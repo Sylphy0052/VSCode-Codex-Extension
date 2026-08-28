@@ -1084,6 +1084,76 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('ターン結果の確定（issue #939）', () => {
+    /**
+     * 実機のCodex（CLI 0.148.0）が1ターンで送る通知を、届く順に流す。
+     * `thread/status/changed`（idle）が `turn/completed` より先に来るところが要点。
+     */
+    const openTask = async (activities: ChatActivity[]) => {
+      const { manager, connection } = createManager({ onActivity: (a) => activities.push(a) });
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await started;
+      return connection;
+    };
+
+    const runUntilIdle = (connection: FakeAppServerConnection): void => {
+      connection.notify('thread/status/changed', {
+        threadId: 'thread-A',
+        status: { type: 'active' },
+      });
+      connection.notify('turn/started', { threadId: 'thread-A', turn: { id: 'turn-1' } });
+      connection.notify('item/completed', {
+        threadId: 'thread-A',
+        turnId: 'turn-1',
+        item: { id: 'i1', type: 'agentMessage', text: '直しました' },
+      });
+      connection.notify('thread/status/changed', {
+        threadId: 'thread-A',
+        status: { type: 'idle' },
+      });
+    };
+
+    it('threadがidleになっただけでは作業記録へ成果を残さない', async () => {
+      const activities: ChatActivity[] = [];
+      const connection = await openTask(activities);
+      runUntilIdle(connection);
+      await tick();
+      // この時点の`turnResultText`は`turn/started`が空に戻したままで、
+      // 残せば必ず中身の無い成果行になる
+      expect(activities.filter((a) => a.kind === 'result')).toHaveLength(0);
+    });
+
+    it('turn/completed が届いた時点で、応答本文を1回だけ残す', async () => {
+      const activities: ChatActivity[] = [];
+      const connection = await openTask(activities);
+      runUntilIdle(connection);
+      connection.notify('turn/completed', { threadId: 'thread-A' });
+      await tick();
+      const results = activities.filter((a) => a.kind === 'result');
+      expect(results).toHaveLength(1);
+      expect(results[0]?.text).toBe('直しました');
+    });
+
+    it('確定した後の状態変化では、同じターンの成果を積み直さない', async () => {
+      const activities: ChatActivity[] = [];
+      const connection = await openTask(activities);
+      runUntilIdle(connection);
+      connection.notify('turn/completed', { threadId: 'thread-A' });
+      connection.notify('thread/status/changed', {
+        threadId: 'thread-A',
+        status: { type: 'idle' },
+      });
+      await tick();
+      expect(activities.filter((a) => a.kind === 'result')).toHaveLength(1);
+    });
+  });
+
   describe('setPromptTransform（design.md §16.4 / §16.12）', () => {
     it('実際の送信は展開後、作業記録には展開前の文面を残す', async () => {
       const activities: ChatActivity[] = [];

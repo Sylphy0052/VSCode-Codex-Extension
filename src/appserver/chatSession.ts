@@ -590,6 +590,11 @@ export class ChatSession {
     // 画面がそれを伝えないと「中断が効かない」としか見えないため、印と注記を残す。
     // 注記のidは要求を投げる前に捕まえた turnId から作る。応答を待つ間に `Esc` をもう一度
     // 押されると、そのときには state.turnId が落ちていて別idの注記がもう1行出てしまう（issue #258）
+    // **`turnCompletionSeq`はここで進めない**（issue #939）。app-serverは`turn/interrupt`が
+    // 成功したターンも`turn/completed`（`status: "interrupted"`）で終わらせる
+    // （`codex-rs/app-server/README.md`）。ここで進めると同じターンを2回確定させ、
+    // 作業記録・ターン完了の通知が二重になり、待機列があれば次の指示まで余分に送る。
+    // ターンの結果を確定させるのは`turn/completed`だけにする
     const marked = markInterruptedCommands({ ...this.state, busy: false }, turnId);
     this.update({ ...marked, turnId: undefined });
   }
@@ -747,16 +752,34 @@ export class ChatSession {
    * `busy: false, turnFailed: true`まで戻しており、`releasePendingApprovals()`と並べて
    * `handleConnectionLost()`から呼び、Codex側も同じ状態・同じ文言（`turnFailed`）に揃える。
    *
-   * 応答待ちでない（`busy: false`）セッションには何もしない（issue #420レビュー指摘）。
+   * ターンを抱えていないセッションには何もしない（issue #420レビュー指摘）。
    * `handleConnectionLost()`は開いている全パネルへ無条件に呼ぶため、ガード無しだと
    * ターンを送っていないセッションにまで`turnFailed: true`が立ち、`update()`経由で
    * 全パネルに不要な`postState`が撒かれてしまう。
+   *
+   * **判定は`busy`だけでは足りない**（issue #939）。`thread/status/changed`（idle）は
+   * `turn/completed`より先に届くため、その間に接続が切れると`busy`は既に`false`で、
+   * それでも結果の確定していないターンが残っている。この窓で何もしないと、世代の変化を
+   * 待つ側（`LoopController.observe`）が永久に`turn/completed`を待つ。`turnId`が残って
+   * いるかどうかを「未確定のターンがあるか」の印として併せて見る。
+   *
+   * `turnId`をここで落とすのは、接続断の通知が複数回届いても確定を1回に留めるため。
+   * **1つのターンについて`turnCompletionSeq`を2回以上進めてはいけない。**
    */
   markTurnFailed(): void {
-    if (!this.state.busy) {
+    const hasOutstandingTurn = this.state.busy || this.state.turnId !== undefined;
+    if (!hasOutstandingTurn) {
       return;
     }
-    this.update({ ...this.state, busy: false, turnFailed: true });
+    this.update({
+      ...this.state,
+      busy: false,
+      turnId: undefined,
+      turnFailed: true,
+      // 走っていたターンが「失敗として確定した」（issue #939）。`turn/completed`を
+      // 受け取れないと確定した経路なので、ここが唯一の確定点になる
+      turnCompletionSeq: this.state.turnCompletionSeq + 1,
+    });
   }
 
   /** 画面を閉じるときなど。保留中の要求を全て拒否して解放し、覚えていた状態も破棄する。 */

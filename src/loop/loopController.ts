@@ -1,4 +1,4 @@
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem, ChatState } from '../appserver/chatState';
 import {
   detectStalledLoop,
   extractTurnSignature,
@@ -6,8 +6,10 @@ import {
   DEFAULT_STALL_REPEAT_COUNT,
 } from './stallDetector';
 import {
+  agentMessageFinalLine,
   appendLoopEngineeringInstruction,
   declaresEscalate,
+  lastAgentMessage,
   type LoopEngineeringConfig,
   type LoopEngineeringPhase,
 } from './loopEngineering';
@@ -29,7 +31,9 @@ import { buildResponseSummary } from '../orchestrator/taskSummary';
 /**
  * ループの終了をエージェント自身に宣言させるための合図。
  *
- * 会話に紛れない綴りにしてある。エージェントの発言にこれが現れたら条件成立とみなす。
+ * 会話に紛れない綴りにしてある。判定は`declaresDone`が行い、**エージェントの発言の最後の
+ * 非空行がこの綴りと完全に一致する場合だけ**条件成立とみなす（issue #914）。本文の途中に
+ * 現れただけでは成立しない。
  */
 export const LOOP_DONE_TOKEN = '<<LOOP_DONE>>';
 
@@ -267,25 +271,39 @@ export function decoratePrompt(prompt: string, condition: string): string {
   if (condition === '') {
     return prompt;
   }
-  return `${prompt}\n\n（終了条件「${condition}」を満たしている場合は、作業をせず ${LOOP_DONE_TOKEN} とだけ出力してください）`;
+  return `${prompt}\n\n（終了条件「${condition}」を満たしている場合は、作業をせず、応答の最後の非空行に ${LOOP_DONE_TOKEN} だけを出力し、それ以降は何も出力しないでください）`;
 }
 
-/** 直近のエージェント発言が終了を宣言しているか。 */
-export function declaresDone(state: ChatState): boolean {
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
-    if (item?.kind === 'agentMessage') {
-      return item.text.includes(LOOP_DONE_TOKEN);
-    }
-  }
-  return false;
+/**
+ * **渡された発言が**終了を宣言しているか。
+ *
+ * **発言の最終行が`LOOP_DONE_TOKEN`と完全に一致する場合だけ**成立とする（issue #914）。
+ * 以前は`includes`で本文中に現れれば成立としていたが、この合図を教えるのは
+ * `decoratePrompt`が終了条件へ添える文そのものであり、その綴りが会話に残る。そのため
+ * 「まだ <<LOOP_DONE>> は出しません」といった説明文だけでループが終了していた。
+ * `declaresEscalate`（issue #891）が同じ理由で最終行の完全一致にしてあり、判定方式を
+ * 揃えた（共通の取り出しは`agentMessageFinalLine`）。
+ *
+ * **これは挙動の変更である。** 合図を文中へ埋めて返していたエージェントでは、これまで
+ * 終了していたループが終了しなくなる。`decoratePrompt`の依頼文も、合図だけを最後の行へ
+ * 出すよう明示する文面へ合わせて直してある。
+ *
+ * **その発言が現在のターンのものかは、この関数では判断しない**（issue #937）。会話全体
+ * から直近の`agentMessage`を探す形にしていた頃は、ツール実行だけで本文を返さなかった
+ * ターンで過去の発言を拾い、ループを始める前に残っていた合図で停止しえた。どの発言を
+ * 渡すかは`observe()`が`lastMessage`と比べて決める。
+ */
+export function declaresDone(item: ChatItem): boolean {
+  return agentMessageFinalLine(item) === LOOP_DONE_TOKEN;
 }
 
 /**
  * 同じ指示を条件成立まで送り続ける。
  *
- * ターンの完了は `ChatState.busy` の立ち下がりで見る。CodexとClaude Codeで
- * 状態の形が共通なので、この制御はプロバイダを問わず同じものを使える。
+ * ターンの完了は `ChatState.busy` の立ち下がりと `turnCompletionSeq` の変化の両方で見る
+ * （issue #939）。`busy` だけでは「threadが暇になった」しか分からず、Codexではその時点で
+ * まだターンの結果が確定していない。CodexとClaude Codeで状態の形が共通なので、この制御は
+ * プロバイダを問わず同じものを使える。
  * 画面ではなく拡張機能側に置くのは、タブの再描画やウィンドウのリロードで
  * 進行中のループが消えないようにするため。
  */
@@ -295,13 +313,26 @@ export class LoopController {
   /** 送った指示のターンが始まったのを見たか。始まる前の busy=false と区別する。 */
   private sawBusy = false;
   /**
+   * 走っているターンが始まった時点の`ChatState.turnCompletionSeq`（issue #939）。
+   *
+   * `busy`の立ち下がりだけではターンの完了を判定できない。Codexは
+   * `thread/status/changed`（idle）を`turn/completed`より先に送るため、`busy`が落ちた
+   * 時点の`turnResultText`は`turn/started`で空に戻したままである。ここを完了とみなすと、
+   * 停滞検知の署名も作業記録の成果もworker-reportの証拠も、常に空を見ることになる。
+   *
+   * そこで「ターンが始まったときの完了世代」を覚え、`busy`が落ちたあとも世代が変わる
+   * まで待つ。イベントが`idle`→`completed`でも`completed`→`idle`でも、結果が確定した
+   * あとにだけ次へ進む。
+   */
+  private resultSeqAtTurnStart: number | undefined;
+  /**
    * `pause()` で一時停止中か（design.md §16.21「waitingReplyへの遷移」）。
    *
-   * `true` の間、`observe()` はターンの完了を検知しても `continuePrompt` を送らない
-   * （回数上限・終了条件の判定そのものへも進ませない。`resume()` が呼ばれるまで
-   * ループは実際に止まったまま待つ。`running` 自体は `true` のまま保つ
-   * （`stop()` は呼ばない）。タスクのセッションは生きているため、design.mdの
-   * 「waitingReplyも並列の枠を占める」という状態と整合する。
+   * **`true` の間も停止条件の判定は行い、止めるのは次の指示の送信だけ**（issue #909）。
+   * 撤退の申告・終了条件・停滞・時間上限・回数上限はターンの完了時にそのまま評価し、
+   * 送るはずだった指示を`sendNext()`が`pendingPrompt`へ保留して`resume()`が送る。
+   * `running` 自体は `true` のまま保つ（`stop()` は呼ばない）。タスクのセッションは
+   * 生きているため、design.mdの「waitingReplyも並列の枠を占める」という状態と整合する。
    */
   private paused = false;
   /**
@@ -337,6 +368,41 @@ export class LoopController {
    * （走行中のターンの完了時に`observe()`が続きを決める）。`start()`・`stop()`で戻す。
    */
   private pendingPrompt: string | undefined;
+  /**
+   * ループ実行の世代（issue #933）。`start()`と`stop()`で1つ進める。
+   *
+   * **非同期の処理が、自分を始めた実行がもう終わっていることに気づくための印。**
+   * Evaluatorの応答待ちや送信の`Promise`は、ループを止めた後・別の計画で始め直した後に
+   * 解決することがある。開始時点の世代を捕まえておき、解決した時点で
+   * `this.runGeneration`と違っていれば何もしない。`this.plan !== plan`の参照比較では
+   * `.finally()`や`Promise.catch()`のように計画を持たない経路を守れず、同じ計画の
+   * オブジェクトを使い回されると誤って一致してしまう。
+   */
+  private runGeneration = 0;
+  /**
+   * 前のターン境界で見えていた、最後の`agentMessage`（issue #937）。
+   *
+   * 完了・撤退の合図は**そのターンで新しく出た発言にだけ**効かせる。会話全体から直近の
+   * `agentMessage`を探すと、ツール実行だけで本文を返さなかったターンで過去のターンの
+   * 発言が判定に掛かり、ループを始める前に残っていた`<<LOOP_DONE>>`で即座に停止しうる。
+   *
+   * ターンの絞り込みに`ChatItem.turnId`も`ChatState.turnResultText`も使えない。
+   * `appendDelta`（`chatState.ts`）が作る項目は`turnId`が`undefined`のままになることが
+   * あり、`summarizeTurn`がそれを落とすため`turnResultText`が空になる（`planner.ts`が
+   * この取りこぼしにフォールバックを入れている）。合図を`turnResultText`だけで見ると、
+   * その場合に**正しく合図を返しているのに止まらない**。停止できない側へ倒れる誤りは
+   * 避ける。
+   *
+   * **比べるのは項目そのもの（参照の同一性）で、`id`や本文ではない。** `id`と最終行の
+   * 組で比べていた頃は、Claude側で`message.id`が取れず`assistant:text:0`へ
+   * フォールバックする場面（`claude/streamJson.ts`の`blockId` / `partialId`）で、
+   * **一度`<<LOOP_DONE>>`で終えた会話から始め直した1ターン目に同じ合図を返すと、開始前の
+   * baselineと区別が付かずに無視していた**。`ChatState`の更新は変えた項目だけを新しい
+   * オブジェクトへ差し替え、触っていない項目の参照はそのまま残す
+   * （`upsertItem` / `appendDelta` / `markInterruptedCommands`）ので、参照が変わって
+   * いなければそのターンは何も言っていない、と見てよい。
+   */
+  private lastMessage: ChatItem | undefined;
 
   constructor(
     private readonly send: (text: string) => void | Promise<void>,
@@ -348,10 +414,18 @@ export class LoopController {
      */
     private readonly stallThreshold: number = DEFAULT_STALL_REPEAT_COUNT,
     /**
-     * 現在時刻の取得（issue #891）。時間上限の判定にだけ使う。
-     * テストから任意の時刻を流し込めるよう差し替え可能にしてある（既定は`Date.now`）。
+     * 経過時間の計測（issue #891）。時間上限の判定にだけ使う。
+     *
+     * 既定は`performance.now`（issue #914）。使うのは`start()`時点との差だけなので
+     * 基準時刻に意味は無く、NTP同期や手動の時刻変更で飛ばないことの方が重要である
+     * （`Date.now` は経過時間の計測には向かない）。テストから任意の値を流し込めるよう
+     * 差し替え可能にしてある。
+     *
+     * **OS・実行環境のサスペンド中の時間は数えない**（Linuxでの基準は`CLOCK_MONOTONIC`
+     * 相当で、サスペンドを含める`CLOCK_BOOTTIME`とは違う）。この値は進行中のターンへ
+     * 割り込まないsoft deadlineであり、実時間に対する厳密な期限管理ではない。
      */
-    private readonly now: () => number = () => Date.now(),
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
   getStatus(): LoopStatus {
@@ -400,6 +474,14 @@ export class LoopController {
       return;
     }
     this.pendingPrompt = undefined;
+    // 保留してから再開までの待ち時間で時間上限を跨いでいないかを、送る直前にもう一度見る
+    // （issue #914）。ターンが完了した時点では超えていなくても、返信を待っている間に
+    // 上限へ達することがある——人が2時間後に答えることもある。回数上限を見直さないのは、
+    // 待っている間に`iteration`が進むことはなく、保留を作った時点の判定で足りるため
+    if (this.hasExceededDuration(this.plan)) {
+      this.stop('timedOut');
+      return;
+    }
     this.dispatch(pending, 'continue');
   }
 
@@ -419,13 +501,30 @@ export class LoopController {
     return buildNextTurnPrompt(indeterminate(''), plan.goal.definition.purpose);
   }
 
-  /** ループを開始し、1回目の指示を送る。 */
-  start(plan: LoopPlan): void {
+  /**
+   * ループを開始し、1回目の指示を送る。
+   *
+   * `existingItems`には**開始時点の会話の項目**を渡す（issue #933）。ここで既に終了コードの
+   * 出ているコマンド実行を「拾い済み」として記録しておかないと、ゴール駆動ループの最初の
+   * 評価で、ループを始める前に実行されたコマンドまで`iteration=1`の証拠として積まれる
+   * （`ChatState.items`は会話全体を持ち続けるため）。「開始前に`npm test`が通っていた」
+   * だけで受入基準を満たしたと判定され、現在のコードを一度も検証しないまま止まりうる。
+   * 省略時は空として扱う（従来ループでは証拠を使わないため影響しない）。
+   *
+   * 同じ`existingItems`から、完了・撤退の合図の境界（`lastMessage`）も作る
+   * （issue #937）。開始前に残っていた`<<LOOP_DONE>>`で1ターン目に止まらないようにする。
+   */
+  start(plan: LoopPlan, existingItems: readonly ChatItem[] = []): void {
     this.plan = plan;
+    this.runGeneration += 1;
     this.stallHistory = [];
     this.startedAt = this.now();
     this.goalEvidence = [];
-    this.seenEvidenceIds = new Set();
+    this.seenEvidenceIds = new Set(
+      existingItems.filter(isSettledCommandItem).map((item) => item.id),
+    );
+    this.lastMessage = lastAgentMessage(existingItems);
+    this.resultSeqAtTurnStart = undefined;
     this.indeterminateStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
@@ -461,7 +560,11 @@ export class LoopController {
       return false;
     }
     this.plan = undefined;
+    // 走っていた実行の世代を閉じる（issue #933）。停止後に解決する非同期の処理は、
+    // 自分の世代と食い違うことで「もう自分の実行ではない」と気づける
+    this.runGeneration += 1;
     this.sawBusy = false;
+    this.resultSeqAtTurnStart = undefined;
     this.paused = false;
     this.stallHistory = [];
     this.startedAt = undefined;
@@ -470,6 +573,7 @@ export class LoopController {
     this.indeterminateStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
+    this.lastMessage = undefined;
     this.status = { ...this.status, running: false, stopReason: reason };
     this.onStatus(this.status);
     return true;
@@ -490,6 +594,10 @@ export class LoopController {
       return;
     }
     if (state.busy) {
+      if (!this.sawBusy) {
+        // このターンが始まった時点の完了世代を覚える（issue #939）
+        this.resultSeqAtTurnStart = state.turnCompletionSeq;
+      }
       this.sawBusy = true;
       return;
     }
@@ -509,7 +617,24 @@ export class LoopController {
       // 送った指示のターンがまだ始まっていない
       return;
     }
+    if (state.turnCompletionSeq === this.resultSeqAtTurnStart) {
+      // threadは暇になったが、`turn/completed`・`turn/failed`をまだ受け取っていない
+      // （issue #939）。この時点の`turnResultText`は空なので、ここでターンを消費すると
+      // 停滞検知の署名もゴール駆動の証拠も空のまま確定してしまう
+      return;
+    }
     this.sawBusy = false;
+    this.resultSeqAtTurnStart = undefined;
+
+    // このターンで新しい発言が出たかを、合図の判定より前に確定させる（issue #937）。
+    // 更新を分岐の後ろに置くと、どこかの`return`で更新を忘れて次のターンの判定が
+    // 狂う。境界の更新と「新しいか」の記録をここで済ませ、以降は`newMessage`だけを見る
+    const previousMessage = this.lastMessage;
+    this.lastMessage = lastAgentMessage(state.items);
+    const newMessage =
+      this.lastMessage !== undefined && this.lastMessage !== previousMessage
+        ? this.lastMessage
+        : undefined;
 
     if (state.turnFailed) {
       // 一時停止中でも、ターン自体が失敗していれば止める。「返信待ちのまま実は
@@ -521,13 +646,18 @@ export class LoopController {
     // 「解決できないので止めてくれ」は条件の成立とは独立した申し出であり、条件を
     // 設定していないループでも効かせる必要がある。完了（`done`）より先に判定するのは、
     // 同じ応答が両方の合図を含んでいた場合に「終わった」と誤って扱わないため
-    if (declaresEscalate(state)) {
+    if (newMessage !== undefined && declaresEscalate(newMessage)) {
       this.stop('escalated');
       return;
     }
     // ゴール駆動ループ（issue #892）ではWorkerへ`<<LOOP_DONE>>`を頼まないため、
     // 自己申告による完了は見ない。完了判定はEvaluatorだけが持つ
-    if (plan.goal === undefined && plan.condition !== '' && declaresDone(state)) {
+    if (
+      newMessage !== undefined &&
+      plan.goal === undefined &&
+      plan.condition !== '' &&
+      declaresDone(newMessage)
+    ) {
       this.stop('done');
       return;
     }
@@ -545,8 +675,13 @@ export class LoopController {
     // 完了判定の所有権をEvaluatorへ渡した以上、終局の判定はEvaluatorに先に見せる（issue #909）
     if (plan.goal !== undefined) {
       this.evaluating = true;
-      void this.runGoalTurn(plan, state).finally(() => {
-        this.evaluating = false;
+      // 世代を捕まえてから始める（issue #933）。この評価が終わる前にループが止まり、
+      // 別の実行が始まっていた場合、その実行の`evaluating`を折らないため
+      const generation = this.runGeneration;
+      void this.runGoalTurn(plan, state, generation).finally(() => {
+        if (generation === this.runGeneration) {
+          this.evaluating = false;
+        }
       });
       return;
     }
@@ -601,7 +736,7 @@ export class LoopController {
    * **次のターンの指示文はここ（`LoopController`）で組み立てる。** Evaluatorが返した
    * 文字列をそのままユーザープロンプトとして送る経路は作らない。
    */
-  private async runGoalTurn(plan: LoopPlan, state: ChatState): Promise<void> {
+  private async runGoalTurn(plan: LoopPlan, state: ChatState, generation: number): Promise<void> {
     const goal = plan.goal;
     if (goal === undefined) {
       return;
@@ -621,8 +756,10 @@ export class LoopController {
       })
       .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
 
-    // 評価を待っている間に止められた・別の計画で開始し直された場合は何もしない
-    if (!this.status.running || this.plan !== plan) {
+    // 評価を待っている間に止められた・別の実行が始まっていた場合は何もしない
+    // （issue #933。`this.plan !== plan`だけでは、同じ計画のオブジェクトを使い回されると
+    // 別の実行を自分の実行と取り違える）
+    if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
       return;
     }
     if (evaluation.verdict === 'achieved') {
@@ -698,7 +835,14 @@ export class LoopController {
         plan.goal === undefined ? decoratePrompt(withPolicy, plan.condition) : withPolicy,
       );
       if (result instanceof Promise) {
-        result.catch(() => this.stop('failed'));
+        // 送信が失敗しても、その頃には別の実行が始まっていることがある（issue #933）。
+        // 古い送信のrejectで今のループを止めない
+        const generation = this.runGeneration;
+        result.catch(() => {
+          if (generation === this.runGeneration) {
+            this.stop('failed');
+          }
+        });
       }
     } catch {
       this.stop('failed');

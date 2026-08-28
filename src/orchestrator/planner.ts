@@ -1234,9 +1234,12 @@ export async function runSingleTurnTask(
             reject(new Error(`${label}のターンが失敗しました`));
             return;
           }
-          // Codexの完了通知では、画面上のagentMessageは残っているのに
-          // turnResultTextだけ空になることがある。単発セッションはこのターンだけを
-          // 実行するため、表示中の最後のagentMessageを安全なフォールバックにする。
+          // 画面上のagentMessageは残っているのにturnResultTextだけ空になる主因は
+          // issue #939（`thread/status/changed`のidleを`turn/completed`より先に受けて
+          // ターンを消費していた）で塞いだ。それでもフォールバックは残す——`interrupted`
+          // `manual`のように`turn/completed`を受け取らないまま止まる経路では、依然として
+          // 空になる。単発セッションはこのターンだけを実行するため、表示中の最後の
+          // agentMessageが安全な代わりになる。
           resolve(
             state.turnResultText.trim() !== ''
               ? state.turnResultText

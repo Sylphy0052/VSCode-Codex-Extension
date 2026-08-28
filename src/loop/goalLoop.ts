@@ -1,5 +1,4 @@
 import type { ChatItem, ChatState } from '../appserver/chatState';
-import { lastNonEmptyAgentMessageText } from '../appserver/chatState';
 
 /**
  * ゴール駆動ループ（issue #892）の型と、会話から証拠を拾う処理。
@@ -86,14 +85,14 @@ export interface GoalEvaluatorInput {
 /** Evaluatorの呼び出し。失敗時も例外を投げず`indeterminate`を返す実装を期待する。 */
 export type GoalEvaluator = (input: GoalEvaluatorInput) => Promise<GoalEvaluation>;
 
-/** 既定で許す`indeterminate`の連続回数。これを超えたら人へ渡す（`escalated`で止める）。 */
+/** 既定の`indeterminate`の連続上限。**この回数に達したら**人へ渡す（`escalated`で止める）。 */
 export const DEFAULT_MAX_INDETERMINATE = 3;
 
 /** `LoopPlan`へ載せるゴールループの設定。 */
 export interface GoalLoopConfig {
   definition: GoalDefinition;
   evaluate: GoalEvaluator;
-  /** `indeterminate`が続くのを許す回数。省略時は`DEFAULT_MAX_INDETERMINATE`。 */
+  /** `indeterminate`の連続上限。**この回数に達したら**止める。省略時は`DEFAULT_MAX_INDETERMINATE`。 */
   maxIndeterminate?: number;
 }
 
@@ -172,12 +171,20 @@ export function collectCommandEvidence(
  *
  * コマンドの終了コードのように確かめようがないため、`status`は常に`unknown`。
  * Evaluatorにはこの区別を明示したうえで渡す（`goalPrompt.ts`）。
+ *
+ * **見るのは`state.turnResultText`（そのターンの`agentMessage`だけを連結した値）で、
+ * `state.items`全体へ遡らない**（issue #933）。会話全体から直近の発言を探すと、
+ * コマンド実行だけで本文を返さなかったターンで**過去のターンの発言を現在のiterationの
+ * 証拠として積み直す**。ループを始める前の発言まで`iteration=1`の申告になり、
+ * Evaluatorの判断を古い主張で汚す。そのターンが何も言わなかったなら、申告は無い
+ * （`undefined`）のが正しい。`stallDetector.ts`が署名の取り出しで`items`へ
+ * フォールバックしないのと同じ理由。
  */
 export function buildWorkerReportEvidence(
   state: ChatState,
   iteration: number,
 ): GoalEvidence | undefined {
-  const text = lastNonEmptyAgentMessageText(state.items).trim();
+  const text = state.turnResultText.trim();
   if (text === '') {
     return undefined;
   }

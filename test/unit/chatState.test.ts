@@ -1597,3 +1597,62 @@ describe('applyEvent / 承認要求の自動レビュー', () => {
     );
   });
 });
+
+describe('turnCompletionSeq（ターン結果の確定、issue #939）', () => {
+  /**
+   * 実機のCodex（CLI 0.148.0）が1ターンで送る通知の順序。`thread/status/changed`（idle）が
+   * `turn/completed` より先に届くところが要点で、`busy` の立ち下がりの時点では
+   * `turnResultText` がまだ `turn/started` で空に戻したままになっている。
+   */
+  const runTurn = (events: [string, Record<string, unknown>][]) =>
+    events.reduce((state, [method, params]) => applyEvent(state, method, params), initialChatState);
+
+  const ACTIVE: [string, Record<string, unknown>] = [
+    'thread/status/changed',
+    { status: { type: 'active' } },
+  ];
+  const STARTED: [string, Record<string, unknown>] = ['turn/started', { turn: { id: 'turn-1' } }];
+  const MESSAGE: [string, Record<string, unknown>] = [
+    'item/completed',
+    { turnId: 'turn-1', item: { id: 'i1', type: 'agentMessage', text: '直しました' } },
+  ];
+  const IDLE: [string, Record<string, unknown>] = [
+    'thread/status/changed',
+    { status: { type: 'idle' } },
+  ];
+
+  it('threadがidleになっただけでは確定させない（turnResultTextはまだ空）', () => {
+    const state = runTurn([ACTIVE, STARTED, MESSAGE, IDLE]);
+    expect(state.busy).toBe(false);
+    expect(state.turnResultText).toBe('');
+    expect(state.turnCompletionSeq).toBe(0);
+  });
+
+  it('turn/completed で初めて確定し、応答本文が入る', () => {
+    const state = runTurn([ACTIVE, STARTED, MESSAGE, IDLE, ['turn/completed', {}]]);
+    expect(state.turnResultText).toBe('直しました');
+    expect(state.turnCompletionSeq).toBe(1);
+  });
+
+  it('turn/failed も確定として数える', () => {
+    const state = runTurn([ACTIVE, STARTED, MESSAGE, IDLE, ['turn/failed', {}]]);
+    expect(state.turnFailed).toBe(true);
+    expect(state.turnCompletionSeq).toBe(1);
+  });
+
+  it('ターンを重ねるたびに増える', () => {
+    const first = runTurn([ACTIVE, STARTED, MESSAGE, IDLE, ['turn/completed', {}]]);
+    const second = ['turn/started', 'turn/completed'].reduce(
+      (state, method) =>
+        applyEvent(state, method, method === 'turn/started' ? { turn: { id: 'turn-2' } } : {}),
+      first,
+    );
+    expect(second.turnCompletionSeq).toBe(2);
+  });
+
+  it('ターンに関係しない通知では増えない', () => {
+    const base = runTurn([ACTIVE, STARTED, MESSAGE, IDLE, ['turn/completed', {}]]);
+    const after = applyEvent(base, 'thread/status/changed', { status: { type: 'idle' } });
+    expect(after.turnCompletionSeq).toBe(base.turnCompletionSeq);
+  });
+});

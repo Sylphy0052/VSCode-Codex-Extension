@@ -1,13 +1,15 @@
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { initialChatState, type ChatItem, type ChatState } from '../../src/appserver/chatState';
+import type { ChatItem } from '../../src/appserver/chatState';
 import {
+  agentMessageFinalLine,
   appendLoopEngineeringInstruction,
   declaresEscalate,
   defaultLoopEngineeringConfig,
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
+  lastAgentMessage,
   LOOP_ESCALATE_TOKEN,
   type LoopEngineeringConfig,
 } from '../../src/loop/loopEngineering';
@@ -27,8 +29,6 @@ const agentMessage = (text: string): ChatItem => ({
   turnId: undefined,
   diffs: [],
 });
-
-const state = (items: ChatItem[]): ChatState => ({ ...initialChatState, items });
 
 describe('appendLoopEngineeringInstruction', () => {
   it('無効なら本文を一字一句変えない', () => {
@@ -79,38 +79,78 @@ describe('appendLoopEngineeringInstruction', () => {
 
 describe('declaresEscalate', () => {
   it('最終行が合図と完全一致していれば成立する', () => {
-    expect(declaresEscalate(state([agentMessage(`手が尽きた。\n${LOOP_ESCALATE_TOKEN}`)]))).toBe(
-      true,
-    );
+    expect(declaresEscalate(agentMessage(`手が尽きた。\n${LOOP_ESCALATE_TOKEN}`))).toBe(true);
   });
 
   it('前後の空白は無視する', () => {
-    expect(declaresEscalate(state([agentMessage(`  ${LOOP_ESCALATE_TOKEN}  \n\n`)]))).toBe(true);
+    expect(declaresEscalate(agentMessage(`  ${LOOP_ESCALATE_TOKEN}  \n\n`))).toBe(true);
   });
 
   it('本文の途中に説明として現れただけでは成立しない', () => {
     // 指示文そのものが会話にこの綴りを含むため、includes判定だと誤停止する
     expect(
       declaresEscalate(
-        state([agentMessage(`必要なら ${LOOP_ESCALATE_TOKEN} を返します。作業を続けます。`)]),
+        agentMessage(`必要なら ${LOOP_ESCALATE_TOKEN} を返します。作業を続けます。`),
       ),
     ).toBe(false);
   });
 
   it('最終行に合図以外の文字が混ざっていれば成立しない', () => {
-    expect(declaresEscalate(state([agentMessage(`${LOOP_ESCALATE_TOKEN} 理由: 権限がない`)]))).toBe(
-      false,
+    expect(declaresEscalate(agentMessage(`${LOOP_ESCALATE_TOKEN} 理由: 権限がない`))).toBe(false);
+  });
+
+  it('本文が空なら成立しない', () => {
+    expect(declaresEscalate(agentMessage('   '))).toBe(false);
+  });
+
+  it('エージェントの発言以外を渡されても成立しない（issue #937）', () => {
+    const command: ChatItem = {
+      ...agentMessage(LOOP_ESCALATE_TOKEN),
+      id: 'c1',
+      kind: 'commandExecution',
+    };
+    expect(declaresEscalate(command)).toBe(false);
+  });
+});
+
+describe('agentMessageFinalLine', () => {
+  it('最後の非空行を前後の空白を除いて返す', () => {
+    expect(agentMessageFinalLine(agentMessage('1行目\n  結び  \n\n'))).toBe('結び');
+  });
+
+  it('本文が空白だけならundefined', () => {
+    expect(agentMessageFinalLine(agentMessage('  \n\n'))).toBeUndefined();
+  });
+
+  it('エージェントの発言以外はundefined', () => {
+    expect(
+      agentMessageFinalLine({ ...agentMessage('結び'), id: 'c1', kind: 'commandExecution' }),
+    ).toBeUndefined();
+  });
+});
+
+describe('lastAgentMessage', () => {
+  it('末尾から数えて最初のエージェント発言を返す', () => {
+    expect(
+      lastAgentMessage([agentMessage('古い'), { ...agentMessage('新しい'), id: 'a2' }])?.text,
+    ).toBe('新しい');
+  });
+
+  it('応答の後ろにコマンド実行の項目が並んでいても、その応答を返す（issue #914）', () => {
+    // 見るのは配列の最後の項目ではなく、最後の`agentMessage`
+    const command: ChatItem = {
+      ...agentMessage(''),
+      id: 'c1',
+      kind: 'commandExecution',
+      detail: 'npm test',
+    };
+    expect(lastAgentMessage([agentMessage(LOOP_ESCALATE_TOKEN), command])?.text).toBe(
+      LOOP_ESCALATE_TOKEN,
     );
   });
 
-  it('直近のエージェント発言だけを見る（古い発言の合図では成立しない）', () => {
-    expect(
-      declaresEscalate(state([agentMessage(LOOP_ESCALATE_TOKEN), agentMessage('続けます')])),
-    ).toBe(false);
-  });
-
-  it('エージェントの発言が無ければ成立しない', () => {
-    expect(declaresEscalate(state([]))).toBe(false);
+  it('エージェントの発言が無ければundefined', () => {
+    expect(lastAgentMessage([])).toBeUndefined();
   });
 });
 

@@ -49,10 +49,22 @@ const plan = (overrides: Partial<LoopPlan> = {}): LoopPlan => ({
   ...overrides,
 });
 
-/** 1ターン分の状態変化を流す。応答中になってから完了へ落ちる。 */
+/**
+ * 1ターン分の状態変化を流す。応答中になってから完了へ落ちる。
+ *
+ * 完了側では`turnCompletionSeq`を進める（issue #939）。`busy`が落ちただけでは
+ * `LoopController`はターンを消費しない——実機のCodexは`thread/status/changed`（idle）を
+ * `turn/completed`より先に送り、その時点では応答テキストがまだ確定していないため。
+ */
+const finished = (completed: ChatState): ChatState => ({
+  ...completed,
+  busy: false,
+  turnCompletionSeq: completed.turnCompletionSeq + 1,
+});
+
 const runTurn = (controller: LoopController, completed: ChatState = state()): void => {
   controller.observe(state({ busy: true }));
-  controller.observe(completed);
+  controller.observe(finished(completed));
 };
 
 const spy = (): { sent: string[]; send: (text: string) => void } => {
@@ -114,20 +126,22 @@ describe('decoratePrompt', () => {
 });
 
 describe('declaresDone', () => {
-  it('直近のエージェント発言に合図があれば真', () => {
-    expect(declaresDone(state({ items: [agentMessage(LOOP_DONE_TOKEN)] }))).toBe(true);
+  it('最終行が合図と完全一致していれば真', () => {
+    expect(declaresDone(agentMessage(LOOP_DONE_TOKEN))).toBe(true);
   });
 
-  it('古い発言の合図は見ない', () => {
-    const items = [
-      { ...agentMessage(LOOP_DONE_TOKEN), id: 'old' },
-      { ...agentMessage('まだ続きます'), id: 'new' },
-    ];
-    expect(declaresDone(state({ items }))).toBe(false);
+  it('本文の途中に現れただけでは偽', () => {
+    expect(declaresDone(agentMessage(`まだ ${LOOP_DONE_TOKEN} は出しません`))).toBe(false);
   });
 
-  it('エージェントの発言が無ければ偽', () => {
-    expect(declaresDone(state())).toBe(false);
+  it('本文が空なら偽', () => {
+    expect(declaresDone(agentMessage('  '))).toBe(false);
+  });
+
+  it('エージェントの発言以外を渡されても偽（issue #937）', () => {
+    expect(
+      declaresDone({ ...agentMessage(LOOP_DONE_TOKEN), id: 'c1', kind: 'commandExecution' }),
+    ).toBe(false);
   });
 });
 
@@ -175,8 +189,46 @@ describe('LoopController', () => {
     const { sent, send } = spy();
     const controller = new LoopController(send);
     controller.start(plan({ condition: '20話完了' }));
-    runTurn(controller, state({ items: [agentMessage(`了解しました ${LOOP_DONE_TOKEN}`)] }));
+    runTurn(controller, state({ items: [agentMessage(`了解しました\n${LOOP_DONE_TOKEN}`)] }));
     expect(sent).toHaveLength(1);
+    expect(controller.getStatus().stopReason).toBe('done');
+  });
+
+  it('合図が本文の途中にあるだけでは止まらない（issue #914）', () => {
+    // 合図を教えるのは`decoratePrompt`が添える文そのもので、その綴りが会話に残る。
+    // `includes`判定だと「まだ出しません」という説明文で終了してしまっていた
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(
+      controller,
+      state({ items: [agentMessage(`まだ ${LOOP_DONE_TOKEN} は出しません。続けます。`)] }),
+    );
+    expect(controller.getStatus().stopReason).toBeUndefined();
+    expect(controller.running).toBe(true);
+  });
+
+  it('最終行に合図以外の文字が混ざっていれば止まらない（issue #914）', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(controller, state({ items: [agentMessage(`${LOOP_DONE_TOKEN} 理由: 完了`)] }));
+    expect(controller.getStatus().stopReason).toBeUndefined();
+  });
+
+  it('応答の後ろにコマンド実行が並んでいても合図を拾う（issue #914）', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(
+      controller,
+      state({
+        items: [
+          agentMessage(`終わりました\n${LOOP_DONE_TOKEN}`),
+          { ...agentMessage(''), id: 'c1', kind: 'commandExecution', detail: 'npm test' },
+        ],
+      }),
+    );
     expect(controller.getStatus().stopReason).toBe('done');
   });
 
@@ -211,7 +263,7 @@ describe('LoopController', () => {
     expect(controller.running).toBe(true);
 
     // 承認が片付いてターンが終われば続きへ進む
-    controller.observe(state());
+    controller.observe(finished(state()));
     expect(sent).toHaveLength(2);
   });
 
@@ -225,7 +277,7 @@ describe('LoopController', () => {
     expect(controller.running).toBe(true);
 
     // 待ち行列が捌ければ続きへ進む
-    controller.observe(state());
+    controller.observe(finished(state()));
     expect(sent).toHaveLength(2);
   });
 
@@ -364,6 +416,48 @@ describe('LoopController', () => {
       controller.start(plan());
       controller.resume();
       expect(sent).toEqual(['第1話を執筆']);
+    });
+
+    describe('停止ポリシーは一時停止をまたいでも効く（issue #914）', () => {
+      it('一時停止中に完了したターンが終了条件を満たしていればdoneで止まる', () => {
+        const { sent, send } = spy();
+        const controller = new LoopController(send);
+        controller.start(plan({ condition: '20話完了' }));
+        controller.pause();
+        runTurn(controller, state({ items: [agentMessage(LOOP_DONE_TOKEN)] }));
+        expect(controller.getStatus().stopReason).toBe('done');
+        controller.resume();
+        expect(sent).toHaveLength(1);
+      });
+
+      it('一時停止中に時間上限を超えていたらtimedOutで止まる', () => {
+        const { sent, send } = spy();
+        let now = 0;
+        const controller = new LoopController(send, undefined, undefined, () => now);
+        controller.start(plan({ maxDurationMs: 1000 }));
+        controller.pause();
+        now = 1000;
+        runTurn(controller);
+        expect(controller.getStatus().stopReason).toBe('timedOut');
+        controller.resume();
+        expect(sent).toHaveLength(1);
+      });
+
+      it('返信を待っている間に時間上限を跨いだら、再開しても次を送らずtimedOutで止まる', () => {
+        // ターンが完了した時点では超えていない。人が答えるまでの待ち時間で超える
+        const { sent, send } = spy();
+        let now = 0;
+        const controller = new LoopController(send, undefined, undefined, () => now);
+        controller.start(plan({ maxDurationMs: 1000 }));
+        controller.pause();
+        now = 500;
+        runTurn(controller);
+        expect(controller.running).toBe(true);
+        now = 5000;
+        controller.resume();
+        expect(sent).toHaveLength(1);
+        expect(controller.getStatus().stopReason).toBe('timedOut');
+      });
     });
 
     it('stop()すると一時停止フラグも解ける', () => {
@@ -594,6 +688,90 @@ describe('LoopController（撤退の申告・時間上限・ループエンジ�
   });
 });
 
+describe('LoopController: 停止理由の優先順位（issue #914）', () => {
+  it('撤退の申告と終了条件が同時に成立していればescalatedを採る', () => {
+    // 「解決できないので止めてくれ」を「終わった」と読み替えない
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan({ condition: '20話完了' }));
+    runTurn(
+      controller,
+      state({ items: [agentMessage(`${LOOP_DONE_TOKEN}\n${LOOP_ESCALATE_TOKEN}`)] }),
+    );
+    expect(controller.getStatus().stopReason).toBe('escalated');
+  });
+
+  it('停滞と時間切れが同時に成立していればstalledを採る', () => {
+    // 「進んでいない」は原因を名指しできる分だけ理由として具体的
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, 2, () => now);
+    controller.start(plan({ maxIterations: 20, maxDurationMs: 1000 }));
+    runTurn(controller, state({ turnResultText: '同じ内容' }));
+    now = 5000;
+    runTurn(controller, state({ turnResultText: '同じ内容' }));
+    expect(controller.getStatus().stopReason).toBe('stalled');
+  });
+
+  it('時間切れと回数切れが同時に成立していればtimedOutを採る', () => {
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, undefined, () => now);
+    controller.start(plan({ maxIterations: 1, maxDurationMs: 1000 }));
+    now = 5000;
+    runTurn(controller);
+    expect(controller.getStatus().stopReason).toBe('timedOut');
+  });
+
+  it('ターンの失敗は撤退の申告より先に見る', () => {
+    const { send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    runTurn(controller, state({ turnFailed: true, items: [agentMessage(LOOP_ESCALATE_TOKEN)] }));
+    expect(controller.getStatus().stopReason).toBe('failed');
+  });
+});
+
+describe('LoopController: 時間上限の境界（issue #914）', () => {
+  const runWithElapsed = (elapsed: number): LoopController => {
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, undefined, () => now);
+    controller.start(plan({ maxIterations: 20, maxDurationMs: 1000 }));
+    now = elapsed;
+    runTurn(controller);
+    return controller;
+  };
+
+  it('上限に1ミリ秒足りなければ続ける', () => {
+    expect(runWithElapsed(999).running).toBe(true);
+  });
+
+  it('上限ちょうどで止める', () => {
+    expect(runWithElapsed(1000).getStatus().stopReason).toBe('timedOut');
+  });
+
+  it('上限を超えていれば止める', () => {
+    expect(runWithElapsed(1001).getStatus().stopReason).toBe('timedOut');
+  });
+
+  it('上限を大きく超えても、ターンが走っている間は止めない（hard timeoutではない）', () => {
+    // 走行中のターンへ割り込まない割り切り。仕様として固定しておく
+    const { send } = spy();
+    let now = 0;
+    const controller = new LoopController(send, undefined, undefined, () => now);
+    controller.start(plan({ maxIterations: 20, maxDurationMs: 1000 }));
+    controller.observe(state({ busy: true }));
+    now = 60 * 60 * 1000;
+    controller.observe(state({ busy: true }));
+    expect(controller.running).toBe(true);
+    expect(controller.getStatus().stopReason).toBeUndefined();
+    // busyが下りたターン境界で初めて止まる
+    controller.observe(finished(state()));
+    expect(controller.getStatus().stopReason).toBe('timedOut');
+  });
+});
+
 describe('normalizeLoopPlan（時間上限とループエンジニアリング、issue #891）', () => {
   it('分をミリ秒へ直す', () => {
     expect(
@@ -737,7 +915,7 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
   /** ターンを1回終わらせ、非同期の評価が進むところまで待つ。 */
   const finishTurn = async (loop: LoopController, items: ChatItem[] = []): Promise<void> => {
     loop.observe(state({ busy: true }));
-    loop.observe(state({ busy: false, items }));
+    loop.observe(finished(state({ items })));
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -746,7 +924,7 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
   /** `finishTurn`と同じだが、完了時の状態を丸ごと差し替えられる（停滞判定のテスト用）。 */
   const finishTurn2 = async (loop: LoopController, completed: ChatState): Promise<void> => {
     loop.observe(state({ busy: true }));
-    loop.observe(completed);
+    loop.observe(finished(completed));
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -849,7 +1027,15 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
         return evaluation();
       }),
     );
-    await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 0'), agentMessage('直しました')]);
+    await finishTurn2(
+      loop,
+      state({
+        busy: false,
+        items: [commandItem('c1', 'npm test', 'exit 0'), agentMessage('直しました')],
+        // 申告はそのターンの`turnResultText`から取る（issue #933）
+        turnResultText: '直しました',
+      }),
+    );
     const evidence = inputs[0]?.evidence ?? [];
     expect(evidence.some((e) => e.kind === 'test' && e.status === 'pass')).toBe(true);
     expect(evidence.some((e) => e.kind === 'worker-report' && e.status === 'unknown')).toBe(true);
@@ -868,6 +1054,260 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await finishTurn(loop, items);
     await finishTurn(loop, items);
     expect((inputs[1]?.evidence ?? []).filter((e) => e.kind === 'test')).toHaveLength(1);
+  });
+
+  describe('合図は現在のターンで出た発言にだけ効く（issue #937）', () => {
+    /** idと本文を指定した`agentMessage`。ターンを跨ぐ同一性の検証に使う。 */
+    const message = (id: string, text: string): ChatItem => ({ ...agentMessage(text), id });
+
+    it('開始前に残っていた合図では止まらない', () => {
+      // 前のループの最後の応答が会話に残っている状態でループを始め、1ターン目が
+      // コマンド実行だけで終わる（新しい`agentMessage`が出ない）
+      const before = [message('old', `終わりました\n${LOOP_DONE_TOKEN}`)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了' }), before);
+      runTurn(controller, state({ items: before }));
+      expect(controller.running).toBe(true);
+    });
+
+    it('開始前に残っていた撤退の申告でも止まらない', () => {
+      const before = [message('old', `手が尽きた\n${LOOP_ESCALATE_TOKEN}`)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan(), before);
+      runTurn(controller, state({ items: before }));
+      expect(controller.running).toBe(true);
+    });
+
+    it('前のターンの発言を、ツールだけの次のターンで新しい発言として扱わない', () => {
+      // 合図を含まない応答を1ターン目に出し、2ターン目はコマンド実行だけで終わる。
+      // このとき1ターン目の発言が判定に掛かってはいけない
+      const first = [message('a1', '直しました')];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: first }));
+      expect(controller.running).toBe(true);
+      // 2ターン目。`items`は変わらない（新しい発言が無い）
+      runTurn(controller, state({ items: first }));
+      expect(controller.running).toBe(true);
+    });
+
+    it('そのターンで新しく出た合図では、これまでどおり止まる', () => {
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: [message('a1', '直しました')] }));
+      expect(controller.running).toBe(true);
+      runTurn(
+        controller,
+        state({ items: [message('a1', '直しました'), message('a2', LOOP_DONE_TOKEN)] }),
+      );
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('idが使い回されても、新しい発言なら合図として扱う', () => {
+      // Claude側は`message.id`が取れないと`assistant:text:0`へフォールバックするため、
+      // 別のターンの発言が同じidになる（`streamJson.ts`の`blockId` / `partialId`）。
+      // idで比べると、ここで合図を取りこぼして止まれなくなる
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: [message('assistant:text:0', '直しました')] }));
+      expect(controller.running).toBe(true);
+      runTurn(controller, state({ items: [message('assistant:text:0', LOOP_DONE_TOKEN)] }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('turnResultTextが空でも、新しい発言に合図があれば止まる', () => {
+      // `appendDelta`が作った項目は`turnId`が付かないことがあり、`summarizeTurn`が
+      // それを落として`turnResultText`が空になる（`planner.ts`のフォールバック参照）。
+      // 合図の判定をこの値に頼っていないことを固定する
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }));
+      runTurn(controller, state({ items: [message('a1', LOOP_DONE_TOKEN)], turnResultText: '' }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('始め直した後に、同じidで同じ合図を新しく返しても止まる', () => {
+      // Claudeのfallback idでは、別の実行の発言が同じ`assistant:text:0`になる。
+      // idと最終行だけを比べると、開始前のbaselineと区別が付かず**新しく返した合図を
+      // 無視して止まれなくなる**。境界は項目そのもので比べる
+      const previous = [message('assistant:text:0', LOOP_DONE_TOKEN)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了', maxIterations: 5 }), previous);
+      // 別のオブジェクトだが、idも本文も開始前の発言と完全に同じ
+      runTurn(controller, state({ items: [message('assistant:text:0', LOOP_DONE_TOKEN)] }));
+      expect(controller.getStatus().stopReason).toBe('done');
+    });
+
+    it('止め直したループでは、前の実行の発言を持ち越さない', () => {
+      const items = [message('a1', `終わりました\n${LOOP_DONE_TOKEN}`)];
+      const controller = new LoopController(() => undefined);
+      controller.start(plan({ condition: '20話完了' }));
+      runTurn(controller, state({ items }));
+      expect(controller.getStatus().stopReason).toBe('done');
+      // 同じ発言が会話に残ったまま始め直す。開始時点の項目を渡すので拾い直さない
+      controller.start(plan({ condition: '20話完了' }), items);
+      runTurn(controller, state({ items }));
+      expect(controller.running).toBe(true);
+    });
+  });
+
+  describe('現在の実行以外の状態を持ち込まない（issue #933）', () => {
+    it('ループを始める前に完了していたコマンドは、最初の評価の証拠に入らない', async () => {
+      // `ChatState.items`は会話全体を持ち続ける。baselineを持たないと「開始前に
+      // `npm test`が通っていた」だけで受入基準を満たしたと判定されうる
+      const inputs: GoalEvaluatorInput[] = [];
+      const before = [commandItem('old', 'npm test', 'exit 0')];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+        before,
+      );
+      await finishTurn(loop, before);
+      expect(inputs[0]?.evidence ?? []).toHaveLength(0);
+    });
+
+    it('ループを始めた後に完了したコマンドは、これまでどおり証拠に入る', async () => {
+      const inputs: GoalEvaluatorInput[] = [];
+      const before = [commandItem('old', 'npm test', 'exit 0')];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+        before,
+      );
+      await finishTurn(loop, [...before, commandItem('new', 'npm run build', 'exit 0')]);
+      const evidence = inputs[0]?.evidence ?? [];
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.source).toContain('npm run build');
+    });
+
+    it('開始時点でまだ実行中だったコマンドは、終わった時点で証拠になる', async () => {
+      // baselineへ入れてよいのは終了コードの読める項目だけ（issue #909と同じ判定）
+      const inputs: GoalEvaluatorInput[] = [];
+      const before = [commandItem('c1', 'npm test', 'running')];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+        before,
+      );
+      await finishTurn(loop, [commandItem('c1', 'npm test', 'exit 0')]);
+      expect((inputs[0]?.evidence ?? []).filter((e) => e.kind === 'test')).toHaveLength(1);
+    });
+
+    it('そのターンが何も言わなければ、過去の発言を申告として積み直さない', async () => {
+      const inputs: GoalEvaluatorInput[] = [];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+      );
+      // コマンド実行だけで本文を返さなかったターン。`items`には過去の発言が残っている
+      await finishTurn2(
+        loop,
+        state({
+          busy: false,
+          items: [agentMessage('前のターンで直しました')],
+          turnResultText: '',
+        }),
+      );
+      expect((inputs[0]?.evidence ?? []).filter((e) => e.kind === 'worker-report')).toHaveLength(0);
+    });
+
+    it('古い実行のEvaluatorが返っても、新しい実行の評価待ちを折らない', async () => {
+      let releaseA: ((value: GoalEvaluation) => void) | undefined;
+      const gateA = new Promise<GoalEvaluation>((resolve) => {
+        releaseA = resolve;
+      });
+      const loop = new LoopController(() => undefined);
+      loop.start(goalPlan(async () => gateA));
+      loop.observe(state({ busy: true }));
+      loop.observe(finished(state()));
+      loop.stop('manual');
+
+      // 別の実行を始め、こちらも評価待ちにする
+      let evaluatedB = 0;
+      loop.start(
+        goalPlan(async () => {
+          evaluatedB += 1;
+          return new Promise<GoalEvaluation>(() => undefined);
+        }),
+      );
+      loop.observe(state({ busy: true }));
+      loop.observe(finished(state()));
+      expect(evaluatedB).toBe(1);
+
+      // 古い評価がいま返る。Bの`evaluating`を折ってはいけない
+      releaseA?.(evaluation({ verdict: 'achieved' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(loop.running).toBe(true);
+      expect(loop.getStatus().stopReason).toBeUndefined();
+      // 折れていれば、次のターン完了で2回目の評価が走ってしまう
+      loop.observe(state({ busy: true }));
+      loop.observe(finished(state()));
+      expect(evaluatedB).toBe(1);
+    });
+
+    it('同じ計画のオブジェクトで始め直しても、古い評価が新しい実行を止めない', async () => {
+      // `this.plan !== plan`の参照比較だけでは、同じオブジェクトを使い回されると
+      // 別の実行を自分の実行と取り違える
+      let releaseA: ((value: GoalEvaluation) => void) | undefined;
+      const gateA = new Promise<GoalEvaluation>((resolve) => {
+        releaseA = resolve;
+      });
+      let first = true;
+      const plan = goalPlan(async () => {
+        if (first) {
+          first = false;
+          return gateA;
+        }
+        return new Promise<GoalEvaluation>(() => undefined);
+      });
+      const loop = new LoopController(() => undefined);
+      loop.start(plan);
+      loop.observe(state({ busy: true }));
+      loop.observe(finished(state()));
+      loop.stop('manual');
+      loop.start(plan);
+
+      releaseA?.(evaluation({ verdict: 'achieved' }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(loop.running).toBe(true);
+      expect(loop.getStatus().stopReason).toBeUndefined();
+    });
+
+    it('古い実行の送信が失敗しても、新しい実行をfailedで止めない', async () => {
+      let rejectA: ((reason: Error) => void) | undefined;
+      const sendA = new Promise<void>((_, reject) => {
+        rejectA = reject;
+      });
+      let first = true;
+      const loop = new LoopController(() => {
+        if (first) {
+          first = false;
+          return sendA;
+        }
+        return undefined;
+      });
+      loop.start(goalPlan(async () => evaluation()));
+      loop.stop('manual');
+      loop.start(goalPlan(async () => evaluation()));
+
+      rejectA?.(new Error('古い送信の失敗'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(loop.running).toBe(true);
+      expect(loop.getStatus().stopReason).toBeUndefined();
+    });
   });
 
   it('indeterminate が続いたら人へ渡す', async () => {
@@ -954,7 +1394,7 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
       }),
     );
     loop.observe(state({ busy: true }));
-    loop.observe(state({ busy: false }));
+    loop.observe(finished(state()));
     loop.stop('manual');
     release?.();
     await Promise.resolve();
@@ -962,6 +1402,35 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
     await Promise.resolve();
     expect(sent).toHaveLength(1);
     expect(loop.getStatus().stopReason).toBe('manual');
+  });
+
+  it('評価を待っている間に一時停止して再開しても、判定が返ったときに1回だけ送る（issue #914）', async () => {
+    // `pendingPrompt` / `paused` / `evaluating` と非同期のEvaluatorが最も競合する境界。
+    // resume時点ではまだ判定が無いので送らず、判定が返った時点で`paused`が解けている
+    // ためそのまま送る
+    const sent: string[] = [];
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(
+      goalPlan(async () => {
+        await gate;
+        return evaluation({ nextFocus: 'ログを確認する' });
+      }),
+    );
+    loop.observe(state({ busy: true }));
+    loop.observe(finished(state()));
+    loop.pause();
+    loop.resume();
+    expect(sent).toHaveLength(1);
+    release?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain('ログを確認する');
   });
 
   describe('issue #909: 証拠の取りこぼし・pauseによるBound迂回・判定順', () => {
@@ -1051,7 +1520,7 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
       loop.resume();
       expect(sent).toHaveLength(1);
       // 走行中のターンが終われば、通常どおり次を送る
-      loop.observe(state({ busy: false }));
+      loop.observe(finished(state()));
       expect(sent).toHaveLength(2);
     });
 
@@ -1104,5 +1573,134 @@ describe('LoopController（ゴール駆動、issue #892）', () => {
       await finishTurn2(loop, same);
       expect(loop.getStatus().stopReason).toBe('stalled');
     });
+  });
+
+  describe('ターンの結果が確定するまで評価しない（issue #939）', () => {
+    it('threadがidleになっただけでは評価を始めない', async () => {
+      const inputs: GoalEvaluatorInput[] = [];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+      );
+      loop.observe(state({ busy: true }));
+      // `thread/status/changed`（idle）だけが届いた状態。`turn/completed` はまだで、
+      // `turnResultText` は `turn/started` で空に戻したまま
+      loop.observe(state({ busy: false, items: [agentMessage('直しました')] }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(inputs).toHaveLength(0);
+    });
+
+    it('turn/completed が届いてから、そのターンの申告を証拠として渡す', async () => {
+      const inputs: GoalEvaluatorInput[] = [];
+      const loop = new LoopController(() => undefined);
+      loop.start(
+        goalPlan(async (i) => {
+          inputs.push(i);
+          return evaluation();
+        }),
+      );
+      const completed = state({
+        items: [agentMessage('直しました')],
+        turnResultText: '直しました',
+      });
+      loop.observe(state({ busy: true }));
+      loop.observe(state({ busy: false, items: completed.items }));
+      loop.observe(finished(completed));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(inputs).toHaveLength(1);
+      const report = (inputs[0]?.evidence ?? []).filter((e) => e.kind === 'worker-report');
+      expect(report).toHaveLength(1);
+      expect(report[0]?.detail).toContain('直しました');
+    });
+  });
+});
+
+describe('LoopController: ターンの結果が確定するまで消費しない（issue #939）', () => {
+  /**
+   * Codexは`thread/status/changed`（idle）を`turn/completed`より先に送る。`busy`が
+   * 落ちた時点の状態は「threadが暇になっただけ」で、`turnResultText`は`turn/started`が
+   * 空に戻したままになっている。この状態を表す。
+   */
+  const idleOnly = (overrides: Partial<ChatState> = {}): ChatState =>
+    state({ ...overrides, busy: false, turnResultText: '' });
+
+  it('threadがidleになっただけでは次の指示を送らない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.observe(state({ busy: true }));
+    controller.observe(idleOnly({ items: [agentMessage('直しました')] }));
+    expect(sent).toHaveLength(1);
+    expect(controller.running).toBe(true);
+  });
+
+  it('turn/completed が届いた時点で、1回だけ次の指示を送る', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.observe(state({ busy: true }));
+    controller.observe(idleOnly());
+    controller.observe(finished(state({ turnResultText: '直しました' })));
+    expect(sent).toHaveLength(2);
+  });
+
+  it('確定した後に別の状態変化が来ても、同じターンで二重に送らない', () => {
+    const { sent, send } = spy();
+    const controller = new LoopController(send);
+    controller.start(plan());
+    controller.observe(state({ busy: true }));
+    controller.observe(idleOnly());
+    const completed = finished(state({ turnResultText: '直しました' }));
+    controller.observe(completed);
+    expect(sent).toHaveLength(2);
+    // 使用量の更新など、ターンとは関係のない状態変化が続けて届く
+    controller.observe({ ...completed, items: [agentMessage('直しました')] });
+    expect(sent).toHaveLength(2);
+  });
+
+  it('idle時点の空の応答を停滞の履歴へ積まない', () => {
+    // 停滞閾値2。同じ本文を2ターン続けたら止まる。idle時点の空文字を積んでしまうと
+    // 履歴が空だけで埋まり、本文の反復を検知できなくなる
+    const controller = new LoopController(
+      () => undefined,
+      () => undefined,
+      2,
+    );
+    controller.start(plan({ maxIterations: 10 }));
+    for (let i = 0; i < 2; i += 1) {
+      controller.observe(state({ busy: true }));
+      controller.observe(idleOnly());
+      controller.observe(finished(state({ turnResultText: '同じ報告' })));
+    }
+    expect(controller.getStatus().stopReason).toBe('stalled');
+  });
+
+  it('ターンの失敗も、確定した時点で止める', () => {
+    const controller = new LoopController(() => undefined);
+    controller.start(plan());
+    controller.observe(state({ busy: true }));
+    // idleだけの時点では、失敗かどうかもまだ確定していない
+    controller.observe(idleOnly());
+    expect(controller.running).toBe(true);
+    controller.observe(finished(state({ turnFailed: true })));
+    expect(controller.getStatus().stopReason).toBe('failed');
+  });
+
+  it('完了の合図も、確定したターンの発言として判定する', () => {
+    const controller = new LoopController(() => undefined);
+    controller.start(plan({ condition: '終わったら合図' }));
+    const items = [agentMessage(`直しました\n${LOOP_DONE_TOKEN}`)];
+    controller.observe(state({ busy: true }));
+    controller.observe(idleOnly({ items }));
+    expect(controller.running).toBe(true);
+    controller.observe(finished(state({ items })));
+    expect(controller.getStatus().stopReason).toBe('done');
   });
 });

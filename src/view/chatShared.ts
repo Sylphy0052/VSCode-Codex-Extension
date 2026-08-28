@@ -1360,7 +1360,7 @@ ${chatStyles()}
       <label>最大回数
         <input id="loopMax" type="number" min="1" max="200" value="20">
       </label>
-      <label>時間上限（分。空なら時間では止めません）
+      <label title="上限を過ぎたら次のターンを始めません。実行中のターンには割り込まないため、実際に止まるのは上限を超えた直後のターンの完了時で、その分だけ超過します。承認待ちで止まっていた時間も経過に含みます（PCのスリープ中は除きます）。">時間上限（分。空なら時間では止めません）
         <input id="loopMaxDuration" type="number" min="1" max="1440" placeholder="例: 60">
       </label>
       <label class="grow">終了条件（空なら回数だけで終わります）

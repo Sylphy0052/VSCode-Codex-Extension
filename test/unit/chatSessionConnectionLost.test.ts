@@ -240,3 +240,41 @@ describe('dispose()でdeniedReviewsも解放する（issue #354・3点目）', (
     await expect(responded).resolves.toEqual({ decision: 'cancel' });
   });
 });
+
+describe('idleとturn/completedの間で接続が切れても確定する（issue #939）', () => {
+  /** `thread/status/changed`(idle) までは届き、`turn/completed` が来ていない状態を作る。 */
+  async function idleBeforeCompleted(): Promise<ChatSession> {
+    const { session } = fakeSession();
+    await session.start('/w', config());
+    session.applyNotification('turn/started', { threadId: 'th-1', turn: { id: 'turn-1' } });
+    session.applyNotification('thread/status/changed', {
+      threadId: 'th-1',
+      status: { type: 'idle' },
+    });
+    return session;
+  }
+
+  it('busyが既にfalseでも、確定していないターンが残っていれば失敗として確定させる', async () => {
+    const session = await idleBeforeCompleted();
+    const before = session.getState();
+    expect(before.busy).toBe(false);
+    expect(before.turnId).toBe('turn-1');
+
+    session.markTurnFailed();
+
+    const state = session.getState();
+    expect(state.turnFailed).toBe(true);
+    expect(state.turnCompletionSeq).toBe(before.turnCompletionSeq + 1);
+    expect(state.turnId).toBeUndefined();
+  });
+
+  it('接続断の後始末が2回呼ばれても、同じターンを2回確定させない', async () => {
+    const session = await idleBeforeCompleted();
+    const before = session.getState().turnCompletionSeq;
+
+    session.markTurnFailed();
+    session.markTurnFailed();
+
+    expect(session.getState().turnCompletionSeq).toBe(before + 1);
+  });
+});

@@ -24,15 +24,15 @@
  * `LoopController`が送る指示であり、参照するのも`LoopController`自身のため。
  */
 
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem } from '../appserver/chatState';
 
 /**
  * 行き詰まりを申告するための合図（Escalate、issue #891）。
  *
- * 会話に紛れない綴りにしてある点は`LOOP_DONE_TOKEN`（`loopController.ts`）と同じだが、
- * **判定は`declaresEscalate`が最終行の完全一致で行う**（`LOOP_DONE_TOKEN`のような
- * `includes`ではない）。この合図は「解決できないので止めてくれ」という強い意味を持ち、
- * 指示文そのものが会話の中でこの綴りを含むため、`includes`では
+ * 会話に紛れない綴りにしてある点も、**判定が最終行の完全一致である**点も
+ * `LOOP_DONE_TOKEN`（`loopController.ts`）と同じ（`LOOP_DONE_TOKEN`は`includes`だったが、
+ * 同じ理由でissue #914に完全一致へ揃えた）。この合図は「解決できないので止めてくれ」と
+ * いう強い意味を持ち、指示文そのものが会話の中でこの綴りを含むため、`includes`では
  * 「必要なら <<LOOP_ESCALATE>> を返します」といった説明文だけで誤って停止してしまう。
  *
  * 合図の定義をこのモジュールへ置くのは、これを教えるのが`loopEngineering`の指示文
@@ -42,25 +42,64 @@ import type { ChatState } from '../appserver/chatState';
 export const LOOP_ESCALATE_TOKEN = '<<LOOP_ESCALATE>>';
 
 /**
- * 直近のエージェント発言が行き詰まりを宣言しているか。
+ * **渡された発言が**行き詰まりを宣言しているか。
  *
- * **応答の最終行が`LOOP_ESCALATE_TOKEN`と完全に一致する場合だけ**成立とする
+ * **発言の最終行が`LOOP_ESCALATE_TOKEN`と完全に一致する場合だけ**成立とする
  * （前後の空白は除いて比べる）。本文の途中に説明として現れただけでは成立しない。
  *
- * 判定に使うのは「末尾から数えて最初の`agentMessage`」で、`declaresDone`と同じ。
+ * 受け取るのが`ChatState`ではなく`ChatItem`なのは、**「どの発言を見るか」の判断を
+ * `LoopController`へ移したため**（issue #937）。会話全体から直近の発言を探していた頃は、
+ * ツール実行だけで本文を返さなかったターンで過去のターンの発言を拾い、ループを始める
+ * 前の合図で停止しえた。この関数は「渡された発言が合図か」だけを答え、それが現在の
+ * ターンのものかは呼び出し側が決める（`declaresDone`も同じ形）。
+ *
  * ループエンジニアリングモードが無効でも判定自体は行う——利用者が自分の指示文へ
  * この合図を書いた場合にも効かせるためで、完全一致にしてあるぶん誤検知の余地は小さい。
  */
-export function declaresEscalate(state: ChatState): boolean {
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
+export function declaresEscalate(item: ChatItem): boolean {
+  return agentMessageFinalLine(item) === LOOP_ESCALATE_TOKEN;
+}
+
+/**
+ * エージェントの発言の、**最後の非空行**（前後の空白を除く）。
+ *
+ * `agentMessage`以外を渡された場合と、本文が空白だけの場合は`undefined`。合図
+ * （`LOOP_ESCALATE_TOKEN` / `LOOP_DONE_TOKEN`）の判定はどちらもこの値との完全一致で
+ * 行う（issue #914）。
+ */
+export function agentMessageFinalLine(item: ChatItem): string | undefined {
+  if (item.kind !== 'agentMessage') {
+    return undefined;
+  }
+  const text = item.text.trimEnd();
+  if (text === '') {
+    return undefined;
+  }
+  const lines = text.split('\n');
+  const lastLine = lines[lines.length - 1];
+  return lastLine === undefined ? undefined : lastLine.trim();
+}
+
+/**
+ * 末尾から数えて最初の`agentMessage`。1つも無ければ`undefined`。
+ *
+ * 見るのが配列の最後の項目ではなく最後の`agentMessage`なのは、応答の後ろに
+ * `commandExecution`などの項目が並ぶことがあるため。合図はエージェントの発言の中に
+ * あればよく、その後ろにツールの実行記録が続いていても成立する。
+ *
+ * これが**どのターンの発言かはここでは分からない**。`ChatItem.turnId`は
+ * `item/agentMessage/delta`で作られた項目では`undefined`のままになることがあり
+ * （`chatState.ts`の`appendDelta`）、ターンの絞り込みには使えない。現在のターンの
+ * ものかは`LoopController`が前のターン境界の値と比べて決める（issue #937）。
+ */
+export function lastAgentMessage(items: readonly ChatItem[]): ChatItem | undefined {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
     if (item?.kind === 'agentMessage') {
-      const lines = item.text.trimEnd().split('\n');
-      const lastLine = lines[lines.length - 1];
-      return lastLine !== undefined && lastLine.trim() === LOOP_ESCALATE_TOKEN;
+      return item;
     }
   }
-  return false;
+  return undefined;
 }
 
 /**
@@ -73,22 +112,28 @@ export function declaresEscalate(state: ChatState): boolean {
  */
 export const DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION =
   'このループでは次の方針で作業すること。' +
-  '1) 完了したかどうかは、テストの終了コードやコマンドの実行結果など、機械的に確認できる根拠で判断する。自己申告で完了としない。' +
-  '2) 前回と同じやり方で解決しなかった場合は、同じ手を繰り返さず方針を変える。' +
-  '3) 直前のターンで出たエラーや失敗した出力は、次の作業の入力として扱う。' +
-  `4) 自力では解決できないと判断した場合は、作業を続けずに、応答の最終行へ ${LOOP_ESCALATE_TOKEN} とだけ出力して人へ引き継ぐ。`;
+  '1) 完了は自己申告だけで判断せず、可能な場合はテストの終了コード、コマンド結果、生成物の確認など機械的に検証できる根拠で確認する。機械的な検証が適さない作業では、完了を確認できる具体的な根拠を示す。' +
+  '2) 直前の結果を確認してから次の行動を決める。同じ前提・同じ操作で進展せず、新しい情報も得られない場合は、そのまま繰り返さず原因仮説または方針を変える。一時的な失敗と判断できる根拠がある場合の再試行はよい。' +
+  '3) 直前のターンで得た成功・失敗・エラー・検証結果を次の判断へ反映し、未解決の原因と次に確かめることを更新する。' +
+  '4) 必要な権限・入力・外部判断が無い、複数の異なる方針を試しても進展しない、または追加作業から新しい情報を得られる見込みが無い場合は無意味に作業を続けない。' +
+  `行き詰まりの原因、試したこと、人に必要な判断や入力を簡潔に報告した後、応答の最後の非空行に ${LOOP_ESCALATE_TOKEN} だけを出力し、それ以降は何も出力しない。`;
 
 /**
  * `agent.chat.loopEngineering.continueInstruction` の既定値。**2回目以降に**連結する
  * 短い再確認。
  *
  * 完全な方針文を200回（`LOOP_ITERATION_LIMIT`）送り直しても得るものは無いため、
- * 継続側は要点だけにする。1回目の指示は同じ会話の中に残っているので、方針そのものを
- * 再掲せずに参照できる。
+ * 継続側は要点だけにする。ただし**短くても自己完結させる**（issue #914）。
+ * 「1回目の方針を継続すること」と参照するだけの文面にしていた頃は、会話の圧縮・要約や
+ * tool outputによる希釈で初回メッセージの意味が薄れると、何を続ければよいのかが
+ * 分からなくなっていた。4軸それぞれの中身を1文ずつ入れ、初回指示を読み直せなくても
+ * 成立する文面にしてある。
  */
 export const DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION =
-  'ループの作業方針（機械的な検証・行き詰まったときの方針変更・エラーの折り返し・' +
-  `解決不能なときの ${LOOP_ESCALATE_TOKEN}）を継続すること。前ターンの検証結果を根拠に次の行動を選ぶこと。`;
+  '直前の検証結果を確認してから次の行動を決めること。完了は自己申告だけでなく確認可能な根拠に基づいて判断すること。' +
+  '同じ前提・同じ操作で進展せず新しい情報も得られない場合は繰り返さず、原因仮説または方針を変えること。' +
+  '直前の成功・失敗・エラーを次の判断へ反映すること。' +
+  `追加作業で進展する見込みが無い場合は必要な報告を終えた後、最後の非空行に ${LOOP_ESCALATE_TOKEN} だけを出力し、それ以降は何も出力しない。`;
 
 /** ループの何回目の送信かの区別。連結する指示文をこれで選ぶ。 */
 export type LoopEngineeringPhase = 'initial' | 'continue';

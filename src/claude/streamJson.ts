@@ -50,6 +50,10 @@ export const initialClaudeState: ChatState = {
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
+  // Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` を同時に決めるため、
+  // Codexのような順序の食い違い（issue #939）は起きない。それでも読み手を共通にするため、
+  // 完了の世代はプロバイダを問わず同じ意味で持つ
+  turnCompletionSeq: 0,
   todos: NO_TODOS,
   todoHistory: NO_TODO_HISTORY,
   backgroundTerminals: NO_BACKGROUND_TERMINALS,
@@ -210,10 +214,12 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  * ユーザー側のイベント。ツール結果と、`--replay-user-messages` で返ってくる
  * 自分の発言の2種類が来る。
  *
- * Skill起動時は、CLIがSKILL.md全文を `isMeta: true` のuserテキストとして別途注入して
- * くる（実測、issue #691）。他の `isMeta: true`（`<local-command-caveat>`・
- * cross-session-message等）と混同しないよう `isSkillContextEntry` で絞り込み、通常の
- * userMessageと区別してfold対象（`skillContext`、chatScript.tsのFOLD_KINDS）にする。
+ * Skill起動時は、CLIがSKILL.md全文をuserテキストとして別途注入してくる（実測、issue #691）。
+ * このイベントに付く目印はセッション履歴側と違い、`isSynthetic: true` だけで `isMeta` も
+ * `sourceToolUseID` も付かない（実測、issue #934）。他の合成メッセージ
+ * （`<local-command-caveat>`・cross-session-message等）と混同しないよう
+ * `isSkillContextEntry` で絞り込み、通常のuserMessageと区別してfold対象
+ * （`skillContext`、chatScript.tsのFOLD_KINDS）にする。
  */
 function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
   const content = list(rec(event['message'])?.['content']);
@@ -361,7 +367,14 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
   const subtype = str(event['subtype']);
   const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
-  return { ...state, busy: false, turnFailed: failed, turnResultText: str(event['result']) };
+  return {
+    ...state,
+    busy: false,
+    turnFailed: failed,
+    turnResultText: str(event['result']),
+    // ターンの結果が確定した（issue #939）。Codexの `turn/completed` に対応する
+    turnCompletionSeq: state.turnCompletionSeq + 1,
+  };
 }
 
 /**

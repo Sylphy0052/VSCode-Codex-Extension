@@ -443,28 +443,58 @@ function prefixLines(text: string, marker: string): string {
 const SKILL_CONTEXT_PREFIX = 'Base directory for this skill:';
 
 /**
- * Skill注入の本文かどうか（issue #889）。
+ * 同じskillを2回目以降に起動したとき、CLIが本文の代わりに注入する注記（実測、issue #934）。
+ * 本文と違って `Base directory for this skill:` で始まらないため、別に拾う。
+ * 取り出し位置を揃えるため、skill名は必ず1番目のグループに置く。
+ */
+const SKILL_REINVOCATION_PATTERNS = [
+  /^\(Re-invocation of \/(\S+) — /,
+  /^Skill \/(\S+) was loaded earlier /,
+  /^Skill \/(\S+) is already loaded above[;.]/,
+];
+
+/**
+ * Skill注入の本文または再実行時の注記かどうか（issue #889、#934）。
  *
  * issue #691 では起動元Skillツールの `sourceToolUseID` の有無だけで判定していたが、
  * `/<skill名>` のようにslash commandから直接起動した場合は `sourceToolUseID` が付かない。
  * 手元の全transcript（613件の注入）では492件が `sourceToolUseID` 付き、85件が無しで、
  * 無しの側はCLIのバージョンに相関しなかった。書き出しの一文でも拾う。
+ *
+ * さらにissue #934で、セッション履歴（`~/.claude/projects/*.jsonl`）と動作中の
+ * stream-jsonでフィールドが違うことが判った。前者には `isMeta: true` が付くが、後者は
+ * `isSynthetic: true` だけで `isMeta` も `sourceToolUseID` も付かない（CLI 2.1.247で実測）。
+ *
+ * `isSynthetic` は割り込みの通知など他の合成メッセージにも付くため、そちらは
+ * `sourceToolUseID` では通さず書き出しが合ったものだけを拾う。履歴側の判定は
+ * issue #889 までと同じままにして、読み直したときの見え方を変えない。
+ * ユーザー自身の発言にはどちらの目印も付かないので、手で同じ文面を書かない限り
+ * 巻き込まない。
  */
 export function isSkillContextEntry(entry: Record<string, unknown>, text: string): boolean {
-  if (entry['isMeta'] !== true) {
-    return false;
+  if (entry['isMeta'] === true) {
+    return str(entry['sourceToolUseID']) !== '' || isSkillContextText(text);
   }
-  return str(entry['sourceToolUseID']) !== '' || text.startsWith(SKILL_CONTEXT_PREFIX);
+  return entry['isSynthetic'] === true && isSkillContextText(text);
+}
+
+/** 書き出しだけでSkill注入と判る文面か（本文・再実行時の注記の両方）。 */
+function isSkillContextText(text: string): boolean {
+  if (text.startsWith(SKILL_CONTEXT_PREFIX)) {
+    return true;
+  }
+  return SKILL_REINVOCATION_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 /**
  * 注入本文の1行目 `Base directory for this skill: <path>` からskill名を取り出す。
  * 見出しに出して「どのskillが動いたか」だけは畳んだままでも判るようにする（issue #889）。
+ * 再実行時の注記は本文が無いぶん見出しだけが手がかりになるので、そちらからも取る（issue #934）。
  */
 export function skillContextName(text: string): string {
   const head = text.split('\n', 1)[0] ?? '';
   if (!head.startsWith(SKILL_CONTEXT_PREFIX)) {
-    return '';
+    return reinvocationSkillName(head);
   }
   const path = head
     .slice(SKILL_CONTEXT_PREFIX.length)
@@ -472,6 +502,17 @@ export function skillContextName(text: string): string {
     .replace(/[/\\]+$/, '');
   const name = path.split(/[/\\]/).pop() ?? '';
   return name;
+}
+
+/** 再実行時の注記からskill名を取り出す。合わなければ空文字。 */
+function reinvocationSkillName(head: string): string {
+  for (const pattern of SKILL_REINVOCATION_PATTERNS) {
+    const name = pattern.exec(head)?.[1];
+    if (name !== undefined) {
+      return name;
+    }
+  }
+  return '';
 }
 
 function item(

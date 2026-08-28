@@ -168,8 +168,15 @@ interface ChatPanel extends BaseChatPanel {
    * 別のタブの実行中が互いに見えてしまう）。タブごとに一意な値をここへ持つ。
    */
   secondOpinionKey: string;
-  /** ターン完了検知（`busy` の立ち下がり）に使う直前の値。 */
-  wasBusy: boolean;
+  /**
+   * ターン結果の確定検知に使う直前の`ChatState.turnCompletionSeq`（issue #939）。
+   *
+   * `busy`の立ち下がりは「threadが暇になったか」しか表さない。Codexは
+   * `thread/status/changed`（idle）を`turn/completed`より先に送るため、その時点では
+   * `turnResultText`がまだ空である。成果の通知・待機列の送信・ターン完了の通知は、
+   * `busy`ではなくこの値の変化を境目にする。
+   */
+  lastTurnCompletionSeq: number;
   /** ループ停止検知（`running` の立ち下がり）に使う直前の値。 */
   wasLoopRunning: boolean;
   /** `setApprovalHandler` で差し込まれた自動判定。未設定なら従来通り必ず承認カードを出す。 */
@@ -702,7 +709,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       modelSettings,
       persistModelSettings,
       secondOpinionKey: randomUUID(),
-      wasBusy: false,
+      lastTurnCompletionSeq: 0,
       wasLoopRunning: false,
       approvalHandler: undefined,
       mcpElicitationHandler: undefined,
@@ -786,7 +793,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private buildTaskSession(entry: ChatPanel, threadId: string, mcpRequested = false): TaskSession {
     return {
       sessionId: threadId,
-      runLoop: (plan: LoopPlan) => entry.loop.start(plan),
+      runLoop: (plan: LoopPlan) => entry.loop.start(plan, entry.session.getState().items),
       send: (text: string) => {
         void this.sendOnce(entry, text);
       },
@@ -870,13 +877,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (entry.disposed) {
       return;
     }
-    // ターンが終わった瞬間に、待たせていた指示を1件送る
-    const finished = entry.wasBusy && !state.busy;
-    entry.wasBusy = state.busy;
-    if (finished && state.queued.length > 0) {
+    // ターンの結果が確定した瞬間に、待たせていた指示を1件送る。
+    //
+    // 境目は`busy`の立ち下がりではなく`turnCompletionSeq`の変化で見る（issue #939）。
+    // Codexは`thread/status/changed`（idle）を`turn/completed`より先に送るため、
+    // `busy`が落ちた時点の`turnResultText`は`turn/started`で空に戻したままで、
+    // `reportTurnResult`は必ず空を見ていた。「暇になった→次を送る」ではなく
+    // 「前のターンが確定した→次を送ってよい」が正しい順序でもある。
+    const turnFinished = entry.lastTurnCompletionSeq !== state.turnCompletionSeq;
+    entry.lastTurnCompletionSeq = state.turnCompletionSeq;
+    if (turnFinished && state.queued.length > 0) {
       void entry.session.sendNextQueued(this.configFor(entry));
     }
-    if (finished) {
+    if (turnFinished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
       this.notifyTurnComplete(entry);
     }
@@ -1154,7 +1167,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           return;
         }
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
-        entry.loop.start(plan);
+        entry.loop.start(plan, entry.session.getState().items);
         return;
       }
       if (type === 'loop/stop') {

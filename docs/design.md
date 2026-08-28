@@ -7629,6 +7629,145 @@ Issue #926 P0 でこの位置付けを整理した。**背景要約は付随情�
 - `test/unit/loopController.test.ts`（`issue #909`のdescribe）: 実行中だったコマンドが次のターンで証拠になること、`exit 0`以外も`fail`として1回だけ積まれること、一時停止中に回数上限・撤退・停滞が成立したら再開しても送らないこと、走行中の再開で二重に送らないこと、ゴール駆動で一時停止中の`achieved`/`escalate`が再開後の送信を止めること、評価結果を保った指示が再開時に1回だけ送られること、停滞が成立していてもEvaluatorの達成判定が先に見られること、未達のまま停滞すれば従来どおり`stalled`で止まること
 - 修正前の実装に対して上記のテストを流し、10件が落ちること（＝不具合を実際に捕まえていること）を確認した
 
+### 14.87 ループの指示文と合図の綴りを直す（Issue #914）
+
+§14.79（停止ポリシーの3本立て）を外部レビューへ掛けて見つかった不備のうち、§14.86（issue #909）で直しきれていないものをまとめる。一時停止中に停止判定を飛ばしていた問題と、ゴール駆動で停滞判定がEvaluatorより先に走っていた問題は#909で解決済みのため、ここでは扱わない。
+
+**継続指示は自己完結させた。** 「1回目の方針を継続すること」と参照するだけの文面は、会話の圧縮・要約やtool outputによる希釈で初回メッセージの意味が薄れると効かなくなる。ループは200回（`LOOP_ITERATION_LIMIT`）まで回せるので、後半で実質無効になる。4軸それぞれの中身を1文ずつ入れ、初回指示を読み直せなくても成立する文面にした。初回の方針文も、機械的な検証が適さない作業への逃げ道、一時的な失敗の再試行の許容、撤退条件の具体化の3点を補った。10ターンごとの全文再注入のような仕組みは入れていない（Controllerに段階が増え、利用者のカスタム文面との意味も複雑になる）。
+
+**時間上限はsoft deadlineである。** 指定した時間で必ず止まるわけではない。判定はターンの完了時にだけ行うので、上限10分に対して1ターンが90分なら90分走る。超過幅は1ターンの長さ・Evaluatorの応答時間・承認待ちの長さの分だけ伸びる。ハードな打ち切りが要るようになったら、この値をsoft limitのまま残してターン単位の `hardTurnTimeout` を別に足す。
+
+測るのは**`start()` からのmonotonicな経過時間**で、`performance.now`（既定）を使う。差分しか使わないので基準時刻に意味は無く、NTP同期や手動の時刻変更で飛ばないことの方が重要である（`Date.now` は経過時間の計測には向かない）。**プロセスが動いている間の待ち時間——waitingReply・承認待ち・Evaluatorの応答待ち——は、この予算に含む。**「エージェントが実際に処理していた時間だけを数える」方式（active execution budget）は採らない——停止の予測可能性を、実行時間としての正確さより優先する。
+
+ただし**OS・実行環境のサスペンド中の時間は数えない**。`performance.now` の基準はLinuxでは `CLOCK_MONOTONIC` 相当で、サスペンド中を含める `CLOCK_BOOTTIME` とは違う。スリープを跨いだ場合、実時間より短い経過として扱われる。これは割り切りである——この値はもともと進行中のターンへ割り込まないsoft deadlineであり、実時間に対する厳密な期限管理を要求していない。サスペンドまで含めて測りたくなったら、その時点で `Date.now` との併用（大きい方を採る）を検討する。
+
+**`resume()` は送る直前にもう一度、時間上限と回数上限を見る。** #909で `pause()` を送信のゲートに限定し、保留した指示を `resume()` がそのまま送るようにしたが、**保留してから再開までの待ち時間**は誰も見ていなかった。ターンが完了した時点では超えていなくても、返信を待っている間に時間上限へ達することがある（人が2時間後に答えることもある）。ここだけは保留を作った時点の判定では足りない。
+
+**`LOOP_DONE_TOKEN` の判定も最終行の完全一致へ寄せた。** `declaresDone` は `includes` だったため、`まだ <<LOOP_DONE>> は出しません` のような説明文でループが終了していた。合図を教えるのは `decoratePrompt` が終了条件へ添える文そのもので、その綴りが会話に残る——`declaresEscalate`（§14.79）を完全一致にしたのと同じ構図である。取り出しは `lastAgentMessageFinalLine`（`loopEngineering.ts`）へ共通化した。見るのは配列の最後の項目ではなく最後の `agentMessage` なので、応答の後ろに `commandExecution` が並んでいても合図は拾える。**これは既存の挙動の変更で**、合図を文中へ埋めて返していたエージェントでは終了しなくなる。`decoratePrompt` の依頼文も「応答の最後の非空行に合図だけを出す」よう直した。
+
+#### 確かめ方
+
+- `test/unit/loopController.test.ts`（`issue #914`のdescribe）: 一時停止中に時間上限を超えたターンが終われば `timedOut` で止まること、待ち時間で上限を跨いだ `resume()` が送らずに止まること、停止理由が同時に成立したときの優先順位、時間上限の境界（`limit - 1` は継続、`limit` と `limit + 1` は停止）、上限を大きく超えても `busy` の間は止まらないこと、評価を待っている間に一時停止して再開しても1回だけ送ること、合図が本文の途中にあるだけでは止まらないこと、最終行に合図以外が混ざっていれば止まらないこと、応答の後ろにコマンド実行が並んでいても合図を拾うこと
+- `test/unit/loopEngineering.test.ts`: `lastAgentMessageFinalLine` の取り出し、応答の後ろに `commandExecution` が並んでも撤退の申告が成立すること
+
+### 14.88 現在のループ実行以外の状態を持ち込まない（Issue #933）
+
+§14.86（issue #909）・§14.87（issue #914）の後の実装を外部レビューへ掛けて見つかった3系統の不備。どれも「**いま走っているループ実行（run）の外にある状態が、この実行の中へ混ざる**」という同じ不変条件の違反である。
+
+**ゴール駆動の証拠はループ開始時点でbaselineを取る。** `start()` は `seenEvidenceIds` を空にし、`ingestEvidence()` は `state.items` 全体を `collectCommandEvidence` へ渡していた。`ChatState.items` は会話全体を持ち続けるため、**ループを始める前に実行された終了コード付きのコマンドがすべて `iteration=1` の証拠として積まれる**。「開始前に `npm test` が通っていた」だけで受入基準を満たしたとEvaluatorが判定し、現在のコードを一度も検証しないまま `done` で止まりうる。`start(plan, existingItems)` で開始時点の項目を受け取り、`isSettledCommandItem` で絞ったidを `seenEvidenceIds` の初期値にする。`ChatState` 全体ではなく `readonly ChatItem[]` を渡すのは、`LoopController` を `vscode` にも会話の全体像にも依存させないため。
+
+`worker-report` も同じ問題を持っていた。`buildWorkerReportEvidence` は `lastNonEmptyAgentMessageText(state.items)` で会話全体から直近の発言を探すため、コマンド実行だけで本文を返さなかったターンで**過去のターンの発言を現在のiterationの申告として積み直す**。`state.turnResultText`（そのターンの `agentMessage` だけを連結した値）へ寄せた。そのターンが何も言わなかったなら申告は無いのが正しく、`stallDetector.ts` が署名の取り出しで `items` へフォールバックしないのと同じ理由である。`status` が `unknown` なので `achieved` の直接の根拠にはならないが、Evaluatorの `reason` / `gaps` / `nextFocus` を古い主張で汚す。
+
+**非同期の処理は実行世代で隔離する。** `runGeneration` を1つ持ち、`start()` と `stop()` で進める。非同期の開始点で世代を捕まえ、解決した時点で `this.runGeneration` と違えば何もしない。守る対象は3箇所。
+
+- `observe()` の `.finally(() => { this.evaluating = false; })` — run Aの評価がpendingのままAを止めてBを開始すると、Aのfinallyが**Bの `evaluating` を折る**。Bの評価中にもう1つ評価が走る
+- `dispatch()` の `result.catch(() => this.stop('failed'))` — run Aの送信Promiseが後からrejectすると、**Bが `failed` で止まる**
+- `runGoalTurn()` のawait後 — 既に `this.plan !== plan` を見ていたが、参照比較なので**同じ計画のオブジェクトを使い回されると別の実行を自分の実行と取り違える**。現在の全呼び出し元はリテラルか `normalizeLoopPlan` の新規オブジェクトのため今は起きないが、この前提を呼び出し側へ押しつけない
+
+`.finally()` と `Promise.catch()` は計画を持たないので、参照比較では守れない。世代という1つの数だけが全経路で使える印になる。
+
+**Evaluatorの応答待ちは時間上限の外にある。** 判定は `finishTurn()` にあり、Evaluatorを待っている間の `observe()` は `evaluating` で戻るため、待っている最中に上限を跨いでも止まらない。ただし `goalEvaluatorProcess.ts` はプロセスをタイムアウトで落とす（既定 `agent.chat.goalEvaluator.timeoutSeconds` = 120秒）ので、無期限には待たない。§14.87 のsoft deadlineの超過幅に、**上限を跨いだ最後のEvaluator待ちの分（最大でタイムアウト1回分）** が加わると考えればよい。毎ターン加算されるわけではない。
+
+#### 確かめ方
+
+- `test/unit/loopController.test.ts`（`issue #933`のdescribe）: ループ開始前に完了していたコマンドが最初の評価の証拠に入らないこと、開始後に完了したコマンドはこれまでどおり入ること、開始時点で実行中だったコマンドは終わった時点で証拠になること、そのターンが何も言わなければ過去の発言を申告として積み直さないこと、古い実行のEvaluatorが返っても新しい実行の評価待ちを折らないこと、同じ計画のオブジェクトで始め直しても古い評価が新しい実行を止めないこと、古い実行の送信の失敗が新しい実行を `failed` にしないこと
+- 上の7件は、修正を1つずつ戻すと落ちることを確認した（実際に不具合を捕まえていること）
+
+### 14.89 完了・撤退の合図を現在のターンに限定する（Issue #937）
+
+§14.88（issue #933）で塞いだ「実行の外にある状態が混ざる」不変条件の違反が、完了・撤退の合図の判定にも残っていた。`declaresDone` / `declaresEscalate` は `state.items` を末尾から走査して最初に見つかった `agentMessage` を見ていた。`ChatState.items` は会話全体を持ち続けるため、**そのターンが本文を返さなかった場合（コマンド実行だけで終わったターン）、過去のターンの発言が判定に掛かる**。ループを始める前の会話に最終行が `<<LOOP_DONE>>` の応答が残っていれば――前回のループの最後の応答がまさにそれである――1ターン目で即座に `done` で止まる。`declaresEscalate` は `plan.condition` の有無に関わらず効くため、終了条件を設定していないループでも起きる。
+
+**`turnResultText` へ寄せる形は採らなかった。** §14.88 の `worker-report` と停滞検知（§16.27）は「そのターンの `agentMessage` だけを連結した値」を根拠にしているが、合図の判定にこれを使うと止まれなくなる。`appendDelta`（`chatState.ts`）が `item/agentMessage/delta` で作る項目は `turnId` が `undefined` のままで、`item/completed` が `turnId` を持たなければ `upsertItem` でも埋まらない。`summarizeTurn` は `turnId` の一致で絞るためこの項目を落とし、**画面に発言が出ているのに `turnResultText` だけが空になる**（`planner.ts` がこの取りこぼしにフォールバックを入れている）。worker-report と停滞検知はこの場合「申告なし」「検知しない」に落ちるだけだが、合図は「正しく合図を返しているのに止まらない」になる。停止できない側へ倒れる誤りは避ける。
+
+**代わりに、前のターン境界の `agentMessage` と比べて「このターンで新しく出た発言か」を直接見る。** `LoopController` が `lastMessage` を持ち、`start(plan, existingItems)` で開始時点の値を入れ、`observe()` がターンの完了を消費した直後に更新する。更新を停止判定より**前**に置くのは、どこかの `return` で更新を忘れて次のターンの判定が狂うのを防ぐため。合図の判定は、新しい発言が出たときだけ行う。
+
+**比べるのは項目そのもの（参照の同一性）である。** `id` と最終行の組で比べる案は成立しない。Claude側の `blockId` / `partialId`（`claude/streamJson.ts`）は `message.id` が取れないとき `assistant` へフォールバックするため、`assistant:text:0` が実行を跨いで同じ値になる。`<<LOOP_DONE>>` で終えた会話から始め直し、1ターン目に同じ合図を返すと、開始時点のbaselineと `id` も最終行も一致してしまい、**新しく返した合図を「前と同じ」と見て無視する**。同一実行の中では「合図が2ターン続くなら1ターン目で止まっている」が成り立つが、実行を跨ぐ `start()` のbaselineでは成り立たない。
+
+参照で比べてよいのは、`ChatState` の更新が**変えた項目だけを新しいオブジェクトへ差し替え、触っていない項目の参照をそのまま残す**ためである（`upsertItem` / `appendDelta`、および `markInterruptedCommands` も実行中のコマンドだけを作り直す）。参照が変わっていなければ、そのターンは何も言っていない。
+
+**純粋関数側は「渡された発言が合図か」だけを答える。** `declaresDone(item)` / `declaresEscalate(item)` / `agentMessageFinalLine(item)` は `ChatItem` を受け取る形にし、「どの発言を見るか」は `LoopController` が決める。会話の全体像を見る責務を1箇所へ寄せた（`lastAgentMessage(items)` だけが `items` を走査する）。
+
+`turnResultText` が空になる件そのものは別に扱う。**#937 の正しさはその修正に依存しない。** ただし**ここに書いた原因（`appendDelta` 由来の `turnId` 欠落）は誤りだった**。実機のイベント列を採ると `item/started` も `item/completed` も `turnId` を持っており、通常の経路で欠落は起きない。真の原因は §14.90 に書いた通知の順序である。`turnResultText` を停止ポリシーの根拠に使わないという #937 の判断自体は変わらない（合図は「そのターンで新しく出た発言か」という別の問いに答えるものであり、応答本文の連結ではそもそも答えられない）。
+
+#### 確かめ方
+
+- `test/unit/loopController.test.ts`（`issue #937`のdescribe）: 開始前に残っていた `<<LOOP_DONE>>` / `<<LOOP_ESCALATE>>` で止まらないこと、前のターンの発言をツールだけの次のターンで新しい発言として扱わないこと、そのターンで新しく出た合図ではこれまでどおり止まること、`id` が使い回されても新しい発言なら合図として扱うこと、`turnResultText` が空でも新しい発言の合図で止まること、止め直したループが前の実行の発言を持ち越さないこと、**始め直した後に同じ `id` で同じ合図を新しく返しても止まること**
+- `test/unit/loopEngineering.test.ts`: `declaresEscalate` / `agentMessageFinalLine` が `agentMessage` 以外を渡されたとき成立しないこと、`lastAgentMessage` が応答の後ろにコマンド実行が並んでいてもその応答を返すこと（§14.87 からの要件）
+- 境界の比較を無効化すると3件が落ち、比較を `id` と最終行の組に落とすと「始め直した後に同じidで同じ合図を新しく返しても止まる」の1件が落ちることを確認した
+
+### 14.90 ターンの結果が確定した時点を`busy`と分けて持つ（Issue #939）
+
+`ChatState.turnResultText`（そのターンの応答本文）が、実機ではほぼ常に空だった。`planner.ts` と `taskSummary.ts` には「画面に `agentMessage` は出ているのに `turnResultText` だけ空になることがある」というフォールバックが先に入っていたが、原因は特定されていなかった。§14.89 は `appendDelta` の `turnId` 欠落を原因として書いたが、これは**誤りだった**。
+
+#### 実イベント列
+
+`codex app-server`（CLI 0.148.0）へ `initialize` → `thread/start` → `turn/start` を直接投げ、通知を全件記録した。1ターンで届く順序は次の通りである。
+
+```
+thread/status/changed (active)
+turn/started                    turnId あり
+item/started    userMessage     turnId あり
+item/completed  userMessage     turnId あり
+item/started    agentMessage    turnId あり
+item/agentMessage/delta         turnId あり
+item/completed  agentMessage    turnId あり
+thread/tokenUsage/updated
+account/rateLimits/updated
+thread/status/changed (idle)    ← ここで busy が false になる
+turn/completed                  ← ここで初めて turnResultText が入る
+```
+
+`turnId` はどのイベントにも乗っている。`appendDelta` が `turnId: undefined` で項目を作るのは `item/started` を取り逃した場合の防御であって、通常の経路では通らない。
+
+**原因は `thread/status/changed`(idle) が `turn/completed` より先に届くことである。** `busy` は前者で false になり、`turnResultText` に値が入るのは後者である。その間には `turn/started` が空へ戻した値しか無い。`busy` の立ち下がりを「ターンが終わった」と読む側は、必ず空を見ていた。
+
+#### `busy` は「threadが暇か」であって「ターンの結果が確定したか」ではない
+
+この2つを1つの変数に押し込めていたことが不具合の本体である。`busy` は画面の実行中表示にも使われており、意味を「`turn/completed` を受け取ったか」へ変えると、最終通知が届かない経路で永遠に実行中のままになり、スレッドの状態と表示も乖離する。
+
+**そこで `ChatState.turnCompletionSeq`（ターンの結果が確定した回数）を足し、完了の境目をこちらへ移した。** `turn/completed` と `turn/failed` でだけ1つ増やし、`thread/status/changed` では増やさない。
+
+**真偽値ではなく単調増加の数にしてある。** `turnResultReady: boolean` でも実装できるが、「次のターン開始で false に戻す」というedgeの管理が要り、戻し忘れが次のターンの判定を狂わせる。数なら読み手は「前に見た値と違うか」だけを見ればよく、途中に何件のイベントが挟まっても、`turnResultText` が正当に空でも、完了そのものは判定できる。
+
+#### 接続断・中断でも確定として数える
+
+`chatSession.ts` の `markTurnFailed()`（issue #420）と `streamSession.ts` の `stateAfterProcessGone()`（issue #897）は、CLIとの接続が切れたときに `busy: false, turnFailed: true` まで戻す。**ここでも `turnCompletionSeq` を進める。** 進めないと、完了の世代を見て次を決める側が `turn/completed` を永久に待ち、接続断でループが止まらなくなる。「結果が確定した」には「失敗として確定した」を含める。
+
+**Codexの中断（`chatSession.interrupt()`）では進めない。** app-serverは `turn/interrupt` が成功したターンも `turn/completed`（`status: "interrupted"`）で終わらせる（`codex-rs/app-server/README.md`: 「the turn finishes with `status: "interrupted"`」「When the model is done (or the turn is interrupted via making the `turn/interrupt` call), the server sends `turn/completed`」）。中断側でも進めると同じターンを2回確定させ、作業記録とターン完了の通知が二重になり、待機列があれば次の指示まで余分に送る。ここは `turn/completed` を唯一の確定点にする。**中断リクエスト自体が失敗した分岐でも進めない**——あちらはターンが続いている可能性が高く（コード中のコメントもそう書いている）、完了として扱うと次の指示を重ねて送る。`startReview`（inline）の失敗ロールバックも同様で、そもそもターンが始まっていない。
+
+Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` を同時に決めるため、この順序の食い違いは起きない。それでも同じ意味で世代を進め、読み手をプロバイダ共通にしている。中断（`streamSession.interrupt()`）では進める——CLIは中断後に `result` を返さないことがあり、ここが確定点になる。
+
+**代替の確定点には「未確定のターンがあるか」のガードが要る。** どれも「終局通知が来ない」ことを理由に確定を作る側なので、ターンを抱えていない状態で通ると、無かった完了を1つ生む。Viewは世代の変化を無条件に「ターンが終わった」と読むため、直前のターンの成果が作業記録へ二重に残り、待機列があれば送信まで走る。
+
+- `chatSession.markTurnFailed()`: 判定は `busy || turnId !== undefined`。**`busy` だけでは足りない**——`thread/status/changed`（idle）は `turn/completed` より先に届くので、その窓で接続が切れると `busy` は既に `false` で、それでも結果の確定していないターンが残っている。この窓を落とすと `LoopController.observe` が永久に `turn/completed` を待つ。確定と同時に `turnId` も落とし、接続断の後始末が複数回呼ばれても確定を1回に留める
+- `streamSession.stateAfterProcessGone()` / `interrupt()`: 判定は `busy`。`send()` が送信前に `busy: true` にするため、Claude側ではこれが未確定ターンの印になる。`stateAfterProcessGone()` はプロセスの `exit`・`error`（**起動失敗を含む**）から呼ばれるので、1ターンも送っていない状態や `result` を処理し終えたidleの状態でも通りうる
+
+#### 消費側を`busy`から移す
+
+`busy` の立ち下がりは、待機列の送信・作業記録への成果通知・ターン完了の通知・`LoopController` の4つに使われていた。**`LoopController` だけを直しても #939 は直らない。**
+
+- `chatView.ts` / `claudeChatView.ts` の `onSessionChange`: `entry.wasBusy` を廃し、`entry.lastTurnCompletionSeq` との比較で境目を作る。`reportTurnResult` はこれで初めて本文を持つ。待機列の送信も同じ側へ移した——「暇になった→次を送る」ではなく「**前のターンが確定した→次を送ってよい**」が正しい順序で、前者だと `turn/completed` の前に次のターンが始まりうる
+- `LoopController.observe()`: ターンが始まった時点の `turnCompletionSeq` を `resultSeqAtTurnStart` に覚え、`busy` が落ちたあとも世代が変わるまでターンを消費しない。イベントが `idle`→`completed` でも `completed`→`idle` でも、結果が確定したあとにだけ次へ進む
+
+`wasBusy` は書くだけで誰も読まない状態になったため消した。`runner.ts` の `wasBusy` はターンの**開始**（立ち上がり）を数えるもので、意味が違うので残している。
+
+#### 挙動の変化
+
+**停滞検知（§16.27）がここで初めて実際に働き始める。** `extractTurnSignature` は `turnResultText` だけを見て、空のときは比較不能として空文字を返す設計である。これまでは毎ターン空文字が積まれ、`detectStalledLoop` は空文字の反復を停滞と見なさないため、**検知が事実上効いていなかった**。false positive（進んでいるのに止める）ではなく false negative（止まらない）側に倒れていたので実害は表に出ていない。同じ理由で、ゴール駆動ループの worker-report（§14.88）も毎ターン欠落していた。
+
+`planner.ts` のフォールバック（表示中の最後の `agentMessage` へ落ちる）は**残す**。原因は塞いだが、`interrupted` / `manual` のように `turn/completed` を受け取らないまま停止する経路では依然 `turnResultText` が空になる。`taskSummary.ts` の分岐はそもそも「ターン進行中はストリーミング中の発言を出す」という表示上の意図で、#939 の回避策ではない。
+
+#### 確かめ方
+
+- `test/unit/chatState.test.ts`: 実イベント列を流し、idle の時点では `turnCompletionSeq` が増えず `turnResultText` も空のままであること、`turn/completed` で初めて確定し本文が入ること、`turn/failed` も確定として数えること
+- `test/unit/claudeStreamJson.test.ts`: `result` の1イベントで確定すること（成功・失敗とも）
+- `test/unit/loopController.test.ts`: idle だけでは次の指示を送らず評価も始めないこと、`turn/completed` で1回だけ消費すること、確定後の別の状態変化で二重に送らないこと、idle 時点の空の応答を停滞の履歴へ積まないこと（同じ本文の反復が正しく `stalled` になる）、失敗と完了の合図も確定した時点で判定すること
+- `test/unit/chatViewManager.test.ts`: 実イベント列で、idle だけでは作業記録へ成果を残さず、`turn/completed` で本文を1回だけ残すこと
+- `test/unit/chatSessionInterrupt.test.ts`: `interrupt()` 自身は世代を進めず、後から届く `turn/completed` で1回だけ確定すること、中断が失敗したときは進めないこと
+- `test/unit/chatSessionConnectionLost.test.ts`: `busy` が既に `false` でも未確定のターンが残っていれば確定させること、後始末が2回呼ばれても2回確定させないこと
+- `test/unit/claudeStreamSessionExitRelease.test.ts`: 走行中のプロセス消失は確定させ、`result` の後・起動失敗・応答中でない中断では確定を作らないこと
+- **陽性対照**: 消費側を `busy` の立ち下がりへ戻すと8件が落ちる（うち新規6件: `LoopController` 4件、`chatViewManager` 2件）。`chatState.ts` 側で `thread/status/changed` に世代を進めさせると `chatState.test.ts` の5件が落ちる。exactly onceのガード3つを外す（中断で進める／`markTurnFailed` を `busy` だけで見る／Claude側を無条件に進める）と7件が落ちる。**落ちない新規テストが5件ある**（「idle だけでは作業記録へ成果を残さない」「`turn/completed` で1回だけ次を送る」「確定後に二重に送らない」「中断が失敗したときも進めない」「走行中のプロセス消失は確定させる」）。`reportTurnResult` の空ガードや既存の `sawBusy`、元から進めていない分岐が偶然カバーしているためで、**回帰防止テストであって陽性対照ではない**
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか
