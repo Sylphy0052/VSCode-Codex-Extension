@@ -362,6 +362,10 @@ export class LoopController {
      * 基準時刻に意味は無く、NTP同期や手動の時刻変更で飛ばないことの方が重要である
      * （`Date.now` は経過時間の計測には向かない）。テストから任意の値を流し込めるよう
      * 差し替え可能にしてある。
+     *
+     * **OS・実行環境のサスペンド中の時間は数えない**（Linuxでの基準は`CLOCK_MONOTONIC`
+     * 相当で、サスペンドを含める`CLOCK_BOOTTIME`とは違う）。この値は進行中のターンへ
+     * 割り込まないsoft deadlineであり、実時間に対する厳密な期限管理ではない。
      */
     private readonly now: () => number = () => performance.now(),
   ) {}
