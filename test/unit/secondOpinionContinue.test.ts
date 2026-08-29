@@ -251,7 +251,13 @@ describe('draftSecondOpinionHandoff（Issue #929 Handoff）', () => {
     expect(port.sentToMain).toBe(0);
     expect(advisor.currentState()).toBe('handoffDrafted');
     expect(port.drafts).toEqual([
-      { userSummary: 'B案を勧める', mainInstruction: 'B案で実装すること', revision: 1 },
+      {
+        userSummary: 'B案を勧める',
+        mainInstruction: 'B案で実装すること',
+        revision: 1,
+        // 下書きの根拠になった材料の世代（Issue #975）。更新していないので1世代目のまま
+        materialRevision: 1,
+      },
     ]);
     expect(port.notes[1]?.display.status).toBe('completed');
     // 表示には「まだ送っていない」と出す（下書きを送信済みと読み違えさせない）

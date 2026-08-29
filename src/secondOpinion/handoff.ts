@@ -19,6 +19,14 @@ export interface HandoffDraft {
    * 作った場合に、古い方が送られるのを防ぐ（Issue #929 の自己レビュー）。
    */
   revision: number;
+  /**
+   * この下書きの根拠になった材料の世代（Issue #975）。
+   *
+   * 承認のときに相談相手の現在の世代と比べる。相談の途中で材料を更新すると、更新前の
+   * 議論から作った下書きは古い前提に立ったものになる。送るのを止めはしないが、**古い
+   * ことを知らないまま送らせない**ために持ち回る。
+   */
+  materialRevision: number;
   /** 利用者が採否を判断するための要約。会話へ表示するだけで、送信されることはない。 */
   userSummary: string;
   /** 承認されたときにだけ作業中のAIへ渡る指示文。 */
@@ -26,7 +34,7 @@ export interface HandoffDraft {
 }
 
 /** パースの結果。世代はまだ付いていない（相談相手が採番する）。 */
-export type ParsedHandoff = Omit<HandoffDraft, 'revision'>;
+export type ParsedHandoff = Omit<HandoffDraft, 'revision' | 'materialRevision'>;
 
 export type HandoffParseResult = { ok: true; draft: ParsedHandoff } | { ok: false; reason: string };
 

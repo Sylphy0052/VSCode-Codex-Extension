@@ -76,6 +76,17 @@ export interface CaptureSnapshotOptions {
   maxUntrackedBytes?: number;
   /** 未追跡ファイルの読み取り。既定はNode実装。テストではフェイクを渡す。 */
   untrackedReader?: UntrackedFileReader;
+  /**
+   * 差分のベースに使うコミット。既定は現在のHEAD（Issue #975）。
+   *
+   * 相談の途中で材料を更新するとき（`AdvisorSession.updateMaterial`）に、**相談開始時の
+   * コミットを渡す**。HEADを取り直すと、利用者が修正をコミットした時点で
+   * `git diff <新HEAD>` が空になり、確認してほしい修正が材料から丸ごと消える。
+   *
+   * 渡したコミットが辿れない場合（ブランチの切り替え・rebaseなど）は `ok: false` を返す。
+   * 別の地点との差分へ黙って読み替えない。
+   */
+  baseCommit?: string;
 }
 
 /**
@@ -85,6 +96,39 @@ export interface CaptureSnapshotOptions {
  * 理由を添えて `ok: false` を返す（呼び出し側が会話へ理由を残す。黙って空のレビューを
  * 走らせない）。
  */
+/**
+ * 差分のベースにするコミットを決める（Issue #975）。
+ *
+ * 指定が無ければ現在のHEAD。指定があれば**それが今も辿れることを確かめてから**使う。
+ * 相談の途中でブランチを切り替えられた場合など、開始時のコミットが失われていることは
+ * ありうる。そこでHEADへ黙って戻すと、利用者が「開始時からの変更」だと思っている材料が、
+ * 別の地点との差分に入れ替わる。
+ */
+async function resolveBaseCommit(
+  cwd: string,
+  git: GitCommandRunner,
+  pinned: string | undefined,
+): Promise<{ ok: true; commit: string } | { ok: false; reason: string }> {
+  if (pinned === undefined) {
+    const head = await resolveHeadCommit(cwd, git);
+    if (head === undefined) {
+      return {
+        ok: false,
+        reason: 'HEADコミットを解決できませんでした（コミットがまだありません）',
+      };
+    }
+    return { ok: true, commit: head };
+  }
+  const exists = await git.run(['cat-file', '-e', `${pinned}^{commit}`], cwd);
+  if (exists.code !== 0) {
+    return {
+      ok: false,
+      reason: `相談を始めた時点のコミット（${pinned.slice(0, 8)}）が見つかりません（ブランチの切り替えなどで失われた可能性があります）`,
+    };
+  }
+  return { ok: true, commit: pinned };
+}
+
 export async function captureWorkspaceSnapshot(
   cwd: string,
   git: GitCommandRunner,
@@ -98,16 +142,19 @@ export async function captureWorkspaceSnapshot(
   if (!(await isGitWorkingTree(cwd, git))) {
     return { ok: false, reason: 'gitの作業ツリーではないため、変更のスナップショットを取れません' };
   }
-  const baseCommit = await resolveHeadCommit(cwd, git);
-  if (baseCommit === undefined) {
-    return { ok: false, reason: 'HEADコミットを解決できませんでした（コミットがまだありません）' };
+  const baseCommit = await resolveBaseCommit(cwd, git, options.baseCommit);
+  if (!baseCommit.ok) {
+    return baseCommit;
   }
   // `HEAD` ではなく解決済みのハッシュを渡す。`git diff HEAD` は `HEAD` を解決し直すため、
   // `rev-parse` との間にコミットが入ると `baseCommit` と差分が別の地点を指す（#926 A）。
   // `--no-ext-diff` / `--no-textconv` は、利用者の `.gitconfig` / `.gitattributes` に
   // 設定された外部diffドライバ・textconvフィルタを走らせないため。レビュー用の写しを
   // 取るだけの経路で任意の外部コマンドを起動する理由が無い
-  const result = await git.run(['diff', '--no-ext-diff', '--no-textconv', baseCommit, '--'], cwd);
+  const result = await git.run(
+    ['diff', '--no-ext-diff', '--no-textconv', baseCommit.commit, '--'],
+    cwd,
+  );
   if (result.code !== 0) {
     const detail = result.stderr.trim();
     return {
@@ -120,7 +167,7 @@ export async function captureWorkspaceSnapshot(
   // ファイルを触ると一覧と差分がずれうる。ずれても害は「`base/` に余分なファイルが載る」
   // か「1件載らない」までで、`base/` の中身自体は `baseCommit` から読むので変わらない
   const named = await git.run(
-    ['diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', baseCommit, '--'],
+    ['diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', baseCommit.commit, '--'],
     cwd,
   );
   const changedPaths = named.code === 0 ? parseUntrackedList(named.stdout) : [];
@@ -145,7 +192,7 @@ export async function captureWorkspaceSnapshot(
     ok: true,
     material: { fullDiff: diff, changedPaths },
     snapshot: {
-      baseCommit,
+      baseCommit: baseCommit.commit,
       diff: budgeted.diff,
       truncated: budgeted.truncated,
       diffOmissions: budgeted.omissions,

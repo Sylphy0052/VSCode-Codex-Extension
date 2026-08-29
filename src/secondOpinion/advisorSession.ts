@@ -22,7 +22,16 @@ import {
 } from '../orchestrator/planner';
 import type { TaskSession } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
-import type { ReviewBundle } from './reviewBundle';
+import {
+  buildMaterialContextHeader,
+  buildMaterialUpdatePrompt,
+  materialUpdateAckToken,
+} from './prompt';
+import {
+  FIRST_REVIEW_BUNDLE_REVISION,
+  MAX_REVIEW_BUNDLE_REVISIONS,
+  type ReviewBundle,
+} from './reviewBundle';
 
 /**
  * Advisorセッションの状態（Issue #929 受入基準）。
@@ -59,6 +68,37 @@ export type AdvisorTurnResult =
       kind: 'closed' | 'busy' | 'cancelled' | 'failed';
       reason: string;
     };
+
+/**
+ * 材料を最新へ更新した結果（Issue #975）。
+ *
+ * 1ターン分の結果（{@link AdvisorTurnResult}）と分けるのは、失敗の種類が1つ多いためである。
+ * `unsupported` は「この相談では材料を更新できない」——作業ツリーの変更以外を資料に選んだ
+ * 相談には、更新すべき材料そのものが無い。
+ */
+export type AdvisorMaterialUpdateResult =
+  | {
+      ok: true;
+      /** 更新後の世代。1始まりで、更新のたびに1つ増える。 */
+      revision: number;
+      response: string;
+      partialReason?: string | undefined;
+    }
+  | {
+      ok: false;
+      kind: 'closed' | 'busy' | 'cancelled' | 'failed' | 'unsupported';
+      reason: string;
+    };
+
+/**
+ * 新しい世代の材料を書き出す手段（Issue #975）。
+ *
+ * 実装は view 層が持つ（現在の作業ツリーからスナップショットを取り直す処理は `vscode` と
+ * git に依存する）。ここでは「書き出せた場合に、その場所をAdvisorへ伝える」ことだけを行う。
+ *
+ * @returns 書き出した材料の、bundleのルートからの相対パス
+ */
+export type AdvisorMaterialWriter = (bundleDir: string, revision: number) => Promise<string>;
 
 /** 閉じた理由。ログと会話へ残す文言に使う。 */
 export type AdvisorCloseReason =
@@ -108,6 +148,13 @@ export interface AdvisorSessionOptions {
    * **閉じる責任はこのクラスが持つ。** 渡さない呼び出し（テスト・古い経路）では何もしない。
    */
   bundle?: ReviewBundle | undefined;
+  /**
+   * 相談の途中で材料を最新へ更新する手段（Issue #975）。
+   *
+   * 渡さない呼び出しでは更新できない（{@link AdvisorSession.canUpdateMaterial} が `false`）。
+   * 資料に作業ツリーの変更を選ばなかった相談には、更新すべき材料が無い。
+   */
+  writeMaterial?: AdvisorMaterialWriter | undefined;
   /** 無操作で閉じるまでの時間。既定は {@link DEFAULT_ADVISOR_IDLE_TIMEOUT_MS}。 */
   idleTimeoutMs?: number | undefined;
   log?: Logger | undefined;
@@ -142,6 +189,39 @@ export class AdvisorSession {
    * のはAになる。承認のときに世代まで一致させることで、この取り違えを塞ぐ。
    */
   private draftRevision = 0;
+  /**
+   * Advisorが**正本として受け取った**材料の世代（Issue #975）。開始時点が1。
+   *
+   * 進めるのは、更新の合図（{@link materialUpdateAckToken}）が返ったときだけである。
+   * 書き出せただけで進めると、Advisorが古い材料のまま話しているのに「最新」と数えることに
+   * なり、書き戻しのときの古さの警告が出なくなる。
+   */
+  private materialRevision = FIRST_REVIEW_BUNDLE_REVISION;
+  /**
+   * **書き出した**材料の世代（Issue #975）。{@link materialRevision} とは別に持つ。
+   *
+   * 番号は一度使ったら再利用しない。通知が失敗した世代へ新しい内容を上書きすると、Advisorが
+   * 既に読んだかもしれないパスの中身が入れ替わる——1世代目を上書きしない理由と同じ問題が、
+   * 2世代目以降で再発する。失敗した世代のディレクトリはそのまま置き、次は次の番号へ書く。
+   */
+  private writtenRevision = FIRST_REVIEW_BUNDLE_REVISION;
+  /** 正本の材料の置き場（bundleのルートからの相対）。1世代目は `undefined`。 */
+  private materialPath: string | undefined;
+  /**
+   * 材料の更新が走っているか（Issue #975）。
+   *
+   * `turn` とは別に持つ。更新は「材料の書き出し」と「Advisorへの通知」の2段で、前半には
+   * ターンが無い。前半を無防備にすると、書き出している最中に別の質問が始まり、閉じられ、
+   * bundleが消された後に `mkdir` が消えたディレクトリを作り直す（回収対象外の残骸になる）。
+   */
+  private updating = false;
+  /**
+   * 閉じたときに、材料の後始末を更新の完了まで遅らせたか（Issue #975）。
+   *
+   * `close()` が更新中に来たら、その場では消さずにここへ印を付ける。先に消しても、走って
+   * いる書き出しがディレクトリを作り直してしまう。
+   */
+  private bundleDisposalPending = false;
 
   constructor(options: AdvisorSessionOptions) {
     this.options = options;
@@ -162,9 +242,9 @@ export class AdvisorSession {
     return this.state;
   }
 
-  /** 走っているターンがあるか。UIの押下可否の判定に使う。 */
+  /** 走っているターンがあるか。UIの押下可否の判定に使う。材料の更新中も含む。 */
   isBusy(): boolean {
-    return this.turn !== undefined;
+    return this.turn !== undefined || this.updating;
   }
 
   /**
@@ -195,6 +275,154 @@ export class AdvisorSession {
    */
   async draftHandoff(prompt: string, signal?: AbortSignal): Promise<AdvisorTurnResult> {
     return this.runTurn(prompt, signal);
+  }
+
+  /** 現在の材料の世代（Issue #975）。下書きに記録し、書き戻しのときに古さを見る。 */
+  currentMaterialRevision(): number {
+    return this.materialRevision;
+  }
+
+  /** 材料を更新できる相談か（Issue #975）。UIのボタンを出すかどうかの判定に使う。 */
+  canUpdateMaterial(): boolean {
+    return this.options.writeMaterial !== undefined && this.options.bundle !== undefined;
+  }
+
+  /**
+   * 材料を現在の作業ツリーの状態へ更新する（Issue #975）。
+   *
+   * **利用者が明示的に押したときにだけ呼ぶ。** 自動で更新すると、利用者の知らないうちに
+   * Advisorの前提が変わり、同じ問いに同じ答えが返らなくなる。
+   *
+   * 手順は「新しい世代を書き出す → Advisorへ伝える」の順である。書き出しに失敗した時点で
+   * 止め、Advisorには何も送らない。逆順にすると、存在しない材料を正本だと伝えることになる。
+   *
+   * 世代を進めるのは、通知のターンが成立したときだけである（{@link materialRevision}）。
+   *
+   * 送信文をここで組むのは、`ask` / `draftHandoff` が呼び出し側から受け取るのと非対称だが、
+   * 更新では**書き出した場所**が本文の中身になる。呼び出し側で組ませるには、書き出しと
+   * 送信を別のAPIへ割ることになり、その間に片方だけ済んだ状態が挟まる。
+   */
+  async updateMaterial(signal?: AbortSignal): Promise<AdvisorMaterialUpdateResult> {
+    const write = this.options.writeMaterial;
+    const bundle = this.options.bundle;
+    if (write === undefined || bundle === undefined) {
+      return {
+        ok: false,
+        kind: 'unsupported',
+        reason:
+          'この相談では材料を更新できません（作業ツリーの変更を資料に選んだ相談でのみ使えます）',
+      };
+    }
+    if (this.isClosed()) {
+      return { ok: false, kind: 'closed', reason: 'この相談は既に終了しています' };
+    }
+    if (this.updating || this.turn !== undefined) {
+      return { ok: false, kind: 'busy', reason: 'この相談では別の問い合わせが実行中です' };
+    }
+    if (this.state === 'approved') {
+      // `runTurn` も同じ理由で弾くが、そこまで進むと材料を書き出してから断ることになる。
+      // 送信を待っている間の更新は、書き出す前に断る
+      return { ok: false, kind: 'busy', reason: '承認した指示を送信中です' };
+    }
+    if (this.writtenRevision >= MAX_REVIEW_BUNDLE_REVISIONS) {
+      return {
+        ok: false,
+        kind: 'failed',
+        reason: `1回の相談で作れる材料は${MAX_REVIEW_BUNDLE_REVISIONS}世代までです（相談をやり直すと、いまの状態から始められます）`,
+      };
+    }
+    const next = this.writtenRevision + 1;
+    // 書き出しの間は `turn` が無いので、この印で守る。閉じる側（`close`）も、これを見て
+    // 材料の後始末を後回しにする
+    this.updating = true;
+    let materialPath: string;
+    try {
+      materialPath = await write(bundle.dir, next);
+    } catch (e) {
+      this.finishUpdating();
+      return {
+        ok: false,
+        kind: 'failed',
+        reason: `材料を書き出せませんでした: ${errorMessage(e)}`,
+      };
+    }
+    // 番号は使い切りにする。通知が失敗しても、この番号へ別の内容を上書きしない
+    this.writtenRevision = next;
+    if (this.isClosed()) {
+      // 書き出している間に閉じられた。ここで止めないと、閉じた相談へ通知を送ることになる。
+      // 材料は `finishUpdating()` がbundleごと消す
+      this.finishUpdating();
+      return { ok: false, kind: 'closed', reason: 'この相談は既に終了しています' };
+    }
+    let result: AdvisorTurnResult;
+    try {
+      result = await this.runTurn(
+        buildMaterialUpdatePrompt(next, materialPath),
+        signal,
+        () => {
+          // 材料が変われば、それ以前の相談から作った下書きは前提が違う。承認できる状態の
+          // まま残さない（追加の相談（`ask`）が下書きを無効にするのと同じ理由）
+          this.state = 'consulting';
+        },
+        // この本文自体が新しい正本を伝えるものなので、正本のヘッダは付けない
+        { withMaterialHeader: false },
+      );
+    } finally {
+      this.finishUpdating();
+    }
+    if (!result.ok) {
+      return { ok: false, kind: result.kind, reason: result.reason };
+    }
+    if (result.partialReason !== undefined) {
+      // 打ち切りで途中まで返っただけの応答は、正本を切り替えた証拠にならない
+      return {
+        ok: false,
+        kind: 'failed',
+        reason: `${result.partialReason}（材料の切り替えを確認できませんでした）`,
+      };
+    }
+    if (!result.response.includes(materialUpdateAckToken(next))) {
+      // 合図が返らない＝正本を切り替えられなかった、と扱う。世代を進めると、Advisorが
+      // 古い材料で答えているのに最新だと数えることになる
+      return {
+        ok: false,
+        kind: 'failed',
+        reason: '相談相手が材料の切り替えを確認しませんでした（前の材料のまま相談を続けられます）',
+      };
+    }
+    this.materialRevision = next;
+    this.materialPath = materialPath;
+    this.options.log?.info(
+      `${ADVISOR_LOG_PREFIX} レビュー材料を更新しました（第${next}世代 / ${materialPath}）`,
+    );
+    return {
+      ok: true,
+      revision: next,
+      response: result.response,
+    };
+  }
+
+  /**
+   * 材料の更新の後始末（Issue #975）。
+   *
+   * 更新中に `close()` が来ていたら、遅らせておいた材料の削除をここで行う。閉じる側で先に
+   * 消すと、走っている書き出しが `mkdir` でディレクトリを作り直し、回収されない残骸になる。
+   */
+  private finishUpdating(): void {
+    this.updating = false;
+    if (this.bundleDisposalPending) {
+      this.bundleDisposalPending = false;
+      this.disposeBundle();
+    }
+  }
+
+  /** 材料の一時ディレクトリを消す。`close()` と {@link finishUpdating} の共通処理。 */
+  private disposeBundle(): void {
+    void this.options.bundle?.dispose().catch((e: unknown) => {
+      this.options.log?.warn(
+        `${ADVISOR_LOG_PREFIX} レビュー材料を消せませんでした: ${errorMessage(e)}`,
+      );
+    });
   }
 
   /**
@@ -289,12 +517,14 @@ export class AdvisorSession {
         );
       }
       // 材料の一時ディレクトリも一緒に消す（Issue #926 E）。相談が続く限り残すが、
-      // 閉じた後まで置いておく理由は無い。`close()` は同期なので待たずに投げる
-      void this.options.bundle?.dispose().catch((e: unknown) => {
-        this.options.log?.warn(
-          `${ADVISOR_LOG_PREFIX} レビュー材料を消せませんでした: ${errorMessage(e)}`,
-        );
-      });
+      // 閉じた後まで置いておく理由は無い。`close()` は同期なので待たずに投げる。
+      // ただし材料の更新が走っている間は消さない（Issue #975）。ここで消しても、走って
+      // いる書き出しが `mkdir` でディレクトリを作り直し、誰にも消されない残骸になる
+      if (this.updating) {
+        this.bundleDisposalPending = true;
+      } else {
+        this.disposeBundle();
+      }
       this.options.log?.info(
         `${ADVISOR_LOG_PREFIX} Advisorセッションを閉じました（${CLOSE_REASON_LABELS[reason]}）`,
       );
@@ -318,6 +548,7 @@ export class AdvisorSession {
     prompt: string,
     signal: AbortSignal | undefined,
     onStart?: () => void,
+    options?: { withMaterialHeader?: boolean },
   ): Promise<AdvisorTurnResult> {
     if (this.isClosed()) {
       return { ok: false, kind: 'closed', reason: 'この相談は既に終了しています' };
@@ -342,14 +573,18 @@ export class AdvisorSession {
       controller.abort();
     }
     try {
-      const response = await awaitSingleTurn(this.session, prompt, {
-        timeoutMs: this.options.timeoutMs,
-        log: this.options.log,
-        label: ADVISOR_LABEL,
-        logPrefix: ADVISOR_LOG_PREFIX,
-        partialOnTimeout: true,
-        signal: controller.signal,
-      });
+      const response = await awaitSingleTurn(
+        this.session,
+        this.withMaterialHeader(prompt, options),
+        {
+          timeoutMs: this.options.timeoutMs,
+          log: this.options.log,
+          label: ADVISOR_LABEL,
+          logPrefix: ADVISOR_LOG_PREFIX,
+          partialOnTimeout: true,
+          signal: controller.signal,
+        },
+      );
       if (response.trim() === '') {
         return { ok: false, kind: 'failed', reason: 'セカンドオピニオンの応答が空でした' };
       }
@@ -373,6 +608,21 @@ export class AdvisorSession {
         this.armIdleTimer();
       }
     }
+  }
+
+  /**
+   * 送信文の先頭へ、正本の材料の所在を足す（Issue #975）。
+   *
+   * 更新の通知は会話が伸びるほど履歴の奥へ流れる。一方でbundleの直下には1世代目の
+   * `changes.diff` が残り続けるため、Advisorが材料を探し直すと古い方に当たる。毎ターンの
+   * 先頭で正本を名指ししておく。1世代目のままなら何も足さない。
+   */
+  private withMaterialHeader(prompt: string, options?: { withMaterialHeader?: boolean }): string {
+    if (options?.withMaterialHeader === false || this.materialPath === undefined) {
+      return prompt;
+    }
+    const header = buildMaterialContextHeader(this.materialRevision, this.materialPath);
+    return header === undefined ? prompt : `${header}\n\n${prompt}`;
   }
 
   /**
