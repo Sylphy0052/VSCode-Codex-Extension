@@ -495,7 +495,16 @@ export async function startSecondOpinion(
       void vscode.window.showErrorMessage(
         'セカンドオピニオン: レビュー材料を書き出せなかったため実行しません',
       );
-      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      // 止めたわけではないので「停止しました」とは出さない。押した人に理由が届く形で残す
+      port.note(
+        id,
+        failedSecondOpinionDisplay(
+          candidate,
+          artifactKind,
+          request,
+          'レビュー材料を書き出せませんでした',
+        ),
+      );
       return;
     }
     // 親のターンが走っている間は、依頼の内容を固めたところで一旦止まる（Issue #949）。
@@ -774,10 +783,7 @@ async function startAskGptSecondOpinion(
       log.warn(
         `[secondOpinion] レビュー用の作業ディレクトリを作れませんでした: ${errorMessage(e)}`,
       );
-      port.note(
-        id,
-        cancelledAskGptDisplay(candidate, request, '作業ディレクトリを作れませんでした'),
-      );
+      port.note(id, failedAskGptDisplay(candidate, request, '作業ディレクトリを作れませんでした'));
       return;
     }
     // 親のターンが走っている間は、質問文の組み立てを始めずに待つ（Issue #949）。既定モードは
