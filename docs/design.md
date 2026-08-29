@@ -8544,6 +8544,7 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 #### 確かめ方
 
 - `test/unit/composerButtons.test.ts`: 正準の並びが19個になり、`secondOpinionDirect` / `secondOpinionAskGpt` が既定では「…」メニューへ畳まれること、未知ID・重複IDの既定へのフォールバックが従来どおり働くこと
+- `test/integration/chatCodexSecondOpinionMode.test.ts`: webviewから届いた `secondOpinionDirect` / `secondOpinionAskGpt` が、設定 `agent.secondOpinion.mode` と逆のモードで走ること。判定はモードごとに逆になる2点（追加資料のQuickPickが出たか、`thread/fork` を呼んだか）で行う。単体テストはボタンの描画と `startSecondOpinion()` の分岐を別々に見ているだけで、その間の配線——どのメッセージにどちらのモードを添えるか——はどちらも踏まないため、`'direct'` と `'askGpt'` を取り違えても単体テストは全部通る
 - `docs/manual-test.md`: 3つの入口それぞれが設定と無関係に意図したモードで走ること、実行中に3つとも押せなくなること、Codex側・Claude Code側の両方で成り立つこと
 
 ### 16.44 チームモード（Issue #693）

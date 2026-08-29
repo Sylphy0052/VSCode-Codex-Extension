@@ -3550,7 +3550,7 @@ Claude Code CLI 2.1.235 での実測。design.md §14.61 / §14.62）。CLIが�
 - 操作: `agent.chat.composerButtons` へ `secondOpinionDirect` と `secondOpinionAskGpt` を足す
 - 期待: 2つが表のアイコン列へ出る。3つのアイコンが見分けられる
 
-モードの固定:
+モードの固定（Codex側は`test/integration/chatCodexSecondOpinionMode.test.ts`のS-04・S-05が自動で押さえている。手で見るのはClaude Code側と、確認用Markdownの中身）:
 
 - 操作: `agent.secondOpinion.mode` を `direct`（既定）にして「質問文を組み立てて聞く」を押す
 - 期待: 追加資料のQuickPickが出ない。作業中のAIがタブを開かずに質問文を組み立て、`agent.secondOpinion.askGpt.confirm` が `true` なら確認用のMarkdownが開く
