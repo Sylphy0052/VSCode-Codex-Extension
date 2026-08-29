@@ -52,8 +52,18 @@ export const REVIEW_BUNDLE_BASE_DIR = 'base';
  */
 export const REVIEW_BUNDLE_UPDATES_DIR = 'updates';
 
-/** 1世代目の世代番号。更新のたびに1つ増える。 */
+/** 1世代目の世代番号。書き出しのたびに1つ増える。 */
 export const FIRST_REVIEW_BUNDLE_REVISION = 1;
+
+/**
+ * 1つのbundleへ書き出せる世代の上限（Issue #975）。
+ *
+ * 1世代あたり `changes.diff` と `base/` で最大8MiB強を使う。相談は無操作30分で閉じるが、
+ * 押し続ければ世代は増え続けるため、一時領域を使い切る前に断る。上限に達したら古い世代を
+ * 黙って消すのではなく更新を断る——消すと、Advisorが既に読んだ材料が会話の途中で
+ * 消えることになる。
+ */
+export const MAX_REVIEW_BUNDLE_REVISIONS = 10;
 
 /**
  * `base/` へ書き出す1ファイルの上限。
@@ -172,6 +182,11 @@ export async function appendReviewBundleRevision(
   revision: number,
   source: ReviewMaterialSource,
 ): Promise<string> {
+  if (!Number.isSafeInteger(revision) || revision <= FIRST_REVIEW_BUNDLE_REVISION) {
+    // 呼び出し側が採番するが、`updates/<revision>` はそのままパスになる。整数以外や
+    // 1世代目以下を受け取ったまま組み立てない
+    throw new Error(`世代の番号が不正です（revision=${revision}）`);
+  }
   const relative = reviewBundleRevisionPath(revision);
   const dir = path.join(bundleDir, REVIEW_BUNDLE_UPDATES_DIR, String(revision));
   if (!isInsideRoot(dir, bundleDir)) {
@@ -179,12 +194,15 @@ export async function appendReviewBundleRevision(
     // 指したまま書き込む経路を残さない
     throw new Error(`世代の書き出し先がレビュー材料の外を指しています（revision=${revision}）`);
   }
-  await fs.rm(dir, { recursive: true, force: true });
-  await fs.mkdir(dir, { recursive: true });
   try {
+    // 世代番号は再利用しないので、通常ここに既存のディレクトリは無い。それでも消してから
+    // 作るのは、異常終了で番号だけ進まなかった場合に古い断片が残るのを防ぐため
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(dir, { recursive: true });
     await writeMaterialInto(dir, source);
     return relative;
   } catch (e) {
+    // `mkdir` が途中まで作ってから失敗した場合も含めて消す（try の外に置くと拾えない）
     await fs.rm(dir, { recursive: true, force: true });
     throw e;
   }

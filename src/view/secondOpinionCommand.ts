@@ -708,8 +708,12 @@ function materialWriterFor(
   if (captured.artifact.kind !== 'workspaceChanges' || captured.material === undefined) {
     return undefined;
   }
+  // 相談を始めた時点のコミットを固定する（Issue #975）。更新のたびにHEADを取り直すと、
+  // 利用者が修正をコミットした時点で `git diff <新HEAD>` が空になり、いちばん見てほしい
+  // 修正が材料から丸ごと消える
+  const baseCommit = captured.artifact.snapshot.baseCommit;
   return async (bundleDir, revision) => {
-    const next = await captureWorkspaceSnapshot(cwd, git);
+    const next = await captureWorkspaceSnapshot(cwd, git, { baseCommit });
     if (!next.ok) {
       throw new Error(next.reason);
     }
@@ -719,6 +723,8 @@ function materialWriterFor(
     return appendReviewBundleRevision(bundleDir, revision, {
       cwd,
       git,
+      // 固定したコミットから読む。`base/` の内容は全世代で同じになるが、Advisorが
+      // その世代のディレクトリだけで完結して読めることを優先する
       baseCommit: next.snapshot.baseCommit,
       fullDiff: next.material.fullDiff,
       changedPaths: next.material.changedPaths,

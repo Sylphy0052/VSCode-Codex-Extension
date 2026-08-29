@@ -13,7 +13,10 @@ import {
   AdvisorSession,
   AdvisorSessionStore,
   DEFAULT_ADVISOR_IDLE_TIMEOUT_MS,
+  type AdvisorMaterialWriter,
 } from '../../src/secondOpinion/advisorSession';
+import { materialUpdateAckToken } from '../../src/secondOpinion/prompt';
+import type { ReviewBundle } from '../../src/secondOpinion/reviewBundle';
 import type { SecondOpinionCandidate } from '../../src/secondOpinion/candidates';
 
 const CANDIDATE: SecondOpinionCandidate = {
@@ -313,5 +316,149 @@ describe('AdvisorSessionStore（Issue #929）', () => {
     expect(second.disposeCalls).toBe(1);
     expect(store.get('parent-1')).toBeUndefined();
     expect(store.get('parent-2')).toBeUndefined();
+  });
+});
+
+/**
+ * 材料を書き出したことにするフェイク。実際のファイルは触らない。
+ *
+ * `hold` の間は書き出しを終わらせず、書き出し中に別の操作が来る経路を試せるようにする。
+ */
+class FakeMaterialWriter {
+  revisions: number[] = [];
+  hold = false;
+  failWith: string | undefined;
+  private release: (() => void) | undefined;
+
+  readonly write: AdvisorMaterialWriter = async (_bundleDir, revision) => {
+    this.revisions.push(revision);
+    if (this.hold) {
+      await new Promise<void>((resolve) => {
+        this.release = resolve;
+      });
+    }
+    if (this.failWith !== undefined) {
+      throw new Error(this.failWith);
+    }
+    return `updates/${revision}`;
+  };
+
+  /** `hold` で止めていた書き出しを終わらせる。 */
+  finish(): void {
+    this.release?.();
+    this.release = undefined;
+  }
+}
+
+function createFakeBundle(): ReviewBundle & { disposeCalls: number } {
+  const bundle = {
+    dir: '/fake/review-bundle-x',
+    disposeCalls: 0,
+    async dispose(): Promise<void> {
+      bundle.disposeCalls += 1;
+    },
+  };
+  return bundle;
+}
+
+function createAdvisorWithMaterial(
+  session: FakeSession,
+  writer: FakeMaterialWriter,
+  bundle: ReviewBundle,
+): AdvisorSession {
+  return new AdvisorSession({
+    session,
+    parentSessionId: 'parent-1',
+    candidate: CANDIDATE,
+    timeoutMs: 60_000,
+    bundle,
+    writeMaterial: writer.write,
+  });
+}
+
+describe('AdvisorSession の材料の更新（Issue #975）', () => {
+  it('更新の合図が返れば世代が進み、以後のターンの先頭へ正本が付く', async () => {
+    const session = new FakeSession();
+    session.response = materialUpdateAckToken(2);
+    const writer = new FakeMaterialWriter();
+    const bundle = createFakeBundle();
+    const advisor = createAdvisorWithMaterial(session, writer, bundle);
+
+    const result = await advisor.updateMaterial();
+
+    expect(result).toMatchObject({ ok: true, revision: 2 });
+    expect(advisor.currentMaterialRevision()).toBe(2);
+    expect(writer.revisions).toEqual([2]);
+    // 更新の通知そのものには正本のヘッダを付けない（その本文が正本を伝えている）
+    expect(session.prompts[0]?.startsWith('現在の正本は')).toBe(false);
+    expect(session.prompts[0]).toContain('updates/2');
+
+    session.response = '回答';
+    await advisor.ask('直したので見てほしい');
+    // 更新の通知は会話が伸びると履歴の奥へ流れるため、以後は毎ターンの先頭で正本を名指しする
+    expect(session.prompts[1]).toContain('現在の正本は第2世代');
+    advisor.close('userEnded');
+  });
+
+  it('合図が返らなければ世代を進めず、同じ番号へ書き直さない', async () => {
+    const session = new FakeSession();
+    session.response = '了解しました';
+    const writer = new FakeMaterialWriter();
+    const advisor = createAdvisorWithMaterial(session, writer, createFakeBundle());
+
+    const first = await advisor.updateMaterial();
+    expect(first).toMatchObject({ ok: false, kind: 'failed' });
+    expect(advisor.currentMaterialRevision()).toBe(1);
+
+    // 番号は使い切り。Advisorが既に読んだかもしれないパスへ別の内容を上書きしない
+    session.response = materialUpdateAckToken(3);
+    const second = await advisor.updateMaterial();
+    expect(second).toMatchObject({ ok: true, revision: 3 });
+    expect(writer.revisions).toEqual([2, 3]);
+    advisor.close('userEnded');
+  });
+
+  it('書き出している間に閉じられたら通知せず、材料は書き出しの完了後に消す', async () => {
+    const session = new FakeSession();
+    session.response = materialUpdateAckToken(2);
+    const writer = new FakeMaterialWriter();
+    writer.hold = true;
+    const bundle = createFakeBundle();
+    const advisor = createAdvisorWithMaterial(session, writer, bundle);
+
+    const pending = advisor.updateMaterial();
+    advisor.close('userEnded');
+    // 書き出しの最中に消すと、走っている書き出しがディレクトリを作り直してしまう
+    expect(bundle.disposeCalls).toBe(0);
+
+    writer.finish();
+    await expect(pending).resolves.toMatchObject({ ok: false, kind: 'closed' });
+    // 閉じた相談へ通知は送らない
+    expect(session.prompts).toEqual([]);
+    expect(bundle.disposeCalls).toBe(1);
+  });
+
+  it('材料を書き出せない相談では unsupported を返す', async () => {
+    const session = new FakeSession();
+    const advisor = createAdvisor(session);
+    expect(advisor.canUpdateMaterial()).toBe(false);
+    const result = await advisor.updateMaterial();
+    expect(result).toMatchObject({ ok: false, kind: 'unsupported' });
+    expect(session.prompts).toEqual([]);
+    advisor.close('userEnded');
+  });
+
+  it('書き出しに失敗したら通知を送らず、世代も進めない', async () => {
+    const session = new FakeSession();
+    const writer = new FakeMaterialWriter();
+    writer.failWith = 'ディスクがいっぱいです';
+    const advisor = createAdvisorWithMaterial(session, writer, createFakeBundle());
+
+    const result = await advisor.updateMaterial();
+
+    expect(result).toMatchObject({ ok: false, kind: 'failed' });
+    expect(session.prompts).toEqual([]);
+    expect(advisor.currentMaterialRevision()).toBe(1);
+    advisor.close('userEnded');
   });
 });
