@@ -196,6 +196,12 @@ describe('createNodeUntrackedFileReader（Issue #926 F）', () => {
   });
 });
 
+/** hunkが2件ある差分。1件だけ入る予算を渡して境界での切り詰めを見る。 */
+const BIG_DIFF =
+  'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n' +
+  '@@ -1,1 +1,1 @@\n+aaaaaaaaaa\n' +
+  '@@ -2,1 +2,1 @@\n+bbbbbbbbbb\n';
+
 describe('captureWorkspaceSnapshot と未追跡ファイル（Issue #926 F）', () => {
   const base = {
     'rev-parse --is-inside-work-tree': okResult('true\n'),
@@ -205,12 +211,12 @@ describe('captureWorkspaceSnapshot と未追跡ファイル（Issue #926 F）', 
   it('未追跡ファイルを差分とは別に取り、先に予算を確保する', async () => {
     const git = fakeGit({
       ...base,
-      'diff --no-ext-diff --no-textconv abc1234 --': okResult('x'.repeat(50)),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult(BIG_DIFF),
       'diff --name-only -z --no-ext-diff --no-textconv abc1234 --': okResult('a.ts\0'),
       'ls-files --others --exclude-standard -z': okResult('new.ts\0'),
     });
     const result = await captureWorkspaceSnapshot('/repo', git, {
-      maxDiffChars: 20,
+      maxDiffBytes: 99,
       maxUntrackedBytes: 10,
       untrackedReader: fakeReader({ [path.resolve('/repo', 'new.ts')]: 'newnewnew' }),
     });
@@ -221,11 +227,13 @@ describe('captureWorkspaceSnapshot と未追跡ファイル（Issue #926 F）', 
     expect(result.snapshot.untrackedFiles).toEqual([
       { path: 'new.ts', content: 'newnewnew', bytes: 9 },
     ]);
-    // 未追跡の9byteを引いた残りが差分の予算になる
-    expect(result.snapshot.diff).toHaveLength(11);
+    // 未追跡の9byteを引いた残り（90byte）が差分の予算になり、hunkが1件落ちる
     expect(result.snapshot.truncated).toBe(true);
+    expect(result.snapshot.diffPartials).toEqual([
+      { path: 'a.ts', omittedHunks: 1, totalHunks: 2 },
+    ]);
     expect(result.material.changedPaths).toEqual(['a.ts']);
-    expect(result.material.fullDiff).toHaveLength(50);
+    expect(result.material.fullDiff).toBe(BIG_DIFF);
   });
 
   it('差分が空でも未追跡ファイルがあれば実行する', async () => {

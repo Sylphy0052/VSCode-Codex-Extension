@@ -13,6 +13,12 @@
  * 「親セッションの会話が混ざらない」（受入基準4）を検証する。
  */
 
+import {
+  MAX_DIFF_OMISSION_ENTRIES,
+  type DiffOmission,
+  type DiffOmissionReason,
+  type DiffPartialFile,
+} from './diffBudget';
 import type { UntrackedFile, UntrackedOmission, UntrackedOmissionReason } from './untracked';
 
 /** 起動時点で固定した、作業ツリーの変更。 */
@@ -21,8 +27,16 @@ export interface WorkspaceSnapshot {
   baseCommit: string;
   /** `git diff <baseCommit>` の結果。 */
   diff: string;
-  /** 上限を超えて末尾を落としたか。 */
+  /** 上限を超えて何かを落としたか。 */
   truncated: boolean;
+  /**
+   * 差分から丸ごと落としたファイル（Issue #926 H）。
+   *
+   * 落とした事実だけを `truncated` で伝えても、どのファイルを見ていないのかは伝わらない。
+   */
+  diffOmissions: DiffOmission[];
+  /** ファイルは残したが一部のhunkを落としたもの（Issue #926 H）。 */
+  diffPartials: DiffPartialFile[];
   /**
    * まだgitに登録されていない新規ファイル（Issue #926 F）。
    *
@@ -241,16 +255,69 @@ function untrackedSection(
   return parts.join('\n');
 }
 
+/** 差分から内容を落とした理由の、プロンプトへ出す文言（Issue #926 H）。 */
+const DIFF_OMISSION_LABELS: Record<DiffOmissionReason, string> = {
+  binary: 'バイナリ',
+  generated: '自動生成とみなしたファイル',
+};
+
+/**
+ * 差分から落としたものの一覧（Issue #926 H）。
+ *
+ * 「大きいので末尾を省略した」だけでは、どのファイルを見ていないのかが伝わらない。
+ * パス・サイズ・理由を出し、hunk単位で落としたファイルは残数を出す。
+ *
+ * 件数が多いときは {@link MAX_DIFF_OMISSION_ENTRIES} 件で打ち切り、残りは件数だけを
+ * 伝える。省略の一覧そのもので予算を食い潰しては本末転倒である。
+ */
+function diffOmissionSection(
+  omissions: readonly DiffOmission[],
+  partials: readonly DiffPartialFile[],
+): string | undefined {
+  if (omissions.length === 0 && partials.length === 0) {
+    return undefined;
+  }
+  const lines: string[] = [
+    '',
+    '### 上の差分に含めなかったもの',
+    '',
+    'これらは変更されていますが、内容を渡していません。**変更が無いとは読まないでください。**',
+    '判断に必要なら「この部分は確認できていない」と明記してください。',
+    '',
+  ];
+  const shown = omissions.slice(0, MAX_DIFF_OMISSION_ENTRIES);
+  for (const omission of shown) {
+    lines.push(
+      `- \`${omission.path}\`（${formatBytes(omission.bytes)}）— ${DIFF_OMISSION_LABELS[omission.reason]}`,
+    );
+  }
+  if (omissions.length > shown.length) {
+    lines.push(`- ほか${omissions.length - shown.length}件`);
+  }
+  const shownPartials = partials.slice(0, MAX_DIFF_OMISSION_ENTRIES);
+  for (const partial of shownPartials) {
+    lines.push(
+      `- \`${partial.path}\` — ${partial.totalHunks}件中${partial.omittedHunks}件のhunkを省略`,
+    );
+  }
+  if (partials.length > shownPartials.length) {
+    lines.push(`- ほか${partials.length - shownPartials.length}件（hunkの一部を省略）`);
+  }
+  return lines.join('\n');
+}
+
 function artifactSection(artifact: SecondOpinionArtifact): string | undefined {
   switch (artifact.kind) {
     case 'workspaceChanges': {
       const { baseCommit, diff, truncated, untrackedFiles, untrackedOmissions } = artifact.snapshot;
       const notice = truncated
-        ? '\n\n注意: 差分が大きいため末尾を省略しています。省略部分については判断を保留し、その旨を明記してください。'
+        ? '\n\n注意: 差分が大きいため一部を省略しています。省略した部分については判断を保留し、その旨を明記してください。'
         : '';
+      const omitted =
+        diffOmissionSection(artifact.snapshot.diffOmissions, artifact.snapshot.diffPartials) ?? '';
       const diffSection =
         `## 追加資料: 作業ツリーの変更（起動時点のスナップショット）\n\nbaseCommit: ${baseCommit}\n\n` +
-        `${fence(diff, 'diff')}${notice}`;
+        `${fence(diff, 'diff')}${notice}${omitted}`;
       const untracked = untrackedSection(untrackedFiles, untrackedOmissions);
       return untracked === undefined ? diffSection : `${diffSection}\n\n${untracked}`;
     }

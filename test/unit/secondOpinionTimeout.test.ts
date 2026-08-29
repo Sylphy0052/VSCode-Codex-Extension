@@ -111,6 +111,8 @@ const SNAPSHOT_CONTEXT = {
     truncated: false,
     untrackedFiles: [],
     untrackedOmissions: [],
+    diffOmissions: [],
+    diffPartials: [],
   },
 };
 
