@@ -39,6 +39,7 @@ import {
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
   readChatLoopEngineeringConfig,
+  readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
   readConfig,
   readWorkflowsConfig,
@@ -47,6 +48,7 @@ import {
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import { advisorDisplay, createLoopAdvisorConfig } from './loopAdvisorFactory';
+import { planGoalDraft } from './goalDraftFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -1231,6 +1233,27 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         entry.loop.start(plan, entry.session.getState().items);
         return;
       }
+      if (type === 'loop/planGoal') {
+        // 一文からゴールの下書きを組み立てる準備ターン（issue #958）。**ここではループを
+        // 始めず**、下書きを画面へ返すだけにする。確認を省く設定のときだけ`start`を立てる
+        const settings = readGoalDraftConfig();
+        const text = typeof m['text'] === 'string' ? m['text'].trim() : '';
+        if (!settings.enabled || text === '') {
+          void entry.panel?.webview.postMessage({
+            type: 'loop/goalDraft',
+            ok: false,
+            message: '目的と受入基準を入力してください',
+          });
+          return;
+        }
+        const drafted = await planGoalDraft(entry.cwd, text, 'codex', this.log);
+        void entry.panel?.webview.postMessage(
+          drafted.ok
+            ? { type: 'loop/goalDraft', ok: true, goal: drafted.goal, start: !settings.confirm }
+            : { type: 'loop/goalDraft', ok: false, message: drafted.message },
+        );
+        return;
+      }
       if (type === 'loop/stop') {
         entry.loop.stop('manual');
         return;
@@ -1315,6 +1338,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // webviewを作り直した直後は会話が空。差し分ではなく全量から送り直す（issue #262）
         entry.sentItems = undefined;
         this.refreshSettings();
+        void entry.panel?.webview.postMessage({
+          type: 'loopAutoGoal',
+          enabled: readGoalDraftConfig().enabled,
+        });
         await this.postCommands(entry);
       }
     } catch (e) {

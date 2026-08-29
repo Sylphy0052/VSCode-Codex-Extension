@@ -948,6 +948,47 @@
           "scope": "window",
           "markdownDescription": "「証拠が足りず判定できない」（`indeterminate`）が何回続いたら人へ渡すか。判定できない状態は**未達とは別物**であり、黙って回し続けない。この回数に達するとループは「撤退の申告」として止まる。"
         },
+        "agent.chat.loop.autoGoal.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "ゴール駆動ループ（issue #892）を、短い一文（「Issue #123に着手」など）だけから始められるようにする（issue #958）。目的・受入基準・継続指示のいずれも空のまま開始したとき、本編の前に1ターンだけ準備役を走らせ、目的・受入基準・制約の下書きを組み立てる。下書きは3つの欄へ流し込むだけで、**ループはまだ始まらない**。無効にすると準備ターンは走らず、従来どおり入力を求める。"
+        },
+        "agent.chat.loop.autoGoal.confirm": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "組み立てた下書きを人が確認してからループを始める（既定 `true`）。ゴールはループ全体の判定基準であり、ここが外れると最大200周ぶん外れる。`false` にすると確認せずそのまま開始する。"
+        },
+        "agent.chat.loop.autoGoal.provider": {
+          "type": "string",
+          "enum": [
+            "inherit",
+            "claude",
+            "codex"
+          ],
+          "enumDescriptions": [
+            "会話しているのと同じCLIで組み立てる",
+            "常に claude で組み立てる",
+            "常に codex で組み立てる"
+          ],
+          "default": "inherit",
+          "scope": "window",
+          "markdownDescription": "準備ターンをどのプロバイダで動かすか。準備役にはツールを渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）ため、このターンでファイルが書き換わることはない。**`claude` / `codex` を明示すると、依頼文とIssue本文が会話とは別のプロバイダへ渡る。**"
+        },
+        "agent.chat.loop.autoGoal.model": {
+          "type": "string",
+          "default": "auto",
+          "scope": "window",
+          "markdownDescription": "準備ターンに使うモデル。`auto` なら軽量なモデルに任せる（claude は `haiku`、codex はCLIの既定）。"
+        },
+        "agent.chat.loop.autoGoal.timeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "scope": "window",
+          "markdownDescription": "準備ターンの応答を待つ上限（秒）。超えた場合は3つの欄を空のまま残し、ループは始めない。"
+        },
         "agent.chat.loopAdvisor.enabled": {
           "type": "boolean",
           "default": false,

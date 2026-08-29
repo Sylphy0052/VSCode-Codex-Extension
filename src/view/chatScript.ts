@@ -2354,6 +2354,17 @@ export function chatScript(
     );
     // ゴール駆動では2回目以降の指示文をEvaluatorの判定から組み立てるため、継続指示は要らない
     if (!goalDriven && !plan.continuePrompt.trim()) {
+      // 一文からゴールを組み立てる（issue #958）。走らせるのは**目的も受入基準も継続指示も
+      // 空**のとき、つまり従来なら入力を促して止まっていた場合だけなので、既存のループの
+      // 挙動は変わらない。1回目の指示が空なら材料が無いので、これまでどおり入力を促す
+      if (autoGoalEnabled && plan.initialPrompt.trim() && !goalDraftPending) {
+        goalDraftPending = true;
+        el('loopStart').disabled = true;
+        el('loopGoalNotice').hidden = false;
+        el('loopGoalNotice').textContent = 'ゴールの下書きを組み立てています…';
+        vscode.postMessage({ type: 'loop/planGoal', text: plan.initialPrompt });
+        return;
+      }
       el('loopContinue').focus();
       return;
     }
@@ -2362,6 +2373,43 @@ export function chatScript(
   });
 
   el('loopStop').addEventListener('click', () => vscode.postMessage({ type: 'loop/stop' }));
+
+  /**
+   * 一文からゴールの下書きを組み立てている最中か（issue #958）。二重に頼まないための札。
+   * 応答（loop/goalDraft）が届くか、失敗が返るまで開始ボタンを押せなくする。
+   */
+  let goalDraftPending = false;
+  /** 準備ターンを使うか。拡張機能側の設定（agent.chat.loop.autoGoal.enabled）を反映する。 */
+  let autoGoalEnabled = true;
+
+  /**
+   * 組み立てた下書きを3欄へ流し込む。**ここではループを始めない**（issue #958）。
+   *
+   * ゴールはループ全体の判定基準であり、外れたまま始めると最大200周ぶん外れる。人が読んで
+   * 直してから開始ボタンを押す。確認を省く設定のときだけ、拡張機能側が start: true を付ける。
+   */
+  function applyGoalDraft(data) {
+    goalDraftPending = false;
+    el('loopStart').disabled = false;
+    if (!data.ok) {
+      el('loopGoalNotice').hidden = false;
+      el('loopGoalNotice').textContent = data.message || 'ゴールの下書きを作れませんでした';
+      el('loopGoalPurpose').focus();
+      return;
+    }
+    el('loopGoalPurpose').value = data.goal.purpose || '';
+    el('loopGoalCriteria').value = data.goal.acceptanceCriteria || '';
+    el('loopGoalConstraints').value = data.goal.constraints || '';
+    el('loopGoalNotice').hidden = false;
+    el('loopGoalNotice').textContent = data.start
+      ? 'ゴールの下書きでループを始めます'
+      : 'ゴールの下書きを入れました。確認・修正して「開始」を押してください';
+    if (data.start) {
+      el('loopStart').click();
+      return;
+    }
+    el('loopGoalPurpose').focus();
+  }
 
   // 1回のスクロールで、最下部への移動と発言間の移動の両方を更新する。
   // 個別のリスナーに分けると、高頻度のscrollイベントごとにDOM探索が重複する。
@@ -3076,6 +3124,12 @@ export function chatScript(
     }
     if (data.type === 'loopEngineering' && typeof data.enabled === 'boolean') {
       applyLoopEngineeringEnabled(data.enabled);
+    }
+    if (data.type === 'loopAutoGoal' && typeof data.enabled === 'boolean') {
+      autoGoalEnabled = data.enabled;
+    }
+    if (data.type === 'loop/goalDraft') {
+      applyGoalDraft(data);
     }
     if (data.type === 'files') {
       // 打っている途中に古い応答が届くことがある。今の語と一致するものだけ出す

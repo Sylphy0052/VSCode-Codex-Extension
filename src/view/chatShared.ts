@@ -1380,6 +1380,8 @@ ${chatStyles()}
         <textarea id="loopGoalConstraints" placeholder="例: テストを弱めない。既存の公開APIを変えない"></textarea>
       </label>
       <p class="loopGoalNote">両方を入れて開始すると、毎ターン別のAIが会話と実行結果を読んで達成したかを判定し、未達なら次に集中することを添えて自動で続けます。継続指示と終了条件は使いません。</p>
+      <p class="loopGoalNote">3つとも空のまま「1回目の指示」だけを書いて開始すると、その一文（Issue番号があればその本文も）からゴールの下書きを組み立ててここへ入れます。下書きを確認・修正してからもう一度開始してください。</p>
+      <p id="loopGoalNotice" class="loopGoalNote" hidden></p>
     </details>
   </div>
   <details id="settingsBox"${options.showSettings ? '' : ' hidden'}>

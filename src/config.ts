@@ -60,6 +60,7 @@ import {
 import { DEFAULT_MAX_INDETERMINATE } from './loop/goalLoop';
 import { DEFAULT_ADVISOR_EVERY_N_TURNS } from './loop/loopAdvisor';
 import type { LoopAdvisorSettings } from './loop/loopAdvisorProcess';
+import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
   GoalEvaluatorProviderSetting,
   GoalEvaluatorSettings,
@@ -355,6 +356,23 @@ export function readLoopAdvisorConfig(): LoopAdvisorSettings {
     model: str(c, 'chat.loopAdvisor.model', 'auto'),
     timeoutSeconds: num(c, 'chat.loopAdvisor.timeoutSeconds', 120),
     everyNTurns: num(c, 'chat.loopAdvisor.everyNTurns', DEFAULT_ADVISOR_EVERY_N_TURNS),
+  };
+}
+
+/**
+ * 一文からゴール定義の下書きを作る準備ターンの設定を読む（issue #958）。
+ *
+ * 既定は有効。ただし走るのは**目的も受入基準も継続指示も空**のとき、つまり従来なら
+ * 「入力してください」と弾いていた場合だけなので、既存のループの挙動は変わらない。
+ */
+export function readGoalDraftConfig(): GoalDraftSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('chat.loop.autoGoal.enabled') !== false,
+    confirm: c.get<boolean>('chat.loop.autoGoal.confirm') !== false,
+    provider: normalizeEvaluatorProvider(c.get<string>('chat.loop.autoGoal.provider')),
+    model: str(c, 'chat.loop.autoGoal.model', 'auto'),
+    timeoutSeconds: num(c, 'chat.loop.autoGoal.timeoutSeconds', 120),
   };
 }
 
