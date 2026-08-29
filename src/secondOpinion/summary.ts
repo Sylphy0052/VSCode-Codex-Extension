@@ -18,7 +18,7 @@ import * as path from 'node:path';
 import type { Logger } from '../log';
 import { SANDBOX_MODES } from '../codex/types';
 import type { ApprovalMode } from '../codex/types';
-import { runSingleTurnTask } from '../orchestrator/planner';
+import { runSingleTurnTask, SingleTurnCancelledError } from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 
 /** 要約セッションの権限。セカンドオピニオン本体と同じく読み取りだけで固定する。 */
@@ -184,10 +184,27 @@ export interface ConversationSummaryRequest {
   /** `buildTranscriptMarkdown` が作った会話の記録。上限はこの関数の中で掛ける。 */
   conversation: string;
   timeoutMs?: number | undefined;
+  /**
+   * 利用者による停止（Issue #940）。要約はセカンドオピニオン本体の**前に直列で**走るため、
+   * この区間で止められることが現実にある。実行1回分のキャンセルハンドルがそのまま渡る。
+   */
+  signal?: AbortSignal | undefined;
 }
 
 export type ConversationSummaryResult =
-  { ok: true; summary: string } | { ok: false; reason: string };
+  | { ok: true; summary: string }
+  | {
+      ok: false;
+      reason: string;
+      /**
+       * 利用者が止めた結果の失敗か（Issue #940）。
+       *
+       * 呼び出し側はこれを見て**本体を開始しない**。要約の失敗は本来「付随情報が無いだけ」
+       * なので本体を続ける設計だが、利用者停止をその経路へ流すと、止めたのに本体が
+       * 走り出す。区別できなければならない。
+       */
+      cancelledByUser?: boolean | undefined;
+    };
 
 /**
  * 会話の要約を1つ作る。
@@ -210,6 +227,10 @@ export async function summarizeConversation(
     `${SUMMARY_LOG_PREFIX} start model=${request.model} effort=${request.effort} ` +
       `promptChars=${prompt.length}`,
   );
+  // 既に止められていれば、一時ディレクトリも作らずに返す（Issue #940）
+  if (request.signal?.aborted === true) {
+    return { ok: false, reason: '利用者の操作で停止しました', cancelledByUser: true };
+  }
   // 実workspaceから外して走らせる（Issue #926 E）。作れなければ要約自体を諦める
   const isolatedDir = await createIsolatedSummaryDir(log);
   if (isolatedDir === undefined) {
@@ -228,6 +249,8 @@ export async function summarizeConversation(
         openPanel: false,
         label: SUMMARY_LABEL,
         logPrefix: SUMMARY_LOG_PREFIX,
+        // 利用者が止めたら要約も打ち切る（Issue #940）
+        signal: request.signal,
       },
     );
     if (response.trim() === '') {
@@ -235,6 +258,10 @@ export async function summarizeConversation(
     }
     return { ok: true, summary: response.trim() };
   } catch (e) {
+    // 利用者停止は「要約を作れなかった」ではない。呼び出し側が本体を続けないよう印を付ける
+    if (e instanceof SingleTurnCancelledError) {
+      return { ok: false, reason: e.message, cancelledByUser: true };
+    }
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   } finally {
     // 成功・失敗・打ち切りのいずれでも消す。中身は空のままのはず（read-onlyで書けない）だが、

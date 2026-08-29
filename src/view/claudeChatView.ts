@@ -14,7 +14,7 @@ import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
-import { startSecondOpinion } from './secondOpinionCommand';
+import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
 import {
   capSideQuestionHistory,
   finishedSideQuestionDisplay,
@@ -1773,6 +1773,16 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'secondOpinionStop' && typeof m['itemId'] === 'string') {
+        // 会話の項目から止める（Issue #940）。タブを開かない設定でもここから止まる
+        stopSecondOpinion(
+          entry.secondOpinionKey,
+          this.secondOpinionRegistry,
+          m['itemId'],
+          this.log,
+        );
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {
