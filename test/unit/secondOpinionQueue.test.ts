@@ -88,6 +88,10 @@ class FakePort implements SecondOpinionPanelPort {
   lastAssistantResponse(): string {
     return '';
   }
+
+  async generateRequestText(): Promise<never> {
+    throw new Error('既定モードでは質問文の組み立ては呼ばれない');
+  }
   conversationTranscript(): string {
     return '';
   }

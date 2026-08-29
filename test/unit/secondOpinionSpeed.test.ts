@@ -93,6 +93,9 @@ function port(transcript: string): SecondOpinionPanelPort {
       notes.push(display);
     },
     setRunning: () => undefined,
+    generateRequestText: async () => {
+      throw new Error('既定モードでは質問文の組み立ては呼ばれない');
+    },
     // 親は暇（Issue #949 の待機には入らない）
     isParentIdle: () => true,
     onParentStateChanged: () => ({ dispose: () => undefined }),

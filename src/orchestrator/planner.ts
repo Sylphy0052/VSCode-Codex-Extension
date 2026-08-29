@@ -1212,155 +1212,13 @@ export async function runSingleTurnTask(
     if (openPanel) {
       session.open({ preserveFocus: true });
     }
-    return await new Promise<string>((resolve, reject) => {
-      let settled = false;
-      /**
-       * 決着を1箇所に集める（Issue #926 C）。
-       *
-       * 「最初に決着した経路」だけを採用し、そのときタイマーを必ず解除する。個別の経路が
-       * `clearTimeout` を持つ形だと、経路が増えるたびに解除を書き足すことになり、実際に
-       * `runLoop()` の同期throw経路で解除が漏れていた（残ったタイマーが後から発火し、
-       * dispose済みのセッションへ `interrupt()` を呼ぶ）。
-       *
-       * `timer` は下で宣言する`const`を閉包で掴む。ここが呼ばれるのは必ず`setTimeout`より
-       * 後（タイマー・`onFinished`・`runLoop`のcatch・外部キャンセルのいずれも非同期または
-       * 後続の行）なので、未初期化のまま参照されることは無い。**この前提を崩さないこと**——
-       * `setTimeout` より前で `settle()` を呼ぶ経路を足すと、`clearTimeout(timer)` が
-       * 未初期化の束縛に触って `ReferenceError` になる。呼ばれた時点で既に `abort` 済みの
-       * `AbortSignal` は、この関数の冒頭（セッションを開く前）で処理している（Issue #940）。
-       *
-       * 外部キャンセル用のリスナーもここで外す。決着した後に残しておくと、終了済みの実行に
-       * 対して後から `abort` が飛んできたときに無駄な処理が走る（`settled` で弾かれるので
-       * 実害は無いが、`session` への参照を保持し続ける理由も無い）。
-       */
-      const settle = (action: () => void): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-        action();
-      };
-      // 打ち切り時に部分出力を拾うため、直近の状態を持つ。`TaskSession`には状態を
-      // 取り出す口が無く、`onFinished`は打ち切り時には呼ばれないため、変化を受けて
-      // 保つしかない（`partialOnTimeout`が偽なら参照しない）
-      let latestState: ChatState | undefined;
-      if (partialOnTimeout) {
-        session.onStateChanged((state) => {
-          latestState = state;
-        });
-      }
-      /**
-       * 打ち切りまでに出ていた分を拾う（Issue #907 / #940）。
-       *
-       * タイムアウトと利用者停止で扱いを変えない。どちらも「途中で切った」であり、
-       * 出ている回答を捨てる理由はどちらにも無い。
-       */
-      const collectPartial = (): string | undefined => {
-        const partial =
-          partialOnTimeout && latestState !== undefined
-            ? lastNonEmptyAgentMessageText(latestState.items)
-            : '';
-        return partial.trim() === '' ? undefined : partial;
-      };
-      /**
-       * 相手側へ打ち切りを要求する（タイムアウト・利用者停止で共通）。
-       *
-       * 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、こちら側の
-       * 決着を妨げない）。ただしinterrupt自体が失敗した場合は相手側の処理が残り続けている
-       * 可能性があるため、内部情報（スタックトレース・絶対パス・プロンプト全文）を含まない
-       * 形でログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）。
-       *
-       * Issue #926 D の調査結果: app-serverには `turn/interrupt` があり、`ChatSession`は
-       * それを呼ぶ（`appserver/chatSession.ts`）。ただし停止の**完了**は保証できない。
-       * ターンidが割り当たる前は要求自体が送られず、`turn/interrupt` はターンを終わらせても
-       * 実行中コマンドの子プロセスはCLI側に残る（issue #246）。ここで待たない設計も含め、
-       * 「打ち切りを要求した」までが保証の範囲であることをログにも残す。
-       */
-      const requestInterrupt = (why: string): void => {
-        void session.interrupt().catch((e: unknown) => {
-          const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
-          log?.warn(`${logPrefix} ${why}後のinterrupt()に失敗しました: ${message}`);
-        });
-        log?.warn(
-          `${logPrefix} 打ち切りを要求しました（${why}。停止の完了は保証しません。相手側で処理が続いている可能性があります）`,
-        );
-      };
-      /**
-       * 外部（利用者）からの打ち切り（Issue #940）。
-       *
-       * `function` 宣言にしているのは巻き上げのため。`settle()` はリスナーの後始末で
-       * この関数を参照するが、`settle()` の定義はここより前にある。`const` にすると、
-       * 定義順に依存した未初期化参照を招きうる。
-       */
-      function onAbort(): void {
-        settle(() => {
-          requestInterrupt('利用者の停止');
-          reject(new SingleTurnCancelledError(singleTurnCancelledMessage(label), collectPartial()));
-        });
-      }
-      const timer = setTimeout(() => {
-        settle(() => {
-          requestInterrupt('タイムアウト');
-          // 打ち切りまでに出ていた分は、呼び出し側が望めば渡す（Issue #907）。ここで
-          // 捨てると、長考するモデルほど成果が丸ごと消える。本文はログへ出さない
-          reject(
-            new SingleTurnTimeoutError(
-              `${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました` +
-                '（停止を要求しましたが、相手側で処理が続いている可能性があります）',
-              collectPartial(),
-            ),
-          );
-        });
-      }, timeoutMs);
-      // タイマーを作った後に登録する（`settle()` が `clearTimeout(timer)` を呼ぶため、
-      // これより前に決着させてはならない）。`abort` 済みのsignalへ後から登録しても
-      // リスナーは発火しないので、`await host.openTaskSession(input)` の最中に止められた
-      // 場合を明示的に拾う（Issue #940）
-      signal?.addEventListener('abort', onAbort, { once: true });
-      if (signal?.aborted === true) {
-        onAbort();
-      }
-      session.onFinished((reason, state) => {
-        settle(() => {
-          if (reason === 'failed') {
-            reject(new Error(`${label}のターンが失敗しました`));
-            return;
-          }
-          // 画面上のagentMessageは残っているのにturnResultTextだけ空になる主因は
-          // issue #939（`thread/status/changed`のidleを`turn/completed`より先に受けて
-          // ターンを消費していた）で塞いだ。それでもフォールバックは残す——`interrupted`
-          // `manual`のように`turn/completed`を受け取らないまま止まる経路では、依然として
-          // 空になる。単発セッションはこのターンだけを実行するため、表示中の最後の
-          // agentMessageが安全な代わりになる。
-          resolve(
-            state.turnResultText.trim() !== ''
-              ? state.turnResultText
-              : lastNonEmptyAgentMessageText(state.items),
-          );
-        });
-      });
-      // 既に決着していればターンを始めない（Issue #940）。ここまでの間に止められている
-      // 場合があり、開始してしまうと「止めたのに1ターン走る」ことになる
-      if (settled) {
-        return;
-      }
-      try {
-        session.runLoop({
-          initialPrompt: prompt,
-          continuePrompt: '',
-          maxIterations: 1,
-          condition: '',
-        });
-      } catch (e) {
-        // `runLoop()` は同期で投げうる。ここで拾わないとPromiseはrejectされるが
-        // タイマーが残り、後から発火してdispose済みのセッションへ `interrupt()` を
-        // 呼ぶ（Issue #926 C）
-        settle(() => {
-          reject(e instanceof Error ? e : new Error(String(e)));
-        });
-      }
+    return await awaitSingleTurn(session, prompt, {
+      timeoutMs,
+      log,
+      label,
+      logPrefix,
+      partialOnTimeout,
+      signal,
     });
   } finally {
     // design.md §16.9「生成が終わったらセッションを閉じる」。1ターンごとに新しいセッション
@@ -1369,6 +1227,191 @@ export async function runSingleTurnTask(
       session.dispose();
     }
   }
+}
+
+/** {@link awaitSingleTurn} の任意指定。セッションを開く／閉じる責務は呼び出し側にある。 */
+export type AwaitSingleTurnOptions = Omit<
+  SingleTurnOptions,
+  'disposeSession' | 'onSessionOpened' | 'openPanel'
+>;
+
+/**
+ * 既に開いているセッションへ1ターンだけ送り、応答を待つ。
+ *
+ * {@link runSingleTurnTask} から待機部分だけを切り出したもの。あちらはセッションを自分で
+ * 開いて閉じるが、こちらは開いたセッションを受け取るだけで、`dispose()` も承認ハンドラの
+ * 設定も呼び出し側の責務とする。
+ *
+ * 分けたのは、askGptモード（Issue #947）の生成ターンが**forkしたセッション**の上で走る
+ * ためである。`thread/fork`（Codex）や `--fork-session`（Claude）で作ったセッションは
+ * `host.openTaskSession()` を通らないので `runSingleTurnTask` へは渡せないが、待ち方
+ * （`runLoop` を1回・`onFinished` で受ける・タイムアウトで `interrupt()` を要求する・
+ * 決着を1箇所に集める）は同じでよい。ここを二重に書くと、Issue #926 C で塞いだタイマー
+ * 漏れのような穴を、経路ごとにもう一度作ることになる。
+ */
+export function awaitSingleTurn(
+  session: TaskSession,
+  prompt: string,
+  options: AwaitSingleTurnOptions = {},
+): Promise<string> {
+  const {
+    timeoutMs = PLANNER_TURN_TIMEOUT_MS,
+    log,
+    label = DEFAULT_SINGLE_TURN_LABEL,
+    logPrefix = DEFAULT_SINGLE_TURN_LOG_PREFIX,
+    partialOnTimeout = false,
+    signal,
+  } = options;
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    /**
+     * 決着を1箇所に集める（Issue #926 C）。
+     *
+     * 「最初に決着した経路」だけを採用し、そのときタイマーを必ず解除する。個別の経路が
+     * `clearTimeout` を持つ形だと、経路が増えるたびに解除を書き足すことになり、実際に
+     * `runLoop()` の同期throw経路で解除が漏れていた（残ったタイマーが後から発火し、
+     * dispose済みのセッションへ `interrupt()` を呼ぶ）。
+     *
+     * `timer` は下で宣言する`const`を閉包で掴む。ここが呼ばれるのは必ず`setTimeout`より
+     * 後（タイマー・`onFinished`・`runLoop`のcatch・外部キャンセルのいずれも非同期または
+     * 後続の行）なので、未初期化のまま参照されることは無い。**この前提を崩さないこと**——
+     * `setTimeout` より前で `settle()` を呼ぶ経路を足すと、`clearTimeout(timer)` が
+     * 未初期化の束縛に触って `ReferenceError` になる。呼ばれた時点で既に `abort` 済みの
+     * `AbortSignal` は、この関数の冒頭（セッションを開く前）で処理している（Issue #940）。
+     *
+     * 外部キャンセル用のリスナーもここで外す。決着した後に残しておくと、終了済みの実行に
+     * 対して後から `abort` が飛んできたときに無駄な処理が走る（`settled` で弾かれるので
+     * 実害は無いが、`session` への参照を保持し続ける理由も無い）。
+     */
+    const settle = (action: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      action();
+    };
+    // 打ち切り時に部分出力を拾うため、直近の状態を持つ。`TaskSession`には状態を
+    // 取り出す口が無く、`onFinished`は打ち切り時には呼ばれないため、変化を受けて
+    // 保つしかない（`partialOnTimeout`が偽なら参照しない）
+    let latestState: ChatState | undefined;
+    if (partialOnTimeout) {
+      session.onStateChanged((state) => {
+        latestState = state;
+      });
+    }
+    /**
+     * 打ち切りまでに出ていた分を拾う（Issue #907 / #940）。
+     *
+     * タイムアウトと利用者停止で扱いを変えない。どちらも「途中で切った」であり、
+     * 出ている回答を捨てる理由はどちらにも無い。
+     */
+    const collectPartial = (): string | undefined => {
+      const partial =
+        partialOnTimeout && latestState !== undefined
+          ? lastNonEmptyAgentMessageText(latestState.items)
+          : '';
+      return partial.trim() === '' ? undefined : partial;
+    };
+    /**
+     * 相手側へ打ち切りを要求する（タイムアウト・利用者停止で共通）。
+     *
+     * 完了・失敗を待たず投げっぱなしにする（interrupt自体がハングしても、こちら側の
+     * 決着を妨げない）。ただしinterrupt自体が失敗した場合は相手側の処理が残り続けている
+     * 可能性があるため、内部情報（スタックトレース・絶対パス・プロンプト全文）を含まない
+     * 形でログには残す（#400コードレビュー指摘 low 2。完全に握り潰さない）。
+     *
+     * Issue #926 D の調査結果: app-serverには `turn/interrupt` があり、`ChatSession`は
+     * それを呼ぶ（`appserver/chatSession.ts`）。ただし停止の**完了**は保証できない。
+     * ターンidが割り当たる前は要求自体が送られず、`turn/interrupt` はターンを終わらせても
+     * 実行中コマンドの子プロセスはCLI側に残る（issue #246）。ここで待たない設計も含め、
+     * 「打ち切りを要求した」までが保証の範囲であることをログにも残す。
+     */
+    const requestInterrupt = (why: string): void => {
+      void session.interrupt().catch((e: unknown) => {
+        const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+        log?.warn(`${logPrefix} ${why}後のinterrupt()に失敗しました: ${message}`);
+      });
+      log?.warn(
+        `${logPrefix} 打ち切りを要求しました（${why}。停止の完了は保証しません。相手側で処理が続いている可能性があります）`,
+      );
+    };
+    /**
+     * 外部（利用者）からの打ち切り（Issue #940）。
+     *
+     * `function` 宣言にしているのは巻き上げのため。`settle()` はリスナーの後始末で
+     * この関数を参照するが、`settle()` の定義はここより前にある。`const` にすると、
+     * 定義順に依存した未初期化参照を招きうる。
+     */
+    function onAbort(): void {
+      settle(() => {
+        requestInterrupt('利用者の停止');
+        reject(new SingleTurnCancelledError(singleTurnCancelledMessage(label), collectPartial()));
+      });
+    }
+    const timer = setTimeout(() => {
+      settle(() => {
+        requestInterrupt('タイムアウト');
+        // 打ち切りまでに出ていた分は、呼び出し側が望めば渡す（Issue #907）。ここで
+        // 捨てると、長考するモデルほど成果が丸ごと消える。本文はログへ出さない
+        reject(
+          new SingleTurnTimeoutError(
+            `${label}のターンが${timeoutMs}ミリ秒以内に完了しなかったため打ち切りました` +
+              '（停止を要求しましたが、相手側で処理が続いている可能性があります）',
+            collectPartial(),
+          ),
+        );
+      });
+    }, timeoutMs);
+    // タイマーを作った後に登録する（`settle()` が `clearTimeout(timer)` を呼ぶため、
+    // これより前に決着させてはならない）。`abort` 済みのsignalへ後から登録しても
+    // リスナーは発火しないので、`await host.openTaskSession(input)` の最中に止められた
+    // 場合を明示的に拾う（Issue #940）
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted === true) {
+      onAbort();
+    }
+    session.onFinished((reason, state) => {
+      settle(() => {
+        if (reason === 'failed') {
+          reject(new Error(`${label}のターンが失敗しました`));
+          return;
+        }
+        // 画面上のagentMessageは残っているのにturnResultTextだけ空になる主因は
+        // issue #939（`thread/status/changed`のidleを`turn/completed`より先に受けて
+        // ターンを消費していた）で塞いだ。それでもフォールバックは残す——`interrupted`
+        // `manual`のように`turn/completed`を受け取らないまま止まる経路では、依然として
+        // 空になる。単発セッションはこのターンだけを実行するため、表示中の最後の
+        // agentMessageが安全な代わりになる。
+        resolve(
+          state.turnResultText.trim() !== ''
+            ? state.turnResultText
+            : lastNonEmptyAgentMessageText(state.items),
+        );
+      });
+    });
+    // 既に決着していればターンを始めない（Issue #940）。ここまでの間に止められている
+    // 場合があり、開始してしまうと「止めたのに1ターン走る」ことになる
+    if (settled) {
+      return;
+    }
+    try {
+      session.runLoop({
+        initialPrompt: prompt,
+        continuePrompt: '',
+        maxIterations: 1,
+        condition: '',
+      });
+    } catch (e) {
+      // `runLoop()` は同期で投げうる。ここで拾わないとPromiseはrejectされるが
+      // タイマーが残り、後から発火してdispose済みのセッションへ `interrupt()` を
+      // 呼ぶ（Issue #926 C）
+      settle(() => {
+        reject(e instanceof Error ? e : new Error(String(e)));
+      });
+    }
+  });
 }
 
 /**
