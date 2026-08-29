@@ -51,6 +51,7 @@ import {
 import { normalizeSecondOpinionMode, type SecondOpinionMode } from './secondOpinion/askGpt';
 import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
 import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
+import { DEFAULT_ADVISOR_IDLE_TIMEOUT_MS } from './secondOpinion/advisorSession';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
 import {
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
@@ -231,6 +232,19 @@ export interface SecondOpinionConfig {
   mode: SecondOpinionMode;
   /** askGptモードの設定（Issue #947）。 */
   askGpt: AskGptSettings;
+  /** 相談を続けられるAdvisorセッション（Issue #929）の設定。 */
+  advisor: AdvisorSettings;
+}
+
+/** Advisorセッション（Issue #929）の設定。 */
+export interface AdvisorSettings {
+  /**
+   * 回答の後もセッションを保持し、追加の相談とメインAIへの指示づくりを使えるようにするか。
+   * 既定は `true`。切ると Issue #894 時点の「1回聞いて表示するだけ」に戻る。
+   */
+  enabled: boolean;
+  /** 無操作でセッションを閉じるまでの時間。 */
+  idleTimeoutMs: number;
 }
 
 /** askGptモードの設定（Issue #947）。項目が増えても呼び出し側の分岐が散らないよう入れ子で持つ。 */
@@ -260,7 +274,27 @@ export function readSecondOpinionConfig(): SecondOpinionConfig {
     template: rawTemplate.trim() === '' ? DEFAULT_SECOND_OPINION_TEMPLATE : rawTemplate,
     mode: normalizeSecondOpinionMode(c.get<unknown>('secondOpinion.mode')),
     askGpt: { confirm: c.get<boolean>('secondOpinion.askGpt.confirm') ?? true },
+    advisor: {
+      enabled: c.get<boolean>('secondOpinion.advisor.enabled') ?? true,
+      idleTimeoutMs: normalizeAdvisorIdleTimeoutMs(
+        c.get<unknown>('secondOpinion.advisor.idleTimeoutMs'),
+      ),
+    },
   };
+}
+
+/**
+ * `agent.secondOpinion.advisor.idleTimeoutMs` の検証（Issue #929）。
+ *
+ * `timeoutMs` と同じ流儀で、数値でなければ既定へ戻し、極端な値を丸める。下限を1分に
+ * するのは、入力を考えている間に閉じてしまう設定を作らせないため。上限は、閉じ忘れた
+ * セッションが常駐app-server側へ残り続ける時間の上限でもある。
+ */
+function normalizeAdvisorIdleTimeoutMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_ADVISOR_IDLE_TIMEOUT_MS;
+  }
+  return Math.min(4 * 60 * 60_000, Math.max(60_000, Math.round(value)));
 }
 
 /**

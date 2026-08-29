@@ -30,6 +30,12 @@ import {
   type RequestGenerationResult,
 } from '../secondOpinion/askGpt';
 import {
+  AdvisorSession,
+  AdvisorSessionStore,
+  type AdvisorCloseReason,
+} from '../secondOpinion/advisorSession';
+import { parseHandoffDraft, type HandoffDraft } from '../secondOpinion/handoff';
+import {
   describeRedaction,
   mergeRedactionCounts,
   redactCredentials,
@@ -37,15 +43,23 @@ import {
 import {
   cancelledAskGptDisplay,
   cancelledPartialAskGptDisplay,
+  cancelledFollowUpDisplay,
+  cancelledHandoffDisplay,
   cancelledPartialSecondOpinionDisplay,
   cancelledSecondOpinionDisplay,
   failedAskGptDisplay,
+  draftedHandoffDisplay,
+  failedFollowUpDisplay,
+  failedHandoffDisplay,
   failedSecondOpinionDisplay,
   finishedAskGptDisplay,
+  finishedFollowUpDisplay,
   finishedSecondOpinionDisplay,
   partialAskGptDisplay,
   partialSecondOpinionDisplay,
   pendingAskGptDisplay,
+  pendingFollowUpDisplay,
+  pendingHandoffDisplay,
   pendingSecondOpinionDisplay,
   queuedSecondOpinionDisplay,
   type SecondOpinionDisplay,
@@ -53,6 +67,8 @@ import {
 } from '../secondOpinion/display';
 import {
   ARTIFACT_KIND_LABELS,
+  buildAdvisorFollowUpPrompt,
+  buildHandoffDraftPrompt,
   SECOND_OPINION_ARTIFACT_KINDS,
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
@@ -102,6 +118,43 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
   note(id: string, display: SecondOpinionDisplay): void;
   /** webviewのボタンの押下可否を切り替える。 */
   setRunning(running: boolean): void;
+  /**
+   * 親の会話が既に破棄されているか（Issue #929）。
+   *
+   * 相談を続けるためにAdvisorセッションを保持する経路で要る。実行中にタブを閉じられると、
+   * 保持する相手（会話）が無いのにセッションだけが残る。破棄は `note()` / `setRunning()`
+   * が no-op になるだけなので、結果からは判別できない。
+   *
+   * 省略した呼び出し側は「破棄されていない」として扱う（保持しない設定・テスト用）。
+   */
+  isParentDisposed?(): boolean;
+  /**
+   * 相談を続けられる状態になったことを画面へ伝える（Issue #929）。
+   *
+   * 会話のどの項目に「追加で相談」「メインAIへの指示を作る」を出すかを、拡張機能側から
+   * webviewへ知らせるための口。`itemId` が `undefined` のときは、どの項目にもボタンを
+   * 出さない（相談が終わった・保持しない設定）。
+   */
+  setAdvisorItem?(itemId: string | undefined): void;
+  /**
+   * 下書きが1件できたことを画面へ伝える（Issue #929 Handoff）。
+   *
+   * ここで渡すのは**承認の対象そのもの**である。承認と送信の経路が、表示に使った文字列では
+   * なくこの値を見るようにするために、画面側が保持する。`undefined` は下書きが無い状態
+   * （相談へ戻った・送った・閉じた）を表す。
+   */
+  setHandoffDraft?(draft: HandoffDraft | undefined): void;
+  /**
+   * 承認された指示を作業中のAIへ送る（Issue #929）。**この機能で唯一の送信経路。**
+   *
+   * 任意の文字列を送れる汎用の口（`sendToMain(text)` のようなもの）を置かないのは、置いた
+   * 時点で「承認を通っていない文を送る」経路がAPIとして生えるためである。ここは
+   * `approveSecondOpinionHandoff` からしか呼ばれず、その関数は `markApproved()` が
+   * 通ったときにしか呼ばない。
+   *
+   * 戻り値は送信できたか待機列へ入ったか。親がターン中なら待たせる（既存の指示と同じ扱い）。
+   */
+  sendApprovedInstruction?(text: string): Promise<'sent' | 'queued'>;
   /**
    * 親の文脈を継いだforkで質問文を生成する（Issue #947）。
    *
@@ -333,6 +386,12 @@ export async function startSecondOpinion(
    * （`ChatViewManager`）はそれを渡す。
    */
   listEfforts: (model: string) => readonly string[] = () => FALLBACK_EFFORTS,
+  /**
+   * 相談を続けるためにAdvisorセッションを保持する置き場（Issue #929）。
+   *
+   * 渡さない呼び出しは Issue #894 時点の挙動（1ターンで閉じる）になる。
+   */
+  advisorStore?: AdvisorSessionStore,
 ): Promise<void> {
   if (registry.isRunning(port.parentSessionId)) {
     void vscode.window.showInformationMessage(
@@ -433,6 +492,9 @@ export async function startSecondOpinion(
       port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
       return;
     }
+    // 相談を続ける設定なら、回答の後もセッションを残す（Issue #929）。残ったセッションは
+    // この後 `handOverAdvisorSession` が引き取り、引き取れなければそこで閉じる
+    const keepSession = config.advisor.enabled && advisorStore !== undefined;
     const result = await runSecondOpinion(
       host,
       {
@@ -445,6 +507,7 @@ export async function startSecondOpinion(
         conversationSummary: summary.text,
         conversationBackgroundKind: summary.kind,
         signal: controller.signal,
+        keepSession,
       },
       log,
     );
@@ -460,6 +523,7 @@ export async function startSecondOpinion(
     if (!result.ok && result.cancelledByUser !== true) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
+    handOverAdvisorSession(port, advisorStore, config, candidate, result, id, log);
   } finally {
     registry.end(port.parentSessionId, id);
     // `setRunning()` は契約上no-opのはずだが、投げても `registry.end()` を巻き添えに
@@ -472,6 +536,66 @@ export async function startSecondOpinion(
       );
     }
   }
+}
+
+/**
+ * 残ったセッションを `AdvisorSession` へ引き取らせる（Issue #929）。
+ *
+ * `runSecondOpinion` は `keepSession` を指定したときだけセッションを返し、返した時点で
+ * **閉じる責任はこちらへ移る**。引き取れない条件をここで一箇所に集め、そのすべてで
+ * `dispose()` する。取りこぼすと、常駐app-server側のスレッドが誰にも閉じられないまま残る。
+ *
+ * 引き取れないのは次の場合である。
+ *
+ * - 保持しない設定・置き場を渡していない呼び出し（`runSecondOpinion` が返してくること自体
+ *   は無いが、条件を二重に持たない）
+ * - 実行中にタブを閉じられた。相談を続ける相手（会話）がもう無い。破棄は `note()` が
+ *   no-opになるだけで結果からは判らないため、`isParentDisposed()` で明示的に確かめる
+ */
+function handOverAdvisorSession(
+  port: SecondOpinionPanelPort,
+  store: AdvisorSessionStore | undefined,
+  config: SecondOpinionConfig,
+  candidate: SecondOpinionCandidate,
+  result: SecondOpinionResult,
+  itemId: string,
+  log: Logger,
+): void {
+  if (!result.ok || result.session === undefined) {
+    return;
+  }
+  const session = result.session;
+  if (store === undefined || !config.advisor.enabled || port.isParentDisposed?.() === true) {
+    log.info('[secondOpinion] 相談を続けないため、Advisorセッションを閉じます');
+    try {
+      session.dispose();
+    } catch (e) {
+      log.warn(`[secondOpinion] Advisorセッションを閉じられませんでした: ${errorMessage(e)}`);
+    }
+    return;
+  }
+  const advisor = new AdvisorSession({
+    session,
+    parentSessionId: port.parentSessionId,
+    candidate,
+    timeoutMs: config.timeoutMs,
+    idleTimeoutMs: config.advisor.idleTimeoutMs,
+    log,
+    onClosed: (closed) => {
+      store.remove(closed);
+      // 閉じた相談の項目に「追加で相談」を残さない
+      port.setAdvisorItem?.(undefined);
+      // 承認の対象も一緒に捨てる。相談相手がいなくなった後の下書きは送れない
+      port.setHandoffDraft?.(undefined);
+    },
+  });
+  // 登録してからボタンを出す。逆にすると、押せる見た目なのに置き場に無い区間ができる
+  store.set(advisor);
+  port.setAdvisorItem?.(itemId);
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** 生成が成立しなかった理由の、人向けの主語。詳細はこの後ろへ繋げる。 */
@@ -703,6 +827,276 @@ export function stopSecondOpinion(
     return;
   }
   log.info(`[secondOpinion] 停止を要求しました（runId=${runId}）`);
+}
+
+/**
+ * 保持しているAdvisorへ追加の質問を送る（Issue #929 Consult）。
+ *
+ * **メインセッションへは何も送らない。** 送るのはこの相談相手のセッションだけで、結果は
+ * 会話へ新しい項目として残す（何を相談したのかを後から追えるようにする。受入基準3）。
+ *
+ * 実行中の管理は1ターン目と同じ `SecondOpinionRegistry` を通す。同じ会話から2本の
+ * 問い合わせが走らないことと、会話の項目から停止できることを、既存の仕組みのまま効かせる。
+ */
+export async function continueSecondOpinion(
+  port: SecondOpinionPanelPort,
+  registry: SecondOpinionRegistry,
+  store: AdvisorSessionStore,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      'この会話で続けられる相談はありません（もう一度セカンドオピニオンを実行してください）',
+    );
+    port.setAdvisorItem?.(undefined);
+    return;
+  }
+  if (registry.isRunning(port.parentSessionId)) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  const question = await vscode.window.showInputBox({
+    title: 'セカンドオピニオンへの追加の相談',
+    prompt:
+      '前回までのやり取りを踏まえて聞き直せます（作業中のAIには送りません。回答も自動では反映されません）',
+  });
+  if (question === undefined || question.trim() === '') {
+    return;
+  }
+  const id = `secondOpinion:${randomUUID()}`;
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  try {
+    port.setRunning(true);
+    // 追加の相談は下書きを無効にする（`AdvisorSession.ask` が `consulting` へ戻すのと対）。
+    // 古い下書きを承認できる状態のまま残すと、相談の結論と送る文がずれる
+    port.setHandoffDraft?.(undefined);
+    port.note(id, pendingFollowUpDisplay(advisor.candidate, question));
+    const result = await advisor.ask(
+      buildAdvisorFollowUpPrompt(question),
+      controller.signal,
+    );
+    if (result.ok) {
+      port.note(
+        id,
+        finishedFollowUpDisplay(advisor.candidate, question, result.response, result.partialReason),
+      );
+      return;
+    }
+    if (result.kind === 'cancelled') {
+      port.note(id, cancelledFollowUpDisplay(advisor.candidate, question));
+      return;
+    }
+    log.warn(`[secondOpinion] 追加の相談に失敗しました: ${result.reason}`);
+    port.note(id, failedFollowUpDisplay(advisor.candidate, question, result.reason));
+  } finally {
+    registry.end(port.parentSessionId, id);
+    try {
+      port.setRunning(false);
+    } catch (e) {
+      log.warn(`[secondOpinion] 実行中表示の解除に失敗しました: ${errorMessage(e)}`);
+    }
+  }
+}
+
+/**
+ * メインAIへの指示の下書きを作らせる（Issue #929 Handoff）。
+ *
+ * **ここでは何も送らない。** 作るのは下書きだけで、作業中のAIへ渡るのは利用者が読み、直し、
+ * 承認したときに限る（Human Gate）。押し直せば作り直せる——`draftHandoff` は毎回同じ相談の
+ * 続きとして走るので、直前の下書きは新しいもので置き換わる。
+ *
+ * 形式どおりに読めなかった応答は下書きとして扱わず、失敗として理由を出す（`parseHandoffDraft`）。
+ * 読めた場合にだけ `markHandoffDrafted()` で状態を進める。承認できるのは読めた下書きだけ、
+ * という不変条件をここで守る。
+ */
+export async function draftSecondOpinionHandoff(
+  port: SecondOpinionPanelPort,
+  registry: SecondOpinionRegistry,
+  store: AdvisorSessionStore,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      'この会話で続けられる相談はありません（もう一度セカンドオピニオンを実行してください）',
+    );
+    port.setAdvisorItem?.(undefined);
+    return;
+  }
+  const id = `secondOpinion:${randomUUID()}`;
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  try {
+    port.setRunning(true);
+    port.note(id, pendingHandoffDisplay(advisor.candidate));
+    const result = await advisor.draftHandoff(buildHandoffDraftPrompt(), controller.signal);
+    if (!result.ok) {
+      if (result.kind === 'cancelled') {
+        port.note(id, cancelledHandoffDisplay(advisor.candidate));
+        return;
+      }
+      log.warn(`[secondOpinion] 指示の下書きに失敗しました: ${result.reason}`);
+      port.note(id, failedHandoffDisplay(advisor.candidate, result.reason));
+      return;
+    }
+    const parsed = parseHandoffDraft(result.response);
+    if (!parsed.ok) {
+      // 読めない応答は下書きにしない。作り直せるよう、何が読めなかったのかを出す
+      log.warn(`[secondOpinion] 指示の下書きを解釈できませんでした: ${parsed.reason}`);
+      port.note(
+        id,
+        failedHandoffDisplay(
+          advisor.candidate,
+          `下書きの形式を読み取れませんでした（${parsed.reason}）。もう一度お試しください`,
+        ),
+      );
+      return;
+    }
+    const revision = advisor.markHandoffDrafted();
+    if (revision === undefined) {
+      // 待っている間に閉じられた。承認できない下書きを出さない
+      port.note(id, failedHandoffDisplay(advisor.candidate, 'この相談は既に終了しています'));
+      return;
+    }
+    const draft: HandoffDraft = { ...parsed.draft, revision };
+    port.setHandoffDraft?.(draft);
+    port.note(id, draftedHandoffDisplay(advisor.candidate, draft));
+  } finally {
+    registry.end(port.parentSessionId, id);
+    try {
+      port.setRunning(false);
+    } catch (e) {
+      log.warn(`[secondOpinion] 実行中表示の解除に失敗しました: ${errorMessage(e)}`);
+    }
+  }
+}
+
+/**
+ * 承認された指示の頭に必ず付ける断り書き（Issue #929）。
+ *
+ * 受け取る側（作業中のAI）にとって、この文は**外部の相談相手が書き、利用者が承認したもの**
+ * である。それを伏せて渡すと、AIは利用者本人が考えた指示として扱う。出所が判れば、指示の
+ * 前提が自分の把握している状況と食い違うときに、そのまま従わず確かめる余地が残る。
+ *
+ * 編集できる下書き（`mainInstruction`）とは別に、送信時にここで足す。下書きへ埋め込むと、
+ * 利用者が消せてしまい「出所を伏せた指示」を作れてしまう。
+ */
+function provenancePrefix(candidate: SecondOpinionCandidate): string {
+  return [
+    `以下は、この会話とは独立したセカンドオピニオン（${candidate.model} / ${candidate.effort}）へ相談した結果を、利用者が確認・編集して承認した指示です。`,
+    'あなた自身が把握している状況と食い違う前提があれば、そのまま従わずに指摘してください。',
+    '',
+    '---',
+    '',
+  ].join('\n');
+}
+
+/**
+ * 下書きを人が読み、直し、承認して送る（Issue #929 Human Gate）。
+ *
+ * **この機能で、作業中のAIへ何かが渡る唯一の経路。** 手順は必ず「開く → 人が読む →
+ * 明示的に押す → 送る」の順で、途中を飛ばせないようにしてある。
+ *
+ * 編集を無題のMarkdownドキュメントで行わせるのは、承認の前に**全文を、送られる形のまま**
+ * 見せるためである。入力欄（InputBox）は1行しか見えず、長い指示文は読まれないまま承認される。
+ * 開くのは指示文だけで、要約は含めない（要約は利用者向けの文であり、送る対象ではない）。
+ *
+ * 確認の通知を非モーダルにするのは、押す前に本文を直せるようにするため。モーダルにすると
+ * 編集がブロックされ、「読んで直してから承認する」ができなくなる。
+ *
+ * 送った後は相談を閉じる。指示を渡した時点でこの相談は役目を終えており、開いたままにすると
+ * 「送った後に続けた相談」が、送った指示とずれたまま次の承認の材料になる。
+ */
+export async function approveSecondOpinionHandoff(
+  port: SecondOpinionPanelPort,
+  store: AdvisorSessionStore,
+  draft: HandoffDraft | undefined,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (draft === undefined || advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      '送れる指示の下書きがありません（「メインAIへの指示を作る」から作成してください）',
+    );
+    return;
+  }
+  if (port.sendApprovedInstruction === undefined) {
+    void vscode.window.showErrorMessage('この画面からは指示を送れません');
+    return;
+  }
+  // 読んでいる間に無操作で閉じられないようにする。長い指示文ほど読む時間は延びる
+  advisor.keepAlive();
+  // 送られる形のまま全文を見せ、その場で直せるようにする
+  const document = await vscode.workspace.openTextDocument({
+    content: draft.mainInstruction,
+    language: 'markdown',
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  const choice = await vscode.window.showInformationMessage(
+    '内容を確認・編集してから送信してください。送信するまで作業中のAIには何も渡りません',
+    '送る',
+    'やめる',
+  );
+  if (choice !== '送る') {
+    return;
+  }
+  const edited = document.getText().trim();
+  if (edited === '') {
+    void vscode.window.showWarningMessage('指示が空です。送信しませんでした');
+    return;
+  }
+  // 承認できるのは「下書きができている状態」かつ「いま開いているのが最新の下書き」のとき
+  // だけである。世代まで見るのは、承認の画面を開いたまま新しい下書きを作ると、状態は
+  // `handoffDrafted` に戻っているので状態だけの判定では通ってしまい、**画面に出ている古い方**
+  // が送られるため（Issue #929 の自己レビュー）
+  if (!advisor.markApproved(draft.revision)) {
+    void vscode.window.showWarningMessage(
+      advisor.closedReason() === undefined
+        ? '下書きが最新ではありません。もう一度「メインAIへの指示を作る」から作成してください'
+        : 'この相談は既に終了しています。もう一度セカンドオピニオンを実行してください',
+    );
+    return;
+  }
+  const text = `${provenancePrefix(advisor.candidate)}${edited}`;
+  try {
+    const outcome = await port.sendApprovedInstruction(text);
+    log.info(`[secondOpinion] 承認された指示を送りました（${outcome}）`);
+    void vscode.window.showInformationMessage(
+      outcome === 'sent'
+        ? 'セカンドオピニオンの指示を作業中のAIへ送りました'
+        : 'セカンドオピニオンの指示を待機列へ入れました（現在のターンの後に送られます）',
+    );
+  } catch (e) {
+    // 送れなかったときは相談を閉じない。承認も取り消して、同じ下書きをもう一度
+    // 承認できる状態へ戻す（送れなかっただけで下書きは古くなっていない）
+    advisor.revertApproval();
+    log.warn(`[secondOpinion] 承認された指示を送れませんでした: ${errorMessage(e)}`);
+    void vscode.window.showErrorMessage(`指示を送れませんでした: ${errorMessage(e)}`);
+    return;
+  }
+  store.closeFor(port.parentSessionId, 'instructionSent');
+}
+
+/**
+ * 保持しているAdvisorセッションを閉じる（Issue #929）。
+ *
+ * 会話の「相談を終了」から押される経路と、親の会話が破棄された・拡張機能が終了する経路の
+ * 両方から使う。存在しない場合は何もしない（押し直し・二重の後始末で例外にしない）。
+ */
+export function endSecondOpinionConsult(
+  parentSessionId: string,
+  store: AdvisorSessionStore,
+  reason: AdvisorCloseReason,
+): void {
+  store.closeFor(parentSessionId, reason);
 }
 
 /**

@@ -25,7 +25,17 @@ import {
   SingleTurnTimeoutError,
 } from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
-import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
+import {
+  approveSecondOpinionHandoff,
+  continueSecondOpinion,
+  draftSecondOpinionHandoff,
+  endSecondOpinionConsult,
+  startSecondOpinion,
+  stopSecondOpinion,
+  type SecondOpinionPanelPort,
+} from './secondOpinionCommand';
+import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
+import type { HandoffDraft } from '../secondOpinion/handoff';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   capSideQuestionHistory,
@@ -313,6 +323,20 @@ export class ClaudeChatViewManager
   private commands: SlashCommand[] | undefined;
   /** セカンドオピニオン（Issue #894）の実行中管理。親セッションごとに1本へ絞る。 */
   private readonly secondOpinionRegistry = new SecondOpinionRegistry();
+  /**
+   * 相談を続けられるAdvisorセッションの置き場（Issue #929）。
+   *
+   * 実行中かどうかを見る `secondOpinionRegistry` とは寿命が違う。1ターンが終わっても
+   * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
+   */
+  private readonly advisorStore = new AdvisorSessionStore();
+  /**
+   * 承認待ちの下書き（Issue #929 Handoff）。会話ごとに最新の1件だけを持つ。
+   *
+   * webviewへは中身を渡さない。承認して送る経路が読むのはこの値であり、画面から返って
+   * きた文字列ではない——往復させると、表示のために整形した文が送信の対象になりうる。
+   */
+  private readonly handoffDrafts = new Map<string, HandoffDraft | undefined>();
   /**
    * セカンドオピニオンの依頼先となるCodex側のホスト（`ChatViewManager`）。
    *
@@ -998,28 +1022,82 @@ export class ClaudeChatViewManager
       return;
     }
     await startSecondOpinion(
-      {
-        // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
-        ...secondOpinionParentPortFor(entry),
-        parentSessionId: entry.secondOpinionKey,
-        cwd: entry.cwd,
-        lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
-        // 要約（Issue #903）の入力。画面が持っている項目から組み立てるだけで、
-        // 親セッションへは何も送らない
-        conversationTranscript: () =>
-          buildTranscriptMarkdown(entry.session.getState().items, 'Claude Code'),
-        note: (id, display) => entry.session.noteSecondOpinion(id, display),
-        setRunning: (running) => {
-          void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
-        },
-        generateRequestText: (instruction, timeoutMs, signal) =>
-          this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
-        summaryRollout: this.summaryRollout,
-      },
+      this.secondOpinionPortFor(entry),
       host,
       this.secondOpinionRegistry,
       this.log,
+      undefined,
+      undefined,
+      this.advisorStore,
     );
+  }
+
+  /**
+   * パネルが閉じたら相談相手も閉じる（Issue #929）。
+   *
+   * 会話が消えた後もセッションが生き残ると、誰にも見えないままCodexのプロセスと
+   * ロールアウトだけが増える。
+   */
+  protected override onTeardown(entry: ClaudePanel): void {
+    endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
+    this.handoffDrafts.delete(entry.secondOpinionKey);
+  }
+
+  /** 拡張機能の終了時に、残っている相談相手をすべて閉じる（Issue #929）。 */
+  protected override onDispose(): void {
+    this.advisorStore.closeAll('shutdown');
+    this.handoffDrafts.clear();
+  }
+
+  /**
+   * セカンドオピニオンの差し込み口を1つ作る。
+   *
+   * 起動（`startSecondOpinion`）と追加の相談（`continueSecondOpinion`）で同じものを使う。
+   */
+  private secondOpinionPortFor(entry: ClaudePanel): SecondOpinionPanelPort {
+    return {
+      // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
+      ...secondOpinionParentPortFor(entry),
+      parentSessionId: entry.secondOpinionKey,
+      cwd: entry.cwd,
+      lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
+      // 要約（Issue #903）の入力。画面が持っている項目から組み立てるだけで、
+      // 親セッションへは何も送らない
+      conversationTranscript: () =>
+        buildTranscriptMarkdown(entry.session.getState().items, 'Claude Code'),
+      note: (id, display) => entry.session.noteSecondOpinion(id, display),
+      setRunning: (running) => {
+        void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
+      },
+      isParentDisposed: () => entry.disposed,
+      setAdvisorItem: (itemId) => {
+        void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
+      },
+      // 承認された指示を送る唯一の口（Issue #929）。`approveSecondOpinionHandoff` が
+      // `markApproved()` を通したときにだけ呼ばれる
+      sendApprovedInstruction: async (text) => {
+        const outcome = entry.session.sendOrQueue(text, []);
+        // 人が送った指示と同じ扱いで作業記録へ残す（Codex画面の `reportActivity` と揃える）。
+        // 承認を経た本人の指示であり、記録から落とすと日報に穴が空く
+        const sessionId = entry.session.threadId;
+        if (sessionId !== undefined) {
+          this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
+        }
+        return Promise.resolve(outcome);
+      },
+      setHandoffDraft: (draft) => {
+        // 承認の対象は画面ではなく拡張機能側が持つ（Issue #929）。webviewへ渡すのは
+        // ボタンを出すかどうかの真偽値だけで、指示文そのものは往復させない
+        this.handoffDrafts.set(entry.secondOpinionKey, draft);
+        void entry.panel?.webview.postMessage({
+          type: 'secondOpinionHandoff',
+          hasDraft: draft !== undefined,
+        });
+      },
+      generateRequestText: (instruction, timeoutMs, signal) =>
+        this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
+      summaryRollout: this.summaryRollout,
+    };
   }
 
   /**
@@ -1932,6 +2010,40 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'secondOpinionContinue') {
+        // 追加の相談（Issue #929）。メインセッションへは1ターンも送らない
+        void continueSecondOpinion(
+          this.secondOpinionPortFor(entry),
+          this.secondOpinionRegistry,
+          this.advisorStore,
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionDraft') {
+        // メインAIへの指示の下書き（Issue #929）。作るだけで、送信はしない
+        void draftSecondOpinionHandoff(
+          this.secondOpinionPortFor(entry),
+          this.secondOpinionRegistry,
+          this.advisorStore,
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionApprove') {
+        // 人が読み、直し、承認したときにだけ送る（Issue #929 Human Gate）
+        void approveSecondOpinionHandoff(
+          this.secondOpinionPortFor(entry),
+          this.advisorStore,
+          this.handoffDrafts.get(entry.secondOpinionKey),
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionEnd') {
+        endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'userEnded');
         return;
       }
       if (type === 'secondOpinionStop' && typeof m['itemId'] === 'string') {
