@@ -1396,13 +1396,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
-   * セカンドオピニオン（Issue #894）を起動する。
-   *
-   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
-   * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
-   * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
-   */
-  /**
    * 要約セッションのrolloutを消すための口を作る（Issue #942）。
    *
    * Claude Code画面のセカンドオピニオンも要約だけはCodexのセッションを開くため、
@@ -1412,6 +1405,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return createNodeSummaryRolloutDeps(codexPaths(this.codexHome).sessions, this.fs, this.log);
   }
 
+  /**
+   * セカンドオピニオン（Issue #894）を起動する。
+   *
+   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
+   * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
+   * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
+   */
   private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
       {

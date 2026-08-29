@@ -78,13 +78,6 @@ import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinio
  * （Issue #926 B）。呼び出し側でも try/finally で守っているが、二重の保険とする。
  */
 export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
-  /**
-   * 要約セッションのrolloutを消すための口（Issue #942）。
-   *
-   * 要約セッションは親会話の複製をディスクへ残すが、その複製は一時ディレクトリのcwdを
-   * 持つため拡張の履歴一覧に出ない。渡されたときだけ後始末する（未設定なら何もしない）。
-   */
-  summaryRollout?: SummaryRolloutDeps | undefined;
   /** 重複起動の判定キー（親セッションのid）。 */
   parentSessionId: string;
   /** 親セッションの作業ディレクトリ。未設定ならワークスペースを使う。 */
@@ -98,6 +91,13 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
    * 組み立てたものを読むだけ（親のターンを1つも使わない。受入基準3）。
    */
   conversationTranscript(): string;
+  /**
+   * 要約セッションのrolloutを消すための口（Issue #942）。
+   *
+   * 要約セッションは親会話の複製をディスクへ残すが、その複製は一時ディレクトリのcwdを
+   * 持つため拡張の履歴一覧に出ない。渡されたときだけ後始末する（未設定なら何もしない）。
+   */
+  summaryRollout?: SummaryRolloutDeps | undefined;
   /** 会話へ1項目として残す/更新する。 */
   note(id: string, display: SecondOpinionDisplay): void;
   /** webviewのボタンの押下可否を切り替える。 */
