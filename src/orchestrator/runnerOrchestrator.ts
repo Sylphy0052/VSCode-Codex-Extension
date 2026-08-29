@@ -1429,14 +1429,17 @@ function buildTaskEvent(
       if (
         failure?.kind === 'stalled' ||
         failure?.kind === 'escalated' ||
-        failure?.kind === 'advised'
+        failure?.kind === 'advised' ||
+        failure?.kind === 'conflicted'
       ) {
         const cause =
           failure.kind === 'stalled'
             ? '停滞したため停止しました（同じ応答が繰り返されました）'
             : failure.kind === 'advised'
               ? 'Advisorが重大な指摘を返したため停止しました（issue #957）'
-              : '自力では解決できないと申告したため停止しました';
+              : failure.kind === 'conflicted'
+                ? 'Advisorの重大な指摘と評価役の達成判定が食い違ったため停止しました（issue #964）'
+                : '自力では解決できないと申告したため停止しました';
         return {
           kind: 'taskStalled',
           body: withSummary(

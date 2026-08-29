@@ -159,32 +159,65 @@ export interface HeadlessCliDeps {
   logWarn?: (message: string) => void;
 }
 
+/** 呼び出しが失敗した理由。応答が得られなかったときだけ使う。 */
+export type HeadlessFailureReason = 'timeout' | 'process-error';
+
+/**
+ * ヘッドレス実行の結果。
+ *
+ * 失敗を`undefined`の1値に潰さないのは、呼び出し側が「時間切れ」と「起動・終了の失敗」を
+ * 人へ言い分けられるようにするため（issue #964）。判断そのものは呼び出し側の責務で、
+ * ここでは何が起きたかだけを返す。
+ */
+export type HeadlessOutcome =
+  | { readonly ok: true; readonly text: string }
+  | { readonly ok: false; readonly reason: HeadlessFailureReason };
+
 /**
  * プロンプトを1回だけ投げ、応答本文を返す。**失敗しても例外を投げず`undefined`を返す。**
  *
  * CLIが落ちた・タイムアウトした・何も返らなかったのいずれも`undefined`で、続けるか
  * 止めるかの判断は呼び出し側に委ねる。脇役の失敗でループ全体が壊れると、それまでの
  * 作業ごと失われる。
+ *
+ * 失敗の理由まで要るときは`runHeadlessPromptDetailed`を使う。
  */
 export async function runHeadlessPrompt(
   deps: HeadlessCliDeps,
   prompt: string,
 ): Promise<string | undefined> {
+  const outcome = await runHeadlessPromptDetailed(deps, prompt);
+  return outcome.ok ? outcome.text : undefined;
+}
+
+/**
+ * `runHeadlessPrompt`の、失敗の理由まで返す版。
+ *
+ * **例外は投げない。** 時間切れは`timeout`、起動できなかった・異常終了した・何も
+ * 返らなかったは`process-error`にする。応答本文がJSONとして読めるかどうかは、その内容を
+ * 知っている呼び出し側（Advisor・Evaluator）の判断であり、ここでは見ない。
+ */
+export async function runHeadlessPromptDetailed(
+  deps: HeadlessCliDeps,
+  prompt: string,
+): Promise<HeadlessOutcome> {
   return deps.provider === 'claude' ? runClaude(deps, prompt) : runCodex(deps, prompt);
 }
 
-async function runClaude(deps: HeadlessCliDeps, prompt: string): Promise<string | undefined> {
+async function runClaude(deps: HeadlessCliDeps, prompt: string): Promise<HeadlessOutcome> {
   const result = await runProcess(
     deps.executable,
     buildClaudeHeadlessArgs(deps.model),
     prompt,
     deps.timeoutMs,
   );
-  if (result === undefined) {
+  if (!result.ok) {
     deps.logWarn?.('claudeのヘッドレス実行が応答しませんでした');
-    return undefined;
+    return result;
   }
-  return readClaudeResult(result);
+  const body = readClaudeResult(result.text);
+  // `result`が空文字だった場合も「何も返らなかった」として扱う
+  return body === undefined ? { ok: false, reason: 'process-error' } : { ok: true, text: body };
 }
 
 /** `--output-format json` の応答から本文（`result`）だけを取り出す。 */
@@ -203,7 +236,7 @@ export function readClaudeResult(stdout: string): string | undefined {
   return stdout.trim() === '' ? undefined : stdout;
 }
 
-async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<string | undefined> {
+async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<HeadlessOutcome> {
   const dir = await mkdtemp(join(tmpdir(), 'loop-headless-'));
   const outputFile = join(dir, `${randomUUID()}.txt`);
   try {
@@ -216,12 +249,12 @@ async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<string |
       deps.timeoutMs,
       dir,
     );
-    if (result === undefined) {
+    if (!result.ok) {
       deps.logWarn?.('codexのヘッドレス実行が応答しませんでした');
-      return undefined;
+      return result;
     }
     const written = await readFile(outputFile, 'utf8').catch(() => '');
-    return written.trim() === '' ? result : written;
+    return { ok: true, text: written.trim() === '' ? result.text : written };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -233,7 +266,7 @@ async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<string |
  * プロンプトには会話の抜粋（ファイル内容やコマンド出力）が含まれるため、引数ではなく
  * 標準入力で渡す。引数に載せるとプロセス一覧から他の利用者に読めてしまう。
  *
- * 応答が無いまま居座らせない。時間切れ・起動失敗・異常終了はいずれも`undefined`。
+ * 応答が無いまま居座らせない。時間切れは`timeout`、起動失敗・異常終了は`process-error`。
  *
  * `cwd`を渡すと、その場所で起動する。省略すると拡張機能ホストの作業ディレクトリを継ぐ。
  */
@@ -243,7 +276,7 @@ function runProcess(
   stdin: string,
   timeoutMs: number,
   cwd?: string,
-): Promise<string | undefined> {
+): Promise<HeadlessOutcome> {
   return new Promise((resolve) => {
     const proc = spawn(executable, args, {
       stdio: ['pipe', 'pipe', 'ignore'],
@@ -252,7 +285,7 @@ function runProcess(
     let stdout = '';
     let settled = false;
 
-    const finish = (value: string | undefined): void => {
+    const finish = (value: HeadlessOutcome): void => {
       if (settled) {
         return;
       }
@@ -262,18 +295,21 @@ function runProcess(
       killWithEscalation(proc);
       resolve(value);
     };
+    const fail = (reason: HeadlessFailureReason): void => finish({ ok: false, reason });
 
-    const timer = setTimeout(() => finish(undefined), timeoutMs);
+    const timer = setTimeout(() => fail('timeout'), timeoutMs);
 
     proc.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
     });
-    proc.on('error', () => finish(undefined));
-    proc.on('close', (code) => finish(code === 0 ? stdout : undefined));
+    proc.on('error', () => fail('process-error'));
+    proc.on('close', (code) => {
+      finish(code === 0 ? { ok: true, text: stdout } : { ok: false, reason: 'process-error' });
+    });
 
     // 起動後に相手が終了した状態への書き込みで飛ぶEPIPE等は、ここで捕まえないと
     // Nodeの未捕捉例外になる（design.md §14.31）
-    guardStdinErrors(proc, () => finish(undefined));
+    guardStdinErrors(proc, () => fail('process-error'));
     if (canWriteStdin(proc)) {
       proc.stdin.end(stdin);
     }

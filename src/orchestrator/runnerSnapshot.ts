@@ -393,6 +393,7 @@ export function deriveStalledWarnings(live: LiveRun): WorkflowWarning[] {
       state.failure?.kind === 'stalled' ||
       state.failure?.kind === 'escalated' ||
       state.failure?.kind === 'advised' ||
+      state.failure?.kind === 'conflicted' ||
       state.failure?.kind === 'timedOut';
     if (state.state === 'failed' && stalledLike) {
       // セッションが残っていれば「続ける」で続きから走らせられる（`continueTask`が
@@ -406,9 +407,11 @@ export function deriveStalledWarnings(live: LiveRun): WorkflowWarning[] {
           ? '自力では解決できないと申告して停止しました'
           : state.failure?.kind === 'advised'
             ? 'Advisorが重大な指摘を返して停止しました'
-            : state.failure?.kind === 'timedOut'
-              ? '時間上限に達して停止しました'
-              : '同じ応答が繰り返され、進捗が無いまま停止しました';
+            : state.failure?.kind === 'conflicted'
+              ? 'Advisorの重大な指摘と評価役の達成判定が食い違って停止しました'
+              : state.failure?.kind === 'timedOut'
+                ? '時間上限に達して停止しました'
+                : '同じ応答が繰り返され、進捗が無いまま停止しました';
       warnings.push({
         kind: 'loopStalled',
         taskId,

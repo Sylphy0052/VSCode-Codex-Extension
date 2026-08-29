@@ -79,7 +79,7 @@ describe('buildAdvisorPrompt', () => {
 describe('parseAdvice', () => {
   it('JSONの3つの深刻度をそのまま読む', () => {
     for (const severity of ['blocker', 'concern', 'note'] as const) {
-      expect(parseAdvice(`{"severity":"${severity}","findings":[],"nextFocus":""}`).severity).toBe(
+      expect(parseAdvice(`{"severity":"${severity}","findings":[],"nextFocus":""}`)?.severity).toBe(
         severity,
       );
     }
@@ -89,27 +89,29 @@ describe('parseAdvice', () => {
     const parsed = parseAdvice(
       '```json\n{"severity":"concern","findings":["テストが無い"],"nextFocus":"テストを足す"}\n```',
     );
-    expect(parsed.severity).toBe('concern');
-    expect(parsed.findings).toEqual(['テストが無い']);
-    expect(parsed.nextFocus).toBe('テストを足す');
+    expect(parsed?.severity).toBe('concern');
+    expect(parsed?.findings).toEqual(['テストが無い']);
+    expect(parsed?.nextFocus).toBe('テストを足す');
   });
 
-  it('不正なJSONは「指摘なし」に倒す（blockerへは倒さない）', () => {
-    expect(parseAdvice('壊れた応答')).toEqual(noAdvice());
-    expect(parseAdvice('')).toEqual(noAdvice());
+  it('不正なJSONは読めなかったこととして返す（指摘なしにもblockerにも倒さない）', () => {
+    // issue #964: 「読めなかった」を`noAdvice()`へ倒すと、呼び出し側が
+    // 「見たうえで指摘が無かった」と区別できなくなる
+    expect(parseAdvice('壊れた応答')).toBeUndefined();
+    expect(parseAdvice('')).toBeUndefined();
   });
 
-  it('未知の深刻度も「指摘なし」に倒す', () => {
-    expect(parseAdvice('{"severity":"fatal","findings":["止めろ"]}')).toEqual(noAdvice());
+  it('未知の深刻度も読めなかったこととして返す', () => {
+    expect(parseAdvice('{"severity":"fatal","findings":["止めろ"]}')).toBeUndefined();
   });
 
   it('文字列でない findings は落とし、構造化フィールドだけを残す', () => {
     const parsed = parseAdvice(
       '{"severity":"note","findings":["ok",42,null],"nextFocus":123,"evidence":"x"}',
     );
-    expect(parsed.findings).toEqual(['ok']);
-    expect(parsed.nextFocus).toBe('');
-    expect(parsed.evidence).toEqual([]);
+    expect(parsed?.findings).toEqual(['ok']);
+    expect(parsed?.nextFocus).toBe('');
+    expect(parsed?.evidence).toEqual([]);
   });
 });
 

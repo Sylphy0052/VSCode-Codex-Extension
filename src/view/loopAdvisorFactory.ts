@@ -1,5 +1,11 @@
 import { readClaudeConfig, readConfig, readLoopAdvisorConfig } from '../config';
-import type { LoopAdvice, LoopAdvisorConfig } from '../loop/loopAdvisor';
+import {
+  ADVISOR_FAILURE_ALERT_THRESHOLD,
+  type LoopAdvice,
+  type LoopAdvisorConfig,
+  type LoopAdvisorFailureReason,
+  type LoopAdvisorNote,
+} from '../loop/loopAdvisor';
 import { resolveHeadlessProvider, type HeadlessProvider } from '../loop/headlessCli';
 import { createLoopAdvisor } from '../loop/loopAdvisorProcess';
 import type { Logger } from '../log';
@@ -16,7 +22,7 @@ import type { Logger } from '../log';
 export function createLoopAdvisorConfig(
   host: HeadlessProvider,
   log: Logger,
-  note: (advice: LoopAdvice, iteration: number) => void,
+  note: (note: LoopAdvisorNote, iteration: number) => void,
 ): LoopAdvisorConfig | undefined {
   const settings = readLoopAdvisorConfig();
   if (!settings.enabled) {
@@ -47,16 +53,31 @@ const SEVERITY_LABEL: Record<LoopAdvice['severity'], string> = {
   note: '参考',
 };
 
+/** Advisorが動けなかった理由の表示名。 */
+const FAILURE_LABEL: Record<LoopAdvisorFailureReason, string> = {
+  timeout: '時間内に応答しませんでした',
+  'invalid-response': '応答を読み取れませんでした',
+  'process-error': '起動できないか、途中で終了しました',
+};
+
 /**
  * Advisorの結果を会話へ差し込む表示を組み立てる。
  *
  * **Advisorへ送った材料の全文は残さない。** 証拠と応答本文の再掲になり、ターンごとに
  * 会話が埋まる。残すのは深刻度・指摘の全文・Advisorが挙げた根拠だけにする。
+ *
+ * 動けなかった周は「指摘はありませんでした」と書かない（issue #964）。**評価できなかった
+ * ことをそのまま出す。** 続けて失敗しているときは、Advisorが実質無効になっていることが
+ * 分かる書き方にする。
  */
 export function advisorDisplay(
-  advice: LoopAdvice,
+  note: LoopAdvisorNote,
   iteration: number,
 ): { status: string; text: string; detail: string } {
+  if (note.status === 'failed') {
+    return failureDisplay(note, iteration);
+  }
+  const advice = note.advice;
   const heading = `Advisor（${iteration}ターン目）: ${SEVERITY_LABEL[advice.severity]}`;
   const body =
     advice.findings.length === 0
@@ -70,5 +91,29 @@ export function advisorDisplay(
     status: advice.severity,
     text: `${heading}\n\n${body}${focus}`,
     detail: advice.evidence.length === 0 ? '' : advice.evidence.map((e) => `- ${e}`).join('\n'),
+  };
+}
+
+/**
+ * Advisorが動けなかった周の表示。
+ *
+ * 1回目は事実だけを書き、`ADVISOR_FAILURE_ALERT_THRESHOLD`回続いた時点から「連続して
+ * 動けていない」と明示する。ここで初めて、Advisorが実質無効のまま回っていることが
+ * 利用者に伝わる。
+ */
+function failureDisplay(
+  note: Extract<LoopAdvisorNote, { status: 'failed' }>,
+  iteration: number,
+): { status: string; text: string; detail: string } {
+  const alerting = note.consecutiveFailures >= ADVISOR_FAILURE_ALERT_THRESHOLD;
+  const heading = `Advisor（${iteration}ターン目）: 評価できませんでした`;
+  const body = `今回はAdvisorを実行できませんでした（${FAILURE_LABEL[note.reason]}）。ループは続行しています。`;
+  const alert = alerting
+    ? `\n\nAdvisorが${note.consecutiveFailures}回続けて動けていません。設定（実行ファイル・モデル・タイムアウト）を確認してください。この状態では進め方の点検が行われていません。`
+    : '';
+  return {
+    status: alerting ? 'concern' : 'note',
+    text: `${heading}\n\n${body}${alert}`,
+    detail: '',
   };
 }

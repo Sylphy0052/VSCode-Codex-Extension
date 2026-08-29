@@ -923,9 +923,9 @@ describe('workflowScript', () => {
 
       // 範囲の切り出しに失敗すると0件になりうる。0件だと後続の検査（forループ・空集合同士の
       // Set一致）が何も検査しないまま素通りしてしまうため、件数そのものを先に主張して固定する
-      // （issue #957時点で15種）。kindを足すときはこの数字も直すことになり、
+      // （issue #964時点で16種）。kindを足すときはこの数字も直すことになり、
       // それは意図した変更として差分に出る。
-      expect(allFailureKinds).toHaveLength(15);
+      expect(allFailureKinds).toHaveLength(16);
       // 範囲を切らずに拾うと`AutoResumeOutcome`のkindが混ざる。正規表現を緩めて範囲チェックが
       // 効かなくなったときに、これらが入っていないことで検出する。`resumed`だけは現状の
       // 正規表現では拾われない形（この行の一覧に残してあるのは、書き方が揃えられたときに
@@ -1043,7 +1043,7 @@ describe('workflowScript', () => {
     // 同じ集合は runState.ts の isResumableFailure にあり、両者は揃えて直す
     // （design.md §14.79、issue #957）
     expect(source).toContain(
-      "const resumableKinds = ['maxReached', 'stalled', 'escalated', 'advised', 'timedOut']",
+      "const resumableKinds = ['maxReached', 'stalled', 'escalated', 'advised', 'conflicted', 'timedOut']",
     );
     expect(source).toContain('resumableKinds.includes(task.failure.kind)');
     expect(source).toContain('task.hasLiveSession === true');
