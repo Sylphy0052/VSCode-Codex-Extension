@@ -65,6 +65,7 @@ import {
 } from '../secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
 import { summarizeConversation } from '../secondOpinion/summary';
+import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinion/wait';
 
 /**
@@ -77,6 +78,13 @@ import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinio
  * （Issue #926 B）。呼び出し側でも try/finally で守っているが、二重の保険とする。
  */
 export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
+  /**
+   * 要約セッションのrolloutを消すための口（Issue #942）。
+   *
+   * 要約セッションは親会話の複製をディスクへ残すが、その複製は一時ディレクトリのcwdを
+   * 持つため拡張の履歴一覧に出ない。渡されたときだけ後始末する（未設定なら何もしない）。
+   */
+  summaryRollout?: SummaryRolloutDeps | undefined;
   /** 重複起動の判定キー（親セッションのid）。 */
   parentSessionId: string;
   /** 親セッションの作業ディレクトリ。未設定ならワークスペースを使う。 */
@@ -290,6 +298,7 @@ async function buildConversationSummary(
           // 要約中に止められることがある（Issue #940）。本体より前の直列区間なので、
           // 待ち時間としてはここが一番長くなることもある
           signal,
+          rollout: port.summaryRollout,
         },
         log,
       ),

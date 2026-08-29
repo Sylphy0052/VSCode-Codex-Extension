@@ -57,6 +57,7 @@ import {
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
+import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
 import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
@@ -321,6 +322,7 @@ export class ClaudeChatViewManager
    * `extension.ts` が組み立て時に注入する。
    */
   private secondOpinionHost: TaskSessionHost | undefined;
+  private summaryRollout: SummaryRolloutDeps | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -974,6 +976,15 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * 要約セッション（Codex側）のrolloutを消すための口を`extension.ts`から注入する（Issue #942）。
+   *
+   * この画面はCodexのホーム（`CODEX_HOME`）を持たないため、自前では組み立てられない。
+   */
+  setSummaryRollout(deps: SummaryRolloutDeps): void {
+    this.summaryRollout = deps;
+  }
+
+  /**
    * セカンドオピニオン（Issue #894）を起動する。
    *
    * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
@@ -1003,6 +1014,7 @@ export class ClaudeChatViewManager
         },
         generateRequestText: (instruction, timeoutMs, signal) =>
           this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
+        summaryRollout: this.summaryRollout,
       },
       host,
       this.secondOpinionRegistry,

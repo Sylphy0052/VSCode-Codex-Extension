@@ -24,6 +24,7 @@ import {
   type ServerRequestHandler,
 } from '../appserver/connection';
 import { describeUnsafeCombination } from '../codex/argvBuilder';
+import { codexPaths } from '../codex/cliLocator';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { buildDisabledMcpServersOverlay } from '../codex/mcpDisable';
@@ -69,6 +70,10 @@ import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { buildHandoffPrompt, resolveWithRetry } from './handoff';
 import type { SessionStore } from '../session/sessionStore';
+import {
+  createNodeSummaryRolloutDeps,
+  type SummaryRolloutDeps,
+} from '../secondOpinion/summaryRollout';
 import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
 import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
 import { AttachmentBox } from '../provider/attachments';
@@ -1397,6 +1402,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
    * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
    */
+  /**
+   * 要約セッションのrolloutを消すための口を作る（Issue #942）。
+   *
+   * Claude Code画面のセカンドオピニオンも要約だけはCodexのセッションを開くため、
+   * `extension.ts` から`ClaudeChatViewManager`へも同じものを渡す。
+   */
+  summaryRolloutDeps(): SummaryRolloutDeps {
+    return createNodeSummaryRolloutDeps(codexPaths(this.codexHome).sessions, this.fs, this.log);
+  }
+
   private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
       {
@@ -1415,6 +1430,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         },
         generateRequestText: (instruction, timeoutMs, signal) =>
           this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
+        summaryRollout: this.summaryRolloutDeps(),
       },
       this,
       this.secondOpinionRegistry,
