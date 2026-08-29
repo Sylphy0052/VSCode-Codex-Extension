@@ -16,7 +16,12 @@ import {
   normalizeSecondOpinionMode,
   validateAskGptRequestText,
 } from '../../src/secondOpinion/askGpt';
-import { describeRedaction, redactCredentials } from '../../src/secondOpinion/redact';
+import { buildAskGptSecondOpinionPrompt } from '../../src/secondOpinion/prompt';
+import {
+  describeRedaction,
+  mergeRedactionCounts,
+  redactCredentials,
+} from '../../src/secondOpinion/redact';
 
 /** 8セクションをすべて備えた最小の正しい質問文。 */
 function validText(): string {
@@ -142,5 +147,81 @@ describe('redactCredentials', () => {
     expect(describeRedaction(redactCredentials('何も無い文'))).toBeUndefined();
     const note = describeRedaction(redactCredentials('const API_KEY = "9f8e7d6c5b4a39281706"'));
     expect(note).toContain('認証情報の代入1件');
+  });
+});
+
+describe('mergeRedactionCounts（Issue #954）', () => {
+  it('複数回の伏せ字化の件数を1つに合算する', () => {
+    const a = redactCredentials('const API_KEY = "9f8e7d6c5b4a39281706"');
+    const b = redactCredentials('const API_KEY = "0011223344556677aabb"');
+    const merged = mergeRedactionCounts(a, b);
+
+    expect(merged.total).toBe(2);
+    expect(merged.counts['認証情報の代入']).toBe(2);
+  });
+
+  it('ルール名が違えば内訳を並べる', () => {
+    const assignment = redactCredentials('const API_KEY = "9f8e7d6c5b4a39281706"');
+    const url = redactCredentials('https://alice:s3cr3t-value@example.com/repo.git');
+    const note = describeRedaction(mergeRedactionCounts(assignment, url));
+
+    expect(note).toContain('認証情報の代入1件');
+    expect(note).toContain('URL埋め込みの認証情報1件');
+  });
+
+  it('どちらも0件なら合算も0件で、注記は出ない', () => {
+    const merged = mergeRedactionCounts(
+      redactCredentials('何も無い文'),
+      redactCredentials('こちらも普通の文'),
+    );
+
+    expect(merged.total).toBe(0);
+    expect(describeRedaction(merged)).toBeUndefined();
+  });
+
+  it('引数が無くても0件として扱う', () => {
+    expect(mergeRedactionCounts().total).toBe(0);
+  });
+});
+
+describe('buildAskGptSecondOpinionPrompt の依頼文（Issue #954）', () => {
+  const questionText = '# 質問: テスト\n\n## 1. 目的\n\n本文';
+
+  it('利用者の依頼文を、質問文より前の独立した節として置く', () => {
+    const prompt = buildAskGptSecondOpinionPrompt(questionText, 'この設計で進めてよいか');
+
+    expect(prompt).toContain('## 利用者からの依頼');
+    expect(prompt).toContain('この設計で進めてよいか');
+    expect(prompt.indexOf('## 利用者からの依頼')).toBeLessThan(
+      prompt.indexOf('## 質問（作業中のエージェントが組み立てたもの）'),
+    );
+  });
+
+  it('固定指示は依頼文より前に出る', () => {
+    const prompt = buildAskGptSecondOpinionPrompt(questionText, '依頼');
+
+    expect(prompt.indexOf('独立した立場から意見を求められています')).toBeLessThan(
+      prompt.indexOf('## 利用者からの依頼'),
+    );
+  });
+
+  it('依頼文を要約・整形せずそのまま渡す（前後の空白だけ落とす）', () => {
+    const raw = '  1行目\n\n- 箇条書き\n- もう1つ  ';
+    const prompt = buildAskGptSecondOpinionPrompt(questionText, raw);
+
+    expect(prompt).toContain('1行目\n\n- 箇条書き\n- もう1つ');
+  });
+
+  it('依頼文もコードフェンスで囲む（見出しや箇条書きが固定指示と混ざらない）', () => {
+    const prompt = buildAskGptSecondOpinionPrompt(questionText, '## 見出しに見える依頼');
+    const afterHeading = prompt.slice(prompt.indexOf('## 利用者からの依頼'));
+
+    expect(afterHeading).toMatch(/## 利用者からの依頼\n\n```markdown\n## 見出しに見える依頼\n```/);
+  });
+
+  it('依頼文と質問文が食い違うときは依頼文を優先する、と伝える', () => {
+    const prompt = buildAskGptSecondOpinionPrompt(questionText, '依頼');
+
+    expect(prompt).toContain('利用者の依頼文が求めていることを優先してください');
   });
 });

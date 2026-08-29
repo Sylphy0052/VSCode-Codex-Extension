@@ -29,7 +29,11 @@ import {
   validateAskGptRequestText,
   type RequestGenerationResult,
 } from '../secondOpinion/askGpt';
-import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
+import {
+  describeRedaction,
+  mergeRedactionCounts,
+  redactCredentials,
+} from '../secondOpinion/redact';
 import {
   cancelledAskGptDisplay,
   cancelledPartialAskGptDisplay,
@@ -612,9 +616,13 @@ async function startAskGptSecondOpinion(
     }
 
     // 送信経路の最後で伏せる（受入基準12）。Advisorのセッションはローカルプロセスだが、
-    // モデルサービスへ送信するクライアントである
+    // モデルサービスへ送信するクライアントである。
+    //
+    // 依頼文もAdvisorへ渡る（Issue #954）ので同じ扱いにする。会話へ残す件数は合算する
+    // （送ったのは1本のテキストなので、読む側が2つの数を足す形にはしない）
     const redaction = redactCredentials(confirmed);
-    const redactionNote = describeRedaction(redaction);
+    const requestRedaction = redactCredentials(request);
+    const redactionNote = describeRedaction(mergeRedactionCounts(redaction, requestRedaction));
     if (redactionNote !== undefined) {
       log.info(`[secondOpinion] askGpt ${redactionNote}`);
     }
@@ -625,7 +633,9 @@ async function startAskGptSecondOpinion(
       {
         cwd,
         candidate,
-        request,
+        // 伏せた側を送る。会話へ残す `request` は原文のままで、利用者が自分の書いた文を
+        // 読み返せなくなる理由が無い（伏せるのは送信経路だけ）
+        request: requestRedaction.text,
         // askGptでは追加資料も背景要約も渡さない。材料は質問文の中にある（受入基準3）
         artifact: { kind: 'none' },
         headless: config.headless,

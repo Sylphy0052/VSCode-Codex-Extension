@@ -136,8 +136,29 @@ export function redactCredentials(text: string): RedactionResult {
   return { text: out, counts, total };
 }
 
+/**
+ * 複数回の伏せ字化の件数を1つにまとめる（Issue #954）。
+ *
+ * askGptモードでは、利用者の依頼文と親が組み立てた質問文を別々に伏せてから送る。会話へ残す
+ * 件数を別々に出すと、利用者は2つの数を足して読むことになる。送ったのは1本のテキストなので、
+ * 件数も1つに見せる。`text` は持たない——結合した本文はここでは作れないし、作る意味も無い。
+ */
+export function mergeRedactionCounts(
+  ...results: ReadonlyArray<Pick<RedactionResult, 'counts' | 'total'>>
+): Pick<RedactionResult, 'counts' | 'total'> {
+  const counts: Record<string, number> = {};
+  for (const result of results) {
+    for (const [name, count] of Object.entries(result.counts)) {
+      counts[name] = (counts[name] ?? 0) + count;
+    }
+  }
+  return { counts, total: results.reduce((sum, r) => sum + r.total, 0) };
+}
+
 /** 置換の内訳を1行の日本語にする（会話へ残す用）。0件なら `undefined`。 */
-export function describeRedaction(result: RedactionResult): string | undefined {
+export function describeRedaction(
+  result: Pick<RedactionResult, 'counts' | 'total'>,
+): string | undefined {
   if (result.total === 0) {
     return undefined;
   }
