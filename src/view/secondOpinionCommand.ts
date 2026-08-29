@@ -24,6 +24,8 @@ import type { TaskSessionHost } from '../orchestrator/taskSession';
 import { nodeGitCommandRunner, type GitCommandRunner } from '../orchestrator/worktree';
 import type { SecondOpinionCandidate } from '../secondOpinion/candidates';
 import {
+  cancelledPartialSecondOpinionDisplay,
+  cancelledSecondOpinionDisplay,
   failedSecondOpinionDisplay,
   finishedSecondOpinionDisplay,
   partialSecondOpinionDisplay,
@@ -222,23 +224,26 @@ async function buildConversationSummary(
   host: TaskSessionHost,
   config: SecondOpinionConfig,
   log: Logger,
+  signal: AbortSignal,
 ): Promise<{
   text: string | undefined;
   kind: ConversationBackgroundKind;
   failure: string | undefined;
+  /** 利用者が止めた結果か（Issue #940）。真なら呼び出し側は本体を開始しない。 */
+  cancelledByUser: boolean;
 }> {
   if (!config.summary.enabled) {
-    return { text: undefined, kind: 'summary', failure: undefined };
+    return { text: undefined, kind: 'summary', failure: undefined, cancelledByUser: false };
   }
   const conversation = port.conversationTranscript();
   if (conversation.trim() === '') {
-    return { text: undefined, kind: 'summary', failure: undefined };
+    return { text: undefined, kind: 'summary', failure: undefined, cancelledByUser: false };
   }
   if (conversation.length < SUMMARY_SKIP_THRESHOLD_CHARS) {
     log.info(
       `[secondOpinion] 会話が短いため要約セッションを開きません（${conversation.length}文字）`,
     );
-    return { text: conversation, kind: 'transcript', failure: undefined };
+    return { text: conversation, kind: 'transcript', failure: undefined, cancelledByUser: false };
   }
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: '会話の要約を作成しています…' },
@@ -249,13 +254,22 @@ async function buildConversationSummary(
           model: config.summary.model,
           effort: config.summary.effort,
           conversation,
+          // 要約中に止められることがある（Issue #940）。本体より前の直列区間なので、
+          // 待ち時間としてはここが一番長くなることもある
+          signal,
         },
         log,
       ),
   );
-  return result.ok
-    ? { text: result.summary, kind: 'summary', failure: undefined }
-    : { text: undefined, kind: 'summary', failure: result.reason };
+  if (result.ok) {
+    return { text: result.summary, kind: 'summary', failure: undefined, cancelledByUser: false };
+  }
+  return {
+    text: undefined,
+    kind: 'summary',
+    failure: result.reason,
+    cancelledByUser: result.cancelledByUser === true,
+  };
 }
 
 /**
@@ -328,7 +342,13 @@ export async function startSecondOpinion(
     return;
   }
 
-  if (!registry.begin(port.parentSessionId)) {
+  // 会話へ残す項目のidを、この実行の識別子（`runId`）としても使う（Issue #940）。停止操作は
+  // 項目から押されるので、押された項目のidがそのまま「どの実行を止めるか」になる
+  const id = `secondOpinion:${randomUUID()}`;
+  // 止める単位は個々の `TaskSession` ではなく、この実行1回（会話の要約＋本体）である。
+  // 要約中はまだ本体のセッションが無いため、セッションを登録する形では止められない
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
     // 選択している間に別経路から起動された場合。二重に走らせない
     void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
     return;
@@ -337,13 +357,20 @@ export async function startSecondOpinion(
   // `finally` へ入らず、`registry` にidが残って以後その会話では二度と起動できなくなる
   // （選択UIを触っている最中にタブを閉じられる経路で実際に踏みうる。Issue #926 B）
   try {
-    const id = `secondOpinion:${randomUUID()}`;
     port.setRunning(true);
     port.note(id, pendingSecondOpinionDisplay(candidate, artifactKind, request));
     // 要約は本体より先に作る（本体のプロンプトへ載せるため）。失敗しても本体は続ける
-    const summary = await buildConversationSummary(port, host, config, log);
+    const summary = await buildConversationSummary(port, host, config, log, controller.signal);
     if (summary.failure !== undefined) {
       log.warn(`[secondOpinion] 会話の要約を作れませんでした: ${summary.failure}`);
+    }
+    // 要約中に止められた場合と、要約が終わってから本体を始めるまでの間に止められた場合
+    // （Issue #940）。ここで返さないと「止めたのに本体が走り出す」——要約の失敗は本来
+    // 本体を続ける理由になるため、利用者停止をその経路へ流してはならない
+    if (summary.cancelledByUser || controller.signal.aborted) {
+      log.info('[secondOpinion] 利用者の操作で停止しました（本体は開始していません）');
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      return;
     }
     const result = await runSecondOpinion(
       host,
@@ -356,6 +383,7 @@ export async function startSecondOpinion(
         timeoutMs: config.timeoutMs,
         conversationSummary: summary.text,
         conversationBackgroundKind: summary.kind,
+        signal: controller.signal,
       },
       log,
     );
@@ -368,11 +396,11 @@ export async function startSecondOpinion(
           ? 'off'
           : 'failed';
     port.note(id, resultDisplay(candidate, artifactKind, request, result, summaryStatus));
-    if (!result.ok) {
+    if (!result.ok && result.cancelledByUser !== true) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
   } finally {
-    registry.end(port.parentSessionId);
+    registry.end(port.parentSessionId, id);
     // `setRunning()` は契約上no-opのはずだが、投げても `registry.end()` を巻き添えに
     // しない順（end → setRunning）と、個別のtry/catchの両方で守る
     try {
@@ -383,6 +411,34 @@ export async function startSecondOpinion(
       );
     }
   }
+}
+
+/**
+ * 実行中のセカンドオピニオンを止める（Issue #940）。
+ *
+ * 会話に出ている実行中の項目から押される。`headless` の値に関わらずこの経路で止まる
+ * （既定ではタブが開かないため、タブ側の操作だけでは足りない）。
+ *
+ * 止めるのは、押された項目に対応する実行だけ。`runId`（＝項目のid）が今走っている実行と
+ * 一致しなければ何もしない。会話には終わった実行の項目も残るため、古い項目から遅れて
+ * 届いた停止操作が、後から始めた別の実行を止めてはならない。
+ *
+ * ここでは会話の項目を更新しない。停止後の表示は、実行側（`startSecondOpinion`）が
+ * キャンセルとして決着したときに1回だけ書く。両方が書くと、どちらが最後に走るかで
+ * 表示が変わる。
+ */
+export function stopSecondOpinion(
+  parentSessionId: string,
+  registry: SecondOpinionRegistry,
+  runId: string,
+  log: Logger,
+): void {
+  if (!registry.cancel(parentSessionId, runId)) {
+    // 既に終わっている・別の実行が走っている場合。押した側には何も起きない
+    log.info(`[secondOpinion] 停止の対象が見つかりませんでした（runId=${runId}）`);
+    return;
+  }
+  log.info(`[secondOpinion] 停止を要求しました（runId=${runId}）`);
 }
 
 /**
@@ -399,7 +455,21 @@ function resultDisplay(
   summaryStatus: SecondOpinionSummaryStatus,
 ): SecondOpinionDisplay {
   if (!result.ok) {
+    // 利用者が止めた結果は失敗ではない（Issue #940）。回答が1件も出ないまま止めた場合が
+    // ここに来る。失敗として出すと、押した本人に「動かなかった」と読ませてしまう
+    if (result.cancelledByUser === true) {
+      return cancelledSecondOpinionDisplay(candidate, artifactKind, request);
+    }
     return failedSecondOpinionDisplay(candidate, artifactKind, request, result.reason);
+  }
+  if (result.partialReason !== undefined && result.cancelledByUser === true) {
+    return cancelledPartialSecondOpinionDisplay(
+      candidate,
+      artifactKind,
+      request,
+      result.response,
+      summaryStatus,
+    );
   }
   if (result.partialReason !== undefined) {
     return partialSecondOpinionDisplay(

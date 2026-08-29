@@ -12,7 +12,11 @@
 import type { ApprovalMode } from '../codex/types';
 import { SANDBOX_MODES } from '../codex/types';
 import type { Logger } from '../log';
-import { runSingleTurnTask, SingleTurnTimeoutError } from '../orchestrator/planner';
+import {
+  runSingleTurnTask,
+  SingleTurnCancelledError,
+  SingleTurnTimeoutError,
+} from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
 import {
@@ -87,6 +91,11 @@ export interface SecondOpinionRequest {
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
+  /**
+   * 利用者による停止（Issue #940）。`SecondOpinionRegistry` が持つ、この実行1回分の
+   * キャンセルハンドルから渡る。
+   */
+  signal?: AbortSignal | undefined;
 }
 
 export type SecondOpinionResult =
@@ -98,8 +107,22 @@ export type SecondOpinionResult =
        * 最後まで返ってきた場合は `undefined`。
        */
       partialReason?: string | undefined;
+      /**
+       * 打ち切りが利用者の停止操作によるものか（Issue #940）。タイムアウトによる
+       * 打ち切りと文言で区別するために使う。`partialReason` が `undefined` のときは
+       * 参照しない（最後まで返ってきている）。
+       */
+      cancelledByUser?: boolean | undefined;
     }
-  | { ok: false; reason: string };
+  | {
+      ok: false;
+      reason: string;
+      /**
+       * 利用者が停止した結果の終了か（Issue #940）。回答が1件も出ないまま止めた場合が
+       * これにあたる。失敗と同じ見た目にしないために、呼び出し側がここで見分ける。
+       */
+      cancelledByUser?: boolean | undefined;
+    };
 
 /**
  * ログに出す背景の状態（Issue #944）。
@@ -155,6 +178,8 @@ export async function runSecondOpinion(
         logPrefix: SECOND_OPINION_LOG_PREFIX,
         // 打ち切られても、そこまでの回答は捨てない（Issue #907）
         partialOnTimeout: true,
+        // 利用者による停止（Issue #940）。渡さなければ内部タイマーだけが打ち切りを起こす
+        signal: request.signal,
       },
     );
     if (response.trim() === '') {
@@ -170,33 +195,103 @@ export async function runSecondOpinion(
       );
       return { ok: true, response: e.partialText, partialReason: e.message };
     }
+    // 利用者が止めた場合も同じ扱い（Issue #940）。ただし理由は型で見分け、表示では
+    // タイムアウトと区別する（止めた本人にタイムアウトと読ませない）
+    if (e instanceof SingleTurnCancelledError) {
+      if (e.partialText !== undefined) {
+        log?.info(
+          `${SECOND_OPINION_LOG_PREFIX} cancelled partial=yes responseChars=${e.partialText.length}`,
+        );
+        return {
+          ok: true,
+          response: e.partialText,
+          partialReason: e.message,
+          cancelledByUser: true,
+        };
+      }
+      log?.info(`${SECOND_OPINION_LOG_PREFIX} cancelled partial=no`);
+      return { ok: false, reason: e.message, cancelledByUser: true };
+    }
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }
 }
 
+/** 走っている実行1回分。`SecondOpinionRegistry` が親セッションごとに1つだけ持つ。 */
+interface RunningSecondOpinion {
+  /** この実行の識別子（Issue #940）。会話へ残す項目のidと同じ値を使う。 */
+  runId: string;
+  /** 実行全体（会話の要約＋本体）を打ち切る。何度呼んでも安全であること。 */
+  cancel: () => void;
+}
+
 /**
- * 親セッションごとの実行中管理（受入基準8）。
+ * 親セッションごとの実行中管理（Issue #894 受入基準8）と、実行の停止（Issue #940）。
  *
  * 同じ親セッションからの重複起動だけを止める。別の親セッションからの同時実行は
- * 止めない（グローバルに1本へ絞る理由が無い）。
+ * 止めない（グローバルに1本へ絞る理由が無い）。ある会話の停止操作が、別の会話で走って
+ * いる実行に触れることも無い。
+ *
+ * 持つのは `TaskSession` ではなく**実行1回分のキャンセルハンドル**である（Issue #940）。
+ * 1回のセカンドオピニオンは「会話の要約セッション → 本体のセッション」の順に最大2つの
+ * セッションを開くため、`TaskSession` を持たせる形にすると、要約中（本体がまだ無い区間）を
+ * 止められない。止める単位はセッションではなく実行そのものとする。
+ *
+ * 登録は `(parentSessionId, runId)` の組で行う。`runId` を持たないと、
+ * 「止める → すぐ次を始める → 前の実行の後始末が走る」の順で、**後から始めた実行の登録を
+ * 前の実行が消してしまう**（同じ `parentSessionId` を消すため）。会話に残った古い項目から
+ * 遅れて届いた停止操作が、後から始めた実行を止めてしまう問題も同じ根による。
  */
 export class SecondOpinionRegistry {
-  private readonly running = new Set<string>();
+  private readonly running = new Map<string, RunningSecondOpinion>();
 
   isRunning(parentSessionId: string): boolean {
     return this.running.has(parentSessionId);
   }
 
-  /** 開始できたら `true`。既に走っていれば `false`（呼び出し側は起動しない）。 */
-  begin(parentSessionId: string): boolean {
+  /**
+   * 開始できたら `true`。既に走っていれば `false`（呼び出し側は起動しない）。
+   *
+   * `cancel` は実行全体を打ち切るハンドル。`AbortController.abort()` のように、
+   * 複数回呼ばれても安全なものを渡すこと（停止操作の多重押下・停止と後始末の競合で
+   * 実際に複数回呼ばれうる）。
+   */
+  begin(parentSessionId: string, runId: string, cancel: () => void): boolean {
     if (this.running.has(parentSessionId)) {
       return false;
     }
-    this.running.add(parentSessionId);
+    this.running.set(parentSessionId, { runId, cancel });
     return true;
   }
 
-  end(parentSessionId: string): void {
-    this.running.delete(parentSessionId);
+  /**
+   * 走っている実行を止める。止める対象を指定できたら `true`。
+   *
+   * `runId` が現在走っている実行と一致するときだけ止める。会話に残った古い項目の
+   * 停止操作が、後から始めた別の実行を止めてはならない。
+   *
+   * **ここでは登録を消さない。** 消すのは実行側の後始末（`end`）である。停止を要求しても
+   * 実行はまだ決着していない（`runSingleTurnTask` の `settle()` を通り、`finally` で
+   * セッションを閉じるまで走る）。ここで消すと、その短い間に次の実行を始められてしまい、
+   * 前の実行の後始末が後から効いて状態が食い違う。
+   */
+  cancel(parentSessionId: string, runId: string): boolean {
+    const entry = this.running.get(parentSessionId);
+    if (entry === undefined || entry.runId !== runId) {
+      return false;
+    }
+    entry.cancel();
+    return true;
+  }
+
+  /**
+   * 実行の後始末。`runId` が一致するときだけ消す。
+   *
+   * 古い実行の `finally` が、後から始まった実行の登録を消さないようにする（Issue #940）。
+   */
+  end(parentSessionId: string, runId: string): void {
+    const entry = this.running.get(parentSessionId);
+    if (entry !== undefined && entry.runId === runId) {
+      this.running.delete(parentSessionId);
+    }
   }
 }

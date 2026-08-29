@@ -464,8 +464,9 @@ describe('chatScript', () => {
     });
 
     it('状態のラベルと色の割り当てが食い違っていない', () => {
-      // ラベルを足したのに色を割り当て忘れる、を防ぐ。成否でない3つだけが対象外
-      const uncolored = ['completed', 'approved', 'interacted'];
+      // ラベルを足したのに色を割り当て忘れる、を防ぐ。成否でない4つだけが対象外
+      // （cancelled は利用者が止めた結果であり失敗ではない。Issue #940）
+      const uncolored = ['completed', 'approved', 'interacted', 'cancelled'];
       const expected = keysOf('STATUS_LABEL').filter((key) => !uncolored.includes(key));
       expect(keysOf('STATUS_CLASS').sort()).toEqual(expected.sort());
     });

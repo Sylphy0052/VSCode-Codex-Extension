@@ -311,16 +311,49 @@ describe('runSecondOpinion（Issue #894）', () => {
   });
 });
 
-describe('SecondOpinionRegistry（Issue #894）', () => {
+describe('SecondOpinionRegistry（Issue #894 / #940）', () => {
+  const noopCancel = (): void => {};
+
   it('同じ親セッションからの重複起動を止め、終了後は再び開始できる', () => {
     const registry = new SecondOpinionRegistry();
-    expect(registry.begin('parent-a')).toBe(true);
-    expect(registry.begin('parent-a')).toBe(false);
+    expect(registry.begin('parent-a', 'run-1', noopCancel)).toBe(true);
+    expect(registry.begin('parent-a', 'run-2', noopCancel)).toBe(false);
     // 別の親セッションは止めない（グローバル1本制限は設けない）
-    expect(registry.begin('parent-b')).toBe(true);
-    registry.end('parent-a');
+    expect(registry.begin('parent-b', 'run-3', noopCancel)).toBe(true);
+    registry.end('parent-a', 'run-1');
     expect(registry.isRunning('parent-a')).toBe(false);
-    expect(registry.begin('parent-a')).toBe(true);
+    expect(registry.begin('parent-a', 'run-4', noopCancel)).toBe(true);
+  });
+
+  it('cancel() は runId が一致する実行だけを止め、登録は消さない（Issue #940）', () => {
+    const cancelled: string[] = [];
+    const registry = new SecondOpinionRegistry();
+    registry.begin('parent-a', 'run-1', () => cancelled.push('run-1'));
+
+    // 別の実行のidでは止まらない（会話に残る古い項目から遅れて届く停止操作）
+    expect(registry.cancel('parent-a', 'run-0')).toBe(false);
+    // 走っていない親セッションでも何も起きない
+    expect(registry.cancel('parent-b', 'run-1')).toBe(false);
+    expect(cancelled).toEqual([]);
+
+    expect(registry.cancel('parent-a', 'run-1')).toBe(true);
+    expect(cancelled).toEqual(['run-1']);
+    // 決着は実行側が付ける。停止を要求しただけでは解放しない
+    expect(registry.isRunning('parent-a')).toBe(true);
+  });
+
+  it('古い実行の end() は、後から始まった実行の登録を消さない（Issue #940）', () => {
+    const registry = new SecondOpinionRegistry();
+    registry.begin('parent-a', 'run-1', noopCancel);
+    registry.end('parent-a', 'run-1');
+    registry.begin('parent-a', 'run-2', noopCancel);
+
+    // 止めた実行の後始末が遅れて届く経路
+    registry.end('parent-a', 'run-1');
+    expect(registry.isRunning('parent-a')).toBe(true);
+    // 新しい実行は自分のidでだけ解放できる
+    registry.end('parent-a', 'run-2');
+    expect(registry.isRunning('parent-a')).toBe(false);
   });
 });
 

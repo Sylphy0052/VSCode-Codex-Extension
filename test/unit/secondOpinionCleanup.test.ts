@@ -208,7 +208,7 @@ describe('startSecondOpinion の実行中フラグ（Issue #926 B）', () => {
     ).rejects.toThrow('パネルは破棄済みです');
 
     expect(registry.isRunning('parent-a')).toBe(false);
-    expect(registry.begin('parent-a')).toBe(true);
+    expect(registry.begin('parent-a', 'run-next', () => {})).toBe(true);
   });
 
   it('finally の setRunning() が投げても registry の解除は済んでいる', async () => {

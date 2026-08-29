@@ -88,7 +88,7 @@ import {
 } from '../codex/reviewTarget';
 import { buildSideQuestionForkParams } from '../codex/sideQuestion';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
-import { startSecondOpinion } from './secondOpinionCommand';
+import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -1156,6 +1156,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'secondOpinion') {
         await this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'secondOpinionStop' && typeof m['itemId'] === 'string') {
+        // 会話の項目から止める（Issue #940）。タブを開かない設定でもここから止まる
+        stopSecondOpinion(
+          entry.secondOpinionKey,
+          this.secondOpinionRegistry,
+          m['itemId'],
+          this.log,
+        );
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
