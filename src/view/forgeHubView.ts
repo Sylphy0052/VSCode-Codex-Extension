@@ -60,7 +60,9 @@ export class ForgeHubViewManager implements vscode.Disposable {
         this.issues = [];
       });
       this.panel.webview.html = render(this.panel.webview);
-      this.panel.webview.onDidReceiveMessage((message: unknown) => void this.receive(message));
+      this.panel.webview.onDidReceiveMessage(
+        (message: unknown) => void this.receiveSafely(message),
+      );
     } else {
       this.panel.reveal();
     }
@@ -96,6 +98,32 @@ export class ForgeHubViewManager implements vscode.Disposable {
       this.postSnapshot();
     } finally {
       this.refreshing = false;
+    }
+  }
+
+  /**
+   * `receive`が投げても、要求に対する結果を必ず1回返す（Issue #978）。
+   *
+   * 画面は結果が返るまで押したボタンを無効にしている。ここで例外を握り潰すと、
+   * ボタンがWebviewを閉じるまで無効のまま戻らない。
+   */
+  private async receiveSafely(message: unknown): Promise<void> {
+    try {
+      await this.receive(message);
+    } catch (error) {
+      if (!isRecord(message)) return;
+      const requestType = typeof message['type'] === 'string' ? message['type'] : undefined;
+      const resultType =
+        requestType === undefined ? undefined : RESULT_TYPE_BY_REQUEST[requestType];
+      if (resultType === undefined) return;
+      this.post({
+        type: resultType,
+        ok: false,
+        message:
+          '処理中に想定外のエラーが発生しました: ' +
+          (error instanceof Error ? error.message : String(error)),
+        requestId: readRequestId(message),
+      });
     }
   }
 
@@ -455,6 +483,14 @@ export class ForgeHubViewManager implements vscode.Disposable {
  * 画面側で判別できない。確認の無い`refreshCi`は複数のカードで続けて押せるうえ、
  * 応答の順序も保証されない。
  */
+/** 要求の種類と、その要求に対して画面が待っている結果の型の対応（Issue #978）。 */
+const RESULT_TYPE_BY_REQUEST: Record<string, string> = {
+  startIssue: 'startResult',
+  createIssue: 'issueResult',
+  createDraftPullRequest: 'pullRequestResult',
+  refreshCi: 'ciResult',
+};
+
 function readRequestId(message: Record<string, unknown>): string | undefined {
   const value = message['requestId'];
   return typeof value === 'string' ? value : undefined;
