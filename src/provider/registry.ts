@@ -51,6 +51,13 @@ export class ProviderRegistry {
               `${provider.label} の一覧構築: 壊れた行 ${result.skippedIndexLines} / 実体なし ${result.unresolved}`,
             );
           }
+          // 派生スレッドの除外だけで0件になった場合、黙って履歴が空になるのを防ぐ（issue #943）
+          const filteredOut = result.filteredOut ?? 0;
+          if (result.sessions.length === 0 && filteredOut > 0) {
+            log.warn(
+              `${provider.label} の一覧構築: 派生スレッドとして ${filteredOut} 件を除外し、表示できるセッションが残りませんでした`,
+            );
+          }
           // thread/listが使えず（未接続・空応答・エラー）ファイル読みへ退避した場合、
           // 黙って表示が変わらないよう理由を出力パネルに残す（issue #45）
           if (result.threadListFallbackReason !== undefined) {

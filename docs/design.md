@@ -136,6 +136,8 @@ test/
 
 **収録規則（スパイクで確認済み）**: このindexは全セッションを含まない。`session_meta.thread_source == "user"` のセッションのみが載り、`thread_source: "subagent"` や `source: "exec"` の非対話セッションは載らない。本拡張機能が起動するのはユーザー起点の対話セッションなので一覧のソースとして妥当だが、「sessionsディレクトリのファイル数 ≠ index行数」である点を実装時に前提としてよい。
 
+**0.148.0での変化（issue #943）**: codex-cli 0.148.0 では `session_meta` に `thread_source` が書かれなくなり、`session_index.jsonl` にもこのキーは無い（キーは `id` / `thread_name` / `updated_at` の3つ）。そのため「`thread_source` が `user` のものだけが載る」という上記の収録規則は、現行版では判定材料そのものが存在しない。未設定を除外扱いにすると一覧が丸ごと空になるため、判定は「明示的に `user` 以外のときだけ除く」に改めてある（§4.4）。
+
 ### 4.2 `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`（退避経路）
 
 **1行目のみ**を読む。全文パースは不要。
@@ -169,7 +171,7 @@ test/
 
 - 並び順は index の `updated_at`。無ければファイルの更新時刻で代用する
 - 表示名は index の `thread_name`。無ければ先頭40行から最初の指示を拾う
-- `thread_source` が `user` でない派生スレッドは出さない
+- `thread_source` が明示的に `user` 以外の値（`subagent` など）を持つ派生スレッドは出さない。未設定は除外しない（codex-cli 0.148.0 では書かれないため。issue #943、§4.4）
 - indexにあるのにロールアウトが消えているものは、cwdが判らず開けないので出さない（`unresolved` として数える）
 
 **最初の指示の在り処は入口で異なる**。TUI経由は `event_msg` の `user_message` に入るが、チャット画面（app-server）経由のセッションにはこれが無く、`response_item` の `message`（role=user）だけが残る。後者は `turn_context` より前に AGENTS.md などの前置きが同じ形で入るため、`turn_context` 以降の最初の1件を採る。
@@ -196,7 +198,7 @@ app-serverのJSON-RPC。`AppServerClient.listThreads(limit, archivedSessionsDir)
 - `updatedAt` ← `updatedAt`。**実測でUnix epoch秒（数値）**。ISO8601文字列で来た場合も念のため受け付ける。読めなければそのエントリ自体を除く
 - `cwd` ← `cwd`。空文字は `undefined` にする
 - `archived` ← `archived` に相当するフィールドが応答に無いため、`path` が `archivedSessionsDir`（`CodexPaths.archivedSessions`）配下かどうかで判定する。ファイル読み経路（§4.2）と同じ考え方
-- `threadSource` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドのみ除く。実測（§14.28、`thread/list` を `{limit:100}` で全件ページングし尽くした33件）では `threadSource` は**全件 `null`** だったため、`null` / 未設定は除外せず一覧に含める（issue #224）。当初は `threadSource !== 'user'` で絞り込んでいたが、これだと `null` も除外対象になり、実データでは全件が落ちて `thread/list` 経由の一覧が常に空になっていた。ファイル読み経路の収録規則（§4.1「収録規則」）は `session_index.jsonl` 側の `thread_source` に実値が入るため `=== 'user'` の絞り込みのままで正しく、`thread/list` 側だけこの条件になる
+- `threadSource` が明示的に `'user'` 以外の値（`'subagent'` など）を持つ派生スレッドのみ除く。実測（§14.28、`thread/list` を `{limit:100}` で全件ページングし尽くした33件）では `threadSource` は**全件 `null`** だったため、`null` / 未設定は除外せず一覧に含める（issue #224）。当初は `threadSource !== 'user'` で絞り込んでいたが、これだと `null` も除外対象になり、実データでは全件が落ちて `thread/list` 経由の一覧が常に空になっていた。ファイル読み経路（`sessionMeta.isUserThread`）も同じ規則で判定する。あちらが見ているのは `session_index.jsonl` ではなくロールアウト1行目の `session_meta` で、codex-cli 0.148.0 ではそこに `thread_source` が無い。当初はファイル読み経路だけ `=== 'user'` の絞り込みを残していたが、それだと未設定が全件落ちてファイル読み経路の一覧が常に空になっていた（issue #943）。現在は両経路とも同じ条件で揃えてある
 
 **既知の簡略化**: `limit` はサーバーへの要求件数の上限であり、`threadSource` やワークスペーススコープでの絞り込みは正規化・`SessionStore` 側で後から行う。そのため、絞り込み後の件数が `maxEntries` より少なくなることがある（ファイル読み経路は絞り込み後もロールアウトの実在を全件走査するため、この制約が無い）。実用上は問題になりにくいと考えているが、体感で件数が足りないという報告があれば見直す。
 
