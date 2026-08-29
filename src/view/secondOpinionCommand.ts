@@ -65,6 +65,7 @@ import {
 } from '../secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
 import { summarizeConversation } from '../secondOpinion/summary';
+import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinion/wait';
 
 /**
@@ -90,6 +91,13 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
    * 組み立てたものを読むだけ（親のターンを1つも使わない。受入基準3）。
    */
   conversationTranscript(): string;
+  /**
+   * 要約セッションのrolloutを消すための口（Issue #942）。
+   *
+   * 要約セッションは親会話の複製をディスクへ残すが、その複製は一時ディレクトリのcwdを
+   * 持つため拡張の履歴一覧に出ない。渡されたときだけ後始末する（未設定なら何もしない）。
+   */
+  summaryRollout?: SummaryRolloutDeps | undefined;
   /** 会話へ1項目として残す/更新する。 */
   note(id: string, display: SecondOpinionDisplay): void;
   /** webviewのボタンの押下可否を切り替える。 */
@@ -290,6 +298,7 @@ async function buildConversationSummary(
           // 要約中に止められることがある（Issue #940）。本体より前の直列区間なので、
           // 待ち時間としてはここが一番長くなることもある
           signal,
+          rollout: port.summaryRollout,
         },
         log,
       ),

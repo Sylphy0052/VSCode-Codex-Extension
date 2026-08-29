@@ -20,6 +20,7 @@ import { SANDBOX_MODES } from '../codex/types';
 import type { ApprovalMode } from '../codex/types';
 import { runSingleTurnTask, SingleTurnCancelledError } from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
+import { removeSummaryRollout, type SummaryRolloutDeps } from './summaryRollout';
 
 /** 要約セッションの権限。セカンドオピニオン本体と同じく読み取りだけで固定する。 */
 const SUMMARY_APPROVAL_MODE: ApprovalMode = 'never';
@@ -189,6 +190,14 @@ export interface ConversationSummaryRequest {
    * この区間で止められることが現実にある。実行1回分のキャンセルハンドルがそのまま渡る。
    */
   signal?: AbortSignal | undefined;
+  /**
+   * 要約セッションのrolloutを消すための口（Issue #942）。省略すると消さない。
+   *
+   * 消さない場合、親会話の複製がCLIのrolloutとしてディスクへ残る。拡張の履歴一覧には
+   * 出ないため、利用者はその存在を知る手段も消す手段も持たない。`vscode`にも
+   * `CodexPaths`にも依存しないよう、走査と削除はview層から渡す。
+   */
+  rollout?: SummaryRolloutDeps | undefined;
 }
 
 export type ConversationSummaryResult =
@@ -236,6 +245,8 @@ export async function summarizeConversation(
   if (isolatedDir === undefined) {
     return { ok: false, reason: '要約用の隔離ディレクトリを作れませんでした' };
   }
+  // rolloutを消すために、開いたセッションのidを覚えておく（Issue #942）
+  let summarySessionId: string | undefined;
   try {
     const response = await runSingleTurnTask(
       host,
@@ -251,6 +262,9 @@ export async function summarizeConversation(
         logPrefix: SUMMARY_LOG_PREFIX,
         // 利用者が止めたら要約も打ち切る（Issue #940）
         signal: request.signal,
+        onSessionOpened: (session) => {
+          summarySessionId = session.sessionId;
+        },
       },
     );
     if (response.trim() === '') {
@@ -273,5 +287,46 @@ export async function summarizeConversation(
         }`,
       );
     });
+    // 一時ディレクトリと同じく、成功・失敗・打ち切りのいずれでも消す（Issue #942）。
+    // 消すのは`runSingleTurnTask`が`dispose()`を終えたあと——CLIが書き終える前に消しに
+    // 行くと、消したつもりで残る
+    await discardSummaryRollout(summarySessionId, request.rollout, log);
   }
+}
+
+/**
+ * 要約セッションのrolloutを消す（Issue #942）。
+ *
+ * 消せなかったことは要約の失敗ではない（要約はもう手元にある）。**結果はログにだけ残す。**
+ * ここで例外を投げると、要約は取れているのに`finally`から抜けられなくなる。
+ */
+async function discardSummaryRollout(
+  sessionId: string | undefined,
+  deps: SummaryRolloutDeps | undefined,
+  log?: Logger,
+): Promise<void> {
+  if (deps === undefined) {
+    return;
+  }
+  if (sessionId === undefined) {
+    // セッションを開く前に打ち切られた場合。rollout自体が無いので消すものも無い
+    return;
+  }
+  const outcome = await removeSummaryRollout(sessionId, deps).catch((e: unknown) => {
+    log?.warn(
+      `${SUMMARY_LOG_PREFIX} rolloutの削除で例外が出ました: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return 'failed' as const;
+  });
+  if (outcome === 'removed') {
+    log?.info(`${SUMMARY_LOG_PREFIX} 要約セッションのrolloutを削除しました`);
+    return;
+  }
+  // 残った場合は、会話の複製がディスクに残り続ける。**黙って残さない**
+  log?.warn(
+    `${SUMMARY_LOG_PREFIX} 要約セッションのrolloutが残っている可能性があります（${outcome}）。` +
+      'CODEX_HOME/sessions を確認してください',
+  );
 }

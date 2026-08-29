@@ -527,6 +527,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // Claude側の管理クラスはCodexのホストを持たないため、ここで注入する（統合テストからの
   // 差し替えも効くよう`overridableHost`を通す）
   claudeChat.setSecondOpinionHost(overridableHost('codex', chat));
+  // 要約セッションのrolloutもCodex側に書かれるため、後始末の口も同じくここで渡す（Issue #942）
+  claudeChat.setSummaryRollout(chat.summaryRolloutDeps());
 
   const workflowRunner = new WorkflowRunner({
     hosts: {

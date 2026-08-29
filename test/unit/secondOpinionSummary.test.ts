@@ -305,3 +305,77 @@ describe('normalizeSecondOpinionSummary（Issue #903）', () => {
     expect(result.warnings[0]).toContain('effort');
   });
 });
+
+/**
+ * 要約セッションのrolloutの後始末（Issue #942）。
+ *
+ * 見張るのは「消しに行くのが`dispose()`のあとであること」と「消せなくても要約は返ること」。
+ * 照合そのもの（ファイル名とsession_metaの二重一致）は `summaryRollout.test.ts` 側で見る。
+ */
+describe('要約セッションのrollout後始末（Issue #942）', () => {
+  const ROLLOUT = '/sessions/2026/08/29/rollout-2026-08-29T00-00-00-summary-session.jsonl';
+  const META = JSON.stringify({
+    type: 'session_meta',
+    payload: { session_id: 'summary-session', cwd: '/tmp/x', timestamp: '2026-08-29T00:00:00Z' },
+  });
+
+  it('要約が終わったあとに、そのセッションのrolloutを消す', async () => {
+    const host = new FakeHost();
+    const removed: string[] = [];
+    let disposeCallsWhenRemoved = -1;
+
+    const result = await summarizeConversation(host, {
+      model: 'gpt-5.6-sol',
+      effort: 'low',
+      conversation: CONVERSATION,
+      rollout: {
+        sessionsDir: '/sessions',
+        listRollouts: async () => [ROLLOUT],
+        readFirstLine: async () => META,
+        removeFile: async (filePath) => {
+          removed.push(filePath);
+          disposeCallsWhenRemoved = host.sessions[0]?.disposeCalls ?? -1;
+        },
+      },
+    });
+
+    expect(result).toEqual({ ok: true, summary: '要約です' });
+    expect(removed).toEqual([ROLLOUT]);
+    // CLIが書き終える前に消しに行かないよう、`dispose()`より後であること
+    expect(disposeCallsWhenRemoved).toBe(1);
+  });
+
+  it('rolloutを消せなくても要約は返る', async () => {
+    const host = new FakeHost();
+
+    const result = await summarizeConversation(host, {
+      model: 'gpt-5.6-sol',
+      effort: 'low',
+      conversation: CONVERSATION,
+      rollout: {
+        sessionsDir: '/sessions',
+        listRollouts: async () => {
+          throw new Error('ENOENT');
+        },
+        readFirstLine: async () => undefined,
+        removeFile: async () => {
+          throw new Error('never called');
+        },
+      },
+    });
+
+    expect(result).toEqual({ ok: true, summary: '要約です' });
+  });
+
+  it('後始末の口を渡さなければ何もしない', async () => {
+    const host = new FakeHost();
+
+    const result = await summarizeConversation(host, {
+      model: 'gpt-5.6-sol',
+      effort: 'low',
+      conversation: CONVERSATION,
+    });
+
+    expect(result).toEqual({ ok: true, summary: '要約です' });
+  });
+});
