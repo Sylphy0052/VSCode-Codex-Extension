@@ -169,6 +169,10 @@ function throwingPort(overrides: Partial<SecondOpinionPanelPort> = {}): SecondOp
       throw new Error('パネルは破棄済みです');
     },
     setRunning: () => {},
+    isBusy: () => false,
+    generateRequestText: async () => {
+      throw new Error('既定モードでは質問文の組み立ては呼ばれない');
+    },
     ...overrides,
   };
 }

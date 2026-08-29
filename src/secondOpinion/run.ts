@@ -16,6 +16,7 @@ import { runSingleTurnTask, SingleTurnTimeoutError } from '../orchestrator/plann
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
 import {
+  buildAskGptSecondOpinionPrompt,
   buildSecondOpinionPrompt,
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
@@ -87,6 +88,14 @@ export interface SecondOpinionRequest {
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
+  /**
+   * askGptモード（Issue #947）で、親セッションが組み立てた質問文。
+   *
+   * 渡された場合、Advisorへ送るのはこの本文と拡張機能側の固定指示だけになる。`artifact` と
+   * `conversationSummary` は組み立てに使わない（背景も追加資料も、質問文の中に含まれている
+   * 前提のため。受入基準3）。
+   */
+  askGptRequestText?: string | undefined;
 }
 
 export type SecondOpinionResult =
@@ -126,17 +135,21 @@ export async function runSecondOpinion(
   request: SecondOpinionRequest,
   log?: Logger,
 ): Promise<SecondOpinionResult> {
-  const prompt = buildSecondOpinionPrompt({
-    userRequest: request.request,
-    artifact: request.artifact,
-    conversationSummary: request.conversationSummary,
-    conversationBackgroundKind: request.conversationBackgroundKind,
-  });
+  const prompt =
+    request.askGptRequestText === undefined
+      ? buildSecondOpinionPrompt({
+          userRequest: request.request,
+          artifact: request.artifact,
+          conversationSummary: request.conversationSummary,
+          conversationBackgroundKind: request.conversationBackgroundKind,
+        })
+      : buildAskGptSecondOpinionPrompt(request.askGptRequestText);
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
   log?.info(
     `${SECOND_OPINION_LOG_PREFIX} start provider=codex model=${request.candidate.model} ` +
       `effort=${request.candidate.effort} headless=${String(request.headless)} ` +
+      `mode=${request.askGptRequestText === undefined ? 'direct' : 'askGpt'} ` +
       `artifact=${request.artifact.kind} ` +
       `summary=${describeBackgroundForLog(request)} ` +
       `promptChars=${prompt.length}`,

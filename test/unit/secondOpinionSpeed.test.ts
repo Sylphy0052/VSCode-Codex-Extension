@@ -93,6 +93,10 @@ function port(transcript: string): SecondOpinionPanelPort {
       notes.push(display);
     },
     setRunning: () => undefined,
+    isBusy: () => false,
+    generateRequestText: async () => {
+      throw new Error('既定モードでは質問文の組み立ては呼ばれない');
+    },
   };
 }
 

@@ -862,6 +862,23 @@
           "scope": "window",
           "markdownDescription": "セカンドオピニオンの依頼文の既定値。実行のたびに編集できる。"
         },
+        "agent.secondOpinion.mode": {
+          "type": "string",
+          "enum": ["direct", "askGpt"],
+          "enumDescriptions": [
+            "拡張機能が集めた材料（依頼文・背景要約・差分スナップショット）をそのまま渡す",
+            "いま作業しているAI自身に、単体で読める質問文を組み立てさせてから渡す"
+          ],
+          "default": "direct",
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンへ渡す材料の作り方。`askGpt` では、作業中のAIが会話の流れとリポジトリの中身を踏まえて8項目（目的・質問・背景・環境・関連コード全文・試したこと・制約・期待する回答形式）の質問文を作り、それだけを相談相手へ送る。会話の要約は使わず、追加資料の選択も出ない。"
+        },
+        "agent.secondOpinion.askGpt.confirm": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "`agent.secondOpinion.mode` が `askGpt` のとき、組み立てられた質問文を送信前に開いて確認・編集できるようにする。`false` にすると確認なしでそのまま送る。"
+        },
         "agent.chat.turnSummary.enabled": {
           "type": "boolean",
           "default": false,

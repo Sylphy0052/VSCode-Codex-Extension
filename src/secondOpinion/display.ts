@@ -135,6 +135,111 @@ export function partialSecondOpinionDisplay(
 }
 
 /**
+ * askGptモード（Issue #947）の注記。
+ *
+ * 既定モードの注記が「背景を添えたか」を伝えるのに対し、こちらが伝えるべきは
+ * 「渡したのは作業中のAI自身が組み立てた質問文である」こと。同じ独立性でも、資料を
+ * 選んだのが拡張機能なのか作業中のAIなのかで、返ってきた意見の読み方が変わる。
+ */
+const ASK_GPT_NOTE =
+  '作業中のAIとは別セッションの意見です（作業中のAIが組み立てた質問文だけを渡しています）';
+
+/**
+ * askGptモードの実行条件の1行表記。
+ *
+ * 質問文の全文は載せない。関連コードの全文を含むため会話が埋まってしまう。何を送ったかは
+ * 分量で示し、中身は送信前の確認（`agent.secondOpinion.askGpt.confirm`）で見てもらう。
+ */
+function describeAskGptRun(
+  candidate: SecondOpinionCandidate,
+  extras: (string | undefined)[],
+): string {
+  return [
+    `${candidate.model} / ${candidate.effort}`,
+    ...extras.filter((e) => e !== undefined),
+  ].join(' ・ ');
+}
+
+/**
+ * askGptモードの進行中表示。
+ *
+ * `phase` で「質問文を組み立てている」段階と「意見を待っている」段階を書き分ける。生成は
+ * リポジトリの読み取りを伴い、本体と同じくらい待つことがあるため、どちらで待っているのかが
+ * 分からないと止まって見える。
+ */
+export function pendingAskGptDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  phase: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'inProgress',
+    text: `セカンドオピニオンを依頼しました（${candidate.name}）\n\n${request}`,
+    detail: describeAskGptRun(candidate, [phase]),
+  };
+}
+
+/** askGptモードの完了表示。 */
+export function finishedAskGptDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  response: string,
+  requestTextChars: number,
+  redactionNote: string | undefined,
+): SecondOpinionDisplay {
+  return {
+    status: 'completed',
+    text: `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}\n\n**回答**\n\n${response}`,
+    detail: describeAskGptRun(candidate, [
+      ASK_GPT_NOTE,
+      `質問文${requestTextChars.toLocaleString('en-US')}文字`,
+      redactionNote,
+    ]),
+  };
+}
+
+/** askGptモードの、打ち切られてそこまでの回答だけが返ったときの表示。 */
+export function partialAskGptDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  response: string,
+  reason: string,
+  requestTextChars: number,
+  redactionNote: string | undefined,
+): SecondOpinionDisplay {
+  return {
+    status: 'completed',
+    text:
+      `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}\n\n` +
+      `**回答（打ち切り時点まで）**\n\n${response}`,
+    detail: describeAskGptRun(candidate, [
+      `${reason}（ここまでの回答を残しています）`,
+      ASK_GPT_NOTE,
+      `質問文${requestTextChars.toLocaleString('en-US')}文字`,
+      redactionNote,
+    ]),
+  };
+}
+
+/**
+ * askGptモードの失敗表示。
+ *
+ * 質問文の生成に失敗した場合もここへ来る。Advisorを開始していないことが読み取れるよう、
+ * 理由には何の段階で止まったかを含めて渡す（呼び出し側の責務）。
+ */
+export function failedAskGptDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  reason: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'failed',
+    text: `セカンドオピニオン（${candidate.name}）\n\n${request}`,
+    detail: describeAskGptRun(candidate, [reason]),
+  };
+}
+
+/**
  * 失敗・打ち切りの表示。
  *
  * タブを開かない（headless）場合、ここに出さないと人には何も見えない。理由を必ず載せる

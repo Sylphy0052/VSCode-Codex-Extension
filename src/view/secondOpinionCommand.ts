@@ -24,9 +24,20 @@ import type { TaskSessionHost } from '../orchestrator/taskSession';
 import { nodeGitCommandRunner, type GitCommandRunner } from '../orchestrator/worktree';
 import type { SecondOpinionCandidate } from '../secondOpinion/candidates';
 import {
+  buildAskGptRequestInstruction,
+  DEFAULT_ASK_GPT_TEMPLATE,
+  validateAskGptRequestText,
+  type RequestGenerationResult,
+} from '../secondOpinion/askGpt';
+import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
+import {
+  failedAskGptDisplay,
   failedSecondOpinionDisplay,
+  finishedAskGptDisplay,
   finishedSecondOpinionDisplay,
+  partialAskGptDisplay,
   partialSecondOpinionDisplay,
+  pendingAskGptDisplay,
   pendingSecondOpinionDisplay,
   type SecondOpinionDisplay,
   type SecondOpinionSummaryStatus,
@@ -73,6 +84,23 @@ export interface SecondOpinionPanelPort {
   note(id: string, display: SecondOpinionDisplay): void;
   /** webviewのボタンの押下可否を切り替える。 */
   setRunning(running: boolean): void;
+  /**
+   * 親セッションがいまターンを実行中か（Issue #947 受入基準10）。
+   *
+   * askGptモードの生成ターンは、親の会話とワークスペースの両方を材料にする。親が走っている
+   * 最中に読みに行くと、会話は変更前・あるファイルは変更後・別のファイルは変更前という、
+   * どの時点にも存在しなかった状態を質問文へ書き込みうる。既定モードは押下時点の差分を
+   * スナップショットとして固定してこれを避けているが、askGptでは親が何を読むかを事前に
+   * 決められないため、同じ手が使えない。実行中は開始しない。
+   */
+  isBusy(): boolean;
+  /**
+   * 親の文脈を継いだforkで質問文を生成する（Issue #947）。
+   *
+   * 実装はCodexが `thread/fork`（`ephemeral: true`）、Claudeが `-r <id> --fork-session`。
+   * どちらもタブを開かず、親の本流の会話には何も残さない。
+   */
+  generateRequestText(instruction: string, timeoutMs: number): Promise<RequestGenerationResult>;
 }
 
 /**
@@ -307,6 +335,11 @@ export async function startSecondOpinion(
   }
   // 今回だけの上書き。設定の候補（`candidates.ts`）は変えない（Issue #944）
   const candidate: SecondOpinionCandidate = { ...picked, effort };
+  if (config.mode === 'askGpt') {
+    // 追加資料の選択は出さない。何を渡すかは親が質問文の中で決める（Issue #947 受入基準1）
+    await startAskGptSecondOpinion(port, host, registry, log, config, cwd, candidate);
+    return;
+  }
   const artifactKind = await pickArtifactKind(config.summary.enabled);
   if (artifactKind === undefined) {
     return;
@@ -375,6 +408,173 @@ export async function startSecondOpinion(
     registry.end(port.parentSessionId);
     // `setRunning()` は契約上no-opのはずだが、投げても `registry.end()` を巻き添えに
     // しない順（end → setRunning）と、個別のtry/catchの両方で守る
+    try {
+      port.setRunning(false);
+    } catch (e) {
+      log.warn(
+        `[secondOpinion] 実行中表示の解除に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+}
+
+/** 生成が成立しなかった理由の、人向けの主語。詳細はこの後ろへ繋げる。 */
+const GENERATION_FAILURE_LABELS: Record<RequestGenerationResultKind, string> = {
+  busy: '作業中のAIが応答中のため、質問文を組み立てられませんでした',
+  unsupported: 'この会話では質問文を組み立てられませんでした',
+  timeout: '質問文の組み立てが時間内に終わりませんでした',
+  'provider-error': '質問文の組み立てに失敗しました',
+  'invalid-output': '組み立てられた質問文が指定の形式ではありませんでした',
+};
+
+type RequestGenerationResultKind = Exclude<RequestGenerationResult, { ok: true }>['kind'];
+
+/**
+ * 生成された質問文を人へ見せ、送ってよいかを確かめる（Issue #947 受入基準9）。
+ *
+ * untitledのMarkdownとして開き、編集できる状態のまま確認ボタンを出す。ボタンをmodalに
+ * しないのは、modalダイアログが出ている間はエディタを触れず、「編集してから送る」が
+ * できなくなるため。エディタを開いただけ・閉じただけを合図にもしない——開いた直後に読むと
+ * 人が編集する前に送ってしまい、閉じるのを待つと「送るつもり」「やめるつもり」「誤って
+ * 閉じた」を区別できない。明示的な押下だけを送信の合図とする。
+ *
+ * 送るのは押下時点のドキュメント本文であり、開いた時点の文字列ではない（編集結果が送信文に
+ * なることの実体）。
+ */
+async function confirmAskGptRequestText(text: string): Promise<string | undefined> {
+  const doc = await vscode.workspace.openTextDocument({ content: text, language: 'markdown' });
+  await vscode.window.showTextDocument(doc, { preview: false });
+  const picked = await vscode.window.showInformationMessage(
+    'この質問文でセカンドオピニオンへ送りますか？（開いたタブで編集できます。保存は不要です）',
+    '送信',
+    'やめる',
+  );
+  return picked === '送信' ? doc.getText() : undefined;
+}
+
+/**
+ * askGptモード（Issue #947）を走らせる。
+ *
+ * 既定モード（`startSecondOpinion` の後半）との違いは材料の作り方だけで、Advisorの権限も
+ * 結果の差し込み先も同じ。ここが持つのは「親に質問文を作らせ、検証し、確認を取り、伏せてから
+ * 渡す」までの手順である。
+ *
+ * `registry.begin()` を親の生成より前に取るのが要点。あとから取ると、生成を待っている間に
+ * もう一度ボタンを押せてしまい、同じ会話から2本の生成ターンが走る（受入基準11）。
+ */
+async function startAskGptSecondOpinion(
+  port: SecondOpinionPanelPort,
+  host: TaskSessionHost,
+  registry: SecondOpinionRegistry,
+  log: Logger,
+  config: SecondOpinionConfig,
+  cwd: string,
+  candidate: SecondOpinionCandidate,
+): Promise<void> {
+  const request = await vscode.window.showInputBox({
+    title: 'セカンドオピニオンへの依頼',
+    prompt:
+      '聞きたいことを書いてください。関連コード・環境・経緯は、いま作業しているAIが会話とリポジトリから集めて質問文にまとめます',
+    // 既定モードの `agent.secondOpinion.template`（「この変更をレビューしてください」）は
+    // 差分を渡す前提の文言で、askGptには合わない。ここは専用の既定文を使う
+    value: DEFAULT_ASK_GPT_TEMPLATE,
+  });
+  if (request === undefined || request.trim() === '') {
+    return;
+  }
+
+  // 入力を書いている間に走り出していることがあるため、開始の直前にもう一度見る（受入基準10）
+  if (port.isBusy()) {
+    void vscode.window.showInformationMessage(
+      'この会話のAIが応答中です。質問文はその会話とリポジトリを読んで組み立てるため、応答が終わってから実行してください',
+    );
+    return;
+  }
+
+  if (!registry.begin(port.parentSessionId)) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  try {
+    const id = `secondOpinion:${randomUUID()}`;
+    port.setRunning(true);
+    port.note(id, pendingAskGptDisplay(candidate, request, '質問文を組み立てています…'));
+
+    const generated = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Window,
+        title: 'セカンドオピニオンへ送る質問文を組み立てています…',
+      },
+      () => port.generateRequestText(buildAskGptRequestInstruction(request), config.timeoutMs),
+    );
+    if (!generated.ok) {
+      const reason = `${GENERATION_FAILURE_LABELS[generated.kind]}: ${generated.reason}`;
+      log.warn(`[secondOpinion] askGptの質問文を組み立てられませんでした: ${generated.kind}`);
+      port.note(id, failedAskGptDisplay(candidate, request, reason));
+      return;
+    }
+
+    const validated = validateAskGptRequestText(generated.text);
+    if (!validated.ok) {
+      const reason = `${GENERATION_FAILURE_LABELS['invalid-output']}: ${validated.reason}`;
+      log.warn(`[secondOpinion] askGptの質問文が形式を満たしませんでした`);
+      port.note(id, failedAskGptDisplay(candidate, request, reason));
+      return;
+    }
+
+    const confirmed = config.askGpt.confirm
+      ? await confirmAskGptRequestText(validated.text)
+      : validated.text;
+    if (confirmed === undefined || confirmed.trim() === '') {
+      // 人がやめた場合。何を止めたのかが会話に残らないと、押した記録だけが宙に浮く
+      port.note(id, failedAskGptDisplay(candidate, request, '送信を取りやめました'));
+      return;
+    }
+
+    // 送信経路の最後で伏せる（受入基準12）。Advisorのセッションはローカルプロセスだが、
+    // モデルサービスへ送信するクライアントである
+    const redaction = redactCredentials(confirmed);
+    const redactionNote = describeRedaction(redaction);
+    if (redactionNote !== undefined) {
+      log.info(`[secondOpinion] askGpt ${redactionNote}`);
+    }
+
+    port.note(id, pendingAskGptDisplay(candidate, request, '意見を待っています…'));
+    const result = await runSecondOpinion(
+      host,
+      {
+        cwd,
+        candidate,
+        request,
+        // askGptでは追加資料も背景要約も渡さない。材料は質問文の中にある（受入基準3）
+        artifact: { kind: 'none' },
+        headless: config.headless,
+        timeoutMs: config.timeoutMs,
+        askGptRequestText: redaction.text,
+      },
+      log,
+    );
+    const chars = redaction.text.length;
+    if (!result.ok) {
+      log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
+      port.note(id, failedAskGptDisplay(candidate, request, result.reason));
+      return;
+    }
+    port.note(
+      id,
+      result.partialReason === undefined
+        ? finishedAskGptDisplay(candidate, request, result.response, chars, redactionNote)
+        : partialAskGptDisplay(
+            candidate,
+            request,
+            result.response,
+            result.partialReason,
+            chars,
+            redactionNote,
+          ),
+    );
+  } finally {
+    registry.end(port.parentSessionId);
     try {
       port.setRunning(false);
     } catch (e) {
