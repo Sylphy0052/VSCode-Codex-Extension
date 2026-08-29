@@ -18,6 +18,7 @@ import {
   ASK_GPT_LOG_PREFIX,
   ASK_GPT_TAB_TITLE,
   type RequestGenerationResult,
+  type SecondOpinionMode,
 } from '../secondOpinion/askGpt';
 import {
   awaitSingleTurn,
@@ -1015,7 +1016,11 @@ export class ClaudeChatViewManager
    * セッションが起動時点の成果物と依頼文だけを見て評価し、その結果をこの会話へ表示する
    * （この会話へ発言として送り返すことはしない）。
    */
-  private async startSecondOpinionFor(entry: ClaudePanel): Promise<void> {
+  private async startSecondOpinionFor(
+    entry: ClaudePanel,
+    /** 今回だけモードを固定する（Issue #972）。省略時は設定に従う */
+    modeOverride?: SecondOpinionMode,
+  ): Promise<void> {
     const host = this.secondOpinionHost;
     if (host === undefined) {
       void vscode.window.showErrorMessage('セカンドオピニオンの依頼先（Codex）を利用できません');
@@ -1029,6 +1034,7 @@ export class ClaudeChatViewManager
       undefined,
       undefined,
       this.advisorStore,
+      modeOverride,
     );
   }
 
@@ -2010,6 +2016,15 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
+        return;
+      }
+      // モードを固定した入口（Issue #972）。設定は書き換えず、今回の起動だけを固定する
+      if (type === 'secondOpinionDirect') {
+        void this.startSecondOpinionFor(entry, 'direct');
+        return;
+      }
+      if (type === 'secondOpinionAskGpt') {
+        void this.startSecondOpinionFor(entry, 'askGpt');
         return;
       }
       if (type === 'secondOpinionContinue') {

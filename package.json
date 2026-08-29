@@ -750,7 +750,9 @@
               "forgeHub",
               "openProgress",
               "handoffToNewSession",
-              "secondOpinion"
+              "secondOpinion",
+              "secondOpinionDirect",
+              "secondOpinionAskGpt"
             ],
             "enumDescriptions": [
               "画像を添付する",
@@ -769,7 +771,9 @@
               "Forge Hubを開く",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ",
-              "独立したCodexセッションへ意見を求める（セカンドオピニオン）"
+              "独立したCodexセッションへ意見を求める（セカンドオピニオン）",
+              "セカンドオピニオンを、材料をそのまま渡すモード（direct）に固定して実行する",
+              "セカンドオピニオンを、質問文を組み立てて渡すモード（askGpt）に固定して実行する"
             ]
           },
           "default": [
