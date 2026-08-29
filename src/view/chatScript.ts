@@ -2361,7 +2361,9 @@ export function chatScript(
       // 一貫した契約にする——下書きは3欄すべてを入れ替えるため、片方だけ見て発動を
       // 決めると、見ていない欄に書かれた文が黙って消える（issue #961）
       const goalEmpty = goalFieldsEmpty(plan.goal);
-      if (autoGoalEnabled && goalEmpty && plan.initialPrompt.trim() && goalDraftRequest === undefined) {
+      const canDraft =
+        autoGoalEnabled && goalEmpty && plan.initialPrompt.trim() && goalDraftRequest === undefined;
+      if (canDraft) {
         requestGoalDraft(plan.initialPrompt);
         return;
       }
