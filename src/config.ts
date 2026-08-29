@@ -394,6 +394,24 @@ export function readLoopAdvisorConfig(): LoopAdvisorSettings {
 }
 
 /**
+ * ループのAdvisorを使うかを、ユーザー設定へ保存する（issue #994）。
+ *
+ * `enabled` だけでなく `provider` も `codex` へ固定する。この入口の目的は
+ * 「会話しているのとは別のCLIへ進め方を確認させる」ことであり、既定の `inherit` の
+ * ままではどの画面から回したかで相談先が変わってしまう。
+ *
+ * 無効にするときは `provider` を戻さない。`enabled` が `false` の間は参照されないため、
+ * 元の値を覚えておく仕組みを持つほどの意味が無い（切り替えのたびに保存先が増える）。
+ */
+export async function setLoopAdvisorEnabled(enabled: boolean): Promise<void> {
+  const c = vscode.workspace.getConfiguration('agent');
+  await c.update('chat.loopAdvisor.enabled', enabled, vscode.ConfigurationTarget.Global);
+  if (enabled) {
+    await c.update('chat.loopAdvisor.provider', 'codex', vscode.ConfigurationTarget.Global);
+  }
+}
+
+/**
  * 一文からゴール定義の下書きを作る準備ターンの設定を読む（issue #958）。
  *
  * 既定は有効。ただし走るのは**目的も受入基準も継続指示も空**のとき、つまり従来なら

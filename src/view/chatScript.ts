@@ -2993,6 +2993,20 @@ export function chatScript(
     button.querySelector('.composerOverflowLabel').textContent = 'ループエンジニアリングを' + action;
   }
 
+  el('loopAdvisorToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleLoopAdvisor' }),
+  );
+
+  // ループのAdvisor（issue #957）の有効・無効。ループエンジニアリングと同じ形のトグルだが、
+  // 切り替えるのは送信テキストではなく、毎ターン別のAIを呼ぶかどうか（issue #994）
+  function applyLoopAdvisorEnabled(enabled) {
+    const button = el('loopAdvisorToggle');
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', 'ループAdvisorを' + action);
+    button.querySelector('.composerOverflowLabel').textContent = 'ループAdvisorを' + action;
+  }
+
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
    * 中に実体をそのまま置いてあり、hidden属性で表と行き来させているだけなので、
@@ -3308,6 +3322,9 @@ export function chatScript(
     }
     if (data.type === 'loopEngineering' && typeof data.enabled === 'boolean') {
       applyLoopEngineeringEnabled(data.enabled);
+    }
+    if (data.type === 'loopAdvisor' && typeof data.enabled === 'boolean') {
+      applyLoopAdvisorEnabled(data.enabled);
     }
     if (data.type === 'loopAutoGoal' && typeof data.enabled === 'boolean') {
       autoGoalEnabled = data.enabled;
