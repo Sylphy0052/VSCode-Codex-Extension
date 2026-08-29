@@ -99,6 +99,12 @@ describe('redactCredentials: 秘密でない識別子を壊さない（Issue #96
     expect(result.text).toBe(`api_key: ${REDACTION_MARK}`);
   });
 
+  it('クオートされた文字列リテラルは識別子の除外を通さない', () => {
+    // 裸の値は他の識別子への参照だが、文字列リテラルは値そのもの。数字が無くても認証情報でありうる
+    const result = redactCredentials('password = "CorrectHorseBattery"');
+    expect(result.text).toBe(`password = "${REDACTION_MARK}"`);
+  });
+
   it('数字を含む値は識別子に見えても伏せる', () => {
     const result = redactCredentials('access_token = live_key_20260829');
     expect(result.text).toBe(`access_token = ${REDACTION_MARK}`);

@@ -104,9 +104,16 @@ function looksLikeIdentifier(value: string): boolean {
  *
  * 既知の接頭辞（`ghp_` など）は値そのものが発行元を名乗るので迷わず伏せてよいが、キー名からの
  * 推定はキー名が当たっているとは限らない。判定基準を分け、こちらにだけ識別子の除外を足す。
+ *
+ * 識別子の除外はクオートされていない値にだけ効かせる。`const tokenType = access_token;` の
+ * ような裸の値は他の識別子への参照だが、`password = "CorrectHorseBattery"` のような文字列
+ * リテラルは値そのものであり、数字を含まなくても認証情報でありうる。
  */
-function looksLikeAssignedSecret(value: string): boolean {
-  return looksLikeRealSecret(value) && !looksLikeIdentifier(value);
+function looksLikeAssignedSecret(value: string, quoted: boolean): boolean {
+  if (!looksLikeRealSecret(value)) {
+    return false;
+  }
+  return quoted || !looksLikeIdentifier(value);
 }
 
 /**
@@ -167,9 +174,9 @@ const RULES: readonly RedactionRule[] = [
     // `API_KEY=...` もこれまで通り拾える（Issue #963）
     name: '認証情報の代入',
     pattern:
-      /(['"`]?)\b([A-Za-z0-9_-]*(?:api[-_]?key|secret|token|password|passwd|pwd|access[-_]?key|client[-_]?secret|private[-_]?key|credentials?)[A-Za-z0-9_-]*)\b\1(\s*[:=]\s*)(['"`]?)([^\s'"`,;)\]}]+)(['"`]?)/gi,
+      /(['"`]?)\b([A-Za-z0-9_-]*(?:api[-_]?key|secret|token|password|passwd|pwd|access[-_]?key|client[-_]?secret|private[-_]?key|credentials?)[A-Za-z0-9_-]*)\1(\s*[:=]\s*)(['"`]?)([^\s'"`,;)\]}]+)(['"`]?)/gi,
     replace: (all, keyQuote, key, sep, openQuote, value, closeQuote) =>
-      looksLikeAssignedSecret(value)
+      looksLikeAssignedSecret(value, openQuote !== '')
         ? `${keyQuote}${key}${keyQuote}${sep}${openQuote}${REDACTION_MARK}${closeQuote}`
         : all,
   },
