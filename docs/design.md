@@ -4421,7 +4421,9 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 
 #### 回数切れから続ける（issue #284）
 
-回数切れ（`maxReached`）は、**同じ会話・同じworktreeのまま続きを走らせられる**ようにする（Viewの「続ける」。§16.8）。再試行が「最初からやり直す」形しか持たないのは、失敗（`failed`）が「その文脈のまま送り直しても同じところで詰まる」状態だからで、回数切れは違う。作業は正しい方向へ進んでいて、単に送信回数の予算が尽きただけという場合が多く、そこで20回分の文脈を捨てて最初からやり直させるのは無駄が大きい。**同じ理由で停滞（`stalled`）も「続ける」の対象に含めた（§16.27、Issue #336）。停滞はCLIが壊れたわけではなく同じ応答を繰り返しているだけなので、指示を変えれば同じ文脈のまま続けられる余地がある。**
+回数切れ（`maxReached`）は、**同じ会話・同じworktreeのまま続きを走らせられる**ようにする（Viewの「続ける」。§16.8）。再試行が「最初からやり直す」形しか持たないのは、失敗（`failed`）が「その文脈のまま送り直しても同じところで詰まる」状態だからで、回数切れは違う。作業は正しい方向へ進んでいて、単に送信回数の予算が尽きただけという場合が多く、そこでそれまでの文脈を捨てて最初からやり直させるのは無駄が大きい。**同じ理由で停滞（`stalled`）も「続ける」の対象に含めた（§16.27、Issue #336）。停滞はCLIが壊れたわけではなく同じ応答を繰り返しているだけなので、指示を変えれば同じ文脈のまま続けられる余地がある。**
+
+ただし既定の `maxIterations` は3回（`workflow.ts`の`DEFAULT_MAX_ITERATIONS`、Issue #839）であり、上限到達は「その回数では終わらない粒度だった」合図でもある。そのためオーケストレーターへの通知では、`continue_task` / `retry_task` より先に `update_task_prompt` での継続指示の変更を促し、それでも終わる見込みが立たない場合の手段として `add_task` / `remove_task` / `update_task_dependencies` による計画の見直しを挙げる（§16.23）。
 
 - 状態は `failed`（回数切れ）から `running` へ戻す（`continueTask`）。連鎖して `skipped` になった依存先を `pending` へ戻すことと、`haltedByUser` を解除することは手動の再実行と同じ
 - **`retryCount` / `manualRetryCount` は増やさない。** worktreeもブランチも作り直さないため、増やすと名前（`retrySuffixOf`）だけが実体とずれる。`submissionCount` も通算のまま残す（何回送ったかは人が予算を足すかどうかの判断材料になる）
@@ -5640,7 +5642,8 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | run開始                                                                                    | ゴール・タスクid一覧・依存関係・並列枠の要約                                          |
 | タスクが `done`                                                                            | id・所要・直近の応答の1行要約                                                         |
-| タスクが `failed`                                                                          | id・理由（回数切れ／ターン失敗／手動停止）                                            |
+| タスクが `failed`（ターン失敗／手動停止）                                                  | id・理由                                                                              |
+| タスクが回数切れで止まる（`maxReached`。Issue #839）                                       | id・上限に達した旨・`update_task_prompt`を優先し`add_task`/`remove_task`/`update_task_dependencies`で計画を直せる旨（`taskStalled`） |
 | タスクが停滞して止まる（`stalled`。§16.27、Issue #336）                                    | id・停滞した旨・`continue_task`/`retry_task`のどちらでも復帰できる旨（`taskStalled`） |
 | `waitingApproval` へ                                                                       | id・要求の1行要約（`TaskPendingApprovalSnapshot`）                                    |
 | `blocked` へ                                                                               | id・衝突して統合できていない旨                                                        |
@@ -5935,7 +5938,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### オーケストレーターへの通知（既存の通知テーブルへの追加のみ）
 
-新しい直接通知経路は作らず、`runnerOrchestrator.ts`の`buildTaskEvent`の既存`case 'failed':`分岐へ、`failure.kind === 'stalled'`のときだけ`taskFailed`ではなく`taskStalled`（`OrchestratorEventKind`へ追加、`orchestratorSession.ts`）を返す判定を足しただけである。本文は既存の`withSummary`（内部で`lastResponseSummary`を埋め込む）を使い、`wrapEvent`（`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`）による単一のサニタイズ点をそのまま通過する。二重にエスケープしない・素通りもさせない。
+新しい直接通知経路は作らず、`runnerOrchestrator.ts`の`buildTaskEvent`の既存`case 'failed':`分岐へ、`failure.kind === 'stalled'`のときだけ`taskFailed`ではなく`taskStalled`（`OrchestratorEventKind`へ追加、`orchestratorSession.ts`）を返す判定を足しただけである。**Issue #839以降、回数切れ（`maxReached`）も同じ`taskStalled`で通知する。「壊れて失敗したのではなく、続きを試す余地が残っている停止」という点が停滞と共通しているため、種別は増やさず本文で言い分ける（時間切れ`timedOut`・撤退申告`escalated`も同じ扱い）。回数切れの本文では、再試行より計画の調整を優先するよう指示する。**本文は既存の`withSummary`（内部で`lastResponseSummary`を埋め込む）を使い、`wrapEvent`（`escapeAngleBrackets(stripControlCharsPreservingNewlines(...))`）による単一のサニタイズ点をそのまま通過する。二重にエスケープしない・素通りもさせない。
 
 #### ワークフローViewへの表示
 
