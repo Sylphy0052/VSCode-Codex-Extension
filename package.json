@@ -1023,15 +1023,15 @@
             "常に claude で確認する",
             "常に codex で確認する"
           ],
-          "default": "inherit",
+          "default": "codex",
           "scope": "window",
-          "markdownDescription": "Advisorをどのプロバイダで動かすか。評価役と同じ考え方で、既定の `inherit` は会話しているのと同じCLIを使う。Advisorにもツールは渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）。**`claude` / `codex` を明示すると、会話の抜粋（ファイル内容やコマンド出力を含む）が会話とは別のプロバイダへ渡る。** 送信前に資格情報らしき文字列は伏せるが、業務コードそのものは伏せない。"
+          "markdownDescription": "Advisorをどのプロバイダで動かすか。既定は `codex` 固定で、会話しているのがどちらのCLIでも相談先は変わらない（`inherit` にすると会話と同じCLIになるが、それでは画面によって相談先が変わる）。Advisorにもツールは渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）。**会話とは別のプロバイダを指定すると、会話の抜粋（ファイル内容やコマンド出力を含む）がそちらへ渡る。** 送信前に資格情報らしき文字列は伏せるが、業務コードそのものは伏せない。"
         },
         "agent.chat.loopAdvisor.model": {
           "type": "string",
           "default": "auto",
           "scope": "window",
-          "markdownDescription": "Advisorに使うモデル。`auto` なら軽量なモデルに任せる（claude は `haiku`、codex はCLIの既定）。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
+          "markdownDescription": "Advisorに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて解決する（codex は `gpt-5.6-sol`、claude は `haiku`）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
         },
         "agent.chat.loopAdvisor.timeoutSeconds": {
           "type": "number",

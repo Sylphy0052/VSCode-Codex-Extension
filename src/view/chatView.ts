@@ -42,6 +42,8 @@ import {
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
+  readLoopAdvisorConfig,
+  setLoopAdvisorEnabled,
   readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -829,6 +831,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
+      loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
@@ -1390,6 +1393,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const enabled = !readChatLoopEngineeringConfig().enabled;
         await setChatLoopEngineeringEnabled(enabled);
         void entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled });
+        return;
+      }
+      if (type === 'toggleLoopAdvisor') {
+        await setLoopAdvisorEnabled(!readLoopAdvisorConfig().enabled);
+        // 書いたのはGlobalだが、workspace側に上書きがあると実効値は動かない。要求値ではなく
+        // 読み直した値を返し、表示と実際の動作を食い違わせない（issue #994）
+        void entry.panel?.webview.postMessage({
+          type: 'loopAdvisor',
+          enabled: readLoopAdvisorConfig().enabled,
+        });
         return;
       }
       if (type === 'toggleTurnSummary') {

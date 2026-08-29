@@ -62,6 +62,8 @@ import {
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
+  readLoopAdvisorConfig,
+  setLoopAdvisorEnabled,
   readClaudeConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -1516,6 +1518,7 @@ export class ClaudeChatViewManager
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
+      loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
@@ -2204,6 +2207,19 @@ export class ClaudeChatViewManager
         const enabled = !readChatLoopEngineeringConfig().enabled;
         void setChatLoopEngineeringEnabled(enabled)
           .then(() => entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled }))
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleLoopAdvisor') {
+        void setLoopAdvisorEnabled(!readLoopAdvisorConfig().enabled)
+          // 書いたのはGlobalだが、workspace側に上書きがあると実効値は動かない。要求値ではなく
+          // 読み直した値を返し、表示と実際の動作を食い違わせない（issue #994）
+          .then(() =>
+            entry.panel?.webview.postMessage({
+              type: 'loopAdvisor',
+              enabled: readLoopAdvisorConfig().enabled,
+            }),
+          )
           .catch((e: unknown) => this.reportError(e));
         return;
       }
