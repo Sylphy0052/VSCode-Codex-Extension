@@ -44,7 +44,7 @@ interface RedactionRule {
  * 誤った合図だけが残る。
  */
 function looksLikeRealSecret(value: string): boolean {
-  const trimmed = value.trim().replace(/^['"`]|['"`]$/g, '');
+  const trimmed = unquote(value);
   if (trimmed.length < 8) {
     return false;
   }
@@ -63,6 +63,71 @@ function looksLikeRealSecret(value: string): boolean {
   }
   return true;
 }
+
+/** 前後を囲うクオートを1組だけ外す。 */
+function unquote(value: string): string {
+  return value.trim().replace(/^['"`]|['"`]$/g, '');
+}
+
+/** 識別子1語とみなす上限の長さ。これを超える英字だけの値は、単語ではなく乱数列とみなす。 */
+const IDENTIFIER_MAX_LENGTH = 30;
+
+/**
+ * 値が「秘密ではない識別子」に見えるかの判定（Issue #963）。
+ *
+ * `const tokenType = access_token;` の右辺はキー名だけ見れば認証情報に見えるが、実体はただの
+ * 識別子である。ここを伏せると、レビューを頼んだコードが壊れた状態でAdvisorやセカンドオピニオン
+ * に読まれ、誤った判断につながる。伏せ漏れも壊しすぎも、どちらも害がある。
+ *
+ * 線は「数字も記号も無く、区切りかcamelCaseで語が分かれている短い値」に引く。3つとも要る。
+ *
+ * - 数字を含まない: 実在の認証情報はほぼ必ず数字を含む
+ * - 語が分かれている: `abcdefghijklmnop` のような一続きの英字列は単語ではなく乱数列とみなし、
+ *   識別子から外して伏せる側へ倒す（伏せ漏れを避ける）
+ * - 短い: 語に見えても十分に長ければ乱数列かパスフレーズであり、伏せる側へ倒す
+ */
+function looksLikeIdentifier(value: string): boolean {
+  const trimmed = unquote(value);
+  if (trimmed.length > IDENTIFIER_MAX_LENGTH) {
+    return false;
+  }
+  if (!/^[A-Za-z]+(?:[-_.][A-Za-z]+)*$/.test(trimmed)) {
+    return false;
+  }
+  const separated = /[-_.]/.test(trimmed);
+  const camelCase = /[a-z][A-Z]/.test(trimmed);
+  return separated || camelCase;
+}
+
+/**
+ * 「認証情報らしきキーへの代入」の値を伏せるかの判定（Issue #963）。
+ *
+ * 既知の接頭辞（`ghp_` など）は値そのものが発行元を名乗るので迷わず伏せてよいが、キー名からの
+ * 推定はキー名が当たっているとは限らない。判定基準を分け、こちらにだけ識別子の除外を足す。
+ */
+function looksLikeAssignedSecret(value: string): boolean {
+  return looksLikeRealSecret(value) && !looksLikeIdentifier(value);
+}
+
+/**
+ * 値だけで発行元が分かるトークンの形（Issue #963）。
+ *
+ * 完全網羅は原理的にできないので、実際に扱う開発環境で出てくる形を足していく表として持つ。
+ * ここに載る形はキー名が無くても伏せる——値そのものが「これは認証情報だ」と名乗っているため、
+ * 誤検知の心配がほぼ無い。名前からの推定である「認証情報の代入」ルールとは判定基準を分ける。
+ */
+const KNOWN_TOKEN_FORMATS: readonly string[] = [
+  'sk-[A-Za-z0-9_-]{16,}', // OpenAI系
+  'gh[pousr]_[A-Za-z0-9]{20,}', // GitHub（従来形式）
+  'github_pat_[A-Za-z0-9_]{20,}', // GitHub（fine-grained）
+  'glpat-[A-Za-z0-9_-]{20,}', // GitLab personal access token
+  'xox[abposr]-[A-Za-z0-9-]{10,}', // Slack
+  'AKIA[0-9A-Z]{16}', // AWS アクセスキー
+  'ASIA[0-9A-Z]{16}', // AWS 一時アクセスキー（STS）
+  'AIza[A-Za-z0-9_-]{35}', // Google API キー
+  'eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}', // bare JWT
+  'sig=[A-Za-z0-9%+/=]{40,}', // Azure SAS の署名
+];
 
 /**
  * 適用するルール。
@@ -92,17 +157,21 @@ const RULES: readonly RedactionRule[] = [
   {
     // 既知の発行元が持つ接頭辞。キー名が無くても値だけで判別できる
     name: '既知の形式のトークン',
-    pattern:
-      /\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[A-Za-z0-9_-]{35})\b/g,
+    pattern: new RegExp(`\\b(${KNOWN_TOKEN_FORMATS.join('|')})\\b`, 'g'),
     replace: () => REDACTION_MARK,
   },
   {
-    // `API_KEY = "..."` / `password: '...'` 形式の代入。キー名は残して値だけ伏せる
+    // `API_KEY = "..."` / `password: '...'` / `{"api_key": "..."}` 形式の代入。
+    // キー名は残して値だけ伏せる。キー名を囲うクオート（JSON・YAML・JS）は同じ字で閉じる
+    // ことを後方参照で要求する——`\1` は引用が無いとき空文字にマッチするので、素の
+    // `API_KEY=...` もこれまで通り拾える（Issue #963）
     name: '認証情報の代入',
     pattern:
-      /\b([A-Za-z0-9_-]*(?:api[-_]?key|secret|token|password|passwd|pwd|access[-_]?key|client[-_]?secret|private[-_]?key|credentials?)[A-Za-z0-9_-]*)(\s*[:=]\s*)(['"`]?)([^\s'"`,;)\]}]+)(['"`]?)/gi,
-    replace: (all, key, sep, openQuote, value, closeQuote) =>
-      looksLikeRealSecret(value) ? `${key}${sep}${openQuote}${REDACTION_MARK}${closeQuote}` : all,
+      /(['"`]?)\b([A-Za-z0-9_-]*(?:api[-_]?key|secret|token|password|passwd|pwd|access[-_]?key|client[-_]?secret|private[-_]?key|credentials?)[A-Za-z0-9_-]*)\b\1(\s*[:=]\s*)(['"`]?)([^\s'"`,;)\]}]+)(['"`]?)/gi,
+    replace: (all, keyQuote, key, sep, openQuote, value, closeQuote) =>
+      looksLikeAssignedSecret(value)
+        ? `${keyQuote}${key}${keyQuote}${sep}${openQuote}${REDACTION_MARK}${closeQuote}`
+        : all,
   },
 ];
 
