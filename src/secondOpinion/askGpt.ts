@@ -135,6 +135,63 @@ export function buildAskGptRequestInstruction(userRequest: string): string {
 }
 
 /**
+ * 質問文の組み立てを試みる回数の上限（Issue #997）。初回と、形式検証に落ちたときの
+ * 組み立て直し1回で計2回。
+ *
+ * 無制限に回し直さないのは {@link validateAskGptRequestText} のコメントと同じ理由による。
+ * 直らない出力を黙って回し続けると、原因が見えないまま待ち時間だけが伸びる。一方で、
+ * 見出し1行の表記ゆれのために利用者が最初からやり直すのも損が大きい。失敗理由を渡したうえで
+ * 1回だけ試すのが、その両方を避ける落としどころである。
+ */
+export const ASK_GPT_MAX_ATTEMPTS = 2;
+
+/**
+ * 形式検証に落ちたときに、ログへ残す生成文の長さ（Issue #997）。
+ *
+ * 全文は残さない。質問文にはリポジトリのコードがそのまま入るため、ログが実質的なコードの
+ * 写しになる。落ちた理由の切り分けに要るのは冒頭の見出し周辺だけである。
+ */
+export const ASK_GPT_INVALID_LOG_CHARS = 400;
+
+/**
+ * 形式検証に落ちた生成文を、ログの1行へ収まる形にする。
+ *
+ * 改行を可視化してから切るのは、見出しが行頭にあるかどうかが失敗理由そのものであり、
+ * 折り返された状態では読み取れないため。
+ */
+export function summarizeInvalidAskGptText(text: string): string {
+  const head = text.slice(0, ASK_GPT_INVALID_LOG_CHARS).replace(/\r?\n/g, '\\n');
+  return text.length > ASK_GPT_INVALID_LOG_CHARS ? `${head}…` : head;
+}
+
+/**
+ * 形式検証に落ちた出力を組み立て直させる指示を作る（Issue #997）。
+ *
+ * 元の指示をそのまま先頭に置き、後ろへ失敗の事実と理由を足す。指示を書き換えて短くしないのは、
+ * 生成ターンが毎回新しいforkであり、前回何を指示されたかを引き継がないため。
+ *
+ * 理由は拡張機能が組み立てた文字列（{@link validateAskGptRequestText} の戻り値）であって、
+ * 外部から入ってきた文字列ではない。
+ */
+export function buildAskGptRetryInstruction(userRequest: string, reason: string): string {
+  const first = ASK_GPT_SECTION_HEADINGS[0];
+  const last = ASK_GPT_SECTION_HEADINGS[ASK_GPT_SECTION_HEADINGS.length - 1];
+  return [
+    buildAskGptRequestInstruction(userRequest),
+    '',
+    '## 前回の出力について',
+    '',
+    '直前に同じ依頼で組み立てた質問文は、形式の検査に落ちました。理由は次のとおりです。',
+    '',
+    reason.trim(),
+    '',
+    '内容を一から考え直す必要はありません。同じ材料のまま、形式だけを直して全文を書き直してください。',
+    `特に見出しは、上に挙げた8つの文字列（\`${first}\` 〜 \`${last}\`）と完全に一致させ、行頭から書いてください。番号・空白・記号を変えたり、見出しの後ろに補足を足したりしないでください。`,
+    '出力は質問文のMarkdownそのものだけです。今回も前置き・釈明を書かないでください。',
+  ].join('\n');
+}
+
+/**
  * 生成が成立しなかった理由の区分。
  *
  * 文字列を返すAPIにしない（Issue #947 の外部レビュー指摘）。生成ターンは画面ごとに違う仕組みで
