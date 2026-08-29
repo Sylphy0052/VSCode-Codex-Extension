@@ -5,6 +5,11 @@
     "module": "Node16",
     "moduleResolution": "Node16",
     "strict": true,
+    // 到達不能コードをtscのエラーにする（Issue #977）。ESLintのno-unreachableは
+    // typescript-eslintのeslint-recommendedが「TypeScript側が見る」前提で無効化
+    // している（--print-configで severity 0 を実測）。TypeScript側は既定では
+    // エディタ上の提案に留まりtscを失敗させないため、両方すり抜けていた。
+    "allowUnreachableCode": false,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "exactOptionalPropertyTypes": true,
