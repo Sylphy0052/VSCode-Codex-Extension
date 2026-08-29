@@ -203,6 +203,8 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
           truncated: false,
           untrackedFiles: [],
           untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
         },
       },
     });
@@ -229,10 +231,12 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
           truncated: true,
           untrackedFiles: [],
           untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
         },
       },
     });
-    expect(prompt).toContain('末尾を省略しています');
+    expect(prompt).toContain('一部を省略しています');
   });
 
   it('差分にコードフェンスが含まれても囲みが壊れない', () => {
@@ -247,6 +251,8 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
           truncated: false,
           untrackedFiles: [],
           untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
         },
       },
     });
@@ -283,6 +289,8 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
           truncated: false,
           untrackedFiles: [],
           untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
         },
       },
     });
@@ -324,6 +332,8 @@ describe('runSecondOpinion（Issue #894）', () => {
       truncated: false,
       untrackedFiles: [],
       untrackedOmissions: [],
+      diffOmissions: [],
+      diffPartials: [],
     },
   };
 
@@ -470,6 +480,8 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
         truncated: false,
         untrackedFiles: [],
         untrackedOmissions: [],
+        diffOmissions: [],
+        diffPartials: [],
       },
     });
   });
@@ -496,6 +508,8 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
         truncated: false,
         untrackedFiles: [],
         untrackedOmissions: [],
+        diffOmissions: [],
+        diffPartials: [],
       },
     });
   });
@@ -516,23 +530,48 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('上限を超える差分は切り詰め、切り詰めたことを示す', async () => {
+  it('上限を超える差分はhunkの境界で切り、落としたものを返す（Issue #926 H）', async () => {
+    const big =
+      'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n' +
+      `@@ -1,1 +1,1 @@\n+${'a'.repeat(200)}\n` +
+      `@@ -2,1 +2,1 @@\n+${'b'.repeat(200)}\n`;
     const git = fakeGit({
       'rev-parse --is-inside-work-tree': okResult('true\n'),
       'rev-parse HEAD': okResult('abc1234\n'),
-      'diff --no-ext-diff --no-textconv abc1234 --': okResult('x'.repeat(50)),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult(big),
     });
-    const result = await captureWorkspaceSnapshot('/repo', git, { maxDiffChars: 10 });
-    expect(result).toEqual({
-      ok: true,
-      material: { fullDiff: 'x'.repeat(50), changedPaths: [] },
-      snapshot: {
-        baseCommit: 'abc1234',
-        diff: 'x'.repeat(10),
-        truncated: true,
-        untrackedFiles: [],
-        untrackedOmissions: [],
-      },
+    // 1つ目のhunkと省略の行だけが入る予算
+    const result = await captureWorkspaceSnapshot('/repo', git, { maxDiffBytes: 378 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.snapshot.truncated).toBe(true);
+    // hunkの途中では切れていない
+    expect(result.snapshot.diff).toContain(`@@ -1,1 +1,1 @@\n+${'a'.repeat(200)}\n`);
+    expect(result.snapshot.diff).not.toContain('b'.repeat(200));
+    expect(result.snapshot.diffPartials).toEqual([
+      { path: 'a.ts', omittedHunks: 1, totalHunks: 2 },
+    ]);
+    // 材料側（bundleへ書く分）は切らない
+    expect(result.material.fullDiff).toBe(big);
+  });
+
+  it('上限以下なら差分に手を入れない（Issue #926 H 受入基準）', async () => {
+    const diff = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,1 @@\n+a\n';
+    const git = fakeGit({
+      'rev-parse --is-inside-work-tree': okResult('true\n'),
+      'rev-parse HEAD': okResult('abc1234\n'),
+      'diff --no-ext-diff --no-textconv abc1234 --': okResult(diff),
     });
+    const result = await captureWorkspaceSnapshot('/repo', git);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.snapshot.diff).toBe(diff);
+    expect(result.snapshot.truncated).toBe(false);
+    expect(result.snapshot.diffOmissions).toEqual([]);
+    expect(result.snapshot.diffPartials).toEqual([]);
   });
 });

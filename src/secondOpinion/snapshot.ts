@@ -16,6 +16,7 @@ import {
   resolveHeadCommit,
   type GitCommandRunner,
 } from '../orchestrator/worktree';
+import { applyDiffBudget } from './diffBudget';
 import type { WorkspaceSnapshot } from './prompt';
 import {
   collectUntrackedFiles,
@@ -25,14 +26,16 @@ import {
 } from './untracked';
 
 /**
- * プロンプトへ載せる材料の上限（文字数）。
+ * プロンプトへ載せる材料の上限（UTF-8 byte）。
  *
  * 超えた分は落とし、落としたことをプロンプトへ明記する（`prompt.ts` の `truncated` と
  * 省略の一覧）。黙って切ると、モデルは「全部を見た」前提で判断してしまう。
  *
- * 差分の切り詰めは今はまだ生の文字列カットである。hunk単位の配分は Issue #926 H で入れる。
+ * 単位はbyteである（Issue #926 H）。以前は文字数で測っていたが、日本語のコメントや
+ * 識別子を含む差分では実際に送る量と3倍近くずれる。差分の切り詰め方（ファイル単位の
+ * 配分・hunk境界）は `diffBudget.ts` にある。
  */
-export const MAX_DIFF_CHARS = 200_000;
+export const MAX_DIFF_BYTES = 200_000;
 
 /**
  * 未追跡ファイルが使える上限（Issue #926 F）。
@@ -67,8 +70,8 @@ export type CaptureSnapshotResult =
   | { ok: false; reason: string };
 
 export interface CaptureSnapshotOptions {
-  /** 材料全体の上限（文字数）。既定は {@link MAX_DIFF_CHARS}。 */
-  maxDiffChars?: number;
+  /** 材料全体の上限（UTF-8 byte）。既定は {@link MAX_DIFF_BYTES}。 */
+  maxDiffBytes?: number;
   /** 未追跡ファイルが使える上限。既定は {@link MAX_UNTRACKED_TOTAL_BYTES}。 */
   maxUntrackedBytes?: number;
   /** 未追跡ファイルの読み取り。既定はNode実装。テストではフェイクを渡す。 */
@@ -87,10 +90,10 @@ export async function captureWorkspaceSnapshot(
   git: GitCommandRunner,
   options: CaptureSnapshotOptions = {},
 ): Promise<CaptureSnapshotResult> {
-  const maxDiffChars = options.maxDiffChars ?? MAX_DIFF_CHARS;
+  const maxDiffBytes = options.maxDiffBytes ?? MAX_DIFF_BYTES;
   const maxUntrackedBytes = Math.min(
     options.maxUntrackedBytes ?? MAX_UNTRACKED_TOTAL_BYTES,
-    maxDiffChars,
+    maxDiffBytes,
   );
   if (!(await isGitWorkingTree(cwd, git))) {
     return { ok: false, reason: 'gitの作業ツリーではないため、変更のスナップショットを取れません' };
@@ -135,15 +138,18 @@ export async function captureWorkspaceSnapshot(
     };
   }
 
-  const diffBudget = Math.max(0, maxDiffChars - untrackedBytes);
-  const truncated = diff.length > diffBudget;
+  // 未追跡ファイルで使った分を引いた残りが差分の予算になる。切るのはhunkの境界で、
+  // 落としたファイルは理由付きで返る（Issue #926 H）
+  const budgeted = applyDiffBudget(diff, Math.max(0, maxDiffBytes - untrackedBytes));
   return {
     ok: true,
     material: { fullDiff: diff, changedPaths },
     snapshot: {
       baseCommit,
-      diff: truncated ? diff.slice(0, diffBudget) : diff,
-      truncated,
+      diff: budgeted.diff,
+      truncated: budgeted.truncated,
+      diffOmissions: budgeted.omissions,
+      diffPartials: budgeted.partials,
       untrackedFiles: untracked.files,
       untrackedOmissions: untracked.omissions,
     },
