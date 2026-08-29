@@ -17,6 +17,7 @@ import type {
   TaskSessionInput,
 } from '../../src/orchestrator/taskSession';
 import type { GitCommandRunner } from '../../src/orchestrator/worktree';
+import { ASK_GPT_SECTION_HEADINGS } from '../../src/secondOpinion/askGpt';
 import { SecondOpinionRegistry } from '../../src/secondOpinion/run';
 import type { SecondOpinionDisplay } from '../../src/secondOpinion/display';
 import {
@@ -101,6 +102,22 @@ function port(generated: string): SecondOpinionPanelPort & { generateCalls: numb
   return created;
 }
 
+/**
+ * 形式検証（`validateAskGptRequestText`）を通る質問文。
+ *
+ * ここで数えたいのは組み立てを何回頼んだかであり、形式に落ちる文を渡すと組み立て直し
+ * （Issue #997）が走って回数がずれる。モードの固定とは無関係な理由で数が動かないようにする。
+ */
+function validAskGptText(note: string): string {
+  return [
+    `# 質問: ${note}`,
+    '',
+    'この質問文だけで内容が分かるように書いてある。',
+    '',
+    ...ASK_GPT_SECTION_HEADINGS.map((heading) => `${heading}\n\n${note}\n`),
+  ].join('\n');
+}
+
 /** 追加資料のQuickPickが出たら「追加資料なし」を選ぶ。出た回数も数える。 */
 function answerQuickPicks(): { artifactPicks: number } {
   const counts = { artifactPicks: 0 };
@@ -132,7 +149,7 @@ describe('入力欄のモード固定ボタン（Issue #972）', () => {
       secondOpinion: { mode: 'direct', askGpt: { confirm: false } },
     });
     const counts = answerQuickPicks();
-    const p = port('# 1. 目的\n\nモードの固定を確かめる');
+    const p = port(validAskGptText('モードの固定を確かめる'));
     const host = new RecordingHost();
 
     await startSecondOpinion(
@@ -180,7 +197,7 @@ describe('入力欄のモード固定ボタン（Issue #972）', () => {
       secondOpinion: { mode: 'askGpt', askGpt: { confirm: false } },
     });
     const counts = answerQuickPicks();
-    const p = port('# 1. 目的\n\n設定に従った');
+    const p = port(validAskGptText('設定に従った'));
     const host = new RecordingHost();
 
     await startSecondOpinion(p, host, new SecondOpinionRegistry(), noopLog, unusedGit, () => [

@@ -24,8 +24,11 @@ import type { TaskSessionHost } from '../orchestrator/taskSession';
 import { nodeGitCommandRunner, type GitCommandRunner } from '../orchestrator/worktree';
 import type { SecondOpinionCandidate } from '../secondOpinion/candidates';
 import {
+  ASK_GPT_MAX_ATTEMPTS,
   buildAskGptRequestInstruction,
+  buildAskGptRetryInstruction,
   DEFAULT_ASK_GPT_TEMPLATE,
+  summarizeInvalidAskGptText,
   validateAskGptRequestText,
   type RequestGenerationResult,
   type SecondOpinionMode,
@@ -881,45 +884,81 @@ async function startAskGptSecondOpinion(
       return;
     }
 
-    port.note(id, pendingAskGptDisplay(candidate, request, '質問文を組み立てています…'));
-    const generated = await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Window,
-        title: 'セカンドオピニオンへ送る質問文を組み立てています…',
-      },
-      () =>
-        port.generateRequestText(
-          buildAskGptRequestInstruction(request),
-          config.timeoutMs,
-          controller.signal,
+    // 形式検証に落ちたときだけ、失敗理由を添えて1回だけ組み立て直す（Issue #997）。生成そのものの
+    // 失敗（timeout・provider-error など）は回し直さない。同じ条件で同じ失敗を繰り返すだけで、
+    // 待ち時間が倍になる
+    let validatedText: string | undefined;
+    let lastInvalidReason: string | undefined;
+    for (let attempt = 1; attempt <= ASK_GPT_MAX_ATTEMPTS; attempt += 1) {
+      const retrying = lastInvalidReason !== undefined;
+      const progressTitle = retrying
+        ? 'セカンドオピニオンへ送る質問文を組み立て直しています…'
+        : 'セカンドオピニオンへ送る質問文を組み立てています…';
+      port.note(
+        id,
+        pendingAskGptDisplay(
+          candidate,
+          request,
+          retrying
+            ? '質問文が形式を満たさなかったため組み立て直しています…'
+            : '質問文を組み立てています…',
         ),
-    );
-    if (!generated.ok) {
-      if (generated.kind === 'cancelled') {
-        log.info('[secondOpinion] 質問文の組み立て中に利用者の操作で停止しました');
+      );
+      const instruction =
+        lastInvalidReason === undefined
+          ? buildAskGptRequestInstruction(request)
+          : buildAskGptRetryInstruction(request, lastInvalidReason);
+      const generated = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: progressTitle },
+        () => port.generateRequestText(instruction, config.timeoutMs, controller.signal),
+      );
+      if (!generated.ok) {
+        if (generated.kind === 'cancelled') {
+          log.info('[secondOpinion] 質問文の組み立て中に利用者の操作で停止しました');
+          port.note(
+            id,
+            cancelledAskGptDisplay(candidate, request, '質問文の組み立て中に停止しました'),
+          );
+          return;
+        }
+        const reason = `${GENERATION_FAILURE_LABELS[generated.kind]}: ${generated.reason}`;
+        log.warn(`[secondOpinion] askGptの質問文を組み立てられませんでした: ${generated.kind}`);
+        port.note(id, failedAskGptDisplay(candidate, request, reason));
+        return;
+      }
+
+      const result = validateAskGptRequestText(generated.text);
+      if (result.ok) {
+        validatedText = result.text;
+        break;
+      }
+      lastInvalidReason = result.reason;
+      // 落ちた本文の冒頭を残す。理由だけでは、見出しをどう書いて落ちたのかが後から判らない
+      log.warn(
+        `[secondOpinion] askGptの質問文が形式を満たしませんでした（${attempt}/${ASK_GPT_MAX_ATTEMPTS}回目）: ` +
+          `${result.reason} / 冒頭: ${summarizeInvalidAskGptText(generated.text)}`,
+      );
+      // 組み立て直しの前に停止されていたら、そこで終える（Issue #940と同じ隙間を作らない）
+      if (controller.signal.aborted) {
+        log.info('[secondOpinion] 利用者の操作で停止しました（組み立て直しは行いません）');
         port.note(
           id,
           cancelledAskGptDisplay(candidate, request, '質問文の組み立て中に停止しました'),
         );
         return;
       }
-      const reason = `${GENERATION_FAILURE_LABELS[generated.kind]}: ${generated.reason}`;
-      log.warn(`[secondOpinion] askGptの質問文を組み立てられませんでした: ${generated.kind}`);
-      port.note(id, failedAskGptDisplay(candidate, request, reason));
-      return;
     }
-
-    const validated = validateAskGptRequestText(generated.text);
-    if (!validated.ok) {
-      const reason = `${GENERATION_FAILURE_LABELS['invalid-output']}: ${validated.reason}`;
-      log.warn(`[secondOpinion] askGptの質問文が形式を満たしませんでした`);
+    if (validatedText === undefined) {
+      const reason =
+        `${GENERATION_FAILURE_LABELS['invalid-output']}: ${lastInvalidReason ?? '理由不明'}` +
+        `（${ASK_GPT_MAX_ATTEMPTS}回試しました）`;
       port.note(id, failedAskGptDisplay(candidate, request, reason));
       return;
     }
 
     const confirmed = config.askGpt.confirm
-      ? await confirmAskGptRequestText(validated.text)
-      : validated.text;
+      ? await confirmAskGptRequestText(validatedText)
+      : validatedText;
     if (confirmed === undefined || confirmed.trim() === '') {
       // 人がやめた場合。何を止めたのかが会話に残らないと、押した記録だけが宙に浮く
       port.note(id, cancelledAskGptDisplay(candidate, request, '送信を取りやめました'));
