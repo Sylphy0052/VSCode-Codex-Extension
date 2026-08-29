@@ -93,9 +93,14 @@ import {
   ASK_GPT_TAB_TITLE,
   type RequestGenerationResult,
 } from '../secondOpinion/askGpt';
-import { awaitSingleTurn, SingleTurnTimeoutError } from '../orchestrator/planner';
+import {
+  awaitSingleTurn,
+  SingleTurnCancelledError,
+  SingleTurnTimeoutError,
+} from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
-import { startSecondOpinion } from './secondOpinionCommand';
+import { secondOpinionParentPortFor } from './secondOpinionParent';
+import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -941,7 +946,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
-    for (const listener of entry.stateListeners) {
+    // 控えを取ってから回す。listenerの中で購読を解く経路があり（セカンドオピニオンの
+    // 待機。Issue #949）、配列そのものを回していると、外した位置より後ろのlistenerが
+    // その1回だけ呼ばれずに飛ぶ
+    for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
   }
@@ -1165,6 +1173,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.startSecondOpinionFor(entry);
         return;
       }
+      if (type === 'secondOpinionStop' && typeof m['itemId'] === 'string') {
+        // 会話の項目から止める（Issue #940）。タブを開かない設定でもここから止まる
+        stopSecondOpinion(
+          entry.secondOpinionKey,
+          this.secondOpinionRegistry,
+          m['itemId'],
+          this.log,
+        );
+        return;
+      }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {
         entry.session.cancelQueued(m['index']);
         return;
@@ -1339,6 +1357,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
       {
+        // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
+        ...secondOpinionParentPortFor(entry),
         parentSessionId: entry.secondOpinionKey,
         cwd: entry.cwd,
         lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
@@ -1350,9 +1370,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         setRunning: (running) => {
           void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
         },
-        isBusy: () => entry.session.getState().busy,
-        generateRequestText: (instruction, timeoutMs) =>
-          this.generateAskGptRequestText(entry, instruction, timeoutMs),
+        generateRequestText: (instruction, timeoutMs, signal) =>
+          this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
       },
       this,
       this.secondOpinionRegistry,
@@ -1368,8 +1387,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * askGptモード（Issue #947）の質問文を、親の文脈を継いだforkの上で組み立てる。
    *
    * 脇道の質問（`startSideQuestion`）と同じ `thread/fork` + `ephemeral: true` を使うが、
-   * タブは開かず、`panels` にも登録しない。人が見て操作するための会話ではなく、1ターンで
-   * 使い切って捨てる作業用のスレッドだからである（ephemeralなのでロールアウトも残らない）。
+   * タブは開かない。人が見て操作するための会話ではなく、1ターンで使い切って捨てる作業用の
+   * スレッドだからである（ephemeralなのでロールアウトも残らない）。ただし `panels` へは
+   * 登録する（理由は下の登録箇所）。
    *
    * forkする理由は、親の本流の会話に生成のやり取りを残さないため（受入基準2）。それでいて
    * fork時点までの会話は引き継ぐので、親が知っている経緯を踏まえた質問文になる。
@@ -1382,7 +1402,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry: ChatPanel,
     instruction: string,
     timeoutMs: number,
+    signal: AbortSignal,
   ): Promise<RequestGenerationResult> {
+    if (signal.aborted) {
+      // forkもセッションも作らずに返す。既に止まっていると分かっている
+      return { ok: false, kind: 'cancelled', reason: '利用者の操作で停止しました' };
+    }
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
       return {
@@ -1450,9 +1475,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         log: this.log,
         label: ASK_GPT_LABEL,
         logPrefix: ASK_GPT_LOG_PREFIX,
+        signal,
       });
       return { ok: true, text };
     } catch (e) {
+      if (e instanceof SingleTurnCancelledError) {
+        return { ok: false, kind: 'cancelled', reason: e.message };
+      }
       if (e instanceof SingleTurnTimeoutError) {
         return { ok: false, kind: 'timeout', reason: e.message };
       }

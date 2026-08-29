@@ -9,9 +9,15 @@
 import type { SecondOpinionCandidate } from './candidates';
 import { ARTIFACT_KIND_LABELS, type SecondOpinionArtifactKind } from './prompt';
 
-/** 会話へ残す1項目の中身。`ChatItem` の `text` / `detail` / `status` にそのまま入る。 */
+/**
+ * 会話へ残す1項目の中身。`ChatItem` の `text` / `detail` / `status` にそのまま入る。
+ *
+ * `cancelled` は利用者が止めたとき（Issue #940）。`failed` と分けているのは、止めたのは
+ * 本人であって失敗ではないため。webview側の見出しラベル（`chatScript.ts` の
+ * `STATUS_LABEL`）にも同じ値を足してある。
+ */
 export interface SecondOpinionDisplay {
-  status: 'inProgress' | 'completed' | 'failed';
+  status: 'inProgress' | 'completed' | 'failed' | 'cancelled';
   text: string;
   detail: string;
 }
@@ -75,6 +81,29 @@ function independenceNote(summaryStatus: SecondOpinionSummaryStatus): string {
     case 'off':
       return INDEPENDENT_NOTE;
   }
+}
+
+/**
+ * 親セッションのターンが終わるのを待っている間の表示（Issue #949）。
+ *
+ * 押した直後に出す。依頼の内容はもう固まっている（依頼先・追加資料・依頼文はここへ来る前に
+ * 決まり、変更のスナップショットも取得済み）ことが読めるように、`pendingSecondOpinionDisplay`
+ * と同じ本文を使い、`detail` の先頭だけを待機の表示に替える。
+ *
+ * `status` は `inProgress` のままにする。待機も含めて「この会話でセカンドオピニオンが1件
+ * 進行中」であることに変わりはなく、webview側（`chatScript.ts` の `STATUS_LABEL`）に
+ * 状態を増やすと、停止ボタンの出し分けなど既存の分岐がすべて増える。
+ */
+export function queuedSecondOpinionDisplay(
+  candidate: SecondOpinionCandidate,
+  artifactKind: SecondOpinionArtifactKind,
+  request: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'inProgress',
+    text: `セカンドオピニオンを依頼しました（${candidate.name}）\n\n${request}`,
+    detail: `順番待ち（この会話の応答が終わってから始めます）… ・ ${describeRun(candidate, artifactKind)}`,
+  };
 }
 
 /** 起動直後、応答が届く前の表示。 */
@@ -236,6 +265,107 @@ export function failedAskGptDisplay(
     status: 'failed',
     text: `セカンドオピニオン（${candidate.name}）\n\n${request}`,
     detail: describeAskGptRun(candidate, [reason]),
+  };
+}
+
+/**
+ * askGptモードで、利用者が止めたときの表示（Issue #940の扱いに合わせる）。
+ *
+ * `failed` にはしない。止めたのは利用者であって、機能が失敗したわけではない。止めた段階
+ * （質問文の組み立て中か、意見を待っている間か）は `reason` で呼び出し側が渡す。
+ */
+export function cancelledAskGptDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  reason: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text: `セカンドオピニオン（${candidate.name}）\n\n${request}`,
+    detail: describeAskGptRun(candidate, [reason]),
+  };
+}
+
+/**
+ * askGptモードで、利用者が止め、そこまでの回答が出ていたときの表示。
+ *
+ * 残し方は {@link partialAskGptDisplay}（打ち切り）と同じだが、見出しと注記で理由を
+ * 区別する。止めた本人に「時間切れ」と読ませない。
+ */
+export function cancelledPartialAskGptDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  response: string,
+  requestTextChars: number,
+  redactionNote: string | undefined,
+): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text:
+      `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}\n\n` +
+      `**回答（利用者が停止した時点まで）**\n\n${response}`,
+    detail: describeAskGptRun(candidate, [
+      CANCELLED_WITH_RESPONSE_NOTE,
+      ASK_GPT_NOTE,
+      `質問文${requestTextChars.toLocaleString('en-US')}文字`,
+      redactionNote,
+    ]),
+  };
+}
+
+/**
+ * 利用者が止めたときの注記（Issue #940）。
+ *
+ * 「停止しました」と言い切らない。拡張が保証するのは、停止操作を受け付けてこの実行を
+ * 拡張側で終了扱いにし、可能な状態であればCLIへ打ち切りを要求するところまでで、CLIの
+ * ターンやその子プロセスが止まったことは確認していない（Issue #926 D / #246）。
+ * ターンidがまだ割り当たっていない等の理由で、要求自体を送れないこともある。
+ */
+const CANCELLED_NOTE =
+  '停止を要求し、この実行を拡張側では終了扱いにしました。相手側の処理が停止したことは確認していません';
+
+/** 止めた時点までの回答が残っている場合の注記（Issue #940）。 */
+const CANCELLED_WITH_RESPONSE_NOTE =
+  '利用者が停止を要求しました。ここまでの回答を残しています。相手側では処理が続いている可能性があります';
+
+/**
+ * 利用者が止め、回答が1件も出ていなかったときの表示（Issue #940）。
+ *
+ * `failed` にはしない。止めたのは利用者であって、機能が失敗したわけではない。実行中の
+ * 項目を消さずにここへ更新するのは、タブを開かない設定では会話のこの項目だけが唯一の
+ * 手掛かりであり、消すと「押したのに何も残らない」状態になるため。
+ */
+export function cancelledSecondOpinionDisplay(
+  candidate: SecondOpinionCandidate,
+  artifactKind: SecondOpinionArtifactKind,
+  request: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text: `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}`,
+    detail: `${CANCELLED_NOTE} ・ ${describeRun(candidate, artifactKind)}`,
+  };
+}
+
+/**
+ * 利用者が止め、そこまでの回答が出ていたときの表示（Issue #940）。
+ *
+ * 残し方は {@link partialSecondOpinionDisplay}（タイムアウト）と同じだが、本文の見出しと
+ * 注記で理由を区別する。止めた本人に「時間切れ」と読ませない。
+ */
+export function cancelledPartialSecondOpinionDisplay(
+  candidate: SecondOpinionCandidate,
+  artifactKind: SecondOpinionArtifactKind,
+  request: string,
+  response: string,
+  summaryStatus: SecondOpinionSummaryStatus = 'off',
+): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text:
+      `セカンドオピニオン（${candidate.name}）\n\n**依頼**\n\n${request}\n\n` +
+      `**回答（利用者が停止した時点まで）**\n\n${response}`,
+    detail: `${CANCELLED_WITH_RESPONSE_NOTE} ・ ${independenceNote(summaryStatus)} ・ ${describeRun(candidate, artifactKind)}`,
   };
 }
 

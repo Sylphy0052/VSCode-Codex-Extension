@@ -203,6 +203,9 @@ export function chatScript(
     running: '実行中',
     completed: '完了',
     failed: '失敗',
+    // 利用者が止めたセカンドオピニオン（Issue #940）。失敗とは分ける——止めたのは本人で
+    // あって、機能が失敗したわけではない
+    cancelled: '停止',
     declined: '拒否',
     // subAgentActivity（issue #34）のkindがそのままstatusへ入る（SubAgentActivityKind）
     started: '開始',
@@ -370,6 +373,21 @@ export function chatScript(
     });
     actions.appendChild(rewind);
 
+    // 実行中のセカンドオピニオンを止める（Issue #940）。既定ではタブが開かないため、
+    // 会話のこの項目が唯一の掛かりどころになる。押した後は無効にする——停止は1回で足り、
+    // 押し直しても同じ要求が増えるだけ。表示の更新は拡張機能側が行う
+    const stop = document.createElement('button');
+    stop.className = 'secondary';
+    stop.textContent = '停止';
+    stop.hidden = true;
+    stop.addEventListener('click', () => {
+      if (!node.stopTarget) return;
+      node.stopRequested = true;
+      stop.disabled = true;
+      vscode.postMessage({ type: 'secondOpinionStop', itemId: node.stopTarget });
+    });
+    actions.appendChild(stop);
+
     head.appendChild(actions);
     wrap.appendChild(head);
 
@@ -426,6 +444,9 @@ export function chatScript(
       forkTarget: undefined,
       rewind,
       rewindTarget: undefined,
+      stop,
+      stopTarget: undefined,
+      stopRequested: false,
       fullText: '',
       lastItem: undefined,
       // Markdown描画のキャッシュ（issue #290）。'text' はtextContentのみ、
@@ -1104,6 +1125,18 @@ export function chatScript(
     // どの発言でも常に持っている値なので、直前の発言の有無を待つ必要が無い
     node.rewindTarget = item.kind === 'userMessage' ? item.id : undefined;
     node.rewind.hidden = !(SHOW_REWIND && item.kind === 'userMessage');
+
+    // 停止は実行中のセカンドオピニオンにだけ出す（Issue #940）。項目のidがそのまま
+    // 実行の識別子になる。終わった実行の項目に押せるボタンを残さない
+    const stoppable = item.kind === 'secondOpinion' && item.status === 'inProgress';
+    node.stopTarget = stoppable ? item.id : undefined;
+    node.stop.hidden = !stoppable;
+    // 押した後に実行が終われば、次に同じ枠を別の実行が使うことはある（ノードはidごとに
+    // 使い回す）。実行中でなくなった時点で押せる状態へ戻しておく
+    if (!stoppable) {
+      node.stopRequested = false;
+    }
+    node.stop.disabled = node.stopRequested;
   }
 
   function syncItems(items) {

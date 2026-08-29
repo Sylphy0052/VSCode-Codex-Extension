@@ -148,7 +148,7 @@ export function buildAskGptRequestInstruction(userRequest: string): string {
  * - `invalid-output`: 応答は返ったが、質問文として使える形ではなかった
  */
 export type RequestGenerationFailureKind =
-  'busy' | 'unsupported' | 'timeout' | 'provider-error' | 'invalid-output';
+  'busy' | 'cancelled' | 'unsupported' | 'timeout' | 'provider-error' | 'invalid-output';
 
 /**
  * 質問文の生成結果。

@@ -169,10 +169,12 @@ function throwingPort(overrides: Partial<SecondOpinionPanelPort> = {}): SecondOp
       throw new Error('パネルは破棄済みです');
     },
     setRunning: () => {},
-    isBusy: () => false,
     generateRequestText: async () => {
       throw new Error('既定モードでは質問文の組み立ては呼ばれない');
     },
+    // 親は暇（Issue #949 の待機には入らない）
+    isParentIdle: () => true,
+    onParentStateChanged: () => ({ dispose: () => {} }),
     ...overrides,
   };
 }
@@ -212,7 +214,7 @@ describe('startSecondOpinion の実行中フラグ（Issue #926 B）', () => {
     ).rejects.toThrow('パネルは破棄済みです');
 
     expect(registry.isRunning('parent-a')).toBe(false);
-    expect(registry.begin('parent-a')).toBe(true);
+    expect(registry.begin('parent-a', 'run-next', () => {})).toBe(true);
   });
 
   it('finally の setRunning() が投げても registry の解除は済んでいる', async () => {

@@ -19,9 +19,14 @@ import {
   ASK_GPT_TAB_TITLE,
   type RequestGenerationResult,
 } from '../secondOpinion/askGpt';
-import { awaitSingleTurn, SingleTurnTimeoutError } from '../orchestrator/planner';
+import {
+  awaitSingleTurn,
+  SingleTurnCancelledError,
+  SingleTurnTimeoutError,
+} from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
-import { startSecondOpinion } from './secondOpinionCommand';
+import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
+import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   capSideQuestionHistory,
   finishedSideQuestionDisplay,
@@ -955,6 +960,8 @@ export class ClaudeChatViewManager
     }
     await startSecondOpinion(
       {
+        // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
+        ...secondOpinionParentPortFor(entry),
         parentSessionId: entry.secondOpinionKey,
         cwd: entry.cwd,
         lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
@@ -966,9 +973,8 @@ export class ClaudeChatViewManager
         setRunning: (running) => {
           void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
         },
-        isBusy: () => entry.session.getState().busy,
-        generateRequestText: (instruction, timeoutMs) =>
-          this.generateAskGptRequestText(entry, instruction, timeoutMs),
+        generateRequestText: (instruction, timeoutMs, signal) =>
+          this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
       },
       host,
       this.secondOpinionRegistry,
@@ -995,7 +1001,12 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     instruction: string,
     timeoutMs: number,
+    signal: AbortSignal,
   ): Promise<RequestGenerationResult> {
+    if (signal.aborted) {
+      // CLIを1本も起こさずに返す。既に止まっていると分かっている
+      return { ok: false, kind: 'cancelled', reason: '利用者の操作で停止しました' };
+    }
     const sessionId = entry.session.threadId;
     if (sessionId === undefined) {
       return {
@@ -1051,9 +1062,13 @@ export class ClaudeChatViewManager
         log: this.log,
         label: ASK_GPT_LABEL,
         logPrefix: ASK_GPT_LOG_PREFIX,
+        signal,
       });
       return { ok: true, text };
     } catch (e) {
+      if (e instanceof SingleTurnCancelledError) {
+        return { ok: false, kind: 'cancelled', reason: e.message };
+      }
       if (e instanceof SingleTurnTimeoutError) {
         return { ok: false, kind: 'timeout', reason: e.message };
       }
@@ -1495,7 +1510,10 @@ export class ClaudeChatViewManager
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
-    for (const listener of entry.stateListeners) {
+    // 控えを取ってから回す。listenerの中で購読を解く経路があり（セカンドオピニオンの
+    // 待機。Issue #949）、配列そのものを回していると、外した位置より後ろのlistenerが
+    // その1回だけ呼ばれずに飛ぶ
+    for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
   }
@@ -1874,6 +1892,16 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'secondOpinionStop' && typeof m['itemId'] === 'string') {
+        // 会話の項目から止める（Issue #940）。タブを開かない設定でもここから止まる
+        stopSecondOpinion(
+          entry.secondOpinionKey,
+          this.secondOpinionRegistry,
+          m['itemId'],
+          this.log,
+        );
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {

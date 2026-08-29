@@ -31,6 +31,10 @@ import {
 } from '../secondOpinion/askGpt';
 import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
 import {
+  cancelledAskGptDisplay,
+  cancelledPartialAskGptDisplay,
+  cancelledPartialSecondOpinionDisplay,
+  cancelledSecondOpinionDisplay,
   failedAskGptDisplay,
   failedSecondOpinionDisplay,
   finishedAskGptDisplay,
@@ -39,6 +43,7 @@ import {
   partialSecondOpinionDisplay,
   pendingAskGptDisplay,
   pendingSecondOpinionDisplay,
+  queuedSecondOpinionDisplay,
   type SecondOpinionDisplay,
   type SecondOpinionSummaryStatus,
 } from '../secondOpinion/display';
@@ -56,6 +61,7 @@ import {
 } from '../secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
 import { summarizeConversation } from '../secondOpinion/summary';
+import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinion/wait';
 
 /**
  * 画面1つ分の差し込み口。`ChatPanel` / `ClaudePanel` の違いをここへ閉じ込める。
@@ -66,7 +72,7 @@ import { summarizeConversation } from '../secondOpinion/summary';
  * `SecondOpinionRegistry` に残り、以後その会話ではセカンドオピニオンを起動できなくなる
  * （Issue #926 B）。呼び出し側でも try/finally で守っているが、二重の保険とする。
  */
-export interface SecondOpinionPanelPort {
+export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
   /** 重複起動の判定キー（親セッションのid）。 */
   parentSessionId: string;
   /** 親セッションの作業ディレクトリ。未設定ならワークスペースを使う。 */
@@ -85,22 +91,19 @@ export interface SecondOpinionPanelPort {
   /** webviewのボタンの押下可否を切り替える。 */
   setRunning(running: boolean): void;
   /**
-   * 親セッションがいまターンを実行中か（Issue #947 受入基準10）。
-   *
-   * askGptモードの生成ターンは、親の会話とワークスペースの両方を材料にする。親が走っている
-   * 最中に読みに行くと、会話は変更前・あるファイルは変更後・別のファイルは変更前という、
-   * どの時点にも存在しなかった状態を質問文へ書き込みうる。既定モードは押下時点の差分を
-   * スナップショットとして固定してこれを避けているが、askGptでは親が何を読むかを事前に
-   * 決められないため、同じ手が使えない。実行中は開始しない。
-   */
-  isBusy(): boolean;
-  /**
    * 親の文脈を継いだforkで質問文を生成する（Issue #947）。
    *
    * 実装はCodexが `thread/fork`（`ephemeral: true`）、Claudeが `-r <id> --fork-session`。
    * どちらもタブを開かず、親の本流の会話には何も残さない。
+   *
+   * `signal` は利用者の停止（Issue #940）。生成は本体と同じだけ待つことがあるため、
+   * 待っている間に止められる必要がある。
    */
-  generateRequestText(instruction: string, timeoutMs: number): Promise<RequestGenerationResult>;
+  generateRequestText(
+    instruction: string,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<RequestGenerationResult>;
 }
 
 /**
@@ -250,23 +253,26 @@ async function buildConversationSummary(
   host: TaskSessionHost,
   config: SecondOpinionConfig,
   log: Logger,
+  signal: AbortSignal,
 ): Promise<{
   text: string | undefined;
   kind: ConversationBackgroundKind;
   failure: string | undefined;
+  /** 利用者が止めた結果か（Issue #940）。真なら呼び出し側は本体を開始しない。 */
+  cancelledByUser: boolean;
 }> {
   if (!config.summary.enabled) {
-    return { text: undefined, kind: 'summary', failure: undefined };
+    return { text: undefined, kind: 'summary', failure: undefined, cancelledByUser: false };
   }
   const conversation = port.conversationTranscript();
   if (conversation.trim() === '') {
-    return { text: undefined, kind: 'summary', failure: undefined };
+    return { text: undefined, kind: 'summary', failure: undefined, cancelledByUser: false };
   }
   if (conversation.length < SUMMARY_SKIP_THRESHOLD_CHARS) {
     log.info(
       `[secondOpinion] 会話が短いため要約セッションを開きません（${conversation.length}文字）`,
     );
-    return { text: conversation, kind: 'transcript', failure: undefined };
+    return { text: conversation, kind: 'transcript', failure: undefined, cancelledByUser: false };
   }
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: '会話の要約を作成しています…' },
@@ -277,13 +283,22 @@ async function buildConversationSummary(
           model: config.summary.model,
           effort: config.summary.effort,
           conversation,
+          // 要約中に止められることがある（Issue #940）。本体より前の直列区間なので、
+          // 待ち時間としてはここが一番長くなることもある
+          signal,
         },
         log,
       ),
   );
-  return result.ok
-    ? { text: result.summary, kind: 'summary', failure: undefined }
-    : { text: undefined, kind: 'summary', failure: result.reason };
+  if (result.ok) {
+    return { text: result.summary, kind: 'summary', failure: undefined, cancelledByUser: false };
+  }
+  return {
+    text: undefined,
+    kind: 'summary',
+    failure: result.reason,
+    cancelledByUser: result.cancelledByUser === true,
+  };
 }
 
 /**
@@ -361,7 +376,13 @@ export async function startSecondOpinion(
     return;
   }
 
-  if (!registry.begin(port.parentSessionId)) {
+  // 会話へ残す項目のidを、この実行の識別子（`runId`）としても使う（Issue #940）。停止操作は
+  // 項目から押されるので、押された項目のidがそのまま「どの実行を止めるか」になる
+  const id = `secondOpinion:${randomUUID()}`;
+  // 止める単位は個々の `TaskSession` ではなく、この実行1回（会話の要約＋本体）である。
+  // 要約中はまだ本体のセッションが無いため、セッションを登録する形では止められない
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
     // 選択している間に別経路から起動された場合。二重に走らせない
     void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
     return;
@@ -370,13 +391,34 @@ export async function startSecondOpinion(
   // `finally` へ入らず、`registry` にidが残って以後その会話では二度と起動できなくなる
   // （選択UIを触っている最中にタブを閉じられる経路で実際に踏みうる。Issue #926 B）
   try {
-    const id = `secondOpinion:${randomUUID()}`;
     port.setRunning(true);
+    // 親のターンが走っている間は、依頼の内容を固めたところで一旦止まる（Issue #949）。
+    // ここまでの選択・入力・スナップショットは待たせずに済ませてあり、待たせるのは
+    // この後に開く2つのセッション（会話の要約と本体）だけである
+    if (!port.isParentIdle()) {
+      port.note(id, queuedSecondOpinionDisplay(candidate, artifactKind, request));
+      log.info('[secondOpinion] 親セッションのターンが終わるまで待機します');
+    }
+    const waited = await waitForParentIdle(port, controller.signal);
+    if (waited === 'cancelled') {
+      // 待機中に止められた場合。セッションは1つも開いていない
+      log.info('[secondOpinion] 待機中に利用者の操作で停止しました（セッションは開いていません）');
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      return;
+    }
     port.note(id, pendingSecondOpinionDisplay(candidate, artifactKind, request));
     // 要約は本体より先に作る（本体のプロンプトへ載せるため）。失敗しても本体は続ける
-    const summary = await buildConversationSummary(port, host, config, log);
+    const summary = await buildConversationSummary(port, host, config, log, controller.signal);
     if (summary.failure !== undefined) {
       log.warn(`[secondOpinion] 会話の要約を作れませんでした: ${summary.failure}`);
+    }
+    // 要約中に止められた場合と、要約が終わってから本体を始めるまでの間に止められた場合
+    // （Issue #940）。ここで返さないと「止めたのに本体が走り出す」——要約の失敗は本来
+    // 本体を続ける理由になるため、利用者停止をその経路へ流してはならない
+    if (summary.cancelledByUser || controller.signal.aborted) {
+      log.info('[secondOpinion] 利用者の操作で停止しました（本体は開始していません）');
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      return;
     }
     const result = await runSecondOpinion(
       host,
@@ -389,6 +431,7 @@ export async function startSecondOpinion(
         timeoutMs: config.timeoutMs,
         conversationSummary: summary.text,
         conversationBackgroundKind: summary.kind,
+        signal: controller.signal,
       },
       log,
     );
@@ -401,11 +444,11 @@ export async function startSecondOpinion(
           ? 'off'
           : 'failed';
     port.note(id, resultDisplay(candidate, artifactKind, request, result, summaryStatus));
-    if (!result.ok) {
+    if (!result.ok && result.cancelledByUser !== true) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
   } finally {
-    registry.end(port.parentSessionId);
+    registry.end(port.parentSessionId, id);
     // `setRunning()` は契約上no-opのはずだが、投げても `registry.end()` を巻き添えに
     // しない順（end → setRunning）と、個別のtry/catchの両方で守る
     try {
@@ -421,6 +464,9 @@ export async function startSecondOpinion(
 /** 生成が成立しなかった理由の、人向けの主語。詳細はこの後ろへ繋げる。 */
 const GENERATION_FAILURE_LABELS: Record<RequestGenerationResultKind, string> = {
   busy: '作業中のAIが応答中のため、質問文を組み立てられませんでした',
+  // 停止は失敗として表示しない（呼び出し側が先に `cancelled` へ分岐する）。到達しないが、
+  // 種別の網羅性を型で保つために置く
+  cancelled: '質問文の組み立てを停止しました',
   unsupported: 'この会話では質問文を組み立てられませんでした',
   timeout: '質問文の組み立てが時間内に終わりませんでした',
   'provider-error': '質問文の組み立てに失敗しました',
@@ -483,31 +529,58 @@ async function startAskGptSecondOpinion(
     return;
   }
 
-  // 入力を書いている間に走り出していることがあるため、開始の直前にもう一度見る（受入基準10）
-  if (port.isBusy()) {
-    void vscode.window.showInformationMessage(
-      'この会話のAIが応答中です。質問文はその会話とリポジトリを読んで組み立てるため、応答が終わってから実行してください',
-    );
-    return;
-  }
-
-  if (!registry.begin(port.parentSessionId)) {
+  // 会話へ残す項目のidを、この実行の識別子としても使う（Issue #940。既定モードと同じ）
+  const id = `secondOpinion:${randomUUID()}`;
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
     void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
     return;
   }
   try {
-    const id = `secondOpinion:${randomUUID()}`;
     port.setRunning(true);
-    port.note(id, pendingAskGptDisplay(candidate, request, '質問文を組み立てています…'));
+    // 親のターンが走っている間は、質問文の組み立てを始めずに待つ（Issue #949）。既定モードは
+    // 押下時点の差分を固定してから待つが、askGptは親が何を読むかを事前に決められないため、
+    // 待つ意味がより強い。走っている最中に読むと、会話は変更前・あるファイルは変更後という、
+    // どの時点にも存在しなかった状態を質問文へ書き込みうる
+    if (!port.isParentIdle()) {
+      port.note(
+        id,
+        pendingAskGptDisplay(
+          candidate,
+          request,
+          '順番待ち（この会話の応答が終わってから始めます）…',
+        ),
+      );
+      log.info('[secondOpinion] 親セッションのターンが終わるまで待機します');
+    }
+    if ((await waitForParentIdle(port, controller.signal)) === 'cancelled') {
+      log.info('[secondOpinion] 待機中に利用者の操作で停止しました（セッションは開いていません）');
+      port.note(id, cancelledAskGptDisplay(candidate, request, '待機中に停止しました'));
+      return;
+    }
 
+    port.note(id, pendingAskGptDisplay(candidate, request, '質問文を組み立てています…'));
     const generated = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Window,
         title: 'セカンドオピニオンへ送る質問文を組み立てています…',
       },
-      () => port.generateRequestText(buildAskGptRequestInstruction(request), config.timeoutMs),
+      () =>
+        port.generateRequestText(
+          buildAskGptRequestInstruction(request),
+          config.timeoutMs,
+          controller.signal,
+        ),
     );
     if (!generated.ok) {
+      if (generated.kind === 'cancelled') {
+        log.info('[secondOpinion] 質問文の組み立て中に利用者の操作で停止しました');
+        port.note(
+          id,
+          cancelledAskGptDisplay(candidate, request, '質問文の組み立て中に停止しました'),
+        );
+        return;
+      }
       const reason = `${GENERATION_FAILURE_LABELS[generated.kind]}: ${generated.reason}`;
       log.warn(`[secondOpinion] askGptの質問文を組み立てられませんでした: ${generated.kind}`);
       port.note(id, failedAskGptDisplay(candidate, request, reason));
@@ -527,7 +600,14 @@ async function startAskGptSecondOpinion(
       : validated.text;
     if (confirmed === undefined || confirmed.trim() === '') {
       // 人がやめた場合。何を止めたのかが会話に残らないと、押した記録だけが宙に浮く
-      port.note(id, failedAskGptDisplay(candidate, request, '送信を取りやめました'));
+      port.note(id, cancelledAskGptDisplay(candidate, request, '送信を取りやめました'));
+      return;
+    }
+    // 確認を読んでいる間に停止ボタンを押された場合。ここで返さないと「止めたのにAdvisorが
+    // 走り出す」（Issue #940で既定モードが塞いだのと同じ隙間）
+    if (controller.signal.aborted) {
+      log.info('[secondOpinion] 利用者の操作で停止しました（Advisorは開始していません）');
+      port.note(id, cancelledAskGptDisplay(candidate, request, '送信前に停止しました'));
       return;
     }
 
@@ -551,30 +631,23 @@ async function startAskGptSecondOpinion(
         headless: config.headless,
         timeoutMs: config.timeoutMs,
         askGptRequestText: redaction.text,
+        signal: controller.signal,
       },
       log,
     );
     const chars = redaction.text.length;
     if (!result.ok) {
+      if (result.cancelledByUser === true) {
+        port.note(id, cancelledAskGptDisplay(candidate, request, result.reason));
+        return;
+      }
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
       port.note(id, failedAskGptDisplay(candidate, request, result.reason));
       return;
     }
-    port.note(
-      id,
-      result.partialReason === undefined
-        ? finishedAskGptDisplay(candidate, request, result.response, chars, redactionNote)
-        : partialAskGptDisplay(
-            candidate,
-            request,
-            result.response,
-            result.partialReason,
-            chars,
-            redactionNote,
-          ),
-    );
+    port.note(id, askGptResultDisplay(candidate, request, result, chars, redactionNote));
   } finally {
-    registry.end(port.parentSessionId);
+    registry.end(port.parentSessionId, id);
     try {
       port.setRunning(false);
     } catch (e) {
@@ -583,6 +656,74 @@ async function startAskGptSecondOpinion(
       );
     }
   }
+}
+
+/**
+ * 実行中のセカンドオピニオンを止める（Issue #940）。
+ *
+ * 会話に出ている実行中の項目から押される。`headless` の値に関わらずこの経路で止まる
+ * （既定ではタブが開かないため、タブ側の操作だけでは足りない）。
+ *
+ * 止めるのは、押された項目に対応する実行だけ。`runId`（＝項目のid）が今走っている実行と
+ * 一致しなければ何もしない。会話には終わった実行の項目も残るため、古い項目から遅れて
+ * 届いた停止操作が、後から始めた別の実行を止めてはならない。
+ *
+ * ここでは会話の項目を更新しない。停止後の表示は、実行側（`startSecondOpinion`）が
+ * キャンセルとして決着したときに1回だけ書く。両方が書くと、どちらが最後に走るかで
+ * 表示が変わる。
+ */
+export function stopSecondOpinion(
+  parentSessionId: string,
+  registry: SecondOpinionRegistry,
+  runId: string,
+  log: Logger,
+): void {
+  if (!registry.cancel(parentSessionId, runId)) {
+    // 既に終わっている・別の実行が走っている場合。押した側には何も起きない
+    log.info(`[secondOpinion] 停止の対象が見つかりませんでした（runId=${runId}）`);
+    return;
+  }
+  log.info(`[secondOpinion] 停止を要求しました（runId=${runId}）`);
+}
+
+/**
+ * askGptモードの、回答が返ったときの表示を3通りへ振り分ける。
+ *
+ * 最後まで返った／打ち切られた／利用者が止めた、で見せ方が変わる。止めた本人に
+ * 「時間切れ」と読ませない（Issue #940の既定モードと同じ扱い）。
+ */
+function askGptResultDisplay(
+  candidate: SecondOpinionCandidate,
+  request: string,
+  result: SecondOpinionResult & { ok: true },
+  requestTextChars: number,
+  redactionNote: string | undefined,
+): SecondOpinionDisplay {
+  if (result.partialReason === undefined) {
+    return finishedAskGptDisplay(
+      candidate,
+      request,
+      result.response,
+      requestTextChars,
+      redactionNote,
+    );
+  }
+  return result.cancelledByUser === true
+    ? cancelledPartialAskGptDisplay(
+        candidate,
+        request,
+        result.response,
+        requestTextChars,
+        redactionNote,
+      )
+    : partialAskGptDisplay(
+        candidate,
+        request,
+        result.response,
+        result.partialReason,
+        requestTextChars,
+        redactionNote,
+      );
 }
 
 /**
@@ -599,7 +740,21 @@ function resultDisplay(
   summaryStatus: SecondOpinionSummaryStatus,
 ): SecondOpinionDisplay {
   if (!result.ok) {
+    // 利用者が止めた結果は失敗ではない（Issue #940）。回答が1件も出ないまま止めた場合が
+    // ここに来る。失敗として出すと、押した本人に「動かなかった」と読ませてしまう
+    if (result.cancelledByUser === true) {
+      return cancelledSecondOpinionDisplay(candidate, artifactKind, request);
+    }
     return failedSecondOpinionDisplay(candidate, artifactKind, request, result.reason);
+  }
+  if (result.partialReason !== undefined && result.cancelledByUser === true) {
+    return cancelledPartialSecondOpinionDisplay(
+      candidate,
+      artifactKind,
+      request,
+      result.response,
+      summaryStatus,
+    );
   }
   if (result.partialReason !== undefined) {
     return partialSecondOpinionDisplay(
