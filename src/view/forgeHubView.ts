@@ -483,6 +483,11 @@ export class ForgeHubViewManager implements vscode.Disposable {
  * 画面側で判別できない。確認の無い`refreshCi`は複数のカードで続けて押せるうえ、
  * 応答の順序も保証されない。
  */
+function readRequestId(message: Record<string, unknown>): string | undefined {
+  const value = message['requestId'];
+  return typeof value === 'string' ? value : undefined;
+}
+
 /** 要求の種類と、その要求に対して画面が待っている結果の型の対応（Issue #978）。 */
 const RESULT_TYPE_BY_REQUEST: Record<string, string> = {
   startIssue: 'startResult',
@@ -490,11 +495,6 @@ const RESULT_TYPE_BY_REQUEST: Record<string, string> = {
   createDraftPullRequest: 'pullRequestResult',
   refreshCi: 'ciResult',
 };
-
-function readRequestId(message: Record<string, unknown>): string | undefined {
-  const value = message['requestId'];
-  return typeof value === 'string' ? value : undefined;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
