@@ -42,6 +42,66 @@ export interface ParsedSecondOpinionCandidates {
  */
 const MODEL_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * `name` / `model` / `effort` の長さ上限（Issue #926 J）。
+ *
+ * 選択UI（QuickPick）のラベルとして並ぶため、極端に長い値は一覧を読めなくする。
+ * 設定の書き間違い・貼り間違いを捨てるための上限であり、正当な値がここへ当たることは無い。
+ */
+const MAX_FIELD_LENGTH = 100;
+
+/**
+ * 候補の件数の上限（Issue #926 J）。
+ *
+ * 候補はQuickPickへそのまま並ぶ。数千件を書かれると選択そのものが成立しないため、
+ * 超過分は捨てて理由を残す（先頭から採るので、書いた順の上位が残る）。
+ */
+export const MAX_SECOND_OPINION_CANDIDATES = 20;
+
+/**
+ * 制御文字（改行・タブを含む）かどうか。
+ *
+ * QuickPickのラベルへそのまま渡ると一覧の行が壊れ、ログへ出ると1行1件の前提も崩れる。
+ * 正規表現へ直接書くと `no-control-regex` に触れるため、`workflow.ts` と同じく
+ * コードポイントで判定する。
+ */
+function isControlChar(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return code < 0x20 || code === 0x7f;
+}
+
+/** 制御文字を1文字でも含むか。 */
+function hasControlChar(value: string): boolean {
+  return [...value].some(isControlChar);
+}
+
+/**
+ * 警告文へ埋める表示名を安全な形へ落とす。
+ *
+ * 制御文字を含む値がそのままログへ流れると、警告そのものが読めなくなる。
+ */
+function safeLabel(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return fallback;
+  }
+  return [...trimmed]
+    .map((ch) => (isControlChar(ch) ? ' ' : ch))
+    .join('')
+    .slice(0, MAX_FIELD_LENGTH);
+}
+
+/**
+ * 必須の文字列項目を読む。
+ *
+ * 前後の空白を落としてから空判定し、**落とした後の値**を返す（Issue #926 J）。
+ * `"   "` のような空白だけの `name` は、以前は空文字ではないという理由だけで通り、
+ * QuickPickに空のラベルとして並んでいた。格納する値もtrim後にすることで、表示・
+ * 重複判定・CLIへ渡る値のすべてが同じ値になる。
+ */
 function readRequiredString(
   entry: Record<string, unknown>,
   key: string,
@@ -49,13 +109,32 @@ function readRequiredString(
   warnings: string[],
 ): string | undefined {
   const value = entry[key];
-  if (typeof value !== 'string' || value === '') {
+  if (typeof value !== 'string') {
+    warnings.push(
+      `セカンドオピニオンの候補「${label}」の ${key} が文字列ではないため無視しました: ${JSON.stringify(value)}`,
+    );
+    return undefined;
+  }
+  if (hasControlChar(value)) {
+    warnings.push(
+      `セカンドオピニオンの候補「${label}」の ${key} に制御文字が含まれるため無視しました`,
+    );
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
     warnings.push(
       `セカンドオピニオンの候補「${label}」の ${key} が空でない文字列ではないため無視しました: ${JSON.stringify(value)}`,
     );
     return undefined;
   }
-  return value;
+  if (trimmed.length > MAX_FIELD_LENGTH) {
+    warnings.push(
+      `セカンドオピニオンの候補「${label}」の ${key} が${MAX_FIELD_LENGTH}文字を超えるため無視しました（${trimmed.length}文字）`,
+    );
+    return undefined;
+  }
+  return trimmed;
 }
 
 /**
@@ -82,6 +161,14 @@ export function normalizeSecondOpinionCandidates(value: unknown): ParsedSecondOp
   const candidates: SecondOpinionCandidate[] = [];
   const seenNames = new Set<string>();
   for (const [index, entry] of value.entries()) {
+    // 件数の上限は「残った候補の数」で見る（Issue #926 J）。壊れた要素は捨てられるので、
+    // 生の配列の長さで打ち切ると、書き間違いのぶんだけ有効な候補が入らなくなる
+    if (candidates.length >= MAX_SECOND_OPINION_CANDIDATES) {
+      warnings.push(
+        `セカンドオピニオンの候補が${MAX_SECOND_OPINION_CANDIDATES}件を超えたため、${index + 1}件目以降を無視しました`,
+      );
+      break;
+    }
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
       warnings.push(
         `セカンドオピニオンの候補${index + 1}件目がオブジェクトではないため無視しました: ${JSON.stringify(entry)}`,
@@ -89,7 +176,7 @@ export function normalizeSecondOpinionCandidates(value: unknown): ParsedSecondOp
       continue;
     }
     const record = entry as Record<string, unknown>;
-    const label = typeof record['name'] === 'string' ? record['name'] : `${index + 1}件目`;
+    const label = safeLabel(record['name'], `${index + 1}件目`);
     const name = readRequiredString(record, 'name', label, warnings);
     const model = readRequiredString(record, 'model', label, warnings);
     const effort = readRequiredString(record, 'effort', label, warnings);

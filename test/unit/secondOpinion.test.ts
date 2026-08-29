@@ -9,6 +9,7 @@ import type {
 import type { GitCommandResult, GitCommandRunner } from '../../src/orchestrator/worktree';
 import {
   DEFAULT_SECOND_OPINION_CANDIDATES,
+  MAX_SECOND_OPINION_CANDIDATES,
   normalizeSecondOpinionCandidates,
   type SecondOpinionCandidate,
 } from '../../src/secondOpinion/candidates';
@@ -125,6 +126,68 @@ describe('normalizeSecondOpinionCandidates（Issue #894）', () => {
   it('全部壊れていれば既定へ丸める', () => {
     const parsed = normalizeSecondOpinionCandidates([{ model: 'x' }, 42]);
     expect(parsed.candidates).toEqual([...DEFAULT_SECOND_OPINION_CANDIDATES]);
+  });
+
+  it('空白だけのnameを捨てる（Issue #926 J）', () => {
+    const parsed = normalizeSecondOpinionCandidates([
+      { name: '   ', model: 'gpt-5.6-sol', effort: 'high' },
+    ]);
+    expect(parsed.candidates).toEqual([...DEFAULT_SECOND_OPINION_CANDIDATES]);
+    expect(parsed.warnings.some((warning) => warning.includes('name'))).toBe(true);
+  });
+
+  it('前後の空白を落とした値で格納し、重複も落とした後の値で判定する（Issue #926 J）', () => {
+    const parsed = normalizeSecondOpinionCandidates([
+      { name: '  Sol  ', model: '  gpt-5.6-sol  ', effort: ' high ' },
+      { name: 'Sol', model: 'gpt-5.6-luna', effort: 'low' },
+    ]);
+    expect(parsed.candidates).toEqual([{ name: 'Sol', model: 'gpt-5.6-sol', effort: 'high' }]);
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it('制御文字を含むnameを捨てる（Issue #926 J）', () => {
+    const parsed = normalizeSecondOpinionCandidates([
+      { name: 'Sol\nもう1行', model: 'gpt-5.6-sol', effort: 'high' },
+    ]);
+    expect(parsed.candidates).toEqual([...DEFAULT_SECOND_OPINION_CANDIDATES]);
+    expect(parsed.warnings.some((warning) => warning.includes('制御文字'))).toBe(true);
+  });
+
+  it('長さ上限を超えるnameを捨てる（Issue #926 J）', () => {
+    const parsed = normalizeSecondOpinionCandidates([
+      { name: 'あ'.repeat(101), model: 'gpt-5.6-sol', effort: 'high' },
+      { name: 'あ'.repeat(100), model: 'gpt-5.6-sol', effort: 'high' },
+    ]);
+    expect(parsed.candidates).toEqual([
+      { name: 'あ'.repeat(100), model: 'gpt-5.6-sol', effort: 'high' },
+    ]);
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it('件数の上限を超えた分を捨てて理由を残す（Issue #926 J）', () => {
+    const entries = Array.from({ length: MAX_SECOND_OPINION_CANDIDATES + 3 }, (_unused, index) => ({
+      name: `候補${index + 1}`,
+      model: 'gpt-5.6-sol',
+      effort: 'high',
+    }));
+    const parsed = normalizeSecondOpinionCandidates(entries);
+    expect(parsed.candidates).toHaveLength(MAX_SECOND_OPINION_CANDIDATES);
+    expect(parsed.candidates.at(-1)?.name).toBe(`候補${MAX_SECOND_OPINION_CANDIDATES}`);
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it('壊れた要素は件数の上限に数えない（Issue #926 J）', () => {
+    const entries = [
+      42,
+      ...Array.from({ length: MAX_SECOND_OPINION_CANDIDATES }, (_unused, index) => ({
+        name: `候補${index + 1}`,
+        model: 'gpt-5.6-sol',
+        effort: 'high',
+      })),
+    ];
+    const parsed = normalizeSecondOpinionCandidates(entries);
+    expect(parsed.candidates).toHaveLength(MAX_SECOND_OPINION_CANDIDATES);
+    expect(parsed.warnings).toHaveLength(1);
   });
 });
 
