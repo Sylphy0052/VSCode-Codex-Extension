@@ -15,21 +15,21 @@ npm run check     # lint + format:check + typecheck + test
 
 ## npmスクリプト
 
-| コマンド                        | 内容                                                                                                                            |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                                                                                    |
-| `npm run watch`                 | sourcemap付きで監視ビルドする                                                                                                   |
-| `npm run typecheck`             | `tsc --noEmit`                                                                                                                  |
-| `npm run lint`                  | `eslint .`                                                                                                                      |
-| `npm run format`                | Prettierで整形する（`prettier --write .`）                                                                                      |
-| `npm run format:check`          | 整形が準拠しているかだけを検査する（`prettier --check .`）                                                                      |
-| `npm test`                      | `vitest run`（`test/unit/**`）                                                                                                  |
-| `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する                                                                    |
-| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る                                                             |
-| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                                                                               |
-| `npm run test:external-cli`     | 実CLI（`codex app-server`）を起動する検査（`test/external-cli/**`）。CODEX_BIN環境変数でパスを指定する（既定はPATH上の`codex`） |
-| `npm run check`                 | lint / format:check / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                 |
-| `npm run package`               | ビルドしてvsixを生成する                                                                                                        |
+| コマンド                        | 内容                                                                                                                              |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run build`                 | esbuildで `dist/extension.js` にバンドルする                                                                                      |
+| `npm run watch`                 | sourcemap付きで監視ビルドする                                                                                                     |
+| `npm run typecheck`             | `tsc --noEmit`                                                                                                                    |
+| `npm run lint`                  | `eslint .`                                                                                                                        |
+| `npm run format`                | Prettierで整形する（`prettier --write .`）                                                                                        |
+| `npm run format:check`          | 整形が準拠しているかだけを検査する（`prettier --check .`）                                                                        |
+| `npm test`                      | `vitest run`（`test/unit/**`）                                                                                                    |
+| `npm run test:coverage`         | 上記にカバレッジ計測を付けて実行する。下限を下回ると失敗する                                                                      |
+| `npm run test:integration`      | 実VSCode上の統合テスト（`test/integration/**`）。ディスプレイが要る（[docs/integration-testing.md](docs/integration-testing.md)） |
+| `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                                                                                 |
+| `npm run test:external-cli`     | 実CLI（`codex app-server`）を起動する検査（`test/external-cli/**`）。CODEX_BIN環境変数でパスを指定する（既定はPATH上の`codex`）   |
+| `npm run check`                 | lint / format:check / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                   |
+| `npm run package`               | ビルドしてvsixを生成する                                                                                                          |
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
@@ -143,6 +143,8 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 - パーサと引数組み立ては純粋関数として切り出し、実CLIを起動せずにテストする
 
 実VSCodeが要る領域のうち、**実CLIプロセスを使わずに確認できるもの**は `test/integration/`（`@vscode/test-electron`）へ切り出す土台を作った。`npm run test:integration` / `npm run test:integration:xvfb` で実行する。書き方はVitestのユニットテストと違い、実VSCodeの拡張機能ホスト上でMochaが動く点に注意（`describe`/`it`ではなく`suite`/`test`）。
+
+**走らせ方・1件だけ絞る方法・既知の失敗・結果を誤読しやすい箇所は [docs/integration-testing.md](docs/integration-testing.md) にまとめてある。**
 
 - `vscode.extensions.getExtension('Sylphy0052.vscode-codex-extension')` で拡張機能を取得し、`activate()` の戻り値（`ExtensionTestApi`）経由で`view/**`側の実インスタンス（`SessionTreeProvider`）へアクセスする。VSCodeに依存する層はユニットテストからimportできないため（`docs/design.md` §11）、テスト専用の最小限の口として用意してある
 - 実CLI（codex/claude）は絶対に呼ばない。`test/integration/fixtures/setup.mjs` が使い捨てのVSCodeプロファイルを作り、`codex.executablePath` / `claude.executablePath` を存在しない絶対パスへ固定した上で、`codex.codexHome` / `claude.configDir` を一時ディレクトリへ向けている。ユーザーの実環境（`~/.codex` `~/.claude` 実際のVSCodeユーザー設定）には一切触れない
