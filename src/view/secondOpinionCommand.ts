@@ -1063,7 +1063,9 @@ export async function approveSecondOpinionHandoff(
         : 'セカンドオピニオンの指示を待機列へ入れました（現在のターンの後に送られます）',
     );
   } catch (e) {
-    // 送れなかったときは相談を閉じない。作り直さずにもう一度承認できる状態を残す
+    // 送れなかったときは相談を閉じない。承認も取り消して、同じ下書きをもう一度
+    // 承認できる状態へ戻す（送れなかっただけで下書きは古くなっていない）
+    advisor.revertApproval();
     log.warn(`[secondOpinion] 承認された指示を送れませんでした: ${errorMessage(e)}`);
     void vscode.window.showErrorMessage(`指示を送れませんでした: ${errorMessage(e)}`);
     return;

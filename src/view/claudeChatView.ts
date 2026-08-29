@@ -1077,6 +1077,12 @@ export class ClaudeChatViewManager
       // `markApproved()` を通したときにだけ呼ばれる
       sendApprovedInstruction: async (text) => {
         const outcome = entry.session.sendOrQueue(text, []);
+        // 人が送った指示と同じ扱いで作業記録へ残す（Codex画面の `reportActivity` と揃える）。
+        // 承認を経た本人の指示であり、記録から落とすと日報に穴が空く
+        const sessionId = entry.session.threadId;
+        if (sessionId !== undefined) {
+          this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
+        }
         return Promise.resolve(outcome);
       },
       setHandoffDraft: (draft) => {

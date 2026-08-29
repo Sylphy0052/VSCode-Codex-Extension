@@ -404,7 +404,15 @@ describe('approveSecondOpinionHandoff（Issue #929 Human Gate）', () => {
 
     expect(port.sent).toEqual([]);
     expect(advisor.closedReason()).toBeUndefined();
-    store.closeFor(PARENT_ID, 'userEnded');
+    // 承認は取り消されている。送れなかっただけで下書きは古くなっていない
+    expect(advisor.currentState()).toBe('handoffDrafted');
+
+    // 同じ下書きをそのままもう一度承認できる（作り直させない）
+    port.sendFailure = undefined;
+    await approveSecondOpinionHandoff(port, store, draft, LOG);
+
+    expect(port.sent).toHaveLength(1);
+    expect(advisor.closedReason()).toBe('instructionSent');
   });
 });
 

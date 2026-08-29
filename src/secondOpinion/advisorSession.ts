@@ -206,6 +206,25 @@ export class AdvisorSession {
   }
 
   /**
+   * 承認を下書きの状態へ戻す（Issue #929）。
+   *
+   * 承認は通ったが**送信そのものに失敗した**ときだけ使う。`approved` のまま残すと、
+   * 同じ下書きをもう一度承認しようとしても {@link markApproved} が `false` を返し、
+   * 「下書きが最新ではありません」という事実と違う理由で弾かれる。送れなかっただけで
+   * 下書きは古くなっていないので、作り直させる理由が無い。
+   *
+   * 戻すのは `approved` からだけである。追加の相談で `consulting` へ戻っている場合は
+   * 下書き自体が無効なので、ここで `handoffDrafted` へ引き上げてはならない。
+   */
+  revertApproval(): void {
+    if (this.state !== 'approved') {
+      return;
+    }
+    this.state = 'handoffDrafted';
+    this.armIdleTimer();
+  }
+
+  /**
    * 閉じる。冪等。
    *
    * 順は「タイマー解除 → 走っているターンを止める → `dispose()`」。`dispose()` は
