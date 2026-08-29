@@ -20,13 +20,13 @@ describe('parseDiff（Issue #926 H）', () => {
   });
 
   it('削除されたファイルは前像側のパスを使う', () => {
-    const diff = 'diff --git a/gone.ts b/gone.ts\n--- a/gone.ts\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-a\n';
+    const diff =
+      'diff --git a/gone.ts b/gone.ts\n--- a/gone.ts\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-a\n';
     expect(parseDiff(diff).files[0]?.path).toBe('gone.ts');
   });
 
   it('バイナリを見分ける', () => {
-    const diff =
-      'diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n';
+    const diff = 'diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n';
     expect(parseDiff(diff).files[0]?.binary).toBe(true);
   });
 
@@ -71,9 +71,28 @@ describe('applyDiffBudget（Issue #926 H）', () => {
     expect(result.diff).toContain('# 省略:');
   });
 
+  it('予算がhunk 1件分も無くても、ファイルの存在は消さない', () => {
+    const diff = fileDiff('src/big.ts', 5);
+    // headerだけで使い切る大きさ
+    const result = applyDiffBudget(diff, 10);
+    expect(result.diff).toContain('diff --git a/src/big.ts b/src/big.ts');
+    expect(result.omissions).toEqual([]);
+    expect(result.partials).toEqual([{ path: 'src/big.ts', omittedHunks: 5, totalHunks: 5 }]);
+    expect(result.diff).toContain('# 省略: このファイルの残り 5/5 hunk');
+  });
+
+  it('内容行が @@ や diff --git で始まっても区画を割らない', () => {
+    // 差分そのものを編集した場合、追加行は `+@@` / `+diff --git` になる
+    const diff =
+      'diff --git a/sample.diff b/sample.diff\n--- a/sample.diff\n+++ b/sample.diff\n' +
+      '@@ -1,2 +1,2 @@\n+@@ -1,1 +1,1 @@\n+diff --git a/x b/x\n';
+    const parsed = parseDiff(diff);
+    expect(parsed.files).toHaveLength(1);
+    expect(parsed.files[0]?.hunks).toHaveLength(1);
+  });
+
   it('バイナリは本文を渡さず、一覧へ載せる', () => {
-    const binary =
-      'diff --git a/img.png b/img.png\nGIT binary patch\n' + `${'z'.repeat(500)}\n`;
+    const binary = 'diff --git a/img.png b/img.png\nGIT binary patch\n' + `${'z'.repeat(500)}\n`;
     const diff = binary + fileDiff('src/a.ts', 1);
     const result = applyDiffBudget(diff, 300);
     expect(result.diff).not.toContain('GIT binary patch');
