@@ -169,6 +169,9 @@ function throwingPort(overrides: Partial<SecondOpinionPanelPort> = {}): SecondOp
       throw new Error('パネルは破棄済みです');
     },
     setRunning: () => {},
+    // 親は暇（Issue #949 の待機には入らない）
+    isParentIdle: () => true,
+    onParentStateChanged: () => ({ dispose: () => {} }),
     ...overrides,
   };
 }

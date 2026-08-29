@@ -30,6 +30,7 @@ import {
   finishedSecondOpinionDisplay,
   partialSecondOpinionDisplay,
   pendingSecondOpinionDisplay,
+  queuedSecondOpinionDisplay,
   type SecondOpinionDisplay,
   type SecondOpinionSummaryStatus,
 } from '../secondOpinion/display';
@@ -47,6 +48,7 @@ import {
 } from '../secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
 import { summarizeConversation } from '../secondOpinion/summary';
+import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinion/wait';
 
 /**
  * 画面1つ分の差し込み口。`ChatPanel` / `ClaudePanel` の違いをここへ閉じ込める。
@@ -57,7 +59,7 @@ import { summarizeConversation } from '../secondOpinion/summary';
  * `SecondOpinionRegistry` に残り、以後その会話ではセカンドオピニオンを起動できなくなる
  * （Issue #926 B）。呼び出し側でも try/finally で守っているが、二重の保険とする。
  */
-export interface SecondOpinionPanelPort {
+export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
   /** 重複起動の判定キー（親セッションのid）。 */
   parentSessionId: string;
   /** 親セッションの作業ディレクトリ。未設定ならワークスペースを使う。 */
@@ -358,6 +360,20 @@ export async function startSecondOpinion(
   // （選択UIを触っている最中にタブを閉じられる経路で実際に踏みうる。Issue #926 B）
   try {
     port.setRunning(true);
+    // 親のターンが走っている間は、依頼の内容を固めたところで一旦止まる（Issue #949）。
+    // ここまでの選択・入力・スナップショットは待たせずに済ませてあり、待たせるのは
+    // この後に開く2つのセッション（会話の要約と本体）だけである
+    if (!port.isParentIdle()) {
+      port.note(id, queuedSecondOpinionDisplay(candidate, artifactKind, request));
+      log.info('[secondOpinion] 親セッションのターンが終わるまで待機します');
+    }
+    const waited = await waitForParentIdle(port, controller.signal);
+    if (waited === 'cancelled') {
+      // 待機中に止められた場合。セッションは1つも開いていない
+      log.info('[secondOpinion] 待機中に利用者の操作で停止しました（セッションは開いていません）');
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      return;
+    }
     port.note(id, pendingSecondOpinionDisplay(candidate, artifactKind, request));
     // 要約は本体より先に作る（本体のプロンプトへ載せるため）。失敗しても本体は続ける
     const summary = await buildConversationSummary(port, host, config, log, controller.signal);

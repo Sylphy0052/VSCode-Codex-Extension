@@ -93,6 +93,9 @@ function port(transcript: string): SecondOpinionPanelPort {
       notes.push(display);
     },
     setRunning: () => undefined,
+    // 親は暇（Issue #949 の待機には入らない）
+    isParentIdle: () => true,
+    onParentStateChanged: () => ({ dispose: () => undefined }),
   };
 }
 
