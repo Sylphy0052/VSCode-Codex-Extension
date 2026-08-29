@@ -48,7 +48,7 @@ import {
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import { advisorDisplay, createLoopAdvisorConfig } from './loopAdvisorFactory';
-import { planGoalDraft } from './goalDraftFactory';
+import { buildGoalDraftReply, planGoalDraft } from './goalDraftFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -1234,24 +1234,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'loop/planGoal') {
-        // 一文からゴールの下書きを組み立てる準備ターン（issue #958）。**ここではループを
-        // 始めず**、下書きを画面へ返すだけにする。確認を省く設定のときだけ`start`を立てる
-        const settings = readGoalDraftConfig();
-        const text = typeof m['text'] === 'string' ? m['text'].trim() : '';
-        if (!settings.enabled || text === '') {
-          void entry.panel?.webview.postMessage({
-            type: 'loop/goalDraft',
-            ok: false,
-            message: '目的と受入基準を入力してください',
-          });
-          return;
-        }
-        const drafted = await planGoalDraft(entry.cwd, text, 'codex', this.log);
-        void entry.panel?.webview.postMessage(
-          drafted.ok
-            ? { type: 'loop/goalDraft', ok: true, goal: drafted.goal, start: !settings.confirm }
-            : { type: 'loop/goalDraft', ok: false, message: drafted.message },
-        );
+        await this.planGoalDraftFor(entry, m['id'], m['text']);
         return;
       }
       if (type === 'loop/stop') {
@@ -1347,6 +1330,31 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /**
+   * 一文からゴールの下書きを組み立てる準備ターン（issue #958）。**ここではループを始めず**、
+   * 下書きを画面へ返すだけにする。確認を省く設定のときだけ`start`を立てる。
+   *
+   * **どの経路を通っても`loop/goalDraft`を必ず1回返す**（issue #961）。webview側は要求を
+   * 出した時点で開始ボタンを無効化し、この応答でだけ戻す。設定の読み出し・`git`・`gh`の
+   * 実行など、下書きの生成そのものより外側で例外が出ると応答が返らず、画面が
+   * 「組み立てています…」のまま操作不能で残る。下位層がどれだけ握っていても、要求と応答の
+   * 境界には別に最後の受けが要る。
+   *
+   * `id`は要求ごとの通し番号。そのまま返して、古い応答を画面側で捨てられるようにする。
+   */
+  private async planGoalDraftFor(
+    entry: ChatPanel,
+    rawId: unknown,
+    rawText: unknown,
+  ): Promise<void> {
+    const reply = await buildGoalDraftReply(rawId, rawText, {
+      readSettings: readGoalDraftConfig,
+      plan: (text) => planGoalDraft(entry.cwd, text, 'codex', this.log),
+      logWarn: (message) => this.log.warn(message),
+    });
+    void entry.panel?.webview.postMessage(reply);
   }
 
   /**
