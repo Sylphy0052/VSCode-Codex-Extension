@@ -1810,21 +1810,27 @@ describe('LoopController（Advisor、issue #957）', () => {
     expect(loop.getStatus().stopReason).toBe('advised');
   });
 
-  it('concern では止めず、指摘を次のターンの指示へ別の区画として載せる', async () => {
+  it('concern では止めず、指摘を次のターンの参考として載せる', async () => {
     const sent: string[] = [];
     const loop = new LoopController((t) => void sent.push(t));
     loop.start(
       plan({
         advise: async () =>
-          advice({ severity: 'concern', findings: ['例外を握り潰している'], nextFocus: '直す' }),
+          advice({
+            severity: 'concern',
+            findings: ['例外を握り潰している'],
+            nextFocus: '直す',
+            focus: 'inspect-regression-risk',
+          }),
       }),
     );
     await finishAdvisedTurn(loop);
     expect(loop.running).toBe(true);
     expect(sent).toHaveLength(2);
-    expect(sent[1]).toContain('## 別のAIからの指摘');
+    expect(sent[1]).toContain('### 別のAI（Advisor）からの指摘');
     expect(sent[1]).toContain('例外を握り潰している');
-    expect(sent[1]).toContain('- Advisor: 直す');
+    // 指示になるのは列挙値から引いた固定文だけ（issue #962）
+    expect(sent[1]).toContain('既存の動作を壊していないかを確かめてください。');
   });
 
   it('note の指摘は載せるが、次に集中することへは格上げしない', async () => {
@@ -1833,7 +1839,12 @@ describe('LoopController（Advisor、issue #957）', () => {
     loop.start(
       plan({
         advise: async () =>
-          advice({ severity: 'note', findings: ['命名が惜しい'], nextFocus: '名前を直す' }),
+          advice({
+            severity: 'note',
+            findings: ['命名が惜しい'],
+            nextFocus: '名前を直す',
+            focus: 'review-scope',
+          }),
       }),
     );
     await finishAdvisedTurn(loop);

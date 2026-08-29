@@ -2440,6 +2440,18 @@ export function chatScript(
    * いたら**適用しない**。捨てる方を既定にするのは、下書きは作り直せるが、利用者が書いた
    * 文は復元できないため
    */
+  // Issue本文を材料にした下書きは自動開始しない（issue #962）。なぜ待たされるのかが
+  // 分からないと、利用者は設定が効いていないと受け取る
+  function goalDraftNotice(data) {
+    if (data.start) {
+      return 'ゴールの下書きでループを始めます';
+    }
+    if (data.provenance === 'external-issue') {
+      return 'Issue本文を材料にしたため、内容を確認してから「開始」を押してください';
+    }
+    return 'ゴールの下書きを入れました。確認・修正して「開始」を押してください';
+  }
+
   function applyGoalDraft(data) {
     const request = goalDraftRequest;
     // 別の要求の応答、または要求していないのに届いた応答は捨てる。パネルを作り直した
@@ -2461,11 +2473,7 @@ export function chatScript(
     el('loopGoalPurpose').value = data.goal.purpose || '';
     el('loopGoalCriteria').value = data.goal.acceptanceCriteria || '';
     el('loopGoalConstraints').value = data.goal.constraints || '';
-    showGoalNotice(
-      data.start
-        ? 'ゴールの下書きでループを始めます'
-        : 'ゴールの下書きを入れました。確認・修正して「開始」を押してください',
-    );
+    showGoalNotice(goalDraftNotice(data));
     if (data.start) {
       el('loopStart').click();
       return;

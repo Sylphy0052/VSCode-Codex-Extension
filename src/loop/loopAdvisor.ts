@@ -1,4 +1,5 @@
 import type { GoalEvaluatorInput } from './goalLoop';
+import type { TurnFocus } from './turnFocus';
 
 /**
  * ループのAdvisor（issue #957）の型。
@@ -31,8 +32,14 @@ export interface LoopAdvice {
   severity: AdviceSeverity;
   /** 指摘。1件1行の観察であって、命令形の指示ではない。 */
   findings: string[];
-  /** 次のターンで見直すべき点。1〜2文。 */
+  /**
+   * 次のターンで見直すべき点（自由文）。**これは参考であって指示ではない。**
+   *
+   * Workerへ送る指示文は`focus`の固定文から組み立てる（issue #962）。
+   */
   nextFocus: string;
+  /** 次のターンの焦点。列挙値。省略時は`none`として扱う。 */
+  focus?: TurnFocus;
   /** 判断の根拠にした証拠。 */
   evidence: string[];
 }
@@ -73,7 +80,7 @@ export interface LoopAdvisorConfig {
  * 困るため、呼び出し側（`loopAdvisorProcess.ts`）はログへ理由を残す。
  */
 export function noAdvice(): LoopAdvice {
-  return { severity: 'note', findings: [], nextFocus: '', evidence: [] };
+  return { severity: 'note', findings: [], nextFocus: '', evidence: [], focus: 'none' };
 }
 
 /**
