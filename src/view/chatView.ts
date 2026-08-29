@@ -935,7 +935,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
-    for (const listener of entry.stateListeners) {
+    // 控えを取ってから回す。listenerの中で購読を解く経路があり（セカンドオピニオンの
+    // 待機。Issue #949）、配列そのものを回していると、外した位置より後ろのlistenerが
+    // その1回だけ呼ばれずに飛ぶ
+    for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
   }

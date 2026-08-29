@@ -7911,6 +7911,10 @@ parentSessionId
 
 待機中も`SecondOpinionRegistry`には登録済みのため、同じ会話からの2件目は従来どおり拒否する（複数件をFIFOで溜める形にはしていない）。
 
+#### 状態の配り方を控え越しにした
+
+`onSessionChange`が`entry.stateListeners`を配列のまま回していたのを、控え（`[...entry.stateListeners]`）を回す形へ変えた（`chatView.ts`・`claudeChatView.ts`）。待機のlistenerは条件が揃った時点で**自分自身を配列から外す**ため、配列そのものを回していると、外した位置より後ろのlistenerがその1回だけ呼ばれずに飛ぶ。これまでのlistenerは登録しっぱなしで解除する経路が無く踏まなかった。
+
 #### 確かめ方
 
 - `test/unit/secondOpinionWait.test.ts`: 最初からidleなら購読を張らないこと、idleへの遷移で1回だけ解除されること、購読より前にidle化・abortした場合でも取り残されないこと（どちらも、対策を外すとこのテストだけが落ちることを確認済み）、決着後に購読が残らないこと
