@@ -83,6 +83,29 @@ function independenceNote(summaryStatus: SecondOpinionSummaryStatus): string {
   }
 }
 
+/**
+ * 親セッションのターンが終わるのを待っている間の表示（Issue #949）。
+ *
+ * 押した直後に出す。依頼の内容はもう固まっている（依頼先・追加資料・依頼文はここへ来る前に
+ * 決まり、変更のスナップショットも取得済み）ことが読めるように、`pendingSecondOpinionDisplay`
+ * と同じ本文を使い、`detail` の先頭だけを待機の表示に替える。
+ *
+ * `status` は `inProgress` のままにする。待機も含めて「この会話でセカンドオピニオンが1件
+ * 進行中」であることに変わりはなく、webview側（`chatScript.ts` の `STATUS_LABEL`）に
+ * 状態を増やすと、停止ボタンの出し分けなど既存の分岐がすべて増える。
+ */
+export function queuedSecondOpinionDisplay(
+  candidate: SecondOpinionCandidate,
+  artifactKind: SecondOpinionArtifactKind,
+  request: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'inProgress',
+    text: `セカンドオピニオンを依頼しました（${candidate.name}）\n\n${request}`,
+    detail: `順番待ち（この会話の応答が終わってから始めます）… ・ ${describeRun(candidate, artifactKind)}`,
+  };
+}
+
 /** 起動直後、応答が届く前の表示。 */
 export function pendingSecondOpinionDisplay(
   candidate: SecondOpinionCandidate,

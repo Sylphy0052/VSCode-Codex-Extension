@@ -7866,6 +7866,60 @@ parentSessionId
 - `test/unit/webviewScript.test.ts`: 状態のラベルと色の割り当ての突き合わせ（`cancelled`は色を付けない側）
 - `docs/manual-test.md` U-43: `headless: true`での実行中の停止、要約中の停止、停止後の再実行、回答が出た後の停止
 
+### 14.93 実行中に押したセカンドオピニオンを待たせる（Issue #949）
+
+§14.80のセカンドオピニオンは、押した時点で親セッションの状態を一切見ずに走り出す。親が応答している最中に押すと、要約セッション（§14.83）と本体のセッションがその場で開き、進行中のターンへ割り込む形になっていた。押した側は「順番に処理される」と読むのが自然なので、**新しいCLIセッションを開くところだけを、親が暇になるまで遅らせる**。
+
+#### 待たせるのはセッションを開く直前だけ
+
+1回のセカンドオピニオンのうち、親の実行と競合するのは`host.openTaskSession`を呼ぶ2箇所（会話の要約と本体）だけである。それ以外は競合しない——依頼先・思考の深さ・追加資料の種別・依頼文はQuickPickとInputBoxで人が決めるだけ、変更のスナップショット（`snapshot.ts`）はgitのサブプロセスを叩くだけで、どちらもCLIのセッションを開かない。
+
+```
+押下 → 依頼先/effort/資料種別/依頼文 → スナップショット → [待機] → 要約セッション → 本体セッション
+                    競合しない区間                        ここだけ遅らせる
+```
+
+先に全部待たせる形にすると、親のターンが終わってから選択UIが出ることになり、押した人はそこまで画面の前で待たされる。決められることを先に決めておけば、待つのは「開始の一瞬」だけで済む。
+
+#### idleの定義に待機列を含める
+
+`state.busy === false && state.queued.length === 0`（`isIdleChatState`、`view/secondOpinionParent.ts`）。
+
+`busy`の立ち下がりだけを見てはいけない。人が積んだ指示が残っていると、ターンが確定した直後に`onSessionChange`が`sendNextQueued`を呼び（§14.90）、親はすぐ`busy`へ戻る。その隙間で走らせると、待たせた意味が無い。積んだ指示を捌き切ってから始める。
+
+判定はこの1関数だけが持つ。`SecondOpinionParentPort`（`secondOpinion/wait.ts`）の`onParentStateChanged`がcallbackへ`ChatState`を渡さないのも同じ理由で、状態を運ぶ形にすると判定式が`chatView.ts`側と`claudeChatView.ts`側の2箇所へ写る。
+
+#### 購読してから再判定する
+
+`waitForParentIdle`（`secondOpinion/wait.ts`）の要点は順序である。
+
+1. `signal.aborted`を見る（既に止まっていれば購読を1つも張らずに返す）
+2. `isParentIdle()`が真なら即座に返す
+3. 偽なら状態変化と`abort`の両方を購読する
+4. **購読を張った直後にもう一度`isParentIdle()`と`signal.aborted`を評価する**
+5. 決着は1回だけに絞り、そのとき両方の購読を必ず解く
+
+4が無いと、2で「暇ではない」と読んだ直後・3で購読を張るまでの間にidleへ遷移した場合、その通知はどこにも届かず永久に待つ（lost wakeup）。`abort`側も同じで、`AbortSignal`の`abort`は一度きりのため、張る前に発火していると二度と届かない。
+
+結果は例外ではなく`'idle' | 'cancelled'`で返す。この機能の停止経路（§14.92）は既に`controller.signal.aborted`を見て停止表示へ分岐する形で揃っており、ここだけ例外にすると呼び出し側へ別系統の分岐が増える。
+
+#### 待機中の見え方と停止
+
+待機に入ると会話へ`queuedSecondOpinionDisplay`（`secondOpinion/display.ts`）を1項目残し、idleになった時点で従来の`pendingSecondOpinionDisplay`へ差し替える。`status`は`inProgress`のままで増やさない——待機も含めて「この会話でセカンドオピニオンが1件進行中」であることに変わりはなく、状態を増やすとwebview側（`chatScript.ts`の`STATUS_LABEL`）と停止ボタンの出し分けが両方増える。
+
+停止（§14.92）の`AbortController`をそのまま待機区間にも通してあるため、**待機中も会話の項目から止められる**。止めた場合はセッションを1本も開かずに終わり、`cancelledSecondOpinionDisplay`が残る。
+
+待機中も`SecondOpinionRegistry`には登録済みのため、同じ会話からの2件目は従来どおり拒否する（複数件をFIFOで溜める形にはしていない）。
+
+#### 状態の配り方を控え越しにした
+
+`onSessionChange`が`entry.stateListeners`を配列のまま回していたのを、控え（`[...entry.stateListeners]`）を回す形へ変えた（`chatView.ts`・`claudeChatView.ts`）。待機のlistenerは条件が揃った時点で**自分自身を配列から外す**ため、配列そのものを回していると、外した位置より後ろのlistenerがその1回だけ呼ばれずに飛ぶ。これまでのlistenerは登録しっぱなしで解除する経路が無く踏まなかった。
+
+#### 確かめ方
+
+- `test/unit/secondOpinionWait.test.ts`: 最初からidleなら購読を張らないこと、idleへの遷移で1回だけ解除されること、購読より前にidle化・abortした場合でも取り残されないこと（どちらも、対策を外すとこのテストだけが落ちることを確認済み）、決着後に購読が残らないこと
+- `test/unit/secondOpinionQueue.test.ts`: 応答中は依頼を確定させたうえで`openTaskSession`を呼ばないこと、`busy`が落ちても待機列が残っている間は開かないこと、idle後に状態変化が続いても開くのは1本だけであること、待機中の停止でセッションを1本も開かずに終わること、待機中の2件目を拒否すること
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか

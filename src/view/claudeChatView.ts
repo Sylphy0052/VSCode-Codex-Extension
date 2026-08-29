@@ -15,6 +15,7 @@ import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
+import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   capSideQuestionHistory,
   finishedSideQuestionDisplay,
@@ -948,6 +949,8 @@ export class ClaudeChatViewManager
     }
     await startSecondOpinion(
       {
+        // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
+        ...secondOpinionParentPortFor(entry),
         parentSessionId: entry.secondOpinionKey,
         cwd: entry.cwd,
         lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
@@ -1394,7 +1397,10 @@ export class ClaudeChatViewManager
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
-    for (const listener of entry.stateListeners) {
+    // 控えを取ってから回す。listenerの中で購読を解く経路があり（セカンドオピニオンの
+    // 待機。Issue #949）、配列そのものを回していると、外した位置より後ろのlistenerが
+    // その1回だけ呼ばれずに飛ぶ
+    for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
   }
