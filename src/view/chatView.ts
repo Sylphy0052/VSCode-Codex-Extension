@@ -100,6 +100,7 @@ import {
   ASK_GPT_LOG_PREFIX,
   ASK_GPT_TAB_TITLE,
   type RequestGenerationResult,
+  type SecondOpinionMode,
 } from '../secondOpinion/askGpt';
 import {
   awaitSingleTurn,
@@ -1209,6 +1210,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.startSecondOpinionFor(entry);
         return;
       }
+      // モードを固定した入口（Issue #972）。設定は書き換えず、今回の起動だけを固定する
+      if (type === 'secondOpinionDirect') {
+        await this.startSecondOpinionFor(entry, 'direct');
+        return;
+      }
+      if (type === 'secondOpinionAskGpt') {
+        await this.startSecondOpinionFor(entry, 'askGpt');
+        return;
+      }
       if (type === 'secondOpinionContinue') {
         // 追加の相談（Issue #929）。メインセッションへは1ターンも送らない
         await continueSecondOpinion(
@@ -1474,7 +1484,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
    * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
    */
-  private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
+  private async startSecondOpinionFor(
+    entry: ChatPanel,
+    /** 今回だけモードを固定する（Issue #972）。省略時は設定に従う */
+    modeOverride?: SecondOpinionMode,
+  ): Promise<void> {
     await startSecondOpinion(
       this.secondOpinionPortFor(entry),
       this,
@@ -1485,6 +1499,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 受け付ける値の一覧はこちらから渡す
       (model) => effortsFor(this.settings.snapshot().models, model),
       this.advisorStore,
+      modeOverride,
     );
   }
 

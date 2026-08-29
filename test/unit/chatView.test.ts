@@ -435,9 +435,38 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       'workflowView',
       'sessionKanban',
       'openProgress',
+      'secondOpinionDirect',
+      'secondOpinionAskGpt',
     ]) {
       expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
     }
+  });
+
+  // Issue #972。ボタンを1つ足すには ID一覧・composerButtonSpec・renderShell・
+  // chatScript.ts のイベント登録の4つがそろっている必要がある。イベント登録だけ足して
+  // HTMLに要素が無いと `el(id)` が null を返し、そのボタンが効かないのではなく
+  // webviewの初期化ごと落ちる。設定の並びが何であれ、各IDがちょうど1個出ることを見る
+  describe('セカンドオピニオンの3つの入口がDOM上にちょうど1個ずつ出る（Issue #972）', () => {
+    const secondOpinionIds = ['secondOpinion', 'secondOpinionDirect', 'secondOpinionAskGpt'];
+
+    function countButton(html: string, id: string): number {
+      return html.split(`id="${id}"`).length - 1;
+    }
+
+    it.each([
+      ['既定（composerButtons省略）', undefined],
+      ['3つとも表に出す指定', secondOpinionIds as ComposerButtonId[]],
+      ['空配列（すべて「…」メニューへ畳む）', [] as ComposerButtonId[]],
+      ['無関係なIDだけを表に出す指定', ['review'] as ComposerButtonId[]],
+    ])('%s でも3つとも1個ずつ', (_label, composerButtons) => {
+      const html = renderShell(
+        fakeWebview() as never,
+        buildOptions(composerButtons === undefined ? {} : { composerButtons }),
+      );
+      for (const id of secondOpinionIds) {
+        expect(countButton(html, id), `${id} はちょうど1個のはず`).toBe(1);
+      }
+    });
   });
 
   it('composerButtonsを指定すると、そこに挙げたIDだけが表に出て、残りは「…」メニューに入る（表に出なくなったボタンがどこからも到達できなくならないことの確認）', () => {

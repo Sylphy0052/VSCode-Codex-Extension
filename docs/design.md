@@ -8481,6 +8481,41 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 - `test/unit/secondOpinionHandoff.test.ts`: 厳格なパース（ブロック無し・複数・壊れたJSON・キー欠落・空・長すぎ・閉じていないフェンス）
 - `test/unit/secondOpinionContinue.test.ts`: 追加の相談が相談相手だけへ送られること、承認したときにだけ送ること、出所の断り書きが必ず付くこと、エディタで開くのは指示文だけで直した本文が送られること、下書きが古ければ送らないこと、送信に失敗したら閉じないこと
 
+### 14.102 モードを固定してセカンドオピニオンを起動する（Issue #972）
+
+#### 設定でしか切り替えられなかった
+
+§14.94 で足した `askGpt` モードは、設定 `agent.secondOpinion.mode` を書き換えたときだけ有効になる。会話の途中で「今回は状況を整理してから聞きたい」と思っても、その場では切り替えられない。実際にはこの2つは排他的な好みではなく用途で使い分けたい——短い確認は `direct` で足り、設計判断や込み入った不具合は `askGpt` の方が向く。
+
+#### 入口を3つにする
+
+`COMPOSER_BUTTON_IDS`（§14.58）へ `secondOpinionDirect` / `secondOpinionAskGpt` を足し、モードを固定した入口を2つ用意した。既存の `secondOpinion` は従来どおり設定に従う。
+
+**片方（askGptだけ）にしない。** モード固定の入口を1つだけ足すと、設定を `askGpt` にしている利用者は2つのボタンがどちらも `askGpt` になり、`direct` へ到達する手段が消える。設定値に関わらず両方向へ行けるよう、固定の入口は2つとも持つ。
+
+`DEFAULT_COMPOSER_BUTTONS` は変えない（§14.82 の7つのまま）。表は既に埋まっており、8つ目以降を足すと入力欄が狭い環境で折り返す。既定では「…」メニューに出て、`overflowComposerButtons` が到達性を保証する（§14.58）。表へ出したい利用者は `agent.chat.composerButtons` へ足せる。
+
+#### モードの上書きは分岐の1行だけ
+
+`startSecondOpinion()` へ `modeOverride?: SecondOpinionMode` を**引数リストの末尾**に足した。途中へ挿すと既存呼び出しの位置引数の対応が崩れる。`config.mode` を読む箇所は分岐の1行しかないため、`const effectiveMode = modeOverride ?? config.mode` を置いて判定をそこへ寄せれば足りる。`startAskGptSecondOpinion()` 以降の下流は `config.mode` を参照しない。
+
+**設定値は書き換えない。** ボタンで固定するのは今回の起動だけで、次に `secondOpinion` を押せば設定どおりのモードで走る。押した操作が設定を書き換えると、1回の選択が以後の既定を変えてしまう。
+
+#### 実行中は3つとも押せない
+
+3つの入口は同じ `SecondOpinionRegistry`（§14.92）を共有する。排他そのものは候補・effort選択の**後**に呼ぶ `registry.begin()` の compare-and-set が担っており、入口が増えても穴は開かない——起動フローの先頭にある `isRunning()` は、選択UIを出す前に案内するための早期チェックにすぎない。
+
+一方、webview側は `el('secondOpinion')` 1つだけを `disabled` にしていた。入口が3つになると、実行中でも残り2つが押せてしまい、`begin()` が拒否するまで気付けない。3つまとめて同じ状態にする。「実行中はもう片方を押すと案内が出る」ではなく「実行中は3つとも押せない」を正とし、`begin()` 失敗時の案内はUIの無効化が間に合わない競合とコマンド経由の二重要求に対する防御として残す。
+
+#### ボタンIDの追加は4箇所そろえる
+
+ボタンを1つ足すには、`COMPOSER_BUTTON_IDS`（ID一覧）・`composerButtonSpec`（ラベルとアイコン）・`renderShell`（描画）・`chatScript.ts`（イベント登録）の4つがそろっている必要がある。イベント登録だけ足してHTMLに要素が無いと、`el(id)` が `null` を返して**webviewの初期化ごと落ちる**（そのボタンだけが効かないのではなく、以後のスクリプトが全て動かなくなる）。ID一覧へ足せば表か「…」のどちらかに必ず描画される（§14.58）ので、実際には一覧への追加漏れが唯一の落とし穴になる。
+
+#### 確かめ方
+
+- `test/unit/composerButtons.test.ts`: 正準の並びが19個になり、`secondOpinionDirect` / `secondOpinionAskGpt` が既定では「…」メニューへ畳まれること、未知ID・重複IDの既定へのフォールバックが従来どおり働くこと
+- `docs/manual-test.md`: 3つの入口それぞれが設定と無関係に意図したモードで走ること、実行中に3つとも押せなくなること、Codex側・Claude Code側の両方で成り立つこと
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか

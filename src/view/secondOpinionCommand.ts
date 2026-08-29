@@ -28,6 +28,7 @@ import {
   DEFAULT_ASK_GPT_TEMPLATE,
   validateAskGptRequestText,
   type RequestGenerationResult,
+  type SecondOpinionMode,
 } from '../secondOpinion/askGpt';
 import {
   AdvisorSession,
@@ -392,6 +393,14 @@ export async function startSecondOpinion(
    * 渡さない呼び出しは Issue #894 時点の挙動（1ターンで閉じる）になる。
    */
   advisorStore?: AdvisorSessionStore,
+  /**
+   * 今回だけモードを固定する（Issue #972）。入力欄のモード固定ボタンから渡す。
+   *
+   * 渡さない呼び出しは設定 `agent.secondOpinion.mode` に従う（既定の入口の挙動）。
+   * ここで上書きしても設定値は書き換えない。引数は末尾に足す（途中へ挿すと既存の
+   * 位置引数の対応が崩れる）。
+   */
+  modeOverride?: SecondOpinionMode,
 ): Promise<void> {
   if (registry.isRunning(port.parentSessionId)) {
     void vscode.window.showInformationMessage(
@@ -422,7 +431,9 @@ export async function startSecondOpinion(
   }
   // 今回だけの上書き。設定の候補（`candidates.ts`）は変えない（Issue #944）
   const candidate: SecondOpinionCandidate = { ...picked, effort };
-  if (config.mode === 'askGpt') {
+  // 押されたボタンでモードを固定できる（Issue #972）。設定はそのまま残す
+  const effectiveMode = modeOverride ?? config.mode;
+  if (effectiveMode === 'askGpt') {
     // 追加資料の選択は出さない。何を渡すかは親が質問文の中で決める（Issue #947 受入基準1）
     await startAskGptSecondOpinion(port, host, registry, log, config, cwd, candidate);
     return;
@@ -876,10 +887,7 @@ export async function continueSecondOpinion(
     // 古い下書きを承認できる状態のまま残すと、相談の結論と送る文がずれる
     port.setHandoffDraft?.(undefined);
     port.note(id, pendingFollowUpDisplay(advisor.candidate, question));
-    const result = await advisor.ask(
-      buildAdvisorFollowUpPrompt(question),
-      controller.signal,
-    );
+    const result = await advisor.ask(buildAdvisorFollowUpPrompt(question), controller.signal);
     if (result.ok) {
       port.note(
         id,
