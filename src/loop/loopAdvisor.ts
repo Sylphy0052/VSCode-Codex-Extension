@@ -89,6 +89,22 @@ export type LoopAdvisorFn = (input: GoalEvaluatorInput) => Promise<LoopAdvisorRe
 /** Advisorを呼ぶ間隔の既定（毎ターン）。 */
 export const DEFAULT_ADVISOR_EVERY_N_TURNS = 1;
 
+/**
+ * Advisorを動かすプロバイダの既定（issue #994）。
+ *
+ * `inherit`（会話しているのと同じCLI）にはしない。Advisorの役割は「別の目で進め方を見る」
+ * ことであり、どちらの画面からループを回したかで相談先が変わると、指摘の出所が安定しない。
+ */
+export const DEFAULT_ADVISOR_PROVIDER = 'codex';
+
+/**
+ * Advisorに使うモデルの既定（issue #994）。
+ *
+ * セカンドオピニオン（`DEFAULT_SECOND_OPINION_CANDIDATES`）の既定と同じものを指す。
+ * 同じ「独立した第三者に見てもらう」役割で、片方だけ軽量モデルに落とす理由が無い。
+ */
+export const DEFAULT_ADVISOR_MODEL = 'gpt-5.6-sol';
+
 /** `LoopPlan`へ載せるAdvisorの設定。省略するとAdvisorを呼ばない。 */
 export interface LoopAdvisorConfig {
   advise: LoopAdvisorFn;
