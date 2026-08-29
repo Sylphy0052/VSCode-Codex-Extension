@@ -76,6 +76,11 @@ export function buildClaudeHeadlessArgs(model: string): string[] {
  *
  * 脇役に必要な能力はJSONを1つ書くことだけなので、能力は列挙して落とす。
  * 詳細な実測結果はissue #962に記録した。
+ *
+ * **守る不変条件**: Codexのヘッドレス実行は、ローカルのファイル読取・環境変数・外部
+ * ネットワーク・連携アプリ（apps / plugins）のいずれにも到達できず、モデルへのプロンプトと
+ * JSONの応答だけを行う。**Codex CLIを更新したときは、この文が成り立つかを実測で確かめる**
+ * ——allowlistの機構が無い以上、新しい能力が既定で有効なまま追加されれば黙って露出が戻る。
  */
 export const CODEX_DENIED_FEATURES = [
   // シェル経由の任意コマンド実行。これが最も広い読み取り経路。
