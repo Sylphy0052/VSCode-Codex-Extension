@@ -17,7 +17,7 @@ import {
   SingleTurnCancelledError,
   SingleTurnTimeoutError,
 } from '../orchestrator/planner';
-import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
+import type { TaskSession, TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
 import {
   buildAskGptSecondOpinionPrompt,
@@ -105,6 +105,16 @@ export interface SecondOpinionRequest {
    * キャンセルハンドルから渡る。
    */
   signal?: AbortSignal | undefined;
+  /**
+   * 回答が返った後もセッションを閉じずに残す（Issue #929）。
+   *
+   * 残したセッションは {@link SecondOpinionResult.session} で返す。**受け取った側が
+   * 閉じる責任を負う**（`AdvisorSession` へ渡して、その `close()` に任せる）。
+   *
+   * 残すのは最後まで返ってきたときだけである。打ち切り・失敗の場合は、相手側のターンが
+   * どこまで進んでいるか分からないまま次の質問を重ねることになるため、ここで閉じる。
+   */
+  keepSession?: boolean | undefined;
 }
 
 export type SecondOpinionResult =
@@ -122,6 +132,11 @@ export type SecondOpinionResult =
        * 参照しない（最後まで返ってきている）。
        */
       cancelledByUser?: boolean | undefined;
+      /**
+       * 閉じずに残したセッション（Issue #929）。`keepSession` を指定し、かつ最後まで
+       * 返ってきたときだけ入る。**受け取った側が `dispose()` の責任を持つ。**
+       */
+      session?: TaskSession | undefined;
     }
   | {
       ok: false;
@@ -177,6 +192,12 @@ export async function runSecondOpinion(
       `summary=${describeBackgroundForLog(request)} ` +
       `promptChars=${prompt.length}`,
   );
+  // 保持する場合の所有権（Issue #929）。`runSingleTurnTask` に閉じさせない代わりに、
+  // 「呼び出し側へ渡せた（`handedOver`）」ときを除いて、この関数の `finally` で必ず閉じる。
+  // 渡す前の区間（応答が空だった・例外が出た・打ち切られた）で漏らすと、常駐app-server側の
+  // スレッドが誰にも閉じられないまま残る
+  let opened: TaskSession | undefined;
+  let handedOver = false;
   try {
     const response = await runSingleTurnTask(
       host,
@@ -193,10 +214,19 @@ export async function runSecondOpinion(
         partialOnTimeout: true,
         // 利用者による停止（Issue #940）。渡さなければ内部タイマーだけが打ち切りを起こす
         signal: request.signal,
+        // 相談を続ける場合だけ、閉じる責任をこちらへ引き取る（Issue #929）
+        disposeSession: request.keepSession !== true,
+        onSessionOpened: (session) => {
+          opened = session;
+        },
       },
     );
     if (response.trim() === '') {
       return { ok: false, reason: 'セカンドオピニオンの応答が空でした' };
+    }
+    if (request.keepSession === true && opened !== undefined) {
+      handedOver = true;
+      return { ok: true, response, session: opened };
     }
     return { ok: true, response };
   } catch (e) {
@@ -226,6 +256,20 @@ export async function runSecondOpinion(
       return { ok: false, reason: e.message, cancelledByUser: true };
     }
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  } finally {
+    // 呼び出し側へ渡せなかったセッションはここで閉じる。`disposeSession: false` を
+    // 渡した以上、`runSingleTurnTask` はもう閉じてくれない
+    if (request.keepSession === true && opened !== undefined && !handedOver) {
+      try {
+        opened.dispose();
+      } catch (e) {
+        log?.warn(
+          `${SECOND_OPINION_LOG_PREFIX} セッションを閉じられませんでした: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
   }
 }
 
