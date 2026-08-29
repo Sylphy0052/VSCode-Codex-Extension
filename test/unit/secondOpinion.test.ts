@@ -197,7 +197,13 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
       userRequest: 'この変更をレビューして',
       artifact: {
         kind: 'workspaceChanges',
-        snapshot: { baseCommit: 'abc1234', diff: 'diff --git a/a.ts b/a.ts', truncated: false },
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: 'diff --git a/a.ts b/a.ts',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+        },
       },
     });
     expect(prompt).toContain('独立した立場から意見を求められています');
@@ -217,7 +223,13 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
       userRequest: 'レビューして',
       artifact: {
         kind: 'workspaceChanges',
-        snapshot: { baseCommit: 'abc1234', diff: 'diff', truncated: true },
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: 'diff',
+          truncated: true,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+        },
       },
     });
     expect(prompt).toContain('末尾を省略しています');
@@ -229,7 +241,13 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
       userRequest: 'レビューして',
       artifact: {
         kind: 'workspaceChanges',
-        snapshot: { baseCommit: 'abc1234', diff, truncated: false },
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff,
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+        },
       },
     });
     expect(prompt).toContain('````diff');
@@ -259,11 +277,20 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
       userRequest: 'レビューして',
       artifact: {
         kind: 'workspaceChanges',
-        snapshot: { baseCommit: 'abc1234', diff: 'diff', truncated: false },
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: 'diff',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+        },
       },
     });
-    // ベース側を読む手段（git show）は残したうえで、全体の探索だけを止める
-    expect(prompt).toContain('git show <baseCommit>:<path>');
+    // ベース側を読む手段は残したうえで、全体の探索だけを止める。読ませる先は
+    // 実workspaceではなくbundleの `base/` である（Issue #926 E）
+    expect(prompt).toContain('`base/<パス>` を読んでください');
+    expect(prompt).toContain('`changes.diff`');
+    expect(prompt).not.toContain('git show');
     expect(prompt).toContain('リポジトリ全体の探索は行わないでください');
   });
 
@@ -291,7 +318,13 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
 describe('runSecondOpinion（Issue #894）', () => {
   const snapshotContext = {
     kind: 'workspaceChanges' as const,
-    snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;', truncated: false },
+    snapshot: {
+      baseCommit: 'abc1234',
+      diff: '+const a = 1;',
+      truncated: false,
+      untrackedFiles: [],
+      untrackedOmissions: [],
+    },
   };
 
   it('読み取り専用・承認拒否・選んだ候補のmodel/effortでセッションを開く', async () => {
@@ -430,7 +463,14 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     const result = await captureWorkspaceSnapshot('/repo', git);
     expect(result).toEqual({
       ok: true,
-      snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;\n', truncated: false },
+      material: { fullDiff: '+const a = 1;\n', changedPaths: [] },
+      snapshot: {
+        baseCommit: 'abc1234',
+        diff: '+const a = 1;\n',
+        truncated: false,
+        untrackedFiles: [],
+        untrackedOmissions: [],
+      },
     });
   });
 
@@ -449,7 +489,14 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     const result = await captureWorkspaceSnapshot('/repo', git);
     expect(result).toEqual({
       ok: true,
-      snapshot: { baseCommit: 'abc1234', diff: '+固定した地点の差分\n', truncated: false },
+      material: { fullDiff: '+固定した地点の差分\n', changedPaths: [] },
+      snapshot: {
+        baseCommit: 'abc1234',
+        diff: '+固定した地点の差分\n',
+        truncated: false,
+        untrackedFiles: [],
+        untrackedOmissions: [],
+      },
     });
   });
 
@@ -475,10 +522,17 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
       'rev-parse HEAD': okResult('abc1234\n'),
       'diff --no-ext-diff --no-textconv abc1234 --': okResult('x'.repeat(50)),
     });
-    const result = await captureWorkspaceSnapshot('/repo', git, 10);
+    const result = await captureWorkspaceSnapshot('/repo', git, { maxDiffChars: 10 });
     expect(result).toEqual({
       ok: true,
-      snapshot: { baseCommit: 'abc1234', diff: 'x'.repeat(10), truncated: true },
+      material: { fullDiff: 'x'.repeat(50), changedPaths: [] },
+      snapshot: {
+        baseCommit: 'abc1234',
+        diff: 'x'.repeat(10),
+        truncated: true,
+        untrackedFiles: [],
+        untrackedOmissions: [],
+      },
     });
   });
 });

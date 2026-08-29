@@ -161,6 +161,7 @@ import { buildSessionKanban } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager } from './view/sessionKanbanView';
 import { ForgeHubViewManager } from './view/forgeHubView';
 import { SessionDecorationProvider } from './view/sessionDecorations';
+import { defaultReviewBundleRoot, removeStaleReviewBundles } from './secondOpinion/reviewBundle';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
@@ -299,6 +300,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
   context.subscriptions.push(channel);
+
+  // 前回の異常終了で残ったレビュー材料を回収する（Issue #926 E）。十分に古いものだけを
+  // 消すので、別ウィンドウで使用中のものは巻き込まない。起動を待たせる必要は無い
+  void removeStaleReviewBundles(defaultReviewBundleRoot(), Date.now(), undefined, log);
 
   const home = resolveCodexHome(readConfig().codexHome, nodeLocatorDeps);
   const paths = codexPaths(home);
