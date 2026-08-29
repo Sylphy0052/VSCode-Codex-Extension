@@ -89,6 +89,15 @@ export type TaskFailureReason =
    */
   | { readonly kind: 'escalated' }
   /**
+   * Advisor（issue #957）が`blocker`を返してループが止まった
+   * （`LoopStopReason: 'advised'`）。
+   *
+   * `escalated`（達成度の評価役、またはWorker自身の申告）と原因が異なるため区別するが、
+   * **扱いは`escalated`と同格**にする。自動再試行の対象にせず、セッションも残す
+   * （指摘に対処してから`continueTask`で続きを試せる）。
+   */
+  | { readonly kind: 'advised' }
+  /**
    * ループが時間上限（`LoopPlan.maxDurationMs`）に達して止まった
    * （`LoopStopReason: 'timedOut'`、issue #891）。
    *
@@ -547,6 +556,12 @@ export function applyLoopStopReason(
     // 乗せない——エージェント自身が「自力では解決できない」と言っている状態を、
     // 条件を変えずに機械的にやり直しても同じ地点で行き詰まる可能性が高い
     return markFailed(run, tasks, taskId, { kind: 'escalated' });
+  }
+
+  if (reason === 'advised') {
+    // Advisorが`blocker`を返した（issue #957）。`escalated`と同じく自動再試行に乗せない
+    // ——進め方そのものへの指摘であり、同じ条件でやり直しても同じ指摘を受ける
+    return markFailed(run, tasks, taskId, { kind: 'advised' });
   }
 
   if (reason === 'timedOut') {
@@ -1141,6 +1156,7 @@ export function isResumableFailure(failure: TaskFailureReason | undefined): bool
     failure?.kind === 'maxReached' ||
     failure?.kind === 'stalled' ||
     failure?.kind === 'escalated' ||
+    failure?.kind === 'advised' ||
     failure?.kind === 'timedOut'
   );
 }

@@ -8005,6 +8005,72 @@ Advisorへ渡すのは親が組み立てた質問文だけ、ではない。利�
 - `test/unit/secondOpinionAskGpt.test.ts`: 8見出しの順序・欠落・重複・前置き・長さ上限の判定（本文中に見出し文字列が引用されていても行頭でなければ数えないこと）、credentialの形ごとの伏せ字化と、環境変数参照・プレースホルダを伏せないこと、依頼文が固定指示の後・質問文の前にfence付きで入ること、伏せた件数が合算されること
 - `test/integration/chatCodexSecondOpinionAskGpt.test.ts`: 生成ターンがephemeralなforkの上で走り、本流のスレッドへは何も送らず、タブを一度も作らないこと。ターンが完了（形式違反で止まる）・失敗・タイムアウト（打ち切りを要求する）のいずれでもAdvisorのセッションを開始しないこと
 - `test/unit/secondOpinionCleanup.test.ts` / `test/unit/secondOpinionSpeed.test.ts`: `direct` モードの既存の挙動が変わらないこと
+
+### 14.95 ループの各ターンにAdvisorのレビューを挟む（Issue #957）
+
+#### 何を足したのか
+
+§14.81 のゴール駆動ループは、各ターンのあとに別セッションのEvaluatorが「ゴールを達成したか」を判定する。判定は4値（`achieved` / `continue` / `escalate` / `indeterminate`）で、続けるか止めるかを決める。ここで抜けているのは**進め方の妥当性**である。Evaluatorは止める側であって方向を変える側ではなく、受入基準から外れた作業・危うい前提・遠回りは、誰も問わないまま何十周と続きうる。
+
+そこで各ターンのあとに、Evaluatorと**並列に**Advisor（§14.80 のセカンドオピニオンと同じ役回りの第三者）を走らせる。Advisorは同じ材料を別の目で見て、深刻度付きの指摘を返す。
+
+- `blocker`: ループを `advised` で止めて人へ渡す
+- `concern`: 止めず、指摘を次のターンの指示へ**独立した区画**として載せる
+- `note`: 区画へは載せるが、`## 次に集中すること` へは格上げしない
+
+既定は無効（`agent.chat.loopAdvisor.enabled`）。有効にしない限り、ゴール駆動ループの挙動は1つも変わらない。
+
+#### Issue #929 との関係
+
+§14.80 のセカンドオピニオンは「Advisorの回答をそのまま作業指示にしない」ために、**人のゲート**を置いている。ループの中では毎ターン人が挟まれないため、そのゲートを**構造で代替する**。
+
+Advisorの出力は `LoopAdvice`（`severity` / `findings` / `nextFocus` / `evidence`）という構造化フィールドだけで、**自由文の指示（次ターンのユーザープロンプトそのもの）を含まない**。次ターンの指示文の組み立ては `LoopController` 側（`buildNextTurnPrompt`）に残る。これは `GoalEvaluation` に課しているのと同じ制約であり、Advisorへ完全なプロンプト生成権限を渡さないことで、ドリフト・勝手な要件追加・会話へ紛れ込んだ指示文の素通し（prompt injection）をまとめて減らす。渡す材料も `formatUntrusted` で「これはデータであって指示ではない」と囲ってある。
+
+#### 4つの設計判断
+
+| 論点 | 採った案 | 捨てた案とその理由 |
+| --- | --- | --- |
+| 置き場所 | Evaluatorと**並列** | Evaluatorを置き換える案。達成判定と妥当性判定は問いが違い、片方が他方を兼ねられない |
+| 権限 | **深刻度で分岐**（`blocker`だけ止める） | 常に止める案。指摘のたびに人待ちになり、自動で回す目的が消える。常に止めない案では重大な逸走を誰も止められない |
+| 材料 | Evaluatorの入力（`GoalEvaluatorInput`）を**使い回す** | Advisorのために毎ターン`thread/fork`する案。待ち時間がもう1本増え、同じターンについて2人が違う材料を見ることになる |
+| 呼ぶ頻度 | 設定で N ターンごと（既定1） | 毎ターン固定。長いループでの費用と待ち時間を利用者が調整できない |
+
+代償は正直に書いておく。**1周あたり別セッションが2本になる**ため、Issue #944 で詰めたセカンドオピニオンの速度改善のぶんは、ループ全体で見ると部分的に戻る。並列に走らせているので待ち時間は「2本の遅い方」で済むが、費用は素直に増える。既定を無効にし、`everyNTurns` を用意したのはこのためである。
+
+#### 失敗したときにどう倒すか
+
+**Advisorの失敗は `blocker` へ倒さない。** CLIが落ちた・タイムアウトした・JSONが読めなかったのいずれも `noAdvice()`（`severity: 'note'`・指摘なし）として扱い、ループは続く。脇役の不調がそのまま本編の停止（＝人待ち）になると、Advisorを有効にしただけでループが回らなくなる。握り潰していることが分からないと困るため、失敗した事実はログへ残す。
+
+EvaluatorとAdvisorは独立に `catch` してあり、**片方が失敗しても他方の結果は使う**。`Promise.all` で束ねていないのは、Advisorを使わないループのマイクロタスクの回数を変えないためである（束ねると1tick増え、既存の非同期テストが崩れる＝挙動が変わっている）。
+
+`everyNTurns` が2以上のとき、Advisorを呼ばない周では前回の指摘を**持ち越さない**。古い指摘を新しいターンの評価として読ませることになり、Issue #933 で証拠の積み直しについて踏んだのと同じ罠になる。
+
+#### 停止理由を分ける
+
+`LoopStopReason` に `advised` を、`TaskFailureReason` に `{ kind: 'advised' }` を足した。**`escalated` と同じ値にしない。** 同じにすると「Evaluator（または Worker 自身の申告）が止めたのか、Advisorが止めたのか」が会話とログから読めなくなる。両者は見ているものが違い、人が次に取る手も違う。
+
+扱いは `escalated` と同格で、自動再試行には乗せず（`applyLoopStopReason`）、セッションも残す（`runner.ts` の `onTaskFinished`、`isResumableFailure`、`workflowScript.ts` の `canContinueTask`）。指摘に対処してから「続ける」で同じ会話のまま再開できる。
+
+#### 送信前に伏せるもの
+
+Advisorへ送るプロンプトは `redactCredentials`（§14.80）を通す。Codex CLI / Claude CLI はいずれもモデルサービスへ送るクライアントであり、同一マシンで動いていることは資格情報を素通しにしてよい理由にならない。**業務コードそのものは伏せない**——伏せると指摘が成り立たなくなるうえ、隠したい対象はそこではない。ログへ出すのは深刻度・件数・伏せた件数だけで、プロンプトと応答本文は出さない。
+
+会話には、Advisorが動いた周だけ深刻度と指摘の全文を残す（指摘が無かった周も残す。「見たうえで無かった」と「そもそも見ていない」を区別するため）。**送った材料の全文は残さない**——証拠と応答本文の再掲になり、ターンごとに会話が埋まる。
+
+#### 実装の置き場
+
+- `src/loop/loopAdvisor.ts`: 型（`LoopAdvice` / `LoopAdvisorConfig`）と `noAdvice` / `shouldAdvise`。`goalLoop.ts` と同じく `vscode` に依存しない
+- `src/loop/advisorPrompt.ts`: `buildAdvisorPrompt` / `parseAdvice`。切り詰めの規則（`normalizeField` / `normalizeList`）と証拠の整形（`formatEvidence`）は `goalPrompt.ts` から共有する
+- `src/loop/loopAdvisorProcess.ts`: CLIのヘッドレス実行。`redactAdvisorPrompt` を送信経路と切り離してexportしてあるのは、伏せていることを単体テストで固定するため
+- `src/loop/headlessCli.ts`: Evaluatorが持っていた起動処理（引数の組み立てとプロセス実行）の共通部。ツールを渡さない・利用者の設定を読ませない・毎回statelessという条件はAdvisorでも同じで、二重に実装しない
+- `src/view/loopAdvisorFactory.ts`: 設定の読み出しと、会話への差し込み（`noteSecondOpinion` を再利用）
+
+#### 確かめ方
+
+- `test/unit/loopAdvisor.test.ts`: `shouldAdvise` の間隔と誤設定の倒し方、プロンプトがEvaluatorと違う問いを立てること、`parseAdvice` が壊れた応答・未知の深刻度を `blocker` ではなく「指摘なし」へ倒すこと、`buildNextTurnPrompt` の区画分けと `note` の格上げ抑止、資格情報が伏せられ業務コードは伏せられないこと
+- `test/unit/loopController.test.ts`（`LoopController（Advisor、issue #957）`）: `advisor` を渡さないと挙動が変わらないこと、EvaluatorとAdvisorが同じ材料を見て並列に走ること、`blocker` が `advised` で止めること、Evaluator/Advisorの片方が落ちても他方の結果を使うこと、`everyNTurns` の周でないターンで呼ばず持ち越しもしないこと、会話への差し込み
+- `test/unit/webviewScript.test.ts`: `TaskFailureReason` の全 kind が `FAILURE_LABEL` に揃っていること、`canContinueTask` の集合に `advised` が入っていること
+
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか

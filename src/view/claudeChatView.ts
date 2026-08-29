@@ -122,6 +122,7 @@ import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import { buildHandoffPrompt, resolveWithRetry } from './handoff';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
+import { advisorDisplay, createLoopAdvisorConfig } from './loopAdvisorFactory';
 import { CLAUDE_EFFORTS, CLAUDE_PERMISSION_MODES } from '../claude/types';
 import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
 import {
@@ -1958,6 +1959,13 @@ export class ClaudeChatViewManager
           m['plan'],
           readChatLoopEngineeringConfig(),
           createGoalLoopOptions('claude', this.log),
+          // Advisor（issue #957）。設定で無効なら`undefined`が返り、計画にも載らない
+          createLoopAdvisorConfig('claude', this.log, (advice, iteration) =>
+            entry.session.noteSecondOpinion(
+              `loopAdvisor:${iteration}`,
+              advisorDisplay(advice, iteration),
+            ),
+          ),
         );
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');

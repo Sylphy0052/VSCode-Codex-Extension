@@ -864,7 +864,10 @@
         },
         "agent.secondOpinion.mode": {
           "type": "string",
-          "enum": ["direct", "askGpt"],
+          "enum": [
+            "direct",
+            "askGpt"
+          ],
           "enumDescriptions": [
             "拡張機能が集めた材料（依頼文・背景要約・差分スナップショット）をそのまま渡す",
             "いま作業しているAI自身に、単体で読める質問文を組み立てさせてから渡す"
@@ -944,6 +947,48 @@
           "minimum": 1,
           "scope": "window",
           "markdownDescription": "「証拠が足りず判定できない」（`indeterminate`）が何回続いたら人へ渡すか。判定できない状態は**未達とは別物**であり、黙って回し続けない。この回数に達するとループは「撤退の申告」として止まる。"
+        },
+        "agent.chat.loopAdvisor.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "ゴール駆動ループ（issue #892）の各ターンのあとに、別のAI（Advisor、issue #957）へ進め方の妥当性を確認させる。評価役（`agent.chat.goalEvaluator.*`）が「ゴールを達成したか」だけを見るのに対し、Advisorは「その進め方でよいか」を見る。両者は並列に走る。**1ターンあたりの待ち時間と費用が増える**ため既定では無効。Advisorが `blocker` を返すとループを止めて人へ渡し、それ以外の指摘は次のターンの指示へ別の区画として載せる。ゴール（目的と受入基準）を入力していないループでは動かない。"
+        },
+        "agent.chat.loopAdvisor.provider": {
+          "type": "string",
+          "enum": [
+            "inherit",
+            "claude",
+            "codex"
+          ],
+          "enumDescriptions": [
+            "会話しているのと同じCLIで確認する",
+            "常に claude で確認する",
+            "常に codex で確認する"
+          ],
+          "default": "inherit",
+          "scope": "window",
+          "markdownDescription": "Advisorをどのプロバイダで動かすか。評価役と同じ考え方で、既定の `inherit` は会話しているのと同じCLIを使う。Advisorにもツールは渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）。**`claude` / `codex` を明示すると、会話の抜粋（ファイル内容やコマンド出力を含む）が会話とは別のプロバイダへ渡る。** 送信前に資格情報らしき文字列は伏せるが、業務コードそのものは伏せない。"
+        },
+        "agent.chat.loopAdvisor.model": {
+          "type": "string",
+          "default": "auto",
+          "scope": "window",
+          "markdownDescription": "Advisorに使うモデル。`auto` なら軽量なモデルに任せる（claude は `haiku`、codex はCLIの既定）。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
+        },
+        "agent.chat.loopAdvisor.timeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "scope": "window",
+          "markdownDescription": "Advisorの応答を待つ上限（秒）。超えた場合は「指摘なし」として扱い、ループは止めない。Advisorの不調で本編が人待ちにならないようにするため、失敗を `blocker` へは倒さない。"
+        },
+        "agent.chat.loopAdvisor.everyNTurns": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "scope": "window",
+          "markdownDescription": "何ターンごとにAdvisorを呼ぶか。既定の `1` は毎ターン。増やすと待ち時間と費用は減るが、方向が外れていることに気づくのが遅れる。Advisorを呼ばない周では、前の周の指摘を持ち越さない（古い指摘を新しいターンの評価として読ませないため）。"
         },
         "agent.notifications.approvalPending": {
           "type": "boolean",

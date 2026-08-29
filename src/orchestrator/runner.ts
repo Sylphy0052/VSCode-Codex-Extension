@@ -4660,6 +4660,7 @@ export class WorkflowRunner {
         reason !== 'maxReached' &&
         reason !== 'stalled' &&
         reason !== 'escalated' &&
+        reason !== 'advised' &&
         reason !== 'timedOut'
       ) {
         liveTask?.session.dispose();
