@@ -8487,7 +8487,6 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 - `test/unit/composerButtons.test.ts`: 正準の並びが19個になり、`secondOpinionDirect` / `secondOpinionAskGpt` が既定では「…」メニューへ畳まれること、未知ID・重複IDの既定へのフォールバックが従来どおり働くこと
 - `docs/manual-test.md`: 3つの入口それぞれが設定と無関係に意図したモードで走ること、実行中に3つとも押せなくなること、Codex側・Claude Code側の両方で成り立つこと
 
-
 ### 16.44 チームモード（Issue #693）
 
 #### 何を足したのか
