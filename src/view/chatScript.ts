@@ -75,6 +75,13 @@ export function chatScript(
    * メッセージでクラスを付けるだけでは次の状態更新で消える。ここへ持って計算へ混ぜる。
    */
   let secondOpinionRunning = false;
+  /**
+   * 相談を続けられるセカンドオピニオンの項目id（Issue #929）。
+   *
+   * 拡張機能側が secondOpinionAdvisor メッセージで知らせる。undefined のときは
+   * どの項目にも「追加で相談」「相談を終了」を出さない（相談相手が閉じている）。
+   */
+  let advisorItemId;
   /** 直近の状態でバックグラウンドターミナルが残っているか（枠色の計算に使う）。 */
   let hasBackgroundTerminals = false;
   /**
@@ -388,6 +395,29 @@ export function chatScript(
     });
     actions.appendChild(stop);
 
+    // 相談を続ける（Issue #929）。押すと拡張機能側が質問の入力欄を出す。ここは
+    // 要求を送るだけで、作業中のAIへは何も届かない
+    const consult = document.createElement('button');
+    consult.className = 'secondary';
+    consult.textContent = '追加で相談';
+    consult.hidden = true;
+    consult.addEventListener('click', () => {
+      vscode.postMessage({ type: 'secondOpinionContinue' });
+    });
+    actions.appendChild(consult);
+
+    // 相談相手のセッションを閉じる（Issue #929）。閉じた後は拡張機能側が
+    // secondOpinionAdvisor で undefined を送り返し、この2つのボタンが消える
+    const endConsult = document.createElement('button');
+    endConsult.className = 'secondary';
+    endConsult.textContent = '相談を終了';
+    endConsult.hidden = true;
+    endConsult.addEventListener('click', () => {
+      endConsult.disabled = true;
+      vscode.postMessage({ type: 'secondOpinionEnd' });
+    });
+    actions.appendChild(endConsult);
+
     head.appendChild(actions);
     wrap.appendChild(head);
 
@@ -447,6 +477,8 @@ export function chatScript(
       stop,
       stopTarget: undefined,
       stopRequested: false,
+      consult,
+      endConsult,
       fullText: '',
       lastItem: undefined,
       // Markdown描画のキャッシュ（issue #290）。'text' はtextContentのみ、
@@ -1137,6 +1169,25 @@ export function chatScript(
       node.stopRequested = false;
     }
     node.stop.disabled = node.stopRequested;
+
+    // 相談の続き（Issue #929）は、相談相手を保持している項目にだけ出す。実行中の項目には
+    // 出さない（同じ会話で2本目の問い合わせは始められないため、押せても断られるだけ）
+    applyAdvisorButtons(node, item.id);
+  }
+
+  /**
+   * 「追加で相談」「相談を終了」の表示を1項目ぶん決める（Issue #929）。
+   *
+   * 項目の描画からも、advisorItemId が届いた瞬間からも呼ぶ。状態の更新を待たずに
+   * ボタンが出入りする必要があるため、判定をここ1箇所へ置く。
+   */
+  function applyAdvisorButtons(node, itemId) {
+    const active = advisorItemId !== undefined && advisorItemId === itemId;
+    node.consult.hidden = !active;
+    node.endConsult.hidden = !active;
+    if (active) {
+      node.endConsult.disabled = false;
+    }
   }
 
   function syncItems(items) {
@@ -3231,6 +3282,13 @@ export function chatScript(
       // 既定ではタブが開かないため、走っていることが分かるのはこの枠色だけ（Issue #905）
       secondOpinionRunning = data.running;
       applyBackgroundRunning(document.body.classList.contains('busy'));
+    }
+    if (data.type === 'secondOpinionAdvisor') {
+      // 相談を続けられる項目が変わった（Issue #929）。状態の更新を待たずに反映する
+      advisorItemId = typeof data.itemId === 'string' ? data.itemId : undefined;
+      for (const [id, node] of nodes) {
+        applyAdvisorButtons(node, id);
+      }
     }
     if (data.type === 'insertComposerText' && typeof data.text === 'string') {
       // エディタの選択範囲を入力欄へ挿す（issue #292）。ホスト側（chatView.ts /

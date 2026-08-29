@@ -882,6 +882,18 @@
           "scope": "window",
           "markdownDescription": "`agent.secondOpinion.mode` が `askGpt` のとき、組み立てられた質問文を送信前に開いて確認・編集できるようにする。`false` にすると確認なしでそのまま送る。"
         },
+        "agent.secondOpinion.advisor.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンの回答が返った後もその相談相手のセッションを保持し、会話の項目から追加の相談とメインAIへの指示づくりを行えるようにする。`false` にすると1回聞いて表示するだけになる。保持したセッションは無操作が続くと `agent.secondOpinion.advisor.idleTimeoutMs` で閉じる。"
+        },
+        "agent.secondOpinion.advisor.idleTimeoutMs": {
+          "type": "number",
+          "default": 1800000,
+          "scope": "window",
+          "markdownDescription": "保持した相談相手のセッションを、無操作が続いたときに閉じるまでの時間（ミリ秒）。既定は30分。1分〜4時間の範囲に丸める。"
+        },
         "agent.chat.turnSummary.enabled": {
           "type": "boolean",
           "default": false,

@@ -387,3 +387,80 @@ export function failedSecondOpinionDisplay(
     detail: `${reason} ・ ${describeRun(candidate, artifactKind)}`,
   };
 }
+
+/**
+ * 相談の続き（Issue #929 Consult）で会話へ残す注記。
+ *
+ * 追加の往復であること、渡ったのは利用者の質問だけであることを毎回出す。1ターン目の注記
+ * （{@link independenceNote}）が「何を材料に判断したか」を伝えるのに対し、こちらが伝えるのは
+ * 「これは同じ相談の続きで、作業中のAIは介在していない」ことである。
+ */
+const FOLLOW_UP_NOTE = '同じ相談相手への追加の質問です（作業中のAIには送っていません）';
+
+/** 依頼先の1行表記。追加の相談では渡した資料の種類を出さない（1ターン目の材料のままのため）。 */
+function describeFollowUpRun(candidate: SecondOpinionCandidate): string {
+  return `${candidate.model} / ${candidate.effort}`;
+}
+
+/** 相談の続きの、応答を待っている間の表示。 */
+export function pendingFollowUpDisplay(
+  candidate: SecondOpinionCandidate,
+  question: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'inProgress',
+    text: `セカンドオピニオンへ追加で相談しました（${candidate.name}）\n\n${question}`,
+    detail: `実行中… ・ ${FOLLOW_UP_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/**
+ * 相談の続きの、回答が届いた後の表示。
+ *
+ * 打ち切られてそこまでの回答だけが返った場合は `partialReason` を渡す。1ターン目と同じく、
+ * 途中で切れていることが読み取れないと、指摘が出ていないのか出せなかったのかを取り違える。
+ */
+export function finishedFollowUpDisplay(
+  candidate: SecondOpinionCandidate,
+  question: string,
+  response: string,
+  partialReason?: string,
+): SecondOpinionDisplay {
+  const heading = partialReason === undefined ? '**回答**' : '**回答（打ち切り時点まで）**';
+  return {
+    status: 'completed',
+    text:
+      `セカンドオピニオン・追加の相談（${candidate.name}）\n\n**質問**\n\n${question}\n\n` +
+      `${heading}\n\n${response}`,
+    detail: [
+      ...(partialReason === undefined ? [] : [`${partialReason}（ここまでの回答を残しています）`]),
+      FOLLOW_UP_NOTE,
+      describeFollowUpRun(candidate),
+    ].join(' ・ '),
+  };
+}
+
+/** 相談の続きが失敗したときの表示。 */
+export function failedFollowUpDisplay(
+  candidate: SecondOpinionCandidate,
+  question: string,
+  reason: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'failed',
+    text: `セカンドオピニオンへ追加で相談しました（${candidate.name}）\n\n${question}`,
+    detail: `${reason} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/** 相談の続きを利用者が止めたときの表示。 */
+export function cancelledFollowUpDisplay(
+  candidate: SecondOpinionCandidate,
+  question: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text: `セカンドオピニオンへ追加で相談しました（${candidate.name}）\n\n${question}`,
+    detail: `${CANCELLED_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}

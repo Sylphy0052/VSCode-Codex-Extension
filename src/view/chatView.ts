@@ -108,7 +108,14 @@ import {
 } from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
-import { startSecondOpinion, stopSecondOpinion } from './secondOpinionCommand';
+import {
+  continueSecondOpinion,
+  endSecondOpinionConsult,
+  startSecondOpinion,
+  stopSecondOpinion,
+  type SecondOpinionPanelPort,
+} from './secondOpinionCommand';
+import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -351,6 +358,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
   /** セカンドオピニオン（Issue #894）の実行中管理。親セッションごとに1本へ絞る。 */
   private readonly secondOpinionRegistry = new SecondOpinionRegistry();
+  /**
+   * 相談を続けられるAdvisorセッションの置き場（Issue #929）。
+   *
+   * 実行中かどうかを見る `secondOpinionRegistry` とは寿命が違う。1ターンが終わっても
+   * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
+   */
+  private readonly advisorStore = new AdvisorSessionStore();
 
   private readonly catalog: CommandCatalog;
   private commands: SlashCommand[] | undefined;
@@ -919,6 +933,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   protected override onTeardown(entry: ChatPanel): void {
     this.pendingStarts.remove(entry);
+    // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、
+    // 誰にも見えないままCodexのプロセスとロールアウトだけが増える
+    endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
   }
 
   private onSessionChange(entry: ChatPanel, state: ChatState): void {
@@ -1181,6 +1198,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.startSecondOpinionFor(entry);
         return;
       }
+      if (type === 'secondOpinionContinue') {
+        // 追加の相談（Issue #929）。メインセッションへは1ターンも送らない
+        await continueSecondOpinion(
+          this.secondOpinionPortFor(entry),
+          this.secondOpinionRegistry,
+          this.advisorStore,
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionEnd') {
+        endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'userEnded');
+        return;
+      }
       if (type === 'secondOpinionStop' && typeof m['itemId'] === 'string') {
         // 会話の項目から止める（Issue #940）。タブを開かない設定でもここから止まる
         stopSecondOpinion(
@@ -1414,24 +1445,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
-      {
-        // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
-        ...secondOpinionParentPortFor(entry),
-        parentSessionId: entry.secondOpinionKey,
-        cwd: entry.cwd,
-        lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
-        // 要約（Issue #903）の入力。画面が持っている項目から組み立てるだけで、
-        // 親セッションへは何も送らない
-        conversationTranscript: () =>
-          buildTranscriptMarkdown(entry.session.getState().items, 'Codex'),
-        note: (id, display) => entry.session.noteSecondOpinion(id, display),
-        setRunning: (running) => {
-          void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
-        },
-        generateRequestText: (instruction, timeoutMs, signal) =>
-          this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
-        summaryRollout: this.summaryRolloutDeps(),
-      },
+      this.secondOpinionPortFor(entry),
       this,
       this.secondOpinionRegistry,
       this.log,
@@ -1439,7 +1453,39 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // effortの選択肢（Issue #944）。Codexのモデルカタログを持っているのはここだけなので、
       // 受け付ける値の一覧はこちらから渡す
       (model) => effortsFor(this.settings.snapshot().models, model),
+      this.advisorStore,
     );
+  }
+
+  /**
+   * セカンドオピニオンの差し込み口を1つ作る。
+   *
+   * 起動（`startSecondOpinion`）と追加の相談（`continueSecondOpinion`）で同じものを使う。
+   * どちらも「この会話へ項目を差し込む」「この会話のボタンを切り替える」だけを行う。
+   */
+  private secondOpinionPortFor(entry: ChatPanel): SecondOpinionPanelPort {
+    return {
+      // 親のターンが走っている間は、セッションを開く直前で待たせる（Issue #949）
+      ...secondOpinionParentPortFor(entry),
+      parentSessionId: entry.secondOpinionKey,
+      cwd: entry.cwd,
+      lastAssistantResponse: () => lastNonEmptyAgentMessageText(entry.session.getState().items),
+      // 要約（Issue #903）の入力。画面が持っている項目から組み立てるだけで、
+      // 親セッションへは何も送らない
+      conversationTranscript: () =>
+        buildTranscriptMarkdown(entry.session.getState().items, 'Codex'),
+      note: (id, display) => entry.session.noteSecondOpinion(id, display),
+      setRunning: (running) => {
+        void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
+      },
+      isParentDisposed: () => entry.disposed,
+      setAdvisorItem: (itemId) => {
+        void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
+      },
+      generateRequestText: (instruction, timeoutMs, signal) =>
+        this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
+      summaryRollout: this.summaryRolloutDeps(),
+    };
   }
 
   /**
@@ -2071,6 +2117,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * を解放する（Claude Codeはセッションごとに別プロセスのため対応する処理が無い）。
    */
   protected override onDispose(): void {
+    this.advisorStore.closeAll('shutdown');
     this.connection.dispose();
   }
 }

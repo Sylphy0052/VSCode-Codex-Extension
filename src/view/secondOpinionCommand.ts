@@ -30,6 +30,11 @@ import {
   type RequestGenerationResult,
 } from '../secondOpinion/askGpt';
 import {
+  AdvisorSession,
+  AdvisorSessionStore,
+  type AdvisorCloseReason,
+} from '../secondOpinion/advisorSession';
+import {
   describeRedaction,
   mergeRedactionCounts,
   redactCredentials,
@@ -37,15 +42,19 @@ import {
 import {
   cancelledAskGptDisplay,
   cancelledPartialAskGptDisplay,
+  cancelledFollowUpDisplay,
   cancelledPartialSecondOpinionDisplay,
   cancelledSecondOpinionDisplay,
   failedAskGptDisplay,
+  failedFollowUpDisplay,
   failedSecondOpinionDisplay,
   finishedAskGptDisplay,
+  finishedFollowUpDisplay,
   finishedSecondOpinionDisplay,
   partialAskGptDisplay,
   partialSecondOpinionDisplay,
   pendingAskGptDisplay,
+  pendingFollowUpDisplay,
   pendingSecondOpinionDisplay,
   queuedSecondOpinionDisplay,
   type SecondOpinionDisplay,
@@ -53,6 +62,7 @@ import {
 } from '../secondOpinion/display';
 import {
   ARTIFACT_KIND_LABELS,
+  buildAdvisorFollowUpPrompt,
   SECOND_OPINION_ARTIFACT_KINDS,
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
@@ -102,6 +112,24 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
   note(id: string, display: SecondOpinionDisplay): void;
   /** webviewのボタンの押下可否を切り替える。 */
   setRunning(running: boolean): void;
+  /**
+   * 親の会話が既に破棄されているか（Issue #929）。
+   *
+   * 相談を続けるためにAdvisorセッションを保持する経路で要る。実行中にタブを閉じられると、
+   * 保持する相手（会話）が無いのにセッションだけが残る。破棄は `note()` / `setRunning()`
+   * が no-op になるだけなので、結果からは判別できない。
+   *
+   * 省略した呼び出し側は「破棄されていない」として扱う（保持しない設定・テスト用）。
+   */
+  isParentDisposed?(): boolean;
+  /**
+   * 相談を続けられる状態になったことを画面へ伝える（Issue #929）。
+   *
+   * 会話のどの項目に「追加で相談」「メインAIへの指示を作る」を出すかを、拡張機能側から
+   * webviewへ知らせるための口。`itemId` が `undefined` のときは、どの項目にもボタンを
+   * 出さない（相談が終わった・保持しない設定）。
+   */
+  setAdvisorItem?(itemId: string | undefined): void;
   /**
    * 親の文脈を継いだforkで質問文を生成する（Issue #947）。
    *
@@ -333,6 +361,12 @@ export async function startSecondOpinion(
    * （`ChatViewManager`）はそれを渡す。
    */
   listEfforts: (model: string) => readonly string[] = () => FALLBACK_EFFORTS,
+  /**
+   * 相談を続けるためにAdvisorセッションを保持する置き場（Issue #929）。
+   *
+   * 渡さない呼び出しは Issue #894 時点の挙動（1ターンで閉じる）になる。
+   */
+  advisorStore?: AdvisorSessionStore,
 ): Promise<void> {
   if (registry.isRunning(port.parentSessionId)) {
     void vscode.window.showInformationMessage(
@@ -433,6 +467,9 @@ export async function startSecondOpinion(
       port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
       return;
     }
+    // 相談を続ける設定なら、回答の後もセッションを残す（Issue #929）。残ったセッションは
+    // この後 `handOverAdvisorSession` が引き取り、引き取れなければそこで閉じる
+    const keepSession = config.advisor.enabled && advisorStore !== undefined;
     const result = await runSecondOpinion(
       host,
       {
@@ -445,6 +482,7 @@ export async function startSecondOpinion(
         conversationSummary: summary.text,
         conversationBackgroundKind: summary.kind,
         signal: controller.signal,
+        keepSession,
       },
       log,
     );
@@ -460,6 +498,7 @@ export async function startSecondOpinion(
     if (!result.ok && result.cancelledByUser !== true) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
+    handOverAdvisorSession(port, advisorStore, config, candidate, result, id, log);
   } finally {
     registry.end(port.parentSessionId, id);
     // `setRunning()` は契約上no-opのはずだが、投げても `registry.end()` を巻き添えに
@@ -472,6 +511,64 @@ export async function startSecondOpinion(
       );
     }
   }
+}
+
+/**
+ * 残ったセッションを `AdvisorSession` へ引き取らせる（Issue #929）。
+ *
+ * `runSecondOpinion` は `keepSession` を指定したときだけセッションを返し、返した時点で
+ * **閉じる責任はこちらへ移る**。引き取れない条件をここで一箇所に集め、そのすべてで
+ * `dispose()` する。取りこぼすと、常駐app-server側のスレッドが誰にも閉じられないまま残る。
+ *
+ * 引き取れないのは次の場合である。
+ *
+ * - 保持しない設定・置き場を渡していない呼び出し（`runSecondOpinion` が返してくること自体
+ *   は無いが、条件を二重に持たない）
+ * - 実行中にタブを閉じられた。相談を続ける相手（会話）がもう無い。破棄は `note()` が
+ *   no-opになるだけで結果からは判らないため、`isParentDisposed()` で明示的に確かめる
+ */
+function handOverAdvisorSession(
+  port: SecondOpinionPanelPort,
+  store: AdvisorSessionStore | undefined,
+  config: SecondOpinionConfig,
+  candidate: SecondOpinionCandidate,
+  result: SecondOpinionResult,
+  itemId: string,
+  log: Logger,
+): void {
+  if (!result.ok || result.session === undefined) {
+    return;
+  }
+  const session = result.session;
+  if (store === undefined || !config.advisor.enabled || port.isParentDisposed?.() === true) {
+    log.info('[secondOpinion] 相談を続けないため、Advisorセッションを閉じます');
+    try {
+      session.dispose();
+    } catch (e) {
+      log.warn(`[secondOpinion] Advisorセッションを閉じられませんでした: ${errorMessage(e)}`);
+    }
+    return;
+  }
+  const advisor = new AdvisorSession({
+    session,
+    parentSessionId: port.parentSessionId,
+    candidate,
+    timeoutMs: config.timeoutMs,
+    idleTimeoutMs: config.advisor.idleTimeoutMs,
+    log,
+    onClosed: (closed) => {
+      store.remove(closed);
+      // 閉じた相談の項目に「追加で相談」を残さない
+      port.setAdvisorItem?.(undefined);
+    },
+  });
+  // 登録してからボタンを出す。逆にすると、押せる見た目なのに置き場に無い区間ができる
+  store.set(advisor);
+  port.setAdvisorItem?.(itemId);
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** 生成が成立しなかった理由の、人向けの主語。詳細はこの後ろへ繋げる。 */
@@ -703,6 +800,91 @@ export function stopSecondOpinion(
     return;
   }
   log.info(`[secondOpinion] 停止を要求しました（runId=${runId}）`);
+}
+
+/**
+ * 保持しているAdvisorへ追加の質問を送る（Issue #929 Consult）。
+ *
+ * **メインセッションへは何も送らない。** 送るのはこの相談相手のセッションだけで、結果は
+ * 会話へ新しい項目として残す（何を相談したのかを後から追えるようにする。受入基準3）。
+ *
+ * 実行中の管理は1ターン目と同じ `SecondOpinionRegistry` を通す。同じ会話から2本の
+ * 問い合わせが走らないことと、会話の項目から停止できることを、既存の仕組みのまま効かせる。
+ */
+export async function continueSecondOpinion(
+  port: SecondOpinionPanelPort,
+  registry: SecondOpinionRegistry,
+  store: AdvisorSessionStore,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      'この会話で続けられる相談はありません（もう一度セカンドオピニオンを実行してください）',
+    );
+    port.setAdvisorItem?.(undefined);
+    return;
+  }
+  if (registry.isRunning(port.parentSessionId)) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  const question = await vscode.window.showInputBox({
+    title: 'セカンドオピニオンへの追加の相談',
+    prompt:
+      '前回までのやり取りを踏まえて聞き直せます（作業中のAIには送りません。回答も自動では反映されません）',
+  });
+  if (question === undefined || question.trim() === '') {
+    return;
+  }
+  const id = `secondOpinion:${randomUUID()}`;
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  try {
+    port.setRunning(true);
+    port.note(id, pendingFollowUpDisplay(advisor.candidate, question));
+    const result = await advisor.ask(
+      buildAdvisorFollowUpPrompt(question),
+      controller.signal,
+    );
+    if (result.ok) {
+      port.note(
+        id,
+        finishedFollowUpDisplay(advisor.candidate, question, result.response, result.partialReason),
+      );
+      return;
+    }
+    if (result.kind === 'cancelled') {
+      port.note(id, cancelledFollowUpDisplay(advisor.candidate, question));
+      return;
+    }
+    log.warn(`[secondOpinion] 追加の相談に失敗しました: ${result.reason}`);
+    port.note(id, failedFollowUpDisplay(advisor.candidate, question, result.reason));
+  } finally {
+    registry.end(port.parentSessionId, id);
+    try {
+      port.setRunning(false);
+    } catch (e) {
+      log.warn(`[secondOpinion] 実行中表示の解除に失敗しました: ${errorMessage(e)}`);
+    }
+  }
+}
+
+/**
+ * 保持しているAdvisorセッションを閉じる（Issue #929）。
+ *
+ * 会話の「相談を終了」から押される経路と、親の会話が破棄された・拡張機能が終了する経路の
+ * 両方から使う。存在しない場合は何もしない（押し直し・二重の後始末で例外にしない）。
+ */
+export function endSecondOpinionConsult(
+  parentSessionId: string,
+  store: AdvisorSessionStore,
+  reason: AdvisorCloseReason,
+): void {
+  store.closeFor(parentSessionId, reason);
 }
 
 /**
