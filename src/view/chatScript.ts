@@ -82,6 +82,13 @@ export function chatScript(
    * どの項目にも「追加で相談」「相談を終了」を出さない（相談相手が閉じている）。
    */
   let advisorItemId;
+  /**
+   * 承認待ちの指示の下書きがあるか（Issue #929）。
+   *
+   * 下書きの中身は拡張機能側が持つ。ここが持つのは「承認のボタンを出すか」だけで、
+   * 送る文をwebviewとの間で往復させない。
+   */
+  let advisorHasDraft = false;
   /** 直近の状態でバックグラウンドターミナルが残っているか（枠色の計算に使う）。 */
   let hasBackgroundTerminals = false;
   /**
@@ -417,6 +424,17 @@ export function chatScript(
     });
     actions.appendChild(draft);
 
+    // 下書きを読んで承認し、作業中のAIへ送る（Issue #929）。押しても即座には送らず、
+    // 拡張機能側が全文をエディタで開き、そこでの確認を経てから送る
+    const approve = document.createElement('button');
+    approve.className = 'secondary';
+    approve.textContent = '指示を確認して送る';
+    approve.hidden = true;
+    approve.addEventListener('click', () => {
+      vscode.postMessage({ type: 'secondOpinionApprove' });
+    });
+    actions.appendChild(approve);
+
     // 相談相手のセッションを閉じる（Issue #929）。閉じた後は拡張機能側が
     // secondOpinionAdvisor で undefined を送り返し、この2つのボタンが消える
     const endConsult = document.createElement('button');
@@ -490,6 +508,7 @@ export function chatScript(
       stopRequested: false,
       consult,
       draft,
+      approve,
       endConsult,
       fullText: '',
       lastItem: undefined,
@@ -1197,6 +1216,8 @@ export function chatScript(
     const active = advisorItemId !== undefined && advisorItemId === itemId;
     node.consult.hidden = !active;
     node.draft.hidden = !active;
+    // 承認は下書きができているときだけ。追加の相談をすると下書きは無効になり、消える
+    node.approve.hidden = !(active && advisorHasDraft);
     node.endConsult.hidden = !active;
     if (active) {
       node.endConsult.disabled = false;
@@ -3296,9 +3317,18 @@ export function chatScript(
       secondOpinionRunning = data.running;
       applyBackgroundRunning(document.body.classList.contains('busy'));
     }
+    if (data.type === 'secondOpinionHandoff') {
+      // 承認待ちの下書きの有無が変わった（Issue #929）
+      advisorHasDraft = data.hasDraft === true;
+      for (const [id, node] of nodes) {
+        applyAdvisorButtons(node, id);
+      }
+    }
     if (data.type === 'secondOpinionAdvisor') {
       // 相談を続けられる項目が変わった（Issue #929）。状態の更新を待たずに反映する
       advisorItemId = typeof data.itemId === 'string' ? data.itemId : undefined;
+      // 相談相手が変われば下書きも別物になる。前の相談の承認ボタンを残さない
+      advisorHasDraft = false;
       for (const [id, node] of nodes) {
         applyAdvisorButtons(node, id);
       }

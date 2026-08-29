@@ -26,6 +26,7 @@ import {
 } from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import {
+  approveSecondOpinionHandoff,
   continueSecondOpinion,
   draftSecondOpinionHandoff,
   endSecondOpinionConsult,
@@ -1072,6 +1073,12 @@ export class ClaudeChatViewManager
       setAdvisorItem: (itemId) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
       },
+      // 承認された指示を送る唯一の口（Issue #929）。`approveSecondOpinionHandoff` が
+      // `markApproved()` を通したときにだけ呼ばれる
+      sendApprovedInstruction: async (text) => {
+        const outcome = entry.session.sendOrQueue(text, []);
+        return Promise.resolve(outcome);
+      },
       setHandoffDraft: (draft) => {
         // 承認の対象は画面ではなく拡張機能側が持つ（Issue #929）。webviewへ渡すのは
         // ボタンを出すかどうかの真偽値だけで、指示文そのものは往復させない
@@ -2015,6 +2022,16 @@ export class ClaudeChatViewManager
           this.secondOpinionPortFor(entry),
           this.secondOpinionRegistry,
           this.advisorStore,
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionApprove') {
+        // 人が読み、直し、承認したときにだけ送る（Issue #929 Human Gate）
+        void approveSecondOpinionHandoff(
+          this.secondOpinionPortFor(entry),
+          this.advisorStore,
+          this.handoffDrafts.get(entry.secondOpinionKey),
           this.log,
         );
         return;

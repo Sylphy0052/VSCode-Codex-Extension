@@ -237,6 +237,19 @@ interface MockState {
   openedTextDocumentPaths: string[];
   /** `commands.executeCommand` に渡されたコマンドIDの履歴（issue #250）。 */
   executedCommands: string[];
+  /**
+   * `workspace.openTextDocument({ content })` で開かれた無題の文書の本文（Issue #929）。
+   *
+   * 承認して送る導線が「エディタで開いた本文」を送信の対象にするため、何を開いたのかを
+   * テストから読めるようにする。
+   */
+  untitledDocumentContents: string[];
+  /**
+   * 無題の文書が `getText()` で返す本文の差し替え（Issue #929）。
+   *
+   * 開いた後に人が手で直す場面を模すために使う。未設定なら開いたときの本文をそのまま返す。
+   */
+  untitledDocumentEdit: string | undefined;
 }
 
 const state: MockState = {
@@ -254,6 +267,8 @@ const state: MockState = {
   existingTextDocumentPaths: new Set(),
   openedTextDocumentPaths: [],
   executedCommands: [],
+  untitledDocumentContents: [],
+  untitledDocumentEdit: undefined,
 };
 
 /** テストコードから内部状態を操作・観測するための入口。実装コードからは使わない。 */
@@ -273,6 +288,16 @@ export const __mock = {
     state.existingTextDocumentPaths = new Set();
     state.openedTextDocumentPaths = [];
     state.executedCommands = [];
+    state.untitledDocumentContents = [];
+    state.untitledDocumentEdit = undefined;
+  },
+  /** `openTextDocument({ content })` で開かれた無題の文書の本文の履歴（Issue #929）。 */
+  get untitledDocumentContents(): string[] {
+    return state.untitledDocumentContents;
+  },
+  /** 開いた後に人が直した本文（Issue #929）。設定すると `getText()` がこれを返す。 */
+  set untitledDocumentEdit(value: string | undefined) {
+    state.untitledDocumentEdit = value;
   },
   /** `commands.executeCommand` が呼ばれたコマンドIDの履歴（issue #250）。 */
   get executedCommands(): string[] {
@@ -424,11 +449,23 @@ export const workspace = {
    * （issue #205のデバッグログを開く導線。候補が複数ある実装のフォールバックを
    * テストできるよう、実物と同じく無いパスは reject する）。
    */
-  openTextDocument: (uri: FakeUri): Promise<{ uri: FakeUri }> => {
-    if (!state.existingTextDocumentPaths.has(uri.fsPath)) {
-      return Promise.reject(new Error(`ENOENT: no such file, open '${uri.fsPath}'`));
+  openTextDocument: (
+    target: FakeUri | { content?: string; language?: string },
+  ): Promise<{ uri: FakeUri; getText?: () => string }> => {
+    if (!('fsPath' in target)) {
+      // 無題の文書（Issue #929 の承認導線）。実物と同じくディスク上のファイルを要求しない
+      const content = target.content ?? '';
+      state.untitledDocumentContents.push(content);
+      const index = state.untitledDocumentContents.length;
+      return Promise.resolve({
+        uri: { fsPath: `untitled:${index}` },
+        getText: () => state.untitledDocumentEdit ?? content,
+      });
     }
-    return Promise.resolve({ uri });
+    if (!state.existingTextDocumentPaths.has(target.fsPath)) {
+      return Promise.reject(new Error(`ENOENT: no such file, open '${target.fsPath}'`));
+    }
+    return Promise.resolve({ uri: target });
   },
 };
 

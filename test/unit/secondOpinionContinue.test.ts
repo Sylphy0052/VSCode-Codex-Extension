@@ -18,6 +18,7 @@ import type { SecondOpinionDisplay } from '../../src/secondOpinion/display';
 import { SecondOpinionRegistry } from '../../src/secondOpinion/run';
 import type { HandoffDraft } from '../../src/secondOpinion/handoff';
 import {
+  approveSecondOpinionHandoff,
   continueSecondOpinion,
   draftSecondOpinionHandoff,
   endSecondOpinionConsult,
@@ -77,6 +78,9 @@ class FakePort implements SecondOpinionPanelPort {
   running: boolean[] = [];
   advisorItems: (string | undefined)[] = [];
   drafts: (HandoffDraft | undefined)[] = [];
+  sent: string[] = [];
+  /** 設定すると送信が失敗する（送れなかったときの後始末を試す）。 */
+  sendFailure: Error | undefined;
   /** メインセッションへ送った回数。ここが0のままであることが受入基準（1ターンも送らない）。 */
   sentToMain = 0;
 
@@ -97,6 +101,13 @@ class FakePort implements SecondOpinionPanelPort {
   }
   setHandoffDraft(draft: HandoffDraft | undefined): void {
     this.drafts.push(draft);
+  }
+  async sendApprovedInstruction(text: string): Promise<'sent' | 'queued'> {
+    if (this.sendFailure !== undefined) {
+      throw this.sendFailure;
+    }
+    this.sent.push(text);
+    return 'sent';
   }
   isParentDisposed(): boolean {
     return false;
@@ -282,6 +293,167 @@ describe('draftSecondOpinionHandoff（Issue #929 Handoff）', () => {
 
     expect(advisor.currentState()).toBe('consulting');
     expect(port.drafts.at(-1)).toBeUndefined();
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+});
+
+describe('approveSecondOpinionHandoff（Issue #929 Human Gate）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  /** 下書きができている状態まで進める。 */
+  async function seedDraft(
+    store: AdvisorSessionStore,
+    port: FakePort,
+    session: FakeSession,
+  ): Promise<HandoffDraft> {
+    session.response = [
+      '```json',
+      JSON.stringify({ userSummary: '要約', mainInstruction: 'B案で実装すること' }),
+      '```',
+    ].join('\n');
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+    const draft = port.drafts.at(-1);
+    if (draft === undefined) {
+      throw new Error('下書きができていない');
+    }
+    return draft;
+  }
+
+  it('承認したときにだけ送り、出所を頭に付ける', async () => {
+    __mock.showInformationMessageAnswer = '送る';
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+    const draft = await seedDraft(store, port, session);
+
+    await approveSecondOpinionHandoff(port, store, draft, LOG);
+
+    expect(port.sent).toHaveLength(1);
+    const sent = port.sent[0] ?? '';
+    // 出所の断り書きは送信時に必ず付く（下書きからは消せない）
+    expect(sent).toContain('独立したセカンドオピニオン');
+    expect(sent).toContain('gpt-5.6-sol / high');
+    expect(sent.endsWith('B案で実装すること')).toBe(true);
+    // 送った後は相談を閉じる
+    expect(advisor.closedReason()).toBe('instructionSent');
+    expect(session.disposeCalls).toBe(1);
+  });
+
+  it('確認で「やめる」を選んだら何も送らない', async () => {
+    __mock.showInformationMessageAnswer = undefined;
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+    const draft = await seedDraft(store, port, session);
+
+    await approveSecondOpinionHandoff(port, store, draft, LOG);
+
+    expect(port.sent).toEqual([]);
+    // 承認していないので相談は続けられる
+    expect(advisor.closedReason()).toBeUndefined();
+    expect(advisor.currentState()).toBe('handoffDrafted');
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+
+  it('下書きが無ければ送らない', async () => {
+    __mock.showInformationMessageAnswer = '送る';
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    seedAdvisor(store, session);
+    const port = new FakePort();
+
+    await approveSecondOpinionHandoff(port, store, undefined, LOG);
+
+    expect(port.sent).toEqual([]);
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+
+  it('追加の相談で下書きが古くなっていたら送らない', async () => {
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+    const draft = await seedDraft(store, port, session);
+    // 追加で相談すると `consulting` へ戻る（相談の結論と下書きがずれる）
+    __mock.showInputBoxAnswer = 'やはりC案は？';
+    await continueSecondOpinion(port, new SecondOpinionRegistry(), store, LOG);
+    expect(advisor.currentState()).toBe('consulting');
+
+    __mock.showInformationMessageAnswer = '送る';
+    await approveSecondOpinionHandoff(port, store, draft, LOG);
+
+    expect(port.sent).toEqual([]);
+    expect(advisor.closedReason()).toBeUndefined();
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+
+  it('送信に失敗したら相談を閉じない（もう一度承認できる）', async () => {
+    __mock.showInformationMessageAnswer = '送る';
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+    port.sendFailure = new Error('セッションが応答しません');
+    const draft = await seedDraft(store, port, session);
+
+    await approveSecondOpinionHandoff(port, store, draft, LOG);
+
+    expect(port.sent).toEqual([]);
+    expect(advisor.closedReason()).toBeUndefined();
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+});
+
+describe('承認前の編集（Issue #929）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('エディタで開くのは指示文だけで、直した本文が送られる', async () => {
+    __mock.showInformationMessageAnswer = '送る';
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    session.response = [
+      '```json',
+      JSON.stringify({ userSummary: '利用者向けの要約', mainInstruction: 'B案で実装すること' }),
+      '```',
+    ].join('\n');
+    seedAdvisor(store, session);
+    const port = new FakePort();
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+    const draft = port.drafts.at(-1);
+    // 人が本文を直した状況を作る
+    __mock.untitledDocumentEdit = 'B案で実装すること（ただしAPIは変えない）';
+
+    await approveSecondOpinionHandoff(port, store, draft, LOG);
+
+    // 開くのは指示文だけ。利用者向けの要約は送信の対象ではないので混ぜない
+    expect(__mock.untitledDocumentContents).toEqual(['B案で実装すること']);
+    expect(port.sent[0]?.endsWith('B案で実装すること（ただしAPIは変えない）')).toBe(true);
+  });
+
+  it('本文を空にして承認しても送らない', async () => {
+    __mock.showInformationMessageAnswer = '送る';
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    const advisor = seedAdvisor(store, session);
+    session.response = [
+      '```json',
+      JSON.stringify({ userSummary: '要約', mainInstruction: '指示' }),
+      '```',
+    ].join('\n');
+    const port = new FakePort();
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+    __mock.untitledDocumentEdit = '   \n  ';
+
+    await approveSecondOpinionHandoff(port, store, port.drafts.at(-1), LOG);
+
+    expect(port.sent).toEqual([]);
+    expect(advisor.closedReason()).toBeUndefined();
     store.closeFor(PARENT_ID, 'userEnded');
   });
 });

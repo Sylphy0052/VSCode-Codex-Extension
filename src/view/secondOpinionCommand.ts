@@ -145,6 +145,17 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
    */
   setHandoffDraft?(draft: HandoffDraft | undefined): void;
   /**
+   * 承認された指示を作業中のAIへ送る（Issue #929）。**この機能で唯一の送信経路。**
+   *
+   * 任意の文字列を送れる汎用の口（`sendToMain(text)` のようなもの）を置かないのは、置いた
+   * 時点で「承認を通っていない文を送る」経路がAPIとして生えるためである。ここは
+   * `approveSecondOpinionHandoff` からしか呼ばれず、その関数は `markApproved()` が
+   * 通ったときにしか呼ばない。
+   *
+   * 戻り値は送信できたか待機列へ入ったか。親がターン中なら待たせる（既存の指示と同じ扱い）。
+   */
+  sendApprovedInstruction?(text: string): Promise<'sent' | 'queued'>;
+  /**
    * 親の文脈を継いだforkで質問文を生成する（Issue #947）。
    *
    * 実装はCodexが `thread/fork`（`ephemeral: true`）、Claudeが `-r <id> --fork-session`。
@@ -960,6 +971,104 @@ export async function draftSecondOpinionHandoff(
       log.warn(`[secondOpinion] 実行中表示の解除に失敗しました: ${errorMessage(e)}`);
     }
   }
+}
+
+/**
+ * 承認された指示の頭に必ず付ける断り書き（Issue #929）。
+ *
+ * 受け取る側（作業中のAI）にとって、この文は**外部の相談相手が書き、利用者が承認したもの**
+ * である。それを伏せて渡すと、AIは利用者本人が考えた指示として扱う。出所が判れば、指示の
+ * 前提が自分の把握している状況と食い違うときに、そのまま従わず確かめる余地が残る。
+ *
+ * 編集できる下書き（`mainInstruction`）とは別に、送信時にここで足す。下書きへ埋め込むと、
+ * 利用者が消せてしまい「出所を伏せた指示」を作れてしまう。
+ */
+function provenancePrefix(candidate: SecondOpinionCandidate): string {
+  return [
+    `以下は、この会話とは独立したセカンドオピニオン（${candidate.model} / ${candidate.effort}）へ相談した結果を、利用者が確認・編集して承認した指示です。`,
+    'あなた自身が把握している状況と食い違う前提があれば、そのまま従わずに指摘してください。',
+    '',
+    '---',
+    '',
+  ].join('\n');
+}
+
+/**
+ * 下書きを人が読み、直し、承認して送る（Issue #929 Human Gate）。
+ *
+ * **この機能で、作業中のAIへ何かが渡る唯一の経路。** 手順は必ず「開く → 人が読む →
+ * 明示的に押す → 送る」の順で、途中を飛ばせないようにしてある。
+ *
+ * 編集を無題のMarkdownドキュメントで行わせるのは、承認の前に**全文を、送られる形のまま**
+ * 見せるためである。入力欄（InputBox）は1行しか見えず、長い指示文は読まれないまま承認される。
+ * 開くのは指示文だけで、要約は含めない（要約は利用者向けの文であり、送る対象ではない）。
+ *
+ * 確認の通知を非モーダルにするのは、押す前に本文を直せるようにするため。モーダルにすると
+ * 編集がブロックされ、「読んで直してから承認する」ができなくなる。
+ *
+ * 送った後は相談を閉じる。指示を渡した時点でこの相談は役目を終えており、開いたままにすると
+ * 「送った後に続けた相談」が、送った指示とずれたまま次の承認の材料になる。
+ */
+export async function approveSecondOpinionHandoff(
+  port: SecondOpinionPanelPort,
+  store: AdvisorSessionStore,
+  draft: HandoffDraft | undefined,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (draft === undefined || advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      '送れる指示の下書きがありません（「メインAIへの指示を作る」から作成してください）',
+    );
+    return;
+  }
+  if (port.sendApprovedInstruction === undefined) {
+    void vscode.window.showErrorMessage('この画面からは指示を送れません');
+    return;
+  }
+  // 送られる形のまま全文を見せ、その場で直せるようにする
+  const document = await vscode.workspace.openTextDocument({
+    content: draft.mainInstruction,
+    language: 'markdown',
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  const choice = await vscode.window.showInformationMessage(
+    '内容を確認・編集してから送信してください。送信するまで作業中のAIには何も渡りません',
+    '送る',
+    'やめる',
+  );
+  if (choice !== '送る') {
+    return;
+  }
+  const edited = document.getText().trim();
+  if (edited === '') {
+    void vscode.window.showWarningMessage('指示が空です。送信しませんでした');
+    return;
+  }
+  // 承認できるのは下書きができている状態からだけ。追加の相談で `consulting` へ戻っていたら
+  // ここで止まる（相談の結論と、送ろうとしている文がずれている）
+  if (!advisor.markApproved()) {
+    void vscode.window.showWarningMessage(
+      '下書きが最新ではありません。もう一度「メインAIへの指示を作る」から作成してください',
+    );
+    return;
+  }
+  const text = `${provenancePrefix(advisor.candidate)}${edited}`;
+  try {
+    const outcome = await port.sendApprovedInstruction(text);
+    log.info(`[secondOpinion] 承認された指示を送りました（${outcome}）`);
+    void vscode.window.showInformationMessage(
+      outcome === 'sent'
+        ? 'セカンドオピニオンの指示を作業中のAIへ送りました'
+        : 'セカンドオピニオンの指示を待機列へ入れました（現在のターンの後に送られます）',
+    );
+  } catch (e) {
+    // 送れなかったときは相談を閉じない。作り直さずにもう一度承認できる状態を残す
+    log.warn(`[secondOpinion] 承認された指示を送れませんでした: ${errorMessage(e)}`);
+    void vscode.window.showErrorMessage(`指示を送れませんでした: ${errorMessage(e)}`);
+    return;
+  }
+  store.closeFor(port.parentSessionId, 'instructionSent');
 }
 
 /**

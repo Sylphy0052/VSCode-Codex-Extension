@@ -109,6 +109,7 @@ import {
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
+  approveSecondOpinionHandoff,
   continueSecondOpinion,
   draftSecondOpinionHandoff,
   endSecondOpinionConsult,
@@ -1228,6 +1229,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         );
         return;
       }
+      if (type === 'secondOpinionApprove') {
+        // 人が読み、直し、承認したときにだけ送る（Issue #929 Human Gate）
+        void approveSecondOpinionHandoff(
+          this.secondOpinionPortFor(entry),
+          this.advisorStore,
+          this.handoffDrafts.get(entry.secondOpinionKey),
+          this.log,
+        );
+        return;
+      }
       if (type === 'secondOpinionEnd') {
         endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'userEnded');
         return;
@@ -1501,6 +1512,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       isParentDisposed: () => entry.disposed,
       setAdvisorItem: (itemId) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
+      },
+      // 承認された指示を送る唯一の口（Issue #929）。`approveSecondOpinionHandoff` が
+      // `markApproved()` を通したときにだけ呼ばれる
+      sendApprovedInstruction: async (text) => {
+        const outcome = await entry.session.sendOrQueue(text, this.configFor(entry));
+        this.reportActivity(entry, text);
+        return outcome;
       },
       setHandoffDraft: (draft) => {
         // 承認の対象は画面ではなく拡張機能側が持つ（Issue #929）。webviewへ渡すのは
