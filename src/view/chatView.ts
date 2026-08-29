@@ -110,12 +110,14 @@ import { SecondOpinionRegistry } from '../secondOpinion/run';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   continueSecondOpinion,
+  draftSecondOpinionHandoff,
   endSecondOpinionConsult,
   startSecondOpinion,
   stopSecondOpinion,
   type SecondOpinionPanelPort,
 } from './secondOpinionCommand';
 import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
+import type { HandoffDraft } from '../secondOpinion/handoff';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
 import { isEditableKey, type SettingsProvider } from './settingsProvider';
@@ -365,6 +367,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
    */
   private readonly advisorStore = new AdvisorSessionStore();
+  /**
+   * 承認待ちの下書き（Issue #929 Handoff）。会話ごとに最新の1件だけを持つ。
+   *
+   * webviewへは中身を渡さない。承認して送る経路が読むのはこの値であり、画面から返って
+   * きた文字列ではない——往復させると、表示のために整形した文が送信の対象になりうる。
+   */
+  private readonly handoffDrafts = new Map<string, HandoffDraft | undefined>();
 
   private readonly catalog: CommandCatalog;
   private commands: SlashCommand[] | undefined;
@@ -936,6 +945,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、
     // 誰にも見えないままCodexのプロセスとロールアウトだけが増える
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
+    this.handoffDrafts.delete(entry.secondOpinionKey);
   }
 
   private onSessionChange(entry: ChatPanel, state: ChatState): void {
@@ -1201,6 +1211,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'secondOpinionContinue') {
         // 追加の相談（Issue #929）。メインセッションへは1ターンも送らない
         await continueSecondOpinion(
+          this.secondOpinionPortFor(entry),
+          this.secondOpinionRegistry,
+          this.advisorStore,
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionDraft') {
+        // メインAIへの指示の下書き（Issue #929）。作るだけで、送信はしない
+        void draftSecondOpinionHandoff(
           this.secondOpinionPortFor(entry),
           this.secondOpinionRegistry,
           this.advisorStore,
@@ -1481,6 +1501,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       isParentDisposed: () => entry.disposed,
       setAdvisorItem: (itemId) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
+      },
+      setHandoffDraft: (draft) => {
+        // 承認の対象は画面ではなく拡張機能側が持つ（Issue #929）。webviewへ渡すのは
+        // ボタンを出すかどうかの真偽値だけで、指示文そのものは往復させない
+        this.handoffDrafts.set(entry.secondOpinionKey, draft);
+        void entry.panel?.webview.postMessage({
+          type: 'secondOpinionHandoff',
+          hasDraft: draft !== undefined,
+        });
       },
       generateRequestText: (instruction, timeoutMs, signal) =>
         this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
@@ -2118,6 +2147,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   protected override onDispose(): void {
     this.advisorStore.closeAll('shutdown');
+    this.handoffDrafts.clear();
     this.connection.dispose();
   }
 }

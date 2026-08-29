@@ -16,8 +16,10 @@ import { AdvisorSession, AdvisorSessionStore } from '../../src/secondOpinion/adv
 import type { SecondOpinionCandidate } from '../../src/secondOpinion/candidates';
 import type { SecondOpinionDisplay } from '../../src/secondOpinion/display';
 import { SecondOpinionRegistry } from '../../src/secondOpinion/run';
+import type { HandoffDraft } from '../../src/secondOpinion/handoff';
 import {
   continueSecondOpinion,
+  draftSecondOpinionHandoff,
   endSecondOpinionConsult,
   type SecondOpinionPanelPort,
 } from '../../src/view/secondOpinionCommand';
@@ -34,6 +36,8 @@ class FakeSession implements TaskSession {
   readonly sessionId = 'advisor-session';
   disposeCalls = 0;
   prompts: string[] = [];
+  /** `runLoop()` が返す本文。 */
+  response = 'B案の弱点は…';
   private finished: ((reason: LoopStopReason, state: ChatState) => void) | undefined;
 
   send(): void {}
@@ -57,7 +61,7 @@ class FakeSession implements TaskSession {
   }
   runLoop(plan: LoopPlan): void {
     this.prompts.push(plan.initialPrompt);
-    this.finished?.('maxReached', { ...initialChatState, turnResultText: 'B案の弱点は…' });
+    this.finished?.('maxReached', { ...initialChatState, turnResultText: this.response });
   }
   async interrupt(): Promise<void> {}
   dispose(): void {
@@ -72,6 +76,7 @@ class FakePort implements SecondOpinionPanelPort {
   notes: { id: string; display: SecondOpinionDisplay }[] = [];
   running: boolean[] = [];
   advisorItems: (string | undefined)[] = [];
+  drafts: (HandoffDraft | undefined)[] = [];
   /** メインセッションへ送った回数。ここが0のままであることが受入基準（1ターンも送らない）。 */
   sentToMain = 0;
 
@@ -89,6 +94,9 @@ class FakePort implements SecondOpinionPanelPort {
   }
   setAdvisorItem(itemId: string | undefined): void {
     this.advisorItems.push(itemId);
+  }
+  setHandoffDraft(draft: HandoffDraft | undefined): void {
+    this.drafts.push(draft);
   }
   isParentDisposed(): boolean {
     return false;
@@ -206,5 +214,74 @@ describe('continueSecondOpinion（Issue #929）', () => {
     endSecondOpinionConsult(PARENT_ID, store, 'userEnded');
 
     expect(session.disposeCalls).toBe(1);
+  });
+});
+
+describe('draftSecondOpinionHandoff（Issue #929 Handoff）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('読めた下書きを会話へ出し、承認できる状態へ進める', async () => {
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    session.response = [
+      '```json',
+      JSON.stringify({ userSummary: 'B案を勧める', mainInstruction: 'B案で実装すること' }),
+      '```',
+    ].join('\n');
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+
+    // 送ったのは相談相手だけ。作業中のAIへは1ターンも送らない
+    expect(session.prompts).toHaveLength(1);
+    expect(port.sentToMain).toBe(0);
+    expect(advisor.currentState()).toBe('handoffDrafted');
+    expect(port.drafts).toEqual([
+      { userSummary: 'B案を勧める', mainInstruction: 'B案で実装すること' },
+    ]);
+    expect(port.notes[1]?.display.status).toBe('completed');
+    // 表示には「まだ送っていない」と出す（下書きを送信済みと読み違えさせない）
+    expect(port.notes[1]?.display.detail).toContain('承認するまで送りません');
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+
+  it('形式を読み取れない応答は下書きにしない', async () => {
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    session.response = 'B案がよいと思います。';
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+
+    // 読めなければ承認へ進めない（承認できるのは読めた下書きだけ）
+    expect(advisor.currentState()).toBe('consulting');
+    expect(port.drafts).toEqual([]);
+    expect(port.notes[1]?.display.status).toBe('failed');
+    store.closeFor(PARENT_ID, 'userEnded');
+  });
+
+  it('追加で相談すると承認待ちの下書きを捨てる', async () => {
+    __mock.showInputBoxAnswer = 'やはりC案は？';
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    session.response = [
+      '```json',
+      JSON.stringify({ userSummary: '要約', mainInstruction: '指示' }),
+      '```',
+    ].join('\n');
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+    expect(advisor.currentState()).toBe('handoffDrafted');
+
+    await continueSecondOpinion(port, new SecondOpinionRegistry(), store, LOG);
+
+    expect(advisor.currentState()).toBe('consulting');
+    expect(port.drafts.at(-1)).toBeUndefined();
+    store.closeFor(PARENT_ID, 'userEnded');
   });
 });

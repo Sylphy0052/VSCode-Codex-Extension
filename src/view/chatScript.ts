@@ -406,6 +406,17 @@ export function chatScript(
     });
     actions.appendChild(consult);
 
+    // 相談の結論をメインAIへの指示の下書きにする（Issue #929）。作るだけで送信はしない。
+    // 送るかどうかは下書きを読んだ後に別の操作で決める
+    const draft = document.createElement('button');
+    draft.className = 'secondary';
+    draft.textContent = 'メインAIへの指示を作る';
+    draft.hidden = true;
+    draft.addEventListener('click', () => {
+      vscode.postMessage({ type: 'secondOpinionDraft' });
+    });
+    actions.appendChild(draft);
+
     // 相談相手のセッションを閉じる（Issue #929）。閉じた後は拡張機能側が
     // secondOpinionAdvisor で undefined を送り返し、この2つのボタンが消える
     const endConsult = document.createElement('button');
@@ -478,6 +489,7 @@ export function chatScript(
       stopTarget: undefined,
       stopRequested: false,
       consult,
+      draft,
       endConsult,
       fullText: '',
       lastItem: undefined,
@@ -1184,6 +1196,7 @@ export function chatScript(
   function applyAdvisorButtons(node, itemId) {
     const active = advisorItemId !== undefined && advisorItemId === itemId;
     node.consult.hidden = !active;
+    node.draft.hidden = !active;
     node.endConsult.hidden = !active;
     if (active) {
       node.endConsult.disabled = false;

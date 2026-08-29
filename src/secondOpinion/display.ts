@@ -464,3 +464,64 @@ export function cancelledFollowUpDisplay(
     detail: `${CANCELLED_NOTE} ・ ${describeFollowUpRun(candidate)}`,
   };
 }
+
+/** 下書きがまだ送られていないことの断り書き。 */
+const HANDOFF_PENDING_NOTE = 'まだ作業中のAIへは送っていません（承認するまで送りません）';
+
+/** 下書きを待っている間の表示。 */
+export function pendingHandoffDisplay(candidate: SecondOpinionCandidate): SecondOpinionDisplay {
+  return {
+    status: 'inProgress',
+    text: `セカンドオピニオンへメインAIへの指示の下書きを依頼しました（${candidate.name}）`,
+    detail: `実行中… ・ ${HANDOFF_PENDING_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/**
+ * メインAIへの指示の下書き（Issue #929 Handoff）の表示。
+ *
+ * 会話へ出すのは**要約と指示文の全文**である。指示文を畳んだり省略したりしない——承認すれば
+ * そのまま作業中のAIへ渡る文なので、承認の前に全文が見えている必要がある。
+ *
+ * `detail` に「まだ送っていない」と明記するのは、下書きが出た時点で送信済みと読み違えられる
+ * ことを防ぐため。この機能で一番取り返しがつかないのは、送るつもりのない文が送られることである。
+ */
+export function draftedHandoffDisplay(
+  candidate: SecondOpinionCandidate,
+  draft: { userSummary: string; mainInstruction: string },
+): SecondOpinionDisplay {
+  return {
+    status: 'completed',
+    text:
+      `セカンドオピニオン・メインAIへの指示の下書き（${candidate.name}）\n\n` +
+      `**この相談の要約**\n\n${draft.userSummary}\n\n` +
+      `**メインAIへの指示（案）**\n\n${draft.mainInstruction}`,
+    detail: `${HANDOFF_PENDING_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/**
+ * 下書きの作成が失敗したときの表示。
+ *
+ * 応答が形式どおりに読めなかった場合もここへ来る（`parseHandoffDraft` の失敗）。読めない応答を
+ * そのまま下書きとして見せると、要約と指示文の切り分けが合っているかを利用者が確かめられない。
+ */
+export function failedHandoffDisplay(
+  candidate: SecondOpinionCandidate,
+  reason: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'failed',
+    text: `セカンドオピニオンへメインAIへの指示の下書きを依頼しました（${candidate.name}）`,
+    detail: `${reason} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/** 下書きの作成を利用者が止めたときの表示。 */
+export function cancelledHandoffDisplay(candidate: SecondOpinionCandidate): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text: `セカンドオピニオンへメインAIへの指示の下書きを依頼しました（${candidate.name}）`,
+    detail: `${CANCELLED_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}

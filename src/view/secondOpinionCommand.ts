@@ -34,6 +34,7 @@ import {
   AdvisorSessionStore,
   type AdvisorCloseReason,
 } from '../secondOpinion/advisorSession';
+import { parseHandoffDraft, type HandoffDraft } from '../secondOpinion/handoff';
 import {
   describeRedaction,
   mergeRedactionCounts,
@@ -43,10 +44,13 @@ import {
   cancelledAskGptDisplay,
   cancelledPartialAskGptDisplay,
   cancelledFollowUpDisplay,
+  cancelledHandoffDisplay,
   cancelledPartialSecondOpinionDisplay,
   cancelledSecondOpinionDisplay,
   failedAskGptDisplay,
+  draftedHandoffDisplay,
   failedFollowUpDisplay,
+  failedHandoffDisplay,
   failedSecondOpinionDisplay,
   finishedAskGptDisplay,
   finishedFollowUpDisplay,
@@ -55,6 +59,7 @@ import {
   partialSecondOpinionDisplay,
   pendingAskGptDisplay,
   pendingFollowUpDisplay,
+  pendingHandoffDisplay,
   pendingSecondOpinionDisplay,
   queuedSecondOpinionDisplay,
   type SecondOpinionDisplay,
@@ -63,6 +68,7 @@ import {
 import {
   ARTIFACT_KIND_LABELS,
   buildAdvisorFollowUpPrompt,
+  buildHandoffDraftPrompt,
   SECOND_OPINION_ARTIFACT_KINDS,
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
@@ -130,6 +136,14 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
    * 出さない（相談が終わった・保持しない設定）。
    */
   setAdvisorItem?(itemId: string | undefined): void;
+  /**
+   * 下書きが1件できたことを画面へ伝える（Issue #929 Handoff）。
+   *
+   * ここで渡すのは**承認の対象そのもの**である。承認と送信の経路が、表示に使った文字列では
+   * なくこの値を見るようにするために、画面側が保持する。`undefined` は下書きが無い状態
+   * （相談へ戻った・送った・閉じた）を表す。
+   */
+  setHandoffDraft?(draft: HandoffDraft | undefined): void;
   /**
    * 親の文脈を継いだforkで質問文を生成する（Issue #947）。
    *
@@ -560,6 +574,8 @@ function handOverAdvisorSession(
       store.remove(closed);
       // 閉じた相談の項目に「追加で相談」を残さない
       port.setAdvisorItem?.(undefined);
+      // 承認の対象も一緒に捨てる。相談相手がいなくなった後の下書きは送れない
+      port.setHandoffDraft?.(undefined);
     },
   });
   // 登録してからボタンを出す。逆にすると、押せる見た目なのに置き場に無い区間ができる
@@ -845,6 +861,9 @@ export async function continueSecondOpinion(
   }
   try {
     port.setRunning(true);
+    // 追加の相談は下書きを無効にする（`AdvisorSession.ask` が `consulting` へ戻すのと対）。
+    // 古い下書きを承認できる状態のまま残すと、相談の結論と送る文がずれる
+    port.setHandoffDraft?.(undefined);
     port.note(id, pendingFollowUpDisplay(advisor.candidate, question));
     const result = await advisor.ask(
       buildAdvisorFollowUpPrompt(question),
@@ -863,6 +882,76 @@ export async function continueSecondOpinion(
     }
     log.warn(`[secondOpinion] 追加の相談に失敗しました: ${result.reason}`);
     port.note(id, failedFollowUpDisplay(advisor.candidate, question, result.reason));
+  } finally {
+    registry.end(port.parentSessionId, id);
+    try {
+      port.setRunning(false);
+    } catch (e) {
+      log.warn(`[secondOpinion] 実行中表示の解除に失敗しました: ${errorMessage(e)}`);
+    }
+  }
+}
+
+/**
+ * メインAIへの指示の下書きを作らせる（Issue #929 Handoff）。
+ *
+ * **ここでは何も送らない。** 作るのは下書きだけで、作業中のAIへ渡るのは利用者が読み、直し、
+ * 承認したときに限る（Human Gate）。押し直せば作り直せる——`draftHandoff` は毎回同じ相談の
+ * 続きとして走るので、直前の下書きは新しいもので置き換わる。
+ *
+ * 形式どおりに読めなかった応答は下書きとして扱わず、失敗として理由を出す（`parseHandoffDraft`）。
+ * 読めた場合にだけ `markHandoffDrafted()` で状態を進める。承認できるのは読めた下書きだけ、
+ * という不変条件をここで守る。
+ */
+export async function draftSecondOpinionHandoff(
+  port: SecondOpinionPanelPort,
+  registry: SecondOpinionRegistry,
+  store: AdvisorSessionStore,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      'この会話で続けられる相談はありません（もう一度セカンドオピニオンを実行してください）',
+    );
+    port.setAdvisorItem?.(undefined);
+    return;
+  }
+  const id = `secondOpinion:${randomUUID()}`;
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  try {
+    port.setRunning(true);
+    port.note(id, pendingHandoffDisplay(advisor.candidate));
+    const result = await advisor.draftHandoff(buildHandoffDraftPrompt(), controller.signal);
+    if (!result.ok) {
+      if (result.kind === 'cancelled') {
+        port.note(id, cancelledHandoffDisplay(advisor.candidate));
+        return;
+      }
+      log.warn(`[secondOpinion] 指示の下書きに失敗しました: ${result.reason}`);
+      port.note(id, failedHandoffDisplay(advisor.candidate, result.reason));
+      return;
+    }
+    const parsed = parseHandoffDraft(result.response);
+    if (!parsed.ok) {
+      // 読めない応答は下書きにしない。作り直せるよう、何が読めなかったのかを出す
+      log.warn(`[secondOpinion] 指示の下書きを解釈できませんでした: ${parsed.reason}`);
+      port.note(
+        id,
+        failedHandoffDisplay(
+          advisor.candidate,
+          `下書きの形式を読み取れませんでした（${parsed.reason}）。もう一度お試しください`,
+        ),
+      );
+      return;
+    }
+    advisor.markHandoffDrafted();
+    port.setHandoffDraft?.(parsed.draft);
+    port.note(id, draftedHandoffDisplay(advisor.candidate, parsed.draft));
   } finally {
     registry.end(port.parentSessionId, id);
     try {

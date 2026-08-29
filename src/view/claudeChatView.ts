@@ -27,12 +27,14 @@ import {
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import {
   continueSecondOpinion,
+  draftSecondOpinionHandoff,
   endSecondOpinionConsult,
   startSecondOpinion,
   stopSecondOpinion,
   type SecondOpinionPanelPort,
 } from './secondOpinionCommand';
 import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
+import type { HandoffDraft } from '../secondOpinion/handoff';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   capSideQuestionHistory,
@@ -327,6 +329,13 @@ export class ClaudeChatViewManager
    * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
    */
   private readonly advisorStore = new AdvisorSessionStore();
+  /**
+   * 承認待ちの下書き（Issue #929 Handoff）。会話ごとに最新の1件だけを持つ。
+   *
+   * webviewへは中身を渡さない。承認して送る経路が読むのはこの値であり、画面から返って
+   * きた文字列ではない——往復させると、表示のために整形した文が送信の対象になりうる。
+   */
+  private readonly handoffDrafts = new Map<string, HandoffDraft | undefined>();
   /**
    * セカンドオピニオンの依頼先となるCodex側のホスト（`ChatViewManager`）。
    *
@@ -1030,11 +1039,13 @@ export class ClaudeChatViewManager
    */
   protected override onTeardown(entry: ClaudePanel): void {
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
+    this.handoffDrafts.delete(entry.secondOpinionKey);
   }
 
   /** 拡張機能の終了時に、残っている相談相手をすべて閉じる（Issue #929）。 */
   protected override onDispose(): void {
     this.advisorStore.closeAll('shutdown');
+    this.handoffDrafts.clear();
   }
 
   /**
@@ -1060,6 +1071,15 @@ export class ClaudeChatViewManager
       isParentDisposed: () => entry.disposed,
       setAdvisorItem: (itemId) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
+      },
+      setHandoffDraft: (draft) => {
+        // 承認の対象は画面ではなく拡張機能側が持つ（Issue #929）。webviewへ渡すのは
+        // ボタンを出すかどうかの真偽値だけで、指示文そのものは往復させない
+        this.handoffDrafts.set(entry.secondOpinionKey, draft);
+        void entry.panel?.webview.postMessage({
+          type: 'secondOpinionHandoff',
+          hasDraft: draft !== undefined,
+        });
       },
       generateRequestText: (instruction, timeoutMs, signal) =>
         this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
@@ -1982,6 +2002,16 @@ export class ClaudeChatViewManager
       if (type === 'secondOpinionContinue') {
         // 追加の相談（Issue #929）。メインセッションへは1ターンも送らない
         void continueSecondOpinion(
+          this.secondOpinionPortFor(entry),
+          this.secondOpinionRegistry,
+          this.advisorStore,
+          this.log,
+        );
+        return;
+      }
+      if (type === 'secondOpinionDraft') {
+        // メインAIへの指示の下書き（Issue #929）。作るだけで、送信はしない
+        void draftSecondOpinionHandoff(
           this.secondOpinionPortFor(entry),
           this.secondOpinionRegistry,
           this.advisorStore,
