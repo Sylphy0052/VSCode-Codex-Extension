@@ -1,5 +1,5 @@
 import type { ApprovalDecision } from '../appserver/approvals';
-import type { ChatState } from '../appserver/chatState';
+import type { ChatState, PendingApproval } from '../appserver/chatState';
 import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import type { TaskSession, TaskSessionHost } from '../orchestrator/taskSession';
 import type { Provider } from '../orchestrator/workflow';
@@ -10,7 +10,16 @@ export interface ForgeOrchestratorSnapshot {
   busy: boolean;
   turnFailed: boolean;
   messages: ReadonlyArray<{ kind: string; text: string }>;
-  approvals: ReadonlyArray<{ requestId: number | string; title: string; detail: string }>;
+  approvals: ReadonlyArray<{
+    requestId: number | string;
+    /**
+     * 要求の種類。`decide()`の4値で答えられるかがこれで決まるため、Forge Hubは
+     * これを見て操作ボタンを出すかどうかを分ける（`PendingApproval.kind`のJSDoc参照）。
+     */
+    kind: PendingApproval['kind'];
+    title: string;
+    detail: string;
+  }>;
 }
 
 /**
@@ -88,6 +97,12 @@ export class ForgeOrchestrator {
     return this.reveal?.(provider, sessionId) ?? false;
   }
 
+  /** オーケストレータ会話そのものを表に出す。まだ開いていなければ何もしない。 */
+  revealOrchestrator(): boolean {
+    if (this.current === undefined) return false;
+    return this.reveal?.(this.current.provider, this.current.session.sessionId) ?? false;
+  }
+
   decideApproval(requestId: number | string, decision: ApprovalDecision): void {
     this.current?.session.decideApproval(requestId, decision);
   }
@@ -142,6 +157,7 @@ export class ForgeOrchestrator {
         .map((item) => ({ kind: item.kind, text: item.text })),
       approvals: state.approvals.map((approval) => ({
         requestId: approval.requestId,
+        kind: approval.kind,
         title: approval.title,
         detail: approval.detail,
       })),
