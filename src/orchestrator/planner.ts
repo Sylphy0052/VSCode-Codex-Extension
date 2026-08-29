@@ -1296,13 +1296,13 @@ export async function runSingleTurnTask(
        */
       function onAbort(): void {
         settle(() => {
-          requestInterrupt('利用者が停止しました');
+          requestInterrupt('利用者の停止');
           reject(new SingleTurnCancelledError(singleTurnCancelledMessage(label), collectPartial()));
         });
       }
       const timer = setTimeout(() => {
         settle(() => {
-          requestInterrupt('タイムアウトしました');
+          requestInterrupt('タイムアウト');
           // 打ち切りまでに出ていた分は、呼び出し側が望めば渡す（Issue #907）。ここで
           // 捨てると、長考するモデルほど成果が丸ごと消える。本文はログへ出さない
           reject(
