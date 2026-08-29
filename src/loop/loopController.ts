@@ -26,6 +26,7 @@ import {
   type GoalLoopConfig,
 } from './goalLoop';
 import { buildNextTurnPrompt, indeterminate } from './goalPrompt';
+import { noAdvice, shouldAdvise, type LoopAdvisorConfig } from './loopAdvisor';
 import { buildResponseSummary } from '../orchestrator/taskSummary';
 
 /**
@@ -73,6 +74,18 @@ export interface LoopPlan {
    * ため、この設定があるときは`condition`（`<<LOOP_DONE>>`の依頼）を送信文へ添えない。
    */
   goal?: GoalLoopConfig;
+  /**
+   * Advisorの設定（issue #957）。省略すると**既存のゴール駆動ループの挙動から1つも変わらない**。
+   *
+   * 有効なとき、各ターンの完了後にEvaluatorと**並列で**Advisorへも同じ材料を渡し、
+   * 進め方についての指摘を受け取る。`blocker`ならループを止めて人へ渡し、それ以外は
+   * 次のターンの指示文へ別の区画として載せる。
+   *
+   * ゴール駆動ループでないとき（`goal`が無いとき）は付かない。Advisorへ渡す材料は
+   * Evaluatorの入力（`GoalEvaluatorInput`）を使い回しており、ゴールが無いとそもそも
+   * 「妥当な進め方か」を判断する基準が無い。
+   */
+  advisor?: LoopAdvisorConfig;
 }
 
 export type LoopStopReason =
@@ -110,6 +123,17 @@ export type LoopStopReason =
    * 同じ地点で行き詰まる可能性が高く、人・オーケストレーターの判断を挟む価値があるため。
    */
   | 'escalated'
+  /**
+   * Advisor（issue #957）が`blocker`を返したため止めた。
+   *
+   * **`escalated`（Evaluator由来・Worker自身の申告）とは別の値にする。** 同じ値にすると、
+   * 会話とログから「どちらが止めたのか」が読めなくなる。Evaluatorは達成度を、Advisorは
+   * 進め方を見ており、人が次に取る手も違う。
+   *
+   * 扱いは`escalated`と同格（自動再試行に乗せず、セッションは残す）。指摘に対処してから
+   * 「続ける」で同じ会話のまま再開できる。
+   */
+  | 'advised'
   /**
    * `LoopPlan.maxDurationMs` の時間上限に達した（issue #891）。
    *
@@ -176,6 +200,7 @@ export function normalizeLoopPlan(
   raw: unknown,
   engineering?: LoopEngineeringConfig,
   goalOptions?: GoalLoopOptions,
+  advisor?: LoopAdvisorConfig,
 ): LoopPlan | undefined {
   if (typeof raw !== 'object' || raw === null) {
     return undefined;
@@ -206,6 +231,9 @@ export function normalizeLoopPlan(
     ...normalizeMaxDuration(value['maxDurationMinutes']),
     ...(engineering === undefined ? {} : { engineering }),
     ...(goal === undefined ? {} : { goal }),
+    // Advisorはゴール駆動ループでだけ動く（`LoopPlan.advisor`のコメント参照）。
+    // ゴールが無いのに設定だけ載せると、画面に無効な設定が効いているように見える
+    ...(goal === undefined || advisor === undefined ? {} : { advisor }),
   };
 }
 
@@ -744,22 +772,47 @@ export class LoopController {
     const iteration = this.status.iteration;
     this.ingestEvidence(state, iteration);
 
+    // EvaluatorとAdvisorは**同じ材料**を見る（issue #957）。Advisorのために別途
+    // 材料を組み直すと、同じターンについて2人が違うものを見ることになる
+    const input = {
+      goal: goal.definition,
+      evidence: this.goalEvidence,
+      summary: buildResponseSummary(state),
+      recentTurns: collectRecentTurns(state.items),
+      iteration,
+    };
+    const advisor =
+      plan.advisor !== undefined && shouldAdvise(iteration, plan.advisor.everyNTurns)
+        ? plan.advisor
+        : undefined;
+
+    // **Advisorを先に走らせてから、Evaluatorを待つ**（issue #957）。直列にすると1ターン
+    // あたりの待ち時間が素直に2倍になる。`Promise.all`で束ねないのは、Advisorを使わない
+    // ループのマイクロタスクの回数を変えないため（束ねると1tick増える）
+    const advicePromise = advisor?.advise(input).catch(() => noAdvice());
     // Evaluatorの実装が例外を投げてもループを壊さない。判定できなかったこと自体を
-    // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる
+    // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる。
+    // 両者は独立に`catch`しており、**片方が失敗しても他方の結果は使う**
     const evaluation = await goal
-      .evaluate({
-        goal: goal.definition,
-        evidence: this.goalEvidence,
-        summary: buildResponseSummary(state),
-        recentTurns: collectRecentTurns(state.items),
-        iteration,
-      })
+      .evaluate(input)
       .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
+    const advice = advicePromise === undefined ? undefined : await advicePromise;
 
     // 評価を待っている間に止められた・別の実行が始まっていた場合は何もしない
     // （issue #933。`this.plan !== plan`だけでは、同じ計画のオブジェクトを使い回されると
     // 別の実行を自分の実行と取り違える）
     if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
+      return;
+    }
+    // Advisorが動いた周は、指摘の有無に関わらず会話へ残す。「見たうえで指摘が無かった」
+    // ことと「そもそも見ていない」ことを、あとから読んで区別できるようにする
+    if (advisor !== undefined && advice !== undefined) {
+      advisor.note?.(advice, iteration);
+    }
+    // Advisorの`blocker`はEvaluatorの判定より先に見る。**このまま進めてはいけないと
+    // 言われている状態で、達成の判定だけを見て続けない**
+    if (advice?.severity === 'blocker') {
+      this.stop('advised');
       return;
     }
     if (evaluation.verdict === 'achieved') {
@@ -785,7 +838,9 @@ export class LoopController {
     // ここへ来るのは終局でない判定のときだけ——`continue`か、連続上限に達していない
     // `indeterminate`（上限に達した分は上で`escalated`として返している）。Evaluatorの
     // 終局判定を停滞より先に見るのが issue #909 の順序
-    this.finishTurn(plan, buildNextTurnPrompt(evaluation, goal.definition.purpose));
+    // `advice`はこのターンで受け取ったものだけを渡す。Advisorを呼ばない周へ前回の指摘を
+    // 持ち越さない（古い指摘を新しいターンの評価として読ませない。issue #933と同じ罠）
+    this.finishTurn(plan, buildNextTurnPrompt(evaluation, goal.definition.purpose, advice));
   }
 
   /** このターンで新しく得た証拠をledgerへ積む。 */

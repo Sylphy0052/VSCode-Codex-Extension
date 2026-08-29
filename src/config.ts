@@ -58,6 +58,8 @@ import {
   type LoopEngineeringConfig,
 } from './loop/loopEngineering';
 import { DEFAULT_MAX_INDETERMINATE } from './loop/goalLoop';
+import { DEFAULT_ADVISOR_EVERY_N_TURNS } from './loop/loopAdvisor';
+import type { LoopAdvisorSettings } from './loop/loopAdvisorProcess';
 import type {
   GoalEvaluatorProviderSetting,
   GoalEvaluatorSettings,
@@ -336,6 +338,23 @@ export function readGoalEvaluatorConfig(): GoalEvaluatorSettings {
     model: str(c, 'chat.goalEvaluator.model', 'auto'),
     timeoutSeconds: num(c, 'chat.goalEvaluator.timeoutSeconds', 120),
     maxIndeterminate: num(c, 'chat.goalEvaluator.maxIndeterminate', DEFAULT_MAX_INDETERMINATE),
+  };
+}
+
+/**
+ * ループのAdvisorの設定を読む（issue #957）。
+ *
+ * 既定は無効。有効にすると1ターンあたりのCLI呼び出しがもう1本増えるため、利用者が
+ * 明示的に選んだときだけ動かす。
+ */
+export function readLoopAdvisorConfig(): LoopAdvisorSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('chat.loopAdvisor.enabled') === true,
+    provider: normalizeEvaluatorProvider(c.get<string>('chat.loopAdvisor.provider')),
+    model: str(c, 'chat.loopAdvisor.model', 'auto'),
+    timeoutSeconds: num(c, 'chat.loopAdvisor.timeoutSeconds', 120),
+    everyNTurns: num(c, 'chat.loopAdvisor.everyNTurns', DEFAULT_ADVISOR_EVERY_N_TURNS),
   };
 }
 

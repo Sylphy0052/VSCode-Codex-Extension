@@ -46,6 +46,7 @@ import {
 } from '../config';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
+import { advisorDisplay, createLoopAdvisorConfig } from './loopAdvisorFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -1214,6 +1215,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           m['plan'],
           readChatLoopEngineeringConfig(),
           createGoalLoopOptions('codex', this.log),
+          // Advisor（issue #957）。設定で無効なら`undefined`が返り、計画にも載らない
+          createLoopAdvisorConfig('codex', this.log, (advice, iteration) =>
+            entry.session.noteSecondOpinion(
+              `loopAdvisor:${iteration}`,
+              advisorDisplay(advice, iteration),
+            ),
+          ),
         );
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');

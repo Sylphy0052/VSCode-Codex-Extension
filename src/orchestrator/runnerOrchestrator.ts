@@ -1426,11 +1426,17 @@ function buildTaskEvent(
       // （issue #891）。通知の種別を増やさないのは、オーケストレーターにとっての意味が
       // 「壊れて失敗したのではなく、続きを試す余地が残っている停止」で共通しているため。
       // どれで止まったのかは本文で言い分ける
-      if (failure?.kind === 'stalled' || failure?.kind === 'escalated') {
+      if (
+        failure?.kind === 'stalled' ||
+        failure?.kind === 'escalated' ||
+        failure?.kind === 'advised'
+      ) {
         const cause =
           failure.kind === 'stalled'
             ? '停滞したため停止しました（同じ応答が繰り返されました）'
-            : '自力では解決できないと申告したため停止しました';
+            : failure.kind === 'advised'
+              ? 'Advisorが重大な指摘を返したため停止しました（issue #957）'
+              : '自力では解決できないと申告したため停止しました';
         return {
           kind: 'taskStalled',
           body: withSummary(
