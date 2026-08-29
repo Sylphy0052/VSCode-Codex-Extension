@@ -59,11 +59,7 @@ import {
   type LoopEngineeringConfig,
 } from './loop/loopEngineering';
 import { DEFAULT_MAX_INDETERMINATE } from './loop/goalLoop';
-import {
-  DEFAULT_ADVISOR_EVERY_N_TURNS,
-  DEFAULT_ADVISOR_MODEL,
-  DEFAULT_ADVISOR_PROVIDER,
-} from './loop/loopAdvisor';
+import { DEFAULT_ADVISOR_EVERY_N_TURNS, DEFAULT_ADVISOR_PROVIDER } from './loop/loopAdvisor';
 import type { LoopAdvisorSettings } from './loop/loopAdvisorProcess';
 import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
@@ -386,9 +382,12 @@ export function readGoalEvaluatorConfig(): GoalEvaluatorSettings {
  * 既定は無効。有効にすると1ターンあたりのCLI呼び出しがもう1本増えるため、利用者が
  * 明示的に選んだときだけ動かす。
  *
- * 相談先は既定でCodexの `gpt-5.6-sol` に固定してある（issue #994）。`inherit` だと
- * 会話しているのがCodexかClaude Codeかで相談先が変わり、「別のAIに進め方を確認させる」
- * という役割に対して結果の出所が安定しない。変えたい場合は設定で上書きする。
+ * 相談先は既定でCodexに固定してある（issue #994）。`inherit` だと会話しているのがCodexか
+ * Claude Codeかで相談先が変わり、「別のAIに進め方を確認させる」という役割に対して結果の
+ * 出所が安定しない。変えたい場合は設定で上書きする。
+ *
+ * `model` はここでは `auto` のまま返す。実際のモデル名は実効プロバイダが決まってから
+ * `resolveAdvisorModel` が解決する（`loopAdvisorFactory.ts`）。
  */
 export function readLoopAdvisorConfig(): LoopAdvisorSettings {
   const c = vscode.workspace.getConfiguration('agent');
@@ -397,7 +396,7 @@ export function readLoopAdvisorConfig(): LoopAdvisorSettings {
     provider: normalizeEvaluatorProvider(
       c.get<string>('chat.loopAdvisor.provider') ?? DEFAULT_ADVISOR_PROVIDER,
     ),
-    model: str(c, 'chat.loopAdvisor.model', DEFAULT_ADVISOR_MODEL),
+    model: str(c, 'chat.loopAdvisor.model', 'auto'),
     timeoutSeconds: num(c, 'chat.loopAdvisor.timeoutSeconds', 120),
     everyNTurns: num(c, 'chat.loopAdvisor.everyNTurns', DEFAULT_ADVISOR_EVERY_N_TURNS),
   };

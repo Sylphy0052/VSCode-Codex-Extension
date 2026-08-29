@@ -5,6 +5,7 @@ import {
   type LoopAdvisorConfig,
   type LoopAdvisorFailureReason,
   type LoopAdvisorNote,
+  resolveAdvisorModel,
 } from '../loop/loopAdvisor';
 import { resolveHeadlessProvider, type HeadlessProvider } from '../loop/headlessCli';
 import { createLoopAdvisor } from '../loop/loopAdvisorProcess';
@@ -36,7 +37,8 @@ export function createLoopAdvisorConfig(
     advise: createLoopAdvisor({
       provider,
       executable,
-      model: settings.model,
+      // 設定が`auto`のときのモデル名は、呼ぶ先が決まってからでないと選べない（issue #994）
+      model: resolveAdvisorModel(settings.model, provider),
       timeoutMs: settings.timeoutSeconds * 1000,
       logWarn: (message) => log.warn(message),
       logInfo: (message) => log.info(message),

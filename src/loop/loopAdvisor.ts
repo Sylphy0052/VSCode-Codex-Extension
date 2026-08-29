@@ -98,12 +98,30 @@ export const DEFAULT_ADVISOR_EVERY_N_TURNS = 1;
 export const DEFAULT_ADVISOR_PROVIDER = 'codex';
 
 /**
- * Advisorに使うモデルの既定（issue #994）。
+ * `model: auto` のとき、Codexで動かすAdvisorに使うモデル（issue #994）。
  *
- * セカンドオピニオン（`DEFAULT_SECOND_OPINION_CANDIDATES`）の既定と同じものを指す。
- * 同じ「独立した第三者に見てもらう」役割で、片方だけ軽量モデルに落とす理由が無い。
+ * セカンドオピニオンの既定候補（`DEFAULT_SECOND_OPINION_CANDIDATES`）とモデル名を揃えて
+ * ある。ただし reasoning effort は揃っていない——Advisorの起動引数には effort を渡す経路が
+ * 無く、`Sol (high)` と同じ条件にはならない。
+ *
+ * **これはCodex用であり、設定の既定値そのものではない。** `agent.chat.loopAdvisor.model` の
+ * 既定は `auto` のままにしてある。設定側をモデル名で固定してしまうと、`provider` だけを
+ * `claude` へ変えた利用者にCodex用のモデル名がそのまま渡る（`buildClaudeHeadlessArgs` は
+ * `auto` 以外を素通しする）。解決は実効プロバイダが決まる場所で行う。
  */
-export const DEFAULT_ADVISOR_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_ADVISOR_CODEX_MODEL = 'gpt-5.6-sol';
+
+/**
+ * `agent.chat.loopAdvisor.model` を、実際に起動するCLIに合わせて解決する（issue #994）。
+ *
+ * 明示されたモデル名は必ず優先する。`auto` のときだけプロバイダごとの既定へ倒す。
+ */
+export function resolveAdvisorModel(model: string, provider: 'claude' | 'codex'): string {
+  if (model !== 'auto' && model !== '') {
+    return model;
+  }
+  return provider === 'codex' ? DEFAULT_ADVISOR_CODEX_MODEL : 'auto';
+}
 
 /** `LoopPlan`へ載せるAdvisorの設定。省略するとAdvisorを呼ばない。 */
 export interface LoopAdvisorConfig {

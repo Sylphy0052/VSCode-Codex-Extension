@@ -2211,9 +2211,15 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'toggleLoopAdvisor') {
-        const enabled = !readLoopAdvisorConfig().enabled;
-        void setLoopAdvisorEnabled(enabled)
-          .then(() => entry.panel?.webview.postMessage({ type: 'loopAdvisor', enabled }))
+        void setLoopAdvisorEnabled(!readLoopAdvisorConfig().enabled)
+          // 書いたのはGlobalだが、workspace側に上書きがあると実効値は動かない。要求値ではなく
+          // 読み直した値を返し、表示と実際の動作を食い違わせない（issue #994）
+          .then(() =>
+            entry.panel?.webview.postMessage({
+              type: 'loopAdvisor',
+              enabled: readLoopAdvisorConfig().enabled,
+            }),
+          )
           .catch((e: unknown) => this.reportError(e));
         return;
       }

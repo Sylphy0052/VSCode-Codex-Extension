@@ -1029,9 +1029,9 @@
         },
         "agent.chat.loopAdvisor.model": {
           "type": "string",
-          "default": "gpt-5.6-sol",
+          "default": "auto",
           "scope": "window",
-          "markdownDescription": "Advisorに使うモデル。既定は `gpt-5.6-sol`（セカンドオピニオンの既定と揃えてある）。`auto` にすると軽量なモデルに任せる（claude は `haiku`、codex はCLIの既定）。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
+          "markdownDescription": "Advisorに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて解決する（codex は `gpt-5.6-sol`、claude は `haiku`）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
         },
         "agent.chat.loopAdvisor.timeoutSeconds": {
           "type": "number",
