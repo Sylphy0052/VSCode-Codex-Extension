@@ -1448,6 +1448,23 @@ function buildTaskEvent(
           ),
         };
       }
+      // 回数切れ（`maxReached`）。既定の`maxIterations`は3回（`workflow.ts`の
+      // `DEFAULT_MAX_ITERATIONS`）で、ここへ来るのは「その回数では終わらない粒度だった」
+      // ことの合図でもある。同じ指示のまま`continue_task`/`retry_task`で繰り返しても
+      // 同じところで止まりやすいため、計画そのものを直す道具を先に挙げる（Issue #839）
+      if (failure?.kind === 'maxReached') {
+        return {
+          kind: 'taskStalled',
+          body: withSummary(
+            `タスク ${taskId} が送信回数の上限に達したため停止しました。` +
+              '同じ指示のまま繰り返すのではなく、まずupdate_task_promptで継続指示を' +
+              '変えることを検討してください。それでも終わる見込みが立たないなら、' +
+              'add_taskでの分割・remove_taskでの未開始タスクの削除・' +
+              'update_task_dependenciesでの依存の変更で計画そのものを直せます。' +
+              '単に続きを走らせるだけならcontinue_task、最初からやり直すならretry_taskです。',
+          ),
+        };
+      }
       if (failure?.kind === 'timedOut') {
         return {
           kind: 'taskStalled',
