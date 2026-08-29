@@ -22,6 +22,7 @@ import {
 } from '../orchestrator/planner';
 import type { TaskSession } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
+import type { ReviewBundle } from './reviewBundle';
 
 /**
  * Advisorセッションの状態（Issue #929 受入基準）。
@@ -100,6 +101,13 @@ export interface AdvisorSessionOptions {
   candidate: SecondOpinionCandidate;
   /** 追加ターン1回あたりの上限。既定は呼び出し側の設定値をそのまま渡す。 */
   timeoutMs: number;
+  /**
+   * このセッションの作業ディレクトリになっているレビュー材料（Issue #926 E）。
+   *
+   * 相談を続ける間は残しておく必要がある（追加の質問で `base/` を読み直しうる）。
+   * **閉じる責任はこのクラスが持つ。** 渡さない呼び出し（テスト・古い経路）では何もしない。
+   */
+  bundle?: ReviewBundle | undefined;
   /** 無操作で閉じるまでの時間。既定は {@link DEFAULT_ADVISOR_IDLE_TIMEOUT_MS}。 */
   idleTimeoutMs?: number | undefined;
   log?: Logger | undefined;
@@ -280,6 +288,13 @@ export class AdvisorSession {
           `${ADVISOR_LOG_PREFIX} Advisorセッションを閉じられませんでした: ${errorMessage(e)}`,
         );
       }
+      // 材料の一時ディレクトリも一緒に消す（Issue #926 E）。相談が続く限り残すが、
+      // 閉じた後まで置いておく理由は無い。`close()` は同期なので待たずに投げる
+      void this.options.bundle?.dispose().catch((e: unknown) => {
+        this.options.log?.warn(
+          `${ADVISOR_LOG_PREFIX} レビュー材料を消せませんでした: ${errorMessage(e)}`,
+        );
+      });
       this.options.log?.info(
         `${ADVISOR_LOG_PREFIX} Advisorセッションを閉じました（${CLOSE_REASON_LABELS[reason]}）`,
       );

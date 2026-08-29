@@ -83,7 +83,13 @@ const CANDIDATE = { name: 'Sol (high)', model: 'gpt-5.6-sol', effort: 'high' };
 const CONVERSATION = '## 依頼\n\nテストを直して\n\n---\n\n## Codex\n\n直しました';
 const SNAPSHOT_CONTEXT = {
   kind: 'workspaceChanges' as const,
-  snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;', truncated: false },
+  snapshot: {
+    baseCommit: 'abc1234',
+    diff: '+const a = 1;',
+    truncated: false,
+    untrackedFiles: [],
+    untrackedOmissions: [],
+  },
 };
 
 describe('summarizeConversation（Issue #903）', () => {

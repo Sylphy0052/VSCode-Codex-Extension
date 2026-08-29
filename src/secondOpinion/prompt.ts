@@ -13,6 +13,8 @@
  * 「親セッションの会話が混ざらない」（受入基準4）を検証する。
  */
 
+import type { UntrackedFile, UntrackedOmission, UntrackedOmissionReason } from './untracked';
+
 /** 起動時点で固定した、作業ツリーの変更。 */
 export interface WorkspaceSnapshot {
   /** `git rev-parse HEAD` の結果。 */
@@ -21,6 +23,15 @@ export interface WorkspaceSnapshot {
   diff: string;
   /** 上限を超えて末尾を落としたか。 */
   truncated: boolean;
+  /**
+   * まだgitに登録されていない新規ファイル（Issue #926 F）。
+   *
+   * 差分とは別の区画へ置く。`git diff` の結果に混ぜると、Advisorは「既存ファイルへの
+   * 変更」として読んでしまう。
+   */
+  untrackedFiles: UntrackedFile[];
+  /** 内容を載せなかった未追跡ファイル。パスとサイズだけをプロンプトへ載せる。 */
+  untrackedOmissions: UntrackedOmission[];
 }
 
 /**
@@ -153,7 +164,13 @@ function systemInstruction(
     lines.push(
       '以下の baseCommit と差分を、現在の変更の正本として扱ってください。',
       '現在の作業ツリーは実行中に変更されている可能性があるため、判断の根拠に含めないでください。',
-      'ベース側のコードを読む必要がある場合は `git show <baseCommit>:<path>` を使ってください。',
+      // 作業ディレクトリはリポジトリではなく、押下時点の材料だけを置いた一時ディレクトリで
+      // ある（Issue #926 E）。`git show` を使わせる指示は外した——リポジトリが見えない場所
+      // では動かず、動く場所（絶対パスで辿った場合）では実行中に書き換わった状態を読む
+      'この作業ディレクトリには、押下時点で固定したレビュー用の材料だけが置いてあります。リポジトリそのものではありません。',
+      'ベース側のコードを読む必要がある場合は `base/<パス>` を読んでください（変更対象ファイルの、baseCommit時点の内容です）。',
+      '差分の全量は `changes.diff` にあります（下の区画は大きい場合に省略されていることがあります）。',
+      'この作業ディレクトリの外を読みに行かないでください。そこにあるのは実行中に書き換わりうる現在の作業ツリーで、押下時点の材料とは食い違います。',
       'ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。',
     );
   } else {
@@ -165,17 +182,77 @@ function systemInstruction(
   return lines.join('\n');
 }
 
+/** 内容を載せなかった理由の、プロンプトへ出す文言（Issue #926 F）。 */
+const UNTRACKED_OMISSION_LABELS: Record<UntrackedOmissionReason, string> = {
+  binary: 'バイナリ（NULを含む）',
+  'unsafe-file-type': '通常ファイルではない',
+  'outside-workspace': '解決先がworkspaceの外',
+  'per-file-budget': '1ファイルの上限を超える',
+  'total-budget': '全体の上限に達した',
+  'read-error': '読み取りに失敗',
+};
+
+/** byte数を読める形にする。省略の一覧で規模の見当を付けるためだけに使う。 */
+function formatBytes(bytes: number | undefined): string {
+  if (bytes === undefined) {
+    return 'サイズ不明';
+  }
+  return bytes < 1024 ? `${bytes} B` : `${Math.round(bytes / 1024)} KB`;
+}
+
+/**
+ * 未追跡ファイルの区画（Issue #926 F）。
+ *
+ * 差分とは別の見出しに置く。`git diff` の中へ混ぜると「既存ファイルへの変更」として
+ * 読まれ、新規ファイルであることが伝わらない。
+ *
+ * 載せなかったものは必ず一覧に出す。**黙って落とさない。** 何を見ていないかが分からないと、
+ * Advisorは「新規ファイルはこれで全部」という前提で判断してしまう。
+ */
+function untrackedSection(
+  files: readonly UntrackedFile[],
+  omissions: readonly UntrackedOmission[],
+): string | undefined {
+  if (files.length === 0 && omissions.length === 0) {
+    return undefined;
+  }
+  const parts: string[] = [
+    '## 追加資料: まだgitに登録されていない新規ファイル（同じ起動時点のスナップショット）',
+    '',
+    '上の差分には現れません（`git diff` は未追跡ファイルを出力しないため）。',
+  ];
+  for (const file of files) {
+    parts.push('', `### ${file.path}`, '', fence(file.content, ''));
+  }
+  if (omissions.length > 0) {
+    parts.push(
+      '',
+      '### 内容を載せていない未追跡ファイル',
+      '',
+      'これらは存在しますが中身を渡していません。判断に必要なら、内容を前提にせず「未確認」として扱ってください。',
+      '',
+    );
+    for (const omission of omissions) {
+      parts.push(
+        `- \`${omission.path}\`（${formatBytes(omission.bytes)}）— ${UNTRACKED_OMISSION_LABELS[omission.reason]}`,
+      );
+    }
+  }
+  return parts.join('\n');
+}
+
 function artifactSection(artifact: SecondOpinionArtifact): string | undefined {
   switch (artifact.kind) {
     case 'workspaceChanges': {
-      const { baseCommit, diff, truncated } = artifact.snapshot;
+      const { baseCommit, diff, truncated, untrackedFiles, untrackedOmissions } = artifact.snapshot;
       const notice = truncated
         ? '\n\n注意: 差分が大きいため末尾を省略しています。省略部分については判断を保留し、その旨を明記してください。'
         : '';
-      return (
+      const diffSection =
         `## 追加資料: 作業ツリーの変更（起動時点のスナップショット）\n\nbaseCommit: ${baseCommit}\n\n` +
-        `${fence(diff, 'diff')}${notice}`
-      );
+        `${fence(diff, 'diff')}${notice}`;
+      const untracked = untrackedSection(untrackedFiles, untrackedOmissions);
+      return untracked === undefined ? diffSection : `${diffSection}\n\n${untracked}`;
     }
     case 'lastAssistantResponse':
       return `## 追加資料: 直近のエージェント応答\n\n${fence(artifact.response, '')}`;

@@ -79,7 +79,13 @@ import {
   SecondOpinionRegistry,
   type SecondOpinionResult,
 } from '../secondOpinion/run';
-import { captureWorkspaceSnapshot } from '../secondOpinion/snapshot';
+import {
+  createEmptyReviewBundle,
+  createReviewBundle,
+  defaultReviewBundleRoot,
+  type ReviewBundle,
+} from '../secondOpinion/reviewBundle';
+import { captureWorkspaceSnapshot, type ReviewMaterial } from '../secondOpinion/snapshot';
 import { summarizeConversation } from '../secondOpinion/summary';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import { waitForParentIdle, type SecondOpinionParentPort } from '../secondOpinion/wait';
@@ -271,14 +277,23 @@ async function pickArtifactKind(
  * 作業ツリーを書き換えると、どの時点にも存在しなかった状態を見せることになる。
  * ここで内容を確定させることが受入基準5の実体。
  */
+interface CapturedArtifact {
+  artifact: SecondOpinionArtifact;
+  /**
+   * bundleへ書き出す材料（Issue #926 E）。`workspaceChanges` のときだけ入る。
+   * それ以外の資料は本文の中で完結しており、作業ディレクトリへ置くものが無い。
+   */
+  material?: ReviewMaterial | undefined;
+}
+
 async function captureArtifact(
   kind: SecondOpinionArtifactKind,
   cwd: string,
   port: SecondOpinionPanelPort,
   git: GitCommandRunner,
-): Promise<SecondOpinionArtifact | undefined> {
+): Promise<CapturedArtifact | undefined> {
   if (kind === 'none') {
-    return { kind: 'none' };
+    return { artifact: { kind: 'none' } };
   }
   if (kind === 'lastAssistantResponse') {
     const response = port.lastAssistantResponse().trim();
@@ -288,7 +303,7 @@ async function captureArtifact(
       );
       return undefined;
     }
-    return { kind: 'lastAssistantResponse', response };
+    return { artifact: { kind: 'lastAssistantResponse', response } };
   }
   const captured = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: '変更のスナップショットを取得しています…' },
@@ -298,7 +313,10 @@ async function captureArtifact(
     void vscode.window.showErrorMessage(`セカンドオピニオン: ${captured.reason}`);
     return undefined;
   }
-  return { kind: 'workspaceChanges', snapshot: captured.snapshot };
+  return {
+    artifact: { kind: 'workspaceChanges', snapshot: captured.snapshot },
+    material: captured.material,
+  };
 }
 
 /**
@@ -443,10 +461,11 @@ export async function startSecondOpinion(
   if (request === undefined || request.trim() === '') {
     return;
   }
-  const artifact = await captureArtifact(artifactKind, cwd, port, git);
-  if (artifact === undefined) {
+  const captured = await captureArtifact(artifactKind, cwd, port, git);
+  if (captured === undefined) {
     return;
   }
+  const artifact = captured.artifact;
 
   // 会話へ残す項目のidを、この実行の識別子（`runId`）としても使う（Issue #940）。停止操作は
   // 項目から押されるので、押された項目のidがそのまま「どの実行を止めるか」になる
@@ -459,11 +478,26 @@ export async function startSecondOpinion(
     void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
     return;
   }
+  // 材料の一時ディレクトリ（Issue #926 E）。相談を続ける場合は `AdvisorSession` へ渡し、
+  // 渡せなかった場合はこの関数の `finally` で必ず消す
+  let bundle: ReviewBundle | undefined;
+  let bundleHandedOver = false;
   // `begin()` の成功直後から `try` を始める。`setRunning()` / `note()` が投げると
   // `finally` へ入らず、`registry` にidが残って以後その会話では二度と起動できなくなる
   // （選択UIを触っている最中にタブを閉じられる経路で実際に踏みうる。Issue #926 B）
   try {
     port.setRunning(true);
+    // Advisorの作業ディレクトリを、押下時点の材料だけを置いた一時ディレクトリにする
+    // （Issue #926 E）。作れなかったときは実行しない。親セッションの作業ツリーで開く形へ
+    // 戻すのは、この変更で無くしたかった状態そのものである
+    bundle = await createBundleFor(cwd, git, captured, log);
+    if (bundle === undefined) {
+      void vscode.window.showErrorMessage(
+        'セカンドオピニオン: レビュー材料を書き出せなかったため実行しません',
+      );
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      return;
+    }
     // 親のターンが走っている間は、依頼の内容を固めたところで一旦止まる（Issue #949）。
     // ここまでの選択・入力・スナップショットは待たせずに済ませてあり、待たせるのは
     // この後に開く2つのセッション（会話の要約と本体）だけである
@@ -498,7 +532,8 @@ export async function startSecondOpinion(
     const result = await runSecondOpinion(
       host,
       {
-        cwd,
+        // 実workspaceではなく材料だけを置いた一時ディレクトリで開く（Issue #926 E）
+        cwd: bundle.dir,
         candidate,
         request,
         artifact,
@@ -523,9 +558,26 @@ export async function startSecondOpinion(
     if (!result.ok && result.cancelledByUser !== true) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
-    handOverAdvisorSession(port, advisorStore, config, candidate, result, id, log);
+    bundleHandedOver = handOverAdvisorSession(
+      port,
+      advisorStore,
+      config,
+      candidate,
+      result,
+      id,
+      log,
+      bundle,
+    );
   } finally {
     registry.end(port.parentSessionId, id);
+    // 相談が続かないなら材料は用済み。`AdvisorSession` が引き取った場合は、その `close()` が消す
+    if (!bundleHandedOver && bundle !== undefined) {
+      try {
+        await bundle.dispose();
+      } catch (e) {
+        log.warn(`[secondOpinion] レビュー材料を消せませんでした: ${errorMessage(e)}`);
+      }
+    }
     // `setRunning()` は契約上no-opのはずだが、投げても `registry.end()` を巻き添えに
     // しない順（end → setRunning）と、個別のtry/catchの両方で守る
     try {
@@ -560,9 +612,10 @@ function handOverAdvisorSession(
   result: SecondOpinionResult,
   itemId: string,
   log: Logger,
-): void {
+  bundle: ReviewBundle | undefined,
+): boolean {
   if (!result.ok || result.session === undefined) {
-    return;
+    return false;
   }
   const session = result.session;
   if (store === undefined || !config.advisor.enabled || port.isParentDisposed?.() === true) {
@@ -572,7 +625,7 @@ function handOverAdvisorSession(
     } catch (e) {
       log.warn(`[secondOpinion] Advisorセッションを閉じられませんでした: ${errorMessage(e)}`);
     }
-    return;
+    return false;
   }
   const advisor = new AdvisorSession({
     session,
@@ -580,6 +633,8 @@ function handOverAdvisorSession(
     candidate,
     timeoutMs: config.timeoutMs,
     idleTimeoutMs: config.advisor.idleTimeoutMs,
+    // 相談が続く間は材料も残す。追加の質問で `base/` を読み直しうる（Issue #926 E）
+    bundle,
     log,
     onClosed: (closed) => {
       store.remove(closed);
@@ -592,6 +647,41 @@ function handOverAdvisorSession(
   // 登録してからボタンを出す。逆にすると、押せる見た目なのに置き場に無い区間ができる
   store.set(advisor);
   port.setAdvisorItem?.(itemId);
+  return true;
+}
+
+/**
+ * Advisorのセッションを開く作業ディレクトリを用意する（Issue #926 E）。
+ *
+ * 追加資料が作業ツリーの変更なら材料を書き出し、それ以外なら空のディレクトリを作る。
+ * 空でも意味がある——親セッションの作業ツリーを `cwd` にしないための場所である。
+ *
+ * 失敗したら `undefined` を返す。呼び出し側は実行を取りやめる。
+ */
+async function createBundleFor(
+  cwd: string,
+  git: GitCommandRunner,
+  captured: CapturedArtifact,
+  log: Logger,
+): Promise<ReviewBundle | undefined> {
+  const root = defaultReviewBundleRoot();
+  try {
+    if (captured.artifact.kind !== 'workspaceChanges' || captured.material === undefined) {
+      return await createEmptyReviewBundle(root);
+    }
+    return await createReviewBundle({
+      root,
+      cwd,
+      git,
+      baseCommit: captured.artifact.snapshot.baseCommit,
+      fullDiff: captured.material.fullDiff,
+      changedPaths: captured.material.changedPaths,
+      log,
+    });
+  } catch (e) {
+    log.warn(`[secondOpinion] レビュー材料を書き出せませんでした: ${errorMessage(e)}`);
+    return undefined;
+  }
 }
 
 function errorMessage(e: unknown): string {
@@ -673,8 +763,23 @@ async function startAskGptSecondOpinion(
     void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
     return;
   }
+  // askGptでも親セッションの作業ツリーでAdvisorを開かない（Issue #926 E）。材料は質問文の
+  // 中にあるため中身は空だが、`cwd` を実workspaceにしない意味は既定モードと同じ
+  let bundle: ReviewBundle | undefined;
   try {
     port.setRunning(true);
+    try {
+      bundle = await createEmptyReviewBundle(defaultReviewBundleRoot());
+    } catch (e) {
+      log.warn(
+        `[secondOpinion] レビュー用の作業ディレクトリを作れませんでした: ${errorMessage(e)}`,
+      );
+      port.note(
+        id,
+        cancelledAskGptDisplay(candidate, request, '作業ディレクトリを作れませんでした'),
+      );
+      return;
+    }
     // 親のターンが走っている間は、質問文の組み立てを始めずに待つ（Issue #949）。既定モードは
     // 押下時点の差分を固定してから待つが、askGptは親が何を読むかを事前に決められないため、
     // 待つ意味がより強い。走っている最中に読むと、会話は変更前・あるファイルは変更後という、
@@ -764,7 +869,7 @@ async function startAskGptSecondOpinion(
     const result = await runSecondOpinion(
       host,
       {
-        cwd,
+        cwd: bundle.dir,
         candidate,
         // 伏せた側を送る。会話へ残す `request` は原文のままで、利用者が自分の書いた文を
         // 読み返せなくなる理由が無い（伏せるのは送信経路だけ）
@@ -791,6 +896,16 @@ async function startAskGptSecondOpinion(
     port.note(id, askGptResultDisplay(candidate, request, result, chars, redactionNote));
   } finally {
     registry.end(port.parentSessionId, id);
+    // askGptでは相談を続けない（セッションを保持しない）ので、必ずここで消す
+    if (bundle !== undefined) {
+      try {
+        await bundle.dispose();
+      } catch (e) {
+        log.warn(
+          `[secondOpinion] レビュー用の作業ディレクトリを消せませんでした: ${errorMessage(e)}`,
+        );
+      }
+    }
     try {
       port.setRunning(false);
     } catch (e) {
@@ -876,10 +991,7 @@ export async function continueSecondOpinion(
     // 古い下書きを承認できる状態のまま残すと、相談の結論と送る文がずれる
     port.setHandoffDraft?.(undefined);
     port.note(id, pendingFollowUpDisplay(advisor.candidate, question));
-    const result = await advisor.ask(
-      buildAdvisorFollowUpPrompt(question),
-      controller.signal,
-    );
+    const result = await advisor.ask(buildAdvisorFollowUpPrompt(question), controller.signal);
     if (result.ok) {
       port.note(
         id,

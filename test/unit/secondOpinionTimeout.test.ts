@@ -105,7 +105,13 @@ const SESSION_INPUT: TaskSessionInput = {
 const CANDIDATE = { name: 'Sol (high)', model: 'gpt-5.6-sol', effort: 'high' };
 const SNAPSHOT_CONTEXT = {
   kind: 'workspaceChanges' as const,
-  snapshot: { baseCommit: 'abc1234', diff: '+const a = 1;', truncated: false },
+  snapshot: {
+    baseCommit: 'abc1234',
+    diff: '+const a = 1;',
+    truncated: false,
+    untrackedFiles: [],
+    untrackedOmissions: [],
+  },
 };
 
 describe('runSingleTurnTask の打ち切り（Issue #907）', () => {
