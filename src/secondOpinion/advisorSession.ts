@@ -264,6 +264,10 @@ export class AdvisorSession {
    * 止め、Advisorには何も送らない。逆順にすると、存在しない材料を正本だと伝えることになる。
    *
    * 世代を進めるのは、通知のターンが成立したときだけである（{@link materialRevision}）。
+   *
+   * 送信文をここで組むのは、`ask` / `draftHandoff` が呼び出し側から受け取るのと非対称だが、
+   * 更新では**書き出した場所**が本文の中身になる。呼び出し側で組ませるには、書き出しと
+   * 送信を別のAPIへ割ることになり、その間に片方だけ済んだ状態が挟まる。
    */
   async updateMaterial(signal?: AbortSignal): Promise<AdvisorMaterialUpdateResult> {
     const write = this.options.writeMaterial;
@@ -281,6 +285,11 @@ export class AdvisorSession {
     }
     if (this.turn !== undefined) {
       return { ok: false, kind: 'busy', reason: 'この相談では別の問い合わせが実行中です' };
+    }
+    if (this.state === 'approved') {
+      // `runTurn` も同じ理由で弾くが、そこまで進むと材料を書き出してから断ることになる。
+      // 送信を待っている間の更新は、書き出す前に断る
+      return { ok: false, kind: 'busy', reason: '承認した指示を送信中です' };
     }
     const next = this.materialRevision + 1;
     let materialPath: string;
