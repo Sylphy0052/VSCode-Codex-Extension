@@ -251,7 +251,7 @@ describe('draftSecondOpinionHandoff（Issue #929 Handoff）', () => {
     expect(port.sentToMain).toBe(0);
     expect(advisor.currentState()).toBe('handoffDrafted');
     expect(port.drafts).toEqual([
-      { userSummary: 'B案を勧める', mainInstruction: 'B案で実装すること' },
+      { userSummary: 'B案を勧める', mainInstruction: 'B案で実装すること', revision: 1 },
     ]);
     expect(port.notes[1]?.display.status).toBe('completed');
     // 表示には「まだ送っていない」と出す（下書きを送信済みと読み違えさせない）
@@ -463,5 +463,54 @@ describe('承認前の編集（Issue #929）', () => {
     expect(port.sent).toEqual([]);
     expect(advisor.closedReason()).toBeUndefined();
     store.closeFor(PARENT_ID, 'userEnded');
+  });
+});
+
+describe('古い下書きを送らないこと（Issue #929 の自己レビュー）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  /** 下書きを1つ作り、その世代つきの値を返す。 */
+  async function makeDraft(
+    store: AdvisorSessionStore,
+    port: FakePort,
+    session: FakeSession,
+    instruction: string,
+  ): Promise<HandoffDraft> {
+    session.response = [
+      '```json',
+      JSON.stringify({ userSummary: '要約', mainInstruction: instruction }),
+      '```',
+    ].join('\n');
+    await draftSecondOpinionHandoff(port, new SecondOpinionRegistry(), store, LOG);
+    const draft = port.drafts.at(-1);
+    if (draft === undefined) {
+      throw new Error('下書きができていない');
+    }
+    return draft;
+  }
+
+  it('承認の画面を開いたまま作り直したら、古い方は送られない', async () => {
+    const store = new AdvisorSessionStore();
+    const session = new FakeSession();
+    const advisor = seedAdvisor(store, session);
+    const port = new FakePort();
+    const first = await makeDraft(store, port, session, 'A案で実装すること');
+    // 承認へ進む前に作り直す。状態は handoffDrafted のままなので、世代を見ないと通る
+    const second = await makeDraft(store, port, session, 'B案で実装すること');
+    expect(second.revision).toBe(first.revision + 1);
+    expect(advisor.currentState()).toBe('handoffDrafted');
+
+    __mock.showInformationMessageAnswer = '送る';
+    await approveSecondOpinionHandoff(port, store, first, LOG);
+
+    expect(port.sent).toEqual([]);
+    expect(advisor.closedReason()).toBeUndefined();
+
+    // 新しい方は送れる
+    await approveSecondOpinionHandoff(port, store, second, LOG);
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0]?.endsWith('B案で実装すること')).toBe(true);
   });
 });

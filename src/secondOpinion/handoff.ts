@@ -12,14 +12,24 @@
 
 /** 承認前の下書き。両方とも空でないことが保証される。 */
 export interface HandoffDraft {
+  /**
+   * この下書きの世代（`AdvisorSession.markHandoffDrafted()` が返す値）。
+   *
+   * 承認のときに相談相手の現在の世代と一致させる。承認の画面を開いたまま新しい下書きを
+   * 作った場合に、古い方が送られるのを防ぐ（Issue #929 の自己レビュー）。
+   */
+  revision: number;
   /** 利用者が採否を判断するための要約。会話へ表示するだけで、送信されることはない。 */
   userSummary: string;
   /** 承認されたときにだけ作業中のAIへ渡る指示文。 */
   mainInstruction: string;
 }
 
+/** パースの結果。世代はまだ付いていない（相談相手が採番する）。 */
+export type ParsedHandoff = Omit<HandoffDraft, 'revision'>;
+
 export type HandoffParseResult =
-  | { ok: true; draft: HandoffDraft }
+  | { ok: true; draft: ParsedHandoff }
   | { ok: false; reason: string };
 
 /**
@@ -62,6 +72,13 @@ export function parseHandoffDraft(raw: string): HandoffParseResult {
     return { ok: false, reason: 'JSONの中身がオブジェクトではありませんでした' };
   }
   const record = parsed as Record<string, unknown>;
+  const unknownKeys = Object.keys(record).filter(
+    (key) => key !== 'userSummary' && key !== 'mainInstruction',
+  );
+  if (unknownKeys.length > 0) {
+    // 指示した2つ以外のキーがあるということは、形式を守れていない。読み替えて通さない
+    return { ok: false, reason: `想定していないキーがありました: ${unknownKeys.join(', ')}` };
+  }
   const summary = requireText(record['userSummary'], 'userSummary', MAX_SUMMARY_CHARS);
   if (typeof summary !== 'string') {
     return summary;

@@ -126,6 +126,14 @@ export class AdvisorSession {
   /** 実行中のターンを止めるためのハンドル。走っていなければ `undefined`。 */
   private turn: AbortController | undefined;
   private closeReason: AdvisorCloseReason | undefined;
+  /**
+   * 下書きの世代（Issue #929）。{@link markHandoffDrafted} のたびに1つ増える。
+   *
+   * 状態だけでは「どの下書きを承認したのか」が定まらない。承認の画面で古い下書きAを開いた
+   * まま新しい下書きBを作ると、状態は `handoffDrafted` に戻っているので承認は通り、送られる
+   * のはAになる。承認のときに世代まで一致させることで、この取り違えを塞ぐ。
+   */
+  private draftRevision = 0;
 
   constructor(options: AdvisorSessionOptions) {
     this.options = options;
@@ -181,13 +189,19 @@ export class AdvisorSession {
     return this.runTurn(prompt, signal);
   }
 
-  /** 下書きが読めたことを記録する。`closed` では何もしない。 */
-  markHandoffDrafted(): void {
+  /**
+   * 下書きが読めたことを記録し、その下書きの世代を返す。`closed` では `undefined`。
+   *
+   * 返した世代は下書きと一緒に持ち回り、承認のときに {@link markApproved} へ渡す。
+   */
+  markHandoffDrafted(): number | undefined {
     if (this.state === 'closed') {
-      return;
+      return undefined;
     }
     this.state = 'handoffDrafted';
+    this.draftRevision += 1;
     this.armIdleTimer();
+    return this.draftRevision;
   }
 
   /**
@@ -196,13 +210,27 @@ export class AdvisorSession {
    * 承認できるのは `handoffDrafted` からだけである。相談中や閉じた後から承認へ飛べると、
    * 「何を承認したのか」が定まらない。
    */
-  markApproved(): boolean {
-    if (this.state !== 'handoffDrafted') {
+  markApproved(revision: number): boolean {
+    if (this.state !== 'handoffDrafted' || revision !== this.draftRevision) {
       return false;
     }
     this.state = 'approved';
     this.armIdleTimer();
     return true;
+  }
+
+  /**
+   * 無操作タイマーを張り直す（Issue #929）。
+   *
+   * 承認の画面（エディタ）を開いた時点で呼ぶ。長い指示文を読んでいる間は状態が変わらないため、
+   * これが無いと「読んでいる最中に相談が閉じ、押した瞬間に送れない」ことが起こる。閉じていれば
+   * 何もしない（閉じたセッションを生き返らせない）。
+   */
+  keepAlive(): void {
+    if (this.isClosed()) {
+      return;
+    }
+    this.armIdleTimer();
   }
 
   /**
@@ -281,6 +309,11 @@ export class AdvisorSession {
     }
     if (this.turn !== undefined) {
       return { ok: false, kind: 'busy', reason: 'この相談では別の問い合わせが実行中です' };
+    }
+    if (this.state === 'approved') {
+      // `approved` でいるのは送信を待っている間だけである。ここで相談を受けると
+      // `consulting` へ戻り、送信が失敗したときの `revertApproval()` が効かなくなる
+      return { ok: false, kind: 'busy', reason: '承認した指示を送信中です' };
     }
     onStart?.();
     this.clearIdleTimer();

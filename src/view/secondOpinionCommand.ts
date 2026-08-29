@@ -960,9 +960,15 @@ export async function draftSecondOpinionHandoff(
       );
       return;
     }
-    advisor.markHandoffDrafted();
-    port.setHandoffDraft?.(parsed.draft);
-    port.note(id, draftedHandoffDisplay(advisor.candidate, parsed.draft));
+    const revision = advisor.markHandoffDrafted();
+    if (revision === undefined) {
+      // 待っている間に閉じられた。承認できない下書きを出さない
+      port.note(id, failedHandoffDisplay(advisor.candidate, 'この相談は既に終了しています'));
+      return;
+    }
+    const draft: HandoffDraft = { ...parsed.draft, revision };
+    port.setHandoffDraft?.(draft);
+    port.note(id, draftedHandoffDisplay(advisor.candidate, draft));
   } finally {
     registry.end(port.parentSessionId, id);
     try {
@@ -1026,6 +1032,8 @@ export async function approveSecondOpinionHandoff(
     void vscode.window.showErrorMessage('この画面からは指示を送れません');
     return;
   }
+  // 読んでいる間に無操作で閉じられないようにする。長い指示文ほど読む時間は延びる
+  advisor.keepAlive();
   // 送られる形のまま全文を見せ、その場で直せるようにする
   const document = await vscode.workspace.openTextDocument({
     content: draft.mainInstruction,
@@ -1045,11 +1053,15 @@ export async function approveSecondOpinionHandoff(
     void vscode.window.showWarningMessage('指示が空です。送信しませんでした');
     return;
   }
-  // 承認できるのは下書きができている状態からだけ。追加の相談で `consulting` へ戻っていたら
-  // ここで止まる（相談の結論と、送ろうとしている文がずれている）
-  if (!advisor.markApproved()) {
+  // 承認できるのは「下書きができている状態」かつ「いま開いているのが最新の下書き」のとき
+  // だけである。世代まで見るのは、承認の画面を開いたまま新しい下書きを作ると、状態は
+  // `handoffDrafted` に戻っているので状態だけの判定では通ってしまい、**画面に出ている古い方**
+  // が送られるため（Issue #929 の自己レビュー）
+  if (!advisor.markApproved(draft.revision)) {
     void vscode.window.showWarningMessage(
-      '下書きが最新ではありません。もう一度「メインAIへの指示を作る」から作成してください',
+      advisor.closedReason() === undefined
+        ? '下書きが最新ではありません。もう一度「メインAIへの指示を作る」から作成してください'
+        : 'この相談は既に終了しています。もう一度セカンドオピニオンを実行してください',
     );
     return;
   }

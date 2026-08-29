@@ -73,6 +73,16 @@ describe('parseHandoffDraft（Issue #929）', () => {
     });
   });
 
+  it('指示した2つ以外のキーがあれば受け付けない', () => {
+    const raw = jsonBlock(
+      JSON.stringify({ userSummary: '要約', mainInstruction: '指示', note: '補足' }),
+    );
+    expect(parseHandoffDraft(raw)).toEqual({
+      ok: false,
+      reason: '想定していないキーがありました: note',
+    });
+  });
+
   it('空白だけの値は空として扱う', () => {
     const raw = jsonBlock(JSON.stringify({ userSummary: '要約', mainInstruction: '   \n  ' }));
     expect(parseHandoffDraft(raw)).toEqual({ ok: false, reason: 'mainInstruction が空でした' });

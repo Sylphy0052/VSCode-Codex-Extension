@@ -144,14 +144,47 @@ describe('AdvisorSession の状態遷移（Issue #929）', () => {
   it('承認できるのは handoffDrafted からだけ', () => {
     const session = new FakeSession();
     const advisor = createAdvisor(session);
-    expect(advisor.markApproved()).toBe(false);
+    expect(advisor.markApproved(1)).toBe(false);
     expect(advisor.currentState()).toBe('consulting');
-    advisor.markHandoffDrafted();
-    expect(advisor.markApproved()).toBe(true);
+    const revision = advisor.markHandoffDrafted();
+    expect(revision).toBe(1);
+    expect(advisor.markApproved(revision ?? 0)).toBe(true);
     expect(advisor.currentState()).toBe('approved');
     advisor.close('instructionSent');
-    expect(advisor.markApproved()).toBe(false);
+    expect(advisor.markApproved(revision ?? 0)).toBe(false);
     expect(advisor.currentState()).toBe('closed');
+  });
+
+  it('古い世代の下書きは承認できない', () => {
+    const session = new FakeSession();
+    const advisor = createAdvisor(session);
+    const first = advisor.markHandoffDrafted();
+    // 承認の画面を開いたまま、新しい下書きを作った状況
+    const second = advisor.markHandoffDrafted();
+    expect(second).toBe((first ?? 0) + 1);
+    // 状態は handoffDrafted のままだが、古い方は通らない
+    expect(advisor.currentState()).toBe('handoffDrafted');
+    expect(advisor.markApproved(first ?? 0)).toBe(false);
+    expect(advisor.markApproved(second ?? 0)).toBe(true);
+    advisor.close('instructionSent');
+  });
+
+  it('送信を待っている間は追加の相談を受け付けない', async () => {
+    const session = new FakeSession();
+    const advisor = createAdvisor(session);
+    const revision = advisor.markHandoffDrafted();
+    expect(advisor.markApproved(revision ?? 0)).toBe(true);
+    // `approved` でいるのは送信待ちの間だけ。ここで `consulting` へ戻されると、
+    // 送信に失敗したときの `revertApproval()` が効かなくなる
+    const result = await advisor.ask('やはりC案は？');
+    expect(result).toEqual({
+      ok: false,
+      kind: 'busy',
+      reason: '承認した指示を送信中です',
+    });
+    expect(advisor.currentState()).toBe('approved');
+    expect(session.prompts).toEqual([]);
+    advisor.close('instructionSent');
   });
 
   it('閉じた後は下書きの記録も受け付けない', () => {
