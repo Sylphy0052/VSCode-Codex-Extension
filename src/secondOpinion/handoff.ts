@@ -28,9 +28,7 @@ export interface HandoffDraft {
 /** パースの結果。世代はまだ付いていない（相談相手が採番する）。 */
 export type ParsedHandoff = Omit<HandoffDraft, 'revision'>;
 
-export type HandoffParseResult =
-  | { ok: true; draft: ParsedHandoff }
-  | { ok: false; reason: string };
+export type HandoffParseResult = { ok: true; draft: ParsedHandoff } | { ok: false; reason: string };
 
 /**
  * 指示文の上限（文字数）。
