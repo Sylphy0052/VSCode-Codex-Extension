@@ -166,7 +166,7 @@ export async function runSecondOpinion(
           conversationSummary: request.conversationSummary,
           conversationBackgroundKind: request.conversationBackgroundKind,
         })
-      : buildAskGptSecondOpinionPrompt(request.askGptRequestText);
+      : buildAskGptSecondOpinionPrompt(request.askGptRequestText, request.request);
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
   log?.info(
