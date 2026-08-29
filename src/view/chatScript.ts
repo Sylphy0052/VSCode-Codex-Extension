@@ -2354,17 +2354,17 @@ export function chatScript(
     );
     // ゴール駆動では2回目以降の指示文をEvaluatorの判定から組み立てるため、継続指示は要らない
     if (!goalDriven && !plan.continuePrompt.trim()) {
-      // 一文からゴールを組み立てる（issue #958）。走らせるのは**目的も受入基準も継続指示も
+      // 一文からゴールを組み立てる（issue #958）。走らせるのは**ゴールの3欄も継続指示も
       // 空**のとき、つまり従来なら入力を促して止まっていた場合だけなので、既存のループの
       // 挙動は変わらない。1回目の指示が空なら材料が無いので、これまでどおり入力を促す。
-      // 片方だけ埋まっている場合も走らせない——利用者が書いた文を下書きで上書きしない
-      const goalEmpty = !plan.goal.purpose.trim() && !plan.goal.acceptanceCriteria.trim();
-      if (autoGoalEnabled && goalEmpty && plan.initialPrompt.trim() && !goalDraftPending) {
-        goalDraftPending = true;
-        el('loopStart').disabled = true;
-        el('loopGoalNotice').hidden = false;
-        el('loopGoalNotice').textContent = 'ゴールの下書きを組み立てています…';
-        vscode.postMessage({ type: 'loop/planGoal', text: plan.initialPrompt });
+      // 制約だけを書いた場合も走らせない。「1文字でも書いていたら自動生成しない」を
+      // 一貫した契約にする——下書きは3欄すべてを入れ替えるため、片方だけ見て発動を
+      // 決めると、見ていない欄に書かれた文が黙って消える（issue #961）
+      const goalEmpty = goalFieldsEmpty(plan.goal);
+      const canDraft =
+        autoGoalEnabled && goalEmpty && plan.initialPrompt.trim() && goalDraftRequest === undefined;
+      if (canDraft) {
+        requestGoalDraft(plan.initialPrompt);
         return;
       }
       el('loopContinue').focus();
@@ -2377,35 +2377,95 @@ export function chatScript(
   el('loopStop').addEventListener('click', () => vscode.postMessage({ type: 'loop/stop' }));
 
   /**
-   * 一文からゴールの下書きを組み立てている最中か（issue #958）。二重に頼まないための札。
-   * 応答（loop/goalDraft）が届くか、失敗が返るまで開始ボタンを押せなくする。
+   * 組み立て中の下書き要求（issue #958、#961）。要求していないときは undefined。
+   *
+   * idと、要求した時点の入力の写しを持つ。二重に頼まないための札を兼ねるが、札だけでは
+   * 足りない——待っている間に利用者が書いた文を、届いた下書きが黙って上書きしてしまう。
    */
-  let goalDraftPending = false;
+  let goalDraftRequest = undefined;
+  /** 要求ごとの通し番号。古い応答を捨てるために使う（issue #961）。 */
+  let goalDraftSeq = 0;
   /** 準備ターンを使うか。拡張機能側の設定（agent.chat.loop.autoGoal.enabled）を反映する。 */
   let autoGoalEnabled = true;
+
+  /** ゴールの3欄が全て空か（issue #961）。 */
+  function goalFieldsEmpty(goal) {
+    return !goal.purpose.trim() && !goal.acceptanceCriteria.trim() && !goal.constraints.trim();
+  }
+
+  /** 下書きの適用可否を決めるために比べる入力の写しを取る（issue #961）。 */
+  function goalDraftSnapshot() {
+    return {
+      initialPrompt: el('loopInitial').value,
+      purpose: el('loopGoalPurpose').value,
+      acceptanceCriteria: el('loopGoalCriteria').value,
+      constraints: el('loopGoalConstraints').value,
+    };
+  }
+
+  /** 下書きの組み立てを頼む。押せるのは3欄が空のときだけなので、写しはその状態を指す。 */
+  function requestGoalDraft(initialPrompt) {
+    goalDraftSeq += 1;
+    goalDraftRequest = { id: goalDraftSeq, before: goalDraftSnapshot() };
+    el('loopStart').disabled = true;
+    showGoalNotice('ゴールの下書きを組み立てています…');
+    vscode.postMessage({ type: 'loop/planGoal', text: initialPrompt, id: goalDraftSeq });
+  }
+
+  function showGoalNotice(text) {
+    el('loopGoalNotice').hidden = false;
+    el('loopGoalNotice').textContent = text;
+  }
+
+  /** 要求した時点から入力が変わっていないか（issue #961）。 */
+  function goalDraftInputUnchanged(before) {
+    const now = goalDraftSnapshot();
+    return (
+      now.initialPrompt === before.initialPrompt &&
+      now.purpose === before.purpose &&
+      now.acceptanceCriteria === before.acceptanceCriteria &&
+      now.constraints === before.constraints
+    );
+  }
 
   /**
    * 組み立てた下書きを3欄へ流し込む。**ここではループを始めない**（issue #958）。
    *
    * ゴールはループ全体の判定基準であり、外れたまま始めると最大200周ぶん外れる。人が読んで
    * 直してから開始ボタンを押す。確認を省く設定のときだけ、拡張機能側が start: true を付ける。
+   *
+   * 待っている間の編集を尊重する（issue #961）。3欄は組み立て中も編集でき、1回目の指示も
+   * 変えられる。届いた下書きを無条件に入れると、利用者が自分で書いたゴールが消え、
+   * confirm を切っているときは古い一文から作ったゴールでそのまま走り出す。入力が変わって
+   * いたら**適用しない**。捨てる方を既定にするのは、下書きは作り直せるが、利用者が書いた
+   * 文は復元できないため
    */
   function applyGoalDraft(data) {
-    goalDraftPending = false;
+    const request = goalDraftRequest;
+    // 別の要求の応答、または要求していないのに届いた応答は捨てる。パネルを作り直した
+    // 直後などに、前の要求の応答が遅れて届くことがある
+    if (request === undefined || data.id !== request.id) {
+      return;
+    }
+    goalDraftRequest = undefined;
     el('loopStart').disabled = false;
     if (!data.ok) {
-      el('loopGoalNotice').hidden = false;
-      el('loopGoalNotice').textContent = data.message || 'ゴールの下書きを作れませんでした';
+      showGoalNotice(data.message || 'ゴールの下書きを作れませんでした');
       el('loopGoalPurpose').focus();
+      return;
+    }
+    if (!goalDraftInputUnchanged(request.before)) {
+      showGoalNotice('入力が変わったため、組み立てた下書きは反映しませんでした');
       return;
     }
     el('loopGoalPurpose').value = data.goal.purpose || '';
     el('loopGoalCriteria').value = data.goal.acceptanceCriteria || '';
     el('loopGoalConstraints').value = data.goal.constraints || '';
-    el('loopGoalNotice').hidden = false;
-    el('loopGoalNotice').textContent = data.start
-      ? 'ゴールの下書きでループを始めます'
-      : 'ゴールの下書きを入れました。確認・修正して「開始」を押してください';
+    showGoalNotice(
+      data.start
+        ? 'ゴールの下書きでループを始めます'
+        : 'ゴールの下書きを入れました。確認・修正して「開始」を押してください',
+    );
     if (data.start) {
       el('loopStart').click();
       return;

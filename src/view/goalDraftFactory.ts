@@ -1,7 +1,11 @@
 import { readClaudeConfig, readConfig, readGoalDraftConfig } from '../config';
 import { resolveHeadlessProvider, type HeadlessProvider } from '../loop/headlessCli';
 import { extractIssueNumber } from '../loop/goalDraft';
-import { createGoalDraftPlanner, type GoalDraftResult } from '../loop/goalDraftProcess';
+import {
+  createGoalDraftPlanner,
+  type GoalDraftResult,
+  type GoalDraftSettings,
+} from '../loop/goalDraftProcess';
 import {
   detectForgeHost,
   nodeCliCommandRunner,
@@ -88,6 +92,51 @@ async function fetchIssueBody(
     return undefined;
   }
   return readIssueBody(result.stdout);
+}
+
+/**
+ * webviewの`loop/planGoal`へ返す応答を組み立てる（issue #961）。
+ *
+ * **どの経路を通っても必ず1つの応答を返す。** webview側は要求を出した時点で開始ボタンを
+ * 無効化し、この応答でだけ元へ戻す。設定の読み出し・`git`・`gh`の実行など、下書きの生成
+ * そのものより外側で例外が出ると応答が返らず、画面は「組み立てています…」のまま操作不能で
+ * 残る。`createGoalDraftPlanner`が内側で例外を握っていることとは別に、要求と応答の境界にも
+ * 受けが要る。
+ *
+ * `id`は要求ごとの通し番号で、そのまま返して古い応答を画面側で捨てられるようにする。
+ * 数値でない値は載せない（webview側は一致しない応答を無視する）。
+ */
+export async function buildGoalDraftReply(
+  rawId: unknown,
+  rawText: unknown,
+  deps: {
+    readSettings: () => GoalDraftSettings;
+    plan: (text: string) => Promise<GoalDraftResult>;
+    logWarn: (message: string) => void;
+  },
+): Promise<Record<string, unknown>> {
+  const id = typeof rawId === 'number' ? rawId : undefined;
+  const reply = (body: Record<string, unknown>): Record<string, unknown> => ({
+    type: 'loop/goalDraft',
+    id,
+    ...body,
+  });
+  try {
+    const settings = deps.readSettings();
+    const text = typeof rawText === 'string' ? rawText.trim() : '';
+    if (!settings.enabled || text === '') {
+      return reply({ ok: false, message: '目的と受入基準を入力してください' });
+    }
+    const drafted = await deps.plan(text);
+    return drafted.ok
+      ? reply({ ok: true, goal: drafted.goal, start: !settings.confirm })
+      : reply({ ok: false, message: drafted.message });
+  } catch (e) {
+    deps.logWarn(
+      `ゴールの下書きの生成に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return reply({ ok: false, message: 'ゴールの下書きの生成に失敗しました' });
+  }
 }
 
 /** `gh issue view --json title,body` の応答から、題と本文を1つのテキストへ均す。 */
