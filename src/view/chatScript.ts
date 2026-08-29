@@ -2356,8 +2356,10 @@ export function chatScript(
     if (!goalDriven && !plan.continuePrompt.trim()) {
       // 一文からゴールを組み立てる（issue #958）。走らせるのは**目的も受入基準も継続指示も
       // 空**のとき、つまり従来なら入力を促して止まっていた場合だけなので、既存のループの
-      // 挙動は変わらない。1回目の指示が空なら材料が無いので、これまでどおり入力を促す
-      if (autoGoalEnabled && plan.initialPrompt.trim() && !goalDraftPending) {
+      // 挙動は変わらない。1回目の指示が空なら材料が無いので、これまでどおり入力を促す。
+      // 片方だけ埋まっている場合も走らせない——利用者が書いた文を下書きで上書きしない
+      const goalEmpty = !plan.goal.purpose.trim() && !plan.goal.acceptanceCriteria.trim();
+      if (autoGoalEnabled && goalEmpty && plan.initialPrompt.trim() && !goalDraftPending) {
         goalDraftPending = true;
         el('loopStart').disabled = true;
         el('loopGoalNotice').hidden = false;
