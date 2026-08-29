@@ -62,7 +62,7 @@ describe('applyDiffBudget（Issue #926 H）', () => {
 
   it('1ファイルで予算を超えても、そのファイルは残り省略したhunk数が明記される', () => {
     const diff = fileDiff('src/big.ts', 10);
-    const result = applyDiffBudget(diff, 150);
+    const result = applyDiffBudget(diff, 300);
     expect(result.diff).toContain('diff --git a/src/big.ts b/src/big.ts');
     expect(result.omissions).toEqual([]);
     expect(result.partials).toHaveLength(1);
@@ -73,12 +73,13 @@ describe('applyDiffBudget（Issue #926 H）', () => {
 
   it('予算がhunk 1件分も無くても、ファイルの存在は消さない', () => {
     const diff = fileDiff('src/big.ts', 5);
-    // headerだけで使い切る大きさ
+    // headerだけで使い切る大きさ。1ファイルしか無いので、ここだけは上限を超えても残す
     const result = applyDiffBudget(diff, 10);
     expect(result.diff).toContain('diff --git a/src/big.ts b/src/big.ts');
     expect(result.omissions).toEqual([]);
+    // 差分の中に注記を置く余地すら無いので、省略した事実は一覧側だけが持つ
     expect(result.partials).toEqual([{ path: 'src/big.ts', omittedHunks: 5, totalHunks: 5 }]);
-    expect(result.diff).toContain('# 省略: このファイルの残り 5/5 hunk');
+    expect(result.diff).not.toContain('@@');
   });
 
   it('内容行が @@ や diff --git で始まっても区画を割らない', () => {
@@ -137,6 +138,53 @@ describe('applyDiffBudget（Issue #926 H）', () => {
     expect(japanese.length).toBeLessThan(utf8Bytes(japanese));
     const result = applyDiffBudget(japanese, japanese.length);
     expect(result.truncated).toBe(true);
+  });
+
+  it('自動生成ファイル1件だけの差分では、そのファイルを落とさない', () => {
+    // `dist/app.js` だけを直した差分。落とすと渡す材料が空になる
+    const diff = fileDiff('dist/app.js', 40);
+    const result = applyDiffBudget(diff, 300);
+    expect(result.omissions).toEqual([]);
+    expect(result.diff).toContain('diff --git a/dist/app.js b/dist/app.js');
+    expect(result.partials.map((entry) => entry.path)).toEqual(['dist/app.js']);
+  });
+
+  it('自動生成が2件でも、残りが空になるところまでは落とさない', () => {
+    const diff = fileDiff('dist/a.js', 20) + fileDiff('dist/b.js', 20);
+    const result = applyDiffBudget(diff, 400);
+    expect(result.omissions).toHaveLength(1);
+    expect(result.diff).toContain('diff --git');
+  });
+
+  it('headerだけで超えるほどファイルが多いときも上限を守る', () => {
+    // hunkが1件も無い変更（モード変更・リネームのみ）を並べる。hunk配分では削れない
+    let diff = '';
+    for (let i = 0; i < 200; i += 1) {
+      diff += `diff --git a/f${i}.ts b/f${i}.ts\nold mode 100644\nnew mode 100755\n`;
+    }
+    const result = applyDiffBudget(diff, 1_000);
+    expect(utf8Bytes(result.diff)).toBeLessThanOrEqual(1_000);
+    expect(result.truncated).toBe(true);
+    expect(result.omissions.every((entry) => entry.reason === 'total-budget')).toBe(true);
+    expect(result.omissions.length).toBeGreaterThan(0);
+  });
+
+  it('先頭の巨大なhunkで打ち切らず、後ろの小さいhunkを拾う', () => {
+    const diff =
+      `diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n` +
+      `@@ -1,1 +1,1 @@\n+${'x'.repeat(2_000)}\n` +
+      `@@ -50,1 +50,1 @@\n+if (!user.isAdmin) throw new Error('forbidden');\n`;
+    const result = applyDiffBudget(diff, 600);
+    expect(result.diff).toContain("+if (!user.isAdmin) throw new Error('forbidden');");
+    expect(result.partials).toEqual([{ path: 'src/auth.ts', omittedHunks: 1, totalHunks: 2 }]);
+  });
+
+  it('省略の行を足しても上限を超えない', () => {
+    const diff = fileDiff('src/a.ts', 30) + fileDiff('src/b.ts', 30) + fileDiff('src/c.ts', 30);
+    for (const limit of [400, 700, 1_500, 3_000]) {
+      const result = applyDiffBudget(diff, limit);
+      expect(utf8Bytes(result.diff)).toBeLessThanOrEqual(limit);
+    }
   });
 
   it('`diff --git` が無い入力でも予算を超えたまま渡さない', () => {

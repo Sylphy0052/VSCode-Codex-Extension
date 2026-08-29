@@ -533,23 +533,23 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
   it('上限を超える差分はhunkの境界で切り、落としたものを返す（Issue #926 H）', async () => {
     const big =
       'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n' +
-      '@@ -1,1 +1,1 @@\n+aaaaaaaaaa\n' +
-      '@@ -2,1 +2,1 @@\n+bbbbbbbbbb\n';
+      `@@ -1,1 +1,1 @@\n+${'a'.repeat(200)}\n` +
+      `@@ -2,1 +2,1 @@\n+${'b'.repeat(200)}\n`;
     const git = fakeGit({
       'rev-parse --is-inside-work-tree': okResult('true\n'),
       'rev-parse HEAD': okResult('abc1234\n'),
       'diff --no-ext-diff --no-textconv abc1234 --': okResult(big),
     });
-    // 1つ目のhunkだけが入る予算
-    const result = await captureWorkspaceSnapshot('/repo', git, { maxDiffBytes: 90 });
+    // 1つ目のhunkと省略の行だけが入る予算
+    const result = await captureWorkspaceSnapshot('/repo', git, { maxDiffBytes: 378 });
     expect(result.ok).toBe(true);
     if (!result.ok) {
       return;
     }
     expect(result.snapshot.truncated).toBe(true);
     // hunkの途中では切れていない
-    expect(result.snapshot.diff).toContain('@@ -1,1 +1,1 @@\n+aaaaaaaaaa\n');
-    expect(result.snapshot.diff).not.toContain('bbbbbbbbbb');
+    expect(result.snapshot.diff).toContain(`@@ -1,1 +1,1 @@\n+${'a'.repeat(200)}\n`);
+    expect(result.snapshot.diff).not.toContain('b'.repeat(200));
     expect(result.snapshot.diffPartials).toEqual([
       { path: 'a.ts', omittedHunks: 1, totalHunks: 2 },
     ]);

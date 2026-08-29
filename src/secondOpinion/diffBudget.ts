@@ -41,7 +41,15 @@ export type DiffOmissionReason =
   /** バイナリのため本文を載せない。 */
   | 'binary'
   /** 自動生成とみなして落とした。 */
-  | 'generated';
+  | 'generated'
+  /**
+   * 上限に対してファイル数が多すぎ、headerすら入らなかった。
+   *
+   * 変更ファイルが数千件あると、hunkを1件も渡さなくてもheaderの合計だけで上限を超える。
+   * その場合は上限を守る方を優先し、入らなかったファイルをここへ落とす。落としたパスは
+   * 一覧に出るため、存在自体は伝わる。
+   */
+  | 'total-budget';
 
 /** 落としたファイル1件。 */
 export interface DiffOmission {
@@ -82,10 +90,13 @@ const GENERATED_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)(Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/,
   /(^|\/)(dist|build|out|vendor|node_modules|__generated__)\//,
   /\.min\.(js|css)$/,
-  /\.(map|snap)$/,
   /\.generated\./,
   /(^|\/)[^/]*_pb\.(js|ts|go|py)$/,
 ];
+
+// `*.snap`（スナップショットテスト）と `*.map`（source map）はここに入れない。前者は
+// 「意図しない出力の変化」を見るための材料そのもので、レビューで最も見たい差分になりうる。
+// 後者は手書きの対応表がこの拡張子を使うことがある。どちらも落とす側へ倒す理由が弱い
 
 /** 省略の一覧へ載せる最大件数。超えた分は件数だけを伝える。 */
 export const MAX_DIFF_OMISSION_ENTRIES = 50;
@@ -162,16 +173,28 @@ export function parseDiff(diff: string): { preamble: string; files: DiffFileSect
  * **予算に収まっていれば何もしない**（受入基準: 上限以下なら渡す内容がこれまでと
  * 変わらない）。超えたときだけ、次の順で削る。
  *
- * 1. バイナリと自動生成ファイルを落とす。それで収まればここで確定する
- * 2. まだ超えるなら、残ったファイルへ予算を配分し、hunkの境界で切る
+ * 1. バイナリを落とす（本文はbase85で、読ませても判断には使えない）
+ * 2. まだ超えるなら自動生成とみなしたファイルを大きい順に落とす。ただし**最後の1件は
+ *    落とさない**——それを落とすと渡す差分が空になり、材料なしで相談が走る
+ * 3. まだheaderの合計すら入らないなら、入らないファイルを `total-budget` として落とす。
+ *    上限を守る方を優先する（受入基準4の例外。`docs/design.md` に明記してある）
+ * 4. 残ったファイルへ予算を配分し、hunkの境界で切る
  *
  * 配分は小さいファイルから順に「残り予算 ÷ 残りファイル数」を割り当て、使い切らなかった
  * 分を次のファイルへ回す。先頭から詰めると `git diff` の出力順（おおむねパス順）で
  * 後ろのファイルが必ず落ちるが、パスの並びは変更の重要度と関係が無い。
  *
- * ファイルのheaderは予算を超えても必ず入れる。予算がhunk 1件分も無い場合、そのファイルは
- * 「hunkを全部省略した」形で残る——**ファイルの存在自体は消さない**。変更の中心が巨大な
- * ファイルであることは普通にあり、そこで消えると最も見てほしいものが伝わらない。
+ * hunkは入らなかったものを飛ばして先へ進む（そこで打ち切らない）。巨大な整形変更のhunkが
+ * 先頭にあるだけで、同じファイルの末尾にある小さな重要な修正まで落ちるのを避けるため。
+ * その代わり渡したhunkは連続とは限らないので、省略の行にそう書く。
+ *
+ * ファイルのheaderは、そのファイルを残す限り必ず入れる。予算がhunk 1件分も無い場合、
+ * そのファイルは「hunkを全部省略した」形で残る——**ファイルの存在自体は消さない**。
+ * 変更の中心が巨大なファイルであることは普通にあり、そこで消えると最も見てほしいものが
+ * 伝わらない。
+ *
+ * 上限は原則として守るが、**ファイルが1件だけでheaderがそれ自体で上限を超える**場合に
+ * 限り超える。そこまで削ると差分が空になり、渡す意味が無くなる。
  */
 export function applyDiffBudget(diff: string, maxBytes: number): DiffBudgetResult {
   if (utf8Bytes(diff) <= maxBytes) {
@@ -187,7 +210,7 @@ export function applyDiffBudget(diff: string, maxBytes: number): DiffBudgetResul
     return { diff: cutAtLineBoundary(preamble, maxBytes), truncated: true, omissions, partials };
   }
 
-  const kept: DiffFileSection[] = [];
+  let kept: DiffFileSection[] = [];
   for (const file of files) {
     if (file.binary) {
       omissions.push({ path: file.path, bytes: file.bytes, reason: 'binary' });
@@ -205,12 +228,34 @@ export function applyDiffBudget(diff: string, maxBytes: number): DiffBudgetResul
       .filter((file) => file.generated)
       .sort((left, right) => right.bytes - left.bytes);
     for (const file of generated) {
-      if (keptBytes(kept) <= budget) {
+      // 最後の1件は自動生成でも落とさない。`dist/app.js` だけを直した差分で、渡すものが
+      // 何も無くなるのを防ぐ。残せば下のhunk配分に載り、headerと入る範囲のhunkは渡る
+      if (kept.length <= 1 || keptBytes(kept) <= budget) {
         break;
       }
       kept.splice(kept.indexOf(file), 1);
       omissions.push({ path: file.path, bytes: file.bytes, reason: 'generated' });
     }
+  }
+
+  // ここまでで、hunkを1件も渡さなくてもheaderの合計だけで上限を超えることがある
+  // （モード変更やリネームだけの変更が数千件、など）。hunk配分は「headerは必ず入れる」
+  // 前提なので、その前にファイル数そのものを予算へ収める
+  const floorBytes = (file: DiffFileSection): number => utf8Bytes(file.header);
+  if (kept.reduce((total, file) => total + floorBytes(file), 0) > budget) {
+    const fit: DiffFileSection[] = [];
+    let used = 0;
+    for (const file of kept) {
+      const size = floorBytes(file);
+      // 1件目だけは、単独で上限を超えても入れる（空の差分を渡さないため）
+      if (fit.length > 0 && used + size > budget) {
+        omissions.push({ path: file.path, bytes: file.bytes, reason: 'total-budget' });
+        continue;
+      }
+      fit.push(file);
+      used += size;
+    }
+    kept = fit;
   }
 
   // パスではなく区画そのものを鍵にする。同じパスに対する区画が2つ出る形（モード変更と
@@ -219,30 +264,51 @@ export function applyDiffBudget(diff: string, maxBytes: number): DiffBudgetResul
   if (keptBytes(kept) > budget) {
     // 小さいファイルから配る。使い切らなかった分が大きいファイルへ回る
     const order = [...kept].sort((left, right) => left.bytes - right.bytes);
+    // まだ処理していないファイルのheaderの合計。これを常に残しておけば、後ろのファイルが
+    // headerすら入らない事態にならない（headerの合計が予算に収まることは上で保証済み）
+    let reserved = order.reduce((total, file) => total + floorBytes(file), 0);
     let index = 0;
     for (const file of order) {
-      const share = Math.floor(budget / (order.length - index));
+      const headerBytes = floorBytes(file);
+      reserved -= headerBytes;
+      const remainingFiles = order.length - index;
       index += 1;
-      let used = utf8Bytes(file.header);
-      const takenHunks: string[] = [];
-      for (const hunk of file.hunks) {
-        const size = utf8Bytes(hunk);
-        if (used + size > share) {
-          break;
+      // このファイルがheaderに上乗せしてよい量。後続のheader分を除いた残りを、残り
+      // ファイル数で均等に割る。ここを超えなければ全体で予算を超えない
+      const extra = Math.max(0, Math.floor((budget - reserved - headerBytes) / remainingFiles));
+      const allHunkBytes = file.hunks.reduce((total, hunk) => total + utf8Bytes(hunk), 0);
+      let body: string;
+      if (allHunkBytes <= extra) {
+        // 丸ごと入る。省略の行を出さないので、その分を取っておく必要も無い
+        body = file.header + file.hunks.join('');
+      } else {
+        // 省略の行も予算のうち。hunkを詰めた後に足すと、その分だけ予算を超える
+        const forHunks = extra - maxNoticeBytes(file);
+        const takenHunks: string[] = [];
+        let hunkBytes = 0;
+        for (const hunk of file.hunks) {
+          const size = utf8Bytes(hunk);
+          if (hunkBytes + size > forHunks) {
+            // 打ち切らずに次を見る。後ろにある小さいhunkが入る余地を残す
+            continue;
+          }
+          takenHunks.push(hunk);
+          hunkBytes += size;
         }
-        takenHunks.push(hunk);
-        used += size;
-      }
-      const omittedHunks = file.hunks.length - takenHunks.length;
-      let body = file.header + takenHunks.join('');
-      if (omittedHunks > 0) {
-        const notice = hunkOmissionNotice(omittedHunks, file.hunks.length);
-        body = ensureTrailingNewline(body) + notice;
-        used += utf8Bytes(notice);
-        partials.push({ path: file.path, omittedHunks, totalHunks: file.hunks.length });
+        const omittedHunks = file.hunks.length - takenHunks.length;
+        body = file.header + takenHunks.join('');
+        if (omittedHunks > 0) {
+          partials.push({ path: file.path, omittedHunks, totalHunks: file.hunks.length });
+          // 省略の行を置く余地が無ければ、差分の中には書かずに一覧側だけで伝える。
+          // 上限を超えてまで注記を入れる価値は無い（`partials` に必ず載っている）
+          if (hunkBytes + maxNoticeBytes(file) <= extra) {
+            body =
+              ensureTrailingNewline(body) + hunkOmissionNotice(omittedHunks, file.hunks.length);
+          }
+        }
       }
       rendered.set(file, body);
-      budget -= used;
+      budget -= utf8Bytes(body);
     }
   }
 
@@ -251,12 +317,25 @@ export function applyDiffBudget(diff: string, maxBytes: number): DiffBudgetResul
     .filter((file) => keptSet.has(file))
     .map((file) => rendered.get(file) ?? file.header + file.hunks.join(''))
     .join('');
+  const out = preamble + body;
   return {
-    diff: preamble + body,
-    truncated: omissions.length > 0 || partials.length > 0,
+    // 一覧に出ない削り方（headerだけになったファイル、行境界での切り落とし）でも
+    // `truncated` が立つよう、出力そのものを元と比べる
+    diff: out,
+    truncated: out !== diff,
     omissions,
     partials,
   };
+}
+
+/**
+ * 省略の行が使いうる最大byte数。
+ *
+ * 省略数は総数を超えないので、両方に総数を入れた形が桁数の上限になる。予算を配る前に
+ * この分を引いておかないと、hunkを詰め終わってから足すことになり上限を超える。
+ */
+function maxNoticeBytes(file: DiffFileSection): number {
+  return utf8Bytes(hunkOmissionNotice(file.hunks.length, file.hunks.length));
 }
 
 /**
@@ -267,7 +346,7 @@ export function applyDiffBudget(diff: string, maxBytes: number): DiffBudgetResul
  * これを読むのは `git apply` ではなくモデルである。
  */
 function hunkOmissionNotice(omitted: number, total: number): string {
-  return `# 省略: このファイルの残り ${omitted}/${total} hunk は上限のため渡していません\n`;
+  return `# 省略: ${omitted}/${total} hunk は上限のため渡していません（連続とは限りません）\n`;
 }
 
 /**

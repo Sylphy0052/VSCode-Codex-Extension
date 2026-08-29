@@ -259,6 +259,7 @@ function untrackedSection(
 const DIFF_OMISSION_LABELS: Record<DiffOmissionReason, string> = {
   binary: 'バイナリ',
   generated: '自動生成とみなしたファイル',
+  'total-budget': '変更ファイルが多すぎて上限に入らなかった',
 };
 
 /**
