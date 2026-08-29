@@ -2300,6 +2300,7 @@ export function chatScript(
     // issue #957。Advisorが blocker を返した。escalated（評価役・Worker自身の申告）とは
     // 別の理由なので、文面でも言い分ける
     advised: 'Advisorから重大な指摘があったため止めました',
+    conflicted: 'Advisorの重大な指摘と評価役の達成判定が食い違ったため止めました',
     // issue #891。時間上限に達した。判定はターンの完了時に行うため、実際に止まるのは上限を
     // 超えた直後のターン境界になる
     timedOut: '時間上限に達したため止めました',

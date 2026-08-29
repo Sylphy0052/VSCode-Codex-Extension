@@ -26,7 +26,13 @@ import {
   type GoalLoopConfig,
 } from './goalLoop';
 import { buildNextTurnPrompt, indeterminate } from './goalPrompt';
-import { noAdvice, shouldAdvise, type LoopAdvisorConfig } from './loopAdvisor';
+import {
+  advisorFailed,
+  shouldAdvise,
+  type LoopAdvisorConfig,
+  type LoopAdvisorNote,
+  type LoopAdvisorResult,
+} from './loopAdvisor';
 import { buildResponseSummary } from '../orchestrator/taskSummary';
 
 /**
@@ -134,6 +140,18 @@ export type LoopStopReason =
    * 「続ける」で同じ会話のまま再開できる。
    */
   | 'advised'
+  /**
+   * Advisorが`blocker`を返した周に、Evaluatorが`achieved`と判定した（issue #964）。
+   *
+   * **`advised`とは別の値にする。** `blocker` + `continue` / `indeterminate` は
+   * 「進め方に問題があるので止める」という一方向の話だが、`blocker` + `achieved` は
+   * **2つの役の判断が食い違っている**状態である。どちらを採るかは機械が決めてよい種類の
+   * ことではないため、片方を黙って捨てず、食い違ったこと自体を人へ渡す。
+   *
+   * 扱いは`advised` / `escalated`と同格（自動再試行に乗せず、セッションは残す）。指摘を
+   * 見たうえで、達成として畳むか作業を続けるかを人が選び、「続ける」で再開できる。
+   */
+  | 'conflicted'
   /**
    * `LoopPlan.maxDurationMs` の時間上限に達した（issue #891）。
    *
@@ -384,6 +402,13 @@ export class LoopController {
   /** `indeterminate`が連続した回数。`achieved`/`continue`/`escalate`で0に戻す。 */
   private indeterminateStreak = 0;
   /**
+   * Advisorが連続で動けなかった回数（issue #964）。Advisorが動いた周で0に戻す。
+   *
+   * 単発の失敗は流すが、続いていることは会話へ出す。数えるのをここに置くのは、
+   * Advisorの呼び出しが毎回statelessで、失敗が続いているかを本人が知らないため。
+   */
+  private advisorFailureStreak = 0;
+  /**
    * Evaluatorの応答を待っている間か。待っている間に届く`observe()`で二重に評価を
    * 走らせない（評価はターンごとに1回）。
    */
@@ -554,6 +579,7 @@ export class LoopController {
     this.lastMessage = lastAgentMessage(existingItems);
     this.resultSeqAtTurnStart = undefined;
     this.indeterminateStreak = 0;
+    this.advisorFailureStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
     this.status = {
@@ -599,6 +625,7 @@ export class LoopController {
     this.goalEvidence = [];
     this.seenEvidenceIds = new Set();
     this.indeterminateStreak = 0;
+    this.advisorFailureStreak = 0;
     this.evaluating = false;
     this.pendingPrompt = undefined;
     this.lastMessage = undefined;
@@ -789,14 +816,14 @@ export class LoopController {
     // **Advisorを先に走らせてから、Evaluatorを待つ**（issue #957）。直列にすると1ターン
     // あたりの待ち時間が素直に2倍になる。`Promise.all`で束ねないのは、Advisorを使わない
     // ループのマイクロタスクの回数を変えないため（束ねると1tick増える）
-    const advicePromise = advisor?.advise(input).catch(() => noAdvice());
+    const advicePromise = advisor?.advise(input).catch(() => advisorFailed('process-error'));
     // Evaluatorの実装が例外を投げてもループを壊さない。判定できなかったこと自体を
     // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる。
     // 両者は独立に`catch`しており、**片方が失敗しても他方の結果は使う**
     const evaluation = await goal
       .evaluate(input)
       .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
-    const advice = advicePromise === undefined ? undefined : await advicePromise;
+    const adviceResult = advicePromise === undefined ? undefined : await advicePromise;
 
     // 評価を待っている間に止められた・別の実行が始まっていた場合は何もしない
     // （issue #933。`this.plan !== plan`だけでは、同じ計画のオブジェクトを使い回されると
@@ -804,15 +831,23 @@ export class LoopController {
     if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
       return;
     }
-    // Advisorが動いた周は、指摘の有無に関わらず会話へ残す。「見たうえで指摘が無かった」
-    // ことと「そもそも見ていない」ことを、あとから読んで区別できるようにする
-    if (advisor !== undefined && advice !== undefined) {
-      advisor.note?.(advice, iteration);
+    if (adviceResult !== undefined) {
+      this.advisorFailureStreak =
+        adviceResult.status === 'failed' ? this.advisorFailureStreak + 1 : 0;
     }
+    // Advisorを呼んだ周は、指摘の有無にも成否にも関わらず会話へ残す（issue #964）。
+    // 「見たうえで指摘が無かった」「見ていない」「動けなかった」の3つを区別できるようにする
+    if (advisor !== undefined && adviceResult !== undefined) {
+      this.noteAdvisor(advisor, adviceResult, iteration);
+    }
+    // 動けなかった周は指摘が無かった周として扱わない。次ターンの参考にも載せない
+    const advice = adviceResult?.status === 'ok' ? adviceResult.advice : undefined;
     // Advisorの`blocker`はEvaluatorの判定より先に見る。**このまま進めてはいけないと
     // 言われている状態で、達成の判定だけを見て続けない**
     if (advice?.severity === 'blocker') {
-      this.stop('advised');
+      // `blocker`と`achieved`は、優先順位の問題ではなく2つの役の判断の食い違いである
+      // （issue #964）。どちらかを黙って捨てず、食い違ったことごと人へ渡す
+      this.stop(evaluation.verdict === 'achieved' ? 'conflicted' : 'advised');
       return;
     }
     if (evaluation.verdict === 'achieved') {
@@ -841,6 +876,35 @@ export class LoopController {
     // `advice`はこのターンで受け取ったものだけを渡す。Advisorを呼ばない周へ前回の指摘を
     // 持ち越さない（古い指摘を新しいターンの評価として読ませない。issue #933と同じ罠）
     this.finishTurn(plan, buildNextTurnPrompt(evaluation, goal.definition.purpose, advice));
+  }
+
+  /**
+   * Advisorの結果を会話へ差し込む（issue #964）。
+   *
+   * **表示の失敗をここで閉じ込める。** `note`はview層から注入される表示処理であり、
+   * これが投げた例外でこの先の停止判定・次ターンの送信まで到達しなくなると、脇役の不調が
+   * 本編を止めることになる。`LoopAdvisorConfig.note`側にも「例外を投げないこと」と
+   * 書いてあるが、契約に頼らず呼ぶ側でも守る。
+   */
+  private noteAdvisor(
+    advisor: LoopAdvisorConfig,
+    result: LoopAdvisorResult,
+    iteration: number,
+  ): void {
+    const note: LoopAdvisorNote =
+      result.status === 'ok'
+        ? { status: 'ok', advice: result.advice }
+        : {
+            status: 'failed',
+            reason: result.reason,
+            consecutiveFailures: this.advisorFailureStreak,
+          };
+    try {
+      advisor.note?.(note, iteration);
+    } catch {
+      // 表示できなかったことは記録できないが、ループは続ける。ここで握り潰す代わりに
+      // 投げ直すと、Advisorが動いた周だけループが止まるという最悪の壊れ方になる
+    }
   }
 
   /** このターンで新しく得た証拠をledgerへ積む。 */

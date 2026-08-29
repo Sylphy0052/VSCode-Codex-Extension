@@ -49,6 +49,7 @@ export function workflowScript(): string {
     timedOut: '時間切れ',
     // Issue #957。Advisorが blocker を返してループが止まった
     advised: 'Advisorの指摘',
+    conflicted: 'Advisorと評価役の食い違い',
   };
 
   const QUALITY_PHASE_LABEL = {
@@ -690,7 +691,7 @@ export function workflowScript(): string {
     // 撤退の申告（escalated）、時間切れ（timedOut、どちらもIssue #891）も同じ会話のまま
     // 続けられる。いずれもセッションは生きたまま止まっている。
     // 拡張機能側の同じ判定は runState.ts の isResumableFailure にある
-    const resumableKinds = ['maxReached', 'stalled', 'escalated', 'advised', 'timedOut'];
+    const resumableKinds = ['maxReached', 'stalled', 'escalated', 'advised', 'conflicted', 'timedOut'];
     return (
       task.state === 'failed'
       && task.failure

@@ -2,11 +2,16 @@ import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
 import { buildAdvisorPrompt, parseAdvice } from './advisorPrompt';
 import type { GoalEvaluatorInput } from './goalLoop';
 import {
-  runHeadlessPrompt,
+  runHeadlessPromptDetailed,
   type HeadlessProvider,
   type HeadlessProviderSetting,
 } from './headlessCli';
-import { noAdvice, type LoopAdvice, type LoopAdvisorFn } from './loopAdvisor';
+import {
+  advisorFailed,
+  advisorOk,
+  type LoopAdvisorFn,
+  type LoopAdvisorResult,
+} from './loopAdvisor';
 
 /**
  * ループのAdvisor（issue #957）を、CLIのヘッドレス実行として呼ぶ。
@@ -61,26 +66,39 @@ export function redactAdvisorPrompt(
  * Advisorを1回呼ぶ関数を作る。
  *
  * **呼び出しに失敗しても例外を投げない。** CLIが落ちた・タイムアウトした・JSONが読めない
- * のいずれも「指摘なし」（`noAdvice()`）として返す。Advisorの不調でループ全体が壊れたり
+ * のいずれも`failed`として返し、ループは続行させる。Advisorの不調でループ全体が壊れたり
  * 人待ちで止まったりしないようにする。
+ *
+ * ただし失敗を「指摘なし」へは倒さない（issue #964）。**動いたうえで指摘が無かった周と、
+ * 一度も動けなかった周を、呼び出し側が区別できるようにする。**
  */
 export function createLoopAdvisor(deps: LoopAdvisorDeps): LoopAdvisorFn {
-  return async (input: GoalEvaluatorInput): Promise<LoopAdvice> => {
+  return async (input: GoalEvaluatorInput): Promise<LoopAdvisorResult> => {
     const redaction = redactAdvisorPrompt(input);
     const note = describeRedaction(redaction);
     if (note !== undefined) {
       deps.logInfo?.(`Advisorへ送る前に伏せました: ${note}`);
     }
     try {
-      const raw = await runHeadlessPrompt(deps, redaction.text);
-      if (raw === undefined) {
-        deps.logWarn?.('Advisorの呼び出しに失敗しました（指摘なしとして続行します）');
-        return noAdvice();
+      const outcome = await runHeadlessPromptDetailed(deps, redaction.text);
+      if (!outcome.ok) {
+        deps.logWarn?.(
+          `Advisorの呼び出しに失敗しました（${outcome.reason}。今回は評価なしとして続行します）`,
+        );
+        return advisorFailed(outcome.reason);
       }
-      return parseAdvice(raw);
+      const advice = parseAdvice(outcome.text);
+      if (advice === undefined) {
+        // 応答本文はログへ出さない（プロンプトと同じく資格情報が混ざりうる）
+        deps.logWarn?.(
+          'Advisorの応答をJSONとして読めませんでした（今回は評価なしとして続行します）',
+        );
+        return advisorFailed('invalid-response');
+      }
+      return advisorOk(advice);
     } catch (e) {
       deps.logWarn?.(`Advisorの呼び出しで例外が出ました: ${errorMessage(e)}`);
-      return noAdvice();
+      return advisorFailed('process-error');
     }
   };
 }

@@ -8056,7 +8056,7 @@ Advisorの出力は `LoopAdvice`（`severity` / `findings` / `nextFocus` / `evid
 
 #### 失敗したときにどう倒すか
 
-**Advisorの失敗は `blocker` へ倒さない。** CLIが落ちた・タイムアウトした・JSONが読めなかったのいずれも `noAdvice()`（`severity: 'note'`・指摘なし）として扱い、ループは続く。脇役の不調がそのまま本編の停止（＝人待ち）になると、Advisorを有効にしただけでループが回らなくなる。握り潰していることが分からないと困るため、失敗した事実はログへ残す。
+**Advisorの失敗は `blocker` へ倒さない。** CLIが落ちた・タイムアウトした・JSONが読めなかったのいずれもループを止めない。脇役の不調がそのまま本編の停止（＝人待ち）になると、Advisorを有効にしただけでループが回らなくなる。ただし失敗を「指摘なし」としても扱わない（§14.99、Issue #964）。呼び出しは `LoopAdvisorResult`（`ok` / `failed`）を返し、失敗した周は会話にもログにも失敗として残る。
 
 EvaluatorとAdvisorは独立に `catch` してあり、**片方が失敗しても他方の結果は使う**。`Promise.all` で束ねていないのは、Advisorを使わないループのマイクロタスクの回数を変えないためである（束ねると1tick増え、既存の非同期テストが崩れる＝挙動が変わっている）。
 
@@ -8072,11 +8072,11 @@ EvaluatorとAdvisorは独立に `catch` してあり、**片方が失敗して�
 
 Advisorへ送るプロンプトは `redactCredentials`（§14.80）を通す。Codex CLI / Claude CLI はいずれもモデルサービスへ送るクライアントであり、同一マシンで動いていることは資格情報を素通しにしてよい理由にならない。**業務コードそのものは伏せない**——伏せると指摘が成り立たなくなるうえ、隠したい対象はそこではない。ログへ出すのは深刻度・件数・伏せた件数だけで、プロンプトと応答本文は出さない。
 
-会話には、Advisorが動いた周だけ深刻度と指摘の全文を残す（指摘が無かった周も残す。「見たうえで無かった」と「そもそも見ていない」を区別するため）。**送った材料の全文は残さない**——証拠と応答本文の再掲になり、ターンごとに会話が埋まる。
+会話には、Advisorを呼んだ周だけ深刻度と指摘の全文を残す（指摘が無かった周も、動けなかった周も残す。「見たうえで無かった」「そもそも見ていない」「動けなかった」を区別するため。§14.99）。**送った材料の全文は残さない**——証拠と応答本文の再掲になり、ターンごとに会話が埋まる。
 
 #### 実装の置き場
 
-- `src/loop/loopAdvisor.ts`: 型（`LoopAdvice` / `LoopAdvisorConfig`）と `noAdvice` / `shouldAdvise`。`goalLoop.ts` と同じく `vscode` に依存しない
+- `src/loop/loopAdvisor.ts`: 型（`LoopAdvice` / `LoopAdvisorResult` / `LoopAdvisorNote` / `LoopAdvisorConfig`）と `noAdvice` / `shouldAdvise`。`goalLoop.ts` と同じく `vscode` に依存しない
 - `src/loop/advisorPrompt.ts`: `buildAdvisorPrompt` / `parseAdvice`。切り詰めの規則（`normalizeField` / `normalizeList`）と証拠の整形（`formatEvidence`）は `goalPrompt.ts` から共有する
 - `src/loop/loopAdvisorProcess.ts`: CLIのヘッドレス実行。`redactAdvisorPrompt` を送信経路と切り離してexportしてあるのは、伏せていることを単体テストで固定するため
 - `src/loop/headlessCli.ts`: Evaluatorが持っていた起動処理（引数の組み立てとプロセス実行）の共通部。ツールを渡さない・利用者の設定を読ませない・毎回statelessという条件はAdvisorでも同じで、二重に実装しない
@@ -8084,7 +8084,7 @@ Advisorへ送るプロンプトは `redactCredentials`（§14.80）を通す。C
 
 #### 確かめ方
 
-- `test/unit/loopAdvisor.test.ts`: `shouldAdvise` の間隔と誤設定の倒し方、プロンプトがEvaluatorと違う問いを立てること、`parseAdvice` が壊れた応答・未知の深刻度を `blocker` ではなく「指摘なし」へ倒すこと、`buildNextTurnPrompt` の区画分けと `note` の格上げ抑止、資格情報が伏せられ業務コードは伏せられないこと
+- `test/unit/loopAdvisor.test.ts`: `shouldAdvise` の間隔と誤設定の倒し方、プロンプトがEvaluatorと違う問いを立てること、`parseAdvice` が壊れた応答・未知の深刻度を `blocker` へ倒さず「読めなかった」（`undefined`）として返すこと、`buildNextTurnPrompt` の区画分けと `note` の格上げ抑止、資格情報が伏せられ業務コードは伏せられないこと
 - `test/unit/loopController.test.ts`（`LoopController（Advisor、issue #957）`）: `advisor` を渡さないと挙動が変わらないこと、EvaluatorとAdvisorが同じ材料を見て並列に走ること、`blocker` が `advised` で止めること、Evaluator/Advisorの片方が落ちても他方の結果を使うこと、`everyNTurns` の周でないターンで呼ばず持ち越しもしないこと、会話への差し込み
 - `test/unit/webviewScript.test.ts`: `TaskFailureReason` の全 kind が `FAILURE_LABEL` に揃っていること、`canContinueTask` の集合に `advised` が入っていること
 
@@ -8297,6 +8297,47 @@ JSONを`GoalDefinition`へ変換した時点で「外部のIssueに由来する�
 - 実機での確認は、テストの写しではなく`buildCodexHeadlessArgs()`が返した引数そのままで
   `codex`を起動し、カナリア4件・`web__run`・外部アプリ・`apply_patch`が全て失敗すること、
   同じ引数でJSONが返ることを見る
+
+### 14.99 Advisorの失敗・判断の食い違い・表示の例外を分ける（Issue #964）
+
+§14.95 の実装には、外部レビューで挙がった3つの穴が残っていた。いずれも「脇役が本編を壊さない」という原則を守ろうとして、守りすぎた結果である。
+
+#### 動けなかった周と、指摘が無かった周を分ける
+
+`createLoopAdvisor` は失敗もJSONの読み取り失敗も `noAdvice()`（`severity: 'note'`・空の `findings`）へ倒しており、表示側は `findings` が空なら「指摘はありませんでした」と出していた。利用者からは、**Advisorが見たうえで問題なしと言った周と、Advisorが一度も動けなかった周が同じに見える**。§14.95 が「両者を区別するために指摘が無い周も会話へ残す」と書いた意図の逆になっていた。
+
+結果を型で分ける。
+
+```ts
+type LoopAdvisorResult =
+  | { status: 'ok'; advice: LoopAdvice }
+  | { status: 'failed'; reason: 'timeout' | 'invalid-response' | 'process-error' };
+```
+
+`parseAdvice` も「読めなかった」を `noAdvice()` ではなく `undefined` で返すようにした。読めなかったことを呼び出し側が `invalid-response` として扱えなければ、失敗はどこかで必ず「指摘なし」に化ける。理由を3値に分けたのは、人が次に取る手が違うためである（時間切れならタイムアウト設定、読み取り失敗ならモデルやプロンプト、起動失敗なら実行ファイルや環境）。`runHeadlessPrompt` は失敗を `undefined` に潰す既存の形を残しつつ、理由まで返す `runHeadlessPromptDetailed` を足してAdvisorだけが使う。
+
+**単発の失敗でループは止めない**という方針は変えない。代わりに、失敗した周は会話へ「評価できませんでした」と残し、`LoopController` が連続失敗の回数を数えて `LoopAdvisorNote` に載せる。2回続いた時点から表示を変え、Advisorが実質無効のまま回っていることを利用者へ伝える。回数を数えるのを `LoopController` に置いたのは、Advisorの呼び出しが毎回statelessで、失敗が続いていることを本人が知らないためである。
+
+#### `blocker` と `achieved` の食い違いを、優先順位の問題として畳まない
+
+`runGoalTurn` はAdvisorの `blocker` をEvaluatorの判定より先に見て `advised` で止めていた。`blocker` + `continue` / `indeterminate` はこの順序でよい（このまま進めてはいけないと言われている状態で、達成の判定だけを見て続けない）。
+
+一方 `blocker` + `achieved` は、**2つの役の判断が食い違った**場面である。どちらを採るかは機械が決めてよい種類のことではないのに、現状はEvaluatorが達成と判断した事実が制御上消え、人からは単に `advised` に見えていた。
+
+`LoopStopReason` に `conflicted` を、`TaskFailureReason` に `{ kind: 'conflicted' }` を足し、食い違いだけを別の値にした。扱いは `advised` と同格で、自動再試行に乗せず（`applyLoopStopReason`）、セッションも残す（`isResumableFailure`、`canContinueTask`、`runner.ts` の `onTaskFinished`）。人が指摘を読んだうえで、達成として畳むか作業を続けるかを選び、「続ける」で再開できる。
+
+#### 表示の例外を制御フローから隔離する
+
+`advisor.note?.(...)` はview層から注入される表示処理で、`runGoalTurn` はこれを無防備に呼んでいた。表示が例外を投げただけで、その先の `blocker` 判定・`achieved` 判定・`finishTurn` まで到達しなくなる。**Advisorが動いた周だけループが止まる**という、最も分かりにくい壊れ方になる。
+
+呼び出しを `LoopController.noteAdvisor` に切り出して `try` で囲み、`LoopAdvisorConfig.note` 側にも「例外を投げないこと」と契約を書いた。契約だけでも呼ぶ側だけでも足りない——注入する実装は将来増えるため契約を書き、契約は破られうるため呼ぶ側でも守る。
+
+#### 確かめ方
+
+- `test/unit/loopAdvisor.test.ts`: `parseAdvice` が壊れた応答・未知の深刻度を `undefined` で返すこと
+- `test/unit/loopController.test.ts`: 動けなかった周が `failed` として会話へ残ること、例外も `failed` になること、連続失敗の回数を数えて動いた周で0に戻すこと、動けなかった周の内容を次のターンの参考へ載せないこと、`blocker` + `achieved` が `conflicted` で止まり `blocker` + `indeterminate` は `advised` のままであること、`note` が例外を投げても停止判定と次ターンの送信が行われること
+- `test/unit/loopAdvisorDisplay.test.ts`: 動けなかった周が「指摘はありませんでした」とは違う文面になること、理由ごとに書き分けること、連続失敗が閾値に達してから警告の書き方になること
+- `test/unit/webviewScript.test.ts`: `conflicted` が `FAILURE_LABEL` と `canContinueTask` の集合に入っていること
 
 ### 16.44 チームモード（Issue #693）
 

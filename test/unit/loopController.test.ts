@@ -25,7 +25,13 @@ import type {
   GoalVerdict,
 } from '../../src/loop/goalLoop';
 import { indeterminate } from '../../src/loop/goalPrompt';
-import { noAdvice, type LoopAdvice, type LoopAdvisorConfig } from '../../src/loop/loopAdvisor';
+import {
+  advisorFailed,
+  advisorOk,
+  noAdvice,
+  type LoopAdvice,
+  type LoopAdvisorConfig,
+} from '../../src/loop/loopAdvisor';
 
 const state = (overrides: Partial<ChatState> = {}): ChatState => ({
   ...initialChatState,
@@ -1733,10 +1739,13 @@ describe('LoopController（Advisor、issue #957）', () => {
     ...overrides,
   });
 
+  /** Advisorが動いて指摘を返した結果（issue #964）。 */
+  const advised = (overrides: Partial<LoopAdvice> = {}) => advisorOk(advice(overrides));
+
   it('advisor を渡さないゴール駆動ループの挙動は変わらない', async () => {
     const sent: string[] = [];
     const loop = new LoopController((t) => void sent.push(t));
-    const withAdvisor = plan({ advise: async () => advice() });
+    const withAdvisor = plan({ advise: async () => advised() });
     const withoutAdvisor: LoopPlan = { ...withAdvisor };
     delete withoutAdvisor.advisor;
     loop.start(withoutAdvisor);
@@ -1759,7 +1768,7 @@ describe('LoopController（Advisor、issue #957）', () => {
         {
           advise: async (i) => {
             advisorInput = i;
-            return advice();
+            return advised();
           },
         },
         async (i) => {
@@ -1784,7 +1793,7 @@ describe('LoopController（Advisor、issue #957）', () => {
         {
           advise: async () => {
             started.push('advisor');
-            return advice();
+            return advised();
           },
         },
         async () => {
@@ -1804,7 +1813,7 @@ describe('LoopController（Advisor、issue #957）', () => {
 
   it('blocker でループを advised として止める（escalated とは別の理由）', async () => {
     const loop = new LoopController(() => undefined);
-    loop.start(plan({ advise: async () => advice({ severity: 'blocker', findings: ['危険'] }) }));
+    loop.start(plan({ advise: async () => advised({ severity: 'blocker', findings: ['危険'] }) }));
     await finishAdvisedTurn(loop);
     expect(loop.running).toBe(false);
     expect(loop.getStatus().stopReason).toBe('advised');
@@ -1816,7 +1825,7 @@ describe('LoopController（Advisor、issue #957）', () => {
     loop.start(
       plan({
         advise: async () =>
-          advice({
+          advised({
             severity: 'concern',
             findings: ['例外を握り潰している'],
             nextFocus: '直す',
@@ -1839,7 +1848,7 @@ describe('LoopController（Advisor、issue #957）', () => {
     loop.start(
       plan({
         advise: async () =>
-          advice({
+          advised({
             severity: 'note',
             findings: ['命名が惜しい'],
             nextFocus: '名前を直す',
@@ -1873,7 +1882,7 @@ describe('LoopController（Advisor、issue #957）', () => {
     loop.start(
       plan(
         {
-          advise: async () => advice({ severity: 'concern', findings: ['証拠が足りない'] }),
+          advise: async () => advised({ severity: 'concern', findings: ['証拠が足りない'] }),
         },
         async () => {
           throw new Error('Evaluatorが落ちた');
@@ -1909,7 +1918,7 @@ describe('LoopController（Advisor、issue #957）', () => {
         everyNTurns: 2,
         advise: async (i) => {
           calls.push(i.iteration);
-          return advice({ severity: 'concern', findings: ['1周目の指摘'] });
+          return advised({ severity: 'concern', findings: ['1周目の指摘'] });
         },
       }),
     );
@@ -1924,16 +1933,21 @@ describe('LoopController（Advisor、issue #957）', () => {
   });
 
   it('Advisorが動いた周は、指摘が無くても会話へ残す', async () => {
-    const notes: Array<{ severity: string; iteration: number }> = [];
+    const notes: Array<{ status: string; severity: string; iteration: number }> = [];
     const loop = new LoopController(() => undefined);
     loop.start(
       plan({
-        advise: async () => advice(),
-        note: (a, iteration) => notes.push({ severity: a.severity, iteration }),
+        advise: async () => advised(),
+        note: (n, iteration) =>
+          notes.push({
+            status: n.status,
+            severity: n.status === 'ok' ? n.advice.severity : '',
+            iteration,
+          }),
       }),
     );
     await finishAdvisedTurn(loop);
-    expect(notes).toEqual([{ severity: 'note', iteration: 1 }]);
+    expect(notes).toEqual([{ status: 'ok', severity: 'note', iteration: 1 }]);
   });
 
   it('Advisorを呼ばない周は会話へ残さない', async () => {
@@ -1942,11 +1956,132 @@ describe('LoopController（Advisor、issue #957）', () => {
     loop.start(
       plan({
         everyNTurns: 2,
-        advise: async () => advice(),
-        note: (_a, iteration) => notes.push(iteration),
+        advise: async () => advised(),
+        note: (_n, iteration) => notes.push(iteration),
       }),
     );
     await finishAdvisedTurn(loop);
     expect(notes).toEqual([]);
+  });
+  it('Advisorが動けなかった周は、指摘なしと区別できる形で会話へ残す（issue #964）', async () => {
+    const notes: Array<{ status: string; reason?: string; failures?: number }> = [];
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async () => advisorFailed('timeout'),
+        note: (n) =>
+          notes.push(
+            n.status === 'failed'
+              ? { status: n.status, reason: n.reason, failures: n.consecutiveFailures }
+              : { status: n.status },
+          ),
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    expect(notes).toEqual([{ status: 'failed', reason: 'timeout', failures: 1 }]);
+  });
+
+  it('Advisorが例外を投げた周も failed として残す（指摘なしへ倒さない）', async () => {
+    const statuses: string[] = [];
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async () => {
+          throw new Error('CLIが落ちた');
+        },
+        note: (n) => statuses.push(n.status),
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    expect(statuses).toEqual(['failed']);
+  });
+
+  it('連続で動けなかった回数を数え、動いた周で0に戻す', async () => {
+    const failures: number[] = [];
+    let ok = false;
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async () => (ok ? advised() : advisorFailed('process-error')),
+        note: (n) => {
+          if (n.status === 'failed') {
+            failures.push(n.consecutiveFailures);
+          }
+        },
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    await finishAdvisedTurn(loop);
+    ok = true;
+    await finishAdvisedTurn(loop);
+    ok = false;
+    await finishAdvisedTurn(loop);
+    expect(failures).toEqual([1, 2, 1]);
+  });
+
+  it('動けなかった周の内容は次のターンの参考に載せない', async () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(plan({ advise: async () => advisorFailed('invalid-response') }));
+    await finishAdvisedTurn(loop);
+    expect(loop.running).toBe(true);
+    expect(sent[1]).not.toContain('Advisor');
+  });
+
+  it('blocker と achieved が食い違ったら conflicted で止める（advised とは別）', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan(
+        { advise: async () => advised({ severity: 'blocker', findings: ['方向が違う'] }) },
+        async () => evaluation({ verdict: 'achieved' }),
+      ),
+    );
+    await finishAdvisedTurn(loop);
+    expect(loop.running).toBe(false);
+    expect(loop.getStatus().stopReason).toBe('conflicted');
+  });
+
+  it('blocker と indeterminate は従来どおり advised で止める', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan(
+        { advise: async () => advised({ severity: 'blocker', findings: ['方向が違う'] }) },
+        async () => evaluation({ verdict: 'indeterminate' }),
+      ),
+    );
+    await finishAdvisedTurn(loop);
+    expect(loop.getStatus().stopReason).toBe('advised');
+  });
+
+  it('note が例外を投げても、その周の停止判定と次ターンの送信は行われる', async () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(
+      plan({
+        advise: async () => advised({ severity: 'concern', findings: ['例外を握り潰している'] }),
+        note: () => {
+          throw new Error('表示に失敗した');
+        },
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    expect(loop.running).toBe(true);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain('例外を握り潰している');
+  });
+
+  it('note が例外を投げても blocker の停止は行われる', async () => {
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async () => advised({ severity: 'blocker', findings: ['危険'] }),
+        note: () => {
+          throw new Error('表示に失敗した');
+        },
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    expect(loop.running).toBe(false);
+    expect(loop.getStatus().stopReason).toBe('advised');
   });
 });

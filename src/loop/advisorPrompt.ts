@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { formatUntrusted } from '../orchestrator/untrustedText';
 import type { GoalEvaluatorInput } from './goalLoop';
 import { formatEvidence, normalizeField, normalizeList } from './goalPrompt';
-import { noAdvice, type AdviceSeverity, type LoopAdvice } from './loopAdvisor';
+import type { AdviceSeverity, LoopAdvice } from './loopAdvisor';
 import { formatTurnFocusChoices, normalizeTurnFocus } from './turnFocus';
 
 /**
@@ -104,20 +104,23 @@ export function buildAdvisorPrompt(
 }
 
 /**
- * Advisorの応答を読む。**読めなかったものはすべて「指摘なし」に倒す。**
+ * Advisorの応答を読む。**読めなかったときは`undefined`を返す。**
  *
  * 不正なJSON・未知の`severity`・空の応答でループを壊さない。**壊れた応答を`blocker`へ
  * 倒さない**のは、Advisorの不調がそのまま本編の停止になるのを避けるためである
  * （`noAdvice`のコメント参照）。
+ *
+ * 一方で「指摘なし」（`noAdvice()`）へも倒さない（issue #964）。読めなかったことを呼び出し
+ * 側が`invalid-response`として扱えるようにし、Advisorが黙って無効になるのを防ぐ。
  */
-export function parseAdvice(raw: string): LoopAdvice {
+export function parseAdvice(raw: string): LoopAdvice | undefined {
   const parsed = tryParseJson(raw);
   if (parsed === undefined) {
-    return noAdvice();
+    return undefined;
   }
   const severity = normalizeSeverity(parsed['severity']);
   if (severity === undefined) {
-    return noAdvice();
+    return undefined;
   }
   return {
     severity,
