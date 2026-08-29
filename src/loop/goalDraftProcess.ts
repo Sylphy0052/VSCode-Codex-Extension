@@ -40,8 +40,22 @@ export interface GoalDraftDeps {
   logInfo?: (message: string) => void;
 }
 
+/**
+ * 下書きの出所（issue #962）。
+ *
+ * `buildGoalDraftPrompt`はIssue本文を囲って渡すが、モデルがJSONを返した時点で「外部の
+ * Issueに由来する」という情報は消える。囲いはモデルが従う保証のある仕組みではないので、
+ * **1回AIを通しただけで信頼済みへ昇格させない**ために出所を持ち回る。
+ *
+ * - `user-only`: 材料が利用者の書いた一文だけ
+ * - `external-issue`: 外部（GitHubのIssue本文）を材料に含む
+ */
+export type GoalDraftProvenance = 'user-only' | 'external-issue';
+
 /** 準備ターンの結果。失敗の理由を画面へそのまま出せるようにしておく。 */
-export type GoalDraftResult = { ok: true; goal: GoalDefinition } | { ok: false; message: string };
+export type GoalDraftResult =
+  | { ok: true; goal: GoalDefinition; provenance: GoalDraftProvenance }
+  | { ok: false; message: string };
 
 /**
  * 準備ターンのプロンプトを組み立て、資格情報らしき文字列を伏せる。
@@ -87,7 +101,11 @@ export function createGoalDraftPlanner(
           message: 'ゴールの下書きを読み取れませんでした。目的と受入基準を手で入力してください',
         };
       }
-      return { ok: true, goal };
+      return {
+        ok: true,
+        goal,
+        provenance: issueBody === undefined ? 'user-only' : 'external-issue',
+      };
     } catch (e) {
       deps.logWarn?.(`ゴールの下書きの生成で例外が出ました: ${errorMessage(e)}`);
       return { ok: false, message: 'ゴールの下書きの生成に失敗しました' };

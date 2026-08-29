@@ -64,18 +64,77 @@ export function buildClaudeHeadlessArgs(model: string): string[] {
 }
 
 /**
+ * Codexが持てる能力のうち、脇役として明示的に禁止するもの（実測: codex-cli 0.148.0）。
+ *
+ * `--sandbox read-only`は**ローカルの書き込みを止めるだけ**で、読み取りもネットワークも
+ * 止めない。実測では、この引数だけの状態でCodexが`/bin/bash -c`を起動し、作業ディレクトリ
+ * の外の絶対パス・ホーム配下のファイル・環境変数のすべてを読めた。さらにシェルを止めても
+ * `web__run`で外部サイトを取得でき、`mcp__codex_apps__*`（利用者のアカウントに繋がった
+ * GitHub・Google Drive等）が生きていて、読み取りだけでなくファイル作成やPRのマージのような
+ * 副作用を持つツールまで露出していた。これらはローカルのサンドボックスの管轄外であるため、
+ * サンドボックスを固くしても防げない。
+ *
+ * 脇役に必要な能力はJSONを1つ書くことだけなので、能力は列挙して落とす。
+ * 詳細な実測結果はissue #962に記録した。
+ *
+ * **守る不変条件**: Codexのヘッドレス実行は、ローカルのファイル読取・環境変数・外部
+ * ネットワーク・連携アプリ（apps / plugins）のいずれにも到達できず、モデルへのプロンプトと
+ * JSONの応答だけを行う。**Codex CLIを更新したときは、この文が成り立つかを実測で確かめる**
+ * ——allowlistの機構が無い以上、新しい能力が既定で有効なまま追加されれば黙って露出が戻る。
+ */
+export const CODEX_DENIED_FEATURES = [
+  // シェル経由の任意コマンド実行。これが最も広い読み取り経路。
+  'shell_tool',
+  'unified_exec',
+  // 利用者のアカウントに繋がった外部アプリ。ローカルsandboxの外側で副作用を起こせる。
+  'apps',
+  'plugins',
+  // ブラウザ操作。外部への到達と持ち出しの経路になる。
+  'browser_use',
+  'browser_use_external',
+  'browser_use_full_cdp_access',
+  'in_app_browser',
+  'computer_use',
+  // 判定には要らない生成・分岐系。露出を減らす目的で落とす。
+  'image_generation',
+  'multi_agent',
+  'view_image',
+  // 上記を落としても、code modeが残っているとツール呼び出しの受け皿として機能する。
+  'code_mode_host',
+] as const;
+
+/**
+ * フラグでは落とせない能力を設定値で塞ぐ。
+ *
+ * - `tools.web_search=false`: 検索経由の外部到達を止める。
+ * - `shell_environment_policy.inherit=none`: シェルを無効化していても残す。将来別のツールが
+ *   環境変数を参照する経路への備えであり、冗長ではない。
+ */
+export const CODEX_CONFIG_OVERRIDES = [
+  'tools.web_search=false',
+  'shell_environment_policy.inherit=none',
+] as const;
+
+/**
  * Codex CLIの起動引数（実測: codex-cli 0.148.0）。
  *
- * - `--sandbox read-only`: Codexには`--tools ""`に相当するフラグが無いため、書き込みと
- *   ネットワークを伴う操作をサンドボックスで塞ぐことで代える。
+ * - `--sandbox read-only`: ローカルへの書き込みを塞ぐ。**読み取りは止まらない**ため、
+ *   これ単体を隔離の根拠にしない（`CODEX_DENIED_FEATURES`を参照）。
  * - `--ephemeral`: セッションファイルを残さない。毎回statelessという方針と一致する。
  * - `--ignore-user-config`: Claudeの`--setting-sources ""`に相当する汚染対策。
  * - `--skip-git-repo-check`: リポジトリの外でも走らせられるようにする。
+ * - `--disable <feature>`: 脇役に不要な能力を明示的に落とす。
  * - `-o <file>`: 最終メッセージだけをファイルへ書かせる。標準出力には進捗も混ざるため、
  *   本文の取り出しをファイル経由にする。
+ *
+ * 禁止の列挙はCLIの更新に弱い。allowlistの機構が無い以上、**Codex CLIを上げたときは
+ * 露出するツール一覧を測り直し、許可していない新しい能力が増えていないか確認する**
+ * 必要がある（issue #962の受入基準）。
  */
 export function buildCodexHeadlessArgs(model: string, outputFile: string): string[] {
   const modelArgs = model === 'auto' || model === '' ? [] : ['-m', model];
+  const denyArgs = CODEX_DENIED_FEATURES.flatMap((feature) => ['--disable', feature]);
+  const configArgs = CODEX_CONFIG_OVERRIDES.flatMap((override) => ['-c', override]);
   return [
     'exec',
     '--sandbox',
@@ -83,6 +142,8 @@ export function buildCodexHeadlessArgs(model: string, outputFile: string): strin
     '--ephemeral',
     '--ignore-user-config',
     '--skip-git-repo-check',
+    ...denyArgs,
+    ...configArgs,
     ...modelArgs,
     '-o',
     outputFile,
@@ -146,11 +207,14 @@ async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<string |
   const dir = await mkdtemp(join(tmpdir(), 'loop-headless-'));
   const outputFile = join(dir, `${randomUUID()}.txt`);
   try {
+    // 空の一時ディレクトリで動かす。ツールは落としてあるが、作業ディレクトリを
+    // 渡す理由が無い以上、渡さない側へ倒す（issue #962）
     const result = await runProcess(
       deps.executable,
       buildCodexHeadlessArgs(deps.model, outputFile),
       prompt,
       deps.timeoutMs,
+      dir,
     );
     if (result === undefined) {
       deps.logWarn?.('codexのヘッドレス実行が応答しませんでした');
@@ -170,15 +234,21 @@ async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<string |
  * 標準入力で渡す。引数に載せるとプロセス一覧から他の利用者に読めてしまう。
  *
  * 応答が無いまま居座らせない。時間切れ・起動失敗・異常終了はいずれも`undefined`。
+ *
+ * `cwd`を渡すと、その場所で起動する。省略すると拡張機能ホストの作業ディレクトリを継ぐ。
  */
 function runProcess(
   executable: string,
   args: string[],
   stdin: string,
   timeoutMs: number,
+  cwd?: string,
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
-    const proc = spawn(executable, args, { stdio: ['pipe', 'pipe', 'ignore'] });
+    const proc = spawn(executable, args, {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      ...(cwd === undefined ? {} : { cwd }),
+    });
     let stdout = '';
     let settled = false;
 

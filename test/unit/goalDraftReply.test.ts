@@ -24,25 +24,44 @@ describe('buildGoalDraftReply（issue #961）', () => {
   it('下書きができたら3欄の値を返す', async () => {
     const reply = await buildGoalDraftReply(1, 'Issue #1に着手', {
       readSettings: () => settings(),
-      plan: async () => ({ ok: true, goal }),
+      plan: async () => ({ ok: true, goal, provenance: 'user-only' }),
       logWarn: () => undefined,
     });
-    expect(reply).toEqual({ type: 'loop/goalDraft', id: 1, ok: true, goal, start: false });
+    expect(reply).toEqual({
+      type: 'loop/goalDraft',
+      id: 1,
+      ok: true,
+      goal,
+      provenance: 'user-only',
+      start: false,
+    });
   });
 
   it('confirm が false のときだけ start を立てる', async () => {
     const reply = await buildGoalDraftReply(1, '着手', {
       readSettings: () => settings({ confirm: false }),
-      plan: async () => ({ ok: true, goal }),
+      plan: async () => ({ ok: true, goal, provenance: 'user-only' }),
       logWarn: () => undefined,
     });
     expect(reply['start']).toBe(true);
   });
 
+  it('外部Issueを材料にした下書きは confirm が false でも自動開始しない', async () => {
+    const reply = await buildGoalDraftReply(1, 'Issue #1に着手', {
+      readSettings: () => settings({ confirm: false }),
+      plan: async () => ({ ok: true, goal, provenance: 'external-issue' }),
+      logWarn: () => undefined,
+    });
+    // 下書き自体は返すが、人が確認するまで開始しない
+    expect(reply['ok']).toBe(true);
+    expect(reply['start']).toBe(false);
+    expect(reply['provenance']).toBe('external-issue');
+  });
+
   it('要求の通し番号をそのまま返す（古い応答を画面側で捨てられるように）', async () => {
     const reply = await buildGoalDraftReply(42, '着手', {
       readSettings: () => settings(),
-      plan: async () => ({ ok: true, goal }),
+      plan: async () => ({ ok: true, goal, provenance: 'user-only' }),
       logWarn: () => undefined,
     });
     expect(reply['id']).toBe(42);
@@ -51,7 +70,7 @@ describe('buildGoalDraftReply（issue #961）', () => {
   it('通し番号が数値でなければ載せない', async () => {
     const reply = await buildGoalDraftReply('abc', '着手', {
       readSettings: () => settings(),
-      plan: async () => ({ ok: true, goal }),
+      plan: async () => ({ ok: true, goal, provenance: 'user-only' }),
       logWarn: () => undefined,
     });
     expect(reply['id']).toBeUndefined();
@@ -63,7 +82,7 @@ describe('buildGoalDraftReply（issue #961）', () => {
       readSettings: () => settings({ enabled: false }),
       plan: async () => {
         called = true;
-        return { ok: true, goal };
+        return { ok: true, goal, provenance: 'user-only' };
       },
       logWarn: () => undefined,
     });
@@ -74,7 +93,7 @@ describe('buildGoalDraftReply（issue #961）', () => {
   it('依頼文が空白だけなら生成を呼ばずに失敗を返す', async () => {
     const reply = await buildGoalDraftReply(1, '  \n ', {
       readSettings: () => settings(),
-      plan: async () => ({ ok: true, goal }),
+      plan: async () => ({ ok: true, goal, provenance: 'user-only' }),
       logWarn: () => undefined,
     });
     expect(reply['ok']).toBe(false);
@@ -107,7 +126,7 @@ describe('buildGoalDraftReply（issue #961）', () => {
       readSettings: () => {
         throw new Error('設定が読めない');
       },
-      plan: async () => ({ ok: true, goal }),
+      plan: async () => ({ ok: true, goal, provenance: 'user-only' }),
       logWarn: () => undefined,
     });
     expect(reply).toMatchObject({ ok: false });

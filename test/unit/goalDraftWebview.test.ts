@@ -211,6 +211,14 @@ describe('applyGoalDraft（issue #958、#961）', () => {
     expect(h.clicks).toBe(1);
   });
 
+  it('外部Issueが材料だと、確認を促す文言を出す（issue #962）', () => {
+    const h = harness({ loopInitial: 'Issue #1に着手' });
+    h.requestGoalDraft('Issue #1に着手');
+    h.applyGoalDraft({ ...draft, provenance: 'external-issue' });
+    expect(h.notice()).toContain('Issue本文を材料にした');
+    expect(h.clicks).toBe(0);
+  });
+
   it('待っている間にゴールを書かれていたら反映しない', () => {
     const h = harness({ loopInitial: '着手' });
     h.requestGoalDraft('着手');

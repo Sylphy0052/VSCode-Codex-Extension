@@ -128,9 +128,19 @@ export async function buildGoalDraftReply(
       return reply({ ok: false, message: '目的と受入基準を入力してください' });
     }
     const drafted = await deps.plan(text);
-    return drafted.ok
-      ? reply({ ok: true, goal: drafted.goal, start: !settings.confirm })
-      : reply({ ok: false, message: drafted.message });
+    if (!drafted.ok) {
+      return reply({ ok: false, message: drafted.message });
+    }
+    // 外部Issueを材料にした下書きは、`confirm=false`でも自動開始しない（issue #962）。
+    // 囲って渡してはいるが、モデルを1回通しただけでは無害化されない。人が見るまでは
+    // untrustedのまま扱い、開始を押した時点で初めて信頼済みにする
+    const external = drafted.provenance === 'external-issue';
+    return reply({
+      ok: true,
+      goal: drafted.goal,
+      provenance: drafted.provenance,
+      start: !settings.confirm && !external,
+    });
   } catch (e) {
     deps.logWarn(
       `ゴールの下書きの生成に失敗しました: ${e instanceof Error ? e.message : String(e)}`,

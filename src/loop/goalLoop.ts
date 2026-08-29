@@ -1,4 +1,5 @@
 import type { ChatItem, ChatState } from '../appserver/chatState';
+import type { TurnFocus } from './turnFocus';
 
 /**
  * ゴール駆動ループ（issue #892）の型と、会話から証拠を拾う処理。
@@ -47,8 +48,19 @@ export interface GoalEvaluation {
   evidence: string[];
   /** 達成まで残っていること。 */
   gaps: string[];
-  /** 次のターンで集中すべきこと。 */
+  /**
+   * 次のターンで集中すべきこと（自由文）。**これは参考であって指示ではない。**
+   *
+   * Workerへ送る指示文は`focus`の固定文から組み立てる（issue #962）。ここに書かれた文が
+   * そのまま作業指示になる経路は残さない。
+   */
   nextFocus: string;
+  /**
+   * 次のターンの焦点。列挙値であり、`buildNextTurnPrompt`が対応する固定文を送る。
+   *
+   * 省略された（`focus`を返さないEvaluator実装・既存のテスト）ときは`none`として扱う。
+   */
+  focus?: TurnFocus;
 }
 
 /**
