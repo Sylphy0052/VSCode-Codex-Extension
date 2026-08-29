@@ -113,6 +113,7 @@ import {
   approveSecondOpinionHandoff,
   continueSecondOpinion,
   draftSecondOpinionHandoff,
+  updateSecondOpinionMaterial,
   endSecondOpinionConsult,
   startSecondOpinion,
   stopSecondOpinion,
@@ -1229,6 +1230,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         );
         return;
       }
+      if (type === 'secondOpinionUpdateMaterial') {
+        // 相談の途中で材料を最新へ更新する（Issue #975）。押したときだけ更新する
+        void updateSecondOpinionMaterial(
+          this.secondOpinionPortFor(entry),
+          this.secondOpinionRegistry,
+          this.advisorStore,
+          this.log,
+        );
+        return;
+      }
       if (type === 'secondOpinionDraft') {
         // メインAIへの指示の下書き（Issue #929）。作るだけで、送信はしない
         void draftSecondOpinionHandoff(
@@ -1525,8 +1536,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
       },
       isParentDisposed: () => entry.disposed,
-      setAdvisorItem: (itemId) => {
-        void entry.panel?.webview.postMessage({ type: 'secondOpinionAdvisor', itemId });
+      setAdvisorItem: (itemId, options) => {
+        void entry.panel?.webview.postMessage({
+          type: 'secondOpinionAdvisor',
+          itemId,
+          // 材料を更新できる相談かどうか（Issue #975）。ボタンを出すかの判定に使う
+          canUpdateMaterial: options?.canUpdateMaterial === true,
+        });
       },
       // 承認された指示を送る唯一の口（Issue #929）。`approveSecondOpinionHandoff` が
       // `markApproved()` を通したときにだけ呼ばれる

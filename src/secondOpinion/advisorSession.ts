@@ -22,7 +22,8 @@ import {
 } from '../orchestrator/planner';
 import type { TaskSession } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
-import type { ReviewBundle } from './reviewBundle';
+import { buildMaterialUpdatePrompt } from './prompt';
+import { FIRST_REVIEW_BUNDLE_REVISION, type ReviewBundle } from './reviewBundle';
 
 /**
  * Advisorセッションの状態（Issue #929 受入基準）。
@@ -59,6 +60,37 @@ export type AdvisorTurnResult =
       kind: 'closed' | 'busy' | 'cancelled' | 'failed';
       reason: string;
     };
+
+/**
+ * 材料を最新へ更新した結果（Issue #975）。
+ *
+ * 1ターン分の結果（{@link AdvisorTurnResult}）と分けるのは、失敗の種類が1つ多いためである。
+ * `unsupported` は「この相談では材料を更新できない」——作業ツリーの変更以外を資料に選んだ
+ * 相談には、更新すべき材料そのものが無い。
+ */
+export type AdvisorMaterialUpdateResult =
+  | {
+      ok: true;
+      /** 更新後の世代。1始まりで、更新のたびに1つ増える。 */
+      revision: number;
+      response: string;
+      partialReason?: string | undefined;
+    }
+  | {
+      ok: false;
+      kind: 'closed' | 'busy' | 'cancelled' | 'failed' | 'unsupported';
+      reason: string;
+    };
+
+/**
+ * 新しい世代の材料を書き出す手段（Issue #975）。
+ *
+ * 実装は view 層が持つ（現在の作業ツリーからスナップショットを取り直す処理は `vscode` と
+ * git に依存する）。ここでは「書き出せた場合に、その場所をAdvisorへ伝える」ことだけを行う。
+ *
+ * @returns 書き出した材料の、bundleのルートからの相対パス
+ */
+export type AdvisorMaterialWriter = (bundleDir: string, revision: number) => Promise<string>;
 
 /** 閉じた理由。ログと会話へ残す文言に使う。 */
 export type AdvisorCloseReason =
@@ -108,6 +140,13 @@ export interface AdvisorSessionOptions {
    * **閉じる責任はこのクラスが持つ。** 渡さない呼び出し（テスト・古い経路）では何もしない。
    */
   bundle?: ReviewBundle | undefined;
+  /**
+   * 相談の途中で材料を最新へ更新する手段（Issue #975）。
+   *
+   * 渡さない呼び出しでは更新できない（{@link AdvisorSession.canUpdateMaterial} が `false`）。
+   * 資料に作業ツリーの変更を選ばなかった相談には、更新すべき材料が無い。
+   */
+  writeMaterial?: AdvisorMaterialWriter | undefined;
   /** 無操作で閉じるまでの時間。既定は {@link DEFAULT_ADVISOR_IDLE_TIMEOUT_MS}。 */
   idleTimeoutMs?: number | undefined;
   log?: Logger | undefined;
@@ -142,6 +181,14 @@ export class AdvisorSession {
    * のはAになる。承認のときに世代まで一致させることで、この取り違えを塞ぐ。
    */
   private draftRevision = 0;
+  /**
+   * 材料の世代（Issue #975）。開始時点が1で、更新が**Advisorへ伝わるたび**に1つ増える。
+   *
+   * 書き出せただけでは進めない。通知のターンが失敗した場合、Advisorは古い材料のまま
+   * 話し続けるので、そこを「最新の世代」と数えると、書き戻し時の古さの警告が出なくなる。
+   * 書き出しだけ済んだ世代のディレクトリは、次の更新で同じ番号のまま書き直される。
+   */
+  private materialRevision = FIRST_REVIEW_BUNDLE_REVISION;
 
   constructor(options: AdvisorSessionOptions) {
     this.options = options;
@@ -195,6 +242,75 @@ export class AdvisorSession {
    */
   async draftHandoff(prompt: string, signal?: AbortSignal): Promise<AdvisorTurnResult> {
     return this.runTurn(prompt, signal);
+  }
+
+  /** 現在の材料の世代（Issue #975）。下書きに記録し、書き戻しのときに古さを見る。 */
+  currentMaterialRevision(): number {
+    return this.materialRevision;
+  }
+
+  /** 材料を更新できる相談か（Issue #975）。UIのボタンを出すかどうかの判定に使う。 */
+  canUpdateMaterial(): boolean {
+    return this.options.writeMaterial !== undefined && this.options.bundle !== undefined;
+  }
+
+  /**
+   * 材料を現在の作業ツリーの状態へ更新する（Issue #975）。
+   *
+   * **利用者が明示的に押したときにだけ呼ぶ。** 自動で更新すると、利用者の知らないうちに
+   * Advisorの前提が変わり、同じ問いに同じ答えが返らなくなる。
+   *
+   * 手順は「新しい世代を書き出す → Advisorへ伝える」の順である。書き出しに失敗した時点で
+   * 止め、Advisorには何も送らない。逆順にすると、存在しない材料を正本だと伝えることになる。
+   *
+   * 世代を進めるのは、通知のターンが成立したときだけである（{@link materialRevision}）。
+   */
+  async updateMaterial(signal?: AbortSignal): Promise<AdvisorMaterialUpdateResult> {
+    const write = this.options.writeMaterial;
+    const bundle = this.options.bundle;
+    if (write === undefined || bundle === undefined) {
+      return {
+        ok: false,
+        kind: 'unsupported',
+        reason:
+          'この相談では材料を更新できません（作業ツリーの変更を資料に選んだ相談でのみ使えます）',
+      };
+    }
+    if (this.isClosed()) {
+      return { ok: false, kind: 'closed', reason: 'この相談は既に終了しています' };
+    }
+    if (this.turn !== undefined) {
+      return { ok: false, kind: 'busy', reason: 'この相談では別の問い合わせが実行中です' };
+    }
+    const next = this.materialRevision + 1;
+    let materialPath: string;
+    try {
+      materialPath = await write(bundle.dir, next);
+    } catch (e) {
+      return {
+        ok: false,
+        kind: 'failed',
+        reason: `材料を書き出せませんでした: ${errorMessage(e)}`,
+      };
+    }
+    const result = await this.runTurn(buildMaterialUpdatePrompt(next, materialPath), signal, () => {
+      // 材料が変われば、それ以前の相談から作った下書きは前提が違う。承認できる状態のまま
+      // 残さない（追加の相談（`ask`）が下書きを無効にするのと同じ理由）
+      this.state = 'consulting';
+    });
+    if (!result.ok) {
+      return { ok: false, kind: result.kind, reason: result.reason };
+    }
+    this.materialRevision = next;
+    this.options.log?.info(
+      `${ADVISOR_LOG_PREFIX} レビュー材料を更新しました（第${next}世代 / ${materialPath}）`,
+    );
+    return {
+      ok: true,
+      revision: next,
+      response: result.response,
+      partialReason: result.partialReason,
+    };
   }
 
   /**

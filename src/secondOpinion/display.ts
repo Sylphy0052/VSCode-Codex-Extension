@@ -465,6 +465,73 @@ export function cancelledFollowUpDisplay(
   };
 }
 
+/**
+ * 材料の更新（Issue #975）で会話へ残す注記。
+ *
+ * 更新は利用者が明示的に押したときにだけ起きる。自動で入れ替わったのではないことを毎回
+ * 出しておかないと、後から会話を読み返したときに「いつの材料で話していたのか」が辿れない。
+ */
+const MATERIAL_UPDATE_NOTE = '利用者の操作で材料を更新しました（作業中のAIには送っていません）';
+
+/** 材料の更新を伝えている間の表示。 */
+export function pendingMaterialUpdateDisplay(
+  candidate: SecondOpinionCandidate,
+): SecondOpinionDisplay {
+  return {
+    status: 'inProgress',
+    text: 'セカンドオピニオンのレビュー材料を最新の状態へ更新しています',
+    detail: `実行中… ・ ${MATERIAL_UPDATE_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/**
+ * 材料の更新が済んだときの表示。
+ *
+ * Advisorからの応答も一緒に残す。更新の連絡に対して何を読み直したのか、前の議論と食い違う
+ * 点をどう見たのかが、次の質問を考える材料になる。
+ */
+export function finishedMaterialUpdateDisplay(
+  candidate: SecondOpinionCandidate,
+  revision: number,
+  response: string,
+  partialReason?: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'completed',
+    text:
+      `セカンドオピニオンのレビュー材料を更新しました（第${revision}世代）\n\n` +
+      `**相談相手の応答**\n\n${response}`,
+    detail: [
+      ...(partialReason === undefined ? [] : [`${partialReason}（ここまでの応答を残しています）`]),
+      MATERIAL_UPDATE_NOTE,
+      describeFollowUpRun(candidate),
+    ].join(' ・ '),
+  };
+}
+
+/** 材料の更新が失敗したときの表示。以後も前の世代の材料で相談は続けられる。 */
+export function failedMaterialUpdateDisplay(
+  candidate: SecondOpinionCandidate,
+  reason: string,
+): SecondOpinionDisplay {
+  return {
+    status: 'failed',
+    text: 'セカンドオピニオンのレビュー材料を更新できませんでした（相談は更新前の材料のまま続けられます）',
+    detail: `${reason} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
+/** 材料の更新を利用者が止めたときの表示。 */
+export function cancelledMaterialUpdateDisplay(
+  candidate: SecondOpinionCandidate,
+): SecondOpinionDisplay {
+  return {
+    status: 'cancelled',
+    text: 'セカンドオピニオンのレビュー材料の更新を停止しました（相談は更新前の材料のまま続けられます）',
+    detail: `${CANCELLED_NOTE} ・ ${describeFollowUpRun(candidate)}`,
+  };
+}
+
 /** 下書きがまだ送られていないことの断り書き。 */
 const HANDOFF_PENDING_NOTE = 'まだ作業中のAIへは送っていません（承認するまで送りません）';
 

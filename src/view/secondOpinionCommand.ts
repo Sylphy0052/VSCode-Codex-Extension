@@ -34,6 +34,7 @@ import {
   AdvisorSession,
   AdvisorSessionStore,
   type AdvisorCloseReason,
+  type AdvisorMaterialWriter,
 } from '../secondOpinion/advisorSession';
 import { parseHandoffDraft, type HandoffDraft } from '../secondOpinion/handoff';
 import {
@@ -46,21 +47,25 @@ import {
   cancelledPartialAskGptDisplay,
   cancelledFollowUpDisplay,
   cancelledHandoffDisplay,
+  cancelledMaterialUpdateDisplay,
   cancelledPartialSecondOpinionDisplay,
   cancelledSecondOpinionDisplay,
   failedAskGptDisplay,
   draftedHandoffDisplay,
   failedFollowUpDisplay,
   failedHandoffDisplay,
+  failedMaterialUpdateDisplay,
   failedSecondOpinionDisplay,
   finishedAskGptDisplay,
   finishedFollowUpDisplay,
+  finishedMaterialUpdateDisplay,
   finishedSecondOpinionDisplay,
   partialAskGptDisplay,
   partialSecondOpinionDisplay,
   pendingAskGptDisplay,
   pendingFollowUpDisplay,
   pendingHandoffDisplay,
+  pendingMaterialUpdateDisplay,
   pendingSecondOpinionDisplay,
   queuedSecondOpinionDisplay,
   type SecondOpinionDisplay,
@@ -81,6 +86,7 @@ import {
   type SecondOpinionResult,
 } from '../secondOpinion/run';
 import {
+  appendReviewBundleRevision,
   createEmptyReviewBundle,
   createReviewBundle,
   defaultReviewBundleRoot,
@@ -141,8 +147,12 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
    * 会話のどの項目に「追加で相談」「メインAIへの指示を作る」を出すかを、拡張機能側から
    * webviewへ知らせるための口。`itemId` が `undefined` のときは、どの項目にもボタンを
    * 出さない（相談が終わった・保持しない設定）。
+   *
+   * `options.canUpdateMaterial` は「材料を最新にする」を出してよいか（Issue #975）。
+   * 資料に作業ツリーの変更を選ばなかった相談では更新できないため、押せば断られるだけの
+   * ボタンを出さない。
    */
-  setAdvisorItem?(itemId: string | undefined): void;
+  setAdvisorItem?(itemId: string | undefined, options?: { canUpdateMaterial: boolean }): void;
   /**
    * 下書きが1件できたことを画面へ伝える（Issue #929 Handoff）。
    *
@@ -587,6 +597,9 @@ export async function startSecondOpinion(
       id,
       log,
       bundle,
+      // 相談の途中で材料を最新へ更新する手段（Issue #975）。作業ツリーの変更を資料に
+      // 選んだときだけ渡す（それ以外の資料には、更新すべき材料が無い）
+      materialWriterFor(cwd, git, captured, log),
     );
   } finally {
     registry.end(port.parentSessionId, id);
@@ -633,6 +646,7 @@ function handOverAdvisorSession(
   itemId: string,
   log: Logger,
   bundle: ReviewBundle | undefined,
+  writeMaterial: AdvisorMaterialWriter | undefined,
 ): boolean {
   if (!result.ok || result.session === undefined) {
     return false;
@@ -655,6 +669,8 @@ function handOverAdvisorSession(
     idleTimeoutMs: config.advisor.idleTimeoutMs,
     // 相談が続く間は材料も残す。追加の質問で `base/` を読み直しうる（Issue #926 E）
     bundle,
+    // 相談の途中で材料を最新へ更新する手段（Issue #975）
+    writeMaterial,
     log,
     onClosed: (closed) => {
       store.remove(closed);
@@ -666,8 +682,49 @@ function handOverAdvisorSession(
   });
   // 登録してからボタンを出す。逆にすると、押せる見た目なのに置き場に無い区間ができる
   store.set(advisor);
-  port.setAdvisorItem?.(itemId);
+  port.setAdvisorItem?.(itemId, { canUpdateMaterial: advisor.canUpdateMaterial() });
   return true;
+}
+
+/**
+ * 相談の途中で材料を最新へ更新する手段を作る（Issue #975）。
+ *
+ * 更新のたびに**現在の作業ツリーからスナップショットを取り直す**。1ターン目と同じ
+ * `captureWorkspaceSnapshot` を使うので、`baseCommit` と差分の組み合わせが食い違わない
+ * ことも同じ理屈で守られる（Issue #926 A）。
+ *
+ * 資料が作業ツリーの変更でない相談には `undefined` を返す。渡す材料が本文の中で完結して
+ * おり、作業ディレクトリに更新すべきものが無い。
+ *
+ * 失敗は投げて呼び出し側（`AdvisorSession.updateMaterial`）へ伝える。半端に成功した
+ * 世代をAdvisorへ知らせないため、ここで握り潰さない。
+ */
+function materialWriterFor(
+  cwd: string,
+  git: GitCommandRunner,
+  captured: CapturedArtifact,
+  log: Logger,
+): AdvisorMaterialWriter | undefined {
+  if (captured.artifact.kind !== 'workspaceChanges' || captured.material === undefined) {
+    return undefined;
+  }
+  return async (bundleDir, revision) => {
+    const next = await captureWorkspaceSnapshot(cwd, git);
+    if (!next.ok) {
+      throw new Error(next.reason);
+    }
+    if (next.material === undefined) {
+      throw new Error('現在の作業ツリーから材料を取得できませんでした');
+    }
+    return appendReviewBundleRevision(bundleDir, revision, {
+      cwd,
+      git,
+      baseCommit: next.snapshot.baseCommit,
+      fullDiff: next.material.fullDiff,
+      changedPaths: next.material.changedPaths,
+      log,
+    });
+  };
 }
 
 /**
@@ -1033,6 +1090,79 @@ export async function continueSecondOpinion(
 }
 
 /**
+ * 相談の途中で、Advisorの見る材料を最新へ更新する（Issue #975）。
+ *
+ * **利用者が押したときにだけ動く。** 自動更新にしないのは、押していないのにAdvisorの前提が
+ * 入れ替わると、同じ問いに同じ答えが返らなくなるためである。何を根拠に答えたのかを利用者が
+ * 辿れる状態を保つ。
+ *
+ * 更新は1ターン使う。書き出した材料の場所をAdvisorへ伝え、そこを正本として扱わせるまでが
+ * この操作であり、伝わっていない材料を置いただけでは「更新した」とは言えない。
+ *
+ * 失敗しても相談は続く。前の世代の材料はそのまま残っており、次の質問はそれを根拠に答えられる。
+ */
+export async function updateSecondOpinionMaterial(
+  port: SecondOpinionPanelPort,
+  registry: SecondOpinionRegistry,
+  store: AdvisorSessionStore,
+  log: Logger,
+): Promise<void> {
+  const advisor = store.get(port.parentSessionId);
+  if (advisor === undefined) {
+    void vscode.window.showInformationMessage(
+      'この会話で続けられる相談はありません（もう一度セカンドオピニオンを実行してください）',
+    );
+    port.setAdvisorItem?.(undefined);
+    return;
+  }
+  if (!advisor.canUpdateMaterial()) {
+    void vscode.window.showInformationMessage(
+      'この相談では材料を更新できません（「作業ツリーの変更」を資料に選んだ相談でのみ使えます）',
+    );
+    return;
+  }
+  const id = `secondOpinion:${randomUUID()}`;
+  const controller = new AbortController();
+  if (!registry.begin(port.parentSessionId, id, () => controller.abort())) {
+    void vscode.window.showInformationMessage('この会話のセカンドオピニオンは既に実行中です');
+    return;
+  }
+  try {
+    port.setRunning(true);
+    // 材料が変われば、それ以前の相談から作った下書きは前提が違う。追加の相談と同じく、
+    // 承認できる状態のまま残さない
+    port.setHandoffDraft?.(undefined);
+    port.note(id, pendingMaterialUpdateDisplay(advisor.candidate));
+    const result = await advisor.updateMaterial(controller.signal);
+    if (result.ok) {
+      port.note(
+        id,
+        finishedMaterialUpdateDisplay(
+          advisor.candidate,
+          result.revision,
+          result.response,
+          result.partialReason,
+        ),
+      );
+      return;
+    }
+    if (result.kind === 'cancelled') {
+      port.note(id, cancelledMaterialUpdateDisplay(advisor.candidate));
+      return;
+    }
+    log.warn(`[secondOpinion] レビュー材料を更新できませんでした: ${result.reason}`);
+    port.note(id, failedMaterialUpdateDisplay(advisor.candidate, result.reason));
+  } finally {
+    registry.end(port.parentSessionId, id);
+    try {
+      port.setRunning(false);
+    } catch (e) {
+      log.warn(`[secondOpinion] 実行中表示の解除に失敗しました: ${errorMessage(e)}`);
+    }
+  }
+}
+
+/**
  * メインAIへの指示の下書きを作らせる（Issue #929 Handoff）。
  *
  * **ここでは何も送らない。** 作るのは下書きだけで、作業中のAIへ渡るのは利用者が読み、直し、
@@ -1095,7 +1225,13 @@ export async function draftSecondOpinionHandoff(
       port.note(id, failedHandoffDisplay(advisor.candidate, 'この相談は既に終了しています'));
       return;
     }
-    const draft: HandoffDraft = { ...parsed.draft, revision };
+    // 下書きの根拠になった材料の世代を持ち回る（Issue #975）。承認のときに、その後
+    // 材料が更新されていないかを見る
+    const draft: HandoffDraft = {
+      ...parsed.draft,
+      revision,
+      materialRevision: advisor.currentMaterialRevision(),
+    };
     port.setHandoffDraft?.(draft);
     port.note(id, draftedHandoffDisplay(advisor.candidate, draft));
   } finally {
@@ -1169,8 +1305,14 @@ export async function approveSecondOpinionHandoff(
     language: 'markdown',
   });
   await vscode.window.showTextDocument(document, { preview: false });
+  // 下書きを作った後に材料が更新されていれば、この指示は更新前の前提に立っている
+  // （Issue #975）。送るのは止めない——古いと分かったうえで送りたい場合があり、そこを
+  // 塞ぐと下書きを作り直すためだけに1ターン使わせることになる。ただし黙って送らせない
+  const staleMaterial = draft.materialRevision < advisor.currentMaterialRevision();
   const choice = await vscode.window.showInformationMessage(
-    '内容を確認・編集してから送信してください。送信するまで作業中のAIには何も渡りません',
+    staleMaterial
+      ? `この下書きは、更新前の材料（第${draft.materialRevision}世代）に基づいています。その後レビュー材料を第${advisor.currentMaterialRevision()}世代へ更新しました。内容を確認・編集してから送信してください`
+      : '内容を確認・編集してから送信してください。送信するまで作業中のAIには何も渡りません',
     '送る',
     'やめる',
   );

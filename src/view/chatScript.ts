@@ -89,6 +89,13 @@ export function chatScript(
    * 送る文をwebviewとの間で往復させない。
    */
   let advisorHasDraft = false;
+  /**
+   * 相談の材料を最新へ更新できるか（Issue #975）。
+   *
+   * 更新できるのは、資料に作業ツリーの変更を選んだ相談だけである。それ以外では押しても
+   * 断られるだけなので、ボタン自体を出さない。
+   */
+  let advisorCanUpdateMaterial = false;
   /** 直近の状態でバックグラウンドターミナルが残っているか（枠色の計算に使う）。 */
   let hasBackgroundTerminals = false;
   /**
@@ -413,6 +420,17 @@ export function chatScript(
     });
     actions.appendChild(consult);
 
+    // Advisorの見る材料を、いまの作業ツリーの状態へ更新する（Issue #975）。押したときだけ
+    // 更新する。自動で入れ替えると、利用者の知らないうちにAdvisorの前提が変わる
+    const updateMaterial = document.createElement('button');
+    updateMaterial.className = 'secondary';
+    updateMaterial.textContent = '材料を最新にする';
+    updateMaterial.hidden = true;
+    updateMaterial.addEventListener('click', () => {
+      vscode.postMessage({ type: 'secondOpinionUpdateMaterial' });
+    });
+    actions.appendChild(updateMaterial);
+
     // 相談の結論をメインAIへの指示の下書きにする（Issue #929）。作るだけで送信はしない。
     // 送るかどうかは下書きを読んだ後に別の操作で決める
     const draft = document.createElement('button');
@@ -507,6 +525,7 @@ export function chatScript(
       stopTarget: undefined,
       stopRequested: false,
       consult,
+      updateMaterial,
       draft,
       approve,
       endConsult,
@@ -1215,6 +1234,8 @@ export function chatScript(
   function applyAdvisorButtons(node, itemId) {
     const active = advisorItemId !== undefined && advisorItemId === itemId;
     node.consult.hidden = !active;
+    // 材料の更新（Issue #975）は、更新できる相談のときだけ出す
+    node.updateMaterial.hidden = !(active && advisorCanUpdateMaterial);
     node.draft.hidden = !active;
     // 承認は下書きができているときだけ。追加の相談をすると下書きは無効になり、消える
     node.approve.hidden = !(active && advisorHasDraft);
@@ -3340,6 +3361,8 @@ export function chatScript(
       advisorItemId = typeof data.itemId === 'string' ? data.itemId : undefined;
       // 相談相手が変われば下書きも別物になる。前の相談の承認ボタンを残さない
       advisorHasDraft = false;
+      // 材料を更新できるかは相談ごとに決まる（Issue #975）
+      advisorCanUpdateMaterial = data.canUpdateMaterial === true;
       for (const [id, node] of nodes) {
         applyAdvisorButtons(node, id);
       }
