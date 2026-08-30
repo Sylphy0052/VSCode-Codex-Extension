@@ -14,6 +14,8 @@
  * で固めるため、webviewUriで参照しても配布物に入らず黙って壊れる。SVGにしておけば
  * CSP（`default-src 'none'`、`img-src` も `font-src` も無し）を広げずに済む。
  */
+import { MERGE_TURNS_SOURCE } from './progressDelta';
+
 export function progressScript(): string {
   return `
   const vscode = acquireVsCodeApi();
@@ -433,6 +435,40 @@ export function progressScript(): string {
     renderTimeline(view.turns);
   }
 
+  /**
+   * これまでに積んだターン（issue #1024）。届く差し分はこれへ当てて積み直す。
+   * 空にするのは全量が届いたときと、拡張機能側が「対象の会話が無い」を送ってきたとき。
+   */
+  let turns = [];
+
+  ${MERGE_TURNS_SOURCE}
+
+  /**
+   * 届いた内容を積み直して描く。積み直せなければ全量を送り直してもらう。
+   *
+   * 総数が合わないのは取りこぼしか並びのずれで、そのまま描くと古いターンが
+   * 残り続ける。会話項目の側（stateDelta.ts）と同じく、疑わしいときは全量へ戻す。
+   */
+  function apply(message) {
+    if (message.payload === undefined || message.payload === null) {
+      turns = [];
+      render(undefined);
+      return;
+    }
+    const merged = mergeTurns(turns, message.payload.turns);
+    if (merged === undefined) {
+      turns = [];
+      vscode.postMessage({ type: 'progressFull' });
+      return;
+    }
+    turns = merged;
+    render({
+      summary: message.payload.summary,
+      checklist: message.payload.checklist,
+      turns: turns,
+    });
+  }
+
   function renderEmptyDecoration() {
     const target = el('emptyIcon');
     clear(target);
@@ -444,7 +480,7 @@ export function progressScript(): string {
     if (message === undefined || message === null || message.type !== 'progress') {
       return;
     }
-    render(message.view);
+    apply(message);
   });
 
   renderEmptyDecoration();

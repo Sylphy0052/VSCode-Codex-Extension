@@ -4,7 +4,8 @@ import type { ChatState } from '../appserver/chatState';
 import type { Logger } from '../log';
 import { chatCsp } from './chatCsp';
 import type { ChatStateChange, ProgressTarget } from './chatManagerBase';
-import { buildProgress } from './progressModel';
+import { buildProgress, type ProgressView } from './progressModel';
+import { buildProgressPayload } from './progressDelta';
 import { progressScript } from './progressScript';
 import { progressStyles } from './progressStyles';
 
@@ -28,6 +29,13 @@ export class ProgressViewManager implements vscode.Disposable {
    * 見えるようになった時点で最新へ追いつかせれば足りる。
    */
   private readonly staleThreadIds = new Set<string>();
+  /**
+   * スレッドごとに前回送った表示モデル（issue #1024）。次に送る差し分の基準になる。
+   *
+   * webview側が積み直しに失敗したとき（`progressFull`）とタブを閉じたときに捨てる。
+   * 捨てた後の最初の送信は全量になる（`buildProgressPayload` は前回が無ければ `full`）。
+   */
+  private readonly sentViews = new Map<string, ProgressView>();
 
   constructor(
     private readonly read: ProgressStateReader,
@@ -52,6 +60,7 @@ export class ProgressViewManager implements vscode.Disposable {
     panel.onDidDispose(() => {
       this.panels.delete(target.threadId);
       this.staleThreadIds.delete(target.threadId);
+      this.sentViews.delete(target.threadId);
     });
     panel.onDidChangeViewState(() => {
       if (panel.visible && this.staleThreadIds.delete(target.threadId)) {
@@ -61,7 +70,10 @@ export class ProgressViewManager implements vscode.Disposable {
     panel.webview.html = render(panel.webview);
     // webviewの読み込みが終わってから初期表示を送る（HTMLを入れた直後は受け取れない）
     panel.webview.onDidReceiveMessage((message: unknown) => {
-      if (isReady(message)) {
+      // webviewを作り直した直後（ready）と、積み直しに失敗したとき（progressFull）は
+      // 基準を捨てて全量から送り直す。取りこぼしたまま差し分を当て続けない
+      if (messageType(message) === 'ready' || messageType(message) === 'progressFull') {
+        this.sentViews.delete(target.threadId);
         this.post(target.threadId, panel);
       }
     });
@@ -84,17 +96,25 @@ export class ProgressViewManager implements vscode.Disposable {
       this.staleThreadIds.add(change.threadId);
       return;
     }
-    void panel.webview.postMessage({ type: 'progress', view: buildProgress(change.state) });
+    this.send(change.threadId, panel, buildProgress(change.state));
+  }
+
+  /** 差し分を組み立てて送り、次回の基準として今回の表示モデルを覚える。 */
+  private send(threadId: string, panel: vscode.WebviewPanel, view: ProgressView): void {
+    const payload = buildProgressPayload(this.sentViews.get(threadId), view);
+    this.sentViews.set(threadId, view);
+    void panel.webview.postMessage({ type: 'progress', payload });
   }
 
   private post(threadId: string, panel: vscode.WebviewPanel): void {
     const state = this.read(threadId);
     if (state === undefined) {
       // チャットのタブが閉じられた後にリロードされた場合。数字を出すより空だと判る方がよい
-      void panel.webview.postMessage({ type: 'progress', view: undefined });
+      this.sentViews.delete(threadId);
+      void panel.webview.postMessage({ type: 'progress', payload: undefined });
       return;
     }
-    void panel.webview.postMessage({ type: 'progress', view: buildProgress(state) });
+    this.send(threadId, panel, buildProgress(state));
   }
 
   dispose(): void {
@@ -103,6 +123,7 @@ export class ProgressViewManager implements vscode.Disposable {
     }
     this.panels.clear();
     this.staleThreadIds.clear();
+    this.sentViews.clear();
   }
 }
 
@@ -111,12 +132,13 @@ function panelTitle(title: string): string {
   return `進捗: ${title}`;
 }
 
-function isReady(message: unknown): boolean {
-  return (
-    typeof message === 'object' &&
-    message !== null &&
-    (message as Record<string, unknown>)['type'] === 'ready'
-  );
+/** webviewから届いたメッセージの種類。読めない形なら `undefined`。 */
+function messageType(message: unknown): string | undefined {
+  if (typeof message !== 'object' || message === null) {
+    return undefined;
+  }
+  const type = (message as Record<string, unknown>)['type'];
+  return typeof type === 'string' ? type : undefined;
 }
 
 function render(webview: vscode.Webview): string {
