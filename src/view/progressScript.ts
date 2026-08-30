@@ -1,3 +1,5 @@
+import { MERGE_TURNS_SOURCE } from './progressDelta';
+
 /**
  * 進捗画面（issue #721、見た目の作り直しは issue #781）のWebviewで動くスクリプト。
  *
@@ -14,8 +16,6 @@
  * で固めるため、webviewUriで参照しても配布物に入らず黙って壊れる。SVGにしておけば
  * CSP（`default-src 'none'`、`img-src` も `font-src` も無し）を広げずに済む。
  */
-import { MERGE_TURNS_SOURCE } from './progressDelta';
-
 export function progressScript(): string {
   return `
   const vscode = acquireVsCodeApi();
