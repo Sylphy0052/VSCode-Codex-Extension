@@ -53,6 +53,8 @@ export function progressScript(): string {
 
   /** 閉じずに開いたまま出すターン数（末尾から数える）。 */
   const OPEN_TURNS = 3;
+  /** 「作り直すターンは1つも無い」を表す（issue #1025）。undefined は全量の作り直しを指す。 */
+  const EMPTY_CHANGED = new Set();
   /**
    * ターン番号 → 開閉。自分で開閉したターンだけを覚え、触っていないターンは
    * OPEN_TURNS の既定に従わせる（issue 750）。render は状態が届くたびに
@@ -201,7 +203,23 @@ export function progressScript(): string {
    * ファイル数で数える（グループ数ではない）。1つのディレクトリに数百件ある形でも
    * 既定の表示が短く収まるようにするため。
    */
+  /** 直前に描いたファイル一覧の内容。同じなら作り直さない（issue #1025）。 */
+  let filesShownKey = undefined;
+
+  /**
+   * ファイル一覧を描く。中身が前回と同じなら何もしない（issue #1025）。
+   *
+   * タイムラインと同じ理由で、ここも毎更新で作り直していた。ファイルは1ターンに
+   * 数件しか増えないため、状態が届くたびに全行を作り直すのは無駄が大きい。
+   * 突き合わせはディレクトリとファイル名を連ねた文字列で行う。数百件でも安く、
+   * 並びの入れ替わりも拾える。
+   */
   function renderFiles(groups) {
+    const key = groups.map((group) => group.dir + '\u0000' + group.files.join('\u0000')).join('\u0001');
+    if (key === filesShownKey) {
+      return;
+    }
+    filesShownKey = key;
     const list = el('files');
     const foot = el('filesMore');
     clear(list);
@@ -232,6 +250,8 @@ export function progressScript(): string {
       button.type = 'button';
       button.addEventListener('click', () => {
         filesExpanded = true;
+        // 内容は同じで出す範囲だけが変わるので、突き合わせの鍵を捨ててから描き直す
+        filesShownKey = undefined;
         renderFiles(groups);
       });
       foot.appendChild(button);
@@ -329,9 +349,27 @@ export function progressScript(): string {
     return article;
   }
 
-  function renderTimeline(turns) {
+  /**
+   * ターン番号 → いま出ているノード。据え置くターンを見分けるために持つ（issue #1025）。
+   * 全量が届いたときに空へ戻す。
+   */
+  let turnNodes = {};
+
+  /**
+   * タイムラインを描く（issue #1025）。
+   *
+   * changed は今回作り直すターン番号の集合。undefined なら全部作り直す（全量が届いた
+   * ときと初回）。**据え置いたノードは触らない**: 作り直すとその中の選択が消え、
+   * フォーカスが body へ戻り、スクロール位置も失われる。応答中は毎秒20回ここへ来る
+   * ため、末尾のターンだけが伸びる普段の更新で全部を作り直すと、文字を選んでいる間に
+   * 選択が消え続ける。
+   */
+  function renderTimeline(turns, changed) {
     const timeline = el('timeline');
-    clear(timeline);
+    if (changed === undefined) {
+      clear(timeline);
+      turnNodes = {};
+    }
     // 古いターンは畳む。全部開いたままだと、長いセッションでは下まで辿れない
     const firstOpen = Math.max(turns.length - OPEN_TURNS, 0);
     let closed = 0;
@@ -345,7 +383,20 @@ export function progressScript(): string {
       if (!isOpen) {
         closed += 1;
       }
-      timeline.appendChild(renderTurn(turn, isLatest, isOpen));
+      const current = turnNodes[turn.index];
+      if (current === undefined) {
+        const fresh = renderTurn(turn, isLatest, isOpen);
+        turnNodes[turn.index] = fresh;
+        timeline.appendChild(fresh);
+      } else if (changed !== undefined && changed.has(turn.index)) {
+        const fresh = renderTurn(turn, isLatest, isOpen);
+        turnNodes[turn.index] = fresh;
+        timeline.replaceChild(fresh, current);
+      } else {
+        // 中身は変わっていない。最新の印と開閉だけは移りうるので属性だけ当てる
+        current.className = 'turn' + (isLatest ? ' latest' : '');
+        current.open = isOpen;
+      }
     }
     el('timelineSection').hidden = turns.length === 0;
     renderExpandAll(turns, closed);
@@ -355,8 +406,16 @@ export function progressScript(): string {
    * 「すべて開く」。畳まれたターンが1件も無いときは出さない（issue 750。ターンが
    * OPEN_TURNS 件以下のセッションで、押しても何も起きないボタンを見せないため）。
    */
+  /** 直前に出した「閉じているNターンを開く」の N。同じなら作り直さない（issue #1025）。 */
+  let expandAllShown = -1;
+
   function renderExpandAll(turns, closed) {
     const holder = el('timelineMore');
+    // 押せるボタンを毎回作り直すと、当たっていたフォーカスが body へ戻る
+    if (closed === expandAllShown) {
+      return;
+    }
+    expandAllShown = closed;
     clear(holder);
     if (closed === 0) {
       return;
@@ -367,7 +426,8 @@ export function progressScript(): string {
       for (const turn of turns) {
         turnOpen[turn.index] = true;
       }
-      renderTimeline(turns);
+      // 開閉は据え置きの経路（属性だけ当てる）で移せる。作り直さない
+      renderTimeline(turns, EMPTY_CHANGED);
     });
     holder.appendChild(button);
   }
@@ -376,6 +436,9 @@ export function progressScript(): string {
     el(id).textContent = suffix === undefined ? String(value) : String(value) + suffix;
   }
 
+  /** 直前に出した状態。応答中↔待機中が移ったときだけバッジを書き換える（issue #1025）。 */
+  let badgeBusy = undefined;
+
   function renderSummary(summary) {
     isBusy = summary.busy === true;
     // 画面上端の稼働バー（issue 751）。バッジの点滅だけでは、画面を下へスクロールして
@@ -383,10 +446,16 @@ export function progressScript(): string {
     el('busyBar').hidden = !summary.busy;
 
     const badge = el('statusBadge');
-    badge.className = summary.busy ? 'busy' : '';
-    clear(badge);
-    badge.appendChild(node('span', 'dot', undefined));
-    badge.appendChild(node('span', 'text', summary.busy ? '応答中' : '待機中'));
+    // バッジは読み上げの窓（aria-live）にしてある。応答中の間も状態は毎秒20回届くので、
+    // 毎回作り直すと同じ「応答中」を延々と読み上げることになる。遷移のときだけ触る
+    // （issue #1025）。読み上げるのは状態の1語だけで、KPIの数字は含めない
+    if (badgeBusy !== isBusy) {
+      badgeBusy = isBusy;
+      badge.className = summary.busy ? 'busy' : '';
+      clear(badge);
+      badge.appendChild(node('span', 'dot', undefined));
+      badge.appendChild(node('span', 'text', summary.busy ? '応答中' : '待機中'));
+    }
 
     setKpi('kpiTurns', summary.turnCount, undefined);
     setKpi('kpiFiles', summary.editedFiles.length, undefined);
@@ -417,8 +486,14 @@ export function progressScript(): string {
     el('progressPercent').textContent = percent + '%';
   }
 
-  function render(view) {
+  function render(view, changed) {
     if (view === undefined || view === null || view.summary.turnCount === 0) {
+      // 据え置きの土台を捨てる。次に中身が来たときは全部作り直しになる（issue #1025）
+      clear(el('timeline'));
+      turnNodes = {};
+      expandAllShown = -1;
+      filesShownKey = undefined;
+      badgeBusy = undefined;
       el('empty').hidden = false;
       el('summary').hidden = true;
       el('busyBar').hidden = true;
@@ -432,7 +507,7 @@ export function progressScript(): string {
     renderSummary(view.summary);
     renderChecklist(view.checklist);
     renderFiles(view.summary.editedFileGroups);
-    renderTimeline(view.turns);
+    renderTimeline(view.turns, changed);
   }
 
   /**
@@ -462,11 +537,19 @@ export function progressScript(): string {
       return;
     }
     turns = merged;
-    render({
-      summary: message.payload.summary,
-      checklist: message.payload.checklist,
-      turns: turns,
-    });
+    // 全量が届いたら作り直す。差し分なら届いたターンだけを作り直す（issue #1025）
+    const changed =
+      message.payload.turns.mode === 'full'
+        ? undefined
+        : new Set(message.payload.turns.turns.map((turn) => turn.index));
+    render(
+      {
+        summary: message.payload.summary,
+        checklist: message.payload.checklist,
+        turns: turns,
+      },
+      changed,
+    );
   }
 
   function renderEmptyDecoration() {

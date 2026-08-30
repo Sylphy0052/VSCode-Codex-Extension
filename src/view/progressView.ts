@@ -156,7 +156,23 @@ ${progressStyles()}
 </style>
 </head>
 <body>
-  <!-- 応答中の稼働バー（issue 751）。画面上端に固定する。TODOの完了率バー
+${progressBody()}<script nonce="${nonce}">
+${progressScript()}
+</script>
+</body>
+</html>`;
+}
+
+/**
+ * webviewの本体（`<body>` の中身）。
+ *
+ * `progressScript` が `getElementById` で掴む器をここに置く。スクリプト側の
+ * 振る舞いをテストするには同じDOMが要るため、HTMLを組み立てる `render` から
+ * 切り出して単体で取れるようにしてある（`test/unit/progressDom.test.ts`。
+ * テスト側へ写しを置くと、器を足したときに片方だけ古くなる）。
+ */
+export function progressBody(): string {
+  return `  <!-- 応答中の稼働バー（issue 751）。画面上端に固定する。TODOの完了率バー
        （#progressRow）とは別物なので、位置と形で区別できるようにしてある -->
   <div id="busyBar" hidden><div id="busyBarFill"></div></div>
   <div id="empty">
@@ -167,7 +183,9 @@ ${progressStyles()}
   <section id="summary" hidden>
     <div id="summaryHeader">
       <h1>進捗</h1>
-      <span id="statusBadge"></span>
+      <!-- 状態の遷移（応答中↔待機中）だけを読み上げへ届ける窓（issue #1025）。
+           KPIの数字は含めない。含めると応答中は毎秒20回の更新のたびに読み上げる -->
+      <span id="statusBadge" aria-live="polite" aria-atomic="true"></span>
     </div>
     <div id="kpis">
       <div class="kpi"><span class="kpi-value" id="kpiTurns">0</span><span class="kpi-label">ターン</span></div>
@@ -194,9 +212,5 @@ ${progressStyles()}
     <div id="timeline"></div>
     <div id="timelineMore"></div>
   </section>
-<script nonce="${nonce}">
-${progressScript()}
-</script>
-</body>
-</html>`;
+`;
 }
