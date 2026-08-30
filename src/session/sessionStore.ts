@@ -9,7 +9,7 @@ import {
 } from '../codex/sessionMeta';
 import type { SessionMeta, SessionSummary } from '../codex/types';
 import { mapWithLimit } from '../util/concurrency';
-import { basenameOf } from '../util/paths';
+import { basenameOf, isWithinAnyRoot } from '../util/paths';
 import type { FileSystemPort, MetaCachePort, ThreadListPort, ThreadNameSetterPort } from './ports';
 
 export type HistoryScope = 'workspace' | 'all';
@@ -70,14 +70,14 @@ interface RolloutLocation {
 /**
  * 与えられたパスがいずれかのワークスペースフォルダの配下か。
  * `/a/b` が `/a/bc` を誤って含まないよう境界を厳密に見る。
+ *
+ * 判定の中身は`util/paths.ts`へ移した（Issue #1019）。`..`を解決せず、区切りの向きも
+ * 揃えていなかったため、ワークスペース外の会話を取り込んだり、Windowsで取りこぼしたり
+ * していた。同じ判定が`sessionKanbanModel.ts`にも別実装であり、直せる範囲が食い違って
+ * いたので1つに寄せた。呼び出し側の書き方は変えない。
  */
 export function isWithinAny(target: string, folders: string[]): boolean {
-  const norm = (p: string) => (p.endsWith('/') ? p.slice(0, -1) : p);
-  const t = norm(target);
-  return folders.some((folder) => {
-    const f = norm(folder);
-    return t === f || t.startsWith(`${f}/`);
-  });
+  return isWithinAnyRoot(target, folders);
 }
 
 export class SessionStore {
