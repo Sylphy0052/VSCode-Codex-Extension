@@ -18,7 +18,25 @@ import {
   type ChatState,
 } from '../../../src/appserver/chatState';
 import { AppServerConnection, type ServerRequest } from '../../../src/appserver/connection';
+import { buildDisabledMcpServersOverlay } from '../../../src/codex/mcpDisable';
+import { sandboxPolicyFor } from '../../../src/codex/sandboxPolicy';
 import type { Logger } from '../../../src/log';
+
+/**
+ * 本番のAdvisorと同じ実行条件（`src/secondOpinion/run.ts` の `buildSecondOpinionSessionInput`）。
+ *
+ * ここが本番と1つでも違うと、測っているのは「本番のセカンドオピニオン」ではなくなる。実際の
+ * 経路は `buildSecondOpinionSessionInput` → `ChatViewManager.openTaskSession` →
+ * `ChatSession.start` / `ChatSession.send` で、そこから出る値を写してある。
+ *
+ * - `sandbox: 'read-only'` … Advisorは読み取りのみ。`turn/start` 側の `sandboxPolicy` と組で効く
+ * - `approvalPolicy: 'never'` … 承認要求を出さない
+ * - `approvalsReviewer` は送らない（`toCodexConfig` が空に固定している）
+ * - `bypassApprovalsAndSandbox` は false なので、`turnPolicyFor` は設定由来の
+ *   `sandboxPolicy` だけを返す
+ */
+const SANDBOX_MODE = 'read-only';
+const APPROVAL_POLICY = 'never';
 
 /** 起動先。CIやローカルでバージョンを固定したい場合に環境変数で差し替える。 */
 const CODEX_BIN = process.env['CODEX_BIN'] ?? 'codex';
@@ -121,7 +139,28 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
 
   try {
     await connection.ensureStarted();
-    const started = await connection.request('thread/start', { cwd: request.cwd });
+
+    // MCPサーバを1本も接続させない（Issue #944）。本番のAdvisorは `disableMcpServers: true` で
+    // 開くため、ここで載せるとツール定義の分だけ条件が変わる。`config/read` に失敗しても
+    // 本体と同じく組み込み分だけのオーバーレイで続ける
+    let mcpServers: Record<string, unknown>;
+    try {
+      const config = await connection.request('config/read', {});
+      record('response', { method: 'config/read', error: config.error });
+      mcpServers = buildDisabledMcpServersOverlay(config.result);
+    } catch {
+      mcpServers = buildDisabledMcpServersOverlay(undefined);
+    }
+
+    const startParams = {
+      cwd: request.cwd,
+      sandbox: SANDBOX_MODE,
+      approvalPolicy: APPROVAL_POLICY,
+      model: request.model,
+      config: { mcp_servers: mcpServers },
+    };
+    record('request', { method: 'thread/start', params: startParams });
+    const started = await connection.request('thread/start', startParams);
     record('response', { method: 'thread/start', result: started.result, error: started.error });
     if (started.error !== undefined) {
       return {
@@ -147,14 +186,18 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
     const completion = waitForTurnEnd((listener) => {
       onEvent = listener;
     });
-    const turn = await connection.request('turn/start', {
+    const turnParams = {
       threadId,
       input: [{ type: 'text', text: request.prompt }],
       model: request.model,
       effort: request.effort,
-      // Advisorは読み取りのみ。本体（`buildSummarySessionInput` と同じ固定値）へ揃える
-      approvalPolicy: 'never',
-    });
+      approvalPolicy: APPROVAL_POLICY,
+      // 本体は `turnPolicyFor` がこれを載せる（planMode無し・bypass無しなので、設定由来の
+      // `sandboxPolicy` だけが出る）。`thread/start` の `sandbox` と組で読み取り専用になる
+      sandboxPolicy: sandboxPolicyFor(SANDBOX_MODE),
+    };
+    record('request', { method: 'turn/start', params: { ...turnParams, input: '<prompt>' } });
+    const turn = await connection.request('turn/start', turnParams);
     record('response', { method: 'turn/start', result: turn.result, error: turn.error });
     if (turn.error !== undefined) {
       return {

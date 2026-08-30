@@ -45,6 +45,24 @@ npx tsx test/bench/secondOpinionEval/probe.ts [--out <トレース出力先>]
 
 送受信したJSON-RPCは全件トレースへ残る。1項目でも失敗したら、そのトレースと `applyEvent` の解釈を突き合わせる。
 
+#### 本番Advisorとの実行条件の一致
+
+ハーネスは本番のAdvisor（`src/secondOpinion/run.ts` の `buildSecondOpinionSessionInput` → `ChatViewManager.openTaskSession` → `ChatSession.start` / `send`）と同じ値を送る。ここが違うと、測っているのが本番のセカンドオピニオンではなくなる。
+
+| 送信先         | フィールド           | 値                                                               |
+| -------------- | -------------------- | ---------------------------------------------------------------- |
+| `thread/start` | `sandbox`            | `read-only`                                                      |
+| `thread/start` | `approvalPolicy`     | `never`                                                          |
+| `thread/start` | `model`              | 条件で固定したモデル                                             |
+| `thread/start` | `config.mcp_servers` | 全サーバ無効化のオーバーレイ（`buildDisabledMcpServersOverlay`） |
+| `turn/start`   | `model` / `effort`   | 条件で固定した値                                                 |
+| `turn/start`   | `approvalPolicy`     | `never`                                                          |
+| `turn/start`   | `sandboxPolicy`      | `{ type: 'readOnly' }`（`sandboxPolicyFor('read-only')`）        |
+
+`approvalsReviewer` は送らない（本番の `toCodexConfig` が空に固定している）。`bypassApprovalsAndSandbox` も false なので、`turnPolicyFor` は設定由来の `sandboxPolicy` だけを返す。
+
+MCPを無効化するのは速度のためだけではない。既定のまま開くと利用者の `config.toml` のサーバと組み込みの `codex_apps` が接続され、ツール定義がターンへ載る。本番は載せないので、載せたまま測ると別物を測ることになる。
+
 ### 1. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。20〜30件を目安に、`kind` ごとの件数を**揃えて**集める（24件なら各6件）。実際の利用比率に合わせると、件数の多い種類の評価が全体平均になってしまう。利用比率での重み付けは、種類別の値が出てから後で掛ければよい。
