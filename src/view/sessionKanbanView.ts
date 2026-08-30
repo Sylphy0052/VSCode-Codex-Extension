@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { Logger } from '../log';
 import { chatCsp } from './chatCsp';
@@ -5,10 +6,25 @@ import type { SessionKanbanBoard } from './sessionKanbanModel';
 
 export type SessionKanbanReader = () => SessionKanbanBoard;
 
+/**
+ * 盤面を送る間隔（Issue #1012）。
+ *
+ * 更新の元は`chatView.ts`の`flushState`で、`STATE_POST_INTERVAL_MS`（50ms）ごとに
+ * 発火しうる。そのまま繋ぐとカンバンは1セッションあたり毎秒20回まで全カードを
+ * 作り直す。ここでまとめる。デバウンスにすると更新が続く間ずっと描画されないため、
+ * 「最初の1件はすぐ送り、以降は間隔ごとにまとめ、最後の1回は必ず送る」形にする
+ * （`chatView.ts`の`postState`と同じ流儀）。
+ */
+const POST_INTERVAL_MS = 250;
+
 /** 現在のワークスペースで拡張機能が管理中の会話を状態別に並べる専用View（Issue #811）。 */
 export class SessionKanbanViewManager implements vscode.Disposable {
   static readonly viewType = 'agent.sessionKanban';
   private panel: vscode.WebviewPanel | undefined;
+  /** 非表示の間に来た更新（Issue #1012）。表に戻った時点で1回だけ送り直す */
+  private dirty = false;
+  private postTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastPostAt = 0;
 
   constructor(
     private readonly read: SessionKanbanReader,
@@ -25,25 +41,66 @@ export class SessionKanbanViewManager implements vscode.Disposable {
         { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true },
       );
       this.panel.onDidDispose(() => {
+        this.clearTimer();
+        this.dirty = false;
         this.panel = undefined;
+      });
+      // 非表示の間の更新は溜めておき、表に戻った時点で送り直す（Issue #1012）。
+      // `retainContextWhenHidden`でDOMは残るため、送り直さないと古い盤面が残る
+      this.panel.onDidChangeViewState(() => {
+        if (this.panel?.visible === true && this.dirty) {
+          this.schedulePost();
+        }
       });
       this.panel.webview.html = render(this.panel.webview);
       this.panel.webview.onDidReceiveMessage((message: unknown) => this.receive(message));
-    } else {
-      this.panel.reveal();
+      // 初回の盤面はwebviewからの`ready`に対して送る。ここで送っても、webview側が
+      // `message`のlistenerを登録する前なら届かない（VS Codeは順序を保証しない）
+      this.log.info('セッションカンバンを開いた');
+      return;
     }
-    this.post();
-    this.log.info('セッションカンバンを開いた');
+    this.panel.reveal();
+    this.schedulePost();
+    this.log.info('セッションカンバンを表に出した');
   }
 
   refresh(): void {
-    if (this.panel?.visible) {
-      this.post();
+    if (this.panel === undefined) {
+      return;
     }
+    if (!this.panel.visible) {
+      this.dirty = true;
+      return;
+    }
+    this.schedulePost();
   }
 
   dispose(): void {
+    this.clearTimer();
     this.panel?.dispose();
+  }
+
+  /** 最初の1件はすぐ、以降は`POST_INTERVAL_MS`ごとにまとめ、最後の1回は必ず送る */
+  private schedulePost(): void {
+    if (this.postTimer !== undefined) {
+      return;
+    }
+    const since = Date.now() - this.lastPostAt;
+    if (since >= POST_INTERVAL_MS) {
+      this.post();
+      return;
+    }
+    this.postTimer = setTimeout(() => {
+      this.postTimer = undefined;
+      this.post();
+    }, POST_INTERVAL_MS - since);
+  }
+
+  private clearTimer(): void {
+    if (this.postTimer !== undefined) {
+      clearTimeout(this.postTimer);
+      this.postTimer = undefined;
+    }
   }
 
   private receive(message: unknown): void {
@@ -70,6 +127,8 @@ export class SessionKanbanViewManager implements vscode.Disposable {
     if (this.panel === undefined) {
       return;
     }
+    this.lastPostAt = Date.now();
+    this.dirty = false;
     void this.panel.webview.postMessage({ type: 'board', board: this.read() });
   }
 }
@@ -79,7 +138,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function render(webview: vscode.Webview): string {
-  const nonce = String(Date.now());
+  // 他の画面（`chatShared.ts`・`progressView.ts`など）と同じく予測できない値にする
+  const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
   return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body><main><header><div><p class="eyebrow">CURRENT WORKSPACE</p><h1>セッションカンバン</h1><p class="description">この拡張機能が開いて管理している会話だけを表示します。</p></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
 }
@@ -100,6 +160,9 @@ const script = `
 const vscode = acquireVsCodeApi(); const board = document.getElementById('board'); const summary = document.getElementById('summary');
 const specs = [{ key:'approvalPending', label:'承認待ち', icon:'⚠', empty:'対応待ちの会話はありません' }, { key:'running', label:'実行中', icon:'↻', empty:'実行中の会話はありません' }, { key:'idle', label:'待機中', icon:'●', empty:'待機中の会話はありません' }];
 function text(tag, value, cls) { const el=document.createElement(tag); el.textContent=value; if(cls) el.className=cls; return el; }
-function render(data) { board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; summary.append(text('span', data.total + ' セッション', 'metric')); for(const spec of specs) { const count=counts[spec.key].length; const metric=text('span', spec.label + ' ' + count, 'metric' + (spec.key==='approvalPending' && count ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column'; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', String(count), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(count===0) cards.append(text('p', spec.empty, 'empty')); for(const card of counts[spec.key]) { const button=document.createElement('button'); button.type='button'; button.className='card ' + spec.key; button.title=card.title + '\\n' + card.cwd; button.append(text('span', card.title || '名称未設定', 'card-title')); const meta=document.createElement('span'); meta.className='meta'; meta.append(text('span', card.provider, 'provider'), text('span', '•'), text('span', card.cwdLabel)); button.append(meta); button.addEventListener('click', () => vscode.postMessage({type:'open', provider:card.provider, threadId:card.threadId})); cards.append(button); } column.append(head,cards); board.append(column); } }
+// 盤面を作り直すとフォーカス中のカードも消える。同じ会話のカードへ戻す（Issue #1012）
+function focusedCard() { const el=document.activeElement; return el && el.dataset && el.dataset.threadId ? { provider: el.dataset.provider, threadId: el.dataset.threadId } : undefined; }
+function restoreFocus(target) { if(!target) return; const next=board.querySelector('[data-provider="' + CSS.escape(target.provider) + '"][data-thread-id="' + CSS.escape(target.threadId) + '"]'); if(next) next.focus(); }
+function render(data) { const focused = focusedCard(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; summary.append(text('span', data.total + ' セッション', 'metric')); for(const spec of specs) { const count=counts[spec.key].length; const metric=text('span', spec.label + ' ' + count, 'metric' + (spec.key==='approvalPending' && count ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column'; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', String(count), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(count===0) cards.append(text('p', spec.empty, 'empty')); for(const card of counts[spec.key]) { const button=document.createElement('button'); button.type='button'; button.className='card ' + spec.key; button.dataset.threadId=card.threadId; button.dataset.provider=card.provider; button.title=card.title + '\\n' + card.cwd; button.append(text('span', card.title || '名称未設定', 'card-title')); const meta=document.createElement('span'); meta.className='meta'; meta.append(text('span', card.provider, 'provider'), text('span', '•'), text('span', card.cwdLabel)); button.append(meta); button.addEventListener('click', () => vscode.postMessage({type:'open', provider:card.provider, threadId:card.threadId})); cards.append(button); } column.append(head,cards); board.append(column); } restoreFocus(focused); }
 window.addEventListener('message', event => { if(event.data.type==='board') render(event.data.board); }); vscode.postMessage({type:'ready'});
 `;
