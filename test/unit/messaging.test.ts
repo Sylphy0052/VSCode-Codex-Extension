@@ -1876,7 +1876,7 @@ class FakeHandoffPort implements HandoffPort {
     this.files.set(`${taskId}/${slug}`, content);
     return {
       ok: true,
-      value: { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}-${slug}.md` },
+      value: { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}~${slug}.md` },
     };
   }
   async read(taskId: string, slug: string): Promise<HandoffResult<string>> {
@@ -1888,7 +1888,7 @@ class FakeHandoffPort implements HandoffPort {
   async list(): Promise<readonly HandoffEntry[]> {
     return [...this.files.keys()].map((key) => {
       const [taskId = '', slug = ''] = key.split('/');
-      return { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}-${slug}.md` };
+      return { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}~${slug}.md` };
     });
   }
   async remove(taskId: string, slug: string): Promise<HandoffResult<undefined>> {
