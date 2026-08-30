@@ -44,6 +44,15 @@ export async function prepareCaseMaterial(evalCase: EvalCase): Promise<PrepareMa
     return { ok: false, reason: captured.reason };
   }
 
+  // 入力の組み立てはbundleを作る**前**に済ませる。後ろに置くと、未対応の指定で落ちたときに
+  // 作りかけの一時ディレクトリが残る（`buildInput` は例外を投げうる）
+  let input: SecondOpinionInput;
+  try {
+    input = buildInput(evalCase, captured.snapshot);
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'second-opinion-eval-'));
   let bundle: ReviewBundle;
   try {
@@ -66,7 +75,7 @@ export async function prepareCaseMaterial(evalCase: EvalCase): Promise<PrepareMa
   return {
     ok: true,
     material: {
-      input: buildInput(evalCase, captured.snapshot),
+      input,
       cwd: bundle.dir,
       baseCommit: captured.snapshot.baseCommit,
       async dispose(): Promise<void> {

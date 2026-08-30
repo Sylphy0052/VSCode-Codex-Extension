@@ -203,7 +203,13 @@ async function main(): Promise<void> {
             `${evalCase.id}__${condition.id}__${attempt}.json`,
           );
           await fs.writeFile(file, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-          if (turn.error === undefined) {
+          if (turn.error === undefined && turn.response.trim() === '') {
+            // エラーは無いのに本文が空。プロトコルの読み方がずれている可能性があるので、
+            // 成功として数えない（採点シートも空の回答は除外するが、そこまで気づかないと
+            // 「なぜか件数が減った」だけが残る）
+            console.error(`[eval] ${label}: 回答が空でした → ${path.basename(file)}`);
+            failures += 1;
+          } else if (turn.error === undefined) {
             console.log(`[eval] ${label}: ${turn.latencyMs}ms → ${path.basename(file)}`);
           } else {
             console.error(`[eval] ${label}: ${turn.error} → ${path.basename(file)}`);

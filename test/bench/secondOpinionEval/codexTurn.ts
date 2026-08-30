@@ -185,9 +185,18 @@ function waitForTurnEnd(
       }, TURN_TIMEOUT_MS);
       timer.unref();
 
+      // ターンが始まったことを見てからでないと終了を判定しない。`turn/started` より先に
+      // 別の通知（`thread/tokenUsage/updated` など）が届くことがあり、その時点の状態は
+      // 「turnIdが無く busy でもない」——つまり終了条件と見分けが付かない。始まる前に
+      // 判定すると、回答が1文字も返っていないのに正常終了として記録してしまう
+      let started = false;
       const check = (): void => {
         const state = readState();
         if (state.turnId !== undefined || state.busy) {
+          started = true;
+          return;
+        }
+        if (!started) {
           return;
         }
         clearTimeout(timer);
