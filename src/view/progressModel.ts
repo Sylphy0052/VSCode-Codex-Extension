@@ -40,6 +40,9 @@ export interface ProgressTurn {
    * `editedFiles` から重複を落としたままだと「1回直しただけ」と「同じファイルを10回
    * 往復した」が画面上で区別できない。件数の一覧性は `editedFiles` 側で保ち、
    * 回数はこちらに分けて持つ（既存の利用側の数え方を変えないため）。
+   *
+   * 中身は `Object.create(null)` で作る（`emptyTurn`。issue #1017）。`{}` だと
+   * パスが `__proto__` のときだけ代入が継承アクセサへ吸われ、回数を持てない。
    */
   fileEditCounts: Record<string, number>;
   /** そのターンで実行したコマンド。同じコマンドの繰り返しも別の行として残す。 */
@@ -221,7 +224,12 @@ function emptyTurn(index: number): ProgressTurn {
     instruction: '',
     response: '',
     editedFiles: [],
-    fileEditCounts: {},
+    // `{}` ではなくプロトタイプを持たないオブジェクトにする（issue #1017）。
+    // `{}` だと `counts['__proto__'] = 1` が `Object.prototype` のセッターへ渡って
+    // 値が保存されず、`Object.hasOwn` も常に false を返すため、パスが `__proto__` の
+    // ファイルだけ毎回「未登録」と判定されて `editedFiles` へ重複して積まれる。
+    // `postMessage`（構造化クローン）でもJSON往復でも own property のまま残ることは実測済み
+    fileEditCounts: Object.create(null) as Record<string, number>,
     commands: [],
     todoChanges: [],
   };
@@ -252,7 +260,8 @@ function absorb(turn: ProgressTurn, item: ChatItem): void {
     //
     // 判定に `Object.hasOwn` を使うのは、パスが `toString` のようにObject.prototypeの
     // 名前と重なったときに「既出」と誤判定しないため（`counts[path] === undefined` だと
-    // 継承した関数を拾ってしまい、そのファイルだけ一覧から消える）。
+    // 継承した関数を拾ってしまい、そのファイルだけ一覧から消える）。`__proto__` は
+    // 判定だけでは足りず、入れ物側もプロトタイプを持たない必要がある（`emptyTurn`）。
     const seen = Object.hasOwn(turn.fileEditCounts, diff.path);
     if (!seen) {
       turn.editedFiles.push(diff.path);
