@@ -130,6 +130,16 @@ export interface ForgePlannedIssue {
   plannedAt: string;
 }
 
+/**
+ * リモート状態の取り込み結果（Issue #1029）。
+ *
+ * 失敗を`reason`で分けるのは、取得そのものに失敗した`error`と、書き戻す先のカードが
+ * 既に無い`gone`とで、画面に出すべき文言が違うため。`gone`はcleanup完了で追跡対象から
+ * 外した直後に起きる正常な結末なので、赤いエラーとして見せない。
+ */
+export type ForgeRefreshResult =
+  { ok: true } | { ok: false; reason: 'gone' | 'error'; message: string };
+
 /** `gh` / `glab`への操作をWebviewから切り離す。最初は診断とIssue作成を担当する。 */
 export class ForgeHubService {
   private readonly worktrees = new WorktreeCreationQueue();
@@ -319,16 +329,57 @@ export class ForgeHubService {
       .sort((a, b) => b.plannedAt.localeCompare(a.plannedAt));
   }
 
-  /** cleanup済みであることを利用者が確認したカードだけ、Hubの追跡対象から外す。 */
-  async completeCleanup(branch: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  /**
+   * cleanup済みであることを利用者が確認したカードだけ、Hubの追跡対象から外す。
+   *
+   * 判定に`status`ではなく`pullRequestState`を使う（Issue #1029）。`status`はCIやレビューの
+   * 取得結果を含む派生値で、確認ダイアログを表示している間にも背景同期で動きうる。カードを
+   * 外してよい根拠は「PR/MRがマージ済みであること」そのものなので、そちらを直接検証する。
+   */
+  async completeCleanup(branch: string): Promise<ForgeRefreshResult> {
     const item = this.workItems.get(branch);
-    if (item === undefined) return { ok: false, message: '対象のForge作業が見つかりません。' };
-    if (item.status !== 'cleanup') {
-      return { ok: false, message: 'マージ済み・cleanup待ちのカードだけ完了にできます。' };
+    if (item === undefined) {
+      return {
+        ok: false,
+        reason: 'gone',
+        message: '対象のForge作業は既に追跡対象から外れています。',
+      };
+    }
+    if (item.pullRequestState !== 'merged') {
+      return {
+        ok: false,
+        reason: 'error',
+        message: 'マージ済み・cleanup待ちのカードだけ完了にできます。',
+      };
     }
     this.workItems.delete(branch);
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return { ok: true };
+  }
+
+  /**
+   * CLI取得の完了後に、**その時点の**カードへ結果を反映する（Issue #1029）。
+   *
+   * CLI実行前に読んだカードをそのまま書き戻すと、待っている間にcleanup完了で消えたカードが
+   * 古い内容で復活する。書き戻す直前に読み直し、消えていれば何もしない。
+   *
+   * `mutate`は同期関数に限る。`enforceTerminalPrInvariant`から`workItems.set`までの間に
+   * `await`が入ると、そこで別の更新が割り込んで同じ取り違えが起きる。
+   */
+  private async applyRemoteUpdate(
+    branch: string,
+    expectedPullRequestNumber: number,
+    mutate: (current: ForgeWorkItem) => ForgeWorkItem,
+  ): Promise<'applied' | 'gone'> {
+    const current = this.workItems.get(branch);
+    if (current === undefined) return 'gone';
+    // 取得中にPR/MRが差し替わったカードへ、前のPR/MRの結果を書かない。マージ済みの単調性は
+    // 「同じPR/MR番号のライフサイクル」を前提にしているため、番号が変われば前提が崩れる。
+    if (current.pullRequestNumber !== expectedPullRequestNumber) return 'gone';
+    const normalized = enforceTerminalPrInvariant(current, mutate(current));
+    this.workItems.set(branch, { ...normalized, nextAction: deriveNextAction(normalized) });
+    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    return 'applied';
   }
 
   async refreshRemoteStates(): Promise<void> {
@@ -431,31 +482,35 @@ export class ForgeHubService {
     return { ok: true, url: created.url };
   }
 
-  async refreshCi(branch: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  async refreshCi(branch: string): Promise<ForgeRefreshResult> {
     const item = this.workItems.get(branch);
     if (item?.pullRequestNumber === undefined) {
-      return { ok: false, message: 'PR/MR番号がないためCIを取得できません。' };
+      return { ok: false, reason: 'error', message: 'PR/MR番号がないためCIを取得できません。' };
     }
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
     const status: ForgeWorkItem['status'] =
       ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
-    const itemWithoutCiMessage = { ...item };
-    delete itemWithoutCiMessage.ciMessage;
-    const next = {
-      ...itemWithoutCiMessage,
-      status,
-      ...(ci.message === undefined ? {} : { ciMessage: ci.message }),
-      updatedAt: new Date().toISOString(),
-    };
-    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
-    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
-    return { ok: true };
+    const applied = await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => {
+      const base = { ...current };
+      delete base.ciMessage;
+      return {
+        ...base,
+        status,
+        ...(ci.message === undefined ? {} : { ciMessage: ci.message }),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    return applied === 'applied' ? { ok: true } : goneResult;
   }
 
-  async refreshReview(branch: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  async refreshReview(branch: string): Promise<ForgeRefreshResult> {
     const item = this.workItems.get(branch);
     if (item?.pullRequestNumber === undefined) {
-      return { ok: false, message: 'PR/MR番号がないため、レビューを取得できません。' };
+      return {
+        ok: false,
+        reason: 'error',
+        message: 'PR/MR番号がないため、レビューを取得できません。',
+      };
     }
     const review = await fetchReviewThreads(
       this.deps.cli,
@@ -463,31 +518,36 @@ export class ForgeHubService {
       item.cwd,
       item.pullRequestNumber,
     );
-    const base = { ...item };
-    delete base.reviewCommentCount;
-    delete base.reviewMessage;
-    delete base.reviewComments;
-    const next = {
-      ...base,
-      ...(review.ok
-        ? {
-            reviewCommentCount: review.comments.length,
-            reviewComments: review.comments.map((comment) => ({
-              id: comment.id,
-              author: comment.author,
-              body: comment.body,
-              ...(comment.threadId === undefined ? {} : { threadId: comment.threadId }),
-              ...(comment.resolved === undefined ? {} : { resolved: comment.resolved }),
-            })),
-          }
-        : { reviewMessage: review.message ?? 'レビューを取得できませんでした。' }),
-      updatedAt: new Date().toISOString(),
-    };
-    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
-    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    const applied = await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => {
+      const base = { ...current };
+      delete base.reviewCommentCount;
+      delete base.reviewMessage;
+      delete base.reviewComments;
+      return {
+        ...base,
+        ...(review.ok
+          ? {
+              reviewCommentCount: review.comments.length,
+              reviewComments: review.comments.map((comment) => ({
+                id: comment.id,
+                author: comment.author,
+                body: comment.body,
+                ...(comment.threadId === undefined ? {} : { threadId: comment.threadId }),
+                ...(comment.resolved === undefined ? {} : { resolved: comment.resolved }),
+              })),
+            }
+          : { reviewMessage: review.message ?? 'レビューを取得できませんでした。' }),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    if (applied === 'gone') return goneResult;
     return review.ok
       ? { ok: true }
-      : { ok: false, message: review.message ?? 'レビューを取得できませんでした。' };
+      : {
+          ok: false,
+          reason: 'error',
+          message: review.message ?? 'レビューを取得できませんでした。',
+        };
   }
 
   async replyToReviewThread(
@@ -521,33 +581,62 @@ export class ForgeHubService {
     });
   }
 
-  async refreshPullRequestStatus(
-    branch: string,
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  async refreshPullRequestStatus(branch: string): Promise<ForgeRefreshResult> {
     const item = this.workItems.get(branch);
     if (item?.pullRequestNumber === undefined)
-      return { ok: false, message: 'PR/MR番号がないため、状態を取得できません。' };
+      return { ok: false, reason: 'error', message: 'PR/MR番号がないため、状態を取得できません。' };
     const remote = await fetchPullRequestStatus(
       this.deps.cli,
       item.host,
       item.cwd,
       item.pullRequestNumber,
     );
-    const next = {
-      ...item,
+    const applied = await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => ({
+      ...current,
       pullRequestState: remote.state,
       ...(remote.mergeable === undefined ? {} : { mergeable: remote.mergeable }),
       ...(remote.approvalsLeft === undefined ? {} : { approvalsLeft: remote.approvalsLeft }),
       ...(remote.message === undefined ? {} : { pullRequestMessage: remote.message }),
-      status: remote.state === 'merged' ? 'cleanup' : item.status,
+      status: remote.state === 'merged' ? 'cleanup' : current.status,
       updatedAt: new Date().toISOString(),
-    };
-    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
-    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    }));
+    if (applied === 'gone') return goneResult;
     return remote.state === 'unknown'
-      ? { ok: false, message: remote.message ?? 'PR/MR状態を取得できませんでした。' }
+      ? {
+          ok: false,
+          reason: 'error',
+          message: remote.message ?? 'PR/MR状態を取得できませんでした。',
+        }
       : { ok: true };
   }
+}
+
+/** 書き戻す先のカードが既に無いときの結末（Issue #1029）。失敗ではなく中立として扱う。 */
+const goneResult = {
+  ok: false,
+  reason: 'gone',
+  message: '対象のForge作業は既に追跡対象から外れています。',
+} as const satisfies ForgeRefreshResult;
+
+/**
+ * 一度マージを観測したカードを、後続の更新でcleanup以外へ戻さない（Issue #1029）。
+ *
+ * `refreshPullRequestStatus`がマージ済みを検出して`cleanup`にしても、同じ更新ループの
+ * `refreshCi`が`status`を無条件で上書きしていたため、マージ済みカードがcleanup列へ
+ * 到達できなかった。CI・レビュー・PR/MR状態のどの取得から書き戻す場合も、ここを通す。
+ *
+ * `merged`だけをterminalにする。未マージの`closed`は再オープンできるため含めない。
+ * この単調性は「同じPR/MR番号のライフサイクル」を前提にしており、番号の一致は
+ * `applyRemoteUpdate`が別途確認する。
+ */
+function enforceTerminalPrInvariant(
+  previous: ForgeWorkItem,
+  candidate: ForgeWorkItem,
+): ForgeWorkItem {
+  if (previous.pullRequestState !== 'merged' && candidate.pullRequestState !== 'merged') {
+    return candidate;
+  }
+  return { ...candidate, pullRequestState: 'merged', status: 'cleanup' };
 }
 
 function parseDiscoveredPullRequest(
