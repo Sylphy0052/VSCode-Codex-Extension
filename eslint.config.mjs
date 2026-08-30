@@ -52,4 +52,20 @@ export default tseslint.config(
       eqeqeq: ['error', 'always'],
     },
   },
+  // 開発用スクリプト（scripts/*.mjs）。Nodeで直接動かす道具であり、結果を標準出力へ
+  // 書くのが仕事なので`no-console`を外す。拡張本体のバンドルには入らない。
+  // `js.configs.recommended`はNodeのグローバルを知らないため、使うものだけ宣言する
+  // （宣言が無いと`console`が`no-undef`になる。実測: count-manual-test-cases.mjsで10件）
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
 );
