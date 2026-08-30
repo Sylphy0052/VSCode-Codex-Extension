@@ -1132,7 +1132,9 @@ export const DELETE_HANDOFF_TOOL: McpToolDefinition = {
   name: 'delete_handoff',
   description:
     '`write_handoff`が残したファイルを1件消す。不要になったら消すためのツールで、' +
-    '既に無い場合も成功として扱う。',
+    '既に無い場合も成功として扱う。消せるのは自分（呼び出し元のtaskId）が書いたものだけで、' +
+    '他のタスクが書いたものを指定すると理由が返る（オーケストレーターだけは' +
+    'どのタスクのものでも消せる）。',
   inputSchema: {
     type: 'object',
     properties: { taskId: TASK_ID_ARG, slug: { type: 'string', description: '対象のslug' } },
@@ -1284,7 +1286,7 @@ export interface TaskMessagingHubDeps {
 export interface HandoffPort {
   write(taskId: string, slug: string, content: string): Promise<HandoffResult<HandoffEntry>>;
   read(taskId: string, slug: string): Promise<HandoffResult<string>>;
-  list(): Promise<readonly HandoffEntry[]>;
+  list(): Promise<HandoffResult<readonly HandoffEntry[]>>;
   remove(taskId: string, slug: string): Promise<HandoffResult<undefined>>;
 }
 
@@ -1773,7 +1775,16 @@ export class MessagingMcpServer {
     }
 
     if (name === LIST_HANDOFFS_TOOL.name) {
-      const entries = await handoff.list();
+      // ガード失敗（`findSymlinkedAncestor`が祖先のシンボリックリンクを見つけた場合）を
+      // 空配列で返すと「0件」と区別できない（Issue #1033）。他の3ツールと同じく理由を返す
+      const result = await handoff.list();
+      if (!result.ok) {
+        return success(
+          request.id,
+          toolTextResult(JSON.stringify({ accepted: false, reason: result.error }), true),
+        );
+      }
+      const entries = result.value;
       return success(
         request.id,
         toolTextResult(JSON.stringify({ accepted: true, reason: `${entries.length}件`, entries })),
@@ -1824,6 +1835,32 @@ export class MessagingMcpServer {
     }
 
     // name === DELETE_HANDOFF_TOOL.name（このメソッドを呼ぶ4分岐のうち残りの1つ）
+    //
+    // **消せるのは自分が書いたものだけ（Issue #1033）。** `read_handoff`の横断参照は
+    // 「役割セッションが設計メモを書き、オーケストレーターが読む」という想定利用そのもの
+    // なので開いたままにするが、削除にはその必要が無い。受け渡し領域がrun終了時に消える
+    // 一時領域であることは影響度を下げるだけで、実行中の連携情報を他のタスクが消せば
+    // runの進行は妨害できる。
+    //
+    // 判定は接続（`connection.taskId`）だけで行い、引数の値では分岐しない。
+    // オーケストレーターだけは配下のすべてを消せる——runの段取りを持つ側であり、
+    // 不要になった受け渡しを片付ける役目もここにあるため。オーケストレーターかどうかは
+    // `ORCHESTRATOR_CONNECTION_ID`との比較で決まり、`TASK_ID_PATTERN`に合致する文字列
+    // からは到達できない（`controlFor`と同じ方法）
+    const isOrchestrator = taskId === ORCHESTRATOR_CONNECTION_ID;
+    const owner = isOrchestrator ? RESERVED_ORCHESTRATOR_TASK_ID : taskId;
+    if (!isOrchestrator && target !== owner) {
+      return success(
+        request.id,
+        toolTextResult(
+          JSON.stringify({
+            accepted: false,
+            reason: `自分が書いた受け渡しファイルだけを削除できます（このセッションのtaskIdは ${owner}）`,
+          }),
+          true,
+        ),
+      );
+    }
     const result = await handoff.remove(target, slug);
     const body = result.ok
       ? { accepted: true, reason: '削除しました' }

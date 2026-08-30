@@ -8805,6 +8805,10 @@ webview側は届いた差し分を `index` で当てて積み直し、**総数�
 
 オーケストレーターの接続id（`ORCHESTRATOR_CONNECTION_ID`、値は`-orchestrator-`）は`TASK_ID_PATTERN`に一致しないため、そのままではファイル名に使えない。`write_handoff`はオーケストレーターからの書き込みだけ`RESERVED_ORCHESTRATOR_TASK_ID`（`_orchestrator`、`workflow.ts:105`）へ読み替える（`messaging.ts:1625-1629`）。同名のタスクは`validateWorkflow`が定義できないよう弾いている（`workflow.ts:1345-1348`）ため、この読み替えがタスクのファイルと衝突することはない。
 
+**削除できるのは自分が書いたものだけにする（Issue #1033）。** `delete_handoff`は当初`taskId`と`slug`を引数に取るだけで、呼び出し元が誰かを見ていなかった。`write_handoff`が`connection.taskId`から書き込み先を決めて名義を守っている（上記）のに対し、削除側は他タスクの成果物を消せる状態で、名義の保護が書き込みだけの片側になっていた。現在は接続の`taskId`と削除対象の`taskId`が一致することを求め、一致しないときは`accepted: false`と「自分が書いた受け渡しファイルだけを削除できます」という理由を返す。オーケストレーターだけは例外で、どのタスクのファイルも削除できる——runの後片付けと、行き詰まったタスクの残骸を掃除する役割を担うためで、`decide_approval`と同じく`delete_handoff`はオーケストレーターでも自動許可の対象外にしてある（§16.2）。この制約は`DELETE_HANDOFF_TOOL.description`にも書き、エージェントが試す前に読めるようにする。
+
+**一覧はガードに弾かれたことを「0件」と区別する（Issue #1033）。** `TeamHandoffStore.list`は当初`HandoffEntry[]`を返し、`findSymlinkedAncestor`のガードに弾かれた場合も空配列を返していた。呼び出したエージェントからは「まだ誰も書いていない」と見分けが付かず、他のタスクが書いたはずのメモを探しているオーケストレーターが「無い」と判断して先へ進む。現在は`HandoffResult<HandoffEntry[]>`を返し、`list_handoffs`はガード失敗を`accepted: false`と理由で返す（`entries`は付けない）。`read_handoff`・`write_handoff`が既に`HandoffResult`で失敗を伝えていたのに`list`だけが例外だった、という不揃いの解消でもある。
+
 **予約idとの一致は大文字小文字を無視して見る（Issue #1022）。** `validateWorkflow`の`_orchestrator` / `_integration`の判定は当初完全一致だったが、大小文字を区別しないファイルシステム（Windows・既定のmacOS）では`_Orchestrator`のタスクが`_orchestrator`と同じ場所を指す——受け渡しファイル（`_orchestrator~<slug>.md`）と統合worktreeの置き場をタスク側が名乗れてしまう。タスク同士の大文字小文字違いは既に`idsByLowerCase`で弾いていた（worktreeのパスとブランチ名のため）が、そちらは予約idを対象にしていない。
 
 `read_handoff`が返す本文は`formatUntrusted`で囲ってから返す（`messaging.ts:1652-1657`）。受け渡しファイルの中身はエージェントが書いた自由記述であり、`send_message`の本文（`wrapTaskMessage`）や`{{T1.result}}`と同じ脅威クラス（上流の自由記述がそのまま下流のプロンプトへ入る経路）にあたるためで、無害化を経ずに素通りさせない。
