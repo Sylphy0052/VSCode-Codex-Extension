@@ -9,6 +9,8 @@
  * いないため、素のNodeプロセスから使える（`test/external-cli/threadStart.test.mjs` と同じ前提）。
  */
 
+import * as fs from 'node:fs';
+
 import {
   applyEvent,
   initialChatState,
@@ -35,6 +37,15 @@ export interface CodexTurnRequest {
   prompt: string;
   model: string;
   effort: string;
+  /**
+   * 指定すると、送受信したJSON-RPCを1行1件のJSONで書き出す。
+   *
+   * プロトコルの読み違いは「回答が返った」だけでは見つからない。本体と同じ `applyEvent` を
+   * 使っている以上、本体が取り違えていればハーネスも同じように取り違え、辻褄が合ってしまう。
+   * 最初の1件は必ずこれを付けて流し、生のイベント列と `lastNonEmptyAgentMessageText` の結果を
+   * 突き合わせる（`probe.ts`）。
+   */
+  traceFile?: string;
 }
 
 export interface CodexTurnResult {
@@ -56,21 +67,9 @@ const silentLogger: Logger = {
   show: () => undefined,
 };
 
-/**
- * 承認要求への応答。
- *
- * Advisorは読み取りのみ（`approvalPolicy: 'never'`）で動かすため、本来ここへは来ない。
- * それでも**必ず何か返す**必要がある。応答を返さないとapp-serverは待ち続け、ターンが
- * タイムアウトするまでハーネスが止まる（`ServerRequestHandler` の契約）。
- *
- * 返すのは一律の拒否である。ここで承認してしまうと、測定中のAdvisorが読み取り以外のことを
- * できてしまい、本体の権限と条件が変わる。
- */
-async function denyServerRequest(request: ServerRequest): Promise<unknown> {
-  if (request.method.includes('Approval') || request.method.includes('approval')) {
-    return { decision: 'denied' };
-  }
-  return {};
+/** 承認要求のメソッド名か。 */
+function isApprovalRequest(method: string): boolean {
+  return method.toLowerCase().includes('approval');
 }
 
 /**
@@ -83,20 +82,47 @@ async function denyServerRequest(request: ServerRequest): Promise<unknown> {
 export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurnResult> {
   let state: ChatState = initialChatState;
   let onEvent: (() => void) | undefined;
+  /**
+   * 想定していないサーバー要求。
+   *
+   * 応答は返す（返さないとapp-serverが待ち続け、ターンがタイムアウトするまで止まる）が、
+   * **その実行は失敗として記録する**。測定系で未知のプロトコルを黙って握り潰すと、条件の差の
+   * つもりでプロトコル不一致の影響を測ることになる。
+   */
+  const unexpectedRequests: string[] = [];
+
+  const trace =
+    request.traceFile === undefined
+      ? undefined
+      : fs.createWriteStream(request.traceFile, { flags: 'a' });
+  const record = (kind: string, payload: unknown): void => {
+    trace?.write(`${JSON.stringify({ at: new Date().toISOString(), kind, payload })}\n`);
+  };
 
   const connection = new AppServerConnection(
     () => CODEX_BIN,
     silentLogger,
     (method, params) => {
+      record('notification', { method, params });
       state = applyEvent(state, method, params);
       onEvent?.();
     },
-    denyServerRequest,
+    async (serverRequest: ServerRequest) => {
+      record('serverRequest', { method: serverRequest.method, params: serverRequest.params });
+      if (isApprovalRequest(serverRequest.method)) {
+        // Advisorは読み取りのみ（`approvalPolicy: 'never'`）なので本来ここへは来ない。承認して
+        // しまうと測定中のAdvisorが読み取り以外をできてしまい、本体と権限が変わる
+        return { decision: 'denied' };
+      }
+      unexpectedRequests.push(serverRequest.method);
+      return {};
+    },
   );
 
   try {
     await connection.ensureStarted();
     const started = await connection.request('thread/start', { cwd: request.cwd });
+    record('response', { method: 'thread/start', result: started.result, error: started.error });
     if (started.error !== undefined) {
       return {
         response: '',
@@ -129,6 +155,7 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
       // Advisorは読み取りのみ。本体（`buildSummarySessionInput` と同じ固定値）へ揃える
       approvalPolicy: 'never',
     });
+    record('response', { method: 'turn/start', result: turn.result, error: turn.error });
     if (turn.error !== undefined) {
       return {
         response: '',
@@ -141,15 +168,21 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
 
     const outcome = await completion(() => state);
     const latencyMs = Date.now() - startedAt;
+    const failure =
+      outcome ??
+      (unexpectedRequests.length === 0
+        ? undefined
+        : `想定していないサーバー要求を受けました: ${[...new Set(unexpectedRequests)].join(', ')}`);
     return {
       response: lastNonEmptyAgentMessageText(state.items),
       latencyMs,
       sessionTokens: state.sessionTokens,
       contextUsage: state.context,
-      ...(outcome === undefined ? {} : { error: outcome }),
+      ...(failure === undefined ? {} : { error: failure }),
     };
   } finally {
     connection.dispose();
+    trace?.end();
   }
 }
 

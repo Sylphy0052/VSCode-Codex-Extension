@@ -13,13 +13,37 @@ import type { ContextUsage } from '../../../src/appserver/chatState';
 import type { SecondOpinionInput } from '../../../src/secondOpinion/prompt';
 
 /**
+ * 「重要だった」と後から確定した問題1件。
+ *
+ * 文字列だけにしないのは、**自分の事後の印象を正解にしないため**である。何を根拠に重要だと
+ * 言えるのかを一緒に持たせ、根拠の強さ（{@link provenance}）まで書かせる。recall の分母は
+ * ここに並べた件数なので、根拠の弱い項目を足すほど分母が水増しされる。
+ */
+export interface KnownFinding {
+  /** 何が問題だったか。採点者はこの記述と回答を突き合わせる。 */
+  finding: string;
+  /** そう言える根拠。テストのID、Issue番号、実測値など、後から辿れるもの。 */
+  evidence: string;
+  severity: 'critical' | 'warning';
+  /**
+   * 根拠の出所。強い順に `test` > `measured` > `issue` > `review` > `retrospective`。
+   *
+   * `retrospective`（後から自分でそう思った）だけの項目は、集計時に区別できるようにしておく。
+   * これを混ぜたまま recall を出すと、後知恵の量だけ分母が動く。
+   */
+  provenance: 'test' | 'measured' | 'issue' | 'review' | 'retrospective';
+}
+
+/**
  * 評価に使う1案件。
  *
- * 「過去に結論が確定している実案件」を指す。`repoPath` と `baseCommit` で材料の取得地点を
- * 固定するため、同じ案件を何度流しても Advisor が見る材料は同じになる（測定の前提）。
+ * 「過去に結論が確定している実案件」を指す。材料の取得地点は {@link baseCommit} と
+ * {@link targetCommit} の**両方**で固定する。片側だけでは固定にならない（`git diff <base>` の
+ * 右辺は実行時の作業ツリーなので、翌日に作業ツリーが変われば同じ `baseCommit` でも別の材料に
+ * なる）。
  */
 export interface EvalCase {
-  /** 案件の識別子。結果ファイル名と突き合わせに使う。 */
+  /** 案件の識別子。結果ファイル名と突き合わせに使う。案件一覧の中で重複してはならない。 */
   id: string;
   /**
    * 案件の種類。
@@ -37,28 +61,39 @@ export interface EvalCase {
    * 条件間の比較が成立しなくなる。
    */
   baseCommit: string;
+  /**
+   * 差分の右辺にするコミット。
+   *
+   * **必須にしてある。** ここを省いて作業ツリーを右辺にすると、同じ案件を後日流し直したときに
+   * 別の材料になり、実験の再現ができない。ハーネスはこのコミットで一時worktreeを作り、そこから
+   * 材料を取る。
+   */
+  targetCommit: string;
   /** 利用者の依頼文。実際にその案件で使った（または使うはずだった）もの。 */
   userRequest: string;
   /**
    * 背景として渡す本文。空文字なら背景を渡さない。
    *
-   * 実行のたびに要約セッションを開くと、要約の揺らぎが条件間の差へ混ざる。既定ではここへ
-   * **確定済みの背景本文**を入れ、要約セッションを開かない（{@link summarize} を参照）。
+   * 実行のたびに要約セッションを開くと、要約の揺らぎが条件間の差へ混ざる。ここへは
+   * **確定済みの背景本文**を入れ、要約セッションは開かない。
    */
   conversation: string;
   /**
-   * 会話から要約セッションを開いて背景を作り直すか。既定は `false`。
+   * {@link conversation} が何であるか。
    *
-   * `true` にすると本番と同じ経路（要約セッション経由）になるが、要約が実行のたびに変わる。
-   * 要約の作り方そのものを比べる条件（Issue #1044 の条件E）でだけ `true` にする。
+   * 本番では長い会話は要約セッションを通り、`summary` として渡る。ここへ会話記録をそのまま
+   * 入れて `transcript` として流すと、それは**本番の再現ではない**。本番経路で一度作った要約を
+   * 貼って `summary` を指定すれば、本番の材料を保ったまま要約の揺らぎだけを排除できる。
+   * どちらであるかを案件ごとに明示させる。
    */
-  summarize?: boolean;
+  conversationKind: 'summary' | 'transcript';
   /**
-   * 後から本当に重要だったと分かっている問題。recall の採点に使う。
+   * 後から本当に重要だったと分かっている問題。recall の採点と、その分母に使う。
    *
-   * **実験の実施前に確定させること。** 回答を見てから足すと、その回答に有利な採点になる。
+   * **実験の実施前に確定させること。** 回答を見てから足したり削ったりすると、その回答に有利な
+   * 採点になる。案件一覧を固定した時点のコミットを実行記録へ残す（`manifest.json`）。
    */
-  knownImportantFindings: string[];
+  knownImportantFindings: KnownFinding[];
   /** 変更してはいけない制約・既に決まっている方針。誤認数の採点に使う。 */
   knownConstraints: string[];
 }
@@ -71,7 +106,7 @@ export interface EvalCase {
  * 直したときに測定対象がずれる。
  */
 export interface EvalCondition {
-  /** 条件名（`A` / `B` …）。採点時は伏せる。 */
+  /** 条件名（`A` / `B-pos` / `B-repeat` …）。採点時は伏せる。 */
   id: string;
   /** 何を変えた条件かの説明。結果ファイルへ残す。 */
   description: string;
@@ -81,11 +116,21 @@ export interface EvalCondition {
 
 /** 1回の実行の記録。採点はこのファイルだけを見て行う。 */
 export interface EvalRunRecord {
+  /** この実行がどのrunに属するか。別のrunの結果が同じディレクトリへ混ざるのを弾くために使う。 */
+  runId: string;
   caseId: string;
   caseKind: EvalCase['kind'];
   conditionId: string;
   /** 同じ条件を複数回流したときの通し番号（出力のばらつきを見るため）。 */
   attempt: number;
+  /**
+   * この案件の中で何番目に実行した条件か（1始まり）。
+   *
+   * 条件の実行順は案件ごとに入れ替える。モデル側の一時的な調子（混雑・時刻・バックエンドの
+   * 入れ替え）が特定の条件へ偏って乗るのを防ぐためで、偏りが残っていないことを後から検査
+   * できるように順番も記録する。
+   */
+  conditionOrder: number;
   /** Advisorへ実際に送った本文の全文。 */
   prompt: string;
   /** Advisorの回答の全文。 */
@@ -108,6 +153,31 @@ export interface EvalRunRecord {
   effort: string;
   /** 材料の取得地点。条件間で同じであったことを後から検査するために残す。 */
   baseCommit: string;
+  targetCommit: string;
+  /**
+   * この案件の重要問題の総数（recall の分母）。
+   *
+   * 集計側で案件ファイルを読み直さずに済むよう、実行記録へ焼き込む。分母を持たないと
+   * 「8件拾った」が 8/10 なのか 8/20 なのか区別できない。
+   */
+  knownImportantTotal: number;
   /** 失敗した場合の理由。成功なら `undefined`。 */
   error?: string;
+}
+
+/** run全体の素性。結果ディレクトリへ1つ置く。 */
+export interface EvalRunManifest {
+  runId: string;
+  /** ハーネス側のコミット。どのコードで測ったかを後から特定するために要る。 */
+  harnessCommit: string;
+  /** 案件ファイルの内容ハッシュ。実験の途中で正解ラベルが変わっていないことの担保。 */
+  casesSha256: string;
+  casesPath: string;
+  model: string;
+  effort: string;
+  conditionIds: string[];
+  attempts: number;
+  caseCount: number;
+  /** 実行開始時刻（ISO 8601）。 */
+  startedAt: string;
 }

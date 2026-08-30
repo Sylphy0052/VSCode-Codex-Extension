@@ -6,29 +6,46 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/run.ts --cases <cases.json> --out <出力ディレクトリ>
- *   [--conditions A,B] [--attempts 1] [--model gpt-5.6-sol] [--effort high]
+ *   [--conditions A,B-pos] [--attempts 2] [--model gpt-5.6-sol] [--effort high]
  * ```
  *
  * **実物の Codex CLI を呼ぶ。** 案件数 × 条件数 × 試行回数だけモデルへの往復が起き、そのぶんの
- * 時間と費用がかかる。20案件 × 2条件 × 1回で40往復になる。
+ * 時間と費用がかかる。24案件 × 3条件 × 2回で144往復になる。
  *
  * 結果は1実行1ファイル（`<出力先>/<案件id>__<条件id>__<試行番号>.json`）で書く。1つの巨大な
- * JSONへまとめないのは、途中で失敗しても既に終わった分が残るようにするためである。
+ * JSONへまとめないのは、途中で失敗しても既に終わった分が残るようにするためである。runの素性は
+ * `manifest.json` へ別に置く。
  */
 
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
+import { nodeGitCommandRunner } from '../../../src/orchestrator/worktree';
 import { buildSecondOpinionPrompt } from '../../../src/secondOpinion/prompt';
 import { runCodexTurn } from './codexTurn';
 import { EVAL_CONDITIONS, findCondition } from './conditions';
 import { prepareCaseMaterial } from './materials';
-import type { EvalCase, EvalCondition, EvalRunRecord } from './types';
+import type {
+  EvalCase,
+  EvalCondition,
+  EvalRunManifest,
+  EvalRunRecord,
+  KnownFinding,
+} from './types';
 
 /** 既定のモデルとeffort。Advisor本体の既定（`DEFAULT_SECOND_OPINION_CANDIDATES`）と同じ。 */
 const DEFAULT_MODEL = 'gpt-5.6-sol';
 const DEFAULT_EFFORT = 'high';
+
+/**
+ * 既定の試行回数。
+ *
+ * 1回では、条件の差なのか同じ条件内のばらつきなのかを区別できない。プロンプトの並べ替え程度の
+ * 介入は効果も小さいと見込まれるので、既定を2回にしてある。
+ */
+const DEFAULT_ATTEMPTS = 2;
 
 interface Options {
   casesPath: string;
@@ -70,7 +87,7 @@ function parseArgs(argv: readonly string[]): Options {
           return condition;
         });
 
-  const attemptsRaw = values.get('attempts') ?? '1';
+  const attemptsRaw = values.get('attempts') ?? String(DEFAULT_ATTEMPTS);
   const attempts = Number.parseInt(attemptsRaw, 10);
   if (!Number.isSafeInteger(attempts) || attempts < 1) {
     throw new Error(`--attempts は1以上の整数である必要があります: ${attemptsRaw}`);
@@ -92,13 +109,25 @@ function parseArgs(argv: readonly string[]): Options {
  * 形が違うものは黙って飛ばさず、その場で落とす。1件でも欠けたまま走ると、集計時に
  * 「その案件だけ条件Bが無い」という穴の開いた結果になり、原因の切り分けができない。
  */
-async function loadCases(casesPath: string): Promise<EvalCase[]> {
+async function loadCases(casesPath: string): Promise<{ cases: EvalCase[]; sha256: string }> {
   const raw = await fs.readFile(casesPath, 'utf8');
   const parsed: unknown = JSON.parse(raw);
   if (!Array.isArray(parsed)) {
     throw new Error(`${casesPath} は案件の配列である必要があります`);
   }
-  return parsed.map((entry, index) => validateCase(entry, index));
+  const cases = parsed.map((entry, index) => validateCase(entry, index));
+
+  // idが重複していると結果ファイル名が衝突し、後から書いた方が前を上書きする。件数だけが
+  // 静かに減るので、読み込みの時点で落とす
+  const seen = new Set<string>();
+  for (const evalCase of cases) {
+    if (seen.has(evalCase.id)) {
+      throw new Error(`案件idが重複しています: ${evalCase.id}`);
+    }
+    seen.add(evalCase.id);
+  }
+
+  return { cases, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
 const CASE_KINDS: readonly EvalCase['kind'][] = [
@@ -106,6 +135,14 @@ const CASE_KINDS: readonly EvalCase['kind'][] = [
   'designDecision',
   'rootCause',
   'choice',
+];
+
+const PROVENANCES: readonly KnownFinding['provenance'][] = [
+  'test',
+  'measured',
+  'issue',
+  'review',
+  'retrospective',
 ];
 
 function validateCase(entry: unknown, index: number): EvalCase {
@@ -135,34 +172,130 @@ function validateCase(entry: unknown, index: number): EvalCase {
     );
   }
 
+  const conversationKind = record['conversationKind'];
+  if (conversationKind !== 'summary' && conversationKind !== 'transcript') {
+    throw new Error(
+      `${index}件目の案件の conversationKind が summary / transcript のいずれでもありません: ${String(conversationKind)}`,
+    );
+  }
+
   const conversation = record['conversation'];
   return {
     id: requireString('id'),
     kind: kind as EvalCase['kind'],
     repoPath: requireString('repoPath'),
     baseCommit: requireString('baseCommit'),
+    targetCommit: requireString('targetCommit'),
     userRequest: requireString('userRequest'),
     conversation: typeof conversation === 'string' ? conversation : '',
-    ...(record['summarize'] === true ? { summarize: true } : {}),
-    knownImportantFindings: stringArray('knownImportantFindings'),
+    conversationKind,
+    knownImportantFindings: validateKnownFindings(record['knownImportantFindings'], index),
     knownConstraints: stringArray('knownConstraints'),
   };
 }
 
+/**
+ * 正解ラベルを検査する。
+ *
+ * 文字列の配列を受け付けない。根拠のない項目をrecallの分母へ入れると、後から思いついた分だけ
+ * 分母が動き、条件間の比較が成立しなくなる（Issue #1044）。
+ */
+function validateKnownFindings(value: unknown, index: number): KnownFinding[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${index}件目の案件の knownImportantFindings が配列ではありません`);
+  }
+  return value.map((entry, i) => {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new Error(
+        `${index}件目の案件の knownImportantFindings[${i}] がオブジェクトではありません`,
+      );
+    }
+    const record = entry as Record<string, unknown>;
+    const finding = record['finding'];
+    const evidence = record['evidence'];
+    const severity = record['severity'];
+    const provenance = record['provenance'];
+    if (typeof finding !== 'string' || finding.trim() === '') {
+      throw new Error(`${index}件目の knownImportantFindings[${i}].finding が空です`);
+    }
+    if (typeof evidence !== 'string' || evidence.trim() === '') {
+      throw new Error(
+        `${index}件目の knownImportantFindings[${i}].evidence が空です（根拠のない項目はrecallの分母へ入れない）`,
+      );
+    }
+    if (severity !== 'critical' && severity !== 'warning') {
+      throw new Error(`${index}件目の knownImportantFindings[${i}].severity が不正です`);
+    }
+    if (
+      typeof provenance !== 'string' ||
+      !PROVENANCES.includes(provenance as KnownFinding['provenance'])
+    ) {
+      throw new Error(
+        `${index}件目の knownImportantFindings[${i}].provenance が ${PROVENANCES.join(' / ')} のいずれでもありません`,
+      );
+    }
+    return {
+      finding,
+      evidence,
+      severity,
+      provenance: provenance as KnownFinding['provenance'],
+    };
+  });
+}
+
+/**
+ * 条件の実行順を案件ごとにずらす。
+ *
+ * 全案件で同じ順に流すと、モデル側の一時的な調子（混雑・時刻・バックエンドの入れ替え）が
+ * 特定の条件へ偏って乗る。先頭が常に条件Aなら、Aだけが「毎回いちばん最初に聞かれる」条件に
+ * なってしまう。案件と試行の番号で回転させ、順序の効果を条件間で均す。
+ */
+function rotate<T>(items: readonly T[], offset: number): T[] {
+  if (items.length === 0) {
+    return [];
+  }
+  const shift = ((offset % items.length) + items.length) % items.length;
+  return [...items.slice(shift), ...items.slice(0, shift)];
+}
+
+async function readHarnessCommit(): Promise<string> {
+  const result = await nodeGitCommandRunner.run(['rev-parse', 'HEAD'], process.cwd());
+  return result.code === 0 ? result.stdout.trim() : 'unknown';
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  const cases = await loadCases(options.casesPath);
+  const { cases, sha256 } = await loadCases(options.casesPath);
   await fs.mkdir(options.outDir, { recursive: true });
+
+  const runId = randomUUID();
+  const manifest: EvalRunManifest = {
+    runId,
+    harnessCommit: await readHarnessCommit(),
+    casesSha256: sha256,
+    casesPath: path.resolve(options.casesPath),
+    model: options.model,
+    effort: options.effort,
+    conditionIds: options.conditions.map((condition) => condition.id),
+    attempts: options.attempts,
+    caseCount: cases.length,
+    startedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(
+    path.join(options.outDir, 'manifest.json'),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    'utf8',
+  );
 
   console.log(
     `[eval] 案件${cases.length}件 × 条件${options.conditions.length}件 × ${options.attempts}回 = ` +
       `${cases.length * options.conditions.length * options.attempts}往復`,
   );
-  console.log(`[eval] model=${options.model} effort=${options.effort}`);
+  console.log(`[eval] runId=${runId} model=${options.model} effort=${options.effort}`);
   console.log(`[eval] 案件の内訳: ${summarizeKinds(cases)}`);
 
   let failures = 0;
-  for (const evalCase of cases) {
+  for (const [caseIndex, evalCase] of cases.entries()) {
     const prepared = await prepareCaseMaterial(evalCase);
     if (!prepared.ok) {
       console.error(`[eval] ${evalCase.id}: 材料を作れませんでした: ${prepared.reason}`);
@@ -171,8 +304,9 @@ async function main(): Promise<void> {
     }
     const material = prepared.material;
     try {
-      for (const condition of options.conditions) {
-        for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+      for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+        const ordered = rotate(options.conditions, caseIndex + attempt - 1);
+        for (const [orderIndex, condition] of ordered.entries()) {
           const prompt = buildSecondOpinionPrompt(condition.apply(material.input));
           const label = `${evalCase.id} / ${condition.id} / ${attempt}`;
           console.log(`[eval] ${label}: 送信（${Buffer.byteLength(prompt, 'utf8')} bytes）`);
@@ -183,10 +317,12 @@ async function main(): Promise<void> {
             effort: options.effort,
           });
           const record: EvalRunRecord = {
+            runId,
             caseId: evalCase.id,
             caseKind: evalCase.kind,
             conditionId: condition.id,
             attempt,
+            conditionOrder: orderIndex + 1,
             prompt,
             response: turn.response,
             latencyMs: turn.latencyMs,
@@ -196,6 +332,8 @@ async function main(): Promise<void> {
             model: options.model,
             effort: options.effort,
             baseCommit: material.baseCommit,
+            targetCommit: evalCase.targetCommit,
+            knownImportantTotal: evalCase.knownImportantFindings.length,
             ...(turn.error === undefined ? {} : { error: turn.error }),
           };
           const file = path.join(
