@@ -2,7 +2,7 @@
  * 進捗画面（issue #721、見た目の作り直しは issue #781）のWebviewで動くスクリプト。
  *
  * `workflowScript.ts` と同じ方針。テンプレートリテラルの中身なのでTypeScriptの型検査も
- * lintも効かない（`progressScript.test.ts` で構文だけ機械的に確かめる）。
+ * lintも効かない（`test/unit/webviewScript.test.ts` で構文だけ機械的に確かめる）。
  *
  * セキュリティ上の要点: 指示・応答・ファイルパス・コマンド・TODOの本文はすべて
  * エージェントの出力に由来する。文字列結合でHTMLへ埋め込まず、必ず
@@ -61,6 +61,13 @@ export function progressScript(): string {
   let isBusy = false;
   /** ファイル一覧を畳まずに出す件数。これを超えた分は「もっと見る」の裏へ回す。 */
   const FILES_SHOWN = 20;
+  /**
+   * ファイル一覧を全件出すか（issue #1013）。renderFiles は状態が届くたびに一覧を
+   * 作り直すので、開いた状態をDOM側に置いたままにはできない。応答中の状態通知は
+   * 間引き後でも 50ms 間隔（STATE_POST_INTERVAL_MS）で届くため、覚えておかないと
+   * 「もっと見る」を押した直後に畳み戻る。turnOpen と同じ理由・同じ持ち方。
+   */
+  let filesExpanded = false;
 
   /**
    * アイコンを作る。label を渡した場合だけ読み上げの対象にする。
@@ -201,7 +208,8 @@ export function progressScript(): string {
     let shown = 0;
     const rest = [];
     for (const group of groups) {
-      const room = FILES_SHOWN - shown;
+      // 一度開いたら以降は全件出す。ファイルが増えた分もそのまま続けて出る（issue #1013）
+      const room = filesExpanded ? group.files.length : FILES_SHOWN - shown;
       if (room <= 0) {
         rest.push(group);
         continue;
@@ -221,10 +229,8 @@ export function progressScript(): string {
       const button = node('button', 'more', '残り' + hidden + '件を表示');
       button.type = 'button';
       button.addEventListener('click', () => {
-        for (const group of rest) {
-          list.appendChild(fileGroupRow(group, group.files));
-        }
-        button.remove();
+        filesExpanded = true;
+        renderFiles(groups);
       });
       foot.appendChild(button);
     }
