@@ -196,23 +196,19 @@ export function progressScript(): string {
     return row;
   }
 
+  /** 直前に描いたファイル一覧の内容。同じなら作り直さない（issue #1025）。 */
+  let filesShownKey = undefined;
+
   /**
    * 変更したファイルをディレクトリごとにまとめて出す（issue 749）。
    *
    * 先頭から FILES_SHOWN 件で打ち切り、残りは「もっと見る」の裏へ回す。打ち切りは
    * ファイル数で数える（グループ数ではない）。1つのディレクトリに数百件ある形でも
    * 既定の表示が短く収まるようにするため。
-   */
-  /** 直前に描いたファイル一覧の内容。同じなら作り直さない（issue #1025）。 */
-  let filesShownKey = undefined;
-
-  /**
-   * ファイル一覧を描く。中身が前回と同じなら何もしない（issue #1025）。
    *
-   * タイムラインと同じ理由で、ここも毎更新で作り直していた。ファイルは1ターンに
-   * 数件しか増えないため、状態が届くたびに全行を作り直すのは無駄が大きい。
-   * 突き合わせはディレクトリとファイル名を連ねた文字列で行う。数百件でも安く、
-   * 並びの入れ替わりも拾える。
+   * 中身が前回と同じなら何もしない（issue #1025）。タイムラインと同じ理由で、ここも
+   * 毎更新で作り直していた。突き合わせはディレクトリとファイル名を連ねた文字列で行う。
+   * 数百件でも安く、並びの入れ替わりも拾える。
    */
   function renderFiles(groups) {
     const key = groups.map((group) => group.dir + '\u0000' + group.files.join('\u0000')).join('\u0001');
@@ -402,13 +398,16 @@ export function progressScript(): string {
     renderExpandAll(turns, closed);
   }
 
-  /**
-   * 「すべて開く」。畳まれたターンが1件も無いときは出さない（issue 750。ターンが
-   * OPEN_TURNS 件以下のセッションで、押しても何も起きないボタンを見せないため）。
-   */
   /** 直前に出した「閉じているNターンを開く」の N。同じなら作り直さない（issue #1025）。 */
   let expandAllShown = -1;
 
+  /**
+   * 「すべて開く」。畳まれたターンが1件も無いときは出さない（issue 750。ターンが
+   * OPEN_TURNS 件以下のセッションで、押しても何も起きないボタンを見せないため）。
+   *
+   * Nが変わらなければ作り直さない（issue #1025）。押せる要素を作り直すと、当たって
+   * いたフォーカスが body へ戻るため。
+   */
   function renderExpandAll(turns, closed) {
     const holder = el('timelineMore');
     // 押せるボタンを毎回作り直すと、当たっていたフォーカスが body へ戻る
@@ -423,6 +422,10 @@ export function progressScript(): string {
     const button = node('button', 'more', '閉じている' + closed + 'ターンを開く');
     button.type = 'button';
     button.addEventListener('click', () => {
+      // このハンドラは作られた時点の turns を掴む。ボタンは N が変わらなければ据え置く
+      // ので、押した時点の並びとはずれうる。いまは差が出ない（開くのは turnOpen への
+      // index 単位の書き込みで、増えるターンは必ず末尾に来て既定で開くため）。
+      // 既定の開き方（OPEN_TURNS）を変えるときはここも見直すこと
       for (const turn of turns) {
         turnOpen[turn.index] = true;
       }
