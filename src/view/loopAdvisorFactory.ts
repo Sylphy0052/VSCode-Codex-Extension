@@ -23,7 +23,7 @@ import type { Logger } from '../log';
 export function createLoopAdvisorConfig(
   host: HeadlessProvider,
   log: Logger,
-  note: (note: LoopAdvisorNote, iteration: number) => void,
+  note: (note: LoopAdvisorNote, iteration: number, runId: number) => void,
 ): LoopAdvisorConfig | undefined {
   const settings = readLoopAdvisorConfig();
   if (!settings.enabled) {
@@ -79,6 +79,9 @@ export function advisorDisplay(
   if (note.status === 'failed') {
     return failureDisplay(note, iteration);
   }
+  if (note.status === 'disabled') {
+    return disabledDisplay(note, iteration);
+  }
   const advice = note.advice;
   const heading = `Advisor（${iteration}ターン目）: ${SEVERITY_LABEL[advice.severity]}`;
   const body =
@@ -102,6 +105,10 @@ export function advisorDisplay(
  * 1回目は事実だけを書き、`ADVISOR_FAILURE_ALERT_THRESHOLD`回続いた時点から「連続して
  * 動けていない」と明示する。ここで初めて、Advisorが実質無効のまま回っていることが
  * 利用者に伝わる。
+ *
+ * 同じ回数で`LoopController`はこの実行のAdvisorを止める（issue #1009）。**止めたことは
+ * この文面で伝える。** 呼ぶのをやめたことを別の項目で出すと、失敗の記録と止めた記録が
+ * 会話に2行並び、同じことを2回言うことになる。
  */
 function failureDisplay(
   note: Extract<LoopAdvisorNote, { status: 'failed' }>,
@@ -116,6 +123,48 @@ function failureDisplay(
   return {
     status: alerting ? 'concern' : 'note',
     text: `${heading}\n\n${body}${alert}`,
+    detail: '',
+  };
+}
+
+/**
+ * 連続失敗が続いたため、この実行ではもうAdvisorを呼ばないことの表示（issue #1009）。
+ *
+ * `failureDisplay`の警告と違い、**この先は呼ばれない**ことを伝える。1回の呼び出しは
+ * 最大でタイムアウトぶん待つため、失敗が続く状態を放っておくと待ち時間だけが積み上がる。
+ * 止めたことを黙っていると、Advisorが動いていないことに気づけないまま回ることになる。
+ */
+function disabledDisplay(
+  note: Extract<LoopAdvisorNote, { status: 'disabled' }>,
+  iteration: number,
+): { status: string; text: string; detail: string } {
+  return {
+    status: 'concern',
+    text:
+      `Advisor（${iteration}ターン目）: このループでは呼ぶのをやめました\n\n` +
+      `Advisorが${note.consecutiveFailures}回続けて動けなかったため（${FAILURE_LABEL[note.reason]}）、` +
+      'このループの残りでは呼びません。1回あたり最大でタイムアウトぶん待つため、' +
+      '指摘が得られないまま待ち時間だけが増えるのを避けます。' +
+      '設定（実行ファイル・モデル・タイムアウト）を確認してください。' +
+      '次にループを始めたときは、またAdvisorを呼びます。',
+    detail: '',
+  };
+}
+
+/**
+ * ゴールの無いループをAdvisor有効のまま始めたときの注記（issue #1009）。
+ *
+ * Advisorはゴール駆動ループでしか動かない（`LoopPlan.advisor`のコメント）。設定と
+ * トグルはONのままなので、**黙って何も起きない**と「効いているつもり」で回せてしまう。
+ * ループの開始時に1回だけ出し、毎ターンは繰り返さない（毎周出すと本編が埋まる）。
+ */
+export function advisorSkippedDisplay(): { status: string; text: string; detail: string } {
+  return {
+    status: 'note',
+    text:
+      'Advisor: このループでは動きません\n\n' +
+      'Advisorはゴール（目的と受入基準）を入力したループでのみ動きます。' +
+      '目的を入れずに始めたため、このループの進め方は点検されません。',
     detail: '',
   };
 }

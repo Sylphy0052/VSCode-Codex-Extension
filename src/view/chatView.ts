@@ -50,7 +50,11 @@ import {
 } from '../config';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
-import { advisorDisplay, createLoopAdvisorConfig } from './loopAdvisorFactory';
+import {
+  advisorDisplay,
+  advisorSkippedDisplay,
+  createLoopAdvisorConfig,
+} from './loopAdvisorFactory';
 import { buildGoalDraftReply, planGoalDraft } from './goalDraftFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
@@ -1283,21 +1287,32 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // ループエンジニアリングの方針（issue #891）は設定から読んで渡す。webviewから
         // 届いた`plan`には含めない——送信文の組み立てに使う指示文をwebview側の値で
         // 差し替えられるようにしないため
+        // Advisor（issue #957）。設定で無効なら`undefined`が返り、計画にも載らない
+        const advisor = createLoopAdvisorConfig('codex', this.log, (advice, iteration, runId) =>
+          entry.session.noteSecondOpinion(
+            // 実行ごとに別のidにする（issue #1009）。ターン番号だけだと、同じ会話で
+            // 2回目のループを回したときに1回目の記録を上書きしてしまう
+            `loopAdvisor:${runId}:${iteration}`,
+            advisorDisplay(advice, iteration),
+          ),
+        );
         const plan = normalizeLoopPlan(
           m['plan'],
           readChatLoopEngineeringConfig(),
           createGoalLoopOptions('codex', this.log),
-          // Advisor（issue #957）。設定で無効なら`undefined`が返り、計画にも載らない
-          createLoopAdvisorConfig('codex', this.log, (advice, iteration) =>
-            entry.session.noteSecondOpinion(
-              `loopAdvisor:${iteration}`,
-              advisorDisplay(advice, iteration),
-            ),
-          ),
+          advisor,
         );
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');
           return;
+        }
+        // 有効なのにゴールが無いループでは動かない。黙って何も起きないと、効いている
+        // つもりで回せてしまう（issue #1009）
+        if (advisor !== undefined && plan.goal === undefined) {
+          entry.session.noteSecondOpinion(
+            `loopAdvisor:skipped:${randomUUID()}`,
+            advisorSkippedDisplay(),
+          );
         }
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
         entry.loop.start(plan, entry.session.getState().items);
