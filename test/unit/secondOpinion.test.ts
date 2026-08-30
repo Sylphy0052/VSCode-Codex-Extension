@@ -211,9 +211,10 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     expect(prompt).toContain('独立した立場から意見を求められています');
     // 用途をコードレビューへ限定しない（Issue #926 P0）
     expect(prompt).toContain('求められるのはコードレビューに限りません');
-    // 独立性は「セッション状態を継承しない」こと。回答は自動反映されない（Human Gate）
+    // 独立性は「セッション状態を継承しない」こと。回答の行き先は設定で変わるため、採否を
+    // 決めるのが受け取った側であることだけを固定指示で伝える（Issue #1003）
     expect(prompt).toContain('そのエージェントの内部の判断過程は渡されていません');
-    expect(prompt).toContain('元の作業へ自動では反映されません');
+    expect(prompt).toContain('採否を決めるのは受け取った側です');
     expect(prompt).toContain('abc1234');
     expect(prompt).toContain('diff --git a/a.ts b/a.ts');
     expect(prompt).toContain('現在の作業ツリーは実行中に変更されている可能性がある');
