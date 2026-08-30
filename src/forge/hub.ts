@@ -148,7 +148,11 @@ export class ForgeHubService {
 
   constructor(private readonly deps: ForgeHubDeps) {
     for (const item of deps.memento.get<ForgeWorkItem[]>(FORGE_WORK_ITEMS_KEY, [])) {
-      if (isForgeWorkItem(item)) this.workItems.set(item.branch, item);
+      // 以前の版が保存したカードは、マージ済みでもstatusが上書きされたまま残っていることがある
+      // （Issue #1029）。書き戻しのときだけ正規化していると、リモート取得が失敗し続ける間は
+      // ずっとcleanup列へ移らない。読み込んだ時点で揃えておく。
+      if (isForgeWorkItem(item))
+        this.workItems.set(item.branch, enforceTerminalPrInvariant(item, item));
     }
     for (const planned of deps.memento.get<ForgePlannedIssue[]>(FORGE_PLANNED_ISSUES_KEY, [])) {
       if (
@@ -362,14 +366,14 @@ export class ForgeHubService {
    */
   private async applyRemoteUpdate(
     branch: string,
-    expectedPullRequestNumber: number,
+    expectedPullRequestNumber: number | undefined,
     mutate: (current: ForgeWorkItem) => ForgeWorkItem,
-  ): Promise<'applied' | 'gone'> {
+  ): Promise<'applied' | 'gone' | 'superseded'> {
     const current = this.workItems.get(branch);
     if (current === undefined) return 'gone';
     // 取得中にPR/MRが差し替わったカードへ、前のPR/MRの結果を書かない。マージ済みの単調性は
     // 「同じPR/MR番号のライフサイクル」を前提にしているため、番号が変われば前提が崩れる。
-    if (current.pullRequestNumber !== expectedPullRequestNumber) return 'gone';
+    if (current.pullRequestNumber !== expectedPullRequestNumber) return 'superseded';
     const normalized = enforceTerminalPrInvariant(current, mutate(current));
     this.workItems.set(branch, { ...normalized, nextAction: deriveNextAction(normalized) });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
@@ -423,15 +427,16 @@ export class ForgeHubService {
     if (result.code !== 0 || result.stdout.trim() === '') return;
     const found = parseDiscoveredPullRequest(item.host, result.stdout);
     if (found === undefined) return;
-    const next: ForgeWorkItem = {
-      ...item,
+    // 取得の待ち時間に会話状態などが更新されていることがある。入口で読んだカードをそのまま
+    // 書き戻すとその更新が消えるため、書き戻す直前のカードへ番号だけを乗せる。
+    // 入口では番号が無いことを確認済み。別経路が先に番号を入れていたら、こちらは書かない。
+    await this.applyRemoteUpdate(branch, undefined, (current) => ({
+      ...current,
       pullRequestNumber: found.number,
       ...(found.url === undefined ? {} : { pullRequestUrl: found.url }),
       status: 'review',
       updatedAt: new Date().toISOString(),
-    };
-    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
-    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    }));
   }
 
   async createDraftPullRequest(
@@ -464,15 +469,16 @@ export class ForgeHubService {
     if (!created.ok) return { ok: false, message: created.message };
     const number =
       created.url === undefined ? undefined : parsePullRequestNumberFromUrl(created.url);
-    const next = {
-      ...item,
+    // push・PR/MR作成の間に会話状態などが更新されていることがある。入口で読んだカードを
+    // そのまま書き戻すとその更新が消えるため、書き戻す直前のカードへ結果だけを乗せる。
+    // 書き戻せなくてもPR/MRの作成自体は成功しているので、URLは返す。
+    await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => ({
+      ...current,
       status: 'review' as const,
       ...(created.url === undefined ? {} : { pullRequestUrl: created.url }),
       ...(number === undefined ? {} : { pullRequestNumber: number }),
       updatedAt: new Date().toISOString(),
-    };
-    this.workItems.set(branch, { ...next, nextAction: deriveNextAction(next) });
-    await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
+    }));
     return { ok: true, url: created.url };
   }
 
@@ -494,7 +500,7 @@ export class ForgeHubService {
         updatedAt: new Date().toISOString(),
       };
     });
-    return applied === 'applied' ? { ok: true } : goneResult;
+    return applied === 'applied' ? { ok: true } : discardedResult(applied);
   }
 
   async refreshReview(branch: string): Promise<ForgeRefreshResult> {
@@ -534,7 +540,7 @@ export class ForgeHubService {
         updatedAt: new Date().toISOString(),
       };
     });
-    if (applied === 'gone') return goneResult;
+    if (applied !== 'applied') return discardedResult(applied);
     return review.ok
       ? { ok: true }
       : {
@@ -594,7 +600,7 @@ export class ForgeHubService {
       status: remote.state === 'merged' ? 'cleanup' : current.status,
       updatedAt: new Date().toISOString(),
     }));
-    if (applied === 'gone') return goneResult;
+    if (applied !== 'applied') return discardedResult(applied);
     return remote.state === 'unknown'
       ? {
           ok: false,
@@ -611,6 +617,22 @@ const goneResult = {
   reason: 'gone',
   message: '対象のForge作業は既に追跡対象から外れています。',
 } as const satisfies ForgeRefreshResult;
+
+/**
+ * 取得結果を書き戻せなかった理由を、利用者向けの文言に振り分ける（Issue #1029）。
+ *
+ * カードが消えている場合と、待っている間にPR/MRが差し替わった場合とでは、
+ * 画面に出すべき説明が違う。どちらも失敗ではないので`gone`扱いで中立に見せる。
+ */
+function discardedResult(outcome: 'gone' | 'superseded'): ForgeRefreshResult {
+  return outcome === 'gone'
+    ? goneResult
+    : {
+        ok: false,
+        reason: 'gone',
+        message: 'PR/MRが差し替わったため、取得した結果を破棄しました。',
+      };
+}
 
 /**
  * 一度マージを観測したカードを、後続の更新でcleanup以外へ戻さない（Issue #1029）。

@@ -377,7 +377,22 @@ describe('ForgeHubService cleanupライフサイクル', () => {
     expect(await service.refreshCi(branch)).toMatchObject({ ok: false, reason: 'error' });
   });
 
-  it('以前の版が保存したmerged×ciのカードを次の同期でcleanupへ戻す', async () => {
+  it('CI取得の待ち時間に入った会話状態の更新を、CI結果の書き戻しで消さない', async () => {
+    const remote: Remote = { ci: ciPassed, pullRequest: open };
+    const { service, branch } = await startedService(remote);
+    remote.beforeCi = async () => {
+      await service.recordSessionState('thread-1', { busy: false, failed: true });
+    };
+
+    expect(await service.refreshCi(branch)).toEqual({ ok: true });
+    expect(service.listWorkItems()[0]).toMatchObject({
+      sessionBusy: false,
+      sessionFailed: true,
+      status: 'ci',
+    });
+  });
+
+  it('以前の版が保存したmerged×ciのカードを、読み込んだ時点でcleanupへ戻す', async () => {
     const stored = {
       issue: { number: 12, title: '矛盾した状態で保存されたIssue' },
       host: 'github',
@@ -415,7 +430,10 @@ describe('ForgeHubService cleanupライフサイクル', () => {
       },
     });
 
-    expect(service.listWorkItems()).toMatchObject([{ status: 'ci' }]);
+    // リモート取得を待たずに揃っている。取得が失敗し続けてもcleanup列に出せる。
+    expect(service.listWorkItems()).toMatchObject([
+      { status: 'cleanup', pullRequestState: 'merged' },
+    ]);
     await service.refreshRemoteStates();
 
     expect(service.listWorkItems()).toMatchObject([
