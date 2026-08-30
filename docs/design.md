@@ -8734,7 +8734,11 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 
 #### ファイル受け渡し
 
-置き場は`.agents/handoff/runs/<runId>/<taskId>-<slug>.md`（`teamHandoff.ts:15,25`）。`send_message`/`ask_orchestrator`の本文上限（`MAX_MESSAGE_BODY_LENGTH`）に収まらない・後から読み返したい情報（設計メモ、レビュー結果、共有コンテキスト）だけをファイルとして残すための領域で、メッセージング（§16.21・§16.34）の代わりではない。1ファイルの本文は`MAX_HANDOFF_BYTES`（256KiB、`teamHandoff.ts:36`）、1run内のファイル数は`MAX_HANDOFF_FILES_PER_RUN`（100件、`teamHandoff.ts:39`）が上限。パスの組み立ては`handoffPath`（`teamHandoff.ts:73-87`）だけが行い、各操作の前に祖先へのシンボリックリンクガード（`findSymlinkedAncestor`、§16.6と同じ一次防御）を通す。
+置き場は`.agents/handoff/runs/<runId>/<taskId>~<slug>.md`（`teamHandoff.ts`の`HANDOFF_DIR_SEGMENTS`・`NAME_SEPARATOR`）。`send_message`/`ask_orchestrator`の本文上限（`MAX_MESSAGE_BODY_LENGTH`）に収まらない・後から読み返したい情報（設計メモ、レビュー結果、共有コンテキスト）だけをファイルとして残すための領域で、メッセージング（§16.21・§16.34）の代わりではない。1ファイルの本文は`MAX_HANDOFF_BYTES`（256KiB、`teamHandoff.ts:36`）、1run内のファイル数は`MAX_HANDOFF_FILES_PER_RUN`（100件、`teamHandoff.ts:39`）が上限。パスの組み立ては`handoffPath`（`teamHandoff.ts:73-87`）だけが行い、各操作の前に祖先へのシンボリックリンクガード（`findSymlinkedAncestor`、§16.6と同じ一次防御）を通す。
+
+**`taskId`とスラッグの区切りは`~`にする（`NAME_SEPARATOR`、Issue #1022）。** `TASK_ID_PATTERN`（`workflow.ts`）と`SLUG_PATTERN`（`teamHandoff.ts`）はどちらも`~`を許さないため、この1文字が現れる位置は組み立てで置いた1箇所だけになり、`parseHandoffFileName`の分割が一意に決まる。当初は`-`で区切り「最後の`-`で割る」と決めていたが、`-`は両側の字種に含まれるため割り方が定まらず、`impl`＋`design-memo`と`impl-design`＋`memo`が同じ`impl-design-memo.md`になっていた——`list_handoffs`が書いた本人と違う`taskId`を返し、`write_handoff`が`connection.taskId`だけを使って守っていた「別タスクの名義を騙れない」（§16.21）も、`-`を含むtaskIdのタスクが1つあれば破れていた。分割後は`taskId`を`TASK_ID_PATTERN`、スラッグを`SLUG_PATTERN`で個別に検証する（以前は`taskId`側もスラッグのパターンで代用しており、taskIdとしては長すぎる名前を通していた）。受け渡し領域はrun終了時に丸ごと消える一時領域なので、旧命名との後方互換は持たない。
+
+ディレクトリ分割（`<runId>/<taskId>/<slug>.md`）も候補だったが採らない。`list`の走査・1run内のファイル数上限の数え方・シンボリックリンクガードの対象がいずれも1段深くなって差分と回帰範囲が広がるうえ、`taskId`がそのままディレクトリ名になると、Windowsの予約デバイス名（`CON`等）のtaskIdで作成に失敗する経路が増える。
 
 書き換える操作（`makeDirectory` / `writeTextFile` / `removeFile` / `removeDirectory`）は、`HandoffFileSystemPort`の側で成否を`boolean`で返す。失敗を`void`で握り潰すと、`write_handoff`が書けていないファイルに対して「書き込みました」と応答し、直後の`read_handoff`が「ありません」になる——呼び出したエージェントからは原因を追えない不整合になるためである。読む操作（`readTextFile` / `listDirectory`）は「無ければ空」という戻り値自体が失敗を表せるので`boolean`にしていない。
 
@@ -8755,7 +8759,7 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 #### 確かめ方
 
 - `test/unit/rolePresets.test.ts`: 役割ごとの`model`/`effort`の対応・`escalation`段がどの役割からも引けないこと・未知の役割の扱い
-- `test/unit/teamHandoff.test.ts`: `write`/`read`/`list`/`remove`/`removeRun`の正常系、本文サイズ上限・ファイル数上限での拒否、シンボリックリンクガード、`parseHandoffFileName`の境界（最後の`-`で割る仕様）
+- `test/unit/teamHandoff.test.ts`: `write`/`read`/`list`/`remove`/`removeRun`の正常系、本文サイズ上限・ファイル数上限での拒否、シンボリックリンクガード、`parseHandoffFileName`の境界（区切り文字での分割・taskIdとslugを別々のパターンで検証すること・`impl`+`design-memo`と`impl-design`+`memo`が別ファイルとして共存すること）
 - `test/unit/messaging.test.ts`: 4ツールの可視性（`hub.handoff`未設定時は見せない）、`write_handoff`が接続の`taskId`のみを使い引数の同名フィールドを無視すること、オーケストレーターの書き込みが`RESERVED_ORCHESTRATOR_TASK_ID`へ読み替わること、`read_handoff`の本文が`formatUntrusted`で囲まれること
 - `test/unit/workflow.test.ts`: `role`の解決優先順位4段（タスクが明示 > タスクの役割 > `defaults`が明示 > `defaults`の役割）と、どちらも無いときに`model`/`effort`が`undefined`のまま（従来どおり拡張機能の設定に従う）であること、`id: "_orchestrator"`が`validateWorkflow`のエラーになること
 - `test/unit/planner.test.ts`: `team`を指定したときだけ`role`の説明と役割ごとの`model`/`effort`がプロンプトへ出ること

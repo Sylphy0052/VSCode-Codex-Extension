@@ -6,6 +6,7 @@ import {
   runIdError,
   type SymlinkCheckPort,
 } from './fsGuards';
+import { TASK_ID_PATTERN } from './workflow';
 
 /**
  * チームモードのファイル受け渡し（design.md §16.44、Issue #693）。
@@ -36,6 +37,18 @@ const HANDOFF_DIR_SEGMENTS = ['.agents', 'handoff', 'runs'] as const;
  * スラッグはエージェントが生成した文字列がそのまま来る経路なので、taskIdと同じ強度で縛る。
  */
 const SLUG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * ファイル名の中で `taskId` とスラッグを区切る1文字。
+ *
+ * `TASK_ID_PATTERN`（`workflow.ts`）と `SLUG_PATTERN` のどちらも `~` を許さないため、
+ * この文字が現れる位置は組み立てで置いた1箇所だけになり、分割が一意に決まる（Issue #1022）。
+ * 以前は `-` で区切り「最後の `-` で割る」と決めていたが、`-` は両側の字種に含まれるため
+ * 割り方が定まらず、`impl` + `design-memo` と `impl-design` + `memo` が同じファイル名に
+ * なっていた——一覧が書いた本人と違う`taskId`を返し、`write_handoff`が
+ * `connection.taskId`だけを使って守っていた「別タスクの名義を騙れない」も破れていた。
+ */
+const NAME_SEPARATOR = '~';
 
 /** 1ファイルの本文の上限。巨大なファイルで拡張機能ホストを固まらせないための安全弁。 */
 export const MAX_HANDOFF_BYTES = 256 * 1024;
@@ -91,7 +104,7 @@ export function handoffPath(repoRoot: string, runId: string, taskId: string, slu
   if (!SLUG_PATTERN.test(slug)) {
     throw new Error(`不正なスラッグ（許可されない文字を含みます）: ${slug}`);
   }
-  return path.join(handoffRunDir(repoRoot, runId), `${taskId}-${slug}.md`);
+  return path.join(handoffRunDir(repoRoot, runId), `${taskId}${NAME_SEPARATOR}${slug}.md`);
 }
 
 /** 一覧の1件。 */
@@ -103,12 +116,13 @@ export interface HandoffEntry {
 }
 
 /**
- * ファイル名を `<taskId>-<slug>.md` として解釈する。想定外の名前（人が置いたファイル、
- * 別の命名の残骸）は `undefined` を返して一覧から外す。
+ * ファイル名を `<taskId>~<slug>.md` として解釈する。想定外の名前（人が置いたファイル、
+ * 旧命名の残骸）は `undefined` を返して一覧から外す。
  *
- * taskIdもスラッグも `-` を含みうるため区切りが一意に定まらない。**最後の `-` で割る**
- * ことに決め、`handoffPath` が組み立てる形（スラッグは末尾）と揃える。両側を
- * それぞれのパターンで検証するので、割り方を間違えた組み合わせは弾かれる。
+ * 区切りの `NAME_SEPARATOR` は taskId・スラッグのどちらの字種にも含まれないため、
+ * 最初に現れた1文字で割れば `handoffPath` が組み立てた形へ必ず戻る。両側は
+ * それぞれのパターン（taskIdは `TASK_ID_PATTERN`、スラッグは `SLUG_PATTERN`）で
+ * 個別に検証する。区切りが2つ以上ある名前は、どちらかの検証で必ず落ちる。
  */
 export function parseHandoffFileName(
   fileName: string,
@@ -117,18 +131,19 @@ export function parseHandoffFileName(
     return undefined;
   }
   const stem = fileName.slice(0, -'.md'.length);
-  const cut = stem.lastIndexOf('-');
+  const cut = stem.indexOf(NAME_SEPARATOR);
   if (cut <= 0 || cut === stem.length - 1) {
     return undefined;
   }
   const taskId = stem.slice(0, cut);
-  const slug = stem.slice(cut + 1);
+  const slug = stem.slice(cut + NAME_SEPARATOR.length);
   if (!SLUG_PATTERN.test(slug)) {
     return undefined;
   }
-  // taskIdの字種は `identifierError` と同じ判定を通したいが、runIdを持たないため
-  // ここではスラッグと同じパターンで代用する（`TASK_ID_PATTERN` と同一の字種）
-  if (!SLUG_PATTERN.test(taskId)) {
+  // taskIdは`identifierError`と同じ`TASK_ID_PATTERN`で見る（runIdを持たないため
+  // `identifierError`自体は呼べない）。スラッグのパターンで代用すると、taskIdとしては
+  // 長すぎる名前（50文字超）を通してしまう
+  if (!TASK_ID_PATTERN.test(taskId)) {
     return undefined;
   }
   return { taskId, slug };
@@ -223,7 +238,10 @@ export class TeamHandoffStore {
     }
     const content = await this.fs.readTextFile(target);
     if (content === undefined) {
-      return { ok: false, error: `受け渡しファイルが見つかりません: ${taskId}-${slug}.md` };
+      return {
+        ok: false,
+        error: `受け渡しファイルが見つかりません: ${taskId}${NAME_SEPARATOR}${slug}.md`,
+      };
     }
     return { ok: true, value: content };
   }
