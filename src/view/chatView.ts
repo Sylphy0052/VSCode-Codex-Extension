@@ -1531,8 +1531,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           canUpdateMaterial: options?.canUpdateMaterial === true,
         });
       },
-      // 承認された指示を送る唯一の口（Issue #929）。`approveSecondOpinionHandoff` が
-      // `markApproved()` を通したときにだけ呼ばれる
+      // セカンドオピニオンの結果が作業中のAIへ渡る唯一の口（Issue #929）。人が承認した指示
+      // （`approveSecondOpinionHandoff` が `markApproved()` を通したとき）と、回答の自動送信
+      // （`autoSendResult`。Issue #1003）の両方がここを通る
       sendApprovedInstruction: async (text) => {
         const outcome = await entry.session.sendOrQueue(text, this.configFor(entry));
         this.reportActivity(entry, text);

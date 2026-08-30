@@ -862,6 +862,12 @@
           "scope": "window",
           "markdownDescription": "セカンドオピニオンの依頼文の既定値。実行のたびに編集できる。"
         },
+        "agent.secondOpinion.autoSend": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンの回答が返った時点で、その全文を作業中のAIへ自動で送る。作業中のAIは前置き（別セッションの意見であり人はまだ確認していないこと）を読んだうえで、採否を自分で判断する。`false` にすると自動では送らず、回答項目の「メインAIへの指示を作る」→「指示を確認して送る」で人が確認してから送る従来の手順になる。失敗した回答は自動送信の対象にしない。"
+        },
         "agent.secondOpinion.advisor.enabled": {
           "type": "boolean",
           "default": true,

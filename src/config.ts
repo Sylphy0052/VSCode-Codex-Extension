@@ -229,6 +229,11 @@ export interface SecondOpinionConfig {
   template: string;
   /** 相談を続けられるAdvisorセッション（Issue #929）の設定。 */
   advisor: AdvisorSettings;
+  /**
+   * 回答が返った時点で、その全文を作業中のAIへ自動で送るか（Issue #1003）。既定は `true`。
+   * `false` にすると Issue #929 の手動2ステップ（指示を作る → 確認して送る）だけになる。
+   */
+  autoSend: boolean;
 }
 
 /** Advisorセッション（Issue #929）の設定。 */
@@ -267,6 +272,7 @@ export function readSecondOpinionConfig(): SecondOpinionConfig {
         c.get<unknown>('secondOpinion.advisor.idleTimeoutMs'),
       ),
     },
+    autoSend: c.get<boolean>('secondOpinion.autoSend') ?? true,
   };
 }
 
