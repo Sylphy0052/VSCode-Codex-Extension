@@ -603,7 +603,11 @@ Evaluatorは「ゴールを達成したか」を見る役で、**進め方が妥
 | `concern` | 止めず、次のターンの指示へ独立した区画として載せる     |
 | `note`    | 参考として載せるが「次に集中すること」へは格上げしない |
 
-Advisorが落ちてもループは止まらない（応答が読めない・タイムアウトのときは「指摘なし」として扱う）。呼ぶ間隔は `agent.chat.loopAdvisor.everyNTurns` で変えられる。
+Advisorが落ちてもループは止まらない。応答が読めない・タイムアウトのときは**評価できなかった周**として会話へ残し、「見たうえで指摘が無かった」周とは区別する。同じ理由で続けて動けないときは、その旨と設定を確認する案内を出したうえで、その実行の残りではAdvisorを呼ばない（待ち時間だけが積み上がるのを避けるため）。呼ぶ間隔は `agent.chat.loopAdvisor.everyNTurns` で変えられる。
+
+相談先は既定でCodex CLIに固定してある。Claude Codeの会話からループを回した場合も、抜粋はCodexへ渡る。変えるには `agent.chat.loopAdvisor.provider` を指定する。
+
+ゴール（目的と受入基準）を入力していないループでは動かない。有効のまま目的なしでループを始めたときは、その旨を会話へ1回だけ残す。
 
 ### セカンドオピニオン
 
@@ -978,10 +982,10 @@ tasks:
 | `agent.chat.loop.autoGoal.provider`              | `inherit`                                                                        | window   | 準備ターンを動かすCLI。準備役にはツールを渡さないため、このターンでファイルは書き換わらない                                                                                                                                                                 |
 | `agent.chat.loop.autoGoal.model`                 | `auto`                                                                           | window   | 準備ターンのモデル。`auto` は軽量なモデルに任せる                                                                                                                                                                                                           |
 | `agent.chat.loop.autoGoal.timeoutSeconds`        | `120`                                                                            | window   | 準備ターンの応答を待つ上限（秒）。超えたら3つの欄を空のまま残し、ループは始めない                                                                                                                                                                           |
-| `agent.chat.loopAdvisor.enabled`                 | `false`                                                                          | window   | ゴール駆動ループの各ターンのあとに、別のAI（[Advisor](#ループのadvisor)）へ進め方の妥当性を見せる                                                                                                                                                           |
+| `agent.chat.loopAdvisor.enabled`                 | `false`                                                                          | window   | ゴール駆動ループの各ターンのあとに、別のAI（[Advisor](#ループのadvisor)）へ進め方の妥当性を見せる。既定の相談先はCodex CLIで、Claude Codeの会話でも抜粋はCodexへ渡る                                                                                        |
 | `agent.chat.loopAdvisor.provider`                | `codex`                                                                          | window   | Advisorを動かすCLI。既定は `codex` 固定で、会話しているCLIによらず相談先は変わらない                                                                                                                                                                        |
 | `agent.chat.loopAdvisor.model`                   | `auto`                                                                           | window   | Advisorのモデル。`auto` は動かすプロバイダに合わせて解決する（codexは `gpt-5.6-sol`、claudeは `haiku`）                                                                                                                                                     |
-| `agent.chat.loopAdvisor.timeoutSeconds`          | `120`                                                                            | window   | Advisorの応答を待つ上限（秒）。超えたら「指摘なし」として扱い、ループは止めない                                                                                                                                                                             |
+| `agent.chat.loopAdvisor.timeoutSeconds`          | `120`                                                                            | window   | Advisorの応答を待つ上限（秒）。超えたら評価できなかった周として会話へ残し、ループは止めない。10未満を書いても10として扱う                                                                                                                                   |
 | `agent.chat.loopAdvisor.everyNTurns`             | `1`                                                                              | window   | 何ターンごとにAdvisorを呼ぶか。増やすと待ち時間と費用は減るが、方向のずれに気づくのが遅くなる                                                                                                                                                               |
 | `agent.notifications.approvalPending`            | `true`                                                                           | window   | 承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求での重複通知はしない                                                                                                                                       |
 | `agent.notifications.turnComplete`               | `false`                                                                          | window   | ターンが完了した直後、そのタブが見えていなければ通知を出す。既定は無効                                                                                                                                                                                      |

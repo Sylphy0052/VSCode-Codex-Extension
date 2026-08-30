@@ -382,6 +382,8 @@ export function readGoalEvaluatorConfig(): GoalEvaluatorSettings {
  * `model` はここでは `auto` のまま返す。実際のモデル名は実効プロバイダが決まってから
  * `resolveAdvisorModel` が解決する（`loopAdvisorFactory.ts`）。
  */
+const MIN_ADVISOR_TIMEOUT_SECONDS = 10;
+
 export function readLoopAdvisorConfig(): LoopAdvisorSettings {
   const c = vscode.workspace.getConfiguration('agent');
   return {
@@ -390,7 +392,13 @@ export function readLoopAdvisorConfig(): LoopAdvisorSettings {
       c.get<string>('chat.loopAdvisor.provider') ?? DEFAULT_ADVISOR_PROVIDER,
     ),
     model: str(c, 'chat.loopAdvisor.model', 'auto'),
-    timeoutSeconds: num(c, 'chat.loopAdvisor.timeoutSeconds', 120),
+    // package.json の `minimum` は設定UIの検証にしか効かない。settings.json へ直接
+    // `0` を書かれると毎ターン即時タイムアウトになり、Advisorが黙って無効になる
+    // （issue #1009）。`everyNTurns` は `shouldAdvise` 側が下限を持つため、扱いを揃える
+    timeoutSeconds: Math.max(
+      MIN_ADVISOR_TIMEOUT_SECONDS,
+      num(c, 'chat.loopAdvisor.timeoutSeconds', 120),
+    ),
     everyNTurns: num(c, 'chat.loopAdvisor.everyNTurns', DEFAULT_ADVISOR_EVERY_N_TURNS),
   };
 }
