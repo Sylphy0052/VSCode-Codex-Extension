@@ -3,10 +3,10 @@ import * as path from 'node:path';
 import {
   findSymlinkedAncestor,
   identifierError,
+  isValidTaskId,
   runIdError,
   type SymlinkCheckPort,
 } from './fsGuards';
-import { TASK_ID_PATTERN } from './workflow';
 
 /**
  * チームモードのファイル受け渡し（design.md §16.44、Issue #693）。
@@ -121,7 +121,7 @@ export interface HandoffEntry {
  *
  * 区切りの `NAME_SEPARATOR` は taskId・スラッグのどちらの字種にも含まれないため、
  * 最初に現れた1文字で割れば `handoffPath` が組み立てた形へ必ず戻る。両側は
- * それぞれのパターン（taskIdは `TASK_ID_PATTERN`、スラッグは `SLUG_PATTERN`）で
+ * それぞれの判定（taskIdは `isValidTaskId`、スラッグは `SLUG_PATTERN`）で
  * 個別に検証する。区切りが2つ以上ある名前は、どちらかの検証で必ず落ちる。
  */
 export function parseHandoffFileName(
@@ -140,10 +140,9 @@ export function parseHandoffFileName(
   if (!SLUG_PATTERN.test(slug)) {
     return undefined;
   }
-  // taskIdは`identifierError`と同じ`TASK_ID_PATTERN`で見る（runIdを持たないため
-  // `identifierError`自体は呼べない）。スラッグのパターンで代用すると、taskIdとしては
-  // 長すぎる名前（50文字超）を通してしまう
-  if (!TASK_ID_PATTERN.test(taskId)) {
+  // taskIdは`identifierError`と同じ判定（`isValidTaskId`、`fsGuards.ts`）で見る。
+  // スラッグのパターンで代用すると、taskIdとしては長すぎる名前（50文字超）を通してしまう
+  if (!isValidTaskId(taskId)) {
     return undefined;
   }
   return { taskId, slug };
