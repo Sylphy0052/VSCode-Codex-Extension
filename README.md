@@ -25,6 +25,9 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - バックグラウンドで走っているプロセスを確認する（Claude Codeは個別に停止できる）
 - サブエージェントの活動を会話の中で確認する（Codex。切替はできない）
 - 実行したセッションを日報・週報システムへ流す
+- 作業中のAIとは独立した別のAIへ、判断・助言・レビューを求める（[セカンドオピニオン](#セカンドオピニオン)）
+- 目的と受入基準を先に決め、達成したかを別のAIに判定させながら回す（[ゴール駆動ループ](#ゴール駆動ループ)）
+- ループの各ターンの進め方を、別のAIに見てもらう（[Advisor](#ループのadvisor)）
 - 複数のタスクを依存関係つきのYAMLで定義し、並列のセッションで走らせる（[ワークフロー](#ワークフロー並列オーケストレーション)）
 
 **状態: 動作するが実機での検証は途上。** 詳細は[開発状況](#開発状況)を参照。
@@ -39,17 +42,69 @@ WSL RemoteやDev Containerなどリモート環境で開発している場合、
 
 ## インストール
 
-Marketplaceには未公開のため、vsixを作ってインストールする。
+Marketplaceには未公開のため、リポジトリからvsixを作ってインストールする。
+
+### 1. 前提を確認する
+
+```bash
+code --version    # 1.90以降
+node --version    # v20以降
+npm --version
+git --version
+codex --version   # Codexを使う場合
+claude --version  # Claude Codeを使う場合
+```
+
+CodexとClaude Codeは、どちらか一方でよい（両方でもよい）。**どちらも入っていない場合、この拡張機能はほとんど何もできない。** CLIの導入と初回ログインは各CLIの公式手順に従うこと。この拡張機能はAI本体もAPIキーも同梱しない。
+
+**WSL・Dev Container・SSHで開発している場合は、上のコマンドをすべてそのリモート側で実行して確認する。** この拡張機能は `extensionKind: ["workspace"]` として動くため、UI側（Windowsなど）に入れたCLIは参照しない。
+
+### 2. vsixを作る
 
 ```bash
 git clone https://github.com/Sylphy0052/VSCode-Codex-Extension.git
 cd VSCode-Codex-Extension
 npm install
-npm run package                                    # vscode-codex-extension-<version>.vsix を生成
+npm run package    # vscode-codex-extension-<version>.vsix を生成
+```
+
+`npm run package` はコンパイルと `vsce package` をまとめて実行する。成功するとリポジトリ直下に `vscode-codex-extension-0.0.1.vsix` ができる。これが拡張機能の本体。
+
+### 3. インストールする
+
+```bash
 code --install-extension vscode-codex-extension-0.0.1.vsix
 ```
 
-VSCodeのUIからインストールする場合は、拡張機能ビューの右上「...」→「Install from VSIX...」で同じvsixを選ぶ。インストール後にウィンドウをリロードすると、アクティビティバーに Agents のアイコンが増える。
+`code` コマンドが無い場合は、VSCodeの拡張機能ビュー右上の「...」→「Install from VSIX...」から同じファイルを選ぶ。
+
+WSLやDev Containerで使う場合は、**そのリモート側へインストールする**（リモートに接続したウィンドウで上のコマンドを実行するか、拡張機能ビューで「Install in WSL: ...」を選ぶ）。
+
+### 4. リロードして確認する
+
+コマンドパレット（`Ctrl+Shift+P`）で `Developer: Reload Window` を実行する。アクティビティバーに **Agents** のアイコンが増えていれば成功。
+
+アイコンが出ない場合は、そのフォルダが**信頼されていない**可能性がある（Workspace Trustが無効だと拡張機能は動かない）。コマンドパレットの `Workspaces: Manage Workspace Trust` で信頼する。
+
+### 更新する
+
+```bash
+cd VSCode-Codex-Extension
+git pull
+npm install
+npm run package
+code --install-extension vscode-codex-extension-0.0.1.vsix --force
+```
+
+そのあとウィンドウをリロードする。同じバージョン番号のまま入れ直す場合は `--force` が要る。
+
+### アンインストールする
+
+```bash
+code --uninstall-extension Sylphy0052.vscode-codex-extension
+```
+
+拡張機能ビューの一覧から「アンインストール」を選んでもよい。設定（`settings.json` に書いた `codex.*` / `claude.*` / `agent.*`）と、CodexやClaude Code自身が持つセッション履歴は消えない。
 
 ## クイックスタート
 
@@ -509,6 +564,45 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 
 承認カードが出ている間や、手で送った指示が待ち行列に残っている間は次の指示を送らず、それらが片付いてから続きへ進む。止まった理由は次のループを始めるまで画面に残る。
 
+### ゴール駆動ループ
+
+ループには、回数と終了条件だけで回す形（上記）のほかに、**目的と受入基準を先に決め、1ターンごとに別セッションのAI（Evaluator）が達成を判定する**形がある。判定役を分けるのは、作業したエージェント自身に「終わったか」を聞くと自己申告になるためで、完了判定の所有権をWorkerから取り上げてEvaluatorへ移している。
+
+- Evaluatorは毎ターン新しいセッションで走る（前回の判断へのアンカリングとcontextの肥大化を避ける）。ツールは渡さないので、Evaluatorが自分で直しに行くことはない
+- 判定は `achieved` / `continue` / `escalate` / `indeterminate` の4値。`continue` のときは次のターンで集中すべきことが指示へ添えられる
+- 証拠が足りず判定できない（`indeterminate`）が `agent.chat.goalEvaluator.maxIndeterminate` 回続いたら人へ渡す。未達とは別に数える
+- Workerが「自分では解決できない」と申告した場合（`<<LOOP_ESCALATE>>`）は、Evaluatorの判定を待たずに人へ渡す
+
+**一文から始められる。** 「Issue #123に着手」のような一文でループを始めると、本編の前に準備ターンが1回だけ走り、目的・受入基準・初回指示の下書きを組み立てる（`agent.chat.loop.autoGoal.enabled`、既定で有効）。下書きは人が確認してから開始する（`agent.chat.loop.autoGoal.confirm`）。準備役にはツールを渡さないため、このターンでファイルは書き換わらない。
+
+### ループのAdvisor
+
+Evaluatorは「ゴールを達成したか」を見る役で、**進め方が妥当か**は見ない。受入基準から外れた作業・危うい前提・遠回りは、誰も問わないまま何十周と続きうる。そこで各ターンのあとにEvaluatorと並列でAdvisor（第三者のAI）を走らせ、深刻度つきの指摘を返させる。`agent.chat.loopAdvisor.enabled` で有効にする（既定は無効）。会話の「…」メニューからもON/OFFできる。
+
+| 深刻度    | 扱い                                                   |
+| --------- | ------------------------------------------------------ |
+| `blocker` | ループを `advised` で止めて人へ渡す                    |
+| `concern` | 止めず、次のターンの指示へ独立した区画として載せる     |
+| `note`    | 参考として載せるが「次に集中すること」へは格上げしない |
+
+Advisorが落ちてもループは止まらない（応答が読めない・タイムアウトのときは「指摘なし」として扱う）。呼ぶ間隔は `agent.chat.loopAdvisor.everyNTurns` で変えられる。
+
+### セカンドオピニオン
+
+進行中の作業について、**作業を担当しているAIとは独立した別セッション**へ判断・助言・レビューを求める導線。入力欄の「…」メニューの「セカンドオピニオン」から起動する。Codex画面・Claude Code画面のどちらから押しても、開くのは独立したCodexのセッション（既定は `gpt-5.6-sol` / effort `high`）。
+
+置き換えたいのは「Claude Codeの回答をChatGPTへ貼り、意見をClaude Codeへ貼り戻す」という手作業の往復である。用途はコードレビューに限らず、「この実装で続けてよいか」「A / B / C ならどれを採るか」「次に何を検証すべきか」も同じ導線で扱う。
+
+- **独立性の意味**: 作業中のAIのセッション状態・内部コンテキストを継承しないこと。会話を一切渡さないことではない。渡すのは、会話から独立に生成した背景要約（`agent.secondOpinion.summary`。要約を作るのも別のセッション）、利用者の依頼文、必要に応じた差分スナップショットである
+- **[脇道の質問](#脇道の質問btwclaude-code)との違い**: 脇道の質問は本流の会話を踏まえる。セカンドオピニオンは親セッションの状態を継承しない。会話の項目種別も分けてあり、返ってきた意見の重みを取り違えないようにしている
+- **相談は続けられる**（`agent.secondOpinion.advisor.enabled`、既定で有効）。回答後も相談相手のセッションを保持し、「その前提は違う」「ならC案は？」と聞き直せる。相談の結論は、作業中のAIへの指示として組み立て直してから渡せる（この経路は利用者が読み、直し、承認したときだけ送る）
+- **回答そのものは既定で作業中のAIへも全文が渡る**（`agent.secondOpinion.autoSend`）。渡るときは「別セッションの意見であり人はまだ確認していない」という前置きが付き、採否は作業中のAIが判断する。`false` にすると自動では送らず、上の「指示を作って承認してから送る」手順だけになる
+- 依頼文は `agent.secondOpinion.template` を既定値として実行のたびに編集できる（既定は「この変更をレビューしてください。特に設計上の欠陥、見落とし、より単純な代替案を挙げてください。」）。相談先は `agent.secondOpinion.candidates` で変える
+- 既定ではタブを開かずに走る（`agent.secondOpinion.headless`）。実行中は外周の枠が黄色になり、同じ会話からの二重起動はできない。実行中でも止められる
+- 待ち時間の上限は1ターンあたり `agent.secondOpinion.timeoutMs`（既定15分）。背景要約の生成にも同じ上限が別に効く
+
+相談先のセッションは read-only のサンドボックスで開き、承認要求は全て拒否する。プロンプト全文・差分全文はログへ出さない。
+
 ## ワークフロー（並列オーケストレーション）
 
 複数のタスクを依存関係つきのYAMLで定義し、独立したタスクを並列のセッションで走らせる機能。`T1 → (T2 || T3) → T4` のように、T1が終わったらT2とT3を同時に始め、両方が終わってからT4を始める、という形が書ける。各タスクは通常のチャット画面（Codex / Claude Code）1枚として開き、独立したgit worktreeで走る。設計の詳細は[docs/design.md](docs/design.md) §16を参照。
@@ -832,22 +926,48 @@ tasks:
 
 ### 共通
 
-| キー                                  | 既定                                          | スコープ | 説明                                                                                                                                                                                                                                          |
-| ------------------------------------- | --------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `codex.history.scope`                 | `workspace`                                   | window   | `workspace` / `all`                                                                                                                                                                                                                           |
-| `codex.history.maxEntries`            | `200`                                         | window   | 一覧構築の上限件数                                                                                                                                                                                                                            |
-| `codex.history.groupBy`               | `date`                                        | window   | 履歴のグループ化。`date` / `folder` / `none`                                                                                                                                                                                                  |
-| `agent.activityLog.enabled`           | `true`                                        | window   | 実行したセッションを日報バッファへ記録する                                                                                                                                                                                                    |
-| `agent.activityLog.dir`               | `""`                                          | machine  | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer`                                                                                                                                                                                       |
-| `agent.chat.renderMarkdown`           | `true`                                        | window   | [応答本文をMarkdownとして描画するか](#応答のmarkdown描画)。`false`で従来の生テキスト表示に戻す                                                                                                                                                |
-| `agent.chat.density`                  | `comfortable`                                 | window   | [チャット画面の表示密度](#会話画面の見やすさ)。`compact`で発言どうしの間隔・本文の余白・行間が詰まる（Codex/Claude Code両画面共通）。反映には会話タブを開き直す                                                                               |
-| `agent.chat.sendOn`                   | `ctrlEnter`                                   | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`（Codex/Claude Code両画面共通）                                                                                                                                                 |
-| `agent.chat.composerButtons`          | `[attach,loopToggle,compact,claudeImport]`    | window   | 入力欄アイコン列の表に直接出すボタン。残りは「…」メニューへ畳む（[後述](#入力欄アイコン列の整理)）。未知のIDや重複を含む場合は既定へ丸める                                                                                                    |
-| `agent.chat.turnSummary.enabled`      | `false`                                       | window   | [応答末尾に要約と次アクションを出させる](#応答末尾の要約と次の推奨アクション)。手動で送る発言の末尾へ指示文を毎回足す。既定は無効                                                                                                             |
-| `agent.chat.turnSummary.instruction`  | [既定文](#応答末尾の要約と次の推奨アクション) | window   | 有効なときに発言の末尾へ足す指示文。空文字なら足さない（無効化と同じ）                                                                                                                                                                        |
-| `agent.notifications.approvalPending` | `true`                                        | window   | 承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求での重複通知はしない                                                                                                                         |
-| `agent.notifications.turnComplete`    | `false`                                       | window   | ターンが完了した直後、そのタブが見えていなければ通知を出す。既定は無効                                                                                                                                                                        |
-| `agent.sessionPresets`                | `[]`                                          | resource | [プリセットから新しい会話を開く](#プリセットから新しい会話を開く)。`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory` を持つ配列。`approvalMode` / `sandbox` は拡張機能側の現在の設定より緩められない |
+| キー                                             | 既定                                                                             | スコープ | 説明                                                                                                                                                                                                                                                        |
+| ------------------------------------------------ | -------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codex.usage.statusBarGauge`                     | `true`                                                                           | window   | ステータスバーのCodex使用量へ5目盛りのゲージ（`▮▮▯▯▯`）を数字の手前に添える。`false`で数字だけの表示に戻す                                                                                                                                                  |
+| `codex.history.scope`                            | `workspace`                                                                      | window   | `workspace` / `all`                                                                                                                                                                                                                                         |
+| `codex.history.maxEntries`                       | `200`                                                                            | window   | 一覧構築の上限件数                                                                                                                                                                                                                                          |
+| `codex.history.groupBy`                          | `date`                                                                           | window   | 履歴のグループ化。`date` / `folder` / `none`                                                                                                                                                                                                                |
+| `agent.activityLog.enabled`                      | `true`                                                                           | window   | 実行したセッションを日報バッファへ記録する                                                                                                                                                                                                                  |
+| `agent.activityLog.dir`                          | `""`                                                                             | machine  | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer`                                                                                                                                                                                                     |
+| `agent.chat.renderMarkdown`                      | `true`                                                                           | window   | [応答本文をMarkdownとして描画するか](#応答のmarkdown描画)。`false`で従来の生テキスト表示に戻す                                                                                                                                                              |
+| `agent.chat.density`                             | `comfortable`                                                                    | window   | [チャット画面の表示密度](#会話画面の見やすさ)。`compact`で発言どうしの間隔・本文の余白・行間が詰まる（Codex/Claude Code両画面共通）。反映には会話タブを開き直す                                                                                             |
+| `agent.chat.sendOn`                              | `ctrlEnter`                                                                      | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`（Codex/Claude Code両画面共通）                                                                                                                                                               |
+| `agent.chat.composerButtons`                     | `[attach,loopToggle,compact,recap,planToggle,handoffToNewSession,secondOpinion]` | window   | 入力欄アイコン列の表に直接出すボタン。残りは「…」メニューへ畳む（[後述](#入力欄アイコン列の整理)）。未知のIDや重複を含む場合は既定へ丸める                                                                                                                  |
+| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-5.6-sol","effort":"high"}]`                  | window   | [セカンドオピニオン](#セカンドオピニオン)の依頼先候補（`name` / `model` / `effort` の配列）。1件だけなら選択UIを出さずにその候補で起動する。壊れた値・空配列は既定へ丸める。起動先はCodex固定で、sandbox（read-only）と承認の扱い（全て拒否）は変えられない |
+| `agent.secondOpinion.summary`                    | `{"enabled":true,"model":"gpt-5.6-luna","effort":"low"}`                         | window   | 依頼へ添える会話の背景要約。要約を作るのは会話を進めているAIではなく別の独立したセッション。`enabled: false` で添えない                                                                                                                                     |
+| `agent.secondOpinion.headless`                   | `true`                                                                           | window   | 相談先のセッションをタブを開かずに走らせる。`false` にすると進行の見えるタブを開く                                                                                                                                                                          |
+| `agent.secondOpinion.timeoutMs`                  | `900000`                                                                         | window   | 1ターンを待つ上限（ミリ秒）。最初の相談と追加の相談のどちらにも同じ上限が効く                                                                                                                                                                               |
+| `agent.secondOpinion.template`                   | [既定文](#セカンドオピニオン)                                                    | window   | 依頼文の既定値。実行のたびに編集できる                                                                                                                                                                                                                      |
+| `agent.secondOpinion.autoSend`                   | `true`                                                                           | window   | 回答が返った時点で、その全文を作業中のAIへ自動で送る。作業中のAIは「別セッションの意見であり人はまだ確認していない」という前置きを読んだうえで採否を判断する。`false` にすると人が確認してから送る手順になる。失敗した回答は自動送信の対象にしない          |
+| `agent.secondOpinion.advisor.enabled`            | `true`                                                                           | window   | 回答が返った後も相談相手のセッションを保持し、追加の相談と作業中のAIへの指示づくりを続けられるようにする                                                                                                                                                    |
+| `agent.secondOpinion.advisor.idleTimeoutMs`      | `1800000`                                                                        | window   | 保持した相談相手を、無操作が続いたときに閉じるまでの時間（ミリ秒）。1分〜4時間の範囲に丸める                                                                                                                                                                |
+| `agent.chat.turnSummary.enabled`                 | `false`                                                                          | window   | [応答末尾に要約と次アクションを出させる](#応答末尾の要約と次の推奨アクション)。手動で送る発言の末尾へ指示文を毎回足す。既定は無効                                                                                                                           |
+| `agent.chat.turnSummary.instruction`             | [既定文](#応答末尾の要約と次の推奨アクション)                                    | window   | 有効なときに発言の末尾へ足す指示文。空文字なら足さない（無効化と同じ）                                                                                                                                                                                      |
+| `agent.chat.loopEngineering.enabled`             | `false`                                                                          | window   | [ループ](#同じ指示を繰り返すループ)が送る指示の末尾へ、機械的な検証・行き詰まりでの方針変更・撤退の申告を促す指示文を足す                                                                                                                                   |
+| `agent.chat.loopEngineering.initialInstruction`  | 既定文                                                                           | window   | 有効なときにループの**1回目**の指示へ足す文                                                                                                                                                                                                                 |
+| `agent.chat.loopEngineering.continueInstruction` | 既定文                                                                           | window   | 有効なときにループの**2回目以降**の指示へ足す文                                                                                                                                                                                                             |
+| `agent.chat.goalEvaluator.provider`              | `inherit`                                                                        | window   | [ゴール駆動ループ](#ゴール駆動ループ)の達成を判定する評価役を動かすCLI。`inherit` は会話と同じCLI。評価役にはツールを渡さない。`claude` / `codex` を明示すると会話の抜粋が別のプロバイダへ渡る                                                              |
+| `agent.chat.goalEvaluator.model`                 | `auto`                                                                           | window   | 評価役のモデル。`auto` は軽量なモデルに任せる（claudeは `haiku`、codexはCLIの既定）                                                                                                                                                                         |
+| `agent.chat.goalEvaluator.timeoutSeconds`        | `120`                                                                            | window   | 評価役の応答を待つ上限（秒）。超えたら「判定できなかった」（`indeterminate`）として扱う                                                                                                                                                                     |
+| `agent.chat.goalEvaluator.maxIndeterminate`      | `3`                                                                              | window   | `indeterminate` が何回続いたら人へ渡すか。未達とは別に数える                                                                                                                                                                                                |
+| `agent.chat.loop.autoGoal.enabled`               | `true`                                                                           | window   | 「Issue #123に着手」のような一文だけから[ゴールの下書き](#ゴール駆動ループ)を組み立てる準備ターンを走らせる                                                                                                                                                 |
+| `agent.chat.loop.autoGoal.confirm`               | `true`                                                                           | window   | 組み立てた下書きを人が確認してからループを始める                                                                                                                                                                                                            |
+| `agent.chat.loop.autoGoal.provider`              | `inherit`                                                                        | window   | 準備ターンを動かすCLI。準備役にはツールを渡さないため、このターンでファイルは書き換わらない                                                                                                                                                                 |
+| `agent.chat.loop.autoGoal.model`                 | `auto`                                                                           | window   | 準備ターンのモデル。`auto` は軽量なモデルに任せる                                                                                                                                                                                                           |
+| `agent.chat.loop.autoGoal.timeoutSeconds`        | `120`                                                                            | window   | 準備ターンの応答を待つ上限（秒）。超えたら3つの欄を空のまま残し、ループは始めない                                                                                                                                                                           |
+| `agent.chat.loopAdvisor.enabled`                 | `false`                                                                          | window   | ゴール駆動ループの各ターンのあとに、別のAI（[Advisor](#ループのadvisor)）へ進め方の妥当性を見せる                                                                                                                                                           |
+| `agent.chat.loopAdvisor.provider`                | `codex`                                                                          | window   | Advisorを動かすCLI。既定は `codex` 固定で、会話しているCLIによらず相談先は変わらない                                                                                                                                                                        |
+| `agent.chat.loopAdvisor.model`                   | `auto`                                                                           | window   | Advisorのモデル。`auto` は動かすプロバイダに合わせて解決する（codexは `gpt-5.6-sol`、claudeは `haiku`）                                                                                                                                                     |
+| `agent.chat.loopAdvisor.timeoutSeconds`          | `120`                                                                            | window   | Advisorの応答を待つ上限（秒）。超えたら「指摘なし」として扱い、ループは止めない                                                                                                                                                                             |
+| `agent.chat.loopAdvisor.everyNTurns`             | `1`                                                                              | window   | 何ターンごとにAdvisorを呼ぶか。増やすと待ち時間と費用は減るが、方向のずれに気づくのが遅くなる                                                                                                                                                               |
+| `agent.notifications.approvalPending`            | `true`                                                                           | window   | 承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求での重複通知はしない                                                                                                                                       |
+| `agent.notifications.turnComplete`               | `false`                                                                          | window   | ターンが完了した直後、そのタブが見えていなければ通知を出す。既定は無効                                                                                                                                                                                      |
+| `agent.sessionPresets`                           | `[]`                                                                             | resource | [プリセットから新しい会話を開く](#プリセットから新しい会話を開く)。`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory` を持つ配列。`approvalMode` / `sandbox` は拡張機能側の現在の設定より緩められない               |
 
 空文字は「そのフラグを渡さない」を意味し、CLI側の設定（`~/.codex/config.toml` / `~/.claude/settings.json`）に委譲する。設定パネルには委譲先の実際の値が `既定: gpt-5.6-terra` のように表示される。パネル上部のタブでCodexとClaude Codeを切り替える。
 
@@ -886,6 +1006,58 @@ tasks:
 ### machineスコープについて
 
 実行するバイナリと権限に影響する設定は `machine` スコープに固定しており、リポジトリの `.vscode/settings.json` からは変更できない。これがないと、リポジトリをクローンして開いただけで任意のバイナリが起動され、CLIのサンドボックスも無効化されうる。
+
+### 別のマシンへ設定を引き継ぐ
+
+**Settings Syncだけでは引き継げない。** この拡張機能の設定81件のうち、`machine` が18件、`machine-overridable` が24件（合計42件）を占める。VSCodeのSettings Syncは、この2つのスコープの設定を「値がマシンごとに固有だから」という理由で既定では同期しない。加えて、Settings Syncはリモートウィンドウ（SSH / Dev Container / WSL）との間で拡張機能を同期しない。
+
+したがって引き継ぐものは次の4つで、それぞれ経路が違う。
+
+| 引き継ぐもの                                     | 置き場所                                                                                                   | 方法                               |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| 拡張機能そのもの                                 | -                                                                                                          | 新しいマシンでvsixを作って入れ直す |
+| 拡張機能の設定（`codex.*` `claude.*` `agent.*`） | ローカル: User `settings.json`。リモート接続時: リモート側の `~/.vscode-server/data/Machine/settings.json` | 該当キーを手でコピーする           |
+| ワークスペース固有の設定                         | リポジトリの `.vscode/settings.json`                                                                       | gitに入っていれば自動で付いてくる  |
+| CLI側の設定・認証                                | `~/.codex/`（`config.toml` / `auth.json`）、`~/.claude/`                                                   | 新しいマシンでCLIへログインし直す  |
+
+#### 設定を書き出す
+
+現在のマシンで、この拡張機能のキーだけを抜き出す。リモート接続で使っている場合は、リモート側のファイルを見ること。
+
+```bash
+# リモート（WSL / Dev Container / SSH）で使っている場合
+SRC=~/.vscode-server/data/Machine/settings.json
+# ローカルのLinuxで使っている場合
+# SRC=~/.config/Code/User/settings.json
+# macOSの場合
+# SRC="$HOME/Library/Application Support/Code/User/settings.json"
+# Windowsの場合は %APPDATA%\Code\User\settings.json
+
+python3 -c "
+import json, re, sys
+raw = open('$SRC').read()
+raw = re.sub(r'^\s*//.*$', '', raw, flags=re.M)   # 行コメントを落とす
+data = json.loads(raw)
+out = {k: v for k, v in data.items() if k.split('.')[0] in ('codex', 'claude', 'agent')}
+print(json.dumps(out, ensure_ascii=False, indent=2))
+" > agent-sessions-settings.json
+```
+
+書き出したJSONを新しいマシンへ持っていき、同じ位置の `settings.json` へ**中身を差し込む**（ファイルごと上書きしない。他の拡張機能の設定を消してしまう）。
+
+#### 引き継ぐ前に見直すもの
+
+そのままコピーすると危ないもの、環境が変わると壊れるものがある。
+
+- `codex.executablePath` / `claude.executablePath` / `agent.activityLog.dir` / `codex.codexHome` / `claude.configDir` — **パスはマシンごとに違う。** 絶対パスを書いていた場合は、新しいマシンに合わせて直すか、既定へ戻す
+- `codex.bypassApprovalsAndSandbox` / `agent.workflows.allowAutoApprove` / `agent.workflows.allowClaudeBypassPermissions` — **承認とサンドボックスを外す設定。** 使い捨ての環境向けに有効にしていたものを、そのまま常用マシンへ持ち込まないこと
+- `agent.sessionPresets` — `workingDirectory` に絶対パスが入っていれば直す
+
+#### 引き継がれないもの
+
+- **会話の履歴**は拡張機能ではなくCLI側（`~/.codex/sessions` / `~/.claude/projects`）にある。持っていきたい場合はそのディレクトリごとコピーする（この拡張機能は会話本文を保存しない）
+- **ピン留め・セッション名・ワークフローの実行状態**はVSCodeの `globalState`（`globalStorage` 配下のDB）にあり、手でコピーする経路は用意していない。新しいマシンでは付け直しになる
+- **CLIの認証**（`~/.codex/auth.json` など）はマシンをまたいでコピーせず、新しいマシンでログインし直すこと
 
 ## 日報・週報連携
 

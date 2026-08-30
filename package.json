@@ -727,7 +727,7 @@
           ],
           "default": "ctrlEnter",
           "scope": "window",
-          "markdownDescription": "チャット画面の入力欄でEnterを送信に使うか。候補メニュー（`/` `@`）を開いている間はEnterが候補の確定として優先され、IME変換中のEnterは送信しない。**Codex画面のみ**（Claude Code画面は今回のスコープ外で常に`ctrlEnter`のまま）。"
+          "markdownDescription": "チャット画面の入力欄でEnterを送信に使うか。候補メニュー（`/` `@`）を開いている間はEnterが候補の確定として優先され、IME変換中のEnterは送信しない。Codex画面・Claude Code画面のどちらにも効く。"
         },
         "agent.chat.composerButtons": {
           "type": "array",

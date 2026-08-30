@@ -835,8 +835,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       },
       // 応答本文のMarkdown描画（issue #290、設定 agent.chat.renderMarkdown）
       renderMarkdown: readChatRenderMarkdownConfig(),
-      // 送信キー（issue #288、設定 agent.chat.sendOn）。Codex画面にのみ配線している
-      // （ChatShellOptions.sendOnのJSDoc参照）
+      // 送信キー（issue #288、設定 agent.chat.sendOn）。Claude Code画面
+      // （claudeChatView.ts）にも同じ配線がある
       sendOn: readChatSendOnConfig(),
       // 表示密度（issue #718、設定 agent.chat.density）。body のクラスにだけ効く
       density: readChatDensityConfig(),
