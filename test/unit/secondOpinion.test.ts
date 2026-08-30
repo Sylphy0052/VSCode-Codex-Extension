@@ -261,6 +261,65 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     expect(prompt).toContain(diff);
   });
 
+  it('restateRequestAtEndを指定すると依頼文が末尾へも載る（Issue #1044 条件B）', () => {
+    const userRequest = 'この設計判断が妥当か教えてほしい';
+    const withRestate = buildSecondOpinionPrompt({
+      userRequest,
+      restateRequestAtEnd: true,
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    });
+    // 冒頭の「## 依頼」と末尾の再掲で2回。片方しか無ければ介入が効いていない
+    expect(withRestate.split(userRequest).length - 1).toBe(2);
+    expect(withRestate).toContain('## 最終確認: 今回答えてほしいこと');
+    // 再掲は差分より後ろに置かないと、資料の手前に問いが埋もれる状態が変わらない
+    expect(withRestate.indexOf('## 最終確認')).toBeGreaterThan(
+      withRestate.indexOf('+const a = 1;'),
+    );
+  });
+
+  it('restateRequestAtEndを指定しなければ既定の挙動が変わらない（Issue #1044）', () => {
+    const input = {
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges' as const,
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    };
+    expect(buildSecondOpinionPrompt(input)).toBe(
+      buildSecondOpinionPrompt({ ...input, restateRequestAtEnd: false }),
+    );
+    expect(buildSecondOpinionPrompt(input)).not.toContain('## 最終確認');
+  });
+
+  it('追加資料が無いときは末尾へ再掲しない（Issue #1044）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: '設計の考え方を聞きたい',
+      restateRequestAtEnd: true,
+      artifact: { kind: 'none' },
+    });
+    expect(prompt).not.toContain('## 最終確認');
+    expect(prompt.split('設計の考え方を聞きたい').length - 1).toBe(1);
+  });
+
   it('レビュー対象なしなら依頼文だけを載せる', () => {
     const prompt = buildSecondOpinionPrompt({
       userRequest: '設計の考え方を聞きたい',

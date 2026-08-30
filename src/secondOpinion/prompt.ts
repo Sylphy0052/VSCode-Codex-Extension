@@ -109,6 +109,17 @@ export interface SecondOpinionInput {
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
   /** 今回評価してほしい追加資料。 */
   artifact: SecondOpinionArtifact;
+  /**
+   * 依頼文をプロンプトの末尾へもう一度置くか（Issue #1044 条件B）。既定は `false`。
+   *
+   * 並びは「固定指示 → 依頼 → 背景 → 追加資料」で、追加資料は数十KB〜200KBになりうる。
+   * 依頼はその手前にあるため、資料が大きいほど「何を答えるのか」が読み終わりから遠ざかる。
+   * 末尾へ短く置き直すこと自体は数行で済むので、効果があるかどうかを測れるようにしておく。
+   *
+   * 既定を `false` にしてあるのは、これが**測定のための介入**であり、効果が確かめられる前に
+   * 既定の挙動を変えないため（Issue #1044 の受入基準「拡張本体の既定挙動を変えずに」）。
+   */
+  restateRequestAtEnd?: boolean | undefined;
 }
 
 /** 背景として渡した本文の出所（Issue #944）。 */
@@ -365,8 +376,31 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
     `## 依頼\n\n${input.userRequest.trim()}`,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
     artifactSection(input.artifact),
+    input.restateRequestAtEnd === true ? restatedRequestSection(input) : undefined,
   ].filter((section): section is string => section !== undefined);
   return sections.join('\n\n');
+}
+
+/**
+ * 末尾へ置き直す依頼（Issue #1044 条件B）。
+ *
+ * 依頼文をそのまま繰り返すだけで、新しい指示は足さない。足すと、これが「配置を変えた効果」
+ * ではなく「指示を増やした効果」の測定になり、条件Aとの差の説明がつかなくなる。
+ *
+ * 追加資料が無いときは出さない。資料が無ければ依頼はもともと末尾付近にあり、置き直しても
+ * 同じ文が2回続くだけになる。
+ */
+function restatedRequestSection(input: SecondOpinionInput): string | undefined {
+  if (input.artifact.kind === 'none') {
+    return undefined;
+  }
+  return [
+    '## 最終確認: 今回答えてほしいこと',
+    '',
+    '上の資料を読んだうえで、次の依頼に答えてください（冒頭に置いたものと同じ依頼です）。',
+    '',
+    fence(input.userRequest.trim(), 'markdown'),
+  ].join('\n');
 }
 
 /**

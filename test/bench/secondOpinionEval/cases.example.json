@@ -1,0 +1,15 @@
+[
+  {
+    "id": "example-code-review",
+    "kind": "codeReview",
+    "repoPath": "/absolute/path/to/repo",
+    "baseCommit": "0123456789abcdef0123456789abcdef01234567",
+    "userRequest": "この変更をレビューしてください。特に設計上の欠陥、見落とし、より単純な代替案を挙げてください。",
+    "conversation": "利用者とエージェントのやり取りの記録、または確定済みの背景本文。空文字なら背景を渡さない。",
+    "knownImportantFindings": [
+      "後から本当に重要だったと分かっている問題を1件ずつ書く",
+      "実験の実施前に確定させること"
+    ],
+    "knownConstraints": ["変更してはいけない範囲や、既に決まっている方針を1件ずつ書く"]
+  }
+]
