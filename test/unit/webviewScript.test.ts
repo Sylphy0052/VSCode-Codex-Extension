@@ -1340,3 +1340,40 @@ describe('progressStyles', () => {
     expect(fill.slice(0, fill.indexOf('}'))).not.toContain('position: fixed');
   });
 });
+
+describe('workflowScript のノード内の文字の切り詰め（issue #1011）', () => {
+  it('実測幅で切り詰める関数があり、SVGへ入れたあとに当てる', () => {
+    const source = workflowScript();
+    // 陽性対照: 関数がある（綴り違いで空振りしていない）
+    expect(source).toContain('function fitNodeText(node, maxWidth)');
+    // 文字数ではなく実測幅で判断する
+    expect(source).toContain('node.getComputedTextLength()');
+    // getComputedTextLengthはDOMへ接続され描画されている要素でしか測れないため、
+    // appendのあとに当てる
+    expect(source).toContain('svg.appendChild(nodeGroup);');
+    expect(source).toContain("nodeGroup.querySelectorAll('text[data-fit]')");
+  });
+
+  it('id・状態・要約の3つに収める幅を持たせる', () => {
+    const source = workflowScript();
+    // ノードの幅168pxから左右の余白を引いた値。idの行だけは記号のぶん開始位置が右へずれる
+    expect(source).toContain('const NODE_TEXT_MAX_WIDTH = 148;');
+    expect(source).toContain('const NODE_ID_MAX_WIDTH = 132;');
+    expect((source.match(/'data-fit':/g) ?? []).length).toBe(3);
+  });
+
+  it('文字数だけで切る実装が残っていない', () => {
+    const source = workflowScript();
+    // 以前は26文字で切っており、日本語だと実測264pxで枠（148px）を超えていた
+    expect(source).not.toContain('lastResponseSummary.slice(0, 26)');
+    // 粗い上限は残す（長い応答をそのまま測ると1回目のレイアウトだけが重くなる）
+    expect(source).toContain('const NODE_TEXT_SCAN_LIMIT = 40;');
+  });
+
+  it('測れなかったときの下支えとしてクリップを当てる', () => {
+    const source = workflowScript();
+    expect(source).toContain("const clip = svgEl('clipPath', { id: NODE_CLIP_ID });");
+    // 3つのtextすべてに当てる（測定が0を返す場合の保険）
+    expect((source.match(/'clip-path': 'url\(#' \+ NODE_CLIP_ID \+ '\)'/g) ?? []).length).toBe(3);
+  });
+});

@@ -380,6 +380,66 @@ export function workflowScript(): string {
 
   // ---- 依存グラフ（SVG） ----
 
+  // ノード内の文字の切り詰め（issue #1011）。ノードの幅は168pxで、文字は左右に10pxの
+  // 余白を残して描く。日本語は1文字がfont-sizeとほぼ同じ幅（10pxのフォントで実測10.2px）に
+  // なるため、文字数だけで切ると枠を超え、後から描かれる隣のノードの矩形の下へ潜り込む。
+  // SVGのtextは幅で折り返しも省略もしないので、実測幅で切り詰めるしかない。
+  const NODE_TEXT_MAX_WIDTH = 148;
+  // idの行だけは状態の記号のぶん開始位置が右にずれる（x = -w/2 + 26）
+  const NODE_ID_MAX_WIDTH = 132;
+  // 実測の前に粗く切っておく上限。長い応答をそのまま測ると1回目のレイアウトだけが重くなる。
+  // 実際に収まるのは日本語で15文字前後なので、この値で切っても表示される内容は変わらない
+  const NODE_TEXT_SCAN_LIMIT = 40;
+  // 測定が効かなかったときの下支え（fitNodeTextのJSDoc参照）。文字だけを切りたいので
+  // ノードの矩形（168x60）より横を内側へ取る。矩形と同じにすると、選択中の太い枠線
+  // （stroke-width: 3）の外側半分まで切ってしまう
+  const NODE_CLIP_ID = 'wfNodeClip';
+
+  /**
+   * ノード内の文字を、実測幅がmaxWidthに収まるまで末尾から削って省略記号を付ける
+   * （issue #1011）。
+   *
+   * **SVGへappendしたあとに呼ぶこと。** getComputedTextLengthはDOMへ接続され描画されて
+   * いる要素でしか測れず、未接続・非表示では0を返す。0が返ったときは何もしない
+   * （クリップ（NODE_CLIP_ID）が隣のノードへのはみ出しだけは防ぐ）。
+   *
+   * **測定の回数を抑える。** textContentの書き換えと測定を交互に行うと、そのたびに
+   * レイアウトが同期で走る。タスクは1runあたり最大50件、1ノードに3つの文字列があるので、
+   * 1文字列あたりの測定回数がそのまま効いてくる。幅は文字数にほぼ比例するため、直前の
+   * 測定値から次の候補を比率で推定し、推定が範囲外へ出たときだけ二分探索へ落とす。
+   * 日本語26文字の要約で測定3回（二分探索のみなら5回）だった。
+   */
+  function fitNodeText(node, maxWidth) {
+    const full = node.textContent;
+    if (full === '') return;
+    let width = node.getComputedTextLength();
+    if (width === 0 || width <= maxWidth) return;
+    // lo: 収まると確認できた文字数。hi: 収まる可能性が残っている上限
+    // （full全体は超過すると分かっているので、最低1文字は削る）
+    let lo = 0;
+    let hi = full.length - 1;
+    let count = full.length;
+    let probe = Math.min(hi, Math.max(1, Math.floor((full.length * maxWidth) / width)));
+    while (lo < hi) {
+      node.textContent = full.slice(0, probe) + '…';
+      width = node.getComputedTextLength();
+      count = probe;
+      if (width <= maxWidth) {
+        lo = probe;
+      } else {
+        hi = probe - 1;
+      }
+      if (lo >= hi) break;
+      // 比率での推定がloより先へ進まない・hiを超えるときは二分探索へ落とす
+      // （進まない候補を測り続けると終わらない）
+      const next = Math.floor((count * maxWidth) / width);
+      probe = next > lo && next <= hi ? next : Math.ceil((lo + hi) / 2);
+    }
+    // 1文字＋省略記号すら入らないとき（極端に幅の広い文字）は空にする。
+    // 枠の外へ出すよりは何も出さないほうがよい
+    node.textContent = lo > 0 ? full.slice(0, lo) + '…' : '';
+  }
+
   function markForState(state, submissionCount) {
     const group = svgEl('g', { class: 'wf-mark' });
     if (state === 'running') {
@@ -432,7 +492,13 @@ export function workflowScript(): string {
     mark.setAttribute('transform', 'translate(' + (-w / 2 + 14) + ',' + (-h / 2 + 14) + ')');
     group.appendChild(mark);
 
-    const idText = svgEl('text', { class: 'wf-id', x: -w / 2 + 26, y: -h / 2 + 18 });
+    const idText = svgEl('text', {
+      class: 'wf-id',
+      x: -w / 2 + 26,
+      y: -h / 2 + 18,
+      'clip-path': 'url(#' + NODE_CLIP_ID + ')',
+      'data-fit': NODE_ID_MAX_WIDTH,
+    });
     // idはYAML由来（design.mdの検証で字種は絞られているが、Viewとしては信用しない）。
     // 必ずtextContentへ代入する（HTML/SVGとして解釈させない）。
     // 役割ラベル（design.md §16.44、Issue #693。roleLabelは拡張機能側でroleLabel()を通した
@@ -451,7 +517,15 @@ export function workflowScript(): string {
       const reason = describeFailure(task);
       if (reason) metaParts.push(reason);
     }
-    const metaText = svgEl('text', { class: 'wf-meta', x: -w / 2 + 10, y: -h / 2 + 34 });
+    const metaText = svgEl('text', {
+      class: 'wf-meta',
+      x: -w / 2 + 10,
+      y: -h / 2 + 34,
+      'clip-path': 'url(#' + NODE_CLIP_ID + ')',
+      'data-fit': NODE_TEXT_MAX_WIDTH,
+    });
+    // 状態と失敗の理由を連ねると、実測で枠を超える組み合わせがある
+    // （「失敗 ・ 依存先の統合ブロック（T1, T2）」で183〜189px。issue #1011）
     metaText.textContent = metaParts.join(' ・ ');
     group.appendChild(metaText);
 
@@ -471,12 +545,19 @@ export function workflowScript(): string {
     }
 
     if (task.lastResponseSummary) {
-      const summaryText = svgEl('text', { class: 'wf-summary', x: -w / 2 + 10, y: -h / 2 + 48 });
-      const shown =
-        task.lastResponseSummary.length > 26
-          ? task.lastResponseSummary.slice(0, 26) + '…'
+      const summaryText = svgEl('text', {
+        class: 'wf-summary',
+        x: -w / 2 + 10,
+        y: -h / 2 + 48,
+        'clip-path': 'url(#' + NODE_CLIP_ID + ')',
+        'data-fit': NODE_TEXT_MAX_WIDTH,
+      });
+      // ここでは粗く切るだけ。実際の省略位置はSVGへ入れたあとにfitNodeTextが実測で決める
+      // （文字数で切ると日本語で枠を超える。issue #1011）
+      summaryText.textContent =
+        task.lastResponseSummary.length > NODE_TEXT_SCAN_LIMIT
+          ? task.lastResponseSummary.slice(0, NODE_TEXT_SCAN_LIMIT) + '…'
           : task.lastResponseSummary;
-      summaryText.textContent = shown;
       group.appendChild(summaryText);
     }
 
@@ -620,6 +701,13 @@ export function workflowScript(): string {
       marker.appendChild(svgEl('path', { class: v.cls, d: 'M 0 0 L 10 5 L 0 10 z' }));
       defs.appendChild(marker);
     }
+    // ノードの文字がはみ出さないための下支え（issue #1011）。主役は実測での切り詰め
+    // （fitNodeText）で、これは測れなかったとき（パネルが非表示のまま組み立てた等）に
+    // 隣のノードの領域へ文字を潜り込ませないための保険。ノードのローカル座標で当たるので
+    // 全ノードで同じ1つを使い回せる。矩形（168x60）より少し内側にして、文字だけを切る
+    const clip = svgEl('clipPath', { id: NODE_CLIP_ID });
+    clip.appendChild(svgEl('rect', { x: -80, y: -30, width: 160, height: 60 }));
+    defs.appendChild(clip);
     return defs;
   }
 
@@ -676,6 +764,11 @@ export function workflowScript(): string {
       nodeGroup.appendChild(buildNode(task, n));
     }
     svg.appendChild(nodeGroup);
+    // 文字の切り詰めはSVGへ入れたあと（getComputedTextLengthはDOMへ接続され描画されて
+    // いる要素でしか測れない。issue #1011）。属性で幅を持たせておき、ここでまとめて当てる
+    nodeGroup.querySelectorAll('text[data-fit]').forEach((target) => {
+      fitNodeText(target, Number(target.getAttribute('data-fit')));
+    });
     applyGraphScale();
   }
 
