@@ -218,20 +218,39 @@ describe('変更ファイルの重複除去（issue #1013）', () => {
     expect(view.turns[0]?.fileEditCounts).toEqual({ 'src/a.ts': 3, 'src/b.ts': 1 });
   });
 
-  it('Object.prototype と同じ名前のファイルも一覧へ出す', () => {
-    // `counts[path] === undefined` で既出を見ると、継承した関数を拾って
-    // このファイルだけ一覧から消える
-    const view = buildProgress(
-      stateWith([
-        item('userMessage', { text: '指示' }),
-        fileChange('toString'),
-        fileChange('toString'),
-      ]),
-    );
+  // Object.prototype の名前と重なるパス。`__proto__` だけは判定（issue #1013）に加えて
+  // 入れ物側もプロトタイプを持たない必要がある（issue #1017）
+  const inheritedNames = ['toString', 'constructor', 'hasOwnProperty', '__proto__'];
 
-    expect(view.turns[0]?.editedFiles).toEqual(['toString']);
-    expect(view.turns[0]?.fileEditCounts['toString']).toBe(2);
-    expect(view.summary.editedFiles).toEqual(['toString']);
+  for (const name of inheritedNames) {
+    it(`パスが ${name} でも一覧は1件で、回数を数える`, () => {
+      const view = buildProgress(
+        stateWith([
+          item('userMessage', { text: '指示' }),
+          fileChange(name),
+          fileChange(name),
+          fileChange(name),
+        ]),
+      );
+
+      expect(view.turns[0]?.editedFiles).toEqual([name]);
+      expect(view.turns[0]?.fileEditCounts[name]).toBe(3);
+      expect(view.summary.editedFiles).toEqual([name]);
+    });
+  }
+
+  it('回数の入れ物はプロトタイプを持たない（issue #1017）', () => {
+    // 陽性対照: `__proto__` を own property として持てることまで見る。
+    // `{}` で作ると代入が継承アクセサへ吸われ、この検査が落ちる
+    const view = buildProgress(
+      stateWith([item('userMessage', { text: '指示' }), fileChange('__proto__')]),
+    );
+    const counts = view.turns[0]?.fileEditCounts;
+
+    expect(Object.getPrototypeOf(counts)).toBeNull();
+    expect(Object.hasOwn(counts ?? {}, '__proto__')).toBe(true);
+    // プロトタイプ汚染が起きていないこと
+    expect(({} as Record<string, unknown>)['__proto__']).toBe(Object.prototype);
   });
 });
 
