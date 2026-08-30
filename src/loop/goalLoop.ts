@@ -94,8 +94,16 @@ export interface GoalEvaluatorInput {
   iteration: number;
 }
 
-/** Evaluatorの呼び出し。失敗時も例外を投げず`indeterminate`を返す実装を期待する。 */
-export type GoalEvaluator = (input: GoalEvaluatorInput) => Promise<GoalEvaluation>;
+/**
+ * Evaluatorの呼び出し。失敗時も例外を投げず`indeterminate`を返す実装を期待する。
+ *
+ * `signal`はループが止められたときに発火する（issue #1009）。応答を待っている間に止められた
+ * 実行の結果は捨てられるため、受け取った実装はその場でプロセスを回収してよい。
+ */
+export type GoalEvaluator = (
+  input: GoalEvaluatorInput,
+  signal?: AbortSignal,
+) => Promise<GoalEvaluation>;
 
 /** 既定の`indeterminate`の連続上限。**この回数に達したら**人へ渡す（`escalated`で止める）。 */
 export const DEFAULT_MAX_INDETERMINATE = 3;
