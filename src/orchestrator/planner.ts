@@ -1242,8 +1242,8 @@ export type AwaitSingleTurnOptions = Omit<
  * 開いて閉じるが、こちらは開いたセッションを受け取るだけで、`dispose()` も承認ハンドラの
  * 設定も呼び出し側の責務とする。
  *
- * 分けたのは、askGptモード（Issue #947）の生成ターンが**forkしたセッション**の上で走る
- * ためである。`thread/fork`（Codex）や `--fork-session`（Claude）で作ったセッションは
+ * 分けたのは、呼び出し側が自分で開いたセッションの上で1ターンだけ走らせたい経路が
+ * あるためである（相談を続けるAdvisorセッションなど）。これらは
  * `host.openTaskSession()` を通らないので `runSingleTurnTask` へは渡せないが、待ち方
  * （`runLoop` を1回・`onFinished` で受ける・タイムアウトで `interrupt()` を要求する・
  * 決着を1箇所に集める）は同じでよい。ここを二重に書くと、Issue #926 C で塞いだタイマー

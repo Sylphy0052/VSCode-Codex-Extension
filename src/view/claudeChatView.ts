@@ -13,18 +13,6 @@ import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
-import {
-  ASK_GPT_LABEL,
-  ASK_GPT_LOG_PREFIX,
-  ASK_GPT_TAB_TITLE,
-  type RequestGenerationResult,
-  type SecondOpinionMode,
-} from '../secondOpinion/askGpt';
-import {
-  awaitSingleTurn,
-  SingleTurnCancelledError,
-  SingleTurnTimeoutError,
-} from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import {
   approveSecondOpinionHandoff,
@@ -1019,11 +1007,7 @@ export class ClaudeChatViewManager
    * セッションが起動時点の成果物と依頼文だけを見て評価し、その結果をこの会話へ表示する
    * （この会話へ発言として送り返すことはしない）。
    */
-  private async startSecondOpinionFor(
-    entry: ClaudePanel,
-    /** 今回だけモードを固定する（Issue #972）。省略時は設定に従う */
-    modeOverride?: SecondOpinionMode,
-  ): Promise<void> {
+  private async startSecondOpinionFor(entry: ClaudePanel): Promise<void> {
     const host = this.secondOpinionHost;
     if (host === undefined) {
       void vscode.window.showErrorMessage('セカンドオピニオンの依頼先（Codex）を利用できません');
@@ -1037,7 +1021,6 @@ export class ClaudeChatViewManager
       undefined,
       undefined,
       this.advisorStore,
-      modeOverride,
     );
   }
 
@@ -1108,110 +1091,8 @@ export class ClaudeChatViewManager
           hasDraft: draft !== undefined,
         });
       },
-      generateRequestText: (instruction, timeoutMs, signal) =>
-        this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
       summaryRollout: this.summaryRollout,
     };
-  }
-
-  /**
-   * askGptモード（Issue #947）の質問文を、親の文脈を継いだforkの上で組み立てる。
-   *
-   * `side_question`（`startSideQuestion`）は使えない。あれは `canUseTool` を常にdenyする
-   * control requestで（design.md §14.62の実測）、リポジトリを読ませる用途に向かない。ツール
-   * 呼び出しを試みた時点で応答は英語固定のプレースホルダになり、しかも封筒は
-   * `subtype:"success"` のままなので、成功として流れてしまう。
-   *
-   * 代わりに `openFork` と同じ `-r <id> --fork-session` で新しいCLIプロセスを1つ起動し、
-   * 1ターンだけ使って捨てる。fork先は元セッションのtranscriptを汚さず（受入基準2）、
-   * fork時点までの会話は引き継ぐのでツールも普通に使える。タブは開かない。
-   *
-   * fork先の新しいセッションidはCLIが振るため拡張機能からは追跡できない（`openFork` の
-   * 注意書きと同じ制約）が、1ターンで閉じるこの用途では困らない。
-   */
-  private async generateAskGptRequestText(
-    entry: ClaudePanel,
-    instruction: string,
-    timeoutMs: number,
-    signal: AbortSignal,
-  ): Promise<RequestGenerationResult> {
-    if (signal.aborted) {
-      // CLIを1本も起こさずに返す。既に止まっていると分かっている
-      return { ok: false, kind: 'cancelled', reason: '利用者の操作で停止しました' };
-    }
-    const sessionId = entry.session.threadId;
-    if (sessionId === undefined) {
-      return {
-        ok: false,
-        kind: 'unsupported',
-        reason: 'この会話はまだ開始されていないため、分岐して質問文を作れません',
-      };
-    }
-    if (entry.session.getState().busy) {
-      return { ok: false, kind: 'busy', reason: 'この会話のAIが応答中です' };
-    }
-    const folder = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
-    if (folder === undefined) {
-      return { ok: false, kind: 'unsupported', reason: '作業ディレクトリを特定できませんでした' };
-    }
-
-    const sideEntry = this.buildEntry(
-      folder,
-      ASK_GPT_TAB_TITLE,
-      false,
-      undefined,
-      undefined,
-      this.initialModelSettings(undefined, sessionId),
-    );
-    try {
-      sideEntry.session.start({
-        cwd: folder,
-        target: { kind: 'fork', sessionId },
-        sessionId: undefined,
-        config: this.configFor(sideEntry),
-      });
-    } catch (e) {
-      this.teardown(sideEntry);
-      return {
-        ok: false,
-        kind: 'provider-error',
-        reason: e instanceof Error ? e.message : String(e),
-      };
-    }
-
-    // タブは開かないが、管理表へは `openFork` と同じ形の合成キーで登録する。登録しないと、
-    // 生成中に拡張機能が破棄されたときに `teardown` の対象から漏れ、CLIプロセスが残る
-    this.panels.set(`askGpt:${randomUUID()}`, sideEntry);
-
-    // `TaskSession.sessionId` にはfork元のidを渡す。fork先の新しいidはCLIが振るため
-    // 拡張機能からは知れないが、この値は待ち合わせには使われない（ログ・引き継ぎ用）
-    const session = this.buildTaskSession(sideEntry, sessionId);
-    // 質問文を書くだけのターンに承認が要る操作は無い。要求が来たら理由を問わず拒否する
-    session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
-    try {
-      const text = await awaitSingleTurn(session, instruction, {
-        timeoutMs,
-        log: this.log,
-        label: ASK_GPT_LABEL,
-        logPrefix: ASK_GPT_LOG_PREFIX,
-        signal,
-      });
-      return { ok: true, text };
-    } catch (e) {
-      if (e instanceof SingleTurnCancelledError) {
-        return { ok: false, kind: 'cancelled', reason: e.message };
-      }
-      if (e instanceof SingleTurnTimeoutError) {
-        return { ok: false, kind: 'timeout', reason: e.message };
-      }
-      return {
-        ok: false,
-        kind: 'provider-error',
-        reason: e instanceof Error ? e.message : String(e),
-      };
-    } finally {
-      this.teardown(sideEntry);
-    }
   }
 
   /**
@@ -2025,15 +1906,6 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
-        return;
-      }
-      // モードを固定した入口（Issue #972）。設定は書き換えず、今回の起動だけを固定する
-      if (type === 'secondOpinionDirect') {
-        void this.startSecondOpinionFor(entry, 'direct');
-        return;
-      }
-      if (type === 'secondOpinionAskGpt') {
-        void this.startSecondOpinionFor(entry, 'askGpt');
         return;
       }
       if (type === 'secondOpinionContinue') {
