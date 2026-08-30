@@ -221,12 +221,14 @@ export interface SecondOpinionSummarySettings {
 /**
  * 要約の既定。
  *
- * effortを既定の候補（`high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮で、
- * ここへ時間と費用を掛けても独立した意見の質は上がらないため。
+ * モデルもeffortも既定の候補（`gpt-5.6-sol` / `high`）より下げてあるのは、要約に求めるのが
+ * 判断ではなく事実の圧縮で、ここへ時間と費用を掛けても独立した意見の質は上がらないため。
+ * しかも要約セッションは会話が `SUMMARY_SKIP_THRESHOLD_CHARS` を超えるたびに開く（Issue #1001）。
+ * 要約が痩せて本体の判断が狂うようなら、設定でモデルを上げられる。
  */
 export const DEFAULT_SECOND_OPINION_SUMMARY: SecondOpinionSummarySettings = {
   enabled: true,
-  model: 'gpt-5.6-sol',
+  model: 'gpt-5.6-luna',
   effort: 'low',
 };
 
