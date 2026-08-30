@@ -390,33 +390,50 @@ export function workflowScript(): string {
   // 実測の前に粗く切っておく上限。長い応答をそのまま測ると1回目のレイアウトだけが重くなる。
   // 実際に収まるのは日本語で15文字前後なので、この値で切っても表示される内容は変わらない
   const NODE_TEXT_SCAN_LIMIT = 40;
-  // 測定が効かなかったときの下支え（fitNodeTextのJSDoc参照）。ノードの矩形より少し広く取り、
-  // 選択中の太い枠線（stroke-width: 3）を巻き込まない
+  // 測定が効かなかったときの下支え（fitNodeTextのJSDoc参照）。文字だけを切りたいので
+  // ノードの矩形（168x60）より横を内側へ取る。矩形と同じにすると、選択中の太い枠線
+  // （stroke-width: 3）の外側半分まで切ってしまう
   const NODE_CLIP_ID = 'wfNodeClip';
 
   /**
    * ノード内の文字を、実測幅がmaxWidthに収まるまで末尾から削って省略記号を付ける
-   * （issue #1011）。二分探索なので測定回数は文字数の対数で収まる。
+   * （issue #1011）。
    *
    * **SVGへappendしたあとに呼ぶこと。** getComputedTextLengthはDOMへ接続され描画されて
    * いる要素でしか測れず、未接続・非表示では0を返す。0が返ったときは何もしない
    * （クリップ（NODE_CLIP_ID）が隣のノードへのはみ出しだけは防ぐ）。
+   *
+   * **測定の回数を抑える。** textContentの書き換えと測定を交互に行うと、そのたびに
+   * レイアウトが同期で走る。タスクは1runあたり最大50件、1ノードに3つの文字列があるので、
+   * 1文字列あたりの測定回数がそのまま効いてくる。幅は文字数にほぼ比例するため、直前の
+   * 測定値から次の候補を比率で推定し、推定が範囲外へ出たときだけ二分探索へ落とす。
+   * 日本語26文字の要約で測定3回（二分探索のみなら5回）だった。
    */
   function fitNodeText(node, maxWidth) {
     const full = node.textContent;
     if (full === '') return;
-    const width = node.getComputedTextLength();
+    let width = node.getComputedTextLength();
     if (width === 0 || width <= maxWidth) return;
+    // lo: 収まると確認できた文字数。hi: 収まる可能性が残っている上限
+    // （full全体は超過すると分かっているので、最低1文字は削る）
     let lo = 0;
     let hi = full.length - 1;
+    let count = full.length;
+    let probe = Math.min(hi, Math.max(1, Math.floor((full.length * maxWidth) / width)));
     while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      node.textContent = full.slice(0, mid) + '…';
-      if (node.getComputedTextLength() <= maxWidth) {
-        lo = mid;
+      node.textContent = full.slice(0, probe) + '…';
+      width = node.getComputedTextLength();
+      count = probe;
+      if (width <= maxWidth) {
+        lo = probe;
       } else {
-        hi = mid - 1;
+        hi = probe - 1;
       }
+      if (lo >= hi) break;
+      // 比率での推定がloより先へ進まない・hiを超えるときは二分探索へ落とす
+      // （進まない候補を測り続けると終わらない）
+      const next = Math.floor((count * maxWidth) / width);
+      probe = next > lo && next <= hi ? next : Math.ceil((lo + hi) / 2);
     }
     // 1文字＋省略記号すら入らないとき（極端に幅の広い文字）は空にする。
     // 枠の外へ出すよりは何も出さないほうがよい
@@ -749,11 +766,9 @@ export function workflowScript(): string {
     svg.appendChild(nodeGroup);
     // 文字の切り詰めはSVGへ入れたあと（getComputedTextLengthはDOMへ接続され描画されて
     // いる要素でしか測れない。issue #1011）。属性で幅を持たせておき、ここでまとめて当てる
-    const fitTargets = nodeGroup.querySelectorAll('text[data-fit]');
-    for (let i = 0; i < fitTargets.length; i += 1) {
-      const target = fitTargets[i];
+    nodeGroup.querySelectorAll('text[data-fit]').forEach((target) => {
       fitNodeText(target, Number(target.getAttribute('data-fit')));
-    }
+    });
     applyGraphScale();
   }
 
