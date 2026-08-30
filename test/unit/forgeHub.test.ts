@@ -225,3 +225,219 @@ describe('ForgeHubService', () => {
     expect(cli.calls.some((call) => call.command === 'gh' && call.args[0] === 'pr')).toBe(true);
   });
 });
+
+/**
+ * cleanupライフサイクル（Issue #1029）。
+ *
+ * `gh pr view`は3用途で呼ばれるため、`--json=`の中身で応答を切り替える。
+ * `statusCheckRollup`がCI、`state,...`がPR/MR状態、`number,url`がPR/MRの発見。
+ */
+describe('ForgeHubService cleanupライフサイクル', () => {
+  interface Remote {
+    ci: string;
+    pullRequest: string;
+    /** CI取得を任意の時点まで止める。割り込みの再現に使う。 */
+    beforeCi?: () => Promise<void>;
+  }
+
+  const startedService = async (
+    remote: Remote,
+  ): Promise<{ service: ForgeHubService; branch: string }> => {
+    const cli = new FakeCli();
+    cli.run = async (command, args) => {
+      cli.calls.push({ command, args });
+      if (args[0] === 'auth') return { code: 0, stdout: '', stderr: '' };
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        const json = args.find((arg) => arg.startsWith('--json=')) ?? '';
+        if (json.includes('statusCheckRollup')) {
+          if (remote.beforeCi !== undefined) await remote.beforeCi();
+          return { code: 0, stdout: remote.ci, stderr: '' };
+        }
+        if (json.includes('state')) return { code: 0, stdout: remote.pullRequest, stderr: '' };
+      }
+      if (command === 'gh' && args[0] === 'api') return { code: 0, stdout: '[]', stderr: '' };
+      return { code: 0, stdout: 'https://github.com/owner/repo/pull/12\n', stderr: '' };
+    };
+    const git = new FakeGit({ code: 0, stdout: '', stderr: '' });
+    git.run = async (args: readonly string[]) => {
+      if (args[0] === 'remote') {
+        return { code: 0, stdout: 'https://github.com/owner/repo.git\n', stderr: '' };
+      }
+      if (args[0] === 'symbolic-ref') return { code: 0, stdout: 'origin/main\n', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const service = new ForgeHubService({
+      git,
+      cli,
+      cliAvailability: available,
+      fs: files,
+      worktreeFs,
+      memento,
+    });
+    const snapshot = await service.inspect('codex', '/repo');
+    await service.recordStartedWork(
+      snapshot,
+      { number: 12, title: 'cleanupまで通すIssue' },
+      { cwd: '/repo/.agents/worktrees/run/issue-12', branch: 'fix/12/cleanup' },
+      'thread-1',
+    );
+    const branch = service.listWorkItems()[0]?.branch;
+    if (branch === undefined) throw new Error('作業カードが記録されませんでした');
+    await service.createDraftPullRequest(branch);
+    return { service, branch };
+  };
+
+  const merged = '{"state":"MERGED","isDraft":false,"mergeable":"MERGEABLE"}';
+  const open = '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE"}';
+  const ciFailed = '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}';
+  const ciPassed = '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}';
+  const ciPending = '{"statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":null}]}';
+
+  it.each([
+    ['CI失敗', ciFailed],
+    ['CI成功', ciPassed],
+    ['CI実行中', ciPending],
+  ])('マージ済みカードは%sでもcleanupに残る', async (_label, ci) => {
+    const remote: Remote = { ci, pullRequest: merged };
+    const { service } = await startedService(remote);
+
+    await service.refreshRemoteStates();
+
+    expect(service.listWorkItems()).toMatchObject([
+      { status: 'cleanup', pullRequestState: 'merged', nextAction: 'cleanupを確認する' },
+    ]);
+  });
+
+  it('手動のCI更新でもcleanupから戻らない', async () => {
+    const remote: Remote = { ci: ciPassed, pullRequest: merged };
+    const { service, branch } = await startedService(remote);
+    await service.refreshRemoteStates();
+
+    const result = await service.refreshCi(branch);
+
+    expect(result).toEqual({ ok: true });
+    expect(service.listWorkItems()).toMatchObject([{ status: 'cleanup' }]);
+  });
+
+  it('マージを観測した後にopenが返ってもmergedのまま扱う', async () => {
+    const remote: Remote = { ci: ciPending, pullRequest: merged };
+    const { service, branch } = await startedService(remote);
+    await service.refreshPullRequestStatus(branch);
+    remote.pullRequest = open;
+
+    await service.refreshPullRequestStatus(branch);
+
+    expect(service.listWorkItems()).toMatchObject([
+      { status: 'cleanup', pullRequestState: 'merged' },
+    ]);
+  });
+
+  it('CI取得中にcleanup完了したカードを復活させない', async () => {
+    let completed: Awaited<ReturnType<ForgeHubService['completeCleanup']>> | undefined;
+    const remote: Remote = { ci: ciPassed, pullRequest: merged };
+    const { service, branch } = await startedService(remote);
+    await service.refreshPullRequestStatus(branch);
+    // CI取得の待ち時間中にcleanup完了が入る順序を、CLI応答の直前で再現する。
+    remote.beforeCi = async () => {
+      completed = await service.completeCleanup(branch);
+    };
+
+    const result = await service.refreshCi(branch);
+
+    expect(completed).toEqual({ ok: true });
+    expect(result).toMatchObject({ ok: false, reason: 'gone' });
+    expect(service.listWorkItems()).toEqual([]);
+  });
+
+  it('completeCleanupはマージ済みだけ受け付ける', async () => {
+    const remote: Remote = { ci: ciPassed, pullRequest: open };
+    const { service, branch } = await startedService(remote);
+    await service.refreshRemoteStates();
+
+    const rejected = await service.completeCleanup(branch);
+
+    expect(rejected).toMatchObject({ ok: false, reason: 'error' });
+    expect(service.listWorkItems()).toHaveLength(1);
+
+    remote.pullRequest = merged;
+    await service.refreshRemoteStates();
+    const accepted = await service.completeCleanup(branch);
+
+    expect(accepted).toEqual({ ok: true });
+    expect(service.listWorkItems()).toEqual([]);
+  });
+
+  it('既に外したカードへの再要求はgoneとして返す', async () => {
+    const remote: Remote = { ci: ciPassed, pullRequest: merged };
+    const { service, branch } = await startedService(remote);
+    await service.refreshRemoteStates();
+    await service.completeCleanup(branch);
+
+    expect(await service.completeCleanup(branch)).toMatchObject({ ok: false, reason: 'gone' });
+    expect(await service.refreshCi(branch)).toMatchObject({ ok: false, reason: 'error' });
+  });
+
+  it('CI取得の待ち時間に入った会話状態の更新を、CI結果の書き戻しで消さない', async () => {
+    const remote: Remote = { ci: ciPassed, pullRequest: open };
+    const { service, branch } = await startedService(remote);
+    remote.beforeCi = async () => {
+      await service.recordSessionState('thread-1', { busy: false, failed: true });
+    };
+
+    expect(await service.refreshCi(branch)).toEqual({ ok: true });
+    expect(service.listWorkItems()[0]).toMatchObject({
+      sessionBusy: false,
+      sessionFailed: true,
+      status: 'ci',
+    });
+  });
+
+  it('以前の版が保存したmerged×ciのカードを、読み込んだ時点でcleanupへ戻す', async () => {
+    const stored = {
+      issue: { number: 12, title: '矛盾した状態で保存されたIssue' },
+      host: 'github',
+      provider: 'codex',
+      cwd: '/repo/.agents/worktrees/run/issue-12',
+      branch: 'fix/12/cleanup',
+      sessionId: 'thread-1',
+      status: 'ci',
+      pullRequestNumber: 12,
+      pullRequestState: 'merged',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    };
+    const cli = new FakeCli();
+    cli.run = async (command, args) => {
+      cli.calls.push({ command, args });
+      if (args[0] === 'auth') return { code: 0, stdout: '', stderr: '' };
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        const json = args.find((arg) => arg.startsWith('--json=')) ?? '';
+        if (json.includes('statusCheckRollup')) return { code: 0, stdout: ciPassed, stderr: '' };
+        if (json.includes('state')) return { code: 0, stdout: merged, stderr: '' };
+      }
+      return { code: 0, stdout: '[]', stderr: '' };
+    };
+    const service = new ForgeHubService({
+      git: new FakeGit({ code: 0, stdout: 'https://github.com/owner/repo.git\n', stderr: '' }),
+      cli,
+      cliAvailability: available,
+      fs: files,
+      worktreeFs,
+      memento: {
+        get: <T>(key: string, defaultValue: T): T =>
+          key === 'agent.forge.workItems.v1' ? ([stored] as unknown as T) : defaultValue,
+        update: async (): Promise<void> => {},
+      },
+    });
+
+    // リモート取得を待たずに揃っている。取得が失敗し続けてもcleanup列に出せる。
+    expect(service.listWorkItems()).toMatchObject([
+      { status: 'cleanup', pullRequestState: 'merged' },
+    ]);
+    await service.refreshRemoteStates();
+
+    expect(service.listWorkItems()).toMatchObject([
+      { status: 'cleanup', pullRequestState: 'merged' },
+    ]);
+  });
+});
