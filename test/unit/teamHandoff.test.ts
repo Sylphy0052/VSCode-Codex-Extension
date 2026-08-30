@@ -9,12 +9,23 @@ import {
   MAX_HANDOFF_FILES_PER_RUN,
   parseHandoffFileName,
   TeamHandoffStore,
+  type HandoffEntry,
   type HandoffFileSystemPort,
+  type HandoffResult,
 } from '../../src/orchestrator/teamHandoff';
 
 /** `runId`はUUID形式で検証されるため、テスト全体で1つの妥当なUUIDを使い回す。 */
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
 const REPO_ROOT = '/repo';
+
+/**
+ * `list`の成功結果から一覧を取り出す。ガード失敗と「0件」を区別するため
+ * `list`は`HandoffResult`を返す（Issue #1033）ので、正常系のテストはここを通す。
+ */
+function listedEntries(result: HandoffResult<readonly HandoffEntry[]>): readonly HandoffEntry[] {
+  expect(result.ok).toBe(true);
+  return result.ok ? result.value : [];
+}
 
 /**
  * `HandoffFileSystemPort`のインメモリfake。`fsGuards.test.ts`の`FakeSymlinkPort`と同じ
@@ -233,7 +244,7 @@ describe('TeamHandoffStore', () => {
     });
 
     // 一覧は書いた側のtaskId/slugをそのまま返す
-    expect(await store.list(RUN_ID)).toEqual(
+    expect(listedEntries(await store.list(RUN_ID))).toEqual(
       expect.arrayContaining([
         {
           taskId: 'impl',
@@ -265,7 +276,7 @@ describe('TeamHandoffStore', () => {
     await store.write(RUN_ID, 'T1', 'note', '内容1');
     await store.write(RUN_ID, 'T2', 'design', '内容2');
 
-    const entries = await store.list(RUN_ID);
+    const entries = listedEntries(await store.list(RUN_ID));
     expect(entries).toHaveLength(2);
     expect(entries).toEqual(
       expect.arrayContaining([
@@ -289,7 +300,7 @@ describe('TeamHandoffStore', () => {
     await fs.writeTextFile(path.join(runDir, '人が置いたファイル.txt'), 'x');
     const store = new TeamHandoffStore(REPO_ROOT, fs);
 
-    const entries = await store.list(RUN_ID);
+    const entries = listedEntries(await store.list(RUN_ID));
     expect(entries).toEqual([]);
   });
 
@@ -324,7 +335,7 @@ describe('TeamHandoffStore', () => {
     const removeRunResult = await store.removeRun(RUN_ID);
     expect(removeRunResult).toEqual({ ok: true, value: undefined });
 
-    const entries = await store.list(RUN_ID);
+    const entries = listedEntries(await store.list(RUN_ID));
     expect(entries).toEqual([]);
   });
 
@@ -336,7 +347,7 @@ describe('TeamHandoffStore', () => {
     if (!result.ok) {
       expect(result.error).toContain('不正なスラッグ');
     }
-    expect(await store.list(RUN_ID)).toEqual([]);
+    expect(listedEntries(await store.list(RUN_ID))).toEqual([]);
   });
 
   it('不正なtaskIdのwriteは書き込まずにエラーを返す', async () => {
@@ -425,12 +436,17 @@ describe('TeamHandoffStore', () => {
     }
   });
 
-  it('祖先にシンボリックリンクがあるとlistは空配列を返す', async () => {
+  it('祖先にシンボリックリンクがあるとlistは理由付きで失敗する（Issue #1033）', async () => {
     const linkedRunsDir = path.join(REPO_ROOT, '.agents', 'handoff', 'runs');
     const fs = new FakeHandoffFileSystem([linkedRunsDir]);
     const store = new TeamHandoffStore(REPO_ROOT, fs);
 
-    expect(await store.list(RUN_ID)).toEqual([]);
+    // 空配列を返していたころは「まだ誰も書いていない」と見分けが付かなかった
+    const result = await store.list(RUN_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('シンボリックリンク');
+    }
   });
 
   it('祖先にシンボリックリンクがあるとremoveを拒否する', async () => {

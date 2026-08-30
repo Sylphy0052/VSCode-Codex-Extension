@@ -245,11 +245,24 @@ export class TeamHandoffStore {
     return { ok: true, value: content };
   }
 
-  /** runの中の一覧。想定外の名前のファイルは含めない。 */
-  async list(runId: string): Promise<HandoffEntry[]> {
-    const dir = handoffRunDir(this.repoRoot, runId);
-    if ((await this.guard(dir)) !== undefined) {
-      return [];
+  /**
+   * runの中の一覧。想定外の名前のファイルは含めない。
+   *
+   * **他の操作と同じく成否を`HandoffResult`で返す（Issue #1033）。** 以前は
+   * `HandoffEntry[]`を返し、シンボリックリンクガードに引っかかったときも空配列にして
+   * いたため、呼び出し側からは「受け渡しファイルが0件」と区別できなかった——
+   * `write`/`read`/`remove`がガード失敗を理由付きで返すのと揃える。
+   */
+  async list(runId: string): Promise<HandoffResult<HandoffEntry[]>> {
+    let dir: string;
+    try {
+      dir = handoffRunDir(this.repoRoot, runId);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    const guardMessage = await this.guard(dir);
+    if (guardMessage !== undefined) {
+      return { ok: false, error: guardMessage };
     }
     const names = await this.fs.listDirectory(dir);
     const entries: HandoffEntry[] = [];
@@ -263,7 +276,7 @@ export class TeamHandoffStore {
         });
       }
     }
-    return entries;
+    return { ok: true, value: entries };
   }
 
   /**
