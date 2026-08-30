@@ -1,3 +1,4 @@
+import { isWithinAnyRoot, normalizeWorkspacePath } from '../util/paths';
 import type { SessionActivityState } from './sessionActivity';
 
 /**
@@ -39,7 +40,7 @@ export function buildSessionKanban(
   };
   const columns = Object.keys(cards) as SessionKanbanColumn[];
   for (const session of sessions) {
-    if (session.cwd === undefined || !workspaceRoots.some((root) => isWithin(session.cwd!, root))) {
+    if (session.cwd === undefined || !isWithinAnyRoot(session.cwd, workspaceRoots)) {
       continue;
     }
     const column = session.activity;
@@ -51,21 +52,8 @@ export function buildSessionKanban(
   return { cards, total: columns.reduce((total, column) => total + cards[column].length, 0) };
 }
 
-function isWithin(cwd: string, root: string): boolean {
-  const normalizedRoot = normalizePath(root);
-  const normalizedCwd = normalizePath(cwd);
-  if (normalizedRoot === '/') {
-    return normalizedCwd.startsWith('/');
-  }
-  return normalizedCwd === normalizedRoot || normalizedCwd.startsWith(`${normalizedRoot}/`);
-}
-
+/** カードに出す表示名。判定と同じ正規化を通してから末尾の要素だけを取る */
 function basename(path: string): string {
-  const trimmed = normalizePath(path);
+  const trimmed = normalizeWorkspacePath(path);
   return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed;
-}
-
-function normalizePath(path: string): string {
-  const normalized = path.replace(/\\/gu, '/').replace(/\/+$/u, '');
-  return normalized === '' ? '/' : normalized;
 }
