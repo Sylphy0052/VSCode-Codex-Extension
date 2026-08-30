@@ -226,7 +226,7 @@ export interface SecondOpinionSummarySettings {
  */
 export const DEFAULT_SECOND_OPINION_SUMMARY: SecondOpinionSummarySettings = {
   enabled: true,
-  model: 'gpt-5.6-sol',
+  model: 'gpt-5.6-luna',
   effort: 'low',
 };
 

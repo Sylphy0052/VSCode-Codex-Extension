@@ -288,22 +288,22 @@ describe('要約の結末に応じた会話の注記（Issue #903）', () => {
 });
 
 describe('normalizeSecondOpinionSummary（Issue #903）', () => {
-  it('未指定なら既定（有効・Sol・low）を使う', () => {
+  it('未指定なら既定（有効・Luna・low）を使う', () => {
     expect(normalizeSecondOpinionSummary(undefined)).toEqual({
-      summary: { enabled: true, model: 'gpt-5.6-sol', effort: 'low' },
+      summary: { enabled: true, model: 'gpt-5.6-luna', effort: 'low' },
       warnings: [],
     });
   });
 
   it('オブジェクトでなければ丸ごと既定へ戻し、理由を返す', () => {
     const result = normalizeSecondOpinionSummary('yes');
-    expect(result.summary).toEqual({ enabled: true, model: 'gpt-5.6-sol', effort: 'low' });
+    expect(result.summary).toEqual({ enabled: true, model: 'gpt-5.6-luna', effort: 'low' });
     expect(result.warnings[0]).toContain('agent.secondOpinion.summary');
   });
 
   it('項目単位で落とす（modelだけ壊れていてもenabledの指定は生きる）', () => {
     const result = normalizeSecondOpinionSummary({ enabled: false, model: 'bad model' });
-    expect(result.summary).toEqual({ enabled: false, model: 'gpt-5.6-sol', effort: 'low' });
+    expect(result.summary).toEqual({ enabled: false, model: 'gpt-5.6-luna', effort: 'low' });
     expect(result.warnings[0]).toContain('model');
   });
 

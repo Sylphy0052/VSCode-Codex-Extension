@@ -838,7 +838,7 @@
           "additionalProperties": false,
           "default": {
             "enabled": true,
-            "model": "gpt-5.6-sol",
+            "model": "gpt-5.6-luna",
             "effort": "low"
           },
           "scope": "window",

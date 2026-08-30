@@ -7698,7 +7698,7 @@ Issue #926 P0 でこの位置付けを整理した。**背景要約は付随情�
 
 背景は基本コンテキストだが、無ければ成立しないわけではない。失敗・空応答・タイムアウトのいずれでも `ok: false` を返すだけで、セカンドオピニオン本体は要約なしで続行する。要約を切る（`agent.secondOpinion.summary.enabled: false`）と、要約セッションを開かず、`## ここまでの背景` の区画自体が出ない（元の会話に由来する材料が一切渡らない）。
 
-設定は `agent.secondOpinion.summary`（`enabled` / `model` / `effort`、既定は有効・`gpt-5.6-sol`・`low`）。effortを本体（`high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮であるため。項目単位で検証し、`model`だけ壊れていても`enabled`の指定は生かす。
+設定は `agent.secondOpinion.summary`（`enabled` / `model` / `effort`、既定は有効・`gpt-5.6-luna`・`low`）。モデルもeffortも本体（`gpt-5.6-sol` / `high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮であるためで、会話が4,000文字を超えるたびに開く経路（`SUMMARY_SKIP_THRESHOLD_CHARS`）に最上位モデルを充てる必然性がない（Issue #1001）。要約が痩せて本体の判断が狂うようなら、設定でモデルを上げられる。項目単位で検証し、`model`だけ壊れていても`enabled`の指定は生かす。
 
 本番ログへ出すのは要約セッションの `model` / `effort` / `promptChars` と、本体側の `summary=on|off` だけ。会話の記録・要約の本文は出さない（§14.80と同じ）。
 
