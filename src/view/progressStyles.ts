@@ -373,6 +373,19 @@ ${sharedStyles()}
   .change.added .mark { color: var(--vscode-descriptionForeground); }
   .change.removed { color: var(--vscode-descriptionForeground); }
   .change.removed .text { text-decoration: line-through; }
+  /* 読み上げにだけ載せる領域（issue 1025）。display:none や visibility:hidden では
+     読み上げからも消えるため、面積を潰して視覚から外す */
+  .srOnly {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
 ${reducedMotionStyles()}
 `;
 }

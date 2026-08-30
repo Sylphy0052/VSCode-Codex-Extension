@@ -180,6 +180,10 @@ ${progressStyles()}
       <span id="progressPercent"></span>
     </div>
   </section>
+  <!-- 応答中↔待機中の変化だけを読み上げへ届ける（issue #1025）。KPIやタイムラインへ
+       広く aria-live を付けると、更新のたびに中身を読み直してうるさくなるため、
+       流すのはこの1行に絞る。画面には出さない -->
+  <p id="liveStatus" class="srOnly" role="status" aria-live="polite"></p>
   <section id="checklistSection" hidden>
     <h2>チェックリスト</h2>
     <ul id="checklist"></ul>
