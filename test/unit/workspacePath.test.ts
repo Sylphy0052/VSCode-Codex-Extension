@@ -4,8 +4,8 @@ import { isWithinAnyRoot, isWithinRoot, normalizeWorkspacePath } from '../../src
 /**
  * ワークスペースの所属判定（Issue #1019）。
  *
- * 大小文字の既定は実行環境に依存するため、ここでは `caseInsensitive` を明示して
- * 両方の側を確かめる。既定値そのものはテストしない（CI と実機で答えが変わるため）。
+ * 大小文字の既定はパスの形で決まる（ドライブ絶対パスと UNC だけ無視する）。実行環境に
+ * 依存しないので既定値そのものも確かめる。
  */
 
 describe('normalizeWorkspacePath（issue #1019）', () => {
@@ -34,6 +34,22 @@ describe('normalizeWorkspacePath（issue #1019）', () => {
     expect(normalizeWorkspacePath('\\\\server\\share\\proj')).toBe('//server/share/proj');
     expect(normalizeWorkspacePath('//server/share/proj/pkg/..')).toBe('//server/share/proj');
   });
+
+  it('UNCのサーバ名と共有名は .. で削れない', () => {
+    // 削ると //server/share が //server や // に化けて、別の共有と一致しうる
+    expect(normalizeWorkspacePath('//server/share/../..')).toBe('//server/share');
+    expect(normalizeWorkspacePath('//server/share/../other')).toBe('//server/share/other');
+  });
+
+  it('ドライブ絶対パスではドライブが .. で消えない', () => {
+    expect(normalizeWorkspacePath('C:\\')).toBe('C:/');
+    expect(normalizeWorkspacePath('C:\\..\\secret')).toBe('C:/secret');
+    expect(normalizeWorkspacePath('C:\\a\\..\\..\\x')).toBe('C:/x');
+  });
+
+  it('ドライブ相対パス（C:foo）を絶対パスに化けさせない', () => {
+    expect(normalizeWorkspacePath('C:foo')).toBe('C:foo');
+  });
 });
 
 describe('isWithinRoot（issue #1019）', () => {
@@ -59,6 +75,20 @@ describe('isWithinRoot（issue #1019）', () => {
   it('末尾の区切りと区切りの向きを吸収する', () => {
     expect(isWithinRoot('C:\\work\\repo\\pkg', 'C:/work/repo/')).toBe(true);
     expect(isWithinRoot('/work/repo/', '/work/repo')).toBe(true);
+  });
+
+  it('ドライブ絶対パスの根と、ドライブ相対パスを区別する', () => {
+    expect(isWithinRoot('C:\\foo', 'C:\\')).toBe(true);
+    expect(isWithinRoot('C:', 'C:\\')).toBe(false);
+    expect(isWithinRoot('C:foo', 'C:\\')).toBe(false);
+  });
+
+  it('既定では、両側がWindowsのパスのときだけ大小文字を無視する', () => {
+    // ドライブレターの大小は揺れるので吸収する
+    expect(isWithinRoot('c:\\work\\repo\\pkg', 'C:\\work\\repo')).toBe(true);
+    expect(isWithinRoot('\\\\Server\\Share\\proj', '//server/share')).toBe(true);
+    // POSIXでは /a と /A が別のディレクトリ。実行環境がWindowsでも畳まない
+    expect(isWithinRoot('/work/Repo/pkg', '/work/repo')).toBe(false);
   });
 
   it('大小文字を無視する設定では、ドライブレターの大小差を吸収する', () => {
