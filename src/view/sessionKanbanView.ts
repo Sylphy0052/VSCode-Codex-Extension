@@ -128,7 +128,9 @@ export class SessionKanbanViewManager implements vscode.Disposable {
       return;
     }
     this.lastPostAt = Date.now();
-    this.dirty = false;
+    // まとめ待ちの間に非表示へ移ったときは、送った分が画面へ反映された保証が無い。
+    // dirtyは表に出ているときだけ下ろし、非表示なら表に戻った時点で送り直す
+    this.dirty = !this.panel.visible;
     void this.panel.webview.postMessage({ type: 'board', board: this.read() });
   }
 }
