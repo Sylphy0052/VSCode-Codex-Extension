@@ -243,14 +243,22 @@ describe('変更ファイルの重複除去（issue #1013）', () => {
     // 陽性対照: `__proto__` を own property として持てることまで見る。
     // `{}` で作ると代入が継承アクセサへ吸われ、この検査が落ちる
     const view = buildProgress(
-      stateWith([item('userMessage', { text: '指示' }), fileChange('__proto__')]),
+      stateWith([
+        item('userMessage', { text: '指示' }),
+        // `__proto__` の下にキーがある形。`{}` の入れ物へ素通しすると
+        // `Object.prototype` へ `nested` が生える経路になりうる
+        fileChange('__proto__'),
+        fileChange('__proto__/nested'),
+      ]),
     );
     const counts = view.turns[0]?.fileEditCounts;
 
     expect(Object.getPrototypeOf(counts)).toBeNull();
     expect(Object.hasOwn(counts ?? {}, '__proto__')).toBe(true);
-    // プロトタイプ汚染が起きていないこと
-    expect(({} as Record<string, unknown>)['__proto__']).toBe(Object.prototype);
+    // 汚染が起きていないことは、無関係なオブジェクトに値が生えていないかで見る。
+    // `({}).__proto__` の比較では見えない（汚染しても `Object.prototype` を返すため）
+    expect(({} as Record<string, unknown>)['nested']).toBeUndefined();
+    expect(Object.hasOwn(Object.prototype, 'nested')).toBe(false);
   });
 });
 
