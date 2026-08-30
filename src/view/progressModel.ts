@@ -102,11 +102,15 @@ export function buildProgress(state: ChatState): ProgressView {
 
 function buildSummary(state: ChatState, turns: readonly ProgressTurn[]): ProgressSummary {
   const editedFiles: string[] = [];
+  // 既出かどうかは Set で見る（issue #1013）。並びは最初に変更した順のまま配列で保つ。
+  // `includes` だけだとファイル数の2乗で効き、この関数は状態が届くたびに丸ごと走る
+  const seen = new Set<string>();
   let commandCount = 0;
   for (const turn of turns) {
     commandCount += turn.commands.length;
     for (const file of turn.editedFiles) {
-      if (!editedFiles.includes(file)) {
+      if (!seen.has(file)) {
+        seen.add(file);
         editedFiles.push(file);
       }
     }
@@ -243,10 +247,13 @@ function absorb(turn: ProgressTurn, item: ChatItem): void {
     if (diff.path === '') {
       continue;
     }
-    if (!turn.editedFiles.includes(diff.path)) {
+    // 既出かどうかは `fileEditCounts` の有無で見る（issue #1013）。`includes` の走査を
+    // 増やさずに済み、持つ状態も増えない
+    const count = turn.fileEditCounts[diff.path];
+    if (count === undefined) {
       turn.editedFiles.push(diff.path);
     }
-    turn.fileEditCounts[diff.path] = (turn.fileEditCounts[diff.path] ?? 0) + 1;
+    turn.fileEditCounts[diff.path] = (count ?? 0) + 1;
   }
 }
 
