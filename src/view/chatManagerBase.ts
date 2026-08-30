@@ -100,6 +100,14 @@ export interface BaseChatPanel {
 export interface ChatStateChange {
   threadId: string;
   state: ChatState;
+  /**
+   * そのときのチャットの表示名（issue #1013）。進捗画面はタブのタイトルへ使う。
+   *
+   * `open`のときに一度読んだ値を持ち続けると、`deriveTitle`が名前を作り直しても
+   * （`chatView.ts`の`onSessionChange`、`claudeChatView.ts`の`applyTitle`）進捗タブだけ
+   * 古い名前のまま残る。状態と同じ経路で毎回渡して追随させる。
+   */
+  title: string;
 }
 
 /**
@@ -226,7 +234,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     if (threadId === undefined) {
       return;
     }
-    this.stateChanged.fire({ threadId, state });
+    this.stateChanged.fire({ threadId, state, title: entry.title });
   }
 
   /**
