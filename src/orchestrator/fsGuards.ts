@@ -58,6 +58,17 @@ export function identifierError(runId: string, taskId: string): string | undefin
 }
 
 /**
+ * `taskId` だけを検証する（`runId` を持たない場所から使う）。
+ *
+ * `parseHandoffFileName`（`teamHandoff.ts`）のように、ファイル名から取り出した `taskId` を
+ * 検証したいが `runId` は手元に無い、という呼び出し向け。判定は `identifierError` の
+ * `taskId` 側と同じ `TASK_ID_PATTERN` で、字種の定義をこのファイルの外へ広げないために置く。
+ */
+export function isValidTaskId(taskId: string): boolean {
+  return TASK_ID_PATTERN.test(taskId);
+}
+
+/**
  * `worktreePath` / `branchName` はパスとブランチ名を組み立てる純粋関数のため、不正な入力は
  * 例外にする（`pseudoWorktreePath` も同じ流儀）。
  */

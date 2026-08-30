@@ -100,9 +100,28 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
 }
 
 describe('handoffPath / handoffRunDir', () => {
-  it('runId/taskId/slugから `<taskId>-<slug>.md` のパスを組み立てる', () => {
+  it('runId/taskId/slugから `<taskId>~<slug>.md` のパスを組み立てる', () => {
     const p = handoffPath(REPO_ROOT, RUN_ID, 'T1', 'design-note');
-    expect(p).toBe(path.join(REPO_ROOT, '.agents', 'handoff', 'runs', RUN_ID, 'T1-design-note.md'));
+    expect(p).toBe(path.join(REPO_ROOT, '.agents', 'handoff', 'runs', RUN_ID, 'T1~design-note.md'));
+  });
+
+  it('taskIdとslugの両方がハイフンを含んでも、別々のファイルになる（Issue #1022）', () => {
+    // 区切りが`-`だったころは、この2件が同じ `impl-design-memo.md` へ落ちていた。
+    // 一方の書き込みが他方を上書きでき、`write_handoff`が`connection.taskId`だけを
+    // 使って守っていた「別タスクの名義を騙れない」が破れていた
+    const a = handoffPath(REPO_ROOT, RUN_ID, 'impl', 'design-memo');
+    const b = handoffPath(REPO_ROOT, RUN_ID, 'impl-design', 'memo');
+    expect(path.basename(a)).toBe('impl~design-memo.md');
+    expect(path.basename(b)).toBe('impl-design~memo.md');
+    expect(a).not.toBe(b);
+  });
+
+  it('区切り文字を含むslugは例外を投げる（組み立て側で弾く）', () => {
+    expect(() => handoffPath(REPO_ROOT, RUN_ID, 'T1', 'a~b')).toThrow('不正なスラッグ');
+  });
+
+  it('区切り文字を含むtaskIdは例外を投げる', () => {
+    expect(() => handoffPath(REPO_ROOT, RUN_ID, 'T1~x', 'note')).toThrow('不正なtaskId');
   });
 
   it('不正なrunIdは例外を投げる', () => {
@@ -120,35 +139,59 @@ describe('handoffPath / handoffRunDir', () => {
   });
 });
 
-describe('parseHandoffFileName（最後のハイフンで分割する）', () => {
-  it('taskId-slug.md を分解する', () => {
-    expect(parseHandoffFileName('T1-note.md')).toEqual({ taskId: 'T1', slug: 'note' });
+describe('parseHandoffFileName（区切り文字で分割する）', () => {
+  it('taskId~slug.md を分解する', () => {
+    expect(parseHandoffFileName('T1~note.md')).toEqual({ taskId: 'T1', slug: 'note' });
   });
 
-  it('taskIdがハイフンを含んでいても、最後のハイフンで区切ってslugを取り出す', () => {
-    // taskId自体に`-`が入りうる（`TASK_ID_PATTERN`はハイフンを許すため）。
-    // `handoffPath`が組み立てる形（スラッグは末尾）に合わせ、最後のハイフンで割る
-    expect(parseHandoffFileName('implement-feature-note.md')).toEqual({
-      taskId: 'implement-feature',
-      slug: 'note',
+  it('taskIdとslugの両方がハイフンを含んでも、書いた側の組み合わせをそのまま返す（Issue #1022）', () => {
+    expect(parseHandoffFileName('impl~design-memo.md')).toEqual({
+      taskId: 'impl',
+      slug: 'design-memo',
+    });
+    expect(parseHandoffFileName('impl-design~memo.md')).toEqual({
+      taskId: 'impl-design',
+      slug: 'memo',
+    });
+  });
+
+  it('オーケストレーターの予約idの名前も分解できる', () => {
+    expect(parseHandoffFileName('_orchestrator~plan.md')).toEqual({
+      taskId: '_orchestrator',
+      slug: 'plan',
     });
   });
 
   it('.mdで終わらない名前はundefined', () => {
-    expect(parseHandoffFileName('T1-note.txt')).toBeUndefined();
+    expect(parseHandoffFileName('T1~note.txt')).toBeUndefined();
   });
 
-  it('ハイフンを含まない名前はundefined（区切りが定まらない）', () => {
+  it('区切り文字を含まない名前はundefined（旧命名の残骸を含む）', () => {
     expect(parseHandoffFileName('note.md')).toBeUndefined();
+    expect(parseHandoffFileName('T1-note.md')).toBeUndefined();
   });
 
-  it('ハイフンが先頭または末尾直前にしか無い場合はundefined（taskId/slugが空になる）', () => {
-    expect(parseHandoffFileName('-note.md')).toBeUndefined();
-    expect(parseHandoffFileName('T1-.md')).toBeUndefined();
+  it('区切り文字が先頭または末尾直前にしか無い場合はundefined（taskId/slugが空になる）', () => {
+    expect(parseHandoffFileName('~note.md')).toBeUndefined();
+    expect(parseHandoffFileName('T1~.md')).toBeUndefined();
+  });
+
+  it('区切り文字が2つ以上ある名前はundefined（slug側の字種で落ちる）', () => {
+    expect(parseHandoffFileName('T1~a~b.md')).toBeUndefined();
   });
 
   it('slugの字種が不正ならundefined', () => {
-    expect(parseHandoffFileName('T1-has/slash.md')).toBeUndefined();
+    expect(parseHandoffFileName('T1~has/slash.md')).toBeUndefined();
+  });
+
+  it('taskIdの字種が不正ならundefined（TASK_ID_PATTERNで見る）', () => {
+    expect(parseHandoffFileName('-bad~note.md')).toBeUndefined();
+    // taskIdは50文字まで。slugの上限（64文字）で代用していたころは通っていた長さ
+    expect(parseHandoffFileName(`${'a'.repeat(51)}~note.md`)).toBeUndefined();
+    expect(parseHandoffFileName(`${'a'.repeat(50)}~note.md`)).toEqual({
+      taskId: 'a'.repeat(50),
+      slug: 'note',
+    });
   });
 });
 
@@ -165,12 +208,55 @@ describe('TeamHandoffStore', () => {
       expect(writeResult.value).toEqual({
         taskId: 'T1',
         slug: 'note',
-        relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'T1-note.md'),
+        relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'T1~note.md'),
       });
     }
 
     const readResult = await store.read(RUN_ID, 'T1', 'note');
     expect(readResult).toEqual({ ok: true, value: '内容' });
+  });
+
+  it('ハイフンを含むtaskIdとslugの組み合わせが混ざっても、互いを上書きしない（Issue #1022）', async () => {
+    const fs = new FakeHandoffFileSystem();
+    const store = new TeamHandoffStore(REPO_ROOT, fs);
+    await store.write(RUN_ID, 'impl', 'design-memo', '実装が書いたメモ');
+    await store.write(RUN_ID, 'impl-design', 'memo', '設計が書いたメモ');
+
+    // 別ファイルとして共存し、それぞれ書いた内容が読める
+    expect(await store.read(RUN_ID, 'impl', 'design-memo')).toEqual({
+      ok: true,
+      value: '実装が書いたメモ',
+    });
+    expect(await store.read(RUN_ID, 'impl-design', 'memo')).toEqual({
+      ok: true,
+      value: '設計が書いたメモ',
+    });
+
+    // 一覧は書いた側のtaskId/slugをそのまま返す
+    expect(await store.list(RUN_ID)).toEqual(
+      expect.arrayContaining([
+        {
+          taskId: 'impl',
+          slug: 'design-memo',
+          relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'impl~design-memo.md'),
+        },
+        {
+          taskId: 'impl-design',
+          slug: 'memo',
+          relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'impl-design~memo.md'),
+        },
+      ]),
+    );
+
+    // 片方を消してももう片方は残る
+    expect(await store.remove(RUN_ID, 'impl-design', 'memo')).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(await store.read(RUN_ID, 'impl', 'design-memo')).toEqual({
+      ok: true,
+      value: '実装が書いたメモ',
+    });
   });
 
   it('write→listの正常系: 一覧に登場する', async () => {
@@ -186,12 +272,12 @@ describe('TeamHandoffStore', () => {
         {
           taskId: 'T1',
           slug: 'note',
-          relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'T1-note.md'),
+          relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'T1~note.md'),
         },
         {
           taskId: 'T2',
           slug: 'design',
-          relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'T2-design.md'),
+          relativePath: path.join('.agents', 'handoff', 'runs', RUN_ID, 'T2~design.md'),
         },
       ]),
     );
@@ -218,7 +304,7 @@ describe('TeamHandoffStore', () => {
     const readResult = await store.read(RUN_ID, 'T1', 'note');
     expect(readResult).toEqual({
       ok: false,
-      error: '受け渡しファイルが見つかりません: T1-note.md',
+      error: '受け渡しファイルが見つかりません: T1~note.md',
     });
   });
 
@@ -275,7 +361,7 @@ describe('TeamHandoffStore', () => {
     }
     expect(await store.read(RUN_ID, 'T1', 'note')).toEqual({
       ok: false,
-      error: '受け渡しファイルが見つかりません: T1-note.md',
+      error: '受け渡しファイルが見つかりません: T1~note.md',
     });
   });
 
