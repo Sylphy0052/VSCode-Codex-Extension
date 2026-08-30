@@ -991,7 +991,7 @@
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "markdownDescription": "ゴール駆動ループ（issue #892）の各ターンのあとに、別のAI（Advisor、issue #957）へ進め方の妥当性を確認させる。評価役（`agent.chat.goalEvaluator.*`）が「ゴールを達成したか」だけを見るのに対し、Advisorは「その進め方でよいか」を見る。両者は並列に走る。**1ターンあたりの待ち時間と費用が増える**ため既定では無効。Advisorが `blocker` を返すとループを止めて人へ渡し、それ以外の指摘は次のターンの指示へ別の区画として載せる。ゴール（目的と受入基準）を入力していないループでは動かない。"
+          "markdownDescription": "ゴール駆動ループ（issue #892）の各ターンのあとに、別のAI（Advisor、issue #957）へ進め方の妥当性を確認させる。評価役（`agent.chat.goalEvaluator.*`）が「ゴールを達成したか」だけを見るのに対し、Advisorは「その進め方でよいか」を見る。両者は並列に走る。**1ターンあたりの待ち時間と費用が増える**ため既定では無効。Advisorが `blocker` を返すとループを止めて人へ渡し、それ以外の指摘は次のターンの指示へ別の区画として載せる。ゴール（目的と受入基準）を入力していないループでは動かない。**既定の相談先はCodex CLI（`provider` の既定が `codex`）であり、Claude Codeの会話でも抜粋はCodexへ渡る。** 相談先は `agent.chat.loopAdvisor.provider` で変えられる。"
         },
         "agent.chat.loopAdvisor.provider": {
           "type": "string",
@@ -1020,7 +1020,7 @@
           "default": 120,
           "minimum": 10,
           "scope": "window",
-          "markdownDescription": "Advisorの応答を待つ上限（秒）。超えた場合は「指摘なし」として扱い、ループは止めない。Advisorの不調で本編が人待ちにならないようにするため、失敗を `blocker` へは倒さない。"
+          "markdownDescription": "Advisorの応答を待つ上限（秒）。超えた場合は**評価できなかった周**として会話へ残し（「指摘なし」とは区別する）、ループは止めない。Advisorの不調で本編が人待ちにならないようにするため、失敗を `blocker` へは倒さない。10未満を書いても10として扱う。"
         },
         "agent.chat.loopAdvisor.everyNTurns": {
           "type": "number",

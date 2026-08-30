@@ -84,7 +84,10 @@ export function advisorFailed(reason: LoopAdvisorFailureReason): LoopAdvisorResu
  *
  * **失敗時も例外を投げず`advisorFailed(...)`を返す実装を期待する。**
  */
-export type LoopAdvisorFn = (input: GoalEvaluatorInput) => Promise<LoopAdvisorResult>;
+export type LoopAdvisorFn = (
+  input: GoalEvaluatorInput,
+  signal?: AbortSignal,
+) => Promise<LoopAdvisorResult>;
 
 /** Advisorを呼ぶ間隔の既定（毎ターン）。 */
 export const DEFAULT_ADVISOR_EVERY_N_TURNS = 1;
@@ -138,7 +141,7 @@ export interface LoopAdvisorConfig {
    * （停止判定・次ターンの送信）が止まってはならない。`LoopController`側でも呼び出しを
    * `try`で囲んで守るが、契約としてもここに書いておく（issue #964）。
    */
-  note?: (note: LoopAdvisorNote, iteration: number) => void;
+  note?: (note: LoopAdvisorNote, iteration: number, runId: number) => void;
 }
 
 /**
@@ -155,6 +158,16 @@ export type LoopAdvisorNote =
       readonly reason: LoopAdvisorFailureReason;
       /** このターンを含めて、Advisorが連続で動けなかった回数。1以上。 */
       readonly consecutiveFailures: number;
+    }
+  /**
+   * 連続失敗が続いたため、この実行の残りではAdvisorを呼ばないと決めた（issue #1009）。
+   *
+   * `failed`の連続と違い、**この先はもう呼ばれない**ことを伝える。1回だけ出す。
+   */
+  | {
+      readonly status: 'disabled';
+      readonly reason: LoopAdvisorFailureReason;
+      readonly consecutiveFailures: number;
     };
 
 /**
@@ -164,6 +177,16 @@ export type LoopAdvisorNote =
  * 変える。
  */
 export const ADVISOR_FAILURE_ALERT_THRESHOLD = 2;
+
+/**
+ * 連続失敗が何回続いたら、その実行でAdvisorを呼ぶのをやめるか（issue #1009）。
+ *
+ * 1回の呼び出しは最大`timeoutSeconds`（既定120秒）待つ。時間切れが続く状態は、指摘が
+ * 得られないまま毎ターン待たされるだけなので、実質無効になったところで打ち切る。
+ * `ADVISOR_FAILURE_ALERT_THRESHOLD`（警告の文面を変える回数）より大きくしてある——
+ * 警告を出す前に呼ぶのをやめると、利用者が気づく前に黙って止まることになる。
+ */
+export const ADVISOR_FAILURE_DISABLE_THRESHOLD = 3;
 
 /**
  * 指摘なしの結果。**Advisorが動いたうえで指摘が無かった周**にだけ使う。

@@ -237,6 +237,11 @@ export function chatScript(
     denied: '拒否',
     timedOut: '時間切れ',
     aborted: '中止',
+    // ループのAdvisor（issue #957）の深刻度。secondOpinion の項目として差し込まれるため、
+    // ここへ足さないと英語の識別子がそのまま見出しに出る（issue #1009）
+    blocker: '重大な指摘',
+    concern: '指摘',
+    note: '参考',
   };
 
   /**
@@ -248,6 +253,8 @@ export function chatScript(
    * 完了（completed / approved）に色を当てていない。ほとんどの出力は完了で終わるため、
    * 色を付けると画面が一色に埋まり、目立たせたい失敗のほうが埋もれる。
    * interacted は subAgentActivity の種類であって成否ではないので、ここには入れない。
+   * note（Advisorの参考）も同じ理由で色を当てない——指摘の無かった周も note で出るため、
+   * 色を付けるとAdvisorを呼んだ周がすべて着色され、blocker が埋もれる（issue #1009）。
    */
   const STATUS_CLASS = {
     inProgress: 'status-running',
@@ -259,6 +266,10 @@ export function chatScript(
     interrupted: 'status-failed',
     timedOut: 'status-failed',
     aborted: 'status-failed',
+    // Advisorの blocker はループを止めた側の合図なので、失敗と同じ扱いで目に入れる。
+    // concern は「続けてよいが見直してほしい」であり、進行中と同じ色に留める（issue #1009）
+    blocker: 'status-failed',
+    concern: 'status-running',
   };
 
   /** 付け外しの対象。どれか1つだけが付く。 */

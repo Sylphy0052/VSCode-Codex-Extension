@@ -73,15 +73,23 @@ export function redactAdvisorPrompt(
  * 一度も動けなかった周を、呼び出し側が区別できるようにする。**
  */
 export function createLoopAdvisor(deps: LoopAdvisorDeps): LoopAdvisorFn {
-  return async (input: GoalEvaluatorInput): Promise<LoopAdvisorResult> => {
+  return async (input: GoalEvaluatorInput, signal?: AbortSignal): Promise<LoopAdvisorResult> => {
     const redaction = redactAdvisorPrompt(input);
     const note = describeRedaction(redaction);
     if (note !== undefined) {
       deps.logInfo?.(`Advisorへ送る前に伏せました: ${note}`);
     }
     try {
-      const outcome = await runHeadlessPromptDetailed(deps, redaction.text);
+      // 打ち切りの合図はターンごとに変わるため、作り置きした`deps`ではなくここで足す
+      const outcome = await runHeadlessPromptDetailed(
+        { ...deps, ...(signal === undefined ? {} : { signal }) },
+        redaction.text,
+      );
       if (!outcome.ok) {
+        if (signal?.aborted === true) {
+          // ループを止めたことによる打ち切り。CLIの不調ではないので警告として残さない
+          return advisorFailed(outcome.reason);
+        }
         deps.logWarn?.(
           `Advisorの呼び出しに失敗しました（${outcome.reason}。今回は評価なしとして続行します）`,
         );

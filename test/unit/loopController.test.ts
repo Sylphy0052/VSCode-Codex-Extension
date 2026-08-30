@@ -26,6 +26,7 @@ import type {
 } from '../../src/loop/goalLoop';
 import { indeterminate } from '../../src/loop/goalPrompt';
 import {
+  ADVISOR_FAILURE_DISABLE_THRESHOLD,
   advisorFailed,
   advisorOk,
   noAdvice,
@@ -2083,5 +2084,137 @@ describe('LoopController（Advisor、issue #957）', () => {
     await finishAdvisedTurn(loop);
     expect(loop.running).toBe(false);
     expect(loop.getStatus().stopReason).toBe('advised');
+  });
+});
+
+describe('LoopController（Advisorの打ち切り、issue #1009）', () => {
+  const finishAdvisedTurn = async (loop: LoopController): Promise<void> => {
+    loop.observe(state({ busy: true }));
+    loop.observe(finished(state()));
+    for (let i = 0; i < 8; i += 1) {
+      await Promise.resolve();
+    }
+  };
+
+  const plan = (
+    advisor: Partial<LoopAdvisorConfig> & Pick<LoopAdvisorConfig, 'advise'>,
+  ): LoopPlan => ({
+    initialPrompt: '始めて',
+    continuePrompt: '',
+    maxIterations: 10,
+    condition: '',
+    goal: {
+      definition: { purpose: '直す', acceptanceCriteria: 'テストが通る' },
+      evaluate: async () => evaluation({ nextFocus: '続ける' }),
+    },
+    advisor,
+  });
+
+  it('連続で動けない状態が続いたら、その実行では呼ぶのをやめる', async () => {
+    const statuses: string[] = [];
+    let calls = 0;
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async () => {
+          calls += 1;
+          return advisorFailed('timeout');
+        },
+        note: (n) => statuses.push(n.status),
+      }),
+    );
+    for (let i = 0; i < 5; i += 1) {
+      await finishAdvisedTurn(loop);
+    }
+    // 3回目で打ち切る。4周目以降は呼ばれないので、呼び出しも記録も増えない
+    expect(calls).toBe(ADVISOR_FAILURE_DISABLE_THRESHOLD);
+    expect(statuses).toEqual(['failed', 'failed', 'disabled']);
+  });
+
+  it('打ち切っても本編は続く', async () => {
+    const sent: string[] = [];
+    const loop = new LoopController((t) => void sent.push(t));
+    loop.start(plan({ advise: async () => advisorFailed('process-error') }));
+    for (let i = 0; i < 4; i += 1) {
+      await finishAdvisedTurn(loop);
+    }
+    expect(loop.running).toBe(true);
+    expect(sent).toHaveLength(5);
+  });
+
+  it('次にループを始めれば、また呼ぶ', async () => {
+    let calls = 0;
+    const loop = new LoopController(() => undefined);
+    const failing = plan({
+      advise: async () => {
+        calls += 1;
+        return advisorFailed('timeout');
+      },
+    });
+    loop.start(failing);
+    for (let i = 0; i < 4; i += 1) {
+      await finishAdvisedTurn(loop);
+    }
+    expect(calls).toBe(ADVISOR_FAILURE_DISABLE_THRESHOLD);
+    // 打ち切りは実行ごとの状態であって、設定を無効にしたわけではない
+    loop.start(failing);
+    await finishAdvisedTurn(loop);
+    expect(calls).toBe(ADVISOR_FAILURE_DISABLE_THRESHOLD + 1);
+  });
+
+  it('止めた実行の失敗は数に入れない', async () => {
+    const statuses: string[] = [];
+    let called = 0;
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async () => {
+          called += 1;
+          // 応答が返る前にループが止められた状況を作る
+          loop.stop('manual');
+          return advisorFailed('process-error');
+        },
+        note: (n) => statuses.push(n.status),
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    // Advisorは確かに呼ばれている（呼ばれないまま空になる検査にしない）
+    expect(called).toBe(1);
+    // そのうえで、世代の判定で降りるため会話にも残らず連続失敗にも数えない
+    expect(statuses).toEqual([]);
+  });
+
+  it('会話へ残すidの材料になる実行の識別子を、実行ごとに変えて渡す', async () => {
+    const runIds: number[] = [];
+    const loop = new LoopController(() => undefined);
+    const p = plan({
+      advise: async () => advisorOk(noAdvice()),
+      note: (_n, _iteration, runId) => runIds.push(runId),
+    });
+    loop.start(p);
+    await finishAdvisedTurn(loop);
+    loop.stop('manual');
+    loop.start(p);
+    await finishAdvisedTurn(loop);
+    expect(runIds).toHaveLength(2);
+    expect(runIds[0]).not.toBe(runIds[1]);
+  });
+
+  it('ループを止めると、待っているAdvisorへ打ち切りを伝える', async () => {
+    let seen: AbortSignal | undefined;
+    const loop = new LoopController(() => undefined);
+    loop.start(
+      plan({
+        advise: async (_input, signal) => {
+          seen = signal;
+          return advisorOk(noAdvice());
+        },
+      }),
+    );
+    await finishAdvisedTurn(loop);
+    expect(seen).toBeDefined();
+    expect(seen?.aborted).toBe(false);
+    loop.stop('manual');
+    expect(seen?.aborted).toBe(true);
   });
 });

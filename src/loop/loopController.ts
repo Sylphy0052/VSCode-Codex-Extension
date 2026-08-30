@@ -27,6 +27,7 @@ import {
 } from './goalLoop';
 import { buildNextTurnPrompt, indeterminate } from './goalPrompt';
 import {
+  ADVISOR_FAILURE_DISABLE_THRESHOLD,
   advisorFailed,
   shouldAdvise,
   type LoopAdvisorConfig,
@@ -409,6 +410,23 @@ export class LoopController {
    */
   private advisorFailureStreak = 0;
   /**
+   * 連続失敗が続いたため、この実行ではAdvisorを呼ばないと決めた印（issue #1009）。
+   *
+   * 呼び出しは1回あたり最大`timeoutSeconds`（既定120秒）待つ。時間切れが続くとその分だけ
+   * 毎ターン待たされ続けるため、実質無効になったところで呼ぶのをやめる。**止めたことは
+   * 会話へ1回だけ残す。**黙って呼ばなくなると、Advisorが動いていないことに気づけない。
+   * `start()`・`stop()`で戻す。
+   */
+  private advisorDisabled = false;
+  /**
+   * 走っている実行の打ち切りの合図（issue #1009）。
+   *
+   * `start()`で作り直し、`stop()`で発火する。脇役（Evaluator / Advisor）の応答待ちは
+   * ループを止めても最大`timeoutMs`ぶん居座るため、止めた時点でプロセスごと回収させる。
+   * 結果は世代の判定（`runGeneration`）で既に捨てているので、打ち切りで失われるものは無い。
+   */
+  private runAbort: AbortController | undefined;
+  /**
    * Evaluatorの応答を待っている間か。待っている間に届く`observe()`で二重に評価を
    * 走らせない（評価はターンごとに1回）。
    */
@@ -580,6 +598,8 @@ export class LoopController {
     this.resultSeqAtTurnStart = undefined;
     this.indeterminateStreak = 0;
     this.advisorFailureStreak = 0;
+    this.advisorDisabled = false;
+    this.runAbort = new AbortController();
     this.evaluating = false;
     this.pendingPrompt = undefined;
     this.status = {
@@ -626,6 +646,11 @@ export class LoopController {
     this.seenEvidenceIds = new Set();
     this.indeterminateStreak = 0;
     this.advisorFailureStreak = 0;
+    this.advisorDisabled = false;
+    // 待っている脇役のプロセスをその場で回収する。世代の判定で結果は既に捨てているが、
+    // 止めたはずのものが最大120秒走り続けるのは費用の面でも説明の面でも良くない
+    this.runAbort?.abort();
+    this.runAbort = undefined;
     this.evaluating = false;
     this.pendingPrompt = undefined;
     this.lastMessage = undefined;
@@ -808,20 +833,26 @@ export class LoopController {
       recentTurns: collectRecentTurns(state.items),
       iteration,
     };
+    // 連続失敗で呼ぶのをやめた後は、間隔の判定より先に降りる（issue #1009）
     const advisor =
-      plan.advisor !== undefined && shouldAdvise(iteration, plan.advisor.everyNTurns)
+      plan.advisor !== undefined &&
+      !this.advisorDisabled &&
+      shouldAdvise(iteration, plan.advisor.everyNTurns)
         ? plan.advisor
         : undefined;
 
     // **Advisorを先に走らせてから、Evaluatorを待つ**（issue #957）。直列にすると1ターン
     // あたりの待ち時間が素直に2倍になる。`Promise.all`で束ねないのは、Advisorを使わない
     // ループのマイクロタスクの回数を変えないため（束ねると1tick増える）
-    const advicePromise = advisor?.advise(input).catch(() => advisorFailed('process-error'));
+    const signal = this.runAbort?.signal;
+    const advicePromise = advisor
+      ?.advise(input, signal)
+      .catch(() => advisorFailed('process-error'));
     // Evaluatorの実装が例外を投げてもループを壊さない。判定できなかったこと自体を
     // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる。
     // 両者は独立に`catch`しており、**片方が失敗しても他方の結果は使う**
     const evaluation = await goal
-      .evaluate(input)
+      .evaluate(input, signal)
       .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
     const adviceResult = advicePromise === undefined ? undefined : await advicePromise;
 
@@ -834,11 +865,17 @@ export class LoopController {
     if (adviceResult !== undefined) {
       this.advisorFailureStreak =
         adviceResult.status === 'failed' ? this.advisorFailureStreak + 1 : 0;
+      // 実質無効になったところで呼ぶのをやめる（issue #1009）。1回あたり最大
+      // `timeoutSeconds`待つため、失敗が続くとその分だけ毎ターン待たされ続ける。
+      // **止めたことは会話へ出す**（下の`noteAdvisor`が`disabled`として渡す）
+      if (this.advisorFailureStreak >= ADVISOR_FAILURE_DISABLE_THRESHOLD) {
+        this.advisorDisabled = true;
+      }
     }
     // Advisorを呼んだ周は、指摘の有無にも成否にも関わらず会話へ残す（issue #964）。
     // 「見たうえで指摘が無かった」「見ていない」「動けなかった」の3つを区別できるようにする
     if (advisor !== undefined && adviceResult !== undefined) {
-      this.noteAdvisor(advisor, adviceResult, iteration);
+      this.noteAdvisor(advisor, adviceResult, iteration, generation);
     }
     // 動けなかった周は指摘が無かった周として扱わない。次ターンの参考にも載せない
     const advice = adviceResult?.status === 'ok' ? adviceResult.advice : undefined;
@@ -890,17 +927,20 @@ export class LoopController {
     advisor: LoopAdvisorConfig,
     result: LoopAdvisorResult,
     iteration: number,
+    runId: number,
   ): void {
     const note: LoopAdvisorNote =
       result.status === 'ok'
         ? { status: 'ok', advice: result.advice }
         : {
-            status: 'failed',
+            // 呼ぶのをやめると決めた周は、失敗の報告ではなく**やめたこと**を伝える
+            // （issue #1009）。同じ周に2行出すと、同じ出来事を2回言うことになる
+            status: this.advisorDisabled ? 'disabled' : 'failed',
             reason: result.reason,
             consecutiveFailures: this.advisorFailureStreak,
           };
     try {
-      advisor.note?.(note, iteration);
+      advisor.note?.(note, iteration, runId);
     } catch {
       // 表示できなかったことは記録できないが、ループは続ける。ここで握り潰す代わりに
       // 投げ直すと、Advisorが動いた周だけループが止まるという最悪の壊れ方になる

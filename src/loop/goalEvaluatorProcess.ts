@@ -74,10 +74,14 @@ export interface GoalEvaluatorDeps {
  * 評価の失敗でループ全体が壊れると、それまでの作業ごと失われる。
  */
 export function createGoalEvaluator(deps: GoalEvaluatorDeps): GoalEvaluator {
-  return async (input: GoalEvaluatorInput): Promise<GoalEvaluation> => {
+  return async (input: GoalEvaluatorInput, signal?: AbortSignal): Promise<GoalEvaluation> => {
     const prompt = buildEvaluatorPrompt(input);
     try {
-      const raw = await runHeadlessPrompt(deps, prompt);
+      // 打ち切りの合図はターンごとに変わるため、作り置きした`deps`ではなくここで足す
+      const raw = await runHeadlessPrompt(
+        { ...deps, ...(signal === undefined ? {} : { signal }) },
+        prompt,
+      );
       if (raw === undefined) {
         return indeterminate('Evaluatorの呼び出しに失敗しました');
       }

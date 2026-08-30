@@ -157,6 +157,15 @@ export interface HeadlessCliDeps {
   timeoutMs: number;
   /** 失敗の記録先。判断そのものは呼び出し側で安全側へ倒すため、ここでは記録だけ行う。 */
   logWarn?: (message: string) => void;
+  /**
+   * 呼び出し側が実行を打ち切るための合図（issue #1009）。
+   *
+   * 脇役（Evaluator / Advisor）の応答を待っている間にループが止められると、それまでは
+   * `timeoutMs`（Advisorの既定は120秒）ぶんプロセスが居座り続けていた。結果は世代の
+   * 判定で捨てられるため害は無いが、止めたはずのものが走り続けるのは費用の面でも
+   * 説明の面でも良くない。**abortされた実行の結果は使われない前提**で、その場で回収する。
+   */
+  signal?: AbortSignal;
 }
 
 /** 呼び出しが失敗した理由。応答が得られなかったときだけ使う。 */
@@ -210,9 +219,14 @@ async function runClaude(deps: HeadlessCliDeps, prompt: string): Promise<Headles
     buildClaudeHeadlessArgs(deps.model),
     prompt,
     deps.timeoutMs,
+    undefined,
+    deps.signal,
   );
   if (!result.ok) {
-    deps.logWarn?.('claudeのヘッドレス実行が応答しませんでした');
+    // 打ち切りは利用者が止めた結果であり、CLIの不調ではない。警告として残さない
+    if (deps.signal?.aborted !== true) {
+      deps.logWarn?.('claudeのヘッドレス実行が応答しませんでした');
+    }
     return result;
   }
   const body = readClaudeResult(result.text);
@@ -248,9 +262,12 @@ async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<Headless
       prompt,
       deps.timeoutMs,
       dir,
+      deps.signal,
     );
     if (!result.ok) {
-      deps.logWarn?.('codexのヘッドレス実行が応答しませんでした');
+      if (deps.signal?.aborted !== true) {
+        deps.logWarn?.('codexのヘッドレス実行が応答しませんでした');
+      }
       return result;
     }
     const written = await readFile(outputFile, 'utf8').catch(() => '');
@@ -276,8 +293,14 @@ function runProcess(
   stdin: string,
   timeoutMs: number,
   cwd?: string,
+  signal?: AbortSignal,
 ): Promise<HeadlessOutcome> {
   return new Promise((resolve) => {
+    // 起動前に既に打ち切られていれば、プロセスを作らずに返す
+    if (signal?.aborted === true) {
+      resolve({ ok: false, reason: 'process-error' });
+      return;
+    }
     const proc = spawn(executable, args, {
       stdio: ['pipe', 'pipe', 'ignore'],
       ...(cwd === undefined ? {} : { cwd }),
@@ -291,11 +314,17 @@ function runProcess(
       }
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       // SIGTERMに応答しないプロセスも回収できるよう、共通処理へ寄せる
       killWithEscalation(proc);
       resolve(value);
     };
     const fail = (reason: HeadlessFailureReason): void => finish({ ok: false, reason });
+
+    // 打ち切りは時間切れとは分けて`process-error`にする。時間切れなら設定を延ばす、が
+    // 次の手になるが、打ち切りは利用者が止めただけで設定は関係ない
+    const onAbort = (): void => fail('process-error');
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     const timer = setTimeout(() => fail('timeout'), timeoutMs);
 
