@@ -248,12 +248,16 @@ function absorb(turn: ProgressTurn, item: ChatItem): void {
       continue;
     }
     // 既出かどうかは `fileEditCounts` の有無で見る（issue #1013）。`includes` の走査を
-    // 増やさずに済み、持つ状態も増えない
-    const count = turn.fileEditCounts[diff.path];
-    if (count === undefined) {
+    // 増やさずに済み、持つ状態も増えない。
+    //
+    // 判定に `Object.hasOwn` を使うのは、パスが `toString` のようにObject.prototypeの
+    // 名前と重なったときに「既出」と誤判定しないため（`counts[path] === undefined` だと
+    // 継承した関数を拾ってしまい、そのファイルだけ一覧から消える）。
+    const seen = Object.hasOwn(turn.fileEditCounts, diff.path);
+    if (!seen) {
       turn.editedFiles.push(diff.path);
     }
-    turn.fileEditCounts[diff.path] = (count ?? 0) + 1;
+    turn.fileEditCounts[diff.path] = (seen ? (turn.fileEditCounts[diff.path] ?? 0) : 0) + 1;
   }
 }
 

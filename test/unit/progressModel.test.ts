@@ -217,6 +217,22 @@ describe('変更ファイルの重複除去（issue #1013）', () => {
     expect(view.turns[0]?.editedFiles).toEqual(['src/a.ts', 'src/b.ts']);
     expect(view.turns[0]?.fileEditCounts).toEqual({ 'src/a.ts': 3, 'src/b.ts': 1 });
   });
+
+  it('Object.prototype と同じ名前のファイルも一覧へ出す', () => {
+    // `counts[path] === undefined` で既出を見ると、継承した関数を拾って
+    // このファイルだけ一覧から消える
+    const view = buildProgress(
+      stateWith([
+        item('userMessage', { text: '指示' }),
+        fileChange('toString'),
+        fileChange('toString'),
+      ]),
+    );
+
+    expect(view.turns[0]?.editedFiles).toEqual(['toString']);
+    expect(view.turns[0]?.fileEditCounts['toString']).toBe(2);
+    expect(view.summary.editedFiles).toEqual(['toString']);
+  });
 });
 
 describe('diffTodos', () => {
