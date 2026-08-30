@@ -750,9 +750,7 @@
               "forgeHub",
               "openProgress",
               "handoffToNewSession",
-              "secondOpinion",
-              "secondOpinionDirect",
-              "secondOpinionAskGpt"
+              "secondOpinion"
             ],
             "enumDescriptions": [
               "画像を添付する",
@@ -771,9 +769,7 @@
               "Forge Hubを開く",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ",
-              "独立したCodexセッションへ意見を求める（セカンドオピニオン）",
-              "セカンドオピニオンを、材料をそのまま渡すモード（direct）に固定して実行する",
-              "セカンドオピニオンを、質問文を組み立てて渡すモード（askGpt）に固定して実行する"
+              "独立したCodexセッションへ意見を求める（セカンドオピニオン）"
             ]
           },
           "default": [
@@ -858,33 +854,13 @@
           "type": "number",
           "default": 900000,
           "scope": "window",
-          "markdownDescription": "セカンドオピニオンの**1ターン**を待つ上限（ミリ秒）。最初の相談と追加の相談のどちらにも同じ上限が効く。会話の要約（`agent.secondOpinion.summary`）はこれとは別枠で最大2分かかるため、要約を有効にしたまま最初の相談を始めると、既定では最大17分（要約2分 + 本体15分）待つ。`agent.secondOpinion.mode` が `askGpt` のときは、質問文を組み立てるターンにも同じ上限が効くため既定で最大30分になり、さらに作業中のAIの応答が終わるまで待つ。相談を続けている間の合計時間に上限は無い。超えると打ち切り、そこまでに出ていた回答があればそれを会話へ残す（無ければ理由だけ残す）。10秒〜60分の範囲へ丸める。"
+          "markdownDescription": "セカンドオピニオンの**1ターン**を待つ上限（ミリ秒）。最初の相談と追加の相談のどちらにも同じ上限が効く。会話の要約（`agent.secondOpinion.summary`）はこれとは別枠で最大2分かかるため、要約を有効にしたまま最初の相談を始めると、既定では最大17分（要約2分 + 本体15分）待つ。相談を続けている間の合計時間に上限は無い。超えると打ち切り、そこまでに出ていた回答があればそれを会話へ残す（無ければ理由だけ残す）。10秒〜60分の範囲へ丸める。"
         },
         "agent.secondOpinion.template": {
           "type": "string",
           "default": "この変更をレビューしてください。特に設計上の欠陥、見落とし、より単純な代替案を挙げてください。",
           "scope": "window",
           "markdownDescription": "セカンドオピニオンの依頼文の既定値。実行のたびに編集できる。"
-        },
-        "agent.secondOpinion.mode": {
-          "type": "string",
-          "enum": [
-            "direct",
-            "askGpt"
-          ],
-          "enumDescriptions": [
-            "拡張機能が集めた材料（依頼文・背景要約・差分スナップショット）をそのまま渡す",
-            "いま作業しているAI自身に、単体で読める質問文を組み立てさせてから渡す"
-          ],
-          "default": "direct",
-          "scope": "window",
-          "markdownDescription": "セカンドオピニオンへ渡す材料の作り方。`askGpt` では、作業中のAIが会話の流れとリポジトリの中身を踏まえて8項目（目的・質問・背景・環境・関連コード全文・試したこと・制約・期待する回答形式）の質問文を作り、それだけを相談相手へ送る。会話の要約は使わず、追加資料の選択も出ない。"
-        },
-        "agent.secondOpinion.askGpt.confirm": {
-          "type": "boolean",
-          "default": true,
-          "scope": "window",
-          "markdownDescription": "`agent.secondOpinion.mode` が `askGpt` のとき、組み立てられた質問文を送信前に開いて確認・編集できるようにする。`false` にすると確認なしでそのまま送る。"
         },
         "agent.secondOpinion.advisor.enabled": {
           "type": "boolean",

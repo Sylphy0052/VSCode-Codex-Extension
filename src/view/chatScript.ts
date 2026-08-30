@@ -2960,13 +2960,6 @@ export function chatScript(
   el('secondOpinion').addEventListener('click', () =>
     vscode.postMessage({ type: 'secondOpinion' }),
   );
-  // モードを固定して起動する入口（Issue #972）。上のボタンは設定に従う
-  el('secondOpinionDirect').addEventListener('click', () =>
-    vscode.postMessage({ type: 'secondOpinionDirect' }),
-  );
-  el('secondOpinionAskGpt').addEventListener('click', () =>
-    vscode.postMessage({ type: 'secondOpinionAskGpt' }),
-  );
   el('turnSummaryToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'toggleTurnSummary' }),
   );
@@ -3354,14 +3347,10 @@ export function chatScript(
     if (data.type === 'secondOpinionRunning' && typeof data.running === 'boolean') {
       // セカンドオピニオン（Issue #894）は親セッションごとに1本だけ。走っている間は
       // セカンドオピニオンのボタンだけを押せなくする。入力欄と送信は止めない（別視点の
-      // 待ち時間で本流の作業を止めない、という受入基準7のため）。
-      // 入口は3つ（設定に従う / direct固定 / askGpt固定。Issue #972）あり、どれから
-      // 始まっても同じ実行を指すため、まとめて同じ状態にする
-      for (const buttonId of ['secondOpinion', 'secondOpinionDirect', 'secondOpinionAskGpt']) {
-        const button = el(buttonId);
-        button.disabled = data.running;
-        button.setAttribute('aria-disabled', String(data.running));
-      }
+      // 待ち時間で本流の作業を止めない、という受入基準7のため）
+      const secondOpinionButton = el('secondOpinion');
+      secondOpinionButton.disabled = data.running;
+      secondOpinionButton.setAttribute('aria-disabled', String(data.running));
       // 既定ではタブが開かないため、走っていることが分かるのはこの枠色だけ（Issue #905）
       secondOpinionRunning = data.running;
       applyBackgroundRunning(document.body.classList.contains('busy'));

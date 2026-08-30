@@ -97,18 +97,6 @@ import {
   type ReviewTargetKind,
 } from '../codex/reviewTarget';
 import { buildSideQuestionForkParams } from '../codex/sideQuestion';
-import {
-  ASK_GPT_LABEL,
-  ASK_GPT_LOG_PREFIX,
-  ASK_GPT_TAB_TITLE,
-  type RequestGenerationResult,
-  type SecondOpinionMode,
-} from '../secondOpinion/askGpt';
-import {
-  awaitSingleTurn,
-  SingleTurnCancelledError,
-  SingleTurnTimeoutError,
-} from '../orchestrator/planner';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
@@ -1214,15 +1202,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.startSecondOpinionFor(entry);
         return;
       }
-      // モードを固定した入口（Issue #972）。設定は書き換えず、今回の起動だけを固定する
-      if (type === 'secondOpinionDirect') {
-        await this.startSecondOpinionFor(entry, 'direct');
-        return;
-      }
-      if (type === 'secondOpinionAskGpt') {
-        await this.startSecondOpinionFor(entry, 'askGpt');
-        return;
-      }
       if (type === 'secondOpinionContinue') {
         // 追加の相談（Issue #929）。メインセッションへは1ターンも送らない
         await continueSecondOpinion(
@@ -1508,11 +1487,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
    * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
    */
-  private async startSecondOpinionFor(
-    entry: ChatPanel,
-    /** 今回だけモードを固定する（Issue #972）。省略時は設定に従う */
-    modeOverride?: SecondOpinionMode,
-  ): Promise<void> {
+  private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
       this.secondOpinionPortFor(entry),
       this,
@@ -1523,7 +1498,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 受け付ける値の一覧はこちらから渡す
       (model) => effortsFor(this.settings.snapshot().models, model),
       this.advisorStore,
-      modeOverride,
     );
   }
 
@@ -1573,122 +1547,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           hasDraft: draft !== undefined,
         });
       },
-      generateRequestText: (instruction, timeoutMs, signal) =>
-        this.generateAskGptRequestText(entry, instruction, timeoutMs, signal),
       summaryRollout: this.summaryRolloutDeps(),
     };
-  }
-
-  /**
-   * askGptモード（Issue #947）の質問文を、親の文脈を継いだforkの上で組み立てる。
-   *
-   * 脇道の質問（`startSideQuestion`）と同じ `thread/fork` + `ephemeral: true` を使うが、
-   * タブは開かない。人が見て操作するための会話ではなく、1ターンで使い切って捨てる作業用の
-   * スレッドだからである（ephemeralなのでロールアウトも残らない）。ただし `panels` へは
-   * 登録する（理由は下の登録箇所）。
-   *
-   * forkする理由は、親の本流の会話に生成のやり取りを残さないため（受入基準2）。それでいて
-   * fork時点までの会話は引き継ぐので、親が知っている経緯を踏まえた質問文になる。
-   *
-   * 待ち方は `awaitSingleTurn`（`planner.ts`）に任せる。`runSingleTurnTask` はセッションを
-   * 自分で開くためforkしたスレッドには使えないが、待ち合わせの作り込み（1ターンで閉じる・
-   * タイムアウトで `interrupt()` を要求する・決着を1箇所に集める）は同じものを使いたい。
-   */
-  private async generateAskGptRequestText(
-    entry: ChatPanel,
-    instruction: string,
-    timeoutMs: number,
-    signal: AbortSignal,
-  ): Promise<RequestGenerationResult> {
-    if (signal.aborted) {
-      // forkもセッションも作らずに返す。既に止まっていると分かっている
-      return { ok: false, kind: 'cancelled', reason: '利用者の操作で停止しました' };
-    }
-    const threadId = entry.session.threadId;
-    if (threadId === undefined) {
-      return {
-        ok: false,
-        kind: 'unsupported',
-        reason: 'この会話はまだ開始されていないため、分岐して質問文を作れません',
-      };
-    }
-    if (entry.session.getState().busy) {
-      return {
-        ok: false,
-        kind: 'busy',
-        reason: 'この会話のAIが応答中です',
-      };
-    }
-
-    let forkResult: unknown;
-    try {
-      const response = await this.connection.request(
-        'thread/fork',
-        buildSideQuestionForkParams(threadId),
-      );
-      forkResult = response.result;
-    } catch (e) {
-      return {
-        ok: false,
-        kind: 'provider-error',
-        reason: e instanceof Error ? e.message : String(e),
-      };
-    }
-
-    const sideEntry = this.buildEntry(
-      entry.cwd,
-      ASK_GPT_TAB_TITLE,
-      false,
-      entry.taskConfig,
-      undefined,
-      { ...entry.modelSettings },
-      false,
-    );
-    let sideThreadId: string;
-    try {
-      sideThreadId = sideEntry.session.loadForkedThread(forkResult);
-    } catch (e) {
-      this.teardown(sideEntry);
-      return {
-        ok: false,
-        kind: 'provider-error',
-        reason: e instanceof Error ? e.message : String(e),
-      };
-    }
-
-    // タブは開かないが `panels` へは登録する。通知の宛先は `findByThreadId` が
-    // `panels` から引くため、登録しないとこのスレッド宛の `turn/completed` が
-    // どこにも届かず、必ずタイムアウトになる（`teardown` が登録を外す）
-    this.panels.set(sideThreadId, sideEntry);
-
-    const session = this.buildTaskSession(sideEntry, sideThreadId);
-    // 質問文を書くだけのターンに承認が要る操作は無い。要求が来たら理由を問わず拒否する
-    // （`runSingleTurnTask` と同じ扱い）
-    session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'decline' }));
-    try {
-      const text = await awaitSingleTurn(session, instruction, {
-        timeoutMs,
-        log: this.log,
-        label: ASK_GPT_LABEL,
-        logPrefix: ASK_GPT_LOG_PREFIX,
-        signal,
-      });
-      return { ok: true, text };
-    } catch (e) {
-      if (e instanceof SingleTurnCancelledError) {
-        return { ok: false, kind: 'cancelled', reason: e.message };
-      }
-      if (e instanceof SingleTurnTimeoutError) {
-        return { ok: false, kind: 'timeout', reason: e.message };
-      }
-      return {
-        ok: false,
-        kind: 'provider-error',
-        reason: e instanceof Error ? e.message : String(e),
-      };
-    } finally {
-      this.teardown(sideEntry);
-    }
   }
 
   /**

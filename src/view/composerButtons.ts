@@ -24,8 +24,6 @@ export const COMPOSER_BUTTON_IDS = [
   'openProgress',
   'handoffToNewSession',
   'secondOpinion',
-  'secondOpinionDirect',
-  'secondOpinionAskGpt',
 ] as const;
 
 export type ComposerButtonId = (typeof COMPOSER_BUTTON_IDS)[number];

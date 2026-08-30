@@ -3539,34 +3539,41 @@ Claude Code CLI 2.1.235 での実測。design.md §14.61 / §14.62）。CLIが�
 - 操作: `agent.secondOpinion.advisor.idleTimeoutMs` を短く（例: 60000）して放置する
 - 期待: その時間を過ぎるとボタンが消え、「一定時間操作がなかったため閉じました」が出る
 
-### U-46 モードを固定した2つのセカンドオピニオン（design.md §14.102、Issue #972）
+### U-46 セカンドオピニオンの入口が1つだけ（design.md §14.103、Issue #999）
 
 前提: `agent.chat.composerButtons` は既定のまま（設定していない）。
 
 入口の見え方:
 
 - 操作: 入力欄の「…」メニューを開く
-- 期待: 「セカンドオピニオン（材料をそのまま渡す）」と「セカンドオピニオン（質問文を組み立てて聞く）」が並ぶ。表側の7つは変わっていない
-- 操作: `agent.chat.composerButtons` へ `secondOpinionDirect` と `secondOpinionAskGpt` を足す
-- 期待: 2つが表のアイコン列へ出る。3つのアイコンが見分けられる
+- 期待: セカンドオピニオンの入口が1つも出ない（既定では表側の7つに入っているため）。「セカンドオピニオン（材料をそのまま渡す）」「セカンドオピニオン（質問文を組み立てて聞く）」はどこにも出ない
+- 操作: `agent.chat.composerButtons` から `secondOpinion` を外す
+- 期待: 「…」メニューに「セカンドオピニオン」が1つだけ出る
+- 操作: `agent.chat.composerButtons` へ `secondOpinionDirect` を書いて保存する
+- 期待: 未知のIDとして設定が丸ごと既定へ丸められ、表側は既定の7つに戻る。出力チャンネルに警告が1行残る
 
-モードの固定（Codex側は`test/integration/chatCodexSecondOpinionMode.test.ts`のS-04・S-05が自動で押さえている。手で見るのはClaude Code側と、確認用Markdownの中身）:
+固定された挙動:
 
-- 操作: `agent.secondOpinion.mode` を `direct`（既定）にして「質問文を組み立てて聞く」を押す
-- 期待: 追加資料のQuickPickが出ない。作業中のAIがタブを開かずに質問文を組み立て、`agent.secondOpinion.askGpt.confirm` が `true` なら確認用のMarkdownが開く
-- 操作: `agent.secondOpinion.mode` を `askGpt` にして「材料をそのまま渡す」を押す
-- 期待: 追加資料のQuickPickが出る。背景要約を添えた従来の材料が渡る
-- 操作: 上の2つを実行した後で、既存の「セカンドオピニオン」を押す
-- 期待: `agent.secondOpinion.mode` の設定どおりのモードで走る（ボタンの操作で設定は書き換わっていない）
+- 操作: 「セカンドオピニオン」を押す
+- 期待: 追加資料のQuickPickが出る。依頼文のInputBoxが `agent.secondOpinion.template` の値で開き、その場で編集して送れる
+- 期待: 質問文を組み立てるターンが走らない（タブも増えず、確認用のMarkdownも開かない）
+- 期待: 回答が会話へ表示されるだけで、作業中のAIへは何も送られない
+- 操作: 設定画面で `agent.secondOpinion.mode` と `agent.secondOpinion.askGpt.confirm` を探す
+- 期待: どちらも存在しない
+
+依頼先の変更:
+
+- 操作: `agent.secondOpinion.candidates` を未設定のまま押す
+- 期待: 依頼先のQuickPickが出ず、`gpt-5.6-sol` / `high` で走る（出力チャンネルの `start provider=codex model=... effort=...` で確認する）
+- 操作: `agent.secondOpinion.candidates` へ別のモデルを1件だけ書いて押す
+- 期待: QuickPickは出ないまま、書いたモデル・effortで走る
 
 実行中の扱い:
 
-- 操作: どれか1つを起動し、走っている間に「…」メニューを開く
-- 期待: 3つとも押せない（`aria-disabled`）。入力欄と送信は止まらない。外周の枠が黄色になる
+- 操作: 起動し、走っている間に入力欄を見る
+- 期待: セカンドオピニオンのボタンが押せない（`aria-disabled`）。入力欄と送信は止まらない。外周の枠が黄色になる
 - 操作: 走っている間にコマンド経由でもう一度起動する
 - 期待: 「この会話のセカンドオピニオンは既に実行中です」と出て、2本目は始まらない
-- 操作: 候補選択・effort選択・質問文の確認のそれぞれでキャンセルする
-- 期待: Advisorセッションが始まらず、3つのボタンが押せる状態に戻る
 
 両画面:
 

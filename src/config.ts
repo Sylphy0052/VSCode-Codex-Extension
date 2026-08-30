@@ -48,7 +48,6 @@ import {
   type SecondOpinionCandidate,
   type SecondOpinionSummarySettings,
 } from './secondOpinion/candidates';
-import { normalizeSecondOpinionMode, type SecondOpinionMode } from './secondOpinion/askGpt';
 import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
 import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
 import { DEFAULT_ADVISOR_IDLE_TIMEOUT_MS } from './secondOpinion/advisorSession';
@@ -228,10 +227,6 @@ export interface SecondOpinionConfig {
   timeoutMs: number;
   /** 依頼文の既定値。 */
   template: string;
-  /** 材料の作り方（Issue #947）。既定は `direct`（従来どおり）。 */
-  mode: SecondOpinionMode;
-  /** askGptモードの設定（Issue #947）。 */
-  askGpt: AskGptSettings;
   /** 相談を続けられるAdvisorセッション（Issue #929）の設定。 */
   advisor: AdvisorSettings;
 }
@@ -245,12 +240,6 @@ export interface AdvisorSettings {
   enabled: boolean;
   /** 無操作でセッションを閉じるまでの時間。 */
   idleTimeoutMs: number;
-}
-
-/** askGptモードの設定（Issue #947）。項目が増えても呼び出し側の分岐が散らないよう入れ子で持つ。 */
-export interface AskGptSettings {
-  /** 生成された質問文を、送信前に人へ見せて編集させるか。既定は `true`。 */
-  confirm: boolean;
 }
 
 /**
@@ -272,8 +261,6 @@ export function readSecondOpinionConfig(): SecondOpinionConfig {
     headless: c.get<boolean>('secondOpinion.headless') ?? true,
     timeoutMs: normalizeSecondOpinionTimeoutMs(c.get<unknown>('secondOpinion.timeoutMs')),
     template: rawTemplate.trim() === '' ? DEFAULT_SECOND_OPINION_TEMPLATE : rawTemplate,
-    mode: normalizeSecondOpinionMode(c.get<unknown>('secondOpinion.mode')),
-    askGpt: { confirm: c.get<boolean>('secondOpinion.askGpt.confirm') ?? true },
     advisor: {
       enabled: c.get<boolean>('secondOpinion.advisor.enabled') ?? true,
       idleTimeoutMs: normalizeAdvisorIdleTimeoutMs(

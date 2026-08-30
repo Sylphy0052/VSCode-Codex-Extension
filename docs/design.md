@@ -7396,24 +7396,12 @@ interface SecondOpinionInput {
 
 `agent.secondOpinion.timeoutMs` が縛るのは**1ターン**である。押してから結果が出るまでの待ち時間はこれだけでは決まらず、モードによって `timeoutMs` が効く回数も変わる。
 
-**`direct`（既定）の場合**
-
 | 段                              | 上限                                | 設定項目                                                           |
 | ------------------------------- | ----------------------------------- | ------------------------------------------------------------------ |
 | 会話の要約（§14.83。無効なら0） | 2分（`DEFAULT_SUMMARY_TIMEOUT_MS`） | 無い（`agent.secondOpinion.summary.enabled` で有無だけ切り替わる） |
 | Advisorの1ターン                | 既定15分                            | `agent.secondOpinion.timeoutMs`                                    |
 
 要約と本体は直列に走る。要約を有効にしたまま最初の相談を始めると、**既定の構成では最大17分**（2分 + 15分）待つ。
-
-**`askGpt`（§14.94）の場合**
-
-| 段                                               | 上限     | 設定項目                                                  |
-| ------------------------------------------------ | -------- | --------------------------------------------------------- |
-| 親セッションのターンが終わるまでの待機（§14.93） | 無い     | 無い                                                      |
-| 質問文の組み立て（親セッションのfork）           | 既定15分 | `agent.secondOpinion.timeoutMs`（本体と同じ値を使い回す） |
-| Advisorの1ターン                                 | 既定15分 | `agent.secondOpinion.timeoutMs`                           |
-
-`askGpt` では要約セッションを開かない代わりに、**`timeoutMs` が2回効く**（既定で最大30分）。加えて親が応答中ならその完了を待つため、押した時点で本流のターンが走っていると待ち時間はさらに伸びる。
 
 **追加の相談（§14.101）** は要約も質問文の組み立ても行わない（`continueSecondOpinion` は `AdvisorSession.ask` を呼ぶだけ）。上限は `timeoutMs` の1回分である。
 
@@ -7425,7 +7413,7 @@ interface SecondOpinionInput {
 
 押下時に `git rev-parse HEAD` と `git diff` を1回だけ実行して材料を固定していたが（受入基準5）、Advisorのセッションは**親セッションと同じ作業ディレクトリ**で開いていた。プロンプトでは「スナップショットを正本として扱え」「現在の作業ツリーを判断の根拠に含めるな」と伝えていた一方で、`cwd` には実行中に書き換わり続ける現物がそのまま見えている。`read-only` サンドボックスが止めるのはAdvisor自身の書き込みだけで、読むことは止めない。文面での約束と、そこに置いてあるものが食い違っていた。
 
-Advisorのセッションを、**押下時点の材料だけを書き出した一時ディレクトリ**（`secondOpinion/reviewBundle.ts`）で開くように変えた。中身は次の2つで、追加資料が「作業ツリーの変更」以外のとき（`none` / 直近の応答 / `askGpt`）は空のディレクトリを作る。空でも意味があり、`cwd` を実workspaceにしないという一点のために作る。
+Advisorのセッションを、**押下時点の材料だけを書き出した一時ディレクトリ**（`secondOpinion/reviewBundle.ts`）で開くように変えた。中身は次の2つで、追加資料が「作業ツリーの変更」以外のとき（`none` / 直近の応答）は空のディレクトリを作る。空でも意味があり、`cwd` を実workspaceにしないという一点のために作る。
 
 - `changes.diff` — 押下時点の差分の全量。プロンプトへ載せる分は上限（`MAX_DIFF_BYTES`）で切るが、こちらは切らない
 - `base/<パス>` — 変更対象ファイルの `baseCommit` 時点の内容。`git show <baseCommit>:<path>` で読む
@@ -7441,7 +7429,7 @@ Advisorのセッションを、**押下時点の材料だけを書き出した�
 
 - 絶対パスや `..` で実workspaceへ到達することは止められない。codex-cli 0.148.0 の `read-only` サンドボックスには**読み取り先を限定する指定が無く**（`turn/start` の `sandboxPolicy` で `writableRoots` を持つのは `workspaceWrite` だけ）、ファイル読み取りツールそのものを無効化する設定も無い（`codex app-server --strict-config -c ...` で実機確認済み）。これは「見せない」ではなく「既定で目に入る場所を材料だけにする」対策である
 
-一時ディレクトリの寿命は、相談が続く間はAdvisorセッションが持つ（`AdvisorSession.close()` で消す）。相談を続けない構成・引き取れなかった場合・`askGpt` は、実行した関数の `finally` で消す。異常終了で消し損ねた分は、次回の起動時に接頭辞（`review-bundle-`）と経過時間（24時間）の両方が一致するものだけを回収する——別ウィンドウで使用中のものを巻き込まないためである。
+一時ディレクトリの寿命は、相談が続く間はAdvisorセッションが持つ（`AdvisorSession.close()` で消す）。相談を続けない構成・引き取れなかった場合は、実行した関数の `finally` で消す。異常終了で消し損ねた分は、次回の起動時に接頭辞（`review-bundle-`）と経過時間（24時間）の両方が一致するものだけを回収する——別ウィンドウで使用中のものを巻き込まないためである。
 
 **副作用: Advisorのセッションが履歴一覧に出なくなる。** rolloutは `cwd` ごとに分かれるため、bundleで開いたセッションはworkspaceの履歴に並ばない。§14.100（Issue #942）で要約セッションのrolloutを消したのと同じ種類の副作用だが、**Advisorのrolloutは消さない**。要約と違い、そこには回答という残す値打ちのある内容が入っている。履歴一覧側でこれを拾う話は別issueにする。
 
@@ -7512,7 +7500,7 @@ changedPaths: a.txt
 
 ##### 更新できる相談の限定
 
-更新できるのは、追加資料に「作業ツリーの変更」を選んだ相談だけである。それ以外（`none` / 直近の応答 / `askGpt`）の材料はプロンプトの中で完結しており、作業ディレクトリに更新すべきものが無い。webview側のボタンも、更新できる相談のときだけ出す（`secondOpinionAdvisor` メッセージの `canUpdateMaterial`）。
+更新できるのは、追加資料に「作業ツリーの変更」を選んだ相談だけである。それ以外（`none` / 直近の応答）の材料はプロンプトの中で完結しており、作業ディレクトリに更新すべきものが無い。webview側のボタンも、更新できる相談のときだけ出す（`secondOpinionAdvisor` メッセージの `canUpdateMaterial`）。
 
 #### 差分の切り詰め（Issue #926 H）
 
@@ -8091,6 +8079,10 @@ parentSessionId
 
 ### 14.94 セカンドオピニオンの材料を親セッションに作らせる（Issue #947）
 
+> **この節の `askGpt` モードは撤去済みです（Issue #999、§14.103）。** セカンドオピニオンの入口は1つへ統合し、
+> 材料の作り方は `direct` に固定した。設定 `agent.secondOpinion.mode` / `agent.secondOpinion.askGpt.confirm` と
+> `src/secondOpinion/askGpt.ts` は削除済みで、以下は当時の設計の記録である。
+
 #### 何を変えたのか
 
 §14.80のセカンドオピニオンは、拡張機能が材料を機械的に集めてAdvisorへ渡す。利用者が短い依頼文を書き、そこへ別セッションが作った背景要約（§14.83）と押下時点で固定した差分（§14.80）を添える。集め方が固定されているので、質問の中身に関係なく同じ形の材料が渡る。
@@ -8618,6 +8610,9 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 
 ### 14.102 モードを固定してセカンドオピニオンを起動する（Issue #972）
 
+> **この節の入口2つは撤去済みです（Issue #999、§14.103）。** `secondOpinionDirect` / `secondOpinionAskGpt` は
+> `COMPOSER_BUTTON_IDS` から削除し、入口は `secondOpinion` の1つへ戻した。以下は当時の設計の記録である。
+
 #### 設定でしか切り替えられなかった
 
 §14.94 で足した `askGpt` モードは、設定 `agent.secondOpinion.mode` を書き換えたときだけ有効になる。会話の途中で「今回は状況を整理してから聞きたい」と思っても、その場では切り替えられない。実際にはこの2つは排他的な好みではなく用途で使い分けたい——短い確認は `direct` で足り、設計判断や込み入った不具合は `askGpt` の方が向く。
@@ -8651,6 +8646,34 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 - `test/unit/composerButtons.test.ts`: 正準の並びが19個になり、`secondOpinionDirect` / `secondOpinionAskGpt` が既定では「…」メニューへ畳まれること、未知ID・重複IDの既定へのフォールバックが従来どおり働くこと
 - `test/integration/chatCodexSecondOpinionMode.test.ts`: webviewから届いた `secondOpinionDirect` / `secondOpinionAskGpt` が、設定 `agent.secondOpinion.mode` と逆のモードで走ること。判定はモードごとに逆になる2点（追加資料のQuickPickが出たか、`thread/fork` を呼んだか）で行う。単体テストはボタンの描画と `startSecondOpinion()` の分岐を別々に見ているだけで、その間の配線——どのメッセージにどちらのモードを添えるか——はどちらも踏まないため、`'direct'` と `'askGpt'` を取り違えても単体テストは全部通る
 - `docs/manual-test.md`: 3つの入口それぞれが設定と無関係に意図したモードで走ること、実行中に3つとも押せなくなること、Codex側・Claude Code側の両方で成り立つこと
+
+### 14.103 セカンドオピニオンの入口を1つへ統合する（Issue #999）
+
+#### 入口が3つあると押す前に選ばされる
+
+§14.102 で入口を3つにした（設定に従う `secondOpinion` / `direct` 固定 / `askGpt` 固定）。用途で使い分けられるようにしたものだが、実際には「…」メニューにセカンドオピニオンが2つ並び、押す前にどちらを選ぶかを毎回考えることになった。モードという概念自体が、この機能を使うときに要らない判断を1つ増やしている。
+
+#### `direct` へ固定して `askGpt` を落とす
+
+入口は `secondOpinion` の1つへ戻し、材料の作り方は `direct`（拡張機能が依頼文・背景要約・差分スナップショットを集めて1ターンで渡す）に固定した。`askGpt` の経路（`src/secondOpinion/askGpt.ts`、`buildAskGptSecondOpinionPrompt`、`generateAskGptRequestText`、askGpt専用の表示関数）と、設定 `agent.secondOpinion.mode` / `agent.secondOpinion.askGpt.confirm` を削除した。
+
+**`direct` を残したのは、この機能に求めているものが「押した時点の材料で、独立した相手に1ターンで聞く」だからである。** `askGpt` は質問文を組み立てる余分な1ターンを先に走らせるため、`timeoutMs` が2回効いて既定で最大30分待つ（§14.94）。さらに組み立ての段で親がリポジトリを読むので、押してから返るまでに触れる範囲も広い。短く聞いて短く返ってくることのほうが、この機能では効く。
+
+**利用者が変えられる範囲は増やさない。** 依頼文は `agent.secondOpinion.template` を既定値として実行のたびにInputBoxで編集でき、依頼先は `agent.secondOpinion.candidates`（既定 `gpt-5.6-sol` / `high`）で変えられる。どちらも既存の仕組みで足りるため、この変更で新しい設定は足していない。
+
+#### 共有部品は残す
+
+`askGpt` のために作った部品のうち、他の機能も使っているものは残した。`src/secondOpinion/redact.ts`（`loop/goalDraftProcess.ts` / `loop/loopAdvisorProcess.ts` が使う）、`planner.ts` の `awaitSingleTurn`（`secondOpinion/advisorSession.ts` が使う）、`codex/sideQuestion.ts`（脇道の質問が使う）がそれにあたる。消したのは `askGpt` 専用の経路だけである。
+
+#### 消えたボタンIDが設定に残っていても壊れない
+
+`agent.chat.composerButtons` に `secondOpinionDirect` / `secondOpinionAskGpt` を書いていた利用者の設定は、未知IDを含む配列として `normalizeComposerButtons`（§14.58）が丸ごと既定へ丸め、警告をログへ出す。一部のボタンだけ消えた中途半端な並びにはならない。
+
+#### 確かめ方
+
+- `test/unit/composerButtons.test.ts`: 正準の並びが17個になり、`secondOpinionDirect` / `secondOpinionAskGpt` が消えていること、未知ID・重複IDの既定へのフォールバックが従来どおり働くこと
+- `test/unit/chatView.test.ts`: 設定の並びが何であれ、`secondOpinion` がDOM上にちょうど1個出ること（ID一覧・`composerButtonSpec`・`renderShell`・`chatScript.ts` の4箇所がそろっていることの確認。§14.102）
+- `docs/manual-test.md`: 「…」メニューの入口が1つだけであること、依頼文を編集して送れること、`agent.secondOpinion.candidates` を変えたモデルで走ること
 
 ### 16.44 チームモード（Issue #693）
 
