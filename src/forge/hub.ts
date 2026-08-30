@@ -338,13 +338,7 @@ export class ForgeHubService {
    */
   async completeCleanup(branch: string): Promise<ForgeRefreshResult> {
     const item = this.workItems.get(branch);
-    if (item === undefined) {
-      return {
-        ok: false,
-        reason: 'gone',
-        message: '対象のForge作業は既に追跡対象から外れています。',
-      };
-    }
+    if (item === undefined) return goneResult;
     if (item.pullRequestState !== 'merged') {
       return {
         ok: false,
