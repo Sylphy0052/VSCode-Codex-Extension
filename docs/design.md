@@ -8748,6 +8748,8 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 
 オーケストレーターの接続id（`ORCHESTRATOR_CONNECTION_ID`、値は`-orchestrator-`）は`TASK_ID_PATTERN`に一致しないため、そのままではファイル名に使えない。`write_handoff`はオーケストレーターからの書き込みだけ`RESERVED_ORCHESTRATOR_TASK_ID`（`_orchestrator`、`workflow.ts:105`）へ読み替える（`messaging.ts:1625-1629`）。同名のタスクは`validateWorkflow`が定義できないよう弾いている（`workflow.ts:1345-1348`）ため、この読み替えがタスクのファイルと衝突することはない。
 
+**予約idとの一致は大文字小文字を無視して見る（Issue #1022）。** `validateWorkflow`の`_orchestrator` / `_integration`の判定は当初完全一致だったが、大小文字を区別しないファイルシステム（Windows・既定のmacOS）では`_Orchestrator`のタスクが`_orchestrator`と同じ場所を指す——受け渡しファイル（`_orchestrator~<slug>.md`）と統合worktreeの置き場をタスク側が名乗れてしまう。タスク同士の大文字小文字違いは既に`idsByLowerCase`で弾いていた（worktreeのパスとブランチ名のため）が、そちらは予約idを対象にしていない。
+
 `read_handoff`が返す本文は`formatUntrusted`で囲ってから返す（`messaging.ts:1652-1657`）。受け渡しファイルの中身はエージェントが書いた自由記述であり、`send_message`の本文（`wrapTaskMessage`）や`{{T1.result}}`と同じ脅威クラス（上流の自由記述がそのまま下流のプロンプトへ入る経路）にあたるためで、無害化を経ずに素通りさせない。
 
 #### Viewの表示

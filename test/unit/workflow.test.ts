@@ -671,6 +671,18 @@ tasks:
     expect(errors.some((e) => e.taskIds.includes('_integration'))).toBe(true);
   });
 
+  it('大文字小文字だけ違う "_Integration" もエラーになる（Issue #1022）', () => {
+    // 大小文字を区別しないファイルシステムでは統合worktreeと同じ場所を指す
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ id: '_Integration' })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(errors.some((e) => e.taskIds.includes('_Integration'))).toBe(true);
+  });
+
   it.each(['prompt', 'done', 'continuePrompt'] as const)('%sが長すぎるとエラーになる', (field) => {
     const tooLong = 'a'.repeat(20001);
     const def = {
@@ -1764,6 +1776,23 @@ describe('validateWorkflow の RESERVED_ORCHESTRATOR_TASK_ID（design.md §16.44
     expect(
       errors.some(
         (e) => e.taskIds.includes('_orchestrator') && e.message.includes('予約されている'),
+      ),
+    ).toBe(true);
+  });
+
+  it('大文字小文字だけ違う "_Orchestrator" もエラーになる（Issue #1022）', () => {
+    // 大小文字を区別しないファイルシステムでは、このタスクの受け渡しファイル
+    // （`_Orchestrator~<slug>.md`）がオーケストレーターのファイルと同じ場所を指す
+    const def = {
+      version: 1,
+      name: 'テスト',
+      maxParallel: 3,
+      tasks: [task({ id: '_Orchestrator' })],
+    };
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some(
+        (e) => e.taskIds.includes('_Orchestrator') && e.message.includes('予約されている'),
       ),
     ).toBe(true);
   });

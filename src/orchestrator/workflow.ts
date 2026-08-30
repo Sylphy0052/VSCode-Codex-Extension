@@ -1551,16 +1551,22 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
         message: `id を"-retry<数字>"で終わらせることはできません（再試行時のブランチ名と衝突します）: ${t.id}`,
       });
     }
-    if (t.id === RESERVED_INTEGRATION_TASK_ID) {
+    // 予約idとの一致は大文字小文字を無視して見る（Issue #1022）。大小文字を区別しない
+    // ファイルシステムでは`_Orchestrator`のタスクが`_orchestrator`と同じ場所を指すため、
+    // 完全一致だけで弾くと、オーケストレーターの受け渡しファイル（`_orchestrator~<slug>.md`）や
+    // 統合worktreeの置き場をタスク側が名乗れてしまう。タスク同士の大文字小文字違いは
+    // 下の`idsByLowerCase`で見ているが、そちらは予約idを対象にしない
+    const lowerId = t.id.toLowerCase();
+    if (lowerId === RESERVED_INTEGRATION_TASK_ID) {
       errors.push({
         taskIds: [t.id],
-        message: `id "${RESERVED_INTEGRATION_TASK_ID}" は統合worktree用に予約されているため使えません`,
+        message: `id "${RESERVED_INTEGRATION_TASK_ID}" は統合worktree用に予約されているため使えません（大文字小文字だけ違う形も含む）`,
       });
     }
-    if (t.id === RESERVED_ORCHESTRATOR_TASK_ID) {
+    if (lowerId === RESERVED_ORCHESTRATOR_TASK_ID) {
       errors.push({
         taskIds: [t.id],
-        message: `id "${RESERVED_ORCHESTRATOR_TASK_ID}" はオーケストレーターの受け渡しファイル用に予約されているため使えません`,
+        message: `id "${RESERVED_ORCHESTRATOR_TASK_ID}" はオーケストレーターの受け渡しファイル用に予約されているため使えません（大文字小文字だけ違う形も含む）`,
       });
     }
   }
