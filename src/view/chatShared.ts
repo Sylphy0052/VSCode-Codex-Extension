@@ -1225,7 +1225,7 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
       return {
         ariaLabel: 'セカンドオピニオン',
         title:
-          'この会話そのものは渡さずに、依頼文・背景要約・差分だけを独立したCodexセッションへ渡して意見を求めます（レビューのほか、案の比較や進めてよいかの判断も頼めます。結果はこの会話へ表示され、作業中のAIへ自動では送られません）',
+          'この会話そのものは渡さずに、依頼文と選んだ資料だけを独立したCodexセッションへ渡して意見を求めます（レビューのほか、案の比較や進めてよいかの判断も頼めます。既定では別セッションが作った背景要約を添えます。結果はこの会話へ表示され、作業中のAIへ自動では送られません）',
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.secondOpinion,
