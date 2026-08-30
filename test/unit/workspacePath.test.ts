@@ -87,6 +87,11 @@ describe('isWithinRoot（issue #1019）', () => {
   it('ルートを指定されたら絶対パスはすべて配下', () => {
     expect(isWithinRoot('/work/repo', '/')).toBe(true);
   });
+
+  it('ルートが空なら配下としない', () => {
+    // 旧実装は絶対パスをすべて通していた。絞り込みが全開になる方向なので閉じる
+    expect(isWithinRoot('/work/repo', '')).toBe(false);
+  });
 });
 
 describe('isWithinAnyRoot（issue #1019）', () => {

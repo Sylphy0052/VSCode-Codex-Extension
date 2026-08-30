@@ -83,7 +83,12 @@ export function isWithinRoot(
   const fold = (value: string) => (caseInsensitive ? value.toLowerCase() : value);
   const normalizedRoot = fold(normalizeWorkspacePath(root));
   const normalizedCwd = fold(normalizeWorkspacePath(cwd));
-  if (normalizedRoot === '/' || normalizedRoot === '') {
+  if (normalizedRoot === '') {
+    // ルートが空。旧実装は絶対パスをすべて配下としていたが、絞り込みが全開になる方向の
+    // 緩さなので閉じる側へ倒す（Issue #1019）
+    return false;
+  }
+  if (normalizedRoot === '/') {
     // ルート直下を指定されたら、絶対パスはすべて配下
     return normalizedCwd.startsWith('/');
   }
