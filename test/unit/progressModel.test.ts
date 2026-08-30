@@ -185,6 +185,56 @@ describe('buildProgress', () => {
   });
 });
 
+describe('変更ファイルの重複除去（issue #1013）', () => {
+  it('セッション全体の一覧は最初に変更した順で、重複を1件へまとめる', () => {
+    const view = buildProgress(
+      stateWith([
+        item('userMessage', { text: '1回目' }),
+        fileChange('src/b.ts'),
+        fileChange('src/a.ts'),
+        fileChange('src/b.ts'),
+        item('userMessage', { text: '2回目' }),
+        fileChange('src/a.ts'),
+        fileChange('src/c.ts'),
+      ]),
+    );
+
+    // 名前順（a, b, c）ではなく、最初に触った順であることまで固定する
+    expect(view.summary.editedFiles).toEqual(['src/b.ts', 'src/a.ts', 'src/c.ts']);
+  });
+
+  it('ターン内の重複は一覧から落とし、回数だけを数える', () => {
+    const view = buildProgress(
+      stateWith([
+        item('userMessage', { text: '指示' }),
+        fileChange('src/a.ts'),
+        fileChange('src/a.ts'),
+        fileChange('src/a.ts'),
+        fileChange('src/b.ts'),
+      ]),
+    );
+
+    expect(view.turns[0]?.editedFiles).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(view.turns[0]?.fileEditCounts).toEqual({ 'src/a.ts': 3, 'src/b.ts': 1 });
+  });
+
+  it('Object.prototype と同じ名前のファイルも一覧へ出す', () => {
+    // `counts[path] === undefined` で既出を見ると、継承した関数を拾って
+    // このファイルだけ一覧から消える
+    const view = buildProgress(
+      stateWith([
+        item('userMessage', { text: '指示' }),
+        fileChange('toString'),
+        fileChange('toString'),
+      ]),
+    );
+
+    expect(view.turns[0]?.editedFiles).toEqual(['toString']);
+    expect(view.turns[0]?.fileEditCounts['toString']).toBe(2);
+    expect(view.summary.editedFiles).toEqual(['toString']);
+  });
+});
+
 describe('diffTodos', () => {
   it('増えた・着手した・完了した・消えたを見分ける', () => {
     const before = [todo('A', 'pending'), todo('B', 'pending'), todo('C', 'pending')];

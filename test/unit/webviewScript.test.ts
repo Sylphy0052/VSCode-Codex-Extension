@@ -1232,10 +1232,24 @@ describe('progressScript', () => {
     expect(source).toContain('function fileGroupRow(group, names)');
     expect(source).toContain('renderFiles(view.summary.editedFileGroups);');
     // 打ち切りはグループ数ではなくファイル数で数える
-    expect(source).toContain('const room = FILES_SHOWN - shown;');
+    expect(source).toContain('FILES_SHOWN - shown');
     expect(source).toContain('残り');
     // 平坦な一覧を作る旧経路は残さない
     expect(source).not.toContain('fillPathList');
+  });
+
+  it('ファイル一覧の展開を覚えて再描画で失わない（issue #1013）', () => {
+    const source = progressScript();
+    // 陽性対照: 展開を覚える入れ物がある（綴り違いで空振りしていない）
+    expect(source).toContain('let filesExpanded = false;');
+    // 展開後は打ち切らず全件出す
+    expect(source).toContain(
+      'const room = filesExpanded ? group.files.length : FILES_SHOWN - shown;',
+    );
+    // ボタンはDOMへ直接足さず、フラグを立てて描き直す（次の状態更新でも保たれる）
+    expect(source).toContain('filesExpanded = true;');
+    expect(source).toContain('renderFiles(groups);');
+    expect(source).not.toContain('button.remove();');
   });
 
   it('ターンの開閉を覚えて再描画で失わない（issue #750）', () => {

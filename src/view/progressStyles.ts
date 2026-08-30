@@ -4,7 +4,8 @@ import { sharedStyles } from './sharedStyles';
 /**
  * 進捗画面（issue #721、見た目の作り直しは issue #781）のスタイル。
  *
- * `chatStyles.ts` と同じくテンプレートリテラルの中身で、型検査もlintも効かない。
+ * `chatStyles.ts` と同じくテンプレートリテラルの中身で、型検査もlintも効かない
+ * （崩れると見た目が黙って壊れる規則だけを `test/unit/progressStyles.test.ts` で押さえる）。
  * 色は必ず `var(--vscode-*)` を使い、テーマに追随させる。
  *
  * アイコンはインラインSVG（`progressScript.ts` の `icon()`）で、`fill` / `stroke` に

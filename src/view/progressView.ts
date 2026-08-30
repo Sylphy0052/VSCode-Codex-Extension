@@ -44,7 +44,7 @@ export class ProgressViewManager implements vscode.Disposable {
 
     const panel = vscode.window.createWebviewPanel(
       'agent.progress',
-      `進捗: ${target.title}`,
+      panelTitle(target.title),
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true },
     );
@@ -74,6 +74,12 @@ export class ProgressViewManager implements vscode.Disposable {
     if (panel === undefined) {
       return;
     }
+    // 名前の追随は中身の更新より先に行う（issue #1013）。タブのタイトルは
+    // 見えていないタブでも読めるため、`staleThreadIds` へ回す経路の手前で当てる
+    const title = panelTitle(change.title);
+    if (panel.title !== title) {
+      panel.title = title;
+    }
     if (!panel.visible) {
       this.staleThreadIds.add(change.threadId);
       return;
@@ -98,6 +104,11 @@ export class ProgressViewManager implements vscode.Disposable {
     this.panels.clear();
     this.staleThreadIds.clear();
   }
+}
+
+/** 進捗タブのタイトル。開いたときと`notify`で同じ形にするため1か所へ寄せる。 */
+function panelTitle(title: string): string {
+  return `進捗: ${title}`;
 }
 
 function isReady(message: unknown): boolean {
