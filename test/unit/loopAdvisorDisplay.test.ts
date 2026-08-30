@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { noAdvice, type LoopAdvice } from '../../src/loop/loopAdvisor';
-import { advisorDisplay } from '../../src/view/loopAdvisorFactory';
+import { advisorDisplay, advisorSkippedDisplay } from '../../src/view/loopAdvisorFactory';
 
 const advice = (overrides: Partial<LoopAdvice> = {}): LoopAdvice => ({
   ...noAdvice(),
@@ -71,5 +71,28 @@ describe('advisorDisplay（issue #964）', () => {
     expect(display.text).toContain('テストが無い');
     expect(display.text).toContain('次に見直すこと: テストを足す');
     expect(display.detail).toContain('npm test が走っていない');
+  });
+});
+
+describe('advisorDisplay（打ち切りと不動作の告知、issue #1009）', () => {
+  it('呼ぶのをやめた周は、失敗の報告と区別できる文面で出す', () => {
+    const display = advisorDisplay(
+      { status: 'disabled', reason: 'timeout', consecutiveFailures: 3 },
+      4,
+    );
+    expect(display.text).toContain('Advisor（4ターン目）');
+    expect(display.text).toContain('呼ぶのをやめました');
+    expect(display.text).toContain('3回続けて動けなかった');
+    expect(display.text).toContain('時間内に応答しませんでした');
+    // 設定が無効になったわけではないことも伝える
+    expect(display.text).toContain('次にループを始めたときは、またAdvisorを呼びます');
+    expect(display.status).toBe('concern');
+  });
+
+  it('ゴールの無いループで動かないことを、開始時に伝える', () => {
+    const display = advisorSkippedDisplay();
+    expect(display.text).toContain('このループでは動きません');
+    expect(display.text).toContain('目的と受入基準');
+    expect(display.status).toBe('note');
   });
 });
