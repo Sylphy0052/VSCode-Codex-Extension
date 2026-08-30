@@ -993,6 +993,16 @@ export async function draftSecondOpinionHandoff(
  * 編集できる下書き（`mainInstruction`）とは別に、送信時にここで足す。下書きへ埋め込むと、
  * 利用者が消せてしまい「出所を伏せた指示」を作れてしまう。
  */
+function provenancePrefix(candidate: SecondOpinionCandidate): string {
+  return [
+    `以下は、この会話とは独立したセカンドオピニオン（${candidate.model} / ${candidate.effort}）へ相談した結果を、利用者が確認・編集して承認した指示です。`,
+    'あなた自身が把握している状況と食い違う前提があれば、そのまま従わずに指摘してください。',
+    '',
+    '---',
+    '',
+  ].join('\n');
+}
+
 /**
  * 回答が返った時点で、その全文を作業中のAIへ送る（Issue #1003）。
  *
@@ -1057,16 +1067,6 @@ function autoSendPrefix(candidate: SecondOpinionCandidate, partial: boolean): st
       '利用者はまだ内容を確認しておらず、承認された指示ではありません。',
     ...(partial ? ['この回答は最後まで返る前に打ち切られており、途中までの内容です。'] : []),
     'あなた自身が把握している状況と食い違う前提があれば、そのまま従わずに指摘してください。従うか否かの判断はあなたが行ってください。',
-    '',
-    '---',
-    '',
-  ].join('\n');
-}
-
-function provenancePrefix(candidate: SecondOpinionCandidate): string {
-  return [
-    `以下は、この会話とは独立したセカンドオピニオン（${candidate.model} / ${candidate.effort}）へ相談した結果を、利用者が確認・編集して承認した指示です。`,
-    'あなた自身が把握している状況と食い違う前提があれば、そのまま従わずに指摘してください。',
     '',
     '---',
     '',
