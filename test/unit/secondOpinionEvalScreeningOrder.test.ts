@@ -5,7 +5,7 @@ import {
   hasStrongEvidence,
   screeningOrderOf,
   shuffleKeyOf,
-} from '../bench/secondOpinionEval/screeningOrder';
+} from '../bench/secondOpinionEval/screeningPool';
 
 function candidate(overrides: Partial<EvidenceCandidates> = {}): EvidenceCandidates {
   return {

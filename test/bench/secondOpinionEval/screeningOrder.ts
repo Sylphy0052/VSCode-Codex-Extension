@@ -12,7 +12,7 @@
  * Issueの運用・テストを足す割合・AIの使い方・PRの種類が変わっていれば、先頭から40件で
  * 止めたときに特定の時期だけを読んだことになる。固定のseedで並べ替えて、その順を凍結する。
  *
- * 並べ替えは `sha256(SHUFFLE_SEED + prNumber)` の昇順で行う。乱数生成器を持たないので、
+ * 並べ替えは `sha256(STRONG_SHUFFLE_SEED + prNumber)` の昇順で行う。乱数生成器を持たないので、
  * 実装も監査も同じ1行で済み、誰が何度実行しても同じ順になる。
  *
  * **停止条件は結果依存で、単位は案件（PR）である。** primary な `groundTruthBasis` の
@@ -36,6 +36,7 @@ import process from 'node:process';
 
 import { writeFrozen } from './frozenFile';
 import { type EvidenceCandidates } from './evidenceChannels';
+import { STRONG_SHUFFLE_SEED, screeningOrderOf } from './screeningPool';
 
 /**
  * 手順2で凍結した証拠候補のsha256。
@@ -44,9 +45,6 @@ import { type EvidenceCandidates } from './evidenceChannels';
  */
 const EXPECTED_CANDIDATES_SHA256 =
   '2ece68beb18979f56828548241444a014c6bcd21c0439b42e91ebfd67ce1a235';
-
-/** 並べ替えのseed。変えたら別の順序になるので、版と一緒に上げる。 */
-const SHUFFLE_SEED = 'ground-truth-screen-v1:';
 
 /** 読む順の版。規則やseedを変えたら上げ、前の版のファイルは残す。 */
 const SCREENING_ORDER_VERSION = 2;
@@ -92,41 +90,6 @@ function parseArgs(argv: readonly string[]): Args {
   return { candidatesPath, outPath };
 }
 
-/**
- * 強い証拠の系統を持つ案件を選ぶ。
- *
- * `follow-up-test` は「後続のfix PRがテストを触っている」、`openedAfterMerge` は「マージ後に
- * 立ったIssueがこのPRを参照している」で、どちらも実験や独立した報告へつながりうる。
- *
- * **これは415件から得られるprimary ground truthの全体ではない。** account review / comment
- * しか持たない案件にも `independent-human` になりうるものが残っている。ここで作るのは
- * あくまで、強い証拠を持つ部分集合から作ったpoolである。足りなければ探索範囲を広げる。
- */
-export function hasStrongEvidence(candidate: EvidenceCandidates): boolean {
-  return (
-    candidate.channels.includes('follow-up-test') ||
-    candidate.followUpIssues.some((issue) => issue.openedAfterMerge)
-  );
-}
-
-/** 並べ替えの鍵。PR番号だけで決まるので、何度実行しても同じ順になる。 */
-export function shuffleKeyOf(prNumber: number, seed: string = SHUFFLE_SEED): string {
-  return createHash('sha256').update(`${seed}${prNumber}`).digest('hex');
-}
-
-export function screeningOrderOf(
-  candidates: readonly EvidenceCandidates[],
-  seed: string = SHUFFLE_SEED,
-): { prNumber: number; shuffleKey: string }[] {
-  return candidates
-    .filter(hasStrongEvidence)
-    .map((candidate) => ({
-      prNumber: candidate.prNumber,
-      shuffleKey: shuffleKeyOf(candidate.prNumber, seed),
-    }))
-    .sort((a, b) => (a.shuffleKey < b.shuffleKey ? -1 : a.shuffleKey > b.shuffleKey ? 1 : 0));
-}
-
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const raw = await fs.readFile(args.candidatesPath, 'utf8');
@@ -144,7 +107,7 @@ async function main(): Promise<void> {
     candidatesFile: path.basename(args.candidatesPath),
     candidatesSha256: sha256,
     screeningOrderVersion: SCREENING_ORDER_VERSION,
-    shuffleSeed: SHUFFLE_SEED,
+    shuffleSeed: STRONG_SHUFFLE_SEED,
     /** 強い証拠の系統をどう定義したか。 */
     strongEvidenceRule: 'follow-up-test または openedAfterMerge な follow-up issue を持つ',
     /** 停止の単位は案件（PR）。finding の総数ではない。 */

@@ -24,12 +24,26 @@ import process from 'node:process';
 
 import { parseDecisionsJsonl, summarizeScreening, validateScreeningLog } from './screeningResult';
 
-/** 手順3の前段で凍結した読む順のsha256。ずれたら止める。 */
-const EXPECTED_ORDER_SHA256 = 'edcdfd12f49cedc1de65e35483e61e023e378c07420557d8a785c7da565e9583';
+/**
+ * 凍結済みの読む順と、その供給源の名前。
+ *
+ * **供給源ごとに別々に集計する。** 強い証拠のpoolと追加poolを混ぜると、どちらの収率で
+ * 40件そろえたのかが後から読めない。最終のpoolは和集合でよいが、出所は残す。
+ */
+const KNOWN_ORDERS: readonly { sha256: string; poolId: string }[] = [
+  {
+    sha256: 'edcdfd12f49cedc1de65e35483e61e023e378c07420557d8a785c7da565e9583',
+    poolId: 'strong-evidence',
+  },
+  {
+    sha256: '33cc390e3b6bd2a14108947559ef79bff8e0bfa77da0f74937ff746ad5085158',
+    poolId: 'supplemental',
+  },
+];
 
 interface OrderFile {
   total: number;
-  primaryTargetCases: number;
+  primaryTargetCases?: number;
   order: { prNumber: number; shuffleKey: string }[];
 }
 
@@ -67,10 +81,11 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const rawOrder = await fs.readFile(args.orderPath, 'utf8');
   const orderSha256 = createHash('sha256').update(rawOrder).digest('hex');
-  if (orderSha256 !== EXPECTED_ORDER_SHA256) {
+  const known = KNOWN_ORDERS.find((entry) => entry.sha256 === orderSha256);
+  if (known === undefined) {
     throw new Error(
-      `読む順のsha256が想定と一致しません。想定: ${EXPECTED_ORDER_SHA256} / 実測: ${orderSha256}。` +
-        '順序が変わっています。凍結済みの版を指定してください',
+      `読む順のsha256が凍結済みのどれとも一致しません。実測: ${orderSha256}。` +
+        `凍結済み: ${KNOWN_ORDERS.map((entry) => `${entry.poolId}=${entry.sha256}`).join(' / ')}`,
     );
   }
   const orderFile = JSON.parse(rawOrder) as OrderFile;
@@ -84,16 +99,20 @@ async function main(): Promise<void> {
 
   const summary = summarizeScreening(entries, orderFile.total);
   const output = {
+    poolId: known.poolId,
     orderFile: path.basename(args.orderPath),
     orderSha256,
     decisionsFile: path.basename(args.decisionsPath),
     decisionsSha256: createHash('sha256').update(rawDecisions).digest('hex'),
     primaryTargetCases: orderFile.primaryTargetCases,
-    reachedTarget: summary.primaryCases >= orderFile.primaryTargetCases,
+    reachedTarget:
+      orderFile.primaryTargetCases !== undefined &&
+      summary.primaryCases >= orderFile.primaryTargetCases,
     ...summary,
   };
   await fs.writeFile(args.outPath, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
 
+  console.log(`供給源: ${known.poolId}`);
   console.log(`読んだ案件: ${summary.screenedCases} 件 / 全 ${orderFile.total} 件`);
   console.log(`  primary が成立した案件: ${summary.primaryCases} 件（停止判定はこれ）`);
   console.log(`  成立しなかった案件: ${summary.nonPrimaryCases} 件`);
@@ -102,11 +121,13 @@ async function main(): Promise<void> {
   for (const row of summary.nonPrimaryBreakdown) {
     console.log(`  ${row.disposition}: ${row.count} 件`);
   }
-  console.log(
-    output.reachedTarget
-      ? `停止条件に到達（primary ${summary.primaryCases} 件 >= ${orderFile.primaryTargetCases} 件）`
-      : `停止条件まであと ${orderFile.primaryTargetCases - summary.primaryCases} 件`,
-  );
+  if (orderFile.primaryTargetCases !== undefined) {
+    console.log(
+      output.reachedTarget
+        ? `停止条件に到達（primary ${summary.primaryCases} 件 >= ${orderFile.primaryTargetCases} 件）`
+        : `停止条件まであと ${orderFile.primaryTargetCases - summary.primaryCases} 件`,
+    );
+  }
   console.log(`書き出し: ${args.outPath}`);
 }
 

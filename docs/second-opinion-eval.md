@@ -258,6 +258,50 @@ npx tsx test/bench/secondOpinionEval/screeningSummary.ts \
 
 集計ファイルは凍結しない（進むたびに作り直す）。凍結してあるのは読む順と、追記しかしない判定の記録である。読む順のsha256が凍結済みの版と違えば止まり、凍結した順を飛ばして読んでいれば `validateScreeningLog()` が落とす。
 
+### 2-3. 追加poolを凍結する（Issue #1046 手順3の前段）
+
+強い証拠のpoolを20件読んだ時点で、primary が成立したのは2件だった。残り78件だけで40件そろえるには48%の収率が要る。実測の10%とはかけ離れているので、別の供給源を足す。**到達目標の40件は下げない。**
+
+```
+npx tsx test/bench/secondOpinionEval/supplementalOrder.ts \
+  --candidates eval-results/evidence-candidates-v3.json \
+  --strong-order eval-results/screening-order-v2.json \
+  --out eval-results/supplemental-order-v1.json
+```
+
+#### 読んだ内容から選び方を作らない
+
+20件を読んで見えた失敗の形（別Issueを拾いやすい、scope外を拾いやすい、テスト追加だけを拾う）へ合わせて候補を絞ると、screening の結果で候補の規則を学習したことになる。20件の結果から使うのは「追加探索を始めるかどうか」の引き金だけにする。
+
+集合は手順2で凍結済みの `evidence-candidates-v3.json` の機械的な属性だけで決める。
+
+```
+supplemental = 強い証拠を持たない ∩ (follow-up-fix | account-review | account-comment | closing-issue)
+```
+
+中身を読んで入れる・外すは決めない。「REDなしの follow-up-fix」のように、人が読んで選別する条件も使わない。
+
+#### tierを付けず、固定seedの順に読む
+
+channel ごとに成立しやすさの見当は付くが、それは主観が入る。強い証拠の98件を先に読んでいる時点で既に「期待の高い順」の優先はしているので、この上さらに順位を付けない。集合全体を `sha256('ground-truth-supplemental-v1:' + prNumber)` の昇順に並べた順で読む。
+
+#### 重複ゼロを検証する
+
+`verifyDisjoint()` が、追加poolと強い証拠のpoolが1件も重ならないことを確かめ、重なれば止める。重なると同じ案件が2つのpoolの分母へ二重に入る。実測は 277件 / 98件 / 重複0件（候補415件のうち、どちらにも入らない40件は追加の系統をどれも持たない）。
+
+#### funnelを供給源ごとに分ける
+
+集計は混ぜない。順序ファイルの sha256 から `poolId`（`strong-evidence` / `supplemental`）を判別し、`screeningSummary.ts` がどちらの供給源の集計かを出す。最終的な primary pool は和集合でよいが、出所は残す。
+
+#### いつ供給源を選び直すか
+
+追加poolの先頭10件を読んだ時点で決める。
+
+- primary が3件以上 → 追加poolを優先して続ける
+- 2件以下 → 強い証拠のpoolの前回読み終えた位置の次（`orderIndex 20`）へ戻り、20件足して再評価する
+
+どちらの結果でも、40 primary cases という目標は下げない。足りなければさらに対象を広げる。
+
 ### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。20〜30件を目安に、`kind` ごとの件数を**揃えて**集める（24件なら各6件）。実際の利用比率に合わせると、件数の多い種類の評価が全体平均になってしまう。利用比率での重み付けは、種類別の値が出てから後で掛ければよい。
