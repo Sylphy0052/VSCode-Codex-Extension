@@ -306,8 +306,6 @@ async function main(): Promise<void> {
       const judged = eligibility.get(eligibilityKey(entry.caseId, i, args.baseline));
       return judged !== undefined && judged.discoverable && !judged.explicitlyExposed;
     };
-    const rescueIndexes = selected.primary.filter((i) => !inBaseline(i));
-    const sharedIndexes = selected.primary.filter((i) => inBaseline(i));
     const recall: RecallCounts = {
       recalled: recalledPrimary.length,
       total: primary.size,
@@ -316,9 +314,9 @@ async function main(): Promise<void> {
       recalledWarning: recalledPrimary.filter((i) => severityOf(i) === 'warning').length,
       totalWarning: selected.primary.filter((i) => severityOf(i) === 'warning').length,
       recalledRescue: recalledPrimary.filter((i) => !inBaseline(i)).length,
-      totalRescue: rescueIndexes.length,
+      totalRescue: selected.primary.filter((i) => !inBaseline(i)).length,
       recalledShared: recalledPrimary.filter((i) => inBaseline(i)).length,
-      totalShared: sharedIndexes.length,
+      totalShared: selected.primary.filter((i) => inBaseline(i)).length,
     };
     const outside = score.recalledFindingIndexes.length - recalledPrimary.length;
     if (outside > 0) {
