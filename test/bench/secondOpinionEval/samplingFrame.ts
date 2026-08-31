@@ -45,6 +45,7 @@ import * as path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 
+import { refuseIfExists, writeFrozen } from './frozenFile';
 import { resolveSnapshot, type SnapshotStatus } from './prSnapshot';
 
 const run = promisify(execFile);
@@ -218,11 +219,14 @@ async function loadSource(
       : parsed;
     return {
       snapshot,
-      path: path.resolve(args.prsPath),
+      path: args.prsPath,
       sha256: createHash('sha256').update(raw).digest('hex'),
     };
   }
 
+  const outPath = args.sourceOutPath ?? '';
+  // 素は一度取ったら二度と取り直さない。同じパスへ書き直せるなら、凍結したことにならない
+  await refuseIfExists(outPath, '母集団の素');
   const { stdout } = await run('gh', [...GH_ARGS], { maxBuffer: 64 * 1024 * 1024 });
   const snapshot: SourceSnapshot = {
     capturedAt: new Date().toISOString(),
@@ -230,12 +234,11 @@ async function loadSource(
     prs: JSON.parse(stdout) as GhPullRequest[],
   };
   const json = `${JSON.stringify(snapshot, null, 2)}\n`;
-  const outPath = args.sourceOutPath ?? '';
   await fs.mkdir(path.dirname(path.resolve(outPath)), { recursive: true });
   await fs.writeFile(outPath, json, 'utf8');
   return {
     snapshot,
-    path: path.resolve(outPath),
+    path: outPath,
     sha256: createHash('sha256').update(json).digest('hex'),
   };
 }
@@ -422,8 +425,13 @@ async function main(): Promise<void> {
   const frame = {
     population: inWindow.length,
     window: [args.since, args.until],
-    /** 母集団の素。frameだけ凍結しても、GitHubを引き直せば母集団は変わる。 */
-    sourcePath: source.path,
+    /**
+     * 母集団の素。frameだけ凍結しても、GitHubを引き直せば母集団は変わる。
+     *
+     * 正本は `sourceSha256` のほうで、ファイル名は目印にすぎない。**絶対パスは入れない。**
+     * 入れると、同じ素から作ってもcloneの置き場所でframeのハッシュが変わってしまう。
+     */
+    sourceFile: path.basename(source.path),
     sourceSha256: source.sha256,
     capturedAt: source.snapshot.capturedAt,
     exclusionRulesVersion: EXCLUSION_RULES_VERSION,
@@ -440,8 +448,7 @@ async function main(): Promise<void> {
   };
 
   const json = `${JSON.stringify(frame, null, 2)}\n`;
-  await fs.mkdir(path.dirname(path.resolve(args.outPath)), { recursive: true });
-  await fs.writeFile(args.outPath, json, 'utf8');
+  const written = await writeFrozen(args.outPath, json);
   const sha256 = createHash('sha256').update(json).digest('hex');
 
   console.log('');
@@ -490,7 +497,9 @@ async function main(): Promise<void> {
   console.log(`母集団の素: ${source.path}`);
   console.log(`  sha256: ${source.sha256}`);
   console.log(`  取得時刻: ${source.snapshot.capturedAt}`);
-  console.log(`書き出し: ${args.outPath}`);
+  console.log(
+    `書き出し: ${args.outPath}${written === 'unchanged' ? '（既存と同一。書き換えていない）' : ''}`,
+  );
   console.log(`  sha256: ${sha256}`);
 }
 
