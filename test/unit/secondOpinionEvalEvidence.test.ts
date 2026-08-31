@@ -4,6 +4,7 @@ import {
   authorKindOf,
   changeTypeOf,
   collectCandidates,
+  FOLLOW_UP_FILE_PAGE,
   isTestPath,
   summarizeChannels,
   type RawCrossReference,
@@ -129,6 +130,27 @@ describe('collectCandidates', () => {
     expect(candidates.followUpPrs[0]?.touchesTests).toBeUndefined();
     expect(candidates.channels).toContain('follow-up-fix');
     expect(candidates.channels).not.toContain('follow-up-test');
+  });
+
+  it('ファイル一覧が上限まで埋まっていれば、テスト無しとは断定しない', () => {
+    // 上限で切れた一覧にテストが見えないのは「触っていない」ではなく「見えていない」
+    const files = Array.from({ length: FOLLOW_UP_FILE_PAGE }, (_, index) => `src/f${index}.ts`);
+    const candidates = collectCandidates(
+      rawEvidence({ crossReferences: [crossRef({ number: 200 })] }),
+      new Map([[200, files]]),
+    );
+
+    expect(candidates.followUpPrs[0]?.touchesTests).toBeUndefined();
+    expect(candidates.channels).not.toContain('follow-up-test');
+  });
+
+  it('上限に達していなければ、テストが無いことを false として数える', () => {
+    const candidates = collectCandidates(
+      rawEvidence({ crossReferences: [crossRef({ number: 200 })] }),
+      new Map([[200, ['src/foo.ts']]]),
+    );
+
+    expect(candidates.followUpPrs[0]?.touchesTests).toBe(false);
   });
 
   it('Codexのコメントだけでは account-comment が立たない', () => {

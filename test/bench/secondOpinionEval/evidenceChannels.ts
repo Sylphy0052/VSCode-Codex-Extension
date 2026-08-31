@@ -137,6 +137,15 @@ export interface EvidenceCandidates {
 /** 後続のfixとみなすタイトルの型。`feat` は問題の証拠にならないので入れない。 */
 const FIX_CHANGE_TYPES: readonly string[] = ['fix', 'revert', 'test', 'perf'];
 
+/**
+ * 後続PRのファイル一覧を引くときの上限。
+ *
+ * ここに達している一覧は途中で切れている可能性があるので、テストが見つからなくても
+ * 「テストを触っていない」とは言えない。{@link collectCandidates} はその場合 `undefined`
+ * を返す。`false` にすると、引けていないだけのものが「テスト無し」として数えられる。
+ */
+export const FOLLOW_UP_FILE_PAGE = 100;
+
 const TEST_PATH_PATTERNS = [
   /^test\//,
   /^tests\//,
@@ -161,6 +170,21 @@ export function changeTypeOf(title: string): string | undefined {
 }
 
 /**
+ * テストを触っているか。分からないときは `false` ではなく `undefined` を返す。
+ *
+ * 一覧が上限まで埋まっているときは、その先にテストがあっても見えない。
+ */
+function touchesTestsOf(files: readonly string[] | undefined): boolean | undefined {
+  if (files === undefined) {
+    return undefined;
+  }
+  if (files.some(isTestPath)) {
+    return true;
+  }
+  return files.length >= FOLLOW_UP_FILE_PAGE ? undefined : false;
+}
+
+/**
  * 証拠候補を数える。
  *
  * 後続かどうかは**このPRがマージされた後に作られたか**で見る。マージ前から存在する参照は、
@@ -182,7 +206,7 @@ export function collectCandidates(
         createdAt: ref.createdAt,
         mergedAt: ref.mergedAt,
         changeType: changeTypeOf(ref.title),
-        touchesTests: files === undefined ? undefined : files.some(isTestPath),
+        touchesTests: touchesTestsOf(files),
       };
     });
 

@@ -41,6 +41,7 @@ import { promisify } from 'node:util';
 import {
   collectCandidates,
   summarizeChannels,
+  FOLLOW_UP_FILE_PAGE,
   type EvidenceCandidates,
   type RawCrossReference,
   type RawPrEvidence,
@@ -70,7 +71,6 @@ const COMMENT_PAGE = 100;
 const REVIEW_PAGE = 50;
 const CLOSING_ISSUE_PAGE = 10;
 const TIMELINE_PAGE = 100;
-const FILE_PAGE = 100;
 
 interface FramePullRequest {
   prNumber: number;
@@ -80,8 +80,6 @@ interface FramePullRequest {
 }
 
 interface Frame {
-  sourceSha256: string;
-  exclusionRulesVersion: number;
   prs: FramePullRequest[];
 }
 
@@ -349,7 +347,7 @@ async function fetchFollowUpFiles(
     const aliases = batch
       .map(
         (number) =>
-          `    p${number}: pullRequest(number: ${number}) { files(first: ${FILE_PAGE}) { nodes { path } } }`,
+          `    p${number}: pullRequest(number: ${number}) { files(first: ${FOLLOW_UP_FILE_PAGE}) { nodes { path } } }`,
       )
       .join('\n');
     const query = `query {
@@ -385,6 +383,14 @@ async function loadEvidenceSource(
     if (source.frameSha256 !== frameSha256) {
       throw new Error(
         `保存済みの素は別のframeから取られています。素: ${source.frameSha256} / 今回のframe: ${frameSha256}`,
+      );
+    }
+    // 版が違う素は項目そのものが欠けている。読めてしまうと、欠けた項目が「値が無い」ではなく
+    // 「条件を満たさない」として静かに数えられる
+    if (source.evidenceRulesVersion !== EVIDENCE_RULES_VERSION) {
+      throw new Error(
+        `保存済みの素は規則の版が違います。素: v${source.evidenceRulesVersion} / 今回: v${EVIDENCE_RULES_VERSION}。` +
+          'その版で取り直したファイルを指すか、前の版のコードで読んでください',
       );
     }
     return {
