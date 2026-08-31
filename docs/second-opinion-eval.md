@@ -171,7 +171,7 @@ npx tsx test/bench/secondOpinionEval/screeningOrder.ts \
 これは「98件のうち何件成立したか」という母集団の割合を出す手続きではない。作りたいのは本測定に使えるpoolであって、成立率の推定ではない。したがって集計では次を分けて出し、**未読を不成立に混ぜない**。
 
 ```
-unreadCases      98 件（強い証拠を持つ）
+totalCases       98 件（強い証拠を持つ）
 screenedCases    K 件を読んだ
   primaryCases      40 件（primary な finding を1つ以上持つ。停止判定はこれ）
   nonPrimaryCases   K - 40 件（読んだが成立しなかった）
@@ -183,6 +183,74 @@ finding の総数は `primaryFindings` として別に記録するが、**停止
 後の工程で抽出の制約を満たせなければ、**凍結した順序の、前回読み終えた位置の次から**読み足す。読む順を後から選び直さないので、どこまで読んだかが変わっても選択の恣意性は入らない。
 
 **この98件は415件から得られるprimary ground truthの全体ではない。** account review / comment しか持たない案件にも `independent-human` になりうるものが残っている。ここで作るのは強い証拠を持つ部分集合から構築したpoolで、足りなければ探索範囲を広げる。
+
+### 2-2. 判定の記録形式を固定する（Issue #1046 手順3の前段）
+
+**証拠を1件も読む前に、記録する形と集計の規則を固定する。** 10件読んでから項目を足すと、先に読んだ案件だけを後知恵で見直す余地ができる。定義は `test/bench/secondOpinionEval/screeningResult.ts` にある。
+
+判定は `eval-results/screening-decisions-v1.jsonl` へ**1件読み終えるたびに1行追記する**。既存の行は書き換えない。
+
+```jsonc
+{
+  "type": "decision",
+  "orderIndex": 0, // 凍結した読む順の位置（0始まり）
+  "prNumber": 621,
+  "primaryCase": true, // primary な finding を1つ以上持つか
+  "findings": [
+    {
+      "finding": "早期returnで後片付けが飛ぶ",
+      "groundTruthBasis": "empirical",
+      "evidence": "後続PR #700 が再現テストを足している",
+      "evidenceRefs": ["#700"],
+      "primary": true,
+    },
+  ],
+  "disposition": "primary",
+  "rationale": "後続の再現テストで真だと確認できる",
+}
+```
+
+判定を訂正するときも行を消さず、`"type": "supersede"` の行を追記して、`supersedes`（置き換える行番号）と `reason` を残す。同じPRに複数の行があれば**後の行が有効**になる。
+
+#### `primaryCase` の決め方
+
+`groundTruthBasis` が `empirical` / `independent-report` / `independent-human` のいずれかである finding を**1つ以上持てば `true`**。それ以外は `false`。finding の数は関係しない（停止条件の単位が案件だから）。
+
+#### `disposition` の意味
+
+`primary` / 非primary の2値にすると、「AI由来しか無かった」「真だと確定できなかった」「そもそも問題が無かった」を後から区別できない。次の7種で持つ。
+
+- `primary` — primary な finding が1つ以上ある
+- `model-derived-only` — finding はあるが、根拠がAIレビューだけ
+- `retrospective-only` — finding はあるが、後から自分でそう思っただけ
+- `mixed-only` — finding はあるが、根拠が複数種類にまたがる（`groundTruthBasis` の `mixed`）
+- `other-non-primary` — 上のどれか1種類には収まらない非primary（`model-derived` と `retrospective` が混在する等）
+- `insufficient-evidence` — 問題の候補はあったが、真だと確定できる証拠が足りない
+- `no-relevant-finding` — 読んだが、正解ラベルにできる問題そのものが無い
+
+`validateScreeningEntry()` が、`primaryCase` と `findings` と `disposition` の食い違い、根拠の空欄、primary なのに参照先が無い記録を検出する。
+
+#### 集計の出し方（10件ごと）
+
+**手で数えない。** 記録から機械的に導く。
+
+```
+npx tsx test/bench/secondOpinionEval/screeningSummary.ts \
+  --order eval-results/screening-order-v2.json \
+  --decisions eval-results/screening-decisions-v1.jsonl \
+  --out eval-results/screening-summary-v1.json
+```
+
+| 項目                  | 計算                                                        |
+| --------------------- | ----------------------------------------------------------- |
+| `screenedCases`       | 有効な判定の件数（訂正は元の行と合わせて1件）               |
+| `primaryCases`        | そのうち `primaryCase` が `true` の件数。**停止判定はこれ** |
+| `nonPrimaryCases`     | `screenedCases - primaryCases`                              |
+| `unreadCases`         | `98 - screenedCases`。**不成立に混ぜない**                  |
+| `primaryFindings`     | `primary` な finding の総数。記録のみで停止判定には使わない |
+| `nonPrimaryBreakdown` | 非primary 6種それぞれの件数（0件の種別も落とさない）        |
+
+集計ファイルは凍結しない（進むたびに作り直す）。凍結してあるのは読む順と、追記しかしない判定の記録である。読む順のsha256が凍結済みの版と違えば止まり、凍結した順を飛ばして読んでいれば `validateScreeningLog()` が落とす。
 
 ### 3. 案件ファイルを作る
 
