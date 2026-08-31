@@ -13,6 +13,7 @@
  * 「親セッションの会話が混ざらない」（受入基準4）を検証する。
  */
 
+import { FROZEN_AFTER_TREE_NOTICE_FILE } from './afterTree';
 import {
   MAX_DIFF_OMISSION_ENTRIES,
   type DiffOmission,
@@ -131,6 +132,21 @@ export interface SecondOpinionInput {
    * 既定の挙動を変えないため（Issue #1044 の受入基準「拡張本体の既定挙動を変えずに」）。
    */
   restateRequestAtEnd?: boolean | undefined;
+  /**
+   * 押下時点のリポジトリ全体の写しを置いたディレクトリ（Issue #1047 条件C-repo）。
+   * 作業ディレクトリからの相対パスで渡す。既定は `undefined`＝写しを置かない現行のまま。
+   *
+   * 条件Aの材料は `changes.diff` と `base/<変更対象ファイル>` だけなので、**そのPRが触って
+   * いないファイルは既定で目に入らない**。#1044 のscreeningでは、primaryと判定した9件のうち
+   * 4件が「壊した場所が差分の外」で、条件Aの材料からは到達できなかった。ここを渡すと、
+   * 固定指示が「外を読むな」から「この写しの中でなら、判断に必要な範囲で追加で読んでよい」へ
+   * 変わる（探索先は写しの中に閉じたままで、実行中の作業ツリーは相変わらず読ませない）。
+   *
+   * 写し自体を作るのは `afterTree.ts` の `createFrozenAfterTree()` で、ここは**その場所を
+   * 名指しするだけ**である。値を渡したのに写しが無いと、Advisorは無いディレクトリを探しに
+   * 行って空振りする。渡す側が実体化の成否を見てから渡すこと。
+   */
+  afterTreeDir?: string | undefined;
 }
 
 /** 依頼の区画の位置（Issue #1044 条件B-pos）。 */
@@ -174,6 +190,7 @@ function systemInstruction(
   artifact: SecondOpinionArtifact,
   hasSummary: boolean,
   backgroundKind: ConversationBackgroundKind,
+  afterTreeDir: string | undefined,
 ): string {
   const lines = [
     'あなたは、別のAIエージェントが進めている作業について、独立した立場から意見を求められています。',
@@ -214,7 +231,7 @@ function systemInstruction(
       // `updates/<世代>/` への追加として届くため、届いたときの扱いを先に知らせておく
       '相談の途中で利用者が材料を更新することがあります。そのときは更新の連絡が届き、以後はそこで示された材料が正本になります。連絡が無いうちは、この材料が最新です。',
       'この作業ディレクトリの外を読みに行かないでください。そこにあるのは実行中に書き換わりうる現在の作業ツリーで、押下時点の材料とは食い違います。',
-      'ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。',
+      ...explorationInstruction(afterTreeDir),
     );
   } else {
     lines.push(
@@ -223,6 +240,35 @@ function systemInstruction(
     );
   }
   return lines.join('\n');
+}
+
+/**
+ * 追加で読んでよい範囲の指示（Issue #1047 条件C-repo）。
+ *
+ * 写しが無いとき（既定）は現行のまま「リポジトリ全体の探索は行わない」で閉じる。read-onlyの
+ * ツールは使えるため、指示が無いと材料で足りる問いでもリポジトリを読み回り、そのぶん回答が
+ * 遅れる（Issue #944）。
+ *
+ * 写しがあるときは、その禁止をそのまま置いておくことができない。禁止と写しを同時に渡すと、
+ * 「読んでよい材料がそこにあるのに読むなと書いてある」という矛盾になり、どちらへ倒れるかが
+ * 実行ごとに変わる。**探索の可否ではなく順番を指定する**——まず依頼・背景・差分を読み、
+ * それで判断が付かない箇所についてだけ写しの中を追加で読ませる。差分を読む前に写しを
+ * 読み回らせると、依頼と関係のない場所の指摘が増えて回答が遅くなるだけになる。
+ *
+ * 写しの性質（凍結されていること・欠落がありうること）は写しの中の
+ * `.frozen-after-tree.txt` に書いてある（`afterTree.ts`）。ここから名指しして読ませるのは、
+ * 「無い＝存在しない」と読まれるのを防ぐためである。
+ */
+function explorationInstruction(afterTreeDir: string | undefined): string[] {
+  if (afterTreeDir === undefined || afterTreeDir === '') {
+    return ['ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。'];
+  }
+  return [
+    `\`${afterTreeDir}/\` には、押下時点のリポジトリ全体の写しが置いてあります。差分が触っていないファイル（依存先・型定義・設定・既存のテスト）もここから読めます。`,
+    'この写しは押下時点で凍結されており、以後は書き換わりません。実行しても、ここに無い依存やビルド結果は解決しません。',
+    `まず依頼・背景・差分を読んでください。そのうえで判断に必要な場合にだけ、\`${afterTreeDir}/\` の中を追加で読んでください。読む前から網羅的に探索する必要はありません。`,
+    `\`${afterTreeDir}/${FROZEN_AFTER_TREE_NOTICE_FILE}\` に、この写しへ含められなかったファイルが書いてあります。そこに挙がっているものは「存在しない」のではなく「押下時点で内容を取得できなかった」ものです。`,
+  ];
 }
 
 /** 内容を載せなかった理由の、プロンプトへ出す文言（Issue #926 F）。 */
@@ -388,7 +434,7 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
   const position = input.requestPosition ?? 'front';
   const request = requestSection(input.userRequest);
   const sections = [
-    systemInstruction(input.artifact, summary !== '', backgroundKind),
+    systemInstruction(input.artifact, summary !== '', backgroundKind, input.afterTreeDir),
     position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
     artifactSection(input.artifact),
