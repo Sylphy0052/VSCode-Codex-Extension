@@ -159,24 +159,28 @@ npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
 ```
 npx tsx test/bench/secondOpinionEval/screeningOrder.ts \
   --candidates eval-results/evidence-candidates-v3.json \
-  --out eval-results/screening-order-v1.json
+  --out eval-results/screening-order-v2.json
 ```
 
 強い証拠の系統（`follow-up-test`、または `openedAfterMerge` な follow-up issue）を持つ案件を選び、`sha256("ground-truth-screen-v1:" + prNumber)` の昇順に並べて凍結する。実測で98件だった。
 
 **PR番号順では読まない。** 番号順は結果とは独立だが、ほぼ時間順でもある。この期間中にIssueの運用・テストを足す割合・AIの使い方が変わっていれば、先頭から止めたときに特定の時期だけを読んだことになる。
 
-**停止条件は結果依存である。** primary な `groundTruthBasis` が40件そろった時点で止める。これは「98件のうち何件成立したか」という母集団の割合を出す手続きではない。作りたいのは本測定に使えるpoolであって、成立率の推定ではない。したがって集計では次を分けて出し、**未読を不成立に混ぜない**。
+**停止条件は結果依存で、単位は案件（PR）である。** primary な `groundTruthBasis` の finding を1つ以上持つPRを1件と数え、40件に達した時点で止める。**同じPRで複数の finding が成立しても、停止のカウントは1**。finding の総数で数えると、少数のPRに集中したときに早く止まりすぎる。最終の抽出は案件単位なので、こちらへ揃える。
+
+これは「98件のうち何件成立したか」という母集団の割合を出す手続きではない。作りたいのは本測定に使えるpoolであって、成立率の推定ではない。したがって集計では次を分けて出し、**未読を不成立に混ぜない**。
 
 ```
-98 件（強い証拠を持つ）
-→ K 件を読んだ
-   → 40 件 primary 成立
-   → K - 40 件 成立せず
-→ 98 - K 件 未読
+unreadCases      98 件（強い証拠を持つ）
+screenedCases    K 件を読んだ
+  primaryCases      40 件（primary な finding を1つ以上持つ。停止判定はこれ）
+  nonPrimaryCases   K - 40 件（読んだが成立しなかった）
+unreadCases      98 - K 件（まだ読んでいない）
 ```
 
-後の工程で抽出の制約を満たせなければ、**凍結した順序の続きから**読み足す。読む順を後から選び直さないので、どこまで読んだかが変わっても選択の恣意性は入らない。
+finding の総数は `primaryFindings` として別に記録するが、**停止判定には使わない**。
+
+後の工程で抽出の制約を満たせなければ、**凍結した順序の、前回読み終えた位置の次から**読み足す。読む順を後から選び直さないので、どこまで読んだかが変わっても選択の恣意性は入らない。
 
 **この98件は415件から得られるprimary ground truthの全体ではない。** account review / comment しか持たない案件にも `independent-human` になりうるものが残っている。ここで作るのは強い証拠を持つ部分集合から構築したpoolで、足りなければ探索範囲を広げる。
 
