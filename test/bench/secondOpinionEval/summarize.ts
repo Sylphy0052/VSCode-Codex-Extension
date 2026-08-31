@@ -69,6 +69,12 @@ interface RecallCounts {
   totalCritical: number;
   recalledWarning: number;
   totalWarning: number;
+  /** baseline（既定は条件A）の分母に入らない正解ラベルの分（Issue #1047 の救済分）。 */
+  recalledRescue: number;
+  totalRescue: number;
+  /** baseline の分母にも入る正解ラベルの分。救済分と足すと総 recall になる。 */
+  recalledShared: number;
+  totalShared: number;
 }
 
 interface Aggregate {
@@ -87,6 +93,17 @@ interface Aggregate {
   knownCriticalTotal: number;
   recalledWarning: number;
   knownWarningTotal: number;
+  /**
+   * baseline の分母に入らない正解ラベルだけを集めた recall（Issue #1047）。
+   *
+   * 総 recall だけを見ると、救済（baseline では発見不能だったものを拾えた）と、baseline でも
+   * 拾えていたものの取りこぼしが同じ数字へ潰れる。条件C-repo が「探索させたから届いた」のか
+   * 「もともと届いていた分を数え直しただけ」なのかを分けるために、分母を2つへ割る。
+   */
+  recalledRescue: number;
+  knownRescueTotal: number;
+  recalledShared: number;
+  knownSharedTotal: number;
   constraintViolations: number;
   hallucinatedFindings: number;
   unnecessaryInvestigationRequests: number;
@@ -164,6 +181,10 @@ function emptyAggregate(conditionId: string): Aggregate {
     knownCriticalTotal: 0,
     recalledWarning: 0,
     knownWarningTotal: 0,
+    recalledRescue: 0,
+    knownRescueTotal: 0,
+    recalledShared: 0,
+    knownSharedTotal: 0,
     constraintViolations: 0,
     hallucinatedFindings: 0,
     unnecessaryInvestigationRequests: 0,
@@ -279,6 +300,14 @@ async function main(): Promise<void> {
     const primary = new Set(selected.primary);
     const recalledPrimary = score.recalledFindingIndexes.filter((i) => primary.has(i));
     const severityOf = (i: number): KnownFinding['severity'] | undefined => findings[i]?.severity;
+    // baseline の分母に入るかどうかでラベルを2つへ割る。条件が違っても同じラベルを見るので、
+    // 判定は baseline 側の `FindingEligibility` を引き直して決める
+    const inBaseline = (i: number): boolean => {
+      const judged = eligibility.get(eligibilityKey(entry.caseId, i, args.baseline));
+      return judged !== undefined && judged.discoverable && !judged.explicitlyExposed;
+    };
+    const rescueIndexes = selected.primary.filter((i) => !inBaseline(i));
+    const sharedIndexes = selected.primary.filter((i) => inBaseline(i));
     const recall: RecallCounts = {
       recalled: recalledPrimary.length,
       total: primary.size,
@@ -286,6 +315,10 @@ async function main(): Promise<void> {
       totalCritical: selected.primary.filter((i) => severityOf(i) === 'critical').length,
       recalledWarning: recalledPrimary.filter((i) => severityOf(i) === 'warning').length,
       totalWarning: selected.primary.filter((i) => severityOf(i) === 'warning').length,
+      recalledRescue: recalledPrimary.filter((i) => !inBaseline(i)).length,
+      totalRescue: rescueIndexes.length,
+      recalledShared: recalledPrimary.filter((i) => inBaseline(i)).length,
+      totalShared: sharedIndexes.length,
     };
     const outside = score.recalledFindingIndexes.length - recalledPrimary.length;
     if (outside > 0) {
@@ -314,6 +347,10 @@ async function main(): Promise<void> {
     aggregate.knownCriticalTotal += recall.totalCritical;
     aggregate.recalledWarning += recall.recalledWarning;
     aggregate.knownWarningTotal += recall.totalWarning;
+    aggregate.recalledRescue += recall.recalledRescue;
+    aggregate.knownRescueTotal += recall.totalRescue;
+    aggregate.recalledShared += recall.recalledShared;
+    aggregate.knownSharedTotal += recall.totalShared;
     aggregate.constraintViolations += score.constraintViolations;
     aggregate.hallucinatedFindings += score.hallucinatedFindings;
     aggregate.unnecessaryInvestigationRequests += score.unnecessaryInvestigationRequests;
@@ -348,11 +385,11 @@ async function main(): Promise<void> {
     );
   }
 
-  printConditionTable(aggregates);
+  printConditionTable(aggregates, args.baseline);
   printPaired(scoredItems, args.baseline);
 }
 
-function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>): void {
+function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>, baselineId: string): void {
   const rows = [...aggregates.values()].sort((a, b) => a.conditionId.localeCompare(b.conditionId));
   for (const row of rows) {
     console.log(`条件 ${row.conditionId}（採点 ${row.scored} 件 / 実行 ${row.attempted} 件）`);
@@ -386,6 +423,14 @@ function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>): void {
     console.log(
       `    うち warning:       ${ratio(row.recalledWarning, row.knownWarningTotal)}` +
         `（${row.recalledWarning}/${row.knownWarningTotal}）`,
+    );
+    console.log(
+      `    ${baselineId}の分母外:        ${ratio(row.recalledRescue, row.knownRescueTotal)}` +
+        `（${row.recalledRescue}/${row.knownRescueTotal}、この条件で新たに分母へ入った分）`,
+    );
+    console.log(
+      `    ${baselineId}の分母内:        ${ratio(row.recalledShared, row.knownSharedTotal)}` +
+        `（${row.recalledShared}/${row.knownSharedTotal}、両条件で分母に入る分）`,
     );
     console.log(
       `  分母から外した正解:   ${row.eligibilityExcluded} 件（循環・発見不能・答えが入力にある）` +
