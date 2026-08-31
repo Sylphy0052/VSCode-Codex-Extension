@@ -4,10 +4,12 @@
  * 条件は「現行から**1つだけ**変える」形で並べる。1つの条件で複数を同時に変えると、差が出ても
  * どれが効いたのかを言えない。
  *
- * 現時点で実装があるのはA・B-pos・B-repeatだけである。C以降は後続Issueで足す。**先に空の条件を
- * 置かない。** 実行できない条件を一覧へ並べておくと、結果ファイルに条件名だけが残り、走らせたのか
- * 失敗したのか後から区別できなくなる。
+ * 現時点で実装があるのはA・B-pos・B-repeat・C-repoだけである。以降は後続Issueで足す。
+ * **先に空の条件を置かない。** 実行できない条件を一覧へ並べておくと、結果ファイルに条件名だけが
+ * 残り、走らせたのか失敗したのか後から区別できなくなる。
  */
+
+import { REVIEW_BUNDLE_AFTER_DIR } from '../../../src/secondOpinion/reviewBundle';
 
 import type { EvalCondition } from './types';
 
@@ -43,10 +45,34 @@ const CONDITION_B_REPEAT: EvalCondition = {
   apply: (input) => ({ ...input, restateRequestAtEnd: true }),
 };
 
+/**
+ * 押下時点のリポジトリ全体の写しを材料へ足し、その中でだけ探索を許す（Issue #1047）。
+ *
+ * #1044 のscreeningで primary と判定した9件のうち4件（`#330` `#319` `#405` `#135`）は、
+ * 壊した場所が差分の外にあり、条件Aの材料（`changes.diff` と `base/<変更対象ファイル>`）
+ * からは到達できなかった。この条件は、そこへ `after/` を足して依存先・型・設定・既存の
+ * テストまで辿れるようにする。
+ *
+ * **変えているのは1つではない**（`after/` の追加と、固定指示の「探索するな」→「必要な範囲で
+ * 追加で読め」）。ただしこの2つは分離できない。写しだけ置いて禁止を残せば矛盾した指示になり、
+ * 指示だけ変えても読む先が無い。条件名を `C-repo` としてあるのは、これが位置の実験
+ * （`B-pos`）のような単一要素の切り分けではなく、**実用寄りの介入**だからである。
+ *
+ * 費用はプロンプト長ではなく探索の往復として出る（写しはプロンプトへ載らない）。条件Aとの
+ * 差は `EvalRunRecord.toolCalls` と `latencyMs` で見る。
+ */
+const CONDITION_C_REPO: EvalCondition = {
+  id: 'C-repo',
+  description: 'A + 押下時点のリポジトリ全体の写し（`after/`）と、その中に限った探索の許可',
+  apply: (input) => ({ ...input, afterTreeDir: REVIEW_BUNDLE_AFTER_DIR }),
+  needsAfterTree: true,
+};
+
 export const EVAL_CONDITIONS: readonly EvalCondition[] = [
   CONDITION_A,
   CONDITION_B_POS,
   CONDITION_B_REPEAT,
+  CONDITION_C_REPO,
 ];
 
 /** 条件名から引く。未知の名前は `undefined`。 */

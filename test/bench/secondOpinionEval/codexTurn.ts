@@ -22,6 +22,8 @@ import { buildDisabledMcpServersOverlay } from '../../../src/codex/mcpDisable';
 import { sandboxPolicyFor } from '../../../src/codex/sandboxPolicy';
 import type { Logger } from '../../../src/log';
 
+import type { EvalToolCall } from './types';
+
 /**
  * 本番のAdvisorと同じ実行条件（`src/secondOpinion/run.ts` の `buildSecondOpinionSessionInput`）。
  *
@@ -73,8 +75,31 @@ export interface CodexTurnResult {
   sessionTokens: number | undefined;
   /** いまコンテキストに載っていた量。 */
   contextUsage: ChatState['context'];
+  /**
+   * このターンで走らせたコマンド（Issue #1047）。
+   *
+   * `state.items` から取る。条件C-repoの費用は探索の往復として出るので、回数と中身の両方を
+   * 残す。読んだファイルの一覧はここから集計側が取り出す（コマンドの形はCLIの版で変わるため、
+   * 実行時に解釈して捨てない）。
+   */
+  toolCalls: EvalToolCall[];
   /** ターンが失敗・中断で終わった場合の理由。正常終了なら `undefined`。 */
   error?: string;
+}
+
+/**
+ * `state.items` からコマンドの実行だけを拾う。
+ *
+ * `commandExecution` に限らないのは、CLIの版によって読み取りが別の種類の項目で届きうる
+ * ためである。ここで種類を絞り込むと、増えた経路が黙って0件として記録される。
+ * `agentMessage` / `reasoning`（回答そのもの）だけを外す。
+ */
+const NON_TOOL_ITEM_KINDS: ReadonlySet<string> = new Set(['agentMessage', 'reasoning']);
+
+function collectToolCalls(items: ChatState['items']): EvalToolCall[] {
+  return items
+    .filter((item) => !NON_TOOL_ITEM_KINDS.has(item.kind))
+    .map((item) => ({ kind: item.kind, detail: item.detail, status: item.status }));
 }
 
 /** 何も出さないLogger。ハーネスの進捗は `run.ts` が自分で出す。 */
@@ -168,6 +193,7 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
         latencyMs: 0,
         sessionTokens: undefined,
         contextUsage: undefined,
+        toolCalls: collectToolCalls(state.items),
         error: `thread/startに失敗しました: ${JSON.stringify(started.error)}`,
       };
     }
@@ -178,6 +204,7 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
         latencyMs: 0,
         sessionTokens: undefined,
         contextUsage: undefined,
+        toolCalls: collectToolCalls(state.items),
         error: `thread/startの応答からthreadIdを取れませんでした: ${JSON.stringify(started.result)}`,
       };
     }
@@ -205,6 +232,7 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
         latencyMs: Date.now() - startedAt,
         sessionTokens: state.sessionTokens,
         contextUsage: state.context,
+        toolCalls: collectToolCalls(state.items),
         error: `turn/startに失敗しました: ${JSON.stringify(turn.error)}`,
       };
     }
@@ -221,6 +249,7 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
       latencyMs,
       sessionTokens: state.sessionTokens,
       contextUsage: state.context,
+      toolCalls: collectToolCalls(state.items),
       ...(failure === undefined ? {} : { error: failure }),
     };
   } finally {

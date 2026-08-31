@@ -18,14 +18,22 @@ import { nodeGitCommandRunner } from '../../../src/orchestrator/worktree';
 import type { SecondOpinionInput, WorkspaceSnapshot } from '../../../src/secondOpinion/prompt';
 import { createReviewBundle, type ReviewBundle } from '../../../src/secondOpinion/reviewBundle';
 import { captureWorkspaceSnapshot } from '../../../src/secondOpinion/snapshot';
-import type { EvalCase } from './types';
+import type { EvalCase, EvalCondition } from './types';
 
 /** 1案件ぶんの、条件をまたいで共有する材料。**使い終わったら {@link dispose} を呼ぶこと。** */
 export interface CaseMaterial {
   /** 全条件へ渡す共通の入力。条件はこれを書き換えて使う。 */
   input: SecondOpinionInput;
-  /** Advisorのセッションを開く作業ディレクトリ。 */
+  /** `after/` を要求しない条件（A / B-pos / B-repeat）の作業ディレクトリ。 */
   cwd: string;
+  /**
+   * その条件でAdvisorのセッションを開く作業ディレクトリ（Issue #1047）。
+   *
+   * `EvalCondition.needsAfterTree` の条件だけ、`after/` を持つ別のbundleを返す。**同じbundleを
+   * 使い回さない。** 写しを1つのbundleへ置くと、固定指示が名指ししていない条件Aでも `ls` で
+   * 見つけられてしまい、条件Aが「差分だけを見た場合」の測定でなくなる。
+   */
+  cwdFor(condition: EvalCondition): string;
   /** 実際に使われたベースコミット。記録用。 */
   baseCommit: string;
   dispose(): Promise<void>;
@@ -40,7 +48,10 @@ export type PrepareMaterialResult =
  * 本体（`secondOpinionCommand.ts`）と同じ関数を呼ぶ。ここでsnapshotの取り方やbundleの構造を
  * 書き直すと、測定対象が本体からずれる。
  */
-export async function prepareCaseMaterial(evalCase: EvalCase): Promise<PrepareMaterialResult> {
+export async function prepareCaseMaterial(
+  evalCase: EvalCase,
+  conditions: readonly EvalCondition[] = [],
+): Promise<PrepareMaterialResult> {
   // 後片付けを1か所へ集める。途中で失敗した場合も、それまでに作ったものを逆順で片付ける
   const cleanups: (() => Promise<void>)[] = [];
   const cleanup = async (): Promise<void> => {
@@ -73,16 +84,18 @@ export async function prepareCaseMaterial(evalCase: EvalCase): Promise<PrepareMa
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  const common = {
+    root,
+    cwd: checkout.dir,
+    git: nodeGitCommandRunner,
+    baseCommit: captured.snapshot.baseCommit,
+    fullDiff: captured.material.fullDiff,
+    changedPaths: captured.material.changedPaths,
+  };
+
   let bundle: ReviewBundle;
   try {
-    bundle = await createReviewBundle({
-      root,
-      cwd: checkout.dir,
-      git: nodeGitCommandRunner,
-      baseCommit: captured.snapshot.baseCommit,
-      fullDiff: captured.material.fullDiff,
-      changedPaths: captured.material.changedPaths,
-    });
+    bundle = await createReviewBundle(common);
   } catch (e) {
     return await fail(
       `レビュー材料を書き出せませんでした: ${e instanceof Error ? e.message : String(e)}`,
@@ -90,11 +103,44 @@ export async function prepareCaseMaterial(evalCase: EvalCase): Promise<PrepareMa
   }
   cleanups.push(() => bundle.dispose());
 
+  let afterTreeBundle: ReviewBundle | undefined;
+  if (conditions.some((condition) => condition.needsAfterTree === true)) {
+    const applyDiff = captured.material.applyDiff;
+    if (applyDiff === undefined) {
+      // 空文字列（未追跡だけの変更）とは区別する。取得に失敗したまま空として扱うと、
+      // 中身がbaseと同じ木を「押下時点の写し」として渡すことになる
+      return await fail('`git apply` へ通せる差分を取れなかったため、`after/` を作れません');
+    }
+    try {
+      afterTreeBundle = await createReviewBundle({ ...common, afterTree: { applyDiff } });
+    } catch (e) {
+      // 写しの構築は fail-close（`afterTree.ts`）。半端な木で条件C-repoを流すと、
+      // 「baseのままの箇所」と「afterになった箇所」が混ざった材料を測ることになる
+      return await fail(
+        `押下時点の写し（after/）を作れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    cleanups.push(() => afterTreeBundle?.dispose() ?? Promise.resolve());
+  }
+
   return {
     ok: true,
     material: {
       input,
       cwd: bundle.dir,
+      cwdFor(condition: EvalCondition): string {
+        if (condition.needsAfterTree !== true) {
+          return bundle.dir;
+        }
+        if (afterTreeBundle === undefined) {
+          // 条件一覧を渡さずに呼ばれた場合。写しの無いbundleを黙って返すと、Advisorは
+          // 名指しされたディレクトリを探しに行って空振りし、その結果が条件C-repoとして残る
+          throw new Error(
+            `条件 ${condition.id} は after/ を要求しますが、材料の用意時に渡されていません`,
+          );
+        }
+        return afterTreeBundle.dir;
+      },
       baseCommit: captured.snapshot.baseCommit,
       dispose: cleanup,
     },

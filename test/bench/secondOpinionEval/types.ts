@@ -253,6 +253,17 @@ export interface EvalCondition {
   description: string;
   /** 入力の書き換え。条件A（現行）は何もしない。 */
   apply: (input: SecondOpinionInput) => SecondOpinionInput;
+  /**
+   * 押下時点のリポジトリ全体の写し（`after/`）を材料へ足すか（Issue #1047 条件C-repo）。
+   * 既定は `false`。
+   *
+   * **プロンプトの書き換えだけでは足りない**ので、条件の側に持たせてある。`apply` が
+   * `afterTreeDir` を指しても、その場所に写しが無ければAdvisorは空振りする。逆に写しを
+   * 全条件のbundleへ置いてしまうと、条件Aの作業ディレクトリにもリポジトリ全体が現れる——
+   * 固定指示が名指ししていなくてもAdvisorは `ls` で見つけられるので、条件Aが
+   * 「差分だけを見た場合」の測定でなくなる。**条件ごとに別のbundleを作る**（`materials.ts`）。
+   */
+  needsAfterTree?: boolean | undefined;
 }
 
 /** 1回の実行の記録。採点はこのファイルだけを見て行う。 */
@@ -328,8 +339,31 @@ export interface EvalRunRecord {
    * 依頼文が見つからなかった場合は `undefined`。
    */
   bytesAfterRequest: number | undefined;
+  /**
+   * Advisorがこのターンで走らせたコマンド（Issue #1047 条件C-repo）。
+   *
+   * 条件C-repoの費用は「写しを置いたぶんプロンプトが伸びる」ではなく——写しはプロンプトへ
+   * 載らない——**Advisorが何回読みに行ったか**として出る。回数と中身の両方を残すのは、
+   * 「探索したか」だけでなく「何を読んだか」を後から言えるようにするためである。読んだ
+   * ファイルの一覧は、この文字列から集計側が取り出す（コマンドの形はCLIの版で変わるため、
+   * 実行時に解釈して捨てない）。
+   *
+   * 条件Aでも空とは限らない。材料（`changes.diff` / `base/`）を読むのもここに出る。
+   * **条件Aとの差**が探索の増分である。
+   */
+  toolCalls: EvalToolCall[];
   /** 失敗した場合の理由。成功なら `undefined`。 */
   error?: string;
+}
+
+/** Advisorが走らせたコマンド1件（Issue #1047）。 */
+export interface EvalToolCall {
+  /** `ChatItem.kind`（`commandExecution` など）。 */
+  kind: string;
+  /** コマンド行やファイル名など、種類ごとの補足（`ChatItem.detail`）。無ければ空文字列。 */
+  detail: string;
+  /** 完了したか失敗したか。`ChatItem.status` をそのまま持つ。 */
+  status: string | undefined;
 }
 
 /** run全体の素性。結果ディレクトリへ1つ置く。 */

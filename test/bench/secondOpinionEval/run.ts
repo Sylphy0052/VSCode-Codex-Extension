@@ -377,14 +377,24 @@ async function main(): Promise<void> {
 
   let failures = 0;
   for (const [caseIndex, evalCase] of cases.entries()) {
-    const prepared = await prepareCaseMaterial(evalCase);
+    const prepared = await prepareCaseMaterial(evalCase, options.conditions);
     if (!prepared.ok) {
       console.error(`[eval] ${evalCase.id}: 材料を作れませんでした: ${prepared.reason}`);
       failures += 1;
       continue;
     }
     const material = prepared.material;
-    await reportEvidencePathCoverage(evalCase, material.cwd);
+    // 材料は条件によって別のディレクトリになりうる（`after/` を持つのは条件C-repoだけ）。
+    // 同じ内容を何度も報告しないよう、実際に使うディレクトリの重複を除いてから見る
+    const coverageSeen = new Set<string>();
+    for (const condition of options.conditions) {
+      const dir = material.cwdFor(condition);
+      if (coverageSeen.has(dir)) {
+        continue;
+      }
+      coverageSeen.add(dir);
+      await reportEvidencePathCoverage(evalCase, dir, condition.id);
+    }
     try {
       for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
         const ordered = rotate(options.conditions, caseIndex + attempt - 1);
@@ -393,7 +403,8 @@ async function main(): Promise<void> {
           const label = `${evalCase.id} / ${condition.id} / ${attempt}`;
           console.log(`[eval] ${label}: 送信（${Buffer.byteLength(prompt, 'utf8')} bytes）`);
           const turn = await runCodexTurn({
-            cwd: material.cwd,
+            // 条件C-repoだけ `after/` を持つ別のbundleで開く（Issue #1047）
+            cwd: material.cwdFor(condition),
             prompt,
             model: options.model,
             effort: options.effort,
@@ -419,6 +430,7 @@ async function main(): Promise<void> {
             knownCriticalTotal: countSeverity(evalCase, 'critical'),
             knownWarningTotal: countSeverity(evalCase, 'warning'),
             bytesAfterRequest: measureBytesAfterRequest(prompt, evalCase.userRequest),
+            toolCalls: turn.toolCalls,
             ...(turn.error === undefined ? {} : { error: turn.error }),
           };
           const file = path.join(
@@ -433,7 +445,10 @@ async function main(): Promise<void> {
             console.error(`[eval] ${label}: 回答が空でした → ${path.basename(file)}`);
             failures += 1;
           } else if (turn.error === undefined) {
-            console.log(`[eval] ${label}: ${turn.latencyMs}ms → ${path.basename(file)}`);
+            console.log(
+              `[eval] ${label}: ${turn.latencyMs}ms / ツール${turn.toolCalls.length}回 → ` +
+                `${path.basename(file)}`,
+            );
           } else {
             console.error(`[eval] ${label}: ${turn.error} → ${path.basename(file)}`);
             failures += 1;
@@ -462,18 +477,24 @@ async function main(): Promise<void> {
  * 発見可能性の判定は条件ごとに人が下し、`FindingEligibility` へ残す。ここが出すのはその判定の
  * 材料であって、代わりではない。自動で弾くと、再構成できる案件まで黙って落ちる。
  */
-async function reportEvidencePathCoverage(evalCase: EvalCase, bundleDir: string): Promise<void> {
+async function reportEvidencePathCoverage(
+  evalCase: EvalCase,
+  bundleDir: string,
+  conditionId: string,
+): Promise<void> {
   const wanted = new Set(evalCase.knownImportantFindings.flatMap((f) => f.evidencePaths));
   if (wanted.size === 0) {
     return;
   }
   const present = new Set(await listFilesRecursively(bundleDir, ''));
-  // `base/<パス>` として置かれるので、bundle 内の相対パスからその接頭辞を外して突き合わせる
-  const normalized = new Set([...present].map((p) => p.replace(/^base\//, '')));
+  // `base/<パス>` `after/<パス>` として置かれるので、bundle 内の相対パスからその接頭辞を
+  // 外して突き合わせる
+  const normalized = new Set([...present].map((p) => p.replace(/^(?:base|after)\//u, '')));
   const missing = [...wanted].filter((p) => !normalized.has(p));
   if (missing.length > 0) {
     console.log(
-      `[eval] ${evalCase.id}: evidencePaths のうち bundle に見当たらないもの ${missing.length} 件（発見可能性の判定材料。実行は止めない）: ${missing.join(', ')}`,
+      `[eval] ${evalCase.id} / ${conditionId}: evidencePaths のうち bundle に見当たらないもの ` +
+        `${missing.length} 件（発見可能性の判定材料。実行は止めない）: ${missing.join(', ')}`,
     );
   }
 }
