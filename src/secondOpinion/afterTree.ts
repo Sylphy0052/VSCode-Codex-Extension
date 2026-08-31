@@ -187,7 +187,15 @@ export async function createFrozenAfterTree(
       GIT_WORK_TREE: undefined,
     };
 
-    const readTree = await git.run(['read-tree', `${baseCommit}^{tree}`], cwd, { env: indexEnv });
+    // 改行の変換を止める（`core.autocrlf` はWindowsのgitで既定が `true`）。`git diff` の出力は
+    // blobの内容（LF）を基準にするのに対し、`checkout-index` は変換して書くため、変換したまま
+    // だと当てる側と当てられる側で改行が食い違い、Windowsでだけ `git apply` が必ず落ちる。
+    // ここで作るのは読ませるための写しであって、人が編集する作業ツリーではない
+    const noEolConversion = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'];
+
+    const readTree = await git.run([...noEolConversion, 'read-tree', `${baseCommit}^{tree}`], cwd, {
+      env: indexEnv,
+    });
     if (readTree.code !== 0) {
       throw new FrozenAfterTreeError(
         `after-treeのベース（${baseCommit.slice(0, 8)}）を読めませんでした`,
@@ -199,9 +207,11 @@ export async function createFrozenAfterTree(
     // `--prefix` は末尾の区切りまで含めて連結される。区切りは `/` に揃える
     // （Windowsのgitも `/` を受け付ける。`\` は接頭辞としてそのまま連結されて壊れる）
     const prefix = `${dir.replace(/\\/gu, '/')}/`;
-    const checkout = await git.run(['checkout-index', '-a', '-f', '--prefix', prefix], cwd, {
-      env: indexEnv,
-    });
+    const checkout = await git.run(
+      [...noEolConversion, 'checkout-index', '-a', '-f', '--prefix', prefix],
+      cwd,
+      { env: indexEnv },
+    );
     if (checkout.code !== 0) {
       throw new FrozenAfterTreeError(
         'after-treeのベース側を書き出せませんでした',

@@ -258,6 +258,29 @@ describe('createFrozenAfterTree（Issue #1047）', () => {
     }
   });
 
+  it('core.autocrlf が有効でも当てられる（Windowsのgitの既定）', async () => {
+    // `checkout-index` が改行を変換すると、LFを基準にした差分が当たらなくなる。
+    // Linuxでも設定は効くので、ここで同じ経路を踏める
+    await git(repo, 'config', 'core.autocrlf', 'true');
+    await fs.writeFile(path.join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+    const tree = await createFrozenAfterTree({
+      dir: treeDir(),
+      cwd: repo,
+      git: nodeGitCommandRunner,
+      baseCommit: base,
+      applyDiff: await applyDiffOf(repo, base),
+    });
+    try {
+      expect(await fs.readFile(path.join(tree.dir, 'src', 'a.ts'), 'utf8')).toBe(
+        'export const a = 1;\n',
+      );
+      // 変換されていれば CRLF になる。写しはblobの内容そのままであること
+      expect(await fs.readFile(path.join(tree.dir, 'src', 'dep.ts'), 'utf8')).not.toContain('\r');
+    } finally {
+      await tree.dispose();
+    }
+  });
+
   it('作業ツリーを読まない。木を作った後に作業ツリーを書き換えても木は変わらない', async () => {
     await fs.writeFile(path.join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
     const pinned = await applyDiffOf(repo, base);
