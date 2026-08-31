@@ -34,13 +34,29 @@ interface Score {
    * 書き方の比較になってしまう。
    */
   totalFindings: number;
-  /** そのうち、実際に採用できる重要な指摘の数。主指標 actionable precision の分子。 */
+  /** そのうち、材料の中で真と確かめられ、実際に採用できる指摘の数。precision の分子。 */
   actionableFindings: number;
+  /** 材料の中で確かめた結果、採用に値しないと判断した指摘の数（真だが影響が無い、など）。 */
+  verifiedNonActionableFindings: number;
+  /**
+   * 材料の中では真偽を決められない指摘の数。
+   *
+   * **precision の分母へ入れない。** 入れると「材料に無いので確認できない」と正しく留保した
+   * 回答が、存在しない問題を指摘した回答と同じように減点される。それは「不確かなことは黙る」
+   * のが得だという採点になり、測りたいものと逆を測る。
+   *
+   * 代わりに {@link Aggregate.indeterminateFindings} を別の指標として出す。留保ばかり並べる
+   * 回答はそちらで悪化し、黙る回答は recall と指摘数で悪化するので、逃げ道は残らない。
+   */
+  indeterminateFindings: number;
   /** `knownImportantFindings` のうち、この回答が拾えた数。分母は実行記録が持っている。 */
   recalledImportant: number;
+  /** そのうち severity 別の内訳。総 recall が warning 側に引っ張られるのを見分けるために要る。 */
+  recalledCritical: number;
+  recalledWarning: number;
   /** 制約・既決事項を誤認していた箇所の数。 */
   constraintViolations: number;
-  /** 存在しない問題を指摘していた数。 */
+  /** 材料と矛盾する、存在しない問題を指摘していた数。 */
   hallucinatedFindings: number;
   /** 「まず調べてほしい」で終わり、判断材料になっていない要求の数。 */
   unnecessaryInvestigationRequests: number;
@@ -69,11 +85,20 @@ interface Aggregate {
   failed: number;
   totalFindings: number;
   actionableFindings: number;
+  verifiedNonActionableFindings: number;
+  indeterminateFindings: number;
   recalledImportant: number;
   knownImportantTotal: number;
+  recalledCritical: number;
+  knownCriticalTotal: number;
+  recalledWarning: number;
+  knownWarningTotal: number;
   constraintViolations: number;
   hallucinatedFindings: number;
   unnecessaryInvestigationRequests: number;
+  /** 依頼の末尾からプロンプト末尾までのバイト数。取れた実行の数と合計。 */
+  bytesAfterRequestSamples: number;
+  bytesAfterRequestTotal: number;
   latencyMsTotal: number;
   promptBytesTotal: number;
   /** トークン量が取れた実行の数。取れなかった分を平均へ混ぜないために数える。 */
@@ -115,11 +140,19 @@ function emptyAggregate(conditionId: string): Aggregate {
     failed: 0,
     totalFindings: 0,
     actionableFindings: 0,
+    verifiedNonActionableFindings: 0,
+    indeterminateFindings: 0,
     recalledImportant: 0,
     knownImportantTotal: 0,
+    recalledCritical: 0,
+    knownCriticalTotal: 0,
+    recalledWarning: 0,
+    knownWarningTotal: 0,
     constraintViolations: 0,
     hallucinatedFindings: 0,
     unnecessaryInvestigationRequests: 0,
+    bytesAfterRequestSamples: 0,
+    bytesAfterRequestTotal: 0,
     latencyMsTotal: 0,
     promptBytesTotal: 0,
     usageSamples: 0,
@@ -177,6 +210,7 @@ async function main(): Promise<void> {
   }
 
   const scoredItems: Scored[] = [];
+  const brokenScores: string[] = [];
   let unmatched = 0;
   for (const score of scores) {
     const entry = byScoringId.get(score.scoringId);
@@ -189,19 +223,40 @@ async function main(): Promise<void> {
       unmatched += 1;
       continue;
     }
+    const classified =
+      score.actionableFindings +
+      score.verifiedNonActionableFindings +
+      score.hallucinatedFindings +
+      score.indeterminateFindings;
+    if (classified !== score.totalFindings) {
+      // 4区分の合計が総数と合わない採点は、区分の付け漏れか二重計上である。そのまま
+      // 入れると precision の分母が黙ってずれるので、落として場所を告げる
+      brokenScores.push(`${score.scoringId}: ${classified} !== ${score.totalFindings}`);
+      continue;
+    }
     scoredItems.push({ caseId: entry.caseId, conditionId: entry.conditionId, score, record });
 
     const aggregate = take(entry.conditionId);
     aggregate.scored += 1;
     aggregate.totalFindings += score.totalFindings;
     aggregate.actionableFindings += score.actionableFindings;
+    aggregate.verifiedNonActionableFindings += score.verifiedNonActionableFindings;
+    aggregate.indeterminateFindings += score.indeterminateFindings;
     aggregate.recalledImportant += score.recalledImportant;
     aggregate.knownImportantTotal += record.knownImportantTotal;
+    aggregate.recalledCritical += score.recalledCritical;
+    aggregate.knownCriticalTotal += record.knownCriticalTotal;
+    aggregate.recalledWarning += score.recalledWarning;
+    aggregate.knownWarningTotal += record.knownWarningTotal;
     aggregate.constraintViolations += score.constraintViolations;
     aggregate.hallucinatedFindings += score.hallucinatedFindings;
     aggregate.unnecessaryInvestigationRequests += score.unnecessaryInvestigationRequests;
     aggregate.latencyMsTotal += record.latencyMs;
     aggregate.promptBytesTotal += record.promptBytes;
+    if (typeof record.bytesAfterRequest === 'number') {
+      aggregate.bytesAfterRequestSamples += 1;
+      aggregate.bytesAfterRequestTotal += record.bytesAfterRequest;
+    }
     const totalTokens = record.sessionTokens;
     if (typeof totalTokens === 'number') {
       aggregate.usageSamples += 1;
@@ -212,6 +267,12 @@ async function main(): Promise<void> {
   if (unmatched > 0) {
     // 突き合わせに失敗した採点を黙って捨てると、集計の母数だけが静かに減る
     console.error(`[summarize] 対応する実行が見つからない採点が ${unmatched} 件ありました`);
+  }
+  if (brokenScores.length > 0) {
+    console.error(
+      `[summarize] 4区分の合計が totalFindings と合わない採点を ${brokenScores.length} 件除外しました: ` +
+        brokenScores.join(', '),
+    );
   }
 
   printConditionTable(aggregates);
@@ -226,13 +287,32 @@ function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>): void {
       `  実行成功率:           ${ratio(row.attempted - row.failed, row.attempted)}` +
         `（失敗 ${row.failed} 件）`,
     );
+    const judged =
+      row.actionableFindings + row.verifiedNonActionableFindings + row.hallucinatedFindings;
     console.log(
-      `  actionable precision: ${ratio(row.actionableFindings, row.totalFindings)}` +
-        `（${row.actionableFindings}/${row.totalFindings}、指摘数で重み付いた micro 平均）`,
+      `  actionable precision: ${ratio(row.actionableFindings, judged)}` +
+        `（${row.actionableFindings}/${judged}、真偽を決められた指摘のみが分母。` +
+        `指摘数で重み付いた micro 平均）`,
+    );
+    console.log(
+      `  actionable yield:     ${ratio(row.actionableFindings, row.totalFindings)}` +
+        `（${row.actionableFindings}/${row.totalFindings}、留保も分母へ入れた副指標）`,
+    );
+    console.log(
+      `  判定不能の割合:       ${ratio(row.indeterminateFindings, row.totalFindings)}` +
+        `（${row.indeterminateFindings}/${row.totalFindings}）`,
     );
     console.log(
       `  重要問題のrecall:     ${ratio(row.recalledImportant, row.knownImportantTotal)}` +
         `（${row.recalledImportant}/${row.knownImportantTotal}）`,
+    );
+    console.log(
+      `    うち critical:      ${ratio(row.recalledCritical, row.knownCriticalTotal)}` +
+        `（${row.recalledCritical}/${row.knownCriticalTotal}）`,
+    );
+    console.log(
+      `    うち warning:       ${ratio(row.recalledWarning, row.knownWarningTotal)}` +
+        `（${row.recalledWarning}/${row.knownWarningTotal}）`,
     );
     console.log(`  1回答あたりの指摘数:  ${ratio(row.totalFindings, row.scored)}`);
     console.log(
@@ -248,6 +328,10 @@ function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>): void {
     );
     console.log(`  平均latency:          ${ratio(row.latencyMsTotal, row.scored)} ms`);
     console.log(`  平均プロンプト:       ${ratio(row.promptBytesTotal, row.scored)} bytes`);
+    console.log(
+      `  依頼より後ろの量:     ${ratio(row.bytesAfterRequestTotal, row.bytesAfterRequestSamples)} bytes` +
+        `（取得できた実行 ${row.bytesAfterRequestSamples}/${row.scored} 件）`,
+    );
     console.log(
       `  平均トークン:         ${ratio(row.usageTotalTokens, row.usageSamples)}` +
         `（取得できた実行 ${row.usageSamples}/${row.scored} 件）`,
@@ -286,8 +370,17 @@ function printPaired(items: readonly Scored[], baselineId: string): void {
     perCase.set(conditionId, {
       precision: mean(
         list
-          .filter((score) => score.totalFindings > 0)
-          .map((score) => score.actionableFindings / score.totalFindings),
+          .map((score) => ({
+            actionable: score.actionableFindings,
+            judged:
+              score.actionableFindings +
+              score.verifiedNonActionableFindings +
+              score.hallucinatedFindings,
+          }))
+          // 全指摘が「材料の中では決められない」だった回答は precision を持たない。
+          // 0/0 を 0 と数えると、留保しただけで負けたことになる
+          .filter((v) => v.judged > 0)
+          .map((v) => v.actionable / v.judged),
       ),
       recall:
         knownTotal === 0 ? undefined : mean(list.map((s) => s.recalledImportant / knownTotal)),

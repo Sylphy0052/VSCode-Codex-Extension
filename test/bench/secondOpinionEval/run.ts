@@ -137,6 +137,14 @@ const CASE_KINDS: readonly EvalCase['kind'][] = [
   'choice',
 ];
 
+/**
+ * 1つの正解ラベルに書ける判定条件の上限。
+ *
+ * 割りすぎると「全部言い当てろ」になり、同じ問題を別の言葉で指摘した回答を落とす。最小の
+ * 因果鎖（発生条件・破れる性質・影響範囲）を書けば足りるので、その分だけに制限する。
+ */
+const MAX_RECALL_CRITERIA = 4;
+
 const PROVENANCES: readonly KnownFinding['provenance'][] = [
   'test',
   'measured',
@@ -212,11 +220,28 @@ function validateKnownFindings(value: unknown, index: number): KnownFinding[] {
     }
     const record = entry as Record<string, unknown>;
     const finding = record['finding'];
+    const recallCriteria = record['recallCriteria'];
     const evidence = record['evidence'];
     const severity = record['severity'];
     const provenance = record['provenance'];
     if (typeof finding !== 'string' || finding.trim() === '') {
       throw new Error(`${index}件目の knownImportantFindings[${i}].finding が空です`);
+    }
+    if (
+      !Array.isArray(recallCriteria) ||
+      recallCriteria.length === 0 ||
+      recallCriteria.some((item) => typeof item !== 'string' || item.trim() === '')
+    ) {
+      throw new Error(
+        `${index}件目の knownImportantFindings[${i}].recallCriteria が空でない文字列の配列ではありません（拾ったと数える条件を実験の前に固定する）`,
+      );
+    }
+    if (recallCriteria.length > MAX_RECALL_CRITERIA) {
+      // 条件を細かく割りすぎると、1つの正解ラベルが実質「全部言い当てろ」になり、言い換えを
+      // 落とす方向へ倒れる。割るのは最小の因果鎖の分だけにする
+      throw new Error(
+        `${index}件目の knownImportantFindings[${i}].recallCriteria が ${MAX_RECALL_CRITERIA} 件を超えています（最小の因果鎖の分だけに割る）`,
+      );
     }
     if (typeof evidence !== 'string' || evidence.trim() === '') {
       throw new Error(
@@ -236,6 +261,7 @@ function validateKnownFindings(value: unknown, index: number): KnownFinding[] {
     }
     return {
       finding,
+      recallCriteria: recallCriteria as string[],
       evidence,
       severity,
       provenance: provenance as KnownFinding['provenance'],
@@ -334,6 +360,9 @@ async function main(): Promise<void> {
             baseCommit: material.baseCommit,
             targetCommit: evalCase.targetCommit,
             knownImportantTotal: evalCase.knownImportantFindings.length,
+            knownCriticalTotal: countSeverity(evalCase, 'critical'),
+            knownWarningTotal: countSeverity(evalCase, 'warning'),
+            bytesAfterRequest: measureBytesAfterRequest(prompt, evalCase.userRequest),
             ...(turn.error === undefined ? {} : { error: turn.error }),
           };
           const file = path.join(
@@ -365,6 +394,32 @@ async function main(): Promise<void> {
     // 失敗を含む結果を「走り切った」と読ませない。集計前に気づけるようにする
     process.exitCode = 1;
   }
+}
+
+function countSeverity(evalCase: EvalCase, severity: KnownFinding['severity']): number {
+  return evalCase.knownImportantFindings.filter((finding) => finding.severity === severity).length;
+}
+
+/**
+ * 依頼文が最後に現れた位置から、プロンプト末尾までのバイト数を測る。
+ *
+ * 条件 `B-pos` が効くとすれば、それは依頼から読み終わりまでの距離が縮むからである。その距離を
+ * 実行記録へ残しておかないと、「効かなかった」のか「そもそも埋もれる距離ではなかった」のかを
+ * 後から区別できない。
+ *
+ * 最後の出現を見るのは `B-repeat` のためである。この条件は依頼を冒頭に残したまま末尾へも
+ * 再掲するので、最初の出現から測ると位置を変えていない条件Aと同じ値になってしまう。
+ */
+function measureBytesAfterRequest(prompt: string, userRequest: string): number | undefined {
+  const needle = userRequest.trim();
+  if (needle === '') {
+    return undefined;
+  }
+  const at = prompt.lastIndexOf(needle);
+  if (at < 0) {
+    return undefined;
+  }
+  return Buffer.byteLength(prompt.slice(at + needle.length), 'utf8');
 }
 
 function summarizeKinds(cases: readonly EvalCase[]): string {
