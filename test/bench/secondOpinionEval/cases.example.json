@@ -1,0 +1,21 @@
+[
+  {
+    "id": "example-01",
+    "kind": "codeReview",
+    "repoPath": "/absolute/path/to/repo",
+    "baseCommit": "0000000000000000000000000000000000000000",
+    "targetCommit": "1111111111111111111111111111111111111111",
+    "userRequest": "この変更をレビューしてください。特に設計上の欠陥、見落とし、より単純な代替案を挙げてください。",
+    "conversation": "本番経路で作った要約、または当時の会話記録をここへ貼る。空文字なら背景を渡さない。",
+    "conversationKind": "summary",
+    "knownImportantFindings": [
+      {
+        "finding": "後から本当に重要だったと分かっている問題を1件ずつ書く",
+        "evidence": "そう言える根拠。テストID、Issue番号、実測値など後から辿れるもの",
+        "severity": "critical",
+        "provenance": "test"
+      }
+    ],
+    "knownConstraints": ["変更してはいけない制約や、既に決まっている方針を書く"]
+  }
+]

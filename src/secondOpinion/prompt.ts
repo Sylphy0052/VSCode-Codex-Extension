@@ -109,7 +109,32 @@ export interface SecondOpinionInput {
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
   /** 今回評価してほしい追加資料。 */
   artifact: SecondOpinionArtifact;
+  /**
+   * 依頼の区画をどこへ置くか（Issue #1044 条件B-pos）。既定は `'front'`（現行）。
+   *
+   * 並びは「固定指示 → 依頼 → 背景 → 追加資料」で、追加資料は数十KB〜200KBになりうる。
+   * 依頼はその手前にあるため、資料が大きいほど「何を答えるのか」が読み終わりから遠ざかる。
+   *
+   * `'end'` は依頼を末尾へ**移動**する。複製ではない。見出し・本文・トークン数・出現回数を
+   * 揃えたまま位置だけを変えるためで、こうしないと「位置の効果」と「同じ文が2回出ることの
+   * 効果」を分離できない（{@link restateRequestAtEnd} との違い）。
+   */
+  requestPosition?: RequestPosition | undefined;
+  /**
+   * 依頼文をプロンプトの末尾へもう一度置くか（Issue #1044 条件B-repeat）。既定は `false`。
+   *
+   * こちらは**実用寄りの介入**で、位置の実験ではない。冒頭の依頼を残したまま末尾へ再掲するので、
+   * 位置に加えて「2回出ること」「最終確認という見出し」「読み直しを促す一文」が同時に変わる。
+   * 位置だけを見たいときは {@link requestPosition} を使う。
+   *
+   * 既定を `false` にしてあるのは、これが**測定のための介入**であり、効果が確かめられる前に
+   * 既定の挙動を変えないため（Issue #1044 の受入基準「拡張本体の既定挙動を変えずに」）。
+   */
+  restateRequestAtEnd?: boolean | undefined;
 }
+
+/** 依頼の区画の位置（Issue #1044 条件B-pos）。 */
+export type RequestPosition = 'front' | 'end';
 
 /** 背景として渡した本文の出所（Issue #944）。 */
 export type ConversationBackgroundKind = 'summary' | 'transcript';
@@ -360,13 +385,52 @@ function summarySection(summary: string, kind: ConversationBackgroundKind): stri
 export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
   const summary = input.conversationSummary?.trim() ?? '';
   const backgroundKind = input.conversationBackgroundKind ?? 'summary';
+  const position = input.requestPosition ?? 'front';
+  const request = requestSection(input.userRequest);
   const sections = [
     systemInstruction(input.artifact, summary !== '', backgroundKind),
-    `## 依頼\n\n${input.userRequest.trim()}`,
+    position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
     artifactSection(input.artifact),
+    position === 'end' ? request : undefined,
+    input.restateRequestAtEnd === true ? restatedRequestSection(input) : undefined,
   ].filter((section): section is string => section !== undefined);
   return sections.join('\n\n');
+}
+
+/**
+ * 依頼の区画（Issue #1044 条件B-pos）。
+ *
+ * 位置を変えても**同じ文字列**を出す。見出しや前置きを位置ごとに変えると、位置以外も同時に
+ * 変わってしまい、差の原因を位置へ帰属できなくなる。
+ */
+function requestSection(userRequest: string): string {
+  return `## 依頼\n\n${userRequest.trim()}`;
+}
+
+/**
+ * 末尾へ再掲する依頼（Issue #1044 条件B-repeat）。
+ *
+ * 冒頭の依頼を残したまま、末尾へもう一度置く。位置だけを見る条件ではない（位置のみを変える
+ * のは {@link SecondOpinionInput.requestPosition} の `'end'`）。ここは実運用で効きそうな形を
+ * そのまま試す枠で、見出しと読み直しを促す一文を足している。
+ *
+ * 依頼の後ろに何も続かないときは出さない。その場合、依頼はもともと末尾にあり、再掲しても
+ * 同じ文が2回続くだけになる。**追加資料の有無だけで決めない**。資料が無くても背景が長ければ
+ * 依頼は読み終わりから十分遠くなるので、背景も「後ろに続くもの」として数える。
+ */
+function restatedRequestSection(input: SecondOpinionInput): string | undefined {
+  const hasBackground = (input.conversationSummary?.trim() ?? '') !== '';
+  if (input.artifact.kind === 'none' && !hasBackground) {
+    return undefined;
+  }
+  return [
+    '## 最終確認: 今回答えてほしいこと',
+    '',
+    '上の資料を読んだうえで、次の依頼に答えてください（冒頭に置いたものと同じ依頼です）。',
+    '',
+    fence(input.userRequest.trim(), 'markdown'),
+  ].join('\n');
 }
 
 /**

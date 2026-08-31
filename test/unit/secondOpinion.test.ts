@@ -261,6 +261,116 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     expect(prompt).toContain(diff);
   });
 
+  it('restateRequestAtEndを指定すると依頼文が末尾へも載る（Issue #1044 条件B）', () => {
+    const userRequest = 'この設計判断が妥当か教えてほしい';
+    const withRestate = buildSecondOpinionPrompt({
+      userRequest,
+      restateRequestAtEnd: true,
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    });
+    // 冒頭の「## 依頼」と末尾の再掲で2回。片方しか無ければ介入が効いていない
+    expect(withRestate.split(userRequest).length - 1).toBe(2);
+    expect(withRestate).toContain('## 最終確認: 今回答えてほしいこと');
+    // 再掲は差分より後ろに置かないと、資料の手前に問いが埋もれる状態が変わらない
+    expect(withRestate.indexOf('## 最終確認')).toBeGreaterThan(
+      withRestate.indexOf('+const a = 1;'),
+    );
+  });
+
+  it('restateRequestAtEndを指定しなければ既定の挙動が変わらない（Issue #1044）', () => {
+    const input = {
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges' as const,
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    };
+    expect(buildSecondOpinionPrompt(input)).toBe(
+      buildSecondOpinionPrompt({ ...input, restateRequestAtEnd: false }),
+    );
+    expect(buildSecondOpinionPrompt(input)).not.toContain('## 最終確認');
+  });
+
+  it('追加資料も背景も無いときは末尾へ再掲しない（Issue #1044）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: '設計の考え方を聞きたい',
+      restateRequestAtEnd: true,
+      artifact: { kind: 'none' },
+    });
+    expect(prompt).not.toContain('## 最終確認');
+    expect(prompt.split('設計の考え方を聞きたい').length - 1).toBe(1);
+  });
+
+  it('追加資料が無くても背景が続くなら末尾へ再掲する（Issue #1044）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: '設計の考え方を聞きたい',
+      conversationSummary: 'これまでの経緯',
+      restateRequestAtEnd: true,
+      artifact: { kind: 'none' },
+    });
+    // 依頼の後ろに背景が続く以上、依頼は読み終わりから遠い。資料の有無だけで判断しない
+    expect(prompt).toContain('## 最終確認');
+    expect(prompt.indexOf('## 最終確認')).toBeGreaterThan(prompt.indexOf('これまでの経緯'));
+  });
+
+  it('requestPosition: end は依頼を末尾へ移動する（Issue #1044 条件B-pos）', () => {
+    const userRequest = 'この設計判断が妥当か教えてほしい';
+    const input = {
+      userRequest,
+      artifact: {
+        kind: 'workspaceChanges' as const,
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    };
+    const front = buildSecondOpinionPrompt(input);
+    const end = buildSecondOpinionPrompt({ ...input, requestPosition: 'end' });
+
+    // 移動であって複製ではない。出現回数が増えると「位置の効果」と「2回出ることの効果」を
+    // 分離できなくなる
+    expect(end.split(userRequest).length - 1).toBe(1);
+    expect(end.indexOf('## 依頼')).toBeGreaterThan(end.indexOf('+const a = 1;'));
+    expect(front.indexOf('## 依頼')).toBeLessThan(front.indexOf('+const a = 1;'));
+    // 区画の中身は同一。並び以外が変わっていれば長さが動く
+    expect(end.length).toBe(front.length);
+  });
+
+  it('requestPosition の既定は front で、指定しない場合と同じになる（Issue #1044）', () => {
+    const input = {
+      userRequest: 'レビューして',
+      artifact: { kind: 'none' as const },
+    };
+    expect(buildSecondOpinionPrompt(input)).toBe(
+      buildSecondOpinionPrompt({ ...input, requestPosition: 'front' }),
+    );
+  });
+
   it('レビュー対象なしなら依頼文だけを載せる', () => {
     const prompt = buildSecondOpinionPrompt({
       userRequest: '設計の考え方を聞きたい',
