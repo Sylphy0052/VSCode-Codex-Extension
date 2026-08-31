@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseDecisionsJsonl,
+  parseScreeningEntry,
   summarizeScreening,
   validateScreeningEntry,
   validateScreeningLog,
@@ -86,6 +87,20 @@ describe('validateScreeningEntry', () => {
     const entry = decision({ findings: [finding('empirical', { evidenceRefs: [] })] });
     expect(validateScreeningEntry(entry, ORDER)).toContainEqual(
       expect.stringContaining('evidenceRefs が空です'),
+    );
+  });
+
+  it('finding の本文が空なら検出する', () => {
+    const entry = decision({ findings: [finding('empirical', { finding: '   ' })] });
+    expect(validateScreeningEntry(entry, ORDER)).toContainEqual(
+      expect.stringContaining('finding が空です'),
+    );
+  });
+
+  it('空の参照先を検出する', () => {
+    const entry = decision({ findings: [finding('empirical', { evidenceRefs: ['  '] })] });
+    expect(validateScreeningEntry(entry, ORDER)).toContainEqual(
+      expect.stringContaining('evidenceRefs に空の参照があります'),
     );
   });
 
@@ -212,6 +227,57 @@ describe('summarizeScreening', () => {
   });
 });
 
+describe('parseScreeningEntry', () => {
+  it('型どおりのJSONを受け取る', () => {
+    expect(parseScreeningEntry(JSON.parse(JSON.stringify(decision())))).toEqual(decision());
+  });
+
+  it('type のtypoを通さない', () => {
+    // as ScreeningEntry で受けていたときは、集計には入るのに順序確認から外れて食い違った
+    expect(() => parseScreeningEntry({ ...decision(), type: 'decison' })).toThrow(/type/);
+  });
+
+  it('groundTruthBasis のtypoを通さない', () => {
+    const entry = { ...decision(), findings: [finding('empirical')] };
+    entry.findings[0]!.groundTruthBasis = 'independent-humna' as GroundTruthBasis;
+    expect(() => parseScreeningEntry(entry)).toThrow(/groundTruthBasis/);
+  });
+
+  it('disposition のtypoを通さない', () => {
+    expect(() => parseScreeningEntry({ ...decision(), disposition: 'primaryy' })).toThrow(
+      /disposition/,
+    );
+  });
+
+  it('数値の欄が数でなければ投げる', () => {
+    expect(() => parseScreeningEntry({ ...decision(), orderIndex: '0' })).toThrow(/orderIndex/);
+    expect(() => parseScreeningEntry({ ...decision(), orderIndex: -1 })).toThrow(/orderIndex/);
+    expect(() => parseScreeningEntry({ ...decision(), orderIndex: 1.5 })).toThrow(/orderIndex/);
+    expect(() => parseScreeningEntry({ ...decision(), prNumber: 0 })).toThrow(/prNumber/);
+  });
+
+  it('真偽値の欄が真偽値でなければ投げる', () => {
+    expect(() => parseScreeningEntry({ ...decision(), primaryCase: 'true' })).toThrow(
+      /primaryCase/,
+    );
+  });
+
+  it('findings が配列でなければ投げる', () => {
+    expect(() => parseScreeningEntry({ ...decision(), findings: {} })).toThrow(/findings/);
+  });
+
+  it('evidenceRefs の要素が文字列でなければ投げる', () => {
+    const entry = { ...decision(), findings: [{ ...finding('empirical'), evidenceRefs: [700] }] };
+    expect(() => parseScreeningEntry(entry)).toThrow(/evidenceRefs\[0\]/);
+  });
+
+  it('supersede には supersedes と reason を要求する', () => {
+    const entry = { ...decision(), type: 'supersede' };
+    expect(() => parseScreeningEntry(entry)).toThrow(/supersedes/);
+    expect(() => parseScreeningEntry({ ...entry, supersedes: 0 })).toThrow(/reason/);
+  });
+});
+
 describe('parseDecisionsJsonl', () => {
   it('空行を飛ばして1行1件で読む', () => {
     const text = `${JSON.stringify(decision())}\n\n${JSON.stringify(
@@ -223,6 +289,13 @@ describe('parseDecisionsJsonl', () => {
   it('壊れた行は行番号を添えて投げる', () => {
     expect(() => parseDecisionsJsonl(`${JSON.stringify(decision())}\n{壊れている\n`)).toThrow(
       /2 行目/,
+    );
+  });
+
+  it('型に合わない行も行番号を添えて投げる', () => {
+    const broken = JSON.stringify({ ...decision(), type: 'decison' });
+    expect(() => parseDecisionsJsonl(`${JSON.stringify(decision())}\n${broken}\n`)).toThrow(
+      /2 行目.*type/s,
     );
   });
 });
@@ -252,6 +325,50 @@ describe('validateScreeningLog', () => {
       decision({ orderIndex: 1, prNumber: 650 }),
     ];
     expect(validateScreeningLog(entries, ORDER)).toEqual([]);
+  });
+
+  it('訂正が自分自身を指していたら検出する', () => {
+    const entries: ScreeningEntry[] = [
+      decision(),
+      {
+        ...decision({ primaryCase: false, findings: [], disposition: 'insufficient-evidence' }),
+        type: 'supersede',
+        supersedes: 1,
+        reason: '自己参照',
+      },
+    ];
+    expect(validateScreeningLog(entries, ORDER)).toContainEqual(
+      expect.stringContaining('自分自身か後の行'),
+    );
+  });
+
+  it('訂正の理由が空なら検出する', () => {
+    const entries: ScreeningEntry[] = [
+      decision(),
+      {
+        ...decision({ primaryCase: false, findings: [], disposition: 'insufficient-evidence' }),
+        type: 'supersede',
+        supersedes: 0,
+        reason: '  ',
+      },
+    ];
+    expect(validateScreeningLog(entries, ORDER)).toContainEqual(
+      expect.stringContaining('reason が空です'),
+    );
+  });
+
+  it('2回目の訂正は直前の訂正を置き換える', () => {
+    const correction = (supersedes: number): ScreeningEntry => ({
+      ...decision({ primaryCase: false, findings: [], disposition: 'insufficient-evidence' }),
+      type: 'supersede',
+      supersedes,
+      reason: '読み違えていた',
+    });
+    // 1回目の訂正(行1)を飛ばして最初のdecision(行0)を指すのは、履歴が枝分かれする
+    expect(validateScreeningLog([decision(), correction(0), correction(0)], ORDER)).toContainEqual(
+      expect.stringContaining('直前の判定を置き換えて'),
+    );
+    expect(validateScreeningLog([decision(), correction(0), correction(1)], ORDER)).toEqual([]);
   });
 
   it('訂正が別の案件を指していたら検出する', () => {

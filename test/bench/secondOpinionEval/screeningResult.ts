@@ -21,6 +21,15 @@ export type GroundTruthBasis =
   | 'retrospective'
   | 'mixed';
 
+export const GROUND_TRUTH_BASES: readonly GroundTruthBasis[] = [
+  'empirical',
+  'independent-report',
+  'independent-human',
+  'model-derived',
+  'retrospective',
+  'mixed',
+];
+
 export const PRIMARY_BASES: readonly GroundTruthBasis[] = [
   'empirical',
   'independent-report',
@@ -130,6 +139,16 @@ export interface ScreeningSummary {
   nonPrimaryBreakdown: { disposition: ScreeningDisposition; count: number }[];
 }
 
+export const SCREENING_DISPOSITIONS: readonly ScreeningDisposition[] = [
+  'primary',
+  'model-derived-only',
+  'retrospective-only',
+  'mixed-only',
+  'other-non-primary',
+  'insufficient-evidence',
+  'no-relevant-finding',
+];
+
 const NON_PRIMARY_DISPOSITIONS: readonly ScreeningDisposition[] = [
   'model-derived-only',
   'retrospective-only',
@@ -192,6 +211,13 @@ export function validateScreeningEntry(
         `findings[${index}]: groundTruthBasis=${finding.groundTruthBasis} と primary=${String(finding.primary)} が食い違います`,
       );
     }
+    if (finding.finding.trim() === '') {
+      // 本文の無い finding を primary に数えると、後でラベルにできないものが停止条件を進める
+      problems.push(`findings[${index}]: finding が空です`);
+    }
+    if (finding.evidenceRefs.some((ref) => ref.trim() === '')) {
+      problems.push(`findings[${index}]: evidenceRefs に空の参照があります`);
+    }
     if (finding.evidence.trim() === '') {
       // 根拠の無い finding を分母へ入れると、後から思いついた分だけ分母が動く
       problems.push(`findings[${index}]: evidence が空です`);
@@ -252,6 +278,103 @@ function dispositionProblems(entry: ScreeningEntry, hasPrimary: boolean): string
     : [`disposition は ${expected} のはずです（実際の basis: ${[...bases].join(', ')}）`];
 }
 
+/**
+ * 手で書いたJSONを、型どおりかどうか確かめてから受け取る。
+ *
+ * **TypeScriptの型をvalidationの代わりにしない。** `as ScreeningEntry` で受けると、
+ * `"type": "decison"` のようなtypeoが静かに通り、集計には入るのに順序の確認からは外れる、
+ * という食い違いが起きる。外から来たJSONは境界で全部見る。
+ */
+export function parseScreeningEntry(value: unknown): ScreeningEntry {
+  const record = asRecord(value, '判定');
+  const type = requireLiteral(record.type, ['decision', 'supersede'] as const, 'type');
+  const base = {
+    orderIndex: requireIndex(record.orderIndex, 'orderIndex'),
+    prNumber: requirePositiveInteger(record.prNumber, 'prNumber'),
+    primaryCase: requireBoolean(record.primaryCase, 'primaryCase'),
+    findings: requireArray(record.findings, 'findings').map((finding, index) =>
+      parseFinding(finding, index),
+    ),
+    disposition: requireLiteral(record.disposition, SCREENING_DISPOSITIONS, 'disposition'),
+    rationale: requireString(record.rationale, 'rationale'),
+  };
+  if (type === 'decision') {
+    return { type, ...base };
+  }
+  return {
+    type,
+    ...base,
+    supersedes: requireIndex(record.supersedes, 'supersedes'),
+    reason: requireString(record.reason, 'reason'),
+  };
+}
+
+function parseFinding(value: unknown, index: number): ScreeningFinding {
+  const record = asRecord(value, `findings[${index}]`);
+  return {
+    finding: requireString(record.finding, `findings[${index}].finding`),
+    groundTruthBasis: requireLiteral(
+      record.groundTruthBasis,
+      GROUND_TRUTH_BASES,
+      `findings[${index}].groundTruthBasis`,
+    ),
+    evidence: requireString(record.evidence, `findings[${index}].evidence`),
+    evidenceRefs: requireArray(record.evidenceRefs, `findings[${index}].evidenceRefs`).map(
+      (ref, refIndex) => requireString(ref, `findings[${index}].evidenceRefs[${refIndex}]`),
+    ),
+    primary: requireBoolean(record.primary, `findings[${index}].primary`),
+  };
+}
+
+function asRecord(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${what} がオブジェクトではありません`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireString(value: unknown, what: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${what} が文字列ではありません`);
+  }
+  return value;
+}
+
+function requireBoolean(value: unknown, what: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new Error(`${what} が真偽値ではありません`);
+  }
+  return value;
+}
+
+function requireIndex(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${what} が0以上の整数ではありません`);
+  }
+  return value;
+}
+
+function requirePositiveInteger(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${what} が正の整数ではありません`);
+  }
+  return value;
+}
+
+function requireArray(value: unknown, what: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${what} が配列ではありません`);
+  }
+  return value;
+}
+
+function requireLiteral<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new Error(`${what} は ${allowed.join(' / ')} のいずれかである必要があります`);
+  }
+  return value as T;
+}
+
 export function parseDecisionsJsonl(text: string): ScreeningEntry[] {
   return text
     .split('\n')
@@ -259,10 +382,10 @@ export function parseDecisionsJsonl(text: string): ScreeningEntry[] {
     .filter((entry) => entry.line !== '')
     .map((entry) => {
       try {
-        return JSON.parse(entry.line) as ScreeningEntry;
+        return parseScreeningEntry(JSON.parse(entry.line));
       } catch (error) {
         throw new Error(
-          `${entry.index + 1} 行目がJSONとして読めません: ${error instanceof Error ? error.message : String(error)}`,
+          `${entry.index + 1} 行目が読めません: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     });
@@ -284,14 +407,7 @@ export function validateScreeningLog(
       problems.push(`${index + 1} 行目: ${problem}`);
     }
     if (entry.type === 'supersede') {
-      const target = entries[entry.supersedes];
-      if (target === undefined) {
-        problems.push(`${index + 1} 行目: supersedes ${entry.supersedes} は範囲外です`);
-      } else if (target.prNumber !== entry.prNumber) {
-        problems.push(
-          `${index + 1} 行目: supersedes の指す行は #${target.prNumber} で、#${entry.prNumber} と違います`,
-        );
-      }
+      problems.push(...supersedeProblems(entry, index, entries));
     }
   }
 
@@ -305,6 +421,49 @@ export function validateScreeningLog(
       );
       break;
     }
+  }
+  return problems;
+}
+
+/**
+ * 訂正が、その案件の**直前の有効な判定**を指しているかを見る。
+ *
+ * 自分自身や未来の行を指せると、訂正の履歴が一本につながらず、いつ何をなぜ変えたかを
+ * 追えなくなる。append-onlyにする意味が消えるので、ここで落とす。
+ */
+function supersedeProblems(
+  entry: ScreeningSupersede,
+  index: number,
+  entries: readonly ScreeningEntry[],
+): string[] {
+  const where = `${index + 1} 行目`;
+  if (entry.supersedes >= index) {
+    return [`${where}: supersedes ${entry.supersedes} が自分自身か後の行を指しています`];
+  }
+  const problems: string[] = [];
+  const target = entries[entry.supersedes];
+  if (target === undefined) {
+    problems.push(`${where}: supersedes ${entry.supersedes} は範囲外です`);
+  } else if (target.prNumber !== entry.prNumber) {
+    problems.push(
+      `${where}: supersedes の指す行は #${target.prNumber} で、#${entry.prNumber} と違います`,
+    );
+  } else {
+    const latest = entries
+      .slice(0, index)
+      .reduce<number | undefined>(
+        (found, candidate, candidateIndex) =>
+          candidate.prNumber === entry.prNumber ? candidateIndex : found,
+        undefined,
+      );
+    if (latest !== entry.supersedes) {
+      problems.push(
+        `${where}: #${entry.prNumber} の直前の判定は ${(latest ?? 0) + 1} 行目です。訂正は直前の判定を置き換えてください`,
+      );
+    }
+  }
+  if (entry.reason.trim() === '') {
+    problems.push(`${where}: reason が空です`);
   }
   return problems;
 }

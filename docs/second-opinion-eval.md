@@ -228,7 +228,11 @@ finding の総数は `primaryFindings` として別に記録するが、**停止
 - `insufficient-evidence` — 問題の候補はあったが、真だと確定できる証拠が足りない
 - `no-relevant-finding` — 読んだが、正解ラベルにできる問題そのものが無い
 
-`validateScreeningEntry()` が、`primaryCase` と `findings` と `disposition` の食い違い、根拠の空欄、primary なのに参照先が無い記録を検出する。
+記録は手で書くので、読み込む時点で**型どおりかどうかを全部見る**（`parseScreeningEntry()`）。`"type": "decison"` のようなtypoを `as ScreeningEntry` で通すと、集計には入るのに順序の確認からは外れる、という食い違いが起きる。
+
+`validateScreeningEntry()` が、`primaryCase` と `findings` と `disposition` の食い違い、`finding` 本文・`evidence`・`rationale` の空欄、primary なのに参照先が無い記録、空の `evidenceRefs` を検出する。
+
+訂正（`supersede`）は、**その案件の直前の有効な判定を指し**、`reason` が空でないことを要求する。自分自身や後の行を指せると、訂正の履歴が一本につながらない。
 
 #### 集計の出し方（10件ごと）
 
@@ -249,6 +253,8 @@ npx tsx test/bench/secondOpinionEval/screeningSummary.ts \
 | `unreadCases`         | `98 - screenedCases`。**不成立に混ぜない**                  |
 | `primaryFindings`     | `primary` な finding の総数。記録のみで停止判定には使わない |
 | `nonPrimaryBreakdown` | 非primary 6種それぞれの件数（0件の種別も落とさない）        |
+
+10件ごとの中間報告には、集計に入っている `decisionsSha256` も一緒に残す。追記しかしない記録のcheckpointになり、後から差し替えられていないことを確かめられる。
 
 集計ファイルは凍結しない（進むたびに作り直す）。凍結してあるのは読む順と、追記しかしない判定の記録である。読む順のsha256が凍結済みの版と違えば止まり、凍結した順を飛ばして読んでいれば `validateScreeningLog()` が落とす。
 
