@@ -177,6 +177,8 @@ npx tsx test/bench/secondOpinionEval/screeningOrder.ts \
 
 正例に数えてよいのは、primary かつその条件の eligibility（`discoverable` かつ `explicitlyExposed` でない）を通ったものだけ。目安として **eligible な primary 18件**（必要15件に対して20%の予備）を暫定の停止点に置くが、18件に届く前でも各層の供給が十分と分かれば止めてよく、逆に18件あっても層が偏っていれば続ける。
 
+**どの条件の eligibility で数えるかは分析ごとに違う**（下の「分析を2つに分ける」）。prompt-placement の分析は条件Aで、context-coverage の分析は条件C-repo で数える。**strong pool は60件で一時停止している。** 条件Aだけで数えると残り38件を読んでも15件に届かない見込みで、条件C-repo の増分価値を先に確かめるほうが得るものが大きいと判断したため（下の「条件Aの材料が recall の天井になっている」）。再開するのは凍結順の `orderIndex 60` から。
+
 これは「98件のうち何件成立したか」という母集団の割合を出す手続きではない。作りたいのは本測定に使えるpoolであって、成立率の推定ではない。したがって集計では次を分けて出し、**未読を不成立に混ぜない**。
 
 ```
@@ -458,6 +460,55 @@ screening 50件（strong 40 / supplemental 10）時点の実測は次のとお�
 ```
 
 **primary benchmark の分母は「条件A（現行bundle）で発見可能」で判定する。** 条件Aで証拠が無い案件を混ぜると、依頼文の位置効果ではなく材料不足を測ってしまう。条件Cを測るときは、「Aでは発見できないが探索すれば発見できる」案件を別セットとして集計する。ラベルは共通なので**再ラベルは要らない**。
+
+#### 分析を2つに分ける（2026-08-31）
+
+screening 60件の実測（下の「条件Aの材料が recall の天井になっている」）を受けて、1つの benchmark で全条件を並べるのをやめ、次の2つに分ける。**分母が違うものを1つの表に並べると、材料不足と依頼文の位置効果が混ざる。**
+
+| 分析             | 比較する条件               | 分母                                            | 何が分かるか                                     |
+| ---------------- | -------------------------- | ----------------------------------------------- | ------------------------------------------------ |
+| prompt-placement | `A` / `B-pos` / `B-repeat` | **条件Aで discoverable な finding だけ**        | 同じ材料のまま依頼文を末尾へ動かす・繰り返す効果 |
+| context-coverage | `A` / `C-repo`             | primary な finding 全部（条件ごとの判定を使う） | 探索でどれだけ材料不足を埋められるか             |
+
+context-coverage では次の3つに分けて出す。**最も重要なのは2番目**で、これが探索の増分価値そのものになる。
+
+- `A-discoverable`（両条件で発見できるはず）
+- `A-undiscoverable / C-repo-discoverable`（探索でしか届かない）
+- どちらでも発見できない
+
+**条件Aの定義は変えない。** 現行 production の材料そのものであり、これを広げると既存の pilot・eligibility 判定・screening 60件の意味が全部変わる。広い材料は条件 `C-repo`（#1047）として足し、Aは凍結した baseline として残す。
+
+#### 条件C-repo の discoverable をどう判定するか
+
+条件C-repo の材料は「凍結した after-tree ＋ `changes.diff` を bounded read-only で探索」である（#1047）。判定基準は次の2つを両方満たすこと。
+
+- 証拠となるファイルが `targetCommit` の after-tree に**実在する**（`git show <targetCommit>:<path>` で確認する）
+- 差分に現れる識別子（変更した関数名・型名・新設フィールド名・変更した固定文字列）から、**1〜2ホップの grep と読解で到達できる**
+
+リポジトリ全体の網羅走査は前提にしない。#1047 の固定指示が「判断に必要な場合だけ依存先を追加で読む」である以上、「全部読めば見つかる」を discoverable の根拠にすると、実際の探索より甘い分母になる。
+
+条件Aの `base/<変更対象ファイル>` は after-tree と `changes.diff` から復元できるため、**A で discoverable な finding は C-repo でも discoverable として扱う**。
+
+#### 条件Aの材料が recall の天井になっている（2026-08-31）
+
+strong pool を60件読んだ時点の実測。
+
+- primary な案件 9件（15%）
+- そのうち条件Aで discoverable なのは 5件（8.3%）
+- **primary 9件のうち4件（44%）が条件Aで発見できない**
+
+落ちた4件（#330 / #319 / #405 / #135）は構造が全部同じで、**PRが壊した・繋ぎ損ねた場所が、そのPRが触っていないファイルにある**。強い証拠（後続テストの赤・後続fix）が付くのはまさにこの型なので、strong pool の証拠条件と条件Aの発見可能性は構造的に逆を向いている。
+
+この4件を条件C-repo で判定し直すと **4件とも discoverable** だった（証拠ファイルの実在は `git show` で確認済み）。
+
+- #330: after-tree の `test/integration/workflowMerge.test.ts` に旧形式 `Merge task T2 (run ...)` が実在。変更した `mergeCommitMessage` か旧形式の文字列を grep して1ホップ
+- #405: `test/integration/workflowForgeOrder.test.ts` に `['pr','merge','--merge']` の期待値が実在。テストは関数名を名指ししないため「変更した引数列の期待値を持つテストを探す」形の探索が要る
+- #135: `src/orchestrator/runner.ts` に `issue: undefined` が実在。新設した `issue` フィールドの消費側を grep して1ホップ
+- #319: 送信経路（`chatView.ts` → `stateDelta.ts`）が実在。ただし2〜3ホップと、切り詰めが表示用 diff にしか効かないという読解が要る。他3件より弱い
+
+したがって screening の停止条件は「**条件Aで** eligible な primary が何件そろったか」では見ない。分析ごとに分母が違うので、**それぞれの分析に十分な分母があるか**で見る。難易度の必要数 `9 / 6 / 6 / 3` は変えない。
+
+「条件Aだけでは正例が15件そろわなかった」ことは benchmark の失敗ではない。**production の材料では、独立した根拠を持つ既知の欠陥のかなりの部分がそもそも観測できない**という製品側の実測結果である。
 
 実行時は `evidencePaths` のうち bundle に見当たらないものを一覧で出す。これは判定の材料であって判定ではなく、**実行は止めない**（自動で弾くと、差分から再構成できる案件まで黙って落ちる）。
 
