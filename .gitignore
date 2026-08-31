@@ -19,3 +19,6 @@ coverage/
 
 # ChatGPT向け質問ファイルのドラフト（ローカルのみ、リモート未push）
 docs/chatgpt/
+
+# セカンドオピニオン評価の測定結果 (ローカルのみ、リモート未push)
+eval-results/
