@@ -76,8 +76,18 @@ MCPを無効化するのは速度のためだけではない。既定のまま�
 案件を選ぶ前に、**証拠情報を一切使わないメタデータだけの母集団**を作って凍結する。
 
 ```
-npx tsx test/bench/secondOpinionEval/samplingFrame.ts --out eval-results/sampling-frame-v2.json
+# 1回だけ: GitHubから引いて、母集団の素をそのまま保存する
+npx tsx test/bench/secondOpinionEval/samplingFrame.ts \
+  --source-out eval-results/sampling-source-v2.json --out eval-results/sampling-frame-v2.json
+
+# 以降: 保存した素からのみ作り直す
+npx tsx test/bench/secondOpinionEval/samplingFrame.ts \
+  --prs eval-results/sampling-source-v2.json --out eval-results/sampling-frame-v2.json
 ```
+
+**母集団の素も凍結する。** frameのハッシュを記録しても、GitHubを引き直せば母集団そのものが変わる。期間の指定は日付単位なので、`--until` に指定した当日の後半にPRがマージされれば同じコマンドが別の母集団を返す。`gh` の出力をそのまま保存し、そのハッシュを frame の `sourceSha256` へ書き、以降の再生成は保存した素からだけ行う。素を保存せずにGitHubを引くことはできない（`--prs` か `--source-out` のどちらかが必須）。
+
+**母集団の四分位が境界と一致しなければ生成を止める。** 境界は母集団の四分位そのものなので、ずれたということは母集団が変わったということである。そのまま書き出すと「四分位で切った」と書いてある層が実際には四分位でなくなる。止まったら実測値へ更新して `exclusionRulesVersion` を上げ、前の版のファイルは残す。
 
 linked Issue の有無・人間コメントの有無・レビューの有無を、この段階では条件にしない。「正解ラベルを作りやすいPR」に絞ると母集団そのものが証拠の多い側へ寄り、あとから脱落率を測っても意味を持たなくなる。証拠による脱落は次の段階で数える。
 
@@ -95,7 +105,7 @@ test-only / config-only / refactor / 巨大PR などは**除外せずタグを�
 
 **base は merge commit の第1親ではなく `merge-base` を取る。** 第1親はmerge直前の `main` であって分岐点ではないので、分岐からmergeまでに他のPRが `main` へ入っているとその分が逆向きに混ざる（実測でPR #1041 が 169行 → 1272行 になった）。親が1つしかないPR（squash / rebase）は黙って補正せず `snapshotStatus: 'non-linear'` として記録する。
 
-出力のSHA-256を記録し、以降の段階はこの凍結物を入力にする。規則や境界を変えたら `exclusionRulesVersion` を上げ、**前の版を上書きしない**。
+素と出力のSHA-256を記録し、以降の段階はこの凍結物を入力にする。規則や境界を変えたら `exclusionRulesVersion` を上げ、**前の版を上書きしない**。
 
 ### 2. 案件ファイルを作る
 

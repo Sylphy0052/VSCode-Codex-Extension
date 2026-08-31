@@ -5,9 +5,20 @@
  * 使い方:
  *
  * ```
- * npx tsx test/bench/secondOpinionEval/samplingFrame.ts --out eval-results/sampling-frame.json
- *   [--prs <gh pr list の出力JSON>] [--since 2026-08-07] [--until 2026-08-31]
+ * # 1回だけ: GitHubから引いて、母集団の素をそのまま保存する
+ * npx tsx test/bench/secondOpinionEval/samplingFrame.ts \
+ *   --source-out eval-results/sampling-source-v2.json --out eval-results/sampling-frame-v2.json
+ *
+ * # 以降: 保存した素からのみ作り直す
+ * npx tsx test/bench/secondOpinionEval/samplingFrame.ts \
+ *   --prs eval-results/sampling-source-v2.json --out eval-results/sampling-frame-v2.json
  * ```
+ *
+ * **母集団の素も凍結する。** frameのハッシュを記録しても、GitHubを引き直せば母集団そのものが
+ * 変わる。期間の指定は日付単位なので、`--until` に指定した当日の後半にPRがマージされれば、
+ * 同じコマンドが別の母集団を返す。frameだけを凍結しても「どの入力から作ったか」は固定されない
+ * ので、`gh` の出力をそのまま保存し、そのハッシュをframeへ書く。以降の再生成は保存した素から
+ * だけ行う。
  *
  * **証拠の有無をここでは一切見ない。** linked Issue があるか、人間のコメントが付いているか、
  * テストが後から足されたかは、どれもこの段階では条件にしない。ここで「正解ラベルを作りやすい
@@ -34,7 +45,17 @@ import * as path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 
+import { resolveSnapshot, type SnapshotStatus } from './prSnapshot';
+
 const run = promisify(execFile);
+
+/** 案件の判定は、このスクリプトを動かしているリポジトリに対して行う。 */
+const REPO_DIR = process.cwd();
+
+async function git(args: readonly string[]): Promise<string> {
+  const { stdout } = await run('git', ['-C', REPO_DIR, ...args], { maxBuffer: 64 * 1024 * 1024 });
+  return stdout;
+}
 
 /**
  * 変更規模の層の境界（Issue #1046）。metadata eligible 415件の四分位。
@@ -68,7 +89,8 @@ const PILOT_PR_NUMBERS: readonly number[] = [992, 995, 1027];
 /** 評価基盤そのもののIssue。これらに紐づくPRは測定対象から外す。 */
 const BENCHMARK_ISSUE_NUMBERS: readonly number[] = [1044, 1045, 1046, 1047, 1048];
 
-const DEFAULT_SINCE = '2026-08-07';
+/** 実際に最も古いマージが 2026-08-10。当初は 08-07 としていたが、その3日間にマージは無い。 */
+const DEFAULT_SINCE = '2026-08-10';
 const DEFAULT_UNTIL = '2026-08-31';
 
 interface GhPullRequest {
@@ -80,8 +102,6 @@ interface GhPullRequest {
   headRefOid: string;
   mergeCommit: { oid: string } | null;
 }
-
-type SnapshotStatus = 'ok' | 'non-linear' | 'unavailable';
 
 type ChangeSizeStratum = 'S' | 'M' | 'L' | 'XL';
 
@@ -124,6 +144,7 @@ interface FramePullRequest {
 interface Args {
   outPath: string;
   prsPath: string | undefined;
+  sourceOutPath: string | undefined;
   since: string;
   until: string;
 }
@@ -141,131 +162,82 @@ function parseArgs(argv: readonly string[]): Args {
   if (outPath === undefined || outPath === '') {
     throw new Error('--out は必須です');
   }
+  const prsPath = values.get('prs');
+  const sourceOutPath = values.get('source-out');
+  if (
+    (prsPath === undefined || prsPath === '') &&
+    (sourceOutPath === undefined || sourceOutPath === '')
+  ) {
+    // 素を保存しないままGitHubを引くと、そのframeがどの入力から出たかを後から示せない
+    throw new Error(
+      '--prs（保存済みの母集団）か --source-out（これから保存する先）のどちらかは必須です',
+    );
+  }
   return {
     outPath,
-    prsPath: values.get('prs'),
+    prsPath,
+    sourceOutPath,
     since: values.get('since') ?? DEFAULT_SINCE,
     until: values.get('until') ?? DEFAULT_UNTIL,
   };
 }
 
-async function git(args: readonly string[]): Promise<string> {
-  const { stdout } = await run('git', [...args], { maxBuffer: 64 * 1024 * 1024 });
-  return stdout;
-}
+const GH_ARGS = [
+  'pr',
+  'list',
+  '--state',
+  'merged',
+  '--limit',
+  '1000',
+  '--json',
+  'number,title,body,mergedAt,baseRefOid,headRefOid,mergeCommit',
+] as const;
 
-async function commitExists(sha: string): Promise<boolean> {
-  try {
-    await git(['cat-file', '-e', `${sha}^{commit}`]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function loadPullRequests(args: Args): Promise<GhPullRequest[]> {
-  if (args.prsPath !== undefined && args.prsPath !== '') {
-    return JSON.parse(await fs.readFile(args.prsPath, 'utf8')) as GhPullRequest[];
-  }
-  const { stdout } = await run(
-    'gh',
-    [
-      'pr',
-      'list',
-      '--state',
-      'merged',
-      '--limit',
-      '1000',
-      '--json',
-      'number,title,body,mergedAt,baseRefOid,headRefOid,mergeCommit',
-    ],
-    { maxBuffer: 64 * 1024 * 1024 },
-  );
-  return JSON.parse(stdout) as GhPullRequest[];
+/** 保存した母集団の素。`prs` は `gh` の出力をそのまま入れる。 */
+interface SourceSnapshot {
+  capturedAt: string;
+  command: string;
+  prs: GhPullRequest[];
 }
 
 /**
- * base と target を決める（Issue #1046）。
+ * 母集団の素を用意する（Issue #1046）。
  *
- * target は merge commit の第2親（PRのhead）。API の `headRefOid` ではなくこちらを使うのは、
- * **親であればローカルに必ずある**ためである。head branch は削除されるので `headRefOid` は
- * fetch済みとは限らない。
- *
- * base は**第1親ではなく `merge-base`** を取る。第1親はmerge直前の `main` であって、この
- * ブランチの分岐点ではない。分岐してからmergeされるまでに他のPRが `main` へ入っていると、
- * 第1親との差分にはその分が逆向きに混ざる。実測では PR #1041 が 169行 / 5ファイル のところ
- * 1272行 / 19ファイル になった。
- *
- * 親が1つしかない場合（squash / rebase merge）は、この対応が成り立たない。**黙って補正せず**
- * `non-linear` として記録し、API の値から同じく merge-base を取る。
+ * `--prs` があればそれを読む。無ければGitHubを引き、**引いた内容をそのまま保存する**。保存
+ * せずに引くのは `parseArgs` で禁止してあるので、素の無いframeはできない。
  */
-async function resolveSnapshot(pr: GhPullRequest): Promise<{
-  status: SnapshotStatus;
-  baseSha: string | undefined;
-  targetSha: string | undefined;
-  note: string | undefined;
-}> {
-  const mergeCommit = pr.mergeCommit?.oid;
-  if (mergeCommit === undefined || !(await commitExists(mergeCommit))) {
+async function loadSource(
+  args: Args,
+): Promise<{ snapshot: SourceSnapshot; path: string; sha256: string }> {
+  if (args.prsPath !== undefined && args.prsPath !== '') {
+    const raw = await fs.readFile(args.prsPath, 'utf8');
+    const parsed = JSON.parse(raw) as SourceSnapshot | GhPullRequest[];
+    // `gh` の生出力（配列）を直接渡された場合も読む。ただし取得時刻は分からない
+    const snapshot: SourceSnapshot = Array.isArray(parsed)
+      ? { capturedAt: 'unknown', command: `gh ${GH_ARGS.join(' ')}`, prs: parsed }
+      : parsed;
     return {
-      status: 'unavailable',
-      baseSha: undefined,
-      targetSha: undefined,
-      note: 'merge commit がローカルに無い',
+      snapshot,
+      path: path.resolve(args.prsPath),
+      sha256: createHash('sha256').update(raw).digest('hex'),
     };
-  }
-  const parents = (await git(['rev-list', '--parents', '-n', '1', mergeCommit]))
-    .trim()
-    .split(/\s+/);
-  const [, first, second] = parents;
-  if (first !== undefined && second !== undefined) {
-    const mergeBase = await mergeBaseOf(first, second);
-    if (mergeBase === undefined) {
-      return {
-        status: 'unavailable',
-        baseSha: undefined,
-        targetSha: undefined,
-        note: 'merge commit の2つの親に共通祖先が無い',
-      };
-    }
-    return { status: 'ok', baseSha: mergeBase, targetSha: second, note: undefined };
   }
 
-  // 親が1つ = squash か rebase。merge commit の差分は取れるが、PRのheadそのものではない
-  const baseAvailable = await commitExists(pr.baseRefOid);
-  const headAvailable = await commitExists(pr.headRefOid);
-  if (baseAvailable && headAvailable) {
-    const mergeBase = await mergeBaseOf(pr.baseRefOid, pr.headRefOid);
-    if (mergeBase !== undefined) {
-      return {
-        status: 'non-linear',
-        baseSha: mergeBase,
-        targetSha: pr.headRefOid,
-        note: 'merge commit の親が1つ（squash/rebase）。API の base/head から merge-base を取った',
-      };
-    }
-    return {
-      status: 'unavailable',
-      baseSha: undefined,
-      targetSha: undefined,
-      note: 'merge commit の親が1つで、API の base/head に共通祖先が無い',
-    };
-  }
-  return {
-    status: 'unavailable',
-    baseSha: undefined,
-    targetSha: undefined,
-    note: `merge commit の親が1つで、API の ${baseAvailable ? 'head' : 'base'} もローカルに無い`,
+  const { stdout } = await run('gh', [...GH_ARGS], { maxBuffer: 64 * 1024 * 1024 });
+  const snapshot: SourceSnapshot = {
+    capturedAt: new Date().toISOString(),
+    command: `gh ${GH_ARGS.join(' ')}`,
+    prs: JSON.parse(stdout) as GhPullRequest[],
   };
-}
-
-async function mergeBaseOf(a: string, b: string): Promise<string | undefined> {
-  try {
-    const out = (await git(['merge-base', a, b])).trim();
-    return out === '' ? undefined : out;
-  } catch {
-    return undefined;
-  }
+  const json = `${JSON.stringify(snapshot, null, 2)}\n`;
+  const outPath = args.sourceOutPath ?? '';
+  await fs.mkdir(path.dirname(path.resolve(outPath)), { recursive: true });
+  await fs.writeFile(outPath, json, 'utf8');
+  return {
+    snapshot,
+    path: path.resolve(outPath),
+    sha256: createHash('sha256').update(json).digest('hex'),
+  };
 }
 
 function stratumOf(changedLines: number): ChangeSizeStratum {
@@ -344,7 +316,7 @@ function isBenchmarkSelf(pr: GhPullRequest): boolean {
 }
 
 async function classify(pr: GhPullRequest): Promise<FramePullRequest> {
-  const snapshot = await resolveSnapshot(pr);
+  const snapshot = await resolveSnapshot(pr, REPO_DIR);
   const base: FramePullRequest = {
     prNumber: pr.number,
     title: pr.title,
@@ -415,8 +387,8 @@ function quartilesOf(values: readonly number[]): { q1: number; median: number; q
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const all = await loadPullRequests(args);
-  const inWindow = all.filter((pr) => {
+  const source = await loadSource(args);
+  const inWindow = source.snapshot.prs.filter((pr) => {
     const day = pr.mergedAt.slice(0, 10);
     return day >= args.since && day <= args.until;
   });
@@ -434,9 +406,26 @@ async function main(): Promise<void> {
     eligible.map((pr) => pr.changedLines).filter((n): n is number => typeof n === 'number'),
   );
 
+  // 境界は母集団の四分位そのものである。ずれたということは母集団が変わったということで、
+  // そのまま書き出すと「四分位で切った」と書いてある層が実際には四分位でなくなる
+  if (
+    measured.q1 !== CHANGE_SIZE_QUARTILES.q1 ||
+    measured.median !== CHANGE_SIZE_QUARTILES.median ||
+    measured.q3 !== CHANGE_SIZE_QUARTILES.q3
+  ) {
+    throw new Error(
+      `母集団の四分位が境界と一致しません。境界: ${JSON.stringify(CHANGE_SIZE_QUARTILES)} / 実測: ${JSON.stringify(measured)}。` +
+        '母集団が変わっています。CHANGE_SIZE_QUARTILES を実測値へ更新し、EXCLUSION_RULES_VERSION を上げ、前の版のファイルは残してください',
+    );
+  }
+
   const frame = {
     population: inWindow.length,
     window: [args.since, args.until],
+    /** 母集団の素。frameだけ凍結しても、GitHubを引き直せば母集団は変わる。 */
+    sourcePath: source.path,
+    sourceSha256: source.sha256,
+    capturedAt: source.snapshot.capturedAt,
     exclusionRulesVersion: EXCLUSION_RULES_VERSION,
     /** 層を切る境界。 */
     quartiles: CHANGE_SIZE_QUARTILES,
@@ -498,8 +487,11 @@ async function main(): Promise<void> {
     );
   }
   console.log('');
+  console.log(`母集団の素: ${source.path}`);
+  console.log(`  sha256: ${source.sha256}`);
+  console.log(`  取得時刻: ${source.snapshot.capturedAt}`);
   console.log(`書き出し: ${args.outPath}`);
-  console.log(`sha256: ${sha256}`);
+  console.log(`  sha256: ${sha256}`);
 }
 
 main().catch((error: unknown) => {
