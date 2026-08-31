@@ -111,7 +111,50 @@ test-only / config-only / refactor / 巨大PR などは**除外せずタグを�
 
 素と出力のSHA-256を記録し、以降の段階はこの凍結物を入力にする。規則や境界を変えたら `exclusionRulesVersion` を上げ、**前の版を上書きしない**。
 
-### 2. 案件ファイルを作る
+### 2. 証拠候補を検索する（Issue #1046 手順2）
+
+手順1で凍結した母集団の各案件について、正解ラベルの根拠になりうる材料の在り処を集める。
+
+```
+# 1回だけ: GitHubから引いて、証拠の素をそのまま保存する
+npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
+  --frame eval-results/sampling-frame-v2.json \
+  --evidence-src-out eval-results/evidence-source-v3.json \
+  --out eval-results/evidence-candidates-v3.json
+
+# 以降: 保存した素からのみ作り直す
+npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
+  --frame eval-results/sampling-frame-v2.json \
+  --evidence-src eval-results/evidence-source-v3.json \
+  --out eval-results/evidence-candidates-v3.json
+```
+
+**ここでは正解ラベルを作らない。** 集めるのは判断の材料であって、材料の有無で `groundTruthBasis` を機械的に決めることはしない。「後続コミットで直した」という事実だけでは、元の問題が実際に成立した証拠にならない。判定は手順3で中身を読んで行う。
+
+集める系統は次の5つで、重複してよい。
+
+| 系統              | 中身                                                               |
+| ----------------- | ------------------------------------------------------------------ |
+| `follow-up-fix`   | マージ後に、このPRを参照する fix / revert / test / perf のPRがある |
+| `follow-up-test`  | その後続PRがテストを触っている（実験による確定の候補）             |
+| `follow-up-issue` | マージ後に、このPRを参照するIssueがある                            |
+| `closing-issue`   | このPRが閉じたIssue（変更の背景。不具合の証拠ではない）            |
+| `account-comment` | AIレビュアー以外のアカウントによるコメント                         |
+| `account-review`  | AIレビュアー以外のアカウントによるレビュー                         |
+
+**後続かどうかは「このPRのマージ後に参照されたか」で見る。** 実測では、後続として拾ったPR参照213件のうち、対象より先にマージ済みだったものは0件だった。あわせて、参照元のIssue自体がマージ後に立ったか（`openedAfterMerge`）も記録する。前からある計画Issueが後で言及されただけのものは、このPRを受けた報告ではない。
+
+**投稿者のloginで「人間の証拠」と決めない。** このリポジトリのPR本文もコメントも、多くはAIエージェントがアカウント所有者の名前で書いている。`account` は「人間が書いた」ではなく「AIレビュアーだと断定できない」の意で、AIの転記かどうかは手順3で中身を読んで判断する。
+
+**Codexレビューは正解ラベルの根拠にしないが、件数は数える。** 数えないと「Codexの指摘しか無い案件」が何件あるかを後から示せない。
+
+`account-comment` と `account-review` を分ける理由はない。中身がAIの転記かどうかはこの段階で判定しないので、コメントだけを候補にすると、非modelのレビューしか持たないPRが「候補ゼロ」に数えられてしまう（実測で13件あった）。
+
+**取り切れなかったものを黙って落とさない。** コメント・レビュー・closing Issue、および**各closing Issue内のコメント**について、総数と取得件数を突き合わせ、足りなければ `truncated` へ残す。
+
+手順1と同じ凍結の契約を使う。frameのsha256が想定と違えば止まり、素は取り直さず、出力は1バイトでも違えば拒否する。加えて、**保存済みの素がframeのeligibleと同じ集合であること**（件数一致・重複なし・欠けなし・余分なし）も確かめる。版とハッシュだけでは、件数の違う素や同じPRが二重に入った素をそのまま集計できてしまう。
+
+### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。20〜30件を目安に、`kind` ごとの件数を**揃えて**集める（24件なら各6件）。実際の利用比率に合わせると、件数の多い種類の評価が全体平均になってしまう。利用比率での重み付けは、種類別の値が出てから後で掛ければよい。
 
@@ -181,7 +224,7 @@ test-only / config-only / refactor / 巨大PR などは**除外せずタグを�
 
 `knownImportantFindings` は**空でよい**。「見るべき問題が無かった変更」を混ぜないと、存在しない問題を指摘する量を測れない。その案件では recall は算出しない（対象外）。
 
-`knownConstraints` は**材料の中で確かめられる事実だけ**を書く。詳しくは「5. 採点する」の「真偽は材料の中だけで判定する」を参照。
+`knownConstraints` は**材料の中で確かめられる事実だけ**を書く。詳しくは「6. 採点する」の「真偽は材料の中だけで判定する」を参照。
 
 ### 分母へ入れてよい正解ラベル（Issue #1046）
 
@@ -234,7 +277,7 @@ test-only / config-only / refactor / 巨大PR などは**除外せずタグを�
 
 案件ファイルは実案件のパスや会話を含むため、リポジトリへコミットしない。
 
-### 3. 実行する
+### 4. 実行する
 
 ```
 npx tsx test/bench/secondOpinionEval/run.ts \
@@ -253,7 +296,7 @@ npx tsx test/bench/secondOpinionEval/run.ts \
 
 **結果ディレクトリはrunごとに分ける。** 同じディレクトリへ別のrunの結果が混ざると、条件ごとの件数が合わなくなる（`runId` が違うものは採点シート生成時に弾かれ、件数が出る）。
 
-### 4. 採点シートを作る
+### 5. 採点シートを作る
 
 ```
 npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
@@ -272,7 +315,7 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 
 **条件ごとのプロンプト全文は採点者へ渡さない。** `B-repeat` は依頼が2回入っているので、見ればどの条件か分かる。
 
-### 5. 採点する
+### 6. 採点する
 
 `sheet.json` の各項目を `rubric.json` の同じ `opaqueCaseId` と突き合わせ、次の値を付けた配列を `scores.json` として書く。
 
@@ -336,7 +379,7 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 - 全体の25〜30%は二重採点する（人とAI、またはAIの2回）。**`kind`・条件・難易度で層別して抜く**。特定の条件だけが二重採点から漏れると、その条件のズレは見えない
 - ズレが大きければ、その基準はまだ固まっていない。**基準を直してから測り直す。** ズレたまま本測定へ進むと、条件差なのか採点のばらつきなのかを後から分けられない
 
-### 6. 集計する
+### 7. 集計する
 
 ```
 npx tsx test/bench/secondOpinionEval/summarize.ts \
