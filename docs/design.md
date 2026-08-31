@@ -7537,6 +7537,92 @@ changedPaths: a.txt
 
 更新できるのは、追加資料に「作業ツリーの変更」を選んだ相談だけである。それ以外（`none` / 直近の応答）の材料はプロンプトの中で完結しており、作業ディレクトリに更新すべきものが無い。webview側のボタンも、更新できる相談のときだけ出す（`secondOpinionAdvisor` メッセージの `canUpdateMaterial`）。
 
+#### 凍結after-treeの構築（Issue #1047）
+
+条件A（上の「レビュー材料の隔離」）がAdvisorへ渡すのは `changes.diff` と `base/<変更対象ファイル>` だけである。**そのPRが触っていないファイルは既定で目に入らない。** Issue #1044 のscreeningでは、primaryと判定した9件のうち4件（#330 / #319 / #405 / #135）が「壊した場所・繋ぎ損ねた場所が差分の外」で、条件Aの材料からは到達できなかった。この4件はいずれも、押下時点のリポジトリを読めれば差分中の識別子から1〜2ホップで辿り着く。
+
+条件C-repoは、そこへ「押下時点の作業ツリーと同じ内容を持つ、書き換わらない木」を足す。
+
+##### 本番には`targetCommit`が無い
+
+評価ハーネス（`test/bench/secondOpinionEval/materials.ts`）は `git worktree add --detach <targetCommit>` で after 側を用意している。**この方法は本番では使えない。** `snapshot.ts` が固定するのは `baseCommit` と、そこからの差分だけで、after 側は未コミットの作業ツリーである。コミットとして存在しないので、押下時点の材料から組み立てるしかない。
+
+##### 構築方式の比較（実測）
+
+このリポジトリ（583ファイル・11.2MB・`baseCommit` = `HEAD~5`）と、binary・symlink・実行bitを含む使い捨てリポジトリで4系統を実測した。
+
+| 方式                                                             | 時間      | `.git`混入 | objectDBへの書込 | 追加依存                        |
+| ---------------------------------------------------------------- | --------- | ---------- | ---------------- | ------------------------------- |
+| A `git archive` + tar展開 + `git apply`                          | 0.53s     | 無し       | 0                | **tar展開器とbinary対応stdout** |
+| B 一時index + `apply --cached` + `write-tree` + `checkout-index` | 0.36s     | 無し       | **blob + tree**  | 無し                            |
+| B' 一時index + `checkout-index` + 展開先で `git apply`           | **0.20s** | 無し       | **0**            | 無し                            |
+| C detached worktree + `git apply` + `.git`を除いたコピー         | 0.59s     | **要除外** | 0                | 無し                            |
+
+A・B・B'・Cの4方式は、生成した木の中身が互いにbyte一致した（`diff -rq`）。Bが `write-tree` で返した tree SHA は `HEAD` の tree と一致し、この比較自体の正しさもそこで確かめている。
+
+**採ったのはB'である。** 決め手は2つ。
+
+- **Aはこのコードベースでは実装コストが跳ね上がる。** `GitCommandRunner.run` は `stdout` を文字列で返す。tarをここに通すとbinaryが壊れるため、binary対応の実行系と、tar展開器（`package.json` の実行時依存は `yaml` の1つだけ）の両方を足すことになる。`checkout-index --prefix` はgitが直接ファイルを書くので、どちらも要らない
+- **BとE（後述）は利用者のobjectDBへ書く。** `git apply --cached` と `git add -A` は after 側の内容をblobとして書き出す。使い捨てリポジトリでの実測では、B・Eがそれぞれ緩いobjectを2個増やしたのに対し、B'は**0個**だった。`git add -N` を避けた未追跡ファイルの扱い（Issue #926 F）と同じ理由で、人が作業している最中のリポジトリへ書き込む経路は作らない
+
+Bの利点は `write-tree` の返す tree SHA で凍結を検証できることだが、objectDBへ書く代償に見合わないと判断した。B'では代わりに、木の中の `.frozen-after-tree.txt` にベースコミット・ファイル数・欠落を残す。
+
+Cを採る場合も **detached worktree をそのままAdvisorの `cwd` にはできない。** worktree内の `.git` はファイルで、本体リポジトリの `.git` を指す。そこからは履歴・他ブランチ・他コミットへ到達でき、「押下時点の木だけ」という材料の契約を超える。したがってCは「worktreeを作る → `.git` を除いて別ディレクトリへコピーする」の2段になり、ディスクを2倍使い、`git worktree list` に一時的なエントリが載る。
+
+比較しなかった `git ls-tree -r` + `git cat-file --batch` は、Aと同じbinary stdoutの問題を持ち、加えてファイル数ぶんのプロセス起動が要る。この規模（583ファイル）で他の方式が0.2〜0.6秒に収まっているため、実測せずに落とした。
+
+##### press-time snapshot tree（E）を採らなかった理由
+
+比較の途中で、`GIT_INDEX_FILE` に一時indexを置いて `read-tree <base>` → `add -A` → `write-tree` する方式（E）も測った。押下時点の作業ツリーを1回の走査でtreeオブジェクトとして固定でき、未追跡ファイルも自動で入り、`git diff` を打ち直す必要が無い。凍結の忠実さという点では最も強い。
+
+採らなかったのは、objectDBへ書くこと（B と同じ）に加えて、**押下の瞬間に作業ツリー全体を走査する**ためである。`add -A` は差分の有無にかかわらず全ファイルをstatし、変更されたものはblobとして書き出す。押下から最初の応答までの待ち時間は既に長い（要約2分 + 本体15分）ので、押下時点の同期処理を増やす方向は取らない。
+
+##### 実装（`secondOpinion/afterTree.ts`）
+
+`createFrozenAfterTree()` が読むのは次の3つだけで、いずれも押下時点で固定済みである。実行時に作業ツリーを読むgitコマンドは無い。
+
+- `baseCommit` — 不変のコミット。`read-tree` / `checkout-index` はここからしか読まない
+- `applyDiff` — 押下時に取った差分の**文字列**。ここで `git diff` を打ち直さない
+- `untrackedFiles` — 押下時に `untracked.ts` の安全確認（realpath・fstat・同一fdからの読み取り）を通して読み終えた内容
+
+一時indexは `GIT_INDEX_FILE` でしか指定できず、`-c` でもサブコマンドのオプションでも渡せない。そのため `GitCommandRunner.run` に環境変数の口（`GitCommandOptions`）を足した。値が `undefined` のキーは親プロセスから引き継がずに消す——gitのhookから拡張機能が起動された場合など、親に `GIT_DIR` / `GIT_WORK_TREE` が残っていると別のリポジトリを触るためである。`git apply` の側では `GIT_CEILING_DIRECTORIES` で探索を展開先の親で止め、展開先の上位にあるリポジトリを見つけないようにしている。
+
+**本物のindexも作業ツリーも書き換えない**ことは、木の構築前後で `git status --porcelain` が変わらないことをテストで確かめている。
+
+##### `changes.diff`はそのまま`git apply`へ通せない
+
+`ReviewMaterial` に `applyDiff` を足し、`fullDiff`（= `changes.diff` の中身）とは別に取る。同じ地点の差分を2回取ることになるが、`fullDiff` をそのまま使えない理由が3つある。
+
+- **binary**: 既定の `git diff` はbinaryの中身を出さず `Binary files a/x and b/x differ` の1行になる。これを当てようとすると `error: cannot apply binary patch to 'x' without full index line` で失敗する（実測）。`--binary` が要る
+- **`diff.noprefix` / `diff.mnemonicPrefix`**: 利用者の設定次第で `a/` `b/` が消えたり `i/` `w/` になったりし、`git apply` の既定の `-p1` が外れる。`--src-prefix` / `--dst-prefix` で固定する
+- **`color.diff = always`**: 出力先がパイプでも色が付く。ANSIが混ざった差分は当たらない。`--no-color` で消す
+
+**`fullDiff` 側は変えていない。** そちらは条件Aの材料そのもので、Issue #1044 のベースラインとして凍結してある。`--binary` を足すとbinaryを含む案件で `changes.diff` の中身が変わる。
+
+なお後ろの2つ（`diff.noprefix` / `color.diff`）は、`changes.diff` 自体も利用者の設定次第で見た目が変わるという既存の問題でもある。Advisorが読むだけなら実害は小さいため、ここでは直さない。
+
+`applyDiff` は取得に失敗すると `undefined` になる。空文字列（未追跡ファイルだけが変わった場合に実際に起こる）と区別する必要があるためで、両方を空文字列にすると `git diff` が落ちたときに「差分が無い＝baseがそのまま after」という誤った木ができる。
+
+##### fail-openしない
+
+差分の適用に失敗したら、**途中まで実体化した木を返さない**。半端な木は「baseのままの箇所」と「afterになった箇所」が混ざり、どちらなのかAdvisorにも人にも区別できない。失敗したらディレクトリごと消して `FrozenAfterTreeError` を投げる。呼び出し側は条件Aの材料だけで進むか、相談自体をやめるかを選ぶ。`git apply --3way` は使わない——フォールバックでbaseのblobを探しに行く経路が増え、「当たらなかった」が「別の当て方で通った」に化ける。
+
+未追跡ファイルのうち、押下時点で内容を取得できなかったもの（binary・予算超過・型・権限）は木に置けない。**それを黙って飲まない。** `FrozenAfterTree.omissions` で返し、木の中の `.frozen-after-tree.txt` にも「存在しないのではなく、押下時点で取得できなかった」と明記する。Advisorが木を「押下時点の全部」と読むことを防ぐのが目的である。
+
+##### 確かめ方
+
+`test/unit/secondOpinionAfterTree.test.ts`。フェイクのgitでは確かめられない（gitが実際に何を書くか、当たらない差分で本当に失敗するか）ため、`worktree.test.ts` に倣って使い捨てリポジトリへ実物のgitを打つ。
+
+- 差分に現れないファイルも木に入る（C-repoの値打ちそのもの）
+- 木に `.git` を作らない
+- binary・実行bit・symlinkの変更が写る
+- `--binary` なしの差分では失敗し、木を残さない
+- 当たらない差分・辿れないベースコミットでは失敗し、木を残さない
+- 未追跡ファイルを置き、取得できなかったものは欠落として `omissions` と説明ファイルに残る
+- 木の外を指す未追跡パスは書かない
+- 木を作った後に作業ツリーを書き換えても木は変わらない
+- 本物のindexと作業ツリーが変わらない
+
 #### 差分の切り詰め（Issue #926 H）
 
 以前は `diff.slice(0, maxDiffChars)` で先頭から生の文字列として切っていた。落としたこと自体は `truncated` でプロンプトへ伝えていたが、切り方に4つの問題があった。
