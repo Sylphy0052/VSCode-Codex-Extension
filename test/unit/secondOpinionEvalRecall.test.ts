@@ -22,7 +22,7 @@ function finding(overrides: Partial<KnownFinding> = {}): KnownFinding {
     severity: 'critical',
     provenance: 'issue',
     groundTruthBasis: 'empirical',
-    evidencePaths: ['base/src/x.ts'],
+    evidencePaths: ['src/x.ts'],
     ...overrides,
   };
 }
