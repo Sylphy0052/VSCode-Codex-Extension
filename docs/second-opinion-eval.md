@@ -113,6 +113,8 @@ MCPを無効化するのは速度のためだけではない。既定のまま�
 ```json
 {
   "finding": "何が問題だったか（根本原因と、そこから観測できる症状で書く。修正箇所で書かない）",
+  "groundTruthBasis": "empirical",
+  "evidencePaths": ["src/orchestrator/teamHandoff.ts"],
   "recallCriteria": [
     "発生条件（いつ起きるか）に言及している",
     "破れる性質・観測できる症状（何が壊れるか）に言及している",
@@ -132,9 +134,54 @@ MCPを無効化するのは速度のためだけではない。既定のまま�
 
 `knownConstraints` は**材料の中で確かめられる事実だけ**を書く。詳しくは「4. 採点する」の「真偽は材料の中だけで判定する」を参照。
 
-`provenance` は根拠の強さで、強い順に `test` > `measured` > `issue` > `review` > `retrospective`。**`retrospective`（後から自分でそう思った）ばかりの案件は、recall の分母が事後の思い付きの量で動く。** 根拠のない項目を分母へ入れないこと。
+### 分母へ入れてよい正解ラベル（Issue #1046）
 
-回答を見てから正解を足したり削ったりすると、その回答に有利な採点になる。案件ファイルの内容ハッシュは実行時に `manifest.json` へ記録されるので、途中で書き換えれば後から分かる。
+`provenance`（根拠が置かれている場所）とは別に、**その問題が真だと何で確定したか**を `groundTruthBasis` に書く。recall の分母はこちらで決める。
+
+| 値                   | 意味                                                                     | 分母     |
+| -------------------- | ------------------------------------------------------------------------ | -------- |
+| `empirical`          | 修正前で失敗し修正後で成功するテスト、再現テスト、実機再現、ログ、実測値 | 入る     |
+| `independent-report` | AIレビューとは独立に発生した具体的症状。再現条件と観測結果が残るもの     | 入る     |
+| `independent-human`  | コードから論理的に成立すると人が確認したもの。AI指摘の転記でないこと     | 入る     |
+| `model-derived`      | AIのレビューだけが根拠。AI指摘をそのまま転記したIssue・コメントを含む    | 外す     |
+| `retrospective`      | 後から自分でそう思っただけ                                               | 外す     |
+| `mixed`              | 複数種類にまたがる。**最も弱い根拠で判定する**                           | 判定次第 |
+
+**記録場所や投稿者では判定しない。** 「AIが指摘 → 人がIssueへ転記 → `provenance: issue`」という経路が残るためである。このリポジトリでは直近120件のマージ済みPRのうち75件に `chatgpt-codex-connector` のレビューが付いており、実際にその経路が起きうる。測定対象と同じモデル系列の出力を正解にすると、recall は「すでにCodexが言ったことをもう一度言えるか」の測定になる。
+
+**「後続コミットで直した」という事実だけでは足りない。** 誰かが直すと判断したことは示せるが、元の問題が実際に成立した証拠にはならない。
+
+### 条件ごとに変わるもの
+
+次の2つは**条件に依存する**のでラベルへ書かない。
+
+- **発見可能か** — 条件Cで凍結リポジトリを探索させれば発見可能になる問題がある（#1047）
+- **入力に答えが書かれているか** — case brief を生成する条件では、生成文が原因を書いてしまえば、材料から推論するはずだった問題が入力に露出する
+
+ラベルが持つのは `evidencePaths`（発見に何が要るか）だけで、これは**判定の入力であって判定そのものではない**。「パスが材料に入っている＝発見できる」ではない。条件Aでは after 側の内容が `base/` に無くても `changes.diff` の全量から再構成できることがあり、逆にパスが入っていても必要な hunk がプロンプトから省かれていることもある。基準は次のとおり。
+
+> その条件で Advisor が実際にアクセスできる証拠から、`recallCriteria` を合理的に導けるか。
+
+判定は条件ごとに人が下し、`eligibility.json` へ残す。
+
+```json
+{
+  "caseId": "...",
+  "findingIndex": 0,
+  "conditionId": "A",
+  "discoverable": true,
+  "explicitlyExposed": false,
+  "rationale": "そう判定した理由"
+}
+```
+
+**primary benchmark の分母は「条件A（現行bundle）で発見可能」で判定する。** 条件Aで証拠が無い案件を混ぜると、依頼文の位置効果ではなく材料不足を測ってしまう。条件Cを測るときは、「Aでは発見できないが探索すれば発見できる」案件を別セットとして集計する。ラベルは共通なので**再ラベルは要らない**。
+
+実行時は `evidencePaths` のうち bundle に見当たらないものを一覧で出す。これは判定の材料であって判定ではなく、**実行は止めない**（自動で弾くと、差分から再構成できる案件まで黙って落ちる）。
+
+回答を見てから正解を足したり削ったりすると、その回答に有利な採点になる。案件ファイルと判定ファイル（`eligibility.json`）の内容ハッシュは、実行時に `manifest.json` の `casesSha256` / `eligibilitySha256` へ記録される。集計はこの2つを照合し、**一致しなければ止まる**。
+
+止めるのは、判定ファイルが recall の分母を直接動かすためである。`discoverable` を1つ `false` にするだけで分母が減り、ラベルは1文字も変わらないので差分にも出ない。警告にして続けると、歪んだ数値が出てから気づくことになる。`--eligibility` を付けずに実行した run も、分母を後から決められる状態なので集計しない。
 
 案件ファイルは実案件のパスや会話を含むため、リポジトリへコミットしない。
 
@@ -187,9 +234,7 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 | `verifiedNonActionableFindings`    | 材料の中で確かめた結果、採用に値しないと判断した指摘の数     |
 | `hallucinatedFindings`             | 材料と矛盾する、存在しない問題を指摘していた数               |
 | `indeterminateFindings`            | 材料の中では真偽を決められない指摘の数                       |
-| `recalledImportant`                | `knownImportantFindings` のうち拾えた数                      |
-| `recalledCritical`                 | そのうち `severity: critical` の数                           |
-| `recalledWarning`                  | そのうち `severity: warning` の数                            |
+| `recalledFindingIndexes`           | 拾えた正解ラベルの添字（`knownImportantFindings` の位置）    |
 | `constraintViolations`             | 制約・既決事項を誤認していた箇所の数                         |
 | `unnecessaryInvestigationRequests` | 「まず調べてほしい」で終わり、判断材料になっていない要求の数 |
 
@@ -215,6 +260,8 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 
 採点時は、**どの条件をどの記述が満たしたか**を記録する。後から一致を検証できるのはこの記録だけである。
 
+**採点者には案件の全ラベルを見せ、拾えたラベルの添字を返させる。** 件数ではなく添字で受けるのは、recall の分母が条件ごとに変わるからである。条件ごとに見せるラベルを変えると採点シートから条件が割れるので、絞り込みは集計側で掛ける。件数だけ受け取ると、分子が全ラベル基準・分母が条件基準というちぐはぐな比になる。
+
 `finding` を修正箇所で書かない。pilot（#1027）で「予約idの判定が case-sensitive」と修正箇所で書いたところ、回答はどれも「taskId と slug が大小文字を保ったままファイル名になるので、大小文字を区別しないファイルシステムでは別名義で上書きできる」——同じ現象をより広い原因で指摘していた。実際の修正は予約idの比較だけを直すものだったため「拾った」とも「拾っていない」とも読め、同じ6回答の recall が 1.000 と 0.000 の両方になった。
 
 #### 指標
@@ -226,7 +273,7 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 1. actionable precision
 2. actionable yield（`actionableFindings` / `totalFindings`）— 留保も分母へ入れた副指標。留保で稼ぐ回答はここで落ちる
 3. 判定不能の割合（`indeterminateFindings` / `totalFindings`）
-4. 重要問題の recall（`recalledImportant` / 案件の `knownImportantFindings` 件数）と、**critical / warning に分けた recall**。総 recall だけを見ると、warning を多く拾って critical を落とした回答が良く見える
+4. 重要問題の recall（拾えたラベル / その条件で分母に入るラベルの件数）と、**critical / warning に分けた recall**。総 recall だけを見ると、warning を多く拾って critical を落とした回答が良く見える
 5. 1回答あたりの指摘数
 6. 1回答あたりの存在しない問題の指摘数
 
@@ -244,10 +291,13 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 
 ```
 npx tsx test/bench/secondOpinionEval/summarize.ts \
-  --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> [--baseline A]
+  --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> --cases <案件ファイル> \
+  --eligibility <条件ごとの判定> [--baseline A]
 ```
 
 条件ごとの実測値（precision / actionable yield / 判定不能の割合 / recall と critical・warning の内訳 / 依頼文より後ろのバイト数など）に加えて、**案件ごとに対にした差**（precision / recall の平均差と勝敗）が出る。
+
+分母から外した正解ラベルの件数（循環・発見不能・答えが入力にある）と、条件ごとの判定が無くて外した件数も条件ごとに出る。**黙って分母から消すと、外れた件数が分からないまま recall だけが上がる。**
 
 全体を合算した値（micro 平均）は、指摘を多く並べた回答ほど重みが大きい。10件指摘する案件は2件しか指摘しない案件の5倍効く。条件の比較はもともと同じ案件を全条件へ流す対照実験なので、案件ごとに差を取って分布を見るほうが素直である。micro 平均は参考として併記される。
 

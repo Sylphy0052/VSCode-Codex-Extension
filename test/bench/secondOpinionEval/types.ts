@@ -68,6 +68,97 @@ export interface KnownFinding {
    * これを混ぜたまま recall を出すと、後知恵の量だけ分母が動く。
    */
   provenance: 'test' | 'measured' | 'issue' | 'review' | 'retrospective';
+  /**
+   * その問題が真だと**何で確定したか**。eligibility の判定はこの値で行う（Issue #1046）。
+   *
+   * {@link provenance} は根拠が置かれている場所であって、根拠の独立性ではない。場所で判定すると
+   * 「Codexが指摘 → 人がIssueへ転記 → `provenance: issue`」という経路で循環が残る。このリポジトリ
+   * では直近120件のマージ済みPRのうち75件に `chatgpt-codex-connector` のレビューが付いており、
+   * 実際にその経路が起きうる。**測定対象と同じモデル系列の出力を正解にすると、recall は
+   * 「すでにCodexが言ったことをもう一度言えるか」の測定になる。**
+   *
+   * - `empirical`: 修正前で失敗し修正後で成功するテスト、再現テスト、実機再現、ログ、実測値
+   * - `independent-report`: AIレビューとは独立に発生した具体的症状。再現条件と観測結果が残るもの
+   * - `independent-human`: コードから論理的に成立すると人が確認したもの。AI指摘の転記でないこと
+   * - `model-derived`: AIのレビューだけが根拠。AI指摘をそのまま転記したIssue・コメントを含む
+   * - `retrospective`: 後から自分でそう思っただけ
+   * - `mixed`: 複数種類にまたがる。**primary benchmark からは常に除外する**（下記）
+   *
+   * **「後続コミットで直した」という事実だけでは足りない。** 誰かが直すと判断したことは示せるが、
+   * 元の問題が実際に成立した証拠にはならない。
+   *
+   * `mixed` を分母へ入れないのは、この値だけでは何と何が混ざっているかが分からないためである。
+   * 「empirical と independent-human」なのか「empirical と model-derived」なのかを区別できず、
+   * 「最も弱い根拠で判定する」を実装できない。独立した根拠があるなら、**最も直接的な1種類を
+   * 選んで書けば足りる**ので、混合を表現できる必要は無い。
+   */
+  groundTruthBasis:
+    | 'empirical'
+    | 'independent-report'
+    | 'independent-human'
+    | 'model-derived'
+    | 'retrospective'
+    | 'mixed';
+  /**
+   * この問題の発見に必要なファイルのリポジトリ相対パス。
+   *
+   * **これは判定の入力であって、判定そのものではない。** 「パスが材料に入っている＝発見できる」
+   * ではない。条件Aでは after 側の内容が `base/` に無くても、`changes.diff` の全量から再構成
+   * できることがある。逆にパスが入っていても、必要な hunk がプロンプトから省かれていることも
+   * ある。判定の基準は次のとおりで、そのつど条件ごとに下す。
+   *
+   * > その条件で Advisor が実際にアクセスできる証拠から、{@link recallCriteria} を合理的に
+   * > 導けるか。
+   *
+   * 発見可能性（discoverability）と、入力に答えが書かれているか（explicitness）は、どちらも
+   * **条件に依存する**のでラベルには持たせない。条件Cで凍結リポジトリを探索させれば発見可能に
+   * なる問題があり（#1047）、case brief を生成する条件では、生成文が原因を書いてしまえば
+   * latent だった問題が explicit になる。ラベルへ焼き込むと、条件を足すたびに20〜30件の
+   * 再ラベルが要る。{@link FindingEligibility} として条件ごとに別で持つ。
+   */
+  evidencePaths: string[];
+}
+
+/** recall の分母へ入れてよい {@link KnownFinding.groundTruthBasis}。 */
+export const INDEPENDENT_GROUND_TRUTH_BASES: ReadonlySet<KnownFinding['groundTruthBasis']> =
+  new Set(['empirical', 'independent-report', 'independent-human']);
+
+/**
+ * 正解ラベルの根拠が、測定対象のモデルから独立しているか。
+ *
+ * これは条件に依存しない（何で真だと確定したかは、どの条件で流しても変わらない）ので、ここで
+ * 判定できる。条件に依存する発見可能性・explicitness は {@link FindingEligibility} で扱う。
+ */
+export function hasIndependentGroundTruth(finding: KnownFinding): boolean {
+  return INDEPENDENT_GROUND_TRUTH_BASES.has(finding.groundTruthBasis);
+}
+
+/**
+ * 正解ラベル1件が、ある条件で recall の分母に入るか（Issue #1046）。
+ *
+ * 案件ファイルとは別に持つ。条件を足しても既存のラベルを書き換えずに済ませるためである。
+ * 判定は条件ごとに人が下し、根拠を {@link rationale} へ残す。
+ */
+export interface FindingEligibility {
+  caseId: string;
+  /** `knownImportantFindings` の添字。 */
+  findingIndex: number;
+  conditionId: string;
+  /**
+   * その条件で Advisor がアクセスできる証拠から、`recallCriteria` を合理的に導けるか。
+   *
+   * `false` の項目を分母へ入れると、回答が知りようのない事実で recall を下げることになる。
+   */
+  discoverable: boolean;
+  /**
+   * その条件の最終入力に、答えがすでに書かれているか。
+   *
+   * `true` の項目を分母へ入れると、レビュー能力ではなく再読能力を測ってしまう。指標が飽和する
+   * 原因にもなる。
+   */
+  explicitlyExposed: boolean;
+  /** そう判定した理由。後から検証できるように残す。 */
+  rationale: string;
 }
 
 /**
@@ -205,10 +296,16 @@ export interface EvalRunRecord {
   baseCommit: string;
   targetCommit: string;
   /**
-   * この案件の重要問題の総数（recall の分母）。
+   * `knownImportantFindings.length` の写し。**primary recall の分母ではない。**
    *
-   * 集計側で案件ファイルを読み直さずに済むよう、実行記録へ焼き込む。分母を持たないと
-   * 「8件拾った」が 8/10 なのか 8/20 なのか区別できない。
+   * 分母は `groundTruthBasis` による除外（条件に依らない）と {@link FindingEligibility} に
+   * よる除外（条件ごとに変わる）を掛けたあとの件数で、集計側が案件ファイルと判定ファイルから
+   * 出す。ここに置いてあるのは、案件が何件のラベルを持っていたかを実行時点で残すためだけの値
+   * である。
+   * `groundTruthBasis` による除外（条件に依らない）と、{@link FindingEligibility} による除外
+   * （条件ごとに変わる）を掛けたあとの件数を、集計側が案件ファイルと eligibility から出す。
+   * 実行記録の側で分母を確定させないのは、**条件を足すたびに過去の実行記録が古くなるのを
+   * 避けるため**である。
    */
   knownImportantTotal: number;
   /**
@@ -243,6 +340,18 @@ export interface EvalRunManifest {
   /** 案件ファイルの内容ハッシュ。実験の途中で正解ラベルが変わっていないことの担保。 */
   casesSha256: string;
   casesPath: string;
+  /**
+   * 条件ごとの判定ファイル（`eligibility.json`）の内容ハッシュ。
+   *
+   * 案件ファイルだけを固定しても、**recall の分母は後から動かせる**。回答を読んでから
+   * `discoverable` や `explicitlyExposed` を書き換えて集計し直せば、ラベルを1文字も触らずに
+   * 分母が変わる。「回答を見る前に凍結する」という設計が別経路から破れるので、判定ファイルも
+   * 実行前に確定させ、ハッシュを残して集計時に突き合わせる。
+   *
+   * 判定ファイルを渡さずに実行した場合は `undefined`。その run の結果は本測定には使えない。
+   */
+  eligibilitySha256: string | undefined;
+  eligibilityPath: string | undefined;
   model: string;
   effort: string;
   conditionIds: string[];

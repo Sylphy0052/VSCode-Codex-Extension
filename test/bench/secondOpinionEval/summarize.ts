@@ -6,8 +6,17 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/summarize.ts \
- *   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> [--baseline A]
+ *   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> --cases <案件ファイル> \
+ *   --eligibility <条件ごとの判定> [--baseline A]
  * ```
+ *
+ * recall の分母は条件ごとに変わる（Issue #1046）。案件ファイルの正解ラベルへ、条件ごとの
+ * `FindingEligibility`（その条件の材料から発見できるか / 入力に答えが書かれていないか）を
+ * 掛けて確定する。
+ *
+ * 案件ファイルと判定ファイルは、**実行時のものと同一であることをハッシュで確かめてから**集計
+ * する。どちらかが変わっていれば集計を止める。回答を読んでから判定を書き換えれば、ラベルを
+ * 1文字も触らずに分母を動かせるためである。
  *
  * 採点ファイル（`scores.json`）は、採点者が `sheet.json` と `rubric.json` を見ながら書く配列で
  * ある。形式は {@link Score} を参照。
@@ -21,46 +30,20 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-import type { EvalRunRecord } from './types';
+import {
+  type EvalCase,
+  type EvalRunRecord,
+  type FindingEligibility,
+  type KnownFinding,
+} from './types';
 
-/** 採点者が1回答ごとに付ける値。 */
-interface Score {
-  scoringId: string;
-  /**
-   * 指摘の総数。
-   *
-   * 同じ根本原因・同じ修正を指す記述は、箇条書きが何行に分かれていても1件と数える
-   * （`docs/second-opinion-eval.md` の採点規約）。分割の仕方で分母が動くと、精度の比較が
-   * 書き方の比較になってしまう。
-   */
-  totalFindings: number;
-  /** そのうち、材料の中で真と確かめられ、実際に採用できる指摘の数。precision の分子。 */
-  actionableFindings: number;
-  /** 材料の中で確かめた結果、採用に値しないと判断した指摘の数（真だが影響が無い、など）。 */
-  verifiedNonActionableFindings: number;
-  /**
-   * 材料の中では真偽を決められない指摘の数。
-   *
-   * **precision の分母へ入れない。** 入れると「材料に無いので確認できない」と正しく留保した
-   * 回答が、存在しない問題を指摘した回答と同じように減点される。それは「不確かなことは黙る」
-   * のが得だという採点になり、測りたいものと逆を測る。
-   *
-   * 代わりに {@link Aggregate.indeterminateFindings} を別の指標として出す。留保ばかり並べる
-   * 回答はそちらで悪化し、黙る回答は recall と指摘数で悪化するので、逃げ道は残らない。
-   */
-  indeterminateFindings: number;
-  /** `knownImportantFindings` のうち、この回答が拾えた数。分母は実行記録が持っている。 */
-  recalledImportant: number;
-  /** そのうち severity 別の内訳。総 recall が warning 側に引っ張られるのを見分けるために要る。 */
-  recalledCritical: number;
-  recalledWarning: number;
-  /** 制約・既決事項を誤認していた箇所の数。 */
-  constraintViolations: number;
-  /** 材料と矛盾する、存在しない問題を指摘していた数。 */
-  hallucinatedFindings: number;
-  /** 「まず調べてほしい」で終わり、判断材料になっていない要求の数。 */
-  unnecessaryInvestigationRequests: number;
-}
+import {
+  eligibilityKey,
+  selectPrimaryFindingIndexes,
+  validateScore,
+  verifyFrozenInputs,
+  type Score,
+} from './recall';
 
 interface KeyEntry {
   scoringId: string;
@@ -75,6 +58,17 @@ interface Scored {
   conditionId: string;
   score: Score;
   record: EvalRunRecord;
+  /** その条件で分母に入る正解ラベルの件数と、拾えた件数（severity 別を含む）。 */
+  recall: RecallCounts;
+}
+
+interface RecallCounts {
+  recalled: number;
+  total: number;
+  recalledCritical: number;
+  totalCritical: number;
+  recalledWarning: number;
+  totalWarning: number;
 }
 
 interface Aggregate {
@@ -99,6 +93,10 @@ interface Aggregate {
   /** 依頼の末尾からプロンプト末尾までのバイト数。取れた実行の数と合計。 */
   bytesAfterRequestSamples: number;
   bytesAfterRequestTotal: number;
+  /** 条件ごとの判定（`FindingEligibility`）が無く、分母から外したラベルの延べ数。 */
+  eligibilityUnjudged: number;
+  /** 判定はあるが分母から外したラベルの延べ数（循環・発見不能・答えが入力にある）。 */
+  eligibilityExcluded: number;
   latencyMsTotal: number;
   promptBytesTotal: number;
   /** トークン量が取れた実行の数。取れなかった分を平均へ混ぜないために数える。 */
@@ -110,6 +108,8 @@ interface Args {
   resultsDir: string;
   scores: string;
   key: string;
+  cases: string;
+  eligibility: string;
   baseline: string;
 }
 
@@ -126,10 +126,26 @@ function parseArgs(argv: readonly string[]): Args {
   const resultsDir = values.get('results');
   const scores = values.get('scores');
   const key = values.get('key');
-  if (resultsDir === undefined || scores === undefined || key === undefined) {
-    throw new Error('--results と --scores と --key は必須です');
+  const cases = values.get('cases');
+  const eligibility = values.get('eligibility');
+  if (
+    resultsDir === undefined ||
+    scores === undefined ||
+    key === undefined ||
+    cases === undefined ||
+    eligibility === undefined
+  ) {
+    // 判定ファイルを省けるようにすると、分母を後から決められる経路が残る
+    throw new Error('--results と --scores と --key と --cases と --eligibility は必須です');
   }
-  return { resultsDir, scores, key, baseline: values.get('baseline') ?? 'A' };
+  return {
+    resultsDir,
+    scores,
+    key,
+    cases,
+    eligibility,
+    baseline: values.get('baseline') ?? 'A',
+  };
 }
 
 function emptyAggregate(conditionId: string): Aggregate {
@@ -153,6 +169,8 @@ function emptyAggregate(conditionId: string): Aggregate {
     unnecessaryInvestigationRequests: 0,
     bytesAfterRequestSamples: 0,
     bytesAfterRequestTotal: 0,
+    eligibilityUnjudged: 0,
+    eligibilityExcluded: 0,
     latencyMsTotal: 0,
     promptBytesTotal: 0,
     usageSamples: 0,
@@ -179,6 +197,17 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const scores = JSON.parse(await fs.readFile(args.scores, 'utf8')) as Score[];
   const key = JSON.parse(await fs.readFile(args.key, 'utf8')) as KeyEntry[];
+  await verifyFrozenInputs(args.resultsDir, args.cases, args.eligibility);
+  const cases = JSON.parse(await fs.readFile(args.cases, 'utf8')) as EvalCase[];
+  const findingsByCase = new Map(cases.map((c) => [c.id, c.knownImportantFindings]));
+  // ここへ来る時点で verifyFrozenInputs が通っているので、判定ファイルは必ずある
+  const eligibility = new Map<string, FindingEligibility>();
+  const eligibilityEntries = JSON.parse(
+    await fs.readFile(args.eligibility, 'utf8'),
+  ) as FindingEligibility[];
+  for (const entry of eligibilityEntries) {
+    eligibility.set(eligibilityKey(entry.caseId, entry.findingIndex, entry.conditionId), entry);
+  }
 
   const byScoringId = new Map(key.map((entry) => [entry.scoringId, entry]));
   const records = new Map<string, EvalRunRecord>();
@@ -211,6 +240,7 @@ async function main(): Promise<void> {
 
   const scoredItems: Scored[] = [];
   const brokenScores: string[] = [];
+  let outsidePrimary = 0;
   let unmatched = 0;
   for (const score of scores) {
     const entry = byScoringId.get(score.scoringId);
@@ -234,20 +264,56 @@ async function main(): Promise<void> {
       brokenScores.push(`${score.scoringId}: ${classified} !== ${score.totalFindings}`);
       continue;
     }
-    scoredItems.push({ caseId: entry.caseId, conditionId: entry.conditionId, score, record });
+    const findings = findingsByCase.get(entry.caseId) ?? [];
+    const invalid = validateScore(score, findings.length);
+    if (invalid !== undefined) {
+      brokenScores.push(`${score.scoringId}: ${invalid}`);
+      continue;
+    }
+    const selected = selectPrimaryFindingIndexes(
+      findings,
+      eligibility,
+      entry.caseId,
+      entry.conditionId,
+    );
+    const primary = new Set(selected.primary);
+    const recalledPrimary = score.recalledFindingIndexes.filter((i) => primary.has(i));
+    const severityOf = (i: number): KnownFinding['severity'] | undefined => findings[i]?.severity;
+    const recall: RecallCounts = {
+      recalled: recalledPrimary.length,
+      total: primary.size,
+      recalledCritical: recalledPrimary.filter((i) => severityOf(i) === 'critical').length,
+      totalCritical: selected.primary.filter((i) => severityOf(i) === 'critical').length,
+      recalledWarning: recalledPrimary.filter((i) => severityOf(i) === 'warning').length,
+      totalWarning: selected.primary.filter((i) => severityOf(i) === 'warning').length,
+    };
+    const outside = score.recalledFindingIndexes.length - recalledPrimary.length;
+    if (outside > 0) {
+      // 分母の外のラベルを拾ったこと自体は悪くない。ただし分子へ入れると比が壊れるので落とす
+      outsidePrimary += outside;
+    }
+    scoredItems.push({
+      caseId: entry.caseId,
+      conditionId: entry.conditionId,
+      score,
+      record,
+      recall,
+    });
 
     const aggregate = take(entry.conditionId);
+    aggregate.eligibilityUnjudged += selected.unjudged;
+    aggregate.eligibilityExcluded += selected.excluded;
     aggregate.scored += 1;
     aggregate.totalFindings += score.totalFindings;
     aggregate.actionableFindings += score.actionableFindings;
     aggregate.verifiedNonActionableFindings += score.verifiedNonActionableFindings;
     aggregate.indeterminateFindings += score.indeterminateFindings;
-    aggregate.recalledImportant += score.recalledImportant;
-    aggregate.knownImportantTotal += record.knownImportantTotal;
-    aggregate.recalledCritical += score.recalledCritical;
-    aggregate.knownCriticalTotal += record.knownCriticalTotal;
-    aggregate.recalledWarning += score.recalledWarning;
-    aggregate.knownWarningTotal += record.knownWarningTotal;
+    aggregate.recalledImportant += recall.recalled;
+    aggregate.knownImportantTotal += recall.total;
+    aggregate.recalledCritical += recall.recalledCritical;
+    aggregate.knownCriticalTotal += recall.totalCritical;
+    aggregate.recalledWarning += recall.recalledWarning;
+    aggregate.knownWarningTotal += recall.totalWarning;
     aggregate.constraintViolations += score.constraintViolations;
     aggregate.hallucinatedFindings += score.hallucinatedFindings;
     aggregate.unnecessaryInvestigationRequests += score.unnecessaryInvestigationRequests;
@@ -270,8 +336,15 @@ async function main(): Promise<void> {
   }
   if (brokenScores.length > 0) {
     console.error(
-      `[summarize] 4区分の合計が totalFindings と合わない採点を ${brokenScores.length} 件除外しました: ` +
+      `[summarize] 形が正しくない採点を ${brokenScores.length} 件除外しました: ` +
         brokenScores.join(', '),
+    );
+  }
+
+  if (outsidePrimary > 0) {
+    // 分母の外のラベルを拾った分。分子へ入れると比が壊れるので落としているが、件数は出す
+    console.error(
+      `[summarize] 分母に入らない正解ラベルを拾った採点が延べ ${outsidePrimary} 件ありました（分子には数えていません）`,
     );
   }
 
@@ -314,6 +387,10 @@ function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>): void {
       `    うち warning:       ${ratio(row.recalledWarning, row.knownWarningTotal)}` +
         `（${row.recalledWarning}/${row.knownWarningTotal}）`,
     );
+    console.log(
+      `  分母から外した正解:   ${row.eligibilityExcluded} 件（循環・発見不能・答えが入力にある）` +
+        ` / 未判定 ${row.eligibilityUnjudged} 件`,
+    );
     console.log(`  1回答あたりの指摘数:  ${ratio(row.totalFindings, row.scored)}`);
     console.log(
       `  存在しない問題の指摘: ${ratio(row.hallucinatedFindings, row.scored)} 件/回答` +
@@ -354,18 +431,16 @@ interface CaseConditionValue {
  */
 function printPaired(items: readonly Scored[], baselineId: string): void {
   const byCase = new Map<string, Map<string, CaseConditionValue>>();
-  const grouped = new Map<string, Score[]>();
-  const totals = new Map<string, number>();
+  const grouped = new Map<string, Scored[]>();
   for (const item of items) {
-    const compositeKey = `${item.caseId} ${item.conditionId}`;
-    const list = grouped.get(compositeKey) ?? [];
-    list.push(item.score);
-    grouped.set(compositeKey, list);
-    totals.set(compositeKey, item.record.knownImportantTotal);
+    const compositeKey = `${item.caseId}\u0000${item.conditionId}`;
+    const group = grouped.get(compositeKey) ?? [];
+    group.push(item);
+    grouped.set(compositeKey, group);
   }
-  for (const [compositeKey, list] of grouped) {
-    const [caseId = '', conditionId = ''] = compositeKey.split(' ');
-    const knownTotal = totals.get(compositeKey) ?? 0;
+  for (const [compositeKey, group] of grouped) {
+    const [caseId = '', conditionId = ''] = compositeKey.split('\u0000');
+    const list = group.map((item) => item.score);
     const perCase = byCase.get(caseId) ?? new Map<string, CaseConditionValue>();
     perCase.set(conditionId, {
       precision: mean(
@@ -382,8 +457,12 @@ function printPaired(items: readonly Scored[], baselineId: string): void {
           .filter((v) => v.judged > 0)
           .map((v) => v.actionable / v.judged),
       ),
-      recall:
-        knownTotal === 0 ? undefined : mean(list.map((s) => s.recalledImportant / knownTotal)),
+      // 分母は条件ごとに違う。案件と条件の組で確定した件数を使い、0件なら recall を出さない
+      recall: mean(
+        group
+          .filter((item) => item.recall.total > 0)
+          .map((i) => i.recall.recalled / i.recall.total),
+      ),
     });
     byCase.set(caseId, perCase);
   }
