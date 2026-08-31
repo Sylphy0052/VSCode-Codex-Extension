@@ -9,14 +9,14 @@
  * # 1回だけ: GitHubから引いて、証拠の素をそのまま保存する
  * npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
  *   --frame eval-results/sampling-frame-v2.json \
- *   --evidence-src-out eval-results/evidence-source-v2.json \
- *   --out eval-results/evidence-candidates-v2.json
+ *   --evidence-src-out eval-results/evidence-source-v3.json \
+ *   --out eval-results/evidence-candidates-v3.json
  *
  * # 以降: 保存した素からのみ作り直す
  * npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
  *   --frame eval-results/sampling-frame-v2.json \
- *   --evidence-src eval-results/evidence-source-v2.json \
- *   --out eval-results/evidence-candidates-v2.json
+ *   --evidence-src eval-results/evidence-source-v3.json \
+ *   --out eval-results/evidence-candidates-v3.json
  * ```
  *
  * **ここでは正解ラベルを作らない。** 集めるのは「その問題が真だと確定した根拠」を人が読んで
@@ -41,6 +41,7 @@ import { promisify } from 'node:util';
 import {
   collectCandidates,
   summarizeChannels,
+  verifySourceCoverage,
   FOLLOW_UP_FILE_PAGE,
   type EvidenceCandidates,
   type RawCrossReference,
@@ -62,7 +63,7 @@ const REPO_NAME = 'VSCode-Codex-Extension';
 const EXPECTED_FRAME_SHA256 = 'aaf4a28de0d6a3f8b24815f52e89dfc7bf5cadc6dd932f773004aa7cbd621bc6';
 
 /** 証拠候補の収集規則の版。規則を変えたら上げ、前の版のファイルは残す。 */
-const EVIDENCE_RULES_VERSION = 2;
+const EVIDENCE_RULES_VERSION = 3;
 
 /** 1リクエストで引くPR数。GraphQLのnode数上限に収まる範囲で大きくとる。 */
 const BATCH_SIZE = 20;
@@ -278,6 +279,14 @@ function truncationsOf(node: GqlPrEvidence): string[] {
       `closingIssues(${node.closingIssuesReferences.nodes.length}/${node.closingIssuesReferences.totalCount})`,
     );
   }
+  for (const issue of node.closingIssuesReferences.nodes) {
+    // Issue本体が取れていても、その中のコメントが切れていれば再現報告が素から落ちる
+    if (issue.comments.nodes.length < issue.comments.totalCount) {
+      truncated.push(
+        `issue#${issue.number}.comments(${issue.comments.nodes.length}/${issue.comments.totalCount})`,
+      );
+    }
+  }
   // timelineItems の totalCount は itemTypes での絞り込み前の件数を返すので比較に使えない。
   // 取り切れたかは「上限まで埋まっていないこと」で見る
   if (node.timelineItems.nodes.length >= TIMELINE_PAGE) {
@@ -302,6 +311,7 @@ function toRawEvidence(node: GqlPrEvidence): RawPrEvidence {
       authorLogin: issue.author?.login,
       body: issue.body ?? '',
       comments: issue.comments.nodes.map(toComment),
+      commentTotalCount: issue.comments.totalCount,
     })),
     crossReferences: node.timelineItems.nodes
       .map(toCrossReference)
@@ -393,6 +403,7 @@ async function loadEvidenceSource(
           'その版で取り直したファイルを指すか、前の版のコードで読んでください',
       );
     }
+    verifySourceCoverage(source.prs, prNumbers);
     return {
       source,
       path: args.evidenceSrcPath,

@@ -52,6 +52,13 @@ export interface RawLinkedIssue {
   authorLogin: string | undefined;
   body: string;
   comments: RawComment[];
+  /**
+   * このIssueに付いているコメントの総数。
+   *
+   * `comments` は上限まで引いた分しか持たない。総数を残しておかないと、101件目以降の再現報告
+   * が素から消えていることを後から示せない。切れていれば `truncated` へ出す。
+   */
+  commentTotalCount: number;
 }
 
 export interface RawCrossReference {
@@ -99,12 +106,25 @@ export type EvidenceChannel =
   /** このPRが閉じたIssue。変更の背景であって、不具合が起きた証拠ではない。 */
   | 'closing-issue'
   /** AIレビュアー以外のアカウントによるコメント。AIの転記かどうかは手順3で見る。 */
-  | 'account-comment';
+  | 'account-comment'
+  /**
+   * AIレビュアー以外のアカウントによるレビュー。
+   *
+   * `account-comment` と同じ扱いにする。中身がAIの転記かどうかはこの段階では判定しないので、
+   * コメントだけを候補にしてレビューを落とすと、非modelのレビューしか持たないPRが「候補
+   * ゼロ」に数えられてしまう。
+   */
+  | 'account-review';
 
 export interface FollowUpPr {
   number: number;
   title: string;
+  /** 参照された時刻。 */
   createdAt: string;
+  /** PR自体が立った時刻。マージ前から開いていたPRが後で参照しただけのこともある。 */
+  sourceCreatedAt: string;
+  /** マージ後に立ったPRか。Issue側と対称にしてある。 */
+  openedAfterMerge: boolean;
   mergedAt: string | undefined;
   /** Conventional Commits の型。タイトルから読めなければ `undefined`。 */
   changeType: string | undefined;
@@ -204,6 +224,8 @@ export function collectCandidates(
         number: ref.number,
         title: ref.title,
         createdAt: ref.createdAt,
+        sourceCreatedAt: ref.sourceCreatedAt,
+        openedAfterMerge: ref.sourceCreatedAt > raw.mergedAt,
         mergedAt: ref.mergedAt,
         changeType: changeTypeOf(ref.title),
         touchesTests: touchesTestsOf(files),
@@ -225,7 +247,7 @@ export function collectCandidates(
     number: issue.number,
     title: issue.title,
     authorKind: authorKindOf(issue.authorLogin),
-    commentCount: issue.comments.length,
+    commentCount: issue.commentTotalCount,
   }));
 
   const commentKinds = raw.comments.map((comment) => authorKindOf(comment.authorLogin));
@@ -251,6 +273,9 @@ export function collectCandidates(
   if (commentKinds.includes('account')) {
     channels.push('account-comment');
   }
+  if (reviewKinds.includes('account')) {
+    channels.push('account-review');
+  }
 
   return {
     prNumber: raw.prNumber,
@@ -271,13 +296,14 @@ export const EVIDENCE_CHANNELS: readonly EvidenceChannel[] = [
   'follow-up-issue',
   'closing-issue',
   'account-comment',
+  'account-review',
 ];
 
 /**
  * 系統ごとの件数と、候補がひとつも無いPRの数。
  *
- * `closing-issue` と `account-comment` はほぼ全件に付くはずで、ここが絞り込みになるとは
- * 考えていない。絞り込みは手順3の中身の判定で起きる。
+ * `closing-issue` / `account-comment` / `account-review` はほぼ全件に付くはずで、ここが
+ * 絞り込みになるとは考えていない。絞り込みは手順3の中身の判定で起きる。
  */
 export function summarizeChannels(all: readonly EvidenceCandidates[]): {
   total: number;
@@ -292,4 +318,45 @@ export function summarizeChannels(all: readonly EvidenceCandidates[]): {
     })),
     noChannel: all.filter((candidate) => candidate.channels.length === 0).length,
   };
+}
+
+/**
+ * 保存済みの素が、frameのeligibleと**同じ集合**であることを確かめる。
+ *
+ * 版とframeのハッシュだけでは、件数が足りない素・同じPRが二重に入った素・frame外のPRが
+ * 混じった素をそのまま集計できてしまう。分母が静かに変わるので、ここで止める。
+ */
+export function verifySourceCoverage(
+  prs: readonly { prNumber: number }[],
+  expected: readonly number[],
+): void {
+  const actual = prs.map((pr) => pr.prNumber);
+  const seen = new Set<number>();
+  const duplicates = actual.filter((number) => {
+    if (seen.has(number)) {
+      return true;
+    }
+    seen.add(number);
+    return false;
+  });
+  const expectedSet = new Set(expected);
+  const missing = expected.filter((number) => !seen.has(number));
+  const extra = actual.filter((number) => !expectedSet.has(number));
+
+  const problems: string[] = [];
+  if (duplicates.length > 0) {
+    problems.push(`重複: ${[...new Set(duplicates)].join(', ')}`);
+  }
+  if (missing.length > 0) {
+    problems.push(`欠け: ${missing.join(', ')}`);
+  }
+  if (extra.length > 0) {
+    problems.push(`余分: ${extra.join(', ')}`);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `保存済みの素がframeのeligibleと一致しません（期待 ${expected.length} 件 / 素 ${actual.length} 件）。` +
+        problems.join(' / '),
+    );
+  }
 }

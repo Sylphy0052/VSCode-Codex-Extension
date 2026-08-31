@@ -119,14 +119,14 @@ test-only / config-only / refactor / 巨大PR などは**除外せずタグを�
 # 1回だけ: GitHubから引いて、証拠の素をそのまま保存する
 npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
   --frame eval-results/sampling-frame-v2.json \
-  --evidence-src-out eval-results/evidence-source-v2.json \
-  --out eval-results/evidence-candidates-v2.json
+  --evidence-src-out eval-results/evidence-source-v3.json \
+  --out eval-results/evidence-candidates-v3.json
 
 # 以降: 保存した素からのみ作り直す
 npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
   --frame eval-results/sampling-frame-v2.json \
-  --evidence-src eval-results/evidence-source-v2.json \
-  --out eval-results/evidence-candidates-v2.json
+  --evidence-src eval-results/evidence-source-v3.json \
+  --out eval-results/evidence-candidates-v3.json
 ```
 
 **ここでは正解ラベルを作らない。** 集めるのは判断の材料であって、材料の有無で `groundTruthBasis` を機械的に決めることはしない。「後続コミットで直した」という事実だけでは、元の問題が実際に成立した証拠にならない。判定は手順3で中身を読んで行う。
@@ -140,6 +140,7 @@ npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
 | `follow-up-issue` | マージ後に、このPRを参照するIssueがある                            |
 | `closing-issue`   | このPRが閉じたIssue（変更の背景。不具合の証拠ではない）            |
 | `account-comment` | AIレビュアー以外のアカウントによるコメント                         |
+| `account-review`  | AIレビュアー以外のアカウントによるレビュー                         |
 
 **後続かどうかは「このPRのマージ後に参照されたか」で見る。** 実測では、後続として拾ったPR参照213件のうち、対象より先にマージ済みだったものは0件だった。あわせて、参照元のIssue自体がマージ後に立ったか（`openedAfterMerge`）も記録する。前からある計画Issueが後で言及されただけのものは、このPRを受けた報告ではない。
 
@@ -147,7 +148,11 @@ npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
 
 **Codexレビューは正解ラベルの根拠にしないが、件数は数える。** 数えないと「Codexの指摘しか無い案件」が何件あるかを後から示せない。
 
-手順1と同じ凍結の契約を使う。frameのsha256が想定と違えば止まり、素は取り直さず、出力は1バイトでも違えば拒否する。
+`account-comment` と `account-review` を分ける理由はない。中身がAIの転記かどうかはこの段階で判定しないので、コメントだけを候補にすると、非modelのレビューしか持たないPRが「候補ゼロ」に数えられてしまう（実測で13件あった）。
+
+**取り切れなかったものを黙って落とさない。** コメント・レビュー・closing Issue、および**各closing Issue内のコメント**について、総数と取得件数を突き合わせ、足りなければ `truncated` へ残す。
+
+手順1と同じ凍結の契約を使う。frameのsha256が想定と違えば止まり、素は取り直さず、出力は1バイトでも違えば拒否する。加えて、**保存済みの素がframeのeligibleと同じ集合であること**（件数一致・重複なし・欠けなし・余分なし）も確かめる。版とハッシュだけでは、件数の違う素や同じPRが二重に入った素をそのまま集計できてしまう。
 
 ### 3. 案件ファイルを作る
 

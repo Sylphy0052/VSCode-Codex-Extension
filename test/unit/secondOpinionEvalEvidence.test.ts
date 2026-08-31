@@ -7,6 +7,7 @@ import {
   FOLLOW_UP_FILE_PAGE,
   isTestPath,
   summarizeChannels,
+  verifySourceCoverage,
   type RawCrossReference,
   type RawPrEvidence,
 } from '../bench/secondOpinionEval/evidenceChannels';
@@ -184,6 +185,55 @@ describe('collectCandidates', () => {
     expect(candidates.channels).toEqual([]);
   });
 
+  it('非modelのレビューしか無いPRを候補ゼロに数えない', () => {
+    // コメントだけを候補にすると、レビューで指摘されたPRが「材料なし」として落ちる
+    const candidates = collectCandidates(
+      rawEvidence({
+        reviews: [{ authorLogin: 'Sylphy0052', state: 'CHANGES_REQUESTED', body: '' }],
+      }),
+      new Map(),
+    );
+
+    expect(candidates.accountReviewCount).toBe(1);
+    expect(candidates.channels).toEqual(['account-review']);
+  });
+
+  it('closing Issue の件数は取れた分ではなく総数を出す', () => {
+    const candidates = collectCandidates(
+      rawEvidence({
+        closingIssues: [
+          {
+            number: 500,
+            title: '元のIssue',
+            authorLogin: 'Sylphy0052',
+            body: '',
+            comments: [
+              { authorLogin: 'Sylphy0052', createdAt: '2026-08-19T00:00:00Z', body: '1件目' },
+            ],
+            commentTotalCount: 120,
+          },
+        ],
+      }),
+      new Map(),
+    );
+
+    expect(candidates.closingIssues[0]?.commentCount).toBe(120);
+  });
+
+  it('後続PRにも openedAfterMerge を残す', () => {
+    const candidates = collectCandidates(
+      rawEvidence({
+        crossReferences: [
+          crossRef({ number: 200, sourceCreatedAt: '2026-08-01T00:00:00Z' }),
+          crossRef({ number: 201, sourceCreatedAt: '2026-08-21T00:00:00Z' }),
+        ],
+      }),
+      new Map(),
+    );
+
+    expect(candidates.followUpPrs.map((pr) => pr.openedAfterMerge)).toEqual([false, true]);
+  });
+
   it('マージ後に立ったIssueの参照は follow-up-issue になる', () => {
     const candidates = collectCandidates(
       rawEvidence({
@@ -230,5 +280,40 @@ describe('collectCandidates', () => {
     expect(summary.total).toBe(2);
     expect(summary.noChannel).toBe(1);
     expect(summary.perChannel.find((entry) => entry.channel === 'follow-up-test')?.count).toBe(1);
+  });
+});
+
+describe('verifySourceCoverage', () => {
+  const expected = [1, 2, 3];
+
+  it('同じ集合なら通す', () => {
+    expect(() =>
+      verifySourceCoverage([{ prNumber: 3 }, { prNumber: 1 }, { prNumber: 2 }], expected),
+    ).not.toThrow();
+  });
+
+  it('欠けている素を拒否する', () => {
+    // 件数が減った素をそのまま集計すると、分母が静かに変わる
+    expect(() => verifySourceCoverage([{ prNumber: 1 }, { prNumber: 2 }], expected)).toThrow(
+      /欠け: 3/,
+    );
+  });
+
+  it('重複している素を拒否する', () => {
+    expect(() =>
+      verifySourceCoverage(
+        [{ prNumber: 1 }, { prNumber: 1 }, { prNumber: 2 }, { prNumber: 3 }],
+        expected,
+      ),
+    ).toThrow(/重複: 1/);
+  });
+
+  it('frame外のPRが混じった素を拒否する', () => {
+    expect(() =>
+      verifySourceCoverage(
+        [{ prNumber: 1 }, { prNumber: 2 }, { prNumber: 3 }, { prNumber: 99 }],
+        expected,
+      ),
+    ).toThrow(/余分: 99/);
   });
 });
