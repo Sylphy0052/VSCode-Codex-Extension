@@ -13,6 +13,9 @@
  * - `changes.diff` — 押下時点の差分の全量（プロンプトへ載せる分は上限で切られるが、これは切らない）
  * - `base/<パス>` — 変更対象ファイルの `baseCommit` 時点の内容
  *
+ * `afterTree` を渡した場合はこれに `after/` が加わる（Issue #1047 条件C-repo）。押下時点の
+ * リポジトリ全体の写しで、差分が触っていないファイルもここから読める。**既定では作らない。**
+ *
  * **保証できることとできないこと**（design.md §14.80 に同じ内容を残す）。
  *
  * - 保証する: 既定でAdvisorの目に入るのは、押下時点で固定した材料だけである
@@ -27,7 +30,9 @@ import * as path from 'node:path';
 
 import type { Logger } from '../log';
 import type { GitCommandRunner } from '../orchestrator/worktree';
-import { isInsideRoot } from './untracked';
+
+import { createFrozenAfterTree } from './afterTree';
+import { isInsideRoot, type UntrackedFile, type UntrackedOmission } from './untracked';
 
 /** 一時ディレクトリ名の接頭辞。取り残しの掃除は、この接頭辞を持つものだけを対象にする。 */
 export const REVIEW_BUNDLE_PREFIX = 'review-bundle-';
@@ -37,6 +42,15 @@ export const REVIEW_BUNDLE_DIFF_FILE = 'changes.diff';
 
 /** ベース側の内容を置くディレクトリ名。プロンプトの固定指示から名指しする。 */
 export const REVIEW_BUNDLE_BASE_DIR = 'base';
+
+/**
+ * 押下時点のリポジトリ全体の写しを置くディレクトリ名（Issue #1047 条件C-repo）。
+ *
+ * **既定では作らない。** {@link CreateReviewBundleRequest.afterTree} を渡したときだけ実体化する。
+ * 効果が測れる前に拡張本体の既定挙動を変えないためで、いまこれを渡すのは評価ハーネス
+ * （`test/bench/secondOpinionEval/`）だけである。
+ */
+export const REVIEW_BUNDLE_AFTER_DIR = 'after';
 
 /**
  * 2世代目以降の材料を置くディレクトリ名（Issue #975）。
@@ -108,9 +122,38 @@ export interface ReviewMaterialSource {
   log?: Logger | undefined;
 }
 
+/**
+ * 押下時点のリポジトリ全体の写しを、bundleの中へ足すための材料（Issue #1047 条件C-repo）。
+ *
+ * `changes.diff` と同じ押下時点の材料から組み立てる。ここで `git diff` を打ち直さないのは、
+ * 打ち直した時点の作業ツリーが混ざると、写しと `changes.diff` が別の時点を指すためである。
+ */
+export interface ReviewBundleAfterTreeSource {
+  /**
+   * `git apply` へ通せる形の差分（`ReviewMaterial.applyDiff`）。
+   *
+   * {@link ReviewMaterialSource.fullDiff} とは別に受け取る。`fullDiff` は表示・保存用で、
+   * binaryのhunkや `diff.noprefix` の設定次第でそのままでは当たらない（Issue #1047 で実測）。
+   */
+  applyDiff: string;
+  /** 押下時に読み終えた未追跡ファイル。 */
+  untrackedFiles?: readonly UntrackedFile[];
+  /** 押下時に内容を読めなかった未追跡ファイル。写しには置けないので欠落として記録する。 */
+  untrackedOmissions?: readonly UntrackedOmission[];
+}
+
 export interface CreateReviewBundleRequest extends ReviewMaterialSource {
   /** bundleを作る親ディレクトリ（拡張機能のstorage配下）。無ければ作る。 */
   root: string;
+  /**
+   * 渡すと `after/` へ押下時点のリポジトリ全体の写しを作る（Issue #1047 条件C-repo）。
+   *
+   * 省略時は何も作らない。**渡した場合、写しの構築に失敗したらbundleごと作らない。**
+   * 半端な写しは「baseのままの箇所」と「afterになった箇所」が混ざり、どちらなのかAdvisorにも
+   * 人にも区別できない（`afterTree.ts`）。呼び出し側は写し無しでやり直すか、相談自体をやめる
+   * かを選ぶ。
+   */
+  afterTree?: ReviewBundleAfterTreeSource | undefined;
 }
 
 const LOG_PREFIX = '[secondOpinion]';
@@ -154,6 +197,24 @@ export async function createReviewBundle(
   const bundle = bundleAt(dir);
   try {
     await writeMaterialInto(dir, request);
+    if (request.afterTree !== undefined) {
+      // 写しの `dispose` は持ち回らない。bundleの `dispose` がディレクトリごと消すので、
+      // 別に持つと同じ場所を二度消すことになる
+      await createFrozenAfterTree({
+        dir: path.join(dir, REVIEW_BUNDLE_AFTER_DIR),
+        cwd: request.cwd,
+        git: request.git,
+        baseCommit: request.baseCommit,
+        applyDiff: request.afterTree.applyDiff,
+        ...(request.afterTree.untrackedFiles === undefined
+          ? {}
+          : { untrackedFiles: request.afterTree.untrackedFiles }),
+        ...(request.afterTree.untrackedOmissions === undefined
+          ? {}
+          : { untrackedOmissions: request.afterTree.untrackedOmissions }),
+        log: request.log,
+      });
+    }
     return bundle;
   } catch (e) {
     // 途中まで書いたディレクトリを残さない
