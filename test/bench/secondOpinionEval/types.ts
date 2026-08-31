@@ -82,10 +82,15 @@ export interface KnownFinding {
    * - `independent-human`: コードから論理的に成立すると人が確認したもの。AI指摘の転記でないこと
    * - `model-derived`: AIのレビューだけが根拠。AI指摘をそのまま転記したIssue・コメントを含む
    * - `retrospective`: 後から自分でそう思っただけ
-   * - `mixed`: 複数種類にまたがる。**最も弱い根拠で判定する**
+   * - `mixed`: 複数種類にまたがる。**primary benchmark からは常に除外する**（下記）
    *
    * **「後続コミットで直した」という事実だけでは足りない。** 誰かが直すと判断したことは示せるが、
    * 元の問題が実際に成立した証拠にはならない。
+   *
+   * `mixed` を分母へ入れないのは、この値だけでは何と何が混ざっているかが分からないためである。
+   * 「empirical と independent-human」なのか「empirical と model-derived」なのかを区別できず、
+   * 「最も弱い根拠で判定する」を実装できない。独立した根拠があるなら、**最も直接的な1種類を
+   * 選んで書けば足りる**ので、混合を表現できる必要は無い。
    */
   groundTruthBasis:
     | 'empirical'
@@ -291,12 +296,12 @@ export interface EvalRunRecord {
   baseCommit: string;
   targetCommit: string;
   /**
-   * この案件の重要問題のうち、**primary recall の分母へ入れるものの件数**。
+   * `knownImportantFindings.length` の写し。**primary recall の分母ではない。**
    *
-   * 集計側で案件ファイルを読み直さずに済むよう、実行記録へ焼き込む。分母を持たないと
-   * 「8件拾った」が 8/10 なのか 8/20 なのか区別できない。
-   *
-   * ここは案件が持つ**素の件数**である。recall の分母に使う件数はこれではない。
+   * 分母は `groundTruthBasis` による除外（条件に依らない）と {@link FindingEligibility} に
+   * よる除外（条件ごとに変わる）を掛けたあとの件数で、集計側が案件ファイルと判定ファイルから
+   * 出す。ここに置いてあるのは、案件が何件のラベルを持っていたかを実行時点で残すためだけの値
+   * である。
    * `groundTruthBasis` による除外（条件に依らない）と、{@link FindingEligibility} による除外
    * （条件ごとに変わる）を掛けたあとの件数を、集計側が案件ファイルと eligibility から出す。
    * 実行記録の側で分母を確定させないのは、**条件を足すたびに過去の実行記録が古くなるのを
@@ -335,6 +340,18 @@ export interface EvalRunManifest {
   /** 案件ファイルの内容ハッシュ。実験の途中で正解ラベルが変わっていないことの担保。 */
   casesSha256: string;
   casesPath: string;
+  /**
+   * 条件ごとの判定ファイル（`eligibility.json`）の内容ハッシュ。
+   *
+   * 案件ファイルだけを固定しても、**recall の分母は後から動かせる**。回答を読んでから
+   * `discoverable` や `explicitlyExposed` を書き換えて集計し直せば、ラベルを1文字も触らずに
+   * 分母が変わる。「回答を見る前に凍結する」という設計が別経路から破れるので、判定ファイルも
+   * 実行前に確定させ、ハッシュを残して集計時に突き合わせる。
+   *
+   * 判定ファイルを渡さずに実行した場合は `undefined`。その run の結果は本測定には使えない。
+   */
+  eligibilitySha256: string | undefined;
+  eligibilityPath: string | undefined;
   model: string;
   effort: string;
   conditionIds: string[];

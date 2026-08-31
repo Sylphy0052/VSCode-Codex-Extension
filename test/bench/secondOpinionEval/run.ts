@@ -6,8 +6,14 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/run.ts --cases <cases.json> --out <出力ディレクトリ>
+ *   [--eligibility <eligibility.json>]
  *   [--conditions A,B-pos] [--attempts 2] [--model gpt-5.6-sol] [--effort high]
  * ```
+ *
+ * **本測定では `--eligibility` を必ず渡す。** recall の分母は案件ファイルの正解ラベルと、条件
+ * ごとの判定（`eligibility.json`）の両方で決まる。案件ファイルだけを固定しても、回答を読んで
+ * から判定を書き換えれば分母は動く。両方のハッシュを `manifest.json` へ残し、集計時に突き合わ
+ * せる。
  *
  * **実物の Codex CLI を呼ぶ。** 案件数 × 条件数 × 試行回数だけモデルへの往復が起き、そのぶんの
  * 時間と費用がかかる。24案件 × 3条件 × 2回で144往復になる。
@@ -49,6 +55,8 @@ const DEFAULT_ATTEMPTS = 2;
 
 interface Options {
   casesPath: string;
+  /** 条件ごとの判定ファイル。本測定では必須（省くと分母を後から動かせる）。 */
+  eligibilityPath: string | undefined;
   outDir: string;
   conditions: EvalCondition[];
   attempts: number;
@@ -95,6 +103,7 @@ function parseArgs(argv: readonly string[]): Options {
 
   return {
     casesPath,
+    eligibilityPath: values.get('eligibility'),
     outDir,
     conditions,
     attempts,
@@ -323,6 +332,18 @@ async function readHarnessCommit(): Promise<string> {
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const { cases, sha256 } = await loadCases(options.casesPath);
+  // 判定ファイルの中身はここでは使わない。実行前に確定していたことを示すハッシュだけ取る
+  const eligibilitySha256 =
+    options.eligibilityPath === undefined
+      ? undefined
+      : createHash('sha256')
+          .update(await fs.readFile(options.eligibilityPath, 'utf8'))
+          .digest('hex');
+  if (eligibilitySha256 === undefined) {
+    console.error(
+      '[eval] --eligibility が指定されていません。recall の分母を後から動かせる状態なので、この run は本測定には使えません',
+    );
+  }
   await fs.mkdir(options.outDir, { recursive: true });
 
   const runId = randomUUID();
@@ -331,6 +352,9 @@ async function main(): Promise<void> {
     harnessCommit: await readHarnessCommit(),
     casesSha256: sha256,
     casesPath: path.resolve(options.casesPath),
+    eligibilitySha256,
+    eligibilityPath:
+      options.eligibilityPath === undefined ? undefined : path.resolve(options.eligibilityPath),
     model: options.model,
     effort: options.effort,
     conditionIds: options.conditions.map((condition) => condition.id),

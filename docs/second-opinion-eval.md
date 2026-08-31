@@ -179,7 +179,9 @@ MCPを無効化するのは速度のためだけではない。既定のまま�
 
 実行時は `evidencePaths` のうち bundle に見当たらないものを一覧で出す。これは判定の材料であって判定ではなく、**実行は止めない**（自動で弾くと、差分から再構成できる案件まで黙って落ちる）。
 
-回答を見てから正解を足したり削ったりすると、その回答に有利な採点になる。案件ファイルの内容ハッシュは実行時に `manifest.json` へ記録されるので、途中で書き換えれば後から分かる。
+回答を見てから正解を足したり削ったりすると、その回答に有利な採点になる。案件ファイルと判定ファイル（`eligibility.json`）の内容ハッシュは、実行時に `manifest.json` の `casesSha256` / `eligibilitySha256` へ記録される。集計はこの2つを照合し、**一致しなければ止まる**。
+
+止めるのは、判定ファイルが recall の分母を直接動かすためである。`discoverable` を1つ `false` にするだけで分母が減り、ラベルは1文字も変わらないので差分にも出ない。警告にして続けると、歪んだ数値が出てから気づくことになる。`--eligibility` を付けずに実行した run も、分母を後から決められる状態なので集計しない。
 
 案件ファイルは実案件のパスや会話を含むため、リポジトリへコミットしない。
 
@@ -290,7 +292,7 @@ npx tsx test/bench/secondOpinionEval/scoringSheet.ts \
 ```
 npx tsx test/bench/secondOpinionEval/summarize.ts \
   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> --cases <案件ファイル> \
-  [--eligibility <条件ごとの判定>] [--baseline A]
+  --eligibility <条件ごとの判定> [--baseline A]
 ```
 
 条件ごとの実測値（precision / actionable yield / 判定不能の割合 / recall と critical・warning の内訳 / 依頼文より後ろのバイト数など）に加えて、**案件ごとに対にした差**（precision / recall の平均差と勝敗）が出る。

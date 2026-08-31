@@ -7,12 +7,16 @@
  * ```
  * npx tsx test/bench/secondOpinionEval/summarize.ts \
  *   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> --cases <案件ファイル> \
- *   [--eligibility <条件ごとの判定>] [--baseline A]
+ *   --eligibility <条件ごとの判定> [--baseline A]
  * ```
  *
  * recall の分母は条件ごとに変わる（Issue #1046）。案件ファイルの正解ラベルへ、条件ごとの
  * `FindingEligibility`（その条件の材料から発見できるか / 入力に答えが書かれていないか）を
- * 掛けて確定する。`--eligibility` を省くと分母は0になる。
+ * 掛けて確定する。
+ *
+ * 案件ファイルと判定ファイルは、**実行時のものと同一であることをハッシュで確かめてから**集計
+ * する。どちらかが変わっていれば集計を止める。回答を読んでから判定を書き換えれば、ラベルを
+ * 1文字も触らずに分母を動かせるためである。
  *
  * 採点ファイル（`scores.json`）は、採点者が `sheet.json` と `rubric.json` を見ながら書く配列で
  * ある。形式は {@link Score} を参照。
@@ -27,101 +31,19 @@ import * as path from 'node:path';
 import process from 'node:process';
 
 import {
-  hasIndependentGroundTruth,
   type EvalCase,
   type EvalRunRecord,
   type FindingEligibility,
   type KnownFinding,
 } from './types';
 
-/**
- * ある条件で recall の分母へ入れる正解ラベルの添字を返す（Issue #1046）。
- *
- * 3つを掛ける。
- *
- * 1. 根拠が測定対象のモデルから独立しているか（条件に依らない）
- * 2. その条件の材料から発見できるか
- * 3. その条件の入力に答えが書かれていないか
- *
- * 2と3は条件ごとに変わるのでラベルには持たせず、`FindingEligibility` として別に持つ。判定が
- * 無いラベルは**分母へ入れない**。入れると「判定していないだけ」のラベルで recall が下がる。
- * 外した件数は集計へ出す。黙って分母から消すと、外れた件数が分からないまま recall だけが動く。
- */
-/** `FindingEligibility` を引くキー。案件id・添字・条件idの組。 */
-function eligibilityKey(caseId: string, findingIndex: number, conditionId: string): string {
-  return JSON.stringify([caseId, findingIndex, conditionId]);
-}
-
-function selectPrimaryFindingIndexes(
-  findings: readonly KnownFinding[],
-  eligibility: ReadonlyMap<string, FindingEligibility>,
-  caseId: string,
-  conditionId: string,
-): { primary: number[]; unjudged: number; excluded: number } {
-  const primary: number[] = [];
-  let unjudged = 0;
-  let excluded = 0;
-  for (const [index, finding] of findings.entries()) {
-    if (!hasIndependentGroundTruth(finding)) {
-      excluded += 1;
-      continue;
-    }
-    const judged = eligibility.get(eligibilityKey(caseId, index, conditionId));
-    if (judged === undefined) {
-      unjudged += 1;
-      continue;
-    }
-    if (!judged.discoverable || judged.explicitlyExposed) {
-      excluded += 1;
-      continue;
-    }
-    primary.push(index);
-  }
-  return { primary, unjudged, excluded };
-}
-
-/** 採点者が1回答ごとに付ける値。 */
-interface Score {
-  scoringId: string;
-  /**
-   * 指摘の総数。
-   *
-   * 同じ根本原因・同じ修正を指す記述は、箇条書きが何行に分かれていても1件と数える
-   * （`docs/second-opinion-eval.md` の採点規約）。分割の仕方で分母が動くと、精度の比較が
-   * 書き方の比較になってしまう。
-   */
-  totalFindings: number;
-  /** そのうち、材料の中で真と確かめられ、実際に採用できる指摘の数。precision の分子。 */
-  actionableFindings: number;
-  /** 材料の中で確かめた結果、採用に値しないと判断した指摘の数（真だが影響が無い、など）。 */
-  verifiedNonActionableFindings: number;
-  /**
-   * 材料の中では真偽を決められない指摘の数。
-   *
-   * **precision の分母へ入れない。** 入れると「材料に無いので確認できない」と正しく留保した
-   * 回答が、存在しない問題を指摘した回答と同じように減点される。それは「不確かなことは黙る」
-   * のが得だという採点になり、測りたいものと逆を測る。
-   *
-   * 代わりに {@link Aggregate.indeterminateFindings} を別の指標として出す。留保ばかり並べる
-   * 回答はそちらで悪化し、黙る回答は recall と指摘数で悪化するので、逃げ道は残らない。
-   */
-  indeterminateFindings: number;
-  /**
-   * この回答が拾えた正解ラベルの**添字**（`knownImportantFindings` の位置）。
-   *
-   * 件数ではなく添字で受けるのは、**recall の分母が条件ごとに変わる**からである（Issue #1046）。
-   * 採点者には案件の全ラベルを見せる（条件ごとに見せるラベルを変えると、採点シートから条件が
-   * 割れる）。どのラベルを分母へ入れるかは条件ごとに違うので、絞り込みは集計側で掛ける。
-   * 件数だけ受け取ると、分子が全ラベル基準・分母が条件基準というちぐはぐな比になる。
-   */
-  recalledFindingIndexes: number[];
-  /** 制約・既決事項を誤認していた箇所の数。 */
-  constraintViolations: number;
-  /** 材料と矛盾する、存在しない問題を指摘していた数。 */
-  hallucinatedFindings: number;
-  /** 「まず調べてほしい」で終わり、判断材料になっていない要求の数。 */
-  unnecessaryInvestigationRequests: number;
-}
+import {
+  eligibilityKey,
+  selectPrimaryFindingIndexes,
+  validateScore,
+  verifyFrozenInputs,
+  type Score,
+} from './recall';
 
 interface KeyEntry {
   scoringId: string;
@@ -187,7 +109,7 @@ interface Args {
   scores: string;
   key: string;
   cases: string;
-  eligibility: string | undefined;
+  eligibility: string;
   baseline: string;
 }
 
@@ -205,20 +127,23 @@ function parseArgs(argv: readonly string[]): Args {
   const scores = values.get('scores');
   const key = values.get('key');
   const cases = values.get('cases');
+  const eligibility = values.get('eligibility');
   if (
     resultsDir === undefined ||
     scores === undefined ||
     key === undefined ||
-    cases === undefined
+    cases === undefined ||
+    eligibility === undefined
   ) {
-    throw new Error('--results と --scores と --key と --cases は必須です');
+    // 判定ファイルを省けるようにすると、分母を後から決められる経路が残る
+    throw new Error('--results と --scores と --key と --cases と --eligibility は必須です');
   }
   return {
     resultsDir,
     scores,
     key,
     cases,
-    eligibility: values.get('eligibility'),
+    eligibility,
     baseline: values.get('baseline') ?? 'A',
   };
 }
@@ -272,19 +197,16 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const scores = JSON.parse(await fs.readFile(args.scores, 'utf8')) as Score[];
   const key = JSON.parse(await fs.readFile(args.key, 'utf8')) as KeyEntry[];
+  await verifyFrozenInputs(args.resultsDir, args.cases, args.eligibility);
   const cases = JSON.parse(await fs.readFile(args.cases, 'utf8')) as EvalCase[];
   const findingsByCase = new Map(cases.map((c) => [c.id, c.knownImportantFindings]));
+  // ここへ来る時点で verifyFrozenInputs が通っているので、判定ファイルは必ずある
   const eligibility = new Map<string, FindingEligibility>();
-  if (args.eligibility !== undefined) {
-    const entries = JSON.parse(await fs.readFile(args.eligibility, 'utf8')) as FindingEligibility[];
-    for (const entry of entries) {
-      eligibility.set(eligibilityKey(entry.caseId, entry.findingIndex, entry.conditionId), entry);
-    }
-  } else {
-    // 判定が無いと分母が空になる。黙って recall を `-` にすると、測れていないことに気づけない
-    console.error(
-      '[summarize] --eligibility が指定されていません。条件ごとの発見可能性の判定が無いため、recall の分母は0になります',
-    );
+  const eligibilityEntries = JSON.parse(
+    await fs.readFile(args.eligibility, 'utf8'),
+  ) as FindingEligibility[];
+  for (const entry of eligibilityEntries) {
+    eligibility.set(eligibilityKey(entry.caseId, entry.findingIndex, entry.conditionId), entry);
   }
 
   const byScoringId = new Map(key.map((entry) => [entry.scoringId, entry]));
@@ -343,6 +265,11 @@ async function main(): Promise<void> {
       continue;
     }
     const findings = findingsByCase.get(entry.caseId) ?? [];
+    const invalid = validateScore(score, findings.length);
+    if (invalid !== undefined) {
+      brokenScores.push(`${score.scoringId}: ${invalid}`);
+      continue;
+    }
     const selected = selectPrimaryFindingIndexes(
       findings,
       eligibility,
@@ -409,7 +336,7 @@ async function main(): Promise<void> {
   }
   if (brokenScores.length > 0) {
     console.error(
-      `[summarize] 4区分の合計が totalFindings と合わない採点を ${brokenScores.length} 件除外しました: ` +
+      `[summarize] 形が正しくない採点を ${brokenScores.length} 件除外しました: ` +
         brokenScores.join(', '),
     );
   }
