@@ -384,18 +384,19 @@ async function main(): Promise<void> {
       continue;
     }
     const material = prepared.material;
-    // 材料は条件によって別のディレクトリになりうる（`after/` を持つのは条件C-repoだけ）。
-    // 同じ内容を何度も報告しないよう、実際に使うディレクトリの重複を除いてから見る
-    const coverageSeen = new Set<string>();
-    for (const condition of options.conditions) {
-      const dir = material.cwdFor(condition);
-      if (coverageSeen.has(dir)) {
-        continue;
-      }
-      coverageSeen.add(dir);
-      await reportEvidencePathCoverage(evalCase, dir, condition.id);
-    }
     try {
+      // 材料は条件によって別のディレクトリになりうる（`after/` を持つのは条件C-repoだけ）。
+      // 同じ内容を何度も報告しないよう、実際に使うディレクトリの重複を除いてから見る。
+      // `cwdFor` は条件と材料が食い違えば投げるので、`finally` で片付く位置に置く
+      const coverageSeen = new Set<string>();
+      for (const condition of options.conditions) {
+        const dir = material.cwdFor(condition);
+        if (coverageSeen.has(dir)) {
+          continue;
+        }
+        coverageSeen.add(dir);
+        await reportEvidencePathCoverage(evalCase, dir, condition.id);
+      }
       for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
         const ordered = rotate(options.conditions, caseIndex + attempt - 1);
         for (const [orderIndex, condition] of ordered.entries()) {

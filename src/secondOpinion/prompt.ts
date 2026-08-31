@@ -142,7 +142,7 @@ export interface SecondOpinionInput {
    * 固定指示が「外を読むな」から「この写しの中でなら、判断に必要な範囲で追加で読んでよい」へ
    * 変わる（探索先は写しの中に閉じたままで、実行中の作業ツリーは相変わらず読ませない）。
    *
-   * 写し自体を作るのは {@link createFrozenAfterTree}（`afterTree.ts`）で、ここは**その場所を
+   * 写し自体を作るのは `afterTree.ts` の `createFrozenAfterTree()` で、ここは**その場所を
    * 名指しするだけ**である。値を渡したのに写しが無いと、Advisorは無いディレクトリを探しに
    * 行って空振りする。渡す側が実体化の成否を見てから渡すこと。
    */
