@@ -7634,7 +7634,34 @@ Cを採る場合も **detached worktree をそのままAdvisorの `cwd` には�
 
 **条件ごとに別のbundleを作る。** 1つのbundleへ写しを置くと、固定指示が名指ししていない条件Aでも `ls` で見つけられてしまい、条件Aが「差分だけを見た場合」の測定でなくなる。`CaseMaterial.cwdFor(condition)` が、`needsAfterTree` の条件にだけ写し入りのbundleを返す。snapshotそのものは案件ごとに1度しか取らないので、条件間で材料が変わることはない。
 
-拡張本体の既定挙動は変えていない。`createReviewBundle` は `afterTree` を渡したときだけ `after/` を作り、`buildSecondOpinionPrompt` は `afterTreeDir` を渡したときだけ探索の指示を出す。いまどちらも渡すのは評価ハーネスだけである。
+`createReviewBundle` は `afterTree` を渡したときだけ `after/` を作り、`buildSecondOpinionPrompt` は `afterTreeDir` を渡したときだけ探索の指示を出す。条件Aはどちらも渡さない。
+
+##### 拡張本体の既定にする（Issue #1062）
+
+Issue #1060 で9案件を測定し、条件C-repoの採用を確定した。凍結済みの `cases-primary-v1.json` / `eligibility-v1.json` に対する実測は次のとおりである。
+
+| 指標                      | 条件A        | 条件C-repo       |
+| ------------------------- | ------------ | ---------------- |
+| 重要問題のrecall          | 0.167（1/6） | 0.400（4/10）    |
+| baselineの分母外（救済）  | -（0/0）     | **0.750（3/4）** |
+| baselineの分母内          | 0.167（1/6） | 0.167（1/6）     |
+| toolCalls（bundle内のみ） | 9.22 回/回答 | 10.11 回/回答    |
+| latency                   | 388,365 ms   | 381,789 ms       |
+| sessionTokens             | 894,035      | 1,088,137        |
+| プロンプト長              | 83,023 B     | 83,774 B         |
+
+**両条件で分母に入る6件のrecallは同一である。** C-repoの増分はすべて分母外（差分の外にある問題）から来ており、探索が本来読むべき材料から注意を逸らしている兆候は出ていない。費用は予告どおりプロンプト長ではなく探索の往復として現れ、トークンが21.7%増えた。latencyは増えていない。
+
+そこで既定を条件C-repo側にする。設定 `agent.secondOpinion.afterTree`（既定 `true`）で切れる。トークンの増加を許容できない場合と、写しの構築が失敗し続ける環境のための退避口である。
+
+**写しを作れなくても相談は止めない。** `createReviewBundle` は `afterTree` を渡した場合、写しの構築に失敗するとbundleごと作らない（半端な木は「baseのままの箇所」と「afterになった箇所」が区別できないため）。呼び出し側（`secondOpinionCommand.ts`）はそれを受けて、条件A相当の材料だけで作り直す。写しはrecallを上げる追加材料であって、相談の成立条件ではない。落ちる経路は2つで、どちらもログへ理由を残す。
+
+- `ReviewMaterial.applyDiff` が `undefined`（押下時の `git diff --binary` が失敗した）。空文字列（未追跡ファイルだけが変わった場合に実際に起こる）とは区別する
+- `createFrozenAfterTree()` が投げた
+
+このとき `afterTreeDir` もプロンプトへ渡さない。**写しが無いのに指示だけ変わる状態を作らない**——Advisorが無いディレクトリを探しに行って空振りする。
+
+材料を最新へ更新する経路（Issue #975）では、写しは追随しない。写しは最初の押下時点で凍結されており、`updates/<世代>/` に積まれるのは `changes.diff` と `base/` だけである。黙っていると新しい差分と古い写しが同じ時点のものとして読まれるため、更新の通知（`buildMaterialUpdatePrompt`）へ「写しはこの更新に追随していない」という1行を足す。写しがある相談にだけ出す。
 
 ##### 費用の測り方
 

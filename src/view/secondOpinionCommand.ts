@@ -72,6 +72,7 @@ import {
   createEmptyReviewBundle,
   createReviewBundle,
   defaultReviewBundleRoot,
+  REVIEW_BUNDLE_AFTER_DIR,
   type ReviewBundle,
 } from '../secondOpinion/reviewBundle';
 import { captureWorkspaceSnapshot, type ReviewMaterial } from '../secondOpinion/snapshot';
@@ -464,8 +465,9 @@ export async function startSecondOpinion(
     // Advisorの作業ディレクトリを、押下時点の材料だけを置いた一時ディレクトリにする
     // （Issue #926 E）。作れなかったときは実行しない。親セッションの作業ツリーで開く形へ
     // 戻すのは、この変更で無くしたかった状態そのものである
-    bundle = await createBundleFor(cwd, git, captured, log);
-    if (bundle === undefined) {
+    const created = await createBundleFor(cwd, git, captured, config.afterTree, log);
+    bundle = created?.bundle;
+    if (created === undefined || bundle === undefined) {
       void vscode.window.showErrorMessage(
         'セカンドオピニオン: レビュー材料を書き出せなかったため実行しません',
       );
@@ -526,6 +528,9 @@ export async function startSecondOpinion(
         conversationBackgroundKind: summary.kind,
         signal: controller.signal,
         keepSession,
+        // 写しを実体化できたときだけ渡す。渡すと固定指示が「外を読むな」から
+        // 「この写しの中でなら追加で読んでよい」へ変わる（Issue #1062）
+        afterTreeDir: created.afterTreeDir,
       },
       log,
     );
@@ -558,6 +563,7 @@ export async function startSecondOpinion(
       // 相談の途中で材料を最新へ更新する手段（Issue #975）。作業ツリーの変更を資料に
       // 選んだときだけ渡す（それ以外の資料には、更新すべき材料が無い）
       materialWriterFor(cwd, git, captured, log),
+      created.afterTreeDir,
     );
   } finally {
     registry.end(port.parentSessionId, id);
@@ -605,6 +611,7 @@ function handOverAdvisorSession(
   log: Logger,
   bundle: ReviewBundle | undefined,
   writeMaterial: AdvisorMaterialWriter | undefined,
+  afterTreeDir: string | undefined,
 ): boolean {
   if (!result.ok || result.session === undefined) {
     return false;
@@ -627,6 +634,8 @@ function handOverAdvisorSession(
     idleTimeoutMs: config.advisor.idleTimeoutMs,
     // 相談が続く間は材料も残す。追加の質問で `base/` を読み直しうる（Issue #926 E）
     bundle,
+    // 材料を更新したときに、写しが追随していないことを伝えるために要る（Issue #1062）
+    afterTreeDir,
     // 相談の途中で材料を最新へ更新する手段（Issue #975）
     writeMaterial,
     log,
@@ -691,6 +700,18 @@ function materialWriterFor(
   };
 }
 
+/** {@link createBundleFor} の結果。写しを実体化できたかどうかを一緒に返す（Issue #1062）。 */
+interface CreatedBundle {
+  bundle: ReviewBundle;
+  /**
+   * 押下時点の写しを置いた場所（bundleのルートからの相対パス）。作れなかったときは `undefined`。
+   *
+   * プロンプトの固定指示はこの値の有無で変わる（`prompt.ts`）。**実体があるときだけ渡す。**
+   * 写しが無いのに名前だけ渡すと、Advisorは無いディレクトリを探しに行って空振りする。
+   */
+  afterTreeDir?: string | undefined;
+}
+
 /**
  * Advisorのセッションを開く作業ディレクトリを用意する（Issue #926 E）。
  *
@@ -703,22 +724,54 @@ async function createBundleFor(
   cwd: string,
   git: GitCommandRunner,
   captured: CapturedArtifact,
+  wantAfterTree: boolean,
   log: Logger,
-): Promise<ReviewBundle | undefined> {
+): Promise<CreatedBundle | undefined> {
   const root = defaultReviewBundleRoot();
   try {
     if (captured.artifact.kind !== 'workspaceChanges' || captured.material === undefined) {
-      return await createEmptyReviewBundle(root);
+      return { bundle: await createEmptyReviewBundle(root) };
     }
-    return await createReviewBundle({
+    const material = captured.material;
+    const snapshot = captured.artifact.snapshot;
+    const base = {
       root,
       cwd,
       git,
-      baseCommit: captured.artifact.snapshot.baseCommit,
-      fullDiff: captured.material.fullDiff,
-      changedPaths: captured.material.changedPaths,
+      baseCommit: snapshot.baseCommit,
+      fullDiff: material.fullDiff,
+      changedPaths: material.changedPaths,
       log,
-    });
+    };
+    // 写しを作れる材料が揃っているときだけ試す。`applyDiff` が `undefined` なのは押下時の
+    // `git diff --binary` が失敗した場合で、空文字列（未追跡ファイルだけが変わった場合に
+    // 実際に起こる）とは区別する。空文字列まで失敗として扱うと、差分が無いだけの状態が
+    // 「baseがそのまま after」ではなく「作れなかった」になる
+    if (wantAfterTree && material.applyDiff !== undefined) {
+      try {
+        const bundle = await createReviewBundle({
+          ...base,
+          afterTree: {
+            applyDiff: material.applyDiff,
+            untrackedFiles: snapshot.untrackedFiles,
+            untrackedOmissions: snapshot.untrackedOmissions,
+          },
+        });
+        return { bundle, afterTreeDir: REVIEW_BUNDLE_AFTER_DIR };
+      } catch (e) {
+        // 写しの構築に失敗すると bundle ごと作られない（`reviewBundle.ts` は半端な木を
+        // 残さない）。写しは recall を上げる追加材料であって相談の成立条件ではないため、
+        // 条件A相当の材料だけで作り直して続ける（Issue #1062）
+        log.warn(
+          `[secondOpinion] 押下時点の写しを作れなかったため、差分とベース側だけで続けます: ${errorMessage(e)}`,
+        );
+      }
+    } else if (wantAfterTree) {
+      log.warn(
+        '[secondOpinion] 押下時点の差分を取れていないため、写しを作らず差分とベース側だけで続けます',
+      );
+    }
+    return { bundle: await createReviewBundle(base) };
   } catch (e) {
     log.warn(`[secondOpinion] レビュー材料を書き出せませんでした: ${errorMessage(e)}`);
     return undefined;

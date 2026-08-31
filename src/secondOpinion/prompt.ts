@@ -134,7 +134,10 @@ export interface SecondOpinionInput {
   restateRequestAtEnd?: boolean | undefined;
   /**
    * 押下時点のリポジトリ全体の写しを置いたディレクトリ（Issue #1047 条件C-repo）。
-   * 作業ディレクトリからの相対パスで渡す。既定は `undefined`＝写しを置かない現行のまま。
+   * 作業ディレクトリからの相対パスで渡す。省略すると写しを置かない指示になる。
+   *
+   * 拡張本体は既定でここを渡す（設定 `agent.secondOpinion.afterTree`、Issue #1062）。渡さない
+   * のは、設定で切っている場合と、写しを実体化できなかった場合である。
    *
    * 条件Aの材料は `changes.diff` と `base/<変更対象ファイル>` だけなので、**そのPRが触って
    * いないファイルは既定で目に入らない**。#1044 のscreeningでは、primaryと判定した9件のうち
@@ -552,7 +555,11 @@ export function materialUpdateAckToken(revision: number): string {
  * 何を聞くかは利用者が次の追加の相談で決める。通知と一緒に質問させると、利用者が頼んで
  * いない観点でのレビューが始まり、そのぶん待たされる。
  */
-export function buildMaterialUpdatePrompt(revision: number, materialPath: string): string {
+export function buildMaterialUpdatePrompt(
+  revision: number,
+  materialPath: string,
+  afterTreeDir?: string | undefined,
+): string {
   const token = materialUpdateAckToken(revision);
   return [
     '以下は、この相談を依頼した利用者本人からの連絡です。',
@@ -561,6 +568,13 @@ export function buildMaterialUpdatePrompt(revision: number, materialPath: string
     `新しい材料は、この作業ディレクトリの \`${materialPath}/\` にあります。`,
     `- 差分の全量: \`${materialPath}/${REVIEW_BUNDLE_DIFF_FILE}\``,
     `- ベース側のコード: \`${materialPath}/${REVIEW_BUNDLE_BASE_DIR}/<パス>\``,
+    // 写しは最初の押下時点で凍結されており、更新には追随しない（Issue #1062）。黙っていると
+    // 新しい差分と古い写しが同じ時点のものとして読まれる
+    ...(afterTreeDir === undefined || afterTreeDir === ''
+      ? []
+      : [
+          `なお \`${afterTreeDir}/\` の写しは最初の押下時点のままで、この更新には追随していません。更新後の内容は \`${materialPath}/\` を根拠にしてください。`,
+        ]),
     '',
     '**以後はこちらを正本として扱ってください。** 最初に渡した材料と、それより前の更新は、更新前の状態として残してあります（何が変わったのかを読む用途にだけ使ってください）。',
     'これまでの議論のうち、更新後の材料と食い違う部分があれば、次に質問されたときにその食い違いを指摘してください。前提が変わったことに気付かないまま話を続けないでください。',
