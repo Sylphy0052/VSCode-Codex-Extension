@@ -6,8 +6,13 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/summarize.ts \
- *   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> [--baseline A]
+ *   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> --cases <案件ファイル> \
+ *   [--eligibility <条件ごとの判定>] [--baseline A]
  * ```
+ *
+ * recall の分母は条件ごとに変わる（Issue #1046）。案件ファイルの正解ラベルへ、条件ごとの
+ * `FindingEligibility`（その条件の材料から発見できるか / 入力に答えが書かれていないか）を
+ * 掛けて確定する。`--eligibility` を省くと分母は0になる。
  *
  * 採点ファイル（`scores.json`）は、採点者が `sheet.json` と `rubric.json` を見ながら書く配列で
  * ある。形式は {@link Score} を参照。
@@ -21,7 +26,59 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-import type { EvalRunRecord } from './types';
+import {
+  hasIndependentGroundTruth,
+  type EvalCase,
+  type EvalRunRecord,
+  type FindingEligibility,
+  type KnownFinding,
+} from './types';
+
+/**
+ * ある条件で recall の分母へ入れる正解ラベルの添字を返す（Issue #1046）。
+ *
+ * 3つを掛ける。
+ *
+ * 1. 根拠が測定対象のモデルから独立しているか（条件に依らない）
+ * 2. その条件の材料から発見できるか
+ * 3. その条件の入力に答えが書かれていないか
+ *
+ * 2と3は条件ごとに変わるのでラベルには持たせず、`FindingEligibility` として別に持つ。判定が
+ * 無いラベルは**分母へ入れない**。入れると「判定していないだけ」のラベルで recall が下がる。
+ * 外した件数は集計へ出す。黙って分母から消すと、外れた件数が分からないまま recall だけが動く。
+ */
+/** `FindingEligibility` を引くキー。案件id・添字・条件idの組。 */
+function eligibilityKey(caseId: string, findingIndex: number, conditionId: string): string {
+  return JSON.stringify([caseId, findingIndex, conditionId]);
+}
+
+function selectPrimaryFindingIndexes(
+  findings: readonly KnownFinding[],
+  eligibility: ReadonlyMap<string, FindingEligibility>,
+  caseId: string,
+  conditionId: string,
+): { primary: number[]; unjudged: number; excluded: number } {
+  const primary: number[] = [];
+  let unjudged = 0;
+  let excluded = 0;
+  for (const [index, finding] of findings.entries()) {
+    if (!hasIndependentGroundTruth(finding)) {
+      excluded += 1;
+      continue;
+    }
+    const judged = eligibility.get(eligibilityKey(caseId, index, conditionId));
+    if (judged === undefined) {
+      unjudged += 1;
+      continue;
+    }
+    if (!judged.discoverable || judged.explicitlyExposed) {
+      excluded += 1;
+      continue;
+    }
+    primary.push(index);
+  }
+  return { primary, unjudged, excluded };
+}
 
 /** 採点者が1回答ごとに付ける値。 */
 interface Score {
@@ -49,11 +106,15 @@ interface Score {
    * 回答はそちらで悪化し、黙る回答は recall と指摘数で悪化するので、逃げ道は残らない。
    */
   indeterminateFindings: number;
-  /** `knownImportantFindings` のうち、この回答が拾えた数。分母は実行記録が持っている。 */
-  recalledImportant: number;
-  /** そのうち severity 別の内訳。総 recall が warning 側に引っ張られるのを見分けるために要る。 */
-  recalledCritical: number;
-  recalledWarning: number;
+  /**
+   * この回答が拾えた正解ラベルの**添字**（`knownImportantFindings` の位置）。
+   *
+   * 件数ではなく添字で受けるのは、**recall の分母が条件ごとに変わる**からである（Issue #1046）。
+   * 採点者には案件の全ラベルを見せる（条件ごとに見せるラベルを変えると、採点シートから条件が
+   * 割れる）。どのラベルを分母へ入れるかは条件ごとに違うので、絞り込みは集計側で掛ける。
+   * 件数だけ受け取ると、分子が全ラベル基準・分母が条件基準というちぐはぐな比になる。
+   */
+  recalledFindingIndexes: number[];
   /** 制約・既決事項を誤認していた箇所の数。 */
   constraintViolations: number;
   /** 材料と矛盾する、存在しない問題を指摘していた数。 */
@@ -75,6 +136,17 @@ interface Scored {
   conditionId: string;
   score: Score;
   record: EvalRunRecord;
+  /** その条件で分母に入る正解ラベルの件数と、拾えた件数（severity 別を含む）。 */
+  recall: RecallCounts;
+}
+
+interface RecallCounts {
+  recalled: number;
+  total: number;
+  recalledCritical: number;
+  totalCritical: number;
+  recalledWarning: number;
+  totalWarning: number;
 }
 
 interface Aggregate {
@@ -99,6 +171,10 @@ interface Aggregate {
   /** 依頼の末尾からプロンプト末尾までのバイト数。取れた実行の数と合計。 */
   bytesAfterRequestSamples: number;
   bytesAfterRequestTotal: number;
+  /** 条件ごとの判定（`FindingEligibility`）が無く、分母から外したラベルの延べ数。 */
+  eligibilityUnjudged: number;
+  /** 判定はあるが分母から外したラベルの延べ数（循環・発見不能・答えが入力にある）。 */
+  eligibilityExcluded: number;
   latencyMsTotal: number;
   promptBytesTotal: number;
   /** トークン量が取れた実行の数。取れなかった分を平均へ混ぜないために数える。 */
@@ -110,6 +186,8 @@ interface Args {
   resultsDir: string;
   scores: string;
   key: string;
+  cases: string;
+  eligibility: string | undefined;
   baseline: string;
 }
 
@@ -126,10 +204,23 @@ function parseArgs(argv: readonly string[]): Args {
   const resultsDir = values.get('results');
   const scores = values.get('scores');
   const key = values.get('key');
-  if (resultsDir === undefined || scores === undefined || key === undefined) {
-    throw new Error('--results と --scores と --key は必須です');
+  const cases = values.get('cases');
+  if (
+    resultsDir === undefined ||
+    scores === undefined ||
+    key === undefined ||
+    cases === undefined
+  ) {
+    throw new Error('--results と --scores と --key と --cases は必須です');
   }
-  return { resultsDir, scores, key, baseline: values.get('baseline') ?? 'A' };
+  return {
+    resultsDir,
+    scores,
+    key,
+    cases,
+    eligibility: values.get('eligibility'),
+    baseline: values.get('baseline') ?? 'A',
+  };
 }
 
 function emptyAggregate(conditionId: string): Aggregate {
@@ -153,6 +244,8 @@ function emptyAggregate(conditionId: string): Aggregate {
     unnecessaryInvestigationRequests: 0,
     bytesAfterRequestSamples: 0,
     bytesAfterRequestTotal: 0,
+    eligibilityUnjudged: 0,
+    eligibilityExcluded: 0,
     latencyMsTotal: 0,
     promptBytesTotal: 0,
     usageSamples: 0,
@@ -179,6 +272,20 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const scores = JSON.parse(await fs.readFile(args.scores, 'utf8')) as Score[];
   const key = JSON.parse(await fs.readFile(args.key, 'utf8')) as KeyEntry[];
+  const cases = JSON.parse(await fs.readFile(args.cases, 'utf8')) as EvalCase[];
+  const findingsByCase = new Map(cases.map((c) => [c.id, c.knownImportantFindings]));
+  const eligibility = new Map<string, FindingEligibility>();
+  if (args.eligibility !== undefined) {
+    const entries = JSON.parse(await fs.readFile(args.eligibility, 'utf8')) as FindingEligibility[];
+    for (const entry of entries) {
+      eligibility.set(eligibilityKey(entry.caseId, entry.findingIndex, entry.conditionId), entry);
+    }
+  } else {
+    // 判定が無いと分母が空になる。黙って recall を `-` にすると、測れていないことに気づけない
+    console.error(
+      '[summarize] --eligibility が指定されていません。条件ごとの発見可能性の判定が無いため、recall の分母は0になります',
+    );
+  }
 
   const byScoringId = new Map(key.map((entry) => [entry.scoringId, entry]));
   const records = new Map<string, EvalRunRecord>();
@@ -211,6 +318,7 @@ async function main(): Promise<void> {
 
   const scoredItems: Scored[] = [];
   const brokenScores: string[] = [];
+  let outsidePrimary = 0;
   let unmatched = 0;
   for (const score of scores) {
     const entry = byScoringId.get(score.scoringId);
@@ -234,20 +342,51 @@ async function main(): Promise<void> {
       brokenScores.push(`${score.scoringId}: ${classified} !== ${score.totalFindings}`);
       continue;
     }
-    scoredItems.push({ caseId: entry.caseId, conditionId: entry.conditionId, score, record });
+    const findings = findingsByCase.get(entry.caseId) ?? [];
+    const selected = selectPrimaryFindingIndexes(
+      findings,
+      eligibility,
+      entry.caseId,
+      entry.conditionId,
+    );
+    const primary = new Set(selected.primary);
+    const recalledPrimary = score.recalledFindingIndexes.filter((i) => primary.has(i));
+    const severityOf = (i: number): KnownFinding['severity'] | undefined => findings[i]?.severity;
+    const recall: RecallCounts = {
+      recalled: recalledPrimary.length,
+      total: primary.size,
+      recalledCritical: recalledPrimary.filter((i) => severityOf(i) === 'critical').length,
+      totalCritical: selected.primary.filter((i) => severityOf(i) === 'critical').length,
+      recalledWarning: recalledPrimary.filter((i) => severityOf(i) === 'warning').length,
+      totalWarning: selected.primary.filter((i) => severityOf(i) === 'warning').length,
+    };
+    const outside = score.recalledFindingIndexes.length - recalledPrimary.length;
+    if (outside > 0) {
+      // 分母の外のラベルを拾ったこと自体は悪くない。ただし分子へ入れると比が壊れるので落とす
+      outsidePrimary += outside;
+    }
+    scoredItems.push({
+      caseId: entry.caseId,
+      conditionId: entry.conditionId,
+      score,
+      record,
+      recall,
+    });
 
     const aggregate = take(entry.conditionId);
+    aggregate.eligibilityUnjudged += selected.unjudged;
+    aggregate.eligibilityExcluded += selected.excluded;
     aggregate.scored += 1;
     aggregate.totalFindings += score.totalFindings;
     aggregate.actionableFindings += score.actionableFindings;
     aggregate.verifiedNonActionableFindings += score.verifiedNonActionableFindings;
     aggregate.indeterminateFindings += score.indeterminateFindings;
-    aggregate.recalledImportant += score.recalledImportant;
-    aggregate.knownImportantTotal += record.knownImportantTotal;
-    aggregate.recalledCritical += score.recalledCritical;
-    aggregate.knownCriticalTotal += record.knownCriticalTotal;
-    aggregate.recalledWarning += score.recalledWarning;
-    aggregate.knownWarningTotal += record.knownWarningTotal;
+    aggregate.recalledImportant += recall.recalled;
+    aggregate.knownImportantTotal += recall.total;
+    aggregate.recalledCritical += recall.recalledCritical;
+    aggregate.knownCriticalTotal += recall.totalCritical;
+    aggregate.recalledWarning += recall.recalledWarning;
+    aggregate.knownWarningTotal += recall.totalWarning;
     aggregate.constraintViolations += score.constraintViolations;
     aggregate.hallucinatedFindings += score.hallucinatedFindings;
     aggregate.unnecessaryInvestigationRequests += score.unnecessaryInvestigationRequests;
@@ -272,6 +411,13 @@ async function main(): Promise<void> {
     console.error(
       `[summarize] 4区分の合計が totalFindings と合わない採点を ${brokenScores.length} 件除外しました: ` +
         brokenScores.join(', '),
+    );
+  }
+
+  if (outsidePrimary > 0) {
+    // 分母の外のラベルを拾った分。分子へ入れると比が壊れるので落としているが、件数は出す
+    console.error(
+      `[summarize] 分母に入らない正解ラベルを拾った採点が延べ ${outsidePrimary} 件ありました（分子には数えていません）`,
     );
   }
 
@@ -314,6 +460,10 @@ function printConditionTable(aggregates: ReadonlyMap<string, Aggregate>): void {
       `    うち warning:       ${ratio(row.recalledWarning, row.knownWarningTotal)}` +
         `（${row.recalledWarning}/${row.knownWarningTotal}）`,
     );
+    console.log(
+      `  分母から外した正解:   ${row.eligibilityExcluded} 件（循環・発見不能・答えが入力にある）` +
+        ` / 未判定 ${row.eligibilityUnjudged} 件`,
+    );
     console.log(`  1回答あたりの指摘数:  ${ratio(row.totalFindings, row.scored)}`);
     console.log(
       `  存在しない問題の指摘: ${ratio(row.hallucinatedFindings, row.scored)} 件/回答` +
@@ -354,18 +504,16 @@ interface CaseConditionValue {
  */
 function printPaired(items: readonly Scored[], baselineId: string): void {
   const byCase = new Map<string, Map<string, CaseConditionValue>>();
-  const grouped = new Map<string, Score[]>();
-  const totals = new Map<string, number>();
+  const grouped = new Map<string, Scored[]>();
   for (const item of items) {
-    const compositeKey = `${item.caseId} ${item.conditionId}`;
-    const list = grouped.get(compositeKey) ?? [];
-    list.push(item.score);
-    grouped.set(compositeKey, list);
-    totals.set(compositeKey, item.record.knownImportantTotal);
+    const compositeKey = `${item.caseId}\u0000${item.conditionId}`;
+    const group = grouped.get(compositeKey) ?? [];
+    group.push(item);
+    grouped.set(compositeKey, group);
   }
-  for (const [compositeKey, list] of grouped) {
-    const [caseId = '', conditionId = ''] = compositeKey.split(' ');
-    const knownTotal = totals.get(compositeKey) ?? 0;
+  for (const [compositeKey, group] of grouped) {
+    const [caseId = '', conditionId = ''] = compositeKey.split('\u0000');
+    const list = group.map((item) => item.score);
     const perCase = byCase.get(caseId) ?? new Map<string, CaseConditionValue>();
     perCase.set(conditionId, {
       precision: mean(
@@ -382,8 +530,12 @@ function printPaired(items: readonly Scored[], baselineId: string): void {
           .filter((v) => v.judged > 0)
           .map((v) => v.actionable / v.judged),
       ),
-      recall:
-        knownTotal === 0 ? undefined : mean(list.map((s) => s.recalledImportant / knownTotal)),
+      // 分母は条件ごとに違う。案件と条件の組で確定した件数を使い、0件なら recall を出さない
+      recall: mean(
+        group
+          .filter((item) => item.recall.total > 0)
+          .map((i) => i.recall.recalled / i.recall.total),
+      ),
     });
     byCase.set(caseId, perCase);
   }

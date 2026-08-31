@@ -153,6 +153,15 @@ const PROVENANCES: readonly KnownFinding['provenance'][] = [
   'retrospective',
 ];
 
+const GROUND_TRUTH_BASES: readonly KnownFinding['groundTruthBasis'][] = [
+  'empirical',
+  'independent-report',
+  'independent-human',
+  'model-derived',
+  'retrospective',
+  'mixed',
+];
+
 function validateCase(entry: unknown, index: number): EvalCase {
   if (typeof entry !== 'object' || entry === null) {
     throw new Error(`${index}件目の案件がオブジェクトではありません`);
@@ -224,6 +233,8 @@ function validateKnownFindings(value: unknown, index: number): KnownFinding[] {
     const evidence = record['evidence'];
     const severity = record['severity'];
     const provenance = record['provenance'];
+    const groundTruthBasis = record['groundTruthBasis'];
+    const evidencePaths = record['evidencePaths'];
     if (typeof finding !== 'string' || finding.trim() === '') {
       throw new Error(`${index}件目の knownImportantFindings[${i}].finding が空です`);
     }
@@ -259,12 +270,32 @@ function validateKnownFindings(value: unknown, index: number): KnownFinding[] {
         `${index}件目の knownImportantFindings[${i}].provenance が ${PROVENANCES.join(' / ')} のいずれでもありません`,
       );
     }
+    if (
+      typeof groundTruthBasis !== 'string' ||
+      !GROUND_TRUTH_BASES.includes(groundTruthBasis as KnownFinding['groundTruthBasis'])
+    ) {
+      // 記録場所（provenance）ではなく「何で真だと確定したか」で recall の分母を決める。
+      // ここを省けるようにすると、モデル自身のレビューを正解にした案件が黙って混ざる
+      throw new Error(
+        `${index}件目の knownImportantFindings[${i}].groundTruthBasis が ${GROUND_TRUTH_BASES.join(' / ')} のいずれでもありません`,
+      );
+    }
+    if (
+      !Array.isArray(evidencePaths) ||
+      evidencePaths.some((item) => typeof item !== 'string' || item.trim() === '')
+    ) {
+      throw new Error(
+        `${index}件目の knownImportantFindings[${i}].evidencePaths が文字列の配列ではありません（発見に何が要るかを実験の前に書く）`,
+      );
+    }
     return {
       finding,
       recallCriteria: recallCriteria as string[],
       evidence,
       severity,
       provenance: provenance as KnownFinding['provenance'],
+      groundTruthBasis: groundTruthBasis as KnownFinding['groundTruthBasis'],
+      evidencePaths: evidencePaths as string[],
     };
   });
 }
@@ -329,6 +360,7 @@ async function main(): Promise<void> {
       continue;
     }
     const material = prepared.material;
+    await reportEvidencePathCoverage(evalCase, material.cwd);
     try {
       for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
         const ordered = rotate(options.conditions, caseIndex + attempt - 1);
@@ -394,6 +426,46 @@ async function main(): Promise<void> {
     // 失敗を含む結果を「走り切った」と読ませない。集計前に気づけるようにする
     process.exitCode = 1;
   }
+}
+
+/**
+ * `evidencePaths` のうち、bundle に見当たらないものを報告する（Issue #1046）。
+ *
+ * **これは判定ではない。実行も止めない。** 「パスが材料に入っている＝発見できる」ではないし、
+ * その逆も成り立たない。条件Aでは after 側の内容が `base/` に無くても `changes.diff` の全量から
+ * 再構成できることがあり、パスが入っていても必要な hunk がプロンプトから省かれていることもある。
+ *
+ * 発見可能性の判定は条件ごとに人が下し、`FindingEligibility` へ残す。ここが出すのはその判定の
+ * 材料であって、代わりではない。自動で弾くと、再構成できる案件まで黙って落ちる。
+ */
+async function reportEvidencePathCoverage(evalCase: EvalCase, bundleDir: string): Promise<void> {
+  const wanted = new Set(evalCase.knownImportantFindings.flatMap((f) => f.evidencePaths));
+  if (wanted.size === 0) {
+    return;
+  }
+  const present = new Set(await listFilesRecursively(bundleDir, ''));
+  // `base/<パス>` として置かれるので、bundle 内の相対パスからその接頭辞を外して突き合わせる
+  const normalized = new Set([...present].map((p) => p.replace(/^base\//, '')));
+  const missing = [...wanted].filter((p) => !normalized.has(p));
+  if (missing.length > 0) {
+    console.log(
+      `[eval] ${evalCase.id}: evidencePaths のうち bundle に見当たらないもの ${missing.length} 件（発見可能性の判定材料。実行は止めない）: ${missing.join(', ')}`,
+    );
+  }
+}
+
+async function listFilesRecursively(root: string, prefix: string): Promise<string[]> {
+  const entries = await fs.readdir(path.join(root, prefix), { withFileTypes: true });
+  const out: string[] = [];
+  for (const entry of entries) {
+    const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      out.push(...(await listFilesRecursively(root, relative)));
+    } else {
+      out.push(relative);
+    }
+  }
+  return out;
 }
 
 function countSeverity(evalCase: EvalCase, severity: KnownFinding['severity']): number {
