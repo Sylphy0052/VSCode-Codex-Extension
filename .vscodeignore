@@ -22,6 +22,8 @@ coverage/**
 out/**
 scripts/**
 docs/**
+# セカンドオピニオンの精度測定の成果物（docs/second-opinion-eval.md）。実行時には読まない
+eval-results/**
 node_modules/**
 **/*.map
 **/*.vsix
