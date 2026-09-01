@@ -3505,19 +3505,20 @@ NGは再現手順とログの該当行をそのまま貼る。要約しない。
 
 CLIの版に強く依存していて、更新で黙って壊れうるもの。`codex --version` / `claude --version` が上がったら、まずここだけでも通す。
 
-| ケース      | 依存しているもの                                                                                 | 壊れたときの見え方                                     |
-| ----------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| L-29        | **未文書化の環境変数** `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`（`strings` 調査が根拠）       | 巻き戻しが常に失敗する。会話は壊れない                 |
-| C-30        | Codexの `config/batchWrite` によるhookの信頼書き込み（issue #146で隔離環境にて実測済み）         | 信頼しても状態が変わらない                             |
-| C-33        | Codexの `skills/config/write`（issue #146で隔離環境にて実測済み）                                | 有効無効を切り替えても戻る                             |
-| C-36        | Codexの `plugin/install` / `plugin/uninstall`（issue #146で隔離環境にて実測済み）                | 操作しても一覧が変わらない                             |
-| C-44        | Codexの `externalAgentConfig/import`（issue #146で隔離環境にて実測済み）                         | インポートが完了しない                                 |
-| C-28        | `review/start`（スキーマ根拠）                                                                   | レビューが始まらない                                   |
-| C-43        | `subAgentActivity` / `collabAgentToolCall`（スキーマ根拠。手元で再現できていない）               | 項目が種類名だけになる                                 |
-| L-13 / C-14 | Claude Codeの `initialize` が返すコマンド一覧                                                    | 候補の中身が変わる。実在しないコマンドが出るなら要調査 |
-| L-38        | Claude Codeの `background_tasks_changed` 通知と `stop_task`                                      | 一覧が出ない・停止できない                             |
-| U-29〜U-31  | Claude Codeの `rewind_conversation` control request の応答の形（Claude Code CLI 2.1.235 で実測） | 分岐が黙って中途半端になる。**失敗が成功に見える**     |
-| U-32 / U-33 | Claude Codeの `side_question` control request の応答の形（Claude Code CLI 2.1.235 で実測）       | 脇道の質問が失敗しても成功として表示される             |
+| ケース      | 依存しているもの                                                                                                         | 壊れたときの見え方                                              |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| L-29        | **未文書化の環境変数** `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`（`strings` 調査が根拠）                               | 巻き戻しが常に失敗する。会話は壊れない                          |
+| C-30        | Codexの `config/batchWrite` によるhookの信頼書き込み（issue #146で隔離環境にて実測済み）                                 | 信頼しても状態が変わらない                                      |
+| C-33        | Codexの `skills/config/write`（issue #146で隔離環境にて実測済み）                                                        | 有効無効を切り替えても戻る                                      |
+| C-36        | Codexの `plugin/install` / `plugin/uninstall`（issue #146で隔離環境にて実測済み）                                        | 操作しても一覧が変わらない                                      |
+| C-44        | Codexの `externalAgentConfig/import`（issue #146で隔離環境にて実測済み）                                                 | インポートが完了しない                                          |
+| C-28        | `review/start`（スキーマ根拠）                                                                                           | レビューが始まらない                                            |
+| C-43        | `subAgentActivity` / `collabAgentToolCall`（スキーマ根拠。手元で再現できていない）                                       | 項目が種類名だけになる                                          |
+| L-13 / C-14 | Claude Codeの `initialize` が返すコマンド一覧                                                                            | 候補の中身が変わる。実在しないコマンドが出るなら要調査          |
+| L-38        | Claude Codeの `background_tasks_changed` 通知と `stop_task`                                                              | 一覧が出ない・停止できない                                      |
+| U-29〜U-31  | Claude Codeの `rewind_conversation` control request の応答の形（Claude Code CLI 2.1.235 で実測）                         | 分岐が黙って中途半端になる。**失敗が成功に見える**              |
+| U-32 / U-33 | Claude Codeの `side_question` control request の応答の形（Claude Code CLI 2.1.235 で実測）                               | 脇道の質問が失敗しても成功として表示される                      |
+| U-48        | Codexの `skills.include_instructions=false`（codex-cli 0.148.0 で実測。`features.skills` / `skills.enabled` は効かない） | Advisorがbundleの外の `SKILL.md` を読み始める。**例外は出ない** |
 
 **U-29〜U-33 は壊れ方が特殊なので、更新のたびに必ず通すこと。** この2つの control request は
 **失敗したときも封筒に `subtype:"success"` を返す**。失敗は本体のフィールドにしか現れない
@@ -3699,6 +3700,27 @@ Issue番号を含まない一文:
 
 - 操作: 上をCodex側・Claude Code側の両方で行う
 - 期待: どちらも同じように動く。webviewを開いた直後にコンソールへ例外が出ない
+
+### U-48 Advisorがbundleの外を読まないこと（design.md §14.105、Issue #1061）
+
+**単体テストで確かめられるのは「`thread/start` へどう送ったか」までである。** 提示が実際に消えているかはCLIの実装次第で、キーの名前が変わっても例外は出ずに黙って元に戻る。だからここは実機で見る。
+
+前提: `~/.codex/skills/` にskillが1つ以上ある状態にする（`codex exec --skip-git-repo-check "提示されているskillの名前を列挙して"` で一覧が返れば良い）。
+
+- 操作: `agent.secondOpinion.headless` を `false` にして、資料に「作業ツリーの変更」を選んでセカンドオピニオンを実行する
+- 期待: 回答が返る（`thread/start` が失敗していないこと。configのキーが不正なら相談自体が起動しない）
+- 操作: 開いたAdvisorのタブで、実行されたコマンドを最初から順に見る
+- 期待: **`~/.codex/skills/` 配下を読むコマンドが1件も無い。** 読むのは `changes.diff` / `base/` / `after/`（写しを渡した場合）だけである
+- 参考: 塞ぐ前は**1つ目のコマンド**が `sed -n '1,240p' /home/<user>/.codex/skills/<name>/SKILL.md` だった（Issue #1047 のprobe）。出るとすればそこなので、最初の1〜2件を重点的に見る
+
+回答の中身が変わることも見る:
+
+- 期待: skillの文体指導が効かなくなるため、回答の書きぶりがこれまでと変わりうる。**指摘の中身が落ちていないか**を1件は読んで確かめる（変わっていること自体は意図した変更）
+
+塞ぐ前に取った測定結果を数え直す場合:
+
+- 操作: `npx tsx test/bench/secondOpinionEval/toolCallScope.ts <結果ディレクトリ>`
+- 期待: 案件・条件ごとに「コマンドN回（bundle内x / 外y）」と、外を触ったコマンドの絶対パスが出る
 
 ## 確認できないもの
 
