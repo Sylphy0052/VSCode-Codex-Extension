@@ -46,9 +46,10 @@ export const REVIEW_BUNDLE_BASE_DIR = 'base';
 /**
  * 押下時点のリポジトリ全体の写しを置くディレクトリ名（Issue #1047 条件C-repo）。
  *
- * **既定では作らない。** {@link CreateReviewBundleRequest.afterTree} を渡したときだけ実体化する。
- * 効果が測れる前に拡張本体の既定挙動を変えないためで、いまこれを渡すのは評価ハーネス
- * （`test/bench/secondOpinionEval/`）だけである。
+ * {@link CreateReviewBundleRequest.afterTree} を渡したときだけ実体化する。**拡張本体は既定で
+ * 渡す**（設定 `agent.secondOpinion.afterTree`、Issue #1062）。Issue #1060 の実測で、条件Aの
+ * 材料からは到達できなかった正解ラベル4件のうち3件をこの写しが拾ったため。評価ハーネス
+ * （`test/bench/secondOpinionEval/`）は条件ごとに渡す・渡さないを切り替える。
  */
 export const REVIEW_BUNDLE_AFTER_DIR = 'after';
 

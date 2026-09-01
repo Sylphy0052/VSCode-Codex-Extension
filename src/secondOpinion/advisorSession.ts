@@ -149,6 +149,14 @@ export interface AdvisorSessionOptions {
    */
   bundle?: ReviewBundle | undefined;
   /**
+   * 押下時点のリポジトリ全体の写しを置いた場所（Issue #1062）。写しが無ければ `undefined`。
+   *
+   * ここで要るのは材料を更新したときの伝え方だけである。写しは1世代目の押下時点で凍結されて
+   * おり、更新には追随しない。黙っていると、Advisorは新しい `changes.diff` と古い写しを
+   * 同じ時点のものとして読む。
+   */
+  afterTreeDir?: string | undefined;
+  /**
    * 相談の途中で材料を最新へ更新する手段（Issue #975）。
    *
    * 渡さない呼び出しでは更新できない（{@link AdvisorSession.canUpdateMaterial} が `false`）。
@@ -357,7 +365,7 @@ export class AdvisorSession {
     let result: AdvisorTurnResult;
     try {
       result = await this.runTurn(
-        buildMaterialUpdatePrompt(next, materialPath),
+        buildMaterialUpdatePrompt(next, materialPath, this.options.afterTreeDir),
         signal,
         () => {
           // 材料が変われば、それ以前の相談から作った下書きは前提が違う。承認できる状態の

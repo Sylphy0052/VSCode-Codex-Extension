@@ -234,6 +234,19 @@ export interface SecondOpinionConfig {
    * `false` にすると Issue #929 の手動2ステップ（指示を作る → 確認して送る）だけになる。
    */
   autoSend: boolean;
+  /**
+   * 押下時点のリポジトリ全体の写し（`after/`）を材料へ足すか（Issue #1062）。既定は `true`。
+   *
+   * Issue #1060 の実測（9案件）で、条件Aの材料からは到達できなかった正解ラベル4件のうち3件を
+   * この写しが拾った。両条件で分母に入るラベルの recall は同一で、増分はすべて「差分の外に
+   * ある問題」から来ている。代わりに1回答あたりのトークンが21.7%増える（探索の往復として
+   * 現れる。プロンプト長はほぼ変わらない）。
+   *
+   * `false` にすると Issue #1047 以前と同じ材料（`changes.diff` と `base/`）に戻り、固定指示も
+   * 「リポジトリ全体の探索は行わない」へ戻る。トークンの増加を許容できない場合と、写しの
+   * 構築が失敗し続ける環境のための退避口である。
+   */
+  afterTree: boolean;
 }
 
 /** Advisorセッション（Issue #929）の設定。 */
@@ -273,6 +286,7 @@ export function readSecondOpinionConfig(): SecondOpinionConfig {
       ),
     },
     autoSend: c.get<boolean>('secondOpinion.autoSend') ?? true,
+    afterTree: c.get<boolean>('secondOpinion.afterTree') ?? true,
   };
 }
 

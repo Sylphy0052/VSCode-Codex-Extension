@@ -88,6 +88,14 @@ export interface SecondOpinionRequest {
    * 省略時は `'summary'`。
    */
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
+  /**
+   * 押下時点のリポジトリ全体の写しを置いた場所（bundleのルートからの相対パス。Issue #1062）。
+   *
+   * 渡すと固定指示が「リポジトリ全体の探索は行わない」から「この写しの中でなら、判断に必要な
+   * 範囲で追加で読んでよい」へ変わる（`prompt.ts`）。**写しを実体化できたときだけ渡すこと。**
+   * 実体が無いのに渡すと、Advisorは無いディレクトリを探しに行って空振りする。
+   */
+  afterTreeDir?: string | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
@@ -169,6 +177,7 @@ export async function runSecondOpinion(
     artifact: request.artifact,
     conversationSummary: request.conversationSummary,
     conversationBackgroundKind: request.conversationBackgroundKind,
+    afterTreeDir: request.afterTreeDir,
   });
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
@@ -177,6 +186,7 @@ export async function runSecondOpinion(
       `effort=${request.candidate.effort} headless=${String(request.headless)} ` +
       `artifact=${request.artifact.kind} ` +
       `summary=${describeBackgroundForLog(request)} ` +
+      `afterTree=${String(request.afterTreeDir !== undefined)} ` +
       `promptChars=${prompt.length}`,
   );
   // 保持する場合の所有権（Issue #929）。`runSingleTurnTask` に閉じさせない代わりに、
