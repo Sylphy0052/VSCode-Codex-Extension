@@ -28,6 +28,7 @@ import { codexPaths } from '../codex/cliLocator';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
 import { buildDisabledMcpServersOverlay } from '../codex/mcpDisable';
+import { SKILLS_DISABLED_CONFIG_OVERLAY } from '../codex/skillDisable';
 import { effortsFor } from '../codex/modelCatalog';
 import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
@@ -644,8 +645,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         : input.disableMcpServers === true
           ? await this.disabledMcpServersConfig()
           : undefined;
+    // skillを提示させないセッション（セカンドオピニオン。Issue #1061）は、`thread/start` の
+    // configへ重ねる。MCPの指定とは独立なので、両方指定されたら両方載る
+    const threadConfig =
+      mcpServersConfig === undefined && input.disableSkills !== true
+        ? undefined
+        : {
+            ...(mcpServersConfig === undefined ? {} : { mcp_servers: mcpServersConfig }),
+            ...(input.disableSkills === true ? SKILLS_DISABLED_CONFIG_OVERLAY : {}),
+          };
     try {
-      const threadId = await entry.session.start(input.cwd, taskConfig, mcpServersConfig);
+      const threadId = await entry.session.start(input.cwd, taskConfig, threadConfig);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
       await this.persistModelSettings(entry, threadId);

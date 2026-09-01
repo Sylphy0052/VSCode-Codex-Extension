@@ -19,6 +19,7 @@ import {
 } from '../../../src/appserver/chatState';
 import { AppServerConnection, type ServerRequest } from '../../../src/appserver/connection';
 import { buildDisabledMcpServersOverlay } from '../../../src/codex/mcpDisable';
+import { SKILLS_DISABLED_CONFIG_OVERLAY } from '../../../src/codex/skillDisable';
 import { sandboxPolicyFor } from '../../../src/codex/sandboxPolicy';
 import type { Logger } from '../../../src/log';
 
@@ -182,7 +183,10 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
       sandbox: SANDBOX_MODE,
       approvalPolicy: APPROVAL_POLICY,
       model: request.model,
-      config: { mcp_servers: mcpServers },
+      // 本番と同じくskillを提示させない（`buildSecondOpinionSessionInput` の
+      // `disableSkills: true`）。提示があるとAdvisorはbundleの外の `SKILL.md` を読みに行き、
+      // 費用の指標である `toolCalls` に材料と無関係な読み取りが混ざる（Issue #1061）
+      config: { mcp_servers: mcpServers, ...SKILLS_DISABLED_CONFIG_OVERLAY },
     };
     record('request', { method: 'thread/start', params: startParams });
     const started = await connection.request('thread/start', startParams);
