@@ -535,6 +535,33 @@ strong pool を60件読んだ時点の実測。
 
 「条件Aだけでは正例が15件そろわなかった」ことは benchmark の失敗ではない。**production の材料では、独立した根拠を持つ既知の欠陥のかなりの部分がそもそも観測できない**という製品側の実測結果である。
 
+### 3-1. 24件を層化ランダム抽出する（Issue #1046 手順4）
+
+eligible pool から本測定の24件を機械的に抜く。**印象で並べず、抜いた結果を見て内訳を決め直さない。**
+
+```
+npx tsx test/bench/secondOpinionEval/selectCases.ts \
+  --pool eval-results/selection-pool-v1.json \
+  --frame eval-results/sampling-frame-v2.json \
+  --eligibility eval-results/eligibility-v1.json \
+  --condition C-repo \
+  --out eval-results/selected-cases-v1.json
+```
+
+`--pool` は screening の結果から人が作る母集団で、1件ごとに `caseId` / `prNumber` / `stratum`（難易度）/ `kind` / `changeSizeStratum` / `tags` を持つ。難易度の判断だけが人の入力で、**それ以外の属性は照合される**。
+
+**規則は入力より先に決まっている。** 層ごとの必要数（`9 / 6 / 6 / 3`）・seed・変更規模のバランス制約は `stratifiedSample.ts` の定数で、pool の中身では変わらない。規則を変えるときは `SELECTION_VERSION` を上げ、前の版のファイルは残す。
+
+抽出の前に3つを確かめ、1つでも通らなければ**抜かずに止める**。
+
+- pool の `changeSizeStratum` と `tags` が、凍結済みの sampling frame と一致すること。frame で除外済みのPRが混ざっていないこと。ここを緩めると、`extreme-tail` の目印を書き換えてバランス制約を通せてしまう
+- 正例（`hard-positive` / `normal-positive`）が、その条件の eligibility で `discoverable` かつ `explicitlyExposed` でないこと。**判定が無い正例は通ったものとして扱わない**
+- 層ごとの候補数が必要数以上あること。足りなければ screening を読み進めてから抽出する
+
+変更規模のバランス制約（4層それぞれ最低3件 / `extreme-tail` 最低1件）を満たさないときは、seed に試行番号を混ぜて引き直す。**引き直しは番号を1つずつ進めるだけで、途中で規則は変えない。** 落ちた試行も出力の `attempts` に残すので、何回引いたかは後から見える。上限（100回）に達したら、seed を足して引き直さずに止める。満たすまで回せる設計にすると「制約を満たした」ではなく「満たすまで回した」になるため、そこで母集団か制約のどちらかを人が見直す。
+
+出力は `writeFrozen` で凍結する。同じ入力から作り直して一致を確かめることはできるが、**1バイトでも違えば書かずに止まる**。
+
 ### 4. 実行する
 
 ```
