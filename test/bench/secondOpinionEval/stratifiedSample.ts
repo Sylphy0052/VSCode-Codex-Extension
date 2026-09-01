@@ -147,6 +147,25 @@ export function balanceShortfalls(selected: readonly SelectionCandidate[]): stri
  * caseId の重複と層ごとの不足で止める。**足りないまま抜いて「そろった」ことにしない。**
  */
 export function verifyPool(candidates: readonly SelectionCandidate[]): void {
+  // pool は人が書くJSONなので、既知の値だけが来るとは限らない。未知の層は
+  // どの層にも入らないまま静かに落ちるか、内訳の集計を NaN にする。先に弾く。
+  const unknown = candidates.flatMap((candidate) => {
+    const problems: string[] = [];
+    if (!DIFFICULTY_STRATA.includes(candidate.stratum)) {
+      problems.push(
+        `${candidate.caseId}: stratum が ${DIFFICULTY_STRATA.join(' / ')} のいずれでもありません（${String(candidate.stratum)}）`,
+      );
+    }
+    if (!CHANGE_SIZE_STRATA.includes(candidate.changeSizeStratum)) {
+      problems.push(
+        `${candidate.caseId}: changeSizeStratum が ${CHANGE_SIZE_STRATA.join(' / ')} のいずれでもありません（${String(candidate.changeSizeStratum)}）`,
+      );
+    }
+    return problems;
+  });
+  if (unknown.length > 0) {
+    throw new Error(`pool に未知の値があります（${unknown.length} 件）: ${summarize(unknown)}`);
+  }
   const seen = new Set<string>();
   const duplicates = new Set<string>();
   for (const candidate of candidates) {
@@ -225,6 +244,10 @@ function summarize(problems: readonly string[], limit = 10): string {
  *
  * 判定の無い正例は**通ったものとして扱わない**。判定していないだけのものを分母へ入れると、
  * recall が「判定漏れの分だけ」下がる（Issue #1046）。
+ *
+ * ここで見るのは**案件として使えるか**なので、finding が複数あるときは1つでも通っていれば
+ * 抽出の候補にする。finding 単位で分母から外すのは集計側（`recall.ts`）の仕事で、そちらは
+ * 判定漏れも `unjudged` として数える。
  */
 export function verifyPositivesEligible(
   candidates: readonly SelectionCandidate[],

@@ -97,6 +97,22 @@ describe('verifyPool', () => {
     expect(() => verifyPool(candidates)).toThrow(/層の候補が足りません/);
   });
 
+  it('未知の難易度の層があれば止める', () => {
+    const candidates = pool();
+    const tampered = candidates.map((entry, index) =>
+      index === 0 ? { ...entry, stratum: 'easy-positive' as DifficultyStratum } : entry,
+    );
+    expect(() => verifyPool(tampered)).toThrow(/stratum が/);
+  });
+
+  it('未知の変更規模の層があれば止める', () => {
+    const candidates = pool();
+    const tampered = candidates.map((entry, index) =>
+      index === 0 ? { ...entry, changeSizeStratum: 'XXL' as ChangeSizeStratum } : entry,
+    );
+    expect(() => verifyPool(tampered)).toThrow(/changeSizeStratum が/);
+  });
+
   it('caseIdが重複していれば止める', () => {
     const candidates = pool();
     const first = candidates[0] as SelectionCandidate;

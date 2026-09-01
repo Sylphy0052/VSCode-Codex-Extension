@@ -99,17 +99,37 @@ async function readWithSha(filePath: string): Promise<{ raw: string; sha256: str
   return { raw, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
+/** 期待した配列が入っているかだけ確かめる。中身の検証は `stratifiedSample.ts` 側でする。 */
+function arrayField<T>(value: unknown, field: string, what: string): T[] {
+  const list = (value as Record<string, unknown> | null)?.[field];
+  if (!Array.isArray(list)) {
+    throw new Error(`${what} に配列の ${field} がありません`);
+  }
+  return list as T[];
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const pool = await readWithSha(args.poolPath);
   const frame = await readWithSha(args.framePath);
   const eligibility = await readWithSha(args.eligibilityPath);
 
-  const candidates = (JSON.parse(pool.raw) as PoolFile).candidates;
-  verifyAgainstFrame(candidates, (JSON.parse(frame.raw) as FrameFile).prs);
+  const candidates = arrayField<SelectionCandidate>(
+    JSON.parse(pool.raw) as PoolFile,
+    'candidates',
+    args.poolPath,
+  );
+  verifyAgainstFrame(
+    candidates,
+    arrayField<FramePullRequest>(JSON.parse(frame.raw) as FrameFile, 'prs', args.framePath),
+  );
   verifyPositivesEligible(
     candidates,
-    (JSON.parse(eligibility.raw) as EligibilityFile).entries,
+    arrayField<EligibilityEntry>(
+      JSON.parse(eligibility.raw) as EligibilityFile,
+      'entries',
+      args.eligibilityPath,
+    ),
     args.conditionId,
   );
 
