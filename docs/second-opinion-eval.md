@@ -57,19 +57,36 @@ npx tsx test/bench/secondOpinionEval/probe.ts [--out <トレース出力先>]
 
 ハーネスは本番のAdvisor（`src/secondOpinion/run.ts` の `buildSecondOpinionSessionInput` → `ChatViewManager.openTaskSession` → `ChatSession.start` / `send`）と同じ値を送る。ここが違うと、測っているのが本番のセカンドオピニオンではなくなる。
 
-| 送信先         | フィールド           | 値                                                               |
-| -------------- | -------------------- | ---------------------------------------------------------------- |
-| `thread/start` | `sandbox`            | `read-only`                                                      |
-| `thread/start` | `approvalPolicy`     | `never`                                                          |
-| `thread/start` | `model`              | 条件で固定したモデル                                             |
-| `thread/start` | `config.mcp_servers` | 全サーバ無効化のオーバーレイ（`buildDisabledMcpServersOverlay`） |
-| `turn/start`   | `model` / `effort`   | 条件で固定した値                                                 |
-| `turn/start`   | `approvalPolicy`     | `never`                                                          |
-| `turn/start`   | `sandboxPolicy`      | `{ type: 'readOnly' }`（`sandboxPolicyFor('read-only')`）        |
+| 送信先         | フィールド           | 値                                                                    |
+| -------------- | -------------------- | --------------------------------------------------------------------- |
+| `thread/start` | `sandbox`            | `read-only`                                                           |
+| `thread/start` | `approvalPolicy`     | `never`                                                               |
+| `thread/start` | `model`              | 条件で固定したモデル                                                  |
+| `thread/start` | `config.mcp_servers` | 全サーバ無効化のオーバーレイ（`buildDisabledMcpServersOverlay`）      |
+| `thread/start` | `config.skills`      | `{ include_instructions: false }`（`SKILLS_DISABLED_CONFIG_OVERLAY`） |
+| `turn/start`   | `model` / `effort`   | 条件で固定した値                                                      |
+| `turn/start`   | `approvalPolicy`     | `never`                                                               |
+| `turn/start`   | `sandboxPolicy`      | `{ type: 'readOnly' }`（`sandboxPolicyFor('read-only')`）             |
 
 `approvalsReviewer` は送らない（本番の `toCodexConfig` が空に固定している）。`bypassApprovalsAndSandbox` も false なので、`turnPolicyFor` は設定由来の `sandboxPolicy` だけを返す。
 
 MCPを無効化するのは速度のためだけではない。既定のまま開くと利用者の `config.toml` のサーバと組み込みの `codex_apps` が接続され、ツール定義がターンへ載る。本番は載せないので、載せたまま測ると別物を測ることになる。
+
+skillを提示させないのも同じ理由である（Issue #1061）。Codex CLIは利用可能なskillの一覧をシステムプロンプトへ自動で載せ、使うと決めたら `SKILL.md` を読むよう指示する。Advisorはこれを見て、固定指示の「この作業ディレクトリの外を読みに行かないでください」に反し、1つ目のコマンドで `~/.codex/skills/<name>/SKILL.md` を読みに行く（#1047 のprobeで、条件A・条件C-repoの両方に出た）。材料をbundleへ隔離した前提が崩れるうえ、費用の指標である `toolCalls` に材料と無関係な読み取りとその失敗が混ざる。
+
+無効化のキーは実測で選んである（codex-cli 0.148.0）。`features.skills=false` と `skills.enabled=false` は効かず、一覧はそのまま提示される。効くのは `skills.include_instructions=false` だけである。app-server経由でも同じで、オーバーレイ有りでは「提示されているskillを列挙せよ」に「なし」と答え、外すと20件を列挙する（陽性対照つきで確認）。
+
+グローバルな `~/.codex/AGENTS.md` はこの経路では消せない（`project_doc_max_bytes=0` / `instructions` / `user_instructions` のいずれでも残る）。ただしプロンプトへ注入されるだけでコマンドの実行を伴わないため `toolCalls` には現れず、条件間で一定である。消すには `CODEX_HOME` ごと差し替えることになり、認証情報の置き場も巻き込むのでここでは行わない。
+
+#### 塞ぐ前に取った記録を数え直す
+
+`skills.include_instructions=false` を入れる前の実行記録には、bundleの外の読み取りが混ざったままである。取り直さずに内訳を出す。
+
+```
+npx tsx test/bench/secondOpinionEval/toolCallScope.ts <結果ディレクトリ>
+```
+
+コマンド本体（先頭の `/bin/bash -lc` を落とした残り）に絶対パスが現れるかで、bundleの中だけを触ったコマンドと外を触ったコマンドを数え分ける。bundleはセッションの作業ディレクトリなので、材料への参照は `changes.diff` / `base/...` / `after/...` の相対パスで出る。完全な判定ではない（bundleを絶対パスで指したコマンドは外と数え、変数経由の参照は拾えない）ので、費用の内訳を後から言うために使い、「外を読んでいないことの証明」には使わない。
 
 ### 1. sampling frame を作る（Issue #1046 手順1）
 

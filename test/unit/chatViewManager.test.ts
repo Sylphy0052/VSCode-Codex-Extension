@@ -1217,6 +1217,70 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('skillを提示させないセッション（design.md §14.105、Issue #1061）', () => {
+    it('disableSkillsを渡すとthread/startのconfigへskills.include_instructions=falseが載る', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableSkills: true,
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as {
+        config?: { skills?: { include_instructions?: boolean } };
+      };
+      expect(params.config?.skills).toEqual({ include_instructions: false });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+
+    it('MCPの指定と同居する（どちらかが消えない）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+        disableSkills: true,
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as {
+        config?: {
+          mcp_servers?: Record<string, unknown>;
+          skills?: { include_instructions?: boolean };
+        };
+      };
+      expect(params.config?.mcp_servers?.['task-messaging']).toBeDefined();
+      expect(params.config?.skills).toEqual({ include_instructions: false });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+
+    it('指定しなければskillの指定は載らない（後方互換）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as { config?: Record<string, unknown> };
+      expect(params.config).toBeUndefined();
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+  });
+
   describe('タスク間メッセージングのMCP設定・可視性確認（design.md §16.21、Issue #123）', () => {
     it('input.mcpを渡すとthread/startのconfig.mcp_serversへ差し込まれる（実測: streamable_http）', async () => {
       const { manager, connection } = createManager();

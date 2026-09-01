@@ -67,6 +67,9 @@ export function buildSecondOpinionSessionInput(
     // 材料を読んで答えるだけのターンでMCPのツールは要らない。既定のまま開くと
     // 利用者のサーバと組み込みの `codex_apps` が接続され、その分だけ遅くなる（Issue #944）
     disableMcpServers: true,
+    // 固定指示は「この作業ディレクトリの外を読みに行かない」だが、skillの一覧を提示されると
+    // Advisorは `~/.codex/skills/<name>/SKILL.md` を読みに行く（Issue #1061。#1047 で実測）
+    disableSkills: true,
   };
 }
 

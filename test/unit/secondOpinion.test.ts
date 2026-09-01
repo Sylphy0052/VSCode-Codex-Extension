@@ -465,6 +465,8 @@ describe('runSecondOpinion（Issue #894）', () => {
         sandbox: 'read-only',
         // MCPサーバは1本も載せない（Issue #944）
         disableMcpServers: true,
+        // skillの一覧も提示させない（Issue #1061）。提示があるとbundleの外を読みに行く
+        disableSkills: true,
       },
     ]);
   });

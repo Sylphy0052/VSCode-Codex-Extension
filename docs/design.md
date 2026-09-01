@@ -8970,3 +8970,37 @@ webview側は届いた差し分を `index` で当てて積み直し、**総数�
 - `test/unit/workflowGraph.test.ts`: `kanbanBucket`のバケツ分け、`summarizeKanban`の件数、`taskRoleLabel`
 - `test/unit/runnerTeamHandoff.test.ts`: run終了時に受け渡しファイルの置き場ごと消すこと、撤去に失敗したとき（`ok: false`・例外・祖先のシンボリックリンク）は警告だけ残してrunの結果を書き換えないこと。`runner.ts`の終了処理は`TeamHandoffStore`を`nodeHandoffFileSystem`と直接組み立てる（注入点を意図的に持たない）ため、このテストだけはモジュールごと差し替えて観測している（Issue #725）
 - `docs/manual-test.md` W-W: メニューからの起動と生成されたYAMLに`role`が入ること、カンバンのバッジと役割ラベルの見え方、実機のMCP越しの`write_handoff`/`read_handoff`、run終了後に`.agents/handoff/runs/<runId>/`が消えていること、再開した2周目が空から始まること（Issue #725）
+
+### 14.105 Advisorにskillを提示しない（Issue #1061）
+
+§14.80のセカンドオピニオンは、差分と変更対象ファイルだけを置いた隔離ディレクトリ（review bundle。§14.87）をセッションの作業ディレクトリにし、固定指示で「この作業ディレクトリの外を読みに行かないでください」と縛る。ところがAdvisorは、**1つ目のコマンドで** `~/.codex/skills/<name>/SKILL.md` を読みに行っていた（Issue #1047 のE2E probe `eval-results/probe-c-repo-v1/` で、条件A・条件C-repoの両方に出た）。
+
+原因はモデルの気まぐれではない。Codex CLIが利用可能なskillの一覧をシステムプロンプトへ自動で載せ、「使うと決めたらまず `SKILL.md` を最後まで読む」よう指示している（実測: 素の `codex exec` へ「提示されているskillを列挙せよ」と聞くと20件を答える）。提示があるかぎり、固定指示と衝突したまま読みに行く余地が残る。
+
+害は2つある。**材料をbundleへ隔離した前提が崩れる**こと、そして**費用の測定に雑音が乗る**ことである。精度測定（§14.99 / Issue #1047）は「条件Aとの `toolCalls` の差＝探索の増分」として費用を読むが、条件Aの内訳に材料と無関係な読み取りとその失敗（probeでは `exit 2` が4回）が混ざる。機密面の懸念は無い（読んでいるのは利用者自身のskill定義で、外部への送信でもない）。
+
+#### 塞ぎ方は実測で選ぶ
+
+`thread/start` の `config` へ重ねるオーバーレイで塞ぐ（`src/codex/skillDisable.ts`）。キーの候補は3つあり、効いたのは1つだけだった（codex-cli 0.148.0）。
+
+| 指定                                | 結果                                     |
+| ----------------------------------- | ---------------------------------------- |
+| `features.skills=false`             | 効かない。一覧はそのまま提示される       |
+| `skills.enabled=false`              | 効かない（設定は受理されるが一覧は残る） |
+| `skills.include_instructions=false` | **効く**。skillの提示そのものが消える    |
+
+確認はapp-server経由でも行った。オーバーレイ有りでは「提示されているskillを列挙せよ」に「なし」と答え、外すと20件を列挙する（陽性対照つき）。指定は`TaskSessionInput.disableSkills`で、`ChatViewManager.openTaskSession`がMCPのオーバーレイと合成して`thread/start`の`config`へ載せる。両者は独立なので、`disableMcpServers`と併用すると両方載る。
+
+**グローバルな `~/.codex/AGENTS.md` は消せない。** `project_doc_max_bytes=0` / `instructions` / `user_instructions` のいずれでも残ることを実測で確認した。消すには `CODEX_HOME` ごと差し替えることになり、認証情報の置き場（`auth.json`）まで巻き込むため行わない。こちらはプロンプトへ注入されるだけでコマンドの実行を伴わないので、`toolCalls` には現れず、条件間でも一定である。
+
+#### 塞ぐ前に取った記録
+
+既に取った実行記録には、bundleの外の読み取りが混ざったまま残る。取り直さずに内訳を出せるよう、コマンドをbundleの中と外で数え分ける集計（`test/bench/secondOpinionEval/toolCallScope.ts`）を置いた。判定は「先頭の `/bin/bash -lc` を落としたコマンド本体に絶対パスが現れるか」で、bundleがセッションの作業ディレクトリである以上、材料への参照は相対パスで出るという性質に乗っている。完全な判定ではない（bundleを絶対パスで指したコマンドは外と数え、変数経由の参照は拾えない）ので、費用の内訳を後から言うために使い、「外を読んでいない」ことの証明には使わない。証明の側はこの節の変更が担う。
+
+`eval-results/probe-c-repo-v1/` へ当てると、条件Aはコマンド9回のうち外が4回、条件C-repoは7回のうち外が3回で、いずれも `japanese-writing` skillの `SKILL.md` と参照ファイルだった。
+
+#### 確かめ方
+
+- `test/unit/chatViewManager.test.ts`: `disableSkills`を渡したとき`thread/start`の`config`へ`skills.include_instructions=false`が載ること、MCPの指定と同居すること、指定しなければ`config`自体が載らないこと（後方互換）
+- `test/unit/secondOpinion.test.ts`: セカンドオピニオンのセッション入力に`disableSkills`が入ること
+- app-server経由の実測（陽性対照つき）: 上記のとおり

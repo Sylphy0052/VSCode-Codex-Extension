@@ -137,18 +137,18 @@ export class ChatSession {
   /**
    * 新しいスレッドを開始する。
    *
-   * `mcpServersConfig` を渡すと、`thread/start`の`config`フィールド
+   * `threadConfig` を渡すと、`thread/start`の`config`フィールド
    * （`ThreadStartParams`。`codex app-server generate-json-schema`のスキーマでは
-   * `additionalProperties: true`の自由形式）へ`{ mcp_servers: mcpServersConfig }`として
-   * 差し込む（実測。CLI 0.147.0）。**`config.toml`には一切書き込まれない**
-   * （`config/read`で確認済み。スレッド限定のオーバーレイ）。呼び出し側が何を渡すか
-   * （サーバ名・接続先）を決める。このクラス自身は中身の意味（タスク間メッセージング
-   * design.md §16.21）を知らない（`ChatViewManager`側の責務。呼び出し側のJSDoc参照）。
+   * `additionalProperties: true`の自由形式）へそのまま差し込む（実測。CLI 0.147.0）。
+   * **`config.toml`には一切書き込まれない**（`config/read`で確認済み。スレッド限定の
+   * オーバーレイ）。中身（`mcp_servers`によるタスク間メッセージング design.md §16.21、
+   * `skills`によるskillの非提示 Issue #1061）を決めるのは呼び出し側で、このクラス自身は
+   * その意味を知らない（`ChatViewManager`側の責務。呼び出し側のJSDoc参照）。
    */
   async start(
     cwd: string,
     config: CodexConfig,
-    mcpServersConfig?: Record<string, unknown>,
+    threadConfig?: Record<string, unknown>,
   ): Promise<string> {
     await this.connection.ensureStarted();
     const params: Record<string, unknown> = { cwd };
@@ -169,8 +169,8 @@ export class ChatSession {
     if (config.model !== '') {
       params['model'] = config.model;
     }
-    if (mcpServersConfig !== undefined) {
-      params['config'] = { mcp_servers: mcpServersConfig };
+    if (threadConfig !== undefined) {
+      params['config'] = threadConfig;
     }
 
     const response = await this.connection.request('thread/start', params);
