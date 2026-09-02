@@ -8,6 +8,8 @@ import {
   readChatLoopEngineeringConfig,
   readGoalEvaluatorConfig,
   setChatLoopEngineeringEnabled,
+  readChatLimitAutoResumeEnabled,
+  setChatLimitAutoResumeEnabled,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
@@ -680,6 +682,20 @@ describe('readChatLoopEngineeringConfig（issue #891）', () => {
     expect(readChatLoopEngineeringConfig().continueInstruction).toBe(
       DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
     );
+  });
+});
+
+describe('readChatLimitAutoResumeEnabled（issue #1069）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定は有効で、ユーザー設定へ有効無効を保存できる', async () => {
+    expect(readChatLimitAutoResumeEnabled()).toBe(true);
+    await setChatLimitAutoResumeEnabled(false);
+    expect(readChatLimitAutoResumeEnabled()).toBe(false);
+    await setChatLimitAutoResumeEnabled(true);
+    expect(readChatLimitAutoResumeEnabled()).toBe(true);
   });
 });
 

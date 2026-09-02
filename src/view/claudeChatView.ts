@@ -47,6 +47,8 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readChatLimitAutoResumeEnabled,
+  setChatLimitAutoResumeEnabled,
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
@@ -202,6 +204,9 @@ interface ClaudePanel extends BaseChatPanel {
    * transcript）とは別物で、このタブを閉じれば消える（拡張機能側にも永続化しない）。
    */
   sideQuestionHistory: SideQuestionHistoryEntry[];
+  limitAutoResumeTimer: ReturnType<typeof setTimeout> | undefined;
+  limitAutoResumeAt: number | undefined;
+  limitAutoResumeAwaitingResult: boolean;
 }
 
 /**
@@ -241,6 +246,10 @@ interface ChatSettingsPayload {
 
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
+const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
+const LIMIT_AUTO_RESUME_GRACE_MS = 30_000;
+const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
+const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
 
 /**
  * Claude Codeチャットパネルの生成オプション（design.md §14.48、issue #287）。
@@ -1035,6 +1044,7 @@ export class ClaudeChatViewManager
    * ロールアウトだけが増える。
    */
   protected override onTeardown(entry: ClaudePanel): void {
+    this.cancelLimitAutoResume(entry);
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
     this.handoffDrafts.delete(entry.secondOpinionKey);
   }
@@ -1368,6 +1378,9 @@ export class ClaudeChatViewManager
       approvalResolvedListeners: [],
       notifiedApprovalRequestIds: new Set(),
       sideQuestionHistory: [],
+      limitAutoResumeTimer: undefined,
+      limitAutoResumeAt: undefined,
+      limitAutoResumeAwaitingResult: false,
     };
     return entry;
   }
@@ -1405,6 +1418,7 @@ export class ClaudeChatViewManager
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
+      limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
@@ -1526,6 +1540,7 @@ export class ClaudeChatViewManager
     if (turnFinished) {
       void this.refreshUsage();
     }
+    this.scheduleLimitAutoResume(entry, state, turnFinished);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -1535,6 +1550,87 @@ export class ClaudeChatViewManager
     for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
+  }
+
+  private cancelLimitAutoResume(entry: ClaudePanel): void {
+    if (entry.limitAutoResumeTimer !== undefined) {
+      clearTimeout(entry.limitAutoResumeTimer);
+      entry.limitAutoResumeTimer = undefined;
+    }
+    entry.limitAutoResumeAt = undefined;
+    entry.limitAutoResumeAwaitingResult = false;
+  }
+
+  private scheduleLimitAutoResume(
+    entry: ClaudePanel,
+    state: ChatState,
+    turnFinished = false,
+  ): void {
+    if (!readChatLimitAutoResumeEnabled() || entry.panel === undefined) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    if (entry.limitAutoResumeAwaitingResult) {
+      if (!turnFinished) {
+        return;
+      }
+      entry.limitAutoResumeAwaitingResult = false;
+      if (state.turnFailed && state.usage?.limited === true) {
+        this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
+      } else {
+        this.cancelLimitAutoResume(entry);
+      }
+      return;
+    }
+    if (state.usage?.limited !== true) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    if (entry.limitAutoResumeTimer !== undefined) {
+      return;
+    }
+    const resetAt = state.usage.resetsAt;
+    const waitMs =
+      resetAt === undefined
+        ? LIMIT_AUTO_RESUME_FALLBACK_MS
+        : Math.max(0, resetAt * 1_000 - Date.now()) + LIMIT_AUTO_RESUME_GRACE_MS;
+    this.armLimitAutoResume(entry, waitMs);
+  }
+
+  private armLimitAutoResume(entry: ClaudePanel, waitMs: number): void {
+    if (entry.limitAutoResumeTimer !== undefined) {
+      clearTimeout(entry.limitAutoResumeTimer);
+    }
+    entry.limitAutoResumeAt = Date.now() + waitMs;
+    entry.limitAutoResumeTimer = setTimeout(() => {
+      entry.limitAutoResumeTimer = undefined;
+      entry.limitAutoResumeAt = undefined;
+      const latest = entry.session.getState();
+      if (
+        entry.disposed ||
+        entry.panel === undefined ||
+        !readChatLimitAutoResumeEnabled() ||
+        latest.busy ||
+        latest.approvals.length > 0 ||
+        latest.prompts.length > 0
+      ) {
+        return;
+      }
+      entry.limitAutoResumeAwaitingResult = true;
+      try {
+        entry.session.noteLocalEvent(
+          `limitAutoResume:${Date.now()}`,
+          '使用量上限の解除後に自動続行しています',
+        );
+        entry.session.send(LIMIT_AUTO_RESUME_INSTRUCTION);
+      } catch (e) {
+        entry.limitAutoResumeAwaitingResult = false;
+        this.reportError(e);
+        if (readChatLimitAutoResumeEnabled() && entry.panel !== undefined) {
+          this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
+        }
+      }
+    }, waitMs);
   }
 
   /**
@@ -1738,6 +1834,7 @@ export class ClaudeChatViewManager
         if (text.trim() === '' && entry.attachments.list.length === 0) {
           return;
         }
+        this.cancelLimitAutoResume(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
         // 行頭が !/# の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5/#6、
@@ -1832,6 +1929,7 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'interrupt') {
+        this.cancelLimitAutoResume(entry);
         entry.loop.noteUserAction();
         entry.session.interrupt();
         return;
@@ -2051,6 +2149,7 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'loop/stop') {
+        this.cancelLimitAutoResume(entry);
         entry.loop.stop('manual');
         return;
       }
@@ -2093,6 +2192,23 @@ export class ClaudeChatViewManager
         const enabled = !readChatLoopEngineeringConfig().enabled;
         void setChatLoopEngineeringEnabled(enabled)
           .then(() => entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled }))
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleLimitAutoResume') {
+        const enabled = !readChatLimitAutoResumeEnabled();
+        void setChatLimitAutoResumeEnabled(enabled)
+          .then(() => {
+            if (!enabled) {
+              this.cancelLimitAutoResume(entry);
+            } else {
+              this.scheduleLimitAutoResume(entry, entry.session.getState());
+            }
+            return entry.panel?.webview.postMessage({
+              type: 'limitAutoResume',
+              enabled: readChatLimitAutoResumeEnabled(),
+            });
+          })
           .catch((e: unknown) => this.reportError(e));
         return;
       }

@@ -40,6 +40,8 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readChatLimitAutoResumeEnabled,
+  setChatLimitAutoResumeEnabled,
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
@@ -139,6 +141,10 @@ import {
 } from './chatShared';
 
 const VIEW_TYPE = 'codex.chat';
+const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
+const LIMIT_AUTO_RESUME_GRACE_MS = 30_000;
+const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
+const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
 
 /**
  * Codexチャットパネルの生成オプション（design.md §14.48、issue #287）。
@@ -237,6 +243,9 @@ interface ChatPanel extends BaseChatPanel {
    * （`stateFull`）に戻す。
    */
   sentItems?: readonly ChatItem[] | undefined;
+  limitAutoResumeTimer: ReturnType<typeof setTimeout> | undefined;
+  limitAutoResumeAt: number | undefined;
+  limitAutoResumeAwaitingResult: boolean;
 }
 
 /**
@@ -797,6 +806,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       approvalResolvedListeners: [],
       mcpStartupListeners: [],
       notifiedApprovalRequestIds: new Set(),
+      limitAutoResumeTimer: undefined,
+      limitAutoResumeAt: undefined,
+      limitAutoResumeAwaitingResult: false,
     };
     return entry;
   }
@@ -834,6 +846,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
+      limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
@@ -949,6 +962,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * （`thread/start`応答待ち登録。Claude Codeには対応する概念が無い）からも取り除く。
    */
   protected override onTeardown(entry: ChatPanel): void {
+    this.cancelLimitAutoResume(entry);
     this.pendingStarts.remove(entry);
     // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、
     // 誰にも見えないままCodexのプロセスとロールアウトだけが増える
@@ -986,6 +1000,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       entry.panel.title = decoratePanelTitle(entry.title, deriveSessionActivityState(state));
     }
     this.notifyNewApprovals(entry, state);
+    this.scheduleLimitAutoResume(entry, state, turnFinished);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -995,6 +1010,85 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
+  }
+
+  private cancelLimitAutoResume(entry: ChatPanel): void {
+    if (entry.limitAutoResumeTimer !== undefined) {
+      clearTimeout(entry.limitAutoResumeTimer);
+      entry.limitAutoResumeTimer = undefined;
+    }
+    entry.limitAutoResumeAt = undefined;
+    entry.limitAutoResumeAwaitingResult = false;
+  }
+
+  private scheduleLimitAutoResume(entry: ChatPanel, state: ChatState, turnFinished = false): void {
+    if (!readChatLimitAutoResumeEnabled() || entry.panel === undefined) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    if (entry.limitAutoResumeAwaitingResult) {
+      if (!turnFinished) {
+        return;
+      }
+      entry.limitAutoResumeAwaitingResult = false;
+      if (state.turnFailed && state.usage?.limited === true) {
+        this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
+      } else {
+        this.cancelLimitAutoResume(entry);
+      }
+      return;
+    }
+    // レート制限通知はアカウント単位で全タブへ届く。失敗した会話だけを再開対象にする。
+    if (!state.turnFailed || state.usage?.limited !== true) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    if (entry.limitAutoResumeTimer !== undefined) {
+      return;
+    }
+    const resetAt = state.usage.resetsAt;
+    const waitMs =
+      resetAt === undefined
+        ? LIMIT_AUTO_RESUME_FALLBACK_MS
+        : Math.max(0, resetAt * 1_000 - Date.now()) + LIMIT_AUTO_RESUME_GRACE_MS;
+    this.armLimitAutoResume(entry, waitMs);
+  }
+
+  private armLimitAutoResume(entry: ChatPanel, waitMs: number): void {
+    if (entry.limitAutoResumeTimer !== undefined) {
+      clearTimeout(entry.limitAutoResumeTimer);
+    }
+    entry.limitAutoResumeAt = Date.now() + waitMs;
+    entry.limitAutoResumeTimer = setTimeout(() => {
+      entry.limitAutoResumeTimer = undefined;
+      entry.limitAutoResumeAt = undefined;
+      const latest = entry.session.getState();
+      if (
+        entry.disposed ||
+        entry.panel === undefined ||
+        !readChatLimitAutoResumeEnabled() ||
+        latest.busy ||
+        latest.approvals.length > 0 ||
+        latest.prompts.length > 0
+      ) {
+        return;
+      }
+      entry.limitAutoResumeAwaitingResult = true;
+      entry.session.noteLocalEvent(
+        `limitAutoResume:${Date.now()}`,
+        '使用量上限の解除後に自動続行しています',
+      );
+      void entry.session
+        .send(LIMIT_AUTO_RESUME_INSTRUCTION, this.configFor(entry))
+        .catch((e: unknown) => {
+          const shouldRetry = entry.limitAutoResumeAwaitingResult;
+          entry.limitAutoResumeAwaitingResult = false;
+          this.reportError(e);
+          if (shouldRetry && readChatLimitAutoResumeEnabled() && entry.panel !== undefined) {
+            this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
+          }
+        });
+    }, waitMs);
   }
 
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
@@ -1025,6 +1119,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         if (entry.session.getState().restore !== undefined) {
           return;
         }
+        this.cancelLimitAutoResume(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
         // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
@@ -1137,6 +1232,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'interrupt') {
+        this.cancelLimitAutoResume(entry);
         entry.loop.noteUserAction();
         await entry.session.interrupt();
         return;
@@ -1333,6 +1429,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'loop/stop') {
+        this.cancelLimitAutoResume(entry);
         entry.loop.stop('manual');
         return;
       }
@@ -1397,6 +1494,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const enabled = !readChatLoopEngineeringConfig().enabled;
         await setChatLoopEngineeringEnabled(enabled);
         void entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled });
+        return;
+      }
+      if (type === 'toggleLimitAutoResume') {
+        const enabled = !readChatLimitAutoResumeEnabled();
+        await setChatLimitAutoResumeEnabled(enabled);
+        if (!enabled) {
+          this.cancelLimitAutoResume(entry);
+        } else {
+          this.scheduleLimitAutoResume(entry, entry.session.getState());
+        }
+        void entry.panel?.webview.postMessage({
+          type: 'limitAutoResume',
+          enabled: readChatLimitAutoResumeEnabled(),
+        });
         return;
       }
       if (type === 'toggleLoopAdvisor') {

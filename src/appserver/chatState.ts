@@ -1404,13 +1404,14 @@ export function applyEvent(
     case 'account/rateLimits/updated': {
       const primary = rec(rec(params['rateLimits'])?.['primary']);
       const usedPercent = primary?.['usedPercent'];
+      const resetsAt = primary?.['resetsAt'];
       return {
         ...state,
         usage: {
           usedPercent: typeof usedPercent === 'number' ? usedPercent : state.usage?.usedPercent,
-          resetsAt: state.usage?.resetsAt,
+          resetsAt: typeof resetsAt === 'number' ? resetsAt : state.usage?.resetsAt,
           limitLabel: state.usage?.limitLabel,
-          limited: state.usage?.limited,
+          limited: typeof usedPercent === 'number' ? usedPercent >= 100 : state.usage?.limited,
         },
       };
     }

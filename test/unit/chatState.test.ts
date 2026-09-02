@@ -412,9 +412,12 @@ describe('applyEvent', () => {
 
   it('レート制限を取り込む', () => {
     const state = feed(initialChatState, [
-      ['account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 91 } } }],
+      [
+        'account/rateLimits/updated',
+        { rateLimits: { primary: { usedPercent: 100, resetsAt: 1786937045 } } },
+      ],
     ]);
-    expect(state.usage).toEqual({ usedPercent: 91 });
+    expect(state.usage).toEqual({ usedPercent: 100, resetsAt: 1786937045, limited: true });
   });
 
   it('Codexが付けた名前を取り込む', () => {

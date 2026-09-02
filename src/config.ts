@@ -366,6 +366,20 @@ export async function setChatLoopEngineeringEnabled(enabled: boolean): Promise<v
     .update('chat.loopEngineering.enabled', enabled, vscode.ConfigurationTarget.Global);
 }
 
+/** 使用量上限の解除後に、CodexまたはClaude Code会話へ継続指示を自動送信するか。 */
+export function readChatLimitAutoResumeEnabled(): boolean {
+  return (
+    vscode.workspace.getConfiguration('agent').get<boolean>('chat.limitAutoResume.enabled') ?? true
+  );
+}
+
+/** 使用量上限の解除後の自動続行を、ユーザー設定へ保存する。 */
+export async function setChatLimitAutoResumeEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.limitAutoResume.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
 /**
  * ゴール駆動ループのEvaluatorの設定を読む（issue #892）。
  *
