@@ -3011,6 +3011,22 @@ export function chatScript(
     button.querySelector('.composerOverflowLabel').textContent = 'ループAdvisorを' + action;
   }
 
+  const limitAutoResumeToggle = el('limitAutoResumeToggle');
+  if (limitAutoResumeToggle) {
+    limitAutoResumeToggle.addEventListener('click', () =>
+      vscode.postMessage({ type: 'toggleLimitAutoResume' }),
+    );
+  }
+
+  function applyLimitAutoResumeEnabled(enabled) {
+    const button = el('limitAutoResumeToggle');
+    if (!button) return;
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', '上限解除後に自動続行を' + action);
+    button.querySelector('.composerOverflowLabel').textContent = '上限解除後に自動続行を' + action;
+  }
+
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
    * 中に実体をそのまま置いてあり、hidden属性で表と行き来させているだけなので、
@@ -3329,6 +3345,9 @@ export function chatScript(
     }
     if (data.type === 'loopAdvisor' && typeof data.enabled === 'boolean') {
       applyLoopAdvisorEnabled(data.enabled);
+    }
+    if (data.type === 'limitAutoResume' && typeof data.enabled === 'boolean') {
+      applyLimitAutoResumeEnabled(data.enabled);
     }
     if (data.type === 'loopAutoGoal' && typeof data.enabled === 'boolean') {
       autoGoalEnabled = data.enabled;

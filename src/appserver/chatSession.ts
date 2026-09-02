@@ -220,6 +220,11 @@ export class ChatSession {
     this.update(appendSecondOpinion(this.state, id, display));
   }
 
+  /** CLIへ送らない拡張機能側の通知を会話へ残す。 */
+  noteLocalEvent(id: string, text: string): void {
+    this.update(appendNotice(this.state, id, text));
+  }
+
   /** 明示的な復元に失敗しても、タブを閉じずに再試行できる状態へ戻す。 */
   resumeFailed(reason: string): void {
     this.update({ ...this.state, restore: { state: 'failed', message: reason } });

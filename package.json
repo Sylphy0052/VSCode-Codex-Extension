@@ -784,6 +784,12 @@
           "scope": "window",
           "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は添付・ループ・圧縮・要約・計画・新セッションへ引き継ぐ・セカンドオピニオンの7つ（Issue #900）。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
         },
+        "agent.chat.limitAutoResume.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "CodexまたはClaude Codeの使用量上限に達した会話を自動で続行するか。入力欄の「…」メニューからも切り替えられる。リセット時刻の30秒後に継続指示を送り、時刻がない場合は30分後に確認する。再開しても上限中なら1分後に再試行する。会話タブを閉じた場合、承認待ちの場合、手動で中断した場合は送信しない。"
+        },
         "agent.secondOpinion.candidates": {
           "type": "array",
           "items": {
