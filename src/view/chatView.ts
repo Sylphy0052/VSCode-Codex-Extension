@@ -1081,9 +1081,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       void entry.session
         .send(LIMIT_AUTO_RESUME_INSTRUCTION, this.configFor(entry))
         .catch((e: unknown) => {
+          const shouldRetry = entry.limitAutoResumeAwaitingResult;
           entry.limitAutoResumeAwaitingResult = false;
           this.reportError(e);
-          if (readChatLimitAutoResumeEnabled() && entry.panel !== undefined) {
+          if (shouldRetry && readChatLimitAutoResumeEnabled() && entry.panel !== undefined) {
             this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
           }
         });
