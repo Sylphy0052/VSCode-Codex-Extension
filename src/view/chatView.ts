@@ -1021,6 +1021,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.limitAutoResumeAwaitingResult = false;
   }
 
+  private limitAutoResumeStatus(entry: ChatPanel): Record<string, unknown> {
+    return {
+      enabled: readChatLimitAutoResumeEnabled(),
+      scheduledAt: entry.limitAutoResumeAt,
+      awaitingResult: entry.limitAutoResumeAwaitingResult,
+    };
+  }
+
   private scheduleLimitAutoResume(entry: ChatPanel, state: ChatState, turnFinished = false): void {
     if (!readChatLimitAutoResumeEnabled() || entry.panel === undefined) {
       this.cancelLimitAutoResume(entry);
@@ -1059,6 +1067,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       clearTimeout(entry.limitAutoResumeTimer);
     }
     entry.limitAutoResumeAt = Date.now() + waitMs;
+    this.postState(entry);
     entry.limitAutoResumeTimer = setTimeout(() => {
       entry.limitAutoResumeTimer = undefined;
       entry.limitAutoResumeAt = undefined;
@@ -1071,9 +1080,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         latest.approvals.length > 0 ||
         latest.prompts.length > 0
       ) {
+        this.postState(entry);
         return;
       }
       entry.limitAutoResumeAwaitingResult = true;
+      this.postState(entry);
       entry.session.noteLocalEvent(
         `limitAutoResume:${Date.now()}`,
         '使用量上限の解除後に自動続行しています',
@@ -1504,6 +1515,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         } else {
           this.scheduleLimitAutoResume(entry, entry.session.getState());
         }
+        this.postState(entry);
         void entry.panel?.webview.postMessage({
           type: 'limitAutoResume',
           enabled: readChatLimitAutoResumeEnabled(),
@@ -1826,6 +1838,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         settings: this.settingsSnapshotFor(entry),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        limitAutoResumeStatus: this.limitAutoResumeStatus(entry),
         // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
         // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
         // ボタン表示のヒントに過ぎない

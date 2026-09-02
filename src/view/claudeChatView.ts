@@ -563,6 +563,7 @@ export class ClaudeChatViewManager
         items: stripHostOnlyItems(state.items),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        limitAutoResumeStatus: this.limitAutoResumeStatus(entry),
         // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
         // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
         // ボタン表示のヒントに過ぎない
@@ -636,6 +637,7 @@ export class ClaudeChatViewManager
         items: [],
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        limitAutoResumeStatus: this.limitAutoResumeStatus(entry),
         workspaceRoots: workspaceFolderPaths(),
         settings: this.buildSettingsPayload(entry),
       },
@@ -1561,6 +1563,14 @@ export class ClaudeChatViewManager
     entry.limitAutoResumeAwaitingResult = false;
   }
 
+  private limitAutoResumeStatus(entry: ClaudePanel): Record<string, unknown> {
+    return {
+      enabled: readChatLimitAutoResumeEnabled(),
+      scheduledAt: entry.limitAutoResumeAt,
+      awaitingResult: entry.limitAutoResumeAwaitingResult,
+    };
+  }
+
   private scheduleLimitAutoResume(
     entry: ClaudePanel,
     state: ChatState,
@@ -1602,6 +1612,7 @@ export class ClaudeChatViewManager
       clearTimeout(entry.limitAutoResumeTimer);
     }
     entry.limitAutoResumeAt = Date.now() + waitMs;
+    this.postState(entry);
     entry.limitAutoResumeTimer = setTimeout(() => {
       entry.limitAutoResumeTimer = undefined;
       entry.limitAutoResumeAt = undefined;
@@ -1614,9 +1625,11 @@ export class ClaudeChatViewManager
         latest.approvals.length > 0 ||
         latest.prompts.length > 0
       ) {
+        this.postState(entry);
         return;
       }
       entry.limitAutoResumeAwaitingResult = true;
+      this.postState(entry);
       try {
         entry.session.noteLocalEvent(
           `limitAutoResume:${Date.now()}`,
@@ -2204,6 +2217,7 @@ export class ClaudeChatViewManager
             } else {
               this.scheduleLimitAutoResume(entry, entry.session.getState());
             }
+            this.postState(entry);
             return entry.panel?.webview.postMessage({
               type: 'limitAutoResume',
               enabled: readChatLimitAutoResumeEnabled(),
