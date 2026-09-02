@@ -1316,6 +1316,7 @@ ${chatStyles()}
     </div>
     <ol id="queueList"></ol>
   </div>
+  <div id="limitAutoResumeStatus" role="status" aria-live="polite"${options.limitAutoResumeEnabled === true ? '' : ' hidden'}>上限解除後の自動続行: ON（上限検知待ち）</div>
   <div id="status"></div>
   <div id="todos" hidden>
     <div class="head">TODO一覧</div>

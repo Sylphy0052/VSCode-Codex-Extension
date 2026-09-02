@@ -548,6 +548,14 @@ ${sharedStyles()}
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  #limitAutoResumeStatus {
+    margin: 0 16px 6px;
+    padding: 6px 8px;
+    border-left: 3px solid var(--vscode-charts-blue, var(--vscode-focusBorder));
+    color: var(--vscode-foreground);
+    background: var(--vscode-textBlockQuote-background, var(--vscode-editor-inactiveSelectionBackground));
+    font-size: 0.85em;
+  }
   #status { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
   /* コンテキストの残りが少ないとき。見落とすと突然の圧縮に驚かされる */
   #status .warn {

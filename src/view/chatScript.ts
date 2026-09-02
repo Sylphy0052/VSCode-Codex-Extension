@@ -2051,6 +2051,7 @@ export function chatScript(
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
     renderQueue(queuedMessages);
+    renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
     hasBackgroundTerminals = (state.backgroundTerminals || []).length > 0;
@@ -2210,6 +2211,30 @@ export function chatScript(
     button.title = unsupportedModel
       ? 'このモデルはFast modeに対応していません'
       : '応答を速くします（Fast mode）';
+  }
+
+  function renderLimitAutoResumeStatus(status) {
+    const node = el('limitAutoResumeStatus');
+    if (!node) return;
+    const enabled = !!(status && status.enabled);
+    node.hidden = !enabled;
+    if (!enabled) return;
+    if (status.awaitingResult) {
+      node.textContent = '上限解除後の自動続行: 「続けて」を送信しました。上限状態を確認しています';
+      return;
+    }
+    if (typeof status.scheduledAt === 'number') {
+      const scheduledAt = new Date(status.scheduledAt).toLocaleString('ja-JP', {
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      node.textContent =
+        '上限解除後の自動続行: 上限を検知しました。' + scheduledAt + 'に「続けて」を送信します';
+      return;
+    }
+    node.textContent = '上限解除後の自動続行: ON（上限検知待ち）';
   }
 
   /**
@@ -3025,6 +3050,7 @@ export function chatScript(
     button.setAttribute('aria-pressed', String(enabled));
     button.setAttribute('aria-label', '上限解除後に自動続行を' + action);
     button.querySelector('.composerOverflowLabel').textContent = '上限解除後に自動続行を' + action;
+    renderLimitAutoResumeStatus({ enabled: enabled });
   }
 
   /**
