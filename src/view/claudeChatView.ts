@@ -530,6 +530,12 @@ export class ClaudeChatViewManager
     };
   }
 
+  refreshModelCatalog(): void {
+    for (const entry of this.allPanels()) {
+      this.refreshSettings(entry);
+    }
+  }
+
   /**
    * 画面下の設定行へ現在値と選択肢を送る。設定パネルでの変更など、人の操作へ即座に
    * 反映したい場面でだけ呼ぶ（`postState`の間引きを待たせない）。

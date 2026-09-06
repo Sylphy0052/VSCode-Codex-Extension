@@ -11,6 +11,19 @@ import { sharedStyles } from './sharedStyles';
 export function chatStyles(): string {
   return `
 ${sharedStyles()}
+  .modelInput { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
+  .modelInput input {
+    flex: 1 1 12em;
+    min-width: 0;
+    padding: 3px 4px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: var(--agent-radius-sm);
+    font: inherit;
+  }
+  .modelInput input:focus { outline: 1px solid var(--vscode-focusBorder); }
+
   html, body { height: 100%; margin: 0; }
   body {
     display: flex;
