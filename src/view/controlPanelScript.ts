@@ -1100,6 +1100,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     const select = el(id);
     if (!select) return;
     const box = document.createElement('div');
+    box.className = 'modelInput';
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = '一覧外のモデルID';
@@ -1112,7 +1113,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
       if (value) vscode.postMessage({ type, key: 'model', value });
     });
     box.append(input, button);
-    select.after(box);
+    const anchor = select.closest('label') || select;
+    anchor.after(box);
   }
 
   addModelInput('model', 'update');
