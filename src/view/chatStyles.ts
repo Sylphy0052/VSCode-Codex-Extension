@@ -193,6 +193,32 @@ ${sharedStyles()}
     border-left: 2px solid var(--vscode-textLink-foreground);
   }
   /*
+   * 指示の書き直し（issue #1073）。本文と同じ位置・同じ枠で出し、直している対象が
+   * どの発言かを見失わないようにする。入力欄は中身の行数に合わせて伸びる（growEditInput）。
+   */
+  .edit-box {
+    padding: var(--chat-body-padding);
+    border-radius: var(--agent-radius-md);
+    background-color: var(--vscode-textBlockQuote-background);
+    border-left: 2px solid var(--vscode-textLink-foreground);
+  }
+  .edit-input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    padding: 6px 8px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: var(--agent-radius-sm);
+    font-family: inherit;
+    font-size: inherit;
+    line-height: var(--chat-line-height);
+  }
+  .edit-input:focus { outline: 1px solid var(--vscode-focusBorder); }
+  .edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+  /*
    * エージェントの応答にも縁取りを付ける（issue #712）。ここに何も無いと、応答が長い
    * ときにターンの切れ目が本文の途切れ方でしか分からない。自分の発言（textLink色の線と
    * 背景）より弱い線にして、どちらが自分の発言かは引き続き見分けられるようにする。

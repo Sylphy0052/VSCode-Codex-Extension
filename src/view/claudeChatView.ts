@@ -876,8 +876,16 @@ export class ClaudeChatViewManager
    * CLIが異常終了した後）の間は分岐先を特定できないため実行しない。ボタンが押せているのに
    * 無言で何も起きないと壊れているように見える（issue #340横断レビュー指摘）ため、
    * その旨を通知する。
+   *
+   * `resendText`を渡すと「送った指示を書き直して送り直す」（issue #1073）になる。
+   * 戻り先の決め方も開くタブも分岐と同じで、違いは戻し切ったあとに入力欄へ本文を挿すか
+   * （分岐）、書き直した本文をそのまま送るか（書き直し）だけ。
    */
-  private async forkFromTurn(entry: ClaudePanel, targetUuid: string): Promise<void> {
+  private async forkFromTurn(
+    entry: ClaudePanel,
+    targetUuid: string,
+    resendText?: string,
+  ): Promise<void> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
       void vscode.window.showErrorMessage(
@@ -890,7 +898,14 @@ export class ClaudeChatViewManager
       .items.filter((item) => item.kind === 'userMessage')
       .map((item) => item.id);
 
-    await this.openForkFromTurn(threadId, '分岐', entry.cwd, userMessageUuids, targetUuid);
+    await this.openForkFromTurn(
+      threadId,
+      resendText === undefined ? '分岐' : '修正',
+      entry.cwd,
+      userMessageUuids,
+      targetUuid,
+      resendText,
+    );
   }
 
   /**
@@ -920,6 +935,7 @@ export class ClaudeChatViewManager
     cwd: string | undefined,
     userMessageUuids: readonly string[],
     targetUuid: string,
+    resendText?: string,
   ): Promise<void> {
     const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
     if (folder === undefined) {
@@ -949,7 +965,13 @@ export class ClaudeChatViewManager
     );
 
     const result = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
+      {
+        location: vscode.ProgressLocation.Notification,
+        title:
+          resendText === undefined
+            ? 'この指示から分岐しています…'
+            : 'この指示を書き直して送り直しています…',
+      },
       () => entry.session.rewindConversationToTurn(userMessageUuids, targetUuid),
     );
 
@@ -969,6 +991,12 @@ export class ClaudeChatViewManager
         `このタブへ入力を続けず、閉じてやり直してください（${reason}）`;
       entry.session.noteLocalEvent(`forkFromTurnFailed:${randomUUID()}`, warning);
       void vscode.window.showErrorMessage(warning);
+      return;
+    }
+    // 書き直し（issue #1073）は、戻し切った会話へ書き直した本文をそのまま送る。
+    // 分岐のときだけ、CLIが返した元の本文（prefillText）を入力欄へ挿して人に委ねる
+    if (resendText !== undefined) {
+      this.dispatch(entry, resendText);
       return;
     }
     if (result.prefillText !== undefined && result.prefillText !== '') {
@@ -2087,6 +2115,17 @@ export class ClaudeChatViewManager
         // 会話の途中のターンから分岐（issue #333、design.md §14.61）。新しいタブを
         // 開くだけで、この会話（entry）そのものには何も送らない
         void this.forkFromTurn(entry, m['turnId']);
+        return;
+      }
+      if (
+        type === 'editResend' &&
+        typeof m['turnId'] === 'string' &&
+        typeof m['text'] === 'string'
+      ) {
+        // 送った指示の書き直し（issue #1073）。分岐と同じく新しいタブを開くだけで、
+        // この会話（entry）そのものには何も送らない
+        entry.loop.noteUserAction();
+        void this.forkFromTurn(entry, m['turnId'], m['text']);
         return;
       }
       if (type === 'planMode') {
