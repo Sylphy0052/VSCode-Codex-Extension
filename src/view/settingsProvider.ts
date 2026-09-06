@@ -351,6 +351,32 @@ export class SettingsProvider {
     private readonly log: Logger,
   ) {}
 
+  private pendingModelRefresh: Promise<void> | undefined;
+
+  /** モデル候補だけを再取得する。同時要求はまとめ、失敗時は直前の一覧を保つ。 */
+  refreshModels(): Promise<void> {
+    if (this.pendingModelRefresh !== undefined) {
+      return this.pendingModelRefresh;
+    }
+    this.pendingModelRefresh = Promise.allSettled([this.loadCodexModels(), this.loadClaudeModels()])
+      .then(([codex, claude]) => {
+        if (codex.status === 'fulfilled') {
+          this.models = codex.value;
+        } else {
+          this.log.warn('Codexのモデル一覧を更新できませんでした');
+        }
+        if (claude.status === 'fulfilled') {
+          this.claudeModels = claude.value;
+        } else {
+          this.log.warn('Claude Codeのモデル一覧を更新できませんでした');
+        }
+      })
+      .finally(() => {
+        this.pendingModelRefresh = undefined;
+      });
+    return this.pendingModelRefresh;
+  }
+
   /** 一度でも読み込んだか。未読込のまま snapshot を返すと選択肢が空になる。 */
   private loaded = false;
 
@@ -372,11 +398,8 @@ export class SettingsProvider {
   private async loadImmediate(): Promise<void> {
     this.loaded = true;
     // CLIの起動を待つ時間が二重にならないよう、まとめて聞く
-    [this.models, this.claudeModels, this.claudeAgents] = await Promise.all([
-      this.loadCodexModels(),
-      this.loadClaudeModels(),
-      this.loadClaudeAgents(),
-    ]);
+    const [, agents] = await Promise.all([this.refreshModels(), this.loadClaudeAgents()]);
+    this.claudeAgents = agents;
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
     this.defaults = toml === undefined ? noDefaults : extractDefaults(toml);
@@ -535,15 +558,20 @@ export class SettingsProvider {
       return fromCli;
     }
 
+    if (this.models.length > 0) {
+      this.log.warn('Codexのモデル一覧を取得できませんでした。前回の候補を保持します');
+      return this.models;
+    }
     this.log.warn('CLIからモデル一覧を取得できませんでした。キャッシュを読みます');
     const catalog = await this.fs.readTextFile(this.modelsCachePath);
     if (catalog === undefined) {
       this.log.warn(`モデル一覧を読めませんでした: ${this.modelsCachePath}`);
-      return [];
+      return this.models;
     }
     const models = parseModelCatalog(catalog);
     if (models.length === 0) {
-      this.log.warn('モデル一覧が空でした。既知の値へフォールバックします');
+      this.log.warn('モデル一覧が空でした。前回の候補を保持します');
+      return this.models;
     }
     return models;
   }
@@ -554,9 +582,11 @@ export class SettingsProvider {
     if (fromCli !== undefined && fromCli.length > 0) {
       return fromCli;
     }
-    this.log.warn(
-      'Claude Codeのモデル一覧を取得できませんでした。エイリアスの一覧へフォールバックします',
-    );
+    if (this.claudeModels.length > 0) {
+      this.log.warn('Claude Codeのモデル一覧を取得できませんでした。前回の候補を保持します');
+      return this.claudeModels;
+    }
+    this.log.warn('Claude Codeのモデル一覧を取得できませんでした。エイリアスを表示します');
     return claudeFallbackModels();
   }
 

@@ -1940,6 +1940,27 @@ export function chatScript(
     });
   }
 
+  function addModelInput(id, type) {
+    const select = el(id);
+    if (!select) return;
+    const box = document.createElement('div');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '一覧外のモデルID';
+    input.setAttribute('aria-label', '一覧外のモデルID');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'モデルIDを適用';
+    button.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (value) vscode.postMessage({ type, key: 'model', value });
+    });
+    box.append(input, button);
+    select.after(box);
+  }
+
+  addModelInput('model', 'config');
+
   for (const key of SETTING_KEYS) {
     const select = el(key);
     if (!select) continue;

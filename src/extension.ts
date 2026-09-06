@@ -915,6 +915,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }),
   );
 
+  // CLIが返すモデル候補を更新し、開いている画面へ反映する。
+  let modelRefreshDisposed = false;
+  const refreshModelCatalog = async (): Promise<void> => {
+    await settings.refreshModels();
+    if (modelRefreshDisposed) {
+      return;
+    }
+    await panel.refreshModelCatalog();
+    chat.refreshSettings();
+    claudeChat.refreshModelCatalog();
+  };
+  const modelRefreshTimer = setInterval(() => {
+    void refreshModelCatalog().catch(() => log.warn('モデル候補の表示を更新できませんでした'));
+  }, 5 * 60_000);
+  context.subscriptions.push({
+    dispose: () => {
+      modelRefreshDisposed = true;
+      clearInterval(modelRefreshTimer);
+    },
+  });
+  void refreshModelCatalog().catch(() => log.warn('モデル候補の表示を更新できませんでした'));
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('codex') || e.affectsConfiguration('claude')) {
