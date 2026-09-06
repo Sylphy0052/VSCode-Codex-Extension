@@ -950,8 +950,10 @@ export function chatScript(
         if (node.bodySummary.textContent !== summaryLabel) node.bodySummary.textContent = summaryLabel;
         node.bodyContent.textContent = primary;
       }
-      node.body.hidden = primary === '';
-      node.copy.hidden = primary === '';
+      // 通常分岐と揃える。userMessage は今のところ折りたたみ対象にならないが、
+      // 対象が広がっても書き直し中の入力欄と本文が二重に出ないようにする（issue #1073）
+      node.body.hidden = primary === '' || node.editing;
+      node.copy.hidden = primary === '' || node.editing;
       return;
     }
 

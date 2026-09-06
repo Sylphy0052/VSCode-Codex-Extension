@@ -1943,7 +1943,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       void vscode.window.showErrorMessage('分岐後の会話を開けなかったため送り直せませんでした');
       return;
     }
-    await forked.session.sendOrQueue(text, this.configFor(forked));
+    // 分岐そのものは成功していても、続く `thread/resume` に失敗して新しいタブが
+    // 使えない状態のことがある（`openThread` は失敗を握って `restore.state` を
+    // 'failed' にするだけ）。その状態へ送ると `turn/start` が例外を投げるため、
+    // ここで拾って理由を出す。分岐後のタブは残るので、そこから送り直せる
+    try {
+      await forked.session.sendOrQueue(text, this.configFor(forked));
+    } catch (e) {
+      this.reportError(e);
+      this.postState(forked);
+      return;
+    }
     this.reportActivity(forked, text);
     this.postState(forked);
   }
