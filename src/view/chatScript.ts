@@ -382,6 +382,16 @@ export function chatScript(
     });
     actions.appendChild(copy);
 
+    // 送った指示を書き直して送り直す（issue #1073）。押すと本文の表示がその場で入力欄に
+    // 変わる。入力欄（画面下の #input）へ移さないのは、どの指示を直しているのかを
+    // 見失わないため。送るまでは会話・ファイル・タブのいずれも変えない
+    const edit = document.createElement('button');
+    edit.className = 'secondary';
+    edit.textContent = '修正';
+    edit.hidden = true;
+    edit.addEventListener('click', () => startEdit(node));
+    actions.appendChild(edit);
+
     const fork = document.createElement('button');
     fork.className = 'secondary';
     fork.textContent = 'ここから分岐';
@@ -498,6 +508,55 @@ export function chatScript(
     }
     wrap.appendChild(body);
 
+    // 指示の書き直し（issue #1073）。本文と同じ場所に出し、編集中は本文を隠す。
+    // userMessage以外では常に隠れたまま
+    const editBox = document.createElement('div');
+    editBox.className = 'edit-box';
+    editBox.hidden = true;
+    const editInput = document.createElement('textarea');
+    editInput.className = 'edit-input';
+    editInput.addEventListener('input', () => growEditInput(editInput));
+    editInput.addEventListener('keydown', (e) => {
+      // Escで取り消す。会話全体のEsc（中断）へは渡さない
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        endEdit(node);
+        return;
+      }
+      if (e.key !== 'Enter') return;
+      // 送信キーは入力欄と同じ設定に従う（issue #288）。変換確定のEnterでは送らない
+      const action = decideSendKeyAction(
+        {
+          key: e.key,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          shiftKey: e.shiftKey,
+          isComposing: e.isComposing === true,
+        },
+        SEND_ON,
+      );
+      if (action === 'send') {
+        e.preventDefault();
+        e.stopPropagation();
+        submitEdit(node);
+      }
+    });
+    editBox.appendChild(editInput);
+    const editActions = document.createElement('div');
+    editActions.className = 'edit-actions';
+    const editCancel = document.createElement('button');
+    editCancel.className = 'secondary';
+    editCancel.textContent = 'キャンセルする';
+    editCancel.addEventListener('click', () => endEdit(node));
+    editActions.appendChild(editCancel);
+    const editSend = document.createElement('button');
+    editSend.textContent = '送信する';
+    editSend.addEventListener('click', () => submitEdit(node));
+    editActions.appendChild(editSend);
+    editBox.appendChild(editActions);
+    wrap.appendChild(editBox);
+
     // Web検索の結果（issue #18）。URLとタイトルの一覧を出す。webSearch以外では常に空
     const searchResults = document.createElement('div');
     searchResults.className = 'search-results';
@@ -528,6 +587,16 @@ export function chatScript(
       diffs,
       diffKey: '',
       copy,
+      edit,
+      editBox,
+      editInput,
+      editSend,
+      // 書き直したあとの送り先（issue #1073）。forkTargetと同じ値を使う。
+      // Codex画面で最初の発言だけは手前のターンが無いため undefined のままになり、
+      // その場合は分岐ではなく新しい会話として送り直す（editFromStart）
+      editTarget: undefined,
+      editFromStart: false,
+      editing: false,
       fork,
       forkTarget: undefined,
       rewind,
@@ -909,8 +978,10 @@ export function chatScript(
         node.body.textContent = primary;
       }
     }
-    node.body.hidden = primary === '';
-    node.copy.hidden = primary === '';
+    // 書き直し中は本文の代わりに入力欄を出している（issue #1073）。状態の更新が届いても
+    // 本文を出し直さない（編集中の内容の上に元の本文が重なって見えるのを防ぐ）
+    node.body.hidden = primary === '' || node.editing;
+    node.copy.hidden = primary === '' || node.editing;
   }
 
   /**
@@ -1139,6 +1210,60 @@ export function chatScript(
     container.hidden = diffs.length === 0;
   }
 
+  /**
+   * 送った指示の書き直しを始める（issue #1073）。
+   *
+   * 本文の表示をその場でtextareaへ差し替える。画面下の入力欄へ本文を移す形にしないのは、
+   * どの指示を直しているのかが視線から外れるため。ここでは表示を変えるだけで、
+   * 会話・ファイル・タブのいずれにも触れない（送信するまで何も起きない）。
+   */
+  function startEdit(node) {
+    if (node.editing) return;
+    node.editing = true;
+    node.editInput.value = node.fullText || '';
+    node.editBox.hidden = false;
+    node.body.hidden = true;
+    node.edit.hidden = true;
+    node.editSend.disabled = false;
+    growEditInput(node.editInput);
+    node.editInput.focus();
+    node.editInput.selectionStart = node.editInput.selectionEnd = node.editInput.value.length;
+  }
+
+  /** 書き直しをやめて表示を元へ戻す。取り消しでは何も送らない（issue #1073）。 */
+  function endEdit(node) {
+    if (!node.editing) return;
+    node.editing = false;
+    node.editBox.hidden = true;
+    // 本文の出し分け（Markdown・折りたたみ）ごとやり直して、隠していた表示を戻す
+    if (node.lastItem) renderBody(node, node.lastItem);
+    node.edit.hidden = node.editTarget === undefined && !node.editFromStart;
+  }
+
+  /**
+   * 書き直した内容で送り直す（issue #1073）。ここは要求を送るだけで、どこまで戻すか・
+   * どの会話へ送るかは拡張機能側（chatView.ts / claudeChatView.ts）が決める。
+   * 送り先は新しいタブになるため、この会話の表示はそのまま元へ戻す。
+   */
+  function submitEdit(node) {
+    const text = node.editInput.value;
+    if (text.trim() === '') return;
+    node.editSend.disabled = true;
+    vscode.postMessage({
+      type: 'editResend',
+      turnId: node.editTarget,
+      fromStart: node.editFromStart === true,
+      text,
+    });
+    endEdit(node);
+  }
+
+  /** 書き直し欄の高さを中身に合わせる。長い指示を数行しか見せないと直しづらい。 */
+  function growEditInput(input) {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 480) + 'px';
+  }
+
   // 「ここから分岐」ボタンの対象を決める（issue #333、design.md §14.61）。
   //
   // Codex画面（既定）: 対象は直前の発言のturnId（thread/forkのlastTurnIdは
@@ -1213,6 +1338,16 @@ export function chatScript(
     // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
     node.forkTarget = forkTarget;
     node.fork.hidden = !(item.kind === 'userMessage' && forkTarget);
+
+    // 書き直しの送り先は分岐と同じ（issue #1073）。Codex画面で最初の発言だけは手前の
+    // ターンが無く forkTarget が undefined になるため、分岐ではなく新しい会話として
+    // 送り直す（editFromStart）。Claude Code画面は発言自身のidを常に持つのでここは常にfalse
+    const editable = item.kind === 'userMessage';
+    node.editTarget = editable ? forkTarget : undefined;
+    node.editFromStart = editable && forkTarget === undefined;
+    node.edit.hidden = !editable || node.editing;
+    // 別の発言として作り直された枠に、前の発言の編集状態を持ち越さない
+    if (!editable && node.editing) endEdit(node);
 
     // 巻き戻しは発言自身のidを渡す（対象は「この発言を送る前」）。turnIdと違い、
     // どの発言でも常に持っている値なので、直前の発言の有無を待つ必要が無い

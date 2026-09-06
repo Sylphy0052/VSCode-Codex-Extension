@@ -1463,6 +1463,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.forkFrom(entry, m['turnId']);
         return;
       }
+      if (type === 'editResend' && typeof m['text'] === 'string') {
+        // 送った指示の書き直し（issue #1073）。分岐と同じく新しいタブを開くだけで、
+        // この会話（entry）そのものには何も送らない
+        entry.loop.noteUserAction();
+        await this.editAndResend(
+          entry,
+          typeof m['turnId'] === 'string' ? m['turnId'] : undefined,
+          m['text'],
+        );
+        return;
+      }
       if (type === 'approvalLevel') {
         // 承認レベル（3段階）。Codexでは承認方法・サンドボックス・承認要求の回し先の
         // 3項目へ展開される（`SettingsProvider.updateApprovalLevel`）
@@ -1890,26 +1901,84 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
   }
 
-  /** 会話の途中から分岐し、新しい画面で開く。元のスレッドは変更されない。 */
-  private async forkFrom(entry: ChatPanel, turnId: string): Promise<void> {
+  /**
+   * 送った指示を書き直して送り直す（issue #1073）。Claude Code画面の
+   * `editAndResend`（`claudeChatView.ts`）と操作は同じで、裏の作り方だけが違う。
+   *
+   * `turnId`（＝分岐と同じく「引き継ぐ最後のターン」＝直す指示の手前の発言）があれば
+   * `thread/fork` で会話をそこまでにした新しいスレッドを開き、書き直した本文を送る。
+   * 最初の発言を直す場合は引き継ぐターンが無いため、分岐ではなく新しい会話として開始する
+   * （`thread/fork` の `lastTurnId` は必須。`appServerClient.ts` の `forkThread` 参照）。
+   *
+   * 元のスレッドは変更されない。ファイルも戻らない（issue #1074で別途扱う）。
+   */
+  private async editAndResend(
+    entry: ChatPanel,
+    turnId: string | undefined,
+    text: string,
+  ): Promise<void> {
+    if (text.trim() === '') {
+      return;
+    }
+    if (turnId === undefined) {
+      const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+      if (cwd === undefined) {
+        void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
+        return;
+      }
+      await this.openNewWithPrompt(cwd, text);
+      return;
+    }
+    const newThreadId = await this.forkFrom(
+      entry,
+      turnId,
+      '修正',
+      'この指示を書き直して送り直しています…',
+    );
+    if (newThreadId === undefined) {
+      return;
+    }
+    const forked = this.panels.get(newThreadId);
+    if (forked === undefined) {
+      void vscode.window.showErrorMessage('分岐後の会話を開けなかったため送り直せませんでした');
+      return;
+    }
+    await forked.session.sendOrQueue(text, this.configFor(forked));
+    this.reportActivity(forked, text);
+    this.postState(forked);
+  }
+
+  /**
+   * 会話の途中から分岐し、新しい画面で開く。元のスレッドは変更されない。
+   *
+   * 分岐後のスレッドidを返す（issue #1073。`editAndResend` が、開いたスレッドへ
+   * 書き直した本文を送るために使う）。分岐できなかったときは `undefined`。
+   */
+  private async forkFrom(
+    entry: ChatPanel,
+    turnId: string,
+    title = '分岐',
+    progressTitle = 'この指示から分岐しています…',
+  ): Promise<string | undefined> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
-      return;
+      return undefined;
     }
 
     const response = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
+      { location: vscode.ProgressLocation.Notification, title: progressTitle },
       () => this.connection.request('thread/fork', { threadId, lastTurnId: turnId }),
     );
 
     const newThreadId = readForkedThreadId(response.result);
     if (newThreadId === undefined) {
       void vscode.window.showErrorMessage('分岐後のスレッドidを読み取れませんでした');
-      return;
+      return undefined;
     }
     this.log.info(`分岐しました: ${threadId} → ${newThreadId}`);
     await this.persistModelSettings(entry, newThreadId);
-    await this.openThread(newThreadId, '分岐', undefined);
+    await this.openThread(newThreadId, title, undefined);
+    return newThreadId;
   }
 
   /**
