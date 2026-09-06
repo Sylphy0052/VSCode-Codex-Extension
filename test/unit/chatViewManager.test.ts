@@ -1,3 +1,7 @@
+import * as nodeFs from 'node:fs';
+import * as nodePath from 'node:path';
+import * as nodeOs from 'node:os';
+import { workspace as fakeWorkspace } from '../mocks/vscode';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
@@ -1963,5 +1967,123 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toContainEqual(
       expect.stringContaining('履歴保存が完了しませんでした'),
     );
+  });
+});
+
+describe('Codexのファイル復元と送り直し', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setConfig('codex', {});
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    Object.defineProperty(fakeWorkspace, 'textDocuments', { configurable: true, value: [] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    'success',
+    'cancel',
+    'conflict',
+    'startFailure',
+    'dirty',
+    'fork',
+    'resumeFailure',
+  ] as const)('%s: 復元できたときだけ新規会話へ送る', async (scenario) => {
+    const cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'rewind-view-'));
+    const file = nodePath.join(cwd, 'added.txt');
+    const { manager, connection } = createManager();
+    try {
+      __mock.setWorkspaceFolder(cwd);
+      const opening = manager.openNew(cwd);
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('original'));
+      await opening;
+      const panel = __mock.createdPanels[0]!;
+      const forking = scenario === 'fork' || scenario === 'resumeFailure';
+      if (forking)
+        connection.notify('item/completed', {
+          threadId: 'original',
+          turnId: 'turn0',
+          item: { type: 'userMessage', id: 'user0', content: [] },
+        });
+      connection.notify('item/completed', {
+        threadId: 'original',
+        turnId: 'turn1',
+        item: {
+          type: 'userMessage',
+          id: 'user1',
+          content: [{ type: 'inputText', text: 'original' }],
+        },
+      });
+      nodeFs.writeFileSync(file, 'added\n');
+      connection.notify('item/completed', {
+        threadId: 'original',
+        turnId: 'turn1',
+        item: {
+          type: 'fileChange',
+          id: 'edit1',
+          status: 'completed',
+          changes: [{ path: file, kind: { type: 'add' }, diff: 'added\n' }],
+        },
+      });
+      connection.notify('turn/completed', {
+        threadId: 'original',
+        turn: { id: 'turn1', status: 'completed' },
+      });
+      if (scenario === 'cancel') __mock.showWarningMessageAnswer = undefined;
+      if (scenario === 'conflict') nodeFs.writeFileSync(file, 'external');
+      if (scenario === 'dirty')
+        Object.defineProperty(fakeWorkspace, 'textDocuments', {
+          configurable: true,
+          value: [{ isDirty: true, uri: { fsPath: file } }],
+        });
+      panel.webview.simulateMessage({
+        type: 'editResend',
+        messageId: 'user1',
+        turnId: forking ? 'turn0' : undefined,
+        text: 'revised',
+        restoreFiles: true,
+      });
+      await tick(40);
+      const starts = connection.requests.filter((r) => r.method === 'thread/start');
+      if (scenario === 'cancel' || scenario === 'conflict') {
+        expect(starts).toHaveLength(1);
+      } else if (forking) {
+        expect(connection.requests.find((r) => r.method === 'thread/fork')?.params).toEqual({
+          threadId: 'original',
+          lastTurnId: 'turn0',
+        });
+        connection.resolveFirst('thread/fork', threadStartResult('new-thread'));
+        await tick(40);
+        expect(nodeFs.readFileSync(file, 'utf8')).toBe('added\n');
+        if (scenario === 'resumeFailure') connection.rejectFirst('thread/resume', 'resume failed');
+        else connection.resolveFirst('thread/resume', { thread: { id: 'new-thread', turns: [] } });
+        await tick(40);
+      } else {
+        expect(starts).toHaveLength(2);
+        // 新しい会話を開けるまではファイルを変更しない。
+        expect(nodeFs.readFileSync(file, 'utf8')).toBe('added\n');
+        if (scenario === 'startFailure') connection.rejectFirst('thread/start', 'start failed');
+        else connection.resolveFirst('thread/start', threadStartResult('new-thread'));
+        await tick(40);
+      }
+      const sends = connection.requests.filter((r) => r.method === 'turn/start');
+      if (scenario === 'success' || scenario === 'fork') {
+        expect(nodeFs.existsSync(file)).toBe(false);
+        expect(sends).toHaveLength(1);
+        expect(sends[0]?.params).toMatchObject({ threadId: 'new-thread' });
+        connection.resolveFirst('turn/start', { turn: { id: 'new-turn' } });
+        await tick();
+      } else {
+        expect(sends).toHaveLength(0);
+        expect(nodeFs.readFileSync(file, 'utf8')).toBe(
+          scenario === 'conflict' ? 'external' : 'added\n',
+        );
+      }
+    } finally {
+      manager.dispose();
+      nodeFs.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

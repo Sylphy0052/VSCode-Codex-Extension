@@ -880,9 +880,8 @@ export interface ChatShellOptions {
   /**
    * 発言ごとに「ここまで戻す」ボタンを出すか（Claude Code画面のみ）。
    *
-   * Codexには会話の途中から**分岐**する導線（「ここから分岐」）が既にあり、巻き戻しは
-   * 実装しない（design.md「Claude Codeの巻き戻し」。thread/rollbackはdeprecatedかつ
-   * ファイルを戻さない）。Claude Codeは`rewind_files`でファイルだけを戻せる。
+   * Claude Codeのファイルだけを戻す操作。「修正」の「ファイルも戻す」は両画面で
+   * 常に使える別の導線で、Codexでは記録した差分、Claude Codeではrewind_filesを使う。
    */
   showRewind?: boolean;
   /**

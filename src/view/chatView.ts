@@ -10,10 +10,12 @@ import {
 } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
+  readRewindChanges,
   lastNonEmptyAgentMessageText,
   type ChatItem,
   type ChatState,
 } from '../appserver/chatState';
+import { FileRewindJournal, type FileRewindPlan } from '../appserver/fileRewind';
 import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { ChatSession } from '../appserver/chatSession';
 import {
@@ -576,11 +578,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
-  async openNewWithPrompt(cwd: string, prompt: string): Promise<string | undefined> {
+  async openNewWithPrompt(
+    cwd: string,
+    prompt: string,
+    beforeSend?: () => void,
+  ): Promise<string | undefined> {
     const threadId = await this.openNew(cwd);
     if (threadId === undefined) return undefined;
     const entry = this.panels.get(threadId);
     if (entry === undefined) return undefined;
+    beforeSend?.();
     await entry.session.sendOrQueue(prompt, this.configFor(entry));
     this.reportActivity(entry, prompt);
     return threadId;
@@ -1471,6 +1478,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           entry,
           typeof m['turnId'] === 'string' ? m['turnId'] : undefined,
           m['text'],
+          m['restoreFiles'] === true,
+          typeof m['messageId'] === 'string' ? m['messageId'] : undefined,
         );
         return;
       }
@@ -1910,12 +1919,94 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 最初の発言を直す場合は引き継ぐターンが無いため、分岐ではなく新しい会話として開始する
    * （`thread/fork` の `lastTurnId` は必須。`appServerClient.ts` の `forkThread` 参照）。
    *
-   * 元のスレッドは変更されない。ファイルも戻らない（issue #1074で別途扱う）。
+   * 元のスレッドは変更されない。ファイル復元は明示選択されたときだけ行う。
    */
   private async editAndResend(
     entry: ChatPanel,
     turnId: string | undefined,
     text: string,
+    restoreFiles = false,
+    messageId?: string,
+  ): Promise<void> {
+    if (this.restoringFiles) return;
+    this.restoringFiles = restoreFiles;
+    try {
+      let plan: FileRewindPlan | undefined;
+      const sourceItems = entry.session.getState().items;
+      if (restoreFiles) {
+        if (!entry.cwd || !messageId)
+          throw new Error('復元対象の発言または作業ディレクトリがありません');
+        this.assertRewindIdle();
+        const targetIndex = sourceItems.findIndex(
+          (item) => item.id === messageId && item.kind === 'userMessage',
+        );
+        const previousTurn = sourceItems
+          .slice(0, targetIndex)
+          .filter((item) => item.kind === 'userMessage' && item.turnId)
+          .at(-1)?.turnId;
+        if (targetIndex < 0 || previousTurn !== turnId)
+          throw new Error('会話とファイルの戻り先が一致しません。やり直してください');
+        const journal = this.fileJournals.get(entry) ?? new FileRewindJournal();
+        plan = journal.prepare(entry.cwd, entry.session.getState().items, messageId);
+        const choice = await vscode.window.showWarningMessage(
+          'AIが直接編集したファイルを戻し、新しいタブへ送り直しますか？',
+          {
+            modal: true,
+            detail:
+              'コマンド実行で変わったファイルは戻りません。同じ作業ディレクトリを使う他のタブにも影響します。\n\n' +
+              (plan.images.map((image) => image.path).join('\n') || '対象ファイルなし'),
+          },
+          'ファイルも戻して送信する',
+        );
+        if (choice !== 'ファイルも戻して送信する') return;
+        this.assertRewindIdle();
+        plan.validate();
+      }
+      await this.resendWithRewind(
+        entry,
+        turnId,
+        text,
+        plan
+          ? () => {
+              if (entry.session.getState().items !== sourceItems)
+                throw new Error('確認中に会話が更新されました。やり直してください');
+              this.applyFileRewind(plan);
+            }
+          : undefined,
+      );
+    } catch (error) {
+      this.reportError(error);
+    } finally {
+      this.restoringFiles = false;
+    }
+  }
+
+  private assertRewindIdle(): void {
+    if (
+      this.allPanels().some(
+        (panel) => panel.session.getState().busy || panel.session.getState().queued.length > 0,
+      )
+    ) {
+      throw new Error('実行中または送信待ちの会話があります。停止してからファイルを戻してください');
+    }
+  }
+
+  private applyFileRewind(plan: FileRewindPlan): void {
+    this.assertRewindIdle();
+    const paths = new Set(plan.images.map((image) => image.path));
+    if (vscode.workspace.textDocuments.some((doc) => doc.isDirty && paths.has(doc.uri.fsPath))) {
+      throw new Error(
+        '復元対象に未保存の編集があります。保存または取り消してからやり直してください',
+      );
+    }
+    plan.apply();
+  }
+
+  private async resendWithRewind(
+    entry: ChatPanel,
+    turnId: string | undefined,
+    text: string,
+    beforeSend?: () => void,
   ): Promise<void> {
     if (text.trim() === '') {
       return;
@@ -1926,7 +2017,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
         return;
       }
-      await this.openNewWithPrompt(cwd, text);
+      await this.openNewWithPrompt(cwd, text, beforeSend);
       return;
     }
     const newThreadId = await this.forkFrom(
@@ -1948,6 +2039,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 'failed' にするだけ）。その状態へ送ると `turn/start` が例外を投げるため、
     // ここで拾って理由を出す。分岐後のタブは残るので、そこから送り直せる
     try {
+      if (forked.session.getState().restore?.state === 'failed')
+        throw new Error('新しいタブの復元に失敗しました');
+      beforeSend?.();
+      const journal = this.fileJournals.get(entry);
+      if (journal) this.fileJournals.set(forked, journal.copy());
       await forked.session.sendOrQueue(text, this.configFor(forked));
     } catch (e) {
       this.reportError(e);
@@ -2199,6 +2295,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return [...this.panels.values(), ...this.pendingStarts.values()];
   }
 
+  private readonly fileJournals = new WeakMap<ChatPanel, FileRewindJournal>();
+  private restoringFiles = false;
+
   private routeNotification(method: string, params: Record<string, unknown>): void {
     // account/rateLimits/updated のようなアカウント単位の通知は threadId を持たない。
     // スレッドで絞れないので開いている（開始待ちも含む）画面すべてへ配る。
@@ -2219,6 +2318,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         listener(name, status);
       }
       return;
+    }
+    if (target && method === 'item/completed') {
+      const item = params['item'] as Record<string, unknown> | undefined;
+      if (
+        item?.['type'] === 'fileChange' &&
+        typeof item['id'] === 'string' &&
+        item['status'] === 'completed' &&
+        target.cwd
+      ) {
+        let journal = this.fileJournals.get(target);
+        if (!journal) {
+          journal = new FileRewindJournal();
+          this.fileJournals.set(target, journal);
+        }
+        journal.capture(target.cwd, item['id'], readRewindChanges(item['changes']));
+      }
     }
     target?.session.applyNotification(method, params);
   }
