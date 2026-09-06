@@ -885,7 +885,12 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     targetUuid: string,
     resendText?: string,
+    restoreFiles = false,
   ): Promise<void> {
+    if (restoreFiles && entry.session.getState().busy) {
+      void vscode.window.showErrorMessage('実行中の会話を停止してからファイルを戻してください');
+      return;
+    }
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
       void vscode.window.showErrorMessage(
@@ -905,6 +910,7 @@ export class ClaudeChatViewManager
       userMessageUuids,
       targetUuid,
       resendText,
+      restoreFiles ? async () => this.rewindFiles(entry, targetUuid, true) : undefined,
     );
   }
 
@@ -936,6 +942,7 @@ export class ClaudeChatViewManager
     userMessageUuids: readonly string[],
     targetUuid: string,
     resendText?: string,
+    beforeResend?: () => Promise<boolean>,
   ): Promise<void> {
     const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
     if (folder === undefined) {
@@ -996,6 +1003,7 @@ export class ClaudeChatViewManager
     // 書き直し（issue #1073）は、戻し切った会話へ書き直した本文をそのまま送る。
     // 分岐のときだけ、CLIが返した元の本文（prefillText）を入力欄へ挿して人に委ねる
     if (resendText !== undefined) {
+      if (beforeResend && !(await beforeResend())) return;
       this.dispatch(entry, resendText);
       return;
     }
@@ -2125,7 +2133,7 @@ export class ClaudeChatViewManager
         // 送った指示の書き直し（issue #1073）。分岐と同じく新しいタブを開くだけで、
         // この会話（entry）そのものには何も送らない
         entry.loop.noteUserAction();
-        void this.forkFromTurn(entry, m['turnId'], m['text']);
+        void this.forkFromTurn(entry, m['turnId'], m['text'], m['restoreFiles'] === true);
         return;
       }
       if (type === 'planMode') {
@@ -2654,26 +2662,41 @@ export class ClaudeChatViewManager
    * 3) 対象ファイルを列挙し「会話は変わらない」ことを明記した確認ダイアログ
    * 4) 承認されたら適用し、結果を必ず画面に返す（成功も失敗も黙って終わらせない）
    */
-  private async rewindFiles(entry: ClaudePanel, userMessageId: string): Promise<void> {
+  private async rewindFiles(
+    entry: ClaudePanel,
+    userMessageId: string,
+    resending = false,
+  ): Promise<boolean> {
     let preview: Awaited<ReturnType<ClaudeStreamSession['previewRewindFiles']>>;
     try {
       preview = await entry.session.previewRewindFiles(userMessageId);
     } catch (e) {
       this.reportError(e);
-      return;
+      return false;
     }
     if (!preview.ok) {
       void vscode.window.showErrorMessage(
         `この発言まで戻せません: ${preview.error}（CLIのバージョンや実行環境によって使えないことがあります）`,
       );
-      return;
+      return false;
     }
     if (preview.filesChanged.length === 0) {
       void vscode.window.showInformationMessage('戻すファイルの変更はありませんでした。');
-      return;
+      return true;
     }
-    if (!(await confirmRewindFiles(preview.filesChanged))) {
-      return;
+    if (entry.session.getState().busy) {
+      void vscode.window.showErrorMessage('実行中の会話を停止してからファイルを戻してください');
+      return false;
+    }
+    const confirmed = resending
+      ? (await vscode.window.showWarningMessage(
+          'ファイルも戻して新しいタブへ送り直しますか？',
+          { modal: true, detail: preview.filesChanged.join('\n') },
+          '戻して送信する',
+        )) === '戻して送信する'
+      : await confirmRewindFiles(preview.filesChanged);
+    if (!confirmed || entry.session.getState().busy) {
+      return false;
     }
 
     let result: Awaited<ReturnType<ClaudeStreamSession['applyRewindFiles']>>;
@@ -2681,15 +2704,16 @@ export class ClaudeChatViewManager
       result = await entry.session.applyRewindFiles(userMessageId);
     } catch (e) {
       this.reportError(e);
-      return;
+      return false;
     }
     if (!result.ok) {
       void vscode.window.showErrorMessage(`ファイルを戻せませんでした: ${result.error}`);
-      return;
+      return false;
     }
     void vscode.window.showInformationMessage(
       `${preview.filesChanged.length}件のファイルを戻しました: ${preview.filesChanged.join(', ')}`,
     );
+    return true;
   }
 
   /**

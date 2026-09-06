@@ -635,6 +635,55 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  it.each(['success', 'cancel', 'failure'] as const)(
+    'ファイルも戻す修正はrewind_filesを使う: %s',
+    async (scenario) => {
+      const { sessions } = stubStartCapturing();
+      const fork = vi
+        .spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn')
+        .mockResolvedValue({
+          ok: true,
+          prefillText: undefined,
+          error: undefined,
+          succeededCount: 1,
+        });
+      const preview = vi
+        .spyOn(ClaudeStreamSession.prototype, 'previewRewindFiles')
+        .mockResolvedValue({
+          ok: true,
+          filesChanged: ['a.txt'],
+          insertions: 1,
+          deletions: 0,
+          error: undefined,
+        });
+      const apply = vi.spyOn(ClaudeStreamSession.prototype, 'applyRewindFiles').mockResolvedValue({
+        ok: scenario !== 'failure',
+        filesChanged: [],
+        insertions: 0,
+        deletions: 0,
+        error: scenario === 'failure' ? 'conflict' : undefined,
+      });
+      const send = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
+      const { manager } = createManager();
+      const id = await manager.openNew('/workspace/root');
+      sessions[0]!.receive(initLine(id!));
+      sessions[0]!.receive(resultLine());
+      if (scenario === 'cancel') __mock.showWarningMessageAnswer = undefined;
+      await manager.simulateWebviewMessage(id!, {
+        type: 'editResend',
+        turnId: 'u1',
+        text: 'revised',
+        restoreFiles: true,
+      });
+      await flush();
+      expect(fork).toHaveBeenCalled();
+      expect(preview).toHaveBeenCalledWith('u1');
+      expect(apply).toHaveBeenCalledTimes(scenario === 'cancel' ? 0 : 1);
+      expect(send).toHaveBeenCalledTimes(scenario === 'success' ? 1 : 0);
+      manager.dispose();
+    },
+  );
+
   describe('会話の途中のターンから分岐（issue #333、design.md §14.61）', () => {
     it('セッション全体のforkと同じ経路で新しいタブを開き、rewindConversationToTurnへ対象のuuidを渡す', async () => {
       const startCalls = stubStart();

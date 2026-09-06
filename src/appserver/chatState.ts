@@ -1,3 +1,4 @@
+import type { RewindChange } from './fileRewind';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import type { Attachment } from '../provider/attachments';
 import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
@@ -1822,4 +1823,19 @@ export function addPrompt(state: ChatState, prompt: PendingPrompt): ChatState {
 
 export function removePrompt(state: ChatState, requestId: number | string): ChatState {
   return { ...state, prompts: state.prompts.filter((p) => p.requestId !== requestId) };
+}
+
+/** 表示用の正規化で末尾改行や空ファイルを失わない復元用入力。 */
+export function readRewindChanges(changes: unknown): RewindChange[] {
+  if (!Array.isArray(changes)) return [];
+  return changes.map((raw) => {
+    const change = rec(raw);
+    const kind = rec(change?.['kind']);
+    return {
+      path: str(change?.['path']),
+      kind: str(kind?.['type']),
+      movePath: strOrUndefined(kind?.['move_path']),
+      diff: typeof change?.['diff'] === 'string' ? change['diff'] : '\0',
+    };
+  });
 }

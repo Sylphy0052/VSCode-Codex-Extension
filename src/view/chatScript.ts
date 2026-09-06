@@ -543,6 +543,12 @@ export function chatScript(
       }
     });
     editBox.appendChild(editInput);
+    const editRestore = document.createElement('input');
+    editRestore.type = 'checkbox';
+    const editRestoreLabel = document.createElement('label');
+    editRestoreLabel.appendChild(editRestore);
+    editRestoreLabel.appendChild(document.createTextNode('ファイルも戻す'));
+    editBox.appendChild(editRestoreLabel);
     const editActions = document.createElement('div');
     editActions.className = 'edit-actions';
     const editCancel = document.createElement('button');
@@ -591,6 +597,7 @@ export function chatScript(
       editBox,
       editInput,
       editSend,
+      editRestore,
       // 書き直したあとの送り先（issue #1073）。forkTargetと同じ値を使う。
       // Codex画面で最初の発言だけは手前のターンが無いため undefined のままになり、
       // その場合は分岐ではなく新しい会話として送り直す（editFromStart）
@@ -1223,6 +1230,7 @@ export function chatScript(
     if (node.editing) return;
     node.editing = true;
     node.editInput.value = node.fullText || '';
+    node.editRestore.checked = false;
     node.editBox.hidden = false;
     node.body.hidden = true;
     node.edit.hidden = true;
@@ -1253,6 +1261,8 @@ export function chatScript(
     node.editSend.disabled = true;
     vscode.postMessage({
       type: 'editResend',
+      messageId: node.rewindTarget,
+      restoreFiles: node.editRestore.checked,
       turnId: node.editTarget,
       fromStart: node.editFromStart === true,
       text,
