@@ -259,7 +259,7 @@ describe('IntegrationQueue（直列化）', () => {
   it('integrateが直列化され、同時に複数要求してもマニフェスト更新が重ならない', async () => {
     let active = 0;
     let maxActive = 0;
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue('/nowhere');
     const fs = nodePseudoWorktreeFileSystem;
 
     const originalEnqueue = (
@@ -301,7 +301,7 @@ describe('IntegrationQueue（直列化）', () => {
     '永続化（onIntegratedフック）が完了するまで次のタスクのintegrateが始まらないため、' +
       '書き込みの順序が保証される',
     async () => {
-      const queue = new IntegrationQueue();
+      const queue = new IntegrationQueue('/nowhere');
       const fs = nodePseudoWorktreeFileSystem;
 
       let stored = '';
@@ -1586,7 +1586,7 @@ describe('実ファイルシステムでの統合テスト', () => {
     const t1After = await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem);
     const diff = diffSnapshots(t1.snapshot, t1After);
 
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     const plan = await queue.integrate(
       'T1',
       t1.cwd,
@@ -1627,7 +1627,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       await takeSnapshot(t2.cwd, [], nodePseudoWorktreeFileSystem),
     );
 
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     const firstPlan = await queue.integrate(
       'T1',
       t1.cwd,
@@ -1675,7 +1675,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       t1.snapshot,
       await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
     );
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
 
     const result = await reflectIntegrationToWorkspace(
@@ -1766,7 +1766,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       t1.snapshot,
       await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
     );
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
 
     // 実行中に人がワークスペース側を直接編集した状況を再現する
@@ -1861,7 +1861,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         t1.snapshot,
         await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
       );
-      const queue = new IntegrationQueue();
+      const queue = new IntegrationQueue(workspace);
       await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
 
       // 2件目（b.txt）のワークスペースへの反映だけが失敗するフェイクへ差し替える
@@ -3312,12 +3312,120 @@ describe('実ファイルシステムでの統合テスト', () => {
       );
     });
   });
+
+  describe('統合先へのコピーの境界検証（Issue #1117）', () => {
+    /**
+     * `applyDiffToIntegration`は統合先と差分パスを結合して`mkdir`+`copyFile`するだけで、
+     * 境界を一切確認していなかった。統合先を作った`ensureIntegrationDir`の検査はrun開始時の
+     * 1回きりなので、タスクの実行中に統合先配下を外向きのシンボリックリンクへ差し替えられると
+     * リンク先へ書き込まれる。後段の`reflectIntegrationToWorkspace`で止めてもコピーは
+     * 取り消せない。
+     */
+    async function prepareTaskClone(relPath: string, content: string): Promise<string> {
+      await writeWorkspaceFile(relPath, 'original\n');
+      const t1 = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      expect(t1.ok).toBe(true);
+      if (!t1.ok) throw new Error('cloneWorkspace failed');
+      await writeFile(path.join(t1.cwd, ...relPath.split('/')), content);
+      return t1.cwd;
+    }
+
+    it('統合先の子ディレクトリが外向きシンボリックリンクならコピーせず、リンク先に書き込まない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const taskDir = await prepareTaskClone('src/a.txt', 'changed by task, longer content\n');
+        // タスクの実行中に、統合先の子ディレクトリを外部ディレクトリへのリンクへ差し替える
+        await symlink(outsideDir, path.join(integration.dir, 'src'));
+
+        await expect(
+          applyDiffToIntegration(
+            workspace,
+            taskDir,
+            integration.dir,
+            [{ path: 'src/a.txt', kind: 'modified' }],
+            nodePseudoWorktreeFileSystem,
+          ),
+        ).rejects.toThrow(/シンボリックリンク/);
+
+        // リンク先（ワークスペースの外）には何も書かれていない
+        await expect(readdir(outsideDir)).resolves.toEqual([]);
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('統合先の既存ファイルが外向きシンボリックリンクならコピーせず、リンク先を書き換えない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await writeFile(path.join(outsideDir, 'secret.txt'), 'secret\n');
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const taskDir = await prepareTaskClone('a.txt', 'changed by task, longer content\n');
+        await symlink(path.join(outsideDir, 'secret.txt'), path.join(integration.dir, 'a.txt'));
+
+        await expect(
+          applyDiffToIntegration(
+            workspace,
+            taskDir,
+            integration.dir,
+            [{ path: 'a.txt', kind: 'modified' }],
+            nodePseudoWorktreeFileSystem,
+          ),
+        ).rejects.toThrow(/シンボリックリンク/);
+
+        await expect(readFile(path.join(outsideDir, 'secret.txt'), 'utf8')).resolves.toBe(
+          'secret\n',
+        );
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('正常な統合は従来どおりコピーされ、一時ファイルを残さない', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const taskDir = await prepareTaskClone('src/a.txt', 'changed by task, longer content\n');
+
+      await applyDiffToIntegration(
+        workspace,
+        taskDir,
+        integration.dir,
+        [{ path: 'src/a.txt', kind: 'modified' }],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      await expect(readFile(path.join(integration.dir, 'src', 'a.txt'), 'utf8')).resolves.toBe(
+        'changed by task, longer content\n',
+      );
+      await expect(readdir(path.join(integration.dir, 'src'))).resolves.toEqual(['a.txt']);
+    });
+  });
 });
 
 describe('applyDiffToIntegration', () => {
   it('deleted差分はファイルシステムへ触れない（統合先は疎な構成のため）', async () => {
     const calls: string[] = [];
-    const fs: Parameters<typeof applyDiffToIntegration>[3] = {
+    const fs: Parameters<typeof applyDiffToIntegration>[4] = {
       readdir: async () => [],
       statFile: async () => undefined,
       isSymbolicLink: async () => false,
@@ -3342,6 +3450,7 @@ describe('applyDiffToIntegration', () => {
     };
 
     await applyDiffToIntegration(
+      '/ws',
       '/task',
       '/integration',
       [{ path: 'deleted.txt', kind: 'deleted' }],

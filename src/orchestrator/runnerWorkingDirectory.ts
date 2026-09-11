@@ -269,8 +269,8 @@ export async function resolvePseudoState(
     self.deps.log.warn(`[workflow ${runId}] ${sanitizeForLog(loadedManifest.message)}`);
   }
   const queue = loadedManifest.ok
-    ? new PseudoWorktreeIntegrationQueue(loadedManifest.manifest)
-    : new PseudoWorktreeIntegrationQueue(new Map(), loadedManifest.message);
+    ? new PseudoWorktreeIntegrationQueue(repoRoot, loadedManifest.manifest)
+    : new PseudoWorktreeIntegrationQueue(repoRoot, new Map(), loadedManifest.message);
   return {
     ok: true,
     state: {
