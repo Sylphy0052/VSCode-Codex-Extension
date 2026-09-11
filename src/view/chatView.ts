@@ -25,7 +25,6 @@ import {
   type ServerRequest,
   type ServerRequestHandler,
 } from '../appserver/connection';
-import { describeUnsafeCombination } from '../codex/argvBuilder';
 import { codexPaths } from '../codex/cliLocator';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
@@ -282,25 +281,6 @@ interface ChatPanel extends BaseChatPanel {
   lastSafeBoundaryKey: string | undefined;
   /** 安全な区切りの分類器が走っている最中か。ターンが立て続けに終わっても二重に呼ばない。 */
   safeBoundaryProbing: boolean;
-}
-
-/**
-/**
- * 保護を外した設定のまま会話を開いてよいか確かめる（issue #222、design.md §7）。
- *
- * 承認とサンドボックスの両方が効かない組み合わせは、モデルの提案がそのまま実行される。
- * 設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。会話を開く
- * たびに、何が起きるかを示して同意を取る。
- *
- * キャンセルされたら開かない（既定はキャンセル側）。
- */
-export async function confirmUnsafeCombination(config: CodexConfig): Promise<boolean> {
-  const reason = describeUnsafeCombination(config);
-  if (reason === undefined) {
-    return true;
-  }
-  const choice = await vscode.window.showWarningMessage(reason, { modal: true }, 'このまま開く');
-  return choice === 'このまま開く';
 }
 
 /**
@@ -596,17 +576,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return undefined;
     }
 
-    // 保護を外した設定のまま開こうとしていないか（issue #222）。パネルを作る前に聞く。
-    // タスク用のセッション（`openTaskSession`）は無人実行で人が答えられないため、
-    // そちらは `toCodexConfig` が危険な値を持ち込まないようにして防いでいる
-    const config = taskConfig ?? readConfig().codex;
-    if (!(await confirmUnsafeCombination(config))) {
-      return undefined;
-    }
-
-    // `modelSettings` を渡す経路は引き継ぎ（Issue #1082）。送信のたびに `configFor` が
-    // model / effortを差し込むため起動後の書き換えでも効くが、起動時の設定にも同じ値を
-    // 載せておく（`config` はこの時点でグローバル設定かタスク設定しか持たない）
     const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig, undefined, modelSettings);
     this.showPanel(entry, false);
     const pendingKey = this.pendingStarts.begin(entry);

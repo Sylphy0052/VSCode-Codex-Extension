@@ -2878,11 +2878,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 端末起動（当時の`buildShellArgs`。TUIタブ方式廃止に伴い#357で削除済み）では、有効なときに`-s` / `-a` / `--approve-for-me`を渡さない。CLIは併用を弾かない（`codex -s read-only --dangerously-bypass-approvals-and-sandbox --version`がパースを通ることを実測）が、どちらが勝つかがヘルプに書かれていないため、引数の意味が一意に決まるようこちらで落として警告を出す。
 
-#### 会話を開くたびに同意を取る
+#### 会話開始時の確認を省く（Issue #1094）
 
-`isUnsafeCombination`が単独で真を返す。この関数は本issueまで**どこからも呼ばれていなかった**ため、あわせて配線した（`confirmUnsafeCombination`、`ChatViewManager.openNew`）。`danger-full-access` + `never`と`danger-full-access` + `auto_review`も同時に確認の対象になる。
-
-確認の本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination`）。設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。当てはまるものが複数ある場合は、実際に効くほう（`bypass`）を述べる。
+Codexの会話開始時は、選択済みの承認・サンドボックス設定をそのまま適用する。`bypassApprovalsAndSandbox`、`danger-full-access`と`never`または`auto_review`の組み合わせでも、開始前のモーダル確認は出さない。設定変更時の確認と実行中の承認要求は従来どおり。
 
 タスクセッション（`openTaskSession`）は無人実行で人が答えられないため、確認を挟む代わりに`toCodexConfig`が`false`を固定して危険な値を持ち込ませない。
 
@@ -3276,7 +3274,7 @@ CLIを混在させている利用者にとっては情報が1つ減るが、ア�
 
 - `model` / `effort`はクランプ対象外（§16.16の表の「machine-overridable」な設定と同じ扱い。実行経路や権限には関わらない）。プリセットで未指定（設定に項目自体が無い）なら空文字（CLI側の設定に委譲する、の意）にする。**拡張機能の現在の`codex.model`等を暗黙に継承することはしない。** `buildEffectiveTaskConfig`（ワークフロータスク）が`task.model ?? ''`としているのと同じ方針で、プリセットは「指定しなかった項目はCLIの既定へ委譲する自己完結した束」として扱う
 - `sandbox`はCodex固有の概念（Claudeには起動時のサンドボックスフラグが無い）。Claude向けプリセットで`sandbox`を書いても、クランプ自体が無意味なため常に空文字にする（警告も出さない。§16.16の`buildEffectiveTaskConfig`と同じ扱い）
-- `approvalMode`が拡張機能側の`bypassPermissions`（Claude）を継承した場合の`acceptEdits`読み替え（§16.16、issue #271）は**プリセットには適用しない**。ワークフロー実行は無人で人が承認できないためこの読み替えが要るが、プリセットは対話的なチャット画面を開く操作であり、`openNew`側の`confirmUnsafeCombination` / `isUnsafeClaudeCombination`（`chatView.ts` / `claudeChatView.ts`、既存のまま変更していない）が起動前の確認ダイアログを出す。人が確認できる経路が既にあるため、読み替えの多層防御を重ねる必要が無いと判断した
+- `approvalMode`が拡張機能側の`bypassPermissions`（Claude）を継承した場合の`acceptEdits`読み替え（§16.16、issue #271）はプリセットには適用しない。プリセットは対話的な会話として選択済みの設定を使う。Claudeは開始前の確認を維持し、CodexはIssue #1094で開始前の確認を削除した。
 
 検証（配列であること・各要素がオブジェクトであること・`name`/`provider`の必須性・型違いの拒否）は`src/sessionPresets.ts`に切り出した。CONTRIBUTING.mdのレイヤの制約（ロジック層は`vscode`をimportしない）に従い、`test/unit/sessionPresets.test.ts`から実VSCode無しでテストする。クランプの純粋ロジック自体は`src/util/safetyClamp.ts`にあり（前述のissue #308の抽出）、`sessionPresets.ts`はそれを再利用する側になる。`sessionPresets.ts`自身を`src/util/**`ではなく`src/`直下に置いているのは、`agent.sessionPresets`の読み込み・検証・実効値の組み立てという機能のまとまりを保つためで、`src/util`を横断的な小物の置き場という位置付けのままにするための判断である。
 

@@ -8,7 +8,7 @@ export function isSessionId(value: string): boolean {
 }
 
 /**
- * Codexの保護を両方とも外す組み合わせ。起動前に確認ダイアログを出す（設計書 §7）。
+ * Codexの保護を両方とも外す組み合わせ。
  *
  * - `bypassApprovalsAndSandbox`: 単独で該当する（issue #222）。他の3つと違って
  *   サンドボックス自体を張らないため、`sandbox` に何が入っていても意味を持たない。
