@@ -1487,9 +1487,13 @@ export function chatScript(
   /**
    * AskUserQuestion（issue #685）の選択UI。「送信」/「拒否」の2ボタンに絞る
    * （選ばずに常時許可という概念が成立しないため、常時許可ボタンは出さない）。
-   * 1〜4問を質問ごとに区切って並べ、multiSelect指定に応じてradio/checkboxを出す
+   * 1〜4問を質問ごとに区切り、multiSelect指定に応じてradio/checkboxを出す
    * （見た目はbuildOptions＝requestUserInput/elicitation用と似せているが、
    * 型（questions/options）が違うため呼び出しは共有できず別実装にしてある）。
+   *
+   * 質問が2問以上のときは1問ずつタブで切り替える（issue #1085）。全部を縦に
+   * 並べるとカードだけで画面が埋まり、回答の判断材料である会話が見えなくなる。
+   * 非表示の質問も入力要素はDOMに残すので、タブを行き来しても選択は消えない。
    */
   function renderAskUserQuestion(approval) {
     const wrap = document.createElement('div');
@@ -1501,9 +1505,70 @@ export function chatScript(
 
     const readers = [];
     const questions = approval.questions || [];
+
+    const tabBar = document.createElement('div');
+    tabBar.className = 'question-tabs';
+    tabBar.setAttribute('role', 'tablist');
+    // 1問しかないならタブは情報を増やさないので出さない
+    if (questions.length > 1) wrap.appendChild(tabBar);
+
+    const body = document.createElement('div');
+    body.className = 'question-body';
+    wrap.appendChild(body);
+
+    const tabs = [];
+    const panels = [];
+    const showQuestion = (active) => {
+      panels.forEach((panel, i) => (panel.hidden = i !== active));
+      tabs.forEach((tab, i) => {
+        tab.classList.toggle('active', i === active);
+        tab.setAttribute('aria-selected', i === active ? 'true' : 'false');
+      });
+      body.scrollTop = 0;
+    };
+
     questions.forEach((question, index) => {
-      wrap.appendChild(buildAskUserQuestionField(approval.requestId, question, index, readers));
+      const panel = buildAskUserQuestionField(approval.requestId, question, index, readers);
+      panels.push(panel);
+      body.appendChild(panel);
+
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'question-tab';
+      tab.setAttribute('role', 'tab');
+      tab.textContent = askUserQuestionTabLabel(question, index);
+      tab.addEventListener('click', () => showQuestion(index));
+      tabs.push(tab);
+      tabBar.appendChild(tab);
     });
+    showQuestion(0);
+
+    // 未回答で送信が止まった理由。止まった質問が隠れたタブ側にあると画面上の
+    // 変化が何も無く、押しても反応しないように見えてしまう
+    const warning = document.createElement('div');
+    warning.className = 'question-warning';
+    warning.hidden = true;
+    wrap.appendChild(warning);
+
+    // 未回答のタブに印を付け、最初の未回答の位置を返す（全部答えていれば-1）
+    const markUnanswered = (answers) => {
+      let first = -1;
+      questions.forEach((question, i) => {
+        const empty = (answers[question.question] || []).length === 0;
+        tabs[i].classList.toggle('unanswered', empty);
+        if (empty && first < 0) first = i;
+      });
+      return first;
+    };
+    // 回答したら印と文言をその場で取り下げる。直したのに赤いままだと、まだ何か
+    // 足りないのか送信を試すまで分からない
+    const refreshUnanswered = () => {
+      const answers = {};
+      for (const read of readers) read(answers);
+      if (markUnanswered(answers) < 0) warning.hidden = true;
+    };
+    body.addEventListener('change', refreshUnanswered);
+    body.addEventListener('input', refreshUnanswered);
 
     const actions = document.createElement('div');
     actions.className = 'actions';
@@ -1515,8 +1580,14 @@ export function chatScript(
       for (const read of readers) read(answers);
       // 選択必須。未回答の質問があれば送信しない（multiSelect:falseはradioで自然に
       // 1つへ強制されるが、選び忘れ自体は防げないため両方とも件数で確認する）
-      const unanswered = questions.some((q) => (answers[q.question] || []).length === 0);
-      if (unanswered) return;
+      const firstUnanswered = markUnanswered(answers);
+      if (firstUnanswered >= 0) {
+        showQuestion(firstUnanswered);
+        warning.textContent = '未回答の質問があります。すべての質問に回答してください。';
+        warning.hidden = false;
+        return;
+      }
+      warning.hidden = true;
       actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
       vscode.postMessage({ type: 'answerAskUserQuestion', requestId: approval.requestId, answers });
     });
@@ -1533,6 +1604,18 @@ export function chatScript(
 
     wrap.appendChild(actions);
     return wrap;
+  }
+
+  /**
+   * タブの見出し。headerは短い札として書かれるのでそのまま使い、無いときだけ
+   * 質問文を切り詰める（タブが折り返して縦に伸びるのを防ぐ）。
+   */
+  function askUserQuestionTabLabel(question, index) {
+    const header = (question.header || '').trim();
+    if (header !== '') return header;
+    const text = (question.question || '').trim();
+    if (text === '') return '質問 ' + String(index + 1);
+    return text.length > 20 ? text.slice(0, 19) + '…' : text;
   }
 
   /** 1問分の見出し・本文・選択肢。 */
