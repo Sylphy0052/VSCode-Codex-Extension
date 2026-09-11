@@ -47,6 +47,44 @@ describe('redactCredentials: quoteされたキー名（Issue #963）', () => {
   });
 });
 
+describe('redactCredentials: クオートされた値は空白以降も伏せる（Issue #1119）', () => {
+  it('ダブルクオート内の空白を含むpasswordを値全体で伏せる', () => {
+    const result = redactCredentials('password: "correct horse battery"');
+    expect(result.text).toBe(`password: "${REDACTION_MARK}"`);
+    expect(result.counts['認証情報の代入']).toBe(1);
+  });
+
+  it('単引用内の空白区切りの短い語も、値全体を1つの秘密として伏せる', () => {
+    // 修正前は先頭の語 `a` だけを値とみなし、8文字未満の「短い値」として原文全体を残していた
+    const result = redactCredentials("token='a b c d e f g'");
+    expect(result.text).toBe(`token='${REDACTION_MARK}'`);
+  });
+
+  it('エスケープされたクオートを含む値を、途中で閉じたと誤認せず伏せる', () => {
+    const result = redactCredentials('secret = "ab\\"cd ef gh"');
+    expect(result.text).toBe(`secret = "${REDACTION_MARK}"`);
+  });
+
+  it('カンマやセミコロンを含むクオート値も末尾まで伏せる', () => {
+    const result = redactCredentials('{"api_key": "9f8e7d6c, 5b4a; 3928"}');
+    expect(result.text).toBe(`{"api_key": "${REDACTION_MARK}"}`);
+  });
+
+  it('クオート値は行をまたがない（閉じ忘れが次の行を巻き込まない）', () => {
+    const result = redactCredentials('password: "9f8e7d6c5b4a\nnext_line = keep');
+    expect(result.text).toBe(`password: "${REDACTION_MARK}\nnext_line = keep`);
+  });
+
+  it('空のクオート値は伏せない', () => {
+    expect(redactCredentials('password: ""').text).toBe('password: ""');
+  });
+
+  it('陽性対照: クオートの無い値は従来どおり空白の手前までを伏せる', () => {
+    const result = redactCredentials('API_KEY=9f8e7d6c5b4a39281706 trailing');
+    expect(result.text).toBe(`API_KEY=${REDACTION_MARK} trailing`);
+  });
+});
+
 describe('redactCredentials: 既知の形式のトークン（Issue #963）', () => {
   it('GitLabのpersonal access tokenを伏せる', () => {
     const result = redactCredentials(`token: ${GITLAB_PAT}`);

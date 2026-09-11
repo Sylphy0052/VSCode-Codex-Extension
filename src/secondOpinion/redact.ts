@@ -171,9 +171,18 @@ const RULES: readonly RedactionRule[] = [
     // キー名は残して値だけ伏せる。キー名を囲うクオート（JSON・YAML・JS）は同じ字で閉じる
     // ことを後方参照で要求する——`\1` は引用が無いとき空文字にマッチするので、素の
     // `API_KEY=...` もこれまで通り拾える（Issue #963）
+    //
+    // 値は2通りに分ける（Issue #1119）。
+    // - クオートで開く値: 同じ字で閉じるまでを値とする。空白・`,`・`;` を含んでもよく、
+    //   `\"` のようなエスケープは1文字として飛ばす。改行はまたがない（閉じ忘れを行末で止める）
+    // - それ以外: 空白・区切り記号の手前までを値とする（従来どおり。開きクオートだけあって
+    //   閉じていない値もこちらへ落ちる）
+    // どちらの枝でも「開きクオート・値・閉じクオート」の3つを必ず文字列で捕捉する。
+    // `redactCredentials` は未参加のキャプチャ（undefined）を落として渡すので、枝ごとに
+    // 引数の並びが変わらないよう、閉じが無い枝では空文字を捕捉する `()` を置く
     name: '認証情報の代入',
     pattern:
-      /(['"`]?)\b([A-Za-z0-9_-]*(?:api[-_]?key|secret|token|password|passwd|pwd|access[-_]?key|client[-_]?secret|private[-_]?key|credentials?)[A-Za-z0-9_-]*)\1(\s*[:=]\s*)(['"`]?)([^\s'"`,;)\]}]+)(['"`]?)/gi,
+      /(['"`]?)\b([A-Za-z0-9_-]*(?:api[-_]?key|secret|token|password|passwd|pwd|access[-_]?key|client[-_]?secret|private[-_]?key|credentials?)[A-Za-z0-9_-]*)\1(\s*[:=]\s*)(?:(['"`])((?:(?!\4)[^\\\r\n]|\\.)*)(\4)|(['"`]?)([^\s'"`,;)\]}]+)())/gi,
     replace: (all, keyQuote, key, sep, openQuote, value, closeQuote) =>
       looksLikeAssignedSecret(value, openQuote !== '')
         ? `${keyQuote}${key}${keyQuote}${sep}${openQuote}${REDACTION_MARK}${closeQuote}`
