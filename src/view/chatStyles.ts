@@ -309,6 +309,45 @@ ${sharedStyles()}
     font-family: var(--vscode-editor-font-family);
     font-size: 0.85em;
   }
+  /*
+   * AskUserQuestion（issue #1085）の質問タブ。4問ぶんを縦に並べるとカードだけで
+   * ビューが埋まるので、1問ずつ切り替え、質問本体にも高さの上限を置く
+   */
+  .approval .question-tabs {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  }
+  .approval .question-tab {
+    padding: 3px 10px;
+    max-width: 14em;
+    overflow: hidden;
+    color: var(--vscode-descriptionForeground);
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid transparent;
+    border-radius: 0;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .approval .question-tab:hover { color: var(--vscode-foreground); background-color: transparent; }
+  .approval .question-tab.active {
+    color: var(--vscode-foreground);
+    border-bottom-color: var(--vscode-focusBorder);
+  }
+  .approval .question-tab.unanswered { color: var(--vscode-errorForeground); }
+  .approval .question-body {
+    max-height: 40vh;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+  }
+  .approval .question-warning {
+    margin: 4px 0 8px;
+    color: var(--vscode-errorForeground);
+    font-size: 0.85em;
+  }
   /* .approvalはAskUserQuestion（issue #685）の選択UIがここを使う */
   .prompt .field, .approval .field { margin-bottom: 10px; }
   .prompt .field-label, .approval .field-label {
