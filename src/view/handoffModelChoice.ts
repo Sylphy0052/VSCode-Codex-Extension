@@ -8,7 +8,7 @@ import { effortsFor, type ModelInfo } from '../codex/modelCatalog';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { SessionModelSettings } from '../sessionModelSettings';
 import { classifyHandoff, type HandoffClassifierInput } from './handoffClassifier';
-import { resolveProfile } from './handoffRouter';
+import { isProfileChange, resolveProfile, type TaskAssessment } from './handoffRouter';
 
 /**
  * 引き継ぎ先セッションのmodel / effortを決め、**引き継ぐ前に人へ確認する**（Issue #1082）。
@@ -61,24 +61,30 @@ function allowedEfforts(deps: HandoffModelChoiceDeps, model: string): string[] {
  *
  * 分類に失敗したときは引き継ぎ元をそのまま持ち越す。グローバル設定へ戻すと、引き継ぎ元で
  * わざわざ変えた設定を分類の失敗だけで捨てることになる。
+ *
+ * @param preassessed 既に取ってある見立て（Issue #1090の区切り判定で1回起動している）。
+ *   渡されたときは分類器を起動し直さない。1回の引き継ぎでCLIを2回起動しないため
  */
 export async function proposeHandoffModelSettings(
   current: SessionModelSettings,
   input: HandoffClassifierInput,
   deps: HandoffModelChoiceDeps,
+  preassessed?: TaskAssessment,
 ): Promise<HandoffModelChoice> {
   const settings: SessionModelSettings = { model: current.model, effort: current.effort };
   const reasons: string[] = [];
 
   if (readAutoHandoffRouterEnabled()) {
-    const assessment = await classifyHandoff(
-      {
-        provider: deps.provider,
-        executable: deps.executable,
-        ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
-      },
-      input,
-    );
+    const assessment =
+      preassessed ??
+      (await classifyHandoff(
+        {
+          provider: deps.provider,
+          executable: deps.executable,
+          ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
+        },
+        input,
+      ));
     if (assessment === undefined) {
       reasons.push('作業の分類に失敗したため引き継ぎ元を踏襲');
     } else {
@@ -169,13 +175,16 @@ async function pickManually(
  * 候補を人へ見せ、承認・選び直し・再判定のいずれかを受ける。
  *
  * @returns 承認された設定。ダイアログを閉じたときは `undefined`（引き継ぎを中止する）
+ * @param preassessed 区切り判定で既に取ってある見立て（Issue #1090）。初回の提案にだけ使い、
+ *   「再判定」を押されたときは新たに分類器を起動する
  */
 export async function chooseHandoffModelSettings(
   current: SessionModelSettings,
   input: HandoffClassifierInput,
   deps: HandoffModelChoiceDeps,
+  preassessed?: TaskAssessment,
 ): Promise<HandoffModelChoice | undefined> {
-  let proposal = await proposeHandoffModelSettings(current, input, deps);
+  let proposal = await proposeHandoffModelSettings(current, input, deps, preassessed);
   const canReclassify = readAutoHandoffRouterEnabled();
 
   for (;;) {
@@ -216,4 +225,68 @@ export async function chooseHandoffModelSettings(
     }
     return undefined;
   }
+}
+
+/** 安全な区切りの後段（分類器）の結果（Issue #1090）。 */
+export interface SafeBoundaryProbe {
+  assessment: TaskAssessment;
+  /** いま新しいセッションへ切り替えても失うものが無いか。 */
+  switchSafe: boolean;
+  /** その根拠を1文で。ポインタファイルとログへ出す。 */
+  switchReason: string;
+  /** 解決したmodel/effortが今の値と実質的に違うか（`switchSafe` が真のときだけ意味を持つ）。 */
+  profileChanged: boolean;
+  /** 解決したmodel/effort。確認ダイアログへ出す値と同じ。 */
+  profile: SessionModelSettings;
+}
+
+/**
+ * 安全な区切りの後段を実行する（Issue #1090）。前段（`passesSafeBoundaryGate`）を通った
+ * ときだけ呼ぶ。
+ *
+ * ここで起動した分類器の見立ては、そのまま `chooseHandoffModelSettings` の `preassessed`
+ * へ渡して使い回す。区切りの判定と引き継ぎ先の決定でCLIを2回起動しないため。
+ *
+ * 分類器が無効（`agent.autoHandoff.router` がOFF）・起動できない・応答を読めないときは
+ * `undefined`。「切り替えてよいか」を確かめられていない以上、区切り待ちの契機は発火させない
+ * （残量が尽きたときの `threshold` は分類器に依らず従来どおり発火する）。
+ */
+export async function probeSafeBoundary(
+  current: SessionModelSettings,
+  input: HandoffClassifierInput,
+  deps: HandoffModelChoiceDeps,
+): Promise<SafeBoundaryProbe | undefined> {
+  if (!readAutoHandoffRouterEnabled()) {
+    return undefined;
+  }
+  const assessment = await classifyHandoff(
+    {
+      provider: deps.provider,
+      executable: deps.executable,
+      ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
+    },
+    input,
+  );
+  if (assessment === undefined) {
+    return undefined;
+  }
+  if (!assessment.switchSafe) {
+    return {
+      assessment,
+      switchSafe: false,
+      switchReason: assessment.switchReason,
+      profileChanged: false,
+      profile: { model: current.model, effort: current.effort },
+    };
+  }
+  // 明示設定（`agent.autoHandoff.model` / `.effort`）まで含めた最終的な提案と比べる。
+  // 解決結果だけで比べると、設定で固定している人のところで毎回「変わった」ことになる
+  const proposal = await proposeHandoffModelSettings(current, input, deps, assessment);
+  return {
+    assessment,
+    switchSafe: true,
+    switchReason: assessment.switchReason,
+    profileChanged: isProfileChange(current, proposal.settings),
+    profile: proposal.settings,
+  };
 }

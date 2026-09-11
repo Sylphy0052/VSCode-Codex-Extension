@@ -1967,6 +1967,47 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(pointer).not.toContain('file-history-snapshot');
   });
 
+  it.each([
+    ['成功したら旧タブを確認なしで閉じる', 'turn/completed', true],
+    ['失敗したら旧タブを残す', 'turn/failed', false],
+  ] as const)('新セッションの初回ターンが%s（Issue #1090）', async (_name, method, closed) => {
+    const store = fakeSessionStore({
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const { manager, connection } = createManager({ store });
+
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+    const oldPanel = __mock.createdPanels.at(-1);
+
+    const handoff = manager.handoffToNewSession();
+    await vi.waitFor(() => {
+      expect(connection.requests.filter((r) => r.method === 'thread/start').length).toBe(2);
+    });
+    connection.resolveFirst('thread/start', threadStartResult('thread-new'));
+    await vi.waitFor(() => {
+      expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(true);
+    });
+    connection.resolveFirst('turn/start', {});
+    await handoff;
+    expect(oldPanel?.disposed).toBe(false);
+
+    connection.notify(method, { threadId: 'thread-new' });
+    if (closed) {
+      await vi.waitFor(() => {
+        expect(oldPanel?.disposed).toBe(true);
+      });
+      // 停止の確認は出さない。引き継ぐ前の確認（PR #1088）だけが残る
+      expect(__mock.messages.infos).toHaveLength(1);
+      expect(__mock.messages.infos[0]).toContain('引き継ぎますか？');
+    } else {
+      await tick();
+      expect(oldPanel?.disposed).toBe(false);
+    }
+  });
+
   it('rolloutが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {
     const store = fakeSessionStore({ resolveHandoffRolloutPath: async () => undefined });
     const { manager, connection } = createManager({ store });

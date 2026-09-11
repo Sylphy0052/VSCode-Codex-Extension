@@ -19,11 +19,19 @@ import type { ChatState } from '../appserver/chatState';
 /** どちらのCLIのtranscriptか。抽出コマンドの形が全く違うため分ける。 */
 export type HandoffProvider = 'claude' | 'codex';
 
-/** 引き継ぎが始まった契機。ポインタファイルへ事実として1行残す。 */
+/**
+ * 引き継ぎが始まった契機。ポインタファイルへ事実として1行残す。
+ *
+ * `threshold` / `compactBoundary` は区切りを待たずに発火する（残量が尽きる方が損失が大きい）。
+ * `softThreshold` / `profileChanged` は安全な区切り（`passesSafeBoundaryGate` と分類器の
+ * `switchSafe`）が成立したときだけ発火する（Issue #1090）。
+ */
 export type HandoffTrigger =
   | { kind: 'manual' }
   | { kind: 'threshold'; remainingPercent: number }
-  | { kind: 'compactBoundary' };
+  | { kind: 'compactBoundary' }
+  | { kind: 'softThreshold'; remainingPercent: number; switchReason: string }
+  | { kind: 'profileChanged'; model: string; effort: string; switchReason: string };
 
 /** ポインタファイルの材料。すべて拡張機能が既に持っている値だけで構成する。 */
 export interface HandoffPointerInput {
@@ -185,6 +193,12 @@ function triggerLabel(trigger: HandoffTrigger): string {
   }
   if (trigger.kind === 'compactBoundary') {
     return '自動圧縮の直後';
+  }
+  if (trigger.kind === 'softThreshold') {
+    return `コンテキスト残量が緩い閾値を下回り、安全な区切りが来た（残り${trigger.remainingPercent}%。${trigger.switchReason}）`;
+  }
+  if (trigger.kind === 'profileChanged') {
+    return `安全な区切りで、次の作業に合うmodel/effortが変わった（${trigger.model || '既定'} / ${trigger.effort || '既定'}。${trigger.switchReason}）`;
   }
   return '手動操作';
 }
@@ -406,6 +420,71 @@ export interface AutoHandoffDecisionInput {
   /** 直前の状態から自動圧縮が走ったか。 */
   compacted: boolean;
   thresholdPercent: number;
+  /**
+   * 区切りを待つ契機で使う緩い閾値（Issue #1090）。`thresholdPercent` より大きい値。
+   *
+   * 省略したときは区切り待ちの閾値契機（`softThreshold`）を使わない。
+   */
+  softThresholdPercent?: number;
+  /**
+   * 今が安全な区切りか（`passesSafeBoundaryGate` の前段と分類器の `switchSafe` の両方）。
+   *
+   * 判定には分類器の起動を伴うため、ここでは結果だけを受け取る。前段を通っていないとき・
+   * 分類器を呼んでいないときは `false`。
+   */
+  safeBoundary?: boolean;
+  /** 安全な区切りで、次の作業に合うmodel/effortが今の値と違うか（Issue #1090）。 */
+  profileChanged?: boolean;
+  /** `profileChanged` の根拠として残す、解決したmodel/effortと分類器の1文。 */
+  profile?: { model: string; effort: string };
+  /** 分類器が返した「切り替えてよい理由」。ポインタファイルへそのまま出す。 */
+  switchReason?: string;
+}
+
+/** 安全な区切りの前段（決定論的・コストゼロ）の判断材料。すべて呼び出し側が持っている値。 */
+export interface SafeBoundaryGateInput {
+  /** ターン実行中か。 */
+  busy: boolean;
+  /** 直前のターンが失敗して終わったか。失敗直後は「区切り」ではなく「中断」。 */
+  turnFailed: boolean;
+  /** 未応答の承認要求の件数。 */
+  pendingApprovals: number;
+  /** 未応答の問い合わせ（`ask_user` 等）の件数。 */
+  pendingPrompts: number;
+  /** 送信待ちで積まれている指示の件数。 */
+  queued: number;
+  /** ゴール駆動ループが走っているか。 */
+  loopRunning: boolean;
+  /** タスク用セッションか。無人で走るため人の区切りとは無関係。 */
+  taskManaged: boolean;
+}
+
+/**
+ * 安全な区切りの前段（Issue #1090）。
+ *
+ * ここを通ったときだけ分類器（LLM・CLI起動）を呼ぶ。全部が決定論的な条件で、どれか1つでも
+ * 崩れていれば「今は切り替えられない」ことがコスト無しに判る。
+ */
+export function passesSafeBoundaryGate(input: SafeBoundaryGateInput): boolean {
+  return (
+    !input.busy &&
+    !input.turnFailed &&
+    input.pendingApprovals === 0 &&
+    input.pendingPrompts === 0 &&
+    input.queued === 0 &&
+    !input.loopRunning &&
+    !input.taskManaged
+  );
+}
+
+/**
+ * 分類器を起動してよいかを絞る鍵（Issue #1090の確認点1）。
+ *
+ * 直近のユーザー指示が前回の判定から変わっていなければ、同じ材料で同じ結論が出るだけの
+ * ため呼ばない。ターンが終わるたびにCLIを起動するとコストと待ち時間が積み上がる。
+ */
+export function safeBoundaryProbeKey(recentUserMessages: readonly string[]): string {
+  return recentUserMessages.join('\u0000');
 }
 
 /**
@@ -425,6 +504,25 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
   }
   if (input.compacted) {
     return { kind: 'compactBoundary' };
+  }
+  if (input.safeBoundary !== true) {
+    return undefined;
+  }
+  const switchReason = input.switchReason ?? '';
+  if (
+    input.softThresholdPercent !== undefined &&
+    input.remainingPercent !== undefined &&
+    input.remainingPercent <= input.softThresholdPercent
+  ) {
+    return { kind: 'softThreshold', remainingPercent: input.remainingPercent, switchReason };
+  }
+  if (input.profileChanged === true) {
+    return {
+      kind: 'profileChanged',
+      model: input.profile?.model ?? '',
+      effort: input.profile?.effort ?? '',
+      switchReason,
+    };
   }
   return undefined;
 }

@@ -11,6 +11,8 @@ import {
   countCompactions,
   decideAutoHandoff,
   handoffPointerFileName,
+  passesSafeBoundaryGate,
+  safeBoundaryProbeKey,
   recentUserMessages,
   shellQuote,
   waitForFirstTurn,
@@ -67,6 +69,33 @@ describe('ポインタファイルの本文', () => {
     expect(
       buildHandoffPointerMarkdown(baseInput({ trigger: { kind: 'compactBoundary' } })),
     ).toContain('引き継いだ契機: 自動圧縮の直後');
+    expect(
+      buildHandoffPointerMarkdown(
+        baseInput({
+          trigger: {
+            kind: 'softThreshold',
+            remainingPercent: 38,
+            switchReason: 'PRがマージされた',
+          },
+        }),
+      ),
+    ).toContain(
+      '引き継いだ契機: コンテキスト残量が緩い閾値を下回り、安全な区切りが来た（残り38%。PRがマージされた）',
+    );
+    expect(
+      buildHandoffPointerMarkdown(
+        baseInput({
+          trigger: {
+            kind: 'profileChanged',
+            model: 'opus',
+            effort: 'medium',
+            switchReason: '設計が終わり次は実装',
+          },
+        }),
+      ),
+    ).toContain(
+      '引き継いだ契機: 安全な区切りで、次の作業に合うmodel/effortが変わった（opus / medium。設計が終わり次は実装）',
+    );
   });
 
   it('全文読み込みの禁止と、読む順序を書く', () => {
@@ -232,6 +261,106 @@ describe('自動引き継ぎの発火判定', () => {
       kind: 'threshold',
       remainingPercent: 5,
     });
+  });
+
+  it('安全な区切りが成立していなければ、緩い閾値以下でも発火しない（Issue #1090）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 35,
+        softThresholdPercent: 40,
+        safeBoundary: false,
+        profileChanged: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('安全な区切りで残量が緩い閾値以下なら softThreshold 契機（Issue #1090）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 40,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        switchReason: 'PRがマージされた',
+      }),
+    ).toEqual({ kind: 'softThreshold', remainingPercent: 40, switchReason: 'PRがマージされた' });
+  });
+
+  it('残量が十分でも、model/effortが変わるなら profileChanged 契機（Issue #1090）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 90,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        profileChanged: true,
+        profile: { model: 'opus', effort: 'medium' },
+        switchReason: '設計が終わり次は実装',
+      }),
+    ).toEqual({
+      kind: 'profileChanged',
+      model: 'opus',
+      effort: 'medium',
+      switchReason: '設計が終わり次は実装',
+    });
+  });
+
+  it('安全な区切りでも、緩い閾値超えでプロファイルが同じなら発火しない（Issue #1090）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 90,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        profileChanged: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('残量が厳しい閾値以下なら、安全な区切りを待たずに threshold が優先する（Issue #1090）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 10,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        profileChanged: true,
+      }),
+    ).toEqual({ kind: 'threshold', remainingPercent: 10 });
+  });
+});
+
+describe('安全な区切りの前段（Issue #1090）', () => {
+  const gate = {
+    busy: false,
+    turnFailed: false,
+    pendingApprovals: 0,
+    pendingPrompts: 0,
+    queued: 0,
+    loopRunning: false,
+    taskManaged: false,
+  };
+
+  it('全部成立していれば通す', () => {
+    expect(passesSafeBoundaryGate(gate)).toBe(true);
+  });
+
+  it.each([
+    ['ターン実行中', { busy: true }],
+    ['直前のターンが失敗', { turnFailed: true }],
+    ['承認待ち', { pendingApprovals: 1 }],
+    ['入力待ち', { pendingPrompts: 1 }],
+    ['送信待ちの指示', { queued: 1 }],
+    ['ループ実行中', { loopRunning: true }],
+    ['タスク用セッション', { taskManaged: true }],
+  ])('%s なら通さない', (_name, over) => {
+    expect(passesSafeBoundaryGate({ ...gate, ...over })).toBe(false);
+  });
+
+  it('同じ指示の並びなら同じ鍵になる（分類器を繰り返し起動しない）', () => {
+    expect(safeBoundaryProbeKey(['a', 'b'])).toBe(safeBoundaryProbeKey(['a', 'b']));
+    expect(safeBoundaryProbeKey(['a', 'b'])).not.toBe(safeBoundaryProbeKey(['a', 'b', 'c']));
   });
 });
 

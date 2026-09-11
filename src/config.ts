@@ -397,6 +397,53 @@ export function readAutoHandoffThresholdPercent(): number {
   return Math.round(raw);
 }
 
+/** @see readAutoHandoffSoftThresholdPercent */
+export const DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT = 40;
+
+/**
+ * 区切りを待つ自動引き継ぎの閾値（Issue #1090）。
+ *
+ * `thresholdPercent`（既定20）がギリギリまで粘る線なのに対し、こちらは「残量に余裕がある
+ * うちに、安全な区切りが来たら引き継ぐ」線。区切りの判定には分類器（`switch_safe`）を通す
+ * ため、残量だけで発火することはない。
+ *
+ * `thresholdPercent` 以下の値は意味を持たない（そちらが先に発火する）ので丸める。
+ */
+export function readAutoHandoffSoftThresholdPercent(): number {
+  const hard = readAutoHandoffThresholdPercent();
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('autoHandoff.softThresholdPercent');
+  const value =
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= 99
+      ? Math.round(raw)
+      : DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT;
+  return Math.max(value, hard);
+}
+
+/**
+ * 安全な区切りで、次の作業に合うmodel/effortが変わったときに引き継ぐか（Issue #1090）。
+ *
+ * 既定はON。残量に関係なく発火するため、OFFにすると引き継ぎは残量の2つの閾値だけになる。
+ */
+export function readAutoHandoffOnProfileChange(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('autoHandoff.onProfileChange');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
+ * 引き継ぎ後、旧セッションのタブを確認なしで閉じるか（Issue #1090）。
+ *
+ * 既定はON。新セッションの初回ターンが**成功したときだけ**閉じ、失敗・時間切れなら残す。
+ * OFFにすると従来どおり停止してよいか確認ダイアログを出す。
+ */
+export function readAutoHandoffCloseOldTab(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.closeOldTab');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
 /**
  * 引き継ぎ先セッションのmodel / effortの明示指定（Issue #1082）。
  *

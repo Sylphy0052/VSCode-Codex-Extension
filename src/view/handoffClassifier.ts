@@ -143,6 +143,18 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   lines.push('- 材料が乏しいときは各軸を1へ寄せる。分からないことを理由に0へ落とさない');
   lines.push('- confidenceは0〜1の小数で、この分類にどれだけ自信があるか');
   lines.push('');
+  lines.push('## 切り替えてよいか（switch_safe）');
+  lines.push('');
+  lines.push(
+    'あわせて、いま会話を新しいセッションへ切り替えてしまってよいかを判定してください。判断の基準は「作業が完結したか」ではなく、**新しいセッションがtranscriptと引き継ぎメモから続きを始められるか**です。',
+  );
+  lines.push('');
+  lines.push('- true: 直前の指示が一段落し、次に何をするかが文面から追える');
+  lines.push(
+    '- false: 議論の途中、ユーザーの質問に答えきっていない、出しかけの成果物がある、直前の指示の実行が終わっていない',
+  );
+  lines.push('- switch_reasonにはその根拠を1文で書く');
+  lines.push('');
   lines.push('## 出力');
   lines.push('');
   lines.push(
@@ -150,7 +162,7 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   );
   lines.push('');
   lines.push(
-    '{"task_type": "<上の一覧から1つ>", "difficulty": 0, "scope": 0, "ambiguity": 0, "risk": 0, "autonomy": 0, "confidence": 0.0, "reasons": ["<根拠を日本語で短く>", "..."]}',
+    '{"task_type": "<上の一覧から1つ>", "difficulty": 0, "scope": 0, "ambiguity": 0, "risk": 0, "autonomy": 0, "confidence": 0.0, "reasons": ["<根拠を日本語で短く>", "..."], "switch_safe": true, "switch_reason": "<根拠を日本語で1文>"}',
   );
   return lines.join('\n');
 }
@@ -215,7 +227,25 @@ export function parseAssessment(raw: string): TaskAssessment | undefined {
         .slice(0, REASON_COUNT)
     : [];
 
-  return { taskType, difficulty, scope, ambiguity, risk, autonomy, confidence, reasons };
+  // switch_safeは**読めなければfalse**。欠けたまま切り替える側へ倒すと、議論の途中で
+  // タブが入れ替わる（Issue #1090）
+  const switchSafe = record['switch_safe'] === true;
+  const rawSwitchReason = record['switch_reason'];
+  const switchReason =
+    typeof rawSwitchReason === 'string' ? fold(rawSwitchReason, REASON_LIMIT) : '';
+
+  return {
+    taskType,
+    difficulty,
+    scope,
+    ambiguity,
+    risk,
+    autonomy,
+    confidence,
+    reasons,
+    switchSafe,
+    switchReason,
+  };
 }
 
 export interface HandoffClassifierDeps {

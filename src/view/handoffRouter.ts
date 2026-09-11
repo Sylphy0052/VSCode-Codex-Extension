@@ -56,6 +56,32 @@ export interface TaskAssessment {
   /** 分類器の自信。0〜1。判定には使わず、理由として残すだけ。 */
   confidence: number;
   reasons: string[];
+  /**
+   * 今この場で新しいセッションへ切り替えても失うものが無いか（Issue #1090）。
+   *
+   * 「作業が完結したか」ではなく「新しいセッションがtranscriptとポインタファイルから続きを
+   * 始められるか」。途中の議論・未回答の質問・出しかけの成果物があれば `false`。読めなかった
+   * ときは `false`（＝切り替えない）へ倒す。
+   */
+  switchSafe: boolean;
+  /** `switchSafe` の根拠を1文で。ポインタファイルとログへ出す。 */
+  switchReason: string;
+}
+
+/** 引き継ぎ先の解決結果が今の設定と実質的に違うか（Issue #1090の `profileChanged`）。 */
+export function isProfileChange(current: HandoffProfile, next: HandoffProfile): boolean {
+  if (current.model !== next.model) {
+    return true;
+  }
+  // effortは2段以上動いたときだけ「変わった」とする。1段差（high→xhigh）で引き継ぐと
+  // 区切りのたびにタブが増える割に、得られる差が小さい。
+  const from = EFFORT_LADDER.indexOf(current.effort);
+  const to = EFFORT_LADDER.indexOf(next.effort);
+  if (from === -1 || to === -1) {
+    // どちらかが未指定・ladder外なら比較材料が無い。モデルが同じなら変わっていない扱い
+    return false;
+  }
+  return Math.abs(to - from) >= 2;
 }
 
 export function isAssessmentScore(value: unknown): value is AssessmentScore {
