@@ -91,7 +91,7 @@ import {
   writeHandoffPointer,
   type HandoffTrigger,
 } from './handoff';
-import { resolveHandoffModelSettings } from './handoffModelChoice';
+import { chooseHandoffModelSettings } from './handoffModelChoice';
 import type { SessionStore } from '../session/sessionStore';
 import {
   createNodeSummaryRolloutDeps,
@@ -678,7 +678,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
     const state = entry.session.getState();
     const gitBranch = await resolveGitBranch(entry.cwd);
-    const choice = await resolveHandoffModelSettings(
+    const choice = await chooseHandoffModelSettings(
       entry.modelSettings,
       {
         turnFailed: state.turnFailed,
@@ -694,6 +694,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         logWarn: (message) => this.log.warn(message),
       },
     );
+    if (choice === undefined) {
+      // 確認で閉じられた。人が「今は引き継がない」と決めたのだから、エラーにも警告にもしない
+      this.log.info('引き継ぎは確認ダイアログで中止されました');
+      return false;
+    }
     this.log.info(
       `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
     );

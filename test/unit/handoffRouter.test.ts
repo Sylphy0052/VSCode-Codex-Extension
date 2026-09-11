@@ -3,8 +3,11 @@ import type { ModelInfo } from '../../src/codex/modelCatalog';
 import {
   EFFORT_LADDER,
   MODEL_TIERS,
-  resolveLevelSettings,
-  type HandoffLevel,
+  applyCorrections,
+  effortIndexFor,
+  resolveProfile,
+  tierFor,
+  type TaskAssessment,
 } from '../../src/view/handoffRouter';
 
 function model(slug: string, efforts: readonly string[]): ModelInfo {
@@ -35,9 +38,24 @@ function claudeModels(): ModelInfo[] {
   return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE), model('fable', FIVE)];
 }
 
-const current = { model: 'gpt-5.6-sol', effort: 'high' };
+function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
+  return {
+    taskType: 'implementation',
+    difficulty: 0,
+    scope: 0,
+    ambiguity: 0,
+    risk: 0,
+    autonomy: 0,
+    confidence: 0.9,
+    reasons: [],
+    ...over,
+  };
+}
 
-describe('レベルの段の定義', () => {
+const current = { model: 'gpt-5.6-sol', effort: 'high' };
+const noFailure = { turnFailed: false };
+
+describe('段の定義', () => {
   it('ティアは3段で、最下位にhaiku/lunaを含めない', () => {
     expect(MODEL_TIERS).toHaveLength(3);
     const flat = MODEL_TIERS.flat();
@@ -45,90 +63,172 @@ describe('レベルの段の定義', () => {
     expect(flat).not.toContain('luna');
   });
 
-  it('effortは4段でmaxを含めない', () => {
-    expect([...EFFORT_LADDER]).toEqual(['low', 'medium', 'high', 'xhigh']);
+  it('effortは3段でlowとmaxを含めない', () => {
+    expect([...EFFORT_LADDER]).toEqual(['medium', 'high', 'xhigh']);
   });
 });
 
-describe('resolveLevelSettings: Codexのカタログ', () => {
-  const cases: [HandoffLevel, string, string][] = [
-    [0, 'gpt-5.6-terra', 'low'],
-    [1, 'gpt-5.6-terra', 'medium'],
-    [2, 'gpt-5.6-sol', 'medium'],
-    [3, 'gpt-5.6-sol', 'high'],
-    [4, 'gpt-5.6-astra', 'high'],
-    [5, 'gpt-5.6-astra', 'xhigh'],
-  ];
+describe('effortはdifficultyだけで決まる', () => {
+  it('difficulty 0/1/2 → medium/high/xhigh', () => {
+    expect(effortIndexFor(assess({ difficulty: 0 })).index).toBe(0);
+    expect(effortIndexFor(assess({ difficulty: 1 })).index).toBe(1);
+    expect(effortIndexFor(assess({ difficulty: 2 })).index).toBe(2);
+  });
 
-  for (const [level, expectedModel, expectedEffort] of cases) {
-    it(`L${level} は ${expectedModel} / ${expectedEffort}`, () => {
-      const resolved = resolveLevelSettings(level, codexModels(), current);
-      expect(resolved).toEqual({ model: expectedModel, effort: expectedEffort });
+  it('scopeやriskが高くてもdifficultyが低ければeffortは上がらない（riskは2を除く）', () => {
+    expect(effortIndexFor(assess({ difficulty: 0, scope: 2, ambiguity: 2 })).index).toBe(0);
+  });
+
+  it('debugging / security_review / review_spec / risk=2 はhigh以上', () => {
+    for (const taskType of ['debugging', 'security_review', 'review_spec'] as const) {
+      const result = effortIndexFor(assess({ difficulty: 0, taskType }));
+      expect(result.index).toBe(1);
+      expect(result.notes).toContain('effort floor: high');
+    }
+    expect(effortIndexFor(assess({ difficulty: 0, risk: 2 })).index).toBe(1);
+  });
+});
+
+describe('modelはscope+ambiguity+risk+autonomyで決まる', () => {
+  it('合計2以下は最下位、5以下は中位、6以上は最上位', () => {
+    expect(tierFor(assess()).tier).toBe(0);
+    expect(tierFor(assess({ scope: 1, ambiguity: 1 })).tier).toBe(0);
+    expect(tierFor(assess({ scope: 1, ambiguity: 1, risk: 1 })).tier).toBe(1);
+    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 1 })).tier).toBe(1);
+    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2 })).tier).toBe(2);
+  });
+
+  it('difficultyが高くてもmodelは上がらない（Sonnet/xhigh を表現できる）', () => {
+    const resolved = resolveProfile(assess({ difficulty: 2 }), noFailure, claudeModels(), {
+      model: 'opus',
+      effort: 'high',
     });
-  }
-
-  it('カタログにmaxがあってもL5では選ばない', () => {
-    expect(resolveLevelSettings(5, codexModels(), current).effort).toBe('xhigh');
+    expect(resolved).toMatchObject({ model: 'sonnet', effort: 'xhigh' });
   });
 
-  it('lunaはどのレベルでも選ばれない', () => {
-    const models = codexModels();
-    for (const level of [0, 1, 2, 3, 4, 5] as HandoffLevel[]) {
-      expect(resolveLevelSettings(level, models, current).model).not.toContain('luna');
-    }
-  });
-});
-
-describe('resolveLevelSettings: Claude Codeのカタログ', () => {
-  it('L0/L1はsonnet、L2/L3はopus、L4/L5はfable', () => {
-    const models = claudeModels();
-    expect(resolveLevelSettings(0, models, { model: 'opus', effort: 'high' }).model).toBe('sonnet');
-    expect(resolveLevelSettings(2, models, { model: 'opus', effort: 'high' }).model).toBe('opus');
-    expect(resolveLevelSettings(5, models, { model: 'opus', effort: 'high' }).model).toBe('fable');
-  });
-
-  it('haikuはどのレベルでも選ばれない', () => {
-    const models = claudeModels();
-    for (const level of [0, 1, 2, 3, 4, 5] as HandoffLevel[]) {
-      expect(resolveLevelSettings(level, models, { model: 'opus', effort: 'high' }).model).not.toBe(
-        'haiku',
-      );
-    }
+  it('広く曖昧でもdifficultyが低ければ Opus/medium になりうる', () => {
+    const resolved = resolveProfile(
+      assess({ difficulty: 0, scope: 2, ambiguity: 1, autonomy: 1 }),
+      noFailure,
+      claudeModels(),
+      { model: 'sonnet', effort: 'high' },
+    );
+    expect(resolved).toMatchObject({ model: 'opus', effort: 'medium' });
   });
 });
 
-describe('resolveLevelSettings: カタログが揃わないとき', () => {
+describe('補正', () => {
+  it('security_review は risk=2', () => {
+    const { assessment, notes } = applyCorrections(
+      assess({ taskType: 'security_review', risk: 0 }),
+      noFailure,
+    );
+    expect(assessment.risk).toBe(2);
+    expect(notes).toContain('security_review: risk=2');
+  });
+
+  it('debugging は difficulty=2', () => {
+    const { assessment } = applyCorrections(assess({ taskType: 'debugging' }), noFailure);
+    expect(assessment.difficulty).toBe(2);
+  });
+
+  it('spec / planning は ambiguity を1以上にする', () => {
+    expect(applyCorrections(assess({ taskType: 'spec' }), noFailure).assessment.ambiguity).toBe(1);
+    expect(
+      applyCorrections(assess({ taskType: 'planning', ambiguity: 2 }), noFailure).assessment
+        .ambiguity,
+    ).toBe(2);
+  });
+
+  it('直前のターンが失敗していれば difficulty を1段上げる（上限2）', () => {
+    const raised = applyCorrections(assess({ difficulty: 1 }), { turnFailed: true });
+    expect(raised.assessment.difficulty).toBe(2);
+    expect(raised.notes).toContain('previous attempt failed: difficulty=2');
+
+    const capped = applyCorrections(assess({ difficulty: 2 }), { turnFailed: true });
+    expect(capped.assessment.difficulty).toBe(2);
+    expect(capped.notes).toHaveLength(0);
+  });
+
+  it('補正は元の見立てを書き換えない', () => {
+    const original = assess({ taskType: 'security_review', risk: 0 });
+    applyCorrections(original, noFailure);
+    expect(original.risk).toBe(0);
+  });
+});
+
+describe('resolveProfile: Codexのカタログ', () => {
+  it('局所・明確・定型 → Terra / medium', () => {
+    expect(resolveProfile(assess(), noFailure, codexModels(), current)).toMatchObject({
+      model: 'gpt-5.6-terra',
+      effort: 'medium',
+    });
+  });
+
+  it('複数ファイル・複数ステップ → Terra / high', () => {
+    expect(
+      resolveProfile(assess({ difficulty: 1, scope: 1 }), noFailure, codexModels(), current),
+    ).toMatchObject({ model: 'gpt-5.6-terra', effort: 'high' });
+  });
+
+  it('リポジトリ横断・曖昧・高リスク・自律 → Astra / xhigh', () => {
+    expect(
+      resolveProfile(
+        assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 }),
+        noFailure,
+        codexModels(),
+        current,
+      ),
+    ).toMatchObject({ model: 'gpt-5.6-astra', effort: 'xhigh' });
+  });
+
+  it('lunaはどの見立てでも選ばれない', () => {
+    expect(resolveProfile(assess(), noFailure, codexModels(), current).model).not.toContain('luna');
+  });
+
+  it('理由に見立ての内訳と補正を残す', () => {
+    const resolved = resolveProfile(
+      assess({ taskType: 'debugging' }),
+      { turnFailed: true },
+      codexModels(),
+      current,
+    );
+    expect(resolved.reasons[0]).toContain('debugging difficulty=2');
+    expect(resolved.reasons).toContain('debugging: difficulty=2');
+  });
+});
+
+describe('resolveProfile: カタログが揃わないとき', () => {
   it('ティアに合うモデルがカタログに無ければ引き継ぎ元のモデルを据え置く', () => {
     const onlyTop = [model('gpt-5.6-astra', FIVE)];
-    // L0が求めるのは最下位ティア（terra）。無いので据え置き
-    expect(resolveLevelSettings(0, onlyTop, current).model).toBe(current.model);
-    // L4が求めるのは最上位ティア。こちらは見つかる
-    expect(resolveLevelSettings(4, onlyTop, current).model).toBe('gpt-5.6-astra');
+    expect(resolveProfile(assess(), noFailure, onlyTop, current).model).toBe(current.model);
+    expect(
+      resolveProfile(assess({ scope: 2, ambiguity: 2, risk: 2 }), noFailure, onlyTop, current)
+        .model,
+    ).toBe('gpt-5.6-astra');
   });
 
   it('effort非対応のモデルにはeffortを渡さない', () => {
     const models = [model('sonnet', [])];
-    expect(resolveLevelSettings(0, models, { model: 'sonnet', effort: '' })).toEqual({
-      model: 'sonnet',
-      effort: '',
-    });
+    expect(
+      resolveProfile(assess({ difficulty: 2 }), noFailure, models, { model: 'sonnet', effort: '' }),
+    ).toMatchObject({ model: 'sonnet', effort: '' });
   });
 
-  it('カタログのeffortが一部しか無ければ、その中の端へ丸める', () => {
+  it('カタログのeffortが一部しか無ければ、選べる中の最上位へ丸める', () => {
     const models = [model('gpt-5.6-terra', ['low', 'medium'])];
-    // L1が求めるのはmedium（ladderの2番目）。そのまま取れる
-    expect(resolveLevelSettings(1, models, current).effort).toBe('medium');
-    // L5が求めるのはxhighだが無いので、選べる中の最上位へ丸める
-    expect(resolveLevelSettings(5, models, current).effort).toBe('medium');
+    expect(resolveProfile(assess({ difficulty: 2 }), noFailure, models, current).effort).toBe(
+      'medium',
+    );
   });
 
   it('カタログのeffortがladderに載っていない値だけなら未指定にする', () => {
     const models = [model('gpt-5.6-terra', ['max'])];
-    expect(resolveLevelSettings(3, models, current).effort).toBe('');
+    expect(resolveProfile(assess(), noFailure, models, current).effort).toBe('');
   });
 
   it('カタログが空ならfallbackのeffort一覧から選び、モデルは据え置く', () => {
-    const resolved = resolveLevelSettings(4, [], current, FIVE);
+    const resolved = resolveProfile(assess({ difficulty: 1 }), noFailure, [], current, FIVE);
     expect(resolved.model).toBe(current.model);
     expect(resolved.effort).toBe('high');
   });
