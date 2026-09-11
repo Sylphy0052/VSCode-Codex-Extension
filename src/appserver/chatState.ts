@@ -536,9 +536,9 @@ export interface ChatState {
    * 「…」メニューのトグルからで、拡張機能側だけで完結する状態のためCLIへは何も送らず、
    * 設定へも書き戻さない。閾値はユーザー設定（`agent.autoHandoff.thresholdPercent`）で持つ。
    *
-   * 下の `initialChatState` が `false` なのは、定数がモジュール読み込み時に評価されて
-   * 設定の変更に追随しないため。設定を読むのはセッションを作る時点（`chatSession.ts` /
-   * `streamSession.ts`）で、そこで上書きする。
+   * 下の `initialChatState` が `false` なのは、この層とセッション層が `vscode` を
+   * importしないため（CONTRIBUTING.mdの「レイヤの制約」）。設定を読むのはview層で、
+   * セッションの構築時に初期値として渡される。
    */
   autoHandoff: boolean;
   /**

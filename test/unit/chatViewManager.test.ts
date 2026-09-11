@@ -13,7 +13,7 @@ import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMe
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, deriveTitle } from '../../src/view/chatView';
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
-import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
+import { RECAP_INSTRUCTION, type ChatSession } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
 import {
@@ -560,6 +560,35 @@ describe('ChatViewManager', () => {
       expect(manager.isOpen('thread-manual')).toBe(true);
       __mock.lastCreatedPanel()?.dispose();
       expect(manager.isOpen('thread-manual')).toBe(false);
+    });
+  });
+
+  describe('自動引き継ぎの初期値の配線（Issue #1091）', () => {
+    /** `ChatSession` は設定を読まないため、view層が渡した初期値をセッションから読む。 */
+    const autoHandoffOf = (manager: ChatViewManager, threadId: string): boolean | undefined =>
+      (manager as unknown as { panels: Map<string, { session: ChatSession }> }).panels
+        .get(threadId)
+        ?.session.getState().autoHandoff;
+
+    it('設定が未指定なら新しいセッションはONで始まる', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-auto-on'));
+      await p;
+
+      expect(autoHandoffOf(manager, 'thread-auto-on')).toBe(true);
+    });
+
+    it('設定をOFFにすると新しいセッションはOFFで始まる', async () => {
+      __mock.setConfig('agent', { 'autoHandoff.enabled': false });
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-auto-off'));
+      await p;
+
+      expect(autoHandoffOf(manager, 'thread-auto-off')).toBe(false);
     });
   });
 

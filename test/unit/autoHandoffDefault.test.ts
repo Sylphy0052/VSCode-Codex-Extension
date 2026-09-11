@@ -1,9 +1,8 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import type { AppServerConnection } from '../../src/appserver/connection';
+import { describe, expect, it } from 'vitest';
 import { ChatSession } from '../../src/appserver/chatSession';
+import type { AppServerConnectionPort } from '../../src/appserver/connection';
 import { ClaudeStreamSession } from '../../src/claude/streamSession';
 import type { Logger } from '../../src/log';
-import { __mock } from '../mocks/vscode';
 
 const fakeLogger: Logger = {
   info: () => undefined,
@@ -12,54 +11,57 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
-function createChatSession(): ChatSession {
-  const connection = {
-    async ensureStarted() {
-      return undefined;
-    },
-    async request() {
-      return { result: {} };
-    },
-  } as unknown as AppServerConnection;
-  return new ChatSession(connection, fakeLogger, () => undefined);
-}
+const fakeConnection = {
+  async ensureStarted() {
+    return undefined;
+  },
+  async request() {
+    return { result: {} };
+  },
+} as unknown as AppServerConnectionPort;
 
-function createClaudeSession(): ClaudeStreamSession {
+function createClaudeSession(initialAutoHandoff?: boolean): ClaudeStreamSession {
   return new ClaudeStreamSession(
     () => 'claude',
     fakeLogger,
     () => undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    initialAutoHandoff,
   );
 }
 
 /**
- * 自動引き継ぎの初期値は `agent.autoHandoff.enabled`（Issue #1091）。設定を読むのは
- * セッションを作る時点で、`initialChatState` / `initialClaudeState` のような定数側では
- * 読まない（モジュール読み込み時に一度しか評価されないため）。
+ * 自動引き継ぎの初期値（Issue #1091）。値の出どころはユーザー設定
+ * （`agent.autoHandoff.enabled`）だが、セッション層は `vscode` をimportしない
+ * （CONTRIBUTING.mdの「レイヤの制約」）ため、設定を読むのはview層で、ここは値を
+ * 受け取るだけ。設定そのものの既定は `config.test.ts` で確かめる。
  */
-describe('新規セッションの自動引き継ぎの初期値（Issue #1091）', () => {
-  beforeEach(() => {
-    __mock.reset();
+describe('セッションの自動引き継ぎの初期値（Issue #1091）', () => {
+  it('渡された初期値でCodex・Claude Codeのどちらも始まる', () => {
+    expect(
+      new ChatSession(fakeConnection, fakeLogger, () => undefined, true).getState().autoHandoff,
+    ).toBe(true);
+    expect(createClaudeSession(true).getState().autoHandoff).toBe(true);
   });
 
-  it('設定が未指定ならCodex・Claude CodeのどちらもONで始まる', () => {
-    expect(createChatSession().getState().autoHandoff).toBe(true);
-    expect(createClaudeSession().getState().autoHandoff).toBe(true);
-  });
-
-  it('設定をOFFにすると、どちらもOFFで始まる', () => {
-    __mock.setConfig('agent', { 'autoHandoff.enabled': false });
-
-    expect(createChatSession().getState().autoHandoff).toBe(false);
+  it('初期値を渡さないときはOFF（設定を知らない層のため、既定はONにしない）', () => {
+    expect(
+      new ChatSession(fakeConnection, fakeLogger, () => undefined).getState().autoHandoff,
+    ).toBe(false);
     expect(createClaudeSession().getState().autoHandoff).toBe(false);
   });
 
-  it('セッション中のトグルはユーザー設定へ書き戻さない', () => {
-    const session = createChatSession();
+  it('セッション中のトグルはそのセッションの中だけで効く', () => {
+    const session = new ChatSession(fakeConnection, fakeLogger, () => undefined, true);
     session.setAutoHandoff(false);
 
     expect(session.getState().autoHandoff).toBe(false);
-    // 同じ設定のまま次のセッションを作ると、また既定のONで始まる
-    expect(createChatSession().getState().autoHandoff).toBe(true);
+    // 同じ初期値で作り直した別セッションは影響を受けない（設定へ書き戻していない）
+    expect(
+      new ChatSession(fakeConnection, fakeLogger, () => undefined, true).getState().autoHandoff,
+    ).toBe(true);
   });
 });

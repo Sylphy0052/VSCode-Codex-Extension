@@ -42,6 +42,7 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readAutoHandoffEnabled,
   readAutoHandoffThresholdPercent,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
@@ -945,8 +946,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   ): ChatPanel {
     // sessionのコールバックはentryを参照するが、実際に呼ばれるのはentry代入後
     // （closureが束縛するのは変数、呼び出し時点の値を読む。既存コードと同じ流儀）。
-    const session = new ChatSession(this.connection, this.log, (state) =>
-      this.onSessionChange(entry, state),
+    const session = new ChatSession(
+      this.connection,
+      this.log,
+      (state) => this.onSessionChange(entry, state),
+      // 自動引き継ぎの初期値（Issue #1091）。ChatSessionはvscodeに依存しないため、
+      // 設定の読み出しはここ（view層）で行う（`LoopController`のしきい値と同じ）
+      readAutoHandoffEnabled(),
     );
     const loop = new LoopController(
       (text) => this.sendFromLoop(entry, text),

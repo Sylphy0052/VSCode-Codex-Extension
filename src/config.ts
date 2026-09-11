@@ -380,9 +380,10 @@ export function readChatLimitAutoResumeEnabled(): boolean {
  * 単位（`ChatState.autoHandoff`）に持つ。入力欄の「…」メニューのトグルはその一時的な
  * 上書きで、ここへは書き戻さない（会話ごとに入れたい／入れたくないが分かれるため）。
  *
- * 読むのはセッションを作る時点（`chatSession.ts` / `streamSession.ts`）で、
- * `initialChatState` のような定数の側では読まない。定数はモジュール読み込み時に
- * 評価されるため、設定を変えても既に読み込んだ値のままになる。
+ * 読むのはview層（`chatView.ts` / `claudeChatView.ts` がセッションを作るところ）。セッション層
+ * （`src/appserver/chatSession.ts` / `src/claude/streamSession.ts`）は `vscode` をimportしない
+ * ため、値だけを構築時の引数で渡す（CONTRIBUTING.mdの「レイヤの制約」。`LoopController` の
+ * しきい値と同じ流儀）。
  */
 export function readAutoHandoffEnabled(): boolean {
   const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.enabled');
