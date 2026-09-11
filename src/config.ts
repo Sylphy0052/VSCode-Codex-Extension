@@ -400,7 +400,7 @@ export function readAutoHandoffThresholdPercent(): number {
 /**
  * 引き継ぎ先セッションのmodel / effortの明示指定（Issue #1082）。
  *
- * 空文字は「未指定」。未指定のときはレベル判定→引き継ぎ元の値→グローバル設定の順で
+ * 空文字は「未指定」。未指定のときは作業の分類→引き継ぎ元の値→グローバル設定の順で
  * 決まる。ここで指定した値はその全てより優先する。値の妥当性（存在するモデルか、その
  * モデルがそのeffortに対応するか）はここでは見ない。モデル一覧はCLIから動的に取るもので、
  * 設定を読む時点では手元に無いため。
@@ -417,11 +417,11 @@ export function readAutoHandoffEffort(): string {
 }
 
 /**
- * 引き継ぎ先のmodel / effortをCLIのヘッドレス実行で判定するか（Issue #1082）。
+ * 引き継ぎ先のmodel / effortを、CLIのヘッドレス実行による作業の分類から決めるか（Issue #1082）。
  *
- * 既定はON。OFFにすると判定のためのCLI起動を行わず、引き継ぎ先は引き継ぎ元の値をそのまま
+ * 既定はON。OFFにすると分類のためのCLI起動を行わず、引き継ぎ先は引き継ぎ元の値をそのまま
  * 持ち越す（従来のグローバル設定へ戻る挙動には戻らない。そちらは引き継ぎ元の設定を捨てる
- * 分だけ意図から遠い）。
+ * 分だけ意図から遠い）。ON / OFFにかかわらず、引き継ぐ前の確認ダイアログは出る。
  */
 export function readAutoHandoffRouterEnabled(): boolean {
   const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.router');
