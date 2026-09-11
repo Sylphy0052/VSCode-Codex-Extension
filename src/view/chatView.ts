@@ -771,6 +771,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     if (readAutoHandoffCloseOldTab()) {
+      // 引き継いだ後に旧タブで新しいターンが走り出していたら閉じない（進行中の作業を切らない）
+      if (oldEntry.session.getState().busy) {
+        this.log.info('引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します');
+        return;
+      }
       this.log.info('引き継ぎ元のセッションを停止してタブを閉じます（履歴は残ります）');
       void oldEntry.session.interrupt();
       this.teardown(oldEntry);
@@ -848,6 +853,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     const messages = recentUserMessages(state);
+    if (messages.length === 0) {
+      // 材料が無い（開いた直後・復元直後）。分類させても中身の無い見立てが返るだけ
+      return;
+    }
     const key = safeBoundaryProbeKey(messages);
     if (key === entry.lastSafeBoundaryKey) {
       return;
