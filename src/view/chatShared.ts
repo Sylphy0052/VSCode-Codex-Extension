@@ -1268,11 +1268,8 @@ function renderComposerButton(
   // （issue #1086）。幅が足りないボタンは実行時に「…」メニューへ移すため、移動先で
   // ラベルを組み立て直さずに済ませる。
   const label = `<span class="composerOverflowLabel">${ariaLabel}</span>`;
-  // 最初からメニューにあるボタン（設定で畳んだ分）には印を付ける。幅が広がったときに
-  // 表へ返すのは、幅が足りずに実行時へ移したボタンだけにするため。
-  const overflowAttr = variant === 'menu' ? ' data-overflow="fixed"' : '';
   const hiddenAttr = spec.hidden ? ' hidden' : '';
-  return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${overflowAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
+  return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
 }
 
 /**

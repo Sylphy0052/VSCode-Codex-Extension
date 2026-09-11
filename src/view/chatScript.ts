@@ -3382,8 +3382,8 @@ export function chatScript(
    * アイコン列の自動オーバーフロー（issue #1086）。#composerIconRowは折り返さない
    * 1段に固定してあるため、幅が足りなくなった分は実行時に「…」メニューへ移す。移すのは
    * ボタン要素そのもの（複製しない）なので、idもイベント配線も、応答中のdisabled切替や
-   * hiddenの出し入れもそのまま効く。設定で初めからメニューに置いたボタン
-   * （data-overflow="fixed"）は、幅が広がっても表へは返さない。
+   * hiddenの出し入れもそのまま効く。表へ返す対象は描画時に表にあったボタン
+   * （composerIconRowOrder）だけで、設定で初めからメニューに置いたボタンは動かさない。
    */
   const composerIconRow = el('composerIconRow');
 
