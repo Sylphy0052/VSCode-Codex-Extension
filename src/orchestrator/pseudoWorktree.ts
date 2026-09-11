@@ -1530,22 +1530,125 @@ export async function ensureIntegrationDir(
  * （元々そこには何も無い）ため、ファイルシステム上の操作は無く、`manifest` 側の記録
  * （`kind: 'deleted'`）だけで表現する。ワークスペースへの反映時（`reflectIntegrationToWorkspace`）
  * にこの記録を読んで実際の削除を行う。
+ *
+ * **1件ごとに、このファイルの他の経路（`cloneWorkspace` / `ensureIntegrationDir` /
+ * `persistManifest` / `reflectIntegrationToWorkspace`）と同じ二段構えの境界確認を行う
+ * （Issue #1117）。** 従来はここだけが `integrationDir` と差分パスを結合して
+ * `mkdir` + `copyFile` するだけで、境界を一切確認していなかった。統合先を作った
+ * `ensureIntegrationDir` の検査はrun開始時の1回きりで、タスクの実行中に統合先配下の
+ * 子ディレクトリや既存ファイルが外向きのシンボリックリンクへ差し替えられると、
+ * `copyFile` はそれを解決してリンク先へ書き込む。後段の `reflectIntegrationToWorkspace`
+ * が反映を止めても、統合先への書き込み自体は既に起きていて取り消せない。差し替えは
+ * 短い競合窓を突く必要すらなく、タスク（AIエージェント自身を含む）が実行中に事前配置できる。
+ *
+ * 境界の逸脱を見つけたら例外を投げてそのエントリで中断する（`IntegrationQueue.integrate`
+ * 経由で呼び出し側へ伝わり、マニフェストは更新されない）。それ以前のエントリだけが
+ * コピー済みの中途半端な状態になるが、境界の外へ書き込むよりは害が小さい。
  */
 export async function applyDiffToIntegration(
+  workspaceRoot: string,
   taskDir: string,
   integrationDir: string,
   entries: readonly DiffEntry[],
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<void> {
-  for (const entry of entries) {
-    if (entry.kind === 'deleted') {
-      continue;
-    }
+  const toApply = entries.filter((entry) => entry.kind !== 'deleted');
+  if (toApply.length === 0) {
+    return;
+  }
+
+  // `realRoot`はこのファイル内の実パス厳密一致における唯一のアンカー（`resolveRealRemovalTarget`
+  // の規範コメント参照）。確認できないならフェイルクローズする（`reflectIntegrationToWorkspace`
+  // が同じ場合に`partialApply`で止めるのと同じ判断）。
+  const realRoot = await fs.realpath(workspaceRoot);
+  if (realRoot === undefined) {
+    throw new Error(
+      `ワークスペースルート自身の実パスを確認できなかったため、統合先への適用を中止しました: ${sanitizeForLog(workspaceRoot)}`,
+    );
+  }
+
+  for (const entry of toApply) {
+    const safePath = sanitizeForLog(entry.path);
     const segments = entry.path.split('/');
     const from = path.join(taskDir, ...segments);
     const to = path.join(integrationDir, ...segments);
-    await fs.mkdir(path.dirname(to));
-    await fs.copyFile(from, to);
+
+    if (!isPathWithinRoot(from, taskDir)) {
+      throw new Error(`コピー元が複製先の外を指しています（${safePath}）`);
+    }
+    if (!isPathWithinRoot(to, integrationDir)) {
+      throw new Error(`コピー先が統合先の外を指しています（${safePath}）`);
+    }
+
+    // 一次防御: コピー元・先の経路にシンボリックリンクが無いことをI/Oの前に確かめる。
+    // 終端のセグメント自身も見るため、コピー先に既にあるファイルが外向きリンクだった
+    // 場合もここで止まる。存在しないセグメントは`isSymbolicLink`が`false`を返すので、
+    // これから作るディレクトリ・ファイルは素通りする。
+    const fromSymlink = await findSymlinkedAncestor(workspaceRoot, from, fs);
+    if (fromSymlink !== undefined) {
+      throw new Error(
+        `コピー元の経路にシンボリックリンクが含まれています（${safePath}）: ${sanitizeForLog(fromSymlink)}`,
+      );
+    }
+    const toSymlink = await findSymlinkedAncestor(workspaceRoot, to, fs);
+    if (toSymlink !== undefined) {
+      throw new Error(
+        `コピー先の経路にシンボリックリンクが含まれています（${safePath}）: ${sanitizeForLog(toSymlink)}`,
+      );
+    }
+
+    // 二次防御（コピー元）。読み出しは`copyFile`の中で起きるため、確認は読み出しの前に
+    // 行う（`reflectIntegrationToWorkspace`の反映元と同じ理由。読んだ内容が統合先へ
+    // そのまま書かれるので、事後の確認では境界外の内容を持ち込んだ後になる）。
+    const realFrom = await fs.realpath(from);
+    const expectedFrom = path.join(realRoot, path.relative(workspaceRoot, from));
+    if (realFrom === undefined || realFrom !== expectedFrom) {
+      throw new Error(
+        `コピー元が実際には想定した場所以外を指しています（${safePath}）: ${sanitizeForLog(realFrom ?? from)}`,
+      );
+    }
+
+    // 二次防御（コピー先）。親ディレクトリを作った直後に実パスを確かめる。ここで
+    // 確認しておけば、ファイル本体の書き込みが境界の外で起きない。`expected`は
+    // `toDir`自身の`realpath`ではなく`realRoot`から組み立てる（`toDir`が差し替えられて
+    // いると両辺が同じ実体を指して必ず一致し、検査が自己無矛盾になるため）。
+    // 境界外に解決されたディレクトリは撤去しない（実体がリンク先＝既存のデータで
+    // ありうるため。`reflectIntegrationToWorkspace`と同じ裁定）。
+    const toDir = path.dirname(to);
+    await fs.mkdir(toDir);
+    const realToDir = await fs.realpath(toDir);
+    const expectedToDir = path.join(realRoot, path.relative(workspaceRoot, toDir));
+    if (realToDir === undefined || realToDir !== expectedToDir) {
+      throw new Error(
+        `コピー先のディレクトリが実際には想定した場所以外を指しています（${safePath}）: ${sanitizeForLog(realToDir ?? toDir)}`,
+      );
+    }
+
+    // `realToDir`の確認から実際の書き込みまでに残るTOCTOU窓の扱いも
+    // `reflectIntegrationToWorkspace`（Issue #445 / #484 / #505）へ揃える。一時ファイルへ
+    // 書いて`rename`で確定させることで、`to`という名前自体がリンクへ差し替えられる攻撃を
+    // 塞ぎ（`rename`は終端のリンクを解決せずディレクトリエントリを置き換える）、
+    // 書き込み後に`realRoot`起点の厳密一致で「想定した場所へ書けたか」を確かめる。
+    // 親ディレクトリ側の窓はNodeの標準APIだけでは閉じられないため残存リスクとして受け入れる。
+    // 一時ファイルは`rename`がクロスデバイスにならないよう`toDir`と同じディレクトリに置き、
+    // 名前は推測不能にする（予測できると、そこへ先回りしてリンクを仕込まれる）。
+    const tempTarget = path.join(toDir, `.pwt-integrate-${randomBytes(16).toString('hex')}.tmp`);
+    try {
+      await fs.copyFile(from, tempTarget);
+      const realTemp = await fs.realpath(tempTarget);
+      const expectedTemp = path.join(realRoot, path.relative(workspaceRoot, tempTarget));
+      if (realTemp === undefined || realTemp !== expectedTemp) {
+        throw new Error(
+          `コピー先が実際には想定した場所以外へ書き込まれたため、書き込みを取り消しました` +
+            `（${safePath}）: ${sanitizeForLog(realTemp ?? tempTarget)}`,
+        );
+      }
+      await fs.rename(tempTarget, to);
+    } catch (e) {
+      // 例外の理由を問わず一時ファイルを残置しない（`reflectIntegrationToWorkspace`と同じ）。
+      await fs.removeFile(tempTarget);
+      throw e;
+    }
   }
 }
 
@@ -1563,17 +1666,28 @@ export async function applyDiffToIntegration(
  */
 export class IntegrationQueue {
   private readonly queue = new SerialQueue();
+  private readonly workspaceRoot: string;
   private manifest: IntegrationManifest;
   private readonly manifestRestoreError: string | undefined;
 
   /**
+   * `workspaceRoot`は`applyDiffToIntegration`が境界確認の起点に使う（Issue #1117）。
+   * 実パス厳密一致のアンカーは「攻撃者が動かせない、呼び出し元から固定値で渡る値」で
+   * なければならず（`resolveRealRemovalTarget`の規範コメント参照）、統合のたびに渡される
+   * `integrationDir`から導いてはいけないため、run単位で固定されるこのインスタンスが保持する。
+   *
    * `manifestRestoreError`はリロード復元時（Issue #380）、永続化されたマニフェストが
    * 壊れていて読み戻せなかった場合に呼び出し側（`resolvePseudoState`）が渡す。定義されて
    * いれば、このrunの統合状態はもう分からない（空マニフェストのまま続行すると「復元済み
    * だが実は何も統合していない」と区別が付かない）ため、`reflectPseudoWorktree`側が
    * ワークスペースへの反映を「0件で成功」にせず明示的に止める判定材料として使う。
    */
-  constructor(initialManifest: IntegrationManifest = new Map(), manifestRestoreError?: string) {
+  constructor(
+    workspaceRoot: string,
+    initialManifest: IntegrationManifest = new Map(),
+    manifestRestoreError?: string,
+  ) {
+    this.workspaceRoot = workspaceRoot;
     this.manifest = initialManifest;
     this.manifestRestoreError = manifestRestoreError;
   }
@@ -1615,7 +1729,7 @@ export class IntegrationQueue {
   ): Promise<IntegrationPlan> {
     return this.enqueue(async () => {
       const plan = planIntegration(taskId, diff, this.manifest);
-      await applyDiffToIntegration(taskDir, integrationDir, plan.toApply, fs);
+      await applyDiffToIntegration(this.workspaceRoot, taskDir, integrationDir, plan.toApply, fs);
       this.manifest = plan.manifest;
       if (onIntegrated !== undefined) {
         await onIntegrated(plan.manifest);
