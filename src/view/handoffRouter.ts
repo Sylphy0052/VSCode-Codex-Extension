@@ -66,6 +66,21 @@ export interface TaskAssessment {
   switchSafe: boolean;
   /** `switchSafe` の根拠を1文で。ポインタファイルとログへ出す。 */
   switchReason: string;
+  /**
+   * 直前のアシスタント応答が、セッションの切り替え・引き継ぎを自分から提案しているか
+   * （Issue #1097）。
+   *
+   * `CLAUDE.md` / `AGENTS.md` の「セッション切替」規約に従い、アシスタントが「実装は別
+   * セッション推奨」「次は新チャットへ引き継ぐ」と述べることがある。この提案は残量にも
+   * model/effortの変化にも表れないため、独立した契機として扱う。
+   *
+   * 判定を正規表現ではなくLLMに任せるのは、言い回しが「/clear して続きを」「handoffして」
+   * のようにぶれ、パターンでは漏れと誤検知の両方が出るため。読めなかったときは `false`
+   * （＝提案は無かった）へ倒す。
+   */
+  handoffSuggested: boolean;
+  /** `handoffSuggested` の根拠を1文で。提案が無ければ空。 */
+  handoffSuggestReason: string;
 }
 
 /** 引き継ぎ先の解決結果が今の設定と実質的に違うか（Issue #1090の `profileChanged`）。 */

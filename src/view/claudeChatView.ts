@@ -52,6 +52,9 @@ import {
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
+  readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffClassifierTimeoutMs,
+  readAutoHandoffRouterEnabled,
   readAutoHandoffCloseOldTab,
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
@@ -136,12 +139,20 @@ import {
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
   recentUserMessages,
+  recentAssistantMessages,
   resolveGitBranch,
   resolveWithRetry,
   waitForFirstTurn,
   writeHandoffPointer,
   type HandoffTrigger,
 } from './handoff';
+import {
+  HandoffTrace,
+  describeAssessment,
+  describeDecision,
+  describeGate,
+  describeProfile,
+} from './handoffTrace';
 import { chooseHandoffModelSettings, probeSafeBoundary } from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
 import { appendTurnSummaryInstruction } from './turnSummary';
@@ -246,6 +257,13 @@ interface ClaudePanel extends BaseChatPanel {
   lastSafeBoundaryKey: string | undefined;
   /** 安全な区切りの分類器が走っている最中か。ターンが立て続けに終わっても二重に呼ばない。 */
   safeBoundaryProbing: boolean;
+  /**
+   * 自動引き継ぎの判定過程の記録先（Issue #1097）。
+   *
+   * パネルごとに持つのは、同じ理由の連続を抑えるのに直前の行を覚える必要があるため。
+   * 複数のタブで共有すると、タブを跨いだだけで抑制が外れたり効きすぎたりする。
+   */
+  trace: HandoffTrace;
 }
 
 /**
@@ -825,12 +843,14 @@ export class ClaudeChatViewManager
     }
 
     const state = entry.session.getState();
+    const lastAssistantMessage = recentAssistantMessages(state, 1)[0];
     const gitBranch = await resolveGitBranch(entry.cwd);
     const choice = await chooseHandoffModelSettings(
       entry.modelSettings,
       {
         turnFailed: state.turnFailed,
         recentUserMessages: recentUserMessages(state),
+        recentAssistantMessages: recentAssistantMessages(state),
         cwd: entry.cwd,
         gitBranch,
         turnEditedFiles: state.turnEditedFiles,
@@ -865,6 +885,8 @@ export class ClaudeChatViewManager
         turnFailed: state.turnFailed,
         busy: state.busy,
         recentUserMessages: recentUserMessages(state),
+        // 引き継ぎ元の最終応答をそのまま申し送りにする（Issue #1097）。要約しない
+        ...(lastAssistantMessage === undefined ? {} : { nextSteps: lastAssistantMessage }),
         turnEditedFiles: state.turnEditedFiles,
         routerReasons: choice.reasons,
         createdAt: new Date(),
@@ -978,37 +1000,54 @@ export class ClaudeChatViewManager
     }
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
     const onProfileChange = readAutoHandoffOnProfileChange();
+    const onAssistantSuggestion = readAutoHandoffOnAssistantSuggestion();
     const remainingPercent = state.context?.remainingPercent;
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
-    if (!withinSoft && !onProfileChange) {
+    if (!withinSoft && !onProfileChange && !onAssistantSuggestion) {
+      // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
+      entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
-    if (
-      !passesSafeBoundaryGate({
-        busy: state.busy,
-        turnFailed: state.turnFailed,
-        pendingApprovals: state.approvals.length,
-        pendingPrompts: state.prompts.length,
-        queued: state.queued.length,
-        loopRunning: entry.loop.getStatus().running,
-        taskManaged: entry.taskManaged,
-      })
-    ) {
+    if (!readAutoHandoffRouterEnabled()) {
+      // 分類器が無いと `switchSafe` も `handoffSuggested` も得られない。区切り待ちの契機は
+      // 全部この判定に依存しているため、ここで止める（残量の閾値契機は別経路で発火する）
+      entry.trace.info('分類器が無効（agent.autoHandoff.router=false）のため発火しない');
+      return;
+    }
+    const loopStatus = entry.loop.getStatus();
+    const gate = {
+      busy: state.busy,
+      turnFailed: state.turnFailed,
+      pendingApprovals: state.approvals.length,
+      pendingPrompts: state.prompts.length,
+      queued: state.queued.length,
+      // `running` は `pause()` 中も true のまま。返信待ちで止まっているループを「実行中」と
+      // 数えると、`/loop` 運用では区切り系の契機が全部塞がる（Issue #1097）
+      loopRunning: loopStatus.running && !entry.loop.isPaused,
+      taskManaged: entry.taskManaged,
+    };
+    if (!passesSafeBoundaryGate(gate)) {
+      entry.trace.info(`gate blocked (${describeGate(gate)})`);
       return;
     }
     const messages = recentUserMessages(state);
     if (messages.length === 0) {
       // 材料が無い（開いた直後・復元直後）。分類させても中身の無い見立てが返るだけ
+      entry.trace.info('材料が無いため分類器を起動しない（ユーザー指示の記録なし）');
       return;
     }
-    const key = safeBoundaryProbeKey(messages);
+    const assistantMessages = recentAssistantMessages(state);
+    const key = safeBoundaryProbeKey(messages, assistantMessages);
     if (key === entry.lastSafeBoundaryKey) {
+      entry.trace.info('前回と同じ材料のため分類器を起動しない');
       return;
     }
     entry.lastSafeBoundaryKey = key;
 
     const gitBranch = await resolveGitBranch(entry.cwd);
     entry.safeBoundaryProbing = true;
+    entry.trace.info('分類器を起動する');
+    const startedAt = Date.now();
     let probe;
     try {
       probe = await probeSafeBoundary(
@@ -1016,6 +1055,7 @@ export class ClaudeChatViewManager
         {
           turnFailed: state.turnFailed,
           recentUserMessages: messages,
+          recentAssistantMessages: assistantMessages,
           cwd: entry.cwd,
           gitBranch,
           turnEditedFiles: state.turnEditedFiles,
@@ -1025,18 +1065,25 @@ export class ClaudeChatViewManager
           executable: this.claudePath(),
           models: this.settings.claudeSnapshot().models,
           fallbackEfforts: CLAUDE_EFFORTS,
-          logWarn: (message) => this.log.warn(message),
+          timeoutMs: readAutoHandoffClassifierTimeoutMs(),
+          logWarn: (message) => entry.trace.warn(message),
         },
       );
     } finally {
       entry.safeBoundaryProbing = false;
     }
-    if (probe === undefined || !probe.switchSafe) {
+    entry.trace.info(`分類器の応答まで${Date.now() - startedAt}ms`);
+    if (probe === undefined) {
+      // 失敗の理由（時間切れ / 起動失敗 / JSON不正）は `classifyHandoff` がwarnで出す
+      entry.trace.info('分類できなかったため発火しない（理由は直前のwarnを見る）');
       return;
     }
+    entry.trace.info(describeAssessment(probe.assessment));
+    entry.trace.info(describeProfile(probe));
     // 分類器を待っている間に状況が変わっていることがある（新しい指示・引き継ぎ済み）
     const latest = entry.session.getState();
     if (entry.disposed || entry.autoHandoffStarted || latest.busy || !latest.autoHandoff) {
+      entry.trace.info('分類器を待つ間に状況が変わったため発火しない');
       return;
     }
     const trigger = decideAutoHandoff({
@@ -1047,11 +1094,16 @@ export class ClaudeChatViewManager
       compacted: false,
       thresholdPercent: readAutoHandoffThresholdPercent(),
       softThresholdPercent,
-      safeBoundary: true,
+      // `assistantSuggested` だけは `switchSafe` を要求しない（Issue #1097）
+      boundaryGatePassed: true,
+      safeBoundary: probe.switchSafe,
+      handoffSuggested: onAssistantSuggestion && probe.handoffSuggested,
+      handoffSuggestReason: probe.handoffSuggestReason,
       profileChanged: onProfileChange && probe.profileChanged,
       profile: probe.profile,
       switchReason: probe.switchReason,
     });
+    entry.trace.info(describeDecision(trigger));
     if (trigger === undefined) {
       return;
     }
@@ -1756,6 +1808,7 @@ export class ClaudeChatViewManager
       autoHandoffStarted: false,
       lastCompactionCount: 0,
       lastSafeBoundaryKey: undefined,
+      trace: new HandoffTrace(this.log),
       safeBoundaryProbing: false,
     };
     return entry;

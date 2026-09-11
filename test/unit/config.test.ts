@@ -15,6 +15,7 @@ import {
   setChatLimitAutoResumeEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffThresholdPercent,
+  readAutoHandoffClassifierTimeoutMs,
   DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT,
   readClaudeConfig,
   readNotificationsConfig,
@@ -769,6 +770,35 @@ describe('readNotificationsConfig（issue #286）', () => {
   it('agent.notifications.turnCompleteをtrueにできる', () => {
     __mock.setConfig('agent', { 'notifications.turnComplete': true });
     expect(readNotificationsConfig().turnComplete).toBe(true);
+  });
+});
+
+describe('readAutoHandoffClassifierTimeoutMs（Issue #1097）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未設定なら120秒（package.jsonのdefaultとも一致する）', () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    };
+    const declared =
+      manifest.contributes.configuration.properties['agent.autoHandoff.classifierTimeoutMs'];
+
+    expect(declared?.default).toBe(120_000);
+    expect(readAutoHandoffClassifierTimeoutMs()).toBe(120_000);
+  });
+
+  it('設定された値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'autoHandoff.classifierTimeoutMs': 45_000 });
+    expect(readAutoHandoffClassifierTimeoutMs()).toBe(45_000);
+  });
+
+  it('範囲外・数値でない値は既定へ丸める', () => {
+    for (const value of [4_999, 600_001, -1, Number.NaN, 'あ']) {
+      __mock.setConfig('agent', { 'autoHandoff.classifierTimeoutMs': value });
+      expect(readAutoHandoffClassifierTimeoutMs()).toBe(120_000);
+    }
   });
 });
 

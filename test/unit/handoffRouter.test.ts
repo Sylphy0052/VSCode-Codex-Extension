@@ -51,6 +51,8 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
     reasons: [],
     switchSafe: true,
     switchReason: '',
+    handoffSuggested: false,
+    handoffSuggestReason: '',
     ...over,
   };
 }

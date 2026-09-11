@@ -14,6 +14,7 @@ import {
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
   recentUserMessages,
+  recentAssistantMessages,
   shellQuote,
   waitForFirstTurn,
   writeHandoffPointer,
@@ -95,6 +96,19 @@ describe('ポインタファイルの本文', () => {
       ),
     ).toContain(
       '引き継いだ契機: 安全な区切りで、次の作業に合うmodel/effortが変わった（opus / medium。設計が終わり次は実装）',
+    );
+    expect(
+      buildHandoffPointerMarkdown(
+        baseInput({
+          trigger: {
+            kind: 'assistantSuggested',
+            switchReason: '実装が一段落した',
+            suggestReason: '応答が「実装は別セッション推奨」と述べている',
+          },
+        }),
+      ),
+    ).toContain(
+      '引き継いだ契機: アシスタント自身が引き継ぎを提案した（応答が「実装は別セッション推奨」と述べている。実装が一段落した）',
     );
   });
 
@@ -196,6 +210,39 @@ describe('ポインタファイルの書き出し', () => {
 
   it('セッションIDにパス区切りが混ざっても別ディレクトリへ書かない', () => {
     expect(handoffPointerFileName('../../etc/passwd', new Date())).not.toContain('/');
+  });
+});
+
+describe('次にやること（申し送り。Issue #1097）', () => {
+  it('nextSteps を渡すと節が現れ、ユーザー指示ではない旨を添える', () => {
+    const md = buildHandoffPointerMarkdown(
+      baseInput({ nextSteps: '#1098の実装へ進む。squash mergeは使わない。' }),
+    );
+    expect(md).toContain('## 次にやること（引き継ぎ元のアシスタントの申し送り）');
+    expect(md).toContain('#1098の実装へ進む。squash mergeは使わない。');
+    expect(md).toContain('**ユーザーの指示ではない**');
+    // 新セッションが最初に読む位置（状態の直後・読み方の前）に置く
+    expect(md.indexOf('## 引き継ぎ時点の状態')).toBeLessThan(
+      md.indexOf('## 次にやること（引き継ぎ元のアシスタントの申し送り）'),
+    );
+    expect(md.indexOf('## 次にやること（引き継ぎ元のアシスタントの申し送り）')).toBeLessThan(
+      md.indexOf('## 読み方（先に守ること）'),
+    );
+  });
+
+  it('nextSteps が無い・空白だけなら節ごと出さない', () => {
+    expect(buildHandoffPointerMarkdown(baseInput())).not.toContain('## 次にやること');
+    expect(buildHandoffPointerMarkdown(baseInput({ nextSteps: '   \n ' }))).not.toContain(
+      '## 次にやること',
+    );
+  });
+
+  it('上限を超えたら切り詰め、続きの読み方を1行添える', () => {
+    const long = 'あ'.repeat(5000);
+    const md = buildHandoffPointerMarkdown(baseInput({ nextSteps: long }));
+    expect(md).not.toContain(long);
+    expect(md).toContain('あ'.repeat(4000));
+    expect(md).toContain('ここで切り詰めてある');
   });
 });
 
@@ -318,6 +365,112 @@ describe('自動引き継ぎの発火判定', () => {
     ).toBeUndefined();
   });
 
+  it('残量が十分でプロファイルが同じでも、アシスタントの提案があれば発火する（Issue #1097）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 90,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        profileChanged: false,
+        handoffSuggested: true,
+        handoffSuggestReason: '応答が「別セッションで実装を」と提案している',
+        switchReason: '実装が一段落した',
+      }),
+    ).toEqual({
+      kind: 'assistantSuggested',
+      switchReason: '実装が一段落した',
+      suggestReason: '応答が「別セッションで実装を」と提案している',
+    });
+  });
+
+  it('switchSafe が false でも、提案があれば assistantSuggested が立つ（Issue #1097）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 90,
+        softThresholdPercent: 40,
+        boundaryGatePassed: true,
+        safeBoundary: false,
+        handoffSuggested: true,
+        handoffSuggestReason: '応答が引き継ぎを提案している',
+        switchReason: 'MRは作成済みだが未マージ',
+      }),
+    ).toEqual({
+      kind: 'assistantSuggested',
+      switchReason: 'MRは作成済みだが未マージ',
+      suggestReason: '応答が引き継ぎを提案している',
+    });
+  });
+
+  it('switchSafe が false で提案も無ければ、softThreshold も profileChanged も立たない（Issue #1097）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 30,
+        softThresholdPercent: 40,
+        boundaryGatePassed: true,
+        safeBoundary: false,
+        handoffSuggested: false,
+        profileChanged: true,
+        profile: { model: 'opus', effort: 'medium' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('提案が無ければ、同じ状況で発火しない（Issue #1097）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 90,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        profileChanged: false,
+        handoffSuggested: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('安全な区切りが成立していなければ、提案があっても発火しない（Issue #1097）', () => {
+    // `loopRunning` / `taskManaged` は前段で落ちるため `safeBoundary` が立たない
+    for (const over of [{ loopRunning: true }, { taskManaged: true }]) {
+      const gate = {
+        busy: false,
+        turnFailed: false,
+        pendingApprovals: 0,
+        pendingPrompts: 0,
+        queued: 0,
+        loopRunning: false,
+        taskManaged: false,
+        ...over,
+      };
+      expect(passesSafeBoundaryGate(gate)).toBe(false);
+      expect(
+        decideAutoHandoff({
+          ...base,
+          remainingPercent: 90,
+          softThresholdPercent: 40,
+          safeBoundary: passesSafeBoundaryGate(gate),
+          handoffSuggested: true,
+          handoffSuggestReason: '応答が引き継ぎを提案している',
+        }),
+      ).toBeUndefined();
+    }
+  });
+
+  it('残量が緩い閾値以下なら、提案より softThreshold が先に成立する（Issue #1097）', () => {
+    expect(
+      decideAutoHandoff({
+        ...base,
+        remainingPercent: 30,
+        softThresholdPercent: 40,
+        safeBoundary: true,
+        handoffSuggested: true,
+        switchReason: '実装が一段落した',
+      }),
+    ).toEqual({ kind: 'softThreshold', remainingPercent: 30, switchReason: '実装が一段落した' });
+  });
+
   it('残量が厳しい閾値以下なら、安全な区切りを待たずに threshold が優先する（Issue #1090）', () => {
     expect(
       decideAutoHandoff({
@@ -362,6 +515,27 @@ describe('安全な区切りの前段（Issue #1090）', () => {
     expect(safeBoundaryProbeKey(['a', 'b'])).toBe(safeBoundaryProbeKey(['a', 'b']));
     expect(safeBoundaryProbeKey(['a', 'b'])).not.toBe(safeBoundaryProbeKey(['a', 'b', 'c']));
   });
+
+  it('ターンが完了して応答が増えれば鍵が変わる（Issue #1097）', () => {
+    const messages = ['直しておいて'];
+    expect(safeBoundaryProbeKey(messages, ['直した'])).not.toBe(
+      safeBoundaryProbeKey(messages, ['直した', '次は別件へ移る']),
+    );
+  });
+
+  it('同一ターン内でstateが更新されても材料が同じなら鍵は変わらない（Issue #1097）', () => {
+    const messages = ['直しておいて'];
+    const replies = ['直した'];
+    expect(safeBoundaryProbeKey(messages, replies)).toBe(
+      safeBoundaryProbeKey([...messages], [...replies]),
+    );
+  });
+
+  it('指示と応答の境目が動いただけの並びを同じ鍵にしない（Issue #1097）', () => {
+    expect(safeBoundaryProbeKey(['a', 'b'], ['c'])).not.toBe(
+      safeBoundaryProbeKey(['a'], ['b', 'c']),
+    );
+  });
 });
 
 describe('圧縮回数の数え方', () => {
@@ -392,6 +566,28 @@ describe('直近のユーザー指示', () => {
       ],
     };
     expect(recentUserMessages(state, 2)).toEqual(['2件目', '3件目']);
+  });
+});
+
+describe('直前のアシスタント応答（Issue #1097）', () => {
+  it('末尾から指定件数だけを会話順で返し、空文と他の種類は落とす', () => {
+    const state: ChatState = {
+      ...initialChatState,
+      items: [
+        item('agentMessage', '1件目'),
+        item('userMessage', '指示'),
+        item('agentMessage', '   '),
+        item('reasoning', '考えている'),
+        item('agentMessage', '2件目'),
+        item('agentMessage', '3件目'),
+      ],
+    };
+    expect(recentAssistantMessages(state, 2)).toEqual(['2件目', '3件目']);
+  });
+
+  it('応答がまだ無ければ空', () => {
+    const state: ChatState = { ...initialChatState, items: [item('userMessage', '指示')] };
+    expect(recentAssistantMessages(state)).toEqual([]);
   });
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CLASSIFIER_MODELS,
+  CLASSIFIER_TIMEOUT_MS,
   buildClassifierPrompt,
   classifyHandoff,
   parseAssessment,
@@ -10,6 +11,7 @@ import {
 function input(over: Partial<HandoffClassifierInput> = {}): HandoffClassifierInput {
   return {
     recentUserMessages: [],
+    recentAssistantMessages: [],
     turnFailed: false,
     cwd: '/home/me/work/app',
     gitBranch: 'main',
@@ -50,6 +52,36 @@ describe('buildClassifierPrompt', () => {
     expect(folded).not.toContain(long);
   });
 
+  it('直前のアシスタント応答を節として載せ、末尾2件までで長い応答は折り畳む（Issue #1097）', () => {
+    const prompt = buildClassifierPrompt(
+      input({ recentAssistantMessages: ['1件目', '2件目', '3件目'] }),
+    );
+    expect(prompt).toContain('### 直前のアシスタントの応答（古い順）');
+    expect(prompt).not.toContain('1件目');
+    expect(prompt).toContain('2件目');
+    expect(prompt).toContain('3件目');
+
+    const long = `${'い'.repeat(1000)}次は新チャットへ引き継ぐ`;
+    const folded = buildClassifierPrompt(input({ recentAssistantMessages: [long] }));
+    expect(folded).toContain('（中略）');
+    expect(folded).not.toContain(long);
+    // 宣言は応答の末尾に出る。先頭から切ると判定材料そのものが落ちる
+    expect(folded).toContain('次は新チャットへ引き継ぐ');
+  });
+
+  it('アシスタントの宣言があればそれを分類の対象にすると指示する（Issue #1097）', () => {
+    expect(buildClassifierPrompt(input())).toContain(
+      'アシスタントの応答が次に取り掛かる作業を宣言していれば',
+    );
+  });
+
+  it('引き継ぎの提案があったかを判定させる（Issue #1097）', () => {
+    const prompt = buildClassifierPrompt(input());
+    expect(prompt).toContain('## 引き継ぎを提案しているか（handoff_suggested）');
+    expect(prompt).toContain('"handoff_suggested"');
+    expect(prompt).toContain('"handoff_suggest_reason"');
+  });
+
   it('材料が無いときは「記録が無い」と明示する（空欄にしない）', () => {
     const prompt = buildClassifierPrompt(input());
     expect(prompt).toContain('（記録が無い）');
@@ -71,7 +103,26 @@ describe('parseAssessment', () => {
       // switch_safeが無いJSONは「切り替えてよいと言っていない」ので false（Issue #1090）
       switchSafe: false,
       switchReason: '',
+      // handoff_suggestedも同じ。無ければ「提案は無かった」（Issue #1097）
+      handoffSuggested: false,
+      handoffSuggestReason: '',
     });
+  });
+
+  it('handoff_suggested と根拠を読む（Issue #1097）', () => {
+    const raw = VALID.replace(
+      '}',
+      ', "handoff_suggested": true, "handoff_suggest_reason": "別セッションでの実装を勧めている"}',
+    );
+    expect(parseAssessment(raw)).toMatchObject({
+      handoffSuggested: true,
+      handoffSuggestReason: '別セッションでの実装を勧めている',
+    });
+  });
+
+  it('陰性対照: handoff_suggested が真偽値でなければ提案は無かった扱い（Issue #1097）', () => {
+    const raw = VALID.replace('}', ', "handoff_suggested": "true"}');
+    expect(parseAssessment(raw)).toMatchObject({ handoffSuggested: false });
   });
 
   it('コードブロックや前後の文が付いていても読む', () => {
@@ -113,7 +164,7 @@ describe('parseAssessment', () => {
 
 describe('classifyHandoff', () => {
   it('会話しているCLIと、そのプロバイダの最下位ティアのモデルで起動する', async () => {
-    const run = vi.fn().mockResolvedValue(VALID);
+    const run = vi.fn().mockResolvedValue({ ok: true, text: VALID });
     const assessment = await classifyHandoff(
       { provider: 'codex', executable: '/usr/bin/codex', run },
       input(),
@@ -128,34 +179,54 @@ describe('classifyHandoff', () => {
     expect(CLASSIFIER_MODELS.codex).toBe('terra');
   });
 
-  it('応答が得られなければundefinedを返し、警告を残す', async () => {
-    const warnings: string[] = [];
-    const assessment = await classifyHandoff(
-      {
-        provider: 'claude',
-        executable: 'claude',
-        run: vi.fn().mockResolvedValue(undefined),
-        logWarn: (m) => warnings.push(m),
-      },
+  it('既定のタイムアウトは120秒で、設定された値はそのまま渡す（Issue #1097）', async () => {
+    expect(CLASSIFIER_TIMEOUT_MS).toBe(120_000);
+
+    const run = vi.fn().mockResolvedValue({ ok: true, text: VALID });
+    await classifyHandoff({ provider: 'codex', executable: 'codex', run }, input());
+    expect(run.mock.calls[0]?.[0]).toMatchObject({ timeoutMs: 120_000 });
+
+    const explicit = vi.fn().mockResolvedValue({ ok: true, text: VALID });
+    await classifyHandoff(
+      { provider: 'codex', executable: 'codex', timeoutMs: 45_000, run: explicit },
       input(),
     );
-    expect(assessment).toBeUndefined();
-    expect(warnings).toHaveLength(1);
+    expect(explicit.mock.calls[0]?.[0]).toMatchObject({ timeoutMs: 45_000 });
   });
 
-  it('応答を読めなければundefinedを返し、警告を残す', async () => {
-    const warnings: string[] = [];
-    const assessment = await classifyHandoff(
-      {
-        provider: 'claude',
-        executable: 'claude',
-        run: vi.fn().mockResolvedValue('分類できませんでした'),
-        logWarn: (m) => warnings.push(m),
-      },
-      input(),
-    );
-    expect(assessment).toBeUndefined();
-    expect(warnings).toHaveLength(1);
+  it('時間切れ・起動失敗・JSON不正を言い分ける（Issue #1097）', async () => {
+    const collect = async (
+      value: unknown,
+    ): Promise<{ warnings: string[]; assessment: unknown }> => {
+      const warnings: string[] = [];
+      const assessment = await classifyHandoff(
+        {
+          provider: 'claude',
+          executable: 'claude',
+          run: vi.fn().mockResolvedValue(value),
+          logWarn: (m) => warnings.push(m),
+        },
+        input(),
+      );
+      return { warnings, assessment };
+    };
+
+    const timedOut = await collect({ ok: false, reason: 'timeout' });
+    expect(timedOut.assessment).toBeUndefined();
+    expect(timedOut.warnings[0]).toContain('時間切れ');
+    expect(timedOut.warnings[0]).toContain('120000ms');
+
+    const failed = await collect({ ok: false, reason: 'process-error' });
+    expect(failed.assessment).toBeUndefined();
+    expect(failed.warnings[0]).toContain('実行できませんでした');
+
+    const broken = await collect({ ok: true, text: '分類できませんでした' });
+    expect(broken.assessment).toBeUndefined();
+    expect(broken.warnings[0]).toContain('JSONとして不正');
+
+    // 3つが同じ文言にならないこと（ログから切り分けられる）
+    const messages = [timedOut.warnings[0], failed.warnings[0], broken.warnings[0]];
+    expect(new Set(messages).size).toBe(3);
   });
 
   it('例外が出ても投げ返さない', async () => {
