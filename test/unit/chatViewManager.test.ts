@@ -1909,6 +1909,9 @@ describe('deriveTitle（Issue #599、pinnedNameを最優先にする）', () => 
 describe('handoffToNewSession（issue #694）', () => {
   beforeEach(() => {
     __mock.reset();
+    // 引き継ぎ先のレベル判定（Issue #1082）は実CLIをヘッドレス起動する。ここで見たいのは
+    // ポインタファイルの書き出しと初回送信なので、判定は切って外部プロセスに触らせない
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
     __mock.setWorkspaceFolder('/workspace/root');
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });

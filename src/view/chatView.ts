@@ -678,16 +678,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
     const state = entry.session.getState();
     const gitBranch = await resolveGitBranch(entry.cwd);
-    const choice = resolveHandoffModelSettings(
+    const choice = await resolveHandoffModelSettings(
       entry.modelSettings,
-      this.settings.snapshot().models,
       {
-        trigger,
         turnFailed: state.turnFailed,
         recentUserMessages: recentUserMessages(state),
         cwd: entry.cwd,
         gitBranch,
         turnEditedFiles: state.turnEditedFiles,
+      },
+      {
+        provider: 'codex',
+        executable: readConfig().executablePath,
+        models: this.settings.snapshot().models,
+        logWarn: (message) => this.log.warn(message),
       },
     );
     this.log.info(

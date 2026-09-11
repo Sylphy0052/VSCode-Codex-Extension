@@ -814,18 +814,22 @@ export class ClaudeChatViewManager
 
     const state = entry.session.getState();
     const gitBranch = await resolveGitBranch(entry.cwd);
-    const choice = resolveHandoffModelSettings(
+    const choice = await resolveHandoffModelSettings(
       entry.modelSettings,
-      this.settings.claudeSnapshot().models,
       {
-        trigger,
         turnFailed: state.turnFailed,
         recentUserMessages: recentUserMessages(state),
         cwd: entry.cwd,
         gitBranch,
         turnEditedFiles: state.turnEditedFiles,
       },
-      CLAUDE_EFFORTS,
+      {
+        provider: 'claude',
+        executable: this.claudePath(),
+        models: this.settings.claudeSnapshot().models,
+        fallbackEfforts: CLAUDE_EFFORTS,
+        logWarn: (message) => this.log.warn(message),
+      },
     );
     this.log.info(
       `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
