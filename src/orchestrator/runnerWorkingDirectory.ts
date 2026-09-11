@@ -263,7 +263,21 @@ export async function resolvePseudoState(
   if (!ensured.ok) {
     return { ok: false, message: ensured.message };
   }
-  const baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
+  // `takeSnapshot`はワークスペースを読めなかった時点で例外を投げる（Issue #1118）。
+  // ここで受け止めないと、`Result`を返す約束のこの関数から例外が漏れて呼び出し元
+  // （`runner.ts`のrun開始・`runnerRestore.ts`の復元）が未ハンドルrejectになる。
+  // **欠けたbaselineのまま先へ進ませない。** 比較の基準が欠けていると、最後の反映で
+  // 「人が消した」と「読めなかった」の区別が付かなくなる。
+  let baseline: Snapshot;
+  try {
+    baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
+  } catch (e) {
+    const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    return {
+      ok: false,
+      message: `ワークスペースの走査に失敗したため、疑似worktreeの基準スナップショットを取得できませんでした: ${detail}`,
+    };
+  }
   const loadedManifest = await loadPersistedManifest(repoRoot, runId, deps.fs);
   if (!loadedManifest.ok) {
     self.deps.log.warn(`[workflow ${runId}] ${sanitizeForLog(loadedManifest.message)}`);

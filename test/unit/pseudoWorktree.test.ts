@@ -3460,3 +3460,103 @@ describe('applyDiffToIntegration', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('スナップショット走査の失敗（Issue #1118）', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-scan-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function errnoError(code: string): NodeJS.ErrnoException {
+    const error: NodeJS.ErrnoException = new Error(`${code}: simulated`);
+    error.code = code;
+    return error;
+  }
+
+  /**
+   * 走査の失敗を空一覧へ畳んでいたため、`takeSnapshot`が欠けた一覧を成功として返し、
+   * `diffSnapshots`がその全件を`deleted`と判定していた。最終反映の削除分岐は
+   * マニフェストのその記録に従って元のワークスペースのファイルを消す。
+   */
+  it('readdirがEACCESで失敗したらスナップショット取得が失敗し、削除として扱われない（受入基準）', async () => {
+    await mkdir(path.join(root, 'sub'), { recursive: true });
+    await writeFile(path.join(root, 'sub', 'a.txt'), 'content\n');
+    await writeFile(path.join(root, 'keep.txt'), 'content\n');
+
+    const baseline = await takeSnapshot(root, [], nodePseudoWorktreeFileSystem);
+    expect([...baseline.keys()].sort()).toEqual(['keep.txt', 'sub/a.txt']);
+
+    // 完了時の走査で、サブディレクトリだけが読めなくなった状況
+    const failingFs: typeof nodePseudoWorktreeFileSystem = {
+      ...nodePseudoWorktreeFileSystem,
+      readdir: async (target) => {
+        if (target === path.join(root, 'sub')) {
+          throw errnoError('EACCES');
+        }
+        return nodePseudoWorktreeFileSystem.readdir(target);
+      },
+    };
+
+    await expect(takeSnapshot(root, [], failingFs)).rejects.toThrow(/EACCES/);
+  });
+
+  it('statFileがEACCESで失敗した場合もスナップショット取得が失敗する', async () => {
+    await writeFile(path.join(root, 'a.txt'), 'content\n');
+
+    const failingFs: typeof nodePseudoWorktreeFileSystem = {
+      ...nodePseudoWorktreeFileSystem,
+      statFile: async () => {
+        throw errnoError('EACCES');
+      },
+    };
+
+    await expect(takeSnapshot(root, [], failingFs)).rejects.toThrow(/EACCES/);
+  });
+
+  it('ENOENT（タスクが本当に削除した）は従来どおり削除として扱われる（受入基準）', async () => {
+    await writeFile(path.join(root, 'a.txt'), 'content\n');
+    await writeFile(path.join(root, 'gone.txt'), 'will be deleted\n');
+    const baseline = await takeSnapshot(root, [], nodePseudoWorktreeFileSystem);
+
+    await rm(path.join(root, 'gone.txt'));
+    const current = await takeSnapshot(root, [], nodePseudoWorktreeFileSystem);
+
+    expect(diffSnapshots(baseline, current)).toEqual([{ path: 'gone.txt', kind: 'deleted' }]);
+  });
+
+  it('走査対象のディレクトリ自体が存在しない（ENOENT）場合は空のスナップショットを返す', async () => {
+    await expect(
+      takeSnapshot(path.join(root, 'nowhere'), [], nodePseudoWorktreeFileSystem),
+    ).resolves.toEqual(new Map());
+  });
+
+  /**
+   * ポート実装そのものの挙動。`EACCES`は実行ユーザーがrootだと再現しないため、非rootでも
+   * 確実に起こせる`ENOTDIR`（通常ファイルに対する`readdir`）で「ENOENT以外を畳まない」
+   * ことを確かめる。修正前はどちらの失敗も空一覧・undefinedへ畳んでいた。
+   */
+  it('readdirはENOENT以外の失敗を畳まない（通常ファイルへの走査はENOTDIR）', async () => {
+    const file = path.join(root, 'a.txt');
+    await writeFile(file, 'content\n');
+
+    await expect(nodePseudoWorktreeFileSystem.readdir(file)).rejects.toThrow();
+    await expect(nodePseudoWorktreeFileSystem.readdir(path.join(root, 'nowhere'))).resolves.toEqual(
+      [],
+    );
+  });
+
+  it('statFileはENOENT以外の失敗を畳まない（通常ファイルの配下はENOTDIR）', async () => {
+    const file = path.join(root, 'a.txt');
+    await writeFile(file, 'content\n');
+
+    await expect(nodePseudoWorktreeFileSystem.statFile(path.join(file, 'child'))).rejects.toThrow();
+    await expect(
+      nodePseudoWorktreeFileSystem.statFile(path.join(root, 'nowhere.txt')),
+    ).resolves.toBeUndefined();
+  });
+});

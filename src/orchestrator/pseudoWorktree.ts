@@ -394,7 +394,19 @@ export async function loadPersistedManifest(
     }
   }
 
-  const stat = await fs.statFile(filePath);
+  // `statFile`は`ENOENT`以外の失敗をthrowする（Issue #1118）。この関数は`Result`を
+  // 返す約束なので、読めなかったことも復元の失敗として畳む（サイズを確かめられないまま
+  // 読み進めない）。
+  let stat: PseudoWorktreeFileStat | undefined;
+  try {
+    stat = await fs.statFile(filePath);
+  } catch (e) {
+    const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
+    return {
+      ok: false,
+      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルの情報を取得できません）: ${sanitizeForLog(filePath)}: ${detail}`,
+    };
+  }
   if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
     return {
       ok: false,
@@ -663,9 +675,22 @@ export interface PseudoWorktreeFileStat {
  * 複製・スナップショット・差分適用に要る操作だけに絞る。
  */
 export interface PseudoWorktreeFileSystemPort {
-  /** ディレクトリのエントリ一覧。存在しない・読めない場合は空配列を返す。 */
+  /**
+   * ディレクトリのエントリ一覧。**存在しない（`ENOENT`）場合だけ**空配列を返し、
+   * それ以外の失敗（`EACCES` / `ENOTDIR` / I/Oエラー等）はthrowする（Issue #1118）。
+   *
+   * かつては全ての失敗を空配列へ変換していたが、それだと走査の失敗が「そこには何も
+   * 無かった」と見分けが付かない。`takeSnapshot`は欠けた一覧をそのまま成功として返し、
+   * `diffSnapshots`が欠けた分を丸ごと`deleted`と判定して統合マニフェストへ登録するため、
+   * 最終反映の削除分岐が元のワークスペースのファイルを消してしまう。読めなかったことは
+   * 読めなかったこととして伝え、不完全なスナップショットのまま先へ進ませない。
+   */
   readdir(target: string): Promise<readonly PseudoWorktreeDirEntry[]>;
-  /** 通常ファイルのサイズ・更新時刻。存在しない・ディレクトリ・シンボリックリンクの場合は undefined。 */
+  /**
+   * 通常ファイルのサイズ・更新時刻。存在しない（`ENOENT`）・ディレクトリ・シンボリック
+   * リンクの場合は undefined。**それ以外の失敗（`EACCES` 等）は`readdir`と同じ理由で
+   * throwする**（Issue #1118）。
+   */
   statFile(target: string): Promise<PseudoWorktreeFileStat | undefined>;
   /** `target` そのものがシンボリックリンクか（`lstat`。辿らない）。存在しなければ `false`。 */
   isSymbolicLink(target: string): Promise<boolean>;
@@ -722,6 +747,18 @@ export interface PseudoWorktreeFileSystemPort {
   removeEmptyDir(target: string): Promise<void>;
 }
 
+/**
+ * 「対象が無い」ことを表すエラーか（Issue #1118）。
+ *
+ * `readdir` / `statFile` が「無い＝空・undefined」へ畳んでよいのはこの場合だけで、
+ * それ以外（`EACCES` / `EPERM` / `EIO` 等）は走査そのものの失敗として呼び出し側へ
+ * 伝える。`ENOTDIR`（途中の要素がディレクトリでない）も「無い」には含めない。
+ * その位置に何かが実在していて期待した形と違う、という別の異常だからである。
+ */
+function isNotFoundError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
 export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
   async readdir(target: string): Promise<readonly PseudoWorktreeDirEntry[]> {
     try {
@@ -731,8 +768,11 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
         isDirectory: entry.isDirectory(),
         isSymbolicLink: entry.isSymbolicLink(),
       }));
-    } catch {
-      return [];
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return [];
+      }
+      throw error;
     }
   },
   async statFile(target: string): Promise<PseudoWorktreeFileStat | undefined> {
@@ -742,8 +782,11 @@ export const nodePseudoWorktreeFileSystem: PseudoWorktreeFileSystemPort = {
         return undefined;
       }
       return { size: stat.size, mtimeMs: stat.mtimeMs };
-    } catch {
-      return undefined;
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return undefined;
+      }
+      throw error;
     }
   },
   async isSymbolicLink(target: string): Promise<boolean> {
@@ -863,7 +906,16 @@ async function listFiles(
 // スナップショット取得
 // ---------------------------------------------------------------------------
 
-/** `root` 配下のスナップショット（除外・シンボリックリンクを除いたファイルのサイズ・更新時刻）を取る。 */
+/**
+ * `root` 配下のスナップショット（除外・シンボリックリンクを除いたファイルのサイズ・更新時刻）を取る。
+ *
+ * **走査に失敗したら例外を投げる（Issue #1118）。** `readdir` / `statFile` が
+ * `ENOENT` 以外の失敗をthrowするようになったため、この関数も途中で読めないディレクトリ・
+ * ファイルがあればそのまま伝播する。**不完全なスナップショットを成功として返してはいけない。**
+ * 欠けた一覧をそのまま返すと、`diffSnapshots` が欠けた分を丸ごと `deleted` と判定し、
+ * 統合マニフェスト経由で最終反映の削除分岐が元のワークスペースのファイルを消してしまう。
+ * 呼び出し側は失敗を「そのタスク・そのrunを止める理由」として扱うこと。
+ */
 export async function takeSnapshot(
   root: string,
   exclude: readonly string[],
