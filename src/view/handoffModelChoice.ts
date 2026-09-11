@@ -33,6 +33,8 @@ export interface HandoffModelChoiceDeps {
   models: readonly ModelInfo[];
   /** カタログからeffort一覧を取れないときの退避先（Claude Codeは `CLAUDE_EFFORTS`）。 */
   fallbackEfforts?: readonly string[];
+  /** 分類の待ち時間（Issue #1097）。省略時は `CLASSIFIER_TIMEOUT_MS`。 */
+  timeoutMs?: number;
   logWarn?: (message: string) => void;
 }
 
@@ -81,6 +83,7 @@ export async function proposeHandoffModelSettings(
         {
           provider: deps.provider,
           executable: deps.executable,
+          ...(deps.timeoutMs === undefined ? {} : { timeoutMs: deps.timeoutMs }),
           ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
         },
         input,
@@ -234,6 +237,13 @@ export interface SafeBoundaryProbe {
   switchSafe: boolean;
   /** その根拠を1文で。ポインタファイルとログへ出す。 */
   switchReason: string;
+  /**
+   * アシスタント自身が引き継ぎを提案したか（Issue #1097。`switchSafe` が真のときだけ
+   * 意味を持つ）。
+   */
+  handoffSuggested: boolean;
+  /** `handoffSuggested` の根拠を1文で。提案が無ければ空。 */
+  handoffSuggestReason: string;
   /** 解決したmodel/effortが今の値と実質的に違うか（`switchSafe` が真のときだけ意味を持つ）。 */
   profileChanged: boolean;
   /** 解決したmodel/effort。確認ダイアログへ出す値と同じ。 */
@@ -263,6 +273,7 @@ export async function probeSafeBoundary(
     {
       provider: deps.provider,
       executable: deps.executable,
+      ...(deps.timeoutMs === undefined ? {} : { timeoutMs: deps.timeoutMs }),
       ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
     },
     input,
@@ -270,23 +281,20 @@ export async function probeSafeBoundary(
   if (assessment === undefined) {
     return undefined;
   }
-  if (!assessment.switchSafe) {
-    return {
-      assessment,
-      switchSafe: false,
-      switchReason: assessment.switchReason,
-      profileChanged: false,
-      profile: { model: current.model, effort: current.effort },
-    };
-  }
   // 明示設定（`agent.autoHandoff.model` / `.effort`）まで含めた最終的な提案と比べる。
   // 解決結果だけで比べると、設定で固定している人のところで毎回「変わった」ことになる
   const proposal = await proposeHandoffModelSettings(current, input, deps, assessment);
   return {
     assessment,
-    switchSafe: true,
+    switchSafe: assessment.switchSafe,
     switchReason: assessment.switchReason,
-    profileChanged: isProfileChange(current, proposal.settings),
+    // `handoffSuggested` は `switchSafe` と独立に通す（Issue #1097）。提案した側が既に
+    // 「いま切り替えてよい」と判断しており、そこへ分類器の `switchSafe` を重ねると
+    // 「MRは作成済みだが未マージ」のような状態で宣言を握り潰すことになる
+    handoffSuggested: assessment.handoffSuggested,
+    handoffSuggestReason: assessment.handoffSuggestReason,
+    // `profileChanged` の方は従来どおり `switchSafe` を要求する
+    profileChanged: assessment.switchSafe && isProfileChange(current, proposal.settings),
     profile: proposal.settings,
   };
 }

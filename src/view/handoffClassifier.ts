@@ -1,6 +1,7 @@
 import {
-  runHeadlessPrompt,
+  runHeadlessPromptDetailed,
   type HeadlessCliDeps,
+  type HeadlessOutcome,
   type HeadlessProvider,
 } from '../loop/headlessCli';
 import {
@@ -43,13 +44,28 @@ export const CLASSIFIER_MODELS: Record<HeadlessProvider, string> = {
   codex: 'terra',
 };
 
-/** 分類の待ち時間。人が引き継ぎ操作の結果を待っているため、長く待たせない。 */
-export const CLASSIFIER_TIMEOUT_MS = 30_000;
+/**
+ * 分類の待ち時間の既定（Issue #1097で30秒から延長）。
+ *
+ * 同じヘッドレス実行を使うAdvisorの既定（120秒）に合わせる。30秒では時間切れになり、
+ * `undefined` が返って引き継ぎが黙って発火しなかった。自動発火の経路では人が結果を待って
+ * いないため長くても体感の損が無く、手動でも「待ってでも判定する」方が、引き継ぎ元の設定の
+ * まま黙って進むよりよい。`agent.autoHandoff.classifierTimeoutMs` で変えられる。
+ */
+export const CLASSIFIER_TIMEOUT_MS = 120_000;
 
 /** 分類の材料。`HandoffPointerInput` が既に集めている値だけで構成する。 */
 export interface HandoffClassifierInput {
   /** 直近のユーザー指示（会話順）。 */
   recentUserMessages: readonly string[];
+  /**
+   * 直前のアシスタント応答（会話順、末尾数件）。
+   *
+   * ユーザーが次の指示を出す前に、アシスタント側が「この作業は完了、次は別の作業へ」と
+   * 宣言していることがある（Issue #1097）。指示だけを見ていると、その宣言が分類の材料に
+   * 入らず、作業の切り替わりを検知できない。
+   */
+  recentAssistantMessages: readonly string[];
   /** 直前のターンが失敗して終わったか。 */
   turnFailed: boolean;
   cwd: string | undefined;
@@ -65,6 +81,13 @@ export interface HandoffClassifierInput {
 const MESSAGE_LIMIT = 400;
 /** 渡す指示の件数。新しいものを優先する。 */
 const MESSAGE_COUNT = 5;
+/**
+ * 渡すアシスタント応答の件数。
+ *
+ * 指示より少ないのは、応答が指示より長くなりやすく、折り畳んでも件数を増やすとプロンプトが
+ * 指示の側を押しのけるため。切り替わりの宣言は直近の応答に出る。
+ */
+const ASSISTANT_MESSAGE_COUNT = 2;
 /** 渡すファイルの件数。 */
 const FILE_COUNT = 20;
 /** 理由1件の上限。ポインタファイルとログへそのまま出すため長くしない。 */
@@ -86,6 +109,10 @@ function fold(text: string, limit: number): string {
 export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   const messages = input.recentUserMessages
     .slice(-MESSAGE_COUNT)
+    .map((m) => fold(m, MESSAGE_LIMIT))
+    .filter((m) => m !== '');
+  const assistantMessages = input.recentAssistantMessages
+    .slice(-ASSISTANT_MESSAGE_COUNT)
     .map((m) => fold(m, MESSAGE_LIMIT))
     .filter((m) => m !== '');
   const files = input.turnEditedFiles.slice(0, FILE_COUNT);
@@ -129,6 +156,14 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   lines.push('');
   lines.push(messages.length === 0 ? '（記録が無い）' : messages.map((m) => `- ${m}`).join('\n'));
   lines.push('');
+  lines.push('### 直前のアシスタントの応答（古い順）');
+  lines.push('');
+  lines.push(
+    assistantMessages.length === 0
+      ? '（記録が無い）'
+      : assistantMessages.map((m) => `- ${m}`).join('\n'),
+  );
+  lines.push('');
   lines.push('### 直前のターンで編集したファイル');
   lines.push('');
   lines.push(
@@ -140,6 +175,9 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   lines.push('## 分類の指針');
   lines.push('');
   lines.push('- 会話の話題ではなく、次のセッションが実際に行う作業で判断する');
+  lines.push(
+    '- アシスタントの応答が次に取り掛かる作業を宣言していれば、直前までやっていた作業ではなく、その宣言された作業を分類の対象とする',
+  );
   lines.push('- 材料が乏しいときは各軸を1へ寄せる。分からないことを理由に0へ落とさない');
   lines.push('- confidenceは0〜1の小数で、この分類にどれだけ自信があるか');
   lines.push('');
@@ -155,6 +193,20 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   );
   lines.push('- switch_reasonにはその根拠を1文で書く');
   lines.push('');
+  lines.push('## 引き継ぎを提案しているか（handoff_suggested）');
+  lines.push('');
+  lines.push(
+    'さらに、**直前のアシスタントの応答**が、いまのセッションを終えて新しいセッションへ移ることを自分から提案しているかを判定してください。判定するのはアシスタントの応答だけで、ユーザーの指示は対象にしません。',
+  );
+  lines.push('');
+  lines.push(
+    '- true: 「別セッションで実装することを推奨」「次は新しいチャットへ引き継ぐ」「/clear してから続きを」「handoffして」のように、セッションを切り替える提案が応答に含まれる（言い回しは問わない）',
+  );
+  lines.push(
+    '- false: そうした提案が無い。作業の完了報告・次にやることの説明だけで、セッションの切り替えに触れていないものは false',
+  );
+  lines.push('- handoff_suggest_reasonには根拠を1文で書く。提案が無ければ空文字にする');
+  lines.push('');
   lines.push('## 出力');
   lines.push('');
   lines.push(
@@ -162,7 +214,7 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   );
   lines.push('');
   lines.push(
-    '{"task_type": "<上の一覧から1つ>", "difficulty": 0, "scope": 0, "ambiguity": 0, "risk": 0, "autonomy": 0, "confidence": 0.0, "reasons": ["<根拠を日本語で短く>", "..."], "switch_safe": true, "switch_reason": "<根拠を日本語で1文>"}',
+    '{"task_type": "<上の一覧から1つ>", "difficulty": 0, "scope": 0, "ambiguity": 0, "risk": 0, "autonomy": 0, "confidence": 0.0, "reasons": ["<根拠を日本語で短く>", "..."], "switch_safe": true, "switch_reason": "<根拠を日本語で1文>", "handoff_suggested": false, "handoff_suggest_reason": "<根拠を日本語で1文。提案が無ければ空文字>"}',
   );
   return lines.join('\n');
 }
@@ -234,6 +286,13 @@ export function parseAssessment(raw: string): TaskAssessment | undefined {
   const switchReason =
     typeof rawSwitchReason === 'string' ? fold(rawSwitchReason, REASON_LIMIT) : '';
 
+  // handoff_suggestedも**読めなければfalse**。欠けたまま提案があった扱いにすると、
+  // 何も提案していない応答でタブが入れ替わる（Issue #1097）
+  const handoffSuggested = record['handoff_suggested'] === true;
+  const rawHandoffSuggestReason = record['handoff_suggest_reason'];
+  const handoffSuggestReason =
+    typeof rawHandoffSuggestReason === 'string' ? fold(rawHandoffSuggestReason, REASON_LIMIT) : '';
+
   return {
     taskType,
     difficulty,
@@ -245,6 +304,8 @@ export function parseAssessment(raw: string): TaskAssessment | undefined {
     reasons,
     switchSafe,
     switchReason,
+    handoffSuggested,
+    handoffSuggestReason,
   };
 }
 
@@ -253,8 +314,10 @@ export interface HandoffClassifierDeps {
   provider: HeadlessProvider;
   executable: string;
   logWarn?: (message: string) => void;
+  /** 待ち時間。省略時は `CLASSIFIER_TIMEOUT_MS`（設定で変えられる。Issue #1097）。 */
+  timeoutMs?: number;
   /** テストから差し替えるための口。既定は実際のヘッドレス実行。 */
-  run?: (deps: HeadlessCliDeps, prompt: string) => Promise<string | undefined>;
+  run?: (deps: HeadlessCliDeps, prompt: string) => Promise<HeadlessOutcome>;
 }
 
 /**
@@ -266,25 +329,31 @@ export async function classifyHandoff(
   deps: HandoffClassifierDeps,
   input: HandoffClassifierInput,
 ): Promise<TaskAssessment | undefined> {
-  const run = deps.run ?? runHeadlessPrompt;
+  const run = deps.run ?? runHeadlessPromptDetailed;
   try {
-    const raw = await run(
+    const outcome = await run(
       {
         provider: deps.provider,
         executable: deps.executable,
         model: CLASSIFIER_MODELS[deps.provider],
-        timeoutMs: CLASSIFIER_TIMEOUT_MS,
+        timeoutMs: deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS,
         ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
       },
       buildClassifierPrompt(input),
     );
-    if (raw === undefined) {
-      deps.logWarn?.('引き継ぎ先の作業の分類が応答しませんでした');
+    if (!outcome.ok) {
+      // 時間切れと起動・異常終了を言い分ける（Issue #1097）。同じ「応答しませんでした」だと
+      // タイムアウトを延ばすべきなのか、CLIのパスが違うのかがログから判らない
+      deps.logWarn?.(
+        outcome.reason === 'timeout'
+          ? `引き継ぎ先の作業の分類が時間切れになりました（${deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS}ms）`
+          : '引き継ぎ先の作業の分類を実行できませんでした（CLIの起動失敗・異常終了）',
+      );
       return undefined;
     }
-    const assessment = parseAssessment(raw);
+    const assessment = parseAssessment(outcome.text);
     if (assessment === undefined) {
-      deps.logWarn?.('引き継ぎ先の作業の分類の応答を読めませんでした');
+      deps.logWarn?.('引き継ぎ先の作業の分類の応答を読めませんでした（JSONとして不正）');
     }
     return assessment;
   } catch (e) {

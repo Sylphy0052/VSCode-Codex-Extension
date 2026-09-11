@@ -814,6 +814,20 @@
           "scope": "window",
           "markdownDescription": "安全な区切りで、次の作業に合うmodel/effort（`agent.autoHandoff.router` の判定結果）が現在の値と違うときに自動引き継ぎする（Issue #1090）。コンテキスト残量は問わない。「設計が終わって次は実装」「実装から原因不明のバグ調査へ」のように、モデルを変えるべき区切りで新しいセッションへ移るための設定。モデルが変わるとき、またはeffortが2段以上動くときだけ発火する。"
         },
+        "agent.autoHandoff.classifierTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 5000,
+          "maximum": 600000,
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先の作業を分類するヘッドレス実行（`agent.autoHandoff.router`）の待ち時間（ミリ秒。Issue #1097）。時間切れになると分類が得られず、安全な区切りを待つ契機（`softThreshold` / `onProfileChange` / `onAssistantSuggestion`）は発火しない。範囲外の値と数値でない値は既定の120000へ丸める。"
+        },
+        "agent.autoHandoff.onAssistantSuggestion": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "安全な区切りで、アシスタント自身が「別セッションで続きを」「新しいチャットへ引き継ぐ」と提案したときに自動引き継ぎする（Issue #1097）。コンテキスト残量もmodel/effortの変化も問わない。提案があったかどうかは `agent.autoHandoff.router` の分類器が判定する（正規表現では言い回しのぶれを拾えないため）。`/loop` 実行中とタスク用セッションでは発火しない。"
+        },
         "agent.autoHandoff.closeOldTab": {
           "type": "boolean",
           "default": true,

@@ -450,6 +450,44 @@ export function readAutoHandoffOnProfileChange(): boolean {
   return typeof raw === 'boolean' ? raw : true;
 }
 
+/** 分類のタイムアウトの既定と、設定で受け付ける範囲（Issue #1097）。 */
+const CLASSIFIER_TIMEOUT_MS_DEFAULT = 120_000;
+const CLASSIFIER_TIMEOUT_MIN_MS = 5_000;
+const CLASSIFIER_TIMEOUT_MAX_MS = 600_000;
+
+/**
+ * 引き継ぎ先の作業を分類するヘッドレス実行の待ち時間（Issue #1097）。
+ *
+ * 既定は `CLASSIFIER_TIMEOUT_MS`（120秒）。短すぎると時間切れで分類が `undefined` になり、
+ * 区切り待ちの契機が黙って発火しなくなる。数値でない値・範囲外は既定へ丸める。
+ */
+export function readAutoHandoffClassifierTimeoutMs(): number {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('autoHandoff.classifierTimeoutMs');
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return CLASSIFIER_TIMEOUT_MS_DEFAULT;
+  }
+  const rounded = Math.round(raw);
+  if (rounded < CLASSIFIER_TIMEOUT_MIN_MS || rounded > CLASSIFIER_TIMEOUT_MAX_MS) {
+    return CLASSIFIER_TIMEOUT_MS_DEFAULT;
+  }
+  return rounded;
+}
+
+/**
+ * 安全な区切りで、アシスタント自身が引き継ぎを提案したときに引き継ぐか（Issue #1097）。
+ *
+ * 既定はON。残量にもmodel/effortの変化にも関係なく発火する。OFFにすると、提案だけを理由に
+ * した引き継ぎは起きなくなる（分類器そのものを止めるのは `agent.autoHandoff.router`）。
+ */
+export function readAutoHandoffOnAssistantSuggestion(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('autoHandoff.onAssistantSuggestion');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
 /**
  * 引き継ぎ後、旧セッションのタブを確認なしで閉じるか（Issue #1090）。
  *

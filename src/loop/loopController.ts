@@ -508,6 +508,17 @@ export class LoopController {
   }
 
   /**
+   * `pause()` で一時停止中か（Issue #1097）。
+   *
+   * `running` は `pause()` 中も `true` のままのため、「いま実際に指示を送り続けているか」は
+   * `running && !isPaused` で判る。自動引き継ぎの安全な区切り判定は、返信待ちで止まって
+   * いるループを「実行中」と数えないためにこれを見る。
+   */
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /**
    * ループを一時停止する（design.md §16.21「自分のターンを終えたあと、返信が届くまで
    * 次の指示を受け取らない」）。
    *

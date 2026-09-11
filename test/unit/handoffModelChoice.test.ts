@@ -30,6 +30,7 @@ const models = [
 const current = { model: 'gpt-5.6-sol', effort: 'medium' };
 const input = {
   recentUserMessages: ['続きをやって'],
+  recentAssistantMessages: [],
   turnFailed: false,
   cwd: '/workspace/root',
   gitBranch: 'main',
@@ -52,6 +53,8 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
     reasons: [],
     switchSafe: true,
     switchReason: '',
+    handoffSuggested: false,
+    handoffSuggestReason: '',
     ...over,
   };
 }
@@ -234,8 +237,9 @@ describe('probeSafeBoundary（Issue #1090）', () => {
       switchSafe: false,
       switchReason: '議論の途中',
       profileChanged: false,
-      profile: current,
     });
+    // 解決自体は行う（ログへ出すため）。`switchSafe` が false でも `profileChanged` は立たない
+    expect(probe?.profile).toEqual({ model: 'gpt-5.6-astra', effort: 'high' });
   });
 
   it('switch_safe が true でモデルが変わるなら profileChanged', async () => {
@@ -247,6 +251,58 @@ describe('probeSafeBoundary（Issue #1090）', () => {
       switchSafe: true,
       profileChanged: true,
       profile: { model: 'gpt-5.6-astra', effort: 'high' },
+    });
+  });
+
+  it('ユーザー指示が変わらなくてもアシスタントの宣言で profileChanged が立つ（Issue #1097）', async () => {
+    const spy = vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
+      assess({
+        switchSafe: true,
+        switchReason: '別件へ移ると宣言',
+        scope: 2,
+        ambiguity: 2,
+        risk: 2,
+      }),
+    );
+    const declared = {
+      ...input,
+      recentAssistantMessages: ['#782完了。次は新しい機能の設計に取り掛かる'],
+    };
+    const probe = await probeSafeBoundary(current, declared, deps());
+    expect(probe).toMatchObject({ switchSafe: true, profileChanged: true });
+    // 宣言が分類器まで届いていること（届かなければ切り替わりを検知できない）
+    expect(spy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        recentAssistantMessages: ['#782完了。次は新しい機能の設計に取り掛かる'],
+      }),
+    );
+  });
+
+  it('分類器の handoffSuggested と根拠をそのまま通す（Issue #1097）', async () => {
+    vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
+      assess({
+        switchSafe: true,
+        handoffSuggested: true,
+        handoffSuggestReason: '別セッションでの実装を勧めている',
+      }),
+    );
+    expect(await probeSafeBoundary(current, input, deps())).toMatchObject({
+      handoffSuggested: true,
+      handoffSuggestReason: '別セッションでの実装を勧めている',
+    });
+  });
+
+  it('switch_safe が false でも handoffSuggested は通す（Issue #1097）', async () => {
+    vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
+      assess({ switchSafe: false, handoffSuggested: true, handoffSuggestReason: '提案あり' }),
+    );
+    expect(await probeSafeBoundary(current, input, deps())).toMatchObject({
+      switchSafe: false,
+      handoffSuggested: true,
+      handoffSuggestReason: '提案あり',
+      // `profileChanged` の方は従来どおり `switchSafe` を要求する
+      profileChanged: false,
     });
   });
 
