@@ -3484,7 +3484,9 @@ export function chatScript(
   }
 
   if (composerIconRow) {
-    scheduleComposerIconsReflow();
+    // 最初の1回だけは描画を待たずに測る。1フレームでも溢れたままだと、行の外へ出た
+    // ボタンで横スクロールバーが出てしまう（この行はoverflowを指定できない）
+    reflowComposerIcons();
     if (typeof ResizeObserver === 'function') {
       new ResizeObserver(() => scheduleComposerIconsReflow()).observe(composerIconRow);
     } else {
