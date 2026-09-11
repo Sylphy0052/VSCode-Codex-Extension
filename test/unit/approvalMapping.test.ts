@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { buildEscalationRequest } from '../../src/orchestrator/approvalMapping';
 import type { ChatItem, PendingApproval } from '../../src/appserver/chatState';
 import type { WorktreeFileSystemPort } from '../../src/orchestrator/worktree';
+import {
+  classifyApprovalRequest,
+  type EscalationPolicy,
+  type TaskBoundary,
+} from '../../src/orchestrator/escalation';
 
 /** 実パス解決の代わりに、そのままの文字列を返すフェイク（境界チェックの対象にするだけなら十分）。 */
 const identityFs: WorktreeFileSystemPort = {
@@ -191,5 +196,88 @@ describe('buildEscalationRequest（design.md §16.7: 判定へは生の要求パ
       resolvingFs,
     );
     expect(request.cwd).toBe('/resolved/repo/task');
+  });
+});
+
+describe('buildEscalationRequest: 境界検査へ渡すパスの取りこぼし（Issue #1104）', () => {
+  const boundary: TaskBoundary = { allowedRoots: ['/repo/task'], gitCommonDir: undefined };
+  const policy: EscalationPolicy = { escalate: [], allow: [], autoApprove: true };
+
+  function itemWithDiff(path: string, movePath: string | undefined): ChatItem {
+    return {
+      id: 'item-1',
+      kind: 'fileChange',
+      text: '',
+      detail: '',
+      status: undefined,
+      turnId: undefined,
+      diffs: [{ path, kind: 'update', movePath, diff: '', editReplace: undefined }],
+    };
+  }
+
+  it('移動先（movePath）も境界検査の対象にする', async () => {
+    const request = await buildEscalationRequest(
+      'codex',
+      fileChangeApproval('item-1'),
+      { itemId: 'item-1' },
+      '/repo/task',
+      [itemWithDiff('/repo/task/a.ts', '/outside/a.ts')],
+      identityFs,
+    );
+    expect(request.paths).toEqual(['/repo/task/a.ts', '/outside/a.ts']);
+    expect(classifyApprovalRequest(request, boundary, policy).decision).toBe('ask');
+  });
+
+  it('元パスも移動先も境界内ならautoのまま', async () => {
+    const request = await buildEscalationRequest(
+      'codex',
+      fileChangeApproval('item-1'),
+      { itemId: 'item-1' },
+      '/repo/task',
+      [itemWithDiff('/repo/task/a.ts', '/repo/task/b.ts')],
+      identityFs,
+    );
+    expect(request.paths).toEqual(['/repo/task/a.ts', '/repo/task/b.ts']);
+    expect(classifyApprovalRequest(request, boundary, policy).decision).toBe('auto');
+  });
+
+  it('未作成ファイルは実在する最寄りの親を解決してから検査する（外向きsymlinkを見落とさない）', async () => {
+    // /repo/task/link -> /outside。その配下の new.ts はまだ無く、パス全体のrealpathは失敗する
+    const symlinkedFs: WorktreeFileSystemPort = {
+      ...identityFs,
+      realpath: async (target) => {
+        if (target === '/repo/task/link/new.ts') {
+          return undefined;
+        }
+        return target === '/repo/task/link' ? '/outside' : target;
+      },
+    };
+    const request = await buildEscalationRequest(
+      'claude',
+      fileChangeApproval(undefined),
+      { tool_name: 'Write', input: { file_path: '/repo/task/link/new.ts' } },
+      '/repo/task',
+      [],
+      symlinkedFs,
+    );
+    expect(request.paths).toEqual(['/outside/new.ts']);
+    expect(classifyApprovalRequest(request, boundary, policy).decision).toBe('ask');
+  });
+
+  it('実在する親が1つも無ければpathsを空にして判定失敗（ask）へ倒す', async () => {
+    const unresolvableFs: WorktreeFileSystemPort = {
+      ...identityFs,
+      realpath: async () => undefined,
+    };
+    const request = await buildEscalationRequest(
+      'claude',
+      fileChangeApproval(undefined),
+      { tool_name: 'Write', input: { file_path: '/repo/task/new.ts' } },
+      '/repo/task',
+      [],
+      unresolvableFs,
+    );
+    expect(request.paths).toEqual([]);
+    expect(classifyApprovalRequest(request, boundary, policy).decision).toBe('ask');
   });
 });
