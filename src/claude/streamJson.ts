@@ -46,6 +46,8 @@ export const initialClaudeState: ChatState = {
   // （Codexのみ、issue #294）
   sessionTokens: undefined,
   planMode: false,
+  // 自動引き継ぎ（Issue #1079）は拡張機能側だけで完結する状態で、CLIには対応する概念が無い
+  autoHandoff: false,
   // Codexのレビュー中フラグに相当する概念がClaude Codeには無い
   reviewing: false,
   turnResultText: '',

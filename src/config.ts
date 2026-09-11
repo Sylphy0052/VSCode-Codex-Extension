@@ -373,6 +373,30 @@ export function readChatLimitAutoResumeEnabled(): boolean {
   );
 }
 
+/**
+ * 自動引き継ぎが始まるコンテキスト残量の割合（Issue #1079）。
+ *
+ * ON/OFFはセッション単位（`ChatState.autoHandoff`）で持ち、設定にはしない。ここで持つのは
+ * 閾値だけ。名前空間が `agent.` なのは、これがCodex CLI固有の設定ではなく両プロバイダ
+ * 共通の機能だから（`codex.` はCLIの起動・サンドボックス・モデルなどCodex固有の設定に
+ * 限って使っている）。
+ *
+ * 既定の20は `chatScript.ts` の `LOW_CONTEXT_PERCENT`（残量表示が「残りわずか」に変わる
+ * 境界）と同じ。壊れた値（数値でない・範囲外）は既定へ丸める。
+ */
+export const DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT = 20;
+
+/** @see DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT */
+export function readAutoHandoffThresholdPercent(): number {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('autoHandoff.thresholdPercent');
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1 || raw > 99) {
+    return DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT;
+  }
+  return Math.round(raw);
+}
+
 /** 使用量上限の解除後の自動続行を、ユーザー設定へ保存する。 */
 export async function setChatLimitAutoResumeEnabled(enabled: boolean): Promise<void> {
   await vscode.workspace

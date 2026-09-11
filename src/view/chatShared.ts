@@ -1046,6 +1046,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2" width="11" height="12" rx="1.2"/><path d="m5 6 1.2 1.2L8.5 5M9.5 6h1.5M5 10l1.2 1.2L8.5 9M9.5 10h1.5"/></svg>',
   handoff:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h8M8.5 4.5 12 8l-3.5 3.5"/><path d="M2.5 3.5v9"/></svg>',
+  autoHandoff:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 3v10"/><path d="M3.5 8h5M6.5 5.5 9 8l-2.5 2.5"/><path d="M14.2 9.6A3.4 3.4 0 1 1 13 6.2"/><path d="M11.2 4.2h2.2v2.2"/></svg>',
   secondOpinion:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 4.2a1 1 0 0 1 1-1h6.4a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H5.4L3 11V8.8h-.2a1 1 0 0 1-1-1z"/><path d="M12.2 6.2h1a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H13V14l-2.4-2.2H8.2"/></svg>',
   previousUserMessage:
@@ -1221,6 +1223,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.handoff,
+      };
+    case 'autoHandoffToggle':
+      return {
+        ariaLabel: '自動引き継ぎ',
+        title:
+          'コンテキストの残りが少なくなったとき、または自動圧縮が走ったときに、この会話を自動で新しいセッションへ引き継ぎます（ターンの実行中は待ちます）',
+        hidden: false,
+        pressed: true,
+        icon: COMPOSER_ICONS.autoHandoff,
       };
     case 'secondOpinion':
       return {

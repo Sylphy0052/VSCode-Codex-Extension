@@ -116,6 +116,8 @@ function createManager(options?: {
   revealImportSection?: () => void | Promise<void>;
   store?: SessionStore;
   sessionSettings?: SessionModelSettingsStore;
+  /** 引き継ぎのポインタファイル（Issue #1079）の置き場所。 */
+  globalStorageDir?: string;
 }): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
@@ -134,6 +136,8 @@ function createManager(options?: {
     factory,
     options?.store,
     options?.sessionSettings,
+    options?.globalStorageDir ??
+      nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-handoff-')),
   );
   return { manager, connection: connection() };
 }
@@ -1919,11 +1923,12 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toHaveLength(0);
   });
 
-  it('rolloutが解決できれば、新セッションへ固定文言とパスを送る', async () => {
+  it('rolloutが解決できれば、ポインタファイルを書いて新セッションへそのパスを送る', async () => {
     const store = fakeSessionStore({
       resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
     });
-    const { manager, connection } = createManager({ store });
+    const globalStorageDir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-handoff-'));
+    const { manager, connection } = createManager({ store, globalStorageDir });
 
     const opened = manager.openNew('/workspace/root');
     await tick();
@@ -1931,18 +1936,32 @@ describe('handoffToNewSession（issue #694）', () => {
     await opened;
 
     const handoff = manager.handoffToNewSession();
-    await tick();
+    // ポインタファイルの書き出しとブランチ解決（どちらも実I/O）を挟むため、
+    // マイクロタスクを流すだけでは `thread/start` がまだ出ていない
+    await vi.waitFor(() => {
+      expect(connection.requests.filter((r) => r.method === 'thread/start').length).toBe(2);
+    });
     connection.resolveFirst('thread/start', threadStartResult('thread-new'));
-    await tick();
+    await vi.waitFor(() => {
+      expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(true);
+    });
     connection.resolveFirst('turn/start', {});
     await handoff;
 
     const turnStart = connection.requests.filter((r) => r.method === 'turn/start');
-    expect(
-      turnStart.some((r) =>
-        JSON.stringify(r.params).includes('/home/user/.codex/sessions/rollout-x.jsonl'),
-      ),
-    ).toBe(true);
+    const sent = turnStart.map((r) => JSON.stringify(r.params)).join('\n');
+    // 初回プロンプトはポインタファイルのパスを指すだけで、rollout本体は指さない
+    expect(sent).toContain(nodePath.join(globalStorageDir, 'handoff'));
+    expect(sent).not.toContain('/home/user/.codex/sessions/rollout-x.jsonl');
+
+    // rolloutの在処と抽出コマンドはポインタファイル側にある
+    const pointerPath = /(\/[^"\\\s]+\.md)/u.exec(sent)?.[1];
+    expect(pointerPath).toBeDefined();
+    const pointer = nodeFs.readFileSync(pointerPath!, 'utf8');
+    expect(pointer).toContain('/home/user/.codex/sessions/rollout-x.jsonl');
+    expect(pointer).toContain('response_item');
+    // Codex側では編集ファイルの抽出式を載せない（確実な式が書けないため）
+    expect(pointer).not.toContain('file-history-snapshot');
   });
 
   it('rolloutが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {

@@ -750,6 +750,7 @@
               "forgeHub",
               "openProgress",
               "handoffToNewSession",
+              "autoHandoffToggle",
               "secondOpinion"
             ],
             "enumDescriptions": [
@@ -769,6 +770,7 @@
               "Forge Hubを開く",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ",
+              "自動引き継ぎ（コンテキスト逼迫時に自動で新セッションへ引き継ぐ）を切り替える",
               "独立したCodexセッションへ意見を求める（セカンドオピニオン）"
             ]
           },
@@ -783,6 +785,14 @@
           ],
           "scope": "window",
           "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は添付・ループ・圧縮・要約・計画・新セッションへ引き継ぐ・セカンドオピニオンの7つ（Issue #900）。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
+        },
+        "agent.autoHandoff.thresholdPercent": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 99,
+          "scope": "window",
+          "markdownDescription": "自動引き継ぎ（Issue #1079）が始まるコンテキスト残量の割合。残りがこの値以下になった時点、または自動圧縮が走った時点で、会話を新しいセッションへ引き継ぐ。既定の20は入力欄の残量表示が「残りわずか」に変わる境界と同じ。ON/OFFはこの設定ではなく会話ごとに入力欄の「…」メニューの「自動引き継ぎ」で切り替える（既定はOFF）。Codex/Claude Code両画面共通。"
         },
         "agent.chat.limitAutoResume.enabled": {
           "type": "boolean",
