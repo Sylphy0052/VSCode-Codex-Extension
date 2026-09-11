@@ -37,7 +37,6 @@ import type { SideQuestionHistoryEntry } from '../claude/control';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
-import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import { effortsFor } from '../codex/modelCatalog';
 import {
   currentWorkspaceFolder,
@@ -742,11 +741,6 @@ export class ClaudeChatViewManager
       );
       return undefined;
     }
-    const effectiveConfig = taskConfig ?? readClaudeConfig().claude;
-    if (isUnsafeClaudeCombination(effectiveConfig) && !(await this.confirmUnsafe())) {
-      return undefined;
-    }
-
     const sessionId = randomSessionId();
     // `modelSettings` を渡す経路は引き継ぎ（Issue #1082）。CLIはmodel / effortを起動時の
     // argvで受け取るため、起動後に `entry.modelSettings` を書き換えても初回プロンプトには
@@ -3082,15 +3076,6 @@ export class ClaudeChatViewManager
     void vscode.window.showWarningMessage(
       'この画面ではツール実行の承認を受け取れませんでした。claude.permissionMode の設定に従って動作します。',
     );
-  }
-
-  private async confirmUnsafe(): Promise<boolean> {
-    const choice = await vscode.window.showWarningMessage(
-      '承認が無効になっています。Claude Code はツールを確認なしで実行します。',
-      { modal: true },
-      '実行する',
-    );
-    return choice === '実行する';
   }
 }
 

@@ -151,8 +151,8 @@ function configArgs(config: ClaudeConfig, warnings: string[]): string[] {
 }
 
 /**
- * 承認をすべて外す指定かどうか。起動前に確認ダイアログを出す
- * （Codexの `danger-full-access` + `never` と同じ扱い）。
+ * 承認をすべて外す指定かどうか（Codexの `danger-full-access` + `never` と同じ扱い）。
+ * 会話開始時の確認ダイアログはIssue #1096で削除した。
  */
 export function isUnsafeClaudeCombination(config: ClaudeConfig): boolean {
   if (config.permissionMode === 'bypassPermissions') {
