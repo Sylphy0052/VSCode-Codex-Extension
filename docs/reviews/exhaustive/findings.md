@@ -4,6 +4,8 @@
 
 P1は権限・秘密・データ保持・停止などの重大な問題、P2は通常の不具合や検査の欠落、P3は影響が限定的な問題。実機再現の有無と成立条件は各根拠文書へ記録した。IDを付けない契約上の注意・追加検証候補はこの一覧へ数えない。
 
+P1の23件は2026-09-12にGitHub Issueへ起票した。対応表は末尾の「P1のIssue」節にある。起票は修正完了を意味しない。
+
 | ID                  | 優先度 | 内容                                                           | 根拠                                            |
 | ------------------- | ------ | -------------------------------------------------------------- | ----------------------------------------------- |
 | EX-AFTERTREE-01     | P1     | 説明ファイルへの書込みが追跡済みリンクをたどる                 | [精査記録](second-opinion-lifecycle.md)         |
@@ -100,3 +102,33 @@ P1は権限・秘密・データ保持・停止などの重大な問題、P2は�
 | EX-WORKTREE-01      | P2     | 別タスクのブランチ名が正規化で衝突する                         | [精査記録](worktree-main.md)                    |
 | EX-TEXT-01          | P3     | inline切詰めでサロゲートペアを分断する                         | [精査記録](orchestrator-helpers.md)             |
 | EX-WORKFLOW-01      | P3     | 34行の`task.outcome?.trim() !== ''`はoutcome未指定でも真になる | [精査記録](orchestrator-helpers.md)             |
+
+## P1のIssue
+
+2026-09-12にGitHub Issueへ起票した。EX-APPROVAL-01とEX-APPROVAL-02は同じ変換段階（`approvalMapping.ts`）の問題なので1件にまとめた。各Issueには現状・発生条件・対応方針・受入基準を書き、根拠として本一覧と精査記録を参照する。
+
+| ID                | Issue                                                                     |
+| ----------------- | ------------------------------------------------------------------------- |
+| EX-AFTERTREE-01   | [#1103](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1103) |
+| EX-APPROVAL-01    | [#1104](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1104) |
+| EX-APPROVAL-02    | [#1104](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1104) |
+| EX-CONFIG-01      | [#1105](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1105) |
+| EX-CONN-01        | [#1106](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1106) |
+| EX-EXT-01         | [#1107](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1107) |
+| EX-FORGE-01       | [#1108](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1108) |
+| EX-FORGE-03       | [#1109](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1109) |
+| EX-FORGE-04       | [#1110](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1110) |
+| EX-INTEGRATION-01 | [#1111](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1111) |
+| EX-MCP-01         | [#1112](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1112) |
+| EX-MESSAGING-02   | [#1113](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1113) |
+| EX-PSEUDO-01      | [#1114](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1114) |
+| EX-PSEUDO-02      | [#1115](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1115) |
+| EX-PSEUDO-04      | [#1116](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1116) |
+| EX-PSEUDO-05      | [#1117](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1117) |
+| EX-PSEUDO-06      | [#1118](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1118) |
+| EX-REDACT-01      | [#1119](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1119) |
+| EX-ROADMAP-03     | [#1120](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1120) |
+| EX-RUNNER-02      | [#1121](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1121) |
+| EX-SANITIZE-01    | [#1122](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1122) |
+| EX-UNTRACKED-01   | [#1123](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1123) |
+| EX-WORKFLOW-03    | [#1124](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/1124) |
