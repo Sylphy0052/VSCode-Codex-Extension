@@ -3414,17 +3414,38 @@ export function chatScript(
     return maxRight > rowRight + 1;
   }
 
+  /**
+   * 「…」メニューへ移したボタンを、描画時の並びの位置へ戻す。自分より後ろで表に残って
+   * いる最初のボタンの前へ入れれば、並びは元のままになる（誰も残っていなければ「…」の前）。
+   */
+  function restoreComposerIcon(button) {
+    const index = composerIconRowOrder.indexOf(button);
+    let anchor = composerOverflow;
+    for (let i = index + 1; i < composerIconRowOrder.length; i++) {
+      const next = composerIconRowOrder[i];
+      if (next.parentNode === composerIconRow) {
+        anchor = next;
+        break;
+      }
+    }
+    button.removeAttribute('role');
+    composerIconRow.insertBefore(button, anchor);
+  }
+
   function reflowComposerIcons() {
     if (!composerIconRow || reflowingComposerIcons) return;
     // 開いている間に項目が動くと押し間違える。閉じたときに測り直す
     if (!composerOverflowMenu.hidden) return;
     reflowingComposerIcons = true;
+    // DOMから外して入れ直すとフォーカスは外れる。測り直しのたびにフォーカスが飛ぶと
+    // キーボード操作の最中に行き先を見失うため、動かしたあとに戻せるなら戻す
+    const focused = document.activeElement;
     try {
       composerOverflow.hidden = false;
-      // いったん全部を元の並びで表へ戻し、そのうえで入りきらない分を測る
+      // いったん全部を元の並びで表へ戻し、そのうえで入りきらない分を測り直す。
+      // 動かすのは実際にメニューにあるボタンだけにして、表に留まる分は触らない
       for (const button of composerIconRowOrder) {
-        button.removeAttribute('role');
-        composerIconRow.insertBefore(button, composerOverflow);
+        if (button.parentNode !== composerIconRow) restoreComposerIcon(button);
       }
       let guard = composerIconRowOrder.length;
       while (composerIconRowOverflowing() && guard-- > 0) {
@@ -3440,6 +3461,15 @@ export function chatScript(
       composerOverflow.hidden = overflowMenuItems().length === 0;
     } finally {
       reflowingComposerIcons = false;
+    }
+    // 「…」メニューへ移ったボタンは畳まれていて focus できないため、見えている場合だけ戻す
+    if (
+      focused &&
+      focused !== document.activeElement &&
+      focused.isConnected &&
+      focused.offsetParent !== null
+    ) {
+      focused.focus();
     }
   }
 

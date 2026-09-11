@@ -437,8 +437,8 @@ ${sharedStyles()}
    */
   #composerIconRow > button > .composerOverflowLabel { display: none; }
   /*
-   * 送信以外のボタンはアイコンのみ（issue #226）。ラベルを消していても折り返すと
-   * 縦に潰れて読みにくいため、ボタン自体はnowrap・縮小なしのままにする。
+   * 送信以外のボタンはアイコンのみ（issue #226）。幅が足りないときに全部を細く潰すと
+   * どれも読めなくなるため、縮めずに1つずつ「…」メニューへ送る（issue #1086）。
    */
   #composer button {
     white-space: nowrap;

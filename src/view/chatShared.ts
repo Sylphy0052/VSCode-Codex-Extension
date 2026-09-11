@@ -1333,7 +1333,7 @@ ${chatStyles()}
     <ol id="queueList"></ol>
   </div>
   <div id="limitAutoResumeStatus" role="status" aria-live="polite"${options.limitAutoResumeEnabled === true ? '' : ' hidden'}>上限解除後の自動続行: ON（上限検知待ち）</div>
-  <details id="statusBox" open>
+  <details id="statusBox" open hidden>
     <summary title="実行状態・使用量の表示を開閉します"><span class="label">状態</span><span id="statusSummary"></span></summary>
     <div id="status"></div>
   </details>
