@@ -87,6 +87,7 @@ import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
+  advanceCompactionCount,
   buildHandoffPrompt,
   countCompactions,
   decideAutoHandoff,
@@ -282,8 +283,14 @@ interface ChatPanel extends BaseChatPanel {
    * しても、1セッションにつき1回しか引き継がない（`claudeChatView.ts`と同じ扱い）。
    */
   autoHandoffStarted: boolean;
-  /** 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら圧縮が走った。 */
-  lastCompactionCount: number;
+  /**
+   * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら圧縮が走った。
+   *
+   * 最初の同期を受け取るまでは `undefined`。復元や履歴からの再開では、最初の同期で
+   * 過去の圧縮がまとめて届くため、`0` を基準に比較すると圧縮が走ったと誤判定する
+   * （Issue #1101）。
+   */
+  lastCompactionCount: number | undefined;
   /**
    * 前回、安全な区切りの分類器（Issue #1090）を走らせたときの材料の鍵。
    *
@@ -584,6 +591,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     cwd?: string,
     taskConfig?: CodexConfig,
     modelSettings?: SessionModelSettings,
+    preserveFocus = false,
   ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
@@ -595,7 +603,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
 
     const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig, undefined, modelSettings);
-    this.showPanel(entry, false);
+    this.showPanel(entry, preserveFocus);
     const pendingKey = this.pendingStarts.begin(entry);
     try {
       const threadId = await entry.session.start(targetCwd, this.configFor(entry));
@@ -733,7 +741,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return false;
     }
 
-    const newThreadId = await this.openNew(entry.cwd, entry.taskConfig, choice.settings);
+    // 画面に出ていないタブからの引き継ぎでは、新セッションを背面に開く（Issue #1101）。
+    // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
+    // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる
+    const preserveFocus = entry.panel?.visible !== true;
+    const newThreadId = await this.openNew(
+      entry.cwd,
+      entry.taskConfig,
+      choice.settings,
+      preserveFocus,
+    );
     if (newThreadId === undefined) {
       return false;
     }
@@ -792,9 +809,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `decideAutoHandoff`）。
    */
   private maybeAutoHandoff(entry: ChatPanel, state: ChatState): void {
-    const compactions = countCompactions(state);
-    const compacted = compactions > entry.lastCompactionCount;
-    entry.lastCompactionCount = compactions;
+    const { compacted, lastCompactionCount } = advanceCompactionCount(
+      entry.lastCompactionCount,
+      countCompactions(state),
+    );
+    entry.lastCompactionCount = lastCompactionCount;
 
     if (entry.disposed || entry.panel === undefined) {
       return;
@@ -1142,7 +1161,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       limitAutoResumeAt: undefined,
       limitAutoResumeAwaitingResult: false,
       autoHandoffStarted: false,
-      lastCompactionCount: 0,
+      lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
       safeBoundaryProbing: false,
