@@ -741,6 +741,7 @@ export class ClaudeChatViewManager
       );
       return undefined;
     }
+
     const sessionId = randomSessionId();
     // `modelSettings` を渡す経路は引き継ぎ（Issue #1082）。CLIはmodel / effortを起動時の
     // argvで受け取るため、起動後に `entry.modelSettings` を書き換えても初回プロンプトには
