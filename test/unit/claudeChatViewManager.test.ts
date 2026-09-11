@@ -2569,6 +2569,9 @@ describe('X3: 脇道の質問のmanager層配線（issue #334、issue #340横断
 describe('handoffToNewSession（issue #694）', () => {
   beforeEach(() => {
     __mock.reset();
+    // 引き継ぎ先のレベル判定（Issue #1082）は実CLIをヘッドレス起動する。ここで見たいのは
+    // ポインタファイルの書き出しと初回送信なので、判定は切って外部プロセスに触らせない
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });

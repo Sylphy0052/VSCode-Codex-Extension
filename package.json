@@ -798,7 +798,7 @@
           "type": "string",
           "default": "",
           "scope": "window",
-          "markdownDescription": "引き継ぎ先セッションで使うモデル（Issue #1082）。空なら未指定で、内容から決めるルータの判定→引き継ぎ元のモデル→グローバル設定の順で決まる。指定するとその全てより優先する。Codex/Claude Code両画面共通のため、片方にしか無いモデル名を書くともう片方の引き継ぎで無効な値がCLIへ渡る。"
+          "markdownDescription": "引き継ぎ先セッションで使うモデル（Issue #1082）。空なら未指定で、レベル判定→引き継ぎ元のモデル→グローバル設定の順で決まる。指定するとその全てより優先する。Codex/Claude Code両画面共通のため、片方にしか無いモデル名を書くともう片方の引き継ぎで無効な値がCLIへ渡る。"
         },
         "agent.autoHandoff.effort": {
           "type": "string",
@@ -810,7 +810,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "引き継ぎ先のmodel/effortを引き継ぎ元の内容から決める（Issue #1082）。直近のユーザー指示・直前のターンが失敗したか・作業中のパスから作業の重さを見積もり、モデル一覧とeffort一覧の中から選ぶ。判定の理由は引き継ぎのポインタファイルと出力パネルに残る。OFFにすると引き継ぎ元のmodel/effortをそのまま持ち越す。"
+          "markdownDescription": "引き継ぎ先のmodel/effortを引き継ぎ元の内容から決める（Issue #1082）。引き継ぎのたびに、会話しているのと同じCLI（Codex/Claude Code）をヘッドレスで1回だけ起動し、直近のユーザー指示・直前のターンが失敗したか・作業中のパスを渡して作業の重さ（L0〜L5）を判定させる。判定にはツールも利用者の設定も渡さない。結果はモデル一覧とeffort一覧の中から解決し、判定の理由は引き継ぎのポインタファイルと出力パネルに残る。OFFにすると判定のためのCLI起動を行わず、引き継ぎ元のmodel/effortをそのまま持ち越す。"
         },
         "agent.chat.limitAutoResume.enabled": {
           "type": "boolean",

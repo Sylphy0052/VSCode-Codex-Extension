@@ -1,266 +1,135 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelInfo } from '../../src/codex/modelCatalog';
-import { decideHandoffModel, type HandoffRouterInput } from '../../src/view/handoffRouter';
+import {
+  EFFORT_LADDER,
+  MODEL_TIERS,
+  resolveLevelSettings,
+  type HandoffLevel,
+} from '../../src/view/handoffRouter';
 
-/** Codex側のカタログを模した一覧。effortは5段階。 */
-function codexModels(): ModelInfo[] {
-  const efforts = ['low', 'medium', 'high', 'xhigh', 'max'].map((effort) => ({
-    effort,
-    description: undefined,
-  }));
-  return [
-    {
-      slug: 'gpt-5.6-luna',
-      displayName: 'luna',
-      description: undefined,
-      defaultEffort: 'medium',
-      supportsEffort: true,
-      efforts,
-    },
-    {
-      slug: 'gpt-5.6-terra',
-      displayName: 'terra',
-      description: undefined,
-      defaultEffort: 'medium',
-      supportsEffort: true,
-      efforts,
-    },
-    {
-      slug: 'gpt-5.6-sol',
-      displayName: 'sol',
-      description: undefined,
-      defaultEffort: 'medium',
-      supportsEffort: true,
-      efforts,
-    },
-  ];
-}
-
-/** effortの概念を持たないモデルだけの一覧（Claude Codeの haiku 相当）。 */
-function noEffortModels(): ModelInfo[] {
-  return [
-    {
-      slug: 'haiku',
-      displayName: 'haiku',
-      description: undefined,
-      defaultEffort: undefined,
-      supportsEffort: false,
-      efforts: [],
-    },
-  ];
-}
-
-function input(over: Partial<HandoffRouterInput> = {}): HandoffRouterInput {
+function model(slug: string, efforts: readonly string[]): ModelInfo {
   return {
-    trigger: { kind: 'manual' },
-    turnFailed: false,
-    recentUserMessages: [],
-    cwd: '/home/me/work/app',
-    gitBranch: 'main',
-    turnEditedFiles: [],
-    ...over,
+    slug,
+    displayName: slug,
+    description: undefined,
+    defaultEffort: undefined,
+    supportsEffort: efforts.length > 0,
+    efforts: efforts.map((effort) => ({ effort, description: undefined })),
   };
 }
 
-const current = { model: 'gpt-5.6-terra', effort: 'medium' };
+const FIVE = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-describe('decideHandoffModel: 判定材料が無いとき', () => {
-  it('陰性対照: 指示が空・失敗なし・パス該当なしでは判定しない', () => {
-    expect(decideHandoffModel(input(), codexModels(), current)).toBeUndefined();
+/** Codex側のカタログを模した一覧（Terra < Sol < Astra）。 */
+function codexModels(): ModelInfo[] {
+  return [
+    model('gpt-5.6-luna', FIVE),
+    model('gpt-5.6-terra', FIVE),
+    model('gpt-5.6-sol', FIVE),
+    model('gpt-5.6-astra', FIVE),
+  ];
+}
+
+/** Claude Code側のカタログを模した一覧（Sonnet < Opus < Fable）。 */
+function claudeModels(): ModelInfo[] {
+  return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE), model('fable', FIVE)];
+}
+
+const current = { model: 'gpt-5.6-sol', effort: 'high' };
+
+describe('レベルの段の定義', () => {
+  it('ティアは3段で、最下位にhaiku/lunaを含めない', () => {
+    expect(MODEL_TIERS).toHaveLength(3);
+    const flat = MODEL_TIERS.flat();
+    expect(flat).not.toContain('haiku');
+    expect(flat).not.toContain('luna');
   });
 
-  it('陰性対照: どのキーワードにも当たらない指示だけでは判定しない', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['READMEの誤字を直して', 'ありがとう'] }),
-      codexModels(),
-      current,
-    );
-    expect(decision).toBeUndefined();
-  });
-
-  it('陽性対照: キーワードが1つでもあれば判定する', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['この関数をリファクタして'] }),
-      codexModels(),
-      current,
-    );
-    expect(decision).toBeDefined();
-    expect(decision?.reasons).toContain('+1 refactor');
-  });
-});
-
-describe('decideHandoffModel: 加点とレベル', () => {
-  it('加点1件（score=2）はL1', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['パフォーマンスが悪いので直したい'] }),
-      codexModels(),
-      current,
-    );
-    expect(decision?.level).toBe(1);
-  });
-
-  it('turnFailedはレベルを1段上げる（加点ではない）', () => {
-    const base = decideHandoffModel(
-      input({ recentUserMessages: ['リファクタして'] }),
-      codexModels(),
-      current,
-    );
-    const withFailure = decideHandoffModel(
-      input({ recentUserMessages: ['リファクタして'], turnFailed: true }),
-      codexModels(),
-      current,
-    );
-    expect(base?.level).toBe(1);
-    expect(withFailure?.level).toBe(2);
-    expect(withFailure?.reasons).toContain('+1 level -> L2 (previous attempt failed)');
-  });
-
-  it('turnFailedだけでも判定材料として扱う', () => {
-    const decision = decideHandoffModel(input({ turnFailed: true }), codexModels(), current);
-    expect(decision?.level).toBe(1);
-  });
-
-  it('分類のfloorが加点結果を上回るときは引き上げる', () => {
-    // securityのキーワード1つだけならscore=2（L1）だが、floorでL4へ
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['認証まわりを直したい'] }),
-      codexModels(),
-      current,
-    );
-    expect(decision?.level).toBe(4);
-    expect(decision?.reasons).toContain('floor security -> L4');
-  });
-
-  it('パスから分類を拾う（加点はせずfloorだけ効く）', () => {
-    const decision = decideHandoffModel(
-      input({ turnEditedFiles: ['db/migrations/0001_init.sql'] }),
-      codexModels(),
-      current,
-    );
-    expect(decision?.level).toBe(3);
-    expect(decision?.reasons).toContain('floor path:migration');
-  });
-
-  it('Windows形式のパス区切りでも分類を拾う', () => {
-    const decision = decideHandoffModel(
-      input({ turnEditedFiles: ['src\\auth\\login.ts'] }),
-      codexModels(),
-      current,
-    );
-    expect(decision?.level).toBe(4);
+  it('effortは4段でmaxを含めない', () => {
+    expect([...EFFORT_LADDER]).toEqual(['low', 'medium', 'high', 'xhigh']);
   });
 });
 
-describe('decideHandoffModel: L5の扱い', () => {
-  const heavy = [
-    'セキュリティの設計を見直す',
-    '並行処理の競合が原因のバグを追う',
-    'マイグレーションのリファクタ',
-    '性能が遅い',
+describe('resolveLevelSettings: Codexのカタログ', () => {
+  const cases: [HandoffLevel, string, string][] = [
+    [0, 'gpt-5.6-terra', 'low'],
+    [1, 'gpt-5.6-terra', 'medium'],
+    [2, 'gpt-5.6-sol', 'medium'],
+    [3, 'gpt-5.6-sol', 'high'],
+    [4, 'gpt-5.6-astra', 'high'],
+    [5, 'gpt-5.6-astra', 'xhigh'],
   ];
 
-  it('直前のターンが失敗していなければ、全分類に当たってもL4に留まる', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: heavy }),
-      codexModels(),
-      current,
-    );
-    // キーワードの加点はscore最大9（＝L4）で、失敗していない限りL5へは届かない
-    expect(decision?.level).toBe(4);
-    expect(decision?.effort).toBe('xhigh');
+  for (const [level, expectedModel, expectedEffort] of cases) {
+    it(`L${level} は ${expectedModel} / ${expectedEffort}`, () => {
+      const resolved = resolveLevelSettings(level, codexModels(), current);
+      expect(resolved).toEqual({ model: expectedModel, effort: expectedEffort });
+    });
+  }
+
+  it('カタログにmaxがあってもL5では選ばない', () => {
+    expect(resolveLevelSettings(5, codexModels(), current).effort).toBe('xhigh');
   });
 
-  it('直前のターンが失敗していればL5に届く', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: heavy, turnFailed: true }),
-      codexModels(),
-      current,
-    );
-    expect(decision?.level).toBe(5);
-    expect(decision?.effort).toBe('max');
+  it('lunaはどのレベルでも選ばれない', () => {
+    const models = codexModels();
+    for (const level of [0, 1, 2, 3, 4, 5] as HandoffLevel[]) {
+      expect(resolveLevelSettings(level, models, current).model).not.toContain('luna');
+    }
   });
 });
 
-describe('decideHandoffModel: model / effortの解決', () => {
-  it('L0/L1は低ティア、L2/L3は中ティア、L4以上は高ティアのモデルを選ぶ', () => {
-    const low = decideHandoffModel(
-      input({ recentUserMessages: ['リファクタして'] }),
-      codexModels(),
-      current,
-    );
-    expect(low?.model).toBe('gpt-5.6-luna');
-
-    const high = decideHandoffModel(
-      input({ recentUserMessages: ['セキュリティを見たい'] }),
-      codexModels(),
-      current,
-    );
-    expect(high?.model).toBe('gpt-5.6-sol');
+describe('resolveLevelSettings: Claude Codeのカタログ', () => {
+  it('L0/L1はsonnet、L2/L3はopus、L4/L5はfable', () => {
+    const models = claudeModels();
+    expect(resolveLevelSettings(0, models, { model: 'opus', effort: 'high' }).model).toBe('sonnet');
+    expect(resolveLevelSettings(2, models, { model: 'opus', effort: 'high' }).model).toBe('opus');
+    expect(resolveLevelSettings(5, models, { model: 'opus', effort: 'high' }).model).toBe('fable');
   });
 
+  it('haikuはどのレベルでも選ばれない', () => {
+    const models = claudeModels();
+    for (const level of [0, 1, 2, 3, 4, 5] as HandoffLevel[]) {
+      expect(resolveLevelSettings(level, models, { model: 'opus', effort: 'high' }).model).not.toBe(
+        'haiku',
+      );
+    }
+  });
+});
+
+describe('resolveLevelSettings: カタログが揃わないとき', () => {
   it('ティアに合うモデルがカタログに無ければ引き継ぎ元のモデルを据え置く', () => {
-    const onlyMid: ModelInfo[] = codexModels().filter((m) => m.slug.includes('terra'));
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['セキュリティを見たい'] }),
-      onlyMid,
-      current,
-    );
-    expect(decision?.model).toBe(current.model);
-  });
-
-  it('effortはカタログの一覧の中の相対位置で決まる（L0=最下位、L5=最上位）', () => {
-    const l0 = decideHandoffModel(
-      input({ turnEditedFiles: [], recentUserMessages: [], turnFailed: false }),
-      codexModels(),
-      current,
-    );
-    expect(l0).toBeUndefined(); // 材料が無いので判定しない
-
-    const l1 = decideHandoffModel(
-      input({ recentUserMessages: ['リファクタして'] }),
-      codexModels(),
-      current,
-    );
-    expect(l1?.effort).toBe('medium');
-
-    const l4 = decideHandoffModel(
-      input({ recentUserMessages: ['設計を見直したい'] }),
-      codexModels(),
-      current,
-    );
-    expect(l4?.effort).toBe('xhigh');
+    const onlyTop = [model('gpt-5.6-astra', FIVE)];
+    // L0が求めるのは最下位ティア（terra）。無いので据え置き
+    expect(resolveLevelSettings(0, onlyTop, current).model).toBe(current.model);
+    // L4が求めるのは最上位ティア。こちらは見つかる
+    expect(resolveLevelSettings(4, onlyTop, current).model).toBe('gpt-5.6-astra');
   });
 
   it('effort非対応のモデルにはeffortを渡さない', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['リファクタして'] }),
-      noEffortModels(),
-      { model: 'haiku', effort: '' },
-    );
-    expect(decision?.model).toBe('haiku');
-    expect(decision?.effort).toBe('');
+    const models = [model('sonnet', [])];
+    expect(resolveLevelSettings(0, models, { model: 'sonnet', effort: '' })).toEqual({
+      model: 'sonnet',
+      effort: '',
+    });
   });
 
-  it('カタログが空でもfallbackのeffort一覧から選ぶ', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['セキュリティを見たい'] }),
-      [],
-      current,
-      ['low', 'medium', 'high', 'xhigh', 'max'],
-    );
-    expect(decision?.model).toBe(current.model);
-    expect(decision?.effort).toBe('xhigh');
+  it('カタログのeffortが一部しか無ければ、その中の端へ丸める', () => {
+    const models = [model('gpt-5.6-terra', ['low', 'medium'])];
+    // L1が求めるのはmedium（ladderの2番目）。そのまま取れる
+    expect(resolveLevelSettings(1, models, current).effort).toBe('medium');
+    // L5が求めるのはxhighだが無いので、選べる中の最上位へ丸める
+    expect(resolveLevelSettings(5, models, current).effort).toBe('medium');
   });
-});
 
-describe('decideHandoffModel: 判定理由', () => {
-  it('先頭にレベルとスコアを置き、加点の内訳を続ける', () => {
-    const decision = decideHandoffModel(
-      input({ recentUserMessages: ['リファクタして'], turnFailed: true }),
-      codexModels(),
-      current,
-    );
-    expect(decision?.reasons[0]).toBe('L2 (score=2)');
-    expect(decision?.reasons).toContain('+1 refactor');
+  it('カタログのeffortがladderに載っていない値だけなら未指定にする', () => {
+    const models = [model('gpt-5.6-terra', ['max'])];
+    expect(resolveLevelSettings(3, models, current).effort).toBe('');
+  });
+
+  it('カタログが空ならfallbackのeffort一覧から選び、モデルは据え置く', () => {
+    const resolved = resolveLevelSettings(4, [], current, FIVE);
+    expect(resolved.model).toBe(current.model);
+    expect(resolved.effort).toBe('high');
   });
 });
