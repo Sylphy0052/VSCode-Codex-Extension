@@ -2525,6 +2525,8 @@ export function chatScript(
       if (state.busy) brief.push('応答中…');
       if (context) brief.push(context.text);
       if (cost) brief.push(cost.text);
+      // 上限だけは畳んでいても気づけるようにする。要求ボタン自体は開かないと押せない
+      if (usageCreditsLimited(state)) brief.push('上限に達しています');
       statusSummary.textContent = brief.join(' ・ ');
     }
     // 出すものが何も無いときは見出しごと消す。畳める代わりに空の行が増えては本末転倒
