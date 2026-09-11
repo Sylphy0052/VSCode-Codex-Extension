@@ -1550,6 +1550,26 @@ export function chatScript(
     warning.hidden = true;
     wrap.appendChild(warning);
 
+    // 未回答のタブに印を付け、最初の未回答の位置を返す（全部答えていれば-1）
+    const markUnanswered = (answers) => {
+      let first = -1;
+      questions.forEach((question, i) => {
+        const empty = (answers[question.question] || []).length === 0;
+        tabs[i].classList.toggle('unanswered', empty);
+        if (empty && first < 0) first = i;
+      });
+      return first;
+    };
+    // 回答したら印と文言をその場で取り下げる。直したのに赤いままだと、まだ何か
+    // 足りないのか送信を試すまで分からない
+    const refreshUnanswered = () => {
+      const answers = {};
+      for (const read of readers) read(answers);
+      if (markUnanswered(answers) < 0) warning.hidden = true;
+    };
+    body.addEventListener('change', refreshUnanswered);
+    body.addEventListener('input', refreshUnanswered);
+
     const actions = document.createElement('div');
     actions.className = 'actions';
 
@@ -1560,9 +1580,7 @@ export function chatScript(
       for (const read of readers) read(answers);
       // 選択必須。未回答の質問があれば送信しない（multiSelect:falseはradioで自然に
       // 1つへ強制されるが、選び忘れ自体は防げないため両方とも件数で確認する）
-      const isUnanswered = (q) => (answers[q.question] || []).length === 0;
-      tabs.forEach((tab, i) => tab.classList.toggle('unanswered', isUnanswered(questions[i])));
-      const firstUnanswered = questions.findIndex(isUnanswered);
+      const firstUnanswered = markUnanswered(answers);
       if (firstUnanswered >= 0) {
         showQuestion(firstUnanswered);
         warning.textContent = '未回答の質問があります。すべての質問に回答してください。';
