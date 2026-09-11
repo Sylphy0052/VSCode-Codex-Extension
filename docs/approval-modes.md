@@ -57,7 +57,7 @@ Codexは2軸なので、Claudeの1軸に対しては組み合わせが対応す�
 - Shift+Tabの循環は**全確認 ↔ Auto**の2つだけを回る。全承認はセレクタから明示の同意を経てのみ選べる（連打で保護が外れないようにするため。`CLAUDE_APPROVAL_CYCLE`が`bypassPermissions`を外していたのと同じ理由）。
 - ワークフローYAMLのクランプ（design.md §16.16）とセッションプリセット（§14.56）は従来どおり**生の値**を見る。レベルは生の値へ展開されてから既存のクランプに乗るため、`src/util/safetyClamp.ts`はレベルを知らない。
 
-`danger-full-access` + `never`（および`danger-full-access` + `approvalsReviewer: auto_review`）の検出は[src/codex/argvBuilder.ts](../src/codex/argvBuilder.ts)の`isUnsafeCombination`が担う。ただし**この関数はまだどこからも呼ばれていない**（ユニットテストのみ）。モーダルでの同意を出す配線は残っており、issue #222に残課題として書いてある。
+`danger-full-access`と`never`または`approvalsReviewer: auto_review`の組み合わせでも、会話開始時にはモーダル確認を出さない（Issue #1094）。設定変更時の確認は従来どおり。
 
 ## TUIから変える
 
@@ -131,7 +131,7 @@ CLIフラグ1枚に対応する単一の値は無く、**2つの指定の組**�
 
 #### 安全側の扱い
 
-- `isUnsafeCombination`が単独で真を返す。`sandbox`に何が入っていても意味を持たないため、組み合わせを見ない。会話を開くたびにモーダルで同意を取る（[src/view/chatView.ts](../src/view/chatView.ts)の`confirmUnsafeCombination`）。本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination`）。
+- `isUnsafeCombination`が単独で真を返す。`sandbox`に何が入っていても意味を持たないため、組み合わせを見ない。選択済みの設定で会話を開始し、開始時の追加確認は出さない（Issue #1094）。
 - Shift+Tabの循環には入れない。`APPROVAL_MODES`の値ではないため、そもそも循環の対象にならない。
 - ワークフローのタスクには継承させない。`toCodexConfig`が常に`false`へ固定する。YAMLのスキーマ（design.md §16.2）にこの項目は無く、拡張機能側の設定を継承すると、人が対話セッション用に意識して外した保護が無人実行のタスクへ暗黙に伝播する。
 
