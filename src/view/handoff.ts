@@ -45,6 +45,13 @@ export interface HandoffPointerInput {
   recentUserMessages: readonly string[];
   /** 直前のターンで編集したファイル。ターン単位でリセットされるため「全部」ではない。 */
   turnEditedFiles: readonly string[];
+  /**
+   * 引き継ぎ先のmodel / effortをどう決めたか（Issue #1082。`handoffRouter.ts`）。
+   *
+   * ルータが判定しなかった（材料が無い・設定でOFF）ときは省略する。後からルータを調整
+   * できるよう、結論だけでなく加点の内訳をそのまま残す。
+   */
+  routerReasons?: readonly string[];
   createdAt: Date;
 }
 
@@ -217,6 +224,9 @@ export function buildHandoffPointerMarkdown(input: HandoffPointerInput): string 
   lines.push(`- gitブランチ: ${input.gitBranch ?? '不明'}`);
   lines.push(`- モデル: ${input.model === undefined || input.model === '' ? '既定' : input.model}`);
   lines.push(`- 引き継いだ契機: ${triggerLabel(input.trigger)}`);
+  if (input.routerReasons !== undefined && input.routerReasons.length > 0) {
+    lines.push(`- 引き継ぎ先のmodel/effortの判定: ${input.routerReasons.join(' / ')}`);
+  }
   lines.push(`- 生成時刻: ${input.createdAt.toISOString()}`);
   lines.push('');
   lines.push('## 引き継ぎ時点の状態');

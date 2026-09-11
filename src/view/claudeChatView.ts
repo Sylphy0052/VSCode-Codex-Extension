@@ -137,6 +137,7 @@ import {
   writeHandoffPointer,
   type HandoffTrigger,
 } from './handoff';
+import { resolveHandoffModelSettings } from './handoffModelChoice';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import {
@@ -713,7 +714,11 @@ export class ClaudeChatViewManager
    * 呼び出し元がその後すぐ発言を送りたい場合（`handoffToNewSession`）のために、
    * 発行した`sessionId`を返す。開けなかった場合は`undefined`。
    */
-  async openNew(cwd?: string, taskConfig?: ClaudeConfig): Promise<string | undefined> {
+  async openNew(
+    cwd?: string,
+    taskConfig?: ClaudeConfig,
+    modelSettings?: SessionModelSettings,
+  ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
     if (targetCwd === undefined) {
@@ -728,7 +733,10 @@ export class ClaudeChatViewManager
     }
 
     const sessionId = randomSessionId();
-    const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig);
+    // `modelSettings` を渡す経路は引き継ぎ（Issue #1082）。CLIはmodel / effortを起動時の
+    // argvで受け取るため、起動後に `entry.modelSettings` を書き換えても初回プロンプトには
+    // 効かない。`buildEntry` へ渡して `configFor` が起動前に読む形にする
+    const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig, undefined, modelSettings);
     this.showPanel(entry, false);
     this.panels.set(sessionId, entry);
     entry.session.start({
@@ -805,6 +813,23 @@ export class ClaudeChatViewManager
     }
 
     const state = entry.session.getState();
+    const gitBranch = await resolveGitBranch(entry.cwd);
+    const choice = resolveHandoffModelSettings(
+      entry.modelSettings,
+      this.settings.claudeSnapshot().models,
+      {
+        trigger,
+        turnFailed: state.turnFailed,
+        recentUserMessages: recentUserMessages(state),
+        cwd: entry.cwd,
+        gitBranch,
+        turnEditedFiles: state.turnEditedFiles,
+      },
+      CLAUDE_EFFORTS,
+    );
+    this.log.info(
+      `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
+    );
     let pointerPath: string;
     try {
       pointerPath = await writeHandoffPointer(this.globalStorageDir, {
@@ -812,13 +837,14 @@ export class ClaudeChatViewManager
         sessionId,
         transcriptPath,
         cwd: entry.cwd,
-        gitBranch: await resolveGitBranch(entry.cwd),
+        gitBranch,
         model: entry.modelSettings.model,
         trigger,
         turnFailed: state.turnFailed,
         busy: state.busy,
         recentUserMessages: recentUserMessages(state),
         turnEditedFiles: state.turnEditedFiles,
+        routerReasons: choice.reasons,
         createdAt: new Date(),
       });
     } catch (e) {
@@ -826,7 +852,7 @@ export class ClaudeChatViewManager
       return false;
     }
 
-    const newSessionId = await this.openNew(entry.cwd, entry.taskConfig);
+    const newSessionId = await this.openNew(entry.cwd, entry.taskConfig, choice.settings);
     if (newSessionId === undefined) {
       return false;
     }
