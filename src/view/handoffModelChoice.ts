@@ -180,9 +180,18 @@ export async function chooseHandoffModelSettings(
 
   for (;;) {
     const buttons = canReclassify ? [PROCEED, REPICK, RECLASSIFY] : [PROCEED, REPICK];
+    // 本文は1行にし、値と理由は `detail` へ。modalの本文に改行を入れるとOSによって潰れる
     const answer = await vscode.window.showInformationMessage(
-      `この設定で引き継ぎますか？\nModel: ${label(proposal.settings.model)} / Effort: ${label(proposal.settings.effort)}`,
-      { modal: true, detail: proposal.reasons.join('\n') },
+      `この設定で引き継ぎますか？（Model: ${label(proposal.settings.model)} / Effort: ${label(proposal.settings.effort)}）`,
+      {
+        modal: true,
+        detail: [
+          `Model: ${label(proposal.settings.model)}`,
+          `Effort: ${label(proposal.settings.effort)}`,
+          '',
+          ...proposal.reasons,
+        ].join('\n'),
+      },
       ...buttons,
     );
     if (answer === PROCEED) {
