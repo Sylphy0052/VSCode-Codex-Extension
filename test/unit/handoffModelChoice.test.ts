@@ -3,6 +3,7 @@ import { __mock } from '../mocks/vscode';
 import type { ModelInfo } from '../../src/codex/modelCatalog';
 import {
   chooseHandoffModelSettings,
+  probeSafeBoundary,
   proposeHandoffModelSettings,
 } from '../../src/view/handoffModelChoice';
 import * as classifier from '../../src/view/handoffClassifier';
@@ -49,6 +50,8 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
     autonomy: 0,
     confidence: 0.9,
     reasons: [],
+    switchSafe: true,
+    switchReason: '',
     ...over,
   };
 }
@@ -201,5 +204,68 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
     expect(choice?.settings).toEqual(current);
     // ボタンの並びは直接は取れないため、OFFでも承認経路が通ることだけを見る
     expect(__mock.messages.infos).toHaveLength(1);
+  });
+});
+
+describe('probeSafeBoundary（Issue #1090）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    vi.restoreAllMocks();
+  });
+
+  it('routerがOFFなら分類器を起動せず undefined', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const spy = vi.spyOn(classifier, 'classifyHandoff');
+    expect(await probeSafeBoundary(current, input, deps())).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('分類に失敗したら undefined（区切り待ちの契機は発火させない）', async () => {
+    vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(undefined);
+    expect(await probeSafeBoundary(current, input, deps())).toBeUndefined();
+  });
+
+  it('switch_safe が false なら profileChanged を見ない', async () => {
+    vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
+      assess({ switchSafe: false, switchReason: '議論の途中', scope: 2, ambiguity: 2, risk: 2 }),
+    );
+    const probe = await probeSafeBoundary(current, input, deps());
+    expect(probe).toMatchObject({
+      switchSafe: false,
+      switchReason: '議論の途中',
+      profileChanged: false,
+      profile: current,
+    });
+  });
+
+  it('switch_safe が true でモデルが変わるなら profileChanged', async () => {
+    vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
+      assess({ switchSafe: true, switchReason: '設計が終わった', scope: 2, ambiguity: 2, risk: 2 }),
+    );
+    const probe = await probeSafeBoundary(current, input, deps());
+    expect(probe).toMatchObject({
+      switchSafe: true,
+      profileChanged: true,
+      profile: { model: 'gpt-5.6-astra', effort: 'high' },
+    });
+  });
+
+  it('解決結果が今と同じなら profileChanged は false', async () => {
+    vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
+      assess({ switchSafe: true, difficulty: 1, scope: 1, ambiguity: 1, risk: 1, autonomy: 1 }),
+    );
+    const probe = await probeSafeBoundary({ model: 'gpt-5.6-sol', effort: 'high' }, input, deps());
+    expect(probe).toMatchObject({ switchSafe: true, profileChanged: false });
+  });
+
+  it('分類器は1回しか起動せず、その見立てを引き継ぎ先の決定へ使い回せる', async () => {
+    const spy = vi
+      .spyOn(classifier, 'classifyHandoff')
+      .mockResolvedValue(assess({ switchSafe: true }));
+    const probe = await probeSafeBoundary(current, input, deps());
+    __mock.showInformationMessageAnswer = '引き継ぐ';
+    const choice = await chooseHandoffModelSettings(current, input, deps(), probe?.assessment);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(choice?.settings).toEqual(probe?.profile);
   });
 });

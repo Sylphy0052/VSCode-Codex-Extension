@@ -794,6 +794,26 @@
           "scope": "window",
           "markdownDescription": "自動引き継ぎ（Issue #1079）が始まるコンテキスト残量の割合。残りがこの値以下になった時点、または自動圧縮が走った時点で、会話を新しいセッションへ引き継ぐ。既定の20は入力欄の残量表示が「残りわずか」に変わる境界と同じ。ON/OFFはこの設定ではなく会話ごとに入力欄の「…」メニューの「自動引き継ぎ」で切り替える（既定はOFF）。Codex/Claude Code両画面共通。"
         },
+        "agent.autoHandoff.softThresholdPercent": {
+          "type": "number",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 99,
+          "scope": "window",
+          "markdownDescription": "安全な区切りを待って自動引き継ぎ（Issue #1090）を始めるコンテキスト残量の割合。残りがこの値以下で、かつターンが終わっていて承認待ち・入力待ち・ループが無く、分類器が「いま切り替えても失うものが無い」と判定したときに引き継ぐ。`agent.autoHandoff.thresholdPercent` 以下の値を書いた場合はそちらへ丸める（残量だけで発火する方が先に成立するため）。Codex/Claude Code両画面共通。"
+        },
+        "agent.autoHandoff.onProfileChange": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "安全な区切りで、次の作業に合うmodel/effort（`agent.autoHandoff.router` の判定結果）が現在の値と違うときに自動引き継ぎする（Issue #1090）。コンテキスト残量は問わない。「設計が終わって次は実装」「実装から原因不明のバグ調査へ」のように、モデルを変えるべき区切りで新しいセッションへ移るための設定。モデルが変わるとき、またはeffortが2段以上動くときだけ発火する。"
+        },
+        "agent.autoHandoff.closeOldTab": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "引き継ぎ後に引き継ぎ元のタブを確認なしで閉じる（Issue #1090）。新しいセッションの初回ターンが成功したときだけ閉じ、失敗・時間切れのときは残す。履歴（transcript / rollout）は残るため、必要なら履歴から開き直せる。OFFにすると従来どおり「引き継ぎ元のセッションを停止しますか？」と確認する。"
+        },
         "agent.autoHandoff.model": {
           "type": "string",
           "default": "",

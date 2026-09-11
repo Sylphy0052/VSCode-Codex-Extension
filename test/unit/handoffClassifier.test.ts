@@ -68,6 +68,9 @@ describe('parseAssessment', () => {
       autonomy: 1,
       confidence: 0.93,
       reasons: ['仕様が明確', '複数ファイル変更'],
+      // switch_safeが無いJSONは「切り替えてよいと言っていない」ので false（Issue #1090）
+      switchSafe: false,
+      switchReason: '',
     });
   });
 
@@ -168,5 +171,27 @@ describe('classifyHandoff', () => {
     );
     expect(assessment).toBeUndefined();
     expect(warnings[0]).toContain('spawn ENOENT');
+  });
+});
+
+describe('switch_safe（Issue #1090）', () => {
+  it('プロンプトに切り替え可否の判定を含める', () => {
+    const prompt = buildClassifierPrompt(input());
+    expect(prompt).toContain('switch_safe');
+    expect(prompt).toContain('switch_reason');
+    expect(prompt).toContain('新しいセッションがtranscriptと引き継ぎメモから続きを始められるか');
+  });
+
+  it('switch_safe と switch_reason を読む', () => {
+    const raw = VALID.replace(/\}$/, ', "switch_safe": true, "switch_reason": "PRがマージされた"}');
+    expect(parseAssessment(raw)).toMatchObject({
+      switchSafe: true,
+      switchReason: 'PRがマージされた',
+    });
+  });
+
+  it('switch_safe が真偽値でなければ false（切り替えない側へ倒す）', () => {
+    const raw = VALID.replace(/\}$/, ', "switch_safe": "yes"}');
+    expect(parseAssessment(raw)).toMatchObject({ switchSafe: false, switchReason: '' });
   });
 });

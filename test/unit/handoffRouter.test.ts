@@ -5,6 +5,7 @@ import {
   MODEL_TIERS,
   applyCorrections,
   effortIndexFor,
+  isProfileChange,
   resolveProfile,
   tierFor,
   type TaskAssessment,
@@ -48,6 +49,8 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
     autonomy: 0,
     confidence: 0.9,
     reasons: [],
+    switchSafe: true,
+    switchReason: '',
     ...over,
   };
 }
@@ -231,5 +234,34 @@ describe('resolveProfile: カタログが揃わないとき', () => {
     const resolved = resolveProfile(assess({ difficulty: 1 }), noFailure, [], current, FIVE);
     expect(resolved.model).toBe(current.model);
     expect(resolved.effort).toBe('high');
+  });
+});
+
+describe('isProfileChange（Issue #1090）', () => {
+  it('モデルが変われば「変わった」', () => {
+    expect(
+      isProfileChange({ model: 'sonnet', effort: 'medium' }, { model: 'opus', effort: 'medium' }),
+    ).toBe(true);
+  });
+
+  it('effortの1段差では「変わった」にしない', () => {
+    expect(
+      isProfileChange({ model: 'opus', effort: 'high' }, { model: 'opus', effort: 'xhigh' }),
+    ).toBe(false);
+  });
+
+  it('effortが2段動けば「変わった」', () => {
+    expect(
+      isProfileChange({ model: 'opus', effort: 'xhigh' }, { model: 'opus', effort: 'medium' }),
+    ).toBe(true);
+  });
+
+  it('effortが未指定・ladder外なら比較材料が無いので「変わっていない」', () => {
+    expect(isProfileChange({ model: 'opus', effort: '' }, { model: 'opus', effort: 'xhigh' })).toBe(
+      false,
+    );
+    expect(
+      isProfileChange({ model: 'opus', effort: 'low' }, { model: 'opus', effort: 'xhigh' }),
+    ).toBe(false);
   });
 });
