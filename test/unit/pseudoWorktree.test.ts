@@ -2021,10 +2021,10 @@ describe('実ファイルシステムでの統合テスト', () => {
   );
 
   it(
-    '書き込み直後にrealpathで境界外と判明した場合は撤去して失敗とする' +
+    '書き込み直後にrealpathで境界外と判明した場合は一時ファイルだけを消して失敗とする' +
       '（レビュー指摘: medium、TOCTOU対策の二段目。cloneWorkspace/ensureIntegrationDirと' +
-      '同じ「作成後に実パス解決して境界確認、外れていれば撤去する」二段構えをpersistManifest' +
-      'にも対にする）',
+      '同じ「作成後に実パス解決して境界確認、外れていれば中止する」二段構えをpersistManifest' +
+      'にも対にする。確認対象はIssue #1116で一時ファイルへ移した）',
     async () => {
       const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-'));
       try {
@@ -2037,7 +2037,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         const fakeFs: typeof nodePseudoWorktreeFileSystem = {
           ...nodePseudoWorktreeFileSystem,
           realpath: async (target) => {
-            if (target === filePath) {
+            if (path.basename(target).startsWith('.pwt-manifest-')) {
               return path.join(outsideDir, 'manifest.json');
             }
             return nodePseudoWorktreeFileSystem.realpath(target);
@@ -2048,13 +2048,94 @@ describe('実ファイルシステムでの統合テスト', () => {
           /想定した場所以外/,
         );
 
-        // 撤去されており、実体としては残っていない
+        // `rename`へ進んでいないため、保存先は作られていない
         await expect(readFile(filePath)).rejects.toThrow();
+        // 一時ファイルも残っていない
+        const dirEntries = await readdir(path.dirname(filePath));
+        expect(dirEntries.filter((name) => name.startsWith('.pwt-manifest-'))).toEqual([]);
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }
     },
   );
+
+  /**
+   * Issue #1116（受入基準）: 事後確認で不一致と分かったとき、従来は保存先
+   * （差し替え先）を`removeFile`していた。差し替え先に既存の`manifest.json`があれば、
+   * 上書きしたうえで削除するため「書き込みを取り消した」のに元データは戻らない。
+   */
+  it('不一致を検知しても、差し替え先にあった既存のmanifest.jsonを失わない（受入基準）', async () => {
+    const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-victim-'));
+    try {
+      const victim = path.join(outsideDir, 'manifest.json');
+      await writeFile(victim, '{"existing":"data"}\n');
+
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
+
+      // 一次確認の後に`<runId>`ディレクトリが外部ディレクトリへのリンクへ差し替えられ、
+      // その配下でのI/Oがすべて差し替え先へ着地する状況を再現する（リンクを辿るのは
+      // ファイルシステムの仕事なので、ポートの各メソッドで肩代わりする）
+      const dirPath = path.dirname(filePath);
+      const redirect = (target: string): string =>
+        target.startsWith(`${dirPath}${path.sep}`)
+          ? path.join(outsideDir, path.relative(dirPath, target))
+          : target;
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        realpath: async (target) => nodePseudoWorktreeFileSystem.realpath(redirect(target)),
+        writeTextFile: async (target, content) =>
+          nodePseudoWorktreeFileSystem.writeTextFile(redirect(target), content),
+        removeFile: async (target) => nodePseudoWorktreeFileSystem.removeFile(redirect(target)),
+        rename: async (from, to) =>
+          nodePseudoWorktreeFileSystem.rename(redirect(from), redirect(to)),
+      };
+
+      await expect(persistManifest(workspace, RUN_ID, manifest, fakeFs)).rejects.toThrow(
+        /想定した場所以外/,
+      );
+
+      // 一時ファイルへの書き込みだったため、既存ファイルは上書きも削除もされていない
+      await expect(readFile(victim, 'utf8')).resolves.toBe('{"existing":"data"}\n');
+      await expect(readFile(filePath)).rejects.toThrow();
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('書き込みが途中で失敗しても前回のmanifestが残る（受入基準）', async () => {
+    const filePath = integrationManifestPath(workspace, RUN_ID);
+    await persistManifest(
+      workspace,
+      RUN_ID,
+      new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]),
+      nodePseudoWorktreeFileSystem,
+    );
+    const before = await readFile(filePath, 'utf8');
+
+    // 途中まで書いてから失敗する状況（ディスク満杯・プロセス終了）を再現する。
+    // 直接上書きしていた頃は、これで`manifest.json`が壊れた内容のまま残っていた
+    const failingFs: typeof nodePseudoWorktreeFileSystem = {
+      ...nodePseudoWorktreeFileSystem,
+      writeTextFile: async (target, content) => {
+        await nodePseudoWorktreeFileSystem.writeTextFile(target, content.slice(0, 5));
+        throw new Error('ENOSPC: simulated');
+      },
+    };
+
+    await expect(
+      persistManifest(
+        workspace,
+        RUN_ID,
+        new Map([['b.txt', { taskId: 'T2', kind: 'added' }]]),
+        failingFs,
+      ),
+    ).rejects.toThrow(/ENOSPC/);
+
+    await expect(readFile(filePath, 'utf8')).resolves.toBe(before);
+    const dirEntries = await readdir(path.dirname(filePath));
+    expect(dirEntries.filter((name) => name.startsWith('.pwt-manifest-'))).toEqual([]);
+  });
 
   /**
    * Issue #505（監査指摘、再監査→再々監査で2段階発覚した循環バグの修正後の回帰テスト）:

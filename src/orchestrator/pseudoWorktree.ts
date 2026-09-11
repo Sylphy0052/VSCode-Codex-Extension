@@ -523,46 +523,80 @@ export async function persistManifest(
 
   await fs.mkdir(dirPath);
 
-  await fs.writeTextFile(filePath, serializeManifest(manifest));
-
-  // Issue #505（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
-  // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ低い。
-  // `<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリへの
-  // シンボリックリンクへ差し替えられると、`realpath(worktreesRoot)`と`realpath(filePath)`は
-  // どちらも差し替え後の実体を指し、両者は必ず一致してしまう（`<runId>`を差し替える
-  // 循環とまったく同じ構造で、起点が1段上がっただけでは解消しない）。
-  // `resolveRealRemovalTarget`（Issue #493）も含め、このファイル内で`.agents/worktrees`
-  // 起点にしていた箇所は全てこの穴を持っていた。攻撃者が動かせない唯一の起点は
-  // 呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+  // Issue #1116: 保存先を直接`writeTextFile`で上書きしていたため、2つの経路で前回の
+  // マニフェストを失いえた。
   //
-  // Issue #505（レビュー指摘、low）: `realRoot`の取得は、他4箇所（`cloneWorkspace` /
-  // `ensureIntegrationDir` / `resolveRealRemovalTarget` / `reflectIntegrationToWorkspace`）と
-  // 同じく、比較対象の実パス（`realFilePath`）の取得と同じタイミング（比較の直前）に
-  // 揃える。以前は`realRoot`だけを`writeTextFile`より前に取得しており、「取得できなければ
-  // 書き込む前に打ち切る」という意図に見えたが、この関数は`realRoot`取得の前に既に
-  // `mkdir(dirPath)`で`dirPath`（`<runId>`ディレクトリ）を作成済みであり、「書き込みより
-  // 前に打ち切る」という性質はI/O全体では既に成立していない（ディレクトリの作成という
-  // 副作用は`realRoot`取得前から発生している）。`writeTextFile`もこの関数のI/Oの一部でしか
-  // ないため、その前に限って`realRoot`だけ先取りする理由は無く、揃えたほうが「4箇所は
-  // 同じ形」という主張に対して素直になる。`realRoot`が取得できない場合は、下の分岐で
-  // 書き込み済みの`filePath`を`removeFile`で取り消してから同じエラーとして報告する
-  // （既存の不一致検知と同じ後始末）。
-  const realRoot = await fs.realpath(workspaceRoot);
-  const realFilePath = await fs.realpath(filePath);
-  const expectedFilePath =
-    realRoot !== undefined
-      ? path.join(realRoot, path.relative(workspaceRoot, filePath))
-      : undefined;
-  if (
-    realFilePath === undefined ||
-    expectedFilePath === undefined ||
-    realFilePath !== expectedFilePath
-  ) {
-    await fs.removeFile(filePath);
-    throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
-        `書き込みを取り消しました: ${sanitizeForLog(realFilePath ?? filePath)}`,
-    );
+  // 1. 一次確認（`findSymlinkedAncestor`）の後に祖先がリンクへ差し替えられると、
+  //    書き込みはリンク先へ着地する。差し替え先に既存の`manifest.json`があれば、
+  //    **それを上書きしてから**下の事後確認が不一致を検知し、`removeFile(filePath)`で
+  //    差し替え先のファイルを消してしまう。「書き込みを取り消した」のに元データは戻らない。
+  //    `cloneWorkspace` / `ensureIntegrationDir`が「境界外に解決された対象は撤去しない」
+  //    という裁定へ揃えたのに、この経路だけ既存データを消す動作が残っていた。
+  // 2. 通常の保存先でも、非atomicな上書きは書き込み途中の失敗・プロセス終了で
+  //    内容が欠けた`manifest.json`を残す（前回の記録が失われる）。
+  //
+  // そこで`reflectIntegrationToWorkspace` / `applyDiffToIntegration`と同じく、一時ファイルへ
+  // 書いてから`rename`で確定させる。事後確認で不一致なら消すのは一時ファイルだけで、
+  // 保存先（差し替え先を含む）には触れない。`rename`は終端のリンクを解決せずディレクトリ
+  // エントリを置き換えるため、`filePath`自身がリンクへ差し替えられていてもリンク先を
+  // 書き換えることはない。
+  //
+  // なお`fsync`は行っていない。`PseudoWorktreeFileSystemPort`に相当するメソッドが無く、
+  // 追加は他の実装すべてに波及するため。`rename`だけでもプロセスの異常終了に対しては
+  // 「前回の内容かこの回の内容か」のどちらかが残る（内容が欠けたファイルは残らない）
+  // 状態になり、Issueが挙げた2つの失われ方は塞げる。電源断の耐性は別途の課題とする。
+  const tempPath = path.join(dirPath, `.pwt-manifest-${randomBytes(16).toString('hex')}.tmp`);
+  try {
+    await fs.writeTextFile(tempPath, serializeManifest(manifest));
+
+    // Issue #505（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
+    // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ低い。
+    // `<ws>/.agents`自体が（`<ws>/.git`等）ワークスペース内の別ディレクトリへの
+    // シンボリックリンクへ差し替えられると、`realpath(worktreesRoot)`と`realpath(filePath)`は
+    // どちらも差し替え後の実体を指し、両者は必ず一致してしまう（`<runId>`を差し替える
+    // 循環とまったく同じ構造で、起点が1段上がっただけでは解消しない）。
+    // `resolveRealRemovalTarget`（Issue #493）も含め、このファイル内で`.agents/worktrees`
+    // 起点にしていた箇所は全てこの穴を持っていた。攻撃者が動かせない唯一の起点は
+    // 呼び出し元から固定値で渡る`workspaceRoot`自身であるため、ここへ揃える。
+    //
+    // Issue #505（レビュー指摘、low）: `realRoot`の取得は、他4箇所（`cloneWorkspace` /
+    // `ensureIntegrationDir` / `resolveRealRemovalTarget` / `reflectIntegrationToWorkspace`）と
+    // 同じく、比較対象の実パス（`realFilePath`）の取得と同じタイミング（比較の直前）に
+    // 揃える。以前は`realRoot`だけを`writeTextFile`より前に取得しており、「取得できなければ
+    // 書き込む前に打ち切る」という意図に見えたが、この関数は`realRoot`取得の前に既に
+    // `mkdir(dirPath)`で`dirPath`（`<runId>`ディレクトリ）を作成済みであり、「書き込みより
+    // 前に打ち切る」という性質はI/O全体では既に成立していない（ディレクトリの作成という
+    // 副作用は`realRoot`取得前から発生している）。`writeTextFile`もこの関数のI/Oの一部でしか
+    // ないため、その前に限って`realRoot`だけ先取りする理由は無く、揃えたほうが「4箇所は
+    // 同じ形」という主張に対して素直になる。`realRoot`が取得できない場合は、下の分岐で
+    // 書き込み済みの一時ファイルを`removeFile`で取り消してから同じエラーとして報告する
+    // （既存の不一致検知と同じ後始末）。
+    //
+    // Issue #1116: 確認の対象は`filePath`ではなく一時ファイル（`tempPath`）にする。
+    // `rename`の前に確かめることで、境界外・差し替え先へ書かれた内容が`manifest.json`の
+    // 名前で一瞬でも見える窓を作らない（`reflectIntegrationToWorkspace`と同じ順序）。
+    const realRoot = await fs.realpath(workspaceRoot);
+    const realTempPath = await fs.realpath(tempPath);
+    const expectedTempPath =
+      realRoot !== undefined
+        ? path.join(realRoot, path.relative(workspaceRoot, tempPath))
+        : undefined;
+    if (
+      realTempPath === undefined ||
+      expectedTempPath === undefined ||
+      realTempPath !== expectedTempPath
+    ) {
+      throw new Error(
+        `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
+          `書き込みを取り消しました: ${sanitizeForLog(realTempPath ?? tempPath)}`,
+      );
+    }
+    await fs.rename(tempPath, filePath);
+  } catch (e) {
+    // 例外の理由を問わず一時ファイルを残置しない。**保存先（`filePath`）には触れない**
+    // ——差し替え攻撃の下では、そこにあるのは他人の既存データでありうる（Issue #1116）。
+    await fs.removeFile(tempPath);
+    throw e;
   }
 }
 
