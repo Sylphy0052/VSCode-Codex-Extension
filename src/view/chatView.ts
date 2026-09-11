@@ -741,10 +741,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return false;
     }
 
-    // 画面に出ていないタブからの引き継ぎでは、新セッションを背面に開く（Issue #1101）。
+    // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
     // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
-    // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる
-    const preserveFocus = entry.panel?.visible !== true;
+    // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる。
+    // 手動（ボタン操作）はユーザーがその場で求めた操作なので必ず前面へ出す。見立ての
+    // 取得で待っている間にタブを離れることがあり、`visible` だけで決めると背面に開く
+    const preserveFocus = trigger.kind !== 'manual' && entry.panel?.visible !== true;
     const newThreadId = await this.openNew(
       entry.cwd,
       entry.taskConfig,
