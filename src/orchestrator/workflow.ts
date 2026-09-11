@@ -313,6 +313,26 @@ const rec = (v: unknown): Record<string, unknown> | undefined => {
 
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
+/**
+ * 配列であることが意味を持つフィールドを読む（Issue #1124）。
+ *
+ * `arr` は配列以外を黙って空にするため、`escalate: npm run deploy` のような配列記法の
+ * 書き忘れが「停止条件なし」として通ってしまう。`escalate`・`allow`・`verify.*` は承認や
+ * 検証の条件そのものなので、`dependsOn` と同じく配列でなければ `parseErrors` へ残し、
+ * `validateWorkflow` でエラーにする。未指定（`undefined`）は空配列でエラーにしない。
+ */
+const arrayField = (
+  raw: unknown,
+  field: string,
+  example: string,
+  parseErrors: string[],
+): unknown[] => {
+  if (raw === undefined) return [];
+  if (Array.isArray(raw)) return raw;
+  parseErrors.push(`${field} は配列で指定してください（例: ${example}）`);
+  return [];
+};
+
 /** 配列の要素から文字列以外を除いた結果と、除いた要素があったかどうかを返す。 */
 interface FilteredStringArray {
   values: string[];
@@ -583,14 +603,18 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     }
   }
 
-  const escalateFiltered = filterStringArray(arr(t['escalate']));
+  const escalateFiltered = filterStringArray(
+    arrayField(t['escalate'], 'escalate', 'escalate: ["git push"]', parseErrors),
+  );
   if (escalateFiltered.hadNonStringElements) {
     // escalateは自動承認を止める側（安全性を強める側）のフィールド。黙って要素を捨てると
     // 本来止まるはずの操作が自動承認されてしまうフェイルオープンになるため警告する
     parseWarnings.push('escalate に文字列でない要素が含まれていたため無視しました');
   }
 
-  const allowFiltered = filterStringArray(arr(t['allow']));
+  const allowFiltered = filterStringArray(
+    arrayField(t['allow'], 'allow', 'allow: ["npm test"]', parseErrors),
+  );
   if (allowFiltered.hadNonStringElements) {
     // allowは停止条件を緩める側のフィールド。要素を捨てても「緩めそこなう」だけで安全側に
     // 倒れるが、設定ミスに気づけるよう警告だけは出す（escalateとは無効化の方向が逆）
@@ -616,9 +640,15 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
   }
 
   const verifyRaw = rec(t['verify']);
-  const verifyCommands = filterStringArray(arr(verifyRaw?.['commands']));
-  const verifyFiles = filterStringArray(arr(verifyRaw?.['files']));
-  const verifyDiff = filterStringArray(arr(verifyRaw?.['diff']));
+  const verifyCommands = filterStringArray(
+    arrayField(verifyRaw?.['commands'], 'verify.commands', 'commands: ["npm test"]', parseErrors),
+  );
+  const verifyFiles = filterStringArray(
+    arrayField(verifyRaw?.['files'], 'verify.files', 'files: ["src/index.ts"]', parseErrors),
+  );
+  const verifyDiff = filterStringArray(
+    arrayField(verifyRaw?.['diff'], 'verify.diff', 'diff: ["src/index.ts"]', parseErrors),
+  );
   for (const [field, filtered] of [
     ['verify.commands', verifyCommands],
     ['verify.files', verifyFiles],
