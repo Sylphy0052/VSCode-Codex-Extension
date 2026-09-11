@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+
 import type { ChatItem, PendingApproval } from '../appserver/chatState';
 import {
   normalizeCommand,
@@ -60,22 +62,59 @@ function readOptionalString(v: unknown): string | undefined {
   return typeof v === 'string' && v !== '' ? v : undefined;
 }
 
-/** パスらしい文字列を実パスへ解決する。解決できなければ元の文字列のまま返す（安全側＝境界外と判定されやすい方に倒す）。 */
-async function resolveRealPath(fs: WorktreeFileSystemPort, raw: string): Promise<string> {
+/**
+ * パスらしい文字列を実パスへ解決する。解決できなければ `undefined` を返す。
+ *
+ * まだ作られていないファイル（Claudeの `Write` やCodexの新規作成）は、パス全体の
+ * `realpath` が失敗する。生の文字列をそのまま返すと、許可root配下のsymlinkが外部を
+ * 指していてもその情報が落ちて字面の境界検査を通ってしまうため、実在する最寄りの親を
+ * 解決し、そこへ残りの成分を連結した値を返す（レビュー指摘: EX-APPROVAL-02）。
+ * ルートまで遡っても解決できないときだけ `undefined` にして、呼び出し側から
+ * 「判定に失敗した」＝ `ask` へ倒す。
+ */
+async function resolveRealPath(
+  fs: WorktreeFileSystemPort,
+  raw: string,
+): Promise<string | undefined> {
   if (raw === '') {
     return raw;
   }
-  const resolved = await fs.realpath(raw);
-  return resolved ?? raw;
+  const direct = await fs.realpath(raw);
+  if (direct !== undefined) {
+    return direct;
+  }
+  // 末尾の成分を1つずつ剥がしながら、実在する最寄りの親を探す。
+  const trailing: string[] = [];
+  let current = raw;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    trailing.unshift(path.basename(current));
+    const resolvedParent = await fs.realpath(parent);
+    if (resolvedParent !== undefined) {
+      return path.join(resolvedParent, ...trailing);
+    }
+    current = parent;
+  }
 }
 
-/** `fileChange` のitemIdから、Codexの `ChatState.items` に積まれた差分のパス一覧を引く。 */
+/**
+ * `fileChange` のitemIdから、Codexの `ChatState.items` に積まれた差分のパス一覧を引く。
+ *
+ * 移動（rename）の要求では移動先 `movePath` も書き込み先になるため、元パスと併せて
+ * 境界検査へ渡す。元が境界内でも移動先が境界外・`.git` 配下のことがある
+ * （レビュー指摘: EX-APPROVAL-01）。
+ */
 function codexFileChangePaths(itemId: string | undefined, items: readonly ChatItem[]): string[] {
   if (itemId === undefined) {
     return [];
   }
   const item = items.find((i) => i.id === itemId);
-  return item === undefined ? [] : item.diffs.map((d) => d.path).filter((p) => p !== '');
+  return item === undefined
+    ? []
+    : item.diffs.flatMap((d) => [d.path, d.movePath ?? '']).filter((p) => p !== '');
 }
 
 /** ClaudeのEdit/Write/NotebookEdit要求から変更対象パスを引く。itemIdの参照は不要。 */
@@ -121,7 +160,9 @@ export async function buildEscalationRequest(
         ? str(rec(rawParams['input'])?.['command'])
         : normalizeCommand(rawParams['command']);
     const rawCwd = provider === 'claude' ? taskCwd : str(rawParams['cwd']);
-    const cwd = rawCwd === '' ? '' : await resolveRealPath(fs, rawCwd);
+    // cwdは実行時に存在するディレクトリなので、解決できないのは指定自体が無効なとき。
+    // その場合は生の文字列のまま境界検査へ回す（fileChangeと違い、握り潰す経路がない）。
+    const cwd = rawCwd === '' ? '' : ((await resolveRealPath(fs, rawCwd)) ?? rawCwd);
     return {
       kind: 'command',
       command,
@@ -139,7 +180,11 @@ export async function buildEscalationRequest(
       provider === 'claude'
         ? claudeFileChangePaths(rawParams)
         : codexFileChangePaths(approval.itemId, latestItems);
-    const paths = await Promise.all(rawPaths.map((p) => resolveRealPath(fs, p)));
+    const resolved = await Promise.all(rawPaths.map((p) => resolveRealPath(fs, p)));
+    // 1つでも実パスへ落とせないものがあれば、そのパスを字面のまま検査しても境界の
+    // 外向きリンクを見落とす。パス一覧を空にして `classifyApprovalRequest` の
+    // 「変更対象のパスを取得できない＝判定に失敗」の経路（allowでは解除できない ask）へ回す。
+    const paths = resolved.every((p): p is string => p !== undefined) ? resolved : [];
     return {
       kind: 'fileChange',
       command: '',
