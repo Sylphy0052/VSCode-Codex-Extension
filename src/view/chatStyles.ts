@@ -458,14 +458,26 @@ ${sharedStyles()}
     display: flex;
     gap: 8px;
   }
+  /*
+   * アイコン列は常に1段に保つ（issue #1086）。折り返しを許すと幅が狭いパネルで2段・3段に
+   * 伸びて会話の領域を食う。入りきらないボタンはchatScript.tsのreflowComposerIcons()が
+   * 実行時に「…」メニューへ移す。overflowは指定しない——ここを隠すと、この行の中から
+   * 上へ開く「…」メニュー（絶対配置）まで切り取られてしまうため。溢れているかどうかは
+   * スクリプト側が各ボタンの右端で判定する。
+   */
   #composerIconRow {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 8px;
   }
   /*
-   * 送信以外のボタンはアイコンのみ（issue #226）。ラベルを消していても折り返すと
-   * 縦に潰れて読みにくいため、ボタン自体はnowrap・縮小なしのままにする。
+   * ボタンのラベルは「…」メニューにあるときだけ見せる。表にある間はアイコンのみ
+   * （issue #226）を保つ。
+   */
+  #composerIconRow > button > .composerOverflowLabel { display: none; }
+  /*
+   * 送信以外のボタンはアイコンのみ（issue #226）。幅が足りないときに全部を細く潰すと
+   * どれも読めなくなるため、縮めずに1つずつ「…」メニューへ送る（issue #1086）。
    */
   #composer button {
     white-space: nowrap;
@@ -634,7 +646,26 @@ ${sharedStyles()}
     background: var(--vscode-textBlockQuote-background, var(--vscode-editor-inactiveSelectionBackground));
     font-size: 0.85em;
   }
-  #status { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  /*
+   * 実行状態・使用量の行（issue #1086）。幅が狭いと「承認 / 応答中 / コンテキスト /
+   * コスト / 追加クレジット」が何行にも折り返して会話の領域を食うため、detailsで畳める
+   * ようにする。開閉状態はwebviewのstateへ保存する（chatScript.tsのstatusBox）。
+   */
+  #statusBox { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  #statusBox > summary {
+    cursor: pointer;
+    /* display:flexにすると開閉の三角が消えるため、既定のlist-itemのままにする */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #statusBox > summary:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  #statusBox > summary .label { font-weight: 600; }
+  #statusSummary { margin-left: 8px; }
+  #status { padding: 2px 0 0; }
   /* コンテキストの残りが少ないとき。見落とすと突然の圧縮に驚かされる */
   #status .warn {
     color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));

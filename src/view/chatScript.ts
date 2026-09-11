@@ -2074,6 +2074,18 @@ export function chatScript(
     });
   }
 
+  // 状態行（承認・応答中・コンテキスト・コスト等）の開閉も覚える（issue #1086）。
+  // 幅が狭いと何行にも折り返して会話の領域を食うため畳めるようにした。従来どおり
+  // 見えている方を既定にし、畳んだ選択だけを覚える
+  const statusBox = el('statusBox');
+  if (statusBox) {
+    const saved = vscode.getState() || {};
+    statusBox.open = saved.statusOpen !== false;
+    statusBox.addEventListener('toggle', () => {
+      patchState({ statusOpen: statusBox.open });
+    });
+  }
+
   // バックグラウンド実行中一覧の開閉もリロードをまたいで覚える（issue #678）。既定は閉じた状態
   const backgroundTerminalsBox = el('backgroundTerminals');
   if (backgroundTerminalsBox) {
@@ -2588,6 +2600,21 @@ export function chatScript(
       button.addEventListener('click', () => vscode.postMessage({ type: 'usageCreditsRequest' }));
       status.appendChild(button);
     }
+
+    // 畳んでいる間も状況が分かるよう、見出しには要点だけを添える（issue #1086）
+    const statusSummary = el('statusSummary');
+    if (statusSummary) {
+      const brief = [];
+      if (state.busy) brief.push('応答中…');
+      if (context) brief.push(context.text);
+      if (cost) brief.push(cost.text);
+      // 上限だけは畳んでいても気づけるようにする。要求ボタン自体は開かないと押せない
+      if (usageCreditsLimited(state)) brief.push('上限に達しています');
+      statusSummary.textContent = brief.join(' ・ ');
+    }
+    // 出すものが何も無いときは見出しごと消す。畳める代わりに空の行が増えては本末転倒
+    const statusBox = el('statusBox');
+    if (statusBox) statusBox.hidden = status.childNodes.length === 0;
   }
 
   /**
@@ -3346,6 +3373,8 @@ export function chatScript(
     composerOverflowMenu.hidden = true;
     composerOverflowToggle.setAttribute('aria-expanded', 'false');
     if (focusToggle) composerOverflowToggle.focus();
+    // 開いている間は見送っていた測り直しを、閉じたこの時点で反映する（issue #1086）
+    scheduleComposerIconsReflow();
   }
 
   /**
@@ -3431,6 +3460,132 @@ export function chatScript(
   window.addEventListener('resize', () => {
     if (!composerOverflowMenu.hidden) positionOverflowMenu();
   });
+
+  /**
+   * アイコン列の自動オーバーフロー（issue #1086）。#composerIconRowは折り返さない
+   * 1段に固定してあるため、幅が足りなくなった分は実行時に「…」メニューへ移す。移すのは
+   * ボタン要素そのもの（複製しない）なので、idもイベント配線も、応答中のdisabled切替や
+   * hiddenの出し入れもそのまま効く。表へ返す対象は描画時に表にあったボタン
+   * （composerIconRowOrder）だけで、設定で初めからメニューに置いたボタンは動かさない。
+   */
+  const composerIconRow = el('composerIconRow');
+
+  /** 描画時点の並び。表へ戻すときはこの順に置き直す。 */
+  const composerIconRowOrder = composerIconRow
+    ? Array.prototype.filter.call(
+        composerIconRow.children,
+        (node) => node.tagName === 'BUTTON' && node !== composerOverflowToggle,
+      )
+    : [];
+
+  let reflowingComposerIcons = false;
+  let composerIconsReflowQueued = false;
+
+  /**
+   * アイコン列が幅からはみ出しているか。行にoverflowを指定すると「…」メニューまで
+   * 切り取られてしまうため、CSSのスクロール量ではなく各要素の右端で判定する。
+   */
+  function composerIconRowOverflowing() {
+    const rowRight = composerIconRow.getBoundingClientRect().right;
+    let maxRight = 0;
+    for (const node of composerIconRow.children) {
+      if (node.hidden) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      if (rect.right > maxRight) maxRight = rect.right;
+    }
+    return maxRight > rowRight + 1;
+  }
+
+  /**
+   * 「…」メニューへ移したボタンを、描画時の並びの位置へ戻す。自分より後ろで表に残って
+   * いる最初のボタンの前へ入れれば、並びは元のままになる（誰も残っていなければ「…」の前）。
+   */
+  function restoreComposerIcon(button) {
+    const index = composerIconRowOrder.indexOf(button);
+    let anchor = composerOverflow;
+    for (let i = index + 1; i < composerIconRowOrder.length; i++) {
+      const next = composerIconRowOrder[i];
+      if (next.parentNode === composerIconRow) {
+        anchor = next;
+        break;
+      }
+    }
+    button.removeAttribute('role');
+    composerIconRow.insertBefore(button, anchor);
+  }
+
+  function reflowComposerIcons() {
+    if (!composerIconRow || reflowingComposerIcons) return;
+    // 開いている間に項目が動くと押し間違える。閉じたときに測り直す
+    if (!composerOverflowMenu.hidden) return;
+    reflowingComposerIcons = true;
+    // DOMから外して入れ直すとフォーカスは外れる。測り直しのたびにフォーカスが飛ぶと
+    // キーボード操作の最中に行き先を見失うため、動かしたあとに戻せるなら戻す
+    const focused = document.activeElement;
+    try {
+      composerOverflow.hidden = false;
+      // いったん全部を元の並びで表へ戻し、そのうえで入りきらない分を測り直す。
+      // 動かすのは実際にメニューにあるボタンだけにして、表に留まる分は触らない
+      for (const button of composerIconRowOrder) {
+        if (button.parentNode !== composerIconRow) restoreComposerIcon(button);
+      }
+      let guard = composerIconRowOrder.length;
+      while (composerIconRowOverflowing() && guard-- > 0) {
+        const rest = composerIconRowOrder.filter(
+          (button) => !button.hidden && button.parentNode === composerIconRow,
+        );
+        if (rest.length === 0) break;
+        const button = rest[rest.length - 1];
+        button.setAttribute('role', 'menuitem');
+        composerOverflowMenu.insertBefore(button, composerOverflowMenu.firstChild);
+      }
+      // 畳んだ項目が1つも無いなら「…」自体を出さない
+      composerOverflow.hidden = overflowMenuItems().length === 0;
+    } finally {
+      reflowingComposerIcons = false;
+    }
+    // 「…」メニューへ移ったボタンは畳まれていて focus できないため、見えている場合だけ戻す
+    if (
+      focused &&
+      focused !== document.activeElement &&
+      focused.isConnected &&
+      focused.offsetParent !== null
+    ) {
+      focused.focus();
+    }
+  }
+
+  /** 測り直しは次の描画フレームまでまとめる（幅の変化もhiddenの変化も連続して届く）。 */
+  function scheduleComposerIconsReflow() {
+    if (composerIconsReflowQueued) return;
+    composerIconsReflowQueued = true;
+    requestAnimationFrame(() => {
+      composerIconsReflowQueued = false;
+      reflowComposerIcons();
+    });
+  }
+
+  if (composerIconRow) {
+    // 最初の1回だけは描画を待たずに測る。1フレームでも溢れたままだと、行の外へ出た
+    // ボタンで横スクロールバーが出てしまう（この行はoverflowを指定できない）
+    reflowComposerIcons();
+    if (typeof ResizeObserver === 'function') {
+      new ResizeObserver(() => scheduleComposerIconsReflow()).observe(composerIconRow);
+    } else {
+      window.addEventListener('resize', scheduleComposerIconsReflow);
+    }
+    // ボタンの出し入れ（レビュー中・計画モード・取り込みの有無など）でも必要な幅が変わる。
+    // 監視するのはhiddenだけにして、この関数自身が触るrole属性では発火させない
+    if (typeof MutationObserver === 'function') {
+      const observer = new MutationObserver(() => {
+        if (!reflowingComposerIcons) scheduleComposerIconsReflow();
+      });
+      for (const button of composerIconRowOrder) {
+        observer.observe(button, { attributes: true, attributeFilter: ['hidden'] });
+      }
+    }
+  }
 
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
