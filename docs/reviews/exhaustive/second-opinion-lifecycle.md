@@ -1,0 +1,26 @@
+# レビュー材料の実体化と相談継続の精査
+
+src/secondOpinion/afterTree.ts、reviewBundle.ts、display.ts、advisorSession.tsと、test/unit/secondOpinionAfterTree.test.ts、secondOpinionReviewBundle.test.ts、secondOpinionKeepSession.test.ts、secondOpinionCleanup.test.ts、secondOpinionAdvisorSession.test.tsの全関数・分岐・テスト本体を読んだ。テストは未実行。
+
+| 対象                         | 確認内容と不足                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| afterTree                    | 絶対パス・空ディレクトリ確認、一時index、Git環境変数の除去、改行変換抑止、read-tree/checkout-index/apply失敗、未追跡内容の書出し、省略記録、通常ファイル数、notice、失敗時削除とfinallyを確認。mkdir/readdirはtryの外なので失敗時にwork用tmpを残す。削除失敗は元例外を覆う。書込み保護の問題はEX-AFTERTREE-01。Gitのfilter、submodule、外向きsymlink、attributesによる改行変換の影響は確認不足。                                                                                                                      |
+| afterTreeのテスト            | mkdtemp、ローカルGit設定、fixtureのcommit、実Git runner、各finally、afterEach削除まで確認。未変更依存、.git不在、binary/実行bit/内部symlink、binary patch不足、不正patch、不正base、非空宛先保護、未追跡と省略、字句上の../、autocrlf、採取後の変更、本物indexのstatus維持、snapshot接続を確認する内容。実行bit・symlinkはWindows用skipや代替がなく環境依存。status比較だけではindexのbyte単位不変やobjectDBへの無書込みを証明しない。                                                                                |
+| reviewBundle                 | 空bundle・材料bundle、after-tree追加、失敗時全削除、revision整数/下限・パス確認、同世代の削除再作成、差分全量、baseの1件512KiB/合計8MiB、NUL/不存在/範囲外の除外、stale掃除と冪等disposeを確認。revision上限10はadvisor側でのみ守る。baseを飛ばした理由は結果に残さない。dispose済みを削除成功前に立てるため、削除失敗後の再試行はno-op。stale判定はrootのmtimeだけで、長時間使っている相談の最終操作を表さない。                                                                                                     |
+| bundleのテスト               | 実tmpへの差分/base出力、新規baseなし、../除外、NUL、dispose2回、空bundle、古い接頭辞付きdirだけ削除、不存在rootを確認。fakeShowは登録なしを失敗とし、Gitを起動しない。baseのbyte上限、権限エラー、削除失敗後の再試行、使用中bundle、after-treeとの接続はこのテストでは扱わない。                                                                                                                                                                                                                                      |
+| display                      | 依頼待機/実行/成功/部分/取消/失敗、要約4状態、追加相談、材料更新、handoff下書きと未送信注記、optional partialReasonの有無を確認。取消の部分回答をどの表示へ渡すかはcallerの責務。材料更新中のdetailも「更新しました」とするため、本文の進行中表示と時制がずれる。HTML変換・escapeはこの層にないため表示側と併読が必要。                                                                                                                                                                                               |
+| AdvisorSession               | 状態、draft/material/writtenの各世代、同時turn・approvedの拒否、abort転送、timeout/取消の部分応答、材料の書込み→通知→ack、番号再利用防止、更新中closeのbundle削除延期、idle timer、承認失敗の戻し、closeの冪等性とstoreの同一instance除去を確認。runTurnはturnを確認するがupdatingを確認しないため、writer待機中の直接askを受け付けうる。画面registryとの到達性は画面本体の精査へ残す。update開始時はidle timerを解除せず、事前abortでも先に書き出す。markHandoffDraftedもclosed以外のbusy/approvedを直接は拒まない。 |
+| Advisorのテスト              | FakeSessionの同期回答/hold、同時ask拒否、closed、相談による下書き無効化、世代不一致、approved中拒否、close冪等・interrupt・dispose例外、fake timerによる30分/延長、store交換と全close、FakeMaterialWriterの保留/失敗、ack有無、書込み中closeと削除延期を確認。writer待機中のask、上限10、通知中timeout/取消、idle期限と書込みの競合、短い部分回答後の次turnは扱わない。                                                                                                                                               |
+| keepSession・cleanupのテスト | 単発の既定dispose、成功時所有権移譲、空/失敗/timeout/abortで非保持、open/approvalHandler/onSessionOpened/runLoopの同期throwとdispose、disposeSession=false、タイマー解除、view note例外とregistry解除、finallyのsetRunning例外吸収を確認。keepSessionのabortはopenTaskSessionのawait直後に競合させる内容で、実CLIの途中応答後の取消ではない。FakeHost/TaskSessionはプロセスを持たない。                                                                                                                               |
+
+## EX-AFTERTREE-01[P1]:説明ファイルへの書込みが追跡済みリンクをたどる
+
+src/secondOpinion/afterTree.ts:210付近のcheckout-indexは追跡済みsymlinkも展開する。その後:335以降のwriteNoticeは、固定名.frozen-after-tree.txtへfs.writeFileを実行する。既存パスのlstat・排他的作成・リンク追跡防止がない。
+
+この固定名が外部の書込み可能なファイルを指すsymlinkとしてcommitされていれば、コピー作成だけでリンク先を説明文へ上書きしうる。競合による差替えは不要。通常ファイルとして存在する場合も、レビュー対象の内容を説明文で置換し、正確なコピーでなくなる。writeUntrackedの字句上の境界確認も、展開済みのリンクを含む経路を保護しない。
+
+説明文はリポジトリの名前空間の外へ置くか、衝突を扱ったうえでリンクをたどらず作成する必要がある。既存のsymlinkテストはlink.tsの内部参照の変更だけで、固定名・外向き参照・書出し先の保護は確認しない。実際の上書き・攻撃の再現は実行していない。
+
+## 制約
+
+CLI側の停止確認がないままAdvisorのrunTurnはfinallyでturnを解除する。timeout/取消後も相談sessionは保持するので、旧turnが継続した場合の追加質問との混在はplanner・view・CLIの境界を含めた確認が必要。ここでは実際に混在したとは断定しない。実行検証、ファイル作成機能の起動、削除機能の起動はしていない。

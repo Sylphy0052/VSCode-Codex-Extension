@@ -1,0 +1,25 @@
+# Codexチャット管理のテスト内容
+
+対象:test/unit/chatViewManager.test.ts。全2,089行の準備・操作・期待値・後片付けと各条件入力を確認した。テスト未実行。
+
+## 起動・寿命・設定
+
+同時起動の承認配布、開始待ち通知、TaskSession.sendのprompt変換除外、disconnect、閉じたタスクの維持と再表示、タスク別model、承認モード、composer上限、import/openThread/loop/approve/rename、active sequence、clear、復元対象の保存を確認した。未知threadを2起動へ拒否する試験はあるが、1起動待ちへ誤配送するF10-01の条件は無い。disconnect後にthread/startを成功させるfakeは、実接続のpending request棄却と異なる。model変更の独立性はmodelのみで、approval/sandbox/effortは確認しない。保存は同一managerと同期Mementoで、拡張再起動ではない。
+
+interruptの試験は終了通知が来ないことだけで、次ターンが送られてループが継続することを検査しない。clearはidleとbusy時の取消を扱うが、busy時の確定・割込みを検査しない。renameの表題はタブ名反映を述べるが期待値は要求のnameだけ。openThread再表示はpanel数だけでresume要求数を検査しない。未解決のturn/startとmanager未破棄を残す試験が多い。
+
+## 通知・ループ・操作
+
+idleが完了通知に先行する順序、prompt変換と活動記録、skill無効化とMCP設定の併用、MCP待機、pause/resume、recap、workflow/team/kanban等の導線、busy/承認バッジ、非表示時の通知、タイトル/pinを確認した。完了通知の多くはthreadIdだけでturnのid/status/errorを与えず、F11-01とEX-STATE-01の失敗・別turn・重複完了を検出できない。pause/resumeは次のturn/start件数まで観測している。
+
+MCPの「別thread・別名を無視する」は誤った通知も正しい通知もreadyであり、最後のtrueだけを見る。正しい通知前に未解決であることを確認せず、誤配送で先に解決しても通る。通知は確認開始後に投入され、EX-MCP-02の早着、timeout、同時確認、破棄を検査しない。disableMcpServers時のconfig/read失敗は未検査。
+
+空会話のrecapは1回だけでEX-RECAP-01の2回目を扱わない。承認通知の重複防止試験は最初の自動選択でpanelが表示されるため、その後は可視性による抑制でも通る。表示状態を戻して同一承認の重複を観測する必要がある。タイトル長のUTF-16境界は未検査。stateMessagesOfは差分を自前で合成しtotalと長さ不一致を検査しないため、実Webviewの差分反映を保証しない。
+
+## 引継ぎ・ファイル復元
+
+引継ぎはactive無し、rolloutあり、保存待ちリトライ失敗を扱う。固定パスを送信内容に含むことは検査するが、引継ぎ先のmodel等は見ない。
+
+復元・再送はsuccess/cancel/conflict/startFailure/dirty/fork/resumeFailureの7条件。実一時ディレクトリに追加ファイルを作り、会話準備が完了するまで変更しないこと、成功時の削除と送信先、新規開始/再開失敗時の内容維持を確認する。finallyでmanagerと一時ディレクトリを片付ける。対象は追加ファイル1件で、更新/削除/移動、複数ファイルの途中失敗、確認待ちのsymlink差替え、別Provider同時編集はこの試験を通らない。dirty条件は新規thread作成後に送信を止める挙動を期待している。
+
+fake filesystem、同期Memento、5回のmicrotask待機と50msの投稿待ち、実時間を進めるfake timerの範囲を確認した。待機回数は完了条件を直接表さず、未解決RPCや破棄漏れによる試験間の影響は実行せず判定できない。

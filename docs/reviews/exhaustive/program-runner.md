@@ -1,0 +1,35 @@
+# program実行本体とテスト
+
+対象:`src/orchestrator/programRunner.ts`、`test/unit/programRunner.test.ts`。全文の各関数・分岐・テスト準備・操作・期待値を読んだ。テスト未実行。
+
+## 新規指摘
+
+### EX-PROGRAM-01・P2:計画変更とrun完了が重なると完了状態を失う
+
+`programRunner.ts:713`の計画更新はcurrentを読み、resolveProgramDefinitionをawaitしてから、そのcurrentからchanged.stateを作る。保存時は最新値へ展開するがstateだけは古いchanged.stateを上書きする。一方、`:511`のonRunChangedによる完了保存はprogram単位のrunExclusiveを通らない。
+
+計画変更がcurrentを取得→run完了がstoreへdoneを保存しtrackedRunsから除去→計画変更が古いstateを保存、という順で完了runがrunningへ戻る。そのrunはもう追跡されず、依存runが開始できない。onRunChangedの更新も同じ排他へ入れるか、保存時の最新stateに操作を適用する必要がある。既存の同時完了テストはpump同士の二重起動を調べるもので、この経路を通らない。
+
+## 関数・分岐
+
+attachはworkflow通知を購読し、非同期完了処理のrejectをログへ変える。二重attachは前購読を解除しない。disposeは購読・復旧timerを解除するが、進行中のstart/pumpとキューを無効化しない。programごとのrunExclusiveは終了時にキューMapを消すが、後続予約の有無やMapが同じqueueを指すかまでは確認しない。
+
+startは定義のsize/読取り/parse/validate、UUID・時刻、初期保存、pumpの順。pumpは保存定義優先で検証し、旧ポートでは即失敗伝播、新ポートでは復旧待ちに分ける。開始集合を計算して1runずつawaitし、必要な復旧と終了判定を行って通知する。起動途中の停止を同じキューの後ろへ積む問題は既存F34-01。workflow.startのrejectをstartOneRunが受けないため、runRefはpendingのままpumpが終了し、後続起動も中断する。
+
+startOneRunは絶対defPathを防御的に拒否し、workspaceとのjoin後にworkflow.startする。成功を返してから逆引き登録・programControl・running保存を行う。起動中の完了通知やcontrol呼出しは、この登録順との整合を別途確認する必要がある。ok:falseとallow確認待ちはfailedへ倒す。maybeMarkFinishedは未完了かつ復旧待ちでない場合だけ時刻を保存する。
+
+haltは追跡中のrunへstopし、programのhaltedByUserとpendingのskippedを保存する。復旧中のfailed runは追跡から外れており、ここではstopやendProgramRecoveryを呼ばず、timerとrecoveryも残す。recoveryがある間はfinishedAtを付けないため、停止後も復旧期限まで待機表示が残り得る。
+
+復元はfailedかつrunIdのある参照をlive outcomeに合わせ、runningだけ追跡し、programControlを再配線する。全programへpumpする。onRunChangedは非runningを一度だけ受け、追跡を消して復旧通知・状態保存・pumpへ進む。保存reject時には追跡を戻さない。live欠落は何もせず残す。
+
+復旧は失敗集合とpending依存/残るrunningで判定し、10分の期限と履歴を保存する。追加失敗は集合を併合し、既存timerの保持run集合も増やす。期限到達は直列処理で失敗を伝播し、復旧解除・保持runの通信終了・終了時刻・通知を行う。timerコールバックはrejectを回収せず、定義の再検証失敗では復旧状態とtimer登録が残ったまま再予約しない。clearはtimer解除→保存→保持run解放で、保存rejectの場合は解放まで進まない。
+
+programControlは状態照会、run追加、削除、再試行、依存変更を実装する。定義検証を通して保存し、完了時刻を消して再pumpする。削除はrunning/doneを拒否し、そのrunへの依存も削除する。retryはfailed/skippedだけ、依存変更はpendingだけで重複を除く。haltedByUserを解除しないため、停止済みprogramへのretryがacceptedでも再開しない。addのdependsOnは非文字列を除外し、不正型全体をエラーにしない。履歴は末尾50件。
+
+## テスト内容と不足
+
+テストは依存順、並列、maxParallel、同tickの複数完了による二重起動防止、リロード後の同run再開・欠落・独立pending、起動ok:false、不正program、失敗の依存伝播・連鎖、人の停止とリロードを確認する。期待値は起動パス・回数、run参照状態、skip理由、finishedAt、stop対象まで読む。同期MapのMemento、手動finishRun、空logger、正常ファイルを使う。一部テストはdisposeを省き、waitForでstartCallsだけを待った後に別の保存属性を読むため、待機対象と最終期待値の確定地点が一致しない。
+
+fakeWorkflowはbeginProgramRecovery等の任意APIを実装しない。したがって本体の10分復旧、timer、保持runの解除、run追加/削除/再試行/依存変更、計画履歴、control付き復元をこのファイルでは検証していない。runner.test.tsを検索した範囲でもこれらのAPIの直接テストは見当たらない。新規指摘の計画変更と完了の交差、startのreject/早期完了、dispose中起動、復旧中停止、保存障害、期限処理失敗、キュー削除中の後続予約が不足する。
+
+復元フェイクはseedのrun-1があってもnextIdを0から始めるため、次の新規起動もrun-1を返す。実UUIDの一意性を再現せず、元runと後続runのID衝突をテストが見逃す。20msの余分な待機による「遅れて二重起動しない」確認は、その時間より遅い処理まで保証するものではない。

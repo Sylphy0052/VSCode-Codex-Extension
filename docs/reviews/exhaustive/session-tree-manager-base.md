@@ -1,0 +1,29 @@
+# セッションツリー・チャット管理基底・起動失敗/ゴール下書き試験
+
+対象:sessionTreeProvider.tsと単体テスト、chatManagerBase.ts、goalDraftWebview.test.ts、chatViewSessionStartFailure.test.ts。全文の関数・分岐・テスト準備/操作/期待値を確認した。テスト未実行。
+
+## ツリー
+
+scopeの設定上書き、filterの空白判定とcontext更新、pin/unpin永続化後のrefresh、debounce、ルート読込みと葉/グループの子、表示候補からURI逆引き辞書を作った後の装飾通知、none/date/folderとpin優先、各TreeItemのid/command/引数/context/仮想URIを確認した。ラベル一致はhighlightを付け、cwd/IDだけの一致は文字列にする。アイコンと説明は承認待ち→実行中→開いている→アーカイブ→providerの順、グループ内訳も承認を優先する。disposeはtimerと2Emitterを解放する。
+
+getChildrenのI/Oには世代判定が無い。scope/設定変更前の読込みが後から完了すると、古い候補でvisibleSessionsと装飾を置き換える可能性がある。filterは読込み後の最新値、groupBy/maxEntriesは読込み前の値を使うため、途中変更に対する一貫性も無い。I/O rejectとdispose中の読込み終了をここでは回収しない。tooltipは未エスケープのthreadName/cwd/idをMarkdown文字列へ入れる。isTrustedを有効にしてはいないが、Markdownの見え方やリンク化は入力で変わる。相対時刻・日付境界は既存EX-VIEW-01/02の対象。
+
+テストはidの名前重複/provider間衝突、元のSessionSummaryをcommandへ渡すこと、活動状態の形・色・説明、相対時刻とcwd/CLI tooltip、グループ内訳優先、仮想URI/未知URI/フィルター後の装飾と発火順、date/folder/none、pin有無/幽霊pin/解除、検索とhighlightを確認する。比較の一部は本体と同じformatRelativeTimeを期待値生成にも使うため時刻関数自身の誤りを検出しない。fakeProvidersは即座に同じ配列を返す。debounce・dispose・読込みの逆順完了・context/永続化失敗・本物のVSCodeメニュー/描画は通らない。
+
+## チャット管理基底
+
+active/sequence、状態照会、managedSessions、進捗通知、全panel列挙、showとattach、task管理時のタブ寿命分離、activity/承認一覧/再表示、composer挿入、承認通知・完了通知、teardown/disposeと拡張hookを確認した。showはdisposedを拒否し、preserveFocusと実panel.activeに沿って対象を更新する。承認通知の既読Setは通知無効/可視の場合にも追加し、後から通知しない。通知ボタンの遅いクリックはshowのdisposedガードが受ける。
+
+resolveApprovalはsession.decideの戻り値やrequestの存在を確認せず、全listenerへ決定済みを通知する。無効/重複requestIdをsessionが無視してもlistenerは通知されるため、runner側の反応を併せて確認する必要がある。listenerのthrowは後続listenerを止める。teardownはdisposedを先に立てて再入を避けるが、loop.stop/session.dispose/panel.dispose/hookの例外を隔離しない。途中throwではMapからの除去と集合通知を飛ばし、次回teardownも早期returnする。getActivityStateと承認一覧はdisposedを除外せず、この部分破棄状態を拾い得る。manager全体のdispose後に新しいopenを拒否するフラグはこの基底には無い。Codex/Claudeの遅い起動は既存F03-04/05。
+
+## ゴール下書き試験
+
+goalDraftWebview.test.tsは生成されたchatScriptの目印区間を切り出し、実関数をnew Functionで実行する。切り出し範囲と開始側のgoalFieldsEmpty利用は文字列で確認する。空3欄/目的のみ/受入のみ/制約のみ/空白、request採番と開始無効化、正常適用、start指定時だけクリック、外部Issue由来表示、待機中の入力変更保護、別id/要求なし/二重応答無視、失敗理由有無、制約欠落を確認する。
+
+fakeDOMは全nodeのhiddenとdisabledを同じ2変数で共有し、clickも対象に関係なく同じ回数へ加算する。従って誤ったnodeを無効化/クリックしてもこれらの期待値だけでは検出できない。開始ボタン実イベント、window.messageの振分け、VSCodeとの通信、provider差、timeout/パネル再生成、前回要求との交差はこの切り出し試験には含まれない。
+
+## 起動失敗試験
+
+chatViewSessionStartFailure.test.tsは実ChatViewManagerとFakeConnectionでthread/startをrejectし、openNewは例外を吸収してエラー表示、openTaskSessionはエラー表示と再throw、双方でpendingStarts/panels除去とteardown呼出しを確認する。手動起動は実際のfakepanel破棄も観測し、taskはpanel未作成を確認する。開始前提のpending件数を置いており単に起動しない実装では通らない。
+
+task経路はsession.dispose/loop.stopの効果までは観測しない。ensureStarted失敗・resume失敗・同時複数起動の片側失敗・破棄後の遅い成功/失敗・復旧再接続は別対象。tickは固定5回のmicrotaskであり、本物のI/O時間を再現しない。manager自体のdisposeは無い。

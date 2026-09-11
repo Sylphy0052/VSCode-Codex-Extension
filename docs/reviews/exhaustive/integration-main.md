@@ -1,0 +1,29 @@
+# ローカル統合・占有・完了判定とテスト
+
+対象:src/orchestrator/integration.ts、test/unit/integration.test.ts。全文の関数・分岐・型契約と全テスト内容を確認した。テスト未実行。
+
+## 作成と統合
+
+統合パス/ブランチのrunId検査、HEAD/祖先symlink/既存branch/作成後境界と撤去、タスク分岐元のHEAD取得、未コミットのstatus/add/commitの各成功失敗を確認した。作成側のI/O・環境継承・事後撤去の注意はworktree-main.mdと共通。自動commitはcwdを受け入れ全変更をaddする契約で、cwdとbranchの同一性を確認する責任は呼出し側にある。
+
+isValidTaskBranchはwfでrunId全体、conventionalで先頭8文字のsuffixだけを確認する。taskIdとbranch末尾の一致を確認する関数ではない。EX-WORKTREE-01の名前衝突に加え、taskIdのintegrationは統合ブランチ名そのものと衝突する。workflow.tsの予約は_integrationなので、このタスク名を拒否しない。作成時にbranchExistsとなる。
+
+mergeTaskBranchはID/branch、既存MERGE_HEAD/未解決パス、巻戻しHEAD取得、merge、成功後HEAD/失敗後未解決パスの順。事前検査のコマンド失敗は素通りする。成功後HEADが取れなくても空のmergeCommitでsuccessを返す。未解決パスはNUL区切りでなく行分割・trimのため、特殊なファイル名は正確に表せない。衝突は未解決状態を保持し、abortは別操作。
+
+## 占有と寿命
+
+cwdごとのholderとFIFO waiters、通常/二重/偽造/別owner/非holder解放、全解放のrevoked、待機解除、queue投入前と実行開始時の再検査、taskId一致、create/pushの共通queueを確認した。leaseはcwd文字列をキーにし実パスの同一性までは見ない。全解放後の新規取得を拒否するdisposed状態はこのクラスに無い。mergeTask内の複数awaitの間にはleaseを再検査せず、実行開始後の失効は呼出し側の寿命管理にも依存する。pushはleaseを引数に取らず、呼出し側が占有中に実行する契約。
+
+## 完了判定・復元
+
+**EX-INTEGRATION-01(P1):マージを取り消した状態も解決済みと判定する。** integration.ts:1036のisMergeResolutionCompleteは未解決パスが空でMERGE_HEADのrev-parseが非0ならtrueを返す。mergeをabort/resetで取り消した状態でも成立するが、対象ブランチのcommitが統合先に入ったことを確認しない。runnerMerge.ts:1308付近は解決sessionのdoneとこの値だけでmarkMergeSucceeded・cleanup・後続起動へ進む。成果未統合のままdoneになる。MERGE_HEAD問い合わせ自体の異常終了も不在と同一扱いになる。取込み対象SHAの到達性、必要なcommitの存在と作業状態を併せて確認する必要がある。
+
+reloadのreconcileは全履歴subjectを固定文言の新旧形式で照合し、type変更には耐える。ただし通常commitか実mergeかを確認せず、revertや再試行世代も識別しない。未解決diffの取得失敗でもlogに一致があればdoneになる。findTaskIdsMergedSinceは範囲を指定しID重複を除くが、失敗と0件を区別しない。衝突解決promptはtarget/othersと未解決パスを無制限に連結する。
+
+## テスト内容と不足
+
+固定メッセージ/type、識別子、branch形式、origin、統合worktree作成の正常/既存/失敗/symlink/外側、commitのclean/dirty/各失敗、merge正常/衝突/失敗/不正入力、abort、push、reload判定、新旧subject抽出、prompt、leaseのFIFO/別cwd/偽造/二重解放/失効とqueue待ちを確認する。全件fake git/filesystemで、実commit graphは作らない。
+
+「自動commit後の統合ブランチに変更を含む」はfakeの呼出し順だけを見ており、統合結果の内容は確認しない。「マージが直列化」はテスト自体が1件ずつawaitし、さらにfakeがMERGE_HEAD問い合わせにもSHAを返すため実mergeを呼ばずbusyになっても通る。戻り値とmerge呼出し件数を検査しない。作成同士/作成とpushの直列化も件数だけで重なりと開始順を検査しない。一方、push同士はactive最大値、lease試験は未解放時の待機とqueue保留中の失効後git不実行を観測する。
+
+isMergeResolutionCompleteは未解決あり/MERGE_HEADあり/両方なしの3件だけで、EX-INTEGRATION-01の未取込み・取消・問い合わせ失敗を検査しない。固定文言関数のlength検査は引数の意味を保証しない。FakeGitの未登録応答はcode0/空文字で、空の成功が実際には成立しない問い合わせも成功扱いになる。通常leaseを解放しない試験は多いが、各queueが試験内に閉じている。これらの内容確認をテスト合格報告と解釈しない。

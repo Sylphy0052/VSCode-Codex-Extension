@@ -1172,6 +1172,10 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 
 ビルド・テスト・アーキテクチャは [CONTRIBUTING.md](CONTRIBUTING.md)、設計の背景と検証結果は [docs/design.md](docs/design.md) を参照。
 
+全体を機能ごとにレビューする場合は[機能別レビュー台帳](docs/feature-inventory.md)を参照。チェック項目、実装先、既存テスト、全ソース・コマンド・設定の対応表をまとめている。[全機能の静的レビュー結果](docs/reviews/summary.md)に指摘と未検証事項を記録した。
+
+全関数・全分岐・全テスト内容の[静的精査](docs/reviews/exhaustive/README.md)も完了している。555ファイル分の根拠と[追加の94指摘](docs/reviews/exhaustive/findings.md)を保存した。テストの実行と指摘の修正は未実施。
+
 ## ライセンス
 
 MIT

@@ -22,3 +22,6 @@ docs/chatgpt/
 
 # セカンドオピニオン評価の測定結果 (ローカルのみ、リモート未push)
 eval-results/
+
+# 全関数精査の構文抽出結果 (約15MB、docs/reviews/exhaustive/extract.mjs で再生成できる中間生成物)
+docs/reviews/exhaustive/inventory.json
