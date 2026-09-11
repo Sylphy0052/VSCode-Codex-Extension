@@ -119,7 +119,16 @@ export class ChatSession {
     private readonly connection: AppServerConnectionPort,
     private readonly log: Logger,
     private readonly onChange: (state: ChatState) => void,
-  ) {}
+    /**
+     * 自動引き継ぎ（Issue #1079）をこのセッションの初めからONにするか（Issue #1091）。
+     *
+     * 値の出どころはユーザー設定（`agent.autoHandoff.enabled`）だが、この層は `vscode` を
+     * importしないため、読むのは呼び出し側の `chatView.ts` に任せて値だけ受け取る。
+     */
+    initialAutoHandoff: boolean = initialChatState.autoHandoff,
+  ) {
+    this.state = { ...initialChatState, autoHandoff: initialAutoHandoff };
+  }
 
   get threadId(): string | undefined {
     return this.state.threadId;

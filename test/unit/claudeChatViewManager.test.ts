@@ -328,6 +328,27 @@ describe('ClaudeChatViewManager', () => {
     });
   });
 
+  describe('自動引き継ぎの初期値の配線（Issue #1091）', () => {
+    it('設定が未指定なら新しいセッションはONで始まる', async () => {
+      const { sessions } = stubStartCapturing();
+      const { manager } = createManager();
+
+      await manager.openNew('/workspace/root');
+
+      expect(sessions[0]?.getState().autoHandoff).toBe(true);
+    });
+
+    it('設定をOFFにすると新しいセッションはOFFで始まる', async () => {
+      __mock.setConfig('agent', { 'autoHandoff.enabled': false });
+      const { sessions } = stubStartCapturing();
+      const { manager } = createManager();
+
+      await manager.openNew('/workspace/root');
+
+      expect(sessions[0]?.getState().autoHandoff).toBe(false);
+    });
+  });
+
   describe('ループを介さない1回きりの送信（TaskSession.send。design.md §16.23）', () => {
     it('本文をそのままCLIへ送る（promptTransformは通さない）', async () => {
       stubStart();

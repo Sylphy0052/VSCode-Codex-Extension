@@ -213,7 +213,17 @@ export class ClaudeStreamSession {
      */
     private readonly spawnProcess: ClaudeSpawnPort = (command, args, options) =>
       spawn(command, [...args], { ...options, stdio: ['pipe', 'pipe', 'pipe'] }),
-  ) {}
+    /**
+     * 自動引き継ぎ（Issue #1079）をこのセッションの初めからONにするか（Issue #1091）。
+     *
+     * 値の出どころはユーザー設定（`agent.autoHandoff.enabled`）だが、この層は `vscode` を
+     * importしない（CONTRIBUTING.mdの「レイヤの制約」）ため、読むのは呼び出し側の
+     * `claudeChatView.ts` に任せて値だけ受け取る。`LoopController` のしきい値と同じ流儀。
+     */
+    private readonly initialAutoHandoff: boolean = initialClaudeState.autoHandoff,
+  ) {
+    this.state = { ...initialClaudeState, autoHandoff: initialAutoHandoff };
+  }
 
   /**
    * 使えるスラッシュコマンド。
@@ -369,6 +379,8 @@ export class ClaudeStreamSession {
       todos: options.initialTodos ?? initialClaudeState.todos,
       todoHistory: options.initialTodoHistory ?? initialClaudeState.todoHistory,
       name: options.initialName,
+      // ここが実効値になるため、構築時と同じ初期値を入れ直す（Issue #1091）
+      autoHandoff: this.initialAutoHandoff,
     });
 
     this.initializeControl();

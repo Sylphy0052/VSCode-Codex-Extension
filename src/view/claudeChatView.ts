@@ -49,6 +49,7 @@ import {
   setChatTurnSummaryEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
+  readAutoHandoffEnabled,
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
@@ -1719,6 +1720,9 @@ export class ClaudeChatViewManager
           : Promise.resolve({ kind: 'ask' as const }),
       // 統合テスト（Issue #186）が差し替えている間だけフェイクのプロセスになる。
       this.resolveSpawn(),
+      // 自動引き継ぎの初期値（Issue #1091）。ClaudeStreamSessionはvscodeに依存しないため、
+      // 設定の読み出しはここ（view層）で行う（下の`LoopController`と同じ）
+      readAutoHandoffEnabled(),
     );
 
     const loop = new LoopController(

@@ -531,10 +531,14 @@ export interface ChatState {
   /**
    * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
    *
-   * ワークスペース全体の設定にはしない（会話ごとに入れたい／入れたくないが分かれるため）。
-   * 切り替えは入力欄の「…」メニューのトグルからで、拡張機能側だけで完結する状態のため
-   * CLIへは何も送らない。閾値だけはユーザー設定（`agent.autoHandoff.thresholdPercent`）
-   * で持つ。
+   * 初期値はユーザー設定（`agent.autoHandoff.enabled`、既定ON）から入り、そこから先は
+   * 会話ごとに入れたい／入れたくないが分かれるためセッション単位で持つ。切り替えは入力欄の
+   * 「…」メニューのトグルからで、拡張機能側だけで完結する状態のためCLIへは何も送らず、
+   * 設定へも書き戻さない。閾値はユーザー設定（`agent.autoHandoff.thresholdPercent`）で持つ。
+   *
+   * 下の `initialChatState` が `false` なのは、この層とセッション層が `vscode` を
+   * importしないため（CONTRIBUTING.mdの「レイヤの制約」）。設定を読むのはview層で、
+   * セッションの構築時に初期値として渡される。
    */
   autoHandoff: boolean;
   /**

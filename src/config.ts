@@ -374,12 +374,29 @@ export function readChatLimitAutoResumeEnabled(): boolean {
 }
 
 /**
+ * 新しい会話で自動引き継ぎ（Issue #1079）を最初から有効にするか（Issue #1091）。
+ *
+ * 既定はON。この設定が決めるのは新規セッションの初期値だけで、以降のON/OFFはセッション
+ * 単位（`ChatState.autoHandoff`）に持つ。入力欄の「…」メニューのトグルはその一時的な
+ * 上書きで、ここへは書き戻さない（会話ごとに入れたい／入れたくないが分かれるため）。
+ *
+ * 読むのはview層（`chatView.ts` / `claudeChatView.ts` がセッションを作るところ）。セッション層
+ * （`src/appserver/chatSession.ts` / `src/claude/streamSession.ts`）は `vscode` をimportしない
+ * ため、値だけを構築時の引数で渡す（CONTRIBUTING.mdの「レイヤの制約」。`LoopController` の
+ * しきい値と同じ流儀）。
+ */
+export function readAutoHandoffEnabled(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.enabled');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
  * 自動引き継ぎが始まるコンテキスト残量の割合（Issue #1079）。
  *
- * ON/OFFはセッション単位（`ChatState.autoHandoff`）で持ち、設定にはしない。ここで持つのは
- * 閾値だけ。名前空間が `agent.` なのは、これがCodex CLI固有の設定ではなく両プロバイダ
- * 共通の機能だから（`codex.` はCLIの起動・サンドボックス・モデルなどCodex固有の設定に
- * 限って使っている）。
+ * ON/OFFの初期値は `agent.autoHandoff.enabled`（`readAutoHandoffEnabled`）で、会話ごとの
+ * 切り替えはセッション単位（`ChatState.autoHandoff`）。ここで持つのは閾値だけ。名前空間が
+ * `agent.` なのは、これがCodex CLI固有の設定ではなく両プロバイダ共通の機能だから
+ * （`codex.` はCLIの起動・サンドボックス・モデルなどCodex固有の設定に限って使っている）。
  *
  * 既定の20は `chatScript.ts` の `LOW_CONTEXT_PERCENT`（残量表示が「残りわずか」に変わる
  * 境界）と同じ。壊れた値（数値でない・範囲外）は既定へ丸める。
