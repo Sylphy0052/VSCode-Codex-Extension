@@ -127,7 +127,8 @@ export function buildEffectiveTaskConfig(
   // 有効にした場合は危険判定が全て無効になることを警告として必ず残す。
   let approvalMode = approvalResult.value;
   if (task.provider === 'claude' && approvalMode === 'bypassPermissions') {
-    if (baseline.allowClaudeBypassPermissions) {
+    // `=== true` で限定する（Issue #1105。型を偽った設定値で読み替えが外れないための多層防御）
+    if (baseline.allowClaudeBypassPermissions === true) {
       warnings.push(
         'agent.workflows.allowClaudeBypassPermissions が有効なため、このタスクは' +
           'bypassPermissionsのまま実行します。危険判定（承認）は一切働きません',

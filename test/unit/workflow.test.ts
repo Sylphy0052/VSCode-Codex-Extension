@@ -1375,6 +1375,15 @@ describe('clampAutoApprove', () => {
     expect(result.value).toBe(false);
     expect(result.warning).toBeUndefined();
   });
+
+  it('allowAutoApproveが型を偽った値（文字列 "false"）でも無効化される（Issue #1105）', () => {
+    // 設定読取りが真偽値以外を返した場合の多層防御。`!allowAutoApprove` だと `!"false"` が
+    // falseになり、YAMLの autoApprove: true がそのまま通ってしまう
+    const lying = 'false' as unknown as boolean;
+    const result = clampAutoApprove(true, lying);
+    expect(result.value).toBe(false);
+    expect(result.warning).toBeDefined();
+  });
 });
 
 describe('CLEANUP_MODES（design.md §16.17「worktreeの片付け」）', () => {

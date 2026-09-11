@@ -3241,7 +3241,7 @@ export class WorkflowRunner {
       live.failureRecovery !== undefined ||
       live.failureRecoveryExhausted ||
       live.runState.haltedByUser ||
-      !this.deps.readBaseline().allowAutoApprove
+      this.deps.readBaseline().allowAutoApprove !== true
     ) {
       return false;
     }
@@ -3538,7 +3538,7 @@ export class WorkflowRunner {
     if (
       task.provider === 'claude' &&
       effective.config.approvalMode === 'bypassPermissions' &&
-      !baseline.allowClaudeBypassPermissions
+      baseline.allowClaudeBypassPermissions !== true
     ) {
       throw new Error(
         '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +

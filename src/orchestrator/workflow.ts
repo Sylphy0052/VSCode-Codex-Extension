@@ -1886,7 +1886,9 @@ export function clampAutoApprove(
   yamlValue: boolean,
   allowAutoApprove: boolean,
 ): AutoApproveClampResult {
-  if (yamlValue && !allowAutoApprove) {
+  // `=== true` で限定する。設定読取りが型を偽った値（文字列 `"false"` 等）を返しても
+  // 抑止が外れないようにする多層防御（Issue #1105。一次防御は `config.ts` の `permissionFlag`）
+  if (yamlValue && allowAutoApprove !== true) {
     return {
       value: false,
       warning:

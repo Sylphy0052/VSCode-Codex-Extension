@@ -177,6 +177,26 @@ describe('buildEffectiveTaskConfig（design.md §16.16の唯一の入口）', ()
     expect(result.warnings.some((w) => w.includes('危険判定'))).toBe(true);
   });
 
+  it('allowClaudeBypassPermissionsが型を偽った値（文字列 "false"）でも読み替える（Issue #1105）', () => {
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'claude',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      {
+        ...baseline,
+        claudePermissionMode: 'bypassPermissions',
+        allowClaudeBypassPermissions: 'false' as unknown as boolean,
+      },
+    );
+    expect(result.config.approvalMode).toBe('acceptEdits');
+    expect(result.warnings.some((w) => w.includes('acceptEdits'))).toBe(true);
+  });
+
   it('CodexタスクはbypassPermissionsの読み替えの対象外（Claude固有の値のため）', () => {
     const result = buildEffectiveTaskConfig(
       {
