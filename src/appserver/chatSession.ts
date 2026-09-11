@@ -1,4 +1,5 @@
 import { isApprovalsReviewer, type CodexConfig } from '../codex/types';
+import { readAutoHandoffEnabled } from '../config';
 import type { Logger } from '../log';
 import { isBlockedByReview, readAutoApprovalReview } from './autoApprovalReview';
 import {
@@ -87,7 +88,11 @@ interface WaitingPrompt {
  * （TUI方式では次のセッションまで待つ必要があった）。
  */
 export class ChatSession {
-  private state: ChatState = initialChatState;
+  /**
+   * 自動引き継ぎの初期値だけは設定から入れる（Issue #1091）。定数の `initialChatState` 側で
+   * 読まないのは、そちらがモジュール読み込み時に一度だけ評価されるため。
+   */
+  private state: ChatState = { ...initialChatState, autoHandoff: readAutoHandoffEnabled() };
   private readonly waiting = new Map<number | string, WaitingApproval>();
   /** 回答待ちの問い合わせ。応答を返すまでapp-serverは待ち続ける。 */
   private readonly waitingPrompts = new Map<number | string, WaitingPrompt>();

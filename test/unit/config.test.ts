@@ -13,6 +13,7 @@ import {
   setChatLoopEngineeringEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
+  readAutoHandoffEnabled,
   readAutoHandoffThresholdPercent,
   DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT,
   readClaudeConfig,
@@ -802,6 +803,37 @@ describe('readAutoHandoffThresholdPercent（Issue #1079）', () => {
     for (const bad of [0, 100, -5, Number.NaN, '20', null]) {
       __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': bad });
       expect(readAutoHandoffThresholdPercent()).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+    }
+  });
+});
+
+describe('readAutoHandoffEnabled（Issue #1091）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未指定ならONで、package.jsonのdefaultも同じ', () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: {
+        configuration: { properties: Record<string, { default?: unknown; type?: unknown }> };
+      };
+    };
+    const declared = manifest.contributes.configuration.properties['agent.autoHandoff.enabled'];
+
+    expect(declared?.type).toBe('boolean');
+    expect(declared?.default).toBe(true);
+    expect(readAutoHandoffEnabled()).toBe(true);
+  });
+
+  it('OFFにするとその値を使う', () => {
+    __mock.setConfig('agent', { 'autoHandoff.enabled': false });
+    expect(readAutoHandoffEnabled()).toBe(false);
+  });
+
+  it('真偽値でない値はONへ倒す', () => {
+    for (const bad of ['false', 0, null]) {
+      __mock.setConfig('agent', { 'autoHandoff.enabled': bad });
+      expect(readAutoHandoffEnabled()).toBe(true);
     }
   });
 });

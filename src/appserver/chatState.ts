@@ -531,10 +531,14 @@ export interface ChatState {
   /**
    * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
    *
-   * ワークスペース全体の設定にはしない（会話ごとに入れたい／入れたくないが分かれるため）。
-   * 切り替えは入力欄の「…」メニューのトグルからで、拡張機能側だけで完結する状態のため
-   * CLIへは何も送らない。閾値だけはユーザー設定（`agent.autoHandoff.thresholdPercent`）
-   * で持つ。
+   * 初期値はユーザー設定（`agent.autoHandoff.enabled`、既定ON）から入り、そこから先は
+   * 会話ごとに入れたい／入れたくないが分かれるためセッション単位で持つ。切り替えは入力欄の
+   * 「…」メニューのトグルからで、拡張機能側だけで完結する状態のためCLIへは何も送らず、
+   * 設定へも書き戻さない。閾値はユーザー設定（`agent.autoHandoff.thresholdPercent`）で持つ。
+   *
+   * 下の `initialChatState` が `false` なのは、定数がモジュール読み込み時に評価されて
+   * 設定の変更に追随しないため。設定を読むのはセッションを作る時点（`chatSession.ts` /
+   * `streamSession.ts`）で、そこで上書きする。
    */
   autoHandoff: boolean;
   /**
