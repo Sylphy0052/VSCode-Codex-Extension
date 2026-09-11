@@ -5018,7 +5018,7 @@ tasks:
         (c) =>
           c.args[0] === 'api' &&
           c.args[1] === 'projects/:id/merge_requests' &&
-          c.args.some((a) => a.startsWith('--field=source_branch=wf/')),
+          c.args.some((a) => a.startsWith('--raw-field=source_branch=wf/')),
       );
       const taskCreateCall = cli.calls[createCallIndex];
       expect(taskCreateCall?.args).toContain('--field=draft=true');

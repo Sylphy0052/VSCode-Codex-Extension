@@ -662,7 +662,8 @@ function invalidCliArgumentValue(value: string): boolean {
  *   `projects/:id/merge_requests` へPOSTし、`--field description=@<path>` で本文をファイル
  *   経由にする（`glab api` の `--field` は値が `@` から始まると「その後ろをファイル名として
  *   読む」という仕様。同じく実機の `--help` で確認済み）。`source_branch` / `target_branch` /
- *   `title` は文字列として渡す。
+ *   `title` は `--raw-field`（`-f`）で文字列として渡す。`--field` は `@` 先頭をファイル参照、
+ *   `true`/数値を型変換するため、自由入力に使うとローカルファイルの内容が投稿される（Issue #1109）。
  *
  * 全てのフラグを `--flag=value` の1トークン形式にする。`gh` / `glab` はいずれもpflagベースの
  * パーサで、`--flag value`（スペース区切りの2トークン）だと `value` が `-` から始まる文字列
@@ -702,9 +703,9 @@ function buildCreatePullRequestArgs(
   const args = [
     'api',
     'projects/:id/merge_requests',
-    `--field=source_branch=${params.head}`,
-    `--field=target_branch=${params.base}`,
-    `--field=title=${params.title}`,
+    `--raw-field=source_branch=${params.head}`,
+    `--raw-field=target_branch=${params.base}`,
+    `--raw-field=title=${params.title}`,
     `--field=description=@${params.bodyFilePath}`,
   ];
   if (params.draft === true) {
@@ -830,11 +831,11 @@ function buildCreateIssueArgs(
   const args = [
     'api',
     'projects/:id/issues',
-    `--field=title=${params.title}`,
+    `--raw-field=title=${params.title}`,
     `--field=description=@${params.bodyFilePath}`,
   ];
   if (params.labels !== undefined && params.labels !== '')
-    args.push(`--field=labels=${params.labels}`);
+    args.push(`--raw-field=labels=${params.labels}`);
   for (const assigneeId of params.assigneeIds ?? []) {
     args.push(`--field=assignee_ids[]=${String(assigneeId)}`);
   }
@@ -2331,7 +2332,7 @@ export async function fetchReviewThreads(
       'graphql',
       '-f',
       'query=query($id:ID!){node(id:$id){... on PullRequest{reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{id body createdAt author{login}}}}}}}}',
-      '-F',
+      '-f',
       `id=${pullRequestId}`,
     ],
     cwd,
@@ -2355,7 +2356,13 @@ function invalidReviewThreadAction(number: number, threadId: string, body?: stri
   );
 }
 
-/** レビューのスレッドへ返信する。GitHubはGraphQL、GitLabはDiscussions APIを使う。 */
+/**
+ * レビューのスレッドへ返信する。GitHubはGraphQL、GitLabはDiscussions APIを使う。
+ *
+ * GraphQL変数は `-f`（`--raw-field`）で文字列として渡す。`-F`（`--field`）は値が `@` で始まると
+ * ローカルファイルを読み込み、`true`/数値を型変換するため、自由入力の本文には使わない
+ * （Issue #1109）。
+ */
 export async function replyToReviewThread(
   deps: CreatePullRequestDeps,
   request: { host: ForgeHost; cwd: string; number: number; threadId: string; body: string },
@@ -2371,9 +2378,9 @@ export async function replyToReviewThread(
         'graphql',
         '-f',
         'query=mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id}}}',
-        '-F',
+        '-f',
         `threadId=${request.threadId}`,
-        '-F',
+        '-f',
         `body=${request.body}`,
       ],
       request.cwd,
@@ -2418,7 +2425,7 @@ export async function resolveReviewThread(
             'graphql',
             '-f',
             'query=mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}',
-            '-F',
+            '-f',
             `threadId=${request.threadId}`,
           ],
           request.cwd,
