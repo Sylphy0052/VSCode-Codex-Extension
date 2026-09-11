@@ -397,6 +397,36 @@ export function readAutoHandoffThresholdPercent(): number {
   return Math.round(raw);
 }
 
+/**
+ * 引き継ぎ先セッションのmodel / effortの明示指定（Issue #1082）。
+ *
+ * 空文字は「未指定」。未指定のときはルータの判定→引き継ぎ元の値→グローバル設定の順で
+ * 決まる。ここで指定した値はその全てより優先する。値の妥当性（存在するモデルか、その
+ * モデルがそのeffortに対応するか）はここでは見ない。モデル一覧はCLIから動的に取るもので、
+ * 設定を読む時点では手元に無いため。
+ */
+export function readAutoHandoffModel(): string {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.model');
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/** @see readAutoHandoffModel */
+export function readAutoHandoffEffort(): string {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.effort');
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/**
+ * 内容からmodel / effortを決めるルータ（Issue #1082）を使うか。
+ *
+ * 既定はON。OFFにすると引き継ぎ先は引き継ぎ元の値をそのまま持ち越す（従来のグローバル設定
+ * へ戻る挙動には戻らない。そちらは引き継ぎ元の設定を捨てる分だけ意図から遠い）。
+ */
+export function readAutoHandoffRouterEnabled(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.router');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
 /** 使用量上限の解除後の自動続行を、ユーザー設定へ保存する。 */
 export async function setChatLimitAutoResumeEnabled(enabled: boolean): Promise<void> {
   await vscode.workspace

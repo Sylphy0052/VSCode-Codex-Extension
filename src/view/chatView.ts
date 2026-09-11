@@ -91,6 +91,7 @@ import {
   writeHandoffPointer,
   type HandoffTrigger,
 } from './handoff';
+import { resolveHandoffModelSettings } from './handoffModelChoice';
 import type { SessionStore } from '../session/sessionStore';
 import {
   createNodeSummaryRolloutDeps,
@@ -566,7 +567,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `cwd` / `taskConfig` を省略すると、従来通りワークスペース直下・拡張機能の
    * グローバル設定で始まる（design.md §16.10の1。既存の呼び出しは全て既定値で動く）。
    */
-  async openNew(cwd?: string, taskConfig?: CodexConfig): Promise<string | undefined> {
+  async openNew(
+    cwd?: string,
+    taskConfig?: CodexConfig,
+    modelSettings?: SessionModelSettings,
+  ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
     if (targetCwd === undefined) {
@@ -584,11 +589,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return undefined;
     }
 
-    const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig);
+    // `modelSettings` を渡す経路は引き継ぎ（Issue #1082）。送信のたびに `configFor` が
+    // model / effortを差し込むため起動後の書き換えでも効くが、起動時の設定にも同じ値を
+    // 載せておく（`config` はこの時点でグローバル設定かタスク設定しか持たない）
+    const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig, undefined, modelSettings);
     this.showPanel(entry, false);
     const pendingKey = this.pendingStarts.begin(entry);
     try {
-      const threadId = await entry.session.start(targetCwd, config);
+      const threadId = await entry.session.start(targetCwd, this.configFor(entry));
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
       await this.persistModelSettings(entry, threadId);
@@ -669,6 +677,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
 
     const state = entry.session.getState();
+    const gitBranch = await resolveGitBranch(entry.cwd);
+    const choice = resolveHandoffModelSettings(
+      entry.modelSettings,
+      this.settings.snapshot().models,
+      {
+        trigger,
+        turnFailed: state.turnFailed,
+        recentUserMessages: recentUserMessages(state),
+        cwd: entry.cwd,
+        gitBranch,
+        turnEditedFiles: state.turnEditedFiles,
+      },
+    );
+    this.log.info(
+      `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
+    );
     let pointerPath: string;
     try {
       pointerPath = await writeHandoffPointer(this.globalStorageDir, {
@@ -676,13 +700,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         sessionId: threadId,
         transcriptPath: rolloutPath,
         cwd: entry.cwd,
-        gitBranch: await resolveGitBranch(entry.cwd),
+        gitBranch,
         model: entry.modelSettings.model,
         trigger,
         turnFailed: state.turnFailed,
         busy: state.busy,
         recentUserMessages: recentUserMessages(state),
         turnEditedFiles: state.turnEditedFiles,
+        routerReasons: choice.reasons,
         createdAt: new Date(),
       });
     } catch (e) {
@@ -690,7 +715,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return false;
     }
 
-    const newThreadId = await this.openNew(entry.cwd, entry.taskConfig);
+    const newThreadId = await this.openNew(entry.cwd, entry.taskConfig, choice.settings);
     if (newThreadId === undefined) {
       return false;
     }

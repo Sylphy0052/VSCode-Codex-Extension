@@ -794,6 +794,24 @@
           "scope": "window",
           "markdownDescription": "自動引き継ぎ（Issue #1079）が始まるコンテキスト残量の割合。残りがこの値以下になった時点、または自動圧縮が走った時点で、会話を新しいセッションへ引き継ぐ。既定の20は入力欄の残量表示が「残りわずか」に変わる境界と同じ。ON/OFFはこの設定ではなく会話ごとに入力欄の「…」メニューの「自動引き継ぎ」で切り替える（既定はOFF）。Codex/Claude Code両画面共通。"
         },
+        "agent.autoHandoff.model": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先セッションで使うモデル（Issue #1082）。空なら未指定で、内容から決めるルータの判定→引き継ぎ元のモデル→グローバル設定の順で決まる。指定するとその全てより優先する。Codex/Claude Code両画面共通のため、片方にしか無いモデル名を書くともう片方の引き継ぎで無効な値がCLIへ渡る。"
+        },
+        "agent.autoHandoff.effort": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先セッションで使うreasoning effort（Issue #1082）。空なら未指定。`agent.autoHandoff.model` と同じ優先順位で扱う。effortに対応しないモデルでは無視される。"
+        },
+        "agent.autoHandoff.router": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先のmodel/effortを引き継ぎ元の内容から決める（Issue #1082）。直近のユーザー指示・直前のターンが失敗したか・作業中のパスから作業の重さを見積もり、モデル一覧とeffort一覧の中から選ぶ。判定の理由は引き継ぎのポインタファイルと出力パネルに残る。OFFにすると引き継ぎ元のmodel/effortをそのまま持ち越す。"
+        },
         "agent.chat.limitAutoResume.enabled": {
           "type": "boolean",
           "default": true,
