@@ -47,6 +47,7 @@ import {
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
   readAutoHandoffClassifierTimeoutMs,
+  readAutoHandoffRouterEnabled,
   readAutoHandoffCloseOldTab,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
@@ -833,6 +834,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
+    if (!readAutoHandoffRouterEnabled()) {
+      // 分類器が無いと `switchSafe` も `handoffSuggested` も得られない。区切り待ちの契機は
+      // 全部この判定に依存しているため、ここで止める（残量の閾値契機は別経路で発火する）
+      entry.trace.info('分類器が無効（agent.autoHandoff.router=false）のため発火しない');
+      return;
+    }
     const loopStatus = entry.loop.getStatus();
     const gate = {
       busy: state.busy,
@@ -893,7 +900,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.trace.info(`分類器の応答まで${Date.now() - startedAt}ms`);
     if (probe === undefined) {
       // 失敗の理由（時間切れ / 起動失敗 / JSON不正）は `classifyHandoff` がwarnで出す
-      entry.trace.info('分類できなかったため発火しない');
+      entry.trace.info('分類できなかったため発火しない（理由は直前のwarnを見る）');
       return;
     }
     entry.trace.info(describeAssessment(probe.assessment));

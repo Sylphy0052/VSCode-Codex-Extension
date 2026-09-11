@@ -61,10 +61,12 @@ describe('buildClassifierPrompt', () => {
     expect(prompt).toContain('2件目');
     expect(prompt).toContain('3件目');
 
-    const long = 'い'.repeat(1000);
+    const long = `${'い'.repeat(1000)}次は新チャットへ引き継ぐ`;
     const folded = buildClassifierPrompt(input({ recentAssistantMessages: [long] }));
-    expect(folded).toContain('…');
+    expect(folded).toContain('（中略）');
     expect(folded).not.toContain(long);
+    // 宣言は応答の末尾に出る。先頭から切ると判定材料そのものが落ちる
+    expect(folded).toContain('次は新チャットへ引き継ぐ');
   });
 
   it('アシスタントの宣言があればそれを分類の対象にすると指示する（Issue #1097）', () => {

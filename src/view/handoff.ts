@@ -23,9 +23,10 @@ export type HandoffProvider = 'claude' | 'codex';
  * 引き継ぎが始まった契機。ポインタファイルへ事実として1行残す。
  *
  * `threshold` / `compactBoundary` は区切りを待たずに発火する（残量が尽きる方が損失が大きい）。
- * `softThreshold` / `assistantSuggested` / `profileChanged` は安全な区切り
- * （`passesSafeBoundaryGate` と分類器の `switchSafe`）が成立したときだけ発火する
- * （Issue #1090、`assistantSuggested` はIssue #1097）。
+ * `softThreshold` / `profileChanged` は安全な区切り（`passesSafeBoundaryGate` と分類器の
+ * `switchSafe`）が成立したときだけ発火する（Issue #1090）。`assistantSuggested`
+ * （Issue #1097）は前段の `passesSafeBoundaryGate` だけを要求し、`switchSafe` は見ない
+ * ——提案した側が既に「いま切り替えてよい」と判断しているため。
  */
 export type HandoffTrigger =
   | { kind: 'manual' }
@@ -208,7 +209,7 @@ function triggerLabel(trigger: HandoffTrigger): string {
     return `コンテキスト残量が緩い閾値を下回り、安全な区切りが来た（残り${trigger.remainingPercent}%。${trigger.switchReason}）`;
   }
   if (trigger.kind === 'assistantSuggested') {
-    return `アシスタントが引き継ぎを提案し、安全な区切りが来た（${trigger.suggestReason || '提案の根拠は記録されていない'}。${trigger.switchReason}）`;
+    return `アシスタント自身が引き継ぎを提案した（${trigger.suggestReason || '提案の根拠は記録されていない'}。${trigger.switchReason}）`;
   }
   if (trigger.kind === 'profileChanged') {
     return `安全な区切りで、次の作業に合うmodel/effortが変わった（${trigger.model || '既定'} / ${trigger.effort || '既定'}。${trigger.switchReason}）`;

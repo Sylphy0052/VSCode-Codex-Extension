@@ -100,6 +100,23 @@ function fold(text: string, limit: number): string {
 }
 
 /**
+ * 先頭と末尾を残して真ん中を落とす（Issue #1097）。
+ *
+ * アシスタントの応答には**末尾を残す**必要がある。「次は新チャットへ引き継ぐ」のような
+ * 宣言は応答の最後に書かれるため、先頭から切る `fold` だと判定材料そのものが落ちる。
+ * 全体の長さは `fold` と同じ上限に収め、プロンプトが指示の側を押しのけないようにする。
+ */
+function foldEnds(text: string, limit: number): string {
+  const single = text.replace(/\s+/g, ' ').trim();
+  if (single.length <= limit) {
+    return single;
+  }
+  const head = Math.floor(limit / 2);
+  const tail = limit - head;
+  return `${single.slice(0, head)}…（中略）…${single.slice(single.length - tail)}`;
+}
+
+/**
  * 分類を頼むプロンプトを組み立てる。
  *
  * 軸の定義をそのまま載せ、**作業を解かないこと・モデルとeffortを選ばないこと**を明示する。
@@ -113,7 +130,7 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
     .filter((m) => m !== '');
   const assistantMessages = input.recentAssistantMessages
     .slice(-ASSISTANT_MESSAGE_COUNT)
-    .map((m) => fold(m, MESSAGE_LIMIT))
+    .map((m) => foldEnds(m, MESSAGE_LIMIT))
     .filter((m) => m !== '');
   const files = input.turnEditedFiles.slice(0, FILE_COUNT);
 
