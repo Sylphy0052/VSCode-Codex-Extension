@@ -6,6 +6,7 @@ import {
   stripControlChars,
   stripControlCharsPreservingNewlines,
 } from '../../src/orchestrator/sanitize';
+import { redactCredentials } from '../../src/secondOpinion/redact';
 
 describe('sanitizeForLog（design.md §16.7のsanitizeForReasonを共通化。レビュー指摘: warning）', () => {
   it('制御文字・改行を空白に畳む', () => {
@@ -421,6 +422,40 @@ describe('maskForLog（Issue #474 指摘3: トークン様文字列のマスク�
     const once = maskForLog(input);
     const twice = maskForLog(once);
     expect(twice).toBe(once);
+  });
+});
+
+describe('maskForLog（Issue #1122: sk-形式の下線とgithub_pat_形式をマスク対象に含める）', () => {
+  it('下線を含むsk-形式のキーは下線以降も残さず全体をマスクする', () => {
+    const input = 'key=sk-ABCDEFGHIJKL_privateSuffix is invalid';
+    const result = maskForLog(input);
+    expect(result).not.toContain('privateSuffix');
+    expect(result).toBe('key=*** is invalid');
+  });
+
+  it('fine-grained PAT（github_pat_）をマスクする', () => {
+    const input =
+      'token=github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789 でログインに失敗しました';
+    const result = maskForLog(input);
+    expect(result).not.toContain('11ABCDEFG0123456789');
+    expect(result).toBe('token=*** でログインに失敗しました');
+  });
+
+  it('短いgithub_pat_接頭辞は誤マスクしない（過剰マスク防止）', () => {
+    expect(maskForLog('github_pat_short')).toBe('github_pat_short');
+  });
+
+  it('redactCredentialsが伏せるsk-/gh*_/github_pat_形状はmaskForLogでも全体が消える（両者の対象書式の一致）', () => {
+    const samples = [
+      'sk-ABCDEFGHIJKL_privateSuffix0123',
+      'ghp_1234567890abcdefTOKEN123',
+      'github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz',
+    ];
+    for (const secret of samples) {
+      const input = `error: ${secret} rejected`;
+      expect(redactCredentials(input).text).not.toContain(secret);
+      expect(maskForLog(input)).toBe('error: *** rejected');
+    }
   });
 });
 
