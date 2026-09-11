@@ -295,6 +295,19 @@ export class ChatSession {
   }
 
   /**
+   * 自動引き継ぎ（Issue #1079）を切り替える。
+   *
+   * 拡張機能側だけで完結する状態なのでapp-serverへは何も送らない。値は画面のトグルの
+   * 見た目と、`chatView.ts` の発火判定の両方が読む。
+   */
+  setAutoHandoff(on: boolean): void {
+    if (this.state.autoHandoff === on) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoff: on });
+  }
+
+  /**
    * 発言を送る。モデル・effort・承認方針・サンドボックスはここで毎回渡す。
    *
    * `turn/start` の指定は「このターン以降」に効くため、会話の途中で権限を変えられる。

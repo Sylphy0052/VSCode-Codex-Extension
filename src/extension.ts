@@ -489,6 +489,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
     store,
     sessionModelSettings,
+    // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
+    context.globalStorageUri.fsPath,
   );
   context.subscriptions.push(chat);
 
@@ -510,6 +512,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // `activate()` が終わった後からでも差し替えられる。
     () => claudeSpawnOverride.spawn,
     sessionModelSettings,
+    // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
+    context.globalStorageUri.fsPath,
   );
   context.subscriptions.push(claudeChat);
 

@@ -42,6 +42,7 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readAutoHandoffThresholdPercent,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
   readChatLoopEngineeringConfig,
@@ -79,7 +80,17 @@ import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivit
 import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
-import { buildHandoffPrompt, resolveWithRetry } from './handoff';
+import {
+  buildHandoffPrompt,
+  countCompactions,
+  decideAutoHandoff,
+  recentUserMessages,
+  resolveGitBranch,
+  resolveWithRetry,
+  waitForFirstTurn,
+  writeHandoffPointer,
+  type HandoffTrigger,
+} from './handoff';
 import type { SessionStore } from '../session/sessionStore';
 import {
   createNodeSummaryRolloutDeps,
@@ -248,6 +259,13 @@ interface ChatPanel extends BaseChatPanel {
   limitAutoResumeTimer: ReturnType<typeof setTimeout> | undefined;
   limitAutoResumeAt: number | undefined;
   limitAutoResumeAwaitingResult: boolean;
+  /**
+   * 自動引き継ぎ（Issue #1079）を既に始めたか。閾値契機と圧縮契機のどちらが先に成立
+   * しても、1セッションにつき1回しか引き継がない（`claudeChatView.ts`と同じ扱い）。
+   */
+  autoHandoffStarted: boolean;
+  /** 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら圧縮が走った。 */
+  lastCompactionCount: number;
 }
 
 /**
@@ -425,6 +443,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     private readonly store?: SessionStore,
     /** モデルとeffortのセッション別保存先（issue #844）。 */
     private readonly sessionSettings?: SessionModelSettingsStore,
+    /**
+     * 引き継ぎのポインタファイル（Issue #1079）を書く場所。`ExtensionContext.
+     * globalStorageUri.fsPath` を渡す。リポジトリ内には置かない（push事故と
+     * working treeの汚れを避けるため）。未指定なら引き継ぎ自体を断る。
+     */
+    private readonly globalStorageDir?: string,
   ) {
     super();
     this.catalog = new CommandCatalog(this.fs);
@@ -594,14 +618,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
-   * 現在アクティブなセッションのtranscript相当（rollout）を新セッションへ渡し、
-   * 引き継ぎを開始する（issue #694）。Claude Code側の`handoffToNewSession`と同じ設計
+   * 現在アクティブなセッションを新セッションへ引き継ぐ（issue #694、方式の変更は
+   * Issue #1079）。Claude Code側の`handoffToNewSession`と同じ設計
    * （`src/view/handoff.ts`参照）。
    */
   async handoffToNewSession(): Promise<void> {
-    if (this.store === undefined) {
-      return;
-    }
     const entry = this.active;
     if (entry === undefined) {
       return;
@@ -610,28 +631,139 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (threadId === undefined) {
       return;
     }
+    await this.startHandoff(entry, threadId, { kind: 'manual' }, true);
+  }
+
+  /**
+   * 引き継ぎの本体。手動操作と自動発火で共通に使う。
+   *
+   * 旧セッションは**ここでは止めない**。新セッションの初回応答が成功してから確認
+   * ダイアログを出す（`confirmStopAfterFirstTurn`）。先に止めると、引き継ぎに失敗した
+   * ときに作業を失う。
+   *
+   * @param notifyFailure 失敗をダイアログで知らせるか。自動発火では出さない
+   */
+  private async startHandoff(
+    entry: ChatPanel,
+    threadId: string,
+    trigger: HandoffTrigger,
+    notifyFailure: boolean,
+  ): Promise<boolean> {
+    if (this.store === undefined || this.globalStorageDir === undefined) {
+      this.log.warn('引き継ぎに必要な履歴の解決口か置き場所が渡されていないため引き継げません');
+      return false;
+    }
     const rolloutPath = await resolveWithRetry(
       () => this.store!.resolveHandoffRolloutPath(threadId),
       10,
       500,
     );
     if (rolloutPath === undefined) {
-      void vscode.window.showErrorMessage(
-        '引き継ぎ元セッションの履歴保存が完了しませんでした。少し待ってから再試行してください',
-      );
-      return;
+      const message =
+        '引き継ぎ元セッションの履歴保存が完了しませんでした。少し待ってから再試行してください';
+      this.log.warn(message);
+      if (notifyFailure) {
+        void vscode.window.showErrorMessage(message);
+      }
+      return false;
     }
+
+    const state = entry.session.getState();
+    let pointerPath: string;
+    try {
+      pointerPath = await writeHandoffPointer(this.globalStorageDir, {
+        provider: 'codex',
+        sessionId: threadId,
+        transcriptPath: rolloutPath,
+        cwd: entry.cwd,
+        gitBranch: await resolveGitBranch(entry.cwd),
+        model: entry.modelSettings.model,
+        trigger,
+        turnFailed: state.turnFailed,
+        busy: state.busy,
+        recentUserMessages: recentUserMessages(state),
+        turnEditedFiles: state.turnEditedFiles,
+        createdAt: new Date(),
+      });
+    } catch (e) {
+      this.reportError(e);
+      return false;
+    }
+
     const newThreadId = await this.openNew(entry.cwd, entry.taskConfig);
     if (newThreadId === undefined) {
-      return;
+      return false;
     }
     const newEntry = this.panels.get(newThreadId);
     if (newEntry === undefined) {
-      return;
+      return false;
     }
-    const text = buildHandoffPrompt(rolloutPath);
+    // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
+    newEntry.session.setAutoHandoff(state.autoHandoff);
+    const text = buildHandoffPrompt(pointerPath);
     await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
     this.reportActivity(newEntry, text);
+    void this.confirmStopAfterFirstTurn(entry, newEntry);
+    return true;
+  }
+
+  /**
+   * 新セッションの初回応答が成功するのを待ってから、旧セッションを止めてよいか尋ねる。
+   * 承認を得られたときだけ `interrupt()` と後片付けを行う。
+   */
+  private async confirmStopAfterFirstTurn(oldEntry: ChatPanel, newEntry: ChatPanel): Promise<void> {
+    const succeeded = await waitForFirstTurn(newEntry);
+    if (!succeeded || oldEntry.disposed) {
+      return;
+    }
+    const stop = '旧セッションを停止';
+    const choice = await vscode.window.showInformationMessage(
+      '新しいセッションへの引き継ぎが終わりました。引き継ぎ元のセッションを停止しますか？',
+      { modal: true, detail: '停止すると、この会話のタブは閉じます。履歴（rollout）は残ります。' },
+      stop,
+    );
+    if (choice !== stop || oldEntry.disposed) {
+      return;
+    }
+    void oldEntry.session.interrupt();
+    this.teardown(oldEntry);
+  }
+
+  /**
+   * 自動引き継ぎ（Issue #1079）の発火判定。`onSessionChange` から毎回呼ぶ。
+   * 判定の中身はClaude Code側の `maybeAutoHandoff` と同じ（`handoff.ts`の
+   * `decideAutoHandoff`）。
+   */
+  private maybeAutoHandoff(entry: ChatPanel, state: ChatState): void {
+    const compactions = countCompactions(state);
+    const compacted = compactions > entry.lastCompactionCount;
+    entry.lastCompactionCount = compactions;
+
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    const trigger = decideAutoHandoff({
+      enabled: state.autoHandoff,
+      busy: state.busy,
+      alreadyStarted: entry.autoHandoffStarted,
+      remainingPercent: state.context?.remainingPercent,
+      compacted,
+      thresholdPercent: readAutoHandoffThresholdPercent(),
+    });
+    if (trigger === undefined) {
+      return;
+    }
+    const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+    if (threadId === undefined) {
+      return;
+    }
+    // 失敗しても戻さない（`claudeChatView.ts` の `maybeAutoHandoff` と同じ理由）
+    entry.autoHandoffStarted = true;
+    entry.session.noteLocalEvent(
+      `autoHandoff:${Date.now()}`,
+      '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
+    );
+    void this.startHandoff(entry, threadId, trigger, false);
   }
 
   /**
@@ -816,6 +948,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       limitAutoResumeTimer: undefined,
       limitAutoResumeAt: undefined,
       limitAutoResumeAwaitingResult: false,
+      autoHandoffStarted: false,
+      lastCompactionCount: 0,
     };
     return entry;
   }
@@ -1008,6 +1142,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     this.notifyNewApprovals(entry, state);
     this.scheduleLimitAutoResume(entry, state, turnFinished);
+    this.maybeAutoHandoff(entry, state);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -1282,6 +1417,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'planMode') {
         entry.loop.noteUserAction();
         entry.session.setPlanMode(m['on'] === true);
+        return;
+      }
+      if (type === 'autoHandoff') {
+        entry.loop.noteUserAction();
+        const on = m['on'] === true;
+        // 一度自動で引き継いだ後に入れ直したら、また引き継げるようにする
+        if (on) {
+          entry.autoHandoffStarted = false;
+        }
+        entry.session.setAutoHandoff(on);
         return;
       }
       if (type === 'review') {

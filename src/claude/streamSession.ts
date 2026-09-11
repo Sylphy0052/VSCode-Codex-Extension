@@ -452,6 +452,19 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 自動引き継ぎ（Issue #1079）を切り替える。
+   *
+   * 拡張機能側だけで完結する状態なのでCLIへは何も送らない。プロセスが動いていなくても
+   * 切り替えられる（`setFastMode` と違い、CLIに対応する概念が無いため）。
+   */
+  setAutoHandoff(on: boolean): void {
+    if (this.state.autoHandoff === on) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoff: on });
+  }
+
+  /**
    * 会話中にeffortを変える。
    *
    * 専用の制御要求が無いため `apply_flag_settings` に載せる。**効いたことは観測できない**

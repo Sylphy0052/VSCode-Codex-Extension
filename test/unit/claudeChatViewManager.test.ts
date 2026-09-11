@@ -1,3 +1,7 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/streamSession';
@@ -118,6 +122,8 @@ function createManager(options?: {
   store?: ClaudeSessionStore;
   onActivity?: (activity: ChatActivity) => void;
   sessionSettings?: SessionModelSettingsStore;
+  /** 引き継ぎのポインタファイル（Issue #1079）の置き場所。 */
+  globalStorageDir?: string;
 }): {
   manager: ClaudeChatViewManager;
   store: ClaudeSessionStore;
@@ -138,6 +144,7 @@ function createManager(options?: {
     options?.memoryMemento ?? fakeMemento(),
     undefined,
     options?.sessionSettings,
+    options?.globalStorageDir ?? mkdtempSync(join(tmpdir(), 'claude-handoff-')),
   );
   return { manager, store };
 }
@@ -2577,16 +2584,30 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toHaveLength(0);
   });
 
-  it('transcriptが解決できれば、新セッションへ固定文言とパスを送る', async () => {
+  it('transcriptが解決できれば、ポインタファイルを書いて新セッションへそのパスを送る', async () => {
     stubStartCapturing();
     const sendSpy = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
     const store = fakeStore({ resolveTranscriptPath: async () => '/home/user/.claude/x.jsonl' });
-    const { manager } = createManager({ store });
+    const globalStorageDir = mkdtempSync(join(tmpdir(), 'claude-handoff-'));
+    const { manager } = createManager({ store, globalStorageDir });
     await manager.openNew('/workspace/root');
 
     await manager.handoffToNewSession();
 
-    expect(sendSpy).toHaveBeenCalledWith(expect.stringContaining('/home/user/.claude/x.jsonl'), []);
+    // 初回プロンプトはポインタファイルのパスを指すだけで、transcript本体は指さない
+    const [prompt] = sendSpy.mock.calls[0] ?? [];
+    expect(prompt).toContain(join(globalStorageDir, 'handoff'));
+    expect(prompt).not.toContain('/home/user/.claude/x.jsonl');
+    expect(prompt).toContain('全文読み込まないこと');
+
+    // transcriptの在処と抽出コマンドはポインタファイル側にある
+    const pointerPath = /(\/\S+\.md)/u.exec(String(prompt))?.[1];
+    expect(pointerPath).toBeDefined();
+    const pointer = readFileSync(pointerPath!, 'utf8');
+    expect(pointer).toContain('/home/user/.claude/x.jsonl');
+    expect(pointer).toContain('isCompactSummary');
+    expect(pointer).toContain('file-history-snapshot');
+
     // 新セッションが増えている（元のタブ+新タブ）
     expect(__mock.createdPanels.length).toBe(2);
   });

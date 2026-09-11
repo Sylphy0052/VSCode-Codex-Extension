@@ -2244,6 +2244,7 @@ export function chatScript(
     const sendDebugCommandButton = el('sendDebugCommand');
     if (sendDebugCommandButton) sendDebugCommandButton.disabled = !!state.busy;
     applyPlanMode(state.planMode);
+    applyAutoHandoff(state.autoHandoff);
     applyFastMode(state);
     renderAttachments(state.attachments);
     applyLoop(state.loop);
@@ -2350,6 +2351,18 @@ export function chatScript(
     const button = el('planToggle');
     button.setAttribute('aria-pressed', planMode ? 'true' : 'false');
     button.className = planMode ? 'toggled' : 'secondary';
+  }
+
+  // いま自動引き継ぎがONか（Issue #1079）。押したときに反転させるため覚えておく
+  let autoHandoff = false;
+
+  /** 自動引き継ぎボタンの見た目。計画ボタンと同じく、押されているかが常に分かるようにする。 */
+  function applyAutoHandoff(on) {
+    autoHandoff = !!on;
+    const button = el('autoHandoffToggle');
+    if (!button) return;
+    button.setAttribute('aria-pressed', autoHandoff ? 'true' : 'false');
+    button.className = autoHandoff ? 'toggled' : 'secondary';
   }
 
   // いまFast modeか（Claude Codeのみ）。押したときに反転させるため覚えておく
@@ -3123,6 +3136,13 @@ export function chatScript(
   el('fastToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'fastMode', on: !fastMode }),
   );
+  // 自動引き継ぎ（Issue #1079）。これも見た目は状態が返ってきてから変える
+  const autoHandoffButton = el('autoHandoffToggle');
+  if (autoHandoffButton) {
+    autoHandoffButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'autoHandoff', on: !autoHandoff }),
+    );
+  }
 
   // Codexは対象をQuickPickで選ばせるためホストへ委ねる。Claude Codeはコマンドとして
   // そのまま送る（CLI側が対話で対象を聞く）

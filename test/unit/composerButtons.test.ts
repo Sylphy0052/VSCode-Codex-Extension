@@ -8,7 +8,7 @@ import {
 } from '../../src/view/composerButtons';
 
 describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準の並び）', () => {
-  it('17個の操作を正準の並びで持つ', () => {
+  it('18個の操作を正準の並びで持つ', () => {
     expect(COMPOSER_BUTTON_IDS).toEqual([
       'attach',
       'loopToggle',
@@ -26,6 +26,7 @@ describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準�
       'forgeHub',
       'openProgress',
       'handoffToNewSession',
+      'autoHandoffToggle',
       'secondOpinion',
     ]);
   });
@@ -106,7 +107,7 @@ describe('normalizeComposerButtons（設定 agent.chat.composerButtons の検証
 });
 
 describe('overflowComposerButtons（「…」メニューへ畳むボタンの算出）', () => {
-  it('既定の7つを渡すと、残り10個が正準の並びの順で返る（インポートも到達できる）', () => {
+  it('既定の7つを渡すと、残り11個が正準の並びの順で返る（インポートも到達できる）', () => {
     expect(overflowComposerButtons(DEFAULT_COMPOSER_BUTTONS)).toEqual([
       'claudeImport',
       'fastToggle',
@@ -118,14 +119,15 @@ describe('overflowComposerButtons（「…」メニューへ畳むボタンの�
       'sessionKanban',
       'forgeHub',
       'openProgress',
+      'autoHandoffToggle',
     ]);
   });
 
-  it('空配列（表に何も出さない設定）を渡すと17個すべてが返る', () => {
+  it('空配列（表に何も出さない設定）を渡すと18個すべてが返る', () => {
     expect(overflowComposerButtons([])).toEqual(COMPOSER_BUTTON_IDS);
   });
 
-  it('17個すべてを渡すと空配列が返る（どこにも重複しない）', () => {
+  it('18個すべてを渡すと空配列が返る（どこにも重複しない）', () => {
     expect(overflowComposerButtons(COMPOSER_BUTTON_IDS)).toEqual([]);
   });
 

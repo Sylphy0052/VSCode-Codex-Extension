@@ -49,6 +49,7 @@ import {
   setChatTurnSummaryEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
+  readAutoHandoffThresholdPercent,
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
@@ -125,7 +126,17 @@ import {
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
-import { buildHandoffPrompt, resolveWithRetry } from './handoff';
+import {
+  buildHandoffPrompt,
+  countCompactions,
+  decideAutoHandoff,
+  recentUserMessages,
+  resolveGitBranch,
+  resolveWithRetry,
+  waitForFirstTurn,
+  writeHandoffPointer,
+  type HandoffTrigger,
+} from './handoff';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import {
@@ -207,6 +218,19 @@ interface ClaudePanel extends BaseChatPanel {
   limitAutoResumeTimer: ReturnType<typeof setTimeout> | undefined;
   limitAutoResumeAt: number | undefined;
   limitAutoResumeAwaitingResult: boolean;
+  /**
+   * 自動引き継ぎ（Issue #1079）を既に始めたか。
+   *
+   * 閾値契機と`compact_boundary`契機のどちらが先に成立しても、1セッションにつき1回しか
+   * 引き継がない（Issue #1079の確認点2）。引き継ぎ処理そのものが非同期で長いため、
+   * 開始した時点で立てる。
+   */
+  autoHandoffStarted: boolean;
+  /**
+   * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら自動圧縮が
+   * 走ったと判る。専用のイベントを`ChatState`へ足さずに済ませるため、項目を数える。
+   */
+  lastCompactionCount: number;
 }
 
 /**
@@ -394,6 +418,12 @@ export class ClaudeChatViewManager
     private readonly resolveSpawn: () => ClaudeSpawnPort | undefined = () => undefined,
     /** モデルとeffortのセッション別保存先（issue #844）。 */
     private readonly sessionSettings?: SessionModelSettingsStore,
+    /**
+     * 引き継ぎのポインタファイル（Issue #1079）を書く場所。`ExtensionContext.
+     * globalStorageUri.fsPath` を渡す。リポジトリ内には置かない（push事故と
+     * working treeの汚れを避けるため）。未指定なら引き継ぎ自体を断る。
+     */
+    private readonly globalStorageDir?: string,
   ) {
     super();
     this.catalog = new CommandCatalog(fs);
@@ -722,10 +752,12 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * 現在アクティブなセッションのtranscriptを新セッションへ渡し、引き継ぎを開始する
-   * （issue #694）。CLIの応答を待って解析するのではなく、旧セッションのtranscript
-   * ファイルパスを固定文言に埋め込んで新セッションへそのまま送る（新セッション側の
-   * CLI自身に読ませて要約させる）。
+   * 現在アクティブなセッションを新セッションへ引き継ぐ（issue #694、方式の変更は
+   * Issue #1079）。
+   *
+   * 会話そのものは渡さない。`handoff.ts` が旧セッションのtranscriptの在処と読み方だけを
+   * 書いたポインタファイルを1枚作り、新セッションへはそのパスを送る。組み立てにモデルは
+   * 使わない。
    */
   async handoffToNewSession(): Promise<void> {
     const entry = this.active;
@@ -736,22 +768,150 @@ export class ClaudeChatViewManager
     if (sessionId === undefined) {
       return;
     }
+    await this.startHandoff(entry, sessionId, { kind: 'manual' }, true);
+  }
+
+  /**
+   * 引き継ぎの本体。手動操作（`handoffToNewSession`）と自動発火（`maybeAutoHandoff`）で
+   * 共通に使う。
+   *
+   * 旧セッションは**ここでは止めない**。新セッションの初回応答が成功したことを確かめて
+   * から確認ダイアログを出す（`confirmStopAfterFirstTurn`）。先に止めると、引き継ぎに
+   * 失敗したときに作業を失う。
+   *
+   * @param notifyFailure 失敗をダイアログで知らせるか。自動発火では出さない
+   *   （ユーザーが操作していないため、突然のエラー表示は驚かせるだけ。ログには残す）
+   */
+  private async startHandoff(
+    entry: ClaudePanel,
+    sessionId: string,
+    trigger: HandoffTrigger,
+    notifyFailure: boolean,
+  ): Promise<boolean> {
+    if (this.globalStorageDir === undefined) {
+      this.log.warn('引き継ぎのポインタファイルの置き場所が渡されていないため引き継げません');
+      return false;
+    }
     const transcriptPath = await resolveWithRetry(() =>
       this.store.resolveTranscriptPath(sessionId),
     );
     if (transcriptPath === undefined) {
-      void vscode.window.showErrorMessage('引き継ぎ元セッションのtranscriptが見つかりませんでした');
-      return;
+      const message = '引き継ぎ元セッションのtranscriptが見つかりませんでした';
+      this.log.warn(message);
+      if (notifyFailure) {
+        void vscode.window.showErrorMessage(message);
+      }
+      return false;
     }
+
+    const state = entry.session.getState();
+    let pointerPath: string;
+    try {
+      pointerPath = await writeHandoffPointer(this.globalStorageDir, {
+        provider: 'claude',
+        sessionId,
+        transcriptPath,
+        cwd: entry.cwd,
+        gitBranch: await resolveGitBranch(entry.cwd),
+        model: entry.modelSettings.model,
+        trigger,
+        turnFailed: state.turnFailed,
+        busy: state.busy,
+        recentUserMessages: recentUserMessages(state),
+        turnEditedFiles: state.turnEditedFiles,
+        createdAt: new Date(),
+      });
+    } catch (e) {
+      this.reportError(e);
+      return false;
+    }
+
     const newSessionId = await this.openNew(entry.cwd, entry.taskConfig);
     if (newSessionId === undefined) {
-      return;
+      return false;
     }
     const newEntry = this.panels.get(newSessionId);
     if (newEntry === undefined) {
+      return false;
+    }
+    // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
+    // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
+    newEntry.session.setAutoHandoff(state.autoHandoff);
+    this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
+    void this.confirmStopAfterFirstTurn(entry, newEntry);
+    return true;
+  }
+
+  /**
+   * 新セッションの初回応答が成功するのを待ってから、旧セッションを止めてよいか尋ねる。
+   *
+   * 承認を得られたときだけ `interrupt()` とタブの後片付け（`teardown`）を行う。失敗・
+   * 打ち切りのときは旧セッションをそのまま残す（引き継ぎ先が使い物にならないまま元を
+   * 失うのを防ぐ）。
+   */
+  private async confirmStopAfterFirstTurn(
+    oldEntry: ClaudePanel,
+    newEntry: ClaudePanel,
+  ): Promise<void> {
+    const succeeded = await waitForFirstTurn(newEntry);
+    if (!succeeded || oldEntry.disposed) {
       return;
     }
-    this.dispatch(newEntry, buildHandoffPrompt(transcriptPath));
+    const stop = '旧セッションを停止';
+    const choice = await vscode.window.showInformationMessage(
+      '新しいセッションへの引き継ぎが終わりました。引き継ぎ元のセッションを停止しますか？',
+      { modal: true, detail: '停止すると、この会話のタブは閉じます。transcriptは残ります。' },
+      stop,
+    );
+    if (choice !== stop || oldEntry.disposed) {
+      return;
+    }
+    oldEntry.session.interrupt();
+    this.teardown(oldEntry);
+  }
+
+  /**
+   * 自動引き継ぎ（Issue #1079）の発火判定。`onSessionChange` から毎回呼ぶ。
+   *
+   * 契機は2つ（残量が閾値以下 / 自動圧縮が走った）だが、優先順位は付けない。先に成立した
+   * 方で1回だけ引き継ぎ、`autoHandoffStarted` で二重発火を止める（Issue #1079の確認点2）。
+   * 実際、`compact_boundary` が届く時点で使用量は圧縮後の値へ落ちるため、両者が同時に
+   * 成立し続けることはない。
+   *
+   * ターン実行中は発火させない。安全な区切り（`busy` が落ちている）まで待つ。
+   */
+  private maybeAutoHandoff(entry: ClaudePanel, state: ChatState): void {
+    const compactions = countCompactions(state);
+    const compacted = compactions > entry.lastCompactionCount;
+    entry.lastCompactionCount = compactions;
+
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    const trigger = decideAutoHandoff({
+      enabled: state.autoHandoff,
+      busy: state.busy,
+      alreadyStarted: entry.autoHandoffStarted,
+      remainingPercent: state.context?.remainingPercent,
+      compacted,
+      thresholdPercent: readAutoHandoffThresholdPercent(),
+    });
+    if (trigger === undefined) {
+      return;
+    }
+    const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+    if (sessionId === undefined) {
+      return;
+    }
+    // 失敗しても戻さない。戻すとターンが終わるたびに引き継ぎを試し続けることになる
+    // （`resolveWithRetry` が既に短時間のリトライを持っている）。失敗はログに残るので、
+    // 引き継ぎたい場合はトグルを入れ直すか手動の引き継ぎを使う
+    entry.autoHandoffStarted = true;
+    entry.session.noteLocalEvent(
+      `autoHandoff:${Date.now()}`,
+      '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
+    );
+    void this.startHandoff(entry, sessionId, trigger, false);
   }
 
   /**
@@ -1425,6 +1585,8 @@ export class ClaudeChatViewManager
       limitAutoResumeTimer: undefined,
       limitAutoResumeAt: undefined,
       limitAutoResumeAwaitingResult: false,
+      autoHandoffStarted: false,
+      lastCompactionCount: 0,
     };
     return entry;
   }
@@ -1585,6 +1747,7 @@ export class ClaudeChatViewManager
       void this.refreshUsage();
     }
     this.scheduleLimitAutoResume(entry, state, turnFinished);
+    this.maybeAutoHandoff(entry, state);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -2153,6 +2316,16 @@ export class ClaudeChatViewManager
       if (type === 'fastMode') {
         entry.loop.noteUserAction();
         entry.session.setFastMode(m['on'] === true);
+        return;
+      }
+      if (type === 'autoHandoff') {
+        entry.loop.noteUserAction();
+        const on = m['on'] === true;
+        // 一度自動で引き継いだ後に入れ直したら、また引き継げるようにする
+        if (on) {
+          entry.autoHandoffStarted = false;
+        }
+        entry.session.setAutoHandoff(on);
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {

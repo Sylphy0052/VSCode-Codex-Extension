@@ -529,6 +529,15 @@ export interface ChatState {
    */
   planMode: boolean;
   /**
+   * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
+   *
+   * ワークスペース全体の設定にはしない（会話ごとに入れたい／入れたくないが分かれるため）。
+   * 切り替えは入力欄の「…」メニューのトグルからで、拡張機能側だけで完結する状態のため
+   * CLIへは何も送らない。閾値だけはユーザー設定（`agent.autoHandoff.thresholdPercent`）
+   * で持つ。
+   */
+  autoHandoff: boolean;
+  /**
    * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
    *
    * `initialize` の応答の `fast_mode_state` 由来。**Claude Code側にしか無い**概念で、
@@ -630,6 +639,7 @@ export const initialChatState: ChatState = {
   sessionCost: undefined,
   sessionTokens: undefined,
   planMode: false,
+  autoHandoff: false,
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],

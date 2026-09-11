@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   __resetPseudoWorktreeExcludeWarningForTestOnly,
@@ -10,6 +13,8 @@ import {
   setChatLoopEngineeringEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
+  readAutoHandoffThresholdPercent,
+  DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
@@ -763,5 +768,40 @@ describe('readNotificationsConfig（issue #286）', () => {
   it('agent.notifications.turnCompleteをtrueにできる', () => {
     __mock.setConfig('agent', { 'notifications.turnComplete': true });
     expect(readNotificationsConfig().turnComplete).toBe(true);
+  });
+});
+
+describe('readAutoHandoffThresholdPercent（Issue #1079）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定はpackage.jsonのdefaultと一致する', () => {
+    // package.jsonは`resolveJsonModule`を有効にしていないため実ファイルを読む
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    };
+    const declared =
+      manifest.contributes.configuration.properties['agent.autoHandoff.thresholdPercent'];
+
+    expect(declared?.default).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+    expect(readAutoHandoffThresholdPercent()).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+  });
+
+  it('設定された割合をそのまま使う', () => {
+    __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': 35 });
+    expect(readAutoHandoffThresholdPercent()).toBe(35);
+  });
+
+  it('小数は丸める', () => {
+    __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': 12.4 });
+    expect(readAutoHandoffThresholdPercent()).toBe(12);
+  });
+
+  it('範囲外・数値でない値は既定へ倒す', () => {
+    for (const bad of [0, 100, -5, Number.NaN, '20', null]) {
+      __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': bad });
+      expect(readAutoHandoffThresholdPercent()).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+    }
   });
 });
