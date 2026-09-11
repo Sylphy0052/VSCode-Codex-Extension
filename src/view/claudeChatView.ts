@@ -37,7 +37,6 @@ import type { SideQuestionHistoryEntry } from '../claude/control';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
 import { transcriptItems } from '../claude/transcript';
-import { isUnsafeClaudeCombination } from '../claude/argvBuilder';
 import { effortsFor } from '../codex/modelCatalog';
 import {
   currentWorkspaceFolder,
@@ -740,10 +739,6 @@ export class ClaudeChatViewManager
       void vscode.window.showErrorMessage(
         'Claude Codeを開始するにはフォルダを開いてください（ファイル > フォルダーを開く）',
       );
-      return undefined;
-    }
-    const effectiveConfig = taskConfig ?? readClaudeConfig().claude;
-    if (isUnsafeClaudeCombination(effectiveConfig) && !(await this.confirmUnsafe())) {
       return undefined;
     }
 
@@ -3082,15 +3077,6 @@ export class ClaudeChatViewManager
     void vscode.window.showWarningMessage(
       'この画面ではツール実行の承認を受け取れませんでした。claude.permissionMode の設定に従って動作します。',
     );
-  }
-
-  private async confirmUnsafe(): Promise<boolean> {
-    const choice = await vscode.window.showWarningMessage(
-      '承認が無効になっています。Claude Code はツールを確認なしで実行します。',
-      { modal: true },
-      '実行する',
-    );
-    return choice === '実行する';
   }
 }
 

@@ -1181,10 +1181,10 @@ find ~/.codex/sessions -name '*.jsonl' -size +10M -printf '%s %p\n' | sort -rn |
 L-02（`initialize`ハンドシェイクの成功/失敗）とL-03（`can_use_tool`の許可・拒否・セッション内
 許可の往復）は統合テストへ移した（Issue #188、`chatClaudeHandshake.test.ts`）。
 
-### L-04 承認無効の警告
+### L-04 承認無効でも開始前の確認を出さない
 
 - 操作: `claude.permissionMode` を `bypassPermissions` にして新しいClaude Code画面を開く
-- 期待: モーダルで `承認が無効になっています。Claude Code はツールを確認なしで実行します。` が出て、「実行する」を押すまで進まない
+- 期待: モーダルの確認は出ず、そのまま会話が始まる（Issue #1096）。設定変更時の確認は従来どおり出る
 - 後始末: 確認後は設定を戻す
 
 L-05（中断で`interrupt`が飛ぶこと）とL-06（セッションidが起動前に採番され`--session-id`と
@@ -2984,7 +2984,7 @@ Codex画面・Claude Code画面の両方に共通する機能（`chatScript.ts`/
 - 操作: コマンドパレットから「Agent: プリセットから新しい会話を開く…」（`agent.openPresetChat`）
 - 期待: 設定したプリセットの一覧がQuickPickに出る（ラベルはプリセット名、説明にprovider/model/effort、詳細に承認・サンドボックス・作業ディレクトリが出る）
 - 操作: いずれかを選ぶ
-- 期待: 選んだプリセットのmodel/effort/承認/サンドボックスで新しい会話が開く。Codexは全承認・保護の無効化を選択済みでも開始前の確認ダイアログを出さない（Issue #1094）。Claudeの開始前の確認は従来どおり
+- 期待: 選んだプリセットのmodel/effort/承認/サンドボックスで新しい会話が開く。Codex（Issue #1094）もClaude（Issue #1096）も、全承認・保護の無効化を選択済みで開始前の確認ダイアログを出さない
 - 操作: 履歴ビュー（`codex.sessions`）のタイトルバーからも同じコマンドを実行する
 - 期待: コマンドパレットと同じ挙動になる
 
