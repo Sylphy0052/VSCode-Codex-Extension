@@ -1,0 +1,39 @@
+# 実行の復元と作業場所・疑似統合
+
+対象:`src/orchestrator/runnerRestore.ts`、`src/orchestrator/runnerWorkingDirectory.ts`。全文の各関数・分岐・await前後を精査した。これらを呼ぶrunner.test.tsの全文精査は別記録で行う。テスト未実行。
+
+## 新規指摘
+
+### EX-PSEUDO-01・P1:疑似隔離の復元失敗後に元workspaceで実行する
+
+`runnerRestore.ts:341`のresolveRestoredPseudoStateは統合先の作成失敗をログに残し、pseudoをundefinedにして復元を続ける。`runnerWorkingDirectory.ts:161`のsharedFallbackはpseudoがある場合だけcloneし、ない場合は`:182`で元のrepoRootを返す。隔離を使っていた非gitのrunで統合先がリンクなどに変わり復元不能になると、自動再開または手動再試行が隔離なしで元workspaceへ書き込み得る。
+
+依存ポート自体を省いた後方互換の場合と、実際の隔離作成失敗を区別して停止する必要がある。strictでerrorになるタスクにはこの経路は適用されない。元workspaceへの実書込みは未検証。
+
+### EX-PSEUDO-02・P1:リロード前の手動編集を反映基準へ取り込む
+
+`runnerWorkingDirectory.ts:273`のresolvePseudoStateはworkspaceの現在値をbaselineにし、以前に統合したmanifestを読み戻す。復元時も同じ関数を使うため、run開始後〜リロード前に人が変更したファイルは、その変更後の状態がbaselineになる。再開runの終了時、`:410`のreflectIntegrationToWorkspaceへ新baselineと旧統合結果を渡すため、該当ファイルが以後変わっていなければ過去の手動編集を検知できず、統合結果で上書きする。
+
+例:タスクがa.txtの変更を統合済み、人が元workspaceのa.txtを別内容へ変更、run途中でリロード、残りを再開して反映する。元の比較基準を保存するか、復元後の旧manifestの反映前に明示的な差分確認が必要。初回runや人の変更がない場合とは区別する。実FSでの再現は未実行。
+
+## 復元の関数・分岐
+
+reconcileAfterReload後に既存runを除外し、定義のsize/読取り/parse/validate、git判定・HEAD・統合先、保存taskと現在YAMLの突合せ、Forge・疑似状態を再構成する。1runのI/Oがthrowするとループ全体を中断し、後続runは復元されない。size判定と読取りは別awaitで読取り後の実byte数を再検査しない。復元中のdisposeや同runの並行復元に対する世代確認もこの層にはない。
+
+mergingはgit実体からdone/blocked/再開へ補正し、必要なbranch/cwdがなければblocked。YAMLにないtaskは除外、保存にないtaskはpendingへ追加して警告する。定義の同じIDに対するprompt/権限変更は集合の突合せでは検出しない。元HEAD、結果本文、会話、承認、質問の配送先、検証結果、実効権限、review poll等は復元しない。PRと最終結果は表示時に保存値へ戻る。既存F35-01の返信待ち停止、F35-02の依存成果欠落を参照する。
+
+merging再開は1件ずつ呼び、1件のthrowをログに残して残りへ進む。自動再開とは並行である。自動再開は設定、haltedByUser、対象状態・他失敗・allow、回数上限を確認し、状態と警告を変更して回数保存→通信準備→相談起動→pumpへ進む。回数保存や通信準備がrejectした場合は外側のログだけになり、既にpendingへ戻した状態をロールバックしない。storeでrunが消えていても旧pを再保存する。
+
+## 作業場所・疑似統合の関数と分岐
+
+明示cwdはrealpathとroot実体で境界確認し、開始前に全taskを検査、個別開始でも再検査する。rootのrealpath失敗は生rootへ戻す。sharedは元root、strictはerror、git隔離は統合HEAD読取りとworktree作成を同じキュー項目で行い、非git隔離は疑似cloneへ進む。retryを両種へ渡す。境界生成は共通のbuildTaskBoundaryへ委譲する。
+
+疑似統合はtask複製の初期/現在snapshot差分、直列統合、同キュー内manifest保存、衝突blocked・成功done・例外mergeFailed、persist/notify/pumpの順。manifest保存失敗はログだけで統合成功のままになるため、クラッシュ後に旧manifestしか残らない可能性がある。task再実行・run破棄をawait後に再確認する世代判定はない。
+
+反映はmanifest読込エラーなら止め、開始時のmanifestを固定してworkspaceの変更を確認する。成功・部分適用だけappliedPathsのbaselineを更新し、人の変更を検知した拒否では更新しない。未適用・除外・所有taskを警告し、例外も警告にして終了処理を継続する。反映失敗でも既にdoneのtask状態は戻さない。baseline更新自体がthrowすると部分適用の詳細よりcatchの警告が優先される。警告は同種の過去のものを除去しない。
+
+formatPathListは各要素を無害化し、20件と残件数へ表示を丸める。表示しない残りもmapで全件処理する。反映・検査の間の実FS競合は[pseudo-worktree-main.md](pseudo-worktree-main.md)へ記録した。
+
+## 確認が必要なテスト内容
+
+runnerの既存テストでは、復元YAMLの集合差・各状態・自動再開条件、疑似manifestの復元・部分反映・baseline更新・除外・I/O障害を、準備と期待値まで別途読む必要がある。本記録の2実装ファイルを読んだことだけで、対応テストや実FSの検証を済ませた扱いにはしない。新規2指摘では、復元失敗時の実cwdと、リロード前の手動変更が残ることの期待値が必要となる。

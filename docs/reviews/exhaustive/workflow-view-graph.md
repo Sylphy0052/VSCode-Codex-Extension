@@ -1,0 +1,41 @@
+# ワークフロー表示・集計・配線
+
+対象:workflowGraph.tsと単体テスト、workflowView.ts、workflowScript.ts、workflowStyles.ts、workflowViewGraph.test.ts、workflowViewPrograms.test.ts、workflowWiring.test.ts。各ファイル全文と埋め込みJavaScript/CSSを読んだ。テスト未実行。
+
+## 新規指摘
+
+### EX-WFVIEW-01・P2:復元後は取り込み済み件数を過少表示する
+
+runnerRestore.ts:406はlive.tasksを空Mapで復元する。runnerSnapshot.ts:243はbranchをliveTaskからしか取らず、保存済みpersistedTask.branchへ戻さない。workflowView.ts:291はこのsnapshot.tasksをそのままsummarizeIntegrationへ渡すため、doneでもbranchが無いタスクを共有ディレクトリ扱いで除外する。リロード前に統合済みだったタスクの件数が、リロード後には0件になる。PRの復元ではpersistedTaskを参照しており、branchにも同じ扱いが必要。集計テストのbranch未指定は共有タスクしか想定していない。
+
+### EX-WFVIEW-02・P2:下書きから定義ファイルを開けない
+
+workflowView.ts:163のpreviewDefinitionはactiveRunIdをundefinedへ設定する。一方、openDefFileは:378のrunId未指定ガードより後にあるため、下書き表示で「定義ファイルを開く」を押しても必ず戻る。HTMLではボタンを有効にしており、プレビューのdefPathも持つが利用しない。生成直後に定義を直す導線が機能しない。
+
+### EX-WFVIEW-03・P2:完了タスクの経過時間が空欄になる
+
+workflowScript.tsのrenderTableは経過セルを空文字で毎回作り、running/waitingApprovalだけdata-live=1を付ける。末尾の毎秒更新もdata-live=1だけを対象にする。done/failed/merging/waitingReplyへ変わって表が再生成されると、そのタスクの表示時間は空欄となり更新されない。終了時間を保存して計算する経路が無い。全体経過時間は逆にrun終了後も増え続ける。
+
+## 関数・分岐
+
+workflowGraphは依存DFSの段計算、未定義参照の無視、循環検出、段内の幅による折り返し、中央寄せ、座標・辺生成を実装する。循環では戻った1頂点だけを0にし、循環全体を同段にはしない。定義検証で循環を拒否することが前提。maxWidth未指定/無限/非正値と狭幅でも有限な配置を返す。進捗は9状態を数え、doneのみ整数比率、積み上げ区画は丸めない比率を返す。kanban分類と役割ラベル、統合branch無し/PR無し/共有タスク除外を確認した。
+
+WorkflowViewManagerはパネル生成・再表示・破棄、runnerとprogramの独立購読、一覧/state/program送信、未実行プレビューを持つ。program側の保存完了通知を購読し、runnerの早い通知で保存前programを読む問題を避けている。二重disposeやdispose後showの使用禁止フラグは無い。postMessageとhandleMessageのrejectは受けず、呼出先例外がUIの結果に変わらない。
+
+受信はobject/type、有限幅の0〜20000丸め、存在するrun選択、program停止、run停止、worktree撤去/一括片付けの確認と結果表示、定義ファイル、https限定PR表示、orchestrator送信/表示、confirm限定最終統合判断、質問回答、task表示/中断/停止/再実行/継続/再統合/承認を分岐する。撤去確認前にrunIdを固定する一方、task操作メッセージにはrunIdや承認requestIdが無く現在選択runのtaskへ解決するため、画面更新と操作の交差には追加確認が必要。再試行allow確認後の2回目の結果は表示しない。previewDefinitionの遅いレビュー結果が別run表示を戻す点はコメントで明示した許容仕様。
+
+workflowScriptはDOM/SVGをcreateElementとtextContentで生成し、動的HTML文字列を使わない。9状態の記号・ラベル、失敗種別、品質契約、復旧優先バナー、kanban絞り込み、辺の選択強調、グラフ折り返し/倍率/スクロール位置、実測文字省略、操作ボタン条件、承認・プロンプト詳細、orchestrator入力/未読/質問、警告、PR・最終統合、program状態/失敗伝播/復旧/履歴を確認した。文字省略のsliceはUTF-16単位で補助平面文字を分割し得る。taskId辞書は通常objectで、定義側の予約名排除に依存する。
+
+画面更新は全体再生成。最終統合理由inputも更新のたびに失われ、programやタスクの変化が入力と重なる場合に理由を書き直す必要がある。選択task・詳細展開Set・kanbanFilter・orchestrator下書きはrunId別ではなく持ち越す。applyNoRunは旧headerの名前・進捗・バナー・経過時刻・停止ボタンを消さない。入力送信は受付結果を待たず空にする。待機返信タスクには個別停止ボタンを出さない。SVGノード操作はclickのみでkeyboard対応が無い。CSSは全状態・狭幅カード化・進捗の境界・フォーカス・reducedMotionを確認したが、実ブラウザの視認性/寸法は未検証。
+
+## テスト内容と不足
+
+workflowGraph.test.tsは依存なし/鎖/分岐合流/循環/未知参照、空/単ノード/複数段/幅2・3・6列/最小幅、座標・辺・折り返し、全9状態と比率0/33/100、警告有無、統合branch無し/空/PR有無/共有除外、全kanban/役割、区画0/全種/単一/3等分を確認する。定義で無効となる入力は有限性中心であり、循環の全頂点同段は保証しない。復元snapshotを通した件数確認は無い。
+
+workflowViewGraph.test.tsはフェイクパネルで幅未通知、幅送信後の折り返し、同値再送抑制、NaN/負値、ズームボタンHTML、パネルオプションを確認する。NaNと負値を連続投入した最終状態しか見ないため、NaN単独で再送されないことまでは主張しない。巨大値/Infinity/文字列/破棄再生成やプレビュー操作は無い。
+
+workflowViewPrograms.test.tsは実ProgramRunner+Storeと共通workflowフェイクを結線し、R1失敗→R2skippedが最後のWebview通知へ届くことを保存状態と照合する。フェイクに復旧APIが無いので現行の10分復旧待ち経路は通らない。受信通知そのものではなくstore確定をwaitForしてから最終通知を読むため、通知の確定とのずれも再確認余地がある。
+
+workflowWiring.test.tsはChatViewManagerとWorkflowRunnerを組み立て、Mementoだけ共有した新インスタンスでtaskの汎用復元を拒否し、手動threadは遅延ロードで残す。テスト自身がextensionの配線を複製するので、extension.tsが実際にクロージャを渡し忘れた変更は検出しない。ClaudeもCodexの同じhostに置換しており、Claude固有復元は通らない。固定回数microtask flushは全処理終了の保証ではなく、runner/chatのdisposeも無い。
+
+埋め込みスクリプトのDOM試験は既存の別ファイルの精査記録を参照。ここでのテストはUI操作全件・復元表示・理由入力保持・完了時間・更新中の操作対象維持を網羅していない。

@@ -1,0 +1,27 @@
+# 設定パネル本体・画面スクリプト・ホスト試験
+
+対象:controlPanelView.ts、controlPanelScript.ts、test/unit/controlPanelView.test.ts。全文の関数・分岐と試験の準備/操作/期待値を確認した。テスト未実行。スクリプトは元の補間を含むテンプレートを読んだ。
+
+## ホスト
+
+view生成/破棄、使用量差込み、section再表示、refreshとhooks先読み、状態の整形・異常集計・見出し集計、ready/toggle/retry、新規会話、承認/設定の更新、MCP/skill/plugin切替、hook信頼、Claude skill再読込み、plugin導入/削除、import成功/部分失敗/結果未着/取消、login/logout、入力boxとmarketplace選択の各成功/取消/不正入力を確認した。
+
+handleMessageと起動時のvoid refreshには最上位catchが無い。SettingsProvider側が結果オブジェクトへ変換しない例外が出るとpost/refreshを飛ばし、画面の仮の選択や読込表示が残る。MCP等の操作結果を捨てる既存F16/F17も参照する。UIは送信中に操作を無効化せず、ホストにも要求全体の直列化は無い。複数設定変更・確認中の別操作はSettingsProviderの競合対策に依存する。viewのdispose callbackは自身が現在のviewか照合せず参照を消す。新旧viewが重なる実際のVSCode順序は未確認。
+
+readyとresolve直後の双方がrefreshを呼び、後者は購読前のpostになり得る。初期表示はready側の再送に依存する。revealSectionはready待ち・保留を持たず、その時点のwebviewへ送るだけである。showUsage等の呼出し側は表示完了だけでなくwebview受信準備との順序確認が必要。login用terminalは固定コマンドを既存の同名terminalへ追記し、実行ファイル設定やそのterminalの入力状態を参照しない。インポート履歴時刻はtoISOString前にDateの範囲を検査しない。
+
+HTML全セクション、radioのprovider別name/説明、nonce/CSP、使用量整形、履歴整形、各固定文字列と補間を読んだ。「次に開くセッション」とする説明と実際の既存会話への設定反映はSettingsProvider/manager側の契約を併読する必要がある。
+
+## Webview
+
+空/読込/失敗の共通DOM生成、retry逆引き、承認radioと実効値、カタログ外値の維持、既定値ラベル、見出し件数の消去、banner有無と移動先、使用量の上限clampを確認した。下限clampは無く、時刻文言はstate受信時だけ更新する。F11-07を参照する。
+
+MCPのconnected/disabled/unavailable、hook信頼/無効/警告、skillのtoggle可否/出所、pluginの導入/削除/提供件数、appのenabled/callable、import選択のSet維持と候補消滅時の削除、履歴の部分失敗、accountのログイン済み/未ログインと操作を確認した。利用者由来の表示本文はtextContentを使う。動的な行ごとにcallbackが対象のkey/scopeを保持する。全stateでreplaceChildrenし直すため、操作中のfocusや一時的選択は更新の影響を受ける。importは有効なkeyの選択を維持する一方、送信後に選択解除も二重送信防止も行わない。
+
+Codex/Claudeの設定適用、モデル外入力、provider切替と保存、section開閉状態の復元、toggleによる遅延取得、欠落sectionのcontinue、openSectionのprovider選択/scroll、message/readyを確認した。missing sectionを初期化で飛ばしても、後のapply/renderSectionは対象containerの存在を前提とする。タブはclick配線とaria-selectedだけで、矢印キー移動やtabpanelとのaria-controlsの対応は無い。
+
+## ホスト試験
+
+fakeSettingsは即時解決し、loadedSectionIdsやloadingSectionsは実I/Oに連動しない。fakeWebviewのpostは常にtrue、破棄してもmessage handlerを解除しない。flushAsyncは0ms timerのためmicrotask段数からは独立するが、実際の遅いI/Oの完了を待つ仕組みではない。
+
+toggle/retryの正常/不正、loadingSectionsの転送、revealの有/無、dispose後の送信なし、全sectionのicon、radioの順/ラベル/unsafe件数、CSPの固定期待値を確認した。「settings.loadを1回」の試験はload回数を記録せず、state件数とhooks要求だけを見る。実装のloadが0回/複数回でもこの期待値からは検出できない。unsafeの試験は件数中心で、対象のvalueとの対応は独立に検査しない。操作系handler、reject、viewの入替え、ready前要求、同時操作、Webview実DOMの操作はこのファイルでは通らない。既に記録したcontrolPanelScript.test.tsの試験と併せても実機確認の代替にはならない。
