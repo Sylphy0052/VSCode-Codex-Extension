@@ -133,6 +133,7 @@ import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
+  advanceCompactionCount,
   buildHandoffPrompt,
   countCompactions,
   decideAutoHandoff,
@@ -247,8 +248,12 @@ interface ClaudePanel extends BaseChatPanel {
   /**
    * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら自動圧縮が
    * 走ったと判る。専用のイベントを`ChatState`へ足さずに済ませるため、項目を数える。
+   *
+   * 最初の同期を受け取るまでは `undefined`。復元や履歴からの再開では、最初の同期で
+   * 過去の圧縮がまとめて届くため、`0` を基準に比較すると圧縮が走ったと誤判定する
+   * （Issue #1101）。
    */
-  lastCompactionCount: number;
+  lastCompactionCount: number | undefined;
   /**
    * 前回、安全な区切りの分類器（Issue #1090）を走らせたときの材料の鍵。
    *
@@ -750,6 +755,7 @@ export class ClaudeChatViewManager
     cwd?: string,
     taskConfig?: ClaudeConfig,
     modelSettings?: SessionModelSettings,
+    preserveFocus = false,
   ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
@@ -765,7 +771,7 @@ export class ClaudeChatViewManager
     // argvで受け取るため、起動後に `entry.modelSettings` を書き換えても初回プロンプトには
     // 効かない。`buildEntry` へ渡して `configFor` が起動前に読む形にする
     const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig, undefined, modelSettings);
-    this.showPanel(entry, false);
+    this.showPanel(entry, preserveFocus);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: targetCwd,
@@ -896,7 +902,18 @@ export class ClaudeChatViewManager
       return false;
     }
 
-    const newSessionId = await this.openNew(entry.cwd, entry.taskConfig, choice.settings);
+    // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
+    // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
+    // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる。
+    // 手動（ボタン操作）はユーザーがその場で求めた操作なので必ず前面へ出す。見立ての
+    // 取得で待っている間にタブを離れることがあり、`visible` だけで決めると背面に開く
+    const preserveFocus = trigger.kind !== 'manual' && entry.panel?.visible !== true;
+    const newSessionId = await this.openNew(
+      entry.cwd,
+      entry.taskConfig,
+      choice.settings,
+      preserveFocus,
+    );
     if (newSessionId === undefined) {
       return false;
     }
@@ -963,9 +980,11 @@ export class ClaudeChatViewManager
    * ターン実行中は発火させない。安全な区切り（`busy` が落ちている）まで待つ。
    */
   private maybeAutoHandoff(entry: ClaudePanel, state: ChatState): void {
-    const compactions = countCompactions(state);
-    const compacted = compactions > entry.lastCompactionCount;
-    entry.lastCompactionCount = compactions;
+    const { compacted, lastCompactionCount } = advanceCompactionCount(
+      entry.lastCompactionCount,
+      countCompactions(state),
+    );
+    entry.lastCompactionCount = lastCompactionCount;
 
     if (entry.disposed || entry.panel === undefined) {
       return;
@@ -1806,7 +1825,7 @@ export class ClaudeChatViewManager
       limitAutoResumeAt: undefined,
       limitAutoResumeAwaitingResult: false,
       autoHandoffStarted: false,
-      lastCompactionCount: 0,
+      lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
       safeBoundaryProbing: false,

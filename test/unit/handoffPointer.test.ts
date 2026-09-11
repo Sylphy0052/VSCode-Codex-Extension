@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initialChatState, type ChatItem, type ChatState } from '../../src/appserver/chatState';
 import {
+  advanceCompactionCount,
   buildHandoffPointerMarkdown,
   buildHandoffPrompt,
   countCompactions,
@@ -550,6 +551,37 @@ describe('圧縮回数の数え方', () => {
       ],
     };
     expect(countCompactions(state)).toBe(2);
+  });
+});
+
+describe('圧縮契機の材料の進め方（Issue #1101）', () => {
+  it('最初の同期では圧縮が走ったことにしない', () => {
+    // 復元や履歴からの再開では、最初の同期で過去の圧縮がまとめて届く
+    expect(advanceCompactionCount(undefined, 21)).toEqual({
+      compacted: false,
+      lastCompactionCount: 21,
+    });
+  });
+
+  it('最初の同期で件数が0でも基準だけ作る', () => {
+    expect(advanceCompactionCount(undefined, 0)).toEqual({
+      compacted: false,
+      lastCompactionCount: 0,
+    });
+  });
+
+  it('基準ができた後に件数が増えたら圧縮が走ったとする', () => {
+    expect(advanceCompactionCount(21, 22)).toEqual({
+      compacted: true,
+      lastCompactionCount: 22,
+    });
+  });
+
+  it('件数が変わらなければ圧縮は走っていない', () => {
+    expect(advanceCompactionCount(21, 21)).toEqual({
+      compacted: false,
+      lastCompactionCount: 21,
+    });
   });
 });
 

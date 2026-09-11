@@ -470,6 +470,31 @@ export function countCompactions(state: ChatState): number {
   return state.items.filter((item) => item.kind === 'contextCompaction').length;
 }
 
+/** `advanceCompactionCount` の結果。次に控える件数と、圧縮が走ったかの判定。 */
+export interface CompactionAdvance {
+  /** 直前の同期から圧縮が走ったか。最初の同期では必ず `false`。 */
+  compacted: boolean;
+  /** 次の比較の基準として控える件数。 */
+  lastCompactionCount: number;
+}
+
+/**
+ * 圧縮契機の判定材料を1段進める。
+ *
+ * 最初の同期（`previous` が `undefined`）では基準を作るだけで `compacted` を立てない。
+ * 復元や履歴からの再開では、最初の同期で過去の圧縮がまとめて届く。`0` を基準にすると
+ * 実際には起きていない圧縮で引き継ぎが発火する（Issue #1101）。
+ */
+export function advanceCompactionCount(
+  previous: number | undefined,
+  current: number,
+): CompactionAdvance {
+  return {
+    compacted: previous !== undefined && current > previous,
+    lastCompactionCount: current,
+  };
+}
+
 /** 自動引き継ぎを始めてよいかの判断材料。すべて呼び出し側が既に持っている値。 */
 export interface AutoHandoffDecisionInput {
   /** このセッションで自動引き継ぎがONか（`ChatState.autoHandoff`）。 */
