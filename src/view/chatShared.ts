@@ -1264,9 +1264,15 @@ function renderComposerButton(
   const title = escapeHtml(spec.title);
   const pressedAttr = spec.pressed ? ' aria-pressed="false"' : '';
   const roleAttr = variant === 'menu' ? ' role="menuitem"' : '';
-  const label = variant === 'menu' ? `<span class="composerOverflowLabel">${ariaLabel}</span>` : '';
+  // ラベルは置き場所によらず常に描画し、表（アイコン列）にある間だけCSSで隠す
+  // （issue #1086）。幅が足りないボタンは実行時に「…」メニューへ移すため、移動先で
+  // ラベルを組み立て直さずに済ませる。
+  const label = `<span class="composerOverflowLabel">${ariaLabel}</span>`;
+  // 最初からメニューにあるボタン（設定で畳んだ分）には印を付ける。幅が広がったときに
+  // 表へ返すのは、幅が足りずに実行時へ移したボタンだけにするため。
+  const overflowAttr = variant === 'menu' ? ' data-overflow="fixed"' : '';
   const hiddenAttr = spec.hidden ? ' hidden' : '';
-  return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
+  return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${overflowAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
 }
 
 /**
@@ -1327,7 +1333,10 @@ ${chatStyles()}
     <ol id="queueList"></ol>
   </div>
   <div id="limitAutoResumeStatus" role="status" aria-live="polite"${options.limitAutoResumeEnabled === true ? '' : ' hidden'}>上限解除後の自動続行: ON（上限検知待ち）</div>
-  <div id="status"></div>
+  <details id="statusBox" open>
+    <summary title="実行状態・使用量の表示を開閉します"><span class="label">状態</span><span id="statusSummary"></span></summary>
+    <div id="status"></div>
+  </details>
   <div id="todos" hidden>
     <div class="head">TODO一覧</div>
     <ul id="todosList"></ul>
