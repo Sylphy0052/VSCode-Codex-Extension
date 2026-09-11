@@ -992,6 +992,46 @@ function notifyPseudoWorktreeExcludeWarnings(warnings: readonly string[]): void 
   void vscode.window.showWarningMessage(message);
 }
 
+/**
+ * 型の合わない権限設定について通知済みのキー。`readWorkflowsConfig` は設定を読むたびに
+ * 呼ばれるため、同じキーの通知を繰り返さないための重複除け。設定を直せば外れ、再び壊れた
+ * 値を入れれば改めて通知される。
+ */
+const warnedPermissionFlagKeys = new Set<string>();
+
+/**
+ * テスト専用: `warnedPermissionFlagKeys` をリセットする。`test/unit/config.test.ts` の
+ * `beforeEach` から呼ぶ。本体コードから呼んではならない。
+ */
+export function __resetPermissionFlagWarningForTestOnly(): void {
+  warnedPermissionFlagKeys.clear();
+}
+
+/**
+ * 権限を広げる側の真偽値設定を読む（Issue #1105）。`true` のときだけ有効にし、それ以外
+ * （`false`・未設定・型の合わない値）は全て無効として扱う。
+ *
+ * `c.get<boolean>() ?? false` は実行時の型を確かめない。設定読取りが文字列 `"false"` の
+ * ような値を返すと真として扱われ、`clampAutoApprove` の抑止や `bypassPermissions` の
+ * 読み替えが効かなくなる。package.json の JSON Schema（`type: boolean`）はVSCodeの設定UI
+ * を通した入力しか守らないため、ここで `=== true` に限定する。型の合わない値は無効化した
+ * うえで通知し、設定を書いた本人が気づけるようにする。
+ */
+function permissionFlag(c: vscode.WorkspaceConfiguration, key: string): boolean {
+  const v = c.get<unknown>(key);
+  if (v === undefined || typeof v === 'boolean') {
+    warnedPermissionFlagKeys.delete(key);
+    return v === true;
+  }
+  if (!warnedPermissionFlagKeys.has(key)) {
+    warnedPermissionFlagKeys.add(key);
+    void vscode.window.showWarningMessage(
+      `agent.${key} は真偽値ではないため無効（false）として扱います（値の型: ${typeof v}）`,
+    );
+  }
+  return false;
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
@@ -1002,8 +1042,8 @@ export function readWorkflowsConfig(): WorkflowsConfig {
   notifyPseudoWorktreeExcludeWarnings(pseudoWorktreeExclude.warnings);
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
-    allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
-    allowClaudeBypassPermissions: c.get<boolean>('workflows.allowClaudeBypassPermissions') ?? false,
+    allowAutoApprove: permissionFlag(c, 'workflows.allowAutoApprove'),
+    allowClaudeBypassPermissions: permissionFlag(c, 'workflows.allowClaudeBypassPermissions'),
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
     pseudoWorktreeExclude: pseudoWorktreeExclude.exclude,
     pseudoWorktreeExcludeWarnings: pseudoWorktreeExclude.warnings,

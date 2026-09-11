@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  __resetPermissionFlagWarningForTestOnly,
   __resetPseudoWorktreeExcludeWarningForTestOnly,
   readChatComposerButtonsConfig,
   readChatSendOnConfig,
@@ -29,6 +30,100 @@ import {
 } from '../../src/loop/loopEngineering';
 import { DEFAULT_MAX_INDETERMINATE } from '../../src/loop/goalLoop';
 import { __mock } from '../mocks/vscode';
+import { clampAutoApprove } from '../../src/orchestrator/workflow';
+import { buildEffectiveTaskConfig } from '../../src/orchestrator/taskConfig';
+
+describe('readWorkflowsConfig（Issue #1105: 権限設定はtrueだけを有効にする）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __resetPermissionFlagWarningForTestOnly();
+  });
+
+  it.each([
+    ['文字列 "true"', 'true'],
+    ['文字列 "false"', 'false'],
+    ['数値 1', 1],
+    ['数値 0', 0],
+    ['null', null],
+    ['オブジェクト', {}],
+    ['配列', []],
+  ])('%s は真偽値でないので、両方の権限設定をfalseとして読み、通知する', (_label, value) => {
+    __mock.setConfig('agent', {
+      'workflows.allowAutoApprove': value,
+      'workflows.allowClaudeBypassPermissions': value,
+    });
+    const config = readWorkflowsConfig();
+    expect(config.allowAutoApprove).toBe(false);
+    expect(config.allowClaudeBypassPermissions).toBe(false);
+    expect(__mock.messages.warnings).toHaveLength(2);
+    expect(__mock.messages.warnings[0]).toContain('agent.workflows.allowAutoApprove');
+    expect(__mock.messages.warnings[1]).toContain('agent.workflows.allowClaudeBypassPermissions');
+  });
+
+  it('真偽値のtrueだけを有効にし、通知しない', () => {
+    __mock.setConfig('agent', {
+      'workflows.allowAutoApprove': true,
+      'workflows.allowClaudeBypassPermissions': true,
+    });
+    const config = readWorkflowsConfig();
+    expect(config.allowAutoApprove).toBe(true);
+    expect(config.allowClaudeBypassPermissions).toBe(true);
+    expect(__mock.messages.warnings).toHaveLength(0);
+  });
+
+  it('真偽値のfalseと未設定はfalseで、通知しない', () => {
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': false });
+    const config = readWorkflowsConfig();
+    expect(config.allowAutoApprove).toBe(false);
+    expect(config.allowClaudeBypassPermissions).toBe(false);
+    expect(__mock.messages.warnings).toHaveLength(0);
+  });
+
+  it('同じキーの型不正は繰り返し通知せず、直してから再び壊すと改めて通知する', () => {
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': 'false' });
+    readWorkflowsConfig();
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': false });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': 'false' });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(2);
+  });
+
+  it('型不正の値でも、YAMLのautoApprove: trueの抑止が働く', () => {
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': 'false' });
+    const result = clampAutoApprove(true, readWorkflowsConfig().allowAutoApprove);
+    expect(result.value).toBe(false);
+    expect(result.warning).toBeDefined();
+  });
+
+  it('型不正の値でも、ClaudeのbypassPermissionsは安全なモードへ読み替えられる', () => {
+    __mock.setConfig('agent', { 'workflows.allowClaudeBypassPermissions': 'false' });
+    const workflows = readWorkflowsConfig();
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'claude',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      {
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'bypassPermissions',
+        allowAutoApprove: workflows.allowAutoApprove,
+        allowClaudeBypassPermissions: workflows.allowClaudeBypassPermissions,
+      },
+    );
+    expect(result.config.approvalMode).toBe('acceptEdits');
+  });
+});
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
   beforeEach(() => {
