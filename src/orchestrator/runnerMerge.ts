@@ -353,6 +353,24 @@ function finalizeTaskPullRequestFlow(
       ? { number: parsePullRequestNumberFromUrl(flow.pullRequest.url), url: flow.pullRequest.url }
       : undefined;
 
+  // レビューで止めた場合、マージは試みていない（`mergeOutcome`が`undefined`。Issue #1110）。
+  // `busy`ではなく`failure`にするのは、Viewの「再マージ」で同じ変更をもう一度マージしても
+  // 指摘は消えないため。直すべきはコードで、復旧はタスクの失敗として扱う
+  if (flow.mergeOutcome === undefined) {
+    const message =
+      flow.review !== undefined && !flow.review.ok
+        ? flow.review.message
+        : 'レビューの結果を判定できませんでした';
+    const merge: MergeTaskResult = {
+      kind: 'failure',
+      message: `PR/MRのレビューで指摘が残っているため、統合ブランチへのマージを行いませんでした: ${message}`,
+    };
+    // 指摘の中身は`buildTaskPullRequestReviewStep`が`taskPullRequestReview`警告として
+    // 既に積んでいる。ここで同じ内容をもう一度警告へ出さず、ログとマージ結果に留める
+    self.deps.log.warn(`[workflow ${runId}/${taskId}] ${merge.message}`);
+    return { merge, pullRequest };
+  }
+
   return { merge: flow.mergeOutcome, pullRequest };
 }
 

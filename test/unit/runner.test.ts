@@ -5607,8 +5607,32 @@ tasks:
     reviewSession?.finish('done', doneState('[]'));
     await flush();
 
-    // レビューを挟んでもタスクは最終的に完了する（マージを止めない）
+    // レビューで指摘が無ければタスクは最終的に完了する
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it('レビューで指摘があれば統合ブランチへマージせず、タスクを失敗にする（Issue #1110）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { reviewTaskPullRequest: true }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/task-review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    const mergeCallsBeforeReview = git.calls.filter((c) => c.args[0] === 'merge').length;
+    const reviewSession = codexHost.sessions[codexHost.sessions.length - 1];
+    reviewSession?.finish('done', doneState('[{"message":"境界の検査が抜けている"}]'));
+    await flush();
+
+    // 指摘が残っているので統合worktreeでのマージへは進まない
+    expect(git.calls.filter((c) => c.args[0] === 'merge').length).toBe(mergeCallsBeforeReview);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
   });
 });
 
