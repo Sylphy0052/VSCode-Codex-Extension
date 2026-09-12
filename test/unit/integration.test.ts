@@ -865,36 +865,92 @@ describe('reconcileMergingTaskOnReload（design.md §16.11）', () => {
 });
 
 describe('isMergeResolutionComplete（design.md §16.17「コンフリクト」4.）', () => {
-  it('未解決パスが無く、MERGE_HEADも見つからなければtrue（解決してコミット済み）', async () => {
+  const TASK_BRANCH = `wf/${RUN_ID}/T1`;
+  const TARGET = { runId: RUN_ID, taskBranch: TASK_BRANCH };
+
+  /**
+   * 全ての確認が「解決済み」を示すフェイク。`overrides`に渡した応答だけを差し替える
+   * （`FakeGit.respond`は先に登録した応答が優先されるため、差し替えを先に積む）。
+   */
+  function resolvedGit(overrides: Array<[string[], GitCommandResult]> = []): FakeGit {
     const git = new FakeGit();
+    for (const [prefix, result] of overrides) {
+      git.respond(prefix, result);
+    }
     git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
-    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
-      code: 1,
-      stdout: '',
-      stderr: 'not found',
-    });
-    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git)).toBe(true);
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['status', '--porcelain', '-uno'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['merge-base', '--is-ancestor'], { code: 0, stdout: '', stderr: '' });
+    return git;
+  }
+
+  it('未解決パスが無く、MERGE_HEADも無く、タスクブランチが取り込まれていればtrue', async () => {
+    const git = resolvedGit();
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(true);
+    expect(
+      git.calls.some(
+        (c) => c.args[0] === 'merge-base' && c.args[2] === TASK_BRANCH && c.args[3] === 'HEAD',
+      ),
+    ).toBe(true);
   });
 
   it('未解決パスが残っていればfalse', async () => {
-    const git = new FakeGit();
-    git.respond(['diff', '--name-only', '--diff-filter=U'], {
-      code: 0,
-      stdout: 'a.ts\n',
-      stderr: '',
-    });
-    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git)).toBe(false);
+    const git = resolvedGit([
+      [['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: 'a.ts\n', stderr: '' }],
+    ]);
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
   });
 
   it('未解決パスは無いがMERGE_HEADがまだ存在すれば（コミット前）false', async () => {
-    const git = new FakeGit();
-    git.respond(['diff', '--name-only', '--diff-filter=U'], { code: 0, stdout: '', stderr: '' });
-    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
-      code: 0,
-      stdout: `${'a'.repeat(40)}\n`,
-      stderr: '',
-    });
-    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git)).toBe(false);
+    const git = resolvedGit([
+      [
+        ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+        { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' },
+      ],
+    ]);
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
+  });
+
+  it('MERGE_HEADが無くてもタスクブランチが取り込まれていなければfalse（merge --abort・reset。Issue #1111）', async () => {
+    const git = resolvedGit([
+      [['merge-base', '--is-ancestor'], { code: 1, stdout: '', stderr: '' }],
+    ]);
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
+  });
+
+  it('MERGE_HEADの問い合わせがエラー（非0かつstderrあり）なら完了扱いにしない（Issue #1111）', async () => {
+    const git = resolvedGit([
+      [
+        ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+        { code: 128, stdout: '', stderr: 'fatal: not a git repository\n' },
+      ],
+    ]);
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
+  });
+
+  it('未コミットの変更が残っていればfalse（Issue #1111）', async () => {
+    const git = resolvedGit([
+      [['status', '--porcelain', '-uno'], { code: 0, stdout: ' M a.ts\n', stderr: '' }],
+    ]);
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
+  });
+
+  it('未追跡ファイルだけが残っていても完了を否定しない（統合worktreeのビルド生成物。Issue #1111）', async () => {
+    const git = resolvedGit();
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(true);
+    // `-uno`を付けているので、未追跡ファイルは`git status`の出力に載らない
+    expect(git.calls.some((c) => c.args[0] === 'status' && c.args.includes('-uno'))).toBe(true);
+  });
+
+  it('このrunのタスクブランチの形でなければgitを叩かずfalse（フラグ注入対策。Issue #1111）', async () => {
+    const git = resolvedGit();
+    expect(
+      await isMergeResolutionComplete(INTEGRATION_CWD, git, {
+        runId: RUN_ID,
+        taskBranch: '--upload-pack=evil',
+      }),
+    ).toBe(false);
+    expect(git.calls).toHaveLength(0);
   });
 });
 

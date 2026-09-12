@@ -790,6 +790,7 @@ async function mergeWithLease(
     taskId,
     task,
     integration,
+    taskBranch,
     merge,
     originCommit,
     lease,
@@ -923,6 +924,7 @@ async function startMergeResolution(
   taskId: string,
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
+  taskBranch: string,
   conflict: Extract<MergeTaskResult, { kind: 'conflict' }>,
   originCommit: string,
   lease: IntegrationLease,
@@ -1029,7 +1031,16 @@ async function startMergeResolution(
         return;
       }
       finishedWhileOpening.done = true;
-      void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
+      void onMergeResolutionFinished(
+        self,
+        runId,
+        taskId,
+        task,
+        integration,
+        taskBranch,
+        reason,
+        lease,
+      );
     });
 
     // 承認待ちの可視化（Issue #413 PR4）。**`onFinished`と同じく`session.open()`より前に
@@ -1150,11 +1161,12 @@ async function onMergeResolutionFinished(
   taskId: string,
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
+  taskBranch: string,
   reason: LoopStopReason,
   lease: IntegrationLease,
 ): Promise<void> {
   try {
-    await finishMergeResolution(self, runId, taskId, task, integration, reason, lease);
+    await finishMergeResolution(self, runId, taskId, task, integration, taskBranch, reason, lease);
   } catch (e) {
     const live = self.runs.get(runId);
     if (live !== undefined) {
@@ -1179,6 +1191,7 @@ async function finishMergeResolution(
   taskId: string,
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
+  taskBranch: string,
   reason: LoopStopReason,
   lease: IntegrationLease,
 ): Promise<void> {
@@ -1329,7 +1342,8 @@ async function finishMergeResolution(
 
   // design.md §16.17「コンフリクト」4.「宣言だけを信じず`git status`でも確かめる」
   const resolved =
-    reason === 'done' && (await isMergeResolutionComplete(integration.cwd, self.deps.git));
+    reason === 'done' &&
+    (await isMergeResolutionComplete(integration.cwd, self.deps.git, { runId, taskBranch }));
   if (resolved) {
     live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
     // ラッパー（`WorkflowRunner`側のメソッド）を通す。テストが`prototype`をスパイして
@@ -1344,7 +1358,7 @@ async function finishMergeResolution(
 
   if (reason === 'done') {
     self.deps.log.warn(
-      `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は未解決のままでした`,
+      `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は解決が統合ブランチへ入っていませんでした（未解決・未コミット・取り消しのいずれか）`,
     );
   }
   await abortAndBlock(self, runId, taskId, integration, lease);
