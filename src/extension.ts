@@ -1386,7 +1386,12 @@ async function runWorkflow(
     if (choice !== '実行する') {
       return;
     }
-    result = await runner.start(picked.file.fsPath, folder.uri.fsPath, { allowConfirmed: true });
+    // 確認したのは、確認時に読んだ内容そのもの。呼び直しの時点で定義が書き換わっていれば
+    // ダイジェストが食い違い、`runner.start` がもう一度確認を求める（Issue #1107）
+    result = await runner.start(picked.file.fsPath, folder.uri.fsPath, {
+      allowConfirmed: true,
+      ...(result.allowDigest === undefined ? {} : { allowConfirmedDigest: result.allowDigest }),
+    });
   }
   if (!result.ok) {
     const detail = (result.errors ?? []).map((e) => e.message).join('\n');

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -472,6 +472,14 @@ export interface StartWorkflowResult {
   /** `true` のとき、`allowTaskIds` を確認のうえ `allowConfirmed: true` で呼び直すこと（design.md §16.7）。 */
   needsAllowConfirmation?: boolean;
   allowTaskIds?: readonly string[];
+  /**
+   * 確認の対象になった定義ファイルの内容ダイジェスト（Issue #1107）。
+   *
+   * 呼び出し側は確認が取れたら、この値を `allowConfirmedDigest` へそのまま入れて呼び直す。
+   * 呼び直しの時点で定義が書き換わっていれば値が食い違い、**確認していない設定が同意済みと
+   * して実行されることはない**（再度 `needsAllowConfirmation` が返る）。
+   */
+  allowDigest?: string;
 }
 
 /** `WorkflowRunner.retryTask` の戻り値。`start()` の `allow` 確認と同じ形にしてある。 */
@@ -1633,6 +1641,17 @@ function buildHandoffPort(repoRoot: string, runId: string): HandoffPort {
   };
 }
 
+/**
+ * `allow` の確認に使う、定義ファイルの内容ダイジェスト（Issue #1107）。
+ *
+ * 確認ダイアログを出している間にファイルが差し替えられていないことだけを見るので、
+ * 内容そのものの比較で足りる。ハッシュにしているのは、値を呼び出し側（Viewやコマンド）へ
+ * 渡して返してもらう経路に定義の本文をそのまま流さないため。
+ */
+export function workflowDigest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
 export class WorkflowRunner {
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）からは`self.runs`として読むが、
@@ -1794,7 +1813,8 @@ export class WorkflowRunner {
   private async parseAndValidateWorkflow(
     defPath: string,
   ): Promise<
-    { ok: true; def: WorkflowDefinition } | { ok: false; errors: readonly WorkflowIssue[] }
+    | { ok: true; def: WorkflowDefinition; digest: string }
+    | { ok: false; errors: readonly WorkflowIssue[] }
   > {
     const size = await this.deps.filePort.fileSize(defPath);
     if (size === undefined) {
@@ -1840,7 +1860,7 @@ export class WorkflowRunner {
         ],
       };
     }
-    return { ok: true, def };
+    return { ok: true, def, digest: workflowDigest(text) };
   }
 
   /** `start()`のgit判定（design.md §16.6）。gitでない場合は`worktree-strict`の禁止を確認する。 */
@@ -2087,22 +2107,37 @@ export class WorkflowRunner {
    * 実行を始めず `needsAllowConfirmation` を立てて返す（design.md §16.7「`allow`を含む
    * ワークフローは、実行開始時に...確認を取る」）。呼び出し側（`extension.ts` /
    * ワークフローView）はこれを見てモーダルを出し、確認が取れたら
-   * `allowConfirmed: true` で呼び直す。
+   * `allowConfirmed: true` と、返した `allowDigest` を `allowConfirmedDigest` へ入れて
+   * 呼び直す。
+   *
+   * **真偽値だけでは確認を省かない（Issue #1107）。** 定義は呼び直しのたびに読み直すため、
+   * 確認ダイアログを出している間にYAMLを差し替えられると、確認していない `allow` が同意済みと
+   * して実行されてしまう。ダイジェストが一致しなければ、もう一度確認を取り直す。
    */
   async start(
     defPath: string,
     repoRoot: string,
-    options?: { allowConfirmed?: boolean; programControl?: ProgramControlPort },
+    options?: {
+      allowConfirmed?: boolean;
+      allowConfirmedDigest?: string;
+      programControl?: ProgramControlPort;
+    },
   ): Promise<StartWorkflowResult> {
     const parsed = await this.parseAndValidateWorkflow(defPath);
     if (!parsed.ok) {
       return parsed;
     }
-    const { def } = parsed;
+    const { def, digest } = parsed;
 
     const allowTaskIds = def.tasks.filter((t) => t.allow.length > 0).map((t) => t.id);
-    if (allowTaskIds.length > 0 && options?.allowConfirmed !== true) {
-      return { ok: false, needsAllowConfirmation: true, allowTaskIds };
+    if (allowTaskIds.length > 0) {
+      // 確認済みと言えるのは「この内容を見せて同意を取った」ときだけ。ダイジェストが無い・
+      // 食い違う場合は確認からやり直す（Issue #1107。fail-closed）
+      const confirmedForThisContent =
+        options?.allowConfirmed === true && options.allowConfirmedDigest === digest;
+      if (!confirmedForThisContent) {
+        return { ok: false, needsAllowConfirmation: true, allowTaskIds, allowDigest: digest };
+      }
     }
 
     const gitContext = await this.resolveStartGitContext(repoRoot, def);
