@@ -96,6 +96,15 @@ export interface ForgeWorkItem {
   issue: RoadmapIssueSummary;
   host: ForgeHost;
   provider: ForgeHubProvider;
+  /**
+   * このカードのリポジトリ識別（Issue #1108）。origin remoteのURL。取れないときは着手時の
+   * 作業場所で代用する。
+   *
+   * branch名だけをカードの識別子にすると、別リポジトリの同名branchが同じカードとして
+   * 上書きされる。カードの操作は必ずこの値を含む{@link forgeWorkItemKey}で引く。
+   */
+  repo: string;
+  /** このカードの作業場所（隔離worktree）。`対応する`の送信先はHubのcwdではなくここ。 */
   cwd: string;
   branch: string;
   sessionId: string;
@@ -128,6 +137,35 @@ export interface ForgeWorkItem {
 export interface ForgePlannedIssue {
   number: number;
   plannedAt: string;
+  /**
+   * 計画を書いたリポジトリの識別（Issue #1108）。Issue番号だけで持つと、別リポジトリの
+   * 同番号Issueが同じ計画済みとして扱われる。
+   *
+   * 旧版が保存した計画には無いため、その場合は空文字列になる（どのリポジトリでも
+   * 従来どおり計画済みとして扱う）。
+   */
+  repo: string;
+}
+
+/**
+ * スナップショットが指すリポジトリの識別（Issue #1108）。
+ *
+ * origin remoteのURLを優先する。同じリポジトリを別のworktreeから開いても同じ値になり、
+ * 「着手したworktree」と「Hubを開いた場所」がずれてもカードは1つに保たれる。取れない場合は
+ * 作業場所で代用する（判別できないより、粗くても分かれているほうが安全側）。
+ */
+export function forgeRepoId(snapshot: Pick<ForgeHubSnapshot, 'remoteUrl' | 'cwd'>): string {
+  return snapshot.remoteUrl ?? snapshot.cwd;
+}
+
+/** カードの識別子（Issue #1108）。リポジトリ識別とbranch名の複合。 */
+export function forgeWorkItemKey(item: Pick<ForgeWorkItem, 'repo' | 'branch'>): string {
+  return `${item.repo}\u0000${item.branch}`;
+}
+
+/** 計画の識別子（Issue #1108）。リポジトリ識別とIssue番号の複合。 */
+function plannedIssueKey(repo: string, number: number): string {
+  return `${repo}\u0000${String(number)}`;
 }
 
 /**
@@ -144,23 +182,27 @@ export type ForgeRefreshResult =
 export class ForgeHubService {
   private readonly worktrees = new WorktreeCreationQueue();
   private readonly workItems = new Map<string, ForgeWorkItem>();
-  private readonly plannedIssues = new Map<number, ForgePlannedIssue>();
+  /** キーは {@link plannedIssueKey}（リポジトリ識別 + Issue番号。Issue #1108）。 */
+  private readonly plannedIssues = new Map<string, ForgePlannedIssue>();
 
   constructor(private readonly deps: ForgeHubDeps) {
-    for (const item of deps.memento.get<ForgeWorkItem[]>(FORGE_WORK_ITEMS_KEY, [])) {
+    for (const raw of deps.memento.get<ForgeWorkItem[]>(FORGE_WORK_ITEMS_KEY, [])) {
       // 以前の版が保存したカードは、マージ済みでもstatusが上書きされたまま残っていることがある
       // （Issue #1029）。書き戻しのときだけ正規化していると、リモート取得が失敗し続ける間は
       // ずっとcleanup列へ移らない。読み込んだ時点で揃えておく。
-      if (isForgeWorkItem(item))
-        this.workItems.set(item.branch, enforceTerminalPrInvariant(item, item));
+      if (!isForgeWorkItem(raw)) continue;
+      // 旧版のカードには `repo` が無い。作業場所で代用する（Issue #1108）
+      const legacy = raw as ForgeWorkItem & { repo?: string };
+      const item: ForgeWorkItem = { ...raw, repo: legacy.repo ?? raw.cwd };
+      this.workItems.set(forgeWorkItemKey(item), enforceTerminalPrInvariant(item, item));
     }
-    for (const planned of deps.memento.get<ForgePlannedIssue[]>(FORGE_PLANNED_ISSUES_KEY, [])) {
-      if (
-        Number.isSafeInteger(planned.number) &&
-        planned.number > 0 &&
-        typeof planned.plannedAt === 'string'
-      ) {
-        this.plannedIssues.set(planned.number, planned);
+    for (const raw of deps.memento.get<ForgePlannedIssue[]>(FORGE_PLANNED_ISSUES_KEY, [])) {
+      if (Number.isSafeInteger(raw.number) && raw.number > 0 && typeof raw.plannedAt === 'string') {
+        // 旧版の計画にはリポジトリ識別が無い。空文字列のまま持ち、どのリポジトリからでも
+        // 従来どおり計画済みとして見えるようにする（Issue #1108）
+        const legacy = raw as ForgePlannedIssue & { repo?: string };
+        const planned: ForgePlannedIssue = { ...raw, repo: legacy.repo ?? '' };
+        this.plannedIssues.set(plannedIssueKey(planned.repo, planned.number), planned);
       }
     }
   }
@@ -242,9 +284,11 @@ export class ForgeHubService {
       },
     );
     if (!result.ok) return { ok: false, message: result.message };
-    this.plannedIssues.set(issue.number, {
+    const repo = forgeRepoId(snapshot);
+    this.plannedIssues.set(plannedIssueKey(repo, issue.number), {
       number: issue.number,
       plannedAt: new Date().toISOString(),
+      repo,
     });
     await this.deps.memento.update(FORGE_PLANNED_ISSUES_KEY, [...this.plannedIssues.values()]);
     return result;
@@ -299,10 +343,12 @@ export class ForgeHubService {
     sessionId: string,
   ): Promise<void> {
     if (snapshot.host === undefined) return;
+    const repo = forgeRepoId(snapshot);
     const item: ForgeWorkItem = {
       issue,
       host: snapshot.host,
       provider: snapshot.provider,
+      repo,
       cwd: worktree.cwd,
       branch: worktree.branch,
       sessionId,
@@ -312,22 +358,44 @@ export class ForgeHubService {
       updatedAt: new Date().toISOString(),
       nextAction: '実装を続ける',
     };
-    this.workItems.set(worktree.branch, item);
-    this.plannedIssues.delete(issue.number);
+    this.workItems.set(forgeWorkItemKey(item), item);
+    this.plannedIssues.delete(plannedIssueKey(repo, issue.number));
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     await this.deps.memento.update(FORGE_PLANNED_ISSUES_KEY, [...this.plannedIssues.values()]);
+  }
+
+  /**
+   * カードを識別子から引く（Issue #1108）。
+   *
+   * 受け取るのは {@link forgeWorkItemKey} の複合キー。branch名だけを渡す旧来の呼び出しにも
+   * 応えるが、その場合は別リポジトリの同名branchを区別できないため**最初の1件**になる。
+   * 画面から来る操作は必ず複合キーを渡すこと。
+   */
+  private resolveWorkItem(key: string): ForgeWorkItem | undefined {
+    return (
+      this.workItems.get(key) ?? [...this.workItems.values()].find((item) => item.branch === key)
+    );
   }
 
   listWorkItems(): readonly ForgeWorkItem[] {
     return [...this.workItems.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   }
 
+  /**
+   * 計画済みのIssueを、**そのリポジトリのぶんだけ**返す（Issue #1108）。
+   *
+   * 旧版が保存した計画（リポジトリ識別なし）は、どのリポジトリからでも従来どおり見える。
+   */
   listPlannedIssues(
+    snapshot: Pick<ForgeHubSnapshot, 'remoteUrl' | 'cwd'>,
     issues: readonly RoadmapIssueSummary[],
   ): readonly (ForgePlannedIssue & { issue: RoadmapIssueSummary })[] {
+    const repo = forgeRepoId(snapshot);
     return issues
       .flatMap((issue) => {
-        const planned = this.plannedIssues.get(issue.number);
+        const planned =
+          this.plannedIssues.get(plannedIssueKey(repo, issue.number)) ??
+          this.plannedIssues.get(plannedIssueKey('', issue.number));
         return planned === undefined ? [] : [{ ...planned, issue }];
       })
       .sort((a, b) => b.plannedAt.localeCompare(a.plannedAt));
@@ -340,8 +408,8 @@ export class ForgeHubService {
    * 取得結果を含む派生値で、確認ダイアログを表示している間にも背景同期で動きうる。カードを
    * 外してよい根拠は「PR/MRがマージ済みであること」そのものなので、そちらを直接検証する。
    */
-  async completeCleanup(branch: string): Promise<ForgeRefreshResult> {
-    const item = this.workItems.get(branch);
+  async completeCleanup(key: string): Promise<ForgeRefreshResult> {
+    const item = this.resolveWorkItem(key);
     if (item === undefined) return goneResult;
     if (item.pullRequestState !== 'merged') {
       return {
@@ -350,7 +418,7 @@ export class ForgeHubService {
         message: 'マージ済み・cleanup待ちのカードだけ完了にできます。',
       };
     }
-    this.workItems.delete(branch);
+    this.workItems.delete(forgeWorkItemKey(item));
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return { ok: true };
   }
@@ -365,30 +433,34 @@ export class ForgeHubService {
    * `await`が入ると、そこで別の更新が割り込んで同じ取り違えが起きる。
    */
   private async applyRemoteUpdate(
-    branch: string,
+    key: string,
     expectedPullRequestNumber: number | undefined,
     mutate: (current: ForgeWorkItem) => ForgeWorkItem,
   ): Promise<'applied' | 'gone' | 'superseded'> {
-    const current = this.workItems.get(branch);
+    const current = this.resolveWorkItem(key);
     if (current === undefined) return 'gone';
     // 取得中にPR/MRが差し替わったカードへ、前のPR/MRの結果を書かない。マージ済みの単調性は
     // 「同じPR/MR番号のライフサイクル」を前提にしているため、番号が変われば前提が崩れる。
     if (current.pullRequestNumber !== expectedPullRequestNumber) return 'superseded';
     const normalized = enforceTerminalPrInvariant(current, mutate(current));
-    this.workItems.set(branch, { ...normalized, nextAction: deriveNextAction(normalized) });
+    this.workItems.set(forgeWorkItemKey(normalized), {
+      ...normalized,
+      nextAction: deriveNextAction(normalized),
+    });
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
     return 'applied';
   }
 
   async refreshRemoteStates(): Promise<void> {
     for (const item of this.listWorkItems()) {
-      if (item.pullRequestNumber === undefined) await this.discoverPullRequest(item.branch);
-      if (this.workItems.get(item.branch)?.pullRequestNumber === undefined) continue;
+      const key = forgeWorkItemKey(item);
+      if (item.pullRequestNumber === undefined) await this.discoverPullRequest(key);
+      if (this.workItems.get(key)?.pullRequestNumber === undefined) continue;
       // 両メソッドは同じカードを読み直して丸ごと永続化する。並列化すると後着の書き込みが
       // 先着のPR状態またはレビュー状態を消してしまうため、カード内だけは直列にする。
-      await this.refreshPullRequestStatus(item.branch);
-      await this.refreshReview(item.branch);
-      await this.refreshCi(item.branch);
+      await this.refreshPullRequestStatus(key);
+      await this.refreshReview(key);
+      await this.refreshCi(key);
     }
   }
 
@@ -399,7 +471,7 @@ export class ForgeHubService {
   ): Promise<void> {
     const item = this.listWorkItems().find((candidate) => candidate.sessionId === sessionId);
     if (item === undefined) return;
-    this.workItems.set(item.branch, {
+    this.workItems.set(forgeWorkItemKey(item), {
       ...item,
       sessionBusy: state.busy,
       sessionFailed: state.failed,
@@ -413,15 +485,15 @@ export class ForgeHubService {
     await this.deps.memento.update(FORGE_WORK_ITEMS_KEY, this.listWorkItems());
   }
 
-  private async discoverPullRequest(branch: string): Promise<void> {
-    const item = this.workItems.get(branch);
+  private async discoverPullRequest(key: string): Promise<void> {
+    const item = this.resolveWorkItem(key);
     if (item === undefined || item.pullRequestNumber !== undefined) return;
     const result =
       item.host === 'github'
-        ? await this.deps.cli.run('gh', ['pr', 'view', branch, '--json=number,url'], item.cwd)
+        ? await this.deps.cli.run('gh', ['pr', 'view', item.branch, '--json=number,url'], item.cwd)
         : await this.deps.cli.run(
             'glab',
-            ['mr', 'list', '--source-branch', branch, '--output', 'json'],
+            ['mr', 'list', '--source-branch', item.branch, '--output', 'json'],
             item.cwd,
           );
     if (result.code !== 0 || result.stdout.trim() === '') return;
@@ -430,7 +502,7 @@ export class ForgeHubService {
     // 取得の待ち時間に会話状態などが更新されていることがある。入口で読んだカードをそのまま
     // 書き戻すとその更新が消えるため、書き戻す直前のカードへ番号だけを乗せる。
     // 入口では番号が無いことを確認済み。別経路が先に番号を入れていたら、こちらは書かない。
-    await this.applyRemoteUpdate(branch, undefined, (current) => ({
+    await this.applyRemoteUpdate(key, undefined, (current) => ({
       ...current,
       pullRequestNumber: found.number,
       ...(found.url === undefined ? {} : { pullRequestUrl: found.url }),
@@ -440,9 +512,9 @@ export class ForgeHubService {
   }
 
   async createDraftPullRequest(
-    branch: string,
+    key: string,
   ): Promise<{ ok: true; url: string | undefined } | { ok: false; message: string }> {
-    const item = this.workItems.get(branch);
+    const item = this.resolveWorkItem(key);
     if (item === undefined) return { ok: false, message: '対象のForge作業が見つかりません。' };
     const dirty = await this.deps.git.run(['status', '--porcelain'], item.cwd);
     if (dirty.code !== 0 || dirty.stdout.trim() !== '')
@@ -472,7 +544,7 @@ export class ForgeHubService {
     // push・PR/MR作成の間に会話状態などが更新されていることがある。入口で読んだカードを
     // そのまま書き戻すとその更新が消えるため、書き戻す直前のカードへ結果だけを乗せる。
     // 書き戻せなくてもPR/MRの作成自体は成功しているので、URLは返す。
-    await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => ({
+    await this.applyRemoteUpdate(key, item.pullRequestNumber, (current) => ({
       ...current,
       status: 'review' as const,
       ...(created.url === undefined ? {} : { pullRequestUrl: created.url }),
@@ -482,15 +554,15 @@ export class ForgeHubService {
     return { ok: true, url: created.url };
   }
 
-  async refreshCi(branch: string): Promise<ForgeRefreshResult> {
-    const item = this.workItems.get(branch);
+  async refreshCi(key: string): Promise<ForgeRefreshResult> {
+    const item = this.resolveWorkItem(key);
     if (item?.pullRequestNumber === undefined) {
       return { ok: false, reason: 'error', message: 'PR/MR番号がないためCIを取得できません。' };
     }
     const ci = await fetchCiConclusion(this.deps.cli, item.host, item.cwd, item.pullRequestNumber);
     const status: ForgeWorkItem['status'] =
       ci.conclusion === 'failed' ? 'blocked' : ci.conclusion === 'passed' ? 'ci' : 'ciPending';
-    const applied = await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => {
+    const applied = await this.applyRemoteUpdate(key, item.pullRequestNumber, (current) => {
       const base = { ...current };
       delete base.ciMessage;
       return {
@@ -503,8 +575,8 @@ export class ForgeHubService {
     return applied === 'applied' ? { ok: true } : discardedResult(applied);
   }
 
-  async refreshReview(branch: string): Promise<ForgeRefreshResult> {
-    const item = this.workItems.get(branch);
+  async refreshReview(key: string): Promise<ForgeRefreshResult> {
+    const item = this.resolveWorkItem(key);
     if (item?.pullRequestNumber === undefined) {
       return {
         ok: false,
@@ -518,7 +590,7 @@ export class ForgeHubService {
       item.cwd,
       item.pullRequestNumber,
     );
-    const applied = await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => {
+    const applied = await this.applyRemoteUpdate(key, item.pullRequestNumber, (current) => {
       const base = { ...current };
       delete base.reviewCommentCount;
       delete base.reviewMessage;
@@ -551,11 +623,11 @@ export class ForgeHubService {
   }
 
   async replyToReviewThread(
-    branch: string,
+    key: string,
     threadId: string,
     body: string,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
-    const item = this.workItems.get(branch);
+    const item = this.resolveWorkItem(key);
     if (item?.pullRequestNumber === undefined) {
       return { ok: false, message: 'PR/MR番号がないため、レビューへ返信できません。' };
     }
@@ -566,10 +638,10 @@ export class ForgeHubService {
   }
 
   async resolveReviewThread(
-    branch: string,
+    key: string,
     threadId: string,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
-    const item = this.workItems.get(branch);
+    const item = this.resolveWorkItem(key);
     if (item?.pullRequestNumber === undefined) {
       return { ok: false, message: 'PR/MR番号がないため、レビューを解決できません。' };
     }
@@ -581,8 +653,8 @@ export class ForgeHubService {
     });
   }
 
-  async refreshPullRequestStatus(branch: string): Promise<ForgeRefreshResult> {
-    const item = this.workItems.get(branch);
+  async refreshPullRequestStatus(key: string): Promise<ForgeRefreshResult> {
+    const item = this.resolveWorkItem(key);
     if (item?.pullRequestNumber === undefined)
       return { ok: false, reason: 'error', message: 'PR/MR番号がないため、状態を取得できません。' };
     const remote = await fetchPullRequestStatus(
@@ -591,7 +663,7 @@ export class ForgeHubService {
       item.cwd,
       item.pullRequestNumber,
     );
-    const applied = await this.applyRemoteUpdate(branch, item.pullRequestNumber, (current) => ({
+    const applied = await this.applyRemoteUpdate(key, item.pullRequestNumber, (current) => ({
       ...current,
       pullRequestState: remote.state,
       ...(remote.mergeable === undefined ? {} : { mergeable: remote.mergeable }),
