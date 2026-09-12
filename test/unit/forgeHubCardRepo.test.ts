@@ -210,4 +210,34 @@ describe('ForgeHubViewManager: 「対応する」の送信先（Issue #1108）',
     expect(sends[0]?.provider).toBe(itemA.provider);
     view.dispose();
   });
+
+  it('カード操作は識別子だけで届く（画面はbranch名を送らない）', async () => {
+    const service = createService();
+    await recordTwoRepos(service);
+    const itemA = service
+      .listWorkItems()
+      .find((item: ForgeWorkItem) => item.cwd === '/worktrees/a/issue-12');
+    if (itemA === undefined) throw new Error('リポジトリAのカードがありません');
+
+    const { orchestrator } = fakeOrchestrator();
+    const view = new ForgeHubViewManager(service, () => '/repoB', orchestrator, fakeLogger);
+    await view.show('codex');
+    const panel = __mock.lastCreatedPanel();
+    if (panel === undefined) throw new Error('Webviewパネルが作られていません');
+
+    panel.webview.simulateMessage({
+      type: 'createDraftPullRequest',
+      key: forgeWorkItemKey(itemA),
+      requestId: 'request-1',
+    });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 受け取れていなければ結果そのものが返らない（branch名を前提にした入口の取りこぼし検出）
+    expect(
+      panel.webview.sent.some(
+        (message) => (message as { type?: string }).type === 'pullRequestResult',
+      ),
+    ).toBe(true);
+    view.dispose();
+  });
 });

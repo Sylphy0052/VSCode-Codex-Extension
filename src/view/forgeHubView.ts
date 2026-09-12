@@ -293,7 +293,7 @@ export class ForgeHubViewManager implements vscode.Disposable {
       this.postSnapshot();
       return;
     }
-    if (message.type === 'createDraftPullRequest' && typeof message['branch'] === 'string') {
+    if (message.type === 'createDraftPullRequest') {
       const confirmation = await vscode.window.showWarningMessage(
         '対象branchをpushし、Draft PR/MRを作成します。マージは行いません。',
         { modal: true },
