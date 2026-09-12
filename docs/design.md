@@ -6204,7 +6204,7 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 - 応答はJSON配列（`[{"message": "..."}]`）を期待し、`TaskPullRequestReviewFinding`へ変換する。JSONとして解釈できない・配列でない応答は指摘0件とせずレビュー失敗にする。件数上限は30件、メッセージは500文字で`sanitizeInlineText`を通す
 - レビューセッションの起動・応答待ちそのものが失敗した場合（タイムアウト等）も例外を投げず、`error`へ理由を残して`findings: []`を返す
 
-`buildTaskPullRequestReviewStep`は、エラーまたは指摘があれば警告を積んで`ok: false`を返す。`runTaskPullRequestFlow`はローカルマージを呼ばず、上位がタスクを失敗へ倒す。
+`buildTaskPullRequestReviewStep`は、エラーまたは指摘があれば警告を積んで`ok: false`を返す。`runTaskPullRequestFlow`はローカルマージもready化も呼ばず`mergeOutcome`を`undefined`にして返し、`finalizeTaskPullRequestFlow`（`runnerMerge.ts`）がそれを`kind: 'failure'`のマージ結果へ変換してタスクを失敗へ倒す（Issue #1110）。`busy`ではなく`failure`にするのは、同じ変更をViewの「再マージ」でもう一度マージしても指摘は消えないため。ready化まで止めるのは、統合へ入れていない変更のDraftを外すと「マージ済み」に見えてしまうため。
 
 #### 外部由来テキストの扱い（サニタイズは1度だけ、§16.24）
 
@@ -6212,7 +6212,7 @@ Issue本文（`buildTaskIssueBody`）・レビュープロンプト（`buildTask
 
 #### 検証
 
-`test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）してもmergeは進むことを確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
+`test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）なら`mergeAndPushIntegration`も`markPullRequestReady`も呼ばず`mergeOutcome`が`undefined`になること（Issue #1110。実装がこの停止条件を満たさず、以前は「失敗してもmergeは進む」をテストで固定していた）を確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
 
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 

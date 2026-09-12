@@ -1345,7 +1345,7 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
     expect(result.review).toBeUndefined();
   });
 
-  it('reviewPullRequestが失敗（指摘あり相当）してもmergeAndPushIntegrationは呼ぶ（マージを止めない）', async () => {
+  it('reviewPullRequestが失敗（指摘あり相当）したらmergeAndPushIntegrationを呼ばない（Issue #1110）', async () => {
     const { order, steps } = recordingSteps({
       reviewPullRequest: { ok: false, message: 'レビューに失敗しました' },
     });
@@ -1356,10 +1356,46 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
       'pushIntegrationBranch',
       'createPullRequest',
       'reviewPullRequest',
-      'mergeAndPushIntegration',
     ]);
     expect(result.review).toEqual({ ok: false, message: 'レビューに失敗しました' });
+    expect(result.mergeOutcome).toBeUndefined();
+  });
+
+  it('reviewPullRequestが失敗したらmarkPullRequestReadyも呼ばない（Issue #1110）', async () => {
+    const { order, markPullRequestReadyUrls, steps } = recordingSteps({
+      reviewPullRequest: { ok: false, message: 'レビューの指摘が2件残っています' },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+    ]);
+    expect(markPullRequestReadyUrls).toEqual([]);
+    expect(result.markReady).toBeUndefined();
+    expect(result.mergeOutcome).toBeUndefined();
+  });
+
+  it('reviewPullRequestが成功すれば従来どおりmerge・ready化まで進む（Issue #1110）', async () => {
+    const { order, steps } = recordingSteps({
+      reviewPullRequest: { ok: true },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+      'markPullRequestReady',
+    ]);
     expect(result.mergeOutcome).toEqual({ merged: true });
+    expect(result.markReady).toEqual({ ok: true });
   });
 
   it('reviewPullRequestを渡さなければ結果のreviewはundefinedで、mergeの順序も変わらない', async () => {
