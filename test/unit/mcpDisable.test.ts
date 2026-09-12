@@ -23,8 +23,17 @@ describe('buildDisabledMcpServersOverlay', () => {
     },
   };
 
+  /** `ok: true` を前提に中身を取り出す（失敗していたらテストをそこで落とす）。 */
+  function overlayOf(raw: unknown): Record<string, unknown> {
+    const result = buildDisabledMcpServersOverlay(raw);
+    if (!result.ok) {
+      throw new Error(`予期しない失敗: ${result.reason}`);
+    }
+    return result.overlay;
+  }
+
   it('設定のサーバと組み込みのサーバを、すべて無効化した形で返す', () => {
-    const overlay = buildDisabledMcpServersOverlay(configRead);
+    const overlay = overlayOf(configRead);
     expect(Object.keys(overlay).sort()).toEqual(['codegraph', 'codex_apps', 'playwright']);
     for (const value of Object.values(overlay)) {
       // `enabled: false` だけでは、定義の無いサーバで `thread/start` が失敗する
@@ -33,10 +42,16 @@ describe('buildDisabledMcpServersOverlay', () => {
   });
 
   it('空のオーバーレイは返さない（それでは1本も無効化できない）', () => {
-    expect(Object.keys(buildDisabledMcpServersOverlay(configRead)).length).toBeGreaterThan(0);
+    expect(Object.keys(overlayOf(configRead)).length).toBeGreaterThan(0);
   });
 
-  it('config/read が読めない形でも、組み込みのサーバは無効化する', () => {
+  it('mcp_serversが無いのは正常（利用者が1つも定義していない）。組み込みだけを無効化する', () => {
+    expect(Object.keys(overlayOf({ config: {} }))).toEqual([...BUILTIN_MCP_SERVER_NAMES]);
+  });
+
+  it('config/read が読めない形ならオーバーレイを組み立てない（Issue #1112）', () => {
+    // マージであって置換ではないため、名前を挙げられなかったサーバは接続されたままになる。
+    // 組み込み分だけを無効化して続けると、利用者設定のMCPが生きたまま相談が始まる
     for (const raw of [
       undefined,
       null,
@@ -44,9 +59,11 @@ describe('buildDisabledMcpServersOverlay', () => {
       { config: null },
       { config: { mcp_servers: 3 } },
     ]) {
-      expect(Object.keys(buildDisabledMcpServersOverlay(raw))).toEqual([
-        ...BUILTIN_MCP_SERVER_NAMES,
-      ]);
+      const result = buildDisabledMcpServersOverlay(raw);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason.length).toBeGreaterThan(0);
+      }
     }
   });
 });

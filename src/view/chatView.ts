@@ -28,7 +28,10 @@ import {
 import { codexPaths } from '../codex/cliLocator';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
-import { buildDisabledMcpServersOverlay } from '../codex/mcpDisable';
+import {
+  buildDisabledMcpServersOverlay,
+  type DisabledMcpServersOverlayResult,
+} from '../codex/mcpDisable';
 import { SKILLS_DISABLED_CONFIG_OVERLAY } from '../codex/skillDisable';
 import { effortsFor } from '../codex/modelCatalog';
 import { readSkillsList } from '../codex/skillsList';
@@ -988,20 +991,23 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, 'Codex');
-    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
-    const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
     // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む
     // （`ChatSession.start`はmcp_servers自体の意味を知らない。同メソッドのJSDoc参照）
     // MCPを使わないセッション（セカンドオピニオンとその要約。Issue #944）は、サーバを
     // 名指しで無効化したオーバーレイを渡す。`mcp`が指定されていればそちらを優先する
     // （メッセージングを黙って壊さない。`TaskSessionInput.disableMcpServers`のJSDoc参照）
+    //
+    // **パネルを作る前に解決する**（Issue #1112）。無効化するサーバ名を挙げられないときは
+    // ここで例外になり、タブも保留中の開始も作らないまま呼び出し側へ返る
     const mcpServersConfig =
       input.mcp !== undefined
         ? { [MESSAGING_MCP_SERVER_NAME]: { url: input.mcp.url, type: 'streamable_http' } }
         : input.disableMcpServers === true
           ? await this.disabledMcpServersConfig()
           : undefined;
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
+    const pendingKey = this.pendingStarts.begin(entry);
     // skillを提示させないセッション（セカンドオピニオン。Issue #1061）は、`thread/start` の
     // configへ重ねる。MCPの指定とは独立なので、両方指定されたら両方載る
     const threadConfig =
@@ -1029,22 +1035,30 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * MCPサーバを1本も接続させない `thread/start` のconfig（Issue #944）。
    *
    * サーバ名は `config/read`（実測35ms）から読み、`config.toml` に現れない組み込みの
-   * サーバは `buildDisabledMcpServersOverlay` が足す。`config/read` に失敗しても
-   * 組み込み分だけのオーバーレイで続ける（ツールを積んだまま走らせる理由が無いため）。
+   * サーバは `buildDisabledMcpServersOverlay` が足す。
+   *
+   * **一覧を読めなかったら例外にしてセッションを開かない（Issue #1112）。** オーバーレイは
+   * マージなので、名前を挙げられなかったサーバはそのまま接続される。以前は組み込み分だけの
+   * オーバーレイで続けていたため、`config/read` が落ちると利用者の `config.toml` のサーバ
+   * （外部を操作できるツールを含む）が生きたまま相談セッションが始まっていた。
    */
   private async disabledMcpServersConfig(): Promise<Record<string, unknown>> {
+    let result: DisabledMcpServersOverlayResult;
     try {
       await this.connection.ensureStarted();
       const response = await this.connection.request('config/read', {});
-      return buildDisabledMcpServersOverlay(response.result);
+      result = buildDisabledMcpServersOverlay(response.result);
     } catch (e) {
-      this.log.warn(
-        `MCPサーバ一覧を読めなかったため、組み込み分だけを無効化して開始します: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
-      return buildDisabledMcpServersOverlay(undefined);
+      result = { ok: false, reason: e instanceof Error ? e.message : String(e) };
     }
+    if (!result.ok) {
+      const message = `MCPサーバ一覧を読めなかったため、MCPを無効化するセッションを開始しませんでした: ${result.reason}`;
+      this.log.error(message);
+      const error = new Error(message);
+      this.reportError(error);
+      throw error;
+    }
+    return result.overlay;
   }
 
   /** 既存のスレッドを開く。 */

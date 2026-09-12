@@ -167,16 +167,15 @@ export async function runCodexTurn(request: CodexTurnRequest): Promise<CodexTurn
     await connection.ensureStarted();
 
     // MCPサーバを1本も接続させない（Issue #944）。本番のAdvisorは `disableMcpServers: true` で
-    // 開くため、ここで載せるとツール定義の分だけ条件が変わる。`config/read` に失敗しても
-    // 本体と同じく組み込み分だけのオーバーレイで続ける
-    let mcpServers: Record<string, unknown>;
-    try {
-      const config = await connection.request('config/read', {});
-      record('response', { method: 'config/read', error: config.error });
-      mcpServers = buildDisabledMcpServersOverlay(config.result);
-    } catch {
-      mcpServers = buildDisabledMcpServersOverlay(undefined);
+    // 開くため、ここで載せるとツール定義の分だけ条件が変わる。一覧を読めなければ本体と同じく
+    // 中止する（Issue #1112。無効化しきれないまま測ると条件が変わる）
+    const config = await connection.request('config/read', {});
+    record('response', { method: 'config/read', error: config.error });
+    const overlay = buildDisabledMcpServersOverlay(config.result);
+    if (!overlay.ok) {
+      throw new Error(`MCPサーバ一覧を読めませんでした: ${overlay.reason}`);
     }
+    const mcpServers = overlay.overlay;
 
     const startParams = {
       cwd: request.cwd,

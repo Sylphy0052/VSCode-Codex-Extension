@@ -17,6 +17,9 @@
  *   他と同じく無効化できる。`config/read` の `mcp_servers` にも現れないため、名前を明示的に足す。
  *
  * `vscode` には依存しない。`config/read` の生の応答を受け取り、オーバーレイを返すだけ。
+ *
+ * **無効化するサーバ名を挙げられないときは、オーバーレイを返さない**（Issue #1112）。
+ * 呼び出し側はセッションの起動そのものを中止する。
  */
 
 /**
@@ -40,14 +43,35 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/** {@link buildDisabledMcpServersOverlay} の結果。 */
+export type DisabledMcpServersOverlayResult =
+  { ok: true; overlay: Record<string, unknown> } | { ok: false; reason: string };
+
 /**
  * `config/read` の応答から、全てのMCPサーバを無効化するオーバーレイを組み立てる。
  *
- * 応答が読めない形でも、組み込みのサーバ分だけは無効化したオーバーレイを返す
- * （`config/read` に失敗したからといって、ツール224本を積んだまま走らせる理由は無い）。
+ * **応答が読めない形なら組み立てず `ok: false` を返す（Issue #1112）。** オーバーレイは
+ * 設定全体の置換ではなくマージなので、名前を挙げられなかったサーバは無効化されない。
+ * 以前は読めない場合に組み込みのサーバ分だけのオーバーレイを返していたが、それでは
+ * 利用者の `config.toml` に定義されたサーバ（外部を操作できるツールを含む）が接続された
+ * まま相談セッションが始まる。名前が挙げられないなら、起動しない方を選ぶ。
+ *
+ * 「読めない形」とは、応答が `{ config: { ... } }` の形をしていないこと。`mcp_servers` が
+ * 無いのは**正常**（利用者が1つも定義していない）ので、組み込みのサーバだけを無効化した
+ * オーバーレイを返す。
  */
-export function buildDisabledMcpServersOverlay(configReadResult: unknown): Record<string, unknown> {
-  const configured = record(record(record(configReadResult)?.['config'])?.['mcp_servers']);
+export function buildDisabledMcpServersOverlay(
+  configReadResult: unknown,
+): DisabledMcpServersOverlayResult {
+  const config = record(record(configReadResult)?.['config']);
+  if (config === undefined) {
+    return { ok: false, reason: 'config/read の応答が想定した形（config オブジェクト）ではない' };
+  }
+  const rawServers = config['mcp_servers'];
+  const configured = record(rawServers);
+  if (rawServers !== undefined && configured === undefined) {
+    return { ok: false, reason: 'config/read の mcp_servers がオブジェクトではない' };
+  }
   const names = new Set<string>([...BUILTIN_MCP_SERVER_NAMES]);
   for (const name of Object.keys(configured ?? {})) {
     names.add(name);
@@ -56,5 +80,5 @@ export function buildDisabledMcpServersOverlay(configReadResult: unknown): Recor
   for (const name of names) {
     overlay[name] = { enabled: false, command: DISABLED_TRANSPORT_COMMAND };
   }
-  return overlay;
+  return { ok: true, overlay };
 }

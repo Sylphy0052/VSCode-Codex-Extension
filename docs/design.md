@@ -8129,7 +8129,7 @@ Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` �
 - 名前ごとに `enabled: false`: `config.toml`由来の3本は接続されなくなる（`mcpServerStatus/list`で`serverInfo: null` / `tools: {}`）。`codex_apps`は残る
 - `codex_apps` へ `{ enabled: false, command: 'true' }`: 4本すべて無効化。`command`を省くと`invalid transport`で`thread/start`自体が失敗する（`config.toml`に定義が無いため）
 
-したがってオーバーレイは名前を列挙して組み立てるしかない。名前は`config/read`（実測35ms）から読み、そこに現れない組み込み分（`BUILTIN_MCP_SERVER_NAMES`）を足す（`src/codex/mcpDisable.ts`）。`config/read`に失敗しても組み込み分だけのオーバーレイで続ける。指定は`TaskSessionInput.disableMcpServers`で、タスク間メッセージングの`mcp`（§16.21）が指定されていればそちらを優先する（メッセージングを黙って壊さない）。
+したがってオーバーレイは名前を列挙して組み立てるしかない。名前は`config/read`（実測35ms）から読み、そこに現れない組み込み分（`BUILTIN_MCP_SERVER_NAMES`）を足す（`src/codex/mcpDisable.ts`）。**`config/read`に失敗した場合・応答が`{ config: { ... } }`の形でない場合は、オーバーレイを組み立てずセッションの起動そのものを中止する（Issue #1112）。** オーバーレイはマージであって置換ではないため、名前を挙げられなかったサーバはそのまま接続される。以前は組み込み分だけのオーバーレイで続けていたが、それでは利用者の`config.toml`のサーバ（外部を操作できるツールを含む）が生きたまま相談セッションが始まる。`mcp_servers`が無いのは正常（利用者が1つも定義していない）なので、組み込み分だけを無効化して続ける。パネルは無効化の解決に成功してから作るので、中止したときはタブも保留中の開始も残らない。指定は`TaskSessionInput.disableMcpServers`で、タスク間メッセージングの`mcp`（§16.21）が指定されていればそちらを優先する（メッセージングを黙って壊さない）。
 
 #### 要約セッションを短くする・開かない
 
