@@ -2073,7 +2073,7 @@ export function startHttpMcpTransport(
     const taskId =
       token !== undefined && MCP_TOKEN_PATTERN.test(token) ? tokenToTaskId.get(token) : undefined;
 
-    if (req.method !== 'POST' || taskId === undefined) {
+    if (req.method !== 'POST' || token === undefined || taskId === undefined) {
       res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
       return;
     }
@@ -2104,6 +2104,16 @@ export function startHttpMcpTransport(
     });
     req.on('end', () => {
       if (rejectedForSize) {
+        return;
+      }
+      // ヘッダー受信時に決めた`taskId`を、本文の受信完了時にもう一度照合する（Issue #1113）。
+      // ヘッダーだけ送って本文を保留したまま`registerTask`が走ると、失効したはずの古い
+      // トークンの要求が新しいセッションと同じ`taskId`として処理されてしまう。トークンが
+      // まだ同じタスクへ紐づいていることをここで確かめ、失効していれば拒否する
+      // （`registerTask`は再登録時に古いトークンを`tokenToTaskId`から消すため、
+      // 失効後は`get`がundefinedになる）
+      if (tokenToTaskId.get(token) !== taskId) {
+        res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden');
         return;
       }
       let parsed: unknown;

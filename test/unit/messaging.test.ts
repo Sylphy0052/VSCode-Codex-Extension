@@ -1,3 +1,5 @@
+import * as http from 'node:http';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -1416,6 +1418,46 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
     const delivered = hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.body).toBe('via-new-url');
+  });
+
+  it('ヘッダー受信後・本文完了前に再登録されると古い要求は拒否される（Issue #1113）', async () => {
+    const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
+    handle = await startHttpMcpTransport(hub);
+    const activeHandle = handle;
+    const oldUrl = activeHandle.registerTask('T1');
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'send_message',
+        arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'via-stale-token', expectReply: false },
+      },
+    });
+
+    // ヘッダーだけ先に届かせ、サーバがtaskIdを決めた後・本文の受信が終わる前に再登録する
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = http.request(
+        oldUrl,
+        { method: 'POST', headers: { 'content-type': 'application/json' } },
+        (response) => {
+          response.resume();
+          response.on('end', () => resolve(response.statusCode ?? 0));
+        },
+      );
+      request.on('error', reject);
+      // `flushHeaders`でヘッダーだけ先に送り出す。サーバ側が要求を受け取ったことを直接
+      // 観測できる口が無いため、ループバックでの往復に十分な余裕（100ms）を取ってから
+      // 再登録する
+      request.flushHeaders();
+      setTimeout(() => {
+        activeHandle.registerTask('T1');
+        request.end(body);
+      }, 100);
+    });
+
+    expect(status).toBe(403);
+    expect(hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)).toHaveLength(0);
   });
 
   it('タスクごとに別のURLが発行される（同じサーバを1つのrunで使い回す）', async () => {
