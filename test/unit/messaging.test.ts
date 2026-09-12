@@ -1446,11 +1446,14 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
         },
       );
       request.on('error', reject);
+      // `flushHeaders`でヘッダーだけ先に送り出す。サーバ側が要求を受け取ったことを直接
+      // 観測できる口が無いため、ループバックでの往復に十分な余裕（100ms）を取ってから
+      // 再登録する
       request.flushHeaders();
       setTimeout(() => {
         activeHandle.registerTask('T1');
         request.end(body);
-      }, 50);
+      }, 100);
     });
 
     expect(status).toBe(403);
