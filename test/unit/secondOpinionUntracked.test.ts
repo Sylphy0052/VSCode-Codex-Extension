@@ -1,3 +1,19 @@
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  collectUntrackedFiles,
+  createNodeUntrackedFileReader,
+  isInsideRoot,
+  looksBinary,
+  parseUntrackedList,
+  type UntrackedFileReader,
+} from '../../src/secondOpinion/untracked';
+import { captureWorkspaceSnapshot } from '../../src/secondOpinion/snapshot';
+import type { GitCommandResult, GitCommandRunner } from '../../src/orchestrator/worktree';
+
 /**
  * `open` の直前に割り込むためのフック（Issue #1123）。
  *
@@ -18,22 +34,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     },
   };
 });
-
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import {
-  collectUntrackedFiles,
-  createNodeUntrackedFileReader,
-  isInsideRoot,
-  looksBinary,
-  parseUntrackedList,
-  type UntrackedFileReader,
-} from '../../src/secondOpinion/untracked';
-import { captureWorkspaceSnapshot } from '../../src/secondOpinion/snapshot';
-import type { GitCommandResult, GitCommandRunner } from '../../src/orchestrator/worktree';
 
 function okResult(stdout: string): GitCommandResult {
   return { code: 0, stdout, stderr: '' };
