@@ -282,6 +282,7 @@ const UNTRACKED_OMISSION_LABELS: Record<UntrackedOmissionReason, string> = {
   'per-file-budget': '1ファイルの上限を超える',
   'total-budget': '全体の上限に達した',
   'read-error': '読み取りに失敗',
+  'path-changed': '確認後に実体が差し替わった',
 };
 
 /** byte数を読める形にする。省略の一覧で規模の見当を付けるためだけに使う。 */

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   collectUntrackedFiles,
@@ -13,6 +13,27 @@ import {
 } from '../../src/secondOpinion/untracked';
 import { captureWorkspaceSnapshot } from '../../src/secondOpinion/snapshot';
 import type { GitCommandResult, GitCommandRunner } from '../../src/orchestrator/worktree';
+
+/**
+ * `open` の直前に割り込むためのフック（Issue #1123）。
+ *
+ * 確認とopenの間の差し替えは実ファイルシステムのタイミングでは狙って起こせない。
+ * `node:fs/promises` の `open` を包み、呼ばれた瞬間に差し替えを行って競合を再現する。
+ */
+const openRace = vi.hoisted(() => ({
+  before: undefined as ((openedPath: string) => Promise<void>) | undefined,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async open(...args: Parameters<typeof actual.open>) {
+      await openRace.before?.(String(args[0]));
+      return actual.open(...args);
+    },
+  };
+});
 
 function okResult(stdout: string): GitCommandResult {
   return { code: 0, stdout, stderr: '' };
@@ -142,6 +163,10 @@ describe('createNodeUntrackedFileReader（Issue #926 F）', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  afterEach(() => {
+    openRace.before = undefined;
+  });
+
   it('通常のテキストファイルは読める', async () => {
     await fs.writeFile(path.join(root, 'a.ts'), 'const a = 1;\n', 'utf8');
     const result = await createNodeUntrackedFileReader().read(
@@ -187,6 +212,44 @@ describe('createNodeUntrackedFileReader（Issue #926 F）', () => {
       64 * 1024,
     );
     expect(result).toEqual({ kind: 'skipped', reason: 'binary', bytes: 3 });
+  });
+
+  it('確認とopenの間に外部ファイルへ差し替えられたら読まない（Issue #1123）', async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'untracked-outside-'));
+    try {
+      const secret = path.join(outside, 'credentials');
+      await fs.writeFile(secret, 'token=abcdef\n', 'utf8');
+      const target = path.join(root, 'a.ts');
+      await fs.writeFile(target, 'const a = 1;\n', 'utf8');
+      // 境界の確認が終わったあと、開く直前に外向きのsymlinkへ差し替える
+      openRace.before = async (openedPath) => {
+        if (openedPath !== target) {
+          return;
+        }
+        openRace.before = undefined;
+        await fs.rm(target);
+        await fs.symlink(secret, target);
+      };
+      const result = await createNodeUntrackedFileReader().read(target, root, 64 * 1024);
+      expect(result).toEqual({ kind: 'skipped', reason: 'path-changed' });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('差し替えが起きなければ従来どおり読める（Issue #1123）', async () => {
+    await fs.writeFile(path.join(root, 'b.ts'), 'const b = 2;\n', 'utf8');
+    let opened = 0;
+    openRace.before = async () => {
+      opened += 1;
+    };
+    const result = await createNodeUntrackedFileReader().read(
+      path.join(root, 'b.ts'),
+      root,
+      64 * 1024,
+    );
+    expect(result).toEqual({ kind: 'file', bytes: 13, content: 'const b = 2;\n' });
+    expect(opened).toBe(1);
   });
 
   it('上限を超えるファイルは開いても読まない', async () => {

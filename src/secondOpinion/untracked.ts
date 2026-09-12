@@ -15,15 +15,19 @@
  * 送ることになる。読む前に必ず次を確かめる。
  *
  * 1. `realpath` で解決したパスがworkspace rootの配下にあること
- * 2. 開いた**fd自身**が通常ファイルであること（`fstat`）
- * 3. 読むのは**そのfd**からであること
+ * 2. 開いた**fd自身**が、境界を確認した実体と同じであること（`dev`/`ino` の一致）
+ * 3. 開いた**fd自身**が通常ファイルであること（`fstat`）
+ * 4. 読むのは**そのfd**からであること
  *
- * 3が要るのは、`lstat` とroot確認の後にファイルを差し替えられるため（TOCTOU）。パスを
- * 検査してからパスで開き直すと、検査した対象と読む対象が別物になりうる。
+ * 4が要るのは、`lstat` とroot確認の後にファイルを差し替えられるため（TOCTOU）。パスを
+ * 検査してからパスで開き直すと、検査した対象と読む対象が別物になりうる。2が要るのは、
+ * 確認と `open` の間にも同じすき間があり、開いたfdだけを見ても境界の中かは分からない
+ * ため。
  *
  * `vscode` には依存しない。実際のファイル操作は呼び出し側が渡す（{@link UntrackedFileReader}）。
  */
 
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -50,7 +54,9 @@ export type UntrackedOmissionReason =
   /** 全体の予算を使い切った。 */
   | 'total-budget'
   /** 読み取りそのものに失敗した（権限・I/O）。 */
-  | 'read-error';
+  | 'read-error'
+  /** 境界を確認したあと、開くまでの間に実体が差し替わった。 */
+  | 'path-changed';
 
 /** 内容を載せなかったファイル1件。パスとサイズだけをプロンプトへ載せる。 */
 export interface UntrackedOmission {
@@ -67,7 +73,7 @@ export type UntrackedReadResult =
 
 export interface UntrackedFileReader {
   /**
-   * 未追跡ファイルを1件読む。上のドキュメントの1〜3をこの中で守ること。
+   * 未追跡ファイルを1件読む。上のドキュメントの1〜4をこの中で守ること。
    *
    * @param absPath 読む対象の絶対パス
    * @param root workspace rootの絶対パス。解決後のパスがこの配下に無ければ読まない
@@ -122,13 +128,21 @@ export function looksBinary(buffer: Buffer): boolean {
  * `open` してから `fstat` で通常ファイルを確かめ、**その fd から読む**。パスで検査して
  * パスで開き直すと、検査と読み取りの間に差し替えられる（TOCTOU）。`realpath` は
  * symlinkを解決するため、リポジトリ外を指すsymlinkはここで弾かれる。
+ *
+ * それでも `realpath` と `open` の間にはすき間が残る。そこでファイルや親ディレクトリを
+ * 外向きのsymlinkへ差し替えられると、開いたfdは境界の中を確認した対象とは別の実体を
+ * 指す。`fstat` は通常ファイルかとサイズしか見ないため、これだけでは気付けない。
+ * 境界を確認した時点の `dev`/`ino` を控えておき、開いたfdの `fstat` と一致しなければ
+ * 読まない（Issue #1123）。
  */
 export function createNodeUntrackedFileReader(): UntrackedFileReader {
   return {
     async read(absPath, root, maxBytes) {
       let resolved: string;
+      let verified: Stats;
       try {
         resolved = await fs.realpath(absPath);
+        verified = await fs.lstat(resolved);
       } catch {
         return { kind: 'skipped', reason: 'read-error' };
       }
@@ -139,6 +153,9 @@ export function createNodeUntrackedFileReader(): UntrackedFileReader {
       try {
         handle = await fs.open(resolved, 'r');
         const stat = await handle.stat();
+        if (stat.dev !== verified.dev || stat.ino !== verified.ino) {
+          return { kind: 'skipped', reason: 'path-changed' };
+        }
         if (!stat.isFile()) {
           return { kind: 'skipped', reason: 'unsafe-file-type' };
         }
