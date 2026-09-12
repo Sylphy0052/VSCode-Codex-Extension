@@ -95,6 +95,31 @@ describe('createFrozenAfterTree（Issue #1047）', () => {
     }
   });
 
+  it('未追跡ファイルの書き出し先が展開済みsymlinkを通って木の外を指すときは書かない（Issue #1103）', async () => {
+    const outsideDir = path.join(scratch, 'outside-dir');
+    await fs.mkdir(outsideDir);
+    await fs.symlink(outsideDir, path.join(repo, 'linkdir'));
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-qm', 'add dir symlink');
+    const base2 = (await git(repo, 'rev-parse', 'HEAD')).trim();
+
+    const tree = await createFrozenAfterTree({
+      dir: treeDir(),
+      cwd: repo,
+      git: nodeGitCommandRunner,
+      baseCommit: base2,
+      applyDiff: await applyDiffOf(repo, base2),
+      untrackedFiles: [{ path: 'linkdir/evil.txt', content: 'evil\n', bytes: 5 }],
+    });
+    try {
+      // 木の外へは書かない
+      await expect(fs.stat(path.join(outsideDir, 'evil.txt'))).rejects.toThrow();
+      expect(tree.omissions).toEqual([{ path: 'linkdir/evil.txt', reason: 'unsafe-path' }]);
+    } finally {
+      await tree.dispose();
+    }
+  });
+
   it('固定名が外を指すsymlinkとしてcommitされていても、リンク先を上書きしない（Issue #1103）', async () => {
     const outside = path.join(scratch, 'outside.txt');
     await fs.writeFile(outside, 'outside-content\n');

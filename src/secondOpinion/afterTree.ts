@@ -95,7 +95,9 @@ export interface FrozenAfterTreeOmission {
    *
    * - `untracked-not-captured`: 押下時点で内容を読めていない（binary・予算超過・型・権限）。
    *   `untracked.ts` の判定理由を {@link detail} へそのまま持つ
-   * - `unsafe-path`: 書き出し先が木の外を指した
+   * - `unsafe-path`: 書き出し先が木の外を指した（字句上の判定に加え、展開済みのsymlinkを
+   *   通って外へ出る場合も含む。Issue #1103）。写しに同じパスが既にあって書かなかった場合も
+   *   これで、理由は {@link detail} に入る
    */
   reason: 'untracked-not-captured' | 'unsafe-path';
   detail?: string | undefined;
@@ -324,8 +326,26 @@ async function writeUntracked(
     }
     try {
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, file.content, 'utf8');
+      // 字句上の確認（`isInsideRoot`）だけでは、展開済みのsymlinkを通って木の外へ書ける
+      // （`checkout-index` は追跡済みのsymlinkもそのまま展開する。Issue #1103）。親の実体を
+      // 解決して木の中にあることを確かめてから書く
+      const parent = await fs.realpath(path.dirname(target));
+      if (!isInsideRoot(path.join(parent, path.basename(target)), await fs.realpath(dir))) {
+        omissions.push({ path: file.path, reason: 'unsafe-path' });
+        continue;
+      }
+      // 既にあるものは上書きしない。未追跡ファイルと同じパスが写しに既にある場合、それは
+      // 追跡済みの実体（symlinkでありうる）であり、上書きするとリンク先まで書き換わる
+      await fs.writeFile(target, file.content, { encoding: 'utf8', flag: 'wx' });
     } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+        omissions.push({
+          path: file.path,
+          reason: 'unsafe-path',
+          detail: '写しに同じパスが既にあるため書かなかった',
+        });
+        continue;
+      }
       throw new FrozenAfterTreeError(
         `未追跡ファイルをafter-treeへ書けませんでした: ${file.path}`,
         'write',
