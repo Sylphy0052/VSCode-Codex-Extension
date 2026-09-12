@@ -511,3 +511,118 @@ describe('AppServerConnection: LOWレビュー指摘の後始末（issue #419）
     expect(proc.kill).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Issue #1106: 保留中のサーバ要求（承認カードなど）の処理が終わる前に接続が切れて張り直されると、
+ * 旧要求への応答が新接続へ書かれてしまう。idは接続ごとに振り直されるため、新側が同じidで出した
+ * 別の要求への回答として解釈されうる（誤承認）。
+ */
+describe('AppServerConnection のサーバ要求への応答（Issue #1106）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    spawnMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SERVER_REQUEST_ID = 4242;
+
+  /** サーバからの要求1件を、応答を保留したまま受けている接続を作る。 */
+  async function connectionWithPendingServerRequest(): Promise<{
+    connection: AppServerConnection;
+    proc1: ReturnType<typeof fakeChildProcess>;
+    settle: { resolve: (value: unknown) => void; reject: (reason: Error) => void };
+  }> {
+    const proc1 = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc1.proc);
+    let settle: { resolve: (value: unknown) => void; reject: (reason: Error) => void } | undefined;
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => undefined,
+      async () =>
+        await new Promise<unknown>((resolve, reject) => {
+          settle = { resolve, reject };
+        }),
+    );
+
+    const started = connection.ensureStarted();
+    proc1.emitStdout(
+      JSON.stringify({ jsonrpc: '2.0', id: initializeRequestId(proc1.writes), result: {} }),
+    );
+    await started;
+
+    // 承認要求が届く。`onServerRequest` は保留のまま（人の操作を待っている状態）
+    proc1.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: SERVER_REQUEST_ID,
+        method: 'applyPatchApproval',
+        params: {},
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    if (settle === undefined) {
+      throw new Error('onServerRequestが呼ばれていません');
+    }
+    return { connection, proc1, settle };
+  }
+
+  /** 接続を張り直す。 */
+  async function reconnect(
+    connection: AppServerConnection,
+    proc1: ReturnType<typeof fakeChildProcess>,
+  ): Promise<ReturnType<typeof fakeChildProcess>> {
+    const proc2 = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc2.proc);
+    proc1.emitExit(1, null);
+    const restarted = connection.ensureStarted();
+    proc2.emitStdout(
+      JSON.stringify({ jsonrpc: '2.0', id: initializeRequestId(proc2.writes), result: {} }),
+    );
+    await restarted;
+    return proc2;
+  }
+
+  /** 旧要求のidを含む行が書かれているか。 */
+  function wroteResponseFor(writes: string[]): boolean {
+    return writes.some((line) => {
+      const parsed = JSON.parse(line) as { id?: unknown; method?: unknown };
+      return parsed.id === SERVER_REQUEST_ID && parsed.method === undefined;
+    });
+  }
+
+  it('再接続後に成功応答が出ても、新接続へは書かない', async () => {
+    const { connection, proc1, settle } = await connectionWithPendingServerRequest();
+    const proc2 = await reconnect(connection, proc1);
+
+    settle.resolve({ decision: 'approved' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(wroteResponseFor(proc2.writes)).toBe(false);
+    connection.dispose();
+  });
+
+  it('再接続後にエラー応答になっても、新接続へは書かない', async () => {
+    const { connection, proc1, settle } = await connectionWithPendingServerRequest();
+    const proc2 = await reconnect(connection, proc1);
+
+    settle.reject(new Error('承認に失敗'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(wroteResponseFor(proc2.writes)).toBe(false);
+    connection.dispose();
+  });
+
+  it('接続が切り替わっていなければ、従来どおり同じ接続へ応答を書く', async () => {
+    const { connection, proc1, settle } = await connectionWithPendingServerRequest();
+
+    settle.resolve({ decision: 'approved' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(wroteResponseFor(proc1.writes)).toBe(true);
+    connection.dispose();
+  });
+});
