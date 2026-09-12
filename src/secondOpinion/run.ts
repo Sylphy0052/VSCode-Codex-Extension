@@ -99,6 +99,13 @@ export interface SecondOpinionRequest {
    * 実体が無いのに渡すと、Advisorは無いディレクトリを探しに行って空振りする。
    */
   afterTreeDir?: string | undefined;
+  /**
+   * 写しの説明ファイルの、写しのルートからの相対名（Issue #1103）。
+   *
+   * 省略時は既定の名前（`FROZEN_AFTER_TREE_NOTICE_FILE`）を名指しする。同じ名前が
+   * リポジトリにcommitされていた場合だけ、写し側を残して説明ファイルが別名になる。
+   */
+  afterTreeNoticeFile?: string | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
@@ -181,6 +188,7 @@ export async function runSecondOpinion(
     conversationSummary: request.conversationSummary,
     conversationBackgroundKind: request.conversationBackgroundKind,
     afterTreeDir: request.afterTreeDir,
+    afterTreeNoticeFile: request.afterTreeNoticeFile,
   });
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ

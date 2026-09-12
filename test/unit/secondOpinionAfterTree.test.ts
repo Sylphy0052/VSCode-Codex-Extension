@@ -95,6 +95,87 @@ describe('createFrozenAfterTree（Issue #1047）', () => {
     }
   });
 
+  it('未追跡ファイルの書き出し先が展開済みsymlinkを通って木の外を指すときは書かない（Issue #1103）', async () => {
+    const outsideDir = path.join(scratch, 'outside-dir');
+    await fs.mkdir(outsideDir);
+    await fs.symlink(outsideDir, path.join(repo, 'linkdir'));
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-qm', 'add dir symlink');
+    const base2 = (await git(repo, 'rev-parse', 'HEAD')).trim();
+
+    const tree = await createFrozenAfterTree({
+      dir: treeDir(),
+      cwd: repo,
+      git: nodeGitCommandRunner,
+      baseCommit: base2,
+      applyDiff: await applyDiffOf(repo, base2),
+      untrackedFiles: [{ path: 'linkdir/evil.txt', content: 'evil\n', bytes: 5 }],
+    });
+    try {
+      // 木の外へは書かない
+      await expect(fs.stat(path.join(outsideDir, 'evil.txt'))).rejects.toThrow();
+      expect(tree.omissions).toEqual([{ path: 'linkdir/evil.txt', reason: 'unsafe-path' }]);
+    } finally {
+      await tree.dispose();
+    }
+  });
+
+  it('固定名が外を指すsymlinkとしてcommitされていても、リンク先を上書きしない（Issue #1103）', async () => {
+    const outside = path.join(scratch, 'outside.txt');
+    await fs.writeFile(outside, 'outside-content\n');
+    await fs.symlink(outside, path.join(repo, FROZEN_AFTER_TREE_NOTICE_FILE));
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-qm', 'add notice symlink');
+    const base2 = (await git(repo, 'rev-parse', 'HEAD')).trim();
+
+    const tree = await createFrozenAfterTree({
+      dir: treeDir(),
+      cwd: repo,
+      git: nodeGitCommandRunner,
+      baseCommit: base2,
+      applyDiff: await applyDiffOf(repo, base2),
+    });
+    try {
+      // 木の外にあるリンク先は書き換わらない
+      expect(await fs.readFile(outside, 'utf8')).toBe('outside-content\n');
+      // 写しの側はsymlinkのまま残り、説明ファイルは別名になる
+      const linkStat = await fs.lstat(path.join(tree.dir, FROZEN_AFTER_TREE_NOTICE_FILE));
+      expect(linkStat.isSymbolicLink()).toBe(true);
+      expect(tree.noticeFile).not.toBe(FROZEN_AFTER_TREE_NOTICE_FILE);
+      const notice = await fs.readFile(path.join(tree.dir, tree.noticeFile), 'utf8');
+      expect(notice).toContain(base2);
+    } finally {
+      await tree.dispose();
+    }
+    // 木を消してもリンク先は残る
+    expect(await fs.readFile(outside, 'utf8')).toBe('outside-content\n');
+  });
+
+  it('固定名が通常ファイルとしてcommitされていたら、その内容を説明文で置き換えない（Issue #1103）', async () => {
+    await fs.writeFile(path.join(repo, FROZEN_AFTER_TREE_NOTICE_FILE), 'repo-owned\n');
+    await git(repo, 'add', '-A');
+    await git(repo, 'commit', '-qm', 'add notice file');
+    const base2 = (await git(repo, 'rev-parse', 'HEAD')).trim();
+
+    const tree = await createFrozenAfterTree({
+      dir: treeDir(),
+      cwd: repo,
+      git: nodeGitCommandRunner,
+      baseCommit: base2,
+      applyDiff: await applyDiffOf(repo, base2),
+    });
+    try {
+      expect(await fs.readFile(path.join(tree.dir, FROZEN_AFTER_TREE_NOTICE_FILE), 'utf8')).toBe(
+        'repo-owned\n',
+      );
+      expect(tree.noticeFile).toBe('.frozen-after-tree-1.txt');
+      const notice = await fs.readFile(path.join(tree.dir, tree.noticeFile), 'utf8');
+      expect(notice).toContain('セカンドオピニオン');
+    } finally {
+      await tree.dispose();
+    }
+  });
+
   it('木に`.git`を作らない（履歴・他ブランチへ辿れる経路を残さない）', async () => {
     await fs.writeFile(path.join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
     const tree = await createFrozenAfterTree({

@@ -531,6 +531,7 @@ export async function startSecondOpinion(
         // 写しを実体化できたときだけ渡す。渡すと固定指示が「外を読むな」から
         // 「この写しの中でなら追加で読んでよい」へ変わる（Issue #1062）
         afterTreeDir: created.afterTreeDir,
+        afterTreeNoticeFile: created.afterTreeNoticeFile,
       },
       log,
     );
@@ -710,6 +711,11 @@ interface CreatedBundle {
    * 写しが無いのに名前だけ渡すと、Advisorは無いディレクトリを探しに行って空振りする。
    */
   afterTreeDir?: string | undefined;
+  /**
+   * 写しの説明ファイルの、写しのルートからの相対名（Issue #1103）。写しが無いときは
+   * `undefined`。
+   */
+  afterTreeNoticeFile?: string | undefined;
 }
 
 /**
@@ -757,7 +763,11 @@ async function createBundleFor(
             untrackedOmissions: snapshot.untrackedOmissions,
           },
         });
-        return { bundle, afterTreeDir: REVIEW_BUNDLE_AFTER_DIR };
+        return {
+          bundle,
+          afterTreeDir: REVIEW_BUNDLE_AFTER_DIR,
+          afterTreeNoticeFile: bundle.afterTreeNoticeFile,
+        };
       } catch (e) {
         // 写しの構築に失敗すると bundle ごと作られない（`reviewBundle.ts` は半端な木を
         // 残さない）。写しは recall を上げる追加材料であって相談の成立条件ではないため、

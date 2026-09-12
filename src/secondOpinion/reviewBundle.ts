@@ -103,6 +103,14 @@ export const STALE_REVIEW_BUNDLE_MS = 24 * 60 * 60_000;
 export interface ReviewBundle {
   /** Advisorのセッションを開く作業ディレクトリ。 */
   readonly dir: string;
+  /**
+   * 写しの説明ファイルの、写しのルートからの相対名（Issue #1103）。写しを作らなかったときは
+   * `undefined`。
+   *
+   * 同じ名前がリポジトリにcommitされていると既定の名前が使えないため、プロンプトで名指し
+   * する側はこの値を使う（`afterTree.ts`）。
+   */
+  readonly afterTreeNoticeFile?: string | undefined;
   /** 中身ごと消す。冪等。 */
   dispose(): Promise<void>;
 }
@@ -201,7 +209,7 @@ export async function createReviewBundle(
     if (request.afterTree !== undefined) {
       // 写しの `dispose` は持ち回らない。bundleの `dispose` がディレクトリごと消すので、
       // 別に持つと同じ場所を二度消すことになる
-      await createFrozenAfterTree({
+      const tree = await createFrozenAfterTree({
         dir: path.join(dir, REVIEW_BUNDLE_AFTER_DIR),
         cwd: request.cwd,
         git: request.git,
@@ -215,6 +223,7 @@ export async function createReviewBundle(
           : { untrackedOmissions: request.afterTree.untrackedOmissions }),
         log: request.log,
       });
+      return { ...bundle, afterTreeNoticeFile: tree.noticeFile };
     }
     return bundle;
   } catch (e) {

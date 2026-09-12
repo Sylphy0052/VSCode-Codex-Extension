@@ -13,7 +13,7 @@ import {
   normalizeSecondOpinionCandidates,
   type SecondOpinionCandidate,
 } from '../../src/secondOpinion/candidates';
-import { buildSecondOpinionPrompt } from '../../src/secondOpinion/prompt';
+import { buildSecondOpinionPrompt, type SecondOpinionInput } from '../../src/secondOpinion/prompt';
 import { runSecondOpinion, SecondOpinionRegistry } from '../../src/secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../../src/secondOpinion/snapshot';
 
@@ -219,6 +219,32 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     expect(prompt).toContain('diff --git a/a.ts b/a.ts');
     expect(prompt).toContain('現在の作業ツリーは実行中に変更されている可能性がある');
     expect(prompt).toContain('この変更をレビューして');
+  });
+
+  it('写しの説明ファイルは、実体化した側から渡された名前で名指しする（Issue #1103）', () => {
+    const input: SecondOpinionInput = {
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: 'diff --git a/a.ts b/a.ts',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+      afterTreeDir: 'after',
+    };
+
+    // 既定では固定の名前を名指しする
+    expect(buildSecondOpinionPrompt(input)).toContain('`after/.frozen-after-tree.txt`');
+    // 衝突して別名になった場合は、その名前を名指しする
+    expect(
+      buildSecondOpinionPrompt({ ...input, afterTreeNoticeFile: '.frozen-after-tree-1.txt' }),
+    ).toContain('`after/.frozen-after-tree-1.txt`');
   });
 
   it('差分を切り詰めたときは、その旨を本文に載せる', () => {
