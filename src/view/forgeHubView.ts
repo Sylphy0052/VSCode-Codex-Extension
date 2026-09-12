@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { ForgeOrchestrator } from '../forge/orchestrator';
+import { forgeWorkItemKey } from '../forge/hub';
 import type {
   ForgeHubProvider,
   ForgeHubService,
   ForgeHubSnapshot,
   ForgeIssueDraft,
+  ForgeWorkItem,
 } from '../forge/hub';
 import type { Logger } from '../log';
 import type { RoadmapIssueSummary } from '../orchestrator/roadmap';
@@ -164,10 +166,8 @@ export class ForgeHubViewManager implements vscode.Disposable {
       }
       return;
     }
-    if (message.type === 'runWorkAction' && typeof message['branch'] === 'string') {
-      const item = this.service
-        .listWorkItems()
-        .find((candidate) => candidate.branch === message['branch']);
+    if (message.type === 'runWorkAction') {
+      const item = this.findWorkItem(readWorkItemId(message));
       if (item !== undefined) {
         if (item.status === 'cleanup') {
           const confirmed = await vscode.window.showWarningMessage(
@@ -177,19 +177,21 @@ export class ForgeHubViewManager implements vscode.Disposable {
           );
           if (confirmed !== 'cleanupを依頼する') return;
         }
+        // 送信先はHubを開いている場所ではなく、**そのカードの作業場所**（Issue #1108）。
+        // Hubは複数リポジトリのカードを1つの盤面に並べるため、現在のcwdへ送ると別リポジトリの
+        // 同番号Issueに対して対応を依頼してしまう。隔離worktreeで着手したカードも同じ理由で、
+        // 記録した作業場所へ送る
         await this.orchestrator.send(
-          this.snapshot?.provider ?? item.provider,
-          this.snapshot?.cwd ?? item.cwd,
+          item.provider,
+          item.cwd,
           buildWorkActionPrompt(item.host, item.status, item.issue.number, item.pullRequestNumber),
         );
       }
       return;
     }
-    if (message.type === 'completeCleanup' && typeof message['branch'] === 'string') {
+    if (message.type === 'completeCleanup') {
       const requestId = readRequestId(message);
-      const item = this.service
-        .listWorkItems()
-        .find((candidate) => candidate.branch === message['branch']);
+      const item = this.findWorkItem(readWorkItemId(message));
       if (item === undefined) {
         this.post({
           type: 'cleanupResult',
@@ -219,7 +221,7 @@ export class ForgeHubViewManager implements vscode.Disposable {
         });
         return;
       }
-      const result = await this.service.completeCleanup(item.branch);
+      const result = await this.service.completeCleanup(forgeWorkItemKey(item));
       this.post(
         result.ok
           ? { type: 'cleanupResult', ok: true, requestId }
@@ -291,7 +293,7 @@ export class ForgeHubViewManager implements vscode.Disposable {
       this.postSnapshot();
       return;
     }
-    if (message.type === 'createDraftPullRequest' && typeof message['branch'] === 'string') {
+    if (message.type === 'createDraftPullRequest') {
       const confirmation = await vscode.window.showWarningMessage(
         '対象branchをpushし、Draft PR/MRを作成します。マージは行いません。',
         { modal: true },
@@ -308,7 +310,7 @@ export class ForgeHubViewManager implements vscode.Disposable {
         });
         return;
       }
-      const result = await this.service.createDraftPullRequest(message['branch']);
+      const result = await this.service.createDraftPullRequest(readWorkItemId(message));
       this.post(
         result.ok
           ? { type: 'pullRequestResult', ok: true, url: result.url, requestId }
@@ -317,9 +319,9 @@ export class ForgeHubViewManager implements vscode.Disposable {
       this.postSnapshot();
       return;
     }
-    if (message.type === 'refreshCi' && typeof message['branch'] === 'string') {
+    if (message.type === 'refreshCi') {
       const requestId = readRequestId(message);
-      const result = await this.service.refreshCi(message['branch']);
+      const result = await this.service.refreshCi(readWorkItemId(message));
       this.post(
         result.ok
           ? { type: 'ciResult', ok: true, requestId }
@@ -334,8 +336,8 @@ export class ForgeHubViewManager implements vscode.Disposable {
       this.postSnapshot();
       return;
     }
-    if (message.type === 'refreshReview' && typeof message['branch'] === 'string') {
-      const result = await this.service.refreshReview(message['branch']);
+    if (message.type === 'refreshReview') {
+      const result = await this.service.refreshReview(readWorkItemId(message));
       this.post(
         result.ok
           ? { type: 'reviewResult', ok: true }
@@ -346,7 +348,6 @@ export class ForgeHubViewManager implements vscode.Disposable {
     }
     if (
       message.type === 'replyReviewThread' &&
-      typeof message['branch'] === 'string' &&
       typeof message['threadId'] === 'string' &&
       typeof message['body'] === 'string'
     ) {
@@ -356,8 +357,9 @@ export class ForgeHubViewManager implements vscode.Disposable {
         '投稿する',
       );
       if (confirmed !== '投稿する') return;
+      const workItemId = readWorkItemId(message);
       const result = await this.service.replyToReviewThread(
-        message['branch'],
+        workItemId,
         message['threadId'],
         message['body'],
       );
@@ -366,28 +368,25 @@ export class ForgeHubViewManager implements vscode.Disposable {
           ? { type: 'reviewActionResult', ok: true }
           : { type: 'reviewActionResult', ok: false, message: result.message },
       );
-      if (result.ok) await this.service.refreshReview(message['branch']);
+      if (result.ok) await this.service.refreshReview(workItemId);
       this.postSnapshot();
       return;
     }
-    if (
-      message.type === 'resolveReviewThread' &&
-      typeof message['branch'] === 'string' &&
-      typeof message['threadId'] === 'string'
-    ) {
+    if (message.type === 'resolveReviewThread' && typeof message['threadId'] === 'string') {
       const confirmed = await vscode.window.showWarningMessage(
         'レビューのスレッドを解決済みにします。',
         { modal: true },
         '解決する',
       );
       if (confirmed !== '解決する') return;
-      const result = await this.service.resolveReviewThread(message['branch'], message['threadId']);
+      const resolveTargetId = readWorkItemId(message);
+      const result = await this.service.resolveReviewThread(resolveTargetId, message['threadId']);
       this.post(
         result.ok
           ? { type: 'reviewActionResult', ok: true }
           : { type: 'reviewActionResult', ok: false, message: result.message },
       );
-      if (result.ok) await this.service.refreshReview(message['branch']);
+      if (result.ok) await this.service.refreshReview(resolveTargetId);
       this.postSnapshot();
       return;
     }
@@ -486,22 +485,36 @@ export class ForgeHubViewManager implements vscode.Disposable {
   }
 
   private postSnapshot(): void {
-    if (this.snapshot !== undefined) {
+    const snapshot = this.snapshot;
+    if (snapshot !== undefined) {
       this.post({
         type: 'snapshot',
-        snapshot: this.snapshot,
-        workItems: this.service.listWorkItems(),
+        snapshot,
+        // カードの識別子は画面から操作を送り返すときに使う。branch名だけだと別リポジトリの
+        // 同名branchを区別できない（Issue #1108）
+        workItems: this.service
+          .listWorkItems()
+          .map((item) => ({ ...item, key: forgeWorkItemKey(item) })),
         unstartedIssues: this.issues.filter(
           (issue) =>
             !this.service.listWorkItems().some((item) => item.issue.number === issue.number) &&
             !this.service
-              .listPlannedIssues(this.issues)
+              .listPlannedIssues(snapshot, this.issues)
               .some((planned) => planned.issue.number === issue.number),
         ),
-        planningIssues: this.service.listPlannedIssues(this.issues),
+        planningIssues: this.service.listPlannedIssues(snapshot, this.issues),
       });
     }
   }
+  /** 画面から届いたカード識別子でカードを引く（Issue #1108）。 */
+  private findWorkItem(id: string): ForgeWorkItem | undefined {
+    const items = this.service.listWorkItems();
+    return (
+      items.find((candidate) => forgeWorkItemKey(candidate) === id) ??
+      items.find((candidate) => candidate.branch === id)
+    );
+  }
+
   private postOrchestratorSnapshot(): void {
     const snapshot = this.orchestrator.getSnapshot();
     if (snapshot !== undefined) this.post({ type: 'orchestrator', snapshot });
@@ -593,6 +606,19 @@ function buildWorkActionPrompt(
   return `${reference}をレビューし、必要な対応を進めてください。`;
 }
 
+/**
+ * 画面が送ってきたカード識別子を読む（Issue #1108）。
+ *
+ * 新しい画面は複合キー（`key`）を送る。`branch` しか持たない旧来のメッセージも受けるが、
+ * 別リポジトリの同名branchは区別できない。
+ */
+function readWorkItemId(message: Record<string, unknown>): string {
+  const key = message['key'];
+  if (typeof key === 'string' && key !== '') return key;
+  const branch = message['branch'];
+  return typeof branch === 'string' ? branch : '';
+}
+
 function render(webview: vscode.Webview): string {
   const nonce = String(Date.now());
   return renderLiveDashboard(webview, nonce);
@@ -601,5 +627,5 @@ function render(webview: vscode.Webview): string {
 export function renderLiveDashboard(webview: vscode.Webview, nonce: string): string {
   return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${chatCsp(webview.cspSource, nonce, { includeImgData: false })}"><style>
 body{margin:0;background:var(--vscode-editor-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family)}main{max-width:1500px;margin:auto;padding:24px}.top,.head,.actions,.filters{display:flex;align-items:center;gap:10px}.top,.head{justify-content:space-between}.top{border-bottom:1px solid var(--vscode-panel-border);padding-bottom:16px}.eyebrow{margin:0;color:var(--vscode-textLink-foreground);font-size:11px;font-weight:700;letter-spacing:.12em}h1{margin:4px 0;font-size:30px}h2,h3{margin:0}.sub,.muted{color:var(--vscode-descriptionForeground)}button,select,textarea{font:inherit}button{border:0;border-radius:6px;padding:7px 10px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}.metric,.panel,.column{border:1px solid var(--vscode-panel-border);border-radius:10px;background:var(--vscode-editorWidget-background)}.metric{padding:12px}.metric small,.badge,.time{display:block;color:var(--vscode-descriptionForeground);font-size:11px}.metric strong{display:block;margin-top:5px;overflow-wrap:anywhere}.panel{padding:14px;margin-top:12px}.urgent{border-color:var(--vscode-testing-iconFailed)}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0}.summary article{padding:12px;border-left:4px solid var(--vscode-textLink-foreground);background:var(--vscode-editor-background);border-radius:6px}.summary strong{font-size:24px}.board{display:grid;grid-template-columns:repeat(5,minmax(250px,1fr));gap:10px;overflow-x:auto;padding:4px 0}.column{min-height:170px;padding:10px}.column.urgent{border-color:var(--vscode-testing-iconFailed)}.card{display:grid;gap:8px;margin-top:9px;padding:11px;border-radius:7px;background:var(--vscode-editor-background);border-left:4px solid var(--vscode-charts-blue)}.card.alert{border-left-color:var(--vscode-testing-iconFailed)}.card.stale{outline:1px dashed var(--vscode-charts-yellow)}.badges{display:flex;flex-wrap:wrap;gap:5px}.badge{padding:3px 6px;border-radius:999px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)}.step{display:grid;grid-template-columns:repeat(5,1fr);gap:2px}.step span{height:4px;background:var(--vscode-panel-border)}.step span.done{background:var(--vscode-charts-green)}.step span.current{background:var(--vscode-progressBar-background)}.chat{max-height:230px;overflow:auto;background:var(--vscode-editor-background);border-radius:7px;padding:7px}.message{white-space:pre-wrap;margin:6px 0;padding:7px;border-left:3px solid var(--vscode-textLink-foreground);font:12px/1.5 var(--vscode-editor-font-family)}textarea{box-sizing:border-box;width:100%;min-height:62px;margin-top:8px;padding:8px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);border-radius:6px}.issues{display:grid;gap:6px;margin-top:10px}.issue{display:flex;justify-content:space-between;gap:8px;padding:8px;background:var(--vscode-editor-background);border-radius:6px}@media(max-width:700px){main{padding:14px}.metrics,.summary{grid-template-columns:1fr 1fr}.board{grid-template-columns:repeat(5,80vw)}}.hostChoice{display:none;margin-top:12px}.approvals{display:none;position:sticky;top:0;z-index:1;margin:12px 0;background:var(--vscode-editor-background)}.approvals.visible{display:block}.approval{margin:8px 0;padding:11px;border:1px solid var(--vscode-charts-orange);border-radius:8px}.approvalDetail{white-space:pre-wrap;margin:6px 0;font:12px/1.5 var(--vscode-editor-font-family)}.notice{display:none;position:sticky;top:0;z-index:1;margin:12px 0;padding:9px 11px;border-radius:8px;border:1px solid var(--vscode-panel-border)}.notice.visible{display:block}.notice.error{border-color:var(--vscode-charts-red)}.notice a{margin-left:8px}button[disabled]{opacity:.5;cursor:not-allowed}.hostChoice.visible{display:block}.hostChoice button{margin-right:8px}
-</style></head><body><main><header class="top"><div><p class="eyebrow">DEVELOPMENT CONTROL CENTER</p><h1>Forge Hub</h1><p id="subtitle" class="sub">接続状態を確認しています。</p></div><button id="refresh">今すぐ同期</button></header><section id="hostChoice" class="hostChoice" aria-live="polite"></section><section id="metrics" class="metrics"></section><section id="approvals" class="approvals" aria-live="polite"></section><section id="notice" class="notice" aria-live="polite"></section><section class="summary"><article><small>要対応</small><strong id="urgentCount">0</strong></article><article><small>実行中</small><strong id="activeCount">0</strong></article><article><small>停滞</small><strong id="staleCount">0</strong></article></section><section class="panel"><div class="head"><h2>タスクボード</h2><div class="filters"><select id="filter"><option value="all">すべて</option><option value="urgent">要対応のみ</option><option value="stale">停滞のみ</option></select><span id="synced" class="muted"></span></div></div><div id="board" class="board" aria-live="polite"></div></section><section class="panel"><div class="head"><h2>オーケストレータ</h2><span id="state" class="muted">待機中</span></div><div id="chat" class="chat"></div><textarea id="input" placeholder="接続状態を確認しています。"></textarea><div class="actions"><button id="send" disabled>送信</button><button id="issuesButton" class="secondary">Issueを読み込む</button><span id="composerState" class="muted" aria-live="polite">接続状態を確認しています。整うまで送信できません。届かないときは「今すぐ同期」を押してください。</span></div><div id="issues" class="issues"></div></section></main><script nonce="${nonce}">const vscode=acquireVsCodeApi(),$=id=>document.getElementById(id);let items=[],filter='all',snapshotReady=false,shownHost=null;const deciding=new Set(),DECIDABLE=['command','fileChange','permissions'];const text=(tag,value,cls)=>{const e=document.createElement(tag);e.textContent=value;if(cls)e.className=cls;return e};const button=(label,fn,cls)=>{const e=text('button',label,cls);e.type='button';e.onclick=fn;return e};const ago=v=>{const n=Date.now()-new Date(v).getTime(),m=Math.floor(n/60000);return m<1?'たった今':m<60?m+'分前':Math.floor(m/60)+'時間前'};const urgent=i=>i.status==='blocked'||i.sessionFailed||(i.reviewComments||[]).some(c=>!c.resolved);const stale=i=>Date.now()-new Date(i.updatedAt||i.startedAt).getTime()>1800000;const stage=i=>i.status==='cleanup'?5:i.pullRequestNumber===undefined?1:i.status==='ciPending'?3:i.status==='ci'?4:2;const show=all=>{items=all;const visible=items.filter(i=>filter==='all'||filter==='urgent'&&urgent(i)||filter==='stale'&&stale(i));$('urgentCount').textContent=items.filter(urgent).length;$('activeCount').textContent=items.filter(i=>i.sessionBusy).length;$('staleCount').textContent=items.filter(stale).length;const board=$('board');board.replaceChildren();const cols=[['urgent','要対応'],['inProgress','実装'],['review','PR/MR・レビュー'],['ci','CI・確認'],['cleanup','cleanup']];for(const [key,label] of cols){const col=text('section','', 'column '+(key==='urgent'?'urgent':''));col.append(text('h3',label));const entries=visible.filter(i=>key==='urgent'?urgent(i):key==='ci'?i.status==='ci'||i.status==='ciPending':i.status===key&&!urgent(i));if(!entries.length)col.append(text('p','該当なし','muted'));for(const i of entries){const card=text('article','', 'card '+(urgent(i)?'alert ':'')+(stale(i)?'stale':''));card.append(text('strong','#'+i.issue.number+' '+i.issue.title));const steps=text('div','step');for(let n=1;n<=5;n++)steps.append(text('span','',n<stage(i)?'done':n===stage(i)?'current':''));card.append(steps);const badges=text('div','badges');for(const v of [i.sessionBusy?'実行中':undefined,i.status==='blocked'?'要対応':undefined,i.ciMessage?'CI失敗':undefined,i.reviewCommentCount!==undefined?'レビュー '+i.reviewCommentCount+'件':undefined,stale(i)?'停滞':undefined])if(v)badges.append(text('span',v,'badge'));card.append(badges,text('span','次: '+(i.nextAction||'状態を確認する'),'muted'),text('span','最終更新 '+ago(i.updatedAt||i.startedAt),'time'));const actions=text('div','actions');actions.append(button('対応する',()=>vscode.postMessage({type:'runWorkAction',branch:i.branch})));if(i.sessionId)actions.append(button('会話',()=>vscode.postMessage({type:'openConversation',provider:i.provider,sessionId:i.sessionId}),'secondary'));if(i.pullRequestNumber===undefined)actions.append(trackedButton('Draft PR/MR','secondary','createDraftPullRequest:'+i.branch,'pullRequestResult','Draft PR/MRの作成',{type:'createDraftPullRequest',branch:i.branch}));else actions.append(trackedButton('CI更新','secondary','refreshCi:'+i.branch,'ciResult','CIの更新',{type:'refreshCi',branch:i.branch}));if(i.pullRequestState==='merged')actions.append(trackedButton('cleanup完了を記録','','completeCleanup:'+i.branch,'cleanupResult','cleanupの記録',{type:'completeCleanup',branch:i.branch}));if(i.pullRequestUrl){const a=text('a','PR/MRを開く');a.href=i.pullRequestUrl;a.target='_blank';actions.append(a)}card.append(actions);col.append(card)}board.append(col)}};const showApprovals=list=>{const box=$('approvals');box.replaceChildren();box.classList.toggle('visible',list.length>0);const alive=new Set(list.map(a=>String(a.requestId)));for(const id of [...deciding])if(!alive.has(id))deciding.delete(id);for(const a of list){const card=text('article','', 'approval');card.append(text('strong',a.title));if(a.detail)card.append(text('pre',a.detail,'approvalDetail'));const actions=text('div','', 'actions');if(DECIDABLE.includes(a.kind)){const note=text('span','「この会話では常に許可」はこのオーケストレータ会話にだけ効きます。','muted');const buttons=[['許可','accept',''],['この会話では常に許可','acceptForSession','secondary'],['拒否','decline','secondary']].map(([label,decision,cls])=>button(label,()=>{for(const b of buttons)b.disabled=true;escape.hidden=false;note.textContent='応答しています。反映されないときは会話を開いて答えてください。';deciding.add(String(a.requestId));vscode.postMessage({type:'decideOrchestratorApproval',requestId:a.requestId,decision})},cls));const escape=button('会話を開く',()=>vscode.postMessage({type:'openOrchestratorConversation'}),'secondary');escape.hidden=!deciding.has(String(a.requestId));if(deciding.has(String(a.requestId))){for(const b of buttons)b.disabled=true;note.textContent='応答しています。反映されないときは会話を開いて答えてください。'}actions.append(...buttons,escape,note)}else{actions.append(text('span','この要求はForge Hubからは答えられません。会話を開いて答えてください。','muted'),button('会話を開く',()=>vscode.postMessage({type:'openOrchestratorConversation'}),'secondary'))}card.append(actions);box.append(card)}};const pending=new Map(),busyActions=new Set(),RESULT_LABELS={startResult:'着手',issueResult:'Issueの作成',planResult:'計画の作成',pullRequestResult:'Draft PR/MRの作成',ciResult:'CIの更新',cleanupResult:'cleanup',reviewResult:'レビューの取得',reviewActionResult:'レビュー対応'};let requestSeq=0,issues=[];const nextRequestId=()=>'forge-'+(++requestSeq);const safeUrl=v=>typeof v==='string'&&(v.startsWith('https://')||v.startsWith('http://'))?v:undefined;const notify=(message,ok,url)=>{const box=$('notice');box.replaceChildren(text('span',message));box.classList.toggle('error',ok===false);box.classList.add('visible');const href=safeUrl(url);if(href){const a=text('a','開く');a.href=href;a.target='_blank';box.append(a)}};const trackedButton=(label,cls,actionKey,expected,action,payload)=>{const b=button(label,()=>{if(busyActions.has(actionKey))return;busyActions.add(actionKey);b.disabled=true;const requestId=nextRequestId();pending.set(requestId,{expected,actionKey,action});notify(action+'を要求しました。',true);vscode.postMessage({...payload,requestId})},cls);b.disabled=busyActions.has(actionKey);return b};const showIssues=list=>{issues=list;$('issues').replaceChildren(...issues.map(i=>{const row=text('div','', 'issue');row.append(text('span','#'+i.number+' '+i.title),trackedButton('着手','','startIssue:'+i.number,'startResult','#'+i.number+'の着手',{type:'startIssue',number:i.number,title:i.title}));return row}))};const handleResult=d=>{const requestId=typeof d.requestId==='string'?d.requestId:undefined;const entry=requestId===undefined?undefined:pending.get(requestId);if(entry!==undefined&&entry.expected===d.type){pending.delete(requestId);busyActions.delete(entry.actionKey)}const action=entry!==undefined&&entry.expected===d.type?entry.action:Object.prototype.hasOwnProperty.call(RESULT_LABELS,d.type)?RESULT_LABELS[d.type]:'操作';if(d.cancelled||d.gone)notify(d.message||action+'を取り消しました。',true);else if(d.ok)notify(action+'が完了しました。',true,d.url);else notify(action+'に失敗しました: '+(typeof d.message==='string'&&d.message?d.message:'原因を特定できませんでした。'),false);show(items);showIssues(issues)};window.addEventListener('message',e=>{const d=e.data;if(Object.prototype.hasOwnProperty.call(RESULT_LABELS,d.type)){handleResult(d);return}if(d.type==='snapshot'){$('subtitle').textContent=(d.snapshot.host||'Forge未判定')+' / '+d.snapshot.cwd;const metrics=[];for(const [l,v] of [['Host',d.snapshot.host||'未判定'],['CLI',d.snapshot.prerequisites?.cliOnPath?'利用可能':'未検出'],['認証',d.snapshot.prerequisites?.authenticated?'確認済み':'未認証'],['同期','30秒ごと']]){const m=text('article','', 'metric');m.append(text('small',l),text('strong',v));metrics.push(m)}$('metrics').replaceChildren(...metrics);const host=d.snapshot.host||'';if(host!==shownHost){shownHost=host;const choice=$('hostChoice');choice.replaceChildren();choice.classList.toggle('visible',!host);if(!host){const notice=text('p','originからForgeを判定できません。操作するホストを選択してください。');const buttons=['github','gitlab'].map(h=>button(h==='github'?'GitHub':'GitLab',()=>{for(const b of buttons)b.disabled=true;notice.textContent='選んだHostで判定しています。';vscode.postMessage({type:'selectHost',host:h})},'secondary'));choice.append(notice,...buttons)}}else if(!host){const buttons=$('hostChoice').querySelectorAll('button');if(buttons.length&&buttons[0].disabled){for(const b of buttons)b.disabled=false;$('hostChoice').querySelector('p').textContent='選んだHostでは判定できませんでした。もう一度選んでください。'}}$('synced').textContent='同期 '+new Date().toLocaleTimeString();show(d.workItems||[]);if(!snapshotReady){snapshotReady=true;$('send').disabled=false;$('input').placeholder='次に進める作業を依頼';$('composerState').textContent=''}}if(d.type==='orchestrator'){const approvals=d.snapshot.approvals||[];$('state').textContent=approvals.length?'承認待ち・'+approvals.length+'件':d.snapshot.busy?'実行中':d.snapshot.turnFailed?'実行失敗':'待機中';showApprovals(approvals);if(d.snapshot.busy)$('composerState').textContent='';$('chat').replaceChildren(...d.snapshot.messages.map(m=>text('pre',m.text,'message')))}if(d.type==='issues'){showIssues(d.issues||[])}});$('refresh').onclick=()=>vscode.postMessage({type:'refresh'});$('filter').onchange=e=>{filter=e.target.value;show(items)};$('send').onclick=()=>{const note=$('composerState');if(!snapshotReady){note.textContent='接続状態を確認しています。表示が整うまで待ってください。';return}const v=$('input').value.trim();if(!v){note.textContent='送る内容を入力してください。';return}vscode.postMessage({type:'sendOrchestrator',text:v});$('input').value='';note.textContent='送信を要求しました。';};$('issuesButton').onclick=()=>vscode.postMessage({type:'listIssues'});vscode.postMessage({type:'ready'});</script></body></html>`;
+</style></head><body><main><header class="top"><div><p class="eyebrow">DEVELOPMENT CONTROL CENTER</p><h1>Forge Hub</h1><p id="subtitle" class="sub">接続状態を確認しています。</p></div><button id="refresh">今すぐ同期</button></header><section id="hostChoice" class="hostChoice" aria-live="polite"></section><section id="metrics" class="metrics"></section><section id="approvals" class="approvals" aria-live="polite"></section><section id="notice" class="notice" aria-live="polite"></section><section class="summary"><article><small>要対応</small><strong id="urgentCount">0</strong></article><article><small>実行中</small><strong id="activeCount">0</strong></article><article><small>停滞</small><strong id="staleCount">0</strong></article></section><section class="panel"><div class="head"><h2>タスクボード</h2><div class="filters"><select id="filter"><option value="all">すべて</option><option value="urgent">要対応のみ</option><option value="stale">停滞のみ</option></select><span id="synced" class="muted"></span></div></div><div id="board" class="board" aria-live="polite"></div></section><section class="panel"><div class="head"><h2>オーケストレータ</h2><span id="state" class="muted">待機中</span></div><div id="chat" class="chat"></div><textarea id="input" placeholder="接続状態を確認しています。"></textarea><div class="actions"><button id="send" disabled>送信</button><button id="issuesButton" class="secondary">Issueを読み込む</button><span id="composerState" class="muted" aria-live="polite">接続状態を確認しています。整うまで送信できません。届かないときは「今すぐ同期」を押してください。</span></div><div id="issues" class="issues"></div></section></main><script nonce="${nonce}">const vscode=acquireVsCodeApi(),$=id=>document.getElementById(id);let items=[],filter='all',snapshotReady=false,shownHost=null;const deciding=new Set(),DECIDABLE=['command','fileChange','permissions'];const text=(tag,value,cls)=>{const e=document.createElement(tag);e.textContent=value;if(cls)e.className=cls;return e};const button=(label,fn,cls)=>{const e=text('button',label,cls);e.type='button';e.onclick=fn;return e};const ago=v=>{const n=Date.now()-new Date(v).getTime(),m=Math.floor(n/60000);return m<1?'たった今':m<60?m+'分前':Math.floor(m/60)+'時間前'};const urgent=i=>i.status==='blocked'||i.sessionFailed||(i.reviewComments||[]).some(c=>!c.resolved);const stale=i=>Date.now()-new Date(i.updatedAt||i.startedAt).getTime()>1800000;const stage=i=>i.status==='cleanup'?5:i.pullRequestNumber===undefined?1:i.status==='ciPending'?3:i.status==='ci'?4:2;const show=all=>{items=all;const visible=items.filter(i=>filter==='all'||filter==='urgent'&&urgent(i)||filter==='stale'&&stale(i));$('urgentCount').textContent=items.filter(urgent).length;$('activeCount').textContent=items.filter(i=>i.sessionBusy).length;$('staleCount').textContent=items.filter(stale).length;const board=$('board');board.replaceChildren();const cols=[['urgent','要対応'],['inProgress','実装'],['review','PR/MR・レビュー'],['ci','CI・確認'],['cleanup','cleanup']];for(const [key,label] of cols){const col=text('section','', 'column '+(key==='urgent'?'urgent':''));col.append(text('h3',label));const entries=visible.filter(i=>key==='urgent'?urgent(i):key==='ci'?i.status==='ci'||i.status==='ciPending':i.status===key&&!urgent(i));if(!entries.length)col.append(text('p','該当なし','muted'));for(const i of entries){const card=text('article','', 'card '+(urgent(i)?'alert ':'')+(stale(i)?'stale':''));card.append(text('strong','#'+i.issue.number+' '+i.issue.title));const steps=text('div','step');for(let n=1;n<=5;n++)steps.append(text('span','',n<stage(i)?'done':n===stage(i)?'current':''));card.append(steps);const badges=text('div','badges');for(const v of [i.sessionBusy?'実行中':undefined,i.status==='blocked'?'要対応':undefined,i.ciMessage?'CI失敗':undefined,i.reviewCommentCount!==undefined?'レビュー '+i.reviewCommentCount+'件':undefined,stale(i)?'停滞':undefined])if(v)badges.append(text('span',v,'badge'));card.append(badges,text('span','次: '+(i.nextAction||'状態を確認する'),'muted'),text('span','最終更新 '+ago(i.updatedAt||i.startedAt),'time'));const actions=text('div','actions');actions.append(button('対応する',()=>vscode.postMessage({type:'runWorkAction',key:i.key})));if(i.sessionId)actions.append(button('会話',()=>vscode.postMessage({type:'openConversation',provider:i.provider,sessionId:i.sessionId}),'secondary'));if(i.pullRequestNumber===undefined)actions.append(trackedButton('Draft PR/MR','secondary','createDraftPullRequest:'+i.key,'pullRequestResult','Draft PR/MRの作成',{type:'createDraftPullRequest',key:i.key}));else actions.append(trackedButton('CI更新','secondary','refreshCi:'+i.key,'ciResult','CIの更新',{type:'refreshCi',key:i.key}));if(i.pullRequestState==='merged')actions.append(trackedButton('cleanup完了を記録','','completeCleanup:'+i.key,'cleanupResult','cleanupの記録',{type:'completeCleanup',key:i.key}));if(i.pullRequestUrl){const a=text('a','PR/MRを開く');a.href=i.pullRequestUrl;a.target='_blank';actions.append(a)}card.append(actions);col.append(card)}board.append(col)}};const showApprovals=list=>{const box=$('approvals');box.replaceChildren();box.classList.toggle('visible',list.length>0);const alive=new Set(list.map(a=>String(a.requestId)));for(const id of [...deciding])if(!alive.has(id))deciding.delete(id);for(const a of list){const card=text('article','', 'approval');card.append(text('strong',a.title));if(a.detail)card.append(text('pre',a.detail,'approvalDetail'));const actions=text('div','', 'actions');if(DECIDABLE.includes(a.kind)){const note=text('span','「この会話では常に許可」はこのオーケストレータ会話にだけ効きます。','muted');const buttons=[['許可','accept',''],['この会話では常に許可','acceptForSession','secondary'],['拒否','decline','secondary']].map(([label,decision,cls])=>button(label,()=>{for(const b of buttons)b.disabled=true;escape.hidden=false;note.textContent='応答しています。反映されないときは会話を開いて答えてください。';deciding.add(String(a.requestId));vscode.postMessage({type:'decideOrchestratorApproval',requestId:a.requestId,decision})},cls));const escape=button('会話を開く',()=>vscode.postMessage({type:'openOrchestratorConversation'}),'secondary');escape.hidden=!deciding.has(String(a.requestId));if(deciding.has(String(a.requestId))){for(const b of buttons)b.disabled=true;note.textContent='応答しています。反映されないときは会話を開いて答えてください。'}actions.append(...buttons,escape,note)}else{actions.append(text('span','この要求はForge Hubからは答えられません。会話を開いて答えてください。','muted'),button('会話を開く',()=>vscode.postMessage({type:'openOrchestratorConversation'}),'secondary'))}card.append(actions);box.append(card)}};const pending=new Map(),busyActions=new Set(),RESULT_LABELS={startResult:'着手',issueResult:'Issueの作成',planResult:'計画の作成',pullRequestResult:'Draft PR/MRの作成',ciResult:'CIの更新',cleanupResult:'cleanup',reviewResult:'レビューの取得',reviewActionResult:'レビュー対応'};let requestSeq=0,issues=[];const nextRequestId=()=>'forge-'+(++requestSeq);const safeUrl=v=>typeof v==='string'&&(v.startsWith('https://')||v.startsWith('http://'))?v:undefined;const notify=(message,ok,url)=>{const box=$('notice');box.replaceChildren(text('span',message));box.classList.toggle('error',ok===false);box.classList.add('visible');const href=safeUrl(url);if(href){const a=text('a','開く');a.href=href;a.target='_blank';box.append(a)}};const trackedButton=(label,cls,actionKey,expected,action,payload)=>{const b=button(label,()=>{if(busyActions.has(actionKey))return;busyActions.add(actionKey);b.disabled=true;const requestId=nextRequestId();pending.set(requestId,{expected,actionKey,action});notify(action+'を要求しました。',true);vscode.postMessage({...payload,requestId})},cls);b.disabled=busyActions.has(actionKey);return b};const showIssues=list=>{issues=list;$('issues').replaceChildren(...issues.map(i=>{const row=text('div','', 'issue');row.append(text('span','#'+i.number+' '+i.title),trackedButton('着手','','startIssue:'+i.number,'startResult','#'+i.number+'の着手',{type:'startIssue',number:i.number,title:i.title}));return row}))};const handleResult=d=>{const requestId=typeof d.requestId==='string'?d.requestId:undefined;const entry=requestId===undefined?undefined:pending.get(requestId);if(entry!==undefined&&entry.expected===d.type){pending.delete(requestId);busyActions.delete(entry.actionKey)}const action=entry!==undefined&&entry.expected===d.type?entry.action:Object.prototype.hasOwnProperty.call(RESULT_LABELS,d.type)?RESULT_LABELS[d.type]:'操作';if(d.cancelled||d.gone)notify(d.message||action+'を取り消しました。',true);else if(d.ok)notify(action+'が完了しました。',true,d.url);else notify(action+'に失敗しました: '+(typeof d.message==='string'&&d.message?d.message:'原因を特定できませんでした。'),false);show(items);showIssues(issues)};window.addEventListener('message',e=>{const d=e.data;if(Object.prototype.hasOwnProperty.call(RESULT_LABELS,d.type)){handleResult(d);return}if(d.type==='snapshot'){$('subtitle').textContent=(d.snapshot.host||'Forge未判定')+' / '+d.snapshot.cwd;const metrics=[];for(const [l,v] of [['Host',d.snapshot.host||'未判定'],['CLI',d.snapshot.prerequisites?.cliOnPath?'利用可能':'未検出'],['認証',d.snapshot.prerequisites?.authenticated?'確認済み':'未認証'],['同期','30秒ごと']]){const m=text('article','', 'metric');m.append(text('small',l),text('strong',v));metrics.push(m)}$('metrics').replaceChildren(...metrics);const host=d.snapshot.host||'';if(host!==shownHost){shownHost=host;const choice=$('hostChoice');choice.replaceChildren();choice.classList.toggle('visible',!host);if(!host){const notice=text('p','originからForgeを判定できません。操作するホストを選択してください。');const buttons=['github','gitlab'].map(h=>button(h==='github'?'GitHub':'GitLab',()=>{for(const b of buttons)b.disabled=true;notice.textContent='選んだHostで判定しています。';vscode.postMessage({type:'selectHost',host:h})},'secondary'));choice.append(notice,...buttons)}}else if(!host){const buttons=$('hostChoice').querySelectorAll('button');if(buttons.length&&buttons[0].disabled){for(const b of buttons)b.disabled=false;$('hostChoice').querySelector('p').textContent='選んだHostでは判定できませんでした。もう一度選んでください。'}}$('synced').textContent='同期 '+new Date().toLocaleTimeString();show(d.workItems||[]);if(!snapshotReady){snapshotReady=true;$('send').disabled=false;$('input').placeholder='次に進める作業を依頼';$('composerState').textContent=''}}if(d.type==='orchestrator'){const approvals=d.snapshot.approvals||[];$('state').textContent=approvals.length?'承認待ち・'+approvals.length+'件':d.snapshot.busy?'実行中':d.snapshot.turnFailed?'実行失敗':'待機中';showApprovals(approvals);if(d.snapshot.busy)$('composerState').textContent='';$('chat').replaceChildren(...d.snapshot.messages.map(m=>text('pre',m.text,'message')))}if(d.type==='issues'){showIssues(d.issues||[])}});$('refresh').onclick=()=>vscode.postMessage({type:'refresh'});$('filter').onchange=e=>{filter=e.target.value;show(items)};$('send').onclick=()=>{const note=$('composerState');if(!snapshotReady){note.textContent='接続状態を確認しています。表示が整うまで待ってください。';return}const v=$('input').value.trim();if(!v){note.textContent='送る内容を入力してください。';return}vscode.postMessage({type:'sendOrchestrator',text:v});$('input').value='';note.textContent='送信を要求しました。';};$('issuesButton').onclick=()=>vscode.postMessage({type:'listIssues'});vscode.postMessage({type:'ready'});</script></body></html>`;
 }
