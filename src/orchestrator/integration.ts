@@ -1032,13 +1032,36 @@ export async function findTaskIdsMergedSince(
  * `git status`相当のコマンドで確かめる（design.md §16.17「コンフリクト」4.
  * 「宣言だけを信じず`git status`でも確かめる」）。
  *
- * 未解決パス（`git diff --diff-filter=U`）が無く、かつマージが進行中でない
- * （`MERGE_HEAD`が存在しない＝解決コミットが済んでいる）ときだけ`true`。
+ * 次の4つを全て満たすときだけ`true`。
+ *
+ * 1. 未解決パス（`git diff --diff-filter=U`）が無い
+ * 2. マージが進行中でない（`MERGE_HEAD`が存在しない＝解決コミットが済んでいる）
+ * 3. 作業ツリーに未コミットの変更が残っていない（`git status --porcelain -uno`）
+ * 4. タスクブランチのcommitが統合先のHEADから到達できる（`git merge-base --is-ancestor`）
+ *
+ * **1と2だけでは`git merge --abort`や`git reset`でマージを取り消した状態と区別できない**
+ * （どちらも未解決0件・`MERGE_HEAD`なしになる）。取り消したまま`done`を宣言されると、
+ * 成果が統合されていないのに「解決済み」として後続へ進んでいた（Issue #1111）。取込みの
+ * 有無そのものを見る4を足して区別する。3は、解決の編集が未コミットのまま残っている状態を
+ * 「取り込み済み」と読み違えないため（未追跡ファイルは対象外。統合worktreeにはビルド生成物が
+ * 置かれうるため、それで完了を否定しない）。
+ *
+ * `MERGE_HEAD`の問い合わせが**エラーで**落ちた場合（非0かつstderrあり）は「不在」ではなく
+ * 「不明」として`false`にする。`-q --verify`は不在のとき何も出力せず終了コードだけで返すため、
+ * stderrがある非0はコマンド自体の異常（壊れたworktree等）である。
+ *
+ * `taskBranch`は`git merge-base --is-ancestor <taskBranch> HEAD`の位置引数として渡すため、
+ * `isValidTaskBranch`でこのrunのタスクブランチの形であることを先に確かめる（`-`始まりの
+ * 文字列がフラグとして解釈されるのを防ぐ、`mergeTaskBranch`と同じ理由の防御）。
  */
 export async function isMergeResolutionComplete(
   integrationWorktreeCwd: string,
   git: GitCommandRunner,
+  target: { runId: string; taskBranch: string },
 ): Promise<boolean> {
+  if (!isValidTaskBranch(target.taskBranch, target.runId)) {
+    return false;
+  }
   const unresolved = await git.run(
     ['diff', '--name-only', '--diff-filter=U'],
     integrationWorktreeCwd,
@@ -1051,5 +1074,16 @@ export async function isMergeResolutionComplete(
     integrationWorktreeCwd,
   );
   // MERGE_HEADの解決に成功する（code 0）ということは、まだマージ進行中（未コミット）
-  return mergeHead.code !== 0;
+  if (mergeHead.code === 0 || mergeHead.stderr.trim() !== '') {
+    return false;
+  }
+  const status = await git.run(['status', '--porcelain', '-uno'], integrationWorktreeCwd);
+  if (status.code !== 0 || status.stdout.trim() !== '') {
+    return false;
+  }
+  const merged = await git.run(
+    ['merge-base', '--is-ancestor', target.taskBranch, 'HEAD'],
+    integrationWorktreeCwd,
+  );
+  return merged.code === 0;
 }

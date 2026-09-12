@@ -326,6 +326,11 @@ interface FakeGitHandle extends GitCommandRunner {
    * 衝突解決セッション役の`FakeTaskSession`が`finish('done', ...)`する前に呼ぶ。
    */
   resolveConflict(): void;
+  /**
+   * 衝突解決セッションのテスト用。`git merge --abort`や`git reset`でマージを取り消した状態を
+   * 模す（未解決パスも`MERGE_HEAD`も無いが、対象ブランチは統合先へ入っていない。Issue #1111）。
+   */
+  abandonConflict(): void;
 }
 
 /**
@@ -371,10 +376,23 @@ function fakeGit(options?: {
   let conflictPending = options?.conflictOnce === true;
   let unresolvedConflict = false;
   let worktreeAddCallCount = 0;
+  // 統合先へ取り込み済みのブランチ（`git merge-base --is-ancestor`の応答に使う。Issue #1111）
+  const mergedBranches = new Set<string>();
+  // 衝突して解決待ちのブランチ。解決コミットが打たれた時点で取込み済みになる
+  let mergingBranch: string | undefined;
   return {
     calls,
     resolveConflict() {
       unresolvedConflict = false;
+      // 「解決してコミットした」＝対象ブランチが統合先へ入った状態（Issue #1111）
+      if (mergingBranch !== undefined) {
+        mergedBranches.add(mergingBranch);
+        mergingBranch = undefined;
+      }
+    },
+    abandonConflict() {
+      unresolvedConflict = false;
+      mergingBranch = undefined;
     },
     async run(args, cwd) {
       calls.push({ args: [...args], cwd });
@@ -403,10 +421,12 @@ function fakeGit(options?: {
           : { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
-        // マージ進行中（未解決の衝突が残っている）間だけ見つかる
+        // マージ進行中（未解決の衝突が残っている）間だけ見つかる。
+        // `-q --verify`は不在のとき何も出力しないため、stderrは空にする
+        // （`isMergeResolutionComplete`はstderrのある非0を「不明」として扱う。Issue #1111）
         return unresolvedConflict
           ? { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
-          : { code: 1, stdout: '', stderr: 'not found' };
+          : { code: 1, stdout: '', stderr: '' };
       }
       if (args[0] === 'rev-parse' && args.includes('--verify')) {
         // ブランチはまだ存在しない（worktree作成前提）
@@ -427,16 +447,20 @@ function fakeGit(options?: {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--no-ff') {
+        // `['merge', '--no-ff', '-m', <message>, <taskBranch>]`（`integration.ts`）
+        const branch = args[4] ?? '';
         if (conflictPending) {
           if (options?.conflictEveryMerge !== true) {
             conflictPending = false;
           }
           unresolvedConflict = true;
+          mergingBranch = branch;
           return { code: 1, stdout: '', stderr: 'CONFLICT (content): fake conflict' };
         }
         if (options?.failMerge) {
           return { code: 1, stdout: '', stderr: 'fatal: fake merge failure' };
         }
+        mergedBranches.add(branch);
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--abort') {
@@ -445,7 +469,14 @@ function fakeGit(options?: {
           return { code: 1, stdout: '', stderr: 'fatal: fake merge --abort failure' };
         }
         unresolvedConflict = false;
+        // 巻き戻したので取り込まれていない（Issue #1111）
+        mergingBranch = undefined;
         return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
+        return mergedBranches.has(args[2] ?? '')
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: '' };
       }
       if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
         return unresolvedConflict
@@ -3203,6 +3234,27 @@ tasks:
     await flush();
 
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it('衝突解決セッションがマージを取り消したままdoneを宣言してもdoneにしない（Issue #1111）', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+
+    // `git merge --abort`相当。未解決パスも`MERGE_HEAD`も無いが、T1のcommitは
+    // 統合ブランチへ入っていない
+    const resolutionSession = codexHost.sessions.at(-1);
+    git.abandonConflict();
+    resolutionSession?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
   });
 
   /**
@@ -11474,6 +11526,7 @@ tasks:
     const throwingGit: FakeGitHandle = {
       calls: base.calls,
       resolveConflict: () => base.resolveConflict(),
+      abandonConflict: () => base.abandonConflict(),
       run: async (args, cwd) => {
         if (cwd.endsWith('/T1')) {
           throw new Error('gitの起動に失敗しました');
@@ -11618,6 +11671,7 @@ tasks:
     return {
       calls: base.calls,
       resolveConflict: () => base.resolveConflict(),
+      abandonConflict: () => base.abandonConflict(),
       run: async (args, cwd) => {
         if (args[0] === 'merge' && args[1] === '--no-ff') {
           throw new Error('ENOSPC: fake disk full');
@@ -11687,6 +11741,7 @@ tasks:
     const git: FakeGitHandle = {
       calls: base.calls,
       resolveConflict: () => base.resolveConflict(),
+      abandonConflict: () => base.abandonConflict(),
       run: async (args, cwd) => {
         if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
           diffCallCount += 1;
