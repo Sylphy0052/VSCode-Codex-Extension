@@ -199,6 +199,69 @@ describe('ChatViewManager', () => {
     vi.useRealTimers();
   });
 
+  describe('MCPを無効化するセッション（Issue #944・Issue #1112）', () => {
+    it('config/read が成功すれば、利用者設定と組み込みのMCPを無効化して開始する', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableMcpServers: true,
+      });
+      await tick();
+
+      connection.resolveFirst('config/read', {
+        config: { mcp_servers: { playwright: { command: 'npx' } } },
+      });
+      await tick();
+
+      const start = connection.requests.find((r) => r.method === 'thread/start');
+      expect(start).toBeDefined();
+      const overlay = (start?.params as { config?: { mcp_servers?: Record<string, unknown> } })
+        ?.config?.mcp_servers;
+      expect(Object.keys(overlay ?? {}).sort()).toEqual(['codex_apps', 'playwright']);
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await started;
+    });
+
+    it('config/read が失敗したら thread/start を呼ばずにエラーで終わる（Issue #1112）', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableMcpServers: true,
+      });
+      await tick();
+
+      connection.rejectFirst('config/read', 'app-serverが応答しません: config/read');
+
+      // オーバーレイはマージなので、名前を挙げられなければ利用者設定のMCPは生きたまま。
+      // 起動せずに失敗させる
+      await expect(started).rejects.toThrow(/MCPサーバ一覧を読めなかった/u);
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(0);
+      // タブも作らない（パネルを作る前に解決している）
+      expect(__mock.createdPanels).toHaveLength(0);
+    });
+
+    it('config/read の応答の形が想定外でも thread/start を呼ばない（Issue #1112）', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableMcpServers: true,
+      });
+      await tick();
+
+      connection.resolveFirst('config/read', { unexpected: true });
+
+      await expect(started).rejects.toThrow(/MCPサーバ一覧を読めなかった/u);
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(0);
+    });
+  });
+
   describe('並列開始時の宛先解決（design.md §16.10の3の回帰）', () => {
     it('2つのタスクを並列で開始しても、threadIdの判らない要求を誤って別タスクへ渡さない', async () => {
       const { manager, connection } = createManager();
