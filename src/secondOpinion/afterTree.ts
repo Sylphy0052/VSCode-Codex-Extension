@@ -70,8 +70,16 @@ import type { Logger } from '../log';
 import type { GitCommandRunner } from '../orchestrator/worktree';
 import { isInsideRoot, type UntrackedFile, type UntrackedOmission } from './untracked';
 
-/** 木の中に置く説明ファイル。Advisorがこの木の性質と欠落を読めるようにする。 */
+/**
+ * 木の中に置く説明ファイルの既定の名前。Advisorがこの木の性質と欠落を読めるようにする。
+ *
+ * **同じ名前がリポジトリにcommitされていた場合は、この名前を使わない**（Issue #1103）。
+ * 実際に使った名前は {@link FrozenAfterTree.noticeFile} で返す。
+ */
 export const FROZEN_AFTER_TREE_NOTICE_FILE = '.frozen-after-tree.txt';
+
+/** 説明ファイルの名前が衝突したときに試す別名の上限。 */
+const MAX_NOTICE_NAME_ATTEMPTS = 16;
 
 /** 一時indexとパッチを置く作業ディレクトリの接頭辞。**after-treeの中には置かない**。 */
 const WORK_DIR_PREFIX = 'after-tree-work-';
@@ -101,6 +109,14 @@ export interface FrozenAfterTree {
   readonly omissions: readonly FrozenAfterTreeOmission[];
   /** 実体化したファイル数（未追跡ぶんを含む）。 */
   readonly fileCount: number;
+  /**
+   * 説明ファイルの、木のルートからの相対名（Issue #1103）。
+   *
+   * 通常は {@link FROZEN_AFTER_TREE_NOTICE_FILE} だが、同じ名前がリポジトリにcommitされて
+   * いた場合は写しの側を残し、説明ファイルを別名にする。プロンプトから名指しする側は、
+   * 固定の名前ではなくこの値を使うこと。
+   */
+  readonly noticeFile: string;
   /** 中身ごと消す。冪等。 */
   dispose(): Promise<void>;
 }
@@ -224,7 +240,7 @@ export async function createFrozenAfterTree(
 
     const omissions = await writeUntracked(dir, request);
     const fileCount = await countFiles(dir);
-    await writeNotice(dir, request, omissions, fileCount);
+    const noticeFile = await writeNotice(dir, request, omissions, fileCount);
 
     request.log?.info(
       `${LOG_PREFIX} frozen after-tree built base=${baseCommit.slice(0, 8)} ` +
@@ -235,6 +251,7 @@ export async function createFrozenAfterTree(
       dir,
       omissions,
       fileCount,
+      noticeFile,
       async dispose(): Promise<void> {
         await removeTree();
       },
@@ -331,13 +348,15 @@ async function writeUntracked(
  *
  * 欠落が無くても書く。「凍結した写しであって、いま動いているリポジトリではない」ことは
  * 欠落の有無にかかわらず伝える必要がある。
+ *
+ * @returns 実際に書いた説明ファイルの、木のルートからの相対名
  */
 async function writeNotice(
   dir: string,
   request: CreateFrozenAfterTreeRequest,
   omissions: readonly FrozenAfterTreeOmission[],
   fileCount: number,
-): Promise<void> {
+): Promise<string> {
   const lines = [
     'このディレクトリは、セカンドオピニオンの依頼を押した時点のリポジトリの写しです。',
     '読み取り専用の材料であり、いま動いている作業ツリーではありません。実行しても、',
@@ -360,11 +379,54 @@ async function writeNotice(
       lines.push(`- ${omission.path}: ${omission.reason}${detail}`);
     }
   }
-  await fs.writeFile(
-    path.join(dir, FROZEN_AFTER_TREE_NOTICE_FILE),
-    `${lines.join('\n')}\n`,
-    'utf8',
+  return await writeNoticeFile(dir, `${lines.join('\n')}\n`);
+}
+
+/**
+ * 説明ファイルを、既にあるものを壊さずに作る（Issue #1103）。
+ *
+ * `checkout-index` は追跡済みのsymlinkもそのまま展開するため、説明ファイルと同じ名前が
+ * 外を指すsymlinkとしてcommitされていると、素の `fs.writeFile` はリンク先（木の外にある
+ * 書込み可能なファイル）を上書きしてしまう。通常ファイルとしてcommitされている場合も、
+ * 写しの中身が説明文で置き換わって「正確な写し」ではなくなる。
+ *
+ * そのため `wx`（`O_CREAT | O_EXCL`）で作る。symlinkでも通常ファイルでも、既にあれば
+ * `EEXIST` で失敗し、リンクは一切たどらない。衝突したときは**写しの側を残し**、説明ファイルの
+ * 名前を変えて置く（説明ファイルはこちらが足したものなので、写しの正確さを優先する）。
+ */
+async function writeNoticeFile(dir: string, body: string): Promise<string> {
+  for (let attempt = 0; attempt <= MAX_NOTICE_NAME_ATTEMPTS; attempt += 1) {
+    const name = noticeFileName(attempt);
+    try {
+      await fs.writeFile(path.join(dir, name), body, { encoding: 'utf8', flag: 'wx' });
+      return name;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new FrozenAfterTreeError(
+          'after-treeの説明ファイルを書けませんでした',
+          'write',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
+  }
+  throw new FrozenAfterTreeError(
+    `after-treeの説明ファイルを置ける名前が見つかりませんでした（${FROZEN_AFTER_TREE_NOTICE_FILE}）`,
+    'write',
   );
+}
+
+/** `.frozen-after-tree.txt` → `.frozen-after-tree-1.txt` … の順に候補を出す。 */
+function noticeFileName(attempt: number): string {
+  if (attempt === 0) {
+    return FROZEN_AFTER_TREE_NOTICE_FILE;
+  }
+  const ext = path.extname(FROZEN_AFTER_TREE_NOTICE_FILE);
+  const base = FROZEN_AFTER_TREE_NOTICE_FILE.slice(
+    0,
+    FROZEN_AFTER_TREE_NOTICE_FILE.length - ext.length,
+  );
+  return `${base}-${attempt}${ext}`;
 }
 
 /** 木の中の通常ファイル数を数える。説明ファイル自身は書く前に数えるので入らない。 */

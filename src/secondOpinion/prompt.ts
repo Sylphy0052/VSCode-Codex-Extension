@@ -150,6 +150,14 @@ export interface SecondOpinionInput {
    * 行って空振りする。渡す側が実体化の成否を見てから渡すこと。
    */
   afterTreeDir?: string | undefined;
+  /**
+   * 写しの説明ファイルの、写しのルートからの相対名（Issue #1103）。
+   *
+   * 省略時は {@link FROZEN_AFTER_TREE_NOTICE_FILE} を名指しする。同じ名前がリポジトリに
+   * commitされていた場合、写し側を残すために説明ファイルが別名になるため、実体化した側から
+   * 受け取った名前をそのまま渡すこと。
+   */
+  afterTreeNoticeFile?: string | undefined;
 }
 
 /** 依頼の区画の位置（Issue #1044 条件B-pos）。 */
@@ -194,6 +202,7 @@ function systemInstruction(
   hasSummary: boolean,
   backgroundKind: ConversationBackgroundKind,
   afterTreeDir: string | undefined,
+  afterTreeNoticeFile: string | undefined,
 ): string {
   const lines = [
     'あなたは、別のAIエージェントが進めている作業について、独立した立場から意見を求められています。',
@@ -234,7 +243,7 @@ function systemInstruction(
       // `updates/<世代>/` への追加として届くため、届いたときの扱いを先に知らせておく
       '相談の途中で利用者が材料を更新することがあります。そのときは更新の連絡が届き、以後はそこで示された材料が正本になります。連絡が無いうちは、この材料が最新です。',
       'この作業ディレクトリの外を読みに行かないでください。そこにあるのは実行中に書き換わりうる現在の作業ツリーで、押下時点の材料とは食い違います。',
-      ...explorationInstruction(afterTreeDir),
+      ...explorationInstruction(afterTreeDir, afterTreeNoticeFile),
     );
   } else {
     lines.push(
@@ -262,15 +271,23 @@ function systemInstruction(
  * `.frozen-after-tree.txt` に書いてある（`afterTree.ts`）。ここから名指しして読ませるのは、
  * 「無い＝存在しない」と読まれるのを防ぐためである。
  */
-function explorationInstruction(afterTreeDir: string | undefined): string[] {
+function explorationInstruction(
+  afterTreeDir: string | undefined,
+  afterTreeNoticeFile: string | undefined,
+): string[] {
   if (afterTreeDir === undefined || afterTreeDir === '') {
     return ['ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。'];
   }
+  // 既定の名前がリポジトリのファイルと衝突したときは、説明ファイルが別名になる（Issue #1103）
+  const noticeFile =
+    afterTreeNoticeFile === undefined || afterTreeNoticeFile === ''
+      ? FROZEN_AFTER_TREE_NOTICE_FILE
+      : afterTreeNoticeFile;
   return [
     `\`${afterTreeDir}/\` には、押下時点のリポジトリ全体の写しが置いてあります。差分が触っていないファイル（依存先・型定義・設定・既存のテスト）もここから読めます。`,
     'この写しは押下時点で凍結されており、以後は書き換わりません。実行しても、ここに無い依存やビルド結果は解決しません。',
     `まず依頼・背景・差分を読んでください。そのうえで判断に必要な場合にだけ、\`${afterTreeDir}/\` の中を追加で読んでください。読む前から網羅的に探索する必要はありません。`,
-    `\`${afterTreeDir}/${FROZEN_AFTER_TREE_NOTICE_FILE}\` に、この写しへ含められなかったファイルが書いてあります。そこに挙がっているものは「存在しない」のではなく「押下時点で内容を取得できなかった」ものです。`,
+    `\`${afterTreeDir}/${noticeFile}\` に、この写しへ含められなかったファイルが書いてあります。そこに挙がっているものは「存在しない」のではなく「押下時点で内容を取得できなかった」ものです。`,
   ];
 }
 
@@ -438,7 +455,13 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
   const position = input.requestPosition ?? 'front';
   const request = requestSection(input.userRequest);
   const sections = [
-    systemInstruction(input.artifact, summary !== '', backgroundKind, input.afterTreeDir),
+    systemInstruction(
+      input.artifact,
+      summary !== '',
+      backgroundKind,
+      input.afterTreeDir,
+      input.afterTreeNoticeFile,
+    ),
     position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
     artifactSection(input.artifact),

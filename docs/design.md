@@ -7614,6 +7614,8 @@ Cを採る場合も **detached worktree をそのままAdvisorの `cwd` には�
 
 未追跡ファイルのうち、押下時点で内容を取得できなかったもの（binary・予算超過・型・権限）は木に置けない。**それを黙って飲まない。** `FrozenAfterTree.omissions` で返し、木の中の `.frozen-after-tree.txt` にも「存在しないのではなく、押下時点で取得できなかった」と明記する。Advisorが木を「押下時点の全部」と読むことを防ぐのが目的である。
 
+**説明ファイルは排他的に作り、写しの側を上書きしない（Issue #1103）。** `checkout-index` は追跡済みのsymlinkもそのまま展開するため、`.frozen-after-tree.txt` という名前が木の外を指すsymlinkとしてcommitされていると、素の書込みはリンク先（木の外にある書込み可能なファイル）を書き換えてしまう。通常ファイルとしてcommitされている場合も、写しの中身が説明文で置き換わって正確な写しではなくなる。そのため説明ファイルは `wx`（`O_CREAT | O_EXCL`）で作る。既にあれば `EEXIST` で失敗し、リンクは一切たどらない。衝突したときは**写しの側を残し**、`.frozen-after-tree-1.txt` のように名前を変えて置く（説明ファイルはこちらが足したものなので、写しの正確さを優先する）。実際に使った名前は `FrozenAfterTree.noticeFile` で返し、プロンプトで名指しする側（`prompt.ts`）はその値を使う。
+
 ##### 確かめ方
 
 `test/unit/secondOpinionAfterTree.test.ts`。フェイクのgitでは確かめられない（gitが実際に何を書くか、当たらない差分で本当に失敗するか）ため、`worktree.test.ts` に倣って使い捨てリポジトリへ実物のgitを打つ。
