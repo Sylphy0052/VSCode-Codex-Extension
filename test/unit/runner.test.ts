@@ -15,6 +15,7 @@ import type {
 import {
   WAITING_REPLY_POLL_INTERVAL_MS,
   WorkflowRunner,
+  type StartWorkflowResult,
   type WorkflowFilePort,
   type WorkflowRunnerForgeDeps,
   type WorkflowRunnerMessagingDeps,
@@ -1072,6 +1073,27 @@ function filePort(content: string): WorkflowFilePort {
   };
 }
 
+/**
+ * `allow` の確認を1往復してから開始する。
+ *
+ * Issue #1107 以降、`allowConfirmed: true` だけでは開始しない（確認した内容そのものを指す
+ * ダイジェストの一致まで見る）。確認の中身を問わないテストはこれを使う。
+ */
+async function startWithAllowConfirmed(
+  runner: WorkflowRunner,
+  defPath: string,
+  repoRoot = '/repo',
+): Promise<StartWorkflowResult> {
+  const first = await runner.start(defPath, repoRoot);
+  if (first.ok || first.needsAllowConfirmation !== true) {
+    return first;
+  }
+  return await runner.start(defPath, repoRoot, {
+    allowConfirmed: true,
+    ...(first.allowDigest === undefined ? {} : { allowConfirmedDigest: first.allowDigest }),
+  });
+}
+
 /** マイクロタスクを十分な回数流し、非同期の起動チェーン（worktree→boundary→openTaskSession）を進める。 */
 async function flush(times = 100): Promise<void> {
   for (let i = 0; i < times; i += 1) {
@@ -1111,6 +1133,8 @@ function createHarness(
     readAutoResume?: () => boolean;
     readMaxAutoResumeAttempts?: () => number;
     readReviewCommentPollIntervalSec?: () => number;
+    /** 実行のたびに内容が変わる定義ファイルを模すための差し替え口（Issue #1107）。 */
+    filePort?: WorkflowFilePort;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -1124,7 +1148,7 @@ function createHarness(
     worktreeQueue: new WorktreeCreationQueue(),
     git,
     fs: options?.fs ?? identityFs,
-    filePort: filePort(yaml),
+    filePort: options?.filePort ?? filePort(yaml),
     store,
     log: options?.log ?? fakeLogger,
     readBaseline: () => ({
@@ -2549,9 +2573,10 @@ tasks:
     done: d
 `;
     const { runner, codexHost, store } = createHarness(allowRetryYaml);
-    const result = await runner.start('/repo/.agents/workflows/allow-retry.yaml', '/repo', {
-      allowConfirmed: true,
-    });
+    const result = await startWithAllowConfirmed(
+      runner,
+      '/repo/.agents/workflows/allow-retry.yaml',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -2668,6 +2693,7 @@ tasks:
 
     const second = await runner.start('/repo/.agents/workflows/allow.yaml', '/repo', {
       allowConfirmed: true,
+      allowConfirmedDigest: first.allowDigest as string,
     });
     expect(second.ok).toBe(true);
     await flush();
@@ -2677,6 +2703,65 @@ tasks:
     expect(snapshot?.warnings.some((w) => w.kind === 'allowOverride' && w.taskId === 'T1')).toBe(
       true,
     );
+  });
+
+  it('確認の後に定義が差し替えられたら、同意済みとして実行せず確認をやり直す（Issue #1107）', async () => {
+    const confirmedYaml = `
+version: 1
+name: allow-digest-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+    const tamperedYaml = `
+version: 1
+name: allow-digest-test
+tasks:
+  - id: T1
+    allow:
+      - "rm -rf /"
+    prompt: p
+    done: d
+`;
+    let content = confirmedYaml;
+    const { runner, codexHost } = createHarness(confirmedYaml, {
+      filePort: {
+        fileSize: async () => Buffer.byteLength(content, 'utf8'),
+        readTextFile: async () => content,
+      },
+    });
+    const defPath = '/repo/.agents/workflows/allow-digest.yaml';
+
+    const first = await runner.start(defPath, '/repo');
+    expect(first.needsAllowConfirmation).toBe(true);
+    const confirmedDigest = first.allowDigest as string;
+    expect(confirmedDigest).toBeTypeOf('string');
+
+    // 確認ダイアログを出している間に定義が差し替わる
+    content = tamperedYaml;
+
+    const second = await runner.start(defPath, '/repo', {
+      allowConfirmed: true,
+      allowConfirmedDigest: confirmedDigest,
+    });
+    expect(second.ok).toBe(false);
+    expect(second.needsAllowConfirmation).toBe(true);
+    expect(second.allowTaskIds).toEqual(['T1']);
+    expect(second.allowDigest).not.toBe(confirmedDigest);
+    await flush();
+    expect(codexHost.sessions).toHaveLength(0);
+
+    // 差し替わった内容で確認を取り直せば開始する
+    const third = await runner.start(defPath, '/repo', {
+      allowConfirmed: true,
+      allowConfirmedDigest: second.allowDigest as string,
+    });
+    expect(third.ok).toBe(true);
+    await flush();
+    expect(codexHost.sessions).toHaveLength(1);
   });
 
   it('上流より緩い下流がresultを参照するワークフローはViewの警告欄にpermissionEscalationが出る（design.md §16.4 案2、Issue #67）', async () => {
@@ -2958,9 +3043,10 @@ tasks:
     done: d
 `;
       const { runner, codexHost, store } = createHarness(allowYaml);
-      const result = await runner.start('/repo/.agents/workflows/reload-allow.yaml', '/repo', {
-        allowConfirmed: true,
-      });
+      const result = await startWithAllowConfirmed(
+        runner,
+        '/repo/.agents/workflows/reload-allow.yaml',
+      );
       const runId = result.runId as string;
       await flush();
       codexHost.byTaskId('T1');
@@ -10772,9 +10858,10 @@ tasks:
 
   it('allowを持つタスクがreloadInterruptedなら、run全体の自動再開を見送る', async () => {
     const { runner, store } = createHarness(ALLOW_YAML);
-    const result = await runner.start('/repo/.agents/workflows/auto-resume-allow.yaml', '/repo', {
-      allowConfirmed: true,
-    });
+    const result = await startWithAllowConfirmed(
+      runner,
+      '/repo/.agents/workflows/auto-resume-allow.yaml',
+    );
     const runId = result.runId as string;
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
