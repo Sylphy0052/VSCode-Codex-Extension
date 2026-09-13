@@ -616,7 +616,11 @@ function isHumanMessage(entry: Record<string, unknown>): boolean {
  * `<cross-session-message>` タグが残るため、タグ抽出をせずに済むこちらを使う。
  */
 function crossSessionMessageBody(entry: Record<string, unknown>): string | undefined {
-  if (str(entry['type']) !== 'user' || entry['isMeta'] !== true) {
+  if (
+    str(entry['type']) !== 'user' ||
+    entry['isMeta'] !== true ||
+    entry['isSidechain'] === true
+  ) {
     return undefined;
   }
   const origin = rec(entry['origin']);
