@@ -293,18 +293,21 @@ export function integrationManifestPath(workspaceRoot: string, runId: string): s
 export type LoadManifestResult =
   { ok: true; manifest: IntegrationManifest } | { ok: false; message: string };
 
+type ReadGuardedTextFileResult =
+  { ok: true; content: string | undefined } | { ok: false; message: string };
+
 /**
- * 永続化されたマニフェストを読み戻す（design.md §16.11の対象。Issue #380）。
+ * `.agents/worktrees/<runId>/`配下の永続化ファイル（`manifest.json`・`baseline.json`）を
+ * 経路の検査付きで読み戻す共通処理（design.md §16.11の対象。Issue #380・Issue #1115）。
  *
- * ファイルが無い場合（初回実行、またはまだ1件も統合していない実行）は「復元できない」
- * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
- * ファイルはあるが内容を解析できない場合（破損）、不正なキー（パストラバーサルの疑いが
- * あるエントリ）を含む場合、エントリ数が上限を超える場合は`ok: false`にする。ここを
- * 黙って空マニフェストへ倒すと、統合済みだった成果があったことに呼び出し側が
- * 気づけない（「0件で成功」に見えてしまう。Issueの本題。`deserializeManifest`も
- * Issue #440で同じ基準のfail-closedへ揃えてある）。
+ * ファイルが無い場合は`content: undefined`で`ok: true`を返す（「まだ書かれていない」は
+ * 呼び出し側にとって正常系であり、ここでは区別しない）。読めたが経路・サイズの検査に
+ * 通らない場合だけ`ok: false`にする。内容の解釈（JSONのパースと妥当性検査）は呼び出し側の
+ * 責務で、ここは**どのファイルを読んでよいか**だけを見る。
  *
- * 読み込みの前に、`integrationManifestPath`が指す経路にシンボリックリンクが含まれて
+ * `label`はエラーメッセージへ埋め込む対象の呼び名（例: `疑似worktreeの統合マニフェスト`）。
+ *
+ * 読み込みの前に、`filePath`が指す経路にシンボリックリンクが含まれて
  * いないかを確かめる（レビュー指摘: medium）。`.agents/worktrees/<runId>`の親のいずれかが
  * シンボリックリンクだと境界外のファイルを読んでしまう。`ensureIntegrationDir`等と同じ
  * `findSymlinkedAncestor`による一次防御をI/Oの前に通す。
@@ -319,8 +322,8 @@ export type LoadManifestResult =
  * 厳密一致にする（Issue #505、セキュリティ監査で発覚。high）。** `isPathWithinRoot`
  * だけだと、`filePath`（`manifest.json`）がワークスペース**内**の別の実体（典型的には
  * `.git/hooks`配下の攻撃者が置いたJSON）へのシンボリックリンクへ差し替えられていた
- * 場合に「境界内」として素通りし、偽装されたマニフェストを正当な内容として読み込んで
- * しまう。この関数はrun実行開始時だけでなくVS Codeのウィンドウ再読み込み（リロード
+ * 場合に「境界内」として素通りし、偽装された内容を正当なものとして読み込んでしまう。
+ * この関数はrun実行開始時だけでなくVS Codeのウィンドウ再読み込み（リロード
  * 復元）時にも呼ばれるため、レースに勝つ必要が無く「実行中に差し替えを仕込み、後続の
  * 通常のリロードを待つ」だけで発火しうる。他4箇所（`persistManifest`/`cloneWorkspace`/
  * `resolveRealRemovalTarget`/`ensureIntegrationDir`）と同じく、`workspaceRoot`
@@ -333,24 +336,24 @@ export type LoadManifestResult =
  * 足りる」という理由で許容していたが、他の読み出し箇所（`reflectIntegrationToWorkspace`の
  * 反映元コピー）が「読み出しの前に確認する」方針を明言しているのと非対称だった。ファイルが
  * まだ存在しない（初回実行等）場合の`realpath`の`undefined`はここでは正常系（後段の
- * `readTextFile`も`undefined`を返し、空マニフェストとして扱われる）のため、
+ * `readTextFile`も`undefined`を返し、呼び出し側が「まだ無い」として扱う）のため、
  * `realFilePath !== undefined`のときだけ境界を確認し、フェイルクローズしない。
  *
- * ファイルサイズの上限（`MAX_MANIFEST_FILE_BYTES`）による足切りも`JSON.parse`の前に行う
+ * ファイルサイズの上限（`maxBytes`）による足切りも読み込んだ内容を返す前に行う
  * （レビュー指摘: medium、Issue #380の追加指摘。`MAX_MANIFEST_ENTRIES`の項のコメント参照）。
  */
-export async function loadPersistedManifest(
+async function readGuardedTextFile(
   workspaceRoot: string,
-  runId: string,
+  filePath: string,
+  maxBytes: number,
+  label: string,
   fs: PseudoWorktreeFileSystemPort,
-): Promise<LoadManifestResult> {
-  const filePath = integrationManifestPath(workspaceRoot, runId);
-
+): Promise<ReadGuardedTextFileResult> {
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
   if (symlinkedAncestor !== undefined) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストの読み込み元の経路にシンボリックリンクが含まれています。読み込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
+      message: `${label}の読み込み元の経路にシンボリックリンクが含まれています。読み込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     };
   }
 
@@ -389,7 +392,7 @@ export async function loadPersistedManifest(
     ) {
       return {
         ok: false,
-        message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(filePath)}`,
+        message: `${label}を復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(filePath)}`,
       };
     }
   }
@@ -404,19 +407,19 @@ export async function loadPersistedManifest(
     const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルの情報を取得できません）: ${sanitizeForLog(filePath)}: ${detail}`,
+      message: `${label}を復元できませんでした（ファイルの情報を取得できません）: ${sanitizeForLog(filePath)}: ${detail}`,
     };
   }
-  if (stat !== undefined && stat.size > MAX_MANIFEST_FILE_BYTES) {
+  if (stat !== undefined && stat.size > maxBytes) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（ファイルサイズが上限を超えています）: ${sanitizeForLog(filePath)}`,
+      message: `${label}を復元できませんでした（ファイルサイズが上限を超えています）: ${sanitizeForLog(filePath)}`,
     };
   }
 
   const content = await fs.readTextFile(filePath);
   if (content === undefined) {
-    return { ok: true, manifest: new Map() };
+    return { ok: true, content: undefined };
   }
 
   // Issue #505（監査指摘、二段構え）: 上の事前確認だけでは、確認した瞬間だけ
@@ -441,36 +444,78 @@ export async function loadPersistedManifest(
   ) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(realFilePath2 ?? filePath)}`,
+      message: `${label}を復元できませんでした（読み込み元が実際には想定した場所以外を指しています）: ${sanitizeForLog(realFilePath2 ?? filePath)}`,
     };
+  }
+
+  return { ok: true, content };
+}
+
+/** 経路検査付きの読み書きでエラーメッセージへ埋め込む、統合マニフェストの呼び名。 */
+const MANIFEST_LABEL = '疑似worktreeの統合マニフェスト';
+
+/**
+ * 永続化されたマニフェストを読み戻す（design.md §16.11の対象。Issue #380）。
+ *
+ * ファイルが無い場合（初回実行、またはまだ1件も統合していない実行）は「復元できない」
+ * ではなく「復元すべきものがまだ無い」正常系のため、空のマニフェストで`ok: true`を返す。
+ * ファイルはあるが内容を解析できない場合（破損）、不正なキー（パストラバーサルの疑いが
+ * あるエントリ）を含む場合、エントリ数が上限を超える場合は`ok: false`にする。ここを
+ * 黙って空マニフェストへ倒すと、統合済みだった成果があったことに呼び出し側が
+ * 気づけない（「0件で成功」に見えてしまう。Issueの本題。`deserializeManifest`も
+ * Issue #440で同じ基準のfail-closedへ揃えてある）。
+ *
+ * 読み込み経路そのものの検査（シンボリックリンク・実パス厳密一致・サイズ上限）は
+ * `readGuardedTextFile`が担う。
+ */
+export async function loadPersistedManifest(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<LoadManifestResult> {
+  const filePath = integrationManifestPath(workspaceRoot, runId);
+  const read = await readGuardedTextFile(
+    workspaceRoot,
+    filePath,
+    MAX_MANIFEST_FILE_BYTES,
+    MANIFEST_LABEL,
+    fs,
+  );
+  if (!read.ok) {
+    return { ok: false, message: read.message };
+  }
+  if (read.content === undefined) {
+    return { ok: true, manifest: new Map() };
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(read.content);
   } catch {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（内容を解析できません）: ${sanitizeForLog(filePath)}`,
+      message: `${MANIFEST_LABEL}を復元できませんでした（内容を解析できません）: ${sanitizeForLog(filePath)}`,
     };
   }
   const { manifest, ok } = manifestFromParsedJson(parsed);
   if (!ok) {
     return {
       ok: false,
-      message: `疑似worktreeの統合マニフェストを復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${sanitizeForLog(filePath)}`,
+      message: `${MANIFEST_LABEL}を復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${sanitizeForLog(filePath)}`,
     };
   }
   return { ok: true, manifest };
 }
 
 /**
- * マニフェストを永続化する（design.md §16.11の対象。Issue #380）。タスク1件分の統合
- * （`IntegrationQueue.integrate`）が成功するたびに呼び出し側（`integratePseudoWorktree`）
- * から呼ぶ。書き込み失敗（EACCES/ENOSPC等）はここでは吸収せず、他のポートメソッドと
- * 同じく素通しでthrowする（呼び出し側が「統合自体は成立している」ことと区別して扱うため）。
+ * `.agents/worktrees/<runId>/`配下の永続化ファイル（`manifest.json`・`baseline.json`）を
+ * 経路の検査付きで書き出す共通処理（design.md §16.11の対象。Issue #380・Issue #1115）。
+ * 書き込み失敗（EACCES/ENOSPC等）はここでは吸収せず、他のポートメソッドと同じく素通しで
+ * throwする（呼び出し側が「統合自体は成立している」ことと区別して扱うため）。
  *
- * 書き込みの前に、`loadPersistedManifest`と同じくシンボリックリンクの経路検知を行う
+ * `label`はエラーメッセージへ埋め込む対象の呼び名（`readGuardedTextFile`と同じもの）。
+ *
+ * 書き込みの前に、`readGuardedTextFile`と同じくシンボリックリンクの経路検知を行う
  * （レビュー指摘: medium）。
  *
  * さらに、`reflectIntegrationToWorkspace`の書き込み経路（PR #504）と同じ二段構えの
@@ -511,19 +556,19 @@ export async function loadPersistedManifest(
  * フェイルクローズする（`mkdir`が`recursive: true`で必ず`dirPath`を作る以上、
  * `workspaceRoot`自体は通常存在するはずのため）。
  */
-export async function persistManifest(
+async function writeGuardedTextFile(
   workspaceRoot: string,
-  runId: string,
-  manifest: IntegrationManifest,
+  filePath: string,
+  content: string,
+  label: string,
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<void> {
-  const filePath = integrationManifestPath(workspaceRoot, runId);
   const dirPath = path.dirname(filePath);
 
   const symlinkedAncestor = await findSymlinkedAncestor(workspaceRoot, filePath, fs);
   if (symlinkedAncestor !== undefined) {
     throw new Error(
-      `疑似worktreeの統合マニフェストの永続化先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
+      `${label}の永続化先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${sanitizeForLog(symlinkedAncestor)}`,
     );
   }
 
@@ -553,7 +598,7 @@ export async function persistManifest(
   // 状態になり、Issueが挙げた2つの失われ方は塞げる。電源断の耐性は別途の課題とする。
   const tempPath = path.join(dirPath, `.pwt-manifest-${randomBytes(16).toString('hex')}.tmp`);
   try {
-    await fs.writeTextFile(tempPath, serializeManifest(manifest));
+    await fs.writeTextFile(tempPath, content);
 
     // Issue #505（再々監査で発覚）: `expected`の起点を`.agents/worktrees`
     // （`pseudoWorktreesRootDir(workspaceRoot)`）に置いていたが、これでもまだ低い。
@@ -593,7 +638,7 @@ export async function persistManifest(
       realTempPath !== expectedTempPath
     ) {
       throw new Error(
-        `疑似worktreeの統合マニフェストの永続化先が実際には想定した場所以外を指していたため、` +
+        `${label}の永続化先が実際には想定した場所以外を指していたため、` +
           `書き込みを取り消しました: ${sanitizeForLog(realTempPath ?? tempPath)}`,
       );
     }
@@ -604,6 +649,174 @@ export async function persistManifest(
     await fs.removeFile(tempPath);
     throw e;
   }
+}
+
+/**
+ * マニフェストを永続化する（design.md §16.11の対象。Issue #380）。タスク1件分の統合
+ * （`IntegrationQueue.integrate`）が成功するたびに呼び出し側（`integratePseudoWorktree`）
+ * から呼ぶ。経路の検査・一時ファイル+`rename`による確定は`writeGuardedTextFile`が担う。
+ */
+export async function persistManifest(
+  workspaceRoot: string,
+  runId: string,
+  manifest: IntegrationManifest,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<void> {
+  await writeGuardedTextFile(
+    workspaceRoot,
+    integrationManifestPath(workspaceRoot, runId),
+    serializeManifest(manifest),
+    MANIFEST_LABEL,
+    fs,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 反映の比較基準（baseline）の永続化（design.md §16.20、Issue #1115）
+// ---------------------------------------------------------------------------
+
+/** 経路検査付きの読み書きでエラーメッセージへ埋め込む、比較基準の呼び名。 */
+const BASELINE_LABEL = '疑似worktreeの基準スナップショット';
+
+/**
+ * 基準スナップショットへ持ち込めるエントリ数の上限。マニフェスト（`MAX_MANIFEST_ENTRIES`）と
+ * 違い、こちらは**ワークスペース全体**のファイル一覧のため桁が1つ上がる。除外設定
+ * （`node_modules`等）を効かせた後の実ワークスペースが数万件規模になることは十分あり、
+ * その倍以上を安全側の上限として取る。
+ */
+const MAX_BASELINE_ENTRIES = 500_000;
+
+/**
+ * 基準スナップショットのファイル本体として許容する最大サイズ（バイト）。
+ * `MAX_BASELINE_ENTRIES`（50万件）×1エントリあたり百数十バイトを見込んだ規模に
+ * 安全マージンを掛ける。`MAX_MANIFEST_FILE_BYTES`と同じく`JSON.parse`の前の足切り。
+ */
+const MAX_BASELINE_FILE_BYTES = 200 * 1024 * 1024;
+
+/**
+ * 基準スナップショットの永続化先（`<runId>/baseline.json`）。`manifest.json`と同じ
+ * `<runId>`配下に置くため、スナップショット走査（`listFiles`）の除外対象に必ず入る
+ * （反映がこのファイル自身を拾うことはない）。
+ */
+export function pseudoBaselinePath(workspaceRoot: string, runId: string): string {
+  const message = runIdError(runId);
+  if (message !== undefined) {
+    throw new Error(message);
+  }
+  return path.join(pseudoWorktreesRootDir(workspaceRoot), runId, 'baseline.json');
+}
+
+/** `Snapshot`をJSONへ直列化する（`serializeManifest`と同じ形）。 */
+export function serializeSnapshot(snapshot: Snapshot): string {
+  return JSON.stringify(Object.fromEntries(snapshot));
+}
+
+/**
+ * `serializeSnapshot`の逆変換。`manifestFromParsedJson`と同じ基準で、不正なキー
+ * （パストラバーサルの疑いがあるエントリ）・上限超過・値の形が違うエントリがあれば
+ * `ok: false`にする。基準が一部でも欠けていると「人が編集した」と「元から無かった」の
+ * 区別が付かなくなるため、部分的な復元で先へ進ませない。
+ */
+function snapshotFromParsedJson(parsed: unknown): { snapshot: Snapshot; ok: boolean } {
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { snapshot: new Map(), ok: false };
+  }
+  const rawEntries = Object.entries(parsed as Record<string, unknown>);
+  if (rawEntries.length > MAX_BASELINE_ENTRIES) {
+    return { snapshot: new Map(), ok: false };
+  }
+  const result = new Map<string, SnapshotEntry>();
+  for (const [key, value] of rawEntries) {
+    if (!isValidManifestKey(key)) {
+      return { snapshot: new Map(), ok: false };
+    }
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      typeof (value as { size?: unknown }).size !== 'number' ||
+      typeof (value as { mtimeMs?: unknown }).mtimeMs !== 'number'
+    ) {
+      return { snapshot: new Map(), ok: false };
+    }
+    const { size, mtimeMs } = value as { size: number; mtimeMs: number };
+    result.set(key, { size, mtimeMs });
+  }
+  return { snapshot: result, ok: true };
+}
+
+export type LoadBaselineResult =
+  { ok: true; baseline: Snapshot | undefined } | { ok: false; message: string };
+
+/**
+ * 永続化された基準スナップショットを読み戻す（Issue #1115）。
+ *
+ * **リロードをまたいでも「run開始時のワークスペース」を基準に保つための仕組み。**
+ * 以前は復元時にその時点のワークスペースから基準を取り直していたため、run開始後・
+ * リロード前に人が行った編集が基準へ吸収され、再開後の反映（`reflectIntegrationToWorkspace`）
+ * が「変わっていない」と判断してその編集を上書きしていた（Issueの本題）。
+ *
+ * ファイルが無い場合（初回実行）は`baseline: undefined`で`ok: true`を返す。呼び出し側が
+ * 改めてワークスペースを走査して基準を作り、`persistBaseline`で書き出す。ファイルはあるが
+ * 読めない・壊れている場合は`ok: false`にする（**取り直しへ黙って倒さない**。取り直すと
+ * この関数が防ごうとしている上書きがそのまま起きるため）。
+ */
+export async function loadPersistedBaseline(
+  workspaceRoot: string,
+  runId: string,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<LoadBaselineResult> {
+  const filePath = pseudoBaselinePath(workspaceRoot, runId);
+  const read = await readGuardedTextFile(
+    workspaceRoot,
+    filePath,
+    MAX_BASELINE_FILE_BYTES,
+    BASELINE_LABEL,
+    fs,
+  );
+  if (!read.ok) {
+    return { ok: false, message: read.message };
+  }
+  if (read.content === undefined) {
+    return { ok: true, baseline: undefined };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.content);
+  } catch {
+    return {
+      ok: false,
+      message: `${BASELINE_LABEL}を復元できませんでした（内容を解析できません）: ${sanitizeForLog(filePath)}`,
+    };
+  }
+  const { snapshot, ok } = snapshotFromParsedJson(parsed);
+  if (!ok) {
+    return {
+      ok: false,
+      message: `${BASELINE_LABEL}を復元できませんでした（不正なエントリ、またはエントリ数が上限を超えています）: ${sanitizeForLog(filePath)}`,
+    };
+  }
+  return { ok: true, baseline: snapshot };
+}
+
+/**
+ * 基準スナップショットを永続化する（Issue #1115）。run開始時に一度と、反映に成功して
+ * 基準を更新するたび（`reflectPseudoWorktree`）に呼ぶ。`persistManifest`と同じく経路の
+ * 検査・一時ファイル+`rename`による確定を通す。
+ */
+export async function persistBaseline(
+  workspaceRoot: string,
+  runId: string,
+  baseline: Snapshot,
+  fs: PseudoWorktreeFileSystemPort,
+): Promise<void> {
+  await writeGuardedTextFile(
+    workspaceRoot,
+    pseudoBaselinePath(workspaceRoot, runId),
+    serializeSnapshot(baseline),
+    BASELINE_LABEL,
+    fs,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1380,7 @@ export type RemovePseudoIntegrationResult =
     };
 
 /**
- * 撤去3関数（`removePseudoWorktree` / `removeManifestFile` / `removeRunDirIfEmpty`）に
+ * 撤去3関数（`removePseudoWorktree` / `removePersistedFile` / `removeRunDirIfEmpty`）に
  * 共通する、消す前の実パス確認（Issue #493。Issue #484 / PR #504が
  * `reflectIntegrationToWorkspace`の書き込み・削除経路に適用した規律を、撤去系3関数へも
  * 横展開する）。
@@ -1335,21 +1548,23 @@ export async function removePseudoWorktree(
 }
 
 /**
- * `<runId>/manifest.json`（`integrationManifestPath`、Issue #380）を撤去する。
+ * `<runId>`配下の永続化ファイル（`manifest.json`＝`integrationManifestPath`、Issue #380 /
+ * `baseline.json`＝`pseudoBaselinePath`、Issue #1115）を撤去する。
  * `removePseudoWorktree`と同じ規律（消す前に実パス解決し、想定した場所と厳密に一致する
  * ことを確かめる。削除自体も確認済みの実パスに対して行う）を、ディレクトリではなく
  * ファイル1つに対して行う。
  */
-async function removeManifestFile(
+async function removePersistedFile(
   workspaceRoot: string,
   runId: string,
+  resolvePath: (workspaceRoot: string, runId: string) => string,
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<RemovePseudoIntegrationResult> {
   const identifierMessage = runIdError(runId);
   if (identifierMessage !== undefined) {
     return { ok: false, reason: 'invalidIdentifier', message: identifierMessage };
   }
-  const target = integrationManifestPath(workspaceRoot, runId);
+  const target = resolvePath(workspaceRoot, runId);
 
   const check = await resolveRealRemovalTarget(workspaceRoot, target, fs);
   if (check.status === 'absent') {
@@ -1391,7 +1606,7 @@ async function removeManifestFile(
  * 呼び出し側で警告として観測できれば足りる。
  *
  * 消す前に実パス解決し想定した場所と厳密に一致することを確かめ、削除自体も確認済みの
- * 実パスに対して行う規律（Issue #493）は`removePseudoWorktree`/`removeManifestFile`と同じ。
+ * 実パスに対して行う規律（Issue #493）は`removePseudoWorktree`/`removePersistedFile`と同じ。
  */
 async function removeRunDirIfEmpty(
   workspaceRoot: string,
@@ -1457,9 +1672,22 @@ export async function removePseudoIntegration(
   runId: string,
   fs: PseudoWorktreeFileSystemPort,
 ): Promise<RemovePseudoIntegrationResult> {
-  const manifestResult = await removeManifestFile(workspaceRoot, runId, fs);
+  const manifestResult = await removePersistedFile(
+    workspaceRoot,
+    runId,
+    integrationManifestPath,
+    fs,
+  );
   if (!manifestResult.ok) {
     return manifestResult;
+  }
+
+  // 比較基準（`baseline.json`、Issue #1115）もマニフェストと同じタイミングで撤去する。
+  // 残すと`removeRunDirIfEmpty`が`<runId>`を空と見なせず入れ物が片付かないうえ、
+  // 次に同じrunIdが現れた場合（理論上のみ）に古い基準を読み戻してしまう
+  const baselineResult = await removePersistedFile(workspaceRoot, runId, pseudoBaselinePath, fs);
+  if (!baselineResult.ok) {
+    return baselineResult;
   }
 
   const integrationResult = await removePseudoWorktree(

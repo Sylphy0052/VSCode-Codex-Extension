@@ -4,7 +4,9 @@ import {
   cloneWorkspace,
   diffSnapshots,
   ensureIntegrationDir,
+  loadPersistedBaseline,
   loadPersistedManifest,
+  persistBaseline,
   persistManifest,
   reflectIntegrationToWorkspace,
   takeSnapshot,
@@ -260,6 +262,15 @@ async function resolveWorktreeWorkingDirectory(
  * ファイルが無いため空のマニフェストになる（正常系）。ファイルはあるが壊れている場合
  * だけ`queue`へ復元失敗の理由を持たせ、`reflectPseudoWorktree`側がワークスペースへの
  * 反映を「0件で成功」にせず明示的に止める判定材料にする。
+ *
+ * **反映の比較基準（`baseline`）も永続化したものを読み戻す（`<runId>/baseline.json`。
+ * Issue #1115）。** 以前はこの関数が呼ばれるたびにワークスペースを走査して基準を
+ * 取り直していたため、リロード復元時には「run開始後・リロード前に人が行った編集」が
+ * 基準そのものへ吸収されてしまい、再開後の反映が人の編集を変更なしと見なして上書き
+ * していた。基準を取り直すのは永続化された基準がまだ無いとき（＝run開始時）だけにし、
+ * 取り直した基準はその場で永続化する。**永続化された基準が壊れていて読めない場合は
+ * 取り直しへ倒さずfail-closedにする**（取り直すと、この仕組みが防ごうとしている
+ * 上書きがそのまま起きるため）。
  */
 export async function resolvePseudoState(
   self: WorkflowRunnerInternals,
@@ -274,20 +285,43 @@ export async function resolvePseudoState(
   if (!ensured.ok) {
     return { ok: false, message: ensured.message };
   }
+  // 永続化された基準（Issue #1115）を先に読む。壊れている場合はワークスペースからの
+  // 取り直しへ倒さず、復元の失敗として扱う（取り直した基準にはリロード前の人の編集が
+  // 既に取り込まれており、反映がそれを上書きしてしまうため）
+  const loadedBaseline = await loadPersistedBaseline(repoRoot, runId, deps.fs);
+  if (!loadedBaseline.ok) {
+    return { ok: false, message: loadedBaseline.message };
+  }
   // `takeSnapshot`はワークスペースを読めなかった時点で例外を投げる（Issue #1118）。
   // ここで受け止めないと、`Result`を返す約束のこの関数から例外が漏れて呼び出し元
   // （`runner.ts`のrun開始・`runnerRestore.ts`の復元）が未ハンドルrejectになる。
   // **欠けたbaselineのまま先へ進ませない。** 比較の基準が欠けていると、最後の反映で
   // 「人が消した」と「読めなかった」の区別が付かなくなる。
   let baseline: Snapshot;
-  try {
-    baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
-  } catch (e) {
-    const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
-    return {
-      ok: false,
-      message: `ワークスペースの走査に失敗したため、疑似worktreeの基準スナップショットを取得できませんでした: ${detail}`,
-    };
+  if (loadedBaseline.baseline !== undefined) {
+    baseline = loadedBaseline.baseline;
+  } else {
+    try {
+      baseline = await takeSnapshot(repoRoot, deps.exclude, deps.fs);
+    } catch (e) {
+      const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      return {
+        ok: false,
+        message: `ワークスペースの走査に失敗したため、疑似worktreeの基準スナップショットを取得できませんでした: ${detail}`,
+      };
+    }
+    // 取り直したのはこのrunで初めて基準を作る場合（＝run開始時）だけ。次のリロードで
+    // 読み戻せるようここで永続化する。書き込みに失敗したらrunを始めない——基準を
+    // 永続化できないまま走ると、リロード後の反映がIssue #1115の上書きへ戻ってしまう
+    try {
+      await persistBaseline(repoRoot, runId, baseline, deps.fs);
+    } catch (e) {
+      const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      return {
+        ok: false,
+        message: `疑似worktreeの基準スナップショットを永続化できませんでした: ${detail}`,
+      };
+    }
   }
   const loadedManifest = await loadPersistedManifest(repoRoot, runId, deps.fs);
   if (!loadedManifest.ok) {
@@ -483,6 +517,27 @@ export async function reflectPseudoWorktree(
         live.repoRoot,
         deps.fs,
       );
+      // 更新後の基準を永続化する（Issue #1115）。ここを書かないと、次のリロードで
+      // 読み戻される基準が「1周目の反映より前」の内容のままになり、自分が書いた
+      // 反映結果を人の編集と誤検知して2周目の反映が止まる。
+      //
+      // 書き込みに失敗しても反映そのものは既に成立しているため、runは止めず警告に
+      // 留める（`resolvePseudoState`のrun開始時とは扱いが異なる）。この場合、次の
+      // リロードでは古い基準が読み戻され、反映が`workspaceChanged`で止まる側へ倒れる
+      try {
+        await persistBaseline(live.repoRoot, runId, live.pseudo.baseline, deps.fs);
+      } catch (e) {
+        const detail = sanitizeForLog(e instanceof Error ? e.message : String(e));
+        const message =
+          `疑似worktreeの基準スナップショットを更新できませんでした。` +
+          `リロード後の反映が「ワークスペースが変更された」と判断して止まることがあります: ${detail}`;
+        self.deps.log.warn(`[workflow ${runId}] ${message}`);
+        live.warnings.push({
+          kind: 'pseudoWorktreeReflectBlocked',
+          taskId: undefined,
+          message,
+        });
+      }
     }
     if (!result.ok && result.reason === 'workspaceChanged') {
       const changed = `${sanitizeForLog(result.message)}（変更されたパス: ${formatPathList(result.changedPaths)}）`;
