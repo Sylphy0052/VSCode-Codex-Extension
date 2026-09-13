@@ -2915,6 +2915,10 @@ describe('上限で止まったターンだけを自動続行の対象にする�
   const failedResultLine = (): string =>
     `${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true })}\n`;
 
+  /** 成功して終わったターン。実CLIは`subtype`を必ず載せる。 */
+  const successResultLine = (): string =>
+    `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false })}\n`;
+
   /** 費用の取得など、ターンとは別の応答で状態が動く場面を模す。 */
   const costLine = (): string =>
     `${JSON.stringify({
@@ -2960,7 +2964,7 @@ describe('上限で止まったターンだけを自動続行の対象にする�
   it('上限の通知が残っていても、成功したターンには予約しない', async () => {
     const { session, panel, sent } = await openChat();
     session.receive(rateLimitLine('rejected'));
-    session.receive(resultLine());
+    session.receive(successResultLine());
     await flush();
 
     expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
@@ -2988,7 +2992,7 @@ describe('上限で止まったターンだけを自動続行の対象にする�
     await vi.advanceTimersByTimeAsync(31 * 60_000);
     expect(sent).toHaveLength(1);
     session.receive(initLine('s1'));
-    session.receive(resultLine());
+    session.receive(successResultLine());
     await flush();
     expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
 
