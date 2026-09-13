@@ -1362,6 +1362,22 @@ export interface LiveRun {
       }
     | undefined;
   /**
+   * 疑似worktree（design.md §16.20）の統合先を**復元できなかった**理由。リロード時
+   * （`rebuildLiveRun`）に`resolvePseudoState`が失敗したときだけ入る（Issue #1114）。
+   *
+   * `pseudo`が`undefined`になる理由は2つあり、この2つは区別しなければならない。
+   *
+   * - `WorkflowRunnerDeps.pseudoWorktree`を渡していない（後方互換。ワークスペース直下を
+   *   そのまま共有する旧挙動が正しい）
+   * - 隔離を使っていたrunの復元で、統合先の再作成に失敗した（隔離できない）
+   *
+   * 後者を「隔離なし」と同じに扱うと、自動再開や手動の再試行が**隔離なしで元の
+   * ワークスペースへ書き込む**。ここに理由が入っている場合、`sharedFallback`の
+   * 作業ディレクトリ解決は元のrepoRootを返さず例外を投げてタスクを`failed`にする
+   * （`resolveSharedFallbackWorkingDirectory`参照）。
+   */
+  pseudoRestoreFailure: string | undefined;
+  /**
    * タスク間メッセージング（design.md §16.21）。`WorkflowRunnerDeps.messaging`が渡され、
    * かつMCPサーバの起動に成功したときだけ実行開始時に一度作る。
    *
@@ -2219,6 +2235,9 @@ export class WorkflowRunner {
       branchNaming,
       draftPullRequest,
       pseudo,
+      // 実行開始時は統合先の作成に失敗した時点で実行自体を始めない
+      // （`createPseudoWorktreeForStart`）ため、ここへ理由が入ることはない
+      pseudoRestoreFailure: undefined,
       messaging: undefined,
       messagingHub: undefined,
       messagingSetupInFlight: undefined,
