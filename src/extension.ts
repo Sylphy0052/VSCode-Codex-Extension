@@ -2074,8 +2074,10 @@ async function planWorkflowCommand(
  * チームモードを開始する（design.md §16.44、issue #693、`agent.workflows.team`）。
  *
  * 生成経路は`planWorkflowFromGoalCommand`と同じで、違いはタスクへ`role`を書かせることだけ。
- * ロードマップからの生成を選ばせないのは、ロードマップのフェーズは既に工程で割れており、
- * そこへ役割を重ねる意味が薄いため。ここでも実行はせず、YAMLを作ってViewを開くところで止める。
+ * この入口はゴール文からの生成に限る——ロードマップからチームモードで生成する経路は
+ * `agent.workflows.plan`（`planWorkflowFromRoadmapCommand`）のモード選択に置いた
+ * （Issue #1034）。同じことを2つの入口から選べるようにすると、どちらを使えばよいかが
+ * 分からなくなるため、ここには足さない。ここでも実行はせず、YAMLを作ってViewを開くところで止める。
  */
 async function planTeamWorkflowCommand(
   chat: ChatViewManager,
@@ -2233,6 +2235,11 @@ async function planWorkflowFromRoadmapCommand(
     return;
   }
 
+  const team = await pickWorkflowTeamMode();
+  if (team === undefined) {
+    return;
+  }
+
   // 選んだフェーズをまとめて1本のYAMLにする。合計がタスク数の上限を超える選択では
   // フェーズ単位で複数のYAMLへ分ける（design.md §16.19 2段目）
   const chunks = splitRoadmapPhasesIntoChunks(pickedPhases);
@@ -2270,6 +2277,7 @@ async function planWorkflowFromRoadmapCommand(
           cwd: workspaceRoot,
           baseline: readSafetyBaseline(),
           log,
+          team,
         });
       },
     );
@@ -2347,6 +2355,35 @@ async function planWorkflowFromRoadmapCommand(
       `${chunks.length}個のうち${failed}個のワークフローを生成できませんでした（開いたエディタの内容を確認してください）`,
     );
   }
+}
+
+/**
+ * ロードマップ経路の生成モードを選ばせる（design.md §16.44、Issue #1034）。
+ *
+ * キャンセル（Escape）と選択を区別するため、選ばれなかった場合は`undefined`を返す。
+ * 通常モードを先頭に置いて既定の挙動（`team: false`）を保つ。設定で既定を持たせないのは、
+ * 選択状態が画面に出ないまま意図せずチームモードになるのを避けるため（Issue #1034の方針）。
+ *
+ * `export`しているのはテストから直接呼ぶため。コマンド本体（`planWorkflowFromRoadmapCommand`）は
+ * 分解セッションまで動かさないと通せず、キャンセルでYAMLを作らないことだけを確かめられない。
+ */
+export async function pickWorkflowTeamMode(): Promise<boolean | undefined> {
+  const picked = await vscode.window.showQuickPick(
+    [
+      {
+        label: '通常モード',
+        description: '役割を付けずにタスクへ分解する（従来どおり）',
+        team: false,
+      },
+      {
+        label: 'チームモード',
+        description: '各タスクへ役割を付け、役割ごとのmodel/effortで実行する（design.md §16.44）',
+        team: true,
+      },
+    ],
+    { placeHolder: '生成モードを選択', ignoreFocusOut: true },
+  );
+  return picked?.team;
 }
 
 /**
