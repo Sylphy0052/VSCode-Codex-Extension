@@ -2499,3 +2499,107 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
   });
 });
+describe('共通の自動再開設定を全会話へ反映する（Issue #1209）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    __mock.setConfig('codex', {});
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** タブを2枚開き、どちらも webview の`ready`まで済ませる。 */
+  async function openTwoChats(): Promise<{
+    connection: FakeAppServerConnection;
+    panelA: ReturnType<typeof __mock.lastCreatedPanel>;
+    panelB: ReturnType<typeof __mock.lastCreatedPanel>;
+  }> {
+    const { manager, connection } = createManager();
+    const openedA = manager.openNew('/workspace/root');
+    await tick();
+    const openedB = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+    connection.resolveFirst('thread/start', threadStartResult('thread-B'));
+    await openedA;
+    await openedB;
+    const panelA = __mock.createdPanels[__mock.createdPanels.length - 2];
+    const panelB = __mock.createdPanels[__mock.createdPanels.length - 1];
+    panelA?.webview.simulateMessage({ type: 'ready' });
+    panelB?.webview.simulateMessage({ type: 'ready' });
+    return { connection, panelA, panelB };
+  }
+
+  /** 指定した会話を上限で失敗させる（issue #1199で読むようにした`turn/completed`のstatus）。 */
+  function failByUsageLimit(connection: FakeAppServerConnection, threadId: string): void {
+    connection.notify('turn/started', {
+      threadId,
+      turn: { id: `turn-${threadId}` },
+    });
+    connection.notify('turn/completed', {
+      threadId,
+      turn: {
+        id: `turn-${threadId}`,
+        status: 'failed',
+        error: {
+          message: '上限に達しました',
+          codexErrorInfo: 'usageLimitExceeded',
+        },
+      },
+    });
+  }
+
+  type ResumeStatus = { enabled?: boolean; scheduledAt?: number } | undefined;
+
+  function lastResumeStatus(panel: { webview: { sent: unknown[] } } | undefined): ResumeStatus {
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    return (last?.state as unknown as { limitAutoResumeStatus?: ResumeStatus } | undefined)
+      ?.limitAutoResumeStatus;
+  }
+
+  it('無効の間に止まった2会話は、片方のタブでONにすると両方に予約が入る', async () => {
+    // `update`はネストして書くため、初期値もネストで置く（フラットなキーは`getNested`が
+    // 先に拾い、トグルの書き込みを隠してしまう）
+    __mock.setConfig('agent', { chat: { limitAutoResume: { enabled: false } } });
+    const { connection, panelA, panelB } = await openTwoChats();
+    failByUsageLimit(connection, 'thread-A');
+    failByUsageLimit(connection, 'thread-B');
+    await flushStatePosts();
+    // 対照: 無効の間はどちらにも予約が無い
+    expect(lastResumeStatus(panelA)?.scheduledAt).toBeUndefined();
+    expect(lastResumeStatus(panelB)?.scheduledAt).toBeUndefined();
+
+    panelA?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await tick();
+    await flushStatePosts();
+
+    // 操作していないタブにも、新しい状態通知を与えずに予約が入る
+    expect(typeof lastResumeStatus(panelB)?.scheduledAt).toBe('number');
+    expect(typeof lastResumeStatus(panelA)?.scheduledAt).toBe('number');
+  });
+
+  it('片方のタブでOFFにすると、もう片方の予約と表示も消える', async () => {
+    const { connection, panelA, panelB } = await openTwoChats();
+    failByUsageLimit(connection, 'thread-A');
+    failByUsageLimit(connection, 'thread-B');
+    await flushStatePosts();
+    expect(typeof lastResumeStatus(panelB)?.scheduledAt).toBe('number');
+
+    panelA?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await tick();
+    await flushStatePosts();
+
+    expect(lastResumeStatus(panelB)?.scheduledAt).toBeUndefined();
+    expect(lastResumeStatus(panelB)?.enabled).toBe(false);
+    // メニューのボタン（`limitAutoResume`メッセージ）も操作していないタブへ届く
+    const toggles = (panelB?.webview.sent ?? []).filter(
+      (m): m is { type: string; enabled: boolean } =>
+        typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'limitAutoResume',
+    );
+    expect(toggles[toggles.length - 1]?.enabled).toBe(false);
+  });
+});
