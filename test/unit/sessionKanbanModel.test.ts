@@ -62,6 +62,20 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
     expect(board.cards.idle[0]?.cwdLabel).toBe('app');
   });
 
+  it('絶対パスをカードへ載せない（issue 1039）', () => {
+    const board = buildSessionKanban(
+      [session({ cwd: '/home/u/work/repo/pkg/app' })],
+      ['/home/u/work/repo'],
+    );
+    const card = board.cards.idle[0];
+    // 陽性対照: カード自体は作られている（条件を間違えて空を見ていない）
+    expect(card?.cwdLabel).toBe('app');
+    // 画面共有やスクリーンショットでホームディレクトリ名などが映らないよう、
+    // 末尾の要素だけを渡す。`...session` のままだと絶対パスが画面まで届く
+    expect(card).not.toHaveProperty('cwd');
+    expect(JSON.stringify(card)).not.toContain('/home/u');
+  });
+
   it('各列をタイトルの昇順で並べる', () => {
     const board = buildSessionKanban(
       [

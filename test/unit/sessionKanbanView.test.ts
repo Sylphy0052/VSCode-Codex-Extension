@@ -65,6 +65,19 @@ function ready(h: Harness): void {
   h.panel.webview.simulateMessage({ type: 'ready' });
 }
 
+describe('SessionKanbanViewManager（issue 1039、パスの露出）', () => {
+  it('カードのツールチップに作業ディレクトリを出さない', () => {
+    const h = open();
+    const html = h.panel.webview.html;
+    // 陽性対照: ツールチップ自体は今も付けている（綴り違いで空振りしていない）
+    expect(html).toContain("button.title=card.title || '名称未設定';");
+    // 画面共有やスクリーンショットで絶対パスが映らないよう、パスは載せない。
+    // 全体を確かめたいときはサイドバーのセッション一覧のツールチップを見る
+    expect(html).not.toContain('card.cwd;');
+    expect(html).not.toContain("card.title + '\\n' + card.cwd");
+  });
+});
+
 describe('SessionKanbanViewManager（issue #1012、盤面の送信）', () => {
   beforeEach(() => {
     __mock.reset();
