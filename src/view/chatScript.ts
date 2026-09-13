@@ -1478,9 +1478,14 @@ export function chatScript(
 
     const actions = document.createElement('div');
     actions.className = 'actions';
+    // 「この会話では常に許可」は、会話単位の許可を実際に送れるプロバイダにだけ出す
+    // （issue #1194）。Claude Codeのcan_use_tool応答には単発の許可しか無く、
+    // 押しても次の同じ要求でまた承認カードが出る。押せるのに効かないボタンは出さない。
+    // 対応する側を列挙する（除外側を書くと、プロバイダが増えたとき既定で出てしまう）
+    const forSession = APPROVAL_PROVIDER === 'codex';
     for (const [label, decision, secondary] of [
       ['許可', 'accept', false],
-      ['この会話では常に許可', 'acceptForSession', true],
+      ...(forSession ? [['この会話では常に許可', 'acceptForSession', true]] : []),
       ['拒否', 'decline', true],
     ]) {
       const button = document.createElement('button');
