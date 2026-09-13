@@ -4095,7 +4095,7 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 
 #### 上限を2系統に分ける
 
-`MAX_APP_SERVER_LINE_BYTES`（512MB）を追加し、app-serverとのJSON-RPCだけがこちらを使う。
+`MAX_APP_SERVER_LINE_BYTES`（384MB）を追加し、app-serverとのJSON-RPCだけがこちらを使う。
 `MAX_LINE_BUFFER_BYTES`（10MB）は据え置きで、Claude CLIのストリーム（`claude/streamSession.ts`）・
 `util/ndjson.ts`・`orchestrator/` はそのまま。上限そのものは撤廃しない。撤廃すると壊れた出力を
 延々と連結してメモリを食い潰す経路（issue #402、1点目）が復活する。
@@ -4132,6 +4132,33 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 バイト数がUTF-16のcode unit数以上・その3倍以下に必ず収まることを使い、安い `length` で決着する
 場合を先に返してから実際に数える。
 
+#### 上限はV8の文字列長上限より下でなければならない（issue #1153）
+
+当初この上限は512MB（536870912）だったが、V8の文字列長上限
+（`buffer.constants.MAX_STRING_LENGTH` = 536870888）より**24バイト大きかった**。
+
+`FrameBuffer`はチャンクを文字列へ連結してから上限を判定する。上限が文字列長上限以上だと、
+`overflow`が立つより先に連結が`RangeError: Invalid string length`で落ちる。実測（2026-09-13）では、
+改行を含まない1MiBのASCIIチャンクを投入し続けても`overflow`は一度も立たず、535822336バイトの時点で
+RangeErrorになった。つまり**issue #402（1点目）の保護がこの経路だけ効いていなかった**。
+
+さらに`frames.push(chunk)`は呼び出し側の`try`の外にある（`appServerClient.ts`・`connection.ts`とも
+stdoutの`data`ハンドラの中）。RangeErrorはそのまま未捕捉例外になり、上限超過時に行うはずの後始末
+（`clear()`・接続を切って再起動）も実行されない。
+
+上限を384MB（402653184）へ下げ、文字列長上限との間に128MBの余裕を置いた。判定は連結の**後**に
+行うため、ピーク時の文字列長は「上限＋直前に受け取ったチャンク1個分」になる。stdioのパイプの
+チャンクは通常64KBなので、128MBは桁を取り違えても踏まない余裕にあたる。UTF-8のバイト数はUTF-16の
+code unit数以上なので、「バイト数が上限以下」なら「文字数も上限以下」が保証される。バイト側だけを
+見れば足りる。
+
+この不変条件は`test/unit/jsonRpc.test.ts`で固定している。既定値を実際に超えさせる形のテストは
+512MB級のメモリと時間を要するため置いていない（上限超過の挙動そのものは、各テストが`maxBytes`を
+小さい値へ差し替えて確かめている）。
+
+`FrameBuffer`が文字列ではなく`Buffer`で溜める形にすれば文字列長上限から解放されるが、
+`consumeFrames`の戻り値（`rest: string`）と行を文字列で取り出す作り全体に波及するため見送った。
+
 #### 確かめ方
 
 - `test/unit/jsonRpc.test.ts`: `consumeFrames` の `maxBytes` で既定より大きい行を通せること、渡した
@@ -4141,6 +4168,8 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
   位置で二分して試す。`chunk.toString('utf8')`のままなら35通りのうち6通りで落ちることを確認済み）
 - 10MBを超える実セッションでの分岐は `docs/manual-test.md` C-56 に委ねる（ユニットテストでは実物の
   app-serverを相手にできないため）
+- `test/unit/jsonRpc.test.ts`: `MAX_APP_SERVER_LINE_BYTES` が `buffer.constants.MAX_STRING_LENGTH`
+  より下にあり、チャンク1個分を大きく上回る余裕（64MiB以上）が残っていること（issue #1153）
 
 ## 15. 作業記録（日報・週報連携）
 

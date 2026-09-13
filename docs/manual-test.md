@@ -1139,6 +1139,22 @@ find ~/.codex/sessions -name '*.jsonl' -size +10M -printf '%s %p\n' | sort -rn |
 - 操作: 同じセッションで `/btw` を実行する（ephemeralなfork。常駐接続経由）
 - 期待: 脇道のタブが開いて応答が返る
 
+#### 実施記録（2026-09-13、codex-cli 0.154.0）
+
+単発起動の `AppServerClient` 側の経路は、GUIを介さず確認済み。本物の `codex app-server` を
+子プロセスとして起動し、`initialize` → `initialized` → `thread/resume` → `thread/fork` を
+実ロールアウトへ投げ、受信は `src/codex/jsonRpc.ts` の `FrameBuffer` をそのまま通した。
+
+- 113MBのロールアウト: `thread/resume` 50.2 MiB / 6573 ms、途中のターンからの `thread/fork`
+  23.7 MiB / 4802 ms。どちらも成功し、overflowは立たない
+- 手元最大の531MiBのロールアウト（turn 182件）: `thread/resume` 227.7 MiB / 8260 ms、
+  `thread/fork` 78.6 MiB / 13470 ms。どちらも成功
+- 同じ113MBのロールアウトで上限を修正前の10MBへ戻すと、`thread/resume` の時点で
+  「app-serverからの出力が上限（10485760バイト）を超えて改行なしで届きました」を再現する
+
+残っているのは、**チャット画面側の分岐（`chatView.ts` の `forkFrom`）と `/btw`**（常駐接続
+`src/appserver/connection.ts` 経由）。受信側は別実装のため、GUIでの確認が要る。
+
 ### C-57 ステータスバーの使用量にゲージが添う（issue #756、design.md「使用量の表示」）
 
 - 準備: Codexのセッションを1度やり取りして、ステータスバーに `Codex NN%` が出る状態にする
