@@ -29,6 +29,7 @@ export function createGoalLoopOptions(host: GoalEvaluatorProvider, log: Logger):
       model: settings.model,
       timeoutMs: settings.timeoutSeconds * 1000,
       logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
     }),
     maxIndeterminate: settings.maxIndeterminate,
   };

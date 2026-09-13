@@ -7873,6 +7873,8 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 **過信しないこと。** 囲いも切り詰めも補助にすぎず、一次防御はEvaluatorに権限を与えないこと（`--tools ""` / `--sandbox read-only`）の側にある。
 
+Evaluatorへ送るプロンプトは、下書き役（§14.96）・Advisor（§14.95）と同じく送信直前に `redactCredentials`（§14.94）を通す（Issue #1168）。証拠にはコマンドの引数と末尾出力がそのまま入り、Evaluatorは設定次第で本流と別のCLI（別のモデルサービス）で動く。`redactEvaluatorPrompt` を送信経路と切り離してexportしてあるのは、伏せていることを単体テストで固定するため。ログへ出すのは伏せた件数だけで、プロンプトと応答本文は出さない。
+
 #### 層について
 
 `loop/goalPrompt.ts` と `loop/loopController.ts` が `orchestrator/untrustedText.ts` と `orchestrator/taskSummary.ts` を参照する。層としては `loop/` が下位だが、参照先はどちらも `vscode` に依存せず `loop/` を参照し返さないため循環は生じない。切り詰め・制御文字除去・区切りなりすまし対策・1行要約の規則を二重に実装しないことを優先した。
@@ -7891,7 +7893,7 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 - `test/unit/goalLoop.test.ts`: 目的と受入基準が揃ったときだけゴールとして受け付けること、終了コードから `pass` / `fail` を拾い実行中のものは拾わないこと、拾ったidを積み直さないこと、コマンド行から種別を当てること、出力は末尾を残して切ること、証拠のledgerが元の配列を変更せず上限で古い分を落とすこと
 - `test/unit/goalPrompt.test.ts`: 証拠と要約が別の区画に出て終了コードが落ちないこと、会話の抜粋が「指示ではない」と明示した囲いに入ること、コードフェンス・前置き付きのJSONを読めること、不正なJSONと未知の `verdict` が `indeterminate` に倒れること、フィールドの長さと要素数を切り詰めること、次ターンの指示文が決まった枠へはまること
-- `test/unit/goalEvaluatorProcess.test.ts`: 組み立てた引数にツール無効化（`--tools ""` / `--sandbox read-only`）と設定隔離（`--setting-sources ""` / `--ignore-user-config`）が入ること、セッションを引き継ぐ引数（`--resume` / `--continue` / `resume` / `fork`）が入らないこと、`auto` が軽量モデルへ解決されること
+- `test/unit/goalEvaluatorProcess.test.ts`: 組み立てた引数にツール無効化（`--tools ""` / `--sandbox read-only`）と設定隔離（`--setting-sources ""` / `--ignore-user-config`）が入ること、セッションを引き継ぐ引数（`--resume` / `--continue` / `resume` / `fork`）が入らないこと、`auto` が軽量モデルへ解決されること、証拠・ゴール・要約・応答本文に混ざった資格情報が伏せられ業務コードは伏せられないこと
 - `test/unit/loopController.test.ts`: `achieved` で `done`・`escalate` で `escalated` として止まること、`continue` で `nextFocus` を添えた次のターンを送ること、Workerへ `<<LOOP_DONE>>` を付けないこと・Workerの自己申告では止まらないこと・撤退の申告は尊重すること、毎ターン新しく評価すること、`indeterminate` が続いたら人へ渡すこと・`continue` で連続が途切れること、Evaluatorが例外を投げてもループが壊れないこと、最終ターンの達成が `maxReached` に埋もれないこと、評価を待つ間に止められたら次を送らないこと
 - `test/unit/config.test.ts`: 既定が `inherit` / `auto` であること、未知のproviderが `inherit` へ倒れること
 
