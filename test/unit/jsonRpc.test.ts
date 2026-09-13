@@ -1,3 +1,4 @@
+import { constants } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 import {
   consumeFrames,
@@ -7,6 +8,29 @@ import {
   readForkedThreadId,
 } from '../../src/codex/jsonRpc';
 import { MAX_APP_SERVER_LINE_BYTES, MAX_LINE_BUFFER_BYTES } from '../../src/process/childProcess';
+
+describe('MAX_APP_SERVER_LINE_BYTES', () => {
+  it('V8の文字列長上限より下にある（issue #1153）', () => {
+    // `FrameBuffer`はチャンクを文字列へ連結してから上限を判定する。上限が
+    // `buffer.constants.MAX_STRING_LENGTH`以上だと、overflowが立つより先に連結が
+    // `RangeError: Invalid string length`で落ち、issue #402の保護がこの経路だけ効かなくなる。
+    // 当初の512MB（536870912）は文字列長上限（536870888）より24バイト大きかった
+    expect(MAX_APP_SERVER_LINE_BYTES).toBeLessThan(constants.MAX_STRING_LENGTH);
+  });
+
+  it('チャンク1個分を大きく上回る余裕を文字列長上限との間に残している', () => {
+    // 上限の判定は連結の**後**に行うため、ピーク時の文字列長は
+    // 「この上限＋直前に受け取ったチャンク1個分」になる。stdioのパイプのチャンクは通常64KBだが、
+    // 桁を取り違えたまま通らないよう64MiBを余裕の下限として固定する
+    const headroom = constants.MAX_STRING_LENGTH - MAX_APP_SERVER_LINE_BYTES;
+    expect(headroom).toBeGreaterThanOrEqual(64 * 1024 * 1024);
+  });
+
+  it('会話アイテムを全件含む応答を通せる大きさである（issue #795）', () => {
+    // 実測できている最大の`thread/resume`応答は227.7MiB（531MiBのロールアウト、2026-09-13）
+    expect(MAX_APP_SERVER_LINE_BYTES).toBeGreaterThan(256 * 1024 * 1024);
+  });
+});
 
 describe('consumeFrames', () => {
   it('完成した行だけをメッセージにする', () => {
