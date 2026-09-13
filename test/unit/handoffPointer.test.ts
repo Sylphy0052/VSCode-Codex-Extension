@@ -643,29 +643,29 @@ describe('新セッションの初回応答を待つ', () => {
     };
   }
 
-  it('ターンが成功して終われば true を返し、listenerを外す', async () => {
+  it('ターンが成功して終われば succeeded:true を返し、listenerを外す', async () => {
     const w = watcher({ ...initialChatState, turnCompletionSeq: 3 });
     const done = waitForFirstTurn(w);
     expect(w.stateListeners).toHaveLength(1);
 
     w.emit({ ...initialChatState, turnCompletionSeq: 4, turnFailed: false });
 
-    expect(await done).toBe(true);
+    expect(await done).toEqual({ succeeded: true });
     expect(w.stateListeners).toHaveLength(0);
   });
 
-  it('ターンが失敗して終われば false を返す（旧セッションを残す）', async () => {
+  it('ターンが失敗して終われば reason:turnFailed を返す（旧セッションを残す）', async () => {
     const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
     const done = waitForFirstTurn(w);
 
     w.emit({ ...initialChatState, turnCompletionSeq: 1, turnFailed: true });
 
-    expect(await done).toBe(false);
+    expect(await done).toEqual({ succeeded: false, reason: 'turnFailed' });
   });
 
-  it('時間切れなら false を返す', async () => {
+  it('時間切れなら reason:timeout を返す', async () => {
     const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
-    expect(await waitForFirstTurn(w, 1)).toBe(false);
+    expect(await waitForFirstTurn(w, 1)).toEqual({ succeeded: false, reason: 'timeout' });
     expect(w.stateListeners).toHaveLength(0);
   });
 
@@ -677,6 +677,6 @@ describe('新セッションの初回応答を待つ', () => {
     w.emit({ ...initialChatState, turnCompletionSeq: 0, busy: true });
     expect(w.stateListeners).toHaveLength(1);
 
-    expect(await done).toBe(false);
+    expect(await done).toEqual({ succeeded: false, reason: 'timeout' });
   });
 });
