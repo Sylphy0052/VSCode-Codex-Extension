@@ -3616,10 +3616,17 @@ export class WorkflowRunner {
     // 起動へ渡す配線（`TaskSessionInput.mcp`を読む側）はsrc/view/の変更が要るため、この
     // Issueの範囲外（`WorkflowRunnerMessagingDeps`のJSDoc参照）。ここでは値を渡すところまで
     const messagingUrl = live.messaging?.transport.registerTask(taskId);
+    const issueNumber = task.issue ?? live.createdTaskIssues.get(taskId);
     const input: TaskSessionInput = {
       // タブ名にtaskIdを含めるため（Issue #599）。ワークフローが並列に開いたタスクの
       // タブが、これが無いと全部同じ名前になる。権限の決定には使わない
       taskId,
+      // タブ名を`T1`ではなく`#1200 実装`にするため（Issue #1201）。どちらも権限の決定には
+      // 使わない。Issue番号は定義ファイルの指定を優先し、無ければ直前の
+      // `maybeCreateTaskIssue`が自動起票した番号を使う（起票に失敗していれば両方undefined
+      // で、タブ名は従来どおりtaskIdへ落ちる）
+      ...(issueNumber !== undefined ? { issue: issueNumber } : {}),
+      ...(task.role !== undefined ? { teamRole: task.role } : {}),
       cwd,
       config: effective.config,
       sandbox: effective.sandbox,

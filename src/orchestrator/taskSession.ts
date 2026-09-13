@@ -1,6 +1,7 @@
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
+import type { TeamRole } from './rolePresets';
 
 /**
  * チャット画面側がオーケストレータへ提供する口（design.md §16.10）。
@@ -89,6 +90,25 @@ export interface TaskSessionInput {
    * `mergeResolutionTaskId`が先に効くため、こちらは通常のタスクにだけ現れる。
    */
   taskId?: string;
+  /**
+   * このタスクが対応するIssue番号（Issue #1201）。`taskId`と同じく**タブ名を分ける用途
+   * だけに使う**（権限の決定にも、PR本文の`Closes #`にも使わない。後者は
+   * `WorkflowTask.issue`と`live.createdTaskIssues`を直接読む既存の経路が持つ）。
+   *
+   * 渡すと、タブ名が`T1`のような内部idではなく`#1200`になり、どの作業のタブかを
+   * 画面から追える。定義ファイルに`issue`が無く自動起票もされていない場合は省略し、
+   * 従来どおり`taskId`へ落ちる。
+   */
+  issue?: number;
+  /**
+   * このタスクの役割（Issue #1201）。`taskId`と同じく**タブ名を分ける用途だけに使う**
+   * （`model`/`effort`の既定値の解決は`rolePresets.ts`が済ませた値が`config`に入っている）。
+   *
+   * 名前を`role`にしないのは、このinterfaceの`role`（`'task' | 'orchestrator'`。
+   * セッションの種別）が別物のため。同じ名前にすると、権限に関与しない表示用の値と
+   * セッションの種別が混ざる。
+   */
+  teamRole?: TeamRole;
   /** タスクの作業ディレクトリ（worktreeまたは明示cwd）。 */
   cwd: string;
   config: TaskSessionConfig;
