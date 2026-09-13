@@ -42,6 +42,12 @@ export interface BaseChatPanel {
    * `reveal()` / `open()` はこの値が `undefined` ならパネルを作り直す。
    */
   panel: vscode.WebviewPanel | undefined;
+  /**
+   * 最後に見えていた列。`panel.viewColumn` はタブが非表示（背面）のとき`undefined`に
+   * なるため、自動引き継ぎ（背面タブでも発火する）が新パネルの列を決めるときの
+   * フォールバックに使う。`attachPanel`の`onDidChangeViewState`で更新する。
+   */
+  lastKnownViewColumn: vscode.ViewColumn | undefined;
   /** セッションを開始した作業ディレクトリ。カンバンのワークスペース絞り込みに使う。 */
   cwd: string | undefined;
   session: ChatSessionLike;
@@ -245,8 +251,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     return [...this.panels.values()];
   }
 
-  /** 実際のwebviewパネルを新規作成する。viewTypeとパネルオプションはプロバイダごとに異なる。 */
-  protected abstract createWebviewPanel(entry: TPanel, preserveFocus: boolean): vscode.WebviewPanel;
+  /**
+   * 実際のwebviewパネルを新規作成する。viewTypeとパネルオプションはプロバイダごとに異なる。
+   *
+   * `targetViewColumn`が未指定なら`ViewColumn.Active`にフォールバックする（従来通り）。
+   */
+  protected abstract createWebviewPanel(
+    entry: TPanel,
+    preserveFocus: boolean,
+    targetViewColumn: vscode.ViewColumn | undefined,
+  ): vscode.WebviewPanel;
 
   /** webviewへ渡すHTML本体を組み立てる。`renderShell`へ渡すオプションはプロバイダごとに異なる。 */
   protected abstract renderPanelHtml(entry: TPanel, panel: vscode.WebviewPanel): string;
@@ -259,7 +273,11 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * （design.md §16.10の4「reveal()でパネルを作り直し、ChatStateから会話を描き直す」）。
    * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
    */
-  protected showPanel(entry: TPanel, preserveFocus: boolean): void {
+  protected showPanel(
+    entry: TPanel,
+    preserveFocus: boolean,
+    targetViewColumn?: vscode.ViewColumn,
+  ): void {
     if (entry.disposed) {
       return;
     }
@@ -271,7 +289,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       }
       return;
     }
-    const panel = this.createWebviewPanel(entry, preserveFocus);
+    const panel = this.createWebviewPanel(entry, preserveFocus, targetViewColumn);
     this.attachPanel(entry, panel);
   }
 
@@ -286,11 +304,17 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   protected attachPanel(entry: TPanel, panel: vscode.WebviewPanel): void {
     entry.panel = panel;
+    if (panel.visible) {
+      entry.lastKnownViewColumn = panel.viewColumn;
+    }
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.renderPanelHtml(entry, panel);
     panel.webview.onDidReceiveMessage((message: unknown) => this.dispatchMessage(entry, message));
     panel.onDidChangeViewState(() => {
+      if (panel.visible) {
+        entry.lastKnownViewColumn = panel.viewColumn;
+      }
       if (panel.active) {
         this.active = entry;
         this.activeSequence = nextActivePanelSequence();
