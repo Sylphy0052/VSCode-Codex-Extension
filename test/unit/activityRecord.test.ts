@@ -192,6 +192,63 @@ describe('buildActivityRecord (kind: result)', () => {
   });
 });
 
+describe('buildActivityRecord は本文を伏せてから書く（Issue #1169）', () => {
+  const base = {
+    now: at('2026-08-07T00:00:00Z'),
+    timeZoneOffsetMinutes: -540,
+    source: 'claude-code' as const,
+    cwd: '/w/repo',
+    sessionId: 's',
+  };
+  // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+  const fakeGitHubToken = `ghp_${'a1b2c3d4'.repeat(5)}`;
+  const fakeOpenAiKey = `sk-live-${'q'.repeat(24)}`;
+
+  it('発言（prompt）に混ざったトークンと代入値を伏せる', () => {
+    const record = buildActivityRecord({
+      ...base,
+      kind: 'prompt',
+      text: `GITHUB_TOKEN=${fakeGitHubToken} で push して。DBは password: "hunter2-hunter2" です`,
+    });
+    expect(record?.text).not.toContain(fakeGitHubToken);
+    expect(record?.text).not.toContain('hunter2-hunter2');
+    expect(record?.text).toContain('で push して');
+  });
+
+  it('成果（result）に混ざったトークンも伏せ、編集ファイル名は残す', () => {
+    const record = buildActivityRecord({
+      ...base,
+      kind: 'result',
+      text: `export OPENAI_API_KEY=${fakeOpenAiKey} を settings.local.json に書きました`,
+      editedFiles: ['/w/repo/settings.local.json'],
+    });
+    expect(record?.text).not.toContain(fakeOpenAiKey);
+    expect(record?.text).toContain('[edit: settings.local.json]');
+  });
+
+  it('200文字の境界をまたぐ値も、切り詰め後に原文の断片が残らない', () => {
+    // 値の先頭が200文字の内側、末尾が外側に来るように置く。切り詰めてから伏せると、
+    // 途切れた値がどのルールにも当たらず先頭部分が残る
+    const prefix = 'a'.repeat(SUMMARY_MAX_LEN - 20);
+    const record = buildActivityRecord({
+      ...base,
+      kind: 'prompt',
+      text: `${prefix} password: "hunter2-hunter2-hunter2-hunter2"`,
+    });
+    expect(record?.text).not.toContain('hunter2');
+    expect(record?.text).toContain('<MASKED>');
+  });
+
+  it('伏せる対象が無ければ本文をそのまま残す', () => {
+    const record = buildActivityRecord({
+      ...base,
+      kind: 'prompt',
+      text: 'const tokenType = access_token; を直して',
+    });
+    expect(record?.text).toBe('const tokenType = access_token; を直して');
+  });
+});
+
 describe('serializeActivityRecord', () => {
   it('改行で終わる1行のJSONにする', () => {
     const record = buildActivityRecord({
