@@ -13470,6 +13470,7 @@ tasks:
     expect(warnings.some((m) => m.includes('残ります'))).toBe(true);
   });
 });
+
 /**
  * 独立検証（design.md §16.31(c)）の`await`中に人が「全体の停止」を押しても、検証は
  * 停止を確認せずに同じセッションの`runLoop`を張り直していた（Issue #1121、静的精査
