@@ -121,9 +121,11 @@ describe('chatScript', () => {
       true,
     );
     expect(source).toContain('SHOW_TURN_FORK = true');
-    // Codex画面は「直前の発言」を対象にするが、Claude Code画面は「押した発言自身」を
-    // 対象にする（`rewind_conversation`の向きがCodexの`thread/fork`と逆のため）
-    expect(source).toContain('return SHOW_TURN_FORK ? item.id : previousTurnId');
+    // Claude Code画面は「押した発言自身」のidを対象にする（`rewind_conversation`は
+    // 「戻す対象＝分岐したい発言そのもの」を指すため）。Codex画面は押した発言自身の
+    // turnIdを `beforeTurnId` として渡す（Issue #1161）
+    expect(source).toContain('if (SHOW_TURN_FORK) return item.id;');
+    expect(source).toContain('return item.turnId;');
     expect(source).toContain("type: 'fork', turnId: node.forkTarget");
   });
 

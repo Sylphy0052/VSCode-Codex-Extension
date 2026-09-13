@@ -887,12 +887,12 @@ export interface ChatShellOptions {
   /**
    * 発言ごとに「ここから分岐」ボタンを出すか（issue #333、design.md §14.61）。
    *
-   * Codex画面は常にtrue相当（`showTurnFork`を渡さなくても、対象は「直前の発言の
+   * Codex画面は常にtrue相当（`showTurnFork`を渡さなくても、対象は「押した発言自身の
    * `turnId`」として既定で計算される）。Claude Code画面はこれをtrueにして渡し、対象を
-   * 「発言自身のuuid（`item.id`）」に切り替える。`rewind_conversation`（会話の途中の
-   * ターンから分岐）はfork対象の発言自身を戻り先として指定する仕様のため、Codexの
-   * `thread/fork`（対象は「引き継ぐ最後のターン」＝直前の発言）とは向きが違う
-   * （`chatScript.ts` の `turnForkTarget` 参照）。
+   * 「発言自身のuuid（`item.id`）」に切り替える。どちらも押した発言自身を指すが、渡し方は
+   * 違う。Codexの `thread/fork` は `beforeTurnId`（そのターンとそれ以降を除外する指定。
+   * Issue #1161）として**ターン**のidを取り、`rewind_conversation` は戻り先の**発言**の
+   * uuidを取る（`chatScript.ts` の `turnForkTarget` 参照）。
    */
   showTurnFork?: boolean;
   /**

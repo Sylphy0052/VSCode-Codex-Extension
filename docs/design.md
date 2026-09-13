@@ -661,14 +661,34 @@ turn/completed
 
 ### 会話途中からの分岐
 
-`thread/fork` に `lastTurnId` を渡すと、そのターンまでを引き継いだ新しいスレッドができる（元は無傷）。CLIの `codex fork` はターンを指定できないため、この操作はapp-server経由でのみ実現できる。
+`thread/fork` に `beforeTurnId` を渡すと、**そのターンとそれ以降を除いた**新しいスレッドができる（元は無傷）。押した指示自身のターンを渡す。CLIの `codex fork` はターンを指定できないため、この操作はapp-server経由でのみ実現できる。
+
+#### なぜ `lastTurnId` ではなく `beforeTurnId` か（Issue #1161）
+
+CLIの指定は2種類ある（`codex app-server generate-ts --experimental` の `v2/ThreadForkParams.ts`、codex-cli 0.154.0で確認）。
+
+- `lastTurnId`: そのターン**まで**を引き継ぐ（inclusive）。`The referenced turn cannot be in progress.`
+- `beforeTurnId`: そのターン**とそれ以降**を除外する。`lastTurnId` とは併用できない
+
+当初は「直前のユーザー発言の `turnId`」を `lastTurnId` として渡していた。`turn/steer`（応答中の割り込み送信）は**現在のターンへ割り込む**（`chatSession.ts` が `expectedTurnId` に現在の `turnId` を送る）ため、1つのターン T1 にユーザー発言が2つ（A・B）並ぶ。この形になると B の分岐対象が **B自身が属する T1** になり、
+
+- T1 が実行中なら `cannot be in progress` で拒否される
+- T1 が完了済みなら通るが、`lastTurnId: T1` は T1 を含める指定なので、**消したかった B が分岐先に残る**。エラーにならないので気付けない
+
+`beforeTurnId` へ切り替えると、押した発言自身のターンを除外する形になり、どちらも起きない。通常の会話（1ターン1発言）では `beforeTurnId: T_N` と `lastTurnId: T_{N-1}` は同じ範囲を指すので、振る舞いは変わらない。分岐点の計算から「直前のターンを探す」間接参照が消えるため、ターンIDが欠けたときに壊れる系統（§9.5の復元経路、Issue #1155）も分岐点からは無くなる。
+
+会話の**最初**のターンにはボタンを出さない。除外すると何も残らないため。編集再送はこの場合だけ「先頭から新しい会話」（`editFromStart`）へ倒す。判定は `forkTarget` の有無ではなく「手前に完了したターンがあるか」で行う。`turnId` を持たない項目でも `forkTarget` は空になるので、それを先頭と取り違えると会話途中の書き直しが先頭からのやり直しへ倒れる。
+
+残る制約: 同一ターン内に複数のユーザー発言がある場合、`beforeTurnId: T1` は T1 ごと除外するので**手前の発言 A とその応答も落ちる**。CLIはターン単位でしか切れず、発言単位の境界はどちらの指定でも作れない。過少側（分岐先を見れば分かる）を採り、過剰側（気付けない）を避けた。
+
+古いCLIへのフォールバックは作らない。`beforeTurnId` を知らないcodex-cliでは `thread/fork` がエラーを返すが、そのエラーは画面に出て、押したボタンも再試行可能な状態へ戻る（Issue #1156）。capability検出や2段送りは症状を隠す継ぎ足しになるため入れない。`beforeTurnId` の存在は codex-cli 0.153.4 と 0.154.0 で確認済み。
 
 分岐点に使う `turnId` は、**届く経路によって在り処が違う**（Issue #1155）。
 
 - ライブ通知（`item/started` / `item/updated` / `item/completed`）: 通知自身が `turnId` を持つ。`chatState.ts` が `{ ...item, turnId }` で項目へ付ける
 - 復元（`thread/resume`、および同じ形の ephemeral な `thread/fork` の応答）: ターンIDは**外側**の `thread.turns[].id` にあり、`turns[].items[]` の各項目は持たない（実測: codex-cli 0.154.0、2026-09-13。項目のキーは `{type, id, clientId, content}`）
 
-`chatSession.ts` の `readInitialItems` が外側のIDを各項目へ移す。移し替えを忘れると復元した会話の項目は `turnId: undefined` になり、画面側（`chatScript.ts` の `turnForkTarget` は Codex では「直前のユーザー発言の `turnId`」を返す）が分岐対象を決められず、**「ここから分岐」ボタンが出ない**。同じ値を編集再送も宛先に使う（`editTarget`）ため、書き直しが「会話の先頭から新しく始める」扱い（`editFromStart`）へ倒れる。
+`chatSession.ts` の `readInitialItems` が外側のIDを各項目へ移す。移し替えを忘れると復元した会話の項目は `turnId: undefined` になり、画面側（`chatScript.ts` の `turnForkTarget` は Codex では押した発言自身の `turnId` を返す）が分岐対象を決められず、**「ここから分岐」ボタンが出ない**。同じ値を編集再送も宛先に使う（`editTarget`）ため、書き直しの送り先も決まらない。
 
 `turns[].id` はロールアウトの `turn_context.turn_id` と同じ値であることを実測で確かめてある（ライブ通知で付くものと一致する）。
 
@@ -1098,7 +1118,7 @@ TUIタブ（当時の`buildClaudeShellArgs`、§14.2）には付けない。CLI�
 
 #### 会話の途中のターンから分岐（実測で不可と確定、[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22)）
 
-Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会話途中からの分岐」）に相当する経路をClaude Code側で探したが、**拡張機能が使う `--print`（非対話）経路には存在しない**。実測した内容は次のとおり（CLI 2.1.227）。
+Codexの `forkFromTurn`（`thread/fork` に `beforeTurnId` を渡す。§9.5「会話途中からの分岐」）に相当する経路をClaude Code側で探したが、**拡張機能が使う `--print`（非対話）経路には存在しない**。実測した内容は次のとおり（CLI 2.1.227）。
 
 1. **`initialize` の `commands`（90件）に `branch` / `fork` は含まれない**。一方、CLIバイナリの文字列解析では `name:"branch"`（`type:"local-jsx"`、`description:"Create a branch of the current conversation at this point"`）と `name:"fork"`（`type:"local-jsx"`、`description:"Copy this conversation into a new background session and keep working here"`）が実在することを確認した。`local-jsx` は対話的なUIコンポーネント（Ink）の起動を要求する型で、TTYを持たない `--print` では一覧から除かれているとみられる。
 2. **`/branch <name>` / `/fork <directive>` をユーザーメッセージとして送っても実行されない**。CLIは `model: "<synthetic>"` の応答で `"/branch isn't available in this environment."` / `"/fork isn't available in this environment."` を返すだけで、新しいセッションもtranscriptも作られない（実測。CLI自身が安全側に倒して即座に拒否しており、副作用は無い）。
@@ -3526,7 +3546,7 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 
 #### 実測した挙動
 
-1. **`target_message_uuid`は「戻す対象＝分岐したい発言そのもの」を指す**。Codexの`thread/fork`が`lastTurnId`（引き継ぐ最後のターン＝対象の一つ手前）を取るのとは向きが逆で、Claude側は押した発言自身のuuidをそのまま渡す。transcriptの`jsonl`の`"type":"user"`行のトップレベル`uuid`と一致する（`ChatItem.id`としてすでに保持済み。§9.5・上の`rewind_files`節と同じ経路、`src/claude/streamJson.ts`の`applyUser`）
+1. **`target_message_uuid`は「戻す対象＝分岐したい発言そのもの」を指す**。Codexの`thread/fork`が`beforeTurnId`（除外するターン＝押した発言自身のターン。Issue #1161）を取るのとは指定の形が違い、Claude側は押した発言自身のuuidをそのまま渡す。transcriptの`jsonl`の`"type":"user"`行のトップレベル`uuid`と一致する（`ChatItem.id`としてすでに保持済み。§9.5・上の`rewind_files`節と同じ経路、`src/claude/streamJson.ts`の`applyUser`）
 2. **後続の人の発言が残っていると「stale target」として拒否される**。1回の`rewind_conversation`は対象より後の人の発言をすべて消してから対象へ戻す想定の操作ではなく、直近の1件しか戻せない。複数ターン分岐るには**新しい順に1件ずつ逐次**送る必要がある（並列に投げると失敗する）
 3. **応答の封筒は常に`subtype:"success"`（`ControlResponse.ok`は常にtrue）で、成否は`payload.rewound`で判定する**。失敗時も`rewound:false`とエラー文言が同じ成功封筒の中に入って返ってくる。既存の`readRewindFilesResult`（`ok`で成否判定）とは判定方法をあえて分け、`readRewindConversationResult`を新設した（`src/claude/control.ts`）。`ok`だけを見て成功と誤判定しないことをテストで固定した
 4. **`prefillText`はCLIが返す値をそのまま使う**。戻した対象発言の本文がここに入って返ってくるとみられ（新しいタブの入力欄へ流し込む）、拡張機能側でtranscriptを読んで再構成することはしない
@@ -9080,14 +9100,14 @@ webview側は届いた差し分を `index` で当てて積み直し、**総数�
 
 #### 裏側（プロバイダごとの差）
 
-|            | Claude Code画面                                                                                                   | Codex画面                                                                                                 |
-| ---------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| 戻し方     | `--fork-session`で開き、対象の発言まで`rewind_conversation`を逐次送る（§14.61の`openForkFromTurn`をそのまま使う） | `thread/fork`に対象の手前のターンを`lastTurnId`として渡す                                                 |
-| 対象の向き | 押した発言自身のuuid                                                                                              | 押した発言の手前のターンのid                                                                              |
-| 最初の発言 | 発言自身のidを常に持つため通常の経路で戻せる                                                                      | 引き継ぐターンが無く`lastTurnId`を作れないため、分岐ではなく`openNewWithPrompt`で新しい会話として送り直す |
-| 送信       | `dispatch`                                                                                                        | `sendOrQueue`                                                                                             |
+|            | Claude Code画面                                                                                                   | Codex画面                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 戻し方     | `--fork-session`で開き、対象の発言まで`rewind_conversation`を逐次送る（§14.61の`openForkFromTurn`をそのまま使う） | `thread/fork`に対象の発言自身のターンを`beforeTurnId`として渡す                                 |
+| 対象の単位 | 押した発言自身のuuid                                                                                              | 押した発言自身が属するターンのid                                                                |
+| 最初の発言 | 発言自身のidを常に持つため通常の経路で戻せる                                                                      | 除外すると引き継ぐ会話が残らないため、分岐ではなく`openNewWithPrompt`で新しい会話として送り直す |
+| 送信       | `dispatch`                                                                                                        | `sendOrQueue`                                                                                   |
 
-対象の向きが逆である点は分岐（§14.61）と同じ事情で、webview側の`turnForkTarget`が既に吸収している。「修正」もその結果（`forkTarget`）をそのまま送り先に使い、Codex画面で`undefined`になる場合（＝最初の発言）だけ`editFromStart`として区別する。
+対象の単位が違う点は分岐（§14.61）と同じ事情で、webview側の`turnForkTarget`が既に吸収している。「修正」もその結果（`forkTarget`）をそのまま送り先に使い、Codex画面で会話の最初のターンのときだけ`editFromStart`として区別する（Issue #1161。`forkTarget`が`undefined`かどうかではなく、手前に完了したターンがあるかで判定する）。
 
 #### 同じタブでは戻せない
 

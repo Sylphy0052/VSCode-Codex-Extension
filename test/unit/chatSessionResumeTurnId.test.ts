@@ -68,8 +68,8 @@ describe('復元した会話のターンID（Issue #1155）', () => {
   });
 
   it('2ターン目以降のユーザー発言は、手前のターンを分岐対象にできる', () => {
-    // 画面側（chatScript.ts）は「直前のユーザー発言のturnId」を lastTurnId に使う。
-    // turnIdが埋まっていないと分岐ボタンも編集再送の宛先も決められない
+    // 画面側（chatScript.ts）は押した発言自身の turnId を beforeTurnId に使う
+    // （Issue #1161）。turnIdが埋まっていないと分岐ボタンも編集再送の宛先も決められない
     const users = itemsOf(RESUME_RESULT).filter((i) => i.kind === 'userMessage');
 
     expect(users).toHaveLength(2);

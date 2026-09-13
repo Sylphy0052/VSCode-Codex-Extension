@@ -147,7 +147,7 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
     );
   });
 
-  test('C-10: thread/forkはlastTurnIdまでの範囲だけを引き継ぎ、新しいタブが別に開く', async function () {
+  test('C-10: thread/forkはbeforeTurnIdの手前までを引き継ぎ、新しいタブが別に開く', async function () {
     this.timeout(TEST_TIMEOUT_MS);
     const connection = await openChat('thread-fork-src');
     connection.respond('thread/fork', () => ({ thread: { id: 'thread-fork-dst' } }));
@@ -170,10 +170,11 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
       WAIT_OPTIONS,
     );
     // 分岐は「押した指示の手前まで」だけを引き継ぐ。スレッド全体ではなく
-    // `lastTurnId` で範囲を切ることがこの要求の中身から確かめられる（C-10）。
+    // `beforeTurnId`（そのターンとそれ以降を除外する指定。Issue #1161）で範囲を切ることが、
+    // この要求の中身から確かめられる（C-10）。
     assert.deepEqual(connection.firstCall('thread/fork')?.params, {
       threadId: 'thread-fork-src',
-      lastTurnId: 'turn-A',
+      beforeTurnId: 'turn-A',
     });
 
     // 分岐先は新しいスレッドとして`thread/resume`で開き直され、元のタブとは別に増える

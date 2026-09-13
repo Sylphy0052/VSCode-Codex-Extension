@@ -1278,20 +1278,26 @@ export function chatScript(
 
   // 「ここから分岐」ボタンの対象を決める（issue #333、design.md §14.61）。
   //
-  // Codex画面（既定）: 対象は直前の発言のturnId（thread/forkのlastTurnIdは
-  // 「引き継ぐ最後のターン」を指すため）。最初の発言には手前が無いのでボタンを出さない。
+  // Codex画面（既定）: 対象は押した発言**自身**のturnId。thread/forkへは beforeTurnId
+  // （そのターンとそれ以降を除外する指定）として渡す（Issue #1161）。会話の最初の
+  // ターンでは除外すると何も残らないのでボタンを出さない。以前は「直前の発言のturnId」を
+  // lastTurnId（引き継ぐ最後のターン＝含める指定）として渡していたが、同じターンへ
+  // 割り込んで送った指示から分岐すると、実行中のターン自身を指してCLIに拒否され、
+  // 完了後は消したかった指示自身が分岐先に残っていた。
   //
   // Claude Code画面（SHOW_TURN_FORK）: 対象は押した発言自身のid（rewind_conversationの
-  // target_message_uuidは「戻す対象＝分岐したい発言そのもの」を指すため、Codexとは
-  // 向きが違う）。Claude Codeの発言idは常に持っているため、最初の発言でもボタンを出す
-  // （CLIが対象にできない場合はエラー応答として画面に返る。design.md §14.61の
-  // 「未確認のリスク」参照）。
+  // target_message_uuidは「戻す対象＝分岐したい発言そのもの」を指す）。Claude Codeの
+  // 発言idは常に持っているため、最初の発言でもボタンを出す（CLIが対象にできない場合は
+  // エラー応答として画面に返る。design.md §14.61の「未確認のリスク」参照）。
   function turnForkTarget(item, previousTurnId) {
     if (item.kind !== 'userMessage') return undefined;
-    return SHOW_TURN_FORK ? item.id : previousTurnId;
+    if (SHOW_TURN_FORK) return item.id;
+    // 最初のターン（手前に完了したターンが無い）と、turnIdを持たない項目には出さない
+    if (!item.turnId || previousTurnId === undefined) return undefined;
+    return item.turnId;
   }
 
-  function updateNode(node, item, forkTarget) {
+  function updateNode(node, item, forkTarget, isFirstTurn) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) {
       const detail =
@@ -1351,12 +1357,15 @@ export function chatScript(
     node.forkTarget = forkTarget;
     node.fork.hidden = !(item.kind === 'userMessage' && forkTarget);
 
-    // 書き直しの送り先は分岐と同じ（issue #1073）。Codex画面で最初の発言だけは手前の
-    // ターンが無く forkTarget が undefined になるため、分岐ではなく新しい会話として
-    // 送り直す（editFromStart）。Claude Code画面は発言自身のidを常に持つのでここは常にfalse
+    // 書き直しの送り先は分岐と同じ（issue #1073）。Codex画面で会話の最初の発言だけは
+    // 分岐先が空になるため、分岐ではなく新しい会話として送り直す（editFromStart）。
+    // 「最初かどうか」は forkTarget の有無ではなく isFirstTurn で判定する（Issue #1161）。
+    // turnIdを持たない項目でも forkTarget は undefined になるため、それを先頭と取り違えると
+    // 会話の途中の書き直しが先頭からのやり直しへ倒れる。Claude Code画面は発言自身のidを
+    // 常に持ち forkTarget が埋まるので、ここは従来どおり常にfalse
     const editable = item.kind === 'userMessage';
     node.editTarget = editable ? forkTarget : undefined;
-    node.editFromStart = editable && forkTarget === undefined;
+    node.editFromStart = editable && forkTarget === undefined && isFirstTurn === true;
     node.edit.hidden = !editable || node.editing;
     // 別の発言として作り直された枠に、前の発言の編集状態を持ち越さない
     if (!editable && node.editing) endEdit(node);
@@ -1416,7 +1425,7 @@ export function chatScript(
         nodes.set(item.id, node);
         log.appendChild(node.wrap);
       }
-      updateNode(node, item, turnForkTarget(item, previousTurnId));
+      updateNode(node, item, turnForkTarget(item, previousTurnId), previousTurnId === undefined);
       if (item.kind === 'userMessage' && item.turnId) previousTurnId = item.turnId;
     }
 

@@ -2196,7 +2196,8 @@ describe('Codexのファイル復元と送り直し', () => {
       panel.webview.simulateMessage({
         type: 'editResend',
         messageId: 'user1',
-        turnId: forking ? 'turn0' : undefined,
+        // 画面は押した発言（user1）自身のturnIdを送る（Issue #1161）
+        turnId: forking ? 'turn1' : undefined,
         text: 'revised',
         restoreFiles: true,
       });
@@ -2207,7 +2208,8 @@ describe('Codexのファイル復元と送り直し', () => {
       } else if (forking) {
         expect(connection.requests.find((r) => r.method === 'thread/fork')?.params).toEqual({
           threadId: 'original',
-          lastTurnId: 'turn0',
+          // 押した指示自身のターンとそれ以降を除く（Issue #1161）
+          beforeTurnId: 'turn1',
         });
         connection.resolveFirst('thread/fork', threadStartResult('new-thread'));
         await tick(40);
