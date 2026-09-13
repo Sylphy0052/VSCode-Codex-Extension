@@ -807,14 +807,25 @@ export class ClaudeChatViewManager
    * 会話そのものは渡さない。`handoff.ts` が旧セッションのtranscriptの在処と読み方だけを
    * 書いたポインタファイルを1枚作り、新セッションへはそのパスを送る。組み立てにモデルは
    * 使わない。
+   *
+   * 人がその場で押した操作なので、引き継げなかったときは必ず理由を出す。黙って返すと
+   * 「ボタンが効かない」ようにしか見えず、実機で起きても切り分けられない（Issue #1166）。
    */
   async handoffToNewSession(): Promise<void> {
     const entry = this.active;
     if (entry === undefined) {
+      const message =
+        '引き継ぐ会話が選ばれていません。引き継ぎたい会話のタブを開いてから実行してください';
+      this.log.info(message);
+      void vscode.window.showInformationMessage(message);
       return;
     }
     const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
     if (sessionId === undefined) {
+      const message =
+        '引き継ぎ元のセッションIDを特定できなかったため引き継げませんでした（タブは開いたままです）';
+      this.log.warn(message);
+      void vscode.window.showErrorMessage(message);
       return;
     }
     await this.startHandoff(entry, sessionId, { kind: 'manual' }, true);

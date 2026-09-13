@@ -649,14 +649,25 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 現在アクティブなセッションを新セッションへ引き継ぐ（issue #694、方式の変更は
    * Issue #1079）。Claude Code側の`handoffToNewSession`と同じ設計
    * （`src/view/handoff.ts`参照）。
+   *
+   * 人がその場で押した操作なので、引き継げなかったときは必ず理由を出す。黙って返すと
+   * 「ボタンが効かない」ようにしか見えず、実機で起きても切り分けられない（Issue #1166）。
    */
   async handoffToNewSession(): Promise<void> {
     const entry = this.active;
     if (entry === undefined) {
+      const message =
+        '引き継ぐ会話が選ばれていません。引き継ぎたい会話のタブを開いてから実行してください';
+      this.log.info(message);
+      void vscode.window.showInformationMessage(message);
       return;
     }
     const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
     if (threadId === undefined) {
+      const message =
+        '引き継ぎ元のセッションIDを特定できなかったため引き継げませんでした（タブは開いたままです）';
+      this.log.warn(message);
+      void vscode.window.showErrorMessage(message);
       return;
     }
     await this.startHandoff(entry, threadId, { kind: 'manual' }, true);
