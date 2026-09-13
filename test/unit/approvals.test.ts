@@ -129,6 +129,11 @@ describe('summarizePermissions', () => {
 
   it('オブジェクトでない権限は読めない扱いにし、無ければ空とする', () => {
     expect(summarizePermissions('all')).toMatchObject({ granted: {}, unreadable: ['permissions'] });
+    // `network: true` のような形違いを「変更なし」へ読み替えない
+    expect(summarizePermissions({ network: true })).toMatchObject({
+      granted: {},
+      unreadable: ['network'],
+    });
     expect(summarizePermissions(undefined)).toEqual({ lines: [], granted: {}, unreadable: [] });
   });
 });

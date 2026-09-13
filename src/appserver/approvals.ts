@@ -194,8 +194,12 @@ export function summarizePermissions(permissions: unknown): PermissionSummary {
       continue;
     }
     if (key === 'network') {
-      const enabled = rec(value)?.['enabled'];
-      if (enabled !== null && enabled !== undefined && typeof enabled !== 'boolean') {
+      const net = rec(value);
+      const enabled = net?.['enabled'];
+      if (
+        net === undefined ||
+        (enabled !== null && enabled !== undefined && typeof enabled !== 'boolean')
+      ) {
         unreadable.push(key);
         continue;
       }
