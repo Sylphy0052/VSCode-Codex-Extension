@@ -8,6 +8,7 @@ import {
 } from './headlessCli';
 import type { GoalEvaluation, GoalEvaluator, GoalEvaluatorInput } from './goalLoop';
 import { buildEvaluatorPrompt, indeterminate, parseEvaluation } from './goalPrompt';
+import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
 
 /**
  * ゴール駆動ループ（issue #892）のEvaluatorを、CLIのヘッドレス実行として呼ぶ。
@@ -64,6 +65,23 @@ export interface GoalEvaluatorDeps {
   timeoutMs: number;
   /** 失敗の記録先。判定そのものは`indeterminate`へ倒すため、ここでは記録だけ行う。 */
   logWarn?: (message: string) => void;
+  /** 伏せた資格情報の件数の記録先。**プロンプトと応答の本文は出さない。** */
+  logInfo?: (message: string) => void;
+}
+
+/**
+ * Evaluatorへ送るプロンプトを組み立て、資格情報らしき文字列を伏せる（Issue #1168）。
+ *
+ * 証拠にはコマンドの引数と末尾出力、直近の応答本文がそのまま入る。Evaluatorは設定次第で
+ * 本流と別のCLI（別のモデルサービス）で動くため、下書き役（`goalDraftProcess.ts`）・
+ * Advisor（`loopAdvisorProcess.ts`）と同じく送信直前に伏せる。業務コードは伏せない。
+ *
+ * 送信経路と切り離してexportしてあるのは、伏せていることを単体テストで固定するため。
+ */
+export function redactEvaluatorPrompt(
+  input: GoalEvaluatorInput,
+): ReturnType<typeof redactCredentials> {
+  return redactCredentials(buildEvaluatorPrompt(input));
 }
 
 /**
@@ -75,12 +93,16 @@ export interface GoalEvaluatorDeps {
  */
 export function createGoalEvaluator(deps: GoalEvaluatorDeps): GoalEvaluator {
   return async (input: GoalEvaluatorInput, signal?: AbortSignal): Promise<GoalEvaluation> => {
-    const prompt = buildEvaluatorPrompt(input);
+    const redaction = redactEvaluatorPrompt(input);
+    const note = describeRedaction(redaction);
+    if (note !== undefined) {
+      deps.logInfo?.(`Evaluatorへ送る前に伏せました: ${note}`);
+    }
     try {
       // 打ち切りの合図はターンごとに変わるため、作り置きした`deps`ではなくここで足す
       const raw = await runHeadlessPrompt(
         { ...deps, ...(signal === undefined ? {} : { signal }) },
-        prompt,
+        redaction.text,
       );
       if (raw === undefined) {
         return indeterminate('Evaluatorの呼び出しに失敗しました');
