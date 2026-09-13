@@ -51,11 +51,13 @@ export class ProviderRegistry {
               `${provider.label} の一覧構築: 壊れた行 ${result.skippedIndexLines} / 実体なし ${result.unresolved}`,
             );
           }
-          // 派生スレッドの除外だけで0件になった場合、黙って履歴が空になるのを防ぐ（issue #943）
+          // 除外だけで0件になった場合、黙って履歴が空になるのを防ぐ（issue #943）。
+          // 除外の理由はプロバイダ側で異なる（Codexは派生スレッド、Claudeはそれに加えて
+          // 人の指示が無いセッション。Issue #1145）ため、件数だけを出す
           const filteredOut = result.filteredOut ?? 0;
           if (result.sessions.length === 0 && filteredOut > 0) {
             log.warn(
-              `${provider.label} の一覧構築: 派生スレッドとして ${filteredOut} 件を除外し、表示できるセッションが残りませんでした`,
+              `${provider.label} の一覧構築: ${filteredOut} 件を除外し、表示できるセッションが残りませんでした`,
             );
           }
           // thread/listが使えず（未接続・空応答・エラー）ファイル読みへ退避した場合、

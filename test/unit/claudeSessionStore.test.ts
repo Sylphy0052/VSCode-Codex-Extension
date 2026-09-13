@@ -38,6 +38,29 @@ const userLine = (id: string, cwd: string, text: string, ts: string) =>
     message: { role: 'user', content: [{ type: 'text', text }] },
   });
 
+/**
+ * `/usage` のようなスラッシュコマンドが残す形（Issue #1145）。
+ * 本文は制御タグだけで、取り出すと何も残らない。
+ */
+const commandLine = (id: string, cwd: string, command: string, ts: string) =>
+  JSON.stringify({
+    type: 'user',
+    userType: 'external',
+    origin: { kind: 'human' },
+    timestamp: ts,
+    cwd,
+    sessionId: id,
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<command-name>${command}</command-name>\n<command-message>${command}</command-message>`,
+        },
+      ],
+    },
+  });
+
 class FakeFs implements FileSystemPort {
   headReads = 0;
 
@@ -170,6 +193,30 @@ describe('ClaudeSessionStore', () => {
     expect(result.unresolved).toBe(1);
   });
 
+  it('スラッシュコマンドだけのセッションを一覧から外す（issue #1145）', async () => {
+    const fs = new FakeFs({
+      [transcript('-w-alpha', ID_A)]: commandLine(
+        ID_A,
+        '/w/alpha',
+        '/usage',
+        '2026-08-06T20:00:00.000Z',
+      ),
+      [transcript('-w-alpha', ID_B)]: userLine(
+        ID_B,
+        '/w/alpha',
+        '設計を見直したい',
+        '2026-08-06T20:00:00.000Z',
+      ),
+    });
+
+    const result = await new ClaudeSessionStore(fs, paths).list(options());
+
+    expect(result.sessions.map((s) => s.id)).toEqual([ID_B]);
+    expect(result.filteredOut).toBe(1);
+    // 読めなかったわけではないので「実体なし」には数えない
+    expect(result.unresolved).toBe(0);
+  });
+
   it('発言がまだ無いセッションは名前なしで出す', async () => {
     const fs = new FakeFs({
       [transcript('-w-alpha', ID_A)]: JSON.stringify({
@@ -181,6 +228,8 @@ describe('ClaudeSessionStore', () => {
       }),
     });
     const { sessions } = await new ClaudeSessionStore(fs, paths).list(options());
+    // 始めたばかりのセッションは消さない（issue #1145の除外と区別する）
+    expect(sessions.map((s) => s.id)).toEqual([ID_A]);
     expect(sessions[0]?.threadName).toBeUndefined();
   });
 

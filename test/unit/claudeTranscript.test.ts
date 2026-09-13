@@ -118,6 +118,7 @@ describe('parseTranscriptHead', () => {
       firstUserText: '拡張機能の設計を見直したい',
       startedAt: '2026-08-06T20:13:18.257Z',
       gitBranch: 'main',
+      sawUserEntry: true,
     });
   });
 

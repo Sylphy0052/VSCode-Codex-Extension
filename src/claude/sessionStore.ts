@@ -22,8 +22,13 @@ import type { TranscriptMeta } from './types';
 /**
  * 素性を得るために読む先頭行数。
  * `queue-operation` などが数行挟まるため1行では足りない。
+ *
+ * 40行では足りない（Issue #1145）。hookの出力やIDEの選択範囲がattachmentとして
+ * 積まれるセッションでは最初の発言が100行目を越えることがあり、実測216件のうち4件で
+ * 名前を取りこぼしていた。`readHeadUntil` は素性が揃った時点で読むのをやめるため、
+ * 上限を上げても通常のセッションで読む量は変わらない。
  */
-const HEAD_LINES = 40;
+const HEAD_LINES = 128;
 
 /**
  * 素性を読むときに1ファイルから読み込むバイト数の上限（Issue #885）。
@@ -33,6 +38,30 @@ const HEAD_LINES = 40;
  * ここで打ち切って次へ進む。
  */
 const HEAD_MAX_BYTES = 256 * 1024;
+
+/**
+ * 裏の指示だけで終わったセッションを表す印（Issue #1145）。
+ *
+ * `/usage` のようなスラッシュコマンドは、statuslineなどが裏で起動したものであって
+ * 人が始めた作業ではない。手元では216件中86件（40%）がこれに当たり、すべて
+ * `(名称未設定)` として履歴に並んで一覧を読めなくしていた。
+ */
+const BACKGROUND_ONLY = 'background-only';
+
+/**
+ * 裏の指示だけで終わったセッションか（Issue #1145）。
+ *
+ * 発言の形をしたエントリはあるのに、制御タグ（`<command-name>` など）を落とすと本文が
+ * 何も残らない、という状態を見る。`/usage` のようなスラッシュコマンドがこれに当たる。
+ *
+ * 発言そのものが1件も無いセッションは対象にしない。始めたばかりでまだ最初の指示が
+ * 書かれていない場合が同じ形になるため、消すと進行中のセッションが履歴から消える。
+ */
+function isBackgroundOnly(meta: TranscriptMeta): boolean {
+  return (
+    meta.sawUserEntry && (meta.firstUserText === undefined || meta.firstUserText.trim() === '')
+  );
+}
 
 /**
  * 索引を作り直す範囲（Issue #885）。
@@ -70,6 +99,8 @@ export class ClaudeSessionStore {
   private refreshScheduled = false;
   private stale = true;
   private unresolved = 0;
+  /** 裏の指示だけのセッションとして一覧から外した件数（Issue #1145）。 */
+  private filteredOut = 0;
   private onRefreshed: (() => void) | undefined;
   /**
    * 直近の `list` が求めた範囲（Issue #885）。バックグラウンドの照合はこの範囲を引き継ぐ。
@@ -132,7 +163,9 @@ export class ClaudeSessionStore {
         return;
       }
       const meta = await this.readHeadMeta(filePath);
-      if (meta === undefined) {
+      // 裏の指示だけのセッションは索引に入れない（Issue #1145）。`/usage` を打つたびに
+      // 履歴が1件増えるのを防ぐ
+      if (meta === undefined || isBackgroundOnly(meta)) {
         this.index.delete(filePath);
       } else {
         this.index.set({
@@ -177,7 +210,12 @@ export class ClaudeSessionStore {
       });
     }
 
-    return { sessions, skippedIndexLines: 0, unresolved: this.unresolved };
+    return {
+      sessions,
+      skippedIndexLines: 0,
+      unresolved: this.unresolved,
+      filteredOut: this.filteredOut,
+    };
   }
 
   /** 人が付けた名前を読む（issue #199）。付けていなければ `undefined`。 */
@@ -242,6 +280,7 @@ export class ClaudeSessionStore {
       const next = await this.readIndexFromFiles(scope);
       this.index.replace(next.entries);
       this.unresolved = next.unresolved;
+      this.filteredOut = next.filteredOut;
       // 件数で打ち切ったなら索引は途中までなので、あとで走査し直す必要がある
       this.stale = scope?.limit !== undefined;
       this.indexedScopeKey = scopeKey(scope);
@@ -267,6 +306,7 @@ export class ClaudeSessionStore {
   private async readIndexFromFiles(scope?: RefreshScope): Promise<{
     entries: ClaudeSessionIndexEntry[];
     unresolved: number;
+    filteredOut: number;
   }> {
     const narrowed = await this.narrowedTranscripts(scope);
     if (narrowed !== undefined) {
@@ -313,6 +353,7 @@ export class ClaudeSessionStore {
   ): Promise<{
     entries: ClaudeSessionIndexEntry[];
     unresolved: number;
+    filteredOut: number;
   }> {
     const named = files
       .map((filePath) => ({ filePath, id: sessionIdFromTranscriptName(basenameOf(filePath)) }))
@@ -326,12 +367,17 @@ export class ClaudeSessionStore {
 
     const entries: ClaudeSessionIndexEntry[] = [];
     let unresolved = 0;
+    let filteredOut = 0;
     for (const { filePath, id, mtimeMs } of ordered) {
       const cached = this.index.get(filePath);
       const entry =
         cached !== undefined && cached.mtimeMs === mtimeMs
           ? cached
           : await this.readIndexEntry(filePath, id, mtimeMs);
+      if (entry === BACKGROUND_ONLY) {
+        filteredOut += 1;
+        continue;
+      }
       if (entry === undefined) {
         unresolved += 1;
         continue;
@@ -348,7 +394,7 @@ export class ClaudeSessionStore {
       }
     }
 
-    return { entries, unresolved };
+    return { entries, unresolved, filteredOut };
   }
 
   /**
@@ -367,14 +413,23 @@ export class ClaudeSessionStore {
     return reader.result();
   }
 
+  /**
+   * 索引の1件を読む。
+   *
+   * 素性が読めなければ `undefined`、裏の指示だけのセッションなら `BACKGROUND_ONLY`
+   * を返す（Issue #1145）。呼び出し側はこの2つを区別して数える。
+   */
   private async readIndexEntry(
     filePath: string,
     id: string,
     mtimeMs: number | undefined,
-  ): Promise<ClaudeSessionIndexEntry | undefined> {
+  ): Promise<ClaudeSessionIndexEntry | undefined | typeof BACKGROUND_ONLY> {
     const meta = await this.readHeadMeta(filePath);
     if (meta === undefined) {
       return undefined;
+    }
+    if (isBackgroundOnly(meta)) {
+      return BACKGROUND_ONLY;
     }
     return {
       filePath,

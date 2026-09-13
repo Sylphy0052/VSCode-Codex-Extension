@@ -88,6 +88,7 @@ export function createTranscriptHeadReader(): TranscriptHeadReader {
   let startedAt: string | undefined;
   let gitBranch: string | undefined;
   let firstUserText: string | undefined;
+  let sawUserEntry = false;
 
   return {
     push(line: string): boolean {
@@ -102,6 +103,9 @@ export function createTranscriptHeadReader(): TranscriptHeadReader {
       gitBranch ??= str(entry['gitBranch']) || undefined;
 
       if (firstUserText === undefined && isHumanMessage(entry)) {
+        // 制御タグを落とすと空になるエントリ（`/usage` などのスラッシュコマンド）も
+        // 「発言の形をしたものはあった」として数える（Issue #1145）
+        sawUserEntry = true;
         const text = cleanText(messageText(entry));
         if (text !== '') {
           firstUserText = text;
@@ -114,7 +118,7 @@ export function createTranscriptHeadReader(): TranscriptHeadReader {
       if (sessionId === undefined || cwd === undefined) {
         return undefined;
       }
-      return { sessionId, cwd, firstUserText, startedAt, gitBranch };
+      return { sessionId, cwd, firstUserText, startedAt, gitBranch, sawUserEntry };
     },
   };
 }
