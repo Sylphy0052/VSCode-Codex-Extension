@@ -771,7 +771,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 手動（ボタン操作）はユーザーがその場で求めた操作なので必ず前面へ出す。見立ての
     // 取得で待っている間にタブを離れることがあり、`visible` だけで決めると背面に開く
     const preserveFocus = trigger.kind !== 'manual' && entry.panel?.visible !== true;
-    // 引き継ぎ元パネルと同じ列へ開く（Issue #1188）。`panel.viewColumn`は非表示のとき
+    // 引き継ぎ元パネルと同じ列へ開く。`panel.viewColumn`は非表示のとき
     // `undefined`になるため、`lastKnownViewColumn`（最後に見えていた列）へ落ちる
     const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
     const newThreadId = await this.openNew(
