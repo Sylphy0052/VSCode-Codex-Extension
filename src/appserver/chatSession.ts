@@ -861,6 +861,12 @@ function readInitialItems(result: unknown): ChatState['items'] {
   const items: ChatState['items'] = [];
   for (const turn of turns) {
     const t = typeof turn === 'object' && turn !== null ? (turn as Record<string, unknown>) : {};
+    // ターンIDは**外側**（`turns[].id`）にあり、項目自身は持たない（実測: codex-cli 0.154.0。
+    // `turns[0].items[0]` のキーは `{type, id, clientId, content}`）。ここで各項目へ移して
+    // おかないと、復元した会話の項目は `turnId: undefined` のままになり、「ここから分岐」も
+    // 編集再送も境界を決められなくなる（Issue #1155）。ライブ通知の経路（`chatState.ts` の
+    // `item/started` 等）が `{ ...item, turnId }` で付けているものと同じ値・同じ形にする
+    const turnId = typeof t['id'] === 'string' && t['id'] !== '' ? t['id'] : undefined;
     const turnItems = t['items'];
     if (!Array.isArray(turnItems)) {
       continue;
@@ -868,7 +874,7 @@ function readInitialItems(result: unknown): ChatState['items'] {
     for (const raw of turnItems) {
       const normalized = normalizeItem(raw);
       if (normalized !== undefined) {
-        items.push(normalized);
+        items.push(turnId === undefined ? normalized : { ...normalized, turnId });
       }
     }
   }
