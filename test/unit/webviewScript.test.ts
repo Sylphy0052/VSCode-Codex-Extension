@@ -585,6 +585,8 @@ describe('chatScript', () => {
     it('関数の本体を切り出せている（陽性対照）', () => {
       expect(renderPrompts).toContain('function renderPrompts(prompts)');
       expect(renderPrompts).toContain("const box = el('prompts');");
+      // 次の関数まででちゃんと切れている（切り出しに失敗して全文になっていない）
+      expect(renderPrompts).not.toContain('function defaultLabel');
     });
 
     it('既存カードはrequestIdで引き当て、作り直さない', () => {
