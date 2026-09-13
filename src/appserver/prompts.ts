@@ -42,6 +42,16 @@ export interface PromptField {
   required: boolean;
   /** 既定値。空なら未入力で始める。 */
   defaultValue: string;
+  /**
+   * 整数だけを受けるか（JSON Schemaの `integer`）。
+   *
+   * `input` は画面の見た目を決めるだけなので `number` と `integer` を畳んでいる。
+   * 検証はこちらで見分ける。
+   */
+  integer: boolean;
+  /** 下限・上限。スキーマにあるときだけ入る。読まない制約は持たない。 */
+  minimum: number | undefined;
+  maximum: number | undefined;
 }
 
 export interface PendingPrompt {
@@ -58,6 +68,12 @@ export interface PendingPrompt {
   /** ターンを止める要求か。 */
   blocking: boolean;
   fields: PromptField[];
+  /**
+   * 検証で止めた理由。項目idごとの文言。
+   *
+   * 空でない間はカードを消さずに残し、画面がここの文言を該当項目へ出す。
+   */
+  errors: Record<string, string>;
   /**
    * `url` モードのelicitationで示された行き先。
    *
@@ -126,6 +142,10 @@ function describeUserInput(
       input: 'text',
       required: false,
       defaultValue: '',
+      // 質問はどれも自由入力。プロトコルに必須・数値の指定が無い
+      integer: false,
+      minimum: undefined,
+      maximum: undefined,
     });
   }
   if (fields.length === 0) {
@@ -139,6 +159,7 @@ function describeUserInput(
     message: '',
     blocking: params['isBlocking'] !== false,
     fields,
+    errors: {},
     url: undefined,
   };
 }
@@ -157,6 +178,7 @@ function describeElicitation(
     message: str(params['message']),
     // elicitationはターン外でも届く。止めている前提にしない
     blocking: false,
+    errors: {},
   };
 
   if (mode === 'url') {
@@ -202,6 +224,8 @@ function readElicitationField(
 ): PromptField {
   const type = str(property['type']);
   const options = readEnumOptions(property);
+  // 複数選択は要素側に型と範囲が入る（`items`）。単一の項目はその場に入る
+  const constraints = (type === 'array' ? rec(property['items']) : undefined) ?? property;
   return {
     id,
     label: str(property['title']) || id,
@@ -216,6 +240,9 @@ function readElicitationField(
       type === 'boolean' ? 'boolean' : type === 'number' || type === 'integer' ? 'number' : 'text',
     required,
     defaultValue: defaultOf(property['default']),
+    integer: type === 'integer' || str(constraints['type']) === 'integer',
+    minimum: num(constraints['minimum']),
+    maximum: num(constraints['maximum']),
   };
 }
 
@@ -246,6 +273,11 @@ function readEnumOptions(property: Record<string, unknown>): PromptOption[] {
   return options;
 }
 
+/** スキーマの数値。数でない指定は制約なしとして扱う（画面を壊さないため）。 */
+function num(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function defaultOf(value: unknown): string {
   if (typeof value === 'string') {
     return value;
@@ -270,6 +302,59 @@ function readOptions(raw: unknown): PromptOption[] {
     options.push({ value: label, label, description: str(option?.['description']) });
   }
   return options;
+}
+
+/**
+ * 送信された回答をスキーマの制約に照らす。項目idごとに止めた理由を返す。
+ *
+ * 拒否・取り消しは「答えない」ための経路なので検証しない。塞ぐと回答待ちから
+ * 抜けられなくなる。
+ *
+ * **同じ規則がWebview側（`chatScript.ts` の `promptFieldError`）にもある**。
+ * Webviewのスクリプトはテンプレートリテラルでこのモジュールを読み込めないため、
+ * 手前で止める分を写している。最終判断はこちら。
+ */
+export function validatePromptSubmission(
+  prompt: PendingPrompt,
+  submission: PromptSubmission,
+): Record<string, string> {
+  const errors: Record<string, string> = {};
+  if (submission.action !== 'submit') {
+    return errors;
+  }
+  for (const field of prompt.fields) {
+    const message = checkPromptField(field, submission.values[field.id] ?? []);
+    if (message !== '') {
+      errors[field.id] = message;
+    }
+  }
+  return errors;
+}
+
+function checkPromptField(field: PromptField, given: string[]): string {
+  const picked = given.filter((v) => v.trim() !== '');
+  if (picked.length === 0) {
+    return field.required ? '必須項目です' : '';
+  }
+  if (field.input !== 'number') {
+    return '';
+  }
+  for (const raw of picked) {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      return '数値を入力してください';
+    }
+    if (field.integer && !Number.isInteger(value)) {
+      return '整数を入力してください';
+    }
+    if (field.minimum !== undefined && value < field.minimum) {
+      return `${String(field.minimum)} 以上の値を入力してください`;
+    }
+    if (field.maximum !== undefined && value > field.maximum) {
+      return `${String(field.maximum)} 以下の値を入力してください`;
+    }
+  }
+  return '';
 }
 
 /**

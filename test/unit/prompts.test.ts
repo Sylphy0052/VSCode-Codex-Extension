@@ -4,6 +4,7 @@ import {
   buildPromptResponse,
   describePrompt,
   readElicitationFields,
+  validatePromptSubmission,
   type PendingPrompt,
 } from '../../src/appserver/prompts';
 
@@ -173,6 +174,9 @@ describe('readElicitationFields', () => {
         input: 'text',
         required: true,
         defaultValue: '',
+        integer: false,
+        minimum: undefined,
+        maximum: undefined,
       },
       expect.objectContaining({ id: 'days', input: 'number', defaultValue: '3', required: false }),
       expect.objectContaining({ id: 'metric', input: 'boolean', defaultValue: 'true' }),
@@ -306,5 +310,113 @@ describe('buildPromptResponse / elicitation', () => {
     expect(buildPromptResponse(prompt, { action: 'cancel', values: {} })).toEqual({
       action: 'cancel',
     });
+  });
+});
+
+describe('スキーマの制約（issue #1188）', () => {
+  it('integerとnumberを見分け、範囲も読む', () => {
+    const [days, ratio] = readElicitationFields({
+      type: 'object',
+      properties: {
+        days: { type: 'integer', minimum: 1, maximum: 30 },
+        ratio: { type: 'number' },
+      },
+    });
+    // 画面の見た目は同じでも、整数かどうかは残す
+    expect(days).toMatchObject({ input: 'number', integer: true, minimum: 1, maximum: 30 });
+    expect(ratio).toMatchObject({
+      input: 'number',
+      integer: false,
+      minimum: undefined,
+      maximum: undefined,
+    });
+  });
+
+  it('複数選択は要素側の型と範囲を読む', () => {
+    const [ports] = readElicitationFields({
+      type: 'object',
+      properties: { ports: { type: 'array', items: { type: 'integer', minimum: 1024 } } },
+    });
+    expect(ports).toMatchObject({ multiple: true, integer: true, minimum: 1024 });
+  });
+
+  it('数でない制約は制約なしとして扱う', () => {
+    const [n] = readElicitationFields({
+      type: 'object',
+      properties: { n: { type: 'number', minimum: '1', maximum: null } },
+    });
+    expect(n).toMatchObject({ minimum: undefined, maximum: undefined });
+  });
+});
+
+describe('validatePromptSubmission（issue #1188）', () => {
+  const prompt = elicitation({
+    mode: 'form',
+    message: '教えて',
+    requestedSchema: {
+      type: 'object',
+      properties: {
+        city: { type: 'string' },
+        days: { type: 'integer', minimum: 1, maximum: 30 },
+        ratio: { type: 'number' },
+      },
+      required: ['city'],
+    },
+  }) as PendingPrompt;
+
+  it('必須の空欄を止める', () => {
+    expect(
+      validatePromptSubmission(prompt, { action: 'submit', values: { city: ['  '] } }),
+    ).toEqual({ city: '必須項目です' });
+  });
+
+  it('整数の項目へ小数を入れたら止める', () => {
+    expect(
+      validatePromptSubmission(prompt, {
+        action: 'submit',
+        values: { city: ['Tokyo'], days: ['1.5'] },
+      }),
+    ).toEqual({ days: '整数を入力してください' });
+  });
+
+  it('範囲外を止める', () => {
+    expect(
+      validatePromptSubmission(prompt, { action: 'submit', values: { city: ['x'], days: ['0'] } }),
+    ).toEqual({ days: '1 以上の値を入力してください' });
+    expect(
+      validatePromptSubmission(prompt, { action: 'submit', values: { city: ['x'], days: ['31'] } }),
+    ).toEqual({ days: '30 以下の値を入力してください' });
+  });
+
+  it('数値として読めない値を止める', () => {
+    expect(
+      validatePromptSubmission(prompt, {
+        action: 'submit',
+        values: { city: ['x'], ratio: ['さん'] },
+      }),
+    ).toEqual({ ratio: '数値を入力してください' });
+  });
+
+  it('制約を満たせば通り、任意の未入力は咎めない', () => {
+    expect(
+      validatePromptSubmission(prompt, {
+        action: 'submit',
+        values: { city: ['Tokyo'], days: ['3'], ratio: ['0.5'] },
+      }),
+    ).toEqual({});
+    expect(
+      validatePromptSubmission(prompt, { action: 'submit', values: { city: ['Tokyo'] } }),
+    ).toEqual({});
+  });
+
+  it('拒否と取り消しは検証しない', () => {
+    // 答えないための経路を塞ぐと、回答待ちから抜けられなくなる
+    expect(validatePromptSubmission(prompt, { action: 'decline', values: {} })).toEqual({});
+    expect(validatePromptSubmission(prompt, { action: 'cancel', values: {} })).toEqual({});
+  });
+
+  it('requestUserInputは必須も数値の制約も持たないため素通しする', () => {
+    const questions = describeUser([{ id: 'q1', header: 'a', question: '1つめ' }]) as PendingPrompt;
+    expect(validatePromptSubmission(questions, { action: 'submit', values: {} })).toEqual({});
   });
 });

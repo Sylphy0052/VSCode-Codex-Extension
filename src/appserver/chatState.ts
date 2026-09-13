@@ -1851,6 +1851,23 @@ export function removePrompt(state: ChatState, requestId: number | string): Chat
   return { ...state, prompts: state.prompts.filter((p) => p.requestId !== requestId) };
 }
 
+/**
+ * 検証で止めた理由を問い合わせへ載せる。カードは消さない。
+ *
+ * 画面は入力中の値をDOMだけで持つため、理由を出すためにカードを作り直せない。
+ * 状態には理由だけを置き、既存のカードへ反映させる。
+ */
+export function setPromptErrors(
+  state: ChatState,
+  requestId: number | string,
+  errors: Record<string, string>,
+): ChatState {
+  return {
+    ...state,
+    prompts: state.prompts.map((p) => (p.requestId === requestId ? { ...p, errors } : p)),
+  };
+}
+
 /** 表示用の正規化で末尾改行や空ファイルを失わない復元用入力。 */
 export function readRewindChanges(changes: unknown): RewindChange[] {
   if (!Array.isArray(changes)) return [];

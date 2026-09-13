@@ -27,6 +27,7 @@ import {
   removeQueued,
   restoreQueued,
   routeSend,
+  setPromptErrors,
   takeQueuedAt,
   type ChatState,
   type PendingApproval,
@@ -38,6 +39,7 @@ import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
 import {
   buildPromptResponse,
   describePrompt,
+  validatePromptSubmission,
   type PendingPrompt,
   type PromptSubmission,
 } from './prompts';
@@ -737,10 +739,21 @@ export class ChatSession {
    *
    * 未入力のまま送っても形は揃える（質問idを落とすと相手が読めない）。中身を
    * 作らないのは `buildPromptResponse` の役目。
+   *
+   * スキーマの必須・数値の制約に反する回答は送らずに差し戻す。ここで通すと、
+   * 要求元が拒否したときには回答待ちもカードも消えており、同じフォームで
+   * 直せない（issue #1188）。
    */
   answerPrompt(requestId: number | string, submission: PromptSubmission): void {
     const waiting = this.waitingPrompts.get(requestId);
     if (waiting === undefined) {
+      return;
+    }
+    const errors = validatePromptSubmission(waiting.prompt, submission);
+    if (Object.keys(errors).length > 0) {
+      // 伏せ字の項目があるため、理由に値そのものは載せない
+      this.log.warn(`問い合わせの回答を差し戻しました: ${Object.keys(errors).join(', ')}`);
+      this.update(setPromptErrors(this.state, requestId, errors));
       return;
     }
     this.waitingPrompts.delete(requestId);
