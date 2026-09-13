@@ -369,7 +369,7 @@ describe('buildPlannerPrompt（design.md §16.9）', () => {
     const material =
       '## ロードマップの材料\n- id: R1\n  内容: 設計する\n  依存: なし\n  Issue: #12';
     /** 材料の転記制約がroleより優先されることを示す指示（`buildPlannerPrompt`のロードマップ節）。 */
-    const ROADMAP_WINS = 'この節の規則は「## 分解の指針」より優先する';
+    const ROADMAP_WINS = 'この節の規則は、後述の「## 分解の指針」より優先する';
     const ROLE_KEEPS_STRUCTURE =
       'roleはタスクの追加・削除・分割・統合や、依存関係を変える理由にしてはならない';
     const ROLE_IS_NOT_ID = '同じroleを複数のタスクへ付けてよい（roleはタスクidではない）';
