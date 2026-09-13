@@ -2096,7 +2096,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'toggleLimitAutoResume') {
         await setChatLimitAutoResumeEnabled(!readChatLimitAutoResumeEnabled());
-        // 共通設定なので、操作したタブだけでなく全会話へ反映する（Issue #1209）
+        // 共通設定なので、操作したタブだけでなく全会話へ反映する（Issue #1209）。ここで
+        // 届くのはCodex画面の会話だけで、Claude Code画面へは`extension.ts`の
+        // `onDidChangeConfiguration`（設定の書き込みで発火する）経由で届く
         this.refreshLimitAutoResume();
         return;
       }
