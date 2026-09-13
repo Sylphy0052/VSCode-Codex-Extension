@@ -147,4 +147,17 @@ describe('stoppedByUsageLimit: 自動再開の対象を上限で止まった会�
     expect(stoppedByUsageLimit(withUsage(failed, false))).toBe(false);
     expect(stoppedByUsageLimit(failed)).toBe(false);
   });
+
+  it('理由が判らない失敗（turn.errorを受け取れない確定）は前のターンの区分を持ち越さない', () => {
+    // 上限で失敗した直後に、次のターンの`turn/started`を受け取れないまま失敗が確定する
+    // 経路（接続断など）。前の`'usageLimit'`が残ると、上限ではない失敗まで再開してしまう
+    const limited = applyEvent(
+      afterStart(),
+      'turn/completed',
+      completed('failed', 'usageLimitExceeded'),
+    );
+    const cleared: ChatState = { ...limited, turnFailureKind: undefined };
+
+    expect(stoppedByUsageLimit(cleared)).toBe(false);
+  });
 });
