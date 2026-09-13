@@ -8,7 +8,13 @@ import type { SessionStore } from '../session/sessionStore';
 import { chatCsp } from './chatCsp';
 import { formatAbsoluteTime } from './relativeTime';
 
-export type ForkHandler = (session: SessionSummary, turnId: string) => Promise<void>;
+/**
+ * 分岐を実行する。成功したかを返す（Issue #1156）。
+ *
+ * 押した時点でwebview側がボタンを無効化するため、失敗したことを返さないと画面が
+ * 「分岐しています…」のまま固まり、同じ指示から再試行できない。
+ */
+export type ForkHandler = (session: SessionSummary, turnId: string) => Promise<boolean>;
 
 /**
  * 会話を読みながら分岐点を選ぶためのビューア。
@@ -69,7 +75,26 @@ export class ConversationViewManager {
         return;
       }
       this.log.info(`分岐を要求: session=${session.id} turn=${turnId}`);
-      void this.onFork(session, turnId);
+      // 分岐は数秒かかる。その間にタブを閉じられていると、破棄済みのwebviewへの
+      // postMessageが投げる。閉じられていれば戻す相手も居ないので送らない
+      const notifyFailure = (): void => {
+        if (this.panels.get(session.id) !== panel) {
+          return;
+        }
+        void panel.webview.postMessage({ type: 'forkFailed', turnId });
+      };
+      void this.onFork(session, turnId).then(
+        (ok) => {
+          if (!ok) {
+            notifyFailure();
+          }
+        },
+        (e: unknown) => {
+          // 投げて終わった場合もボタンを戻す。戻さないと再試行できない（Issue #1156）
+          this.log.error(`分岐に失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+          notifyFailure();
+        },
+      );
     });
   }
 
@@ -217,6 +242,17 @@ function render(webview: vscode.Webview, title: string, turns: ConversationTurn[
     button.disabled = true;
     button.textContent = '分岐しています…';
     vscode.postMessage({ type: 'fork', turnId: button.dataset.turn });
+  });
+  // 分岐が失敗したら押せる状態へ戻す（Issue #1156）。戻さないとこのタブを開き直すまで
+  // 同じ指示から再試行できない
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || data.type !== 'forkFailed' || typeof data.turnId !== 'string') return;
+    for (const button of document.querySelectorAll('button[data-turn]')) {
+      if (button.dataset.turn !== data.turnId) continue;
+      button.disabled = false;
+      button.textContent = 'ここから分岐';
+    }
   });
 </script>
 </body>

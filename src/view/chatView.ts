@@ -1891,7 +1891,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'fork' && typeof m['turnId'] === 'string') {
-        await this.forkFrom(entry, m['turnId']);
+        // 押した時点でwebview側がボタンを無効化している。失敗したことを返さないと、
+        // タブを開き直すまで同じ発言から再試行できない（Issue #1156）
+        const turnId = m['turnId'];
+        let forkedThreadId: string | undefined;
+        try {
+          forkedThreadId = await this.forkFrom(entry, turnId);
+        } catch (e: unknown) {
+          const reason = e instanceof Error ? e.message : String(e);
+          this.log.error(`分岐に失敗しました: ${reason}`);
+          void vscode.window.showErrorMessage(`分岐に失敗しました: ${reason}`);
+        }
+        if (forkedThreadId === undefined) {
+          void entry.panel?.webview.postMessage({ type: 'forkFailed', turnId });
+        }
         return;
       }
       if (type === 'editResend' && typeof m['text'] === 'string') {
