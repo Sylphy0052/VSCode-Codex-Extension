@@ -6863,6 +6863,69 @@ tasks:
         expect(fs.files.has('/repo/a.txt')).toBe(true);
       },
     );
+
+    it(
+      'run開始後・リロード前にワークスペースを手動編集していた場合、再開後の反映で' +
+        'その編集を上書きせず衝突として報告する（Issue #1115の受入基準）',
+      async () => {
+        const gitPort = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git: gitPort,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-reload.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T1がa.txtを変更して統合まで済ませる（統合先とマニフェストにa.txtが載る）
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+
+        // ここで人がワークスペースのa.txtを直接編集する（run開始後・リロード前）。
+        // 反映の比較基準を復元時に取り直していると、この編集が基準へ吸収されて
+        // 「変わっていない」と判定され、T1の統合結果で上書きされてしまう
+        fs.setFile('/repo/a.txt', { size: 99, mtimeMs: 999 });
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          readAutoResume: () => false,
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        // 中断扱いになったT2を再実行してrunを終わらせ、反映まで進める
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2 = newCodexHost.byTaskId('T2');
+        t2.finish('done', doneState('ok'));
+        await flush();
+
+        // 人の編集がそのまま残っている（統合結果 size:20 で上書きされていない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 99, mtimeMs: 999 });
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        const blocked = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+        expect(blocked?.message).toContain('a.txt');
+      },
+    );
   });
 
   describe('復元時に統合先を用意できなかった場合（Issue #1114）', () => {

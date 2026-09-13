@@ -17,7 +17,10 @@ import {
   isExcludedPath,
   loadPersistedManifest,
   nodePseudoWorktreeFileSystem,
+  persistBaseline,
   persistManifest,
+  loadPersistedBaseline,
+  pseudoBaselinePath,
   planIntegration,
   pseudoWorktreePath,
   pseudoWorktreesRootDir,
@@ -1030,6 +1033,97 @@ describe('実ファイルシステムでの統合テスト', () => {
       const result = await removePseudoWorktree(workspace, RUN_ID, 'T1', fs);
 
       expect(result).toMatchObject({ ok: false, reason: 'removalFailed' });
+    });
+  });
+
+  describe('基準スナップショットの永続化（Issue #1115）', () => {
+    it('persistBaselineで書いた基準をloadPersistedBaselineがそのまま読み戻す', async () => {
+      const baseline = new Map([
+        ['a.txt', { size: 10, mtimeMs: 100 }],
+        ['src/index.ts', { size: 20, mtimeMs: 200 }],
+      ]);
+
+      await persistBaseline(workspace, RUN_ID, baseline, nodePseudoWorktreeFileSystem);
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(true);
+      if (!loaded.ok) return;
+      expect(loaded.baseline).toEqual(baseline);
+    });
+
+    it('まだ書かれていない場合はbaseline: undefinedで成功する（run開始時の正常系）', async () => {
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded).toEqual({ ok: true, baseline: undefined });
+    });
+
+    /**
+     * 壊れた基準を空や部分的な基準へ倒すと、反映が「変わっていない」と判断して人の編集を
+     * 上書きしうる（Issue #1115が塞いだ経路そのもの）。読めない場合はfail-closedにする。
+     */
+    it('内容が壊れている場合はfail-closedにする', async () => {
+      await mkdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)), { recursive: true });
+      await writeFile(pseudoBaselinePath(workspace, RUN_ID), '{ broken', 'utf8');
+
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('内容を解析できません');
+    });
+
+    it('エントリのキーがパストラバーサルを含む場合はfail-closedにする', async () => {
+      await mkdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)), { recursive: true });
+      await writeFile(
+        pseudoBaselinePath(workspace, RUN_ID),
+        JSON.stringify({ '../outside.txt': { size: 1, mtimeMs: 2 } }),
+        'utf8',
+      );
+
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('不正なエントリ');
+    });
+
+    it('エントリの値がsize/mtimeMsの形でない場合はfail-closedにする', async () => {
+      await mkdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)), { recursive: true });
+      await writeFile(
+        pseudoBaselinePath(workspace, RUN_ID),
+        JSON.stringify({ 'a.txt': { size: '10', mtimeMs: 100 } }),
+        'utf8',
+      );
+
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('不正なエントリ');
+    });
+
+    it('removePseudoIntegrationがbaseline.jsonも撤去する', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      await persistBaseline(
+        workspace,
+        RUN_ID,
+        new Map([['a.txt', { size: 10, mtimeMs: 100 }]]),
+        nodePseudoWorktreeFileSystem,
+      );
+
+      const result = await removePseudoIntegration(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(result).toEqual({ ok: true });
+      await expect(readFile(pseudoBaselinePath(workspace, RUN_ID), 'utf8')).rejects.toThrow();
+      // baseline.jsonが残っていると`<runId>`ディレクトリが空にならず片付かない
+      await expect(readdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)))).rejects.toThrow();
     });
   });
 
