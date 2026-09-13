@@ -69,6 +69,15 @@ function isBackgroundOnly(meta: TranscriptMeta): boolean {
 }
 
 /**
+ * 表示名。人の発言が無いセッションは `cross-session-message` の本文で代える
+ * （Issue未起票、2026-09-13）。オーケストレーターとpeerセッション間のやり取りだけの
+ * セッションは、これが無いと全件 `(名称未設定)` になり一覧で見分けが付かない。
+ */
+function displayName(meta: TranscriptMeta): string | undefined {
+  return meta.firstUserText ?? meta.peerMessageText;
+}
+
+/**
  * 索引を作り直す範囲（Issue #885）。
  *
  * `limit` を指定すると件数が揃った時点で走査をやめる（初回表示を早く出すため）。
@@ -179,7 +188,7 @@ export class ClaudeSessionStore {
           session: {
             id,
             provider: 'claude',
-            threadName: meta.firstUserText,
+            threadName: displayName(meta),
             updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
             cwd: meta.cwd,
             archived: false,
@@ -442,7 +451,7 @@ export class ClaudeSessionStore {
       session: {
         id,
         provider: 'claude' as const,
-        threadName: meta.firstUserText,
+        threadName: displayName(meta),
         updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
         cwd: meta.cwd,
         archived: false,

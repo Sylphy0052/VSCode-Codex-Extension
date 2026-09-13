@@ -89,6 +89,7 @@ export function createTranscriptHeadReader(): TranscriptHeadReader {
   let gitBranch: string | undefined;
   let firstUserText: string | undefined;
   let sawUserEntry = false;
+  let peerMessageText: string | undefined;
 
   return {
     push(line: string): boolean {
@@ -112,13 +113,23 @@ export function createTranscriptHeadReader(): TranscriptHeadReader {
         }
       }
 
+      if (peerMessageText === undefined) {
+        const body = crossSessionMessageBody(entry);
+        if (body !== undefined) {
+          const text = cleanText(body);
+          if (text !== '') {
+            peerMessageText = text;
+          }
+        }
+      }
+
       return sessionId !== undefined && cwd !== undefined && firstUserText !== undefined;
     },
     result(): TranscriptMeta | undefined {
       if (sessionId === undefined || cwd === undefined) {
         return undefined;
       }
-      return { sessionId, cwd, firstUserText, startedAt, gitBranch, sawUserEntry };
+      return { sessionId, cwd, firstUserText, startedAt, gitBranch, sawUserEntry, peerMessageText };
     },
   };
 }
@@ -595,6 +606,29 @@ function isHumanMessage(entry: Record<string, unknown>): boolean {
     return false;
   }
   return messageContent(entry).some((part) => str(part['type']) === 'text');
+}
+
+/**
+ * 他セッションから届いた `cross-session-message` の本文（Issue未起票、2026-09-13）。
+ *
+ * `origin.kind === 'peer'` はCLIが送受信の生データをそのまま積んでおり、
+ * `origin.body` にタグ無しの本文が入っている。`content` 側の文字列には
+ * `<cross-session-message>` タグが残るため、タグ抽出をせずに済むこちらを使う。
+ */
+function crossSessionMessageBody(entry: Record<string, unknown>): string | undefined {
+  if (
+    str(entry['type']) !== 'user' ||
+    entry['isMeta'] !== true ||
+    entry['isSidechain'] === true
+  ) {
+    return undefined;
+  }
+  const origin = rec(entry['origin']);
+  if (origin === undefined || str(origin['kind']) !== 'peer') {
+    return undefined;
+  }
+  const body = origin['body'];
+  return typeof body === 'string' ? body : undefined;
 }
 
 function messageContent(entry: Record<string, unknown>): Record<string, unknown>[] {
