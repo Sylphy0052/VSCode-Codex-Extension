@@ -13470,3 +13470,109 @@ tasks:
     expect(warnings.some((m) => m.includes('残ります'))).toBe(true);
   });
 });
+/**
+ * 独立検証（design.md §16.31(c)）の`await`中に人が「全体の停止」を押しても、検証は
+ * 停止を確認せずに同じセッションの`runLoop`を張り直していた（Issue #1121、静的精査
+ * EX-RUNNER-02）。元のループは`done`で終わっているため`stop()`の`stopLoop()`は何にも
+ * 当たらず、止めたはずのAIの修正ループが再開する。
+ */
+describe('WorkflowRunner: 独立検証中の全体停止（Issue #1121）', () => {
+  const VERIFY_YAML = `
+version: 1
+name: verify-halt
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+    verify:
+      files: ["必須ではない.txt"]
+      semantic: false
+`;
+
+  /**
+   * 検証の最初の`await`（`filePort.fileSize`）を任意のタイミングまで止めておくfilePort。
+   * 定義ファイル自身のサイズ取得（`start`が使う）は素通しし、検証対象のパスだけを保留する。
+   */
+  function gatedFilePort(yaml: string): {
+    port: WorkflowFilePort;
+    /** 検証対象の`fileSize`が待ちに入るまで待つ。 */
+    waitForVerification: () => Promise<void>;
+    /** 保留していた`fileSize`を「ファイルなし」（検証失敗）として返す。 */
+    release: () => void;
+  } {
+    let release: (() => void) | undefined;
+    let notifyEntered: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      notifyEntered = resolve;
+    });
+    return {
+      port: {
+        fileSize: async (target: string) => {
+          if (!target.endsWith('必須ではない.txt')) {
+            return Buffer.byteLength(yaml, 'utf8');
+          }
+          notifyEntered?.();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return undefined;
+        },
+        readTextFile: async () => yaml,
+      },
+      waitForVerification: async () => {
+        await entered;
+      },
+      release: () => {
+        release?.();
+      },
+    };
+  }
+
+  it('検証のawait中に停止すると、runLoopを張り直さずタスクが停止として確定する', async () => {
+    const gate = gatedFilePort(VERIFY_YAML);
+    const { runner, codexHost, store } = createHarness(VERIFY_YAML, {
+      filePort: gate.port,
+    });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const runLoopCallsBeforeDone = t1.runLoopCalls.length;
+    t1.finish('done' as LoopStopReason, doneState('[DONE]'));
+    await gate.waitForVerification();
+
+    runner.stop(runId);
+    gate.release();
+    await flush();
+
+    // 検証の失敗を修正させる指示（`runLoop`の張り直し）が出ていない
+    expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone);
+    const run = store.find(runId) as PersistedRun;
+    expect(run.haltedByUser).toBe(true);
+    expect(run.tasks['T1']?.state).toBe('failed');
+  });
+
+  it('停止がなければ従来どおり検証失敗の指摘を返して再試行する（陽性対照）', async () => {
+    const gate = gatedFilePort(VERIFY_YAML);
+    const { runner, codexHost } = createHarness(VERIFY_YAML, {
+      filePort: gate.port,
+    });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    expect(result.runId).toBeDefined();
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const runLoopCallsBeforeDone = t1.runLoopCalls.length;
+    t1.finish('done' as LoopStopReason, doneState('[DONE]'));
+    await gate.waitForVerification();
+
+    gate.release();
+    await flush();
+
+    expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone + 1);
+    expect(t1.runLoopCalls.at(-1)?.initialPrompt).toContain('必須ではない.txt');
+  });
+});

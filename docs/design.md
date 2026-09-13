@@ -6203,6 +6203,8 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 
 失敗時は具体的な指摘を同じ会話・同じworktreeへ返して修正を続ける。初回を含め最大3回で、通過時だけ従来のマージ処理へ進む。3回失敗、レビュー応答が壊れている、レビューセッションが失敗した場合は`failed`として復旧オーケストレーターへ渡す。
 
+**検証の`await`中に人が「全体の停止」を押したら、検証結果を捨てて再開しない**（Issue #1121）。検証はファイルの存在確認・`git diff`・独立レビュー（別セッションの起動）を順に待つあいだ、拡張機能の状態が変わりうる。元のループは`[DONE]`で既に終わっているため`stop()`の`stopLoop()`はこのタスクには当たらず、検証側が黙って`runLoop`を張り直すと「人が止めたのにAIの修正ループが再開する」ことになる。`verifyTaskCompletion`は各`await`の後に、(1) 拡張機能の終了中（`disposing`）、(2) runやタスクの作り直し（`runs`・`live.tasks`から引いた実体が別物になっている）、(3) 全体の停止（`haltedByUser`）を確認し、いずれかであれば結果の適用も`runLoop`の張り直しも行わない。(3) のときだけ、走行中のループを`stopLoop()`で止めたときと同じ`'taskStopped'`でタスクを停止として確定させる（`stop()`の経路と揃える）。(1) は`runState`の書き換え・`persist`まで含めて何もしない（片付けは`dispose()`が受け持つ）。
+
 実施主体は**forge（人のレビューを待つ機構）ではなく、拡張自身が別のエージェントセッションを立てて読み取り専用でレビューさせる方式**を採る。§16.28の`reviewWorkflowPlan`（分解レビュー、roadmap W3）と同じ形をそのまま踏襲する。
 
 - `reviewTaskPullRequest`（`planner.ts`）は`buildPlannerSessionInput` + `sendSingleTurn`（既定`PLANNER_TURN_TIMEOUT_MS` = 5分）で1ターンだけ送って閉じる。§16.28と同じく`sandbox: read-only`（Codex）・`approvalMode: never`（Codex）/`permissionMode: manual`（Claude）で起動し、承認要求は理由を問わず全て拒否する。**読み取り専用であることはプロンプトの指示ではなく起動設定で担保する**
