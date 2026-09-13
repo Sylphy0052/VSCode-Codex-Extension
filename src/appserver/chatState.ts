@@ -1535,13 +1535,16 @@ export function applyEvent(
     }
 
     case 'serverRequest/resolved': {
-      // 別のウィンドウやTUIで承認された。こちらのカードは用済み
+      // 別のウィンドウやTUIで承認・回答された。こちらのカードは用済み
       const requestId = params['requestId'];
       if (typeof requestId !== 'number' && typeof requestId !== 'string') {
         return state;
       }
-      const next = removeApproval(state, requestId);
-      return next.approvals.length === state.approvals.length ? state : next;
+      const next = removePrompt(removeApproval(state, requestId), requestId);
+      return next.approvals.length === state.approvals.length &&
+        next.prompts.length === state.prompts.length
+        ? state
+        : next;
     }
 
     /**
