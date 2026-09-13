@@ -3945,7 +3945,12 @@ export class WorkflowRunner {
     }
 
     const taskStates = new Map([...live.runState.tasks].map(([id, s]) => [id, s.state] as const));
-    const result = await applyRunCompletionToFile({ fs: deps.fs }, target, taskStates);
+    const result = await applyRunCompletionToFile(
+      { fs: deps.fs },
+      target,
+      taskStates,
+      live.repoRoot,
+    );
     if (!result.ok) {
       this.deps.log.warn(`[workflow ${runId}] ${result.message}`);
       return;

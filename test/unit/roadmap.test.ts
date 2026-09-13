@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
 import type { Logger } from '../../src/log';
@@ -27,6 +31,7 @@ import {
   validateRoadmap,
   type GenerateRoadmapDeps,
   type IssueListPort,
+  nodeRoadmapFileSystem,
   type RoadmapFileSystemPort,
   type RoadmapGenerationPort,
   type RoadmapMaterialItem,
@@ -1573,6 +1578,7 @@ describe('applyRunCompletionToFile', () => {
       { fs },
       '/repo/docs/roadmap/g.md',
       new Map([['R1', 'done']]),
+      '/repo',
     );
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
@@ -1590,7 +1596,12 @@ describe('applyRunCompletionToFile', () => {
       },
       readTextFile: async () => SAMPLE_ROADMAP,
     };
-    await applyRunCompletionToFile({ fs }, '/repo/docs/roadmap/g.md', new Map([['R404', 'done']]));
+    await applyRunCompletionToFile(
+      { fs },
+      '/repo/docs/roadmap/g.md',
+      new Map([['R404', 'done']]),
+      '/repo',
+    );
     expect(writeCount).toBe(0);
   });
 
@@ -1599,7 +1610,7 @@ describe('applyRunCompletionToFile', () => {
       writeTextFile: async () => undefined,
       readTextFile: async () => undefined,
     };
-    const outcome = await applyRunCompletionToFile({ fs }, '/repo/missing.md', new Map());
+    const outcome = await applyRunCompletionToFile({ fs }, '/repo/missing.md', new Map(), '/repo');
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.reason).toBe('readFailed');
@@ -1624,6 +1635,7 @@ describe('applyRunCompletionToFile', () => {
         { fs },
         '/repo/docs/roadmap/g.md',
         new Map([['R1', 'done']]),
+        '/repo',
       );
       expect(writeCount).toBe(0);
       expect(outcome.ok).toBe(true);
@@ -1658,8 +1670,18 @@ describe('applyRunCompletionToFile', () => {
       // runAはR1を、runBはR2をdoneにする。maxParallel（既定3）の枠で走った2本が
       // ほぼ同時に完了し、両方の書き戻しが重なった状況
       const [outcomeA, outcomeB] = await Promise.all([
-        applyRunCompletionToFile({ fs }, '/repo/docs/roadmap/g.md', new Map([['R1', 'done']])),
-        applyRunCompletionToFile({ fs }, '/repo/docs/roadmap/g.md', new Map([['R2', 'done']])),
+        applyRunCompletionToFile(
+          { fs },
+          '/repo/docs/roadmap/g.md',
+          new Map([['R1', 'done']]),
+          '/repo',
+        ),
+        applyRunCompletionToFile(
+          { fs },
+          '/repo/docs/roadmap/g.md',
+          new Map([['R2', 'done']]),
+          '/repo',
+        ),
       ]);
 
       expect(outcomeA.ok).toBe(true);
@@ -1884,4 +1906,92 @@ describe('alignRoadmapIssues（design.md §16.19。誤ったCloses #<N>を防ぐ
       expect(parseWorkflowYaml(result.yaml).tasks[0]?.issue).toBe(12);
     },
   );
+});
+
+describe('ロードマップ書き込みの境界検証（実ファイルシステム、Issue #1120）', () => {
+  let workspace: string;
+  let outside: string;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'roadmap-ws-'));
+    outside = await mkdtemp(path.join(tmpdir(), 'roadmap-outside-'));
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  it('通常のディレクトリへは従来どおり書ける', async () => {
+    const target = path.join(workspace, 'docs', 'roadmap', 'g.md');
+
+    await nodeRoadmapFileSystem.writeTextFile(target, '# g\n', workspace);
+
+    expect(await readFile(target, 'utf8')).toBe('# g\n');
+  });
+
+  it('既存ファイルの上書きもできる（一時ファイル+renameで確定する）', async () => {
+    const target = path.join(workspace, 'docs', 'roadmap', 'g.md');
+    await nodeRoadmapFileSystem.writeTextFile(target, '# old\n', workspace);
+
+    await nodeRoadmapFileSystem.writeTextFile(target, '# new\n', workspace);
+
+    expect(await readFile(target, 'utf8')).toBe('# new\n');
+    // 一時ファイルを残さない
+    const entries = await readdir(path.join(workspace, 'docs', 'roadmap'));
+    expect(entries).toEqual(['g.md']);
+  });
+
+  /**
+   * `docs/roadmap`自体をワークスペース外へのシンボリックリンクにしておくと、
+   * パス文字列の判定（`resolveRoadmapOutputPath`）は「ワークスペース内」と見なすが、
+   * 実際の書き込みは外部へ着地する（Issueの本題）。
+   */
+  it('出力先ディレクトリが外向きsymlinkなら書き込みを拒否し、外部にファイルを作らない', async () => {
+    await mkdir(path.join(workspace, 'docs'), { recursive: true });
+    await symlink(outside, path.join(workspace, 'docs', 'roadmap'), 'dir');
+    const target = path.join(workspace, 'docs', 'roadmap', 'g.md');
+
+    await expect(nodeRoadmapFileSystem.writeTextFile(target, '# g\n', workspace)).rejects.toThrow(
+      /シンボリックリンク/,
+    );
+
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it('末端のロードマップファイル自体が外向きsymlinkでも書き込みを拒否する', async () => {
+    await mkdir(path.join(workspace, 'docs', 'roadmap'), { recursive: true });
+    const outsideFile = path.join(outside, 'stolen.md');
+    await writeFile(outsideFile, '# original\n', 'utf8');
+    const target = path.join(workspace, 'docs', 'roadmap', 'g.md');
+    await symlink(outsideFile, target);
+
+    await expect(nodeRoadmapFileSystem.writeTextFile(target, '# g\n', workspace)).rejects.toThrow(
+      /シンボリックリンク/,
+    );
+
+    // リンク先の内容が書き換わっていない
+    expect(await readFile(outsideFile, 'utf8')).toBe('# original\n');
+  });
+
+  it('パス文字列の上でワークスペースの外を指す場合も書き込みを拒否する（多層防御）', async () => {
+    const target = path.join(outside, 'g.md');
+
+    await expect(nodeRoadmapFileSystem.writeTextFile(target, '# g\n', workspace)).rejects.toThrow(
+      /ワークスペースフォルダの外/,
+    );
+
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it('途中のディレクトリが外向きsymlinkでも書き込みを拒否する', async () => {
+    await symlink(outside, path.join(workspace, 'docs'), 'dir');
+    const target = path.join(workspace, 'docs', 'roadmap', 'g.md');
+
+    await expect(nodeRoadmapFileSystem.writeTextFile(target, '# g\n', workspace)).rejects.toThrow(
+      /シンボリックリンク/,
+    );
+
+    expect(await readdir(outside)).toEqual([]);
+  });
 });
