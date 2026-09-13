@@ -811,6 +811,14 @@ export interface PlanWorkflowFromRoadmapInput {
   cwd: string;
   baseline: ExtensionSafetyBaseline;
   log: Logger;
+  /**
+   * チームモードか（design.md §16.44、Issue #1034）。`planWorkflow`へ素通しするだけで、
+   * ここでは材料の組み立てを変えない——ロードマップの項目は role 相当の情報を持たず
+   * （`RoadmapItem`にあるのは id / text / acceptance / evidence / risks / dependsOn / issue
+   * だけ）、role は項目の内容から分解セッションが推定するメタデータになるため。
+   * 「1項目=1タスク」の対応を role が崩さないことは`buildPlannerPrompt`側の指示で担保する。
+   */
+  team?: boolean;
 }
 
 export type PlanWorkflowFromRoadmapResult =
@@ -849,6 +857,9 @@ export async function planWorkflowFromRoadmapPhases(
     baseline: input.baseline,
     log: input.log,
     roadmapMaterial: material,
+    // `exactOptionalPropertyTypes`下では`team: undefined`を書き込めないため、
+    // 値がある場合だけキーを足す（`planWorkflow`の`roadmapMaterial`と同じ書き方）
+    ...(input.team !== undefined ? { team: input.team } : {}),
   };
   const result = await planWorkflow(planInput);
   if (!result.ok) {

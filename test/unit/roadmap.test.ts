@@ -1000,6 +1000,66 @@ describe('planWorkflowFromRoadmapPhases（design.md §16.19 2段目）', () => {
     expect(sentPrompt).toContain('Phase 1: 設計');
   });
 
+  describe('チームモード（design.md §16.44、issue #1034）', () => {
+    /** `buildPlannerPrompt`がチームモードのときだけ出す指示。素通しできたかをここで見る。 */
+    const ROLE_INSTRUCTION = '全てのタスクにroleを書くこと';
+
+    function phaseAndHost(): { phase: RoadmapPhase; host: FakeRoadmapHost } {
+      const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
+      const phase = parsed.phases[0];
+      if (phase === undefined) throw new Error('phase not found');
+      const host = new FakeRoadmapHost(
+        ['version: 1', 'name: x', 'tasks:', '  - id: R1', '    prompt: p', '    done: d'].join(
+          '\n',
+        ),
+      );
+      return { phase, host };
+    }
+
+    it('teamを省略すると、分解セッションへ送るプロンプトにrole指示が入らない（従来どおり）', async () => {
+      const { phase, host } = phaseAndHost();
+
+      await planWorkflowFromRoadmapPhases({ ...baseInput, chunk: chunkOf(phase), host });
+
+      const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+      // 陽性対照: プロンプト自体は組み立っている（空文字列を見て「入っていない」と言っていない）
+      expect(sentPrompt).toContain('## ロードマップの材料');
+      expect(sentPrompt).not.toContain(ROLE_INSTRUCTION);
+    });
+
+    it('team: trueをplanWorkflowへ素通しし、role指示がプロンプトへ入る', async () => {
+      const { phase, host } = phaseAndHost();
+
+      await planWorkflowFromRoadmapPhases({
+        ...baseInput,
+        chunk: chunkOf(phase),
+        host,
+        team: true,
+      });
+
+      const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+      expect(sentPrompt).toContain(ROLE_INSTRUCTION);
+      // ロードマップの材料は従来どおり渡す（roleを足しても材料の組み立ては変えない）
+      expect(sentPrompt).toContain('## ロードマップの材料');
+      expect(sentPrompt).toContain('id: R1');
+    });
+
+    it('team: falseは省略時と同じ（役割を付けない）', async () => {
+      const { phase, host } = phaseAndHost();
+
+      await planWorkflowFromRoadmapPhases({
+        ...baseInput,
+        chunk: chunkOf(phase),
+        host,
+        team: false,
+      });
+
+      const sentPrompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+      expect(sentPrompt).toContain('## ロードマップの材料');
+      expect(sentPrompt).not.toContain(ROLE_INSTRUCTION);
+    });
+  });
+
   it('生成が検証を通らなければ、planWorkflowと同じくok: falseを返す', async () => {
     const parsed = parseRoadmapMarkdown(SAMPLE_ROADMAP);
     const phase = parsed.phases[0];

@@ -364,6 +364,68 @@ describe('buildPlannerPrompt（design.md §16.9）', () => {
     });
   });
 
+  describe('ロードマップ経路のチームモード（design.md §16.19・§16.44、issue #1034）', () => {
+    const summary = { topLevelEntries: [], hasAgentsMd: false, hasClaudeMd: false };
+    const material =
+      '## ロードマップの材料\n- id: R1\n  内容: 設計する\n  依存: なし\n  Issue: #12';
+    /** 材料の転記制約がroleより優先されることを示す指示（`buildPlannerPrompt`のロードマップ節）。 */
+    const ROADMAP_WINS = 'この節の規則は、後述の「## 分解の指針」より優先する';
+    const ROLE_KEEPS_STRUCTURE =
+      'roleはタスクの追加・削除・分割・統合や、依存関係を変える理由にしてはならない';
+    const ROLE_IS_NOT_ID = '同じroleを複数のタスクへ付けてよい（roleはタスクidではない）';
+
+    it('ロードマップ材料があるとき、1項目=1タスクが「## 分解の指針」より優先だと書く', () => {
+      const prompt = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        roadmapMaterial: material,
+      });
+
+      // 陽性対照: ロードマップ節そのものは出ている（材料の渡し方を間違えて空を見ていない）
+      expect(prompt).toContain('## ロードマップの材料');
+      expect(prompt).toContain(ROADMAP_WINS);
+    });
+
+    it('team省略時はロードマップ節へrole向けの指示を足さない', () => {
+      const prompt = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        roadmapMaterial: material,
+      });
+
+      expect(prompt).not.toContain(ROLE_KEEPS_STRUCTURE);
+      expect(prompt).not.toContain(ROLE_IS_NOT_ID);
+    });
+
+    it('team指定時は、roleが1項目=1タスクの対応と依存を変えないよう指示する', () => {
+      const prompt = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        roadmapMaterial: material,
+        team: true,
+      });
+
+      // 「roleごとにタスクを再編せよ」と読まれるとIssue #842と同じ違反になる。
+      // 材料の転記制約の側にも書いて二重に効かせている
+      expect(prompt).toContain(ROLE_KEEPS_STRUCTURE);
+      expect(prompt).toContain(ROLE_IS_NOT_ID);
+      expect(prompt).toContain(ROADMAP_WINS);
+    });
+
+    it('ロードマップ材料が無ければ、team指定でもロードマップ節の指示は出ない', () => {
+      const prompt = buildPlannerPrompt({
+        goal: 'ゴール',
+        workspaceSummary: summary,
+        team: true,
+      });
+
+      // 陽性対照: ゴール文経路のrole指示は出ている（team: trueが効いていないわけではない）
+      expect(prompt).toContain('全てのタスクにroleを書くこと');
+      expect(prompt).not.toContain(ROLE_KEEPS_STRUCTURE);
+      expect(prompt).not.toContain(ROADMAP_WINS);
+    });
+  });
+
   it(
     '改行や制御文字を含むゴール文をプロンプトへ注入できない' +
       '（design.md §16.24、Issue #369。untrustedText.tsのformatUntrustedへ委譲）',
