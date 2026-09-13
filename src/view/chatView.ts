@@ -545,9 +545,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 永久にハングしたままになる。パネルやセッション状態自体は残す（テスト用の
    * `FakeAppServerConnection`は`onDisconnect`を呼ばないため、本番の接続でのみ働く）。
    *
-   * `thread/start`応答待ちの間（`pendingStarts`）に届いた承認要求も`findByThreadId`が
-   * ルーティングしうるため、`panels`だけでなく`allPanels()`（`pendingStarts`も含む）を
-   * 走査する。1セッションの解放が例外を投げても他セッションを解放し続けられるよう、
+   * 走査は`panels`だけでなく`allPanels()`（`pendingStarts`も含む）で行う。開始待ちの
+   * エントリはthreadIdをまだ記録しておらず、宛先を照合できない要求は拒否するため
+   * （F10-01。`findExactByThreadId`参照）今のところ解放すべき保留を持たないが、
+   * 取りこぼしたときの症状が「承認カードが永久に固まる」であるため安全側に倒す。
+   * 1セッションの解放が例外を投げても他セッションを解放し続けられるよう、
    * 個別にtry/catchで囲む（ここは`proc`の`exit`ハンドラから同期的に呼ばれるため、
    * 捕まえ損ねるとNodeの未捕捉例外になる）。
    */
@@ -2798,7 +2800,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
 
-    const target = this.findByThreadId(params['threadId']);
+    const target = this.findNotificationTarget(params['threadId']);
     if (method === 'mcpServer/startupStatus/updated') {
       // MCPツールの可視性確認（design.md §16.21）専用の内部状態。会話には無関係なため
       // ChatSession.applyNotificationへは転送しない（`mcpStartupListeners`のJSDoc参照）
@@ -2829,7 +2831,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   private async routeServerRequest(request: ServerRequest): Promise<unknown> {
-    const target = this.findByThreadId(request.params['threadId']);
+    const target = this.findExactByThreadId(request.params['threadId']);
     if (target === undefined) {
       // 対応する画面が無い要求に「許可」を返してはいけない
       this.log.warn(`宛先不明の要求を拒否しました: ${request.method}`);
@@ -2870,11 +2872,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * threadIdから画面を引く。`panels` に無ければ、開始待ちの中から**そのthreadIdを
    * 実際に記録しているエントリ**を探す（design.md §16.10の3）。
    *
-   * 「開始待ちが1件だけだから」という決め打ちはしない。並列開始時に別タスク宛の
-   * 通知・承認要求を誤って渡すと、それは「別タスクの操作を勝手に許可する」事故になる。
-   * 一致するものが無ければ宛先不明として `undefined`（誤配送より安全な失敗）。
+   * threadIdの一致だけを宛先の根拠にする。「開始待ちが1件だけだから」という決め打ちは
+   * しない。並列開始時に別タスク宛の承認要求を誤って渡すと、それは「別タスクの操作を
+   * 勝手に許可する」事故になる。一致するものが無ければ宛先不明として `undefined`
+   * （誤配送より安全な失敗）。サーバー要求（承認）の宛先はこちらだけを使う。
    */
-  private findByThreadId(threadId: unknown): ChatPanel | undefined {
+  private findExactByThreadId(threadId: unknown): ChatPanel | undefined {
     if (typeof threadId !== 'string') {
       return undefined;
     }
@@ -2882,11 +2885,26 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (known !== undefined) {
       return known;
     }
-    const pending = this.pendingStarts.findByThreadId(threadId, (entry) => entry.session.threadId);
-    if (pending !== undefined) {
-      return pending;
+    return this.pendingStarts.findByThreadId(threadId, (entry) => entry.session.threadId);
+  }
+
+  /**
+   * 通知の宛先を引く。厳密な照合で見つからないときに限り、開始待ちが1件だけなら
+   * それを宛先とする（`thread/start` の応答前に届いた通知の救済。§16.10の3）。
+   *
+   * この救済を承認要求へ広げてはいけない（F10-01）。開始待ちが1件であることは、
+   * 未登録のthreadIdがその会話宛である証明にはならず、閉じた会話の遅延要求などを
+   * 別会話の承認ハンドラーへ渡してしまう。取りこぼして困るのは通知だけで、
+   * 要求は宛先不明として拒否すれば呼び出し元が解放される。
+   */
+  private findNotificationTarget(threadId: unknown): ChatPanel | undefined {
+    const exact = this.findExactByThreadId(threadId);
+    if (exact !== undefined) {
+      return exact;
     }
-    // `thread/start` の応答前に届いた通知。開始待ちが1件だけなら宛先は一意に定まる。
+    if (typeof threadId !== 'string') {
+      return undefined;
+    }
     // 2件以上あるときは諦める（取りこぼしより誤配送のほうが重い。§16.10の3）
     return this.pendingStarts.soleEntry();
   }
