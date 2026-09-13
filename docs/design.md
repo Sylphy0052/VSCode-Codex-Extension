@@ -5004,6 +5004,13 @@ interface TaskSession {
 
 開始待ちを複数持てる形（開始要求ごとのキーで引ける表）に変える。Claude側は `randomSessionId()` で起動前にidが決まり、即座に `panels` へ入るためこの問題は無い。
 
+宛先解決は通知と要求で分ける（Issue #1182、静的レビューの指摘F10-01）。
+
+- 通知（`routeNotification` → `findNotificationTarget`）: `panels` → 開始待ちのthreadId照合 → それでも見つからなければ、開始待ちがちょうど1件のときに限りそれを宛先にする（`soleEntry`）。`thread/start` の応答前に届く通知を取りこぼさないための救済
+- 承認などのサーバー要求（`routeServerRequest` → `findExactByThreadId`）: threadIdが一致する宛先だけへ渡す。`soleEntry` のfallbackは使わない
+
+開始待ちが1件であることは、未登録のthreadIdがその会話宛である証明にはならない。閉じた会話からの遅延要求などをその1件へ渡すと、自動承認ハンドラーが付いた会話なら人に見せないまま許可応答を返しうる。宛先を確定できない要求は `defaultDenyResponse` で拒否する（応答の値を作れない要求はエラーで相手を解放する）。`pendingStarts` に居るのは `thread/start` の往復の間だけで、この区間ではまだturnを開始していないため、要求を拒否しても取りこぼしにはならない。
+
 **4. セッションの寿命をパネルから切り離す**
 
 現状 `panel.onDidDispose` は `session.dispose()` に加えて `panels` からエントリを削除する。`routeNotification` / `routeServerRequest` は `panels` を見て宛先を引くため、**エントリを消すと通知が届かなくなり、`LoopController.observe()` も呼ばれなくなる**。タブを閉じた瞬間にタスクの進行検知が止まり、「閉じてもタスクは走り続ける」が成立しない。
