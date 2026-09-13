@@ -5499,6 +5499,8 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 - **ただしIssue行はあるが番号として読めない項目では、`issue` を削らない**（Issue #408）。`#12abc` のような書き損じや、桁が極端に多くて安全な整数に収まらない番号がこれに当たる。人は番号を書いているのだから「番号が無い」とは扱えず、削るとYAML側にある正しい値まで失う。この場合は項目に `issueUnparseable` を立てて `issue` には触れず、警告として人へ見せる（人が直すべきはロードマップ側であるため）
 - 材料に無いタスク（分解セッションが独自に足したもの）の `issue` は触らない。そちらは転記の確認（`detectRoadmapMaterialMismatches`）が人へ見せる範囲
 - 生成後の検証と、`autoApprove` / `allow` を含む場合の強調は §16.9 のまま。タスク分解のレビュー（§16.28）も、ゴール文から生成した場合と同じ`handlePlanSuccess`を経由するため、この経路（ロードマップ由来）にも同じく掛かる
+- **フェーズを選んだ後に、通常モードとチームモードを1回だけ選ばせる**（`pickWorkflowTeamMode`、`extension.ts`。Issue #1034）。選んだ値は `PlanWorkflowFromRoadmapInput.team` から `planWorkflow` へ素通しするだけで、材料の組み立ては変えない。ロードマップの項目は`role`相当の情報を持たず（`RoadmapItem` にあるのは id / text / acceptance / evidence / risks / dependsOn / issue だけ）、`role`は項目の内容から分解セッションが推定するメタデータになるためである。通常モードを先頭に置いて既定の挙動（`team: false`）を保ち、キャンセル（Escape）ではYAMLを作らずに戻る。メニュー項目を分ける案（入口が増えて分かりにくい）と、設定で既定を持つ案（選択状態が見えないまま意図せずチームモードになる）は採らない
+- **チームモードでも「1項目=1タスク」の対応が`role`より優先されることをプロンプトへ明示する**（`buildPlannerPrompt`のロードマップ節。Issue #1034）。危険なのは分解セッションが`role`の指示を「役割ごとにタスクを再編せよ」と読むケースで、これは Issue #842 で一度起きた違反である。ロードマップ節の側にも「`role`はタスクの追加・削除・分割・統合や依存関係を変える理由にしてはならない」「同じ`role`を複数のタスクへ付けてよい（`role`はタスクidではない）」と書き、材料の転記制約と二重に効かせる。あわせて、この節の規則が「## 分解の指針」の「原則1〜3タスク」より優先されることも明示する——項目が4件以上あるとき、どちらが勝つかを書かないと項目をまとめたYAMLが返り、`detectRoadmapMaterialMismatches` に落ちる
 
 #### ロードマップの更新
 
@@ -9116,7 +9118,7 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 
 `kanbanBucket`/`summarizeKanban`/`taskRoleLabel`（`workflowGraph.ts`）はいずれもチームモードで新設した。`kanbanBucket`は`TaskState`をToDo（`pending`）/ InProgress / Done（`done`）/ 要対応（`failed`・`blocked`・`skipped`）の4バケツへ寄せ、`summarizeKanban`がその件数を数える。InProgressの判定には`runState.ts`の`isActiveTaskState`をそのまま使い、「進行中とは何か」の定義を二重に持たない。`taskRoleLabel`はタスクの`role`から日本語の表示ラベルを引く。`role`が`undefined`（役割なし）のタスクは何も返さず、Webview側も表示しない——チームモードを使わないワークフローの見た目を変えないためである。`workflowView.ts:297-300`がこれをカンバンの各タスクカードへ`roleLabel`として渡す。
 
-`agent.workflows.team`（`workflowMenu.ts:41-45`、`extension.ts:915`）はワークフローメニューに「チームモードを開始…」を足す。実体（`planTeamWorkflowCommand`、`extension.ts:1682-1699`）は`planWorkflowFromGoalCommand`を`team: true`で呼ぶだけで、生成経路自体は§16.9のゴール文からのYAML生成と同じである。`team`が`true`のときだけ`planWorkflow`（`planner.ts`）が「全てのタスクにroleを書くこと」という指示をプロンプトへ足し（`planner.ts:353-357`）、`buildRoleDescription`（`planner.ts:168-174`）が役割ごとのmodel/effortの対応を列挙してモデルへ見せる。生成したYAMLはこれまでどおり実行せず保存するだけで、実行は人がワークフローViewから明示的に選んだときに限る（§16.13）。
+`agent.workflows.team`（`workflowMenu.ts:41-45`、`extension.ts:915`）はワークフローメニューに「チームモードを開始…」を足す。実体（`planTeamWorkflowCommand`、`extension.ts:1682-1699`）は`planWorkflowFromGoalCommand`を`team: true`で呼ぶだけで、生成経路自体は§16.9のゴール文からのYAML生成と同じである。この入口はゴール文からの生成に限る。**ロードマップ経路（§16.19）でチームモードを選ぶ導線は`agent.workflows.plan`側のモード選択に置く**（Issue #1034）——同じことを2つの入口から選べるようにすると、どちらを使えばよいかが分からなくなるためで、`agent.workflows.team`にはロードマップ経路を足さない。`team`が`true`のときだけ`planWorkflow`（`planner.ts`）が「全てのタスクにroleを書くこと」という指示をプロンプトへ足し（`planner.ts:353-357`）、`buildRoleDescription`（`planner.ts:168-174`）が役割ごとのmodel/effortの対応を列挙してモデルへ見せる。生成したYAMLはこれまでどおり実行せず保存するだけで、実行は人がワークフローViewから明示的に選んだときに限る（§16.13）。
 
 #### 確かめ方
 
