@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyEvent, initialChatState, type ChatState } from '../../src/appserver/chatState';
-import { stoppedByUsageLimit } from '../../src/view/chatView';
+import { stoppedByUsageLimit } from '../../src/view/chatShared';
 
 /**
  * 上限で失敗したターンの扱い（issue #1199）。

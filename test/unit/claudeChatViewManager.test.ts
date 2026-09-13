@@ -2789,15 +2789,20 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     return { session, panel, sent };
   }
 
+  /** 上限に当たってターンが失敗した形。`is_error`で`turnFailed`が立つ（`streamJson.ts`）。 */
+  const failedResultLine = (): string =>
+    `${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true })}\n`;
+
   /**
-   * 中断後にCLIから届くターンの確定。
+   * 上限に当たったターンの確定。
    *
    * 実物の`ClaudeStreamSession.interrupt`は`usage`を残したまま`busy: false`を通知するが、
    * 子プロセスを持たないテストではその通知が出ない。同じ形の状態更新をここで起こす
-   * （予約が復活していた経路そのもの）。
+   * （予約が復活していた経路そのもの）。自動続行の対象は上限で失敗したターンだけなので
+   * （Issue #1206）、失敗として確定させる。
    */
   function finishTurn(session: ClaudeStreamSession): void {
-    session.receive(resultLine());
+    session.receive(failedResultLine());
   }
 
   type ResumeStatus = { scheduledAt?: number; suppressed?: boolean } | undefined;
@@ -2812,10 +2817,10 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
   it('中断しなければ、待ち時間が過ぎた時点で継続指示を送る（対照）', async () => {
     const { session, panel, sent } = await openChat();
     session.receive(rateLimitLine('rejected'));
+    finishTurn(session);
     await flush();
     expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
 
-    finishTurn(session);
     await vi.advanceTimersByTimeAsync(31 * 60_000);
 
     expect(sent).toHaveLength(1);
@@ -2828,6 +2833,7 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     await flush();
 
     panel?.webview.simulateMessage({ type: 'interrupt' });
+    // 中断したターンが上限で失敗として確定し、そのあとも使用量の更新が届く
     finishTurn(session);
     session.receive(rateLimitLine('rejected'));
     await flush();
@@ -2859,6 +2865,7 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     panel?.webview.simulateMessage({ type: 'send', text: '続けて' });
     await flush();
     session.receive(rateLimitLine('rejected'));
+    finishTurn(session);
     await flush();
 
     expect(sent).toEqual(['続けて']);
@@ -2871,6 +2878,7 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     session.receive(rateLimitLine('rejected'));
     await flush();
     panel?.webview.simulateMessage({ type: 'interrupt' });
+    finishTurn(session);
     await flush();
 
     // 1回目でOFF、2回目でONへ戻る（トグル）
@@ -2880,6 +2888,131 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     await flush();
 
     expect(lastResumeStatus(panel)?.suppressed).toBe(false);
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+});
+
+describe('上限で止まったターンだけを自動続行の対象にする（Issue #1206）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** レート制限の通知。`status`が`allowed`以外なら上限に当たっている（`streamJson.ts`）。 */
+  const rateLimitLine = (status: string): string =>
+    `${JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status, rateLimitType: 'five_hour' },
+    })}\n`;
+
+  /** 上限に当たってターンが失敗した形。 */
+  const failedResultLine = (): string =>
+    `${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true })}\n`;
+
+  /** 費用の取得など、ターンとは別の応答で状態が動く場面を模す。 */
+  const costLine = (): string =>
+    `${JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: 1_900_000_000 },
+    })}\n`;
+
+  async function openChat(): Promise<{
+    session: ClaudeStreamSession;
+    panel: ReturnType<typeof __mock.lastCreatedPanel>;
+    sent: string[];
+  }> {
+    const { sessions } = stubStartCapturing();
+    const sent: string[] = [];
+    vi.spyOn(ClaudeStreamSession.prototype, 'send').mockImplementation((text: string) => {
+      sent.push(text);
+    });
+    vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockImplementation((text: string) => {
+      sent.push(text);
+      return 'sent';
+    });
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    panel?.webview.simulateMessage({ type: 'ready' });
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが開始されていない');
+    }
+    session.receive(initLine('s1'));
+    return { session, panel, sent };
+  }
+
+  type ResumeStatus = { scheduledAt?: number; awaitingResult?: boolean } | undefined;
+
+  function lastResumeStatus(panel: { webview: { sent: unknown[] } } | undefined): ResumeStatus {
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    return (last?.state as { limitAutoResumeStatus?: ResumeStatus } | undefined)
+      ?.limitAutoResumeStatus;
+  }
+
+  it('上限の通知が残っていても、成功したターンには予約しない', async () => {
+    const { session, panel, sent } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    session.receive(resultLine());
+    await flush();
+
+    expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    expect(sent).toEqual([]);
+  });
+
+  it('上限で失敗したターンには予約する（対照）', async () => {
+    const { session, panel } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    session.receive(failedResultLine());
+    await flush();
+
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+
+  it('自動続行が成功した後は、使用量の応答が届いても予約し直さない', async () => {
+    const { session, panel, sent } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    session.receive(failedResultLine());
+    await flush();
+
+    // 待ち時間が過ぎて継続指示が飛び、そのターンは成功する
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    expect(sent).toHaveLength(1);
+    session.receive(initLine('s1'));
+    session.receive(resultLine());
+    await flush();
+    expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
+
+    // 上限の情報は`allowed`が来るまで残る。その更新だけでは予約しない
+    session.receive(costLine());
+    await flush();
+    expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('自動続行の結果がまた上限での失敗なら再試行を予約する', async () => {
+    const { session, panel, sent } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    session.receive(failedResultLine());
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    expect(sent).toHaveLength(1);
+    session.receive(initLine('s1'));
+    session.receive(failedResultLine());
+    await flush();
+
     expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
   });
 });

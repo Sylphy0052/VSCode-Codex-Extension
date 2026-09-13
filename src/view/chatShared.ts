@@ -264,6 +264,32 @@ export async function confirmRewindFiles(files: readonly string[]): Promise<bool
 }
 
 /**
+ * この会話が使用量の上限で止まったか（issue #1199）。Codex画面・Claude Code画面で共有する。
+ *
+ * レート制限の通知（`usage.limited`）はアカウント単位で全タブへ届くため、それだけでは
+ * どの会話が上限で落ちたかを絞れない。ターン自身が運ぶ失敗の区分（`turnFailureKind`、
+ * Codexの`turn/completed`の`turn.error`由来）が判っていればそちらを信じる。
+ *
+ * - `'usageLimit'`: 待てば解ける上限。再開する。
+ * - `'other'`: 理由が判っていて上限ではない。上限の通知が出ていても再開しない。
+ * - `undefined`: 理由が届かなかった（古いCLIの`turn/failed`、およびこの区分を持たない
+ *   Claude Codeを含む）。従来どおりレート制限の通知で判断する。
+ *
+ * 失敗していないターンは対象外。上限の通知が出ていても、成功した会話まで再開しない
+ * （issue #1206。Claude Code画面はこの判定を通っておらず、成功した会話へも継続指示を
+ * 送っていた）。
+ */
+export function stoppedByUsageLimit(state: ChatState): boolean {
+  if (!state.turnFailed) {
+    return false;
+  }
+  if (state.turnFailureKind !== undefined) {
+    return state.turnFailureKind === 'usageLimit';
+  }
+  return state.usage?.limited === true;
+}
+
+/**
  * ターン完了時の成果を作業記録へ通知する。Codex画面・Claude Code画面の両方で共有する。
  * 応答テキストと編集ファイルの両方が空なら何もしない。
  */

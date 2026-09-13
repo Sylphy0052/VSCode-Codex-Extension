@@ -112,6 +112,7 @@ import {
   reportTurnResult,
   runExportTranscript,
   STATE_POST_INTERVAL_MS,
+  stoppedByUsageLimit,
 } from './chatShared';
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
@@ -2157,26 +2158,30 @@ export class ClaudeChatViewManager
       this.cancelLimitAutoResume(entry);
       return;
     }
+    // 上限で止まったターンだけを対象にする（Issue #1206）。レート制限の通知は
+    // アカウント単位で全タブへ届き、`allowed`が来るまで残るため、それだけで予約すると
+    // 成功した会話へも継続指示を送ってしまう
+    const stoppedByLimit = stoppedByUsageLimit(state);
     if (entry.limitAutoResumeAwaitingResult) {
       if (!turnFinished) {
         return;
       }
       entry.limitAutoResumeAwaitingResult = false;
-      if (state.turnFailed && state.usage?.limited === true) {
+      if (stoppedByLimit) {
         this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
       } else {
         this.cancelLimitAutoResume(entry);
       }
       return;
     }
-    if (state.usage?.limited !== true) {
+    if (!stoppedByLimit) {
       this.cancelLimitAutoResume(entry);
       return;
     }
     if (entry.limitAutoResumeTimer !== undefined) {
       return;
     }
-    const resetAt = state.usage.resetsAt;
+    const resetAt = state.usage?.resetsAt;
     const waitMs =
       resetAt === undefined
         ? LIMIT_AUTO_RESUME_FALLBACK_MS
