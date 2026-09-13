@@ -157,7 +157,7 @@ suite('Codex画面: 承認・問い合わせの往復（Issue #187）', () => {
     });
 
     // 別経路（TUI等）で既に解決された、という通知。カードはここで取り下げられる
-    // （`ChatSession.dropResolvedApproval`）。
+    // （`ChatSession.dropResolvedRequest`）。
     connection.notify('serverRequest/resolved', { threadId: 'thread-resolved', requestId: 6 });
 
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');

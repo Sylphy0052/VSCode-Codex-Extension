@@ -632,7 +632,7 @@ export class ChatSession {
     if (method === SERVER_REQUEST_RESOLVED) {
       const requestId = params['requestId'];
       if (typeof requestId === 'number' || typeof requestId === 'string') {
-        this.dropResolvedApproval(requestId);
+        this.dropResolvedRequest(requestId);
       }
     }
     if (method === AUTO_APPROVAL_REVIEW_COMPLETED) {
@@ -709,17 +709,19 @@ export class ChatSession {
   }
 
   /**
-   * 承認が別の経路で解決されたとき。応答は返さず、画面の保留だけを取り下げる。
+   * 承認・質問が別の経路で解決されたとき。応答は返さず、画面の保留だけを取り下げる。
    *
-   * 同じスレッドを別のウィンドウやTUIでも開いている場合、そちらの承認でこちらの
-   * カードが宙に浮く。`serverRequest/resolved` を受けてここで片付ける。
+   * 同じスレッドを別のウィンドウやTUIでも開いている場合、そちらの承認・回答でこちらの
+   * カードが宙に浮く。`serverRequest/resolved` を受けてここで片付ける。取り下げず放置すると、
+   * 遅れて届いたWebviewの回答（`answerPrompt`）が用済みの要求へ応答を返してしまう。
    */
-  private dropResolvedApproval(requestId: number | string): void {
-    if (!this.waiting.has(requestId)) {
-      return;
+  private dropResolvedRequest(requestId: number | string): void {
+    if (this.waiting.delete(requestId)) {
+      this.log.info(`他の経路で解決された承認を取り下げました: ${String(requestId)}`);
     }
-    this.waiting.delete(requestId);
-    this.log.info(`他の経路で解決された承認を取り下げました: ${String(requestId)}`);
+    if (this.waitingPrompts.delete(requestId)) {
+      this.log.info(`他の経路で解決された問い合わせを取り下げました: ${String(requestId)}`);
+    }
   }
 
   /** ユーザーが承認カードのボタンを押したとき。 */
