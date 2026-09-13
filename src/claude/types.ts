@@ -92,4 +92,12 @@ export interface TranscriptMeta {
    * どちらも `firstUserText` が無いので、この2つを見分けるために使う。
    */
   sawUserEntry: boolean;
+  /**
+   * 他セッションからの `cross-session-message` の本文（Issue未起票、2026-09-13）。
+   *
+   * オーケストレーター等がpeerセッションへ送るメッセージは `isMeta: true` で
+   * 記録され `firstUserText` の対象外になるため、これしか無いセッションは
+   * `firstUserText` が無いまま名称未設定になる。表示名のフォールバックとして使う。
+   */
+  peerMessageText: string | undefined;
 }
