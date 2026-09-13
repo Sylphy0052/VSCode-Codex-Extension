@@ -1212,7 +1212,32 @@ export class ClaudeStreamSession {
     input: Record<string, unknown>,
     rawPayload: Record<string, unknown>,
   ): Promise<void> {
-    const result = await this.interceptApproval(approval, rawPayload);
+    // 判定を待つ間にプロセスが終わることがある（issue #1197）。要求を受けた世代を
+    // 捕まえておき、判定が戻った時点でずれていたら捨てる。終了時の解放
+    // （`releasePendingWaiters()`）が回収できるのはその時点で`waiting`にある分だけで、
+    // 判定中の要求はまだ入っていない。解放が通り過ぎた後から承認カードを出しても、
+    // `write()`はプロセスが無ければ何も送らないため、押せない承認待ちが残る。
+    // 世代のずれを`this.proc !== proc`で見るのは`start()`の5ハンドラと同じ流儀
+    const proc = this.proc;
+
+    let result: ApprovalHandlerResult;
+    try {
+      result = await this.interceptApproval(approval, rawPayload);
+    } catch (e) {
+      // 判定自体が失敗しても要求を放置しない。放置するとCLIが応答を待ち続ける
+      // （issue #1197）。内容を読み取れない要求と同じく拒否側へ倒す
+      this.log.error(`承認の判定に失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+      if (this.proc === proc) {
+        this.write(buildControlResponse(requestId, defaultDenyControlResponse()));
+      }
+      return;
+    }
+
+    if (this.proc !== proc) {
+      this.log.info(`承認: 判定中にセッションが終了したため捨てました（${approval.kind}）`);
+      return;
+    }
+
     if (result.kind === 'auto') {
       this.write(buildControlResponse(requestId, buildCanUseToolResponse(result.decision, input)));
       this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);
