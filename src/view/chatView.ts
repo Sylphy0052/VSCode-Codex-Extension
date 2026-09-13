@@ -314,6 +314,14 @@ interface ChatPanel extends BaseChatPanel {
   limitAutoResumeAt: number | undefined;
   limitAutoResumeAwaitingResult: boolean;
   /**
+   * 人が中断・ループ停止で自動再開を打ち切ったか（Issue #1202）。
+   *
+   * タイマーを消すだけでは、その後の状態更新で同じ条件（上限による失敗）から予約が
+   * 作り直される。人が止めた事実はターンの状態に残らないため、画面側で持つ。
+   * 解除は明示的な操作だけ（手動送信・ループ開始・自動続行設定のOFF→ON）。
+   */
+  limitAutoResumeSuppressed: boolean;
+  /**
    * 自動引き継ぎ（Issue #1079）を既に始めたか。閾値契機と圧縮契機のどちらが先に成立
    * しても、1セッションにつき1回しか引き継がない（`claudeChatView.ts`と同じ扱い）。
    */
@@ -1305,6 +1313,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       limitAutoResumeTimer: undefined,
       limitAutoResumeAt: undefined,
       limitAutoResumeAwaitingResult: false,
+      limitAutoResumeSuppressed: false,
       autoHandoffStarted: false,
       lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
@@ -1524,16 +1533,36 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.limitAutoResumeAwaitingResult = false;
   }
 
+  /**
+   * 人の操作で自動再開を打ち切る（Issue #1202）。中断もループ停止も「今は自動で送るな」
+   * という指示なので、タイマーを消すだけでなく、次の明示的な操作まで予約を止める。
+   */
+  private suppressLimitAutoResume(entry: ChatPanel): void {
+    this.cancelLimitAutoResume(entry);
+    entry.limitAutoResumeSuppressed = true;
+  }
+
+  /** 明示的な送信・再開操作で、手動中断による抑止を解く（Issue #1202）。 */
+  private clearLimitAutoResumeSuppression(entry: ChatPanel): void {
+    entry.limitAutoResumeSuppressed = false;
+  }
+
   private limitAutoResumeStatus(entry: ChatPanel): Record<string, unknown> {
     return {
       enabled: readChatLimitAutoResumeEnabled(),
       scheduledAt: entry.limitAutoResumeAt,
       awaitingResult: entry.limitAutoResumeAwaitingResult,
+      suppressed: entry.limitAutoResumeSuppressed,
     };
   }
 
   private scheduleLimitAutoResume(entry: ChatPanel, state: ChatState, turnFinished = false): void {
     if (!readChatLimitAutoResumeEnabled() || entry.panel === undefined) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    // 人が止めた後は、上限の条件が残っていても予約し直さない（Issue #1202）
+    if (entry.limitAutoResumeSuppressed) {
       this.cancelLimitAutoResume(entry);
       return;
     }
@@ -1581,6 +1610,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         entry.disposed ||
         entry.panel === undefined ||
         !readChatLimitAutoResumeEnabled() ||
+        // 人が中断・ループ停止で止めた後は送らない（Issue #1202）
+        entry.limitAutoResumeSuppressed ||
         latest.busy ||
         latest.approvals.length > 0 ||
         latest.prompts.length > 0
@@ -1636,6 +1667,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           return;
         }
         this.cancelLimitAutoResume(entry);
+        // 人が自分で送り直したら、中断で止めていた自動再開も再び有効にする（Issue #1202）
+        this.clearLimitAutoResumeSuppression(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
         // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
@@ -1755,7 +1788,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'interrupt') {
-        this.cancelLimitAutoResume(entry);
+        // 中断したターンの条件（上限による失敗）は状態に残る。タイマーを消すだけでは
+        // 次の状態更新で予約が復活するため、明示的な操作まで止める（Issue #1202）
+        this.suppressLimitAutoResume(entry);
         entry.loop.noteUserAction();
         await entry.session.interrupt();
         return;
@@ -1904,6 +1939,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'sendQueued' && typeof m['index'] === 'number') {
+        // 待たせていた指示を人が通すのも明示的な送信（Issue #1202）
+        this.clearLimitAutoResumeSuppression(entry);
         entry.loop.noteUserAction();
         await entry.session.sendQueued(m['index'], this.configFor(entry));
         return;
@@ -1918,6 +1955,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'flushQueue') {
         // 待たせていた指示を先に通すため、ループは割り込みとして止める
+        this.clearLimitAutoResumeSuppression(entry);
         entry.loop.noteUserAction();
         await entry.session.flushQueue(this.configFor(entry));
         return;
@@ -1954,6 +1992,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           );
         }
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
+        // 人が回し直したら、中断で止めていた自動再開も再び有効にする（Issue #1202）
+        this.clearLimitAutoResumeSuppression(entry);
         entry.loop.start(plan, entry.session.getState().items);
         return;
       }
@@ -1962,7 +2002,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'loop/stop') {
-        this.cancelLimitAutoResume(entry);
+        // 人が止めた自動送信を、上限の条件が残っているだけで再開しない（Issue #1202）
+        this.suppressLimitAutoResume(entry);
         entry.loop.stop('manual');
         return;
       }
@@ -2061,6 +2102,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         if (!enabled) {
           this.cancelLimitAutoResume(entry);
         } else {
+          // 入れ直しは再開の指示。中断で止めていた分もここで解く（Issue #1202）
+          this.clearLimitAutoResumeSuppression(entry);
           this.scheduleLimitAutoResume(entry, entry.session.getState());
         }
         this.postState(entry);

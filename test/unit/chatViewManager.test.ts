@@ -2370,3 +2370,132 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     expect(threadStarts(connection)).toBe(1);
   });
 });
+
+describe('人が止めた自動続行を状態更新で復活させない（Issue #1202）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    __mock.setConfig('codex', {});
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** タブを1枚開き、webviewの`ready`まで済ませる。 */
+  async function openChat(): Promise<{
+    connection: FakeAppServerConnection;
+    panel: ReturnType<typeof __mock.lastCreatedPanel>;
+  }> {
+    const { manager, connection } = createManager();
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+    await opened;
+    const panel = __mock.lastCreatedPanel();
+    panel?.webview.simulateMessage({ type: 'ready' });
+    return { connection, panel };
+  }
+
+  /** 上限に当たってターンが失敗した形（issue #1199で読むようにした`turn/completed`のstatus）。 */
+  function failByUsageLimit(connection: FakeAppServerConnection): void {
+    connection.notify('turn/started', { threadId: 'thread-A', turn: { id: 'turn-1' } });
+    connection.notify('turn/completed', {
+      threadId: 'thread-A',
+      turn: {
+        id: 'turn-1',
+        status: 'failed',
+        error: { message: '上限に達しました', codexErrorInfo: 'usageLimitExceeded' },
+      },
+    });
+  }
+
+  /** アカウント単位で全会話へ配られるレート制限の通知。人が止めた後も届き続ける。 */
+  function notifyRateLimits(connection: FakeAppServerConnection): void {
+    connection.notify('account/rateLimits/updated', {
+      rateLimits: { primary: { usedPercent: 100 } },
+    });
+  }
+
+  type ResumeStatus = { scheduledAt?: number; suppressed?: boolean } | undefined;
+
+  function lastResumeStatus(panel: { webview: { sent: unknown[] } } | undefined): ResumeStatus {
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    return (last?.state as unknown as { limitAutoResumeStatus?: ResumeStatus } | undefined)
+      ?.limitAutoResumeStatus;
+  }
+
+  function turnStarts(connection: FakeAppServerConnection): number {
+    return connection.requests.filter((r) => r.method === 'turn/start').length;
+  }
+
+  it('上限で失敗したターンには予約が入る（対照）', async () => {
+    const { connection, panel } = await openChat();
+    failByUsageLimit(connection);
+    await flushStatePosts();
+
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+
+  it('ループ停止の後にレート制限の通知が届いても予約が復活しない', async () => {
+    const { connection, panel } = await openChat();
+    failByUsageLimit(connection);
+    await flushStatePosts();
+
+    panel?.webview.simulateMessage({ type: 'loop/stop' });
+    notifyRateLimits(connection);
+    await flushStatePosts();
+
+    expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
+    expect(lastResumeStatus(panel)?.suppressed).toBe(true);
+  });
+
+  it('ループ停止の後は、待ち時間が過ぎても継続指示を送らない', async () => {
+    const { connection, panel } = await openChat();
+    failByUsageLimit(connection);
+    await flushStatePosts();
+    const before = turnStarts(connection);
+
+    panel?.webview.simulateMessage({ type: 'loop/stop' });
+    notifyRateLimits(connection);
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+
+    expect(turnStarts(connection)).toBe(before);
+  });
+
+  it('人が自分で送り直すと抑止が解け、次の上限では再び予約する', async () => {
+    const { connection, panel } = await openChat();
+    failByUsageLimit(connection);
+    await flushStatePosts();
+    panel?.webview.simulateMessage({ type: 'loop/stop' });
+    await flushStatePosts();
+
+    panel?.webview.simulateMessage({ type: 'send', text: '続けて' });
+    await tick();
+    failByUsageLimit(connection);
+    await flushStatePosts();
+
+    expect(lastResumeStatus(panel)?.suppressed).toBe(false);
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+
+  it('自動続行の設定をOFF→ONし直すと抑止が解ける', async () => {
+    const { connection, panel } = await openChat();
+    failByUsageLimit(connection);
+    await flushStatePosts();
+    panel?.webview.simulateMessage({ type: 'loop/stop' });
+    await flushStatePosts();
+
+    // 1回目でOFF、2回目でONへ戻る（トグル）
+    panel?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await tick();
+    panel?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await tick();
+    await flushStatePosts();
+
+    expect(lastResumeStatus(panel)?.suppressed).toBe(false);
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+});

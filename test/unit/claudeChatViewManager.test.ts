@@ -2739,3 +2739,147 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     expect(sessions).toHaveLength(1);
   });
 });
+
+describe('人が止めた自動続行を状態更新で復活させない（Issue #1202）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** レート制限の通知。`status`が`allowed`以外なら上限に当たっている（`streamJson.ts`）。 */
+  const rateLimitLine = (status: string): string =>
+    `${JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status, rateLimitType: 'five_hour' },
+    })}\n`;
+
+  /** タブを1枚開き、`system init`まで済ませる。 */
+  async function openChat(): Promise<{
+    session: ClaudeStreamSession;
+    panel: ReturnType<typeof __mock.lastCreatedPanel>;
+    sent: string[];
+  }> {
+    const { sessions } = stubStartCapturing();
+    // 自動再開も手動送信も、実プロセスを持たないセッションでは送れない。送信先だけ記録する
+    const sent: string[] = [];
+    vi.spyOn(ClaudeStreamSession.prototype, 'send').mockImplementation((text: string) => {
+      sent.push(text);
+    });
+    vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockImplementation((text: string) => {
+      sent.push(text);
+      return 'sent';
+    });
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    const panel = __mock.lastCreatedPanel();
+    panel?.webview.simulateMessage({ type: 'ready' });
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが開始されていない');
+    }
+    // `system init` はターン開始時に届き、`busy: true` になる（`streamJson.ts`）。
+    // 中断ボタンが出ているのはこの間だけなので、走っているターンから始める
+    session.receive(initLine('s1'));
+    return { session, panel, sent };
+  }
+
+  /**
+   * 中断後にCLIから届くターンの確定。
+   *
+   * 実物の`ClaudeStreamSession.interrupt`は`usage`を残したまま`busy: false`を通知するが、
+   * 子プロセスを持たないテストではその通知が出ない。同じ形の状態更新をここで起こす
+   * （予約が復活していた経路そのもの）。
+   */
+  function finishTurn(session: ClaudeStreamSession): void {
+    session.receive(resultLine());
+  }
+
+  type ResumeStatus = { scheduledAt?: number; suppressed?: boolean } | undefined;
+
+  function lastResumeStatus(panel: { webview: { sent: unknown[] } } | undefined): ResumeStatus {
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    return (last?.state as { limitAutoResumeStatus?: ResumeStatus } | undefined)
+      ?.limitAutoResumeStatus;
+  }
+
+  it('中断しなければ、待ち時間が過ぎた時点で継続指示を送る（対照）', async () => {
+    const { session, panel, sent } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+
+    finishTurn(session);
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('前回の作業を続けて');
+  });
+
+  it('手動中断の後にターンの確定が届いても予約が復活しない', async () => {
+    const { session, panel } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+
+    panel?.webview.simulateMessage({ type: 'interrupt' });
+    finishTurn(session);
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+
+    expect(lastResumeStatus(panel)?.scheduledAt).toBeUndefined();
+    expect(lastResumeStatus(panel)?.suppressed).toBe(true);
+  });
+
+  it('手動中断の後は、待ち時間が過ぎても継続指示を送らない', async () => {
+    const { session, panel, sent } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+
+    panel?.webview.simulateMessage({ type: 'interrupt' });
+    finishTurn(session);
+    session.receive(rateLimitLine('rejected'));
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+
+    expect(sent).toEqual([]);
+  });
+
+  it('人が自分で送り直すと抑止が解け、次の上限では再び予約する', async () => {
+    const { session, panel, sent } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+    panel?.webview.simulateMessage({ type: 'interrupt' });
+    await flush();
+
+    panel?.webview.simulateMessage({ type: 'send', text: '続けて' });
+    await flush();
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+
+    expect(sent).toEqual(['続けて']);
+    expect(lastResumeStatus(panel)?.suppressed).toBe(false);
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+
+  it('自動続行の設定をOFF→ONし直すと抑止が解ける', async () => {
+    const { session, panel } = await openChat();
+    session.receive(rateLimitLine('rejected'));
+    await flush();
+    panel?.webview.simulateMessage({ type: 'interrupt' });
+    await flush();
+
+    // 1回目でOFF、2回目でONへ戻る（トグル）
+    panel?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await flush();
+    panel?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await flush();
+
+    expect(lastResumeStatus(panel)?.suppressed).toBe(false);
+    expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
+  });
+});
