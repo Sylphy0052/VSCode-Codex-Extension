@@ -663,6 +663,15 @@ turn/completed
 
 `thread/fork` に `lastTurnId` を渡すと、そのターンまでを引き継いだ新しいスレッドができる（元は無傷）。CLIの `codex fork` はターンを指定できないため、この操作はapp-server経由でのみ実現できる。
 
+分岐点に使う `turnId` は、**届く経路によって在り処が違う**（Issue #1155）。
+
+- ライブ通知（`item/started` / `item/updated` / `item/completed`）: 通知自身が `turnId` を持つ。`chatState.ts` が `{ ...item, turnId }` で項目へ付ける
+- 復元（`thread/resume`、および同じ形の ephemeral な `thread/fork` の応答）: ターンIDは**外側**の `thread.turns[].id` にあり、`turns[].items[]` の各項目は持たない（実測: codex-cli 0.154.0、2026-09-13。項目のキーは `{type, id, clientId, content}`）
+
+`chatSession.ts` の `readInitialItems` が外側のIDを各項目へ移す。移し替えを忘れると復元した会話の項目は `turnId: undefined` になり、画面側（`chatScript.ts` の `turnForkTarget` は Codex では「直前のユーザー発言の `turnId`」を返す）が分岐対象を決められず、**「ここから分岐」ボタンが出ない**。同じ値を編集再送も宛先に使う（`editTarget`）ため、書き直しが「会話の先頭から新しく始める」扱い（`editFromStart`）へ倒れる。
+
+`turns[].id` はロールアウトの `turn_context.turn_id` と同じ値であることを実測で確かめてある（ライブ通知で付くものと一致する）。
+
 ### タブ名
 
 Codexが会話内容から名前を付けると `thread/name/updated` が届くのでタブ名に反映する。`thread/name/set` で変更でき、Codex側に永続化されるため履歴一覧やTUIタブにも波及する。
