@@ -100,6 +100,7 @@ describe('ForgeHubService', () => {
       fs: files,
       worktreeFs,
       memento,
+      readBranchNaming: () => 'wf',
     });
 
     const snapshot = await service.inspect('codex', '/repo');
@@ -121,6 +122,7 @@ describe('ForgeHubService', () => {
       fs: files,
       worktreeFs,
       memento,
+      readBranchNaming: () => 'wf',
     });
     const snapshot = await service.inspect('claude', '/repo');
     const result = await service.createIssue(snapshot, {
@@ -152,6 +154,7 @@ describe('ForgeHubService', () => {
       fs: files,
       worktreeFs,
       memento,
+      readBranchNaming: () => 'wf',
     });
     const snapshot = await service.inspect('codex', '/repo');
     await service.recordStartedWork(
@@ -197,6 +200,7 @@ describe('ForgeHubService', () => {
       fs: files,
       worktreeFs,
       memento,
+      readBranchNaming: () => 'wf',
     });
     const snapshot = await service.inspect('claude', '/repo');
     await service.recordStartedWork(
@@ -273,6 +277,7 @@ describe('ForgeHubService cleanupライフサイクル', () => {
       fs: files,
       worktreeFs,
       memento,
+      readBranchNaming: () => 'wf',
     });
     const snapshot = await service.inspect('codex', '/repo');
     await service.recordStartedWork(
@@ -428,6 +433,7 @@ describe('ForgeHubService cleanupライフサイクル', () => {
           key === 'agent.forge.workItems.v1' ? ([stored] as unknown as T) : defaultValue,
         update: async (): Promise<void> => {},
       },
+      readBranchNaming: () => 'wf',
     });
 
     // リモート取得を待たずに揃っている。取得が失敗し続けてもcleanup列に出せる。

@@ -20,9 +20,11 @@ import { createCliIssueListPort, type RoadmapIssueSummary } from '../orchestrato
 import {
   resolveHeadCommit,
   WorktreeCreationQueue,
+  type BranchNaming,
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from '../orchestrator/worktree';
+import { DEFAULT_COMMIT_TYPE, type CommitType } from '../orchestrator/workflow';
 import { randomUUID } from 'node:crypto';
 import type { MementoLike } from '../util/memento';
 
@@ -89,6 +91,38 @@ export interface ForgeHubDeps {
   fs: ForgeFileSystemPort;
   worktreeFs: WorktreeFileSystemPort;
   memento: MementoLike;
+  /** 設定 `agent.workflows.branchNaming` の現在値（`config.ts`の`readWorkflowsConfig`経由）。 */
+  readBranchNaming: () => BranchNaming;
+}
+
+/**
+ * IssueのlabelからConventional Commitsのtypeを決める（Issue #1032 判断2）。
+ *
+ * 該当するlabelが無ければ`DEFAULT_COMMIT_TYPE`（`chore`）へ倒す。複数該当する場合は
+ * このマップの掲載順を優先度とする。
+ */
+const LABEL_TO_COMMIT_TYPE: Readonly<Record<string, CommitType>> = {
+  bug: 'fix',
+  enhancement: 'feat',
+  feature: 'feat',
+  documentation: 'docs',
+  docs: 'docs',
+  refactor: 'refactor',
+  refactoring: 'refactor',
+  test: 'test',
+  tests: 'test',
+  performance: 'perf',
+  perf: 'perf',
+  ci: 'ci',
+};
+
+export function commitTypeFromLabels(labels: readonly string[] | undefined): CommitType {
+  if (labels === undefined) return DEFAULT_COMMIT_TYPE;
+  for (const label of labels) {
+    const type = LABEL_TO_COMMIT_TYPE[label.toLowerCase()];
+    if (type !== undefined) return type;
+  }
+  return DEFAULT_COMMIT_TYPE;
 }
 
 /** Forge Hubが追跡する開発カード。MR/CI連携を追加しても同じIDを使う。 */
@@ -312,6 +346,22 @@ export class ForgeHubService {
         message: 'CLIの導入・認証・origin remoteを確認してから着手してください。',
       };
     }
+    if (snapshot.host === undefined) {
+      return { ok: false, message: 'GitHub/GitLabを自動判定できないため、着手できません。' };
+    }
+    // GitLab運用規約はブランチ命名 `<type>/<IID>/<slug>` を必須にする。設定
+    // `agent.workflows.branchNaming` が `wf` のままだと、pushがガードに拒否され
+    // Forge Hubから始めた作業を完了できない（Issue #1032 判断1）。設定を勝手に
+    // 上書きせず、worktreeもカードも作らずにここで止める。
+    const configuredNaming = this.deps.readBranchNaming();
+    if (snapshot.host === 'gitlab' && configuredNaming !== 'conventional') {
+      return {
+        ok: false,
+        message:
+          'GitLabではブランチ命名を conventional にしてから着手してください（設定: agent.workflows.branchNaming）。',
+      };
+    }
+    const naming: BranchNaming = snapshot.host === 'gitlab' ? 'conventional' : configuredNaming;
     const root = await this.deps.git.run(['rev-parse', '--show-toplevel'], snapshot.cwd);
     const repoRoot = root.code === 0 ? root.stdout.trim() : '';
     const headCommit =
@@ -329,6 +379,11 @@ export class ForgeHubService {
         taskId: `issue-${issue.number}`,
         headCommit,
         retry: undefined,
+        branchNaming: {
+          naming,
+          type: commitTypeFromLabels(issue.labels),
+          issue: issue.number,
+        },
       },
       this.deps.git,
       this.deps.worktreeFs,
