@@ -24,6 +24,7 @@ import {
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
 } from './prompt';
+import { describeRedaction, redactCredentials } from './redact';
 
 /**
  * 承認要求を人へ回さず全て拒否するモード。`runSingleTurnTask` が起動直前に確かめる
@@ -190,6 +191,13 @@ export async function runSecondOpinion(
     afterTreeDir: request.afterTreeDir,
     afterTreeNoticeFile: request.afterTreeNoticeFile,
   });
+  // 送信直前に資格情報らしき値を伏せる（Issue #1171）。依頼文・背景・差分・未追跡ファイルの
+  // どれに混ざっていても送る本文は1本なので、ここで一括して掛ける。本文はログへ出さず件数だけ残す
+  const redaction = redactCredentials(prompt);
+  const redactionNote = describeRedaction(redaction);
+  if (redactionNote !== undefined) {
+    log?.info(`${SECOND_OPINION_LOG_PREFIX} ${redactionNote}`);
+  }
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
   log?.info(
@@ -198,7 +206,7 @@ export async function runSecondOpinion(
       `artifact=${request.artifact.kind} ` +
       `summary=${describeBackgroundForLog(request)} ` +
       `afterTree=${String(request.afterTreeDir !== undefined)} ` +
-      `promptChars=${prompt.length}`,
+      `promptChars=${redaction.text.length}`,
   );
   // 保持する場合の所有権（Issue #929）。`runSingleTurnTask` に閉じさせない代わりに、
   // 「呼び出し側へ渡せた（`handedOver`）」ときを除いて、この関数の `finally` で必ず閉じる。
@@ -211,7 +219,7 @@ export async function runSecondOpinion(
       host,
       'codex',
       buildSecondOpinionSessionInput(request.cwd, request.candidate),
-      prompt,
+      redaction.text,
       {
         timeoutMs: request.timeoutMs ?? DEFAULT_SECOND_OPINION_TIMEOUT_MS,
         log,

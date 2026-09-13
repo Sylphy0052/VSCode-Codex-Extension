@@ -714,3 +714,37 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     expect(result.snapshot.diffPartials).toEqual([]);
   });
 });
+
+describe('runSecondOpinion は送信直前に資格情報を伏せる（Issue #1171）', () => {
+  // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+  const fakeToken = `ghp_${'a1b2c3d4'.repeat(5)}`;
+
+  it('依頼文・背景・差分のどこにあっても、送る本文には残らない', async () => {
+    const host = new FakeHost();
+    await runSecondOpinion(host, {
+      cwd: '/repo',
+      candidate: CANDIDATE,
+      request: `GITHUB_TOKEN=${fakeToken} で push できない理由を見て`,
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const password = "hunter2-hunter2";',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+      conversationSummary: `Authorization: Bearer ${fakeToken}`,
+      conversationBackgroundKind: 'summary',
+      headless: true,
+    });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).not.toContain(fakeToken);
+    expect(prompt).not.toContain('hunter2-hunter2');
+    expect(prompt).toContain('<MASKED>');
+    expect(prompt).toContain('push できない理由を見て');
+  });
+});
