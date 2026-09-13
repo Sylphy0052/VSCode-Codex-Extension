@@ -2819,6 +2819,7 @@ describe('人が止めた自動続行を状態更新で復活させない（Issu
     await vi.advanceTimersByTimeAsync(31 * 60_000);
 
     expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('前回の作業を続けて');
   });
 
   it('手動中断の後にターンの確定が届いても予約が復活しない', async () => {
