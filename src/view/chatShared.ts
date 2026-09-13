@@ -756,7 +756,10 @@ export async function handleRevertDiff(
   const plan = planDiffActions(diff);
   if (!plan.revert) {
     void vscode.window.showWarningMessage(
-      `この変更は戻せません（移動を伴う変更、または差分を復元できない形式です）: ${diff.path}`,
+      // 新規作成と確認できていない `add` は削除で戻すと既存ファイルを消しうる（issue #1176）
+      diff.kind === 'add' && diff.createUnverified === true
+        ? `この変更は戻せません（新規作成か既存ファイルの上書きかを実行結果から確認できないため、削除による取り消しは行いません）: ${diff.path}`
+        : `この変更は戻せません（移動を伴う変更、または差分を復元できない形式です）: ${diff.path}`,
     );
     return;
   }

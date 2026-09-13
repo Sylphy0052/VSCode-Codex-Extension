@@ -44,9 +44,21 @@ export interface FileDiff {
   diff: string;
   /**
    * Claude CodeのEditツール由来の `update` のときだけ入る置換前後の生の文字列（issue #310）。
-   * Codex側・Claude CodeのWrite/NotebookEdit由来では常に `undefined`。
+   * Codex側では常に `undefined`。Claude CodeのWrite/NotebookEdit由来は、実行結果で
+   * 既存ファイルの上書きと判った場合だけ入る（上書き前後の全文。issue #1176）。
    */
   editReplace: EditReplace | undefined;
+  /**
+   * `add` のうち、**新規作成だったことをまだ確認できていない**ものに立つ印（issue #1176）。
+   *
+   * Claude CodeのWrite / NotebookEditはツールの入力だけでは新規作成と上書きを区別できず、
+   * 上書きを `add` として戻すとファイルの削除になってしまう。実行結果（`toolUseResult`）が
+   * 届くまではこの印を立てておき、`create` と判った時点で外す（`applyFileChangeResult`）。
+   * 印が立ったままの `add` は戻す操作を出さない（`planDiffActions`）。
+   *
+   * Codex CLI由来の `add` と、Claude CodeのEdit由来の差分には付かない。
+   */
+  createUnverified?: boolean | undefined;
 }
 
 /**

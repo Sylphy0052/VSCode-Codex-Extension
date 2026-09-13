@@ -441,6 +441,46 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     expect(port.written).toHaveLength(0);
   });
 
+  // Claude CodeのWrite由来で、新規作成と確認できていない追加（issue #1176）。
+  // そのまま削除すると、既存ファイルを上書きしただけだった場合に消してしまう
+  it('add種別: 新規作成と確認できていなければ削除せず理由を出す', async () => {
+    const fs = new FakeFs('created');
+    const port = new FakeRevertPort('created');
+    __mock.showWarningMessageAnswer = '戻す';
+
+    await handleRevertDiff(
+      fs,
+      [itemWithDiff(addDiff({ createUnverified: true }))],
+      'item-1',
+      0,
+      port,
+    );
+
+    expect(deletedFiles).toHaveLength(0);
+    expect(__mock.writtenFiles).toHaveLength(0);
+    expect(port.written).toHaveLength(0);
+    expect(__mock.messages.warnings[0]).toContain('上書きかを実行結果から確認できない');
+  });
+
+  // 上書きと判った Write は update + editReplace へ組み直されている（issue #1176）。
+  // 削除ではなく、上書き前の内容が復元されることまで見る
+  it('上書きと判ったWrite由来のupdateは、削除ではなく上書き前の内容へ戻す', async () => {
+    const fs = new FakeFs('new1');
+    const port = new FakeRevertPort('new1');
+    __mock.showWarningMessageAnswer = '戻す';
+    const diff = updateDiff({
+      path: 'src/new.txt',
+      diff: '-old1\n+new1',
+      editReplace: { oldString: 'old1', newString: 'new1' },
+    });
+
+    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, port);
+
+    expect(deletedFiles).toHaveLength(0);
+    expect(port.written).toHaveLength(1);
+    expect(port.written[0]?.content).toBe('old1');
+  });
+
   it('delete種別: 確認後に、無いときだけ作る口で元の内容を再作成する', async () => {
     const fs = new FakeFs(undefined);
     const port = new FakeRevertPort(undefined);

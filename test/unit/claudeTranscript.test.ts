@@ -555,3 +555,104 @@ describe('transcriptItems / webSearch', () => {
     expect(items[0]?.searchResults).toEqual([]);
   });
 });
+
+// Claude CodeのWriteは入力だけでは新規作成と上書きを区別できない（issue #1176）。
+// 実行結果（履歴は toolUseResult、ライブは tool_use_result）で分ける。
+describe('transcriptItems / Writeの新規作成と上書き', () => {
+  const assistantWrite = (id: string, filePath: string, content: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      uuid: `a-${id}`,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id, name: 'Write', input: { file_path: filePath, content } }],
+      },
+    });
+
+  const userResult = (id: string, toolUseResult: unknown, key = 'toolUseResult') =>
+    JSON.stringify({
+      type: 'user',
+      uuid: `u-${id}`,
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content: 'ok', is_error: false }],
+      },
+      [key]: toolUseResult,
+    });
+
+  it('結果が届く前は「新規作成と確認できていない」印が立つ', () => {
+    const { items } = transcriptItems([assistantWrite('t1', '/work/a.ts', 'new1\nnew2')]);
+    expect(items[0]?.diffs[0]).toMatchObject({ kind: 'add', createUnverified: true });
+  });
+
+  it('create の結果で印が外れ、追加のまま戻せるようになる', () => {
+    const { items } = transcriptItems([
+      assistantWrite('t1', '/work/a.ts', 'new1\nnew2'),
+      userResult('t1', { type: 'create', filePath: '/work/a.ts', originalFile: null }),
+    ]);
+    const diff = items[0]?.diffs[0];
+    expect(diff).toMatchObject({ kind: 'add', diff: '+new1\n+new2' });
+    expect(diff?.createUnverified).toBeUndefined();
+  });
+
+  it('update の結果で上書き前の内容を持つ update へ組み直す', () => {
+    const { items } = transcriptItems([
+      assistantWrite('t1', '/work/a.ts', 'new1\nnew2'),
+      userResult('t1', {
+        type: 'update',
+        filePath: '/work/a.ts',
+        originalFile: 'old1\nold2',
+        content: 'new1\nnew2',
+      }),
+    ]);
+    const diff = items[0]?.diffs[0];
+    expect(diff).toMatchObject({
+      kind: 'update',
+      diff: '-old1\n-old2\n+new1\n+new2',
+      editReplace: { oldString: 'old1\nold2', newString: 'new1\nnew2' },
+    });
+    expect(diff?.createUnverified).toBeUndefined();
+  });
+
+  it('ライブのstream-jsonと同じ tool_use_result キーでも同じ結果になる', () => {
+    const { items } = transcriptItems([
+      assistantWrite('t1', '/work/a.ts', 'new1'),
+      userResult(
+        't1',
+        { type: 'update', filePath: '/work/a.ts', originalFile: 'old1', content: 'new1' },
+        'tool_use_result',
+      ),
+    ]);
+    expect(items[0]?.diffs[0]).toMatchObject({ kind: 'update' });
+  });
+
+  it('結果を読めなかったときは印が立ったまま残る', () => {
+    const { items } = transcriptItems([
+      assistantWrite('t1', '/work/a.ts', 'new1'),
+      userResult('t1', undefined),
+    ]);
+    expect(items[0]?.diffs[0]).toMatchObject({ kind: 'add', createUnverified: true });
+  });
+
+  it('上書き前後が大きすぎるときは組み直さず印を残す（状態を膨らませない）', () => {
+    const huge = 'x'.repeat(600_000);
+    const { items } = transcriptItems([
+      assistantWrite('t1', '/work/a.ts', huge),
+      userResult('t1', {
+        type: 'update',
+        filePath: '/work/a.ts',
+        originalFile: huge,
+        content: huge,
+      }),
+    ]);
+    expect(items[0]?.diffs[0]).toMatchObject({ kind: 'add', createUnverified: true });
+  });
+
+  it('update でも上書き前の内容が読めなければ印を残す', () => {
+    const { items } = transcriptItems([
+      assistantWrite('t1', '/work/a.ts', 'new1'),
+      userResult('t1', { type: 'update', filePath: '/work/a.ts', content: 'new1' }),
+    ]);
+    expect(items[0]?.diffs[0]).toMatchObject({ kind: 'add', createUnverified: true });
+  });
+});
