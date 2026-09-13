@@ -2207,7 +2207,8 @@ describe('Codexのファイル復元と送り直し', () => {
       } else if (forking) {
         expect(connection.requests.find((r) => r.method === 'thread/fork')?.params).toEqual({
           threadId: 'original',
-          lastTurnId: 'turn0',
+          // 押した指示自身のターンの手前で切る（Issue #1161）
+          beforeTurnId: 'turn0',
         });
         connection.resolveFirst('thread/fork', threadStartResult('new-thread'));
         await tick(40);

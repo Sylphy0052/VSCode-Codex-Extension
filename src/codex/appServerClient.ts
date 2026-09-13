@@ -104,14 +104,21 @@ export class AppServerClient {
     private readonly maxLineBytes: number = MAX_APP_SERVER_LINE_BYTES,
   ) {}
 
-  /** 指定ターンまでで分岐した新しいスレッドを作る。元のスレッドは変更されない。 */
-  async forkThread(threadId: string, lastTurnId: string): Promise<ForkResult> {
-    if (!isSessionId(threadId) || !isSessionId(lastTurnId)) {
+  /**
+   * 指定したターンの**手前**で分岐した新しいスレッドを作る。元のスレッドは変更されない。
+   *
+   * `beforeTurnId` は「そのターンとそれ以降を除外する」指定（Issue #1161）。押した指示
+   * 自身のターンを渡す。含める側の `lastTurnId` を使うと、同じターンへ割り込んで送った
+   * 指示から分岐したときに実行中のターン自身を指してCLIに拒否され、完了後は消したかった
+   * 指示が分岐先に残る。
+   */
+  async forkThread(threadId: string, beforeTurnId: string): Promise<ForkResult> {
+    if (!isSessionId(threadId) || !isSessionId(beforeTurnId)) {
       return { ok: false, error: '不正なidです' };
     }
 
     const result = await this.call<string>(async (request) => {
-      const forked = await request('thread/fork', { threadId, lastTurnId });
+      const forked = await request('thread/fork', { threadId, beforeTurnId });
       if (forked.error !== undefined) {
         return { ok: false, error: forked.error.message };
       }

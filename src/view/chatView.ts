@@ -2369,10 +2369,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 送った指示を書き直して送り直す（issue #1073）。Claude Code画面の
    * `editAndResend`（`claudeChatView.ts`）と操作は同じで、裏の作り方だけが違う。
    *
-   * `turnId`（＝分岐と同じく「引き継ぐ最後のターン」＝直す指示の手前の発言）があれば
-   * `thread/fork` で会話をそこまでにした新しいスレッドを開き、書き直した本文を送る。
-   * 最初の発言を直す場合は引き継ぐターンが無いため、分岐ではなく新しい会話として開始する
-   * （`thread/fork` の `lastTurnId` は必須。`appServerClient.ts` の `forkThread` 参照）。
+   * `turnId`（＝分岐と同じく、直す指示自身が属するターン。Issue #1161）があれば
+   * `thread/fork` にそれを `beforeTurnId` として渡し、そのターンより手前までの新しい
+   * スレッドを開いて書き直した本文を送る。会話の最初の発言を直す場合は引き継ぐ会話が
+   * 残らないため、分岐ではなく新しい会話として開始する（`thread/fork` の分岐点は必須。
+   * `appServerClient.ts` の `forkThread` 参照）。
    *
    * 元のスレッドは変更されない。ファイル復元は明示選択されたときだけ行う。
    */
@@ -2528,7 +2529,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
     const response = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: progressTitle },
-      () => this.connection.request('thread/fork', { threadId, lastTurnId: turnId }),
+      () => this.connection.request('thread/fork', { threadId, beforeTurnId: turnId }),
     );
 
     const newThreadId = readForkedThreadId(response.result);

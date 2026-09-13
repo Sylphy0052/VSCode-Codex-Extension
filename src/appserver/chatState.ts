@@ -73,7 +73,7 @@ export interface ChatItem {
   /** コマンド行やファイル名など、種類ごとの補足。 */
   detail: string;
   status: string | undefined;
-  /** このitemが属するターン。会話内から分岐する際の `lastTurnId` になる。 */
+  /** このitemが属するターン。会話内から分岐する際の `beforeTurnId` になる（Issue #1161）。 */
   turnId: string | undefined;
   /** ファイル変更の差分。他の種類では空。 */
   diffs: FileDiff[];
