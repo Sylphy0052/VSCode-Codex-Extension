@@ -6880,12 +6880,13 @@ tasks:
       store: WorkflowRunStore,
       host: FakeHost,
       pseudoWorktree: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] } | undefined,
+      autoResume = false,
     ): WorkflowRunner {
       return new WorkflowRunner({
-        // 自動再開が動くとretryTaskを待たずにタスクが走り出し、「再開したときに
-        // 何が起きるか」を観測できなくなるため明示的に無効化する（他のリロード
-        // テストと同じ理由。design.md §16.35）
-        readAutoResume: () => false,
+        // 既定では自動再開を切る。有効なままだとretryTaskを待たずにタスクが走り出し、
+        // 「手動で再開したときに何が起きるか」を観測できなくなる（他のリロードテストと
+        // 同じ理由。design.md §16.35）。自動再開そのものを見るテストだけtrueを渡す
+        readAutoResume: () => autoResume,
         hosts: { codex: host, claude: host },
         worktreeQueue: new WorktreeCreationQueue(),
         git: fakeGit({ notGitRepo: true }),
@@ -6931,6 +6932,33 @@ tasks:
         // タスクがワークスペースを直接書き換える
         expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
         await flush();
+        expect(newCodexHost.sessions).toHaveLength(0);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      },
+    );
+
+    it(
+      '統合先の再作成に失敗した復元では、自動再開（design.md §16.35）も' +
+        '元のワークスペースでは走らせない',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, store } = createHarness(ONE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, { fs, exclude: [] }, true);
+        const symlink = vi.spyOn(fs, 'isSymbolicLink').mockResolvedValue(true);
+        await reloadedRunner.restoreRunsForView();
+        symlink.mockRestore();
+        // 自動再開は`restoreRunsForView`から切り離して走る（`void autoResumeIfEligible`）
+        await flush();
+
         expect(newCodexHost.sessions).toHaveLength(0);
         expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
       },
