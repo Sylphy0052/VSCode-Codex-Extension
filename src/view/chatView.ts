@@ -761,10 +761,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       preserveFocus,
     );
     if (newThreadId === undefined) {
+      this.log.warn(
+        '引き継ぎ先セッションを開けなかったため引き継げませんでした（旧タブはそのまま残ります）',
+      );
       return false;
     }
     const newEntry = this.panels.get(newThreadId);
     if (newEntry === undefined) {
+      this.log.warn(
+        `引き継ぎ先セッション(${newThreadId})がパネル一覧に見つからず引き継げませんでした（旧タブはそのまま残ります）`,
+      );
       return false;
     }
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
@@ -797,14 +803,21 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * ときは、設定にかかわらず旧セッションをそのまま残す。
    */
   private async confirmStopAfterFirstTurn(oldEntry: ChatPanel, newEntry: ChatPanel): Promise<void> {
-    const succeeded = await waitForFirstTurn(newEntry);
-    if (!succeeded || oldEntry.disposed) {
+    const outcome = await waitForFirstTurn(newEntry);
+    if (!outcome.succeeded) {
+      this.log.info(
+        `引き継ぎ先の初回ターンが${outcome.reason === 'timeout' ? 'タイムアウト' : '失敗'}したため、旧タブを残します（reason=${outcome.reason}）`,
+      );
+      return;
+    }
+    if (oldEntry.disposed) {
+      this.log.info('引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です（reason=disposed）');
       return;
     }
     if (readAutoHandoffCloseOldTab()) {
       // 引き継いだ後に旧タブで新しいターンが走り出していたら閉じない（進行中の作業を切らない）
       if (oldEntry.session.getState().busy) {
-        this.log.info('引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します');
+        this.log.info('引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します（reason=oldBusy）');
         return;
       }
       this.log.info('引き継ぎ元のセッションを停止してタブを閉じます（履歴は残ります）');
@@ -819,6 +832,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       stop,
     );
     if (choice !== stop || oldEntry.disposed) {
+      this.log.info(
+        `引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します（reason=${oldEntry.disposed ? 'disposed' : 'userDismissed'}）`,
+      );
       return;
     }
     void oldEntry.session.interrupt();
@@ -1023,7 +1039,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       `autoHandoff:${Date.now()}`,
       '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
     );
-    void this.startHandoff(entry, threadId, trigger, false, preassessed);
+    void this.startHandoff(entry, threadId, trigger, false, preassessed).catch((e: unknown) =>
+      this.log.warn(`自動引き継ぎが例外で止まりました: ${errorMessage(e)}`),
+    );
   }
 
   /**

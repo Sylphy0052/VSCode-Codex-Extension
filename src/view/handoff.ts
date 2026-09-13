@@ -792,20 +792,28 @@ export interface HandoffTurnWatch {
 const FIRST_TURN_TIMEOUT_MS = 15 * 60_000;
 
 /**
+ * `waitForFirstTurn` の結果。旧タブを閉じなかった理由をログへ残すため、
+ * 失敗時は `succeeded: false` だけでなく `timeout` / `turnFailed` を区別する（Issue #1158）。
+ */
+export type FirstTurnOutcome =
+  | { succeeded: true }
+  | { succeeded: false; reason: 'timeout' | 'turnFailed' };
+
+/**
  * 新セッションの最初のターンが終わるのを待ち、成功したかを返す。
  *
- * 旧セッションを止めてよいかの判断に使う。時間切れ・失敗のときは `false` を返し、
+ * 旧セッションを止めてよいかの判断に使う。時間切れ・失敗のときは `succeeded: false` を返し、
  * 呼び出し側は旧セッションを残す。`turnCompletionSeq` の変化を境目にするのは
  * `busy` の立ち下がりより取りこぼしが無いため（`onSessionChange` と同じ流儀）。
  */
 export function waitForFirstTurn(
   entry: HandoffTurnWatch,
   timeoutMs = FIRST_TURN_TIMEOUT_MS,
-): Promise<boolean> {
+): Promise<FirstTurnOutcome> {
   const baseline = entry.session.getState().turnCompletionSeq;
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (succeeded: boolean): void => {
+    const finish = (outcome: FirstTurnOutcome): void => {
       if (settled) {
         return;
       }
@@ -815,14 +823,16 @@ export function waitForFirstTurn(
       if (index >= 0) {
         entry.stateListeners.splice(index, 1);
       }
-      resolve(succeeded);
+      resolve(outcome);
     };
     const listener = (state: ChatState): void => {
       if (state.turnCompletionSeq !== baseline) {
-        finish(!state.turnFailed);
+        finish(
+          state.turnFailed ? { succeeded: false, reason: 'turnFailed' } : { succeeded: true },
+        );
       }
     };
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    const timer = setTimeout(() => finish({ succeeded: false, reason: 'timeout' }), timeoutMs);
     entry.stateListeners.push(listener);
   });
 }
