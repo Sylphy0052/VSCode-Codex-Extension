@@ -224,6 +224,20 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   );
   lines.push('- handoff_suggest_reasonには根拠を1文で書く。提案が無ければ空文字にする');
   lines.push('');
+  lines.push('## ユーザーの回答を待っているか（awaiting_user_answer）');
+  lines.push('');
+  lines.push(
+    '最後に、**直前のアシスタントの応答**が、ユーザーへ質問・確認をして回答を待った状態で終わっているかを判定してください。',
+  );
+  lines.push('');
+  lines.push(
+    '- true: 「この方針で実装してよいか」「A案とB案のどちらにするか」のように、ユーザーが答えないと次へ進めない問いで終わっている（疑問符の有無は問わない）',
+  );
+  lines.push(
+    '- false: 問いかけが無い。完了報告・次にやることの説明・確認不要の連絡だけのものは false。応答の途中で検討のために自問しているだけで、最後は結論を述べているものも false',
+  );
+  lines.push('- awaiting_user_answer_reasonには根拠を1文で書く。回答待ちでなければ空文字にする');
+  lines.push('');
   lines.push('## 出力');
   lines.push('');
   lines.push(
@@ -231,7 +245,7 @@ export function buildClassifierPrompt(input: HandoffClassifierInput): string {
   );
   lines.push('');
   lines.push(
-    '{"task_type": "<上の一覧から1つ>", "difficulty": 0, "scope": 0, "ambiguity": 0, "risk": 0, "autonomy": 0, "confidence": 0.0, "reasons": ["<根拠を日本語で短く>", "..."], "switch_safe": true, "switch_reason": "<根拠を日本語で1文>", "handoff_suggested": false, "handoff_suggest_reason": "<根拠を日本語で1文。提案が無ければ空文字>"}',
+    '{"task_type": "<上の一覧から1つ>", "difficulty": 0, "scope": 0, "ambiguity": 0, "risk": 0, "autonomy": 0, "confidence": 0.0, "reasons": ["<根拠を日本語で短く>", "..."], "switch_safe": true, "switch_reason": "<根拠を日本語で1文>", "handoff_suggested": false, "handoff_suggest_reason": "<根拠を日本語で1文。提案が無ければ空文字>", "awaiting_user_answer": false, "awaiting_user_answer_reason": "<根拠を日本語で1文。回答待ちでなければ空文字>"}',
   );
   return lines.join('\n');
 }
@@ -310,6 +324,14 @@ export function parseAssessment(raw: string): TaskAssessment | undefined {
   const handoffSuggestReason =
     typeof rawHandoffSuggestReason === 'string' ? fold(rawHandoffSuggestReason, REASON_LIMIT) : '';
 
+  // awaiting_user_answerは**読めなければfalse**（Issue #1191）。欠けたまま止める側へ倒すと、
+  // この項目を返さない応答で引き継ぎが一切動かなくなる。決定論の検知
+  // （`endsWithUserQuestion`）が前段に入っているため、欠損しても素通りにはならない
+  const awaitingUserAnswer = record['awaiting_user_answer'] === true;
+  const rawAwaitingReason = record['awaiting_user_answer_reason'];
+  const awaitingUserAnswerReason =
+    typeof rawAwaitingReason === 'string' ? fold(rawAwaitingReason, REASON_LIMIT) : '';
+
   return {
     taskType,
     difficulty,
@@ -323,6 +345,8 @@ export function parseAssessment(raw: string): TaskAssessment | undefined {
     switchReason,
     handoffSuggested,
     handoffSuggestReason,
+    awaitingUserAnswer,
+    awaitingUserAnswerReason,
   };
 }
 

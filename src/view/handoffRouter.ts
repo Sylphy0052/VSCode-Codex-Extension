@@ -81,6 +81,21 @@ export interface TaskAssessment {
   handoffSuggested: boolean;
   /** `handoffSuggested` の根拠を1文で。提案が無ければ空。 */
   handoffSuggestReason: string;
+  /**
+   * 直前のアシスタント応答が、ユーザーへ質問して回答を待った状態で終わっているか
+   * （Issue #1191）。
+   *
+   * `switchSafe` と別に持つのは、`assistantSuggested` の契機が `switchSafe` を参照しない
+   * ため（Issue #1097）。「この方針でよいか。よければ新セッションで実装する」のように提案と
+   * 質問が同じ応答に並ぶと、`switchSafe` が false でも提案だけで発火してしまう。
+   *
+   * 決定論の検知（`endsWithUserQuestion`）が末尾行しか見ないのに対し、こちらは質問の後に
+   * 補足が続く応答も拾える。読めなかったときは `false`（＝回答待ちではない）へ倒す。素通り
+   * させる側だが、欠損で毎回止まると引き継ぎが動かなくなるため、既存の欠損時の扱いに合わせる。
+   */
+  awaitingUserAnswer: boolean;
+  /** `awaitingUserAnswer` の根拠を1文で。回答待ちでなければ空。 */
+  awaitingUserAnswerReason: string;
 }
 
 /** 引き継ぎ先の解決結果が今の設定と実質的に違うか（Issue #1090の `profileChanged`）。 */

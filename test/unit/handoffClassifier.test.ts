@@ -82,6 +82,13 @@ describe('buildClassifierPrompt', () => {
     expect(prompt).toContain('"handoff_suggest_reason"');
   });
 
+  it('ユーザーの回答待ちかを判定させる（Issue #1191）', () => {
+    const prompt = buildClassifierPrompt(input());
+    expect(prompt).toContain('## ユーザーの回答を待っているか（awaiting_user_answer）');
+    expect(prompt).toContain('"awaiting_user_answer"');
+    expect(prompt).toContain('"awaiting_user_answer_reason"');
+  });
+
   it('材料が無いときは「記録が無い」と明示する（空欄にしない）', () => {
     const prompt = buildClassifierPrompt(input());
     expect(prompt).toContain('（記録が無い）');
@@ -106,7 +113,26 @@ describe('parseAssessment', () => {
       // handoff_suggestedも同じ。無ければ「提案は無かった」（Issue #1097）
       handoffSuggested: false,
       handoffSuggestReason: '',
+      // awaiting_user_answerも同じ（Issue #1191）。無ければ「回答待ちではない」
+      awaitingUserAnswer: false,
+      awaitingUserAnswerReason: '',
     });
+  });
+
+  it('awaiting_user_answer と根拠を読む（Issue #1191）', () => {
+    const raw = VALID.replace(
+      '}',
+      ', "awaiting_user_answer": true, "awaiting_user_answer_reason": "実装してよいかを尋ねて終わっている"}',
+    );
+    expect(parseAssessment(raw)).toMatchObject({
+      awaitingUserAnswer: true,
+      awaitingUserAnswerReason: '実装してよいかを尋ねて終わっている',
+    });
+  });
+
+  it('陰性対照: awaiting_user_answer が真偽値でなければ回答待ちではない扱い（Issue #1191）', () => {
+    const raw = VALID.replace('}', ', "awaiting_user_answer": "true"}');
+    expect(parseAssessment(raw)).toMatchObject({ awaitingUserAnswer: false });
   });
 
   it('handoff_suggested と根拠を読む（Issue #1097）', () => {

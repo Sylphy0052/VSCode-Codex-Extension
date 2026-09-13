@@ -62,6 +62,7 @@ export function describeGate(input: SafeBoundaryGateInput): string {
     `turnFailed=${input.turnFailed}`,
     `pendingApprovals=${input.pendingApprovals}`,
     `pendingPrompts=${input.pendingPrompts}`,
+    `awaitingUserAnswer=${input.awaitingUserAnswer}`,
     `queued=${input.queued}`,
     `loopRunning=${input.loopRunning}`,
     `taskManaged=${input.taskManaged}`,
@@ -80,6 +81,7 @@ export function describeAssessment(assessment: TaskAssessment): string {
     `confidence=${assessment.confidence.toFixed(2)}`,
     `switchSafe=${assessment.switchSafe}`,
     `handoffSuggested=${assessment.handoffSuggested}`,
+    `awaitingUserAnswer=${assessment.awaitingUserAnswer}`,
     `switchReason=${assessment.switchReason || '(なし)'}`,
     `handoffSuggestReason=${assessment.handoffSuggestReason || '(なし)'}`,
   ].join(' ');

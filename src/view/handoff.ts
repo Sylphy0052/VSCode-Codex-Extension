@@ -56,6 +56,14 @@ export interface HandoffPointerInput {
   turnFailed: boolean;
   /** 引き継ぎ時点でターンが走っていたか（自動引き継ぎでは常にfalseになる）。 */
   busy: boolean;
+  /**
+   * 引き継ぎ元のアシスタントがユーザーへ質問して終わっていたか（Issue #1191）。
+   *
+   * 区切り待ちの契機ではそもそも引き継がないが、残量の閾値・自動圧縮では回答待ちのまま
+   * 引き継ぐ。そのときに「申し送り」として書かれた質問を承諾済みと読まれないよう、状態の
+   * 節へ明示する。
+   */
+  awaitingUserAnswer?: boolean;
   /** 直近のユーザー指示（新しい順ではなく会話順。呼び出し側で件数を絞る）。 */
   recentUserMessages: readonly string[];
   /**
@@ -280,6 +288,11 @@ export function buildHandoffPointerMarkdown(input: HandoffPointerInput): string 
       ? '- 引き継いだ時点でターンが実行中だった。**途中で切れた作業が残っている可能性がある**。'
       : '- 引き継いだ時点でターンは実行中ではなかった。',
   );
+  if (input.awaitingUserAnswer === true) {
+    lines.push(
+      '- 引き継ぎ元のアシスタントは**ユーザーへ質問して回答を待っていた**。下の申し送りに書かれた方針は承諾されたものではない。実行に移す前にユーザーへ質問し直し、回答を得てから進める。',
+    );
+  }
   lines.push('');
   const nextSteps = (input.nextSteps ?? '').trim();
   if (nextSteps !== '') {
@@ -581,6 +594,67 @@ export function containsHandoffPrompt(text: string): boolean {
 }
 
 /**
+ * 回答待ちで終わったと判定する末尾の形（Issue #1191）。
+ *
+ * 疑問符だけでは足りない。日本語の問いかけは「この方針で進めてよいか。」のように疑問符を
+ * 付けずに終わることが多く、実際に引き継ぎが誤発火した応答も疑問符が無かった。
+ *
+ * 逆に広げすぎると、通常の完了報告で引き継ぎが止まる（誤爆の損の方が大きい）。文末の
+ * 「か」は「〜したか。」「〜だろうか。」のような問いに限られ、平叙文の文末には出にくいため
+ * 採用する。「ください」は回答・判断を求める依頼（「どちらか選んでください」）を拾う。
+ */
+const QUESTION_TAIL_PATTERNS: readonly RegExp[] = [
+  /[?？]$/u,
+  /か[。．]?$/u,
+  /(?:ください|下さい)[。．]?$/u,
+  /(?:でよい|で良い|していい|してよい|でいい)[。．]?$/u,
+];
+
+/** 行頭の箇条書き記号・引用符・見出し・強調。末尾の形を見る前に落とす。 */
+const DECORATION_PREFIX = /^\s*(?:[-*+>]\s+|#{1,6}\s+|\d+[.)]\s+)/u;
+const DECORATION_SUFFIX = /(?:\*+|_+|`+)$/u;
+
+/** コードブロックのフェンス（3文字以上のバックティックかチルダ）。 */
+const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})/;
+
+/**
+ * アシスタントの応答がユーザーへの質問で終わっているか（Issue #1191）。
+ *
+ * 「この方針で実装してよいか？」と尋ねて終わったターンは**安全な区切りではない**。ここで
+ * 引き継ぐと、新セッションはその質問を申し送りとして読み、ユーザーが断るつもりだった案を
+ * そのまま実行し始める。
+ *
+ * 見るのは**フェンスの外にある最後の非空行だけ**。応答の途中に出てくる疑問文（検討の過程で
+ * 自問しているもの）まで拾うと、通常の完了報告が軒並み回答待ち扱いになる。質問した後さらに
+ * 説明を続けて終わる応答は取りこぼすが、その分は分類器の `awaiting_user_answer` が拾う。
+ */
+export function endsWithUserQuestion(text: string): boolean {
+  let fence: string | undefined;
+  let last = '';
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    const marks = CODE_FENCE.exec(line)?.[1];
+    if (fence === undefined) {
+      if (marks !== undefined) {
+        fence = marks;
+        continue;
+      }
+    } else {
+      // 閉じフェンスは開きと同じ種類で同じ長さ以上、かつ後ろに情報文字列を付けられない
+      if (marks !== undefined && marks[0] === fence[0] && marks.length >= fence.length) {
+        fence = undefined;
+      }
+      continue;
+    }
+    const trimmed = line.replace(DECORATION_PREFIX, '').replace(DECORATION_SUFFIX, '').trim();
+    if (trimmed !== '') {
+      last = trimmed;
+    }
+  }
+  return last !== '' && QUESTION_TAIL_PATTERNS.some((pattern) => pattern.test(last));
+}
+
+/**
  * 自動圧縮が走った回数。
  *
  * `ChatState` に圧縮の専用フィールドを足さずに済ませるため、会話項目を数える。
@@ -666,6 +740,17 @@ export interface AutoHandoffDecisionInput {
   profile?: { model: string; effort: string };
   /** 分類器が返した「切り替えてよい理由」。ポインタファイルへそのまま出す。 */
   switchReason?: string;
+  /**
+   * アシスタントがユーザーへ質問して回答を待っているか（Issue #1191）。
+   *
+   * 真のときは区切り待ちの契機を**すべて**止める。`assistantSuggested` も止めるのは、
+   * 「この方針で進めてよいか。よければ新セッションで実装する」のように提案と質問が同じ
+   * 応答に並ぶためで、提案だけを見て発火すると回答を待たずに実装が始まる。
+   *
+   * 残量の閾値（`threshold`）と自動圧縮（`compactBoundary`）は止めない。残量が尽きる方が
+   * 損失が大きく、その場合はポインタファイルへ回答待ちである旨を書いて引き継ぐ。
+   */
+  awaitingUserAnswer?: boolean;
 }
 
 /** 安全な区切りの前段（決定論的・コストゼロ）の判断材料。すべて呼び出し側が持っている値。 */
@@ -678,6 +763,14 @@ export interface SafeBoundaryGateInput {
   pendingApprovals: number;
   /** 未応答の問い合わせ（`ask_user` 等）の件数。 */
   pendingPrompts: number;
+  /**
+   * アシスタントがユーザーへ質問して回答を待っているか（Issue #1191）。
+   *
+   * `pendingPrompts` が数えるのは `ask_user` のような**構造化された**問い合わせだけで、
+   * 地の文での「この方針で進めてよいか」は数に入らない。回答待ちのまま引き継ぐと、新
+   * セッションが質問を申し送りと読んで勝手に実行する。判定は `endsWithUserQuestion`。
+   */
+  awaitingUserAnswer: boolean;
   /** 送信待ちで積まれている指示の件数。 */
   queued: number;
   /** ゴール駆動ループが走っているか。 */
@@ -698,6 +791,7 @@ export function passesSafeBoundaryGate(input: SafeBoundaryGateInput): boolean {
     !input.turnFailed &&
     input.pendingApprovals === 0 &&
     input.pendingPrompts === 0 &&
+    !input.awaitingUserAnswer &&
     input.queued === 0 &&
     !input.loopRunning &&
     !input.taskManaged
@@ -752,6 +846,11 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
   }
   // 前段（決定論的な条件）はどの区切り契機にも必須。ここを通っていなければ何も発火しない
   if (input.boundaryGatePassed !== true && input.safeBoundary !== true) {
+    return undefined;
+  }
+  // 回答待ちは区切りではない（Issue #1191）。前段の検知をすり抜けて分類器が拾った場合も
+  // ここで止める
+  if (input.awaitingUserAnswer === true) {
     return undefined;
   }
   const switchReason = input.switchReason ?? '';
