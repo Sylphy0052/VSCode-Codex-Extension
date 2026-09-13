@@ -221,6 +221,49 @@ describe('タイムラインの作り直し（issue #1025）', () => {
   });
 });
 
+describe('ファイル一覧の作り直し（issue #1025）', () => {
+  const withFiles = (turns: ProgressTurn[], files: string[]): ProgressView => {
+    const base = view(turns);
+    return {
+      ...base,
+      summary: {
+        ...base.summary,
+        editedFiles: files,
+        editedFileGroups: [{ dir: 'src/view/', files }],
+      },
+    };
+  };
+
+  it('中身が同じなら作り直さない（選択とフォーカスを保つ）', () => {
+    const { window, deliver } = boot();
+    const before = withFiles([turn(0)], ['a.ts', 'b.ts']);
+    deliver(buildProgressPayload(undefined, before));
+    const first = [...window.document.querySelectorAll('#files > li')];
+    expect(first.length).toBeGreaterThan(0);
+
+    // ファイルは変わらず、末尾のターンだけが伸びる更新（応答中に毎回起きる形）
+    const after = withFiles([turn(0, { response: '応答 0 の続き' })], ['a.ts', 'b.ts']);
+    deliver(buildProgressPayload(before, after));
+
+    const second = [...window.document.querySelectorAll('#files > li')];
+    expect(second[0]).toBe(first[0]);
+  });
+
+  it('ファイルが増えたら作り直す', () => {
+    const { window, deliver } = boot();
+    const before = withFiles([turn(0)], ['a.ts']);
+    deliver(buildProgressPayload(undefined, before));
+    const first = [...window.document.querySelectorAll('#files > li')];
+
+    const after = withFiles([turn(0)], ['a.ts', 'b.ts']);
+    deliver(buildProgressPayload(before, after));
+
+    const second = [...window.document.querySelectorAll('#files > li')];
+    expect(second[0]).not.toBe(first[0]);
+    expect(window.document.getElementById('files')?.textContent).toContain('b.ts');
+  });
+});
+
 describe('状態の読み上げ（issue #1025）', () => {
   it('応答中と待機中の遷移だけを読み上げへ流す', () => {
     const { window, deliver } = boot();

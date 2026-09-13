@@ -209,13 +209,34 @@ export function progressScript(): string {
   }
 
   /**
+   * 直前に描いたファイル一覧の指紋（issue #1025）。同じなら作り直さない。
+   *
+   * タイムラインの turnCache と同じ理由。ここも毎更新で作り直していて、一覧の文字を
+   * 選んでいる間は応答中に選択が消え続けていた。ファイルは1ターンに数件しか増えない
+   * ので、指紋の組み立ての方が全行の作り直しより安い。
+   */
+  let filesShownKey = undefined;
+
+  /**
    * 変更したファイルをディレクトリごとにまとめて出す（issue 749）。
    *
    * 先頭から FILES_SHOWN 件で打ち切り、残りは「もっと見る」の裏へ回す。打ち切りは
    * ファイル数で数える（グループ数ではない）。1つのディレクトリに数百件ある形でも
    * 既定の表示が短く収まるようにするため。
+   *
+   * 中身が前回と同じなら何もしない（issue #1025）。指紋にはディレクトリとファイル名に
+   * 加えて filesExpanded を含める。「残り N 件を表示」は中身を変えずに出す範囲だけを
+   * 変えるため、含めないと押しても描き直されない。
    */
   function renderFiles(groups) {
+    const key =
+      String(filesExpanded) +
+      '\u0002' +
+      groups.map((group) => group.dir + '\u0000' + group.files.join('\u0000')).join('\u0001');
+    if (key === filesShownKey) {
+      return;
+    }
+    filesShownKey = key;
     const list = el('files');
     const foot = el('filesMore');
     clear(list);
