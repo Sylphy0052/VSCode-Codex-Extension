@@ -672,6 +672,13 @@ turn/completed
 
 `turns[].id` はロールアウトの `turn_context.turn_id` と同じ値であることを実測で確かめてある（ライブ通知で付くものと一致する）。
 
+分岐の失敗は、webviewへ `forkFailed` を返して押したボタンを戻す（Issue #1156）。webview側は押した時点でボタンを無効化する（チャット画面は `disabled`、会話閲覧画面は文言も「分岐しています…」へ変える）ため、失敗を返さないとタブを開き直すまで同じ発言から再試行できない。再描画は同じDOMを使い回すので、状態の更新では戻らない。
+
+- チャット画面: `chatView.ts` の `fork` ハンドラが `forkFrom` の戻り値（`undefined` は失敗）と例外の両方を見て `forkFailed` を送る。`chatScript.ts` は `forkTarget` が一致するボタンだけを戻す
+- 会話閲覧画面: `ConversationViewManager` の `ForkHandler` が成功したかを返す（`extension.ts` の `forkFromTurn`）。失敗と例外の両方で `forkFailed` を送る
+
+成功したときは何も返さない。新しいタブが開くうえ、同じ発言から続けて分岐を投げる重複実行を防ぐため、ボタンは無効のままにする。
+
 ### タブ名
 
 Codexが会話内容から名前を付けると `thread/name/updated` が届くのでタブ名に反映する。`thread/name/set` で変更でき、Codex側に永続化されるため履歴一覧やTUIタブにも波及する。

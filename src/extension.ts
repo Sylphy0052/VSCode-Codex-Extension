@@ -2802,7 +2802,7 @@ async function forkFromTurn(
   log: Logger,
   session: SessionSummary,
   turnId: string,
-): Promise<void> {
+): Promise<boolean> {
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
     () => appServer.forkThread(session.id, turnId),
@@ -2811,12 +2811,14 @@ async function forkFromTurn(
   if (!result.ok) {
     log.error(`分岐に失敗しました: ${result.error}`);
     void vscode.window.showErrorMessage(`分岐に失敗しました: ${result.error}`);
-    return;
+    // 呼び出し元（会話閲覧画面）が押したボタンを戻せるよう、失敗を返す（Issue #1156）
+    return false;
   }
 
   log.info(`分岐しました: ${session.id} → ${result.threadId}`);
   await chat.openThread(result.threadId, `${codex.tabTitle(session)} (分岐)`, session.cwd);
   tree.refresh();
+  return true;
 }
 
 /**

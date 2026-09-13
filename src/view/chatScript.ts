@@ -3820,6 +3820,14 @@ export function chatScript(
       // 届いた画像を反映する。差分がある項目だけ描き直される
       if (lastItems) syncItems(lastItems);
     }
+    if (data.type === 'forkFailed' && typeof data.turnId === 'string') {
+      // 分岐が失敗した。押した時点で無効化したボタンを押せる状態へ戻す（Issue #1156）。
+      // 再描画は同じDOMを使い回すため、ここで戻さないとタブを開き直すまで再試行できない。
+      // 対象は forkTarget が一致するものだけ（別の発言から進行中の分岐は止めない）
+      for (const node of nodes.values()) {
+        if (node.forkTarget === data.turnId) node.fork.disabled = false;
+      }
+    }
     if (data.type === 'restoreQueuedText' && typeof data.text === 'string') {
       // Escで戻した待ち行列の末尾。拡張側で既にキューから取り除き済みなので、
       // 入力欄へそのまま書き戻すだけでよい
