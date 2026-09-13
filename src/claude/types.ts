@@ -83,4 +83,13 @@ export interface TranscriptMeta {
   /** 最初に見つかったエントリの時刻（ISO8601）。 */
   startedAt: string | undefined;
   gitBranch: string | undefined;
+  /**
+   * 人の発言の形をしたエントリが1件でもあったか（Issue #1145）。
+   *
+   * `/usage` のようなスラッシュコマンドは `<command-name>` などの制御タグだけで
+   * できたエントリとして残るため、本文を取り出すと空になり `firstUserText` が付かない。
+   * 「裏の指示だけで終わったセッション」と「始めたばかりでまだ発言が無いセッション」は
+   * どちらも `firstUserText` が無いので、この2つを見分けるために使う。
+   */
+  sawUserEntry: boolean;
 }

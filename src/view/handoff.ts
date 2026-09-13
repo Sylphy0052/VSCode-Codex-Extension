@@ -390,6 +390,63 @@ export function buildHandoffPrompt(pointerPath: string): string {
   return `前セッションの続き。${pointerPath} を読んで、そこに書かれた手順で状況を把握してから作業を続けて。前セッションのtranscriptは全文読み込まないこと。`;
 }
 
+/** 引き継ぎ先の名前に付ける世代の印（Issue #1145）。 */
+const CONTINUATION_SUFFIX = /^(.*?)\s*\(続き(\d+)\)$/u;
+
+/** 引き継ぎ先の名前の長さ。タブに収まる範囲に切る。 */
+const HANDOFF_NAME_LENGTH = 32;
+
+/**
+ * 引き継ぎ先セッションの名前（Issue #1145）。
+ *
+ * 名前を付けないと、引き継ぎ先の表示名は初回プロンプト（`buildHandoffPrompt`）の
+ * 「前セッションの続き。…」になる。自動引き継ぎを重ねるほど同じ名前のタブと履歴が
+ * 並び、どれが何の作業か判らなくなるため、引き継ぎ元の名前へ世代の印を付けて渡す。
+ *
+ * 印は `(続き2)` から始めて引き継ぐたびに1つ増やす（元が1代目なので次が2）。
+ * 元の名前が空なら印だけを返す。
+ */
+export function nextHandoffName(baseName: string | undefined): string {
+  const base = (baseName ?? '').replace(/\s+/gu, ' ').trim();
+  const matched = CONTINUATION_SUFFIX.exec(base);
+  if (matched === null) {
+    return base === '' ? '(続き2)' : `${truncateName(base)} (続き2)`;
+  }
+  const head = matched[1]?.trim() ?? '';
+  const generation = Number(matched[2]);
+  // 桁溢れしたときは増やさずそのまま返す（名前が壊れるより据え置きの方が害がない）
+  const next = Number.isSafeInteger(generation) ? generation + 1 : generation;
+  return head === '' ? `(続き${next})` : `${truncateName(head)} (続き${next})`;
+}
+
+function truncateName(name: string): string {
+  return name.length > HANDOFF_NAME_LENGTH ? `${name.slice(0, HANDOFF_NAME_LENGTH)}…` : name;
+}
+
+/** タブ名に付くプロバイダの接頭辞。名前の材料にするときは落とす。 */
+const PROVIDER_PREFIX = /^(?:Codex|Claude Code|Claude):\s*/u;
+
+/**
+ * 引き継ぎ元の名前（Issue #1145）。`nextHandoffName` へ渡す材料を作る。
+ *
+ * 解決順は `deriveTitle`（`chatView.ts` / `claudeChatView.ts`）と同じ
+ * 「オーケストレータが指定した名前 > 人やCLIが付けた名前 > 最初のユーザー発言」。
+ * タブ名と違い接頭辞は付けない（引き継ぎ先で `deriveTitle` が改めて付けるため、
+ * 残すと `Codex: Codex: …` と二重になる）。
+ */
+export function deriveHandoffBaseName(state: ChatState, pinnedName?: string): string | undefined {
+  const pinned = pinnedName?.replace(PROVIDER_PREFIX, '').trim();
+  if (pinned !== undefined && pinned !== '') {
+    return pinned;
+  }
+  const name = state.name?.trim();
+  if (name !== undefined && name !== '') {
+    return name;
+  }
+  const first = state.items.find((item) => item.kind === 'userMessage' && item.text.trim() !== '');
+  return first === undefined || first.kind !== 'userMessage' ? undefined : first.text;
+}
+
 /**
  * いまのブランチ名を取る。
  *

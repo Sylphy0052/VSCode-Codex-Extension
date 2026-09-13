@@ -94,6 +94,8 @@ import {
   buildHandoffPrompt,
   countCompactions,
   decideAutoHandoff,
+  deriveHandoffBaseName,
+  nextHandoffName,
   passesSafeBoundaryGate,
   recentUserMessages,
   recentAssistantMessages,
@@ -765,6 +767,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
     newEntry.session.setAutoHandoff(state.autoHandoff);
+    // 引き継ぎ元の名前に世代の印を付けて渡す（Issue #1145）。付けないと引き継ぎ先の
+    // 表示名が初回プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けが
+    // つかなくなる。
+    //
+    // 応答は待たない。`thread/name/set` はCodexへの往復で、返らなければ引き継ぎの初回
+    // プロンプトごと止まってしまう。名前が付かなくても引き継ぎ自体は成立するため、
+    // 失敗は記録に留める
+    const handoffName = nextHandoffName(deriveHandoffBaseName(state, entry.pinnedName));
+    void newEntry.session
+      .setName(handoffName)
+      .catch((e: unknown) =>
+        this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
+      );
     const text = buildHandoffPrompt(pointerPath);
     await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
     this.reportActivity(newEntry, text);
