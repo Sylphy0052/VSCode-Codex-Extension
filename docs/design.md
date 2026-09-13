@@ -2905,6 +2905,14 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 `codex.bypassApprovalsAndSandbox`。`approvalsReviewer`と同じ理由で、`SANDBOX_MODES` / `APPROVAL_MODES`へ値を足さない。これらは**宣言順＝安全順**という前提を持ち、Shift+Tabの循環とYAMLのクランプ（§16.16）がその順序に依存している。「サンドボックスを張らない」はその順序の外側にある。
 
+#### 3段階の承認レベルとは併存しない（Issue #1180）
+
+bypassは`approvalMode` / `sandbox` / `approvalsReviewer`の3項目より優先される（`thread/start`では承認まわりを載せず、`turnPolicyFor`が`approvalPolicy: 'never'`と外部サンドボックス指定を返す）。そのため両方を独立に持つと、承認レベルを「全確認」へ戻したつもりでも実際は素通しのまま、という食い違いが起きる。
+
+- **書き込み側**: `updateApprovalLevel`（`src/view/settingsProvider.ts`）は3項目を書く前にbypassを`false`にする。読み直してまだ立っていれば3項目を書かずに`false`を返し、理由を出す。先に落とすのは、落とせなかったときに「表示は全確認・実際は素通し」という食い違いを新しく作らないため
+- **表示側**: `levelFromCodexSettings`（`src/provider/approvalLevel.ts`）はbypassが立っている間、3項目が何であれ`full`を返す。実効状態は承認なし・サンドボックスなしであり、「全確認」と表示してはならない
+- `full`を3項目（`never` + `danger-full-access`）で表現しbypassを使わない方針（§14.45冒頭・`codexSettingsForLevel`のJSDoc）は変えない。`full`を選び直した場合もbypassは落とす
+
 #### ターン側でしか表現できない
 
 実測では`SandboxPolicy`に`externalSandbox`があり、承認側の`approvalPolicy: never`と組にしてフラグ1枚と同じ意味になる。ただし`ThreadStartParams`は`sandbox`（`SandboxMode`の3値）しか取らず`sandboxPolicy`を持たない。`sandboxPolicy`を取るのは`TurnStartParams`だけであるため、`thread/start`では表現できない。
