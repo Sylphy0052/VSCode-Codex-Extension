@@ -179,6 +179,17 @@ async function resolveSharedFallbackWorkingDirectory(
       originCommit: '',
     };
   }
+  // 復元時に統合先を作り直せなかった実行（Issue #1114）。`live.pseudo`が`undefined`でも
+  // ここは後方互換の「ワークスペース直下を共有する」経路へ落としてはいけない。隔離を
+  // 使っていたrunの復元で隔離を用意できなかったということであり、そのまま続けると
+  // 自動再開や手動の再試行が**隔離なしで元のワークスペースへ書き込む**。隔離できない
+  // ことを復元失敗として扱い、例外でタスクを`failed`へ倒す（呼び出し元の`startTask`が
+  // 受け止めて`applyLoopStopReason(..., 'failed')`にする）
+  if (live.pseudoRestoreFailure !== undefined) {
+    throw new Error(
+      `${live.pseudoRestoreFailure}。隔離できないため、元のワークスペースでは実行しません`,
+    );
+  }
   return {
     cwd: live.repoRoot,
     branch: '',

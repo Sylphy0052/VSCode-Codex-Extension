@@ -6864,6 +6864,132 @@ tasks:
       },
     );
   });
+
+  describe('復元時に統合先を用意できなかった場合（Issue #1114）', () => {
+    const ONE_TASK_YAML = `
+version: 1
+name: pseudo-restore-failure-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+    /** リロード後のプロセス（ライブな状態を失った新しい`WorkflowRunner`）を模す。 */
+    function createReloadedRunner(
+      store: WorkflowRunStore,
+      host: FakeHost,
+      pseudoWorktree: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] } | undefined,
+      autoResume = false,
+    ): WorkflowRunner {
+      return new WorkflowRunner({
+        // 既定では自動再開を切る。有効なままだとretryTaskを待たずにタスクが走り出し、
+        // 「手動で再開したときに何が起きるか」を観測できなくなる（他のリロードテストと
+        // 同じ理由。design.md §16.35）。自動再開そのものを見るテストだけtrueを渡す
+        readAutoResume: () => autoResume,
+        hosts: { codex: host, claude: host },
+        worktreeQueue: new WorktreeCreationQueue(),
+        git: fakeGit({ notGitRepo: true }),
+        fs: identityFs,
+        filePort: filePort(ONE_TASK_YAML),
+        store,
+        ...(pseudoWorktree !== undefined ? { pseudoWorktree } : {}),
+        log: fakeLogger,
+        readBaseline: () => ({
+          codexSandbox: 'read-only',
+          codexApprovalMode: 'on-request',
+          claudePermissionMode: 'manual',
+          allowAutoApprove: true,
+          allowClaudeBypassPermissions: false,
+        }),
+      });
+    }
+
+    it(
+      '統合先の再作成に失敗した復元では、タスクを元のワークスペースで再開せず' +
+        '停止状態のままにする（受入基準）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, store } = createHarness(ONE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, { fs, exclude: [] });
+        // 統合先を復元できない状況（統合先の経路がシンボリックリンクへ差し替えられた等。
+        // Issueの発生条件）を再現する。復元の最中だけ効かせる
+        const symlink = vi.spyOn(fs, 'isSymbolicLink').mockResolvedValue(true);
+        await reloadedRunner.restoreRunsForView();
+        symlink.mockRestore();
+
+        // 復元で中断扱いになったT1を再実行しても、隔離が無いまま元のワークスペース
+        // （/repo）でCLIセッションを開かない。開いてしまうと、隔離を前提に走らせていた
+        // タスクがワークスペースを直接書き換える
+        expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        expect(newCodexHost.sessions).toHaveLength(0);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      },
+    );
+
+    it(
+      '統合先の再作成に失敗した復元では、自動再開（design.md §16.35）も' +
+        '元のワークスペースでは走らせない',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, store } = createHarness(ONE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, { fs, exclude: [] }, true);
+        const symlink = vi.spyOn(fs, 'isSymbolicLink').mockResolvedValue(true);
+        await reloadedRunner.restoreRunsForView();
+        symlink.mockRestore();
+        // 自動再開は`restoreRunsForView`から切り離して走る（`void autoResumeIfEligible`）
+        await flush();
+
+        expect(newCodexHost.sessions).toHaveLength(0);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      },
+    );
+
+    it(
+      'WorkflowRunnerDeps.pseudoWorktreeを省略した実行の復元は、従来どおり' +
+        'ワークスペース直下で再開する（後方互換。受入基準）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const { runner, store } = createHarness(ONE_TASK_YAML, { git });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, undefined);
+        await reloadedRunner.restoreRunsForView();
+
+        expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        // 共有（ワークスペース直下）で走る場合はcwdにタスクIDが入らないため、
+        // `byTaskId`（cwdの末尾で引く）ではなく開かれたセッションそのものを見る
+        const t1 = newCodexHost.sessions[0] as FakeTaskSession;
+        expect(t1.cwd).toBe('/repo');
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+      },
+    );
+  });
 });
 
 describe('WorkflowRunner: タスク間メッセージング（design.md §16.21、Issue #105）', () => {
