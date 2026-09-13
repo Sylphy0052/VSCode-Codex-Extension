@@ -927,7 +927,14 @@ export class SettingsProvider {
    * 続けて出るうえ、途中で取り消されると3項目が食い違ったまま残る。レベルは「どこまで
    * 任せるか」を1つ選ぶ操作なので、同意も1つにまとめる。
    *
-   * @returns 実際に変更したら true。確認で取り消された場合は false。
+   * Codexでは別軸の `bypassApprovalsAndSandbox`（issue #222）も同時に落とす（issue #1180）。
+   * bypassは3項目より優先されるため、残したままだと「全確認」へ戻したつもりの操作が効かず、
+   * 送信されるのは `approvalPolicy: 'never'` と外部サンドボックス指定のままになる。落とせた
+   * ことを読み直して確かめ、まだ立っていれば**成功扱いにしない**（レベルは変わらなかった
+   * ものとして扱う）。
+   *
+   * @returns 実際に変更したら true。確認で取り消された場合と、bypassを落とせなかった
+   *   場合は false。
    */
   async updateApprovalLevel(provider: ProviderId, level: ApprovalLevel): Promise<boolean> {
     if (isUnsafeLevel(level) && !(await confirmFullApproval(provider))) {
@@ -947,6 +954,11 @@ export class SettingsProvider {
 
     const next = codexSettingsForLevel(level);
     const section = vscode.workspace.getConfiguration('codex');
+    // 3項目より先にbypassを落とす。ここで失敗したときに3項目だけ変わって「全確認と
+    // 表示されるのに実際は素通し」という食い違いを新たに作らないため（issue #1180）
+    if (!(await this.clearCodexBypass())) {
+      return false;
+    }
     await section.update('approvalMode', next.approvalMode, vscode.ConfigurationTarget.Global);
     await section.update('sandbox', next.sandbox, vscode.ConfigurationTarget.Global);
     await section.update(
@@ -955,6 +967,38 @@ export class SettingsProvider {
       vscode.ConfigurationTarget.Global,
     );
     this.log.info(`Codexの承認レベルを ${level} にしました`);
+    return true;
+  }
+
+  /**
+   * `codex.bypassApprovalsAndSandbox` を落とす（issue #1180）。
+   *
+   * 既に `false` なら何もしない。書いたあとに読み直して、まだ立っていれば失敗として扱う
+   * （`scope: machine` の設定なのでユーザー設定だけを見ればよいが、書き込みが失敗しても
+   * 例外にならない経路があるため、値そのもので確かめる）。
+   *
+   * @returns 落とせた（もともと立っていない場合を含む）なら true
+   */
+  private async clearCodexBypass(): Promise<boolean> {
+    if (!readConfig().codex.bypassApprovalsAndSandbox) {
+      return true;
+    }
+    const section = vscode.workspace.getConfiguration('codex');
+    try {
+      await section.update('bypassApprovalsAndSandbox', false, vscode.ConfigurationTarget.Global);
+    } catch (e) {
+      this.log.warn(
+        `承認なし実行の指定を解除できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (readConfig().codex.bypassApprovalsAndSandbox) {
+      this.log.warn('承認なし実行の指定が解除できていないため、承認レベルを変更しませんでした');
+      void vscode.window.showWarningMessage(
+        '承認レベルを変更できませんでした: 「承認とサンドボックスを外す」設定（codex.bypassApprovalsAndSandbox）を解除できません。設定を直接falseにしてください',
+      );
+      return false;
+    }
+    this.log.info('承認レベルの変更にあわせて承認なし実行の指定を解除しました');
     return true;
   }
 

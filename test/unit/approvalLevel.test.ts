@@ -141,6 +141,55 @@ describe('現在の設定からレベルを引く', () => {
     ).toBeUndefined();
   });
 
+  // bypassは3項目より優先され、実効状態は承認なし・サンドボックスなしになる（issue #1180）。
+  // 3項目だけを見て「全確認」と表示すると、保護を戻したつもりの表示と実際の権限が食い違う
+  it('bypassが立っている間は3項目が何であれ full', () => {
+    expect(
+      levelFromCodexSettings({
+        approvalMode: 'untrusted',
+        sandbox: 'workspace-write',
+        approvalsReviewer: 'user',
+        bypassApprovalsAndSandbox: true,
+      }),
+    ).toBe('full');
+    expect(
+      levelFromCodexSettings({
+        approvalMode: 'on-request',
+        sandbox: 'workspace-write',
+        approvalsReviewer: 'auto_review',
+        bypassApprovalsAndSandbox: true,
+      }),
+    ).toBe('full');
+    // CLIへ委譲している状態でも、bypassが立っていれば実効状態は決まる
+    expect(
+      levelFromCodexSettings({
+        approvalMode: '',
+        sandbox: '',
+        approvalsReviewer: '',
+        bypassApprovalsAndSandbox: true,
+      }),
+    ).toBe('full');
+  });
+
+  it('bypassが false / 未指定なら従来どおり3項目で判定する', () => {
+    for (const level of APPROVAL_LEVELS) {
+      expect(
+        levelFromCodexSettings({
+          ...codexSettingsForLevel(level),
+          bypassApprovalsAndSandbox: false,
+        }),
+      ).toBe(level);
+    }
+    expect(
+      levelFromCodexSettings({
+        approvalMode: 'on-request',
+        sandbox: 'workspace-write',
+        approvalsReviewer: 'user',
+        bypassApprovalsAndSandbox: false,
+      }),
+    ).toBeUndefined();
+  });
+
   it('Claudeはレベルに対応しないpermission modeでカスタムになる', () => {
     expect(levelFromClaudePermissionMode('manual')).toBe('ask');
     expect(levelFromClaudePermissionMode('bypassPermissions')).toBe('full');
