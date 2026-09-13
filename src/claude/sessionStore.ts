@@ -56,6 +56,11 @@ const BACKGROUND_ONLY = 'background-only';
  *
  * 発言そのものが1件も無いセッションは対象にしない。始めたばかりでまだ最初の指示が
  * 書かれていない場合が同じ形になるため、消すと進行中のセッションが履歴から消える。
+ *
+ * 判定の材料は先頭 `HEAD_LINES` 行の範囲で集めたものなので、それより後ろに最初の発言が
+ * あるセッションは誤って外れうる。手元の実測では最初の発言は最も遅いもので114行目に
+ * あり、128行の範囲に収まっている。外れても消えるのは一覧の1行だけで、transcriptは
+ * そのまま残る。
  */
 function isBackgroundOnly(meta: TranscriptMeta): boolean {
   return (
