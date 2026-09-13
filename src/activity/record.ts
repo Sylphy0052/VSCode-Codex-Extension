@@ -1,4 +1,5 @@
 import { basename, isAbsolute, relative } from 'node:path';
+import { redactCredentials } from '../secondOpinion/redact';
 
 /**
  * 日報/週報システムへ渡す作業記録の1レコード。
@@ -18,7 +19,10 @@ export interface ActivityRecord {
   ts: string;
   source: ActivitySource;
   cwd: string;
-  /** 1行要約。会話本文をこれ以上残さない。 */
+  /**
+   * 1行要約。本文の空白を畳んで先頭 {@link SUMMARY_MAX_LEN} 文字までを残し、資格情報らしき
+   * 値は伏せてある（Issue #1169）。会話本文をこれ以上残さない。
+   */
   text: string;
   /** 収集元の区別。この拡張機能から出たものは常に 'vscode'。 */
   ref: string;
@@ -63,10 +67,14 @@ export function buildActivityRecord(input: BuildActivityRecordInput): ActivityRe
     return undefined;
   }
 
+  // 伏せるのは切り詰めの前。切り詰めてからでは、200文字の境界で途切れた値がどのルールにも
+  // 当たらず原文の断片が残る。このバッファは通常の出力ログ（`maskForLog`）を通らず別の
+  // ファイルへ残るため、外部送信経路と同じ `redactCredentials` をここで掛ける（Issue #1169）
+  const redacted = redactCredentials(input.text).text;
   const text =
     input.kind === 'result'
-      ? buildResultText(input.text, input.editedFiles ?? [], cwd)
-      : summarize(input.text);
+      ? buildResultText(redacted, input.editedFiles ?? [], cwd)
+      : summarize(redacted);
   if (text === '') {
     return undefined;
   }
