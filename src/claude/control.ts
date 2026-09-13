@@ -961,7 +961,11 @@ export function describeCanUseTool(
 
 /**
  * 承認の決定を応答の形にする。
- * CLI側に「この会話では常に許可」の区別が無いため、許可として返す。
+ *
+ * CLI側に「この会話では常に許可」の区別が無く、`can_use_tool` の応答で表現できるのは
+ * 単発の許可だけである。そのため画面では `acceptForSession` のボタンを出さない
+ * （issue #1194、`chatScript.ts` の `renderApproval`）。それでも届いた場合は、
+ * 拒否側へ倒さず単発の許可として扱う（会話単位へ広げる約束はしない）。
  */
 export function buildCanUseToolResponse(
   decision: ApprovalDecision,
