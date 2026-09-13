@@ -101,6 +101,7 @@ function createService(): ForgeHubService {
     fs: files,
     worktreeFs,
     memento,
+    readBranchNaming: () => 'wf',
   });
 }
 

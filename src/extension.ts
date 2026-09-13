@@ -754,6 +754,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       fs: nodeForgeFileSystem,
       worktreeFs: nodeWorktreeFileSystem,
       memento: context.workspaceState,
+      readBranchNaming: () => readWorkflowsConfig().branchNaming,
     }),
     () => currentWorkspaceFolder()?.uri.fsPath,
     new ForgeOrchestrator(

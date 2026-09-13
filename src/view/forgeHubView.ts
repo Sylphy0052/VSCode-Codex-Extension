@@ -430,7 +430,7 @@ export class ForgeHubViewManager implements vscode.Disposable {
           snapshot.provider,
           result.cwd,
           `issue-${String(issue.number)}`,
-          `${buildIssueStartPrompt(snapshot.host, issue.number)}\n作業ディレクトリは\`${result.cwd}\`です。\n\n${
+          `${buildIssueStartPrompt(snapshot.host, issue.number)}\n作業ディレクトリは\`${result.cwd}\`、ブランチは\`${result.branch}\`です。worktreeとブランチはForge Hubが作成済みのため、新規作成しないでください。\n\n${
             snapshot.host === 'gitlab'
               ? `$gitlab-develop #${issue.number}`
               : `GitHub Issue #${issue.number}に着手してください。`
