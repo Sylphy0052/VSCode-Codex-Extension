@@ -351,6 +351,32 @@ export class SettingsProvider {
     private readonly log: Logger,
   ) {}
 
+  private pendingModelRefresh: Promise<void> | undefined;
+
+  /** モデル候補だけを再取得する。同時要求はまとめ、失敗時は直前の一覧を保つ。 */
+  refreshModels(): Promise<void> {
+    if (this.pendingModelRefresh !== undefined) {
+      return this.pendingModelRefresh;
+    }
+    this.pendingModelRefresh = Promise.allSettled([this.loadCodexModels(), this.loadClaudeModels()])
+      .then(([codex, claude]) => {
+        if (codex.status === 'fulfilled') {
+          this.models = codex.value;
+        } else {
+          this.log.warn('Codexのモデル一覧を更新できませんでした');
+        }
+        if (claude.status === 'fulfilled') {
+          this.claudeModels = claude.value;
+        } else {
+          this.log.warn('Claude Codeのモデル一覧を更新できませんでした');
+        }
+      })
+      .finally(() => {
+        this.pendingModelRefresh = undefined;
+      });
+    return this.pendingModelRefresh;
+  }
+
   /** 一度でも読み込んだか。未読込のまま snapshot を返すと選択肢が空になる。 */
   private loaded = false;
 
@@ -372,11 +398,8 @@ export class SettingsProvider {
   private async loadImmediate(): Promise<void> {
     this.loaded = true;
     // CLIの起動を待つ時間が二重にならないよう、まとめて聞く
-    [this.models, this.claudeModels, this.claudeAgents] = await Promise.all([
-      this.loadCodexModels(),
-      this.loadClaudeModels(),
-      this.loadClaudeAgents(),
-    ]);
+    const [, agents] = await Promise.all([this.refreshModels(), this.loadClaudeAgents()]);
+    this.claudeAgents = agents;
 
     const toml = await this.fs.readTextFile(this.configTomlPath);
     this.defaults = toml === undefined ? noDefaults : extractDefaults(toml);
@@ -535,15 +558,20 @@ export class SettingsProvider {
       return fromCli;
     }
 
+    if (this.models.length > 0) {
+      this.log.warn('Codexのモデル一覧を取得できませんでした。前回の候補を保持します');
+      return this.models;
+    }
     this.log.warn('CLIからモデル一覧を取得できませんでした。キャッシュを読みます');
     const catalog = await this.fs.readTextFile(this.modelsCachePath);
     if (catalog === undefined) {
       this.log.warn(`モデル一覧を読めませんでした: ${this.modelsCachePath}`);
-      return [];
+      return this.models;
     }
     const models = parseModelCatalog(catalog);
     if (models.length === 0) {
-      this.log.warn('モデル一覧が空でした。既知の値へフォールバックします');
+      this.log.warn('モデル一覧が空でした。前回の候補を保持します');
+      return this.models;
     }
     return models;
   }
@@ -554,9 +582,11 @@ export class SettingsProvider {
     if (fromCli !== undefined && fromCli.length > 0) {
       return fromCli;
     }
-    this.log.warn(
-      'Claude Codeのモデル一覧を取得できませんでした。エイリアスの一覧へフォールバックします',
-    );
+    if (this.claudeModels.length > 0) {
+      this.log.warn('Claude Codeのモデル一覧を取得できませんでした。前回の候補を保持します');
+      return this.claudeModels;
+    }
+    this.log.warn('Claude Codeのモデル一覧を取得できませんでした。エイリアスを表示します');
     return claudeFallbackModels();
   }
 
@@ -897,7 +927,14 @@ export class SettingsProvider {
    * 続けて出るうえ、途中で取り消されると3項目が食い違ったまま残る。レベルは「どこまで
    * 任せるか」を1つ選ぶ操作なので、同意も1つにまとめる。
    *
-   * @returns 実際に変更したら true。確認で取り消された場合は false。
+   * Codexでは別軸の `bypassApprovalsAndSandbox`（issue #222）も同時に落とす（issue #1180）。
+   * bypassは3項目より優先されるため、残したままだと「全確認」へ戻したつもりの操作が効かず、
+   * 送信されるのは `approvalPolicy: 'never'` と外部サンドボックス指定のままになる。落とせた
+   * ことを読み直して確かめ、まだ立っていれば**成功扱いにしない**（レベルは変わらなかった
+   * ものとして扱う）。
+   *
+   * @returns 実際に変更したら true。確認で取り消された場合と、bypassを落とせなかった
+   *   場合は false。
    */
   async updateApprovalLevel(provider: ProviderId, level: ApprovalLevel): Promise<boolean> {
     if (isUnsafeLevel(level) && !(await confirmFullApproval(provider))) {
@@ -917,6 +954,11 @@ export class SettingsProvider {
 
     const next = codexSettingsForLevel(level);
     const section = vscode.workspace.getConfiguration('codex');
+    // 3項目より先にbypassを落とす。ここで失敗したときに3項目だけ変わって「全確認と
+    // 表示されるのに実際は素通し」という食い違いを新たに作らないため（issue #1180）
+    if (!(await this.clearCodexBypass())) {
+      return false;
+    }
     await section.update('approvalMode', next.approvalMode, vscode.ConfigurationTarget.Global);
     await section.update('sandbox', next.sandbox, vscode.ConfigurationTarget.Global);
     await section.update(
@@ -925,6 +967,38 @@ export class SettingsProvider {
       vscode.ConfigurationTarget.Global,
     );
     this.log.info(`Codexの承認レベルを ${level} にしました`);
+    return true;
+  }
+
+  /**
+   * `codex.bypassApprovalsAndSandbox` を落とす（issue #1180）。
+   *
+   * 既に `false` なら何もしない。書いたあとに読み直して、まだ立っていれば失敗として扱う
+   * （`scope: machine` の設定なのでユーザー設定だけを見ればよいが、書き込みが失敗しても
+   * 例外にならない経路があるため、値そのもので確かめる）。
+   *
+   * @returns 落とせた（もともと立っていない場合を含む）なら true
+   */
+  private async clearCodexBypass(): Promise<boolean> {
+    if (!readConfig().codex.bypassApprovalsAndSandbox) {
+      return true;
+    }
+    const section = vscode.workspace.getConfiguration('codex');
+    try {
+      await section.update('bypassApprovalsAndSandbox', false, vscode.ConfigurationTarget.Global);
+    } catch (e) {
+      this.log.warn(
+        `承認なし実行の指定を解除できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (readConfig().codex.bypassApprovalsAndSandbox) {
+      this.log.warn('承認なし実行の指定が解除できていないため、承認レベルを変更しませんでした');
+      void vscode.window.showWarningMessage(
+        '承認レベルを変更できませんでした: 「承認とサンドボックスを外す」設定（codex.bypassApprovalsAndSandbox）を解除できません。設定を直接falseにしてください',
+      );
+      return false;
+    }
+    this.log.info('承認レベルの変更にあわせて承認なし実行の指定を解除しました');
     return true;
   }
 

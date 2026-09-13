@@ -954,7 +954,7 @@ tasks:
 | `codex.history.scope`                            | `workspace`                                                                      | window   | `workspace` / `all`                                                                                                                                                                                                                                         |
 | `codex.history.maxEntries`                       | `200`                                                                            | window   | 一覧構築の上限件数                                                                                                                                                                                                                                          |
 | `codex.history.groupBy`                          | `date`                                                                           | window   | 履歴のグループ化。`date` / `folder` / `none`                                                                                                                                                                                                                |
-| `agent.activityLog.enabled`                      | `true`                                                                           | window   | 実行したセッションを日報バッファへ記録する                                                                                                                                                                                                                  |
+| `agent.activityLog.enabled`                      | `true`                                                                           | window   | 発言と成果を日報バッファへ記録する（本文は先頭200文字、資格情報は伏せる）                                                                                                                                                                                   |
 | `agent.activityLog.dir`                          | `""`                                                                             | machine  | 空なら `DAILY_BUFFER_DIR` → `~/workspace/dairy/.buffer`                                                                                                                                                                                                     |
 | `agent.chat.renderMarkdown`                      | `true`                                                                           | window   | [応答本文をMarkdownとして描画するか](#応答のmarkdown描画)。`false`で従来の生テキスト表示に戻す                                                                                                                                                              |
 | `agent.chat.density`                             | `comfortable`                                                                    | window   | [チャット画面の表示密度](#会話画面の見やすさ)。`compact`で発言どうしの間隔・本文の余白・行間が詰まる（Codex/Claude Code両画面共通）。反映には会話タブを開き直す                                                                                             |
@@ -1085,11 +1085,12 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
 
 ## 日報・週報連携
 
-この拡張機能から実行したセッションを、**セッションごとに1行**だけ日報の追記バッファへ書き出す。
+この拡張機能から実行したセッションの発言と成果を、日報の追記バッファへ書き出す。
 
+- 頻度: 発言の送信ごとに1行（`kind` が `prompt`）、ターンの完了ごとに1行（`kind` が `result`）
 - 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`
-- 形式: `{"ts","source","cwd","text","ref"}`（`source` は `codex` / `claude-code`、`ref` は `vscode`）
-- 本文は1行要約200文字まで。会話本文そのものは書き出さない
+- 形式: `{"ts","source","cwd","text","ref","session_id","kind"}`（`source` は `codex` / `claude-code`、`ref` は `vscode`）
+- 本文は空白を畳んで先頭200文字まで。成果の行には編集ファイル名（5件まで）を添える。資格情報らしき値（既知の形のトークン、`password:` などへの代入値）は書く前に伏せる。会話本文の全文は書き出さない
 - `agent.activityLog.enabled` を `false` にすれば一切書かない
 
 `~/.claude/scripts/daily/collect.py` がこのバッファを読み、日報・週報の作業ログに載る。拡張機能経由のClaude Codeセッションは transcript 走査とも重複しうるため、収集側で1件に畳んでいる（設計書 §15.4）。
@@ -1171,6 +1172,10 @@ VSCodeが読むPATHはシェルの対話設定（`.bashrc` 等）を経ないこ
 ## 開発に参加する
 
 ビルド・テスト・アーキテクチャは [CONTRIBUTING.md](CONTRIBUTING.md)、設計の背景と検証結果は [docs/design.md](docs/design.md) を参照。
+
+全体を機能ごとにレビューする場合は[機能別レビュー台帳](docs/feature-inventory.md)を参照。チェック項目、実装先、既存テスト、全ソース・コマンド・設定の対応表をまとめている。[全機能の静的レビュー結果](docs/reviews/summary.md)に指摘と未検証事項を記録した。
+
+全関数・全分岐・全テスト内容の[静的精査](docs/reviews/exhaustive/README.md)も完了している。555ファイル分の根拠と[追加の94指摘](docs/reviews/exhaustive/findings.md)を保存した。テストの実行と指摘の修正は未実施。
 
 ## ライセンス
 

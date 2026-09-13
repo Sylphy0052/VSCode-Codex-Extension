@@ -387,3 +387,20 @@ describe('要約セッションのrollout後始末（Issue #942）', () => {
     expect(result).toEqual({ ok: true, summary: '要約です' });
   });
 });
+
+describe('summarizeConversation は送信直前に資格情報を伏せる（Issue #1171）', () => {
+  it('会話に混ざったトークンを要約セッションへ送らない', async () => {
+    const host = new FakeHost();
+    // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+    const fakeToken = `sk-live-${'q'.repeat(24)}`;
+    await summarizeConversation(host, {
+      model: 'gpt-5.6-sol',
+      effort: 'low',
+      conversation: `export OPENAI_API_KEY=${fakeToken}\n${CONVERSATION}`,
+    });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).not.toContain(fakeToken);
+    expect(prompt).toContain('<MASKED>');
+    expect(prompt).toContain('テストを直して');
+  });
+});

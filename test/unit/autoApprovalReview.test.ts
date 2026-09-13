@@ -63,6 +63,26 @@ describe('describeReviewAction', () => {
     ).toBe('権限の昇格: network（外部APIを叩くため）');
   });
 
+  // issue #1184: 現行プロトコルの permissions はオブジェクト。対象を落とさない
+  it('権限の昇格はオブジェクト形の権限から対象を出す', () => {
+    expect(
+      describeReviewAction({
+        type: 'requestPermissions',
+        reason: null,
+        permissions: {
+          network: { enabled: true },
+          fileSystem: { read: null, write: ['/work/out'] },
+        },
+      }),
+    ).toBe('権限の昇格: ネットワーク接続: 許可, 書き込み: /work/out');
+    expect(
+      describeReviewAction({
+        type: 'requestPermissions',
+        permissions: { network: { enabled: true }, process: {} },
+      }),
+    ).toBe('権限の昇格: ネットワーク接続: 許可, 読み取れない項目: process');
+  });
+
   it('未知の種類でも捨てずに種類名だけ出す', () => {
     expect(describeReviewAction({ type: 'somethingNew' })).toBe('somethingNew');
     expect(describeReviewAction(undefined)).toBe('');

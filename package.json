@@ -687,7 +687,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "この拡張機能から実行したセッションを日報/週報用のバッファへ記録する。記録するのはセッションごとに1行（時刻・作業ディレクトリ・要約）だけで、会話本文は書き出さない。"
+          "markdownDescription": "この拡張機能から実行したセッションの発言と成果を日報/週報用のバッファへ記録する。発言の送信ごと・ターンの完了ごとに1行（時刻・作業ディレクトリ・本文の先頭200文字・編集ファイル名）を追記する。資格情報らしき値は伏せてから書き、会話本文の全文は書き出さない。"
         },
         "agent.activityLog.dir": {
           "type": "string",
@@ -750,6 +750,7 @@
               "forgeHub",
               "openProgress",
               "handoffToNewSession",
+              "autoHandoffToggle",
               "secondOpinion"
             ],
             "enumDescriptions": [
@@ -769,6 +770,7 @@
               "Forge Hubを開く",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ",
+              "自動引き継ぎ（コンテキスト逼迫時に自動で新セッションへ引き継ぐ）を切り替える",
               "独立したCodexセッションへ意見を求める（セカンドオピニオン）"
             ]
           },
@@ -783,6 +785,78 @@
           ],
           "scope": "window",
           "markdownDescription": "チャット入力欄のアイコン列（`#composerIconRow`）の表に直接並べるボタン。ここに無いボタンは「…」メニューへ畳まれる（無くなるわけではない、issue #296）。既定は添付・ループ・圧縮・要約・計画・新セッションへ引き継ぐ・セカンドオピニオンの7つ（Issue #900）。未知のIDや重複を含む場合は既定へ丸める。Codex/Claude Code両画面共通（実行時の条件で元から出ないボタン、例えば`fastToggle`はFast mode非対応環境では終始非表示、を指定しても、その状態のままなら出ない）。"
+        },
+        "agent.autoHandoff.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "新しい会話で自動引き継ぎ（Issue #1079）を最初から有効にする。この設定が決めるのは新規セッションの初期値だけで、会話ごとの切り替えは入力欄の「…」メニューの「自動引き継ぎ」で行う（その操作はこの設定を書き換えず、その会話の中だけで効く）。引き継ぎ先のセッションは引き継ぎ元の値をそのまま継ぐ。OFFにすると、これまでどおり会話ごとに手で入れる形になる。Codex/Claude Code両画面共通。"
+        },
+        "agent.autoHandoff.thresholdPercent": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 99,
+          "scope": "window",
+          "markdownDescription": "自動引き継ぎ（Issue #1079）が始まるコンテキスト残量の割合。残りがこの値以下になった時点、または自動圧縮が走った時点で、会話を新しいセッションへ引き継ぐ。既定の20は入力欄の残量表示が「残りわずか」に変わる境界と同じ。ON/OFFはこの設定ではなく `agent.autoHandoff.enabled`（新規セッションの初期値）と、会話ごとの入力欄の「…」メニューの「自動引き継ぎ」で切り替える。Codex/Claude Code両画面共通。"
+        },
+        "agent.autoHandoff.softThresholdPercent": {
+          "type": "number",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 99,
+          "scope": "window",
+          "markdownDescription": "安全な区切りを待って自動引き継ぎ（Issue #1090）を始めるコンテキスト残量の割合。残りがこの値以下で、かつターンが終わっていて承認待ち・入力待ち・ループが無く、分類器が「いま切り替えても失うものが無い」と判定したときに引き継ぐ。`agent.autoHandoff.thresholdPercent` 以下の値を書いた場合はそちらへ丸める（残量だけで発火する方が先に成立するため）。Codex/Claude Code両画面共通。"
+        },
+        "agent.autoHandoff.onProfileChange": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "安全な区切りで、次の作業に合うmodel/effort（`agent.autoHandoff.router` の判定結果）が現在の値と違うときに自動引き継ぎする（Issue #1090）。コンテキスト残量は問わない。「設計が終わって次は実装」「実装から原因不明のバグ調査へ」のように、モデルを変えるべき区切りで新しいセッションへ移るための設定。モデルが変わるとき、またはeffortが2段以上動くときだけ発火する。"
+        },
+        "agent.autoHandoff.classifierTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 5000,
+          "maximum": 600000,
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先の作業を分類するヘッドレス実行（`agent.autoHandoff.router`）の待ち時間（ミリ秒。Issue #1097）。時間切れになると分類が得られず、安全な区切りを待つ契機（`softThreshold` / `onProfileChange` / `onAssistantSuggestion`）は発火しない。範囲外の値と数値でない値は既定の120000へ丸める。"
+        },
+        "agent.autoHandoff.onAssistantSuggestion": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "安全な区切りで、アシスタント自身が引き継ぎを提案したときに自動引き継ぎする（Issue #1097 / #1150）。コンテキスト残量もmodel/effortの変化も問わない。提案の判定は2経路ある。（1）「別セッションで続きを」「新しいチャットへ引き継ぐ」のような地の文での提案は `agent.autoHandoff.router` の分類器が判定する（正規表現では言い回しのぶれを拾えないため）。（2）handoffプロンプトそのものが出力されたときは、書式が固定されているので拡張機能側が決定論的に検知する。こちらは `agent.autoHandoff.router` が無効・時間切れ・失敗でも発火する。`/loop` 実行中とタスク用セッションではどちらの経路でも発火しない。"
+        },
+        "agent.autoHandoff.closeOldTab": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "引き継ぎ後に引き継ぎ元のタブを確認なしで閉じる（Issue #1090）。新しいセッションの初回ターンが成功したときだけ閉じ、失敗・時間切れのときは残す。履歴（transcript / rollout）は残るため、必要なら履歴から開き直せる。OFFにすると従来どおり「引き継ぎ元のセッションを停止しますか？」と確認する。"
+        },
+        "agent.autoHandoff.model": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先セッションで使うモデル（Issue #1082）。空なら未指定で、作業の分類→引き継ぎ元のモデル→グローバル設定の順で決まる。指定するとその全てより優先する。Codex/Claude Code両画面共通のため、片方にしか無いモデル名を書くともう片方の引き継ぎで無効な値がCLIへ渡る。"
+        },
+        "agent.autoHandoff.effort": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先セッションで使うreasoning effort（Issue #1082）。空なら未指定。`agent.autoHandoff.model` と同じ優先順位で扱う。effortに対応しないモデルでは無視される。"
+        },
+        "agent.autoHandoff.router": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "引き継ぎ先のmodel/effortを引き継ぎ元の内容から決める（Issue #1082）。引き継ぎのたびに、会話しているのと同じCLI（Codex/Claude Code）をヘッドレスで1回だけ起動し、直近のユーザー指示・直前のターンが失敗したか・作業中のパスを渡して作業の性質（種類と difficulty / scope / ambiguity / risk / autonomy）を分類させる。分類器にはツールも利用者の設定も渡さず、モデルやeffortも選ばせない。effortはdifficultyから、モデルは残りの軸の合計から拡張機能側の規則で決め、モデル一覧とeffort一覧の中から解決する。決まった値は引き継ぐ前に確認ダイアログへ出し、承認したときだけ引き継ぐ（選び直し・再判定もできる）。OFFにすると分類のためのCLI起動を行わず、引き継ぎ元のmodel/effortを確認ダイアログへ出す。"
+        },
+        "agent.chat.limitAutoResume.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "CodexまたはClaude Codeの使用量上限に達した会話を自動で続行するか。入力欄の「…」メニューからも切り替えられる。リセット時刻の30秒後に継続指示を送り、時刻がない場合は30分後に確認する。再開しても上限中なら1分後に再試行する。会話タブを閉じた場合、承認待ちの場合、手動で中断した場合は送信しない。"
         },
         "agent.secondOpinion.candidates": {
           "type": "array",
@@ -867,6 +941,12 @@
           "default": true,
           "scope": "window",
           "markdownDescription": "セカンドオピニオンの回答が返った時点で、その全文を作業中のAIへ自動で送る。作業中のAIは前置き（別セッションの意見であり人はまだ確認していないこと）を読んだうえで、採否を自分で判断する。`false` にすると自動では送らず、回答項目の「メインAIへの指示を作る」→「指示を確認して送る」で人が確認してから送る従来の手順になる。失敗した回答は自動送信の対象にしない。"
+        },
+        "agent.secondOpinion.afterTree": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンの材料へ、押下時点のリポジトリ全体の写し（`after/`）を足し、判断に必要な範囲でその中を追加で読ませる。差分が触っていないファイル（依存先・型定義・設定・既存のテスト）にある問題を見つけられるようになる代わりに、1回答あたりのトークンが2割ほど増える。`false` にすると材料は差分と変更対象ファイルのベース側だけになり、リポジトリ全体の探索は行わない。写しを作れなかった場合は、この設定が `true` でも写し無しで実行する。"
         },
         "agent.secondOpinion.advisor.enabled": {
           "type": "boolean",

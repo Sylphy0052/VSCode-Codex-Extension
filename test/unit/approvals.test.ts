@@ -5,6 +5,7 @@ import {
   defaultDenyResponse,
   describeApproval,
   SERVER_REQUEST_METHODS,
+  summarizePermissions,
 } from '../../src/appserver/approvals';
 
 describe('describeApproval', () => {
@@ -49,7 +50,51 @@ describe('describeApproval', () => {
 
   it('権限昇格の要求を理由付きで表す', () => {
     const approval = describeApproval(3, APPROVAL_METHODS.permissions, { reason: 'ネットワーク' });
-    expect(approval).toMatchObject({ kind: 'permissions', detail: 'ネットワーク' });
+    expect(approval).toMatchObject({ kind: 'permissions' });
+    expect(approval?.detail).toBe('ネットワーク\n許可する対象: なし');
+  });
+
+  // issue #1184: 理由が無くても、何を許可するのかが承認カードに出る
+  it('権限昇格の要求は理由が無くても許可対象（ネットワーク・パス）を出す', () => {
+    const approval = describeApproval(3, APPROVAL_METHODS.permissions, {
+      cwd: '/work',
+      reason: null,
+      permissions: {
+        network: { enabled: true },
+        fileSystem: {
+          read: null,
+          write: ['/work/out'],
+          entries: [
+            { path: { type: 'path', path: '/etc/hosts' }, access: 'read' },
+            { path: { type: 'glob_pattern', pattern: '**/*.log' }, access: 'deny' },
+            {
+              path: { type: 'special', value: { kind: 'project_roots', subpath: 'dist' } },
+              access: 'write',
+            },
+          ],
+        },
+      },
+    });
+    expect(approval?.detail).toBe(
+      [
+        'ネットワーク接続: 許可',
+        '書き込み: /work/out',
+        '読み取り: /etc/hosts',
+        'アクセス禁止: **/*.log',
+        '書き込み: プロジェクトルート/dist',
+        '(/work)',
+      ].join('\n'),
+    );
+  });
+
+  it('読み取れない権限は内容不明と明示する', () => {
+    const approval = describeApproval(3, APPROVAL_METHODS.permissions, {
+      reason: '新機能',
+      permissions: { network: { enabled: true }, process: { spawn: true } },
+    });
+    expect(approval?.detail).toBe(
+      '新機能\nネットワーク接続: 許可\n内容を読み取れない項目（許可しても付与しません）: process',
+    );
   });
 
   it('知らない要求はundefined（勝手に許可しないため）', () => {
@@ -57,7 +102,58 @@ describe('describeApproval', () => {
   });
 });
 
+describe('summarizePermissions', () => {
+  it('RequestPermissionProfile の形をそのまま応答用の権限へ写す', () => {
+    const permissions = {
+      network: { enabled: null },
+      fileSystem: { read: ['/a'], write: null, globScanMaxDepth: 3 },
+    };
+    const summary = summarizePermissions(permissions);
+    expect(summary.lines).toEqual(['読み取り: /a']);
+    expect(summary.granted).toEqual(permissions);
+    expect(summary.unreadable).toEqual([]);
+  });
+
+  it('特別なパスは語で示し、知らない種類は読めない扱いにする', () => {
+    const read = (value: unknown) =>
+      summarizePermissions({
+        fileSystem: { entries: [{ path: { type: 'special', value }, access: 'read' }] },
+      });
+    expect(read({ kind: 'root' }).lines).toEqual(['読み取り: ルート（/ 以下すべて）']);
+    expect(read({ kind: 'tmpdir' }).lines).toEqual(['読み取り: 一時ディレクトリ']);
+    expect(read({ kind: 'unknown', path: '/opt', subpath: 'x' }).lines).toEqual([
+      '読み取り: /opt/x',
+    ]);
+    expect(read({ kind: 'future' })).toMatchObject({ lines: [], unreadable: ['fileSystem'] });
+  });
+
+  it('オブジェクトでない権限は読めない扱いにし、無ければ空とする', () => {
+    expect(summarizePermissions('all')).toMatchObject({ granted: {}, unreadable: ['permissions'] });
+    // `network: true` のような形違いを「変更なし」へ読み替えない
+    expect(summarizePermissions({ network: true })).toMatchObject({
+      granted: {},
+      unreadable: ['network'],
+    });
+    expect(summarizePermissions(undefined)).toEqual({ lines: [], granted: {}, unreadable: [] });
+  });
+});
+
 describe('buildApprovalResponse', () => {
+  // issue #1184: 承認カードに出せなかった項目は、許可しても応答へ載せない
+  it('権限要求の許可応答は表示した項目だけを返す', () => {
+    const params = {
+      permissions: { network: { enabled: true }, process: { spawn: true } },
+    };
+    expect(buildApprovalResponse('permissions', 'accept', params)).toEqual({
+      permissions: { network: { enabled: true } },
+      scope: 'turn',
+    });
+    expect(buildApprovalResponse('permissions', 'accept', { permissions: 'all' })).toEqual({
+      permissions: {},
+      scope: 'turn',
+    });
+  });
+
   it('コマンドとファイル変更はdecisionをそのまま返す', () => {
     expect(buildApprovalResponse('command', 'accept', {})).toEqual({ decision: 'accept' });
     expect(buildApprovalResponse('fileChange', 'decline', {})).toEqual({ decision: 'decline' });
@@ -67,13 +163,13 @@ describe('buildApprovalResponse', () => {
   });
 
   it('権限要求は形が異なり、許可時のみ要求された権限を与える', () => {
-    const params = { permissions: { network: true } };
+    const params = { permissions: { network: { enabled: true } } };
     expect(buildApprovalResponse('permissions', 'accept', params)).toEqual({
-      permissions: { network: true },
+      permissions: { network: { enabled: true } },
       scope: 'turn',
     });
     expect(buildApprovalResponse('permissions', 'acceptForSession', params)).toEqual({
-      permissions: { network: true },
+      permissions: { network: { enabled: true } },
       scope: 'session',
     });
   });

@@ -251,14 +251,43 @@ export class AppServerConnection {
     if (id === undefined || method === undefined) {
       return;
     }
+    // 要求を受け取った時点のプロセスを覚えておく（Issue #1106）。`onServerRequest` は承認
+    // カードの応答を待つため、完了まで数分かかることがある。その間に接続が切れて張り直されると
+    // `this.proc` は別のプロセスになっており、そのまま書くと**旧接続の要求への応答が新接続へ
+    // 届く**。idは接続ごとに振り直されるため、新側が同じidで別の要求（別の承認）を出していれば、
+    // それへの回答として解釈されうる。stdout/exitの世代guardは既に走り出したhandlerを止め
+    // られないので、書く直前にもう一度世代を確かめる
+    const origin = this.proc;
     try {
       const result = await this.onServerRequest({ id, method, params: asRecord(message.params) });
-      this.write(encodeResponse(id, result));
+      this.writeToOrigin(origin, id, method, encodeResponse(id, result));
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       this.log.error(`要求 ${method} の処理に失敗しました: ${reason}`);
-      this.write(encodeErrorResponse(id, reason));
+      this.writeToOrigin(origin, id, method, encodeErrorResponse(id, reason));
     }
+  }
+
+  /**
+   * 要求を受けた世代が現役のときだけ応答を書く（Issue #1106）。
+   *
+   * 世代が違えば捨てる。旧接続はもう応答を待っておらず（`reset()` が待機を解いている）、
+   * 新接続にとっては身に覚えのない応答になる。**黙って捨てない**——承認が握り潰された形に
+   * なるため、破棄したことをログに残す。
+   */
+  private writeToOrigin(
+    origin: ChildProcessWithoutNullStreams | undefined,
+    id: number | string,
+    method: string,
+    line: string,
+  ): void {
+    if (origin === undefined || this.proc !== origin) {
+      this.log.warn(
+        `要求 ${method}（id=${String(id)}）の応答は、接続が切り替わったため破棄しました`,
+      );
+      return;
+    }
+    this.write(line);
   }
 
   async request(method: string, params: unknown): Promise<JsonRpcMessage> {

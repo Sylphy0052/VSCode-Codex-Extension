@@ -1,0 +1,3332 @@
+{
+  "src/activity/activityLogger.ts": {
+    "sha256": "928aa0a6e6403be143b9b2083573cd4aad7fca6fa02bb106b84665deee3d6e15",
+    "evidence": "activity.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/activity/nodeAppender.ts": {
+    "sha256": "78191f33874934d2b528ab96ff6e2a46794f88d3441f6fc99996291e106b8694",
+    "evidence": "activity.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/activity/record.ts": {
+    "sha256": "1af3fc7a79fc3e13e0880508372ed46d16551e09dab72a54c770df83955cef75",
+    "evidence": "activity.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/activityLogger.test.ts": {
+    "sha256": "7dc13fca05e2ca70ab9ea16c3b1698e51d6dba81706683be43052448eceffe48",
+    "evidence": "activity.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/activityRecord.test.ts": {
+    "sha256": "41d844efec96399462c2fb8eab863d2122f0d1e4a22d745f4479977584510c61",
+    "evidence": "activity.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/concurrency.ts": {
+    "sha256": "5ac15aa0e515bc3aa53f01a5a733b7a0c415e156f1631307062bb1d1faebd77f",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/memento.ts": {
+    "sha256": "fe5b4f039afd9b7de899ee42b7667d2d57986f2460f5c632a9460e132514a207",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/serialQueue.ts": {
+    "sha256": "2cbd8e03ab2606dcb93fda89e635846c4f9de8d945e27c3669cc0f03fe063d24",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/id.ts": {
+    "sha256": "7f3cf1b456cef4cdf41fdf094eb03f7d6fa7ea279fe23cff3534a56a97b07304",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/types.ts": {
+    "sha256": "fc880adc81a8d91b9a9af7831812881a12cbf49202af1f6d2da609033eb05e79",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/registry.ts": {
+    "sha256": "4749ac59c3aecfbcd17c383918a1288d0d208b19fb9ca17a60be6ce5818c4822",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/account.ts": {
+    "sha256": "696470ac282ce4815ab657a5db93c42803ccf7b914b182ef5fb42745350d28df",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/concurrency.test.ts": {
+    "sha256": "90dc77389e4f33c235f8a9873c11799a29d492ea58655276e5ec1b02d6c9bf29",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/serialQueue.test.ts": {
+    "sha256": "ba6d746b1c5e682aa3dd53e78235dd1b3c45c02cf886816b7e01f0eda7d94464",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/providerRegistry.test.ts": {
+    "sha256": "1d750646d58b662689f2bb749e01389830919052ed736211308cf692a904bf1d",
+    "evidence": "core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/panelState.ts": {
+    "sha256": "9a39b83a8ad334f0a1c3191e1b190f1ff3248c5e433f99ebf2827c7040153a38",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/activePanelSequence.ts": {
+    "sha256": "d44c0520781b7a38ae2e17675db570915cc4786ff05c42eae9729b932e4e2c44",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/reducedMotion.ts": {
+    "sha256": "d39a91c334ed8898229754de5163ee9da826928298056c5bf02a43c472403527",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/density.ts": {
+    "sha256": "77ab146ea27b183f13dfba825b5f2277a18ae35d5b33139b667e9fb18c70b79d",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/relativeTime.ts": {
+    "sha256": "6f22b52878431583626667eca4cce2aeeded9f0dab6cc61583abc869fa87a0b4",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sessionTitle.ts": {
+    "sha256": "2e119d368de733b467852ba16fe8af834e7a646d1a5e6409bd68da3c73475ef8",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/sessionFilter.ts": {
+    "sha256": "ced3f6381ded26c2656f945418b52cba453f0834595a493a9863089b0877677e",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/panelState.test.ts": {
+    "sha256": "f070fefecf981a6e76612ad274c740e267e417a03f5f505f357961a363c96e79",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/density.test.ts": {
+    "sha256": "939d2d56f9c7eeab292a47ddf5782d586849747c728d6033e24126fef3eb1ae3",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/relativeTime.test.ts": {
+    "sha256": "ecf98e84e64a51d62bbc3a95ac451074c62eebaaaaf5e898d15feab1c37de504",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionTitle.test.ts": {
+    "sha256": "37eacdecbd4900f776235a3c3094d719a377d04cc4171ba11cf16538daf1845a",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionFilter.test.ts": {
+    "sha256": "c45bae768ff3a0e50836e108161f58c44127829a9869956ca564bacaffa430f4",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sendKey.ts": {
+    "sha256": "951652162a12ef2675583b37cb5682b9cdc9e403215d8e80a5f5f575bd9b7788",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sendKey.test.ts": {
+    "sha256": "3f824f4796e9b06755aadf6f463cbba0660aced49c094ced0f29beec3f8c9fab",
+    "evidence": "presentation.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/forkFromTurn.ts": {
+    "sha256": "ca663c4305ba4c61698065d7da3f94f52845fe0d82c4e30b36c6ba6235809a6f",
+    "evidence": "fork.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeForkFromTurn.test.ts": {
+    "sha256": "5c64c6a86c041793cf111eb135617152224bb46b42e8828530aa9b31968913ec",
+    "evidence": "fork.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionForkFromTurn.test.ts": {
+    "sha256": "b80a64c8961791da5c4e57fec03bfa95ed7b2d793038e90339dc5e2c13a32471",
+    "evidence": "fork.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/control.ts": {
+    "sha256": "06ed194606c6575bfdb908ab3a5b14beb3cbbc4c245bc72aa6a9eebdcbb8b44a",
+    "evidence": "claude-control.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeControl.test.ts": {
+    "sha256": "9eeeb56a86364078910b899b146e0056dabf41385a2de0b98120bf7cc027495d",
+    "evidence": "claude-control.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/sessionActions.ts": {
+    "sha256": "b55b0133fa96c66531e724ce94127a2b7ac27ac23623b9f3df35233a9e4bd226",
+    "evidence": "session-operations.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/pruneOnStartup.ts": {
+    "sha256": "02ca4e48499483bed8069f5c9152b59c0531df30ec6c0a1f9b9b16fa33f4c8b1",
+    "evidence": "session-operations.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionActions.test.ts": {
+    "sha256": "bbaf0ce70bc3b6df139d7b6be93554c46e16700ed9f0482b78173c297dd3917d",
+    "evidence": "session-operations.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/pruneOnStartup.test.ts": {
+    "sha256": "9e83634d6468cf47472acc6c05ab775af2f803c4080b3b53deadee081449e00c",
+    "evidence": "session-operations.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/argvBuilder.ts": {
+    "sha256": "7b371554164e633e0ed57c59e5495a1553764f5348d56b4f3bf320ef3fe1cfee",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/argvBuilder.ts": {
+    "sha256": "7637a1a05bb997426f700383d9ee5b243d5e9eec28ac1961eda7d95c11bd352a",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/argvBuilder.test.ts": {
+    "sha256": "ebeb2361fa2157604dd5bdde2c7fd5b999dec4df77fef4c20a991e69793055ff",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeArgvBuilder.test.ts": {
+    "sha256": "b792e9b0275b4af1317b87241f08265d615913b99362233f3196a09a70d582e1",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/accountActions.ts": {
+    "sha256": "6f2bf030c98bf217cc6568815beb728a51827903b0b78a6effa2e73dbb96dbd1",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/authActions.ts": {
+    "sha256": "22f29e0ba550452840586a507741210c08c23354584d5730af18413686aff55d",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexAccountActions.test.ts": {
+    "sha256": "83401ba666d73affad9945fe90589d306ac0fb51a0fdc6ae5ede5d286cbb4472",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeAuthActions.test.ts": {
+    "sha256": "9eec50aa5eca22b411164c390f99cbe25d4ad0f20ed50ca4995a0e8497a32141",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/settingsJson.ts": {
+    "sha256": "e42cd15405ccf14ba17525e5cdd98102909791a1e4ce8e8e736daf814fcc2704",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeSettingsJson.test.ts": {
+    "sha256": "3d7e065a5c59517376290784e8e59a5a0e284e4befbf633ae85e3bccf62b8f97",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/sessionNames.ts": {
+    "sha256": "4dd0d280bc71e3ad515e5462c4fcf38ad9a8573c1784b3ebed6f519363fde0d9",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeSessionNames.test.ts": {
+    "sha256": "a94e72bc54c625f2ad17d2eacd953072e0fee00faaa2abcdb0c256ce222548ff",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/transcriptWatcher.ts": {
+    "sha256": "ab2d348f46e69553cc944c6576b5dc5d15000ecc364333b94ccc04d789506ac7",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/skillDisable.ts": {
+    "sha256": "ad23977f0c76ea7002b04fd8a4373087f9112fd4d4ab01281303f6baf3fda434",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/skillsList.ts": {
+    "sha256": "8bd258b299b875d0f723021fd37c561f02e4997a3a8e6d04b8a3663b7c0f12b0",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/skillsList.test.ts": {
+    "sha256": "c9e56236471907fdd640cd54eadc35784693dfe10342788c58f5e2b252cda6a0",
+    "evidence": "provider-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/process/commandRunner.ts": {
+    "sha256": "02b5f08ee3363cc7b9147eef17d581afb10c4c496c3e47ded9a7564d7a8a7f41",
+    "evidence": "process.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/process/childProcess.ts": {
+    "sha256": "dbf394f2f3326270964c3b5feb4e1f89bf8533101692853ed96d8bfb3c5958bb",
+    "evidence": "process.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/process/stdinSafety.ts": {
+    "sha256": "84c515359969db20551457b0b9ff1ae305613e012c9cb22ca82bb07072105bb2",
+    "evidence": "process.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/helpers/fakeChildProcess.ts": {
+    "sha256": "d7cf680a1f35fd9bd2dc7d1f40beb8a07df119279d228a53eed975011e5f3e4c",
+    "evidence": "process.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/childProcess.test.ts": {
+    "sha256": "fc07ee21026f59bd485e0b84f43208ec100fcc1092d7e212fc04e9f7cb03d308",
+    "evidence": "process.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/stdinSafety.test.ts": {
+    "sha256": "e9c13a053fee3e5360edb738022508f3f6fd5bc96ce842668ff8ee8b9c5064e9",
+    "evidence": "process.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "scripts/check.sh": {
+    "sha256": "ec7f2e1c40b305eb9ec177893326f692af7f1ac47ecf5c822cb0941af0685656",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "scripts/count-manual-test-cases.mjs": {
+    "sha256": "5f93f2da6791e06e167c6705d40303fe06aac250face04aa12257c1685550c84",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "scripts/run-external-cli-tests.mjs": {
+    "sha256": "ad0a92702dfb34060105c734275530174a76619cc1bd25d2eb7740474b97f05d",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "scripts/xvfb-vscode-test.sh": {
+    "sha256": "d4b38205736b00eac83809465d68372adb397e32d80f803d5df7d33214794908",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  ".vscode-test.mjs": {
+    "sha256": "0888c3803d7496a1d3955ed94d93377f1c194d45c23a6a8f999b7ab11a832bcf",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "eslint.config.mjs": {
+    "sha256": "9f3cc3e79a025ac1cddecd0120c20d68bcad1eeb8ca98f82dc9fbdc0954369c4",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "vitest.config.ts": {
+    "sha256": "073d5671612931f59387d3dc021b87170587a77317b0ea2fa13be12f8287dabc",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/eslintConfig.test.ts": {
+    "sha256": "b35bf08c635b439ba827eae05ebac3d01c388002eb25ede9a7ed6616dfaa5ef7",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/external-cli/threadStart.test.mjs": {
+    "sha256": "a459601963fda51d926cd1e032df42ca27be487098c256ff52d2271063f2e89a",
+    "evidence": "test-infrastructure.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/fixtures/setup.mjs": {
+    "sha256": "8f4d5754a4545209a60e7aebdcdbf2c33c20e0c295ef542d1e4567a13c4d7d27",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/fixtures/setup.d.mts": {
+    "sha256": "46958bfb5d9e8742f16e8d0aed2f0fa2cd283f9c78f069833a299fac2ee3ef12",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/integrationFixtureGuards.test.ts": {
+    "sha256": "bb527eb3e363f120b8227a1ea7ccdf0090455b7530f9c393a30ed35c516a0078",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/integrationFixturesRoot.test.ts": {
+    "sha256": "30e46db593df26fb1e991613a3a52ee16ab1a2f933acc7137f4f7d5a2fe4a3ed",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/waitFor.ts": {
+    "sha256": "59c4c7bac655560031a607354805803feb5bcbed20eb83fee5ce804060bb8719",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/sessionTree.ts": {
+    "sha256": "fdce5155455e613457741ef162b6443cea7680440ac86efcf4afbfafcda6af22",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/manifest.ts": {
+    "sha256": "255df1d72846504e269a6d783b1be535c53256812b955847d48daf4a0c893f39",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/extension.test.ts": {
+    "sha256": "a9adcfbd980760e3b1f04dfd8a192d98e56170a37c395c42ee8978234d1ca687",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/integration-testing.md": {
+    "sha256": "891d846918ab302c62aaa417435fdbedcc6263c2e727cf1dea17f8daab6d0bbc",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/manual-test-2026-08-10.md": {
+    "sha256": "7a474e38571932403d326795fd326f6708d8717330a9a4b6b0e255dd707f6e4b",
+    "evidence": "integration-fixtures.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/ndjson.ts": {
+    "sha256": "281c4a5aa26a4d560c78193a0d047bd02a23f103058f49d959306de4e6ce9bf6",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/ndjson.test.ts": {
+    "sha256": "10ae0897d734412c4362dbdc257cea30aca7d330424b04c535f03ce54f340885",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/dateBucket.ts": {
+    "sha256": "809eaedf4535eb67b470458e6e49f29b735444a2308f207d78c2fa2e7e59d10d",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/dateBucket.test.ts": {
+    "sha256": "638ea4aa96c1000a507594305fc0dfc851f485ae5a257a586c8ba5cca9582f74",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/sideQuestion.ts": {
+    "sha256": "74511efd404e9d3da53e6eb26a8e2c04cb99e1bd7e5378f3d8ad46d242d785a1",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sideQuestion.test.ts": {
+    "sha256": "cfad7aa07a53196f7494f78240b9bb6905972d10fbeef1e95180f0e292f85391",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/chatCsp.ts": {
+    "sha256": "498180fb8b0baf7810ebc643bbd54b5d9c68d3432e7d6eaf5c63b1dc8e9d9f09",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatCsp.test.ts": {
+    "sha256": "4968525c68b519dfd330e05e460e3585bfceafbb1b389294f5e99a6355ebf9cc",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/approvalPending.ts": {
+    "sha256": "c919fe34694c21e26046d01a4ed5f7343ca1730edbb16ff31f21e45bb81a206d",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/approvalPending.test.ts": {
+    "sha256": "fb9b31d7ff88c9f288ff1112809f686c017ef51c567ab1aa9cc01814adba1096",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/turnSummary.ts": {
+    "sha256": "dcbe930cfd9a56565d2b5902c2a29ae2bec4484d9c74498ab72dd56760cd9f5a",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/turnSummary.test.ts": {
+    "sha256": "7229da26620aca3c9ae5728acb0b8f079679041e673a3de4881ecd8a4e413e1e",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/costText.ts": {
+    "sha256": "cf780dfa0516b8af87ebb2f7018d7fa008f215f9285f9cfa5d3cc11c1644385a",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeCostText.test.ts": {
+    "sha256": "bab50dbc89adbbf667c924c2ff0bbe0dd5674ace90e7efafd7c8aef5cb73c5f3",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/autocompactText.ts": {
+    "sha256": "ec08b9089e91de4a4d58c9fa4d04fa3ca647b76bb6f5a3be7210ad8a681e7878",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeAutocompactText.test.ts": {
+    "sha256": "a10fc1c0e30cf721fc461f83624bed4324900524d526d1c3959fb0a646c84c94",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/usageText.ts": {
+    "sha256": "7b56853d7827fed61876b7440bf9783266bfe235fef65c440c6d70f6872187cb",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeUsageText.test.ts": {
+    "sha256": "0df1e125ea4bf1b8a9083aa33fff72e970bf96783b64a3f99dfe5f855f0d0590",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/turnFocus.ts": {
+    "sha256": "eceb274786e6d62acfd70c049e2167fc9d96fffc7f1f604c5fba77c60bd03e24",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/turnFocus.test.ts": {
+    "sha256": "0dbb8a00c61354e2386614042d64f548187d6ff8df1bf98d5610013451f31212",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/stallDetector.ts": {
+    "sha256": "529a3daa772925ba76f9e0f0bd262570309dabc44c83cbf489565416b3b415f1",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/stallDetector.test.ts": {
+    "sha256": "4c6d5decd7657908f1d2061cb4d321c6ef9508721c88d7384498821fff419ed6",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/taskSummary.ts": {
+    "sha256": "330688451f7691ad5d2db6af01ca4abc1b25b1e3ce589f170bc1069c120b51a0",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/taskSummary.test.ts": {
+    "sha256": "d86b151e9d8002660a8bb1f8136e1a7176dd9f9c3cdc6a7bf88c169ac3ee23f3",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/editorSelection.ts": {
+    "sha256": "9a322277aa168bc2b6de81b84c722a0c91e6c8a154f1f7ae384bd1640b344b66",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/editorSelection.test.ts": {
+    "sha256": "4e1fc164c8540d9b920520b8b382b27737aba0be92d5568827fdfffe49a34852",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/approvalStatusBar.ts": {
+    "sha256": "abbeb48eb89f66abdadf46860c24eee41b49b46f895c169720b4489355c19b4c",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/approvalStatusBar.test.ts": {
+    "sha256": "a397e11c9e824c797214e754242122bbefde4296bdb0eff8d1aa3b419de0e405",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sessionActivity.ts": {
+    "sha256": "cc65370f3f1b8c7872f0c53da22b795b52fff8caf4b450d86b141e35b1fb37a1",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionActivity.test.ts": {
+    "sha256": "25cd5b473cce6d9e4b13b714f56bb4c68cc5b5075b0502c3432f0b3a623d43cd",
+    "evidence": "pure-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/mcpServers.ts": {
+    "sha256": "7d0e7b2ab161add1507864f044d26e6c917ef059097ac1aeb0d3deb19dfdbef4",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/mcpServers.test.ts": {
+    "sha256": "015cb9dadafa3fac41f98c9a762ae9a74f002e953dc4ec487db03ec1375117a3",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/skills.ts": {
+    "sha256": "4bbfed409ccc9ce7159e5f3b5910a0cb03f4090cc4a9184758e3acfb79dc0150",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/skillsProvider.test.ts": {
+    "sha256": "54f0248174414a71250221879a721b4014075522d7425b8b3c463e27a91d4503",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/mcpDisable.ts": {
+    "sha256": "08d1031dd57046af9ce09967b5ce52c32326415d81a995a135126ef56b79bc1a",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/mcpDisable.test.ts": {
+    "sha256": "177a2be40f2ce685ef4455bc65e45c37f18f8112e8a4eaef0b57c34cb3a770d7",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/mcpStatus.ts": {
+    "sha256": "e4e2686439e7ab87c6275e2c006e188984a606f7cda4f1f9f4f0a2d64dc93be6",
+    "evidence": "mcp-skills.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexMcpStatus.test.ts": {
+    "sha256": "db1a69037182b584cf5cce35204fdfcf37ddac1ca78b7415c2177835d67f2b67",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/skillsStatus.ts": {
+    "sha256": "b60e6aa1e502ee935fac72c4428525183397cb88b1ec58fe0c2fb18cbf48c444",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexSkillsStatus.test.ts": {
+    "sha256": "2fac99ca8906a092d0b88419810f5c49b21988b5196fe04396e46af9c846415a",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/skillsList.ts": {
+    "sha256": "ff26388b1cda348d94ab9679c3a876ce9b3c7bd105731e3cfde5fa7e881b585a",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeSkillsList.test.ts": {
+    "sha256": "a964feb468d414886c3ca41ba776c94e0f20c4a84a534f1f39e73ddc5dc14dfb",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/authStatus.ts": {
+    "sha256": "f1156a18de33131f6e1b45b46ebbe506c51a25ac5ed9dda6b24204e8d281caed",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeAuthStatus.test.ts": {
+    "sha256": "9a8ad2bc3ba3ca56dd760f9d78539fa430c0c98a9cc5b7bbfcfccb49209d1d8f",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/accountStatus.ts": {
+    "sha256": "3df95b92e32fa4be2a98aa37325963d53aac5f19caa01eb923af89cb74c54258",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexAccountStatus.test.ts": {
+    "sha256": "e8e89f04bad1e69f742b8df135a078e4af86e80668fdb5c8ebbf8dd30b4adedd",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/provider.ts": {
+    "sha256": "e5e9f033527d330830a4854bc2ba4c6da98c637e04287f5676f2f79a7fe121aa",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/provider.ts": {
+    "sha256": "78c75d90beaa00bdaa6ec972cbaddb62d95352df2bedfe9fc9cab160799aa327",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/authProbe.ts": {
+    "sha256": "facc051326151d1ebb93ab335178d68ea9ddea85b04fb9e62ca9350205a92576",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/usageProbe.ts": {
+    "sha256": "ca4791e355f230150296a05919b706ff188828cd52fae06e749eff5dbd431dac",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/modelProbe.ts": {
+    "sha256": "1f396b85ea0ad0a64f4604ac04581c847d11140dd48498fe2e130db62330a4c5",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeModelProbe.test.ts": {
+    "sha256": "12c99070ce490325e71bfc8cfdbd2186737bc6698f28fc6bb1362ec3b4a965e4",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/agentProbe.ts": {
+    "sha256": "b9721aa39f86f938bbea3b86534627d5e68af81e2eef8bb1cfa6b165622d0533",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeAgentProbe.test.ts": {
+    "sha256": "cb74fa4a888993d1ece440f603756a0f8c775aeb2d7e4160646bde56c214c94b",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/mcpProbe.ts": {
+    "sha256": "87d86fb9443066ab6e0f3bad1c334d7ca6ffb358211aba94d88e61b0a07294ef",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/skillsProbe.ts": {
+    "sha256": "d18660aaa74d6e916a193a8e8620e33e6ab3bfe2fa1238de344f445c3b013d52",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/hooksProbe.ts": {
+    "sha256": "21d44df5be7c6299ea057d46a009ac5282e0e3c3661cdb3674be413daa425897",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/pluginsProbe.ts": {
+    "sha256": "274d5c0a1cf6cbde66a058c736912c366f88a911c192c52f7d6c9924cbdde626",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/pluginsActions.ts": {
+    "sha256": "414986c01ae138a3ab3dd0da6b08e9df9c432c3f322e7bf488d66170a3c26bad",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudePluginsActions.test.ts": {
+    "sha256": "31c98c2f21092dc326060dcc6a683444f40112756549bf580c173143751ec810",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/plugins.ts": {
+    "sha256": "6db4655ebdc2c5b802c0d0ffcc844fc61564ee31b70c42f3d192d41f15c427f5",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/pluginsProvider.test.ts": {
+    "sha256": "10823be7b78fdd687ed0f4f23db49312cc41381767b287f4dfd453a7f655297a",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/hooks.ts": {
+    "sha256": "3392318c30caf362db9459e9ba4c8ffa3ca41f4670a212d2344afa559e4e5de3",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/hooksProvider.test.ts": {
+    "sha256": "87ca06ad08e0811ec7523a021783b59a842eb129b05ca6c3fa6094419115a800",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/hooksSettings.ts": {
+    "sha256": "9416b5e73255675fad42cc05b06e23a40fa62cdb7472beef6fd7856dda46c77a",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeHooksSettings.test.ts": {
+    "sha256": "8214309d72c4649e1a7260301a2a000beae73ed1ebd8dc4016b40b49cfeb480a",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/hooksStatus.ts": {
+    "sha256": "6fb818d40fec780d94cb71e4a91c81c8d93c4848c007e8d807c6ce37db4b7fc6",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexHooksStatus.test.ts": {
+    "sha256": "7af0b1cf98bec1d334fe933038173cafc2ce9f42502cf2c9c06684ab74e870de",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/pluginsList.ts": {
+    "sha256": "811d7070826d5f4c04f78f084664669747202d53bac48a6e6fa1ae487f609e79",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudePluginsList.test.ts": {
+    "sha256": "fe94a7b9363e971c60e57b9a51a65e20c64c031ba4f8a0260d5fb7900d8c57c3",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/pluginsStatus.ts": {
+    "sha256": "65a14e2af4ed17a68cf55dceb2dd4b6502197911f67d9a7d6e16fcced59e83a8",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexPluginsStatus.test.ts": {
+    "sha256": "11c82dfe1246a6d55136b7c1de05c45e50858cad0fd1bdf04d767fc22c461780",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/appsStatus.ts": {
+    "sha256": "0fcdf9401a5e33e420a21e4f27fda409858979181ede80130f8f105e84355447",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexAppsStatus.test.ts": {
+    "sha256": "af30fff240216d465d0c8714c2c4969f77914e2629eb872558a29518a79ecda3",
+    "evidence": "catalogs.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/import.ts": {
+    "sha256": "cbc8645785a4326a3f70dca556784ff5595211ab8340446360a9e310449fba7d",
+    "evidence": "import.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/importStatus.ts": {
+    "sha256": "6e9776fa048409576c89d8e8e1c4f9e94e4da4fbc44feceb0b23bc7aae221341",
+    "evidence": "import.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/importProvider.test.ts": {
+    "sha256": "d6e26deb8b32e923db5fc24bc9e33a55bb4f9d222fed1c3783b82d64b0aa9d4f",
+    "evidence": "import.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/codexImportStatus.test.ts": {
+    "sha256": "6b869b02e9ae0b03988b88007fe5b5b4620239bb12fdc72b3016606a7cd84709",
+    "evidence": "import.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/ports.ts": {
+    "sha256": "2a230ad3023ae4ffd30a9e34080031aae3b0d63aed223e6e75b1e269cfb07fbb",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/nodeFileScan.ts": {
+    "sha256": "301f8b4d963f32e19ec41eafc5d1100ed59673cea6183647ec52ec1e4604dc16",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/nodeFileSystem.ts": {
+    "sha256": "d5a679233c78b59e8bcf4125fc018be5c0fbe21df68b6b91a65ed19bd7d0b63e",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/sessionWatcher.ts": {
+    "sha256": "4199d911e04e6ee516ccbc183f749fe3c9f8ccb753772613c0c212454be5fd95",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/usageReader.ts": {
+    "sha256": "920b5a40b9614115e080e8330fb5cb92a9c4d593cc0d9b89ed4c68ade1d976b0",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/session/sessionStore.ts": {
+    "sha256": "8f6ab95d77791db3c15999fc1eca93437f9ef6555eed8af0c346d38fd87c7daa",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/sessionStore.ts": {
+    "sha256": "72744ac0c9b8cbcf675f2293a072c27b4f5f979e768f5d029f9e163be95b15c1",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/sessionIndex.ts": {
+    "sha256": "5a1dfd8fc16f4e4146116e9075f3a6acace7c4d3bf053309ade1366b493132b5",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/sessionIndex.ts": {
+    "sha256": "f98d96c1b9df586d02e07183fdbeda957725eb1f6ffb52a7f811ca66d149c307",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/sessionMeta.ts": {
+    "sha256": "625cf5475135885e5561dd0efb4a9dfce614567d7d647d0dfb6ce471317be250",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/types.ts": {
+    "sha256": "02bb7cab505bad3ffed5327153a8b0bde4f1fb2f503ced1dfc66760f3332b9e7",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/types.ts": {
+    "sha256": "105f8e7853bc40286c5ea32bc09ad9da83000a29ea2d298b1b4d9bf5cc6e5473",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/nodeFileScan.test.ts": {
+    "sha256": "f20ff03e08ac0d6df22677ac1ba75909c77f46da31fb7463d35af34b7a696d06",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionIndex.test.ts": {
+    "sha256": "d1ed7a0b7a6dc2775ceddf50d6fc824a89ca2d27643a656f9ba48ef5b3fbae21",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionMeta.test.ts": {
+    "sha256": "9560284cd999af2a80f1cfc06ab1e58713beeb98a4293acada79989ccb28ed71",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionStore.test.ts": {
+    "sha256": "c364bf9d460db437ee1db892fa2877a133822341fa345f434b295544db000443",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeSessionStore.test.ts": {
+    "sha256": "690971a03dd219f1fd36c30025c7cb511db50b071efa7a6ec37f3b6badf1bbeb",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/usageReader.test.ts": {
+    "sha256": "fd7991cfa66c07934955536e9fb0955f0f29858dc649cf7f4016ebdc843c1c75",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/nodeMemoryFileSystem.test.ts": {
+    "sha256": "4b3ac3946a11b51962fdde042076cdf229c9ccb969fcac51e8b14faa42b2b405",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/conversation.ts": {
+    "sha256": "c24df340574c1177a9f957d4f4e4290b19e6e17825abd209a8a8fb9439c386f0",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/threadList.ts": {
+    "sha256": "606b0c4600ba1419a80f8e0243ccfa47fc4f95b7bb9068da6ca656d86de4b7b8",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/transcript.ts": {
+    "sha256": "25c811dd7ae7e624bd3246dbc1b8c6400c7765de3250f724997d18c5dd4d593d",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/conversation.test.ts": {
+    "sha256": "ab6b7a9a1f6242ba41c3c35eac29f5fabab60357ee423564e5a4dc76287d1ef9",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/threadList.test.ts": {
+    "sha256": "ffa4e5bfd90e6ff1d2c3ad296f3120354e63e88b6cb086f6a64081a9018ef396",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeTranscript.test.ts": {
+    "sha256": "c32fa441083e4806fa2b0f0a5d16884fcc9ee132ae0abe142213cd234a55cb0a",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/conversationView.ts": {
+    "sha256": "451eb63d3ba33eb118ed7d5330f971467fdb131f24940fc6f9649f0c0e7dffc7",
+    "evidence": "history.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/cliLocator.ts": {
+    "sha256": "c391476034b61525598772da7d975f28b827260c21e4ab8087cf9167bfd36823",
+    "evidence": "locators.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/cliLocator.ts": {
+    "sha256": "fedd70bc8e30acb3a9b30b91de8cd42e324e40d4e06114644bdde61d04236ebd",
+    "evidence": "locators.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/executableResolution.ts": {
+    "sha256": "d3738447d4434b5b532c3440337da7fc02466064c3f2e1d80ac7aa971a889308",
+    "evidence": "locators.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/cliLocator.test.ts": {
+    "sha256": "d8fcf5e13d841e6ccb282f9fc8795ea2b37c6c86b957ceea28cadda787139590",
+    "evidence": "locators.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeLocator.test.ts": {
+    "sha256": "e64ecf57f4112d37d5bbbd71d00cebe077805540a64ebc5e9bb94c8e9463d0d6",
+    "evidence": "locators.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/executableResolution.test.ts": {
+    "sha256": "5dc667f695e046a7b38f89ea123adce6929978fe921a55f09dcb52c302a90e7b",
+    "evidence": "locators.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/commandCatalog.ts": {
+    "sha256": "48919312e6de475e764c8b1a918ec798872d6673a04dfb8768c325ff78b60c80",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/slashCommands.ts": {
+    "sha256": "030a8bb5d724afea43b450c39eb5342df88810813de7c938c13d25537345714e",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/pseudoCommands.ts": {
+    "sha256": "c955966c8d6a728c4aaa364b0f7cac6ca866fafabb2f0b7e2b287711bcb92128",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/inputModes.ts": {
+    "sha256": "ee36f8f9a687bc37b031e376450de3d2473af0dcdf45e76dab780cad78b2d240",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/fileMentions.ts": {
+    "sha256": "96596c7e3503678676928ef1e0506b7e0448b1caeeb2baa37b1a7dba9738059a",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/attachments.ts": {
+    "sha256": "ba6bf5a51ebc7548df37568a0e3b2a79d2814176f48c4f82cdef515b8080e2b7",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/imageRefs.ts": {
+    "sha256": "5e30ade5cb541be69eb9d8e97ecaa7d0d0b2f0e0a9257d161cf6bd180777b421",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/commandCatalog.test.ts": {
+    "sha256": "ed96d74afbf7e565788b6732a2031b8d418c898e42737fe1461bbe0f9b391ad1",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/slashCommands.test.ts": {
+    "sha256": "6dd33bd0ea116357df7411a0e9135fff5570ea30fe9c15a12365ecf74852a670",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/pseudoCommands.test.ts": {
+    "sha256": "0d38cc57e44a10fa59f3504c816aeb969aaa2e36591e012fc65df73bec6143d7",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/inputModes.test.ts": {
+    "sha256": "bfbcd81c03162b42d582bb9a07e7edc8d696d70cb689bf4ac6376baf23143cc2",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/fileMentions.test.ts": {
+    "sha256": "34c2ac2d64c842c25359137f5f38435d9191eeccf312f766ea4c1749388a4a19",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/attachments.test.ts": {
+    "sha256": "b39f1fdb7ea45602993f73f69227cd8ec1b6541fe3a5ccf8220d9aecc4bf8a7f",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/imageReply.test.ts": {
+    "sha256": "6f4e609791d2bc21fa9afcd80cc26abba7378a0ac6299296962fe0a29e601d95",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/argumentHint.test.ts": {
+    "sha256": "1a8859c5eac3da4f39b242a438e8d9a70082238bee2a20f7b04875e1410e0876",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatImages.test.ts": {
+    "sha256": "1d07c0a30bf2b0df440fbeed05884a336202495ac66760d3ac8210ec231158eb",
+    "evidence": "input-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/provider/approvalLevel.ts": {
+    "sha256": "2dabb464fa6116dcceb198a6641de27f2bd9dbb965a19b1179159e54dd852b3f",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/sandboxPolicy.ts": {
+    "sha256": "43caea8277a58db9dae19851c09659b840760895489085c4d00523a2375ea19b",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/safetyClamp.ts": {
+    "sha256": "23686a1a02fd3c357a2a9f74c4615ec66c164f6a567e43b1f4224cccc75719a6",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/configToml.ts": {
+    "sha256": "b1df90d1e88672450fe5d3664ef90bbff80ff67388b6140bc7f8dd31a5c6d915",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/jsonRpc.ts": {
+    "sha256": "94b70065f0676edb84beffd887f85468d93fe5f60da00e3405d9843a30942aaf",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/connection.ts": {
+    "sha256": "035a923967f8063ccc15c50591c113a0345fca5d4d73cea1a8775742289d5f8b",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/approvals.ts": {
+    "sha256": "ba0200d289962f953d7b4fdb574220fe23ccc40d60a16086b513f1fbc610d444",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/autoApprovalReview.ts": {
+    "sha256": "dfc6fa93a7d2eb785dedf25916e578bd4c1aa710ed07a6b507cd00e4bbf76865",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/prompts.ts": {
+    "sha256": "16a280f429b1caba20d4b3339d2c35cb0b885c262a5c50aa997228fbf0f1da0a",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/askUserQuestion.ts": {
+    "sha256": "d02c6f9f88e816060562684ac9c296c7d6a94a6d9b84767cfd49898d0aa635f7",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/approvalLevel.test.ts": {
+    "sha256": "f5992ff0c3ee21c032969121f9ab0e67ccf4f07211d33de8b5a4a0af687c98f7",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sandboxPolicy.test.ts": {
+    "sha256": "dc34485bd2f65752d58201045093e8bb347cb1f7d8e28732d52389e2461913ad",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/safetyClamp.test.ts": {
+    "sha256": "49c18b72a5790371d4f5c43e847bc4de7de9cd633040868ab4c27f28bd17992d",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/configToml.test.ts": {
+    "sha256": "138d69f24fb5e5bc9ca60d7db5ea2763679780c4904bd7a58cf42241725f1156",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/jsonRpc.test.ts": {
+    "sha256": "0dd8e60a83894719f02f9f0277b6503216a1c831811a457c627685b7beea79b5",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/connection.test.ts": {
+    "sha256": "934d42dca64f887dcd4efdc2678f2b6279e83c31247fab572b2ef97f629d7165",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/approvals.test.ts": {
+    "sha256": "8702cef502d263353821bd51a533c0eed41a278e4fc205bd1741e8d44a07d4e3",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/autoApprovalReview.test.ts": {
+    "sha256": "89b04cff2779c2a7e371d7bb78b27c01844810b4c87352ee94ea0b8c9226c4e4",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/prompts.test.ts": {
+    "sha256": "f67adde4055994c3a1ef54139da1ac4c2208f5e59fd596a2e4738bb2ce0e7ab9",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/askUserQuestion.test.ts": {
+    "sha256": "8954267313dce5c306794024d4b3778ffbd5f1410440f34f380b3473b1475eff",
+    "evidence": "approval-transport.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/appServerClient.ts": {
+    "sha256": "3d3334b7b55a5fec531e00daa9b04768012cae1da15c91579dae71f8f9d51183",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/appServerClientRobustness.test.ts": {
+    "sha256": "c3e576fd7c04dfa3447e80ec06170d085d5c1b29a778eac71f6f9abfaf0fd78d",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/modelCatalog.ts": {
+    "sha256": "7a681d976d3162c5c8ac6ca88a199de9d64657e56eba02c2226e7311fc01b07c",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/modelCatalog.test.ts": {
+    "sha256": "b46e99aeea8ba277f2470fd2e8a6f9d91c06b28b76b06954760066c48243a0a0",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/usage.ts": {
+    "sha256": "cdfef9f182267f5101e0dbd4f78561c501451e2b1e671829512c0db8f865006c",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/usage.test.ts": {
+    "sha256": "01a76b454915ff781a9300b0f5f53ad51129091931c9f564748afdb91c415517",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/rateLimitsRead.test.ts": {
+    "sha256": "65f4e76782a7f86082cea46a54d13198d200fc5af67f8b93f4d87fed366687cf",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/sessionModelSettings.ts": {
+    "sha256": "86515b2be64569bc7e61d1b5c6e9bc995e4ab86a84629a43202d240593caeb88",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionModelSettings.test.ts": {
+    "sha256": "78bfba97739d9f786886b3ea466a06da49305bb27e55fb6923d03be0b25e996f",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/planMode.ts": {
+    "sha256": "7f4e965f7c4e2b0565a188368f8b2a3e0af07796186cb33dcb2e2e970abae7c4",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/planMode.test.ts": {
+    "sha256": "22a160b745617d2b6fed552092673f2585b10b6de5edbf935e9902c5cfe1070a",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/codex/reviewTarget.ts": {
+    "sha256": "470e90ba9262c8337b3f5219302baf33d4b3874691aa5ec83cb2add5ce84e626",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/reviewTarget.test.ts": {
+    "sha256": "95237984f92562e50cbfb536fa9b9b602de71e92a5304ece09329c2c51e0fbcf",
+    "evidence": "codex-requests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/chatSession.ts": {
+    "sha256": "15cb31aa710a543fa56e94016d30f49782de934a236c2fed30c97f5ab5e0d114",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatSessionRecap.test.ts": {
+    "sha256": "3f0834f88aa18495ff4526d971800794787c98f20109645bce9fc08e8af3775e",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatReview.test.ts": {
+    "sha256": "9915d1c4e101bdca3462bc23a525e12b97c4ed32162cfd7f2d8e9bec6dddcde6",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatSideQuestion.test.ts": {
+    "sha256": "e80d15620b6bc733ed7e125dd1a655cab808cb20d08d5dfd2d763f2ace6f26ce",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatSessionSendOrQueue.test.ts": {
+    "sha256": "f653da091cfbb5246ccffcf9a481cce7a19a955f8e205587a85c01b44f8be6d7",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatQueue.test.ts": {
+    "sha256": "f09987eef39a1c05075456494e35a68db2405401d8f072d837e6446c14ed840e",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatSessionInterrupt.test.ts": {
+    "sha256": "8c7969f49285a09bd1082077b8fe1b5aa7fd3eea1bbcbdd216c96f84be823cbf",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatSessionConnectionLost.test.ts": {
+    "sha256": "1f07d1af9cf1e11ef1086c23e44b0db0b0910861ea64a4e4ff2c7357d56f3e8f",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatApprovalsReviewer.test.ts": {
+    "sha256": "a113f9e84d8f4730fd02deaafd55cdd9e9d09214ffe62995f23dd3cf23034123",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatBypassSandbox.test.ts": {
+    "sha256": "4f0995747a7c07748ab897c0b6ac0ea9bfb3c269338f697696e1f0f060392f67",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/chatState.ts": {
+    "sha256": "cd99da757a2626a3f9f913d5bc1091193ff54976620373da78a5f5ff7354cb40",
+    "evidence": "chat-state.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatState.test.ts": {
+    "sha256": "b953836012530f04a0f1de691a683425fa34760f9f4e26ed9ed442b83482e443",
+    "evidence": "chat-state.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/transcriptMarkdown.ts": {
+    "sha256": "7ef499912f39110ebec890c4f7d8e89087fcce65ab9e3f7512e171bdc2f8bcf1",
+    "evidence": "transcript-rewind.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/transcriptMarkdown.test.ts": {
+    "sha256": "66f9f517730e7a76ca8f6501bb2e5b218b861ece7698ec97b76df5336a93c160",
+    "evidence": "transcript-rewind.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/appserver/fileRewind.ts": {
+    "sha256": "595743e7fb404130b28e4326d4e73e0016bdbc2fd63af2904c51482f5d73d6ce",
+    "evidence": "transcript-rewind.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/fileRewind.test.ts": {
+    "sha256": "a44fd5f5f61ff0ac464af8cd30c9ae76ac2eaed279fc1ee4dff9bb974a2cbed6",
+    "evidence": "transcript-rewind.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/stateDelta.ts": {
+    "sha256": "50abfc36c45f8f8c0c0edc88a28bc15d80fe367501de7ec431e0eedee654062e",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/stateDelta.test.ts": {
+    "sha256": "0aeb2fdcf3249499938687b8bed8e003bfdb94b09ca44e44c04985a9bf102b47",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/pendingStarts.ts": {
+    "sha256": "604a8ee1836857b05ca57189ae0a6b3858a0ffa5ece2fb3e28c2e153c2029961",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/pendingStarts.test.ts": {
+    "sha256": "01ee1cbbe260456a2389cce8432625d7467e4b9c9a597b6f82841847d01bda89",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/progressDelta.ts": {
+    "sha256": "da51501e89bed94ac0bec7580c982f4fe982e27d0464a53761edf9278e20efea",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/progressDelta.test.ts": {
+    "sha256": "6800df21e017ef83d3e0289d4269c71b4c1272e3562a1df646b596a3a4123e90",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/composerButtons.ts": {
+    "sha256": "f08d653863a44b7853801fabf24ffddd9d3343eba3e090d4be7f01123a29496e",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/composerButtons.test.ts": {
+    "sha256": "82e07355d6e6443e4abff0c2ab7f0a1ed0fcb085e86957a9bfed6f01272f9888",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/pinnedSessions.ts": {
+    "sha256": "c354a8150612d017eab2196760e96d4bfd09499dc46fa1797c3ca3dd0cc4d192",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/pinnedSessions.test.ts": {
+    "sha256": "f76f98f8f96303c2d2d808469d0f9b6c4f2767446b5c752c52d2d6b2c9d3976f",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/sessionGrouping.ts": {
+    "sha256": "1afb32dadf6794fd53f4169b47d021e4d8e38b397fe0b6510a6de9ea2cd83341",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionGrouping.test.ts": {
+    "sha256": "f486f3e2560b2252e7bd483308184ceeeea779b90d0a4c3c5d190e789aa4bfc1",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/paths.ts": {
+    "sha256": "93056dc196cef0b1b7b1989e329fa5708089154896db720b38074201fb84e31e",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workspacePath.test.ts": {
+    "sha256": "12be86acdd3211ce6527738dc7c98d39e2c670213087a4478331af7a0c6eebbe",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/diffWorkspacePath.ts": {
+    "sha256": "c84d0cb2f989d0309711d1ec886db988f4e964a92738cc67352862627470618f",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/diffWorkspacePath.test.ts": {
+    "sha256": "dd76c503bb59bf482d6af1d431e2deb767ddee09f47a3ad97290c811d1ff4caa",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatFileLinks.test.ts": {
+    "sha256": "3bfa0ae0403abad93a76091e6099fb37c90f016f80445c80a582d7d722377ec7",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sessionDecorations.ts": {
+    "sha256": "c2f68e6f5a19a97268ad3c06a8ea7bbb714c0c1bf1d98d04d90cce2233f59e6d",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionDecorations.test.ts": {
+    "sha256": "5231dd8ca2eee2bcdceff0546d394fe8e79c32a0bbef67e445369c0b07a52582",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sessionKanbanModel.ts": {
+    "sha256": "d7d790d1f9c326d21583918fcaac37bf81baa573e14cc5fb38f0db3e5a509745",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionKanbanModel.test.ts": {
+    "sha256": "7efc2ebc17f30ab87bb0a33641e21d1b3211506d3350789815fd4d068aa47177",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/log.ts": {
+    "sha256": "96b5729518e877c6f76788443c94eb59c50827350b6ef635cfe2e1e0af785e2c",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/log.test.ts": {
+    "sha256": "a0034aea427ba8d800919ccf3a2ac5e28911a0a6f39567f5afa8f1f6361dc7d9",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/usageStatusBar.ts": {
+    "sha256": "eac54e9cf892d9aa79dbc4b20f5fad9b47435e74f152a2a2ae2a609cd8442698",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/usageStatusBar.test.ts": {
+    "sha256": "4fd7ccf4d1280e6cd8100a3f10e5109d85f408eef4c0206daa7890d13fb363bd",
+    "evidence": "view-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/helpers/fakeAppServerConnection.ts": {
+    "sha256": "d2de5ea7d895054efe8e1b583b0a14e0fb7bdd9213c51c00b649145b5209f1ed",
+    "evidence": "chat-session.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/streamJson.ts": {
+    "sha256": "93bb52eb6cb4a50387753616c2d06426d2782cdbeeba0575afe0f038123dc5fb",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/streamSession.ts": {
+    "sha256": "08a4e34f35654c7f29f7f594d4fe713b3ec1548af8a6f5db5283295f8abc1cba",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/claude/sideQuestion.ts": {
+    "sha256": "f05ed3bb942d65e2b1d46b57e9d90d04eb1adf965945317bd2e4bb8c246f965e",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamJson.test.ts": {
+    "sha256": "6322a7ea267ded07d10b3e2145b2da9df20d08cea32e6246d31f80dbd201254d",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeSideQuestion.test.ts": {
+    "sha256": "9ce445f89786fde2c5e54e34bdcafcb76a054b530c29b21afcfd6fc33c1f1e9f",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionBackgroundTasks.test.ts": {
+    "sha256": "15ef0af13bb74144be60c75be690ea1060c36e744d123d383db8be2a126f9ffa",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionRecap.test.ts": {
+    "sha256": "2eee713e54d63762ceea240d70f372689cf85819a53c0e50a7fd3bb105a3b6a9",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionAutocompact.test.ts": {
+    "sha256": "806483510fe401594d8864c0db865b08f426809f4e2ac6a91349468612bb48f1",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionExitRelease.test.ts": {
+    "sha256": "f1a349300c488e66839582c355d3a3c3270d9457120c02b548044f5cd33332f0",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionMcpStatus.test.ts": {
+    "sha256": "c2b86268910d61cd964035d0822fe4f3fd57958984da3884a7023ce4eb056e78",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionBufferOverflow.test.ts": {
+    "sha256": "fc2a40242b370ccf051dc2388f64c0d34cdb18a41d41fa984232e420bbca0fa3",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionAskUserQuestion.test.ts": {
+    "sha256": "9bc1572025cd5a7f4b403bf17d7f2adca1e6f6f5aab1cea105c4689b2867fba4",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionApproval.test.ts": {
+    "sha256": "cee06e525bd560d430d0c9042c53d607b715ac5ab8d8ed9f1af311e1613c1b4a",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionDebug.test.ts": {
+    "sha256": "b5c718297017335f641f93d254da49bf56762a973e83040176fb6c07552a1efd",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionReloadSkills.test.ts": {
+    "sha256": "7346cb239c1ada2291ceca072b76b8dd8eb63043ec20750219992b0936671b8e",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionUsageCredits.test.ts": {
+    "sha256": "715e2c3bd2dea242d9cc1fb74b7cd47b02ab0b9b234ea797077370475fe4dfc3",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionSideQuestion.test.ts": {
+    "sha256": "698f1cfd0cf283c74b101336343e39626444015af6829e3eccbdff875ce7427e",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionImportConfig.test.ts": {
+    "sha256": "6613ddf0a8eb9a386c09a5fb29e2ac22db41ca08ff40e94b77e74afa4733f1fd",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionStaleProc.test.ts": {
+    "sha256": "dab03e5f417b6faaafb3aa7c608efbf9f9fa58be2ada123ce521f0279136a15c",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeStreamSessionRewind.test.ts": {
+    "sha256": "2248afac199b0cebc4455cdf5c33c5414ff62f45db202ad234cb0442e4999cc2",
+    "evidence": "claude-stream.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/taskConfig.ts": {
+    "sha256": "f61b5aedce632cae359dde51f81e339062b9b19cf52467764a4710c5b5118abf",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/taskSession.ts": {
+    "sha256": "9f0970e0b1a35b38dd6006842aeb56e3b1ef31a4b1d6e7eeb5d8338f5aa13b6e",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerInternals.ts": {
+    "sha256": "cd9ed7ff90c8438e2afc4e05a4fd0a4bad6eb2cb044c5f2d878f9fe6fbab4684",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerApproval.ts": {
+    "sha256": "90f56a08441caa6d388f1d2aa1d56d100e50534eed0f3e70f9c52a5a452f892f",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerReviewComments.ts": {
+    "sha256": "a5dacf702381d5456b458356ad837e0ba7766a93ab8e103a0295c909b32b0861",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/scheduler.ts": {
+    "sha256": "7836f71d23567f556e5110d3fca4245b01ca74bdfbc2845d0becc55aa274d5f0",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/programScheduler.ts": {
+    "sha256": "6715080fc47f9c8b02de716e7ba45c9414caa81eeba3e998100a35f679cfb2d2",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/programState.ts": {
+    "sha256": "18ff8a41b75c900772900546aba2a1529d6baa1af0a972fe53fd96f5189053fe",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/programStore.ts": {
+    "sha256": "65c9788b41d4646965ab23b2fc7db15b76a0a667f21c02f364a1b52cd271f12f",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/rolePresets.ts": {
+    "sha256": "feac0b184c44be4990f190e395cc0fe10ef8f960318ee715c3a3bd4b6a3e3cc7",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/fsGuards.ts": {
+    "sha256": "b6db0592fe7019bbbd50515cfdd97ce08f77cd4da4de30850c0a30498514ceb3",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/nodeHandoffFileSystem.ts": {
+    "sha256": "b9aedae9d3779dffa0fcf5e61d16e64f24af206435e029aa4d7d6beed620c6ed",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/untrustedText.ts": {
+    "sha256": "66f5512f25ce9635768837dabb2b51b39ee4d1fbaf7ccc239dcfa11fc05f7904",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/orchestratorSession.ts": {
+    "sha256": "7027e80f357b8539443858353b7b1ef02d4161d8d91149b381fea2c561c0c238",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/taskConfig.test.ts": {
+    "sha256": "8864f3ea60811b31be140a55d3ab6bb1c50aa0eaae217a1be0058578f4e7db33",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/scheduler.test.ts": {
+    "sha256": "b497ed06fbc2606ac4c833abb5258989d01de6b93e8d5f1648024eb1f21452b1",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/programScheduler.test.ts": {
+    "sha256": "0c997efd57cde2e78b6dd44a2b38982a2237871225b307d9f85679f7722b26dd",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/programState.test.ts": {
+    "sha256": "4f209fba2299c1379eb76136139a3afea9480b4578614fea38c5bee76004f702",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/programStore.test.ts": {
+    "sha256": "7e33b820a7d24b8f857a08bbd6722f8cdb60835c21a845495800284f6013549a",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/rolePresets.test.ts": {
+    "sha256": "0529585c049adf42cdc1b32ed4931abb1714ed59cc4038206821bdb5a8ff384a",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/fsGuards.test.ts": {
+    "sha256": "79a50a68c1a9145cf83e21a0f79848924618d6163d74e2f1b53daa47b76e3315",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/nodeHandoffFileSystem.test.ts": {
+    "sha256": "fa1150378249fb215353c53483f51b794389ef550d09e76bcf82d0024b028f9b",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/untrustedText.test.ts": {
+    "sha256": "fccb6f7c3f2c4a868b74b164701d78f266fba2c4f2573907a0f2caab52204336",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/orchestratorSession.test.ts": {
+    "sha256": "0757bc3fc9d4e990202b62d425dbbadc8efebcf9a83d039590322fc2514a3a3f",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/goalEvaluatorProcess.ts": {
+    "sha256": "590917dd452c4bba5bc9d6c4f99ee674654e474d47a382b731bd032771f056c4",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/loopAdvisorProcess.ts": {
+    "sha256": "6e6f72933c02b3ff1843bba83f21a993161011f729c4e4da7468503f7b231687",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/goalDraftProcess.ts": {
+    "sha256": "e142697b6858f8dad8f1b93b64f2cf809cebec13fd71fb5555d4da7455e63f9c",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/goalDraft.ts": {
+    "sha256": "1cc067f7a80a4505972eb99fbee991bc1064653d18009b3fde8cacacac01e58d",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/headlessCli.ts": {
+    "sha256": "1f95caa9c9e39dd1aa57aa6c3b9245d9a4bdf02282053731e47b4b2a8fcfd4ab",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/loopAdvisor.ts": {
+    "sha256": "02d821977b69fa6b22e4331b8bd522afe20b1282874252a7cc6a36722687703d",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/advisorPrompt.ts": {
+    "sha256": "d6d189989d1b8f156ed385b9f01f7126fd55e19a40f55ae692ca2e18093d13bb",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/goalLoop.ts": {
+    "sha256": "13ea95d69a0412c21087fc2321d434cdfd018d4132fcf4e217441fc0bd750041",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/loopEngineering.ts": {
+    "sha256": "59cc064b237d6e6eb9001f5dc64beb2f6083c15ad8a485965247902dc8e45cd1",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/goalPrompt.ts": {
+    "sha256": "7b2bc733265efccf22aa40c9a59567faafb24285007e0c6a1c8a369f818ca6e4",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/goalEvaluatorFactory.ts": {
+    "sha256": "8fda1c64ddb8103cf955efe988eea94a49e2da350a17e08dbdc91cfbe3aee4e6",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/goalDraftFactory.ts": {
+    "sha256": "b7a37f236c4159fe728b5fa0b0b7db7d1e865d51322f36c6edcbc3ab12cdec6e",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/loopAdvisorFactory.ts": {
+    "sha256": "23a50508ad3f9bffc42a625c08b96f5a65774ba72f027721001db2e829acfa58",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/goalDraft.test.ts": {
+    "sha256": "0e5886226818a92f1f451d7f42607aa252ac61c7405bc5864cd483e441ec7403",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/headlessCli.test.ts": {
+    "sha256": "988edb9615f72d88d3ce31a9b2ce29b1e5c38effe514d2a1e674c990f3111fcc",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/goalEvaluatorProcess.test.ts": {
+    "sha256": "8a21ac91d1975174fc7e1cfcb1d27817d2bcbdebc68990a50cc7eb28fb161284",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/loopAdvisor.test.ts": {
+    "sha256": "b981ff73efa7b4c11dd53a5b2b35fcbed431519a3bf4f0a3bb3b1acfa904d5e2",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/goalLoop.test.ts": {
+    "sha256": "0b2a8e0a7455aeae68bd9c4bb6b39c69c5c8dd37b0b859a29ab7d4cda666b341",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/loopAdvisorDisplay.test.ts": {
+    "sha256": "c01bd3252012ae605c108d9e5b0f41ee0721ec376fed8d82fd5bb937ceb1dafc",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/goalDraftReply.test.ts": {
+    "sha256": "c06e7ed3ea1f9a6452f4e08d40c05112bc13a0ed681f887c3efed295b367d309",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/loopEngineering.test.ts": {
+    "sha256": "155093e2217b9368d2861547c34f71941fb18b4cc5cb80117cee7bc31ae9e5e8",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/goalPrompt.test.ts": {
+    "sha256": "bb35a67f6c7b2aef915d221576d00332bfce46090036e100af166a473f277529",
+    "evidence": "loop-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/loop/loopController.ts": {
+    "sha256": "1cabc2896eaf41442081178443993306fed9c9ef9ebef85a19183c1d2d499615",
+    "evidence": "loop-controller.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/loopController.test.ts": {
+    "sha256": "c308f3c9ead19d14efcf5b80edcee92bf299fa0f19677f3ffd24a50072dec09b",
+    "evidence": "loop-controller.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/workflowEvaluation.ts": {
+    "sha256": "a0ceed0e85db043361c8d923a10d4d2890faa70c98060c071f7c83d4e9c85b13",
+    "evidence": "orchestrator-helpers.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/wait.ts": {
+    "sha256": "288f597f34c272353f3abe112b2c99a4d6b922929d15e4a88b0843827e4a800b",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/secondOpinionParent.ts": {
+    "sha256": "915d29d85a974c2865bafb4a4df87cd7c7420f2a606a5346afd02939d0397b88",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/handoff.ts": {
+    "sha256": "7527ec2a9874e89fe1d7c49a1cbcd691c64fee1b485ea2fb2082db78a14065fa",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/handoff.ts": {
+    "sha256": "2b63c1559c053c83ff202e95542adaea19c659c92023516c9dae1d9037f26c2c",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/redact.ts": {
+    "sha256": "dfca1344fd9a37dcbb274e627280a8c16a2f026e0026b010fd47fec287a4247b",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/redact.test.ts": {
+    "sha256": "c2df2d147f9da2348eb463b5bbdd95840c49328c1bd882d6b916ccde8ef11d0b",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionWait.test.ts": {
+    "sha256": "33720f418d0e121a6e68adf3661bc4f62d5d5a384fad32134350da892e0b677e",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionHandoff.test.ts": {
+    "sha256": "104079cdc49d136c62d923276ef2b3c46d376ee044bc86e81b158339841adf57",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/summaryRollout.ts": {
+    "sha256": "2c74039dd4c4275377fc3c83d8c4f29cbff7e871eeaf7d05a795bb6b76cb8078",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/summaryRollout.test.ts": {
+    "sha256": "8797529be3f06246cc1e750ade152fb955624464dfb4a70a1cccd1addf55964d",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/untracked.ts": {
+    "sha256": "0538dbc059f5633f5cb50755331dcf11e89ce0d7f51c76a38acfa4583d7c8f67",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/snapshot.ts": {
+    "sha256": "5374d7850391b15fa24cfcf3a85236f4d7a63fadbca80241a52b1a5193902584",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionUntracked.test.ts": {
+    "sha256": "3d4834c5abd679bcd665468ac92fa266f90d8d9adf5d57e5d3f66a67b2832d0c",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/candidates.ts": {
+    "sha256": "d19a3a448008a35e994a4ba8f3e176dd4d836f243aef3ecee20d46dcae3f351b",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinion.test.ts": {
+    "sha256": "9b48f8c7cd685bedb2018821ac1bff29e2803698368f4e2f4eef8136184113ea",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/run.ts": {
+    "sha256": "496bb116424bb9522385c566b12eff27d96653ba263e36ff7eef304825b77d71",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/diffBudget.ts": {
+    "sha256": "f9fd7e65a0465859a34df9f1b404797e31955d81428530441a02dd4a0f36a154",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionDiffBudget.test.ts": {
+    "sha256": "770ccd205717970042e3472399a6de5ee1644a4851ea421bf2a9f1d3a152bca2",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/prompt.ts": {
+    "sha256": "11c3bb3fba15d001e32b599bb7b87f8d4525df0d92a0843e004aa5861e83fd18",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/summary.ts": {
+    "sha256": "81777d4726ad8c4ade4eed1860b0c2e04def29d4a21948fa16bce5397f498c34",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionSummary.test.ts": {
+    "sha256": "adcf29862042a26c3d3ccc80621aeb03cd0224aba3030082e9c36bc0888c0cee",
+    "evidence": "second-opinion-core.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/afterTree.ts": {
+    "sha256": "4cc40500b21f4618c3f59b5e9448df3eb9f7bc15f6a124c634fe87f767bc0dfc",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/reviewBundle.ts": {
+    "sha256": "85695f92da6f3fdb3ad192f9583e357ca25a3b6bdf2cf22387270db4c5754ff0",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/display.ts": {
+    "sha256": "7ff7d3d6137702b986e49d95fa1a748b77f087d9aeba7cb39f634fe63797eea7",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/secondOpinion/advisorSession.ts": {
+    "sha256": "0fa565b0cf2e19cd45fc65301a9e27351e649d7fefb53e826f7c3c1751d7d1ba",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionAfterTree.test.ts": {
+    "sha256": "351c74a1b7121e22288e7d2d6e809e6323de181c98c2bbef67980731544c3ff9",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionReviewBundle.test.ts": {
+    "sha256": "21492fb094d7d1d1742677ee932386142d3f9e75ca31f110ef6b4550e02dfa7d",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionKeepSession.test.ts": {
+    "sha256": "9ba0c58ced7bf9aa04536b733dbdc6edc663f88aaf34aded69f7964299219290",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionCleanup.test.ts": {
+    "sha256": "53a82d9a9c153a7d4f9466e6247855bfa2ae2a14628ea706194bace5c2da6f16",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionAdvisorSession.test.ts": {
+    "sha256": "aa5fbe51092300c1b916e38a8b163981bf81558735feb9d897597416e1766831",
+    "evidence": "second-opinion-lifecycle.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/secondOpinionCommand.ts": {
+    "sha256": "bfe6946008d8166b068195b560404c24e74f62d616ddf23908cfac2568ec1e07",
+    "evidence": "second-opinion-command.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionAutoSend.test.ts": {
+    "sha256": "0cee0d2899a1bde5b0a4387774e6415282d507dff0d1541c3f8841c6357ccf9c",
+    "evidence": "second-opinion-command.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionContinue.test.ts": {
+    "sha256": "0cd611226bfb349f76b3f74f7e3aef669a287f4592026475d177e410611a482b",
+    "evidence": "second-opinion-command.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionQueue.test.ts": {
+    "sha256": "60048fe133ab0da319ca2a63300ed2735b33a3bcfd14bdb20b948999de59ae12",
+    "evidence": "second-opinion-command.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionSpeed.test.ts": {
+    "sha256": "ec935e284c7dd97aa1af9e4cb32abdada3793d0c9e52f4ebe5b59be20249e7b4",
+    "evidence": "second-opinion-command.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionTimeout.test.ts": {
+    "sha256": "07fd8855adfaf63489d1c953db1e92b77c2b1ca526deac93f8444e35800dde66",
+    "evidence": "second-opinion-command.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/approvalMapping.ts": {
+    "sha256": "e4963d09f12cb6ed0eb4f928b9be55a3fa4fb43efef9293e1f6ac4de4ce53a8f",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/approvalMapping.test.ts": {
+    "sha256": "2d2fa68c3c9a4206e2feef05e300061a27c562301ebbad18c8621972ce7af3e5",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/escalation.ts": {
+    "sha256": "121416b2dda0a7c517a99f80f33df8f330e89394574c63977771daaa846fa380",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/escalation.test.ts": {
+    "sha256": "6173d96319d0d50b2c220f5817cc4580fe5408a1e4a62dc7d39996b1c119943b",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runStore.ts": {
+    "sha256": "4f3aca3931eccd9665595f245b94ec41a45485d3b8ab10063897d7708359e2b8",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/runStore.test.ts": {
+    "sha256": "d7ed5d8418ebef2648d369855f60e46e77101abbe3f3a6dfc1e627ecba3ca55f",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/program.ts": {
+    "sha256": "93a1981b6e8eaad8b44193e5fc2f867046ccbe92da86dde6b533ccb518063904",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/program.test.ts": {
+    "sha256": "1b8c6ea2762e13372fe03e9d6c1b5195e19397f04b0d872791e0bfc0ce3ab0a1",
+    "evidence": "orchestrator-approval-store.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/workflowMenu.ts": {
+    "sha256": "ea351c129089f3488f55682dd9d1432e6e751fdd79a8bf93be522349d6bf1607",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sharedStyles.ts": {
+    "sha256": "6572d3744c95fb39dc3e7f3641ed9deade7790220e1dddf4dd76126038dbaa78",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/controlPanelSummaries.ts": {
+    "sha256": "f36eb69e2dd5c4d40d850cf428c6d3e01054b28cbca060ad2e6c0a5e0b3718d6",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/controlPanelAlerts.ts": {
+    "sha256": "d945ae646ba69f8e6c0a97e12cb3e3c6d9ee524adcbcfe2c3b138ef4da5fe6d1",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/controlPanelIcons.ts": {
+    "sha256": "99c6163e89909225af8925872846efb10bb444eae658ecd8b9d75d7c0e2448c8",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/progressStyles.ts": {
+    "sha256": "22b1a53a884e633c1916297c1dbcb2696ab3db79a73d8637c20d8c4432fbf525",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/progressModel.ts": {
+    "sha256": "d54496c1da9a91f99fb9d3846e47c196c0f184ed7db9d431aec35b35c6d8a0c2",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/progressView.ts": {
+    "sha256": "785e7fdeb3eb2e58634fe89ff9d620969c47d3b7c717bb41c521c9e2449493d6",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/progressScript.ts": {
+    "sha256": "84b37d092a1d76dcffa56c102ae79414b264ac2975fc7ec1ff2ac09e3f0fbcf4",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sessionKanbanView.ts": {
+    "sha256": "53a55aee2d63cd3c5e0101029809a01851c8a6b1fc873e866f23ff5f3cc32a90",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workflowMenu.test.ts": {
+    "sha256": "b3c574076bd70944a8c87b1e37537229343d568982d63bcdd57c4bb081bcda6b",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/progressStyles.test.ts": {
+    "sha256": "3d2f8d216a8344f5736ec99ba781962f37960e6db6b1d46647e5a300d5425737",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/controlPanelSummaries.test.ts": {
+    "sha256": "7b5a2b15a9ef6efda1538cbf7f386e2282e4549171c67f5722ed579ae75dd9e0",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/controlPanelAlerts.test.ts": {
+    "sha256": "a4601dada9bb61d6e5d8f1355b2ce987da92fd3f06921c0e604410af7858e40e",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/menuInlineIcons.test.ts": {
+    "sha256": "26aa2dda9ea7c0cb697c75d583bfde26dddb8b5f11f90c459a3fa9c3b2a0b465",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/keybindings.test.ts": {
+    "sha256": "85920888ff9326643406326f3c2e29dfe879e7af7d10b51c9fb715562794e491",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/extension.warnWithLogLink.test.ts": {
+    "sha256": "283c4da88afcc97366de4bc06328b1d9523a45171bda27c513ecd327c4dd3ea7",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/extension.roadmapLogging.test.ts": {
+    "sha256": "14f1b5781361ebf55d2b7419410011bf85b37fa81e03b4ec33076f0bf3fa238a",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/progressModel.test.ts": {
+    "sha256": "c96f63dcd8a861c1c52953c722a1aa76979afde92167426a7647cabf86c1c906",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionKanbanView.test.ts": {
+    "sha256": "03967bd4c935834b853db2078df309362d17af9335e9357fc9e1e602ede77a59",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/progressBench.ts": {
+    "sha256": "560b86a560dcafbe4c6630f454ed9b8140d37a72921562db273aaa914a9423c3",
+    "evidence": "panel-progress.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/frozenFile.ts": {
+    "sha256": "ee23d5674b03b5dcac1c3e8d19b8c37528192e47ff673b3f961deb474b6cb0ea",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/conditions.ts": {
+    "sha256": "a7888752c7f9d3a0bbc28508caf2db8f1fcbf4ec0dc27bbe1b91807d966cd532",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/screeningPool.ts": {
+    "sha256": "ab9e889d06b3ee5af327b341618964e99d69c024632bb2457dc13de44f4be9ad",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/probe.ts": {
+    "sha256": "631bdb668b77f1d19a96d0b72a73666e2fb2c24de93644bf68851a2c3a379256",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/prSnapshot.ts": {
+    "sha256": "f9ea7679fc3612ca6fa319d9669f3091da683b09bbefaad30efb9edef79c37fe",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/toolCallScope.ts": {
+    "sha256": "3893e10d0f0ef0731578220c5dd48d23964bec710849c31de67d6c8e539d324a",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/screeningSummary.ts": {
+    "sha256": "bf833ad0bcff2789357b0e60a297b2fc1bc6fd83451c6864b023d65f101c5696",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/screeningOrder.ts": {
+    "sha256": "ac073c1a9c0f635eaad7edeba4c3e6590e1fe6711561617e3a39c9c3f4054c1b",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/supplementalOrder.ts": {
+    "sha256": "30d52117b65bf3a35acbb054c5eb49a4410b4995f2adb1652596252796f24400",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/recall.ts": {
+    "sha256": "7b13a1a4726a97a241336b0a9c423357b8769d29993eaae9516649db1401a239",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/types.ts": {
+    "sha256": "8912689c8cc526400a517ef3e7cb638b6495c26b0fb3813b202fbe89f37fb4b5",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/summarize.ts": {
+    "sha256": "a3d54602929945eadc4b81cff9b501d12a85de593e3382ac314ceb4f57b41387",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/scoringSheet.ts": {
+    "sha256": "e2d3ddd096bbdfffbd9f8f9613916da7d736f98dacb7811aaebd9b76946b935d",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/materials.ts": {
+    "sha256": "ad62c481c5bbaa69f709bf2b05b4932c14f6a8bf7385c0c3cd0f1a7c4078fb1a",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/run.ts": {
+    "sha256": "4369f12f6e8ad019bd19f47264cc135816081d28ed2080a646fc298d744ca069",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/codexTurn.ts": {
+    "sha256": "b7d36766703f08394827d9b91f4baf982fee8b9f6eb4fdeedcdeaa39a48b7505",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/selectCases.ts": {
+    "sha256": "09c4036ba851f4ae9a4326c841e20d5a68da12aeb27b6a4385ee0d4fd8ba7ac2",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/evidenceChannels.ts": {
+    "sha256": "1010ca0004e994d56ea2c0c0577a6f24b7968200032c85468f02398028422783",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/evidenceCandidates.ts": {
+    "sha256": "6a09ee8733ead9bc1594411e719ec559572e0c070f1a90e8e61ff55a2ecb5ea4",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/samplingFrame.ts": {
+    "sha256": "10085ef4d71c75ab4ea74437c5da4327ea9243b0debc5cf71941422c0157c729",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/screeningResult.ts": {
+    "sha256": "52e710188d889043224869e04445c98ef05456e2a2d89318bd4197b456404ba0",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/stratifiedSample.ts": {
+    "sha256": "d6db0b3bcee1c1ad057194834f6fc0ea511817e936b6a229a7c99242ff9df780",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalFrozenFile.test.ts": {
+    "sha256": "2d9979724b323e18120910305a5e40aa14ea38e4019e4c5466ef4ee5224fc626",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalPrSnapshot.test.ts": {
+    "sha256": "707aa3cb195268c483071ebcff376832666095703f797b22835d960093a47f65",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalScreeningOrder.test.ts": {
+    "sha256": "8a0baf542a141e8e8b84ac4777608a080b11e59387f7a3c874d43a536e372c0d",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalSupplementalOrder.test.ts": {
+    "sha256": "45e612ba464d4f2b44a4db41d3d48c72a79296712ddf2c77b0ab84cdf05814a0",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalRecall.test.ts": {
+    "sha256": "20413af15cdf6cbb82daf19363248fd25a0aaad064ca888c3bc2107c81c4a083",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalEvidence.test.ts": {
+    "sha256": "ebcc672bf11798bbd2d59d427545f24c49596a8560922e72beb094fa6eb1dfc3",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalScreeningResult.test.ts": {
+    "sha256": "b624237123f473ecd1e11d39f8122205a19e7113be5fa0472304c16d2a158e8a",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/secondOpinionEvalStratifiedSample.test.ts": {
+    "sha256": "ef08c315789488e9a69a78fedab2df9921ff9becd0a93bac837874661ab57e68",
+    "evidence": "evaluation-bench.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/util/diffRestore.ts": {
+    "sha256": "36759ef517facec43d31383b3f299d0cd4660513a4975dabf78fbe827c2349a9",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/diffRestore.test.ts": {
+    "sha256": "8e849149efae193e67bec4d25eb305d1a710d0b7be7ffc49fa6f5f661c5c2cd1",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/highlight.ts": {
+    "sha256": "b2669957308308bc03b9e7ddfe592ac41bf504d5bb9b09d3a45f7a501152c576",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/highlight.test.ts": {
+    "sha256": "5560fee26c79a31be0115be845deefbbabfb29e6f184e14d165e3aa347e5e173",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/markdown.ts": {
+    "sha256": "c7b0cf871b090fc9ed1a90da6631044d34b14b84abb1d4bfe3afc534e5ecf4ac",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/markdown.test.ts": {
+    "sha256": "27415e1151f79a6c0a7f76f57a48a4f1182384dbec6d444295a23a343bef91cc",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/sessionPresets.ts": {
+    "sha256": "5509fda836befae1ca957ff49c410a2ded7d73d9830baa377b3f3f3c1f72ca38",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionPresets.test.ts": {
+    "sha256": "921608838e029cc164b2ee1922b6cef9a32e5eb7f4391bd539fd14a5b38ee2ee",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/settingsProvider.ts": {
+    "sha256": "4b736750db0093081cc6519091806f0d539e1acb136e1cb5a4390371e47c69ca",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/settingsProviderSections.test.ts": {
+    "sha256": "9f2d3522d1f0e8f864baa0c0932cd3b8c2cfcaec2d902718b262e3d8bcd6fc68",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/settingsProviderReloadClaudeSkills.test.ts": {
+    "sha256": "c80a1021632fef0d86af56daccebf3d00cd0c337e90d7555e9a8cf7e9895ad32",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/controlPanelSectionIds.test.ts": {
+    "sha256": "1c0549ac7fea82f2da2ab93a95cd3cb4ff6ca629c4c25678ba1ac512fe70a779",
+    "evidence": "formatting-settings.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/config.ts": {
+    "sha256": "4a90ca9ef29cf562aef4a76fdecbfe7f395c1fb7a343ae4f3e9ccf301fc22141",
+    "evidence": "configuration.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/config.test.ts": {
+    "sha256": "ad26eac9f999c2fe7790fb6839cb5d72613edae980935a4631b2183d950fc233",
+    "evidence": "configuration.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/chatClaudeHandshake.test.ts": {
+    "sha256": "c45de22ea8c0dd120f04554f5a5bb3354a0e74968396abeb0667c6d28f152ced",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/chatClaudeSettings.test.ts": {
+    "sha256": "528c8837f78f3b2fc963be64bde02277bf1dc2261689ddf7fb6073ac39c4f4e4",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/chatClaudeThreadFlow.test.ts": {
+    "sha256": "fe042fb2b95d1f7dfd0153d4ace48b03c9ff83e3166bca5a9464c466cc2496a0",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/chatCodexApprovals.test.ts": {
+    "sha256": "5f744eb5a371e29ea5701ab81278bfee14b6a6cad733162c2e487684f41b8ea9",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/chatCodexThreadFlow.test.ts": {
+    "sha256": "641b687c0f51eb6521aca50b117a3b09ff41dc8396afca3188e669dbf4592d43",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/chatHarness.test.ts": {
+    "sha256": "d08f5059ee029f3383754303862c7a820b4213be3e46dde6865b353fdc25f511",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/configuration.test.ts": {
+    "sha256": "1bd8d3f1cb59416b244ea79fceac650cf019c8afc6f4fd9a651ef97d223917f1",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/chat.ts": {
+    "sha256": "6f4b9483e9cb62277148ea70e7489bb7efb56a8f465776ec7bdaf44f0491143c",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/extension.ts": {
+    "sha256": "ef91091efeed38c32f57527dd2e4dfc2dadcc746144c5fc832a045b9d3488fe2",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/forgeRepo.ts": {
+    "sha256": "700b77292112deb9a7ae1e1356878737c5ca7fd407a8b6eb48e2752c36bc0883",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/mcpClient.ts": {
+    "sha256": "96b9570d6541e27f21d21056c1cc13967feb79f06b3f6211b26e48b3a584abc1",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/helpers/workflow.ts": {
+    "sha256": "bd7634ef0a793acdebeeb13159ef0fbc3193f8ca677d82c0c0040aa1a43c5b93",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/sessionHistory.test.ts": {
+    "sha256": "9f0b002dc158720af5b1f42fbf71eeba9e86a9cf4b4e853d6ae4d0239adf5cef",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/waitForHelper.test.ts": {
+    "sha256": "ee4cfb3a268015123aebda9e54f1484b40409156a8204d63a2e9c788a33a6ad7",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflow.test.ts": {
+    "sha256": "d94e02bc982fd8378386a3a8cb7eca690d4f49a21f9b2b5bd6188d5e330bc1d3",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflowForgeOrder.test.ts": {
+    "sha256": "d7cb13a0b79036d3411140294d488f8b857afcf041d98765b43361c1d06f1a81",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflowForgePrerequisites.test.ts": {
+    "sha256": "3562256800311bfd2717537c010e0367554be967d648470656c713d623925bf1",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflowMerge.test.ts": {
+    "sha256": "f136a11db3ed8a4bba55d816338ca3f7eda89a9c201c18720309f9979fc6ac4c",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflowMessaging.test.ts": {
+    "sha256": "440082772c0381fc89e687c3c3c69d4b21d1fef5d8989026f785dd312e584e7c",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflowPseudoWorktree.test.ts": {
+    "sha256": "f1b34760286f84dcfae58fc9c9736f2ffb8c622e7ae62af410fb23ba55a79a7b",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/integration/workflowRoadmap.test.ts": {
+    "sha256": "8d73e8c1dda30eee711eefb23850c3532a280e94e2b53275d8a705dc9f7cf3a7",
+    "evidence": "integration-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/forge/hub.ts": {
+    "sha256": "db5172d57c57b47eefa8618d015b78b7c250f29b43d3af326c844f885bb84058",
+    "evidence": "forge-hub.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/forge/orchestrator.ts": {
+    "sha256": "1584384cb6540bf82b99506edf8c85d942563e8b039f54fe51a5871935dd83a3",
+    "evidence": "forge-hub.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/forgeHubView.ts": {
+    "sha256": "c5a69bb7d398afe60349bf2c26c1bb79ce0a83f7e92987c6ada1c9c385eca2a0",
+    "evidence": "forge-hub.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/forgeHub.test.ts": {
+    "sha256": "fac525fad728d4dab653456b35ffe644334ec18ed8c20c9110f237853d3c2cc5",
+    "evidence": "forge-hub.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/forgeOrchestrator.test.ts": {
+    "sha256": "52313dba8eadc3d4451a244203612805cdb487e195cf69a347acb5f18b8d3893",
+    "evidence": "forge-hub.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerMessaging.ts": {
+    "sha256": "684401525ffa267f5f2656991c315d241595576ab408ad0653c9c7682eced91e",
+    "evidence": "runner-messaging-handoff-snapshot.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/teamHandoff.ts": {
+    "sha256": "9fd1a88bd95479f42ca4c103c603eee9fa9aabafd06951fc98b6eab7588c3618",
+    "evidence": "runner-messaging-handoff-snapshot.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerSnapshot.ts": {
+    "sha256": "3c68c9429403e415661b3aec050664b13436a8f37f4ab90cddf2b37c4d82ff63",
+    "evidence": "runner-messaging-handoff-snapshot.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/teamHandoff.test.ts": {
+    "sha256": "87846422120d15f2d83bf81e5aed022aabde0e2909b88e17cfe0ca1202d92d3b",
+    "evidence": "runner-messaging-handoff-snapshot.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/runnerTeamHandoff.test.ts": {
+    "sha256": "56b7ba896dacfa08a266b51e548d50676d6c2f73d7a1fb0ac12138adae9bd44c",
+    "evidence": "runner-messaging-handoff-snapshot.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/sanitize.ts": {
+    "sha256": "b82c34a1f295e055f0415e0654a8ba10119f481dc3861b55c17c08fbf969bcbd",
+    "evidence": "log-sanitization.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sanitize.test.ts": {
+    "sha256": "b4511cdbe6d3eae6af0c22f4dabc706760d3e741bef1245dc04582f9475fbb9a",
+    "evidence": "log-sanitization.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerRestore.ts": {
+    "sha256": "ece6a4976318d90f3f2167aca99489302de373c03e23fed01f2c38a438601c20",
+    "evidence": "runner-restore-working-directory.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerWorkingDirectory.ts": {
+    "sha256": "d0d130e08ff3442a8ae9d091b5b38fd4c032301cf1698f33e947d05e93ce5014",
+    "evidence": "runner-restore-working-directory.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/programRunner.ts": {
+    "sha256": "b0b891a4b1df8e81d04e0c6b5881748ba1b43f33f5820b092356b11cc337754a",
+    "evidence": "program-runner.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/programRunner.test.ts": {
+    "sha256": "1bf3174198a433bcbd9ac67321b119c0ec1f166f07b2d7dbc0cb5dfb7decd34a",
+    "evidence": "program-runner.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/workflowGraph.ts": {
+    "sha256": "edcd9e08d25864b407b14eec0656aab6c7cb596e2b6658f86df50e010bda58b9",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workflowGraph.test.ts": {
+    "sha256": "e07db9108a9c5d6681f8cd2ffe5eb655183e6d9fe4e43f2d89f3af6882d329ff",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/workflowView.ts": {
+    "sha256": "4b0c8d4037ba8d807773ccd3ee8b859b3fc0a3f39fd5fa74f5549a93dd56b768",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/workflowScript.ts": {
+    "sha256": "278103c8e008517793f8b5fb11828362ea7c86fba122e1cba03d202a1bbbd9a2",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/workflowStyles.ts": {
+    "sha256": "54bdefade0fd946331923ba74bcf20b65b52ee967d0d9b327a4668cf235eaede",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workflowViewGraph.test.ts": {
+    "sha256": "d091356794f72be3f37a2eb407ff9f0ba84e00602a8be73f1a7f282d5c17d3e9",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workflowViewPrograms.test.ts": {
+    "sha256": "b7f6375bf32105054c714519cdc76b7cb204e2a695a44c2759a2cccec285ba0e",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workflowWiring.test.ts": {
+    "sha256": "b7cc09cd9c59fb81ab955431b13d884090481cdbfedcd85cd49f82aef8beef1a",
+    "evidence": "workflow-view-graph.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/sessionTreeProvider.ts": {
+    "sha256": "900da247759d58b02c6336c310b3de6d757eb9b3f3166c9a0bcbb948fdac7837",
+    "evidence": "session-tree-manager-base.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/sessionTreeProvider.test.ts": {
+    "sha256": "bc39a817ac8a171a1e5cb71d9e2026d72c99152546439511bfe6e530590c7a0e",
+    "evidence": "session-tree-manager-base.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/chatManagerBase.ts": {
+    "sha256": "d58b55ef3b217f4e13feb6eb77cbe2496f5197db5c96de23eb4b25b3caced8d6",
+    "evidence": "session-tree-manager-base.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/goalDraftWebview.test.ts": {
+    "sha256": "18f4ae3ac64f084142fee203151d79bceb32fa537301dd9c4875c70bd5427005",
+    "evidence": "session-tree-manager-base.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatViewSessionStartFailure.test.ts": {
+    "sha256": "12414fe3e5b8cd8963a488931de91cb9dd906fec29c28f63ac2510a670f885d6",
+    "evidence": "session-tree-manager-base.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/chatView.ts": {
+    "sha256": "2b6b4e32944b7f8beb7637797ddfe5d7f8d50f7d0a1a789fad5cabdcd7c2e96d",
+    "evidence": "chat-view-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatView.test.ts": {
+    "sha256": "4d3e2b636e5f8e0f8af4ec87438ab073b36fc6de215bcebefb35c0c2e7be4d79",
+    "evidence": "chat-view-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatViewDestructiveOps.test.ts": {
+    "sha256": "ad75ce148cb5af1449d2b3014256354eff508c7231d15c0a28ceac3de2d11d15",
+    "evidence": "chat-view-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/chatShared.ts": {
+    "sha256": "4d8f9bb17837b633f1f282f34fd1d1810c00eef5349e2225becffaf91c859c55",
+    "evidence": "chat-shared-styles.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/chatStyles.ts": {
+    "sha256": "416e3b3d9c0c9f55c21eebad007b2d927530d0d64168e396d1b76b0568189411",
+    "evidence": "chat-shared-styles.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/controlPanelStyles.ts": {
+    "sha256": "2b79bec114f7cb97cc8ffa92e06d87d023c7399401eace156a1ded8f47cec83b",
+    "evidence": "chat-shared-styles.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/webviewStyles.test.ts": {
+    "sha256": "8cc8d0873a3880fffec8af237b90b6d4640c0a14ee2f03bdd24828e694adaf0e",
+    "evidence": "chat-shared-styles.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/controlPanelView.ts": {
+    "sha256": "ba0de0d7775e482470dcd6eb058907b4dbb31951f9b60416ea58dffad4e80758",
+    "evidence": "control-panel-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/controlPanelScript.ts": {
+    "sha256": "6657f3e498a87a2824cb754c84144126fe819cd43a00f741c0ae8dac05c129d1",
+    "evidence": "control-panel-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/controlPanelView.test.ts": {
+    "sha256": "ac2d1ecf97fe8a72871dc082d0ae7db98e6fc49b8ef5fcdb3d1229e5c1808449",
+    "evidence": "control-panel-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/chatViewManager.test.ts": {
+    "sha256": "b038765eb0b08082d74752ef37a628987d7b3707a447b823ca267fd351e8ec38",
+    "evidence": "chat-view-manager-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/runnerDispose.test.ts": {
+    "sha256": "f6f0a530473cf8969246cc6f8fecdd2da787e374626b920d4df285e80f683b40",
+    "evidence": "runner-lifecycle-tests-vscode-mock.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/runnerTaskApproval.test.ts": {
+    "sha256": "506c6b0a1c85b85e6add86e8d468148d866756be5ef2917e0226e48af0b9e23e",
+    "evidence": "runner-lifecycle-tests-vscode-mock.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/mocks/vscode.ts": {
+    "sha256": "eae979e4253645550a963ca17b93b8e375f99f5938495cef3dd85b907baad173",
+    "evidence": "runner-lifecycle-tests-vscode-mock.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/worktree.ts": {
+    "sha256": "d5f4be849cf601ab653b6552b3bda53c370b5454ed2dda9d9cdb0a01d71fb28a",
+    "evidence": "worktree-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/worktree.test.ts": {
+    "sha256": "ee860fda7c780032651d57a85cb79206972cfb9b42cb3d98c664e09145251d49",
+    "evidence": "worktree-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/integration.ts": {
+    "sha256": "5bb5c95f3077628c35bedb7a76f4c5b4e30b219b0ab306a396bedd0f4a4c2cf2",
+    "evidence": "integration-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/integration.test.ts": {
+    "sha256": "9da34794ae9b021d4c5f82ab0f0a1ecee37b67761151e53916228d7cf85b42fa",
+    "evidence": "integration-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runState.ts": {
+    "sha256": "b8aaf145bfea7ca3ede04608c9af1ba189677d53e884992b346598b2842a363d",
+    "evidence": "run-state-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/runState.test.ts": {
+    "sha256": "95a54480b8e6743fa6a5041a956372a03d44f9b4d384a0e5987d7aabf3d5eaa6",
+    "evidence": "run-state-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerMerge.ts": {
+    "sha256": "645fe1360f6e9b730901d9ab5a07555dd76a765c5451681ee37b8182f5358667",
+    "evidence": "runner-merge-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/webviewScript.test.ts": {
+    "sha256": "15fca951a54415d3c9f0a5f5294adc2ee096474ff497484f548fa92c09571ff5",
+    "evidence": "webview-script-tests.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runnerOrchestrator.ts": {
+    "sha256": "67b76f3a9080f8ea8cd314ad32b74a4c7a46f5730104524986ff97cec290f4ce",
+    "evidence": "runner-orchestrator-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/workflow.ts": {
+    "sha256": "6a101beca09adbb0a950c43f69c7642fda6f8a833c22c41199bd77683e841832",
+    "evidence": "workflow-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/workflow.test.ts": {
+    "sha256": "dbda129befcc8ae971c42a626655fecea7f75aab5eabe2cd2e7bdcb481f09c3c",
+    "evidence": "workflow-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/pseudoWorktree.ts": {
+    "sha256": "b3d5b3a62921ea7376e5fe02b62a24ba83480fa702c62afa5286b1f52bd2ecf0",
+    "evidence": "pseudo-worktree-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/pseudoWorktree.test.ts": {
+    "sha256": "aeafd2597bacf717d0c35b10f57102ceeed00e1e4f2471f4b8a6e5d4ca9cb8eb",
+    "evidence": "pseudo-worktree-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/manual-test-2026-08-29.md": {
+    "sha256": "69af8846f2a4d251cd6f158c37f2d72fd46f7282153fd3fde290c15366767ca6",
+    "evidence": "manual-evaluation-protocol.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/manual-test-plan.md": {
+    "sha256": "3fb89622f8c12360a54791d15aa7689bf255648a724a099d7298028dab82fb91",
+    "evidence": "manual-evaluation-protocol.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/fixtures/workflow-evaluation.json": {
+    "sha256": "feffd8a3803f3d7bab2207349ca5f7fc1d4d8a38666688aa496ecb577c9943cf",
+    "evidence": "manual-evaluation-protocol.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/bench/secondOpinionEval/cases.example.json": {
+    "sha256": "546126b8410d28b1d467fab334402790122eadff5c2df5b35cef18f4144ccd42",
+    "evidence": "manual-evaluation-protocol.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/second-opinion-eval.md": {
+    "sha256": "0f602779864088e30ee63805acd69591662542867ad161e90a73eaf791bf8f55",
+    "evidence": "manual-evaluation-protocol.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/planner.ts": {
+    "sha256": "64e1a32a93bc43852c10aba59a2dd79651b671cb055060a0fc7e69b194374ec7",
+    "evidence": "planner-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/planner.test.ts": {
+    "sha256": "5ab9ea9abf94931809e95d0725b9d5e3d9ec287b1834a28807e52b36f4270cd8",
+    "evidence": "planner-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/messaging.ts": {
+    "sha256": "25d49954421a9a76b9d97e25d8ab0940c830af41e0853635ee003adc33be667e",
+    "evidence": "messaging-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/messaging.test.ts": {
+    "sha256": "1220fe491d4e807518a989db3423e3e1e1a378526c2889a26c916eb204a381bf",
+    "evidence": "messaging-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/roadmap.ts": {
+    "sha256": "aa5c72d0ce852f7745cf430531c7888b37986de3228f60418307d42d50a921ee",
+    "evidence": "roadmap-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/roadmap.test.ts": {
+    "sha256": "57f235d01d78a37b69d23a7657cba63f29528abac2ca62b9ecb8ec003be7fcbc",
+    "evidence": "roadmap-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/forge.ts": {
+    "sha256": "56e19521794f68fe0cee0cdb8ac78db29975c4c7b8b10d6611ca45b922c5535e",
+    "evidence": "forge-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/forge.test.ts": {
+    "sha256": "c3f88ffaafc0385d4d060513dbb5f7452a15ed1d97f1edda879fe5fc8ee96b5a",
+    "evidence": "forge-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/chatScript.ts": {
+    "sha256": "2b1db70ddbb048353ee9df7c5a1946d2550befa7b0d2f5ce89ae5518f4125a27",
+    "evidence": "chat-script-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/view/claudeChatView.ts": {
+    "sha256": "92657f638d3b2ec495bd9c6739bb97b7277bf7fc48680c911058bf4e7c7f1da3",
+    "evidence": "claude-view-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/claudeChatViewManager.test.ts": {
+    "sha256": "a7f751223be3509a8ee0ae594f742900e18f7e3516f3e6e03ba6766461e77172",
+    "evidence": "claude-view-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/extension.ts": {
+    "sha256": "f58ad630e321514731517002cd6d5f9900b997d72e7e4acc66dab5305e932348",
+    "evidence": "extension-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "docs/manual-test.md": {
+    "sha256": "bdc138970e1b5703baa90ce6777e730ec70ecb309c71ae890c9e1f12e64f20d6",
+    "evidence": "manual-test-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "src/orchestrator/runner.ts": {
+    "sha256": "799e4fa8512289714fe5a7fd113128916081a4779a2b16589ff56dfed635bae1",
+    "evidence": "runner-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  },
+  "test/unit/runner.test.ts": {
+    "sha256": "b9e1b8ba250276bd3c3e917a76c538fb897a7bdba8e9e14838d81829476a5f6a",
+    "evidence": "runner-test-main.md",
+    "method": "full-source-static-review",
+    "testsExecuted": false
+  }
+}

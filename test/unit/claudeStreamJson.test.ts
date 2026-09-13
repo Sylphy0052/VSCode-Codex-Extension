@@ -215,6 +215,48 @@ describe('applyStreamEvent', () => {
     });
   });
 
+  // Writeの新規作成と上書き（issue #1176）。履歴の読み直しと同じ結果になることを確かめる
+  it('Writeのtool_use_resultがupdateなら上書き前の内容を持つupdateへ組み直す', () => {
+    const write = {
+      type: 'assistant',
+      message: {
+        id: 'm1',
+        content: [
+          {
+            type: 'tool_use',
+            id: 't1',
+            name: 'Write',
+            input: { file_path: '/work/a.ts', content: 'new1' },
+          },
+        ],
+      },
+    };
+    const running = apply([write]);
+    expect(running.items[0]?.diffs[0]).toMatchObject({ kind: 'add', createUnverified: true });
+
+    const state = apply([
+      write,
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok', is_error: false }],
+        },
+        tool_use_result: {
+          type: 'update',
+          filePath: '/work/a.ts',
+          originalFile: 'old1',
+          content: 'new1',
+        },
+      },
+    ]);
+    expect(state.items[0]?.diffs[0]).toMatchObject({
+      kind: 'update',
+      diff: '-old1\n+new1',
+      editReplace: { oldString: 'old1', newString: 'new1' },
+    });
+    expect(state.items[0]?.diffs[0]?.createUnverified).toBeUndefined();
+  });
+
   it('WebFetchはtool_use_resultにresultsが無いためsearchResultsが空のまま', () => {
     const state = apply([
       {

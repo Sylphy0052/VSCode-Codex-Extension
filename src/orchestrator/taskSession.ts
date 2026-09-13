@@ -127,6 +127,19 @@ export interface TaskSessionInput {
    * 常にCodexのセッションを開くため、Claude側の配線は要らない。
    */
   disableMcpServers?: boolean;
+  /**
+   * このセッションにはskillを提示しない（Issue #1061）。
+   *
+   * Codex CLIは利用可能なskillの一覧をシステムプロンプトへ自動で載せ、使うと決めたら
+   * `SKILL.md` を読むよう指示する。セカンドオピニオンのAdvisorは「この作業ディレクトリの外を
+   * 読みに行かない」という固定指示の下で走るが、この提示があると1つ目のコマンドで
+   * `~/.codex/skills/<name>/SKILL.md` を読みに行く（Issue #1047 のprobeで実測）。材料を
+   * 隔離ディレクトリに限るという前提が崩れ、費用の測定にも材料と無関係な読み取りが混ざる。
+   *
+   * Claude側（`claudeChatView.ts`）は無視する。この指定を使う経路（セカンドオピニオン）は
+   * 常にCodexのセッションを開くため、Claude側の配線は要らない。
+   */
+  disableSkills?: boolean;
 }
 
 export interface TaskSessionHost {

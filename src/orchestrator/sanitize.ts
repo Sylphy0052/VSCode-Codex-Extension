@@ -283,23 +283,31 @@ const BEARER_TOKEN_PATTERN = new RegExp(
  * 後続トークンの量指定子を`{20,}`（上限なし）から`{20,${TOKEN_LENGTH_CAP}}`＋
  * 同じ文字クラスの`*`へ変更した（セキュリティ監査指摘、high）。理由は
  * `TOKEN_LENGTH_CAP`のコメントを参照。
+ *
+ * fine-grained PAT（`github_pat_` 接頭辞。本体は英数字と`_`）も対象に含める（Issue #1122）。
+ * `src/secondOpinion/redact.ts` の `KNOWN_TOKEN_FORMATS` と同じ形状を扱い、ログ側だけ
+ * 保護範囲が狭くならないようにする。
  */
 const GITHUB_TOKEN_PATTERN = new RegExp(
-  `(?<![A-Za-z0-9_])gh[oprsu]_[A-Za-z0-9]{20,${TOKEN_LENGTH_CAP}}[A-Za-z0-9]*`,
+  `(?<![A-Za-z0-9_])(?:gh[oprsu]_[A-Za-z0-9]{20,${TOKEN_LENGTH_CAP}}[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]{20,${TOKEN_LENGTH_CAP}}[A-Za-z0-9_]*)`,
   'gu',
 );
 
 /**
  * OpenAI/Anthropic系でよく使われる `sk-` 接頭辞のAPIキー形状を検出する
- * （Issue #474 指摘3）。接頭辞の直後にハイフンを含む英数字10文字以上を要求し、
+ * （Issue #474 指摘3）。接頭辞の直後にハイフン・下線を含む英数字10文字以上を要求し、
  * `sk-` で始まる短い一般語（過剰マスク）を避けている。
  *
  * 後続トークンの量指定子を`{10,}`（上限なし）から`{10,${TOKEN_LENGTH_CAP}}`＋
  * 同じ文字クラスの`*`へ変更した（セキュリティ監査指摘、high）。理由は
  * `TOKEN_LENGTH_CAP`のコメントを参照。
+ *
+ * 文字クラスに`_`を含める（Issue #1122）。含めないと `sk-...ABC_suffix` のような
+ * 下線入りのキーは下線の手前までしか一致せず、`_suffix` がログに残る（部分マスク）。
+ * `src/secondOpinion/redact.ts` の `KNOWN_TOKEN_FORMATS` と同じ文字クラスにする。
  */
 const OPENAI_STYLE_KEY_PATTERN = new RegExp(
-  `(?<![A-Za-z0-9_])sk-[A-Za-z0-9-]{10,${TOKEN_LENGTH_CAP}}[A-Za-z0-9-]*`,
+  `(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{10,${TOKEN_LENGTH_CAP}}[A-Za-z0-9_-]*`,
   'gu',
 );
 

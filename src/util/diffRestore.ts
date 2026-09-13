@@ -28,6 +28,11 @@ export interface DiffLike {
    * （`DiffLike` 自体が `FileDiff` の最小形を持つのと同じ考え方）。
    */
   editReplace?: { oldString: string; newString: string } | undefined;
+  /**
+   * `add` のうち、新規作成だったことを実行結果で確認できていないもの（issue #1176）。
+   * 詳細は `FileDiff.createUnverified` を参照。
+   */
+  createUnverified?: boolean | undefined;
 }
 
 export interface HunkLine {
@@ -362,7 +367,14 @@ export interface DiffActionAvailability {
 export function planDiffActions(diff: DiffLike): DiffActionAvailability {
   if (diff.kind === 'add') {
     const parsed = reconstructWholeFile(diff.diff, '+');
-    return { openEditor: true, openDiff: parsed.ok, revert: parsed.ok, jumpToLine: 1 };
+    // 新規作成と確認できていない `add` の戻しは削除になる。既存ファイルを上書きしただけ
+    // だった場合に消してしまうため出さない（issue #1176）
+    return {
+      openEditor: true,
+      openDiff: parsed.ok,
+      revert: parsed.ok && diff.createUnverified !== true,
+      jumpToLine: 1,
+    };
   }
   if (diff.kind === 'delete') {
     const parsed = reconstructWholeFile(diff.diff, '-');

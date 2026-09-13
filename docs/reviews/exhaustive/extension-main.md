@@ -1,0 +1,31 @@
+# 拡張の起動・コマンド配線の精査
+
+`src/extension.ts`全3084行を読んだ。import、型契約、activate内の全クロージャ、コマンド、非同期後処理、各補助関数を対象とする。関連テストは[統合試験fixture](integration-fixtures.md)、[統合試験本体](integration-tests.md)、[表示集計・導線テスト](panel-progress.md)で全文確認済み。今回も実行なし。
+
+## 確認範囲
+
+homeと実行ファイルの解決、ログ/活動記録、CodexとClaudeの履歴/index/cache、各probeと設定パネル、Provider、セッション管理、モデル保存、テスト用接続/host/CLI差替えを追った。TaskManagedThreadの循環参照、workflow/program保存と復元順、各timeout/安全設定、MCP、worktree/疑似worktree、Forge、roadmapの実portへの接続も確認した。
+
+会話表示/進捗/カンバン/ForgeHub/履歴tree、ピンと絞込、装飾、承認バッジと戻り先、使用量の取得/間引き/定期更新、watcher、serializer、モデル候補更新とdispose、設定変更通知、コマンド登録の全経路を読んだ。各非同期要求の失敗時、未選択/対象なし/未知Provider、破棄後の戻りも追った。
+
+プリセットの安全側合成とcwd選択、workflow/programの探索と開始/停止、生成Providerの決定、選択範囲の上限/行範囲/表示パス/最新タブへの挿入、進捗の対象選択、ワークスペース概要、ロードマップの生成/Markdown変換/Issue起票/分割/番号補正/警告/保存を確認した。YAMLの名前確認、wxによる同名回避、保存直後のpreview、最大3回のレビュー修正、本文比較による手編集保護、ready書戻しと失敗通知、途中/全体分岐、archive/delete、履歴再開とcache保存まで読んだ。
+
+## EX-EXT-01[P1]:危険操作の同意が確認時の定義へ結び付かない
+
+`extension.ts:1376`付近はrunner.startが返したallowTaskIdsをダイアログへ示し、承認後に同じファイルをallowConfirmed:trueだけで再実行する。`runner.ts:2097`は毎回定義を読み直し、2104行ではこの真偽値だけで再確認を省く。確認待ちにYAMLのタスクやallowパターンを差し替えると、確認していない設定も同意済みとして実行される。拡張設定による上限や他の拒否条件は残るため、それらまで無条件に解除されるという指摘ではない。確認した定義/安全設定のdigestを実行時と照合し、変化時は確認し直す必要がある。既存のallow再試行テストには、確認前後でfilePortの本文を変える試験がない。攻撃や実行による再現はしていない。
+
+## EX-EXT-02[P2]:レビュー修正後にロードマップとの対応を再確認しない
+
+初回のロードマップ生成はid/dependsOn/issueを照合・補正し、`extension.ts:2280`付近でroadmap参照を付ける。しかし2670行以降の自動修正は汎用reviseWorkflowPlanへgoal/YAML/指摘だけを渡す。`planner.ts:1912`の返却条件は構文検証で、元ロードマップとの照合はない。修正応答が有効な別Issue番号へ変えたり、roadmap参照や項目idを落としたりしてもそのまま保存し、次の意味レビューが空ならreadyになる。Closesの誤紐付けや完了チェックの書戻し欠落が再発する条件である。初回補正とは別に、各修正後にも元材料の契約を検査する必要がある。修正器の単体試験は存在するが、この保存処理を通して元ロードマップとの対応を維持する試験はない。
+
+## 既存指摘の追加根拠と試験不足
+
+EX-ROADMAP-03の外部リンク書込はYAML生成にも当てはまる。`extension.ts:2460`付近は相対dirをjoinしてmkdirし、writeUniqueWorkflowFileは祖先の実体を確認しない。設定の`isSafeRelativeDir`は字句検査だけ。wxは同名ファイルの上書きを防ぐが、親ディレクトリが外部へのsymlinkなら外部に新規YAMLを作れる。末端の既存symlinkをwxで上書きするとは主張しない。
+
+F03-01のCodex全体分岐は新IDを作らず元IDをopenThreadへ渡す。F03の途中分岐は別経路でappServer.forkThreadへ渡る。F26-01とEX-PLANNER-01の不正/部分レビューは、ここで全定義をreadyへ変えるところまで接続する。EX-ROADMAP-01/04の誤Issueや余剰タスクは警告だけで保存が続く。F27-01の同名ロードマップ上書きと、起票途中失敗時に作成済みIssueが結果へ残らない問題も実port接続を確認した。
+
+readUsageは複数要求の世代を比較せず後着値を採用し、debounceはdispose口を持たない。設定変更でtree.refreshを呼んでもhistoryScopeをsetScopeし直さず、Claudeの設定表示更新はこのイベント経路から直接呼ばれない。改めて状態イベント等が起きるまで反映が遅れる条件がある。モデル更新はdisposeを待機後に確認するが、他の背景IIFEや復元・usage等に一律の破棄ガードはない。
+
+withSessionはundefinedだけを守り、各callbackのvoid化により完了とrejectをコマンド呼出元へ返さない経路がある。これは全操作が必ず例外を漏らす意味ではなく、下位関数で処理していない失敗の境界として確認が必要。テスト用差替えは環境変数でのみ公開し、実接続のonDisconnectはフェイク生成口へ渡さない。実接続の切断回復は統合フェイクだけでは検査できない。
+
+テストは登録コマンド/公開API、設定、ヘルパーの警告整形とログボタン、各managerへの導線を確認する。起動時の全背景処理の競合、複数コマンド同時生成、保存のENOENT/EACCES/ディスク不足、確認中の定義変更、レビューのapplyEdit/save失敗と閉じた文書、実CLIの起票と部分失敗は実行・再現していない。applyEdit前の本文比較が外部編集との完全な原子性を保証するとも扱わない。

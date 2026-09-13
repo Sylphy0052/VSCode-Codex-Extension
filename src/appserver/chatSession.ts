@@ -27,6 +27,7 @@ import {
   removeQueued,
   restoreQueued,
   routeSend,
+  setPromptErrors,
   takeQueuedAt,
   type ChatState,
   type PendingApproval,
@@ -38,6 +39,7 @@ import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
 import {
   buildPromptResponse,
   describePrompt,
+  validatePromptSubmission,
   type PendingPrompt,
   type PromptSubmission,
 } from './prompts';
@@ -119,7 +121,16 @@ export class ChatSession {
     private readonly connection: AppServerConnectionPort,
     private readonly log: Logger,
     private readonly onChange: (state: ChatState) => void,
-  ) {}
+    /**
+     * 自動引き継ぎ（Issue #1079）をこのセッションの初めからONにするか（Issue #1091）。
+     *
+     * 値の出どころはユーザー設定（`agent.autoHandoff.enabled`）だが、この層は `vscode` を
+     * importしないため、読むのは呼び出し側の `chatView.ts` に任せて値だけ受け取る。
+     */
+    initialAutoHandoff: boolean = initialChatState.autoHandoff,
+  ) {
+    this.state = { ...initialChatState, autoHandoff: initialAutoHandoff };
+  }
 
   get threadId(): string | undefined {
     return this.state.threadId;
@@ -137,18 +148,18 @@ export class ChatSession {
   /**
    * 新しいスレッドを開始する。
    *
-   * `mcpServersConfig` を渡すと、`thread/start`の`config`フィールド
+   * `threadConfig` を渡すと、`thread/start`の`config`フィールド
    * （`ThreadStartParams`。`codex app-server generate-json-schema`のスキーマでは
-   * `additionalProperties: true`の自由形式）へ`{ mcp_servers: mcpServersConfig }`として
-   * 差し込む（実測。CLI 0.147.0）。**`config.toml`には一切書き込まれない**
-   * （`config/read`で確認済み。スレッド限定のオーバーレイ）。呼び出し側が何を渡すか
-   * （サーバ名・接続先）を決める。このクラス自身は中身の意味（タスク間メッセージング
-   * design.md §16.21）を知らない（`ChatViewManager`側の責務。呼び出し側のJSDoc参照）。
+   * `additionalProperties: true`の自由形式）へそのまま差し込む（実測。CLI 0.147.0）。
+   * **`config.toml`には一切書き込まれない**（`config/read`で確認済み。スレッド限定の
+   * オーバーレイ）。中身（`mcp_servers`によるタスク間メッセージング design.md §16.21、
+   * `skills`によるskillの非提示 Issue #1061）を決めるのは呼び出し側で、このクラス自身は
+   * その意味を知らない（`ChatViewManager`側の責務。呼び出し側のJSDoc参照）。
    */
   async start(
     cwd: string,
     config: CodexConfig,
-    mcpServersConfig?: Record<string, unknown>,
+    threadConfig?: Record<string, unknown>,
   ): Promise<string> {
     await this.connection.ensureStarted();
     const params: Record<string, unknown> = { cwd };
@@ -169,8 +180,8 @@ export class ChatSession {
     if (config.model !== '') {
       params['model'] = config.model;
     }
-    if (mcpServersConfig !== undefined) {
-      params['config'] = { mcp_servers: mcpServersConfig };
+    if (threadConfig !== undefined) {
+      params['config'] = threadConfig;
     }
 
     const response = await this.connection.request('thread/start', params);
@@ -218,6 +229,11 @@ export class ChatSession {
    */
   noteSecondOpinion(id: string, display: { status: string; text: string; detail: string }): void {
     this.update(appendSecondOpinion(this.state, id, display));
+  }
+
+  /** CLIへ送らない拡張機能側の通知を会話へ残す。 */
+  noteLocalEvent(id: string, text: string): void {
+    this.update(appendNotice(this.state, id, text));
   }
 
   /** 明示的な復元に失敗しても、タブを閉じずに再試行できる状態へ戻す。 */
@@ -287,6 +303,19 @@ export class ChatSession {
         : '計画モードを抜けました。次の発言から元の権限に戻ります',
     );
     this.update(next);
+  }
+
+  /**
+   * 自動引き継ぎ（Issue #1079）を切り替える。
+   *
+   * 拡張機能側だけで完結する状態なのでapp-serverへは何も送らない。値は画面のトグルの
+   * 見た目と、`chatView.ts` の発火判定の両方が読む。
+   */
+  setAutoHandoff(on: boolean): void {
+    if (this.state.autoHandoff === on) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoff: on });
   }
 
   /**
@@ -603,7 +632,7 @@ export class ChatSession {
     if (method === SERVER_REQUEST_RESOLVED) {
       const requestId = params['requestId'];
       if (typeof requestId === 'number' || typeof requestId === 'string') {
-        this.dropResolvedApproval(requestId);
+        this.dropResolvedRequest(requestId);
       }
     }
     if (method === AUTO_APPROVAL_REVIEW_COMPLETED) {
@@ -680,17 +709,19 @@ export class ChatSession {
   }
 
   /**
-   * 承認が別の経路で解決されたとき。応答は返さず、画面の保留だけを取り下げる。
+   * 承認・質問が別の経路で解決されたとき。応答は返さず、画面の保留だけを取り下げる。
    *
-   * 同じスレッドを別のウィンドウやTUIでも開いている場合、そちらの承認でこちらの
-   * カードが宙に浮く。`serverRequest/resolved` を受けてここで片付ける。
+   * 同じスレッドを別のウィンドウやTUIでも開いている場合、そちらの承認・回答でこちらの
+   * カードが宙に浮く。`serverRequest/resolved` を受けてここで片付ける。取り下げず放置すると、
+   * 遅れて届いたWebviewの回答（`answerPrompt`）が用済みの要求へ応答を返してしまう。
    */
-  private dropResolvedApproval(requestId: number | string): void {
-    if (!this.waiting.has(requestId)) {
-      return;
+  private dropResolvedRequest(requestId: number | string): void {
+    if (this.waiting.delete(requestId)) {
+      this.log.info(`他の経路で解決された承認を取り下げました: ${String(requestId)}`);
     }
-    this.waiting.delete(requestId);
-    this.log.info(`他の経路で解決された承認を取り下げました: ${String(requestId)}`);
+    if (this.waitingPrompts.delete(requestId)) {
+      this.log.info(`他の経路で解決された問い合わせを取り下げました: ${String(requestId)}`);
+    }
   }
 
   /** ユーザーが承認カードのボタンを押したとき。 */
@@ -710,10 +741,21 @@ export class ChatSession {
    *
    * 未入力のまま送っても形は揃える（質問idを落とすと相手が読めない）。中身を
    * 作らないのは `buildPromptResponse` の役目。
+   *
+   * スキーマの必須・数値の制約に反する回答は送らずに差し戻す。ここで通すと、
+   * 要求元が拒否したときには回答待ちもカードも消えており、同じフォームで
+   * 直せない（issue #1188）。
    */
   answerPrompt(requestId: number | string, submission: PromptSubmission): void {
     const waiting = this.waitingPrompts.get(requestId);
     if (waiting === undefined) {
+      return;
+    }
+    const errors = validatePromptSubmission(waiting.prompt, submission);
+    if (Object.keys(errors).length > 0) {
+      // 伏せ字の項目があるため、理由に値そのものは載せない
+      this.log.warn(`問い合わせの回答を差し戻しました: ${Object.keys(errors).join(', ')}`);
+      this.update(setPromptErrors(this.state, requestId, errors));
       return;
     }
     this.waitingPrompts.delete(requestId);
@@ -834,6 +876,12 @@ function readInitialItems(result: unknown): ChatState['items'] {
   const items: ChatState['items'] = [];
   for (const turn of turns) {
     const t = typeof turn === 'object' && turn !== null ? (turn as Record<string, unknown>) : {};
+    // ターンIDは**外側**（`turns[].id`）にあり、項目自身は持たない（実測: codex-cli 0.154.0。
+    // `turns[0].items[0]` のキーは `{type, id, clientId, content}`）。ここで各項目へ移して
+    // おかないと、復元した会話の項目は `turnId: undefined` のままになり、「ここから分岐」も
+    // 編集再送も境界を決められなくなる（Issue #1155）。ライブ通知の経路（`chatState.ts` の
+    // `item/started` 等）が `{ ...item, turnId }` で付けているものと同じ値・同じ形にする
+    const turnId = typeof t['id'] === 'string' && t['id'] !== '' ? t['id'] : undefined;
     const turnItems = t['items'];
     if (!Array.isArray(turnItems)) {
       continue;
@@ -841,7 +889,7 @@ function readInitialItems(result: unknown): ChatState['items'] {
     for (const raw of turnItems) {
       const normalized = normalizeItem(raw);
       if (normalized !== undefined) {
-        items.push(normalized);
+        items.push(turnId === undefined ? normalized : { ...normalized, turnId });
       }
     }
   }

@@ -21,6 +21,7 @@ import type { ApprovalMode } from '../codex/types';
 import { runSingleTurnTask, SingleTurnCancelledError } from '../orchestrator/planner';
 import type { TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import { removeSummaryRollout, type SummaryRolloutDeps } from './summaryRollout';
+import { describeRedaction, redactCredentials } from './redact';
 
 /** 要約セッションの権限。セカンドオピニオン本体と同じく読み取りだけで固定する。 */
 const SUMMARY_APPROVAL_MODE: ApprovalMode = 'never';
@@ -231,10 +232,16 @@ export async function summarizeConversation(
     return { ok: false, reason: '要約できる会話がまだありません' };
   }
   const prompt = buildConversationSummaryPrompt(conversation);
+  // 送信直前に資格情報らしき値を伏せる（Issue #1171）。本文はログへ出さず件数だけ残す
+  const redaction = redactCredentials(prompt);
+  const redactionNote = describeRedaction(redaction);
+  if (redactionNote !== undefined) {
+    log?.info(`${SUMMARY_LOG_PREFIX} ${redactionNote}`);
+  }
   // 会話の中身は出さない（Issue #894 受入基準14と同じ。credential・顧客情報が入りうる）
   log?.info(
     `${SUMMARY_LOG_PREFIX} start model=${request.model} effort=${request.effort} ` +
-      `promptChars=${prompt.length}`,
+      `promptChars=${redaction.text.length}`,
   );
   // 既に止められていれば、一時ディレクトリも作らずに返す（Issue #940）
   if (request.signal?.aborted === true) {
@@ -252,7 +259,7 @@ export async function summarizeConversation(
       host,
       'codex',
       buildSummarySessionInput(isolatedDir, request.model, request.effort),
-      prompt,
+      redaction.text,
       {
         timeoutMs: request.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS,
         log,

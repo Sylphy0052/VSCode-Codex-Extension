@@ -1,5 +1,5 @@
 export interface ConversationTurn {
-  /** `thread/fork` の `lastTurnId` に渡す値。 */
+  /** `thread/fork` の `beforeTurnId` に渡す値（Issue #1161）。 */
   turnId: string;
   timestamp: string | undefined;
   userMessage: string;

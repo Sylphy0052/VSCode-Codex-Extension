@@ -15,6 +15,7 @@ import type {
 import {
   WAITING_REPLY_POLL_INTERVAL_MS,
   WorkflowRunner,
+  type StartWorkflowResult,
   type WorkflowFilePort,
   type WorkflowRunnerForgeDeps,
   type WorkflowRunnerMessagingDeps,
@@ -326,6 +327,11 @@ interface FakeGitHandle extends GitCommandRunner {
    * 衝突解決セッション役の`FakeTaskSession`が`finish('done', ...)`する前に呼ぶ。
    */
   resolveConflict(): void;
+  /**
+   * 衝突解決セッションのテスト用。`git merge --abort`や`git reset`でマージを取り消した状態を
+   * 模す（未解決パスも`MERGE_HEAD`も無いが、対象ブランチは統合先へ入っていない。Issue #1111）。
+   */
+  abandonConflict(): void;
 }
 
 /**
@@ -371,10 +377,23 @@ function fakeGit(options?: {
   let conflictPending = options?.conflictOnce === true;
   let unresolvedConflict = false;
   let worktreeAddCallCount = 0;
+  // 統合先へ取り込み済みのブランチ（`git merge-base --is-ancestor`の応答に使う。Issue #1111）
+  const mergedBranches = new Set<string>();
+  // 衝突して解決待ちのブランチ。解決コミットが打たれた時点で取込み済みになる
+  let mergingBranch: string | undefined;
   return {
     calls,
     resolveConflict() {
       unresolvedConflict = false;
+      // 「解決してコミットした」＝対象ブランチが統合先へ入った状態（Issue #1111）
+      if (mergingBranch !== undefined) {
+        mergedBranches.add(mergingBranch);
+        mergingBranch = undefined;
+      }
+    },
+    abandonConflict() {
+      unresolvedConflict = false;
+      mergingBranch = undefined;
     },
     async run(args, cwd) {
       calls.push({ args: [...args], cwd });
@@ -403,10 +422,12 @@ function fakeGit(options?: {
           : { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
-        // マージ進行中（未解決の衝突が残っている）間だけ見つかる
+        // マージ進行中（未解決の衝突が残っている）間だけ見つかる。
+        // `-q --verify`は不在のとき何も出力しないため、stderrは空にする
+        // （`isMergeResolutionComplete`はstderrのある非0を「不明」として扱う。Issue #1111）
         return unresolvedConflict
           ? { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
-          : { code: 1, stdout: '', stderr: 'not found' };
+          : { code: 1, stdout: '', stderr: '' };
       }
       if (args[0] === 'rev-parse' && args.includes('--verify')) {
         // ブランチはまだ存在しない（worktree作成前提）
@@ -427,16 +448,20 @@ function fakeGit(options?: {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--no-ff') {
+        // `['merge', '--no-ff', '-m', <message>, <taskBranch>]`（`integration.ts`）
+        const branch = args[4] ?? '';
         if (conflictPending) {
           if (options?.conflictEveryMerge !== true) {
             conflictPending = false;
           }
           unresolvedConflict = true;
+          mergingBranch = branch;
           return { code: 1, stdout: '', stderr: 'CONFLICT (content): fake conflict' };
         }
         if (options?.failMerge) {
           return { code: 1, stdout: '', stderr: 'fatal: fake merge failure' };
         }
+        mergedBranches.add(branch);
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--abort') {
@@ -445,7 +470,14 @@ function fakeGit(options?: {
           return { code: 1, stdout: '', stderr: 'fatal: fake merge --abort failure' };
         }
         unresolvedConflict = false;
+        // 巻き戻したので取り込まれていない（Issue #1111）
+        mergingBranch = undefined;
         return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
+        return mergedBranches.has(args[2] ?? '')
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: '' };
       }
       if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
         return unresolvedConflict
@@ -1041,6 +1073,27 @@ function filePort(content: string): WorkflowFilePort {
   };
 }
 
+/**
+ * `allow` の確認を1往復してから開始する。
+ *
+ * Issue #1107 以降、`allowConfirmed: true` だけでは開始しない（確認した内容そのものを指す
+ * ダイジェストの一致まで見る）。確認の中身を問わないテストはこれを使う。
+ */
+async function startWithAllowConfirmed(
+  runner: WorkflowRunner,
+  defPath: string,
+  repoRoot = '/repo',
+): Promise<StartWorkflowResult> {
+  const first = await runner.start(defPath, repoRoot);
+  if (first.ok || first.needsAllowConfirmation !== true) {
+    return first;
+  }
+  return await runner.start(defPath, repoRoot, {
+    allowConfirmed: true,
+    ...(first.allowDigest === undefined ? {} : { allowConfirmedDigest: first.allowDigest }),
+  });
+}
+
 /** マイクロタスクを十分な回数流し、非同期の起動チェーン（worktree→boundary→openTaskSession）を進める。 */
 async function flush(times = 100): Promise<void> {
   for (let i = 0; i < times; i += 1) {
@@ -1080,6 +1133,8 @@ function createHarness(
     readAutoResume?: () => boolean;
     readMaxAutoResumeAttempts?: () => number;
     readReviewCommentPollIntervalSec?: () => number;
+    /** 実行のたびに内容が変わる定義ファイルを模すための差し替え口（Issue #1107）。 */
+    filePort?: WorkflowFilePort;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -1093,7 +1148,7 @@ function createHarness(
     worktreeQueue: new WorktreeCreationQueue(),
     git,
     fs: options?.fs ?? identityFs,
-    filePort: filePort(yaml),
+    filePort: options?.filePort ?? filePort(yaml),
     store,
     log: options?.log ?? fakeLogger,
     readBaseline: () => ({
@@ -2518,9 +2573,10 @@ tasks:
     done: d
 `;
     const { runner, codexHost, store } = createHarness(allowRetryYaml);
-    const result = await runner.start('/repo/.agents/workflows/allow-retry.yaml', '/repo', {
-      allowConfirmed: true,
-    });
+    const result = await startWithAllowConfirmed(
+      runner,
+      '/repo/.agents/workflows/allow-retry.yaml',
+    );
     const runId = result.runId as string;
     await flush();
 
@@ -2637,6 +2693,7 @@ tasks:
 
     const second = await runner.start('/repo/.agents/workflows/allow.yaml', '/repo', {
       allowConfirmed: true,
+      allowConfirmedDigest: first.allowDigest as string,
     });
     expect(second.ok).toBe(true);
     await flush();
@@ -2646,6 +2703,65 @@ tasks:
     expect(snapshot?.warnings.some((w) => w.kind === 'allowOverride' && w.taskId === 'T1')).toBe(
       true,
     );
+  });
+
+  it('確認の後に定義が差し替えられたら、同意済みとして実行せず確認をやり直す（Issue #1107）', async () => {
+    const confirmedYaml = `
+version: 1
+name: allow-digest-test
+tasks:
+  - id: T1
+    allow:
+      - "npm test"
+    prompt: p
+    done: d
+`;
+    const tamperedYaml = `
+version: 1
+name: allow-digest-test
+tasks:
+  - id: T1
+    allow:
+      - "rm -rf /"
+    prompt: p
+    done: d
+`;
+    let content = confirmedYaml;
+    const { runner, codexHost } = createHarness(confirmedYaml, {
+      filePort: {
+        fileSize: async () => Buffer.byteLength(content, 'utf8'),
+        readTextFile: async () => content,
+      },
+    });
+    const defPath = '/repo/.agents/workflows/allow-digest.yaml';
+
+    const first = await runner.start(defPath, '/repo');
+    expect(first.needsAllowConfirmation).toBe(true);
+    const confirmedDigest = first.allowDigest as string;
+    expect(confirmedDigest).toBeTypeOf('string');
+
+    // 確認ダイアログを出している間に定義が差し替わる
+    content = tamperedYaml;
+
+    const second = await runner.start(defPath, '/repo', {
+      allowConfirmed: true,
+      allowConfirmedDigest: confirmedDigest,
+    });
+    expect(second.ok).toBe(false);
+    expect(second.needsAllowConfirmation).toBe(true);
+    expect(second.allowTaskIds).toEqual(['T1']);
+    expect(second.allowDigest).not.toBe(confirmedDigest);
+    await flush();
+    expect(codexHost.sessions).toHaveLength(0);
+
+    // 差し替わった内容で確認を取り直せば開始する
+    const third = await runner.start(defPath, '/repo', {
+      allowConfirmed: true,
+      allowConfirmedDigest: second.allowDigest as string,
+    });
+    expect(third.ok).toBe(true);
+    await flush();
+    expect(codexHost.sessions).toHaveLength(1);
   });
 
   it('上流より緩い下流がresultを参照するワークフローはViewの警告欄にpermissionEscalationが出る（design.md §16.4 案2、Issue #67）', async () => {
@@ -2927,9 +3043,10 @@ tasks:
     done: d
 `;
       const { runner, codexHost, store } = createHarness(allowYaml);
-      const result = await runner.start('/repo/.agents/workflows/reload-allow.yaml', '/repo', {
-        allowConfirmed: true,
-      });
+      const result = await startWithAllowConfirmed(
+        runner,
+        '/repo/.agents/workflows/reload-allow.yaml',
+      );
       const runId = result.runId as string;
       await flush();
       codexHost.byTaskId('T1');
@@ -3203,6 +3320,27 @@ tasks:
     await flush();
 
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it('衝突解決セッションがマージを取り消したままdoneを宣言してもdoneにしない（Issue #1111）', async () => {
+    const git = fakeGit({ conflictOnce: true });
+    const { runner, codexHost, store } = createHarness(YAML, { git });
+    const result = await runner.start('/repo/.agents/workflows/merge.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('merging');
+
+    // `git merge --abort`相当。未解決パスも`MERGE_HEAD`も無いが、T1のcommitは
+    // 統合ブランチへ入っていない
+    const resolutionSession = codexHost.sessions.at(-1);
+    git.abandonConflict();
+    resolutionSession?.finish('done', doneState('衝突を解決しました'));
+    await flush();
+
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
   });
 
   /**
@@ -5018,7 +5156,7 @@ tasks:
         (c) =>
           c.args[0] === 'api' &&
           c.args[1] === 'projects/:id/merge_requests' &&
-          c.args.some((a) => a.startsWith('--field=source_branch=wf/')),
+          c.args.some((a) => a.startsWith('--raw-field=source_branch=wf/')),
       );
       const taskCreateCall = cli.calls[createCallIndex];
       expect(taskCreateCall?.args).toContain('--field=draft=true');
@@ -5607,8 +5745,32 @@ tasks:
     reviewSession?.finish('done', doneState('[]'));
     await flush();
 
-    // レビューを挟んでもタスクは最終的に完了する（マージを止めない）
+    // レビューで指摘が無ければタスクは最終的に完了する
     expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+  });
+
+  it('レビューで指摘があれば統合ブランチへマージせず、タスクを失敗にする（Issue #1110）', async () => {
+    const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git' });
+    const cli = fakeForgeCli();
+    const { runner, codexHost, store } = createHarness(SINGLE_TASK_YAML, {
+      git,
+      forge: fakeForgeDeps(cli, { reviewTaskPullRequest: true }),
+    });
+    const result = await runner.start('/repo/.agents/workflows/task-review.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    await flush();
+
+    const mergeCallsBeforeReview = git.calls.filter((c) => c.args[0] === 'merge').length;
+    const reviewSession = codexHost.sessions[codexHost.sessions.length - 1];
+    reviewSession?.finish('done', doneState('[{"message":"境界の検査が抜けている"}]'));
+    await flush();
+
+    // 指摘が残っているので統合worktreeでのマージへは進まない
+    expect(git.calls.filter((c) => c.args[0] === 'merge').length).toBe(mergeCallsBeforeReview);
+    expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
   });
 });
 
@@ -6699,6 +6861,195 @@ tasks:
         // 幽霊マニフェスト（撤去し忘れたmanifest.json）が読み戻されていれば、ここで
         // 復元したa.txtが再び削除される。修正後は消えていないことを確認する
         expect(fs.files.has('/repo/a.txt')).toBe(true);
+      },
+    );
+
+    it(
+      'run開始後・リロード前にワークスペースを手動編集していた場合、再開後の反映で' +
+        'その編集を上書きせず衝突として報告する（Issue #1115の受入基準）',
+      async () => {
+        const gitPort = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, codexHost, store } = createHarness(TWO_TASK_YAML, {
+          git: gitPort,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-reload.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        // T1がa.txtを変更して統合まで済ませる（統合先とマニフェストにa.txtが載る）
+        const t1 = codexHost.byTaskId('T1');
+        const cloneDir1 = path.join('/repo', '.agents', 'worktrees', runId, 'T1');
+        fs.setFile(path.join(cloneDir1, 'a.txt'), { size: 20, mtimeMs: 200 });
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
+
+        // ここで人がワークスペースのa.txtを直接編集する（run開始後・リロード前）。
+        // 反映の比較基準を復元時に取り直していると、この編集が基準へ吸収されて
+        // 「変わっていない」と判定され、T1の統合結果で上書きされてしまう
+        fs.setFile('/repo/a.txt', { size: 99, mtimeMs: 999 });
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = new WorkflowRunner({
+          readAutoResume: () => false,
+          hosts: { codex: newCodexHost, claude: newCodexHost },
+          worktreeQueue: new WorktreeCreationQueue(),
+          git: fakeGit({ notGitRepo: true }),
+          fs: identityFs,
+          filePort: filePort(TWO_TASK_YAML),
+          store,
+          pseudoWorktree: { fs, exclude: [] },
+          log: fakeLogger,
+          readBaseline: () => ({
+            codexSandbox: 'read-only',
+            codexApprovalMode: 'on-request',
+            claudePermissionMode: 'manual',
+            allowAutoApprove: true,
+            allowClaudeBypassPermissions: false,
+          }),
+        });
+        await reloadedRunner.restoreRunsForView();
+
+        // 中断扱いになったT2を再実行してrunを終わらせ、反映まで進める
+        expect(reloadedRunner.retryTask(runId, 'T2')).toEqual({ ok: true });
+        await flush();
+        const t2 = newCodexHost.byTaskId('T2');
+        t2.finish('done', doneState('ok'));
+        await flush();
+
+        // 人の編集がそのまま残っている（統合結果 size:20 で上書きされていない）
+        expect(fs.files.get('/repo/a.txt')).toEqual({ size: 99, mtimeMs: 999 });
+        const snapshot = reloadedRunner.getSnapshot(runId);
+        const blocked = snapshot?.warnings.find((w) => w.kind === 'pseudoWorktreeReflectBlocked');
+        expect(blocked?.message).toContain('a.txt');
+      },
+    );
+  });
+
+  describe('復元時に統合先を用意できなかった場合（Issue #1114）', () => {
+    const ONE_TASK_YAML = `
+version: 1
+name: pseudo-restore-failure-test
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+    /** リロード後のプロセス（ライブな状態を失った新しい`WorkflowRunner`）を模す。 */
+    function createReloadedRunner(
+      store: WorkflowRunStore,
+      host: FakeHost,
+      pseudoWorktree: { fs: PseudoWorktreeFileSystemPort; exclude: readonly string[] } | undefined,
+      autoResume = false,
+    ): WorkflowRunner {
+      return new WorkflowRunner({
+        // 既定では自動再開を切る。有効なままだとretryTaskを待たずにタスクが走り出し、
+        // 「手動で再開したときに何が起きるか」を観測できなくなる（他のリロードテストと
+        // 同じ理由。design.md §16.35）。自動再開そのものを見るテストだけtrueを渡す
+        readAutoResume: () => autoResume,
+        hosts: { codex: host, claude: host },
+        worktreeQueue: new WorktreeCreationQueue(),
+        git: fakeGit({ notGitRepo: true }),
+        fs: identityFs,
+        filePort: filePort(ONE_TASK_YAML),
+        store,
+        ...(pseudoWorktree !== undefined ? { pseudoWorktree } : {}),
+        log: fakeLogger,
+        readBaseline: () => ({
+          codexSandbox: 'read-only',
+          codexApprovalMode: 'on-request',
+          claudePermissionMode: 'manual',
+          allowAutoApprove: true,
+          allowClaudeBypassPermissions: false,
+        }),
+      });
+    }
+
+    it(
+      '統合先の再作成に失敗した復元では、タスクを元のワークスペースで再開せず' +
+        '停止状態のままにする（受入基準）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, store } = createHarness(ONE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, { fs, exclude: [] });
+        // 統合先を復元できない状況（統合先の経路がシンボリックリンクへ差し替えられた等。
+        // Issueの発生条件）を再現する。復元の最中だけ効かせる
+        const symlink = vi.spyOn(fs, 'isSymbolicLink').mockResolvedValue(true);
+        await reloadedRunner.restoreRunsForView();
+        symlink.mockRestore();
+
+        // 復元で中断扱いになったT1を再実行しても、隔離が無いまま元のワークスペース
+        // （/repo）でCLIセッションを開かない。開いてしまうと、隔離を前提に走らせていた
+        // タスクがワークスペースを直接書き換える
+        expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        expect(newCodexHost.sessions).toHaveLength(0);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      },
+    );
+
+    it(
+      '統合先の再作成に失敗した復元では、自動再開（design.md §16.35）も' +
+        '元のワークスペースでは走らせない',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const fs = new FakePseudoFs({ '/repo/a.txt': { size: 10, mtimeMs: 100 } });
+        const { runner, store } = createHarness(ONE_TASK_YAML, {
+          git,
+          pseudoWorktree: { fs, exclude: [] },
+        });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, { fs, exclude: [] }, true);
+        const symlink = vi.spyOn(fs, 'isSymbolicLink').mockResolvedValue(true);
+        await reloadedRunner.restoreRunsForView();
+        symlink.mockRestore();
+        // 自動再開は`restoreRunsForView`から切り離して走る（`void autoResumeIfEligible`）
+        await flush();
+
+        expect(newCodexHost.sessions).toHaveLength(0);
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      },
+    );
+
+    it(
+      'WorkflowRunnerDeps.pseudoWorktreeを省略した実行の復元は、従来どおり' +
+        'ワークスペース直下で再開する（後方互換。受入基準）',
+      async () => {
+        const git = fakeGit({ notGitRepo: true });
+        const { runner, store } = createHarness(ONE_TASK_YAML, { git });
+        const result = await runner.start('/repo/.agents/workflows/pseudo-restore.yaml', '/repo');
+        const runId = result.runId as string;
+        await flush();
+
+        const newCodexHost = new FakeHost();
+        const reloadedRunner = createReloadedRunner(store, newCodexHost, undefined);
+        await reloadedRunner.restoreRunsForView();
+
+        expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+        await flush();
+        // 共有（ワークスペース直下）で走る場合はcwdにタスクIDが入らないため、
+        // `byTaskId`（cwdの末尾で引く）ではなく開かれたセッションそのものを見る
+        const t1 = newCodexHost.sessions[0] as FakeTaskSession;
+        expect(t1.cwd).toBe('/repo');
+        t1.finish('done', doneState('ok'));
+        await flush();
+        expect(store.find(runId)?.tasks['T1']?.state).toBe('done');
       },
     );
   });
@@ -10696,9 +11047,10 @@ tasks:
 
   it('allowを持つタスクがreloadInterruptedなら、run全体の自動再開を見送る', async () => {
     const { runner, store } = createHarness(ALLOW_YAML);
-    const result = await runner.start('/repo/.agents/workflows/auto-resume-allow.yaml', '/repo', {
-      allowConfirmed: true,
-    });
+    const result = await startWithAllowConfirmed(
+      runner,
+      '/repo/.agents/workflows/auto-resume-allow.yaml',
+    );
     const runId = result.runId as string;
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
@@ -11450,6 +11802,7 @@ tasks:
     const throwingGit: FakeGitHandle = {
       calls: base.calls,
       resolveConflict: () => base.resolveConflict(),
+      abandonConflict: () => base.abandonConflict(),
       run: async (args, cwd) => {
         if (cwd.endsWith('/T1')) {
           throw new Error('gitの起動に失敗しました');
@@ -11594,6 +11947,7 @@ tasks:
     return {
       calls: base.calls,
       resolveConflict: () => base.resolveConflict(),
+      abandonConflict: () => base.abandonConflict(),
       run: async (args, cwd) => {
         if (args[0] === 'merge' && args[1] === '--no-ff') {
           throw new Error('ENOSPC: fake disk full');
@@ -11663,6 +12017,7 @@ tasks:
     const git: FakeGitHandle = {
       calls: base.calls,
       resolveConflict: () => base.resolveConflict(),
+      abandonConflict: () => base.abandonConflict(),
       run: async (args, cwd) => {
         if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
           diffCallCount += 1;
@@ -13113,5 +13468,112 @@ tasks:
     const t1Calls = realpathCalls.filter((p) => p.includes(`/${runId}/T1`));
     expect(t1Calls).toHaveLength(MAX_WORKTREE_REMOVAL_ATTEMPTS + 1);
     expect(warnings.some((m) => m.includes('残ります'))).toBe(true);
+  });
+});
+
+/**
+ * 独立検証（design.md §16.31(c)）の`await`中に人が「全体の停止」を押しても、検証は
+ * 停止を確認せずに同じセッションの`runLoop`を張り直していた（Issue #1121、静的精査
+ * EX-RUNNER-02）。元のループは`done`で終わっているため`stop()`の`stopLoop()`は何にも
+ * 当たらず、止めたはずのAIの修正ループが再開する。
+ */
+describe('WorkflowRunner: 独立検証中の全体停止（Issue #1121）', () => {
+  const VERIFY_YAML = `
+version: 1
+name: verify-halt
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+    verify:
+      files: ["必須ではない.txt"]
+      semantic: false
+`;
+
+  /**
+   * 検証の最初の`await`（`filePort.fileSize`）を任意のタイミングまで止めておくfilePort。
+   * 定義ファイル自身のサイズ取得（`start`が使う）は素通しし、検証対象のパスだけを保留する。
+   */
+  function gatedFilePort(yaml: string): {
+    port: WorkflowFilePort;
+    /** 検証対象の`fileSize`が待ちに入るまで待つ。 */
+    waitForVerification: () => Promise<void>;
+    /** 保留していた`fileSize`を「ファイルなし」（検証失敗）として返す。 */
+    release: () => void;
+  } {
+    let release: (() => void) | undefined;
+    let notifyEntered: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      notifyEntered = resolve;
+    });
+    return {
+      port: {
+        fileSize: async (target: string) => {
+          if (!target.endsWith('必須ではない.txt')) {
+            return Buffer.byteLength(yaml, 'utf8');
+          }
+          notifyEntered?.();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return undefined;
+        },
+        readTextFile: async () => yaml,
+      },
+      waitForVerification: async () => {
+        await entered;
+      },
+      release: () => {
+        release?.();
+      },
+    };
+  }
+
+  it('検証のawait中に停止すると、runLoopを張り直さずタスクが停止として確定する', async () => {
+    const gate = gatedFilePort(VERIFY_YAML);
+    const { runner, codexHost, store } = createHarness(VERIFY_YAML, {
+      filePort: gate.port,
+    });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    const runId = result.runId as string;
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const runLoopCallsBeforeDone = t1.runLoopCalls.length;
+    t1.finish('done' as LoopStopReason, doneState('[DONE]'));
+    await gate.waitForVerification();
+
+    runner.stop(runId);
+    gate.release();
+    await flush();
+
+    // 検証の失敗を修正させる指示（`runLoop`の張り直し）が出ていない
+    expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone);
+    const run = store.find(runId) as PersistedRun;
+    expect(run.haltedByUser).toBe(true);
+    expect(run.tasks['T1']?.state).toBe('failed');
+  });
+
+  it('停止がなければ従来どおり検証失敗の指摘を返して再試行する（陽性対照）', async () => {
+    const gate = gatedFilePort(VERIFY_YAML);
+    const { runner, codexHost } = createHarness(VERIFY_YAML, {
+      filePort: gate.port,
+    });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    expect(result.runId).toBeDefined();
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const runLoopCallsBeforeDone = t1.runLoopCalls.length;
+    t1.finish('done' as LoopStopReason, doneState('[DONE]'));
+    await gate.waitForVerification();
+
+    gate.release();
+    await flush();
+
+    expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone + 1);
+    expect(t1.runLoopCalls.at(-1)?.initialPrompt).toContain('必須ではない.txt');
   });
 });

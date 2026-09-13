@@ -353,6 +353,24 @@ function finalizeTaskPullRequestFlow(
       ? { number: parsePullRequestNumberFromUrl(flow.pullRequest.url), url: flow.pullRequest.url }
       : undefined;
 
+  // レビューで止めた場合、マージは試みていない（`mergeOutcome`が`undefined`。Issue #1110）。
+  // `busy`ではなく`failure`にするのは、Viewの「再マージ」で同じ変更をもう一度マージしても
+  // 指摘は消えないため。直すべきはコードで、復旧はタスクの失敗として扱う
+  if (flow.mergeOutcome === undefined) {
+    const message =
+      flow.review !== undefined && !flow.review.ok
+        ? flow.review.message
+        : 'レビューの結果を判定できませんでした';
+    const merge: MergeTaskResult = {
+      kind: 'failure',
+      message: `PR/MRのレビューで指摘が残っているため、統合ブランチへのマージを行いませんでした: ${message}`,
+    };
+    // 指摘の中身は`buildTaskPullRequestReviewStep`が`taskPullRequestReview`警告として
+    // 既に積んでいる。ここで同じ内容をもう一度警告へ出さず、ログとマージ結果に留める
+    self.deps.log.warn(`[workflow ${runId}/${taskId}] ${merge.message}`);
+    return { merge, pullRequest };
+  }
+
   return { merge: flow.mergeOutcome, pullRequest };
 }
 
@@ -772,6 +790,7 @@ async function mergeWithLease(
     taskId,
     task,
     integration,
+    taskBranch,
     merge,
     originCommit,
     lease,
@@ -905,6 +924,7 @@ async function startMergeResolution(
   taskId: string,
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
+  taskBranch: string,
   conflict: Extract<MergeTaskResult, { kind: 'conflict' }>,
   originCommit: string,
   lease: IntegrationLease,
@@ -1011,7 +1031,16 @@ async function startMergeResolution(
         return;
       }
       finishedWhileOpening.done = true;
-      void onMergeResolutionFinished(self, runId, taskId, task, integration, reason, lease);
+      void onMergeResolutionFinished(
+        self,
+        runId,
+        taskId,
+        task,
+        integration,
+        taskBranch,
+        reason,
+        lease,
+      );
     });
 
     // 承認待ちの可視化（Issue #413 PR4）。**`onFinished`と同じく`session.open()`より前に
@@ -1132,11 +1161,12 @@ async function onMergeResolutionFinished(
   taskId: string,
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
+  taskBranch: string,
   reason: LoopStopReason,
   lease: IntegrationLease,
 ): Promise<void> {
   try {
-    await finishMergeResolution(self, runId, taskId, task, integration, reason, lease);
+    await finishMergeResolution(self, runId, taskId, task, integration, taskBranch, reason, lease);
   } catch (e) {
     const live = self.runs.get(runId);
     if (live !== undefined) {
@@ -1161,6 +1191,7 @@ async function finishMergeResolution(
   taskId: string,
   task: WorkflowTask,
   integration: { cwd: string; branch: string },
+  taskBranch: string,
   reason: LoopStopReason,
   lease: IntegrationLease,
 ): Promise<void> {
@@ -1311,7 +1342,8 @@ async function finishMergeResolution(
 
   // design.md §16.17「コンフリクト」4.「宣言だけを信じず`git status`でも確かめる」
   const resolved =
-    reason === 'done' && (await isMergeResolutionComplete(integration.cwd, self.deps.git));
+    reason === 'done' &&
+    (await isMergeResolutionComplete(integration.cwd, self.deps.git, { runId, taskBranch }));
   if (resolved) {
     live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
     // ラッパー（`WorkflowRunner`側のメソッド）を通す。テストが`prototype`をスパイして
@@ -1326,7 +1358,7 @@ async function finishMergeResolution(
 
   if (reason === 'done') {
     self.deps.log.warn(
-      `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は未解決のままでした`,
+      `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は解決が統合ブランチへ入っていませんでした（未解決・未コミット・取り消しのいずれか）`,
     );
   }
   await abortAndBlock(self, runId, taskId, integration, lease);

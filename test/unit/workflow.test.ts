@@ -822,6 +822,70 @@ tasks:
     );
   });
 
+  it('escalateが配列でない(書き忘れ)場合は警告ではなくエラーになる（Issue #1124）', () => {
+    // 修正前は空配列へ黙って変換され、autoApprove: true と組み合わせると独自の停止条件が
+    // 消えたまま自動承認が働いていた
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    autoApprove: true
+    escalate: npm run sensitive-local-task
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some((e) => e.taskIds.includes('T1') && e.message.includes('escalate は配列で')),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['allow', 'allow: npm test'],
+    ['verify.commands', 'verify:\n      commands: npm test'],
+    ['verify.files', 'verify:\n      files: src/index.ts'],
+    ['verify.diff', 'verify:\n      diff: src/index.ts'],
+  ])('%s が配列でない場合はエラーになり、項目名を含む（Issue #1124）', (field, snippet) => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    ${snippet}
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { errors } = validateWorkflow(def);
+    expect(
+      errors.some((e) => e.taskIds.includes('T1') && e.message.includes(`${field} は配列で`)),
+    ).toBe(true);
+  });
+
+  it('escalate/allow/verifyを配列で指定した定義は従来どおりエラーなく読める（陽性対照）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    escalate: ["git push"]
+    allow: ["npm test"]
+    verify:
+      commands: ["npm test"]
+      files: ["src/index.ts"]
+`;
+    const def = parseWorkflowYaml(yaml);
+    const { errors } = validateWorkflow(def);
+    expect(errors).toEqual([]);
+    expect(def.tasks[0]?.escalate).toEqual(['git push']);
+    expect(def.tasks[0]?.allow).toEqual(['npm test']);
+    expect(def.tasks[0]?.verify?.commands).toEqual(['npm test']);
+  });
+
   it('dependsOnに文字列でない要素が混ざっていると警告になる', () => {
     const yaml = `
 version: 1
@@ -1374,6 +1438,15 @@ describe('clampAutoApprove', () => {
     const result = clampAutoApprove(false, false);
     expect(result.value).toBe(false);
     expect(result.warning).toBeUndefined();
+  });
+
+  it('allowAutoApproveが型を偽った値（文字列 "false"）でも無効化される（Issue #1105）', () => {
+    // 設定読取りが真偽値以外を返した場合の多層防御。`!allowAutoApprove` だと `!"false"` が
+    // falseになり、YAMLの autoApprove: true がそのまま通ってしまう
+    const lying = 'false' as unknown as boolean;
+    const result = clampAutoApprove(true, lying);
+    expect(result.value).toBe(false);
+    expect(result.warning).toBeDefined();
   });
 });
 

@@ -8,7 +8,13 @@ import type { SessionStore } from '../session/sessionStore';
 import { chatCsp } from './chatCsp';
 import { formatAbsoluteTime } from './relativeTime';
 
-export type ForkHandler = (session: SessionSummary, turnId: string) => Promise<void>;
+/**
+ * 分岐を実行する。成功したかを返す（Issue #1156）。
+ *
+ * 押した時点でwebview側がボタンを無効化するため、失敗したことを返さないと画面が
+ * 「分岐しています…」のまま固まり、同じ指示から再試行できない。
+ */
+export type ForkHandler = (session: SessionSummary, turnId: string) => Promise<boolean>;
 
 /**
  * 会話を読みながら分岐点を選ぶためのビューア。
@@ -69,7 +75,26 @@ export class ConversationViewManager {
         return;
       }
       this.log.info(`分岐を要求: session=${session.id} turn=${turnId}`);
-      void this.onFork(session, turnId);
+      // 分岐は数秒かかる。その間にタブを閉じられていると、破棄済みのwebviewへの
+      // postMessageが投げる。閉じられていれば戻す相手も居ないので送らない
+      const notifyFailure = (): void => {
+        if (this.panels.get(session.id) !== panel) {
+          return;
+        }
+        void panel.webview.postMessage({ type: 'forkFailed', turnId });
+      };
+      void this.onFork(session, turnId).then(
+        (ok) => {
+          if (!ok) {
+            notifyFailure();
+          }
+        },
+        (e: unknown) => {
+          // 投げて終わった場合もボタンを戻す。戻さないと再試行できない（Issue #1156）
+          this.log.error(`分岐に失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+          notifyFailure();
+        },
+      );
     });
   }
 
@@ -104,23 +129,21 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * @param previousTurnId 直前のターン。分岐は「この指示の手前まで」を引き継ぐため、
- *   クリックした指示そのものは含めない。最初の指示には手前が無いのでボタンを出さない。
+ * 1ターンを描く。
+ *
+ * 分岐ボタンが渡すのは**このターン自身**のid（`thread/fork` の `beforeTurnId`。そのターンと
+ * それ以降を除外する指定。Issue #1161）。会話の最初のターンは、除外すると何も残らないため
+ * ボタンを出さない（`hasEarlierTurn`）。
  */
-function renderTurn(
-  turn: ConversationTurn,
-  index: number,
-  previousTurnId: string | undefined,
-): string {
+function renderTurn(turn: ConversationTurn, index: number, hasEarlierTurn: boolean): string {
   const time = turn.timestamp === undefined ? '' : formatAbsoluteTime(turn.timestamp);
   const tools = summarizeTools(turn.toolNames);
   const agent = turn.agentMessages
     .map((m) => `<div class="bubble agent">${escapeHtml(m)}</div>`)
     .join('');
-  const forkButton =
-    previousTurnId === undefined
-      ? ''
-      : `<button type="button" data-turn="${escapeHtml(previousTurnId)}">ここから分岐</button>`;
+  const forkButton = !hasEarlierTurn
+    ? ''
+    : `<button type="button" data-turn="${escapeHtml(turn.turnId)}">ここから分岐</button>`;
 
   return `<article class="turn">
   <header>
@@ -208,7 +231,7 @@ function render(webview: vscode.Webview, title: string, turns: ConversationTurn[
 <body>
   <h1>${escapeHtml(title)}</h1>
   <p class="lead">「ここから分岐」を押すと、<strong>その指示の手前まで</strong>を引き継いだ新しいセッションが別タブで開きます。押した指示からやり直せます。元のセッションは変更されません。</p>
-  ${turns.map((turn, i) => renderTurn(turn, i, turns[i - 1]?.turnId)).join('\n')}
+  ${turns.map((turn, i) => renderTurn(turn, i, i > 0)).join('\n')}
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   document.body.addEventListener('click', (event) => {
@@ -217,6 +240,17 @@ function render(webview: vscode.Webview, title: string, turns: ConversationTurn[
     button.disabled = true;
     button.textContent = '分岐しています…';
     vscode.postMessage({ type: 'fork', turnId: button.dataset.turn });
+  });
+  // 分岐が失敗したら押せる状態へ戻す（Issue #1156）。戻さないとこのタブを開き直すまで
+  // 同じ指示から再試行できない
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || data.type !== 'forkFailed' || typeof data.turnId !== 'string') return;
+    for (const button of document.querySelectorAll('button[data-turn]')) {
+      if (button.dataset.turn !== data.turnId) continue;
+      button.disabled = false;
+      button.textContent = 'ここから分岐';
+    }
   });
 </script>
 </body>

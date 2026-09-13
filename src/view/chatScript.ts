@@ -382,6 +382,16 @@ export function chatScript(
     });
     actions.appendChild(copy);
 
+    // 送った指示を書き直して送り直す（issue #1073）。押すと本文の表示がその場で入力欄に
+    // 変わる。入力欄（画面下の #input）へ移さないのは、どの指示を直しているのかを
+    // 見失わないため。送るまでは会話・ファイル・タブのいずれも変えない
+    const edit = document.createElement('button');
+    edit.className = 'secondary';
+    edit.textContent = '修正';
+    edit.hidden = true;
+    edit.addEventListener('click', () => startEdit(node));
+    actions.appendChild(edit);
+
     const fork = document.createElement('button');
     fork.className = 'secondary';
     fork.textContent = 'ここから分岐';
@@ -498,6 +508,61 @@ export function chatScript(
     }
     wrap.appendChild(body);
 
+    // 指示の書き直し（issue #1073）。本文と同じ場所に出し、編集中は本文を隠す。
+    // userMessage以外では常に隠れたまま
+    const editBox = document.createElement('div');
+    editBox.className = 'edit-box';
+    editBox.hidden = true;
+    const editInput = document.createElement('textarea');
+    editInput.className = 'edit-input';
+    editInput.addEventListener('input', () => growEditInput(editInput));
+    editInput.addEventListener('keydown', (e) => {
+      // Escで取り消す。会話全体のEsc（中断）へは渡さない
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        endEdit(node);
+        return;
+      }
+      if (e.key !== 'Enter') return;
+      // 送信キーは入力欄と同じ設定に従う（issue #288）。変換確定のEnterでは送らない
+      const action = decideSendKeyAction(
+        {
+          key: e.key,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          shiftKey: e.shiftKey,
+          isComposing: e.isComposing === true,
+        },
+        SEND_ON,
+      );
+      if (action === 'send') {
+        e.preventDefault();
+        e.stopPropagation();
+        submitEdit(node);
+      }
+    });
+    editBox.appendChild(editInput);
+    const editRestore = document.createElement('input');
+    editRestore.type = 'checkbox';
+    const editRestoreLabel = document.createElement('label');
+    editRestoreLabel.appendChild(editRestore);
+    editRestoreLabel.appendChild(document.createTextNode('ファイルも戻す'));
+    editBox.appendChild(editRestoreLabel);
+    const editActions = document.createElement('div');
+    editActions.className = 'edit-actions';
+    const editCancel = document.createElement('button');
+    editCancel.className = 'secondary';
+    editCancel.textContent = 'キャンセルする';
+    editCancel.addEventListener('click', () => endEdit(node));
+    editActions.appendChild(editCancel);
+    const editSend = document.createElement('button');
+    editSend.textContent = '送信する';
+    editSend.addEventListener('click', () => submitEdit(node));
+    editActions.appendChild(editSend);
+    editBox.appendChild(editActions);
+    wrap.appendChild(editBox);
+
     // Web検索の結果（issue #18）。URLとタイトルの一覧を出す。webSearch以外では常に空
     const searchResults = document.createElement('div');
     searchResults.className = 'search-results';
@@ -528,6 +593,17 @@ export function chatScript(
       diffs,
       diffKey: '',
       copy,
+      edit,
+      editBox,
+      editInput,
+      editSend,
+      editRestore,
+      // 書き直したあとの送り先（issue #1073）。forkTargetと同じ値を使う。
+      // Codex画面で最初の発言だけは手前のターンが無いため undefined のままになり、
+      // その場合は分岐ではなく新しい会話として送り直す（editFromStart）
+      editTarget: undefined,
+      editFromStart: false,
+      editing: false,
       fork,
       forkTarget: undefined,
       rewind,
@@ -881,8 +957,10 @@ export function chatScript(
         if (node.bodySummary.textContent !== summaryLabel) node.bodySummary.textContent = summaryLabel;
         node.bodyContent.textContent = primary;
       }
-      node.body.hidden = primary === '';
-      node.copy.hidden = primary === '';
+      // 通常分岐と揃える。userMessage は今のところ折りたたみ対象にならないが、
+      // 対象が広がっても書き直し中の入力欄と本文が二重に出ないようにする（issue #1073）
+      node.body.hidden = primary === '' || node.editing;
+      node.copy.hidden = primary === '' || node.editing;
       return;
     }
 
@@ -909,8 +987,10 @@ export function chatScript(
         node.body.textContent = primary;
       }
     }
-    node.body.hidden = primary === '';
-    node.copy.hidden = primary === '';
+    // 書き直し中は本文の代わりに入力欄を出している（issue #1073）。状態の更新が届いても
+    // 本文を出し直さない（編集中の内容の上に元の本文が重なって見えるのを防ぐ）
+    node.body.hidden = primary === '' || node.editing;
+    node.copy.hidden = primary === '' || node.editing;
   }
 
   /**
@@ -1051,7 +1131,10 @@ export function chatScript(
 
     const offerOpenEditor = diff.kind !== 'delete';
     const offerOpenDiff = diff.kind === 'add' || diff.kind === 'delete' || diff.kind === 'update';
-    const offerRevert = offerOpenDiff && !diff.movePath;
+    // 新規作成と確認できていない追加（Claude CodeのWrite由来、issue #1176）は
+    // 戻すと削除になる。上書きだった場合に既存ファイルを消すため出さない
+    const unverifiedAdd = diff.kind === 'add' && diff.createUnverified === true;
+    const offerRevert = offerOpenDiff && !diff.movePath && !unverifiedAdd;
     if (!offerOpenEditor && !offerOpenDiff && !offerRevert) return null;
 
     const wrap = document.createElement('span');
@@ -1139,22 +1222,85 @@ export function chatScript(
     container.hidden = diffs.length === 0;
   }
 
-  // 「ここから分岐」ボタンの対象を決める（issue #333、design.md §14.61）。
-  //
-  // Codex画面（既定）: 対象は直前の発言のturnId（thread/forkのlastTurnIdは
-  // 「引き継ぐ最後のターン」を指すため）。最初の発言には手前が無いのでボタンを出さない。
-  //
-  // Claude Code画面（SHOW_TURN_FORK）: 対象は押した発言自身のid（rewind_conversationの
-  // target_message_uuidは「戻す対象＝分岐したい発言そのもの」を指すため、Codexとは
-  // 向きが違う）。Claude Codeの発言idは常に持っているため、最初の発言でもボタンを出す
-  // （CLIが対象にできない場合はエラー応答として画面に返る。design.md §14.61の
-  // 「未確認のリスク」参照）。
-  function turnForkTarget(item, previousTurnId) {
-    if (item.kind !== 'userMessage') return undefined;
-    return SHOW_TURN_FORK ? item.id : previousTurnId;
+  /**
+   * 送った指示の書き直しを始める（issue #1073）。
+   *
+   * 本文の表示をその場でtextareaへ差し替える。画面下の入力欄へ本文を移す形にしないのは、
+   * どの指示を直しているのかが視線から外れるため。ここでは表示を変えるだけで、
+   * 会話・ファイル・タブのいずれにも触れない（送信するまで何も起きない）。
+   */
+  function startEdit(node) {
+    if (node.editing) return;
+    node.editing = true;
+    node.editInput.value = node.fullText || '';
+    node.editRestore.checked = false;
+    node.editBox.hidden = false;
+    node.body.hidden = true;
+    node.edit.hidden = true;
+    node.editSend.disabled = false;
+    growEditInput(node.editInput);
+    node.editInput.focus();
+    node.editInput.selectionStart = node.editInput.selectionEnd = node.editInput.value.length;
   }
 
-  function updateNode(node, item, forkTarget) {
+  /** 書き直しをやめて表示を元へ戻す。取り消しでは何も送らない（issue #1073）。 */
+  function endEdit(node) {
+    if (!node.editing) return;
+    node.editing = false;
+    node.editBox.hidden = true;
+    // 本文の出し分け（Markdown・折りたたみ）ごとやり直して、隠していた表示を戻す
+    if (node.lastItem) renderBody(node, node.lastItem);
+    node.edit.hidden = node.editTarget === undefined && !node.editFromStart;
+  }
+
+  /**
+   * 書き直した内容で送り直す（issue #1073）。ここは要求を送るだけで、どこまで戻すか・
+   * どの会話へ送るかは拡張機能側（chatView.ts / claudeChatView.ts）が決める。
+   * 送り先は新しいタブになるため、この会話の表示はそのまま元へ戻す。
+   */
+  function submitEdit(node) {
+    const text = node.editInput.value;
+    if (text.trim() === '') return;
+    node.editSend.disabled = true;
+    vscode.postMessage({
+      type: 'editResend',
+      messageId: node.rewindTarget,
+      restoreFiles: node.editRestore.checked,
+      turnId: node.editTarget,
+      fromStart: node.editFromStart === true,
+      text,
+    });
+    endEdit(node);
+  }
+
+  /** 書き直し欄の高さを中身に合わせる。長い指示を数行しか見せないと直しづらい。 */
+  function growEditInput(input) {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 480) + 'px';
+  }
+
+  // 「ここから分岐」ボタンの対象を決める（issue #333、design.md §14.61）。
+  //
+  // Codex画面（既定）: 対象は押した発言**自身**のturnId。thread/forkへは beforeTurnId
+  // （そのターンとそれ以降を除外する指定）として渡す（Issue #1161）。会話の最初の
+  // ターンでは除外すると何も残らないのでボタンを出さない。以前は「直前の発言のturnId」を
+  // lastTurnId（引き継ぐ最後のターン＝含める指定）として渡していたが、同じターンへ
+  // 割り込んで送った指示から分岐すると、実行中のターン自身を指してCLIに拒否され、
+  // 完了後は消したかった指示自身が分岐先に残っていた。
+  //
+  // Claude Code画面（SHOW_TURN_FORK）: 対象は押した発言自身のid（rewind_conversationの
+  // target_message_uuidは「戻す対象＝分岐したい発言そのもの」を指す）。Claude Codeの
+  // 発言idは常に持っているため、最初の発言でもボタンを出す（CLIが対象にできない場合は
+  // エラー応答として画面に返る。design.md §14.61の「未確認のリスク」参照）。
+  function turnForkTarget(item, previousTurnId) {
+    if (item.kind !== 'userMessage') return undefined;
+    if (SHOW_TURN_FORK) return item.id;
+    // 最初のターン（手前に完了したターンが無い）と、turnIdを持たない項目には出さない
+    if (!item.turnId || previousTurnId === undefined) return undefined;
+    return item.turnId;
+  }
+
+  function updateNode(node, item, forkTarget, isFirstTurn) {
     const bits = [KIND_LABEL[item.kind] || item.kind];
     if (item.detail) {
       const detail =
@@ -1214,6 +1360,19 @@ export function chatScript(
     node.forkTarget = forkTarget;
     node.fork.hidden = !(item.kind === 'userMessage' && forkTarget);
 
+    // 書き直しの送り先は分岐と同じ（issue #1073）。Codex画面で会話の最初の発言だけは
+    // 分岐先が空になるため、分岐ではなく新しい会話として送り直す（editFromStart）。
+    // 「最初かどうか」は forkTarget の有無ではなく isFirstTurn で判定する（Issue #1161）。
+    // turnIdを持たない項目でも forkTarget は undefined になるため、それを先頭と取り違えると
+    // 会話の途中の書き直しが先頭からのやり直しへ倒れる。Claude Code画面は発言自身のidを
+    // 常に持ち forkTarget が埋まるので、ここは従来どおり常にfalse
+    const editable = item.kind === 'userMessage';
+    node.editTarget = editable ? forkTarget : undefined;
+    node.editFromStart = editable && forkTarget === undefined && isFirstTurn === true;
+    node.edit.hidden = !editable || node.editing;
+    // 別の発言として作り直された枠に、前の発言の編集状態を持ち越さない
+    if (!editable && node.editing) endEdit(node);
+
     // 巻き戻しは発言自身のidを渡す（対象は「この発言を送る前」）。turnIdと違い、
     // どの発言でも常に持っている値なので、直前の発言の有無を待つ必要が無い
     node.rewindTarget = item.kind === 'userMessage' ? item.id : undefined;
@@ -1269,7 +1428,7 @@ export function chatScript(
         nodes.set(item.id, node);
         log.appendChild(node.wrap);
       }
-      updateNode(node, item, turnForkTarget(item, previousTurnId));
+      updateNode(node, item, turnForkTarget(item, previousTurnId), previousTurnId === undefined);
       if (item.kind === 'userMessage' && item.turnId) previousTurnId = item.turnId;
     }
 
@@ -1319,9 +1478,14 @@ export function chatScript(
 
     const actions = document.createElement('div');
     actions.className = 'actions';
+    // 「この会話では常に許可」は、会話単位の許可を実際に送れるプロバイダにだけ出す
+    // （issue #1194）。Claude Codeのcan_use_tool応答には単発の許可しか無く、
+    // 押しても次の同じ要求でまた承認カードが出る。押せるのに効かないボタンは出さない。
+    // 対応する側を列挙する（除外側を書くと、プロバイダが増えたとき既定で出てしまう）
+    const forSession = APPROVAL_PROVIDER === 'codex';
     for (const [label, decision, secondary] of [
       ['許可', 'accept', false],
-      ['この会話では常に許可', 'acceptForSession', true],
+      ...(forSession ? [['この会話では常に許可', 'acceptForSession', true]] : []),
       ['拒否', 'decline', true],
     ]) {
       const button = document.createElement('button');
@@ -1340,9 +1504,13 @@ export function chatScript(
   /**
    * AskUserQuestion（issue #685）の選択UI。「送信」/「拒否」の2ボタンに絞る
    * （選ばずに常時許可という概念が成立しないため、常時許可ボタンは出さない）。
-   * 1〜4問を質問ごとに区切って並べ、multiSelect指定に応じてradio/checkboxを出す
+   * 1〜4問を質問ごとに区切り、multiSelect指定に応じてradio/checkboxを出す
    * （見た目はbuildOptions＝requestUserInput/elicitation用と似せているが、
    * 型（questions/options）が違うため呼び出しは共有できず別実装にしてある）。
+   *
+   * 質問が2問以上のときは1問ずつタブで切り替える（issue #1085）。全部を縦に
+   * 並べるとカードだけで画面が埋まり、回答の判断材料である会話が見えなくなる。
+   * 非表示の質問も入力要素はDOMに残すので、タブを行き来しても選択は消えない。
    */
   function renderAskUserQuestion(approval) {
     const wrap = document.createElement('div');
@@ -1354,9 +1522,70 @@ export function chatScript(
 
     const readers = [];
     const questions = approval.questions || [];
+
+    const tabBar = document.createElement('div');
+    tabBar.className = 'question-tabs';
+    tabBar.setAttribute('role', 'tablist');
+    // 1問しかないならタブは情報を増やさないので出さない
+    if (questions.length > 1) wrap.appendChild(tabBar);
+
+    const body = document.createElement('div');
+    body.className = 'question-body';
+    wrap.appendChild(body);
+
+    const tabs = [];
+    const panels = [];
+    const showQuestion = (active) => {
+      panels.forEach((panel, i) => (panel.hidden = i !== active));
+      tabs.forEach((tab, i) => {
+        tab.classList.toggle('active', i === active);
+        tab.setAttribute('aria-selected', i === active ? 'true' : 'false');
+      });
+      body.scrollTop = 0;
+    };
+
     questions.forEach((question, index) => {
-      wrap.appendChild(buildAskUserQuestionField(approval.requestId, question, index, readers));
+      const panel = buildAskUserQuestionField(approval.requestId, question, index, readers);
+      panels.push(panel);
+      body.appendChild(panel);
+
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'question-tab';
+      tab.setAttribute('role', 'tab');
+      tab.textContent = askUserQuestionTabLabel(question, index);
+      tab.addEventListener('click', () => showQuestion(index));
+      tabs.push(tab);
+      tabBar.appendChild(tab);
     });
+    showQuestion(0);
+
+    // 未回答で送信が止まった理由。止まった質問が隠れたタブ側にあると画面上の
+    // 変化が何も無く、押しても反応しないように見えてしまう
+    const warning = document.createElement('div');
+    warning.className = 'question-warning';
+    warning.hidden = true;
+    wrap.appendChild(warning);
+
+    // 未回答のタブに印を付け、最初の未回答の位置を返す（全部答えていれば-1）
+    const markUnanswered = (answers) => {
+      let first = -1;
+      questions.forEach((question, i) => {
+        const empty = (answers[question.question] || []).length === 0;
+        tabs[i].classList.toggle('unanswered', empty);
+        if (empty && first < 0) first = i;
+      });
+      return first;
+    };
+    // 回答したら印と文言をその場で取り下げる。直したのに赤いままだと、まだ何か
+    // 足りないのか送信を試すまで分からない
+    const refreshUnanswered = () => {
+      const answers = {};
+      for (const read of readers) read(answers);
+      if (markUnanswered(answers) < 0) warning.hidden = true;
+    };
+    body.addEventListener('change', refreshUnanswered);
+    body.addEventListener('input', refreshUnanswered);
 
     const actions = document.createElement('div');
     actions.className = 'actions';
@@ -1368,8 +1597,14 @@ export function chatScript(
       for (const read of readers) read(answers);
       // 選択必須。未回答の質問があれば送信しない（multiSelect:falseはradioで自然に
       // 1つへ強制されるが、選び忘れ自体は防げないため両方とも件数で確認する）
-      const unanswered = questions.some((q) => (answers[q.question] || []).length === 0);
-      if (unanswered) return;
+      const firstUnanswered = markUnanswered(answers);
+      if (firstUnanswered >= 0) {
+        showQuestion(firstUnanswered);
+        warning.textContent = '未回答の質問があります。すべての質問に回答してください。';
+        warning.hidden = false;
+        return;
+      }
+      warning.hidden = true;
       actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
       vscode.postMessage({ type: 'answerAskUserQuestion', requestId: approval.requestId, answers });
     });
@@ -1386,6 +1621,18 @@ export function chatScript(
 
     wrap.appendChild(actions);
     return wrap;
+  }
+
+  /**
+   * タブの見出し。headerは短い札として書かれるのでそのまま使い、無いときだけ
+   * 質問文を切り詰める（タブが折り返して縦に伸びるのを防ぐ）。
+   */
+  function askUserQuestionTabLabel(question, index) {
+    const header = (question.header || '').trim();
+    if (header !== '') return header;
+    const text = (question.question || '').trim();
+    if (text === '') return '質問 ' + String(index + 1);
+    return text.length > 20 ? text.slice(0, 19) + '…' : text;
   }
 
   /** 1問分の見出し・本文・選択肢。 */
@@ -1476,7 +1723,7 @@ export function chatScript(
    * （elicitation）を同じ形で出す。
    *
    * 入力欄の中身は画面が持ち、送信のときにまとめて集める。状態の再描画で入力中の
-   * 値が消えないよう、カードは中身が変わったときだけ作り直す。
+   * 値が消えないよう、カードはrequestIdごとに作り、以後は使い回す（renderPrompts）。
    */
   function renderPrompt(prompt) {
     const wrap = document.createElement('div');
@@ -1517,8 +1764,10 @@ export function chatScript(
     }
 
     const readers = [];
+    // 項目名が __proto__ でも壊れないようMapで持つ
+    const errorSetters = new Map();
     for (const field of prompt.fields || []) {
-      wrap.appendChild(buildField(field, readers));
+      wrap.appendChild(buildField(prompt.requestId, field, readers, errorSetters));
     }
 
     const actions = document.createElement('div');
@@ -1527,16 +1776,35 @@ export function chatScript(
     buttons.push(['拒否', 'decline', true]);
     if (prompt.kind === 'elicitation') buttons.push(['取り消す', 'cancel', true]);
 
+    // ホスト側が差し戻した理由を、カードを作り直さずに反映する。作り直すと入力が消える
+    const applyErrors = (errors) => {
+      const map = errors || {};
+      errorSetters.forEach((show, id) => show(Object.hasOwn(map, id) ? map[id] : ''));
+      // 差し戻されたら押せる状態へ戻す。戻さないとタブを開き直すまで送り直せない
+      if (Object.keys(map).length > 0) {
+        actions.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      }
+    };
+    wrap.applyPromptErrors = applyErrors;
+
     for (const [label, action, secondary] of buttons) {
       const button = document.createElement('button');
       button.textContent = label;
       if (secondary) button.className = 'secondary';
       button.addEventListener('click', () => {
-        actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
-        const values = {};
+        // 項目名はMCPサーバが決める。素のオブジェクトだと __proto__ の回答が消える
+        const values = Object.create(null);
         if (action === 'submit') {
           for (const read of readers) read(values);
+          // 制約に反する回答は送らない。送ってしまうとカードが消え、同じフォームで直せない
+          const errors = promptErrors(prompt.fields || [], values);
+          if (Object.keys(errors).length > 0) {
+            applyErrors(errors);
+            return;
+          }
         }
+        applyErrors({});
+        actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
         vscode.postMessage({
           type: 'prompt',
           requestId: prompt.requestId,
@@ -1549,8 +1817,41 @@ export function chatScript(
     return wrap;
   }
 
-  /** 1つの入力欄。集め方は readers へ積む。 */
-  function buildField(field, readers) {
+  /**
+   * 送信前の検査。ホスト側の validatePromptSubmission と同じ規則で、必須・数値・
+   * 整数・範囲を見る。Webviewのスクリプトは拡張のモジュールを読み込めないため、
+   * 規則をここへ写している。最終判断はホスト側。
+   */
+  function promptErrors(fields, values) {
+    const errors = [];
+    for (const field of fields) {
+      const given = Object.hasOwn(values, field.id) ? values[field.id] : [];
+      const message = promptFieldError(field, Array.isArray(given) ? given : []);
+      if (message !== '') errors.push([field.id, message]);
+    }
+    // 項目名はMCPサーバが決める。素のオブジェクトへ代入すると __proto__ という名前で
+    // 握り潰され、理由が1件も無い（＝検証を通った）ことになる
+    return Object.fromEntries(errors);
+  }
+
+  function promptFieldError(field, given) {
+    const picked = given.filter((v) => String(v).trim() !== '');
+    if (picked.length === 0) return field.required ? '必須項目です' : '';
+    if (field.input !== 'number') return '';
+    for (const raw of picked) {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return '数値を入力してください';
+      if (field.integer && !Number.isInteger(value)) return '整数を入力してください';
+      if (typeof field.minimum === 'number' && value < field.minimum)
+        return field.minimum + ' 以上の値を入力してください';
+      if (typeof field.maximum === 'number' && value > field.maximum)
+        return field.maximum + ' 以下の値を入力してください';
+    }
+    return '';
+  }
+
+  /** 1つの入力欄。集め方は readers へ、止めた理由の出し口は errorSetters へ積む。 */
+  function buildField(requestId, field, readers, errorSetters) {
     const box = document.createElement('div');
     box.className = 'field';
 
@@ -1566,6 +1867,7 @@ export function chatScript(
       box.appendChild(desc);
     }
 
+    const options = field.options || [];
     if (field.input === 'boolean') {
       const input = document.createElement('input');
       input.type = 'checkbox';
@@ -1574,22 +1876,29 @@ export function chatScript(
       readers.push((values) => {
         values[field.id] = [input.checked ? 'true' : 'false'];
       });
-      return box;
+    } else if (options.length > 0) {
+      buildOptions(requestId, box, field, options, readers);
+    } else {
+      box.appendChild(buildFreeInput(field, readers));
     }
 
-    const options = field.options || [];
-    if (options.length > 0) {
-      buildOptions(box, field, options, readers);
-      return box;
-    }
-
-    box.appendChild(buildFreeInput(field, readers));
+    // 理由は入力欄の下に出す。星印だけでは何が足りないか判らない
+    const error = document.createElement('div');
+    error.className = 'field-error';
+    error.hidden = true;
+    box.appendChild(error);
+    errorSetters.set(field.id, (message) => {
+      error.textContent = message;
+      error.hidden = message === '';
+    });
     return box;
   }
 
-  function buildOptions(box, field, options, readers) {
-    // 同じカードに複数の質問が並ぶため、name はフィールドidで分ける
-    const name = 'prompt-' + field.id;
+  function buildOptions(requestId, box, field, options, readers) {
+    // 同じカードに複数の質問が並ぶためフィールドidで分け、さらにrequestIdでscopeする。
+    // 別カードが同じfield.id（MCPフォームのenvironmentなど）を持つとき、nameが衝突すると
+    // ブラウザが両カードを同一グループとして扱い、片方の選択がもう片方を解除してしまう
+    const name = 'prompt-' + String(requestId) + '-' + field.id;
     const inputs = [];
     for (const option of options) {
       const row = document.createElement('label');
@@ -1648,6 +1957,12 @@ export function chatScript(
     const input = document.createElement('input');
     // 伏せ字の指定は画面でも守る
     input.type = field.secret ? 'password' : field.input === 'number' ? 'number' : 'text';
+    if (input.type === 'number') {
+      // スピナーと矢印キーを制約どおりに動かす。素通りする入力は送信時に止める
+      if (field.integer) input.step = '1';
+      if (typeof field.minimum === 'number') input.min = String(field.minimum);
+      if (typeof field.maximum === 'number') input.max = String(field.maximum);
+    }
     input.value = field.defaultValue || '';
     readers.push((values) => {
       values[field.id] = [input.value];
@@ -1655,15 +1970,46 @@ export function chatScript(
     return input;
   }
 
+  /**
+   * 質問カードの一覧。回答前の入力はDOMだけが持つため、一覧が変わっても既存カードは
+   * 作り直さず、増えた分だけ作って消えた分だけ取り除く。全部作り直すと、質問が1件
+   * 増減しただけで残る質問の未送信の本文・選択まで失われる。
+   *
+   * 位置合わせも、ずれているカードだけを動かす。並べ直しのために付け替えると、
+   * 入力中の欄からフォーカスが外れる。
+   */
   function renderPrompts(prompts) {
     const box = el('prompts');
     const list = prompts || [];
-    // 入力中の値を消さないため、顔ぶれが変わったときだけ作り直す
-    const key = list.map((p) => String(p.requestId)).join(',');
-    if (box.dataset.key === key) return;
-    box.dataset.key = key;
-    box.replaceChildren();
-    for (const prompt of list) box.appendChild(renderPrompt(prompt));
+
+    const existing = new Map();
+    for (const card of Array.from(box.children)) {
+      if (card.dataset.requestId !== undefined) existing.set(card.dataset.requestId, card);
+    }
+
+    const next = [];
+    for (const prompt of list) {
+      const id = String(prompt.requestId);
+      const card = existing.get(id);
+      if (card) {
+        existing.delete(id);
+        // 差し戻された理由はカードを作り直さずに載せ替える
+        if (card.applyPromptErrors) card.applyPromptErrors(prompt.errors);
+        next.push(card);
+        continue;
+      }
+      const created = renderPrompt(prompt);
+      created.dataset.requestId = id;
+      if (created.applyPromptErrors) created.applyPromptErrors(prompt.errors);
+      next.push(created);
+    }
+
+    // 一覧から消えた要求（回答・拒否・取り消し済み）のカードだけを外す
+    for (const card of existing.values()) card.remove();
+
+    next.forEach((card, index) => {
+      if (box.children[index] !== card) box.insertBefore(card, box.children[index] || null);
+    });
   }
 
   function defaultLabel(value) {
@@ -1803,6 +2149,29 @@ export function chatScript(
     });
   }
 
+  function addModelInput(id, type) {
+    const select = el(id);
+    if (!select) return;
+    const box = document.createElement('div');
+    box.className = 'modelInput';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '一覧外のモデルID';
+    input.setAttribute('aria-label', '一覧外のモデルID');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'モデルIDを適用';
+    button.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (value) vscode.postMessage({ type, key: 'model', value });
+    });
+    box.append(input, button);
+    const anchor = select.closest('label') || select;
+    anchor.after(box);
+  }
+
+  addModelInput('model', 'config');
+
   for (const key of SETTING_KEYS) {
     const select = el(key);
     if (!select) continue;
@@ -1818,6 +2187,18 @@ export function chatScript(
     settingsBox.open = saved.settingsOpen === true;
     settingsBox.addEventListener('toggle', () => {
       patchState({ settingsOpen: settingsBox.open });
+    });
+  }
+
+  // 状態行（承認・応答中・コンテキスト・コスト等）の開閉も覚える（issue #1086）。
+  // 幅が狭いと何行にも折り返して会話の領域を食うため畳めるようにした。従来どおり
+  // 見えている方を既定にし、畳んだ選択だけを覚える
+  const statusBox = el('statusBox');
+  if (statusBox) {
+    const saved = vscode.getState() || {};
+    statusBox.open = saved.statusOpen !== false;
+    statusBox.addEventListener('toggle', () => {
+      patchState({ statusOpen: statusBox.open });
     });
   }
 
@@ -2051,6 +2432,7 @@ export function chatScript(
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
     renderQueue(queuedMessages);
+    renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
     hasBackgroundTerminals = (state.backgroundTerminals || []).length > 0;
@@ -2073,6 +2455,7 @@ export function chatScript(
     const sendDebugCommandButton = el('sendDebugCommand');
     if (sendDebugCommandButton) sendDebugCommandButton.disabled = !!state.busy;
     applyPlanMode(state.planMode);
+    applyAutoHandoff(state.autoHandoff);
     applyFastMode(state);
     renderAttachments(state.attachments);
     applyLoop(state.loop);
@@ -2181,6 +2564,18 @@ export function chatScript(
     button.className = planMode ? 'toggled' : 'secondary';
   }
 
+  // いま自動引き継ぎがONか（Issue #1079）。押したときに反転させるため覚えておく
+  let autoHandoff = false;
+
+  /** 自動引き継ぎボタンの見た目。計画ボタンと同じく、押されているかが常に分かるようにする。 */
+  function applyAutoHandoff(on) {
+    autoHandoff = !!on;
+    const button = el('autoHandoffToggle');
+    if (!button) return;
+    button.setAttribute('aria-pressed', autoHandoff ? 'true' : 'false');
+    button.className = autoHandoff ? 'toggled' : 'secondary';
+  }
+
   // いまFast modeか（Claude Codeのみ）。押したときに反転させるため覚えておく
   let fastMode = false;
 
@@ -2210,6 +2605,30 @@ export function chatScript(
     button.title = unsupportedModel
       ? 'このモデルはFast modeに対応していません'
       : '応答を速くします（Fast mode）';
+  }
+
+  function renderLimitAutoResumeStatus(status) {
+    const node = el('limitAutoResumeStatus');
+    if (!node) return;
+    const enabled = !!(status && status.enabled);
+    node.hidden = !enabled;
+    if (!enabled) return;
+    if (status.awaitingResult) {
+      node.textContent = '上限解除後の自動続行: 「続けて」を送信しました。上限状態を確認しています';
+      return;
+    }
+    if (typeof status.scheduledAt === 'number') {
+      const scheduledAt = new Date(status.scheduledAt).toLocaleString('ja-JP', {
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      node.textContent =
+        '上限解除後の自動続行: 上限を検知しました。' + scheduledAt + 'に「続けて」を送信します';
+      return;
+    }
+    node.textContent = '上限解除後の自動続行: ON（上限検知待ち）';
   }
 
   /**
@@ -2297,6 +2716,21 @@ export function chatScript(
       button.addEventListener('click', () => vscode.postMessage({ type: 'usageCreditsRequest' }));
       status.appendChild(button);
     }
+
+    // 畳んでいる間も状況が分かるよう、見出しには要点だけを添える（issue #1086）
+    const statusSummary = el('statusSummary');
+    if (statusSummary) {
+      const brief = [];
+      if (state.busy) brief.push('応答中…');
+      if (context) brief.push(context.text);
+      if (cost) brief.push(cost.text);
+      // 上限だけは畳んでいても気づけるようにする。要求ボタン自体は開かないと押せない
+      if (usageCreditsLimited(state)) brief.push('上限に達しています');
+      statusSummary.textContent = brief.join(' ・ ');
+    }
+    // 出すものが何も無いときは見出しごと消す。畳める代わりに空の行が増えては本末転倒
+    const statusBox = el('statusBox');
+    if (statusBox) statusBox.hidden = status.childNodes.length === 0;
   }
 
   /**
@@ -2928,6 +3362,13 @@ export function chatScript(
   el('fastToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'fastMode', on: !fastMode }),
   );
+  // 自動引き継ぎ（Issue #1079）。これも見た目は状態が返ってきてから変える
+  const autoHandoffButton = el('autoHandoffToggle');
+  if (autoHandoffButton) {
+    autoHandoffButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'autoHandoff', on: !autoHandoff }),
+    );
+  }
 
   // Codexは対象をQuickPickで選ばせるためホストへ委ねる。Claude Codeはコマンドとして
   // そのまま送る（CLI側が対話で対象を聞く）
@@ -3011,6 +3452,23 @@ export function chatScript(
     button.querySelector('.composerOverflowLabel').textContent = 'ループAdvisorを' + action;
   }
 
+  const limitAutoResumeToggle = el('limitAutoResumeToggle');
+  if (limitAutoResumeToggle) {
+    limitAutoResumeToggle.addEventListener('click', () =>
+      vscode.postMessage({ type: 'toggleLimitAutoResume' }),
+    );
+  }
+
+  function applyLimitAutoResumeEnabled(enabled) {
+    const button = el('limitAutoResumeToggle');
+    if (!button) return;
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', '上限解除後に自動続行を' + action);
+    button.querySelector('.composerOverflowLabel').textContent = '上限解除後に自動続行を' + action;
+    renderLimitAutoResumeStatus({ enabled: enabled });
+  }
+
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
    * 中に実体をそのまま置いてあり、hidden属性で表と行き来させているだけなので、
@@ -3031,6 +3489,8 @@ export function chatScript(
     composerOverflowMenu.hidden = true;
     composerOverflowToggle.setAttribute('aria-expanded', 'false');
     if (focusToggle) composerOverflowToggle.focus();
+    // 開いている間は見送っていた測り直しを、閉じたこの時点で反映する（issue #1086）
+    scheduleComposerIconsReflow();
   }
 
   /**
@@ -3116,6 +3576,132 @@ export function chatScript(
   window.addEventListener('resize', () => {
     if (!composerOverflowMenu.hidden) positionOverflowMenu();
   });
+
+  /**
+   * アイコン列の自動オーバーフロー（issue #1086）。#composerIconRowは折り返さない
+   * 1段に固定してあるため、幅が足りなくなった分は実行時に「…」メニューへ移す。移すのは
+   * ボタン要素そのもの（複製しない）なので、idもイベント配線も、応答中のdisabled切替や
+   * hiddenの出し入れもそのまま効く。表へ返す対象は描画時に表にあったボタン
+   * （composerIconRowOrder）だけで、設定で初めからメニューに置いたボタンは動かさない。
+   */
+  const composerIconRow = el('composerIconRow');
+
+  /** 描画時点の並び。表へ戻すときはこの順に置き直す。 */
+  const composerIconRowOrder = composerIconRow
+    ? Array.prototype.filter.call(
+        composerIconRow.children,
+        (node) => node.tagName === 'BUTTON' && node !== composerOverflowToggle,
+      )
+    : [];
+
+  let reflowingComposerIcons = false;
+  let composerIconsReflowQueued = false;
+
+  /**
+   * アイコン列が幅からはみ出しているか。行にoverflowを指定すると「…」メニューまで
+   * 切り取られてしまうため、CSSのスクロール量ではなく各要素の右端で判定する。
+   */
+  function composerIconRowOverflowing() {
+    const rowRight = composerIconRow.getBoundingClientRect().right;
+    let maxRight = 0;
+    for (const node of composerIconRow.children) {
+      if (node.hidden) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      if (rect.right > maxRight) maxRight = rect.right;
+    }
+    return maxRight > rowRight + 1;
+  }
+
+  /**
+   * 「…」メニューへ移したボタンを、描画時の並びの位置へ戻す。自分より後ろで表に残って
+   * いる最初のボタンの前へ入れれば、並びは元のままになる（誰も残っていなければ「…」の前）。
+   */
+  function restoreComposerIcon(button) {
+    const index = composerIconRowOrder.indexOf(button);
+    let anchor = composerOverflow;
+    for (let i = index + 1; i < composerIconRowOrder.length; i++) {
+      const next = composerIconRowOrder[i];
+      if (next.parentNode === composerIconRow) {
+        anchor = next;
+        break;
+      }
+    }
+    button.removeAttribute('role');
+    composerIconRow.insertBefore(button, anchor);
+  }
+
+  function reflowComposerIcons() {
+    if (!composerIconRow || reflowingComposerIcons) return;
+    // 開いている間に項目が動くと押し間違える。閉じたときに測り直す
+    if (!composerOverflowMenu.hidden) return;
+    reflowingComposerIcons = true;
+    // DOMから外して入れ直すとフォーカスは外れる。測り直しのたびにフォーカスが飛ぶと
+    // キーボード操作の最中に行き先を見失うため、動かしたあとに戻せるなら戻す
+    const focused = document.activeElement;
+    try {
+      composerOverflow.hidden = false;
+      // いったん全部を元の並びで表へ戻し、そのうえで入りきらない分を測り直す。
+      // 動かすのは実際にメニューにあるボタンだけにして、表に留まる分は触らない
+      for (const button of composerIconRowOrder) {
+        if (button.parentNode !== composerIconRow) restoreComposerIcon(button);
+      }
+      let guard = composerIconRowOrder.length;
+      while (composerIconRowOverflowing() && guard-- > 0) {
+        const rest = composerIconRowOrder.filter(
+          (button) => !button.hidden && button.parentNode === composerIconRow,
+        );
+        if (rest.length === 0) break;
+        const button = rest[rest.length - 1];
+        button.setAttribute('role', 'menuitem');
+        composerOverflowMenu.insertBefore(button, composerOverflowMenu.firstChild);
+      }
+      // 畳んだ項目が1つも無いなら「…」自体を出さない
+      composerOverflow.hidden = overflowMenuItems().length === 0;
+    } finally {
+      reflowingComposerIcons = false;
+    }
+    // 「…」メニューへ移ったボタンは畳まれていて focus できないため、見えている場合だけ戻す
+    if (
+      focused &&
+      focused !== document.activeElement &&
+      focused.isConnected &&
+      focused.offsetParent !== null
+    ) {
+      focused.focus();
+    }
+  }
+
+  /** 測り直しは次の描画フレームまでまとめる（幅の変化もhiddenの変化も連続して届く）。 */
+  function scheduleComposerIconsReflow() {
+    if (composerIconsReflowQueued) return;
+    composerIconsReflowQueued = true;
+    requestAnimationFrame(() => {
+      composerIconsReflowQueued = false;
+      reflowComposerIcons();
+    });
+  }
+
+  if (composerIconRow) {
+    // 最初の1回だけは描画を待たずに測る。1フレームでも溢れたままだと、行の外へ出た
+    // ボタンで横スクロールバーが出てしまう（この行はoverflowを指定できない）
+    reflowComposerIcons();
+    if (typeof ResizeObserver === 'function') {
+      new ResizeObserver(() => scheduleComposerIconsReflow()).observe(composerIconRow);
+    } else {
+      window.addEventListener('resize', scheduleComposerIconsReflow);
+    }
+    // ボタンの出し入れ（レビュー中・計画モード・取り込みの有無など）でも必要な幅が変わる。
+    // 監視するのはhiddenだけにして、この関数自身が触るrole属性では発火させない
+    if (typeof MutationObserver === 'function') {
+      const observer = new MutationObserver(() => {
+        if (!reflowingComposerIcons) scheduleComposerIconsReflow();
+      });
+      for (const button of composerIconRowOrder) {
+        observer.observe(button, { attributes: true, attributeFilter: ['hidden'] });
+      }
+    }
+  }
 
   el('attach').addEventListener('click', () => el('filePicker').click());
   el('filePicker').addEventListener('change', (e) => {
@@ -3330,6 +3916,9 @@ export function chatScript(
     if (data.type === 'loopAdvisor' && typeof data.enabled === 'boolean') {
       applyLoopAdvisorEnabled(data.enabled);
     }
+    if (data.type === 'limitAutoResume' && typeof data.enabled === 'boolean') {
+      applyLimitAutoResumeEnabled(data.enabled);
+    }
     if (data.type === 'loopAutoGoal' && typeof data.enabled === 'boolean') {
       autoGoalEnabled = data.enabled;
     }
@@ -3346,6 +3935,14 @@ export function chatScript(
       imageData.set(data.path, data.dataUrl || data.error || '画像を読み込めませんでした');
       // 届いた画像を反映する。差分がある項目だけ描き直される
       if (lastItems) syncItems(lastItems);
+    }
+    if (data.type === 'forkFailed' && typeof data.turnId === 'string') {
+      // 分岐が失敗した。押した時点で無効化したボタンを押せる状態へ戻す（Issue #1156）。
+      // 再描画は同じDOMを使い回すため、ここで戻さないとタブを開き直すまで再試行できない。
+      // 対象は forkTarget が一致するものだけ（別の発言から進行中の分岐は止めない）
+      for (const node of nodes.values()) {
+        if (node.forkTarget === data.turnId) node.fork.disabled = false;
+      }
     }
     if (data.type === 'restoreQueuedText' && typeof data.text === 'string') {
       // Escで戻した待ち行列の末尾。拡張側で既にキューから取り除き済みなので、

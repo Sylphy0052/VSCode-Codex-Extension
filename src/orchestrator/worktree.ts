@@ -36,12 +36,48 @@ export interface GitCommandResult {
 }
 
 /**
+ * gitコマンド1回ぶんの実行条件（Issue #1047）。
+ *
+ * 環境変数でしか指定できない設定があるために足した。`GIT_INDEX_FILE` は `-c` でも
+ * サブコマンドのオプションでも渡せず、一時indexを使う経路（`secondOpinion/afterTree.ts`）は
+ * これが無いと書けない。
+ */
+export interface GitCommandOptions {
+  /**
+   * 追加・削除する環境変数。値が `undefined` のキーは**親プロセスから引き継がずに消す**。
+   *
+   * 消せる必要があるのは、親プロセス側に `GIT_DIR` / `GIT_INDEX_FILE` / `GIT_WORK_TREE` が
+   * 設定されていると、こちらの意図と別のリポジトリ・別のindexへ操作が向くためである
+   * （gitのhookから拡張機能を起動した場合などに実際に起こる）。
+   */
+  env?: Readonly<Record<string, string | undefined>>;
+}
+
+/**
  * gitコマンド実行の抽象。`nodeCommandRunner`（`src/session/sessionActions.ts`）と同じく
  * `execFile` にargv配列を渡す実装を既定にし、テストでは呼ばれた引数列を記録する
  * フェイクに差し替える。
  */
 export interface GitCommandRunner {
-  run(args: readonly string[], cwd: string): Promise<GitCommandResult>;
+  run(args: readonly string[], cwd: string, options?: GitCommandOptions): Promise<GitCommandResult>;
+}
+
+/**
+ * 親プロセスの環境へ {@link GitCommandOptions.env} を重ねる。値が `undefined` のキーは消す。
+ *
+ * `execFile` の `env` は親環境を継承せず**置き換える**ため、`PATH` を落とすと `git` 自体が
+ * 見つからなくなる。必ず `process.env` から作る。
+ */
+function mergeGitEnv(overrides: Readonly<Record<string, string | undefined>>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete env[key];
+    } else {
+      env[key] = value;
+    }
+  }
+  return env;
 }
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -54,14 +90,23 @@ const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
 export const nodeGitCommandRunner: GitCommandRunner = {
-  run(args: readonly string[], cwd: string): Promise<GitCommandResult> {
+  run(
+    args: readonly string[],
+    cwd: string,
+    options?: GitCommandOptions,
+  ): Promise<GitCommandResult> {
     return new Promise((resolve) => {
       // execFileはシェルを経由せず、argv配列をそのままプロセスへ渡す。`exec` と違い
       // `;` `&&` 等のシェルメタ文字は引数の中身としてしか解釈されない（design.md §8）。
       execFile(
         'git',
         [...args],
-        { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER_BYTES },
+        {
+          cwd,
+          timeout: GIT_TIMEOUT_MS,
+          maxBuffer: GIT_MAX_BUFFER_BYTES,
+          ...(options?.env === undefined ? {} : { env: mergeGitEnv(options.env) }),
+        },
         (error, stdout, stderr) => {
           if (error === null) {
             resolve({ code: 0, stdout, stderr });

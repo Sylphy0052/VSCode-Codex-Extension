@@ -537,12 +537,15 @@ export const window = {
     const choice = items.find((i): i is string => typeof i === 'string');
     return Promise.resolve(choice);
   },
-  showInformationMessage: (message: string, ...items: string[]): Promise<string | undefined> => {
+  showInformationMessage: (message: string, ...items: unknown[]): Promise<string | undefined> => {
     state.messages.infos.push(message);
     if (state.showInformationMessageAnswer !== AUTO_CONFIRM) {
       return Promise.resolve(state.showInformationMessageAnswer);
     }
-    return Promise.resolve(items[0]);
+    // `{ modal: true }` のようなオプションが先頭に来る呼び出し（Issue #1082の引き継ぎ確認など）
+    // でも、最初の**ボタン**を選ぶ。`showWarningMessage` と同じ扱い
+    const choice = items.find((i): i is string => typeof i === 'string');
+    return Promise.resolve(choice);
   },
   showInputBox: (_options?: unknown): Promise<string | undefined> =>
     Promise.resolve(state.showInputBoxAnswer),

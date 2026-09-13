@@ -1,3 +1,5 @@
+import * as http from 'node:http';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -1418,6 +1420,46 @@ describe('startHttpMcpTransport（design.md §16.21「1つの接続=1つのタ�
     expect(delivered[0]?.body).toBe('via-new-url');
   });
 
+  it('ヘッダー受信後・本文完了前に再登録されると古い要求は拒否される（Issue #1113）', async () => {
+    const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
+    handle = await startHttpMcpTransport(hub);
+    const activeHandle = handle;
+    const oldUrl = activeHandle.registerTask('T1');
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'send_message',
+        arguments: { to: ORCHESTRATOR_CONNECTION_ID, body: 'via-stale-token', expectReply: false },
+      },
+    });
+
+    // ヘッダーだけ先に届かせ、サーバがtaskIdを決めた後・本文の受信が終わる前に再登録する
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = http.request(
+        oldUrl,
+        { method: 'POST', headers: { 'content-type': 'application/json' } },
+        (response) => {
+          response.resume();
+          response.on('end', () => resolve(response.statusCode ?? 0));
+        },
+      );
+      request.on('error', reject);
+      // `flushHeaders`でヘッダーだけ先に送り出す。サーバ側が要求を受け取ったことを直接
+      // 観測できる口が無いため、ループバックでの往復に十分な余裕（100ms）を取ってから
+      // 再登録する
+      request.flushHeaders();
+      setTimeout(() => {
+        activeHandle.registerTask('T1');
+        request.end(body);
+      }, 100);
+    });
+
+    expect(status).toBe(403);
+    expect(hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID)).toHaveLength(0);
+  });
+
   it('タスクごとに別のURLが発行される（同じサーバを1つのrunで使い回す）', async () => {
     const hub = buildHub([
       { id: 'T1', state: 'running', summary: '' },
@@ -1885,11 +1927,18 @@ class FakeHandoffPort implements HandoffPort {
       ? { ok: false, error: '受け渡しファイルがありません' }
       : { ok: true, value: found };
   }
-  async list(): Promise<readonly HandoffEntry[]> {
-    return [...this.files.keys()].map((key) => {
+  /** ガード失敗を模すためのエラー。設定すると`list`が`ok: false`を返す（Issue #1033）。 */
+  listError: string | undefined;
+
+  async list(): Promise<HandoffResult<readonly HandoffEntry[]>> {
+    if (this.listError !== undefined) {
+      return { ok: false, error: this.listError };
+    }
+    const entries = [...this.files.keys()].map((key) => {
       const [taskId = '', slug = ''] = key.split('/');
       return { taskId, slug, relativePath: `.agents/handoff/runs/r1/${taskId}~${slug}.md` };
     });
+    return { ok: true, value: entries };
   }
   async remove(taskId: string, slug: string): Promise<HandoffResult<undefined>> {
     return this.files.delete(`${taskId}/${slug}`)
@@ -2113,5 +2162,61 @@ describe('ファイル受け渡しツール（design.md §16.44、Issue #693）'
     });
     await flush();
     expect(lastBody(conn)['accepted']).toBe(false);
+  });
+  it('delete_handoffは他タスクが書いたファイルを拒否する（Issue #1033）', async () => {
+    const handoff = new FakeHandoffPort();
+    await handoff.write('T2', 'b', 'y');
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'delete_handoff', arguments: { taskId: 'T2', slug: 'b' } },
+    });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(false);
+    expect(String(body['reason'])).toContain('T1');
+    // 拒否した以上、実体は残る
+    expect(handoff.files.size).toBe(1);
+  });
+
+  it('delete_handoffはオーケストレーターなら他タスクのファイルも消せる（Issue #1033）', async () => {
+    const handoff = new FakeHandoffPort();
+    await handoff.write('T2', 'b', 'y');
+    const { conn } = buildHandoffServer(ORCHESTRATOR_CONNECTION_ID, handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'delete_handoff', arguments: { taskId: 'T2', slug: 'b' } },
+    });
+    await flush();
+
+    expect(lastBody(conn)['accepted']).toBe(true);
+    expect(handoff.files.size).toBe(0);
+  });
+
+  it('list_handoffsはガードに弾かれたら理由付きで拒否する（Issue #1033）', async () => {
+    const handoff = new FakeHandoffPort();
+    handoff.listError = '受け渡しディレクトリの経路に安全でないリンクがあります';
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'list_handoffs', arguments: {} },
+    });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(false);
+    expect(String(body['reason'])).toContain('安全でないリンク');
+    // 空一覧を「0件」と偽らないこと
+    expect(body['entries']).toBeUndefined();
   });
 });

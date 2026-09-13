@@ -24,6 +24,7 @@ import {
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
 } from './prompt';
+import { describeRedaction, redactCredentials } from './redact';
 
 /**
  * 承認要求を人へ回さず全て拒否するモード。`runSingleTurnTask` が起動直前に確かめる
@@ -67,6 +68,9 @@ export function buildSecondOpinionSessionInput(
     // 材料を読んで答えるだけのターンでMCPのツールは要らない。既定のまま開くと
     // 利用者のサーバと組み込みの `codex_apps` が接続され、その分だけ遅くなる（Issue #944）
     disableMcpServers: true,
+    // 固定指示は「この作業ディレクトリの外を読みに行かない」だが、skillの一覧を提示されると
+    // Advisorは `~/.codex/skills/<name>/SKILL.md` を読みに行く（Issue #1061。#1047 で実測）
+    disableSkills: true,
   };
 }
 
@@ -88,6 +92,21 @@ export interface SecondOpinionRequest {
    * 省略時は `'summary'`。
    */
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
+  /**
+   * 押下時点のリポジトリ全体の写しを置いた場所（bundleのルートからの相対パス。Issue #1062）。
+   *
+   * 渡すと固定指示が「リポジトリ全体の探索は行わない」から「この写しの中でなら、判断に必要な
+   * 範囲で追加で読んでよい」へ変わる（`prompt.ts`）。**写しを実体化できたときだけ渡すこと。**
+   * 実体が無いのに渡すと、Advisorは無いディレクトリを探しに行って空振りする。
+   */
+  afterTreeDir?: string | undefined;
+  /**
+   * 写しの説明ファイルの、写しのルートからの相対名（Issue #1103）。
+   *
+   * 省略時は既定の名前（`FROZEN_AFTER_TREE_NOTICE_FILE`）を名指しする。同じ名前が
+   * リポジトリにcommitされていた場合だけ、写し側を残して説明ファイルが別名になる。
+   */
+  afterTreeNoticeFile?: string | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
@@ -169,7 +188,16 @@ export async function runSecondOpinion(
     artifact: request.artifact,
     conversationSummary: request.conversationSummary,
     conversationBackgroundKind: request.conversationBackgroundKind,
+    afterTreeDir: request.afterTreeDir,
+    afterTreeNoticeFile: request.afterTreeNoticeFile,
   });
+  // 送信直前に資格情報らしき値を伏せる（Issue #1171）。依頼文・背景・差分・未追跡ファイルの
+  // どれに混ざっていても送る本文は1本なので、ここで一括して掛ける。本文はログへ出さず件数だけ残す
+  const redaction = redactCredentials(prompt);
+  const redactionNote = describeRedaction(redaction);
+  if (redactionNote !== undefined) {
+    log?.info(`${SECOND_OPINION_LOG_PREFIX} ${redactionNote}`);
+  }
   // 依頼文・差分の中身は出さない（credential・顧客情報・proprietary codeが入りうる。
   // 受入基準14）。出すのは実行条件と分量だけ
   log?.info(
@@ -177,7 +205,8 @@ export async function runSecondOpinion(
       `effort=${request.candidate.effort} headless=${String(request.headless)} ` +
       `artifact=${request.artifact.kind} ` +
       `summary=${describeBackgroundForLog(request)} ` +
-      `promptChars=${prompt.length}`,
+      `afterTree=${String(request.afterTreeDir !== undefined)} ` +
+      `promptChars=${redaction.text.length}`,
   );
   // 保持する場合の所有権（Issue #929）。`runSingleTurnTask` に閉じさせない代わりに、
   // 「呼び出し側へ渡せた（`handedOver`）」ときを除いて、この関数の `finally` で必ず閉じる。
@@ -190,7 +219,7 @@ export async function runSecondOpinion(
       host,
       'codex',
       buildSecondOpinionSessionInput(request.cwd, request.candidate),
-      prompt,
+      redaction.text,
       {
         timeoutMs: request.timeoutMs ?? DEFAULT_SECOND_OPINION_TIMEOUT_MS,
         log,

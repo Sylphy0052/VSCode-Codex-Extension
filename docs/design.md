@@ -640,6 +640,7 @@ turn/completed
 
 - 宛先の画面が見つからない要求は**必ず拒否側に倒す**。ユーザーの目に触れないまま実行を許さないため。
 - 画面を閉じるときは保留中の要求を全て `cancel` で解放する。放置するとCodexが待ち続ける。
+- 権限昇格の要求（`item/permissions/requestApproval`）は、`reason` の文章とは別に、`permissions`（`RequestPermissionProfile`）から読んだ許可対象（ネットワーク接続の可否、読み取り・書き込み・禁止のパス）をカードに並べる。許可応答に載せる `permissions` も同じ読み取り結果から作り、カードに出せなかった項目（未知のキーや形の違う値）は名前だけ「読み取れない項目」として見せ、許可しても応答へ含めない（`summarizePermissions`、`src/appserver/approvals.ts`、issue #1184）。表示と実際に与える権限を一致させるため。
 
 ### サンドボックスをターン単位で変える
 
@@ -661,7 +662,43 @@ turn/completed
 
 ### 会話途中からの分岐
 
-`thread/fork` に `lastTurnId` を渡すと、そのターンまでを引き継いだ新しいスレッドができる（元は無傷）。CLIの `codex fork` はターンを指定できないため、この操作はapp-server経由でのみ実現できる。
+`thread/fork` に `beforeTurnId` を渡すと、**そのターンとそれ以降を除いた**新しいスレッドができる（元は無傷）。押した指示自身のターンを渡す。CLIの `codex fork` はターンを指定できないため、この操作はapp-server経由でのみ実現できる。
+
+#### なぜ `lastTurnId` ではなく `beforeTurnId` か（Issue #1161）
+
+CLIの指定は2種類ある（`codex app-server generate-ts --experimental` の `v2/ThreadForkParams.ts`、codex-cli 0.154.0で確認）。
+
+- `lastTurnId`: そのターン**まで**を引き継ぐ（inclusive）。`The referenced turn cannot be in progress.`
+- `beforeTurnId`: そのターン**とそれ以降**を除外する。`lastTurnId` とは併用できない
+
+当初は「直前のユーザー発言の `turnId`」を `lastTurnId` として渡していた。`turn/steer`（応答中の割り込み送信）は**現在のターンへ割り込む**（`chatSession.ts` が `expectedTurnId` に現在の `turnId` を送る）ため、1つのターン T1 にユーザー発言が2つ（A・B）並ぶ。この形になると B の分岐対象が **B自身が属する T1** になり、
+
+- T1 が実行中なら `cannot be in progress` で拒否される
+- T1 が完了済みなら通るが、`lastTurnId: T1` は T1 を含める指定なので、**消したかった B が分岐先に残る**。エラーにならないので気付けない
+
+`beforeTurnId` へ切り替えると、押した発言自身のターンを除外する形になり、どちらも起きない。通常の会話（1ターン1発言）では `beforeTurnId: T_N` と `lastTurnId: T_{N-1}` は同じ範囲を指すので、振る舞いは変わらない。分岐点の計算から「直前のターンを探す」間接参照が消えるため、ターンIDが欠けたときに壊れる系統（§9.5の復元経路、Issue #1155）も分岐点からは無くなる。
+
+会話の**最初**のターンにはボタンを出さない。除外すると何も残らないため。編集再送はこの場合だけ「先頭から新しい会話」（`editFromStart`）へ倒す。判定は `forkTarget` の有無ではなく「手前に完了したターンがあるか」で行う。`turnId` を持たない項目でも `forkTarget` は空になるので、それを先頭と取り違えると会話途中の書き直しが先頭からのやり直しへ倒れる。
+
+残る制約: 同一ターン内に複数のユーザー発言がある場合、`beforeTurnId: T1` は T1 ごと除外するので**手前の発言 A とその応答も落ちる**。CLIはターン単位でしか切れず、発言単位の境界はどちらの指定でも作れない。過少側（分岐先を見れば分かる）を採り、過剰側（気付けない）を避けた。
+
+古いCLIへのフォールバックは作らない。`beforeTurnId` を知らないcodex-cliでは `thread/fork` がエラーを返すが、そのエラーは画面に出て、押したボタンも再試行可能な状態へ戻る（Issue #1156）。capability検出や2段送りは症状を隠す継ぎ足しになるため入れない。`beforeTurnId` の存在は codex-cli 0.153.4 と 0.154.0 で確認済み。
+
+分岐点に使う `turnId` は、**届く経路によって在り処が違う**（Issue #1155）。
+
+- ライブ通知（`item/started` / `item/updated` / `item/completed`）: 通知自身が `turnId` を持つ。`chatState.ts` が `{ ...item, turnId }` で項目へ付ける
+- 復元（`thread/resume`、および同じ形の ephemeral な `thread/fork` の応答）: ターンIDは**外側**の `thread.turns[].id` にあり、`turns[].items[]` の各項目は持たない（実測: codex-cli 0.154.0、2026-09-13。項目のキーは `{type, id, clientId, content}`）
+
+`chatSession.ts` の `readInitialItems` が外側のIDを各項目へ移す。移し替えを忘れると復元した会話の項目は `turnId: undefined` になり、画面側（`chatScript.ts` の `turnForkTarget` は Codex では押した発言自身の `turnId` を返す）が分岐対象を決められず、**「ここから分岐」ボタンが出ない**。同じ値を編集再送も宛先に使う（`editTarget`）ため、書き直しの送り先も決まらない。
+
+`turns[].id` はロールアウトの `turn_context.turn_id` と同じ値であることを実測で確かめてある（ライブ通知で付くものと一致する）。
+
+分岐の失敗は、webviewへ `forkFailed` を返して押したボタンを戻す（Issue #1156）。webview側は押した時点でボタンを無効化する（チャット画面は `disabled`、会話閲覧画面は文言も「分岐しています…」へ変える）ため、失敗を返さないとタブを開き直すまで同じ発言から再試行できない。再描画は同じDOMを使い回すので、状態の更新では戻らない。
+
+- チャット画面: `chatView.ts` の `fork` ハンドラが `forkFrom` の戻り値（`undefined` は失敗）と例外の両方を見て `forkFailed` を送る。`chatScript.ts` は `forkTarget` が一致するボタンだけを戻す
+- 会話閲覧画面: `ConversationViewManager` の `ForkHandler` が成功したかを返す（`extension.ts` の `forkFromTurn`）。失敗と例外の両方で `forkFailed` を送る
+
+成功したときは何も返さない。新しいタブが開くうえ、同じ発言から続けて分岐を投げる重複実行を防ぐため、ボタンは無効のままにする。
 
 ### タブ名
 
@@ -1006,8 +1043,11 @@ src/claude/
 | セッション実体 | `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl`（1行1イベント）     |
 | ホーム         | `CLAUDE_CONFIG_DIR` → `~/.claude`（設定 `claude.configDir` で上書き） |
 
-- Codexの `session_index.jsonl` にあたる索引が無いため、transcriptを **mtime降順** に並べ、上位N件だけ先頭40行を読んで一覧を作る。
+- Codexの `session_index.jsonl` にあたる索引が無いため、transcriptを **mtime降順** に並べ、上位N件だけ先頭128行を読んで一覧を作る（素性が揃った時点で読むのをやめるため、通常のセッションで読む量は数行のまま）。上限が40行だった頃は、hookの出力やIDEの選択範囲がattachmentとして積まれるセッションで最初の発言を取りこぼしていた（実測216件中4件。初発言が最大114行目。issue #1145）。
 - Claude Codeには `thread_name` に相当する要約名が無い。表示名は **最初の人の発言**から作る（`isSidechain` のsubagent発言・ツール結果・IDEが挿入する制御タグは除く）。
+- **裏の指示だけで終わったセッションは一覧に出さない**（issue #1145）。`/usage` のようなスラッシュコマンドはstatuslineなどが裏で起動したもので、人が始めた作業ではない。transcriptには発言の形をしたエントリが残るが、中身は `<command-name>` などの制御タグだけで、本文を取り出すと空になる。実測では216件中86件（40%）がこれで、すべて `(名称未設定)` として履歴に並び一覧を読めなくしていた。
+  - 判定は「発言の形をしたエントリはあるのに、制御タグを落とすと本文が残らない」（`TranscriptMeta.sawUserEntry` と `firstUserText` の組み合わせ）。**発言そのものが1件も無いセッションは除外しない**——始めたばかりでまだ最初の指示が書かれていない場合が同じ形になり、消すと進行中のセッションが履歴から消えるため。
+  - 除外した件数は `ListResult.filteredOut` として返す。Codexの派生スレッド除外（§4.4）と同じ枠組みで、除外だけで一覧が空になったときに出力パネルへ理由を残す。
 - 更新契機は `projects/**/*.jsonl` のファイル監視。
 
 ### 14.3 セッションIDの紐付け（実機検証済み）
@@ -1079,7 +1119,7 @@ TUIタブ（当時の`buildClaudeShellArgs`、§14.2）には付けない。CLI�
 
 #### 会話の途中のターンから分岐（実測で不可と確定、[#22](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/22)）
 
-Codexの `forkFromTurn`（`thread/fork` に `lastTurnId` を渡す。§9.5「会話途中からの分岐」）に相当する経路をClaude Code側で探したが、**拡張機能が使う `--print`（非対話）経路には存在しない**。実測した内容は次のとおり（CLI 2.1.227）。
+Codexの `forkFromTurn`（`thread/fork` に `beforeTurnId` を渡す。§9.5「会話途中からの分岐」）に相当する経路をClaude Code側で探したが、**拡張機能が使う `--print`（非対話）経路には存在しない**。実測した内容は次のとおり（CLI 2.1.227）。
 
 1. **`initialize` の `commands`（90件）に `branch` / `fork` は含まれない**。一方、CLIバイナリの文字列解析では `name:"branch"`（`type:"local-jsx"`、`description:"Create a branch of the current conversation at this point"`）と `name:"fork"`（`type:"local-jsx"`、`description:"Copy this conversation into a new background session and keep working here"`）が実在することを確認した。`local-jsx` は対話的なUIコンポーネント（Ink）の起動を要求する型で、TTYを持たない `--print` では一覧から除かれているとみられる。
 2. **`/branch <name>` / `/fork <directive>` をユーザーメッセージとして送っても実行されない**。CLIは `model: "<synthetic>"` の応答で `"/branch isn't available in this environment."` / `"/fork isn't available in this environment."` を返すだけで、新しいセッションもtranscriptも作られない（実測。CLI自身が安全側に倒して即座に拒否しており、副作用は無い）。
@@ -2850,7 +2890,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 `item/autoApprovalReview/started` / `item/autoApprovalReview/completed`は同じ`reviewId`で1件の審査を知らせるため、画面では1件の項目として状態が進むように見せる（`upsertItem`。増やすと判定中と結果が二重に並ぶ）。**人が押していない承認が裏で進む以上、何が審査されどう判定されたかは必ず会話へ残す。**
 
-スキーマ側で`[UNSTABLE]`と明記されている（`GuardianApprovalReview`）。形が変わりうる前提で、読めなかった値は表示を削るだけに留め、**「読めない＝承認された」とは解釈しない**（`src/appserver/autoApprovalReview.ts`）。
+スキーマ側で`[UNSTABLE]`と明記されている（`GuardianApprovalReview`）。形が変わりうる前提で、読めなかった値は表示を削るだけに留め、**「読めない＝承認された」とは解釈しない**（`src/appserver/autoApprovalReview.ts`）。`requestPermissions` の `permissions` は手動承認と同じ `RequestPermissionProfile` なので、承認カードと同じ `summarizePermissions` で対象を整形し、自動承認された権限が会話に残るようにする（issue #1184）。
 
 拒否（`denied`）と時間切れ（`timedOut`）だけは`ChatSession.deniedReviews`へ覚えておき、`thread/approveGuardianDeniedAction`で人が覆せるようにする。この要求は`event`に「シリアライズ済みの`GuardianAssessmentEvent`」を求めるがスキーマは中身を定義していないため、届いた完了通知をそのまま返す以外に組み立てようが無い。承認済みの審査を覚えないのは、後から「承認済みのものを承認し直す」要求を送れてしまうため。
 
@@ -2866,6 +2906,14 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 `codex.bypassApprovalsAndSandbox`。`approvalsReviewer`と同じ理由で、`SANDBOX_MODES` / `APPROVAL_MODES`へ値を足さない。これらは**宣言順＝安全順**という前提を持ち、Shift+Tabの循環とYAMLのクランプ（§16.16）がその順序に依存している。「サンドボックスを張らない」はその順序の外側にある。
 
+#### 3段階の承認レベルとは併存しない（Issue #1180）
+
+bypassは`approvalMode` / `sandbox` / `approvalsReviewer`の3項目より優先される（`thread/start`では承認まわりを載せず、`turnPolicyFor`が`approvalPolicy: 'never'`と外部サンドボックス指定を返す）。そのため両方を独立に持つと、承認レベルを「全確認」へ戻したつもりでも実際は素通しのまま、という食い違いが起きる。
+
+- **書き込み側**: `updateApprovalLevel`（`src/view/settingsProvider.ts`）は3項目を書く前にbypassを`false`にする。読み直してまだ立っていれば3項目を書かずに`false`を返し、理由を出す。先に落とすのは、落とせなかったときに「表示は全確認・実際は素通し」という食い違いを新しく作らないため
+- **表示側**: `levelFromCodexSettings`（`src/provider/approvalLevel.ts`）はbypassが立っている間、3項目が何であれ`full`を返す。実効状態は承認なし・サンドボックスなしであり、「全確認」と表示してはならない
+- `full`を3項目（`never` + `danger-full-access`）で表現しbypassを使わない方針（§14.45冒頭・`codexSettingsForLevel`のJSDoc）は変えない。`full`を選び直した場合もbypassは落とす
+
 #### ターン側でしか表現できない
 
 実測では`SandboxPolicy`に`externalSandbox`があり、承認側の`approvalPolicy: never`と組にしてフラグ1枚と同じ意味になる。ただし`ThreadStartParams`は`sandbox`（`SandboxMode`の3値）しか取らず`sandboxPolicy`を持たない。`sandboxPolicy`を取るのは`TurnStartParams`だけであるため、`thread/start`では表現できない。
@@ -2878,11 +2926,9 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 端末起動（当時の`buildShellArgs`。TUIタブ方式廃止に伴い#357で削除済み）では、有効なときに`-s` / `-a` / `--approve-for-me`を渡さない。CLIは併用を弾かない（`codex -s read-only --dangerously-bypass-approvals-and-sandbox --version`がパースを通ることを実測）が、どちらが勝つかがヘルプに書かれていないため、引数の意味が一意に決まるようこちらで落として警告を出す。
 
-#### 会話を開くたびに同意を取る
+#### 会話開始時の確認を省く（Issue #1094）
 
-`isUnsafeCombination`が単独で真を返す。この関数は本issueまで**どこからも呼ばれていなかった**ため、あわせて配線した（`confirmUnsafeCombination`、`ChatViewManager.openNew`）。`danger-full-access` + `never`と`danger-full-access` + `auto_review`も同時に確認の対象になる。
-
-確認の本文には設定キー名ではなく**何が起きるか**を書く（`describeUnsafeCombination`）。設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。当てはまるものが複数ある場合は、実際に効くほう（`bypass`）を述べる。
+Codexの会話開始時は、選択済みの承認・サンドボックス設定をそのまま適用する。`bypassApprovalsAndSandbox`、`danger-full-access`と`never`または`auto_review`の組み合わせでも、開始前のモーダル確認は出さない。設定変更時の確認と実行中の承認要求は従来どおり。
 
 タスクセッション（`openTaskSession`）は無人実行で人が答えられないため、確認を挟む代わりに`toCodexConfig`が`false`を固定して危険な値を持ち込ませない。
 
@@ -3027,8 +3073,11 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
   移動を伴う`update`で「戻す」を出さないのは、改名を安全に取り消すには「内容を書き戻す」と「`movePath`から`path`へ戻す」の2操作を組み合わせる必要があり、どちらか一方が失敗すると（disk full・権限・競合等）ファイルがどちらの場所にも正しい状態で残らない、単純な書き戻しよりリスクの高い操作になるため。エディタで開く・差分を開くは移動後の場所（`movePath`）に対して引き続き出す
 
 - **パスの検証は2段構え。** (1) 文字列だけの判定（`resolveWithinWorkspace`、`src/util/diffWorkspacePath.ts`）で、`..`セグメントを含む・ワークスペース外を指す絶対パスを拒む。(2) 実ファイルシステムに触れる`verifyRealPathWithinWorkspace`で、`fs.realpath`により対象（存在しなければ実在する直近の祖先まで遡る）とワークスペースルートの両方を実体パスへ解決し、シンボリックリンクによる脱出も検出する。Webview側（`chatScript.ts`の`withinWorkspace`）にも文字列だけの簡易版を置きボタンの出し分けに使うが、これはUXのためのヒントに過ぎず、**ホスト側（`resolveDiffFileForAction`）が独立に同じ判定をやり直してから実際の操作を行う**（Webview側の出し分けだけに頼らない。エージェントの出力に由来する文字列を信用しない、というこのリポジトリの方針）
+- **相対パスの基準は、ワークスペースの先頭ルートではなくその会話の作業ディレクトリ**（Issue #1178）。`resolveWithinWorkspace`（`src/util/diffWorkspacePath.ts`）がルートを先頭から順に試すと、相対パスは必ず最初のルートに収まってしまい、複数ルートの2番目やサブディレクトリを作業ディレクトリにした会話の変更が別の場所のファイルへ向く（開けないだけでなく、同じ雛形のファイルなどで内容の一致検査が通ると、別プロジェクトのファイルを書き戻せる）。会話の`cwd`を`handleOpenDiffFile` / `handleOpenDiffEditor` / `handleRevertDiff`へ渡し、相対パスはそこを基準に**1つへ決めてから**ワークスペース境界を判定する。作業ディレクトリが判らないときは先頭ルートで代替せず、特定できない理由を返して何もしない。絶対パスの扱いと、`..`の拒否・シンボリックリンクの実体確認は変えない
 - **Webviewは差分の中身を送らず、`itemId`+`diffIndex`だけを送る。** ホスト側（`resolveDiffTarget`、`chatShared.ts`）が会話状態（`entry.session.getState().items`）から差分を引き直し、Webviewが自称する path・diff本文・kindをそのまま信用しない。画像表示（`buildImageReply`）が会話に実在するパスだけを対象にするのと同じ考え方
 - **「この変更を戻す」は実行前に必ずモーダルで確認する。** 破壊的操作（`add`は削除、`delete`は再作成、`update`は上書き）の既存の確認（`confirmRewindFiles`等）と同じ`showWarningMessage(..., { modal: true }, ...)`の形。確認モーダルはユーザーの応答待ちで不定長のため、直前（確認を出す前）と直後（書き込み・削除の直前）の2回、現在の内容を読み直して差分の想定と突き合わせる（TOCTOU対策、issue #144のメモリ追記と同じ考え方）。食い違えば理由を出して何もしない
+- **確認後は内容だけでなく場所と実体も確かめる**（Issue #1170）。応答待ちの間に親ディレクトリがワークスペース外へのsymlinkへ差し替わると、同じ絶対パス文字列が別の実体を指し、本文の一致だけでは見抜けない。確認後に実体パスを取り直して確認前と同じでなければ止める。`update` は確認前に控えた `dev`/`ino` と開いたfdの `fstat` が一致したときだけ、そのfdから読み直してそのfdへ書く（`src/util/revertFile.ts`。`secondOpinion/untracked.ts` の読み取り側と同じ考え方）。`add` の削除（ゴミ箱）と `delete` の再作成（`wx`）はfdを持てないため再検査の直後に行い、再検査と操作の間の短い窓は残る（Node.jsに `openat` / `unlinkat` 相当が無い）
+- **Claude CodeのWrite / NotebookEditは、新規作成と確認できるまで「戻す」を出さない**（Issue #1176）。これらのツールはツールの入力だけでは新規作成か既存ファイルの上書きかを区別できず、`describeTool`（`src/claude/transcript.ts`）は一律に`add`として組み立てる。`add`の戻しはファイルの削除のため、上書きだった場合に既存ファイルを消してしまう。そこでWrite / NotebookEdit由来の`add`には`createUnverified`の印を立てておき、実行結果（セッション履歴は`toolUseResult`、動作中のstream-jsonは`tool_use_result`。同じ内容がキー名違いで届くため`toolUseResultOf`で吸収する）が`create`だと判った時点で外す。`update`（＝上書き）だった場合は結果に入っている上書き前の全文（`originalFile`）を使い、`update` + `editReplace`（issue #310でEdit用に足した復元経路）の差分へ組み直すため、戻すと削除ではなく上書き前の内容が復元される。印が立ったままの`add`は`planDiffActions`が`revert: false`を返し、Webview側もボタンを出さない
 - **`delete`の「戻す」でも、対象パスに今なにか在るかを実際に確かめる**（`existingContentForDeleteRevert`、`chatShared.ts`）。`delete`は「ファイルはもう無い」前提の再作成だが、その前提を確かめずに常に「無い」と決め打つと、`computeDiffContents`のdelete分岐にある「ファイルが既に存在します」の検査が構造的に一度も真にならず、差分を取ったあとに同じパスへ作り直された別のファイルを、モーダルの確認だけ通して無条件に上書きしてしまう。`add`の「戻す」は`useTrash: true`でゴミ箱を経由するが、こちらは`writeFile`による上書きで復旧手段が無いため影響が大きい。存在の判定に`FileSystemPort.readTextFile`を使わないのは、あれが「読めなければ無い扱い」でENOENT以外（EACCES/EISDIR等）でも`undefined`を返すため（`src/session/ports.ts`のissue #144のメモ）。実在するのに読めないファイルを「無い」と誤認すると、まさに上書きしてはいけない場面で上書きすることになる。ENOENTを他の失敗と区別できる`vscode.workspace.fs.stat`で判定し、判断が付かないときは「在る」側（＝戻す操作を止める側）へ倒す
 - **差分エディタの右側（変更後）は、`delete`以外は実ファイルそのものを使う。** 仮想ドキュメント同士を比較するより、そのまま編集・保存もできて実用的なため。`delete`だけはファイルが既に無いため、両側とも保存前の仮想ドキュメント（`vscode.workspace.openTextDocument({content, language})`、`runExportTranscript`の「生テキストで開く」・コードブロックの「新規ファイルで開く」と同じ手）にする。左側（変更前）の言語IDは、実ファイルが読めればそこから借りる（`guessDiffLanguageId`）
 - 承認カード（`renderApproval`）のプレビューに出る差分には操作ボタンを出さない。まだ適用されていない変更の見込みを見せているだけで、開く・戻すの対象となる実体が無いため
@@ -3276,7 +3325,7 @@ CLIを混在させている利用者にとっては情報が1つ減るが、ア�
 
 - `model` / `effort`はクランプ対象外（§16.16の表の「machine-overridable」な設定と同じ扱い。実行経路や権限には関わらない）。プリセットで未指定（設定に項目自体が無い）なら空文字（CLI側の設定に委譲する、の意）にする。**拡張機能の現在の`codex.model`等を暗黙に継承することはしない。** `buildEffectiveTaskConfig`（ワークフロータスク）が`task.model ?? ''`としているのと同じ方針で、プリセットは「指定しなかった項目はCLIの既定へ委譲する自己完結した束」として扱う
 - `sandbox`はCodex固有の概念（Claudeには起動時のサンドボックスフラグが無い）。Claude向けプリセットで`sandbox`を書いても、クランプ自体が無意味なため常に空文字にする（警告も出さない。§16.16の`buildEffectiveTaskConfig`と同じ扱い）
-- `approvalMode`が拡張機能側の`bypassPermissions`（Claude）を継承した場合の`acceptEdits`読み替え（§16.16、issue #271）は**プリセットには適用しない**。ワークフロー実行は無人で人が承認できないためこの読み替えが要るが、プリセットは対話的なチャット画面を開く操作であり、`openNew`側の`confirmUnsafeCombination` / `isUnsafeClaudeCombination`（`chatView.ts` / `claudeChatView.ts`、既存のまま変更していない）が起動前の確認ダイアログを出す。人が確認できる経路が既にあるため、読み替えの多層防御を重ねる必要が無いと判断した
+- `approvalMode`が拡張機能側の`bypassPermissions`（Claude）を継承した場合の`acceptEdits`読み替え（§16.16、issue #271）はプリセットには適用しない。プリセットは対話的な会話として選択済みの設定を使う。開始前の確認はCodexがIssue #1094で、ClaudeがIssue #1096で削除済み。
 
 検証（配列であること・各要素がオブジェクトであること・`name`/`provider`の必須性・型違いの拒否）は`src/sessionPresets.ts`に切り出した。CONTRIBUTING.mdのレイヤの制約（ロジック層は`vscode`をimportしない）に従い、`test/unit/sessionPresets.test.ts`から実VSCode無しでテストする。クランプの純粋ロジック自体は`src/util/safetyClamp.ts`にあり（前述のissue #308の抽出）、`sessionPresets.ts`はそれを再利用する側になる。`sessionPresets.ts`自身を`src/util/**`ではなく`src/`直下に置いているのは、`agent.sessionPresets`の読み込み・検証・実効値の組み立てという機能のまとまりを保つためで、`src/util`を横断的な小物の置き場という位置付けのままにするための判断である。
 
@@ -3509,7 +3558,7 @@ Codex側・Claude側は同じ`createExecutablePathResolver(provider, log)`（`sr
 
 #### 実測した挙動
 
-1. **`target_message_uuid`は「戻す対象＝分岐したい発言そのもの」を指す**。Codexの`thread/fork`が`lastTurnId`（引き継ぐ最後のターン＝対象の一つ手前）を取るのとは向きが逆で、Claude側は押した発言自身のuuidをそのまま渡す。transcriptの`jsonl`の`"type":"user"`行のトップレベル`uuid`と一致する（`ChatItem.id`としてすでに保持済み。§9.5・上の`rewind_files`節と同じ経路、`src/claude/streamJson.ts`の`applyUser`）
+1. **`target_message_uuid`は「戻す対象＝分岐したい発言そのもの」を指す**。Codexの`thread/fork`が`beforeTurnId`（除外するターン＝押した発言自身のターン。Issue #1161）を取るのとは指定の形が違い、Claude側は押した発言自身のuuidをそのまま渡す。transcriptの`jsonl`の`"type":"user"`行のトップレベル`uuid`と一致する（`ChatItem.id`としてすでに保持済み。§9.5・上の`rewind_files`節と同じ経路、`src/claude/streamJson.ts`の`applyUser`）
 2. **後続の人の発言が残っていると「stale target」として拒否される**。1回の`rewind_conversation`は対象より後の人の発言をすべて消してから対象へ戻す想定の操作ではなく、直近の1件しか戻せない。複数ターン分岐るには**新しい順に1件ずつ逐次**送る必要がある（並列に投げると失敗する）
 3. **応答の封筒は常に`subtype:"success"`（`ControlResponse.ok`は常にtrue）で、成否は`payload.rewound`で判定する**。失敗時も`rewound:false`とエラー文言が同じ成功封筒の中に入って返ってくる。既存の`readRewindFilesResult`（`ok`で成否判定）とは判定方法をあえて分け、`readRewindConversationResult`を新設した（`src/claude/control.ts`）。`ok`だけを見て成功と誤判定しないことをテストで固定した
 4. **`prefillText`はCLIが返す値をそのまま使う**。戻した対象発言の本文がここに入って返ってくるとみられ（新しいタブの入力欄へ流し込む）、拡張機能側でtranscriptを読んで再構成することはしない
@@ -4094,7 +4143,7 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 
 #### 上限を2系統に分ける
 
-`MAX_APP_SERVER_LINE_BYTES`（512MB）を追加し、app-serverとのJSON-RPCだけがこちらを使う。
+`MAX_APP_SERVER_LINE_BYTES`（384MB）を追加し、app-serverとのJSON-RPCだけがこちらを使う。
 `MAX_LINE_BUFFER_BYTES`（10MB）は据え置きで、Claude CLIのストリーム（`claude/streamSession.ts`）・
 `util/ndjson.ts`・`orchestrator/` はそのまま。上限そのものは撤廃しない。撤廃すると壊れた出力を
 延々と連結してメモリを食い潰す経路（issue #402、1点目）が復活する。
@@ -4131,6 +4180,33 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 バイト数がUTF-16のcode unit数以上・その3倍以下に必ず収まることを使い、安い `length` で決着する
 場合を先に返してから実際に数える。
 
+#### 上限はV8の文字列長上限より下でなければならない（issue #1153）
+
+当初この上限は512MB（536870912）だったが、V8の文字列長上限
+（`buffer.constants.MAX_STRING_LENGTH` = 536870888）より**24バイト大きかった**。
+
+`FrameBuffer`はチャンクを文字列へ連結してから上限を判定する。上限が文字列長上限以上だと、
+`overflow`が立つより先に連結が`RangeError: Invalid string length`で落ちる。実測（2026-09-13）では、
+改行を含まない1MiBのASCIIチャンクを投入し続けても`overflow`は一度も立たず、535822336バイトの時点で
+RangeErrorになった。つまり**issue #402（1点目）の保護がこの経路だけ効いていなかった**。
+
+さらに`frames.push(chunk)`は呼び出し側の`try`の外にある（`appServerClient.ts`・`connection.ts`とも
+stdoutの`data`ハンドラの中）。RangeErrorはそのまま未捕捉例外になり、上限超過時に行うはずの後始末
+（`clear()`・接続を切って再起動）も実行されない。
+
+上限を384MB（402653184）へ下げ、文字列長上限との間に128MBの余裕を置いた。判定は連結の**後**に
+行うため、ピーク時の文字列長は「上限＋直前に受け取ったチャンク1個分」になる。stdioのパイプの
+チャンクは通常64KBなので、128MBは桁を取り違えても踏まない余裕にあたる。UTF-8のバイト数はUTF-16の
+code unit数以上なので、「バイト数が上限以下」なら「文字数も上限以下」が保証される。バイト側だけを
+見れば足りる。
+
+この不変条件は`test/unit/jsonRpc.test.ts`で固定している。既定値を実際に超えさせる形のテストは
+512MB級のメモリと時間を要するため置いていない（上限超過の挙動そのものは、各テストが`maxBytes`を
+小さい値へ差し替えて確かめている）。
+
+`FrameBuffer`が文字列ではなく`Buffer`で溜める形にすれば文字列長上限から解放されるが、
+`consumeFrames`の戻り値（`rest: string`）と行を文字列で取り出す作り全体に波及するため見送った。
+
 #### 確かめ方
 
 - `test/unit/jsonRpc.test.ts`: `consumeFrames` の `maxBytes` で既定より大きい行を通せること、渡した
@@ -4140,6 +4216,8 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
   位置で二分して試す。`chunk.toString('utf8')`のままなら35通りのうち6通りで落ちることを確認済み）
 - 10MBを超える実セッションでの分岐は `docs/manual-test.md` C-56 に委ねる（ユニットテストでは実物の
   app-serverを相手にできないため）
+- `test/unit/jsonRpc.test.ts`: `MAX_APP_SERVER_LINE_BYTES` が `buffer.constants.MAX_STRING_LENGTH`
+  より下にあり、チャンク1個分を大きく上回る余裕（64MiB以上）が残っていること（issue #1153）
 
 ## 15. 作業記録（日報・週報連携）
 
@@ -4448,7 +4526,7 @@ Viewからの手動の「再実行」だけを受け付ける。手動の再実�
 
 `skipped` を見ずに `failed` の有無だけで判定してはいけない。`manual` / `interrupted` による停止は、その原因になったタスク自身を `failed` にしない設計（前述のとおり状態を変えない）ため、`skipped`（`runHalted`）だけが残ってrunが終わることがある。ここを `succeeded` と誤判定すると、一部のタスクが実行されないまま終わったことに気づけない。`dependencyFailed` による `skipped` は必ず対応する `failed` を伴うため2で拾われ、3に落ちるのは `runHalted`（人の割り込み、または他の失敗による停止で新たに開始されなかった独立した枝）だけになる。
 
-**終了時の後始末は、runにつき1度だけ行う。** `blocked` からの「再マージ」、`failed` / `skipped` からの手動の再実行、回数切れからの「続ける」はいずれも再開の起点として終了判定を解除し、runを一度 `running` へ戻す（Issue #432）。この3経路のどれで再開しても、runが再び終了状態へ確定したときに終了時の後始末（オーケストレーターへの完了通知等）を重ねて行ってはならない。再開そのものは人の正当な操作であり妨げないが、後始末は初回の終了確定時にだけ行い、以降の再入では省く。反映を伴う後始末（ロードマップのチェック更新等）のうち、結果が冪等か、再開後の状態を追加で反映すべきものは、この制限の対象にしなくてよい。**疑似worktree（§16.20）の反映もこの制限の対象にしない。** `reflectPseudoWorktree`は反映に成功する（一部適用を含む）たびに比較基準の`live.pseudo.baseline`を更新するため（Issue #511）、2周目以降も1周目と同じ経路で再開後に新たに統合された内容を正しく反映できる。反映を拒否した（`workspaceChanged`）場合はbaselineを更新しない。以前は`baseline`が実行開始時／復元時にしか取られず1周目の反映後も更新されなかったため、2周目以降は必ず`workspaceChanged`の誤検知になる欠陥があり、暫定対応として2周目以降の反映自体を行わず「反映されていない」旨の警告だけを出す形にしていたが（PR #509）、Issue #511でbaselineの更新に置き換え、その暫定の警告と分岐は削除した。この更新は**ワークスペース全体を再スキャンする方式ではない**（当初のIssue #511修正はその方式だったが、レビュー・監査の指摘で置き換えた）。反映（コピー/削除ループ）の途中は実I/Oを伴うため、全体再スキャン方式だと、その最中に人が反映対象**ではない**別ファイルを編集した場合、その編集が再スキャンに紛れ込んで新しい`baseline`へ恒久的に吸収され、以後検知できなくなる窓があった。現在は`reflectIntegrationToWorkspace`が実際に適用した（コピー・削除した）パスだけを`updateSnapshotForAppliedPaths`で`baseline`へ個別に反映し、それ以外のエントリは元の値のまま据え置く。
+**終了時の後始末は、runにつき1度だけ行う。** `blocked` からの「再マージ」、`failed` / `skipped` からの手動の再実行、回数切れからの「続ける」はいずれも再開の起点として終了判定を解除し、runを一度 `running` へ戻す（Issue #432）。この3経路のどれで再開しても、runが再び終了状態へ確定したときに終了時の後始末（オーケストレーターへの完了通知等）を重ねて行ってはならない。再開そのものは人の正当な操作であり妨げないが、後始末は初回の終了確定時にだけ行い、以降の再入では省く。反映を伴う後始末（ロードマップのチェック更新等）のうち、結果が冪等か、再開後の状態を追加で反映すべきものは、この制限の対象にしなくてよい。**疑似worktree（§16.20）の反映もこの制限の対象にしない。** `reflectPseudoWorktree`は反映に成功する（一部適用を含む）たびに比較基準の`live.pseudo.baseline`を更新するため（Issue #511）、2周目以降も1周目と同じ経路で再開後に新たに統合された内容を正しく反映できる。反映を拒否した（`workspaceChanged`）場合はbaselineを更新しない。復元時に基準をその場のワークスペースから取り直していた点はIssue #1115で改め、永続化した基準を読み戻す形にしてある（上記）。以前は`baseline`が実行開始時／復元時にしか取られず1周目の反映後も更新されなかったため、2周目以降は必ず`workspaceChanged`の誤検知になる欠陥があり、暫定対応として2周目以降の反映自体を行わず「反映されていない」旨の警告だけを出す形にしていたが（PR #509）、Issue #511でbaselineの更新に置き換え、その暫定の警告と分岐は削除した。この更新は**ワークスペース全体を再スキャンする方式ではない**（当初のIssue #511修正はその方式だったが、レビュー・監査の指摘で置き換えた）。反映（コピー/削除ループ）の途中は実I/Oを伴うため、全体再スキャン方式だと、その最中に人が反映対象**ではない**別ファイルを編集した場合、その編集が再スキャンに紛れ込んで新しい`baseline`へ恒久的に吸収され、以後検知できなくなる窓があった。現在は`reflectIntegrationToWorkspace`が実際に適用した（コピー・削除した）パスだけを`updateSnapshotForAppliedPaths`で`baseline`へ個別に反映し、それ以外のエントリは元の値のまま据え置く。
 
 #### 承認待ちのまま離脱した場合
 
@@ -4594,6 +4672,7 @@ worktreeを作れないため、`isolation` の値を問わず**git worktree隔�
 
 - `.git` 配下への書き込み、`permissions` 種別の要求、`grantRoot`（セッション残り全体への書き込み許可要求）、`proposedExecpolicyAmendment`（以後の無確認実行の提案）、コマンド文字列が届かない要求は、`allow` でも解除できない。いずれも特定の危険パターンのカテゴリに属する話ではなく、権限そのものの拡大か、判定が成立していない状態だから
 - `allow` を含むタスクがあるワークフローは、実行開始時に「既定の危険操作チェックを解除しているタスクがある」旨を明示して確認を取る。ワークフローViewの警告欄にも、どのタスクがどのパターンを解除しているかを常時出す
+  - **確認の同意は、確認したその内容にだけ効く（Issue #1107）。** `WorkflowRunner.start` は呼び直しのたびに定義ファイルを読み直すため、真偽値の `allowConfirmed` だけで確認を省くと、確認ダイアログを出している間にYAMLを差し替えられたときに「確認していない `allow`」が同意済みとして実行される。確認を求める側は定義の内容ダイジェスト（`allowDigest`）を一緒に返し、呼び直しでは `allowConfirmedDigest` として受け取って再計算した値と照合する。食い違えば確認からやり直す（ダイジェストが無い場合も確認からやり直す。fail-closed）
 - `allow` はタスク単位に閉じる。他のタスクの判定には影響しない
 
 `allow` が「そのタスクに関する限りの全許可」になりうることは避けられない（YAMLを書いた人がそう書いたのだから）。防ぐのではなく、**見えるようにする**のがここでの方針である。
@@ -4926,6 +5005,13 @@ interface TaskSession {
 
 開始待ちを複数持てる形（開始要求ごとのキーで引ける表）に変える。Claude側は `randomSessionId()` で起動前にidが決まり、即座に `panels` へ入るためこの問題は無い。
 
+宛先解決は通知と要求で分ける（Issue #1182、静的レビューの指摘F10-01）。
+
+- 通知（`routeNotification` → `findNotificationTarget`）: `panels` → 開始待ちのthreadId照合 → それでも見つからなければ、開始待ちがちょうど1件のときに限りそれを宛先にする（`soleEntry`）。`thread/start` の応答前に届く通知を取りこぼさないための救済
+- 承認などのサーバー要求（`routeServerRequest` → `findExactByThreadId`）: threadIdが一致する宛先だけへ渡す。`soleEntry` のfallbackは使わない
+
+開始待ちが1件であることは、未登録のthreadIdがその会話宛である証明にはならない。閉じた会話からの遅延要求などをその1件へ渡すと、自動承認ハンドラーが付いた会話なら人に見せないまま許可応答を返しうる。宛先を確定できない要求は `defaultDenyResponse` で拒否する（応答の値を作れない要求はエラーで相手を解放する）。`pendingStarts` に居るのは `thread/start` の往復の間だけで、この区間ではまだturnを開始していないため、要求を拒否しても取りこぼしにはならない。
+
 **4. セッションの寿命をパネルから切り離す**
 
 現状 `panel.onDidDispose` は `session.dispose()` に加えて `panels` からエントリを削除する。`routeNotification` / `routeServerRequest` は `panels` を見て宛先を引くため、**エントリを消すと通知が届かなくなり、`LoopController.observe()` も呼ばれなくなる**。タブを閉じた瞬間にタスクの進行検知が止まり、「閉じてもタスクは走り続ける」が成立しない。
@@ -5193,7 +5279,7 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 1. `git merge` が衝突で終わったら、**衝突した状態のまま**にしておく。先に `git merge --abort` してから解決させると、解決用セッション自身がマージをやり直す必要があり、失敗する経路が増える
 2. 巻き戻し先として、マージ前の統合ブランチのコミットidを控える
 3. 統合worktreeを `cwd` にして解決用セッションを開く。プロンプトには衝突したファイルの一覧、突き合わせる2つのタスクの `prompt` と `done`、未解決パスの一覧（`git diff --name-only --diff-filter=U`）を渡す
-4. 終了条件は「衝突を解決してコミットしてあり、未解決のパスが残っていないこと」。判定は `git status` で拡張機能側からも確かめる（宣言だけを信じない）
+4. 終了条件は「衝突を解決してコミットしてあり、未解決のパスが残っていないこと」。判定は `git status` で拡張機能側からも確かめる（宣言だけを信じない）。**確認は「未解決パスが無い」「`MERGE_HEAD` が無い」だけでは足りない**——`git merge --abort` や `git reset` でマージを取り消した状態も同じ条件を満たすため、取り消したまま `done` を宣言されると成果が統合されないまま「解決済み」として後続へ進む（Issue #1111）。`isMergeResolutionComplete` はこれに加えて、作業ツリーに未コミットの変更が無いこと（`git status --porcelain -uno`。未追跡ファイルは統合worktreeにビルド生成物が置かれうるため対象外）と、タスクブランチのcommitが統合先のHEADから到達できること（`git merge-base --is-ancestor <taskBranch> HEAD`）まで確かめる。`MERGE_HEAD` の問い合わせが非0かつstderrありで落ちた場合は「不在」ではなく「不明」として完了扱いにしない（`-q --verify` は不在のとき何も出力しないため、stderrがあるのはコマンド自体の異常）。`taskBranch` は位置引数として渡すため、`isValidTaskBranch` でこのrunのタスクブランチの形であることを先に確かめる
 5. 解決用セッションはループ制御は通常のタスクと同じ仕組みを使うが、**承認判定は通常のタスクの `escalation.ts`（タスク境界・`allow` / `escalate`）を使わず、標準の承認カード（常に人へ回す既定挙動）へ委ねる。** タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまうため、安全側（常に人の承認を要求する）に倒す単純化である。`maxIterations` は別に持ち、既定は小さくする（5）。何度も回して直らないものは人へ回したほうが早い
 6. 解決できたらマージ完了として扱い、タスクを `done` にして次へ進む
 7. 解決できなければ、控えたコミットidへ `git merge --abort` で戻し、そのタスクを `blocked` にする。ただし**人が止めた場合（タブへの直接介入 = `manual`/`interrupted`、ワークフローViewの「全体の停止」 = `taskStopped`）は巻き戻さない**（Issue #412・#434）。人が統合worktreeで直接手を動かしている経路であり、巻き戻すと未コミットの解決結果を破棄してしまう（1.と同じ理由）。統合worktreeは衝突した状態のまま残り、占有だけが解放される。**そのタスクも`blocked`にする**（Issue #443、案A）。`merging`のまま残すと、`getRunOutcome`が`merging`を`running`扱いするためrunが終了確定せず、`retryMergeState`（`blocked`からしか動かない）の「再マージ」の対象にもならない行き止まりになるためで、`git merge --abort`は呼ばずに`markMergeBlocked`だけを呼ぶ。「巻き戻し済みの`blocked`」との違い（未コミットの解決結果が残っている）は状態には持たせず、警告欄（`mergeInterrupted`）で説明する
@@ -5439,9 +5525,10 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 - 置き場はgitの場合と同じ `<workspace>/.agents/worktrees/<runId>/<taskId>`
 - タスクの開始時にワークスペースの内容を複製する。複製から外すのは `.agents/worktrees` 自身（無限に再帰する）と、重量のあるディレクトリ（設定 `agent.workflows.pseudoWorktreeExclude`、既定 `node_modules` / `.venv` / `dist` / `out`）
 - 同時に、複製元のファイル一覧とサイズ・更新時刻をスナップショットとして持つ
+- **スナップショットの走査（`listFiles` / `takeSnapshot`）が失敗したら、差分計算も統合も反映も行わずに止める（Issue #1118）。** `readdir` / `statFile` が「無い」へ畳んでよいのは `ENOENT` だけで、`EACCES` などそれ以外の失敗は例外として呼び出し側へ伝える。以前は全ての失敗を空一覧・`undefined` へ変換していたため、走査の途中で読めないディレクトリがあると欠けた一覧が成功として返り、`diffSnapshots` がその全件を `deleted` と判定した。統合マニフェストにその削除が登録されると、最終反映の削除分岐が元のワークスペースのファイルを実際に消してしまう。読めなかったことは読めなかったこととして扱い、タスク（`markMergeFailed`）やrun開始（`resolvePseudoState` の失敗）を止めて再試行できる状態にする。`ENOENT` は「タスクが本当に削除した」正常系なので、従来どおり削除として扱う
 - タスクが終わったら、スナップショットとの差分（追加・変更・削除）を計算し、統合先のディレクトリ（`<runId>/_integration`）へ適用する。これがgitの場合のマージにあたる
 - 統合先で同じファイルが別のタスクによって既に変更されていれば衝突とする。**gitが無いので3-way mergeはできない。内容の突き合わせは行わず、そのタスクを直接 `blocked` にする（§16.17のコンフリクト解決セッションは開かない）**。解決用セッションはgitの統合worktreeを前提に組み立てており（衝突したファイルを `cwd` に置いた状態で開く）、疑似worktreeにはその前提が無いため
-- **runが終わったら、統合先の内容をワークスペースへ反映する。run全体の結果（`succeeded` かどうか）は問わない。** それまでに統合できた分は、`failed` / `blocked` / `skipped` が混ざっていてもワークスペースへ反映する。反映の前にワークスペース側が実行中に変更されていないかスナップショットで確かめ、変わっていれば反映せず警告する（人の編集を上書きしない）。この比較基準（`live.pseudo.baseline`）は実行開始時／復元時に一度取ったきりではない。反映に成功する（一部適用の`partialApply`を含む）たびに更新するため、`retryMerge`/`retryTask`/`continueTask`で再開して2周目以降を迎えても、1周目の反映成功それ自体を人の編集と誤検知することなく、再開後に新たに統合された内容を正しく反映できる（Issue #511）。反映を拒否した場合は更新しない（拒否した人の編集を「自分が書いた状態」として取り込むと、以後その編集を検知できなくなるため）。**この更新はワークスペース全体を再スキャンするのではなく、実際に適用した（コピー・削除した）パスだけを個別に反映し、それ以外のエントリは元の値のまま据え置く。** 全体再スキャン方式だと、反映（実I/Oのコピー/削除ループ）の途中に人が反映対象ではない別ファイルを編集した場合、その編集が再スキャンに紛れ込んで`baseline`へ恒久的に吸収され、以後検知できなくなる窓があったため（レビュー・監査指摘）
+- **runが終わったら、統合先の内容をワークスペースへ反映する。run全体の結果（`succeeded` かどうか）は問わない。** それまでに統合できた分は、`failed` / `blocked` / `skipped` が混ざっていてもワークスペースへ反映する。反映の前にワークスペース側が実行中に変更されていないかスナップショットで確かめ、変わっていれば反映せず警告する（人の編集を上書きしない）。この比較基準（`live.pseudo.baseline`）は実行開始時／復元時に一度取ったきりではない。**復元（リロード後）では基準を取り直さず、`<runId>/baseline.json`へ永続化しておいたものを読み戻す（Issue #1115）。** 取り直すと、run開始後・リロード前に人が行った編集が基準そのものへ吸収され、再開後の反映がその編集を「変更なし」と見なして上書きしてしまう。永続化された基準が壊れていて読めない場合は取り直しへ倒さず、復元の失敗として扱う（fail-closed。取り直した基準ではこの上書きがそのまま起きるため）。基準は反映に成功して更新するたびに書き直し、`manifest.json`と同じタイミングで撤去する。反映に成功する（一部適用の`partialApply`を含む）たびに更新するため、`retryMerge`/`retryTask`/`continueTask`で再開して2周目以降を迎えても、1周目の反映成功それ自体を人の編集と誤検知することなく、再開後に新たに統合された内容を正しく反映できる（Issue #511）。反映を拒否した場合は更新しない（拒否した人の編集を「自分が書いた状態」として取り込むと、以後その編集を検知できなくなるため）。**この更新はワークスペース全体を再スキャンするのではなく、実際に適用した（コピー・削除した）パスだけを個別に反映し、それ以外のエントリは元の値のまま据え置く。** 全体再スキャン方式だと、反映（実I/Oのコピー/削除ループ）の途中に人が反映対象ではない別ファイルを編集した場合、その編集が再スキャンに紛れ込んで`baseline`へ恒久的に吸収され、以後検知できなくなる窓があったため（レビュー・監査指摘）
 - PR/MRは作れない。§16.18 の前提チェックで飛ばす
 - 片付け（§16.17「worktreeの片付け」の「まとめて片付ける」操作）の対象には、複製した作業ディレクトリと統合先（`<runId>/_integration`）も含める（Issue #298）。**ただし `blocked` のタスクの複製は残す。** gitならタスクブランチが残るため撤去しても中身を辿れるが、疑似worktreeにはブランチが無く、複製を消すと衝突として弾かれた未統合の差分を復元する手段が無くなる
 - 撤去は `git worktree remove` のような安全弁が使えずディレクトリを直接消すことになるため、**消す前に対象を実パス解決し、その実体が想定した場所そのものであることを厳密に確かめる**（作成時の二段構えのうち後段と同じ確認。詳細はIssue #493の段落を参照）
@@ -5452,7 +5539,11 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 
 **撤去系3関数（`removePseudoWorktree` / `removeManifestFile` / `removeRunDirIfEmpty`）にも同じ規律を横展開した（Issue #493）。** 3関数はいずれも消す前に`fs.realpath(target)`で境界を確認していたが、事後確認が「`.agents/worktrees`の境界内か」（`isPathWithinRoot`）だけを見ていたため、`target`の途中のディレクトリ（典型的には`<runId>`）が`.agents/worktrees`**配下の**別ディレクトリ（他タスクの複製・他runの入れ物）を指すシンボリックリンクへ差し替えられていた場合に素通りし、差し替え先の実体を丸ごと削除してしまう「境界内リダイレクト」が起こり得た（`removeRunDirIfEmpty`の対象が空ディレクトリの場合は`ENOTEMPTY`にも弾かれず実際に削除が成立してしまう）。上記の反映処理と同じく、事後確認を「実パス解決済みのルート＋`target`の相対位置（`path.relative`。`runId`/`taskId`は`identifierError`/`runIdError`で検証済みの固定構造のため、途中のディレクトリの差し替えの影響を受けない）から組み立てた「想定した場所」との厳密一致へ変更した（`resolveRealRemovalTarget`という共通ヘルパーへ抽出）。**この初版の`resolveRealRemovalTarget`は起点を`.agents/worktrees`（`pseudoWorktreesRootDir(workspaceRoot)`）に置いており、以降ここが「正しい参照実装」としてこのファイル内の他の同種チェックに横展開されたが、再々監査（Issue #505）で`<ws>/.agents`自体がワークスペース内の別ディレクトリへ差し替えられると`realpath(worktreesRoot)`と`realpath(target)`が両方とも差し替え後の実体を指し必ず一致してしまう、同じ形の循環バグを`.agents/worktrees`起点自身が抱えていたことが発覚した。攻撃者が動かせない唯一のアンカーは呼び出し元から固定値で渡る`workspaceRoot`自身であるため、現在は起点を`workspaceRoot`まで引き上げている。** 実際の削除操作も、確認済みの実パス（`target`の文字列そのものではなく`fs.realpath`が返した値）に対して行う（対応候補として挙げられていた「削除操作自体をrealpath済みの実パスに対して行う」）。ただし、事後確認から削除呼び出しまでの間にその実パス自身の祖先が差し替えられる残存窓は、反映処理の場合と同じくNode標準APIだけでは閉じ切れない（`openat`相当の欠如、Issue #484）。`runId`/`taskId`は攻撃者が末尾セグメントを自由に選べる値ではなく、監査でも実害は限定的と評価されているため、過剰な作り込みはせず規律の統一と将来の退行防止に留めている。
 
+**マニフェストの保存も一時ファイル+`rename`へ揃えた（Issue #1116）。** `persistManifest`だけが保存先（`manifest.json`）を直接上書きし、事後確認で不一致だったときに**その保存先を`removeFile`していた**。一次確認の後に祖先がリンクへ差し替えられると、書き込みは差し替え先へ着地する。そこに既存の`manifest.json`があれば、上書きしたうえで削除することになり、「書き込みを取り消した」のに元データは戻らない——`cloneWorkspace`/`ensureIntegrationDir`が「境界外に解決された対象は撤去しない」という裁定へ揃えたのに、この経路にだけ既存データを消す動作が残っていた。通常の保存先でも、非atomicな上書きは書き込み途中の失敗で内容の欠けた`manifest.json`を残し、前回の記録を失う。現在は一時ファイル（`.pwt-manifest-<16進32文字>.tmp`）へ書き、実パス厳密一致の確認も**一時ファイルに対して**行ってから`rename`で確定させる。不一致・失敗時に消すのは一時ファイルだけで、保存先には触れない。`fsync`は行っていない（`PseudoWorktreeFileSystemPort`に相当メソッドが無く、追加が全実装へ波及するため）。`rename`だけでもプロセスの異常終了に対しては「前回の内容かこの回の内容か」のどちらかが残る状態になる。電源断の耐性は別途の課題とする。一時ファイルは`.agents/worktrees`配下に置かれ、この領域は`isExcludedPath`が無条件に除外するためスナップショットには現れない（`.pwt-reflect-`のような個別の除外は要らない）。
+
 **設計上の規律（Issue #484、Issue #505で3度再発を確認）: 実パス厳密一致の検査は、ワークスペースルート（呼び出し元から固定値で渡り、攻撃者が差し替えられない最上位）を起点にして比較対象を組み立てる。** `expected`を`target`の直接の親等、攻撃者が差し替えられる中間ノードの`realpath`から組み立てると、その中間ノード自体が差し替えられていた場合に比較の両辺が同じ差し替え後の実体を指し常に一致してしまい、検査が自己無矛盾になって機能しない。この欠陥はレビューと監査を2巡通過してマージされたコード（`reflectIntegrationToWorkspace`）にも実在し、その後「正しい参照実装」として扱われた`resolveRealRemovalTarget`（Issue #493）の`.agents/worktrees`起点にも同じ形で再発した。**`.agents/worktrees`のような中間のディレクトリを起点にすると、そのディレクトリ自体（`<ws>/.agents`）の差し替えで同じ循環が再現するため、中間ディレクトリは起点として使わない。** 攻撃者が動かせない唯一のアンカーは呼び出し元から固定値で渡る`workspaceRoot`自身であり、次に同種の検査を別ファイル（`integration.ts`/`worktree.ts`等）へ書く際も、`workspaceRoot`の`realpath`＋`path.relative(workspaceRoot, target)`の形へ揃えること。
+
+**統合先へのコピー（`applyDiffToIntegration`）にも同じ二段構えを入れた（Issue #1117）。** この関数だけが例外的に、統合先ディレクトリと差分パスを結合して`mkdir`+`copyFile`するだけで境界を確認していなかった。統合先を作った`ensureIntegrationDir`の検査はrun開始時の1回きりであり、タスクの実行中に統合先配下の子ディレクトリや既存ファイルが外向きのシンボリックリンクへ差し替えられると、`copyFile`がそれを解決してリンク先へ書き込む。後段の`reflectIntegrationToWorkspace`が反映を止めても、統合先への書き込み自体は既に起きていて取り消せない。**差し替えは短い競合窓を突く必要がなく、タスク（AIエージェント自身を含む）が実行中に事前配置できる。** 現在はコピー元・コピー先の両方について、一次防御（`findSymlinkedAncestor`による経路のリンク検知。終端セグメントも見るため、コピー先に既にある外向きリンクもここで止まる）と二次防御（`realRoot`起点の実パス厳密一致）を通し、書き込み自体は一時ファイル+`rename`で確定させる。境界の逸脱を見つけたら例外を投げてそのエントリで中断し、マニフェストは更新しない。アンカーとなる`workspaceRoot`は統合のたびに渡される`integrationDir`から導いてはいけないため、run単位で固定される`IntegrationQueue`のインスタンスが保持する。
 
 もう1点、`fsPromises.rm(target, { force: true })`は`ENOENT`を握りつぶすが`EACCES`/`EPERM`等は素通りで投げる。従来は呼び出し側（3関数）に`try/catch`が無く、この例外が`removePseudoIntegration`を越えて`runner.ts`の`cleanupIntegration`まで伝播しうる状態だった（Issue #438が問題視した「削除失敗が握り潰される」の逆方向で、失敗が例外化されて上位を巻き込む）。`tryRemove`という共通ヘルパーで削除呼び出しを`try/catch`し、他の失敗（`boundaryEscape`等）と同じ`Result`型（新しい`reason: 'removalFailed'`）へ正規化した。`removeRunDirIfEmpty`側の失敗はこれまでどおり`removePseudoIntegration`が致命的失敗として扱わず`warning`へ委ねる（PR #492の設計を維持）。
 
@@ -5491,6 +5582,8 @@ Claude Codeには、別々に走っているセッションが互いに名前で
 タスクidを指定できる（従来どおり）。詳細は§16.34を見ること。
 
 トランスポート（`startHttpMcpTransport`、HTTP実装）は、JSONをパースする前のHTTPリクエストボディの受信バイト数にも上限（`MAX_MCP_REQUEST_BODY_BYTES`、64KiB）を設ける（Issue #132 PRレビューでのセキュリティ監査、Info）。`MAX_MESSAGE_BODY_LENGTH` はJSONをパースし終えた後の `validateSendMessage` で効くため、パース前の受信量そのものには効かない。ローカルループバック（`127.0.0.1`）+ 128bitトークン付きURLでしか到達できず外部からの悪用は考えにくいが、そのタスクのCLIプロセス自身が巨大なボディを送る経路は残るため、受信を打ち切る上限を別に設けた。上限を超えたら413で打ち切る。
+
+**トークンの照合はヘッダー受信時と本文の受信完了時の2回行う（Issue #1113）。** URLのトークンから `taskId` を決めるのはヘッダーを受け取った時点だが、そこから本文の受信が終わるまでの間に `registerTask` が走ると、再登録で失効したはずの古いトークンの要求が新しいセッションと同じ `taskId` として処理されてしまう。本文の受信完了時に`tokenToTaskId` を引き直し、同じタスクへ紐づいたままでなければ403で拒否する（失効前から継続していた要求も、失効した時点以降は届かない）。
 
 #### 待ちの表し方
 
@@ -6194,6 +6287,8 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 
 失敗時は具体的な指摘を同じ会話・同じworktreeへ返して修正を続ける。初回を含め最大3回で、通過時だけ従来のマージ処理へ進む。3回失敗、レビュー応答が壊れている、レビューセッションが失敗した場合は`failed`として復旧オーケストレーターへ渡す。
 
+**検証の`await`中に人が「全体の停止」を押したら、検証結果を捨てて再開しない**（Issue #1121）。検証はファイルの存在確認・`git diff`・独立レビュー（別セッションの起動）を順に待つあいだ、拡張機能の状態が変わりうる。元のループは`[DONE]`で既に終わっているため`stop()`の`stopLoop()`はこのタスクには当たらず、検証側が黙って`runLoop`を張り直すと「人が止めたのにAIの修正ループが再開する」ことになる。`verifyTaskCompletion`は各`await`の後に、(1) 拡張機能の終了中（`disposing`）、(2) runやタスクの作り直し（`runs`・`live.tasks`から引いた実体が別物になっている）、(3) 全体の停止（`haltedByUser`）を確認し、いずれかであれば結果の適用も`runLoop`の張り直しも行わない。(3) のときだけ、走行中のループを`stopLoop()`で止めたときと同じ`'taskStopped'`でタスクを停止として確定させる（`stop()`の経路と揃える）。(1) は`runState`の書き換え・`persist`まで含めて何もしない（片付けは`dispose()`が受け持つ）。
+
 実施主体は**forge（人のレビューを待つ機構）ではなく、拡張自身が別のエージェントセッションを立てて読み取り専用でレビューさせる方式**を採る。§16.28の`reviewWorkflowPlan`（分解レビュー、roadmap W3）と同じ形をそのまま踏襲する。
 
 - `reviewTaskPullRequest`（`planner.ts`）は`buildPlannerSessionInput` + `sendSingleTurn`（既定`PLANNER_TURN_TIMEOUT_MS` = 5分）で1ターンだけ送って閉じる。§16.28と同じく`sandbox: read-only`（Codex）・`approvalMode: never`（Codex）/`permissionMode: manual`（Claude）で起動し、承認要求は理由を問わず全て拒否する。**読み取り専用であることはプロンプトの指示ではなく起動設定で担保する**
@@ -6201,7 +6296,7 @@ Issue #341（epic）の方針転換により、「判断するのはオーケス
 - 応答はJSON配列（`[{"message": "..."}]`）を期待し、`TaskPullRequestReviewFinding`へ変換する。JSONとして解釈できない・配列でない応答は指摘0件とせずレビュー失敗にする。件数上限は30件、メッセージは500文字で`sanitizeInlineText`を通す
 - レビューセッションの起動・応答待ちそのものが失敗した場合（タイムアウト等）も例外を投げず、`error`へ理由を残して`findings: []`を返す
 
-`buildTaskPullRequestReviewStep`は、エラーまたは指摘があれば警告を積んで`ok: false`を返す。`runTaskPullRequestFlow`はローカルマージを呼ばず、上位がタスクを失敗へ倒す。
+`buildTaskPullRequestReviewStep`は、エラーまたは指摘があれば警告を積んで`ok: false`を返す。`runTaskPullRequestFlow`はローカルマージもready化も呼ばず`mergeOutcome`を`undefined`にして返し、`finalizeTaskPullRequestFlow`（`runnerMerge.ts`）がそれを`kind: 'failure'`のマージ結果へ変換してタスクを失敗へ倒す（Issue #1110）。`busy`ではなく`failure`にするのは、同じ変更をViewの「再マージ」でもう一度マージしても指摘は消えないため。ready化まで止めるのは、統合へ入れていない変更のDraftを外すと「マージ済み」に見えてしまうため。
 
 #### 外部由来テキストの扱い（サニタイズは1度だけ、§16.24）
 
@@ -6209,7 +6304,7 @@ Issue本文（`buildTaskIssueBody`）・レビュープロンプト（`buildTask
 
 #### 検証
 
-`test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）してもmergeは進むことを確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
+`test/unit/forge.test.ts`が`buildTaskIssueBody`の構成・`createIssue`のホストごとのCLI引数組み立て（GitHub: `gh issue create --body-file=…`、GitLab: `glab api projects/:id/issues --field=description=@…`）・危険な文字列を含む本文が引数へ直接展開されないこと・invalidInput/cliErrorの扱い・一時ファイルの後始末を確かめる。同ファイルが`runTaskPullRequestFlow`に`reviewPullRequest`を渡した場合の呼び出し順序（create→review→merge）・PR/MR作成が失敗すればレビューを呼ばないこと・レビューが失敗（`ok: false`）なら`mergeAndPushIntegration`も`markPullRequestReady`も呼ばず`mergeOutcome`が`undefined`になること（Issue #1110。実装がこの停止条件を満たさず、以前は「失敗してもmergeは進む」をテストで固定していた）を確かめる。`test/unit/planner.test.ts`が`reviewTaskPullRequest`について、§16.28の`reviewWorkflowPlan`のテストと同じ観点（指摘の変換・上限・壊れた応答の扱い・起動設定・1ターンで閉じること・`formatUntrusted`のnonce共有）を確かめる。`test/unit/runner.test.ts`が、本番の呼び出し経路（`runner.start` → タスク完了 → `prepareTaskLaunch`/`mergeTaskWithForge`）を通して、`createTaskIssue`/`reviewTaskPullRequest`いずれも既定では動かないこと・有効化するとIssue起票・レビューセッションの起動が実際に起きること・`pullRequest: 'integration'`では起票しないこと・YAML側で`issue`が既に指定されていれば起票しないこと・起票が失敗してもrunは止まらずタスクが完了することを確かめる。実ホスト（GitHub/GitLab）でIssue起票・レビューコメントの内容が実引数として受理されるかは[manual-test.md](manual-test.md)のW-Kに残す。
 
 ### 16.32 タスクからオーケストレーターへ判断を仰ぐ経路（`ask_orchestrator`、roadmap W7、Issue #571）
 
@@ -7470,7 +7565,7 @@ Advisorのセッションを、**押下時点の材料だけを書き出した�
 
 **未追跡ファイル（F）** も同じ地点の材料として渡す。`git diff` は未追跡ファイルを出力しないため、新機能の開発で主要な実装が全部新規ファイルという場合に、Advisorが既存ファイルの数行しか見ないまま意見を返していた。`git ls-files --others --exclude-standard -z` で一覧を取り、差分の切り詰めより**先に**予算（`MAX_UNTRACKED_TOTAL_BYTES`、10万byte）を確保する。`git add -N` は使わない（親が作業している最中にindexを触らない）。
 
-`.gitignore` を通過したことは安全の根拠にならない。読む前に、(1) `realpath` で解決したパスがworkspace root配下にあること、(2) 開いた**fd自身**が通常ファイルであること（`fstat`）、(3) 読むのは**そのfd**からであること、の3つを確かめる。3が要るのはパス検査と読み取りの間に差し替えられるためで、これが無いとリポジトリ外の資格情報ファイルを指すsymlinkの中身がそのまま外部セッションへ渡る。内容を載せなかったファイルは、パス・サイズ・理由をプロンプトの一覧へ必ず出す（黙って落とすと「新規ファイルは無い」という前提で読まれる）。
+`.gitignore` を通過したことは安全の根拠にならない。読む前に、(1) `realpath` で解決したパスがworkspace root配下にあること、(2) 開いた**fd自身**が境界を確認した実体と同じであること（確認時の `lstat` と `fstat` の `dev`/`ino` の一致）、(3) 開いた**fd自身**が通常ファイルであること（`fstat`）、(4) 読むのは**そのfd**からであること、の4つを確かめる。4が要るのはパス検査と読み取りの間に差し替えられるためで、これが無いとリポジトリ外の資格情報ファイルを指すsymlinkの中身がそのまま外部セッションへ渡る。2が要るのは確認と `open` の間にも同じすき間があるためで（Issue #1123）、`fstat` は種類とサイズしか見ないので開いたfdだけでは境界の中かが分からない。一致しなかったものは `path-changed` として落とす。内容を載せなかったファイルは、パス・サイズ・理由をプロンプトの一覧へ必ず出す（黙って落とすと「新規ファイルは無い」という前提で読まれる）。
 
 予算で落とした未追跡ファイルはbundleにも置いていないため、Advisorからは内容へ到達できない（隔離前は実workspaceを読めば届いた）。到達できないことは一覧に出るので「見ていない」と分かる形にはなっている。全量をbundleへ写す案は、読み取りの安全確認をもう一度別経路で持つことになるので採っていない。
 
@@ -7536,6 +7631,149 @@ changedPaths: a.txt
 ##### 更新できる相談の限定
 
 更新できるのは、追加資料に「作業ツリーの変更」を選んだ相談だけである。それ以外（`none` / 直近の応答）の材料はプロンプトの中で完結しており、作業ディレクトリに更新すべきものが無い。webview側のボタンも、更新できる相談のときだけ出す（`secondOpinionAdvisor` メッセージの `canUpdateMaterial`）。
+
+#### 凍結after-treeの構築（Issue #1047）
+
+条件A（上の「レビュー材料の隔離」）がAdvisorへ渡すのは `changes.diff` と `base/<変更対象ファイル>` だけである。**そのPRが触っていないファイルは既定で目に入らない。** Issue #1044 のscreeningでは、primaryと判定した9件のうち4件（#330 / #319 / #405 / #135）が「壊した場所・繋ぎ損ねた場所が差分の外」で、条件Aの材料からは到達できなかった。この4件はいずれも、押下時点のリポジトリを読めれば差分中の識別子から1〜2ホップで辿り着く。
+
+条件C-repoは、そこへ「押下時点の作業ツリーと同じ内容を持つ、書き換わらない木」を足す。
+
+##### 本番には`targetCommit`が無い
+
+評価ハーネス（`test/bench/secondOpinionEval/materials.ts`）は `git worktree add --detach <targetCommit>` で after 側を用意している。**この方法は本番では使えない。** `snapshot.ts` が固定するのは `baseCommit` と、そこからの差分だけで、after 側は未コミットの作業ツリーである。コミットとして存在しないので、押下時点の材料から組み立てるしかない。
+
+##### 構築方式の比較（実測）
+
+このリポジトリ（583ファイル・11.2MB・`baseCommit` = `HEAD~5`）と、binary・symlink・実行bitを含む使い捨てリポジトリで4系統を実測した。
+
+| 方式                                                             | 時間      | `.git`混入 | objectDBへの書込 | 追加依存                        |
+| ---------------------------------------------------------------- | --------- | ---------- | ---------------- | ------------------------------- |
+| A `git archive` + tar展開 + `git apply`                          | 0.53s     | 無し       | 0                | **tar展開器とbinary対応stdout** |
+| B 一時index + `apply --cached` + `write-tree` + `checkout-index` | 0.36s     | 無し       | **blob + tree**  | 無し                            |
+| B' 一時index + `checkout-index` + 展開先で `git apply`           | **0.20s** | 無し       | **0**            | 無し                            |
+| C detached worktree + `git apply` + `.git`を除いたコピー         | 0.59s     | **要除外** | 0                | 無し                            |
+
+A・B・B'・Cの4方式は、生成した木の中身が互いにbyte一致した（`diff -rq`）。Bが `write-tree` で返した tree SHA は `HEAD` の tree と一致し、この比較自体の正しさもそこで確かめている。
+
+**採ったのはB'である。** 決め手は2つ。
+
+- **Aはこのコードベースでは実装コストが跳ね上がる。** `GitCommandRunner.run` は `stdout` を文字列で返す。tarをここに通すとbinaryが壊れるため、binary対応の実行系と、tar展開器（`package.json` の実行時依存は `yaml` の1つだけ）の両方を足すことになる。`checkout-index --prefix` はgitが直接ファイルを書くので、どちらも要らない
+- **BとE（後述）は利用者のobjectDBへ書く。** `git apply --cached` と `git add -A` は after 側の内容をblobとして書き出す。使い捨てリポジトリでの実測では、B・Eがそれぞれ緩いobjectを2個増やしたのに対し、B'は**0個**だった。`git add -N` を避けた未追跡ファイルの扱い（Issue #926 F）と同じ理由で、人が作業している最中のリポジトリへ書き込む経路は作らない
+
+Bの利点は `write-tree` の返す tree SHA で凍結を検証できることだが、objectDBへ書く代償に見合わないと判断した。B'では代わりに、木の中の `.frozen-after-tree.txt` にベースコミット・ファイル数・欠落を残す。
+
+Cを採る場合も **detached worktree をそのままAdvisorの `cwd` にはできない。** worktree内の `.git` はファイルで、本体リポジトリの `.git` を指す。そこからは履歴・他ブランチ・他コミットへ到達でき、「押下時点の木だけ」という材料の契約を超える。したがってCは「worktreeを作る → `.git` を除いて別ディレクトリへコピーする」の2段になり、ディスクを2倍使い、`git worktree list` に一時的なエントリが載る。
+
+比較しなかった `git ls-tree -r` + `git cat-file --batch` は、Aと同じbinary stdoutの問題を持ち、加えてファイル数ぶんのプロセス起動が要る。この規模（583ファイル）で他の方式が0.2〜0.6秒に収まっているため、実測せずに落とした。
+
+##### press-time snapshot tree（E）を採らなかった理由
+
+比較の途中で、`GIT_INDEX_FILE` に一時indexを置いて `read-tree <base>` → `add -A` → `write-tree` する方式（E）も測った。押下時点の作業ツリーを1回の走査でtreeオブジェクトとして固定でき、未追跡ファイルも自動で入り、`git diff` を打ち直す必要が無い。凍結の忠実さという点では最も強い。
+
+採らなかったのは、objectDBへ書くこと（B と同じ）に加えて、**押下の瞬間に作業ツリー全体を走査する**ためである。`add -A` は差分の有無にかかわらず全ファイルをstatし、変更されたものはblobとして書き出す。押下から最初の応答までの待ち時間は既に長い（要約2分 + 本体15分）ので、押下時点の同期処理を増やす方向は取らない。
+
+##### 実装（`secondOpinion/afterTree.ts`）
+
+`createFrozenAfterTree()` が読むのは次の3つだけで、いずれも押下時点で固定済みである。実行時に作業ツリーを読むgitコマンドは無い。
+
+- `baseCommit` — 不変のコミット。`read-tree` / `checkout-index` はここからしか読まない
+- `applyDiff` — 押下時に取った差分の**文字列**。ここで `git diff` を打ち直さない
+- `untrackedFiles` — 押下時に `untracked.ts` の安全確認（realpath・fstat・同一fdからの読み取り）を通して読み終えた内容
+
+一時indexは `GIT_INDEX_FILE` でしか指定できず、`-c` でもサブコマンドのオプションでも渡せない。そのため `GitCommandRunner.run` に環境変数の口（`GitCommandOptions`）を足した。値が `undefined` のキーは親プロセスから引き継がずに消す——gitのhookから拡張機能が起動された場合など、親に `GIT_DIR` / `GIT_WORK_TREE` が残っていると別のリポジトリを触るためである。`git apply` の側では `GIT_CEILING_DIRECTORIES` で探索を展開先の親で止め、展開先の上位にあるリポジトリを見つけないようにしている。
+
+**本物のindexも作業ツリーも書き換えない**ことは、木の構築前後で `git status --porcelain` が変わらないことをテストで確かめている。
+
+##### `changes.diff`はそのまま`git apply`へ通せない
+
+`ReviewMaterial` に `applyDiff` を足し、`fullDiff`（= `changes.diff` の中身）とは別に取る。同じ地点の差分を2回取ることになるが、`fullDiff` をそのまま使えない理由が3つある。
+
+- **binary**: 既定の `git diff` はbinaryの中身を出さず `Binary files a/x and b/x differ` の1行になる。これを当てようとすると `error: cannot apply binary patch to 'x' without full index line` で失敗する（実測）。`--binary` が要る
+- **`diff.noprefix` / `diff.mnemonicPrefix`**: 利用者の設定次第で `a/` `b/` が消えたり `i/` `w/` になったりし、`git apply` の既定の `-p1` が外れる。`--src-prefix` / `--dst-prefix` で固定する
+- **`color.diff = always`**: 出力先がパイプでも色が付く。ANSIが混ざった差分は当たらない。`--no-color` で消す
+
+**`fullDiff` 側は変えていない。** そちらは条件Aの材料そのもので、Issue #1044 のベースラインとして凍結してある。`--binary` を足すとbinaryを含む案件で `changes.diff` の中身が変わる。
+
+なお後ろの2つ（`diff.noprefix` / `color.diff`）は、`changes.diff` 自体も利用者の設定次第で見た目が変わるという既存の問題でもある。Advisorが読むだけなら実害は小さいため、ここでは直さない。
+
+`applyDiff` は取得に失敗すると `undefined` になる。空文字列（未追跡ファイルだけが変わった場合に実際に起こる）と区別する必要があるためで、両方を空文字列にすると `git diff` が落ちたときに「差分が無い＝baseがそのまま after」という誤った木ができる。
+
+##### fail-openしない
+
+差分の適用に失敗したら、**途中まで実体化した木を返さない**。半端な木は「baseのままの箇所」と「afterになった箇所」が混ざり、どちらなのかAdvisorにも人にも区別できない。失敗したらディレクトリごと消して `FrozenAfterTreeError` を投げる。呼び出し側は条件Aの材料だけで進むか、相談自体をやめるかを選ぶ。`git apply --3way` は使わない——フォールバックでbaseのblobを探しに行く経路が増え、「当たらなかった」が「別の当て方で通った」に化ける。
+
+未追跡ファイルのうち、押下時点で内容を取得できなかったもの（binary・予算超過・型・権限）は木に置けない。**それを黙って飲まない。** `FrozenAfterTree.omissions` で返し、木の中の `.frozen-after-tree.txt` にも「存在しないのではなく、押下時点で取得できなかった」と明記する。Advisorが木を「押下時点の全部」と読むことを防ぐのが目的である。
+
+**説明ファイルは排他的に作り、写しの側を上書きしない（Issue #1103）。** `checkout-index` は追跡済みのsymlinkもそのまま展開するため、`.frozen-after-tree.txt` という名前が木の外を指すsymlinkとしてcommitされていると、素の書込みはリンク先（木の外にある書込み可能なファイル）を書き換えてしまう。通常ファイルとしてcommitされている場合も、写しの中身が説明文で置き換わって正確な写しではなくなる。そのため説明ファイルは `wx`（`O_CREAT | O_EXCL`）で作る。既にあれば `EEXIST` で失敗し、リンクは一切たどらない。衝突したときは**写しの側を残し**、`.frozen-after-tree-1.txt` のように名前を変えて置く（説明ファイルはこちらが足したものなので、写しの正確さを優先する）。実際に使った名前は `FrozenAfterTree.noticeFile` で返し、プロンプトで名指しする側（`prompt.ts`）はその値を使う。
+
+##### 確かめ方
+
+`test/unit/secondOpinionAfterTree.test.ts`。フェイクのgitでは確かめられない（gitが実際に何を書くか、当たらない差分で本当に失敗するか）ため、`worktree.test.ts` に倣って使い捨てリポジトリへ実物のgitを打つ。
+
+- 差分に現れないファイルも木に入る（C-repoの値打ちそのもの）
+- 木に `.git` を作らない
+- binary・実行bit・symlinkの変更が写る
+- `--binary` なしの差分では失敗し、木を残さない
+- 当たらない差分・辿れないベースコミットでは失敗し、木を残さない
+- 未追跡ファイルを置き、取得できなかったものは欠落として `omissions` と説明ファイルに残る
+- 木の外を指す未追跡パスは書かない
+- 木を作った後に作業ツリーを書き換えても木は変わらない
+- 本物のindexと作業ツリーが変わらない
+
+##### 評価ハーネスへの配線（条件C-repo）
+
+測定側（`test/bench/secondOpinionEval/`）へ条件 `C-repo` を足した。変えているのは2つで、**この2つは分離できない**。
+
+- 材料へ `after/`（押下時点のリポジトリ全体の写し）を足す
+- 固定指示の探索の範囲を「リポジトリ全体の探索は行わない」から「まず依頼・背景・差分を読み、判断に必要な場合だけ `after/` の中を追加で読む」へ変える
+
+写しだけ置いて禁止を残せば「読んでよい材料がそこにあるのに読むなと書いてある」という矛盾になり、どちらへ倒れるかが実行ごとに変わる。指示だけ変えても読む先が無い。条件名を `C-repo` としてあるのは、これが位置の実験（`B-pos`）のような単一要素の切り分けではなく、実用寄りの介入だからである。
+
+**条件ごとに別のbundleを作る。** 1つのbundleへ写しを置くと、固定指示が名指ししていない条件Aでも `ls` で見つけられてしまい、条件Aが「差分だけを見た場合」の測定でなくなる。`CaseMaterial.cwdFor(condition)` が、`needsAfterTree` の条件にだけ写し入りのbundleを返す。snapshotそのものは案件ごとに1度しか取らないので、条件間で材料が変わることはない。
+
+`createReviewBundle` は `afterTree` を渡したときだけ `after/` を作り、`buildSecondOpinionPrompt` は `afterTreeDir` を渡したときだけ探索の指示を出す。条件Aはどちらも渡さない。
+
+##### 拡張本体の既定にする（Issue #1062）
+
+Issue #1060 で9案件を測定し、条件C-repoの採用を確定した。凍結済みの `cases-primary-v1.json` / `eligibility-v1.json` に対する実測は次のとおりである。
+
+| 指標                      | 条件A        | 条件C-repo       |
+| ------------------------- | ------------ | ---------------- |
+| 重要問題のrecall          | 0.167（1/6） | 0.400（4/10）    |
+| baselineの分母外（救済）  | -（0/0）     | **0.750（3/4）** |
+| baselineの分母内          | 0.167（1/6） | 0.167（1/6）     |
+| toolCalls（bundle内のみ） | 9.22 回/回答 | 10.11 回/回答    |
+| latency                   | 388,365 ms   | 381,789 ms       |
+| sessionTokens             | 894,035      | 1,088,137        |
+| プロンプト長              | 83,023 B     | 83,774 B         |
+
+**両条件で分母に入る6件のrecallは同一である。** C-repoの増分はすべて分母外（差分の外にある問題）から来ており、探索が本来読むべき材料から注意を逸らしている兆候は出ていない。費用は予告どおりプロンプト長ではなく探索の往復として現れ、トークンが21.7%増えた。latencyは増えていない。
+
+そこで既定を条件C-repo側にする。設定 `agent.secondOpinion.afterTree`（既定 `true`）で切れる。トークンの増加を許容できない場合と、写しの構築が失敗し続ける環境のための退避口である。
+
+**写しを作れなくても相談は止めない。** `createReviewBundle` は `afterTree` を渡した場合、写しの構築に失敗するとbundleごと作らない（半端な木は「baseのままの箇所」と「afterになった箇所」が区別できないため）。呼び出し側（`secondOpinionCommand.ts`）はそれを受けて、条件A相当の材料だけで作り直す。写しはrecallを上げる追加材料であって、相談の成立条件ではない。落ちる経路は2つで、どちらもログへ理由を残す。
+
+- `ReviewMaterial.applyDiff` が `undefined`（押下時の `git diff --binary` が失敗した）。空文字列（未追跡ファイルだけが変わった場合に実際に起こる）とは区別する
+- `createFrozenAfterTree()` が投げた
+
+このとき `afterTreeDir` もプロンプトへ渡さない。**写しが無いのに指示だけ変わる状態を作らない**——Advisorが無いディレクトリを探しに行って空振りする。
+
+材料を最新へ更新する経路（Issue #975）では、写しは追随しない。写しは最初の押下時点で凍結されており、`updates/<世代>/` に積まれるのは `changes.diff` と `base/` だけである。黙っていると新しい差分と古い写しが同じ時点のものとして読まれるため、更新の通知（`buildMaterialUpdatePrompt`）へ「写しはこの更新に追随していない」という1行を足す。写しがある相談にだけ出す。
+
+##### 費用の測り方
+
+条件C-repoの費用はプロンプト長には出ない（写しはプロンプトへ載らない）。出るのは**Advisorが何回読みに行ったか**なので、`EvalRunRecord.toolCalls` としてこのターンで走らせたコマンドを回数と本文の両方で残す。読んだファイルの一覧は集計側がこの文字列から取り出す——コマンドの形はCLIの版で変わるため、実行時に解釈して捨てない。
+
+条件Aでも `toolCalls` は空とは限らない（材料の `changes.diff` や `base/` を読むのもここに出る）。**条件Aとの差**が探索の増分である。探索のlatencyとトークンの増分は、既にある `latencyMs` と `sessionTokens` の条件間の差で見る。
+
+##### recall の別集計（baselineの分母外 / 分母内）
+
+総 recall だけでは、条件C-repo が効いたのかどうかを言えない。**救済**（条件Aでは材料が足りず発見できなかった問題を、探索によって拾えた）と、**もともと両条件で分母に入っていた問題の取りこぼし**が同じ数字へ潰れるためである。分母を2つへ割る。
+
+- baselineの分母外: その条件で新たに分母へ入った正解ラベル。C-repo の狙いはここに出る
+- baselineの分母内: 両条件の分母に入る正解ラベル。ここが下がるなら、探索が本来読むべき材料から注意を逸らしている
+
+割り方は `FindingEligibility` を baseline 側（既定は条件A）で引き直すだけで、ラベルには何も足さない。条件を増やしても再ラベルが要らないという Issue #1046 の性質をそのまま使う。baseline 自身を集計すると分母外は常に0件になる（そのラベルは定義上 baseline の分母に入る）ので、この行が0でないのは baseline 以外の条件だけである。
 
 #### 差分の切り詰め（Issue #926 H）
 
@@ -7654,6 +7892,8 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 **過信しないこと。** 囲いも切り詰めも補助にすぎず、一次防御はEvaluatorに権限を与えないこと（`--tools ""` / `--sandbox read-only`）の側にある。
 
+Evaluatorへ送るプロンプトは、下書き役（§14.96）・Advisor（§14.95）と同じく送信直前に `redactCredentials`（§14.94）を通す（Issue #1168）。証拠にはコマンドの引数と末尾出力がそのまま入り、Evaluatorは設定次第で本流と別のCLI（別のモデルサービス）で動く。`redactEvaluatorPrompt` を送信経路と切り離してexportしてあるのは、伏せていることを単体テストで固定するため。ログへ出すのは伏せた件数だけで、プロンプトと応答本文は出さない。
+
 #### 層について
 
 `loop/goalPrompt.ts` と `loop/loopController.ts` が `orchestrator/untrustedText.ts` と `orchestrator/taskSummary.ts` を参照する。層としては `loop/` が下位だが、参照先はどちらも `vscode` に依存せず `loop/` を参照し返さないため循環は生じない。切り詰め・制御文字除去・区切りなりすまし対策・1行要約の規則を二重に実装しないことを優先した。
@@ -7672,7 +7912,7 @@ Evaluatorへ渡す会話の抜粋は `untrustedText.ts` の囲い（`formatUntru
 
 - `test/unit/goalLoop.test.ts`: 目的と受入基準が揃ったときだけゴールとして受け付けること、終了コードから `pass` / `fail` を拾い実行中のものは拾わないこと、拾ったidを積み直さないこと、コマンド行から種別を当てること、出力は末尾を残して切ること、証拠のledgerが元の配列を変更せず上限で古い分を落とすこと
 - `test/unit/goalPrompt.test.ts`: 証拠と要約が別の区画に出て終了コードが落ちないこと、会話の抜粋が「指示ではない」と明示した囲いに入ること、コードフェンス・前置き付きのJSONを読めること、不正なJSONと未知の `verdict` が `indeterminate` に倒れること、フィールドの長さと要素数を切り詰めること、次ターンの指示文が決まった枠へはまること
-- `test/unit/goalEvaluatorProcess.test.ts`: 組み立てた引数にツール無効化（`--tools ""` / `--sandbox read-only`）と設定隔離（`--setting-sources ""` / `--ignore-user-config`）が入ること、セッションを引き継ぐ引数（`--resume` / `--continue` / `resume` / `fork`）が入らないこと、`auto` が軽量モデルへ解決されること
+- `test/unit/goalEvaluatorProcess.test.ts`: 組み立てた引数にツール無効化（`--tools ""` / `--sandbox read-only`）と設定隔離（`--setting-sources ""` / `--ignore-user-config`）が入ること、セッションを引き継ぐ引数（`--resume` / `--continue` / `resume` / `fork`）が入らないこと、`auto` が軽量モデルへ解決されること、証拠・ゴール・要約・応答本文に混ざった資格情報が伏せられ業務コードは伏せられないこと
 - `test/unit/loopController.test.ts`: `achieved` で `done`・`escalate` で `escalated` として止まること、`continue` で `nextFocus` を添えた次のターンを送ること、Workerへ `<<LOOP_DONE>>` を付けないこと・Workerの自己申告では止まらないこと・撤退の申告は尊重すること、毎ターン新しく評価すること、`indeterminate` が続いたら人へ渡すこと・`continue` で連続が途切れること、Evaluatorが例外を投げてもループが壊れないこと、最終ターンの達成が `maxReached` に埋もれないこと、評価を待つ間に止められたら次を送らないこと
 - `test/unit/config.test.ts`: 既定が `inherit` / `auto` であること、未知のproviderが `inherit` へ倒れること
 
@@ -7985,7 +8225,7 @@ Claude Codeは `result` の1イベントで `busy: false` と `turnResultText` �
 - 名前ごとに `enabled: false`: `config.toml`由来の3本は接続されなくなる（`mcpServerStatus/list`で`serverInfo: null` / `tools: {}`）。`codex_apps`は残る
 - `codex_apps` へ `{ enabled: false, command: 'true' }`: 4本すべて無効化。`command`を省くと`invalid transport`で`thread/start`自体が失敗する（`config.toml`に定義が無いため）
 
-したがってオーバーレイは名前を列挙して組み立てるしかない。名前は`config/read`（実測35ms）から読み、そこに現れない組み込み分（`BUILTIN_MCP_SERVER_NAMES`）を足す（`src/codex/mcpDisable.ts`）。`config/read`に失敗しても組み込み分だけのオーバーレイで続ける。指定は`TaskSessionInput.disableMcpServers`で、タスク間メッセージングの`mcp`（§16.21）が指定されていればそちらを優先する（メッセージングを黙って壊さない）。
+したがってオーバーレイは名前を列挙して組み立てるしかない。名前は`config/read`（実測35ms）から読み、そこに現れない組み込み分（`BUILTIN_MCP_SERVER_NAMES`）を足す（`src/codex/mcpDisable.ts`）。**`config/read`に失敗した場合・応答が`{ config: { ... } }`の形でない場合は、オーバーレイを組み立てずセッションの起動そのものを中止する（Issue #1112）。** オーバーレイはマージであって置換ではないため、名前を挙げられなかったサーバはそのまま接続される。以前は組み込み分だけのオーバーレイで続けていたが、それでは利用者の`config.toml`のサーバ（外部を操作できるツールを含む）が生きたまま相談セッションが始まる。`mcp_servers`が無いのは正常（利用者が1つも定義していない）なので、組み込み分だけを無効化して続ける。パネルは無効化の解決に成功してから作るので、中止したときはタブも保留中の開始も残らない。指定は`TaskSessionInput.disableMcpServers`で、タスク間メッセージングの`mcp`（§16.21）が指定されていればそちらを優先する（メッセージングを黙って壊さない）。
 
 #### 要約セッションを短くする・開かない
 
@@ -8152,6 +8392,8 @@ Claudeの `side_question` control requestは使えない。§14.62の実測ど�
 `direct` モードも `git diff` 全文を同じ経路で送っているので、送信自体は新しくない。askGptで増える分は、**親に関連コード全文・生ログ・設定ファイルを能動的に集めさせる**ことによる遭遇率である。`src/secondOpinion/redact.ts` が、秘密鍵ブロック・URL埋め込みの認証情報・Authorizationヘッダ・既知の接頭辞を持つトークン・`KEY=` 系の代入を伏せる。環境変数の参照（`process.env.X`）やプレースホルダ（`your-password-here`、`xxxx`）は伏せない——読めなくなるだけで守るものが無い。
 
 完全な検出は原理的にできない（任意の文字列が秘密になりうる）。ここが担うのは「よくある形のものは必ず落ちる」までで、外部へ出してよい内容かの最終判断は利用者が行う。そのため伏せた件数を必ず会話へ残す。proprietary codeの秘匿は行わない（credentialとは別の問題であり、コードを伏せると質問が成立しない）。
+
+伏せる経路は送信本文だけではない（Issue #1171）。相談の本体（`run.ts`）・会話の要約（`summary.ts`）・追加の相談と引き継ぎ下書きの依頼（`advisorSession.ts`）は送信直前に `redactCredentials` を通し、相談先が読める資料（review bundleの `changes.diff` と `base/`、材料の更新の各世代）は書き出す前に伏せる。押下時点の写し（after-tree）は `git apply` と未追跡ファイルの実体化でできており、伏せるとパッチが当たらないため、材料（`applyDiff`・未追跡ファイル）に伏せ字対象が1件でもあれば写しを作らず、差分とベース側だけで続ける（`ReviewBundle.afterTreeOmitted`）。`baseCommit` 時点の追跡ファイル全体は走査しない——コミット済みの内容であり、本流のセッションも同じものを読む。これらの経路で伏せた件数はログにだけ残す。
 
 #### 名乗る値と、名前から推した値を分けて扱う（Issue #963）
 
@@ -8860,6 +9102,10 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 
 オーケストレーターの接続id（`ORCHESTRATOR_CONNECTION_ID`、値は`-orchestrator-`）は`TASK_ID_PATTERN`に一致しないため、そのままではファイル名に使えない。`write_handoff`はオーケストレーターからの書き込みだけ`RESERVED_ORCHESTRATOR_TASK_ID`（`_orchestrator`、`workflow.ts:105`）へ読み替える（`messaging.ts:1625-1629`）。同名のタスクは`validateWorkflow`が定義できないよう弾いている（`workflow.ts:1345-1348`）ため、この読み替えがタスクのファイルと衝突することはない。
 
+**削除できるのは自分が書いたものだけにする（Issue #1033）。** `delete_handoff`は当初`taskId`と`slug`を引数に取るだけで、呼び出し元が誰かを見ていなかった。`write_handoff`が`connection.taskId`から書き込み先を決めて名義を守っている（上記）のに対し、削除側は他タスクの成果物を消せる状態で、名義の保護が書き込みだけの片側になっていた。現在は接続の`taskId`と削除対象の`taskId`が一致することを求め、一致しないときは`accepted: false`と「自分が書いた受け渡しファイルだけを削除できます」という理由を返す。オーケストレーターだけは例外で、どのタスクのファイルも削除できる——runの後片付けと、行き詰まったタスクの残骸を掃除する役割を担うためで、`decide_approval`と同じく`delete_handoff`はオーケストレーターでも自動許可の対象外にしてある（§16.2）。この制約は`DELETE_HANDOFF_TOOL.description`にも書き、エージェントが試す前に読めるようにする。
+
+**一覧はガードに弾かれたことを「0件」と区別する（Issue #1033）。** `TeamHandoffStore.list`は当初`HandoffEntry[]`を返し、`findSymlinkedAncestor`のガードに弾かれた場合も空配列を返していた。呼び出したエージェントからは「まだ誰も書いていない」と見分けが付かず、他のタスクが書いたはずのメモを探しているオーケストレーターが「無い」と判断して先へ進む。現在は`HandoffResult<HandoffEntry[]>`を返し、`list_handoffs`はガード失敗を`accepted: false`と理由で返す（`entries`は付けない）。`read_handoff`・`write_handoff`が既に`HandoffResult`で失敗を伝えていたのに`list`だけが例外だった、という不揃いの解消でもある。
+
 **予約idとの一致は大文字小文字を無視して見る（Issue #1022）。** `validateWorkflow`の`_orchestrator` / `_integration`の判定は当初完全一致だったが、大小文字を区別しないファイルシステム（Windows・既定のmacOS）では`_Orchestrator`のタスクが`_orchestrator`と同じ場所を指す——受け渡しファイル（`_orchestrator~<slug>.md`）と統合worktreeの置き場をタスク側が名乗れてしまう。タスク同士の大文字小文字違いは既に`idsByLowerCase`で弾いていた（worktreeのパスとブランチ名のため）が、そちらは予約idを対象にしていない。
 
 `read_handoff`が返す本文は`formatUntrusted`で囲ってから返す（`messaging.ts:1652-1657`）。受け渡しファイルの中身はエージェントが書いた自由記述であり、`send_message`の本文（`wrapTaskMessage`）や`{{T1.result}}`と同じ脅威クラス（上流の自由記述がそのまま下流のプロンプトへ入る経路）にあたるためで、無害化を経ずに素通りさせない。
@@ -8880,3 +9126,129 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 - `test/unit/workflowGraph.test.ts`: `kanbanBucket`のバケツ分け、`summarizeKanban`の件数、`taskRoleLabel`
 - `test/unit/runnerTeamHandoff.test.ts`: run終了時に受け渡しファイルの置き場ごと消すこと、撤去に失敗したとき（`ok: false`・例外・祖先のシンボリックリンク）は警告だけ残してrunの結果を書き換えないこと。`runner.ts`の終了処理は`TeamHandoffStore`を`nodeHandoffFileSystem`と直接組み立てる（注入点を意図的に持たない）ため、このテストだけはモジュールごと差し替えて観測している（Issue #725）
 - `docs/manual-test.md` W-W: メニューからの起動と生成されたYAMLに`role`が入ること、カンバンのバッジと役割ラベルの見え方、実機のMCP越しの`write_handoff`/`read_handoff`、run終了後に`.agents/handoff/runs/<runId>/`が消えていること、再開した2周目が空から始まること（Issue #725）
+
+### 14.105 Advisorにskillを提示しない（Issue #1061）
+
+§14.80のセカンドオピニオンは、差分と変更対象ファイルだけを置いた隔離ディレクトリ（review bundle。§14.87）をセッションの作業ディレクトリにし、固定指示で「この作業ディレクトリの外を読みに行かないでください」と縛る。ところがAdvisorは、**1つ目のコマンドで** `~/.codex/skills/<name>/SKILL.md` を読みに行っていた（Issue #1047 のE2E probe `eval-results/probe-c-repo-v1/` で、条件A・条件C-repoの両方に出た）。
+
+原因はモデルの気まぐれではない。Codex CLIが利用可能なskillの一覧をシステムプロンプトへ自動で載せ、「使うと決めたらまず `SKILL.md` を最後まで読む」よう指示している（実測: 素の `codex exec` へ「提示されているskillを列挙せよ」と聞くと20件を答える）。提示があるかぎり、固定指示と衝突したまま読みに行く余地が残る。
+
+害は2つある。**材料をbundleへ隔離した前提が崩れる**こと、そして**費用の測定に雑音が乗る**ことである。精度測定（§14.99 / Issue #1047）は「条件Aとの `toolCalls` の差＝探索の増分」として費用を読むが、条件Aの内訳に材料と無関係な読み取りとその失敗（probeでは `exit 2` が4回）が混ざる。機密面の懸念は無い（読んでいるのは利用者自身のskill定義で、外部への送信でもない）。
+
+#### 塞ぎ方は実測で選ぶ
+
+`thread/start` の `config` へ重ねるオーバーレイで塞ぐ（`src/codex/skillDisable.ts`）。キーの候補は3つあり、効いたのは1つだけだった（codex-cli 0.148.0）。
+
+| 指定                                | 結果                                     |
+| ----------------------------------- | ---------------------------------------- |
+| `features.skills=false`             | 効かない。一覧はそのまま提示される       |
+| `skills.enabled=false`              | 効かない（設定は受理されるが一覧は残る） |
+| `skills.include_instructions=false` | **効く**。skillの提示そのものが消える    |
+
+確認はapp-server経由でも行った。オーバーレイ有りでは「提示されているskillを列挙せよ」に「なし」と答え、外すと20件を列挙する（陽性対照つき）。指定は`TaskSessionInput.disableSkills`で、`ChatViewManager.openTaskSession`がMCPのオーバーレイと合成して`thread/start`の`config`へ載せる。両者は独立なので、`disableMcpServers`と併用すると両方載る。
+
+**グローバルな `~/.codex/AGENTS.md` は消せない。** `project_doc_max_bytes=0` / `instructions` / `user_instructions` のいずれでも残ることを実測で確認した。消すには `CODEX_HOME` ごと差し替えることになり、認証情報の置き場（`auth.json`）まで巻き込むため行わない。こちらはプロンプトへ注入されるだけでコマンドの実行を伴わないので、`toolCalls` には現れず、条件間でも一定である。
+
+#### 塞ぐ前に取った記録
+
+既に取った実行記録には、bundleの外の読み取りが混ざったまま残る。取り直さずに内訳を出せるよう、コマンドをbundleの中と外で数え分ける集計（`test/bench/secondOpinionEval/toolCallScope.ts`）を置いた。判定は「先頭の `/bin/bash -lc` を落としたコマンド本体に絶対パスが現れるか」で、bundleがセッションの作業ディレクトリである以上、材料への参照は相対パスで出るという性質に乗っている。完全な判定ではない（bundleを絶対パスで指したコマンドは外と数え、変数経由の参照は拾えない）ので、費用の内訳を後から言うために使い、「外を読んでいない」ことの証明には使わない。証明の側はこの節の変更が担う。
+
+`eval-results/probe-c-repo-v1/` へ当てると、条件Aはコマンド9回のうち外が4回、条件C-repoは7回のうち外が3回で、いずれも `japanese-writing` skillの `SKILL.md` と参照ファイルだった。
+
+#### 確かめ方
+
+- `test/unit/chatViewManager.test.ts`: `disableSkills`を渡したとき`thread/start`の`config`へ`skills.include_instructions=false`が載ること、MCPの指定と同居すること、指定しなければ`config`自体が載らないこと（後方互換）
+- `test/unit/secondOpinion.test.ts`: セカンドオピニオンのセッション入力に`disableSkills`が入ること
+- app-server経由の実測（陽性対照つき）: 上記のとおり
+
+### 14.106 送った指示を書き直して送り直す（Issue #1073）
+
+背景: 自分が送った指示に対して用意していた操作は「コピー」「ここから分岐」「ここまで戻す」の3つで、一番よく必要になる「指示を書き直してそこからやり直す」を1つの操作として持っていなかった。分岐（§14.61）でほぼ同じことができるが、戻したあとに入力欄へ本文が挿さるところで止まり、送るのは別操作になる。加えて、Codex画面には「ここから分岐」しか無く、Claude Code画面と操作が揃っていない。
+
+この拡張機能の目的の1つは2つのCLIの画面を揃えることなので、**利用者から見た操作は両画面で1つ**にし、CLIごとの差は裏側で吸収する。
+
+#### 操作（両画面で共通）
+
+1. 自分の発言の「修正」を押す
+2. その発言の本文がその場で入力欄に変わる（`chatScript.ts`の`startEdit`）
+3. 「キャンセルする」で元に戻る。この時点まで会話・ファイル・タブのいずれも変えない
+4. 「送信する」で、その指示より後の会話が無い新しいタブが開き、書き直した本文が送られる
+
+本文を画面下の入力欄（`#input`）へ移さず発言の位置で編集させるのは、どの指示を直しているのかを視線から外さないため。既存の`insertComposerText`（issue #292）を使う分岐とは、ここが意図的に違う。
+
+#### 裏側（プロバイダごとの差）
+
+|            | Claude Code画面                                                                                                   | Codex画面                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 戻し方     | `--fork-session`で開き、対象の発言まで`rewind_conversation`を逐次送る（§14.61の`openForkFromTurn`をそのまま使う） | `thread/fork`に対象の発言自身のターンを`beforeTurnId`として渡す                                 |
+| 対象の単位 | 押した発言自身のuuid                                                                                              | 押した発言自身が属するターンのid                                                                |
+| 最初の発言 | 発言自身のidを常に持つため通常の経路で戻せる                                                                      | 除外すると引き継ぐ会話が残らないため、分岐ではなく`openNewWithPrompt`で新しい会話として送り直す |
+| 送信       | `dispatch`                                                                                                        | `sendOrQueue`                                                                                   |
+
+対象の単位が違う点は分岐（§14.61）と同じ事情で、webview側の`turnForkTarget`が既に吸収している。「修正」もその結果（`forkTarget`）をそのまま送り先に使い、Codex画面で会話の最初のターンのときだけ`editFromStart`として区別する（Issue #1161。`forkTarget`が`undefined`かどうかではなく、手前に完了したターンがあるかで判定する）。
+
+#### 同じタブでは戻せない
+
+`rewind_conversation`はforkしたセッションにしか送れない（forkしていないセッションへ送ると元セッションのtranscriptが壊れる。§14.61の実測5、ガードは`ClaudeStreamSession.rewindConversationToTurn`）。Codexの`thread/fork`も新しいスレッドを作る操作で、既存スレッドを縮める手段は無い。したがって「修正」は必ず新しいタブになり、元のタブの会話は変わらない。
+
+#### ファイルは戻さない
+
+会話だけを戻す。Claude Code画面には`rewind_files`（§14.6）があるが、Codex画面に相当するAPIが無いため、ここで混ぜると画面ごとに結果が変わってしまう。ファイルも含めて戻す「時を戻す」体験はIssue #1074（編集差分を貯めて逆適用する）で別途扱う。既存の「ここまで戻す」（ファイルのみ、Claude Code画面）はそのまま残す。
+
+#### 確かめ方
+
+- `test/unit/webviewScript.test.ts`: webviewスクリプトが構文として成立すること（編集欄のDOM組み立てとキー操作を足したあとも壊れていないこと）
+- ホスト側（`editAndResend` / `forkFromTurn`の`resendText`経路）のユニットテストは未追加。実機での確認に委ねている
+
+### 14.107 Codexの編集差分からファイルも戻す（Issue #1074）
+
+両画面の「修正」欄に「ファイルも戻す」を追加する。既定はオフ。オンで送信すると対象ファイル一覧を確認し、復元が成功したときだけ、新しいタブの会話へ修正した指示を送る。元のタブの会話は変更しない。ファイルは作業ディレクトリを共有する全タブから見えるため、その影響もCodexの確認に表示する。
+
+Codexは`FileRewindJournal`、Claude Codeは既存の`rewind_files`を使う。ClaudeのチェックポイントをCodex用の逆適用で代用しない。新しいタブの作成・会話の分岐に失敗した場合はファイルを変更しない。ファイル復元後の送信が失敗した場合は、戻したファイルと新しいタブが残り、送信エラーを表示する。
+
+#### 記録と逆適用
+
+`item/completed`の`fileChange`で`status: completed`を確認して記録する。`readRewindChanges`は`readFileDiffs`と同じ`changes[]`を読むが、表示用の行頭記号補完を行わず、空ファイルと末尾改行を保持する。記録はタブごとのメモリ内に置く。再読込した履歴から編集直後の後像を推測しない。必要な記録がなければ理由を表示して全体を中止する。修正先の分岐タブへは記録を複製し、分岐先の会話に存在する編集だけを対象にする。
+
+更新は既存の`parseUnifiedDiffHunks`と`reverseApplyHunks`で編集直後の全文へ逆適用する。新規・削除は元のdiffがファイル全文。移動は移動元の復元と移動先の削除へ正規化する。共通の中間形は`FileImage`のパス・前像・後像で、`undefined`がファイル不在を表す。gitコマンドと新規依存は使わない。
+
+対象発言以降の編集を新しい順にたどり、同じパスの前後像が連続しているかを確認する。全対象の現在の全文が後像と一致することを確認してから一覧を出し、適用直前にも再検証する。ハンク外の手編集でも不一致になる。確認中に元の会話が更新された場合、未保存の対象ファイルがある場合、Codexの会話に実行中・送信待ちがある場合も中止する。書込みエラーでは適用済みのファイルを適用前へ戻す。復旧も失敗した場合は対象パスをエラーに残す。
+
+#### 実測
+
+2026-09-06、実CLIの`codex app-server`で、専用ディレクトリの4ファイルを1回の`apply_patch`で更新・新規作成・削除・移動した。完了通知の`changes[]`は次の形式だった。
+
+- 新規・削除の`diff`は全文で、末尾改行を含む。
+- 更新の`diff`は`@@ -1 +1 @@`を含むunified diff。
+- 移動は`kind.type: update`と`kind.move_path`で表され、diff末尾に改行3個と`Moved to: <移動先>`が付く。移動先と一致する付記だけを取り除いて逆適用する。
+- 完了通知は`status: completed`と`turnId`を持つ。
+
+最初の試行は既定モデルとCLIの非互換で失敗した。`model/list`が対応を返した`gpt-5.6-sol`で実測した。承認拒否時とsandbox外編集の通知は未実測。記録対象は成功した完了通知に限定し、作業ディレクトリ外の復元を拒否する。
+
+#### 戻せない範囲
+
+コマンド実行による変更は記録しない。この制約を実行前の確認に表示する。記録した編集の間にコマンドや他タブの編集が入り、前後像が連続しなければ、部分的に戻さず全体を中止する。Claudeの`rewind_files`が使えない環境でも、この仕組みへフォールバックしない。
+
+対象は作業ディレクトリ内の8MiB以下のUTF-8通常ファイルに限る。symlinkを含むパス、hardlink、git管理領域、未知のdiff形式は拒否する。削除された親ディレクトリは自動再作成しない。差分に含まれないファイル属性は復元対象外。記録はタブを閉じるかウィンドウを再読込すると失われる。
+
+全ファイルの検証と書込みは同期処理で行うが、OS全体のトランザクションではない。外部プロセスを停止・ロックする保証はなく、書込み中の外部変更やプロセスクラッシュをまたぐ原子性は保証しない。
+
+#### 検証
+
+`fileRewind.test.ts`でターン境界、複数編集、新規・削除・移動、全文衝突、確認後の変更、記録欠落、拒否、パス制約を確認する。`chatViewManager.test.ts`で新タブ作成後の復元、取消、衝突、未保存、開始失敗時の送信抑止を確認する。実VSCode画面での手動操作は未確認。
+
+### 14.108 幅が狭いときに入力欄の下が縦に伸びるのを抑える（Issue #1086）
+
+チャットパネルが狭いと、入力欄まわりが縦に伸びて会話の領域を食っていた。原因は2つで、アイコン列`#composerIconRow`が`flex-wrap: wrap`で2段・3段に折り返すこと、状態行`#status`（承認・応答中・コンテキスト・コスト・追加クレジット）が折り返して何行にもなることだった。「…」メニュー（§14.58）へ畳む対象は設定`agent.chat.composerButtons`による静的な割当で、実際の幅とは連動していなかった。
+
+#### アイコン列の自動オーバーフロー
+
+`#composerIconRow`を`flex-wrap: nowrap` + `overflow: hidden`にして常に1段へ固定し、入りきらない分は`chatScript.ts`の`reflowComposerIcons()`が実行時に「…」メニューへ移す。移すのはボタン要素そのもので、複製はしない。idもイベント配線も変えないため、応答中のdisabled切替やhiddenの出し入れ（§14.58と同じ理由）はどちら側にあっても効く。
+
+測り方は、まず描画時の並び（初期化時に控えた配列）で全部を表へ戻し、行からはみ出している間だけ表の末尾から1つずつメニューの先頭へ送る、という単純な繰り返しにした。はみ出しの判定には各要素の右端（`getBoundingClientRect().right`）を使う。`overflow: hidden`と`scrollWidth`で測る方法は採らない——この行を隠すと、行の中から上へ開く「…」メニュー（絶対配置）まで切り取られてしまうため。末尾から送って先頭へ入れるので、メニュー内でも表の並びが保たれる。表へ返す対象は描画時に表にあったボタンだけを控えた配列で決めるため、設定で初めからメニューへ畳んだボタンは幅が広がっても動かない。畳んだ項目が1つも無ければ「…」自体を隠す。
+
+表へ戻すのはメニューにあるボタンだけで、表に留まっている分は動かさない。DOMから外して入れ直すとフォーカスが外れるため、測り直しで動いた要素にフォーカスがあった場合は、それが見えている限り戻す。ラベル（`.composerOverflowLabel`）は置き場所によらず常に描画し、表にある間だけCSSで隠す。移動先で組み立て直さずに済み、メニューへ移った瞬間に可読のラベルが出る。測り直しの契機は`ResizeObserver`（幅の変化）と`MutationObserver`（ボタンの`hidden`の変化）で、`requestAnimationFrame`で1フレームにまとめる。監視するのは`hidden`だけにして、この関数自身が付け外しする`role`では発火させない。メニューを開いている間は項目が動くと押し間違えるため測り直しを見送り、閉じた時点で反映する。
+
+#### 状態行の折り畳み
+
+`#status`を`<details id="statusBox">`で包み、`#settingsBox`（issue #266）と同じやり方で開閉状態を`vscode.setState`へ保存する。既定は従来どおり開いた状態で、畳んだ選択だけを覚える。畳んでいる間も状況が分かるよう、見出しには応答中・コンテキスト残量・コスト、それに使用量の上限に達しているかだけを要約して出す（上限は気づけないと困るため。要求ボタン自体は開かないと押せない）。出すものが何も無いときは見出しごと隠す（畳める代わりに空の行が増えては本末転倒なため）。初期HTMLでは`hidden`にしておき、`renderStatus`が中身を入れた時点で出す。

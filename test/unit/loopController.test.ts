@@ -408,6 +408,24 @@ describe('LoopController', () => {
       expect(controller.getStatus().stopReason).toBe('failed');
     });
 
+    it('isPausedで「走っているが止まっている」を見分けられる（Issue #1097）', () => {
+      const { send } = spy();
+      const controller = new LoopController(send);
+      expect(controller.isPaused).toBe(false);
+
+      controller.start(plan());
+      expect(controller.running).toBe(true);
+      expect(controller.isPaused).toBe(false);
+
+      controller.pause();
+      // runningはtrueのままなので、running単体では「止まっている」ことが判らない
+      expect(controller.running).toBe(true);
+      expect(controller.isPaused).toBe(true);
+
+      controller.resume();
+      expect(controller.isPaused).toBe(false);
+    });
+
     it('走っていなければpause()は何もしない', () => {
       const { sent, send } = spy();
       const controller = new LoopController(send);

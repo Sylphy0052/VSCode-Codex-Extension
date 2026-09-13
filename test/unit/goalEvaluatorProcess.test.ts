@@ -4,8 +4,10 @@ import {
   buildClaudeEvaluatorArgs,
   buildCodexEvaluatorArgs,
   readClaudeResult,
+  redactEvaluatorPrompt,
   resolveEvaluatorProvider,
 } from '../../src/loop/goalEvaluatorProcess';
+import type { GoalEvaluatorInput } from '../../src/loop/goalLoop';
 
 describe('resolveEvaluatorProvider', () => {
   it('inherit なら会話しているCLIをそのまま使う', () => {
@@ -101,5 +103,69 @@ describe('readClaudeResult', () => {
 
   it('result が文字列でなければ本文へ倒す', () => {
     expect(readClaudeResult('{"result":42}')).toBe('{"result":42}');
+  });
+});
+
+describe('redactEvaluatorPrompt（Issue #1168）', () => {
+  const input = (overrides: Partial<GoalEvaluatorInput> = {}): GoalEvaluatorInput => ({
+    goal: { purpose: '認証を直す', acceptanceCriteria: 'npm test が exit 0 で終わる' },
+    evidence: [],
+    summary: '',
+    recentTurns: [],
+    iteration: 1,
+    ...overrides,
+  });
+
+  // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+  const fakeGitHubToken = `ghp_${'a1b2c3d4'.repeat(5)}`;
+  const fakeJwt = `eyJ${'x'.repeat(12)}.${'y'.repeat(12)}.${'z'.repeat(12)}`;
+  const fakeAwsKey = `AKIA${'A'.repeat(16)}`;
+  const fakeOpenAiKey = `sk-live-${'q'.repeat(24)}`;
+  const fakeDbPassword = `s3cret${'p4ss'.repeat(2)}`;
+
+  it('証拠のコマンド引数・末尾出力に混ざった資格情報を伏せてから送る', () => {
+    const result = redactEvaluatorPrompt(
+      input({
+        evidence: [
+          {
+            kind: 'test',
+            source: `GITHUB_TOKEN=${fakeGitHubToken} npm test`,
+            status: 'pass',
+            detail: ['exit 0', `Authorization: Bearer ${fakeJwt}`].join('\n'),
+            iteration: 1,
+          },
+        ],
+      }),
+    );
+    expect(result.total).toBeGreaterThan(0);
+    expect(result.text).not.toContain(fakeGitHubToken);
+    expect(result.text).not.toContain(fakeJwt);
+  });
+
+  it('応答本文・要約・ゴール本文に混ざった資格情報も伏せる', () => {
+    const result = redactEvaluatorPrompt(
+      input({
+        goal: {
+          purpose: 'DBへ繋ぐ',
+          acceptanceCriteria: 'password: "hunter2-hunter2" で接続できる',
+          constraints: `${fakeAwsKey} を使う`,
+        },
+        summary: `export API_KEY=${fakeOpenAiKey}`,
+        recentTurns: [`接続文字列は postgres://app:${fakeDbPassword}@db.example.com/app`],
+      }),
+    );
+    expect(result.text).not.toContain('hunter2-hunter2');
+    expect(result.text).not.toContain(fakeAwsKey);
+    expect(result.text).not.toContain(fakeOpenAiKey);
+    expect(result.text).not.toContain(fakeDbPassword);
+    expect(result.text).toContain('db.example.com');
+  });
+
+  it('業務コードは伏せない（伏せると判定が成り立たない）', () => {
+    const result = redactEvaluatorPrompt(
+      input({ recentTurns: ['function authenticate(user) { return user.token !== undefined; }'] }),
+    );
+    expect(result.total).toBe(0);
+    expect(result.text).toContain('function authenticate(user)');
   });
 });

@@ -1,5 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  __resetPermissionFlagWarningForTestOnly,
   __resetPseudoWorktreeExcludeWarningForTestOnly,
   readChatComposerButtonsConfig,
   readChatSendOnConfig,
@@ -8,6 +12,12 @@ import {
   readChatLoopEngineeringConfig,
   readGoalEvaluatorConfig,
   setChatLoopEngineeringEnabled,
+  readChatLimitAutoResumeEnabled,
+  setChatLimitAutoResumeEnabled,
+  readAutoHandoffEnabled,
+  readAutoHandoffThresholdPercent,
+  readAutoHandoffClassifierTimeoutMs,
+  DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT,
   readClaudeConfig,
   readNotificationsConfig,
   readWorkflowsConfig,
@@ -20,6 +30,100 @@ import {
 } from '../../src/loop/loopEngineering';
 import { DEFAULT_MAX_INDETERMINATE } from '../../src/loop/goalLoop';
 import { __mock } from '../mocks/vscode';
+import { clampAutoApprove } from '../../src/orchestrator/workflow';
+import { buildEffectiveTaskConfig } from '../../src/orchestrator/taskConfig';
+
+describe('readWorkflowsConfig（Issue #1105: 権限設定はtrueだけを有効にする）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __resetPermissionFlagWarningForTestOnly();
+  });
+
+  it.each([
+    ['文字列 "true"', 'true'],
+    ['文字列 "false"', 'false'],
+    ['数値 1', 1],
+    ['数値 0', 0],
+    ['null', null],
+    ['オブジェクト', {}],
+    ['配列', []],
+  ])('%s は真偽値でないので、両方の権限設定をfalseとして読み、通知する', (_label, value) => {
+    __mock.setConfig('agent', {
+      'workflows.allowAutoApprove': value,
+      'workflows.allowClaudeBypassPermissions': value,
+    });
+    const config = readWorkflowsConfig();
+    expect(config.allowAutoApprove).toBe(false);
+    expect(config.allowClaudeBypassPermissions).toBe(false);
+    expect(__mock.messages.warnings).toHaveLength(2);
+    expect(__mock.messages.warnings[0]).toContain('agent.workflows.allowAutoApprove');
+    expect(__mock.messages.warnings[1]).toContain('agent.workflows.allowClaudeBypassPermissions');
+  });
+
+  it('真偽値のtrueだけを有効にし、通知しない', () => {
+    __mock.setConfig('agent', {
+      'workflows.allowAutoApprove': true,
+      'workflows.allowClaudeBypassPermissions': true,
+    });
+    const config = readWorkflowsConfig();
+    expect(config.allowAutoApprove).toBe(true);
+    expect(config.allowClaudeBypassPermissions).toBe(true);
+    expect(__mock.messages.warnings).toHaveLength(0);
+  });
+
+  it('真偽値のfalseと未設定はfalseで、通知しない', () => {
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': false });
+    const config = readWorkflowsConfig();
+    expect(config.allowAutoApprove).toBe(false);
+    expect(config.allowClaudeBypassPermissions).toBe(false);
+    expect(__mock.messages.warnings).toHaveLength(0);
+  });
+
+  it('同じキーの型不正は繰り返し通知せず、直してから再び壊すと改めて通知する', () => {
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': 'false' });
+    readWorkflowsConfig();
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': false });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(1);
+
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': 'false' });
+    readWorkflowsConfig();
+    expect(__mock.messages.warnings).toHaveLength(2);
+  });
+
+  it('型不正の値でも、YAMLのautoApprove: trueの抑止が働く', () => {
+    __mock.setConfig('agent', { 'workflows.allowAutoApprove': 'false' });
+    const result = clampAutoApprove(true, readWorkflowsConfig().allowAutoApprove);
+    expect(result.value).toBe(false);
+    expect(result.warning).toBeDefined();
+  });
+
+  it('型不正の値でも、ClaudeのbypassPermissionsは安全なモードへ読み替えられる', () => {
+    __mock.setConfig('agent', { 'workflows.allowClaudeBypassPermissions': 'false' });
+    const workflows = readWorkflowsConfig();
+    const result = buildEffectiveTaskConfig(
+      {
+        provider: 'claude',
+        model: undefined,
+        effort: undefined,
+        approvalMode: undefined,
+        sandbox: undefined,
+        autoApprove: false,
+      },
+      {
+        codexSandbox: 'read-only',
+        codexApprovalMode: 'on-request',
+        claudePermissionMode: 'bypassPermissions',
+        allowAutoApprove: workflows.allowAutoApprove,
+        allowClaudeBypassPermissions: workflows.allowClaudeBypassPermissions,
+      },
+    );
+    expect(result.config.approvalMode).toBe('acceptEdits');
+  });
+});
 
 describe('readWorkflowsConfig（レビュー指摘: warning）', () => {
   beforeEach(() => {
@@ -683,6 +787,20 @@ describe('readChatLoopEngineeringConfig（issue #891）', () => {
   });
 });
 
+describe('readChatLimitAutoResumeEnabled（issue #1069）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定は有効で、ユーザー設定へ有効無効を保存できる', async () => {
+    expect(readChatLimitAutoResumeEnabled()).toBe(true);
+    await setChatLimitAutoResumeEnabled(false);
+    expect(readChatLimitAutoResumeEnabled()).toBe(false);
+    await setChatLimitAutoResumeEnabled(true);
+    expect(readChatLimitAutoResumeEnabled()).toBe(true);
+  });
+});
+
 describe('readGoalEvaluatorConfig（issue #892）', () => {
   beforeEach(() => {
     __mock.reset();
@@ -747,5 +865,100 @@ describe('readNotificationsConfig（issue #286）', () => {
   it('agent.notifications.turnCompleteをtrueにできる', () => {
     __mock.setConfig('agent', { 'notifications.turnComplete': true });
     expect(readNotificationsConfig().turnComplete).toBe(true);
+  });
+});
+
+describe('readAutoHandoffClassifierTimeoutMs（Issue #1097）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未設定なら120秒（package.jsonのdefaultとも一致する）', () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    };
+    const declared =
+      manifest.contributes.configuration.properties['agent.autoHandoff.classifierTimeoutMs'];
+
+    expect(declared?.default).toBe(120_000);
+    expect(readAutoHandoffClassifierTimeoutMs()).toBe(120_000);
+  });
+
+  it('設定された値をそのまま使う', () => {
+    __mock.setConfig('agent', { 'autoHandoff.classifierTimeoutMs': 45_000 });
+    expect(readAutoHandoffClassifierTimeoutMs()).toBe(45_000);
+  });
+
+  it('範囲外・数値でない値は既定へ丸める', () => {
+    for (const value of [4_999, 600_001, -1, Number.NaN, 'あ']) {
+      __mock.setConfig('agent', { 'autoHandoff.classifierTimeoutMs': value });
+      expect(readAutoHandoffClassifierTimeoutMs()).toBe(120_000);
+    }
+  });
+});
+
+describe('readAutoHandoffThresholdPercent（Issue #1079）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定はpackage.jsonのdefaultと一致する', () => {
+    // package.jsonは`resolveJsonModule`を有効にしていないため実ファイルを読む
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    };
+    const declared =
+      manifest.contributes.configuration.properties['agent.autoHandoff.thresholdPercent'];
+
+    expect(declared?.default).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+    expect(readAutoHandoffThresholdPercent()).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+  });
+
+  it('設定された割合をそのまま使う', () => {
+    __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': 35 });
+    expect(readAutoHandoffThresholdPercent()).toBe(35);
+  });
+
+  it('小数は丸める', () => {
+    __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': 12.4 });
+    expect(readAutoHandoffThresholdPercent()).toBe(12);
+  });
+
+  it('範囲外・数値でない値は既定へ倒す', () => {
+    for (const bad of [0, 100, -5, Number.NaN, '20', null]) {
+      __mock.setConfig('agent', { 'autoHandoff.thresholdPercent': bad });
+      expect(readAutoHandoffThresholdPercent()).toBe(DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT);
+    }
+  });
+});
+
+describe('readAutoHandoffEnabled（Issue #1091）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未指定ならONで、package.jsonのdefaultも同じ', () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: {
+        configuration: { properties: Record<string, { default?: unknown; type?: unknown }> };
+      };
+    };
+    const declared = manifest.contributes.configuration.properties['agent.autoHandoff.enabled'];
+
+    expect(declared?.type).toBe('boolean');
+    expect(declared?.default).toBe(true);
+    expect(readAutoHandoffEnabled()).toBe(true);
+  });
+
+  it('OFFにするとその値を使う', () => {
+    __mock.setConfig('agent', { 'autoHandoff.enabled': false });
+    expect(readAutoHandoffEnabled()).toBe(false);
+  });
+
+  it('真偽値でない値はONへ倒す', () => {
+    for (const bad of ['false', 0, null]) {
+      __mock.setConfig('agent', { 'autoHandoff.enabled': bad });
+      expect(readAutoHandoffEnabled()).toBe(true);
+    }
   });
 });

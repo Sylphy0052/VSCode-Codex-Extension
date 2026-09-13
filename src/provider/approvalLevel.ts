@@ -45,6 +45,12 @@ export interface CodexApprovalSettings {
   sandbox: string;
   /** 承認要求を誰へ回すか。`auto`のときだけ`auto_review`になる。 */
   approvalsReviewer: string;
+  /**
+   * 承認もサンドボックスも外す別軸の指定（`--dangerously-bypass-approvals-and-sandbox`、
+   * issue #222）。3段階のレベルとは併存しない（issue #1180）。逆引きのときだけ見るため、
+   * `codexSettingsForLevel` が返す値には含めない。
+   */
+  bypassApprovalsAndSandbox?: boolean | undefined;
 }
 
 /**
@@ -107,8 +113,16 @@ export function claudePermissionModeForLevel(level: ApprovalLevel): string {
  * （＝画面では「カスタム」）。`approvalsReviewer`が空文字のときはCodex側の既定
  * （`user`）として扱う。空文字の`approvalMode` / `sandbox`（CLIのconfig.tomlへ委譲）は
  * 何が効くか拡張機能側では決められないため、どのレベルにも一致させない。
+ *
+ * **`bypassApprovalsAndSandbox`が立っている間は、3項目が何であれ`full`**（issue #1180）。
+ * bypassは3項目より優先され（`chatSession.ts`の`start`/`send`、`turnPolicyFor`）、実効状態は
+ * 承認なし・サンドボックスなしになる。3項目だけを見て「全確認」と表示すると、保護を戻した
+ * つもりの表示と実際に送る権限が食い違う。
  */
 export function levelFromCodexSettings(settings: CodexApprovalSettings): ApprovalLevel | undefined {
+  if (settings.bypassApprovalsAndSandbox === true) {
+    return 'full';
+  }
   const reviewer = settings.approvalsReviewer === '' ? 'user' : settings.approvalsReviewer;
   return APPROVAL_LEVELS.find((level) => {
     const expected = codexSettingsForLevel(level);

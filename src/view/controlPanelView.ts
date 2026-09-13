@@ -166,6 +166,10 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     ]);
   }
 
+  async refreshModelCatalog(): Promise<void> {
+    await this.post();
+  }
+
   private async post(): Promise<void> {
     await this.view?.webview.postMessage({ type: 'state', state: this.buildState() });
   }

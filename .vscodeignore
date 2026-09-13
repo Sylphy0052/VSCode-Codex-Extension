@@ -7,6 +7,10 @@
 .agents/**
 .github/**
 .ruff_cache/**
+# codegraph MCPサーバのローカル作業領域（SQLiteのDBとunixソケット）。実行時には読まない。
+# 除外しないとvsceがソケットを開こうとして ENXIO で失敗し、50MB近いDBも同梱されてしまう
+.codegraph/**
+codegraph.json
 .gitignore
 .prettierignore
 .prettierrc.json
@@ -22,6 +26,8 @@ coverage/**
 out/**
 scripts/**
 docs/**
+# セカンドオピニオンの精度測定の成果物（docs/second-opinion-eval.md）。実行時には読まない
+eval-results/**
 node_modules/**
 **/*.map
 **/*.vsix

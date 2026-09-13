@@ -1,3 +1,4 @@
+import type { RewindChange } from './fileRewind';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import type { Attachment } from '../provider/attachments';
 import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
@@ -43,9 +44,21 @@ export interface FileDiff {
   diff: string;
   /**
    * Claude CodeのEditツール由来の `update` のときだけ入る置換前後の生の文字列（issue #310）。
-   * Codex側・Claude CodeのWrite/NotebookEdit由来では常に `undefined`。
+   * Codex側では常に `undefined`。Claude CodeのWrite/NotebookEdit由来は、実行結果で
+   * 既存ファイルの上書きと判った場合だけ入る（上書き前後の全文。issue #1176）。
    */
   editReplace: EditReplace | undefined;
+  /**
+   * `add` のうち、**新規作成だったことをまだ確認できていない**ものに立つ印（issue #1176）。
+   *
+   * Claude CodeのWrite / NotebookEditはツールの入力だけでは新規作成と上書きを区別できず、
+   * 上書きを `add` として戻すとファイルの削除になってしまう。実行結果（`toolUseResult`）が
+   * 届くまではこの印を立てておき、`create` と判った時点で外す（`applyFileChangeResult`）。
+   * 印が立ったままの `add` は戻す操作を出さない（`planDiffActions`）。
+   *
+   * Codex CLI由来の `add` と、Claude CodeのEdit由来の差分には付かない。
+   */
+  createUnverified?: boolean | undefined;
 }
 
 /**
@@ -72,7 +85,7 @@ export interface ChatItem {
   /** コマンド行やファイル名など、種類ごとの補足。 */
   detail: string;
   status: string | undefined;
-  /** このitemが属するターン。会話内から分岐する際の `lastTurnId` になる。 */
+  /** このitemが属するターン。会話内から分岐する際の `beforeTurnId` になる（Issue #1161）。 */
   turnId: string | undefined;
   /** ファイル変更の差分。他の種類では空。 */
   diffs: FileDiff[];
@@ -528,6 +541,19 @@ export interface ChatState {
    */
   planMode: boolean;
   /**
+   * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
+   *
+   * 初期値はユーザー設定（`agent.autoHandoff.enabled`、既定ON）から入り、そこから先は
+   * 会話ごとに入れたい／入れたくないが分かれるためセッション単位で持つ。切り替えは入力欄の
+   * 「…」メニューのトグルからで、拡張機能側だけで完結する状態のためCLIへは何も送らず、
+   * 設定へも書き戻さない。閾値はユーザー設定（`agent.autoHandoff.thresholdPercent`）で持つ。
+   *
+   * 下の `initialChatState` が `false` なのは、この層とセッション層が `vscode` を
+   * importしないため（CONTRIBUTING.mdの「レイヤの制約」）。設定を読むのはview層で、
+   * セッションの構築時に初期値として渡される。
+   */
+  autoHandoff: boolean;
+  /**
    * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
    *
    * `initialize` の応答の `fast_mode_state` 由来。**Claude Code側にしか無い**概念で、
@@ -629,6 +655,7 @@ export const initialChatState: ChatState = {
   sessionCost: undefined,
   sessionTokens: undefined,
   planMode: false,
+  autoHandoff: false,
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],
@@ -1404,13 +1431,14 @@ export function applyEvent(
     case 'account/rateLimits/updated': {
       const primary = rec(rec(params['rateLimits'])?.['primary']);
       const usedPercent = primary?.['usedPercent'];
+      const resetsAt = primary?.['resetsAt'];
       return {
         ...state,
         usage: {
           usedPercent: typeof usedPercent === 'number' ? usedPercent : state.usage?.usedPercent,
-          resetsAt: state.usage?.resetsAt,
+          resetsAt: typeof resetsAt === 'number' ? resetsAt : state.usage?.resetsAt,
           limitLabel: state.usage?.limitLabel,
-          limited: state.usage?.limited,
+          limited: typeof usedPercent === 'number' ? usedPercent >= 100 : state.usage?.limited,
         },
       };
     }
@@ -1507,13 +1535,16 @@ export function applyEvent(
     }
 
     case 'serverRequest/resolved': {
-      // 別のウィンドウやTUIで承認された。こちらのカードは用済み
+      // 別のウィンドウやTUIで承認・回答された。こちらのカードは用済み
       const requestId = params['requestId'];
       if (typeof requestId !== 'number' && typeof requestId !== 'string') {
         return state;
       }
-      const next = removeApproval(state, requestId);
-      return next.approvals.length === state.approvals.length ? state : next;
+      const next = removePrompt(removeApproval(state, requestId), requestId);
+      return next.approvals.length === state.approvals.length &&
+        next.prompts.length === state.prompts.length
+        ? state
+        : next;
     }
 
     /**
@@ -1821,4 +1852,36 @@ export function addPrompt(state: ChatState, prompt: PendingPrompt): ChatState {
 
 export function removePrompt(state: ChatState, requestId: number | string): ChatState {
   return { ...state, prompts: state.prompts.filter((p) => p.requestId !== requestId) };
+}
+
+/**
+ * 検証で止めた理由を問い合わせへ載せる。カードは消さない。
+ *
+ * 画面は入力中の値をDOMだけで持つため、理由を出すためにカードを作り直せない。
+ * 状態には理由だけを置き、既存のカードへ反映させる。
+ */
+export function setPromptErrors(
+  state: ChatState,
+  requestId: number | string,
+  errors: Record<string, string>,
+): ChatState {
+  return {
+    ...state,
+    prompts: state.prompts.map((p) => (p.requestId === requestId ? { ...p, errors } : p)),
+  };
+}
+
+/** 表示用の正規化で末尾改行や空ファイルを失わない復元用入力。 */
+export function readRewindChanges(changes: unknown): RewindChange[] {
+  if (!Array.isArray(changes)) return [];
+  return changes.map((raw) => {
+    const change = rec(raw);
+    const kind = rec(change?.['kind']);
+    return {
+      path: str(change?.['path']),
+      kind: str(kind?.['type']),
+      movePath: strOrUndefined(kind?.['move_path']),
+      diff: typeof change?.['diff'] === 'string' ? change['diff'] : '\0',
+    };
+  });
 }

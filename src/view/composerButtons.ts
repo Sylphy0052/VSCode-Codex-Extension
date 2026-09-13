@@ -23,6 +23,7 @@ export const COMPOSER_BUTTON_IDS = [
   'forgeHub',
   'openProgress',
   'handoffToNewSession',
+  'autoHandoffToggle',
   'secondOpinion',
 ] as const;
 

@@ -1,3 +1,7 @@
+import * as nodeFs from 'node:fs';
+import * as nodePath from 'node:path';
+import * as nodeOs from 'node:os';
+import { workspace as fakeWorkspace } from '../mocks/vscode';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noDefaults } from '../../src/codex/configToml';
 import type { Logger } from '../../src/log';
@@ -9,7 +13,7 @@ import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMe
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, deriveTitle } from '../../src/view/chatView';
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
-import { RECAP_INSTRUCTION } from '../../src/appserver/chatSession';
+import { RECAP_INSTRUCTION, type ChatSession } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
 import {
@@ -112,6 +116,8 @@ function createManager(options?: {
   revealImportSection?: () => void | Promise<void>;
   store?: SessionStore;
   sessionSettings?: SessionModelSettingsStore;
+  /** 引き継ぎのポインタファイル（Issue #1079）の置き場所。 */
+  globalStorageDir?: string;
 }): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
@@ -130,6 +136,8 @@ function createManager(options?: {
     factory,
     options?.store,
     options?.sessionSettings,
+    options?.globalStorageDir ??
+      nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-handoff-')),
   );
   return { manager, connection: connection() };
 }
@@ -191,6 +199,69 @@ describe('ChatViewManager', () => {
     vi.useRealTimers();
   });
 
+  describe('MCPを無効化するセッション（Issue #944・Issue #1112）', () => {
+    it('config/read が成功すれば、利用者設定と組み込みのMCPを無効化して開始する', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableMcpServers: true,
+      });
+      await tick();
+
+      connection.resolveFirst('config/read', {
+        config: { mcp_servers: { playwright: { command: 'npx' } } },
+      });
+      await tick();
+
+      const start = connection.requests.find((r) => r.method === 'thread/start');
+      expect(start).toBeDefined();
+      const overlay = (start?.params as { config?: { mcp_servers?: Record<string, unknown> } })
+        ?.config?.mcp_servers;
+      expect(Object.keys(overlay ?? {}).sort()).toEqual(['codex_apps', 'playwright']);
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await started;
+    });
+
+    it('config/read が失敗したら thread/start を呼ばずにエラーで終わる（Issue #1112）', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableMcpServers: true,
+      });
+      await tick();
+
+      connection.rejectFirst('config/read', 'app-serverが応答しません: config/read');
+
+      // オーバーレイはマージなので、名前を挙げられなければ利用者設定のMCPは生きたまま。
+      // 起動せずに失敗させる
+      await expect(started).rejects.toThrow(/MCPサーバ一覧を読めなかった/u);
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(0);
+      // タブも作らない（パネルを作る前に解決している）
+      expect(__mock.createdPanels).toHaveLength(0);
+    });
+
+    it('config/read の応答の形が想定外でも thread/start を呼ばない（Issue #1112）', async () => {
+      const { manager, connection } = createManager();
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableMcpServers: true,
+      });
+      await tick();
+
+      connection.resolveFirst('config/read', { unexpected: true });
+
+      await expect(started).rejects.toThrow(/MCPサーバ一覧を読めなかった/u);
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(0);
+    });
+  });
+
   describe('並列開始時の宛先解決（design.md §16.10の3の回帰）', () => {
     it('2つのタスクを並列で開始しても、threadIdの判らない要求を誤って別タスクへ渡さない', async () => {
       const { manager, connection } = createManager();
@@ -247,6 +318,47 @@ describe('ChatViewManager', () => {
       };
       expect(lastOf(panelA)?.state.approvals).toEqual([]);
       expect(lastOf(panelB)?.state.approvals).toEqual([]);
+    });
+
+    it('開始待ちが1件だけでも、threadIdの一致しない承認要求はその会話へ渡さない（F10-01）', async () => {
+      const { manager, connection } = createManager();
+
+      // 開始待ちは会話Bの1件だけ
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-b',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1);
+
+      // どの画面にも開始待ちにも一致しないthreadId宛の承認要求が届く
+      // （閉じた会話の遅延要求など）
+      const responsePromise = connection.serverRequest(
+        99,
+        'item/commandExecution/requestApproval',
+        {
+          threadId: 'thread-A',
+          itemId: 'i1',
+          command: 'ls',
+          cwd: '/workspace/root/task-a',
+        },
+      );
+
+      // 開始待ちが1件であることは、その要求がB宛である証明にならない。
+      // 通知の取りこぼしを救う `soleEntry` のfallbackを要求へ広げると、
+      // Bの承認ハンドラー・承認カードへ別会話の操作が流れる（F10-01）
+      await expect(responsePromise).resolves.toEqual({ decision: 'decline' });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-B'));
+      const task = await started;
+      task.open({ preserveFocus: true });
+
+      const panel = __mock.createdPanels[__mock.createdPanels.length - 1];
+      panel?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
+      const messages = stateMessagesOf(panel);
+      expect(messages[messages.length - 1]?.state.approvals).toEqual([]);
     });
 
     it('sendはループを介さず本文をそのまま送り、作業記録に残さない（design.md §16.23）', async () => {
@@ -414,18 +526,20 @@ describe('ChatViewManager', () => {
   });
 
   describe('接続断で保留中の承認を解放する（issue #354）', () => {
-    it('thread/start応答待ち（pendingStarts）に出た承認カードも、接続断で解放される', async () => {
+    it('保留中の承認カードは接続断で解放される', async () => {
       const { manager, connection } = createManager();
 
-      // thread/startがまだ応答していない間はpanelsではなくpendingStartsに居る
-      // （design.md §16.10の3）。この状態で届いた承認要求も、接続断で解放されなければ
-      // ならない（レビュー指摘: handleConnectionLostがpanelsだけを見ていた問題の回帰防止）
+      // 承認カードを抱えられるのは、threadIdが判って`panels`へ登録された会話だけ。
+      // 開始待ち（pendingStarts）に居る間に届いた要求は、threadIdを照合できないため
+      // 宛先不明として拒否する（F10-01。上の「並列開始時の宛先解決」を参照）
       const p1 = manager.openTaskSession({
         cwd: '/workspace/root/task-a',
         config: EMPTY_TASK_CONFIG,
         sandbox: '',
       });
       await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p1;
 
       const responded = connection.serverRequest(1, 'item/commandExecution/requestApproval', {
         threadId: 'thread-A',
@@ -433,14 +547,12 @@ describe('ChatViewManager', () => {
         command: 'ls',
         cwd: '/workspace/root/task-a',
       });
+      await tick();
 
       connection.simulateDisconnect();
 
       // 承認された扱いにならず、拒否側の値（decide(id, 'cancel')と同じ）で解決される
       await expect(responded).resolves.toEqual({ decision: 'cancel' });
-
-      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
-      await p1;
     });
   });
 
@@ -552,6 +664,35 @@ describe('ChatViewManager', () => {
       expect(manager.isOpen('thread-manual')).toBe(true);
       __mock.lastCreatedPanel()?.dispose();
       expect(manager.isOpen('thread-manual')).toBe(false);
+    });
+  });
+
+  describe('自動引き継ぎの初期値の配線（Issue #1091）', () => {
+    /** `ChatSession` は設定を読まないため、view層が渡した初期値をセッションから読む。 */
+    const autoHandoffOf = (manager: ChatViewManager, threadId: string): boolean | undefined =>
+      (manager as unknown as { panels: Map<string, { session: ChatSession }> }).panels
+        .get(threadId)
+        ?.session.getState().autoHandoff;
+
+    it('設定が未指定なら新しいセッションはONで始まる', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-auto-on'));
+      await p;
+
+      expect(autoHandoffOf(manager, 'thread-auto-on')).toBe(true);
+    });
+
+    it('設定をOFFにすると新しいセッションはOFFで始まる', async () => {
+      __mock.setConfig('agent', { 'autoHandoff.enabled': false });
+      const { manager, connection } = createManager();
+      const p = manager.openNew('/workspace/root');
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-auto-off'));
+      await p;
+
+      expect(autoHandoffOf(manager, 'thread-auto-off')).toBe(false);
     });
   });
 
@@ -1217,6 +1358,70 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('skillを提示させないセッション（design.md §14.105、Issue #1061）', () => {
+    it('disableSkillsを渡すとthread/startのconfigへskills.include_instructions=falseが載る', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        disableSkills: true,
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as {
+        config?: { skills?: { include_instructions?: boolean } };
+      };
+      expect(params.config?.skills).toEqual({ include_instructions: false });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+
+    it('MCPの指定と同居する（どちらかが消えない）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+        mcp: { url: 'http://127.0.0.1:12345/mcp/abc' },
+        disableSkills: true,
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as {
+        config?: {
+          mcp_servers?: Record<string, unknown>;
+          skills?: { include_instructions?: boolean };
+        };
+      };
+      expect(params.config?.mcp_servers?.['task-messaging']).toBeDefined();
+      expect(params.config?.skills).toEqual({ include_instructions: false });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+
+    it('指定しなければskillの指定は載らない（後方互換）', async () => {
+      const { manager, connection } = createManager();
+      const p = manager.openTaskSession({
+        cwd: '/workspace/root/task-a',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+
+      const threadStart = connection.requests.find((r) => r.method === 'thread/start');
+      const params = threadStart?.params as { config?: Record<string, unknown> };
+      expect(params.config).toBeUndefined();
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p;
+    });
+  });
+
   describe('タスク間メッセージングのMCP設定・可視性確認（design.md §16.21、Issue #123）', () => {
     it('input.mcpを渡すとthread/startのconfig.mcp_serversへ差し込まれる（実測: streamable_http）', async () => {
       const { manager, connection } = createManager();
@@ -1837,6 +2042,9 @@ describe('deriveTitle（Issue #599、pinnedNameを最優先にする）', () => 
 describe('handoffToNewSession（issue #694）', () => {
   beforeEach(() => {
     __mock.reset();
+    // 引き継ぎ先のレベル判定（Issue #1082）は実CLIをヘッドレス起動する。ここで見たいのは
+    // ポインタファイルの書き出しと初回送信なので、判定は切って外部プロセスに触らせない
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
     __mock.setWorkspaceFolder('/workspace/root');
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
@@ -1851,7 +2059,51 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toHaveLength(0);
   });
 
-  it('rolloutが解決できれば、新セッションへ固定文言とパスを送る', async () => {
+  it('rolloutが解決できれば、ポインタファイルを書いて新セッションへそのパスを送る', async () => {
+    const store = fakeSessionStore({
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const globalStorageDir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-handoff-'));
+    const { manager, connection } = createManager({ store, globalStorageDir });
+
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+
+    const handoff = manager.handoffToNewSession();
+    // ポインタファイルの書き出しとブランチ解決（どちらも実I/O）を挟むため、
+    // マイクロタスクを流すだけでは `thread/start` がまだ出ていない
+    await vi.waitFor(() => {
+      expect(connection.requests.filter((r) => r.method === 'thread/start').length).toBe(2);
+    });
+    connection.resolveFirst('thread/start', threadStartResult('thread-new'));
+    await vi.waitFor(() => {
+      expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(true);
+    });
+    connection.resolveFirst('turn/start', {});
+    await handoff;
+
+    const turnStart = connection.requests.filter((r) => r.method === 'turn/start');
+    const sent = turnStart.map((r) => JSON.stringify(r.params)).join('\n');
+    // 初回プロンプトはポインタファイルのパスを指すだけで、rollout本体は指さない
+    expect(sent).toContain(nodePath.join(globalStorageDir, 'handoff'));
+    expect(sent).not.toContain('/home/user/.codex/sessions/rollout-x.jsonl');
+
+    // rolloutの在処と抽出コマンドはポインタファイル側にある
+    const pointerPath = /(\/[^"\\\s]+\.md)/u.exec(sent)?.[1];
+    expect(pointerPath).toBeDefined();
+    const pointer = nodeFs.readFileSync(pointerPath!, 'utf8');
+    expect(pointer).toContain('/home/user/.codex/sessions/rollout-x.jsonl');
+    expect(pointer).toContain('response_item');
+    // Codex側では編集ファイルの抽出式を載せない（確実な式が書けないため）
+    expect(pointer).not.toContain('file-history-snapshot');
+  });
+
+  it.each([
+    ['成功したら旧タブを確認なしで閉じる', 'turn/completed', true],
+    ['失敗したら旧タブを残す', 'turn/failed', false],
+  ] as const)('新セッションの初回ターンが%s（Issue #1090）', async (_name, method, closed) => {
     const store = fakeSessionStore({
       resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
     });
@@ -1861,20 +2113,32 @@ describe('handoffToNewSession（issue #694）', () => {
     await tick();
     connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
     await opened;
+    const oldPanel = __mock.createdPanels.at(-1);
 
     const handoff = manager.handoffToNewSession();
-    await tick();
+    await vi.waitFor(() => {
+      expect(connection.requests.filter((r) => r.method === 'thread/start').length).toBe(2);
+    });
     connection.resolveFirst('thread/start', threadStartResult('thread-new'));
-    await tick();
+    await vi.waitFor(() => {
+      expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(true);
+    });
     connection.resolveFirst('turn/start', {});
     await handoff;
+    expect(oldPanel?.disposed).toBe(false);
 
-    const turnStart = connection.requests.filter((r) => r.method === 'turn/start');
-    expect(
-      turnStart.some((r) =>
-        JSON.stringify(r.params).includes('/home/user/.codex/sessions/rollout-x.jsonl'),
-      ),
-    ).toBe(true);
+    connection.notify(method, { threadId: 'thread-new' });
+    if (closed) {
+      await vi.waitFor(() => {
+        expect(oldPanel?.disposed).toBe(true);
+      });
+      // 停止の確認は出さない。引き継ぐ前の確認（PR #1088）だけが残る
+      expect(__mock.messages.infos).toHaveLength(1);
+      expect(__mock.messages.infos[0]).toContain('引き継ぎますか？');
+    } else {
+      await tick();
+      expect(oldPanel?.disposed).toBe(false);
+    }
   });
 
   it('rolloutが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {
@@ -1899,5 +2163,210 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toContainEqual(
       expect.stringContaining('履歴保存が完了しませんでした'),
     );
+  });
+});
+
+describe('Codexのファイル復元と送り直し', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setConfig('codex', {});
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    Object.defineProperty(fakeWorkspace, 'textDocuments', { configurable: true, value: [] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    'success',
+    'cancel',
+    'conflict',
+    'startFailure',
+    'dirty',
+    'fork',
+    'resumeFailure',
+  ] as const)('%s: 復元できたときだけ新規会話へ送る', async (scenario) => {
+    const cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'rewind-view-'));
+    const file = nodePath.join(cwd, 'added.txt');
+    const { manager, connection } = createManager();
+    try {
+      __mock.setWorkspaceFolder(cwd);
+      const opening = manager.openNew(cwd);
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('original'));
+      await opening;
+      const panel = __mock.createdPanels[0]!;
+      const forking = scenario === 'fork' || scenario === 'resumeFailure';
+      if (forking)
+        connection.notify('item/completed', {
+          threadId: 'original',
+          turnId: 'turn0',
+          item: { type: 'userMessage', id: 'user0', content: [] },
+        });
+      connection.notify('item/completed', {
+        threadId: 'original',
+        turnId: 'turn1',
+        item: {
+          type: 'userMessage',
+          id: 'user1',
+          content: [{ type: 'inputText', text: 'original' }],
+        },
+      });
+      nodeFs.writeFileSync(file, 'added\n');
+      connection.notify('item/completed', {
+        threadId: 'original',
+        turnId: 'turn1',
+        item: {
+          type: 'fileChange',
+          id: 'edit1',
+          status: 'completed',
+          changes: [{ path: file, kind: { type: 'add' }, diff: 'added\n' }],
+        },
+      });
+      connection.notify('turn/completed', {
+        threadId: 'original',
+        turn: { id: 'turn1', status: 'completed' },
+      });
+      if (scenario === 'cancel') __mock.showWarningMessageAnswer = undefined;
+      if (scenario === 'conflict') nodeFs.writeFileSync(file, 'external');
+      if (scenario === 'dirty')
+        Object.defineProperty(fakeWorkspace, 'textDocuments', {
+          configurable: true,
+          value: [{ isDirty: true, uri: { fsPath: file } }],
+        });
+      panel.webview.simulateMessage({
+        type: 'editResend',
+        messageId: 'user1',
+        // 画面は押した発言（user1）自身のturnIdを送る（Issue #1161）
+        turnId: forking ? 'turn1' : undefined,
+        text: 'revised',
+        restoreFiles: true,
+      });
+      await tick(40);
+      const starts = connection.requests.filter((r) => r.method === 'thread/start');
+      if (scenario === 'cancel' || scenario === 'conflict') {
+        expect(starts).toHaveLength(1);
+      } else if (forking) {
+        expect(connection.requests.find((r) => r.method === 'thread/fork')?.params).toEqual({
+          threadId: 'original',
+          // 押した指示自身のターンとそれ以降を除く（Issue #1161）
+          beforeTurnId: 'turn1',
+        });
+        connection.resolveFirst('thread/fork', threadStartResult('new-thread'));
+        await tick(40);
+        expect(nodeFs.readFileSync(file, 'utf8')).toBe('added\n');
+        if (scenario === 'resumeFailure') connection.rejectFirst('thread/resume', 'resume failed');
+        else connection.resolveFirst('thread/resume', { thread: { id: 'new-thread', turns: [] } });
+        await tick(40);
+      } else {
+        expect(starts).toHaveLength(2);
+        // 新しい会話を開けるまではファイルを変更しない。
+        expect(nodeFs.readFileSync(file, 'utf8')).toBe('added\n');
+        if (scenario === 'startFailure') connection.rejectFirst('thread/start', 'start failed');
+        else connection.resolveFirst('thread/start', threadStartResult('new-thread'));
+        await tick(40);
+      }
+      const sends = connection.requests.filter((r) => r.method === 'turn/start');
+      if (scenario === 'success' || scenario === 'fork') {
+        expect(nodeFs.existsSync(file)).toBe(false);
+        expect(sends).toHaveLength(1);
+        expect(sends[0]?.params).toMatchObject({ threadId: 'new-thread' });
+        connection.resolveFirst('turn/start', { turn: { id: 'new-turn' } });
+        await tick();
+      } else {
+        expect(sends).toHaveLength(0);
+        expect(nodeFs.readFileSync(file, 'utf8')).toBe(
+          scenario === 'conflict' ? 'external' : 'added\n',
+        );
+      }
+    } finally {
+      manager.dispose();
+      nodeFs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('handoffプロンプトの決定論検知で自動引き継ぎする（Issue #1150）', () => {
+  /** `handoff` skillの出力そのもの。ソース中にバックティックの連続を書かずに組む。 */
+  const HANDOFF_PROMPT = [
+    '一段落したので引き継ぐ。',
+    '',
+    `${'`'.repeat(4)}markdown`,
+    '# 継続 2026-09-13 main',
+    '',
+    '作業: 決定論検知の実装',
+    '`'.repeat(4),
+  ].join('\n');
+
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** タブを1枚開き、`text` を応答本文としてターンを1回完了させる。 */
+  async function finishTurnWith(text: string): Promise<FakeAppServerConnection> {
+    const store = fakeSessionStore({
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const { manager, connection } = createManager({ store });
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+
+    connection.notify('turn/started', { threadId: 'thread-orig', turn: { id: 'turn-1' } });
+    connection.notify('item/completed', {
+      threadId: 'thread-orig',
+      turnId: 'turn-1',
+      item: { id: 'i1', type: 'agentMessage', text },
+    });
+    connection.notify('turn/completed', { threadId: 'thread-orig', turnId: 'turn-1' });
+    connection.notify('thread/status/changed', {
+      threadId: 'thread-orig',
+      status: { type: 'idle' },
+    });
+    await tick();
+    return connection;
+  }
+
+  const threadStarts = (connection: FakeAppServerConnection): number =>
+    connection.requests.filter((r) => r.method === 'thread/start').length;
+
+  // これが本Issueの主目的。分類器を切っていても、handoffプロンプトが出れば引き継ぐ
+  it('router=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await vi.waitFor(() => {
+      expect(threadStarts(connection)).toBe(2);
+    });
+  });
+
+  it('handoffプロンプトが無ければ、router=false のときは従来どおり発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const connection = await finishTurnWith('直しました。次はテストを足す。');
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+
+  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onAssistantSuggestion': false,
+    });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+
+  it('自動引き継ぎ自体がOFFなら発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.enabled': false, 'autoHandoff.router': false });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
   });
 });

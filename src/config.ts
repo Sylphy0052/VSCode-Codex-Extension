@@ -234,6 +234,19 @@ export interface SecondOpinionConfig {
    * `false` にすると Issue #929 の手動2ステップ（指示を作る → 確認して送る）だけになる。
    */
   autoSend: boolean;
+  /**
+   * 押下時点のリポジトリ全体の写し（`after/`）を材料へ足すか（Issue #1062）。既定は `true`。
+   *
+   * Issue #1060 の実測（9案件）で、条件Aの材料からは到達できなかった正解ラベル4件のうち3件を
+   * この写しが拾った。両条件で分母に入るラベルの recall は同一で、増分はすべて「差分の外に
+   * ある問題」から来ている。代わりに1回答あたりのトークンが21.7%増える（探索の往復として
+   * 現れる。プロンプト長はほぼ変わらない）。
+   *
+   * `false` にすると Issue #1047 以前と同じ材料（`changes.diff` と `base/`）に戻り、固定指示も
+   * 「リポジトリ全体の探索は行わない」へ戻る。トークンの増加を許容できない場合と、写しの
+   * 構築が失敗し続ける環境のための退避口である。
+   */
+  afterTree: boolean;
 }
 
 /** Advisorセッション（Issue #929）の設定。 */
@@ -273,6 +286,7 @@ export function readSecondOpinionConfig(): SecondOpinionConfig {
       ),
     },
     autoSend: c.get<boolean>('secondOpinion.autoSend') ?? true,
+    afterTree: c.get<boolean>('secondOpinion.afterTree') ?? true,
   };
 }
 
@@ -350,6 +364,177 @@ export async function setChatLoopEngineeringEnabled(enabled: boolean): Promise<v
   await vscode.workspace
     .getConfiguration('agent')
     .update('chat.loopEngineering.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/** 使用量上限の解除後に、CodexまたはClaude Code会話へ継続指示を自動送信するか。 */
+export function readChatLimitAutoResumeEnabled(): boolean {
+  return (
+    vscode.workspace.getConfiguration('agent').get<boolean>('chat.limitAutoResume.enabled') ?? true
+  );
+}
+
+/**
+ * 新しい会話で自動引き継ぎ（Issue #1079）を最初から有効にするか（Issue #1091）。
+ *
+ * 既定はON。この設定が決めるのは新規セッションの初期値だけで、以降のON/OFFはセッション
+ * 単位（`ChatState.autoHandoff`）に持つ。入力欄の「…」メニューのトグルはその一時的な
+ * 上書きで、ここへは書き戻さない（会話ごとに入れたい／入れたくないが分かれるため）。
+ *
+ * 読むのはview層（`chatView.ts` / `claudeChatView.ts` がセッションを作るところ）。セッション層
+ * （`src/appserver/chatSession.ts` / `src/claude/streamSession.ts`）は `vscode` をimportしない
+ * ため、値だけを構築時の引数で渡す（CONTRIBUTING.mdの「レイヤの制約」。`LoopController` の
+ * しきい値と同じ流儀）。
+ */
+export function readAutoHandoffEnabled(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.enabled');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
+ * 自動引き継ぎが始まるコンテキスト残量の割合（Issue #1079）。
+ *
+ * ON/OFFの初期値は `agent.autoHandoff.enabled`（`readAutoHandoffEnabled`）で、会話ごとの
+ * 切り替えはセッション単位（`ChatState.autoHandoff`）。ここで持つのは閾値だけ。名前空間が
+ * `agent.` なのは、これがCodex CLI固有の設定ではなく両プロバイダ共通の機能だから
+ * （`codex.` はCLIの起動・サンドボックス・モデルなどCodex固有の設定に限って使っている）。
+ *
+ * 既定の20は `chatScript.ts` の `LOW_CONTEXT_PERCENT`（残量表示が「残りわずか」に変わる
+ * 境界）と同じ。壊れた値（数値でない・範囲外）は既定へ丸める。
+ */
+export const DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT = 20;
+
+/** @see DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT */
+export function readAutoHandoffThresholdPercent(): number {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('autoHandoff.thresholdPercent');
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1 || raw > 99) {
+    return DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT;
+  }
+  return Math.round(raw);
+}
+
+/** @see readAutoHandoffSoftThresholdPercent */
+export const DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT = 40;
+
+/**
+ * 区切りを待つ自動引き継ぎの閾値（Issue #1090）。
+ *
+ * `thresholdPercent`（既定20）がギリギリまで粘る線なのに対し、こちらは「残量に余裕がある
+ * うちに、安全な区切りが来たら引き継ぐ」線。区切りの判定には分類器（`switch_safe`）を通す
+ * ため、残量だけで発火することはない。
+ *
+ * `thresholdPercent` 以下の値は意味を持たない（そちらが先に発火する）ので丸める。
+ */
+export function readAutoHandoffSoftThresholdPercent(): number {
+  const hard = readAutoHandoffThresholdPercent();
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('autoHandoff.softThresholdPercent');
+  const value =
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= 99
+      ? Math.round(raw)
+      : DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT;
+  return Math.max(value, hard);
+}
+
+/**
+ * 安全な区切りで、次の作業に合うmodel/effortが変わったときに引き継ぐか（Issue #1090）。
+ *
+ * 既定はON。残量に関係なく発火するため、OFFにすると引き継ぎは残量の2つの閾値だけになる。
+ */
+export function readAutoHandoffOnProfileChange(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('autoHandoff.onProfileChange');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/** 分類のタイムアウトの既定と、設定で受け付ける範囲（Issue #1097）。 */
+const CLASSIFIER_TIMEOUT_MS_DEFAULT = 120_000;
+const CLASSIFIER_TIMEOUT_MIN_MS = 5_000;
+const CLASSIFIER_TIMEOUT_MAX_MS = 600_000;
+
+/**
+ * 引き継ぎ先の作業を分類するヘッドレス実行の待ち時間（Issue #1097）。
+ *
+ * 既定は `CLASSIFIER_TIMEOUT_MS`（120秒）。短すぎると時間切れで分類が `undefined` になり、
+ * 区切り待ちの契機が黙って発火しなくなる。数値でない値・範囲外は既定へ丸める。
+ */
+export function readAutoHandoffClassifierTimeoutMs(): number {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('autoHandoff.classifierTimeoutMs');
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return CLASSIFIER_TIMEOUT_MS_DEFAULT;
+  }
+  const rounded = Math.round(raw);
+  if (rounded < CLASSIFIER_TIMEOUT_MIN_MS || rounded > CLASSIFIER_TIMEOUT_MAX_MS) {
+    return CLASSIFIER_TIMEOUT_MS_DEFAULT;
+  }
+  return rounded;
+}
+
+/**
+ * 安全な区切りで、アシスタント自身が引き継ぎを提案したときに引き継ぐか（Issue #1097）。
+ *
+ * 既定はON。残量にもmodel/effortの変化にも関係なく発火する。OFFにすると、提案だけを理由に
+ * した引き継ぎは起きなくなる（分類器そのものを止めるのは `agent.autoHandoff.router`）。
+ */
+export function readAutoHandoffOnAssistantSuggestion(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('autoHandoff.onAssistantSuggestion');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
+ * 引き継ぎ後、旧セッションのタブを確認なしで閉じるか（Issue #1090）。
+ *
+ * 既定はON。新セッションの初回ターンが**成功したときだけ**閉じ、失敗・時間切れなら残す。
+ * OFFにすると従来どおり停止してよいか確認ダイアログを出す。
+ */
+export function readAutoHandoffCloseOldTab(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.closeOldTab');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
+ * 引き継ぎ先セッションのmodel / effortの明示指定（Issue #1082）。
+ *
+ * 空文字は「未指定」。未指定のときは作業の分類→引き継ぎ元の値→グローバル設定の順で
+ * 決まる。ここで指定した値はその全てより優先する。値の妥当性（存在するモデルか、その
+ * モデルがそのeffortに対応するか）はここでは見ない。モデル一覧はCLIから動的に取るもので、
+ * 設定を読む時点では手元に無いため。
+ */
+export function readAutoHandoffModel(): string {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.model');
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/** @see readAutoHandoffModel */
+export function readAutoHandoffEffort(): string {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.effort');
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/**
+ * 引き継ぎ先のmodel / effortを、CLIのヘッドレス実行による作業の分類から決めるか（Issue #1082）。
+ *
+ * 既定はON。OFFにすると分類のためのCLI起動を行わず、引き継ぎ先は引き継ぎ元の値をそのまま
+ * 持ち越す（従来のグローバル設定へ戻る挙動には戻らない。そちらは引き継ぎ元の設定を捨てる
+ * 分だけ意図から遠い）。ON / OFFにかかわらず、引き継ぐ前の確認ダイアログは出る。
+ */
+export function readAutoHandoffRouterEnabled(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.router');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/** 使用量上限の解除後の自動続行を、ユーザー設定へ保存する。 */
+export async function setChatLimitAutoResumeEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.limitAutoResume.enabled', enabled, vscode.ConfigurationTarget.Global);
 }
 
 /**
@@ -807,6 +992,46 @@ function notifyPseudoWorktreeExcludeWarnings(warnings: readonly string[]): void 
   void vscode.window.showWarningMessage(message);
 }
 
+/**
+ * 型の合わない権限設定について通知済みのキー。`readWorkflowsConfig` は設定を読むたびに
+ * 呼ばれるため、同じキーの通知を繰り返さないための重複除け。設定を直せば外れ、再び壊れた
+ * 値を入れれば改めて通知される。
+ */
+const warnedPermissionFlagKeys = new Set<string>();
+
+/**
+ * テスト専用: `warnedPermissionFlagKeys` をリセットする。`test/unit/config.test.ts` の
+ * `beforeEach` から呼ぶ。本体コードから呼んではならない。
+ */
+export function __resetPermissionFlagWarningForTestOnly(): void {
+  warnedPermissionFlagKeys.clear();
+}
+
+/**
+ * 権限を広げる側の真偽値設定を読む（Issue #1105）。`true` のときだけ有効にし、それ以外
+ * （`false`・未設定・型の合わない値）は全て無効として扱う。
+ *
+ * `c.get<boolean>() ?? false` は実行時の型を確かめない。設定読取りが文字列 `"false"` の
+ * ような値を返すと真として扱われ、`clampAutoApprove` の抑止や `bypassPermissions` の
+ * 読み替えが効かなくなる。package.json の JSON Schema（`type: boolean`）はVSCodeの設定UI
+ * を通した入力しか守らないため、ここで `=== true` に限定する。型の合わない値は無効化した
+ * うえで通知し、設定を書いた本人が気づけるようにする。
+ */
+function permissionFlag(c: vscode.WorkspaceConfiguration, key: string): boolean {
+  const v = c.get<unknown>(key);
+  if (v === undefined || typeof v === 'boolean') {
+    warnedPermissionFlagKeys.delete(key);
+    return v === true;
+  }
+  if (!warnedPermissionFlagKeys.has(key)) {
+    warnedPermissionFlagKeys.add(key);
+    void vscode.window.showWarningMessage(
+      `agent.${key} は真偽値ではないため無効（false）として扱います（値の型: ${typeof v}）`,
+    );
+  }
+  return false;
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
@@ -817,8 +1042,8 @@ export function readWorkflowsConfig(): WorkflowsConfig {
   notifyPseudoWorktreeExcludeWarnings(pseudoWorktreeExclude.warnings);
   return {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
-    allowAutoApprove: c.get<boolean>('workflows.allowAutoApprove') ?? false,
-    allowClaudeBypassPermissions: c.get<boolean>('workflows.allowClaudeBypassPermissions') ?? false,
+    allowAutoApprove: permissionFlag(c, 'workflows.allowAutoApprove'),
+    allowClaudeBypassPermissions: permissionFlag(c, 'workflows.allowClaudeBypassPermissions'),
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
     pseudoWorktreeExclude: pseudoWorktreeExclude.exclude,
     pseudoWorktreeExcludeWarnings: pseudoWorktreeExclude.warnings,

@@ -56,6 +56,31 @@ export interface ReviewMaterial {
   /** 上限で切る前の差分。 */
   fullDiff: string;
   /**
+   * `git apply` に通せる形で取り直した、同じ地点の差分（Issue #1047）。
+   *
+   * {@link fullDiff} をそのまま `git apply` へ渡せない理由が3つある。
+   *
+   * - **binary**: 既定の `git diff` はbinaryの中身を出さず `Binary files a/x and b/x differ` の
+   *   1行になる。これを当てようとすると `cannot apply binary patch to 'x' without full index line`
+   *   で失敗する（実測）。`--binary` が要る
+   * - **`diff.noprefix` / `diff.mnemonicPrefix`**: 利用者の設定次第で `a/` `b/` が消えたり
+   *   `i/` `w/` になったりし、`git apply` の既定の `-p1` が外れる。`--src-prefix` / `--dst-prefix` で固定する
+   * - **`color.diff = always`**: 出力先がパイプでも色が付く。ANSIが混ざった差分は当たらない。`--no-color` で消す
+   *
+   * **{@link fullDiff} 側は変えていない。** そちらは条件A（`changes.diff`）の中身そのもので、
+   * #1044 のベースラインとして凍結してある。`--binary` を足すとbinaryを含む案件で
+   * `changes.diff` の中身が変わり、凍結が壊れる。
+   *
+   * `git diff` を2回打つことになるが、`--name-only` の呼び出しで既に同じ性質を受け入れている
+   * （2回の間に人がファイルを触ると内容がずれうる。ずれても `baseCommit` は同じなので、
+   * ずれるのは右辺だけである）。
+   *
+   * **取得に失敗したときは `undefined` になる。** 空文字列（未追跡ファイルだけが変わった場合に
+   * 実際に起こる）と区別する必要がある。空文字列を失敗と同じ値にすると、`git diff` が落ちた
+   * ときに「差分が無い＝baseがそのまま after」という誤った木ができる。
+   */
+  applyDiff: string | undefined;
+  /**
    * 変更対象のパス一覧。
    *
    * `git diff` の出力を自前で解釈するのではなく `--name-only -z` で取る。パスの引用規則
@@ -172,6 +197,24 @@ export async function captureWorkspaceSnapshot(
   );
   const changedPaths = named.code === 0 ? parseUntrackedList(named.stdout) : [];
 
+  // `git apply` に通せる形の差分（Issue #1047）。失敗しても全体は止めない——after-treeを
+  // 組み立てられなくなるだけで、条件Aの材料（`fullDiff`）だけでレビューは成立する
+  const forApply = await git.run(
+    [
+      'diff',
+      '--binary',
+      '--no-color',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      '--no-ext-diff',
+      '--no-textconv',
+      baseCommit.commit,
+      '--',
+    ],
+    cwd,
+  );
+  const applyDiff = forApply.code === 0 ? forApply.stdout : undefined;
+
   // 未追跡ファイルを先に取る（Issue #926 F）。差分の切り詰めより前に枠を確保しておかないと、
   // 巨大な差分があるときに新規ファイルが1つも載らない
   const untracked = await captureUntracked(cwd, git, maxUntrackedBytes, options.untrackedReader);
@@ -190,7 +233,7 @@ export async function captureWorkspaceSnapshot(
   const budgeted = applyDiffBudget(diff, Math.max(0, maxDiffBytes - untrackedBytes));
   return {
     ok: true,
-    material: { fullDiff: diff, changedPaths },
+    material: { fullDiff: diff, applyDiff, changedPaths },
     snapshot: {
       baseCommit: baseCommit.commit,
       diff: budgeted.diff,

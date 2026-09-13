@@ -335,23 +335,30 @@ async function reconcileRestoredTaskStates(
 /**
  * 疑似worktree（design.md §16.20）。リロード後の再構築はベストエフォートにする
  * （`rebuildLiveRun`自体が「定義ファイルを読めない等は復元をあきらめる」以外は失敗時も
- * 可能な限り表示を続ける方針のため。統合先の再作成に失敗した場合は`pseudo: undefined`の
- * まま続け、ログにだけ残す）。なお、疑似worktreeの`baseline`はrun開始時点ではなく
+ * 可能な限り表示を続ける方針のため。統合先の再作成に失敗した場合も`pseudo: undefined`の
+ * まま復元自体は続け、ログに残す）。
+ *
+ * **ただし失敗した事実は`failure`として持ち帰る（Issue #1114）。** `pseudo: undefined`
+ * だけを返すと、作業ディレクトリの解決（`resolveSharedFallbackWorkingDirectory`）が
+ * 「隔離なし（後方互換）」と区別できず、自動再開や手動の再試行が隔離なしで元の
+ * ワークスペースへ書き込んでしまう。理由を`LiveRun.pseudoRestoreFailure`へ載せ、
+ * 該当runのタスクは開始させずに`failed`へ倒す。
+ *
+ * なお、疑似worktreeの`baseline`はrun開始時点ではなく
  * **復元した時点**のワークスペースで取り直す（`headCommit`と同じ「復元時点を基準にする」
  * 簡略化。再実行は新しい複製でやり直す設計のため、この差異は再実行の意味を壊さない）。
  */
 async function resolveRestoredPseudoState(
   self: WorkflowRunnerInternals,
   p: PersistedRun,
-): Promise<LiveRun['pseudo']> {
+): Promise<{ pseudo: LiveRun['pseudo']; failure: string | undefined }> {
   const resolved = await resolvePseudoState(self, p.workspaceRoot, p.runId);
   if (resolved.ok) {
-    return resolved.state;
+    return { pseudo: resolved.state, failure: undefined };
   }
-  self.deps.log.warn(
-    `[workflow ${p.runId}] 疑似worktreeの統合先を復元できませんでした: ${resolved.message}`,
-  );
-  return undefined;
+  const failure = `疑似worktreeの統合先を復元できませんでした: ${resolved.message}`;
+  self.deps.log.warn(`[workflow ${p.runId}] ${failure}`);
+  return { pseudo: undefined, failure };
 }
 
 async function rebuildLiveRun(
@@ -390,7 +397,9 @@ async function rebuildLiveRun(
     ? await self.resolveForgeState(p.workspaceRoot)
     : { kind: 'disabled' };
   const { branchNaming, draftPullRequest } = resolveBranchNamingAndDraft(self.deps);
-  const pseudo = gitRepo ? undefined : await resolveRestoredPseudoState(self, p);
+  const restoredPseudo = gitRepo
+    ? { pseudo: undefined, failure: undefined }
+    : await resolveRestoredPseudoState(self, p);
 
   return {
     runId: p.runId,
@@ -427,7 +436,8 @@ async function rebuildLiveRun(
     forge,
     branchNaming,
     draftPullRequest,
-    pseudo,
+    pseudo: restoredPseudo.pseudo,
+    pseudoRestoreFailure: restoredPseudo.failure,
     // タスク間メッセージング（design.md §16.21）はこのウィンドウで新たに始める実行にだけ
     // 立てる（リロード直後の復元では作らない。再実行すればstartTask()相当の経路で
     // 改めてタスクが動き出すが、メッセージングはrunそのものに紐づく短命なサーバのため、

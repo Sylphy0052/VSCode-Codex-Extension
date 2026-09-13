@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -472,6 +472,14 @@ export interface StartWorkflowResult {
   /** `true` のとき、`allowTaskIds` を確認のうえ `allowConfirmed: true` で呼び直すこと（design.md §16.7）。 */
   needsAllowConfirmation?: boolean;
   allowTaskIds?: readonly string[];
+  /**
+   * 確認の対象になった定義ファイルの内容ダイジェスト（Issue #1107）。
+   *
+   * 呼び出し側は確認が取れたら、この値を `allowConfirmedDigest` へそのまま入れて呼び直す。
+   * 呼び直しの時点で定義が書き換わっていれば値が食い違い、**確認していない設定が同意済みと
+   * して実行されることはない**（再度 `needsAllowConfirmation` が返る）。
+   */
+  allowDigest?: string;
 }
 
 /** `WorkflowRunner.retryTask` の戻り値。`start()` の `allow` 確認と同じ形にしてある。 */
@@ -1354,6 +1362,22 @@ export interface LiveRun {
       }
     | undefined;
   /**
+   * 疑似worktree（design.md §16.20）の統合先を**復元できなかった**理由。リロード時
+   * （`rebuildLiveRun`）に`resolvePseudoState`が失敗したときだけ入る（Issue #1114）。
+   *
+   * `pseudo`が`undefined`になる理由は2つあり、この2つは区別しなければならない。
+   *
+   * - `WorkflowRunnerDeps.pseudoWorktree`を渡していない（後方互換。ワークスペース直下を
+   *   そのまま共有する旧挙動が正しい）
+   * - 隔離を使っていたrunの復元で、統合先の再作成に失敗した（隔離できない）
+   *
+   * 後者を「隔離なし」と同じに扱うと、自動再開や手動の再試行が**隔離なしで元の
+   * ワークスペースへ書き込む**。ここに理由が入っている場合、`sharedFallback`の
+   * 作業ディレクトリ解決は元のrepoRootを返さず例外を投げてタスクを`failed`にする
+   * （`resolveSharedFallbackWorkingDirectory`参照）。
+   */
+  pseudoRestoreFailure: string | undefined;
+  /**
    * タスク間メッセージング（design.md §16.21）。`WorkflowRunnerDeps.messaging`が渡され、
    * かつMCPサーバの起動に成功したときだけ実行開始時に一度作る。
    *
@@ -1633,6 +1657,17 @@ function buildHandoffPort(repoRoot: string, runId: string): HandoffPort {
   };
 }
 
+/**
+ * `allow` の確認に使う、定義ファイルの内容ダイジェスト（Issue #1107）。
+ *
+ * 確認ダイアログを出している間にファイルが差し替えられていないことだけを見るので、
+ * 内容そのものの比較で足りる。ハッシュにしているのは、値を呼び出し側（Viewやコマンド）へ
+ * 渡して返してもらう経路に定義の本文をそのまま流さないため。
+ */
+export function workflowDigest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
 export class WorkflowRunner {
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）からは`self.runs`として読むが、
@@ -1794,7 +1829,8 @@ export class WorkflowRunner {
   private async parseAndValidateWorkflow(
     defPath: string,
   ): Promise<
-    { ok: true; def: WorkflowDefinition } | { ok: false; errors: readonly WorkflowIssue[] }
+    | { ok: true; def: WorkflowDefinition; digest: string }
+    | { ok: false; errors: readonly WorkflowIssue[] }
   > {
     const size = await this.deps.filePort.fileSize(defPath);
     if (size === undefined) {
@@ -1840,7 +1876,7 @@ export class WorkflowRunner {
         ],
       };
     }
-    return { ok: true, def };
+    return { ok: true, def, digest: workflowDigest(text) };
   }
 
   /** `start()`のgit判定（design.md §16.6）。gitでない場合は`worktree-strict`の禁止を確認する。 */
@@ -2087,22 +2123,37 @@ export class WorkflowRunner {
    * 実行を始めず `needsAllowConfirmation` を立てて返す（design.md §16.7「`allow`を含む
    * ワークフローは、実行開始時に...確認を取る」）。呼び出し側（`extension.ts` /
    * ワークフローView）はこれを見てモーダルを出し、確認が取れたら
-   * `allowConfirmed: true` で呼び直す。
+   * `allowConfirmed: true` と、返した `allowDigest` を `allowConfirmedDigest` へ入れて
+   * 呼び直す。
+   *
+   * **真偽値だけでは確認を省かない（Issue #1107）。** 定義は呼び直しのたびに読み直すため、
+   * 確認ダイアログを出している間にYAMLを差し替えられると、確認していない `allow` が同意済みと
+   * して実行されてしまう。ダイジェストが一致しなければ、もう一度確認を取り直す。
    */
   async start(
     defPath: string,
     repoRoot: string,
-    options?: { allowConfirmed?: boolean; programControl?: ProgramControlPort },
+    options?: {
+      allowConfirmed?: boolean;
+      allowConfirmedDigest?: string;
+      programControl?: ProgramControlPort;
+    },
   ): Promise<StartWorkflowResult> {
     const parsed = await this.parseAndValidateWorkflow(defPath);
     if (!parsed.ok) {
       return parsed;
     }
-    const { def } = parsed;
+    const { def, digest } = parsed;
 
     const allowTaskIds = def.tasks.filter((t) => t.allow.length > 0).map((t) => t.id);
-    if (allowTaskIds.length > 0 && options?.allowConfirmed !== true) {
-      return { ok: false, needsAllowConfirmation: true, allowTaskIds };
+    if (allowTaskIds.length > 0) {
+      // 確認済みと言えるのは「この内容を見せて同意を取った」ときだけ。ダイジェストが無い・
+      // 食い違う場合は確認からやり直す（Issue #1107。fail-closed）
+      const confirmedForThisContent =
+        options?.allowConfirmed === true && options.allowConfirmedDigest === digest;
+      if (!confirmedForThisContent) {
+        return { ok: false, needsAllowConfirmation: true, allowTaskIds, allowDigest: digest };
+      }
     }
 
     const gitContext = await this.resolveStartGitContext(repoRoot, def);
@@ -2184,6 +2235,9 @@ export class WorkflowRunner {
       branchNaming,
       draftPullRequest,
       pseudo,
+      // 実行開始時は統合先の作成に失敗した時点で実行自体を始めない
+      // （`createPseudoWorktreeForStart`）ため、ここへ理由が入ることはない
+      pseudoRestoreFailure: undefined,
       messaging: undefined,
       messagingHub: undefined,
       messagingSetupInFlight: undefined,
@@ -3241,7 +3295,7 @@ export class WorkflowRunner {
       live.failureRecovery !== undefined ||
       live.failureRecoveryExhausted ||
       live.runState.haltedByUser ||
-      !this.deps.readBaseline().allowAutoApprove
+      this.deps.readBaseline().allowAutoApprove !== true
     ) {
       return false;
     }
@@ -3538,7 +3592,7 @@ export class WorkflowRunner {
     if (
       task.provider === 'claude' &&
       effective.config.approvalMode === 'bypassPermissions' &&
-      !baseline.allowClaudeBypassPermissions
+      baseline.allowClaudeBypassPermissions !== true
     ) {
       throw new Error(
         '実効approvalModeがbypassPermissionsのため、このタスクは開始できません' +
@@ -3891,7 +3945,12 @@ export class WorkflowRunner {
     }
 
     const taskStates = new Map([...live.runState.tasks].map(([id, s]) => [id, s.state] as const));
-    const result = await applyRunCompletionToFile({ fs: deps.fs }, target, taskStates);
+    const result = await applyRunCompletionToFile(
+      { fs: deps.fs },
+      target,
+      taskStates,
+      live.repoRoot,
+    );
     if (!result.ok) {
       this.deps.log.warn(`[workflow ${runId}] ${result.message}`);
       return;
@@ -4699,6 +4758,39 @@ export class WorkflowRunner {
     this.pump(runId);
   }
 
+  /**
+   * 独立検証（`verifyTaskCompletion`）の`await`から戻った時点で、検証を打ち切るべき
+   * 事情が起きていないかを見る（Issue #1121）。
+   *
+   * 検証はファイルの存在確認・`git diff`・独立レビュー（別セッションでCLIを起動する）を
+   * 順に`await`するため、その間に人が「全体の停止」を押したり拡張機能が終了したりし得る。
+   * 元のループは`done`で既に終わっているので`stop()`の`stopLoop()`は何にも当たらず、
+   * 検証側が黙って`runLoop`を張り直すと「人が止めたのにAIの修正ループが再開する」。
+   *
+   * - `halted`: 人が全体停止を押した。検証結果は捨て、タスクを停止として確定させる
+   * - `disposing`: 拡張機能の終了中。`runState`の書き換え・`persist`まで含めて何もしない
+   *   （`disposing`のJSDoc参照。片付けは`dispose()`が受け持つ）
+   * - `stale`: runやタスクが作り直された（再実行・破棄）。今の`liveTask`はもう画面上の
+   *   実体ではないため、古い世代の検証結果を新しい実体へ当ててはならない
+   */
+  private verificationAbortReason(
+    runId: string,
+    taskId: string,
+    live: LiveRun,
+    liveTask: LiveTask,
+  ): 'halted' | 'disposing' | 'stale' | undefined {
+    if (this.disposing) {
+      return 'disposing';
+    }
+    if (this.runs.get(runId) !== live || live.tasks.get(taskId) !== liveTask) {
+      return 'stale';
+    }
+    if (live.runState.haltedByUser) {
+      return 'halted';
+    }
+    return undefined;
+  }
+
   /** DONE自己申告を、機械条件と別のread-onlyセッションで確認する。 */
   private async verifyTaskCompletion(
     runId: string,
@@ -4714,12 +4806,32 @@ export class WorkflowRunner {
     const failures: string[] = [];
     const verify = task.verify;
 
+    // 各`await`の後に、停止・破棄・作り直しが挟まっていないかを見る（Issue #1121）。
+    // 打ち切るときは検証中の印を下ろし、人が止めた場合だけ、走行中のループを`stopLoop()`で
+    // 止めたときと同じ`'taskStopped'`でタスクを停止として確定させる（`stop()`の経路と揃える）
+    const abortVerification = (): boolean => {
+      const reason = this.verificationAbortReason(runId, taskId, live, liveTask);
+      if (reason === undefined) {
+        return false;
+      }
+      liveTask.verificationInProgress = false;
+      if (reason === 'halted') {
+        this.deps.log.info(
+          `[workflow ${runId}/${taskId}] 全体の停止により独立検証（${attempt}回目）を打ち切りました`,
+        );
+        this.onTaskFinished(runId, taskId, task, 'taskStopped', state);
+      }
+      return true;
+    };
+
     for (const file of verify?.files ?? []) {
       const target = path.resolve(liveTask.cwd, file);
       if ((await this.deps.filePort.fileSize(target)) === undefined) {
         failures.push(`必須ファイルがありません: ${file}`);
       }
     }
+
+    if (abortVerification()) return;
 
     const diffBase = liveTask.originCommit === '' ? [] : [liveTask.originCommit];
     const [diffResult, changedResult] = await Promise.all([
@@ -4753,6 +4865,10 @@ export class WorkflowRunner {
       }
     }
 
+    // 独立レビューは別セッションでCLIを起動する分だけ長い。入る前に一度見て、
+    // 停止済みなら起動そのものを見送る
+    if (abortVerification()) return;
+
     if (verify?.semantic === true) {
       const verificationContract = [
         task.prompt,
@@ -4776,6 +4892,10 @@ export class WorkflowRunner {
       }
       failures.push(...reviewed.findings.map((finding) => finding.message));
     }
+
+    // 結果の適用（合格の確定・警告の追加・`runLoop`の張り直し）の直前に最後の確認をする。
+    // ここを抜けた後は同じターンの中で完結するため、以降に停止が割り込む余地は無い
+    if (abortVerification()) return;
 
     liveTask.verificationInProgress = false;
     if (failures.length === 0) {

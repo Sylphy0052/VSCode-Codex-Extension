@@ -548,6 +548,28 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
     expect(enabled).toContain('ループエンジニアリングを無効にする');
   });
 
+  it('CodexとClaude Codeで上限解除後の自動続行を「…」メニューから切り替えられる（issue #1069）', () => {
+    const codex = renderShell(
+      fakeWebview() as never,
+      buildOptions({ limitAutoResumeEnabled: true }),
+    );
+    const disabled = renderShell(
+      fakeWebview() as never,
+      buildOptions({ provider: 'claude', limitAutoResumeEnabled: false }),
+    );
+    const enabled = renderShell(
+      fakeWebview() as never,
+      buildOptions({ provider: 'claude', limitAutoResumeEnabled: true }),
+    );
+
+    expect(isInOverflowMenu(codex, 'limitAutoResumeToggle')).toBe(true);
+    expect(isInOverflowMenu(disabled, 'limitAutoResumeToggle')).toBe(true);
+    expect(extractButtonOpenTag(disabled, 'limitAutoResumeToggle')).toContain(
+      'aria-pressed="false"',
+    );
+    expect(extractButtonOpenTag(enabled, 'limitAutoResumeToggle')).toContain('aria-pressed="true"');
+  });
+
   it('ループパネルに時間上限の入力を持つ（issue #891）', () => {
     const html = renderShell(fakeWebview() as never, buildOptions());
     // 上限は LOOP_DURATION_LIMIT_MINUTES（24時間）と揃える

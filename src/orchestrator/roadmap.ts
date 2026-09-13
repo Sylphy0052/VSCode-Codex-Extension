@@ -1510,14 +1510,133 @@ export function createTaskSessionRoadmapGenerationPort(
 /* -------------------------------------------------------------------------------------------- */
 
 export interface RoadmapFileSystemPort {
-  writeTextFile(target: string, content: string): Promise<void>;
+  /**
+   * ロードマップを書き出す。`workspaceRoot`は書き込み先の境界を判定するためのアンカーで、
+   * **呼び出し元から固定値で渡る値**（攻撃者が差し替えられない唯一の起点。Issue #1120）。
+   * 実装はこの値を基準に、書き込み先が本当にワークスペース内かを実ファイルシステム上で
+   * 確かめること（`nodeRoadmapFileSystem`参照）。
+   */
+  writeTextFile(target: string, content: string, workspaceRoot: string): Promise<void>;
   readTextFile(target: string): Promise<string | undefined>;
 }
 
+/**
+ * `workspaceRoot`から`target`までの各セグメントを辿り、シンボリックリンクになっている
+ * 最初の祖先（終端の`target`自身を含む）を返す。無ければ`undefined`。
+ *
+ * `pseudoWorktree.ts`が`findSymlinkedAncestor`（`fsGuards.ts`）で行っているI/O前の
+ * 一次防御と同じ考え方。ロードマップ側のポートは`isSymbolicLink`を持たないため、
+ * Node実装の中で`lstat`を直接使う。
+ */
+async function findSymlinkedSegment(
+  workspaceRoot: string,
+  target: string,
+): Promise<string | undefined> {
+  const rel = path.relative(workspaceRoot, target);
+  const segments = rel.split(path.sep).filter((segment) => segment !== '' && segment !== '..');
+  let cursor = workspaceRoot;
+  for (const segment of segments) {
+    cursor = path.join(cursor, segment);
+    try {
+      const stat = await fsPromises.lstat(cursor);
+      if (stat.isSymbolicLink()) {
+        return cursor;
+      }
+    } catch {
+      // まだ存在しないセグメント（これから`mkdir`で作る途中のディレクトリや、
+      // 初回作成のロードマップ本体）は`ENOENT`になる。リンクではないので続ける
+    }
+  }
+  return undefined;
+}
+
+/**
+ * `target`の実パスが「`workspaceRoot`の実パス起点で組み立てた、想定した場所そのもの」か
+ * どうかを確かめる（Issue #1120）。
+ *
+ * **比較の起点は`workspaceRoot`自身の実パスにする。** `target`の親など途中のノードから
+ * 組み立てると、そのノード自体が差し替えられている攻撃では両辺が同じ差し替え先を指して
+ * 必ず一致し、検査が自己無矛盾になって何も検知できない（`pseudoWorktree.ts`が
+ * Issue #505で3度再発を確認した構造と同じ）。
+ */
+async function isExpectedRealPath(
+  workspaceRoot: string,
+  target: string,
+): Promise<{ ok: true } | { ok: false; actual: string }> {
+  const realRoot = await fsPromises.realpath(workspaceRoot);
+  const realTarget = await fsPromises.realpath(target);
+  const expected = path.join(realRoot, path.relative(workspaceRoot, target));
+  return realTarget === expected ? { ok: true } : { ok: false, actual: realTarget };
+}
+
 export const nodeRoadmapFileSystem: RoadmapFileSystemPort = {
-  async writeTextFile(target: string, content: string): Promise<void> {
-    await fsPromises.mkdir(path.dirname(target), { recursive: true });
-    await fsPromises.writeFile(target, content, 'utf8');
+  /**
+   * **書き込み先がワークスペースの外の実体を指していないことを、実ファイルシステム上で
+   * 確かめてから書く（Issue #1120）。** `resolveRoadmapOutputPath`のパス文字列の判定
+   * （`path.resolve`後の包含チェック）だけでは、`docs/roadmap`のような途中の
+   * ディレクトリが外部へのシンボリックリンクへ差し替えられている場合に、許可された名前の
+   * まま外部のファイルを作成・上書きしてしまう。
+   *
+   * 二段構えは`pseudoWorktree.ts`の書き込み経路と同じ。
+   *
+   * 1. I/Oの前に`workspaceRoot`から`target`までの各セグメントを`lstat`で辿り、
+   *    シンボリックリンク（末端の`target`自身を含む）があれば書かずに中止する
+   * 2. `mkdir`の後、書き込み先ディレクトリの実パスが`workspaceRoot`の実パス起点で
+   *    組み立てた想定の場所と厳密に一致することを確かめる（一次防御と実I/Oの間の
+   *    TOCTOU窓で差し替えられた場合に備える）
+   *
+   * その前段として、`target`がパス文字列の上で既にワークスペースの外を指している場合
+   * （`..`で外へ出る、別のドライブ・ルートの絶対パス）も拒否する。呼び出し側
+   * （`resolveRoadmapOutputPath`・`runner.ts`の書き戻し）が同じ判定を先に通しているが、
+   * 検証を経ずに組み立てた値が渡る経路を残さないための多層防御。**上の実パス厳密一致だけ
+   * では拾えない**——`expected`の組み立てに使う`path.join`が`..`を正規化してしまい、
+   * 外を指すパス同士で一致してしまうため。
+   *
+   * 書き込み自体は同じディレクトリ内の一時ファイルへ行い、`rename`で確定させる。
+   * `rename`は終端のシンボリックリンクを解決せずディレクトリエントリを置き換えるため、
+   * 確認から`rename`までの間に`target`がリンクへ差し替えられてもリンク先は書き換わらない。
+   * 失敗時は一時ファイルだけを片付け、**書き込み先には触れない**（差し替え攻撃の下では、
+   * そこにあるのは他人の既存ファイルでありうるため）。
+   */
+  async writeTextFile(target: string, content: string, workspaceRoot: string): Promise<void> {
+    const relative = path.relative(workspaceRoot, target);
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(
+        `ロードマップの書き込み先がワークスペースフォルダの外です: ${sanitizeForLog(target)}`,
+      );
+    }
+
+    const symlinked = await findSymlinkedSegment(workspaceRoot, target);
+    if (symlinked !== undefined) {
+      throw new Error(
+        `ロードマップの書き込み先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${sanitizeForLog(symlinked)}`,
+      );
+    }
+
+    const dirPath = path.dirname(target);
+    await fsPromises.mkdir(dirPath, { recursive: true });
+
+    const dirCheck = await isExpectedRealPath(workspaceRoot, dirPath);
+    if (!dirCheck.ok) {
+      throw new Error(
+        `ロードマップの書き込み先が実際には想定した場所以外を指しているため、書き込みを中止しました: ${sanitizeForLog(dirCheck.actual)}`,
+      );
+    }
+
+    const tempPath = path.join(dirPath, `.roadmap-${randomUUID()}.tmp`);
+    try {
+      await fsPromises.writeFile(tempPath, content, 'utf8');
+      const tempCheck = await isExpectedRealPath(workspaceRoot, tempPath);
+      if (!tempCheck.ok) {
+        throw new Error(
+          `ロードマップの書き込み先が実際には想定した場所以外を指していたため、書き込みを取り消しました: ${sanitizeForLog(tempCheck.actual)}`,
+        );
+      }
+      await fsPromises.rename(tempPath, target);
+    } catch (e) {
+      await fsPromises.rm(tempPath, { force: true });
+      throw e;
+    }
   },
   async readTextFile(target: string): Promise<string | undefined> {
     try {
@@ -1910,7 +2029,7 @@ export async function generateRoadmap(
       }
     }
   }
-  await deps.fs.writeTextFile(pathResult.path, markdown);
+  await deps.fs.writeTextFile(pathResult.path, markdown, input.workspaceRoot);
   generated.dispose?.();
 
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
@@ -2015,7 +2134,7 @@ export async function convertMarkdownToRoadmap(
     parsed = refined.parsed;
     validation = refined.validation;
   }
-  await deps.fs.writeTextFile(pathResult.path, markdown);
+  await deps.fs.writeTextFile(pathResult.path, markdown, input.workspaceRoot);
   generated.dispose?.();
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
 }
@@ -2134,9 +2253,10 @@ export async function applyRunCompletionToFile(
   deps: ApplyRunCompletionDeps,
   roadmapPath: string,
   taskStates: RunTaskStates,
+  workspaceRoot: string,
 ): Promise<ApplyRunCompletionOutcome> {
   return runExclusiveOnRoadmapFile(roadmapPath, async () =>
-    applyRunCompletionToFileLocked(deps, roadmapPath, taskStates),
+    applyRunCompletionToFileLocked(deps, roadmapPath, taskStates, workspaceRoot),
   );
 }
 
@@ -2148,6 +2268,7 @@ async function applyRunCompletionToFileLocked(
   deps: ApplyRunCompletionDeps,
   roadmapPath: string,
   taskStates: RunTaskStates,
+  workspaceRoot: string,
 ): Promise<ApplyRunCompletionOutcome> {
   const markdown = await deps.fs.readTextFile(roadmapPath);
   if (markdown === undefined) {
@@ -2159,7 +2280,7 @@ async function applyRunCompletionToFileLocked(
   }
   const result = applyRunCompletion(markdown, taskStates);
   if (result.updatedItemIds.length > 0) {
-    await deps.fs.writeTextFile(roadmapPath, result.markdown);
+    await deps.fs.writeTextFile(roadmapPath, result.markdown, workspaceRoot);
   }
   return {
     ok: true,

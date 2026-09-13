@@ -10,10 +10,12 @@ import {
 } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
+  readRewindChanges,
   lastNonEmptyAgentMessageText,
   type ChatItem,
   type ChatState,
 } from '../appserver/chatState';
+import { FileRewindJournal, type FileRewindPlan } from '../appserver/fileRewind';
 import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { ChatSession } from '../appserver/chatSession';
 import {
@@ -23,11 +25,14 @@ import {
   type ServerRequest,
   type ServerRequestHandler,
 } from '../appserver/connection';
-import { describeUnsafeCombination } from '../codex/argvBuilder';
 import { codexPaths } from '../codex/cliLocator';
 import { summarize } from '../codex/conversation';
 import { readForkedThreadId } from '../codex/jsonRpc';
-import { buildDisabledMcpServersOverlay } from '../codex/mcpDisable';
+import {
+  buildDisabledMcpServersOverlay,
+  type DisabledMcpServersOverlayResult,
+} from '../codex/mcpDisable';
+import { SKILLS_DISABLED_CONFIG_OVERLAY } from '../codex/skillDisable';
 import { effortsFor } from '../codex/modelCatalog';
 import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
@@ -39,6 +44,16 @@ import {
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
+  readAutoHandoffEnabled,
+  readAutoHandoffThresholdPercent,
+  readAutoHandoffSoftThresholdPercent,
+  readAutoHandoffOnProfileChange,
+  readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffClassifierTimeoutMs,
+  readAutoHandoffRouterEnabled,
+  readAutoHandoffCloseOldTab,
+  readChatLimitAutoResumeEnabled,
+  setChatLimitAutoResumeEnabled,
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
   setChatLoopEngineeringEnabled,
@@ -74,7 +89,38 @@ import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivit
 import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
-import { buildHandoffPrompt, resolveWithRetry } from './handoff';
+import {
+  advanceCompactionCount,
+  buildHandoffPrompt,
+  containsHandoffPrompt,
+  countCompactions,
+  decideAutoHandoff,
+  deriveHandoffBaseName,
+  endsWithUserQuestion,
+  HANDOFF_PROMPT_DETECTED_REASON,
+  nextHandoffName,
+  passesSafeBoundaryGate,
+  recentUserMessages,
+  recentAssistantMessages,
+  resolveGitBranch,
+  resolveWithRetry,
+  safeBoundaryProbeKey,
+  decideOldTabAfterHandoff,
+  oldTabKeptMessage,
+  waitForFirstTurn,
+  writeHandoffPointer,
+  type FirstTurnOutcome,
+  type HandoffTrigger,
+} from './handoff';
+import {
+  HandoffTrace,
+  describeAssessment,
+  describeDecision,
+  describeGate,
+  describeProfile,
+} from './handoffTrace';
+import { chooseHandoffModelSettings, probeSafeBoundary } from './handoffModelChoice';
+import type { TaskAssessment } from './handoffRouter';
 import type { SessionStore } from '../session/sessionStore';
 import {
   createNodeSummaryRolloutDeps,
@@ -138,6 +184,10 @@ import {
 } from './chatShared';
 
 const VIEW_TYPE = 'codex.chat';
+const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
+const LIMIT_AUTO_RESUME_GRACE_MS = 30_000;
+const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
+const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
 
 /**
  * Codexチャットパネルの生成オプション（design.md §14.48、issue #287）。
@@ -236,25 +286,37 @@ interface ChatPanel extends BaseChatPanel {
    * （`stateFull`）に戻す。
    */
   sentItems?: readonly ChatItem[] | undefined;
-}
-
-/**
-/**
- * 保護を外した設定のまま会話を開いてよいか確かめる（issue #222、design.md §7）。
- *
- * 承認とサンドボックスの両方が効かない組み合わせは、モデルの提案がそのまま実行される。
- * 設定を変えた本人でも、別の日に開いた会話でそれが効いていることは忘れる。会話を開く
- * たびに、何が起きるかを示して同意を取る。
- *
- * キャンセルされたら開かない（既定はキャンセル側）。
- */
-export async function confirmUnsafeCombination(config: CodexConfig): Promise<boolean> {
-  const reason = describeUnsafeCombination(config);
-  if (reason === undefined) {
-    return true;
-  }
-  const choice = await vscode.window.showWarningMessage(reason, { modal: true }, 'このまま開く');
-  return choice === 'このまま開く';
+  limitAutoResumeTimer: ReturnType<typeof setTimeout> | undefined;
+  limitAutoResumeAt: number | undefined;
+  limitAutoResumeAwaitingResult: boolean;
+  /**
+   * 自動引き継ぎ（Issue #1079）を既に始めたか。閾値契機と圧縮契機のどちらが先に成立
+   * しても、1セッションにつき1回しか引き継がない（`claudeChatView.ts`と同じ扱い）。
+   */
+  autoHandoffStarted: boolean;
+  /**
+   * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら圧縮が走った。
+   *
+   * 最初の同期を受け取るまでは `undefined`。復元や履歴からの再開では、最初の同期で
+   * 過去の圧縮がまとめて届くため、`0` を基準に比較すると圧縮が走ったと誤判定する
+   * （Issue #1101）。
+   */
+  lastCompactionCount: number | undefined;
+  /**
+   * 前回、安全な区切りの分類器（Issue #1090）を走らせたときの材料の鍵。
+   *
+   * 同じ材料で繰り返し起動しないための目印（`safeBoundaryProbeKey`）。
+   */
+  lastSafeBoundaryKey: string | undefined;
+  /** 安全な区切りの分類器が走っている最中か。ターンが立て続けに終わっても二重に呼ばない。 */
+  safeBoundaryProbing: boolean;
+  /**
+   * 自動引き継ぎの判定過程の記録先（Issue #1097）。
+   *
+   * パネルごとに持つのは、同じ理由の連続を抑えるのに直前の行を覚える必要があるため。
+   * 複数のタブで共有すると、タブを跨いだだけで抑制が外れたり効きすぎたりする。
+   */
+  trace: HandoffTrace;
 }
 
 /**
@@ -413,6 +475,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     private readonly store?: SessionStore,
     /** モデルとeffortのセッション別保存先（issue #844）。 */
     private readonly sessionSettings?: SessionModelSettingsStore,
+    /**
+     * 引き継ぎのポインタファイル（Issue #1079）を書く場所。`ExtensionContext.
+     * globalStorageUri.fsPath` を渡す。リポジトリ内には置かない（push事故と
+     * working treeの汚れを避けるため）。未指定なら引き継ぎ自体を断る。
+     */
+    private readonly globalStorageDir?: string,
   ) {
     super();
     this.catalog = new CommandCatalog(this.fs);
@@ -478,9 +546,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 永久にハングしたままになる。パネルやセッション状態自体は残す（テスト用の
    * `FakeAppServerConnection`は`onDisconnect`を呼ばないため、本番の接続でのみ働く）。
    *
-   * `thread/start`応答待ちの間（`pendingStarts`）に届いた承認要求も`findByThreadId`が
-   * ルーティングしうるため、`panels`だけでなく`allPanels()`（`pendingStarts`も含む）を
-   * 走査する。1セッションの解放が例外を投げても他セッションを解放し続けられるよう、
+   * 走査は`panels`だけでなく`allPanels()`（`pendingStarts`も含む）で行う。開始待ちの
+   * エントリはthreadIdをまだ記録しておらず、宛先を照合できない要求は拒否するため
+   * （F10-01。`findExactByThreadId`参照）今のところ解放すべき保留を持たないが、
+   * 取りこぼしたときの症状が「承認カードが永久に固まる」であるため安全側に倒す。
+   * 1セッションの解放が例外を投げても他セッションを解放し続けられるよう、
    * 個別にtry/catchで囲む（ここは`proc`の`exit`ハンドラから同期的に呼ばれるため、
    * 捕まえ損ねるとNodeの未捕捉例外になる）。
    */
@@ -530,7 +600,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `cwd` / `taskConfig` を省略すると、従来通りワークスペース直下・拡張機能の
    * グローバル設定で始まる（design.md §16.10の1。既存の呼び出しは全て既定値で動く）。
    */
-  async openNew(cwd?: string, taskConfig?: CodexConfig): Promise<string | undefined> {
+  async openNew(
+    cwd?: string,
+    taskConfig?: CodexConfig,
+    modelSettings?: SessionModelSettings,
+    preserveFocus = false,
+    targetViewColumn?: vscode.ViewColumn,
+  ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
     if (targetCwd === undefined) {
@@ -540,19 +616,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return undefined;
     }
 
-    // 保護を外した設定のまま開こうとしていないか（issue #222）。パネルを作る前に聞く。
-    // タスク用のセッション（`openTaskSession`）は無人実行で人が答えられないため、
-    // そちらは `toCodexConfig` が危険な値を持ち込まないようにして防いでいる
-    const config = taskConfig ?? readConfig().codex;
-    if (!(await confirmUnsafeCombination(config))) {
-      return undefined;
-    }
-
-    const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig);
-    this.showPanel(entry, false);
+    const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig, undefined, modelSettings);
+    this.showPanel(entry, preserveFocus, targetViewColumn);
     const pendingKey = this.pendingStarts.begin(entry);
     try {
-      const threadId = await entry.session.start(targetCwd, config);
+      const threadId = await entry.session.start(targetCwd, this.configFor(entry));
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
       await this.persistModelSettings(entry, threadId);
@@ -566,32 +634,69 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
-  async openNewWithPrompt(cwd: string, prompt: string): Promise<string | undefined> {
+  async openNewWithPrompt(
+    cwd: string,
+    prompt: string,
+    beforeSend?: () => void,
+  ): Promise<string | undefined> {
     const threadId = await this.openNew(cwd);
     if (threadId === undefined) return undefined;
     const entry = this.panels.get(threadId);
     if (entry === undefined) return undefined;
+    beforeSend?.();
     await entry.session.sendOrQueue(prompt, this.configFor(entry));
     this.reportActivity(entry, prompt);
     return threadId;
   }
 
   /**
-   * 現在アクティブなセッションのtranscript相当（rollout）を新セッションへ渡し、
-   * 引き継ぎを開始する（issue #694）。Claude Code側の`handoffToNewSession`と同じ設計
+   * 現在アクティブなセッションを新セッションへ引き継ぐ（issue #694、方式の変更は
+   * Issue #1079）。Claude Code側の`handoffToNewSession`と同じ設計
    * （`src/view/handoff.ts`参照）。
+   *
+   * 人がその場で押した操作なので、引き継げなかったときは必ず理由を出す。黙って返すと
+   * 「ボタンが効かない」ようにしか見えず、実機で起きても切り分けられない（Issue #1166）。
    */
   async handoffToNewSession(): Promise<void> {
-    if (this.store === undefined) {
-      return;
-    }
     const entry = this.active;
     if (entry === undefined) {
+      const message =
+        '引き継ぐ会話が選ばれていません。引き継ぎたい会話のタブを開いてから実行してください';
+      this.log.info(message);
+      void vscode.window.showInformationMessage(message);
       return;
     }
     const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
     if (threadId === undefined) {
+      const message =
+        '引き継ぎ元のセッションIDを特定できなかったため引き継げませんでした（タブは開いたままです）';
+      this.log.warn(message);
+      void vscode.window.showErrorMessage(message);
       return;
+    }
+    await this.startHandoff(entry, threadId, { kind: 'manual' }, true);
+  }
+
+  /**
+   * 引き継ぎの本体。手動操作と自動発火で共通に使う。
+   *
+   * 旧セッションは**ここでは止めない**。新セッションの初回応答が成功してから確認
+   * ダイアログを出す（`confirmStopAfterFirstTurn`）。先に止めると、引き継ぎに失敗した
+   * ときに作業を失う。
+   *
+   * @param notifyFailure 失敗をダイアログで知らせるか。自動発火では出さない
+   * @param preassessed 区切り判定で既に取ってある見立て（Issue #1090）。分類器の再起動を避ける
+   */
+  private async startHandoff(
+    entry: ChatPanel,
+    threadId: string,
+    trigger: HandoffTrigger,
+    notifyFailure: boolean,
+    preassessed?: TaskAssessment,
+  ): Promise<boolean> {
+    if (this.store === undefined || this.globalStorageDir === undefined) {
+      this.log.warn('引き継ぎに必要な履歴の解決口か置き場所が渡されていないため引き継げません');
+      return false;
     }
     const rolloutPath = await resolveWithRetry(
       () => this.store!.resolveHandoffRolloutPath(threadId),
@@ -599,22 +704,382 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       500,
     );
     if (rolloutPath === undefined) {
-      void vscode.window.showErrorMessage(
-        '引き継ぎ元セッションの履歴保存が完了しませんでした。少し待ってから再試行してください',
-      );
-      return;
+      const message =
+        '引き継ぎ元セッションの履歴保存が完了しませんでした。少し待ってから再試行してください';
+      this.log.warn(message);
+      if (notifyFailure) {
+        void vscode.window.showErrorMessage(message);
+      }
+      return false;
     }
-    const newThreadId = await this.openNew(entry.cwd, entry.taskConfig);
+
+    const state = entry.session.getState();
+    const lastAssistantMessage = recentAssistantMessages(state, 1)[0];
+    const gitBranch = await resolveGitBranch(entry.cwd);
+    const choice = await chooseHandoffModelSettings(
+      entry.modelSettings,
+      {
+        turnFailed: state.turnFailed,
+        recentUserMessages: recentUserMessages(state),
+        recentAssistantMessages: recentAssistantMessages(state),
+        cwd: entry.cwd,
+        gitBranch,
+        turnEditedFiles: state.turnEditedFiles,
+      },
+      {
+        provider: 'codex',
+        executable: readConfig().executablePath,
+        models: this.settings.snapshot().models,
+        logWarn: (message) => this.log.warn(message),
+      },
+      preassessed,
+    );
+    if (choice === undefined) {
+      // 確認で閉じられた。人が「今は引き継がない」と決めたのだから、エラーにも警告にもしない
+      this.log.info('引き継ぎは確認ダイアログで中止されました');
+      return false;
+    }
+    this.log.info(
+      `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
+    );
+    let pointerPath: string;
+    try {
+      pointerPath = await writeHandoffPointer(this.globalStorageDir, {
+        provider: 'codex',
+        sessionId: threadId,
+        transcriptPath: rolloutPath,
+        cwd: entry.cwd,
+        gitBranch,
+        model: entry.modelSettings.model,
+        trigger,
+        turnFailed: state.turnFailed,
+        busy: state.busy,
+        // 回答待ちのまま引き継ぐのは残量の閾値・自動圧縮の契機だけ（Issue #1191）。その
+        // ときに申し送りの質問を承諾済みと読まれないよう、状態として渡す
+        awaitingUserAnswer:
+          lastAssistantMessage !== undefined && endsWithUserQuestion(lastAssistantMessage),
+        recentUserMessages: recentUserMessages(state),
+        // 引き継ぎ元の最終応答をそのまま申し送りにする（Issue #1097）。要約しない
+        ...(lastAssistantMessage === undefined ? {} : { nextSteps: lastAssistantMessage }),
+        turnEditedFiles: state.turnEditedFiles,
+        routerReasons: choice.reasons,
+        createdAt: new Date(),
+      });
+    } catch (e) {
+      this.reportError(e);
+      return false;
+    }
+
+    // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
+    // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
+    // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる。
+    // 手動（ボタン操作）はユーザーがその場で求めた操作なので必ず前面へ出す。見立ての
+    // 取得で待っている間にタブを離れることがあり、`visible` だけで決めると背面に開く
+    const preserveFocus = trigger.kind !== 'manual' && entry.panel?.visible !== true;
+    // 引き継ぎ元パネルと同じ列へ開く。`panel.viewColumn`は非表示のとき
+    // `undefined`になるため、`lastKnownViewColumn`（最後に見えていた列）へ落ちる
+    const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
+    const newThreadId = await this.openNew(
+      entry.cwd,
+      entry.taskConfig,
+      choice.settings,
+      preserveFocus,
+      targetViewColumn,
+    );
     if (newThreadId === undefined) {
-      return;
+      this.log.warn(
+        '引き継ぎ先セッションを開けなかったため引き継げませんでした（旧タブはそのまま残ります）',
+      );
+      return false;
     }
     const newEntry = this.panels.get(newThreadId);
     if (newEntry === undefined) {
+      this.log.warn(
+        `引き継ぎ先セッション(${newThreadId})がパネル一覧に見つからず引き継げませんでした（旧タブはそのまま残ります）`,
+      );
+      return false;
+    }
+    // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
+    newEntry.session.setAutoHandoff(state.autoHandoff);
+    // 引き継ぎ元の名前に世代の印を付けて渡す（Issue #1145）。付けないと引き継ぎ先の
+    // 表示名が初回プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けが
+    // つかなくなる。
+    //
+    // 応答は待たない。`thread/name/set` はCodexへの往復で、返らなければ引き継ぎの初回
+    // プロンプトごと止まってしまう。名前が付かなくても引き継ぎ自体は成立するため、
+    // 失敗は記録に留める
+    const handoffName = nextHandoffName(deriveHandoffBaseName(state, entry.pinnedName));
+    void newEntry.session
+      .setName(handoffName)
+      .catch((e: unknown) =>
+        this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
+      );
+    const text = buildHandoffPrompt(pointerPath);
+    // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
+    // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
+    // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
+    // 残ってしまうため、その場で打ち切る
+    const giveUp = new AbortController();
+    const firstTurn = waitForFirstTurn(newEntry, undefined, giveUp.signal);
+    try {
+      await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
+    } catch (e) {
+      giveUp.abort();
+      throw e;
+    }
+    this.reportActivity(newEntry, text);
+    void this.confirmStopAfterFirstTurn(entry, firstTurn);
+    return true;
+  }
+
+  /**
+   * 新セッションの初回応答が成功するのを待ってから、旧セッションを止める。
+   *
+   * 既定（`agent.autoHandoff.closeOldTab`）では確認せずに停止する（Issue #1090。引き継ぎの
+   * たびにタブが増えるのを避ける。履歴は残るので開き直せる）。初回ターンが失敗・時間切れの
+   * ときは、設定にかかわらず旧セッションをそのまま残す。
+   */
+  private async confirmStopAfterFirstTurn(
+    oldEntry: ChatPanel,
+    firstTurn: Promise<FirstTurnOutcome>,
+  ): Promise<void> {
+    const decision = decideOldTabAfterHandoff({
+      outcome: await firstTurn,
+      oldDisposed: oldEntry.disposed,
+      oldBusy: oldEntry.session.getState().busy,
+      closeOldTab: readAutoHandoffCloseOldTab(),
+    });
+    if (decision.action === 'keep') {
+      this.log.info(oldTabKeptMessage(decision.reason));
       return;
     }
-    const text = buildHandoffPrompt(rolloutPath);
-    await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
-    this.reportActivity(newEntry, text);
+    if (decision.action === 'close') {
+      this.log.info('引き継ぎ元のセッションを停止してタブを閉じます（履歴は残ります）');
+      void oldEntry.session.interrupt();
+      this.teardown(oldEntry);
+      return;
+    }
+    const stop = '旧セッションを停止';
+    const choice = await vscode.window.showInformationMessage(
+      '新しいセッションへの引き継ぎが終わりました。引き継ぎ元のセッションを停止しますか？',
+      { modal: true, detail: '停止すると、この会話のタブは閉じます。履歴（rollout）は残ります。' },
+      stop,
+    );
+    if (choice !== stop || oldEntry.disposed) {
+      this.log.info(oldTabKeptMessage(oldEntry.disposed ? 'disposed' : 'userDismissed'));
+      return;
+    }
+    void oldEntry.session.interrupt();
+    this.teardown(oldEntry);
+  }
+
+  /**
+   * 自動引き継ぎ（Issue #1079）の発火判定。`onSessionChange` から毎回呼ぶ。
+   * 判定の中身はClaude Code側の `maybeAutoHandoff` と同じ（`handoff.ts`の
+   * `decideAutoHandoff`）。
+   */
+  private maybeAutoHandoff(entry: ChatPanel, state: ChatState): void {
+    const { compacted, lastCompactionCount } = advanceCompactionCount(
+      entry.lastCompactionCount,
+      countCompactions(state),
+    );
+    entry.lastCompactionCount = lastCompactionCount;
+
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    const trigger = decideAutoHandoff({
+      enabled: state.autoHandoff,
+      busy: state.busy,
+      alreadyStarted: entry.autoHandoffStarted,
+      remainingPercent: state.context?.remainingPercent,
+      compacted,
+      thresholdPercent: readAutoHandoffThresholdPercent(),
+    });
+    if (trigger !== undefined) {
+      this.beginAutoHandoff(entry, trigger);
+      return;
+    }
+    void this.maybeAutoHandoffAtSafeBoundary(entry, state);
+  }
+
+  /**
+   * 安全な区切りでの自動引き継ぎ（Issue #1090）。
+   *
+   * 前段（`passesSafeBoundaryGate`）を通ったら、まずhandoffプロンプトの出力を決定論的に
+   * 検知する（Issue #1150）。見つかれば分類器を起動せずに `assistantSuggested` で発火する
+   * ため、`agent.autoHandoff.router` が無効でも動く。
+   *
+   * 見つからなければ分類器を起動し、`switch_safe` と、解決したmodel/effortの変化から契機を
+   * 決める。同じ材料での再起動は `lastSafeBoundaryKey` で止める。
+   */
+  private async maybeAutoHandoffAtSafeBoundary(entry: ChatPanel, state: ChatState): Promise<void> {
+    if (!state.autoHandoff || entry.autoHandoffStarted || entry.safeBoundaryProbing) {
+      return;
+    }
+    const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
+    const onProfileChange = readAutoHandoffOnProfileChange();
+    const onAssistantSuggestion = readAutoHandoffOnAssistantSuggestion();
+    const remainingPercent = state.context?.remainingPercent;
+    const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
+    if (!withinSoft && !onProfileChange && !onAssistantSuggestion) {
+      // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
+      entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
+      return;
+    }
+    const loopStatus = entry.loop.getStatus();
+    const assistantMessages = recentAssistantMessages(state);
+    const gate = {
+      busy: state.busy,
+      turnFailed: state.turnFailed,
+      pendingApprovals: state.approvals.length,
+      pendingPrompts: state.prompts.length,
+      // ユーザーへ質問して終わったターンは区切りではない（Issue #1191）。見るのは最終応答
+      // だけで、その前の応答の質問は既に答えられている
+      awaitingUserAnswer: endsWithUserQuestion(assistantMessages.at(-1) ?? ''),
+      queued: state.queued.length,
+      // `running` は `pause()` 中も true のまま。返信待ちで止まっているループを「実行中」と
+      // 数えると、`/loop` 運用では区切り系の契機が全部塞がる（Issue #1097）
+      loopRunning: loopStatus.running && !entry.loop.isPaused,
+      taskManaged: entry.taskManaged,
+    };
+    if (!passesSafeBoundaryGate(gate)) {
+      entry.trace.info(`gate blocked (${describeGate(gate)})`);
+      return;
+    }
+    // handoffプロンプトそのものが出力されていれば、分類器を待たずに発火する（Issue #1150）。
+    // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
+    // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
+    if (onAssistantSuggestion && assistantMessages.some(containsHandoffPrompt)) {
+      entry.trace.info('handoffプロンプトを検知したため分類器を経由せず判定する');
+      const detected = decideAutoHandoff({
+        enabled: state.autoHandoff,
+        busy: state.busy,
+        alreadyStarted: entry.autoHandoffStarted,
+        remainingPercent,
+        compacted: false,
+        thresholdPercent: readAutoHandoffThresholdPercent(),
+        softThresholdPercent,
+        // 分類器を呼んでいないので `switchSafe` は無い。`safeBoundary` を渡さないことで
+        // `softThreshold` / `profileChanged` の分岐には落ちず `assistantSuggested` になる
+        boundaryGatePassed: true,
+        handoffSuggested: true,
+        handoffSuggestReason: HANDOFF_PROMPT_DETECTED_REASON,
+      });
+      if (detected !== undefined) {
+        entry.trace.info(describeDecision(detected));
+        this.beginAutoHandoff(entry, detected);
+        return;
+      }
+      entry.trace.info('handoffプロンプトを検知したが契機が成立しなかった');
+    }
+    if (!readAutoHandoffRouterEnabled()) {
+      // 分類器が無いと `switchSafe` も分類器経由の `handoffSuggested` も得られない。残りの
+      // 区切り待ちの契機は全部この判定に依存しているため、ここで止める（残量の閾値契機は
+      // 別経路で発火する）
+      entry.trace.info('分類器が無効（agent.autoHandoff.router=false）のため発火しない');
+      return;
+    }
+    const messages = recentUserMessages(state);
+    if (messages.length === 0) {
+      // 材料が無い（開いた直後・復元直後）。分類させても中身の無い見立てが返るだけ
+      entry.trace.info('材料が無いため分類器を起動しない（ユーザー指示の記録なし）');
+      return;
+    }
+    const key = safeBoundaryProbeKey(messages, assistantMessages);
+    if (key === entry.lastSafeBoundaryKey) {
+      entry.trace.info('前回と同じ材料のため分類器を起動しない');
+      return;
+    }
+    entry.lastSafeBoundaryKey = key;
+
+    const gitBranch = await resolveGitBranch(entry.cwd);
+    entry.safeBoundaryProbing = true;
+    entry.trace.info('分類器を起動する');
+    const startedAt = Date.now();
+    let probe;
+    try {
+      probe = await probeSafeBoundary(
+        entry.modelSettings,
+        {
+          turnFailed: state.turnFailed,
+          recentUserMessages: messages,
+          recentAssistantMessages: assistantMessages,
+          cwd: entry.cwd,
+          gitBranch,
+          turnEditedFiles: state.turnEditedFiles,
+        },
+        {
+          provider: 'codex',
+          executable: readConfig().executablePath,
+          models: this.settings.snapshot().models,
+          timeoutMs: readAutoHandoffClassifierTimeoutMs(),
+          logWarn: (message) => entry.trace.warn(message),
+        },
+      );
+    } finally {
+      entry.safeBoundaryProbing = false;
+    }
+    entry.trace.info(`分類器の応答まで${Date.now() - startedAt}ms`);
+    if (probe === undefined) {
+      // 失敗の理由（時間切れ / 起動失敗 / JSON不正）は `classifyHandoff` がwarnで出す
+      entry.trace.info('分類できなかったため発火しない（理由は直前のwarnを見る）');
+      return;
+    }
+    entry.trace.info(describeAssessment(probe.assessment));
+    entry.trace.info(describeProfile(probe));
+    // 分類器を待っている間に状況が変わっていることがある（新しい指示・引き継ぎ済み）
+    const latest = entry.session.getState();
+    if (entry.disposed || entry.autoHandoffStarted || latest.busy || !latest.autoHandoff) {
+      entry.trace.info('分類器を待つ間に状況が変わったため発火しない');
+      return;
+    }
+    const trigger = decideAutoHandoff({
+      enabled: latest.autoHandoff,
+      busy: latest.busy,
+      alreadyStarted: entry.autoHandoffStarted,
+      remainingPercent,
+      compacted: false,
+      thresholdPercent: readAutoHandoffThresholdPercent(),
+      softThresholdPercent,
+      // `assistantSuggested` だけは `switchSafe` を要求しない（Issue #1097）
+      boundaryGatePassed: true,
+      safeBoundary: probe.switchSafe,
+      handoffSuggested: onAssistantSuggestion && probe.handoffSuggested,
+      handoffSuggestReason: probe.handoffSuggestReason,
+      // 前段の決定論の検知（末尾行だけを見る）が取りこぼした回答待ちをここで止める
+      // （Issue #1191）
+      awaitingUserAnswer: probe.awaitingUserAnswer,
+      profileChanged: onProfileChange && probe.profileChanged,
+      profile: probe.profile,
+      switchReason: probe.switchReason,
+    });
+    entry.trace.info(describeDecision(trigger));
+    if (trigger === undefined) {
+      return;
+    }
+    this.beginAutoHandoff(entry, trigger, probe.assessment);
+  }
+
+  /** 自動引き継ぎを1回だけ開始する。契機の決め方によらず共通の後始末をここに集める。 */
+  private beginAutoHandoff(
+    entry: ChatPanel,
+    trigger: HandoffTrigger,
+    preassessed?: TaskAssessment,
+  ): void {
+    const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+    if (threadId === undefined) {
+      return;
+    }
+    // 失敗しても戻さない（`claudeChatView.ts` の `maybeAutoHandoff` と同じ理由）
+    entry.autoHandoffStarted = true;
+    entry.session.noteLocalEvent(
+      `autoHandoff:${Date.now()}`,
+      '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
+    );
+    void this.startHandoff(entry, threadId, trigger, false, preassessed).catch((e: unknown) =>
+      this.log.warn(`自動引き継ぎが例外で止まりました: ${errorMessage(e)}`),
+    );
   }
 
   /**
@@ -630,22 +1095,34 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, 'Codex');
-    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
-    const pendingKey = this.pendingStarts.begin(entry);
     // タスク間メッセージング（design.md §16.21）。`input.mcp`が渡されていれば、
     // このスレッドだけに見せるMCPサーバとして`thread/start`のconfigへ差し込む
     // （`ChatSession.start`はmcp_servers自体の意味を知らない。同メソッドのJSDoc参照）
     // MCPを使わないセッション（セカンドオピニオンとその要約。Issue #944）は、サーバを
     // 名指しで無効化したオーバーレイを渡す。`mcp`が指定されていればそちらを優先する
     // （メッセージングを黙って壊さない。`TaskSessionInput.disableMcpServers`のJSDoc参照）
+    //
+    // **パネルを作る前に解決する**（Issue #1112）。無効化するサーバ名を挙げられないときは
+    // ここで例外になり、タブも保留中の開始も作らないまま呼び出し側へ返る
     const mcpServersConfig =
       input.mcp !== undefined
         ? { [MESSAGING_MCP_SERVER_NAME]: { url: input.mcp.url, type: 'streamable_http' } }
         : input.disableMcpServers === true
           ? await this.disabledMcpServersConfig()
           : undefined;
+    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
+    const pendingKey = this.pendingStarts.begin(entry);
+    // skillを提示させないセッション（セカンドオピニオン。Issue #1061）は、`thread/start` の
+    // configへ重ねる。MCPの指定とは独立なので、両方指定されたら両方載る
+    const threadConfig =
+      mcpServersConfig === undefined && input.disableSkills !== true
+        ? undefined
+        : {
+            ...(mcpServersConfig === undefined ? {} : { mcp_servers: mcpServersConfig }),
+            ...(input.disableSkills === true ? SKILLS_DISABLED_CONFIG_OVERLAY : {}),
+          };
     try {
-      const threadId = await entry.session.start(input.cwd, taskConfig, mcpServersConfig);
+      const threadId = await entry.session.start(input.cwd, taskConfig, threadConfig);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
       await this.persistModelSettings(entry, threadId);
@@ -662,22 +1139,30 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * MCPサーバを1本も接続させない `thread/start` のconfig（Issue #944）。
    *
    * サーバ名は `config/read`（実測35ms）から読み、`config.toml` に現れない組み込みの
-   * サーバは `buildDisabledMcpServersOverlay` が足す。`config/read` に失敗しても
-   * 組み込み分だけのオーバーレイで続ける（ツールを積んだまま走らせる理由が無いため）。
+   * サーバは `buildDisabledMcpServersOverlay` が足す。
+   *
+   * **一覧を読めなかったら例外にしてセッションを開かない（Issue #1112）。** オーバーレイは
+   * マージなので、名前を挙げられなかったサーバはそのまま接続される。以前は組み込み分だけの
+   * オーバーレイで続けていたため、`config/read` が落ちると利用者の `config.toml` のサーバ
+   * （外部を操作できるツールを含む）が生きたまま相談セッションが始まっていた。
    */
   private async disabledMcpServersConfig(): Promise<Record<string, unknown>> {
+    let result: DisabledMcpServersOverlayResult;
     try {
       await this.connection.ensureStarted();
       const response = await this.connection.request('config/read', {});
-      return buildDisabledMcpServersOverlay(response.result);
+      result = buildDisabledMcpServersOverlay(response.result);
     } catch (e) {
-      this.log.warn(
-        `MCPサーバ一覧を読めなかったため、組み込み分だけを無効化して開始します: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
-      return buildDisabledMcpServersOverlay(undefined);
+      result = { ok: false, reason: e instanceof Error ? e.message : String(e) };
     }
+    if (!result.ok) {
+      const message = `MCPサーバ一覧を読めなかったため、MCPを無効化するセッションを開始しませんでした: ${result.reason}`;
+      this.log.error(message);
+      const error = new Error(message);
+      this.reportError(error);
+      throw error;
+    }
+    return result.overlay;
   }
 
   /** 既存のスレッドを開く。 */
@@ -753,8 +1238,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   ): ChatPanel {
     // sessionのコールバックはentryを参照するが、実際に呼ばれるのはentry代入後
     // （closureが束縛するのは変数、呼び出し時点の値を読む。既存コードと同じ流儀）。
-    const session = new ChatSession(this.connection, this.log, (state) =>
-      this.onSessionChange(entry, state),
+    const session = new ChatSession(
+      this.connection,
+      this.log,
+      (state) => this.onSessionChange(entry, state),
+      // 自動引き継ぎの初期値（Issue #1091）。ChatSessionはvscodeに依存しないため、
+      // 設定の読み出しはここ（view層）で行う（`LoopController`のしきい値と同じ）
+      readAutoHandoffEnabled(),
     );
     const loop = new LoopController(
       (text) => this.sendFromLoop(entry, text),
@@ -765,6 +1255,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
     const entry: ChatPanel = {
       panel: undefined,
+      lastKnownViewColumn: undefined,
       session,
       loop,
       cwd,
@@ -787,6 +1278,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       approvalResolvedListeners: [],
       mcpStartupListeners: [],
       notifiedApprovalRequestIds: new Set(),
+      limitAutoResumeTimer: undefined,
+      limitAutoResumeAt: undefined,
+      limitAutoResumeAwaitingResult: false,
+      autoHandoffStarted: false,
+      lastCompactionCount: undefined,
+      lastSafeBoundaryKey: undefined,
+      trace: new HandoffTrace(this.log),
+      safeBoundaryProbing: false,
     };
     return entry;
   }
@@ -795,11 +1294,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   protected override createWebviewPanel(
     entry: ChatPanel,
     preserveFocus: boolean,
+    targetViewColumn: vscode.ViewColumn | undefined,
   ): vscode.WebviewPanel {
     return vscode.window.createWebviewPanel(
       VIEW_TYPE,
       entry.title,
-      { viewColumn: vscode.ViewColumn.Active, preserveFocus },
+      { viewColumn: targetViewColumn ?? vscode.ViewColumn.Active, preserveFocus },
       buildChatPanelOptions(),
     );
   }
@@ -824,6 +1324,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
+      limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
       // review/startはapp-serverの標準機能なので、コマンド一覧を待たずに常に出す
       review: { mode: 'quickPick' },
       // 会話の1行要約（issue #228、design.md §14.41）。拡張機能の独自機能として、
@@ -939,6 +1440,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * （`thread/start`応答待ち登録。Claude Codeには対応する概念が無い）からも取り除く。
    */
   protected override onTeardown(entry: ChatPanel): void {
+    this.cancelLimitAutoResume(entry);
     this.pendingStarts.remove(entry);
     // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、
     // 誰にも見えないままCodexのプロセスとロールアウトだけが増える
@@ -976,6 +1478,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       entry.panel.title = decoratePanelTitle(entry.title, deriveSessionActivityState(state));
     }
     this.notifyNewApprovals(entry, state);
+    this.scheduleLimitAutoResume(entry, state, turnFinished);
+    this.maybeAutoHandoff(entry, state);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -985,6 +1489,96 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
+  }
+
+  private cancelLimitAutoResume(entry: ChatPanel): void {
+    if (entry.limitAutoResumeTimer !== undefined) {
+      clearTimeout(entry.limitAutoResumeTimer);
+      entry.limitAutoResumeTimer = undefined;
+    }
+    entry.limitAutoResumeAt = undefined;
+    entry.limitAutoResumeAwaitingResult = false;
+  }
+
+  private limitAutoResumeStatus(entry: ChatPanel): Record<string, unknown> {
+    return {
+      enabled: readChatLimitAutoResumeEnabled(),
+      scheduledAt: entry.limitAutoResumeAt,
+      awaitingResult: entry.limitAutoResumeAwaitingResult,
+    };
+  }
+
+  private scheduleLimitAutoResume(entry: ChatPanel, state: ChatState, turnFinished = false): void {
+    if (!readChatLimitAutoResumeEnabled() || entry.panel === undefined) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    if (entry.limitAutoResumeAwaitingResult) {
+      if (!turnFinished) {
+        return;
+      }
+      entry.limitAutoResumeAwaitingResult = false;
+      if (state.turnFailed && state.usage?.limited === true) {
+        this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
+      } else {
+        this.cancelLimitAutoResume(entry);
+      }
+      return;
+    }
+    // レート制限通知はアカウント単位で全タブへ届く。失敗した会話だけを再開対象にする。
+    if (!state.turnFailed || state.usage?.limited !== true) {
+      this.cancelLimitAutoResume(entry);
+      return;
+    }
+    if (entry.limitAutoResumeTimer !== undefined) {
+      return;
+    }
+    const resetAt = state.usage.resetsAt;
+    const waitMs =
+      resetAt === undefined
+        ? LIMIT_AUTO_RESUME_FALLBACK_MS
+        : Math.max(0, resetAt * 1_000 - Date.now()) + LIMIT_AUTO_RESUME_GRACE_MS;
+    this.armLimitAutoResume(entry, waitMs);
+  }
+
+  private armLimitAutoResume(entry: ChatPanel, waitMs: number): void {
+    if (entry.limitAutoResumeTimer !== undefined) {
+      clearTimeout(entry.limitAutoResumeTimer);
+    }
+    entry.limitAutoResumeAt = Date.now() + waitMs;
+    this.postState(entry);
+    entry.limitAutoResumeTimer = setTimeout(() => {
+      entry.limitAutoResumeTimer = undefined;
+      entry.limitAutoResumeAt = undefined;
+      const latest = entry.session.getState();
+      if (
+        entry.disposed ||
+        entry.panel === undefined ||
+        !readChatLimitAutoResumeEnabled() ||
+        latest.busy ||
+        latest.approvals.length > 0 ||
+        latest.prompts.length > 0
+      ) {
+        this.postState(entry);
+        return;
+      }
+      entry.limitAutoResumeAwaitingResult = true;
+      this.postState(entry);
+      entry.session.noteLocalEvent(
+        `limitAutoResume:${Date.now()}`,
+        '使用量上限の解除後に自動続行しています',
+      );
+      void entry.session
+        .send(LIMIT_AUTO_RESUME_INSTRUCTION, this.configFor(entry))
+        .catch((e: unknown) => {
+          const shouldRetry = entry.limitAutoResumeAwaitingResult;
+          entry.limitAutoResumeAwaitingResult = false;
+          this.reportError(e);
+          if (shouldRetry && readChatLimitAutoResumeEnabled() && entry.panel !== undefined) {
+            this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
+          }
+        });
+    }, waitMs);
   }
 
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
@@ -1015,6 +1609,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         if (entry.session.getState().restore !== undefined) {
           return;
         }
+        this.cancelLimitAutoResume(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         entry.loop.noteUserAction();
         // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
@@ -1089,7 +1684,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'openDiffFile') {
         // 差分の見出し行「エディタで開く」（issue #291）
-        await handleOpenDiffFile(entry.session.getState().items, m['itemId'], m['diffIndex']);
+        await handleOpenDiffFile(
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+          entry.cwd,
+        );
         return;
       }
       if (type === 'openDiffEditor') {
@@ -1099,6 +1699,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           entry.session.getState().items,
           m['itemId'],
           m['diffIndex'],
+          entry.cwd,
         );
         return;
       }
@@ -1109,6 +1710,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           entry.session.getState().items,
           m['itemId'],
           m['diffIndex'],
+          entry.cwd,
         );
         return;
       }
@@ -1127,6 +1729,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'interrupt') {
+        this.cancelLimitAutoResume(entry);
         entry.loop.noteUserAction();
         await entry.session.interrupt();
         return;
@@ -1158,6 +1761,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'planMode') {
         entry.loop.noteUserAction();
         entry.session.setPlanMode(m['on'] === true);
+        return;
+      }
+      if (type === 'autoHandoff') {
+        entry.loop.noteUserAction();
+        const on = m['on'] === true;
+        // 一度自動で引き継いだ後に入れ直したら、また引き継げるようにする
+        if (on) {
+          entry.autoHandoffStarted = false;
+        }
+        entry.session.setAutoHandoff(on);
         return;
       }
       if (type === 'review') {
@@ -1323,6 +1936,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'loop/stop') {
+        this.cancelLimitAutoResume(entry);
         entry.loop.stop('manual');
         return;
       }
@@ -1342,7 +1956,33 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'fork' && typeof m['turnId'] === 'string') {
-        await this.forkFrom(entry, m['turnId']);
+        // 押した時点でwebview側がボタンを無効化している。失敗したことを返さないと、
+        // タブを開き直すまで同じ発言から再試行できない（Issue #1156）
+        const turnId = m['turnId'];
+        let forkedThreadId: string | undefined;
+        try {
+          forkedThreadId = await this.forkFrom(entry, turnId);
+        } catch (e: unknown) {
+          const reason = e instanceof Error ? e.message : String(e);
+          this.log.error(`分岐に失敗しました: ${reason}`);
+          void vscode.window.showErrorMessage(`分岐に失敗しました: ${reason}`);
+        }
+        if (forkedThreadId === undefined) {
+          void entry.panel?.webview.postMessage({ type: 'forkFailed', turnId });
+        }
+        return;
+      }
+      if (type === 'editResend' && typeof m['text'] === 'string') {
+        // 送った指示の書き直し（issue #1073）。分岐と同じく新しいタブを開くだけで、
+        // この会話（entry）そのものには何も送らない
+        entry.loop.noteUserAction();
+        await this.editAndResend(
+          entry,
+          typeof m['turnId'] === 'string' ? m['turnId'] : undefined,
+          m['text'],
+          m['restoreFiles'] === true,
+          typeof m['messageId'] === 'string' ? m['messageId'] : undefined,
+        );
         return;
       }
       if (type === 'approvalLevel') {
@@ -1387,6 +2027,21 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const enabled = !readChatLoopEngineeringConfig().enabled;
         await setChatLoopEngineeringEnabled(enabled);
         void entry.panel?.webview.postMessage({ type: 'loopEngineering', enabled });
+        return;
+      }
+      if (type === 'toggleLimitAutoResume') {
+        const enabled = !readChatLimitAutoResumeEnabled();
+        await setChatLimitAutoResumeEnabled(enabled);
+        if (!enabled) {
+          this.cancelLimitAutoResume(entry);
+        } else {
+          this.scheduleLimitAutoResume(entry, entry.session.getState());
+        }
+        this.postState(entry);
+        void entry.panel?.webview.postMessage({
+          type: 'limitAutoResume',
+          enabled: readChatLimitAutoResumeEnabled(),
+        });
         return;
       }
       if (type === 'toggleLoopAdvisor') {
@@ -1705,6 +2360,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         settings: this.settingsSnapshotFor(entry),
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),
+        limitAutoResumeStatus: this.limitAutoResumeStatus(entry),
         // 差分の見出し行の操作（issue #291）をWebview側でも出し分けるための一覧。
         // 権威ある判定はホスト側（handleOpenDiffFile等）が行うため、ここは
         // ボタン表示のヒントに過ぎない
@@ -1756,26 +2412,189 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text });
   }
 
-  /** 会話の途中から分岐し、新しい画面で開く。元のスレッドは変更されない。 */
-  private async forkFrom(entry: ChatPanel, turnId: string): Promise<void> {
+  /**
+   * 送った指示を書き直して送り直す（issue #1073）。Claude Code画面の
+   * `editAndResend`（`claudeChatView.ts`）と操作は同じで、裏の作り方だけが違う。
+   *
+   * `turnId`（＝分岐と同じく、直す指示自身が属するターン。Issue #1161）があれば
+   * `thread/fork` にそれを `beforeTurnId` として渡し、そのターンより手前までの新しい
+   * スレッドを開いて書き直した本文を送る。会話の最初の発言を直す場合は引き継ぐ会話が
+   * 残らないため、分岐ではなく新しい会話として開始する（`thread/fork` の分岐点は必須。
+   * `appServerClient.ts` の `forkThread` 参照）。
+   *
+   * 元のスレッドは変更されない。ファイル復元は明示選択されたときだけ行う。
+   */
+  private async editAndResend(
+    entry: ChatPanel,
+    turnId: string | undefined,
+    text: string,
+    restoreFiles = false,
+    messageId?: string,
+  ): Promise<void> {
+    if (this.restoringFiles) return;
+    this.restoringFiles = restoreFiles;
+    try {
+      let plan: FileRewindPlan | undefined;
+      const sourceItems = entry.session.getState().items;
+      if (restoreFiles) {
+        if (!entry.cwd || !messageId)
+          throw new Error('復元対象の発言または作業ディレクトリがありません');
+        this.assertRewindIdle();
+        const targetIndex = sourceItems.findIndex(
+          (item) => item.id === messageId && item.kind === 'userMessage',
+        );
+        // 画面が送ってきた分岐点が、いま戻そうとしている発言のものかを確かめる。
+        // 分岐点は押した発言**自身**のターン（`beforeTurnId`。Issue #1161）なので、
+        // 対象発言の `turnId` と突き合わせる。ここを手前のターンと比べると、
+        // 通常の会話では必ず食い違ってファイル復元が常に失敗する。
+        // 分岐点が無い場合は「会話の先頭の発言を新しい会話として送り直す」ときだけ
+        // 正しいので、対象より前にユーザー発言が無いことを確かめる
+        const targetItem = sourceItems[targetIndex];
+        const mismatched =
+          turnId === undefined
+            ? sourceItems.slice(0, targetIndex).some((item) => item.kind === 'userMessage')
+            : targetItem?.turnId !== turnId;
+        if (targetIndex < 0 || mismatched)
+          throw new Error('会話とファイルの戻り先が一致しません。やり直してください');
+        const journal = this.fileJournals.get(entry) ?? new FileRewindJournal();
+        plan = journal.prepare(entry.cwd, entry.session.getState().items, messageId);
+        const choice = await vscode.window.showWarningMessage(
+          'AIが直接編集したファイルを戻し、新しいタブへ送り直しますか？',
+          {
+            modal: true,
+            detail:
+              'コマンド実行で変わったファイルは戻りません。同じ作業ディレクトリを使う他のタブにも影響します。\n\n' +
+              (plan.images.map((image) => image.path).join('\n') || '対象ファイルなし'),
+          },
+          'ファイルも戻して送信する',
+        );
+        if (choice !== 'ファイルも戻して送信する') return;
+        this.assertRewindIdle();
+        plan.validate();
+      }
+      await this.resendWithRewind(
+        entry,
+        turnId,
+        text,
+        plan
+          ? () => {
+              if (entry.session.getState().items !== sourceItems)
+                throw new Error('確認中に会話が更新されました。やり直してください');
+              this.applyFileRewind(plan);
+            }
+          : undefined,
+      );
+    } catch (error) {
+      this.reportError(error);
+    } finally {
+      this.restoringFiles = false;
+    }
+  }
+
+  private assertRewindIdle(): void {
+    if (
+      this.allPanels().some(
+        (panel) => panel.session.getState().busy || panel.session.getState().queued.length > 0,
+      )
+    ) {
+      throw new Error('実行中または送信待ちの会話があります。停止してからファイルを戻してください');
+    }
+  }
+
+  private applyFileRewind(plan: FileRewindPlan): void {
+    this.assertRewindIdle();
+    const paths = new Set(plan.images.map((image) => image.path));
+    if (vscode.workspace.textDocuments.some((doc) => doc.isDirty && paths.has(doc.uri.fsPath))) {
+      throw new Error(
+        '復元対象に未保存の編集があります。保存または取り消してからやり直してください',
+      );
+    }
+    plan.apply();
+  }
+
+  private async resendWithRewind(
+    entry: ChatPanel,
+    turnId: string | undefined,
+    text: string,
+    beforeSend?: () => void,
+  ): Promise<void> {
+    if (text.trim() === '') {
+      return;
+    }
+    if (turnId === undefined) {
+      const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+      if (cwd === undefined) {
+        void vscode.window.showErrorMessage('作業ディレクトリを特定できませんでした');
+        return;
+      }
+      await this.openNewWithPrompt(cwd, text, beforeSend);
+      return;
+    }
+    const newThreadId = await this.forkFrom(
+      entry,
+      turnId,
+      '修正',
+      'この指示を書き直して送り直しています…',
+    );
+    if (newThreadId === undefined) {
+      return;
+    }
+    const forked = this.panels.get(newThreadId);
+    if (forked === undefined) {
+      void vscode.window.showErrorMessage('分岐後の会話を開けなかったため送り直せませんでした');
+      return;
+    }
+    // 分岐そのものは成功していても、続く `thread/resume` に失敗して新しいタブが
+    // 使えない状態のことがある（`openThread` は失敗を握って `restore.state` を
+    // 'failed' にするだけ）。その状態へ送ると `turn/start` が例外を投げるため、
+    // ここで拾って理由を出す。分岐後のタブは残るので、そこから送り直せる
+    try {
+      if (forked.session.getState().restore?.state === 'failed')
+        throw new Error('新しいタブの復元に失敗しました');
+      beforeSend?.();
+      const journal = this.fileJournals.get(entry);
+      if (journal) this.fileJournals.set(forked, journal.copy());
+      await forked.session.sendOrQueue(text, this.configFor(forked));
+    } catch (e) {
+      this.reportError(e);
+      this.postState(forked);
+      return;
+    }
+    this.reportActivity(forked, text);
+    this.postState(forked);
+  }
+
+  /**
+   * 会話の途中から分岐し、新しい画面で開く。元のスレッドは変更されない。
+   *
+   * 分岐後のスレッドidを返す（issue #1073。`editAndResend` が、開いたスレッドへ
+   * 書き直した本文を送るために使う）。分岐できなかったときは `undefined`。
+   */
+  private async forkFrom(
+    entry: ChatPanel,
+    turnId: string,
+    title = '分岐',
+    progressTitle = 'この指示から分岐しています…',
+  ): Promise<string | undefined> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
-      return;
+      return undefined;
     }
 
     const response = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
-      () => this.connection.request('thread/fork', { threadId, lastTurnId: turnId }),
+      { location: vscode.ProgressLocation.Notification, title: progressTitle },
+      () => this.connection.request('thread/fork', { threadId, beforeTurnId: turnId }),
     );
 
     const newThreadId = readForkedThreadId(response.result);
     if (newThreadId === undefined) {
       void vscode.window.showErrorMessage('分岐後のスレッドidを読み取れませんでした');
-      return;
+      return undefined;
     }
     this.log.info(`分岐しました: ${threadId} → ${newThreadId}`);
     await this.persistModelSettings(entry, newThreadId);
-    await this.openThread(newThreadId, '分岐', undefined);
+    await this.openThread(newThreadId, title, undefined);
+    return newThreadId;
   }
 
   /**
@@ -1986,6 +2805,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return [...this.panels.values(), ...this.pendingStarts.values()];
   }
 
+  private readonly fileJournals = new WeakMap<ChatPanel, FileRewindJournal>();
+  private restoringFiles = false;
+
   private routeNotification(method: string, params: Record<string, unknown>): void {
     // account/rateLimits/updated のようなアカウント単位の通知は threadId を持たない。
     // スレッドで絞れないので開いている（開始待ちも含む）画面すべてへ配る。
@@ -1996,7 +2818,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
 
-    const target = this.findByThreadId(params['threadId']);
+    const target = this.findNotificationTarget(params['threadId']);
     if (method === 'mcpServer/startupStatus/updated') {
       // MCPツールの可視性確認（design.md §16.21）専用の内部状態。会話には無関係なため
       // ChatSession.applyNotificationへは転送しない（`mcpStartupListeners`のJSDoc参照）
@@ -2007,11 +2829,27 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       return;
     }
+    if (target && method === 'item/completed') {
+      const item = params['item'] as Record<string, unknown> | undefined;
+      if (
+        item?.['type'] === 'fileChange' &&
+        typeof item['id'] === 'string' &&
+        item['status'] === 'completed' &&
+        target.cwd
+      ) {
+        let journal = this.fileJournals.get(target);
+        if (!journal) {
+          journal = new FileRewindJournal();
+          this.fileJournals.set(target, journal);
+        }
+        journal.capture(target.cwd, item['id'], readRewindChanges(item['changes']));
+      }
+    }
     target?.session.applyNotification(method, params);
   }
 
   private async routeServerRequest(request: ServerRequest): Promise<unknown> {
-    const target = this.findByThreadId(request.params['threadId']);
+    const target = this.findExactByThreadId(request.params['threadId']);
     if (target === undefined) {
       // 対応する画面が無い要求に「許可」を返してはいけない
       this.log.warn(`宛先不明の要求を拒否しました: ${request.method}`);
@@ -2052,11 +2890,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * threadIdから画面を引く。`panels` に無ければ、開始待ちの中から**そのthreadIdを
    * 実際に記録しているエントリ**を探す（design.md §16.10の3）。
    *
-   * 「開始待ちが1件だけだから」という決め打ちはしない。並列開始時に別タスク宛の
-   * 通知・承認要求を誤って渡すと、それは「別タスクの操作を勝手に許可する」事故になる。
-   * 一致するものが無ければ宛先不明として `undefined`（誤配送より安全な失敗）。
+   * threadIdの一致だけを宛先の根拠にする。「開始待ちが1件だけだから」という決め打ちは
+   * しない。並列開始時に別タスク宛の承認要求を誤って渡すと、それは「別タスクの操作を
+   * 勝手に許可する」事故になる。一致するものが無ければ宛先不明として `undefined`
+   * （誤配送より安全な失敗）。サーバー要求（承認）の宛先はこちらだけを使う。
    */
-  private findByThreadId(threadId: unknown): ChatPanel | undefined {
+  private findExactByThreadId(threadId: unknown): ChatPanel | undefined {
     if (typeof threadId !== 'string') {
       return undefined;
     }
@@ -2064,11 +2903,26 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (known !== undefined) {
       return known;
     }
-    const pending = this.pendingStarts.findByThreadId(threadId, (entry) => entry.session.threadId);
-    if (pending !== undefined) {
-      return pending;
+    return this.pendingStarts.findByThreadId(threadId, (entry) => entry.session.threadId);
+  }
+
+  /**
+   * 通知の宛先を引く。厳密な照合で見つからないときに限り、開始待ちが1件だけなら
+   * それを宛先とする（`thread/start` の応答前に届いた通知の救済。§16.10の3）。
+   *
+   * この救済を承認要求へ広げてはいけない（F10-01）。開始待ちが1件であることは、
+   * 未登録のthreadIdがその会話宛である証明にはならず、閉じた会話の遅延要求などを
+   * 別会話の承認ハンドラーへ渡してしまう。取りこぼして困るのは通知だけで、
+   * 要求は宛先不明として拒否すれば呼び出し元が解放される。
+   */
+  private findNotificationTarget(threadId: unknown): ChatPanel | undefined {
+    const exact = this.findExactByThreadId(threadId);
+    if (exact !== undefined) {
+      return exact;
     }
-    // `thread/start` の応答前に届いた通知。開始待ちが1件だけなら宛先は一意に定まる。
+    if (typeof threadId !== 'string') {
+      return undefined;
+    }
     // 2件以上あるときは諦める（取りこぼしより誤配送のほうが重い。§16.10の3）
     return this.pendingStarts.soleEntry();
   }
@@ -2147,11 +3001,12 @@ function readSubmission(raw: unknown): PromptSubmission | undefined {
     typeof submission['values'] === 'object' && submission['values'] !== null
       ? (submission['values'] as Record<string, unknown>)
       : {};
-  const values: Record<string, string[]> = {};
+  const values: Array<[string, string[]]> = [];
   for (const [id, value] of Object.entries(rawValues)) {
     if (Array.isArray(value)) {
-      values[id] = value.filter((v): v is string => typeof v === 'string');
+      values.push([id, value.filter((v): v is string => typeof v === 'string')]);
     }
   }
-  return { action, values };
+  // 項目名はMCPサーバが決める。`values[id] = ...` だと `__proto__` で回答が消える
+  return { action, values: Object.fromEntries(values) };
 }

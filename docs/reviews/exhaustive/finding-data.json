@@ -1,0 +1,566 @@
+[
+  {
+    "id": "EX-AFTERTREE-01",
+    "priority": "P1",
+    "title": "説明ファイルへの書込みが追跡済みリンクをたどる",
+    "evidence": "second-opinion-lifecycle.md"
+  },
+  {
+    "id": "EX-APPROVAL-01",
+    "priority": "P1",
+    "title": "ファイル移動先が自動承認の境界検査から落ちる",
+    "evidence": "orchestrator-approval-store.md"
+  },
+  {
+    "id": "EX-APPROVAL-02",
+    "priority": "P1",
+    "title": "未作成ファイルでは実パス解決の失敗が境界内扱いへ戻る",
+    "evidence": "orchestrator-approval-store.md"
+  },
+  {
+    "id": "EX-CONFIG-01",
+    "priority": "P1",
+    "title": "権限設定が真偽値以外でも有効扱いになる",
+    "evidence": "configuration.md"
+  },
+  {
+    "id": "EX-CONN-01",
+    "priority": "P1",
+    "title": "旧接続の承認応答を新接続へ送れる",
+    "evidence": "approval-transport.md"
+  },
+  {
+    "id": "EX-EXT-01",
+    "priority": "P1",
+    "title": "危険操作の同意が確認時の定義へ結び付かない",
+    "evidence": "extension-main.md"
+  },
+  {
+    "id": "EX-FORGE-01",
+    "priority": "P1",
+    "title": "カードへの対応を別リポジトリへ送る",
+    "evidence": "forge-hub.md"
+  },
+  {
+    "id": "EX-FORGE-03",
+    "priority": "P1",
+    "title": "返信本文をCLIがファイル参照として解釈する",
+    "evidence": "forge-main.md"
+  },
+  {
+    "id": "EX-FORGE-04",
+    "priority": "P1",
+    "title": "レビュー失敗でも統合マージする",
+    "evidence": "forge-main.md"
+  },
+  {
+    "id": "EX-INTEGRATION-01",
+    "priority": "P1",
+    "title": "マージを取り消した状態も解決済みと判定する",
+    "evidence": "integration-main.md"
+  },
+  {
+    "id": "EX-MCP-01",
+    "priority": "P1",
+    "title": "MCP無効化の一覧取得失敗で、利用者設定のMCPを残して起動する",
+    "evidence": "chat-view-main.md"
+  },
+  {
+    "id": "EX-MESSAGING-02",
+    "priority": "P1",
+    "title": "失効したtokenで受信中の要求が実行される",
+    "evidence": "messaging-main.md"
+  },
+  {
+    "id": "EX-PSEUDO-01",
+    "priority": "P1",
+    "title": "疑似隔離の復元失敗後に元workspaceで実行する",
+    "evidence": "runner-restore-working-directory.md"
+  },
+  {
+    "id": "EX-PSEUDO-02",
+    "priority": "P1",
+    "title": "リロード前の手動編集を反映基準へ取り込む",
+    "evidence": "runner-restore-working-directory.md"
+  },
+  {
+    "id": "EX-PSEUDO-04",
+    "priority": "P1",
+    "title": "マニフェスト保存の事後確認は既存ファイルを復旧しない",
+    "evidence": "pseudo-worktree-main.md"
+  },
+  {
+    "id": "EX-PSEUDO-05",
+    "priority": "P1",
+    "title": "統合先へのコピーに境界確認がない",
+    "evidence": "pseudo-worktree-main.md"
+  },
+  {
+    "id": "EX-PSEUDO-06",
+    "priority": "P1",
+    "title": "スナップショットの読込み障害を削除として反映する",
+    "evidence": "pseudo-worktree-main.md"
+  },
+  {
+    "id": "EX-REDACT-01",
+    "priority": "P1",
+    "title": "引用された秘密値の空白以降が伏せられない",
+    "evidence": "second-opinion-core.md"
+  },
+  {
+    "id": "EX-ROADMAP-03",
+    "priority": "P1",
+    "title": "外部へのリンクを辿ってロードマップを書き込む",
+    "evidence": "roadmap-main.md"
+  },
+  {
+    "id": "EX-RUNNER-02",
+    "priority": "P1",
+    "title": "独立検証中の全体停止後に修正ループを再開する",
+    "evidence": "runner-main.md"
+  },
+  {
+    "id": "EX-SANITIZE-01",
+    "priority": "P1",
+    "title": "キーの種類と字種によりログへ秘密の全体・断片が残る",
+    "evidence": "log-sanitization.md"
+  },
+  {
+    "id": "EX-UNTRACKED-01",
+    "priority": "P1",
+    "title": "実パスの確認とopenの間に差し替えられる",
+    "evidence": "second-opinion-core.md"
+  },
+  {
+    "id": "EX-WORKFLOW-03",
+    "priority": "P1",
+    "title": "escalateの配列書き忘れを警告せず無効化する",
+    "evidence": "workflow-main.md"
+  },
+  {
+    "id": "EX-ACT-01",
+    "priority": "P2",
+    "title": "workspace内の`..`で始まるディレクトリ名を外側と誤判定する",
+    "evidence": "activity.md"
+  },
+  {
+    "id": "EX-ADVISOR-01",
+    "priority": "P2",
+    "title": "古い指示の送信完了で置換後の相談を閉じる",
+    "evidence": "second-opinion-command.md"
+  },
+  {
+    "id": "EX-BENCH-01",
+    "priority": "P2",
+    "title": "応答増分のベンチが表示モデルの変化を作れていない",
+    "evidence": "panel-progress.md"
+  },
+  {
+    "id": "EX-CHATUI-01",
+    "priority": "P2",
+    "title": "メニューを閉じるEscapeが応答も中断する",
+    "evidence": "chat-script-main.md"
+  },
+  {
+    "id": "EX-CLAUDE-01",
+    "priority": "P2",
+    "title": "NotebookEditの編集先が成果一覧から漏れる",
+    "evidence": "claude-stream.md"
+  },
+  {
+    "id": "EX-CLAUDE-02",
+    "priority": "P2",
+    "title": "中断後のresultで完了処理が重複する",
+    "evidence": "claude-stream.md"
+  },
+  {
+    "id": "EX-CLAUDE-03",
+    "priority": "P2",
+    "title": "次の送信直後の中断・終了が前ターンの成果を再利用する",
+    "evidence": "claude-stream.md"
+  },
+  {
+    "id": "EX-CLAUDEVIEW-01",
+    "priority": "P2",
+    "title": "シェル入力が別会話の作業フォルダへ向かう",
+    "evidence": "claude-view-main.md"
+  },
+  {
+    "id": "EX-CLAUDEVIEW-02",
+    "priority": "P2",
+    "title": "承認設定の表示が対象セッションと一致しない",
+    "evidence": "claude-view-main.md"
+  },
+  {
+    "id": "EX-CLAUDEVIEW-03",
+    "priority": "P2",
+    "title": "巻戻しの実行中確認が他の会話を含まない",
+    "evidence": "claude-view-main.md"
+  },
+  {
+    "id": "EX-CONN-02",
+    "priority": "P2",
+    "title": "旧初期化の失敗処理が新接続をresetする",
+    "evidence": "approval-transport.md"
+  },
+  {
+    "id": "EX-EVAL-01",
+    "priority": "P2",
+    "title": "完了待機の登録がturn/start応答より後になる",
+    "evidence": "evaluation-bench.md"
+  },
+  {
+    "id": "EX-EVAL-02",
+    "priority": "P2",
+    "title": "同じ採点を複数回集計できる",
+    "evidence": "evaluation-bench.md"
+  },
+  {
+    "id": "EX-EXT-02",
+    "priority": "P2",
+    "title": "レビュー修正後にロードマップとの対応を再確認しない",
+    "evidence": "extension-main.md"
+  },
+  {
+    "id": "EX-FORGE-02",
+    "priority": "P2",
+    "title": "起動失敗・破棄中に相談セッションの所有状態が崩れる",
+    "evidence": "forge-hub.md"
+  },
+  {
+    "id": "EX-FORGE-05",
+    "priority": "P2",
+    "title": "レビュー取得が途中で切れても成功扱い",
+    "evidence": "forge-main.md"
+  },
+  {
+    "id": "EX-FORGE-06",
+    "priority": "P2",
+    "title": "CIの旧形式で未知状態が成功になる",
+    "evidence": "forge-main.md"
+  },
+  {
+    "id": "EX-FROZEN-01",
+    "priority": "P2",
+    "title": "存在確認後の書込みで凍結出力を上書きできる",
+    "evidence": "evaluation-bench.md"
+  },
+  {
+    "id": "EX-GOAL-01",
+    "priority": "P2",
+    "title": "証拠が増えると最新の失敗を送信時に落とす",
+    "evidence": "loop-helpers.md"
+  },
+  {
+    "id": "EX-HISTORY-01",
+    "priority": "P2",
+    "title": "Windowsのarchive判定で区切りを正規化しない",
+    "evidence": "history.md"
+  },
+  {
+    "id": "EX-HISTORY-02",
+    "priority": "P2",
+    "title": "response_itemだけの会話は分岐候補が0件になる",
+    "evidence": "history.md"
+  },
+  {
+    "id": "EX-IMPORT-01",
+    "priority": "P2",
+    "title": "継承プロパティを既知種別として受け入れる",
+    "evidence": "import.md"
+  },
+  {
+    "id": "EX-IMPORT-02",
+    "priority": "P2",
+    "title": "完了待ちtimeoutが開始済みの結果を返せない",
+    "evidence": "codex-requests.md"
+  },
+  {
+    "id": "EX-MANUAL-01",
+    "priority": "P2",
+    "title": "同じ機能に両立しない合格条件が残る",
+    "evidence": "manual-test-main.md"
+  },
+  {
+    "id": "EX-MANUAL-02",
+    "priority": "P2",
+    "title": "障害の準備が検査対象へ届かない",
+    "evidence": "manual-test-main.md"
+  },
+  {
+    "id": "EX-MARKDOWN-01",
+    "priority": "P2",
+    "title": "タスク項目のチェック状態が後続の通常項目へ残る",
+    "evidence": "formatting-settings.md"
+  },
+  {
+    "id": "EX-MCP-02",
+    "priority": "P2",
+    "title": "起動済みMCPの通知を取り逃がし、利用不能と判定する",
+    "evidence": "chat-view-main.md"
+  },
+  {
+    "id": "EX-MESSAGING-01",
+    "priority": "P2",
+    "title": "許可した受け渡し本文をHTTPが拒否する",
+    "evidence": "messaging-main.md"
+  },
+  {
+    "id": "EX-MESSAGING-03",
+    "priority": "P2",
+    "title": "不正な依存引数が依存の削除になる",
+    "evidence": "messaging-main.md"
+  },
+  {
+    "id": "EX-MODEL-01",
+    "priority": "P2",
+    "title": "削除中の取得で設定cacheが復活する",
+    "evidence": "codex-requests.md"
+  },
+  {
+    "id": "EX-ORCH-01",
+    "priority": "P2",
+    "title": "質問回答待ち中の自由入力が消える",
+    "evidence": "runner-orchestrator-main.md"
+  },
+  {
+    "id": "EX-ORCH-02",
+    "priority": "P2",
+    "title": "ask_userのrun累計上限がリロードで失われる",
+    "evidence": "runner-orchestrator-main.md"
+  },
+  {
+    "id": "EX-PLANNER-01",
+    "priority": "P2",
+    "title": "切り詰めた計画・差分を全体レビューの成功として扱う",
+    "evidence": "planner-main.md"
+  },
+  {
+    "id": "EX-PROGRAM-01",
+    "priority": "P2",
+    "title": "計画変更とrun完了が重なると完了状態を失う",
+    "evidence": "program-runner.md"
+  },
+  {
+    "id": "EX-PSEUDO-03",
+    "priority": "P2",
+    "title": "マニフェストの読込み失敗を未保存と同一視する",
+    "evidence": "pseudo-worktree-main.md"
+  },
+  {
+    "id": "EX-RECAP-01",
+    "priority": "P2",
+    "title": "空会話の2回目の要約がモデルへ送られる",
+    "evidence": "chat-session.md"
+  },
+  {
+    "id": "EX-ROADMAP-01",
+    "priority": "P2",
+    "title": "文字列のIssue番号が削除されない",
+    "evidence": "roadmap-main.md"
+  },
+  {
+    "id": "EX-ROADMAP-02",
+    "priority": "P2",
+    "title": "受け付ける箇条書き記号を書戻しで扱えない",
+    "evidence": "roadmap-main.md"
+  },
+  {
+    "id": "EX-ROADMAP-04",
+    "priority": "P2",
+    "title": "材料外の追加タスクを転記確認が見逃す",
+    "evidence": "roadmap-main.md"
+  },
+  {
+    "id": "EX-RUNNER-01",
+    "priority": "P2",
+    "title": "統合レビュー成功後に終了処理を呼ばない経路がある",
+    "evidence": "runner-main.md"
+  },
+  {
+    "id": "EX-RUNNER-03",
+    "priority": "P2",
+    "title": "破棄時に復旧待ちタイマーが残る",
+    "evidence": "runner-main.md"
+  },
+  {
+    "id": "EX-RUNSTATE-01",
+    "priority": "P2",
+    "title": "複数親の片方だけ再マージすると実行中のまま残る",
+    "evidence": "run-state-main.md"
+  },
+  {
+    "id": "EX-SECONDOPINION-01",
+    "priority": "P2",
+    "title": "会話原文を渡さないと説明した後に短い会話を渡す",
+    "evidence": "second-opinion-command.md"
+  },
+  {
+    "id": "EX-SNAPSHOT-01",
+    "priority": "P2",
+    "title": "未追跡一覧の取得失敗を「未追跡なし」と扱う",
+    "evidence": "second-opinion-core.md"
+  },
+  {
+    "id": "EX-STATE-01",
+    "priority": "P2",
+    "title": "完了通知の重複・旧ターンを区別しない",
+    "evidence": "chat-state.md"
+  },
+  {
+    "id": "EX-STATE-02",
+    "priority": "P2",
+    "title": "完了時に消した実行中一覧が次の項目で復活する",
+    "evidence": "chat-state.md"
+  },
+  {
+    "id": "EX-STATE-03",
+    "priority": "P2",
+    "title": "カンマを含むファイル名が成果記録で分割される",
+    "evidence": "chat-state.md"
+  },
+  {
+    "id": "EX-STATE-04",
+    "priority": "P2",
+    "title": "中断応答が先に返るとターン成果が空になる",
+    "evidence": "chat-state.md"
+  },
+  {
+    "id": "EX-TEST-01",
+    "priority": "P2",
+    "title": "ESLintの検査用テストが既存ファイルを上書きして削除する",
+    "evidence": "test-infrastructure.md"
+  },
+  {
+    "id": "EX-TEST-02",
+    "priority": "P2",
+    "title": "ルールの有効性を判定するテストがseverity=0を通す",
+    "evidence": "test-infrastructure.md"
+  },
+  {
+    "id": "EX-TEST-03",
+    "priority": "P2",
+    "title": "隔離ガードのテストが既存の固定ディレクトリを削除する",
+    "evidence": "integration-fixtures.md"
+  },
+  {
+    "id": "EX-TEST-04",
+    "priority": "P2",
+    "title": "重複排除のテストに重複入力がない",
+    "evidence": "input-helpers.md"
+  },
+  {
+    "id": "EX-TEST-05",
+    "priority": "P2",
+    "title": "購読解除テストが解除漏れを検出できない",
+    "evidence": "view-helpers.md"
+  },
+  {
+    "id": "EX-TEST-06",
+    "priority": "P2",
+    "title": "busy時の脇道質問テストが共有初期状態を変更する",
+    "evidence": "claude-stream.md"
+  },
+  {
+    "id": "EX-TEST-07",
+    "priority": "P2",
+    "title": "並行更新テストが更新消失を検出できない",
+    "evidence": "orchestrator-helpers.md"
+  },
+  {
+    "id": "EX-TEST-08",
+    "priority": "P2",
+    "title": "ゴール駆動で完了合図を無視するテストが有効な合図を渡していない",
+    "evidence": "loop-controller.md"
+  },
+  {
+    "id": "EX-TEST-09",
+    "priority": "P2",
+    "title": "メインAIへの未送信を変化しないcounterで判定する",
+    "evidence": "second-opinion-command.md"
+  },
+  {
+    "id": "EX-TEST-10",
+    "priority": "P2",
+    "title": "送信元偽装テストの期待値が本文でも成立する",
+    "evidence": "integration-tests.md"
+  },
+  {
+    "id": "EX-TEST-11",
+    "priority": "P2",
+    "title": "単発送信の作業記録禁止を検出できない準備になっている",
+    "evidence": "claude-view-main.md"
+  },
+  {
+    "id": "EX-TEST-12",
+    "priority": "P2",
+    "title": "別々の呼出し配列のindexで前後関係を判定する",
+    "evidence": "runner-test-main.md"
+  },
+  {
+    "id": "EX-TEST-13",
+    "priority": "P2",
+    "title": "CI待ちの試験がレビューコメント取得を捉える",
+    "evidence": "runner-test-main.md"
+  },
+  {
+    "id": "EX-TEST-14",
+    "priority": "P2",
+    "title": "重複排除の試験で2回目の取得が起きない",
+    "evidence": "runner-test-main.md"
+  },
+  {
+    "id": "EX-VIEW-01",
+    "priority": "P2",
+    "title": "相対日付テストの期待値が負のUTCオフセットを除外する",
+    "evidence": "presentation.md"
+  },
+  {
+    "id": "EX-VIEW-02",
+    "priority": "P2",
+    "title": "夏時間をまたぐ日付分類で前日が「今日」になる",
+    "evidence": "pure-helpers.md"
+  },
+  {
+    "id": "EX-WFVIEW-01",
+    "priority": "P2",
+    "title": "復元後は取り込み済み件数を過少表示する",
+    "evidence": "workflow-view-graph.md"
+  },
+  {
+    "id": "EX-WFVIEW-02",
+    "priority": "P2",
+    "title": "下書きから定義ファイルを開けない",
+    "evidence": "workflow-view-graph.md"
+  },
+  {
+    "id": "EX-WFVIEW-03",
+    "priority": "P2",
+    "title": "完了タスクの経過時間が空欄になる",
+    "evidence": "workflow-view-graph.md"
+  },
+  {
+    "id": "EX-WORKFLOW-02",
+    "priority": "P2",
+    "title": "issueの文字列を先頭の整数だけで受理する",
+    "evidence": "workflow-main.md"
+  },
+  {
+    "id": "EX-WORKTREE-01",
+    "priority": "P2",
+    "title": "別タスクのブランチ名が正規化で衝突する",
+    "evidence": "worktree-main.md"
+  },
+  {
+    "id": "EX-TEXT-01",
+    "priority": "P3",
+    "title": "inline切詰めでサロゲートペアを分断する",
+    "evidence": "orchestrator-helpers.md"
+  },
+  {
+    "id": "EX-WORKFLOW-01",
+    "priority": "P3",
+    "title": "34行の`task.outcome?.trim() !== ''`はoutcome未指定でも真になる",
+    "evidence": "orchestrator-helpers.md"
+  }
+]

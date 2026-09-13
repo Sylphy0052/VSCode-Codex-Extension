@@ -489,6 +489,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
     store,
     sessionModelSettings,
+    // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
+    context.globalStorageUri.fsPath,
   );
   context.subscriptions.push(chat);
 
@@ -510,6 +512,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // `activate()` が終わった後からでも差し替えられる。
     () => claudeSpawnOverride.spawn,
     sessionModelSettings,
+    // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
+    context.globalStorageUri.fsPath,
   );
   context.subscriptions.push(claudeChat);
 
@@ -914,6 +918,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       deserializeWebviewPanel: (panel, state) => claudeChat.restorePanel(panel, state),
     }),
   );
+
+  // CLIが返すモデル候補を更新し、開いている画面へ反映する。
+  let modelRefreshDisposed = false;
+  const refreshModelCatalog = async (): Promise<void> => {
+    await settings.refreshModels();
+    if (modelRefreshDisposed) {
+      return;
+    }
+    await panel.refreshModelCatalog();
+    chat.refreshSettings();
+    claudeChat.refreshModelCatalog();
+  };
+  const modelRefreshTimer = setInterval(() => {
+    void refreshModelCatalog().catch(() => log.warn('モデル候補の表示を更新できませんでした'));
+  }, 5 * 60_000);
+  context.subscriptions.push({
+    dispose: () => {
+      modelRefreshDisposed = true;
+      clearInterval(modelRefreshTimer);
+    },
+  });
+  void refreshModelCatalog().catch(() => log.warn('モデル候補の表示を更新できませんでした'));
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -1360,7 +1386,12 @@ async function runWorkflow(
     if (choice !== '実行する') {
       return;
     }
-    result = await runner.start(picked.file.fsPath, folder.uri.fsPath, { allowConfirmed: true });
+    // 確認したのは、確認時に読んだ内容そのもの。呼び直しの時点で定義が書き換わっていれば
+    // ダイジェストが食い違い、`runner.start` がもう一度確認を求める（Issue #1107）
+    result = await runner.start(picked.file.fsPath, folder.uri.fsPath, {
+      allowConfirmed: true,
+      ...(result.allowDigest === undefined ? {} : { allowConfirmedDigest: result.allowDigest }),
+    });
   }
   if (!result.ok) {
     const detail = (result.errors ?? []).map((e) => e.message).join('\n');
@@ -2771,7 +2802,7 @@ async function forkFromTurn(
   log: Logger,
   session: SessionSummary,
   turnId: string,
-): Promise<void> {
+): Promise<boolean> {
   const result = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'この指示から分岐しています…' },
     () => appServer.forkThread(session.id, turnId),
@@ -2780,12 +2811,14 @@ async function forkFromTurn(
   if (!result.ok) {
     log.error(`分岐に失敗しました: ${result.error}`);
     void vscode.window.showErrorMessage(`分岐に失敗しました: ${result.error}`);
-    return;
+    // 呼び出し元（会話閲覧画面）が押したボタンを戻せるよう、失敗を返す（Issue #1156）
+    return false;
   }
 
   log.info(`分岐しました: ${session.id} → ${result.threadId}`);
   await chat.openThread(result.threadId, `${codex.tabTitle(session)} (分岐)`, session.cwd);
   tree.refresh();
+  return true;
 }
 
 /**

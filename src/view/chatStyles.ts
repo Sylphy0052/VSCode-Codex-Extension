@@ -11,6 +11,19 @@ import { sharedStyles } from './sharedStyles';
 export function chatStyles(): string {
   return `
 ${sharedStyles()}
+  .modelInput { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
+  .modelInput input {
+    flex: 1 1 12em;
+    min-width: 0;
+    padding: 3px 4px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: var(--agent-radius-sm);
+    font: inherit;
+  }
+  .modelInput input:focus { outline: 1px solid var(--vscode-focusBorder); }
+
   html, body { height: 100%; margin: 0; }
   body {
     display: flex;
@@ -193,6 +206,32 @@ ${sharedStyles()}
     border-left: 2px solid var(--vscode-textLink-foreground);
   }
   /*
+   * 指示の書き直し（issue #1073）。本文と同じ位置・同じ枠で出し、直している対象が
+   * どの発言かを見失わないようにする。入力欄は中身の行数に合わせて伸びる（growEditInput）。
+   */
+  .edit-box {
+    padding: var(--chat-body-padding);
+    border-radius: var(--agent-radius-md);
+    background-color: var(--vscode-textBlockQuote-background);
+    border-left: 2px solid var(--vscode-textLink-foreground);
+  }
+  .edit-input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    padding: 6px 8px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: var(--agent-radius-sm);
+    font-family: inherit;
+    font-size: inherit;
+    line-height: var(--chat-line-height);
+  }
+  .edit-input:focus { outline: 1px solid var(--vscode-focusBorder); }
+  .edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+  /*
    * エージェントの応答にも縁取りを付ける（issue #712）。ここに何も無いと、応答が長い
    * ときにターンの切れ目が本文の途切れ方でしか分からない。自分の発言（textLink色の線と
    * 背景）より弱い線にして、どちらが自分の発言かは引き続き見分けられるようにする。
@@ -270,6 +309,45 @@ ${sharedStyles()}
     font-family: var(--vscode-editor-font-family);
     font-size: 0.85em;
   }
+  /*
+   * AskUserQuestion（issue #1085）の質問タブ。4問ぶんを縦に並べるとカードだけで
+   * ビューが埋まるので、1問ずつ切り替え、質問本体にも高さの上限を置く
+   */
+  .approval .question-tabs {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  }
+  .approval .question-tab {
+    padding: 3px 10px;
+    max-width: 14em;
+    overflow: hidden;
+    color: var(--vscode-descriptionForeground);
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid transparent;
+    border-radius: 0;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .approval .question-tab:hover { color: var(--vscode-foreground); background-color: transparent; }
+  .approval .question-tab.active {
+    color: var(--vscode-foreground);
+    border-bottom-color: var(--vscode-focusBorder);
+  }
+  .approval .question-tab.unanswered { color: var(--vscode-errorForeground); }
+  .approval .question-body {
+    max-height: 40vh;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+  }
+  .approval .question-warning {
+    margin: 4px 0 8px;
+    color: var(--vscode-errorForeground);
+    font-size: 0.85em;
+  }
   /* .approvalはAskUserQuestion（issue #685）の選択UIがここを使う */
   .prompt .field, .approval .field { margin-bottom: 10px; }
   .prompt .field-label, .approval .field-label {
@@ -282,6 +360,11 @@ ${sharedStyles()}
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
     white-space: pre-wrap;
+  }
+  .prompt .field-error {
+    margin-top: 3px;
+    color: var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground));
+    font-size: 0.85em;
   }
   .prompt .option, .approval .option {
     display: flex;
@@ -380,14 +463,26 @@ ${sharedStyles()}
     display: flex;
     gap: 8px;
   }
+  /*
+   * アイコン列は常に1段に保つ（issue #1086）。折り返しを許すと幅が狭いパネルで2段・3段に
+   * 伸びて会話の領域を食う。入りきらないボタンはchatScript.tsのreflowComposerIcons()が
+   * 実行時に「…」メニューへ移す。overflowは指定しない——ここを隠すと、この行の中から
+   * 上へ開く「…」メニュー（絶対配置）まで切り取られてしまうため。溢れているかどうかは
+   * スクリプト側が各ボタンの右端で判定する。
+   */
   #composerIconRow {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 8px;
   }
   /*
-   * 送信以外のボタンはアイコンのみ（issue #226）。ラベルを消していても折り返すと
-   * 縦に潰れて読みにくいため、ボタン自体はnowrap・縮小なしのままにする。
+   * ボタンのラベルは「…」メニューにあるときだけ見せる。表にある間はアイコンのみ
+   * （issue #226）を保つ。
+   */
+  #composerIconRow > button > .composerOverflowLabel { display: none; }
+  /*
+   * 送信以外のボタンはアイコンのみ（issue #226）。幅が足りないときに全部を細く潰すと
+   * どれも読めなくなるため、縮めずに1つずつ「…」メニューへ送る（issue #1086）。
    */
   #composer button {
     white-space: nowrap;
@@ -548,7 +643,34 @@ ${sharedStyles()}
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  #status { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  #limitAutoResumeStatus {
+    margin: 0 16px 6px;
+    padding: 6px 8px;
+    border-left: 3px solid var(--vscode-charts-blue, var(--vscode-focusBorder));
+    color: var(--vscode-foreground);
+    background: var(--vscode-textBlockQuote-background, var(--vscode-editor-inactiveSelectionBackground));
+    font-size: 0.85em;
+  }
+  /*
+   * 実行状態・使用量の行（issue #1086）。幅が狭いと「承認 / 応答中 / コンテキスト /
+   * コスト / 追加クレジット」が何行にも折り返して会話の領域を食うため、detailsで畳める
+   * ようにする。開閉状態はwebviewのstateへ保存する（chatScript.tsのstatusBox）。
+   */
+  #statusBox { padding: 0 16px 6px; color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  #statusBox > summary {
+    cursor: pointer;
+    /* display:flexにすると開閉の三角が消えるため、既定のlist-itemのままにする */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #statusBox > summary:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+  }
+  #statusBox > summary .label { font-weight: 600; }
+  #statusSummary { margin-left: 8px; }
+  #status { padding: 2px 0 0; }
   /* コンテキストの残りが少ないとき。見落とすと突然の圧縮に驚かされる */
   #status .warn {
     color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));

@@ -17,7 +17,10 @@ import {
   isExcludedPath,
   loadPersistedManifest,
   nodePseudoWorktreeFileSystem,
+  persistBaseline,
   persistManifest,
+  loadPersistedBaseline,
+  pseudoBaselinePath,
   planIntegration,
   pseudoWorktreePath,
   pseudoWorktreesRootDir,
@@ -259,7 +262,7 @@ describe('IntegrationQueue（直列化）', () => {
   it('integrateが直列化され、同時に複数要求してもマニフェスト更新が重ならない', async () => {
     let active = 0;
     let maxActive = 0;
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue('/nowhere');
     const fs = nodePseudoWorktreeFileSystem;
 
     const originalEnqueue = (
@@ -301,7 +304,7 @@ describe('IntegrationQueue（直列化）', () => {
     '永続化（onIntegratedフック）が完了するまで次のタスクのintegrateが始まらないため、' +
       '書き込みの順序が保証される',
     async () => {
-      const queue = new IntegrationQueue();
+      const queue = new IntegrationQueue('/nowhere');
       const fs = nodePseudoWorktreeFileSystem;
 
       let stored = '';
@@ -1033,6 +1036,97 @@ describe('実ファイルシステムでの統合テスト', () => {
     });
   });
 
+  describe('基準スナップショットの永続化（Issue #1115）', () => {
+    it('persistBaselineで書いた基準をloadPersistedBaselineがそのまま読み戻す', async () => {
+      const baseline = new Map([
+        ['a.txt', { size: 10, mtimeMs: 100 }],
+        ['src/index.ts', { size: 20, mtimeMs: 200 }],
+      ]);
+
+      await persistBaseline(workspace, RUN_ID, baseline, nodePseudoWorktreeFileSystem);
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(true);
+      if (!loaded.ok) return;
+      expect(loaded.baseline).toEqual(baseline);
+    });
+
+    it('まだ書かれていない場合はbaseline: undefinedで成功する（run開始時の正常系）', async () => {
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded).toEqual({ ok: true, baseline: undefined });
+    });
+
+    /**
+     * 壊れた基準を空や部分的な基準へ倒すと、反映が「変わっていない」と判断して人の編集を
+     * 上書きしうる（Issue #1115が塞いだ経路そのもの）。読めない場合はfail-closedにする。
+     */
+    it('内容が壊れている場合はfail-closedにする', async () => {
+      await mkdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)), { recursive: true });
+      await writeFile(pseudoBaselinePath(workspace, RUN_ID), '{ broken', 'utf8');
+
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('内容を解析できません');
+    });
+
+    it('エントリのキーがパストラバーサルを含む場合はfail-closedにする', async () => {
+      await mkdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)), { recursive: true });
+      await writeFile(
+        pseudoBaselinePath(workspace, RUN_ID),
+        JSON.stringify({ '../outside.txt': { size: 1, mtimeMs: 2 } }),
+        'utf8',
+      );
+
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('不正なエントリ');
+    });
+
+    it('エントリの値がsize/mtimeMsの形でない場合はfail-closedにする', async () => {
+      await mkdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)), { recursive: true });
+      await writeFile(
+        pseudoBaselinePath(workspace, RUN_ID),
+        JSON.stringify({ 'a.txt': { size: '10', mtimeMs: 100 } }),
+        'utf8',
+      );
+
+      const loaded = await loadPersistedBaseline(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(loaded.ok).toBe(false);
+      if (loaded.ok) return;
+      expect(loaded.message).toContain('不正なエントリ');
+    });
+
+    it('removePseudoIntegrationがbaseline.jsonも撤去する', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      await persistBaseline(
+        workspace,
+        RUN_ID,
+        new Map([['a.txt', { size: 10, mtimeMs: 100 }]]),
+        nodePseudoWorktreeFileSystem,
+      );
+
+      const result = await removePseudoIntegration(workspace, RUN_ID, nodePseudoWorktreeFileSystem);
+
+      expect(result).toEqual({ ok: true });
+      await expect(readFile(pseudoBaselinePath(workspace, RUN_ID), 'utf8')).rejects.toThrow();
+      // baseline.jsonが残っていると`<runId>`ディレクトリが空にならず片付かない
+      await expect(readdir(path.dirname(pseudoBaselinePath(workspace, RUN_ID)))).rejects.toThrow();
+    });
+  });
+
   describe('removePseudoIntegration（統合worktreeとmanifest.jsonをまとめて撤去、Issue #438）', () => {
     it('_integrationとmanifest.jsonの両方を撤去する（受入基準）', async () => {
       const integration = await ensureIntegrationDir(
@@ -1586,7 +1680,7 @@ describe('実ファイルシステムでの統合テスト', () => {
     const t1After = await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem);
     const diff = diffSnapshots(t1.snapshot, t1After);
 
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     const plan = await queue.integrate(
       'T1',
       t1.cwd,
@@ -1627,7 +1721,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       await takeSnapshot(t2.cwd, [], nodePseudoWorktreeFileSystem),
     );
 
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     const firstPlan = await queue.integrate(
       'T1',
       t1.cwd,
@@ -1675,7 +1769,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       t1.snapshot,
       await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
     );
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
 
     const result = await reflectIntegrationToWorkspace(
@@ -1766,7 +1860,7 @@ describe('実ファイルシステムでの統合テスト', () => {
       t1.snapshot,
       await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
     );
-    const queue = new IntegrationQueue();
+    const queue = new IntegrationQueue(workspace);
     await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
 
     // 実行中に人がワークスペース側を直接編集した状況を再現する
@@ -1861,7 +1955,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         t1.snapshot,
         await takeSnapshot(t1.cwd, [], nodePseudoWorktreeFileSystem),
       );
-      const queue = new IntegrationQueue();
+      const queue = new IntegrationQueue(workspace);
       await queue.integrate('T1', t1.cwd, integration.dir, diff, nodePseudoWorktreeFileSystem);
 
       // 2件目（b.txt）のワークスペースへの反映だけが失敗するフェイクへ差し替える
@@ -2021,10 +2115,10 @@ describe('実ファイルシステムでの統合テスト', () => {
   );
 
   it(
-    '書き込み直後にrealpathで境界外と判明した場合は撤去して失敗とする' +
+    '書き込み直後にrealpathで境界外と判明した場合は一時ファイルだけを消して失敗とする' +
       '（レビュー指摘: medium、TOCTOU対策の二段目。cloneWorkspace/ensureIntegrationDirと' +
-      '同じ「作成後に実パス解決して境界確認、外れていれば撤去する」二段構えをpersistManifest' +
-      'にも対にする）',
+      '同じ「作成後に実パス解決して境界確認、外れていれば中止する」二段構えをpersistManifest' +
+      'にも対にする。確認対象はIssue #1116で一時ファイルへ移した）',
     async () => {
       const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-toctou-'));
       try {
@@ -2037,7 +2131,7 @@ describe('実ファイルシステムでの統合テスト', () => {
         const fakeFs: typeof nodePseudoWorktreeFileSystem = {
           ...nodePseudoWorktreeFileSystem,
           realpath: async (target) => {
-            if (target === filePath) {
+            if (path.basename(target).startsWith('.pwt-manifest-')) {
               return path.join(outsideDir, 'manifest.json');
             }
             return nodePseudoWorktreeFileSystem.realpath(target);
@@ -2048,13 +2142,94 @@ describe('実ファイルシステムでの統合テスト', () => {
           /想定した場所以外/,
         );
 
-        // 撤去されており、実体としては残っていない
+        // `rename`へ進んでいないため、保存先は作られていない
         await expect(readFile(filePath)).rejects.toThrow();
+        // 一時ファイルも残っていない
+        const dirEntries = await readdir(path.dirname(filePath));
+        expect(dirEntries.filter((name) => name.startsWith('.pwt-manifest-'))).toEqual([]);
       } finally {
         await rm(outsideDir, { recursive: true, force: true });
       }
     },
   );
+
+  /**
+   * Issue #1116（受入基準）: 事後確認で不一致と分かったとき、従来は保存先
+   * （差し替え先）を`removeFile`していた。差し替え先に既存の`manifest.json`があれば、
+   * 上書きしたうえで削除するため「書き込みを取り消した」のに元データは戻らない。
+   */
+  it('不一致を検知しても、差し替え先にあった既存のmanifest.jsonを失わない（受入基準）', async () => {
+    const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-victim-'));
+    try {
+      const victim = path.join(outsideDir, 'manifest.json');
+      await writeFile(victim, '{"existing":"data"}\n');
+
+      const filePath = integrationManifestPath(workspace, RUN_ID);
+      const manifest: IntegrationManifest = new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]);
+
+      // 一次確認の後に`<runId>`ディレクトリが外部ディレクトリへのリンクへ差し替えられ、
+      // その配下でのI/Oがすべて差し替え先へ着地する状況を再現する（リンクを辿るのは
+      // ファイルシステムの仕事なので、ポートの各メソッドで肩代わりする）
+      const dirPath = path.dirname(filePath);
+      const redirect = (target: string): string =>
+        target.startsWith(`${dirPath}${path.sep}`)
+          ? path.join(outsideDir, path.relative(dirPath, target))
+          : target;
+      const fakeFs: typeof nodePseudoWorktreeFileSystem = {
+        ...nodePseudoWorktreeFileSystem,
+        realpath: async (target) => nodePseudoWorktreeFileSystem.realpath(redirect(target)),
+        writeTextFile: async (target, content) =>
+          nodePseudoWorktreeFileSystem.writeTextFile(redirect(target), content),
+        removeFile: async (target) => nodePseudoWorktreeFileSystem.removeFile(redirect(target)),
+        rename: async (from, to) =>
+          nodePseudoWorktreeFileSystem.rename(redirect(from), redirect(to)),
+      };
+
+      await expect(persistManifest(workspace, RUN_ID, manifest, fakeFs)).rejects.toThrow(
+        /想定した場所以外/,
+      );
+
+      // 一時ファイルへの書き込みだったため、既存ファイルは上書きも削除もされていない
+      await expect(readFile(victim, 'utf8')).resolves.toBe('{"existing":"data"}\n');
+      await expect(readFile(filePath)).rejects.toThrow();
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('書き込みが途中で失敗しても前回のmanifestが残る（受入基準）', async () => {
+    const filePath = integrationManifestPath(workspace, RUN_ID);
+    await persistManifest(
+      workspace,
+      RUN_ID,
+      new Map([['a.txt', { taskId: 'T1', kind: 'added' }]]),
+      nodePseudoWorktreeFileSystem,
+    );
+    const before = await readFile(filePath, 'utf8');
+
+    // 途中まで書いてから失敗する状況（ディスク満杯・プロセス終了）を再現する。
+    // 直接上書きしていた頃は、これで`manifest.json`が壊れた内容のまま残っていた
+    const failingFs: typeof nodePseudoWorktreeFileSystem = {
+      ...nodePseudoWorktreeFileSystem,
+      writeTextFile: async (target, content) => {
+        await nodePseudoWorktreeFileSystem.writeTextFile(target, content.slice(0, 5));
+        throw new Error('ENOSPC: simulated');
+      },
+    };
+
+    await expect(
+      persistManifest(
+        workspace,
+        RUN_ID,
+        new Map([['b.txt', { taskId: 'T2', kind: 'added' }]]),
+        failingFs,
+      ),
+    ).rejects.toThrow(/ENOSPC/);
+
+    await expect(readFile(filePath, 'utf8')).resolves.toBe(before);
+    const dirEntries = await readdir(path.dirname(filePath));
+    expect(dirEntries.filter((name) => name.startsWith('.pwt-manifest-'))).toEqual([]);
+  });
 
   /**
    * Issue #505（監査指摘、再監査→再々監査で2段階発覚した循環バグの修正後の回帰テスト）:
@@ -3312,12 +3487,120 @@ describe('実ファイルシステムでの統合テスト', () => {
       );
     });
   });
+
+  describe('統合先へのコピーの境界検証（Issue #1117）', () => {
+    /**
+     * `applyDiffToIntegration`は統合先と差分パスを結合して`mkdir`+`copyFile`するだけで、
+     * 境界を一切確認していなかった。統合先を作った`ensureIntegrationDir`の検査はrun開始時の
+     * 1回きりなので、タスクの実行中に統合先配下を外向きのシンボリックリンクへ差し替えられると
+     * リンク先へ書き込まれる。後段の`reflectIntegrationToWorkspace`で止めてもコピーは
+     * 取り消せない。
+     */
+    async function prepareTaskClone(relPath: string, content: string): Promise<string> {
+      await writeWorkspaceFile(relPath, 'original\n');
+      const t1 = await cloneWorkspace(workspace, RUN_ID, 'T1', [], nodePseudoWorktreeFileSystem);
+      expect(t1.ok).toBe(true);
+      if (!t1.ok) throw new Error('cloneWorkspace failed');
+      await writeFile(path.join(t1.cwd, ...relPath.split('/')), content);
+      return t1.cwd;
+    }
+
+    it('統合先の子ディレクトリが外向きシンボリックリンクならコピーせず、リンク先に書き込まない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const taskDir = await prepareTaskClone('src/a.txt', 'changed by task, longer content\n');
+        // タスクの実行中に、統合先の子ディレクトリを外部ディレクトリへのリンクへ差し替える
+        await symlink(outsideDir, path.join(integration.dir, 'src'));
+
+        await expect(
+          applyDiffToIntegration(
+            workspace,
+            taskDir,
+            integration.dir,
+            [{ path: 'src/a.txt', kind: 'modified' }],
+            nodePseudoWorktreeFileSystem,
+          ),
+        ).rejects.toThrow(/シンボリックリンク/);
+
+        // リンク先（ワークスペースの外）には何も書かれていない
+        await expect(readdir(outsideDir)).resolves.toEqual([]);
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('統合先の既存ファイルが外向きシンボリックリンクならコピーせず、リンク先を書き換えない（受入基準）', async () => {
+      const outsideDir = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-outside-'));
+      try {
+        await writeFile(path.join(outsideDir, 'secret.txt'), 'secret\n');
+        const integration = await ensureIntegrationDir(
+          workspace,
+          RUN_ID,
+          nodePseudoWorktreeFileSystem,
+        );
+        expect(integration.ok).toBe(true);
+        if (!integration.ok) return;
+
+        const taskDir = await prepareTaskClone('a.txt', 'changed by task, longer content\n');
+        await symlink(path.join(outsideDir, 'secret.txt'), path.join(integration.dir, 'a.txt'));
+
+        await expect(
+          applyDiffToIntegration(
+            workspace,
+            taskDir,
+            integration.dir,
+            [{ path: 'a.txt', kind: 'modified' }],
+            nodePseudoWorktreeFileSystem,
+          ),
+        ).rejects.toThrow(/シンボリックリンク/);
+
+        await expect(readFile(path.join(outsideDir, 'secret.txt'), 'utf8')).resolves.toBe(
+          'secret\n',
+        );
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('正常な統合は従来どおりコピーされ、一時ファイルを残さない', async () => {
+      const integration = await ensureIntegrationDir(
+        workspace,
+        RUN_ID,
+        nodePseudoWorktreeFileSystem,
+      );
+      expect(integration.ok).toBe(true);
+      if (!integration.ok) return;
+
+      const taskDir = await prepareTaskClone('src/a.txt', 'changed by task, longer content\n');
+
+      await applyDiffToIntegration(
+        workspace,
+        taskDir,
+        integration.dir,
+        [{ path: 'src/a.txt', kind: 'modified' }],
+        nodePseudoWorktreeFileSystem,
+      );
+
+      await expect(readFile(path.join(integration.dir, 'src', 'a.txt'), 'utf8')).resolves.toBe(
+        'changed by task, longer content\n',
+      );
+      await expect(readdir(path.join(integration.dir, 'src'))).resolves.toEqual(['a.txt']);
+    });
+  });
 });
 
 describe('applyDiffToIntegration', () => {
   it('deleted差分はファイルシステムへ触れない（統合先は疎な構成のため）', async () => {
     const calls: string[] = [];
-    const fs: Parameters<typeof applyDiffToIntegration>[3] = {
+    const fs: Parameters<typeof applyDiffToIntegration>[4] = {
       readdir: async () => [],
       statFile: async () => undefined,
       isSymbolicLink: async () => false,
@@ -3342,6 +3625,7 @@ describe('applyDiffToIntegration', () => {
     };
 
     await applyDiffToIntegration(
+      '/ws',
       '/task',
       '/integration',
       [{ path: 'deleted.txt', kind: 'deleted' }],
@@ -3349,5 +3633,105 @@ describe('applyDiffToIntegration', () => {
     );
 
     expect(calls).toEqual([]);
+  });
+});
+
+describe('スナップショット走査の失敗（Issue #1118）', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'pseudo-worktree-scan-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function errnoError(code: string): NodeJS.ErrnoException {
+    const error: NodeJS.ErrnoException = new Error(`${code}: simulated`);
+    error.code = code;
+    return error;
+  }
+
+  /**
+   * 走査の失敗を空一覧へ畳んでいたため、`takeSnapshot`が欠けた一覧を成功として返し、
+   * `diffSnapshots`がその全件を`deleted`と判定していた。最終反映の削除分岐は
+   * マニフェストのその記録に従って元のワークスペースのファイルを消す。
+   */
+  it('readdirがEACCESで失敗したらスナップショット取得が失敗し、削除として扱われない（受入基準）', async () => {
+    await mkdir(path.join(root, 'sub'), { recursive: true });
+    await writeFile(path.join(root, 'sub', 'a.txt'), 'content\n');
+    await writeFile(path.join(root, 'keep.txt'), 'content\n');
+
+    const baseline = await takeSnapshot(root, [], nodePseudoWorktreeFileSystem);
+    expect([...baseline.keys()].sort()).toEqual(['keep.txt', 'sub/a.txt']);
+
+    // 完了時の走査で、サブディレクトリだけが読めなくなった状況
+    const failingFs: typeof nodePseudoWorktreeFileSystem = {
+      ...nodePseudoWorktreeFileSystem,
+      readdir: async (target) => {
+        if (target === path.join(root, 'sub')) {
+          throw errnoError('EACCES');
+        }
+        return nodePseudoWorktreeFileSystem.readdir(target);
+      },
+    };
+
+    await expect(takeSnapshot(root, [], failingFs)).rejects.toThrow(/EACCES/);
+  });
+
+  it('statFileがEACCESで失敗した場合もスナップショット取得が失敗する', async () => {
+    await writeFile(path.join(root, 'a.txt'), 'content\n');
+
+    const failingFs: typeof nodePseudoWorktreeFileSystem = {
+      ...nodePseudoWorktreeFileSystem,
+      statFile: async () => {
+        throw errnoError('EACCES');
+      },
+    };
+
+    await expect(takeSnapshot(root, [], failingFs)).rejects.toThrow(/EACCES/);
+  });
+
+  it('ENOENT（タスクが本当に削除した）は従来どおり削除として扱われる（受入基準）', async () => {
+    await writeFile(path.join(root, 'a.txt'), 'content\n');
+    await writeFile(path.join(root, 'gone.txt'), 'will be deleted\n');
+    const baseline = await takeSnapshot(root, [], nodePseudoWorktreeFileSystem);
+
+    await rm(path.join(root, 'gone.txt'));
+    const current = await takeSnapshot(root, [], nodePseudoWorktreeFileSystem);
+
+    expect(diffSnapshots(baseline, current)).toEqual([{ path: 'gone.txt', kind: 'deleted' }]);
+  });
+
+  it('走査対象のディレクトリ自体が存在しない（ENOENT）場合は空のスナップショットを返す', async () => {
+    await expect(
+      takeSnapshot(path.join(root, 'nowhere'), [], nodePseudoWorktreeFileSystem),
+    ).resolves.toEqual(new Map());
+  });
+
+  /**
+   * ポート実装そのものの挙動。`EACCES`は実行ユーザーがrootだと再現しないため、非rootでも
+   * 確実に起こせる`ENOTDIR`（通常ファイルに対する`readdir`）で「ENOENT以外を畳まない」
+   * ことを確かめる。修正前はどちらの失敗も空一覧・undefinedへ畳んでいた。
+   */
+  it('readdirはENOENT以外の失敗を畳まない（通常ファイルへの走査はENOTDIR）', async () => {
+    const file = path.join(root, 'a.txt');
+    await writeFile(file, 'content\n');
+
+    await expect(nodePseudoWorktreeFileSystem.readdir(file)).rejects.toThrow();
+    await expect(nodePseudoWorktreeFileSystem.readdir(path.join(root, 'nowhere'))).resolves.toEqual(
+      [],
+    );
+  });
+
+  it('statFileはENOENT以外の失敗を畳まない（通常ファイルの配下はENOTDIR）', async () => {
+    const file = path.join(root, 'a.txt');
+    await writeFile(file, 'content\n');
+
+    await expect(nodePseudoWorktreeFileSystem.statFile(path.join(file, 'child'))).rejects.toThrow();
+    await expect(
+      nodePseudoWorktreeFileSystem.statFile(path.join(root, 'nowhere.txt')),
+    ).resolves.toBeUndefined();
   });
 });

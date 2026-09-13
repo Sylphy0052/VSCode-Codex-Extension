@@ -13,6 +13,7 @@
  * 「親セッションの会話が混ざらない」（受入基準4）を検証する。
  */
 
+import { FROZEN_AFTER_TREE_NOTICE_FILE } from './afterTree';
 import {
   MAX_DIFF_OMISSION_ENTRIES,
   type DiffOmission,
@@ -109,7 +110,58 @@ export interface SecondOpinionInput {
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
   /** 今回評価してほしい追加資料。 */
   artifact: SecondOpinionArtifact;
+  /**
+   * 依頼の区画をどこへ置くか（Issue #1044 条件B-pos）。既定は `'front'`（現行）。
+   *
+   * 並びは「固定指示 → 依頼 → 背景 → 追加資料」で、追加資料は数十KB〜200KBになりうる。
+   * 依頼はその手前にあるため、資料が大きいほど「何を答えるのか」が読み終わりから遠ざかる。
+   *
+   * `'end'` は依頼を末尾へ**移動**する。複製ではない。見出し・本文・トークン数・出現回数を
+   * 揃えたまま位置だけを変えるためで、こうしないと「位置の効果」と「同じ文が2回出ることの
+   * 効果」を分離できない（{@link restateRequestAtEnd} との違い）。
+   */
+  requestPosition?: RequestPosition | undefined;
+  /**
+   * 依頼文をプロンプトの末尾へもう一度置くか（Issue #1044 条件B-repeat）。既定は `false`。
+   *
+   * こちらは**実用寄りの介入**で、位置の実験ではない。冒頭の依頼を残したまま末尾へ再掲するので、
+   * 位置に加えて「2回出ること」「最終確認という見出し」「読み直しを促す一文」が同時に変わる。
+   * 位置だけを見たいときは {@link requestPosition} を使う。
+   *
+   * 既定を `false` にしてあるのは、これが**測定のための介入**であり、効果が確かめられる前に
+   * 既定の挙動を変えないため（Issue #1044 の受入基準「拡張本体の既定挙動を変えずに」）。
+   */
+  restateRequestAtEnd?: boolean | undefined;
+  /**
+   * 押下時点のリポジトリ全体の写しを置いたディレクトリ（Issue #1047 条件C-repo）。
+   * 作業ディレクトリからの相対パスで渡す。省略すると写しを置かない指示になる。
+   *
+   * 拡張本体は既定でここを渡す（設定 `agent.secondOpinion.afterTree`、Issue #1062）。渡さない
+   * のは、設定で切っている場合と、写しを実体化できなかった場合である。
+   *
+   * 条件Aの材料は `changes.diff` と `base/<変更対象ファイル>` だけなので、**そのPRが触って
+   * いないファイルは既定で目に入らない**。#1044 のscreeningでは、primaryと判定した9件のうち
+   * 4件が「壊した場所が差分の外」で、条件Aの材料からは到達できなかった。ここを渡すと、
+   * 固定指示が「外を読むな」から「この写しの中でなら、判断に必要な範囲で追加で読んでよい」へ
+   * 変わる（探索先は写しの中に閉じたままで、実行中の作業ツリーは相変わらず読ませない）。
+   *
+   * 写し自体を作るのは `afterTree.ts` の `createFrozenAfterTree()` で、ここは**その場所を
+   * 名指しするだけ**である。値を渡したのに写しが無いと、Advisorは無いディレクトリを探しに
+   * 行って空振りする。渡す側が実体化の成否を見てから渡すこと。
+   */
+  afterTreeDir?: string | undefined;
+  /**
+   * 写しの説明ファイルの、写しのルートからの相対名（Issue #1103）。
+   *
+   * 省略時は {@link FROZEN_AFTER_TREE_NOTICE_FILE} を名指しする。同じ名前がリポジトリに
+   * commitされていた場合、写し側を残すために説明ファイルが別名になるため、実体化した側から
+   * 受け取った名前をそのまま渡すこと。
+   */
+  afterTreeNoticeFile?: string | undefined;
 }
+
+/** 依頼の区画の位置（Issue #1044 条件B-pos）。 */
+export type RequestPosition = 'front' | 'end';
 
 /** 背景として渡した本文の出所（Issue #944）。 */
 export type ConversationBackgroundKind = 'summary' | 'transcript';
@@ -149,6 +201,8 @@ function systemInstruction(
   artifact: SecondOpinionArtifact,
   hasSummary: boolean,
   backgroundKind: ConversationBackgroundKind,
+  afterTreeDir: string | undefined,
+  afterTreeNoticeFile: string | undefined,
 ): string {
   const lines = [
     'あなたは、別のAIエージェントが進めている作業について、独立した立場から意見を求められています。',
@@ -189,7 +243,7 @@ function systemInstruction(
       // `updates/<世代>/` への追加として届くため、届いたときの扱いを先に知らせておく
       '相談の途中で利用者が材料を更新することがあります。そのときは更新の連絡が届き、以後はそこで示された材料が正本になります。連絡が無いうちは、この材料が最新です。',
       'この作業ディレクトリの外を読みに行かないでください。そこにあるのは実行中に書き換わりうる現在の作業ツリーで、押下時点の材料とは食い違います。',
-      'ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。',
+      ...explorationInstruction(afterTreeDir, afterTreeNoticeFile),
     );
   } else {
     lines.push(
@@ -200,6 +254,43 @@ function systemInstruction(
   return lines.join('\n');
 }
 
+/**
+ * 追加で読んでよい範囲の指示（Issue #1047 条件C-repo）。
+ *
+ * 写しが無いとき（既定）は現行のまま「リポジトリ全体の探索は行わない」で閉じる。read-onlyの
+ * ツールは使えるため、指示が無いと材料で足りる問いでもリポジトリを読み回り、そのぶん回答が
+ * 遅れる（Issue #944）。
+ *
+ * 写しがあるときは、その禁止をそのまま置いておくことができない。禁止と写しを同時に渡すと、
+ * 「読んでよい材料がそこにあるのに読むなと書いてある」という矛盾になり、どちらへ倒れるかが
+ * 実行ごとに変わる。**探索の可否ではなく順番を指定する**——まず依頼・背景・差分を読み、
+ * それで判断が付かない箇所についてだけ写しの中を追加で読ませる。差分を読む前に写しを
+ * 読み回らせると、依頼と関係のない場所の指摘が増えて回答が遅くなるだけになる。
+ *
+ * 写しの性質（凍結されていること・欠落がありうること）は写しの中の
+ * `.frozen-after-tree.txt` に書いてある（`afterTree.ts`）。ここから名指しして読ませるのは、
+ * 「無い＝存在しない」と読まれるのを防ぐためである。
+ */
+function explorationInstruction(
+  afterTreeDir: string | undefined,
+  afterTreeNoticeFile: string | undefined,
+): string[] {
+  if (afterTreeDir === undefined || afterTreeDir === '') {
+    return ['ただし読むのは判断に必要な範囲に限り、リポジトリ全体の探索は行わないでください。'];
+  }
+  // 既定の名前がリポジトリのファイルと衝突したときは、説明ファイルが別名になる（Issue #1103）
+  const noticeFile =
+    afterTreeNoticeFile === undefined || afterTreeNoticeFile === ''
+      ? FROZEN_AFTER_TREE_NOTICE_FILE
+      : afterTreeNoticeFile;
+  return [
+    `\`${afterTreeDir}/\` には、押下時点のリポジトリ全体の写しが置いてあります。差分が触っていないファイル（依存先・型定義・設定・既存のテスト）もここから読めます。`,
+    'この写しは押下時点で凍結されており、以後は書き換わりません。実行しても、ここに無い依存やビルド結果は解決しません。',
+    `まず依頼・背景・差分を読んでください。そのうえで判断に必要な場合にだけ、\`${afterTreeDir}/\` の中を追加で読んでください。読む前から網羅的に探索する必要はありません。`,
+    `\`${afterTreeDir}/${noticeFile}\` に、この写しへ含められなかったファイルが書いてあります。そこに挙がっているものは「存在しない」のではなく「押下時点で内容を取得できなかった」ものです。`,
+  ];
+}
+
 /** 内容を載せなかった理由の、プロンプトへ出す文言（Issue #926 F）。 */
 const UNTRACKED_OMISSION_LABELS: Record<UntrackedOmissionReason, string> = {
   binary: 'バイナリ（NULを含む）',
@@ -208,6 +299,7 @@ const UNTRACKED_OMISSION_LABELS: Record<UntrackedOmissionReason, string> = {
   'per-file-budget': '1ファイルの上限を超える',
   'total-budget': '全体の上限に達した',
   'read-error': '読み取りに失敗',
+  'path-changed': '確認後に実体が差し替わった',
 };
 
 /** byte数を読める形にする。省略の一覧で規模の見当を付けるためだけに使う。 */
@@ -360,13 +452,58 @@ function summarySection(summary: string, kind: ConversationBackgroundKind): stri
 export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
   const summary = input.conversationSummary?.trim() ?? '';
   const backgroundKind = input.conversationBackgroundKind ?? 'summary';
+  const position = input.requestPosition ?? 'front';
+  const request = requestSection(input.userRequest);
   const sections = [
-    systemInstruction(input.artifact, summary !== '', backgroundKind),
-    `## 依頼\n\n${input.userRequest.trim()}`,
+    systemInstruction(
+      input.artifact,
+      summary !== '',
+      backgroundKind,
+      input.afterTreeDir,
+      input.afterTreeNoticeFile,
+    ),
+    position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
     artifactSection(input.artifact),
+    position === 'end' ? request : undefined,
+    input.restateRequestAtEnd === true ? restatedRequestSection(input) : undefined,
   ].filter((section): section is string => section !== undefined);
   return sections.join('\n\n');
+}
+
+/**
+ * 依頼の区画（Issue #1044 条件B-pos）。
+ *
+ * 位置を変えても**同じ文字列**を出す。見出しや前置きを位置ごとに変えると、位置以外も同時に
+ * 変わってしまい、差の原因を位置へ帰属できなくなる。
+ */
+function requestSection(userRequest: string): string {
+  return `## 依頼\n\n${userRequest.trim()}`;
+}
+
+/**
+ * 末尾へ再掲する依頼（Issue #1044 条件B-repeat）。
+ *
+ * 冒頭の依頼を残したまま、末尾へもう一度置く。位置だけを見る条件ではない（位置のみを変える
+ * のは {@link SecondOpinionInput.requestPosition} の `'end'`）。ここは実運用で効きそうな形を
+ * そのまま試す枠で、見出しと読み直しを促す一文を足している。
+ *
+ * 依頼の後ろに何も続かないときは出さない。その場合、依頼はもともと末尾にあり、再掲しても
+ * 同じ文が2回続くだけになる。**追加資料の有無だけで決めない**。資料が無くても背景が長ければ
+ * 依頼は読み終わりから十分遠くなるので、背景も「後ろに続くもの」として数える。
+ */
+function restatedRequestSection(input: SecondOpinionInput): string | undefined {
+  const hasBackground = (input.conversationSummary?.trim() ?? '') !== '';
+  if (input.artifact.kind === 'none' && !hasBackground) {
+    return undefined;
+  }
+  return [
+    '## 最終確認: 今回答えてほしいこと',
+    '',
+    '上の資料を読んだうえで、次の依頼に答えてください（冒頭に置いたものと同じ依頼です）。',
+    '',
+    fence(input.userRequest.trim(), 'markdown'),
+  ].join('\n');
 }
 
 /**
@@ -442,7 +579,11 @@ export function materialUpdateAckToken(revision: number): string {
  * 何を聞くかは利用者が次の追加の相談で決める。通知と一緒に質問させると、利用者が頼んで
  * いない観点でのレビューが始まり、そのぶん待たされる。
  */
-export function buildMaterialUpdatePrompt(revision: number, materialPath: string): string {
+export function buildMaterialUpdatePrompt(
+  revision: number,
+  materialPath: string,
+  afterTreeDir?: string | undefined,
+): string {
   const token = materialUpdateAckToken(revision);
   return [
     '以下は、この相談を依頼した利用者本人からの連絡です。',
@@ -451,6 +592,13 @@ export function buildMaterialUpdatePrompt(revision: number, materialPath: string
     `新しい材料は、この作業ディレクトリの \`${materialPath}/\` にあります。`,
     `- 差分の全量: \`${materialPath}/${REVIEW_BUNDLE_DIFF_FILE}\``,
     `- ベース側のコード: \`${materialPath}/${REVIEW_BUNDLE_BASE_DIR}/<パス>\``,
+    // 写しは最初の押下時点で凍結されており、更新には追随しない（Issue #1062）。黙っていると
+    // 新しい差分と古い写しが同じ時点のものとして読まれる
+    ...(afterTreeDir === undefined || afterTreeDir === ''
+      ? []
+      : [
+          `なお \`${afterTreeDir}/\` の写しは最初の押下時点のままで、この更新には追随していません。更新後の内容は \`${materialPath}/\` を根拠にしてください。`,
+        ]),
     '',
     '**以後はこちらを正本として扱ってください。** 最初に渡した材料と、それより前の更新は、更新前の状態として残してあります（何が変わったのかを読む用途にだけ使ってください）。',
     'これまでの議論のうち、更新後の材料と食い違う部分があれば、次に質問されたときにその食い違いを指摘してください。前提が変わったことに気付かないまま話を続けないでください。',

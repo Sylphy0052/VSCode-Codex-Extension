@@ -462,3 +462,16 @@ describe('AdvisorSession の材料の更新（Issue #975）', () => {
     advisor.close('userEnded');
   });
 });
+
+describe('AdvisorSession は送信直前に資格情報を伏せる（Issue #1171）', () => {
+  it('追加の質問に混ざったトークンを相談先へ送らない', async () => {
+    const session = new FakeSession();
+    const advisor = createAdvisor(session);
+    // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+    const fakeToken = `glpat-${'x1'.repeat(12)}`;
+    await advisor.ask(`この ${fakeToken} が漏れていないか見て`);
+    expect(session.prompts[0]).not.toContain(fakeToken);
+    expect(session.prompts[0]).toContain('<MASKED>');
+    expect(session.prompts[0]).toContain('が漏れていないか見て');
+  });
+});

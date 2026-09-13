@@ -13,7 +13,7 @@ import {
   normalizeSecondOpinionCandidates,
   type SecondOpinionCandidate,
 } from '../../src/secondOpinion/candidates';
-import { buildSecondOpinionPrompt } from '../../src/secondOpinion/prompt';
+import { buildSecondOpinionPrompt, type SecondOpinionInput } from '../../src/secondOpinion/prompt';
 import { runSecondOpinion, SecondOpinionRegistry } from '../../src/secondOpinion/run';
 import { captureWorkspaceSnapshot } from '../../src/secondOpinion/snapshot';
 
@@ -221,6 +221,32 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     expect(prompt).toContain('この変更をレビューして');
   });
 
+  it('写しの説明ファイルは、実体化した側から渡された名前で名指しする（Issue #1103）', () => {
+    const input: SecondOpinionInput = {
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: 'diff --git a/a.ts b/a.ts',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+      afterTreeDir: 'after',
+    };
+
+    // 既定では固定の名前を名指しする
+    expect(buildSecondOpinionPrompt(input)).toContain('`after/.frozen-after-tree.txt`');
+    // 衝突して別名になった場合は、その名前を名指しする
+    expect(
+      buildSecondOpinionPrompt({ ...input, afterTreeNoticeFile: '.frozen-after-tree-1.txt' }),
+    ).toContain('`after/.frozen-after-tree-1.txt`');
+  });
+
   it('差分を切り詰めたときは、その旨を本文に載せる', () => {
     const prompt = buildSecondOpinionPrompt({
       userRequest: 'レビューして',
@@ -259,6 +285,116 @@ describe('buildSecondOpinionPrompt（Issue #894）', () => {
     });
     expect(prompt).toContain('````diff');
     expect(prompt).toContain(diff);
+  });
+
+  it('restateRequestAtEndを指定すると依頼文が末尾へも載る（Issue #1044 条件B）', () => {
+    const userRequest = 'この設計判断が妥当か教えてほしい';
+    const withRestate = buildSecondOpinionPrompt({
+      userRequest,
+      restateRequestAtEnd: true,
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    });
+    // 冒頭の「## 依頼」と末尾の再掲で2回。片方しか無ければ介入が効いていない
+    expect(withRestate.split(userRequest).length - 1).toBe(2);
+    expect(withRestate).toContain('## 最終確認: 今回答えてほしいこと');
+    // 再掲は差分より後ろに置かないと、資料の手前に問いが埋もれる状態が変わらない
+    expect(withRestate.indexOf('## 最終確認')).toBeGreaterThan(
+      withRestate.indexOf('+const a = 1;'),
+    );
+  });
+
+  it('restateRequestAtEndを指定しなければ既定の挙動が変わらない（Issue #1044）', () => {
+    const input = {
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges' as const,
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    };
+    expect(buildSecondOpinionPrompt(input)).toBe(
+      buildSecondOpinionPrompt({ ...input, restateRequestAtEnd: false }),
+    );
+    expect(buildSecondOpinionPrompt(input)).not.toContain('## 最終確認');
+  });
+
+  it('追加資料も背景も無いときは末尾へ再掲しない（Issue #1044）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: '設計の考え方を聞きたい',
+      restateRequestAtEnd: true,
+      artifact: { kind: 'none' },
+    });
+    expect(prompt).not.toContain('## 最終確認');
+    expect(prompt.split('設計の考え方を聞きたい').length - 1).toBe(1);
+  });
+
+  it('追加資料が無くても背景が続くなら末尾へ再掲する（Issue #1044）', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: '設計の考え方を聞きたい',
+      conversationSummary: 'これまでの経緯',
+      restateRequestAtEnd: true,
+      artifact: { kind: 'none' },
+    });
+    // 依頼の後ろに背景が続く以上、依頼は読み終わりから遠い。資料の有無だけで判断しない
+    expect(prompt).toContain('## 最終確認');
+    expect(prompt.indexOf('## 最終確認')).toBeGreaterThan(prompt.indexOf('これまでの経緯'));
+  });
+
+  it('requestPosition: end は依頼を末尾へ移動する（Issue #1044 条件B-pos）', () => {
+    const userRequest = 'この設計判断が妥当か教えてほしい';
+    const input = {
+      userRequest,
+      artifact: {
+        kind: 'workspaceChanges' as const,
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const a = 1;',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+    };
+    const front = buildSecondOpinionPrompt(input);
+    const end = buildSecondOpinionPrompt({ ...input, requestPosition: 'end' });
+
+    // 移動であって複製ではない。出現回数が増えると「位置の効果」と「2回出ることの効果」を
+    // 分離できなくなる
+    expect(end.split(userRequest).length - 1).toBe(1);
+    expect(end.indexOf('## 依頼')).toBeGreaterThan(end.indexOf('+const a = 1;'));
+    expect(front.indexOf('## 依頼')).toBeLessThan(front.indexOf('+const a = 1;'));
+    // 区画の中身は同一。並び以外が変わっていれば長さが動く
+    expect(end.length).toBe(front.length);
+  });
+
+  it('requestPosition の既定は front で、指定しない場合と同じになる（Issue #1044）', () => {
+    const input = {
+      userRequest: 'レビューして',
+      artifact: { kind: 'none' as const },
+    };
+    expect(buildSecondOpinionPrompt(input)).toBe(
+      buildSecondOpinionPrompt({ ...input, requestPosition: 'front' }),
+    );
   });
 
   it('レビュー対象なしなら依頼文だけを載せる', () => {
@@ -355,6 +491,8 @@ describe('runSecondOpinion（Issue #894）', () => {
         sandbox: 'read-only',
         // MCPサーバは1本も載せない（Issue #944）
         disableMcpServers: true,
+        // skillの一覧も提示させない（Issue #1061）。提示があるとbundleの外を読みに行く
+        disableSkills: true,
       },
     ]);
   });
@@ -574,5 +712,39 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
     expect(result.snapshot.truncated).toBe(false);
     expect(result.snapshot.diffOmissions).toEqual([]);
     expect(result.snapshot.diffPartials).toEqual([]);
+  });
+});
+
+describe('runSecondOpinion は送信直前に資格情報を伏せる（Issue #1171）', () => {
+  // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+  const fakeToken = `ghp_${'a1b2c3d4'.repeat(5)}`;
+
+  it('依頼文・背景・差分のどこにあっても、送る本文には残らない', async () => {
+    const host = new FakeHost();
+    await runSecondOpinion(host, {
+      cwd: '/repo',
+      candidate: CANDIDATE,
+      request: `GITHUB_TOKEN=${fakeToken} で push できない理由を見て`,
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: {
+          baseCommit: 'abc1234',
+          diff: '+const password = "hunter2-hunter2";',
+          truncated: false,
+          untrackedFiles: [],
+          untrackedOmissions: [],
+          diffOmissions: [],
+          diffPartials: [],
+        },
+      },
+      conversationSummary: `Authorization: Bearer ${fakeToken}`,
+      conversationBackgroundKind: 'summary',
+      headless: true,
+    });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).not.toContain(fakeToken);
+    expect(prompt).not.toContain('hunter2-hunter2');
+    expect(prompt).toContain('<MASKED>');
+    expect(prompt).toContain('push できない理由を見て');
   });
 });

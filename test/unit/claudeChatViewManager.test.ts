@@ -1,3 +1,7 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/streamSession';
@@ -118,6 +122,8 @@ function createManager(options?: {
   store?: ClaudeSessionStore;
   onActivity?: (activity: ChatActivity) => void;
   sessionSettings?: SessionModelSettingsStore;
+  /** 引き継ぎのポインタファイル（Issue #1079）の置き場所。 */
+  globalStorageDir?: string;
 }): {
   manager: ClaudeChatViewManager;
   store: ClaudeSessionStore;
@@ -138,6 +144,7 @@ function createManager(options?: {
     options?.memoryMemento ?? fakeMemento(),
     undefined,
     options?.sessionSettings,
+    options?.globalStorageDir ?? mkdtempSync(join(tmpdir(), 'claude-handoff-')),
   );
   return { manager, store };
 }
@@ -318,6 +325,27 @@ describe('ClaudeChatViewManager', () => {
 
       // 見つからず新規エントリとして作り直されるため、resume経由でstart()がもう一度呼ばれる
       expect(calls).toHaveLength(2);
+    });
+  });
+
+  describe('自動引き継ぎの初期値の配線（Issue #1091）', () => {
+    it('設定が未指定なら新しいセッションはONで始まる', async () => {
+      const { sessions } = stubStartCapturing();
+      const { manager } = createManager();
+
+      await manager.openNew('/workspace/root');
+
+      expect(sessions[0]?.getState().autoHandoff).toBe(true);
+    });
+
+    it('設定をOFFにすると新しいセッションはOFFで始まる', async () => {
+      __mock.setConfig('agent', { 'autoHandoff.enabled': false });
+      const { sessions } = stubStartCapturing();
+      const { manager } = createManager();
+
+      await manager.openNew('/workspace/root');
+
+      expect(sessions[0]?.getState().autoHandoff).toBe(false);
     });
   });
 
@@ -634,6 +662,55 @@ describe('ClaudeChatViewManager', () => {
       expect(__mock.lastCreatedPanel()).toBeDefined();
     });
   });
+
+  it.each(['success', 'cancel', 'failure'] as const)(
+    'ファイルも戻す修正はrewind_filesを使う: %s',
+    async (scenario) => {
+      const { sessions } = stubStartCapturing();
+      const fork = vi
+        .spyOn(ClaudeStreamSession.prototype, 'rewindConversationToTurn')
+        .mockResolvedValue({
+          ok: true,
+          prefillText: undefined,
+          error: undefined,
+          succeededCount: 1,
+        });
+      const preview = vi
+        .spyOn(ClaudeStreamSession.prototype, 'previewRewindFiles')
+        .mockResolvedValue({
+          ok: true,
+          filesChanged: ['a.txt'],
+          insertions: 1,
+          deletions: 0,
+          error: undefined,
+        });
+      const apply = vi.spyOn(ClaudeStreamSession.prototype, 'applyRewindFiles').mockResolvedValue({
+        ok: scenario !== 'failure',
+        filesChanged: [],
+        insertions: 0,
+        deletions: 0,
+        error: scenario === 'failure' ? 'conflict' : undefined,
+      });
+      const send = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
+      const { manager } = createManager();
+      const id = await manager.openNew('/workspace/root');
+      sessions[0]!.receive(initLine(id!));
+      sessions[0]!.receive(resultLine());
+      if (scenario === 'cancel') __mock.showWarningMessageAnswer = undefined;
+      await manager.simulateWebviewMessage(id!, {
+        type: 'editResend',
+        turnId: 'u1',
+        text: 'revised',
+        restoreFiles: true,
+      });
+      await flush();
+      expect(fork).toHaveBeenCalled();
+      expect(preview).toHaveBeenCalledWith('u1');
+      expect(apply).toHaveBeenCalledTimes(scenario === 'cancel' ? 0 : 1);
+      expect(send).toHaveBeenCalledTimes(scenario === 'success' ? 1 : 0);
+      manager.dispose();
+    },
+  );
 
   describe('会話の途中のターンから分岐（issue #333、design.md §14.61）', () => {
     it('セッション全体のforkと同じ経路で新しいタブを開き、rewindConversationToTurnへ対象のuuidを渡す', async () => {
@@ -2513,6 +2590,9 @@ describe('X3: 脇道の質問のmanager層配線（issue #334、issue #340横断
 describe('handoffToNewSession（issue #694）', () => {
   beforeEach(() => {
     __mock.reset();
+    // 引き継ぎ先のレベル判定（Issue #1082）は実CLIをヘッドレス起動する。ここで見たいのは
+    // ポインタファイルの書き出しと初回送信なので、判定は切って外部プロセスに触らせない
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
     __mock.setWorkspaceFolder('/workspace/root');
     vi.restoreAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -2528,16 +2608,30 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toHaveLength(0);
   });
 
-  it('transcriptが解決できれば、新セッションへ固定文言とパスを送る', async () => {
+  it('transcriptが解決できれば、ポインタファイルを書いて新セッションへそのパスを送る', async () => {
     stubStartCapturing();
     const sendSpy = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
     const store = fakeStore({ resolveTranscriptPath: async () => '/home/user/.claude/x.jsonl' });
-    const { manager } = createManager({ store });
+    const globalStorageDir = mkdtempSync(join(tmpdir(), 'claude-handoff-'));
+    const { manager } = createManager({ store, globalStorageDir });
     await manager.openNew('/workspace/root');
 
     await manager.handoffToNewSession();
 
-    expect(sendSpy).toHaveBeenCalledWith(expect.stringContaining('/home/user/.claude/x.jsonl'), []);
+    // 初回プロンプトはポインタファイルのパスを指すだけで、transcript本体は指さない
+    const [prompt] = sendSpy.mock.calls[0] ?? [];
+    expect(prompt).toContain(join(globalStorageDir, 'handoff'));
+    expect(prompt).not.toContain('/home/user/.claude/x.jsonl');
+    expect(prompt).toContain('全文読み込まないこと');
+
+    // transcriptの在処と抽出コマンドはポインタファイル側にある
+    const pointerPath = /(\/\S+\.md)/u.exec(String(prompt))?.[1];
+    expect(pointerPath).toBeDefined();
+    const pointer = readFileSync(pointerPath!, 'utf8');
+    expect(pointer).toContain('/home/user/.claude/x.jsonl');
+    expect(pointer).toContain('isCompactSummary');
+    expect(pointer).toContain('file-history-snapshot');
+
     // 新セッションが増えている（元のタブ+新タブ）
     expect(__mock.createdPanels.length).toBe(2);
   });
@@ -2559,5 +2653,89 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(__mock.messages.errors).toContainEqual(
       expect.stringContaining('transcriptが見つかりませんでした'),
     );
+  });
+});
+
+describe('handoffプロンプトの決定論検知で自動引き継ぎする（Issue #1150）', () => {
+  /** `handoff` skillの出力そのもの。ソース中にバックティックの連続を書かずに組む。 */
+  const HANDOFF_PROMPT = [
+    '一段落したので引き継ぐ。',
+    '',
+    `${'`'.repeat(4)}markdown`,
+    '# 継続 2026-09-13 main',
+    '',
+    '作業: 決定論検知の実装',
+    '`'.repeat(4),
+  ].join('\n');
+
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * タブを1枚開き、`text` を応答本文としてターンを1回完了させる。
+   *
+   * 返すのは `ClaudeStreamSession.start` が呼ばれた回数の記録。自動引き継ぎが発火すると
+   * 新しいセッションが開くので2件になる。
+   */
+  async function finishTurnWith(text: string): Promise<ClaudeStreamSession[]> {
+    const { sessions } = stubStartCapturing();
+    // 引き継ぎ先への初回送信は実プロセスを要求する（`start` を差し替えているので `proc` が
+    // 無い）。ここで見たいのは新しいセッションが開いたことなので、送信は空振りさせる
+    vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
+    const store = fakeStore({
+      resolveTranscriptPath: async () => '/home/user/.claude/projects/repo/session-1150.jsonl',
+    });
+    const { manager } = createManager({ store });
+    await manager.openNew('/workspace/root');
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-1150'));
+    session.receive(assistantTextLine('u1', text));
+    session.receive(resultLine());
+    await flush();
+    return sessions;
+  }
+
+  // これが本Issueの主目的。分類器を切っていても、handoffプロンプトが出れば引き継ぐ
+  it('router=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await vi.waitFor(() => {
+      expect(sessions).toHaveLength(2);
+    });
+  });
+
+  it('handoffプロンプトが無ければ、router=false のときは従来どおり発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const sessions = await finishTurnWith('直しました。次はテストを足す。');
+    await flush();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onAssistantSuggestion': false,
+    });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await flush();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('自動引き継ぎ自体がOFFなら発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.enabled': false, 'autoHandoff.router': false });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await flush();
+    expect(sessions).toHaveLength(1);
   });
 });

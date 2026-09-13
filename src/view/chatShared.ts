@@ -27,6 +27,7 @@ import {
   verifyRealPathWithinWorkspace,
   type DiffPathResolution,
 } from '../util/diffWorkspacePath';
+import { nodeRevertFilePort, sameFileIdentity, type RevertFilePort } from '../util/revertFile';
 import { chatCsp } from './chatCsp';
 import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
@@ -515,11 +516,18 @@ function resolveDiffTarget(
  * シンボリックリンクによる脱出も無いかを確かめる（`verifyRealPathWithinWorkspace`。
  * issue #144の追記処理と同じ考え方）。Webview側（`chatScript.ts`）にも簡易な判定を
  * 置いてボタンの出し分けに使うが、ここが最終判定であり、Webview側の結果は信用しない。
+ *
+ * 相対パスの基準は**その会話の作業ディレクトリ**（`cwd`、issue #1178）。ワークスペースの
+ * 先頭ルートで代替すると、複数ルートの2番目やサブディレクトリで動いている会話の変更が
+ * 別の場所のファイルへ向く。判らないときは対象を特定できない理由を返す。
  */
-async function resolveDiffFileForAction(diff: FileDiff): Promise<DiffPathResolution> {
+async function resolveDiffFileForAction(
+  diff: FileDiff,
+  cwd: string | undefined,
+): Promise<DiffPathResolution> {
   const targetPath = diff.movePath ?? diff.path;
   const roots = workspaceFolderPaths();
-  const staticCheck = resolveWithinWorkspace(targetPath, roots);
+  const staticCheck = resolveWithinWorkspace(targetPath, roots, cwd);
   if (!staticCheck.ok) {
     return staticCheck;
   }
@@ -537,6 +545,7 @@ export async function handleOpenDiffFile(
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  cwd: string | undefined,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
@@ -549,7 +558,7 @@ export async function handleOpenDiffFile(
     );
     return;
   }
-  const resolved = await resolveDiffFileForAction(diff);
+  const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
     return;
@@ -666,6 +675,7 @@ export async function handleOpenDiffEditor(
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  cwd: string | undefined,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
@@ -678,7 +688,7 @@ export async function handleOpenDiffEditor(
     );
     return;
   }
-  const resolved = await resolveDiffFileForAction(diff);
+  const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
     return;
@@ -732,12 +742,22 @@ export async function confirmRevertDiff(diff: FileDiff): Promise<boolean> {
  * 突き合わせる。1回目は確認を出す価値があるかどうかの事前チェック、2回目はTOCTOU対策
  * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。issue #144のメモリ追記と
  * 同じ考え方）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
+ *
+ * 内容だけでなく**場所と実体**も確認後にもう一度確かめる（Issue #1170）。応答待ちの間に
+ * 親ディレクトリがワークスペース外へのsymlinkへ差し替わると、同じ絶対パス文字列が別の
+ * 実体を指し、本文の一致だけでは見抜けない。確認後に実体パスを取り直して確認前と同じで
+ * なければ止め、`update` は確認前に控えた `dev`/`ino` と開いたfdの `fstat` が一致した
+ * ときだけ、そのfdから読んでそのfdへ書く（`revertPort`）。`add` の削除と `delete` の
+ * 再作成はfdを持てないため、再検査の直後に行う。再検査と操作の間の短い窓は残る
+ * （Node.jsに `openat` / `unlinkat` 相当が無い）。
  */
 export async function handleRevertDiff(
   fs: FileSystemPort,
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  cwd: string | undefined,
+  revertPort: RevertFilePort = nodeRevertFilePort,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
@@ -746,11 +766,14 @@ export async function handleRevertDiff(
   const plan = planDiffActions(diff);
   if (!plan.revert) {
     void vscode.window.showWarningMessage(
-      `この変更は戻せません（移動を伴う変更、または差分を復元できない形式です）: ${diff.path}`,
+      // 新規作成と確認できていない `add` は削除で戻すと既存ファイルを消しうる（issue #1176）
+      diff.kind === 'add' && diff.createUnverified === true
+        ? `この変更は戻せません（新規作成か既存ファイルの上書きかを実行結果から確認できないため、削除による取り消しは行いません）: ${diff.path}`
+        : `この変更は戻せません（移動を伴う変更、または差分を復元できない形式です）: ${diff.path}`,
     );
     return;
   }
-  const resolved = await resolveDiffFileForAction(diff);
+  const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
     return;
@@ -761,27 +784,76 @@ export async function handleRevertDiff(
     void vscode.window.showWarningMessage(`変更を戻せません: ${precheck.error}`);
     return;
   }
+  // 確認前の実体を控える。`delete` の戻しは「無い」ことが前提なので控えるものが無い
+  const identityBefore =
+    diff.kind === 'delete' ? undefined : await revertPort.identify(resolved.absolutePath);
   if (!(await confirmRevertDiff(diff))) {
     return;
   }
-  // TOCTOU対策: 確認モーダル（ユーザー応答待ちで不定長）の間に内容が変わりうるため、
-  // 書き込み・削除の直前にもう一度読み直して確かめる（issue #144のメモリ追記と同じ考え方）
-  const atRevert = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
-  const recomputed = computeDiffContents(diff, atRevert);
-  if (!recomputed.ok) {
-    void vscode.window.showWarningMessage(`変更を戻せませんでした: ${recomputed.error}`);
+  // TOCTOU対策（Issue #1170）: 応答待ちの間に親がsymlinkへ差し替わっていないか、実体パスを
+  // 取り直して確認前と突き合わせる。文字列は同じでも指す先が変わりうる
+  const rechecked = await resolveDiffFileForAction(diff, cwd);
+  if (!rechecked.ok || rechecked.absolutePath !== resolved.absolutePath) {
+    void vscode.window.showWarningMessage(
+      `変更を戻せませんでした: 確認している間に対象の場所が変わりました: ${diff.path}`,
+    );
     return;
   }
   try {
-    if (diff.kind === 'add') {
-      await vscode.workspace.fs.delete(vscode.Uri.file(resolved.absolutePath), {
-        useTrash: true,
+    if (diff.kind === 'update') {
+      if (identityBefore === undefined) {
+        void vscode.window.showWarningMessage(
+          '変更を戻せませんでした: ファイルが見つかりません（既に削除されている可能性があります）',
+        );
+        return;
+      }
+      // 開いたfdが確認前と同じ実体のときだけ、そのfdから読み直して同じfdへ書く
+      const outcome = await revertPort.rewrite(resolved.absolutePath, identityBefore, (current) => {
+        const recomputed = computeDiffContents(diff, current);
+        return recomputed.ok
+          ? { ok: true, content: recomputed.before }
+          : { ok: false, reason: recomputed.error };
       });
+      if (outcome.kind === 'aborted') {
+        void vscode.window.showWarningMessage(`変更を戻せませんでした: ${outcome.reason}`);
+        return;
+      }
+      if (outcome.kind !== 'written') {
+        void vscode.window.showWarningMessage(
+          `変更を戻せませんでした: 確認している間に対象のファイルが差し替えられました: ${diff.path}`,
+        );
+        return;
+      }
     } else {
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.file(resolved.absolutePath),
-        Buffer.from(recomputed.before, 'utf8'),
-      );
+      // `add` の削除と `delete` の再作成はfdを持てない。内容（`add` は実体も）を操作の直前に
+      // もう一度確かめる（issue #144のメモリ追記と同じ考え方）
+      if (diff.kind === 'add') {
+        const identityNow = await revertPort.identify(resolved.absolutePath);
+        if (
+          identityBefore === undefined ||
+          identityNow === undefined ||
+          !sameFileIdentity(identityBefore, identityNow)
+        ) {
+          void vscode.window.showWarningMessage(
+            `変更を戻せませんでした: 確認している間に対象のファイルが差し替えられました: ${diff.path}`,
+          );
+          return;
+        }
+      }
+      const atRevert = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
+      const recomputed = computeDiffContents(diff, atRevert);
+      if (!recomputed.ok) {
+        void vscode.window.showWarningMessage(`変更を戻せませんでした: ${recomputed.error}`);
+        return;
+      }
+      if (diff.kind === 'add') {
+        await vscode.workspace.fs.delete(vscode.Uri.file(resolved.absolutePath), {
+          useTrash: true,
+        });
+      } else {
+        // 無いときだけ作る（`wx`）。確認後に同じパスへ別のファイルが作られていれば失敗する
+        await revertPort.createNew(resolved.absolutePath, recomputed.before);
+      }
     }
   } catch (e) {
     void vscode.window.showErrorMessage(
@@ -880,20 +952,19 @@ export interface ChatShellOptions {
   /**
    * 発言ごとに「ここまで戻す」ボタンを出すか（Claude Code画面のみ）。
    *
-   * Codexには会話の途中から**分岐**する導線（「ここから分岐」）が既にあり、巻き戻しは
-   * 実装しない（design.md「Claude Codeの巻き戻し」。thread/rollbackはdeprecatedかつ
-   * ファイルを戻さない）。Claude Codeは`rewind_files`でファイルだけを戻せる。
+   * Claude Codeのファイルだけを戻す操作。「修正」の「ファイルも戻す」は両画面で
+   * 常に使える別の導線で、Codexでは記録した差分、Claude Codeではrewind_filesを使う。
    */
   showRewind?: boolean;
   /**
    * 発言ごとに「ここから分岐」ボタンを出すか（issue #333、design.md §14.61）。
    *
-   * Codex画面は常にtrue相当（`showTurnFork`を渡さなくても、対象は「直前の発言の
+   * Codex画面は常にtrue相当（`showTurnFork`を渡さなくても、対象は「押した発言自身の
    * `turnId`」として既定で計算される）。Claude Code画面はこれをtrueにして渡し、対象を
-   * 「発言自身のuuid（`item.id`）」に切り替える。`rewind_conversation`（会話の途中の
-   * ターンから分岐）はfork対象の発言自身を戻り先として指定する仕様のため、Codexの
-   * `thread/fork`（対象は「引き継ぐ最後のターン」＝直前の発言）とは向きが違う
-   * （`chatScript.ts` の `turnForkTarget` 参照）。
+   * 「発言自身のuuid（`item.id`）」に切り替える。どちらも押した発言自身を指すが、渡し方は
+   * 違う。Codexの `thread/fork` は `beforeTurnId`（そのターンとそれ以降を除外する指定。
+   * Issue #1161）として**ターン**のidを取り、`rewind_conversation` は戻り先の**発言**の
+   * uuidを取る（`chatScript.ts` の `turnForkTarget` 参照）。
    */
   showTurnFork?: boolean;
   /**
@@ -995,6 +1066,8 @@ export interface ChatShellOptions {
    * 「…」メニューのトグルの初期状態に使う（issue #994）。
    */
   loopAdvisorEnabled?: boolean;
+  /** CodexまたはClaude Codeの使用量上限解除後の自動続行が有効か。 */
+  limitAutoResumeEnabled?: boolean;
 }
 
 /** 設定から来る文字列をHTMLへ埋め込む前に無害化する。 */
@@ -1045,6 +1118,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2" width="11" height="12" rx="1.2"/><path d="m5 6 1.2 1.2L8.5 5M9.5 6h1.5M5 10l1.2 1.2L8.5 9M9.5 10h1.5"/></svg>',
   handoff:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h8M8.5 4.5 12 8l-3.5 3.5"/><path d="M2.5 3.5v9"/></svg>',
+  autoHandoff:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 3v10"/><path d="M3.5 8h5M6.5 5.5 9 8l-2.5 2.5"/><path d="M14.2 9.6A3.4 3.4 0 1 1 13 6.2"/><path d="M11.2 4.2h2.2v2.2"/></svg>',
   secondOpinion:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 4.2a1 1 0 0 1 1-1h6.4a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H5.4L3 11V8.8h-.2a1 1 0 0 1-1-1z"/><path d="M12.2 6.2h1a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H13V14l-2.4-2.2H8.2"/></svg>',
   previousUserMessage:
@@ -1221,6 +1296,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         pressed: false,
         icon: COMPOSER_ICONS.handoff,
       };
+    case 'autoHandoffToggle':
+      return {
+        ariaLabel: '自動引き継ぎ',
+        title:
+          'コンテキストの残りが少なくなったとき、または自動圧縮が走ったときに、この会話を自動で新しいセッションへ引き継ぎます（ターンの実行中は待ちます）',
+        hidden: false,
+        pressed: true,
+        icon: COMPOSER_ICONS.autoHandoff,
+      };
     case 'secondOpinion':
       return {
         ariaLabel: 'セカンドオピニオン',
@@ -1252,7 +1336,10 @@ function renderComposerButton(
   const title = escapeHtml(spec.title);
   const pressedAttr = spec.pressed ? ' aria-pressed="false"' : '';
   const roleAttr = variant === 'menu' ? ' role="menuitem"' : '';
-  const label = variant === 'menu' ? `<span class="composerOverflowLabel">${ariaLabel}</span>` : '';
+  // ラベルは置き場所によらず常に描画し、表（アイコン列）にある間だけCSSで隠す
+  // （issue #1086）。幅が足りないボタンは実行時に「…」メニューへ移すため、移動先で
+  // ラベルを組み立て直さずに済ませる。
+  const label = `<span class="composerOverflowLabel">${ariaLabel}</span>`;
   const hiddenAttr = spec.hidden ? ' hidden' : '';
   return `<button id="${id}" type="button" class="secondary"${pressedAttr} aria-label="${ariaLabel}" title="${title}"${roleAttr}${hiddenAttr}>${spec.icon}${label}</button>`;
 }
@@ -1314,7 +1401,11 @@ ${chatStyles()}
     </div>
     <ol id="queueList"></ol>
   </div>
-  <div id="status"></div>
+  <div id="limitAutoResumeStatus" role="status" aria-live="polite"${options.limitAutoResumeEnabled === true ? '' : ' hidden'}>上限解除後の自動続行: ON（上限検知待ち）</div>
+  <details id="statusBox" open hidden>
+    <summary title="実行状態・使用量の表示を開閉します"><span class="label">状態</span><span id="statusSummary"></span></summary>
+    <div id="status"></div>
+  </details>
   <div id="todos" hidden>
     <div class="head">TODO一覧</div>
     <ul id="todosList"></ul>
@@ -1351,6 +1442,7 @@ ${chatStyles()}
           <button id="turnSummaryToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.turnSummaryEnabled === true}" aria-label="ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}" title="手動で送る発言の末尾へ要約指示を毎回付けるか切り替えます">${COMPOSER_ICONS.recap}<span class="composerOverflowLabel">ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="loopEngineeringToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopEngineeringEnabled === true}" aria-label="ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}" title="ループが送る指示の末尾へ、機械的な検証・方針変更・撤退の申告の方針を毎回付けるか切り替えます">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="loopAdvisorToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopAdvisorEnabled === true}" aria-label="ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}" title="ゴール駆動ループの各ターンのあとに、独立したAdvisorセッション（既定ではCodexのgpt-5.6-sol）へ進め方の妥当性を確認させるか切り替えます。目的と受入基準を入れたループでのみ動きます。毎ターンCLIの呼び出しが1本増え、Claude Codeの会話でも抜粋はCodexへ送られます。相談先を変えるにはsettings.jsonのagent.chat.loopAdvisor.provider / .modelを指定します">${COMPOSER_ICONS.secondOpinion}<span class="composerOverflowLabel">ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}</span></button>
+          <button id="limitAutoResumeToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.limitAutoResumeEnabled === true}" aria-label="上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}" title="使用量上限のリセット時刻から30秒後に継続指示を送ります。時刻がない場合は30分後に確認し、再開しても上限中なら1分後に再試行します。会話を閉じた場合、承認待ちの場合、手動で中断した場合は送信しません。">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}</span></button>
         </div>
       </div>
     </div>

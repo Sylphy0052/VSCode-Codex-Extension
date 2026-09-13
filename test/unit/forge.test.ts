@@ -653,9 +653,37 @@ describe('createPullRequest', () => {
     expect(call?.args).toEqual([
       'api',
       'projects/:id/merge_requests',
-      `--field=source_branch=${TASK_BRANCH}`,
-      `--field=target_branch=${INTEGRATION_BRANCH}`,
-      '--field=title=T1: 認証APIを実装する',
+      `--raw-field=source_branch=${TASK_BRANCH}`,
+      `--raw-field=target_branch=${INTEGRATION_BRANCH}`,
+      '--raw-field=title=T1: 認証APIを実装する',
+      `--field=description=@${fs.written[0]?.path}`,
+    ]);
+  });
+
+  it('GitLabのtitleが@で始まっても--raw-fieldで文字列のまま渡す（Issue #1109）', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/merge_requests/1' }),
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    await createPullRequest(
+      { cli, fs },
+      {
+        host: 'gitlab',
+        cwd: '/repo/task',
+        base: INTEGRATION_BRANCH,
+        head: TASK_BRANCH,
+        title: '@/etc/hostname',
+        body: '本文',
+      },
+    );
+
+    const args = cli.calls[0]?.args ?? [];
+    expect(args).toContain('--raw-field=title=@/etc/hostname');
+    expect(args.filter((a) => a.startsWith('--field='))).toEqual([
       `--field=description=@${fs.written[0]?.path}`,
     ]);
   });
@@ -911,7 +939,35 @@ describe('createIssue（design.md §16.31 W6 Issue #596）', () => {
     expect(call?.args).toEqual([
       'api',
       'projects/:id/issues',
-      '--field=title=T1: 認証APIを実装する',
+      '--raw-field=title=T1: 認証APIを実装する',
+      `--field=description=@${fs.written[0]?.path}`,
+    ]);
+  });
+
+  it('GitLabのIssue titleとlabelsが@で始まっても--raw-fieldで文字列のまま渡す（Issue #1109）', async () => {
+    const cli = new FakeCli();
+    cli.respond('glab', ['api'], {
+      code: 0,
+      stdout: JSON.stringify({ web_url: 'https://gitlab.example.com/org/repo/-/issues/7' }),
+      stderr: '',
+    });
+    const fs = new FakeForgeFileSystem();
+
+    await createIssue(
+      { cli, fs },
+      {
+        host: 'gitlab',
+        cwd: '/repo/task',
+        title: '@/etc/hostname',
+        body: '本文',
+        labels: '@/etc/passwd',
+      },
+    );
+
+    const args = cli.calls[0]?.args ?? [];
+    expect(args).toContain('--raw-field=title=@/etc/hostname');
+    expect(args).toContain('--raw-field=labels=@/etc/passwd');
+    expect(args.filter((a) => a.startsWith('--field='))).toEqual([
       `--field=description=@${fs.written[0]?.path}`,
     ]);
   });
@@ -1289,7 +1345,7 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
     expect(result.review).toBeUndefined();
   });
 
-  it('reviewPullRequestが失敗（指摘あり相当）してもmergeAndPushIntegrationは呼ぶ（マージを止めない）', async () => {
+  it('reviewPullRequestが失敗（指摘あり相当）したらmergeAndPushIntegrationを呼ばない（Issue #1110）', async () => {
     const { order, steps } = recordingSteps({
       reviewPullRequest: { ok: false, message: 'レビューに失敗しました' },
     });
@@ -1300,10 +1356,46 @@ describe('runTaskPullRequestFlow（design.md §16.18の作る順序を型で固�
       'pushIntegrationBranch',
       'createPullRequest',
       'reviewPullRequest',
-      'mergeAndPushIntegration',
     ]);
     expect(result.review).toEqual({ ok: false, message: 'レビューに失敗しました' });
+    expect(result.mergeOutcome).toBeUndefined();
+  });
+
+  it('reviewPullRequestが失敗したらmarkPullRequestReadyも呼ばない（Issue #1110）', async () => {
+    const { order, markPullRequestReadyUrls, steps } = recordingSteps({
+      reviewPullRequest: { ok: false, message: 'レビューの指摘が2件残っています' },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+    ]);
+    expect(markPullRequestReadyUrls).toEqual([]);
+    expect(result.markReady).toBeUndefined();
+    expect(result.mergeOutcome).toBeUndefined();
+  });
+
+  it('reviewPullRequestが成功すれば従来どおりmerge・ready化まで進む（Issue #1110）', async () => {
+    const { order, steps } = recordingSteps({
+      reviewPullRequest: { ok: true },
+      markPullRequestReady: { ok: true },
+    });
+    const result = await runTaskPullRequestFlow(steps);
+
+    expect(order).toEqual([
+      'pushTaskBranch',
+      'pushIntegrationBranch',
+      'createPullRequest',
+      'reviewPullRequest',
+      'mergeAndPushIntegration',
+      'markPullRequestReady',
+    ]);
     expect(result.mergeOutcome).toEqual({ merged: true });
+    expect(result.markReady).toEqual({ ok: true });
   });
 
   it('reviewPullRequestを渡さなければ結果のreviewはundefinedで、mergeの順序も変わらない', async () => {
@@ -1965,6 +2057,27 @@ describe('レビューthread操作', () => {
     ]);
     expect(fs.removed).toEqual([fs.written[0]?.path]);
   });
+
+  it.each([['@/etc/hostname'], ['true'], ['42'], ['null']])(
+    'GitHubの返信本文 %s を-fで文字列のまま渡し、-Fのファイル参照・型変換にかけない（Issue #1109）',
+    async (body) => {
+      const cli = new FakeCli();
+      cli.respond('gh', ['api', 'graphql'], { code: 0, stdout: '{}', stderr: '' });
+      const fs = new FakeForgeFileSystem();
+
+      const result = await replyToReviewThread(
+        { cli, fs },
+        { host: 'github', cwd: '/repo', number: 7, threadId: 'PRRT_thread', body },
+      );
+
+      expect(result).toEqual({ ok: true });
+      const args = cli.calls[0]?.args ?? [];
+      expect(args).not.toContain('-F');
+      expect(args[args.indexOf(`body=${body}`) - 1]).toBe('-f');
+      expect(args[args.indexOf('threadId=PRRT_thread') - 1]).toBe('-f');
+      expect(fs.written).toEqual([]);
+    },
+  );
 
   it('GitHubの解決はGraphQL mutationを使う', async () => {
     const cli = new FakeCli();

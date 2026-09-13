@@ -32,6 +32,7 @@ import {
   MAX_REVIEW_BUNDLE_REVISIONS,
   type ReviewBundle,
 } from './reviewBundle';
+import { describeRedaction, redactCredentials } from './redact';
 
 /**
  * Advisorセッションの状態（Issue #929 受入基準）。
@@ -148,6 +149,14 @@ export interface AdvisorSessionOptions {
    * **閉じる責任はこのクラスが持つ。** 渡さない呼び出し（テスト・古い経路）では何もしない。
    */
   bundle?: ReviewBundle | undefined;
+  /**
+   * 押下時点のリポジトリ全体の写しを置いた場所（Issue #1062）。写しが無ければ `undefined`。
+   *
+   * ここで要るのは材料を更新したときの伝え方だけである。写しは1世代目の押下時点で凍結されて
+   * おり、更新には追随しない。黙っていると、Advisorは新しい `changes.diff` と古い写しを
+   * 同じ時点のものとして読む。
+   */
+  afterTreeDir?: string | undefined;
   /**
    * 相談の途中で材料を最新へ更新する手段（Issue #975）。
    *
@@ -357,7 +366,7 @@ export class AdvisorSession {
     let result: AdvisorTurnResult;
     try {
       result = await this.runTurn(
-        buildMaterialUpdatePrompt(next, materialPath),
+        buildMaterialUpdatePrompt(next, materialPath, this.options.afterTreeDir),
         signal,
         () => {
           // 材料が変われば、それ以前の相談から作った下書きは前提が違う。承認できる状態の
@@ -572,19 +581,22 @@ export class AdvisorSession {
     if (signal?.aborted === true) {
       controller.abort();
     }
+    // 送信直前に資格情報らしき値を伏せる（Issue #1171）。追加の質問も引き継ぎの下書き依頼も
+    // 同じモデルサービスへ送る。本文はログへ出さず件数だけ残す
+    const redaction = redactCredentials(this.withMaterialHeader(prompt, options));
+    const redactionNote = describeRedaction(redaction);
+    if (redactionNote !== undefined) {
+      this.options.log?.info(`${ADVISOR_LOG_PREFIX} ${redactionNote}`);
+    }
     try {
-      const response = await awaitSingleTurn(
-        this.session,
-        this.withMaterialHeader(prompt, options),
-        {
-          timeoutMs: this.options.timeoutMs,
-          log: this.options.log,
-          label: ADVISOR_LABEL,
-          logPrefix: ADVISOR_LOG_PREFIX,
-          partialOnTimeout: true,
-          signal: controller.signal,
-        },
-      );
+      const response = await awaitSingleTurn(this.session, redaction.text, {
+        timeoutMs: this.options.timeoutMs,
+        log: this.options.log,
+        label: ADVISOR_LABEL,
+        logPrefix: ADVISOR_LOG_PREFIX,
+        partialOnTimeout: true,
+        signal: controller.signal,
+      });
       if (response.trim() === '') {
         return { ok: false, kind: 'failed', reason: 'セカンドオピニオンの応答が空でした' };
       }

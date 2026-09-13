@@ -5,6 +5,7 @@ import {
   MAX_OUTPUT_CHARS,
   OUTPUT_SOFT_CAP_CHARS,
   addApproval,
+  addPrompt,
   appendNotice,
   appendSideQuestion,
   applyEvent,
@@ -412,9 +413,12 @@ describe('applyEvent', () => {
 
   it('レート制限を取り込む', () => {
     const state = feed(initialChatState, [
-      ['account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 91 } } }],
+      [
+        'account/rateLimits/updated',
+        { rateLimits: { primary: { usedPercent: 100, resetsAt: 1786937045 } } },
+      ],
     ]);
-    expect(state.usage).toEqual({ usedPercent: 91 });
+    expect(state.usage).toEqual({ usedPercent: 100, resetsAt: 1786937045, limited: true });
   });
 
   it('Codexが付けた名前を取り込む', () => {
@@ -672,6 +676,37 @@ describe('承認の出し入れ', () => {
     });
     expect(resolved.approvals).toHaveLength(1);
     expect(applyEvent(initialChatState, 'serverRequest/resolved', {})).toBe(initialChatState);
+  });
+
+  const prompt = {
+    requestId: 7,
+    kind: 'userInput' as const,
+    title: '確認',
+    source: 'codex',
+    message: 'どちらにしますか',
+    blocking: true,
+    fields: [],
+    errors: {},
+    url: undefined,
+  };
+
+  it('質問フォームも解決済み通知で取り下げる（issue #1192）', () => {
+    const added = addPrompt(initialChatState, prompt);
+    const resolved = applyEvent(added, 'serverRequest/resolved', {
+      requestId: 7,
+      threadId: 't1',
+    });
+    expect(resolved.prompts).toEqual([]);
+  });
+
+  it('同じrequestIdの承認と質問フォームを両方取り下げる', () => {
+    const added = addPrompt(addApproval(initialChatState, approval), prompt);
+    const resolved = applyEvent(added, 'serverRequest/resolved', {
+      requestId: 7,
+      threadId: 't1',
+    });
+    expect(resolved.approvals).toEqual([]);
+    expect(resolved.prompts).toEqual([]);
   });
 });
 
