@@ -2396,11 +2396,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const targetIndex = sourceItems.findIndex(
           (item) => item.id === messageId && item.kind === 'userMessage',
         );
-        const previousTurn = sourceItems
-          .slice(0, targetIndex)
-          .filter((item) => item.kind === 'userMessage' && item.turnId)
-          .at(-1)?.turnId;
-        if (targetIndex < 0 || previousTurn !== turnId)
+        // 画面が送ってきた分岐点が、いま戻そうとしている発言のものかを確かめる。
+        // 分岐点は押した発言**自身**のターン（`beforeTurnId`。Issue #1161）なので、
+        // 対象発言の `turnId` と突き合わせる。ここを手前のターンと比べると、
+        // 通常の会話では必ず食い違ってファイル復元が常に失敗する。
+        // 分岐点が無い場合は「会話の先頭の発言を新しい会話として送り直す」ときだけ
+        // 正しいので、対象より前にユーザー発言が無いことを確かめる
+        const targetItem = sourceItems[targetIndex];
+        const mismatched =
+          turnId === undefined
+            ? sourceItems.slice(0, targetIndex).some((item) => item.kind === 'userMessage')
+            : targetItem?.turnId !== turnId;
+        if (targetIndex < 0 || mismatched)
           throw new Error('会話とファイルの戻り先が一致しません。やり直してください');
         const journal = this.fileJournals.get(entry) ?? new FileRewindJournal();
         plan = journal.prepare(entry.cwd, entry.session.getState().items, messageId);
