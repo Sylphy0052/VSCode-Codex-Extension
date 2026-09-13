@@ -75,16 +75,24 @@ export class ConversationViewManager {
         return;
       }
       this.log.info(`分岐を要求: session=${session.id} turn=${turnId}`);
+      // 分岐は数秒かかる。その間にタブを閉じられていると、破棄済みのwebviewへの
+      // postMessageが投げる。閉じられていれば戻す相手も居ないので送らない
+      const notifyFailure = (): void => {
+        if (this.panels.get(session.id) !== panel) {
+          return;
+        }
+        void panel.webview.postMessage({ type: 'forkFailed', turnId });
+      };
       void this.onFork(session, turnId).then(
         (ok) => {
           if (!ok) {
-            void panel.webview.postMessage({ type: 'forkFailed', turnId });
+            notifyFailure();
           }
         },
         (e: unknown) => {
           // 投げて終わった場合もボタンを戻す。戻さないと再試行できない（Issue #1156）
           this.log.error(`分岐に失敗しました: ${e instanceof Error ? e.message : String(e)}`);
-          void panel.webview.postMessage({ type: 'forkFailed', turnId });
+          notifyFailure();
         },
       );
     });
