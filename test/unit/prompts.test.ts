@@ -415,6 +415,30 @@ describe('validatePromptSubmission（issue #1188）', () => {
     expect(validatePromptSubmission(prompt, { action: 'cancel', values: {} })).toEqual({});
   });
 
+  it('__proto__ という名前の項目でも理由を落とさない', () => {
+    // 項目名はMCPサーバが決める。素のオブジェクトへ代入すると握り潰され、検証を通る
+    const hostile = elicitation({
+      mode: 'form',
+      message: '教えて',
+      // オブジェクトリテラルの __proto__ は継承元の指定になる。app-serverからは
+      // JSONで届くので、同じく JSON.parse で自分の項目として作る
+      requestedSchema: JSON.parse(
+        '{"type":"object","properties":{"__proto__":{"type":"string"}},"required":["__proto__"]}',
+      ),
+    }) as PendingPrompt;
+    expect(hostile.fields.map((f) => f.id)).toEqual(['__proto__']);
+    const errors = validatePromptSubmission(hostile, { action: 'submit', values: {} });
+    expect(Object.keys(errors)).toEqual(['__proto__']);
+
+    // 応答を組むところでも落ちず、答えが消えない
+    const response = buildPromptResponse(hostile, {
+      action: 'submit',
+      values: JSON.parse('{"__proto__":["Tokyo"]}') as Record<string, string[]>,
+    }) as { action: string; content: Record<string, unknown> };
+    expect(Object.keys(response.content)).toEqual(['__proto__']);
+    expect(response.content['__proto__']).toBe('Tokyo');
+  });
+
   it('requestUserInputは必須も数値の制約も持たないため素通しする', () => {
     const questions = describeUser([{ id: 'q1', header: 'a', question: '1つめ' }]) as PendingPrompt;
     expect(validatePromptSubmission(questions, { action: 'submit', values: {} })).toEqual({});

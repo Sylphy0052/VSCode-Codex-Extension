@@ -660,6 +660,19 @@ describe('chatScript', () => {
       );
     });
 
+    it('項目名が __proto__ でも理由を落とさない', () => {
+      // 項目名はMCPサーバが決める。素のオブジェクトへの代入は握り潰される
+      const errorsStart = source.indexOf('  function promptErrors(fields, values)');
+      const promptErrors = source.slice(
+        errorsStart,
+        source.indexOf('\n  function ', errorsStart + 1),
+      );
+      expect(promptErrors).toContain('function promptErrors(fields, values)');
+      expect(promptErrors).toContain('return Object.fromEntries(errors);');
+      expect(promptErrors).not.toContain('errors[field.id] = message');
+      expect(renderPrompt).toContain('const errorSetters = new Map();');
+    });
+
     it('差し戻された理由はカードを作り直さずに載せ替える', () => {
       const renderStart = source.indexOf('function renderPrompts');
       const renderPrompts = source.slice(
@@ -674,7 +687,7 @@ describe('chatScript', () => {
 
     it('理由は項目ごとに出し、数値欄へはスキーマの制約を渡す', () => {
       expect(source).toContain("error.className = 'field-error';");
-      expect(source).toContain('errorSetters[field.id] = (message) => {');
+      expect(source).toContain('errorSetters.set(field.id, (message) => {');
       expect(source).toContain("if (field.integer) input.step = '1';");
       expect(source).toContain(
         "if (typeof field.minimum === 'number') input.min = String(field.minimum);",

@@ -1759,7 +1759,8 @@ export function chatScript(
     }
 
     const readers = [];
-    const errorSetters = {};
+    // 項目名が __proto__ でも壊れないようMapで持つ
+    const errorSetters = new Map();
     for (const field of prompt.fields || []) {
       wrap.appendChild(buildField(prompt.requestId, field, readers, errorSetters));
     }
@@ -1773,7 +1774,7 @@ export function chatScript(
     // ホスト側が差し戻した理由を、カードを作り直さずに反映する。作り直すと入力が消える
     const applyErrors = (errors) => {
       const map = errors || {};
-      for (const id of Object.keys(errorSetters)) errorSetters[id](map[id] || '');
+      errorSetters.forEach((show, id) => show(Object.hasOwn(map, id) ? map[id] : ''));
       // 差し戻されたら押せる状態へ戻す。戻さないとタブを開き直すまで送り直せない
       if (Object.keys(map).length > 0) {
         actions.querySelectorAll('button').forEach((b) => (b.disabled = false));
@@ -1786,7 +1787,8 @@ export function chatScript(
       button.textContent = label;
       if (secondary) button.className = 'secondary';
       button.addEventListener('click', () => {
-        const values = {};
+        // 項目名はMCPサーバが決める。素のオブジェクトだと __proto__ の回答が消える
+        const values = Object.create(null);
         if (action === 'submit') {
           for (const read of readers) read(values);
           // 制約に反する回答は送らない。送ってしまうとカードが消え、同じフォームで直せない
@@ -1816,12 +1818,15 @@ export function chatScript(
    * 規則をここへ写している。最終判断はホスト側。
    */
   function promptErrors(fields, values) {
-    const errors = {};
+    const errors = [];
     for (const field of fields) {
-      const message = promptFieldError(field, values[field.id] || []);
-      if (message !== '') errors[field.id] = message;
+      const given = Object.hasOwn(values, field.id) ? values[field.id] : [];
+      const message = promptFieldError(field, Array.isArray(given) ? given : []);
+      if (message !== '') errors.push([field.id, message]);
     }
-    return errors;
+    // 項目名はMCPサーバが決める。素のオブジェクトへ代入すると __proto__ という名前で
+    // 握り潰され、理由が1件も無い（＝検証を通った）ことになる
+    return Object.fromEntries(errors);
   }
 
   function promptFieldError(field, given) {
@@ -1877,10 +1882,10 @@ export function chatScript(
     error.className = 'field-error';
     error.hidden = true;
     box.appendChild(error);
-    errorSetters[field.id] = (message) => {
+    errorSetters.set(field.id, (message) => {
       error.textContent = message;
       error.hidden = message === '';
-    };
+    });
     return box;
   }
 

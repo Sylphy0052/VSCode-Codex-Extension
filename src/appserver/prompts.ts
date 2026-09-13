@@ -318,17 +318,30 @@ export function validatePromptSubmission(
   prompt: PendingPrompt,
   submission: PromptSubmission,
 ): Record<string, string> {
-  const errors: Record<string, string> = {};
   if (submission.action !== 'submit') {
-    return errors;
+    return {};
   }
+  const errors: Array<[string, string]> = [];
   for (const field of prompt.fields) {
-    const message = checkPromptField(field, submission.values[field.id] ?? []);
+    const message = checkPromptField(field, valuesOf(submission.values, field.id));
     if (message !== '') {
-      errors[field.id] = message;
+      errors.push([field.id, message]);
     }
   }
-  return errors;
+  // 項目名はMCPサーバが決める。`errors[id] = message` だと `__proto__` という名前で
+  // 代入が握り潰され、理由が1件も無い（＝検証を通った）ことになる
+  return Object.fromEntries(errors);
+}
+
+/**
+ * 回答から項目の値を取り出す。
+ *
+ * 項目名はMCPサーバが決めるため、`values[id]` の素引きだと `__proto__` で継承元の
+ * オブジェクトが返り、配列として扱ったところで落ちる。自分の項目だけを見る。
+ */
+function valuesOf(values: Record<string, string[]>, id: string): string[] {
+  const given = Object.hasOwn(values, id) ? values[id] : undefined;
+  return Array.isArray(given) ? given : [];
 }
 
 function checkPromptField(field: PromptField, given: string[]): string {
@@ -364,12 +377,12 @@ function checkPromptField(field: PromptField, given: string[]): string {
  */
 export function buildPromptResponse(prompt: PendingPrompt, submission: PromptSubmission): unknown {
   if (prompt.kind === 'userInput') {
-    const answers: Record<string, { answers: string[] }> = {};
+    const answers: Array<[string, { answers: string[] }]> = [];
     for (const field of prompt.fields) {
-      const given = submission.action === 'submit' ? (submission.values[field.id] ?? []) : [];
-      answers[field.id] = { answers: given.filter((v) => v !== '') };
+      const given = submission.action === 'submit' ? valuesOf(submission.values, field.id) : [];
+      answers.push([field.id, { answers: given.filter((v) => v !== '') }]);
     }
-    return { answers };
+    return { answers: Object.fromEntries(answers) };
   }
 
   if (submission.action !== 'submit') {
@@ -383,15 +396,15 @@ function buildElicitationContent(
   prompt: PendingPrompt,
   submission: PromptSubmission,
 ): Record<string, unknown> {
-  const content: Record<string, unknown> = {};
+  const content: Array<[string, unknown]> = [];
   for (const field of prompt.fields) {
-    const given = (submission.values[field.id] ?? []).filter((v) => v !== '');
+    const given = valuesOf(submission.values, field.id).filter((v) => v !== '');
     if (given.length === 0) {
       // 未入力は送らない。空文字を入れるとサーバ側で「答えた」ことになる
       continue;
     }
     if (field.multiple) {
-      content[field.id] = given;
+      content.push([field.id, given]);
       continue;
     }
     const [value] = given;
@@ -399,17 +412,18 @@ function buildElicitationContent(
       continue;
     }
     if (field.input === 'boolean') {
-      content[field.id] = value === 'true';
+      content.push([field.id, value === 'true']);
       continue;
     }
     if (field.input === 'number') {
       const parsed = Number(value);
       if (Number.isFinite(parsed)) {
-        content[field.id] = parsed;
+        content.push([field.id, parsed]);
       }
       continue;
     }
-    content[field.id] = value;
+    content.push([field.id, value]);
   }
-  return content;
+  // 項目名がそのまま鍵になる。`content[id] = v` だと `__proto__` で値が消える
+  return Object.fromEntries(content);
 }

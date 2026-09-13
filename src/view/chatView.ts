@@ -2983,11 +2983,12 @@ function readSubmission(raw: unknown): PromptSubmission | undefined {
     typeof submission['values'] === 'object' && submission['values'] !== null
       ? (submission['values'] as Record<string, unknown>)
       : {};
-  const values: Record<string, string[]> = {};
+  const values: Array<[string, string[]]> = [];
   for (const [id, value] of Object.entries(rawValues)) {
     if (Array.isArray(value)) {
-      values[id] = value.filter((v): v is string => typeof v === 'string');
+      values.push([id, value.filter((v): v is string => typeof v === 'string')]);
     }
   }
-  return { action, values };
+  // 項目名はMCPサーバが決める。`values[id] = ...` だと `__proto__` で回答が消える
+  return { action, values: Object.fromEntries(values) };
 }
