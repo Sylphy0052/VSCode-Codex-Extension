@@ -1718,7 +1718,7 @@ export function chatScript(
    * （elicitation）を同じ形で出す。
    *
    * 入力欄の中身は画面が持ち、送信のときにまとめて集める。状態の再描画で入力中の
-   * 値が消えないよう、カードは中身が変わったときだけ作り直す。
+   * 値が消えないよう、カードはrequestIdごとに作り、以後は使い回す（renderPrompts）。
    */
   function renderPrompt(prompt) {
     const wrap = document.createElement('div');
@@ -1760,7 +1760,7 @@ export function chatScript(
 
     const readers = [];
     for (const field of prompt.fields || []) {
-      wrap.appendChild(buildField(field, readers));
+      wrap.appendChild(buildField(prompt.requestId, field, readers));
     }
 
     const actions = document.createElement('div');
@@ -1792,7 +1792,7 @@ export function chatScript(
   }
 
   /** 1つの入力欄。集め方は readers へ積む。 */
-  function buildField(field, readers) {
+  function buildField(requestId, field, readers) {
     const box = document.createElement('div');
     box.className = 'field';
 
@@ -1821,7 +1821,7 @@ export function chatScript(
 
     const options = field.options || [];
     if (options.length > 0) {
-      buildOptions(box, field, options, readers);
+      buildOptions(requestId, box, field, options, readers);
       return box;
     }
 
@@ -1829,9 +1829,11 @@ export function chatScript(
     return box;
   }
 
-  function buildOptions(box, field, options, readers) {
-    // 同じカードに複数の質問が並ぶため、name はフィールドidで分ける
-    const name = 'prompt-' + field.id;
+  function buildOptions(requestId, box, field, options, readers) {
+    // 同じカードに複数の質問が並ぶためフィールドidで分け、さらにrequestIdでscopeする。
+    // 別カードが同じfield.id（MCPフォームのenvironmentなど）を持つとき、nameが衝突すると
+    // ブラウザが両カードを同一グループとして扱い、片方の選択がもう片方を解除してしまう
+    const name = 'prompt-' + String(requestId) + '-' + field.id;
     const inputs = [];
     for (const option of options) {
       const row = document.createElement('label');
@@ -1897,15 +1899,43 @@ export function chatScript(
     return input;
   }
 
+  /**
+   * 質問カードの一覧。回答前の入力はDOMだけが持つため、一覧が変わっても既存カードは
+   * 作り直さず、増えた分だけ作って消えた分だけ取り除く。全部作り直すと、質問が1件
+   * 増減しただけで残る質問の未送信の本文・選択まで失われる。
+   *
+   * 位置合わせも、ずれているカードだけを動かす。並べ直しのために付け替えると、
+   * 入力中の欄からフォーカスが外れる。
+   */
   function renderPrompts(prompts) {
     const box = el('prompts');
     const list = prompts || [];
-    // 入力中の値を消さないため、顔ぶれが変わったときだけ作り直す
-    const key = list.map((p) => String(p.requestId)).join(',');
-    if (box.dataset.key === key) return;
-    box.dataset.key = key;
-    box.replaceChildren();
-    for (const prompt of list) box.appendChild(renderPrompt(prompt));
+
+    const existing = new Map();
+    for (const card of Array.from(box.children)) {
+      if (card.dataset.requestId !== undefined) existing.set(card.dataset.requestId, card);
+    }
+
+    const next = [];
+    for (const prompt of list) {
+      const id = String(prompt.requestId);
+      const card = existing.get(id);
+      if (card) {
+        existing.delete(id);
+        next.push(card);
+        continue;
+      }
+      const created = renderPrompt(prompt);
+      created.dataset.requestId = id;
+      next.push(created);
+    }
+
+    // 一覧から消えた要求（回答・拒否・取り消し済み）のカードだけを外す
+    for (const card of existing.values()) card.remove();
+
+    next.forEach((card, index) => {
+      if (box.children[index] !== card) box.insertBefore(card, box.children[index] || null);
+    });
   }
 
   function defaultLabel(value) {

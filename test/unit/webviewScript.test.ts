@@ -575,6 +575,47 @@ describe('chatScript', () => {
       expect(field).toContain("if (free !== '') picked.push(free);");
     });
   });
+
+  describe('質問カードの使い回しとラジオグループの分離（issue #1186）', () => {
+    const source = chatScript('Codex', { mode: 'quickPick' });
+    // 関数の中だけを見る（末尾まで取ると他の関数の記述を拾い、否定の検査が空振りする）
+    const start = source.indexOf('function renderPrompts');
+    const renderPrompts = source.slice(start, source.indexOf('\n  function ', start + 1));
+
+    it('関数の本体を切り出せている（陽性対照）', () => {
+      expect(renderPrompts).toContain('function renderPrompts(prompts)');
+      expect(renderPrompts).toContain("const box = el('prompts');");
+      // 次の関数まででちゃんと切れている（切り出しに失敗して全文になっていない）
+      expect(renderPrompts).not.toContain('function defaultLabel');
+    });
+
+    it('既存カードはrequestIdで引き当て、作り直さない', () => {
+      // 回答前の入力はDOMだけが持つ。質問が1件増減しただけで作り直すと、
+      // 残る質問の未送信の本文・選択まで消える
+      expect(renderPrompts).toContain('card.dataset.requestId !== undefined');
+      expect(renderPrompts).toContain('existing.get(id)');
+      expect(renderPrompts).toContain('created.dataset.requestId = id;');
+    });
+
+    it('一覧から消えた要求のカードだけを外す', () => {
+      expect(renderPrompts).toContain('for (const card of existing.values()) card.remove();');
+      // 一括で作り直す旧実装（顔ぶれのキー比較 + replaceChildren）へ戻っていない
+      expect(renderPrompts).not.toContain('box.replaceChildren()');
+      expect(source).not.toContain('box.dataset.key');
+    });
+
+    it('位置がずれたカードだけを動かす', () => {
+      // 並べ直しのために全部を付け替えると、入力中の欄からフォーカスが外れる
+      expect(renderPrompts).toContain('if (box.children[index] !== card)');
+    });
+
+    it('選択肢のグループ名をrequestIdでscopeする', () => {
+      // 別カードが同じfield.idを持つと、nameの衝突で片方の選択が解除される
+      expect(source).toContain("const name = 'prompt-' + String(requestId) + '-' + field.id;");
+      expect(source).toContain('function buildOptions(requestId, box, field, options, readers)');
+      expect(source).toContain('buildField(prompt.requestId, field, readers)');
+    });
+  });
 });
 
 describe('controlPanelScript', () => {
