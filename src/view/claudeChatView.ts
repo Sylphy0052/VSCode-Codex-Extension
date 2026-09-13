@@ -148,6 +148,9 @@ import {
   resolveGitBranch,
   resolveWithRetry,
   waitForFirstTurn,
+  decideOldTabAfterHandoff,
+  oldTabKeptMessage,
+  type FirstTurnOutcome,
   writeHandoffPointer,
   type HandoffTrigger,
 } from './handoff';
@@ -947,8 +950,11 @@ export class ClaudeChatViewManager
         `引き継ぎ先の名前を設定できませんでした: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
+    // 送信より前に初回ターンの監視を張る（Issue #1162）。`dispatch` は今のところ同期だが、
+    // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく
+    const firstTurn = waitForFirstTurn(newEntry);
     this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
-    void this.confirmStopAfterFirstTurn(entry, newEntry);
+    void this.confirmStopAfterFirstTurn(entry, firstTurn);
     return true;
   }
 
@@ -962,25 +968,19 @@ export class ClaudeChatViewManager
    */
   private async confirmStopAfterFirstTurn(
     oldEntry: ClaudePanel,
-    newEntry: ClaudePanel,
+    firstTurn: Promise<FirstTurnOutcome>,
   ): Promise<void> {
-    const outcome = await waitForFirstTurn(newEntry);
-    if (!outcome.succeeded) {
-      this.log.info(
-        `引き継ぎ先の初回ターンが${outcome.reason === 'timeout' ? 'タイムアウト' : '失敗'}したため、旧タブを残します（reason=${outcome.reason}）`,
-      );
+    const decision = decideOldTabAfterHandoff({
+      outcome: await firstTurn,
+      oldDisposed: oldEntry.disposed,
+      oldBusy: oldEntry.session.getState().busy,
+      closeOldTab: readAutoHandoffCloseOldTab(),
+    });
+    if (decision.action === 'keep') {
+      this.log.info(oldTabKeptMessage(decision.reason));
       return;
     }
-    if (oldEntry.disposed) {
-      this.log.info('引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です（reason=disposed）');
-      return;
-    }
-    if (readAutoHandoffCloseOldTab()) {
-      // 引き継いだ後に旧タブで新しいターンが走り出していたら閉じない（進行中の作業を切らない）
-      if (oldEntry.session.getState().busy) {
-        this.log.info('引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します（reason=oldBusy）');
-        return;
-      }
+    if (decision.action === 'close') {
       this.log.info('引き継ぎ元のセッションを停止してタブを閉じます（履歴は残ります）');
       oldEntry.session.interrupt();
       this.teardown(oldEntry);
@@ -993,9 +993,7 @@ export class ClaudeChatViewManager
       stop,
     );
     if (choice !== stop || oldEntry.disposed) {
-      this.log.info(
-        `引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します（reason=${oldEntry.disposed ? 'disposed' : 'userDismissed'}）`,
-      );
+      this.log.info(oldTabKeptMessage(oldEntry.disposed ? 'disposed' : 'userDismissed'));
       return;
     }
     oldEntry.session.interrupt();
@@ -1212,7 +1210,9 @@ export class ClaudeChatViewManager
       '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
     );
     void this.startHandoff(entry, sessionId, trigger, false, preassessed).catch((e: unknown) =>
-      this.log.warn(`自動引き継ぎが例外で止まりました: ${e instanceof Error ? e.message : String(e)}`),
+      this.log.warn(
+        `自動引き継ぎが例外で止まりました: ${e instanceof Error ? e.message : String(e)}`,
+      ),
     );
   }
 

@@ -796,8 +796,7 @@ const FIRST_TURN_TIMEOUT_MS = 15 * 60_000;
  * 失敗時は `succeeded: false` だけでなく `timeout` / `turnFailed` を区別する（Issue #1158）。
  */
 export type FirstTurnOutcome =
-  | { succeeded: true }
-  | { succeeded: false; reason: 'timeout' | 'turnFailed' };
+  { succeeded: true } | { succeeded: false; reason: 'timeout' | 'turnFailed' };
 
 /**
  * 新セッションの最初のターンが終わるのを待ち、成功したかを返す。
@@ -805,6 +804,11 @@ export type FirstTurnOutcome =
  * 旧セッションを止めてよいかの判断に使う。時間切れ・失敗のときは `succeeded: false` を返し、
  * 呼び出し側は旧セッションを残す。`turnCompletionSeq` の変化を境目にするのは
  * `busy` の立ち下がりより取りこぼしが無いため（`onSessionChange` と同じ流儀）。
+ *
+ * **baselineの取得とlistenerの登録は、この関数を呼んだ時点で同期的に終わる**（Promiseの
+ * executorは同期実行されるため）。初回プロンプトの送信より前に呼んでおけば、送信が完了
+ * まで返らない実装でも初回ターンの完了を取りこぼさない（Issue #1162）。この同期性は
+ * 呼び出し側との約束なので、`async` 化したり `await` を挟んだりしてはならない。
  */
 export function waitForFirstTurn(
   entry: HandoffTurnWatch,
@@ -827,14 +831,75 @@ export function waitForFirstTurn(
     };
     const listener = (state: ChatState): void => {
       if (state.turnCompletionSeq !== baseline) {
-        finish(
-          state.turnFailed ? { succeeded: false, reason: 'turnFailed' } : { succeeded: true },
-        );
+        finish(state.turnFailed ? { succeeded: false, reason: 'turnFailed' } : { succeeded: true });
       }
     };
     const timer = setTimeout(() => finish({ succeeded: false, reason: 'timeout' }), timeoutMs);
     entry.stateListeners.push(listener);
   });
+}
+
+/** 引き継ぎ後に旧タブを残したときの理由（ログの `reason=` に出る値）。 */
+export type OldTabKeptReason = 'timeout' | 'turnFailed' | 'disposed' | 'oldBusy' | 'userDismissed';
+
+/**
+ * 引き継ぎ後に旧タブをどう扱うかの決定。
+ *
+ * `confirm` は「人に聞く」で、`agent.autoHandoff.closeOldTab` が無効なときだけ返る。
+ * 聞いた結果は非同期に決まるため、ここでは扱いを決めきらない。
+ */
+export type OldTabDecision =
+  { action: 'close' } | { action: 'confirm' } | { action: 'keep'; reason: OldTabKeptReason };
+
+/** `decideOldTabAfterHandoff` に渡す、判断に要る事実だけ。VSCodeには依存しない。 */
+export interface OldTabDecisionInput {
+  /** 引き継ぎ先の初回ターンの結果（`waitForFirstTurn` の戻り値）。 */
+  outcome: FirstTurnOutcome;
+  /** 引き継ぎ元のパネルが既に破棄済みか。 */
+  oldDisposed: boolean;
+  /** 引き継ぎ元のセッションがターン実行中か。 */
+  oldBusy: boolean;
+  /** `agent.autoHandoff.closeOldTab` の値。 */
+  closeOldTab: boolean;
+}
+
+/**
+ * 引き継ぎ後に旧タブを閉じてよいかを決める（Issue #1158 / #1162）。
+ *
+ * 判断そのものはVSCodeに依存しないため、ここへ切り出して単体テストの対象にする。
+ * 呼び出し側（`chatView.ts` / `claudeChatView.ts` の `confirmStopAfterFirstTurn`）は
+ * 結果に従って停止・後片付け・確認ダイアログを行うだけにする。
+ *
+ * 初回ターンが失敗・時間切れのときは、`closeOldTab` の値にかかわらず残す。引き継ぎ先が
+ * 使い物にならないまま引き継ぎ元を失うのを防ぐため。
+ */
+export function decideOldTabAfterHandoff(input: OldTabDecisionInput): OldTabDecision {
+  if (!input.outcome.succeeded) {
+    return { action: 'keep', reason: input.outcome.reason };
+  }
+  if (input.oldDisposed) {
+    return { action: 'keep', reason: 'disposed' };
+  }
+  if (!input.closeOldTab) {
+    return { action: 'confirm' };
+  }
+  // 引き継いだ後に旧タブで新しいターンが走り出していたら閉じない（進行中の作業を切らない）
+  if (input.oldBusy) {
+    return { action: 'keep', reason: 'oldBusy' };
+  }
+  return { action: 'close' };
+}
+
+/** 旧タブを残した理由を、Outputへ1行で出すための説明にする。 */
+export function oldTabKeptMessage(reason: OldTabKeptReason): string {
+  const detail: Record<OldTabKeptReason, string> = {
+    timeout: '引き継ぎ先の初回ターンがタイムアウトしたため、旧タブを残します',
+    turnFailed: '引き継ぎ先の初回ターンが失敗したため、旧タブを残します',
+    disposed: '引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です',
+    oldBusy: '引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します',
+    userDismissed: '引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します',
+  };
+  return `${detail[reason]}（reason=${reason}）`;
 }
 
 /**
