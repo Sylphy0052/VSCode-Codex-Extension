@@ -640,6 +640,7 @@ turn/completed
 
 - 宛先の画面が見つからない要求は**必ず拒否側に倒す**。ユーザーの目に触れないまま実行を許さないため。
 - 画面を閉じるときは保留中の要求を全て `cancel` で解放する。放置するとCodexが待ち続ける。
+- 権限昇格の要求（`item/permissions/requestApproval`）は、`reason` の文章とは別に、`permissions`（`RequestPermissionProfile`）から読んだ許可対象（ネットワーク接続の可否、読み取り・書き込み・禁止のパス）をカードに並べる。許可応答に載せる `permissions` も同じ読み取り結果から作り、カードに出せなかった項目（未知のキーや形の違う値）は名前だけ「読み取れない項目」として見せ、許可しても応答へ含めない（`summarizePermissions`、`src/appserver/approvals.ts`、issue #1184）。表示と実際に与える権限を一致させるため。
 
 ### サンドボックスをターン単位で変える
 
@@ -2889,7 +2890,7 @@ fork（§14.40）は`view/item/context`の`1_open@1`にしか登録されてお�
 
 `item/autoApprovalReview/started` / `item/autoApprovalReview/completed`は同じ`reviewId`で1件の審査を知らせるため、画面では1件の項目として状態が進むように見せる（`upsertItem`。増やすと判定中と結果が二重に並ぶ）。**人が押していない承認が裏で進む以上、何が審査されどう判定されたかは必ず会話へ残す。**
 
-スキーマ側で`[UNSTABLE]`と明記されている（`GuardianApprovalReview`）。形が変わりうる前提で、読めなかった値は表示を削るだけに留め、**「読めない＝承認された」とは解釈しない**（`src/appserver/autoApprovalReview.ts`）。
+スキーマ側で`[UNSTABLE]`と明記されている（`GuardianApprovalReview`）。形が変わりうる前提で、読めなかった値は表示を削るだけに留め、**「読めない＝承認された」とは解釈しない**（`src/appserver/autoApprovalReview.ts`）。`requestPermissions` の `permissions` は手動承認と同じ `RequestPermissionProfile` なので、承認カードと同じ `summarizePermissions` で対象を整形し、自動承認された権限が会話に残るようにする（issue #1184）。
 
 拒否（`denied`）と時間切れ（`timedOut`）だけは`ChatSession.deniedReviews`へ覚えておき、`thread/approveGuardianDeniedAction`で人が覆せるようにする。この要求は`event`に「シリアライズ済みの`GuardianAssessmentEvent`」を求めるがスキーマは中身を定義していないため、届いた完了通知をそのまま返す以外に組み立てようが無い。承認済みの審査を覚えないのは、後から「承認済みのものを承認し直す」要求を送れてしまうため。
 

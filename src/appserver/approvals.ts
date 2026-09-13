@@ -110,11 +110,19 @@ export function describeApproval(
   }
 
   if (method === APPROVAL_METHODS.permissions) {
+    // 理由の文章だけでは何を許可するのか分からない。許可対象（ネットワーク・パス）を
+    // 要求から読んで並べ、応答（buildApprovalResponse）も同じ読み取り結果から作る
     return {
       requestId,
       kind: 'permissions',
       title: '権限の昇格を許可しますか',
-      detail: str(params['reason']),
+      detail: withCwd(
+        describePermissionDetail(
+          str(params['reason']),
+          summarizePermissions(params['permissions']),
+        ),
+        str(params['cwd']),
+      ),
       itemId: undefined,
     };
   }
@@ -147,6 +155,178 @@ function withCwd(command: string, cwd: string): string {
   return [command, cwd === '' ? '' : `(${cwd})`].filter((s) => s !== '').join('\n');
 }
 
+/** 権限要求（`RequestPermissionProfile`）を読んだ結果。表示と応答の両方をここから作る。 */
+export interface PermissionSummary {
+  /** 画面に出す行。空なら追加の権限は無い。 */
+  lines: string[];
+  /** 応答へ載せる権限。読み取れて表示した項目だけを持つ。 */
+  granted: Record<string, unknown>;
+  /** 読み取れなかった項目のキー。表示で明示し、応答へは載せない。 */
+  unreadable: string[];
+}
+
+const ACCESS_LABELS: Record<string, string> = {
+  read: '読み取り',
+  write: '書き込み',
+  deny: 'アクセス禁止',
+};
+
+/**
+ * 権限要求の `permissions` を、許可対象の一覧と応答用の権限へ分ける。
+ *
+ * 形は Codex CLI 0.154.0 の `RequestPermissionProfile`（`network.enabled` と
+ * `fileSystem.read` / `write` / `entries`）。この関数が読めた項目だけを `granted` に
+ * 写すため、承認カードに出ていない権限が応答に混ざらない。未知の項目や形の違う
+ * 項目は `unreadable` に名前だけ残し、許可の対象から外す（issue #1184）。
+ */
+export function summarizePermissions(permissions: unknown): PermissionSummary {
+  const profile = rec(permissions);
+  if (profile === undefined) {
+    const absent = permissions === undefined || permissions === null;
+    return { lines: [], granted: {}, unreadable: absent ? [] : ['permissions'] };
+  }
+  const lines: string[] = [];
+  const granted: Record<string, unknown> = {};
+  const unreadable: string[] = [];
+  for (const key of Object.keys(profile)) {
+    const value = profile[key];
+    if (value === null || value === undefined) {
+      continue;
+    }
+    if (key === 'network') {
+      const net = rec(value);
+      const enabled = net?.['enabled'];
+      if (
+        net === undefined ||
+        (enabled !== null && enabled !== undefined && typeof enabled !== 'boolean')
+      ) {
+        unreadable.push(key);
+        continue;
+      }
+      if (enabled === true) {
+        lines.push('ネットワーク接続: 許可');
+      } else if (enabled === false) {
+        lines.push('ネットワーク接続: 禁止');
+      }
+      granted[key] = { enabled: enabled ?? null };
+      continue;
+    }
+    if (key === 'fileSystem') {
+      const fs = summarizeFileSystem(value);
+      if (fs === undefined) {
+        unreadable.push(key);
+        continue;
+      }
+      lines.push(...fs.lines);
+      granted[key] = fs.granted;
+      continue;
+    }
+    unreadable.push(key);
+  }
+  return { lines, granted, unreadable };
+}
+
+/** `AdditionalFileSystemPermissions`。1項目でも読めなければ全体を読めない扱いにする。 */
+function summarizeFileSystem(
+  value: unknown,
+): { lines: string[]; granted: Record<string, unknown> } | undefined {
+  const fs = rec(value);
+  if (fs === undefined) {
+    return undefined;
+  }
+  const lines: string[] = [];
+  const granted: Record<string, unknown> = {};
+  for (const key of Object.keys(fs)) {
+    const v = fs[key];
+    if (v === null || v === undefined) {
+      // `read` / `write` はnull必須の項目。受け取った形のまま返す
+      granted[key] = v;
+      continue;
+    }
+    if (key === 'read' || key === 'write') {
+      if (!Array.isArray(v) || !v.every((p) => typeof p === 'string')) {
+        return undefined;
+      }
+      lines.push(...v.map((p) => `${ACCESS_LABELS[key]}: ${p}`));
+      granted[key] = v;
+      continue;
+    }
+    if (key === 'entries') {
+      if (!Array.isArray(v)) {
+        return undefined;
+      }
+      const entries = v.map(describeSandboxEntry);
+      if (entries.some((e) => e === undefined)) {
+        return undefined;
+      }
+      lines.push(...(entries as string[]));
+      granted[key] = v;
+      continue;
+    }
+    if (key === 'globScanMaxDepth' && typeof v === 'number') {
+      granted[key] = v;
+      continue;
+    }
+    return undefined;
+  }
+  return { lines, granted };
+}
+
+/** `FileSystemSandboxEntry` を「アクセス種別: パス」の1行にする。 */
+function describeSandboxEntry(entry: unknown): string | undefined {
+  const e = rec(entry);
+  const access = str(e?.['access']);
+  const label = ACCESS_LABELS[access];
+  const path = describeFileSystemPath(e?.['path']);
+  return label === undefined || path === undefined ? undefined : `${label}: ${path}`;
+}
+
+/** `FileSystemPath`。特別なパスは語で示し、知らない種類は読めない扱いにする。 */
+function describeFileSystemPath(value: unknown): string | undefined {
+  const p = rec(value);
+  switch (str(p?.['type'])) {
+    case 'path':
+      return str(p?.['path']) || undefined;
+    case 'glob_pattern':
+      return str(p?.['pattern']) || undefined;
+    case 'special': {
+      const special = rec(p?.['value']);
+      const subpath = str(special?.['subpath']);
+      const withSub = (base: string): string => (subpath === '' ? base : `${base}/${subpath}`);
+      switch (str(special?.['kind'])) {
+        case 'root':
+          return 'ルート（/ 以下すべて）';
+        case 'minimal':
+          return '最小構成';
+        case 'project_roots':
+          return withSub('プロジェクトルート');
+        case 'tmpdir':
+          return '一時ディレクトリ';
+        case 'slash_tmp':
+          return '/tmp';
+        case 'unknown':
+          return str(special?.['path']) === '' ? undefined : withSub(str(special?.['path']));
+        default:
+          return undefined;
+      }
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** 理由と許可対象を承認カードの本文にまとめる。 */
+function describePermissionDetail(reason: string, summary: PermissionSummary): string {
+  const lines = reason === '' ? [] : [reason];
+  lines.push(...(summary.lines.length === 0 ? ['許可する対象: なし'] : summary.lines));
+  if (summary.unreadable.length > 0) {
+    lines.push(
+      `内容を読み取れない項目（許可しても付与しません）: ${summary.unreadable.join(', ')}`,
+    );
+  }
+  return lines.join('\n');
+}
+
 /** 旧形式のコマンドは配列で届く。 */
 function joinCommand(command: unknown): string {
   if (typeof command === 'string') {
@@ -176,8 +356,10 @@ export function buildApprovalResponse(
 ): unknown {
   if (kind === 'permissions') {
     if (decision === 'accept' || decision === 'acceptForSession') {
+      // 承認カードに出した分だけを許可する。読み取れなかった項目は表示できておらず、
+      // 利用者が同意した内容に含まれないため応答へ載せない（issue #1184）
       return {
-        permissions: params['permissions'] ?? {},
+        permissions: summarizePermissions(params['permissions']).granted,
         scope: decision === 'acceptForSession' ? 'session' : 'turn',
       };
     }

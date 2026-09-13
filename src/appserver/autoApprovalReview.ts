@@ -11,6 +11,8 @@
  * 「読めない＝承認された」と解釈しない。
  */
 
+import { summarizePermissions } from './approvals';
+
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const rec = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -87,7 +89,9 @@ export function describeReviewAction(action: unknown): string {
       return `MCPツール: ${server} / ${tool}`;
     }
     case 'requestPermissions': {
-      const permissions = strings(a['permissions']).join(', ');
+      // 現行の `RequestPermissionProfile` はオブジェクト。手動承認のカードと同じ整形で
+      // 対象を残す（issue #1184）。文字列配列の旧形式も落とさず出す
+      const permissions = describeRequestedPermissions(a['permissions']);
       const reason = str(a['reason']);
       const head = permissions === '' ? '権限の昇格' : `権限の昇格: ${permissions}`;
       return reason === '' ? head : `${head}（${reason}）`;
@@ -95,6 +99,19 @@ export function describeReviewAction(action: unknown): string {
     default:
       return type;
   }
+}
+
+/** 権限要求の対象を1行に畳む。読めない項目は名前だけ残す。 */
+function describeRequestedPermissions(permissions: unknown): string {
+  if (Array.isArray(permissions)) {
+    return strings(permissions).join(', ');
+  }
+  const summary = summarizePermissions(permissions);
+  const parts = [...summary.lines];
+  if (summary.unreadable.length > 0) {
+    parts.push(`読み取れない項目: ${summary.unreadable.join(', ')}`);
+  }
+  return parts.join(', ');
 }
 
 /** 判定の結果（状態・リスク・理由）を1行にする。 */
