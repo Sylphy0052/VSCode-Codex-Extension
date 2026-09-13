@@ -1298,6 +1298,49 @@ describe('progressScript', () => {
     expect(source).toContain("node('details'");
     expect(source).toContain('残り');
   });
+
+  it('中身が変わっていないターンのDOMを作り直さない（issue 1025）', () => {
+    const source = progressScript();
+    // 陽性対照: 前回のDOMを持つ入れ物がある（綴り違いで空振りしていない）
+    expect(source).toContain('const turnCache = new Map();');
+    // 指紋が一致したら作り直さず、開閉だけ属性で合わせる
+    expect(source).toContain('const cached = turnCache.get(turn.index);');
+    expect(source).toContain('article = cached.node;');
+    expect(source).toContain('article.open = isOpen;');
+    // 更新のたびにタイムライン全体を空にする旧経路は残さない。
+    // 陽性対照: 他の領域では clear は今も使われている
+    expect(source).not.toContain('clear(timeline)');
+    expect(source).toContain('clear(list)');
+    // 空にするのは会話が変わったときだけ（前の会話のDOMを持ち越さないため）
+    expect(source).toContain('turnCache.clear();');
+    expect(source).toContain("clear(el('timeline'));");
+    // 指紋に開閉を混ぜない（開閉のたびに作り直すと元の問題へ戻る）
+    expect(source).toContain('function turnKey(turn, isLatest)');
+    expect(source).not.toContain('turnKey(turn, isLatest, isOpen)');
+  });
+
+  it('作り直した要素へフォーカスを戻す（issue 1025）', () => {
+    const source = progressScript();
+    // 陽性対照: 目印を付ける処理がある
+    expect(source).toContain("head.dataset.focusKey = 'turn:' + turn.index;");
+    expect(source).toContain("button.dataset.focusKey = 'files-more';");
+    expect(source).toContain("button.dataset.focusKey = 'timeline-more';");
+    // 描き直す前に控え、描き終えてから戻す
+    expect(source).toContain('const focusKey = focusedKey();');
+    expect(source).toContain('restoreFocus(focusKey);');
+    // 既に当たっているなら focus を呼ばない（読み上げが同じ場所を読み直すため）
+    expect(source).toContain('next !== document.activeElement');
+  });
+
+  it('状態の変化だけを読み上げへ流す（issue 1025）', () => {
+    const source = progressScript();
+    expect(source).toContain('function announceBusy(busy)');
+    expect(source).toContain('announceBusy(isBusy);');
+    expect(source).toContain("el('liveStatus').textContent");
+    // 同じ状態が続く間は書き換えない。画面を開いた直後の1回も流さない
+    expect(source).toContain('if (announcedBusy === busy) {');
+    expect(source).toContain('if (first) {');
+  });
 });
 
 describe('progressStyles', () => {
@@ -1306,6 +1349,14 @@ describe('progressStyles', () => {
     // 生の色指定はストライプの透過白のみ。他はテーマ変数に追随させる
     const literals = source.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
     expect(literals).toEqual([]);
+  });
+
+  it('読み上げ専用の領域を面積だけ潰す（issue 1025）', () => {
+    const source = progressStyles();
+    // display:none や visibility:hidden にすると読み上げからも消える
+    expect(source).toContain('.srOnly');
+    expect(source).toContain('clip-path: inset(50%);');
+    expect(source).not.toContain('.srOnly { display: none');
   });
 
   it('サマリーを上に固定し、下の内容が透けないようにする（issue #781）', () => {

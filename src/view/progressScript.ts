@@ -53,8 +53,6 @@ export function progressScript(): string {
 
   /** 閉じずに開いたまま出すターン数（末尾から数える）。 */
   const OPEN_TURNS = 3;
-  /** 「作り直すターンは1つも無い」を表す（issue #1025）。undefined は全量の作り直しを指す。 */
-  const EMPTY_CHANGED = new Set();
   /**
    * ターン番号 → 開閉。自分で開閉したターンだけを覚え、触っていないターンは
    * OPEN_TURNS の既定に従わせる（issue 750）。render は状態が届くたびに
@@ -72,6 +70,20 @@ export function progressScript(): string {
    * 「もっと見る」を押した直後に畳み戻る。turnOpen と同じ理由・同じ持ち方。
    */
   let filesExpanded = false;
+  /**
+   * ターン番号 → 直前に組み立てたDOMと、その中身の指紋（issue #1025）。
+   *
+   * 中身が変わっていないターンは作り直さずそのまま置く。作り直すと、その中で選んで
+   * いた文字・当たっていたフォーカス・読み上げの位置が毎更新で消える。状態通知は
+   * 間引き後でも 50ms 間隔（STATE_POST_INTERVAL_MS）で届くため、応答中は毎秒何度も
+   * 消えることになる。
+   */
+  const turnCache = new Map();
+  /**
+   * 直前に読み上げへ流した応答中フラグ（issue #1025）。undefined は「まだ何も流して
+   * いない」。画面を開いた直後の1回は状態の変化ではないので流さない。
+   */
+  let announcedBusy;
 
   /**
    * アイコンを作る。label を渡した場合だけ読み上げの対象にする。
@@ -196,26 +208,14 @@ export function progressScript(): string {
     return row;
   }
 
-  /** 直前に描いたファイル一覧の内容。同じなら作り直さない（issue #1025）。 */
-  let filesShownKey = undefined;
-
   /**
    * 変更したファイルをディレクトリごとにまとめて出す（issue 749）。
    *
    * 先頭から FILES_SHOWN 件で打ち切り、残りは「もっと見る」の裏へ回す。打ち切りは
    * ファイル数で数える（グループ数ではない）。1つのディレクトリに数百件ある形でも
    * 既定の表示が短く収まるようにするため。
-   *
-   * 中身が前回と同じなら何もしない（issue #1025）。タイムラインと同じ理由で、ここも
-   * 毎更新で作り直していた。突き合わせはディレクトリとファイル名を連ねた文字列で行う。
-   * 数百件でも安く、並びの入れ替わりも拾える。
    */
   function renderFiles(groups) {
-    const key = groups.map((group) => group.dir + '\u0000' + group.files.join('\u0000')).join('\u0001');
-    if (key === filesShownKey) {
-      return;
-    }
-    filesShownKey = key;
     const list = el('files');
     const foot = el('filesMore');
     clear(list);
@@ -244,10 +244,9 @@ export function progressScript(): string {
     if (hidden > 0) {
       const button = node('button', 'more', '残り' + hidden + '件を表示');
       button.type = 'button';
+      button.dataset.focusKey = 'files-more';
       button.addEventListener('click', () => {
         filesExpanded = true;
-        // 内容は同じで出す範囲だけが変わるので、突き合わせの鍵を捨ててから描き直す
-        filesShownKey = undefined;
         renderFiles(groups);
       });
       foot.appendChild(button);
@@ -299,6 +298,9 @@ export function progressScript(): string {
     head.addEventListener('click', () => {
       turnOpen[turn.index] = !article.open;
     });
+    // 作り直したときにフォーカスを戻す目印（issue #1025）。summary は既定で
+    // キーボードのフォーカスを受けるため、消えると操作位置を見失う
+    head.dataset.focusKey = 'turn:' + turn.index;
     head.appendChild(node('span', 'title', 'ターン ' + (turn.index + 1)));
     if (turn.editedFiles.length > 0) {
       head.appendChild(chip('file', String(turn.editedFiles.length), '変更したファイル'));
@@ -346,29 +348,21 @@ export function progressScript(): string {
   }
 
   /**
-   * ターン番号 → いま出ているノード。据え置くターンを見分けるために持つ（issue #1025）。
-   * 全量が届いたときに空へ戻す。
-   */
-  let turnNodes = {};
-
-  /**
-   * タイムラインを描く（issue #1025）。
+   * ターンの中身の指紋（issue #1025）。これが同じなら作り直さない。
    *
-   * changed は今回作り直すターン番号の集合。undefined なら全部作り直す（全量が届いた
-   * ときと初回）。**据え置いたノードは触らない**: 作り直すとその中の選択が消え、
-   * フォーカスが body へ戻り、スクロール位置も失われる。応答中は毎秒20回ここへ来る
-   * ため、末尾のターンだけが伸びる普段の更新で全部を作り直すと、文字を選んでいる間に
-   * 選択が消え続ける。
+   * 開閉は含めない。開閉は details の open へ代入するだけで反映でき、作り直す理由に
+   * ならないため。最新かどうかは見出しの体裁を変えるので含める。
    */
-  function renderTimeline(turns, changed) {
+  function turnKey(turn, isLatest) {
+    return JSON.stringify(turn) + '|' + isLatest;
+  }
+
+  function renderTimeline(turns) {
     const timeline = el('timeline');
-    if (changed === undefined) {
-      clear(timeline);
-      turnNodes = {};
-    }
     // 古いターンは畳む。全部開いたままだと、長いセッションでは下まで辿れない
     const firstOpen = Math.max(turns.length - OPEN_TURNS, 0);
     let closed = 0;
+    const alive = new Set();
     for (let i = 0; i < turns.length; i += 1) {
       const turn = turns[i];
       const isLatest = i === turns.length - 1;
@@ -379,58 +373,59 @@ export function progressScript(): string {
       if (!isOpen) {
         closed += 1;
       }
-      const current = turnNodes[turn.index];
-      if (current === undefined) {
-        const fresh = renderTurn(turn, isLatest, isOpen);
-        turnNodes[turn.index] = fresh;
-        timeline.appendChild(fresh);
-      } else if (changed !== undefined && changed.has(turn.index)) {
-        const fresh = renderTurn(turn, isLatest, isOpen);
-        turnNodes[turn.index] = fresh;
-        timeline.replaceChild(fresh, current);
+      alive.add(turn.index);
+      const key = turnKey(turn, isLatest);
+      const cached = turnCache.get(turn.index);
+      let article;
+      if (cached !== undefined && cached.key === key) {
+        // 中身が同じターン。DOMには触らず、開閉だけ合わせる（issue #1025）
+        article = cached.node;
+        article.open = isOpen;
       } else {
-        // 中身は変わっていない。最新の印と開閉だけは移りうるので属性だけ当てる
-        current.className = 'turn' + (isLatest ? ' latest' : '');
-        current.open = isOpen;
+        article = renderTurn(turn, isLatest, isOpen);
+        turnCache.set(turn.index, { key: key, node: article });
+      }
+      const current = timeline.children[i];
+      if (current === article) {
+        continue;
+      }
+      if (current === undefined || current === null) {
+        timeline.appendChild(article);
+      } else {
+        timeline.replaceChild(article, current);
+      }
+    }
+    // ターンが減る経路（別セッションへの切り替え）で余った分を落とす
+    while (timeline.children.length > turns.length) {
+      timeline.removeChild(timeline.lastElementChild);
+    }
+    for (const index of [...turnCache.keys()]) {
+      if (!alive.has(index)) {
+        turnCache.delete(index);
       }
     }
     el('timelineSection').hidden = turns.length === 0;
     renderExpandAll(turns, closed);
   }
 
-  /** 直前に出した「閉じているNターンを開く」の N。同じなら作り直さない（issue #1025）。 */
-  let expandAllShown = -1;
-
   /**
    * 「すべて開く」。畳まれたターンが1件も無いときは出さない（issue 750。ターンが
    * OPEN_TURNS 件以下のセッションで、押しても何も起きないボタンを見せないため）。
-   *
-   * Nが変わらなければ作り直さない（issue #1025）。押せる要素を作り直すと、当たって
-   * いたフォーカスが body へ戻るため。
    */
   function renderExpandAll(turns, closed) {
     const holder = el('timelineMore');
-    // 押せるボタンを毎回作り直すと、当たっていたフォーカスが body へ戻る
-    if (closed === expandAllShown) {
-      return;
-    }
-    expandAllShown = closed;
     clear(holder);
     if (closed === 0) {
       return;
     }
     const button = node('button', 'more', '閉じている' + closed + 'ターンを開く');
     button.type = 'button';
+    button.dataset.focusKey = 'timeline-more';
     button.addEventListener('click', () => {
-      // このハンドラは作られた時点の turns を掴む。ボタンは N が変わらなければ据え置く
-      // ので、押した時点の並びとはずれうる。いまは差が出ない（開くのは turnOpen への
-      // index 単位の書き込みで、増えるターンは必ず末尾に来て既定で開くため）。
-      // 既定の開き方（OPEN_TURNS）を変えるときはここも見直すこと
       for (const turn of turns) {
         turnOpen[turn.index] = true;
       }
-      // 開閉は据え置きの経路（属性だけ当てる）で移せる。作り直さない
-      renderTimeline(turns, EMPTY_CHANGED);
+      renderTimeline(turns);
     });
     holder.appendChild(button);
   }
@@ -439,26 +434,18 @@ export function progressScript(): string {
     el(id).textContent = suffix === undefined ? String(value) : String(value) + suffix;
   }
 
-  /** 直前に出した状態。応答中↔待機中が移ったときだけバッジを書き換える（issue #1025）。 */
-  let badgeBusy = undefined;
-
   function renderSummary(summary) {
     isBusy = summary.busy === true;
+    announceBusy(isBusy);
     // 画面上端の稼働バー（issue 751）。バッジの点滅だけでは、画面を下へスクロールして
     // サマリが見えていないときに動いているかが分からない
     el('busyBar').hidden = !summary.busy;
 
     const badge = el('statusBadge');
-    // バッジは読み上げの窓（aria-live）にしてある。応答中の間も状態は毎秒20回届くので、
-    // 毎回作り直すと同じ「応答中」を延々と読み上げることになる。遷移のときだけ触る
-    // （issue #1025）。読み上げるのは状態の1語だけで、KPIの数字は含めない
-    if (badgeBusy !== isBusy) {
-      badgeBusy = isBusy;
-      badge.className = summary.busy ? 'busy' : '';
-      clear(badge);
-      badge.appendChild(node('span', 'dot', undefined));
-      badge.appendChild(node('span', 'text', summary.busy ? '応答中' : '待機中'));
-    }
+    badge.className = summary.busy ? 'busy' : '';
+    clear(badge);
+    badge.appendChild(node('span', 'dot', undefined));
+    badge.appendChild(node('span', 'text', summary.busy ? '応答中' : '待機中'));
 
     setKpi('kpiTurns', summary.turnCount, undefined);
     setKpi('kpiFiles', summary.editedFiles.length, undefined);
@@ -489,14 +476,56 @@ export function progressScript(): string {
     el('progressPercent').textContent = percent + '%';
   }
 
-  function render(view, changed) {
+  /**
+   * いま当たっているフォーカスの目印（issue #1025）。作り直しで消える前に控える。
+   */
+  function focusedKey() {
+    const active = document.activeElement;
+    if (active === null || active.dataset === undefined) {
+      return undefined;
+    }
+    return active.dataset.focusKey;
+  }
+
+  /**
+   * 控えた目印の要素へフォーカスを戻す。既に当たっているなら何もしない
+   * （focus を呼び直すと読み上げが同じ場所をもう一度読む）。
+   */
+  function restoreFocus(key) {
+    if (key === undefined) {
+      return;
+    }
+    const next = document.querySelector('[data-focus-key="' + CSS.escape(key) + '"]');
+    if (next !== null && next !== document.activeElement) {
+      next.focus();
+    }
+  }
+
+  /**
+   * 応答中↔待機中の変化だけを読み上げへ流す（issue #1025）。
+   *
+   * KPIやタイムラインへ広く aria-live を付けると、更新のたびに中身を読み直して
+   * うるさくなる。流すのはこの1行だけに絞り、同じ状態が続く間は書き換えない。
+   */
+  function announceBusy(busy) {
+    if (announcedBusy === busy) {
+      return;
+    }
+    const first = announcedBusy === undefined;
+    announcedBusy = busy;
+    if (first) {
+      // 画面を開いた直後は「変化」ではないので読み上げない
+      return;
+    }
+    el('liveStatus').textContent = busy ? '応答中です。' : '応答が終わりました。';
+  }
+
+  function render(view) {
+    const focusKey = focusedKey();
     if (view === undefined || view === null || view.summary.turnCount === 0) {
-      // 据え置きの土台を捨てる。次に中身が来たときは全部作り直しになる（issue #1025）
+      // 別の会話へ移ったときに前の会話のDOMを持ち越さない（issue 1025）
+      turnCache.clear();
       clear(el('timeline'));
-      turnNodes = {};
-      expandAllShown = -1;
-      filesShownKey = undefined;
-      badgeBusy = undefined;
       el('empty').hidden = false;
       el('summary').hidden = true;
       el('busyBar').hidden = true;
@@ -510,7 +539,8 @@ export function progressScript(): string {
     renderSummary(view.summary);
     renderChecklist(view.checklist);
     renderFiles(view.summary.editedFileGroups);
-    renderTimeline(view.turns, changed);
+    renderTimeline(view.turns);
+    restoreFocus(focusKey);
   }
 
   /**
@@ -540,19 +570,11 @@ export function progressScript(): string {
       return;
     }
     turns = merged;
-    // 全量が届いたら作り直す。差し分なら届いたターンだけを作り直す（issue #1025）
-    const changed =
-      message.payload.turns.mode === 'full'
-        ? undefined
-        : new Set(message.payload.turns.turns.map((turn) => turn.index));
-    render(
-      {
-        summary: message.payload.summary,
-        checklist: message.payload.checklist,
-        turns: turns,
-      },
-      changed,
-    );
+    render({
+      summary: message.payload.summary,
+      checklist: message.payload.checklist,
+      turns: turns,
+    });
   }
 
   function renderEmptyDecoration() {

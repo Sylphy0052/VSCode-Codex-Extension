@@ -27,6 +27,9 @@ function boot(): {
 } {
   const dom = new JSDOM(`<!DOCTYPE html><html><body>${progressBody()}</body></html>`, {
     runScripts: 'outside-only',
+    // url を渡さないと origin が opaque になり、jsdom が localStorage へ触れた時点で
+    // SecurityError を投げる。webview は about:blank ではない場所で動くので合わせる
+    url: 'https://progress.test/',
   });
   const window = dom.window;
   const posted: unknown[] = [];
@@ -120,18 +123,22 @@ describe('タイムラインの作り直し（issue #1025）', () => {
     expect(window.getSelection()?.toString()).toBe('応答 0');
   });
 
-  it('増えたターンは末尾へ足し、既にあるターンはそのまま残す', () => {
+  it('増えたターンは末尾へ足し、最新でなくなった1つを除いて据え置く', () => {
     const { deliver, turnNodes } = boot();
-    const before = view([turn(0)]);
+    const before = view([turn(0), turn(1), turn(2)]);
     deliver(buildProgressPayload(undefined, before));
     const first = turnNodes();
 
-    const after = view([turn(0), turn(1)]);
+    const after = view([turn(0), turn(1), turn(2), turn(3)]);
     deliver(buildProgressPayload(before, after));
 
     const second = turnNodes();
-    expect(second).toHaveLength(2);
+    expect(second).toHaveLength(4);
     expect(second[0]).toBe(first[0]);
+    expect(second[1]).toBe(first[1]);
+    // 指紋（turnKey）は「最新かどうか」を含む。見出しの体裁が変わるため、最新の座を
+    // 明け渡したターンだけは作り直される。ここで選択していた文字は失われる
+    expect(second[2]).not.toBe(first[2]);
   });
 
   it('全量が届いたら作り直す（巻き戻し・resume）', () => {
@@ -189,11 +196,16 @@ describe('タイムラインの作り直し（issue #1025）', () => {
     (button as unknown as { focus: () => void }).focus();
     expect(window.document.activeElement).toBe(button);
 
-    // 畳まれている件数が変わらない更新では、ボタンを作り直さない
     const after = view([turn(0), turn(1), turn(2), turn(3), turn(4, { response: '続き' })]);
     deliver(buildProgressPayload(before, after));
 
-    expect(window.document.activeElement).toBe(button);
+    // ボタンは更新のたびに作り直される。ノードの同一性ではなく、目印
+    // （data-focus-key）を辿って戻せているかを見る
+    const active = window.document.activeElement;
+    expect(active).not.toBe(window.document.body);
+    expect((active as unknown as { dataset: Record<string, string> }).dataset['focusKey']).toBe(
+      'timeline-more',
+    );
   });
 
   it('積み直せなければ全量を送り直してもらう', () => {
@@ -210,26 +222,28 @@ describe('タイムラインの作り直し（issue #1025）', () => {
 });
 
 describe('状態の読み上げ（issue #1025）', () => {
-  it('状態バッジは live region で、遷移したときだけ書き換わる', () => {
+  it('応答中と待機中の遷移だけを読み上げへ流す', () => {
     const { window, deliver } = boot();
     deliver(buildProgressPayload(undefined, view([turn(0)], true)));
-    const badge = window.document.getElementById('statusBadge');
-    expect(badge?.getAttribute('aria-live')).toBe('polite');
-    const text = badge?.querySelector('.text');
-    expect(text?.textContent).toBe('応答中');
+    const live = window.document.getElementById('liveStatus');
+    expect(live?.getAttribute('aria-live')).toBe('polite');
+    // 画面を開いた直後の1回は「変化」ではないので流さない
+    expect(live?.textContent).toBe('');
 
-    // 応答中のまま更新が続いても、読み上げ対象のノードは触らない
+    // 応答中のまま更新が続く間も流さない（毎秒20回読み上げると使えなくなる）
     deliver(
       buildProgressPayload(view([turn(0)], true), view([turn(0, { response: '続き' })], true)),
     );
-    expect(window.document.getElementById('statusBadge')?.querySelector('.text')).toBe(text);
+    expect(live?.textContent).toBe('');
 
-    // 待機中へ移ったときだけ書き換わる
+    // 待機中へ移ったときだけ流す
     deliver(
       buildProgressPayload(view([turn(0, { response: '続き' })], true), view([turn(0)], false)),
     );
-    expect(window.document.getElementById('statusBadge')?.querySelector('.text')?.textContent).toBe(
-      '待機中',
-    );
+    expect(live?.textContent).toBe('応答が終わりました。');
+
+    // 応答中へ戻ったときも流す
+    deliver(buildProgressPayload(view([turn(0)], false), view([turn(0)], true)));
+    expect(live?.textContent).toBe('応答中です。');
   });
 });

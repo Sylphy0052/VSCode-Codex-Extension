@@ -183,9 +183,7 @@ export function progressBody(): string {
   <section id="summary" hidden>
     <div id="summaryHeader">
       <h1>進捗</h1>
-      <!-- 状態の遷移（応答中↔待機中）だけを読み上げへ届ける窓（issue #1025）。
-           KPIの数字は含めない。含めると応答中は毎秒20回の更新のたびに読み上げる -->
-      <span id="statusBadge" aria-live="polite" aria-atomic="true"></span>
+      <span id="statusBadge"></span>
     </div>
     <div id="kpis">
       <div class="kpi"><span class="kpi-value" id="kpiTurns">0</span><span class="kpi-label">ターン</span></div>
@@ -198,6 +196,10 @@ export function progressBody(): string {
       <span id="progressPercent"></span>
     </div>
   </section>
+  <!-- 応答中↔待機中の変化だけを読み上げへ届ける（issue #1025）。KPIやタイムラインへ
+       広く aria-live を付けると、更新のたびに中身を読み直してうるさくなるため、
+       流すのはこの1行に絞る。画面には出さない -->
+  <p id="liveStatus" class="srOnly" role="status" aria-live="polite"></p>
   <section id="checklistSection" hidden>
     <h2>チェックリスト</h2>
     <ul id="checklist"></ul>
