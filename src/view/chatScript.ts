@@ -2613,6 +2613,12 @@ export function chatScript(
     const enabled = !!(status && status.enabled);
     node.hidden = !enabled;
     if (!enabled) return;
+    if (status.suppressed) {
+      // 設定はONのまま止まっている状態（Issue #1202）。待っているように見せない
+      node.textContent =
+        '上限解除後の自動続行: 中断したため停止中です。次に自分で送信すると再び有効になります';
+      return;
+    }
     if (status.awaitingResult) {
       node.textContent = '上限解除後の自動続行: 「続けて」を送信しました。上限状態を確認しています';
       return;
