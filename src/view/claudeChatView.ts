@@ -763,6 +763,7 @@ export class ClaudeChatViewManager
     taskConfig?: ClaudeConfig,
     modelSettings?: SessionModelSettings,
     preserveFocus = false,
+    targetViewColumn?: vscode.ViewColumn,
   ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
@@ -778,7 +779,7 @@ export class ClaudeChatViewManager
     // argvで受け取るため、起動後に `entry.modelSettings` を書き換えても初回プロンプトには
     // 効かない。`buildEntry` へ渡して `configFor` が起動前に読む形にする
     const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig, undefined, modelSettings);
-    this.showPanel(entry, preserveFocus);
+    this.showPanel(entry, preserveFocus, targetViewColumn);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: targetCwd,
@@ -926,11 +927,15 @@ export class ClaudeChatViewManager
     // 手動（ボタン操作）はユーザーがその場で求めた操作なので必ず前面へ出す。見立ての
     // 取得で待っている間にタブを離れることがあり、`visible` だけで決めると背面に開く
     const preserveFocus = trigger.kind !== 'manual' && entry.panel?.visible !== true;
+    // 引き継ぎ元パネルと同じ列へ開く（Issue #1188）。`panel.viewColumn`は非表示のとき
+    // `undefined`になるため、`lastKnownViewColumn`（最後に見えていた列）へ落ちる
+    const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
     const newSessionId = await this.openNew(
       entry.cwd,
       entry.taskConfig,
       choice.settings,
       preserveFocus,
+      targetViewColumn,
     );
     if (newSessionId === undefined) {
       this.log.warn(
@@ -1885,6 +1890,7 @@ export class ClaudeChatViewManager
 
     const entry: ClaudePanel = {
       panel: undefined,
+      lastKnownViewColumn: undefined,
       session,
       loop,
       cwd,
@@ -1921,11 +1927,12 @@ export class ClaudeChatViewManager
   protected override createWebviewPanel(
     entry: ClaudePanel,
     preserveFocus: boolean,
+    targetViewColumn: vscode.ViewColumn | undefined,
   ): vscode.WebviewPanel {
     return vscode.window.createWebviewPanel(
       VIEW_TYPE,
       entry.title,
-      { viewColumn: vscode.ViewColumn.Active, preserveFocus },
+      { viewColumn: targetViewColumn ?? vscode.ViewColumn.Active, preserveFocus },
       buildClaudeChatPanelOptions(),
     );
   }
