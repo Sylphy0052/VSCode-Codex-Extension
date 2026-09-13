@@ -383,7 +383,7 @@ export class ChatSession {
       this.policyOverridden = this.state.planMode;
     }
 
-    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.update({ ...this.state, busy: true, turnFailed: false, turnFailureKind: undefined });
     await this.connection.request('turn/start', params);
   }
 
@@ -508,7 +508,7 @@ export class ChatSession {
     if (threadId === undefined) {
       throw new Error('スレッドが開始されていません');
     }
-    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.update({ ...this.state, busy: true, turnFailed: false, turnFailureKind: undefined });
     await this.connection.request('thread/compact/start', { threadId });
   }
 
@@ -562,7 +562,7 @@ export class ChatSession {
     }
     const params = buildReviewStartParams(threadId, target, delivery);
     if (delivery === 'inline') {
-      this.update({ ...this.state, busy: true, turnFailed: false });
+      this.update({ ...this.state, busy: true, turnFailed: false, turnFailureKind: undefined });
     }
     try {
       const response = await this.connection.request('review/start', params);

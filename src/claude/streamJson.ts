@@ -35,6 +35,8 @@ export const initialClaudeState: ChatState = {
   // Claude Codeの中断はcontrol protocolで、ターンの指定を要らない
   turnId: undefined,
   turnFailed: false,
+  // 失敗の区分はCodexの`turn.error`から作る値なので、Claude Code側では常に未設定
+  turnFailureKind: undefined,
   streamingMessageId: undefined,
   queued: [],
   items: [],

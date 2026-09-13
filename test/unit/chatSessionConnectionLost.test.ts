@@ -207,6 +207,41 @@ describe('接続断でbusyが戻らない問題を直す（issue #420）', () =>
   });
 });
 
+describe('失敗の理由を次のターンへ持ち越さない（issue #1199）', () => {
+  /** 上限で失敗した`turn/completed`を流し、`turnFailureKind`が立った状態を作る。 */
+  async function limitedSession(): Promise<ChatSession> {
+    const { session } = fakeSession();
+    await session.start('/w', config());
+    session.applyNotification('turn/started', { threadId: 'th-1', turn: { id: 't-1' } });
+    session.applyNotification('turn/completed', {
+      threadId: 'th-1',
+      turn: {
+        id: 't-1',
+        status: 'failed',
+        error: { message: '上限に達しました', codexErrorInfo: 'usageLimitExceeded' },
+      },
+    });
+    expect(session.getState().turnFailureKind).toBe('usageLimit');
+    return session;
+  }
+
+  it('send()で理由を消す（turn/startedを待たずに消す）', async () => {
+    const session = await limitedSession();
+
+    await session.send('続きを頼む', config());
+
+    expect(session.getState().turnFailureKind).toBeUndefined();
+  });
+
+  it('compact()でも理由を消す', async () => {
+    const session = await limitedSession();
+
+    await session.compact();
+
+    expect(session.getState().turnFailureKind).toBeUndefined();
+  });
+});
+
 describe('dispose()でdeniedReviewsも解放する（issue #354・3点目）', () => {
   it('dispose後は覚えていた覆し履歴が消え、approveDeniedReviewが何も送らない', async () => {
     const { session, sent } = fakeSession();

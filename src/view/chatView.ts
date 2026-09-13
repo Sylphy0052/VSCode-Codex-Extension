@@ -190,6 +190,30 @@ const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
 const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
 
 /**
+ * この会話が使用量の上限で止まったか（issue #1199）。
+ *
+ * レート制限の通知（`usage.limited`）はアカウント単位で全タブへ届くため、それだけでは
+ * どの会話が上限で落ちたかを絞れない。ターン自身が運ぶ失敗の区分（`turnFailureKind`、
+ * `turn/completed`の`turn.error`由来）が判っていればそちらを信じる。
+ *
+ * - `'usageLimit'`: 待てば解ける上限。再開する。
+ * - `'other'`: 理由が判っていて上限ではない。上限の通知が出ていても再開しない。
+ * - `undefined`: 理由が届かなかった（古いCLIの`turn/failed`を含む）。従来どおり
+ *   レート制限の通知で判断する。
+ *
+ * 失敗していないターンは対象外。上限の通知が出ていても、成功した会話まで再開しない。
+ */
+export function stoppedByUsageLimit(state: ChatState): boolean {
+  if (!state.turnFailed) {
+    return false;
+  }
+  if (state.turnFailureKind !== undefined) {
+    return state.turnFailureKind === 'usageLimit';
+  }
+  return state.usage?.limited === true;
+}
+
+/**
  * Codexチャットパネルの生成オプション（design.md §14.48、issue #287）。
  * `enableFindWidget: true` でCtrl+Fの検索窓を有効にする。オブジェクトの組み立てを
  * 関数として切り出すことで、`createWebviewPanel`（vscode本体のAPI）を実際に呼ばずとも
@@ -1513,27 +1537,29 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.cancelLimitAutoResume(entry);
       return;
     }
+    const stoppedByLimit = stoppedByUsageLimit(state);
     if (entry.limitAutoResumeAwaitingResult) {
       if (!turnFinished) {
         return;
       }
       entry.limitAutoResumeAwaitingResult = false;
-      if (state.turnFailed && state.usage?.limited === true) {
+      if (stoppedByLimit) {
         this.armLimitAutoResume(entry, LIMIT_AUTO_RESUME_RETRY_MS);
       } else {
         this.cancelLimitAutoResume(entry);
       }
       return;
     }
-    // レート制限通知はアカウント単位で全タブへ届く。失敗した会話だけを再開対象にする。
-    if (!state.turnFailed || state.usage?.limited !== true) {
+    if (!stoppedByLimit) {
       this.cancelLimitAutoResume(entry);
       return;
     }
     if (entry.limitAutoResumeTimer !== undefined) {
       return;
     }
-    const resetAt = state.usage.resetsAt;
+    // レート制限の通知が未着なら（`turnFailureKind`だけで上限と判った場合）リセット時刻は
+    // 判らない。その場合は下のフォールバックの待ち時間を使う（issue #1199）
+    const resetAt = state.usage?.resetsAt;
     const waitMs =
       resetAt === undefined
         ? LIMIT_AUTO_RESUME_FALLBACK_MS
