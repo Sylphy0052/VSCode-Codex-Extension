@@ -27,6 +27,10 @@ export type HandoffProvider = 'claude' | 'codex';
  * `switchSafe`）が成立したときだけ発火する（Issue #1090）。`assistantSuggested`
  * （Issue #1097）は前段の `passesSafeBoundaryGate` だけを要求し、`switchSafe` は見ない
  * ——提案した側が既に「いま切り替えてよい」と判断しているため。
+ *
+ * `assistantSuggested` の根拠は2通りある（Issue #1150）。地の文での提案は分類器の
+ * `handoff_suggested` で判定し、handoffプロンプトそのものの出力は
+ * `containsHandoffPrompt` が書式から決定論的に拾う。後者は分類器を経由しない。
  */
 export type HandoffTrigger =
   | { kind: 'manual' }
@@ -514,6 +518,66 @@ export function recentAssistantMessages(
     .filter((item) => item.kind === 'agentMessage' && item.text.trim() !== '')
     .slice(-limit)
     .map((item) => item.text);
+}
+
+/**
+ * handoffプロンプトを囲むフェンスの開始行（Issue #1150）。
+ *
+ * `handoff` skillは開始プロンプト全体を4バックティック以上で囲む。中身のMarkdownが3
+ * バックティックのコードブロックを含むため、外側は必ず4本以上になる。字下げ3文字までを
+ * 許すのはMarkdownのフェンスの規則に合わせるため。
+ */
+const HANDOFF_PROMPT_FENCE = /^ {0,3}(`{4,})/;
+
+/**
+ * handoffプロンプトの見出し行（Issue #1150）。
+ *
+ * `handoff` skillの出力仕様は、標準モードが `# 継続 <YYYY-MM-DD> <branch>`、Codex版の
+ * 詳細モードが `# 継続セッション開始プロンプト`。どちらも `# 継続` で始まるので前方一致で
+ * 両方を拾う。`##` 以下の見出しは対象外（`^#` の次に `継続` を要求するため一致しない）。
+ */
+const HANDOFF_PROMPT_HEADING = /^#[^\S\r\n]*継続/;
+
+/** 決定論検知で発火したときの根拠（`HandoffTrigger.suggestReason`）。 */
+export const HANDOFF_PROMPT_DETECTED_REASON = 'アシスタントの応答にhandoffプロンプトが含まれていた';
+
+/**
+ * アシスタントの応答がhandoffプロンプトそのものを含むか（Issue #1150）。
+ *
+ * 「別セッションで続きを」のような**地の文での提案**は言い回しがぶれるため分類器に任せる
+ * （`agent.autoHandoff.onAssistantSuggestion` の説明を参照）。一方でhandoffプロンプト
+ * そのものは `handoff` skillが書式を固定しているので、ここで決定論的に拾える。分類器が
+ * 無効・時間切れ・JSON不正でも発火できる経路をこの関数が受け持つ。
+ *
+ * フェンスと見出しの**両方**を要求する。見出しだけを見ると、書式を話題にしているだけの
+ * 応答で誤爆する。逆にフェンスだけを見ると、subagent用プロンプトなど同じく4バックティック
+ * で囲む別物まで拾ってしまう。
+ *
+ * ストリーミング途中の断片を拾わないのは呼び出し側の責任。前段（`passesSafeBoundaryGate`）
+ * が `busy` の間は通さない。
+ */
+export function containsHandoffPrompt(text: string): boolean {
+  let fenceLength = 0;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    const marks = HANDOFF_PROMPT_FENCE.exec(line)?.[1];
+    if (fenceLength === 0) {
+      if (marks !== undefined) {
+        fenceLength = marks.length;
+      }
+      continue;
+    }
+    // 閉じフェンスは開きと同じ長さ以上で、後ろに情報文字列を付けられない（Markdownの規則）。
+    // 開き行はバックティックの後ろに言語名が付くため、長さと余分な文字の両方を見て弾く
+    if (marks !== undefined && marks.length >= fenceLength && line.trim() === marks) {
+      fenceLength = 0;
+      continue;
+    }
+    if (HANDOFF_PROMPT_HEADING.test(line)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

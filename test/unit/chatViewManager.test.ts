@@ -2242,3 +2242,88 @@ describe('Codexのファイル復元と送り直し', () => {
     }
   });
 });
+
+describe('handoffプロンプトの決定論検知で自動引き継ぎする（Issue #1150）', () => {
+  /** `handoff` skillの出力そのもの。ソース中にバックティックの連続を書かずに組む。 */
+  const HANDOFF_PROMPT = [
+    '一段落したので引き継ぐ。',
+    '',
+    `${'`'.repeat(4)}markdown`,
+    '# 継続 2026-09-13 main',
+    '',
+    '作業: 決定論検知の実装',
+    '`'.repeat(4),
+  ].join('\n');
+
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** タブを1枚開き、`text` を応答本文としてターンを1回完了させる。 */
+  async function finishTurnWith(text: string): Promise<FakeAppServerConnection> {
+    const store = fakeSessionStore({
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const { manager, connection } = createManager({ store });
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+
+    connection.notify('turn/started', { threadId: 'thread-orig', turn: { id: 'turn-1' } });
+    connection.notify('item/completed', {
+      threadId: 'thread-orig',
+      turnId: 'turn-1',
+      item: { id: 'i1', type: 'agentMessage', text },
+    });
+    connection.notify('turn/completed', { threadId: 'thread-orig', turnId: 'turn-1' });
+    connection.notify('thread/status/changed', {
+      threadId: 'thread-orig',
+      status: { type: 'idle' },
+    });
+    await tick();
+    return connection;
+  }
+
+  const threadStarts = (connection: FakeAppServerConnection): number =>
+    connection.requests.filter((r) => r.method === 'thread/start').length;
+
+  // これが本Issueの主目的。分類器を切っていても、handoffプロンプトが出れば引き継ぐ
+  it('router=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await vi.waitFor(() => {
+      expect(threadStarts(connection)).toBe(2);
+    });
+  });
+
+  it('handoffプロンプトが無ければ、router=false のときは従来どおり発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const connection = await finishTurnWith('直しました。次はテストを足す。');
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+
+  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onAssistantSuggestion': false,
+    });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+
+  it('自動引き継ぎ自体がOFFなら発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.enabled': false, 'autoHandoff.router': false });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+});
