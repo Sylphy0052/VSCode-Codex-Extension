@@ -18,7 +18,15 @@ export interface ManagedSessionInput {
   activity: SessionActivityState;
 }
 
-export interface SessionKanbanCard extends ManagedSessionInput {
+/**
+ * 画面へ送るカード1枚。
+ *
+ * 作業ディレクトリは**末尾の要素だけ**を`cwdLabel`として持ち、絶対パスは持たない
+ * （Issue #1039）。画面共有やスクリーンショットで、ユーザー名・ホームディレクトリ名・
+ * 顧客名を含むディレクトリ名が意図せず映るため。全体を確かめたいときはサイドバーの
+ * セッション一覧のツールチップ（`- cwd:`）を見る。
+ */
+export interface SessionKanbanCard extends Omit<ManagedSessionInput, 'cwd'> {
   column: SessionKanbanColumn;
   cwdLabel: string;
 }
@@ -44,7 +52,9 @@ export function buildSessionKanban(
       continue;
     }
     const column = session.activity;
-    cards[column].push({ ...session, column, cwdLabel: basename(session.cwd) });
+    // cwd は展開に混ぜない。`...session`のままだと絶対パスが画面まで届く（Issue #1039）
+    const { cwd, ...rest } = session;
+    cards[column].push({ ...rest, column, cwdLabel: basename(cwd) });
   }
   for (const column of columns) {
     cards[column].sort((a, b) => a.title.localeCompare(b.title, 'ja'));
