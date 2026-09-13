@@ -244,6 +244,14 @@ export interface SafeBoundaryProbe {
   handoffSuggested: boolean;
   /** `handoffSuggested` の根拠を1文で。提案が無ければ空。 */
   handoffSuggestReason: string;
+  /**
+   * アシスタントがユーザーへ質問して回答を待っているか（Issue #1191）。
+   *
+   * 真のときは区切り待ちの契機をすべて止める（`handoffSuggested` が真でも止める）。
+   */
+  awaitingUserAnswer: boolean;
+  /** `awaitingUserAnswer` の根拠を1文で。回答待ちでなければ空。 */
+  awaitingUserAnswerReason: string;
   /** 解決したmodel/effortが今の値と実質的に違うか（`switchSafe` が真のときだけ意味を持つ）。 */
   profileChanged: boolean;
   /** 解決したmodel/effort。確認ダイアログへ出す値と同じ。 */
@@ -293,6 +301,8 @@ export async function probeSafeBoundary(
     // 「MRは作成済みだが未マージ」のような状態で宣言を握り潰すことになる
     handoffSuggested: assessment.handoffSuggested,
     handoffSuggestReason: assessment.handoffSuggestReason,
+    awaitingUserAnswer: assessment.awaitingUserAnswer,
+    awaitingUserAnswerReason: assessment.awaitingUserAnswerReason,
     // `profileChanged` の方は従来どおり `switchSafe` を要求する
     profileChanged: assessment.switchSafe && isProfileChange(current, proposal.settings),
     profile: proposal.settings,

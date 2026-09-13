@@ -139,6 +139,7 @@ import {
   countCompactions,
   decideAutoHandoff,
   deriveHandoffBaseName,
+  endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   nextHandoffName,
   passesSafeBoundaryGate,
@@ -909,6 +910,10 @@ export class ClaudeChatViewManager
         trigger,
         turnFailed: state.turnFailed,
         busy: state.busy,
+        // 回答待ちのまま引き継ぐのは残量の閾値・自動圧縮の契機だけ（Issue #1191）。その
+        // ときに申し送りの質問を承諾済みと読まれないよう、状態として渡す
+        awaitingUserAnswer:
+          lastAssistantMessage !== undefined && endsWithUserQuestion(lastAssistantMessage),
         recentUserMessages: recentUserMessages(state),
         // 引き継ぎ元の最終応答をそのまま申し送りにする（Issue #1097）。要約しない
         ...(lastAssistantMessage === undefined ? {} : { nextSteps: lastAssistantMessage }),
@@ -1086,11 +1091,15 @@ export class ClaudeChatViewManager
       return;
     }
     const loopStatus = entry.loop.getStatus();
+    const assistantMessages = recentAssistantMessages(state);
     const gate = {
       busy: state.busy,
       turnFailed: state.turnFailed,
       pendingApprovals: state.approvals.length,
       pendingPrompts: state.prompts.length,
+      // ユーザーへ質問して終わったターンは区切りではない（Issue #1191）。見るのは最終応答
+      // だけで、その前の応答の質問は既に答えられている
+      awaitingUserAnswer: endsWithUserQuestion(assistantMessages.at(-1) ?? ''),
       queued: state.queued.length,
       // `running` は `pause()` 中も true のまま。返信待ちで止まっているループを「実行中」と
       // 数えると、`/loop` 運用では区切り系の契機が全部塞がる（Issue #1097）
@@ -1101,7 +1110,6 @@ export class ClaudeChatViewManager
       entry.trace.info(`gate blocked (${describeGate(gate)})`);
       return;
     }
-    const assistantMessages = recentAssistantMessages(state);
     // handoffプロンプトそのものが出力されていれば、分類器を待たずに発火する（Issue #1150）。
     // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
     // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
@@ -1203,6 +1211,9 @@ export class ClaudeChatViewManager
       safeBoundary: probe.switchSafe,
       handoffSuggested: onAssistantSuggestion && probe.handoffSuggested,
       handoffSuggestReason: probe.handoffSuggestReason,
+      // 前段の決定論の検知（末尾行だけを見る）が取りこぼした回答待ちをここで止める
+      // （Issue #1191）
+      awaitingUserAnswer: probe.awaitingUserAnswer,
       profileChanged: onProfileChange && probe.profileChanged,
       profile: probe.profile,
       switchReason: probe.switchReason,

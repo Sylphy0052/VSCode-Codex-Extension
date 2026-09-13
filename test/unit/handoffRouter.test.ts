@@ -53,6 +53,8 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
     switchReason: '',
     handoffSuggested: false,
     handoffSuggestReason: '',
+    awaitingUserAnswer: false,
+    awaitingUserAnswerReason: '',
     ...over,
   };
 }

@@ -11,6 +11,7 @@ import {
   buildHandoffPrompt,
   countCompactions,
   decideAutoHandoff,
+  endsWithUserQuestion,
   handoffPointerFileName,
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
@@ -442,6 +443,7 @@ describe('自動引き継ぎの発火判定', () => {
         turnFailed: false,
         pendingApprovals: 0,
         pendingPrompts: 0,
+        awaitingUserAnswer: false,
         queued: 0,
         loopRunning: false,
         taskManaged: false,
@@ -493,6 +495,7 @@ describe('安全な区切りの前段（Issue #1090）', () => {
     turnFailed: false,
     pendingApprovals: 0,
     pendingPrompts: 0,
+    awaitingUserAnswer: false,
     queued: 0,
     loopRunning: false,
     taskManaged: false,
@@ -507,6 +510,7 @@ describe('安全な区切りの前段（Issue #1090）', () => {
     ['直前のターンが失敗', { turnFailed: true }],
     ['承認待ち', { pendingApprovals: 1 }],
     ['入力待ち', { pendingPrompts: 1 }],
+    ['ユーザーの回答待ち（Issue #1191）', { awaitingUserAnswer: true }],
     ['送信待ちの指示', { queued: 1 }],
     ['ループ実行中', { loopRunning: true }],
     ['タスク用セッション', { taskManaged: true }],
@@ -800,6 +804,36 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
     });
   });
 
+  it('回答待ちで終わっているときは区切り待ちの契機を全部止める（Issue #1191）', () => {
+    const base = {
+      enabled: true,
+      busy: false,
+      alreadyStarted: false,
+      remainingPercent: 90 as number | undefined,
+      compacted: false,
+      thresholdPercent: 20,
+      softThresholdPercent: 40,
+      boundaryGatePassed: true,
+      safeBoundary: true,
+      awaitingUserAnswer: true,
+    };
+    // 提案（`switchSafe` を要求しない契機）でも止まる
+    expect(decideAutoHandoff({ ...base, handoffSuggested: true })).toBeUndefined();
+    expect(decideAutoHandoff({ ...base, profileChanged: true })).toBeUndefined();
+    // 残量が緩い閾値以下でも、区切りを待つ契機であれば止まる
+    expect(decideAutoHandoff({ ...base, remainingPercent: 30 })).toBeUndefined();
+    // 残量が厳しい閾値以下・自動圧縮は従来どおり発火する
+    expect(decideAutoHandoff({ ...base, remainingPercent: 10 })).toEqual({
+      kind: 'threshold',
+      remainingPercent: 10,
+    });
+    expect(decideAutoHandoff({ ...base, compacted: true })).toEqual({ kind: 'compactBoundary' });
+    // 回答待ちでなければ従来どおり提案で発火する
+    expect(
+      decideAutoHandoff({ ...base, awaitingUserAnswer: false, handoffSuggested: true }),
+    ).toMatchObject({ kind: 'assistantSuggested' });
+  });
+
   it('残した理由はreason付きの1行になる', () => {
     expect(oldTabKeptMessage('timeout')).toContain('reason=timeout');
     expect(oldTabKeptMessage('turnFailed')).toContain('reason=turnFailed');
@@ -807,5 +841,45 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
     expect(oldTabKeptMessage('disposed')).toContain('reason=disposed');
     expect(oldTabKeptMessage('oldBusy')).toContain('reason=oldBusy');
     expect(oldTabKeptMessage('userDismissed')).toContain('reason=userDismissed');
+  });
+});
+
+describe('ユーザーへの質問で終わっているかの検知（Issue #1191）', () => {
+  it.each([
+    ['疑問符あり', 'PR #1187 をマージした。次は #1190 に着手してよいか？'],
+    ['疑問符なしの問い', 'A案とB案を比べた。A案で実装してよいか。'],
+    ['選択を求める', '選択肢は3つ。どれで進めるか選んでください。'],
+    ['末尾が判断を仰ぐ形', '影響範囲はここまで。この方針でいい。'],
+    ['箇条書きの最後が質問', '- A: 既存を直す\n- B: 作り直す\n- どちらにするか？'],
+  ])('%s は回答待ちと判定する', (_name, text) => {
+    expect(endsWithUserQuestion(text)).toBe(true);
+  });
+
+  it.each([
+    ['完了報告', '実装とテストが通った。PRを作成済み。'],
+    ['次にやることの説明', '次はCIの確認を行う。結果が出たら報告する。'],
+    ['途中の自問は拾わない', '本当に原因はここか？ 調べた結果、原因はキャッシュだった。'],
+    [
+      'コードブロックの中の疑問符は見ない',
+      '修正した。\n\n```ts\n// これでよいか？\nconst a = 1;\n```',
+    ],
+    ['空文字', ''],
+  ])('%s は回答待ちと判定しない', (_name, text) => {
+    expect(endsWithUserQuestion(text)).toBe(false);
+  });
+});
+
+describe('回答待ちのままの引き継ぎはポインタへ明記する（Issue #1191）', () => {
+  it('回答待ちなら注意書きを出す', () => {
+    const md = buildHandoffPointerMarkdown(
+      baseInput({ awaitingUserAnswer: true, nextSteps: 'この方針で実装してよいか。' }),
+    );
+    expect(md).toContain('ユーザーへ質問して回答を待っていた');
+    expect(md).toContain('承諾されたものではない');
+  });
+
+  it('回答待ちでなければ出さない', () => {
+    const md = buildHandoffPointerMarkdown(baseInput());
+    expect(md).not.toContain('ユーザーへ質問して回答を待っていた');
   });
 });

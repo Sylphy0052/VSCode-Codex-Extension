@@ -24,6 +24,7 @@ const gate = {
   turnFailed: false,
   pendingApprovals: 0,
   pendingPrompts: 0,
+  awaitingUserAnswer: false,
   queued: 0,
   loopRunning: false,
   taskManaged: false,
@@ -42,6 +43,8 @@ const assessment: TaskAssessment = {
   switchReason: '実装が一段落した',
   handoffSuggested: true,
   handoffSuggestReason: '別セッションでの実装を勧めている',
+  awaitingUserAnswer: false,
+  awaitingUserAnswerReason: '',
 };
 
 describe('判定過程のログ（Issue #1097）', () => {
@@ -106,6 +109,8 @@ describe('ログの1行の中身（Issue #1097）', () => {
         switchReason: '',
         handoffSuggested: true,
         handoffSuggestReason: '',
+        awaitingUserAnswer: false,
+        awaitingUserAnswerReason: '',
         profileChanged: true,
         profile: { model: 'gpt-5.6-astra', effort: 'high' },
       }),
