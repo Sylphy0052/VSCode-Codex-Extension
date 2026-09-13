@@ -763,6 +763,11 @@ async function createBundleFor(
             untrackedOmissions: snapshot.untrackedOmissions,
           },
         });
+        if (bundle.afterTreeOmitted !== undefined) {
+          // 写しを作らなかった（資格情報。Issue #1171）。名前を渡さなければ固定指示は
+          // 「外を読むな」のまま。理由は `reviewBundle.ts` がログへ残している
+          return { bundle };
+        }
         return {
           bundle,
           afterTreeDir: REVIEW_BUNDLE_AFTER_DIR,

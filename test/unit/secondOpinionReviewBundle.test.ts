@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  afterTreeCredentialHits,
   createEmptyReviewBundle,
   createReviewBundle,
   removeStaleReviewBundles,
@@ -166,5 +167,79 @@ describe('removeStaleReviewBundles（Issue #926 E）', () => {
     await expect(
       removeStaleReviewBundles(path.join(root, 'missing'), Date.now()),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('createReviewBundle は資料を伏せてから置く（Issue #1171）', () => {
+  let root: string;
+  // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
+  const fakeToken = `ghp_${'a1b2c3d4'.repeat(5)}`;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bundle-redact-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('changes.diff と base/ の中身に資格情報の原文が残らない', async () => {
+    const bundle = await createReviewBundle({
+      root,
+      cwd: '/repo',
+      git: fakeShow({ 'abc1234:src/a.ts': `const token = "${fakeToken}";\n` }),
+      baseCommit: 'abc1234',
+      fullDiff: [
+        'diff --git a/src/a.ts b/src/a.ts',
+        `-const token = "${fakeToken}";`,
+        '+const token = process.env.TOKEN;',
+        '',
+      ].join('\n'),
+      changedPaths: ['src/a.ts'],
+    });
+    try {
+      const diff = await fs.readFile(path.join(bundle.dir, 'changes.diff'), 'utf8');
+      expect(diff).not.toContain(fakeToken);
+      expect(diff).toContain('process.env.TOKEN');
+      const base = await fs.readFile(path.join(bundle.dir, 'base', 'src', 'a.ts'), 'utf8');
+      expect(base).not.toContain(fakeToken);
+      expect(base).toContain('<MASKED>');
+    } finally {
+      await bundle.dispose();
+    }
+  });
+
+  it('写しの材料に資格情報があれば写しを作らず、理由を返す', async () => {
+    const bundle = await createReviewBundle({
+      root,
+      cwd: '/repo',
+      git: fakeShow({}),
+      baseCommit: 'abc1234',
+      fullDiff: 'diff --git a/src/a.ts b/src/a.ts\n',
+      changedPaths: ['src/a.ts'],
+      afterTree: { applyDiff: '+password: "hunter2-hunter2"\n' },
+    });
+    try {
+      expect(bundle.afterTreeOmitted).toBe('credentials');
+      await expect(fs.access(path.join(bundle.dir, 'after'))).rejects.toThrow();
+      // 差分とベース側は従来どおり置く（伏せる対象が無ければ原文のまま）
+      expect(await fs.readFile(path.join(bundle.dir, 'changes.diff'), 'utf8')).toBe(
+        'diff --git a/src/a.ts b/src/a.ts\n',
+      );
+    } finally {
+      await bundle.dispose();
+    }
+  });
+
+  it('afterTreeCredentialHits は差分と未追跡ファイルの両方を数える', () => {
+    expect(afterTreeCredentialHits({ applyDiff: '+const a = 1;\n' })).toBe(0);
+    expect(
+      afterTreeCredentialHits({
+        applyDiff: `+token: ${fakeToken}\n`,
+        untrackedFiles: [
+          { path: 'config.local.json', content: `{"api_key": "${fakeToken}"}`, bytes: 64 },
+        ],
+      }),
+    ).toBeGreaterThanOrEqual(2);
   });
 });

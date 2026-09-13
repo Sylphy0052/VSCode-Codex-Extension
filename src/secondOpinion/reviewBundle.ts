@@ -33,6 +33,7 @@ import type { GitCommandRunner } from '../orchestrator/worktree';
 
 import { createFrozenAfterTree } from './afterTree';
 import { isInsideRoot, type UntrackedFile, type UntrackedOmission } from './untracked';
+import { redactCredentials } from './redact';
 
 /** 一時ディレクトリ名の接頭辞。取り残しの掃除は、この接頭辞を持つものだけを対象にする。 */
 export const REVIEW_BUNDLE_PREFIX = 'review-bundle-';
@@ -111,6 +112,13 @@ export interface ReviewBundle {
    * する側はこの値を使う（`afterTree.ts`）。
    */
   readonly afterTreeNoticeFile?: string | undefined;
+  /**
+   * 写しを頼まれたのに作らなかった理由（Issue #1171）。`credentials` は、写しの材料
+   * （`applyDiff`・未追跡ファイル）に資格情報らしき値があったため。写しは伏せるとパッチが
+   * 当たらず再現性が壊れるので、伏せる代わりに作らない。作ったときと頼まれていないときは
+   * `undefined`。
+   */
+  readonly afterTreeOmitted?: 'credentials' | undefined;
   /** 中身ごと消す。冪等。 */
   dispose(): Promise<void>;
 }
@@ -207,6 +215,15 @@ export async function createReviewBundle(
   try {
     await writeMaterialInto(dir, request);
     if (request.afterTree !== undefined) {
+      const hits = afterTreeCredentialHits(request.afterTree);
+      if (hits > 0) {
+        // 写しは `git apply` と未追跡ファイルの実体化でできており、伏せるとパッチが当たらない。
+        // 伏せられないものは相談先へ見せない（Issue #1171）。差分とベース側は伏せて置いてある
+        request.log?.warn(
+          `${LOG_PREFIX} 押下時点の写しに資格情報らしき値が${hits}件あるため、写しを作りません（差分とベース側だけで続けます）`,
+        );
+        return { ...bundle, afterTreeOmitted: 'credentials' };
+      }
       // 写しの `dispose` は持ち回らない。bundleの `dispose` がディレクトリごと消すので、
       // 別に持つと同じ場所を二度消すことになる
       const tree = await createFrozenAfterTree({
@@ -231,6 +248,21 @@ export async function createReviewBundle(
     await bundle.dispose();
     throw e;
   }
+}
+
+/**
+ * 写しの材料に含まれる、資格情報らしき値の件数（Issue #1171）。
+ *
+ * 写しに入るのは `applyDiff` を当てた結果と未追跡ファイルの中身。`baseCommit` 時点の追跡
+ * ファイル全体（`git checkout-index` で出す）は走査しない——コミット済みの内容であり、本流の
+ * セッションも同じものを読む。
+ */
+export function afterTreeCredentialHits(afterTree: ReviewBundleAfterTreeSource): number {
+  const untracked = afterTree.untrackedFiles ?? [];
+  return untracked.reduce(
+    (total, file) => total + redactCredentials(file.content).total,
+    redactCredentials(afterTree.applyDiff).total,
+  );
 }
 
 /**
@@ -292,7 +324,11 @@ export function reviewBundleRevisionPath(revision: number): string {
  * 欠けていてもレビューは成立する。
  */
 async function writeMaterialInto(dir: string, source: ReviewMaterialSource): Promise<void> {
-  await fs.writeFile(path.join(dir, REVIEW_BUNDLE_DIFF_FILE), source.fullDiff, 'utf8');
+  // 相談先が読める資料には、送信本文と同じ伏せ字を掛けてから置く（Issue #1171）。`changes.diff`
+  // は読む用であり `git apply` には使わないため、伏せても成立する
+  const diffRedaction = redactCredentials(source.fullDiff);
+  let redacted = diffRedaction.total;
+  await fs.writeFile(path.join(dir, REVIEW_BUNDLE_DIFF_FILE), diffRedaction.text, 'utf8');
   const baseDir = path.join(dir, REVIEW_BUNDLE_BASE_DIR);
   await fs.mkdir(baseDir, { recursive: true });
   let used = 0;
@@ -321,14 +357,16 @@ async function writeMaterialInto(dir: string, source: ReviewMaterialSource): Pro
     if (bytes > MAX_BASE_FILE_BYTES || used + bytes > MAX_BASE_TOTAL_BYTES) {
       continue;
     }
+    const baseRedaction = redactCredentials(content);
+    redacted += baseRedaction.total;
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, content, 'utf8');
+    await fs.writeFile(target, baseRedaction.text, 'utf8');
     used += bytes;
     written += 1;
   }
   source.log?.info(
     `${LOG_PREFIX} bundle material written baseFiles=${written}/${source.changedPaths.length} ` +
-      `diffChars=${source.fullDiff.length}`,
+      `diffChars=${source.fullDiff.length} redacted=${redacted}`,
   );
 }
 
