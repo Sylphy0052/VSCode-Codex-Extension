@@ -361,6 +361,11 @@ ${sharedStyles()}
     font-size: 0.85em;
     white-space: pre-wrap;
   }
+  .prompt .field-error {
+    margin-top: 3px;
+    color: var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground));
+    font-size: 0.85em;
+  }
   .prompt .option, .approval .option {
     display: flex;
     align-items: center;

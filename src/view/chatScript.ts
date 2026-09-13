@@ -1759,8 +1759,10 @@ export function chatScript(
     }
 
     const readers = [];
+    // 項目名が __proto__ でも壊れないようMapで持つ
+    const errorSetters = new Map();
     for (const field of prompt.fields || []) {
-      wrap.appendChild(buildField(prompt.requestId, field, readers));
+      wrap.appendChild(buildField(prompt.requestId, field, readers, errorSetters));
     }
 
     const actions = document.createElement('div');
@@ -1769,16 +1771,35 @@ export function chatScript(
     buttons.push(['拒否', 'decline', true]);
     if (prompt.kind === 'elicitation') buttons.push(['取り消す', 'cancel', true]);
 
+    // ホスト側が差し戻した理由を、カードを作り直さずに反映する。作り直すと入力が消える
+    const applyErrors = (errors) => {
+      const map = errors || {};
+      errorSetters.forEach((show, id) => show(Object.hasOwn(map, id) ? map[id] : ''));
+      // 差し戻されたら押せる状態へ戻す。戻さないとタブを開き直すまで送り直せない
+      if (Object.keys(map).length > 0) {
+        actions.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      }
+    };
+    wrap.applyPromptErrors = applyErrors;
+
     for (const [label, action, secondary] of buttons) {
       const button = document.createElement('button');
       button.textContent = label;
       if (secondary) button.className = 'secondary';
       button.addEventListener('click', () => {
-        actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
-        const values = {};
+        // 項目名はMCPサーバが決める。素のオブジェクトだと __proto__ の回答が消える
+        const values = Object.create(null);
         if (action === 'submit') {
           for (const read of readers) read(values);
+          // 制約に反する回答は送らない。送ってしまうとカードが消え、同じフォームで直せない
+          const errors = promptErrors(prompt.fields || [], values);
+          if (Object.keys(errors).length > 0) {
+            applyErrors(errors);
+            return;
+          }
         }
+        applyErrors({});
+        actions.querySelectorAll('button').forEach((b) => (b.disabled = true));
         vscode.postMessage({
           type: 'prompt',
           requestId: prompt.requestId,
@@ -1791,8 +1812,41 @@ export function chatScript(
     return wrap;
   }
 
-  /** 1つの入力欄。集め方は readers へ積む。 */
-  function buildField(requestId, field, readers) {
+  /**
+   * 送信前の検査。ホスト側の validatePromptSubmission と同じ規則で、必須・数値・
+   * 整数・範囲を見る。Webviewのスクリプトは拡張のモジュールを読み込めないため、
+   * 規則をここへ写している。最終判断はホスト側。
+   */
+  function promptErrors(fields, values) {
+    const errors = [];
+    for (const field of fields) {
+      const given = Object.hasOwn(values, field.id) ? values[field.id] : [];
+      const message = promptFieldError(field, Array.isArray(given) ? given : []);
+      if (message !== '') errors.push([field.id, message]);
+    }
+    // 項目名はMCPサーバが決める。素のオブジェクトへ代入すると __proto__ という名前で
+    // 握り潰され、理由が1件も無い（＝検証を通った）ことになる
+    return Object.fromEntries(errors);
+  }
+
+  function promptFieldError(field, given) {
+    const picked = given.filter((v) => String(v).trim() !== '');
+    if (picked.length === 0) return field.required ? '必須項目です' : '';
+    if (field.input !== 'number') return '';
+    for (const raw of picked) {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return '数値を入力してください';
+      if (field.integer && !Number.isInteger(value)) return '整数を入力してください';
+      if (typeof field.minimum === 'number' && value < field.minimum)
+        return field.minimum + ' 以上の値を入力してください';
+      if (typeof field.maximum === 'number' && value > field.maximum)
+        return field.maximum + ' 以下の値を入力してください';
+    }
+    return '';
+  }
+
+  /** 1つの入力欄。集め方は readers へ、止めた理由の出し口は errorSetters へ積む。 */
+  function buildField(requestId, field, readers, errorSetters) {
     const box = document.createElement('div');
     box.className = 'field';
 
@@ -1808,6 +1862,7 @@ export function chatScript(
       box.appendChild(desc);
     }
 
+    const options = field.options || [];
     if (field.input === 'boolean') {
       const input = document.createElement('input');
       input.type = 'checkbox';
@@ -1816,16 +1871,21 @@ export function chatScript(
       readers.push((values) => {
         values[field.id] = [input.checked ? 'true' : 'false'];
       });
-      return box;
-    }
-
-    const options = field.options || [];
-    if (options.length > 0) {
+    } else if (options.length > 0) {
       buildOptions(requestId, box, field, options, readers);
-      return box;
+    } else {
+      box.appendChild(buildFreeInput(field, readers));
     }
 
-    box.appendChild(buildFreeInput(field, readers));
+    // 理由は入力欄の下に出す。星印だけでは何が足りないか判らない
+    const error = document.createElement('div');
+    error.className = 'field-error';
+    error.hidden = true;
+    box.appendChild(error);
+    errorSetters.set(field.id, (message) => {
+      error.textContent = message;
+      error.hidden = message === '';
+    });
     return box;
   }
 
@@ -1892,6 +1952,12 @@ export function chatScript(
     const input = document.createElement('input');
     // 伏せ字の指定は画面でも守る
     input.type = field.secret ? 'password' : field.input === 'number' ? 'number' : 'text';
+    if (input.type === 'number') {
+      // スピナーと矢印キーを制約どおりに動かす。素通りする入力は送信時に止める
+      if (field.integer) input.step = '1';
+      if (typeof field.minimum === 'number') input.min = String(field.minimum);
+      if (typeof field.maximum === 'number') input.max = String(field.maximum);
+    }
     input.value = field.defaultValue || '';
     readers.push((values) => {
       values[field.id] = [input.value];
@@ -1922,11 +1988,14 @@ export function chatScript(
       const card = existing.get(id);
       if (card) {
         existing.delete(id);
+        // 差し戻された理由はカードを作り直さずに載せ替える
+        if (card.applyPromptErrors) card.applyPromptErrors(prompt.errors);
         next.push(card);
         continue;
       }
       const created = renderPrompt(prompt);
       created.dataset.requestId = id;
+      if (created.applyPromptErrors) created.applyPromptErrors(prompt.errors);
       next.push(created);
     }
 
