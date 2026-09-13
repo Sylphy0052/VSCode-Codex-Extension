@@ -18,6 +18,8 @@ import {
   recentAssistantMessages,
   shellQuote,
   waitForFirstTurn,
+  decideOldTabAfterHandoff,
+  oldTabKeptMessage,
   writeHandoffPointer,
   type HandoffPointerInput,
 } from '../../src/view/handoff';
@@ -669,6 +671,55 @@ describe('新セッションの初回応答を待つ', () => {
     expect(w.stateListeners).toHaveLength(0);
   });
 
+  it('呼んだ時点でbaselineとlistenerが確定する（送信前に張れば取りこぼさない。Issue #1162）', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 7 });
+
+    // 初回プロンプトの送信より前に監視を張る想定。awaitを一度も挟まずに登録が終わる
+    const done = waitForFirstTurn(w, 50);
+    expect(w.stateListeners).toHaveLength(1);
+
+    // 送信の完了を待っている間にターンが終わってしまっても、baselineは呼び出し時点の
+    // 7 のままなので完了を拾える
+    w.emit({ ...initialChatState, turnCompletionSeq: 8, turnFailed: false });
+
+    expect(await done).toEqual({ succeeded: true });
+  });
+
+  it('監視を打ち切ったら reason:abandoned を返し、listenerを外す（送信に失敗したとき）', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const giveUp = new AbortController();
+    const done = waitForFirstTurn(w, 60_000, giveUp.signal);
+    expect(w.stateListeners).toHaveLength(1);
+
+    giveUp.abort();
+
+    expect(await done).toEqual({ succeeded: false, reason: 'abandoned' });
+    expect(w.stateListeners).toHaveLength(0);
+  });
+
+  it('既にabort済みのsignalを渡したら、その場で打ち切る', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const giveUp = new AbortController();
+    giveUp.abort();
+
+    expect(await waitForFirstTurn(w, 60_000, giveUp.signal)).toEqual({
+      succeeded: false,
+      reason: 'abandoned',
+    });
+    expect(w.stateListeners).toHaveLength(0);
+  });
+
+  it('ターンが先に終われば、後からabortしても結果は変わらない', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const giveUp = new AbortController();
+    const done = waitForFirstTurn(w, 60_000, giveUp.signal);
+
+    w.emit({ ...initialChatState, turnCompletionSeq: 1, turnFailed: false });
+    giveUp.abort();
+
+    expect(await done).toEqual({ succeeded: true });
+  });
+
   it('ターンが終わる前の状態更新では決めない', async () => {
     const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
     const done = waitForFirstTurn(w, 50);
@@ -678,5 +729,83 @@ describe('新セッションの初回応答を待つ', () => {
     expect(w.stateListeners).toHaveLength(1);
 
     expect(await done).toEqual({ succeeded: false, reason: 'timeout' });
+  });
+});
+
+describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1162）', () => {
+  function input(overrides: Partial<Parameters<typeof decideOldTabAfterHandoff>[0]> = {}) {
+    return {
+      outcome: { succeeded: true } as const,
+      oldDisposed: false,
+      oldBusy: false,
+      closeOldTab: true,
+      ...overrides,
+    };
+  }
+
+  it('初回ターンが成功していて旧が空いていれば閉じる', () => {
+    expect(decideOldTabAfterHandoff(input())).toEqual({ action: 'close' });
+  });
+
+  it('初回ターンが時間切れなら、closeOldTabが有効でも残す', () => {
+    expect(
+      decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'timeout' } })),
+    ).toEqual({ action: 'keep', reason: 'timeout' });
+  });
+
+  it('初回ターンが失敗したら、closeOldTabが有効でも残す', () => {
+    expect(
+      decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'turnFailed' } })),
+    ).toEqual({ action: 'keep', reason: 'turnFailed' });
+  });
+
+  it('送信に失敗して監視を打ち切ったら残す', () => {
+    expect(
+      decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'abandoned' } })),
+    ).toEqual({ action: 'keep', reason: 'abandoned' });
+  });
+
+  it('旧タブが既に破棄済みなら後片付けは要らない', () => {
+    expect(decideOldTabAfterHandoff(input({ oldDisposed: true }))).toEqual({
+      action: 'keep',
+      reason: 'disposed',
+    });
+  });
+
+  it('旧セッションがターン実行中なら閉じない', () => {
+    expect(decideOldTabAfterHandoff(input({ oldBusy: true }))).toEqual({
+      action: 'keep',
+      reason: 'oldBusy',
+    });
+  });
+
+  it('closeOldTabが無効なら人に聞く', () => {
+    expect(decideOldTabAfterHandoff(input({ closeOldTab: false }))).toEqual({
+      action: 'confirm',
+    });
+  });
+
+  it('closeOldTabが無効でも、初回ターンが失敗していれば聞かずに残す', () => {
+    expect(
+      decideOldTabAfterHandoff(
+        input({ closeOldTab: false, outcome: { succeeded: false, reason: 'turnFailed' } }),
+      ),
+    ).toEqual({ action: 'keep', reason: 'turnFailed' });
+  });
+
+  it('closeOldTabが無効でも、旧が破棄済みなら聞かない', () => {
+    expect(decideOldTabAfterHandoff(input({ closeOldTab: false, oldDisposed: true }))).toEqual({
+      action: 'keep',
+      reason: 'disposed',
+    });
+  });
+
+  it('残した理由はreason付きの1行になる', () => {
+    expect(oldTabKeptMessage('timeout')).toContain('reason=timeout');
+    expect(oldTabKeptMessage('turnFailed')).toContain('reason=turnFailed');
+    expect(oldTabKeptMessage('abandoned')).toContain('reason=abandoned');
+    expect(oldTabKeptMessage('disposed')).toContain('reason=disposed');
+    expect(oldTabKeptMessage('oldBusy')).toContain('reason=oldBusy');
+    expect(oldTabKeptMessage('userDismissed')).toContain('reason=userDismissed');
   });
 });

@@ -104,8 +104,11 @@ import {
   resolveGitBranch,
   resolveWithRetry,
   safeBoundaryProbeKey,
+  decideOldTabAfterHandoff,
+  oldTabKeptMessage,
   waitForFirstTurn,
   writeHandoffPointer,
+  type FirstTurnOutcome,
   type HandoffTrigger,
 } from './handoff';
 import {
@@ -789,9 +792,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
       );
     const text = buildHandoffPrompt(pointerPath);
-    await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
+    // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
+    // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
+    // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
+    // 残ってしまうため、その場で打ち切る
+    const giveUp = new AbortController();
+    const firstTurn = waitForFirstTurn(newEntry, undefined, giveUp.signal);
+    try {
+      await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
+    } catch (e) {
+      giveUp.abort();
+      throw e;
+    }
     this.reportActivity(newEntry, text);
-    void this.confirmStopAfterFirstTurn(entry, newEntry);
+    void this.confirmStopAfterFirstTurn(entry, firstTurn);
     return true;
   }
 
@@ -802,24 +816,21 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * たびにタブが増えるのを避ける。履歴は残るので開き直せる）。初回ターンが失敗・時間切れの
    * ときは、設定にかかわらず旧セッションをそのまま残す。
    */
-  private async confirmStopAfterFirstTurn(oldEntry: ChatPanel, newEntry: ChatPanel): Promise<void> {
-    const outcome = await waitForFirstTurn(newEntry);
-    if (!outcome.succeeded) {
-      this.log.info(
-        `引き継ぎ先の初回ターンが${outcome.reason === 'timeout' ? 'タイムアウト' : '失敗'}したため、旧タブを残します（reason=${outcome.reason}）`,
-      );
+  private async confirmStopAfterFirstTurn(
+    oldEntry: ChatPanel,
+    firstTurn: Promise<FirstTurnOutcome>,
+  ): Promise<void> {
+    const decision = decideOldTabAfterHandoff({
+      outcome: await firstTurn,
+      oldDisposed: oldEntry.disposed,
+      oldBusy: oldEntry.session.getState().busy,
+      closeOldTab: readAutoHandoffCloseOldTab(),
+    });
+    if (decision.action === 'keep') {
+      this.log.info(oldTabKeptMessage(decision.reason));
       return;
     }
-    if (oldEntry.disposed) {
-      this.log.info('引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です（reason=disposed）');
-      return;
-    }
-    if (readAutoHandoffCloseOldTab()) {
-      // 引き継いだ後に旧タブで新しいターンが走り出していたら閉じない（進行中の作業を切らない）
-      if (oldEntry.session.getState().busy) {
-        this.log.info('引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します（reason=oldBusy）');
-        return;
-      }
+    if (decision.action === 'close') {
       this.log.info('引き継ぎ元のセッションを停止してタブを閉じます（履歴は残ります）');
       void oldEntry.session.interrupt();
       this.teardown(oldEntry);
@@ -832,9 +843,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       stop,
     );
     if (choice !== stop || oldEntry.disposed) {
-      this.log.info(
-        `引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します（reason=${oldEntry.disposed ? 'disposed' : 'userDismissed'}）`,
-      );
+      this.log.info(oldTabKeptMessage(oldEntry.disposed ? 'disposed' : 'userDismissed'));
       return;
     }
     void oldEntry.session.interrupt();
