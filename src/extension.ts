@@ -952,6 +952,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       if (e.affectsConfiguration('agent.sessionPresets')) {
         void updateSessionPresetsContext(log);
       }
+      // 自動再開の設定はCodex・Claude Codeの全会話で共有する1つの値。設定画面から直接
+      // 書き換えた場合も、開いている会話の予約と表示を揃える（Issue #1209）
+      if (e.affectsConfiguration('agent.chat.limitAutoResume.enabled')) {
+        chat.refreshLimitAutoResume();
+        claudeChat.refreshLimitAutoResume();
+      }
     }),
   );
 

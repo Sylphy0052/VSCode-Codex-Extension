@@ -2135,6 +2135,26 @@ export class ClaudeChatViewManager
     entry.limitAutoResumeSuppressed = false;
   }
 
+  /**
+   * 共通設定 `agent.chat.limitAutoResume.enabled` の現在値を、開いている全会話へ適用する
+   * （Issue #1209。`chatView.ts`の同名メソッドと同じ扱い）。設定はCodex画面とClaude Code画面で
+   * 共有する1つの値なので、どちらの画面で切り替えても両方のマネージャーが呼ばれる。
+   */
+  refreshLimitAutoResume(): void {
+    const enabled = readChatLimitAutoResumeEnabled();
+    for (const entry of this.allPanels()) {
+      if (!enabled) {
+        this.cancelLimitAutoResume(entry);
+      } else {
+        // 入れ直しは再開の指示。中断で止めていた分もここで解く（Issue #1202）
+        this.clearLimitAutoResumeSuppression(entry);
+        this.scheduleLimitAutoResume(entry, entry.session.getState());
+      }
+      this.postState(entry);
+      void entry.panel?.webview.postMessage({ type: 'limitAutoResume', enabled });
+    }
+  }
+
   private limitAutoResumeStatus(entry: ClaudePanel): Record<string, unknown> {
     return {
       enabled: readChatLimitAutoResumeEnabled(),
@@ -2836,22 +2856,11 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'toggleLimitAutoResume') {
-        const enabled = !readChatLimitAutoResumeEnabled();
-        void setChatLimitAutoResumeEnabled(enabled)
-          .then(() => {
-            if (!enabled) {
-              this.cancelLimitAutoResume(entry);
-            } else {
-              // 入れ直しは再開の指示。中断で止めていた分もここで解く（Issue #1202）
-              this.clearLimitAutoResumeSuppression(entry);
-              this.scheduleLimitAutoResume(entry, entry.session.getState());
-            }
-            this.postState(entry);
-            return entry.panel?.webview.postMessage({
-              type: 'limitAutoResume',
-              enabled: readChatLimitAutoResumeEnabled(),
-            });
-          })
+        void setChatLimitAutoResumeEnabled(!readChatLimitAutoResumeEnabled())
+          // 共通設定なので、操作したタブだけでなく全会話へ反映する（Issue #1209）。ここで
+          // 届くのはClaude Code画面の会話だけで、Codex画面へは`extension.ts`の
+          // `onDidChangeConfiguration`（設定の書き込みで発火する）経由で届く
+          .then(() => this.refreshLimitAutoResume())
           .catch((e: unknown) => this.reportError(e));
         return;
       }

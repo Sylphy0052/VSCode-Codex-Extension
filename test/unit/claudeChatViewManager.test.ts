@@ -3020,3 +3020,99 @@ describe('上限で止まったターンだけを自動続行の対象にする�
     expect(typeof lastResumeStatus(panel)?.scheduledAt).toBe('number');
   });
 });
+describe('共通の自動再開設定を全会話へ反映する（Issue #1209）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const rateLimitLine = (status: string): string =>
+    `${JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status, rateLimitType: 'five_hour' },
+    })}\n`;
+
+  /** 上限に当たってターンが失敗した形。`is_error`で`turnFailed`が立つ（`streamJson.ts`）。 */
+  const failedResultLine = (): string =>
+    `${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true })}\n`;
+
+  /** タブを2枚開き、どちらも上限で止まったターンの状態にする。 */
+  async function openTwoStoppedChats(): Promise<{
+    panelA: ReturnType<typeof __mock.lastCreatedPanel>;
+    panelB: ReturnType<typeof __mock.lastCreatedPanel>;
+  }> {
+    const { sessions } = stubStartCapturing();
+    // 実プロセスを持たないセッションでは送れない。自動再開の送信先だけ記録する
+    vi.spyOn(ClaudeStreamSession.prototype, 'send').mockImplementation(() => undefined);
+    vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockImplementation(() => 'sent');
+    const { manager } = createManager();
+    await manager.openNew('/workspace/root');
+    await manager.openNew('/workspace/root');
+    const panelA = __mock.createdPanels[__mock.createdPanels.length - 2];
+    const panelB = __mock.createdPanels[__mock.createdPanels.length - 1];
+    panelA?.webview.simulateMessage({ type: 'ready' });
+    panelB?.webview.simulateMessage({ type: 'ready' });
+    const [sessionA, sessionB] = sessions;
+    if (sessionA === undefined || sessionB === undefined) {
+      throw new Error('セッションが2つ開始されていない');
+    }
+    for (const [index, session] of [sessionA, sessionB].entries()) {
+      session.receive(initLine(`s${index + 1}`));
+      session.receive(rateLimitLine('rejected'));
+      session.receive(failedResultLine());
+    }
+    await flush();
+    return { panelA, panelB };
+  }
+
+  type ResumeStatus = { enabled?: boolean; scheduledAt?: number } | undefined;
+
+  function lastResumeStatus(panel: { webview: { sent: unknown[] } } | undefined): ResumeStatus {
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    return (last?.state as { limitAutoResumeStatus?: ResumeStatus } | undefined)
+      ?.limitAutoResumeStatus;
+  }
+
+  it('無効の間に止まった2会話は、片方のタブでONにすると両方に予約が入る', async () => {
+    // `update`はネストして書くため、初期値もネストで置く（フラットなキーは`getNested`が
+    // 先に拾い、トグルの書き込みを隠してしまう）
+    __mock.setConfig('agent', {
+      chat: { limitAutoResume: { enabled: false } },
+    });
+    const { panelA, panelB } = await openTwoStoppedChats();
+    // 対照: 無効の間はどちらにも予約が無い
+    expect(lastResumeStatus(panelA)?.scheduledAt).toBeUndefined();
+    expect(lastResumeStatus(panelB)?.scheduledAt).toBeUndefined();
+
+    panelA?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await flush();
+
+    // 操作していないタブにも、新しい状態通知を与えずに予約が入る
+    expect(typeof lastResumeStatus(panelB)?.scheduledAt).toBe('number');
+    expect(typeof lastResumeStatus(panelA)?.scheduledAt).toBe('number');
+  });
+
+  it('片方のタブでOFFにすると、もう片方の予約と表示も消える', async () => {
+    const { panelA, panelB } = await openTwoStoppedChats();
+    expect(typeof lastResumeStatus(panelB)?.scheduledAt).toBe('number');
+
+    panelA?.webview.simulateMessage({ type: 'toggleLimitAutoResume' });
+    await flush();
+
+    expect(lastResumeStatus(panelB)?.scheduledAt).toBeUndefined();
+    expect(lastResumeStatus(panelB)?.enabled).toBe(false);
+    // メニューのボタン（`limitAutoResume`メッセージ）も操作していないタブへ届く
+    const toggles = (panelB?.webview.sent ?? []).filter(
+      (m): m is { type: string; enabled: boolean } =>
+        typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'limitAutoResume',
+    );
+    expect(toggles[toggles.length - 1]?.enabled).toBe(false);
+  });
+});
