@@ -4758,6 +4758,39 @@ export class WorkflowRunner {
     this.pump(runId);
   }
 
+  /**
+   * 独立検証（`verifyTaskCompletion`）の`await`から戻った時点で、検証を打ち切るべき
+   * 事情が起きていないかを見る（Issue #1121）。
+   *
+   * 検証はファイルの存在確認・`git diff`・独立レビュー（別セッションでCLIを起動する）を
+   * 順に`await`するため、その間に人が「全体の停止」を押したり拡張機能が終了したりし得る。
+   * 元のループは`done`で既に終わっているので`stop()`の`stopLoop()`は何にも当たらず、
+   * 検証側が黙って`runLoop`を張り直すと「人が止めたのにAIの修正ループが再開する」。
+   *
+   * - `halted`: 人が全体停止を押した。検証結果は捨て、タスクを停止として確定させる
+   * - `disposing`: 拡張機能の終了中。`runState`の書き換え・`persist`まで含めて何もしない
+   *   （`disposing`のJSDoc参照。片付けは`dispose()`が受け持つ）
+   * - `stale`: runやタスクが作り直された（再実行・破棄）。今の`liveTask`はもう画面上の
+   *   実体ではないため、古い世代の検証結果を新しい実体へ当ててはならない
+   */
+  private verificationAbortReason(
+    runId: string,
+    taskId: string,
+    live: LiveRun,
+    liveTask: LiveTask,
+  ): 'halted' | 'disposing' | 'stale' | undefined {
+    if (this.disposing) {
+      return 'disposing';
+    }
+    if (this.runs.get(runId) !== live || live.tasks.get(taskId) !== liveTask) {
+      return 'stale';
+    }
+    if (live.runState.haltedByUser) {
+      return 'halted';
+    }
+    return undefined;
+  }
+
   /** DONE自己申告を、機械条件と別のread-onlyセッションで確認する。 */
   private async verifyTaskCompletion(
     runId: string,
@@ -4773,12 +4806,32 @@ export class WorkflowRunner {
     const failures: string[] = [];
     const verify = task.verify;
 
+    // 各`await`の後に、停止・破棄・作り直しが挟まっていないかを見る（Issue #1121）。
+    // 打ち切るときは検証中の印を下ろし、人が止めた場合だけ、走行中のループを`stopLoop()`で
+    // 止めたときと同じ`'taskStopped'`でタスクを停止として確定させる（`stop()`の経路と揃える）
+    const abortVerification = (): boolean => {
+      const reason = this.verificationAbortReason(runId, taskId, live, liveTask);
+      if (reason === undefined) {
+        return false;
+      }
+      liveTask.verificationInProgress = false;
+      if (reason === 'halted') {
+        this.deps.log.info(
+          `[workflow ${runId}/${taskId}] 全体の停止により独立検証（${attempt}回目）を打ち切りました`,
+        );
+        this.onTaskFinished(runId, taskId, task, 'taskStopped', state);
+      }
+      return true;
+    };
+
     for (const file of verify?.files ?? []) {
       const target = path.resolve(liveTask.cwd, file);
       if ((await this.deps.filePort.fileSize(target)) === undefined) {
         failures.push(`必須ファイルがありません: ${file}`);
       }
     }
+
+    if (abortVerification()) return;
 
     const diffBase = liveTask.originCommit === '' ? [] : [liveTask.originCommit];
     const [diffResult, changedResult] = await Promise.all([
@@ -4812,6 +4865,10 @@ export class WorkflowRunner {
       }
     }
 
+    // 独立レビューは別セッションでCLIを起動する分だけ長い。入る前に一度見て、
+    // 停止済みなら起動そのものを見送る
+    if (abortVerification()) return;
+
     if (verify?.semantic === true) {
       const verificationContract = [
         task.prompt,
@@ -4835,6 +4892,10 @@ export class WorkflowRunner {
       }
       failures.push(...reviewed.findings.map((finding) => finding.message));
     }
+
+    // 結果の適用（合格の確定・警告の追加・`runLoop`の張り直し）の直前に最後の確認をする。
+    // ここを抜けた後は同じターンの中で完結するため、以降に停止が割り込む余地は無い
+    if (abortVerification()) return;
 
     liveTask.verificationInProgress = false;
     if (failures.length === 0) {
