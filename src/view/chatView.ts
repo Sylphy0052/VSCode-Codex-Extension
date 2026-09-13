@@ -1664,7 +1664,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'openDiffFile') {
         // 差分の見出し行「エディタで開く」（issue #291）
-        await handleOpenDiffFile(entry.session.getState().items, m['itemId'], m['diffIndex']);
+        await handleOpenDiffFile(
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+          entry.cwd,
+        );
         return;
       }
       if (type === 'openDiffEditor') {
@@ -1674,6 +1679,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           entry.session.getState().items,
           m['itemId'],
           m['diffIndex'],
+          entry.cwd,
         );
         return;
       }
@@ -1684,6 +1690,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           entry.session.getState().items,
           m['itemId'],
           m['diffIndex'],
+          entry.cwd,
         );
         return;
       }
