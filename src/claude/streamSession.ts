@@ -1234,7 +1234,7 @@ export class ClaudeStreamSession {
     }
 
     if (this.proc !== proc) {
-      this.log.info(`承認: 判定中にセッションが終了したため捨てました（${approval.kind}）`);
+      this.log.info(`承認: 判定中にプロセスが終了・交代したため捨てました（${approval.kind}）`);
       return;
     }
 
