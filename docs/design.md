@@ -4128,6 +4128,9 @@ issue #719 は「実装して実機で見比べ、良くならなければ入れ
 チャンクへ前の世代の残骸がくっつく）。
 
 なお`claude/streamSession.ts`は同じ`chunk.toString('utf8')`の形のままで、今回は触っていない
+（`util/ndjson.ts`経由の別実装で、1行が数十MBになる性質も持たないため）。`consumeFrames` 側の判定（行が完成したときに使う）も、UTF-8の
+バイト数がUTF-16のcode unit数以上・その3倍以下に必ず収まることを使い、安い `length` で決着する
+場合を先に返してから実際に数える。
 
 #### 上限はV8の文字列長上限より下でなければならない（issue #1153）
 
@@ -4155,9 +4158,6 @@ code unit数以上なので、「バイト数が上限以下」なら「文字�
 
 `FrameBuffer`が文字列ではなく`Buffer`で溜める形にすれば文字列長上限から解放されるが、
 `consumeFrames`の戻り値（`rest: string`）と行を文字列で取り出す作り全体に波及するため見送った。
-（`util/ndjson.ts`経由の別実装で、1行が数十MBになる性質も持たないため）。`consumeFrames` 側の判定（行が完成したときに使う）も、UTF-8の
-バイト数がUTF-16のcode unit数以上・その3倍以下に必ず収まることを使い、安い `length` で決着する
-場合を先に返してから実際に数える。
 
 #### 確かめ方
 
@@ -4168,6 +4168,8 @@ code unit数以上なので、「バイト数が上限以下」なら「文字�
   位置で二分して試す。`chunk.toString('utf8')`のままなら35通りのうち6通りで落ちることを確認済み）
 - 10MBを超える実セッションでの分岐は `docs/manual-test.md` C-56 に委ねる（ユニットテストでは実物の
   app-serverを相手にできないため）
+- `test/unit/jsonRpc.test.ts`: `MAX_APP_SERVER_LINE_BYTES` が `buffer.constants.MAX_STRING_LENGTH`
+  より下にあり、チャンク1個分を大きく上回る余裕（64MiB以上）が残っていること（issue #1153）
 
 ## 15. 作業記録（日報・週報連携）
 
