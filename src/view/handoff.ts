@@ -793,7 +793,8 @@ const FIRST_TURN_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * `waitForFirstTurn` の結果。旧タブを閉じなかった理由をログへ残すため、
- * 失敗時は `succeeded: false` だけでなく `timeout` / `turnFailed` を区別する（Issue #1158）。
+ * 失敗時は `succeeded: false` だけでなく理由を区別する（Issue #1158）。`abandoned` は初回
+ * プロンプトを送れずに監視を打ち切ったとき（Issue #1162）。
  */
 export type FirstTurnOutcome =
   { succeeded: true } | { succeeded: false; reason: 'timeout' | 'turnFailed' | 'abandoned' };
