@@ -12,12 +12,14 @@ import {
 import { readClaudeResultImages } from '../provider/imageRefs';
 import { parseAutocompactReport } from './autocompactText';
 import {
+  applyFileChangeResult,
   claudeSearchResults,
   describeTool,
   isSkillContextEntry,
   normalizeTodos,
   skillContextName,
   TODO_WRITE_TOOL,
+  toolUseResultOf,
 } from './transcript';
 
 /**
@@ -239,6 +241,7 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
       }
       // ツールの出力は際限なく長くなりうる。Codex側と同じ上限で末尾だけ残す
       const output = capOutput(resultText(part['content']));
+      const toolUseResult = toolUseResultOf(event);
       const next = [...items];
       next[index] = {
         ...existing,
@@ -251,8 +254,13 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         // 添えられる tool_use_result から取り出す（詳細は transcript.ts の関数を参照）
         searchResults:
           existing.kind === 'webSearch'
-            ? claudeSearchResults(event['tool_use_result'], toolResultCount)
+            ? claudeSearchResults(toolUseResult, toolResultCount)
             : existing.searchResults,
+        // Write / NotebookEdit の新規作成と上書きを結果で分ける（issue #1176）
+        diffs:
+          existing.kind === 'fileChange'
+            ? (applyFileChangeResult(existing.diffs, toolUseResult) ?? existing.diffs)
+            : existing.diffs,
       };
       items = next;
       continue;

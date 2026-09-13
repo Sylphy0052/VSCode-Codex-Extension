@@ -252,6 +252,12 @@ describe('planDiffActions', () => {
     expect(plan).toEqual({ openEditor: true, openDiff: true, revert: true, jumpToLine: 1 });
   });
 
+  // 新規作成と確認できていないWrite由来の追加（issue #1176）。戻すと削除になるため出さない
+  it('add: 新規作成と確認できていなければ戻すを出さない', () => {
+    const plan = planDiffActions({ kind: 'add', diff: '+line1', createUnverified: true });
+    expect(plan).toEqual({ openEditor: true, openDiff: true, revert: false, jumpToLine: 1 });
+  });
+
   it('add: 復元できない差分は開くだけに絞る', () => {
     const plan = planDiffActions({ kind: 'add', diff: 'line1' });
     expect(plan).toEqual({ openEditor: true, openDiff: false, revert: false, jumpToLine: 1 });

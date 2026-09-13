@@ -239,14 +239,20 @@ function appendUserEntry(
     if (target === undefined || existing === undefined) {
       continue;
     }
+    const toolUseResult = toolUseResultOf(entry);
     items[target] = {
       ...existing,
       text: toolResultText(part['content']),
       status: part['is_error'] === true ? 'エラー' : 'completed',
       searchResults:
         existing.kind === 'webSearch'
-          ? claudeSearchResults(entry['tool_use_result'], toolResultCount)
+          ? claudeSearchResults(toolUseResult, toolResultCount)
           : existing.searchResults,
+      // Write / NotebookEdit の新規作成と上書きを結果で分ける（issue #1176）
+      diffs:
+        existing.kind === 'fileChange'
+          ? (applyFileChangeResult(existing.diffs, toolUseResult) ?? existing.diffs)
+          : existing.diffs,
     };
   }
 
@@ -375,10 +381,12 @@ export function describeTool(
       return { kind: 'commandExecution', detail: str(input['command']), diffs: [] };
     case 'Edit':
       return fileChange(input, editDiff(input), buildEditReplace(input));
+    // Write / NotebookEdit は入力だけでは新規作成か上書きか判らない。実行結果が届くまで
+    // 「新規作成と確認できていない」印を立てておく（issue #1176、applyFileChangeResult）
     case 'Write':
-      return fileChange(input, addedDiff(input, str(input['content'])));
+      return fileChange(input, addedDiff(input, str(input['content'])), undefined, true);
     case 'NotebookEdit':
-      return fileChange(input, addedDiff(input, str(input['new_source'])));
+      return fileChange(input, addedDiff(input, str(input['new_source'])), undefined, true);
     case 'Read':
       return { kind: 'fileRead', detail: str(input['file_path']), diffs: [] };
     case 'WebSearch':
@@ -403,6 +411,7 @@ function fileChange(
   input: Record<string, unknown>,
   diff: string,
   editReplace: EditReplace | undefined = undefined,
+  createUnverified = false,
 ): { kind: string; detail: string; diffs: FileDiff[] } {
   const path = str(input['file_path']) || str(input['notebook_path']);
   const kind = str(input['old_string']) === '' ? 'add' : 'update';
@@ -410,8 +419,98 @@ function fileChange(
     kind: 'fileChange',
     detail: path,
     diffs:
-      path === '' || diff === '' ? [] : [{ path, kind, movePath: undefined, diff, editReplace }],
+      path === '' || diff === ''
+        ? []
+        : [
+            {
+              path,
+              kind,
+              movePath: undefined,
+              diff,
+              editReplace,
+              createUnverified: createUnverified ? true : undefined,
+            },
+          ],
   };
+}
+
+/**
+ * 実行結果の別枠データを取り出す（issue #1176）。
+ *
+ * セッション履歴（`~/.claude/projects/*.jsonl`）は `toolUseResult`、動作中の
+ * stream-jsonは `tool_use_result` と、同じ内容がキー名違いで届く（実測）。
+ * 呼び出し側でどちらの経路かを気にせず済むよう、ここで吸収する。
+ */
+export function toolUseResultOf(entry: Record<string, unknown>): unknown {
+  return entry['toolUseResult'] ?? entry['tool_use_result'];
+}
+
+/**
+ * 上書き前後を復元用の生の文字列として抱える上限（issue #1176）。
+ *
+ * 表示用の差分は `MAX_DIFF_LINES` で切り詰まるが、復元に使う `editReplace` は切り詰め
+ * られない（`buildEditReplace` と同じ理由）。Writeはファイルを丸ごと書くため、上書き前後の
+ * 2本を無制限に抱えると会話の状態が膨らむ（`MAX_DIFF_LINES` を置いたのと同じ懸念）。
+ * 超える場合は組み直さず、印を残して戻す操作を出さない。消してしまうよりは戻せない方を選ぶ。
+ */
+const MAX_OVERWRITE_RESTORE_CHARS = 1_000_000;
+
+/**
+ * Write / NotebookEdit の実行結果を差分へ反映する（issue #1176）。
+ *
+ * 入力だけでは新規作成と上書きを区別できないため `add` として組み立てているが、
+ * 実行結果には区別（`type`）と、上書きの場合は上書き前の全文（`originalFile`）が入る
+ * （実測）。ここで実際の動作へ寄せる。
+ *
+ * - `create`: 新規作成と確認できたので印を外す。従来どおり削除で戻せる
+ * - `update`: `update` の差分へ組み直し、`editReplace` に上書き前後の生の文字列を入れる。
+ *   Edit由来の復元（issue #310）と同じ経路に乗り、戻すと上書き前の内容が復元される
+ * - 上記以外（結果が読めない・`originalFile` が無い）: 印を立てたままにし、戻す操作を出さない
+ *
+ * @returns 変わった場合だけ新しい配列。変化が無ければ `undefined`（呼び出し側は元を使う）
+ */
+export function applyFileChangeResult(
+  diffs: readonly FileDiff[],
+  toolUseResult: unknown,
+): FileDiff[] | undefined {
+  const result = rec(toolUseResult);
+  const type = str(result?.['type']);
+  if (type !== 'create' && type !== 'update') {
+    return undefined;
+  }
+  const original = result?.['originalFile'];
+  const content = str(result?.['content']);
+  let changed = false;
+  const next = diffs.map((diff) => {
+    if (diff.createUnverified !== true) {
+      return diff;
+    }
+    if (type === 'create') {
+      changed = true;
+      return { ...diff, createUnverified: undefined };
+    }
+    if (
+      typeof original !== 'string' ||
+      content === '' ||
+      original.length + content.length > MAX_OVERWRITE_RESTORE_CHARS
+    ) {
+      return diff;
+    }
+    changed = true;
+    return {
+      ...diff,
+      kind: 'update',
+      diff: overwriteDiff(original, content),
+      editReplace: { oldString: original, newString: content },
+      createUnverified: undefined,
+    };
+  });
+  return changed ? next : undefined;
+}
+
+/** 上書きの前後を差分にする。行番号は判らないためハンクの見出しは付けない（`editDiff` と同じ）。 */
+function overwriteDiff(before: string, after: string): string {
+  return [prefixLines(before, '-'), prefixLines(after, '+')].filter((s) => s !== '').join('\n');
 }
 
 /** 置換の前後を差分にする。行番号は判らないためハンクの見出しは付けない。 */

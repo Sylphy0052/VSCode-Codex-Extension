@@ -1131,7 +1131,10 @@ export function chatScript(
 
     const offerOpenEditor = diff.kind !== 'delete';
     const offerOpenDiff = diff.kind === 'add' || diff.kind === 'delete' || diff.kind === 'update';
-    const offerRevert = offerOpenDiff && !diff.movePath;
+    // 新規作成と確認できていない追加（Claude CodeのWrite由来、issue #1176）は
+    // 戻すと削除になる。上書きだった場合に既存ファイルを消すため出さない
+    const unverifiedAdd = diff.kind === 'add' && diff.createUnverified === true;
+    const offerRevert = offerOpenDiff && !diff.movePath && !unverifiedAdd;
     if (!offerOpenEditor && !offerOpenDiff && !offerRevert) return null;
 
     const wrap = document.createElement('span');
