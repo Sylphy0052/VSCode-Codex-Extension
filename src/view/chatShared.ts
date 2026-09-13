@@ -516,11 +516,18 @@ function resolveDiffTarget(
  * シンボリックリンクによる脱出も無いかを確かめる（`verifyRealPathWithinWorkspace`。
  * issue #144の追記処理と同じ考え方）。Webview側（`chatScript.ts`）にも簡易な判定を
  * 置いてボタンの出し分けに使うが、ここが最終判定であり、Webview側の結果は信用しない。
+ *
+ * 相対パスの基準は**その会話の作業ディレクトリ**（`cwd`、issue #1178）。ワークスペースの
+ * 先頭ルートで代替すると、複数ルートの2番目やサブディレクトリで動いている会話の変更が
+ * 別の場所のファイルへ向く。判らないときは対象を特定できない理由を返す。
  */
-async function resolveDiffFileForAction(diff: FileDiff): Promise<DiffPathResolution> {
+async function resolveDiffFileForAction(
+  diff: FileDiff,
+  cwd: string | undefined,
+): Promise<DiffPathResolution> {
   const targetPath = diff.movePath ?? diff.path;
   const roots = workspaceFolderPaths();
-  const staticCheck = resolveWithinWorkspace(targetPath, roots);
+  const staticCheck = resolveWithinWorkspace(targetPath, roots, cwd);
   if (!staticCheck.ok) {
     return staticCheck;
   }
@@ -538,6 +545,7 @@ export async function handleOpenDiffFile(
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  cwd: string | undefined,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
@@ -550,7 +558,7 @@ export async function handleOpenDiffFile(
     );
     return;
   }
-  const resolved = await resolveDiffFileForAction(diff);
+  const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
     return;
@@ -667,6 +675,7 @@ export async function handleOpenDiffEditor(
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  cwd: string | undefined,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
@@ -679,7 +688,7 @@ export async function handleOpenDiffEditor(
     );
     return;
   }
-  const resolved = await resolveDiffFileForAction(diff);
+  const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
     return;
@@ -747,6 +756,7 @@ export async function handleRevertDiff(
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  cwd: string | undefined,
   revertPort: RevertFilePort = nodeRevertFilePort,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
@@ -763,7 +773,7 @@ export async function handleRevertDiff(
     );
     return;
   }
-  const resolved = await resolveDiffFileForAction(diff);
+  const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
     return;
@@ -782,7 +792,7 @@ export async function handleRevertDiff(
   }
   // TOCTOU対策（Issue #1170）: 応答待ちの間に親がsymlinkへ差し替わっていないか、実体パスを
   // 取り直して確認前と突き合わせる。文字列は同じでも指す先が変わりうる
-  const rechecked = await resolveDiffFileForAction(diff);
+  const rechecked = await resolveDiffFileForAction(diff, cwd);
   if (!rechecked.ok || rechecked.absolutePath !== resolved.absolutePath) {
     void vscode.window.showWarningMessage(
       `変更を戻せませんでした: 確認している間に対象の場所が変わりました: ${diff.path}`,

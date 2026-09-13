@@ -2440,7 +2440,12 @@ export class ClaudeChatViewManager
       }
       if (type === 'openDiffFile') {
         // 差分の見出し行「エディタで開く」。`chatView.ts` と共通の実装（issue #291）
-        void handleOpenDiffFile(entry.session.getState().items, m['itemId'], m['diffIndex']);
+        void handleOpenDiffFile(
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+          entry.cwd,
+        );
         return;
       }
       if (type === 'openDiffEditor') {
@@ -2450,12 +2455,19 @@ export class ClaudeChatViewManager
           entry.session.getState().items,
           m['itemId'],
           m['diffIndex'],
+          entry.cwd,
         );
         return;
       }
       if (type === 'revertDiff') {
         // 差分の見出し行「この変更を戻す」。`chatView.ts` と共通の実装（issue #291）
-        void handleRevertDiff(this.fs, entry.session.getState().items, m['itemId'], m['diffIndex']);
+        void handleRevertDiff(
+          this.fs,
+          entry.session.getState().items,
+          m['itemId'],
+          m['diffIndex'],
+          entry.cwd,
+        );
         return;
       }
       if (type === 'attach') {

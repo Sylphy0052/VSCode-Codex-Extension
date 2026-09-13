@@ -415,7 +415,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     __mock.showWarningMessageAnswer = '戻す';
     const diff = updateDiff();
 
-    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot, port);
 
     expect(port.written).toHaveLength(1);
     expect(port.written[0]?.path).toBe(path.join(workspaceRoot, 'src/a.txt'));
@@ -432,7 +432,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     const port = new FakeRevertPort('created');
     __mock.showWarningMessageAnswer = '戻す';
 
-    await handleRevertDiff(fs, [itemWithDiff(addDiff())], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(addDiff())], 'item-1', 0, workspaceRoot, port);
 
     expect(deletedFiles).toHaveLength(1);
     expect(deletedFiles[0]?.path).toBe(path.join(workspaceRoot, 'src/new.txt'));
@@ -453,6 +453,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
       [itemWithDiff(addDiff({ createUnverified: true }))],
       'item-1',
       0,
+      workspaceRoot,
       port,
     );
 
@@ -474,7 +475,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
       editReplace: { oldString: 'old1', newString: 'new1' },
     });
 
-    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot, port);
 
     expect(deletedFiles).toHaveLength(0);
     expect(port.written).toHaveLength(1);
@@ -486,7 +487,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     const port = new FakeRevertPort(undefined);
     __mock.showWarningMessageAnswer = '戻す';
 
-    await handleRevertDiff(fs, [itemWithDiff(deleteDiff())], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(deleteDiff())], 'item-1', 0, workspaceRoot, port);
 
     expect(port.created).toHaveLength(1);
     expect(port.created[0]?.path).toBe(path.join(workspaceRoot, 'src/gone.txt'));
@@ -500,7 +501,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     const port = new FakeRevertPort('new');
     __mock.showWarningMessageAnswer = undefined;
 
-    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, workspaceRoot, port);
 
     expect(port.written).toHaveLength(0);
     expect(__mock.writtenFiles).toHaveLength(0);
@@ -513,7 +514,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     __mock.showWarningMessageAnswer = '戻す';
     const diff = updateDiff({ path: '../outside.txt' });
 
-    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot, port);
 
     expect(port.written).toHaveLength(0);
     expect(__mock.writtenFiles).toHaveLength(0);
@@ -528,7 +529,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     const port = new FakeRevertPort('unexpected-content-changed-elsewhere');
     __mock.showWarningMessageAnswer = '戻す';
 
-    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, workspaceRoot, port);
 
     expect(port.written).toHaveLength(0);
     expect(__mock.writtenFiles).toHaveLength(0);
@@ -541,7 +542,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     const port = new FakeRevertPort('already different');
     __mock.showWarningMessageAnswer = '戻す';
 
-    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, workspaceRoot, port);
 
     expect(__mock.messages.warnings).toHaveLength(1);
     expect(__mock.messages.warnings[0]).toContain('変更を戻せません');
@@ -549,10 +550,79 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     expect(port.identifyCalls).toBe(0);
   });
 
+  // 相対パスの基準は会話の作業ディレクトリ（issue #1178）。ワークスペースの先頭ルートを
+  // 使うと、2番目のルートで動いている会話の変更が別プロジェクトのファイルへ向く
+  describe('相対パスの基準は会話の作業ディレクトリ（issue #1178）', () => {
+    let secondRoot: string;
+
+    beforeEach(() => {
+      secondRoot = mkdtempSync(path.join(tmpdir(), 'chatview-destructive-second-'));
+      __mock.setWorkspaceFolders([
+        { fsPath: workspaceRoot, name: 'first' },
+        { fsPath: secondRoot, name: 'second' },
+      ]);
+    });
+
+    afterEach(() => {
+      rmSync(secondRoot, { recursive: true, force: true });
+    });
+
+    it('2番目のルートで動く会話の相対パスは、そちらのルート配下へ向く', async () => {
+      const fs = new FakeFs('new');
+      const port = new FakeRevertPort('new');
+      __mock.showWarningMessageAnswer = '戻す';
+
+      await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, secondRoot, port);
+
+      expect(port.written).toHaveLength(1);
+      expect(port.written[0]?.path).toBe(path.join(secondRoot, 'src/a.txt'));
+      expect(port.written[0]?.content).toBe('old');
+    });
+
+    it('作業ディレクトリが判らない会話では、先頭ルートへ向かわず何もしない', async () => {
+      const fs = new FakeFs('new');
+      const port = new FakeRevertPort('new');
+      __mock.showWarningMessageAnswer = '戻す';
+
+      await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, undefined, port);
+
+      expect(port.written).toHaveLength(0);
+      expect(__mock.writtenFiles).toHaveLength(0);
+      expect(deletedFiles).toHaveLength(0);
+      expect(__mock.messages.warnings[0]).toContain('作業ディレクトリが判らない');
+    });
+
+    it('絶対パスの差分は作業ディレクトリに関係なく従来どおり', async () => {
+      const fs = new FakeFs('new');
+      const port = new FakeRevertPort('new');
+      __mock.showWarningMessageAnswer = '戻す';
+      const absolute = path.join(workspaceRoot, 'src/a.txt');
+
+      await handleRevertDiff(
+        fs,
+        [itemWithDiff(updateDiff({ path: absolute }))],
+        'item-1',
+        0,
+        secondRoot,
+        port,
+      );
+
+      expect(port.written).toHaveLength(1);
+      expect(port.written[0]?.path).toBe(absolute);
+    });
+  });
+
   it('存在しないitemId/diffIndexでは何もしない', async () => {
     const fs = new FakeFs('new');
     const port = new FakeRevertPort('new');
-    await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'missing-item', 0, port);
+    await handleRevertDiff(
+      fs,
+      [itemWithDiff(updateDiff())],
+      'missing-item',
+      0,
+      workspaceRoot,
+      port,
+    );
 
     expect(port.written).toHaveLength(0);
     expect(__mock.messages.warnings).toHaveLength(0);
@@ -563,7 +633,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
     const port = new FakeRevertPort('new');
     const diff = updateDiff({ movePath: 'src/moved.txt' });
 
-    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, port);
+    await handleRevertDiff(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot, port);
 
     expect(port.written).toHaveLength(0);
     expect(__mock.messages.warnings[0]).toContain('戻せません');
@@ -604,7 +674,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
       const port = new FakeRevertPort('new');
       swapParentToOutsideDuringModal();
 
-      await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, port);
+      await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, workspaceRoot, port);
 
       expect(port.written).toHaveLength(0);
       expect(__mock.writtenFiles).toHaveLength(0);
@@ -618,7 +688,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
       const port = new FakeRevertPort('created');
       swapParentToOutsideDuringModal();
 
-      await handleRevertDiff(fs, [itemWithDiff(addDiff())], 'item-1', 0, port);
+      await handleRevertDiff(fs, [itemWithDiff(addDiff())], 'item-1', 0, workspaceRoot, port);
 
       expect(deletedFiles).toHaveLength(0);
       expect(__mock.messages.warnings.some((m) => m.includes('対象の場所が変わりました'))).toBe(
@@ -631,7 +701,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
       const port = new FakeRevertPort(undefined);
       swapParentToOutsideDuringModal();
 
-      await handleRevertDiff(fs, [itemWithDiff(deleteDiff())], 'item-1', 0, port);
+      await handleRevertDiff(fs, [itemWithDiff(deleteDiff())], 'item-1', 0, workspaceRoot, port);
 
       expect(port.created).toHaveLength(0);
       expect(__mock.messages.warnings.some((m) => m.includes('対象の場所が変わりました'))).toBe(
@@ -644,7 +714,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
       const port = new FakeRevertPort('new');
       port.openedIdentity = { dev: 1, ino: 999 };
 
-      await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, port);
+      await handleRevertDiff(fs, [itemWithDiff(updateDiff())], 'item-1', 0, workspaceRoot, port);
 
       expect(port.written).toHaveLength(0);
       expect(__mock.messages.warnings.some((m) => m.includes('差し替えられました'))).toBe(true);
@@ -658,7 +728,7 @@ describe('handleRevertDiff（issue #359: 実ファイルを書き換える最も
         { dev: 1, ino: 101 },
       ];
 
-      await handleRevertDiff(fs, [itemWithDiff(addDiff())], 'item-1', 0, port);
+      await handleRevertDiff(fs, [itemWithDiff(addDiff())], 'item-1', 0, workspaceRoot, port);
 
       expect(deletedFiles).toHaveLength(0);
       expect(__mock.messages.warnings.some((m) => m.includes('差し替えられました'))).toBe(true);
@@ -675,7 +745,7 @@ describe('handleOpenDiffFile（issue #359: 差分見出しの「エディタで�
       diff: '-was here\n',
       editReplace: undefined,
     };
-    await handleOpenDiffFile([itemWithDiff(diff)], 'item-1', 0);
+    await handleOpenDiffFile([itemWithDiff(diff)], 'item-1', 0, workspaceRoot);
 
     expect(__mock.messages.infos.some((m) => m.includes('開けません'))).toBe(true);
     expect(__mock.openedTextDocumentPaths).toHaveLength(0);
@@ -683,7 +753,7 @@ describe('handleOpenDiffFile（issue #359: 差分見出しの「エディタで�
 
   it('ワークスペース外のパスは警告して開かない', async () => {
     const diff = updateDiff({ path: '../outside.txt' });
-    await handleOpenDiffFile([itemWithDiff(diff)], 'item-1', 0);
+    await handleOpenDiffFile([itemWithDiff(diff)], 'item-1', 0, workspaceRoot);
 
     expect(__mock.openedTextDocumentPaths).toHaveLength(0);
     expect(__mock.messages.warnings.some((m) => m.includes('ワークスペースの外'))).toBe(true);
@@ -693,7 +763,7 @@ describe('handleOpenDiffFile（issue #359: 差分見出しの「エディタで�
     const editor = patchShowTextDocumentForEditorFake();
     __mock.setExistingTextDocumentPaths([path.join(workspaceRoot, 'src/new.txt')]);
 
-    await handleOpenDiffFile([itemWithDiff(addDiff())], 'item-1', 0);
+    await handleOpenDiffFile([itemWithDiff(addDiff())], 'item-1', 0, workspaceRoot);
 
     expect(__mock.openedTextDocumentPaths).toEqual([path.join(workspaceRoot, 'src/new.txt')]);
     expect(revealedRanges).toHaveLength(1);
@@ -704,7 +774,7 @@ describe('handleOpenDiffFile（issue #359: 差分見出しの「エディタで�
 
   it('対象ファイルを開けない（存在しない）場合は警告してエディタは開かない', async () => {
     // `__mock.setExistingTextDocumentPaths` を呼ばないため openTextDocument は reject する
-    await handleOpenDiffFile([itemWithDiff(addDiff())], 'item-1', 0);
+    await handleOpenDiffFile([itemWithDiff(addDiff())], 'item-1', 0, workspaceRoot);
 
     expect(__mock.openedTextDocumentPaths).toHaveLength(0);
     expect(__mock.messages.warnings.some((m) => m.includes('ファイルを開けませんでした'))).toBe(
@@ -718,7 +788,7 @@ describe('handleOpenDiffEditor（issue #359: 差分見出しの「差分を開�
     const fs = new FakeFs('current');
     const diff = updateDiff({ diff: 'not a unified diff at all' });
 
-    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0);
+    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot);
 
     expect(__mock.executedCommands).toHaveLength(0);
     expect(__mock.messages.warnings.some((m) => m.includes('開けません'))).toBe(true);
@@ -728,7 +798,7 @@ describe('handleOpenDiffEditor（issue #359: 差分見出しの「差分を開�
     const fs = new FakeFs('current');
     const diff = updateDiff({ path: '../outside.txt' });
 
-    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0);
+    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot);
 
     expect(__mock.executedCommands).toHaveLength(0);
     expect(__mock.messages.warnings.some((m) => m.includes('ワークスペースの外'))).toBe(true);
@@ -739,7 +809,7 @@ describe('handleOpenDiffEditor（issue #359: 差分見出しの「差分を開�
     const fs = new FakeFs('totally different content');
     const diff = updateDiff();
 
-    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0);
+    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot);
 
     expect(__mock.executedCommands).toHaveLength(0);
     expect(__mock.messages.warnings.some((m) => m.includes('差分を開けません'))).toBe(true);
@@ -749,7 +819,7 @@ describe('handleOpenDiffEditor（issue #359: 差分見出しの「差分を開�
     const fs = new FakeFs('new');
     const diff = updateDiff();
 
-    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0);
+    await handleOpenDiffEditor(fs, [itemWithDiff(diff)], 'item-1', 0, workspaceRoot);
 
     expect(__mock.executedCommands).toEqual(['vscode.diff']);
     expect(__mock.messages.warnings).toHaveLength(0);

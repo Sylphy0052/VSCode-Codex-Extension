@@ -27,10 +27,17 @@ export type DiffPathResolution = { ok: true; absolutePath: string } | { ok: fals
  * Webview側（`chatScript.ts`）にも同じ考え方の簡易版（文字列だけの判定）を置いて
  * ボタンの出し分けに使うが、こちらがホスト側の最終判定であり、Webview側の判定結果は
  * 信用しない（エージェントの出力に由来する文字列を信用しない、というこのリポジトリの方針）。
+ *
+ * **相対パスの基準はワークスペースルートではなく、その会話の作業ディレクトリ**
+ * （`conversationCwd`、issue #1178）。ルートを先頭から順に試すと、相対パスは必ず最初の
+ * ルートに収まってしまい、複数ルートの2番目やサブディレクトリを作業ディレクトリにした
+ * 会話の変更が、別の場所のファイルへ向く。作業ディレクトリが判らないときは先頭ルートで
+ * 代替せず、特定できない理由を返す（誤った対象を操作するくらいなら何もしない）。
  */
 export function resolveWithinWorkspace(
   requestedPath: string,
   workspaceRoots: readonly string[],
+  conversationCwd: string | undefined,
 ): DiffPathResolution {
   if (requestedPath === '') {
     return { ok: false, error: 'パスが空です' };
@@ -38,11 +45,17 @@ export function resolveWithinWorkspace(
   if (containsParentSegment(requestedPath)) {
     return { ok: false, error: `ワークスペースの外を指すパスです: ${requestedPath}` };
   }
+  // 相対パスは会話の作業ディレクトリを基準に1つへ決める。そのうえで、決まった1つが
+  // どれかのルート配下に収まっているかを確かめる（境界の判定自体は従来どおり）
+  const candidate = resolveAgainstCwd(requestedPath, conversationCwd);
+  if (candidate === undefined) {
+    return {
+      ok: false,
+      error: `この会話の作業ディレクトリが判らないため、相対パスの対象を特定できません: ${requestedPath}`,
+    };
+  }
   for (const root of workspaceRoots) {
     const normalizedRoot = path.resolve(root);
-    const candidate = path.isAbsolute(requestedPath)
-      ? path.resolve(requestedPath)
-      : path.resolve(normalizedRoot, requestedPath);
     const rel = path.relative(normalizedRoot, candidate);
     // rel === '' はroot自身（ファイルではない）。空でなく、`..`で始まらず、絶対パスでもなければ
     // root配下に収まっている
@@ -55,6 +68,24 @@ export function resolveWithinWorkspace(
 
 function containsParentSegment(p: string): boolean {
   return p.split(/[\\/]/).some((seg) => seg === '..');
+}
+
+/**
+ * 相対パスを会話の作業ディレクトリで解決する（issue #1178）。
+ *
+ * @returns 絶対パス。作業ディレクトリが要るのに判らない場合は `undefined`
+ */
+function resolveAgainstCwd(
+  requestedPath: string,
+  conversationCwd: string | undefined,
+): string | undefined {
+  if (path.isAbsolute(requestedPath)) {
+    return path.resolve(requestedPath);
+  }
+  if (conversationCwd === undefined || conversationCwd === '') {
+    return undefined;
+  }
+  return path.resolve(conversationCwd, requestedPath);
 }
 
 /**
