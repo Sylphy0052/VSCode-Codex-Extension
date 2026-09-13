@@ -320,6 +320,47 @@ describe('ChatViewManager', () => {
       expect(lastOf(panelB)?.state.approvals).toEqual([]);
     });
 
+    it('開始待ちが1件だけでも、threadIdの一致しない承認要求はその会話へ渡さない（F10-01）', async () => {
+      const { manager, connection } = createManager();
+
+      // 開始待ちは会話Bの1件だけ
+      const started = manager.openTaskSession({
+        cwd: '/workspace/root/task-b',
+        config: EMPTY_TASK_CONFIG,
+        sandbox: '',
+      });
+      await tick();
+      expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1);
+
+      // どの画面にも開始待ちにも一致しないthreadId宛の承認要求が届く
+      // （閉じた会話の遅延要求など）
+      const responsePromise = connection.serverRequest(
+        99,
+        'item/commandExecution/requestApproval',
+        {
+          threadId: 'thread-A',
+          itemId: 'i1',
+          command: 'ls',
+          cwd: '/workspace/root/task-a',
+        },
+      );
+
+      // 開始待ちが1件であることは、その要求がB宛である証明にならない。
+      // 通知の取りこぼしを救う `soleEntry` のfallbackを要求へ広げると、
+      // Bの承認ハンドラー・承認カードへ別会話の操作が流れる（F10-01）
+      await expect(responsePromise).resolves.toEqual({ decision: 'decline' });
+
+      connection.resolveFirst('thread/start', threadStartResult('thread-B'));
+      const task = await started;
+      task.open({ preserveFocus: true });
+
+      const panel = __mock.createdPanels[__mock.createdPanels.length - 1];
+      panel?.webview.simulateMessage({ type: 'ready' });
+      await flushStatePosts();
+      const messages = stateMessagesOf(panel);
+      expect(messages[messages.length - 1]?.state.approvals).toEqual([]);
+    });
+
     it('sendはループを介さず本文をそのまま送り、作業記録に残さない（design.md §16.23）', async () => {
       const activities: ChatActivity[] = [];
       const { manager, connection } = createManager({ onActivity: (a) => activities.push(a) });
@@ -485,18 +526,20 @@ describe('ChatViewManager', () => {
   });
 
   describe('接続断で保留中の承認を解放する（issue #354）', () => {
-    it('thread/start応答待ち（pendingStarts）に出た承認カードも、接続断で解放される', async () => {
+    it('保留中の承認カードは接続断で解放される', async () => {
       const { manager, connection } = createManager();
 
-      // thread/startがまだ応答していない間はpanelsではなくpendingStartsに居る
-      // （design.md §16.10の3）。この状態で届いた承認要求も、接続断で解放されなければ
-      // ならない（レビュー指摘: handleConnectionLostがpanelsだけを見ていた問題の回帰防止）
+      // 承認カードを抱えられるのは、threadIdが判って`panels`へ登録された会話だけ。
+      // 開始待ち（pendingStarts）に居る間に届いた要求は、threadIdを照合できないため
+      // 宛先不明として拒否する（F10-01。上の「並列開始時の宛先解決」を参照）
       const p1 = manager.openTaskSession({
         cwd: '/workspace/root/task-a',
         config: EMPTY_TASK_CONFIG,
         sandbox: '',
       });
       await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+      await p1;
 
       const responded = connection.serverRequest(1, 'item/commandExecution/requestApproval', {
         threadId: 'thread-A',
@@ -504,14 +547,12 @@ describe('ChatViewManager', () => {
         command: 'ls',
         cwd: '/workspace/root/task-a',
       });
+      await tick();
 
       connection.simulateDisconnect();
 
       // 承認された扱いにならず、拒否側の値（decide(id, 'cancel')と同じ）で解決される
       await expect(responded).resolves.toEqual({ decision: 'cancel' });
-
-      connection.resolveFirst('thread/start', threadStartResult('thread-A'));
-      await p1;
     });
   });
 
