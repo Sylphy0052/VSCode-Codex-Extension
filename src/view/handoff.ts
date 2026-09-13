@@ -796,7 +796,7 @@ const FIRST_TURN_TIMEOUT_MS = 15 * 60_000;
  * 失敗時は `succeeded: false` だけでなく `timeout` / `turnFailed` を区別する（Issue #1158）。
  */
 export type FirstTurnOutcome =
-  { succeeded: true } | { succeeded: false; reason: 'timeout' | 'turnFailed' };
+  { succeeded: true } | { succeeded: false; reason: 'timeout' | 'turnFailed' | 'abandoned' };
 
 /**
  * 新セッションの最初のターンが終わるのを待ち、成功したかを返す。
@@ -809,10 +809,14 @@ export type FirstTurnOutcome =
  * executorは同期実行されるため）。初回プロンプトの送信より前に呼んでおけば、送信が完了
  * まで返らない実装でも初回ターンの完了を取りこぼさない（Issue #1162）。この同期性は
  * 呼び出し側との約束なので、`async` 化したり `await` を挟んだりしてはならない。
+ *
+ * 送信より前に張る以上、送信そのものが失敗したときに監視だけが残る。`giveUp` を渡して
+ * `abort()` すれば、タイムアウトを待たずに listener を外して `abandoned` で決着させられる。
  */
 export function waitForFirstTurn(
   entry: HandoffTurnWatch,
   timeoutMs = FIRST_TURN_TIMEOUT_MS,
+  giveUp?: AbortSignal,
 ): Promise<FirstTurnOutcome> {
   const baseline = entry.session.getState().turnCompletionSeq;
   return new Promise((resolve) => {
@@ -823,12 +827,14 @@ export function waitForFirstTurn(
       }
       settled = true;
       clearTimeout(timer);
+      giveUp?.removeEventListener('abort', onGiveUp);
       const index = entry.stateListeners.indexOf(listener);
       if (index >= 0) {
         entry.stateListeners.splice(index, 1);
       }
       resolve(outcome);
     };
+    const onGiveUp = (): void => finish({ succeeded: false, reason: 'abandoned' });
     const listener = (state: ChatState): void => {
       if (state.turnCompletionSeq !== baseline) {
         finish(state.turnFailed ? { succeeded: false, reason: 'turnFailed' } : { succeeded: true });
@@ -836,11 +842,17 @@ export function waitForFirstTurn(
     };
     const timer = setTimeout(() => finish({ succeeded: false, reason: 'timeout' }), timeoutMs);
     entry.stateListeners.push(listener);
+    if (giveUp?.aborted === true) {
+      onGiveUp();
+      return;
+    }
+    giveUp?.addEventListener('abort', onGiveUp);
   });
 }
 
 /** 引き継ぎ後に旧タブを残したときの理由（ログの `reason=` に出る値）。 */
-export type OldTabKeptReason = 'timeout' | 'turnFailed' | 'disposed' | 'oldBusy' | 'userDismissed';
+export type OldTabKeptReason =
+  'timeout' | 'turnFailed' | 'abandoned' | 'disposed' | 'oldBusy' | 'userDismissed';
 
 /**
  * 引き継ぎ後に旧タブをどう扱うかの決定。
@@ -895,6 +907,7 @@ export function oldTabKeptMessage(reason: OldTabKeptReason): string {
   const detail: Record<OldTabKeptReason, string> = {
     timeout: '引き継ぎ先の初回ターンがタイムアウトしたため、旧タブを残します',
     turnFailed: '引き継ぎ先の初回ターンが失敗したため、旧タブを残します',
+    abandoned: '引き継ぎ先へ初回プロンプトを送れず監視を打ち切ったため、旧タブを残します',
     disposed: '引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です',
     oldBusy: '引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します',
     userDismissed: '引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します',

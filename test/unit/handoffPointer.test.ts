@@ -685,6 +685,41 @@ describe('新セッションの初回応答を待つ', () => {
     expect(await done).toEqual({ succeeded: true });
   });
 
+  it('監視を打ち切ったら reason:abandoned を返し、listenerを外す（送信に失敗したとき）', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const giveUp = new AbortController();
+    const done = waitForFirstTurn(w, 60_000, giveUp.signal);
+    expect(w.stateListeners).toHaveLength(1);
+
+    giveUp.abort();
+
+    expect(await done).toEqual({ succeeded: false, reason: 'abandoned' });
+    expect(w.stateListeners).toHaveLength(0);
+  });
+
+  it('既にabort済みのsignalを渡したら、その場で打ち切る', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const giveUp = new AbortController();
+    giveUp.abort();
+
+    expect(await waitForFirstTurn(w, 60_000, giveUp.signal)).toEqual({
+      succeeded: false,
+      reason: 'abandoned',
+    });
+    expect(w.stateListeners).toHaveLength(0);
+  });
+
+  it('ターンが先に終われば、後からabortしても結果は変わらない', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const giveUp = new AbortController();
+    const done = waitForFirstTurn(w, 60_000, giveUp.signal);
+
+    w.emit({ ...initialChatState, turnCompletionSeq: 1, turnFailed: false });
+    giveUp.abort();
+
+    expect(await done).toEqual({ succeeded: true });
+  });
+
   it('ターンが終わる前の状態更新では決めない', async () => {
     const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
     const done = waitForFirstTurn(w, 50);
@@ -722,6 +757,12 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
     expect(
       decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'turnFailed' } })),
     ).toEqual({ action: 'keep', reason: 'turnFailed' });
+  });
+
+  it('送信に失敗して監視を打ち切ったら残す', () => {
+    expect(
+      decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'abandoned' } })),
+    ).toEqual({ action: 'keep', reason: 'abandoned' });
   });
 
   it('旧タブが既に破棄済みなら後片付けは要らない', () => {
@@ -762,6 +803,7 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
   it('残した理由はreason付きの1行になる', () => {
     expect(oldTabKeptMessage('timeout')).toContain('reason=timeout');
     expect(oldTabKeptMessage('turnFailed')).toContain('reason=turnFailed');
+    expect(oldTabKeptMessage('abandoned')).toContain('reason=abandoned');
     expect(oldTabKeptMessage('disposed')).toContain('reason=disposed');
     expect(oldTabKeptMessage('oldBusy')).toContain('reason=oldBusy');
     expect(oldTabKeptMessage('userDismissed')).toContain('reason=userDismissed');

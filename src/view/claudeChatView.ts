@@ -147,11 +147,11 @@ import {
   recentAssistantMessages,
   resolveGitBranch,
   resolveWithRetry,
-  waitForFirstTurn,
   decideOldTabAfterHandoff,
   oldTabKeptMessage,
-  type FirstTurnOutcome,
+  waitForFirstTurn,
   writeHandoffPointer,
+  type FirstTurnOutcome,
   type HandoffTrigger,
 } from './handoff';
 import {
@@ -951,9 +951,16 @@ export class ClaudeChatViewManager
       );
     }
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`dispatch` は今のところ同期だが、
-    // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく
-    const firstTurn = waitForFirstTurn(newEntry);
-    this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
+    // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
+    // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
+    const giveUp = new AbortController();
+    const firstTurn = waitForFirstTurn(newEntry, undefined, giveUp.signal);
+    try {
+      this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
+    } catch (e) {
+      giveUp.abort();
+      throw e;
+    }
     void this.confirmStopAfterFirstTurn(entry, firstTurn);
     return true;
   }

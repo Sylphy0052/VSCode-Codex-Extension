@@ -104,11 +104,11 @@ import {
   resolveGitBranch,
   resolveWithRetry,
   safeBoundaryProbeKey,
-  waitForFirstTurn,
   decideOldTabAfterHandoff,
   oldTabKeptMessage,
-  type FirstTurnOutcome,
+  waitForFirstTurn,
   writeHandoffPointer,
+  type FirstTurnOutcome,
   type HandoffTrigger,
 } from './handoff';
 import {
@@ -794,9 +794,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const text = buildHandoffPrompt(pointerPath);
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
-    // 取り逃して必ず15分のタイムアウトへ落ちる
-    const firstTurn = waitForFirstTurn(newEntry);
-    await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
+    // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
+    // 残ってしまうため、その場で打ち切る
+    const giveUp = new AbortController();
+    const firstTurn = waitForFirstTurn(newEntry, undefined, giveUp.signal);
+    try {
+      await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
+    } catch (e) {
+      giveUp.abort();
+      throw e;
+    }
     this.reportActivity(newEntry, text);
     void this.confirmStopAfterFirstTurn(entry, firstTurn);
     return true;
