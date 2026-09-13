@@ -1974,6 +1974,16 @@ describe('ロードマップ書き込みの境界検証（実ファイルシス�
     expect(await readFile(outsideFile, 'utf8')).toBe('# original\n');
   });
 
+  it('パス文字列の上でワークスペースの外を指す場合も書き込みを拒否する（多層防御）', async () => {
+    const target = path.join(outside, 'g.md');
+
+    await expect(nodeRoadmapFileSystem.writeTextFile(target, '# g\n', workspace)).rejects.toThrow(
+      /ワークスペースフォルダの外/,
+    );
+
+    expect(await readdir(outside)).toEqual([]);
+  });
+
   it('途中のディレクトリが外向きsymlinkでも書き込みを拒否する', async () => {
     await symlink(outside, path.join(workspace, 'docs'), 'dir');
     const target = path.join(workspace, 'docs', 'roadmap', 'g.md');

@@ -1585,6 +1585,13 @@ export const nodeRoadmapFileSystem: RoadmapFileSystemPort = {
    *    組み立てた想定の場所と厳密に一致することを確かめる（一次防御と実I/Oの間の
    *    TOCTOU窓で差し替えられた場合に備える）
    *
+   * その前段として、`target`がパス文字列の上で既にワークスペースの外を指している場合
+   * （`..`で外へ出る、別のドライブ・ルートの絶対パス）も拒否する。呼び出し側
+   * （`resolveRoadmapOutputPath`・`runner.ts`の書き戻し）が同じ判定を先に通しているが、
+   * 検証を経ずに組み立てた値が渡る経路を残さないための多層防御。**上の実パス厳密一致だけ
+   * では拾えない**——`expected`の組み立てに使う`path.join`が`..`を正規化してしまい、
+   * 外を指すパス同士で一致してしまうため。
+   *
    * 書き込み自体は同じディレクトリ内の一時ファイルへ行い、`rename`で確定させる。
    * `rename`は終端のシンボリックリンクを解決せずディレクトリエントリを置き換えるため、
    * 確認から`rename`までの間に`target`がリンクへ差し替えられてもリンク先は書き換わらない。
@@ -1592,6 +1599,13 @@ export const nodeRoadmapFileSystem: RoadmapFileSystemPort = {
    * そこにあるのは他人の既存ファイルでありうるため）。
    */
   async writeTextFile(target: string, content: string, workspaceRoot: string): Promise<void> {
+    const relative = path.relative(workspaceRoot, target);
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(
+        `ロードマップの書き込み先がワークスペースフォルダの外です: ${sanitizeForLog(target)}`,
+      );
+    }
+
     const symlinked = await findSymlinkedSegment(workspaceRoot, target);
     if (symlinked !== undefined) {
       throw new Error(
