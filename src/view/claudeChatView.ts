@@ -137,6 +137,8 @@ import {
   buildHandoffPrompt,
   countCompactions,
   decideAutoHandoff,
+  deriveHandoffBaseName,
+  nextHandoffName,
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
   recentUserMessages,
@@ -924,6 +926,19 @@ export class ClaudeChatViewManager
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
     // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
     newEntry.session.setAutoHandoff(state.autoHandoff);
+    // 引き継ぎ元の名前に世代の印を付けて渡す（Issue #1145）。付けないと引き継ぎ先の
+    // 表示名が初回プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けが
+    // つかなくなる。`renameActive`と同じく保存を先にし、CLIへは副送信にする。
+    // 名前を付けられなくても引き継ぎ自体は成立するので、失敗は記録に留める
+    const handoffName = nextHandoffName(deriveHandoffBaseName(state, entry.pinnedName));
+    try {
+      await this.store.rename(newSessionId, handoffName);
+      newEntry.session.setName(handoffName);
+    } catch (e) {
+      this.log.warn(
+        `引き継ぎ先の名前を設定できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
     void this.confirmStopAfterFirstTurn(entry, newEntry);
     return true;
