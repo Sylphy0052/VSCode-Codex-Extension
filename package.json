@@ -826,7 +826,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "安全な区切りで、アシスタント自身が「別セッションで続きを」「新しいチャットへ引き継ぐ」と提案したときに自動引き継ぎする（Issue #1097）。コンテキスト残量もmodel/effortの変化も問わない。提案があったかどうかは `agent.autoHandoff.router` の分類器が判定する（正規表現では言い回しのぶれを拾えないため）。`/loop` 実行中とタスク用セッションでは発火しない。"
+          "markdownDescription": "安全な区切りで、アシスタント自身が引き継ぎを提案したときに自動引き継ぎする（Issue #1097 / #1150）。コンテキスト残量もmodel/effortの変化も問わない。提案の判定は2経路ある。（1）「別セッションで続きを」「新しいチャットへ引き継ぐ」のような地の文での提案は `agent.autoHandoff.router` の分類器が判定する（正規表現では言い回しのぶれを拾えないため）。（2）handoffプロンプトそのものが出力されたときは、書式が固定されているので拡張機能側が決定論的に検知する。こちらは `agent.autoHandoff.router` が無効・時間切れ・失敗でも発火する。`/loop` 実行中とタスク用セッションではどちらの経路でも発火しない。"
         },
         "agent.autoHandoff.closeOldTab": {
           "type": "boolean",

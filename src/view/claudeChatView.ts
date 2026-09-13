@@ -135,9 +135,11 @@ import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
+  containsHandoffPrompt,
   countCompactions,
   decideAutoHandoff,
   deriveHandoffBaseName,
+  HANDOFF_PROMPT_DETECTED_REASON,
   nextHandoffName,
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
@@ -1022,8 +1024,12 @@ export class ClaudeChatViewManager
   /**
    * 安全な区切りでの自動引き継ぎ（Issue #1090）。判定の中身はCodex側の同名メソッドと同じ。
    *
-   * 前段（決定論的）を通ったときだけ分類器を起動し、`switch_safe` と、解決したmodel/effortの
-   * 変化から契機を決める。同じ材料での再起動は `lastSafeBoundaryKey` で止める。
+   * 前段（`passesSafeBoundaryGate`）を通ったら、まずhandoffプロンプトの出力を決定論的に
+   * 検知する（Issue #1150）。見つかれば分類器を起動せずに `assistantSuggested` で発火する
+   * ため、`agent.autoHandoff.router` が無効でも動く。
+   *
+   * 見つからなければ分類器を起動し、`switch_safe` と、解決したmodel/effortの変化から契機を
+   * 決める。同じ材料での再起動は `lastSafeBoundaryKey` で止める。
    */
   private async maybeAutoHandoffAtSafeBoundary(
     entry: ClaudePanel,
@@ -1042,12 +1048,6 @@ export class ClaudeChatViewManager
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
-    if (!readAutoHandoffRouterEnabled()) {
-      // 分類器が無いと `switchSafe` も `handoffSuggested` も得られない。区切り待ちの契機は
-      // 全部この判定に依存しているため、ここで止める（残量の閾値契機は別経路で発火する）
-      entry.trace.info('分類器が無効（agent.autoHandoff.router=false）のため発火しない');
-      return;
-    }
     const loopStatus = entry.loop.getStatus();
     const gate = {
       busy: state.busy,
@@ -1064,13 +1064,46 @@ export class ClaudeChatViewManager
       entry.trace.info(`gate blocked (${describeGate(gate)})`);
       return;
     }
+    const assistantMessages = recentAssistantMessages(state);
+    // handoffプロンプトそのものが出力されていれば、分類器を待たずに発火する（Issue #1150）。
+    // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
+    // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
+    if (onAssistantSuggestion && assistantMessages.some(containsHandoffPrompt)) {
+      entry.trace.info('handoffプロンプトを検知したため分類器を経由せず判定する');
+      const detected = decideAutoHandoff({
+        enabled: state.autoHandoff,
+        busy: state.busy,
+        alreadyStarted: entry.autoHandoffStarted,
+        remainingPercent,
+        compacted: false,
+        thresholdPercent: readAutoHandoffThresholdPercent(),
+        softThresholdPercent,
+        // 分類器を呼んでいないので `switchSafe` は無い。`safeBoundary` を渡さないことで
+        // `softThreshold` / `profileChanged` の分岐には落ちず `assistantSuggested` になる
+        boundaryGatePassed: true,
+        handoffSuggested: true,
+        handoffSuggestReason: HANDOFF_PROMPT_DETECTED_REASON,
+      });
+      if (detected !== undefined) {
+        entry.trace.info(describeDecision(detected));
+        this.beginAutoHandoff(entry, detected);
+        return;
+      }
+      entry.trace.info('handoffプロンプトを検知したが契機が成立しなかった');
+    }
+    if (!readAutoHandoffRouterEnabled()) {
+      // 分類器が無いと `switchSafe` も分類器経由の `handoffSuggested` も得られない。残りの
+      // 区切り待ちの契機は全部この判定に依存しているため、ここで止める（残量の閾値契機は
+      // 別経路で発火する）
+      entry.trace.info('分類器が無効（agent.autoHandoff.router=false）のため発火しない');
+      return;
+    }
     const messages = recentUserMessages(state);
     if (messages.length === 0) {
       // 材料が無い（開いた直後・復元直後）。分類させても中身の無い見立てが返るだけ
       entry.trace.info('材料が無いため分類器を起動しない（ユーザー指示の記録なし）');
       return;
     }
-    const assistantMessages = recentAssistantMessages(state);
     const key = safeBoundaryProbeKey(messages, assistantMessages);
     if (key === entry.lastSafeBoundaryKey) {
       entry.trace.info('前回と同じ材料のため分類器を起動しない');

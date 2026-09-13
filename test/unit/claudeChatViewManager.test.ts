@@ -2655,3 +2655,87 @@ describe('handoffToNewSession（issue #694）', () => {
     );
   });
 });
+
+describe('handoffプロンプトの決定論検知で自動引き継ぎする（Issue #1150）', () => {
+  /** `handoff` skillの出力そのもの。ソース中にバックティックの連続を書かずに組む。 */
+  const HANDOFF_PROMPT = [
+    '一段落したので引き継ぐ。',
+    '',
+    `${'`'.repeat(4)}markdown`,
+    '# 継続 2026-09-13 main',
+    '',
+    '作業: 決定論検知の実装',
+    '`'.repeat(4),
+  ].join('\n');
+
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * タブを1枚開き、`text` を応答本文としてターンを1回完了させる。
+   *
+   * 返すのは `ClaudeStreamSession.start` が呼ばれた回数の記録。自動引き継ぎが発火すると
+   * 新しいセッションが開くので2件になる。
+   */
+  async function finishTurnWith(text: string): Promise<ClaudeStreamSession[]> {
+    const { sessions } = stubStartCapturing();
+    // 引き継ぎ先への初回送信は実プロセスを要求する（`start` を差し替えているので `proc` が
+    // 無い）。ここで見たいのは新しいセッションが開いたことなので、送信は空振りさせる
+    vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue').mockReturnValue('sent');
+    const store = fakeStore({
+      resolveTranscriptPath: async () => '/home/user/.claude/projects/repo/session-1150.jsonl',
+    });
+    const { manager } = createManager({ store });
+    await manager.openNew('/workspace/root');
+    const session = sessions[0];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine('session-1150'));
+    session.receive(assistantTextLine('u1', text));
+    session.receive(resultLine());
+    await flush();
+    return sessions;
+  }
+
+  // これが本Issueの主目的。分類器を切っていても、handoffプロンプトが出れば引き継ぐ
+  it('router=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await vi.waitFor(() => {
+      expect(sessions).toHaveLength(2);
+    });
+  });
+
+  it('handoffプロンプトが無ければ、router=false のときは従来どおり発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    const sessions = await finishTurnWith('直しました。次はテストを足す。');
+    await flush();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onAssistantSuggestion': false,
+    });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await flush();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('自動引き継ぎ自体がOFFなら発火しない', async () => {
+    __mock.setConfig('agent', { 'autoHandoff.enabled': false, 'autoHandoff.router': false });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await flush();
+    expect(sessions).toHaveLength(1);
+  });
+});
