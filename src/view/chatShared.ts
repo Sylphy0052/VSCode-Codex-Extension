@@ -27,6 +27,7 @@ import {
   verifyRealPathWithinWorkspace,
   type DiffPathResolution,
 } from '../util/diffWorkspacePath';
+import { nodeRevertFilePort, sameFileIdentity, type RevertFilePort } from '../util/revertFile';
 import { chatCsp } from './chatCsp';
 import { chatScript, type ReviewButtonConfig } from './chatScript';
 import { chatStyles } from './chatStyles';
@@ -732,12 +733,21 @@ export async function confirmRevertDiff(diff: FileDiff): Promise<boolean> {
  * 突き合わせる。1回目は確認を出す価値があるかどうかの事前チェック、2回目はTOCTOU対策
  * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。issue #144のメモリ追記と
  * 同じ考え方）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
+ *
+ * 内容だけでなく**場所と実体**も確認後にもう一度確かめる（Issue #1170）。応答待ちの間に
+ * 親ディレクトリがワークスペース外へのsymlinkへ差し替わると、同じ絶対パス文字列が別の
+ * 実体を指し、本文の一致だけでは見抜けない。確認後に実体パスを取り直して確認前と同じで
+ * なければ止め、`update` は確認前に控えた `dev`/`ino` と開いたfdの `fstat` が一致した
+ * ときだけ、そのfdから読んでそのfdへ書く（`revertPort`）。`add` の削除と `delete` の
+ * 再作成はfdを持てないため、再検査の直後に行う。再検査と操作の間の短い窓は残る
+ * （Node.jsに `openat` / `unlinkat` 相当が無い）。
  */
 export async function handleRevertDiff(
   fs: FileSystemPort,
   items: readonly ChatItem[],
   itemId: unknown,
   diffIndex: unknown,
+  revertPort: RevertFilePort = nodeRevertFilePort,
 ): Promise<void> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
@@ -761,27 +771,76 @@ export async function handleRevertDiff(
     void vscode.window.showWarningMessage(`変更を戻せません: ${precheck.error}`);
     return;
   }
+  // 確認前の実体を控える。`delete` の戻しは「無い」ことが前提なので控えるものが無い
+  const identityBefore =
+    diff.kind === 'delete' ? undefined : await revertPort.identify(resolved.absolutePath);
   if (!(await confirmRevertDiff(diff))) {
     return;
   }
-  // TOCTOU対策: 確認モーダル（ユーザー応答待ちで不定長）の間に内容が変わりうるため、
-  // 書き込み・削除の直前にもう一度読み直して確かめる（issue #144のメモリ追記と同じ考え方）
-  const atRevert = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
-  const recomputed = computeDiffContents(diff, atRevert);
-  if (!recomputed.ok) {
-    void vscode.window.showWarningMessage(`変更を戻せませんでした: ${recomputed.error}`);
+  // TOCTOU対策（Issue #1170）: 応答待ちの間に親がsymlinkへ差し替わっていないか、実体パスを
+  // 取り直して確認前と突き合わせる。文字列は同じでも指す先が変わりうる
+  const rechecked = await resolveDiffFileForAction(diff);
+  if (!rechecked.ok || rechecked.absolutePath !== resolved.absolutePath) {
+    void vscode.window.showWarningMessage(
+      `変更を戻せませんでした: 確認している間に対象の場所が変わりました: ${diff.path}`,
+    );
     return;
   }
   try {
-    if (diff.kind === 'add') {
-      await vscode.workspace.fs.delete(vscode.Uri.file(resolved.absolutePath), {
-        useTrash: true,
+    if (diff.kind === 'update') {
+      if (identityBefore === undefined) {
+        void vscode.window.showWarningMessage(
+          '変更を戻せませんでした: ファイルが見つかりません（既に削除されている可能性があります）',
+        );
+        return;
+      }
+      // 開いたfdが確認前と同じ実体のときだけ、そのfdから読み直して同じfdへ書く
+      const outcome = await revertPort.rewrite(resolved.absolutePath, identityBefore, (current) => {
+        const recomputed = computeDiffContents(diff, current);
+        return recomputed.ok
+          ? { ok: true, content: recomputed.before }
+          : { ok: false, reason: recomputed.error };
       });
+      if (outcome.kind === 'aborted') {
+        void vscode.window.showWarningMessage(`変更を戻せませんでした: ${outcome.reason}`);
+        return;
+      }
+      if (outcome.kind !== 'written') {
+        void vscode.window.showWarningMessage(
+          `変更を戻せませんでした: 確認している間に対象のファイルが差し替えられました: ${diff.path}`,
+        );
+        return;
+      }
     } else {
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.file(resolved.absolutePath),
-        Buffer.from(recomputed.before, 'utf8'),
-      );
+      // `add` の削除と `delete` の再作成はfdを持てない。内容（`add` は実体も）を操作の直前に
+      // もう一度確かめる（issue #144のメモリ追記と同じ考え方）
+      if (diff.kind === 'add') {
+        const identityNow = await revertPort.identify(resolved.absolutePath);
+        if (
+          identityBefore === undefined ||
+          identityNow === undefined ||
+          !sameFileIdentity(identityBefore, identityNow)
+        ) {
+          void vscode.window.showWarningMessage(
+            `変更を戻せませんでした: 確認している間に対象のファイルが差し替えられました: ${diff.path}`,
+          );
+          return;
+        }
+      }
+      const atRevert = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
+      const recomputed = computeDiffContents(diff, atRevert);
+      if (!recomputed.ok) {
+        void vscode.window.showWarningMessage(`変更を戻せませんでした: ${recomputed.error}`);
+        return;
+      }
+      if (diff.kind === 'add') {
+        await vscode.workspace.fs.delete(vscode.Uri.file(resolved.absolutePath), {
+          useTrash: true,
+        });
+      } else {
+        // 無いときだけ作る（`wx`）。確認後に同じパスへ別のファイルが作られていれば失敗する
+        await revertPort.createNew(resolved.absolutePath, recomputed.before);
+      }
     }
   } catch (e) {
     void vscode.window.showErrorMessage(
