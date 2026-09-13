@@ -345,8 +345,10 @@ describe('applyEvent', () => {
     expect(applyEvent(started, 'turn/failed', {}).turnId).toBeUndefined();
   });
 
-  it('turn/failed だけを失敗として残し、次のターンで消す', () => {
+  it('turn/failed を失敗として残し、次のターンで消す', () => {
     const started = applyEvent(initialChatState, 'turn/started', {});
+    // statusを持たない完了通知は失敗にしない。`turn.status: "failed"` を失敗として扱う
+    // 経路は `turnFailureAutoResume.test.ts` で確かめる（issue #1199）
     expect(applyEvent(started, 'turn/completed', {}).turnFailed).toBe(false);
 
     const failed = applyEvent(started, 'turn/failed', {});

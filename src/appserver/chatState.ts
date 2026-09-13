@@ -465,6 +465,14 @@ export interface ExtraUsageView {
   spendLimitReached: boolean;
 }
 
+/**
+ * ターンが失敗した理由の区分（issue #1199）。
+ *
+ * Codex CLI 0.154.0の`CodexErrorInfo`は上限の種類を区別できる。待てば解ける上限と、
+ * それ以外の失敗を分けて持ち、自動再開の対象を前者に絞る。
+ */
+export type TurnFailureKind = 'usageLimit' | 'other';
+
 export interface ChatState {
   threadId: string | undefined;
   /**
@@ -487,6 +495,17 @@ export interface ChatState {
    * ループ実行が壊れた状態で回り続けないよう、失敗を別に持つ。
    */
   turnFailed: boolean;
+  /**
+   * 直前のターンが失敗した理由の区分（issue #1199）。
+   *
+   * `'usageLimit'`は待てば解ける上限（`usageLimitExceeded` / `rateLimitExceeded`）。
+   * 自動再開はこの区分だけを対象にする。`sessionBudgetExceeded`は時間では戻らないため
+   * `'other'`へ入れる。失敗していないターンでは`undefined`。
+   *
+   * レート制限の通知（`usage.limited`）はアカウント単位で全タブへ届くため、どのターンが
+   * 上限で落ちたかはこちらでしか判らない。
+   */
+  turnFailureKind: TurnFailureKind | undefined;
   /**
    * ストリーミング中のメッセージid（Claude Codeのみ）。
    *
@@ -645,6 +664,7 @@ export const initialChatState: ChatState = {
   busy: false,
   turnId: undefined,
   turnFailed: false,
+  turnFailureKind: undefined,
   streamingMessageId: undefined,
   queued: [],
   items: [],
@@ -1280,6 +1300,27 @@ function appendReasoningDelta(
 }
 
 /**
+ * 失敗したターンの`error`から理由の区分を決める（issue #1199）。
+ *
+ * `codexErrorInfo`は文字列（`"usageLimitExceeded"`等）とオブジェクト
+ * （`{ httpConnectionFailed: { httpStatusCode } }`等）の両方を取る。待てば解ける上限だけを
+ * `'usageLimit'`と見なし、それ以外の失敗は`'other'`にする（誤って自動再開を予約しない）。
+ * `sessionBudgetExceeded`は時間では戻らないため上限には含めない。`error`自体が無いときは
+ * 理由を決め打ちせず`undefined`を返す。
+ */
+function classifyTurnFailure(
+  error: Record<string, unknown> | undefined,
+): TurnFailureKind | undefined {
+  if (error === undefined) {
+    // 型の上では失敗したターンに必ず入るが、届かなければ理由を決め打ちしない。
+    // `undefined`のままにして、レート制限の通知（`usage.limited`）側の判定へ委ねる
+    return undefined;
+  }
+  const info = error['codexErrorInfo'];
+  return info === 'usageLimitExceeded' || info === 'rateLimitExceeded' ? 'usageLimit' : 'other';
+}
+
+/**
  * app-serverの通知を状態に畳み込む。
  *
  * 扱うのは `item/*` `turn/*` `thread/status/changed` と使用量のみ。
@@ -1299,6 +1340,7 @@ export function applyEvent(
         busy: true,
         turnId: turnId === '' ? undefined : turnId,
         turnFailed: false,
+        turnFailureKind: undefined,
         // 前のターンの成果を次のターンへ持ち越さない
         turnResultText: '',
         turnEditedFiles: [],
@@ -1307,11 +1349,18 @@ export function applyEvent(
 
     case 'turn/completed': {
       const summary = summarizeTurn(state.items, state.turnId);
+      // 失敗はこの通知が`turn.status`で運ぶ（issue #1199）。`turn/failed`という通知は
+      // Codex CLI 0.154.0の`ServerNotification`に無く、下の`turn/failed`分岐は古いCLI
+      // 向けに残してあるだけで現行では届かない。statusを読まないと、上限で落ちたターンが
+      // 成功として扱われ、自動再開の対象から外れる
+      const turn = rec(params['turn']);
+      const failed = str(turn?.['status']) === 'failed';
       return {
         ...state,
         busy: false,
         turnId: undefined,
-        turnFailed: false,
+        turnFailed: failed,
+        turnFailureKind: failed ? classifyTurnFailure(rec(turn?.['error'])) : undefined,
         // ターンが終われば走っているコマンドも無い。`item/completed` を取り逃した項目が
         // `inProgress` のまま残ると、画面の外周が黄色のままになる（issue #897）
         backgroundTerminals: NO_BACKGROUND_TERMINALS,
@@ -1328,6 +1377,9 @@ export function applyEvent(
         busy: false,
         turnId: undefined,
         turnFailed: true,
+        // 古いCLI向けの分岐なので理由の区別は持たない（issue #1199）。上限かどうかは
+        // `usage.limited`側の判定に委ねる
+        turnFailureKind: undefined,
         // `turn/completed` と同じ理由で落とす（issue #897）
         backgroundTerminals: NO_BACKGROUND_TERMINALS,
         turnResultText: summary.text,
