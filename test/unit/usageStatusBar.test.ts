@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatUsage } from '../../src/appserver/chatState';
 import { readRateLimits, type UsageSnapshot } from '../../src/codex/usage';
 import { UsageStatusBar } from '../../src/view/usageStatusBar';
@@ -199,5 +199,80 @@ describe('UsageStatusBar のClaude制限表示（issue #1221）', () => {
     const bar = new UsageStatusBar();
     bar.updateClaude(undefined);
     expect(claudeTextOf(bar)).toBe('');
+  });
+});
+
+describe('UsageStatusBar の定期描画（issue #1224）', () => {
+  /** 時計を止めて進める。実装は `Date.now()` と `setInterval` を直接使う。 */
+  const START = Date.UTC(2026, 8, 14, 0, 0, 0);
+  const epochIn = (hours: number): number => Math.floor(START / 1000) + hours * 3600;
+
+  beforeEach(() => {
+    __mock.reset();
+    vi.useFakeTimers();
+    vi.setSystemTime(START);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('通知を追加せず時刻だけ進めるとClaudeの残り時間が進む', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: epochIn(2) }));
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 2時間後');
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+
+    // 陽性対照: 表示そのものが消えたのではなく、残り時間だけが変わっている
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 1時間後');
+    bar.dispose();
+  });
+
+  it('Codex側の残り時間も進む', () => {
+    const bar = new UsageStatusBar();
+    bar.update({ ...snapshot(62), resetsAt: epochIn(2) });
+    expect(textOf(bar)).toContain('2時間後');
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+
+    expect(textOf(bar)).toContain('1時間後');
+    bar.dispose();
+  });
+
+  it('リセット時刻を過ぎたら解除待ちとして出し、警告背景を保つ', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: epochIn(1) }));
+
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+
+    // 「まもなく」だと時刻が過ぎたことと上限が解けたことを読み分けられない
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 解除待ち');
+    expect(claudeBackgroundOf(bar)).toBe('statusBarItem.warningBackground');
+    expect(claudeTooltipOf(bar)).toContain('リセット時刻を過ぎましたが解除の通知は届いていません');
+    bar.dispose();
+  });
+
+  it('解除の通知が届けば解除待ちの表示をやめる', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: epochIn(1) }));
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+    expect(claudeTextOf(bar)).toContain('解除待ち');
+
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: false }));
+
+    expect(claudeTextOf(bar)).not.toContain('解除待ち');
+    expect(claudeBackgroundOf(bar)).toBeUndefined();
+    bar.dispose();
+  });
+
+  it('disposeすると描き直さなくなる', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: epochIn(2) }));
+    bar.dispose();
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 2時間後');
   });
 });

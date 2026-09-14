@@ -32,7 +32,6 @@ import { AppServerClient } from './codex/appServerClient';
 import { codexPaths, nodeLocatorDeps, resolveCodexHome } from './codex/cliLocator';
 import { CodexProvider } from './codex/provider';
 import type { CodexConfig, SessionMeta, SessionSummary } from './codex/types';
-import type { UsageSnapshot } from './codex/usage';
 import {
   currentWorkspaceFolder,
   readActivityLogConfig,
@@ -874,18 +873,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const usageBar = new UsageStatusBar();
   context.subscriptions.push(usageBar);
 
-  let usageSnapshot: UsageSnapshot | undefined;
   const readUsage = async (): Promise<void> => {
     // app-serverに聞ければ現在値が返る。繋がっていないときだけロールアウトを読む
-    usageSnapshot = (await chat.readUsage()) ?? (await usageReader.read());
+    const usageSnapshot = (await chat.readUsage()) ?? (await usageReader.read());
     usageBar.update(usageSnapshot);
     panel.setUsage(usageSnapshot);
   };
   // 会話中は追記が頻発するため間引く
   const readUsageDebounced = debounce(() => void readUsage(), 1_500);
-  // リセットまでの残り時間の表記を進めるだけの再描画（ファイルは読まない）
-  const ticker = setInterval(() => usageBar.update(usageSnapshot), 60_000);
-  context.subscriptions.push(new vscode.Disposable(() => clearInterval(ticker)));
+  // 残り時間の表記を進めるだけの再描画は `UsageStatusBar` が自前のtickerで行う。ここに
+  // 置いていたときはCodex側しか描き直せず、Claudeの表示が固まっていた（issue #1224）
   void readUsage();
 
   const watcher = new SessionWatcher(paths, {

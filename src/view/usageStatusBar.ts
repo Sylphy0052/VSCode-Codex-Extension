@@ -17,6 +17,9 @@ import {
 } from '../codex/usage';
 import { formatAbsoluteTime } from './relativeTime';
 
+/** 残り時間の表記を進めるための再描画の間隔（issue #1224。分未満は表示に出ない）。 */
+const TICK_MS = 60_000;
+
 /**
  * レート制限の使用量をステータスバーに常時表示する。
  * サイドバーを閉じていても見えることが要件なのでステータスバーを使う。
@@ -32,6 +35,9 @@ export class UsageStatusBar implements vscode.Disposable {
    * 到達とリセット時刻を消す。枠ごとに重ねてから代表値を描く。
    */
   private claudeLimits: ClaudeLimitEntry[] = [];
+  /** Codexの直近のスナップショット。残り時間の表記を進めるために持つ（issue #1224）。 */
+  private snapshot: UsageSnapshot | undefined;
+  private readonly ticker: ReturnType<typeof setInterval>;
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -43,6 +49,19 @@ export class UsageStatusBar implements vscode.Disposable {
     this.claudeItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
     this.claudeItem.name = 'Claude Code 制限';
     this.updateClaude(undefined);
+
+    // 残り時間の表記を進めるだけの再描画（新しい値は読まない）。値を持っているのはこの
+    // クラスなので、描き直しもここが持つ。以前は `extension.ts` のtickerがCodex側だけを
+    // 描き直しており、Claudeの表示は通知が止まると固まっていた（issue #1224）
+    this.ticker = setInterval(() => this.redraw(), TICK_MS);
+    // テストやサーバ側の実行で、この間隔だけがプロセスを生かし続けないようにする
+    this.ticker.unref?.();
+  }
+
+  /** 保持している値のまま描き直す。時刻が進むと残り時間の表記が変わる。 */
+  private redraw(): void {
+    this.renderCodex();
+    this.renderClaude();
   }
 
   /**
@@ -58,6 +77,10 @@ export class UsageStatusBar implements vscode.Disposable {
     if (usage !== undefined) {
       this.claudeLimits = mergeClaudeUsage(this.claudeLimits, usage);
     }
+    this.renderClaude();
+  }
+
+  private renderClaude(): void {
     const now = Date.now();
     const summary = summarizeClaudeLimits(this.claudeLimits);
     const text = formatClaudeUsage(summary, now);
@@ -86,6 +109,12 @@ export class UsageStatusBar implements vscode.Disposable {
   }
 
   update(snapshot: UsageSnapshot | undefined): void {
+    this.snapshot = snapshot;
+    this.renderCodex();
+  }
+
+  private renderCodex(): void {
+    const snapshot = this.snapshot;
     if (snapshot?.usedPercent === undefined) {
       this.item.text = '$(pulse) Codex --';
       this.item.tooltip = new vscode.MarkdownString(
@@ -111,6 +140,7 @@ export class UsageStatusBar implements vscode.Disposable {
   }
 
   dispose(): void {
+    clearInterval(this.ticker);
     this.item.dispose();
     this.claudeItem.dispose();
   }

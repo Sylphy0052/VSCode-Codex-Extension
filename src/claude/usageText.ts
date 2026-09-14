@@ -24,12 +24,29 @@ export function formatClaudeUsage(usage: ChatUsage | undefined, nowMs: number): 
     bits.push(usage.limitLabel);
   }
 
-  const resets = formatResetsIn(usage.resetsAt, nowMs);
+  // リセット時刻を過ぎても、解除の通知が届くまでは解除されたことにしない（issue #1224）。
+  // 「まもなく」のままにすると、時刻が過ぎたことと上限が解けたことを読み分けられない
+  const resets = isAwaitingRelease(usage, nowMs)
+    ? '解除待ち'
+    : formatResetsIn(usage.resetsAt, nowMs);
   if (resets !== '') {
     bits.push(resets);
   }
 
   return bits.length === 0 ? '' : `Claude ${bits.join(' ・ ')}`;
+}
+
+/**
+ * 到達したままリセット時刻を過ぎているか。
+ *
+ * Claudeの解除は `rate_limit_event` でしか判らず、チャットが止まっていれば届かない。
+ * こちらから解除を推定せず、待っている状態として出す。
+ */
+export function isAwaitingRelease(
+  limit: { limited: boolean | undefined; resetsAt: number | undefined },
+  nowMs: number,
+): boolean {
+  return limit.limited === true && limit.resetsAt !== undefined && limit.resetsAt * 1000 <= nowMs;
 }
 
 /**
@@ -166,9 +183,14 @@ export function formatClaudeLimitLines(
     if (entry.limited === true) {
       bits.push('到達');
     }
-    const resets = formatResetsIn(entry.resetsAt, nowMs);
-    if (resets !== '') {
-      bits.push(`リセット ${resets}`);
+    if (isAwaitingRelease(entry, nowMs)) {
+      // 解除はCLIの通知でしか判らないため、時刻を過ぎたことだけを述べる（issue #1224）
+      bits.push('リセット時刻を過ぎましたが解除の通知は届いていません');
+    } else {
+      const resets = formatResetsIn(entry.resetsAt, nowMs);
+      if (resets !== '') {
+        bits.push(`リセット ${resets}`);
+      }
     }
     if (bits.length === 0) {
       continue;
