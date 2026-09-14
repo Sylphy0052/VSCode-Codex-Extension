@@ -920,11 +920,36 @@ describe('workflowScript のカンバンバッジからの状態別強調（issu
 
   it('強調はバッジ・グラフ・表をまとめて引き直す（issue #1037）', () => {
     const source = workflowScript();
-    // 陽性対照: 3箇所をまとめて引き直す関数がある
-    expect(source).toContain('function applyKanbanHighlight()');
-    // 表も引き直す。ここが抜けるとグラフだけが反応する元の挙動へ戻る
-    expect(source).toContain('renderTable(currentSnapshot);');
-    expect(source).toContain('renderGraph(currentSnapshot, currentLayout);');
+    // 関数の本体ごと照合する。`renderTable(currentSnapshot);` はこの関数の外にもあるので、
+    // 部分文字列を個別に見るだけでは「表を引き直していない」実装でも通ってしまう
+    expect(source).toContain(
+      [
+        '  function applyKanbanHighlight() {',
+        '    renderKanban(currentKanban);',
+        '    if (currentSnapshot && currentLayout) {',
+        '      renderGraph(currentSnapshot, currentLayout);',
+        '    }',
+        '    if (currentSnapshot) {',
+        '      renderTable(currentSnapshot);',
+        '    }',
+        '  }',
+      ].join('\n'),
+    );
+    // バッジの押下と解除ボタンの両方が同じ経路を通る
+    expect(source).toContain(
+      'kanbanHighlight = kanbanHighlight === bucket ? undefined : bucket;\n      applyKanbanHighlight();',
+    );
+  });
+
+  it('集計が無いrunでは強調を残さない（issue #1037）', () => {
+    const source = workflowScript();
+    // バッジも解除ボタンも出ない状態で強調が残ると、表の行だけが強調されたまま解除できない
+    expect(source).toContain(['    if (!kanban) {', '      box.hidden = true;'].join('\n'));
+    expect(source).toContain(
+      ['      kanbanHighlight = undefined;', '      announcedKanbanHighlight = undefined;'].join(
+        '\n',
+      ),
+    );
   });
 
   it('表は行を消さず、対象行へクラスと視覚非表示テキストを付ける（issue #1037）', () => {

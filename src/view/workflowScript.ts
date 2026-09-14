@@ -414,6 +414,10 @@ export function workflowScript(): string {
     group.replaceChildren();
     if (!kanban) {
       box.hidden = true;
+      // 集計が無いrunではバッジも解除ボタンも出ないので、強調を残すと表の行だけが
+      // 強調されたまま解除できなくなる（issue #1037）。状態ごと捨てる
+      kanbanHighlight = undefined;
+      announcedKanbanHighlight = undefined;
       return;
     }
     // 強調中のバケットが0件になったら解除する。該当が1つも無いまま「強調中」の
