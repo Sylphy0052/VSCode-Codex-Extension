@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { ChatUsage } from '../../src/appserver/chatState';
 import { readRateLimits, type UsageSnapshot } from '../../src/codex/usage';
 import { UsageStatusBar } from '../../src/view/usageStatusBar';
 import { __mock } from '../mocks/vscode';
@@ -120,5 +121,83 @@ describe('UsageStatusBar のツールチップ（issue #1212）', () => {
     const bar = new UsageStatusBar();
     bar.update({ ...snapshot(62), windowMinutes: 10080 });
     expect(tooltipOf(bar)).toContain('- 週次: 62% 使用');
+  });
+});
+
+/** Claude側の項目。Codexとは別のStatusBarItemを持つ。 */
+function claudeTextOf(bar: InstanceType<typeof UsageStatusBar>): string {
+  return (bar as unknown as { claudeItem: { text: string } })['claudeItem'].text;
+}
+
+function claudeTooltipOf(bar: InstanceType<typeof UsageStatusBar>): string {
+  return (
+    (bar as unknown as { claudeItem: { tooltip: { value: string } | undefined } })['claudeItem']
+      .tooltip?.value ?? ''
+  );
+}
+
+function claudeBackgroundOf(bar: InstanceType<typeof UsageStatusBar>): string | undefined {
+  return (bar as unknown as { claudeItem: { backgroundColor: { id: string } | undefined } })[
+    'claudeItem'
+  ].backgroundColor?.id;
+}
+
+const claudeUsage = (over: Partial<ChatUsage>): ChatUsage => ({
+  usedPercent: undefined,
+  resetsAt: undefined,
+  limitLabel: undefined,
+  limited: undefined,
+  ...over,
+});
+
+/**
+ * 表示は実時刻を見るため、テストからは現在時刻からの相対で時刻を作る。
+ * 残り時間は切り捨てで出すので、1分の余裕を足して境界をまたがないようにする。
+ */
+const inHours = (hours: number): number => Math.ceil(Date.now() / 1000) + hours * 3600 + 60;
+
+describe('UsageStatusBar のClaude制限表示（issue #1221）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('割合だけの取得が到達とリセット時刻を消さない', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: inHours(2) }));
+    bar.updateClaude(claudeUsage({ limitLabel: 'セッション', usedPercent: 16 }));
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 2時間後');
+    expect(claudeBackgroundOf(bar)).toBe('statusBarItem.warningBackground');
+    // 見出しに出ない枠はツールチップで読める
+    expect(claudeTooltipOf(bar)).toContain('- セッション: 16% 使用');
+  });
+
+  it('取得の順序が逆でも同じ表示になる', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: 'セッション', usedPercent: 16 }));
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: inHours(2) }));
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 2時間後');
+    expect(claudeBackgroundOf(bar)).toBe('statusBarItem.warningBackground');
+    expect(claudeTooltipOf(bar)).toContain('- セッション: 16% 使用');
+  });
+
+  it('同じ枠の新しい値は上書きし、届かなかった項目は前の値を残す', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '5時間', limited: true, resetsAt: inHours(3) }));
+    bar.updateClaude(claudeUsage({ limitLabel: '5時間', limited: false }));
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 5時間 ・ 3時間後');
+    expect(claudeBackgroundOf(bar)).toBeUndefined();
+  });
+
+  it('到達した枠が複数あればリセットの遅いほうを見出しにする', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(claudeUsage({ limitLabel: '5時間', limited: true, resetsAt: inHours(2) }));
+    bar.updateClaude(claudeUsage({ limitLabel: '週次', limited: true, resetsAt: inHours(30) }));
+    expect(claudeTextOf(bar)).toBe('$(pulse) Claude 週次 到達 ・ 1日後');
+  });
+
+  it('一度も届いていなければ項目を隠す', () => {
+    const bar = new UsageStatusBar();
+    bar.updateClaude(undefined);
+    expect(claudeTextOf(bar)).toBe('');
   });
 });
