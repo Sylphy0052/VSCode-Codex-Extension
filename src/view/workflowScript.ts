@@ -143,6 +143,31 @@ export function workflowScript(): string {
     return label;
   }
 
+  /**
+   * タスク一覧の列数（workflowView.tsのthead）。承認行・展開行が全幅で伸びるための
+   * colSpan に使う。列を足したらここも直す——2箇所へ数字を直接書いていると、
+   * 片方だけ古いままになって行の幅が足りなくなる。
+   */
+  const TASK_TABLE_COLUMNS = 10;
+
+  /**
+   * タスクの model / effort を1つのセルへ収める文言にする（Issue #1035）。
+   *
+   * 値は拡張機能側が解決したもの（task.model / task.effort）をそのまま使い、役割からの
+   * 既定値をここで引き直さない。同じ解決規則を2箇所に置くと、優先順を変えたときに
+   * 片方だけが古いままになる（Issue #104 と同じ形）。
+   *
+   * 片方だけ指定されることがあるので、区切りで繋ぐのではなく有る値だけを並べる。
+   * どちらも無いときに空欄にすると「読み取れないのか、指定が無いのか」が区別できない
+   * ため、既定に従うことが読み取れる文言を出す。
+   */
+  function describeTaskModel(task) {
+    const parts = [];
+    if (task.model) parts.push(task.model);
+    if (task.effort) parts.push(task.effort);
+    return parts.length === 0 ? '既定' : parts.join(' / ');
+  }
+
   // 衝突解決セッションのバッジ文言（Issue #413 PR4）。承認待ち
   // （mergeResolutionWaitingApproval）かLLMが作業中かで出し分ける。
   function mergeResolutionBadgeLabel(task) {
@@ -956,7 +981,7 @@ export function workflowScript(): string {
   function buildApprovalRow(task) {
     const row = el2('tr', 'approval-row');
     const cell = document.createElement('td');
-    cell.colSpan = 9;
+    cell.colSpan = TASK_TABLE_COLUMNS;
     const box = el2('div', 'approval-box');
 
     const heading = text('div', 'kind', task.pendingApproval.kind + ' の承認要求: ');
@@ -1006,7 +1031,7 @@ export function workflowScript(): string {
   function buildPromptRow(task) {
     const row = el2('tr', 'prompt-row');
     const cell = document.createElement('td');
-    cell.colSpan = 9;
+    cell.colSpan = TASK_TABLE_COLUMNS;
     const box = el2('div', 'prompt-box');
 
     if (task.contract) {
@@ -1120,6 +1145,18 @@ export function workflowScript(): string {
       );
 
       row.appendChild(text('td', '', task.provider));
+
+      // 解決済みの model / effort（Issue #1035）。どちらも指定が無いタスクは
+      // 「既定」と出す（空欄だと「読み取れないのか、指定が無いのか」が分からない）
+      const modelText = describeTaskModel(task);
+      const modelCell = text('td', 'model-cell', modelText);
+      // セル幅を超えたときの補助。可視テキスト側にも同じ値が出ているので、
+      // ここだけに情報を置くことにはならない
+      modelCell.title = modelText;
+      if (!task.model && !task.effort) {
+        modelCell.classList.add('hint');
+      }
+      row.appendChild(modelCell);
 
       const elapsedCell = text('td', 'elapsed-cell', '');
       if (task.startedAt) {

@@ -232,6 +232,10 @@ function buildTaskSnapshot(
     // 同じ考え方で、定義から決まる情報は状態として持たない——永続化しないので、
     // リロードで復元したrunでも表示が欠けない（design.md §16.44）
     role: task.role,
+    // model / effort も役割と同じく定義ファイルから都度導出する（Issue #1035）。
+    // `resolveTask`が解決済みの値を`WorkflowTask`へ入れているので、ここは写すだけ
+    model: task.model,
+    effort: task.effort,
     dependsOn: task.dependsOn,
     provider: task.provider,
     state: state?.state ?? 'pending',

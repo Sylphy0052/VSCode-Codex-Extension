@@ -375,6 +375,13 @@ ${sharedStyles()}
   #taskTable .verification-checking { color: var(--vscode-charts-blue); }
   /* 役割（design.md §16.44、Issue #693）。役割が無いタスクはこのセルが空になる */
   #taskTable .role-cell { color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  /* model / effort（Issue #1035）。モデル名は長くなりうるので折り返さず省略する */
+  #taskTable .model-cell {
+    white-space: nowrap;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   #taskTable .hint, #integrationInfo .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 
   /* 狭幅では横長表をカードへ切り替える。主要情報と操作を最初の画面内で読めるようにする。 */
@@ -413,14 +420,19 @@ ${sharedStyles()}
     #taskTable tr.task-row td:nth-child(4)::before { content: '状態'; }
     #taskTable tr.task-row td:nth-child(5)::before { content: '検証'; }
     #taskTable tr.task-row td:nth-child(6)::before { content: 'provider'; }
-    #taskTable tr.task-row td:nth-child(7)::before { content: '経過'; }
-    #taskTable tr.task-row td:nth-child(8)::before { content: '送信回数'; }
-    #taskTable tr.task-row td:nth-child(9)::before { content: '操作'; }
+    /* model / effort（Issue #1035）。providerの直後に入れたので、以降は1つずつ後ろへずれる */
+    #taskTable tr.task-row td:nth-child(7)::before { content: 'model'; }
+    #taskTable tr.task-row td:nth-child(8)::before { content: '経過'; }
+    #taskTable tr.task-row td:nth-child(9)::before { content: '送信回数'; }
+    #taskTable tr.task-row td:nth-child(10)::before { content: '操作'; }
     #taskTable tr.task-row td:nth-child(3),
     #taskTable tr.task-row td:nth-child(4),
     #taskTable tr.task-row td:nth-child(5),
-    #taskTable tr.task-row td:nth-child(9) { grid-column: 1 / -1; }
+    #taskTable tr.task-row td:nth-child(10) { grid-column: 1 / -1; }
     #taskTable .summary-cell { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+    /* カードでは td が flex になり省略記号が効かず、見出し（::before）ごと途中で切れる。
+       summary-cell と同じく幅の上限と省略を外して折り返す（Issue #1035） */
+    #taskTable .model-cell { max-width: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
     #taskTable .ops { flex: 1 1 auto; }
   }
 

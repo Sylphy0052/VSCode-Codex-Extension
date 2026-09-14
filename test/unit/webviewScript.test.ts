@@ -1632,4 +1632,70 @@ describe('workflowScript のノード内の文字の切り詰め（issue #1011�
     // 3つのtextすべてに当てる（測定が0を返す場合の保険）
     expect((source.match(/'clip-path': 'url\(#' \+ NODE_CLIP_ID \+ '\)'/g) ?? []).length).toBe(3);
   });
+
+  it('切り詰めても <title> には完全な id を入れる（Issue #1035）', () => {
+    const source = workflowScript();
+    // title は切り詰めの対象（data-fit）にしない
+    expect(source).toContain("title.textContent = task.id + ' ・ '");
+  });
+});
+
+describe('workflowScript のタスクごとの model / effort 表示（Issue #1035）', () => {
+  const viewSource = (): string =>
+    readFileSync(path.resolve(__dirname, '../../src/view/workflowView.ts'), 'utf8');
+
+  it('表に model / effort の列があり、provider の直後に並ぶ', () => {
+    expect(viewSource()).toContain('<th>provider</th><th>model / effort</th><th>経過</th>');
+  });
+
+  it('拡張機能側で解決済みの値をそのまま出し、役割から引き直さない', () => {
+    const source = workflowScript();
+    // 陽性対照: 文言を組む関数がある
+    expect(source).toContain('function describeTaskModel(task)');
+    expect(source).toContain('if (task.model) parts.push(task.model);');
+    expect(source).toContain('if (task.effort) parts.push(task.effort);');
+    // 役割の既定値をWebview側で再解決していない
+    expect(source).not.toContain('roleDefaults');
+    expect(source).not.toContain('TIER_MODELS');
+  });
+
+  it('どちらも未指定なら空欄にせず「既定」と出す', () => {
+    const source = workflowScript();
+    expect(source).toContain("return parts.length === 0 ? '既定' : parts.join(' / ');");
+    expect(source).toContain("modelCell.classList.add('hint');");
+  });
+
+  it('title だけに情報を置かず、可視テキストにも同じ値を出す', () => {
+    const source = workflowScript();
+    expect(source).toContain("const modelCell = text('td', 'model-cell', modelText);");
+    expect(source).toContain('modelCell.title = modelText;');
+  });
+
+  it('承認行・展開行の colSpan は列数の定数に追随し、thead の列数と一致する', () => {
+    const source = workflowScript();
+    expect(source).toContain('const TASK_TABLE_COLUMNS = 10;');
+    expect(source).not.toContain('cell.colSpan = 9;');
+    expect((source.match(/cell\.colSpan = TASK_TABLE_COLUMNS;/g) ?? []).length).toBe(2);
+    const view = viewSource();
+    const thead = view.slice(view.indexOf('<thead>'), view.indexOf('</thead>'));
+    expect((thead.match(/<th>/g) ?? []).length).toBe(10);
+  });
+
+  it('狭幅のカード表示でも列の見出しが1つずつずれて揃う', () => {
+    const styles = workflowStyles();
+    expect(styles).toContain("td:nth-child(7)::before { content: 'model'; }");
+    expect(styles).toContain("td:nth-child(10)::before { content: '操作'; }");
+    expect(styles).toContain('#taskTable tr.task-row td:nth-child(10) { grid-column: 1 / -1; }');
+    expect(styles).not.toContain("td:nth-child(9)::before { content: '操作'; }");
+  });
+
+  it('狭幅のカード表示では省略を外して折り返す（見出しごと切れないように）', () => {
+    const styles = workflowStyles();
+    const narrow = styles.slice(styles.indexOf('@media (max-width: 680px)'));
+    // 陽性対照: 広幅側では省略する
+    expect(styles).toContain('text-overflow: ellipsis;');
+    expect(narrow).toContain(
+      '#taskTable .model-cell { max-width: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; }',
+    );
+  });
 });

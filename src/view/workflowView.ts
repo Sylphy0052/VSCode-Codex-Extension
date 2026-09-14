@@ -717,7 +717,7 @@ ${workflowStyles()}
         <thead>
           <tr>
             <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th>
-            <th>provider</th><th>経過</th><th>送信回数</th><th>操作</th>
+            <th>provider</th><th>model / effort</th><th>経過</th><th>送信回数</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="taskTableBody"></tbody>
@@ -771,6 +771,8 @@ function buildPreviewSnapshot(
       attempts: 0,
     },
     role: task.role,
+    model: task.model,
+    effort: task.effort,
     dependsOn: task.dependsOn,
     provider: task.provider,
     state: 'pending' as const,
