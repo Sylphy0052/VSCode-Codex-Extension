@@ -96,4 +96,30 @@ describe('UsageReader', () => {
     });
     expect(await new UsageReader(fs, paths).read()).toBeUndefined();
   });
+
+  it('最新ファイルにtoken_countが無ければ次点の候補を試す（issue #1226）', async () => {
+    const fs = new FakeFs({
+      [rollout('newest')]: { content: '{"type":"session_meta"}', mtime: 200 },
+      [rollout('second')]: { content: tokenCountLine(42), mtime: 100 },
+    });
+
+    const snapshot = await new UsageReader(fs, paths).read();
+    expect(snapshot?.usedPercent).toBe(42);
+  });
+
+  it('候補の上限を超えた位置にしかtoken_countが無ければundefined', async () => {
+    // 上限は5件（USAGE_CANDIDATE_LIMIT）。新しい方から5件をsession_metaのみにし、
+    // 6番目（最も古い）にだけ有効な値を置く。上限が働いていなければここを拾ってしまう
+    const fs = new FakeFs({
+      ...Object.fromEntries(
+        Array.from({ length: 5 }, (_, i) => [
+          rollout(`meta-${i}`),
+          { content: '{"type":"session_meta"}', mtime: 100 - i },
+        ]),
+      ),
+      [rollout('too-old')]: { content: tokenCountLine(77), mtime: 1 },
+    });
+
+    expect(await new UsageReader(fs, paths).read()).toBeUndefined();
+  });
 });
