@@ -37,6 +37,23 @@ describe('formatClaudeUsage', () => {
     expect(text).toBe('Claude 週次 到達 ・ 2時間後');
   });
 
+  it('到達したままリセット時刻を過ぎたら解除待ちにする（issue #1224）', () => {
+    const text = formatClaudeUsage(
+      { usedPercent: undefined, resetsAt: inHours(-1), limitLabel: '週次', limited: true },
+      NOW,
+    );
+    // 解除はCLIの通知でしか判らないので、「まもなく」でも解除済みでもなく待ちとして出す
+    expect(text).toBe('Claude 週次 到達 ・ 解除待ち');
+  });
+
+  it('到達していなければ時刻を過ぎても解除待ちにしない', () => {
+    const text = formatClaudeUsage(
+      { usedPercent: 16, resetsAt: inHours(-1), limitLabel: 'セッション', limited: false },
+      NOW,
+    );
+    expect(text).toBe('Claude 16% ・ まもなく');
+  });
+
   it('種類が不明ならリセットだけ出す', () => {
     const text = formatClaudeUsage(
       { usedPercent: undefined, resetsAt: inHours(1), limitLabel: undefined, limited: false },
