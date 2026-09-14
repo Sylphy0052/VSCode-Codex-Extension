@@ -76,7 +76,8 @@ Claudeの制限表示は取得元が2つある。`rate_limit_event`（到達・�
 ## 測って分かった罠
 
 - 索引 `.codegraph/` はgit管理外。無ければ `codegraph init`（577ファイルで6秒ほど）。
-  `.codegraph/` と `codegraph.json` は `.git/info/exclude` へ入れてある（worktreeからは見えないので必要なら再追加）
+  `.codegraph/` と `codegraph.json` は `.git/info/exclude` へ入れてある（共通のgitディレクトリにあるのでworktreeからも効く。
+  `git check-ignore -v codegraph.json` で確認済み）。別PCでは入っていないので追加し直す
 - worktreeセッションでは `cat >> file <<'EOF'` のヒアドキュメントが「複雑すぎる」と拒否されることがある。
   同一コマンドに `grep` 等を継ぎ足すと確実に弾かれる。複数行の追記はEdit/Writeツールを使うほうが速い
 - `npx prettier --check src test` は `test/unit/chatState.test.ts` と `test/unit/rateLimitWindows.test.ts` で
