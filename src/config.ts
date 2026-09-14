@@ -16,6 +16,7 @@ import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
 import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { normalizeChatDensity, type ChatDensity } from './view/density';
+import { isCostPreset, type CostPreset } from './view/handoffRouter';
 import {
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
   DEFAULT_CI_UPDATE_BRANCH_MAX_RETRIES,
@@ -519,6 +520,18 @@ export function readAutoHandoffEffort(): string {
 }
 
 /**
+ * 引き継ぎ先へどれだけコストを掛けてよいかの方針（Issue #1214）。
+ *
+ * 分類（`agent.autoHandoff.router`）の結果に上限を被せるだけで、分類そのものは変えない。
+ * 既定は `balanced`。読めない値は既定へ丸める。`agent.autoHandoff.model` / `.effort` で
+ * 明示した値の方が優先で、そちらにはこの上限を掛けない（明示は人の判断のため）。
+ */
+export function readAutoHandoffCostPreset(): CostPreset {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.costPreset');
+  return isCostPreset(raw) ? raw : 'balanced';
+}
+
+/**
  * 引き継ぎ先のmodel / effortを、CLIのヘッドレス実行による作業の分類から決めるか（Issue #1082）。
  *
  * 既定はON。OFFにすると分類のためのCLI起動を行わず、引き継ぎ先は引き継ぎ元の値をそのまま
@@ -528,6 +541,13 @@ export function readAutoHandoffEffort(): string {
 export function readAutoHandoffRouterEnabled(): boolean {
   const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.router');
   return typeof raw === 'boolean' ? raw : true;
+}
+
+/** コスト方針を、ユーザー設定（グローバル）へ保存する（Issue #1214）。 */
+export async function setAutoHandoffCostPreset(preset: CostPreset): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('autoHandoff.costPreset', preset, vscode.ConfigurationTarget.Global);
 }
 
 /** 使用量上限の解除後の自動続行を、ユーザー設定へ保存する。 */

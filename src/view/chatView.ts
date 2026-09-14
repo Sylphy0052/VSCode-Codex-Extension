@@ -119,7 +119,11 @@ import {
   describeGate,
   describeProfile,
 } from './handoffTrace';
-import { chooseHandoffModelSettings, probeSafeBoundary } from './handoffModelChoice';
+import {
+  chooseHandoffModelSettings,
+  pickHandoffCostPreset,
+  probeSafeBoundary,
+} from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
 import type { SessionStore } from '../session/sessionStore';
 import {
@@ -1830,6 +1834,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           entry.autoHandoffStarted = false;
         }
         entry.session.setAutoHandoff(on);
+        return;
+      }
+      if (type === 'handoffCostPreset') {
+        // 設定を選ぶだけで会話へは何も送らない。ループへの割り込み扱いにはしない
+        await pickHandoffCostPreset();
         return;
       }
       if (type === 'review') {

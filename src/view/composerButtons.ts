@@ -24,6 +24,7 @@ export const COMPOSER_BUTTON_IDS = [
   'openProgress',
   'handoffToNewSession',
   'autoHandoffToggle',
+  'handoffPresetPicker',
   'secondOpinion',
 ] as const;
 
