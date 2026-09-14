@@ -4,6 +4,7 @@ import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import {
   formatResetsIn,
   formatWindow,
+  formatWindowLabel,
   severityOf,
   type UsageSeverity,
   type UsageSnapshot,
@@ -40,6 +41,8 @@ interface UsageView {
   percent: number;
   windowLabel: string;
   resets: string;
+  /** 窓が2つ以上あるときの内訳（issue #1212）。1つならバーと重複するので空。 */
+  windows: string[];
   plan: string;
   credits: string;
   capturedAt: string;
@@ -828,10 +831,18 @@ function buildUsageView(snapshot: UsageSnapshot | undefined): UsageView | undefi
   if (snapshot?.usedPercent === undefined) {
     return undefined;
   }
+  const now = Date.now();
   return {
     percent: Math.round(snapshot.usedPercent),
     windowLabel: formatWindow(snapshot.windowMinutes) || '制限',
-    resets: formatResetsIn(snapshot.resetsAt, Date.now()),
+    resets: formatResetsIn(snapshot.resetsAt, now),
+    windows:
+      snapshot.windows.length < 2
+        ? []
+        : snapshot.windows.map((window) => {
+            const resets = formatResetsIn(window.resetsAt, now);
+            return `${formatWindowLabel(window, snapshot.windows)} ${Math.round(window.usedPercent)}%${resets === '' ? '' : ` (${resets})`}`;
+          }),
     plan: snapshot.planType ?? '',
     credits: snapshot.creditsBalance ?? '',
     capturedAt: snapshot.capturedAt === undefined ? '' : formatAbsoluteTime(snapshot.capturedAt),

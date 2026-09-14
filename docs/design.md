@@ -425,7 +425,7 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 
 レート制限の使用量をステータスバーに常時表示し、詳細を操作パネルに出す。
 
-**データ源**: ロールアウトの `event_msg` / `token_count` イベント。`rate_limits.primary.used_percent` / `window_minutes` / `resets_at`、`credits.balance`、`plan_type`、`info.total_token_usage`、`model_context_window` が得られる。
+**データ源**: ロールアウトの `event_msg` / `token_count` イベント。`rate_limits.primary` / `secondary` の `used_percent` / `window_minutes` / `resets_at`、`limit_id`、`credits.balance`、`plan_type`、`info.total_token_usage`、`model_context_window` が得られる。窓は枠（`limit_id`）ごとに短い窓（primary）と長い窓（secondary）があり、片方だけが100%に達しうる。見出しの数字は最も逼迫した窓、上限判定はどれかの窓が100%以上、リセット時刻は上限に達した窓のうち最も遅いものを使う（issue #1212）。
 
 - レート制限は**アカウント単位**のため、最後に更新されたロールアウトの最新 `token_count` が現在値になる。セッションを跨いで最新ファイルを探す。
 - ファイルは伸びるため、**末尾64KBだけを読んで**最後の `token_count` 行を拾う。先頭が欠けた行はパースに失敗するので黙って読み飛ばす。
