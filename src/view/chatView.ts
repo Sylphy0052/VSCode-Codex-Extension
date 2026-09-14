@@ -98,7 +98,7 @@ import {
   deriveHandoffBaseName,
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
-  nextHandoffName,
+  buildHandoffSessionName,
   passesSafeBoundaryGate,
   recentUserMessages,
   recentAssistantMessages,
@@ -814,14 +814,25 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
     newEntry.session.setAutoHandoff(state.autoHandoff);
-    // 引き継ぎ元の名前に世代の印を付けて渡す（Issue #1145）。付けないと引き継ぎ先の
-    // 表示名が初回プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けが
-    // つかなくなる。
+    // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
+    // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
     //
     // 応答は待たない。`thread/name/set` はCodexへの往復で、返らなければ引き継ぎの初回
     // プロンプトごと止まってしまう。名前が付かなくても引き継ぎ自体は成立するため、
-    // 失敗は記録に留める
-    const handoffName = nextHandoffName(deriveHandoffBaseName(state, entry.pinnedName));
+    // 失敗は記録に留める。
+    //
+    // タブ名の本体は前世代から継がず、この引き継ぎの時点の作業から作り直す（Issue #1228）。
+    // 分類器の見立てがあればそれが最も「今の作業」を表す。無い契機（残量の閾値・自動圧縮、
+    // ルータ無効）では、編集ファイルと直近の指示へ落ちる
+    const previousName = deriveHandoffBaseName(state, entry.pinnedName);
+    const handoffTopic = choice.assessment?.reasons[0] ?? choice.assessment?.switchReason;
+    const handoffName = buildHandoffSessionName({
+      ...(previousName === undefined ? {} : { previousName }),
+      ...(entry.pinnedName === undefined ? {} : { pinnedName: entry.pinnedName }),
+      ...(handoffTopic === undefined ? {} : { topic: handoffTopic }),
+      editedFiles: state.turnEditedFiles,
+      recentUserMessages: recentUserMessages(state),
+    });
     void newEntry.session
       .setName(handoffName)
       .catch((e: unknown) =>
