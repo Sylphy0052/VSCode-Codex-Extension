@@ -5,6 +5,7 @@ import {
   readAutoHandoffModel,
   readAutoHandoffRouterEnabled,
   setAutoHandoffCostPreset,
+  type HandoffCostPresetAgent,
 } from '../config';
 import { effortsFor, type ModelInfo } from '../codex/modelCatalog';
 import type { HeadlessProvider } from '../loop/headlessCli';
@@ -104,7 +105,7 @@ export async function proposeHandoffModelSettings(
         deps.models,
         current,
         deps.fallbackEfforts,
-        readAutoHandoffCostPreset(),
+        readAutoHandoffCostPreset(deps.provider),
       );
       settings.model = resolved.model;
       settings.effort = resolved.effort;
@@ -146,10 +147,14 @@ export async function proposeHandoffModelSettings(
  * 「いま使用量の上限がどれだけ近いか」という会話の外側の事情で決まるため。タブごとに
  * 別々の方針を持たせると、上限が近づいたときに開いている会話の数だけ切り替えることになる。
  *
+ * Codex / Claude Codeで使用量の上限が別のため、方針もCLIごとに別々に持つ（Issue #1216）。
+ *
  * @returns 選んだ方針。閉じたときは `undefined`（設定は変えない）
  */
-export async function pickHandoffCostPreset(): Promise<CostPreset | undefined> {
-  const current = readAutoHandoffCostPreset();
+export async function pickHandoffCostPreset(
+  agent: HandoffCostPresetAgent,
+): Promise<CostPreset | undefined> {
+  const current = readAutoHandoffCostPreset(agent);
   type PresetItem = vscode.QuickPickItem & { preset: CostPreset };
   const choices: PresetItem[] = [
     {
@@ -178,14 +183,15 @@ export async function pickHandoffCostPreset(): Promise<CostPreset | undefined> {
     item.preset === current ? { ...item, label: `$(check) ${item.label}` } : item,
   );
 
+  const agentLabel = agent === 'codex' ? 'Codex' : 'Claude Code';
   const picked = await vscode.window.showQuickPick(items, {
-    title: '自動引き継ぎのコスト方針',
+    title: `${agentLabel}の自動引き継ぎのコスト方針`,
     placeHolder: '引き継ぎ先のmodel / effortにどこまでコストを掛けるか',
   });
   if (picked === undefined) {
     return undefined;
   }
-  await setAutoHandoffCostPreset(picked.preset);
+  await setAutoHandoffCostPreset(agent, picked.preset);
   return picked.preset;
 }
 

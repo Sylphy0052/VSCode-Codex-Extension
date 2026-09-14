@@ -519,16 +519,48 @@ export function readAutoHandoffEffort(): string {
   return typeof raw === 'string' ? raw.trim() : '';
 }
 
+/** コスト方針をCodex / Claude Codeで別々に持たせるための区別（Issue #1216）。 */
+export type HandoffCostPresetAgent = 'codex' | 'claude';
+
+const COST_PRESET_KEY: Record<HandoffCostPresetAgent, string> = {
+  codex: 'autoHandoff.costPreset.codex',
+  claude: 'autoHandoff.costPreset.claude',
+};
+
+/** 明示設定されているかを、既定値との一致では判定しない（既定と同じ値を明示した場合も拾う）。 */
+function hasExplicitValue(
+  inspected: ReturnType<vscode.WorkspaceConfiguration['inspect']>,
+): boolean {
+  return (
+    inspected?.globalValue !== undefined ||
+    inspected?.workspaceValue !== undefined ||
+    inspected?.workspaceFolderValue !== undefined
+  );
+}
+
 /**
- * 引き継ぎ先へどれだけコストを掛けてよいかの方針（Issue #1214）。
+ * 引き継ぎ先へどれだけコストを掛けてよいかの方針（Issue #1214、Codex / Claude Code別に
+ * 持たせるのはIssue #1216）。
  *
  * 分類（`agent.autoHandoff.router`）の結果に上限を被せるだけで、分類そのものは変えない。
  * 既定は `balanced`。読めない値は既定へ丸める。`agent.autoHandoff.model` / `.effort` で
  * 明示した値の方が優先で、そちらにはこの上限を掛けない（明示は人の判断のため）。
+ *
+ * Codex/Claude Codeそれぞれの専用キー（`autoHandoff.costPreset.codex` / `.claude`）が
+ * 未設定のときは、両者が共通で使っていた旧キー `autoHandoff.costPreset` の値を初期値として
+ * 引き継ぐ。使用量の上限はCLIごとに別なので、片方だけ変えても他方へ影響させないため。
  */
-export function readAutoHandoffCostPreset(): CostPreset {
-  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.costPreset');
-  return isCostPreset(raw) ? raw : 'balanced';
+export function readAutoHandoffCostPreset(agent: HandoffCostPresetAgent): CostPreset {
+  const config = vscode.workspace.getConfiguration('agent');
+  const key = COST_PRESET_KEY[agent];
+  if (hasExplicitValue(config.inspect<string>(key))) {
+    const raw = config.get<string>(key);
+    if (isCostPreset(raw)) {
+      return raw;
+    }
+  }
+  const legacy = config.get<string>('autoHandoff.costPreset');
+  return isCostPreset(legacy) ? legacy : 'balanced';
 }
 
 /**
@@ -543,11 +575,19 @@ export function readAutoHandoffRouterEnabled(): boolean {
   return typeof raw === 'boolean' ? raw : true;
 }
 
-/** コスト方針を、ユーザー設定（グローバル）へ保存する（Issue #1214）。 */
-export async function setAutoHandoffCostPreset(preset: CostPreset): Promise<void> {
+/**
+ * コスト方針を、ユーザー設定（グローバル）へ保存する（Issue #1214）。
+ *
+ * Codex / Claude Codeそれぞれの専用キーへ保存する（Issue #1216）。共通の旧キーは書き換えない
+ * （もう片方のCLIの初期値引き継ぎ用に残す）。
+ */
+export async function setAutoHandoffCostPreset(
+  agent: HandoffCostPresetAgent,
+  preset: CostPreset,
+): Promise<void> {
   await vscode.workspace
     .getConfiguration('agent')
-    .update('autoHandoff.costPreset', preset, vscode.ConfigurationTarget.Global);
+    .update(COST_PRESET_KEY[agent], preset, vscode.ConfigurationTarget.Global);
 }
 
 /** 使用量上限の解除後の自動続行を、ユーザー設定へ保存する。 */
