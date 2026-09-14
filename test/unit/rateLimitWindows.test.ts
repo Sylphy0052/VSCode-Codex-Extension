@@ -152,6 +152,24 @@ describe('readRateLimits / 複数の制限枠', () => {
     expect(snapshot?.resetsAt).toBe(9_000);
   });
 
+  it('枠が識別子を持たなければマップのキーで区別する', () => {
+    // `RateLimitSnapshot.limitId` は null を取りうる。キーで区別しないと、識別子無しの
+    // 2枠が同じ枠と見なされ、窓を重ねるときに互いを消す
+    const snapshot = readRateLimits(
+      {
+        rateLimits: null,
+        rateLimitsByLimitId: {
+          codex: { limitId: null, primary: { usedPercent: 10 }, secondary: null },
+          'codex-mini': { limitId: null, primary: { usedPercent: 100 }, secondary: null },
+        },
+      },
+      'now',
+    );
+    expect(snapshot?.windows.map((w) => w.limitId)).toEqual(['codex', 'codex-mini']);
+    expect(mergeRateLimitWindows([], snapshot?.windows ?? [])).toHaveLength(2);
+    expect(snapshot?.usedPercent).toBe(100);
+  });
+
   it('後方互換の単一枠は同じlimitIdなら重ねない', () => {
     const bucket = {
       limitId: 'codex',

@@ -4,8 +4,8 @@ import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import {
   formatResetsIn,
   formatWindow,
-  severityOf,
   formatWindowLabel,
+  severityOf,
   type UsageSeverity,
   type UsageSnapshot,
 } from '../codex/usage';

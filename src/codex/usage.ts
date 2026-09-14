@@ -84,7 +84,8 @@ export function summarizeRateLimitWindows(
       limited: false,
     };
   }
-  let blocking = exhausted[0] as RateLimitWindowInfo;
+  // `exhausted` は空でないので `tightest` へは落ちない（型を通すための既定値）
+  let blocking: RateLimitWindowInfo = exhausted[0] ?? tightest;
   for (const window of exhausted) {
     if (
       window.resetsAt !== undefined &&
@@ -158,11 +159,15 @@ const LOG_KEYS: WindowKeys = {
 function readWindows(
   snapshot: Record<string, unknown> | undefined,
   keys: WindowKeys,
+  fallbackLimitId?: string,
 ): RateLimitWindowInfo[] {
   if (snapshot === undefined) {
     return [];
   }
-  const limitId = str(snapshot[keys.limitId]);
+  // `RateLimitSnapshot.limitId` は null を取りうる。取得応答では枠がマップのキーで
+  // 区別されるため、識別子が読めなければキーを使う（識別子無しが2枠並ぶと、窓を重ねる
+  // ときに同じ枠と見なして互いを消してしまう）
+  const limitId = str(snapshot[keys.limitId]) ?? fallbackLimitId;
   const windows: RateLimitWindowInfo[] = [];
   for (const slot of ['primary', 'secondary'] as const) {
     const window = obj(snapshot[slot]);
@@ -230,8 +235,8 @@ function readResponseWindows(
   rateLimits: Record<string, unknown> | undefined,
   byLimitId: Record<string, unknown> | undefined,
 ): RateLimitWindowInfo[] {
-  const buckets = Object.values(byLimitId ?? {}).map((bucket) =>
-    readWindows(obj(bucket), API_KEYS),
+  const buckets = Object.entries(byLimitId ?? {}).map(([limitId, bucket]) =>
+    readWindows(obj(bucket), API_KEYS, limitId),
   );
   const windows = buckets.flat();
   if (windows.length === 0) {
