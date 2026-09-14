@@ -150,8 +150,32 @@ ${sharedStyles()}
   .quality-values { margin: 2px 0 0; padding-left: 18px; }
   .quality-values li { overflow-wrap: anywhere; }
 
+  /* 視覚的には隠すが支援技術には読ませる（issue #1037）。色・背景での強調が伝わらない
+     利用者へ、表の強調対象行であることを伝えるために使う */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   /* ---- カンバン風のバッジ集計（design.md §16.44、Issue #693） ---- */
-  .kanban-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .kanban-badges { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .kanban-badge-group { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* 強調中の文言と解除ボタン（issue #1037）。バッジと表で共有する状態なので、
+     バッジ群のすぐ下にだけ置く */
+  .kanban-highlight-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+  }
   .kanban-badge {
     display: inline-block;
     padding: 2px 10px;
@@ -193,9 +217,17 @@ ${sharedStyles()}
     opacity: 0.5;
   }
   .kanban-badge:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-  /* 絞り込みに該当しないノードは消さずに淡くする。依存グラフが主役の画面で
+  /* 強調に該当しないノードは消さずに淡くする。依存グラフが主役の画面で
      ノードが消えると関係が読めなくなるため */
   .wf-node.dimmed { opacity: 0.25; }
+  /* 表は淡色化ではなく正の強調にする（issue #1037）。9列ある表を opacity で薄めると
+     コントラストが落ち可読性を損なうため、対象行だけ背景と枠で目立たせ、対象外は
+     文字を薄くしない */
+  #taskTable tr.task-row.highlighted td {
+    background-color: color-mix(in srgb, var(--vscode-list-activeSelectionBackground, var(--vscode-focusBorder)) 20%, var(--vscode-editor-background));
+    border-top: 2px solid var(--vscode-focusBorder);
+    border-bottom: 2px solid var(--vscode-focusBorder);
+  }
 
   /* 拡大中の現在地を示す帯（issue 753）。ミニマップではなく横方向だけの表示にしている */
   #graphViewport {
@@ -363,6 +395,13 @@ ${sharedStyles()}
       border-radius: var(--agent-radius-md);
     }
     #taskTable tr.task-row td { display: flex; gap: 6px; padding: 2px 0; border: 0; min-width: 0; }
+    /* カードになった狭幅では枠を行（カード）の側で太くする（issue #1037）。広幅と同じく
+       セルごとに線を引くと、カードの内側に横線が何本も走る */
+    #taskTable tr.task-row.highlighted {
+      border-width: 2px;
+      border-color: var(--vscode-focusBorder);
+    }
+    #taskTable tr.task-row.highlighted td { border-top: 0; border-bottom: 0; }
     #taskTable tr.task-row td::before {
       flex: 0 0 72px;
       color: var(--vscode-descriptionForeground);

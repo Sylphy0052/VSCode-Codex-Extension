@@ -328,54 +328,113 @@ export function workflowScript(): string {
   const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done', attention: '要対応' };
 
   /**
-   * 押されているバッジのバケット（issue #752）。未選択は undefined。
-   * 状態が届くたびに画面は組み直されるが、この値は残るので絞り込みは維持される。
+   * 押されているバッジのバケット（issue #752、issue #1037で表へも適用）。未選択は undefined。
+   * 状態が届くたびに画面は組み直されるが、この値は残るので強調は維持される。
+   *
+   * 「絞り込み」ではなく「状態別強調」として画面全体（グラフ・表）で統一する（issue #1037）。
+   * グラフは対象外ノードを淡色化、表は対象行を正の強調にする非対称な実装だが、どちらも
+   * 「対象を目立たせる」という同一意味の実装であり、表を淡色化しないのは9列の表を
+   * opacity: 0.25 にするとコントラストが落ち可読性・アクセシビリティを損なうため。
    */
-  let kanbanFilter = undefined;
+  let kanbanHighlight = undefined;
 
   /** バッジを1枚作る。押すとそのバケットのタスクだけを強調する（トグル）。 */
   function kanbanBadge(bucket, count) {
     const button = text(
       'button',
-      'kanban-badge kanban-' + bucket + (kanbanFilter === bucket ? ' selected' : ''),
+      'kanban-badge kanban-' + bucket + (kanbanHighlight === bucket ? ' selected' : ''),
       KANBAN_LABEL[bucket] + ': ' + count,
     );
     button.type = 'button';
     // 0件のバッジは押しても強調するものが無い。押せないことを見た目と支援技術の両方へ伝える
     button.disabled = count === 0;
-    button.setAttribute('aria-pressed', kanbanFilter === bucket ? 'true' : 'false');
+    button.setAttribute('aria-pressed', kanbanHighlight === bucket ? 'true' : 'false');
     button.addEventListener('click', () => {
-      kanbanFilter = kanbanFilter === bucket ? undefined : bucket;
-      // バッジ自身の押下状態と、グラフの強調の両方を引き直す
-      renderKanban(currentKanban);
-      if (currentSnapshot && currentLayout) {
-        renderGraph(currentSnapshot, currentLayout);
-      }
+      kanbanHighlight = kanbanHighlight === bucket ? undefined : bucket;
+      applyKanbanHighlight();
     });
     return button;
   }
 
-  function renderKanban(kanban) {
-    const box = el('kanbanBadges');
-    box.replaceChildren();
-    if (!kanban) {
-      box.hidden = true;
+  /** バッジ（押下状態と強調中表示）・グラフ・表を一度に引き直す。 */
+  function applyKanbanHighlight() {
+    renderKanban(currentKanban);
+    if (currentSnapshot && currentLayout) {
+      renderGraph(currentSnapshot, currentLayout);
+    }
+    if (currentSnapshot) {
+      renderTable(currentSnapshot);
+    }
+  }
+
+  /**
+   * 直前に通知した強調対象（issue #1037）。状態が届くたびに画面は組み直されるので、
+   * 変化していないのに live region を書き換えると同じ文言が何度も読み上げられる。
+   * 初期値は「強調なし」で、初回描画では通知が飛ばない。
+   */
+  let announcedKanbanHighlight = undefined;
+
+  /**
+   * 強調中であることを、バッジ付近の文言（バケット名・件数・適用範囲）と解除ボタンで示す
+   * （issue #1037）。
+   *
+   * 通知は可視の欄ではなく専用の live region（kanbanHighlightLive）へ入れる。解除すると
+   * 可視の欄は hidden になり、hidden の要素は読み上げられないため、そこへ書いても
+   * 解除・自動解除を伝えられない。
+   */
+  function renderKanbanHighlightStatus(kanban) {
+    const status = el('kanbanHighlightStatus');
+    if (kanbanHighlight === undefined) {
+      status.hidden = true;
+      el('kanbanHighlightText').textContent = '';
+    } else {
+      status.hidden = false;
+      el('kanbanHighlightText').textContent =
+        KANBAN_LABEL[kanbanHighlight] +
+        '（' +
+        kanban[kanbanHighlight] +
+        '件）を強調中（依存グラフと一覧の両方。他の行・ノードは消えていません）';
+    }
+    if (announcedKanbanHighlight === kanbanHighlight) {
       return;
     }
-    // 絞り込み中のバケットが0件になったら解除する。該当が1つも無いまま「絞り込み中」の
-    // 見た目だけが残ると、なぜ全部が淡いのかが分からなくなる
-    if (kanbanFilter !== undefined && !(kanban[kanbanFilter] > 0)) {
-      kanbanFilter = undefined;
+    announcedKanbanHighlight = kanbanHighlight;
+    el('kanbanHighlightLive').textContent =
+      kanbanHighlight === undefined
+        ? '状態別の強調を解除しました。全てのタスクを表示しています。'
+        : KANBAN_LABEL[kanbanHighlight] +
+          '（' +
+          kanban[kanbanHighlight] +
+          '件）を強調しました。依存グラフと一覧の両方へ適用しています。行・ノードは消えていません。';
+  }
+
+  function renderKanban(kanban) {
+    const box = el('kanbanBadges');
+    const group = el('kanbanBadgeGroup');
+    group.replaceChildren();
+    if (!kanban) {
+      box.hidden = true;
+      // 集計が無いrunではバッジも解除ボタンも出ないので、強調を残すと表の行だけが
+      // 強調されたまま解除できなくなる（issue #1037）。状態ごと捨てる
+      kanbanHighlight = undefined;
+      announcedKanbanHighlight = undefined;
+      return;
+    }
+    // 強調中のバケットが0件になったら解除する。該当が1つも無いまま「強調中」の
+    // 見た目だけが残ると、なぜ何も強調されていないのかが分からなくなる
+    if (kanbanHighlight !== undefined && !(kanban[kanbanHighlight] > 0)) {
+      kanbanHighlight = undefined;
     }
     box.hidden = false;
     for (const bucket of ['todo', 'inProgress', 'done']) {
-      box.appendChild(kanbanBadge(bucket, kanban[bucket]));
+      group.appendChild(kanbanBadge(bucket, kanban[bucket]));
     }
     // 要対応（failed/blocked/skipped）は1件以上のときだけ、警告色のバッジを追加で出す
     // （design.mdの受入基準）。0件のときは他の3バケットと並べても目立たせる意味が無い
     if (kanban.attention > 0) {
-      box.appendChild(kanbanBadge('attention', kanban.attention));
+      group.appendChild(kanbanBadge('attention', kanban.attention));
     }
+    renderKanbanHighlightStatus(kanban);
   }
 
   // ---- 依存グラフ（SVG） ----
@@ -479,9 +538,9 @@ export function workflowScript(): string {
       class:
         'wf-node state-' + task.state +
         (task.id === selectedTaskId ? ' selected' : '') +
-        // 絞り込み中は該当しないノードを淡くする（issue #752）。消さずに残すのは、
+        // 強調中は該当しないノードを淡くする（issue #752）。消さずに残すのは、
         // 依存グラフが主役の画面でノードが消えると関係が読めなくなるため
-        (kanbanFilter !== undefined && task.kanbanBucket !== kanbanFilter ? ' dimmed' : ''),
+        (kanbanHighlight !== undefined && task.kanbanBucket !== kanbanHighlight ? ' dimmed' : ''),
       transform: 'translate(' + pos.x + ',' + pos.y + ')',
       'data-task-id': task.id,
     });
@@ -1014,11 +1073,20 @@ export function workflowScript(): string {
     const body = el('taskTableBody');
     body.replaceChildren();
     for (const task of snapshot.tasks) {
-      const row = el2('tr', 'task-row');
+      // 強調中の対象行は非表示にせず、色だけに依存しない方法（背景と枠）で強調する
+      // （issue #1037）。対象外の行の文字は薄くしない
+      const isHighlighted = kanbanHighlight !== undefined && task.kanbanBucket === kanbanHighlight;
+      const row = el2('tr', 'task-row' + (isHighlighted ? ' highlighted' : ''));
       row.setAttribute('data-task-id', task.id);
       row.addEventListener('click', () => selectAndReveal(task.id));
 
-      row.appendChild(text('td', '', task.id));
+      const idCell = text('td', '', task.id);
+      if (isHighlighted) {
+        // 視覚非表示テキスト。色・背景での強調が伝わらない支援技術の利用者にも
+        // 「対象であること」を伝える
+        idCell.appendChild(text('span', 'sr-only', '（強調対象: ' + KANBAN_LABEL[kanbanHighlight] + '）'));
+      }
+      row.appendChild(idCell);
 
       // 役割（design.md §16.44、Issue #693）。roleが無い（undefined）タスクは何も出さない。
       // idの代わりではなく専用の列に併記する（表は元々idごとに1行のため、この列自体が
@@ -1435,6 +1503,12 @@ export function workflowScript(): string {
 
   // 現在地の帯（issue #753）。スクロールのたびに引き直す
   el('graphWrap').addEventListener('scroll', scheduleGraphViewport);
+
+  // カンバンの強調はバッジの再押下でも解除できるが、専用の解除ボタンも用意する（issue #1037）
+  el('kanbanHighlightClearBtn').addEventListener('click', () => {
+    kanbanHighlight = undefined;
+    applyKanbanHighlight();
+  });
 
   el('runSelect').addEventListener('change', (e) => {
     vscode.postMessage({ type: 'selectRun', runId: e.target.value });

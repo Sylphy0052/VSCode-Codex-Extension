@@ -883,7 +883,7 @@ describe('workflowScript のグラフの現在地表示（issue #753）', () => 
   });
 });
 
-describe('workflowScript のカンバンバッジからの絞り込み（issue #752）', () => {
+describe('workflowScript のカンバンバッジからの状態別強調（issue #752、issue #1037）', () => {
   it('バッジはボタンで、押下状態を aria-pressed で持つ', () => {
     const source = workflowScript();
     // 陽性対照: バッジを作る関数がある（綴り違いで空振りしていない）
@@ -895,7 +895,7 @@ describe('workflowScript のカンバンバッジからの絞り込み（issue #
 
   it('押すとトグルし、0件のバッジは押せない', () => {
     const source = workflowScript();
-    expect(source).toContain('kanbanFilter = kanbanFilter === bucket ? undefined : bucket;');
+    expect(source).toContain('kanbanHighlight = kanbanHighlight === bucket ? undefined : bucket;');
     expect(source).toContain('button.disabled = count === 0;');
   });
 
@@ -908,14 +908,95 @@ describe('workflowScript のカンバンバッジからの絞り込み（issue #
   it('バケットの分類はWebview側で振り分け直さない', () => {
     const source = workflowScript();
     // 拡張機能側が付けた kanbanBucket をそのまま使う（Issue #104の再発防止）
-    expect(source).toContain('task.kanbanBucket !== kanbanFilter');
+    expect(source).toContain('task.kanbanBucket !== kanbanHighlight');
     expect(source).not.toContain("state === 'failed' || state === 'blocked'");
   });
 
-  it('絞り込み中のバケットが0件になったら解除する', () => {
+  it('強調中のバケットが0件になったら解除する', () => {
     const source = workflowScript();
-    expect(source).toContain('kanbanFilter = undefined;');
-    expect(source).toContain('!(kanban[kanbanFilter] > 0)');
+    expect(source).toContain('kanbanHighlight = undefined;');
+    expect(source).toContain('!(kanban[kanbanHighlight] > 0)');
+  });
+
+  it('強調はバッジ・グラフ・表をまとめて引き直す（issue #1037）', () => {
+    const source = workflowScript();
+    // 関数の本体ごと照合する。`renderTable(currentSnapshot);` はこの関数の外にもあるので、
+    // 部分文字列を個別に見るだけでは「表を引き直していない」実装でも通ってしまう
+    expect(source).toContain(
+      [
+        '  function applyKanbanHighlight() {',
+        '    renderKanban(currentKanban);',
+        '    if (currentSnapshot && currentLayout) {',
+        '      renderGraph(currentSnapshot, currentLayout);',
+        '    }',
+        '    if (currentSnapshot) {',
+        '      renderTable(currentSnapshot);',
+        '    }',
+        '  }',
+      ].join('\n'),
+    );
+    // バッジの押下と解除ボタンの両方が同じ経路を通る
+    expect(source).toContain(
+      'kanbanHighlight = kanbanHighlight === bucket ? undefined : bucket;\n      applyKanbanHighlight();',
+    );
+  });
+
+  it('集計が無いrunでは強調を残さない（issue #1037）', () => {
+    const source = workflowScript();
+    // バッジも解除ボタンも出ない状態で強調が残ると、表の行だけが強調されたまま解除できない
+    expect(source).toContain(['    if (!kanban) {', '      box.hidden = true;'].join('\n'));
+    expect(source).toContain(
+      ['      kanbanHighlight = undefined;', '      announcedKanbanHighlight = undefined;'].join(
+        '\n',
+      ),
+    );
+  });
+
+  it('表は行を消さず、対象行へクラスと視覚非表示テキストを付ける（issue #1037）', () => {
+    const source = workflowScript();
+    expect(source).toContain(
+      'const isHighlighted = kanbanHighlight !== undefined && task.kanbanBucket === kanbanHighlight;',
+    );
+    expect(source).toContain("el2('tr', 'task-row' + (isHighlighted ? ' highlighted' : ''))");
+    expect(source).toContain("'sr-only'");
+    // 表は正の強調だけで、対象外の行は薄くしない（9列の淡色化は可読性を損なう）
+    expect(workflowStyles()).toContain('#taskTable tr.task-row.highlighted td');
+    expect(workflowStyles()).not.toContain('#taskTable tr.task-row.dimmed');
+    expect(workflowStyles()).toContain('.sr-only');
+  });
+
+  it('強調中は適用範囲と件数を出し、解除ボタンを添える（issue #1037）', () => {
+    const source = workflowScript();
+    // 陽性対照: 強調中表示を引き直す関数がある
+    expect(source).toContain('function renderKanbanHighlightStatus(kanban)');
+    expect(source).toContain("el('kanbanHighlightStatus')");
+    expect(source).toContain('を強調中（依存グラフと一覧の両方。他の行・ノードは消えていません）');
+    expect(source).toContain("el('kanbanHighlightClearBtn').addEventListener('click', () => {");
+  });
+
+  it('バッジ群はグループ化し、通知は可視の欄と分けた live region へ入れる（issue #1037）', () => {
+    // workflowView.ts は vscode に依存するため import せず、HTMLの雛形をソースから読む
+    const viewSource = readFileSync(
+      path.resolve(__dirname, '../../src/view/workflowView.ts'),
+      'utf8',
+    );
+    expect(viewSource).toContain('id="kanbanBadgeGroup"');
+    expect(viewSource).toContain('role="group"');
+    expect(viewSource).toContain('id="kanbanHighlightStatus"');
+    expect(viewSource).toContain('id="kanbanHighlightClearBtn"');
+    // 解除すると可視の欄は hidden になり読み上げられないため、通知は別の要素が持つ
+    expect(viewSource).toContain(
+      '<div id="kanbanHighlightLive" class="sr-only" aria-live="polite">',
+    );
+    expect(viewSource).not.toContain('class="kanban-highlight-status" aria-live="polite"');
+  });
+
+  it('解除と自動解除も通知し、同じ内容は繰り返し読み上げない（issue #1037）', () => {
+    const source = workflowScript();
+    expect(source).toContain("el('kanbanHighlightLive').textContent");
+    expect(source).toContain('状態別の強調を解除しました。全てのタスクを表示しています。');
+    // 状態が届くたびの再描画で同じ文言を書き直さない
+    expect(source).toContain('if (announcedKanbanHighlight === kanbanHighlight) {');
   });
 });
 

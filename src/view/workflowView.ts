@@ -678,7 +678,16 @@ ${workflowStyles()}
   </div>
 
   <div id="content" hidden>
-    <div id="kanbanBadges" class="kanban-badges" hidden></div>
+    <div id="kanbanBadges" class="kanban-badges" hidden>
+      <div id="kanbanBadgeGroup" class="kanban-badge-group" role="group" aria-label="状態で強調表示"></div>
+      <div id="kanbanHighlightStatus" class="kanban-highlight-status" hidden>
+        <span id="kanbanHighlightText"></span>
+        <button id="kanbanHighlightClearBtn" type="button" class="secondary">強調を解除</button>
+      </div>
+      <!-- 通知は可視の欄と分ける（issue #1037）。解除すると可視の欄は hidden になり、
+           hidden の要素は読み上げられないため、解除・自動解除を伝えられない -->
+      <div id="kanbanHighlightLive" class="sr-only" aria-live="polite"></div>
+    </div>
     <section id="qualitySection" hidden>
       <div class="quality-head">
         <h2>計画・品質契約</h2>
