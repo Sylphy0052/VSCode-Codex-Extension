@@ -32,7 +32,6 @@ import { AppServerClient } from './codex/appServerClient';
 import { codexPaths, nodeLocatorDeps, resolveCodexHome } from './codex/cliLocator';
 import { CodexProvider } from './codex/provider';
 import type { CodexConfig, SessionMeta, SessionSummary } from './codex/types';
-import type { UsageSnapshot } from './codex/usage';
 import {
   currentWorkspaceFolder,
   readActivityLogConfig,
@@ -874,10 +873,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const usageBar = new UsageStatusBar();
   context.subscriptions.push(usageBar);
 
-  let usageSnapshot: UsageSnapshot | undefined;
   const readUsage = async (): Promise<void> => {
     // app-serverに聞ければ現在値が返る。繋がっていないときだけロールアウトを読む
-    usageSnapshot = (await chat.readUsage()) ?? (await usageReader.read());
+    const usageSnapshot = (await chat.readUsage()) ?? (await usageReader.read());
     usageBar.update(usageSnapshot);
     panel.setUsage(usageSnapshot);
   };
