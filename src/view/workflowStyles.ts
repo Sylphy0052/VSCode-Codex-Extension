@@ -430,6 +430,9 @@ ${sharedStyles()}
     #taskTable tr.task-row td:nth-child(5),
     #taskTable tr.task-row td:nth-child(10) { grid-column: 1 / -1; }
     #taskTable .summary-cell { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+    /* カードでは td が flex になり省略記号が効かず、見出し（::before）ごと途中で切れる。
+       summary-cell と同じく幅の上限と省略を外して折り返す（Issue #1035） */
+    #taskTable .model-cell { max-width: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
     #taskTable .ops { flex: 1 1 auto; }
   }
 

@@ -1688,4 +1688,14 @@ describe('workflowScript のタスクごとの model / effort 表示（Issue #10
     expect(styles).toContain('#taskTable tr.task-row td:nth-child(10) { grid-column: 1 / -1; }');
     expect(styles).not.toContain("td:nth-child(9)::before { content: '操作'; }");
   });
+
+  it('狭幅のカード表示では省略を外して折り返す（見出しごと切れないように）', () => {
+    const styles = workflowStyles();
+    const narrow = styles.slice(styles.indexOf('@media (max-width: 680px)'));
+    // 陽性対照: 広幅側では省略する
+    expect(styles).toContain('text-overflow: ellipsis;');
+    expect(narrow).toContain(
+      '#taskTable .model-cell { max-width: none; overflow: visible; white-space: normal; overflow-wrap: anywhere; }',
+    );
+  });
 });
