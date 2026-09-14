@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 import type { ChatUsage } from '../appserver/chatState';
-import { formatClaudeUsage } from '../claude/usageText';
+import {
+  formatClaudeLimitLines,
+  formatClaudeUsage,
+  mergeClaudeUsage,
+  summarizeClaudeLimits,
+  type ClaudeLimitEntry,
+} from '../claude/usageText';
 import {
   formatResetsIn,
   formatUsageGauge,
@@ -19,6 +25,13 @@ export class UsageStatusBar implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
   /** Claude Codeは常時読める記録が無いため、チャット画面が受け取った値だけを出す別項目にする。 */
   private readonly claudeItem: vscode.StatusBarItem;
+  /**
+   * Claude Codeの制限枠ごとの保持値（issue #1221）。
+   *
+   * 取得元が2つあり、それぞれ持っている情報が違う。届いた値で置き換えると、割合だけの取得が
+   * 到達とリセット時刻を消す。枠ごとに重ねてから代表値を描く。
+   */
+  private claudeLimits: ClaudeLimitEntry[] = [];
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -37,9 +50,17 @@ export class UsageStatusBar implements vscode.Disposable {
    *
    * 一度も届いていない間は項目ごと隠す。値が無いのに枠だけ出ていると、
    * 取得できていないのか制限が無いのか区別できないため。
+   *
+   * 渡された値は枠ごとに重ねて保つ。`rate_limit_event` は到達とリセット時刻を、`/usage` は
+   * 消費率を持つので、後から来たほうで置き換えると片方が消える（issue #1221）。
    */
   updateClaude(usage: ChatUsage | undefined): void {
-    const text = formatClaudeUsage(usage, Date.now());
+    if (usage !== undefined) {
+      this.claudeLimits = mergeClaudeUsage(this.claudeLimits, usage);
+    }
+    const now = Date.now();
+    const summary = summarizeClaudeLimits(this.claudeLimits);
+    const text = formatClaudeUsage(summary, now);
     if (text === '') {
       this.claudeItem.hide();
       return;
@@ -49,13 +70,16 @@ export class UsageStatusBar implements vscode.Disposable {
       [
         '**Claude Code の制限**',
         '',
-        'Claude Codeは消費率を返さないため、制限の種類とリセット時刻だけを表示します。',
+        // 見出しは1枠ぶんなので、他の枠の割合・リセット時刻はここでしか読めない（issue #1221）
+        ...formatClaudeLimitLines(this.claudeLimits, now),
+        '',
+        'Claude Codeは制限の種類ごとに、届いた消費率とリセット時刻を表示します。',
         '',
         '_チャット画面を開いている間に届いた値です_',
       ].join('\n'),
     );
     this.claudeItem.backgroundColor =
-      usage?.limited === true
+      summary?.limited === true
         ? new vscode.ThemeColor('statusBarItem.warningBackground')
         : undefined;
     this.claudeItem.show();

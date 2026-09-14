@@ -15,8 +15,13 @@ export function formatClaudeUsage(usage: ChatUsage | undefined, nowMs: number): 
   const bits: string[] = [];
   if (usage.usedPercent !== undefined) {
     bits.push(`${Math.round(usage.usedPercent)}%`);
-  } else if (usage.limitLabel !== undefined) {
-    bits.push(usage.limited === true ? `${usage.limitLabel} 到達` : usage.limitLabel);
+  }
+  // 到達は割合と同時に出す。割合が判った後に到達の表示が落ちると、待ちが要ることが読めなくなる
+  // （issue #1221）
+  if (usage.limited === true) {
+    bits.push(usage.limitLabel === undefined ? '到達' : `${usage.limitLabel} 到達`);
+  } else if (usage.usedPercent === undefined && usage.limitLabel !== undefined) {
+    bits.push(usage.limitLabel);
   }
 
   const resets = formatResetsIn(usage.resetsAt, nowMs);
@@ -51,4 +56,124 @@ export function parseUsageReport(text: string): ChatUsage | undefined {
 
 function usageOf(usedPercent: number, limitLabel: string): ChatUsage {
   return { usedPercent, resetsAt: undefined, limitLabel, limited: undefined };
+}
+
+/**
+ * 制限枠ひとつぶんの保持値（issue #1221）。
+ *
+ * Claudeの制限表示は取得元が2つあり、`rate_limit_event` は到達とリセット時刻だけを、
+ * `/usage` は消費率だけを返す。届いた値でそのまま置き換えると、後から来たほうが持っていない
+ * 情報が消える。枠ごとに保持して重ねることで、取得の順序で表示が欠けないようにする。
+ */
+export interface ClaudeLimitEntry {
+  /** 制限枠の表示名。取得元の表記のまま持つ。判らなければ undefined。 */
+  label: string | undefined;
+  usedPercent: number | undefined;
+  resetsAt: number | undefined;
+  limited: boolean | undefined;
+}
+
+/**
+ * 届いた値を枠ごとに重ねる。
+ *
+ * 同じ枠（`limitLabel`）の値は上書きし、`undefined` のフィールドは前の値を残す。
+ * `/usage` の「セッション」と `rate_limit_event` の「5時間」が同じ枠かはCLIから判らないため、
+ * 表記が違えば別の枠として持つ。異なる枠の数値とリセット時刻を混ぜない。
+ */
+export function mergeClaudeUsage(
+  prev: readonly ClaudeLimitEntry[],
+  incoming: ChatUsage,
+): ClaudeLimitEntry[] {
+  const next = prev.map((entry) => ({ ...entry }));
+  if (
+    incoming.usedPercent === undefined &&
+    incoming.resetsAt === undefined &&
+    incoming.limited === undefined
+  ) {
+    // ラベルしか無い通知で空の枠を増やしても表示できるものが無い
+    return next;
+  }
+
+  const found = next.find((entry) => entry.label === incoming.limitLabel);
+  const target = found ?? {
+    label: incoming.limitLabel,
+    usedPercent: undefined,
+    resetsAt: undefined,
+    limited: undefined,
+  };
+  if (found === undefined) {
+    next.push(target);
+  }
+  if (incoming.usedPercent !== undefined) {
+    target.usedPercent = incoming.usedPercent;
+  }
+  if (incoming.resetsAt !== undefined) {
+    target.resetsAt = incoming.resetsAt;
+  }
+  if (incoming.limited !== undefined) {
+    target.limited = incoming.limited;
+  }
+  return next;
+}
+
+/**
+ * 保持している枠から、見出しに出す代表値を選ぶ。
+ *
+ * 到達している枠を優先する（待ちが要るのはそちらのため）。複数あれば最も遅いリセット時刻の枠、
+ * 到達が無ければ最も逼迫した枠。割合もリセット時刻も判らない枠は最後に回す。
+ */
+export function summarizeClaudeLimits(entries: readonly ClaudeLimitEntry[]): ChatUsage | undefined {
+  const limited = entries.filter((entry) => entry.limited === true);
+  const byResetsAt = limited.length > 0;
+  const pool = byResetsAt ? limited : entries;
+  let best: ClaudeLimitEntry | undefined;
+  for (const entry of pool) {
+    if (best === undefined || rankOf(entry, byResetsAt) > rankOf(best, byResetsAt)) {
+      best = entry;
+    }
+  }
+  if (best === undefined) {
+    return undefined;
+  }
+  return {
+    usedPercent: best.usedPercent,
+    resetsAt: best.resetsAt,
+    limitLabel: best.label,
+    limited: best.limited,
+  };
+}
+
+function rankOf(entry: ClaudeLimitEntry, byResetsAt: boolean): number {
+  const value = byResetsAt ? entry.resetsAt : entry.usedPercent;
+  return value ?? Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * ツールチップに出す枠ごとの行。
+ *
+ * 見出しには1枠ぶんしか出せないため、代表に選ばれなかった枠の値はここでしか読めない。
+ */
+export function formatClaudeLimitLines(
+  entries: readonly ClaudeLimitEntry[],
+  nowMs: number,
+): string[] {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    const bits: string[] = [];
+    if (entry.usedPercent !== undefined) {
+      bits.push(`${Math.round(entry.usedPercent)}% 使用`);
+    }
+    if (entry.limited === true) {
+      bits.push('到達');
+    }
+    const resets = formatResetsIn(entry.resetsAt, nowMs);
+    if (resets !== '') {
+      bits.push(`リセット ${resets}`);
+    }
+    if (bits.length === 0) {
+      continue;
+    }
+    lines.push(`- ${entry.label ?? '制限'}: ${bits.join(' ・ ')}`);
+  }
+  return lines;
 }
