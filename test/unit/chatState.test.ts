@@ -420,7 +420,74 @@ describe('applyEvent', () => {
         { rateLimits: { primary: { usedPercent: 100, resetsAt: 1786937045 } } },
       ],
     ]);
-    expect(state.usage).toEqual({ usedPercent: 100, resetsAt: 1786937045, limited: true });
+    expect(state.usage).toMatchObject({
+      usedPercent: 100,
+      resetsAt: 1786937045,
+      limited: true,
+    });
+  });
+
+  describe('制限枠ごとの窓（issue #1212）', () => {
+    const notify = (
+      rateLimits: Record<string, unknown>,
+    ): [string, Record<string, unknown>] => ['account/rateLimits/updated', { rateLimits }];
+
+    it('secondaryだけが上限でも上限として扱い、リセット時刻はsecondaryのもの', () => {
+      const state = feed(initialChatState, [
+        notify({
+          limitId: 'codex',
+          primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: 1_000 },
+          secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 9_000 },
+        }),
+      ]);
+      expect(state.usage?.limited).toBe(true);
+      expect(state.usage?.resetsAt).toBe(9_000);
+      expect(state.usage?.usedPercent).toBe(100);
+    });
+
+    it('primaryだけが上限でも上限として扱う', () => {
+      const state = feed(initialChatState, [
+        notify({
+          limitId: 'codex',
+          primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_000 },
+          secondary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 9_000 },
+        }),
+      ]);
+      expect(state.usage?.limited).toBe(true);
+      expect(state.usage?.resetsAt).toBe(1_000);
+    });
+
+    it('別のlimitIdの上限を、前の枠の値で消さない', () => {
+      const state = feed(initialChatState, [
+        notify({ limitId: 'codex-mini', primary: { usedPercent: 100, resetsAt: 2_000 } }),
+        notify({ limitId: 'codex', primary: { usedPercent: 5, resetsAt: 1_000 } }),
+      ]);
+      expect(state.usage?.limited).toBe(true);
+      expect(state.usage?.resetsAt).toBe(2_000);
+      expect(state.usage?.windows).toHaveLength(2);
+    });
+
+    it('疎な更新でsecondaryが省かれても前の値を保つ', () => {
+      const state = feed(initialChatState, [
+        notify({
+          limitId: 'codex',
+          primary: { usedPercent: 20, resetsAt: 1_000 },
+          secondary: { usedPercent: 100, resetsAt: 9_000 },
+        }),
+        notify({ limitId: 'codex', primary: { usedPercent: 25, resetsAt: 1_000 } }),
+      ]);
+      expect(state.usage?.limited).toBe(true);
+      expect(state.usage?.resetsAt).toBe(9_000);
+    });
+
+    it('読める窓が無い通知では前の状態を変えない', () => {
+      const limited = feed(initialChatState, [
+        notify({ limitId: 'codex', primary: { usedPercent: 100, resetsAt: 9_000 } }),
+      ]);
+      const state = feed(limited, [notify({ limitId: 'codex', primary: null, secondary: null })]);
+      expect(state.usage?.limited).toBe(true);
+      expect(state.usage?.resetsAt).toBe(9_000);
+    });
   });
 
   it('Codexが付けた名前を取り込む', () => {

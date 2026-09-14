@@ -5,6 +5,7 @@ import {
   formatResetsIn,
   formatUsageGauge,
   formatWindow,
+  formatWindowLabel,
   severityOf,
   type UsageSnapshot,
 } from '../codex/usage';
@@ -101,16 +102,26 @@ function isGaugeEnabled(): boolean {
 }
 
 function buildTooltip(snapshot: UsageSnapshot): vscode.MarkdownString {
-  const window = formatWindow(snapshot.windowMinutes);
-  const lines = [
-    `**Codex 使用量**`,
-    '',
-    `- ${window === '' ? '制限' : window}: ${Math.round(snapshot.usedPercent ?? 0)}% 使用`,
-  ];
-
-  const resets = formatResetsIn(snapshot.resetsAt, Date.now());
-  if (resets !== '') {
-    lines.push(`- リセット: ${resets}`);
+  const lines = [`**Codex 使用量**`, ''];
+  const now = Date.now();
+  if (snapshot.windows.length === 0) {
+    const window = formatWindow(snapshot.windowMinutes);
+    lines.push(
+      `- ${window === '' ? '制限' : window}: ${Math.round(snapshot.usedPercent ?? 0)}% 使用`,
+    );
+    const resets = formatResetsIn(snapshot.resetsAt, now);
+    if (resets !== '') {
+      lines.push(`- リセット: ${resets}`);
+    }
+  } else {
+    // 窓ごとに1行。見出しの数字は最も逼迫した窓なので、他の窓の残りはここでしか判らない
+    // （issue #1212）
+    for (const window of snapshot.windows) {
+      const resets = formatResetsIn(window.resetsAt, now);
+      lines.push(
+        `- ${formatWindowLabel(window, snapshot.windows)}: ${Math.round(window.usedPercent)}% 使用${resets === '' ? '' : ` ・ リセット ${resets}`}`,
+      );
+    }
   }
   if (snapshot.planType !== undefined) {
     lines.push(`- プラン: ${snapshot.planType}`);

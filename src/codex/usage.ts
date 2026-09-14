@@ -1,16 +1,132 @@
 export interface UsageSnapshot {
   /** この値がAPI応答から得られた時刻（イベントのtimestamp）。 */
   capturedAt: string | undefined;
+  /** 最も逼迫した窓の使用率（`summarizeRateLimitWindows`）。 */
   usedPercent: number | undefined;
   /** 制限ウィンドウの長さ（分）。10080なら週次。 */
   windowMinutes: number | undefined;
-  /** 制限がリセットされる時刻（epoch秒）。 */
+  /** 制限がリセットされる時刻（epoch秒）。上限に達した窓があればそのうち最も遅いもの。 */
   resetsAt: number | undefined;
+  /** 制限枠ごとの窓。上の3つはここから出した代表値（issue #1212）。 */
+  windows: RateLimitWindowInfo[];
   planType: string | undefined;
   creditsBalance: string | undefined;
   hasCredits: boolean | undefined;
   totalTokens: number | undefined;
   contextWindow: number | undefined;
+}
+
+/** 制限枠の中の窓の区別。CLIの型（`RateLimitSnapshot`）の `primary` / `secondary` に対応する。 */
+export type RateLimitWindowSlot = 'primary' | 'secondary';
+
+/**
+ * 制限枠（`limitId`）の1つの窓。
+ *
+ * Codexの制限は枠ごとに短い窓（primary）と長い窓（secondary）を持ち、片方だけが100%に
+ * 達しうる（issue #1212）。primary / secondary の名前で週次・短時間を決め打ちせず、長さは
+ * `windowMinutes` で読む。取得応答は複数の枠を `rateLimitsByLimitId` で返すため、枠の識別子も持つ。
+ */
+export interface RateLimitWindowInfo {
+  /** 制限枠の識別子（`codex` など）。通知に無ければ undefined。 */
+  limitId: string | undefined;
+  slot: RateLimitWindowSlot;
+  usedPercent: number;
+  /** 窓の長さ（分）。 */
+  windowMinutes: number | undefined;
+  /** リセット時刻（epoch秒）。 */
+  resetsAt: number | undefined;
+}
+
+/** 窓の一覧から出した、表示・判定用の代表値。 */
+export interface RateLimitSummary {
+  /** 最も逼迫した窓の使用率。窓が無ければ undefined。 */
+  usedPercent: number | undefined;
+  /** 代表にした窓の長さ（分）。 */
+  windowMinutes: number | undefined;
+  /** 上限に達した窓があればそのうち最も遅いリセット時刻。無ければ最も逼迫した窓のもの。 */
+  resetsAt: number | undefined;
+  /** 100%以上の窓があるか。窓が無ければ undefined。 */
+  limited: boolean | undefined;
+}
+
+/**
+ * 窓の一覧から代表値を出す。
+ *
+ * どの枠が会話に効いているかはCLIから判らない（`Model` に枠の情報が無い）ため、
+ * 既知の枠のどれかが上限なら上限とみなす。再開の待ち時間は阻害している窓のうち最も遅い
+ * リセット時刻を基準にする。早すぎる時刻で発火して1分ごとの再試行に入るより、別枠の上限で
+ * 待ちが延びる方向へ倒す。
+ */
+export function summarizeRateLimitWindows(
+  windows: readonly RateLimitWindowInfo[],
+): RateLimitSummary {
+  const first = windows[0];
+  if (first === undefined) {
+    return {
+      usedPercent: undefined,
+      windowMinutes: undefined,
+      resetsAt: undefined,
+      limited: undefined,
+    };
+  }
+  let tightest = first;
+  for (const window of windows) {
+    if (window.usedPercent > tightest.usedPercent) {
+      tightest = window;
+    }
+  }
+  const exhausted = windows.filter((window) => window.usedPercent >= 100);
+  if (exhausted.length === 0) {
+    return {
+      usedPercent: tightest.usedPercent,
+      windowMinutes: tightest.windowMinutes,
+      resetsAt: tightest.resetsAt,
+      limited: false,
+    };
+  }
+  let blocking = exhausted[0] as RateLimitWindowInfo;
+  for (const window of exhausted) {
+    if (
+      window.resetsAt !== undefined &&
+      (blocking.resetsAt === undefined || window.resetsAt > blocking.resetsAt)
+    ) {
+      blocking = window;
+    }
+  }
+  return {
+    usedPercent: tightest.usedPercent,
+    windowMinutes: blocking.windowMinutes,
+    resetsAt: blocking.resetsAt,
+    limited: true,
+  };
+}
+
+/**
+ * 疎な更新を既知の窓へ重ねる。
+ *
+ * `account/rateLimits/updated` は「直近の取得応答へマージせよ」と注記された疎な更新で、
+ * 通知に無い窓は前の値を保つ。同じ枠・同じ窓は差し替えるが、差し替え側に長さ・リセット時刻が
+ * 無ければ前の値を引き継ぐ（同じ窓のリセット時刻はリセットまで変わらない）。
+ */
+export function mergeRateLimitWindows(
+  known: readonly RateLimitWindowInfo[],
+  incoming: readonly RateLimitWindowInfo[],
+): RateLimitWindowInfo[] {
+  const keyOf = (window: RateLimitWindowInfo): string => `${window.limitId ?? ''}/${window.slot}`;
+  const merged = new Map<string, RateLimitWindowInfo>();
+  for (const window of known) {
+    merged.set(keyOf(window), window);
+  }
+  for (const window of incoming) {
+    const key = keyOf(window);
+    const previous = merged.get(key);
+    merged.set(key, {
+      ...window,
+      windowMinutes: window.windowMinutes ?? previous?.windowMinutes,
+      resetsAt: window.resetsAt ?? previous?.resetsAt,
+    });
+  }
+  return [...merged.values()];
 }
 
 const num = (v: unknown): number | undefined =>
@@ -19,6 +135,60 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== 
 const obj = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
 
+/** 窓の各値を読むキー。app-serverはcamelCase、ロールアウトの記録はsnake_case。 */
+interface WindowKeys {
+  limitId: string;
+  usedPercent: string;
+  windowMinutes: string;
+  resetsAt: string;
+}
+const API_KEYS: WindowKeys = {
+  limitId: 'limitId',
+  usedPercent: 'usedPercent',
+  windowMinutes: 'windowDurationMins',
+  resetsAt: 'resetsAt',
+};
+const LOG_KEYS: WindowKeys = {
+  limitId: 'limit_id',
+  usedPercent: 'used_percent',
+  windowMinutes: 'window_minutes',
+  resetsAt: 'resets_at',
+};
+
+function readWindows(
+  snapshot: Record<string, unknown> | undefined,
+  keys: WindowKeys,
+): RateLimitWindowInfo[] {
+  if (snapshot === undefined) {
+    return [];
+  }
+  const limitId = str(snapshot[keys.limitId]);
+  const windows: RateLimitWindowInfo[] = [];
+  for (const slot of ['primary', 'secondary'] as const) {
+    const window = obj(snapshot[slot]);
+    const usedPercent = num(window?.[keys.usedPercent]);
+    if (window === undefined || usedPercent === undefined) {
+      continue;
+    }
+    windows.push({
+      limitId,
+      slot,
+      usedPercent,
+      windowMinutes: num(window[keys.windowMinutes]),
+      resetsAt: num(window[keys.resetsAt]),
+    });
+  }
+  return windows;
+}
+
+/**
+ * app-serverの `RateLimitSnapshot`（`account/rateLimits/updated` の `rateLimits`、
+ * 取得応答の各枠）から窓を読む。使用率が数値でない窓は採らない。
+ */
+export function readRateLimitSnapshotWindows(snapshot: unknown): RateLimitWindowInfo[] {
+  return readWindows(obj(snapshot), API_KEYS);
+}
+
 /**
  * `account/rateLimits/read` の応答を読む。
  *
@@ -26,25 +196,52 @@ const obj = (v: unknown): Record<string, unknown> | undefined =>
  * （`parseTokenCountLine`）と同じ形に整えて、表示側は区別せず扱えるようにする。
  */
 export function readRateLimits(result: unknown, capturedAt: string): UsageSnapshot | undefined {
-  const rateLimits = obj(obj(result)?.['rateLimits']);
-  const primary = obj(rateLimits?.['primary']);
-  const usedPercent = primary?.['usedPercent'];
-  if (primary === undefined || typeof usedPercent !== 'number') {
+  const root = obj(result);
+  const rateLimits = obj(root?.['rateLimits']);
+  const windows = readResponseWindows(rateLimits, obj(root?.['rateLimitsByLimitId']));
+  if (windows.length === 0) {
     return undefined;
   }
 
+  const summary = summarizeRateLimitWindows(windows);
   const credits = obj(rateLimits?.['credits']);
   return {
     capturedAt,
-    usedPercent,
-    windowMinutes: num(primary['windowDurationMins']),
-    resetsAt: num(primary['resetsAt']),
+    usedPercent: summary.usedPercent,
+    windowMinutes: summary.windowMinutes,
+    resetsAt: summary.resetsAt,
+    windows,
     planType: str(rateLimits?.['planType']),
     creditsBalance: str(credits?.['balance']),
     hasCredits: typeof credits?.['hasCredits'] === 'boolean' ? credits['hasCredits'] : undefined,
     totalTokens: undefined,
     contextWindow: undefined,
   };
+}
+
+/**
+ * 取得応答の窓を集める。
+ *
+ * `rateLimitsByLimitId` があれば枠ごとの全窓を採る。`rateLimits` は「後方互換の単一枠の見え方」で
+ * 同じ枠を写しているため、枠の識別子が既にあれば重ねない。識別子の無い単一枠は、複数枠の
+ * 応答ではどの枠か判らないので採らない。
+ */
+function readResponseWindows(
+  rateLimits: Record<string, unknown> | undefined,
+  byLimitId: Record<string, unknown> | undefined,
+): RateLimitWindowInfo[] {
+  const buckets = Object.values(byLimitId ?? {}).map((bucket) =>
+    readWindows(obj(bucket), API_KEYS),
+  );
+  const windows = buckets.flat();
+  if (windows.length === 0) {
+    return readWindows(rateLimits, API_KEYS);
+  }
+  const single = readWindows(rateLimits, API_KEYS);
+  const known = new Set(windows.map((window) => window.limitId));
+  return windows.concat(
+    single.filter((window) => window.limitId !== undefined && !known.has(window.limitId)),
+  );
 }
 
 /**
@@ -72,16 +269,18 @@ export function parseTokenCountLine(line: string): UsageSnapshot | undefined {
   }
 
   const limits = obj(payload['rate_limits']);
-  const primary = obj(limits?.['primary']);
+  const windows = readWindows(limits, LOG_KEYS);
+  const summary = summarizeRateLimitWindows(windows);
   const credits = obj(limits?.['credits']);
   const info = obj(payload['info']);
   const total = obj(info?.['total_token_usage']);
 
   return {
     capturedAt: str(root['timestamp']),
-    usedPercent: num(primary?.['used_percent']),
-    windowMinutes: num(primary?.['window_minutes']),
-    resetsAt: num(primary?.['resets_at']),
+    usedPercent: summary.usedPercent,
+    windowMinutes: summary.windowMinutes,
+    resetsAt: summary.resetsAt,
+    windows,
     planType: str(limits?.['plan_type']),
     creditsBalance: str(credits?.['balance']),
     hasCredits: typeof credits?.['has_credits'] === 'boolean' ? credits['has_credits'] : undefined,
@@ -194,4 +393,18 @@ export function formatUsageGauge(
     filled = cells - 1;
   }
   return '▮'.repeat(filled) + '▯'.repeat(cells - filled);
+}
+
+/**
+ * 窓の見出し。長さ（`5時間` / `週次`）で呼び、primary / secondary の名前では呼ばない。
+ * 枠が2つ以上あるときだけ識別子を添える。
+ */
+export function formatWindowLabel(
+  window: RateLimitWindowInfo,
+  all: readonly RateLimitWindowInfo[],
+): string {
+  const span =
+    formatWindow(window.windowMinutes) || (window.slot === 'primary' ? '制限' : '長期の制限');
+  const limitIds = new Set(all.map((w) => w.limitId));
+  return limitIds.size > 1 && window.limitId !== undefined ? `${window.limitId} ${span}` : span;
 }

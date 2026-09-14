@@ -208,6 +208,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     fill.style.width = Math.min(100, u.percent) + '%';
     fill.className = 'fill' + (u.severity === 'normal' ? '' : ' ' + u.severity);
     const meta = [];
+    if (u.windows.length > 0) meta.push(u.windows.join(' / '));
     if (u.resets) meta.push('リセット ' + u.resets);
     if (u.plan) meta.push(u.plan);
     if (u.credits) meta.push('クレジット ' + u.credits);

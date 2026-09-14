@@ -2,6 +2,12 @@ import type { RewindChange } from './fileRewind';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import type { Attachment } from '../provider/attachments';
 import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
+import {
+  mergeRateLimitWindows,
+  readRateLimitSnapshotWindows,
+  summarizeRateLimitWindows,
+  type RateLimitWindowInfo,
+} from '../codex/usage';
 import { readAutoApprovalReview } from './autoApprovalReview';
 import type { PendingPrompt } from './prompts';
 
@@ -346,14 +352,23 @@ export interface PendingApproval {
 }
 
 export interface ChatUsage {
-  /** Codex。レート制限の消費率 */
+  /** Codex。レート制限の消費率。複数の窓があれば最も逼迫した窓のもの（issue #1212） */
   usedPercent: number | undefined;
-  /** 制限がリセットされる時刻（epoch秒）。Claude Codeは割合を返さないためこちらで示す */
+  /**
+   * 制限がリセットされる時刻（epoch秒）。Claude Codeは割合を返さないためこちらで示す。
+   * Codexで上限に達した窓が複数あれば、そのうち最も遅いもの（自動再開の待ち時間の基準）
+   */
   resetsAt: number | undefined;
   /** 制限の種類の表示名（`5時間` など） */
   limitLabel: string | undefined;
-  /** 制限に到達しているか */
+  /** 制限に到達しているか。Codexは既知の枠のどれかの窓が100%以上なら true */
   limited: boolean | undefined;
+  /**
+   * Codex。制限枠ごとの窓（issue #1212）。上の値はここから出した代表値。
+   * `account/rateLimits/updated` は疎な更新なので、枠・窓ごとに前の値へ重ねて保つ。
+   * Claude Codeの `rate_limit_event` には無い
+   */
+  windows?: RateLimitWindowInfo[] | undefined;
 }
 
 /**
@@ -1481,16 +1496,22 @@ export function applyEvent(
     }
 
     case 'account/rateLimits/updated': {
-      const primary = rec(rec(params['rateLimits'])?.['primary']);
-      const usedPercent = primary?.['usedPercent'];
-      const resetsAt = primary?.['resetsAt'];
+      // primary だけでなく secondary、別の limitId の枠も判定に使う（issue #1212）。
+      // 通知は疎なので既知の窓へ重ね、代表値（使用率・上限・リセット時刻）は全窓から出し直す
+      const incoming = readRateLimitSnapshotWindows(params['rateLimits']);
+      if (incoming.length === 0) {
+        return state;
+      }
+      const windows = mergeRateLimitWindows(state.usage?.windows ?? [], incoming);
+      const summary = summarizeRateLimitWindows(windows);
       return {
         ...state,
         usage: {
-          usedPercent: typeof usedPercent === 'number' ? usedPercent : state.usage?.usedPercent,
-          resetsAt: typeof resetsAt === 'number' ? resetsAt : state.usage?.resetsAt,
+          usedPercent: summary.usedPercent,
+          resetsAt: summary.resetsAt,
           limitLabel: state.usage?.limitLabel,
-          limited: typeof usedPercent === 'number' ? usedPercent >= 100 : state.usage?.limited,
+          limited: summary.limited,
+          windows,
         },
       };
     }

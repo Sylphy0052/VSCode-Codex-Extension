@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { UsageSnapshot } from '../../src/codex/usage';
+import { readRateLimits, type UsageSnapshot } from '../../src/codex/usage';
 import { UsageStatusBar } from '../../src/view/usageStatusBar';
 import { __mock } from '../mocks/vscode';
 
 /** 実装が持つ `vscode.StatusBarItem`（モックは `FakeStatusBarItem`）を覗く。 */
 function textOf(bar: InstanceType<typeof UsageStatusBar>): string {
   return (bar as unknown as { item: { text: string } })['item'].text;
+}
+
+function tooltipOf(bar: InstanceType<typeof UsageStatusBar>): string {
+  return (
+    (bar as unknown as { item: { tooltip: { value: string } | undefined } })['item'].tooltip
+      ?.value ?? ''
+  );
 }
 
 function backgroundOf(bar: InstanceType<typeof UsageStatusBar>): string | undefined {
@@ -18,6 +25,7 @@ const snapshot = (usedPercent: number | undefined): UsageSnapshot => ({
   usedPercent,
   windowMinutes: undefined,
   resetsAt: undefined,
+  windows: [],
   planType: undefined,
   creditsBalance: undefined,
   hasCredits: undefined,
@@ -79,5 +87,38 @@ describe('UsageStatusBar のゲージ（issue #756）', () => {
     expect(textOf(bar)).toBe('$(pulse) Codex --');
     bar.update(snapshot(undefined));
     expect(textOf(bar)).toBe('$(pulse) Codex --');
+  });
+});
+
+describe('UsageStatusBar のツールチップ（issue #1212）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('窓ごとに1行出す', () => {
+    const bar = new UsageStatusBar();
+    // 取得応答から組み立てる。窓の配列を直接作ると、読み取り側が primary しか採らなくても
+    // このテストは通ってしまう
+    const fromApi = readRateLimits(
+      {
+        rateLimits: {
+          limitId: 'codex',
+          primary: { usedPercent: 20, windowDurationMins: 300 },
+          secondary: { usedPercent: 100, windowDurationMins: 10080 },
+        },
+      },
+      '2026-09-14T00:00:00Z',
+    );
+    bar.update(fromApi);
+    expect(tooltipOf(bar)).toContain('- 5時間: 20% 使用');
+    expect(tooltipOf(bar)).toContain('- 週次: 100% 使用');
+    // 見出しは最も逼迫した窓
+    expect(textOf(bar)).toContain('100%');
+  });
+
+  it('窓が届いていなければ従来どおり代表値の1行だけ出す', () => {
+    const bar = new UsageStatusBar();
+    bar.update({ ...snapshot(62), windowMinutes: 10080 });
+    expect(tooltipOf(bar)).toContain('- 週次: 62% 使用');
   });
 });

@@ -2603,3 +2603,94 @@ describe('共通の自動再開設定を全会話へ反映する（Issue #1209�
     expect(toggles[toggles.length - 1]?.enabled).toBe(false);
   });
 });
+
+describe('secondaryや別の制限枠も自動再開の判定に使う（Issue #1212）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    __mock.setConfig('codex', {});
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function openChat(): Promise<{
+    connection: FakeAppServerConnection;
+    panel: ReturnType<typeof __mock.lastCreatedPanel>;
+  }> {
+    const { manager, connection } = createManager();
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+    await opened;
+    const panel = __mock.lastCreatedPanel();
+    panel?.webview.simulateMessage({ type: 'ready' });
+    return { connection, panel };
+  }
+
+  /** 理由を運ばない失敗（古いCLIの`turn/failed`）。上限かどうかは`usage.limited`で決まる。 */
+  function failWithoutReason(connection: FakeAppServerConnection): void {
+    connection.notify('turn/started', { threadId: 'thread-A', turn: { id: 'turn-1' } });
+    connection.notify('turn/failed', { threadId: 'thread-A', turn: { id: 'turn-1' } });
+  }
+
+  function scheduledAtOf(panel: { webview: { sent: unknown[] } } | undefined): number | undefined {
+    const messages = stateMessagesOf(panel);
+    const last = messages[messages.length - 1];
+    return (
+      last?.state as unknown as { limitAutoResumeStatus?: { scheduledAt?: number } } | undefined
+    )?.limitAutoResumeStatus?.scheduledAt;
+  }
+
+  it('secondaryだけが上限でも予約が入る', async () => {
+    const { connection, panel } = await openChat();
+    connection.notify('account/rateLimits/updated', {
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: 20, windowDurationMins: 300 },
+        secondary: { usedPercent: 100, windowDurationMins: 10080 },
+      },
+    });
+    failWithoutReason(connection);
+    await flushStatePosts();
+
+    expect(typeof scheduledAtOf(panel)).toBe('number');
+  });
+
+  it('待ち時間はsecondaryのリセット時刻を基準にする', async () => {
+    const { connection, panel } = await openChat();
+    const primaryResetsAt = Math.floor(Date.now() / 1000) + 5 * 60;
+    const secondaryResetsAt = Math.floor(Date.now() / 1000) + 2 * 3600;
+    connection.notify('account/rateLimits/updated', {
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: primaryResetsAt },
+        secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: secondaryResetsAt },
+      },
+    });
+    failWithoutReason(connection);
+    await flushStatePosts();
+
+    // 30秒の猶予（`LIMIT_AUTO_RESUME_GRACE_MS`）を足した時刻。primary基準なら5分後になる
+    expect(scheduledAtOf(panel)).toBe(secondaryResetsAt * 1_000 + 30_000);
+  });
+
+  it('別のlimitIdが上限なら、余裕のある枠の通知が後から来ても予約は消えない', async () => {
+    const { connection, panel } = await openChat();
+    connection.notify('account/rateLimits/updated', {
+      rateLimits: { limitId: 'codex-mini', primary: { usedPercent: 100, windowDurationMins: 300 } },
+    });
+    failWithoutReason(connection);
+    await flushStatePosts();
+    expect(typeof scheduledAtOf(panel)).toBe('number');
+
+    connection.notify('account/rateLimits/updated', {
+      rateLimits: { limitId: 'codex', primary: { usedPercent: 5, windowDurationMins: 300 } },
+    });
+    await flushStatePosts();
+
+    expect(typeof scheduledAtOf(panel)).toBe('number');
+  });
+});
