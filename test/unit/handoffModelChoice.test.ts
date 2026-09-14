@@ -73,12 +73,33 @@ describe('proposeHandoffModelSettings', () => {
   });
 
   it('分類が返ればその見立てで決まる', async () => {
-    stubClassifier(assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, reasons: ['広い'] }));
+    stubClassifier(
+      assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2, reasons: ['広い'] }),
+    );
     const { settings, reasons } = await proposeHandoffModelSettings(current, input, deps());
     expect(settings).toEqual({ model: 'gpt-5.6-astra', effort: 'xhigh' });
     expect(reasons.some((r) => r.startsWith('implementation difficulty=2'))).toBe(true);
     expect(reasons).toContain('分類器: 広い');
     expect(reasons).toContain('confidence=0.90');
+  });
+
+  it('コスト方針=low なら最上位モデルもxhighも選ばない（Issue #1214）', async () => {
+    stubClassifier(assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 }));
+    __mock.setConfig('agent', { 'autoHandoff.costPreset': 'low' });
+    const { settings, reasons } = await proposeHandoffModelSettings(current, input, deps());
+    expect(settings).toEqual({ model: 'gpt-5.6-sol', effort: 'high' });
+    expect(reasons).toContain('コスト方針=low: モデルのティアを1へ制限');
+  });
+
+  it('コスト方針より明示設定が優先する（Issue #1214）', async () => {
+    stubClassifier(assess());
+    __mock.setConfig('agent', {
+      'autoHandoff.costPreset': 'low',
+      'autoHandoff.model': 'gpt-5.6-astra',
+      'autoHandoff.effort': 'xhigh',
+    });
+    const { settings } = await proposeHandoffModelSettings(current, input, deps());
+    expect(settings).toEqual({ model: 'gpt-5.6-astra', effort: 'xhigh' });
   });
 
   it('分類に失敗したら引き継ぎ元を踏襲する（グローバル設定へ戻さない）', async () => {
@@ -192,7 +213,7 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
       asked += 1;
       if (asked === 2) {
         __mock.showInformationMessageAnswer = '引き継ぐ';
-        return assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2 });
+        return assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 });
       }
       return assess();
     });
@@ -232,7 +253,14 @@ describe('probeSafeBoundary（Issue #1090）', () => {
 
   it('switch_safe が false なら profileChanged を見ない', async () => {
     vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
-      assess({ switchSafe: false, switchReason: '議論の途中', scope: 2, ambiguity: 2, risk: 2 }),
+      assess({
+        switchSafe: false,
+        switchReason: '議論の途中',
+        scope: 2,
+        ambiguity: 2,
+        risk: 2,
+        autonomy: 2,
+      }),
     );
     const probe = await probeSafeBoundary(current, input, deps());
     expect(probe).toMatchObject({
@@ -246,7 +274,14 @@ describe('probeSafeBoundary（Issue #1090）', () => {
 
   it('switch_safe が true でモデルが変わるなら profileChanged', async () => {
     vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
-      assess({ switchSafe: true, switchReason: '設計が終わった', scope: 2, ambiguity: 2, risk: 2 }),
+      assess({
+        switchSafe: true,
+        switchReason: '設計が終わった',
+        scope: 2,
+        ambiguity: 2,
+        risk: 2,
+        autonomy: 2,
+      }),
     );
     const probe = await probeSafeBoundary(current, input, deps());
     expect(probe).toMatchObject({
@@ -264,6 +299,7 @@ describe('probeSafeBoundary（Issue #1090）', () => {
         scope: 2,
         ambiguity: 2,
         risk: 2,
+        autonomy: 2,
       }),
     );
     const declared = {

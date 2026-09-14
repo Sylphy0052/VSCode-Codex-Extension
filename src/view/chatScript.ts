@@ -3376,6 +3376,15 @@ export function chatScript(
     );
   }
 
+  // 引き継ぎのコスト方針（Issue #1214）。トグルではなくホスト側のQuickPickを開くだけなので、
+  // ここでは見た目を持たない
+  const handoffPresetButton = el('handoffPresetPicker');
+  if (handoffPresetButton) {
+    handoffPresetButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'handoffCostPreset' }),
+    );
+  }
+
   // Codexは対象をQuickPickで選ばせるためホストへ委ねる。Claude Codeはコマンドとして
   // そのまま送る（CLI側が対話で対象を聞く）
   el('review').addEventListener('click', () => {

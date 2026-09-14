@@ -163,7 +163,11 @@ import {
   describeGate,
   describeProfile,
 } from './handoffTrace';
-import { chooseHandoffModelSettings, probeSafeBoundary } from './handoffModelChoice';
+import {
+  chooseHandoffModelSettings,
+  pickHandoffCostPreset,
+  probeSafeBoundary,
+} from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
@@ -2741,6 +2745,14 @@ export class ClaudeChatViewManager
           entry.autoHandoffStarted = false;
         }
         entry.session.setAutoHandoff(on);
+        return;
+      }
+      if (type === 'handoffCostPreset') {
+        // 設定を選ぶだけで会話へは何も送らない。ループへの割り込み扱いにはしない。
+        // このハンドラは同期のため、QuickPickの完了は待たずに投げっぱなしにする
+        void pickHandoffCostPreset().catch((e: unknown) => {
+          this.log.warn(`コスト方針の選択に失敗しました: ${String(e)}`);
+        });
         return;
       }
       if (type === 'cancelQueued' && typeof m['index'] === 'number') {

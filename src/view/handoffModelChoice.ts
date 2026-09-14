@@ -1,14 +1,21 @@
 import * as vscode from 'vscode';
 import {
+  readAutoHandoffCostPreset,
   readAutoHandoffEffort,
   readAutoHandoffModel,
   readAutoHandoffRouterEnabled,
+  setAutoHandoffCostPreset,
 } from '../config';
 import { effortsFor, type ModelInfo } from '../codex/modelCatalog';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { SessionModelSettings } from '../sessionModelSettings';
 import { classifyHandoff, type HandoffClassifierInput } from './handoffClassifier';
-import { isProfileChange, resolveProfile, type TaskAssessment } from './handoffRouter';
+import {
+  isProfileChange,
+  resolveProfile,
+  type CostPreset,
+  type TaskAssessment,
+} from './handoffRouter';
 
 /**
  * 引き継ぎ先セッションのmodel / effortを決め、**引き継ぐ前に人へ確認する**（Issue #1082）。
@@ -97,6 +104,7 @@ export async function proposeHandoffModelSettings(
         deps.models,
         current,
         deps.fallbackEfforts,
+        readAutoHandoffCostPreset(),
       );
       settings.model = resolved.model;
       settings.effort = resolved.effort;
@@ -129,6 +137,53 @@ export async function proposeHandoffModelSettings(
   }
 
   return { settings, reasons };
+}
+
+/**
+ * コスト方針（Issue #1214）を3択で選ばせ、選んだらグローバル設定へ保存する。
+ *
+ * 入力欄の「…」メニューから呼ぶ。会話単位ではなくグローバルに保存するのは、この設定が
+ * 「いま使用量の上限がどれだけ近いか」という会話の外側の事情で決まるため。タブごとに
+ * 別々の方針を持たせると、上限が近づいたときに開いている会話の数だけ切り替えることになる。
+ *
+ * @returns 選んだ方針。閉じたときは `undefined`（設定は変えない）
+ */
+export async function pickHandoffCostPreset(): Promise<CostPreset | undefined> {
+  const current = readAutoHandoffCostPreset();
+  type PresetItem = vscode.QuickPickItem & { preset: CostPreset };
+  const items: PresetItem[] = (
+    [
+      {
+        label: '低（コスト優先）',
+        description: '最上位モデルとxhighを使わない',
+        detail: '使用量の上限が近いときに選ぶ。モデルはopus / solまで、effortはhighまで',
+        preset: 'low',
+      },
+      {
+        label: '中（常用）',
+        description: '最上位モデルは必要最低限',
+        detail:
+          '最上位モデル（fable / astra）は、広さ・曖昧さ・リスク・自律性がすべて最大のときだけ。effortの制限は無い',
+        preset: 'balanced',
+      },
+      {
+        label: '高（最適優先）',
+        description: '制限なし',
+        detail: '作業の見立てだけでmodel / effortを決める',
+        preset: 'full',
+      },
+    ] as PresetItem[]
+  ).map((item) => (item.preset === current ? { ...item, label: `$(check) ${item.label}` } : item));
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: '自動引き継ぎのコスト方針',
+    placeHolder: '引き継ぎ先のmodel / effortにどこまでコストを掛けるか',
+  });
+  if (picked === undefined) {
+    return undefined;
+  }
+  await setAutoHandoffCostPreset(picked.preset);
+  return picked.preset;
 }
 
 /** モデルとeffortを一覧から選ばせる。途中で閉じたら `undefined`。 */

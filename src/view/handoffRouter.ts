@@ -148,6 +148,41 @@ export const MODEL_TIERS: readonly (readonly string[])[] = [
  */
 export const EFFORT_LADDER: readonly string[] = ['medium', 'high', 'xhigh'];
 
+/**
+ * 引き継ぎ先へどれだけコストを掛けてよいかの方針（Issue #1214）。低い順。
+ *
+ * 見立て（assessment）からティアとeffortを決める規則そのものは変えず、**決まった結果へ
+ * 上限を被せる**。分類器のプロンプトにも触れない。判定の意味（この作業はどれだけ重いか）と
+ * 予算の都合（いまどれだけ払えるか）は別の話で、後者のために前者を歪めると、方針を戻した
+ * ときに元の判定へ戻らなくなる。
+ */
+export const COST_PRESETS = ['low', 'balanced', 'full'] as const;
+export type CostPreset = (typeof COST_PRESETS)[number];
+
+export function isCostPreset(value: unknown): value is CostPreset {
+  return typeof value === 'string' && (COST_PRESETS as readonly string[]).includes(value);
+}
+
+/** プリセットごとのモデルのティア上限。`full` は `MODEL_TIERS` の最上位まで。 */
+const TIER_CAP: Record<CostPreset, number> = { low: 1, balanced: 2, full: 2 };
+
+/**
+ * プリセットごとのeffortの段の上限（`EFFORT_LADDER`の添字）。
+ *
+ * `low` だけ `high` で止める。`balanced` でxhighを残すのは、effortを削るとモデルを落とす
+ * よりも失敗（同じところで詰まって再試行）が増えやすく、結果としてかえって高くつくため。
+ */
+const EFFORT_CAP: Record<CostPreset, number> = { low: 1, balanced: 2, full: 2 };
+
+/**
+ * 最上位のティア（fable / astra）へ上げるための合計スコアの下限。
+ *
+ * `full` は従来どおり6。`balanced` は8——scope / ambiguity / risk / autonomy がすべて2、
+ * つまり「リポジトリ横断で、問題の定義から曖昧で、高リスクで、自律的に進める」ときだけ
+ * 最上位を使う。`low` はティア上限が1のため、この値は使わない。
+ */
+const TIER2_FLOOR: Record<CostPreset, number> = { low: 6, balanced: 8, full: 6 };
+
 /** 引き継ぎ先のmodel / effort。 */
 export interface HandoffProfile {
   model: string;
@@ -220,8 +255,19 @@ export function applyCorrections(
   };
 }
 
-/** difficultyからeffortの段（`EFFORT_LADDER`の添字）へ。補正の最低線も含む。 */
-export function effortIndexFor(assessment: TaskAssessment): { index: number; notes: string[] } {
+/**
+ * difficultyからeffortの段（`EFFORT_LADDER`の添字）へ。補正の最低線も含む。
+ *
+ * 最低線（`effort floor`）と上限（コスト方針）がぶつかったときは上限が勝つ。`low` を
+ * 選んでいる人にとっては、危ない作業だからこそ安く済ませたい局面のはずで、ここで最低線を
+ * 優先すると方針が効かない場面が残る。
+ *
+ * @param preset 省略時は `full`（上限なし）
+ */
+export function effortIndexFor(
+  assessment: TaskAssessment,
+  preset: CostPreset = 'full',
+): { index: number; notes: string[] } {
   const notes: string[] = [];
   let index: number = assessment.difficulty;
   // 深く考えないと危ない種類の作業は、difficultyが低く出てもhigh以上にする
@@ -234,6 +280,11 @@ export function effortIndexFor(assessment: TaskAssessment): { index: number; not
     index = 1;
     notes.push('effort floor: high');
   }
+  const cap = EFFORT_CAP[preset];
+  if (index > cap) {
+    index = cap;
+    notes.push(`コスト方針=${preset}: effortを${EFFORT_LADDER[cap] ?? ''}へ制限`);
+  }
   return { index, notes };
 }
 
@@ -241,13 +292,25 @@ export function effortIndexFor(assessment: TaskAssessment): { index: number; not
  * scope / ambiguity / risk / autonomy の合計（0〜8）からティアへ。
  *
  * 2以下は最下位（局所的で明確な作業）、5以下は中位、それ以上は最上位（リポジトリ横断で
- * 曖昧、または高リスクで自律的）。
+ * 曖昧、または高リスクで自律的）。最上位の下限と上限はコスト方針（`preset`）で動く
+ * （Issue #1214。`balanced` は最上位を合計8のときだけ、`low` は最上位を使わない）。
+ *
+ * @param preset 省略時は `full`（従来どおりの割り当て）
  */
-export function tierFor(assessment: TaskAssessment): { tier: number; score: number } {
+export function tierFor(
+  assessment: TaskAssessment,
+  preset: CostPreset = 'full',
+): { tier: number; score: number; notes: string[] } {
   const score = assessment.scope + assessment.ambiguity + assessment.risk + assessment.autonomy;
-  if (score <= 2) return { tier: 0, score };
-  if (score <= 5) return { tier: 1, score };
-  return { tier: 2, score };
+  const uncapped = score <= 2 ? 0 : score < TIER2_FLOOR[preset] ? 1 : 2;
+  const tier = Math.min(uncapped, TIER_CAP[preset]);
+  const notes: string[] =
+    tier === uncapped ? [] : [`コスト方針=${preset}: モデルのティアを${tier}へ制限`];
+  // 下限の引き上げで落ちた分（`balanced` の合計6・7）も、理由として見えるようにする
+  if (tier === uncapped && preset !== 'full' && score >= TIER2_FLOOR.full && tier < 2) {
+    notes.push(`コスト方針=${preset}: 最上位モデルは合計${TIER2_FLOOR[preset]}以上のときだけ`);
+  }
+  return { tier, score, notes };
 }
 
 /** ティアに合うモデルを一覧から選ぶ。見つからなければ `undefined`（＝据え置き）。 */
@@ -297,6 +360,7 @@ export function effortFor(
  *
  * @param current 引き継ぎ元のmodel / effort。ティアに合うモデルが無いときの据え置き先
  * @param fallbackEfforts カタログからeffort一覧を取れないときの退避先（Claude Codeは `CLAUDE_EFFORTS`）
+ * @param preset コスト方針（Issue #1214）。省略時は `full`（従来どおり）
  */
 export function resolveProfile(
   raw: TaskAssessment,
@@ -304,16 +368,18 @@ export function resolveProfile(
   models: readonly ModelInfo[],
   current: HandoffProfile,
   fallbackEfforts?: readonly string[],
+  preset: CostPreset = 'full',
 ): ResolvedProfile {
   const corrected = applyCorrections(raw, context);
   const assessment = corrected.assessment;
-  const effort = effortIndexFor(assessment);
-  const { tier, score } = tierFor(assessment);
+  const effort = effortIndexFor(assessment, preset);
+  const { tier, score, notes: tierNotes } = tierFor(assessment, preset);
 
   const model = pickModel(models, tier) ?? current.model;
   const reasons = [
     `${assessment.taskType} difficulty=${assessment.difficulty} scope=${assessment.scope} ambiguity=${assessment.ambiguity} risk=${assessment.risk} autonomy=${assessment.autonomy} (model score=${score})`,
     ...corrected.notes,
+    ...tierNotes,
     ...effort.notes,
   ];
   return {
