@@ -466,28 +466,35 @@ export function buildHandoffSessionName(input: HandoffNameInput): string {
 }
 
 /**
- * 名前の本体。**明示的に付けられた名前 > 今の作業 > 直近の指示** の順に探す。
+ * 名前の本体。**明示的に付けられた名前 > 触っていたファイル > 見立て > 直近の指示**
+ * の順に探す。
  *
  * `pinnedName` を最優先にするのは、ワークフローが並列に開いたタスクを見分けるために
  * 人（かオーケストレータ）が意図して付けた名前だから（`deriveTitle` と同じ理由）。
- * その次が分類器の見立てで、これが「今の作業」を最もよく表す。見立ては分類器が動く
- * 契機でしか取れない（残量の閾値・自動圧縮では取れず、`agent.autoHandoff.router` が
- * 無効でも取れない）ため、編集したファイルと直近の指示へ順に落とす。
+ *
+ * 次が編集したファイル名。`topic`（分類器の見立て）より前に置くのは、**見立ての文が
+ * model/effortを決めるために書かれたもの**だからである。「探索が支配的」のような判定の
+ * 根拠は、タブ名の幅（`HANDOFF_NAME_LENGTH`）へ切り詰めると何の作業か判らなくなる。
+ * ファイル名は短く具体的で、並んだタブを見分けるという目的に直接効く。
+ *
+ * 編集の無いターン（調査だけで終わったなど）では `turnEditedFiles` が空になるため、
+ * 見立て、さらに直近の指示へ落とす。見立ては分類器が動く契機でしか取れない（残量の
+ * 閾値・自動圧縮では取れず、`agent.autoHandoff.router` が無効でも取れない）。
  */
 function deriveHandoffNameHead(input: HandoffNameInput): string | undefined {
   const pinned = collapse(input.pinnedName?.replace(PROVIDER_PREFIX, ''));
   if (pinned !== undefined) {
     return stripGeneration(pinned);
   }
-  const topic = collapse(input.topic);
-  if (topic !== undefined) {
-    return topic;
-  }
   const files = (input.editedFiles ?? []).filter((file) => file.trim() !== '');
   const firstFile = files[0];
   if (firstFile !== undefined) {
     const name = baseFileName(firstFile);
     return files.length > 1 ? `${name} ほか${files.length - 1}件` : name;
+  }
+  const topic = collapse(input.topic);
+  if (topic !== undefined) {
+    return topic;
   }
   // 新しい順に見る。引き継ぎ先で最初に入るのは初回プロンプトで、それは指示ではなく
   // 引き継ぎの手続きなので材料から外す（Issue #1228）

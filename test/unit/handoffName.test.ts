@@ -44,13 +44,24 @@ describe('buildHandoffSessionName（issue #1145、材料はissue #1228）', () =
     ).toBe('タスクA (続き3)');
   });
 
-  it('見立てが無ければ編集したファイル名を使う', () => {
+  it('編集したファイル名を見立てより優先する', () => {
     expect(
       buildHandoffSessionName({
         editedFiles: ['src/view/handoff.ts'],
+        topic: '見立て',
         recentUserMessages: ['直近の指示'],
       }),
     ).toBe('handoff.ts (続き2)');
+  });
+
+  it('編集が無ければ分類器の見立てを使う', () => {
+    expect(
+      buildHandoffSessionName({
+        editedFiles: [],
+        topic: '見立て',
+        recentUserMessages: ['直近の指示'],
+      }),
+    ).toBe('見立て (続き2)');
   });
 
   it('編集したファイルが複数あれば件数を添える', () => {
@@ -61,7 +72,7 @@ describe('buildHandoffSessionName（issue #1145、材料はissue #1228）', () =
     ).toBe('handoff.ts ほか2件 (続き2)');
   });
 
-  it('見立ても編集ファイルも無ければ直近のユーザー発言を使う', () => {
+  it('編集ファイルも見立ても無ければ直近のユーザー発言を使う', () => {
     expect(buildHandoffSessionName({ recentUserMessages: ['最初の指示', '直近の指示'] })).toBe(
       '直近の指示 (続き2)',
     );
