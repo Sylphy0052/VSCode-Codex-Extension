@@ -799,6 +799,17 @@ export interface TaskSnapshot {
    * 複数のタスクへ割り当てられるため）。
    */
   role: TeamRole | undefined;
+  /**
+   * 解決済みのモデルとreasoning effort（Issue #1035）。`resolveTask`（`workflow.ts`）が
+   * 「タスクが明示 > タスクの役割 > defaults が明示 > defaults の役割」の優先順で解いた
+   * 結果をそのまま写す。**Viewは役割プリセットを引き直さない**——同じ解決規則を2箇所に
+   * 置くと、優先順を変えたときに片方だけが古いままになる（Issue #104 と同じ形）。
+   *
+   * どこにも指定が無ければ `undefined` で、その場合は拡張機能の設定（CLI側の既定）に従う。
+   * 役割は`model`/`effort`の既定値だけを決め、権限には関与しない（design.md §16.44）。
+   */
+  model: string | undefined;
+  effort: string | undefined;
   dependsOn: readonly string[];
   provider: Provider;
   state: TaskState;

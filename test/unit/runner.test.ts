@@ -36,6 +36,7 @@ import {
 } from '../../src/orchestrator/orchestratorSession';
 import type { RoadmapFileSystemPort } from '../../src/orchestrator/roadmap';
 import { formatPathList } from '../../src/orchestrator/runnerWorkingDirectory';
+import { roleDefaults } from '../../src/orchestrator/rolePresets';
 import type {
   PseudoWorktreeDirEntry,
   PseudoWorktreeFileStat,
@@ -13575,5 +13576,46 @@ tasks:
 
     expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone + 1);
     expect(t1.runLoopCalls.at(-1)?.initialPrompt).toContain('必須ではない.txt');
+  });
+});
+
+describe('WorkflowRunner のスナップショットに解決済みの model / effort を載せる（Issue #1035）', () => {
+  const YAML = `
+name: model-effort-snapshot
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+    role: architect
+    model: explicit-model
+    effort: low
+  - id: T2
+    prompt: p
+    done: d
+    role: architect
+  - id: T3
+    prompt: p
+    done: d
+`;
+
+  it('明示値・役割の既定値・未指定をそれぞれ解決結果のまま写す', async () => {
+    const { runner } = createHarness(YAML);
+    const result = await runner.start('/repo/.agents/workflows/model-effort.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const tasks = runner.getSnapshot(runId)?.tasks ?? [];
+    const byId = (id: string) => tasks.find((t) => t.id === id);
+
+    // タスクが明示した値は役割より強い
+    expect(byId('T1')?.model).toBe('explicit-model');
+    expect(byId('T1')?.effort).toBe('low');
+    // 役割だけのタスクは役割の既定値（期待値はプリセットから引き、モデル名を直書きしない）
+    const architect = roleDefaults('architect', 'codex');
+    expect(byId('T2')?.model).toBe(architect.model);
+    expect(byId('T2')?.effort).toBe(architect.effort);
+    // どこにも指定が無ければ undefined（拡張機能の設定に従う）
+    expect(byId('T3')?.model).toBeUndefined();
+    expect(byId('T3')?.effort).toBeUndefined();
   });
 });
