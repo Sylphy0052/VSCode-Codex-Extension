@@ -2077,7 +2077,7 @@ async function planWorkflowCommand(
 }
 
 /**
- * チームモードを開始する（design.md §16.44、issue #693、`agent.workflows.team`）。
+ * チームモードでワークフローを生成する（design.md §16.44、issue #693、`agent.workflows.team`）。
  *
  * 生成経路は`planWorkflowFromGoalCommand`と同じで、違いはタスクへ`role`を書かせることだけ。
  * この入口はゴール文からの生成に限る——ロードマップからチームモードで生成する経路は

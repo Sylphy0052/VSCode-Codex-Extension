@@ -531,7 +531,7 @@
       },
       {
         "command": "agent.workflows.team",
-        "title": "チームモードを開始…",
+        "title": "チームモードでワークフローを生成…",
         "category": "Agent",
         "icon": "$(organization)"
       },

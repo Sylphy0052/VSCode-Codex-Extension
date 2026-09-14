@@ -1276,7 +1276,7 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
       };
     case 'teamWorkflow':
       return {
-        ariaLabel: 'チームモードを開始',
+        ariaLabel: 'チームモードでワークフローを生成',
         title: 'ゴールを役割ごとのセッションへ分けたワークフローを作成します',
         hidden: false,
         pressed: false,

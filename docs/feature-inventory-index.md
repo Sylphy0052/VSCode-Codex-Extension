@@ -55,7 +55,7 @@
 | `agent.workflows.convertRoadmap` | ファイルからロードマップを作成…             | [F27](feature-inventory.md#f27) |
 | `agent.workflows.view`           | ワークフローViewを開く                      | [F36](feature-inventory.md#f36) |
 | `agent.workflows.plan`           | ゴール文からワークフローを生成…             | [F26](feature-inventory.md#f26) |
-| `agent.workflows.team`           | チームモードを開始…                         | [F32](feature-inventory.md#f32) |
+| `agent.workflows.team`           | チームモードでワークフローを生成…           | [F32](feature-inventory.md#f32) |
 | `agent.sendSelectionToChat`      | Agentへ送る                                 | [F05](feature-inventory.md#f05) |
 
 ## ビュー・キーバインド

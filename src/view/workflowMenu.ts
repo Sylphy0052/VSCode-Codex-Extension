@@ -39,7 +39,7 @@ const PLAN: WorkflowMenuEntry = {
  * 役割のプリセットで決まるため（`rolePresets.ts`）で、ふつうの生成と混ぜたくないから。
  */
 const TEAM: WorkflowMenuEntry = {
-  label: '$(organization) チームモードを開始…',
+  label: '$(organization) チームモードでワークフローを生成…',
   description: 'ゴールを役割ごとのセッションへ分けたYAMLを作ります（自動では実行しません）',
   command: 'agent.workflows.team',
 };

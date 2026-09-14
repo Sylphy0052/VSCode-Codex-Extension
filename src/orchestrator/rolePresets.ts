@@ -136,8 +136,8 @@ export function roleDefaults(role: TeamRole, provider: Provider): RoleDefaults {
 /**
  * `escalation` 段のモデル（Codex: Sol / Claude: Fable）。
  *
- * 既定値としては使わないが、「詰まったときに何へ上げればよいか」を人とオーケストレーターへ
- * 示すために公開する（ワークフローViewの注記・`planner.ts` のプロンプト）。
+ * 既定値としては使わない。呼び出し元は `planner.ts` の `buildRoleDescription` だけで、
+ * 分解セッションへ渡すプロンプトに「詰まりそうなタスクに限り明示してよいモデル」として入れる。
  */
 export function escalationModel(provider: Provider): string {
   return TIER_MODELS.escalation[provider];
