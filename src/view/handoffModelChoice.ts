@@ -151,29 +151,32 @@ export async function proposeHandoffModelSettings(
 export async function pickHandoffCostPreset(): Promise<CostPreset | undefined> {
   const current = readAutoHandoffCostPreset();
   type PresetItem = vscode.QuickPickItem & { preset: CostPreset };
-  const items: PresetItem[] = (
-    [
-      {
-        label: '低（コスト優先）',
-        description: '最上位モデルとxhighを使わない',
-        detail: '使用量の上限が近いときに選ぶ。モデルはopus / solまで、effortはhighまで',
-        preset: 'low',
-      },
-      {
-        label: '中（常用）',
-        description: '最上位モデルは必要最低限',
-        detail:
-          '最上位モデル（fable / astra）は、広さ・曖昧さ・リスク・自律性がすべて最大のときだけ。effortの制限は無い',
-        preset: 'balanced',
-      },
-      {
-        label: '高（最適優先）',
-        description: '制限なし',
-        detail: '作業の見立てだけでmodel / effortを決める',
-        preset: 'full',
-      },
-    ] as PresetItem[]
-  ).map((item) => (item.preset === current ? { ...item, label: `$(check) ${item.label}` } : item));
+  const choices: PresetItem[] = [
+    {
+      label: '低（コスト優先）',
+      description: '最上位モデルとxhighを使わない',
+      detail: '使用量の上限が近いときに選ぶ。モデルはopus / solまで、effortはhighまで',
+      preset: 'low',
+    },
+    {
+      label: '中（常用）',
+      description: '最上位モデルは必要最低限',
+      detail:
+        '最上位モデル（fable / astra）は、広さ・曖昧さ・リスク・自律性がすべて最大のときだけ。effortの制限は無い',
+      preset: 'balanced',
+    },
+    {
+      label: '高（最適優先）',
+      description: '制限なし',
+      detail: '作業の見立てだけでmodel / effortを決める',
+      preset: 'full',
+    },
+  ];
+  // いま選ばれているものに印を付ける（QuickPickは初期選択を持たないため、印が無いと
+  // 「今どれか」を確かめるためだけに設定を開くことになる）
+  const items = choices.map((item) =>
+    item.preset === current ? { ...item, label: `$(check) ${item.label}` } : item,
+  );
 
   const picked = await vscode.window.showQuickPick(items, {
     title: '自動引き継ぎのコスト方針',
