@@ -855,6 +855,18 @@
             "balanced",
             "full"
           ],
+          "default": "balanced",
+          "scope": "window",
+          "deprecationMessage": "agent.autoHandoff.costPreset.codex / agent.autoHandoff.costPreset.claude に分割しました（Issue #1216）。この値は両者が未設定のときの初期値としてのみ使われます。",
+          "markdownDescription": "（非推奨）`agent.autoHandoff.costPreset.codex` / `.claude` に分割済み。両方が未設定のときの初期値としてのみ使う。"
+        },
+        "agent.autoHandoff.costPreset.codex": {
+          "type": "string",
+          "enum": [
+            "low",
+            "balanced",
+            "full"
+          ],
           "enumDescriptions": [
             "低（コスト優先）: 最上位モデル（fable / astra）とxhighを使わない",
             "中（常用）: 最上位モデルは広さ・曖昧さ・リスク・自律性がすべて最大のときだけ",
@@ -862,7 +874,23 @@
           ],
           "default": "balanced",
           "scope": "window",
-          "markdownDescription": "自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はモデルをopus / solまで、effortをhighまでに制限する（使用量の上限が近いとき向け）。`balanced`（既定）はeffortを制限せず、最上位モデルはscope / ambiguity / risk / autonomyがすべて2のときだけ使う。`full` は制限を掛けない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。Codex/Claude Code両画面共通。"
+          "markdownDescription": "Codex画面での自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214、CLIごとに分けたのはIssue #1216）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はモデルをopus / solまで、effortをhighまでに制限する（使用量の上限が近いとき向け）。`balanced`（既定）はeffortを制限せず、最上位モデルはscope / ambiguity / risk / autonomyがすべて2のときだけ使う。`full` は制限を掛けない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。未設定のときは旧設定 `agent.autoHandoff.costPreset` の値を初期値として使う。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。"
+        },
+        "agent.autoHandoff.costPreset.claude": {
+          "type": "string",
+          "enum": [
+            "low",
+            "balanced",
+            "full"
+          ],
+          "enumDescriptions": [
+            "低（コスト優先）: 最上位モデル（fable / astra）とxhighを使わない",
+            "中（常用）: 最上位モデルは広さ・曖昧さ・リスク・自律性がすべて最大のときだけ",
+            "高（最適優先）: 作業の見立てだけでmodel/effortを決める"
+          ],
+          "default": "balanced",
+          "scope": "window",
+          "markdownDescription": "Claude Code画面での自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214、CLIごとに分けたのはIssue #1216）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はモデルをopus / solまで、effortをhighまでに制限する（使用量の上限が近いとき向け）。`balanced`（既定）はeffortを制限せず、最上位モデルはscope / ambiguity / risk / autonomyがすべて2のときだけ使う。`full` は制限を掛けない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。未設定のときは旧設定 `agent.autoHandoff.costPreset` の値を初期値として使う。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。"
         },
         "agent.autoHandoff.router": {
           "type": "boolean",

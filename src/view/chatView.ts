@@ -1838,7 +1838,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'handoffCostPreset') {
         // 設定を選ぶだけで会話へは何も送らない。ループへの割り込み扱いにはしない
-        await pickHandoffCostPreset();
+        await pickHandoffCostPreset('codex');
         return;
       }
       if (type === 'review') {

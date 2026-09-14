@@ -402,6 +402,14 @@ function setNested(values: Record<string, unknown>, key: string, value: unknown)
 function makeWorkspaceConfiguration(section: string): {
   get<T>(key: string, defaultValue?: T): T | undefined;
   update(key: string, value: unknown, target?: unknown): Promise<void>;
+  inspect<T>(key: string):
+    | {
+        key: string;
+        globalValue: T | undefined;
+        workspaceValue: T | undefined;
+        workspaceFolderValue: T | undefined;
+      }
+    | undefined;
 } {
   return {
     get<T>(key: string, defaultValue?: T): T | undefined {
@@ -414,6 +422,18 @@ function makeWorkspaceConfiguration(section: string): {
       setNested(values, key, value);
       state.configs.set(section, values);
       return Promise.resolve();
+    },
+    // このモックはスコープ（global/workspace/workspaceFolder）を区別せず1段のmapへ保存する
+    // ため、設定済みの値は一律 `globalValue` として返す（実際のVSCodeとは異なる）
+    inspect<T>(key: string) {
+      const values = state.configs.get(section) ?? {};
+      const value = getNested(values, key) as T | undefined;
+      return {
+        key,
+        globalValue: value,
+        workspaceValue: undefined,
+        workspaceFolderValue: undefined,
+      };
     },
   };
 }

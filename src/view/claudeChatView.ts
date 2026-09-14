@@ -2750,7 +2750,7 @@ export class ClaudeChatViewManager
       if (type === 'handoffCostPreset') {
         // 設定を選ぶだけで会話へは何も送らない。ループへの割り込み扱いにはしない。
         // このハンドラは同期のため、QuickPickの完了は待たずに投げっぱなしにする
-        void pickHandoffCostPreset().catch((e: unknown) => {
+        void pickHandoffCostPreset('claude').catch((e: unknown) => {
           this.log.warn(`コスト方針の選択に失敗しました: ${String(e)}`);
         });
         return;
