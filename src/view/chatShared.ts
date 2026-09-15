@@ -702,28 +702,28 @@ export async function handleOpenDiffEditor(
   itemId: unknown,
   diffIndex: unknown,
   cwd: string | undefined,
-): Promise<void> {
+): Promise<OpenedReviewDiff | undefined> {
   const diff = resolveDiffTarget(items, itemId, diffIndex);
   if (diff === undefined) {
-    return;
+    return undefined;
   }
   const plan = planDiffActions(diff);
   if (!plan.openDiff) {
     void vscode.window.showWarningMessage(
       `この差分は復元できないため開けません（ハンク見出しが無い、またはコンテキストが足りない可能性があります）: ${diff.path}`,
     );
-    return;
+    return undefined;
   }
   const resolved = await resolveDiffFileForAction(diff, cwd);
   if (!resolved.ok) {
     void vscode.window.showWarningMessage(resolved.error);
-    return;
+    return undefined;
   }
   const currentContent = await readCurrentDiffContent(fs, diff, resolved.absolutePath);
   const computed = computeDiffContents(diff, currentContent);
   if (!computed.ok) {
     void vscode.window.showWarningMessage(`差分を開けません: ${computed.error}`);
-    return;
+    return undefined;
   }
   const language = await guessDiffLanguageId(resolved.absolutePath);
   const beforeDoc = await openVirtualDiffDocument(computed.before, language);
@@ -737,6 +737,65 @@ export async function handleOpenDiffEditor(
     afterUri,
     `${diff.path}（変更前 ↔ 変更後）`,
   );
+  return {
+    original: beforeDoc.uri,
+    modified: afterUri,
+    after: computed.after,
+    changedLineRanges: changedLineRanges(diff, computed.after),
+  };
+}
+
+/** 拡張機能が開いたDiffの変更後側で、レビュー対象にできる行範囲（0始まり、終端を含む）。 */
+export interface OpenedReviewDiff {
+  /** 拡張機能が生成した変更前ドキュメント。SCMの同一ファイルDiffと区別する。 */
+  original: vscode.Uri;
+  modified: vscode.Uri;
+  /** Diffを開いた時点の変更後本文。送信前に完全一致を検査する。 */
+  after: string;
+  changedLineRanges: readonly { start: number; end: number }[];
+}
+
+/** unified diffの`+`行だけを変更後側の行番号へ写す。削除だけのハンクは対象にしない。 */
+function changedLineRanges(
+  diff: FileDiff,
+  after: string,
+): readonly { start: number; end: number }[] {
+  if (diff.kind === 'add') {
+    const last = Math.max(0, after.split('\n').length - 1);
+    return [{ start: 0, end: last }];
+  }
+  const ranges: Array<{ start: number; end: number }> = [];
+  let currentLine: number | undefined;
+  let active: { start: number; end: number } | undefined;
+  const flush = (): void => {
+    if (active !== undefined) ranges.push(active);
+    active = undefined;
+  };
+  for (const line of diff.diff.split('\n')) {
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
+    if (header !== null) {
+      flush();
+      currentLine = Number(header[1]) - 1;
+      continue;
+    }
+    if (currentLine === undefined || line.startsWith('\\')) continue;
+    if (line.startsWith('+')) {
+      if (active === undefined || active.end + 1 !== currentLine) {
+        flush();
+        active = { start: currentLine, end: currentLine };
+      } else {
+        active.end = currentLine;
+      }
+      currentLine += 1;
+    } else if (line.startsWith(' ')) {
+      flush();
+      currentLine += 1;
+    } else if (!line.startsWith('-')) {
+      flush();
+    }
+  }
+  flush();
+  return ranges;
 }
 
 /**
@@ -1128,6 +1187,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 4h10M3 8h10M3 12h6"/></svg>',
   plan: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="2.5" width="10" height="11.5" rx="1"/><path d="M6 1.5h4v1.6H6z" fill="currentColor" stroke="none"/><path d="M5.5 7.2l1.3 1.3L9.6 5.7M5.5 10.8h5"/></svg>',
   fast: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8.6 1.3 3 9h4l-.9 5.7L13 7H9z" fill="currentColor"/></svg>',
+  localReview:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2.5h11v8h-7l-3.5 3v-11z"/><path d="M5 5.2h6M5 7.8h4"/></svg>',
   review:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="6.8" cy="6.8" r="4.3"/><path d="M10.1 10.1 14 14"/></svg>',
   export:
@@ -1251,6 +1312,14 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: true,
         pressed: true,
         icon: COMPOSER_ICONS.fast,
+      };
+    case 'localReview':
+      return {
+        ariaLabel: '変更をレビュー',
+        title: 'この会話の変更をレビューします',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.localReview,
       };
     case 'review':
       return {
