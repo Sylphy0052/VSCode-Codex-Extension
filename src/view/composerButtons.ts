@@ -15,6 +15,7 @@ export const COMPOSER_BUTTON_IDS = [
   'planToggle',
   'fastToggle',
   'review',
+  'localReview',
   'exportTranscript',
   'workflowMenu',
   'teamWorkflow',

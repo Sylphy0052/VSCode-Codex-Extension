@@ -428,9 +428,10 @@ describe('applyEvent', () => {
   });
 
   describe('制限枠ごとの窓（issue #1212）', () => {
-    const notify = (
-      rateLimits: Record<string, unknown>,
-    ): [string, Record<string, unknown>] => ['account/rateLimits/updated', { rateLimits }];
+    const notify = (rateLimits: Record<string, unknown>): [string, Record<string, unknown>] => [
+      'account/rateLimits/updated',
+      { rateLimits },
+    ];
 
     it('secondaryだけが上限でも上限として扱い、リセット時刻はsecondaryのもの', () => {
       const state = feed(initialChatState, [

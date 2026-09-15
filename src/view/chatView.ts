@@ -1766,13 +1766,21 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'openDiffEditor') {
         // 差分の見出し行「差分を開く」（issue #291）
-        await handleOpenDiffEditor(
+        const opened = await handleOpenDiffEditor(
           this.fs,
           entry.session.getState().items,
           m['itemId'],
           m['diffIndex'],
           entry.cwd,
         );
+        if (opened !== undefined && entry.session.threadId !== undefined) {
+          await vscode.commands.executeCommand('agent.localReview.registerDiff', {
+            provider: 'codex',
+            threadId: entry.session.threadId,
+            cwd: entry.cwd,
+            ...opened,
+          });
+        }
         return;
       }
       if (type === 'revertDiff') {
@@ -1850,6 +1858,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'handoffCostPreset') {
         // 設定を選ぶだけで会話へは何も送らない。ループへの割り込み扱いにはしない
         await pickHandoffCostPreset('codex');
+        return;
+      }
+      if (type === 'localReview') {
+        const threadId = entry.session.threadId;
+        if (threadId !== undefined) {
+          await vscode.commands.executeCommand('agent.localReview.start', {
+            provider: 'codex',
+            threadId,
+            cwd: entry.cwd,
+          });
+        }
         return;
       }
       if (type === 'review') {
@@ -2455,6 +2474,30 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 作業記録（`reportActivity`）には変換前の `text`（テンプレート展開前）を残す
    * （design.md §16.12）。未設定なら従来通り同じ文字列を送信・記録する。
    */
+  /** Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。 */
+  async sendReviewFeedback(
+    threadId: string,
+    text: string,
+  ): Promise<'sent' | 'sessionUnavailable' | 'deliveryFailed'> {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
+      return 'sessionUnavailable';
+    }
+    this.cancelLimitAutoResume(entry);
+    this.clearLimitAutoResumeSuppression(entry);
+    entry.loop.noteUserAction();
+    try {
+      const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+      await entry.session.send(sent, this.configFor(entry));
+      this.reportActivity(entry, text);
+      this.refreshSettings();
+      return 'sent';
+    } catch (e) {
+      this.reportError(e);
+      return 'deliveryFailed';
+    }
+  }
+
   private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
     const toSend = entry.promptTransform?.(text) ?? text;
     try {

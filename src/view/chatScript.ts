@@ -3387,6 +3387,8 @@ export function chatScript(
 
   // Codexは対象をQuickPickで選ばせるためホストへ委ねる。Claude Codeはコマンドとして
   // そのまま送る（CLI側が対話で対象を聞く）
+  el('localReview').addEventListener('click', () => vscode.postMessage({ type: 'localReview' }));
+
   el('review').addEventListener('click', () => {
     if (REVIEW.mode === 'command') {
       vscode.postMessage({ type: 'send', text: '/' + REVIEW.commandName });
