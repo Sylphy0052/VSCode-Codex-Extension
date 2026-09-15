@@ -156,6 +156,14 @@ import {
   buildAttentionItems,
   type AttentionTarget,
 } from './view/attentionIndex';
+import {
+  isChangedLineSelection,
+  noReviewCandidateMessage,
+  reviewCandidates,
+  reviewDeliveryFailureMessage,
+  reviewMessages,
+  type LocalReviewSession,
+} from './view/localReview';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
@@ -171,7 +179,6 @@ import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import { WorkflowViewManager } from './view/workflowView';
-import { isWithinAnyRoot, isWithinRoot } from './util/paths';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
 
@@ -827,65 +834,37 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         editor.selection.end.line > editor.selection.start.line
           ? editor.selection.end.line - 1
           : editor.selection.end.line;
-      const selectedLinesAreChanged = review.changedLineRanges.some(
-        (range) => editor.selection.start.line >= range.start && selectionEnd <= range.end,
+      const selectedLinesAreChanged = isChangedLineSelection(
+        editor.selection.start.line,
+        selectionEnd,
+        review.changedLineRanges,
       );
       if (!selectedLinesAreChanged) {
         void vscode.window.showWarningMessage('変更後の行だけを選択してください');
         return;
       }
-      const allReviewCandidates = () => [
+      const allReviewCandidates = (): LocalReviewSession[] => [
         ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
         ...claudeChat
           .managedSessions()
           .map((session) => ({ ...session, provider: 'claude' as const })),
       ];
-      const reviewCandidates = (): Array<{
-        provider: 'codex' | 'claude';
-        threadId: string;
-        title: string;
-        cwd: string;
-      }> =>
-        allReviewCandidates().filter(
-          (session): session is typeof session & { cwd: string } =>
-            session.activity === 'running' &&
-            !(
-              session.provider === review.source.provider &&
-              session.threadId === review.source.threadId
-            ) &&
-            review.source.cwd !== undefined &&
-            session.cwd !== undefined &&
-            isWithinAnyRoot(session.cwd, workspaceFolderPaths()) &&
-            isWithinRoot(session.cwd, review.source.cwd) &&
-            isWithinRoot(review.source.cwd, session.cwd) &&
-            isWithinAnyRoot(editor.document.uri.fsPath, [session.cwd]),
+      const candidates = () =>
+        reviewCandidates(
+          allReviewCandidates(),
+          review.source,
+          workspaceFolderPaths(),
+          editor.document.uri.fsPath,
         );
-      const candidates = reviewCandidates();
-      if (candidates.length === 0) {
-        const hasDifferentWorktree = allReviewCandidates().some(
-          (session) =>
-            session.activity === 'running' &&
-            !(
-              session.provider === review.source.provider &&
-              session.threadId === review.source.threadId
-            ) &&
-            session.cwd !== undefined &&
-            isWithinAnyRoot(session.cwd, workspaceFolderPaths()) &&
-            review.source.cwd !== undefined &&
-            !(
-              isWithinRoot(session.cwd, review.source.cwd) &&
-              isWithinRoot(review.source.cwd, session.cwd)
-            ),
-        );
+      const availableCandidates = candidates();
+      if (availableCandidates.length === 0) {
         void vscode.window.showWarningMessage(
-          hasDifferentWorktree
-            ? '同じworkspaceに実行中の別会話はありますが、worktreeが一致しません'
-            : '同じworkspaceとworktreeにある実行中の別会話がありません',
+          noReviewCandidateMessage(allReviewCandidates(), review.source, workspaceFolderPaths()),
         );
         return;
       }
       const target = await vscode.window.showQuickPick(
-        candidates.map((session) => ({
+        availableCandidates.map((session) => ({
           label: session.title,
           description: session.provider === 'codex' ? 'Codex' : 'Claude Code',
           session,
@@ -906,23 +885,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return;
       }
       const range = editor.selection;
-      const payload = [
-        'レビュー指摘です。次の変更後の範囲を確認してください。',
-        `ファイル: ${workspaceRelativeDisplayPath(editor.document.uri)}`,
-        `行: ${range.start.line + 1}-${range.end.line + 1}`,
-        `指摘: ${comment.trim()}`,
-        '```',
+      const { payload, confirmation } = reviewMessages({
+        provider: target.session.provider,
+        file: workspaceRelativeDisplayPath(editor.document.uri),
+        startLine: range.start.line + 1,
+        endLine: range.end.line + 1,
+        comment: comment.trim(),
         selected,
-        '```',
-      ].join('\n');
-      const confirmation = [
-        `${target.session.provider === 'codex' ? 'Codex' : 'Claude Code'}の会話へ次のレビュー指摘を送信しますか？`,
-        `ファイル: ${workspaceRelativeDisplayPath(editor.document.uri)}`,
-        `行: ${range.start.line + 1}-${range.end.line + 1}`,
-        `指摘: ${comment.trim()}`,
-        '引用:',
-        selected,
-      ].join('\n');
+      });
       const confirmed = await vscode.window.showWarningMessage(
         confirmation,
         { modal: true },
@@ -935,7 +905,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         !editor.document.isDirty &&
         editor.document.getText() === review.after &&
         editor.document.getText(editor.selection) === selected &&
-        reviewCandidates().some(
+        candidates().some(
           (candidate) =>
             candidate.provider === target.session.provider &&
             candidate.threadId === target.session.threadId,
@@ -951,13 +921,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           ? await chat.sendReviewFeedback(target.session.threadId, payload)
           : claudeChat.sendReviewFeedback(target.session.threadId, payload);
       if (sent === 'sessionUnavailable') {
-        void vscode.window.showWarningMessage(
-          '送信先の会話は終了したか、送信できる状態ではありません',
-        );
+        void vscode.window.showWarningMessage(reviewDeliveryFailureMessage(sent));
       } else if (sent === 'deliveryFailed') {
-        void vscode.window.showWarningMessage(
-          'providerへの送信に失敗しました。接続状態を確認してからもう一度送信してください',
-        );
+        void vscode.window.showWarningMessage(reviewDeliveryFailureMessage(sent));
       }
     }),
     vscode.window.onDidChangeActiveTextEditor(refreshLocalReviewContext),
