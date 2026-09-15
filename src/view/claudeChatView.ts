@@ -2439,6 +2439,26 @@ export class ClaudeChatViewManager
    * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
    * 作業記録には変換前の `text`（テンプレート展開前）を残す（design.md §16.12）。
    */
+  /** Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。 */
+  sendReviewFeedback(threadId: string, text: string): boolean {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
+      return false;
+    }
+    this.cancelLimitAutoResume(entry);
+    this.clearLimitAutoResumeSuppression(entry);
+    entry.loop.noteUserAction();
+    try {
+      const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+      this.dispatch(entry, sent, true, text);
+      this.refreshSettings(entry);
+      return true;
+    } catch (e) {
+      this.reportError(e);
+      return false;
+    }
+  }
+
   private sendFromLoop(entry: ClaudePanel, text: string): void {
     const toSend = entry.promptTransform?.(text) ?? text;
     try {
@@ -2547,7 +2567,13 @@ export class ClaudeChatViewManager
           m['itemId'],
           m['diffIndex'],
           entry.cwd,
-        );
+        ).then((opened) => {
+          if (opened !== undefined && entry.session.threadId !== undefined) {
+            void vscode.commands.executeCommand('agent.localReview.registerDiff', {
+              provider: 'claude', threadId: entry.session.threadId, cwd: entry.cwd, ...opened,
+            });
+          }
+        });
         return;
       }
       if (type === 'revertDiff') {
@@ -2597,6 +2623,13 @@ export class ClaudeChatViewManager
       }
       if (type === 'recap') {
         this.recap(entry);
+        return;
+      }
+      if (type === 'localReview') {
+        const threadId = entry.session.threadId;
+        if (threadId !== undefined) {
+          void vscode.commands.executeCommand('agent.localReview.start', { provider: 'claude', threadId, cwd: entry.cwd });
+        }
         return;
       }
       if (type === 'autocompactWindow') {
