@@ -11,7 +11,7 @@
     "url": "https://github.com/Sylphy0052/VSCode-Codex-Extension.git"
   },
   "engines": {
-    "node": ">=20",
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
     "vscode": "^1.90.0"
   },
   "extensionKind": [
@@ -44,6 +44,10 @@
         {
           "id": "codex.sessions",
           "name": "履歴"
+        },
+        {
+          "id": "agent.attention",
+          "name": "要対応"
         }
       ]
     },
@@ -163,6 +167,11 @@
           "command": "agent.sendSelectionToChat",
           "when": "editorHasSelection",
           "group": "9_agent@1"
+        },
+        {
+          "command": "agent.localReview.send",
+          "when": "editorHasSelection && agent.localReviewActive",
+          "group": "9_agent@2"
         }
       ],
       "view/item/context": [
@@ -290,6 +299,18 @@
         {
           "command": "agent.openPresetChat",
           "when": "agent.hasSessionPresets"
+        },
+        {
+          "command": "agent.attention.open",
+          "when": "false"
+        },
+        {
+          "command": "agent.localReview.start",
+          "when": "false"
+        },
+        {
+          "command": "agent.localReview.send",
+          "when": "false"
         }
       ]
     },
@@ -550,6 +571,21 @@
         "command": "agent.sendSelectionToChat",
         "title": "Agentへ送る",
         "category": "Agent"
+      },
+      {
+        "command": "agent.attention.open",
+        "title": "要対応を開く",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.localReview.start",
+        "title": "この会話の変更をレビュー",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.localReview.send",
+        "title": "レビュー指摘をAgentへ送る",
+        "category": "Agent"
       }
     ],
     "configuration": {
@@ -759,6 +795,7 @@
               "planToggle",
               "fastToggle",
               "review",
+              "localReview",
               "exportTranscript",
               "workflowMenu",
               "teamWorkflow",
@@ -780,6 +817,7 @@
               "計画モード（読み取りだけに絞る）を切り替える",
               "高速モード（Fast mode）を切り替える",
               "コードレビューを実行する",
+              "この会話の変更をレビューする",
               "会話全体をMarkdownとして取り出す（エクスポート）",
               "ワークフローの実行・View・生成・停止を選ぶ",
               "チームモードのワークフローを作成する",

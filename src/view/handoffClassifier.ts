@@ -41,7 +41,8 @@ import {
  */
 export const CLASSIFIER_MODELS: Record<HeadlessProvider, string> = {
   claude: 'sonnet',
-  codex: 'terra',
+  // CodexはClaude Codeのような短縮名を受け付けないため、正式なモデルslugを渡す。
+  codex: 'gpt-5.6-terra',
 };
 
 /**
