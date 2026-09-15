@@ -2440,10 +2440,13 @@ export class ClaudeChatViewManager
    * 作業記録には変換前の `text`（テンプレート展開前）を残す（design.md §16.12）。
    */
   /** Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。 */
-  sendReviewFeedback(threadId: string, text: string): boolean {
+  sendReviewFeedback(
+    threadId: string,
+    text: string,
+  ): 'sent' | 'sessionUnavailable' | 'deliveryFailed' {
     const entry = this.panels.get(threadId);
     if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
-      return false;
+      return 'sessionUnavailable';
     }
     this.cancelLimitAutoResume(entry);
     this.clearLimitAutoResumeSuppression(entry);
@@ -2452,10 +2455,10 @@ export class ClaudeChatViewManager
       const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
       this.dispatch(entry, sent, true, text);
       this.refreshSettings(entry);
-      return true;
+      return 'sent';
     } catch (e) {
       this.reportError(e);
-      return false;
+      return 'deliveryFailed';
     }
   }
 
@@ -2570,7 +2573,10 @@ export class ClaudeChatViewManager
         ).then((opened) => {
           if (opened !== undefined && entry.session.threadId !== undefined) {
             void vscode.commands.executeCommand('agent.localReview.registerDiff', {
-              provider: 'claude', threadId: entry.session.threadId, cwd: entry.cwd, ...opened,
+              provider: 'claude',
+              threadId: entry.session.threadId,
+              cwd: entry.cwd,
+              ...opened,
             });
           }
         });
@@ -2628,7 +2634,11 @@ export class ClaudeChatViewManager
       if (type === 'localReview') {
         const threadId = entry.session.threadId;
         if (threadId !== undefined) {
-          void vscode.commands.executeCommand('agent.localReview.start', { provider: 'claude', threadId, cwd: entry.cwd });
+          void vscode.commands.executeCommand('agent.localReview.start', {
+            provider: 'claude',
+            threadId,
+            cwd: entry.cwd,
+          });
         }
         return;
       }

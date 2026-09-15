@@ -49,7 +49,9 @@ function attentionSortKey(item: AttentionItem): string {
   return `workflow:${item.target.runId}:${item.target.taskId}`;
 }
 
-export class AttentionIndexProvider implements vscode.TreeDataProvider<AttentionItem>, vscode.Disposable {
+export class AttentionIndexProvider
+  implements vscode.TreeDataProvider<AttentionItem>, vscode.Disposable
+{
   private readonly changed = new vscode.EventEmitter<AttentionItem | undefined>();
   readonly onDidChangeTreeData = this.changed.event;
 

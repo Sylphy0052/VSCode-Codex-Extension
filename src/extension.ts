@@ -151,7 +151,11 @@ import { ChatViewManager } from './view/chatView';
 import type { ActiveComposerTarget } from './view/activePanelSequence';
 import { approvalPendingBadge, type ApprovalPendingSession } from './view/approvalPending';
 import { ApprovalStatusBar, SHOW_APPROVAL_PENDING_COMMAND } from './view/approvalStatusBar';
-import { AttentionIndexProvider, buildAttentionItems, type AttentionTarget } from './view/attentionIndex';
+import {
+  AttentionIndexProvider,
+  buildAttentionItems,
+  type AttentionTarget,
+} from './view/attentionIndex';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { ConversationViewManager } from './view/conversationView';
@@ -680,7 +684,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     buildAttentionItems(
       [
         ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
-        ...claudeChat.managedSessions().map((session) => ({ ...session, provider: 'claude' as const })),
+        ...claudeChat
+          .managedSessions()
+          .map((session) => ({ ...session, provider: 'claude' as const })),
       ],
       workflowRunner.listLive().flatMap((run) => {
         const snapshot = workflowRunner.getSnapshot(run.runId);
@@ -722,7 +728,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     );
   };
   const refreshLocalReviewContext = (): void => {
-    void vscode.commands.executeCommand('setContext', 'agent.localReviewActive', isActiveReviewDiff());
+    void vscode.commands.executeCommand(
+      'setContext',
+      'agent.localReviewActive',
+      isActiveReviewDiff(),
+    );
   };
   context.subscriptions.push(
     vscode.commands.registerCommand('agent.localReview.start', async (target: unknown) => {
@@ -737,32 +747,52 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       ) {
         return;
       }
-      void vscode.window.showInformationMessage('この会話が表示した差分を開き、変更後の行を選択して右クリックから「レビュー指摘をAgentへ送る」を選んでください');
+      void vscode.window.showInformationMessage(
+        'この会話が表示した差分を開き、変更後の行を選択して右クリックから「レビュー指摘をAgentへ送る」を選んでください',
+      );
     }),
     vscode.commands.registerCommand('agent.localReview.registerDiff', (value: unknown) => {
       if (
-        typeof value !== 'object' || value === null ||
-        !('provider' in value) || !('threadId' in value) || !('original' in value) ||
-        !('modified' in value) || !('after' in value) || !('changedLineRanges' in value) ||
-        ((value as { provider: unknown }).provider !== 'codex' && (value as { provider: unknown }).provider !== 'claude') ||
+        typeof value !== 'object' ||
+        value === null ||
+        !('provider' in value) ||
+        !('threadId' in value) ||
+        !('original' in value) ||
+        !('modified' in value) ||
+        !('after' in value) ||
+        !('changedLineRanges' in value) ||
+        ((value as { provider: unknown }).provider !== 'codex' &&
+          (value as { provider: unknown }).provider !== 'claude') ||
         typeof (value as { threadId: unknown }).threadId !== 'string' ||
         !((value as { original: unknown }).original instanceof vscode.Uri) ||
         !((value as { modified: unknown }).modified instanceof vscode.Uri) ||
         typeof (value as { after: unknown }).after !== 'string' ||
         !Array.isArray((value as { changedLineRanges: unknown }).changedLineRanges)
-      ) return;
+      )
+        return;
       const review = value as {
-        provider: 'codex' | 'claude'; threadId: string; cwd?: unknown;
-        original: vscode.Uri; modified: vscode.Uri; after: string;
+        provider: 'codex' | 'claude';
+        threadId: string;
+        cwd?: unknown;
+        original: vscode.Uri;
+        modified: vscode.Uri;
+        after: string;
         changedLineRanges: Array<{ start: unknown; end: unknown }>;
       };
       const ranges = review.changedLineRanges.filter(
         (range): range is { start: number; end: number } =>
-          typeof range.start === 'number' && Number.isInteger(range.start) &&
-          typeof range.end === 'number' && Number.isInteger(range.end) && range.start <= range.end,
+          typeof range.start === 'number' &&
+          Number.isInteger(range.start) &&
+          typeof range.end === 'number' &&
+          Number.isInteger(range.end) &&
+          range.start <= range.end,
       );
       localReviewContext = {
-        source: { provider: review.provider, threadId: review.threadId, cwd: typeof review.cwd === 'string' ? review.cwd : undefined },
+        source: {
+          provider: review.provider,
+          threadId: review.threadId,
+          cwd: typeof review.cwd === 'string' ? review.cwd : undefined,
+        },
         original: review.original,
         modified: review.modified,
         after: review.after,
@@ -773,7 +803,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.localReview.send', async () => {
       const review = localReviewContext;
       const editor = vscode.window.activeTextEditor;
-      if (review === undefined || editor === undefined || editor.selection.isEmpty || !isActiveReviewDiff()) {
+      if (
+        review === undefined ||
+        editor === undefined ||
+        editor.selection.isEmpty ||
+        !isActiveReviewDiff()
+      ) {
         void vscode.window.showWarningMessage('拡張機能が開いたDiffの変更後側で選択してください');
         return;
       }
@@ -782,11 +817,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return;
       }
       if (editor.document.getText() !== review.after) {
-        void vscode.window.showWarningMessage('Diffを開いた後にファイル内容が変わりました。差分を開き直してください');
+        void vscode.window.showWarningMessage(
+          'Diffを開いた後にファイル内容が変わりました。差分を開き直してください',
+        );
         return;
       }
-      const selectionEnd = editor.selection.end.character === 0 && editor.selection.end.line > editor.selection.start.line
-        ? editor.selection.end.line - 1 : editor.selection.end.line;
+      const selectionEnd =
+        editor.selection.end.character === 0 &&
+        editor.selection.end.line > editor.selection.start.line
+          ? editor.selection.end.line - 1
+          : editor.selection.end.line;
       const selectedLinesAreChanged = review.changedLineRanges.some(
         (range) => editor.selection.start.line >= range.start && selectionEnd <= range.end,
       );
@@ -794,28 +834,61 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         void vscode.window.showWarningMessage('変更後の行だけを選択してください');
         return;
       }
-      const reviewCandidates = (): Array<{ provider: 'codex' | 'claude'; threadId: string; title: string; cwd: string }> =>
-        [
-          ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
-          ...claudeChat.managedSessions().map((session) => ({ ...session, provider: 'claude' as const })),
-        ].filter((session): session is typeof session & { cwd: string } =>
-          session.activity === 'running' &&
-          !(session.provider === review.source.provider && session.threadId === review.source.threadId) &&
-          review.source.cwd !== undefined &&
-          session.cwd !== undefined &&
-          isWithinAnyRoot(session.cwd, workspaceFolderPaths()) &&
-          isWithinRoot(session.cwd, review.source.cwd) &&
-          isWithinRoot(review.source.cwd, session.cwd) &&
-          isWithinAnyRoot(editor.document.uri.fsPath, [session.cwd]),
+      const allReviewCandidates = () => [
+        ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
+        ...claudeChat
+          .managedSessions()
+          .map((session) => ({ ...session, provider: 'claude' as const })),
+      ];
+      const reviewCandidates = (): Array<{
+        provider: 'codex' | 'claude';
+        threadId: string;
+        title: string;
+        cwd: string;
+      }> =>
+        allReviewCandidates().filter(
+          (session): session is typeof session & { cwd: string } =>
+            session.activity === 'running' &&
+            !(
+              session.provider === review.source.provider &&
+              session.threadId === review.source.threadId
+            ) &&
+            review.source.cwd !== undefined &&
+            session.cwd !== undefined &&
+            isWithinAnyRoot(session.cwd, workspaceFolderPaths()) &&
+            isWithinRoot(session.cwd, review.source.cwd) &&
+            isWithinRoot(review.source.cwd, session.cwd) &&
+            isWithinAnyRoot(editor.document.uri.fsPath, [session.cwd]),
         );
       const candidates = reviewCandidates();
       if (candidates.length === 0) {
-        void vscode.window.showWarningMessage('同じworkspaceとworktreeにある実行中の別会話がありません');
+        const hasDifferentWorktree = allReviewCandidates().some(
+          (session) =>
+            session.activity === 'running' &&
+            !(
+              session.provider === review.source.provider &&
+              session.threadId === review.source.threadId
+            ) &&
+            session.cwd !== undefined &&
+            isWithinAnyRoot(session.cwd, workspaceFolderPaths()) &&
+            review.source.cwd !== undefined &&
+            !(
+              isWithinRoot(session.cwd, review.source.cwd) &&
+              isWithinRoot(review.source.cwd, session.cwd)
+            ),
+        );
+        void vscode.window.showWarningMessage(
+          hasDifferentWorktree
+            ? '同じworkspaceに実行中の別会話はありますが、worktreeが一致しません'
+            : '同じworkspaceとworktreeにある実行中の別会話がありません',
+        );
         return;
       }
       const target = await vscode.window.showQuickPick(
         candidates.map((session) => ({
-          label: session.title, description: session.provider === 'codex' ? 'Codex' : 'Claude Code', session,
+          label: session.title,
+          description: session.provider === 'codex' ? 'Codex' : 'Claude Code',
+          session,
         })),
         { title: 'レビュー指摘の送信先', placeHolder: '実行中の対象エージェント会話を選択' },
       );
@@ -842,26 +915,49 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         selected,
         '```',
       ].join('\n');
+      const confirmation = [
+        `${target.session.provider === 'codex' ? 'Codex' : 'Claude Code'}の会話へ次のレビュー指摘を送信しますか？`,
+        `ファイル: ${workspaceRelativeDisplayPath(editor.document.uri)}`,
+        `行: ${range.start.line + 1}-${range.end.line + 1}`,
+        `指摘: ${comment.trim()}`,
+        '引用:',
+        selected,
+      ].join('\n');
       const confirmed = await vscode.window.showWarningMessage(
-        `${target.session.provider === 'codex' ? 'Codex' : 'Claude Code'}の会話へレビュー指摘を送信しますか？`,
+        confirmation,
         { modal: true },
         '送信',
       );
       if (confirmed !== '送信') return;
       // 入力・確認中にファイル、Diff、セッション状態、worktreeが変わった場合もfail closedにする。
-      const stillEligible = isActiveReviewDiff() && !editor.document.isDirty && editor.document.getText() === review.after &&
-        editor.document.getText(editor.selection) === selected && reviewCandidates().some((candidate) =>
-        candidate.provider === target.session.provider && candidate.threadId === target.session.threadId,
-      );
+      const stillEligible =
+        isActiveReviewDiff() &&
+        !editor.document.isDirty &&
+        editor.document.getText() === review.after &&
+        editor.document.getText(editor.selection) === selected &&
+        reviewCandidates().some(
+          (candidate) =>
+            candidate.provider === target.session.provider &&
+            candidate.threadId === target.session.threadId,
+        );
       if (!stillEligible) {
-        void vscode.window.showWarningMessage('対象のDiffまたは送信先の状態が変わりました。見直してから選び直してください');
+        void vscode.window.showWarningMessage(
+          '対象のDiffまたは送信先の状態が変わりました。見直してから選び直してください',
+        );
         return;
       }
-      const sent = target.session.provider === 'codex'
-        ? await chat.sendReviewFeedback(target.session.threadId, payload)
-        : claudeChat.sendReviewFeedback(target.session.threadId, payload);
-      if (!sent) {
-        void vscode.window.showWarningMessage('対象の会話が閉じられたか、送信できる状態ではありません');
+      const sent =
+        target.session.provider === 'codex'
+          ? await chat.sendReviewFeedback(target.session.threadId, payload)
+          : claudeChat.sendReviewFeedback(target.session.threadId, payload);
+      if (sent === 'sessionUnavailable') {
+        void vscode.window.showWarningMessage(
+          '送信先の会話は終了したか、送信できる状態ではありません',
+        );
+      } else if (sent === 'deliveryFailed') {
+        void vscode.window.showWarningMessage(
+          'providerへの送信に失敗しました。接続状態を確認してからもう一度送信してください',
+        );
       }
     }),
     vscode.window.onDidChangeActiveTextEditor(refreshLocalReviewContext),
@@ -877,18 +973,29 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.attention.open', (target: AttentionTarget) => {
       if (target.kind === 'workflow') {
         const snapshot = workflowRunner.getSnapshot(target.runId);
-        if (snapshot?.tasks.some((task) => task.id === target.taskId && task.state === 'waitingApproval') !== true) {
+        if (
+          snapshot?.tasks.some(
+            (task) => task.id === target.taskId && task.state === 'waitingApproval',
+          ) !== true
+        ) {
           refreshAttention();
           return;
         }
         workflowView.show(target.runId);
         return;
       }
-      const sessions = target.provider === 'claude' ? claudeChat.managedSessions() : chat.managedSessions();
-      if (sessions.some((session) => session.threadId === target.threadId && session.activity === 'approvalPending')) {
-        const opened = target.provider === 'claude'
-          ? claudeChat.revealSession(target.threadId)
-          : chat.revealSession(target.threadId);
+      const sessions =
+        target.provider === 'claude' ? claudeChat.managedSessions() : chat.managedSessions();
+      if (
+        sessions.some(
+          (session) =>
+            session.threadId === target.threadId && session.activity === 'approvalPending',
+        )
+      ) {
+        const opened =
+          target.provider === 'claude'
+            ? claudeChat.revealSession(target.threadId)
+            : chat.revealSession(target.threadId);
         if (opened) return;
       }
       refreshAttention();

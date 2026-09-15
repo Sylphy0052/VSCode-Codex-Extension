@@ -107,10 +107,7 @@ describe('readRateLimitSnapshotWindows', () => {
       primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: 1_000 },
       secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 9_000 },
     });
-    expect(windows).toEqual([
-      win('primary', 20, 300, 1_000),
-      win('secondary', 100, 10080, 9_000),
-    ]);
+    expect(windows).toEqual([win('primary', 20, 300, 1_000), win('secondary', 100, 10080, 9_000)]);
   });
 
   it('使用率が数値でない窓は採らない', () => {

@@ -756,7 +756,10 @@ export interface OpenedReviewDiff {
 }
 
 /** unified diffの`+`行だけを変更後側の行番号へ写す。削除だけのハンクは対象にしない。 */
-function changedLineRanges(diff: FileDiff, after: string): readonly { start: number; end: number }[] {
+function changedLineRanges(
+  diff: FileDiff,
+  after: string,
+): readonly { start: number; end: number }[] {
   if (diff.kind === 'add') {
     const last = Math.max(0, after.split('\n').length - 1);
     return [{ start: 0, end: last }];

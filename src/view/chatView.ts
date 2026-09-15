@@ -1775,7 +1775,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         );
         if (opened !== undefined && entry.session.threadId !== undefined) {
           await vscode.commands.executeCommand('agent.localReview.registerDiff', {
-            provider: 'codex', threadId: entry.session.threadId, cwd: entry.cwd, ...opened,
+            provider: 'codex',
+            threadId: entry.session.threadId,
+            cwd: entry.cwd,
+            ...opened,
           });
         }
         return;
@@ -1860,7 +1863,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'localReview') {
         const threadId = entry.session.threadId;
         if (threadId !== undefined) {
-          await vscode.commands.executeCommand('agent.localReview.start', { provider: 'codex', threadId, cwd: entry.cwd });
+          await vscode.commands.executeCommand('agent.localReview.start', {
+            provider: 'codex',
+            threadId,
+            cwd: entry.cwd,
+          });
         }
         return;
       }
@@ -2468,10 +2475,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * （design.md §16.12）。未設定なら従来通り同じ文字列を送信・記録する。
    */
   /** Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。 */
-  async sendReviewFeedback(threadId: string, text: string): Promise<boolean> {
+  async sendReviewFeedback(
+    threadId: string,
+    text: string,
+  ): Promise<'sent' | 'sessionUnavailable' | 'deliveryFailed'> {
     const entry = this.panels.get(threadId);
     if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
-      return false;
+      return 'sessionUnavailable';
     }
     this.cancelLimitAutoResume(entry);
     this.clearLimitAutoResumeSuppression(entry);
@@ -2481,10 +2491,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       await entry.session.send(sent, this.configFor(entry));
       this.reportActivity(entry, text);
       this.refreshSettings();
-      return true;
+      return 'sent';
     } catch (e) {
       this.reportError(e);
-      return false;
+      return 'deliveryFailed';
     }
   }
 
