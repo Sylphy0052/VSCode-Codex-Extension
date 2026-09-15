@@ -3,6 +3,7 @@
 .vscode-test.mjs
 .git/**
 .worktree/**
+.cache/webgpt-protocol/**
 .claude/**
 .agents/**
 .github/**

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import * as vscode from 'vscode';
+import { buildWebGptMcpConfig, WEB_GPT_MCP_SERVER } from '../webGpt/discussion';
+import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
 import { isApprovalDecision } from '../appserver/approvals';
 import {
   isOpenableSearchUrl,
@@ -844,6 +846,58 @@ export class ClaudeChatViewManager
       return;
     }
     await this.startHandoff(entry, sessionId, { kind: 'manual' }, true);
+  }
+
+  private readonly webGptPreparing = new Set<ClaudePanel>();
+
+  /** 三点メニューからはentryを固定し、入力中に別タブへ移っても送り先を変えない。 */
+  async discussWithWebGpt(): Promise<void> {
+    const entry = this.active;
+    if (entry === undefined) {
+      reportDiscussionError(new Error('議論するClaude Codeの会話を開いてください'));
+      return;
+    }
+    await this.discussWithWebGptIn(entry);
+  }
+
+  private async discussWithWebGptIn(entry: ClaudePanel): Promise<void> {
+    if (this.webGptPreparing.has(entry)) return;
+    this.webGptPreparing.add(entry);
+    const assertReady = () => {
+      const state = entry.session.getState();
+      if (
+        entry.panel === undefined ||
+        ![...this.panels.values()].includes(entry) ||
+        state.restore
+      ) {
+        throw new Error('起動元のClaude Code会話を開いてから開始してください');
+      }
+      if (state.busy || state.queued.length > 0) {
+        throw new Error('Claude Codeの応答と送信待ちの完了後に、もう一度開始してください');
+      }
+    };
+    try {
+      assertReady();
+      const request = await prepareWebGptDiscussion(true);
+      if (request === undefined) return;
+      assertReady();
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'このClaude Code会話へWebGPT操作を接続しています',
+        },
+        () =>
+          entry.session.ensureMcpServer(WEB_GPT_MCP_SERVER, buildWebGptMcpConfig(request.endpoint)),
+      );
+      assertReady();
+      this.cancelLimitAutoResume(entry);
+      entry.loop.noteUserAction();
+      this.dispatch(entry, request.prompt);
+    } catch (error) {
+      reportDiscussionError(error);
+    } finally {
+      this.webGptPreparing.delete(entry);
+    }
   }
 
   /**
@@ -2658,6 +2712,10 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'webGptDiscussion') {
+        void this.discussWithWebGptIn(entry);
         return;
       }
       if (type === 'secondOpinionContinue') {
