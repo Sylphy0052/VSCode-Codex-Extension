@@ -353,7 +353,7 @@ export function effortFor(
 /**
  * 見立てをmodel / effortへ解決する。
  *
- * **静的な対応表（`スコア6 = gpt-5.6-astra / xhigh` のような）は持たない。** このリポジトリは
+ * **静的な対応表（`スコア6 = gpt-6-astra / xhigh` のような）は持たない。** このリポジトリは
  * モデル一覧もeffort一覧もCLIから動的に取っており（`modelCatalog.ts` の `effortsFor`）、
  * 静的表を持つとその仕組みを迂回して、存在しないモデル名や非対応のeffortをCLIへ渡すことに
  * なる。ここで持つのは順位（どちらが重いか）だけで、実在するかどうかはカタログに訊く。

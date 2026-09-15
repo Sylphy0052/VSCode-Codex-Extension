@@ -202,7 +202,7 @@ describe('classifyHandoff', () => {
       model: CLASSIFIER_MODELS.codex,
     });
     expect(CLASSIFIER_MODELS.claude).toBe('sonnet');
-    expect(CLASSIFIER_MODELS.codex).toBe('terra');
+    expect(CLASSIFIER_MODELS.codex).toBe('gpt-5.6-terra');
   });
 
   it('既定のタイムアウトは120秒で、設定された値はそのまま渡す（Issue #1097）', async () => {
