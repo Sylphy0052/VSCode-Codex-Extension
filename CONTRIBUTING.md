@@ -11,7 +11,7 @@ npm install
 npm run check     # lint + format:check + typecheck + test
 ```
 
-必要なのは Node.js 20以降とVSCode 1.90以降。動作確認には Codex CLI か Claude Code のどちらかがPATH上にあるとよい（無くても大半のテストは通る）。
+開発・テストにはNode.js 24.15以降の24系とVSCode 1.90以降を使う。動作確認には Codex CLI か Claude Code のどちらかがPATH上にあるとよい（無くても大半のテストは通る）。
 
 ## npmスクリプト
 
@@ -57,7 +57,7 @@ prettier を見ていないためCIもlintも緑で通っていた。`npm run fo
 
 ## CI
 
-mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run format:check` / `npm run typecheck` / `npm run build` / `npm run test:coverage` が自動実行される。Node.js 20系で `npm ci` してから走る。
+mainへのpushとPRのたびに、GitHub Actions（`.github/workflows/ci.yml`）で `npm run lint` / `npm run format:check` / `npm run typecheck` / `npm run build` / `npm run test:coverage` が自動実行される。Node.js 24系で`npm ci`してから走る。
 
 `scripts/check.sh`（`npm run lint` / `npm run format:check` / `npm run typecheck` / `npm test` の4つ）とは一致しない。CIは`npm run build`の分だけ検証範囲が広く、tsc --noEmitでは検出できないバンドル失敗（動的import、モジュール解決の差、--externalの指定漏れなど）を拾う。`scripts/check.sh` 自体は変更していないため、手元で全緑にしてもCIのbuildステップは別途確認が必要。
 
