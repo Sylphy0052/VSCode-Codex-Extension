@@ -67,6 +67,7 @@ import {
   type SideQuestionResult,
 } from './control';
 import { forkFromTurn, type ForkFromTurnResult } from './forkFromTurn';
+import { mergeDynamicMcpServer } from './mcpDynamic';
 import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SkillsSnapshot } from '../provider/skills';
@@ -174,6 +175,11 @@ export class ClaudeStreamSession {
     string,
     (servers: McpServerView[] | undefined) => void
   >();
+  private readonly mcpConfigureWaiting = new Map<
+    string,
+    { resolve: (response: ControlResponse) => void; reject: (error: Error) => void }
+  >();
+  private mcpConfiguring = false;
   /**
    * `reload_skills` の応答待ち（issue #202、design.md TP-90）。
    * `mcpStatusWaiting` と同じ形。プロセスが無ければ`undefined`で即解決する
@@ -807,6 +813,74 @@ export class ClaudeStreamSession {
     });
   }
 
+  /** 起動中のプロセスへMCPを追加する。既存の動的サーバーと会話状態を残す。 */
+  async ensureMcpServer(name: string, config: { command: string; args: string[] }): Promise<void> {
+    if (this.proc === undefined) throw new Error('Claude Codeセッションが起動していません');
+    if (this.state.busy || this.mcpConfiguring) {
+      throw new Error('Claude Codeの応答またはMCP接続の完了後に、もう一度開始してください');
+    }
+    const proc = this.proc;
+    this.mcpConfiguring = true;
+    try {
+      const status = await this.requestMcpConfiguration({ subtype: 'mcp_status' }, 10000);
+      const merged = mergeDynamicMcpServer(status.payload, name, config);
+      if (this.proc !== proc || this.state.busy) {
+        throw new Error('入力中にClaude Codeの状態が変わったため、議論を中断しました');
+      }
+      if (merged.connected) return;
+      const result = await this.requestMcpConfiguration(
+        { subtype: 'mcp_set_servers', servers: merged.servers },
+        90000,
+      );
+      const errors = result.payload?.['errors'];
+      if (typeof errors !== 'object' || errors === null || Array.isArray(errors)) {
+        throw new Error('MCP追加の結果を確認できませんでした');
+      }
+      if (Object.keys(errors).length > 0) {
+        throw new Error(
+          'MCPへ接続できませんでした。npxの実行環境とChromeの接続先を確認してください',
+        );
+      }
+      const updated = await this.requestMcpConfiguration({ subtype: 'mcp_status' }, 10000);
+      if (this.proc !== proc || !mergeDynamicMcpServer(updated.payload, name, config).connected) {
+        throw new Error('議論用MCPの接続とツールを確認できませんでした');
+      }
+    } finally {
+      this.mcpConfiguring = false;
+    }
+  }
+
+  private requestMcpConfiguration(
+    request: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<ControlResponse> {
+    if (this.proc === undefined) return Promise.reject(new Error('Claude Codeが終了しました'));
+    const requestId = this.claim('mcpConfigure');
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        clearTimeout(timer);
+        this.mcpConfigureWaiting.delete(requestId);
+        this.outgoing.delete(requestId);
+      };
+      const timer = setTimeout(() => {
+        finish();
+        reject(new Error('MCP接続の応答が時間切れになりました。議論は送信していません'));
+      }, timeoutMs);
+      this.mcpConfigureWaiting.set(requestId, {
+        resolve: (response) => {
+          finish();
+          if (response.ok) resolve(response);
+          else reject(new Error(response.error ?? 'Claude CodeがMCP接続要求を拒否しました'));
+        },
+        reject: (error) => {
+          finish();
+          reject(error);
+        },
+      });
+      this.write(buildControlRequest(requestId, request));
+    });
+  }
+
   /**
    * skillsを読み直す（issue #202、design.md TP-90）。
    *
@@ -1251,6 +1325,11 @@ export class ClaudeStreamSession {
     const outgoing = this.outgoing.get(response.requestId);
     this.outgoing.delete(response.requestId);
 
+    if (outgoing?.kind === 'mcpConfigure') {
+      this.mcpConfigureWaiting.get(response.requestId)?.resolve(response);
+      return;
+    }
+
     if (outgoing?.kind === 'settings') {
       this.noteSettingChange(response, outgoing);
       return;
@@ -1494,6 +1573,10 @@ export class ClaudeStreamSession {
       resolve(undefined);
     }
     this.mcpStatusWaiting.clear();
+    for (const waiter of this.mcpConfigureWaiting.values()) {
+      waiter.reject(new Error('Claude Codeが終了したためMCP接続を中断しました'));
+    }
+    this.mcpConfigureWaiting.clear();
     // reload_skillsの応答待ちも解放する。放置するとawaitしている側が永遠に待つ
     for (const resolve of this.skillsWaiting.values()) {
       resolve(undefined);
@@ -1523,6 +1606,7 @@ type OutgoingKind =
   | 'rewindConversation'
   | 'sideQuestion'
   | 'mcpStatus'
+  | 'mcpConfigure'
   | 'reloadSkills';
 
 interface Outgoing {

@@ -26,6 +26,7 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - サブエージェントの活動を会話の中で確認する（Codex。切替はできない）
 - 実行したセッションを日報・週報システムへ流す
 - 作業中のAIとは独立した別のAIへ、判断・助言・レビューを求める（[セカンドオピニオン](#セカンドオピニオン)）
+- 指定したChatGPT会話とCodex・Claude Codeで議論する（[WebGPTとの議論](#webgptとの議論)）
 - 目的と受入基準を先に決め、達成したかを別のAIに判定させながら回す（[ゴール駆動ループ](#ゴール駆動ループ)）
 - ループの各ターンの進め方を、別のAIに見てもらう（[Advisor](#ループのadvisor)）
 - 複数のタスクを依存関係つきのYAMLで定義し、並列のセッションで走らせる（[ワークフロー](#ワークフロー並列オーケストレーション)）
@@ -39,6 +40,42 @@ CLIコーディングエージェント（Codex / Claude Code）のセッショ�
 - [Codex CLI](https://developers.openai.com/codex/) または [Claude Code](https://code.claude.com/docs/en/quickstart) がPATH上にあること（両方でも片方でもよい）
 
 WSL RemoteやDev Containerなどリモート環境で開発している場合、CLIもその環境側に必要になる。この拡張機能は `extensionKind: ["workspace"]` として動作するため、UI側（Windows等）のCLIは参照しない。
+
+## WebGPTとの議論
+
+CodexまたはClaude Codeの会話下部の三点メニューから`WebGPTと議論…`を押す。Chromeへ接続し、未起動なら専用プロファイルで起動する。初回は開いたChromeでChatGPTへログインする。会話URL、議題、各会話への送信上限を選ぶと議論を開始する。
+
+Codex・Claude Codeとも、その会話で起動しているエージェント自身が文脈を踏まえて議論し、結果も同じ会話へ返す。議題は空欄でもよく、その場合は現在の会話から論点を選ぶ。
+
+コマンドパレットの`Agent: WebGPTと議論…`と履歴ビューの議論アイコンからも開始できる。直前に選んだCodex・Claude Codeの会話を使う。
+
+- 会話URLは空欄で確定するとChatGPTの新規会話を1件作成する。既存会話を使う場合は`https://chatgpt.com/c/<id>`形式で1〜3件指定する。複数指定は空白かカンマで区切る。
+- 送信上限は初回質問を含めて各会話1〜5回。既定は2回で、回答への批評・追加質問を行って結論をまとめるようエージェントへ指示する。
+- 議題と議論中の回答・批評を指定したChatGPT会話へ送信する。議題に必要な現在の論点も要約して送信する。会話全文やワークスペースのファイルは自動添付しない。
+- 停止と追加発言は通常のチャットと同じ。議論の経過と結論はそのタブの履歴に残る。
+
+### ブラウザの準備
+
+Google Chromeと、エージェントが動く環境の`npx`が必要。WindowsとWSLではWindows側のChrome、macOSとLinuxでは拡張機能が動く環境のChromeを起動する。既存のCDP接続が使えれば、そのブラウザを使う。初回は`npx`がClaude Code用の`@playwright/mcp@0.0.81`またはCodex用の`@playwright/cli@0.1.20`を取得する。Claude Codeでは起動中のセッションへMCPを動的に追加する。既存のMCP設定を取得できない場合や接続に失敗した場合は、議論を送信せず理由を表示する。応答中や送信待ちがある場合は完了後に開始する。Codexでは現在の会話へCLI操作手順を渡す。グローバル設定ファイルは変更しない。
+
+専用プロファイルのログイン状態は次回も使う。入力をキャンセルしてもChromeは残る。会話URLはそのプロファイルから開けるものを指定する。Windowsで手動起動する場合は、PowerShellで次を実行する。
+
+```powershell
+$chrome = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+$profile = Join-Path $env:LOCALAPPDATA 'Codex\ChromeChatGPT'
+Start-Process -FilePath $chrome -ArgumentList @(
+  '--remote-debugging-port=9222',
+  '--remote-debugging-address=127.0.0.1',
+  "--user-data-dir=`"$profile`"",
+  'https://chatgpt.com/'
+)
+```
+
+接続先の既定値は`http://127.0.0.1:9222`。変更する場合は設定`agent.webGpt.cdpEndpoint`を使う。ポート付きのHTTPループバックURLのみ受け付ける。WSLなどでは、拡張機能が動く環境からこの接続先に到達できる必要がある。
+
+ブラウザ操作・回答完了の判断・送信回数の管理は起動したエージェントが行う。回数や操作対象は開始指示による制約で、拡張機能による強制制御ではない。接続失敗、ログイン要求、回答取得の失敗では状況を報告して中断するよう指示している。Claude Codeの動的MCPはプロセス終了まで有効で、会話を開き直した場合は再度メニューから開始する。Codexは現在のセッションのシェルからPlaywright CLI 0.1.20をnpxで呼び、既存Chromeへ接続する。シェル実行に必要な権限がない場合は中断する。CLI設定・生成物は拡張機能のストレージに残る。実際のChatGPT画面での一連の動作も未検証。
+
+設計と受入基準は[仕様](docs/webgpt-discussion.md)を参照。
 
 ## インストール
 

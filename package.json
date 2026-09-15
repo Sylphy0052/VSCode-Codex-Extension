@@ -60,6 +60,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "agent.webGpt.discuss",
+          "when": "view == codex.sessions",
+          "group": "navigation@9"
+        },
+        {
           "command": "codex.newChat",
           "when": "view == codex.sessions",
           "group": "navigation@1"
@@ -310,6 +315,12 @@
       ]
     },
     "commands": [
+      {
+        "command": "agent.webGpt.discuss",
+        "title": "WebGPTと議論…",
+        "category": "Agent",
+        "icon": "$(comment-discussion)"
+      },
       {
         "command": "codex.openSession",
         "title": "セッションを開く",
@@ -580,6 +591,12 @@
     "configuration": {
       "title": "Agent Sessions",
       "properties": {
+        "agent.webGpt.cdpEndpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:9222",
+          "scope": "machine",
+          "markdownDescription": "WebGPTとの議論に使うChromeのCDP接続先。未起動なら専用プロファイルでChromeを起動します。ポート付きのHTTPループバックURLのみ。拡張機能が動く環境から接続できる必要があります。"
+        },
         "codex.executablePath": {
           "type": "string",
           "default": "codex",

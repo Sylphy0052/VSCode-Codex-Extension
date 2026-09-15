@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { prepareWebGptCli } from '../webGpt/cli';
+import { buildWebGptDiscussionPrompt } from '../webGpt/discussion';
+import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
 import {
   buildApprovalResponse,
   defaultDenyResponse,
@@ -422,6 +425,62 @@ const REVIEW_TARGET_INPUT: Record<
  * 見ずにタスクのセッションを扱えるようにする（design.md §16.10）。
  */
 export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements TaskSessionHost {
+  private readonly webGptPreparing = new Set<ChatPanel>();
+
+  async discussWithWebGpt(): Promise<void> {
+    const entry = this.active;
+    if (entry === undefined) {
+      reportDiscussionError(new Error('議論するCodexの会話を開いてください'));
+      return;
+    }
+    await this.discussWithWebGptIn(entry);
+  }
+
+  private async discussWithWebGptIn(entry: ChatPanel): Promise<void> {
+    if (this.webGptPreparing.has(entry)) return;
+    this.webGptPreparing.add(entry);
+    const assertReady = () => {
+      const state = entry.session.getState();
+      if (
+        entry.panel === undefined ||
+        ![...this.panels.values()].includes(entry) ||
+        state.restore ||
+        entry.session.threadId === undefined
+      ) {
+        throw new Error('起動元のCodex会話を開いてから開始してください');
+      }
+      if (state.busy || state.queued.length > 0) {
+        throw new Error('Codexの応答と送信待ちの完了後に、もう一度開始してください');
+      }
+    };
+    try {
+      assertReady();
+      if (this.globalStorageDir === undefined) {
+        throw new Error('WebGPT接続設定の保存先を取得できませんでした');
+      }
+      const request = await prepareWebGptDiscussion(true);
+      if (request === undefined) return;
+      assertReady();
+      const browserInstructions = await prepareWebGptCli(this.globalStorageDir, request.endpoint);
+      assertReady();
+      const prompt = buildWebGptDiscussionPrompt(
+        request.topic,
+        request.urls,
+        request.maxSends,
+        true,
+        browserInstructions,
+      );
+      this.cancelLimitAutoResume(entry);
+      entry.loop.noteUserAction();
+      await entry.session.send(prompt, this.configFor(entry));
+      this.reportActivity(entry, prompt);
+    } catch (error) {
+      reportDiscussionError(error);
+    } finally {
+      this.webGptPreparing.delete(entry);
+    }
+  }
+
   private readonly connection: AppServerConnectionPort;
   /**
    * `thread/start` の応答待ち。複数件を同時に持てる（design.md §16.10の3）。
@@ -1915,6 +1974,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'secondOpinion') {
         await this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'webGptDiscussion') {
+        void this.discussWithWebGptIn(entry);
         return;
       }
       if (type === 'secondOpinionContinue') {

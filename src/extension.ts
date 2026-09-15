@@ -1390,6 +1390,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       }),
     ),
     vscode.commands.registerCommand('codex.showLog', () => log.show()),
+    vscode.commands.registerCommand('agent.webGpt.discuss', () => {
+      const codex = chat.getActiveComposerTarget();
+      const claude = claudeChat.getActiveComposerTarget();
+      if (
+        claude !== undefined &&
+        (codex === undefined || claude.activeSequence > codex.activeSequence)
+      ) {
+        return claudeChat.discussWithWebGpt();
+      }
+      return chat.discussWithWebGpt();
+    }),
     // エディタの選択範囲をチャットへ送る（issue #292、design.md §14.57）。
     // 送信はしない（入力欄へ挿すだけ）
     vscode.commands.registerCommand('agent.sendSelectionToChat', () =>

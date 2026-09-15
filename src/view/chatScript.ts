@@ -3429,6 +3429,9 @@ export function chatScript(
   el('secondOpinion').addEventListener('click', () =>
     vscode.postMessage({ type: 'secondOpinion' }),
   );
+  el('webGptDiscussion').addEventListener('click', () =>
+    vscode.postMessage({ type: 'webGptDiscussion' }),
+  );
   el('turnSummaryToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'toggleTurnSummary' }),
   );

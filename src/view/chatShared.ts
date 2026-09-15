@@ -1542,6 +1542,7 @@ ${chatStyles()}
       <div id="composerOverflow">
         <button id="composerOverflowToggle" type="button" class="secondary" aria-haspopup="true" aria-expanded="false" aria-label="その他" title="その他の操作を開きます">...</button>
         <div id="composerOverflowMenu" role="menu" hidden>
+          <button id="webGptDiscussion" type="button" class="secondary" role="menuitem" aria-label="WebGPTと議論…" title="ChatGPTの会話と議論します。Chromeが未起動なら起動します">${COMPOSER_ICONS.secondOpinion}<span class="composerOverflowLabel">WebGPTと議論…</span></button>
           ${overflowButtons
             .map((id) => renderComposerButton(id, composerButtonCtx, 'menu'))
             .join('\n          ')}
