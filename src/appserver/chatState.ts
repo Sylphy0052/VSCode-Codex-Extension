@@ -529,6 +529,14 @@ export interface ChatState {
    */
   streamingMessageId: string | undefined;
   /**
+   * 完成メッセージ（`assistant`）で受け取り済みのブロック数（Claude Codeのみ、issue #1239）。
+   *
+   * 1つのメッセージがブロックごとに分かれて届くと、各イベントのcontent配列での位置が常に0に
+   * なり、断片側のid（メッセージ内の絶対ブロック番号で作る）とずれる。同じ`messageId`が
+   * 続く間はここの`count`を足して絶対番号へ戻す。Codexは通知ごとにitemIdが来るので使わない。
+   */
+  completedBlockOffset: { messageId: string; count: number } | undefined;
+  /**
    * 応答中に送られた指示。ターンが終わってから順に送る。
    *
    * CLIは応答中の指示を受け取れないため、捨てずにここへ積む。
@@ -681,6 +689,7 @@ export const initialChatState: ChatState = {
   turnFailed: false,
   turnFailureKind: undefined,
   streamingMessageId: undefined,
+  completedBlockOffset: undefined,
   queued: [],
   items: [],
   approvals: [],

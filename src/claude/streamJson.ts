@@ -38,6 +38,7 @@ export const initialClaudeState: ChatState = {
   // 失敗の区分はCodexの`turn.error`から作る値なので、Claude Code側では常に未設定
   turnFailureKind: undefined,
   streamingMessageId: undefined,
+  completedBlockOffset: undefined,
   queued: [],
   items: [],
   approvals: [],
@@ -105,6 +106,8 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
     // initはターン開始時に届く。resultで解除する
     busy: true,
     turnFailed: false,
+    // 前のターンのメッセージのブロック数を次のターンへ持ち越さない（issue #1239）
+    completedBlockOffset: undefined,
     // 前のターンの成果を次のターンへ持ち越さない
     turnResultText: '',
     turnEditedFiles: [],
@@ -114,6 +117,17 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
 function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatState {
   const message = rec(event['message']);
   const content = list(message?.['content']);
+  const messageId = str(message?.['id']);
+  // 1つのメッセージのブロックが複数の `assistant` イベントへ分かれて届くと、各イベントの
+  // content配列は1件だけになり位置が常に0になる。断片側のidはメッセージ内の絶対ブロック
+  // 番号（`content_block_delta` の `index`）で作るため、位置をそのまま使うと thinking が
+  // 先行したときにidがずれ、完成応答が別項目として並ぶ（issue #1239）。同じメッセージに
+  // ついて受け取り済みのブロック数を足して絶対番号へ戻す。全ブロックが1イベントで届く
+  // 経路では常に0のままなので、従来と同じidになる
+  const blockOffset =
+    messageId !== '' && state.completedBlockOffset?.messageId === messageId
+      ? state.completedBlockOffset.count
+      : 0;
   let items = state.items;
   let editedFiles = state.turnEditedFiles;
   let todos = state.todos;
@@ -125,7 +139,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     if (type === 'text') {
       const text = str(part['text']);
       items = upsertCompletedBlock(items, state.streamingMessageId, {
-        id: blockId(message, position, 'text'),
+        id: blockId(message, blockOffset + position, 'text'),
         kind: 'agentMessage',
         text,
         detail: '',
@@ -149,7 +163,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     }
     if (type === 'thinking') {
       items = upsertCompletedBlock(items, state.streamingMessageId, {
-        id: blockId(message, position, 'thinking'),
+        id: blockId(message, blockOffset + position, 'thinking'),
         kind: 'reasoning',
         text: str(part['thinking']),
         detail: '',
@@ -198,7 +212,9 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     editedFiles === state.turnEditedFiles &&
     todos === state.todos &&
     autocompactWindow === state.autocompactWindow &&
-    state.streamingMessageId === undefined
+    state.streamingMessageId === undefined &&
+    // ブロックを1つも運んでいないイベントは受け取り済みのブロック数も変えない
+    content.length === 0
   ) {
     return state;
   }
@@ -209,6 +225,11 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     todos,
     todoHistory,
     autocompactWindow,
+    // 次のイベントが同じメッセージの続きのブロックだったときに絶対番号を復元するための
+    // 受け取り済みブロック数（issue #1239）。message.idが無ければ足し合わせる相手を
+    // 決められないため持たない
+    completedBlockOffset:
+      messageId === '' ? undefined : { messageId, count: blockOffset + content.length },
     // 次のmessage_startが欠落した場合に前ターンのidを使い回さない。使い回すと、
     // 次ターンの断片が前の項目を上書きし、完成応答が別項目として追加される。
     streamingMessageId: undefined,
