@@ -32,3 +32,4 @@ eval-results/**
 node_modules/**
 **/*.map
 **/*.vsix
+.playwright-mcp/**
