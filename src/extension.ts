@@ -153,6 +153,7 @@ import { approvalPendingBadge, type ApprovalPendingSession } from './view/approv
 import { ApprovalStatusBar, SHOW_APPROVAL_PENDING_COMMAND } from './view/approvalStatusBar';
 import {
   AttentionIndexProvider,
+  attentionBadge,
   buildAttentionItems,
   type AttentionTarget,
 } from './view/attentionIndex';
@@ -685,8 +686,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   });
   context.subscriptions.push(workflowView);
 
-  // 要対応は会話とワークフローが既に持つ承認待ち状態だけを横断表示する。ここでは
-  // 状態を保存・更新しないため、元の画面で解決すれば次の更新で自然に消える。
+  // 要対応は会話とワークフローが既に持つ状態（承認待ちと、引き継ぎ元として残ったタブ。
+  // Issue #1165）を横断表示する。ここでは状態を保存・更新しないため、元の画面で解決すれば
+  // 次の更新で自然に消える。
   const attention = new AttentionIndexProvider(() =>
     buildAttentionItems(
       [
@@ -707,7 +709,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   });
   const refreshAttention = (): void => {
     attention.refresh();
-    attentionView.badge = approvalPendingBadge(attention.getChildren().length);
+    attentionView.badge = attentionBadge(attention.getChildren().length);
   };
   refreshAttention();
 

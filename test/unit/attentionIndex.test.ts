@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowRunSnapshot } from '../../src/orchestrator/runner';
-import { buildAttentionItems } from '../../src/view/attentionIndex';
+import { attentionBadge, buildAttentionItems } from '../../src/view/attentionIndex';
 import type { ManagedChatSession } from '../../src/view/chatManagerBase';
 
 function chat(
@@ -103,5 +103,16 @@ describe('buildAttentionItems（Issue#1236）', () => {
       'Codex・引き継ぎ元が残存・実行中のため閉じず',
       'Codex・承認待ち',
     ]);
+  });
+});
+
+describe('attentionBadge（Issue#1165）', () => {
+  it('承認待ち以外も数えるため「要対応」と名乗る', () => {
+    expect(attentionBadge(3)).toEqual({ value: 3, tooltip: '要対応 3件' });
+  });
+
+  it('0件以下ではバッジを付けない', () => {
+    expect(attentionBadge(0)).toBeUndefined();
+    expect(attentionBadge(-1)).toBeUndefined();
   });
 });

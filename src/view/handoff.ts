@@ -1005,15 +1005,22 @@ const FIRST_RESPONSE_TIMEOUT_MS = 60_000;
 /**
  * 引き継ぎ先からの応答とみなさない項目の種類。
  *
- * どちらも送る側（人・拡張機能）が積むもので、CLIが返したものではない。初回プロンプトを
- * 送った瞬間に`items`は増えるため、この2種を数から外さないと送信そのものを応答と
- * 取り違える。
+ * `userMessage` / `skillContext` は送る側（人・拡張機能）が積むもの。初回プロンプトを
+ * 送った瞬間に`items`は増えるため、外さないと送信そのものを応答と取り違える。
+ *
+ * `settingsChanged` は承認方法の変更・フックの警告など、モデルの出力ではない横からの
+ * 通知（`appendNotice`）である。起動直後の`status`通知でも積まれるため、これを応答と
+ * 数えるとCLIが立ち上がっただけで「プロンプトを受け取って答え始めた」と誤認する。
  */
-const REQUEST_SIDE_ITEM_KINDS: ReadonlySet<string> = new Set(['userMessage', 'skillContext']);
+const NON_RESPONSE_ITEM_KINDS: ReadonlySet<string> = new Set([
+  'userMessage',
+  'skillContext',
+  'settingsChanged',
+]);
 
 /** CLIが返した項目の数。増えていれば引き継ぎ先は応答を始めている。 */
 function responseItemCount(state: ChatState): number {
-  return state.items.filter((item) => !REQUEST_SIDE_ITEM_KINDS.has(item.kind)).length;
+  return state.items.filter((item) => !NON_RESPONSE_ITEM_KINDS.has(item.kind)).length;
 }
 
 /**

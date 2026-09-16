@@ -674,14 +674,20 @@ describe('新セッションの初回応答を待つ', () => {
     expect(await done).toEqual({ succeeded: true });
   });
 
-  it('送った側の項目が増えただけでは決めない（初回プロンプトの送信を応答と取り違えない）', async () => {
+  it('送った側の項目・横からの通知が増えただけでは決めない', async () => {
     const w = watcher({ ...initialChatState, items: [] });
     const done = waitForDestinationResponse(w, 50);
 
     w.emit({
       ...initialChatState,
       busy: true,
-      items: [item('userMessage', '引き継ぎ'), item('skillContext', 'skill')],
+      items: [
+        // 初回プロンプトの送信そのもの
+        item('userMessage', '引き継ぎ'),
+        item('skillContext', 'skill'),
+        // 起動直後のstatus通知（モデルの出力ではない）
+        item('settingsChanged', ''),
+      ],
     });
     expect(w.stateListeners).toHaveLength(1);
 

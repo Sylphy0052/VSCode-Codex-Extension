@@ -53,6 +53,19 @@ export function buildAttentionItems(
 }
 
 /**
+ * 要対応の一覧に付けるバッジ（Issue #734 / #1165）。0件のときは付けない。
+ *
+ * 承認待ち専用の`approvalPendingBadge`とは別に持つ。この一覧は承認待ちに加えて
+ * 引き継ぎ元の残存も数えるため、「承認待ち N件」と名乗ると中身と合わない。
+ */
+export function attentionBadge(count: number): { value: number; tooltip: string } | undefined {
+  if (count <= 0) {
+    return undefined;
+  }
+  return { value: count, tooltip: `要対応 ${count}件` };
+}
+
+/**
  * 状態に発生時刻が無いため、一覧の順序は発生源とその安定識別子だけで決める。
  *
  * 1つの会話が承認待ちと引き継ぎ元の残存を同時に抱えることがある（Issue #1165）ため、
