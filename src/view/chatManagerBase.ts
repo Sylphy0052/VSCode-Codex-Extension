@@ -5,6 +5,7 @@ import { readNotificationsConfig } from '../config';
 import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
+import { needsAttentionAfterHandoff, type OldTabKeptReason } from './handoff';
 import {
   deriveSessionActivityState,
   sanitizeForNotification,
@@ -98,8 +99,30 @@ export interface BaseChatPanel {
    * （`notifyNewApprovals`参照）。
    */
   notifiedApprovalRequestIds: Set<string>;
+  /**
+   * 引き継ぎ元として残されたときの理由（Issue #1165）。残っていなければ`undefined`。
+   *
+   * 引き継ぎ後に旧タブを閉じられなかったことは、これまでOutputへ1行出るだけで、
+   * タブが増えていく側の人には見えなかった。Attention Indexへ投影するための印として
+   * ここに持つ（`needsAttentionAfterHandoff`が対象を絞る）。
+   *
+   * 人が自分でタブを閉じればエントリごと消えるため、解除の操作は要らない。
+   */
+  handoffKept?: OldTabKeptReason | undefined;
+  /**
+   * `handoffKept`を立てた時点でのユーザー発言の数（Issue #1165）。
+   *
+   * 人がこのタブへ何か送ったら「気づいて使い始めた」ので、印を下げる判定に使う。
+   * 印が立っていない間は`undefined`。
+   */
+  handoffKeptUserMessages?: number | undefined;
   /** 状態送信の間引き（issue #246）。予約中のタイマー。 */
   postTimer?: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** ユーザーが送った発言の数。引き継ぎ元のタブを人が使い直したかの判定に使う。 */
+function countUserMessages(state: ChatState): number {
+  return state.items.filter((item) => item.kind === 'userMessage').length;
 }
 
 /** 状態が変わったことの通知の中身（issue #721）。 */
@@ -133,6 +156,11 @@ export interface ManagedChatSession {
   title: string;
   cwd: string | undefined;
   activity: SessionActivityState;
+  /**
+   * 引き継ぎ元として残されたときの理由（Issue #1165）。残っていなければ`undefined`。
+   * Attention Indexが「引き継いだはずのタブが残っている」項目を作るのに使う。
+   */
+  handoffKept: OldTabKeptReason | undefined;
 }
 
 /**
@@ -229,6 +257,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         title: entry.title,
         cwd: entry.cwd,
         activity: deriveSessionActivityState(entry.session.getState()),
+        handoffKept: entry.handoffKept,
       });
     }
     return sessions;
@@ -236,11 +265,31 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
 
   /** サブクラスの`postState`から呼ぶ。webviewへ送るのと同じ内容を進捗画面へも配る。 */
   protected fireStateChanged(entry: TPanel, state: ChatState): void {
+    this.clearHandoffKeptIfReused(entry, state);
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
       return;
     }
     this.stateChanged.fire({ threadId, state, title: entry.title });
+  }
+
+  /**
+   * 引き継ぎ元として残ったタブへ人が何か送ったら、Attention Indexの印を下げる（Issue #1165）。
+   *
+   * 残っていること自体が問題なのではなく、残っていることに気づかれないのが問題なので、
+   * 人が使い始めた時点で役目が終わる。ターンの実行や完了では下げない——引き継ぎの時点で
+   * 既に走っていたターン（`oldBusy`）が終わっただけでは、人が気づいた証拠にならない。
+   */
+  private clearHandoffKeptIfReused(entry: TPanel, state: ChatState): void {
+    if (entry.handoffKept === undefined) {
+      return;
+    }
+    if (countUserMessages(state) <= (entry.handoffKeptUserMessages ?? 0)) {
+      return;
+    }
+    entry.handoffKept = undefined;
+    entry.handoffKeptUserMessages = undefined;
+    this.panelsChanged.fire();
   }
 
   /**
@@ -532,6 +581,22 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         this.panels.delete(id);
       }
     }
+    this.panelsChanged.fire();
+  }
+
+  /**
+   * 引き継ぎ元として残ったことを記録し、Attention Indexへ反映させる（Issue #1165）。
+   *
+   * 人へ見せない理由（`disposed` / `userDismissed`）は印を付けない。
+   * `onDidChangeState`は旧セッションが idle のまま残るときに出ないため、集合の変化と
+   * 同じ経路（`onDidChangePanels`）で一覧を数え直させる。
+   */
+  protected markHandoffKept(entry: TPanel, reason: OldTabKeptReason): void {
+    if (!needsAttentionAfterHandoff(reason)) {
+      return;
+    }
+    entry.handoffKept = reason;
+    entry.handoffKeptUserMessages = countUserMessages(entry.session.getState());
     this.panelsChanged.fire();
   }
 

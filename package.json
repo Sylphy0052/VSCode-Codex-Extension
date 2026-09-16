@@ -889,7 +889,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "引き継ぎ後に引き継ぎ元のタブを確認なしで閉じる（Issue #1090）。新しいセッションの初回ターンが成功したときだけ閉じ、失敗・時間切れのときは残す。履歴（transcript / rollout）は残るため、必要なら履歴から開き直せる。OFFにすると従来どおり「引き継ぎ元のセッションを停止しますか？」と確認する。"
+          "markdownDescription": "引き継ぎ後に引き継ぎ元のタブを確認なしで閉じる（Issue #1090 / #1165）。新しいセッションが初回プロンプトへ応答を始めたときだけ閉じ、応答が無いまま終わった・60秒以内に始まらなかったときは残す。残した場合は Agent Sessions の Attention 一覧へ理由付きで出る。履歴（transcript / rollout）は残るため、必要なら履歴から開き直せる。OFFにすると従来どおり「引き継ぎ元のセッションを停止しますか？」と確認する。"
         },
         "agent.autoHandoff.model": {
           "type": "string",

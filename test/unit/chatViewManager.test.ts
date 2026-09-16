@@ -2100,10 +2100,13 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(pointer).not.toContain('file-history-snapshot');
   });
 
+  // 待つのは初回ターンの完了ではなく応答の開始（Issue #1165）。完了まで待つと、引き継いだ
+  // 作業が終わるまで旧タブが残る（実測で最長2時間39分）。
   it.each([
-    ['成功したら旧タブを確認なしで閉じる', 'turn/completed', true],
-    ['失敗したら旧タブを残す', 'turn/failed', false],
-  ] as const)('新セッションの初回ターンが%s（Issue #1090）', async (_name, method, closed) => {
+    ['応答を始めたら旧タブを確認なしで閉じる', 'respond', true],
+    ['応答を1件も返さずターンが終われば旧タブを残す', 'turn/completed', false],
+    ['ターンが失敗したら旧タブを残す', 'turn/failed', false],
+  ] as const)('新セッションが%s（Issue #1090 / #1165）', async (_name, method, closed) => {
     const store = fakeSessionStore({
       resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
     });
@@ -2127,7 +2130,15 @@ describe('handoffToNewSession（issue #694）', () => {
     await handoff;
     expect(oldPanel?.disposed).toBe(false);
 
-    connection.notify(method, { threadId: 'thread-new' });
+    if (method === 'respond') {
+      connection.notify('item/started', {
+        threadId: 'thread-new',
+        turnId: 'turn-1',
+        item: { id: 'i1', type: 'agentMessage', text: '引き継ぎファイルを読みます' },
+      });
+    } else {
+      connection.notify(method, { threadId: 'thread-new' });
+    }
     if (closed) {
       await vi.waitFor(() => {
         expect(oldPanel?.disposed).toBe(true);
@@ -2139,6 +2150,50 @@ describe('handoffToNewSession（issue #694）', () => {
       await tick();
       expect(oldPanel?.disposed).toBe(false);
     }
+  });
+
+  it('旧タブを残したらAttention一覧へ理由付きで出し、人が使い直したら下げる（Issue #1165）', async () => {
+    const store = fakeSessionStore({
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const { manager, connection } = createManager({ store });
+
+    const opened = manager.openNew('/workspace/root');
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-orig'));
+    await opened;
+
+    const handoff = manager.handoffToNewSession();
+    await vi.waitFor(() => {
+      expect(connection.requests.filter((r) => r.method === 'thread/start').length).toBe(2);
+    });
+    connection.resolveFirst('thread/start', threadStartResult('thread-new'));
+    await vi.waitFor(() => {
+      expect(connection.requests.some((r) => r.method === 'turn/start')).toBe(true);
+    });
+    connection.resolveFirst('turn/start', {});
+    await handoff;
+
+    // 引き継ぎ先が応答を返さないままターンを終えたので、旧タブは残る
+    connection.notify('turn/failed', { threadId: 'thread-new' });
+    await vi.waitFor(() => {
+      const old = manager.managedSessions().find((s) => s.threadId === 'thread-orig');
+      expect(old?.handoffKept).toBe('turnFailed');
+    });
+
+    // 人が旧タブで作業を再開したら、気づいた証拠なので印を下げる。発言の項目は
+    // app-serverが返す通知で会話へ入る（拡張機能側では先出ししない）
+    void manager.simulateWebviewMessage('thread-orig', { type: 'send', text: '続きをやる' });
+    await tick();
+    connection.notify('item/started', {
+      threadId: 'thread-orig',
+      turnId: 'turn-resume',
+      item: { id: 'u1', type: 'userMessage', text: '続きをやる' },
+    });
+    await vi.waitFor(() => {
+      const old = manager.managedSessions().find((s) => s.threadId === 'thread-orig');
+      expect(old?.handoffKept).toBeUndefined();
+    });
   });
 
   it('rolloutが解決できなければ、短時間リトライ後にエラー通知して新セッションを作らない', async () => {

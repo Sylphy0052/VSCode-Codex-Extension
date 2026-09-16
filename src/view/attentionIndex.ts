@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { WorkflowRunSnapshot } from '../orchestrator/runner';
 import type { ManagedChatSession } from './chatManagerBase';
+import { oldTabKeptLabel } from './handoff';
 
 export type AttentionTarget =
   | { kind: 'chat'; provider: 'codex' | 'claude'; threadId: string }
@@ -19,10 +20,20 @@ export function buildAttentionItems(
 ): AttentionItem[] {
   const items: AttentionItem[] = [];
   for (const chat of chats) {
+    const provider = chat.provider === 'codex' ? 'Codex' : 'Claude Code';
     if (chat.activity === 'approvalPending') {
       items.push({
         label: chat.title,
-        detail: `${chat.provider === 'codex' ? 'Codex' : 'Claude Code'}・承認待ち`,
+        detail: `${provider}・承認待ち`,
+        target: { kind: 'chat', provider: chat.provider, threadId: chat.threadId },
+      });
+    }
+    // 引き継いだのに閉じられなかった旧タブ（Issue #1165）。これまではOutputへ1行出るだけで、
+    // タブが増えていく側の人からは理由が見えなかった
+    if (chat.handoffKept !== undefined) {
+      items.push({
+        label: chat.title,
+        detail: `${provider}・${oldTabKeptLabel(chat.handoffKept)}`,
         target: { kind: 'chat', provider: chat.provider, threadId: chat.threadId },
       });
     }
@@ -41,10 +52,15 @@ export function buildAttentionItems(
   return items.sort((a, b) => attentionSortKey(a).localeCompare(attentionSortKey(b), 'en'));
 }
 
-/** 状態に発生時刻が無いため、一覧の順序は発生源とその安定識別子だけで決める。 */
+/**
+ * 状態に発生時刻が無いため、一覧の順序は発生源とその安定識別子だけで決める。
+ *
+ * 1つの会話が承認待ちと引き継ぎ元の残存を同時に抱えることがある（Issue #1165）ため、
+ * 識別子だけでは同順になる。`detail` を末尾へ足して順序を決めきる。
+ */
 function attentionSortKey(item: AttentionItem): string {
   if (item.target.kind === 'chat') {
-    return `chat:${item.target.provider}:${item.target.threadId}`;
+    return `chat:${item.target.provider}:${item.target.threadId}:${item.detail}`;
   }
   return `workflow:${item.target.runId}:${item.target.taskId}`;
 }

@@ -11,6 +11,7 @@ function chat(
     title: 'Codex会話',
     cwd: '/workspace',
     activity: 'idle',
+    handoffKept: undefined,
     provider: 'codex',
     ...overrides,
   };
@@ -77,6 +78,30 @@ describe('buildAttentionItems（Issue#1236）', () => {
       { kind: 'chat', provider: 'codex', threadId: 'z' },
       { kind: 'workflow', runId: 'run-1', taskId: 'a-task' },
       { kind: 'workflow', runId: 'run-1', taskId: 'z-task' },
+    ]);
+  });
+
+  it('引き継ぎ元として残った会話を理由付きで出す（Issue#1165）', () => {
+    const items = buildAttentionItems([chat({ handoffKept: 'noResponse' })], []);
+
+    expect(items).toEqual([
+      {
+        label: 'Codex会話',
+        detail: 'Codex・引き継ぎ元が残存・引き継ぎ先が無応答',
+        target: { kind: 'chat', provider: 'codex', threadId: 'thread-1' },
+      },
+    ]);
+  });
+
+  it('承認待ちと引き継ぎ元の残存は同じ会話でも別々の項目にする（Issue#1165）', () => {
+    const items = buildAttentionItems(
+      [chat({ activity: 'approvalPending', handoffKept: 'oldBusy' })],
+      [],
+    );
+
+    expect(items.map((item) => item.detail)).toEqual([
+      'Codex・引き継ぎ元が残存・実行中のため閉じず',
+      'Codex・承認待ち',
     ]);
   });
 });
