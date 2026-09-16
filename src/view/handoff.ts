@@ -985,47 +985,83 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
   return undefined;
 }
 
-/** `waitForFirstTurn` が必要とする最小の形。Codex/Claude Codeのパネルはどちらも満たす。 */
+/**
+ * `waitForDestinationResponse` が必要とする最小の形。Codex/Claude Codeのパネルは
+ * どちらも満たす。
+ */
 export interface HandoffTurnWatch {
   session: { getState(): ChatState };
   stateListeners: Array<(state: ChatState) => void>;
 }
 
-/** 初回応答を待つ上限。これを過ぎたら「成功を確かめられなかった」として扱う。 */
-const FIRST_TURN_TIMEOUT_MS = 15 * 60_000;
+/**
+ * 引き継ぎ先が応答を始めるのを待つ上限（Issue #1165）。
+ *
+ * 2026-09-16に実測したログ103件では、引き継ぎ先の最初のレコードは0.7〜12.2秒で現れた。
+ * 60秒はその最大値に対する余裕で、CLIの起動が遅れた場合まで含めて拾う。
+ */
+const FIRST_RESPONSE_TIMEOUT_MS = 60_000;
 
 /**
- * `waitForFirstTurn` の結果。旧タブを閉じなかった理由をログへ残すため、
+ * 引き継ぎ先からの応答とみなさない項目の種類。
+ *
+ * `userMessage` / `skillContext` は送る側（人・拡張機能）が積むもの。初回プロンプトを
+ * 送った瞬間に`items`は増えるため、外さないと送信そのものを応答と取り違える。
+ *
+ * `settingsChanged` は承認方法の変更・フックの警告など、モデルの出力ではない横からの
+ * 通知（`appendNotice`）である。起動直後の`status`通知でも積まれるため、これを応答と
+ * 数えるとCLIが立ち上がっただけで「プロンプトを受け取って答え始めた」と誤認する。
+ */
+const NON_RESPONSE_ITEM_KINDS: ReadonlySet<string> = new Set([
+  'userMessage',
+  'skillContext',
+  'settingsChanged',
+]);
+
+/** CLIが返した項目の数。増えていれば引き継ぎ先は応答を始めている。 */
+function responseItemCount(state: ChatState): number {
+  return state.items.filter((item) => !NON_RESPONSE_ITEM_KINDS.has(item.kind)).length;
+}
+
+/**
+ * `waitForDestinationResponse` の結果。旧タブを閉じなかった理由をログへ残すため、
  * 失敗時は `succeeded: false` だけでなく理由を区別する（Issue #1158）。`abandoned` は初回
  * プロンプトを送れずに監視を打ち切ったとき（Issue #1162）。
  */
-export type FirstTurnOutcome =
-  { succeeded: true } | { succeeded: false; reason: 'timeout' | 'turnFailed' | 'abandoned' };
+export type DestinationResponseOutcome =
+  { succeeded: true } | { succeeded: false; reason: 'noResponse' | 'turnFailed' | 'abandoned' };
 
 /**
- * 新セッションの最初のターンが終わるのを待ち、成功したかを返す。
+ * 引き継ぎ先が初回プロンプトに応答を始めるのを待ち、始めたかどうかを返す。
  *
- * 旧セッションを止めてよいかの判断に使う。時間切れ・失敗のときは `succeeded: false` を返し、
- * 呼び出し側は旧セッションを残す。`turnCompletionSeq` の変化を境目にするのは
- * `busy` の立ち下がりより取りこぼしが無いため（`onSessionChange` と同じ流儀）。
+ * 旧セッションを止めてよいかの判断に使う。応答が来ない・失敗したときは `succeeded: false`
+ * を返し、呼び出し側は旧セッションを残す。
+ *
+ * **待つのは「初回ターンの完了」ではなく「応答の開始」である（Issue #1165）。** 引き継ぎ先の
+ * 初回ターンは引き継いだ作業そのものなので、完了を待つと旧タブが作業の終わりまで残る。
+ * 2026-09-16の実測では、完了まで15分〜2時間39分かかったターンが9件あり、15分の上限では
+ * どれも間に合わなかった。一方で「CLIが起動して応答を返し始めたか」は0.7〜12.2秒で確定し、
+ * これは「引き継ぎ先が使い物になるか」の判断には十分である。
  *
  * **baselineの取得とlistenerの登録は、この関数を呼んだ時点で同期的に終わる**（Promiseの
  * executorは同期実行されるため）。初回プロンプトの送信より前に呼んでおけば、送信が完了
- * まで返らない実装でも初回ターンの完了を取りこぼさない（Issue #1162）。この同期性は
+ * まで返らない実装でも最初の応答を取りこぼさない（Issue #1162）。この同期性は
  * 呼び出し側との約束なので、`async` 化したり `await` を挟んだりしてはならない。
  *
  * 送信より前に張る以上、送信そのものが失敗したときに監視だけが残る。`giveUp` を渡して
- * `abort()` すれば、タイムアウトを待たずに listener を外して `abandoned` で決着させられる。
+ * `abort()` すれば、上限を待たずに listener を外して `abandoned` で決着させられる。
  */
-export function waitForFirstTurn(
+export function waitForDestinationResponse(
   entry: HandoffTurnWatch,
-  timeoutMs = FIRST_TURN_TIMEOUT_MS,
+  timeoutMs = FIRST_RESPONSE_TIMEOUT_MS,
   giveUp?: AbortSignal,
-): Promise<FirstTurnOutcome> {
-  const baseline = entry.session.getState().turnCompletionSeq;
+): Promise<DestinationResponseOutcome> {
+  const baseline = entry.session.getState();
+  const baselineItems = responseItemCount(baseline);
+  const baselineSeq = baseline.turnCompletionSeq;
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (outcome: FirstTurnOutcome): void => {
+    const finish = (outcome: DestinationResponseOutcome): void => {
       if (settled) {
         return;
       }
@@ -1040,11 +1076,17 @@ export function waitForFirstTurn(
     };
     const onGiveUp = (): void => finish({ succeeded: false, reason: 'abandoned' });
     const listener = (state: ChatState): void => {
-      if (state.turnCompletionSeq !== baseline) {
-        finish(state.turnFailed ? { succeeded: false, reason: 'turnFailed' } : { succeeded: true });
+      if (responseItemCount(state) > baselineItems) {
+        finish({ succeeded: true });
+        return;
+      }
+      // 応答を1件も返さないままターンが終わったなら、引き継ぎ先は使い物になっていない。
+      // 成功・失敗のどちらで終わっても同じ扱いにする（応答が無い以上、続きを託せない）
+      if (state.turnCompletionSeq !== baselineSeq) {
+        finish({ succeeded: false, reason: 'turnFailed' });
       }
     };
-    const timer = setTimeout(() => finish({ succeeded: false, reason: 'timeout' }), timeoutMs);
+    const timer = setTimeout(() => finish({ succeeded: false, reason: 'noResponse' }), timeoutMs);
     entry.stateListeners.push(listener);
     if (giveUp?.aborted === true) {
       onGiveUp();
@@ -1056,7 +1098,7 @@ export function waitForFirstTurn(
 
 /** 引き継ぎ後に旧タブを残したときの理由（ログの `reason=` に出る値）。 */
 export type OldTabKeptReason =
-  'timeout' | 'turnFailed' | 'abandoned' | 'disposed' | 'oldBusy' | 'userDismissed';
+  'noResponse' | 'turnFailed' | 'abandoned' | 'disposed' | 'oldBusy' | 'userDismissed';
 
 /**
  * 引き継ぎ後に旧タブをどう扱うかの決定。
@@ -1069,8 +1111,8 @@ export type OldTabDecision =
 
 /** `decideOldTabAfterHandoff` に渡す、判断に要る事実だけ。VSCodeには依存しない。 */
 export interface OldTabDecisionInput {
-  /** 引き継ぎ先の初回ターンの結果（`waitForFirstTurn` の戻り値）。 */
-  outcome: FirstTurnOutcome;
+  /** 引き継ぎ先が応答を始めたかどうか（`waitForDestinationResponse` の戻り値）。 */
+  outcome: DestinationResponseOutcome;
   /** 引き継ぎ元のパネルが既に破棄済みか。 */
   oldDisposed: boolean;
   /** 引き継ぎ元のセッションがターン実行中か。 */
@@ -1083,10 +1125,10 @@ export interface OldTabDecisionInput {
  * 引き継ぎ後に旧タブを閉じてよいかを決める（Issue #1158 / #1162）。
  *
  * 判断そのものはVSCodeに依存しないため、ここへ切り出して単体テストの対象にする。
- * 呼び出し側（`chatView.ts` / `claudeChatView.ts` の `confirmStopAfterFirstTurn`）は
+ * 呼び出し側（`chatView.ts` / `claudeChatView.ts` の `confirmStopAfterFirstResponse`）は
  * 結果に従って停止・後片付け・確認ダイアログを行うだけにする。
  *
- * 初回ターンが失敗・時間切れのときは、`closeOldTab` の値にかかわらず残す。引き継ぎ先が
+ * 引き継ぎ先が応答を始めなかったときは、`closeOldTab` の値にかかわらず残す。引き継ぎ先が
  * 使い物にならないまま引き継ぎ元を失うのを防ぐため。
  */
 export function decideOldTabAfterHandoff(input: OldTabDecisionInput): OldTabDecision {
@@ -1109,14 +1151,38 @@ export function decideOldTabAfterHandoff(input: OldTabDecisionInput): OldTabDeci
 /** 旧タブを残した理由を、Outputへ1行で出すための説明にする。 */
 export function oldTabKeptMessage(reason: OldTabKeptReason): string {
   const detail: Record<OldTabKeptReason, string> = {
-    timeout: '引き継ぎ先の初回ターンがタイムアウトしたため、旧タブを残します',
-    turnFailed: '引き継ぎ先の初回ターンが失敗したため、旧タブを残します',
+    noResponse: '引き継ぎ先が既定時間内に応答を始めなかったため、旧タブを残します',
+    turnFailed: '引き継ぎ先が応答を返さないままターンを終えたため、旧タブを残します',
     abandoned: '引き継ぎ先へ初回プロンプトを送れず監視を打ち切ったため、旧タブを残します',
     disposed: '引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です',
     oldBusy: '引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します',
     userDismissed: '引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します',
   };
   return `${detail[reason]}（reason=${reason}）`;
+}
+
+/**
+ * 旧タブが残ったことを人へ見せるべき理由か（Issue #1165）。
+ *
+ * `disposed` は旧タブがもう無いので見せる相手がいない。`userDismissed` は人が自分で
+ * 「残す」を選んだ結果なので、改めて知らせても新しい情報にならない。それ以外は
+ * 「引き継いだはずのタブが残っている」状態で、人が閉じるか再開するかを決める必要がある。
+ */
+export function needsAttentionAfterHandoff(reason: OldTabKeptReason): boolean {
+  return reason !== 'disposed' && reason !== 'userDismissed';
+}
+
+/** Attention Indexの一覧に出す、旧タブが残った理由の短い説明（Issue #1165）。 */
+export function oldTabKeptLabel(reason: OldTabKeptReason): string {
+  const label: Record<OldTabKeptReason, string> = {
+    noResponse: '引き継ぎ元が残存・引き継ぎ先が無応答',
+    turnFailed: '引き継ぎ元が残存・引き継ぎ先が応答なしで終了',
+    abandoned: '引き継ぎ元が残存・初回プロンプトを送れず',
+    disposed: '引き継ぎ元が残存',
+    oldBusy: '引き継ぎ元が残存・実行中のため閉じず',
+    userDismissed: '引き継ぎ元が残存',
+  };
+  return label[reason];
 }
 
 /**

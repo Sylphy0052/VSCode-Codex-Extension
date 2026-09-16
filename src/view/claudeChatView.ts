@@ -153,9 +153,9 @@ import {
   resolveWithRetry,
   decideOldTabAfterHandoff,
   oldTabKeptMessage,
-  waitForFirstTurn,
+  waitForDestinationResponse,
   writeHandoffPointer,
-  type FirstTurnOutcome,
+  type DestinationResponseOutcome,
   type HandoffTrigger,
 } from './handoff';
 import {
@@ -905,7 +905,7 @@ export class ClaudeChatViewManager
    * 共通に使う。
    *
    * 旧セッションは**ここでは止めない**。新セッションの初回応答が成功したことを確かめて
-   * から確認ダイアログを出す（`confirmStopAfterFirstTurn`）。先に止めると、引き継ぎに
+   * から確認ダイアログを出す（`confirmStopAfterFirstResponse`）。先に止めると、引き継ぎに
    * 失敗したときに作業を失う。
    *
    * @param notifyFailure 失敗をダイアログで知らせるか。自動発火では出さない
@@ -1054,14 +1054,14 @@ export class ClaudeChatViewManager
     // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
     // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
     const giveUp = new AbortController();
-    const firstTurn = waitForFirstTurn(newEntry, undefined, giveUp.signal);
+    const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
     try {
       this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
     } catch (e) {
       giveUp.abort();
       throw e;
     }
-    void this.confirmStopAfterFirstTurn(entry, firstTurn);
+    void this.confirmStopAfterFirstResponse(entry, firstResponse);
     return true;
   }
 
@@ -1073,18 +1073,19 @@ export class ClaudeChatViewManager
    * 残るので履歴から開き直せる）。失敗・打ち切りのときは設定にかかわらず旧セッションを
    * そのまま残す（引き継ぎ先が使い物にならないまま元を失うのを防ぐ）。
    */
-  private async confirmStopAfterFirstTurn(
+  private async confirmStopAfterFirstResponse(
     oldEntry: ClaudePanel,
-    firstTurn: Promise<FirstTurnOutcome>,
+    firstResponse: Promise<DestinationResponseOutcome>,
   ): Promise<void> {
     const decision = decideOldTabAfterHandoff({
-      outcome: await firstTurn,
+      outcome: await firstResponse,
       oldDisposed: oldEntry.disposed,
       oldBusy: oldEntry.session.getState().busy,
       closeOldTab: readAutoHandoffCloseOldTab(),
     });
     if (decision.action === 'keep') {
       this.log.info(oldTabKeptMessage(decision.reason));
+      this.markHandoffKept(oldEntry, decision.reason);
       return;
     }
     if (decision.action === 'close') {
@@ -1100,7 +1101,9 @@ export class ClaudeChatViewManager
       stop,
     );
     if (choice !== stop || oldEntry.disposed) {
-      this.log.info(oldTabKeptMessage(oldEntry.disposed ? 'disposed' : 'userDismissed'));
+      const reason = oldEntry.disposed ? 'disposed' : 'userDismissed';
+      this.log.info(oldTabKeptMessage(reason));
+      this.markHandoffKept(oldEntry, reason);
       return;
     }
     oldEntry.session.interrupt();

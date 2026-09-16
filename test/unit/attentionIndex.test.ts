@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowRunSnapshot } from '../../src/orchestrator/runner';
-import { buildAttentionItems } from '../../src/view/attentionIndex';
+import { attentionBadge, buildAttentionItems } from '../../src/view/attentionIndex';
 import type { ManagedChatSession } from '../../src/view/chatManagerBase';
 
 function chat(
@@ -11,6 +11,7 @@ function chat(
     title: 'Codex会話',
     cwd: '/workspace',
     activity: 'idle',
+    handoffKept: undefined,
     provider: 'codex',
     ...overrides,
   };
@@ -78,5 +79,40 @@ describe('buildAttentionItems（Issue#1236）', () => {
       { kind: 'workflow', runId: 'run-1', taskId: 'a-task' },
       { kind: 'workflow', runId: 'run-1', taskId: 'z-task' },
     ]);
+  });
+
+  it('引き継ぎ元として残った会話を理由付きで出す（Issue#1165）', () => {
+    const items = buildAttentionItems([chat({ handoffKept: 'noResponse' })], []);
+
+    expect(items).toEqual([
+      {
+        label: 'Codex会話',
+        detail: 'Codex・引き継ぎ元が残存・引き継ぎ先が無応答',
+        target: { kind: 'chat', provider: 'codex', threadId: 'thread-1' },
+      },
+    ]);
+  });
+
+  it('承認待ちと引き継ぎ元の残存は同じ会話でも別々の項目にする（Issue#1165）', () => {
+    const items = buildAttentionItems(
+      [chat({ activity: 'approvalPending', handoffKept: 'oldBusy' })],
+      [],
+    );
+
+    expect(items.map((item) => item.detail)).toEqual([
+      'Codex・引き継ぎ元が残存・実行中のため閉じず',
+      'Codex・承認待ち',
+    ]);
+  });
+});
+
+describe('attentionBadge（Issue#1165）', () => {
+  it('承認待ち以外も数えるため「要対応」と名乗る', () => {
+    expect(attentionBadge(3)).toEqual({ value: 3, tooltip: '要対応 3件' });
+  });
+
+  it('0件以下ではバッジを付けない', () => {
+    expect(attentionBadge(0)).toBeUndefined();
+    expect(attentionBadge(-1)).toBeUndefined();
   });
 });

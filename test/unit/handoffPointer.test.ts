@@ -18,9 +18,10 @@ import {
   recentUserMessages,
   recentAssistantMessages,
   shellQuote,
-  waitForFirstTurn,
+  waitForDestinationResponse,
   decideOldTabAfterHandoff,
   oldTabKeptMessage,
+  needsAttentionAfterHandoff,
   writeHandoffPointer,
   type HandoffPointerInput,
 } from '../../src/view/handoff';
@@ -649,50 +650,88 @@ describe('新セッションの初回応答を待つ', () => {
     };
   }
 
-  it('ターンが成功して終われば succeeded:true を返し、listenerを外す', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 3 });
-    const done = waitForFirstTurn(w);
+  it('CLIが項目を返し始めれば succeeded:true を返し、listenerを外す', async () => {
+    const w = watcher({ ...initialChatState, items: [item('userMessage', '引き継ぎ')] });
+    const done = waitForDestinationResponse(w);
     expect(w.stateListeners).toHaveLength(1);
 
-    w.emit({ ...initialChatState, turnCompletionSeq: 4, turnFailed: false });
+    w.emit({
+      ...initialChatState,
+      items: [item('userMessage', '引き継ぎ'), item('agentMessage', '読みます')],
+    });
 
     expect(await done).toEqual({ succeeded: true });
     expect(w.stateListeners).toHaveLength(0);
   });
 
-  it('ターンが失敗して終われば reason:turnFailed を返す（旧セッションを残す）', async () => {
+  it('ターンの完了は待たない（応答が始まった時点で決める。Issue #1165）', async () => {
+    const w = watcher({ ...initialChatState, turnCompletionSeq: 3 });
+    const done = waitForDestinationResponse(w, 50);
+
+    // 完了の世代は動かないまま、ツール実行の項目だけが現れる
+    w.emit({ ...initialChatState, turnCompletionSeq: 3, busy: true, items: [item('reasoning')] });
+
+    expect(await done).toEqual({ succeeded: true });
+  });
+
+  it('送った側の項目・横からの通知が増えただけでは決めない', async () => {
+    const w = watcher({ ...initialChatState, items: [] });
+    const done = waitForDestinationResponse(w, 50);
+
+    w.emit({
+      ...initialChatState,
+      busy: true,
+      items: [
+        // 初回プロンプトの送信そのもの
+        item('userMessage', '引き継ぎ'),
+        item('skillContext', 'skill'),
+        // 起動直後のstatus通知（モデルの出力ではない）
+        item('settingsChanged', ''),
+      ],
+    });
+    expect(w.stateListeners).toHaveLength(1);
+
+    expect(await done).toEqual({ succeeded: false, reason: 'noResponse' });
+  });
+
+  it('応答を1件も返さないままターンが終われば reason:turnFailed を返す（旧セッションを残す）', async () => {
     const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
-    const done = waitForFirstTurn(w);
+    const done = waitForDestinationResponse(w);
 
     w.emit({ ...initialChatState, turnCompletionSeq: 1, turnFailed: true });
 
     expect(await done).toEqual({ succeeded: false, reason: 'turnFailed' });
   });
 
-  it('時間切れなら reason:timeout を返す', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
-    expect(await waitForFirstTurn(w, 1)).toEqual({ succeeded: false, reason: 'timeout' });
+  it('時間切れなら reason:noResponse を返す', async () => {
+    const w = watcher({ ...initialChatState });
+    expect(await waitForDestinationResponse(w, 1)).toEqual({
+      succeeded: false,
+      reason: 'noResponse',
+    });
     expect(w.stateListeners).toHaveLength(0);
   });
 
   it('呼んだ時点でbaselineとlistenerが確定する（送信前に張れば取りこぼさない。Issue #1162）', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 7 });
+    const w = watcher({ ...initialChatState, items: [item('agentMessage', '前の応答')] });
 
     // 初回プロンプトの送信より前に監視を張る想定。awaitを一度も挟まずに登録が終わる
-    const done = waitForFirstTurn(w, 50);
+    const done = waitForDestinationResponse(w, 50);
     expect(w.stateListeners).toHaveLength(1);
 
-    // 送信の完了を待っている間にターンが終わってしまっても、baselineは呼び出し時点の
-    // 7 のままなので完了を拾える
-    w.emit({ ...initialChatState, turnCompletionSeq: 8, turnFailed: false });
+    // 送信の完了を待っている間に応答が来ても、baselineは呼び出し時点の1件のままなので拾える
+    w.emit({
+      ...initialChatState,
+      items: [item('agentMessage', '前の応答'), item('agentMessage', '新しい応答')],
+    });
 
     expect(await done).toEqual({ succeeded: true });
   });
 
   it('監視を打ち切ったら reason:abandoned を返し、listenerを外す（送信に失敗したとき）', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const w = watcher({ ...initialChatState });
     const giveUp = new AbortController();
-    const done = waitForFirstTurn(w, 60_000, giveUp.signal);
+    const done = waitForDestinationResponse(w, 60_000, giveUp.signal);
     expect(w.stateListeners).toHaveLength(1);
 
     giveUp.abort();
@@ -702,37 +741,26 @@ describe('新セッションの初回応答を待つ', () => {
   });
 
   it('既にabort済みのsignalを渡したら、その場で打ち切る', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+    const w = watcher({ ...initialChatState });
     const giveUp = new AbortController();
     giveUp.abort();
 
-    expect(await waitForFirstTurn(w, 60_000, giveUp.signal)).toEqual({
+    expect(await waitForDestinationResponse(w, 60_000, giveUp.signal)).toEqual({
       succeeded: false,
       reason: 'abandoned',
     });
     expect(w.stateListeners).toHaveLength(0);
   });
 
-  it('ターンが先に終われば、後からabortしても結果は変わらない', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
+  it('応答が先に来れば、後からabortしても結果は変わらない', async () => {
+    const w = watcher({ ...initialChatState });
     const giveUp = new AbortController();
-    const done = waitForFirstTurn(w, 60_000, giveUp.signal);
+    const done = waitForDestinationResponse(w, 60_000, giveUp.signal);
 
-    w.emit({ ...initialChatState, turnCompletionSeq: 1, turnFailed: false });
+    w.emit({ ...initialChatState, items: [item('agentMessage', '読みます')] });
     giveUp.abort();
 
     expect(await done).toEqual({ succeeded: true });
-  });
-
-  it('ターンが終わる前の状態更新では決めない', async () => {
-    const w = watcher({ ...initialChatState, turnCompletionSeq: 0 });
-    const done = waitForFirstTurn(w, 50);
-
-    // busyになっただけ（完了していない）
-    w.emit({ ...initialChatState, turnCompletionSeq: 0, busy: true });
-    expect(w.stateListeners).toHaveLength(1);
-
-    expect(await done).toEqual({ succeeded: false, reason: 'timeout' });
   });
 });
 
@@ -747,14 +775,14 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
     };
   }
 
-  it('初回ターンが成功していて旧が空いていれば閉じる', () => {
+  it('引き継ぎ先が応答を始めていて旧が空いていれば閉じる', () => {
     expect(decideOldTabAfterHandoff(input())).toEqual({ action: 'close' });
   });
 
-  it('初回ターンが時間切れなら、closeOldTabが有効でも残す', () => {
+  it('引き継ぎ先が応答を始めなければ、closeOldTabが有効でも残す', () => {
     expect(
-      decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'timeout' } })),
-    ).toEqual({ action: 'keep', reason: 'timeout' });
+      decideOldTabAfterHandoff(input({ outcome: { succeeded: false, reason: 'noResponse' } })),
+    ).toEqual({ action: 'keep', reason: 'noResponse' });
   });
 
   it('初回ターンが失敗したら、closeOldTabが有効でも残す', () => {
@@ -835,12 +863,22 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
   });
 
   it('残した理由はreason付きの1行になる', () => {
-    expect(oldTabKeptMessage('timeout')).toContain('reason=timeout');
+    expect(oldTabKeptMessage('noResponse')).toContain('reason=noResponse');
     expect(oldTabKeptMessage('turnFailed')).toContain('reason=turnFailed');
     expect(oldTabKeptMessage('abandoned')).toContain('reason=abandoned');
     expect(oldTabKeptMessage('disposed')).toContain('reason=disposed');
     expect(oldTabKeptMessage('oldBusy')).toContain('reason=oldBusy');
     expect(oldTabKeptMessage('userDismissed')).toContain('reason=userDismissed');
+  });
+
+  it('人へ見せる理由だけをAttention Indexの対象にする（Issue #1165）', () => {
+    expect(needsAttentionAfterHandoff('noResponse')).toBe(true);
+    expect(needsAttentionAfterHandoff('turnFailed')).toBe(true);
+    expect(needsAttentionAfterHandoff('abandoned')).toBe(true);
+    expect(needsAttentionAfterHandoff('oldBusy')).toBe(true);
+    // 旧タブがもう無い・人が自分で残すと決めた分は、改めて知らせても新しい情報にならない
+    expect(needsAttentionAfterHandoff('disposed')).toBe(false);
+    expect(needsAttentionAfterHandoff('userDismissed')).toBe(false);
   });
 });
 

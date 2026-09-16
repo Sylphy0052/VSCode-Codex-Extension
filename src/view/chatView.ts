@@ -110,9 +110,9 @@ import {
   safeBoundaryProbeKey,
   decideOldTabAfterHandoff,
   oldTabKeptMessage,
-  waitForFirstTurn,
+  waitForDestinationResponse,
   writeHandoffPointer,
-  type FirstTurnOutcome,
+  type DestinationResponseOutcome,
   type HandoffTrigger,
 } from './handoff';
 import {
@@ -753,7 +753,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 引き継ぎの本体。手動操作と自動発火で共通に使う。
    *
    * 旧セッションは**ここでは止めない**。新セッションの初回応答が成功してから確認
-   * ダイアログを出す（`confirmStopAfterFirstTurn`）。先に止めると、引き継ぎに失敗した
+   * ダイアログを出す（`confirmStopAfterFirstResponse`）。先に止めると、引き継ぎに失敗した
    * ときに作業を失う。
    *
    * @param notifyFailure 失敗をダイアログで知らせるか。自動発火では出さない
@@ -903,7 +903,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
     // 残ってしまうため、その場で打ち切る
     const giveUp = new AbortController();
-    const firstTurn = waitForFirstTurn(newEntry, undefined, giveUp.signal);
+    const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
     try {
       await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
     } catch (e) {
@@ -911,7 +911,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       throw e;
     }
     this.reportActivity(newEntry, text);
-    void this.confirmStopAfterFirstTurn(entry, firstTurn);
+    void this.confirmStopAfterFirstResponse(entry, firstResponse);
     return true;
   }
 
@@ -922,18 +922,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * たびにタブが増えるのを避ける。履歴は残るので開き直せる）。初回ターンが失敗・時間切れの
    * ときは、設定にかかわらず旧セッションをそのまま残す。
    */
-  private async confirmStopAfterFirstTurn(
+  private async confirmStopAfterFirstResponse(
     oldEntry: ChatPanel,
-    firstTurn: Promise<FirstTurnOutcome>,
+    firstResponse: Promise<DestinationResponseOutcome>,
   ): Promise<void> {
     const decision = decideOldTabAfterHandoff({
-      outcome: await firstTurn,
+      outcome: await firstResponse,
       oldDisposed: oldEntry.disposed,
       oldBusy: oldEntry.session.getState().busy,
       closeOldTab: readAutoHandoffCloseOldTab(),
     });
     if (decision.action === 'keep') {
       this.log.info(oldTabKeptMessage(decision.reason));
+      this.markHandoffKept(oldEntry, decision.reason);
       return;
     }
     if (decision.action === 'close') {
@@ -949,7 +950,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       stop,
     );
     if (choice !== stop || oldEntry.disposed) {
-      this.log.info(oldTabKeptMessage(oldEntry.disposed ? 'disposed' : 'userDismissed'));
+      const reason = oldEntry.disposed ? 'disposed' : 'userDismissed';
+      this.log.info(oldTabKeptMessage(reason));
+      this.markHandoffKept(oldEntry, reason);
       return;
     }
     void oldEntry.session.interrupt();
