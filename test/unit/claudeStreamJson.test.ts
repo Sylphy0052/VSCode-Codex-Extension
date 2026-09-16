@@ -461,6 +461,63 @@ describe('applyStreamEvent', () => {
     expect(messages[0]).toMatchObject({ id: 'complete_msg:text:0', text: '応答' });
   });
 
+  it('assistantがブロックごとに分かれて届いても断片と同じ項目に収める', () => {
+    const state = apply([
+      { type: 'system', subtype: 'init', session_id: ID },
+      {
+        type: 'stream_event',
+        event: { type: 'message_start', message: { id: 'msg_1', role: 'assistant', content: [] } },
+      },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'thinking', thinking: '' },
+        },
+      },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: '考え中' },
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          id: 'msg_1',
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: '考え中' }],
+        },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 1,
+          delta: { type: 'text_delta', text: '直します' },
+        },
+      },
+      {
+        type: 'assistant',
+        message: { id: 'msg_1', role: 'assistant', content: [{ type: 'text', text: '直します' }] },
+      },
+    ]);
+
+    const messages = state.items.filter((i) => i.kind === 'agentMessage');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ id: 'msg_1:text:1', text: '直します' });
+    const thinking = state.items.filter((i) => i.kind === 'reasoning');
+    expect(thinking).toHaveLength(1);
+    expect(thinking[0]).toMatchObject({ id: 'msg_1:thinking:0', text: '考え中' });
+  });
+
   it('rate_limit_event から制限の状態を取り込む', () => {
     const state = apply([
       { type: 'system', subtype: 'init', session_id: ID },
