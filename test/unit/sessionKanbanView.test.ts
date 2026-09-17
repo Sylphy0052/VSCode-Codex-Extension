@@ -19,8 +19,13 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
+const CURRENT_WINDOW_ID = 'w1';
+
 function board(total: number): SessionKanbanBoard {
-  return { cards: { approvalPending: [], running: [], idle: [] }, total };
+  return {
+    cards: { approvalPending: [], running: [], backgroundRunning: [], idle: [] },
+    total,
+  };
 }
 
 interface Harness {
@@ -37,6 +42,8 @@ function open(): Harness {
   const view = new SessionKanbanViewManager(
     () => board(total),
     () => true,
+    () => undefined,
+    CURRENT_WINDOW_ID,
     fakeLogger,
   );
   view.show();
@@ -176,6 +183,8 @@ describe('SessionKanbanViewManager（issue #1012、盤面の送信）', () => {
     const view = new SessionKanbanViewManager(
       () => board(0),
       () => true,
+      () => undefined,
+      CURRENT_WINDOW_ID,
       fakeLogger,
     );
     expect(() => {

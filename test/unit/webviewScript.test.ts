@@ -59,14 +59,20 @@ describe('chatScript', () => {
     ).not.toThrow();
   });
 
-  it('外周の枠色は、バックグラウンドターミナルとセカンドオピニオンのどちらでも黄になる（Issue #905）', () => {
+  it('外周の枠色は、バックグラウンドターミナルが残っていれば黄になる（Issue #905）', () => {
     const source = chatScript('Codex', { mode: 'quickPick' });
 
     // 枠色の判定は1か所（applyBackgroundRunning）に集約し、状態更新とメッセージ受信の
-    // 両方から呼ぶ。片方だけでクラスを付け外しすると、次の状態更新で消える
+    // 両方から呼ぶ。片方だけでクラスを付け外しすると、次の状態更新で消える。
+    // セカンドオピニオンの実行中は条件に含めない（Issue #1244。統括ページの
+    // backgroundRunning列は拡張側のChatStateから判定しており、webviewだけが知る
+    // セカンドオピニオンの実行状態を含められないため、ここも条件を合わせた）
     expect(source).toContain('function applyBackgroundRunning(busy)');
-    expect(source).toContain('!busy && (hasBackgroundTerminals || secondOpinionRunning)');
-    expect(source).toContain('secondOpinionRunning = data.running;');
+    expect(source).toContain("'background-running', !busy && hasBackgroundTerminals");
+    // secondOpinionRunningメッセージ自体（ボタンの二重起動防止）は残るが、
+    // 枠色の判定用の変数代入は無くなっている
+    expect(source).not.toContain('secondOpinionRunning = data.running');
+    expect(source).not.toContain('let secondOpinionRunning');
     // 状態更新側も同じ関数を通る（旧実装のように条件式を直接書かない）
     expect(source).toContain('applyBackgroundRunning(!!state.busy);');
     expect(source).not.toContain("'background-running',\n      !state.busy &&");

@@ -5,16 +5,35 @@ import {
   sanitizeForNotification,
 } from '../../src/view/sessionActivity';
 
-describe('deriveSessionActivityState（issue #286）', () => {
-  it('busyがfalse・approvalsが空なら待機中', () => {
-    expect(deriveSessionActivityState({ busy: false, approvals: [] })).toBe('idle');
+describe('deriveSessionActivityState（issue #286、4種化はIssue #1244）', () => {
+  it('busyがfalse・approvalsが空・backgroundTerminalsも空なら待機中', () => {
+    expect(
+      deriveSessionActivityState({ busy: false, approvals: [], backgroundTerminals: [] }),
+    ).toBe('idle');
   });
 
   it('busyがtrueなら実行中', () => {
-    expect(deriveSessionActivityState({ busy: true, approvals: [] })).toBe('running');
+    expect(
+      deriveSessionActivityState({ busy: true, approvals: [], backgroundTerminals: [] }),
+    ).toBe('running');
   });
 
-  it('approvalsが1件以上あれば承認待ち（busyの値に関わらず優先する）', () => {
+  it('busyがfalseでbackgroundTerminalsが1件以上あればバックグラウンド実行中', () => {
+    const terminal = {
+      id: 'term-1',
+      command: 'npm test',
+      status: 'inProgress' as const,
+      cwd: '/repo',
+      processId: undefined,
+      taskType: undefined,
+      stoppable: false,
+    };
+    expect(
+      deriveSessionActivityState({ busy: false, approvals: [], backgroundTerminals: [terminal] }),
+    ).toBe('backgroundRunning');
+  });
+
+  it('approvalsが1件以上あれば承認待ち（busy・backgroundTerminalsの値に関わらず優先する）', () => {
     const approval = {
       requestId: 1,
       kind: 'command' as const,
@@ -22,12 +41,12 @@ describe('deriveSessionActivityState（issue #286）', () => {
       detail: 'd',
       itemId: undefined,
     };
-    expect(deriveSessionActivityState({ busy: true, approvals: [approval] })).toBe(
-      'approvalPending',
-    );
-    expect(deriveSessionActivityState({ busy: false, approvals: [approval] })).toBe(
-      'approvalPending',
-    );
+    expect(
+      deriveSessionActivityState({ busy: true, approvals: [approval], backgroundTerminals: [] }),
+    ).toBe('approvalPending');
+    expect(
+      deriveSessionActivityState({ busy: false, approvals: [approval], backgroundTerminals: [] }),
+    ).toBe('approvalPending');
   });
 });
 
