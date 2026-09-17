@@ -128,6 +128,12 @@ export function commandExistsOnPath(
  *
  * シェルは介さない（`spawn`の`shell: false`で起動する）。パイプやリダイレクトは使えないが、
  * 設定値がそのままシェルへ渡ることも無い。
+ *
+ * **`${file}`へ差し込む値をエスケープしない。** どのコマンドへ渡すかは設定した本人しか
+ * 知らず、引用の作法もコマンド次第（PowerShellなら`'`を`''`、シェルスクリプトならまた別）で、
+ * こちらが一律に逃がすと大半の場合に壊れた文字列を渡すことになる。テンプレート自身が
+ * PowerShellのように引用の要る構文を書くなら、引用の面倒も書いた側で見る。既定の候補
+ * （{@link WINDOWS_CANDIDATES}）はこちらが構文を決めているため、そちらではエスケープする。
  */
 export function parsePlayerCommandTemplate(
   template: string,

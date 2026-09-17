@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   candidatesFor,
   commandExistsOnPath,
   parsePlayerCommandTemplate,
   resolvePlayCommand,
+  spawnPlayCommand,
 } from '../../src/util/soundPlayback';
+
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
 const FILE = '/ext/resources/se_sac03.wav';
 
@@ -134,6 +139,61 @@ describe('candidatesFor', () => {
       'aplay',
       'ffplay',
     ]);
+  });
+});
+
+describe('spawnPlayCommand', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  /** `unref()`を持つ、子プロセスの最小限のフェイク。`error`イベントを後から流せる。 */
+  function fakeChild(): EventEmitter & { unref: () => void } {
+    const child = new EventEmitter() as EventEmitter & { unref: () => void };
+    child.unref = vi.fn();
+    return child;
+  }
+
+  it('待ち合わせずに起動する（detached・stdio無視・シェル無し）', () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+
+    expect(spawnPlayCommand({ command: 'paplay', args: [FILE] })).toBe(true);
+    expect(spawnMock).toHaveBeenCalledWith('paplay', [FILE], {
+      detached: true,
+      stdio: 'ignore',
+      shell: false,
+    });
+    // unrefしないと拡張機能の終了が再生プロセスに引きずられる
+    expect(child.unref).toHaveBeenCalled();
+  });
+
+  it("起動後の'error'は拾ってonErrorへ渡す（拾わないと拡張ホストごと落ちる）", () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+    const onError = vi.fn();
+
+    spawnPlayCommand({ command: 'paplay', args: [FILE] }, onError);
+    expect(() => child.emit('error', new Error('spawn paplay ENOENT'))).not.toThrow();
+    expect(onError).toHaveBeenCalledWith('spawn paplay ENOENT');
+  });
+
+  it('spawnが投げてもfalseを返すだけで、例外は呼び出し側へ漏らさない', () => {
+    spawnMock.mockImplementation(() => {
+      throw new Error('EACCES');
+    });
+    const onError = vi.fn();
+
+    expect(spawnPlayCommand({ command: 'paplay', args: [FILE] }, onError)).toBe(false);
+    expect(onError).toHaveBeenCalledWith('EACCES');
+  });
+
+  it('onErrorを渡さなくても落ちない', () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+
+    spawnPlayCommand({ command: 'paplay', args: [FILE] });
+    expect(() => child.emit('error', new Error('boom'))).not.toThrow();
   });
 });
 
