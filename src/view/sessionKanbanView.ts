@@ -51,7 +51,7 @@ export class SessionKanbanViewManager implements vscode.Disposable {
     if (this.panel === undefined) {
       this.panel = vscode.window.createWebviewPanel(
         SessionKanbanViewManager.viewType,
-        'セッションカンバン',
+        'セッション統括',
         vscode.ViewColumn.Beside,
         { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true },
       );
@@ -71,12 +71,12 @@ export class SessionKanbanViewManager implements vscode.Disposable {
       this.panel.webview.onDidReceiveMessage((message: unknown) => this.receive(message));
       // 初回の盤面はwebviewからの`ready`に対して送る。ここで送っても、webview側が
       // `message`のlistenerを登録する前なら届かない（VS Codeは順序を保証しない）
-      this.log.info('セッションカンバンを開いた');
+      this.log.info('セッション統括を開いた');
       return;
     }
     this.panel.reveal();
     this.schedulePost();
-    this.log.info('セッションカンバンを表に出した');
+    this.log.info('セッション統括を表に出した');
   }
 
   refresh(): void {
@@ -177,6 +177,7 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .summary { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; } .metric { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 12px; padding: 6px 10px; white-space: nowrap; } .metric strong { font-size: 16px; margin-right: 4px; } .metric.alert { border-color: var(--vscode-charts-yellow); }
 .board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 16px; align-items: start; } .column { background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 260px; overflow: hidden; } .column-head { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; } .icon { font-size: 16px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 .cards { display: grid; gap: 9px; padding: 10px; } .card { appearance: none; color: inherit; font: inherit; text-align: left; cursor: pointer; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 12px; } .card:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); } .card:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; margin-top: 8px; } .provider { text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
+@media (max-width: 1180px) { .board { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
 @media (max-width: 820px) { header { display:block; } .summary { justify-content:flex-start; margin-top:16px; } .board { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 `;

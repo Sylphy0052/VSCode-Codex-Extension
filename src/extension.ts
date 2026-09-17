@@ -1042,14 +1042,24 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 再利用されるため使わない。
   const windowId = generateWindowId();
   const sessionHubRootDir = sessionHubRoot(context.globalStorageUri.fsPath);
+  // 共有ファイルへ出す項目はここで明示的に選ぶ。`...session`のままだと
+  // `ManagedChatSession`へ項目が増えるたびに、意図しない値が共有ファイルへ流れ出す
   const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] =>
-    (provider === 'codex' ? chat : claudeChat)
-      .managedSessions()
-      .map((session) => ({ ...session, provider }));
+    (provider === 'codex' ? chat : claudeChat).managedSessions().map((session) => ({
+      threadId: session.threadId,
+      title: session.title,
+      cwd: session.cwd,
+      activity: session.activity,
+      provider,
+    }));
+  const currentWindowSessions = (): SharedSession[] => [
+    ...toSharedSessions('codex'),
+    ...toSharedSessions('claude'),
+  ];
   const sessionHubWriter = new SessionHubWriter(
     sessionHubRootDir,
     windowId,
-    () => [...toSharedSessions('codex'), ...toSharedSessions('claude')],
+    currentWindowSessions,
     log,
   );
   sessionHubWriter.start();
@@ -1065,7 +1075,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           ? claudeChat.revealSession(request.threadId)
           : chat.revealSession(request.threadId);
       if (!revealed) {
-        log.info(`セッション統括: 要求されたセッションは既に閉じられています（${request.threadId}）`);
+        log.info(
+          `セッション統括: 要求されたセッションは既に閉じられています（${request.threadId}）`,
+        );
       }
     },
     log,
@@ -1074,12 +1086,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionKanban = new SessionKanbanViewManager(
     () => {
       const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-      const selfSessions: ManagedSessionInput[] = [
-        ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const, windowId })),
-        ...claudeChat
-          .managedSessions()
-          .map((session) => ({ ...session, provider: 'claude' as const, windowId })),
-      ];
+      const selfSessions: ManagedSessionInput[] = currentWindowSessions().map((session) => ({
+        ...session,
+        windowId,
+      }));
       const otherSessions: ManagedSessionInput[] = sessionHubReader
         .getOthers()
         .flatMap((window) =>
@@ -1116,7 +1126,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const onSessionKanbanRelevantChange = (): void => {
     sessionKanban.refresh();
     // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる
-    void sessionHubWriter.write();
+    // （実際の書き込みはWriter側でまとめる）
+    sessionHubWriter.requestWrite();
   };
   context.subscriptions.push(
     sessionKanban,
