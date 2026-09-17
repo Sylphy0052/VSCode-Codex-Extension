@@ -1000,6 +1000,7 @@ export class ClaudeChatViewManager
     if (trigger.kind !== 'manual') {
       playNotificationSound('handoff', entry.panel?.visible === true);
     }
+
     // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
     // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
     // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる。

@@ -3314,6 +3314,7 @@ Windowsの`System.Media.SoundPlayer`はPCMのWAVしか再生できない。設�
 
 - リモート開発（WSL / SSH / Dev Container）では拡張ホスト側で鳴る。音声デバイスが無い環境では鳴らないため、その場合は`playerCommand`でホスト側の再生（WSLなら`powershell.exe`経由）へ逃がす
 - `commandExistsOnPath`の結果をキャッシュしていない。鳴らすたびにPATHを走査する（`existsSync`の数回分であり、ターンの完了頻度から見て無視できる）
+- 自動引き継ぎの音（issue #1246）は、直前のターン完了の音に続けて鳴ることがある。自動引き継ぎの判定はターンの完了を契機に走るため、`turnComplete`と`handoff`が短い間隔で連続する。二重に聞こえるのが煩わしい場合は`agent.notifications.sound.turnComplete`を無効にする（引き継ぎ側だけを残せる）
 - 音量は調整できない。音源そのものを差し替えて対応する
 - 再生コマンドがハングした場合、`detached`で放置した子プロセスが残る（`unref()`しているため拡張機能の終了は妨げない）
 - 通知の「開く」はタブをrevealするだけで、承認カード自体へスクロールする等の追加の誘導は無い（既存の承認カードは会話の最新項目に出るため、revealで大抵は視界に入る）
