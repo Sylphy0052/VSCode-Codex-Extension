@@ -56,12 +56,33 @@ describe('表示密度のクラス（issue #718）', () => {
   it('既定では comfortable のクラスが付く', () => {
     // 設定を書いていない利用者の見た目が変わらないこと
     const html = renderShell(fakeWebview() as never, buildOptions());
-    expect(html).toContain('<body class="density-comfortable">');
+    expect(html).toContain('<body class="density-comfortable ');
   });
 
   it('compact を渡すと compact のクラスが付く', () => {
     const html = renderShell(fakeWebview() as never, buildOptions({ density: 'compact' }));
-    expect(html).toContain('<body class="density-compact">');
+    expect(html).toContain('<body class="density-compact ');
+  });
+});
+
+describe('外装のクラス（issue #1249）', () => {
+  it('既定では cyber のクラスが付く', () => {
+    const html = renderShell(fakeWebview() as never, buildOptions());
+    expect(html).toContain('<body class="density-comfortable skin-cyber">');
+  });
+
+  it('plain を渡すと plain のクラスが付く', () => {
+    // plain 側に効く規則は無く、サイバー固有の規則が外れることで従来の見た目へ戻る
+    const html = renderShell(fakeWebview() as never, buildOptions({ skin: 'plain' }));
+    expect(html).toContain('<body class="density-comfortable skin-plain">');
+  });
+
+  it('密度と外装は独立して付く', () => {
+    const html = renderShell(
+      fakeWebview() as never,
+      buildOptions({ density: 'compact', skin: 'plain' }),
+    );
+    expect(html).toContain('<body class="density-compact skin-plain">');
   });
 });
 

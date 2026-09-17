@@ -16,6 +16,7 @@ import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
 import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { normalizeChatDensity, type ChatDensity } from './view/density';
+import { normalizeChatSkin, type ChatSkin } from './view/skin';
 import { isCostPreset, type CostPreset } from './view/handoffRouter';
 import {
   DEFAULT_CI_WAIT_TIMEOUT_SEC,
@@ -188,6 +189,18 @@ export function readChatRenderMarkdownConfig(): boolean {
 export function readChatDensityConfig(): ChatDensity {
   const c = vscode.workspace.getConfiguration('agent');
   return normalizeChatDensity(c.get<unknown>('chat.density'));
+}
+
+/**
+ * 会話画面の外装（`agent.chat.skin`、既定 `cyber`、issue #1249）。
+ * `plain` にすると装飾を足す前の見た目へ戻る。丸めは `normalizeChatSkin`
+ * （`vscode`に依存しない純粋関数）が行い、ここでは生値を渡すだけ。`density` と
+ * 同じ `agent.chat.*` 名前空間・`window` スコープ（見た目の好みであって権限には
+ * 関わらないため）。
+ */
+export function readChatSkinConfig(): ChatSkin {
+  const c = vscode.workspace.getConfiguration('agent');
+  return normalizeChatSkin(c.get<unknown>('chat.skin'));
 }
 
 /**

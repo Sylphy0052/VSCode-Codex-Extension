@@ -45,6 +45,7 @@ import {
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatDensityConfig,
+  readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
@@ -2090,6 +2091,8 @@ export class ClaudeChatViewManager
       sendOn: readChatSendOnConfig(),
       // 表示密度（issue #718、設定 agent.chat.density）。chatView.ts（Codex）と同じ配線
       density: readChatDensityConfig(),
+      // 外装（issue #1249、設定 agent.chat.skin）。density と同じく body のクラスにだけ効く
+      skin: readChatSkinConfig(),
     });
   }
 

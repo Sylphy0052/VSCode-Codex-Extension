@@ -1111,6 +1111,233 @@ ${sharedStyles()}
   .md-code .tok-number {
     color: var(--vscode-symbolIcon-numberForeground, var(--vscode-charts-green));
   }
+  /*
+   * ここから下はサイバー外装（issue #1249、設定 agent.chat.skin = cyber、既定）。
+   *
+   * 規則はすべて body.skin-cyber の配下に置く。plain を選んだときに従来と1pxも
+   * 変わらないことを、この構造だけで担保するため。ここより上の規則は外装に関わらず
+   * 効く地の見た目で、外装を足すときも触らない。
+   *
+   * 守っている線引きは2つ:
+   *
+   * - 可読性: 本文の文字色・背景色・行長（--chat-measure）・密度（--chat-turn-gap 他）・
+   *   行間は変えない。本文テキストに text-shadow を掛けない（にじみは可読性を直接下げる）。
+   *   発光は枠・左のバー・見出しといった装飾側にだけ載せる。
+   * - 軽さ: filter / backdrop-filter は使わない（合成が重く、項目が多いこの画面では効く）。
+   *   無限に回るアニメーションは応答中の走査線1本だけで、停止中は動くものが無い。
+   *   常時掛かる box-shadow は .item の1層まで。それ以上はホバーとフォーカスのときだけ。
+   *   アニメーションの対象は transform と opacity に限る（レイアウトと塗りを再計算させない）。
+   *
+   * 色は独自に持つ。sharedStyles.ts が色をテーマ変数から取る方針なのは、テーマへの追随を
+   * こちらの更新漏れで止めないため。ネオンはテーマ変数から作れない（どのテーマもこの彩度の
+   * 色を持たない）ので、外装を選んだときだけ効く独自色として、ここに閉じ込める。地の色
+   * （本文・背景）は従来どおりテーマ変数のままで、独自色は装飾にしか使わない。
+   */
+  body.skin-cyber {
+    /* シアン: 自分の発言と、いま動いているもの */
+    --agent-neon-1: #4fe3ff;
+    /* 紫: エージェントの応答 */
+    --agent-neon-2: #b388ff;
+    /* マゼンタ: 対応を待っているもの（承認カード） */
+    --agent-neon-3: #ff5c8a;
+    /* 枠線。地の枠（--agent-border）へシアンを混ぜて、線の存在感だけ上げる */
+    --agent-neon-edge: color-mix(in srgb, var(--agent-neon-1) 28%, var(--agent-border));
+    /* 発光。box-shadow の色にだけ使う */
+    --agent-neon-glow: color-mix(in srgb, var(--agent-neon-1) 45%, transparent);
+    /* 背景の方眼。1枚の背景画像で出すので要素は増えない */
+    --agent-grid-line: color-mix(in srgb, var(--agent-neon-1) 7%, transparent);
+    --agent-grid-step: 48px;
+    /* カードの地。本文の背景そのものなので、混ぜるのはごく薄く */
+    --agent-card-bg: color-mix(
+      in srgb,
+      var(--agent-neon-1) 4%,
+      var(--vscode-editorWidget-background)
+    );
+    /* カード右上の切り欠き。0px にすると角が戻る（高コントラストテーマで使う） */
+    --agent-notch: 10px;
+    /* 見出しの書体と字間。端末の表示に寄せる */
+    --agent-head-font: var(--vscode-editor-font-family, var(--vscode-font-family));
+    --agent-head-tracking: 0.06em;
+    /* 走査線の濃さ */
+    --agent-scan-opacity: 0.5;
+    /* 項目ごとの左のバー。種別ごとに下で差し替える */
+    --agent-item-accent: var(--agent-neon-edge);
+  }
+  /*
+   * lightテーマでは彩度と発光を落とす。暗い背景で成立する明るいネオンは、白地では
+   * 浮いて本文より目立ってしまう。
+   */
+  body.skin-cyber.vscode-light {
+    --agent-neon-1: #0f7f9c;
+    --agent-neon-2: #6b3fd4;
+    --agent-neon-3: #c2185b;
+    --agent-grid-line: color-mix(in srgb, var(--agent-neon-1) 5%, transparent);
+    --agent-neon-glow: color-mix(in srgb, var(--agent-neon-1) 25%, transparent);
+    --agent-card-bg: color-mix(
+      in srgb,
+      var(--agent-neon-1) 2%,
+      var(--vscode-editorWidget-background)
+    );
+    --agent-scan-opacity: 0.35;
+  }
+  /*
+   * 高コントラストテーマでは装飾を無効化する。コントラストを意図して上げているテーマの
+   * 前提を、こちらの飾りで崩さない。
+   *
+   * 個々の規則を打ち消すのではなく、装飾が参照している変数を無色・無寸法へ倒す。規則を
+   * 1つずつ名指しで消す形にすると、後から足した装飾が漏れる。
+   */
+  body.skin-cyber.vscode-high-contrast,
+  body.skin-cyber.vscode-high-contrast-light {
+    --agent-neon-1: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+    --agent-neon-2: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+    --agent-neon-3: var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+    --agent-neon-edge: var(--agent-border);
+    --agent-neon-glow: transparent;
+    --agent-grid-line: transparent;
+    --agent-card-bg: var(--vscode-editorWidget-background);
+    --agent-notch: 0px;
+    --agent-head-font: var(--vscode-font-family);
+    --agent-head-tracking: normal;
+    --agent-item-accent: transparent;
+  }
+  /* 背景の方眼。background-attachment: local で本文と一緒にスクロールする */
+  body.skin-cyber #log {
+    background-image:
+      repeating-linear-gradient(
+        to right,
+        var(--agent-grid-line) 0 1px,
+        transparent 1px var(--agent-grid-step)
+      ),
+      repeating-linear-gradient(
+        to bottom,
+        var(--agent-grid-line) 0 1px,
+        transparent 1px var(--agent-grid-step)
+      );
+    background-attachment: local;
+  }
+  /*
+   * 発言のカード。右上の角を落として、四角い箱ではなく切り出したパネルに見せる。
+   * 左端のバーは inset の box-shadow で出す（要素も余白も増やさずに済む）。
+   *
+   * clip-path は外側へ出る box-shadow を切り落とすため、発光は必ず inset で書く。
+   */
+  body.skin-cyber .item {
+    border-color: var(--agent-neon-edge);
+    background-color: var(--agent-card-bg);
+    box-shadow: inset 2px 0 0 var(--agent-item-accent);
+    clip-path: polygon(
+      0 0,
+      calc(100% - var(--agent-notch)) 0,
+      100% var(--agent-notch),
+      100% 100%,
+      0 100%
+    );
+  }
+  /* 貼り付く見出し（issue #716）の背景をカードの地に合わせる。ずれると帯が浮く */
+  body.skin-cyber .item .head {
+    background-color: var(--agent-card-bg);
+    font-family: var(--agent-head-font);
+    letter-spacing: var(--agent-head-tracking);
+  }
+  /* 種別ごとの左のバー。誰の発言か・何のログかを色でも示す */
+  body.skin-cyber .item.user { --agent-item-accent: var(--agent-neon-1); }
+  body.skin-cyber .item.agent { --agent-item-accent: var(--agent-neon-2); }
+  body.skin-cyber .item.reasoning {
+    --agent-item-accent: color-mix(in srgb, var(--agent-neon-2) 45%, transparent);
+  }
+  body.skin-cyber .item.tool {
+    --agent-item-accent: color-mix(in srgb, var(--agent-neon-1) 40%, transparent);
+  }
+  /* 動いている項目は、進行中の合図（本文左borderの progressBar 色）と役割をそろえる */
+  body.skin-cyber .item.running,
+  body.skin-cyber .item.status-running {
+    --agent-item-accent: var(--agent-neon-1);
+  }
+  body.skin-cyber .item.status-running .head { color: var(--agent-neon-1); }
+  /*
+   * ホバーしたカードだけ枠を起こして薄く光らせる。常時ではなくホバー時にするのは、
+   * 項目数に比例して増える描画を避けるため。左のバーは box-shadow ごと上書きされるので、
+   * ここでも同じ inset を書き直す。
+   */
+  body.skin-cyber .item:hover {
+    border-color: color-mix(in srgb, var(--agent-neon-1) 55%, var(--agent-border));
+    box-shadow:
+      inset 2px 0 0 var(--agent-item-accent),
+      inset 0 0 18px -10px var(--agent-neon-glow);
+  }
+  /* 自分の発言。地の textBlockQuote へシアンをごく薄く混ぜ、線をネオンにする */
+  body.skin-cyber .item.user .body {
+    border-left-color: var(--agent-neon-1);
+    background-color: color-mix(
+      in srgb,
+      var(--agent-neon-1) 7%,
+      var(--vscode-textBlockQuote-background)
+    );
+  }
+  /* 応答。カード化で border-left: none にした線を、外装のときだけ紫で戻す */
+  body.skin-cyber .item.agent .body {
+    border-left: 2px solid color-mix(in srgb, var(--agent-neon-2) 55%, transparent);
+  }
+  /* 対応を待っている承認カード。役割の色（警告）は変えず、発光だけ足す */
+  body.skin-cyber .approval {
+    border-color: var(--agent-neon-3);
+    box-shadow: inset 0 0 20px -12px var(--agent-neon-3);
+  }
+  /*
+   * 応答中かどうかを示す外枠（issue #701）に発光を足す。色の役割（待機=青 /
+   * バックグラウンド=黄 / 応答中=赤）は上の規則のままで、ここでは触らない。
+   */
+  body.skin-cyber::after { box-shadow: inset 0 0 14px -4px var(--agent-neon-glow); }
+  body.skin-cyber.busy::after {
+    box-shadow: inset 0 0 20px -4px color-mix(in srgb, var(--vscode-charts-red) 55%, transparent);
+  }
+  /*
+   * 応答中だけ走査線を1本流す。この画面で無限に回るアニメーションはこれだけで、応答が
+   * 止まると要素ごと消える（body の busy クラスが外れる）。動かすのは transform だけ。
+   *
+   * prefers-reduced-motion のときは reducedMotionStyles() が全称セレクタで極短時間へ
+   * 潰すため、ここでの個別対応は要らない。
+   */
+  body.skin-cyber.busy::before {
+    content: '';
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+    pointer-events: none;
+    /* 外枠（body::after）と同じ層。本文より前、浮き出すメニュー（10）には譲る */
+    z-index: 1;
+    background-image: linear-gradient(to right, transparent, var(--agent-neon-1), transparent);
+    opacity: var(--agent-scan-opacity);
+    animation: agent-scanline 3.2s linear infinite;
+  }
+  /* 高コントラストテーマでは走査線そのものを出さない（動きごと止める） */
+  body.skin-cyber.vscode-high-contrast.busy::before,
+  body.skin-cyber.vscode-high-contrast-light.busy::before {
+    content: none;
+  }
+  @keyframes agent-scanline {
+    from { transform: translateY(0); }
+    to { transform: translateY(100vh); }
+  }
+  /* 入力欄。境界をネオンにし、書いている間はリングで囲う */
+  body.skin-cyber #composer { border-top-color: var(--agent-neon-edge); }
+  body.skin-cyber #composerInputRow textarea:focus {
+    outline-color: var(--agent-neon-1);
+    box-shadow:
+      0 0 0 1px var(--agent-neon-1),
+      0 0 12px -4px var(--agent-neon-glow);
+  }
+  /* 会話内の移動ボタンも同じ線でそろえる */
+  body.skin-cyber #conversationNavigation button { border-color: var(--agent-neon-edge); }
+  body.skin-cyber #conversationNavigation button:hover {
+    border-color: var(--agent-neon-1);
+    box-shadow: 0 0 10px -3px var(--agent-neon-glow);
+  }
+  /* コードブロックの枠も線だけそろえる（中身の色は構文強調のままにする） */
+  body.skin-cyber .md-code { border-color: var(--agent-neon-edge); }
 ${reducedMotionStyles()}
 `;
 }

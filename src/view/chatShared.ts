@@ -17,6 +17,7 @@ import {
 } from '../provider/approvalLevel';
 import type { ProviderId } from '../provider/id';
 import { DEFAULT_CHAT_DENSITY, densityBodyClass, type ChatDensity } from './density';
+import { DEFAULT_CHAT_SKIN, skinBodyClass, type ChatSkin } from './skin';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
@@ -1114,6 +1115,13 @@ export interface ChatShellOptions {
    */
   density?: ChatDensity;
   /**
+   * 会話画面の外装（設定 `agent.chat.skin`、既定 `cyber`、issue #1249）。
+   * 変換は `skin.ts` の `skinBodyClass` が行い、ここでは `body` のクラスにするだけ。
+   * 色と装飾そのものは `chatStyles.ts` が `body.skin-cyber` 配下に持つ。両画面共通の
+   * 設定で、`density` と同じく双方の `attachPanel` から渡す。
+   */
+  skin?: ChatSkin;
+  /**
    * 入力欄でEnterを送信に使うか（設定 `agent.chat.sendOn`、既定 `ctrlEnter`、issue #288）。
    *
    * `ctrlEnter`はCtrl+Enter / Cmd+Enterで送信しEnterは改行のまま（従来の挙動）。`enter`は
@@ -1485,7 +1493,7 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
 ${chatStyles()}
 </style>
 </head>
-<body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)}">
+<body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)} ${skinBodyClass(options.skin ?? DEFAULT_CHAT_SKIN)}">
   <div id="logWrap">
     <div id="log"></div>
     <div id="deferredRestore" hidden>

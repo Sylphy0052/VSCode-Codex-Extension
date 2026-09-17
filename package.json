@@ -768,6 +768,20 @@
           "scope": "window",
           "markdownDescription": "チャット画面の表示密度。`compact`にすると発言どうしの間隔・本文の余白・行間が詰まる（Codex/Claude Code両画面共通）。変更を反映するには会話タブを開き直す。"
         },
+        "agent.chat.skin": {
+          "type": "string",
+          "enum": [
+            "cyber",
+            "plain"
+          ],
+          "enumDescriptions": [
+            "既定。ネオン色の枠・発光・背景の方眼で、端末寄りの見た目にする",
+            "装飾を足す前の見た目。テーマの色だけで描く"
+          ],
+          "default": "cyber",
+          "scope": "window",
+          "markdownDescription": "チャット画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには会話タブを開き直す。"
+        },
         "agent.chat.sendOn": {
           "type": "string",
           "enum": [
