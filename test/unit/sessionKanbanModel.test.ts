@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildSessionKanban, type ManagedSessionInput } from '../../src/view/sessionKanbanModel';
 
+const CURRENT_WINDOW_ID = 'w1';
+
 function session(overrides: Partial<ManagedSessionInput> = {}): ManagedSessionInput {
   return {
     threadId: 't1',
@@ -8,6 +10,7 @@ function session(overrides: Partial<ManagedSessionInput> = {}): ManagedSessionIn
     cwd: '/home/u/work/repo',
     provider: 'codex',
     activity: 'idle',
+    windowId: CURRENT_WINDOW_ID,
     ...overrides,
   };
 }
@@ -21,6 +24,7 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
         session({ threadId: 'c', activity: 'idle' }),
       ],
       ['/home/u/work/repo'],
+      CURRENT_WINDOW_ID,
     );
     expect(board.cards.approvalPending.map((c) => c.threadId)).toEqual(['a']);
     expect(board.cards.running.map((c) => c.threadId)).toEqual(['b']);
@@ -36,13 +40,18 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
         session({ threadId: 'none', cwd: undefined }),
       ],
       ['/home/u/work/repo'],
+      CURRENT_WINDOW_ID,
     );
     expect(board.cards.idle.map((c) => c.threadId)).toEqual(['in']);
     expect(board.total).toBe(1);
   });
 
   it('末尾の区切りと区切りの向きが違っても同じワークスペースとみなす', () => {
-    const board = buildSessionKanban([session({ cwd: 'C:\\work\\repo\\pkg' })], ['C:/work/repo/']);
+    const board = buildSessionKanban(
+      [session({ cwd: 'C:\\work\\repo\\pkg' })],
+      ['C:/work/repo/'],
+      CURRENT_WINDOW_ID,
+    );
     expect(board.total).toBe(1);
   });
 
@@ -50,6 +59,7 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
     const board = buildSessionKanban(
       [session({ cwd: '/home/u/work/repo-2' })],
       ['/home/u/work/repo'],
+      CURRENT_WINDOW_ID,
     );
     expect(board.total).toBe(0);
   });
@@ -58,22 +68,24 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
     const board = buildSessionKanban(
       [session({ cwd: '/home/u/work/repo/pkg/app' })],
       ['/home/u/work/repo'],
+      CURRENT_WINDOW_ID,
     );
     expect(board.cards.idle[0]?.cwdLabel).toBe('app');
   });
 
-  it('絶対パスをカードへ載せない（issue 1039）', () => {
+  it('常時表示のcwdLabelには絶対パスを載せない（issue 1039、hover専用cwdFullはIssue #1244で追加）', () => {
     const board = buildSessionKanban(
       [session({ cwd: '/home/u/work/repo/pkg/app' })],
       ['/home/u/work/repo'],
+      CURRENT_WINDOW_ID,
     );
     const card = board.cards.idle[0];
     // 陽性対照: カード自体は作られている（条件を間違えて空を見ていない）
     expect(card?.cwdLabel).toBe('app');
     // 画面共有やスクリーンショットでホームディレクトリ名などが映らないよう、
-    // 末尾の要素だけを渡す。`...session` のままだと絶対パスが画面まで届く
+    // 常時表示のcwdLabelは末尾の要素だけを持つ。絶対パスはhover専用のcwdFullにだけ載る
     expect(card).not.toHaveProperty('cwd');
-    expect(JSON.stringify(card)).not.toContain('/home/u');
+    expect(card?.cwdFull).toBe('/home/u/work/repo/pkg/app');
   });
 
   it('各列をタイトルの昇順で並べる', () => {
@@ -84,6 +96,7 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
         session({ threadId: '3', title: 'かえで' }),
       ],
       ['/home/u/work/repo'],
+      CURRENT_WINDOW_ID,
     );
     expect(board.cards.idle.map((c) => c.title)).toEqual(['あさひ', 'かえで', 'さくら']);
   });
@@ -92,6 +105,7 @@ describe('buildSessionKanban（issue #811・#1012、管理中の会話を状態�
     const board = buildSessionKanban(
       [session({ threadId: 'a', cwd: '/srv/one' }), session({ threadId: 'b', cwd: '/srv/two' })],
       ['/srv/one', '/srv/two'],
+      CURRENT_WINDOW_ID,
     );
     expect(board.total).toBe(2);
   });

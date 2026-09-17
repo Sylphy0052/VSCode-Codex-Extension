@@ -171,8 +171,17 @@ import { initNotificationSounds } from './view/notificationSound';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
-import { buildSessionKanban } from './view/sessionKanbanModel';
+import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager } from './view/sessionKanbanView';
+import {
+  generateWindowId,
+  sessionHubRoot,
+  SessionHubReader,
+  SessionHubRequestPort,
+  SessionHubRequestWatcher,
+  SessionHubWriter,
+  type SharedSession,
+} from './view/sessionHub';
 import { ForgeHubViewManager } from './view/forgeHubView';
 import { SessionDecorationProvider } from './view/sessionDecorations';
 import { defaultReviewBundleRoot, removeStaleReviewBundles } from './secondOpinion/reviewBundle';
@@ -1029,23 +1038,75 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     claudeChat.onDidChangeState((change) => progress.notify(change)),
   );
 
-  // セッションカンバン（Issue #811）。履歴ファイルではなく、両チャットマネージャーが
-  // 現在管理している会話だけを読むため、外部ターミナルの状態を推測して表示しない。
+  // セッション統括（issue #811、全ウィンドウ横断化はIssue #1244）。履歴ファイルではなく、
+  // 両チャットマネージャーが現在管理している会話（自ウィンドウ）と、共有ファイル経由で
+  // 届く他ウィンドウの会話を合わせて読むため、外部ターミナルの状態を推測して表示しない。
+  //
+  // 共有ディレクトリは`~/.codex` / `~/.claude`とは別（`globalStorageUri`配下）にし、
+  // CLI側の領域を汚さない。`windowId`はこの拡張ホストの起動ごとに生成し、プロセスidは
+  // 再利用されるため使わない。
+  const windowId = generateWindowId();
+  const sessionHubRootDir = sessionHubRoot(context.globalStorageUri.fsPath);
+  // 共有ファイルへ出す項目はここで明示的に選ぶ。`...session`のままだと
+  // `ManagedChatSession`へ項目が増えるたびに、意図しない値が共有ファイルへ流れ出す
+  const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] =>
+    (provider === 'codex' ? chat : claudeChat).managedSessions().map((session) => ({
+      threadId: session.threadId,
+      title: session.title,
+      cwd: session.cwd,
+      activity: session.activity,
+      provider,
+    }));
+  const currentWindowSessions = (): SharedSession[] => [
+    ...toSharedSessions('codex'),
+    ...toSharedSessions('claude'),
+  ];
+  const sessionHubWriter = new SessionHubWriter(
+    sessionHubRootDir,
+    windowId,
+    currentWindowSessions,
+    log,
+  );
+  sessionHubWriter.start();
+  const sessionHubReader = new SessionHubReader(sessionHubRootDir, windowId, log);
+  sessionHubReader.start();
+  const sessionHubRequestPort = new SessionHubRequestPort(sessionHubRootDir, log);
+  const sessionHubRequestWatcher = new SessionHubRequestWatcher(
+    sessionHubRootDir,
+    windowId,
+    (request) => {
+      const revealed =
+        request.provider === 'claude'
+          ? claudeChat.revealSession(request.threadId)
+          : chat.revealSession(request.threadId);
+      if (!revealed) {
+        log.info(
+          `セッション統括: 要求されたセッションは既に閉じられています（${request.threadId}）`,
+        );
+      }
+    },
+    log,
+  );
+  sessionHubRequestWatcher.start();
   const sessionKanban = new SessionKanbanViewManager(
     () => {
       const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-      return buildSessionKanban(
-        [
-          ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
-          ...claudeChat
-            .managedSessions()
-            .map((session) => ({ ...session, provider: 'claude' as const })),
-        ],
-        roots,
-      );
+      const selfSessions: ManagedSessionInput[] = currentWindowSessions().map((session) => ({
+        ...session,
+        windowId,
+      }));
+      const otherSessions: ManagedSessionInput[] = sessionHubReader
+        .getOthers()
+        .flatMap((window) =>
+          window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
+        );
+      return buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId);
     },
     (provider, threadId) =>
       provider === 'claude' ? claudeChat.revealSession(threadId) : chat.revealSession(threadId),
+    (targetWindowId, provider, threadId) =>
+      void sessionHubRequestPort.send(targetWindowId, { provider, threadId }),
+    windowId,
     log,
   );
   const forgeHub = new ForgeHubViewManager(
@@ -1067,13 +1128,23 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     log,
   );
+  const onSessionKanbanRelevantChange = (): void => {
+    sessionKanban.refresh();
+    // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる
+    // （実際の書き込みはWriter側でまとめる）
+    sessionHubWriter.requestWrite();
+  };
   context.subscriptions.push(
     sessionKanban,
     forgeHub,
-    chat.onDidChangeState(() => sessionKanban.refresh()),
-    claudeChat.onDidChangeState(() => sessionKanban.refresh()),
-    chat.onDidChangePanels(() => sessionKanban.refresh()),
-    claudeChat.onDidChangePanels(() => sessionKanban.refresh()),
+    sessionHubReader,
+    sessionHubRequestWatcher,
+    { dispose: () => void sessionHubWriter.dispose() },
+    chat.onDidChangeState(onSessionKanbanRelevantChange),
+    claudeChat.onDidChangeState(onSessionKanbanRelevantChange),
+    chat.onDidChangePanels(onSessionKanbanRelevantChange),
+    claudeChat.onDidChangePanels(onSessionKanbanRelevantChange),
+    sessionHubReader.onDidChange(() => sessionKanban.refresh()),
   );
 
   const actions = new SessionActions(nodeCommandRunner, codexPath);

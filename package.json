@@ -511,7 +511,7 @@
       },
       {
         "command": "agent.sessionKanban",
-        "title": "セッションカンバンを開く",
+        "title": "セッション統括を開く",
         "category": "Agent",
         "icon": "$(project)"
       },

@@ -69,13 +69,6 @@ export function chatScript(
   /** 待ち行列。入力欄でのEsc（末尾を書き戻す）に使うため保つ。 */
   let queuedMessages = [];
   /**
-   * セカンドオピニオン（Issue #894）が走っているか（Issue #905）。
-   *
-   * 外周の枠色は apply() が状態から毎回計算し直すため、secondOpinionRunning
-   * メッセージでクラスを付けるだけでは次の状態更新で消える。ここへ持って計算へ混ぜる。
-   */
-  let secondOpinionRunning = false;
-  /**
    * 相談を続けられるセカンドオピニオンの項目id（Issue #929）。
    *
    * 拡張機能側が secondOpinionAdvisor メッセージで知らせる。undefined のときは
@@ -2372,14 +2365,16 @@ export function chatScript(
   /**
    * 外周の枠を黄色（バックグラウンド実行中）にするかを決める（Issue #905）。
    *
-   * バックグラウンドターミナルとセカンドオピニオンのどちらか一方でも走っていれば黄。
-   * ただし応答中（赤）は優先で、そのときは黄を付けない。
+   * バックグラウンドターミナルが残っていれば黄。ただし応答中（赤）は優先で、
+   * そのときは黄を付けない。
+   *
+   * セカンドオピニオンの実行中は条件に含めない（Issue #1244）。統括ページの
+   * backgroundRunning列は拡張側のChatState（backgroundTerminalsのみ）から
+   * 判定しており、webviewだけが知るセカンドオピニオンの実行状態を含められないため、
+   * ここも合わせてバックグラウンドターミナルだけを条件にする。
    */
   function applyBackgroundRunning(busy) {
-    document.body.classList.toggle(
-      'background-running',
-      !busy && (hasBackgroundTerminals || secondOpinionRunning),
-    );
+    document.body.classList.toggle('background-running', !busy && hasBackgroundTerminals);
   }
 
   function apply(state) {
@@ -3979,9 +3974,6 @@ export function chatScript(
       const secondOpinionButton = el('secondOpinion');
       secondOpinionButton.disabled = data.running;
       secondOpinionButton.setAttribute('aria-disabled', String(data.running));
-      // 既定ではタブが開かないため、走っていることが分かるのはこの枠色だけ（Issue #905）
-      secondOpinionRunning = data.running;
-      applyBackgroundRunning(document.body.classList.contains('busy'));
     }
     if (data.type === 'secondOpinionHandoff') {
       // 承認待ちの下書きの有無が変わった（Issue #929）
