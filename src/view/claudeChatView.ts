@@ -67,6 +67,7 @@ import {
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
+import { playNotificationSound } from './notificationSound';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
@@ -993,6 +994,12 @@ export class ClaudeChatViewManager
       return false;
     }
 
+    // 自動引き継ぎでタブが切り替わることを音で知らせる（Issue #1246）。ここまで来れば
+    // ポインタは書けており、あとは新セッションを開くだけ。中止・失敗で鳴らさないよう、
+    // 引き継ぎが確定してから鳴らす。手動はユーザー自身の操作なので鳴らさない
+    if (trigger.kind !== 'manual') {
+      playNotificationSound('handoff', entry.panel?.visible === true);
+    }
     // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
     // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
     // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる。
