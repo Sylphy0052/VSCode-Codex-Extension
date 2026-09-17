@@ -167,6 +167,7 @@ import {
 } from './view/localReview';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
+import { initNotificationSounds } from './view/notificationSound';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
@@ -313,6 +314,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
   context.subscriptions.push(channel);
+
+  // 通知音の音源置き場を覚えさせる（issue #1242）。`resources/`配下のWAVを鳴らすため、
+  // 拡張機能のインストール先が要る
+  initNotificationSounds(context.extensionUri, log);
 
   // 前回の異常終了で残ったレビュー材料を回収する（Issue #926 E）。十分に古いものだけを
   // 消すので、別ウィンドウで使用中のものは巻き込まない。起動を待たせる必要は無い

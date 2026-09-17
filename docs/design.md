@@ -3258,6 +3258,60 @@ Codexの会話開始時は、選択済みの承認・サンドボックス設定
 
 - タブ名の印は英数記号のみ（`*` / `!`）。ローカライズや、印の意味を凡例として画面内に示す導線は無い（ホバーで見るタブのツールチップ自体がVS Code標準機能に無いため、意味は本ドキュメントとREADMEでのみ説明する）
 - ターン完了の通知は成功・失敗を区別しない（`turnFailed`の値を見ていない）。文言も「応答が終わりました」で共通
+
+### 14.55.1 通知音（issue #1242）
+
+会話が停止したとき（ターン完了）と、承認待ち・質問で止まったときに、**それぞれ別の音**を鳴らす。画面を見ていなくても「終わったのか」「待たれているのか」を聞き分けられるようにするのが狙い。§14.55の通知（トースト）とは独立した設定で制御する。
+
+**VSCodeの拡張APIには音を鳴らす口が無い。** webviewを常駐させてWeb Audioで鳴らす案もあるが、音が要るのはタブが隠れている場面であり、`retainContextWhenHidden`付きのwebviewを常駐させる負担に見合わない。そのため**拡張ホストのOSの再生コマンドを子プロセスとして起動する**方式を採った。端末のベル文字（`\x07`）を隠しterminalへ書く案は、2種類の音を鳴らし分けられないため要件を満たさず却下した。
+
+**再生コマンドは1つに決め打ちしない。** WSL2（WSLg）での実測（2026-09-17）では`paplay` / `aplay` / `pw-play`がいずれも無く、`ffplay`（`/usr/bin/ffplay`）だけがあり、`PULSE_SERVER=unix:/mnt/wslg/PulseServer`経由で実際に音が出た。環境によって入っているものが違うため、プラットフォーム別の候補をPATH上で順に探し、最初に見つかったものを使う。
+
+- Linux（既定のフォールバック先でもある）: `paplay` → `pw-play` → `aplay -q` → `ffplay -nodisp -autoexit -loglevel error`。前の3つは音声サーバへ直接繋ぐ専用コマンドで起動が軽く、汎用プレイヤの`ffplay`を最後に回す
+- macOS: `afplay`
+- Windows: `powershell.exe -NoProfile -NonInteractive -Command (New-Object Media.SoundPlayer '<file>').PlaySync()`。`Play()`（非同期）だとPowerShellが先に終了して音が出ないため`PlaySync()`を使う。パス中の`'`は`''`へ逃がす
+
+**子プロセスは待ち合わせない。** `detached: true`＋`unref()`＋`stdio: 'ignore'`で起動し、拡張機能の終了が再生プロセスに引きずられないようにする。`shell: false`のためパイプやリダイレクトは使えないが、設定値がそのままシェルへ渡ることも無い。起動後に届く`error`イベントは必ず拾う（拾わないとunhandled `'error'`で拡張ホストごと落ちる）。再生できなくても例外は投げず、理由ごとに1回だけログへ残す（毎ターン警告を積むと出力チャネルが埋まるため）。
+
+**音の判定は通知の判定と独立にした。** `agent.notifications.turnComplete`は既定オフだが、「通知は要らないが音は欲しい」が今回の動機そのものであり、通知の設定に相乗りすると音だけを有効にできない。また可視性の扱いも変えてあり、**既定ではタブが見えていても鳴らす**（`onlyWhenHidden`が既定`false`）。タブを開いたまま別のウィンドウを見ている・席を外している、という場面が主な用途で、`WebviewPanel.visible`では判定できないため。従来の通知側は§14.55のまま「見えていれば出さない」で固定で、この設定の影響を受けない。
+
+**承認待ちの音は1ターンに1回だけ。** 通知は要求ごとに出すが（§14.55のdedupはそのまま）、音は`notifyNewApprovals`で「新しい要求が1件以上あったか」を見て1回だけ鳴らす。1ターンで複数の承認要求が同時に現れることがあり、要求ごとに鳴らすと連打になるため。
+
+#### 音源
+
+`resources/`に同梱する（WAV / PCM 16bit / 44.1kHz / ステレオ）。`.vscodeignore`は`resources/`を除外していないため、vsixにそのまま入る。
+
+- `resources/se_sac03.wav`（0.37秒）— ターン完了。頻度が高いため短いものを充てる
+- `resources/se_sab03.wav`（1.00秒）— 承認待ち・質問。対応が要るため長めのものを充てる
+
+Windowsの`System.Media.SoundPlayer`はPCMのWAVしか再生できない。設定で差し替える場合もWAVを前提とする（READMEに明記）。
+
+#### 追加した設定
+
+`agent.notifications.sound.*`（すべて`window`スコープ。§14.55と同じ理由）。読み出しは`src/config.ts`の`readNotificationSoundConfig`。
+
+- `enabled`（既定`true`）: 音全体のオン・オフ
+- `turnComplete` / `approvalPending`（いずれも既定`true`）: 場面ごとのオン・オフ
+- `onlyWhenHidden`（既定`false`）: タブが見えているときは鳴らさないか
+- `turnCompleteFile` / `approvalPendingFile`（既定`""`）: 同梱音源の代わりに鳴らすWAVの絶対パス
+- `playerCommand`（既定`""`）: 再生コマンドの上書き。`${file}`を音源パスへ置換する（`${file}`を含まなければ末尾に足す）。空白を含む引数は`"`か`'`で囲む
+
+#### 実装とテスト
+
+- `src/util/soundPlayback.ts`: `resolvePlayCommand` / `parsePlayerCommandTemplate` / `commandExistsOnPath` / `candidatesFor`（ここまで純粋関数。`hasCommand`と`platform`を注入できる）と`spawnPlayCommand`。`vscode`をimportしないロジック層
+- `src/view/notificationSound.ts`: 設定の読み取りと同梱音源のパス解決（`vscode.Uri.joinPath`）という`vscode`が要る部分だけの薄い層。`initNotificationSounds` / `playNotificationSound` / `resetNotificationSounds`
+- `src/config.ts`: `readNotificationSoundConfig`（`NotificationSoundConfig`）
+- `src/view/chatManagerBase.ts`: `notifyTurnComplete`の冒頭と`notifyNewApprovals`の末尾から`playNotificationSound`を呼ぶ
+- `src/extension.ts`: `activate`で`initNotificationSounds(context.extensionUri, log)`
+- `package.json`: `agent.notifications.sound.*`設定
+- `test/unit/soundPlayback.test.ts`: プラットフォーム別の候補選択、候補なし、上書き指定のパース（`${file}`の有無・引用符・複数箇所）、PowerShellの`'`エスケープ
+
+#### 残る制約
+
+- リモート開発（WSL / SSH / Dev Container）では拡張ホスト側で鳴る。音声デバイスが無い環境では鳴らないため、その場合は`playerCommand`でホスト側の再生（WSLなら`powershell.exe`経由）へ逃がす
+- `commandExistsOnPath`の結果をキャッシュしていない。鳴らすたびにPATHを走査する（`existsSync`の数回分であり、ターンの完了頻度から見て無視できる）
+- 音量は調整できない。音源そのものを差し替えて対応する
+- 再生コマンドがハングした場合、`detached`で放置した子プロセスが残る（`unref()`しているため拡張機能の終了は妨げない）
 - 通知の「開く」はタブをrevealするだけで、承認カード自体へスクロールする等の追加の誘導は無い（既存の承認カードは会話の最新項目に出るため、revealで大抵は視界に入る）
 
 #### 絞り込みの一致箇所を強調する（issue #738）

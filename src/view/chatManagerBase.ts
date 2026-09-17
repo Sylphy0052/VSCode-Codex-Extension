@@ -6,6 +6,7 @@ import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { needsAttentionAfterHandoff, type OldTabKeptReason } from './handoff';
+import { playNotificationSound } from './notificationSound';
 import {
   deriveSessionActivityState,
   sanitizeForNotification,
@@ -487,13 +488,20 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 二度と判定し直さない（同じ要求で通知を重複させないため）。
    */
   protected notifyNewApprovals(entry: TPanel, state: ChatState): void {
+    let hasNew = false;
     for (const approval of state.approvals) {
       const key = String(approval.requestId);
       if (entry.notifiedApprovalRequestIds.has(key)) {
         continue;
       }
       entry.notifiedApprovalRequestIds.add(key);
+      hasNew = true;
       this.notifyApprovalPending(entry, approval);
+    }
+    // 音は1回だけ（issue #1242）。1ターンで複数の承認要求が同時に現れることがあり、
+    // 要求ごとに鳴らすと連打になる。通知の可否（設定・可視性）とは独立に判定する
+    if (hasNew) {
+      playNotificationSound('approvalPending', entry.panel?.visible === true);
     }
   }
 
@@ -531,6 +539,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 1回だけ呼ぶ作りにより、同じターンで重複して呼ばれることは無い。
    */
   protected notifyTurnComplete(entry: TPanel): void {
+    // 音は通知（`agent.notifications.turnComplete`、既定オフ）とは別の設定で判定する
+    // （issue #1242）。通知を出さずに音だけ鳴らしたい場合があるため、先に鳴らす
+    playNotificationSound('turnComplete', entry.panel?.visible === true);
     if (!readNotificationsConfig().turnComplete) {
       return;
     }

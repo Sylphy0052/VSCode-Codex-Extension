@@ -708,6 +708,50 @@ export function readNotificationsConfig(): NotificationsConfig {
   };
 }
 
+/** 通知音（`agent.notifications.sound.*`、issue #1242）。 */
+export interface NotificationSoundConfig {
+  /** 音全体のオン・オフ（既定 `true`）。 */
+  enabled: boolean;
+  /** 会話が停止した（ターンが完了した）ときに鳴らすか（既定 `true`）。 */
+  turnComplete: boolean;
+  /** 承認待ち・質問で止まったときに鳴らすか（既定 `true`）。 */
+  approvalPending: boolean;
+  /**
+   * タブが見えているときは鳴らさないか（既定 `false`）。
+   *
+   * 通知（`agent.notifications.*`）は「見えていれば出さない」で固定だが、音は既定で
+   * 見えていても鳴らす。タブを開いたまま別のウィンドウを見ている・席を外している間に
+   * 気付きたい、というのが音を足す動機であり、可視性だけでは判定できないため。
+   */
+  onlyWhenHidden: boolean;
+  /** 同梱音源の代わりに鳴らすWAVの絶対パス。空文字なら同梱音源を使う。 */
+  turnCompleteFile: string;
+  approvalPendingFile: string;
+  /**
+   * 再生コマンドの上書き。`${file}` を音源の実パスへ置換する。空文字なら
+   * プラットフォーム別の候補から自動で探す（`src/util/soundPlayback.ts`）。
+   */
+  playerCommand: string;
+}
+
+/**
+ * `agent.notifications.sound.*` を読む（issue #1242）。
+ *
+ * 音の好みであり権限には関わらないため、`readNotificationsConfig`と同じ`window`スコープ。
+ */
+export function readNotificationSoundConfig(): NotificationSoundConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('notifications.sound.enabled') !== false,
+    turnComplete: c.get<boolean>('notifications.sound.turnComplete') !== false,
+    approvalPending: c.get<boolean>('notifications.sound.approvalPending') !== false,
+    onlyWhenHidden: c.get<boolean>('notifications.sound.onlyWhenHidden') === true,
+    turnCompleteFile: str(c, 'notifications.sound.turnCompleteFile'),
+    approvalPendingFile: str(c, 'notifications.sound.approvalPendingFile'),
+    playerCommand: str(c, 'notifications.sound.playerCommand'),
+  };
+}
+
 export interface SessionPresetsConfig {
   presets: SessionPreset[];
   /** 検証で無視した項目の理由。呼び出し側（`extension.ts`）がログ・通知へ出す。 */
