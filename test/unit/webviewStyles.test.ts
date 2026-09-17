@@ -231,7 +231,10 @@ describe('chatStyles', () => {
   it('貼り付いた見出しの背景をカードに合わせる（issue #719）', () => {
     const css = stripComments(chatStyles());
     // エディタの背景のままだと、カードの中に色の違う帯が浮く
-    const heads = [...css.matchAll(/\.item \.head\s*\{([^}]*)\}/g)].map((m) => m[1] ?? '');
+    // 外装（issue #1249）の規則は別の地の色を使うため、ここでは地の見た目だけを見る
+    const heads = [...css.matchAll(/(?:^|\})\s*([^{}]*\.item \.head)\s*\{([^}]*)\}/g)]
+      .filter((m) => !(m[1] ?? '').includes('.skin-cyber'))
+      .map((m) => m[2] ?? '');
     expect(heads.length, '.item .head の規則が見つからない').toBeGreaterThan(0);
     const last = heads[heads.length - 1] ?? '';
     expect(last).toContain('background-color: var(--vscode-editorWidget-background)');
@@ -605,4 +608,122 @@ describe('prefers-reduced-motion（issue #760）', () => {
       }
     });
   }
+});
+
+/**
+ * サイバー外装（issue #1249、設定 `agent.chat.skin`）。
+ *
+ * 見た目そのものは機械では確かめられないが、issue #1249 が置いた線引き——
+ * 「`plain` では従来と変わらない」「本文の可読性に関わる指定を変えない」
+ * 「重い描画を持ち込まない」——は、CSSの文面から確かめられる。装飾を足すたびに
+ * 手で見直すのではなく、ここで見張る。
+ */
+describe('サイバー外装（issue #1249）', () => {
+  /** サイバー固有の規則はファイル末尾に固めてある。その開始位置から後ろを切り出す。 */
+  const cyberSection = (): { before: string; section: string } => {
+    const css = stripComments(chatStyles());
+    const index = css.indexOf('body.skin-cyber');
+    expect(index, 'サイバー外装の規則が見つからない').toBeGreaterThan(0);
+    return { before: css.slice(0, index), section: css.slice(index) };
+  };
+
+  it('サイバー固有の規則はすべて body.skin-cyber の配下にある', () => {
+    // plain を選んだときに従来と変わらないことは、この構造だけで担保している
+    const { section } = cyberSection();
+    const selectors = [...section.matchAll(/(?:^|\})\s*([^{}@]+?)\s*\{/g)]
+      .map((m) => (m[1] ?? '').trim())
+      .filter((selector) => selector !== '')
+      // @keyframes の中身（from / to / 50% など）は規則ではなく位置の指定
+      .filter((selector) => !/^(from|to|\d+%)$/.test(selector));
+    const stray = selectors.filter((selector) =>
+      selector.split(',').some((one) => !one.includes('.skin-cyber')),
+    );
+    expect(stray, 'body.skin-cyber の外に出ている規則がある').toEqual([]);
+  });
+
+  it('サイバー外装より前に外装固有の色・クラスが漏れていない', () => {
+    const { before } = cyberSection();
+    expect(before).not.toContain('skin-cyber');
+    expect(before).not.toContain('--agent-neon');
+  });
+
+  it('可読性に関わる変数（行長・密度・行間）を外装から変えない', () => {
+    const { section } = cyberSection();
+    for (const variable of [
+      '--chat-measure',
+      '--chat-turn-gap',
+      '--chat-item-gap',
+      '--chat-sub-gap',
+      '--chat-body-padding',
+      '--chat-line-height',
+    ]) {
+      expect(section.includes(variable), `${variable} を外装が上書きしている`).toBe(false);
+    }
+  });
+
+  it('本文がにじまないよう text-shadow を使わない', () => {
+    // コメント中の言及は対象外。実際の指定だけを見る
+    expect(stripComments(chatStyles())).not.toContain('text-shadow');
+  });
+
+  it('貼り付く見出しの背景がカードの地と同じ変数から来る', () => {
+    // ずれると、カードの中に色の違う帯が浮く（issue #719 と同じ理由）
+    const { section } = cyberSection();
+    expect(section).toMatch(
+      /body\.skin-cyber \.item\s*\{[^}]*background-color:\s*var\(--agent-card-bg\)/,
+    );
+    expect(section).toMatch(
+      /body\.skin-cyber \.item \.head\s*\{[^}]*background-color:\s*var\(--agent-card-bg\)/,
+    );
+  });
+
+  it('合成の重い filter / backdrop-filter を使わない', () => {
+    const css = stripComments(chatStyles());
+    expect(css).not.toContain('backdrop-filter');
+    // -webkit-filter などの接頭辞付きも拾う。プロパティとしての filter だけを見る
+    expect(css).not.toMatch(/(?:^|[^-\w])filter:/);
+  });
+
+  it('無限に回るアニメーションは応答中の走査線1本だけ', () => {
+    const css = stripComments(chatStyles());
+    const infinite = [...css.matchAll(/animation:[^;]*infinite/g)];
+    expect(infinite.length, '無限アニメーションが増えている').toBe(1);
+    // 応答中にだけ現れる要素に付いていること（止まれば要素ごと消える）
+    expect(css).toMatch(/body\.skin-cyber\.busy::before\s*\{[^}]*animation:[^;]*infinite/);
+  });
+
+  it('アニメーションで動かすのは transform だけ', () => {
+    const css = stripComments(chatStyles());
+    const keyframes = [...css.matchAll(/@keyframes\s+[\w-]+\s*\{([\s\S]*?)\}\s*\}/g)];
+    expect(keyframes.length, 'キーフレームが見つからない').toBeGreaterThan(0);
+    for (const frame of keyframes) {
+      const properties = [...(frame[1] ?? '').matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1]);
+      for (const property of properties) {
+        // レイアウトと塗りを再計算させない範囲に限る
+        expect(['transform', 'opacity']).toContain(property);
+      }
+    }
+  });
+
+  it('高コントラストテーマでは装飾が無効になる', () => {
+    const css = stripComments(chatStyles());
+    const highContrast = css.match(
+      /body\.skin-cyber\.vscode-high-contrast,\s*body\.skin-cyber\.vscode-high-contrast-light\s*\{([^}]*)\}/,
+    );
+    expect(highContrast, '高コントラスト用の打ち消しが無い').not.toBeNull();
+    // 装飾は変数越しに色と寸法を取る。ここを無色・無寸法へ倒すことでまとめて効かなくなる
+    expect(highContrast![1]).toMatch(/--agent-neon-glow:\s*transparent/);
+    expect(highContrast![1]).toMatch(/--agent-grid-line:\s*transparent/);
+    expect(highContrast![1]).toMatch(/--agent-item-accent:\s*transparent/);
+    expect(highContrast![1]).toMatch(/--agent-notch:\s*0px/);
+    // 走査線だけは変数で消せないため、要素そのものを出さない
+    expect(css).toMatch(
+      /body\.skin-cyber\.vscode-high-contrast\.busy::before[\s\S]{0,120}content:\s*none/,
+    );
+  });
+
+  it('lightテーマ用に彩度を落とした値を持つ', () => {
+    const css = stripComments(chatStyles());
+    expect(css).toMatch(/body\.skin-cyber\.vscode-light\s*\{[^}]*--agent-neon-1:/);
+  });
 });

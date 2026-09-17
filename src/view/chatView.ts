@@ -44,6 +44,7 @@ import {
   readChatComposerButtonsConfig,
   readChatRenderMarkdownConfig,
   readChatDensityConfig,
+  readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
   setChatTurnSummaryEnabled,
@@ -1440,6 +1441,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       sendOn: readChatSendOnConfig(),
       // 表示密度（issue #718、設定 agent.chat.density）。body のクラスにだけ効く
       density: readChatDensityConfig(),
+      // 外装（issue #1249、設定 agent.chat.skin）。density と同じく body のクラスにだけ効く
+      skin: readChatSkinConfig(),
     });
   }
 
