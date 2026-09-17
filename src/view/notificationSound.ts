@@ -1,5 +1,6 @@
 /**
- * 会話が停止したとき・応答待ちで止まったときに鳴らす音（issue #1242）。
+ * 会話が停止したとき・応答待ちで止まったとき・自動引き継ぎが起きたときに鳴らす音
+ * （issue #1242、issue #1246）。
  *
  * 実際の再生（コマンドの選定と起動）は`src/util/soundPlayback.ts`が担う。ここは
  * 設定（`agent.notifications.sound.*`）と同梱音源のパス解決という、`vscode`が要る部分だけを
@@ -14,8 +15,8 @@ import { readNotificationSoundConfig } from '../config';
 import type { Logger } from '../log';
 import { resolvePlayCommand, spawnPlayCommand } from '../util/soundPlayback';
 
-/** 鳴らす場面。音を分けているのは、画面を見ずに「待たれている」かどうかを聞き分けるため。 */
-export type NotificationSoundKind = 'turnComplete' | 'approvalPending';
+/** 鳴らす場面。音を分けているのは、画面を見ずに何が起きたかを聞き分けるため。 */
+export type NotificationSoundKind = 'turnComplete' | 'approvalPending' | 'handoff';
 
 /** 同梱音源のファイル名。`resources/`直下に置く。 */
 const BUNDLED_SOUND_FILES: Record<NotificationSoundKind, string> = {
@@ -23,6 +24,8 @@ const BUNDLED_SOUND_FILES: Record<NotificationSoundKind, string> = {
   turnComplete: 'se_sac03.wav',
   // 長め（1.00秒）。対応が要る承認待ち・質問に割り当てる
   approvalPending: 'se_sab03.wav',
+  // 中くらい（0.45秒）。自動引き継ぎでタブが切り替わったことを知らせる（Issue #1246）
+  handoff: 'se_sad03.wav',
 };
 
 let extensionUri: vscode.Uri | undefined;
@@ -74,12 +77,19 @@ export function playNotificationSound(kind: NotificationSoundKind, panelVisible:
   if (kind === 'approvalPending' && !config.approvalPending) {
     return;
   }
+  if (kind === 'handoff' && !config.handoff) {
+    return;
+  }
   if (config.onlyWhenHidden && panelVisible) {
     return;
   }
 
-  const override =
-    kind === 'turnComplete' ? config.turnCompleteFile.trim() : config.approvalPendingFile.trim();
+  const overrides: Record<NotificationSoundKind, string> = {
+    turnComplete: config.turnCompleteFile,
+    approvalPending: config.approvalPendingFile,
+    handoff: config.handoffFile,
+  };
+  const override = overrides[kind].trim();
   const file = override !== '' ? override : bundledSoundPath(kind);
   if (file === undefined) {
     return;

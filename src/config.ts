@@ -716,6 +716,8 @@ export interface NotificationSoundConfig {
   turnComplete: boolean;
   /** 承認待ち・質問で止まったときに鳴らすか（既定 `true`）。 */
   approvalPending: boolean;
+  /** 自動引き継ぎ（Issue #1079）が発火したときに鳴らすか（既定 `true`）。 */
+  handoff: boolean;
   /**
    * タブが見えているときは鳴らさないか（既定 `false`）。
    *
@@ -727,6 +729,7 @@ export interface NotificationSoundConfig {
   /** 同梱音源の代わりに鳴らすWAVの絶対パス。空文字なら同梱音源を使う。 */
   turnCompleteFile: string;
   approvalPendingFile: string;
+  handoffFile: string;
   /**
    * 再生コマンドの上書き。`${file}` を音源の実パスへ置換する。空文字なら
    * プラットフォーム別の候補から自動で探す（`src/util/soundPlayback.ts`）。
@@ -745,9 +748,11 @@ export function readNotificationSoundConfig(): NotificationSoundConfig {
     enabled: c.get<boolean>('notifications.sound.enabled') !== false,
     turnComplete: c.get<boolean>('notifications.sound.turnComplete') !== false,
     approvalPending: c.get<boolean>('notifications.sound.approvalPending') !== false,
+    handoff: c.get<boolean>('notifications.sound.handoff') !== false,
     onlyWhenHidden: c.get<boolean>('notifications.sound.onlyWhenHidden') === true,
     turnCompleteFile: str(c, 'notifications.sound.turnCompleteFile'),
     approvalPendingFile: str(c, 'notifications.sound.approvalPendingFile'),
+    handoffFile: str(c, 'notifications.sound.handoffFile'),
     playerCommand: str(c, 'notifications.sound.playerCommand'),
   };
 }

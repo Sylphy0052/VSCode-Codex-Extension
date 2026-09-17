@@ -1226,7 +1226,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "通知音を鳴らすか（Codex/Claude Code両画面共通）。会話が停止したときと、承認待ち・質問で止まったときに、それぞれ別の音を鳴らす。無効にすると一切鳴らさない（通知そのものは`agent.notifications.*`で別に制御する）。"
+          "markdownDescription": "通知音を鳴らすか（Codex/Claude Code両画面共通）。会話が停止したとき、承認待ち・質問で止まったとき、自動引き継ぎが起きたときに、それぞれ別の音を鳴らす。無効にすると一切鳴らさない（通知そのものは`agent.notifications.*`で別に制御する）。"
         },
         "agent.notifications.sound.turnComplete": {
           "type": "boolean",
@@ -1239,6 +1239,12 @@
           "default": true,
           "scope": "window",
           "markdownDescription": "承認待ち・質問で止まったときに音を鳴らすか。1ターンで複数の承認要求が同時に現れても音は1回だけ鳴る。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
+        },
+        "agent.notifications.sound.handoff": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "自動引き継ぎが発火したときに音を鳴らすか。手動（引き継ぎボタン）では鳴らさない。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
         },
         "agent.notifications.sound.onlyWhenHidden": {
           "type": "boolean",
@@ -1257,6 +1263,12 @@
           "default": "",
           "scope": "window",
           "markdownDescription": "承認待ち・質問で止まったときに鳴らすWAVの絶対パス。空なら同梱音源（`resources/se_sab03.wav`）を使う。"
+        },
+        "agent.notifications.sound.handoffFile": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "自動引き継ぎが起きたときに鳴らすWAVの絶対パス。空なら同梱音源（`resources/se_sad03.wav`）を使う。"
         },
         "agent.notifications.sound.playerCommand": {
           "type": "string",

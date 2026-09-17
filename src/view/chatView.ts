@@ -66,6 +66,7 @@ import {
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
+import { playNotificationSound } from './notificationSound';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import {
@@ -840,6 +841,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     } catch (e) {
       this.reportError(e);
       return false;
+    }
+
+    // 自動引き継ぎでタブが切り替わることを音で知らせる（Issue #1246）。ここまで来れば
+    // ポインタは書けており、あとは新セッションを開くだけ。中止・失敗で鳴らさないよう、
+    // 引き継ぎが確定してから鳴らす。手動はユーザー自身の操作なので鳴らさない
+    if (trigger.kind !== 'manual') {
+      playNotificationSound('handoff', entry.panel?.visible === true);
     }
 
     // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
