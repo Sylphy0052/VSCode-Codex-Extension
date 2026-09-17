@@ -1222,6 +1222,48 @@
           "scope": "window",
           "markdownDescription": "ターンが完了した直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。既定は無効（頻度が高く、承認待ちほど対応が急がないため）。"
         },
+        "agent.notifications.sound.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "通知音を鳴らすか（Codex/Claude Code両画面共通）。会話が停止したときと、承認待ち・質問で止まったときに、それぞれ別の音を鳴らす。無効にすると一切鳴らさない（通知そのものは`agent.notifications.*`で別に制御する）。"
+        },
+        "agent.notifications.sound.turnComplete": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "会話が停止した（ターンが完了した）ときに音を鳴らすか。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
+        },
+        "agent.notifications.sound.approvalPending": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "承認待ち・質問で止まったときに音を鳴らすか。1ターンで複数の承認要求が同時に現れても音は1回だけ鳴る。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
+        },
+        "agent.notifications.sound.onlyWhenHidden": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "そのタブが見えているときは音を鳴らさない。既定は無効（タブを開いたまま別のウィンドウを見ている間に気付きたいため、見えていても鳴らす）。通知（`#agent.notifications.approvalPending#`など）は可視性に関わらず常に「見えていれば出さない」で、この設定の影響を受けない。"
+        },
+        "agent.notifications.sound.turnCompleteFile": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "会話が停止したときに鳴らすWAVの絶対パス。空なら同梱音源（`resources/se_sac03.wav`）を使う。Windowsでの再生はPCMのWAVしか扱えないため、WAV以外は避ける。"
+        },
+        "agent.notifications.sound.approvalPendingFile": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "承認待ち・質問で止まったときに鳴らすWAVの絶対パス。空なら同梱音源（`resources/se_sab03.wav`）を使う。"
+        },
+        "agent.notifications.sound.playerCommand": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "音を鳴らす外部コマンドの上書き。`${file}`を音源のパスへ置換する（`${file}`を含めない場合は末尾に足す）。空なら環境から自動で探す（Linux: `paplay` / `pw-play` / `aplay` / `ffplay`、macOS: `afplay`、Windows: `powershell.exe`）。空白を含む引数は`\"`か`'`で囲む。シェルは介さないため、パイプやリダイレクトは使えない。"
+        },
         "agent.sessionPresets": {
           "type": "array",
           "items": {
