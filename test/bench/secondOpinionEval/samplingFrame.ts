@@ -193,8 +193,10 @@ function parseArgs(argv: readonly string[]): Args {
     outPath,
     prsPath,
     sourceOutPath,
-    since: values.get('since') ?? DEFAULT_SINCE,
-    until: values.get('until') ?? DEFAULT_UNTIL,
+    // 値の無い `--since` を空文字のまま通すと、期間の比較が全件不一致になり、
+    // 「母集団0件」というもっともらしい結果で先へ進んでしまう
+    since: values.get('since') || DEFAULT_SINCE,
+    until: values.get('until') || DEFAULT_UNTIL,
     allowUnavailable: values.has('allow-unavailable'),
   };
 }
@@ -398,16 +400,18 @@ async function classify(pr: GhPullRequest): Promise<FramePullRequest> {
   return enriched;
 }
 
-function quartilesOf(values: readonly number[]): { q1: number; median: number; q3: number } {
-  const sorted = [...values].sort((a, b) => a - b);
-  const at = (fraction: number): number => sorted[Math.floor((sorted.length - 1) * fraction)] ?? 0;
-  return { q1: at(0.25), median: at(0.5), q3: at(0.75) };
-}
-
-/** {@link quartilesOf} と同じ取り方の分位点。`extreme-tail` の境界（p90）に使う。 */
+/** 分位点。四分位も `extreme-tail` の境界（p90）も同じ取り方でなければ、層と目印がずれる。 */
 function percentileOf(values: readonly number[], fraction: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor((sorted.length - 1) * fraction)] ?? 0;
+}
+
+function quartilesOf(values: readonly number[]): { q1: number; median: number; q3: number } {
+  return {
+    q1: percentileOf(values, 0.25),
+    median: percentileOf(values, 0.5),
+    q3: percentileOf(values, 0.75),
+  };
 }
 
 async function main(): Promise<void> {
@@ -447,7 +451,7 @@ async function main(): Promise<void> {
   }
 
   // `snapshot-unavailable` は母集団の性質ではなく**手元のcloneの状態**で増える。
-  // squash / rebase でmergeされたPR（版3では222件）は `headRefOid` を必要とし、head branchは
+  // squash / rebase でmergeされたPR（版3では178件）は `headRefOid` を必要とし、head branchは
   // mergeの後に削除されるので、PRのrefを取っていないcloneでは丸ごとここへ落ちる（実測で
   // eligible が 431件 → 253件 になった）。素を凍結してもこれでは母集団が環境で変わるため、
   // 黙って少ない母集団のframeを書かずに止める
