@@ -121,7 +121,12 @@ import {
   type EffectiveTaskConfig,
   type ExtensionSafetyBaseline,
 } from './taskConfig';
-import { buildResponseSummary, buildStructuredSummary, formatBrief } from './taskSummary';
+import {
+  buildResponseSummary,
+  buildStructuredSummary,
+  formatBrief,
+  responseBodyText,
+} from './taskSummary';
 import type {
   ApprovalHandlerResult,
   TaskSession,
@@ -1344,6 +1349,17 @@ export interface LiveRun {
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
   /**
+   * 応答本文の受け渡しファイルへの書き込み（`writeResultHandoff`、Issue #1271）を繋いだ鎖。
+   *
+   * 書き込みはタスクの完了検知と同じ同期ブロックから投げっぱなしで始まるが、その同じ
+   * ブロックが続けて呼ぶ`pump`は、最後のタスクなら`closeMessagingIfFinalMergeSettled`まで
+   * 到達し、そこでrun配下のディレクトリを丸ごと消す（`removeRun`）。両方が投げっぱなしだと
+   * 順序が決まらず、「参照はできるが本文が消えている」か「撤去後に書き戻されて永久に
+   * 残る」かのどちらかになる（自己レビュー指摘: high）。撤去側がこの鎖を待ってから消す
+   * ことで、どちらの事故も起きないようにする。
+   */
+  handoffWrites: Promise<void>;
+  /**
    * 統合ブランチ・統合worktree（design.md §16.17）。`gitRepo`が`true`のときだけ
    * `start()`（または`rebuildLiveRun`）が作る。`isolation: worktree`のタスクが1件も
    * 無い定義でも、runごとに1本という設計（§16.17「統合ブランチ」）どおり作る。
@@ -2252,6 +2268,7 @@ export class WorkflowRunner {
       programControl: options?.programControl,
       integrationReviewAttempts: 0,
       integrationReviewInProgress: false,
+      handoffWrites: Promise.resolve(),
       warnings,
       integration,
       forge,
@@ -3464,8 +3481,11 @@ export class WorkflowRunner {
         `[workflow ${runId}] 受け渡しファイルの片付けに失敗しました: ${sanitizeForLog(reason)}`,
       );
     };
-    void new TeamHandoffStore(live.repoRoot, nodeHandoffFileSystem)
-      .removeRun(runId)
+    // 応答本文の書き込み（`writeResultHandoff`、Issue #1271）が終わってから消す
+    // （`LiveRun.handoffWrites`のJSDoc参照）。最後のタスクの書き込みはこの撤去と同じ
+    // 同期ブロックから始まっており、待たないと撤去との順序が決まらない
+    void live.handoffWrites
+      .then(() => new TeamHandoffStore(live.repoRoot, nodeHandoffFileSystem).removeRun(runId))
       .then((result) => {
         if (!result.ok) {
           warnCleanupFailure(result.error);
@@ -4658,24 +4678,40 @@ export class WorkflowRunner {
    *
    * 本文が空（応答を残さずに終わったタスク）のときは何も書かない。空のファイルを置くと、
    * `read_handoff` が「空の本文」を返して「まだ書かれていない」と区別できなくなる。
+   * **呼び出し側は、書かないと判った場合に `{{T1.handoff}}` と `brief` の成果物欄からも
+   * 参照を落とすこと**（参照だけが残ると、下流が理由の分からない「見つかりません」に
+   * 行き当たる。自己レビュー指摘: medium）。
+   *
+   * 書き込みは `live.handoffWrites` の鎖へ繋ぐ（同フィールドのJSDoc参照）。run配下の
+   * 撤去（`closeMessagingIfFinalMergeSettled`）がこの鎖を待つため、撤去との順序が決まる。
    */
-  private async writeResultHandoff(
+  private writeResultHandoff(runId: string, live: LiveRun, taskId: string, content: string): void {
+    if (content === '') {
+      return;
+    }
+    live.handoffWrites = live.handoffWrites.then(() =>
+      this.writeResultHandoffOnce(runId, live, taskId, content),
+    );
+  }
+
+  private async writeResultHandoffOnce(
     runId: string,
     live: LiveRun,
     taskId: string,
     content: string,
   ): Promise<void> {
-    if (content === '') {
-      return;
-    }
     const warn = (reason: string): void => {
+      // 警告欄へ出す文言も、ログと同じく無害化した理由を使う（`gitFallback` 等の既存の
+      // 警告と揃える。自己レビュー指摘: low）。理由はファイルシステムの例外文字列を
+      // 含みうるため、拡張機能が組み立てた文言と同じ扱いにはしない
+      const safeReason = sanitizeForLog(reason);
       this.deps.log.warn(
-        `[workflow ${runId}] ${taskId}: 応答の受け渡しファイルを書けませんでした: ${sanitizeForLog(reason)}`,
+        `[workflow ${runId}] ${taskId}: 応答の受け渡しファイルを書けませんでした: ${safeReason}`,
       );
       live.warnings.push({
         kind: 'handoffWriteFailed',
         taskId,
-        message: `${taskId} の応答を受け渡しファイルへ書けませんでした（${reason}）。{{${taskId}.handoff}} を参照する下流タスクは本文を取れません`,
+        message: `${taskId} の応答を受け渡しファイルへ書けませんでした（${safeReason}）。{{${taskId}.handoff}} を参照する下流タスクは本文を取れません`,
       });
       this.notify(runId);
     };
@@ -4752,11 +4788,19 @@ export class WorkflowRunner {
 
     if (reason === 'done' && liveTask !== undefined) {
       const files = [...state.turnEditedFiles];
-      // 応答本文の在り処（Issue #1271）。書き込みの成否に依らず決まる参照なので、
-      // 下の非同期な書き込みを待たずに組み立てられる。書けなかった場合は
-      // `read_handoff`が「見つかりません」を返し、警告も別途出る
-      const handoffRef = formatHandoffReference(taskId, RESULT_HANDOFF_SLUG);
-      const structured = buildStructuredSummary(state, { files, artifacts: [handoffRef] });
+      // 応答本文の在り処（Issue #1271）。参照は書き込みの成否に依らず決まるため、下の
+      // 非同期な書き込みを待たずに組み立てられる（書けなかった場合は`read_handoff`が
+      // 「見つかりません」を返し、`handoffWriteFailed`の警告も別途出る）。
+      //
+      // ただし**本文が空のときは参照そのものを置かない**。`writeResultHandoff`は空の
+      // 本文では何も書かず、それは失敗ではないので警告も出ない。参照だけが残ると、
+      // 下流は理由の分からない「見つかりません」に行き当たる（自己レビュー指摘: medium）
+      const body = responseBodyText(state);
+      const handoffRef = body === '' ? '' : formatHandoffReference(taskId, RESULT_HANDOFF_SLUG);
+      const structured = buildStructuredSummary(state, {
+        files,
+        artifacts: handoffRef === '' ? [] : [handoffRef],
+      });
       liveTask.result = {
         result: state.turnResultText,
         cwd: liveTask.cwd,
@@ -4774,8 +4818,9 @@ export class WorkflowRunner {
       };
       // 本文は受け渡しファイルへ置き、下流は必要になった時点で`read_handoff`で取りに行く。
       // 書き込みは非同期だが、下流タスクの開始はセッションの起動を伴うぶん常に後になる
-      // ため、ここで待たずに投げる（待つとタスク完了の確定～`pump`までを止めてしまう）
-      void this.writeResultHandoff(runId, live, taskId, state.turnResultText);
+      // ため、ここで待たずに`live.handoffWrites`の鎖へ積む（待つとタスク完了の確定～
+      // `pump`までを止めてしまう）
+      this.writeResultHandoff(runId, live, taskId, body);
     }
 
     if (reason === 'taskStopped' && liveTask?.taskApprovalTimedOut === true) {

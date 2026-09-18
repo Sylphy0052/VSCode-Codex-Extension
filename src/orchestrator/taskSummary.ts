@@ -20,9 +20,25 @@ export const MAX_SUMMARY_LENGTH = 120;
  * どちらも無ければ空文字（「まだ応答が無い」の意味）を返す。
  */
 export function buildResponseSummary(state: ChatState): string {
-  const source =
-    state.turnResultText !== '' ? state.turnResultText : lastNonEmptyAgentMessageText(state.items);
-  return firstLineOf(source);
+  return firstLineOf(responseBodyText(state));
+}
+
+/**
+ * 要約・受け渡しファイルの元になる応答本文（Issue #1271）。
+ *
+ * ターンの完了後は `turnResultText`、進行中（ストリーミング中）は直近の `agentMessage`。
+ * どちらも無ければ空文字。
+ *
+ * **要点の抽出（`buildStructuredSummary`）と本文の書き出し（`runner.ts` の
+ * `writeResultHandoff`）は、必ず同じここを入口にする。** 片方が `turnResultText` だけを
+ * 見ていると、`turnResultText` が空で直前のメッセージだけがある場合に「要点には成果物の
+ * 在り処が出るのに、その本文はどこにも書かれていない」という食い違いが起きる
+ * （自己レビュー指摘: medium）。
+ */
+export function responseBodyText(state: ChatState): string {
+  return state.turnResultText !== ''
+    ? state.turnResultText
+    : lastNonEmptyAgentMessageText(state.items);
 }
 
 /** タスク定義のpromptを、一覧で読める1行の作業内容へ縮める（Issue #836/#849）。 */
@@ -174,9 +190,7 @@ export function buildStructuredSummary(
   state: ChatState,
   input: { files: readonly string[]; artifacts: readonly string[] },
 ): StructuredSummary {
-  const source =
-    state.turnResultText !== '' ? state.turnResultText : lastNonEmptyAgentMessageText(state.items);
-  const { decisions, openQuestions } = extractSections(source);
+  const { decisions, openQuestions } = extractSections(responseBodyText(state));
   // files / artifacts も他の区分と同じ件数・長さの上限に載せる。`{{T1.files}}` は一覧を
   // 全件渡す変数として残っており、`brief` は要点を渡す側なので、ここで膨らませない
   const files: string[] = [];
