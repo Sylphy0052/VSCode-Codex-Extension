@@ -79,6 +79,7 @@ describe('セッション統括の画面スクリプト（Issue #1258）', () =>
   const PROVIDED = new Set([
     'acquireVsCodeApi',
     'clearTimeout',
+    'setInterval',
     'setTimeout',
     'requestAnimationFrame',
     'if',

@@ -367,7 +367,8 @@ export type SessionHubRequestKind =
   | 'resumeLoop'
   | 'send'
   | 'approvalDetail'
-  | 'approvalDecision';
+  | 'approvalDecision'
+  | 'recentTurns';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -415,10 +416,33 @@ export function isSharedApprovalDecision(value: unknown): value is SharedApprova
   return value === 'accept' || value === 'decline';
 }
 
-/** 応答の`payload`（Issue #1259）。Phase 3以降（会話の直近N件・btwの回答）もここへ足す。 */
+/**
+ * 会話の直近のやり取り1件（Issue #1260）。
+ *
+ * 載せるのは人の発言とエージェントの応答だけで、コマンド実行・思考・ファイル変更は
+ * 含めない。カードは会話の流れを掴むためのもので、詳細はタブ側で読む。
+ */
+export interface SessionRecentTurn {
+  role: 'user' | 'agent';
+  /** 本文。長いものは送る前に切り詰める（`truncated`が立つ）。 */
+  text: string;
+  /** 本文を切り詰めたか。画面は全文をタブ側で読むよう促す。 */
+  truncated: boolean;
+}
+
+/** 応答の`payload`（Issue #1259）。Phase 4以降（btwの回答）もここへ足す。 */
 export interface SessionHubReplyPayload {
   /** `kind === 'approvalDetail'`の応答。承認待ちが無ければ空配列。 */
   approvals?: SessionApprovalDetail[] | undefined;
+  /** `kind === 'recentTurns'`の応答。やり取りが無ければ空配列（Issue #1260）。 */
+  turns?: SessionRecentTurn[] | undefined;
+  /**
+   * `turns`を作った時刻（Issue #1260）。
+   *
+   * `ChatItem`は項目ごとの時刻を持たないため、やり取り1件ずつの時刻は返せない。
+   * 代わりに「いつ時点の内容か」をこれで示す（何秒前の状態を見ているかが判る）。
+   */
+  capturedAt?: number | undefined;
 }
 
 /** 1件の要求。`kind`ごとの追加項目はここへ並べる。 */
@@ -440,6 +464,8 @@ export interface SessionHubRequest {
   approvalRequestId?: string | undefined;
   /** `kind === 'approvalDecision'`のときの決定。受信側が`ApprovalDecision`として検証する。 */
   decision?: string | undefined;
+  /** `kind === 'recentTurns'`のときに欲しい件数（Issue #1260）。受信側が範囲へ丸める。 */
+  limit?: number | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -514,6 +540,7 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     text: typeof v.text === 'string' ? v.text : undefined,
     approvalRequestId: typeof v.approvalRequestId === 'string' ? v.approvalRequestId : undefined,
     decision: typeof v.decision === 'string' ? v.decision : undefined,
+    limit: typeof v.limit === 'number' ? v.limit : undefined,
   };
 }
 
@@ -544,7 +571,14 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
   }
-  const raw = (value as Record<string, unknown>).approvals;
+  const v = value as Record<string, unknown>;
+  if (Array.isArray(v.turns)) {
+    return {
+      turns: parseRecentTurns(v.turns),
+      capturedAt: typeof v.capturedAt === 'number' ? v.capturedAt : undefined,
+    };
+  }
+  const raw = v.approvals;
   if (!Array.isArray(raw)) {
     return undefined;
   }
@@ -570,6 +604,22 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
     });
   }
   return { approvals };
+}
+
+/** 直近のやり取りも同じ方針で読み解く。形の合わない要素は落とす（Issue #1260）。 */
+function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
+  const turns: SessionRecentTurn[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const v = entry as Record<string, unknown>;
+    if ((v.role !== 'user' && v.role !== 'agent') || typeof v.text !== 'string') {
+      continue;
+    }
+    turns.push({ role: v.role, text: v.text, truncated: v.truncated === true });
+  }
+  return turns;
 }
 
 /**
@@ -641,6 +691,7 @@ export class SessionHubRequestPort {
       text?: string | undefined;
       approvalRequestId?: string | undefined;
       decision?: string | undefined;
+      limit?: number | undefined;
     },
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();

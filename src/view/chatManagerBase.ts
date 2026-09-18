@@ -7,7 +7,11 @@ import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { needsAttentionAfterHandoff, type OldTabKeptReason } from './handoff';
 import { playNotificationSound } from './notificationSound';
-import type { SessionApprovalDetail, SharedApprovalDecision } from './sessionHub';
+import type {
+  SessionApprovalDetail,
+  SessionRecentTurn,
+  SharedApprovalDecision,
+} from './sessionHub';
 import {
   deriveSessionActivityState,
   sanitizeForNotification,
@@ -122,6 +126,17 @@ export interface BaseChatPanel {
   postTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
+/**
+ * 直近のやり取りとして返す上限（Issue #1260）。
+ *
+ * 要求側が件数を指定するが、共有ディレクトリへ書くのは別プロセスなので、受信側で丸める。
+ * 大きな値をそのまま通すと、会話全体を1回の応答へ載せることになる。
+ */
+const MAX_RECENT_TURNS = 20;
+
+/** 1件の本文の上限。カードは流れを掴むためのもので、全文はタブ側で読む。 */
+const MAX_RECENT_TURN_CHARS = 600;
+
 /** セッション統括ページから1つのセッションへ行える操作（Issue #1258）。 */
 export type SessionControlAction =
   | { kind: 'open' }
@@ -132,7 +147,9 @@ export type SessionControlAction =
   /** 承認待ちの中身を取り寄せる（Issue #1259）。カードを展開したときだけ送る。 */
   | { kind: 'approvalDetail' }
   /** 取り寄せた中身に対する承認・拒否（Issue #1259）。 */
-  | { kind: 'approvalDecision'; approvalRequestId: string; decision: SharedApprovalDecision };
+  | { kind: 'approvalDecision'; approvalRequestId: string; decision: SharedApprovalDecision }
+  /** 会話の直近のやり取りを取り寄せる（Issue #1260）。カードを展開している間だけ送る。 */
+  | { kind: 'recentTurns'; limit: number };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -140,6 +157,10 @@ export interface SessionControlResult {
   error?: string | undefined;
   /** `kind === 'approvalDetail'`のときだけ入る、承認待ちの中身（Issue #1259）。 */
   approvals?: SessionApprovalDetail[] | undefined;
+  /** `kind === 'recentTurns'`のときだけ入る、直近のやり取り（Issue #1260）。 */
+  turns?: SessionRecentTurn[] | undefined;
+  /** `turns`を作った時刻（Issue #1260）。 */
+  capturedAt?: number | undefined;
 }
 
 /**
@@ -178,6 +199,42 @@ function readApprovalPaths(state: Pick<ChatState, 'items'>, approval: PendingApp
     .split(',')
     .map((p) => p.trim())
     .filter((p) => p !== '');
+}
+
+/**
+ * 統括ページのカードへ出す、直近のやり取り（Issue #1260）。
+ *
+ * 人の発言とエージェントの応答だけを新しい順の末尾から拾う。コマンド実行・思考・
+ * ファイル変更を混ぜると、カードの高さがターンの中身で決まってしまい、会話の流れを
+ * 掴むという用途から外れる（詳細はタブ側で読む）。
+ *
+ * `ChatItem`は項目ごとの時刻を持たないため、1件ずつの時刻は返せない。呼び出し側が
+ * `capturedAt`（いつ時点の内容か）を添える。
+ */
+function readRecentTurns(state: Pick<ChatState, 'items'>, limit: number): SessionRecentTurn[] {
+  const count = Math.min(Math.max(Math.trunc(limit), 1), MAX_RECENT_TURNS);
+  const turns: SessionRecentTurn[] = [];
+  // 末尾から必要な分だけ遡る。長い会話で全件を走査しない
+  for (let i = state.items.length - 1; i >= 0 && turns.length < count; i -= 1) {
+    const item = state.items[i];
+    if (item === undefined) {
+      continue;
+    }
+    const role =
+      item.kind === 'userMessage' ? 'user' : item.kind === 'agentMessage' ? 'agent' : undefined;
+    if (role === undefined || item.text.trim() === '') {
+      continue;
+    }
+    const text = item.text.trim();
+    const truncated = text.length > MAX_RECENT_TURN_CHARS;
+    turns.push({
+      role,
+      // 切り詰めは末尾ではなく先頭を残す。発言の書き出しの方が何の話か判りやすい
+      text: truncated ? text.slice(0, MAX_RECENT_TURN_CHARS) : text,
+      truncated,
+    });
+  }
+  return turns.reverse();
 }
 
 /**
@@ -563,6 +620,12 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         return { ok: true };
       case 'approvalDetail':
         return { ok: true, approvals: describePendingApprovals(entry.session.getState()) };
+      case 'recentTurns':
+        return {
+          ok: true,
+          turns: readRecentTurns(entry.session.getState(), action.limit),
+          capturedAt: Date.now(),
+        };
       case 'approvalDecision': {
         const state = entry.session.getState();
         // 取り寄せてから押すまでの間に、タブ側やTUIで解決されていることがある。
