@@ -169,6 +169,7 @@ import {
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { initNotificationSounds } from './view/notificationSound';
+import { initOsNotifications } from './view/osNotification';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
@@ -334,6 +335,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 通知音の音源置き場を覚えさせる（issue #1242）。`resources/`配下のWAVを鳴らすため、
   // 拡張機能のインストール先が要る
   initNotificationSounds(context.extensionUri, log);
+
+  // OS通知のクリック先URI（`vscode://<拡張機能のid>/focus?...`）を組み立てるのに、
+  // 拡張機能のidが要る（Issue #1285）
+  initOsNotifications(context.extension.id, log);
 
   // 前回の異常終了で残ったレビュー材料を回収する（Issue #926 E）。十分に古いものだけを
   // 消すので、別ウィンドウで使用中のものは巻き込まない。起動を待たせる必要は無い
@@ -1200,6 +1205,33 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     log,
   );
+  // OS通知（Issue #1285）のクリックを受ける。`vscode://<拡張機能のid>/focus?provider=...&session=...`
+  //
+  // **どのウィンドウがこれを受けるかはVSCodeが決める**（直近にアクティブだったウィンドウ）。
+  // 目的のセッションを持たないウィンドウへ届いた場合は、勝手に会話を開き直さず何もしない
+  // （別ウィンドウで開いている同じ会話を二重に立ち上げないため）。
+  context.subscriptions.push(
+    vscode.window.registerUriHandler({
+      handleUri(uri: vscode.Uri): void {
+        if (uri.path !== '/focus') {
+          return;
+        }
+        const query = new URLSearchParams(uri.query);
+        const sessionId = query.get('session') ?? '';
+        if (sessionId === '') {
+          return;
+        }
+        const revealed =
+          query.get('provider') === 'claude'
+            ? claudeChat.revealSession(sessionId)
+            : chat.revealSession(sessionId);
+        if (!revealed) {
+          log.info(`通知から開こうとした会話はこのウィンドウにありませんでした: ${sessionId}`);
+        }
+      },
+    }),
+  );
+
   const onSessionKanbanRelevantChange = (): void => {
     sessionKanban.refresh();
     // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる

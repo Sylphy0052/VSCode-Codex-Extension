@@ -427,6 +427,9 @@ const REVIEW_TARGET_INPUT: Record<
  * 見ずにタスクのセッションを扱えるようにする（design.md §16.10）。
  */
 export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements TaskSessionHost {
+  /** OS通知のクリック先URIに載せる種別（Issue #1285）。 */
+  protected readonly osNotificationProvider = 'codex' as const;
+
   private readonly webGptPreparing = new Set<ChatPanel>();
 
   async discussWithWebGpt(): Promise<void> {
@@ -849,6 +852,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 引き継ぎが確定してから鳴らす。手動はユーザー自身の操作なので鳴らさない
     if (trigger.kind !== 'manual') {
       playNotificationSound('handoff', entry.panel?.visible === true);
+      // OS通知も同じ条件で出す（Issue #1285）
+      this.showOsNotificationFor(entry, 'handoff');
     }
 
     // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
