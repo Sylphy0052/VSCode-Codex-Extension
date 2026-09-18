@@ -3,7 +3,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
 import type { ApprovalDecision } from '../appserver/approvals';
-import type { ChatState, PendingApproval } from '../appserver/chatState';
+import type { ChatState, ContextUsage, PendingApproval } from '../appserver/chatState';
 import type { LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
 import { buildEscalationRequest } from './approvalMapping';
@@ -886,6 +886,27 @@ export interface TaskSnapshot {
   pullRequestNumber: number | undefined;
   /** このタスクのPR/MRのURL。 */
   pullRequestUrl: string | undefined;
+  /**
+   * このタスクのコンテキスト使用量（Issue #1272、design.md §14.9）。`LiveTask.contextUsage`
+   * から都度写す。**取れない場合は`undefined`**で、Viewは「不明」と出して0と区別する
+   * （残量0%・使用0トークンと「まだ判らない」を混同しないため）。応答本文と同じく
+   * 永続化しない（design.md §16.11）ので、リロード後は`undefined`に戻る。
+   */
+  context:
+    | {
+        /** いまコンテキストに載っているトークン数。 */
+        usedTokens: number;
+        /** コンテキスト上限。CLIが返さないことがあるため無い場合を許す。 */
+        contextWindow: number | undefined;
+        /** 残りの割合（0-100の整数）。上限が判らなければ`undefined`。 */
+        remainingPercent: number | undefined;
+      }
+    | undefined;
+  /**
+   * セッション累計のトークン数（Codexのみ、issue #294）。取れない間は`undefined`
+   * （0とは区別する）。`context.usedTokens`とは別物で、圧縮しても減らない。
+   */
+  sessionTokens: number | undefined;
 }
 
 /** ワークフローViewが描画する1実行分のスナップショット（design.md §16.8）。 */
@@ -1120,6 +1141,19 @@ export interface LiveTask {
    */
   originCommit: string;
   lastState: ChatState | undefined;
+  /**
+   * このタスクのコンテキスト使用量（design.md §14.9、Issue #1272）。`onTaskStateChanged`が
+   * `ChatState.context`から写す。まだ届いていない・CLIが返さない間は`undefined`のままで、
+   * 「使っていない（0）」とは区別する。`lastResponseSummary`と同じく永続化しない
+   * （design.md §16.11）ため、リロード後は`undefined`に戻る。
+   */
+  contextUsage: ContextUsage | undefined;
+  /**
+   * セッション累計のトークン数（Codexのみ。`ChatState.sessionTokens`、issue #294）。
+   * 圧縮しても減らない値で、`contextUsage.usedTokens`（いまコンテキストに載っている量）
+   * とは別物。取れない間は`undefined`（0とは区別する）。永続化しない。
+   */
+  sessionTokens: number | undefined;
   /** `done` になったときだけ埋まる。後続タスクのテンプレート変数に使う（応答本文は永続化しない）。 */
   result: TaskResult | undefined;
   /** DONE後の独立検証回数。初回を含め最大3回。 */
@@ -3709,6 +3743,8 @@ export class WorkflowRunner {
       pseudoSnapshot: prepared.pseudoSnapshot,
       originCommit: prepared.originCommit,
       lastState: undefined,
+      contextUsage: undefined,
+      sessionTokens: undefined,
       result: undefined,
       verificationAttempts: 0,
       verificationInProgress: false,
@@ -4737,6 +4773,10 @@ export class WorkflowRunner {
       return;
     }
     liveTask.lastState = state;
+    // コンテキスト残量と累計トークン数（Issue #1272）。取れない間は`undefined`のままに
+    // しておき、ワークフローViewは「不明」として0と区別して出す
+    liveTask.contextUsage = state.context;
+    liveTask.sessionTokens = state.sessionTokens;
     // 直近の応答の1行要約（design.md §16.8）。ストリーミング中も更新するため、
     // ターンの区切りを待たず毎回計算し直す（応答本文そのものは保持しない）
     liveTask.lastResponseSummary = buildResponseSummary(state);

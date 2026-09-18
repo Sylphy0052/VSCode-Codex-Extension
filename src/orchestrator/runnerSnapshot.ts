@@ -261,6 +261,10 @@ function buildTaskSnapshot(
       live.mergeResolutions.get(task.id)?.waitingApprovalSinceMs !== undefined,
     pullRequestNumber: liveTask?.pullRequest?.number ?? persistedTask?.pullRequestNumber,
     pullRequestUrl: liveTask?.pullRequest?.url ?? persistedTask?.pullRequestUrl,
+    // コンテキストの使用量は永続化していない（Issue #1272）。リロード復元直後や、
+    // まだCLIから値が届いていない間は`undefined`のままで、Viewが「不明」と出す
+    context: liveTask?.contextUsage,
+    sessionTokens: liveTask?.sessionTokens,
   };
 }
 

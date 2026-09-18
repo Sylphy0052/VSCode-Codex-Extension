@@ -116,12 +116,16 @@ runs:
     dependsOn: [R1]
 `;
 
-type ProgramsMessage = { type: 'programs'; programs: readonly unknown[] };
+/**
+ * run一覧・プログラム一覧・表示中のrunは1通の`feed`メッセージで届く（Issue #1272）。
+ * プログラム欄だけを見たいこのテストは、その`programs`の部分だけを読む。
+ */
+type FeedMessage = { type: 'feed'; programs: readonly unknown[] };
 
-function lastProgramsMessage(sent: readonly unknown[]): ProgramsMessage | undefined {
+function lastProgramsMessage(sent: readonly unknown[]): FeedMessage | undefined {
   const messages = sent.filter(
-    (m): m is ProgramsMessage =>
-      typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'programs',
+    (m): m is FeedMessage =>
+      typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'feed',
   );
   return messages[messages.length - 1];
 }

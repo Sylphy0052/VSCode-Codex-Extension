@@ -441,6 +441,58 @@ export function summarizeIntegration(
   };
 }
 
+// ---- タスク単位のコンテキスト使用量（design.md §14.9、Issue #1272） ----
+
+/** `formatTaskContext`が受け取る最小限の形（`TaskSnapshot`の一部）。 */
+export interface TaskContextInput {
+  context:
+    | {
+        usedTokens: number;
+        contextWindow: number | undefined;
+        remainingPercent: number | undefined;
+      }
+    | undefined;
+  sessionTokens: number | undefined;
+}
+
+/**
+ * トークン数を桁を落として読みやすくする（`12345` → `12.3k`）。
+ * 1000未満はそのまま出す。負の値・非有限値は`buildContextUsage`側で除いてある。
+ */
+function formatTokens(count: number): string {
+  if (count < 1000) {
+    return String(count);
+  }
+  const k = count / 1000;
+  return (k < 100 ? k.toFixed(1) : String(Math.round(k))) + 'k';
+}
+
+/**
+ * タスク一覧の「コンテキスト」列に出す1行（純粋関数）。
+ *
+ * **取れない値は「不明」と出し、0と区別する**（Issue #1272の受入基準）。空欄にすると
+ * 「使っていない」のか「まだ判らない」のかが読めないため、必ず語で書く。
+ *
+ * - 残量が判る: `残り42%（84.0k/200k） / 累計120k`
+ * - 上限が判らない（CLIが返さない）: `残り不明（使用12.3k） / 累計不明`
+ * - まだ何も届いていない: `残り不明 / 累計不明`
+ */
+export function formatTaskContext(task: TaskContextInput): string {
+  const usage = task.context;
+  let remaining: string;
+  if (usage === undefined) {
+    remaining = '残り不明';
+  } else if (usage.remainingPercent === undefined) {
+    remaining = `残り不明（使用${formatTokens(usage.usedTokens)}）`;
+  } else {
+    const window = usage.contextWindow === undefined ? '' : `/${formatTokens(usage.contextWindow)}`;
+    remaining = `残り${usage.remainingPercent}%（${formatTokens(usage.usedTokens)}${window}）`;
+  }
+  const total =
+    task.sessionTokens === undefined ? '累計不明' : `累計${formatTokens(task.sessionTokens)}`;
+  return `${remaining} / ${total}`;
+}
+
 // HTML文字列への埋め込みを前提にした`escapeHtml`はここに置かない（以前あったが未結線の
 // まま残っていた。レビュー指摘: info「デッドコードのまま『対策済み』に見えるのが一番良くない」）。
 // `workflowView.ts`は初期HTMLシェルへ動的な値を一切埋め込まず（`postMessage`のJSON経由のみ）、
