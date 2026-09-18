@@ -31,6 +31,8 @@ import type { HandoffDraft } from '../secondOpinion/handoff';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   capSideQuestionHistory,
+  describeSideQuestionError,
+  describeSyntheticSideQuestionResponse,
   finishedSideQuestionDisplay,
   pendingSideQuestionDisplay,
   progressSideQuestionDisplay,
@@ -1787,6 +1789,43 @@ export class ClaudeChatViewManager
         historyEntry,
       ]);
     }
+  }
+
+  /**
+   * 統括ページから投げられた脇道の質問（Issue #1261）。
+   *
+   * タブ側の`/btw`（`startSideQuestion`）との違いは、`noteSideQuestion`を呼ばないこと。
+   * 呼ぶと`kind:'sideQuestion'`の項目が会話へ積まれ、統括ページから投げた質問と回答が
+   * タブに残ってしまう（受入基準「本流の会話に残さない」）。CLIとのやり取り
+   * （transcript）にはもともと乗らない（design.md §14.62の実測）。
+   *
+   * 同じタブの過去の脇道の質問（`sideQuestionHistory`）は共有する。`/btw`と統括ページの
+   * どちらから聞いても、前のやり取りを踏まえた続きを聞けるようにする。
+   */
+  protected override async runSideQuestion(entry: ClaudePanel, question: string): Promise<string> {
+    const result = await entry.session.askSideQuestion(question, entry.sideQuestionHistory);
+    if (!result.ok || result.response === undefined) {
+      throw new Error(describeSideQuestionError(result.error));
+    }
+    // 封筒は成功でも、モデルが文章で答えていないことがある（`synthetic`のJSDoc）。
+    // CLIが生成した英語のプレースホルダをそのまま回答として出さない
+    if (result.synthetic === true) {
+      throw new Error(describeSyntheticSideQuestionResponse(result.response));
+    }
+    entry.sideQuestionHistory = capSideQuestionHistory([
+      ...entry.sideQuestionHistory,
+      {
+        question,
+        response: result.response,
+        fallbackNotice:
+          result.refusalFallback === undefined
+            ? undefined
+            : `${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答`,
+      },
+    ]);
+    return result.refusalFallback === undefined
+      ? result.response
+      : `${result.response}\n\n（${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答しました）`;
   }
 
   /**

@@ -2397,6 +2397,119 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
+   * 統括ページから投げられた脇道の質問（Issue #1261）。
+   *
+   * タブ側の`/btw`（`startSideQuestion`）と同じく`thread/fork`（`ephemeral: true`）で
+   * 本流から離れたスレッドを作るが、**タブは開かず`panels`にも載せない**。統括ページで
+   * 読むための1往復なので、相手ウィンドウに会話のタブが増えるのは目的に合わない。
+   * `panels`に載せないことで、共有ファイル（`managedSessions`）にも脇道のスレッドが
+   * 現れない。
+   *
+   * 通知と承認要求の宛先だけは引けないと困るため、`sideQuestionEntries`へ入れて
+   * `findExactByThreadId`から参照する。承認要求は`approvalHandler`で機械的に拒否する
+   * （下の`buildSideQuestionEntry`参照）。
+   */
+  protected override async runSideQuestion(entry: ChatPanel, question: string): Promise<string> {
+    const threadId = entry.session.threadId;
+    if (threadId === undefined) {
+      throw new Error('この会話はまだ開始していません');
+    }
+    const response = await this.connection.request(
+      'thread/fork',
+      buildSideQuestionForkParams(threadId),
+    );
+    const sideEntry = this.buildSideQuestionEntry(entry);
+    let sideThreadId: string;
+    try {
+      sideThreadId = sideEntry.session.loadForkedThread(response.result);
+    } catch (e) {
+      sideEntry.session.dispose();
+      throw e instanceof Error ? e : new Error(String(e));
+    }
+    this.sideQuestionEntries.set(sideThreadId, sideEntry);
+    this.log.info(`統括ページからの脇道の質問を開始しました: ${threadId} → ${sideThreadId}`);
+    try {
+      await sideEntry.session.send(question, this.configFor(sideEntry));
+      return await this.awaitSideQuestionAnswer(sideEntry);
+    } finally {
+      // 呼び出し側（`BaseChatViewManager.startSideQuestion`）が時間切れで待つのをやめた
+      // 場合もここまで来る。走っているターンを止めてから捨てる
+      void sideEntry.session.interrupt().catch(() => undefined);
+      sideEntry.disposed = true;
+      sideEntry.session.dispose();
+      this.sideQuestionEntries.delete(sideThreadId);
+    }
+  }
+
+  /**
+   * 統括ページからの脇道の質問に使う、タブを持たないエントリを作る（Issue #1261）。
+   *
+   * 自動引き継ぎは切る。forkは元の会話をそのまま引き継ぐため、元がしきい値を超えて
+   * いれば脇道でも条件を満たしてしまう（`maybeAutoHandoff`自体は`panel === undefined`で
+   * 止まるが、状態の側でも立てておく）。
+   *
+   * 承認要求は人に聞かずに拒否する。統括ページの脇道の質問は「いま何をしているか」を
+   * 聞くためのもので、そこからコマンド実行やファイル変更を通す必要が無い。聞ける相手
+   * （タブ）を持たないまま承認カードだけが積まれる状態も避ける。
+   */
+  private buildSideQuestionEntry(entry: ChatPanel): ChatPanel {
+    const sideEntry = this.buildEntry(
+      entry.cwd,
+      SIDE_QUESTION_TAB_TITLE,
+      false,
+      entry.taskConfig,
+      undefined,
+      { ...entry.modelSettings },
+      false,
+    );
+    sideEntry.session.setAutoHandoff(false);
+    sideEntry.approvalHandler = () => Promise.resolve({ kind: 'auto', decision: 'decline' });
+    return sideEntry;
+  }
+
+  /**
+   * 脇道のターンが終わるのを待ち、エージェントの応答を取り出す（Issue #1261）。
+   *
+   * 待つ上限は呼び出し側（`BaseChatViewManager`の`SIDE_QUESTION_TIMEOUT_MS`）が持つ。
+   * ここでは終わり方だけを見る。
+   */
+  private awaitSideQuestionAnswer(sideEntry: ChatPanel): Promise<string> {
+    const readAnswer = (state: ChatState): string | undefined => {
+      for (let i = state.items.length - 1; i >= 0; i -= 1) {
+        const item = state.items[i];
+        if (item?.kind === 'agentMessage' && item.text.trim() !== '') {
+          return item.text.trim();
+        }
+      }
+      return undefined;
+    };
+    const finish = (state: ChatState): string => {
+      const answer = readAnswer(state);
+      if (state.turnFailed || answer === undefined) {
+        throw new Error('脇道の質問に回答が返りませんでした');
+      }
+      return answer;
+    };
+    // `send`は`turn/start`の応答までしか待たない。既に終わっていることもある
+    const current = sideEntry.session.getState();
+    if (!current.busy) {
+      return Promise.resolve(finish(current));
+    }
+    return new Promise<string>((resolve, reject) => {
+      sideEntry.stateListeners.push((state) => {
+        if (state.busy) {
+          return;
+        }
+        try {
+          resolve(finish(state));
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)));
+        }
+      });
+    });
+  }
+
+  /**
    * 脇道の質問を送る（issue #24、design.md §14.26、Codex TUIの `/btw` 相当）。
    *
    * 現在のスレッドをephemeralに（`ephemeral: true`で）forkし、新しいタブへ
@@ -3013,6 +3126,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return [...this.panels.values(), ...this.pendingStarts.values()];
   }
 
+  /**
+   * 統括ページからの脇道の質問が使っている、タブを持たないスレッド（Issue #1261）。
+   *
+   * `panels`と分ける理由は`runSideQuestion`のJSDoc参照（カンバンにも共有ファイルにも
+   * 出さない）。通知と承認要求の宛先としてだけ引く。
+   */
+  private readonly sideQuestionEntries = new Map<string, ChatPanel>();
+
   private readonly fileJournals = new WeakMap<ChatPanel, FileRewindJournal>();
   private restoringFiles = false;
 
@@ -3106,6 +3227,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private findExactByThreadId(threadId: unknown): ChatPanel | undefined {
     if (typeof threadId !== 'string') {
       return undefined;
+    }
+    // 統括ページからの脇道の質問（Issue #1261）。`panels`に載せない代わりにここで引く
+    const side = this.sideQuestionEntries.get(threadId);
+    if (side !== undefined) {
+      return side;
     }
     const known = this.panels.get(threadId);
     if (known !== undefined) {

@@ -368,7 +368,9 @@ export type SessionHubRequestKind =
   | 'send'
   | 'approvalDetail'
   | 'approvalDecision'
-  | 'recentTurns';
+  | 'recentTurns'
+  | 'sideQuestion'
+  | 'sideQuestionResult';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -430,7 +432,24 @@ export interface SessionRecentTurn {
   truncated: boolean;
 }
 
-/** 応答の`payload`（Issue #1259）。Phase 4以降（btwの回答）もここへ足す。 */
+/**
+ * 脇道の質問（btw）1件の進み具合（Issue #1261）。
+ *
+ * 回答は本流の会話に残さないため、この値が統括ページへ運ぶ唯一の経路になる。
+ * `sideQuestion`（質問を投げる）と`sideQuestionResult`（進み具合を取りに行く）の
+ * どちらの応答にも同じ形で載る。
+ */
+export interface SessionSideQuestion {
+  /** 受信側が採番する、この質問1件のid。以後の`sideQuestionResult`はこれで引く。 */
+  id: string;
+  /** `running`は回答待ち。`done`なら`answer`、`failed`なら`error`が入る。 */
+  status: 'running' | 'done' | 'failed';
+  question: string;
+  answer?: string | undefined;
+  error?: string | undefined;
+}
+
+/** 応答の`payload`（Issue #1259）。 */
 export interface SessionHubReplyPayload {
   /** `kind === 'approvalDetail'`の応答。承認待ちが無ければ空配列。 */
   approvals?: SessionApprovalDetail[] | undefined;
@@ -443,6 +462,8 @@ export interface SessionHubReplyPayload {
    * 代わりに「いつ時点の内容か」をこれで示す（何秒前の状態を見ているかが判る）。
    */
   capturedAt?: number | undefined;
+  /** `kind === 'sideQuestion'` / `'sideQuestionResult'`の応答（Issue #1261）。 */
+  sideQuestion?: SessionSideQuestion | undefined;
 }
 
 /** 1件の要求。`kind`ごとの追加項目はここへ並べる。 */
@@ -466,6 +487,13 @@ export interface SessionHubRequest {
   decision?: string | undefined;
   /** `kind === 'recentTurns'`のときに欲しい件数（Issue #1260）。受信側が範囲へ丸める。 */
   limit?: number | undefined;
+  /**
+   * `kind === 'sideQuestionResult'`のときの、進み具合を知りたい質問のid（Issue #1261）。
+   *
+   * この要求そのもののidである`requestId`とは別物なので名前を分ける
+   * （`approvalRequestId`と同じ理由）。
+   */
+  sideQuestionId?: string | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -541,6 +569,7 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     approvalRequestId: typeof v.approvalRequestId === 'string' ? v.approvalRequestId : undefined,
     decision: typeof v.decision === 'string' ? v.decision : undefined,
     limit: typeof v.limit === 'number' ? v.limit : undefined,
+    sideQuestionId: typeof v.sideQuestionId === 'string' ? v.sideQuestionId : undefined,
   };
 }
 
@@ -573,6 +602,16 @@ const MAX_REPLY_TURNS = 40;
 const MAX_REPLY_TEXT_CHARS = 2_000;
 
 /**
+ * 脇道の質問の回答として読み取る上限（Issue #1261）。
+ *
+ * 直近のやり取り（`MAX_REPLY_TEXT_CHARS`）より緩くする。やり取りは流れを掴むための
+ * 抜粋だが、回答はそれ自体が読みたいもので、途中で切れると用を成さない。書き手側
+ * （`chatManagerBase.ts`の`MAX_SIDE_QUESTION_ANSWER_CHARS`）より少しだけ緩くして、
+ * 正しい相手からの回答を切り落とさないようにする。
+ */
+const MAX_REPLY_ANSWER_CHARS = 8_000;
+
+/**
  * 応答の`payload`を、信用せずに読み解く（Issue #1259）。
  *
  * 中身は別プロセス（版が違うこともある）が書いた文字列で、そのまま画面へ流す。
@@ -583,6 +622,10 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
     return undefined;
   }
   const v = value as Record<string, unknown>;
+  const sideQuestion = parseSideQuestion(v.sideQuestion);
+  if (sideQuestion !== undefined) {
+    return { sideQuestion };
+  }
   if (Array.isArray(v.turns)) {
     return {
       turns: parseRecentTurns(v.turns),
@@ -615,6 +658,37 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
     });
   }
   return { approvals };
+}
+
+/**
+ * 脇道の質問の進み具合を、信用せずに読み解く（Issue #1261）。
+ *
+ * 形が合わなければ`undefined`を返し、呼び出し側は`payload`そのものを無かったものと
+ * して扱う。`status`は3値のホワイトリストで確かめる。知らない値を通すと、画面が
+ * 「回答待ち」でも「完了」でもない状態のまま固まる。
+ */
+function parseSideQuestion(value: unknown): SessionSideQuestion | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.id !== 'string' || typeof v.question !== 'string') {
+    return undefined;
+  }
+  if (v.status !== 'running' && v.status !== 'done' && v.status !== 'failed') {
+    return undefined;
+  }
+  return {
+    id: v.id,
+    status: v.status,
+    question: cap(v.question, MAX_REPLY_TEXT_CHARS),
+    answer: typeof v.answer === 'string' ? cap(v.answer, MAX_REPLY_ANSWER_CHARS) : undefined,
+    error: typeof v.error === 'string' ? cap(v.error, MAX_REPLY_TEXT_CHARS) : undefined,
+  };
+}
+
+function cap(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text;
 }
 
 /**
@@ -718,6 +792,7 @@ export class SessionHubRequestPort {
       approvalRequestId?: string | undefined;
       decision?: string | undefined;
       limit?: number | undefined;
+      sideQuestionId?: string | undefined;
     },
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
