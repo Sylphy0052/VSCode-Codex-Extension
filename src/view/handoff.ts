@@ -410,101 +410,46 @@ export function buildHandoffPrompt(pointerPath: string): string {
 /**
  * 初回プロンプトの書き出し（Issue #1228）。
  *
- * 名前の材料からこのプロンプト由来のユーザー発言を外すために切り出してある。ここを
- * 変えるときは、引き継ぎ先の発言の見分けが付かなくならないよう `buildHandoffPrompt`
- * と揃える。
+ * 引き継ぎ先の1件目のユーザー発言がこの手続き由来であることを見分けるための目印として
+ * 切り出してある。
  */
 const HANDOFF_PROMPT_HEAD = '前セッションの続き。';
 
 /** 引き継ぎ先の名前に付ける世代の印（Issue #1145）。 */
 const CONTINUATION_SUFFIX = /^(.*?)\s*\(続き(\d+)\)$/u;
 
-/**
- * 引き継ぎ先の名前の長さ。タブに収まる範囲に切る。
- *
- * 32文字では収まらなかった（Issue #1228）。タブには世代の印（` (続き12)`）とCLIの接頭辞
- * （`Codex: `）、実行中・承認待ちの印（`decoratePanelTitle`）も並ぶため、本体に使える幅は
- * これよりずっと狭い。
- */
-const HANDOFF_NAME_LENGTH = 16;
-
-/** 引き継ぎ先の名前の材料（Issue #1228）。すべて `startHandoff` の時点で手元にある値。 */
+/** 引き継ぎ先の名前の材料（Issue #1255）。引き継ぎ元の表示名だけを使う。 */
 export interface HandoffNameInput {
-  /** 引き継ぎ元の表示名（`deriveHandoffBaseName`）。**世代番号の読み取りにだけ使う。** */
+  /**
+   * 引き継ぎ元の表示名（`deriveHandoffBaseName`）。名前の本体と世代番号の両方をここから取る。
+   */
   previousName?: string;
-  /** 人やオーケストレータが明示的に付けた名前（`ChatPanel.pinnedName`）。 */
-  pinnedName?: string;
-  /** 分類器の見立て由来の一文（`TaskAssessment` の `reasons[0]` か `switchReason`）。 */
-  topic?: string;
-  /** 直前のターンで編集したファイル（`ChatState.turnEditedFiles`）。 */
-  editedFiles?: readonly string[];
-  /** 直近のユーザー発言。会話順（末尾が最新）。 */
-  recentUserMessages?: readonly string[];
 }
 
 /**
- * 引き継ぎ先セッションの名前（Issue #1145、材料の作り直しはIssue #1228）。
+ * 引き継ぎ先セッションの名前（Issue #1145、材料はIssue #1255）。
  *
  * 名前を付けないと、引き継ぎ先の表示名は初回プロンプト（`buildHandoffPrompt`）の
  * 「前セッションの続き。…」になる。自動引き継ぎを重ねるほど同じ名前のタブと履歴が
  * 並び、どれが何の作業か判らなくなる。
  *
- * **前世代の名前は引き継がない（Issue #1228）。** 以前は引き継ぎ元の表示名をそのまま
- * 本体に使っていたが、名前の無いセッションではその表示名が「最初のユーザー発言」に
- * なる。それが引き継ぎ時に `state.name` へ焼き付き、次の世代はその `state.name` を
- * 材料にする——という連鎖で、初代の一言が作業内容と無関係なまま世代印だけ増やして
- * 延々コピーされていた。名前を今の作業へ更新する経路が無かったのが原因なので、
- * **引き継ぎのたびに現在の作業から本体を作り直す**。
+ * **本体は引き継ぎ元のタブ名をそのまま継ぎ、世代の印だけを進める（Issue #1255）。**
+ * 一時期は引き継ぎのたびに本体を作り直していた（Issue #1228。編集したファイル・分類器の
+ * 見立て・直近の指示から組み立てる）が、どの材料も「今の作業」の推測にすぎず、同じ作業を
+ * 続けているのに世代ごとに別の名前が並んでタブと履歴の対応が追えなくなった。名前を変える
+ * かどうかは人が決められる（タブの付け直し）ので、自動では推測しない。
  *
- * 引き継ぐのは世代の印だけ。`(続き2)` から始めて引き継ぐたびに1つ増やす（元が1代目
- * なので次が2）。材料が何も取れなければ印だけを返す。
+ * `(続き2)` から始めて引き継ぐたびに1つ増やす（元が1代目なので次が2）。引き継ぎ元の
+ * 名前が取れなければ印だけを返す。
+ *
+ * タブに収まらない長さは切り詰めない。引き継ぎ元のタブに既に出ていた名前をそのまま
+ * 継ぐだけなので、表示の省略はVSCode側に任せる。
  */
 export function buildHandoffSessionName(input: HandoffNameInput): string {
-  const head = deriveHandoffNameHead(input);
+  const previous = collapse(input.previousName?.replace(PROVIDER_PREFIX, ''));
+  const head = previous === undefined ? undefined : stripGeneration(previous);
   const generation = nextGeneration(input.previousName);
-  return head === undefined ? `(続き${generation})` : `${truncateName(head)} (続き${generation})`;
-}
-
-/**
- * 名前の本体。**明示的に付けられた名前 > 触っていたファイル > 見立て > 直近の指示**
- * の順に探す。
- *
- * `pinnedName` を最優先にするのは、ワークフローが並列に開いたタスクを見分けるために
- * 人（かオーケストレータ）が意図して付けた名前だから（`deriveTitle` と同じ理由）。
- *
- * 次が編集したファイル名。`topic`（分類器の見立て）より前に置くのは、**見立ての文が
- * model/effortを決めるために書かれたもの**だからである。「探索が支配的」のような判定の
- * 根拠は、タブ名の幅（`HANDOFF_NAME_LENGTH`）へ切り詰めると何の作業か判らなくなる。
- * ファイル名は短く具体的で、並んだタブを見分けるという目的に直接効く。
- *
- * 編集の無いターン（調査だけで終わったなど）では `turnEditedFiles` が空になるため、
- * 見立て、さらに直近の指示へ落とす。見立ては分類器が動く契機でしか取れない（残量の
- * 閾値・自動圧縮では取れず、`agent.autoHandoff.router` が無効でも取れない）。
- */
-function deriveHandoffNameHead(input: HandoffNameInput): string | undefined {
-  const pinned = collapse(input.pinnedName?.replace(PROVIDER_PREFIX, ''));
-  if (pinned !== undefined) {
-    return stripGeneration(pinned);
-  }
-  const files = (input.editedFiles ?? []).filter((file) => file.trim() !== '');
-  const firstFile = files[0];
-  if (firstFile !== undefined) {
-    const name = baseFileName(firstFile);
-    return files.length > 1 ? `${name} ほか${files.length - 1}件` : name;
-  }
-  const topic = collapse(input.topic);
-  if (topic !== undefined) {
-    return topic;
-  }
-  // 新しい順に見る。引き継ぎ先で最初に入るのは初回プロンプトで、それは指示ではなく
-  // 引き継ぎの手続きなので材料から外す（Issue #1228）
-  for (const message of [...(input.recentUserMessages ?? [])].reverse()) {
-    const text = collapse(message);
-    if (text !== undefined && !text.startsWith(HANDOFF_PROMPT_HEAD)) {
-      return text;
-    }
-  }
-  return undefined;
+  return head === undefined ? `(続き${generation})` : `${head} (続き${generation})`;
 }
 
 /** 引き継ぎ元の名前から次の世代番号を読む。印が無ければ引き継ぎ元が1代目なので2。 */
@@ -518,7 +463,7 @@ function nextGeneration(previousName: string | undefined): number {
   return Number.isSafeInteger(generation) ? generation + 1 : generation;
 }
 
-/** 明示名に既に付いている世代の印を落とす。付け直しで `(続き2) (続き3)` にしないため。 */
+/** 既に付いている世代の印を落とす。付け直しで `(続き2) (続き3)` にしないため。 */
 function stripGeneration(name: string): string | undefined {
   const matched = CONTINUATION_SUFFIX.exec(name);
   if (matched === null) {
@@ -534,31 +479,21 @@ function collapse(text: string | undefined): string | undefined {
   return trimmed === '' ? undefined : trimmed;
 }
 
-/** パスの末尾だけを名前に使う。区切りはPOSIXとWindowsの両方を見る。 */
-function baseFileName(filePath: string): string {
-  const segments = filePath.trim().split(/[/\\]/u);
-  return segments[segments.length - 1] ?? filePath.trim();
-}
-
-function truncateName(name: string): string {
-  return name.length > HANDOFF_NAME_LENGTH ? `${name.slice(0, HANDOFF_NAME_LENGTH)}…` : name;
-}
-
 /** タブ名に付くプロバイダの接頭辞。名前の材料にするときは落とす。 */
 const PROVIDER_PREFIX = /^(?:Codex|Claude Code|Claude):\s*/u;
 
 /**
  * 引き継ぎ元の表示名（Issue #1145）。`buildHandoffSessionName` の `previousName`——
- * つまり**世代番号の読み取り元**として渡す。
+ * つまり**名前の本体と世代番号の読み取り元**として渡す。
  *
  * 解決順は `deriveTitle`（`chatView.ts` / `claudeChatView.ts`）と同じ
  * 「オーケストレータが指定した名前 > 人やCLIが付けた名前」。タブ名と違い接頭辞は
  * 付けない（引き継ぎ先で `deriveTitle` が改めて付けるため、残すと `Codex: Codex: …`
  * と二重になる）。
  *
- * 最初のユーザー発言へ落ちる分岐は持たない（Issue #1228）。世代の印が付いていない
- * 文字列をここで拾っても世代の判定は変わらず、名前の本体は
- * `deriveHandoffNameHead` が別に決めるため。
+ * 最初のユーザー発言へ落ちる分岐は持たない（Issue #1228）。名前の無いセッションで
+ * それを拾うと、作業内容と無関係な初代の一言が世代印だけ増やして延々コピーされる。
+ * 名前が無いなら `(続き2)` のように印だけを出す方がまだ読める。
  */
 export function deriveHandoffBaseName(state: ChatState, pinnedName?: string): string | undefined {
   const pinned = collapse(pinnedName?.replace(PROVIDER_PREFIX, ''));

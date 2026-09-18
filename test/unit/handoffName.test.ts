@@ -10,95 +10,38 @@ const stateWith = (overrides: Partial<ChatState>): ChatState => ({
   ...overrides,
 });
 
-describe('buildHandoffSessionName（issue #1145、材料はissue #1228）', () => {
-  it('印の無い引き継ぎ元からは (続き2) を付ける', () => {
-    expect(buildHandoffSessionName({ previousName: '前の名前', topic: '分類器の見立て' })).toBe(
-      '分類器の見立て (続き2)',
+describe('buildHandoffSessionName（issue #1145、材料はissue #1255）', () => {
+  it('印の無い引き継ぎ元には (続き2) を付ける', () => {
+    expect(buildHandoffSessionName({ previousName: '前の名前' })).toBe('前の名前 (続き2)');
+  });
+
+  it('引き継ぎ元に印があれば本体を保ったまま世代を1つ進める', () => {
+    expect(buildHandoffSessionName({ previousName: '前の名前 (続き2)' })).toBe('前の名前 (続き3)');
+    expect(buildHandoffSessionName({ previousName: '前の名前 (続き9)' })).toBe('前の名前 (続き10)');
+  });
+
+  it('プロバイダの接頭辞は落とす', () => {
+    expect(buildHandoffSessionName({ previousName: 'Codex: タスクA (続き2)' })).toBe(
+      'タスクA (続き3)',
     );
   });
 
-  it('引き継ぎ元に印があれば世代を1つ進める', () => {
-    expect(buildHandoffSessionName({ previousName: '前の名前 (続き2)', topic: '見立て' })).toBe(
-      '見立て (続き3)',
-    );
-    expect(buildHandoffSessionName({ previousName: '前の名前 (続き9)', topic: '見立て' })).toBe(
-      '見立て (続き10)',
-    );
-  });
-
-  it('本体は前世代から継がず、その時点の作業から作り直す（issue #1228）', () => {
-    const name = buildHandoffSessionName({
-      previousName: '作業の続き。前PCでやっていた作業の指示書があるはず (続き3)',
-      topic: 'タブ名の改修',
-    });
-    expect(name).toBe('タブ名の改修 (続き4)');
-  });
-
-  it('明示的に付けられた名前を最優先にし、接頭辞と印は落とす', () => {
-    expect(
-      buildHandoffSessionName({
-        previousName: '前の名前 (続き2)',
-        pinnedName: 'Codex: タスクA (続き2)',
-        topic: '見立て',
-      }),
-    ).toBe('タスクA (続き3)');
-  });
-
-  it('編集したファイル名を見立てより優先する', () => {
-    expect(
-      buildHandoffSessionName({
-        editedFiles: ['src/view/handoff.ts'],
-        topic: '見立て',
-        recentUserMessages: ['直近の指示'],
-      }),
-    ).toBe('handoff.ts (続き2)');
-  });
-
-  it('編集が無ければ分類器の見立てを使う', () => {
-    expect(
-      buildHandoffSessionName({
-        editedFiles: [],
-        topic: '見立て',
-        recentUserMessages: ['直近の指示'],
-      }),
-    ).toBe('見立て (続き2)');
-  });
-
-  it('編集したファイルが複数あれば件数を添える', () => {
-    expect(
-      buildHandoffSessionName({
-        editedFiles: ['src/view/handoff.ts', 'src/view/chatView.ts', 'test/unit/a.test.ts'],
-      }),
-    ).toBe('handoff.ts ほか2件 (続き2)');
-  });
-
-  it('編集ファイルも見立ても無ければ直近のユーザー発言を使う', () => {
-    expect(buildHandoffSessionName({ recentUserMessages: ['最初の指示', '直近の指示'] })).toBe(
-      '直近の指示 (続き2)',
-    );
-  });
-
-  it('引き継ぎの初回プロンプトは材料にしない（issue #1228）', () => {
-    expect(
-      buildHandoffSessionName({
-        recentUserMessages: [
-          '前セッションの続き。/tmp/handoff/x.md を読んで、そこに書かれた手順で状況を把握してから作業を続けて。',
-        ],
-      }),
-    ).toBe('(続き2)');
-  });
-
-  it('材料が何も無ければ印だけを返す', () => {
+  it('引き継ぎ元の名前が無ければ印だけを返す', () => {
     expect(buildHandoffSessionName({})).toBe('(続き2)');
-    expect(buildHandoffSessionName({ previousName: '   ', topic: '  ' })).toBe('(続き2)');
+    expect(buildHandoffSessionName({ previousName: '   ' })).toBe('(続き2)');
+    expect(buildHandoffSessionName({ previousName: '(続き3)' })).toBe('(続き4)');
   });
 
-  it('長い名前は切り詰める', () => {
-    expect(buildHandoffSessionName({ topic: 'あ'.repeat(40) })).toBe(`${'あ'.repeat(16)}… (続き2)`);
+  it('長い名前は切り詰めない（issue #1255。表示の省略はVSCodeに任せる）', () => {
+    expect(buildHandoffSessionName({ previousName: 'あ'.repeat(40) })).toBe(
+      `${'あ'.repeat(40)} (続き2)`,
+    );
   });
 
   it('改行や連続した空白を1つにまとめる', () => {
-    expect(buildHandoffSessionName({ topic: '設計を\n見直す' })).toBe('設計を 見直す (続き2)');
+    expect(buildHandoffSessionName({ previousName: '設計を\n見直す' })).toBe(
+      '設計を 見直す (続き2)',
+    );
   });
 });
 

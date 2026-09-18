@@ -1039,18 +1039,10 @@ export class ClaudeChatViewManager
     // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
     // 引き継ぎ自体は成立するので、失敗は記録に留める。
     //
-    // タブ名の本体は前世代から継がず、この引き継ぎの時点の作業から作り直す（Issue #1228）。
-    // 分類器の見立てがあればそれが最も「今の作業」を表す。無い契機（残量の閾値・自動圧縮、
-    // ルータ無効）では、編集ファイルと直近の指示へ落ちる
+    // タブ名の本体は引き継ぎ元をそのまま継ぎ、世代の印だけを進める（Issue #1255）。
+    // 作業内容からの推測はしない
     const previousName = deriveHandoffBaseName(state, entry.pinnedName);
-    const handoffTopic = choice.assessment?.reasons[0] ?? choice.assessment?.switchReason;
-    const handoffName = buildHandoffSessionName({
-      ...(previousName === undefined ? {} : { previousName }),
-      ...(entry.pinnedName === undefined ? {} : { pinnedName: entry.pinnedName }),
-      ...(handoffTopic === undefined ? {} : { topic: handoffTopic }),
-      editedFiles: state.turnEditedFiles,
-      recentUserMessages: recentUserMessages(state),
-    });
+    const handoffName = buildHandoffSessionName(previousName === undefined ? {} : { previousName });
     try {
       await this.store.rename(newSessionId, handoffName);
       newEntry.session.setName(handoffName);

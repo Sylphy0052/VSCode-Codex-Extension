@@ -50,15 +50,6 @@ export interface HandoffModelChoice {
   settings: SessionModelSettings;
   /** そうなった理由。ポインタファイルとログへ出す。 */
   reasons: string[];
-  /**
-   * 判定に使った見立て（Issue #1228）。分類器が動かなかったとき・手動で選び直された
-   * ときは無い。
-   *
-   * model/effortの決定には要らないが、引き継ぎ先のタブ名の材料として使う
-   * （`buildHandoffSessionName`）。ここで返さないと、名前のために分類器をもう一度
-   * 起動することになる。
-   */
-  assessment?: TaskAssessment;
 }
 
 const PROCEED = '引き継ぐ';
@@ -92,7 +83,6 @@ export async function proposeHandoffModelSettings(
 ): Promise<HandoffModelChoice> {
   const settings: SessionModelSettings = { model: current.model, effort: current.effort };
   const reasons: string[] = [];
-  let usedAssessment: TaskAssessment | undefined;
 
   if (readAutoHandoffRouterEnabled()) {
     const assessment =
@@ -109,7 +99,6 @@ export async function proposeHandoffModelSettings(
     if (assessment === undefined) {
       reasons.push('作業の分類に失敗したため引き継ぎ元を踏襲');
     } else {
-      usedAssessment = assessment;
       const resolved = resolveProfile(
         assessment,
         { turnFailed: input.turnFailed },
@@ -148,11 +137,7 @@ export async function proposeHandoffModelSettings(
     reasons.push(`設定 agent.autoHandoff.effort=${explicitEffort}`);
   }
 
-  return {
-    settings,
-    reasons,
-    ...(usedAssessment === undefined ? {} : { assessment: usedAssessment }),
-  };
+  return { settings, reasons };
 }
 
 /**
