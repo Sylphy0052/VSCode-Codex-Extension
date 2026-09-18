@@ -705,13 +705,13 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   protected beginPendingHandoff(entry: TPanel, trigger: HandoffTrigger): PendingHandoffChoice {
     const pending = new PendingHandoffChoice(triggerLabel(trigger), () => {
-      // 取り下げるのは自分が公開している間だけ。引き継ぎを続けて始めたとき（手動と自動が
-      // 重なる等）に、先に終わった方が後から始まった保留を消さないようにする
-      if (pending.active) {
-        entry.pendingHandoff = pending;
-      } else if (entry.pendingHandoff === pending) {
-        entry.pendingHandoff = undefined;
+      // 触るのは自分がこの画面の保留でいる間だけ。引き継ぎを続けて始めたとき（手動と
+      // 自動が重なる等）に、先に始まった方の再判定や後始末が、後から始まった保留を
+      // 追い出したり消したりしないようにする
+      if (entry.pendingHandoff !== undefined && entry.pendingHandoff !== pending) {
+        return;
       }
+      entry.pendingHandoff = pending.active ? pending : undefined;
       this.refreshPanelTitle(entry);
       this.panelsChanged.fire();
     });

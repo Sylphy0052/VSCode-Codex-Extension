@@ -811,6 +811,14 @@ function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
 const MAX_REPLY_MODEL_OPTIONS = 100;
 
 /**
+ * 判定理由の件数の上限（Issue #1280）。
+ *
+ * 1件ずつの長さだけでなく件数も抑える。統括ページは理由を1件1行で並べるため、
+ * 巨大な配列がそのまま届くとカードの中に大量の行を作ることになる。
+ */
+const MAX_REPLY_REASONS = 40;
+
+/**
  * 保留中の引き継ぎ確認を、信用せずに読み解く（Issue #1280）。
  *
  * 版の違うウィンドウが書いた値なので、必須の項目が欠けていれば丸ごと捨てる。
@@ -831,6 +839,7 @@ function parseHandoffDetail(value: unknown): SessionHandoffDetail | undefined {
     reasons: Array.isArray(v.reasons)
       ? v.reasons
           .filter((r): r is string => typeof r === 'string')
+          .slice(0, MAX_REPLY_REASONS)
           .map((r) => (r.length > MAX_REPLY_TEXT_CHARS ? r.slice(0, MAX_REPLY_TEXT_CHARS) : r))
       : [],
     trigger: typeof v.trigger === 'string' ? v.trigger : '',

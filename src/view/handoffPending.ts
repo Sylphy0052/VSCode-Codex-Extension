@@ -21,6 +21,14 @@ export class PendingHandoffChoice implements HandoffPendingPort {
   private snapshot: PendingSnapshot | undefined;
   /** `external()`が返した約束の解決口。まだ誰も待っていなければ`undefined`。 */
   private waiter: ((decision: HandoffDecision) => void) | undefined;
+  /**
+   * 会話が閉じられたか（`cancelForTeardown`）。
+   *
+   * 立った後は公開も決定の受け付けもしない。「再判定」の分類器を待っている最中に
+   * タブを閉じると、待ち終わった側が新しい提案を`publish`して中止の決定を上書きし、
+   * 誰も答えない確認を待ち続けることになる。
+   */
+  private tornDown = false;
 
   constructor(
     /** 引き継ぎの契機を人が読める文にしたもの（`triggerLabel`）。 */
@@ -35,6 +43,9 @@ export class PendingHandoffChoice implements HandoffPendingPort {
   }
 
   publish(proposal: HandoffModelChoice, presentation: HandoffPendingPresentation): void {
+    if (this.tornDown) {
+      return;
+    }
     // idは提案ごとに振り直す。中身を取り寄せてから決定を押すまでの間に「再判定」で
     // 提案が入れ替わっていたら、見ていない値で引き継ぐことになるため一致させない
     this.snapshot = {
@@ -48,6 +59,10 @@ export class PendingHandoffChoice implements HandoffPendingPort {
   }
 
   external(): Promise<HandoffDecision> {
+    if (this.tornDown) {
+      // 公開する前に閉じられた場合もここへ来る。待たせずに中止で返す
+      return Promise.resolve<HandoffDecision>({ kind: 'cancel' });
+    }
     const decided = this.snapshot?.decided;
     if (decided !== undefined) {
       // `decide()`が解決した約束を待たずに捨てた周回がありうる（モーダルが競争に
@@ -60,7 +75,7 @@ export class PendingHandoffChoice implements HandoffPendingPort {
   }
 
   claim(): boolean {
-    if (this.snapshot === undefined || this.snapshot.decided !== undefined) {
+    if (this.tornDown || this.snapshot === undefined || this.snapshot.decided !== undefined) {
       return false;
     }
     this.snapshot.claimedByModal = true;
@@ -81,10 +96,10 @@ export class PendingHandoffChoice implements HandoffPendingPort {
    * 応答待ちの上限（`REPLY_TIMEOUT_MS`）で打ち切る。
    */
   cancelForTeardown(): void {
-    if (this.snapshot === undefined) {
-      return;
+    this.tornDown = true;
+    if (this.snapshot !== undefined) {
+      this.snapshot.decided = { kind: 'cancel' };
     }
-    this.snapshot.decided = { kind: 'cancel' };
     const waiter = this.waiter;
     this.waiter = undefined;
     waiter?.({ kind: 'cancel' });
