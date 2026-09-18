@@ -302,10 +302,15 @@ function slashCommandText(raw: string): string {
   return args === '' ? name : `${name} ${args}`;
 }
 
+/** slash commandの発言から中身を取り出す制御タグ（`CONTROL_BLOCK`が落とす側の一部）。 */
+const COMMAND_TAG_BODY = {
+  'command-name': /<command-name>([\s\S]*?)<\/command-name>/,
+  'command-args': /<command-args>([\s\S]*?)<\/command-args>/,
+} as const;
+
 /** 制御タグ1つ分の中身。タグが無ければ空文字。 */
-function commandTagBody(raw: string, tag: 'command-name' | 'command-args'): string {
-  const found = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(raw);
-  return (found?.[1] ?? '').trim();
+function commandTagBody(raw: string, tag: keyof typeof COMMAND_TAG_BODY): string {
+  return (COMMAND_TAG_BODY[tag].exec(raw)?.[1] ?? '').trim();
 }
 
 /** ツール名。会話には積まず、専用の一覧として別に持つ。 */
