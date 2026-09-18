@@ -31,6 +31,8 @@ import type { HandoffDraft } from '../secondOpinion/handoff';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
   capSideQuestionHistory,
+  describeSideQuestionError,
+  describeSyntheticSideQuestionResponse,
   finishedSideQuestionDisplay,
   pendingSideQuestionDisplay,
   progressSideQuestionDisplay,
@@ -136,7 +138,7 @@ import {
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
-import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
+import { abortAsRejection, BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
@@ -1787,6 +1789,54 @@ export class ClaudeChatViewManager
         historyEntry,
       ]);
     }
+  }
+
+  /**
+   * 統括ページから投げられた脇道の質問（Issue #1261）。
+   *
+   * タブ側の`/btw`（`startSideQuestion`）との違いは、`noteSideQuestion`を呼ばないこと。
+   * 呼ぶと`kind:'sideQuestion'`の項目が会話へ積まれ、統括ページから投げた質問と回答が
+   * タブに残ってしまう（受入基準「本流の会話に残さない」）。CLIとのやり取り
+   * （transcript）にはもともと乗らない（design.md §14.62の実測）。
+   *
+   * 同じタブの過去の脇道の質問（`sideQuestionHistory`）は共有する。`/btw`と統括ページの
+   * どちらから聞いても、前のやり取りを踏まえた続きを聞けるようにする。
+   */
+  protected override async runSideQuestion(
+    entry: ClaudePanel,
+    question: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    // CLIが応答を返さないまま黙ると`askSideQuestion`は解決しない（解けるのはプロセスの
+    // 破棄時だけ。`streamSession.ts`）。統括ページから投げた質問はタブを持たず、人が
+    // タブを閉じて打ち切る逃げ道が無いため、待つ側をここで区切る。CLIへ送った要求
+    // そのものは取り消せないので、後から応答が来ても捨てられるだけになる
+    const result = await Promise.race([
+      entry.session.askSideQuestion(question, entry.sideQuestionHistory),
+      abortAsRejection(signal),
+    ]);
+    if (!result.ok || result.response === undefined) {
+      throw new Error(describeSideQuestionError(result.error));
+    }
+    // 封筒は成功でも、モデルが文章で答えていないことがある（`synthetic`のJSDoc）。
+    // CLIが生成した英語のプレースホルダをそのまま回答として出さない
+    if (result.synthetic === true) {
+      throw new Error(describeSyntheticSideQuestionResponse(result.response));
+    }
+    entry.sideQuestionHistory = capSideQuestionHistory([
+      ...entry.sideQuestionHistory,
+      {
+        question,
+        response: result.response,
+        fallbackNotice:
+          result.refusalFallback === undefined
+            ? undefined
+            : `${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答`,
+      },
+    ]);
+    return result.refusalFallback === undefined
+      ? result.response
+      : `${result.response}\n\n（${result.refusalFallback.originalModel} が拒否したため ${result.refusalFallback.fallbackModel} が応答しました）`;
   }
 
   /**

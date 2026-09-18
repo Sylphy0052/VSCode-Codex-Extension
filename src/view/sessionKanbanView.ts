@@ -185,6 +185,9 @@ export class SessionKanbanViewManager implements vscode.Disposable {
       approvals: result.approvals,
       turns: result.turns,
       capturedAt: result.capturedAt,
+      // 脇道の質問の進み具合（Issue #1261）。回答は本流の会話に残さないため、
+      // ここを通って統括ページのカードにだけ出る
+      sideQuestion: result.sideQuestion,
     });
   }
 
@@ -237,6 +240,14 @@ function parseAction(message: Record<string, unknown>): SessionControlAction | u
       return typeof message.limit === 'number'
         ? { kind: 'recentTurns', limit: message.limit }
         : undefined;
+    case 'sideQuestion':
+      return typeof message.text === 'string'
+        ? { kind: 'sideQuestion', text: message.text }
+        : undefined;
+    case 'sideQuestionResult':
+      return typeof message.sideQuestionId === 'string'
+        ? { kind: 'sideQuestionResult', sideQuestionId: message.sideQuestionId }
+        : undefined;
     case 'approvalDecision':
       // webviewは信頼境界の外側（`chatView.ts`と同じ扱い）。決定はホワイトリストで確かめる
       return typeof message.approvalRequestId === 'string' &&
@@ -259,7 +270,7 @@ function render(webview: vscode.Webview): string {
   // 外装は会話画面と同じ設定（`agent.chat.skin`）で切り替える（Issue #1253）。
   // 統括画面だけ別の設定にすると、2画面を並べたときに片方だけ装飾が残る
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。「やり取りを見る」で直近のやり取りを読めます（開いている間だけ取り寄せ、閉じると破棄します）。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><details id="filterRepos" class="filter-repos"><summary id="filterReposSummary">リポジトリ: すべて</summary><div id="filterRepoList" class="filter-repo-list" role="group" aria-label="リポジトリで絞り込む"></div></details><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。「やり取りを見る」で直近のやり取りを読めます（開いている間だけ取り寄せ、閉じると破棄します）。「脇道の質問」で本流の会話を汚さずに質問でき、回答はこのページのカードにだけ表示します。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><details id="filterRepos" class="filter-repos"><summary id="filterReposSummary">リポジトリ: すべて</summary><div id="filterRepoList" class="filter-repo-list" role="group" aria-label="リポジトリで絞り込む"></div></details><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -448,12 +459,17 @@ const expanded = new Set(); const details = new Map(); const detailErrors = new 
 // 古い応答の取り違えの判定を兼ねる（閉じて開き直すと前の要求のseqとは一致しなくなる）
 const turnsExpanded = new Set(); const turns = new Map(); const turnsErrors = new Map(); const turnsInflight = new Map();
 const TURNS_LIMIT = 6; const TURNS_POLL_MS = 3000;
+// 脇道の質問（Issue #1261）。カードごとに直近の1件だけを持つ。回答は本流の会話に
+// 残らないため、ここに出ているものが唯一の読み場所になる。
+// btwRuns の値は { id, question, status, answer, error }。status が running の間は
+// TURNS_POLL_MS ごとに進み具合を取りに行き、done / failed になったら止める
+const btwExpanded = new Set(); const btwRuns = new Map(); const btwDrafts = new Map(); const btwInflight = new Map();
 // 送った操作と、その結果を結び付ける通し番号
 let controlSeq = 0; const pendingControls = new Map();
-const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信', approvalDetail: '承認の内容の取り寄せ', recentTurns: 'やり取りの取り寄せ' };
+const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信', approvalDetail: '承認の内容の取り寄せ', recentTurns: 'やり取りの取り寄せ', sideQuestion: '脇道の質問', sideQuestionResult: '脇道の回答の取り寄せ' };
 const decisionLabels = { accept: '承認', decline: '拒否' };
 function controlLabel(action, extra) { return action === 'approvalDecision' ? decisionLabels[extra.decision] : actionLabels[action]; }
-function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit }); return seq; }
+function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit, sideQuestionId: extra && extra.sideQuestionId }); return seq; }
 // 展開したときだけ中身を要求し、閉じたら捨てる（Issue #1259の受入基準）
 function toggleDetail(card) { const key = cardKey(card); if(expanded.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } else { expanded.add(key); detailErrors.delete(key); sendControl(card, 'approvalDetail'); } applyFilter(); }
 // 取り寄せた結果を仕舞う。閉じた後に届いた分は捨てる（閉じたのに中身が出るのを防ぐ）
@@ -465,9 +481,32 @@ function requestTurns(card) { const key = cardKey(card); if(turnsInflight.has(ke
 // いま待っている要求の応答だけを採る。閉じて開き直した後に前の応答が届いても、
 // seqが一致しないので新しい内容を古い内容で上書きしない
 function applyRecentTurns(info, data) { if(turnsInflight.get(info.key) !== data.seq) return; turnsInflight.delete(info.key); if(!turnsExpanded.has(info.key)) return; if(data.ok) { turns.set(info.key, { list: data.turns || [], capturedAt: data.capturedAt }); turnsErrors.delete(info.key); } else { turnsErrors.set(info.key, data.error || '理由は不明です'); } applyFilter(); }
+// 脇道の質問の入力欄を開く・閉じる（Issue #1261）。
+// 回答待ちの間に閉じても、回答そのものは受信側が預かっているので消さない（開き直せば読める）
+function toggleSideQuestion(card) { const key = cardKey(card); if(btwExpanded.has(key)) btwExpanded.delete(key); else btwExpanded.add(key); applyFilter(); }
+// 質問を投げる。回答は待たず、受け付けられたら running のカードとして描き直す
+// submitSeq は「この欄でいま生きている質問はどれか」の印。続けて投げたとき、
+// 前の質問の応答で新しい質問を上書きしないために持つ（結果の取得側は btwInflight で見る）
+function sendSideQuestion(card, question) { const key = cardKey(card); btwInflight.delete(key); const seq = sendControl(card, 'sideQuestion', question); btwRuns.set(key, { id: undefined, question, status: 'running', answer: undefined, error: undefined, submitSeq: seq }); applyFilter(); }
+function applySideQuestion(info, data) {
+  const key = info.key;
+  if(info.action === 'sideQuestionResult') { if(btwInflight.get(key) !== data.seq) return; btwInflight.delete(key); }
+  const run = btwRuns.get(key);
+  if(run === undefined) return;
+  // 投げ直した後に前の質問の応答が届くことがある。いま生きている質問の分だけ採る
+  if(info.action === 'sideQuestion' && run.submitSeq !== data.seq) return;
+  if(!data.ok || !data.sideQuestion) { btwRuns.set(key, Object.assign({}, run, { status: 'failed', error: (data.error || '理由は不明です') })); applyFilter(); return; }
+  const next = data.sideQuestion;
+  if(info.action === 'sideQuestionResult' && run.id !== next.id) return;
+  btwRuns.set(key, { id: next.id, question: next.question, status: next.status, answer: next.answer, error: next.error, submitSeq: run.submitSeq });
+  applyFilter();
+}
+// 回答待ちの質問だけ取りに行く。応答が返る前に次は送らない（recentTurnsと同じ流儀）
+function requestSideQuestionResult(card) { const key = cardKey(card); const run = btwRuns.get(key); if(!run || run.status !== 'running' || run.id === undefined) return; if(btwInflight.has(key)) return; btwInflight.set(key, sendControl(card, 'sideQuestionResult', undefined, { sideQuestionId: run.id })); }
 // 展開中のカードだけを定期的に取り直す。盤面（250ms）とは別の間隔で回す
-// タブが見えていない間は取り直さない（相手ウィンドウへ無駄な要求を送らない）
-setInterval(() => { if(turnsExpanded.size === 0 || document.hidden) return; for(const spec of specs) for(const card of latestBoard.cards[spec.key]) { if(turnsExpanded.has(cardKey(card))) requestTurns(card); } }, TURNS_POLL_MS);
+// タブが見えていない間は取り直さない（相手ウィンドウへ無駄な要求を送らない）。
+// 脇道の回答は展開していなくても取りに行く。カードの待機表示を進めるのに要る（Issue #1261）
+setInterval(() => { if(document.hidden) return; if(turnsExpanded.size === 0 && btwRuns.size === 0) return; for(const spec of specs) for(const card of latestBoard.cards[spec.key]) { if(turnsExpanded.has(cardKey(card))) requestTurns(card); requestSideQuestionResult(card); } }, TURNS_POLL_MS);
 // 生のwindowId（UUID）はユーザーには読めないため、初出順の連番に置き換えて表示する。
 // 番号は絞り込み前の盤面全体から先に割り当てる。絞り込みで隠れたカードを飛ばして
 // 採番すると、条件を変えるたびに同じウィンドウの番号が変わる（Issue #1250）
@@ -544,7 +583,7 @@ function setApprovalFlag(has) { document.body.classList.toggle('has-approval', h
 // 承認待ちがあるのに注意の色が消えると、対応漏れを誘う（Issue #1250）
 // 承認が解決したカードは承認待ちの列から出ていき、「内容を閉じる」を押す手段が無くなる。
 // 列に残っていないキーはここで捨てる（開きっぱなしの統括ページに溜め続けないため）
-function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } }
+function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } for(const key of [...btwRuns.keys()]) { if(!live.has(key)) { btwRuns.delete(key); btwInflight.delete(key); btwDrafts.delete(key); btwExpanded.delete(key); } } }
 function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); renderRepoOptions(collectRepos(data)); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
 function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
 // カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
@@ -578,7 +617,43 @@ function buildCard(card, column) {
   const turnsOpen = turnsExpanded.has(key);
   actions.append(actionButton(key, 'turns', turnsOpen ? 'やり取りを閉じる' : 'やり取りを見る', () => toggleTurns(card)));
   if(turnsOpen) item.append(buildTurns(key));
+  // 脇道の質問（Issue #1261）。回答待ちの間は、欄を閉じていてもボタンで判るようにする
+  const btwOpen = btwExpanded.has(key); const run = btwRuns.get(key);
+  const waiting = run !== undefined && run.status === 'running';
+  actions.append(actionButton(key, 'btw', btwOpen ? '脇道の質問を閉じる' : (waiting ? '脇道の質問（回答待ち）' : '脇道の質問'), () => toggleSideQuestion(card)));
+  if(btwOpen) item.append(buildSideQuestion(card, key));
   return item;
+}
+// 脇道の質問の入力欄と、投げた質問の進み具合（Issue #1261）。
+// 回答は本流の会話に残らないため、この欄が唯一の読み場所になる
+function buildSideQuestion(card, key) {
+  const box = document.createElement('div'); box.className = 'card-detail';
+  const form = document.createElement('div'); form.className = 'card-send';
+  const input = document.createElement('input'); input.type='text'; input.className='send-input'; input.placeholder='本流を汚さずに聞く（例: いま何をしていますか）'; input.setAttribute('aria-label', 'このセッションへ脇道の質問を送る'); input.dataset.cardKey=key; input.dataset.role='btwInput'; input.value=btwDrafts.get(key) || '';
+  const run = btwRuns.get(key);
+  // 回答待ちの間は送れない。受信側も同じ会話への重ね投げを断るので、押せるままにすると
+  // 「押したのに失敗した」だけになる
+  const waiting = run !== undefined && run.status === 'running';
+  const submit=() => { if(waiting) return; const value=input.value; if(value.trim()==='') return; sendSideQuestion(card, value.trim()); btwDrafts.delete(key); input.value=''; };
+  input.disabled = waiting;
+  input.addEventListener('input', () => btwDrafts.set(key, input.value));
+  input.addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); submit(); } });
+  const submitButton = actionButton(key, 'btwSend', '質問', submit); submitButton.disabled = waiting;
+  form.append(input, submitButton);
+  box.append(form);
+  if(run === undefined) { box.append(text('p', '質問と回答はこのカードにだけ出ます（会話には残りません）', 'detail-note')); return box; }
+  const block = document.createElement('div'); block.className = 'turn user';
+  block.append(text('p', '脇道の質問', 'turn-role'));
+  // 相手プロセスが書いた文字列はtextContentで入れる（HTMLとして解釈させない）
+  block.append(text('p', run.question, 'turn-text'));
+  box.append(block);
+  if(run.status === 'running') { box.append(text('p', '回答を待っています…（時間がかかります）', 'detail-note')); return box; }
+  if(run.status === 'failed') { box.append(text('p', '回答を受け取れませんでした: ' + (run.error || '理由は不明です'), 'detail-note')); return box; }
+  const answer = document.createElement('div'); answer.className = 'turn';
+  answer.append(text('p', '回答', 'turn-role'));
+  answer.append(text('p', run.answer || '（回答が空でした）', 'turn-text'));
+  box.append(answer);
+  return box;
 }
 // 取り寄せた直近のやり取り。長い本文は切り詰めて送られてくるので、全文はタブ側で読む
 function buildTurns(key) {
@@ -635,6 +710,8 @@ function showControlResult(data) {
   // 中身の取り寄せはカードの中へ出す。トーストにすると展開のたびに通知が出る
   if(info && info.action === 'approvalDetail') { applyApprovalDetail(info, data); return; }
   if(info && info.action === 'recentTurns') { applyRecentTurns(info, data); return; }
+  // 脇道の質問もカードの中へ出す。回答はトーストに載せない（読みながら操作するため）
+  if(info && (info.action === 'sideQuestion' || info.action === 'sideQuestionResult')) { applySideQuestion(info, data); return; }
   const label = (info ? info.place + info.label : '操作');
   showToast(data.ok ? label + 'を実行しました' : label + 'に失敗しました: ' + (data.error || '理由は不明です'));
   // 承認・拒否の後は手元の中身が古い。捨てて取り直す（解決済みの要求を押せないように）

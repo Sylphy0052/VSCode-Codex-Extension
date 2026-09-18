@@ -13,9 +13,9 @@ describe('deriveSessionActivityState（issue #286、4種化はIssue #1244）', (
   });
 
   it('busyがtrueなら実行中', () => {
-    expect(
-      deriveSessionActivityState({ busy: true, approvals: [], backgroundTerminals: [] }),
-    ).toBe('running');
+    expect(deriveSessionActivityState({ busy: true, approvals: [], backgroundTerminals: [] })).toBe(
+      'running',
+    );
   });
 
   it('busyがfalseでbackgroundTerminalsが1件以上あればバックグラウンド実行中', () => {
