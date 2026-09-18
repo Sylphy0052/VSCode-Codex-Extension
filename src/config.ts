@@ -770,6 +770,42 @@ export function readNotificationSoundConfig(): NotificationSoundConfig {
   };
 }
 
+/** OS通知（`agent.notifications.os.*`、Issue #1285）。 */
+export interface OsNotificationConfig {
+  /**
+   * OS通知全体のオン・オフ（既定 `false`）。
+   *
+   * 既定で無効にしてあるのは、クリックできるトーストにBurntToastの導入が要ることと、
+   * WSL・Windows以外では出せないため。無効の間は`powershell.exe`を一切起動しない。
+   */
+  enabled: boolean;
+  /** 会話が停止した（ターンが完了した）ときに出すか（既定 `true`）。 */
+  turnComplete: boolean;
+  /** 承認待ち・質問で止まったときに出すか（既定 `true`）。 */
+  approvalPending: boolean;
+  /** 自動引き継ぎが発火したときに出すか（既定 `true`）。 */
+  handoff: boolean;
+  /** タブが見えているときは出さないか（既定 `false`）。通知音の同名設定と同じ考え方。 */
+  onlyWhenHidden: boolean;
+}
+
+/**
+ * `agent.notifications.os.*` を読む（Issue #1285）。
+ *
+ * 通知の出し方の好みであり権限には関わらないため、`readNotificationsConfig`と同じ
+ * `window`スコープ。
+ */
+export function readOsNotificationConfig(): OsNotificationConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('notifications.os.enabled') === true,
+    turnComplete: c.get<boolean>('notifications.os.turnComplete') !== false,
+    approvalPending: c.get<boolean>('notifications.os.approvalPending') !== false,
+    handoff: c.get<boolean>('notifications.os.handoff') !== false,
+    onlyWhenHidden: c.get<boolean>('notifications.os.onlyWhenHidden') === true,
+  };
+}
+
 export interface SessionPresetsConfig {
   presets: SessionPreset[];
   /** 検証で無視した項目の理由。呼び出し側（`extension.ts`）がログ・通知へ出す。 */

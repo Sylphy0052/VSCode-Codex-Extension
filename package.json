@@ -1236,6 +1236,36 @@
           "scope": "window",
           "markdownDescription": "ターンが完了した直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。既定は無効（頻度が高く、承認待ちほど対応が急がないため）。"
         },
+        "agent.notifications.os.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "WindowsのOS通知（トースト）を出すか（Codex/Claude Code両画面共通）。会話が停止したとき、承認待ち・質問で止まったとき、自動引き継ぎが起きたときに出す。VSCodeを別ウィンドウへ退けている間でも気付けるようにするための設定で、WSLまたはWindowsで`powershell.exe`が使える場合にだけ効く。無効の間は`powershell.exe`を一切起動しない。通知をクリックして該当タブを最前面に出すには、Windows側で`Install-Module BurntToast -Scope CurrentUser`が必要（未導入でも通知自体は出るが、クリックしても何も起きない）。"
+        },
+        "agent.notifications.os.turnComplete": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "会話が停止した（ターンが完了した）ときにOS通知を出すか。`#agent.notifications.os.enabled#`が有効な場合にだけ効く。"
+        },
+        "agent.notifications.os.approvalPending": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "承認待ち・質問で止まったときにOS通知を出すか。1ターンで複数の承認要求が同時に現れても通知は1回だけ。`#agent.notifications.os.enabled#`が有効な場合にだけ効く。"
+        },
+        "agent.notifications.os.handoff": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "自動引き継ぎが発火したときにOS通知を出すか。手動（引き継ぎボタン）では出さない。`#agent.notifications.os.enabled#`が有効な場合にだけ効く。"
+        },
+        "agent.notifications.os.onlyWhenHidden": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "そのタブが見えているときはOS通知を出さない。既定は無効（タブを開いたまま別のウィンドウを見ている間に気付きたいため、見えていても出す）。通知音の`#agent.notifications.sound.onlyWhenHidden#`と同じ考え方。"
+        },
         "agent.notifications.sound.enabled": {
           "type": "boolean",
           "default": true,
