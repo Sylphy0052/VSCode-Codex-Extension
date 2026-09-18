@@ -11,6 +11,7 @@ import { effortsFor, type ModelInfo } from '../codex/modelCatalog';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { SessionModelSettings } from '../sessionModelSettings';
 import { classifyHandoff, type HandoffClassifierInput } from './handoffClassifier';
+import type { SessionHandoffModelOption } from './sessionHub';
 import {
   isProfileChange,
   resolveProfile,
@@ -50,6 +51,42 @@ export interface HandoffModelChoice {
   settings: SessionModelSettings;
   /** そうなった理由。ポインタファイルとログへ出す。 */
   reasons: string[];
+}
+
+/**
+ * 確認への答え（Issue #1280）。モーダルのボタンと統括ページのボタンで同じ型を使う。
+ */
+export type HandoffDecision =
+  | { kind: 'proceed' }
+  | { kind: 'repick'; settings: SessionModelSettings }
+  | { kind: 'reclassify' }
+  | { kind: 'cancel' };
+
+/** 保留を画面へ出すために必要な、提案そのもの以外の情報（Issue #1280）。 */
+export interface HandoffPendingPresentation {
+  canReclassify: boolean;
+  models: SessionHandoffModelOption[];
+}
+
+/**
+ * 保留中の引き継ぎ確認を、セッションの状態として外（統括ページ）へ公開する口
+ * （Issue #1280）。
+ *
+ * 実装は`handoffPending.ts`。ここはモーダルとの競争だけを見る。
+ */
+export interface HandoffPendingPort {
+  /** 保留を公開する。提案が差し替わる（再判定）たびに呼び直す。 */
+  publish(proposal: HandoffModelChoice, presentation: HandoffPendingPresentation): void;
+  /** 外から決定が来るのを待つ。`publish`した提案1つに対する1回分。 */
+  external(): Promise<HandoffDecision>;
+  /**
+   * モーダル側の答えでこの保留を決着させてよいか確かめ、よければ確保する。
+   *
+   * 外からの決定が先に届いていれば`false`。二重に決着させないためのもの。
+   */
+  claim(): boolean;
+  /** 保留を取り下げる。決着したら必ず呼ぶ。 */
+  clear(): void;
 }
 
 const PROCEED = '引き継ぐ';
@@ -238,60 +275,175 @@ async function pickManually(
   return { model: pickedModel.slug, effort: pickedEffort.effort };
 }
 
+/** 選び直しの候補（Issue #1280）。先頭は引き継ぎ元のまま続けるという選択肢。 */
+function modelOptions(
+  current: SessionModelSettings,
+  deps: HandoffModelChoiceDeps,
+): SessionHandoffModelOption[] {
+  const options: SessionHandoffModelOption[] = [
+    {
+      slug: current.model,
+      label: `引き継ぎ元のまま（${label(current.model)}）`,
+      efforts: allowedEfforts(deps, current.model),
+    },
+  ];
+  for (const model of deps.models) {
+    if (model.slug === current.model) {
+      continue;
+    }
+    options.push({
+      slug: model.slug,
+      label: model.displayName,
+      efforts: allowedEfforts(deps, model.slug),
+    });
+  }
+  return options;
+}
+
+/** 手で指定したときの理由。モーダルからでも統括ページからでも同じ形にする。 */
+function manualReasons(proposal: HandoffModelChoice, where: string): string[] {
+  return [
+    `${where}で指定（提案は ${label(proposal.settings.model)} / ${label(proposal.settings.effort)}）`,
+  ];
+}
+
+/** モーダルの答えと、外（統括ページ）からの決定のどちらが先に来たか。 */
+type Answered =
+  | { source: 'modal'; answer: string | undefined }
+  | { source: 'external'; decision: HandoffDecision };
+
+function showConfirmModal(
+  proposal: HandoffModelChoice,
+  canReclassify: boolean,
+): Thenable<string | undefined> {
+  const buttons = canReclassify ? [PROCEED, REPICK, RECLASSIFY] : [PROCEED, REPICK];
+  // 本文は1行にし、値と理由は `detail` へ。modalの本文に改行を入れるとOSによって潰れる
+  return vscode.window.showInformationMessage(
+    `この設定で引き継ぎますか？（Model: ${label(proposal.settings.model)} / Effort: ${label(proposal.settings.effort)}）`,
+    {
+      modal: true,
+      detail: [
+        `Model: ${label(proposal.settings.model)}`,
+        `Effort: ${label(proposal.settings.effort)}`,
+        '',
+        ...proposal.reasons,
+      ].join('\n'),
+    },
+    ...buttons,
+  );
+}
+
 /**
- * 候補を人へ見せ、承認・選び直し・再判定のいずれかを受ける。
+ * 候補を人へ見せ、承認・選び直し・再判定・中止のいずれかを受ける。
  *
- * @returns 承認された設定。ダイアログを閉じたときは `undefined`（引き継ぎを中止する）
+ * 確認の受け口は2つある（Issue #1280）。このウィンドウのモーダルと、セッション統括ページ
+ * （別ウィンドウからも操作できる）に出る保留カードで、先に答えた方が決着させる。
+ *
+ * **表示済みのモーダルを閉じるAPIはVS Codeに無い**。そのため統括ページ側で決着したときは、
+ * 残ったモーダルへの答えを捨てる（`port.claim()`が`false`を返す）。加えて、一度でも外から
+ * 決定が来た後はモーダルを出し直さない——出し直すと古い値のダイアログの上に新しい
+ * ダイアログが重なるため、以後の確認は統括ページ側だけで行う。
+ *
+ * @returns 承認された設定。ダイアログを閉じた・統括ページで中止したときは `undefined`
+ *   （引き継ぎを中止する）
  * @param preassessed 区切り判定で既に取ってある見立て（Issue #1090）。初回の提案にだけ使い、
  *   「再判定」を押されたときは新たに分類器を起動する
+ * @param pending 保留を統括ページへ公開する口（Issue #1280）。省略するとモーダルだけになる
  */
 export async function chooseHandoffModelSettings(
   current: SessionModelSettings,
   input: HandoffClassifierInput,
   deps: HandoffModelChoiceDeps,
   preassessed?: TaskAssessment,
+  pending?: HandoffPendingPort,
 ): Promise<HandoffModelChoice | undefined> {
-  let proposal = await proposeHandoffModelSettings(current, input, deps, preassessed);
   const canReclassify = readAutoHandoffRouterEnabled();
+  const presentation: HandoffPendingPresentation = {
+    canReclassify,
+    models: modelOptions(current, deps),
+  };
+  // 統括ページから決定が来た後はモーダルを出さない（上のJSDoc参照）。
+  // `pending`が無ければ決定も来ないので、ここが立つことはない
+  let modalDisowned = false;
 
-  for (;;) {
-    const buttons = canReclassify ? [PROCEED, REPICK, RECLASSIFY] : [PROCEED, REPICK];
-    // 本文は1行にし、値と理由は `detail` へ。modalの本文に改行を入れるとOSによって潰れる
-    const answer = await vscode.window.showInformationMessage(
-      `この設定で引き継ぎますか？（Model: ${label(proposal.settings.model)} / Effort: ${label(proposal.settings.effort)}）`,
-      {
-        modal: true,
-        detail: [
-          `Model: ${label(proposal.settings.model)}`,
-          `Effort: ${label(proposal.settings.effort)}`,
-          '',
-          ...proposal.reasons,
-        ].join('\n'),
-      },
-      ...buttons,
-    );
-    if (answer === PROCEED) {
-      return proposal;
-    }
-    if (answer === REPICK) {
-      const picked = await pickManually(current, deps);
-      if (picked !== undefined) {
-        return {
-          settings: picked,
-          reasons: [
-            `手動で指定（提案は ${label(proposal.settings.model)} / ${label(proposal.settings.effort)}）`,
-          ],
-        };
+  try {
+    // 分類器の起動もこの中に入れる。失敗して抜けたときも保留を取り下げるため
+    let proposal = await proposeHandoffModelSettings(current, input, deps, preassessed);
+    // 提案が変わったときだけ公開し直す。保留のidは提案ごとに振り直すため、
+    // ここで毎回publishすると、取り寄せ済みのidが理由も無く古くなる
+    pending?.publish(proposal, presentation);
+    for (;;) {
+      const answered = await nextAnswer(proposal, canReclassify, modalDisowned, pending);
+      if (answered.source === 'external') {
+        modalDisowned = true;
+        const decision = answered.decision;
+        if (decision.kind === 'proceed') {
+          return proposal;
+        }
+        if (decision.kind === 'repick') {
+          return {
+            settings: decision.settings,
+            reasons: manualReasons(proposal, 'セッション統括'),
+          };
+        }
+        if (decision.kind === 'cancel') {
+          return undefined;
+        }
+        proposal = await proposeHandoffModelSettings(current, input, deps);
+        pending?.publish(proposal, presentation);
+        continue;
       }
-      // 一覧を閉じただけなら確認へ戻る。引き継ぎ自体を中止したい意思ではない
-      continue;
+      const answer = answered.answer;
+      if (answer === REPICK) {
+        const picked = await pickManually(current, deps);
+        if (picked === undefined) {
+          // 一覧を閉じただけなら確認へ戻る。引き継ぎ自体を中止したい意思ではない
+          continue;
+        }
+        if (pending !== undefined && !pending.claim()) {
+          // 選んでいる間に統括ページ側で決着していた。次の周回でその決定を拾う
+          modalDisowned = true;
+          continue;
+        }
+        return { settings: picked, reasons: manualReasons(proposal, '手動') };
+      }
+      if (pending !== undefined && !pending.claim()) {
+        modalDisowned = true;
+        continue;
+      }
+      if (answer === PROCEED) {
+        return proposal;
+      }
+      if (answer === RECLASSIFY) {
+        proposal = await proposeHandoffModelSettings(current, input, deps);
+        pending?.publish(proposal, presentation);
+        continue;
+      }
+      return undefined;
     }
-    if (answer === RECLASSIFY) {
-      proposal = await proposeHandoffModelSettings(current, input, deps);
-      continue;
-    }
-    return undefined;
+  } finally {
+    pending?.clear();
   }
+}
+
+/** モーダルと統括ページの両方を待ち、先に答えが来た方を返す。 */
+async function nextAnswer(
+  proposal: HandoffModelChoice,
+  canReclassify: boolean,
+  modalDisowned: boolean,
+  pending: HandoffPendingPort | undefined,
+): Promise<Answered> {
+  const external =
+    pending === undefined
+      ? undefined
+      : pending.external().then((decision): Answered => ({ source: 'external', decision }));
+  if (modalDisowned && external !== undefined) {
+    return external;
+  }
+  const modal = Promise.resolve(showConfirmModal(proposal, canReclassify)).then(
+    (answer): Answered => ({ source: 'modal', answer }),
+  );
+  return external === undefined ? modal : Promise.race([modal, external]);
 }
 
 /** 安全な区切りの後段（分類器）の結果（Issue #1090）。 */

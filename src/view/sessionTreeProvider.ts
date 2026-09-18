@@ -313,6 +313,8 @@ export class SessionTreeProvider
     // design.md §14.55）。`idle`（開いてはいるが動いていない）・未オープンでは何も足さない
     if (activity === 'approvalPending') {
       parts.unshift('承認待ち');
+    } else if (activity === 'handoffPending') {
+      parts.unshift('引き継ぎ確認待ち');
     } else if (activity === 'running') {
       parts.unshift('実行中');
     }
@@ -383,6 +385,11 @@ function buildSessionIcon(
   if (activity === 'approvalPending') {
     return new vscode.ThemeIcon('bell-dot', new vscode.ThemeColor('charts.yellow'));
   }
+  // 引き継ぎ確認待ち（Issue #1280）。承認待ちと同じ「人の答えを待っている」状態なので
+  // 同じ色にし、形（アイコン）で引き継ぎだと分かるようにする
+  if (activity === 'handoffPending') {
+    return new vscode.ThemeIcon('question', new vscode.ThemeColor('charts.yellow'));
+  }
   if (activity === 'running') {
     return new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.blue'));
   }
@@ -415,6 +422,10 @@ export function groupSummaryText(
   const pending = activities.filter((a) => a === 'approvalPending').length;
   if (pending > 0) {
     return `${base} · 承認待ち${pending}`;
+  }
+  const handoff = activities.filter((a) => a === 'handoffPending').length;
+  if (handoff > 0) {
+    return `${base} · 引き継ぎ確認待ち${handoff}`;
   }
   const running = activities.filter((a) => a === 'running').length;
   if (running > 0) {

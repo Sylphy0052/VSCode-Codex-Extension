@@ -55,6 +55,7 @@ export function buildSessionKanban(
   // 列を1つでも書き漏らすとこのリテラルが型エラーになる（Issue #1012、#1244）
   const cards: Record<SessionKanbanColumn, SessionKanbanCard[]> = {
     approvalPending: [],
+    handoffPending: [],
     running: [],
     backgroundRunning: [],
     idle: [],

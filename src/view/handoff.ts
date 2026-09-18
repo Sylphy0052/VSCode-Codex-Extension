@@ -210,7 +210,13 @@ const READING_RULES = [
 ] as const;
 
 /** 契機の日本語表記。 */
-function triggerLabel(trigger: HandoffTrigger): string {
+/**
+ * 引き継ぎの契機を人が読める1文にする。
+ *
+ * ポインタファイルの「引き継いだ契機」と、統括ページの保留カード（Issue #1280）の
+ * 両方が同じ文を使う。
+ */
+export function triggerLabel(trigger: HandoffTrigger): string {
   if (trigger.kind === 'threshold') {
     return `コンテキスト残量が閾値を下回った（残り${trigger.remainingPercent}%）`;
   }

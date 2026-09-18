@@ -807,6 +807,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         logWarn: (message) => this.log.warn(message),
       },
       preassessed,
+      // 確認はこのウィンドウのモーダルと、セッション統括ページの両方で受ける（Issue #1280）
+      this.beginPendingHandoff(entry, trigger),
     );
     if (choice === undefined) {
       // 確認で閉じられた。人が「今は引き継がない」と決めたのだから、エラーにも警告にもしない
@@ -1565,7 +1567,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 名前が変わっていなくても、実行中／承認待ちの状態は変わりうるので毎回適用する
     // （issue #286、design.md §14.55）
     if (entry.panel !== undefined) {
-      entry.panel.title = decoratePanelTitle(entry.title, deriveSessionActivityState(state));
+      entry.panel.title = decoratePanelTitle(
+        entry.title,
+        // 引き継ぎ確認待ち（Issue #1280）は`ChatState`に現れないため別に渡す
+        deriveSessionActivityState(state, entry.pendingHandoff?.active === true),
+      );
     }
     this.notifyNewApprovals(entry, state);
     this.scheduleLimitAutoResume(entry, state, turnFinished);
