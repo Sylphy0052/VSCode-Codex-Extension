@@ -107,6 +107,26 @@ export function handoffPath(repoRoot: string, runId: string, taskId: string, slu
   return path.join(handoffRunDir(repoRoot, runId), `${taskId}${NAME_SEPARATOR}${slug}.md`);
 }
 
+/**
+ * タスクの応答本文を置くときのスラッグ（Issue #1271、親Issue #1270 Phase 1）。
+ *
+ * 下流タスクは `{{T1.handoff}}` が示す参照をたどって `read_handoff` で取りに行く。
+ * タスクにつき1件で上書きするため固定値にしてある（`MAX_HANDOFF_FILES_PER_RUN` を
+ * タスク数に比例して食い潰さない）。
+ */
+export const RESULT_HANDOFF_SLUG = 'result';
+
+/**
+ * `{{T1.handoff}}` へ展開する参照の文言（Issue #1271）。
+ *
+ * ファイルの実パスではなく `read_handoff` の引数を示す。パスを渡すとエージェントが
+ * `read_handoff` を経由せずファイルを直接読みに行く経路ができ、`TeamHandoffStore` の
+ * 検証（識別子の字種・シンボリックリンク祖先）を通らないため。
+ */
+export function formatHandoffReference(taskId: string, slug: string): string {
+  return `read_handoff(taskId: "${taskId}", slug: "${slug}")`;
+}
+
 /** 一覧の1件。 */
 export interface HandoffEntry {
   taskId: string;
