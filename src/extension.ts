@@ -64,6 +64,11 @@ import {
 import { ForgeHubService } from './forge/hub';
 import { ForgeOrchestrator } from './forge/orchestrator';
 import { startHttpMcpTransport } from './orchestrator/messaging';
+import {
+  formatSessionTarget,
+  type SessionBridgePort,
+  type SessionSummary as McpSessionSummary,
+} from './orchestrator/sessionBridge';
 import { nodePseudoWorktreeFileSystem } from './orchestrator/pseudoWorktree';
 import {
   buildRoadmapPlanGoal,
@@ -177,7 +182,7 @@ import { formatRelativeTime } from './view/relativeTime';
 import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
-import { SessionKanbanViewManager } from './view/sessionKanbanView';
+import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
 import {
   generateWindowId,
   sessionHubRoot,
@@ -580,6 +585,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 要約セッションのrolloutもCodex側に書かれるため、後始末の口も同じくここで渡す（Issue #942）
   claudeChat.setSummaryRollout(chat.summaryRolloutDeps());
 
+  /**
+   * エージェント向けのセッション宛の口（design.md §16.21、Issue #1274）。
+   *
+   * 実体は`SessionHub`一式を作り終えたところ（このあと）で入れる。`WorkflowRunner`の
+   * ほうが先に組み立てられるため、ここでは入れ物だけ用意し、`messaging.sessionBridge`
+   * には毎回`current`を読む関数を渡す。
+   */
+  const sessionBridgeHolder: { current: SessionBridgePort | undefined } = { current: undefined };
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
@@ -641,6 +654,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     messaging: {
       startTransport: startHttpMcpTransport,
       readReplyTimeoutSec: () => readWorkflowsConfig().replyTimeoutSec,
+      // 別ウィンドウを含むセッションへの宛先解決（design.md §16.21、Issue #1274）。
+      // 実体はこの下で`SessionHub`一式を作り終えてから入る
+      sessionBridge: () => sessionBridgeHolder.current,
     },
     // 衝突解決セッションの承認待ちアイドルタイムアウト（design.md §16.17「承認待ちの
     // アイドルタイムアウト」、Issue #413 PR5）。`messaging`（省略可能な機能）とは無関係に
@@ -1177,6 +1193,77 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
   );
   sessionHubRequestWatcher.start();
+  /**
+   * 宛先のウィンドウを問わず、セッション1件へ操作を1つ届ける（Issue #1258、#1274）。
+   *
+   * 自ウィンドウなら`controlSession`を直接呼び、別ウィンドウなら要求ファイル経由で流す。
+   * 統括ページ（`SessionKanbanViewManager`）と、エージェント向けのMCPの口
+   * （`SessionBridgePort`。Issue #1274）が同じこの関数を通る——宛先解決を1箇所へ
+   * 集めるため、入口ごとに分岐を持たせない。
+   */
+  const controlSessionAnywhere = async (
+    target: SessionKanbanTarget,
+    action: SessionControlAction,
+  ): Promise<SessionControlResult> => {
+    if (target.windowId === windowId) {
+      return controlSession(target.provider, target.threadId, action, windowId);
+    }
+    const reply = await sessionHubRequestPort.request(target.windowId, {
+      kind: action.kind,
+      provider: target.provider,
+      threadId: target.threadId,
+      text: action.kind === 'send' || action.kind === 'sideQuestion' ? action.text : undefined,
+      sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
+      approvalRequestId: action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
+      decision: action.kind === 'approvalDecision' ? action.decision : undefined,
+      limit: action.kind === 'recentTurns' ? action.limit : undefined,
+      handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
+      handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
+      handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
+      handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
+    });
+    return {
+      ok: reply.ok,
+      error: reply.error,
+      approvals: reply.payload?.approvals,
+      turns: reply.payload?.turns,
+      capturedAt: reply.payload?.capturedAt,
+      handoff: reply.payload?.handoff,
+      sideQuestion: reply.payload?.sideQuestion,
+    };
+  };
+  // エージェント向けの口（design.md §16.21「宛先解決の統合」、Issue #1274）。
+  // `WorkflowRunner`はこれより前に作られるため、`messaging.sessionBridge`は毎回
+  // この変数を読む関数として渡してある（値そのものではなく）
+  sessionBridgeHolder.current = {
+    listSessions: () => [
+      ...currentWindowSessions().map((session) => toSessionSummary(windowId, session, windowId)),
+      ...sessionHubReader
+        .getOthers()
+        .flatMap((other) =>
+          other.sessions.map((session) => toSessionSummary(other.windowId, session, windowId)),
+        ),
+    ],
+    send: async (target, body) => {
+      const result = await controlSessionAnywhere(target, { kind: 'send', text: body });
+      return { ok: result.ok, error: result.error };
+    },
+    ask: async (target, question) => {
+      const result = await controlSessionAnywhere(target, { kind: 'sideQuestion', text: question });
+      return { ok: result.ok, error: result.error, questionId: result.sideQuestion?.id };
+    },
+    askResult: async (target, questionId) => {
+      const result = await controlSessionAnywhere(target, {
+        kind: 'sideQuestionResult',
+        sideQuestionId: questionId,
+      });
+      const side = result.sideQuestion;
+      if (!result.ok || side === undefined) {
+        return { ok: false, error: result.error ?? '問いの進み具合を読めませんでした' };
+      }
+      return { ok: true, status: side.status, answer: side.answer, reason: side.error };
+    },
+  };
   const sessionKanban = new SessionKanbanViewManager(
     () => {
       const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
@@ -1191,35 +1278,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         );
       return buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId);
     },
-    async (target, action) => {
-      if (target.windowId === windowId) {
-        return controlSession(target.provider, target.threadId, action, windowId);
-      }
-      const reply = await sessionHubRequestPort.request(target.windowId, {
-        kind: action.kind,
-        provider: target.provider,
-        threadId: target.threadId,
-        text: action.kind === 'send' || action.kind === 'sideQuestion' ? action.text : undefined,
-        sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
-        approvalRequestId:
-          action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
-        decision: action.kind === 'approvalDecision' ? action.decision : undefined,
-        limit: action.kind === 'recentTurns' ? action.limit : undefined,
-        handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
-        handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
-        handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
-        handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
-      });
-      return {
-        ok: reply.ok,
-        error: reply.error,
-        approvals: reply.payload?.approvals,
-        turns: reply.payload?.turns,
-        capturedAt: reply.payload?.capturedAt,
-        handoff: reply.payload?.handoff,
-        sideQuestion: reply.payload?.sideQuestion,
-      };
-    },
+    controlSessionAnywhere,
     log,
   );
   const forgeHub = new ForgeHubViewManager(
@@ -3709,6 +3768,31 @@ async function persistCache(
  * 載せるものが無ければ`undefined`を返し、`payload`そのものを書かない。空の入れ物を
  * 書いても読む側の分岐が増えるだけで、意味が変わらない。
  */
+/**
+ * 共有ファイルのセッション1件を、MCPの`list_sessions`が返す形へ直す（Issue #1274）。
+ *
+ * 会話本文は元々含まれない（`SharedSession`のJSDoc）。`cwd`が無いセッション
+ * （ワークスペースを開いていない等）は空文字にして、項目そのものは落とさない。
+ */
+function toSessionSummary(
+  ownerWindowId: string,
+  session: SharedSession,
+  selfWindowId: string,
+): McpSessionSummary {
+  return {
+    ref: formatSessionTarget({
+      windowId: ownerWindowId,
+      provider: session.provider,
+      threadId: session.threadId,
+    }),
+    provider: session.provider,
+    title: session.title,
+    cwd: session.cwd ?? '',
+    activity: session.activity,
+    sameWindow: ownerWindowId === selfWindowId,
+  };
+}
+
 function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | undefined {
   if (result.approvals !== undefined) {
     return { approvals: result.approvals };

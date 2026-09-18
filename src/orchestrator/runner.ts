@@ -68,6 +68,7 @@ import {
 } from './messaging';
 import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
 import { reviewTaskPullRequest } from './planner';
+import type { SessionBridgePort } from './sessionBridge';
 import {
   applyLoopStopReason,
   clampWorktreeRemovalAttempts,
@@ -333,6 +334,15 @@ export interface WorkflowRunnerMessagingDeps {
    * （`readBaseline`と同じ流儀。実行中に設定が変わっても次のtickから反映される）。
    */
   readReplyTimeoutSec?: () => number;
+  /**
+   * ウィンドウをまたぐセッションへの口（design.md §16.21「宛先解決の統合」、Issue #1274）。
+   *
+   * 実体（`SessionHub`と自ウィンドウのチャット画面を束ねたもの）は`extension.ts`が
+   * `WorkflowRunner`より後に組み立てるため、値そのものではなく毎回現在値を返す関数で
+   * 受ける（`readReplyTimeoutSec`と同じ流儀）。省略時・`undefined`を返す場合は
+   * `SESSION_TOOLS`が見えず、セッション宛の送信もできない。
+   */
+  sessionBridge?: () => SessionBridgePort | undefined;
 }
 
 /**
@@ -2196,6 +2206,10 @@ export class WorkflowRunner {
         // ワークフロー定義ファイルが属するワークスペースフォルダの絶対パスで、run開始時に
         // 一度だけ解決済みの値（`startRun`のJSDoc参照）をそのまま使う
         handoff: buildHandoffPort(live.repoRoot, runId),
+        // ウィンドウをまたぐセッションへの口（design.md §16.21、Issue #1274）。hubはrunが
+        // 生きている間ずっと同じインスタンスなので、ここで一度だけ現在値を解決する
+        // （`extension.ts`側の実体はactivate中に作られ、以後差し替わらない）
+        sessionBridge: messaging.sessionBridge?.(),
       });
     live.messagingHub = hub;
     try {
