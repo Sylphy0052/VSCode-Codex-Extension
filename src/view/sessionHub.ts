@@ -562,6 +562,17 @@ function parseReply(raw: string): SessionHubReply | undefined {
 }
 
 /**
+ * 応答から読み取る上限（Issue #1260）。
+ *
+ * 書き手側の上限（`chatManagerBase.ts`の`MAX_RECENT_TURNS` / `MAX_RECENT_TURN_CHARS`）
+ * とは別に、読み手側でも持つ。共有ディレクトリへ書くのは別プロセスで、その版が同じ
+ * 上限で絞っている保証は無い。書き手側より少しだけ緩くして、正しい相手からの応答を
+ * 切り落とさないようにする。
+ */
+const MAX_REPLY_TURNS = 40;
+const MAX_REPLY_TEXT_CHARS = 2_000;
+
+/**
  * 応答の`payload`を、信用せずに読み解く（Issue #1259）。
  *
  * 中身は別プロセス（版が違うこともある）が書いた文字列で、そのまま画面へ流す。
@@ -606,10 +617,19 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
   return { approvals };
 }
 
-/** 直近のやり取りも同じ方針で読み解く。形の合わない要素は落とす（Issue #1260）。 */
+/**
+ * 直近のやり取りも同じ方針で読み解く。形の合わない要素は落とす（Issue #1260）。
+ *
+ * 書き手は`readRecentTurns`で件数と文字数を絞ってから書くが、それは同じ版どうしの
+ * 約束にすぎない。壊れたファイル・別の版が書いた巨大な配列や長大な文字列をそのまま
+ * 画面へ流さないよう、読み手でも上限で切る。
+ */
 function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
   const turns: SessionRecentTurn[] = [];
   for (const entry of raw) {
+    if (turns.length >= MAX_REPLY_TURNS) {
+      break;
+    }
     if (typeof entry !== 'object' || entry === null) {
       continue;
     }
@@ -617,7 +637,13 @@ function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
     if ((v.role !== 'user' && v.role !== 'agent') || typeof v.text !== 'string') {
       continue;
     }
-    turns.push({ role: v.role, text: v.text, truncated: v.truncated === true });
+    const capped = v.text.length > MAX_REPLY_TEXT_CHARS;
+    turns.push({
+      role: v.role,
+      text: capped ? v.text.slice(0, MAX_REPLY_TEXT_CHARS) : v.text,
+      // こちらで切った分も「続きがある」ものとして扱う
+      truncated: capped || v.truncated === true,
+    });
   }
   return turns;
 }

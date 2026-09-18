@@ -210,9 +210,18 @@ function readApprovalPaths(state: Pick<ChatState, 'items'>, approval: PendingApp
  *
  * `ChatItem`は項目ごとの時刻を持たないため、1件ずつの時刻は返せない。呼び出し側が
  * `capturedAt`（いつ時点の内容か）を添える。
+ *
+ * 件数の丸めと切り詰めの境界を直接試せるよう、純粋関数としてexportする。
  */
-function readRecentTurns(state: Pick<ChatState, 'items'>, limit: number): SessionRecentTurn[] {
-  const count = Math.min(Math.max(Math.trunc(limit), 1), MAX_RECENT_TURNS);
+export function readRecentTurns(
+  state: Pick<ChatState, 'items'>,
+  limit: number,
+): SessionRecentTurn[] {
+  // NaN・Infinityは丸めを素通りして件数の比較を常に偽にする（1件も返らない）。
+  // 呼び出し側が形だけ確かめて渡すため、ここで使える値へ倒しておく
+  const count = Number.isFinite(limit)
+    ? Math.min(Math.max(Math.trunc(limit), 1), MAX_RECENT_TURNS)
+    : 1;
   const turns: SessionRecentTurn[] = [];
   // 末尾から必要な分だけ遡る。長い会話で全件を走査しない
   for (let i = state.items.length - 1; i >= 0 && turns.length < count; i -= 1) {

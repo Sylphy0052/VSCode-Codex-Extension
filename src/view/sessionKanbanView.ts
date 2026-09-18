@@ -432,23 +432,27 @@ const drafts = new Map();
 const expanded = new Set(); const details = new Map(); const detailErrors = new Map();
 // 直近のやり取り（Issue #1260）。承認の中身と同じく展開している間だけ持つ。
 // 実行中のセッションは内容が進むため、展開中は TURNS_POLL_MS ごとに取り直す
-const turnsExpanded = new Set(); const turns = new Map(); const turnsErrors = new Map(); const turnsPending = new Set();
+// turnsInflight は「いま応答を待っている要求のseq」をカードごとに持つ。多重要求の抑止と、
+// 古い応答の取り違えの判定を兼ねる（閉じて開き直すと前の要求のseqとは一致しなくなる）
+const turnsExpanded = new Set(); const turns = new Map(); const turnsErrors = new Map(); const turnsInflight = new Map();
 const TURNS_LIMIT = 6; const TURNS_POLL_MS = 3000;
 // 送った操作と、その結果を結び付ける通し番号
 let controlSeq = 0; const pendingControls = new Map();
 const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信', approvalDetail: '承認の内容の取り寄せ', recentTurns: 'やり取りの取り寄せ' };
 const decisionLabels = { accept: '承認', decline: '拒否' };
 function controlLabel(action, extra) { return action === 'approvalDecision' ? decisionLabels[extra.decision] : actionLabels[action]; }
-function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit }); }
+function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit }); return seq; }
 // 展開したときだけ中身を要求し、閉じたら捨てる（Issue #1259の受入基準）
 function toggleDetail(card) { const key = cardKey(card); if(expanded.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } else { expanded.add(key); detailErrors.delete(key); sendControl(card, 'approvalDetail'); } applyFilter(); }
 // 取り寄せた結果を仕舞う。閉じた後に届いた分は捨てる（閉じたのに中身が出るのを防ぐ）
 function applyApprovalDetail(info, data) { if(!expanded.has(info.key)) return; if(data.ok) { details.set(info.key, data.approvals || []); detailErrors.delete(info.key); } else { details.delete(info.key); detailErrors.set(info.key, data.error || '理由は不明です'); } applyFilter(); }
 // やり取りも展開したときだけ要求し、閉じたら要求も保持した中身も止める（Issue #1260）
-function toggleTurns(card) { const key = cardKey(card); if(turnsExpanded.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsPending.delete(key); } else { turnsExpanded.add(key); turnsErrors.delete(key); requestTurns(card); } applyFilter(); }
+function toggleTurns(card) { const key = cardKey(card); if(turnsExpanded.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } else { turnsExpanded.add(key); turnsErrors.delete(key); requestTurns(card); } applyFilter(); }
 // 応答が返る前に次を送らない。3秒より応答が遅い相手へ要求を積み上げない
-function requestTurns(card) { const key = cardKey(card); if(turnsPending.has(key)) return; turnsPending.add(key); sendControl(card, 'recentTurns', undefined, { limit: TURNS_LIMIT }); }
-function applyRecentTurns(info, data) { turnsPending.delete(info.key); if(!turnsExpanded.has(info.key)) return; if(data.ok) { turns.set(info.key, { list: data.turns || [], capturedAt: data.capturedAt }); turnsErrors.delete(info.key); } else { turnsErrors.set(info.key, data.error || '理由は不明です'); } applyFilter(); }
+function requestTurns(card) { const key = cardKey(card); if(turnsInflight.has(key)) return; turnsInflight.set(key, sendControl(card, 'recentTurns', undefined, { limit: TURNS_LIMIT })); }
+// いま待っている要求の応答だけを採る。閉じて開き直した後に前の応答が届いても、
+// seqが一致しないので新しい内容を古い内容で上書きしない
+function applyRecentTurns(info, data) { if(turnsInflight.get(info.key) !== data.seq) return; turnsInflight.delete(info.key); if(!turnsExpanded.has(info.key)) return; if(data.ok) { turns.set(info.key, { list: data.turns || [], capturedAt: data.capturedAt }); turnsErrors.delete(info.key); } else { turnsErrors.set(info.key, data.error || '理由は不明です'); } applyFilter(); }
 // 展開中のカードだけを定期的に取り直す。盤面（250ms）とは別の間隔で回す
 // タブが見えていない間は取り直さない（相手ウィンドウへ無駄な要求を送らない）
 setInterval(() => { if(turnsExpanded.size === 0 || document.hidden) return; for(const spec of specs) for(const card of latestBoard.cards[spec.key]) { if(turnsExpanded.has(cardKey(card))) requestTurns(card); } }, TURNS_POLL_MS);
@@ -476,7 +480,7 @@ function setApprovalFlag(has) { document.body.classList.toggle('has-approval', h
 // 承認待ちがあるのに注意の色が消えると、対応漏れを誘う（Issue #1250）
 // 承認が解決したカードは承認待ちの列から出ていき、「内容を閉じる」を押す手段が無くなる。
 // 列に残っていないキーはここで捨てる（開きっぱなしの統括ページに溜め続けないため）
-function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsPending.delete(key); } } }
+function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } }
 function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
 function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
 // カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
