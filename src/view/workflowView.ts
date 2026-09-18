@@ -454,6 +454,13 @@ export class WorkflowViewManager implements vscode.Disposable {
       );
       issues = undefined;
     }
+    if (issues === undefined && cached?.issues !== undefined) {
+      // 一時的な失敗（CLIのタイムアウト・ネットワーク瞬断）で、直前まで出せていた
+      // Issueの状態を一斉に「照合できません」へ後退させない（自己レビュー指摘: medium）。
+      // 取得時刻だけ更新して、次の再取得までの間隔は保つ
+      this.roadmapIssueCache = { at: Date.now(), issues: cached.issues };
+      return cached.issues;
+    }
     this.roadmapIssueCache = { at: Date.now(), issues };
     return issues;
   }
