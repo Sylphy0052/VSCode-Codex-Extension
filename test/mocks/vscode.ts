@@ -198,6 +198,8 @@ interface MockState {
   workspaceFolders: Array<{ uri: { fsPath: string }; name: string; index: number }> | undefined;
   activeTextEditorFolderPath: string | undefined;
   createdPanels: FakeWebviewPanel[];
+  /** `env.openExternal` で開かれたURIの履歴（Issue #1257）。 */
+  openedExternalUris: string[];
   messages: { warnings: string[]; errors: string[]; infos: string[] };
   /** `window.showInputBox` が返す値。テストごとに設定する（既定はキャンセル扱いの`undefined`）。 */
   showInputBoxAnswer: string | undefined;
@@ -257,6 +259,7 @@ const state: MockState = {
   workspaceFolders: undefined,
   activeTextEditorFolderPath: undefined,
   createdPanels: [],
+  openedExternalUris: [],
   messages: { warnings: [], errors: [], infos: [] },
   showInputBoxAnswer: undefined,
   showQuickPickAnswer: undefined,
@@ -278,6 +281,7 @@ export const __mock = {
     state.workspaceFolders = undefined;
     state.activeTextEditorFolderPath = undefined;
     state.createdPanels = [];
+    state.openedExternalUris = [];
     state.messages = { warnings: [], errors: [], infos: [] };
     state.showInputBoxAnswer = undefined;
     state.showQuickPickAnswer = undefined;
@@ -351,6 +355,10 @@ export const __mock = {
   },
   get createdPanels(): FakeWebviewPanel[] {
     return state.createdPanels;
+  },
+  /** `env.openExternal` で開かれたURIの履歴（Issue #1257）。 */
+  get openedExternalUris(): string[] {
+    return state.openedExternalUris;
   },
   lastCreatedPanel(): FakeWebviewPanel | undefined {
     return state.createdPanels[state.createdPanels.length - 1];
@@ -497,6 +505,8 @@ export const workspace = {
  */
 export const Uri = {
   file: (fsPath: string): FakeUri => ({ fsPath }),
+  /** 本物と同じく文字列をそのまま保持するだけ（`strict`の検証はしない）。 */
+  parse: (value: string): FakeUri => ({ fsPath: value }),
   from: ({ scheme, path }: { scheme: string; path?: string }): FakeSchemeUri => ({
     scheme,
     path: path ?? '',
@@ -517,6 +527,14 @@ export interface FakeSchemeUri {
  * チャット画面のワークフローボタンは `agent.workflows.menu` を呼ぶだけで、実体は
  * `extension.ts` 側にある。ここでは実行を模さず、呼ばれたコマンドIDを記録するに留める。
  */
+/** 外部URLを開く口（Issue #1257）。実際には開かず履歴へ記録するだけ。 */
+export const env = {
+  openExternal: async (uri: { fsPath: string }): Promise<boolean> => {
+    state.openedExternalUris.push(uri.fsPath);
+    return true;
+  },
+};
+
 export const commands = {
   executeCommand: (command: string, ..._args: unknown[]): Promise<undefined> => {
     state.executedCommands.push(command);

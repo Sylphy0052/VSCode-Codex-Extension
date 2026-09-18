@@ -1285,6 +1285,11 @@ export interface RoadmapIssueSummary {
   body?: string;
   labels?: string[];
   state?: string;
+  /**
+   * Issueのページ（Issue #1257）。ワークフローViewからIssueを開く導線で使う。
+   * GitHubは`url`、GitLabは`web_url`から読む。CLIの出力に無ければ`undefined`。
+   */
+  url?: string;
 }
 
 /** Issue一覧の取得の抽象。`gh issue list` / `glab issue list` を直接呼ばず、テストで差し替える。 */
@@ -1292,6 +1297,15 @@ export interface IssueListPort {
   /** 取得できなければ `undefined`（design.md §16.19「取れなければ飛ばす」）。 */
   listIssues(cwd: string): Promise<RoadmapIssueSummary[] | undefined>;
 }
+
+/**
+ * 取得するIssueの状態（Issue #1257）。
+ *
+ * 既定は`'open'`（CLIの既定と同じ。ロードマップ生成が参照する「既存Issue」は未完のものが
+ * 対象で、従来の挙動を変えない）。ワークフローViewのロードマップ欄は、項目に紐づくIssueが
+ * 完了済みかどうかまで表示するため`'all'`を使う。
+ */
+export type IssueListState = 'open' | 'all';
 
 const ISSUE_LIST_LIMIT = 200;
 
@@ -1328,12 +1342,15 @@ function parseNumberTitleArray(
           : undefined;
         const body = rec['body'] ?? rec['description'];
         const state = rec['state'];
+        // GitHubは`url`、GitLabは`web_url`（Issue #1257）
+        const url = rec['url'] ?? rec['web_url'];
         out.push({
           number: num,
           title,
           ...(typeof body === 'string' ? { body } : {}),
           ...(labels !== undefined ? { labels } : {}),
           ...(typeof state === 'string' ? { state } : {}),
+          ...(typeof url === 'string' ? { url } : {}),
         });
       }
     }
@@ -1354,7 +1371,9 @@ function parseNumberTitleArray(
 export function createCliIssueListPort(
   git: GitCommandRunner,
   cli: CliCommandRunner,
+  options?: { state?: IssueListState },
 ): IssueListPort {
+  const state: IssueListState = options?.state ?? 'open';
   return {
     async listIssues(cwd: string): Promise<RoadmapIssueSummary[] | undefined> {
       const remote = await git.run(['remote', 'get-url', 'origin'], cwd);
@@ -1372,17 +1391,123 @@ export function createCliIssueListPort(
             'issue',
             'list',
             '--json',
-            'number,title,body,labels,state',
+            'number,title,body,labels,state,url',
             '--limit',
             String(ISSUE_LIST_LIMIT),
+            // 既定はopenのみ。完了済みかどうかまで見るときだけ全件へ広げる（Issue #1257）
+            ...(state === 'all' ? ['--state', 'all'] : []),
           ],
           cwd,
         );
         return result.code === 0 ? parseNumberTitleArray(result.stdout, 'number') : undefined;
       }
-      const result = await cli.run('glab', ['issue', 'list', '-O', 'json'], cwd);
+      const result = await cli.run(
+        'glab',
+        ['issue', 'list', '-O', 'json', ...(state === 'all' ? ['--all'] : [])],
+        cwd,
+      );
       return result.code === 0 ? parseNumberTitleArray(result.stdout, 'iid') : undefined;
     },
+  };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* ロードマップとIssueの突き合わせ（Issue #1257）                                                 */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * ロードマップの1項目に紐づくIssueの状態。
+ *
+ * - `unlinked`: ロードマップにIssue行が無い（未起票）
+ * - `unknown`: Issue一覧が取れなかった、またはCLIの返す状態を解釈できなかった
+ * - `notFound`: Issue番号はあるが、取得した一覧の中に見つからない
+ * - `open` / `closed`: 一覧の`state`から判定した状態
+ */
+export type RoadmapIssueState = 'unlinked' | 'unknown' | 'notFound' | 'open' | 'closed';
+
+export interface RoadmapOverviewItem {
+  id: string;
+  text: string;
+  checked: boolean;
+  issue?: number;
+  issueState: RoadmapIssueState;
+  issueTitle?: string;
+  /** `https://`で始まるものだけを載せる（ホストのCLIが返す値をそのまま信用しない）。 */
+  issueUrl?: string;
+}
+
+export interface RoadmapOverviewPhase {
+  name: string;
+  items: RoadmapOverviewItem[];
+}
+
+export interface RoadmapOverview {
+  title: string;
+  phases: RoadmapOverviewPhase[];
+  /** Issue一覧が取れたか。取れていなければ全項目が`unknown`になる。 */
+  issuesAvailable: boolean;
+}
+
+/** `gh`は`OPEN`/`CLOSED`、`glab`は`opened`/`closed`を返す。どちらも同じ語彙へ寄せる。 */
+function normalizeIssueState(state: string | undefined): 'open' | 'closed' | undefined {
+  if (state === undefined) return undefined;
+  const normalized = state.trim().toLowerCase();
+  if (normalized === 'closed' || normalized === 'merged') return 'closed';
+  if (normalized === 'open' || normalized === 'opened') return 'open';
+  return undefined;
+}
+
+/**
+ * パース済みロードマップと、取得したIssue一覧を突き合わせて表示用の形にする（Issue #1257）。
+ *
+ * 純粋関数。フェーズ順・項目順はロードマップのまま保つ。`issues`が`undefined`（CLI不在・
+ * 未認証・取得失敗）のときは、Issue行を持たない項目だけを`unlinked`とし、残りは`unknown`に
+ * 倒す（「取れなければ飛ばす」。取れていないことと存在しないことを混同しない）。
+ *
+ * ロードマップの本文もIssueのタイトルも外部由来のテキストなので、`sanitizeInlineText`を
+ * 通してから載せる。
+ */
+export function reconcileRoadmapIssues(
+  parsed: ParsedRoadmap,
+  issues: readonly RoadmapIssueSummary[] | undefined,
+): RoadmapOverview {
+  const byNumber = new Map<number, RoadmapIssueSummary>();
+  for (const issue of issues ?? []) {
+    byNumber.set(issue.number, issue);
+  }
+  return {
+    title: sanitizeInlineText(parsed.title, WORKSPACE_ENTRY_MAX_LENGTH),
+    issuesAvailable: issues !== undefined,
+    phases: parsed.phases.map((phase) => ({
+      name: sanitizeInlineText(phase.name, WORKSPACE_ENTRY_MAX_LENGTH),
+      items: phase.items.map((item) => {
+        const base = {
+          id: sanitizeInlineText(item.id, WORKSPACE_ENTRY_MAX_LENGTH),
+          text: sanitizeInlineText(item.text, ISSUE_TITLE_MAX_LENGTH),
+          checked: item.checked,
+        };
+        if (item.issue === undefined) {
+          return { ...base, issueState: 'unlinked' as const };
+        }
+        if (issues === undefined) {
+          return { ...base, issue: item.issue, issueState: 'unknown' as const };
+        }
+        const found = byNumber.get(item.issue);
+        if (found === undefined) {
+          return { ...base, issue: item.issue, issueState: 'notFound' as const };
+        }
+        const state = normalizeIssueState(found.state);
+        return {
+          ...base,
+          issue: item.issue,
+          issueState: state ?? ('unknown' as const),
+          issueTitle: sanitizeInlineText(found.title, ISSUE_TITLE_MAX_LENGTH),
+          ...(found.url !== undefined && found.url.startsWith('https://')
+            ? { issueUrl: found.url }
+            : {}),
+        };
+      }),
+    })),
   };
 }
 
