@@ -3,6 +3,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
 import type { SessionActivityState } from './sessionActivity';
 
@@ -397,6 +398,21 @@ export interface SessionApprovalDetail {
    * 答えられない。統括ページからは中身だけ出し、ボタンは出さない。
    */
   decidable: boolean;
+}
+
+/**
+ * 共有ディレクトリ経由で通す承認の決定（Issue #1259）。
+ *
+ * `ApprovalDecision`は4値あるが、この経路では`accept`と`decline`だけを通す。
+ * `acceptForSession`は以後の承認を自動で許可する最も強い決定で、統括ページにも
+ * ボタンが無い。要求ファイルを直接置ける立場（design.md §14.111）へ、画面に無い
+ * 強い決定まで渡す理由が無い。`cancel`はターンの取り消しで、中断（`interrupt`）が
+ * 別にあるため要らない。
+ */
+export type SharedApprovalDecision = Extract<ApprovalDecision, 'accept' | 'decline'>;
+
+export function isSharedApprovalDecision(value: unknown): value is SharedApprovalDecision {
+  return value === 'accept' || value === 'decline';
 }
 
 /** 応答の`payload`（Issue #1259）。Phase 3以降（会話の直近N件・btwの回答）もここへ足す。 */

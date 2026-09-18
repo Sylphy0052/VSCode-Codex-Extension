@@ -4,7 +4,6 @@ import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
-import { isApprovalDecision } from './appserver/approvals';
 import { ClaudeAgentProbe } from './claude/agentProbe';
 import { ClaudeAuthActions } from './claude/authActions';
 import { ClaudeAuthProbe } from './claude/authProbe';
@@ -174,6 +173,7 @@ import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
+import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager } from './view/sessionKanbanView';
 import {
@@ -183,6 +183,7 @@ import {
   SessionHubRequestPort,
   SessionHubRequestWatcher,
   SessionHubWriter,
+  isSharedApprovalDecision,
   type SessionHubRequest,
   type SharedSession,
 } from './view/sessionHub';
@@ -1084,6 +1085,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionHubRequestPort = new SessionHubRequestPort(sessionHubRootDir, windowId, log);
   // 統括ページからの操作は、自ウィンドウ分も要求ファイル経由で届いた分もここを通す
   // （Issue #1258）。どちらの入口でも同じ判定・同じ副作用になる
+  // 中身を渡した相手と要求を覚えておき、取り寄せていない要求への決定を受信側でも弾く
+  // （Issue #1259）。画面側だけの約束にすると、統括ページを経由しない経路で素通りする
+  const approvalDisclosure = new ApprovalDisclosureLog();
   const controlSession = (
     provider: 'codex' | 'claude',
     threadId: string,
@@ -1091,7 +1095,18 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     /** 要求元のwindowId。自ウィンドウのカードからの操作なら自分自身のid */
     from: string,
   ): SessionControlResult => {
-    const result = (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    const target = { from, provider, threadId };
+    const result =
+      action.kind === 'approvalDecision' &&
+      !approvalDisclosure.consume(target, action.approvalRequestId)
+        ? { ok: false, error: '承認の内容を表示してから操作してください' }
+        : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    if (action.kind === 'approvalDetail' && result.approvals !== undefined) {
+      approvalDisclosure.record(
+        target,
+        result.approvals.map((approval) => approval.requestId),
+      );
+    }
     // 承認・拒否だけは、成否によらず必ず1行残す（Issue #1259）。誰がどの会話の
     // どの要求を承認したのかを、後からOutputだけで追えるようにする
     if (action.kind === 'approvalDecision') {
@@ -3626,7 +3641,7 @@ function toSessionControlAction(
     case 'approvalDetail':
       return { kind: 'approvalDetail' };
     case 'approvalDecision':
-      return approvalRequestId === undefined || !isApprovalDecision(decision)
+      return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
         ? undefined
         : { kind: 'approvalDecision', approvalRequestId, decision };
     default:

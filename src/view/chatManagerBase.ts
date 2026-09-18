@@ -7,7 +7,7 @@ import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { needsAttentionAfterHandoff, type OldTabKeptReason } from './handoff';
 import { playNotificationSound } from './notificationSound';
-import type { SessionApprovalDetail } from './sessionHub';
+import type { SessionApprovalDetail, SharedApprovalDecision } from './sessionHub';
 import {
   deriveSessionActivityState,
   sanitizeForNotification,
@@ -132,7 +132,7 @@ export type SessionControlAction =
   /** 承認待ちの中身を取り寄せる（Issue #1259）。カードを展開したときだけ送る。 */
   | { kind: 'approvalDetail' }
   /** 取り寄せた中身に対する承認・拒否（Issue #1259）。 */
-  | { kind: 'approvalDecision'; approvalRequestId: string; decision: ApprovalDecision };
+  | { kind: 'approvalDecision'; approvalRequestId: string; decision: SharedApprovalDecision };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
