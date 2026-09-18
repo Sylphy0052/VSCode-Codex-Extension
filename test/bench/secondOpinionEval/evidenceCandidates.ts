@@ -8,15 +8,15 @@
  * ```
  * # 1回だけ: GitHubから引いて、証拠の素をそのまま保存する
  * npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
- *   --frame eval-results/sampling-frame-v2.json \
- *   --evidence-src-out eval-results/evidence-source-v3.json \
- *   --out eval-results/evidence-candidates-v3.json
+ *   --frame eval-results/sampling-frame-v3.json \
+ *   --evidence-src-out eval-results/evidence-source-v4.json \
+ *   --out eval-results/evidence-candidates-v4.json
  *
  * # 以降: 保存した素からのみ作り直す
  * npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
- *   --frame eval-results/sampling-frame-v2.json \
- *   --evidence-src eval-results/evidence-source-v3.json \
- *   --out eval-results/evidence-candidates-v3.json
+ *   --frame eval-results/sampling-frame-v3.json \
+ *   --evidence-src eval-results/evidence-source-v4.json \
+ *   --out eval-results/evidence-candidates-v4.json
  * ```
  *
  * **ここでは正解ラベルを作らない。** 集めるのは「その問題が真だと確定した根拠」を人が読んで
@@ -55,15 +55,21 @@ const REPO_OWNER = 'Sylphy0052';
 const REPO_NAME = 'VSCode-Codex-Extension';
 
 /**
- * 手順1で凍結した sampling frame v2 のsha256。
+ * 手順1で凍結した sampling frame v3 のsha256。
  *
  * 母集団が変われば証拠の集計も別物になる。frameは絶対パスを含まないので、この値はcloneの
  * 置き場所に依らない。ずれたら止める。frameを作り直したときは、こちらの版も上げる。
  */
-const EXPECTED_FRAME_SHA256 = 'aaf4a28de0d6a3f8b24815f52e89dfc7bf5cadc6dd932f773004aa7cbd621bc6';
+const EXPECTED_FRAME_SHA256 = '9fb0208257b4b6f79e5128bfcd578b2afa06132874f20fe7faf4ab8a03424854';
 
-/** 証拠候補の収集規則の版。規則を変えたら上げ、前の版のファイルは残す。 */
-const EVIDENCE_RULES_VERSION = 3;
+/**
+ * 証拠候補の収集規則の版。規則を変えたら上げ、前の版のファイルは残す。
+ *
+ * v4 で規則そのものは変えていない。frame が v2（eligible 415件）から v3（eligible 431件）へ
+ * 変わったので上げた。素には版が記録されるので、版を据え置くと母集団の違う素をそのまま
+ * 受け付けてしまう。
+ */
+const EVIDENCE_RULES_VERSION = 4;
 
 /** 1リクエストで引くPR数。GraphQLのnode数上限に収まる範囲で大きくとる。 */
 const BATCH_SIZE = 20;

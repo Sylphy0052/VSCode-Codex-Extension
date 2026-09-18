@@ -4,9 +4,9 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/supplementalOrder.ts \
- *   --candidates eval-results/evidence-candidates-v3.json \
- *   --strong-order eval-results/screening-order-v2.json \
- *   --out eval-results/supplemental-order-v1.json
+ *   --candidates eval-results/evidence-candidates-v4.json \
+ *   --strong-order eval-results/screening-order-v3.json \
+ *   --out eval-results/supplemental-order-v2.json
  * ```
  *
  * **なぜ足すか。** 強い証拠の98件を20件読んだ時点で、primary が成立したのは2件だった。
@@ -15,7 +15,7 @@
  *
  * **読んだ内容から選び方を作らない。** 20件を読んで分かった「別Issueを拾いやすい」等の
  * 失敗の形へ合わせて候補を絞ると、screening の結果で候補の規則を学習したことになる。
- * ここで使うのは手順2で凍結済みの `evidence-candidates-v3.json` の機械的な属性だけで、
+ * ここで使うのは手順2で凍結済みの `evidence-candidates-v4.json` の機械的な属性だけで、
  * 中身を読んで入れる・外すは決めない。20件の結果から使ったのは「追加探索を始めるかどうか」
  * の引き金だけである。
  *
@@ -40,14 +40,19 @@ import {
 
 /** 手順2で凍結した証拠候補のsha256。ずれたら止める。 */
 const EXPECTED_CANDIDATES_SHA256 =
-  '2ece68beb18979f56828548241444a014c6bcd21c0439b42e91ebfd67ce1a235';
+  '6ce8c84c6f2e08667ab71f32f7ad97ac3af137af0ee14dbd02f3b0a95fb05e98';
 
 /** 先に読んでいる強い証拠の順序ファイルのsha256。重複ゼロの検証に使う。 */
 const EXPECTED_STRONG_ORDER_SHA256 =
-  'edcdfd12f49cedc1de65e35483e61e023e378c07420557d8a785c7da565e9583';
+  'f8194249366dd2c786f69fcb2f1ced8a45af75df96207e95113761b8769bfdaf';
 
-/** 追加poolの版。規則やseedを変えたら上げ、前の版のファイルは残す。 */
-const SUPPLEMENTAL_ORDER_VERSION = 1;
+/**
+ * 追加poolの版。規則やseedを変えたら上げ、前の版のファイルは残す。
+ *
+ * v2 で規則もseedも変えていない。入力の証拠候補と強い証拠の順序が、frame v3 由来のものへ
+ * 変わったので上げた。
+ */
+const SUPPLEMENTAL_ORDER_VERSION = 2;
 
 const FIRST_BATCH_CASES = 10;
 

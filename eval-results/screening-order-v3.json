@@ -1,0 +1,427 @@
+{
+  "candidatesFile": "evidence-candidates-v4.json",
+  "candidatesSha256": "6ce8c84c6f2e08667ab71f32f7ad97ac3af137af0ee14dbd02f3b0a95fb05e98",
+  "screeningOrderVersion": 3,
+  "shuffleSeed": "ground-truth-screen-v1:",
+  "strongEvidenceRule": "follow-up-test または openedAfterMerge な follow-up issue を持つ",
+  "primaryTargetCases": 18,
+  "stopRule": "最終24件を組めるかで判定する。難しい正例に充てられる eligible な案件 >= 9 + 予備、普通の正例 >= 6 + 予備、問題の無い変更の負例 >= 6 + 予備、判断しきれない案件 >= 3 + 予備。目安の停止点は eligible な primary 18 件だが、層が満ちていれば手前で止めてよく、満ちていなければ続ける。同じPRで複数の finding が成立しても案件としてのカウントは1。後の工程で抽出の制約を満たせなければ、この順序の、前回読み終えた位置の次から読み足す",
+  "reportingUnits": {
+    "screenedCases": "読んだ案件の数",
+    "primaryCases": "primary な finding を1つ以上持つ案件の数（停止判定はこれ）",
+    "nonPrimaryCases": "読んだが primary が成立しなかった案件の数",
+    "unreadCases": "まだ読んでいない案件の数",
+    "primaryFindings": "成立した finding の総数（記録のみ。停止判定には使わない）"
+  },
+  "total": 102,
+  "order": [
+    {
+      "prNumber": 621,
+      "shuffleKey": "015c88fd82cf83c9c907aebf831bf51eed1bb6e1d3c3d2c662e926415d4a23ba"
+    },
+    {
+      "prNumber": 650,
+      "shuffleKey": "02fac1d400f4d92348ee1631122198ffdd4aa798345a32fd8953735a941244c8"
+    },
+    {
+      "prNumber": 429,
+      "shuffleKey": "03a8e6ecb317b0b693e0c45436b80d01eeaed0b984321819cda767f673e87aa9"
+    },
+    {
+      "prNumber": 927,
+      "shuffleKey": "03e3e9fc20f27644300ca1c3d968c36ad9f5887fcb01c0774109346d5fd06a88"
+    },
+    {
+      "prNumber": 976,
+      "shuffleKey": "040c5b0aa99941df3b2336f47d74170779c42c0395761dd9ebfe77dcb14eca2f"
+    },
+    {
+      "prNumber": 727,
+      "shuffleKey": "04190a982877c581dbe42cf4ede890a443704ab1af0dbd8c286dd9345a4f4fc7"
+    },
+    {
+      "prNumber": 642,
+      "shuffleKey": "04b8ce0b1b5ad8052646b605cfeb7f92aa20c833f43fc4b9fdf5b08a508d45de"
+    },
+    {
+      "prNumber": 626,
+      "shuffleKey": "06c7f1b966dde234d9b694d63b857d6f07e453868f5a5ed7a419c3eefe622a2f"
+    },
+    {
+      "prNumber": 1015,
+      "shuffleKey": "08191a295a13d5d7ae5e0b8291a4470cea097d8282bed02b83da9b3c4e4ab570"
+    },
+    {
+      "prNumber": 141,
+      "shuffleKey": "08ac6d7a74e775d4940e6226af1c650763a1318c653628e7284e612e9a6d81d5"
+    },
+    {
+      "prNumber": 122,
+      "shuffleKey": "097649089932d633a766366e36a106484cabbaea9297735ec34a9705474ea36f"
+    },
+    {
+      "prNumber": 376,
+      "shuffleKey": "12779781ba4e20f18bc364cfd95c3523f195c73d644a31d7331cfb51688fac3f"
+    },
+    {
+      "prNumber": 149,
+      "shuffleKey": "12f5fda12e29677273873a620a5b9e4cff508739c4c1151b82b3a4e1989e0d9e"
+    },
+    {
+      "prNumber": 486,
+      "shuffleKey": "18e4523166c4d20cea996c306a0277325f9facb14eeaaa9f53011b36979b6da5"
+    },
+    {
+      "prNumber": 645,
+      "shuffleKey": "191b78ab60ec6baa6e78edd5c466a8f8b4cc30ad703bb819d2623dc28157e5c8"
+    },
+    {
+      "prNumber": 535,
+      "shuffleKey": "1d56504ccc4732de53b9c1300c24a80bbb896f49f2c6b46c24fbd82ac4418833"
+    },
+    {
+      "prNumber": 652,
+      "shuffleKey": "22939eefcef70eb94818649c0318212f8b899384f1327cb69ba960b7e802d2ca"
+    },
+    {
+      "prNumber": 509,
+      "shuffleKey": "246f85e86bc0db8e9f22d65afc6b1f9ee9b46ac7b0f350b163e5c6fd9e2498ec"
+    },
+    {
+      "prNumber": 373,
+      "shuffleKey": "24e9c3f55e0f485a99a96d90c85cd3eb41776f0114c38f18112e2acdffd2ab77"
+    },
+    {
+      "prNumber": 960,
+      "shuffleKey": "287f0d48b33162e2ba13527e3d7ec5f6dff28a80338b8132039d67cb0657a1f7"
+    },
+    {
+      "prNumber": 330,
+      "shuffleKey": "2cc2665f5455e545aeebbf4b8eadbd5ab3729f5e8b23f6e28bdac8ee0caad545"
+    },
+    {
+      "prNumber": 371,
+      "shuffleKey": "32d044edff498ed224b777d81f614d98ff7bc0c6dc93837b21be4cc2d5fb138f"
+    },
+    {
+      "prNumber": 647,
+      "shuffleKey": "33b41da6aad5b9066252a5e6998fc06e63e9bd46563dc1609fbdff7bd451640b"
+    },
+    {
+      "prNumber": 1041,
+      "shuffleKey": "34ca101944582b8feeb3328e10b9be159561be5725b609bb0f0e499aed4a6c63"
+    },
+    {
+      "prNumber": 139,
+      "shuffleKey": "374a8fdbb13646be9c2d576dd0a4b289af310c5342091d54ef99f62153e6c703"
+    },
+    {
+      "prNumber": 1014,
+      "shuffleKey": "3b16370f163cf84a17a3fbf5ea1d52296adf3f31076bef04f2a639e493d7cd10"
+    },
+    {
+      "prNumber": 138,
+      "shuffleKey": "3d8df7ace319c005f9877cce0227327c33de173c4134f8cda0b46004f162a7e1"
+    },
+    {
+      "prNumber": 494,
+      "shuffleKey": "3ec3f53a272c62184013a31fe819302bb3155f7e0f044123c2702f8cd54465ef"
+    },
+    {
+      "prNumber": 319,
+      "shuffleKey": "407754b6678e910ff2ef26b0315a9c933f3bcc7cd9a3afe3f7e995eb6f85ee6f"
+    },
+    {
+      "prNumber": 483,
+      "shuffleKey": "4297a87f6a3b761b89923f67d107341a06249c87e4f39735965fb7095215ef65"
+    },
+    {
+      "prNumber": 367,
+      "shuffleKey": "43f10d2c683e17c6948234fd7baa5f49ff3faae246ce85ef18bc0cd6475e9c4f"
+    },
+    {
+      "prNumber": 951,
+      "shuffleKey": "454a8b6070df69b7e5b0a58b1cf9022ea042033d14986f66eadb805bd19c3a90"
+    },
+    {
+      "prNumber": 525,
+      "shuffleKey": "45658dbe7a0d3fce5ea7d7467847c0809bace8dd7dbb2dc4ec2bcbba2f508d47"
+    },
+    {
+      "prNumber": 985,
+      "shuffleKey": "48c19d5df99c95b52f7af107e87586daeb53c308c1143c373fcd0ae1e135c706"
+    },
+    {
+      "prNumber": 682,
+      "shuffleKey": "52eafeb8af92f8febd06aede7314d90f25637b745a6e76d28d24af3a2b95ca9e"
+    },
+    {
+      "prNumber": 644,
+      "shuffleKey": "57d5e993f46f7dc42b089970a8e3b133129ce899cc8f8b3df90f4bd34ff14113"
+    },
+    {
+      "prNumber": 1031,
+      "shuffleKey": "5b397682260b8342fc040f13ae09d0b035a01be552b6b99c7a8d43e758e3a8f4"
+    },
+    {
+      "prNumber": 271,
+      "shuffleKey": "5c6042378c17795b809a361d4e19597c65602deb07f30486a83ea787df38c3f9"
+    },
+    {
+      "prNumber": 257,
+      "shuffleKey": "5eaed1e8df968edd1d5083acc3aca29ef788aed99ea5c47ec776318609f6238c"
+    },
+    {
+      "prNumber": 398,
+      "shuffleKey": "624530b65367b1b8023d61668936ffc9c7082e95c92427d2490c285721f5fc13"
+    },
+    {
+      "prNumber": 462,
+      "shuffleKey": "6603bfb41e16a3216df9b1bbda51808b383155239a39e824e3766d3bc71fb6d4"
+    },
+    {
+      "prNumber": 390,
+      "shuffleKey": "67ca5eb1dda6e61565682c6a198eb2f3faee17e152dac4adeeb1cd72dd2c655c"
+    },
+    {
+      "prNumber": 504,
+      "shuffleKey": "67d6a45b54f293cc321013fdc91683a9efabdc1963535eba0fc7352208c11ba5"
+    },
+    {
+      "prNumber": 162,
+      "shuffleKey": "69bca5e533dd9a4b34b4a0c8ed2026af97e6a97dd68cd3902a6f63ea1206e1d2"
+    },
+    {
+      "prNumber": 219,
+      "shuffleKey": "6c760723ea055092492e2978ea0f93d43e9c85d366d60a72eea266d8ba159235"
+    },
+    {
+      "prNumber": 405,
+      "shuffleKey": "6e012cc87c6d5a52950d2c9366c0c9a6ce800bc16e8b9f86f5b0a4cc56ab789c"
+    },
+    {
+      "prNumber": 383,
+      "shuffleKey": "6ed134e90c42387582e1f614f827b74f58f12173df3921a7354942e453800550"
+    },
+    {
+      "prNumber": 763,
+      "shuffleKey": "70dedc74bf2a6e3d5aaa78229eab6124d23baa4e9f34b856dfbd330b07142b37"
+    },
+    {
+      "prNumber": 631,
+      "shuffleKey": "743f4495ca3bbf712a9bfb2f39e8f62cbec52d2ac9ada53a224037c7b387ce2b"
+    },
+    {
+      "prNumber": 377,
+      "shuffleKey": "75e7606d55670df69c59f3484adca87d638e0f2338410bd03489da91890e1b9b"
+    },
+    {
+      "prNumber": 135,
+      "shuffleKey": "76f193f752a30aaa1d18c25f004b8159da7c7f987822fc634f478f1427d6a10f"
+    },
+    {
+      "prNumber": 307,
+      "shuffleKey": "797438caea323489b6d266793a78f3cb7d9ed2fa9b5c51f1863a608c65eb7ff3"
+    },
+    {
+      "prNumber": 384,
+      "shuffleKey": "79ae66255b0a0c34d1072ff7956eb6e7428f6d2b680532546f70bfdd2fc29abf"
+    },
+    {
+      "prNumber": 400,
+      "shuffleKey": "7b57db2b63d16f0bcbcf24c2a8d8fb538a07d1852e8ce07c5960395e2cb76ca7"
+    },
+    {
+      "prNumber": 669,
+      "shuffleKey": "7b9183720b5bfa71cda9c215a2a7f3206feb3ad8e5f821b447fe2aa4603ee747"
+    },
+    {
+      "prNumber": 161,
+      "shuffleKey": "807d3e5576d32c19870729ffc34d557b2011f45731f62761c143692efd603d0d"
+    },
+    {
+      "prNumber": 90,
+      "shuffleKey": "82be656f86d2d021b7e4570ef0a9733b5b358c8681a9b96aa218a14a70c8d16c"
+    },
+    {
+      "prNumber": 623,
+      "shuffleKey": "8423fa69ceb81fc2d05bef34236ab8bfdd79b6156dd672be45d5a9b8919ab9d2"
+    },
+    {
+      "prNumber": 542,
+      "shuffleKey": "848611e99212ce98c72fc41876380c1ffc6e389cf97f41ef928c89b73fd986c6"
+    },
+    {
+      "prNumber": 476,
+      "shuffleKey": "8f83dda3e075bdb3eff470a17c6aabcea4844019283644cae0ff53eafbc8701b"
+    },
+    {
+      "prNumber": 272,
+      "shuffleKey": "904ab88347db43e78cd09b5a49fc73f7aed99faa1276185c7e389a1acb019eb4"
+    },
+    {
+      "prNumber": 385,
+      "shuffleKey": "91637d36231aa2f7c3775c59f63e8f72387bafa8e56a633c98a6b0202ba9b832"
+    },
+    {
+      "prNumber": 488,
+      "shuffleKey": "91ef78639f2e81251149dd0b9bbfc67bcd00664ae5ef8b05fb20245ab0fba5ad"
+    },
+    {
+      "prNumber": 931,
+      "shuffleKey": "92eb8ffbef5650e0ff90da82e0b68449fa44c55e9643bce2e91df11efaac82e2"
+    },
+    {
+      "prNumber": 343,
+      "shuffleKey": "94e3d06f50a51287932c57f4dcf7283613b1c649804496ab549934efc1ab1bec"
+    },
+    {
+      "prNumber": 510,
+      "shuffleKey": "98b9560f99e8be0cf49c32cd4877550e1dab6ff38a70d68cec1f0b1d9a52446b"
+    },
+    {
+      "prNumber": 269,
+      "shuffleKey": "98ec3c59c2b67f725359b924500ada5894aae8539b78a22db80c5d90e333edb2"
+    },
+    {
+      "prNumber": 653,
+      "shuffleKey": "9c7dec5ebf4415a88fea08347f504c822aa13c2d3328e0151176e751ed06e4ad"
+    },
+    {
+      "prNumber": 980,
+      "shuffleKey": "a2d4e20a5f74deed688958ec240488b1373601d7f06bd8e02eb57bd0865c0017"
+    },
+    {
+      "prNumber": 523,
+      "shuffleKey": "a6cd4a265b83e6682f40bde2b5080420d153638af7823d72d1c1d0f11a50ac88"
+    },
+    {
+      "prNumber": 470,
+      "shuffleKey": "a843113c911bcf857352c684c63bd97fbd0a14a0c03a8b121908c4d4b2cf783d"
+    },
+    {
+      "prNumber": 540,
+      "shuffleKey": "a94411c46ae961268189c505f4db10ff7e6c3b5312c51907b00baacdef22adde"
+    },
+    {
+      "prNumber": 447,
+      "shuffleKey": "abd904bd1b95183478651215b53561a2b60f808aebf5dfafa7d1fb80c90a5355"
+    },
+    {
+      "prNumber": 518,
+      "shuffleKey": "ac837b8fdc787c9645f654732e7a3fc6ac81a2954bb3f00aa7a02a1941ffd3fd"
+    },
+    {
+      "prNumber": 444,
+      "shuffleKey": "ad79f43c7843716e8ce64677cb76f63aacb15538b0d47f175074a141333398b4"
+    },
+    {
+      "prNumber": 517,
+      "shuffleKey": "b4d945de34b37144071d143dbaec0c7f638832d0e5ca4f558f5e76cbff12a56e"
+    },
+    {
+      "prNumber": 532,
+      "shuffleKey": "b506b3da2a9f92635952117529552582d352be55f5a84c023088e84a99c65ac0"
+    },
+    {
+      "prNumber": 536,
+      "shuffleKey": "b52e285385ba0a4af8e4338b34e89d89c5512c03280f66e73ccd34f4e1a43c97"
+    },
+    {
+      "prNumber": 417,
+      "shuffleKey": "b74685d7f564a7e5b6ec2caaabe7416f048156e47d50dea7cd681523efe302a8"
+    },
+    {
+      "prNumber": 492,
+      "shuffleKey": "bbf26a0f6f1d28781d5cd2413404ebcd876dcf1686228050eac649c8e5706bec"
+    },
+    {
+      "prNumber": 395,
+      "shuffleKey": "bdaae8e822d650ad6a97232cb08f0cee454aed99ae2503bbeb2d23e92481d0bd"
+    },
+    {
+      "prNumber": 477,
+      "shuffleKey": "bde1163eb71fa3f64e7033dee07ec6f186ecd51bd903afeda05addb4a814e6d3"
+    },
+    {
+      "prNumber": 503,
+      "shuffleKey": "be0a4218dc1eb4df5cbaa49363c918fa289726096184adc99928113b38d43adf"
+    },
+    {
+      "prNumber": 399,
+      "shuffleKey": "be187128726e4da497c9cf6dc4865c5b3c7c198958ce39f7fcab066f17fa1405"
+    },
+    {
+      "prNumber": 611,
+      "shuffleKey": "c23e50ca08d30fde8740d4fb853ff2395308fefb3e7f54497ab1b5bc7de0012a"
+    },
+    {
+      "prNumber": 560,
+      "shuffleKey": "c3984241466a295e1772db3e77cfb7815021740b43c5866f2db216044890cf5d"
+    },
+    {
+      "prNumber": 409,
+      "shuffleKey": "c4fd96d4c6bded925564f03b323bd81b93530df8c71f4fdfd52e3a3682861b26"
+    },
+    {
+      "prNumber": 501,
+      "shuffleKey": "c7a0d310feb95e5d10852bd785575004d571c3c2809a35d4913ec12facc792c4"
+    },
+    {
+      "prNumber": 938,
+      "shuffleKey": "c912111abf2ba9fc1b449fe46d4279ad8402daa9194e51366c576e04b3b576b5"
+    },
+    {
+      "prNumber": 393,
+      "shuffleKey": "d9ff9c699d7a571655928abf86082884e8742f03fdc34d1776a18108432c31fd"
+    },
+    {
+      "prNumber": 397,
+      "shuffleKey": "da38feaf4cd63c2a24e91716777492471a53b855c95980cef68cf4a9595f6698"
+    },
+    {
+      "prNumber": 98,
+      "shuffleKey": "db5f9ebabccdb27b35d2999cc9e20ef1da9dcce07ef6f63b0f6b7cb029ce30ad"
+    },
+    {
+      "prNumber": 908,
+      "shuffleKey": "dbc19146b2ed3f5b45d14972bbcaa8a98262ca27594f291c75d696b88696f631"
+    },
+    {
+      "prNumber": 711,
+      "shuffleKey": "dfed478ffb674a78b6063cb583b62acb0f9985d447393d21c9a2f61f1d5205fd"
+    },
+    {
+      "prNumber": 537,
+      "shuffleKey": "e0f383e53c9f287f64aea2e81f1700da34c45f69ee2cb3b7643b7c04d05f21f8"
+    },
+    {
+      "prNumber": 935,
+      "shuffleKey": "e5dc1e7478128a79063ece5776ae2bb77f2156e5c89ba9b0ef37a795bb4fb599"
+    },
+    {
+      "prNumber": 270,
+      "shuffleKey": "e6908197006bbaf0b20957815ec72dc06b040dfe24c6e4a261b7bad71ca9c983"
+    },
+    {
+      "prNumber": 415,
+      "shuffleKey": "e6b9cffe72ff86a5e0124918c437e06eda9c672230c18c416f6166c557f3b6e9"
+    },
+    {
+      "prNumber": 489,
+      "shuffleKey": "ede627fdcae3ce36df8b875894b4a1ff889c18252bd3dcbb9fadcc90dd852d65"
+    },
+    {
+      "prNumber": 124,
+      "shuffleKey": "f11d96a3ca8e2b202ad30c250c50e7076b50b4a050a3479794c4817fbdd4d67d"
+    },
+    {
+      "prNumber": 342,
+      "shuffleKey": "f786caca439179c9f4e2bc2987e09ab05b9f14877c7885eeb2434c870585419e"
+    },
+    {
+      "prNumber": 641,
+      "shuffleKey": "fbcfa4a8209b4e19247c54de3df88e2f51e903321171e29b5fcf3561c627cd55"
+    }
+  ]
+}

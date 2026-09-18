@@ -4,8 +4,8 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/screeningOrder.ts \
- *   --candidates eval-results/evidence-candidates-v3.json \
- *   --out eval-results/screening-order-v1.json
+ *   --candidates eval-results/evidence-candidates-v4.json \
+ *   --out eval-results/screening-order-v3.json
  * ```
  *
  * **PR番号順では読まない。** 番号順は結果とは独立だが、ほぼ時間順でもある。この期間中に
@@ -16,11 +16,13 @@
  * 実装も監査も同じ1行で済み、誰が何度実行しても同じ順になる。
  *
  * **停止条件は結果依存で、単位は案件（PR）である。** primary な `groundTruthBasis` の
- * finding を1つ以上持つPRを1件と数え、40件に達した時点で止める。**同じPRで複数の finding
- * が成立しても、停止のカウントは1である。** finding の総数で数えると、少数のPRに集中した
- * ときに早く止まりすぎる。最終の抽出は案件単位なので、こちらへ揃える。
+ * finding を1つ以上持つPRを1件と数える。**同じPRで複数の finding が成立しても、停止の
+ * カウントは1である。** finding の総数で数えると、少数のPRに集中したときに早く止まりすぎる。
+ * 最終の抽出は案件単位なので、こちらへ揃える。止める判断そのものは primary の総数ではなく、
+ * 最終24件を組めるか（層の充足性）で行う。{@link STOP_RULE} を参照。
  *
- * これは「98件のうち何件が成立したか」という母集団の割合を出す手続きではない。作りたいのは
+ * これは「強い証拠を持つ案件のうち何件が成立したか」という母集団の割合を出す手続きでは
+ * ない。作りたいのは
  * 本測定に使えるpoolであって、成立率の推定ではない。したがって集計では、読んだ件数・成立
  * した件数・成立しなかった件数・**読んでいない件数**を分けて出し、未読を不成立に混ぜない。
  *
@@ -44,20 +46,41 @@ import { STRONG_SHUFFLE_SEED, screeningOrderOf } from './screeningPool';
  * 候補が変われば読む順も別物になる。ずれたら止める。
  */
 const EXPECTED_CANDIDATES_SHA256 =
-  '2ece68beb18979f56828548241444a014c6bcd21c0439b42e91ebfd67ce1a235';
-
-/** 読む順の版。規則やseedを変えたら上げ、前の版のファイルは残す。 */
-const SCREENING_ORDER_VERSION = 2;
+  '6ce8c84c6f2e08667ab71f32f7ad97ac3af137af0ee14dbd02f3b0a95fb05e98';
 
 /**
- * primary な finding を1つ以上持つ**案件（PR）**がこの件数そろった時点で、いったん読むのを
- * やめる。finding の総数ではない。
+ * 読む順の版。規則やseedを変えたら上げ、前の版のファイルは残す。
  *
- * 最終24件のうち、独立した known finding を要るのは正例だけである。問題の無い変更
- * （20〜25%）と材料だけでは判断しきれない変更（10〜15%）はここを必要としないので、40件は
- * かなり余裕がある。足りなければ凍結済みの順序の、前回読み終えた位置の次から読み足す。
+ * v3 で規則もseedも変えていない。証拠候補が v3（frame v2 由来）から v4（frame v3 由来）へ
+ * 変わり、強い証拠を持つ案件が 98件 → 102件 になったので上げた。
  */
-const PRIMARY_TARGET_CASES = 40;
+const SCREENING_ORDER_VERSION = 3;
+
+/**
+ * primary な finding を1つ以上持つ**案件（PR）**の、暫定の停止点。finding の総数ではない。
+ *
+ * 2026-08-31 に 40件から 18件へ下げた。40件は必要量ではなく余裕値の見積もり違いで、最終24件に
+ * 要る正例は15件（うち難しい正例が9件）である。18件はそこへ20%の予備を乗せた数に当たる。
+ *
+ * **これは目安であって、停止の判定そのものではない。** 実際の停止は {@link STOP_RULE} の
+ * とおり層の充足性で決める。18件に届く前でも各層の供給が十分と分かれば止めてよく、逆に18件
+ * あっても層が偏っていれば続ける。下げたのは必要量の見積もりだけで、primary と認める
+ * `groundTruthBasis` の基準は変えていない。
+ */
+const PRIMARY_TARGET_CASES = 18;
+
+/**
+ * 停止の判定。**primary の総数ではなく、最終24件を組めるか（sampling feasibility）で見る。**
+ *
+ * どの条件の eligibility で数えるかは分析ごとに違う（prompt-placement は条件A、
+ * context-coverage は条件C-repo）。詳細は `docs/second-opinion-eval.md` にある。
+ */
+const STOP_RULE =
+  '最終24件を組めるかで判定する。難しい正例に充てられる eligible な案件 >= 9 + 予備、' +
+  '普通の正例 >= 6 + 予備、問題の無い変更の負例 >= 6 + 予備、判断しきれない案件 >= 3 + 予備。' +
+  `目安の停止点は eligible な primary ${PRIMARY_TARGET_CASES} 件だが、層が満ちていれば手前で止めてよく、` +
+  '満ちていなければ続ける。同じPRで複数の finding が成立しても案件としてのカウントは1。' +
+  '後の工程で抽出の制約を満たせなければ、この順序の、前回読み終えた位置の次から読み足す';
 
 interface CandidatesFile {
   frameSha256: string;
@@ -116,10 +139,7 @@ async function main(): Promise<void> {
      * 停止条件は結果依存である。母集団の成立率の推定には使えない。集計では、読んだ件数・
      * 成立した件数・成立しなかった件数・読んでいない件数を分けて出す。
      */
-    stopRule:
-      `primary な groundTruthBasis の finding を1つ以上持つPRを1件と数え、${PRIMARY_TARGET_CASES} 件に達した時点で停止する。` +
-      '同じPRで複数の finding が成立しても停止のカウントは1。' +
-      '後の工程で抽出の制約を満たせなければ、この順序の、前回読み終えた位置の次から読み足す',
+    stopRule: STOP_RULE,
     /**
      * 集計に使う語。停止判定は `primaryCases` で行い、`primaryFindings` は記録に留める。
      * 未読を不成立に混ぜないため、4つを別々に出す。
@@ -145,9 +165,7 @@ async function main(): Promise<void> {
       .map((entry) => `#${entry.prNumber}`)
       .join(' ')}`,
   );
-  console.log(
-    `停止条件: primary な finding を持つ案件 ${PRIMARY_TARGET_CASES} 件（finding の総数ではない）`,
-  );
+  console.log(`停止条件: ${STOP_RULE}`);
   console.log(
     `書き出し: ${args.outPath}${written === 'unchanged' ? '（既存と同一。書き換えていない）' : ''}`,
   );
