@@ -166,21 +166,39 @@ snapshot: ok 253 / non-linear 178 / unavailable 0
 
 手順1で凍結した母集団の各案件について、正解ラベルの根拠になりうる材料の在り処を集める。
 
-**以降の節に出てくる実測値（証拠候補98件 / 追加pool 277件 / 候補415件など）は、すべて版2のframeを入力にしたときのものである。** 版3では母集団が 548件 / eligible 431件 に変わったため、手順2以降は版3のframeから作り直す必要がある。作り直すまで、これらの数字は版2の記録として読むこと。
-
 ```
 # 1回だけ: GitHubから引いて、証拠の素をそのまま保存する
 npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
   --frame eval-results/sampling-frame-v3.json \
-  --evidence-src-out eval-results/evidence-source-v3.json \
-  --out eval-results/evidence-candidates-v3.json
+  --evidence-src-out eval-results/evidence-source-v4.json \
+  --out eval-results/evidence-candidates-v4.json
 
 # 以降: 保存した素からのみ作り直す
 npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
   --frame eval-results/sampling-frame-v3.json \
-  --evidence-src eval-results/evidence-source-v3.json \
-  --out eval-results/evidence-candidates-v3.json
+  --evidence-src eval-results/evidence-source-v4.json \
+  --out eval-results/evidence-candidates-v4.json
 ```
+
+#### 版4の実測（frame v3 / eligible 431件）
+
+```
+follow-up-fix 55 / follow-up-test 52 / follow-up-issue 179
+closing-issue 289 / account-comment 125 / account-review 187
+候補がひとつも無い: 9 件
+うちマージ後に立ったIssueを含む: 76 件
+強い証拠（follow-up-test または openedAfterMerge な follow-up issue）: 102 件
+後続fixはあるがテストが無い: 3 件
+Codexレビュー / コメントが付いている: 295 件（正解ラベルの根拠には使わない）
+truncated: 0 件
+```
+
+- 証拠の素 `eval-results/evidence-source-v4.json` sha256 `d455825ab710d78f479dce4dc64da579fe7e767634d8e2782cb5bdd826e277f4`（取得 2026-09-18T15:29:21.421Z）
+- 証拠候補 `eval-results/evidence-candidates-v4.json` sha256 `6ce8c84c6f2e08667ab71f32f7ad97ac3af137af0ee14dbd02f3b0a95fb05e98`
+
+`EVIDENCE_RULES_VERSION` を 3 から 4 へ上げたが、**収集の規則は変えていない**。frame が版2（eligible 415件）から版3（eligible 431件）へ変わったので上げた。素には版が記録されるため、版を据え置くと母集団の違う素をそのまま受け付けてしまう。
+
+**手順2より後ろに出てくる実測値のうち、版2のframeを入力にしたままのものが残っている**（追加pool 277件、screening 50件 / 60件時点の funnel、条件Aの eligibility など）。これらは版2の記録として読むこと。強い証拠のpoolは版2の98件から版3の102件へ変わっており、screening は `orderIndex 0` から読み直しになる。
 
 **ここでは正解ラベルを作らない。** 集めるのは判断の材料であって、材料の有無で `groundTruthBasis` を機械的に決めることはしない。「後続コミットで直した」という事実だけでは、元の問題が実際に成立した証拠にならない。判定は手順3で中身を読んで行う。
 
@@ -211,11 +229,16 @@ npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
 
 ```
 npx tsx test/bench/secondOpinionEval/screeningOrder.ts \
-  --candidates eval-results/evidence-candidates-v3.json \
-  --out eval-results/screening-order-v2.json
+  --candidates eval-results/evidence-candidates-v4.json \
+  --out eval-results/screening-order-v3.json
 ```
 
-強い証拠の系統（`follow-up-test`、または `openedAfterMerge` な follow-up issue）を持つ案件を選び、`sha256("ground-truth-screen-v1:" + prNumber)` の昇順に並べて凍結する。実測で98件だった。
+強い証拠の系統（`follow-up-test`、または `openedAfterMerge` な follow-up issue）を持つ案件を選び、`sha256("ground-truth-screen-v1:" + prNumber)` の昇順に並べて凍結する。版3の実測で102件（版2は98件）。
+
+- `eval-results/screening-order-v3.json` sha256 `f8194249366dd2c786f69fcb2f1ced8a45af75df96207e95113761b8769bfdaf`
+- 先頭10件: `#621 #650 #429 #927 #976 #727 #642 #626 #1015 #141`
+
+`SCREENING_ORDER_VERSION` を 2 から 3 へ上げたが、**規則もseedも変えていない**。証拠候補が版3（frame v2 由来）から版4（frame v3 由来）へ変わったので上げた。並べ替えの鍵は `prNumber` だけなので、版2にもあった98件の相対順は変わらず、増えた4件が間へ入る。
 
 **PR番号順では読まない。** 番号順は結果とは独立だが、ほぼ時間順でもある。この期間中にIssueの運用・テストを足す割合・AIの使い方が変わっていれば、先頭から止めたときに特定の時期だけを読んだことになる。
 
@@ -252,7 +275,7 @@ finding の総数は `primaryFindings` として別に記録するが、**停止
 
 **証拠を1件も読む前に、記録する形と集計の規則を固定する。** 10件読んでから項目を足すと、先に読んだ案件だけを後知恵で見直す余地ができる。定義は `test/bench/secondOpinionEval/screeningResult.ts` にある。
 
-判定は `eval-results/screening-decisions-v1.jsonl` へ**1件読み終えるたびに1行追記する**。既存の行は書き換えない。
+判定は `eval-results/screening-decisions-v2.jsonl` へ**1件読み終えるたびに1行追記する**。既存の行は書き換えない。
 
 ```jsonc
 {
@@ -304,9 +327,9 @@ finding の総数は `primaryFindings` として別に記録するが、**停止
 
 ```
 npx tsx test/bench/secondOpinionEval/screeningSummary.ts \
-  --order eval-results/screening-order-v2.json \
-  --decisions eval-results/screening-decisions-v1.jsonl \
-  --out eval-results/screening-summary-v1.json
+  --order eval-results/screening-order-v3.json \
+  --decisions eval-results/screening-decisions-v2.jsonl \
+  --out eval-results/screening-summary-v2.json
 ```
 
 | 項目                  | 計算                                                        |
@@ -328,16 +351,16 @@ npx tsx test/bench/secondOpinionEval/screeningSummary.ts \
 
 ```
 npx tsx test/bench/secondOpinionEval/supplementalOrder.ts \
-  --candidates eval-results/evidence-candidates-v3.json \
-  --strong-order eval-results/screening-order-v2.json \
-  --out eval-results/supplemental-order-v1.json
+  --candidates eval-results/evidence-candidates-v4.json \
+  --strong-order eval-results/screening-order-v3.json \
+  --out eval-results/supplemental-order-v2.json
 ```
 
 #### 読んだ内容から選び方を作らない
 
 20件を読んで見えた失敗の形（別Issueを拾いやすい、scope外を拾いやすい、テスト追加だけを拾う）へ合わせて候補を絞ると、screening の結果で候補の規則を学習したことになる。20件の結果から使うのは「追加探索を始めるかどうか」の引き金だけにする。
 
-集合は手順2で凍結済みの `evidence-candidates-v3.json` の機械的な属性だけで決める。
+集合は手順2で凍結済みの `evidence-candidates-v4.json` の機械的な属性だけで決める。
 
 ```
 supplemental = 強い証拠を持たない ∩ (follow-up-fix | account-review | account-comment | closing-issue)
@@ -347,11 +370,14 @@ supplemental = 強い証拠を持たない ∩ (follow-up-fix | account-review |
 
 #### tierを付けず、固定seedの順に読む
 
-channel ごとに成立しやすさの見当は付くが、それは主観が入る。強い証拠の98件を先に読んでいる時点で既に「期待の高い順」の優先はしているので、この上さらに順位を付けない。集合全体を `sha256('ground-truth-supplemental-v1:' + prNumber)` の昇順に並べた順で読む。
+channel ごとに成立しやすさの見当は付くが、それは主観が入る。強い証拠の102件を先に読んでいる時点で既に「期待の高い順」の優先はしているので、この上さらに順位を付けない。集合全体を `sha256('ground-truth-supplemental-v1:' + prNumber)` の昇順に並べた順で読む。
 
 #### 重複ゼロを検証する
 
-`verifyDisjoint()` が、追加poolと強い証拠のpoolが1件も重ならないことを確かめ、重なれば止める。重なると同じ案件が2つのpoolの分母へ二重に入る。実測は 277件 / 98件 / 重複0件（候補415件のうち、どちらにも入らない40件は追加の系統をどれも持たない）。
+`verifyDisjoint()` が、追加poolと強い証拠のpoolが1件も重ならないことを確かめ、重なれば止める。重なると同じ案件が2つのpoolの分母へ二重に入る。版3での実測は 289件 / 102件 / 重複0件（候補431件のうち、どちらにも入らない40件は、証拠候補をひとつも持たない9件と、`openedAfterMerge` でない follow-up issue しか持たない31件）。版2では 277件 / 98件 / 候補415件だった。
+
+- `eval-results/supplemental-order-v2.json` sha256 `46f119631e658ad6927aca3e48e7cee235d72ee1a6927d9c8227391b36722962`
+- 先頭10件: `#782 #85 #884 #221 #329 #791 #275 #779 #648 #906`
 
 #### funnelを供給源ごとに分ける
 

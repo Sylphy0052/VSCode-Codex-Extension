@@ -4,17 +4,17 @@
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/screeningSummary.ts \
- *   --order eval-results/screening-order-v2.json \
- *   --decisions eval-results/screening-decisions-v1.jsonl \
- *   --out eval-results/screening-summary-v1.json
+ *   --order eval-results/screening-order-v3.json \
+ *   --decisions eval-results/screening-decisions-v2.jsonl \
+ *   --out eval-results/screening-summary-v2.json
  * ```
  *
  * **集計を手で書かない。** 読んだ件数・成立・不成立・未読は、判定の記録から機械的に出す。
  * 手で数えると、途中で止めたときに未読が不成立へ紛れ込む。
  *
  * 出力は凍結しない。screening が進むたびに作り直すファイルなので、`writeFrozen` は使わない。
- * 凍結してあるのは読む順（`screening-order-v2.json`）と、追記しかしない判定の記録
- * （`screening-decisions-v1.jsonl`）である。
+ * 凍結してあるのは読む順（`screening-order-v3.json`）と、追記しかしない判定の記録
+ * （`screening-decisions-v2.jsonl`）である。
  */
 
 import { createHash } from 'node:crypto';

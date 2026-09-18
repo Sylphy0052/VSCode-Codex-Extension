@@ -4,7 +4,7 @@
  * **読み始める前にこの形を固定する。** 10件読んでから項目を足すと、先に読んだ案件だけを
  * 後知恵で見直す余地ができる。
  *
- * 記録は append-only の JSONL（`eval-results/screening-decisions-v1.jsonl`）に置き、1件読み
+ * 記録は append-only の JSONL（`eval-results/screening-decisions-v2.jsonl`）に置き、1件読み
  * 終えるたびに1行足す。既存の行は書き換えない。途中で止まっても、どこまで読んだかが行の
  * 並びで分かる。訂正するときも行を消さず、{@link ScreeningSupersede} を追記して、後の行が
  * 前の行を置き換えたことを残す。
@@ -81,7 +81,7 @@ export type ScreeningDisposition =
   | 'no-relevant-finding';
 
 export interface ScreeningCaseResult {
-  /** `screening-order-v2.json` の `order` 上の位置（0始まり）。読んだ順の証跡になる。 */
+  /** `screening-order-v3.json` の `order` 上の位置（0始まり）。読んだ順の証跡になる。 */
   orderIndex: number;
   prNumber: number;
   /** primary な finding が1つ以上あるか。停止のカウントはこれを1件と数える。 */
