@@ -225,6 +225,8 @@ body.skin-cyber {
   --agent-head-font: var(--vscode-editor-font-family, var(--vscode-font-family));
   --agent-head-tracking: .06em;
   --agent-scan-opacity: .5;
+  /* 待機中カードの左のバー。他の種別は地の border-left をネオンで塗り直す */
+  --agent-card-accent: color-mix(in srgb, var(--agent-neon-1) 35%, transparent);
 }
 /* lightテーマでは彩度と発光を落とす。白地では明るいネオンが本文より目立つ */
 body.skin-cyber.vscode-light { --agent-neon-1: #0f7f9c; --agent-neon-2: #6b3fd4; --agent-neon-3: #c2185b; --agent-grid-line: color-mix(in srgb, var(--agent-neon-1) 5%, transparent); --agent-neon-glow: color-mix(in srgb, var(--agent-neon-1) 25%, transparent); --agent-panel-bg: color-mix(in srgb, var(--agent-neon-1) 2%, var(--vscode-editorWidget-background)); --agent-scan-opacity: .35; }
@@ -232,7 +234,7 @@ body.skin-cyber.vscode-light { --agent-neon-1: #0f7f9c; --agent-neon-2: #6b3fd4;
  * 高コントラストテーマでは装飾を無効化する。規則を1つずつ名指しで消すと後から足した
  * 装飾が漏れるため、装飾が参照している変数を無色・無寸法へ倒す。
  */
-body.skin-cyber.vscode-high-contrast, body.skin-cyber.vscode-high-contrast-light { --agent-neon-1: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); --agent-neon-2: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); --agent-neon-3: var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder)); --agent-neon-edge: var(--vscode-panel-border); --agent-neon-glow: transparent; --agent-grid-line: transparent; --agent-panel-bg: var(--vscode-editorWidget-background); --agent-notch: 0px; --agent-head-font: var(--vscode-font-family); --agent-head-tracking: normal; }
+body.skin-cyber.vscode-high-contrast, body.skin-cyber.vscode-high-contrast-light { --agent-neon-1: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); --agent-neon-2: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); --agent-neon-3: var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder)); --agent-neon-edge: var(--vscode-panel-border); --agent-neon-glow: transparent; --agent-grid-line: transparent; --agent-panel-bg: var(--vscode-editorWidget-background); --agent-notch: 0px; --agent-head-font: var(--vscode-font-family); --agent-head-tracking: normal; --agent-card-accent: transparent; }
 /* 背景の方眼。1枚の背景画像で出すので要素は増えない */
 body.skin-cyber { background-image: repeating-linear-gradient(to right, var(--agent-grid-line) 0 1px, transparent 1px var(--agent-grid-step)), repeating-linear-gradient(to bottom, var(--agent-grid-line) 0 1px, transparent 1px var(--agent-grid-step)); }
 /* 見出し。端末寄りの書体と字間にし、発光は見出しの文字だけに載せる */
@@ -255,9 +257,13 @@ body.skin-cyber .column { border-color: var(--agent-neon-edge); background: var(
 body.skin-cyber .column-head { border-bottom-color: var(--agent-neon-edge); font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--agent-neon-1) 22%, transparent); }
 body.skin-cyber .column-head .icon { color: var(--agent-neon-1); }
 body.skin-cyber .count { color: var(--agent-neon-1); }
-/* 承認待ちの列だけ見出しをマゼンタにする。対応を待っているものの色（Issue #1249と同じ役割） */
-body.skin-cyber .column.approvalPending .column-head { color: var(--agent-neon-3); }
-body.skin-cyber .column.approvalPending .column-head .icon, body.skin-cyber .column.approvalPending .count { color: var(--agent-neon-3); }
+/*
+ * 承認待ちの列の見出しをマゼンタにする。件数バッジの強調（Issue #1250）と同じく、
+ * 実際に承認待ちがあるとき（body.has-approval）だけにする。0件でも注意の色が出て
+ * いると、色が「対応が要る」の合図として働かなくなる。
+ */
+body.skin-cyber.has-approval .column.approvalPending .column-head { color: var(--agent-neon-3); }
+body.skin-cyber.has-approval .column.approvalPending .column-head .icon, body.skin-cyber.has-approval .column.approvalPending .count { color: var(--agent-neon-3); }
 /*
  * カード。種別ごとの左のバーは地の border-left（4px）をネオンで塗り直すだけにする
  * （inset の影を重ねると同じ位置に色違いのバーが2本並ぶ）。待機中だけは地にバーが
@@ -270,9 +276,9 @@ body.skin-cyber .card { border-color: var(--agent-neon-edge); background: color-
 body.skin-cyber .card.approvalPending { border-left-color: var(--agent-neon-3); }
 body.skin-cyber .card.running { border-left-color: var(--agent-neon-1); }
 body.skin-cyber .card.backgroundRunning { border-left-color: var(--agent-neon-2); }
-body.skin-cyber .card.idle { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--agent-neon-1) 35%, transparent); }
+body.skin-cyber .card.idle { box-shadow: inset 2px 0 0 var(--agent-card-accent); }
 body.skin-cyber .card:hover { border-color: color-mix(in srgb, var(--agent-neon-1) 55%, var(--vscode-panel-border)); box-shadow: inset 0 0 20px -10px var(--agent-neon-glow); }
-body.skin-cyber .card.idle:hover { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--agent-neon-1) 35%, transparent), inset 0 0 20px -10px var(--agent-neon-glow); }
+body.skin-cyber .card.idle:hover { box-shadow: inset 2px 0 0 var(--agent-card-accent), inset 0 0 20px -10px var(--agent-neon-glow); }
 body.skin-cyber .card:focus-visible { outline-color: var(--agent-neon-1); }
 /* 種別と所属を示すラベルだけ端末寄りにする。タイトルと作業ディレクトリ名は地のまま */
 body.skin-cyber .provider { color: var(--agent-neon-1); font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); }
@@ -315,11 +321,12 @@ function countLabel(shown, total) { return isFiltering() ? shown + ' / ' + total
 function applyFilter() { clearButton.disabled = !isFiltering(); render(latestBoard); }
 let toastTimer;
 function showToast(message) { toast.textContent = message; toast.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), 2500); }
+// 承認待ちの列の見出しと走査線を切り替える（Issue #1253）。判定は上の注意の色と同じく
+// 絞り込み前の全体の件数で行う
+function setApprovalFlag(has) { document.body.classList.toggle('has-approval', has); }
 // 承認待ちの強調は絞り込み後ではなく全体の件数で決める。絞り込みで隠れただけの
 // 承認待ちがあるのに注意の色が消えると、対応漏れを誘う（Issue #1250）
-function render(data) { const focused = focusedCard(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) { const button=document.createElement('button'); button.type='button'; button.className='card ' + spec.key; button.dataset.threadId=card.threadId; button.dataset.provider=card.provider; button.dataset.windowId=card.windowId; button.title=card.title || '名称未設定'; button.append(text('span', card.title || '名称未設定', 'card-title')); const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const label=windowLabel(card); const windowSpan=text('span', label, 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•'), cwdSpan, text('span', '•'), windowSpan); button.append(meta); button.addEventListener('click', () => { if(!card.isCurrentWindow) showToast(label + ' へ開く要求を送信しました'); vscode.postMessage({type:'open', windowId:card.windowId, provider:card.provider, threadId:card.threadId}); }); cards.append(button); } column.append(head,cards); board.append(column); } // 承認待ちが1件以上あるときだけ走査線を流す（Issue #1253）。絞り込みで隠れただけの
-// 承認待ちでも流し続けるので、注意の色と同じく全体の件数で決める
-document.body.classList.toggle('has-approval', counts.approvalPending.length > 0); restoreFocus(focused); }
+function render(data) { const focused = focusedCard(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) { const button=document.createElement('button'); button.type='button'; button.className='card ' + spec.key; button.dataset.threadId=card.threadId; button.dataset.provider=card.provider; button.dataset.windowId=card.windowId; button.title=card.title || '名称未設定'; button.append(text('span', card.title || '名称未設定', 'card-title')); const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const label=windowLabel(card); const windowSpan=text('span', label, 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•'), cwdSpan, text('span', '•'), windowSpan); button.append(meta); button.addEventListener('click', () => { if(!card.isCurrentWindow) showToast(label + ' へ開く要求を送信しました'); vscode.postMessage({type:'open', windowId:card.windowId, provider:card.provider, threadId:card.threadId}); }); cards.append(button); } column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
 // 入力欄はboard・summaryの外にあるため、盤面の再描画では作り直されない。
 // 絞り込み条件も変数で持ち続けるので、250msごとの再描画をまたいで残る（Issue #1250）
 queryInput.addEventListener('input', () => { query = queryInput.value.trim().toLowerCase(); applyFilter(); });
