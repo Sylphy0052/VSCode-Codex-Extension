@@ -46,6 +46,14 @@ const BODY: Record<OsNotificationKind, string> = {
 
 let extensionId: string | undefined;
 let logger: Logger | undefined;
+/**
+ * この環境で出せるかの判定結果（自己レビュー: low）。
+ *
+ * `canShowOsNotification`はPATH上の全ディレクトリを`existsSync`で走査する。通知のたびに
+ * 同期I/Oで走らせると、連続して通知が出る場面で拡張ホストのメインスレッドを止める。
+ * `powershell.exe`の有無はVSCodeを起動している間に変わらないため、一度で覚える。
+ */
+let supported: boolean | undefined;
 /** 「出せない」を毎回ログへ出さないための記録。理由ごとに1回だけ残す。 */
 const warnedReasons = new Set<string>();
 
@@ -58,6 +66,7 @@ const warnedReasons = new Set<string>();
 export function initOsNotifications(id: string, log: Logger): void {
   extensionId = id;
   logger = log;
+  supported = undefined;
   warnedReasons.clear();
 }
 
@@ -65,6 +74,7 @@ export function initOsNotifications(id: string, log: Logger): void {
 export function resetOsNotifications(): void {
   extensionId = undefined;
   logger = undefined;
+  supported = undefined;
   warnedReasons.clear();
 }
 
@@ -99,7 +109,8 @@ export function showOsNotification(input: OsNotificationInput): void {
   if (config.onlyWhenHidden && input.panelVisible) {
     return;
   }
-  if (!canShowOsNotification()) {
+  supported ??= canShowOsNotification();
+  if (!supported) {
     warnOnce(
       'unsupported',
       'OS通知を出せる環境ではありませんでした' +

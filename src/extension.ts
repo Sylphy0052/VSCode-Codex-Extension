@@ -170,6 +170,7 @@ import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { initNotificationSounds } from './view/notificationSound';
 import { initOsNotifications } from './view/osNotification';
+import { parseFocusRequest } from './util/osNotify';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
@@ -1210,23 +1211,32 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // **どのウィンドウがこれを受けるかはVSCodeが決める**（直近にアクティブだったウィンドウ）。
   // 目的のセッションを持たないウィンドウへ届いた場合は、勝手に会話を開き直さず何もしない
   // （別ウィンドウで開いている同じ会話を二重に立ち上げないため）。
+  //
+  // `vscode://`のリンクは第三者のWebページからも発行できる（VSCodeの確認ダイアログは挟まる）。
+  // ここで起きるのは「既に開いている会話のタブを前面に出す」だけで、会話の中身を読み出す・
+  // 何かを送ることはできない。既知のセッションidを持たない相手には、どのidが開いているかを
+  // 総当たりで探ることしかできず、idはUUID（Claude Codeは`randomSessionId()`、Codexは
+  // app-serverの`threadId`）のため現実的な探索経路にならない（セキュリティ監査: low）。
   context.subscriptions.push(
     vscode.window.registerUriHandler({
       handleUri(uri: vscode.Uri): void {
-        if (uri.path !== '/focus') {
-          return;
-        }
-        const query = new URLSearchParams(uri.query);
-        const sessionId = query.get('session') ?? '';
-        if (sessionId === '') {
+        const request = parseFocusRequest(uri.path, uri.query);
+        if (!request.ok) {
+          // `not-focus`は他の用途のURIかもしれないので黙って捨てる。残る2つは
+          // 通知から来たはずのURIが壊れているということなので記録する
+          if (request.reason !== 'not-focus') {
+            log.info(`通知から開く要求を受け取れませんでした（${request.reason}）: ${uri.path}`);
+          }
           return;
         }
         const revealed =
-          query.get('provider') === 'claude'
-            ? claudeChat.revealSession(sessionId)
-            : chat.revealSession(sessionId);
+          request.provider === 'claude'
+            ? claudeChat.revealSession(request.sessionId)
+            : chat.revealSession(request.sessionId);
         if (!revealed) {
-          log.info(`通知から開こうとした会話はこのウィンドウにありませんでした: ${sessionId}`);
+          log.info(
+            `通知から開こうとした会話はこのウィンドウにありませんでした: ${request.sessionId}`,
+          );
         }
       },
     }),

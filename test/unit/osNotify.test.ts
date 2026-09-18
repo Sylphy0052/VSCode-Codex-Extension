@@ -7,20 +7,28 @@ import {
   canShowOsNotification,
   foldForToast,
   isWsl,
+  parseFocusRequest,
+  pickForwardedEnv,
   showOsNotificationProcess,
 } from '../../src/util/osNotify';
 
 /** `spawn`の戻り値の代わり。stdoutと終了を手で起こせるようにする。 */
-function fakeChild(): EventEmitter & {
+type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   unref: () => void;
-} {
-  const child = new EventEmitter() as EventEmitter & {
-    stdout: EventEmitter;
-    unref: () => void;
-  };
+  kill: () => boolean;
+  killed: boolean;
+};
+
+function fakeChild(): FakeChild {
+  const child = new EventEmitter() as FakeChild;
   child.stdout = new EventEmitter();
   child.unref = (): void => undefined;
+  child.killed = false;
+  child.kill = (): boolean => {
+    child.killed = true;
+    return true;
+  };
   return child;
 }
 
@@ -185,6 +193,11 @@ describe('foldForToast', () => {
   it('上限ちょうどはそのまま', () => {
     expect(foldForToast('あいうえお', 5)).toBe('あいうえお');
   });
+
+  it('NUL・制御文字・DELを落とす', () => {
+    const control = `a\u0000b\u001fc\u007fd\u0008e`;
+    expect(foldForToast(control)).toBe('a b c d e');
+  });
 });
 
 describe('showOsNotificationProcess', () => {
@@ -242,5 +255,92 @@ describe('showOsNotificationProcess', () => {
     child.emit('close', 0);
     // 頭256バイトで切るため、後から来たfallbackは載らない（burnt-toast扱い）
     await expect(promise).resolves.toBe('burnt-toast');
+  });
+});
+
+describe('showOsNotificationProcess（固まったとき）', () => {
+  const request = { title: 'セッション', body: '応答が終わりました', activationUri: '' };
+
+  it('closeもerrorも来ないまま時間切れになったら殺してfailedにする', async () => {
+    const child = fakeChild();
+    const spawnProcess = vi.fn(() => child) as never;
+    const outcome = await showOsNotificationProcess(request, {
+      spawnProcess,
+      env: {},
+      timeoutMs: 5,
+    });
+    expect(outcome).toBe('failed');
+    expect(child.killed).toBe(true);
+  });
+
+  it('時間内に終わっていれば後から殺さない', async () => {
+    const child = fakeChild();
+    const spawnProcess = vi.fn(() => child) as never;
+    const promise = showOsNotificationProcess(request, { spawnProcess, env: {}, timeoutMs: 50 });
+    child.emit('close', 0);
+    await expect(promise).resolves.toBe('burnt-toast');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(child.killed).toBe(false);
+  });
+});
+
+describe('parseFocusRequest', () => {
+  it('providerとsessionを読み取る', () => {
+    expect(parseFocusRequest('/focus', 'provider=claude&session=abc')).toEqual({
+      ok: true,
+      provider: 'claude',
+      sessionId: 'abc',
+    });
+  });
+
+  it('focus以外のパスは受け取らない', () => {
+    expect(parseFocusRequest('/other', 'provider=codex&session=abc')).toEqual({
+      ok: false,
+      reason: 'not-focus',
+    });
+  });
+
+  it('sessionが無ければ受け取らない', () => {
+    expect(parseFocusRequest('/focus', 'provider=codex')).toEqual({
+      ok: false,
+      reason: 'no-session',
+    });
+  });
+
+  it('既知の2つ以外のproviderは受け取らない（黙ってCodex扱いにしない）', () => {
+    expect(parseFocusRequest('/focus', 'provider=Claude&session=abc')).toEqual({
+      ok: false,
+      reason: 'unknown-provider',
+    });
+    expect(parseFocusRequest('/focus', 'session=abc')).toEqual({
+      ok: false,
+      reason: 'unknown-provider',
+    });
+  });
+});
+
+describe('pickForwardedEnv', () => {
+  it('powershell.exeの起動に要るものとWSLの相互運用だけを通す', () => {
+    const picked = pickForwardedEnv({
+      PATH: '/usr/bin',
+      SystemRoot: 'C:\\Windows',
+      WSL_INTEROP: '/run/WSL/1_interop',
+      WSL_DISTRO_NAME: 'Ubuntu',
+    });
+    expect(picked).toEqual({
+      PATH: '/usr/bin',
+      SystemRoot: 'C:\\Windows',
+      WSL_INTEROP: '/run/WSL/1_interop',
+      WSL_DISTRO_NAME: 'Ubuntu',
+    });
+  });
+
+  it('関係のない環境変数はWindows側のプロセスへ渡さない', () => {
+    const picked = pickForwardedEnv({
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'sk-test',
+      HOME: '/home/user',
+    });
+    expect(Object.keys(picked)).toEqual(['PATH']);
   });
 });
