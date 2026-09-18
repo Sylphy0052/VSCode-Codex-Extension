@@ -211,8 +211,38 @@ export interface SessionControlResult {
  * `SessionSideQuestion`（統括ページへ運ぶ形）に、掃除のための`finishedAt`を足したもの。
  */
 interface SideQuestionRun extends SessionSideQuestion {
+  /** どの会話へ投げた質問か。同じ会話への連投を止める判定に使う。 */
+  threadId: string | undefined;
   /** 終わった時刻。走っている間は`undefined`で、掃除の対象にしない。 */
   finishedAt: number | undefined;
+  /**
+   * 時間切れと管理クラスの破棄を実装側（`runSideQuestion`）へ伝える口。
+   *
+   * 待つのをやめるだけでは、Codexはforkしたスレッドとエントリが、Claude Codeは
+   * 応答待ちが残る。打ち切りをそこまで届かせる。
+   */
+  abort: AbortController;
+}
+
+/**
+ * `AbortSignal`が発火したら`reject`するだけのPromise（Issue #1261）。
+ *
+ * 打ち切れない待ち（Claude Codeの`side_question`のように、送った要求を取り消す口が
+ * 無いもの）を`Promise.race`で区切るのに使う。相手が後から応答しても、待っていた側は
+ * 既に離れているだけで、要求そのものは止まっていない。
+ */
+export function abortAsRejection(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const fail = (): void => {
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason)));
+    };
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener('abort', fail, { once: true });
+  });
 }
 
 function toSideQuestionView(run: SideQuestionRun): SessionSideQuestion {
@@ -713,6 +743,11 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         if (question.length > MAX_SIDE_QUESTION_CHARS) {
           return { ok: false, error: '質問が長すぎます（会話のタブから送ってください）' };
         }
+        // 同じ会話へ重ねて投げさせない。1件ごとにCodexはforkスレッド、Claude Codeは
+        // 制御要求を1本使うため、連打でいくらでも並行に走らせられる形にしない
+        if (this.hasRunningSideQuestion(threadId)) {
+          return { ok: false, error: 'この会話は前の脇道の質問の回答待ちです' };
+        }
         return {
           ok: true,
           sideQuestion: toSideQuestionView(this.beginSideQuestionRun(entry, question)),
@@ -758,30 +793,28 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   private beginSideQuestionRun(entry: TPanel, question: string): SideQuestionRun {
     this.sweepSideQuestions();
+    const abort = new AbortController();
     const run: SideQuestionRun = {
       id: randomUUID(),
+      threadId: entry.session.threadId,
       question,
       status: 'running',
       answer: undefined,
       error: undefined,
       finishedAt: undefined,
+      abort,
     };
     this.sideQuestions.set(run.id, run);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error('回答が返ってきませんでした（時間切れ）')),
-        SIDE_QUESTION_TIMEOUT_MS,
-      );
-    });
-    // 待つのをやめても、走っている質問そのものは止められない（CLIへ既に流れている）。
-    // ここで区切るのは画面の待機表示で、受入基準の「待機表示のまま固まらない」を満たす。
-    // 先に回答が返ったらタイマーは落とす（3分ぶん生かしておく理由が無い）
-    void Promise.race([this.runSideQuestion(entry, question), timeout])
+    // 時間切れは表示だけの問題ではない。Codexはforkしたスレッドとエントリを、
+    // Claude Codeは応答待ちを抱えたままになるため、`signal`で実装側にも知らせて
+    // 後始末（中断・破棄）まで届かせる
+    const timer = setTimeout(
+      () => abort.abort(new Error('回答が返ってきませんでした（時間切れ）')),
+      SIDE_QUESTION_TIMEOUT_MS,
+    );
+    void this.runSideQuestion(entry, question, abort.signal)
       .finally(() => {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
+        clearTimeout(timer);
       })
       .then(
         (answer) => {
@@ -799,6 +832,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         },
       );
     return run;
+  }
+
+  /** その会話に回答待ちの質問が残っているか。連投を止めるのに使う。 */
+  private hasRunningSideQuestion(threadId: string): boolean {
+    for (const run of this.sideQuestions.values()) {
+      if (run.status === 'running' && run.threadId === threadId) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -831,8 +874,17 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * Codexは`thread/fork`（ephemeral）、Claude Codeは`side_question`の制御要求と、
    * 経路がまるごと違うためサブクラスが持つ。どちらも本流の会話へ項目を積まないこと、
    * 失敗は`throw`で伝えること（画面へそのまま出る文言にする）を約束とする。
+   *
+   * `signal`は時間切れ（`SIDE_QUESTION_TIMEOUT_MS`）と管理クラスの破棄で発火する。
+   * これを受けたら待つのをやめるだけでなく、確保した資源（Codexのforkスレッドと
+   * エントリ）をそこで手放すところまで行う。放っておくと、応答を返さない相手ほど
+   * 積み上がっていく。
    */
-  protected abstract runSideQuestion(entry: TPanel, question: string): Promise<string>;
+  protected abstract runSideQuestion(
+    entry: TPanel,
+    question: string,
+    signal: AbortSignal,
+  ): Promise<string>;
 
   /**
    * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
@@ -1015,6 +1067,12 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   dispose(): void {
+    // 走っている脇道の質問も打ち切る（Issue #1261）。待ち続けている実装側へ伝えないと、
+    // forkしたスレッドや応答待ちが解けないまま残る
+    for (const run of this.sideQuestions.values()) {
+      run.abort.abort(new Error('拡張機能が終了しました'));
+    }
+    this.sideQuestions.clear();
     for (const entry of this.allPanels()) {
       this.teardown(entry);
     }

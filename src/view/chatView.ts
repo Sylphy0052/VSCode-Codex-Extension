@@ -2409,7 +2409,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `findExactByThreadId`から参照する。承認要求は`approvalHandler`で機械的に拒否する
    * （下の`buildSideQuestionEntry`参照）。
    */
-  protected override async runSideQuestion(entry: ChatPanel, question: string): Promise<string> {
+  protected override async runSideQuestion(
+    entry: ChatPanel,
+    question: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
       throw new Error('この会話はまだ開始していません');
@@ -2430,7 +2434,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.log.info(`統括ページからの脇道の質問を開始しました: ${threadId} → ${sideThreadId}`);
     try {
       await sideEntry.session.send(question, this.configFor(sideEntry));
-      return await this.awaitSideQuestionAnswer(sideEntry);
+      return await this.awaitSideQuestionAnswer(sideEntry, signal);
     } finally {
       // 呼び出し側（`BaseChatViewManager.startSideQuestion`）が時間切れで待つのをやめた
       // 場合もここまで来る。走っているターンを止めてから捨てる
@@ -2470,10 +2474,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /**
    * 脇道のターンが終わるのを待ち、エージェントの応答を取り出す（Issue #1261）。
    *
-   * 待つ上限は呼び出し側（`BaseChatViewManager`の`SIDE_QUESTION_TIMEOUT_MS`）が持つ。
-   * ここでは終わり方だけを見る。
+   * 待つ上限は呼び出し側（`BaseChatViewManager`の`SIDE_QUESTION_TIMEOUT_MS`）が持ち、
+   * `signal`で届く。app-serverがターンの終わりを一度も知らせないまま止まると、
+   * `busy`の立ち下がりは永久に来ない。`signal`で抜けることで、呼び出し側の`finally`
+   * （中断・破棄・`sideQuestionEntries`からの削除）まで必ず進む。
    */
-  private awaitSideQuestionAnswer(sideEntry: ChatPanel): Promise<string> {
+  private awaitSideQuestionAnswer(sideEntry: ChatPanel, signal: AbortSignal): Promise<string> {
     const readAnswer = (state: ChatState): string | undefined => {
       for (let i = state.items.length - 1; i >= 0; i -= 1) {
         const item = state.items[i];
@@ -2496,6 +2502,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return Promise.resolve(finish(current));
     }
     return new Promise<string>((resolve, reject) => {
+      const fail = (e: unknown): void => reject(e instanceof Error ? e : new Error(String(e)));
+      if (signal.aborted) {
+        fail(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => fail(signal.reason), { once: true });
       sideEntry.stateListeners.push((state) => {
         if (state.busy) {
           return;
@@ -2503,7 +2515,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         try {
           resolve(finish(state));
         } catch (e) {
-          reject(e instanceof Error ? e : new Error(String(e)));
+          fail(e);
         }
       });
     });

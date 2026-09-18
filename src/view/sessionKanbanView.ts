@@ -566,12 +566,17 @@ function buildSideQuestion(card, key) {
   const box = document.createElement('div'); box.className = 'card-detail';
   const form = document.createElement('div'); form.className = 'card-send';
   const input = document.createElement('input'); input.type='text'; input.className='send-input'; input.placeholder='本流を汚さずに聞く（例: いま何をしていますか）'; input.setAttribute('aria-label', 'このセッションへ脇道の質問を送る'); input.dataset.cardKey=key; input.dataset.role='btwInput'; input.value=btwDrafts.get(key) || '';
-  const submit=() => { const value=input.value; if(value.trim()==='') return; sendSideQuestion(card, value.trim()); btwDrafts.delete(key); input.value=''; };
+  const run = btwRuns.get(key);
+  // 回答待ちの間は送れない。受信側も同じ会話への重ね投げを断るので、押せるままにすると
+  // 「押したのに失敗した」だけになる
+  const waiting = run !== undefined && run.status === 'running';
+  const submit=() => { if(waiting) return; const value=input.value; if(value.trim()==='') return; sendSideQuestion(card, value.trim()); btwDrafts.delete(key); input.value=''; };
+  input.disabled = waiting;
   input.addEventListener('input', () => btwDrafts.set(key, input.value));
   input.addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); submit(); } });
-  form.append(input, actionButton(key, 'btwSend', '質問', submit));
+  const submitButton = actionButton(key, 'btwSend', '質問', submit); submitButton.disabled = waiting;
+  form.append(input, submitButton);
   box.append(form);
-  const run = btwRuns.get(key);
   if(run === undefined) { box.append(text('p', '質問と回答はこのカードにだけ出ます（会話には残りません）', 'detail-note')); return box; }
   const block = document.createElement('div'); block.className = 'turn user';
   block.append(text('p', '脇道の質問', 'turn-role'));
