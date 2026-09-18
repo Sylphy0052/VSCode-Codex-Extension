@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { watch, type FSWatcher } from 'node:fs';
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { Logger } from '../log';
@@ -85,6 +85,20 @@ function sessionsDir(root: string): string {
 
 function requestsDir(root: string): string {
   return path.join(root, 'requests');
+}
+
+/**
+ * `windowId`と`requestId`の形（Issue #1258）。どちらも`randomUUID()`で作る。
+ *
+ * この2つはファイルパスの一部になる（`requests/<windowId>/<requestId>.json`、
+ * `replies/<requestId>.json`）。共有ディレクトリへ書けるのは同じPCの別プロセスで、
+ * 拡張機能の版が違えば中身も違う。`/`や`..`を含む値をそのまま`path.join`へ渡すと
+ * 共有ディレクトリの外へ書かせられるため、パスに使う前に形で弾く。
+ */
+const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isSafeId(value: string): boolean {
+  return ID_PATTERN.test(value);
 }
 
 const ACTIVITY_STATES: readonly SessionActivityState[] = [
@@ -267,6 +281,10 @@ export class SessionHubReader implements vscode.Disposable {
     void mkdir(sessionsDir(this.root), { recursive: true })
       .then(() => {
         this.watcher = watch(sessionsDir(this.root), () => void this.reload());
+        // 監視先が消える・権限が変わると非同期の`error`が飛ぶ。拾わないと拡張ホストごと落ちる
+        this.watcher.on('error', (e: unknown) => {
+          this.log.warn(`セッション統括: 共有ディレクトリの監視が止まりました: ${String(e)}`);
+        });
       })
       .catch((e: unknown) => {
         this.log.warn(`セッション統括: 共有ディレクトリの監視開始に失敗しました: ${String(e)}`);
@@ -297,7 +315,8 @@ export class SessionHubReader implements vscode.Disposable {
         continue;
       }
       const windowId = name.slice(0, -'.json'.length);
-      if (windowId === this.selfWindowId) {
+      // 形の合わないファイル名は読まない。この値は要求の置き場所になる（Issue #1258）
+      if (windowId === this.selfWindowId || !isSafeId(windowId)) {
         continue;
       }
       try {
@@ -306,7 +325,10 @@ export class SessionHubReader implements vscode.Disposable {
         if (parsed === undefined || now - parsed.updatedAt > STALE_MS) {
           continue;
         }
-        results.push(parsed);
+        // 採用するのはファイル名から取った`windowId`で、ファイルの中身の値ではない
+        // （Issue #1258）。この値は要求ファイルの置き場所（`requests/<windowId>/`）を
+        // 組み立てるのに使われるため、中身を信じると共有ディレクトリの外へ書かせられる
+        results.push({ ...parsed, windowId });
       } catch {
         // 書き込み途中・破損したファイルは無視する（次のheartbeatで直る）
         continue;
@@ -405,10 +427,11 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     return undefined;
   }
   const v = parsed as Record<string, unknown>;
-  if (typeof v.requestId !== 'string' || typeof v.kind !== 'string') {
+  // `requestId`は応答ファイルの名前になる。形で弾かないと`replies/`の外へ書かされる
+  if (typeof v.requestId !== 'string' || !isSafeId(v.requestId) || typeof v.kind !== 'string') {
     return undefined;
   }
-  if (typeof v.from !== 'string' || typeof v.issuedAt !== 'number') {
+  if (typeof v.from !== 'string' || !isSafeId(v.from) || typeof v.issuedAt !== 'number') {
     return undefined;
   }
   if ((v.provider !== 'codex' && v.provider !== 'claude') || typeof v.threadId !== 'string') {
@@ -439,6 +462,42 @@ function parseReply(raw: string): SessionHubReply | undefined {
     ok: v.ok,
     error: typeof v.error === 'string' ? v.error : undefined,
   };
+}
+
+/**
+ * 中身がすべて期限切れの要求ディレクトリを、ディレクトリごと消す。
+ *
+ * 空のディレクトリは消さない。`mkdir`から最初の書き込みまでの一瞬を掃除と取り合うと、
+ * 送った直後の要求を消してしまう。中身が無いディレクトリ1つが残るだけなので害は無い。
+ */
+async function removeIfAbandoned(dir: string, now: number): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(dir);
+  } catch {
+    return;
+  }
+  if (files.length === 0) {
+    return;
+  }
+  for (const file of files) {
+    if (!(await isStaleFile(path.join(dir, file), now))) {
+      // 1つでも新しい要求が残っていれば、宛先のウィンドウがこれから拾う可能性がある
+      return;
+    }
+  }
+  for (const file of files) {
+    try {
+      await unlink(path.join(dir, file));
+    } catch {
+      return;
+    }
+  }
+  try {
+    await rmdir(dir);
+  } catch {
+    // 消せない・使われ始めた場合は次の周回に任せる
+  }
 }
 
 /** そのファイルが`REQUEST_TTL_MS`より古いか。掃除の対象を決めるのに使う。 */
@@ -475,6 +534,11 @@ export class SessionHubRequestPort {
     },
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
+    if (!isSafeId(targetWindowId)) {
+      // 共有ファイルの読み取り口で弾いている値だが、パスを組み立てる直前でも確かめる
+      this.log.warn('セッション統括: 宛先のwindowIdの形が不正なため要求を送りませんでした');
+      return { requestId, ok: false, error: '宛先のウィンドウを特定できませんでした' };
+    }
     const request: SessionHubRequest = {
       ...input,
       requestId,
@@ -499,7 +563,13 @@ export class SessionHubRequestPort {
     } catch {
       // 既に相手が取っていた場合。応答だけが遅れているので、そのまま失敗として返す
     }
-    return { requestId, ok: false, error: '相手のウィンドウから応答がありませんでした' };
+    return {
+      requestId,
+      ok: false,
+      // 応答が来なかっただけで、相手が実行した後に落ちた可能性もある。二重に送る前に
+      // 相手の画面を確かめられるよう、断定しない文にする
+      error: '相手のウィンドウから応答がありませんでした（実行されている場合があります）',
+    };
   }
 
   /**
@@ -566,6 +636,11 @@ export class SessionHubRequestWatcher implements vscode.Disposable {
         // 監視を始める前に届いていた分も拾う
         void this.drain();
         this.watcher = watch(this.dir, () => void this.drain());
+        // 監視先が消える・権限が変わると非同期の`error`が飛ぶ。拾わないと拡張ホストごと落ちる
+        this.watcher.on('error', (e: unknown) => {
+          this.log.warn(`セッション統括: 要求の監視が止まりました: ${String(e)}`);
+        });
+        void this.sweep();
         this.sweepTimer = setInterval(() => void this.sweep(), REQUEST_TTL_MS);
       })
       .catch((e: unknown) => {
@@ -675,6 +750,29 @@ export class SessionHubRequestWatcher implements vscode.Disposable {
         } catch {
           // 消せなければ次の周回で試す
         }
+      }
+    }
+    await this.sweepAbandonedDirs(now);
+  }
+
+  /**
+   * 閉じたウィンドウ宛ての要求ディレクトリを消す。
+   *
+   * `windowId`は拡張ホストの起動ごとに作り直すため（`extension.ts`の`generateWindowId`）、
+   * 閉じたウィンドウ宛ての`requests/<windowId>/`は二度と読まれない。自分では掃除しない
+   * ので、生きているウィンドウが代わりに消さないと増え続ける。
+   */
+  private async sweepAbandonedDirs(now: number): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(requestsDir(this.root));
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const dir = path.join(requestsDir(this.root), name);
+      if (dir !== this.dir) {
+        await removeIfAbandoned(dir, now);
       }
     }
   }
