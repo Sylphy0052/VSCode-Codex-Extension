@@ -313,13 +313,19 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .filter-repo-count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 .filter-repo-empty { margin: 4px; color: var(--vscode-descriptionForeground); }
 .summary { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; } .metric { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 12px; padding: 6px 10px; white-space: nowrap; } .metric strong { font-size: 16px; margin-right: 4px; } .metric.alert { border-color: var(--vscode-charts-yellow); }
-.board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 16px; align-items: start; } .column { background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 260px; overflow: hidden; } .column-head { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; } .icon { font-size: 16px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-.cards { display: grid; gap: 9px; padding: 10px; } .card { color: inherit; font: inherit; text-align: left; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 12px; } .card:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+/* 4列は常に横一列のまま画面へ収める（Issue #1282）。列の最小幅を0にし、カード側の
+   要素にも min-width: 0 を入れて、中身が列トラックを押し広げないようにする */
+.board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: start; } .column { min-width: 0; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 260px; overflow: hidden; } .column-head { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; } .icon { font-size: 16px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.cards { display: grid; gap: 9px; padding: 10px; min-width: 0; } .card { min-width: 0; overflow: hidden; color: inherit; font: inherit; text-align: left; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 10px; } .card:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
 /* 見出しの部分だけが「開く」ボタン。カード全体をボタンにすると操作を中に置けない（Issue #1258） */
-.card-open { appearance: none; display: block; width: 100%; color: inherit; font: inherit; text-align: left; cursor: pointer; background: none; border: 0; padding: 0; } .card-open:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
-.card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
-.card-action { appearance: none; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; white-space: nowrap; cursor: pointer; } .card-action:disabled { opacity: .5; cursor: default; } .card-action:focus-visible, .send-input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.card-send { display: flex; gap: 6px; flex: 1 1 150px; min-width: 150px; } .send-input { flex: 1 1 auto; min-width: 60px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 6px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.handoffPending { border-left: 4px solid var(--vscode-charts-purple); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; margin-top: 8px; } .provider { text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
+.card-open { appearance: none; display: block; width: 100%; min-width: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; background: none; border: 0; padding: 0; } .card-open:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; min-width: 0; }
+/* 列幅が狭いときはボタンの文字を省略して収める。ボタン自体がカードをはみ出さない */
+.card-action { appearance: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; white-space: nowrap; cursor: pointer; } .card-action:disabled { opacity: .5; cursor: default; } .card-action:focus-visible, .send-input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+/* 指示を送る欄は展開したカードにだけ出る（Issue #1282）。列が狭いので1行占有にする */
+.card-send { display: flex; gap: 6px; flex: 1 1 100%; min-width: 0; } .send-input { flex: 1 1 auto; min-width: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 6px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.handoffPending { border-left: 4px solid var(--vscode-charts-purple); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* 折りたたんだカードのメタ情報は1行に収め、あふれる分は省略する（Issue #1282）。
+    フォルダ名はhover（title属性）で全体を読める。展開したら折り返して全部出す */
+ .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: nowrap; overflow: hidden; gap: 6px; font-size: 12px; margin-top: 6px; } .meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta > .sep { flex: 0 0 auto; } .card.is-open .meta { flex-wrap: wrap; } .provider { flex: 0 0 auto; text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
 /* 直近のやり取り（Issue #1260）。役割で左の線を分け、発言の切れ目を判るようにする */
 .turn { border-left: 2px solid var(--vscode-panel-border); padding-left: 8px; display: grid; gap: 2px; }
 .turn.user { border-left-color: var(--vscode-charts-blue); }
@@ -340,8 +346,9 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .handoff-select { color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; font-size: 12px; padding: 2px 4px; max-width: 180px; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translate(-50%, 12px); background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); color: var(--vscode-notifications-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-notifications-border, var(--vscode-panel-border)); border-radius: 6px; padding: 8px 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
-@media (max-width: 1180px) { .board { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
-@media (max-width: 820px) { header { display:block; } .summary { justify-content:flex-start; margin-top:16px; } .board { grid-template-columns: 1fr; } }
+/* 狭い画面でも列は折り返さない（Issue #1282）。横スクロールを出さず、カード側を
+   折りたたんで収める方針にしたため、2列・1列へ組み替えるとかえって縦に伸びる */
+@media (max-width: 820px) { header { display:block; } .summary { justify-content:flex-start; margin-top:16px; } main { padding: 16px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 /*
@@ -475,6 +482,9 @@ const drafts = new Map();
 // 中身は展開している間だけ持ち、閉じたら捨てる。盤面（board）には混ぜないので、
 // 250msごとの再描画で会話の中身が送られ続けることはない
 const expanded = new Set(); const details = new Map(); const detailErrors = new Map();
+// カードそのものの展開状態（Issue #1282）。既定は折りたたみで、展開したカードにだけ
+// 指示の入力欄と、承認の中身・やり取り・脇道の質問のボタンを出す
+const cardsExpanded = new Set();
 // 直近のやり取り（Issue #1260）。承認の中身と同じく展開している間だけ持つ。
 // 実行中のセッションは内容が進むため、展開中は TURNS_POLL_MS ごとに取り直す
 // turnsInflight は「いま応答を待っている要求のseq」をカードごとに持つ。多重要求の抑止と、
@@ -499,6 +509,23 @@ const decisionLabels = { accept: '承認', decline: '拒否' };
 const handoffLabels = { proceed: '引き継ぎ', repick: '引き継ぎ先の変更', reclassify: '再判定', cancel: '引き継ぎの中止' };
 function controlLabel(action, extra) { if(action === 'approvalDecision') return decisionLabels[extra.decision]; if(action === 'handoffDecision') return handoffLabels[extra.decision]; return actionLabels[action]; }
 function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit, sideQuestionId: extra && extra.sideQuestionId, handoffRequestId: extra && extra.handoffRequestId, model: extra && extra.model, effort: extra && extra.effort }); return seq; }
+// カードを折りたたむと、その中で開いていた欄もすべて閉じる（Issue #1282）。
+// 閉じたカードから承認の中身・やり取りの取り寄せが飛び続けないようにする。
+// 脇道の質問の回答（btwRuns）は受信側が預かっている分なので消さない（開き直せば読める）
+function toggleCard(card) {
+  const key = cardKey(card);
+  if(cardsExpanded.has(key)) {
+    cardsExpanded.delete(key);
+    expanded.delete(key); details.delete(key); detailErrors.delete(key);
+    turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key);
+    btwExpanded.delete(key);
+    // 引き継ぎの確認内容も閉じる（Issue #1280）。選び直しの選択は開き直したら取り直す
+    handoffExpanded.delete(key); handoffs.delete(key); handoffErrors.delete(key); handoffInflight.delete(key); handoffPicks.delete(key);
+  } else {
+    cardsExpanded.add(key);
+  }
+  applyFilter();
+}
 // 展開したときだけ中身を要求し、閉じたら捨てる（Issue #1259の受入基準）
 function toggleDetail(card) { const key = cardKey(card); if(expanded.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } else { expanded.add(key); detailErrors.delete(key); sendControl(card, 'approvalDetail'); } applyFilter(); }
 // 取り寄せた結果を仕舞う。閉じた後に届いた分は捨てる（閉じたのに中身が出るのを防ぐ）
@@ -618,22 +645,31 @@ function setApprovalFlag(has) { document.body.classList.toggle('has-approval', h
 // 承認待ちがあるのに注意の色が消えると、対応漏れを誘う（Issue #1250）
 // 承認が解決したカードは承認待ちの列から出ていき、「内容を閉じる」を押す手段が無くなる。
 // 列に残っていないキーはここで捨てる（開きっぱなしの統括ページに溜め続けないため）
-function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } for(const key of [...btwRuns.keys()]) { if(!live.has(key)) { btwRuns.delete(key); btwInflight.delete(key); btwDrafts.delete(key); btwExpanded.delete(key); } } const handoffAlive=new Set(counts.handoffPending.map(cardKey)); for(const key of [...handoffExpanded]) { if(!handoffAlive.has(key)) { handoffExpanded.delete(key); handoffs.delete(key); handoffErrors.delete(key); handoffInflight.delete(key); handoffPicks.delete(key); } } }
+function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } for(const key of [...btwRuns.keys()]) { if(!live.has(key)) { btwRuns.delete(key); btwInflight.delete(key); btwDrafts.delete(key); btwExpanded.delete(key); } } const handoffAlive=new Set(counts.handoffPending.map(cardKey)); for(const key of [...handoffExpanded]) { if(!handoffAlive.has(key)) { handoffExpanded.delete(key); handoffs.delete(key); handoffErrors.delete(key); handoffInflight.delete(key); handoffPicks.delete(key); } } for(const key of [...cardsExpanded]) { if(!live.has(key)) cardsExpanded.delete(key); } }
 function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); renderRepoOptions(collectRepos(data)); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
 function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
 // カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
 // カード全体をボタンにすると中に操作ボタンを置けない（入れ子のボタンは作れない）
 function buildCard(card, column) {
   const key = cardKey(card);
-  const item = document.createElement('div'); item.className = 'card ' + column;
+  // 折りたたんだカードは「開く」「中断」「展開」だけを出す（Issue #1282）。
+  // 列幅に収めるため、指示の入力欄とそれ以外の操作は展開したときにだけ出す
+  const isOpen = cardsExpanded.has(key);
+  const item = document.createElement('div'); item.className = 'card ' + column + (isOpen ? ' is-open' : '');
   const open = document.createElement('button'); open.type='button'; open.className='card-open'; open.dataset.cardKey=key; open.dataset.role='open'; open.title=card.title || '名称未設定';
   open.append(text('span', card.title || '名称未設定', 'card-title'));
-  const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const windowSpan=text('span', windowLabel(card), 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•'), cwdSpan, text('span', '•'), windowSpan); open.append(meta);
+  const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const windowSpan=text('span', windowLabel(card), 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•', 'sep'), cwdSpan, text('span', '•', 'sep'), windowSpan); open.append(meta);
   open.addEventListener('click', () => sendControl(card, 'open'));
   item.append(open);
   const actions=document.createElement('div'); actions.className='card-actions';
   // 待機中のカードには止めるものが無い。承認待ちは「承認せずに止める」ことがあるので押せる
   const stop=actionButton(key, 'interrupt', '中断', () => sendControl(card, 'interrupt')); stop.disabled = column === 'idle'; actions.append(stop);
+  // 回答待ちの脇道の質問は、折りたたんでいても展開ボタンの側で判るようにする
+  const pendingRun = btwRuns.get(key);
+  const hasPendingSideQuestion = pendingRun !== undefined && pendingRun.status === 'running';
+  actions.append(actionButton(key, 'expand', isOpen ? '折りたたむ' : (hasPendingSideQuestion ? '展開（回答待ち）' : '展開'), () => toggleCard(card)));
+  item.append(actions);
+  if(!isOpen) return item;
   // ループのボタンは走っているときだけ出す。走っていないカードに並んでいると、
   // 押せる操作があるように見える
   const loop=card.loop;
@@ -645,7 +681,7 @@ function buildCard(card, column) {
   input.addEventListener('input', () => drafts.set(key, input.value));
   input.addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); submit(); } });
   form.append(input, actionButton(key, 'send', '送信', submit));
-  actions.append(form); item.append(actions);
+  actions.append(form);
   // 承認待ちのカードだけ、中身を取り寄せて広げられる（Issue #1259）
   if(column === 'approvalPending') { const open = expanded.has(key); actions.append(actionButton(key, 'detail', open ? '内容を閉じる' : '内容を見る', () => toggleDetail(card))); if(open) item.append(buildDetail(card, key)); }
   // 引き継ぎ確認待ちのカードだけ、確認の中身を取り寄せて広げられる（Issue #1280）
