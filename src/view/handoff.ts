@@ -410,9 +410,8 @@ export function buildHandoffPrompt(pointerPath: string): string {
 /**
  * 初回プロンプトの書き出し（Issue #1228）。
  *
- * 名前の材料からこのプロンプト由来のユーザー発言を外すために切り出してある。ここを
- * 変えるときは、引き継ぎ先の発言の見分けが付かなくならないよう `buildHandoffPrompt`
- * と揃える。
+ * 引き継ぎ先の1件目のユーザー発言がこの手続き由来であることを見分けるための目印として
+ * 切り出してある。
  */
 const HANDOFF_PROMPT_HEAD = '前セッションの続き。';
 
@@ -485,16 +484,16 @@ const PROVIDER_PREFIX = /^(?:Codex|Claude Code|Claude):\s*/u;
 
 /**
  * 引き継ぎ元の表示名（Issue #1145）。`buildHandoffSessionName` の `previousName`——
- * つまり**世代番号の読み取り元**として渡す。
+ * つまり**名前の本体と世代番号の読み取り元**として渡す。
  *
  * 解決順は `deriveTitle`（`chatView.ts` / `claudeChatView.ts`）と同じ
  * 「オーケストレータが指定した名前 > 人やCLIが付けた名前」。タブ名と違い接頭辞は
  * 付けない（引き継ぎ先で `deriveTitle` が改めて付けるため、残すと `Codex: Codex: …`
  * と二重になる）。
  *
- * 最初のユーザー発言へ落ちる分岐は持たない（Issue #1228）。世代の印が付いていない
- * 文字列をここで拾っても世代の判定は変わらず、名前の本体は
- * `deriveHandoffNameHead` が別に決めるため。
+ * 最初のユーザー発言へ落ちる分岐は持たない（Issue #1228）。名前の無いセッションで
+ * それを拾うと、作業内容と無関係な初代の一言が世代印だけ増やして延々コピーされる。
+ * 名前が無いなら `(続き2)` のように印だけを出す方がまだ読める。
  */
 export function deriveHandoffBaseName(state: ChatState, pinnedName?: string): string | undefined {
   const pinned = collapse(pinnedName?.replace(PROVIDER_PREFIX, ''));
