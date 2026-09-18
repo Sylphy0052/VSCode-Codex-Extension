@@ -1,0 +1,40 @@
+{
+  "poolId": "strong-evidence",
+  "orderFile": "screening-order-v3.json",
+  "orderSha256": "f8194249366dd2c786f69fcb2f1ced8a45af75df96207e95113761b8769bfdaf",
+  "decisionsFile": "screening-decisions-v2.jsonl",
+  "decisionsSha256": "89303ee964ef1673e650f18c44216055743ca0efb07a084352c161b65749719a",
+  "primaryTargetCases": 18,
+  "reachedTarget": false,
+  "screenedCases": 4,
+  "primaryCases": 1,
+  "nonPrimaryCases": 3,
+  "unreadCases": 98,
+  "primaryFindings": 2,
+  "nonPrimaryBreakdown": [
+    {
+      "disposition": "model-derived-only",
+      "count": 1
+    },
+    {
+      "disposition": "retrospective-only",
+      "count": 0
+    },
+    {
+      "disposition": "mixed-only",
+      "count": 0
+    },
+    {
+      "disposition": "other-non-primary",
+      "count": 0
+    },
+    {
+      "disposition": "insufficient-evidence",
+      "count": 0
+    },
+    {
+      "disposition": "no-relevant-finding",
+      "count": 2
+    }
+  ]
+}
