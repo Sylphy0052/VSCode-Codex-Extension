@@ -307,7 +307,7 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .card-action { appearance: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; white-space: nowrap; cursor: pointer; } .card-action:disabled { opacity: .5; cursor: default; } .card-action:focus-visible, .send-input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 /* 指示を送る欄は展開したカードにだけ出る（Issue #1282）。列が狭いので1行占有にする */
 .card-send { display: flex; gap: 6px; flex: 1 1 100%; min-width: 0; } .send-input { flex: 1 1 auto; min-width: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 6px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* 折りたたんだカードのメタ情報は1行に収め、あふれる分は省略する（Issue #1282）。
-    全文はカード見出しのhover（title属性）で読める。展開したら折り返して全部出す */
+    フォルダ名はhover（title属性）で全体を読める。展開したら折り返して全部出す */
  .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: nowrap; overflow: hidden; gap: 6px; font-size: 12px; margin-top: 6px; } .meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta > .sep { flex: 0 0 auto; } .card.is-open .meta { flex-wrap: wrap; } .provider { flex: 0 0 auto; text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
 /* 直近のやり取り（Issue #1260）。役割で左の線を分け、発言の切れ目を判るようにする */
 .turn { border-left: 2px solid var(--vscode-panel-border); padding-left: 8px; display: grid; gap: 2px; }
@@ -628,9 +628,9 @@ function buildCard(card, column) {
   // 待機中のカードには止めるものが無い。承認待ちは「承認せずに止める」ことがあるので押せる
   const stop=actionButton(key, 'interrupt', '中断', () => sendControl(card, 'interrupt')); stop.disabled = column === 'idle'; actions.append(stop);
   // 回答待ちの脇道の質問は、折りたたんでいても展開ボタンの側で判るようにする
-  const run0 = btwRuns.get(key);
-  const waiting0 = run0 !== undefined && run0.status === 'running';
-  actions.append(actionButton(key, 'expand', isOpen ? '折りたたむ' : (waiting0 ? '展開（回答待ち）' : '展開'), () => toggleCard(card)));
+  const pendingRun = btwRuns.get(key);
+  const hasPendingSideQuestion = pendingRun !== undefined && pendingRun.status === 'running';
+  actions.append(actionButton(key, 'expand', isOpen ? '折りたたむ' : (hasPendingSideQuestion ? '展開（回答待ち）' : '展開'), () => toggleCard(card)));
   item.append(actions);
   if(!isOpen) return item;
   // ループのボタンは走っているときだけ出す。走っていないカードに並んでいると、
