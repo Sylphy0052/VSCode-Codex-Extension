@@ -13,9 +13,9 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
-import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
 import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
+import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
 import { normalizeChatDensity, type ChatDensity } from './view/density';
 import { normalizeChatSkin, type ChatSkin } from './view/skin';
 import { isCostPreset, type CostPreset } from './view/handoffRouter';

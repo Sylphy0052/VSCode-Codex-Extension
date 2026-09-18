@@ -9332,7 +9332,9 @@ Viewは変化の種類で送る内容を変えない。run一覧・プログラ�
 
 **回数の上限はタスク全体で通した数を使う。** 新しいセッションへ`task.maxIterations`をそのまま渡すと、分割のたびに上限が増えて`maxReached`の歯止めが効かなくなるため、`remainingIterations`で送信済みの回数を引く（最低1回は残す）。
 
-**古いセッションのリスナーはセッションの同一性で無効化する。** 分割は古いタブを`dispose()`しないため、リスナーは生きたまま残る。人がそのタブへ直接話しかければ状態変化も終了も届き、守らないと古いセッションの結果で`contextUsage`が上書きされたり、タスクが`done`として確定したりする。`attachTaskSession`が配線する`onStateChanged` / `onFinished` / `onApprovalResolved`は、いずれも`live.tasks.get(taskId).session`が自分かどうかを確かめてから進む。
+**古いセッションのリスナーはセッションの同一性で無効化する。** 分割は古いタブを`dispose()`しないため、リスナーは生きたまま残る。人がそのタブへ直接話しかければ状態変化も終了も届き、守らないと古いセッションの結果で`contextUsage`が上書きされたり、タスクが`done`として確定したりする。`attachTaskSession`が配線する`onStateChanged` / `onFinished` / `onApprovalResolved`は、いずれも`live.tasks.get(taskId).session`が自分かどうかを確かめてから進む。**承認の判定（`setApprovalHandler`）も同じ扱いで、差し替わった後の古いセッションからの要求は自動承認せず`ask`（人の承認カード）へ倒す。** 無人実行の自動承認は「ワークフローが進めているタスク」に対する方針で、残した古いタブはもうその対象ではない（自己レビュー指摘: medium）。
+
+**起動に失敗したら、元のセッションを必ず`resumeLoop()`で戻す。** `pauseLoop()`の後に`openTaskSession` / `open()`が失敗したまま放置すると、続きの指示が止まったまま新しいセッションも立たず、タスクは「実行中」の帳簿のまま誰も進めない状態で固まる。run全体が完了判定へ到達しなくなるため、警告1件で済む失敗ではない（自己レビュー指摘: high）。承認待ちのタイムアウト（§16.39）も差し替えと同時に畳む。張りっぱなしのタイマーが残ると、時間切れが**差し替わった後の**セッションへ`stopLoop()`を掛けてしまう。
 
 タブ名の世代の印は`sessionTitle.ts`の`buildSessionPanelTitle`が付ける`(続きN)`で、チャットの自動引き継ぎ（§14の`buildHandoffSessionName`。Issue #1145・#1255）と同じ書式に揃えてある。人から見て「同じ作業の続き」であることが、どちらの経路でも同じ見え方になる。
 
@@ -9347,6 +9349,8 @@ Viewは変化の種類で送る内容を変えない。run一覧・プログラ�
 #### 確かめ方
 
 - `test/unit/contextLow.test.ts`（新設）: `decideContextLow`の発火条件（閾値以下・ターン完了・`none`では動かない・実行中は動かない・残量不明では動かない）とラッチの開閉、`remainingIterations`の下限、`buildSplitPrompt`が本文を貼らず参照だけを載せることと`{{`を無害化すること
+- `test/unit/runner.test.ts`: `WorkflowRunner`を通した配線。圧縮が実際に呼ばれること・ラッチが効いて1回だけであること・回復後は再び動くこと・失敗してもrunが止まらないこと、分割で2代目が開いて続きが走ること・古いタブの終了が無視されること・**起動に失敗したら元のセッションが再開されてタスクが宙に浮かないこと**、`none`では何も起きないこと
+- `test/unit/workflow.test.ts`: `onContextLow`のパース（`compact` / `split` をそのまま読む・未指定は`none`・未知の値は`none`へ倒して警告）
 - `test/unit/sessionTitle.test.ts`: `generation`が2以上のときだけ`(続きN)`が付くこと
 
 ### 14.105 Advisorにskillを提示しない（Issue #1061）

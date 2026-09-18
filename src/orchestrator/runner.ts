@@ -4861,10 +4861,15 @@ export class WorkflowRunner {
     session: TaskSession,
   ): void {
     const isCurrent = (): boolean => this.runs.get(runId)?.tasks.get(taskId)?.session === session;
-    // 承認の判定だけは同一性を問わない。古いタブに残った承認要求も、同じタスクの同じ
-    // 境界（`liveTask.boundary`）で起きたものなので、判定の方針は変えなくてよい
+    // 差し替わった後の古いセッションでは**自動承認をやめて人へ回す**（自己レビュー指摘:
+    // medium）。無人実行の自動承認は「ワークフローが進めているタスク」に対する方針で、
+    // 分割後に残した古いタブはもうその対象ではない。ここを素通しにすると、`onApprovalResolved`
+    // 側だけが同一性で守られている非対称な形になり、古いタブでの自動承認だけが効いて
+    // 結果の反映が握り潰される
     session.setApprovalHandler((approval, rawParams) =>
-      this.handleApproval(runId, taskId, task, approval, rawParams),
+      isCurrent()
+        ? this.handleApproval(runId, taskId, task, approval, rawParams)
+        : Promise.resolve({ kind: 'ask' as const }),
     );
     session.onApprovalResolved((outcome) => {
       if (!isCurrent()) {
@@ -4914,7 +4919,11 @@ export class WorkflowRunner {
       // 待っている間に届く状態変化で同じ閾値から二重に走る
       alreadyActed: liveTask.contextLowLatched || liveTask.contextLowInFlight,
     });
-    liveTask.contextLowLatched = decision.latched;
+    // 実行中（`await`の最中）はラッチを書き換えない（自己レビュー指摘: low）。圧縮・分割が
+    // まだ効いていない時点の残量でラッチを外すと、対策の完了前に「外れた」扱いになる
+    if (!liveTask.contextLowInFlight) {
+      liveTask.contextLowLatched = decision.latched;
+    }
     const action = decision.action;
     if (action === undefined) {
       return;
@@ -4925,7 +4934,13 @@ export class WorkflowRunner {
     });
   }
 
-  /** `onContextLow`の実行。失敗しても警告を残すだけでrunは止めない（Issue #1273）。 */
+  /**
+   * `onContextLow`の実行（Issue #1273）。
+   *
+   * **失敗しても投げ返さずに握る。** 呼び出し元（`maybeActOnContextLow`）は状態変化の
+   * 通知の中から`void`で呼ぶため、ここで投げるとどこにも捕まらないrejectionになる。
+   * 残量対策が効かなかったこと自体は`noteContextLowFailure`が警告として残す。
+   */
   private async runContextLowAction(
     runId: string,
     taskId: string,
@@ -4942,18 +4957,31 @@ export class WorkflowRunner {
         await this.splitTaskSession(runId, taskId, task, liveTask, state, remaining);
       }
     } catch (e) {
-      // CLIの例外文字列をそのまま含みうるため、ログにも警告欄にも無害化した理由を使う
-      const reason = sanitizeForLog(e instanceof Error ? e.message : String(e));
-      this.deps.log.warn(
-        `[workflow ${runId}/${taskId}] コンテキスト残量の対策（${action}）に失敗しました: ${reason}`,
-      );
-      this.pushContextLowWarning(
-        runId,
-        'contextActionFailed',
-        taskId,
-        `${taskId} のコンテキスト残量の対策（${action}）に失敗しました（${reason}）。セッションはそのまま続きます`,
-      );
+      this.noteContextLowFailure(runId, taskId, action, e);
     }
+  }
+
+  /**
+   * 残量対策が失敗したことをログと警告欄へ残す（Issue #1273）。**runは止めない。**
+   * タスクは古いセッションのまま進むため、止めるより「効いていない」ことを見せる方がよい。
+   */
+  private noteContextLowFailure(
+    runId: string,
+    taskId: string,
+    action: Exclude<ContextLowAction, 'none'>,
+    error: unknown,
+  ): void {
+    // CLIの例外文字列をそのまま含みうるため、ログにも警告欄にも無害化した理由を使う
+    const reason = sanitizeForLog(error instanceof Error ? error.message : String(error));
+    this.deps.log.warn(
+      `[workflow ${runId}/${taskId}] コンテキスト残量の対策（${action}）に失敗しました: ${reason}`,
+    );
+    this.pushContextLowWarning(
+      runId,
+      'contextActionFailed',
+      taskId,
+      `${taskId} のコンテキスト残量の対策（${action}）に失敗しました（${reason}）。セッションはそのまま続きます`,
+    );
   }
 
   /** 会話を圧縮する（`onContextLow: compact`）。ループは止めない。 */
@@ -5015,15 +5043,34 @@ export class WorkflowRunner {
     previous.pauseLoop();
 
     // 3. 同じ入力のまま、世代の印だけを進めて開き直す
+    //
+    // **ここから先で失敗したら、必ず元のセッションを`resumeLoop()`で戻す**（自己レビュー
+    // 指摘: high）。戻さないと、`pauseLoop()`で続きの指示を止めたまま新しいセッションも
+    // 立たず、タスクは「実行中」の帳簿のまま誰も進めない状態で固まる。run全体が完了判定へ
+    // 到達しなくなるため、警告1件で済む失敗ではない
     const input: TaskSessionInput = { ...liveTask.input, generation };
-    const session = await this.deps.hosts[task.provider].openTaskSession(input);
+    let session: TaskSession;
+    try {
+      session = await this.deps.hosts[task.provider].openTaskSession(input);
+    } catch (e) {
+      previous.resumeLoop();
+      throw e;
+    }
     if (this.disposing) {
       // `openTaskSession`を待つ間に拡張機能が終了した（`startTask`と同じ番人）。
-      // ここで開いたセッションは`live.tasks`へ入っていないため、自分で閉じる
+      // ここで開いたセッションは`live.tasks`へ入っていないため、自分で閉じる。
+      // 元のセッションは再開しない（`dispose()`が全て畳む最中で、再開しても行き場が無い）
       session.dispose();
       return;
     }
-    session.open({ preserveFocus: true });
+    try {
+      session.open({ preserveFocus: true });
+    } catch (e) {
+      // タブを開けなかった。開きかけのセッションを閉じ、元のセッションで続ける
+      session.dispose();
+      previous.resumeLoop();
+      throw e;
+    }
 
     // 4. 実行時の帳簿を新しいセッションへ載せ替える。**古いセッションはdisposeしない**
     liveTask.session = session;
@@ -5035,6 +5082,18 @@ export class WorkflowRunner {
     liveTask.contextUsage = undefined;
     liveTask.sessionTokens = undefined;
     liveTask.pendingApproval = undefined;
+    // 承認待ちのタイムアウト（Issue #579、design.md §16.39）も畳む（自己レビュー指摘: medium）。
+    // 承認待ちはターン実行中（`busy`）なので分割の判定自体を通らないはずだが、張りっぱなしの
+    // タイマーが残ると、時間切れの`handleTaskApprovalTimeout`が**差し替わった後の新しい**
+    // セッションへ`stopLoop()`を掛けてしまう。取り違えの余地を構造的に残さない
+    liveTask.waitingApprovalSinceMs = undefined;
+    liveTask.taskApprovalTimeoutTimer = scheduleTaskApprovalTimeout(
+      this.internals,
+      runId,
+      taskId,
+      liveTask.taskApprovalTimeoutTimer,
+      undefined,
+    );
     liveTask.wasBusy = false;
     liveTask.lastTurnCompletionSeq = 0;
     live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, liveTask.cwd);

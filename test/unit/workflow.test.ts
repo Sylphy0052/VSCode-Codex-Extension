@@ -1902,6 +1902,56 @@ tasks:
     expect(task?.parseWarnings.join('\n')).toContain('implementer');
   });
 
+  // コンテキスト残量の対策（Issue #1273、design.md §16.47）。`provider` / `isolation` と
+  // 同じく「未知の値は既定へ倒しつつ警告に残す」作法に揃っていることを確かめる
+  it('onContextLowは compact / split をそのまま読む', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    onContextLow: compact
+  - id: T2
+    prompt: 作業する
+    done: 終わっている
+    onContextLow: split
+`;
+    const def = parseWorkflowYaml(yaml);
+    expect(def.tasks[0]?.onContextLow).toBe('compact');
+    expect(def.tasks[1]?.onContextLow).toBe('split');
+    expect(def.tasks[0]?.parseWarnings).toEqual([]);
+  });
+
+  it('onContextLow未指定はnone（現状の挙動を変えない既定）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+`;
+    expect(parseWorkflowYaml(yaml).tasks[0]?.onContextLow).toBe('none');
+  });
+
+  it('onContextLowが未知の値ならnoneへ倒し、値を添えて警告する（黙って圧縮・分割しない）', () => {
+    const yaml = `
+version: 1
+name: テスト
+tasks:
+  - id: T1
+    prompt: 作業する
+    done: 終わっている
+    onContextLow: compress
+`;
+    const task = parseWorkflowYaml(yaml).tasks[0];
+    expect(task?.onContextLow).toBe('none');
+    expect(task?.parseWarnings.join('\n')).toContain('onContextLow');
+    expect(task?.parseWarnings.join('\n')).toContain('compress');
+  });
+
   it('defaults.roleが未知なら、そちらも役割なしへ倒して警告する', () => {
     const yaml = `
 version: 1

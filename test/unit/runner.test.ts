@@ -138,9 +138,11 @@ class FakeTaskSession implements TaskSession {
   }
   /** `TaskSession.compact`（Issue #1273）。呼ばれた回数だけ数える。 */
   compactCalls = 0;
+  /** テスト用。設定すると`compact()`が失敗する（圧縮できないCLIの再現）。 */
+  failCompact: Error | undefined;
   compact(): Promise<void> {
     this.compactCalls += 1;
-    return Promise.resolve();
+    return this.failCompact === undefined ? Promise.resolve() : Promise.reject(this.failCompact);
   }
   /** `TaskSession.note`（Issue #1273）。会話へ残した文言を控える。 */
   notes: string[] = [];
@@ -1156,6 +1158,8 @@ function createHarness(
     readAutoResume?: () => boolean;
     readMaxAutoResumeAttempts?: () => number;
     readReviewCommentPollIntervalSec?: () => number;
+    /** `agent.workflows.contextLowPercent`（Issue #1273）。 */
+    readContextLowPercent?: () => number;
     /** 実行のたびに内容が変わる定義ファイルを模すための差し替え口（Issue #1107）。 */
     filePort?: WorkflowFilePort;
   },
@@ -1214,6 +1218,9 @@ function createHarness(
       : {}),
     ...(options?.readReviewCommentPollIntervalSec !== undefined
       ? { readReviewCommentPollIntervalSec: options.readReviewCommentPollIntervalSec }
+      : {}),
+    ...(options?.readContextLowPercent !== undefined
+      ? { readContextLowPercent: options.readContextLowPercent }
       : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
@@ -13639,5 +13646,216 @@ tasks:
     // どこにも指定が無ければ undefined（拡張機能の設定に従う）
     expect(byId('T3')?.model).toBeUndefined();
     expect(byId('T3')?.effort).toBeUndefined();
+  });
+});
+
+/**
+ * コンテキスト残量に応じた自動圧縮とセッション分割（Issue #1273、design.md §16.47）。
+ *
+ * 発火の判定そのものは`contextLow.ts`の純粋関数（`test/unit/contextLow.test.ts`）で
+ * 押さえてあるので、ここは**`WorkflowRunner`の配線**を確かめる。圧縮が実際に呼ばれるか、
+ * 分割で新しいセッションが開いて続きが走るか、失敗したときにタスクが宙に浮かないか。
+ */
+describe('WorkflowRunner: コンテキスト残量の対策（Issue #1273）', () => {
+  const yamlFor = (onContextLow: string): string => `
+version: 1
+name: context-low
+tasks:
+  - id: T1
+    prompt: T1のプロンプト
+    done: 終わったらDONE
+    maxIterations: 10
+    onContextLow: ${onContextLow}
+`;
+
+  /**
+   * 残量つきの状態。`turnCompletionSeq`を進めた分だけターンが1つ確定したことになる。
+   *
+   * `turnResultText`を入れておくのは、分割が「その時点の応答本文を受け渡しファイルへ置き、
+   * プロンプトへは参照だけを渡す」経路を通るため。本文が空だと参照も置かない（正しい挙動）
+   * ので、参照が載ることを確かめるテストでは本文が要る。
+   */
+  const stateWithContext = (remainingPercent: number, turnCompletionSeq: number): ChatState => ({
+    ...initialChatState,
+    busy: false,
+    turnCompletionSeq,
+    turnResultText: '- 実装を半分終えた\n- 残りはテスト',
+    context: { usedTokens: 1000, contextWindow: 10000, remainingPercent },
+  });
+
+  /** 閾値を割った状態を1ターン分流す。 */
+  async function crossThreshold(session: FakeTaskSession, seq = 1): Promise<void> {
+    session.emitState(stateWithContext(10, seq));
+    await flush();
+  }
+
+  async function startRun(
+    onContextLow: string,
+    options?: Parameters<typeof createHarness>[1],
+  ): Promise<{ harness: Harness; runId: string; session: FakeTaskSession }> {
+    const harness = createHarness(yamlFor(onContextLow), {
+      readContextLowPercent: () => 20,
+      ...options,
+    });
+    const result = await harness.runner.start('/repo/.agents/workflows/context-low.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    return { harness, runId, session: harness.codexHost.byTaskId('T1') };
+  }
+
+  describe('compact', () => {
+    it('閾値を割ったターンの完了で圧縮が呼ばれ、警告欄と会話に残る', async () => {
+      const { harness, runId, session } = await startRun('compact');
+      expect(session.compactCalls).toBe(0);
+
+      await crossThreshold(session);
+
+      expect(session.compactCalls).toBe(1);
+      // 会話へは圧縮する前に書く（圧縮が要約で置き換える前の位置に残すため）
+      expect(session.notes.some((n) => n.includes('会話を圧縮しました'))).toBe(true);
+      const warning = harness.runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'contextCompacted');
+      expect(warning?.taskId).toBe('T1');
+      expect(warning?.message).toContain('残り10%');
+    });
+
+    it('閾値以下のまま何ターン続いても、圧縮は1回だけ（ラッチ）', async () => {
+      const { session } = await startRun('compact');
+      await crossThreshold(session, 1);
+      await crossThreshold(session, 2);
+      await crossThreshold(session, 3);
+      expect(session.compactCalls).toBe(1);
+    });
+
+    it('残量が閾値を上回れば、次に割ったときはもう一度圧縮する', async () => {
+      const { session } = await startRun('compact');
+      await crossThreshold(session, 1);
+      session.emitState(stateWithContext(80, 2));
+      await flush();
+      await crossThreshold(session, 3);
+      expect(session.compactCalls).toBe(2);
+    });
+
+    it('残量を取得できないターンでは何もしない（0%と取り違えない）', async () => {
+      const { session } = await startRun('compact');
+      session.emitState({ ...stateWithContext(10, 1), context: undefined });
+      await flush();
+      expect(session.compactCalls).toBe(0);
+    });
+
+    it('ターンの途中（busy）では何もしない', async () => {
+      const { session } = await startRun('compact');
+      session.emitState({ ...stateWithContext(10, 1), busy: true });
+      await flush();
+      expect(session.compactCalls).toBe(0);
+    });
+
+    it('圧縮が失敗してもrunは止めず、警告だけ残る', async () => {
+      const { harness, runId, session } = await startRun('compact');
+      session.failCompact = new Error('compactできません');
+      await crossThreshold(session);
+
+      expect(harness.runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe(
+        'running',
+      );
+      const warning = harness.runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'contextActionFailed');
+      expect(warning?.message).toContain('compactできません');
+    });
+  });
+
+  describe('split', () => {
+    it('新しいセッションが開き、元のタブは残したまま続きが走る', async () => {
+      const { harness, runId, session } = await startRun('split');
+      const sessionsBefore = harness.codexHost.sessions.length;
+
+      await crossThreshold(session);
+
+      // 元のセッションは止めるだけで捨てない（人が経緯を追えるようにする）
+      expect(session.pauseLoopCount).toBe(1);
+      expect(session.disposed).toBe(false);
+      expect(harness.codexHost.sessions.length).toBe(sessionsBefore + 1);
+
+      // 2代目は世代の印つきで開き、続きの指示から走り出す
+      const next = harness.codexHost.byTaskId('T1');
+      expect(next).not.toBe(session);
+      expect(harness.codexHost.openInputs.at(-1)?.generation).toBe(2);
+      expect(next.runLoopCalls).toHaveLength(1);
+      const plan = next.runLoopCalls[0];
+      expect(plan?.initialPrompt).toContain('T1 の2代目');
+      // 応答本文そのものは貼らず、受け渡しファイルの参照だけを渡す
+      expect(plan?.initialPrompt).toContain('read_handoff(taskId: "T1", slug: "split")');
+      // 回数の上限はタスク全体で通した数（分割のたびに増やさない）
+      expect(plan?.maxIterations).toBeLessThanOrEqual(10);
+
+      // 両方のタブから相手を辿れる
+      expect(session.notes.some((n) => n.includes('2代目のセッションへ引き継ぎます'))).toBe(true);
+      expect(next.notes.some((n) => n.includes('1代目のタブ'))).toBe(true);
+
+      const warning = harness.runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'contextSplit');
+      expect(warning?.taskId).toBe('T1');
+    });
+
+    it('分割後は2代目の完了だけがタスクを確定させる（古いタブの終了は無視する）', async () => {
+      const { harness, runId, session } = await startRun('split');
+      await crossThreshold(session);
+      const next = harness.codexHost.byTaskId('T1');
+
+      // 古いタブで人が何かして終了した扱いになっても、タスクは動かない
+      session.finish('done', doneState('古い方の結果'));
+      await flush();
+      expect(harness.runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe(
+        'running',
+      );
+
+      // 2代目の完了は従来どおり効く（完了判定・マージの経路は変わらない）
+      next.finish('done', doneState('DONE'));
+      await flush();
+      expect(harness.runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe(
+        'done',
+      );
+    });
+
+    it('新しいセッションを開けなければ、元のセッションを再開してrunを止めない', async () => {
+      const { harness, runId, session } = await startRun('split');
+      harness.codexHost.rejectNext(new Error('セッションを開けません'));
+
+      await crossThreshold(session);
+
+      // 止めたまま放置しない（放置するとタスクが「実行中」のまま誰も進めなくなる）
+      expect(session.pauseLoopCount).toBe(1);
+      expect(session.resumeLoopCount).toBe(1);
+      expect(harness.runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe(
+        'running',
+      );
+      const warning = harness.runner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'contextActionFailed');
+      expect(warning?.message).toContain('セッションを開けません');
+
+      // 元のセッションのまま完了できる
+      session.finish('done', doneState('DONE'));
+      await flush();
+      expect(harness.runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T1')?.state).toBe(
+        'done',
+      );
+    });
+  });
+
+  describe('none（既定）', () => {
+    it('閾値を割っても何も起きない', async () => {
+      const { harness, runId, session } = await startRun('none');
+      const sessionsBefore = harness.codexHost.sessions.length;
+      await crossThreshold(session);
+
+      expect(session.compactCalls).toBe(0);
+      expect(session.pauseLoopCount).toBe(0);
+      expect(harness.codexHost.sessions.length).toBe(sessionsBefore);
+      expect(harness.runner.getSnapshot(runId)?.warnings).toHaveLength(0);
+    });
   });
 });
