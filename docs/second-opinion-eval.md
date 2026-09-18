@@ -93,22 +93,31 @@ npx tsx test/bench/secondOpinionEval/toolCallScope.ts <結果ディレクトリ>
 案件を選ぶ前に、**証拠情報を一切使わないメタデータだけの母集団**を作って凍結する。
 
 ```
+# 0. 先にPRのrefを取る（後述。取らないと母集団が静かに減る）
+git fetch origin '+refs/pull/*/head:refs/remotes/pr/*'
+
 # 1回だけ: GitHubから引いて、母集団の素をそのまま保存する
 npx tsx test/bench/secondOpinionEval/samplingFrame.ts \
-  --source-out eval-results/sampling-source-v2.json --out eval-results/sampling-frame-v2.json
+  --source-out eval-results/sampling-source-v3.json --out eval-results/sampling-frame-v3.json
 
 # 以降: 保存した素からのみ作り直す
 npx tsx test/bench/secondOpinionEval/samplingFrame.ts \
-  --prs eval-results/sampling-source-v2.json --out eval-results/sampling-frame-v2.json
+  --prs eval-results/sampling-source-v3.json --out eval-results/sampling-frame-v3.json
 ```
 
+**先にPRのrefを取る。** squash / rebase でmergeされたPRは、merge commitの親が1つしかないため、base / target を API の `baseRefOid` / `headRefOid` から取り直す（`prSnapshot.ts` の `non-linear` 経路）。head branchはmergeの後に削除されるので、PRのrefを取っていないcloneではこれらのcommitが存在せず、該当PRが丸ごと `snapshot-unavailable` へ落ちる。版3の母集団で実測したところ、**eligible が 431件 → 253件** になった。素を凍結しても、frameの中身が「手元のcloneが何をfetchしているか」で変わってしまう。
+
+そのため `snapshot-unavailable` が1件でもあれば生成を止める。GitHub側にrefが残っていないなど、その件数のまま進めると決めたときだけ `--allow-unavailable` を付ける。
+
 **母集団の素も凍結する。** frameのハッシュを記録しても、GitHubを引き直せば母集団そのものが変わる。期間の指定は日付単位なので、`--until` に指定した当日の後半にPRがマージされれば同じコマンドが別の母集団を返す。`gh` の出力をそのまま保存し、そのハッシュを frame の `sourceSha256` へ書き、以降の再生成は保存した素からだけ行う。素を保存せずにGitHubを引くことはできない（`--prs` か `--source-out` のどちらかが必須）。
+
+この取りこぼしは実際に起きた。版2の素を取ったのは 2026-08-31T04:33Z で、`--until 2026-08-31` は日付単位のため、**その後にマージされた11件（#1049〜#1059）が母集団から漏れていた**。版3は 09-18 に取り直しており、期間の末日が完全に過去なので、以後は同じコマンドで同じ母集団が返る。
 
 **一度凍結した版は上書きできない。** 素は既にあれば取り直さない。frameは、既にあって中身が同じなら書かずに済ませ、**1バイトでも違えば拒否する**。作り直したいなら `exclusionRulesVersion` を上げて別のファイルにし、前の版は残す。ハッシュを記録しても同じパスへ書き直せるなら、凍結したことにならない。
 
 frameには**絶対パスを入れない**（`sourceFile` はファイル名だけ）。正本は `sourceSha256` であり、パスを入れると同じ素から作ってもcloneの置き場所でframeのハッシュが変わる。
 
-**母集団の四分位が境界と一致しなければ生成を止める。** 境界は母集団の四分位そのものなので、ずれたということは母集団が変わったということである。そのまま書き出すと「四分位で切った」と書いてある層が実際には四分位でなくなる。止まったら実測値へ更新して `exclusionRulesVersion` を上げ、前の版のファイルは残す。
+**母集団の四分位が境界と一致しなければ生成を止める。** 境界は母集団の四分位そのものなので、ずれたということは母集団が変わったということである。そのまま書き出すと「四分位で切った」と書いてある層が実際には四分位でなくなる。止まったら実測値へ更新して `exclusionRulesVersion` を上げ、前の版のファイルは残す。`extreme-tail` の境界（p90）も同じ理由で検証する。四分位だけ見て通すと、目印だけが前の母集団の値のまま残り、層化の「裾を最低1件は含める」制約が別の帯を指してしまう。
 
 linked Issue の有無・人間コメントの有無・レビューの有無を、この段階では条件にしない。「正解ラベルを作りやすいPR」に絞ると母集団そのものが証拠の多い側へ寄り、あとから脱落率を測っても意味を持たなくなる。証拠による脱落は次の段階で数える。
 
@@ -128,20 +137,47 @@ test-only / config-only / refactor / 巨大PR などは**除外せずタグを�
 
 素と出力のSHA-256を記録し、以降の段階はこの凍結物を入力にする。規則や境界を変えたら `exclusionRulesVersion` を上げ、**前の版を上書きしない**。
 
+#### 版3の結果（2026-09-18）
+
+```
+母集団（2026-08-10〜08-31 にマージ）: 548 件
+  - docs-only: 101 件
+  - benchmark-self: 13 件
+  - pilot: 3 件
+  - snapshot-unavailable: 0 件
+  - empty-diff: 0 件
+metadata eligible: 431 件
+
+変更規模の層（境界 131 / 323 / 691）: S 108 / M 108 / L 107 / XL 108
+extreme-tail（p90 = 1369 超）: 43 件
+タグ: touches-docs 290 / extreme-tail 43 / single-file 18 / refactor 14 / test-only 9 / chore 6 / has-generated 4 / config-only 2
+snapshot: ok 253 / non-linear 178 / unavailable 0
+```
+
+- 母集団の素 `eval-results/sampling-source-v3.json` sha256 `6495b38d1c8b3de551a0dbc277d0dcfe193f54589ef93dcdfa100f5f6c4cd0e4`（取得 2026-09-18T14:50:04.875Z）
+- frame `eval-results/sampling-frame-v3.json` sha256 `9fb0208257b4b6f79e5128bfcd578b2afa06132874f20fe7faf4ab8a03424854`
+
+版2（537件 / eligible 415件 / 境界 129 / 317 / 706）から動いた理由は2つで、どちらも結果変数を見ずに確定している。
+
+1. 版2の素が取得日当日の途中までしか含まず、11件（#1049〜#1059）が漏れていた。この11件はいずれも評価基盤そのもののPRなので、`benchmark-self` が 2件 → 13件 に増えて eligible には入っていない
+2. 版2を作った環境にはPRのrefがあり、`non-linear` の222件が base / target を解決できていた。PRのrefを取らずに再現しようとすると同じ222件が `snapshot-unavailable` へ落ちる
+
 ### 2. 証拠候補を検索する（Issue #1046 手順2）
 
 手順1で凍結した母集団の各案件について、正解ラベルの根拠になりうる材料の在り処を集める。
 
+**以降の節に出てくる実測値（証拠候補98件 / 追加pool 277件 / 候補415件など）は、すべて版2のframeを入力にしたときのものである。** 版3では母集団が 548件 / eligible 431件 に変わったため、手順2以降は版3のframeから作り直す必要がある。作り直すまで、これらの数字は版2の記録として読むこと。
+
 ```
 # 1回だけ: GitHubから引いて、証拠の素をそのまま保存する
 npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
-  --frame eval-results/sampling-frame-v2.json \
+  --frame eval-results/sampling-frame-v3.json \
   --evidence-src-out eval-results/evidence-source-v3.json \
   --out eval-results/evidence-candidates-v3.json
 
 # 以降: 保存した素からのみ作り直す
 npx tsx test/bench/secondOpinionEval/evidenceCandidates.ts \
-  --frame eval-results/sampling-frame-v2.json \
+  --frame eval-results/sampling-frame-v3.json \
   --evidence-src eval-results/evidence-source-v3.json \
   --out eval-results/evidence-candidates-v3.json
 ```
@@ -542,7 +578,7 @@ eligible pool から本測定の24件を機械的に抜く。**印象で並べ�
 ```
 npx tsx test/bench/secondOpinionEval/selectCases.ts \
   --pool eval-results/selection-pool-v1.json \
-  --frame eval-results/sampling-frame-v2.json \
+  --frame eval-results/sampling-frame-v3.json \
   --eligibility eval-results/eligibility-v1.json \
   --condition C-repo \
   --out eval-results/selected-cases-v1.json

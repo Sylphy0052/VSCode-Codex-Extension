@@ -59,30 +59,37 @@ async function git(args: readonly string[]): Promise<string> {
 }
 
 /**
- * 変更規模の層の境界（Issue #1046）。metadata eligible 415件の四分位。
+ * 変更規模の層の境界（Issue #1046）。版3の metadata eligible 431件の四分位。
  *
- * 当初は 69 / 178 / 460 だった。あれは**対象母集団が決まる前に**直近120件から取った暫定値
- * であり、除外規則を固定した本測定の母集団（415件）では四分位から外れていた（実際の層は
- * 15% / 20% / 27% / 38%）。回答の生成も採点もまだしていない段階、つまり**結果を一切見ずに**、
- * 説明変数の側の分布だけで置き換えている。旧境界は {@link PREVIOUS_CHANGE_SIZE_QUARTILES}
- * として残す。
+ * 版1は 69 / 178 / 460 だった。あれは**対象母集団が決まる前に**直近120件から取った暫定値で、
+ * 除外規則を固定した母集団では四分位から外れていた。版2で 129 / 317 / 706 へ直した。
+ *
+ * 版3で再び動いたのは、版2の素が**取得日当日（2026-08-31）の途中までしか含んでいなかった**
+ * ためである。版2の素を取ったのは 08-31T04:33Z で、`--until` は日付単位なので、その後に
+ * マージされた11件（#1049〜#1059）が母集団から漏れていた。版3は 09-18 に取り直しており、
+ * 期間の末日が完全に過去なので、以後は同じコマンドで同じ母集団が返る。
+ *
+ * どの版も、回答の生成も採点もしていない段階、つまり**結果を一切見ずに**、説明変数の側の
+ * 分布だけから機械的に計算している。旧境界は {@link PREVIOUS_CHANGE_SIZE_QUARTILES} に残す。
  */
-const CHANGE_SIZE_QUARTILES = { q1: 129, median: 317, q3: 706 } as const;
+const CHANGE_SIZE_QUARTILES = { q1: 131, median: 323, q3: 691 } as const;
 
-/** 旧境界。どこから来た値かを追えるように残す。 */
-const PREVIOUS_CHANGE_SIZE_QUARTILES = { q1: 69, median: 178, q3: 460 } as const;
+/** 版2の境界。どこから来た値かを追えるように残す。 */
+const PREVIOUS_CHANGE_SIZE_QUARTILES = { q1: 129, median: 317, q3: 706 } as const;
 
 /**
- * 裾の重い側の目印（Issue #1046）。metadata eligible 415件の p90。
+ * 裾の重い側の目印（Issue #1046）。版3の metadata eligible 431件の p90。
  *
  * 上限で足切りはしない。大きい変更ほどセカンドオピニオンが苦手なら、それは測るべき弱点で
  * あって、除外していい理由ではない。層をさらに割るのも24件には細かすぎるので、タグだけ持ち、
  * 最終的に選んだ案件へこの帯が残っているかを見る。
+ *
+ * 四分位と同じく母集団から決まる値なので、ずれたら生成を止める（母集団が変わった印である）。
  */
-const EXTREME_TAIL_LINES = 1387;
+const EXTREME_TAIL_LINES = 1369;
 
 /** 除外規則の版。境界や規則を変えたら上げる。frameのhashと合わせて、どの規則で作ったかを示す。 */
-const EXCLUSION_RULES_VERSION = 2;
+const EXCLUSION_RULES_VERSION = 3;
 
 /** pilotで使った案件。規則を作りながら採点したので、条件の比較には使えない。 */
 const PILOT_PR_NUMBERS: readonly number[] = [992, 995, 1027];
@@ -148,6 +155,8 @@ interface Args {
   sourceOutPath: string | undefined;
   since: string;
   until: string;
+  /** `snapshot-unavailable` が残ったままでも書き出す。既定では止める。 */
+  allowUnavailable: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -155,8 +164,14 @@ function parseArgs(argv: readonly string[]): Args {
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
     if (token !== undefined && token.startsWith('--')) {
-      values.set(token.slice(2), argv[i + 1] ?? '');
-      i += 1;
+      // 値を取らないフラグの次に別のオプションが来たとき、それを値として食わないようにする
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        values.set(token.slice(2), next);
+        i += 1;
+      } else {
+        values.set(token.slice(2), '');
+      }
     }
   }
   const outPath = values.get('out');
@@ -180,6 +195,7 @@ function parseArgs(argv: readonly string[]): Args {
     sourceOutPath,
     since: values.get('since') ?? DEFAULT_SINCE,
     until: values.get('until') ?? DEFAULT_UNTIL,
+    allowUnavailable: values.has('allow-unavailable'),
   };
 }
 
@@ -388,6 +404,12 @@ function quartilesOf(values: readonly number[]): { q1: number; median: number; q
   return { q1: at(0.25), median: at(0.5), q3: at(0.75) };
 }
 
+/** {@link quartilesOf} と同じ取り方の分位点。`extreme-tail` の境界（p90）に使う。 */
+function percentileOf(values: readonly number[], fraction: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) * fraction)] ?? 0;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const source = await loadSource(args);
@@ -405,9 +427,40 @@ async function main(): Promise<void> {
   }
 
   const eligible = classified.filter((pr) => pr.excludedBy === undefined);
-  const measured = quartilesOf(
-    eligible.map((pr) => pr.changedLines).filter((n): n is number => typeof n === 'number'),
+  const eligibleLines = eligible
+    .map((pr) => pr.changedLines)
+    .filter((n): n is number => typeof n === 'number');
+  console.log(
+    `[frame] 母集団 ${inWindow.length} 件 / metadata eligible ${eligible.length} 件` +
+      `（変更行数が取れたもの ${eligibleLines.length} 件）`,
   );
+  // 除外の内訳を必ず出す。eligible の件数だけ見ていると、`snapshot-unavailable` が増えた
+  // （＝手元にcommitが無いだけ）のか、規則で落ちたのかが区別できない
+  const exclusionCounts = new Map<string, number>();
+  for (const pr of classified) {
+    if (pr.excludedBy !== undefined) {
+      exclusionCounts.set(pr.excludedBy, (exclusionCounts.get(pr.excludedBy) ?? 0) + 1);
+    }
+  }
+  for (const [rule, count] of [...exclusionCounts].sort((a, b) => b[1] - a[1])) {
+    console.log(`[frame]   除外 ${rule}: ${count} 件`);
+  }
+
+  // `snapshot-unavailable` は母集団の性質ではなく**手元のcloneの状態**で増える。
+  // squash / rebase でmergeされたPR（版3では222件）は `headRefOid` を必要とし、head branchは
+  // mergeの後に削除されるので、PRのrefを取っていないcloneでは丸ごとここへ落ちる（実測で
+  // eligible が 431件 → 253件 になった）。素を凍結してもこれでは母集団が環境で変わるため、
+  // 黙って少ない母集団のframeを書かずに止める
+  const unavailable = exclusionCounts.get('snapshot-unavailable') ?? 0;
+  if (unavailable > 0 && !args.allowUnavailable) {
+    throw new Error(
+      `snapshot-unavailable が ${unavailable} 件あります。frameを書くとこの母集団で凍結されます。` +
+        "先に `git fetch origin '+refs/pull/*/head:refs/remotes/pr/*'` でPRのrefを取ってから作り直してください。" +
+        'GitHub側にrefが残っていないなど、この件数のまま進めると決めた場合だけ --allow-unavailable を付けてください',
+    );
+  }
+  const measured = quartilesOf(eligibleLines);
+  const measuredP90 = percentileOf(eligibleLines, 0.9);
 
   // 境界は母集団の四分位そのものである。ずれたということは母集団が変わったということで、
   // そのまま書き出すと「四分位で切った」と書いてある層が実際には四分位でなくなる
@@ -419,6 +472,15 @@ async function main(): Promise<void> {
     throw new Error(
       `母集団の四分位が境界と一致しません。境界: ${JSON.stringify(CHANGE_SIZE_QUARTILES)} / 実測: ${JSON.stringify(measured)}。` +
         '母集団が変わっています。CHANGE_SIZE_QUARTILES を実測値へ更新し、EXCLUSION_RULES_VERSION を上げ、前の版のファイルは残してください',
+    );
+  }
+
+  // p90も母集団から決まる値である。四分位だけ見て通すと、`extreme-tail` の目印だけが
+  // 前の母集団の値のまま残り、層化の「裾を最低1件は含める」制約が別の帯を指してしまう
+  if (measuredP90 !== EXTREME_TAIL_LINES) {
+    throw new Error(
+      `母集団のp90が extreme-tail の境界と一致しません。境界: ${EXTREME_TAIL_LINES} / 実測: ${measuredP90}。` +
+        'EXTREME_TAIL_LINES を実測値へ更新し、EXCLUSION_RULES_VERSION を上げ、前の版のファイルは残してください',
     );
   }
 
