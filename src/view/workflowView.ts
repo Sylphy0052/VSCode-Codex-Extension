@@ -8,7 +8,11 @@ import type {
   WorkflowRunSnapshot,
   WorkflowWarning,
 } from '../orchestrator/runner';
-import type { PersistedProgram } from '../orchestrator/programStore';
+import {
+  createWorkflowFeed,
+  type WorkflowFeed,
+  type WorkflowFeedProgramPort,
+} from '../orchestrator/workflowFeed';
 import {
   parseRoadmapMarkdown,
   reconcileRoadmapIssues,
@@ -24,6 +28,7 @@ import {
   summarizeIntegration,
   summarizeKanban,
   taskRoleLabel,
+  formatTaskContext,
 } from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
@@ -42,24 +47,13 @@ import { buildTaskWorkSummary } from '../orchestrator/taskSummary';
  *
  * **省略可能。** コンストラクタでこの口を渡さない場合（既存のテスト・W12-2までの
  * `extension.ts`の配線）は、プログラムに関する表示・操作を一切行わない
- * （`postPrograms`が何もせず戻る）。既存の単発run実行の挙動には一切影響しない
- * （受入基準「既存の単発runの挙動が変わらない」）。
+ * （feedのスナップショットの`programs`が常に空になる）。既存の単発run実行の挙動には
+ * 一切影響しない（受入基準「既存の単発runの挙動が変わらない」）。
+ *
+ * 実体は`workflowFeed.ts`の`WorkflowFeedProgramPort`（Issue #1272でfeed側へ移した。
+ * Viewはこの口を直接使わず、feed越しに読む）。`extension.ts`が渡す形は変わらない。
  */
-export interface ProgramViewPort {
-  /** 永続化済みの全プログラムを新しい順に返す。`ProgramStore.list()`と同じ契約。 */
-  list(): readonly PersistedProgram[];
-  /** 指定プログラムを人の手で止める。`ProgramRunner.haltProgram`と同じ契約。 */
-  halt(programId: string): Promise<void>;
-  /**
-   * プログラムの状態が永続化された後に発火する。`ProgramRunner.onChanged`と同じ契約
-   * （design.md §16.37.3のレビュー指摘F1、Issue #606）。`runner.onChanged`（実行中の
-   * runの変化）とは別の通知で、失敗の伝播（`skipped`化）や`haltProgram`の結果を
-   * ビューへ届けるのはこちら側の役目——`runner.onChanged`のリスナである`ProgramRunner`
-   * 内部の処理（`pumpProgram`）が非同期のため、`runner.onChanged`にただ乗りするだけでは
-   * 永続化前の状態を読んでしまう（詳細は`onRunnerChanged`の実装コメント参照）。
-   */
-  onChanged(listener: (programId: string) => void): () => void;
-}
+export type ProgramViewPort = WorkflowFeedProgramPort;
 
 /**
  * ワークフローViewのロードマップ欄（Issue #1257）が使う口。**省略可能**で、渡さなければ
@@ -137,10 +131,10 @@ export class WorkflowViewManager implements vscode.Disposable {
   private roadmapRequestSeq = 0;
   private readonly unsubscribeChanged: () => void;
   /**
-   * `programs`（`ProgramViewPort`）の変化通知の購読解除。`programs`が省略されていれば
-   * `undefined`のまま（`ProgramViewPort`のJSDoc参照）。
+   * 単発runとプログラムの変化・状態を1本にまとめた口（Issue #1272）。Viewが購読する
+   * イベントも、読むスナップショットもこれ1つだけにする（`workflowFeed.ts`のJSDoc参照）。
    */
-  private readonly unsubscribePrograms: (() => void) | undefined;
+  private readonly feed: WorkflowFeed;
 
   constructor(
     private readonly runner: WorkflowRunner,
@@ -150,22 +144,19 @@ export class WorkflowViewManager implements vscode.Disposable {
      * 省略可能（`ProgramViewPort`のJSDoc参照）。`extension.ts`が`ProgramStore`/
      * `ProgramRunner`から組み立てて渡す。
      */
-    private readonly programs?: ProgramViewPort,
+    programs?: ProgramViewPort,
     /**
      * ロードマップ欄（Issue #1257）。省略可能（`RoadmapViewPort`のJSDoc参照）。
      */
     private readonly roadmap?: RoadmapViewPort,
   ) {
-    this.unsubscribeChanged = runner.onChanged((runId) => this.onRunnerChanged(runId));
-    // プログラム欄の再描画は、実行中のrunの変化（`runner.onChanged`）にはただ乗り
-    // せず、`programs.onChanged`（`ProgramRunner`側で永続化が確定した後にだけ発火する
-    // 専用の通知）を別途購読する（`onRunnerChanged`の実装コメント参照）
-    this.unsubscribePrograms = this.programs?.onChanged(() => this.postPrograms());
+    this.feed = createWorkflowFeed({ runner, ...(programs === undefined ? {} : { programs }) });
+    this.unsubscribeChanged = this.feed.onChanged(() => this.onFeedChanged());
   }
 
   dispose(): void {
     this.unsubscribeChanged();
-    this.unsubscribePrograms?.();
+    this.feed.dispose();
     this.panel?.dispose();
   }
 
@@ -246,86 +237,54 @@ export class WorkflowViewManager implements vscode.Disposable {
     return panel;
   }
 
-  private onRunnerChanged(runId: string): void {
-    if (this.panel === undefined) {
-      return;
-    }
-    // run一覧（実行中/終了の別）はどのrunが変わっても揺れうるので毎回更新する
-    this.postRunList();
-    if (runId === this.activeRunId) {
-      this.postState();
-    }
-    // プログラム欄はここでは更新しない。`runner.onChanged`（このメソッドの発火元）は
-    // `WorkflowRunner`側の`SimpleEmitter`が同期的にリスナを呼ぶが、そのリスナの1つで
-    // ある`ProgramRunner.attach()`の`onRunChanged`ハンドラ自体は非同期
-    // （`void this.onRunChanged(runId).catch(...)`。定義ファイルの再読込を`await`する
-    // `pumpProgram`を経る）。そのため、このメソッドが呼ばれた時点では`ProgramRunner`側の
-    // 永続化（失敗の伝播による`skipped`化を含む）がまだ終わっていない場合がある
-    // （design.md §16.37.3のレビュー指摘F1、Issue #606）。プログラム欄の再描画は、
-    // `ProgramRunner`が永続化を終えた後にだけ発火する専用の通知
-    // （`programs.onChanged`、コンストラクタで購読）に任せる
-  }
-
-  private postAll(): void {
-    this.postRunList();
-    this.postState();
-    this.postPrograms();
-  }
-
   /**
-   * 永続化済みの全プログラムの状態をWebviewへ送る（design.md §16.37.3、roadmap W12-3、
-   * Issue #606）。`programs`（`ProgramViewPort`）が注入されていなければ何もしない
-   * （省略可能。`ProgramViewPort`のJSDoc参照）。
-   */
-  private postPrograms(): void {
-    if (this.panel === undefined || this.programs === undefined) {
-      return;
-    }
-    void this.panel.webview.postMessage({ type: 'programs', programs: this.programs.list() });
-  }
-
-  private postRunList(): void {
-    if (this.panel === undefined) {
-      return;
-    }
-    void this.panel.webview.postMessage({ type: 'runs', runs: this.runner.listLive() });
-  }
-
-  /**
-   * 現在表示中のrunのスナップショットを送る。段レイアウトはここで計算して同送する
-   * （`layoutGraph` は純粋関数。Webview側では再計算しない）。
+   * feed（`workflowFeed.ts`）からの唯一の変化通知。単発runの変化もプログラムの変化も
+   * ここへ届く（Issue #1272）。
    *
-   * ここが更新の唯一の入口。差分計算はしていない（design.mdの「送るのは差分のみ」を
+   * 何が変わったかで送る内容を変えない——run一覧・プログラム欄・表示中のrunは全て
+   * `feed.getSnapshot()`**1回の結果**から作るため、常に同じ時点の状態がそろって届く。
+   * 以前は`runner.onChanged`でrun側だけ、`programs.onChanged`でプログラム側だけを
+   * 更新しており、片方だけ新しい状態を描く余地が残っていた。
+   *
+   * 発火の順序（`ProgramRunner`が永続化を終えてから`kind: 'program'`が流れる）は
+   * feedを挟んでも変わらない（`workflowFeed.ts`のJSDoc参照）。
+   */
+  private onFeedChanged(): void {
+    this.postAll();
+  }
+
+  /**
+   * その時点の全状態（run一覧・プログラム一覧・表示中のrun）を1通のメッセージで送る。
+   *
+   * 段レイアウト・進捗の集計はここで計算して同送する（`layoutGraph`等は純粋関数。
+   * Webview側では再計算しない）。差分計算はしていない（design.mdの「送るのは差分のみ」を
    * 「状態が変わっていないのに送らない」という意味で解釈している。runIdあたり最大
    * 50タスクという上限があるため、スナップショット全体を送っても軽い）。
    */
-  private postState(): void {
+  private postAll(): void {
     if (this.panel === undefined) {
       return;
     }
-    if (this.activeRunId === undefined) {
-      if (this.previewSnapshot !== undefined) {
-        this.postSnapshot(this.previewSnapshot, '（下書き・未実行）');
-        return;
-      }
-      void this.panel.webview.postMessage({ type: 'noRun' });
-      void this.postRoadmap(undefined);
-      return;
+    const feed = this.feed.getSnapshot(this.activeRunId);
+    // 下書きプレビュー（`previewSnapshot`）は`WorkflowRunner`に登録しないためfeedには
+    // 現れない。表示中のrunが無いときだけ、その代わりに出す
+    const isPreview = feed.activeRun === undefined && this.previewSnapshot !== undefined;
+    const snapshot = feed.activeRun ?? (isPreview ? this.previewSnapshot : undefined);
+    if (snapshot !== undefined) {
+      this.panel.title =
+        (snapshot.name === '' ? 'ワークフロー' : snapshot.name) +
+        (isPreview ? '（下書き・未実行）' : '');
     }
-    const snapshot = this.runner.getSnapshot(this.activeRunId);
-    if (snapshot === undefined) {
-      void this.panel.webview.postMessage({ type: 'noRun' });
-      void this.postRoadmap(undefined);
-      return;
-    }
-    this.postSnapshot(snapshot, '');
+    void this.panel.webview.postMessage({
+      type: 'feed',
+      runs: feed.runs,
+      programs: feed.programs,
+      state: snapshot === undefined ? undefined : this.buildStateMessage(snapshot),
+    });
+    void this.postRoadmap(snapshot?.roadmapPath);
   }
 
-  private postSnapshot(snapshot: WorkflowRunSnapshot, titleSuffix: string): void {
-    if (this.panel === undefined) {
-      return;
-    }
-    this.panel.title = (snapshot.name === '' ? 'ワークフロー' : snapshot.name) + titleSuffix;
+  private buildStateMessage(snapshot: WorkflowRunSnapshot): Record<string, unknown> {
     const layout = layoutGraph(snapshot.tasks, { maxWidth: this.graphViewportWidth });
     // 進捗の内訳・統合の状況の集計は`workflowGraph.ts`の純粋関数（テスト済み）で行い、
     // Webview側では受け取った結果を表示するだけにする（design.md §16.8「全体の進捗」・
@@ -352,9 +311,12 @@ export class WorkflowViewManager implements vscode.Disposable {
       // カンバンのバッジから該当タスクを絞り込む（issue #752）ための分類。Webview側で
       // 状態を振り分け直すと、状態が増えたときにここだけ追随漏れになる（Issue #104）
       kanbanBucket: kanbanBucket(t.state),
+      // コンテキスト残量・累計トークン数の表示文字列（Issue #1272）。組み立てはここ
+      // （純粋関数、テスト済み）で済ませ、Webview側は受け取った文字列を出すだけにする
+      // （役割ラベル・進捗の集計と同じ方針。Issue #104の再発防止）
+      contextLabel: formatTaskContext(t),
     }));
-    void this.panel.webview.postMessage({
-      type: 'state',
+    return {
       snapshot: { ...snapshot, tasks: tasksWithRoleLabel },
       layout,
       progress,
@@ -363,10 +325,7 @@ export class WorkflowViewManager implements vscode.Disposable {
       progressSegments: progressSegments(progress),
       kanban,
       integration,
-    });
-    // ロードマップ欄（Issue #1257）。ファイルの読み取りとCLIの実行を伴うので、
-    // スナップショットの送信は待たせず別便で送る
-    void this.postRoadmap(snapshot.roadmapPath);
+    };
   }
 
   /**
@@ -496,7 +455,7 @@ export class WorkflowViewManager implements vscode.Disposable {
         return;
       }
       this.graphViewportWidth = width;
-      this.postState();
+      this.postAll();
       return;
     }
     if (type === 'selectRun' && typeof m['runId'] === 'string') {
@@ -506,7 +465,7 @@ export class WorkflowViewManager implements vscode.Disposable {
       const requestedRunId = m['runId'];
       if (this.runner.listLive().some((r) => r.runId === requestedRunId)) {
         this.activeRunId = requestedRunId;
-        this.postState();
+        this.postAll();
       }
       return;
     }
@@ -521,10 +480,8 @@ export class WorkflowViewManager implements vscode.Disposable {
       // `activeRunId`の有無を問わない（プログラムのpendingなrun参照はそもそも
       // `WorkflowRunner`側のrunIdを持たない。design.md §16.37.3、roadmap W12-3、
       // Issue #606）。`programs`（`ProgramViewPort`）が未注入なら何もしない
-      if (this.programs !== undefined) {
-        await this.programs.halt(m['programId']);
-        this.postPrograms();
-      }
+      await this.feed.haltProgram(m['programId']);
+      this.postAll();
       return;
     }
 
@@ -901,7 +858,7 @@ ${workflowStyles()}
         <thead>
           <tr>
             <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th>
-            <th>provider</th><th>model / effort</th><th>経過</th><th>送信回数</th><th>操作</th>
+            <th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th><th>送信回数</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="taskTableBody"></tbody>
@@ -988,6 +945,9 @@ function buildPreviewSnapshot(
     mergeResolutionWaitingApproval: false,
     pullRequestNumber: undefined,
     pullRequestUrl: undefined,
+    // 下書きはまだセッションを開いていないので、コンテキストの使用量は取れない
+    context: undefined,
+    sessionTokens: undefined,
   }));
   return {
     runId: `preview:${defPath}`,

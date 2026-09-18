@@ -148,7 +148,7 @@ export function workflowScript(): string {
    * colSpan に使う。列を足したらここも直す——2箇所へ数字を直接書いていると、
    * 片方だけ古いままになって行の幅が足りなくなる。
    */
-  const TASK_TABLE_COLUMNS = 10;
+  const TASK_TABLE_COLUMNS = 11;
 
   /**
    * タスクの model / effort を1つのセルへ収める文言にする（Issue #1035）。
@@ -1158,6 +1158,14 @@ export function workflowScript(): string {
       }
       row.appendChild(modelCell);
 
+      // コンテキスト残量と累計トークン数（Issue #1272）。文字列の組み立ては拡張機能側の
+      // 純粋関数（workflowGraph.tsのformatTaskContext、テスト済み）が済ませている。
+      // 取れない値は「不明」と書いてあり、0とは区別が付く
+      const contextText = task.contextLabel || '';
+      const contextCell = text('td', 'context-cell', contextText);
+      contextCell.title = contextText;
+      row.appendChild(contextCell);
+
       const elapsedCell = text('td', 'elapsed-cell', '');
       if (task.startedAt) {
         elapsedCell.setAttribute('data-started', String(Date.parse(task.startedAt) || 0));
@@ -1659,14 +1667,17 @@ export function workflowScript(): string {
   window.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
-    if (msg.type === 'runs') {
+    if (msg.type === 'feed') {
+      // 拡張機能側の1つのスナップショットから作られた1通（Issue #1272）。run一覧・
+      // プログラム欄・表示中のrunは常に同じ時点の状態なので、ここで順に当てるだけでよい
       applyRuns(msg.runs);
-    } else if (msg.type === 'state') {
-      applyState(msg.snapshot, msg.layout, msg.progress, msg.kanban, msg.integration, msg.progressSegments);
-    } else if (msg.type === 'noRun') {
-      applyNoRun();
-    } else if (msg.type === 'programs') {
       applyPrograms(msg.programs);
+      if (msg.state) {
+        const s = msg.state;
+        applyState(s.snapshot, s.layout, s.progress, s.kanban, s.integration, s.progressSegments);
+      } else {
+        applyNoRun();
+      }
     } else if (msg.type === 'roadmap') {
       applyRoadmap(msg.roadmap, msg.path, msg.pending, msg.error);
     }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   aggregateProgress,
+  formatTaskContext,
   progressSegments,
   computeRanks,
   kanbanBucket,
@@ -469,5 +470,40 @@ describe('progressSegments（issue #754）', () => {
     expect(sum).toBeLessThanOrEqual(100);
     // 四捨五入していたら 34 * 3 = 102 になる
     expect(segments.every((s) => s.percent > 33 && s.percent < 34)).toBe(true);
+  });
+});
+
+describe('formatTaskContext: タスク単位のコンテキスト使用量（Issue #1272）', () => {
+  it('残量と上限が判れば割合とトークン数を出す', () => {
+    expect(
+      formatTaskContext({
+        context: { usedTokens: 84000, contextWindow: 200000, remainingPercent: 58 },
+        sessionTokens: 120000,
+      }),
+    ).toBe('残り58%（84.0k/200k） / 累計120k');
+  });
+
+  it('上限が判らないときは残りを「不明」とし、使用量だけ出す', () => {
+    expect(
+      formatTaskContext({
+        context: { usedTokens: 1234, contextWindow: undefined, remainingPercent: undefined },
+        sessionTokens: undefined,
+      }),
+    ).toBe('残り不明（使用1.2k） / 累計不明');
+  });
+
+  it('まだ何も届いていなければ両方「不明」と出す（0とは区別する）', () => {
+    expect(formatTaskContext({ context: undefined, sessionTokens: undefined })).toBe(
+      '残り不明 / 累計不明',
+    );
+  });
+
+  it('残り0%・累計0は「不明」ではなく数字として出す', () => {
+    expect(
+      formatTaskContext({
+        context: { usedTokens: 0, contextWindow: 1000, remainingPercent: 0 },
+        sessionTokens: 0,
+      }),
+    ).toBe('残り0%（0/1.0k） / 累計0');
   });
 });

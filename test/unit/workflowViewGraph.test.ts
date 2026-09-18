@@ -74,14 +74,15 @@ const fakeRunner = {
   getSnapshot: (runId: string) => (runId === SNAPSHOT.runId ? SNAPSHOT : undefined),
 } as unknown as WorkflowRunner;
 
+// run一覧・プログラム・表示中のrunは1通の`feed`メッセージで届く（Issue #1272）
 const lastLayout = (sent: readonly unknown[]): GraphLayout => {
   const states = sent.filter(
-    (m): m is { type: 'state'; layout: GraphLayout } =>
-      typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'state',
+    (m): m is { type: 'feed'; state: { layout: GraphLayout } } =>
+      typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'feed',
   );
   const last = states[states.length - 1];
   expect(last).toBeDefined();
-  return (last as { layout: GraphLayout }).layout;
+  return (last as { state: { layout: GraphLayout } }).state.layout;
 };
 
 /** n個のノードを1行に並べるのに要する幅。 */

@@ -7038,7 +7038,7 @@ export type ProgramRunSkipReason =
 **単発runと違い専用のビューはまだ持たない、としていたW12-2時点の判断を、この段で見直した。** 失敗・停止の状態がワークフローViewから読めることが受入基準（Issue #606）に含まれるため、既存のワークフローView（`workflowView.ts`）へプログラム一覧の表示を追加した。専用の新規パネルは作らず、既存パネルに「プログラム」欄を追加する形にとどめている（新規パネルを起こすほどの表示量ではなく、既存のワークフローViewから各runへも導線があるため）。
 
 - `WorkflowViewManager`のコンストラクタへ、任意（optional）の第3引数`ProgramViewPort`（`list()` / `halt(programId)` / `onChanged(listener)`）を追加した。`ProgramStore` / `ProgramRunner`はこの口を構造的に満たすため、`extension.ts`側はアダプタを挟まず`{ list: () => programStore.list(), halt: (id) => programRunner.haltProgram(id), onChanged: (l) => programRunner.onChanged(l) }`をそのまま渡す。省略可能にしたのは、`test/unit/workflowViewGraph.test.ts`の既存5箇所のインスタンス化を壊さないため
-- 表示更新は`postAll()`（画面初期表示・run切替時）と、`ProgramRunner`側に新設した専用の変化通知（`onChanged`、後述）の両方から`postPrograms()`を呼ぶ形にした。**当初は`onRunnerChanged(runId)`（`runner.onChanged`、何らかのrunが変化した時）にただ乗りする形で実装していたが、レビュー指摘F1（Issue #606）でこれが誤りだと判明した。** `runner.onChanged`（`WorkflowRunner`側の`SimpleEmitter`）は同期的にリスナを呼ぶが、`ProgramRunner.attach()`が登録するリスナ自体は非同期（`void this.onRunChanged(runId).catch(...)`。定義ファイルの再読込を`await`する`pumpProgram`を経て`programStore`へ永続化する）。そのため`onRunnerChanged`の中で`postPrograms()`を呼んでも、`ProgramRunner`側の永続化が完了する前の状態を読んでしまう。依存する後続runがある場合はその後続runの起動が新たな`runner.onChanged`を起こすため実害が薄く隠れていたが、**依存する後続run全てが`skipped`へ倒れてプログラムが終端する（それ以上runが起動しない）ケースでは、以後`runner.onChanged`が一切発火しないため、`skipped`化の結果が永久にビューへ届かなかった**（`docs/manual-test.md` W12-3の「R2が『スキップ』と表示され、理由が読める」を満たせていなかった）。修正では、`ProgramRunner`に`pumpProgram` / `haltProgram`が状態の永続化を終えた後にだけ発火する専用の`onChanged(listener: (programId: string) => void)`を追加し、`WorkflowViewManager`はこちらを購読して`postPrograms()`を呼ぶ形へ変えた。`onRunnerChanged`は run一覧・run詳細の再描画のみを担い、プログラム欄には触れない。**このpub-subの実装は`runner.ts`の`SimpleEmitter`を`export`してそのまま再利用しており、`programRunner.ts`側に同じ形を複製してはいない**（レビュー指摘F2、Issue #606。当初は複製していたが、`fire`が登録順に同期でリスナを呼ぶという順序契約がJSDoc化されていなかったことが今回のF1と#605のF1で同じ機序を2回踏んだ原因のため、複製をやめて契約ごと1箇所へ集約し、`SimpleEmitter`のJSDocへその契約を明記した）
+- 表示更新は`postAll()`（画面初期表示・run切替時）と、`ProgramRunner`側に新設した専用の変化通知（`onChanged`、後述）の両方から`postPrograms()`を呼ぶ形にした。**当初は`onRunnerChanged(runId)`（`runner.onChanged`、何らかのrunが変化した時）にただ乗りする形で実装していたが、レビュー指摘F1（Issue #606）でこれが誤りだと判明した。** `runner.onChanged`（`WorkflowRunner`側の`SimpleEmitter`）は同期的にリスナを呼ぶが、`ProgramRunner.attach()`が登録するリスナ自体は非同期（`void this.onRunChanged(runId).catch(...)`。定義ファイルの再読込を`await`する`pumpProgram`を経て`programStore`へ永続化する）。そのため`onRunnerChanged`の中で`postPrograms()`を呼んでも、`ProgramRunner`側の永続化が完了する前の状態を読んでしまう。依存する後続runがある場合はその後続runの起動が新たな`runner.onChanged`を起こすため実害が薄く隠れていたが、**依存する後続run全てが`skipped`へ倒れてプログラムが終端する（それ以上runが起動しない）ケースでは、以後`runner.onChanged`が一切発火しないため、`skipped`化の結果が永久にビューへ届かなかった**（`docs/manual-test.md` W12-3の「R2が『スキップ』と表示され、理由が読める」を満たせていなかった）。修正では、`ProgramRunner`に`pumpProgram` / `haltProgram`が状態の永続化を終えた後にだけ発火する専用の`onChanged(listener: (programId: string) => void)`を追加し、`WorkflowViewManager`はこちらを購読して`postPrograms()`を呼ぶ形へ変えた。`onRunnerChanged`は run一覧・run詳細の再描画のみを担い、プログラム欄には触れない。**（その後、Issue #1272でこの2本の購読を`WorkflowFeed`の1本へまとめた。永続化後にだけ発火するという上の不変条件はそのままで、Viewから見える口だけを1つにしている。§16.46参照。）****このpub-subの実装は`runner.ts`の`SimpleEmitter`を`export`してそのまま再利用しており、`programRunner.ts`側に同じ形を複製してはいない**（レビュー指摘F2、Issue #606。当初は複製していたが、`fire`が登録順に同期でリスナを呼ぶという順序契約がJSDoc化されていなかったことが今回のF1と#605のF1で同じ機序を2回踏んだ原因のため、複製をやめて契約ごと1箇所へ集約し、`SimpleEmitter`のJSDocへその契約を明記した）
 - 各プログラムの行に、`haltedByUser`が立っておらず`finishedAt`も無い（＝まだ止められる）ときだけ「停止」ボタンを出す。クリックで`vscode.postMessage({ type: 'stopProgram', programId })`を送り、`workflowView.ts`の`handleMessage`が受けて`this.programs.halt(programId)`→`postPrograms()`（即時再描画）を行う
 - 各runの行には、`ProgramRunState`（タスク側の`STATE_LABEL`をそのまま流用）に加え、`skipped`のときは`skipReason`の内容（`failedDependency`なら「Rxの失敗により未着手」、`haltedByUser`なら「人がプログラム全体を停止したため未着手」）を表示する
 - コマンド`agent.workflows.stopProgram`（QuickPickで未完了プログラムを選択し`programRunner.haltProgram`を呼ぶ）を追加した。`agent.workflows.stop`（単発run停止）と対になる形。既存の`agent.workflows.runProgram`のJSDocが「プログラム専用のビューはまだ持たない」としていた記述は、この段の実装に合わせて書き換えた
@@ -9261,6 +9261,42 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 
 - `test/unit/sessionTitle.test.ts`: Issue番号と役割の組み合わせ（両方 / 片方 / どちらも無い）、Issue番号がtaskIdより優先されること、衝突解決とオーケストレーターがそれより先に効くことを、両ラベルについて検証する
 - `docs/manual-test.md` W-T: 実機で並んだタブの見え方（旧`Codex: <taskId>`からの変更分）を確認する
+
+### 16.46 ワークフローViewのイベント・スナップショットを一本化し、タスクのコンテキスト使用量を出す（Issue #1272）
+
+#### 背景
+
+同じ実行についてViewへの入口が2つあった。`WorkflowRunner.onChanged(runId)`（単発run）と`ProgramRunner.onChanged(programId)`（runを束ねるプログラム）である。Viewは両方を購読し、`WorkflowRunner.getSnapshot(runId)`と`ProgramStore.list()`という別々のスナップショットを自前で組み合わせて描いていた。§16.37.3のレビュー指摘F1への対処で購読を2本に分けたこと自体は正しかったが、**片方だけが更新された瞬間の状態を描く余地は残っていた。**
+
+もう1つ、タスクがどれだけコンテキストを使っているかがどこにも出ていなかった。§16.4のpull型（Issue #1271）で渡す量を減らしても、効いているかを確かめる手段が無い。値そのものはチャット画面が既に取っている（§14.9の`ContextUsage`）。
+
+#### 通知とスナップショットを1つにする（`workflowFeed.ts`）
+
+`WorkflowFeed`を新設し、Viewが触るのはこれ1つだけにした。
+
+- 通知は`WorkflowChange`（`{ kind: 'run'; runId }` / `{ kind: 'program'; programId }`）の1本。「何が変わったか」は判別できるままにする
+- スナップショットは`WorkflowFeedSnapshot`（`runs` / `programs` / `activeRun`）の1つ。Viewは1回の`getSnapshot(activeRunId)`で全部読む
+
+**発火の順序は変えていない。** `ProgramRunner.onChanged`が「対象プログラムの状態を`programStore`へ永続化し終えた後にだけ発火する」という不変条件（§16.37.3のレビュー指摘F1）はそのままで、feedは受け取った通知を転送するだけである。`WorkflowRunner.onChanged` / `ProgramRunner.onChanged`自体も残している（`ProgramRunner`が`workflow.onChanged`を購読して動くため）。1つにしたのは**Viewから見える口だけ**である。
+
+Viewは変化の種類で送る内容を変えない。run一覧・プログラム欄・表示中のrunは同じ`getSnapshot`の結果から作るため、常に同じ時点の状態がそろってWebviewへ届く。Webviewへのメッセージも`runs` / `programs` / `state` / `noRun`の4種から`feed`の1通へまとめた。
+
+#### プログラムに属さない単発runの扱い
+
+**同じ`runs`配列に並べる。** プログラムが1つだけのものとして包み直すことはしない。`FeedRunSummary`は`LiveRunSummary`に`programId` / `programRunRefId`（属さなければ`undefined`）を足しただけの形で、突き合わせは`buildFeedRuns`（純粋関数）1箇所に閉じる。これがこれまでViewが持っていた「2種類のデータの突き合わせ」にあたる部分である。
+
+#### タスク単位のコンテキスト使用量
+
+`TaskSession.onStateChanged`が渡す`ChatState`から`context`（§14.9の`ContextUsage`）と`sessionTokens`を`LiveTask`へ写し、`TaskSnapshot`経由でワークフローViewのタスク一覧へ「コンテキスト」列として出す。表示文字列の組み立ては`workflowGraph.ts`の`formatTaskContext`（純粋関数）が行い、Webview側は受け取った文字列を出すだけにする（§16.8の進捗集計と同じ方針。Issue #104の再発防止）。
+
+- **取れない値は「不明」と書き、0と区別する。** 空欄にすると「使っていない」のか「まだ判らない」のかが読めない。残量を返さないプロバイダ・値が届く前の状態は`残り不明`、累計トークン数を持たないClaude Codeのセッションは`累計不明`になる
+- 応答本文と同じく永続化しない（§16.11）。リロード後は`undefined`へ戻り、再びセッションから値が届くまで「不明」と出る
+
+#### 確かめ方
+
+- `test/unit/workflowFeed.test.ts`（新設）: `buildFeedRuns`がプログラムのrunへ`programId`を付けること、単発runは同じ配列に`undefined`付きで並ぶこと、未起動のrun参照（`runId`が無い）を結び付けないこと、同じrunIdを複数のプログラムが参照していたら先勝ちになること
+- `test/unit/workflowGraph.test.ts`: `formatTaskContext`の4ケース（残量と上限あり / 上限だけ不明 / 何も届いていない / 残り0%・累計0を「不明」と混同しない）
+- `test/unit/workflowViewPrograms.test.ts`・`test/unit/workflowViewGraph.test.ts`: 既存の検証内容はそのままに、観測するWebviewメッセージを`feed`の1通へ更新した（§16.37.3のF1の回帰確認は引き続き実物の`ProgramRunner`を通して行う）
 
 ### 14.105 Advisorにskillを提示しない（Issue #1061）
 
