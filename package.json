@@ -780,7 +780,7 @@
           ],
           "default": "cyber",
           "scope": "window",
-          "markdownDescription": "チャット画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには会話タブを開き直す。"
+          "markdownDescription": "チャット画面とセッション統括画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには該当するタブを開き直す。"
         },
         "agent.chat.sendOn": {
           "type": "string",
