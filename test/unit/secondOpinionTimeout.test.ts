@@ -65,6 +65,17 @@ class NeverFinishingSession implements TaskSession {
   }
   setApprovalHandler(): void {}
   onApprovalResolved(): void {}
+  /** `TaskSession.compact`（Issue #1273）。呼ばれた回数だけ数える。 */
+  compactCalls = 0;
+  compact(): Promise<void> {
+    this.compactCalls += 1;
+    return Promise.resolve();
+  }
+  /** `TaskSession.note`（Issue #1273）。会話へ残した文言を控える。 */
+  notes: string[] = [];
+  note(_id: string, text: string): void {
+    this.notes.push(text);
+  }
   async interrupt(): Promise<void> {
     this.interruptCalls += 1;
   }

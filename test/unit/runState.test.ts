@@ -51,6 +51,7 @@ const task = (id: string, dependsOn: string[] = [], retries = 0): WorkflowTask =
   retries,
   issue: undefined,
   cleanup: 'keep',
+  onContextLow: 'none' as const,
   parseErrors: [],
   parseWarnings: [],
 });

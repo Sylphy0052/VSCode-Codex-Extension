@@ -136,6 +136,17 @@ class FakeTaskSession implements TaskSession {
   onApprovalResolved(listener: (outcome: ApprovalOutcome) => void): void {
     this.approvalResolvedListeners.push(listener);
   }
+  /** `TaskSession.compact`（Issue #1273）。呼ばれた回数だけ数える。 */
+  compactCalls = 0;
+  compact(): Promise<void> {
+    this.compactCalls += 1;
+    return Promise.resolve();
+  }
+  /** `TaskSession.note`（Issue #1273）。会話へ残した文言を控える。 */
+  notes: string[] = [];
+  note(_id: string, text: string): void {
+    this.notes.push(text);
+  }
   interrupt(): Promise<void> {
     this.interruptCount += 1;
     return Promise.resolve();
@@ -308,9 +319,20 @@ class FakeHost implements TaskSessionHost {
     return session;
   }
 
-  /** cwdの末尾セグメント（taskId）で引く。worktreePathの末尾がtaskIdになるため。 */
+  /**
+   * cwdの末尾セグメント（taskId）で引く。worktreePathの末尾がtaskIdになるため。
+   *
+   * **再試行の`-retry<n>`も同じタスクとして拾い、最後に開かれた1つを返す。**
+   * `retryTask`はworktreeごと作り直すため、2周目のcwdは`<taskId>-retry0`になる
+   * （`worktree.ts`の`worktreeDirName`）。先頭一致のままだと、既に捨てられた1周目の
+   * セッションが返る。`runner.ts`は現在のセッション（`live.tasks`に載っているもの）
+   * 以外からの通知を無視する（Issue #1273で分割が古いタブを残すようになったため）ので、
+   * 古い方を掴んだテストは「finishしたのに何も起きない」という形で落ちる。
+   */
   byTaskId(taskId: string): FakeTaskSession {
-    const found = this.sessions.find((s) => s.cwd.endsWith(`/${taskId}`) || s.cwd === taskId);
+    const pattern = new RegExp(`(?:^|/)${taskId}(?:-retry\\d+)?$`, 'u');
+    const matched = this.sessions.filter((s) => pattern.test(s.cwd));
+    const found = matched[matched.length - 1];
     if (found === undefined) {
       throw new Error(`taskId=${taskId}のセッションが見つかりません`);
     }

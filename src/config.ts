@@ -13,6 +13,7 @@ import {
 } from './orchestrator/forge';
 import { DEFAULT_REPLY_TIMEOUT_SEC } from './orchestrator/messaging';
 import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
+import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
 import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { normalizeChatDensity, type ChatDensity } from './view/density';
@@ -907,6 +908,17 @@ export interface WorkflowsConfig {
    */
   taskApprovalTimeoutSec: number;
   /**
+   * コンテキスト残量がこの割合（%）以下になったら、タスクの`onContextLow`
+   * （`compact` / `split` / `none`）を実行する（`agent.workflows.contextLowPercent`、
+   * 既定20、`machine-overridable`、Issue #1273、design.md §16.47）。
+   *
+   * **`agent.autoHandoff.thresholdPercent`とは別のキー。** あちらは人が見ているチャットの
+   * 自動引き継ぎ用で、こちらは無人実行のタスク用。既定値は揃えてあるが、片方を緩めたときに
+   * もう片方まで動きが変わる形にしない。権限には関わらないため`forge`/`finalMerge`ほど
+   * 強い制限は要らない。
+   */
+  contextLowPercent: number;
+  /**
    * 最終マージ（`finalMerge: orchestrator`）で、統合PR/MR作成後にオーケストレーターが
    * `decide_final_merge`で応答するのを待つ時間の上限秒数（`agent.workflows.
    * finalMergeDecisionTimeoutSec`、既定900秒、`machine-overridable`、design.md §16.26）。
@@ -1215,6 +1227,7 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     taskApprovalTimeoutSec: normalizeTaskApprovalTimeoutSec(
       c.get<unknown>('workflows.taskApprovalTimeoutSec'),
     ),
+    contextLowPercent: normalizeContextLowPercent(c.get<unknown>('workflows.contextLowPercent')),
     finalMergeDecisionTimeoutSec: normalizeFinalMergeDecisionTimeoutSec(
       c.get<unknown>('workflows.finalMergeDecisionTimeoutSec'),
     ),
@@ -1278,6 +1291,20 @@ function normalizeMergeApprovalTimeoutSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? Math.floor(value)
     : DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC;
+}
+
+/**
+ * `agent.workflows.contextLowPercent` の生値を安全な割合へ丸める（Issue #1273）。
+ *
+ * `package.json`の`minimum: 1` / `maximum: 99`を実行時にも守る。0を許さないのは、
+ * 0%は「もう何も入らない」で、そこから圧縮・分割を始めても手遅れなため。100を許さないのは
+ * 開始直後から常に発火してしまうため。範囲外・非数値は既定値へ丸める
+ * （`normalizeReplyTimeoutSec`と同じ「壊れた設定値は既定へ」方針）。
+ */
+function normalizeContextLowPercent(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 99
+    ? Math.floor(value)
+    : DEFAULT_CONTEXT_LOW_PERCENT;
 }
 
 /**

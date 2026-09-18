@@ -9,6 +9,11 @@ import {
   CODEX_APPROVAL_SAFETY_ORDER,
   SANDBOX_SAFETY_ORDER,
 } from '../util/safetyClamp';
+import {
+  type ContextLowAction,
+  DEFAULT_CONTEXT_LOW_ACTION,
+  isContextLowAction,
+} from './contextLow';
 import { isTeamRole, roleDefaults, TEAM_ROLES, type TeamRole } from './rolePresets';
 import { formatUntrusted, truncateByCodePoint } from './untrustedText';
 
@@ -229,6 +234,14 @@ export interface WorkflowTask {
    */
   issue: number | undefined;
   cleanup: CleanupMode;
+  /**
+   * コンテキスト残量が `agent.workflows.contextLowPercent` を下回ったときの動作
+   * （Issue #1273、親Issue #1270 Phase 3）。既定は `none`（何もしない＝従来どおり）。
+   *
+   * 判定そのものは `contextLow.ts` の `decideContextLow`、実行は `runner.ts` が持つ。
+   * 残量を取得できないプロバイダ・取得前は、どの値を指定しても何も起こらない。
+   */
+  onContextLow: ContextLowAction;
   /**
    * パース時点で検出した検証エラーのメッセージ。`validateWorkflow` がそのままタスクidを添えて報告する。
    * 例: `dependsOn: T1`（配列記法の書き忘れ）は解決後の値だけでは「未指定」と区別が付かないため、
@@ -561,9 +574,19 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     );
   }
   const type = resolveEnum(t['type'], isCommitType, defaults.type);
+  const onContextLow = resolveEnum(
+    t['onContextLow'],
+    isContextLowAction,
+    DEFAULT_CONTEXT_LOW_ACTION,
+  );
   if (type.invalidRaw !== undefined) {
     parseWarnings.push(
       `type に未知の値が指定されたため既定値(${type.value})を使いました: ${type.invalidRaw}`,
+    );
+  }
+  if (onContextLow.invalidRaw !== undefined) {
+    parseWarnings.push(
+      `onContextLow に未知の値が指定されたため既定値(${onContextLow.value})を使いました: ${onContextLow.invalidRaw}`,
     );
   }
 
@@ -704,6 +727,7 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
     issue: issueResult.value,
     // cleanupはworktreeの後始末で、taskごとの上書きはスキーマに無い（design.md §16.2）
     cleanup: defaults.cleanup,
+    onContextLow: onContextLow.value,
     parseErrors,
     parseWarnings,
   };
@@ -807,6 +831,9 @@ export function buildOrchestratorTask(
     issue: issueResult.error === undefined ? issueResult.value : undefined,
     // cleanupはworktreeの後始末で、taskごとの上書きはスキーマに無い（resolveTaskと同じ）
     cleanup: DEFAULT_CLEANUP,
+    // `add_task`（design.md §16.29）は残量対策を受け取らない。オーケストレーターが足す
+    // タスクにも既定（何もしない）を入れておき、指定できるフィールドを増やさない
+    onContextLow: DEFAULT_CONTEXT_LOW_ACTION,
     parseErrors: issueResult.error !== undefined ? [issueResult.error] : [],
     parseWarnings: [],
   };

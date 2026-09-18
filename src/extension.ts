@@ -652,6 +652,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 衝突解決セッション専用）。`messaging`（省略可能な機能）とは無関係に常に効かせるため、
     // 同じくトップレベルへ配線する
     readTaskApprovalTimeoutSec: () => readWorkflowsConfig().taskApprovalTimeoutSec,
+    // 残量対策の閾値（Issue #1273）。設定を変えたら次のターンから効くよう毎回読み直す
+    readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
     // 最終マージの判断待ち（design.md §16.26、`finalMerge: orchestrator`）。オーケストレーターが
     // `decide_final_merge`で応答しない場合に自動的に`hold`へ倒すまでの秒数。`messaging`とは
     // 無関係に常に効かせるため、`readMergeApprovalTimeoutSec`と同じくトップレベルへ配線する

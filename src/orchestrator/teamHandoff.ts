@@ -117,6 +117,16 @@ export function handoffPath(repoRoot: string, runId: string, taskId: string, slu
 export const RESULT_HANDOFF_SLUG = 'result';
 
 /**
+ * セッション分割（`onContextLow: split`。Issue #1273）の時点の応答本文を置くスラッグ。
+ *
+ * `RESULT_HANDOFF_SLUG`（タスクが`done`になったときの最終応答）とは別にする。分割は
+ * タスクの途中で起きるもので、下流タスクが`{{T1.handoff}}`で読む「そのタスクの成果」とは
+ * 別物だから。同じスラッグを使うと、分割のたびに未完成の途中経過が最終応答の位置へ
+ * 上書きされる。分割後のセッション自身だけがこの参照を読む。
+ */
+export const SPLIT_HANDOFF_SLUG = 'split';
+
+/**
  * `{{T1.handoff}}` へ展開する参照の文言（Issue #1271）。
  *
  * ファイルの実パスではなく `read_handoff` の引数を示す。パスを渡すとエージェントが

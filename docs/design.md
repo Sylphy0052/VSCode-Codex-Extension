@@ -9298,6 +9298,57 @@ Viewは変化の種類で送る内容を変えない。run一覧・プログラ�
 - `test/unit/workflowGraph.test.ts`: `formatTaskContext`の4ケース（残量と上限あり / 上限だけ不明 / 何も届いていない / 残り0%・累計0を「不明」と混同しない）
 - `test/unit/workflowViewPrograms.test.ts`・`test/unit/workflowViewGraph.test.ts`: 既存の検証内容はそのままに、観測するWebviewメッセージを`feed`の1通へ更新した（§16.37.3のF1の回帰確認は引き続き実物の`ProgramRunner`を通して行う）
 
+### 16.47 コンテキスト残量に応じた自動圧縮とセッション分割（Issue #1273）
+
+#### 背景
+
+残量の取得（§14.9）と手動の圧縮は既にあるが、どちらも人が押すものである。ワークフローの無人実行（§16.7）の最中は誰も押さないため、長いタスクは溢れるか応答の質が落ちるところまで進む。§16.4のpull型（Issue #1271）で1タスクが受け取る量は減ったが、1タスクが長く走る場合の積み上がりは別の問題として残っていた。
+
+#### いつ動かすか（`contextLow.ts`）
+
+判定は`decideContextLow`（純粋関数、`vscode`にも`ChatState`にも依存しない）へ閉じた。チャット側の同種の判定である`view/handoff.ts`の`decideAutoHandoff`と同じ流儀である。
+
+- **ターンの完了だけを境目にする。** `busy`の立ち下がりではなく`ChatState.turnCompletionSeq`の変化を見る。Codexは`thread/status/changed`（idle）を`turn/completed`より先に送るため、`busy`が落ちた時点ではそのターンの結果が確定していない（issue #939と同じ機序）
+- **残量が取れないときは何もしない。** `remainingPercent`が`undefined`なら、0%と取り違えずそのまま何も起こさない。取れないだけのプロバイダで毎ターン圧縮が走る形にしない
+- **1度動いたらラッチする。** 圧縮も分割も残量を回復させるが、回復するまでの数ターンは閾値以下のままになる。ラッチが無いと同じ閾値で何度も発火する。残量が閾値を上回った時点で外れるため、長いタスクでは2回目以降も動作する（分割の世代が進むのはこのため）。残量が取れないターンではラッチを触らない（「回復した」でも「細っている」でもないため）
+
+閾値は`agent.workflows.contextLowPercent`（既定20、`machine-overridable`）という**専用のキー**にした。既定値は`agent.autoHandoff.thresholdPercent`と同じだが、あちらは人が見ているチャットの自動引き継ぎ用で、片方を緩めるともう片方まで動きが変わる形にはしない。
+
+#### 何をするか（`onContextLow`）
+
+ワークフロー定義のタスクに`onContextLow`（`none` / `compact` / `split`、既定`none`）を足した。未知の値は既定へ倒しつつ`parseWarnings`へ残す（`provider` / `isolation`と同じ作法）。
+
+- `compact`: `TaskSession.compact()`（新設）を呼ぶ。Codexは`thread/compact/start`、Claudeは`/compact`の発言で、画面の圧縮ボタンと同じ経路である。**ただし人への確認（`confirmCompact`）と`loop.noteUserAction()`は通さない。** 無人実行では誰も答えられず、後者は「人が割り込んだ」印でループごと止めてしまう
+- `split`: 同じ入力で新しいセッションを開き、続きから走らせる
+- `none`: 何もしない。既定であり、現状と挙動が変わらない
+
+#### 分割の作り（`splitTaskSession`）
+
+**元のタブは残す。** 人が後から経緯を追えるようにするためで、代わりに`pauseLoop()`で続きの指示だけを止める。`stopLoop()`は使えない（`onFinished`が`'taskStopped'`で発火し、タスクが手動停止として`failed`に確定してしまう）。
+
+**新しいセッションは同じ`TaskSessionInput`で開く。** `LiveTask`へ起動時の入力を控えておき、世代（`generation`）だけを進めて渡す。`prepareTaskLaunch`を通し直すとworktreeを作り直し、途中まで書いた変更から切り離された別のディレクトリで続きが始まる。
+
+**渡すのは要点と在り処だけである**（Phase 1・Issue #1271と同じ方針）。その時点の応答本文は受け渡しファイル（スラッグは`split`。最終応答の`result`とは別にする）へ置き、新しいセッションへは構造化サマリ（`buildStructuredSummary` / `formatBrief`）と`read_handoff`の参照だけを渡す。本文をプロンプトへ貼ると、分割で減らしたはずのコンテキストを初手で埋め直すことになる。要点は分割前の自分自身が書いた文字列なので、`{{`を`{ {`へ潰して`expandTemplate`に拾われないようにしたうえで、`{{T1.brief}}`と同じ囲い（§16.4 案3・案4の`formatUntrusted`、nonceはそのタスクのテンプレート展開と同じ値）に入れる。
+
+**回数の上限はタスク全体で通した数を使う。** 新しいセッションへ`task.maxIterations`をそのまま渡すと、分割のたびに上限が増えて`maxReached`の歯止めが効かなくなるため、`remainingIterations`で送信済みの回数を引く（最低1回は残す）。
+
+**古いセッションのリスナーはセッションの同一性で無効化する。** 分割は古いタブを`dispose()`しないため、リスナーは生きたまま残る。人がそのタブへ直接話しかければ状態変化も終了も届き、守らないと古いセッションの結果で`contextUsage`が上書きされたり、タスクが`done`として確定したりする。`attachTaskSession`が配線する`onStateChanged` / `onFinished` / `onApprovalResolved`は、いずれも`live.tasks.get(taskId).session`が自分かどうかを確かめてから進む。
+
+タブ名の世代の印は`sessionTitle.ts`の`buildSessionPanelTitle`が付ける`(続きN)`で、チャットの自動引き継ぎ（§14の`buildHandoffSessionName`。Issue #1145・#1255）と同じ書式に揃えてある。人から見て「同じ作業の続き」であることが、どちらの経路でも同じ見え方になる。
+
+#### 人に見える形にする
+
+黙って会話が短くなる・タブが増えると、理由を追えなくなる。
+
+- 警告欄（`live.warnings`）へ`contextCompacted` / `contextSplit` / `contextActionFailed`として残す
+- 会話の中へも`TaskSession.note()`（新設。`noteLocalEvent`。CLIとのやり取りには乗らない画面だけの記録）で1行残す。圧縮は**実行する前に**書く（圧縮は会話の中身を要約で置き換えるため、後から足すと要約より後ろの浮いた位置に出る）。分割は元のセッションと新しいセッションの両方へ書き、どちらからでも相手を辿れるようにする
+- 圧縮・分割そのものが失敗しても**runは止めない**。古いセッションのまま進み、`contextActionFailed`の警告だけが残る
+
+#### 確かめ方
+
+- `test/unit/contextLow.test.ts`（新設）: `decideContextLow`の発火条件（閾値以下・ターン完了・`none`では動かない・実行中は動かない・残量不明では動かない）とラッチの開閉、`remainingIterations`の下限、`buildSplitPrompt`が本文を貼らず参照だけを載せることと`{{`を無害化すること
+- `test/unit/sessionTitle.test.ts`: `generation`が2以上のときだけ`(続きN)`が付くこと
+
 ### 14.105 Advisorにskillを提示しない（Issue #1061）
 
 §14.80のセカンドオピニオンは、差分と変更対象ファイルだけを置いた隔離ディレクトリ（review bundle。§14.87）をセッションの作業ディレクトリにし、固定指示で「この作業ディレクトリの外を読みに行かないでください」と縛る。ところがAdvisorは、**1つ目のコマンドで** `~/.codex/skills/<name>/SKILL.md` を読みに行っていた（Issue #1047 のE2E probe `eval-results/probe-c-repo-v1/` で、条件A・条件C-repoの両方に出た）。

@@ -39,6 +39,7 @@ const task = (overrides: Partial<WorkflowTask> = {}): WorkflowTask => ({
   retries: 0,
   issue: undefined,
   cleanup: 'keep',
+  onContextLow: 'none' as const,
   parseErrors: [],
   parseWarnings: [],
   ...overrides,

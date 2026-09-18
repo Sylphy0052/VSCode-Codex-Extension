@@ -160,6 +160,16 @@ export interface TaskSessionInput {
    * 常にCodexのセッションを開くため、Claude側の配線は要らない。
    */
   disableSkills?: boolean;
+  /**
+   * このセッションが同じタスクの何代目か（Issue #1273）。分割（`onContextLow: split`）で
+   * 開き直したときだけ2以上が入る。通常の起動は省略（＝1代目）。
+   *
+   * `role` / `taskId` と同じく**タブ名を分ける用途だけに使う**（権限の決定には使わない）。
+   * 渡さないと、分割のたびに同じタブ名（`#1200 実装`）が並び、どれが続きなのか画面から
+   * 判らなくなる。印の付け方はチャットの自動引き継ぎ（Issue #1145・#1255 の `(続きN)`）に
+   * 揃える（`view/sessionTitle.ts`）。
+   */
+  generation?: number;
 }
 
 export interface TaskSessionHost {
@@ -268,6 +278,31 @@ export interface TaskSession {
    * `onApprovalResolved` のリスナーにも同じ通知が届く。
    */
   decideApproval(requestId: number | string, decision: ApprovalDecision): void;
+  /**
+   * 会話を要約して圧縮する（Issue #1273、design.md §14.9）。
+   *
+   * 画面の圧縮ボタンと同じ経路（Codexは `thread/compact/start`、Claudeは `/compact` の
+   * 発言）を通すが、**人への確認は行わない**。無人実行では誰も答えられないため、
+   * 呼ぶかどうかの判断は `contextLow.ts` の `decideContextLow` が済ませてある。
+   *
+   * 画面の圧縮ボタンと違い `loop.noteUserAction()` は呼ばない。あれは「人が割り込んだ」
+   * 印でループごと止めるためのもので、ここは止めずに圧縮だけを挟みたい。
+   *
+   * 会話の内容を不可逆に変える。失敗したら例外を投げ、呼び出し側（runner.ts）が
+   * 警告として残す（runは止めない）。
+   */
+  compact(): Promise<void>;
+  /**
+   * 拡張機能側で起きたことを会話の中へ1行残す（Issue #1273）。
+   *
+   * CLIとのやり取り（transcript）には乗らない画面だけの記録
+   * （`ChatSession.noteLocalEvent` / `ClaudeStreamSession.noteLocalEvent`）。圧縮・分割は
+   * 黙って起きると「なぜ会話が短くなったのか」が人に判らなくなるため、警告欄
+   * （`live.warnings`）と会話の両方へ事実を残す。
+   *
+   * `id` は同じ事象を二重に積まないための鍵。
+   */
+  note(id: string, text: string): void;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /** タブを背面で用意する。開始時に呼ぶ。 */

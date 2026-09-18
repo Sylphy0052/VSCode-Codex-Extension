@@ -1483,6 +1483,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         mcpRequested ? this.checkMcpStartupStatus(entry) : Promise.resolve(true),
       stopLoop: () => entry.loop.stop('taskStopped'),
       decideApproval: (requestId, decision) => this.resolveApproval(entry, requestId, decision),
+      // 無人実行の自動圧縮（Issue #1273）。画面の圧縮ボタン（`handleMessage`の`compact`
+      // 分岐）と違い、人への確認（`confirmCompact`）も`loop.noteUserAction()`も通さない。
+      // 呼ぶかどうかは`contextLow.ts`が判断済みで、ここで止めるとループごと停止してしまう
+      compact: () => entry.session.compact(),
+      note: (id, text) => entry.session.noteLocalEvent(id, text),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
       dispose: () => this.teardown(entry),

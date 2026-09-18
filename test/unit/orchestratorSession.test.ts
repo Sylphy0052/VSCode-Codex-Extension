@@ -37,6 +37,7 @@ function definition(providers: readonly ('codex' | 'claude')[]): WorkflowDefinit
       retries: 0,
       isolation: 'worktree',
       cleanup: 'keep',
+      onContextLow: 'none' as const,
       cwd: '',
       model: '',
       effort: '',
