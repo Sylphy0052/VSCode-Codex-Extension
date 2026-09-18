@@ -169,6 +169,8 @@ import {
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { initNotificationSounds } from './view/notificationSound';
+import { initOsNotifications } from './view/osNotification';
+import { parseFocusRequest } from './util/osNotify';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
@@ -335,6 +337,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 通知音の音源置き場を覚えさせる（issue #1242）。`resources/`配下のWAVを鳴らすため、
   // 拡張機能のインストール先が要る
   initNotificationSounds(context.extensionUri, log);
+
+  // OS通知のクリック先URI（`vscode://<拡張機能のid>/focus?...`）を組み立てるのに、
+  // 拡張機能のidが要る（Issue #1285）
+  initOsNotifications(context.extension.id, log);
 
   // 前回の異常終了で残ったレビュー材料を回収する（Issue #926 E）。十分に古いものだけを
   // 消すので、別ウィンドウで使用中のものは巻き込まない。起動を待たせる必要は無い
@@ -1215,6 +1221,42 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     log,
   );
+  // OS通知（Issue #1285）のクリックを受ける。`vscode://<拡張機能のid>/focus?provider=...&session=...`
+  //
+  // **どのウィンドウがこれを受けるかはVSCodeが決める**（直近にアクティブだったウィンドウ）。
+  // 目的のセッションを持たないウィンドウへ届いた場合は、勝手に会話を開き直さず何もしない
+  // （別ウィンドウで開いている同じ会話を二重に立ち上げないため）。
+  //
+  // `vscode://`のリンクは第三者のWebページからも発行できる（VSCodeの確認ダイアログは挟まる）。
+  // ここで起きるのは「既に開いている会話のタブを前面に出す」だけで、会話の中身を読み出す・
+  // 何かを送ることはできない。既知のセッションidを持たない相手には、どのidが開いているかを
+  // 総当たりで探ることしかできず、idはUUID（Claude Codeは`randomSessionId()`、Codexは
+  // app-serverの`threadId`）のため現実的な探索経路にならない（セキュリティ監査: low）。
+  context.subscriptions.push(
+    vscode.window.registerUriHandler({
+      handleUri(uri: vscode.Uri): void {
+        const request = parseFocusRequest(uri.path, uri.query);
+        if (!request.ok) {
+          // `not-focus`は他の用途のURIかもしれないので黙って捨てる。残る2つは
+          // 通知から来たはずのURIが壊れているということなので記録する
+          if (request.reason !== 'not-focus') {
+            log.info(`通知から開く要求を受け取れませんでした（${request.reason}）: ${uri.path}`);
+          }
+          return;
+        }
+        const revealed =
+          request.provider === 'claude'
+            ? claudeChat.revealSession(request.sessionId)
+            : chat.revealSession(request.sessionId);
+        if (!revealed) {
+          log.info(
+            `通知から開こうとした会話はこのウィンドウにありませんでした: ${request.sessionId}`,
+          );
+        }
+      },
+    }),
+  );
+
   const onSessionKanbanRelevantChange = (): void => {
     sessionKanban.refresh();
     // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる
