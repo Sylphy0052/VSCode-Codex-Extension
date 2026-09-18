@@ -12,6 +12,7 @@ import {
   type JsonRpcResponse,
   type McpConnection,
   type McpTransportPort,
+  type DispatchErrorLogPort,
 } from '../../src/orchestrator/messaging';
 import { ORCHESTRATOR_CONNECTION_ID } from '../../src/orchestrator/orchestratorSession';
 import { RESERVED_ORCHESTRATOR_TASK_ID } from '../../src/orchestrator/workflow';
@@ -143,13 +144,23 @@ class FakeSessionBridge implements SessionBridgePort {
   ];
   /** `send`を失敗させたいテスト用。 */
   sendError: string | undefined;
+  /** `ask`が返す値。差し替えると受け付け失敗・questionId欠落を試せる。 */
+  askReply: SessionAskResult = { ok: true, questionId: 'q-1' };
   /** `askResult`が返す状態。 */
   askStatus: SessionAskStatusResult = { ok: true, status: 'done', answer: '回答本文' };
+  /** 設定すると各メソッドがこの例外を投げる（`safeDispatch`の経路を通す）。 */
+  throws: Error | undefined;
 
   listSessions(): readonly SessionSummary[] {
+    if (this.throws !== undefined) {
+      throw this.throws;
+    }
     return this.sessions;
   }
   async send(target: SessionTarget, body: string): Promise<SessionBridgeResult> {
+    if (this.throws !== undefined) {
+      throw this.throws;
+    }
     if (this.sendError !== undefined) {
       return { ok: false, error: this.sendError };
     }
@@ -157,10 +168,16 @@ class FakeSessionBridge implements SessionBridgePort {
     return { ok: true };
   }
   async ask(target: SessionTarget, question: string): Promise<SessionAskResult> {
+    if (this.throws !== undefined) {
+      throw this.throws;
+    }
     this.asked.push({ target, question });
-    return { ok: true, questionId: 'q-1' };
+    return this.askReply;
   }
   async askResult(): Promise<SessionAskStatusResult> {
+    if (this.throws !== undefined) {
+      throw this.throws;
+    }
     return this.askStatus;
   }
 }
@@ -199,6 +216,8 @@ interface Wired {
   hub: TaskMessagingHub;
   bridge: FakeSessionBridge;
   handoff: FakeHandoffPort;
+  /** `MessagingMcpServer`がdispatch例外を記録した行。 */
+  logs: string[];
 }
 
 function wire(
@@ -213,13 +232,15 @@ function wire(
       { id: 'T1', state: 'running', summary: '' },
       { id: 'T2', state: 'running', summary: '' },
     ],
-    sessionBridge: bridge,
+    sessionBridge: () => bridge,
     handoff,
   });
-  new MessagingMcpServer(hub, transport);
+  const logs: string[] = [];
+  const logPort: DispatchErrorLogPort = { error: (m) => logs.push(m) };
+  new MessagingMcpServer(hub, transport, logPort);
   const conn = new FakeConnection(taskId);
   transport.connect(conn);
-  return { conn, hub, bridge, handoff };
+  return { conn, hub, bridge, handoff, logs };
 }
 
 /** `sessionBridge` / `handoff` を一切配線しないサーバ。 */
@@ -422,7 +443,7 @@ describe('send_messageのセッション宛（Issue #1274）', () => {
     const bridge = new FakeSessionBridge();
     const hub = new TaskMessagingHub({
       listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
-      sessionBridge: bridge,
+      sessionBridge: () => bridge,
     });
     const target: SessionTarget = {
       windowId: WINDOW_ID,
@@ -586,5 +607,102 @@ describe('read_artifact / write_artifact（Issue #1274）', () => {
     const body = lastBody(conn);
     expect(body['accepted']).toBe(false);
     expect(body['reason']).toBe('受け渡しファイルがありません');
+  });
+});
+
+describe('SessionBridgePortの失敗経路（Issue #1274）', () => {
+  it('ask_sessionが受け付けられなければ理由をそのまま返す', async () => {
+    const bridge = new FakeSessionBridge();
+    bridge.askReply = { ok: false, error: '相手のウィンドウから応答がありませんでした' };
+    const { conn } = wire('T1', { bridge });
+
+    call(conn, 'ask_session', { to: SESSION_REF, question: 'q' });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(false);
+    expect(body['reason']).toBe('相手のウィンドウから応答がありませんでした');
+  });
+
+  it('ask_sessionがok:trueでもquestionIdが無ければ受け付けない', async () => {
+    const bridge = new FakeSessionBridge();
+    bridge.askReply = { ok: true };
+    const { conn } = wire('T1', { bridge });
+
+    call(conn, 'ask_session', { to: SESSION_REF, question: 'q' });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(false);
+    expect(body['questionId']).toBeUndefined();
+  });
+
+  it('ask_session_resultが読めなければ理由をそのまま返す', async () => {
+    const bridge = new FakeSessionBridge();
+    bridge.askStatus = { ok: false, error: '宛先のウィンドウを特定できませんでした' };
+    const { conn } = wire('T1', { bridge });
+
+    call(conn, 'ask_session_result', { to: SESSION_REF, questionId: 'q-1' });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['accepted']).toBe(false);
+    expect(body['reason']).toBe('宛先のウィンドウを特定できませんでした');
+  });
+
+  it('ask_session_resultのfailedは相手が返した理由を載せる', async () => {
+    const bridge = new FakeSessionBridge();
+    bridge.askStatus = { ok: true, status: 'failed', reason: '会話が閉じられました' };
+    const { conn } = wire('T1', { bridge });
+
+    call(conn, 'ask_session_result', { to: SESSION_REF, questionId: 'q-1' });
+    await flush();
+
+    const body = lastBody(conn);
+    expect(body['status']).toBe('failed');
+    expect(body['reason']).toBe('会話が閉じられました');
+    expect(body['answer']).toBeUndefined();
+  });
+
+  it.each([
+    ['send_message', { to: SESSION_REF, body: '本文', expectReply: false }],
+    ['ask_session', { to: SESSION_REF, question: 'q' }],
+    ['ask_session_result', { to: SESSION_REF, questionId: 'q-1' }],
+    ['list_sessions', {}],
+  ])('%sでbridgeが例外を投げてもdispatchで受け止め、ログに残る', async (name, args) => {
+    const bridge = new FakeSessionBridge();
+    bridge.throws = new RangeError('boom');
+    const { conn, logs } = wire('T1', { bridge });
+
+    call(conn, name, args as Record<string, unknown>);
+    await flush();
+
+    const response = conn.sent[conn.sent.length - 1];
+    expect(response && 'error' in response).toBe(true);
+    expect((response as { error: { code: number } }).error.code).toBe(-32603);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('RangeError');
+    expect(logs[0]).toContain('boom');
+  });
+
+  it('sessionBridgeが後から入ってもtools/listへ反映される（実体の遅延配線）', async () => {
+    const transport = new FakeTransport();
+    let bridge: SessionBridgePort | undefined = undefined;
+    const hub = new TaskMessagingHub({
+      listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
+      sessionBridge: () => bridge,
+    });
+    new MessagingMcpServer(hub, transport);
+    const conn = new FakeConnection('T1');
+    transport.connect(conn);
+
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    await flush();
+    expect(toolNames(conn)).not.toEqual(expect.arrayContaining(SESSION_TOOLS.map((t) => t.name)));
+
+    bridge = new FakeSessionBridge();
+    conn.fireRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    await flush();
+    expect(toolNames(conn)).toEqual(expect.arrayContaining(SESSION_TOOLS.map((t) => t.name)));
   });
 });

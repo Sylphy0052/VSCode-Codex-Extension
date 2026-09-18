@@ -1435,8 +1435,15 @@ export interface TaskMessagingHubDeps {
    * 実体は`extension.ts`が`SessionHub`（共有ディレクトリ経由の要求・応答）と自ウィンドウの
    * チャット画面への直接の配送を束ねて渡す。ここから見える口は宛先の別によらず1つで、
    * 同一ウィンドウか別ウィンドウかの分岐は実体側に閉じている。
+   *
+   * **値ではなく毎回現在値を返す関数で受ける**（`readReplyTimeoutSec`と同じ流儀）。
+   * `extension.ts`の`activate`では`WorkflowRunner`のほうが`SessionHub`一式より先に
+   * 組み立てられる。値で受けると、その間に復元されたrun（`restoreRunsForView`からの
+   * 自動再開）のhubだけが`undefined`を掴んだままになり、以後ずっと`SESSION_TOOLS`が
+   * 見えない——エラーにはならず静かに機能が欠ける。関数で受けておけば、実体が後から
+   * 入っても次の`tools/list`から効く。
    */
-  sessionBridge?: SessionBridgePort | undefined;
+  sessionBridge?: (() => SessionBridgePort | undefined) | undefined;
 }
 
 /**
@@ -1520,7 +1527,7 @@ export class TaskMessagingHub {
    * （無ければ `undefined`）。`handoff`と同じく接続の種別を問わず同じ値を使う。
    */
   get sessionBridge(): SessionBridgePort | undefined {
-    return this.deps.sessionBridge;
+    return this.deps.sessionBridge?.();
   }
 
   /**
@@ -1541,7 +1548,7 @@ export class TaskMessagingHub {
     target: SessionTarget,
     body: string,
   ): Promise<SendMessageValidationResult> {
-    const bridge = this.deps.sessionBridge;
+    const bridge = this.deps.sessionBridge?.();
     if (bridge === undefined) {
       return { accepted: false, reason: `宛先が見つかりません（セッション宛の口がありません）` };
     }
@@ -1565,7 +1572,7 @@ export class TaskMessagingHub {
     target: SessionTarget,
     question: string,
   ): Promise<SendMessageValidationResult & { questionId?: string }> {
-    const bridge = this.deps.sessionBridge;
+    const bridge = this.deps.sessionBridge?.();
     if (bridge === undefined) {
       return { accepted: false, reason: `宛先が見つかりません（セッション宛の口がありません）` };
     }
@@ -1594,7 +1601,7 @@ export class TaskMessagingHub {
     status?: 'running' | 'done' | 'failed';
     answer?: string;
   }> {
-    const bridge = this.deps.sessionBridge;
+    const bridge = this.deps.sessionBridge?.();
     if (bridge === undefined) {
       return { accepted: false, reason: `宛先が見つかりません（セッション宛の口がありません）` };
     }

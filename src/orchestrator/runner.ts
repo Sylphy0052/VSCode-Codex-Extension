@@ -2206,10 +2206,11 @@ export class WorkflowRunner {
         // ワークフロー定義ファイルが属するワークスペースフォルダの絶対パスで、run開始時に
         // 一度だけ解決済みの値（`startRun`のJSDoc参照）をそのまま使う
         handoff: buildHandoffPort(live.repoRoot, runId),
-        // ウィンドウをまたぐセッションへの口（design.md §16.21、Issue #1274）。hubはrunが
-        // 生きている間ずっと同じインスタンスなので、ここで一度だけ現在値を解決する
-        // （`extension.ts`側の実体はactivate中に作られ、以後差し替わらない）
-        sessionBridge: messaging.sessionBridge?.(),
+        // ウィンドウをまたぐセッションへの口（design.md §16.21、Issue #1274）。
+        // 関数のまま渡す——`extension.ts`側の実体は`WorkflowRunner`より後に作られるため、
+        // ここで値へ解決すると、復元されたrunだけが`undefined`を掴んだままになる
+        // （`TaskMessagingHubDeps.sessionBridge`のJSDoc参照）
+        sessionBridge: messaging.sessionBridge,
       });
     live.messagingHub = hub;
     try {
