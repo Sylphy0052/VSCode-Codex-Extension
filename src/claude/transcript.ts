@@ -273,11 +273,44 @@ function appendUserEntry(
   if (!isHumanMessage(entry)) {
     return;
   }
-  const text = cleanText(messageText(entry));
+  const raw = messageText(entry);
+  // 制御タグを落とすと空になる発言は、slash commandで始めたもの（issue #1278）。
+  // 打った通りの `/名前 引数` を組み立て直して積む
+  const text = cleanText(raw) || slashCommandText(raw);
   if (text === '') {
     return;
   }
   items.push(item(entry, 'userMessage', { text }));
+}
+
+/**
+ * `/<名前> <引数>` で始めた発言の本文（issue #1278）。
+ *
+ * CLIはslash commandの発言を `<command-name>` などの制御タグだけで記録するため、
+ * `CONTROL_BLOCK` を落とすと本文が何も残らず、会話から発言ごと消えていた。表示のために
+ * ここで組み立て直す。`cleanText` 自体は変えない（`sessionStore.ts`の`isBackgroundOnly`が
+ * 「制御タグを落とすと空になる」性質で`/usage`等の裏コマンドを見分けているため、issue #1145）。
+ *
+ * 合わなければ空文字を返す。呼び出し側は従来どおり積まない。
+ */
+function slashCommandText(raw: string): string {
+  const name = commandTagBody(raw, 'command-name');
+  if (!name.startsWith('/')) {
+    return '';
+  }
+  const args = commandTagBody(raw, 'command-args');
+  return args === '' ? name : `${name} ${args}`;
+}
+
+/** slash commandの発言から中身を取り出す制御タグ（`CONTROL_BLOCK`が落とす側の一部）。 */
+const COMMAND_TAG_BODY = {
+  'command-name': /<command-name>([\s\S]*?)<\/command-name>/,
+  'command-args': /<command-args>([\s\S]*?)<\/command-args>/,
+} as const;
+
+/** 制御タグ1つ分の中身。タグが無ければ空文字。 */
+function commandTagBody(raw: string, tag: keyof typeof COMMAND_TAG_BODY): string {
+  return (COMMAND_TAG_BODY[tag].exec(raw)?.[1] ?? '').trim();
 }
 
 /** ツール名。会話には積まず、専用の一覧として別に持つ。 */

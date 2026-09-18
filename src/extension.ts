@@ -1173,7 +1173,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         kind: action.kind,
         provider: target.provider,
         threadId: target.threadId,
-        text: action.kind === 'send' ? action.text : undefined,
+        text: action.kind === 'send' || action.kind === 'sideQuestion' ? action.text : undefined,
+        sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
         approvalRequestId:
           action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
         decision: action.kind === 'approvalDecision' ? action.decision : undefined,
@@ -1190,6 +1191,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         turns: reply.payload?.turns,
         capturedAt: reply.payload?.capturedAt,
         handoff: reply.payload?.handoff,
+        sideQuestion: reply.payload?.sideQuestion,
       };
     },
     log,
@@ -3655,6 +3657,9 @@ function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | 
   if (result.handoff !== undefined) {
     return { handoff: result.handoff };
   }
+  if (result.sideQuestion !== undefined) {
+    return { sideQuestion: result.sideQuestion };
+  }
   return undefined;
 }
 
@@ -3674,13 +3679,14 @@ function toSessionControlAction(
     | 'approvalRequestId'
     | 'decision'
     | 'limit'
+    | 'sideQuestionId'
     | 'handoffRequestId'
     | 'handoffDecision'
     | 'handoffModel'
     | 'handoffEffort'
   >,
 ): SessionControlAction | undefined {
-  const { text, approvalRequestId, decision, limit } = request;
+  const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
   switch (request.kind as string) {
     case 'open':
       return { kind: 'open' };
@@ -3697,6 +3703,13 @@ function toSessionControlAction(
     case 'recentTurns':
       // 件数は受信側（`controlSession`）が範囲へ丸める。ここでは形だけ確かめる
       return { kind: 'recentTurns', limit: typeof limit === 'number' ? limit : 1 };
+    case 'sideQuestion':
+      // 質問文の空・長さは受信側（`controlSession`）が確かめる
+      return text === undefined ? undefined : { kind: 'sideQuestion', text };
+    case 'sideQuestionResult':
+      return sideQuestionId === undefined
+        ? undefined
+        : { kind: 'sideQuestionResult', sideQuestionId };
     case 'approvalDecision':
       return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
         ? undefined

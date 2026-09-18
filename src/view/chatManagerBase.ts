@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
@@ -17,6 +18,7 @@ import type {
   SessionApprovalDetail,
   SessionHandoffDetail,
   SessionRecentTurn,
+  SessionSideQuestion,
   SharedApprovalDecision,
   SharedHandoffDecision,
 } from './sessionHub';
@@ -153,6 +155,40 @@ const MAX_RECENT_TURNS = 20;
 /** 1件の本文の上限。カードは流れを掴むためのもので、全文はタブ側で読む。 */
 const MAX_RECENT_TURN_CHARS = 600;
 
+/**
+ * 脇道の質問の回答を返すときの上限（Issue #1261）。
+ *
+ * 直近のやり取り（`MAX_RECENT_TURN_CHARS`）より大きくとる。やり取りは流れを掴むための
+ * 抜粋だが、回答はそれ自体が読みたいもので、途中で切れると用を成さない。それでも
+ * 上限を外さないのは、応答ファイルが共有ディレクトリを経由するため（会話1本ぶんの
+ * 長文をそのまま載せない）。
+ */
+const MAX_SIDE_QUESTION_ANSWER_CHARS = 6_000;
+
+/** 質問文の上限。長文を投げる用途なら本流の会話（`send`）を使う。 */
+const MAX_SIDE_QUESTION_CHARS = 2_000;
+
+/**
+ * 回答を待つ上限（Issue #1261）。
+ *
+ * 要求と応答の共通タイムアウト（`sessionHub.ts`の`REPLY_TIMEOUT_MS` = 5秒）とは別物。
+ * 脇道の質問はモデルの応答を待つため5秒では終わらず、要求（投げる）と結果の取得を
+ * 分けている。これは「投げたきり終わらない質問」を片付けるための上限で、これを過ぎた
+ * 質問は`failed`にして画面の待機表示を解く（受入基準「待機表示のまま固まらない」）。
+ */
+const SIDE_QUESTION_TIMEOUT_MS = 180_000;
+
+/**
+ * 終わった質問を保持しておく時間。
+ *
+ * 統括ページは3秒ごとに結果を取りに来るため、これだけあれば読み切れる。統括ページを
+ * 閉じた後に誰も取りに来なかった分も、この時間で消える。
+ */
+const SIDE_QUESTION_TTL_MS = 300_000;
+
+/** 同時に覚えておく質問の数。超えたら古いものから捨てる。 */
+const MAX_SIDE_QUESTIONS = 20;
+
 /** セッション統括ページから1つのセッションへ行える操作（Issue #1258）。 */
 export type SessionControlAction =
   | { kind: 'open' }
@@ -166,6 +202,10 @@ export type SessionControlAction =
   | { kind: 'approvalDecision'; approvalRequestId: string; decision: SharedApprovalDecision }
   /** 会話の直近のやり取りを取り寄せる（Issue #1260）。カードを展開している間だけ送る。 */
   | { kind: 'recentTurns'; limit: number }
+  /** 脇道の質問を投げる（Issue #1261）。回答を待たず、受け付けたことだけを返す。 */
+  | { kind: 'sideQuestion'; text: string }
+  /** 投げた脇道の質問の進み具合を取りに行く（Issue #1261）。 */
+  | { kind: 'sideQuestionResult'; sideQuestionId: string }
   /** 保留中の引き継ぎ確認の中身を取り寄せる（Issue #1280）。カードを展開したときだけ送る。 */
   | { kind: 'handoffDetail' }
   /**
@@ -192,8 +232,60 @@ export interface SessionControlResult {
   turns?: SessionRecentTurn[] | undefined;
   /** `turns`を作った時刻（Issue #1260）。 */
   capturedAt?: number | undefined;
+  /** `kind === 'sideQuestion'` / `'sideQuestionResult'`のときだけ入る（Issue #1261）。 */
+  sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`のときだけ入る、保留中の引き継ぎ確認（Issue #1280）。 */
   handoff?: SessionHandoffDetail | undefined;
+}
+
+/**
+ * 投げた脇道の質問1件の状態（Issue #1261）。
+ *
+ * `SessionSideQuestion`（統括ページへ運ぶ形）に、掃除のための`finishedAt`を足したもの。
+ */
+interface SideQuestionRun extends SessionSideQuestion {
+  /** どの会話へ投げた質問か。同じ会話への連投を止める判定に使う。 */
+  threadId: string | undefined;
+  /** 終わった時刻。走っている間は`undefined`で、掃除の対象にしない。 */
+  finishedAt: number | undefined;
+  /**
+   * 時間切れと管理クラスの破棄を実装側（`runSideQuestion`）へ伝える口。
+   *
+   * 待つのをやめるだけでは、Codexはforkしたスレッドとエントリが、Claude Codeは
+   * 応答待ちが残る。打ち切りをそこまで届かせる。
+   */
+  abort: AbortController;
+}
+
+/**
+ * `AbortSignal`が発火したら`reject`するだけのPromise（Issue #1261）。
+ *
+ * 打ち切れない待ち（Claude Codeの`side_question`のように、送った要求を取り消す口が
+ * 無いもの）を`Promise.race`で区切るのに使う。相手が後から応答しても、待っていた側は
+ * 既に離れているだけで、要求そのものは止まっていない。
+ */
+export function abortAsRejection(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const fail = (): void => {
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason)));
+    };
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener('abort', fail, { once: true });
+  });
+}
+
+function toSideQuestionView(run: SideQuestionRun): SessionSideQuestion {
+  return {
+    id: run.id,
+    status: run.status,
+    question: run.question,
+    answer: run.answer,
+    error: run.error,
+  };
 }
 
 /**
@@ -372,6 +464,14 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   implements vscode.Disposable
 {
   protected readonly panels = new Map<string, TPanel>();
+  /**
+   * 統括ページから投げられた脇道の質問（Issue #1261）。
+   *
+   * 回答は本流の会話に残さないため、届いた回答をここで預かり、要求元が
+   * `sideQuestionResult`で取りに来るまで持つ。会話（`panels`）ではなくこの管理クラスが
+   * 持つのは、質問を投げたタブが閉じた後でも投げた側が結果を読めるようにするため。
+   */
+  private readonly sideQuestions = new Map<string, SideQuestionRun>();
   /** 名前変更・クリア・エディタ選択範囲挿入の対象。最後にアクティブだった画面。 */
   protected active: TPanel | undefined;
   /**
@@ -672,6 +772,14 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * `interrupt`の分岐が持っているため、ここで作り直すと画面からの操作と挙動がずれる。
    */
   controlSession(threadId: string, action: SessionControlAction): SessionControlResult {
+    // 結果の取得だけは会話の有無より先に見る（Issue #1261）。回答が返る前にタブが
+    // 閉じても、投げた側は結果を読めるようにする（預かっているのはこの管理クラス）
+    if (action.kind === 'sideQuestionResult') {
+      const run = this.sideQuestions.get(action.sideQuestionId);
+      return run === undefined
+        ? { ok: false, error: 'この脇道の質問は見つかりませんでした' }
+        : { ok: true, sideQuestion: toSideQuestionView(run) };
+    }
     const entry = this.panels.get(threadId);
     if (entry === undefined || entry.disposed) {
       return { ok: false, error: 'この会話は既に閉じられています' };
@@ -702,6 +810,24 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         }
         entry.loop.resume();
         return { ok: true };
+      case 'sideQuestion': {
+        const question = action.text.trim();
+        if (question === '') {
+          return { ok: false, error: '質問の内容がありません' };
+        }
+        if (question.length > MAX_SIDE_QUESTION_CHARS) {
+          return { ok: false, error: '質問が長すぎます（会話のタブから送ってください）' };
+        }
+        // 同じ会話へ重ねて投げさせない。1件ごとにCodexはforkスレッド、Claude Codeは
+        // 制御要求を1本使うため、連打でいくらでも並行に走らせられる形にしない
+        if (this.hasRunningSideQuestion(threadId)) {
+          return { ok: false, error: 'この会話は前の脇道の質問の回答待ちです' };
+        }
+        return {
+          ok: true,
+          sideQuestion: toSideQuestionView(this.beginSideQuestionRun(entry, question)),
+        };
+      }
       case 'approvalDetail':
         return { ok: true, approvals: describePendingApprovals(entry.session.getState()) };
       case 'recentTurns':
@@ -745,6 +871,112 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       }
     }
   }
+
+  /**
+   * 脇道の質問を投げ、回答を預かる（Issue #1261）。
+   *
+   * 回答は待たずに戻る。統括ページは`sessionHubRequestPort`の5秒のタイムアウトの中で
+   * 「受け付けた」ことだけを受け取り、以降は`sideQuestionResult`で進み具合を取りに来る。
+   *
+   * 回答は`sideQuestions`にだけ置く。`runSideQuestion`の実装（Codexはephemeralな
+   * forkスレッド、Claude Codeは`side_question`の制御要求）はどちらも本流の会話
+   * （`entry.session`の`items`）へ項目を積まないため、統括ページから投げた質問と回答は
+   * 会話のタブ側には現れない（受入基準）。
+   */
+  private beginSideQuestionRun(entry: TPanel, question: string): SideQuestionRun {
+    this.sweepSideQuestions();
+    const abort = new AbortController();
+    const run: SideQuestionRun = {
+      id: randomUUID(),
+      threadId: entry.session.threadId,
+      question,
+      status: 'running',
+      answer: undefined,
+      error: undefined,
+      finishedAt: undefined,
+      abort,
+    };
+    this.sideQuestions.set(run.id, run);
+    // 時間切れは表示だけの問題ではない。Codexはforkしたスレッドとエントリを、
+    // Claude Codeは応答待ちを抱えたままになるため、`signal`で実装側にも知らせて
+    // 後始末（中断・破棄）まで届かせる
+    const timer = setTimeout(
+      () => abort.abort(new Error('回答が返ってきませんでした（時間切れ）')),
+      SIDE_QUESTION_TIMEOUT_MS,
+    );
+    void this.runSideQuestion(entry, question, abort.signal)
+      .finally(() => {
+        clearTimeout(timer);
+      })
+      .then(
+        (answer) => {
+          run.status = 'done';
+          run.answer =
+            answer.length > MAX_SIDE_QUESTION_ANSWER_CHARS
+              ? answer.slice(0, MAX_SIDE_QUESTION_ANSWER_CHARS)
+              : answer;
+          run.finishedAt = Date.now();
+        },
+        (e: unknown) => {
+          run.status = 'failed';
+          run.error = e instanceof Error ? e.message : String(e);
+          run.finishedAt = Date.now();
+        },
+      );
+    return run;
+  }
+
+  /** その会話に回答待ちの質問が残っているか。連投を止めるのに使う。 */
+  private hasRunningSideQuestion(threadId: string): boolean {
+    for (const run of this.sideQuestions.values()) {
+      if (run.status === 'running' && run.threadId === threadId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 終わってから時間が経った質問と、溢れた古い質問を捨てる。
+   *
+   * 走っている質問（`finishedAt`が無い）は件数の溢れでも消さない。消すと、その質問の
+   * 結果を取りに来た統括ページが「見つかりません」を受け取ったまま待ち続ける。
+   */
+  private sweepSideQuestions(): void {
+    const now = Date.now();
+    for (const [id, run] of this.sideQuestions) {
+      if (run.finishedAt !== undefined && now - run.finishedAt > SIDE_QUESTION_TTL_MS) {
+        this.sideQuestions.delete(id);
+      }
+    }
+    // `Map`は挿入順に回るため、先頭が最も古い
+    for (const [id, run] of this.sideQuestions) {
+      if (this.sideQuestions.size <= MAX_SIDE_QUESTIONS) {
+        break;
+      }
+      if (run.finishedAt !== undefined) {
+        this.sideQuestions.delete(id);
+      }
+    }
+  }
+
+  /**
+   * 脇道の質問を実際に投げて、回答本文を返す（Issue #1261）。
+   *
+   * Codexは`thread/fork`（ephemeral）、Claude Codeは`side_question`の制御要求と、
+   * 経路がまるごと違うためサブクラスが持つ。どちらも本流の会話へ項目を積まないこと、
+   * 失敗は`throw`で伝えること（画面へそのまま出る文言にする）を約束とする。
+   *
+   * `signal`は時間切れ（`SIDE_QUESTION_TIMEOUT_MS`）と管理クラスの破棄で発火する。
+   * これを受けたら待つのをやめるだけでなく、確保した資源（Codexのforkスレッドと
+   * エントリ）をそこで手放すところまで行う。放っておくと、応答を返さない相手ほど
+   * 積み上がっていく。
+   */
+  protected abstract runSideQuestion(
+    entry: TPanel,
+    question: string,
+    signal: AbortSignal,
+  ): Promise<string>;
 
   /**
    * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
@@ -930,6 +1162,12 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   dispose(): void {
+    // 走っている脇道の質問も打ち切る（Issue #1261）。待ち続けている実装側へ伝えないと、
+    // forkしたスレッドや応答待ちが解けないまま残る
+    for (const run of this.sideQuestions.values()) {
+      run.abort.abort(new Error('拡張機能が終了しました'));
+    }
+    this.sideQuestions.clear();
     for (const entry of this.allPanels()) {
       this.teardown(entry);
     }
