@@ -503,11 +503,12 @@ function collectRepos(data) {
   return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label, 'ja'));
 }
 function withParent(key, label) { const parts = key.split('/'); return parts.length >= 2 && parts[parts.length - 2] !== '' ? parts[parts.length - 2] + '/' + label : label; }
-// 盤面は250msごとに届く。一覧の中身が変わっていなければDOMは作り直さない。
-// 作り直すと開いている一覧の中でフォーカスやスクロール位置が毎回失われる
+// 盤面は250msごとに届く。並んでいる項目が変わっていなければDOMは作り直さない。
+// 作り直すと開いている一覧の中でフォーカスやスクロール位置が毎回失われる。
+// 件数は会話が動くたびに変わるため、この判定には入れずテキストだけ書き換える
 let repoSignature = '';
 function renderRepoOptions(list) {
-  const signature = list.map(entry => entry.key + '>' + entry.label + '>' + entry.count).join('|');
+  const signature = list.map(entry => entry.key + '>' + entry.label).join('|');
   if(signature !== repoSignature) {
     repoSignature = signature;
     repoList.replaceChildren();
@@ -516,12 +517,14 @@ function renderRepoOptions(list) {
       const row = document.createElement('label'); row.className = 'filter-repo'; row.title = entry.label;
       const box = document.createElement('input'); box.type = 'checkbox'; box.value = entry.key; box.checked = selectedRepos.has(entry.key);
       box.addEventListener('change', () => { if(box.checked) selectedRepos.add(entry.key); else selectedRepos.delete(entry.key); applyFilter(); });
-      row.append(box, text('span', entry.label, 'filter-repo-label'), text('span', String(entry.count), 'filter-repo-count'));
+      const count = text('span', String(entry.count), 'filter-repo-count'); count.dataset.repoKey = entry.key;
+      row.append(box, text('span', entry.label, 'filter-repo-label'), count);
       repoList.append(row);
     }
   } else {
-    // 作り直さないときも、絞り込みの解除でチェックが外れたことは反映する
+    // 作り直さないときも、件数と、絞り込みの解除でチェックが外れたことは反映する
     for(const box of repoList.querySelectorAll('input[type=checkbox]')) box.checked = selectedRepos.has(box.value);
+    for(const entry of list) { const count = repoList.querySelector('[data-repo-key="' + CSS.escape(entry.key) + '"]'); if(count) count.textContent = String(entry.count); }
   }
   repoSummary.textContent = repoSummaryLabel(list);
 }
