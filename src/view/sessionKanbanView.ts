@@ -3,10 +3,29 @@ import * as vscode from 'vscode';
 import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
 import { chatCsp } from './chatCsp';
+import type { SessionControlAction, SessionControlResult } from './chatManagerBase';
 import type { SessionKanbanBoard } from './sessionKanbanModel';
 import { skinBodyClass } from './skin';
 
 export type SessionKanbanReader = () => SessionKanbanBoard;
+
+/** 操作の相手。どのウィンドウのどのセッションか。 */
+export interface SessionKanbanTarget {
+  windowId: string;
+  provider: 'codex' | 'claude';
+  threadId: string;
+}
+
+/**
+ * カードの操作を実行する（Issue #1258）。
+ *
+ * 自ウィンドウか別ウィンドウかの判定と、別ウィンドウ宛ての要求ファイルの送受信は
+ * `extension.ts`側が持つ。この画面は「誰に何をするか」だけを渡し、結果を受け取って出す。
+ */
+export type SessionKanbanControl = (
+  target: SessionKanbanTarget,
+  action: SessionControlAction,
+) => Promise<SessionControlResult>;
 
 /**
  * 盤面を送る間隔（Issue #1012）。
@@ -33,19 +52,14 @@ export class SessionKanbanViewManager implements vscode.Disposable {
 
   constructor(
     private readonly read: SessionKanbanReader,
-    /** 自ウィンドウのカードをクリックしたときにタブを開く。既に閉じていれば`false`。 */
-    private readonly reveal: (provider: 'codex' | 'claude', threadId: string) => boolean,
     /**
-     * 別ウィンドウのカードをクリックしたときに、要求ファイル経由で相手へ依頼する
-     * （Issue #1244）。相手ウィンドウの中でタブが開いた状態にはなるが、ウィンドウ
-     * そのものをOSレベルで前面へ出すAPIは無いため、それは保証しない（画面内に明示）。
+     * カードの操作（開く・中断・一時停止・再開・指示を送る）を実行する（Issue #1258）。
+     *
+     * 別ウィンドウ宛ての操作は要求ファイル経由で届く。相手ウィンドウの中でタブが開いた
+     * 状態にはなるが、ウィンドウそのものをOSレベルで前面へ出すAPIは無いため、それは
+     * 保証しない（画面内に明示）。
      */
-    private readonly requestOpen: (
-      windowId: string,
-      provider: 'codex' | 'claude',
-      threadId: string,
-    ) => void,
-    private readonly currentWindowId: string,
+    private readonly control: SessionKanbanControl,
     private readonly log: Logger,
   ) {}
 
@@ -128,24 +142,43 @@ export class SessionKanbanViewManager implements vscode.Disposable {
       this.post();
       return;
     }
-    if (
-      message.type === 'open' &&
-      (message.provider === 'codex' || message.provider === 'claude') &&
-      typeof message.threadId === 'string' &&
-      typeof message.windowId === 'string'
-    ) {
-      if (message.windowId !== this.currentWindowId) {
-        // 別ウィンドウのカード。要求ファイルを書くだけで、開けたかどうかはここでは分からない
-        // （Issue #1244。相手ウィンドウが既に落ちていた場合も、共有ファイルのheartbeat失効で
-        // 次の描画から一覧から消える）
-        this.requestOpen(message.windowId, message.provider, message.threadId);
-        return;
-      }
-      if (!this.reveal(message.provider, message.threadId)) {
-        vscode.window.showWarningMessage('この会話は既に閉じられています。');
-        this.refresh();
-      }
+    if (message.type === 'control') {
+      this.handleControl(message);
     }
+  }
+
+  /**
+   * カードの操作を実行し、結果を画面へ返す（Issue #1258）。
+   *
+   * `seq`は画面側が振る通し番号で、どのボタンの結果かを結び付けるためだけに使う。
+   * 応答を待つ間に盤面が更新されても、結果は押した本人のカードへ出る。
+   */
+  private handleControl(message: Record<string, unknown>): void {
+    const target = parseTarget(message);
+    const action = parseAction(message);
+    if (target === undefined || action === undefined || typeof message.seq !== 'number') {
+      return;
+    }
+    const seq = message.seq;
+    void this.control(target, action)
+      .then((result) => {
+        this.postControlResult(seq, result);
+        // 中断・一時停止・再開は盤面の見た目に効く。次の定期更新を待たずに描き直す
+        this.refresh();
+      })
+      .catch((e: unknown) => {
+        this.log.warn(`セッション統括: 操作に失敗しました（${action.kind}）: ${String(e)}`);
+        this.postControlResult(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  private postControlResult(seq: number, result: SessionControlResult): void {
+    void this.panel?.webview.postMessage({
+      type: 'controlResult',
+      seq,
+      ok: result.ok,
+      error: result.error,
+    });
   }
 
   private post(): void {
@@ -164,6 +197,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function parseTarget(message: Record<string, unknown>): SessionKanbanTarget | undefined {
+  if (
+    typeof message.windowId !== 'string' ||
+    typeof message.threadId !== 'string' ||
+    (message.provider !== 'codex' && message.provider !== 'claude')
+  ) {
+    return undefined;
+  }
+  return {
+    windowId: message.windowId,
+    provider: message.provider,
+    threadId: message.threadId,
+  };
+}
+
+function parseAction(message: Record<string, unknown>): SessionControlAction | undefined {
+  switch (message.action) {
+    case 'open':
+      return { kind: 'open' };
+    case 'interrupt':
+      return { kind: 'interrupt' };
+    case 'pauseLoop':
+      return { kind: 'pauseLoop' };
+    case 'resumeLoop':
+      return { kind: 'resumeLoop' };
+    case 'send':
+      return typeof message.text === 'string' ? { kind: 'send', text: message.text } : undefined;
+    default:
+      return undefined;
+  }
+}
+
 function render(webview: vscode.Webview): string {
   // 他の画面（`chatShared.ts`・`progressView.ts`など）と同じく予測できない値にする
   const nonce = randomBytes(16).toString('base64');
@@ -171,7 +236,7 @@ function render(webview: vscode.Webview): string {
   // 外装は会話画面と同じ設定（`agent.chat.skin`）で切り替える（Issue #1253）。
   // 統括画面だけ別の設定にすると、2画面を並べたときに片方だけ装飾が残る
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちへの対応も、開いたタブ側（相手ウィンドウ）で行ってください。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちへの対応は、開いたタブ側（相手ウィンドウ）で行ってください。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -187,7 +252,12 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .filter-clear:disabled { opacity: .5; cursor: default; }
 .summary { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; } .metric { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 12px; padding: 6px 10px; white-space: nowrap; } .metric strong { font-size: 16px; margin-right: 4px; } .metric.alert { border-color: var(--vscode-charts-yellow); }
 .board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 16px; align-items: start; } .column { background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 260px; overflow: hidden; } .column-head { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; } .icon { font-size: 16px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-.cards { display: grid; gap: 9px; padding: 10px; } .card { appearance: none; color: inherit; font: inherit; text-align: left; cursor: pointer; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 12px; } .card:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); } .card:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; margin-top: 8px; } .provider { text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
+.cards { display: grid; gap: 9px; padding: 10px; } .card { color: inherit; font: inherit; text-align: left; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 12px; } .card:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+/* 見出しの部分だけが「開く」ボタン。カード全体をボタンにすると操作を中に置けない（Issue #1258） */
+.card-open { appearance: none; display: block; width: 100%; color: inherit; font: inherit; text-align: left; cursor: pointer; background: none; border: 0; padding: 0; } .card-open:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.card-action { appearance: none; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; white-space: nowrap; cursor: pointer; } .card-action:disabled { opacity: .5; cursor: default; } .card-action:focus-visible, .send-input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.card-send { display: flex; gap: 6px; flex: 1 1 150px; min-width: 150px; } .send-input { flex: 1 1 auto; min-width: 60px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 6px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; margin-top: 8px; } .provider { text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translate(-50%, 12px); background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); color: var(--vscode-notifications-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-notifications-border, var(--vscode-panel-border)); border-radius: 6px; padding: 8px 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 @media (max-width: 1180px) { .board { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
@@ -279,7 +349,9 @@ body.skin-cyber .card.backgroundRunning { border-left-color: var(--agent-neon-2)
 body.skin-cyber .card.idle { box-shadow: inset 2px 0 0 var(--agent-card-accent); }
 body.skin-cyber .card:hover { border-color: color-mix(in srgb, var(--agent-neon-1) 55%, var(--vscode-panel-border)); box-shadow: inset 0 0 20px -10px var(--agent-neon-glow); }
 body.skin-cyber .card.idle:hover { box-shadow: inset 2px 0 0 var(--agent-card-accent), inset 0 0 20px -10px var(--agent-neon-glow); }
-body.skin-cyber .card:focus-visible { outline-color: var(--agent-neon-1); }
+/* フォーカスの輪郭はカードそのものではなく、中の操作要素に付く（Issue #1258） */
+body.skin-cyber .card-open:focus-visible, body.skin-cyber .card-action:focus-visible, body.skin-cyber .send-input:focus-visible { outline-color: var(--agent-neon-1); }
+body.skin-cyber .card-action, body.skin-cyber .send-input { border-color: var(--agent-neon-edge); }
 /* 種別と所属を示すラベルだけ端末寄りにする。タイトルと作業ディレクトリ名は地のまま */
 body.skin-cyber .provider { color: var(--agent-neon-1); font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); }
 body.skin-cyber .window-label.current { color: var(--agent-neon-1); }
@@ -301,9 +373,19 @@ const vscode = acquireVsCodeApi(); const board = document.getElementById('board'
 const queryInput = document.getElementById('filterQuery'); const currentToggle = document.getElementById('filterCurrent'); const clearButton = document.getElementById('filterClear');
 const specs = [{ key:'approvalPending', label:'承認待ち', icon:'⚠', empty:'対応待ちの会話はありません' }, { key:'running', label:'実行中', icon:'↻', empty:'実行中の会話はありません' }, { key:'backgroundRunning', label:'バックグラウンド実行中', icon:'◐', empty:'バックグラウンド実行中の会話はありません' }, { key:'idle', label:'待機中', icon:'●', empty:'待機中の会話はありません' }];
 function text(tag, value, cls) { const el=document.createElement(tag); el.textContent=value; if(cls) el.className=cls; return el; }
-// 盤面を作り直すとフォーカス中のカードも消える。同じ会話のカードへ戻す（Issue #1012）
-function focusedCard() { const el=document.activeElement; return el && el.dataset && el.dataset.threadId ? { windowId: el.dataset.windowId, provider: el.dataset.provider, threadId: el.dataset.threadId } : undefined; }
-function restoreFocus(target) { if(!target) return; const next=board.querySelector('[data-window-id="' + CSS.escape(target.windowId) + '"][data-provider="' + CSS.escape(target.provider) + '"][data-thread-id="' + CSS.escape(target.threadId) + '"]'); if(next) next.focus(); }
+// カードの中の要素はどれも data-card-key と data-role を持つ。1枚のカードに操作の
+// ボタンと入力欄が並ぶため、会話だけでなく「その中のどれ」までを鍵にする（Issue #1258）
+function cardKey(card) { return card.windowId + '|' + card.provider + '|' + card.threadId; }
+// 盤面を作り直すとフォーカス中の要素も消える。同じ場所へ戻す（Issue #1012）。
+// 入力欄はカーソル位置まで戻す。250msごとの再描画で毎回末尾へ飛ぶと入力できない
+function focusedSpot() { const el=document.activeElement; if(!el || !el.dataset || !el.dataset.cardKey) return undefined; return { key: el.dataset.cardKey, role: el.dataset.role, start: el.selectionStart, end: el.selectionEnd }; }
+function restoreFocus(spot) { if(!spot) return; const next=board.querySelector('[data-card-key="' + CSS.escape(spot.key) + '"][data-role="' + CSS.escape(spot.role) + '"]'); if(!next) return; next.focus(); if(spot.start !== null && spot.start !== undefined && next.setSelectionRange) next.setSelectionRange(spot.start, spot.end); }
+// 入力途中の指示。再描画をまたいで残す。送信したら消す
+const drafts = new Map();
+// 送った操作と、その結果を結び付ける通し番号
+let controlSeq = 0; const pendingControls = new Map();
+const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信' };
+function sendControl(card, action, text) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { label: actionLabels[action], place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text }); }
 // 生のwindowId（UUID）はユーザーには読めないため、初出順の連番に置き換えて表示する。
 // 番号は絞り込み前の盤面全体から先に割り当てる。絞り込みで隠れたカードを飛ばして
 // 採番すると、条件を変えるたびに同じウィンドウの番号が変わる（Issue #1250）
@@ -326,11 +408,42 @@ function showToast(message) { toast.textContent = message; toast.classList.add('
 function setApprovalFlag(has) { document.body.classList.toggle('has-approval', has); }
 // 承認待ちの強調は絞り込み後ではなく全体の件数で決める。絞り込みで隠れただけの
 // 承認待ちがあるのに注意の色が消えると、対応漏れを誘う（Issue #1250）
-function render(data) { const focused = focusedCard(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) { const button=document.createElement('button'); button.type='button'; button.className='card ' + spec.key; button.dataset.threadId=card.threadId; button.dataset.provider=card.provider; button.dataset.windowId=card.windowId; button.title=card.title || '名称未設定'; button.append(text('span', card.title || '名称未設定', 'card-title')); const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const label=windowLabel(card); const windowSpan=text('span', label, 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•'), cwdSpan, text('span', '•'), windowSpan); button.append(meta); button.addEventListener('click', () => { if(!card.isCurrentWindow) showToast(label + ' へ開く要求を送信しました'); vscode.postMessage({type:'open', windowId:card.windowId, provider:card.provider, threadId:card.threadId}); }); cards.append(button); } column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
+function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
+function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
+// カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
+// カード全体をボタンにすると中に操作ボタンを置けない（入れ子のボタンは作れない）
+function buildCard(card, column) {
+  const key = cardKey(card);
+  const item = document.createElement('div'); item.className = 'card ' + column;
+  const open = document.createElement('button'); open.type='button'; open.className='card-open'; open.dataset.cardKey=key; open.dataset.role='open'; open.title=card.title || '名称未設定';
+  open.append(text('span', card.title || '名称未設定', 'card-title'));
+  const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const windowSpan=text('span', windowLabel(card), 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•'), cwdSpan, text('span', '•'), windowSpan); open.append(meta);
+  open.addEventListener('click', () => sendControl(card, 'open'));
+  item.append(open);
+  const actions=document.createElement('div'); actions.className='card-actions';
+  // 待機中のカードには止めるものが無い。承認待ちは「承認せずに止める」ことがあるので押せる
+  const stop=actionButton(key, 'interrupt', '中断', () => sendControl(card, 'interrupt')); stop.disabled = column === 'idle'; actions.append(stop);
+  // ループのボタンは走っているときだけ出す。走っていないカードに並んでいると、
+  // 押せる操作があるように見える
+  const loop=card.loop;
+  if(loop && loop.running) { const act = loop.paused ? 'resumeLoop' : 'pauseLoop'; actions.append(actionButton(key, 'loop', actionLabels[act], () => sendControl(card, act))); }
+  const form=document.createElement('div'); form.className='card-send';
+  const input=document.createElement('input'); input.type='text'; input.className='send-input'; input.placeholder='指示を送る'; input.setAttribute('aria-label', 'このセッションへ指示を送る'); input.dataset.cardKey=key; input.dataset.role='input'; input.value=drafts.get(key) || '';
+  // 送った時点で入力欄は空にする。届かなかったときだけ書いた内容を戻す（showControlResult）
+  const submit=() => { const value=input.value; if(value.trim()==='') return; sendControl(card, 'send', value); drafts.delete(key); input.value=''; };
+  input.addEventListener('input', () => drafts.set(key, input.value));
+  input.addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); submit(); } });
+  form.append(input, actionButton(key, 'send', '送信', submit));
+  actions.append(form); item.append(actions);
+  return item;
+}
 // 入力欄はboard・summaryの外にあるため、盤面の再描画では作り直されない。
 // 絞り込み条件も変数で持ち続けるので、250msごとの再描画をまたいで残る（Issue #1250）
 queryInput.addEventListener('input', () => { query = queryInput.value.trim().toLowerCase(); applyFilter(); });
 currentToggle.addEventListener('change', () => { currentOnly = currentToggle.checked; applyFilter(); });
 clearButton.addEventListener('click', () => { queryInput.value=''; query=''; currentToggle.checked=false; currentOnly=false; applyFilter(); queryInput.focus(); });
-window.addEventListener('message', event => { if(event.data.type==='board') { latestBoard = event.data.board; applyFilter(); } }); vscode.postMessage({type:'ready'});
+// 操作の結果はトーストで出す（Issue #1258）。別ウィンドウ宛ては応答を待つため、
+// 押した直後ではなく相手が実行した（できなかった）ことが分かってから出る
+function showControlResult(data) { const info = pendingControls.get(data.seq); pendingControls.delete(data.seq); const label = (info ? info.place + info.label : '操作'); showToast(data.ok ? label + 'を実行しました' : label + 'に失敗しました: ' + (data.error || '理由は不明です')); if(!data.ok && info && info.text !== undefined && drafts.get(info.key) === undefined) { drafts.set(info.key, info.text); applyFilter(); } }
+window.addEventListener('message', event => { if(event.data.type==='board') { latestBoard = event.data.board; applyFilter(); } else if(event.data.type==='controlResult') { showControlResult(event.data); } }); vscode.postMessage({type:'ready'});
 `;

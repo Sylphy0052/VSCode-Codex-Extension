@@ -19,8 +19,6 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
-const CURRENT_WINDOW_ID = 'w1';
-
 function board(total: number): SessionKanbanBoard {
   return {
     cards: { approvalPending: [], running: [], backgroundRunning: [], idle: [] },
@@ -41,9 +39,7 @@ function open(): Harness {
   let total = 0;
   const view = new SessionKanbanViewManager(
     () => board(total),
-    () => true,
-    () => undefined,
-    CURRENT_WINDOW_ID,
+    () => Promise.resolve({ ok: true }),
     fakeLogger,
   );
   view.show();
@@ -72,12 +68,58 @@ function ready(h: Harness): void {
   h.panel.webview.simulateMessage({ type: 'ready' });
 }
 
+/**
+ * 画面のスクリプトはテンプレートリテラルの中身で、型検査もlintも効かない（Issue #1258）。
+ *
+ * 関数をリネームして呼び出し側を直し忘れると、盤面の描画が丸ごと落ちる。`new Function`の
+ * 構文検査では未定義の名前を呼んでいることまでは分からないため、定義と呼び出しを突き合わせる。
+ */
+describe('セッション統括の画面スクリプト（Issue #1258）', () => {
+  /** ブラウザとVS Codeが用意する名前。ここに無い名前はスクリプト内で定義されている必要がある */
+  const PROVIDED = new Set([
+    'acquireVsCodeApi',
+    'clearTimeout',
+    'setTimeout',
+    'requestAnimationFrame',
+    'if',
+    'for',
+    'while',
+    'switch',
+    'catch',
+    'return',
+    'function',
+    'typeof',
+  ]);
+
+  function scriptOf(html: string): string {
+    const start = html.lastIndexOf('<script');
+    const body = html.slice(html.indexOf('>', start) + 1);
+    return body.slice(0, body.indexOf('</script>'));
+  }
+
+  it('呼んでいる関数がすべてスクリプト内で定義されている', () => {
+    const h = open();
+    const script = scriptOf(h.panel.webview.html);
+    const defined = new Set<string>();
+    for (const m of script.matchAll(/(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/g)) {
+      defined.add(m[1] as string);
+    }
+    // メソッド呼び出し（`x.foo(`）と組み込みを除いた、素の関数呼び出しだけを見る
+    const called = new Set<string>();
+    for (const m of script.matchAll(/(?<![.\w$])([a-z][\w$]*)\s*\(/g)) {
+      called.add(m[1] as string);
+    }
+    const missing = [...called].filter((name) => !defined.has(name) && !PROVIDED.has(name));
+    expect(missing).toEqual([]);
+  });
+});
+
 describe('SessionKanbanViewManager（issue 1039、パスの露出）', () => {
   it('カードのツールチップに作業ディレクトリを出さない', () => {
     const h = open();
     const html = h.panel.webview.html;
     // 陽性対照: ツールチップ自体は今も付けている（綴り違いで空振りしていない）
-    expect(html).toContain("button.title=card.title || '名称未設定';");
+    expect(html).toContain("open.title=card.title || '名称未設定';");
     // 画面共有やスクリーンショットで絶対パスが映らないよう、パスは載せない。
     // 全体を確かめたいときはサイドバーのセッション一覧のツールチップを見る
     expect(html).not.toContain('card.cwd;');
@@ -182,9 +224,7 @@ describe('SessionKanbanViewManager（issue #1012、盤面の送信）', () => {
   it('パネルが無い間のrefreshは何もしない', () => {
     const view = new SessionKanbanViewManager(
       () => board(0),
-      () => true,
-      () => undefined,
-      CURRENT_WINDOW_ID,
+      () => Promise.resolve({ ok: true }),
       fakeLogger,
     );
     expect(() => {

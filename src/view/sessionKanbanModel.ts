@@ -18,6 +18,12 @@ export interface ManagedSessionInput {
   activity: SessionActivityState;
   /** どのVS Codeウィンドウのセッションか（Issue #1244）。ウィンドウ起動時に生成するid。 */
   windowId: string;
+  /**
+   * ループの走行状態（Issue #1258）。一時停止と再開のボタンを出し分けるのに使う。
+   *
+   * 古い版のウィンドウが書いた共有ファイルには無いため任意。無ければ走っていないものとして扱う。
+   */
+  loop?: { running: boolean; paused: boolean } | undefined;
 }
 
 /**

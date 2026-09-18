@@ -11,6 +11,7 @@ function chat(
     title: 'Codex会話',
     cwd: '/workspace',
     activity: 'idle',
+    loop: { running: false, paused: false },
     handoffKept: undefined,
     provider: 'codex',
     ...overrides,
