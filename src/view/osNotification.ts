@@ -17,8 +17,12 @@ import {
   showOsNotificationProcess,
 } from '../util/osNotify';
 
-/** 通知を出す場面。通知音の`NotificationSoundKind`と同じ顔ぶれ。 */
-export type OsNotificationKind = 'turnComplete' | 'approvalPending' | 'handoff';
+/**
+ * 通知を出す場面。通知音の`NotificationSoundKind`とほぼ同じ顔ぶれだが、`kanbanOpen`
+ * （セッション統括から別ウィンドウを開いたときの前面化用、Issue #1288）だけは
+ * 通知音に対応が無い専用の種別。
+ */
+export type OsNotificationKind = 'turnComplete' | 'approvalPending' | 'handoff' | 'kanbanOpen';
 
 /** どちらのCLIの会話か。クリック先URIに載せ、開き直す側の管理クラスを選ぶのに使う。 */
 export type OsNotificationProvider = 'codex' | 'claude';
@@ -42,6 +46,7 @@ const BODY: Record<OsNotificationKind, string> = {
   turnComplete: '応答が終わりました',
   approvalPending: '承認待ちです',
   handoff: '自動引き継ぎでタブが切り替わりました',
+  kanbanOpen: 'セッション統括から開かれました',
 };
 
 let extensionId: string | undefined;
@@ -104,6 +109,9 @@ export function showOsNotification(input: OsNotificationInput): void {
     return;
   }
   if (input.kind === 'handoff' && !config.handoff) {
+    return;
+  }
+  if (input.kind === 'kanbanOpen' && !config.kanbanOpen) {
     return;
   }
   if (config.onlyWhenHidden && input.panelVisible) {

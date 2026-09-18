@@ -1260,6 +1260,12 @@
           "scope": "window",
           "markdownDescription": "自動引き継ぎが発火したときにOS通知を出すか。手動（引き継ぎボタン）では出さない。`#agent.notifications.os.enabled#`が有効な場合にだけ効く。"
         },
+        "agent.notifications.os.kanbanOpen": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "セッション統括（カンバン）から別ウィンドウの会話を開いたときにOS通知を出すか。VSCodeには他ウィンドウを強制的に前面へ出すAPIが無いため、この通知をクリックすることで対象ウィンドウを前面化する。`#agent.notifications.os.enabled#`が有効な場合にだけ効く。"
+        },
         "agent.notifications.os.onlyWhenHidden": {
           "type": "boolean",
           "default": false,
