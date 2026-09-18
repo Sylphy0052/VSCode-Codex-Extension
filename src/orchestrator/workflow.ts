@@ -1109,7 +1109,15 @@ export interface WorkflowValidationResult {
  * 手書きの一覧との二重管理を避けるため（design.md §16.9のプロンプトはスキーマの説明を
  * 含む必要があるが、フィールド名の一覧そのものは`workflow.ts`の定義が唯一の正）。
  */
-export const TEMPLATE_FIELDS = ['result', 'cwd', 'branch', 'files', 'summary'] as const;
+export const TEMPLATE_FIELDS = [
+  'result',
+  'cwd',
+  'branch',
+  'files',
+  'summary',
+  'brief',
+  'handoff',
+] as const;
 export type TemplateField = (typeof TEMPLATE_FIELDS)[number];
 
 function isTemplateField(v: string): v is TemplateField {
@@ -1380,13 +1388,33 @@ export function permissionEscalationReasons(
  */
 export interface ResultFieldReference {
   id: string;
-  field: 'result' | 'summary' | 'files';
+  field: 'result' | 'summary' | 'files' | 'brief' | 'handoff';
 }
 
 /**
- * タスクの `prompt` / `continuePrompt` から、`dependsOn` に挙げた依存先の `result` /
- * `summary` / `files` への参照を重複を除いて集める（design.md §16.4、Issue #67。
- * `files`はIssue #369で対象に追加した）。
+ * 権限越境の警告（`findPermissionEscalationWarnings`）が対象にするフィールド。
+ *
+ * `brief`は上流の応答から組み立てた要点（Issue #1271）なので`result` / `summary`と同じ。
+ * `handoff`は拡張機能が組み立てた参照そのものだが、**それをたどって読む本文は上流の応答
+ * そのもの**であり、参照を渡すことは本文を渡すことと実質同じなので対象に含める。
+ * `cwd` / `branch` は拡張機能が組み立てた構造化データのため対象外のまま。
+ */
+const ESCALATION_TARGET_FIELDS: readonly ResultFieldReference['field'][] = [
+  'result',
+  'summary',
+  'files',
+  'brief',
+  'handoff',
+];
+
+function isEscalationTargetField(field: string): field is ResultFieldReference['field'] {
+  return (ESCALATION_TARGET_FIELDS as readonly string[]).includes(field);
+}
+
+/**
+ * タスクの `prompt` / `continuePrompt` から、`dependsOn` に挙げた依存先の
+ * `ESCALATION_TARGET_FIELDS` への参照を重複を除いて集める（design.md §16.4、Issue #67。
+ * `files`はIssue #369、`brief` / `handoff`はIssue #1271で対象に追加した）。
  *
  * 読み込み時の警告（`findPermissionEscalationWarnings`）と、実行時（実効値ベース）の
  * 警告（`runner.ts`）の両方がこれを使う。参照抽出ロジックを2箇所に複製しない。
@@ -1398,7 +1426,7 @@ export function referencedResultFields(
   const refs: ResultFieldReference[] = [];
   for (const text of [task.prompt, task.continuePrompt]) {
     for (const ref of extractTemplateRefs(text)) {
-      if (ref.field !== 'result' && ref.field !== 'summary' && ref.field !== 'files') {
+      if (!isEscalationTargetField(ref.field)) {
         continue;
       }
       // 未定義参照・dependsOn外の参照は別のチェック（`validateWorkflow`）で既に
@@ -1778,6 +1806,24 @@ export interface TaskResult {
    * 十分」と判断したときに選べる、短く切り詰め済みの代替。
    */
   summary: string;
+  /**
+   * 構造化サマリを整形した短い文字列（`taskSummary.ts` の `formatBrief`。Issue #1271）。
+   *
+   * 決めたこと・未解決・変更したファイル・成果物の在り処を、それぞれ数件だけ並べたもの。
+   * `summary`（1行）では足りず `result`（全文）では多すぎる、という間を埋めるために置く。
+   * pull型の受け渡し（親Issue #1270）では、これと `handoff` の組が既定の渡し方になる。
+   */
+  brief: string;
+  /**
+   * 応答本文を取り寄せるための参照（Issue #1271）。ファイルのパスそのものではなく、
+   * `read_handoff` ツールへ渡す `taskId` と `slug` を人にもモデルにも読める1行で表す。
+   *
+   * 本文をプロンプトへ貼らずに済ませるための変数なので、**これ自体は上流のエージェントが
+   * 書いた文字列を含まない**（拡張機能が組み立てる）。`cwd` / `branch` と同じ構造化データ
+   * として、囲い（`wrapFreeTextField`）は通さない。ただし、この参照をたどって読む本文は
+   * 上流の応答そのものなので、権限越境の警告（`referencedResultFields`）の対象には含める。
+   */
+  handoff: string;
 }
 
 /**
@@ -1802,7 +1848,7 @@ export { truncateByCodePoint };
  */
 function wrapFreeTextField(
   id: string,
-  field: 'result' | 'summary' | 'files',
+  field: 'result' | 'summary' | 'files' | 'brief',
   value: string,
   nonce: string,
 ): string {
@@ -1828,6 +1874,12 @@ function fieldValue(id: string, field: TemplateField, result: TaskResult, nonce:
       return wrapFreeTextField(id, 'result', result.result, nonce);
     case 'summary':
       return wrapFreeTextField(id, 'summary', result.summary, nonce);
+    case 'brief':
+      return wrapFreeTextField(id, 'brief', result.brief, nonce);
+    // `handoff`は拡張機能が組み立てた参照（`TaskResult.handoff`のJSDoc参照）なので、
+    // `cwd` / `branch` と同じく囲わない
+    case 'handoff':
+      return result.handoff;
   }
 }
 

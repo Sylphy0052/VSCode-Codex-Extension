@@ -38,7 +38,7 @@ import {
 import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
 import type { TeamRole } from './rolePresets';
-import { TeamHandoffStore } from './teamHandoff';
+import { formatHandoffReference, RESULT_HANDOFF_SLUG, TeamHandoffStore } from './teamHandoff';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   removePseudoIntegration,
@@ -121,7 +121,7 @@ import {
   type EffectiveTaskConfig,
   type ExtensionSafetyBaseline,
 } from './taskConfig';
-import { buildResponseSummary } from './taskSummary';
+import { buildResponseSummary, buildStructuredSummary, formatBrief } from './taskSummary';
 import type {
   ApprovalHandlerResult,
   TaskSession,
@@ -512,6 +512,12 @@ export interface WorkflowWarning {
     | 'allowOverride'
     | 'maxReached'
     | 'gitignore'
+    /**
+     * タスクの応答本文を受け渡しファイルへ書けなかった（Issue #1271）。`{{T1.handoff}}` を
+     * 参照する下流タスクが `read_handoff` で本文を取れない状態になるため、黙らせずに出す。
+     * 実行そのものは止めない（下流は `{{T1.brief}}` の要点だけで進むことになる）。
+     */
+    | 'handoffWriteFailed'
     /**
      * PR/MRの前提（`origin` remote・`gh`/`glab`のPATH・認証）が欠けているため、
      * PR/MRの作成を飛ばした（design.md §16.18「前提が欠けている場合」）。
@@ -4638,6 +4644,56 @@ export class WorkflowRunner {
 
   // ---- 完了検知 ----
 
+  /**
+   * タスクの応答本文を受け渡しファイルへ置く（Issue #1271、親Issue #1270 Phase 1）。
+   *
+   * 下流タスクは `{{T1.handoff}}` が示す `read_handoff` でこれを取りに行く。`{{T1.result}}`
+   * のように本文をプロンプトへ貼らないぶん、下流が読むコンテキストが上流の応答の長さに
+   * 比例して増えるのを止められる。
+   *
+   * **`buildHandoffPort` を経由せず `TeamHandoffStore` を直接使う。** ポートは
+   * メッセージング（`ensureMessaging`）が有効なrunにしか配線されていないが、この書き込みは
+   * メッセージングの有無と無関係に行う必要がある（`removeRun` のために直接組み立てている
+   * 片付けの経路と同じ理由）。
+   *
+   * 本文が空（応答を残さずに終わったタスク）のときは何も書かない。空のファイルを置くと、
+   * `read_handoff` が「空の本文」を返して「まだ書かれていない」と区別できなくなる。
+   */
+  private async writeResultHandoff(
+    runId: string,
+    live: LiveRun,
+    taskId: string,
+    content: string,
+  ): Promise<void> {
+    if (content === '') {
+      return;
+    }
+    const warn = (reason: string): void => {
+      this.deps.log.warn(
+        `[workflow ${runId}] ${taskId}: 応答の受け渡しファイルを書けませんでした: ${sanitizeForLog(reason)}`,
+      );
+      live.warnings.push({
+        kind: 'handoffWriteFailed',
+        taskId,
+        message: `${taskId} の応答を受け渡しファイルへ書けませんでした（${reason}）。{{${taskId}.handoff}} を参照する下流タスクは本文を取れません`,
+      });
+      this.notify(runId);
+    };
+    try {
+      const result = await new TeamHandoffStore(live.repoRoot, nodeHandoffFileSystem).write(
+        runId,
+        taskId,
+        RESULT_HANDOFF_SLUG,
+        content,
+      );
+      if (!result.ok) {
+        warn(result.error);
+      }
+    } catch (e) {
+      warn(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   private onTaskStateChanged(runId: string, taskId: string, state: ChatState): void {
     const live = this.runs.get(runId);
     const liveTask = live?.tasks.get(taskId);
@@ -4695,17 +4751,31 @@ export class WorkflowRunner {
     }
 
     if (reason === 'done' && liveTask !== undefined) {
+      const files = [...state.turnEditedFiles];
+      // 応答本文の在り処（Issue #1271）。書き込みの成否に依らず決まる参照なので、
+      // 下の非同期な書き込みを待たずに組み立てられる。書けなかった場合は
+      // `read_handoff`が「見つかりません」を返し、警告も別途出る
+      const handoffRef = formatHandoffReference(taskId, RESULT_HANDOFF_SLUG);
+      const structured = buildStructuredSummary(state, { files, artifacts: [handoffRef] });
       liveTask.result = {
         result: state.turnResultText,
         cwd: liveTask.cwd,
         branch: liveTask.branch,
-        files: [...state.turnEditedFiles],
+        files,
         // {{T1.summary}}（design.md §16.4 案4「絞る」、Issue #67）。#57の1行要約をそのまま
         // 使う。応答全部ではなく要点だけを下流へ渡す選択肢を書き手に与えるためのもので、
         // buildResponseSummary自体が既に制御文字の除去と長さの上限（MAX_SUMMARY_LENGTH）を
         // 行っている
-        summary: buildResponseSummary(state),
+        summary: structured.summary,
+        // {{T1.brief}} / {{T1.handoff}}（Issue #1271、親Issue #1270 Phase 1）。応答本文を
+        // 下流のプロンプトへ貼らず、要点と在り処だけを渡すための組
+        brief: formatBrief(structured),
+        handoff: handoffRef,
       };
+      // 本文は受け渡しファイルへ置き、下流は必要になった時点で`read_handoff`で取りに行く。
+      // 書き込みは非同期だが、下流タスクの開始はセッションの起動を伴うぶん常に後になる
+      // ため、ここで待たずに投げる（待つとタスク完了の確定～`pump`までを止めてしまう）
+      void this.writeResultHandoff(runId, live, taskId, state.turnResultText);
     }
 
     if (reason === 'taskStopped' && liveTask?.taskApprovalTimedOut === true) {
