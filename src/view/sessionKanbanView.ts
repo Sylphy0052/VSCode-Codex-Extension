@@ -259,7 +259,7 @@ function render(webview: vscode.Webview): string {
   // 外装は会話画面と同じ設定（`agent.chat.skin`）で切り替える（Issue #1253）。
   // 統括画面だけ別の設定にすると、2画面を並べたときに片方だけ装飾が残る
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。「やり取りを見る」で直近のやり取りを読めます（開いている間だけ取り寄せ、閉じると破棄します）。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。「やり取りを見る」で直近のやり取りを読めます（開いている間だけ取り寄せ、閉じると破棄します）。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><details id="filterRepos" class="filter-repos"><summary id="filterReposSummary">リポジトリ: すべて</summary><div id="filterRepoList" class="filter-repo-list" role="group" aria-label="リポジトリで絞り込む"></div></details><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -273,6 +273,17 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .filter-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--vscode-descriptionForeground); font-size: 13px; white-space: nowrap; cursor: pointer; }
 .filter-clear { appearance: none; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 13px; padding: 5px 10px; cursor: pointer; }
 .filter-clear:disabled { opacity: .5; cursor: default; }
+.filter-repos { position: relative; font-size: 13px; }
+.filter-repos > summary { list-style: none; cursor: pointer; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 5px 10px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-repos > summary::-webkit-details-marker { display: none; }
+.filter-repos > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.filter-repo-list { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; min-width: 240px; max-width: 360px; max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; padding: 6px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-panel-border); border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,.35); }
+.filter-repo { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px; cursor: pointer; }
+.filter-repo:hover { background: var(--vscode-list-hoverBackground); }
+.filter-repo input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.filter-repo-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-repo-count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.filter-repo-empty { margin: 4px; color: var(--vscode-descriptionForeground); }
 .summary { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; } .metric { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 12px; padding: 6px 10px; white-space: nowrap; } .metric strong { font-size: 16px; margin-right: 4px; } .metric.alert { border-color: var(--vscode-charts-yellow); }
 .board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 16px; align-items: start; } .column { background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 260px; overflow: hidden; } .column-head { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; } .icon { font-size: 16px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 .cards { display: grid; gap: 9px; padding: 10px; } .card { color: inherit; font: inherit; text-align: left; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 12px; } .card:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
@@ -354,8 +365,8 @@ body.skin-cyber .metric { border-color: var(--agent-neon-edge); background: var(
 body.skin-cyber .metric strong { color: var(--agent-neon-1); }
 body.skin-cyber .metric.alert { border-color: var(--agent-neon-3); color: var(--agent-neon-3); box-shadow: inset 0 0 16px -10px var(--agent-neon-3); }
 /* 絞り込み。入力中はリングで囲う */
-body.skin-cyber .filter-input, body.skin-cyber .filter-clear { border-color: var(--agent-neon-edge); }
-body.skin-cyber .filter-input:focus-visible, body.skin-cyber .filter-clear:focus-visible, body.skin-cyber .filter-toggle input:focus-visible { outline-color: var(--agent-neon-1); box-shadow: 0 0 12px -4px var(--agent-neon-glow); }
+body.skin-cyber .filter-input, body.skin-cyber .filter-clear, body.skin-cyber .filter-repos > summary, body.skin-cyber .filter-repo-list { border-color: var(--agent-neon-edge); }
+body.skin-cyber .filter-input:focus-visible, body.skin-cyber .filter-clear:focus-visible, body.skin-cyber .filter-toggle input:focus-visible, body.skin-cyber .filter-repos > summary:focus-visible { outline-color: var(--agent-neon-1); box-shadow: 0 0 12px -4px var(--agent-neon-glow); }
 /*
  * 列のパネル。右上の角を落として、四角い箱ではなく切り出した区画に見せる。
  * clip-path は外側へ出る box-shadow を切り落とすため、発光は必ず inset で書く。
@@ -415,6 +426,7 @@ body.skin-cyber.vscode-high-contrast.has-approval::before, body.skin-cyber.vscod
 const script = `
 const vscode = acquireVsCodeApi(); const board = document.getElementById('board'); const summary = document.getElementById('summary'); const toast = document.getElementById('toast');
 const queryInput = document.getElementById('filterQuery'); const currentToggle = document.getElementById('filterCurrent'); const clearButton = document.getElementById('filterClear');
+const repoDetails = document.getElementById('filterRepos'); const repoSummary = document.getElementById('filterReposSummary'); const repoList = document.getElementById('filterRepoList');
 const specs = [{ key:'approvalPending', label:'承認待ち', icon:'⚠', empty:'対応待ちの会話はありません' }, { key:'running', label:'実行中', icon:'↻', empty:'実行中の会話はありません' }, { key:'backgroundRunning', label:'バックグラウンド実行中', icon:'◐', empty:'バックグラウンド実行中の会話はありません' }, { key:'idle', label:'待機中', icon:'●', empty:'待機中の会話はありません' }];
 function text(tag, value, cls) { const el=document.createElement(tag); el.textContent=value; if(cls) el.className=cls; return el; }
 // カードの中の要素はどれも data-card-key と data-role を持つ。1枚のカードに操作の
@@ -466,9 +478,61 @@ function windowLabel(card) { if(card.isCurrentWindow) return 'このウィンド
 // 描画時に絞る。往復させないので入力に即応し、全体の件数も画面に残せる
 let latestBoard = { cards: { approvalPending: [], running: [], backgroundRunning: [], idle: [] }, total: 0 };
 let query = ''; let currentOnly = false;
-function isFiltering() { return query !== '' || currentOnly; }
+// 選んだリポジトリ（Issue #1276）。同名の別フォルダを区別するため、鍵は絶対パス（cwdFull）にする。
+// 表示はフォルダ名だけで、絶対パスは画面へ出さない（Issue #1039）。
+// 盤面から一時的に消えたリポジトリの選択も残す。消えるたびにチェックが外れると、
+// 実行が終わった会話が居なくなっただけで絞り込みが崩れる
+const selectedRepos = new Set();
+function isFiltering() { return query !== '' || currentOnly || selectedRepos.size > 0; }
 // 絶対パス（cwdFull）は検索対象にしない。画面へ出さない方針（Issue #1039）と揃える
-function matches(card) { if(currentOnly && !card.isCurrentWindow) return false; if(query === '') return true; return ((card.title || '') + ' ' + (card.cwdLabel || '')).toLowerCase().includes(query); }
+function matches(card) { if(currentOnly && !card.isCurrentWindow) return false; if(selectedRepos.size > 0 && !selectedRepos.has(repoKey(card))) return false; if(query === '') return true; return ((card.title || '') + ' ' + (card.cwdLabel || '')).toLowerCase().includes(query); }
+function repoKey(card) { return card.cwdFull || '(不明)'; }
+// 選択肢は絞り込み前の盤面全体から作る。絞り込み後の結果から作ると、選んだ瞬間に
+// 他のリポジトリが選択肢から消えて選び直せなくなる（ウィンドウ番号の採番と同じ方針、Issue #1250）
+function collectRepos(data) {
+  const byKey = new Map();
+  for(const spec of specs) for(const card of data.cards[spec.key]) {
+    const key = repoKey(card); const entry = byKey.get(key);
+    if(entry === undefined) byKey.set(key, { key, label: card.cwdLabel || '(不明)', count: 1 }); else entry.count += 1;
+  }
+  // 同じフォルダ名が別の場所に同時に居るときだけ、親を1階層だけ足して見分けられるようにする。
+  // それでも同じになる場合は同じ表示のまま別項目として並べる（絶対パスは出さない方針を優先）
+  const byLabel = new Map();
+  for(const entry of byKey.values()) { const group = byLabel.get(entry.label); if(group === undefined) byLabel.set(entry.label, [entry]); else group.push(entry); }
+  for(const group of byLabel.values()) { if(group.length < 2) continue; for(const entry of group) entry.label = withParent(entry.key, entry.label); }
+  return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+}
+function withParent(key, label) { const parts = key.split('/'); return parts.length >= 2 && parts[parts.length - 2] !== '' ? parts[parts.length - 2] + '/' + label : label; }
+// 盤面は250msごとに届く。並んでいる項目が変わっていなければDOMは作り直さない。
+// 作り直すと開いている一覧の中でフォーカスやスクロール位置が毎回失われる。
+// 件数は会話が動くたびに変わるため、この判定には入れずテキストだけ書き換える
+let repoSignature = '';
+function renderRepoOptions(list) {
+  const signature = list.map(entry => entry.key + '>' + entry.label).join('|');
+  if(signature !== repoSignature) {
+    repoSignature = signature;
+    repoList.replaceChildren();
+    if(list.length === 0) repoList.append(text('p', '表示できるリポジトリがありません', 'filter-repo-empty'));
+    for(const entry of list) {
+      const row = document.createElement('label'); row.className = 'filter-repo'; row.title = entry.label;
+      const box = document.createElement('input'); box.type = 'checkbox'; box.value = entry.key; box.checked = selectedRepos.has(entry.key);
+      box.addEventListener('change', () => { if(box.checked) selectedRepos.add(entry.key); else selectedRepos.delete(entry.key); applyFilter(); });
+      const count = text('span', String(entry.count), 'filter-repo-count'); count.dataset.repoKey = entry.key;
+      row.append(box, text('span', entry.label, 'filter-repo-label'), count);
+      repoList.append(row);
+    }
+  } else {
+    // 作り直さないときも、件数と、絞り込みの解除でチェックが外れたことは反映する
+    for(const box of repoList.querySelectorAll('input[type=checkbox]')) box.checked = selectedRepos.has(box.value);
+    for(const entry of list) { const count = repoList.querySelector('[data-repo-key="' + CSS.escape(entry.key) + '"]'); if(count) count.textContent = String(entry.count); }
+  }
+  repoSummary.textContent = repoSummaryLabel(list);
+}
+function repoSummaryLabel(list) {
+  if(selectedRepos.size === 0) return 'リポジトリ: すべて';
+  if(selectedRepos.size === 1) { const only = [...selectedRepos][0]; const hit = list.find(entry => entry.key === only); return 'リポジトリ: ' + (hit === undefined ? '1件' : hit.label); }
+  return 'リポジトリ: ' + selectedRepos.size + '件';
+}
 function countLabel(shown, total) { return isFiltering() ? shown + ' / ' + total : String(total); }
 function applyFilter() { clearButton.disabled = !isFiltering(); render(latestBoard); }
 let toastTimer;
@@ -481,7 +545,7 @@ function setApprovalFlag(has) { document.body.classList.toggle('has-approval', h
 // 承認が解決したカードは承認待ちの列から出ていき、「内容を閉じる」を押す手段が無くなる。
 // 列に残っていないキーはここで捨てる（開きっぱなしの統括ページに溜め続けないため）
 function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } }
-function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
+function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); renderRepoOptions(collectRepos(data)); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
 function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
 // カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
 // カード全体をボタンにすると中に操作ボタンを置けない（入れ子のボタンは作れない）
@@ -561,7 +625,9 @@ function buildDetail(card, key) {
 // 絞り込み条件も変数で持ち続けるので、250msごとの再描画をまたいで残る（Issue #1250）
 queryInput.addEventListener('input', () => { query = queryInput.value.trim().toLowerCase(); applyFilter(); });
 currentToggle.addEventListener('change', () => { currentOnly = currentToggle.checked; applyFilter(); });
-clearButton.addEventListener('click', () => { queryInput.value=''; query=''; currentToggle.checked=false; currentOnly=false; applyFilter(); queryInput.focus(); });
+clearButton.addEventListener('click', () => { queryInput.value=''; query=''; currentToggle.checked=false; currentOnly=false; selectedRepos.clear(); applyFilter(); queryInput.focus(); });
+// 一覧の外を押したら閉じる。detailsは既定では開いたままで、盤面のカードを押しても被り続ける
+document.addEventListener('click', event => { if(repoDetails.open && !repoDetails.contains(event.target)) repoDetails.open = false; });
 // 操作の結果はトーストで出す（Issue #1258）。別ウィンドウ宛ては応答を待つため、
 // 押した直後ではなく相手が実行した（できなかった）ことが分かってから出る
 function showControlResult(data) {
