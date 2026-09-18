@@ -785,6 +785,15 @@ export interface OsNotificationConfig {
   approvalPending: boolean;
   /** 自動引き継ぎが発火したときに出すか（既定 `true`）。 */
   handoff: boolean;
+  /**
+   * セッション統括（カンバン）から別ウィンドウの会話を開いたときに出すか（既定 `true`、
+   * Issue #1288）。
+   *
+   * VSCode拡張には他ウィンドウをOSレベルで強制前面化するAPIが無いため、この通知の
+   * クリック（ユーザー操作起点でWindowsのフォアグラウンドロックを回避できる）を
+   * 前面化の手段として使う。
+   */
+  kanbanOpen: boolean;
   /** タブが見えているときは出さないか（既定 `false`）。通知音の同名設定と同じ考え方。 */
   onlyWhenHidden: boolean;
 }
@@ -802,6 +811,7 @@ export function readOsNotificationConfig(): OsNotificationConfig {
     turnComplete: c.get<boolean>('notifications.os.turnComplete') !== false,
     approvalPending: c.get<boolean>('notifications.os.approvalPending') !== false,
     handoff: c.get<boolean>('notifications.os.handoff') !== false,
+    kanbanOpen: c.get<boolean>('notifications.os.kanbanOpen') !== false,
     onlyWhenHidden: c.get<boolean>('notifications.os.onlyWhenHidden') === true,
   };
 }

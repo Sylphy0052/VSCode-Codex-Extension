@@ -169,7 +169,7 @@ import {
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
 import { initNotificationSounds } from './view/notificationSound';
-import { initOsNotifications } from './view/osNotification';
+import { initOsNotifications, showOsNotification } from './view/osNotification';
 import { parseFocusRequest } from './util/osNotify';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
@@ -1132,6 +1132,24 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           `（要求元 ${from}、${provider}/${threadId}、` +
           `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
       );
+    }
+    // 別ウィンドウから「開く」が届いたときだけOS通知を出す（Issue #1288）。
+    // タブは開けるが、ウィンドウ自体をOSレベルで前面化するAPIがVSCodeには無いため、
+    // ユーザー操作起点になるトーストのクリックを前面化の手段として使う
+    // （自ウィンドウ内の操作はここに来ない＝既にアクティブなので通知は不要）。
+    if (action.kind === 'open' && result.ok && from !== windowId) {
+      const session = (provider === 'claude' ? claudeChat : chat)
+        .managedSessions()
+        .find((s) => s.threadId === threadId);
+      if (session !== undefined) {
+        showOsNotification({
+          kind: 'kanbanOpen',
+          panelVisible: false,
+          sessionTitle: session.title,
+          threadId,
+          provider,
+        });
+      }
     }
     return result;
   };
