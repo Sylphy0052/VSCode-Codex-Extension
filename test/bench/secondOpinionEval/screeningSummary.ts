@@ -28,15 +28,19 @@ import { parseDecisionsJsonl, summarizeScreening, validateScreeningLog } from '.
  * 凍結済みの読む順と、その供給源の名前。
  *
  * **供給源ごとに別々に集計する。** 強い証拠のpoolと追加poolを混ぜると、どちらの収率で
- * 40件そろえたのかが後から読めない。最終のpoolは和集合でよいが、出所は残す。
+ * そろえたのかが後から読めない。最終のpoolは和集合でよいが、出所は残す。
+ *
+ * frame 版3 由来の順序（`screening-order-v3.json` / `supplemental-order-v2.json`）に
+ * 差し替えてある。版2 由来の順序（`edcdfd12…` / `33cc390e…`）はファイルも判定の記録も
+ * 残っていないため集計できない。ハッシュは Issue #1044 のコメントに記録がある。
  */
 const KNOWN_ORDERS: readonly { sha256: string; poolId: string }[] = [
   {
-    sha256: 'edcdfd12f49cedc1de65e35483e61e023e378c07420557d8a785c7da565e9583',
+    sha256: 'f8194249366dd2c786f69fcb2f1ced8a45af75df96207e95113761b8769bfdaf',
     poolId: 'strong-evidence',
   },
   {
-    sha256: '33cc390e3b6bd2a14108947559ef79bff8e0bfa77da0f74937ff746ad5085158',
+    sha256: '46f119631e658ad6927aca3e48e7cee235d72ee1a6927d9c8227391b36722962',
     poolId: 'supplemental',
   },
 ];
