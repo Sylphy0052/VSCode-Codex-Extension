@@ -4,6 +4,7 @@ import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
 import { chatCsp } from './chatCsp';
 import type { SessionControlAction, SessionControlResult } from './chatManagerBase';
+import { isSharedApprovalDecision } from './sessionHub';
 import type { SessionKanbanBoard } from './sessionKanbanModel';
 import { skinBodyClass } from './skin';
 
@@ -178,6 +179,9 @@ export class SessionKanbanViewManager implements vscode.Disposable {
       seq,
       ok: result.ok,
       error: result.error,
+      // 承認の中身（Issue #1259）。応答に載せるだけで、盤面（`board`）には混ぜない。
+      // 盤面は250msごとに送り直すため、そこへ入れると会話の中身が流れ続けることになる
+      approvals: result.approvals,
     });
   }
 
@@ -224,6 +228,18 @@ function parseAction(message: Record<string, unknown>): SessionControlAction | u
       return { kind: 'resumeLoop' };
     case 'send':
       return typeof message.text === 'string' ? { kind: 'send', text: message.text } : undefined;
+    case 'approvalDetail':
+      return { kind: 'approvalDetail' };
+    case 'approvalDecision':
+      // webviewは信頼境界の外側（`chatView.ts`と同じ扱い）。決定はホワイトリストで確かめる
+      return typeof message.approvalRequestId === 'string' &&
+        isSharedApprovalDecision(message.decision)
+        ? {
+            kind: 'approvalDecision',
+            approvalRequestId: message.approvalRequestId,
+            decision: message.decision,
+          }
+        : undefined;
     default:
       return undefined;
   }
@@ -236,7 +252,7 @@ function render(webview: vscode.Webview): string {
   // 外装は会話画面と同じ設定（`agent.chat.skin`）で切り替える（Issue #1253）。
   // 統括画面だけ別の設定にすると、2画面を並べたときに片方だけ装飾が残る
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちへの対応は、開いたタブ側（相手ウィンドウ）で行ってください。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -258,6 +274,15 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
 .card-action { appearance: none; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; white-space: nowrap; cursor: pointer; } .card-action:disabled { opacity: .5; cursor: default; } .card-action:focus-visible, .send-input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .card-send { display: flex; gap: 6px; flex: 1 1 150px; min-width: 150px; } .send-input { flex: 1 1 auto; min-width: 60px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 6px; } .card.approvalPending { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); } .card.backgroundRunning { border-left: 4px solid var(--vscode-charts-orange); } .card-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .meta { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; margin-top: 8px; } .provider { text-transform: uppercase; font-weight: 700; } .window-label.current { color: var(--vscode-charts-green); } .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
+/* 承認の中身（Issue #1259）。展開しているカードにだけ出る */
+.card-detail { border-top: 1px solid var(--vscode-panel-border); margin-top: 10px; padding-top: 10px; display: grid; gap: 10px; }
+.detail-note { color: var(--vscode-descriptionForeground); font-size: 12px; margin: 0; }
+.approval { display: grid; gap: 6px; }
+.approval-title { font-size: 12px; font-weight: 650; margin: 0; }
+/* コマンド全文は折り返して全部出す。横スクロールにすると末尾を見落とす */
+.approval-detail { background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background)); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font-family: var(--vscode-editor-font-family); font-size: 12px; margin: 0; max-height: 220px; overflow: auto; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-paths { color: var(--vscode-descriptionForeground); font-size: 12px; margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translate(-50%, 12px); background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); color: var(--vscode-notifications-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-notifications-border, var(--vscode-panel-border)); border-radius: 6px; padding: 8px 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 @media (max-width: 1180px) { .board { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
@@ -352,6 +377,10 @@ body.skin-cyber .card.idle:hover { box-shadow: inset 2px 0 0 var(--agent-card-ac
 /* フォーカスの輪郭はカードそのものではなく、中の操作要素に付く（Issue #1258） */
 body.skin-cyber .card-open:focus-visible, body.skin-cyber .card-action:focus-visible, body.skin-cyber .send-input:focus-visible { outline-color: var(--agent-neon-1); }
 body.skin-cyber .card-action, body.skin-cyber .send-input { border-color: var(--agent-neon-edge); }
+/* 承認の中身。境目と枠だけネオンに寄せ、本文の見た目は地のままにする（Issue #1259） */
+body.skin-cyber .card-detail { border-top-color: var(--agent-neon-edge); }
+body.skin-cyber .approval-detail { border-color: var(--agent-neon-edge); background: color-mix(in srgb, var(--agent-neon-1) 5%, var(--vscode-editor-background)); }
+body.skin-cyber .approval-title { color: var(--agent-neon-3); }
 /* 種別と所属を示すラベルだけ端末寄りにする。タイトルと作業ディレクトリ名は地のまま */
 body.skin-cyber .provider { color: var(--agent-neon-1); font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); }
 body.skin-cyber .window-label.current { color: var(--agent-neon-1); }
@@ -382,10 +411,20 @@ function focusedSpot() { const el=document.activeElement; if(!el || !el.dataset 
 function restoreFocus(spot) { if(!spot) return; const next=board.querySelector('[data-card-key="' + CSS.escape(spot.key) + '"][data-role="' + CSS.escape(spot.role) + '"]'); if(!next) return; next.focus(); if(spot.start !== null && spot.start !== undefined && next.setSelectionRange) next.setSelectionRange(spot.start, spot.end); }
 // 入力途中の指示。再描画をまたいで残す。送信したら消す
 const drafts = new Map();
+// 承認待ちカードの展開状態と、取り寄せた中身（Issue #1259）。
+// 中身は展開している間だけ持ち、閉じたら捨てる。盤面（board）には混ぜないので、
+// 250msごとの再描画で会話の中身が送られ続けることはない
+const expanded = new Set(); const details = new Map(); const detailErrors = new Map();
 // 送った操作と、その結果を結び付ける通し番号
 let controlSeq = 0; const pendingControls = new Map();
-const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信' };
-function sendControl(card, action, text) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { label: actionLabels[action], place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text }); }
+const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信', approvalDetail: '承認の内容の取り寄せ' };
+const decisionLabels = { accept: '承認', decline: '拒否' };
+function controlLabel(action, extra) { return action === 'approvalDecision' ? decisionLabels[extra.decision] : actionLabels[action]; }
+function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision }); }
+// 展開したときだけ中身を要求し、閉じたら捨てる（Issue #1259の受入基準）
+function toggleDetail(card) { const key = cardKey(card); if(expanded.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } else { expanded.add(key); detailErrors.delete(key); sendControl(card, 'approvalDetail'); } applyFilter(); }
+// 取り寄せた結果を仕舞う。閉じた後に届いた分は捨てる（閉じたのに中身が出るのを防ぐ）
+function applyApprovalDetail(info, data) { if(!expanded.has(info.key)) return; if(data.ok) { details.set(info.key, data.approvals || []); detailErrors.delete(info.key); } else { details.delete(info.key); detailErrors.set(info.key, data.error || '理由は不明です'); } applyFilter(); }
 // 生のwindowId（UUID）はユーザーには読めないため、初出順の連番に置き換えて表示する。
 // 番号は絞り込み前の盤面全体から先に割り当てる。絞り込みで隠れたカードを飛ばして
 // 採番すると、条件を変えるたびに同じウィンドウの番号が変わる（Issue #1250）
@@ -408,7 +447,10 @@ function showToast(message) { toast.textContent = message; toast.classList.add('
 function setApprovalFlag(has) { document.body.classList.toggle('has-approval', has); }
 // 承認待ちの強調は絞り込み後ではなく全体の件数で決める。絞り込みで隠れただけの
 // 承認待ちがあるのに注意の色が消えると、対応漏れを誘う（Issue #1250）
-function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
+// 承認が解決したカードは承認待ちの列から出ていき、「内容を閉じる」を押す手段が無くなる。
+// 列に残っていないキーはここで捨てる（開きっぱなしの統括ページに溜め続けないため）
+function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } }
+function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
 function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
 // カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
 // カード全体をボタンにすると中に操作ボタンを置けない（入れ子のボタンは作れない）
@@ -435,7 +477,30 @@ function buildCard(card, column) {
   input.addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); submit(); } });
   form.append(input, actionButton(key, 'send', '送信', submit));
   actions.append(form); item.append(actions);
+  // 承認待ちのカードだけ、中身を取り寄せて広げられる（Issue #1259）
+  if(column === 'approvalPending') { const open = expanded.has(key); actions.append(actionButton(key, 'detail', open ? '内容を閉じる' : '内容を見る', () => toggleDetail(card))); if(open) item.append(buildDetail(card, key)); }
   return item;
+}
+// 取り寄せた承認の中身。承認・拒否のボタンはここにしか無いので、
+// 中身を表示していない状態では押せない（Issue #1259の受入基準）
+function buildDetail(card, key) {
+  const box = document.createElement('div'); box.className = 'card-detail';
+  const error = detailErrors.get(key); const list = details.get(key);
+  if(error !== undefined) { box.append(text('p', '内容を取り寄せられませんでした: ' + error, 'detail-note')); return box; }
+  if(list === undefined) { box.append(text('p', '内容を取り寄せています…', 'detail-note')); return box; }
+  if(list.length === 0) { box.append(text('p', '承認待ちはありません', 'detail-note')); return box; }
+  for(const approval of list) {
+    const block = document.createElement('div'); block.className = 'approval';
+    block.append(text('p', approval.title || '承認待ち', 'approval-title'));
+    // 相手プロセスが書いた文字列はtextContentで入れる（HTMLとして解釈させない）
+    if(approval.detail) block.append(text('pre', approval.detail, 'approval-detail'));
+    if(approval.paths && approval.paths.length) { const paths = document.createElement('ul'); paths.className = 'approval-paths'; for(const p of approval.paths) paths.append(text('li', p)); block.append(paths); }
+    const row = document.createElement('div'); row.className = 'approval-actions';
+    if(approval.decidable) { row.append(actionButton(key, 'approve:' + approval.requestId, '承認', () => sendControl(card, 'approvalDecision', undefined, { approvalRequestId: approval.requestId, decision: 'accept' })), actionButton(key, 'decline:' + approval.requestId, '拒否', () => sendControl(card, 'approvalDecision', undefined, { approvalRequestId: approval.requestId, decision: 'decline' }))); }
+    else { row.append(text('span', 'この問い合わせは会話のタブ側で答えてください', 'detail-note')); }
+    block.append(row); box.append(block);
+  }
+  return box;
 }
 // 入力欄はboard・summaryの外にあるため、盤面の再描画では作り直されない。
 // 絞り込み条件も変数で持ち続けるので、250msごとの再描画をまたいで残る（Issue #1250）
@@ -444,6 +509,15 @@ currentToggle.addEventListener('change', () => { currentOnly = currentToggle.che
 clearButton.addEventListener('click', () => { queryInput.value=''; query=''; currentToggle.checked=false; currentOnly=false; applyFilter(); queryInput.focus(); });
 // 操作の結果はトーストで出す（Issue #1258）。別ウィンドウ宛ては応答を待つため、
 // 押した直後ではなく相手が実行した（できなかった）ことが分かってから出る
-function showControlResult(data) { const info = pendingControls.get(data.seq); pendingControls.delete(data.seq); const label = (info ? info.place + info.label : '操作'); showToast(data.ok ? label + 'を実行しました' : label + 'に失敗しました: ' + (data.error || '理由は不明です')); if(!data.ok && info && info.text !== undefined && drafts.get(info.key) === undefined) { drafts.set(info.key, info.text); applyFilter(); } }
+function showControlResult(data) {
+  const info = pendingControls.get(data.seq); pendingControls.delete(data.seq);
+  // 中身の取り寄せはカードの中へ出す。トーストにすると展開のたびに通知が出る
+  if(info && info.action === 'approvalDetail') { applyApprovalDetail(info, data); return; }
+  const label = (info ? info.place + info.label : '操作');
+  showToast(data.ok ? label + 'を実行しました' : label + 'に失敗しました: ' + (data.error || '理由は不明です'));
+  // 承認・拒否の後は手元の中身が古い。捨てて取り直す（解決済みの要求を押せないように）
+  if(info && info.action === 'approvalDecision') { details.delete(info.key); if(expanded.has(info.key)) { sendControl(info.card, 'approvalDetail'); } applyFilter(); return; }
+  if(!data.ok && info && info.text !== undefined && drafts.get(info.key) === undefined) { drafts.set(info.key, info.text); applyFilter(); }
+}
 window.addEventListener('message', event => { if(event.data.type==='board') { latestBoard = event.data.board; applyFilter(); } else if(event.data.type==='controlResult') { showControlResult(event.data); } }); vscode.postMessage({type:'ready'});
 `;

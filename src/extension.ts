@@ -173,6 +173,7 @@ import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
+import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager } from './view/sessionKanbanView';
 import {
@@ -182,6 +183,8 @@ import {
   SessionHubRequestPort,
   SessionHubRequestWatcher,
   SessionHubWriter,
+  isSharedApprovalDecision,
+  type SessionHubRequest,
   type SharedSession,
 } from './view/sessionHub';
 import { ForgeHubViewManager } from './view/forgeHubView';
@@ -1082,26 +1085,56 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionHubRequestPort = new SessionHubRequestPort(sessionHubRootDir, windowId, log);
   // 統括ページからの操作は、自ウィンドウ分も要求ファイル経由で届いた分もここを通す
   // （Issue #1258）。どちらの入口でも同じ判定・同じ副作用になる
+  // 中身を渡した相手と要求を覚えておき、取り寄せていない要求への決定を受信側でも弾く
+  // （Issue #1259）。画面側だけの約束にすると、統括ページを経由しない経路で素通りする
+  const approvalDisclosure = new ApprovalDisclosureLog();
   const controlSession = (
     provider: 'codex' | 'claude',
     threadId: string,
     action: SessionControlAction,
-  ): SessionControlResult =>
-    (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    /** 要求元のwindowId。自ウィンドウのカードからの操作なら自分自身のid */
+    from: string,
+  ): SessionControlResult => {
+    const target = { from, provider, threadId };
+    const result =
+      action.kind === 'approvalDecision' &&
+      !approvalDisclosure.consume(target, action.approvalRequestId)
+        ? { ok: false, error: '承認の内容を表示してから操作してください' }
+        : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    if (action.kind === 'approvalDetail' && result.approvals !== undefined) {
+      approvalDisclosure.record(
+        target,
+        result.approvals.map((approval) => approval.requestId),
+      );
+    }
+    // 承認・拒否だけは、成否によらず必ず1行残す（Issue #1259）。誰がどの会話の
+    // どの要求を承認したのかを、後からOutputだけで追えるようにする
+    if (action.kind === 'approvalDecision') {
+      log.info(
+        `セッション統括: 承認の決定（${action.decision}）を受け付けました` +
+          `（要求元 ${from}、${provider}/${threadId}、承認要求 ${action.approvalRequestId}、` +
+          `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
+      );
+    }
+    return result;
+  };
   const sessionHubRequestWatcher = new SessionHubRequestWatcher(
     sessionHubRootDir,
     windowId,
     (request) => {
-      const action = toSessionControlAction(request.kind, request.text);
+      const action = toSessionControlAction(request);
       if (action === undefined) {
         // 版が違うウィンドウから知らない操作が届いた。黙って捨てると相手が待つ
         return { ok: false, error: `この版のウィンドウは${request.kind}を扱えません` };
       }
-      const result = controlSession(request.provider, request.threadId, action);
+      const result = controlSession(request.provider, request.threadId, action, request.from);
       if (!result.ok) {
         log.info(`セッション統括: 要求を実行できませんでした（${result.error ?? '理由は不明'}）`);
       }
-      return result;
+      // 取り寄せた中身は応答にだけ載せる。共有ファイルへ常駐させない（Issue #1259）
+      return result.approvals === undefined
+        ? { ok: result.ok, error: result.error }
+        : { ok: result.ok, error: result.error, payload: { approvals: result.approvals } };
     },
     log,
   );
@@ -1122,15 +1155,18 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
     async (target, action) => {
       if (target.windowId === windowId) {
-        return controlSession(target.provider, target.threadId, action);
+        return controlSession(target.provider, target.threadId, action, windowId);
       }
       const reply = await sessionHubRequestPort.request(target.windowId, {
         kind: action.kind,
         provider: target.provider,
         threadId: target.threadId,
         text: action.kind === 'send' ? action.text : undefined,
+        approvalRequestId:
+          action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
+        decision: action.kind === 'approvalDecision' ? action.decision : undefined,
       });
-      return { ok: reply.ok, error: reply.error };
+      return { ok: reply.ok, error: reply.error, approvals: reply.payload?.approvals };
     },
     log,
   );
@@ -3580,17 +3616,18 @@ async function persistCache(
 }
 
 /**
- * 要求ファイルの`kind`を、チャット画面への操作へ変える（Issue #1258）。
+ * 要求ファイルの`kind`を、チャット画面への操作へ変える（Issue #1258、#1259）。
  *
- * 引数を`string`で受けるのは、共有ディレクトリへ書き込むのが版の違う別プロセスだから
- * （`SessionHubRequestWatcher`は未知の`kind`もそのまま渡す）。知らない操作は`undefined`を
- * 返し、呼び出し側が「扱えない」と応答して、送った側をタイムアウトまで待たせない。
+ * `kind`を`string`として扱うのは、共有ディレクトリへ書き込むのが版の違う別プロセス
+ * だから（`SessionHubRequestWatcher`は未知の`kind`もそのまま渡す）。知らない操作は
+ * `undefined`を返し、呼び出し側が「扱えない」と応答して、送った側をタイムアウトまで
+ * 待たせない。`decision`も同じ理由で、ここでホワイトリスト検証してから通す。
  */
 function toSessionControlAction(
-  kind: string,
-  text: string | undefined,
+  request: Pick<SessionHubRequest, 'kind' | 'text' | 'approvalRequestId' | 'decision'>,
 ): SessionControlAction | undefined {
-  switch (kind) {
+  const { text, approvalRequestId, decision } = request;
+  switch (request.kind as string) {
     case 'open':
       return { kind: 'open' };
     case 'interrupt':
@@ -3601,6 +3638,12 @@ function toSessionControlAction(
       return { kind: 'resumeLoop' };
     case 'send':
       return text === undefined ? undefined : { kind: 'send', text };
+    case 'approvalDetail':
+      return { kind: 'approvalDetail' };
+    case 'approvalDecision':
+      return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
+        ? undefined
+        : { kind: 'approvalDecision', approvalRequestId, decision };
     default:
       return undefined;
   }

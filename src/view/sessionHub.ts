@@ -3,6 +3,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
 import type { SessionActivityState } from './sessionActivity';
 
@@ -359,9 +360,68 @@ export class SessionHubReader implements vscode.Disposable {
  * 版の違うウィンドウ同士が同じディレクトリを共有するため、受け取った側が知らない
  * `kind`は必ず`ok: false`で返す（黙って捨てると、送った側が5秒待たされる）。
  */
-export type SessionHubRequestKind = 'open' | 'interrupt' | 'pauseLoop' | 'resumeLoop' | 'send';
+export type SessionHubRequestKind =
+  | 'open'
+  | 'interrupt'
+  | 'pauseLoop'
+  | 'resumeLoop'
+  | 'send'
+  | 'approvalDetail'
+  | 'approvalDecision';
 
-/** 1件の要求。`kind`ごとの追加項目は`text`（`send`が使う）だけ。 */
+/**
+ * 承認待ち1件の中身（Issue #1259）。
+ *
+ * 会話本文は共有ファイルへ常駐させない方針のため、これは`SharedSession`のような
+ * 常駐ファイルには書かない。`approvalDetail`の要求から応答を読み取るまでの間だけ
+ * `replies/<requestId>.json`に載り、読んだ側が消す（`SessionHubRequestPort.waitForReply`）。
+ */
+export interface SessionApprovalDetail {
+  /**
+   * 承認要求のid（`PendingApproval.requestId`）。
+   *
+   * 元の型は`number | string`だが、JSONを跨ぐと数値と文字列が混ざるため、
+   * 文字列へ寄せて運ぶ。受け取った側は`String(...)`で突き合わせて元の値を引き直す。
+   */
+  requestId: string;
+  /** `PendingApproval.kind`。版の違うウィンドウが知らない種別を送ってくるため`string`で受ける。 */
+  kind: string;
+  title: string;
+  /** コマンド全文・変更理由など、承認カードの本文にあたる文字列。 */
+  detail: string;
+  /** 変更対象のパス。`kind === 'fileChange'`のときに対応する項目から引いたもの。 */
+  paths: string[];
+  /**
+   * 承認・拒否の4値（`ApprovalDecision`）で解決できるか。
+   *
+   * `askUserQuestion`（選択式の問い合わせ）は専用の応答経路を持ち、この4値では
+   * 答えられない。統括ページからは中身だけ出し、ボタンは出さない。
+   */
+  decidable: boolean;
+}
+
+/**
+ * 共有ディレクトリ経由で通す承認の決定（Issue #1259）。
+ *
+ * `ApprovalDecision`は4値あるが、この経路では`accept`と`decline`だけを通す。
+ * `acceptForSession`は以後の承認を自動で許可する最も強い決定で、統括ページにも
+ * ボタンが無い。要求ファイルを直接置ける立場（design.md §14.111）へ、画面に無い
+ * 強い決定まで渡す理由が無い。`cancel`はターンの取り消しで、中断（`interrupt`）が
+ * 別にあるため要らない。
+ */
+export type SharedApprovalDecision = Extract<ApprovalDecision, 'accept' | 'decline'>;
+
+export function isSharedApprovalDecision(value: unknown): value is SharedApprovalDecision {
+  return value === 'accept' || value === 'decline';
+}
+
+/** 応答の`payload`（Issue #1259）。Phase 3以降（会話の直近N件・btwの回答）もここへ足す。 */
+export interface SessionHubReplyPayload {
+  /** `kind === 'approvalDetail'`の応答。承認待ちが無ければ空配列。 */
+  approvals?: SessionApprovalDetail[] | undefined;
+}
+
+/** 1件の要求。`kind`ごとの追加項目はここへ並べる。 */
 export interface SessionHubRequest {
   requestId: string;
   kind: SessionHubRequestKind;
@@ -372,23 +432,30 @@ export interface SessionHubRequest {
   threadId: string;
   /** `kind === 'send'`のときの本文。 */
   text?: string | undefined;
+  /**
+   * `kind === 'approvalDecision'`のときの、対象の承認要求のid（Issue #1259）。
+   *
+   * この要求そのもののidである`requestId`とは別物なので名前を分ける。
+   */
+  approvalRequestId?: string | undefined;
+  /** `kind === 'approvalDecision'`のときの決定。受信側が`ApprovalDecision`として検証する。 */
+  decision?: string | undefined;
 }
 
-/**
- * 要求に対する応答。
- *
- * Phase 2以降（承認の中身・会話の直近N件・btwの回答）は、ここへ`payload`を足して運ぶ。
- */
+/** 要求に対する応答。 */
 export interface SessionHubReply {
   requestId: string;
   ok: boolean;
   error?: string | undefined;
+  /** 取り寄せた中身（Issue #1259）。応答ファイルは読んだ側が消すため、共有領域には残らない。 */
+  payload?: SessionHubReplyPayload | undefined;
 }
 
 /** 受信側のハンドラが返す結果。応答ファイルの中身は`requestId`を添えてこれから作る。 */
 export interface SessionHubRequestOutcome {
   ok: boolean;
   error?: string | undefined;
+  payload?: SessionHubReplyPayload | undefined;
 }
 
 /** 応答を待つ上限。これを過ぎたら要求ファイルを取り下げる。 */
@@ -445,6 +512,8 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     provider: v.provider,
     threadId: v.threadId,
     text: typeof v.text === 'string' ? v.text : undefined,
+    approvalRequestId: typeof v.approvalRequestId === 'string' ? v.approvalRequestId : undefined,
+    decision: typeof v.decision === 'string' ? v.decision : undefined,
   };
 }
 
@@ -461,7 +530,46 @@ function parseReply(raw: string): SessionHubReply | undefined {
     requestId: v.requestId,
     ok: v.ok,
     error: typeof v.error === 'string' ? v.error : undefined,
+    payload: parsePayload(v.payload),
   };
+}
+
+/**
+ * 応答の`payload`を、信用せずに読み解く（Issue #1259）。
+ *
+ * 中身は別プロセス（版が違うこともある）が書いた文字列で、そのまま画面へ流す。
+ * 形の合わない要素は落とし、1つでも読めた分だけを返す。
+ */
+function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const raw = (value as Record<string, unknown>).approvals;
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const approvals: SessionApprovalDetail[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const v = entry as Record<string, unknown>;
+    if (typeof v.requestId !== 'string' || typeof v.kind !== 'string') {
+      continue;
+    }
+    approvals.push({
+      requestId: v.requestId,
+      kind: v.kind,
+      title: typeof v.title === 'string' ? v.title : '',
+      detail: typeof v.detail === 'string' ? v.detail : '',
+      paths: Array.isArray(v.paths)
+        ? v.paths.filter((p): p is string => typeof p === 'string')
+        : [],
+      // 読めない版から届いた場合は押せない側へ倒す。誤って承認させない
+      decidable: v.decidable === true,
+    });
+  }
+  return { approvals };
 }
 
 /**
@@ -531,6 +639,8 @@ export class SessionHubRequestPort {
     targetWindowId: string,
     input: Pick<SessionHubRequest, 'kind' | 'provider' | 'threadId'> & {
       text?: string | undefined;
+      approvalRequestId?: string | undefined;
+      decision?: string | undefined;
     },
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
