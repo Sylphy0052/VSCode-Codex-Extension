@@ -17,7 +17,7 @@ const pseudo: PseudoCommand[] = [
 describe('CODEX_PSEUDO_COMMANDS', () => {
   it('拡張機能側で実行できるものだけを載せる', () => {
     // 対応する動作が無いものを載せると「押しても何も起きない」状態に戻る
-    expect(CODEX_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['compact', 'init', 'btw']);
+    expect(CODEX_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['compact', 'init', 'btw', 'clear']);
   });
 
   it('説明が付いている', () => {
@@ -29,16 +29,24 @@ describe('CODEX_PSEUDO_COMMANDS', () => {
     expect(btw?.action).toBe('sideQuestion');
     expect(btw?.argumentHint).not.toBe('');
   });
+
+  it('/clear は引数を取らない（会話のクリア。issue #1264）', () => {
+    const clear = CODEX_PSEUDO_COMMANDS.find((c) => c.name === 'clear');
+    expect(clear?.action).toBe('clearConversation');
+    expect(clear?.argumentHint).toBe('');
+  });
 });
 
 describe('CLAUDE_PSEUDO_COMMANDS（issue #334、design.md §14.62）', () => {
-  it('/btw だけを持つ（/compact・/initはClaude Code側では別経路のため含めない）', () => {
-    expect(CLAUDE_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['btw']);
+  it('/btw と /clear を持つ（/compact・/initはClaude Code側では別経路のため含めない）', () => {
+    expect(CLAUDE_PSEUDO_COMMANDS.map((c) => c.name)).toEqual(['btw', 'clear']);
   });
 
-  it('CODEX_PSEUDO_COMMANDSのbtwと同じ定義を共有する（Codex側の挙動を変えない）', () => {
+  it('CODEX_PSEUDO_COMMANDSと同じ定義を共有する（Codex側の挙動を変えない）', () => {
     const codexBtw = CODEX_PSEUDO_COMMANDS.find((c) => c.name === 'btw');
+    const codexClear = CODEX_PSEUDO_COMMANDS.find((c) => c.name === 'clear');
     expect(CLAUDE_PSEUDO_COMMANDS[0]).toBe(codexBtw);
+    expect(CLAUDE_PSEUDO_COMMANDS[1]).toBe(codexClear);
   });
 });
 
@@ -83,6 +91,19 @@ describe('routePseudoCommand', () => {
 
   it('知らないコマンドは引き受けない', () => {
     expect(routePseudoCommand(pseudo, '/status')).toBeUndefined();
+  });
+
+  it('/clear をクリアへ振り替える（CLIへ送ると発言として素通しされる。issue #1264）', () => {
+    expect(routePseudoCommand(CODEX_PSEUDO_COMMANDS, '/clear')).toEqual({
+      name: 'clear',
+      action: 'clearConversation',
+      args: '',
+    });
+    expect(routePseudoCommand(CLAUDE_PSEUDO_COMMANDS, '/clear')).toEqual({
+      name: 'clear',
+      action: 'clearConversation',
+      args: '',
+    });
   });
 
   it('/btw は質問を引数として取り出す', () => {

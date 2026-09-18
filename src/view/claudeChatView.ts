@@ -1602,10 +1602,18 @@ export class ClaudeChatViewManager
 
   /**
    * 擬似コマンドを実行する。CLIへは何も送らない（`chatView.ts`の`runPseudoCommand`と
-   * 同じ考え方）。Claude Code画面は`CLAUDE_PSEUDO_COMMANDS`（`/btw`のみ）しか候補に
-   * 出さないため、ここへ来る要求は必ず`sideQuestion`になる。
+   * 同じ考え方）。Claude Code画面は`CLAUDE_PSEUDO_COMMANDS`（`/btw`と`/clear`）しか
+   * 候補に出さないため、ここへ来る要求はそのどちらかになる。
    */
   private async runPseudoCommand(entry: ClaudePanel, call: PseudoCommandCall): Promise<void> {
+    if (call.action === 'clearConversation') {
+      if (call.args !== '') {
+        this.log.warn(`/${call.name} は引数を受け取らないため無視します: ${call.args}`);
+      }
+      // クリアアイコン（`claude.clearChat`）と同じ実処理。確認・タスク管理下の拒否も共通
+      await this.clearEntry(entry);
+      return;
+    }
     if (call.action !== 'sideQuestion') {
       // CLAUDE_PSEUDO_COMMANDSに無い動作がここへ来ることは無いが、将来増えたときに
       // 黙って何も起きない状態を作らないよう、判る形で残す
@@ -1924,6 +1932,17 @@ export class ClaudeChatViewManager
       void vscode.window.showInformationMessage('クリアするClaude Code画面を開いてください');
       return;
     }
+    await this.clearEntry(entry);
+  }
+
+  /**
+   * 指定した画面をクリアする（`clearActive` の実処理）。
+   *
+   * 入力欄の `/clear`（issue #1264）は打った画面そのものを対象にしたいため、`this.active`
+   * ではなく送信元の `entry` を受け取れるようにここへ切り出してある（Codex画面の
+   * `clearEntry`（`chatView.ts`）と同じ）。
+   */
+  private async clearEntry(entry: ClaudePanel): Promise<void> {
     // タスク（オーケストレータ）管理下のタブは、走らせている側が寿命を持つ
     if (entry.taskManaged) {
       void vscode.window.showWarningMessage('タスクが動かしている画面はクリアできません');

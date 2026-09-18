@@ -2294,6 +2294,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       await this.runGenerateAgentsFile(entry);
       return;
     }
+    if (call.action === 'clearConversation') {
+      if (call.args !== '') {
+        this.log.warn(`/${call.name} は引数を受け取らないため無視します: ${call.args}`);
+      }
+      // クリアアイコン（`codex.clearChat`）と同じ実処理。確認・タスク管理下の拒否も共通
+      await this.clearEntry(entry);
+      return;
+    }
     if (call.action === 'sideQuestion') {
       const question = trimmedArgsOrUndefined(call.args);
       if (question === undefined) {
@@ -2903,6 +2911,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       void vscode.window.showInformationMessage('クリアするCodex画面を開いてください');
       return;
     }
+    await this.clearEntry(entry);
+  }
+
+  /**
+   * 指定した画面をクリアする（`clearActive` の実処理）。
+   *
+   * 入力欄の `/clear`（issue #1264）は打った画面そのものを対象にしたいため、`this.active`
+   * ではなく送信元の `entry` を受け取れるようにここへ切り出してある。
+   */
+  private async clearEntry(entry: ChatPanel): Promise<void> {
     // タスク（オーケストレータ）管理下のタブは、走らせている側が寿命を持つ
     if (entry.taskManaged) {
       void vscode.window.showWarningMessage('タスクが動かしている画面はクリアできません');
