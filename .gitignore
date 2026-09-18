@@ -20,8 +20,23 @@ coverage/
 # ChatGPT向け質問ファイルのドラフト（ローカルのみ、リモート未push）
 docs/chatgpt/
 
-# セカンドオピニオン評価の測定結果 (ローカルのみ、リモート未push)
-eval-results/
+# セカンドオピニオン評価の測定結果 (既定はローカルのみ、リモート未push)
+#
+# 例外として、凍結した派生物と人の判定だけを追跡する。追跡外のままにしていたために
+# 版2の screening 判定 60件が作業環境ごと失われ、作り直しになった (Issue #1046)。
+# 取り直せば済む素 (sampling-source / evidence-source) と、モデルを呼んだ実行結果は
+# 引き続き追跡しない。素の同一性は frame 側の sourceSha256 で確かめられる。
+eval-results/*
+!eval-results/sampling-frame-*.json
+!eval-results/evidence-candidates-*.json
+!eval-results/screening-order-*.json
+!eval-results/supplemental-order-*.json
+!eval-results/screening-decisions-*.jsonl
+!eval-results/screening-summary-*.json
+!eval-results/eligibility-*.json
+!eval-results/primary-eligibility-*.json
+!eval-results/selection-pool-*.json
+!eval-results/selected-cases-*.json
 
 # 全関数精査の構文抽出結果 (約15MB、docs/reviews/exhaustive/extract.mjs で再生成できる中間生成物)
 docs/reviews/exhaustive/inventory.json
