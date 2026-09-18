@@ -3,13 +3,13 @@
   "orderFile": "screening-order-v3.json",
   "orderSha256": "f8194249366dd2c786f69fcb2f1ced8a45af75df96207e95113761b8769bfdaf",
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "2b6ecc83b28e5351f0225a50f82c28e180be646acd21cd30eb99287cfb093da5",
+  "decisionsSha256": "34aa40f6752df0572970b997a29be9b46528788cd7f92f6521726d038d45ec7c",
   "primaryTargetCases": 18,
   "reachedTarget": false,
-  "screenedCases": 68,
+  "screenedCases": 72,
   "primaryCases": 16,
-  "nonPrimaryCases": 52,
-  "unreadCases": 34,
+  "nonPrimaryCases": 56,
+  "unreadCases": 30,
   "primaryFindings": 18,
   "nonPrimaryBreakdown": [
     {
@@ -34,7 +34,7 @@
     },
     {
       "disposition": "no-relevant-finding",
-      "count": 32
+      "count": 36
     }
   ]
 }
