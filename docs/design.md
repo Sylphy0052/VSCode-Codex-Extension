@@ -9279,7 +9279,7 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 
 **発火の順序は変えていない。** `ProgramRunner.onChanged`が「対象プログラムの状態を`programStore`へ永続化し終えた後にだけ発火する」という不変条件（§16.37.3のレビュー指摘F1）はそのままで、feedは受け取った通知を転送するだけである。`WorkflowRunner.onChanged` / `ProgramRunner.onChanged`自体も残している（`ProgramRunner`が`workflow.onChanged`を購読して動くため）。1つにしたのは**Viewから見える口だけ**である。
 
-Viewは変化の種類で送る内容を変えない。run一覧・プログラム欄・表示中のrunは同じ`getSnapshot`の結果から作るため、常に同じ時点の状態がそろってWebviewへ届く。Webviewへのメッセージも`runs` / `programs` / `state` / `noRun`の4種から`feed`の1通へまとめた。
+Viewは変化の種類で送る内容を変えない。run一覧・プログラム欄・表示中のrunは同じ`getSnapshot`の結果から作るため、常に同じ時点の状態がそろってWebviewへ届く。**例外はロードマップ欄だけ**で、こちらはファイルの読み取りと`gh`/`glab`の起動を伴うため、表示中のrunに関係しない変化（別runの進行・プログラム側の更新）では取り直さない（統合前の`onRunnerChanged`も、表示中のrunの変化でなければ`postState`の中の`postRoadmap`を呼んでいなかった。自己レビュー指摘: medium）。Webviewへのメッセージも`runs` / `programs` / `state` / `noRun`の4種から`feed`の1通へまとめた。
 
 #### プログラムに属さない単発runの扱い
 

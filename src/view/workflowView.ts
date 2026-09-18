@@ -10,6 +10,7 @@ import type {
 } from '../orchestrator/runner';
 import {
   createWorkflowFeed,
+  type WorkflowChange,
   type WorkflowFeed,
   type WorkflowFeedProgramPort,
 } from '../orchestrator/workflowFeed';
@@ -29,6 +30,12 @@ import {
   summarizeKanban,
   taskRoleLabel,
   formatTaskContext,
+  type GraphLayout,
+  type IntegrationSummary,
+  type KanbanBucket,
+  type KanbanSummary,
+  type ProgressSegment,
+  type ProgressSummary,
 } from './workflowGraph';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
@@ -71,6 +78,28 @@ export interface RoadmapViewPort {
   readRoadmap(relativePath: string): Promise<string | undefined>;
   /** Issue一覧（クローズ済みを含む）。取れなければ`undefined`（「取れなければ飛ばす」）。 */
   listIssues(): Promise<readonly RoadmapIssueSummary[] | undefined>;
+}
+
+/**
+ * `feed`メッセージの`state`（表示中のrun、または下書きプレビュー）の中身。
+ *
+ * 段レイアウトと各種の集計は拡張機能側の純粋関数（`workflowGraph.ts`）で済ませて
+ * 同送する。Webview側はこれらを再計算しない（design.md §16.8、Issue #104の再発防止）。
+ */
+interface WorkflowStateMessage {
+  /** 表示用に`roleLabel` / `kanbanBucket` / `contextLabel`を足したタスクを持つスナップショット。 */
+  snapshot: Omit<WorkflowRunSnapshot, 'tasks'> & {
+    tasks: readonly (TaskSnapshot & {
+      roleLabel: string | undefined;
+      kanbanBucket: KanbanBucket;
+      contextLabel: string;
+    })[];
+  };
+  layout: GraphLayout;
+  progress: ProgressSummary;
+  progressSegments: readonly ProgressSegment[];
+  kanban: KanbanSummary;
+  integration: IntegrationSummary | undefined;
 }
 
 /**
@@ -151,7 +180,7 @@ export class WorkflowViewManager implements vscode.Disposable {
     private readonly roadmap?: RoadmapViewPort,
   ) {
     this.feed = createWorkflowFeed({ runner, ...(programs === undefined ? {} : { programs }) });
-    this.unsubscribeChanged = this.feed.onChanged(() => this.onFeedChanged());
+    this.unsubscribeChanged = this.feed.onChanged((change) => this.onFeedChanged(change));
   }
 
   dispose(): void {
@@ -249,8 +278,14 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 発火の順序（`ProgramRunner`が永続化を終えてから`kind: 'program'`が流れる）は
    * feedを挟んでも変わらない（`workflowFeed.ts`のJSDoc参照）。
    */
-  private onFeedChanged(): void {
-    this.postAll();
+  private onFeedChanged(change: WorkflowChange): void {
+    // ロードマップ欄だけは取り直さない場合がある。ファイルの読み取りとCLIの起動
+    // （`gh`/`glab`）を伴うため、表示中のrunに関係しない変化——別runの進行や
+    // プログラム側の更新——のたびに走らせると、実行中はタスクの状態が変わるたびに
+    // プロセスが増える。統合前の`onRunnerChanged`も、表示中のrunの変化でなければ
+    // `postState`（その中の`postRoadmap`）を呼んでいなかった
+    const affectsActiveRun = change.kind !== 'run' || change.runId === this.activeRunId;
+    this.postAll({ refreshRoadmap: affectsActiveRun });
   }
 
   /**
@@ -261,7 +296,7 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 「状態が変わっていないのに送らない」という意味で解釈している。runIdあたり最大
    * 50タスクという上限があるため、スナップショット全体を送っても軽い）。
    */
-  private postAll(): void {
+  private postAll(options: { refreshRoadmap?: boolean } = {}): void {
     if (this.panel === undefined) {
       return;
     }
@@ -281,10 +316,12 @@ export class WorkflowViewManager implements vscode.Disposable {
       programs: feed.programs,
       state: snapshot === undefined ? undefined : this.buildStateMessage(snapshot),
     });
-    void this.postRoadmap(snapshot?.roadmapPath);
+    if (options.refreshRoadmap !== false) {
+      void this.postRoadmap(snapshot?.roadmapPath);
+    }
   }
 
-  private buildStateMessage(snapshot: WorkflowRunSnapshot): Record<string, unknown> {
+  private buildStateMessage(snapshot: WorkflowRunSnapshot): WorkflowStateMessage {
     const layout = layoutGraph(snapshot.tasks, { maxWidth: this.graphViewportWidth });
     // 進捗の内訳・統合の状況の集計は`workflowGraph.ts`の純粋関数（テスト済み）で行い、
     // Webview側では受け取った結果を表示するだけにする（design.md §16.8「全体の進捗」・

@@ -12,6 +12,10 @@
  * - スナップショットは`WorkflowFeedSnapshot`の1つだけにし、run一覧・プログラム一覧・
  *   表示中のrunを**同じ呼び出しの中で**読む（Viewが2種類のデータを突き合わせない）
  *
+ * 純粋関数の置き場の使い分け: 表示のための整形（文字列の組み立て・レイアウト・集計）は
+ * `view/workflowGraph.ts`へ、実行状態どうしの突き合わせ（`buildFeedRuns`）はこちらへ置く。
+ * 後者はVSCodeにもWebviewにも依存しないオーケストレーター層の関心事である。
+ *
  * **発火の順序は変えない。** `ProgramRunner.onChanged`は「対象プログラムの状態を
  * `programStore`へ永続化し終えた後にだけ発火する」（`programRunner.ts`の`changeEmitter`の
  * JSDoc、design.md §16.37.3のレビュー指摘F1）。このモジュールは受け取った通知を
@@ -103,6 +107,13 @@ export function buildFeedRuns(
 ): readonly FeedRunSummary[] {
   const owner = new Map<string, { programId: string; runRefId: string }>();
   for (const program of programs) {
+    // `state.runs`は`Record`（`ProgramState`のJSDoc参照）。永続化を経た値なので、
+    // 想定外の形が入っていても`Object.entries`で投げないよう先に確かめる。ここは
+    // 変化通知のリスナから同期で呼ばれるため、投げると発火元の処理まで巻き込む
+    const runs: unknown = program.state.runs;
+    if (typeof runs !== 'object' || runs === null || Array.isArray(runs)) {
+      continue;
+    }
     for (const [runRefId, entry] of Object.entries(program.state.runs)) {
       if (entry.runId === undefined || owner.has(entry.runId)) {
         continue;
