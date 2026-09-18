@@ -1433,6 +1433,14 @@
           "scope": "machine-overridable",
           "markdownDescription": "通常タスクの承認待ち（`waitingApproval`）が止まってよい時間の上限（秒）。超えたら自動的にタスクを停止し`failed`（理由: `taskApprovalTimedOut`）にする。**`agent.workflows.mergeApprovalTimeoutSec`とは別のキー**（あちらは衝突解決セッション専用で`blocked`にする。設計書 §16.39）。危険と判定された操作を時間切れで暗黙に承認したことにはしない。`retries`の自動再試行の対象にもしない。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（3600秒）にフォールバックする。"
         },
+        "agent.workflows.contextLowPercent": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 99,
+          "scope": "machine-overridable",
+          "markdownDescription": "ワークフローのタスクで、コンテキスト残量がこの割合以下になったときに定義ファイルの `onContextLow`（`compact` / `split` / `none`）を実行する（設計書 §16.47）。既定の `none` を指定したタスクでは何も起きない。**`agent.autoHandoff.thresholdPercent` とは別のキー**（あちらは人が見ているチャットの自動引き継ぎ用）。無人実行の閾値をチャットと独立に調整できるようにしてある。残量を取得できないプロバイダ・取得前は、値によらず何も起こさない。範囲外（1未満・99超・非数値）の値は既定値（20）にフォールバックする。"
+        },
         "agent.workflows.finalMergeDecisionTimeoutSec": {
           "type": "number",
           "default": 900,

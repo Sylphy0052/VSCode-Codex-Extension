@@ -27,8 +27,21 @@ import type { TaskSessionInput } from '../orchestrator/taskSession';
  */
 export type SessionPanelTitleInput = Pick<
   TaskSessionInput,
-  'role' | 'mergeResolutionTaskId' | 'taskId' | 'issue' | 'teamRole'
+  'role' | 'mergeResolutionTaskId' | 'taskId' | 'issue' | 'teamRole' | 'generation'
 >;
+
+/**
+ * 同じタスクを分割（`onContextLow: split`。Issue #1273）で開き直したときの世代の印。
+ *
+ * 書式はチャットの自動引き継ぎ（`view/handoff.ts` の `buildHandoffSessionName`。
+ * Issue #1145・#1255）と同じ `(続きN)` に揃える。人から見て「同じ作業の続き」であることが
+ * どちらの経路でも同じ見え方になるようにするため。1代目（通常の起動）には付けない。
+ */
+function generationSuffix(generation: number | undefined): string {
+  return generation !== undefined && Number.isSafeInteger(generation) && generation >= 2
+    ? ` (続き${generation})`
+    : '';
+}
 
 /**
  * 分岐の順序には意味がある。**衝突解決 > オーケストレーター > 識別子と役割 > ラベルのみ。**
@@ -45,11 +58,12 @@ export type SessionPanelTitleInput = Pick<
  * ためのフォールバックとしてラベルを使う。
  */
 export function buildSessionPanelTitle(input: SessionPanelTitleInput, label: string): string {
+  const suffix = generationSuffix(input.generation);
   if (input.mergeResolutionTaskId !== undefined) {
-    return `衝突解決 ${input.mergeResolutionTaskId}`;
+    return `衝突解決 ${input.mergeResolutionTaskId}${suffix}`;
   }
   if (input.role === 'orchestrator') {
-    return '進行役';
+    return `進行役${suffix}`;
   }
   // Issue番号はタスクidより人にとっての意味が強い（何の作業かを追える）ため優先する。
   // どちらも無いタスク（定義ファイルに`issue`が無く、自動起票もされていない）では
@@ -62,5 +76,5 @@ export function buildSessionPanelTitle(input: SessionPanelTitleInput, label: str
         : undefined;
   const role = input.teamRole !== undefined ? roleLabel(input.teamRole) : undefined;
   const parts = [identifier, role].filter((part): part is string => part !== undefined);
-  return parts.length > 0 ? parts.join(' ') : label;
+  return `${parts.length > 0 ? parts.join(' ') : label}${suffix}`;
 }

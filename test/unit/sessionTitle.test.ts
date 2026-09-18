@@ -110,6 +110,45 @@ describe('buildSessionPanelTitle（Issue #533の3分岐）', () => {
         };
         expect(buildSessionPanelTitle(input, label)).toBe('進行役');
       });
+
+      // 分割（`onContextLow: split`。Issue #1273、design.md §16.47）の世代の印。
+      // 書式はチャットの自動引き継ぎ（`buildHandoffSessionName`）と同じ `(続きN)` に揃える
+      describe('世代の印（Issue #1273）', () => {
+        it('generationが無ければ従来どおり付かない', () => {
+          const input: SessionPanelTitleInput = { issue: 1200 };
+          expect(buildSessionPanelTitle(input, label)).toBe('#1200');
+        });
+
+        it('1代目（通常の起動）にも付かない', () => {
+          const input: SessionPanelTitleInput = { issue: 1200, generation: 1 };
+          expect(buildSessionPanelTitle(input, label)).toBe('#1200');
+        });
+
+        it('2代目以降は末尾に付く', () => {
+          const input: SessionPanelTitleInput = { issue: 1200, generation: 3 };
+          expect(buildSessionPanelTitle(input, label)).toBe('#1200 (続き3)');
+        });
+
+        it('識別子も役割も無いフォールバックにも付く', () => {
+          const input: SessionPanelTitleInput = { generation: 2 };
+          expect(buildSessionPanelTitle(input, label)).toBe(`${label} (続き2)`);
+        });
+
+        it('衝突解決・進行役にも付く（どのタブの続きか見分けられるようにする）', () => {
+          expect(
+            buildSessionPanelTitle({ mergeResolutionTaskId: 'T1', generation: 2 }, label),
+          ).toBe('衝突解決 T1 (続き2)');
+          expect(buildSessionPanelTitle({ role: 'orchestrator', generation: 2 }, label)).toBe(
+            '進行役 (続き2)',
+          );
+        });
+
+        it('壊れた値（NaN・小数・0以下）では付けない', () => {
+          for (const generation of [Number.NaN, 1.5, 0, -1]) {
+            expect(buildSessionPanelTitle({ issue: 1200, generation }, label)).toBe('#1200');
+          }
+        });
+      });
     });
   }
 });

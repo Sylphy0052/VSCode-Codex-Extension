@@ -2213,6 +2213,14 @@ export class ClaudeChatViewManager
       },
       stopLoop: () => entry.loop.stop('taskStopped'),
       decideApproval: (requestId, decision) => this.resolveApproval(entry, requestId, decision),
+      // 無人実行の自動圧縮（Issue #1273）。`chatView.ts`（Codex）と同じ扱いで、画面の
+      // 圧縮ボタン（`this.compact`）が通す確認と`loop.noteUserAction()`は通さない。
+      // Claude側の`compact()`は同期（`/compact`の発言を書くだけ）なのでPromiseへ包む
+      compact: () => {
+        entry.session.compact();
+        return Promise.resolve();
+      },
+      note: (id, text) => entry.session.noteLocalEvent(id, text),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
       dispose: () => this.teardown(entry),

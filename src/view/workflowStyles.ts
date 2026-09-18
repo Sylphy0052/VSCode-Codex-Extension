@@ -488,6 +488,11 @@ ${sharedStyles()}
      上書きとは性質が違う（危険度ではなく分解の妥当性）ため、plannerSecurity等の
      errorForegroundとは別の色にして見分けをつける。 */
   .warning-item.plannerReview { border-left-color: var(--vscode-charts-blue); }
+  /* コンテキスト残量の対策（Issue #1273）。危険でも品質の指摘でもなく「拡張機能がこう動いた」
+     という事実の記録なので、plannerReviewと同じ情報寄りの色にする。失敗（contextActionFailed）
+     だけは対策が効いていないことを示すため、既定の黄色のまま目立たせる。 */
+  .warning-item.contextCompacted { border-left-color: var(--vscode-charts-blue); }
+  .warning-item.contextSplit { border-left-color: var(--vscode-charts-blue); }
 
   /* ---- プログラム欄（design.md §16.37.3、roadmap W12-3、Issue #606） ---- */
   #programsSection { margin-top: 8px; }

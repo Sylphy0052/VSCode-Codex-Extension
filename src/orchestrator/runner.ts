@@ -7,6 +7,13 @@ import type { ChatState, ContextUsage, PendingApproval } from '../appserver/chat
 import type { LoopStopReason } from '../loop/loopController';
 import type { Logger } from '../log';
 import { buildEscalationRequest } from './approvalMapping';
+import {
+  buildSplitPrompt,
+  type ContextLowAction,
+  decideContextLow,
+  DEFAULT_CONTEXT_LOW_PERCENT,
+  remainingIterations,
+} from './contextLow';
 import { classifyApprovalRequest, type EscalationPolicy, type TaskBoundary } from './escalation';
 import {
   buildTaskIssueBody,
@@ -38,7 +45,12 @@ import {
 import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
 import type { TeamRole } from './rolePresets';
-import { formatHandoffReference, RESULT_HANDOFF_SLUG, TeamHandoffStore } from './teamHandoff';
+import {
+  formatHandoffReference,
+  RESULT_HANDOFF_SLUG,
+  SPLIT_HANDOFF_SLUG,
+  TeamHandoffStore,
+} from './teamHandoff';
 import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   removePseudoIntegration,
@@ -417,6 +429,14 @@ export interface WorkflowRunnerDeps {
    */
   readTaskApprovalTimeoutSec?: () => number;
   /**
+   * `agent.workflows.contextLowPercent`の現在値（%）。省略時は
+   * `DEFAULT_CONTEXT_LOW_PERCENT`（既定20）を使う（Issue #1273、design.md §16.47）。
+   * タスクの`onContextLow`（`compact` / `split`）を起こす残量の閾値で、
+   * `readTaskApprovalTimeoutSec`と同じく、呼び出し側は使い捨ての値ではなく毎回現在値を
+   * 返す関数を渡すこと（設定を変えたら次のターンから効く）。
+   */
+  readContextLowPercent?: () => number;
+  /**
    * `agent.workflows.finalMergeDecisionTimeoutSec`の現在値（秒）。省略時は
    * `DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC`（既定900秒）を使う（design.md §16.26）。
    * `finalMerge: orchestrator`で統合PR/MRを作った後、オーケストレーターが
@@ -487,6 +507,16 @@ export interface StartWorkflowResult {
   allowDigest?: string;
 }
 
+/**
+ * 残量を人が読める形にする（Issue #1273）。取れない場合は0%と取り違えない文言にする。
+ *
+ * ここを通るのは警告欄と会話へ残す文言だけで、判定そのものは`decideContextLow`が
+ * `undefined`のまま扱う（取れない残量では何も起こさない）。
+ */
+function describeRemaining(remainingPercent: number | undefined): string {
+  return remainingPercent === undefined ? '不明な割合' : `残り${remainingPercent}%`;
+}
+
 /** `WorkflowRunner.retryTask` の戻り値。`start()` の `allow` 確認と同じ形にしてある。 */
 export interface RetryTaskResult {
   ok: boolean;
@@ -523,6 +553,18 @@ export interface WorkflowWarning {
      * 実行そのものは止めない（下流は `{{T1.brief}}` の要点だけで進むことになる）。
      */
     | 'handoffWriteFailed'
+    /**
+     * コンテキスト残量が閾値を下回ったため会話を圧縮した（Issue #1273）。黙って会話が
+     * 短くなると人が理由を追えないため、事実として残す。runは止めない。
+     */
+    | 'contextCompacted'
+    /** 同じくセッションを分割した（Issue #1273）。元のタブは残り、続きは新しいタブで走る。 */
+    | 'contextSplit'
+    /**
+     * 圧縮・分割そのものに失敗した（Issue #1273）。タスクは古いセッションのまま進むため
+     * runは止めないが、残量対策が効いていないことは見えるようにする。
+     */
+    | 'contextActionFailed'
     /**
      * PR/MRの前提（`origin` remote・`gh`/`glab`のPATH・認証）が欠けているため、
      * PR/MRの作成を飛ばした（design.md §16.18「前提が欠けている場合」）。
@@ -1163,6 +1205,38 @@ export interface LiveTask {
   /** 独立検証を通過したDONEだけを通常の完了処理へ流す。 */
   verificationPassed?: boolean;
   wasBusy: boolean;
+  /**
+   * このタスクのセッションを開いたときの入力（Issue #1273）。分割（`onContextLow: split`）
+   * が**同じ作業ディレクトリ・ブランチ・権限**で開き直すために保持する。
+   * `prepareTaskLaunch`をもう一度通すとworktreeを作り直してしまい、途中まで書いた変更から
+   * 切り離された別のディレクトリで続きが始まる。
+   */
+  input: TaskSessionInput;
+  /**
+   * このタスクの現在のセッションが何代目か（Issue #1273）。分割するたびに1つ増え、
+   * タブ名の世代の印（`sessionTitle.ts` の `(続きN)`）に使う。初回は1。
+   */
+  generation: number;
+  /**
+   * 残量の閾値を跨いで既に動作したか（`contextLow.ts` の `decideContextLow` のラッチ）。
+   * 残量が閾値を上回れば外れるため、長いタスクでは2回目以降も動作する。
+   */
+  contextLowLatched: boolean;
+  /**
+   * 直近に見た `ChatState.turnCompletionSeq`。ターンが1つ完了した瞬間を見るために持つ
+   * （`busy`の立ち下がりでは足りない。issue #939・`contextLow.ts`のJSDoc参照）。
+   */
+  lastTurnCompletionSeq: number;
+  /**
+   * 圧縮・分割の実行中か（Issue #1273）。`await`を挟む間にも状態変化は届くため、
+   * 印が無いと同じ閾値で二重に走る（分割が2回起きてセッションが宙に浮く）。
+   */
+  contextLowInFlight: boolean;
+  /**
+   * `setupTaskPrompting`が作った、テンプレート展開の囲いに使う乱数（design.md §16.4 案3）。
+   * 分割（Issue #1273）が同じ乱数で要点を囲うために持つ。
+   */
+  templateNonce: string;
   submissionCount: number;
   /** タスクが開始された時刻（ISO8601）。Viewの経過時間表示に使う。 */
   startedAt: string;
@@ -3750,6 +3824,12 @@ export class WorkflowRunner {
       verificationInProgress: false,
       verificationPassed: false,
       wasBusy: false,
+      input: prepared.input,
+      generation: prepared.input.generation ?? 1,
+      contextLowLatched: false,
+      lastTurnCompletionSeq: 0,
+      contextLowInFlight: false,
+      templateNonce: '',
       submissionCount: 0,
       startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
       lastResponseSummary: '',
@@ -3781,11 +3861,13 @@ export class WorkflowRunner {
     task: WorkflowTask,
     taskId: string,
     liveTask: LiveTask,
-    effective: EffectiveTaskConfig,
     session: TaskSession,
   ): void {
     const resultsMap = this.buildResultsMap(live, task);
     const templateNonce = this.deps.randomId?.() ?? randomUUID();
+    // 分割（Issue #1273）が同じ乱数で囲いを作れるよう控える。囲いのnonceが送信時の
+    // `expandTemplate` と食い違うと、人にもモデルにも「どこまでが引用か」が揃わなくなる
+    liveTask.templateNonce = templateNonce;
     session.setPromptTransform((text) => {
       // 差し替えられた継続指示があればそちらを基準の本文にする（design.md §16.23
       // `update_task_prompt`）。**テンプレート変数は展開しない**（リテラルとして送る）。
@@ -3906,18 +3988,9 @@ export class WorkflowRunner {
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, prepared.cwd);
 
-      session.setApprovalHandler((approval, rawParams) =>
-        this.handleApproval(runId, taskId, task, approval, rawParams),
-      );
-      session.onApprovalResolved((outcome) =>
-        this.onApprovalResolved(runId, taskId, outcome.decision),
-      );
-      session.onStateChanged((state) => this.onTaskStateChanged(runId, taskId, state));
-      session.onFinished((reason, state) =>
-        this.onTaskFinished(runId, taskId, task, reason, state),
-      );
+      this.attachTaskSession(runId, taskId, task, session);
 
-      this.setupTaskPrompting(live, task, taskId, liveTask, prepared.effective, session);
+      this.setupTaskPrompting(live, task, taskId, liveTask, session);
       this.finishTaskLaunch(runId, taskId, task, session, prepared.usedWorktree, prepared.input);
     } catch (e) {
       // openTaskSessionの失敗はCLIプロセス起動時のエラーをそのまま含みうる。
@@ -4721,12 +4794,18 @@ export class WorkflowRunner {
    * 書き込みは `live.handoffWrites` の鎖へ繋ぐ（同フィールドのJSDoc参照）。run配下の
    * 撤去（`closeMessagingIfFinalMergeSettled`）がこの鎖を待つため、撤去との順序が決まる。
    */
-  private writeResultHandoff(runId: string, live: LiveRun, taskId: string, content: string): void {
+  private writeResultHandoff(
+    runId: string,
+    live: LiveRun,
+    taskId: string,
+    content: string,
+    slug: string = RESULT_HANDOFF_SLUG,
+  ): void {
     if (content === '') {
       return;
     }
     live.handoffWrites = live.handoffWrites.then(() =>
-      this.writeResultHandoffOnce(runId, live, taskId, content),
+      this.writeResultHandoffOnce(runId, live, taskId, content, slug),
     );
   }
 
@@ -4735,6 +4814,7 @@ export class WorkflowRunner {
     live: LiveRun,
     taskId: string,
     content: string,
+    slug: string,
   ): Promise<void> {
     const warn = (reason: string): void => {
       // 警告欄へ出す文言も、ログと同じく無害化した理由を使う（`gitFallback` 等の既存の
@@ -4755,7 +4835,7 @@ export class WorkflowRunner {
       const result = await new TeamHandoffStore(live.repoRoot, nodeHandoffFileSystem).write(
         runId,
         taskId,
-        RESULT_HANDOFF_SLUG,
+        slug,
         content,
       );
       if (!result.ok) {
@@ -4764,6 +4844,307 @@ export class WorkflowRunner {
     } catch (e) {
       warn(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * セッションのリスナーを配線する（`startTask`と分割（Issue #1273）の共通処理）。
+   *
+   * **分割後に古いセッションのリスナーが動かないよう、必ずセッションの同一性を確かめる。**
+   * 分割は古いタブを残す（`dispose()`しない）ため、リスナーは生きたまま残る。人がその
+   * タブへ直接話しかければ状態変化も終了も届き、守らないと古いセッションの結果で
+   * `contextUsage`が上書きされたり、タスクが`done`として確定したりする。
+   */
+  private attachTaskSession(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    session: TaskSession,
+  ): void {
+    const isCurrent = (): boolean => this.runs.get(runId)?.tasks.get(taskId)?.session === session;
+    // 差し替わった後の古いセッションでは**自動承認をやめて人へ回す**（自己レビュー指摘:
+    // medium）。無人実行の自動承認は「ワークフローが進めているタスク」に対する方針で、
+    // 分割後に残した古いタブはもうその対象ではない。ここを素通しにすると、`onApprovalResolved`
+    // 側だけが同一性で守られている非対称な形になり、古いタブでの自動承認だけが効いて
+    // 結果の反映が握り潰される
+    session.setApprovalHandler((approval, rawParams) =>
+      isCurrent()
+        ? this.handleApproval(runId, taskId, task, approval, rawParams)
+        : Promise.resolve({ kind: 'ask' as const }),
+    );
+    session.onApprovalResolved((outcome) => {
+      if (!isCurrent()) {
+        return;
+      }
+      this.onApprovalResolved(runId, taskId, outcome.decision);
+    });
+    session.onStateChanged((state) => {
+      if (!isCurrent()) {
+        return;
+      }
+      this.onTaskStateChanged(runId, taskId, state);
+    });
+    session.onFinished((reason, state) => {
+      if (!isCurrent()) {
+        return;
+      }
+      this.onTaskFinished(runId, taskId, task, reason, state);
+    });
+  }
+
+  /**
+   * コンテキスト残量が閾値を下回っていれば、タスクの`onContextLow`を起こす（Issue #1273）。
+   *
+   * 判定そのものは`contextLow.ts`の`decideContextLow`（純粋関数）に委ね、ここは材料を
+   * 集めて結果を実行へ繋ぐだけにする。残量が取れないプロバイダ・取得前は何も起こさない。
+   */
+  private maybeActOnContextLow(
+    runId: string,
+    taskId: string,
+    live: LiveRun,
+    liveTask: LiveTask,
+    state: ChatState,
+    turnCompleted: boolean,
+  ): void {
+    const task = live.def.tasks.find((t) => t.id === taskId);
+    if (task === undefined || task.onContextLow === 'none') {
+      return;
+    }
+    const decision = decideContextLow({
+      action: task.onContextLow,
+      busy: state.busy,
+      turnCompleted,
+      remainingPercent: state.context?.remainingPercent,
+      thresholdPercent: this.deps.readContextLowPercent?.() ?? DEFAULT_CONTEXT_LOW_PERCENT,
+      // 実行中（`await`の最中）も「既に動作した」として扱う。印が無いと、圧縮・分割を
+      // 待っている間に届く状態変化で同じ閾値から二重に走る
+      alreadyActed: liveTask.contextLowLatched || liveTask.contextLowInFlight,
+    });
+    // 実行中（`await`の最中）はラッチを書き換えない（自己レビュー指摘: low）。圧縮・分割が
+    // まだ効いていない時点の残量でラッチを外すと、対策の完了前に「外れた」扱いになる
+    if (!liveTask.contextLowInFlight) {
+      liveTask.contextLowLatched = decision.latched;
+    }
+    const action = decision.action;
+    if (action === undefined) {
+      return;
+    }
+    liveTask.contextLowInFlight = true;
+    void this.runContextLowAction(runId, taskId, task, liveTask, action, state).finally(() => {
+      liveTask.contextLowInFlight = false;
+    });
+  }
+
+  /**
+   * `onContextLow`の実行（Issue #1273）。
+   *
+   * **失敗しても投げ返さずに握る。** 呼び出し元（`maybeActOnContextLow`）は状態変化の
+   * 通知の中から`void`で呼ぶため、ここで投げるとどこにも捕まらないrejectionになる。
+   * 残量対策が効かなかったこと自体は`noteContextLowFailure`が警告として残す。
+   */
+  private async runContextLowAction(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    liveTask: LiveTask,
+    action: Exclude<ContextLowAction, 'none'>,
+    state: ChatState,
+  ): Promise<void> {
+    const remaining = state.context?.remainingPercent;
+    try {
+      if (action === 'compact') {
+        await this.compactTaskSession(runId, taskId, liveTask, remaining);
+      } else {
+        await this.splitTaskSession(runId, taskId, task, liveTask, state, remaining);
+      }
+    } catch (e) {
+      this.noteContextLowFailure(runId, taskId, action, e);
+    }
+  }
+
+  /**
+   * 残量対策が失敗したことをログと警告欄へ残す（Issue #1273）。**runは止めない。**
+   * タスクは古いセッションのまま進むため、止めるより「効いていない」ことを見せる方がよい。
+   */
+  private noteContextLowFailure(
+    runId: string,
+    taskId: string,
+    action: Exclude<ContextLowAction, 'none'>,
+    error: unknown,
+  ): void {
+    // CLIの例外文字列をそのまま含みうるため、ログにも警告欄にも無害化した理由を使う
+    const reason = sanitizeForLog(error instanceof Error ? error.message : String(error));
+    this.deps.log.warn(
+      `[workflow ${runId}/${taskId}] コンテキスト残量の対策（${action}）に失敗しました: ${reason}`,
+    );
+    this.pushContextLowWarning(
+      runId,
+      'contextActionFailed',
+      taskId,
+      `${taskId} のコンテキスト残量の対策（${action}）に失敗しました（${reason}）。セッションはそのまま続きます`,
+    );
+  }
+
+  /** 会話を圧縮する（`onContextLow: compact`）。ループは止めない。 */
+  private async compactTaskSession(
+    runId: string,
+    taskId: string,
+    liveTask: LiveTask,
+    remainingPercent: number | undefined,
+  ): Promise<void> {
+    const message = `${taskId} のコンテキスト残量が${describeRemaining(remainingPercent)}まで減ったため、会話を圧縮しました`;
+    // **圧縮する前に**会話へ残す。圧縮は会話の中身を要約で置き換えるため、後から足すと
+    // 要約より後ろの浮いた位置に出る。ここへ残せなかった場合でも、警告欄とログには残る
+    liveTask.session.note(`contextLow:compact:${Date.now()}`, message);
+    await liveTask.session.compact();
+    this.pushContextLowWarning(runId, 'contextCompacted', taskId, message);
+  }
+
+  /**
+   * セッションを分割する（`onContextLow: split`）。
+   *
+   * **元のタブは残す**（Issue #1273）。人が後から経緯を追えるようにするためで、代わりに
+   * `pauseLoop()`で続きの指示だけを止める。`stopLoop()`は使えない（`onFinished`が
+   * `'taskStopped'`で発火し、タスクが手動停止として`failed`に確定してしまう）。
+   *
+   * 新しいセッションは**同じ入力**（作業ディレクトリ・ブランチ・権限・MCPのURL）で開く。
+   * `prepareTaskLaunch`を通し直すとworktreeを作り直し、途中まで書いた変更から切り離された
+   * 別のディレクトリで続きが始まる。
+   */
+  private async splitTaskSession(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    liveTask: LiveTask,
+    state: ChatState,
+    remainingPercent: number | undefined,
+  ): Promise<void> {
+    const live = this.runs.get(runId);
+    if (live === undefined || this.disposing) {
+      return;
+    }
+    const previous = liveTask.session;
+    const generation = liveTask.generation + 1;
+
+    // 1. この時点の応答本文は受け渡しファイルへ置き、プロンプトへは参照だけを渡す
+    //    （Phase 1・Issue #1271 と同じ方針）。本文が空なら参照も置かない
+    const body = responseBodyText(state);
+    const handoffRef = body === '' ? '' : formatHandoffReference(taskId, SPLIT_HANDOFF_SLUG);
+    this.writeResultHandoff(runId, live, taskId, body, SPLIT_HANDOFF_SLUG);
+    const brief = formatBrief(
+      buildStructuredSummary(state, {
+        files: [...state.turnEditedFiles],
+        artifacts: handoffRef === '' ? [] : [handoffRef],
+      }),
+    );
+
+    // 2. 元のセッションへ事実を残し、続きの指示だけを止める（タブと会話は残す）
+    const leaveMessage = `${taskId} のコンテキスト残量が${describeRemaining(remainingPercent)}まで減ったため、${generation}代目のセッションへ引き継ぎます。このタブはこのまま残ります`;
+    previous.note(`contextLow:split:${Date.now()}`, leaveMessage);
+    previous.pauseLoop();
+
+    // 3. 同じ入力のまま、世代の印だけを進めて開き直す
+    //
+    // **ここから先で失敗したら、必ず元のセッションを`resumeLoop()`で戻す**（自己レビュー
+    // 指摘: high）。戻さないと、`pauseLoop()`で続きの指示を止めたまま新しいセッションも
+    // 立たず、タスクは「実行中」の帳簿のまま誰も進めない状態で固まる。run全体が完了判定へ
+    // 到達しなくなるため、警告1件で済む失敗ではない
+    const input: TaskSessionInput = { ...liveTask.input, generation };
+    let session: TaskSession;
+    try {
+      session = await this.deps.hosts[task.provider].openTaskSession(input);
+    } catch (e) {
+      previous.resumeLoop();
+      throw e;
+    }
+    if (this.disposing) {
+      // `openTaskSession`を待つ間に拡張機能が終了した（`startTask`と同じ番人）。
+      // ここで開いたセッションは`live.tasks`へ入っていないため、自分で閉じる。
+      // 元のセッションは再開しない（`dispose()`が全て畳む最中で、再開しても行き場が無い）
+      session.dispose();
+      return;
+    }
+    try {
+      session.open({ preserveFocus: true });
+    } catch (e) {
+      // タブを開けなかった。開きかけのセッションを閉じ、元のセッションで続ける
+      session.dispose();
+      previous.resumeLoop();
+      throw e;
+    }
+
+    // 4. 実行時の帳簿を新しいセッションへ載せ替える。**古いセッションはdisposeしない**
+    liveTask.session = session;
+    liveTask.input = input;
+    liveTask.generation = generation;
+    // 状態はセッションに紐づく値なので、載せ替えと同時に捨てる。残しておくと、新しい
+    // セッションの最初の状態が届くまで古い残量が表示され続け、閾値の判定にも混ざる
+    liveTask.lastState = undefined;
+    liveTask.contextUsage = undefined;
+    liveTask.sessionTokens = undefined;
+    liveTask.pendingApproval = undefined;
+    // 承認待ちのタイムアウト（Issue #579、design.md §16.39）も畳む（自己レビュー指摘: medium）。
+    // 承認待ちはターン実行中（`busy`）なので分割の判定自体を通らないはずだが、張りっぱなしの
+    // タイマーが残ると、時間切れの`handleTaskApprovalTimeout`が**差し替わった後の新しい**
+    // セッションへ`stopLoop()`を掛けてしまう。取り違えの余地を構造的に残さない
+    liveTask.waitingApprovalSinceMs = undefined;
+    liveTask.taskApprovalTimeoutTimer = scheduleTaskApprovalTimeout(
+      this.internals,
+      runId,
+      taskId,
+      liveTask.taskApprovalTimeoutTimer,
+      undefined,
+    );
+    liveTask.wasBusy = false;
+    liveTask.lastTurnCompletionSeq = 0;
+    live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, liveTask.cwd);
+
+    this.attachTaskSession(runId, taskId, task, session);
+    this.setupTaskPrompting(live, task, taskId, liveTask, session);
+
+    // 5. 続きから走らせる。回数の上限はタスク全体で通した数を使う（分割のたびに
+    //    上限が増えると`maxReached`の歯止めが効かなくなる）
+    session.note(
+      `contextLow:splitFrom:${Date.now()}`,
+      `${taskId} の${generation}代目のセッションです。${generation - 1}代目のタブに、ここまでの会話が残っています`,
+    );
+    session.runLoop({
+      initialPrompt: buildSplitPrompt({
+        taskId,
+        generation,
+        brief,
+        handoffRef,
+        nonce: liveTask.templateNonce,
+      }),
+      continuePrompt: task.continuePrompt,
+      maxIterations: remainingIterations(task.maxIterations, liveTask.submissionCount),
+      condition: liveTask.usedWorktree ? withCommitRequirement(task.done) : task.done,
+    });
+    if (input.mcp !== undefined) {
+      void checkMessagingVisibility(this.internals, runId, taskId, session);
+    }
+
+    this.pushContextLowWarning(
+      runId,
+      'contextSplit',
+      taskId,
+      `${taskId} のコンテキスト残量が${describeRemaining(remainingPercent)}まで減ったため、${generation}代目のセッションへ分割しました。${generation - 1}代目のタブは残してあります`,
+    );
+    void this.persist(runId);
+  }
+
+  /** 残量対策の事実を警告欄へ積み、Viewへ知らせる（Issue #1273）。 */
+  private pushContextLowWarning(
+    runId: string,
+    kind: WorkflowWarning['kind'],
+    taskId: string,
+    message: string,
+  ): void {
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    live.warnings.push({ kind, taskId, message });
+    this.notify(runId);
   }
 
   private onTaskStateChanged(runId: string, taskId: string, state: ChatState): void {
@@ -4789,6 +5170,12 @@ export class WorkflowRunner {
       live.runState = recordSubmissionCount(live.runState, taskId, liveTask.submissionCount);
       void this.persist(runId);
     }
+    // コンテキスト残量の対策（Issue #1273）。ターンが1つ確定した瞬間だけを見る。
+    // 境目に`busy`の立ち下がりを使わないのはissue #939と同じ理由で、Codexは
+    // `thread/status/changed`（idle）を`turn/completed`より先に送るため
+    const turnCompleted = liveTask.lastTurnCompletionSeq !== state.turnCompletionSeq;
+    liveTask.lastTurnCompletionSeq = state.turnCompletionSeq;
+    this.maybeActOnContextLow(runId, taskId, live, liveTask, state, turnCompleted);
     // 状態変化のたびにViewへ知らせる。永続化（persist）は送信回数の節目だけに絞ったままだが、
     // 表示専用の通知はストリーミング中の要約更新でも毎回出す
     this.notify(runId);
