@@ -7,6 +7,7 @@ import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { needsAttentionAfterHandoff, type OldTabKeptReason } from './handoff';
 import { playNotificationSound } from './notificationSound';
+import type { SessionApprovalDetail } from './sessionHub';
 import {
   deriveSessionActivityState,
   sanitizeForNotification,
@@ -127,12 +128,56 @@ export type SessionControlAction =
   | { kind: 'interrupt' }
   | { kind: 'pauseLoop' }
   | { kind: 'resumeLoop' }
-  | { kind: 'send'; text: string };
+  | { kind: 'send'; text: string }
+  /** 承認待ちの中身を取り寄せる（Issue #1259）。カードを展開したときだけ送る。 */
+  | { kind: 'approvalDetail' }
+  /** 取り寄せた中身に対する承認・拒否（Issue #1259）。 */
+  | { kind: 'approvalDecision'; approvalRequestId: string; decision: ApprovalDecision };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
   ok: boolean;
   error?: string | undefined;
+  /** `kind === 'approvalDetail'`のときだけ入る、承認待ちの中身（Issue #1259）。 */
+  approvals?: SessionApprovalDetail[] | undefined;
+}
+
+/**
+ * 承認待ちの中身を、統括ページへ運べる形にする（Issue #1259）。
+ *
+ * `fileChange`の要求は変更内容を持たず、同じidの項目側に入っている
+ * （`PendingApproval.itemId`のJSDoc）。差分が届く前でもパスだけは`detail`
+ * （`describeFileChanges`がカンマ区切りで作る）から引けるため、両方を見る。
+ */
+function describePendingApprovals(
+  state: Pick<ChatState, 'approvals' | 'items'>,
+): SessionApprovalDetail[] {
+  return state.approvals.map((approval) => ({
+    requestId: String(approval.requestId),
+    kind: approval.kind,
+    title: approval.title,
+    detail: approval.detail,
+    paths: readApprovalPaths(state, approval),
+    // 選択式の問い合わせは4値（accept/acceptForSession/decline/cancel）では答えられない
+    decidable: approval.kind !== 'askUserQuestion',
+  }));
+}
+
+function readApprovalPaths(state: Pick<ChatState, 'items'>, approval: PendingApproval): string[] {
+  if (approval.itemId === undefined) {
+    return [];
+  }
+  const item = state.items.find((i) => i.id === approval.itemId);
+  if (item === undefined) {
+    return [];
+  }
+  if (item.diffs.length > 0) {
+    return item.diffs.map((diff) => diff.path);
+  }
+  return item.detail
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p !== '');
 }
 
 /**
@@ -516,6 +561,24 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         }
         entry.loop.resume();
         return { ok: true };
+      case 'approvalDetail':
+        return { ok: true, approvals: describePendingApprovals(entry.session.getState()) };
+      case 'approvalDecision': {
+        const state = entry.session.getState();
+        // 取り寄せてから押すまでの間に、タブ側やTUIで解決されていることがある。
+        // 残っている要求だけを対象にし、消えていれば失敗として返す（黙って握りつぶさない）
+        const approval = state.approvals.find(
+          (a) => String(a.requestId) === action.approvalRequestId,
+        );
+        if (approval === undefined) {
+          return { ok: false, error: 'この承認要求は既に解決されています' };
+        }
+        if (approval.kind === 'askUserQuestion') {
+          return { ok: false, error: 'この問い合わせは会話のタブ側で答えてください' };
+        }
+        this.resolveApproval(entry, approval.requestId, action.decision);
+        return { ok: true };
+      }
     }
   }
 
