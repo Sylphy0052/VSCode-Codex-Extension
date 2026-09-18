@@ -19,8 +19,6 @@ const fakeLogger: Logger = {
   show: () => undefined,
 };
 
-const CURRENT_WINDOW_ID = 'w1';
-
 function board(total: number): SessionKanbanBoard {
   return {
     cards: { approvalPending: [], running: [], backgroundRunning: [], idle: [] },
@@ -41,9 +39,7 @@ function open(): Harness {
   let total = 0;
   const view = new SessionKanbanViewManager(
     () => board(total),
-    () => true,
-    () => undefined,
-    CURRENT_WINDOW_ID,
+    () => Promise.resolve({ ok: true }),
     fakeLogger,
   );
   view.show();
@@ -77,7 +73,7 @@ describe('SessionKanbanViewManager（issue 1039、パスの露出）', () => {
     const h = open();
     const html = h.panel.webview.html;
     // 陽性対照: ツールチップ自体は今も付けている（綴り違いで空振りしていない）
-    expect(html).toContain("button.title=card.title || '名称未設定';");
+    expect(html).toContain("open.title=card.title || '名称未設定';");
     // 画面共有やスクリーンショットで絶対パスが映らないよう、パスは載せない。
     // 全体を確かめたいときはサイドバーのセッション一覧のツールチップを見る
     expect(html).not.toContain('card.cwd;');
@@ -182,9 +178,7 @@ describe('SessionKanbanViewManager（issue #1012、盤面の送信）', () => {
   it('パネルが無い間のrefreshは何もしない', () => {
     const view = new SessionKanbanViewManager(
       () => board(0),
-      () => true,
-      () => undefined,
-      CURRENT_WINDOW_ID,
+      () => Promise.resolve({ ok: true }),
       fakeLogger,
     );
     expect(() => {

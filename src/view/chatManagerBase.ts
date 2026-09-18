@@ -121,6 +121,36 @@ export interface BaseChatPanel {
   postTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
+/** セッション統括ページから1つのセッションへ行える操作（Issue #1258）。 */
+export type SessionControlAction =
+  | { kind: 'open' }
+  | { kind: 'interrupt' }
+  | { kind: 'pauseLoop' }
+  | { kind: 'resumeLoop' }
+  | { kind: 'send'; text: string };
+
+/** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
+export interface SessionControlResult {
+  ok: boolean;
+  error?: string | undefined;
+}
+
+/**
+ * カードから開いたときにエディタグループを最大化する（Issue #1258）。
+ *
+ * 統括ページは`ViewColumn.Beside`で開くため、そのままだと開いた会話が半分の幅に
+ * 収まってしまう。`workbench.action.toggleMaximizeEditorGroup`はトグルで、最大化中か
+ * どうかを取るAPIが無いため、既に最大化されている状態で呼ぶと解除になる。
+ * 失敗しても会話は開けているので、警告を出さず黙って諦める。
+ */
+async function maximizeEditorGroup(): Promise<void> {
+  try {
+    await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup');
+  } catch {
+    // コマンドが無い版・実行できない配置でも、開く操作自体は成立している
+  }
+}
+
 /** ユーザーが送った発言の数。引き継ぎ元のタブを人が使い直したかの判定に使う。 */
 function countUserMessages(state: ChatState): number {
   return state.items.filter((item) => item.kind === 'userMessage').length;
@@ -157,6 +187,11 @@ export interface ManagedChatSession {
   title: string;
   cwd: string | undefined;
   activity: SessionActivityState;
+  /**
+   * この画面で走らせているループの状態（Issue #1258）。セッション統括ページが
+   * 一時停止と再開のボタンを出し分けるのに使う。
+   */
+  loop: { running: boolean; paused: boolean };
   /**
    * 引き継ぎ元として残されたときの理由（Issue #1165）。残っていなければ`undefined`。
    * Attention Indexが「引き継いだはずのタブが残っている」項目を作るのに使う。
@@ -258,6 +293,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         title: entry.title,
         cwd: entry.cwd,
         activity: deriveSessionActivityState(entry.session.getState()),
+        loop: { running: entry.loop.running, paused: entry.loop.isPaused },
         handoffKept: entry.handoffKept,
       });
     }
@@ -437,6 +473,50 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     this.showPanel(entry, false);
     return true;
+  }
+
+  /**
+   * セッション統括ページ（`sessionKanbanView.ts`）からの操作（Issue #1258）。
+   *
+   * 自ウィンドウのカードからも、別ウィンドウから要求ファイルで届いた分
+   * （`extension.ts`の`SessionHubRequestWatcher`）からも、同じここを通す。
+   *
+   * 中断と送信は`dispatchMessage`（webviewの操作と同じ入口）へ流す。ループへの割り込み
+   * 扱い・上限による自動再開の抑止・擬似コマンドの扱いは各サブクラスの`send` /
+   * `interrupt`の分岐が持っているため、ここで作り直すと画面からの操作と挙動がずれる。
+   */
+  controlSession(threadId: string, action: SessionControlAction): SessionControlResult {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    switch (action.kind) {
+      case 'open':
+        this.showPanel(entry, false);
+        void maximizeEditorGroup();
+        return { ok: true };
+      case 'interrupt':
+        this.dispatchMessage(entry, { type: 'interrupt' });
+        return { ok: true };
+      case 'send':
+        if (action.text.trim() === '') {
+          return { ok: false, error: '送る内容がありません' };
+        }
+        this.dispatchMessage(entry, { type: 'send', text: action.text });
+        return { ok: true };
+      case 'pauseLoop':
+        if (!entry.loop.running || entry.loop.isPaused) {
+          return { ok: false, error: '一時停止できるループが走っていません' };
+        }
+        entry.loop.pause();
+        return { ok: true };
+      case 'resumeLoop':
+        if (!entry.loop.running || !entry.loop.isPaused) {
+          return { ok: false, error: '再開できる一時停止中のループがありません' };
+        }
+        entry.loop.resume();
+        return { ok: true };
+    }
   }
 
   /**

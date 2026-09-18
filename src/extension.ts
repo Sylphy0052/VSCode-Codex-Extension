@@ -171,6 +171,7 @@ import { initNotificationSounds } from './view/notificationSound';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
+import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager } from './view/sessionKanbanView';
 import {
@@ -1055,6 +1056,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       title: session.title,
       cwd: session.cwd,
       activity: session.activity,
+      loop: session.loop,
       provider,
     }));
   const currentWindowSessions = (): SharedSession[] => [
@@ -1070,20 +1072,29 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   sessionHubWriter.start();
   const sessionHubReader = new SessionHubReader(sessionHubRootDir, windowId, log);
   sessionHubReader.start();
-  const sessionHubRequestPort = new SessionHubRequestPort(sessionHubRootDir, log);
+  const sessionHubRequestPort = new SessionHubRequestPort(sessionHubRootDir, windowId, log);
+  // 統括ページからの操作は、自ウィンドウ分も要求ファイル経由で届いた分もここを通す
+  // （Issue #1258）。どちらの入口でも同じ判定・同じ副作用になる
+  const controlSession = (
+    provider: 'codex' | 'claude',
+    threadId: string,
+    action: SessionControlAction,
+  ): SessionControlResult =>
+    (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
   const sessionHubRequestWatcher = new SessionHubRequestWatcher(
     sessionHubRootDir,
     windowId,
     (request) => {
-      const revealed =
-        request.provider === 'claude'
-          ? claudeChat.revealSession(request.threadId)
-          : chat.revealSession(request.threadId);
-      if (!revealed) {
-        log.info(
-          `セッション統括: 要求されたセッションは既に閉じられています（${request.threadId}）`,
-        );
+      const action = toSessionControlAction(request.kind, request.text);
+      if (action === undefined) {
+        // 版が違うウィンドウから知らない操作が届いた。黙って捨てると相手が待つ
+        return { ok: false, error: `この版のウィンドウは${request.kind}を扱えません` };
       }
+      const result = controlSession(request.provider, request.threadId, action);
+      if (!result.ok) {
+        log.info(`セッション統括: 要求を実行できませんでした（${result.error ?? '理由は不明'}）`);
+      }
+      return result;
     },
     log,
   );
@@ -1102,11 +1113,18 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         );
       return buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId);
     },
-    (provider, threadId) =>
-      provider === 'claude' ? claudeChat.revealSession(threadId) : chat.revealSession(threadId),
-    (targetWindowId, provider, threadId) =>
-      void sessionHubRequestPort.send(targetWindowId, { provider, threadId }),
-    windowId,
+    async (target, action) => {
+      if (target.windowId === windowId) {
+        return controlSession(target.provider, target.threadId, action);
+      }
+      const reply = await sessionHubRequestPort.request(target.windowId, {
+        kind: action.kind,
+        provider: target.provider,
+        threadId: target.threadId,
+        text: action.kind === 'send' ? action.text : undefined,
+      });
+      return { ok: reply.ok, error: reply.error };
+    },
     log,
   );
   const forgeHub = new ForgeHubViewManager(
@@ -3518,4 +3536,31 @@ async function persistCache(
   cache: InMemoryMetaCache,
 ): Promise<void> {
   await context.globalState.update(META_CACHE_KEY, cache.toRecord());
+}
+
+/**
+ * 要求ファイルの`kind`を、チャット画面への操作へ変える（Issue #1258）。
+ *
+ * 引数を`string`で受けるのは、共有ディレクトリへ書き込むのが版の違う別プロセスだから
+ * （`SessionHubRequestWatcher`は未知の`kind`もそのまま渡す）。知らない操作は`undefined`を
+ * 返し、呼び出し側が「扱えない」と応答して、送った側をタイムアウトまで待たせない。
+ */
+function toSessionControlAction(
+  kind: string,
+  text: string | undefined,
+): SessionControlAction | undefined {
+  switch (kind) {
+    case 'open':
+      return { kind: 'open' };
+    case 'interrupt':
+      return { kind: 'interrupt' };
+    case 'pauseLoop':
+      return { kind: 'pauseLoop' };
+    case 'resumeLoop':
+      return { kind: 'resumeLoop' };
+    case 'send':
+      return text === undefined ? undefined : { kind: 'send', text };
+    default:
+      return undefined;
+  }
 }
