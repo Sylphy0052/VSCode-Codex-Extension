@@ -1433,6 +1433,76 @@ export function workflowScript(): string {
     el('orchAskUser').hidden = true;
   }
 
+  // ---- ロードマップ（Issue #1257） ----
+
+  const ROADMAP_ISSUE_LABEL = {
+    unlinked: '未起票',
+    unknown: '照合できません',
+    notFound: '一覧に見つかりません',
+    open: '対応中',
+    closed: '完了',
+  };
+
+  function roadmapIssueBadge(item) {
+    const badge = el2('span', 'roadmap-badge state-' + item.issueState);
+    const label = ROADMAP_ISSUE_LABEL[item.issueState] || item.issueState;
+    badge.textContent = item.issue === undefined ? label : '#' + item.issue + ' ' + label;
+    if (item.issueTitle) {
+      badge.title = item.issueTitle;
+    }
+    if (item.issueUrl) {
+      // URL自体は拡張機能側が持つ一覧から引き直す。ここではIssue番号だけを送る
+      badge.classList.add('clickable');
+      badge.addEventListener('click', () => {
+        vscode.postMessage({ type: 'openRoadmapIssue', issue: item.issue });
+      });
+    }
+    return badge;
+  }
+
+  function applyRoadmap(roadmap, path, pending, error) {
+    const section = el('roadmapSection');
+    const body = el('roadmapBody');
+    const status = el('roadmapStatus');
+    const pathLabel = el('roadmapPath');
+    body.replaceChildren();
+    if (!roadmap) {
+      // 定義がロードマップを持たない・読めなかった場合。読めなかったときだけ理由を出す
+      if (error) {
+        section.hidden = false;
+        pathLabel.textContent = path || '';
+        status.textContent = '';
+        body.appendChild(text('div', 'roadmap-empty', error));
+      } else {
+        section.hidden = true;
+      }
+      return;
+    }
+    section.hidden = false;
+    pathLabel.textContent = path || '';
+    status.textContent = pending
+      ? 'Issueの状態を照合中…'
+      : roadmap.issuesAvailable
+        ? ''
+        : 'Issue一覧を取得できませんでした（CLIの導入・認証・originを確認してください）';
+    if (roadmap.title) {
+      body.appendChild(text('div', 'roadmap-title', roadmap.title));
+    }
+    for (const phase of roadmap.phases) {
+      const group = el2('div', 'roadmap-phase');
+      group.appendChild(text('div', 'roadmap-phase-name', phase.name || '（フェーズ未指定）'));
+      for (const item of phase.items) {
+        const row = el2('div', 'roadmap-item' + (item.checked ? ' checked' : ''));
+        row.appendChild(text('span', 'roadmap-check', item.checked ? '✓' : '□'));
+        row.appendChild(text('span', 'roadmap-id', item.id));
+        row.appendChild(text('span', 'roadmap-text', item.text));
+        row.appendChild(roadmapIssueBadge(item));
+        group.appendChild(row);
+      }
+      body.appendChild(group);
+    }
+  }
+
   // ---- プログラム（design.md §16.37.3、roadmap W12-3、Issue #606） ----
 
   const PROGRAM_SKIP_REASON_LABEL = {
@@ -1550,6 +1620,9 @@ export function workflowScript(): string {
   el('runSelect').addEventListener('change', (e) => {
     vscode.postMessage({ type: 'selectRun', runId: e.target.value });
   });
+  el('roadmapRefreshBtn').addEventListener('click', () =>
+    vscode.postMessage({ type: 'roadmapRefresh' }),
+  );
   el('runBtn').addEventListener('click', () => vscode.postMessage({ type: 'run' }));
   el('stopAllBtn').addEventListener('click', () => vscode.postMessage({ type: 'stopAll' }));
   el('removeWorktreesBtn').addEventListener('click', () =>
@@ -1594,6 +1667,8 @@ export function workflowScript(): string {
       applyNoRun();
     } else if (msg.type === 'programs') {
       applyPrograms(msg.programs);
+    } else if (msg.type === 'roadmap') {
+      applyRoadmap(msg.roadmap, msg.path, msg.pending, msg.error);
     }
   });
 

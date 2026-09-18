@@ -85,6 +85,7 @@ import {
   validateRoadmap,
   type IssueListPort,
   type RoadmapIssueCreationPort,
+  type RoadmapIssueSummary,
   type RoadmapItem,
 } from './orchestrator/roadmap';
 import { sanitizeForLog } from './orchestrator/sanitize';
@@ -189,7 +190,8 @@ import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
-import { WorkflowViewManager } from './view/workflowView';
+import { WorkflowViewManager, type RoadmapViewPort } from './view/workflowView';
+import { isPathWithinRoot } from './orchestrator/escalation';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
 
@@ -693,11 +695,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
-  const workflowView = new WorkflowViewManager(workflowRunner, log, {
-    list: () => programStore.list(),
-    halt: (programId) => programRunner.haltProgram(programId),
-    onChanged: (listener) => programRunner.onChanged(listener),
-  });
+  const workflowView = new WorkflowViewManager(
+    workflowRunner,
+    log,
+    {
+      list: () => programStore.list(),
+      halt: (programId) => programRunner.haltProgram(programId),
+      onChanged: (listener) => programRunner.onChanged(listener),
+    },
+    createRoadmapViewPort(),
+  );
   context.subscriptions.push(workflowView);
 
   // 要対応は会話とワークフローが既に持つ状態（承認待ちと、引き継ぎ元として残ったタブ。
@@ -2188,6 +2195,40 @@ function buildRoadmapTaskIssueBody(item: RoadmapItem): string {
     '',
     `- id: ${item.id}`,
   ].join('\n');
+}
+
+/**
+ * ワークフローViewのロードマップ欄（Issue #1257）の口を組み立てる。
+ *
+ * 読み取りは最初のワークスペースフォルダ基準で解決し、**解決結果がそのフォルダの配下に
+ * 収まっていることを確かめてから**読む（`roadmap`は`validateWorkflow`の`isSafeRoadmapPath`で
+ * 検証済みだが、定義ファイルは外部から来るものなので読む直前にも確かめる。`worktree.ts`と
+ * 同じ多層防御）。Issue一覧はクローズ済みも含めて取る（完了済みかどうかを出すため）。
+ */
+function createRoadmapViewPort(): RoadmapViewPort {
+  const issuePort = createCliIssueListPort(nodeGitCommandRunner, nodeCliCommandRunner, {
+    state: 'all',
+  });
+  return {
+    async readRoadmap(relativePath: string): Promise<string | undefined> {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (root === undefined) {
+        return undefined;
+      }
+      const target = path.resolve(root, relativePath);
+      if (!isPathWithinRoot(target, root)) {
+        return undefined;
+      }
+      return nodeRoadmapFileSystem.readTextFile(target);
+    },
+    async listIssues(): Promise<readonly RoadmapIssueSummary[] | undefined> {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (root === undefined) {
+        return undefined;
+      }
+      return issuePort.listIssues(root);
+    },
+  };
 }
 
 /** ロードマップ生成時に未紐付けタスクをGitHub/GitLab Issueへ起票する。 */

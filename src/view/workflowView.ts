@@ -9,6 +9,11 @@ import type {
   WorkflowWarning,
 } from '../orchestrator/runner';
 import type { PersistedProgram } from '../orchestrator/programStore';
+import {
+  parseRoadmapMarkdown,
+  reconcileRoadmapIssues,
+  type RoadmapIssueSummary,
+} from '../orchestrator/roadmap';
 import type { WorkflowDefinition } from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import {
@@ -57,6 +62,31 @@ export interface ProgramViewPort {
 }
 
 /**
+ * ワークフローViewのロードマップ欄（Issue #1257）が使う口。**省略可能**で、渡さなければ
+ * ロードマップ欄を一切出さない（`ProgramViewPort`と同じ方針）。
+ *
+ * ファイルの読み取りとCLIの実行という副作用をここへ閉じ込め、`WorkflowViewManager`側は
+ * 受け取った文字列とIssue一覧を組み立てるだけにする（テストで差し替えられる）。
+ */
+export interface RoadmapViewPort {
+  /**
+   * ワークスペース相対のロードマップMarkdownを読む。**実装はワークスペースフォルダ配下に
+   * 収まっていることを確かめてから読むこと**（`extension.ts`の実装参照）。読めなければ
+   * `undefined`。
+   */
+  readRoadmap(relativePath: string): Promise<string | undefined>;
+  /** Issue一覧（クローズ済みを含む）。取れなければ`undefined`（「取れなければ飛ばす」）。 */
+  listIssues(): Promise<readonly RoadmapIssueSummary[] | undefined>;
+}
+
+/**
+ * Issue一覧の再取得を抑える時間（ミリ秒）。パネルを開くたび・状態が変わるたびに
+ * `gh`/`glab`を起動すると実行中のrunの更新のたびにプロセスが増えるため、この時間内は
+ * 直近の結果を使い回す。人が「更新」を押したときはこの窓を無視して取り直す。
+ */
+const ROADMAP_ISSUE_CACHE_MS = 60_000;
+
+/**
  * ワークフローViewパネルの生成オプション（design.md §14.48、issue #287）。
  * `enableFindWidget: true` でCtrl+Fの検索窓を有効にする。オブジェクトの組み立てを
  * 関数として切り出すことで、`createWebviewPanel`（vscode本体のAPI）を実際に呼ばずとも
@@ -93,6 +123,18 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 未受信の間は`undefined`＝折り返さない（従来どおりのレイアウト）。
    */
   private graphViewportWidth: number | undefined;
+  /**
+   * 直近に取れたIssue一覧と、その取得時刻（Issue #1257）。`ROADMAP_ISSUE_CACHE_MS`の間は
+   * これを使い回す。`issues`が`undefined`（取得に失敗した）でもキャッシュする——失敗も
+   * 同じ頻度で繰り返し試すと、CLI未導入の環境で毎回プロセスを起こすことになるため。
+   */
+  private roadmapIssueCache:
+    { at: number; issues: readonly RoadmapIssueSummary[] | undefined } | undefined;
+  /**
+   * ロードマップ欄の更新の世代（Issue #1257）。CLIの結果は遅れて届くため、その間に別の
+   * runへ切り替わった・更新が再度走った場合に、古い結果で上書きしないための番号。
+   */
+  private roadmapRequestSeq = 0;
   private readonly unsubscribeChanged: () => void;
   /**
    * `programs`（`ProgramViewPort`）の変化通知の購読解除。`programs`が省略されていれば
@@ -109,6 +151,10 @@ export class WorkflowViewManager implements vscode.Disposable {
      * `ProgramRunner`から組み立てて渡す。
      */
     private readonly programs?: ProgramViewPort,
+    /**
+     * ロードマップ欄（Issue #1257）。省略可能（`RoadmapViewPort`のJSDoc参照）。
+     */
+    private readonly roadmap?: RoadmapViewPort,
   ) {
     this.unsubscribeChanged = runner.onChanged((runId) => this.onRunnerChanged(runId));
     // プログラム欄の再描画は、実行中のrunの変化（`runner.onChanged`）にはただ乗り
@@ -263,11 +309,13 @@ export class WorkflowViewManager implements vscode.Disposable {
         return;
       }
       void this.panel.webview.postMessage({ type: 'noRun' });
+      void this.postRoadmap(undefined);
       return;
     }
     const snapshot = this.runner.getSnapshot(this.activeRunId);
     if (snapshot === undefined) {
       void this.panel.webview.postMessage({ type: 'noRun' });
+      void this.postRoadmap(undefined);
       return;
     }
     this.postSnapshot(snapshot, '');
@@ -316,6 +364,106 @@ export class WorkflowViewManager implements vscode.Disposable {
       kanban,
       integration,
     });
+    // ロードマップ欄（Issue #1257）。ファイルの読み取りとCLIの実行を伴うので、
+    // スナップショットの送信は待たせず別便で送る
+    void this.postRoadmap(snapshot.roadmapPath);
+  }
+
+  /**
+   * ロードマップ欄を送る（Issue #1257）。二段構えで送る。
+   *
+   * 1. ロードマップMarkdownを読んでパースした結果（Issueの状態は`unknown`）
+   * 2. Issue一覧が取れてから、突き合わせた結果で上書き
+   *
+   * こうするのは、`gh`/`glab`の起動を待つ間ロードマップ本体すら出ないのを避けるため。
+   * 一覧が取れない環境（CLI未導入・未認証・remoteが無い）では2段目でも`unknown`のままで、
+   * ロードマップ本体は読める。
+   *
+   * `roadmap`（`RoadmapViewPort`）が未注入、または定義が`roadmap`を持たない場合は、
+   * 欄を隠す指示（`roadmap: undefined`）だけを送る。
+   */
+  private async postRoadmap(relativePath: string | undefined, forceRefresh = false): Promise<void> {
+    if (this.panel === undefined) {
+      return;
+    }
+    const seq = ++this.roadmapRequestSeq;
+    if (this.roadmap === undefined || relativePath === undefined) {
+      void this.panel.webview.postMessage({ type: 'roadmap', roadmap: undefined });
+      return;
+    }
+
+    let markdown: string | undefined;
+    try {
+      markdown = await this.roadmap.readRoadmap(relativePath);
+    } catch (e) {
+      this.log.warn(
+        `[workflowView] ロードマップを読めません: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      markdown = undefined;
+    }
+    if (seq !== this.roadmapRequestSeq || this.panel === undefined) {
+      return;
+    }
+    if (markdown === undefined) {
+      void this.panel.webview.postMessage({
+        type: 'roadmap',
+        roadmap: undefined,
+        path: relativePath,
+        error: 'ロードマップのファイルを読めませんでした。',
+      });
+      return;
+    }
+
+    const parsed = parseRoadmapMarkdown(markdown);
+    void this.panel.webview.postMessage({
+      type: 'roadmap',
+      path: relativePath,
+      roadmap: reconcileRoadmapIssues(parsed, undefined),
+      pending: true,
+    });
+
+    const issues = await this.listRoadmapIssues(forceRefresh);
+    if (seq !== this.roadmapRequestSeq || this.panel === undefined) {
+      return;
+    }
+    void this.panel.webview.postMessage({
+      type: 'roadmap',
+      path: relativePath,
+      roadmap: reconcileRoadmapIssues(parsed, issues),
+      pending: false,
+    });
+  }
+
+  /** Issue一覧をキャッシュ越しに取る（Issue #1257）。取れなければ`undefined`。 */
+  private async listRoadmapIssues(
+    forceRefresh: boolean,
+  ): Promise<readonly RoadmapIssueSummary[] | undefined> {
+    if (this.roadmap === undefined) {
+      return undefined;
+    }
+    const cached = this.roadmapIssueCache;
+    if (!forceRefresh && cached !== undefined && Date.now() - cached.at < ROADMAP_ISSUE_CACHE_MS) {
+      return cached.issues;
+    }
+    let issues: readonly RoadmapIssueSummary[] | undefined;
+    try {
+      issues = await this.roadmap.listIssues();
+    } catch (e) {
+      this.log.warn(
+        `[workflowView] Issue一覧を取れません: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      issues = undefined;
+    }
+    this.roadmapIssueCache = { at: Date.now(), issues };
+    return issues;
+  }
+
+  /** 表示中のrun（または下書きプレビュー）のロードマップのパス。 */
+  private activeRoadmapPath(): string | undefined {
+    if (this.activeRunId === undefined) {
+      return this.previewSnapshot?.roadmapPath;
+    }
+    return this.runner.getSnapshot(this.activeRunId)?.roadmapPath;
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -370,6 +518,20 @@ export class WorkflowViewManager implements vscode.Disposable {
         await this.programs.halt(m['programId']);
         this.postPrograms();
       }
+      return;
+    }
+
+    if (type === 'roadmapRefresh') {
+      // 人が押したときはキャッシュの窓を無視して取り直す（Issue #1257）。下書きプレビューでも
+      // 効かせたいので、`activeRunId`の有無を問わないこの位置に置く
+      await this.postRoadmap(this.activeRoadmapPath(), true);
+      return;
+    }
+    if (type === 'openRoadmapIssue' && typeof m['issue'] === 'number') {
+      // WebviewからはIssue番号だけを受け取り、URLは拡張機能側が持つ一覧から引く
+      // （`openTaskPullRequest`と同じ方針。Webviewから渡されたURLは開かない）
+      const issue = this.roadmapIssueCache?.issues?.find((i) => i.number === m['issue']);
+      await this.openIssueUrl(issue?.url);
       return;
     }
 
@@ -600,6 +762,21 @@ export class WorkflowViewManager implements vscode.Disposable {
   }
 
   /**
+   * ロードマップ欄からIssueのページを開く（Issue #1257）。`openPullRequestUrl`と同じく、
+   * ホストのCLIが返した値をそのまま信用せず**`https://`以外のスキームは開かない**。
+   */
+  private async openIssueUrl(url: string | undefined): Promise<void> {
+    if (url === undefined || !url.startsWith('https://')) {
+      return;
+    }
+    try {
+      await vscode.env.openExternal(vscode.Uri.parse(url, true));
+    } catch (e) {
+      this.log.error(`IssueのURLを開けません: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
    * 「再実行」操作。対象タスクに `allow` があれば確認を挟む（design.md §16.7、
    * レビュー指摘: high）。`start()` の実行前確認はプロセス最初の起動時にしか効かず、
    * ウィンドウのリロード後に復元した実行を「再実行」する経路はそれを経由しないため、
@@ -724,6 +901,18 @@ ${workflowStyles()}
       </table>
     </div>
 
+    <section id="roadmapSection" hidden>
+      <div class="section-head">
+        <h2>ロードマップ</h2>
+        <div class="roadmap-tools">
+          <span id="roadmapPath" class="hint"></span>
+          <span id="roadmapStatus" class="hint"></span>
+          <button id="roadmapRefreshBtn" type="button" class="secondary">Issueの状態を更新</button>
+        </div>
+      </div>
+      <div id="roadmapBody"></div>
+    </section>
+
     <div id="integrationSection" hidden>
       <h2>統合の状況</h2>
       <div id="integrationInfo"></div>
@@ -834,5 +1023,8 @@ function buildPreviewSnapshot(
     },
     haltedByUser: false,
     isDraft: true,
+    // 下書きプレビューでもロードマップ欄を出す（Issue #1257）。生成直後の定義でも、
+    // 元にしたロードマップの項目とIssueの状態は読めたほうがよい
+    roadmapPath: def.roadmap,
   };
 }

@@ -918,6 +918,12 @@ export interface WorkflowRunSnapshot {
    */
   isDraft?: boolean;
   /**
+   * 定義の`roadmap`（ワークスペース相対の`.md`。Issue #1257）。ワークフローViewはこれを
+   * 使ってロードマップを読み、フェーズ・項目と、項目に紐づくIssueの状態を出す。
+   * `roadmap`を持たない定義では`undefined`で、Viewはロードマップ欄自体を出さない。
+   */
+  roadmapPath?: string | undefined;
+  /**
    * 統合ブランチ名（design.md §16.8「そのほか」・§16.17。Issue #104）。gitリポジトリでない
    * 実行（統合の概念が無い）や、`WorkflowViewManager.previewDefinition`が組み立てる
    * 生成直後の下書きプレビューでは`undefined`。`workflowGraph.ts`の`summarizeIntegration`が

@@ -540,6 +540,43 @@ ${sharedStyles()}
   }
   .orch-input input:disabled { opacity: 0.5; }
 
+  /* ---- ロードマップ欄（Issue #1257） ---- */
+  .roadmap-tools { display: flex; align-items: center; gap: 8px; }
+  #roadmapBody { display: flex; flex-direction: column; gap: 8px; }
+  .roadmap-title { font-weight: 600; }
+  .roadmap-empty { color: var(--vscode-descriptionForeground); }
+  .roadmap-phase-name {
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--vscode-descriptionForeground);
+    margin-bottom: 2px;
+  }
+  .roadmap-item {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 1px 0;
+    font-size: 0.9em;
+  }
+  /* 完了済みは薄くする。ただし記号（✓/□）でも区別が付くようにしてある */
+  .roadmap-item.checked .roadmap-text { color: var(--vscode-descriptionForeground); }
+  .roadmap-check { width: 1em; }
+  .roadmap-id { font-family: var(--vscode-editor-font-family); opacity: 0.8; }
+  .roadmap-text { flex: 1; min-width: 0; }
+  .roadmap-badge {
+    padding: 0 6px;
+    border-radius: var(--agent-radius-pill);
+    border: 1px solid var(--agent-border);
+    font-size: 0.8em;
+    white-space: nowrap;
+  }
+  .roadmap-badge.clickable { cursor: pointer; text-decoration: underline; }
+  .roadmap-badge.state-open { color: var(--vscode-charts-green); }
+  .roadmap-badge.state-closed { color: var(--vscode-descriptionForeground); }
+  .roadmap-badge.state-unlinked { color: var(--vscode-charts-yellow); }
+  .roadmap-badge.state-notFound { color: var(--vscode-charts-red); }
+  .roadmap-badge.state-unknown { color: var(--vscode-descriptionForeground); }
+
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
 ${reducedMotionStyles()}
 `;

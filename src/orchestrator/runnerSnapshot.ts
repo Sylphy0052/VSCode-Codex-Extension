@@ -104,6 +104,9 @@ export function getSnapshot(
         ),
       ],
     },
+    // ロードマップ欄（Issue #1257）。`validateWorkflow`が`isSafeRoadmapPath`で検証済みの
+    // ワークスペース相対パス。読み込みはView側が行う（ここはVSCode APIに触れない）
+    roadmapPath: live.def.roadmap,
     haltedByUser: live.runState.haltedByUser,
     failureRecovery:
       live.failureRecovery === undefined
