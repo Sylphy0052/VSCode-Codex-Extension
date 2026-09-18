@@ -184,6 +184,7 @@ import {
   SessionHubRequestWatcher,
   SessionHubWriter,
   isSharedApprovalDecision,
+  isSharedHandoffDecision,
   type SessionHubReplyPayload,
   type SessionHubRequest,
   type SharedSession,
@@ -1117,6 +1118,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
       );
     }
+    // 引き継ぎの決定も1行残す（Issue #1280）。引き継ぎ先のmodel / effortは会話の中身では
+    // ないが、どのウィンドウから引き継ぎを進めた・止めたのかを後から追えるようにする
+    if (action.kind === 'handoffDecision') {
+      log.info(
+        `セッション統括: 引き継ぎの決定（${action.decision}）を受け付けました` +
+          `（要求元 ${from}、${provider}/${threadId}、` +
+          `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
+      );
+    }
     return result;
   };
   const sessionHubRequestWatcher = new SessionHubRequestWatcher(
@@ -1169,6 +1179,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
         decision: action.kind === 'approvalDecision' ? action.decision : undefined,
         limit: action.kind === 'recentTurns' ? action.limit : undefined,
+        handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
+        handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
+        handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
+        handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
       });
       return {
         ok: reply.ok,
@@ -1176,6 +1190,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         approvals: reply.payload?.approvals,
         turns: reply.payload?.turns,
         capturedAt: reply.payload?.capturedAt,
+        handoff: reply.payload?.handoff,
         sideQuestion: reply.payload?.sideQuestion,
       };
     },
@@ -3639,6 +3654,9 @@ function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | 
   if (result.turns !== undefined) {
     return { turns: result.turns, capturedAt: result.capturedAt };
   }
+  if (result.handoff !== undefined) {
+    return { handoff: result.handoff };
+  }
   if (result.sideQuestion !== undefined) {
     return { sideQuestion: result.sideQuestion };
   }
@@ -3656,7 +3674,16 @@ function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | 
 function toSessionControlAction(
   request: Pick<
     SessionHubRequest,
-    'kind' | 'text' | 'approvalRequestId' | 'decision' | 'limit' | 'sideQuestionId'
+    | 'kind'
+    | 'text'
+    | 'approvalRequestId'
+    | 'decision'
+    | 'limit'
+    | 'sideQuestionId'
+    | 'handoffRequestId'
+    | 'handoffDecision'
+    | 'handoffModel'
+    | 'handoffEffort'
   >,
 ): SessionControlAction | undefined {
   const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
@@ -3687,6 +3714,21 @@ function toSessionControlAction(
       return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
         ? undefined
         : { kind: 'approvalDecision', approvalRequestId, decision };
+    case 'handoffDetail':
+      return { kind: 'handoffDetail' };
+    case 'handoffDecision':
+      // model / effortは受信側（`PendingHandoffChoice`）が候補と突き合わせて弾く。
+      // ここは`decision`だけをホワイトリストで確かめる
+      return request.handoffRequestId === undefined ||
+        !isSharedHandoffDecision(request.handoffDecision)
+        ? undefined
+        : {
+            kind: 'handoffDecision',
+            handoffRequestId: request.handoffRequestId,
+            decision: request.handoffDecision,
+            model: request.handoffModel,
+            effort: request.handoffEffort,
+          };
     default:
       return undefined;
   }

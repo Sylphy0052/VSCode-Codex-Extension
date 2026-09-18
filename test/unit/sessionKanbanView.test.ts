@@ -21,7 +21,13 @@ const fakeLogger: Logger = {
 
 function board(total: number): SessionKanbanBoard {
   return {
-    cards: { approvalPending: [], running: [], backgroundRunning: [], idle: [] },
+    cards: {
+      approvalPending: [],
+      handoffPending: [],
+      running: [],
+      backgroundRunning: [],
+      idle: [],
+    },
     total,
   };
 }

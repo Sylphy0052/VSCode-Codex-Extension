@@ -6,15 +6,24 @@ import { readNotificationsConfig } from '../config';
 import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
-import { needsAttentionAfterHandoff, type OldTabKeptReason } from './handoff';
+import {
+  needsAttentionAfterHandoff,
+  triggerLabel,
+  type HandoffTrigger,
+  type OldTabKeptReason,
+} from './handoff';
+import { PendingHandoffChoice } from './handoffPending';
 import { playNotificationSound } from './notificationSound';
 import type {
   SessionApprovalDetail,
+  SessionHandoffDetail,
   SessionRecentTurn,
   SessionSideQuestion,
   SharedApprovalDecision,
+  SharedHandoffDecision,
 } from './sessionHub';
 import {
+  decoratePanelTitle,
   deriveSessionActivityState,
   sanitizeForNotification,
   type SessionActivityState,
@@ -124,6 +133,13 @@ export interface BaseChatPanel {
    * 印が立っていない間は`undefined`。
    */
   handoffKeptUserMessages?: number | undefined;
+  /**
+   * 保留中の引き継ぎ確認（Issue #1280）。確認待ちでなければ`undefined`。
+   *
+   * 引き継ぎ先のmodel / effortの確認は人が答えるまで進まない。`ChatState`には現れない
+   * 状態なので、セッションの活動状態（`handoffPending`）の判定材料としてここに持つ。
+   */
+  pendingHandoff?: PendingHandoffChoice | undefined;
   /** 状態送信の間引き（issue #246）。予約中のタイマー。 */
   postTimer?: ReturnType<typeof setTimeout> | undefined;
 }
@@ -189,7 +205,22 @@ export type SessionControlAction =
   /** 脇道の質問を投げる（Issue #1261）。回答を待たず、受け付けたことだけを返す。 */
   | { kind: 'sideQuestion'; text: string }
   /** 投げた脇道の質問の進み具合を取りに行く（Issue #1261）。 */
-  | { kind: 'sideQuestionResult'; sideQuestionId: string };
+  | { kind: 'sideQuestionResult'; sideQuestionId: string }
+  /** 保留中の引き継ぎ確認の中身を取り寄せる（Issue #1280）。カードを展開したときだけ送る。 */
+  | { kind: 'handoffDetail' }
+  /**
+   * 取り寄せた保留に対する決定（Issue #1280）。
+   *
+   * `model` / `effort`は`decision === 'repick'`のときだけ意味を持つ。値の妥当性は
+   * 保留を持っている側（`PendingHandoffChoice`）が、公開した候補と突き合わせて確かめる。
+   */
+  | {
+      kind: 'handoffDecision';
+      handoffRequestId: string;
+      decision: SharedHandoffDecision;
+      model?: string | undefined;
+      effort?: string | undefined;
+    };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -203,6 +234,8 @@ export interface SessionControlResult {
   capturedAt?: number | undefined;
   /** `kind === 'sideQuestion'` / `'sideQuestionResult'`のときだけ入る（Issue #1261）。 */
   sideQuestion?: SessionSideQuestion | undefined;
+  /** `kind === 'handoffDetail'`のときだけ入る、保留中の引き継ぎ確認（Issue #1280）。 */
+  handoff?: SessionHandoffDetail | undefined;
 }
 
 /**
@@ -503,7 +536,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         threadId,
         title: entry.title,
         cwd: entry.cwd,
-        activity: deriveSessionActivityState(entry.session.getState()),
+        activity: this.activityStateOf(entry),
         loop: { running: entry.loop.running, paused: entry.loop.isPaused },
         handoffKept: entry.handoffKept,
       });
@@ -648,7 +681,49 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   getActivityState(id: string): SessionActivityState | undefined {
     const entry = this.panels.get(id);
-    return entry === undefined ? undefined : deriveSessionActivityState(entry.session.getState());
+    return entry === undefined ? undefined : this.activityStateOf(entry);
+  }
+
+  /**
+   * 1つの画面の活動状態。`ChatState`に現れない引き継ぎ確認待ち（Issue #1280）を含める。
+   *
+   * タブ名の印・履歴ツリー・統括ページが同じ判定を通るよう、状態を引く口をここへ揃える。
+   */
+  protected activityStateOf(entry: TPanel): SessionActivityState {
+    return deriveSessionActivityState(
+      entry.session.getState(),
+      entry.pendingHandoff?.active === true,
+    );
+  }
+
+  /**
+   * 引き継ぎ確認の保留を作り、この画面の状態として公開する（Issue #1280）。
+   *
+   * 保留の有無が変わるたびにタブ名の印を付け直し、`onDidChangePanels`で統括ページと
+   * 履歴ツリーを数え直させる。`onDidChangeState`は確認待ちの間`ChatState`が動かない
+   * ため出ない（引き継ぎ元として残ったタブの印（Issue #1165）と同じ事情）。
+   */
+  protected beginPendingHandoff(entry: TPanel, trigger: HandoffTrigger): PendingHandoffChoice {
+    const pending = new PendingHandoffChoice(triggerLabel(trigger), () => {
+      // 触るのは自分がこの画面の保留でいる間だけ。引き継ぎを続けて始めたとき（手動と
+      // 自動が重なる等）に、先に始まった方の再判定や後始末が、後から始まった保留を
+      // 追い出したり消したりしないようにする
+      if (entry.pendingHandoff !== undefined && entry.pendingHandoff !== pending) {
+        return;
+      }
+      entry.pendingHandoff = pending.active ? pending : undefined;
+      this.refreshPanelTitle(entry);
+      this.panelsChanged.fire();
+    });
+    entry.pendingHandoff = pending;
+    return pending;
+  }
+
+  /** タブ名の印を今の活動状態で付け直す（Issue #1280）。 */
+  protected refreshPanelTitle(entry: TPanel): void {
+    if (entry.panel !== undefined && !entry.disposed) {
+      entry.panel.title = decoratePanelTitle(entry.title, this.activityStateOf(entry));
+    }
   }
 
   /**
@@ -776,6 +851,23 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         }
         this.resolveApproval(entry, approval.requestId, action.decision);
         return { ok: true };
+      }
+      case 'handoffDetail': {
+        const handoff = entry.pendingHandoff?.detail();
+        return handoff === undefined
+          ? { ok: false, error: 'この会話は引き継ぎの確認待ちではありません' }
+          : { ok: true, handoff };
+      }
+      case 'handoffDecision': {
+        const pending = entry.pendingHandoff;
+        if (pending === undefined) {
+          return { ok: false, error: 'この引き継ぎ確認は既に解決されています' };
+        }
+        const settings =
+          action.model === undefined
+            ? undefined
+            : { model: action.model, effort: action.effort ?? '' };
+        return pending.decide(action.handoffRequestId, action.decision, settings);
       }
     }
   }
@@ -1027,6 +1119,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       entry.postTimer = undefined;
     }
     entry.loop.stop('manual');
+    // 引き継ぎの確認待ちのままタブを閉じた分を中止する（Issue #1280）。放っておくと
+    // 誰も答えない確認を`chooseHandoffModelSettings`が待ち続ける
+    entry.pendingHandoff?.cancelForTeardown();
     entry.session.dispose();
     entry.panel?.dispose();
     entry.panel = undefined;

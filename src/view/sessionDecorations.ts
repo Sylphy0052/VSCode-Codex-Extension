@@ -16,8 +16,8 @@ import type { SessionActivityState } from './sessionActivity';
  */
 export const SESSION_URI_SCHEME = 'codex-session';
 
-/** 行末のバッジを出す状態。承認待ち＞実行中＞アーカイブ済みの順で優先する。 */
-export type SessionDecorationState = 'approvalPending' | 'running' | 'archived';
+/** 行末のバッジを出す状態。承認待ち＞引き継ぎ確認待ち＞実行中＞アーカイブ済みの順で優先する。 */
+export type SessionDecorationState = 'approvalPending' | 'handoffPending' | 'running' | 'archived';
 
 /**
  * 状態ごとのバッジ・色・読み上げ用の説明。
@@ -35,6 +35,7 @@ export const SESSION_DECORATIONS: Readonly<
   >
 > = {
   approvalPending: { badge: '!', color: 'charts.yellow', tooltip: '承認待ち' },
+  handoffPending: { badge: '?', color: 'charts.yellow', tooltip: '引き継ぎ確認待ち' },
   running: { badge: '▶', color: 'charts.blue', tooltip: '実行中' },
   archived: { color: 'descriptionForeground', tooltip: 'アーカイブ済み' },
 };
@@ -84,6 +85,9 @@ export function decorationStateOf(
 ): SessionDecorationState | undefined {
   if (activity === 'approvalPending') {
     return 'approvalPending';
+  }
+  if (activity === 'handoffPending') {
+    return 'handoffPending';
   }
   if (activity === 'running') {
     return 'running';

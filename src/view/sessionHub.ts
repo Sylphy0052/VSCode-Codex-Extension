@@ -106,6 +106,7 @@ const ACTIVITY_STATES: readonly SessionActivityState[] = [
   'idle',
   'running',
   'approvalPending',
+  'handoffPending',
   'backgroundRunning',
 ];
 
@@ -370,7 +371,9 @@ export type SessionHubRequestKind =
   | 'approvalDecision'
   | 'recentTurns'
   | 'sideQuestion'
-  | 'sideQuestionResult';
+  | 'sideQuestionResult'
+  | 'handoffDetail'
+  | 'handoffDecision';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -419,6 +422,65 @@ export function isSharedApprovalDecision(value: unknown): value is SharedApprova
 }
 
 /**
+ * 保留中の引き継ぎ確認の中身（Issue #1280）。
+ *
+ * `SessionApprovalDetail`と同じく常駐ファイルには書かず、`handoffDetail`の応答にだけ
+ * 載せる。判定理由（`reasons`）は分類器の見立てをそのまま含むため、会話本文に準じる
+ * 扱いにする。
+ */
+export interface SessionHandoffDetail {
+  /**
+   * この保留1件のid（推測できない値）。
+   *
+   * 中身を取り寄せてから決定を押すまでの間に、タブ側のモーダルで答えられていたり
+   * 「再判定」で提案が入れ替わっていたりすると一致しなくなる。承認の
+   * `ApprovalDisclosureLog`にあたる「表示してから操作する」の担保も、この値を
+   * `handoffDetail`の応答でしか配らないことで兼ねる。
+   */
+  requestId: string;
+  /** 提案された引き継ぎ先のmodel。空文字はCLIの既定。 */
+  model: string;
+  /** 提案された引き継ぎ先のeffort。空文字はCLIの既定。 */
+  effort: string;
+  /** そうなった理由（分類器の見立て・コスト方針・設定によるoverride）。 */
+  reasons: string[];
+  /** 引き継ぎの契機を人が読める文にしたもの（`triggerLabel`）。 */
+  trigger: string;
+  /** 「再判定」を出してよいか（`agent.autoHandoff.router`が有効なときだけ）。 */
+  canReclassify: boolean;
+  /**
+   * 選び直しの候補（Issue #1280の確認点3）。
+   *
+   * VS CodeのQuickPickは操作した本人のウィンドウにしか出せないため、別ウィンドウ宛ての
+   * 選び直しは統括ページの中で選ばせる。候補は保留を持っているウィンドウが作る
+   * （モデル一覧はそちらのCLIの設定で決まるため）。
+   */
+  models: SessionHandoffModelOption[];
+}
+
+/** 選び直しの候補1件（Issue #1280）。 */
+export interface SessionHandoffModelOption {
+  /** CLIへ渡す値。空文字はCLIの既定。 */
+  slug: string;
+  /** 画面へ出す名前。 */
+  label: string;
+  /** そのモデルで選べるeffort。空配列なら既定しか選べない。 */
+  efforts: string[];
+}
+
+/**
+ * 統括ページから返せる、引き継ぎ確認への決定（Issue #1280）。
+ *
+ * モーダルのボタン（続行 / 選び直す / 再判定）に「中止」を足した4種。モーダルは
+ * 閉じることで中止できるが、カードには閉じる操作が無いためボタンとして出す。
+ */
+export type SharedHandoffDecision = 'proceed' | 'repick' | 'reclassify' | 'cancel';
+
+export function isSharedHandoffDecision(value: unknown): value is SharedHandoffDecision {
+  return value === 'proceed' || value === 'repick' || value === 'reclassify' || value === 'cancel';
+}
+
+/**
  * 会話の直近のやり取り1件（Issue #1260）。
  *
  * 載せるのは人の発言とエージェントの応答だけで、コマンド実行・思考・ファイル変更は
@@ -464,6 +526,8 @@ export interface SessionHubReplyPayload {
   capturedAt?: number | undefined;
   /** `kind === 'sideQuestion'` / `'sideQuestionResult'`の応答（Issue #1261）。 */
   sideQuestion?: SessionSideQuestion | undefined;
+  /** `kind === 'handoffDetail'`の応答（Issue #1280）。保留が無ければ`undefined`。 */
+  handoff?: SessionHandoffDetail | undefined;
 }
 
 /** 1件の要求。`kind`ごとの追加項目はここへ並べる。 */
@@ -494,6 +558,19 @@ export interface SessionHubRequest {
    * （`approvalRequestId`と同じ理由）。
    */
   sideQuestionId?: string | undefined;
+  /**
+   * `kind === 'handoffDecision'`のときの、対象の保留のid（Issue #1280）。
+   *
+   * 要求そのもののidである`requestId`とは別物なので名前を分ける（`approvalRequestId`と
+   * 同じ事情）。
+   */
+  handoffRequestId?: string | undefined;
+  /** `kind === 'handoffDecision'`のときの決定。受信側が`SharedHandoffDecision`として検証する。 */
+  handoffDecision?: string | undefined;
+  /** `handoffDecision === 'repick'`のときに指定するmodel。空文字はCLIの既定。 */
+  handoffModel?: string | undefined;
+  /** `handoffDecision === 'repick'`のときに指定するeffort。空文字はCLIの既定。 */
+  handoffEffort?: string | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -570,6 +647,10 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     decision: typeof v.decision === 'string' ? v.decision : undefined,
     limit: typeof v.limit === 'number' ? v.limit : undefined,
     sideQuestionId: typeof v.sideQuestionId === 'string' ? v.sideQuestionId : undefined,
+    handoffRequestId: typeof v.handoffRequestId === 'string' ? v.handoffRequestId : undefined,
+    handoffDecision: typeof v.handoffDecision === 'string' ? v.handoffDecision : undefined,
+    handoffModel: typeof v.handoffModel === 'string' ? v.handoffModel : undefined,
+    handoffEffort: typeof v.handoffEffort === 'string' ? v.handoffEffort : undefined,
   };
 }
 
@@ -631,6 +712,10 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
       turns: parseRecentTurns(v.turns),
       capturedAt: typeof v.capturedAt === 'number' ? v.capturedAt : undefined,
     };
+  }
+  if (v.handoff !== undefined) {
+    const handoff = parseHandoffDetail(v.handoff);
+    return handoff === undefined ? undefined : { handoff };
   }
   const raw = v.approvals;
   if (!Array.isArray(raw)) {
@@ -722,6 +807,71 @@ function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
   return turns;
 }
 
+/** 選び直しの候補の上限（Issue #1280）。モデル一覧がこの数を超えることは実際には無い。 */
+const MAX_REPLY_MODEL_OPTIONS = 100;
+
+/**
+ * 判定理由の件数の上限（Issue #1280）。
+ *
+ * 1件ずつの長さだけでなく件数も抑える。統括ページは理由を1件1行で並べるため、
+ * 巨大な配列がそのまま届くとカードの中に大量の行を作ることになる。
+ */
+const MAX_REPLY_REASONS = 40;
+
+/**
+ * 保留中の引き継ぎ確認を、信用せずに読み解く（Issue #1280）。
+ *
+ * 版の違うウィンドウが書いた値なので、必須の項目が欠けていれば丸ごと捨てる。
+ * 「再判定できる」は読めない版から届いたときに押せない側へ倒す（`decidable`と同じ方針）。
+ */
+function parseHandoffDetail(value: unknown): SessionHandoffDetail | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.requestId !== 'string' || typeof v.model !== 'string') {
+    return undefined;
+  }
+  return {
+    requestId: v.requestId,
+    model: v.model,
+    effort: typeof v.effort === 'string' ? v.effort : '',
+    reasons: Array.isArray(v.reasons)
+      ? v.reasons
+          .filter((r): r is string => typeof r === 'string')
+          .slice(0, MAX_REPLY_REASONS)
+          .map((r) => (r.length > MAX_REPLY_TEXT_CHARS ? r.slice(0, MAX_REPLY_TEXT_CHARS) : r))
+      : [],
+    trigger: typeof v.trigger === 'string' ? v.trigger : '',
+    canReclassify: v.canReclassify === true,
+    models: Array.isArray(v.models) ? parseHandoffModelOptions(v.models) : [],
+  };
+}
+
+function parseHandoffModelOptions(raw: readonly unknown[]): SessionHandoffModelOption[] {
+  const options: SessionHandoffModelOption[] = [];
+  for (const entry of raw) {
+    if (options.length >= MAX_REPLY_MODEL_OPTIONS) {
+      break;
+    }
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const v = entry as Record<string, unknown>;
+    if (typeof v.slug !== 'string') {
+      continue;
+    }
+    options.push({
+      slug: v.slug,
+      label: typeof v.label === 'string' && v.label !== '' ? v.label : v.slug,
+      efforts: Array.isArray(v.efforts)
+        ? v.efforts.filter((e): e is string => typeof e === 'string')
+        : [],
+    });
+  }
+  return options;
+}
+
 /**
  * 中身がすべて期限切れの要求ディレクトリを、ディレクトリごと消す。
  *
@@ -793,6 +943,10 @@ export class SessionHubRequestPort {
       decision?: string | undefined;
       limit?: number | undefined;
       sideQuestionId?: string | undefined;
+      handoffRequestId?: string | undefined;
+      handoffDecision?: string | undefined;
+      handoffModel?: string | undefined;
+      handoffEffort?: string | undefined;
     },
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
