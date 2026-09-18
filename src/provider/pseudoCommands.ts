@@ -13,7 +13,7 @@ import type { SlashCommand } from './slashCommands';
  */
 
 /** 擬似コマンドが起こす動作。 */
-export type PseudoAction = 'compact' | 'generateAgentsFile' | 'sideQuestion';
+export type PseudoAction = 'compact' | 'generateAgentsFile' | 'sideQuestion' | 'clearConversation';
 
 export interface PseudoCommand extends SlashCommand {
   action: PseudoAction;
@@ -48,21 +48,35 @@ export const CODEX_PSEUDO_COMMANDS: readonly PseudoCommand[] = [
     argumentHint: '<質問>',
     action: 'sideQuestion',
   },
+  {
+    name: 'clear',
+    description: 'いまの会話を捨てて、同じ作業フォルダで新しい会話を始める',
+    argumentHint: '',
+    action: 'clearConversation',
+  },
 ];
+
+/** Claude Code画面でも扱える擬似コマンドの動作（`CLAUDE_PSEUDO_COMMANDS`の抽出条件）。 */
+const CLAUDE_PSEUDO_ACTIONS: readonly PseudoAction[] = ['sideQuestion', 'clearConversation'];
 
 /**
  * Claude Code画面向けの擬似コマンド（issue #334、design.md §14.62）。
  *
- * `/btw`（脇道の質問）だけを`CODEX_PSEUDO_COMMANDS`から抜き出したもの。`/compact`と
- * `/init`はClaude Code側では扱わない（`/compact`はCLI組込コマンド・画面のボタンの
- * 両方で既に完結しており、`/init`に相当する専用の導線も無い）。ここへ`CODEX_PSEUDO_COMMANDS`
- * をそのまま流用すると、Claude Code画面で`/compact`や`/init`と打ったときに「拡張機能側の
- * 機能」として静かに素通しされ、Codex専用の後始末（`runGenerateAgentsFile`等）が無いまま
- * 何も起きない状態になる（Codex側の挙動は変えない、という制約とは別に、Claude Code側の
- * 既存の`/compact`ボタンの経路とも重複してしまう）。
+ * `/btw`（脇道の質問）と`/clear`（会話のクリア、issue #1264）だけを
+ * `CODEX_PSEUDO_COMMANDS`から抜き出したもの。`/compact`と`/init`はClaude Code側では
+ * 扱わない（`/compact`はCLI組込コマンド・画面のボタンの両方で既に完結しており、
+ * `/init`に相当する専用の導線も無い）。ここへ`CODEX_PSEUDO_COMMANDS`をそのまま流用すると、
+ * Claude Code画面で`/compact`や`/init`と打ったときに「拡張機能側の機能」として静かに
+ * 素通しされ、Codex専用の後始末（`runGenerateAgentsFile`等）が無いまま何も起きない状態に
+ * なる（Codex側の挙動は変えない、という制約とは別に、Claude Code側の既存の`/compact`
+ * ボタンの経路とも重複してしまう）。
+ *
+ * `/clear`を両方へ載せるのは、CLIの`/clear`がTUI層の機能でstream-json入力には存在せず、
+ * そのまま送ると発言として素通しされるため（Codexのapp-serverでも同じ）。拡張機能側の
+ * `clearEntry`（クリアアイコンと同じ実処理）へ振り替えて初めて効く。
  */
 export const CLAUDE_PSEUDO_COMMANDS: readonly PseudoCommand[] = CODEX_PSEUDO_COMMANDS.filter(
-  (command) => command.action === 'sideQuestion',
+  (command) => CLAUDE_PSEUDO_ACTIONS.includes(command.action),
 );
 
 /**
