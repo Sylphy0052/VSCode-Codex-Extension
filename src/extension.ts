@@ -184,6 +184,7 @@ import {
   SessionHubRequestWatcher,
   SessionHubWriter,
   isSharedApprovalDecision,
+  type SessionHubReplyPayload,
   type SessionHubRequest,
   type SharedSession,
 } from './view/sessionHub';
@@ -1131,10 +1132,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       if (!result.ok) {
         log.info(`セッション統括: 要求を実行できませんでした（${result.error ?? '理由は不明'}）`);
       }
-      // 取り寄せた中身は応答にだけ載せる。共有ファイルへ常駐させない（Issue #1259）
-      return result.approvals === undefined
+      // 取り寄せた中身は応答にだけ載せる。共有ファイルへ常駐させない（Issue #1259、#1260）
+      const payload = toReplyPayload(result);
+      return payload === undefined
         ? { ok: result.ok, error: result.error }
-        : { ok: result.ok, error: result.error, payload: { approvals: result.approvals } };
+        : { ok: result.ok, error: result.error, payload };
     },
     log,
   );
@@ -1165,8 +1167,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         approvalRequestId:
           action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
         decision: action.kind === 'approvalDecision' ? action.decision : undefined,
+        limit: action.kind === 'recentTurns' ? action.limit : undefined,
       });
-      return { ok: reply.ok, error: reply.error, approvals: reply.payload?.approvals };
+      return {
+        ok: reply.ok,
+        error: reply.error,
+        approvals: reply.payload?.approvals,
+        turns: reply.payload?.turns,
+        capturedAt: reply.payload?.capturedAt,
+      };
     },
     log,
   );
@@ -3616,6 +3625,22 @@ async function persistCache(
 }
 
 /**
+ * 操作の結果のうち、応答へ載せる分だけを取り出す（Issue #1259、#1260）。
+ *
+ * 載せるものが無ければ`undefined`を返し、`payload`そのものを書かない。空の入れ物を
+ * 書いても読む側の分岐が増えるだけで、意味が変わらない。
+ */
+function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | undefined {
+  if (result.approvals !== undefined) {
+    return { approvals: result.approvals };
+  }
+  if (result.turns !== undefined) {
+    return { turns: result.turns, capturedAt: result.capturedAt };
+  }
+  return undefined;
+}
+
+/**
  * 要求ファイルの`kind`を、チャット画面への操作へ変える（Issue #1258、#1259）。
  *
  * `kind`を`string`として扱うのは、共有ディレクトリへ書き込むのが版の違う別プロセス
@@ -3624,9 +3649,9 @@ async function persistCache(
  * 待たせない。`decision`も同じ理由で、ここでホワイトリスト検証してから通す。
  */
 function toSessionControlAction(
-  request: Pick<SessionHubRequest, 'kind' | 'text' | 'approvalRequestId' | 'decision'>,
+  request: Pick<SessionHubRequest, 'kind' | 'text' | 'approvalRequestId' | 'decision' | 'limit'>,
 ): SessionControlAction | undefined {
-  const { text, approvalRequestId, decision } = request;
+  const { text, approvalRequestId, decision, limit } = request;
   switch (request.kind as string) {
     case 'open':
       return { kind: 'open' };
@@ -3640,6 +3665,9 @@ function toSessionControlAction(
       return text === undefined ? undefined : { kind: 'send', text };
     case 'approvalDetail':
       return { kind: 'approvalDetail' };
+    case 'recentTurns':
+      // 件数は受信側（`controlSession`）が範囲へ丸める。ここでは形だけ確かめる
+      return { kind: 'recentTurns', limit: typeof limit === 'number' ? limit : 1 };
     case 'approvalDecision':
       return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
         ? undefined
