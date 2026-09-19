@@ -418,6 +418,31 @@ npx tsx test/bench/secondOpinionEval/supplementalRule.ts \
 
 PR #1053 には追加poolの先頭が `#782 #85 #884 #221 #938 #329 ...` と書かれているが、現物の `supplemental-order-v2.json` に #938 は無い。**版差であり、現物が正しい。** 証拠候補が版3（frame v2 由来）から版4（frame v3 由来）へ変わった際に、#938 の follow-up issue として #1044 が `openedAfterMerge` で検出されるようになり、#938 は強い証拠のpoolへ移った（`screening-order-v3.json` の `orderIndex 88`、判定は `no-relevant-finding`）。`verifyDisjoint()` が通っているので二重には入っていない。
 
+#### 追加poolの先頭10件の実測と再評価（2026-09-19）
+
+`orderIndex 0〜9`（`#782 #85 #884 #221 #329 #791 #275 #779 #648 #906`）を読んだ結果は次のとおり。判定は `eval-results/screening-decisions-supplemental-v2.jsonl` に追記だけで残し、集計は `eval-results/screening-summary-supplemental-v2.json` にある（版1の記録は作業環境ごと失われているため `orderIndex 0` から読み直した）。
+
+- primary **2件**（#329 / #275）、finding 2件。どちらも `empirical`
+- 非primary 8件 = `model-derived-only` 3（#85 / #884 / #221）/ `no-relevant-finding` 5（#782 / #791 / #779 / #648 / #906）
+- `insufficient-evidence` **0件**
+
+**規則どおり、追加poolの screening はここでいったん止める。** 版3の再評価規則（`supplemental-rule-v3.json`）は「primary が2件以下かつ `insufficient-evidence` が1件以下なら、`no-problem` と `indeterminate` を作る別工程の設計へ移る」と定めており、実測はこれに当たる。primary が出ないからではない（収率は強い証拠のpoolの20件時点と同程度で、読み進めれば正例はさらに増える）。**止める理由は、止まっているのが正例ではなく負例と判断保留の供給だからである。** この供給源は定義上そこを埋められない。
+
+実測で分かったこと2つ。
+
+- **primary 2件は、どちらも機械抽出が拾えなかった後続証拠で確定した。** #329 は Issue #416 の入力長別の実測（`n=20000` で 9676ms）と PR #421 のRED確認済み回帰テスト、#275 は Issue #407 と PR #411 のRED確認済み回帰テストである。どちらも候補ファイルの `followUpPrs` / `followUpIssues` は空で、`git log --all -S "<識別子>"` で識別子を追って初めて出てきた。**本文検索だけでは届かない**という事実が、強い証拠のpoolでの2件（#501 / #537）に続いて3・4例目になった
+- **`closing-issue` は5件中5件が「このPRが直した欠陥」だった。** 版2の10件で得た観測と同じで、この channel 単独では正例を生まない
+
+#### `account-review` channel の偽陽性（2026-09-19に実測）
+
+`evidenceChannels.ts` の `authorKindOf()` は `MODEL_AUTHOR_LOGINS`（`chatgpt-codex-connector` / `copilot`）と `[bot]` 接尾辞でAIレビュアーを判別するが、GraphQL が返す login は **`copilot-pull-request-reviewer`**（接尾辞なし）で、どちらにも当たらず `account` に落ちる。結果、**追加pool 289件のうち136件は `account-review` が偽陽性**で、実際には人のレビューが0件である（先頭10件では #85 / #221 / #329 / #275 が該当）。
+
+- pool の構成への影響は小さい。`account-review` を落としても他の channel を失わない案件が大半で、**集合から外れるのは13件（4.5%）**にとどまる
+- 強い証拠のpool（102件）は `follow-up-test` と `openedAfterMerge` な follow-up issue で選んでおり、この判別を使っていないので影響しない
+- 判定そのものも汚染されていない。screening は実物のレビューを読んで `groundTruthBasis` を決めており、channel の値を根拠にしていない
+
+**凍結した読む順は直さない。** 4.5%の入れ替えのために読む順を作り直すと、既に読んだ分を捨てることになり、止まっている `no-problem` と `indeterminate` の不足は1件も解消しない。`MODEL_AUTHOR_LOGINS` の修正は別途行い、次に候補を作り直す版から効かせる。それまでは、**`account-review` は「人がレビューした」ではなく「bot 以外の login がレビューした（誤判定を含む）」と読む。**
+
 ### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。
