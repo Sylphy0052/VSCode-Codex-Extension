@@ -1,12 +1,12 @@
 {
   "difficultyVersion": 1,
   "judgedAt": "2026-09-19",
-  "screenedCases": 80,
+  "screenedCases": 84,
   "rule": "hard-positive は、欠陥の成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要り、変更を順に読むだけでは気づきにくいもの。normal-positive は、変更対象のファイルを読めば直接見える論理欠陥で、成立条件が単純なもの。層は案件単位で付け、同じ案件に複数の finding があるときは難しいほうへ寄せる。",
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "06734703c4fed2e558dcc4723c23e318b4353d787d48d225b83f6cbdc973deaa",
+  "decisionsSha256": "1e50c8234aa81f41fb63564f7cc066fb836f98efb720bad670dcbe253dd88d7e",
   "eligibilityFile": "eligibility-v1.json",
-  "eligibilitySha256": "cda45ca1e5232908c36225dae1906dc31aedb5ba120621ae66c54317a1215725",
+  "eligibilitySha256": "74c2abe9dca96161c93589eb0376ffccb6015b6996c7ccc53ef0c43f322de1a7",
   "quotas": {
     "hard-positive": 9,
     "normal-positive": 6,
@@ -24,29 +24,29 @@
   "supply": [
     {
       "conditionId": "A",
-      "hard-positive": 10,
+      "hard-positive": 12,
       "normal-positive": 7,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 3,
-        "L": 2,
-        "XL": 11
+        "L": 3,
+        "XL": 12
       },
       "extremeTail": 4
     },
     {
       "conditionId": "C-repo",
-      "hard-positive": 13,
+      "hard-positive": 15,
       "normal-positive": 7,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 5,
-        "L": 2,
-        "XL": 12
+        "L": 3,
+        "XL": 13
       },
       "extremeTail": 5
     }
@@ -250,6 +250,26 @@
       "rationale": "プロセスの世代という非自明な観点が要り、kill のエスカレーション中に新しいプロセスが起動し、古いプロセスの exit が遅れて届くという時間差の前提も要る",
       "changeSizeStratum": "XL",
       "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-395",
+      "prNumber": 395,
+      "orderIndex": 80,
+      "stratum": "hard-positive",
+      "rationale": "永続化によってマニフェストのキーが外部入力へ変わったという前提の変化に気づいたうえで、シンボリックリンクを置ける攻撃者の介在を想定する必要がある。復元時の基準の取り直しも、リロードを挟んだ人の手動編集という時間差の前提が要る",
+      "changeSizeStratum": "XL",
+      "tags": [],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-503",
+      "prNumber": 503,
+      "orderIndex": 82,
+      "stratum": "hard-positive",
+      "rationale": "テストが欠陥を検出できないことを見抜くために、busy の間は pending へ積むだけという通知経路の状態と、テストがターン境界を挟んでいないことを突き合わせる必要がある",
+      "changeSizeStratum": "L",
+      "tags": [],
       "eligibleIn": ["A", "C-repo"]
     }
   ]
