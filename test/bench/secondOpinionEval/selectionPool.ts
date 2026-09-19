@@ -184,6 +184,23 @@ function candidateOf(entry: OrderEntry, stratum: DifficultyStratum): SelectionCa
   };
 }
 
+/**
+ * 正例がどこか1つの条件で判定されているか。
+ *
+ * `eligibleIn` が空の案件は、どの条件でも通らなかったのではなく**判定そのものが無い**。
+ * そのまま流すと `--out-explore` へ落ち、「探索すれば発見できる」案件として記録される。
+ * 判定漏れを別の意味へ読み替えることになるので、1件でもあれば止める。
+ */
+function verifyPositivesJudged(positives: readonly DifficultyCase[]): void {
+  const unjudged = positives.filter((entry) => entry.eligibleIn.length === 0);
+  if (unjudged.length > 0) {
+    throw new Error(
+      `条件ごとの判定が無い正例があります（${unjudged.map((entry) => entry.caseId).join(' / ')}）。` +
+        'eligibility を判定してから母集団を作り直してください',
+    );
+  }
+}
+
 /** 同じPRが2つの層から入ると、抽出で二重に数えられる。1件でもあれば止める。 */
 function verifyNoDuplicates(candidates: readonly SelectionCandidate[]): void {
   const seen = new Map<string, DifficultyStratum>();
@@ -248,6 +265,7 @@ async function main(): Promise<void> {
   verifyFrameLineage(indeterminateFile, frame.sha256, args.indeterminatePath);
 
   const positives = difficultyFile.cases.filter((entry) => POSITIVE_STRATA.has(entry.stratum));
+  verifyPositivesJudged(positives);
   const eligibleHere = positives.filter((entry) => entry.eligibleIn.includes(args.conditionId));
   const exploreOnly = positives.filter((entry) => !entry.eligibleIn.includes(args.conditionId));
 

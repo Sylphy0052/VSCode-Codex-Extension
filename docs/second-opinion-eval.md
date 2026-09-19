@@ -919,6 +919,13 @@ npx tsx test/bench/secondOpinionEval/selectionPool.ts \
 
 `--out-explore` の側を母集団へ混ぜると、抽出された `hard-positive` の一部が prompt-placement の分母から落ちる。条件A・B-pos・B-repeat の比較は同じ分母で見るものなので、ここで正例が9件を割ると、測っているのが依頼文の位置効果なのか材料不足なのか分からなくなる。
 
+組み立ての前に4つを確かめ、1つでも通らなければ**書かずに止まる**。
+
+- `no-problem` と `indeterminate` の読む順が、渡した sampling frame と同じものから作られていること（`frameSha256` の一致）
+- 同じ案件が複数の層に入っていないこと
+- 各案件の `changeSizeStratum` と `tags` が frame と一致し、frame で除外済みのPRが混ざっていないこと
+- 正例の `eligibleIn` が空でないこと。空は「どの条件でも通らなかった」ではなく**判定そのものが無い**という意味で、そのまま流すと判定漏れが `--out-explore` 側へ落ちて「探索すれば発見できる案件」として記録されてしまう
+
 #### 24件を抜く
 
 ```
