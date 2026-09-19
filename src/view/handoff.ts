@@ -822,6 +822,15 @@ export interface SafeBoundaryGateInput {
   loopRunning: boolean;
   /** タスク用セッションか。無人で走るため人の区切りとは無関係。 */
   taskManaged: boolean;
+  /**
+   * バックグラウンドで走っているプロセスがあるか（Issue #1307）。
+   *
+   * バックグラウンド実行はターンが終わっても走り続け、完了したときに元のセッションを再び
+   * 動かす。`busy` はターンの実行中しか true にならないため、これを見ないと「走っている
+   * 最中に引き継いだうえ、引き継ぎ元も作業を続ける」状態になる。判定は
+   * `ChatState.backgroundTerminals` が空かどうか。
+   */
+  backgroundRunning: boolean;
 }
 
 /**
@@ -839,7 +848,8 @@ export function passesSafeBoundaryGate(input: SafeBoundaryGateInput): boolean {
     !input.awaitingUserAnswer &&
     input.queued === 0 &&
     !input.loopRunning &&
-    !input.taskManaged
+    !input.taskManaged &&
+    !input.backgroundRunning
   );
 }
 

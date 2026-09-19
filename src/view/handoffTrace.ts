@@ -66,6 +66,7 @@ export function describeGate(input: SafeBoundaryGateInput): string {
     `queued=${input.queued}`,
     `loopRunning=${input.loopRunning}`,
     `taskManaged=${input.taskManaged}`,
+    `backgroundRunning=${input.backgroundRunning}`,
   ].join(' ');
 }
 

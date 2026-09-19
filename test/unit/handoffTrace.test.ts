@@ -28,6 +28,7 @@ const gate = {
   queued: 0,
   loopRunning: false,
   taskManaged: false,
+  backgroundRunning: false,
 };
 
 const assessment: TaskAssessment = {
@@ -87,6 +88,7 @@ describe('ログの1行の中身（Issue #1097）', () => {
     expect(line).toContain('turnFailed=false');
     expect(line).toContain('loopRunning=false');
     expect(line).toContain('taskManaged=false');
+    expect(line).toContain('backgroundRunning=false');
   });
 
   it('分類器の結果は5軸と switchSafe / handoffSuggested を出す', () => {

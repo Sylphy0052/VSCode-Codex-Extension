@@ -437,8 +437,12 @@ describe('自動引き継ぎの発火判定', () => {
   });
 
   it('安全な区切りが成立していなければ、提案があっても発火しない（Issue #1097）', () => {
-    // `loopRunning` / `taskManaged` は前段で落ちるため `safeBoundary` が立たない
-    for (const over of [{ loopRunning: true }, { taskManaged: true }]) {
+    // どれも前段で落ちるため `safeBoundary` が立たない
+    for (const over of [
+      { loopRunning: true },
+      { taskManaged: true },
+      { backgroundRunning: true },
+    ]) {
       const gate = {
         busy: false,
         turnFailed: false,
@@ -448,6 +452,7 @@ describe('自動引き継ぎの発火判定', () => {
         queued: 0,
         loopRunning: false,
         taskManaged: false,
+        backgroundRunning: false,
         ...over,
       };
       expect(passesSafeBoundaryGate(gate)).toBe(false);
@@ -462,6 +467,17 @@ describe('自動引き継ぎの発火判定', () => {
         }),
       ).toBeUndefined();
     }
+  });
+
+  it('バックグラウンド実行中でも、残量の閾値と自動圧縮は発火する（Issue #1307）', () => {
+    // 前段を通らないので `safeBoundary` も `boundaryGatePassed` も渡さない
+    expect(decideAutoHandoff({ ...base, remainingPercent: 10 })).toEqual({
+      kind: 'threshold',
+      remainingPercent: 10,
+    });
+    expect(decideAutoHandoff({ ...base, remainingPercent: 90, compacted: true })).toEqual({
+      kind: 'compactBoundary',
+    });
   });
 
   it('残量が緩い閾値以下なら、提案より softThreshold が先に成立する（Issue #1097）', () => {
@@ -500,6 +516,7 @@ describe('安全な区切りの前段（Issue #1090）', () => {
     queued: 0,
     loopRunning: false,
     taskManaged: false,
+    backgroundRunning: false,
   };
 
   it('全部成立していれば通す', () => {
@@ -515,6 +532,7 @@ describe('安全な区切りの前段（Issue #1090）', () => {
     ['送信待ちの指示', { queued: 1 }],
     ['ループ実行中', { loopRunning: true }],
     ['タスク用セッション', { taskManaged: true }],
+    ['バックグラウンド実行中（Issue #1307）', { backgroundRunning: true }],
   ])('%s なら通さない', (_name, over) => {
     expect(passesSafeBoundaryGate({ ...gate, ...over })).toBe(false);
   });

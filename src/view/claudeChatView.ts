@@ -1212,6 +1212,9 @@ export class ClaudeChatViewManager
       // 数えると、`/loop` 運用では区切り系の契機が全部塞がる（Issue #1097）
       loopRunning: loopStatus.running && !entry.loop.isPaused,
       taskManaged: entry.taskManaged,
+      // バックグラウンドのプロセスが走っている間は区切りではない（Issue #1307）。完了時に
+      // 引き継ぎ元が再び動くため、ここで引き継ぐと両方のセッションが同じ作業を進める
+      backgroundRunning: state.backgroundTerminals.length > 0,
     };
     if (!passesSafeBoundaryGate(gate)) {
       entry.trace.info(`gate blocked (${describeGate(gate)})`);
