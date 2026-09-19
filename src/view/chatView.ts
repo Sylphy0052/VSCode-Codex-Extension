@@ -84,6 +84,10 @@ import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types'
 import type { PromptSubmission } from '../appserver/prompts';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
+  SessionMessagingHost,
+  SessionMessagingRegistration,
+} from '../orchestrator/sessionMessagingHost';
+import type {
   ApprovalHandler,
   McpElicitationHandler,
   TaskSession,
@@ -575,6 +579,37 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return { model: config.model, effort: config.reasoningEffort };
   }
 
+  /**
+   * 通常の会話へ見せるメッセージング用MCPサーバ（Issue #1305）。`extension.ts`が立てて渡す。
+   * 渡されなければ従来どおりMCPサーバ無しで開く。
+   */
+  private sessionMessaging: SessionMessagingHost | undefined;
+  /**
+   * 会話1つに割り当てたメッセージング用MCPの登録。タブを閉じたときに失効させるため、
+   * `ChatPanel`をキーに持つ（`onTeardown`で`dispose`する）。
+   */
+  private readonly sessionMessagingRegistrations = new WeakMap<
+    ChatPanel,
+    SessionMessagingRegistration
+  >();
+
+  /** 通常の会話へ見せるメッセージング用MCPサーバを配線する（Issue #1305）。 */
+  setSessionMessaging(host: SessionMessagingHost | undefined): void {
+    this.sessionMessaging = host;
+  }
+
+  /**
+   * メッセージング用MCPサーバを、このスレッドにだけ見せる`thread/start`のconfig
+   * （Issue #1305）。タスク用（`openTaskSession`）と同じ形・同じサーバ名を使う。
+   *
+   * `config.toml`には永続化されない（スレッド限定。実測はタスク経路のコメント参照）。
+   */
+  private sessionMessagingThreadConfig(url: string): Record<string, unknown> {
+    return {
+      mcp_servers: { [MESSAGING_MCP_SERVER_NAME]: { url, type: 'streamable_http' } },
+    };
+  }
+
   /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
   private configFor(entry: ChatPanel): CodexConfig {
     const config = entry.taskConfig ?? readConfig().codex;
@@ -693,13 +728,26 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const entry = this.buildEntry(targetCwd, 'Codex', false, taskConfig, undefined, modelSettings);
     this.showPanel(entry, preserveFocus, targetViewColumn);
     const pendingKey = this.pendingStarts.begin(entry);
+    // 他のセッションと話すためのMCPサーバ（Issue #1305）。スレッドidは`thread/start`の
+    // 応答でしか判らないため、先にURLだけ発行し、idが確定してから宛先を束縛する。
+    // 束縛するまでこのURLは404のままで、誰も名乗れない
+    const messaging = this.sessionMessaging?.register('codex');
     try {
-      const threadId = await entry.session.start(targetCwd, this.configFor(entry));
+      const threadId = await entry.session.start(
+        targetCwd,
+        this.configFor(entry),
+        messaging === undefined ? undefined : this.sessionMessagingThreadConfig(messaging.url),
+      );
+      messaging?.bind(threadId);
+      if (messaging !== undefined) {
+        this.sessionMessagingRegistrations.set(entry, messaging);
+      }
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
       await this.persistModelSettings(entry, threadId);
       return threadId;
     } catch (e) {
+      messaging?.dispose();
       this.pendingStarts.end(pendingKey);
       this.teardown(entry);
       this.reportError(e);
@@ -1560,6 +1608,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * （`thread/start`応答待ち登録。Claude Codeには対応する概念が無い）からも取り除く。
    */
   protected override onTeardown(entry: ChatPanel): void {
+    // タブを閉じたら、この会話に割り当てたメッセージング用MCPのURLを失効させる（Issue #1305）
+    this.sessionMessagingRegistrations.get(entry)?.dispose();
+    this.sessionMessagingRegistrations.delete(entry);
     this.cancelLimitAutoResume(entry);
     this.pendingStarts.remove(entry);
     // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、

@@ -1166,6 +1166,16 @@ function permissionFlag(c: vscode.WorkspaceConfiguration, key: string): boolean 
   return false;
 }
 
+/**
+ * 通常の会話どうしがメッセージをやり取りできるようにするか（Issue #1305）。
+ *
+ * 有効にすると、会話を開くたびにメッセージング用のMCPサーバが1つCLIへ渡る。ツール定義の
+ * 分だけ各ターンの入力が増えるため、要らない利用者が切れるようにしておく。既定は有効。
+ */
+export function readSessionMessagingEnabled(): boolean {
+  return vscode.workspace.getConfiguration('agent').get<boolean>('sessions.messaging') !== false;
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
