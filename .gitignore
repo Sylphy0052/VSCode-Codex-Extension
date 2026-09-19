@@ -39,6 +39,7 @@ eval-results/*
 !eval-results/negative-decisions-*.jsonl
 !eval-results/negative-summary-*.json
 !eval-results/indeterminate-summary-*.json
+!eval-results/indeterminate-truncation-*.json
 !eval-results/eligibility-*.json
 !eval-results/difficulty-*.json
 !eval-results/primary-eligibility-*.json
