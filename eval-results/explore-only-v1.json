@@ -1,0 +1,62 @@
+{
+  "selectionPoolVersion": 1,
+  "excludedFromConditionId": "A",
+  "difficultyFile": "difficulty-v1.json",
+  "difficultySha256": "cff7246f1604b66c0f76bfa08e8f582185158d36a5dd2b4358dd9c7f419639f4",
+  "purpose": "context-coverage 分析の A-undiscoverable / C-repo-discoverable。条件Aの材料では発見できないが、探索すれば発見できる正例で、探索の増分価値そのものを測る",
+  "note": "母集団へ混ぜないだけで評価の対象からは外さない。ラベルは共通なので再ラベルは要らない",
+  "total": 4,
+  "cases": [
+    {
+      "caseId": "pr-330",
+      "prNumber": 330,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-1031",
+      "prNumber": 1031,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-405",
+      "prNumber": 405,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [],
+      "eligibleIn": [
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-935",
+      "prNumber": 935,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "C-repo"
+      ]
+    }
+  ]
+}

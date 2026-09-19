@@ -1,0 +1,464 @@
+{
+  "selectionPoolVersion": 1,
+  "conditionId": "A",
+  "difficultyFile": "difficulty-v1.json",
+  "difficultySha256": "cff7246f1604b66c0f76bfa08e8f582185158d36a5dd2b4358dd9c7f419639f4",
+  "negativeFile": "negative-order-v1.json",
+  "negativeSha256": "04777c56c6a5d0159d414c5a39796059bbdf1a425a44f2cc9ba4e46f3c369f0b",
+  "negativeDecisionsFile": "negative-decisions-v1.jsonl",
+  "indeterminateFile": "indeterminate-order-v1.json",
+  "indeterminateSha256": "01dbbe1cc2f1e8a4c2aa54dfe8bb7dec9964c5a615291055884bf2a29b33fe68",
+  "frameFile": "sampling-frame-v3.json",
+  "frameSha256": "9fb0208257b4b6f79e5128bfcd578b2afa06132874f20fe7faf4ab8a03424854",
+  "decisionsFile": "screening-decisions-v2.jsonl",
+  "decisionsSha256": "54fdd4a3732e756143565e8bdc8c550c9d1763f598c012a509afbf37d6f7edde",
+  "eligibilityFile": "eligibility-v1.json",
+  "eligibilitySha256": "c6b4741d76956b1ff7ab9009ea4d46bfc21572bfcb32df1ba63953d0dea07232",
+  "screenedCases": 102,
+  "kindRule": "全案件に codeReview を付ける。母集団はすべてPRの差分で、依頼文も差分のレビューに揃えるため。kind は層化の軸ではなく、結果に内訳を出すための属性として持つ",
+  "poolRule": "正例は difficulty ファイルの eligibleIn が conditionId を含むものだけ。no-problem は確認が済んだ案件だけ。indeterminate は pool 全件。層の判断はここではせず、凍結済みの判定をそのまま使う",
+  "quotas": {
+    "hard-positive": 9,
+    "normal-positive": 6,
+    "no-problem": 6,
+    "indeterminate": 3
+  },
+  "byStratum": {
+    "hard-positive": 12,
+    "normal-positive": 11,
+    "no-problem": 12,
+    "indeterminate": 7
+  },
+  "byChangeSizeStratum": {
+    "S": 5,
+    "M": 8,
+    "L": 7,
+    "XL": 22
+  },
+  "total": 42,
+  "candidates": [
+    {
+      "caseId": "pr-621",
+      "prNumber": 621,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-486",
+      "prNumber": 486,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": []
+    },
+    {
+      "caseId": "pr-139",
+      "prNumber": 139,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-1014",
+      "prNumber": 1014,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "S",
+      "tags": []
+    },
+    {
+      "caseId": "pr-483",
+      "prNumber": 483,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": []
+    },
+    {
+      "caseId": "pr-951",
+      "prNumber": 951,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-985",
+      "prNumber": 985,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-504",
+      "prNumber": 504,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-219",
+      "prNumber": 219,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-307",
+      "prNumber": 307,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-384",
+      "prNumber": 384,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": []
+    },
+    {
+      "caseId": "pr-90",
+      "prNumber": 90,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-343",
+      "prNumber": 343,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-444",
+      "prNumber": 444,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": []
+    },
+    {
+      "caseId": "pr-517",
+      "prNumber": 517,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-536",
+      "prNumber": 536,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-417",
+      "prNumber": 417,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-395",
+      "prNumber": 395,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": []
+    },
+    {
+      "caseId": "pr-503",
+      "prNumber": 503,
+      "stratum": "hard-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": []
+    },
+    {
+      "caseId": "pr-501",
+      "prNumber": 501,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-711",
+      "prNumber": 711,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-537",
+      "prNumber": 537,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-415",
+      "prNumber": 415,
+      "stratum": "normal-positive",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "refactor"
+      ]
+    },
+    {
+      "caseId": "pr-174",
+      "prNumber": 174,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-878",
+      "prNumber": 878,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "S",
+      "tags": [
+        "test-only"
+      ]
+    },
+    {
+      "caseId": "pr-664",
+      "prNumber": 664,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-182",
+      "prNumber": 182,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-988",
+      "prNumber": 988,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-316",
+      "prNumber": 316,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "S",
+      "tags": [
+        "single-file",
+        "test-only"
+      ]
+    },
+    {
+      "caseId": "pr-1021",
+      "prNumber": 1021,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "single-file",
+        "test-only"
+      ]
+    },
+    {
+      "caseId": "pr-183",
+      "prNumber": 183,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-177",
+      "prNumber": 177,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-220",
+      "prNumber": 220,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "S",
+      "tags": [
+        "single-file",
+        "test-only"
+      ]
+    },
+    {
+      "caseId": "pr-179",
+      "prNumber": 179,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-151",
+      "prNumber": 151,
+      "stratum": "no-problem",
+      "kind": "codeReview",
+      "changeSizeStratum": "S",
+      "tags": [
+        "touches-docs"
+      ]
+    },
+    {
+      "caseId": "pr-648",
+      "prNumber": 648,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail",
+        "chore"
+      ]
+    },
+    {
+      "caseId": "pr-631",
+      "prNumber": 631,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-81",
+      "prNumber": 81,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-431",
+      "prNumber": 431,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-542",
+      "prNumber": 542,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-510",
+      "prNumber": 510,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    },
+    {
+      "caseId": "pr-447",
+      "prNumber": 447,
+      "stratum": "indeterminate",
+      "kind": "codeReview",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
+    }
+  ]
+}
