@@ -443,6 +443,100 @@ PR #1053 には追加poolの先頭が `#782 #85 #884 #221 #938 #329 ...` と書�
 
 **凍結した読む順は直さない。** 4.5%の入れ替えのために読む順を作り直すと、既に読んだ分を捨てることになり、止まっている `no-problem` と `indeterminate` の不足は1件も解消しない。`MODEL_AUTHOR_LOGINS` の修正は別途行い、次に候補を作り直す版から効かせる。それまでは、**`account-review` は「人がレビューした」ではなく「bot 以外の login がレビューした（誤判定を含む）」と読む。**
 
+### 2-4. `no-problem` と `indeterminate` の供給を凍結する（Issue #1295）
+
+強い証拠のpool 102件と追加poolの先頭10件を読み終えた時点で、正例2層（`hard-positive` / `normal-positive`）の供給は目処が立ったが、`no-problem` と `indeterminate` は 0件のまま止まった。**screening の `disposition` からこの2層は作れない。** `no-relevant-finding` は「正解ラベルにできる欠陥を作れなかった」であって「重要な問題が無い」ではなく、`insufficient-evidence` は 86件読んで 0件だった。
+
+そこで、証拠channelではなく **sampling frame 側の機械的な性質**から2層を抜く。**1件も読む前に規則を凍結する**のは手順2-2・2-3と同じで、読んでから条件を足すと、先に読んだ案件だけを後知恵で見直す余地ができる。
+
+```
+npx tsx test/bench/secondOpinionEval/negativeOrder.ts \
+  --frame eval-results/sampling-frame-v3.json \
+  --candidates eval-results/evidence-candidates-v4.json \
+  --out eval-results/negative-order-v1.json
+
+npx tsx test/bench/secondOpinionEval/indeterminateOrder.ts \
+  --frame eval-results/sampling-frame-v3.json \
+  --out eval-results/indeterminate-order-v1.json
+```
+
+#### 規則を決める前に数えた（frame v3 / eligible 431件、2026-09-19）
+
+**結果変数（回答・採点）は一切見ていない。** 説明変数の側の機械的な判定を431件へ当てて件数を数えただけである。
+
+| 機械的な性質                                                                   | 件数 | 変更規模の内訳                              |
+| ------------------------------------------------------------------------------ | ---- | ------------------------------------------- |
+| 整形のみ（非docsの変更ファイルが、空白を全て除去すると base と target で一致） | 0    | —                                           |
+| 非docsの変更が `test/` 配下のみ                                                | 20   | S 7 / M 8 / L 5 / XL 0                      |
+| 同上 かつ `followUpPrs` が空 かつ `openedAfterMerge` な `followUpIssues` が空  | 12   | S 4 / M 5 / L 3 / XL 0                      |
+| `git diff <base>..<target>` が `MAX_DIFF_BYTES`（200,000 byte）を超える        | 7    | XL 7                                        |
+| （参考）431件の diff バイト数                                                  | —    | 中央値 28,984 / p90 95,381 / 最大 1,251,190 |
+
+- **整形のみは 0件だった。** `git diff -w --ignore-blank-lines` でも空白除去の一致比較でも同じ結果になる。`prettier --write .` で129ファイルを整形した #648 も、同じPRで `format:check` を package.json / CI へ足しているため整形のみには当たらない。「変更の性質が整形に限られる」負例は、**この母集団には存在しない**
+- 差分が予算を超える7件は #510 / #81 / #447 / #431 / #648 / #542 / #631
+- frame の `test-only` タグ（9件）とは数が違う。タグは docs を含む全変更ファイルが `test/` 配下であることを要求するが、ここでは**非docsの変更ファイル**だけを見る。文書の変更は production の振る舞いを変えないので、負例の根拠を弱めない
+
+#### `no-problem` の供給規則
+
+```
+no-problem-pool = frame v3 の eligible
+  ∩ 非docsの変更ファイルが全て test/ 配下
+  ∩ followUpPrs が空
+  ∩ openedAfterMerge な followUpIssues が空
+```
+
+**「重要な実装欠陥が無い」を積極的に主張できる根拠は次の2つ**で、どちらも不在の証明ではない。
+
+1. production のコードを1行も触らないので、production の振る舞いを壊す欠陥は構造上あり得ない（差分そのものが根拠）
+2. マージ後に、このPRを参照する後続PRも後続Issueも立っていない（事後の裏づけ）
+
+1 だけでは「既存の検証を弱める変更」（期待値の緩和・テストの削除）を排除できない。削除行の有無だけでは切り分けられないので、**凍結した順に読んで、差分に実在する削除・書換が既存の検証を弱めていないかを確認する**。削除行が0なら自動的に満たす。弱めていれば pool から落とし、理由を記録する。この確認は「欠陥が無いことの証明」ではなく「差分に実在する削除行が何をしたか」の確認なので、不在証明の問題は起きない。
+
+12件は予備込みの必要数8件を満たす。S 4 / M 5 / L 3 なので、**正例側で足りない S と L もここで確保する**（eligible な primary 18件の内訳は S 1 / M 5 / L 1 / XL 11）。
+
+**限界を結果へ必ず書く。** この層は test-only に偏る。整形のみのPRは0件で、「production のコードを触るが重要な欠陥が無い」と機械的に主張できる案件はこの母集団には存在しない。したがって `hallucinatedFindings` は「テストだけの変更に対して、存在しない問題をどれだけ指摘するか」として読む。
+
+**ラベルが空であることを hallucination の根拠にしない。** この層の案件に対して、採点者が材料を読んで真と確かめられた指摘が出たら、それは `actionableFindings` に入る（「6. 採点する」の既存規則どおり）。`knownImportantFindings` が空であることは、その指摘を `hallucinatedFindings` へ数える根拠にはならない。
+
+#### `indeterminate` の供給規則
+
+```
+indeterminate-pool = frame v3 の eligible
+  ∩ git diff <base>..<target> のバイト数 > MAX_DIFF_BYTES
+```
+
+条件Aの材料は `applyDiffBudget()` で 200,000 byte に収まるよう削られ、**落としたことと落とした対象がプロンプトへ明記される**（`src/secondOpinion/prompt.ts` の `truncated` と省略の行）。落とされた範囲について断定した指摘は、材料の中では真偽を決められないので `indeterminateFindings` へ入る。この層はそれが起きる案件を必ず含めるために要る。
+
+`knownImportantFindings` は**常に空**にする。層の定義が先にあり、案件ごとにラベルを付けるかどうかを選ばないので、後知恵は入らない。recall はこの層では算出しない。
+
+**条件Aで discoverable でない primary 案件（#330 / #405 / #1031 の型）を indeterminate へ充てる案は採らない。** その型では、Advisor に材料が欠けているという手がかりが一切無く、留保する理由が生じない。出るのは「指摘しない」であって「留保する」ではないので `indeterminateFindings` を動かさず、この層の役目を果たさない。測りたいのが留保できるかである以上、**材料の欠落がプロンプトに現れている案件**でなければならない。
+
+7件は予備込みの必要数4件を満たす。全て XL なので、変更規模の弱い制約には寄与しない（S と L は `no-problem` 側で確保する）。
+
+`MAX_DIFF_BYTES` は production の定数なので、**実際に使った値を pool ファイルへ書いて凍結する**。値が変われば pool も変わるため、そのときは版を上げて作り直す。
+
+生の `git diff` のバイト数は打ち切りの proxy である（実際の bundle は untracked 分も予算を食う）。pool を凍結したあと、**条件Aの bundle を1件ずつ組んで `truncated` が立つことを確認する**。これはモデルを呼ばずに決まるので、結果を覗くことにはならない。
+
+#### 既存poolとの関係
+
+追加pool（289件）と重なる。no-problem の候補12件はすべて追加poolにあり（全て未読）、indeterminate の候補7件は強い証拠のpoolに4件（#510 / #447 / #542 / #631。いずれも読了済みで `no-relevant-finding`）、追加poolに2件（#81 未読 / #648 読了 `no-relevant-finding`）、どちらにも入らないものが1件（#431）である。
+
+**この重なりは `verifyDisjoint()` の対象にしない。** 強い証拠のpoolと追加poolを重ねられないのは、**どちらも primary の収率という同じ指標の分母へ入る**からである。`no-problem` / `indeterminate` は別の層の供給で、最終の24件では1案件1層であり、`verifyPool()` が `caseId` の重複を弾く。
+
+読了済みの5件が全て `no-relevant-finding` だったことは、この規則と矛盾しないという確認に留める。**確定の根拠にはしない**（そうすると screening の `disposition` を負例へ流用したことになる）。
+
+funnel は供給源ごとに分けて出す（`poolId` に `negative` / `indeterminate` を足す）。追加poolの screening を再開する場合は、この2層で確定した案件を読む順から飛ばし、`supersede` で記録する。
+
+#### 凍結の契約
+
+手順1・2と同じものを使う。
+
+- 入力は `sampling-frame-v3.json` と `evidence-candidates-v4.json` だけで、どちらも sha256 を照合してから読む
+- 出力は `writeFrozen()` で書き、既にあって中身が同じなら書かず、**1バイトでも違えば拒否**する
+- 読む順は `sha256('ground-truth-negative-v1:' + prNumber)` / `sha256('ground-truth-indeterminate-v1:' + prNumber)` の昇順。**PR番号順では読まない**
+- 判定は追記のみの jsonl（`negative-decisions-v1.jsonl` / `indeterminate-decisions-v1.jsonl`）。訂正は `supersede` の行を足す
+- pool ファイルに絶対パスを入れない（frame と同じ理由で、cloneの置き場所でハッシュが変わる）
+
 ### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。
