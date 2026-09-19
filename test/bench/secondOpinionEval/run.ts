@@ -326,7 +326,7 @@ async function main(): Promise<void> {
   let failures = 0;
   for (const [caseIndex, evalCase] of cases.entries()) {
     // 全ての往復が成功済みなら材料も作らない。材料の準備は案件ごとにワークツリーを切るので、
-    // 飛ばす案件のぶんだけ再開が遅くなる
+    // 作ってから全部飛ばすと、そのぶんだけ再開が遅くなる
     const remaining =
       options.conditions.length * options.attempts -
       countCompletedFor(completed, evalCase.id, options.conditions, options.attempts);
