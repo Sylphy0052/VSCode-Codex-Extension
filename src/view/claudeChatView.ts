@@ -549,6 +549,9 @@ export class ClaudeChatViewManager
     if (registration === undefined) {
       return;
     }
+    // 同じ会話に二度割り当てられた場合、古いURLはもう誰も使わない。失効させておかないと
+    // サーバ側の表に残り続ける
+    this.sessionMessagingRegistrations.get(entry)?.dispose();
     registration.bind(sessionId);
     this.sessionMessagingRegistrations.set(entry, registration);
   }

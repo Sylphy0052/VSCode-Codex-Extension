@@ -68,7 +68,9 @@ export function startHttpMcpServer(
 ): Promise<HttpMcpServerHandle> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const match = /^\/mcp\/([0-9a-f]{32})$/u.exec(url.pathname);
+    // 字種・長さの判定は`MCP_TOKEN_PATTERN`の1箇所だけに持たせる。ここのパスの
+    // 正規表現にも同じ字種を書くと、片方だけ直したときに検証がすり抜ける
+    const match = /^\/mcp\/([^/]+)$/u.exec(url.pathname);
     const token = match?.[1];
     const target =
       token !== undefined && MCP_TOKEN_PATTERN.test(token) ? resolve(token) : undefined;
