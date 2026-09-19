@@ -31,9 +31,16 @@ eval-results/*
 !eval-results/evidence-candidates-*.json
 !eval-results/screening-order-*.json
 !eval-results/supplemental-order-*.json
+!eval-results/supplemental-rule-*.json
 !eval-results/screening-decisions-*.jsonl
 !eval-results/screening-summary-*.json
+!eval-results/negative-order-*.json
+!eval-results/indeterminate-order-*.json
+!eval-results/negative-decisions-*.jsonl
+!eval-results/negative-summary-*.json
+!eval-results/indeterminate-summary-*.json
 !eval-results/eligibility-*.json
+!eval-results/difficulty-*.json
 !eval-results/primary-eligibility-*.json
 !eval-results/selection-pool-*.json
 !eval-results/selected-cases-*.json

@@ -1,0 +1,180 @@
+{
+  "poolId": "negative",
+  "difficultyStratum": "no-problem",
+  "frameFile": "sampling-frame-v3.json",
+  "frameSha256": "9fb0208257b4b6f79e5128bfcd578b2afa06132874f20fe7faf4ab8a03424854",
+  "candidatesFile": "evidence-candidates-v4.json",
+  "candidatesSha256": "6ce8c84c6f2e08667ab71f32f7ad97ac3af137af0ee14dbd02f3b0a95fb05e98",
+  "negativeOrderVersion": 1,
+  "shuffleSeed": "ground-truth-negative-v1:",
+  "negativeRule": "frame の eligible のうち、文書以外の変更ファイルが全て test/ 配下で、followUpPrs が空、かつ openedAfterMerge な followUpIssues が空の案件。固定seedの順に読み、削除行があるものだけ既存の検証を弱めていないかを確認する",
+  "groundsForEmptyLabel": [
+    "production のコードを1行も触らないので、production の振る舞いを壊す欠陥は構造上あり得ない",
+    "マージ後に、このPRを参照する後続PRも後続Issueも立っていない"
+  ],
+  "knownLimitation": "整形のみのPRは母集団に0件で、「production のコードを触るが重要な欠陥が無い」と機械的に主張できる案件はこの母集団に存在しない。したがってこの層は test-only に偏り、hallucinatedFindings は「テストだけの変更に対して存在しない問題をどれだけ指摘するか」として読む。また、knownImportantFindings が空であることは、採点者が材料から真と確かめた指摘をhallucinatedFindings へ数える根拠にはならない",
+  "neededWithReserve": 8,
+  "meetsNeed": true,
+  "byChangeSizeStratum": {
+    "M": 5,
+    "S": 4,
+    "L": 3
+  },
+  "reportingUnits": {
+    "poolId": "この順序ファイルから読んだ分の集計であることを示す",
+    "screenedCases": "読んだ案件の数",
+    "confirmedCases": "負例として確定した案件の数",
+    "rejectedCases": "読んだが確定しなかった案件の数",
+    "unreadCases": "まだ読んでいない案件の数"
+  },
+  "total": 12,
+  "order": [
+    {
+      "prNumber": 174,
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 1,
+      "additions": 2,
+      "deletions": 1,
+      "needsDeletionReview": true,
+      "shuffleKey": "053558eeab93485937c327bc0de85f77d73254edee9781c45e00222acc36a90a"
+    },
+    {
+      "prNumber": 878,
+      "changeSizeStratum": "S",
+      "tags": [
+        "test-only"
+      ],
+      "nonDocsFiles": 2,
+      "additions": 2,
+      "deletions": 2,
+      "needsDeletionReview": true,
+      "shuffleKey": "358ebe5e9ebb17bb42e272f566e854a94958ba424e6d42d6d4954d4b36f2d236"
+    },
+    {
+      "prNumber": 664,
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 4,
+      "additions": 160,
+      "deletions": 18,
+      "needsDeletionReview": true,
+      "shuffleKey": "47dce650578072aa84feed9435f9ae3fd724bf853a4ac4b466d1be12822844a0"
+    },
+    {
+      "prNumber": 182,
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 4,
+      "additions": 337,
+      "deletions": 4,
+      "needsDeletionReview": true,
+      "shuffleKey": "62d3eb3323e244d62235caf5e0f133f675390f3206de618868bb3db936c92637"
+    },
+    {
+      "prNumber": 988,
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 1,
+      "additions": 190,
+      "deletions": 0,
+      "needsDeletionReview": false,
+      "shuffleKey": "68fde9e34abb7f7d85cb5610084231122c3e1b007f47929c4f33bc7df3db94cc"
+    },
+    {
+      "prNumber": 316,
+      "changeSizeStratum": "S",
+      "tags": [
+        "single-file",
+        "test-only"
+      ],
+      "nonDocsFiles": 1,
+      "additions": 52,
+      "deletions": 5,
+      "needsDeletionReview": true,
+      "shuffleKey": "7eaf2ca08f968c3214e8bcf750b8c908162f4fd81ef3aa1435babd76089ab85e"
+    },
+    {
+      "prNumber": 1021,
+      "changeSizeStratum": "M",
+      "tags": [
+        "single-file",
+        "test-only"
+      ],
+      "nonDocsFiles": 1,
+      "additions": 184,
+      "deletions": 0,
+      "needsDeletionReview": false,
+      "shuffleKey": "b071d7d6778a52aaf3e457f8cd4c703650c84d80eff4c31da199bcb04103efd4"
+    },
+    {
+      "prNumber": 183,
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 5,
+      "additions": 447,
+      "deletions": 3,
+      "needsDeletionReview": true,
+      "shuffleKey": "cae277b723269a3a0d2a3d185b358358183180f221e2fd4166300128781da508"
+    },
+    {
+      "prNumber": 177,
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 4,
+      "additions": 482,
+      "deletions": 1,
+      "needsDeletionReview": true,
+      "shuffleKey": "d4028978b6d80c87e55b30bb5ab775ce051e00f4a149a991fee2646848c25576"
+    },
+    {
+      "prNumber": 220,
+      "changeSizeStratum": "S",
+      "tags": [
+        "single-file",
+        "test-only"
+      ],
+      "nonDocsFiles": 1,
+      "additions": 16,
+      "deletions": 3,
+      "needsDeletionReview": true,
+      "shuffleKey": "de470479ef3fbfdddc1de027a1e09705e61f35362ac4d7af919763777137d9ea"
+    },
+    {
+      "prNumber": 179,
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 4,
+      "additions": 243,
+      "deletions": 2,
+      "needsDeletionReview": true,
+      "shuffleKey": "dee231c57fc734668ef4833bf9e8b7b9821aec75761689c556606ac1aa48e1a6"
+    },
+    {
+      "prNumber": 151,
+      "changeSizeStratum": "S",
+      "tags": [
+        "touches-docs"
+      ],
+      "nonDocsFiles": 1,
+      "additions": 125,
+      "deletions": 0,
+      "needsDeletionReview": false,
+      "shuffleKey": "fcff2bcf7fadd93d447cd5b13f9601a0929e06b3e833934ce88b779e2d7d5a9e"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "poolId": "indeterminate",
+  "registered": true,
+  "difficultyStratum": "indeterminate",
+  "orderFile": "indeterminate-order-v1.json",
+  "orderSha256": "01dbbe1cc2f1e8a4c2aa54dfe8bb7dec9964c5a615291055884bf2a29b33fe68",
+  "poolSize": 7,
+  "neededWithReserve": 4,
+  "byChangeSizeStratum": {
+    "XL": 7
+  },
+  "suppliedCases": 7,
+  "meetsNeed": true
+}
