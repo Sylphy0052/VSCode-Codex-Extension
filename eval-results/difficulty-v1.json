@@ -1,0 +1,235 @@
+{
+  "difficultyVersion": 1,
+  "judgedAt": "2026-09-19",
+  "rule": "hard-positive は、欠陥の成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要り、変更を順に読むだけでは気づきにくいもの。normal-positive は、変更対象のファイルを読めば直接見える論理欠陥で、成立条件が単純なもの。層は案件単位で付け、同じ案件に複数の finding があるときは難しいほうへ寄せる。",
+  "decisionsFile": "screening-decisions-v2.jsonl",
+  "decisionsSha256": "6d0c1b4272e73820f829fec089853ff84504219277acd3b41ca0389832fdc1bc",
+  "eligibilityFile": "eligibility-v1.json",
+  "eligibilitySha256": "2ce3dc5d8a201e33fb4b1b88d60c86864cad52337cd3616afaef8cbfdd075164",
+  "quotas": {
+    "hard-positive": 9,
+    "normal-positive": 6,
+    "no-problem": 6,
+    "indeterminate": 3
+  },
+  "reserveRatio": 0.2,
+  "neededWithReserve": {
+    "hard-positive": 11,
+    "normal-positive": 8,
+    "no-problem": 8,
+    "indeterminate": 4
+  },
+  "note": "no-problem と indeterminate は screening の disposition からそのままでは作れない。no-relevant-finding は「正解ラベルにできる欠陥を作れなかった」であって「重要な問題が無い」ではなく、insufficient-evidence は 0 件である。この2層の供給は別に作る。",
+  "supply": [
+    {
+      "conditionId": "A",
+      "hard-positive": 8,
+      "normal-positive": 7,
+      "no-problem": 0,
+      "indeterminate": 0,
+      "byChangeSize": {
+        "S": 1,
+        "M": 3,
+        "L": 1,
+        "XL": 10
+      },
+      "extremeTail": 4
+    },
+    {
+      "conditionId": "C-repo",
+      "hard-positive": 11,
+      "normal-positive": 7,
+      "no-problem": 0,
+      "indeterminate": 0,
+      "byChangeSize": {
+        "S": 1,
+        "M": 5,
+        "L": 1,
+        "XL": 11
+      },
+      "extremeTail": 5
+    }
+  ],
+  "cases": [
+    {
+      "caseId": "pr-621",
+      "prNumber": 621,
+      "orderIndex": 0,
+      "stratum": "hard-positive",
+      "rationale": "await を跨ぐ read→判断→write と fire-and-forget な購読の組で、同一プログラム配下の同時完了という並行条件が要る。run id 経由のプロトタイプ汚染も、代入がブラケット記法である点に気づく必要がある",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs", "extreme-tail"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-486",
+      "prNumber": 486,
+      "orderIndex": 13,
+      "stratum": "normal-positive",
+      "rationale": "約30MBの入力を通すテストが差分に全文あり、個別のタイムアウト指定が無いことも同じ場所で見える。巨大入力のテストの不安定さは順に読めば目に付く",
+      "changeSizeStratum": "XL",
+      "tags": [],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-330",
+      "prNumber": 330,
+      "orderIndex": 20,
+      "stratum": "hard-positive",
+      "rationale": "壊した先が変更対象に入らないテストで、差分だけを順に読んでも到達しない",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs", "extreme-tail"],
+      "eligibleIn": ["C-repo"]
+    },
+    {
+      "caseId": "pr-139",
+      "prNumber": 139,
+      "orderIndex": 24,
+      "stratum": "hard-positive",
+      "rationale": "413を書いた直後の destroy がRSTになりレスポンスを読めなくなる、というTCP側の挙動の知識が要る",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-1014",
+      "prNumber": 1014,
+      "orderIndex": 25,
+      "stratum": "hard-positive",
+      "rationale": "Object.hasOwn で直したつもりの経路のうち __proto__ だけが継承アクセサへ吸われる、という例外を見抜く必要がある",
+      "changeSizeStratum": "S",
+      "tags": [],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-483",
+      "prNumber": 483,
+      "orderIndex": 29,
+      "stratum": "normal-positive",
+      "rationale": "追加した警告に対応するテストが差分に無い、というテスト不足の形で、差分を順に読めば見える",
+      "changeSizeStratum": "L",
+      "tags": [],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-951",
+      "prNumber": 951,
+      "orderIndex": 31,
+      "stratum": "normal-positive",
+      "rationale": "新規追加した正規表現とテーブルが差分に全文あり、引用符付きのキー名に一致しないことも接頭辞の抜けも、その場で確かめられる",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs", "extreme-tail"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-985",
+      "prNumber": 985,
+      "orderIndex": 33,
+      "stratum": "hard-positive",
+      "rationale": "realpath による確認と open の間の差し替えというTOCTOUで、攻撃者の介在と時間差の前提が要る",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs", "extreme-tail"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-1031",
+      "prNumber": 1031,
+      "orderIndex": 36,
+      "stratum": "hard-positive",
+      "rationale": "lint が赤くなる根拠が変更対象外の設定ファイル側にあり、差分だけを読んでも到達しない",
+      "changeSizeStratum": "M",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["C-repo"]
+    },
+    {
+      "caseId": "pr-504",
+      "prNumber": 504,
+      "orderIndex": 42,
+      "stratum": "hard-positive",
+      "rationale": "検査が自己無矛盾であること（比較対象を検査対象自身から組み立てている）を見抜く必要があり、付いているテストも同じ欠陥を検出できない形になっている",
+      "changeSizeStratum": "M",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-219",
+      "prNumber": 219,
+      "orderIndex": 44,
+      "stratum": "normal-positive",
+      "rationale": "存在確認だけ待って内容を読むという典型的な競合で、テスト本文が差分に全文ある",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-405",
+      "prNumber": 405,
+      "orderIndex": 45,
+      "stratum": "hard-positive",
+      "rationale": "追随していない期待値が変更対象に入らないテストにあり、差分だけを順に読んでも到達しない",
+      "changeSizeStratum": "M",
+      "tags": [],
+      "eligibleIn": ["C-repo"]
+    },
+    {
+      "caseId": "pr-307",
+      "prNumber": 307,
+      "orderIndex": 51,
+      "stratum": "normal-positive",
+      "rationale": "新規関数が会話の作業ディレクトリを引数に取っていないことが、実装を読めば直接見える",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-384",
+      "prNumber": 384,
+      "orderIndex": 52,
+      "stratum": "hard-positive",
+      "rationale": "HOME=/ という環境条件が要り、その場合に正規表現があらゆる区切りへ一致することまで詰める必要がある",
+      "changeSizeStratum": "M",
+      "tags": [],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-90",
+      "prNumber": 90,
+      "orderIndex": 56,
+      "stratum": "normal-positive",
+      "rationale": "固定文字数でのスライスと、SVG の text が折り返しも省略もしないことの組で、差分を読めば見える",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs", "extreme-tail"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-343",
+      "prNumber": 343,
+      "orderIndex": 64,
+      "stratum": "normal-positive",
+      "rationale": "導出が3設定だけを見ていることと、bypass を有効にするとその3設定を渡さないという設定の説明を突き合わせれば見える",
+      "changeSizeStratum": "XL",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-444",
+      "prNumber": 444,
+      "orderIndex": 74,
+      "stratum": "hard-positive",
+      "rationale": "親ディレクトリをシンボリックリンクへ差し替える攻撃を想定したうえで、境界確認と .git 判定のどちらも素通りすることを見抜く必要がある",
+      "changeSizeStratum": "XL",
+      "tags": [],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-517",
+      "prNumber": 517,
+      "orderIndex": 75,
+      "stratum": "hard-positive",
+      "rationale": "停止中の書き換えと復帰フィルタの要求条件という、同じ関数内の2つの状態遷移の相互作用で、複数の親からブロックされている場合という前提も要る",
+      "changeSizeStratum": "M",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    }
+  ]
+}

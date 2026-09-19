@@ -34,6 +34,7 @@ eval-results/*
 !eval-results/screening-decisions-*.jsonl
 !eval-results/screening-summary-*.json
 !eval-results/eligibility-*.json
+!eval-results/difficulty-*.json
 !eval-results/primary-eligibility-*.json
 !eval-results/selection-pool-*.json
 !eval-results/selected-cases-*.json

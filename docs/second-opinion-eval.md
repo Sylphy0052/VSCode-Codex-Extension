@@ -599,6 +599,39 @@ strong pool を60件読んだ時点の実測。
 
 「条件Aだけでは正例が15件そろわなかった」ことは benchmark の失敗ではない。**production の材料では、独立した根拠を持つ既知の欠陥のかなりの部分がそもそも観測できない**という製品側の実測結果である。
 
+#### 版3・76件時点の eligibility 判定と停止判定（2026-09-19）
+
+強い証拠のpool 102件のうち76件を読んだ時点で、primary な案件は18件（finding 20件）になった。停止してよいかを見るために、この20件を条件Aと条件C-repo の2つで判定し `eval-results/eligibility-v1.json` へ、難易度層の割り付けを `eval-results/difficulty-v1.json` へ残した。どちらも `screening-decisions-v2.jsonl` のsha256を持つので、後から判定の入力を取り違えない。
+
+判定の規約は次のとおりで、手順4の案件ファイルもこれに揃える。
+
+- `caseId` は `pr-<PR番号>`
+- `knownImportantFindings` には screening の `findings` のうち `primary: true` のものだけを同じ順に並べ、`findingIndex` はその並びの添字とする。screening 側の添字は `screeningFindingIndex` として残す
+- `explicitlyExposed` は現時点の材料（`changes.diff`・`base/`・変更対象の docs）だけで判定した。`userRequest` と `conversation` を確定させる手順4で、その本文に答えが書かれていないかを見直す
+
+結果は次のとおり。
+
+- 条件A: eligible 15案件 / 17 finding
+- 条件C-repo: eligible 18案件 / 20 finding
+
+条件Aで落ちたのは #330 / #405 / #1031 の3件で、いずれも根拠が変更対象外のファイルにある。#330 と #405 は追随していない統合テスト、#1031 は `eslint.config.mjs` である。60件時点（#330 / #319 / #405 / #135）と同じ型が続いており、3件とも条件C-repo では discoverable だった。
+
+難易度層の割り付けは、成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要るものを `hard-positive`、変更対象のファイルを読めば直接見える論理欠陥を `normal-positive` とした。
+
+| 分析                           | hard-positive | normal-positive | no-problem | indeterminate |
+| ------------------------------ | ------------- | --------------- | ---------- | ------------- |
+| prompt-placement（条件A）      | 8             | 7               | 0          | 0             |
+| context-coverage（条件C-repo） | 11            | 7               | 0          | 0             |
+| 必要数（予備20%込み）          | 11            | 8               | 8          | 4             |
+
+**この時点では止めない。** 目安の「eligible な primary 18件」には届いたが、層で見ると足りていない。
+
+- 条件Aの `hard-positive` が8件で、予備を抜いた必要数9件にも届かない
+- `normal-positive` はどちらの分析でも7件で、予備込みの8件に1件足りない
+- `no-problem` と `indeterminate` は両方0件。screening の `disposition` からはそのまま作れない。`no-relevant-finding` は「正解ラベルにできる欠陥を作れなかった」であって「重要な問題が無い」ではなく、`insufficient-evidence` は76件読んで0件だった
+
+あわせて、変更規模の弱い制約（各層3件以上）も正例側だけでは満たせない。eligible な18件の内訳は S が1件、M が5件、L が1件、XL が11件で、S と L は `no-problem` と `indeterminate` の側で確保する必要がある。
+
 ### 3-1. 24件を層化ランダム抽出する（Issue #1046 手順4）
 
 eligible pool から本測定の24件を機械的に抜く。**印象で並べず、抜いた結果を見て内訳を決め直さない。**
