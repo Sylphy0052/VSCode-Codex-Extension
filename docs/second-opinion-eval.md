@@ -645,9 +645,9 @@ npx tsx test/bench/secondOpinionEval/indeterminateTruncation.ts \
 | #510 | 249,828         | 184,998           | 4            |
 | #447 | 360,713         | 199,541           | 8            |
 
-- `eval-results/indeterminate-truncation-v1.json` sha256 `42f3435f80ae2224685d5c691ac0df3d231d6f7a11ba51cd8841b6beffda86cd`
+- `eval-results/indeterminate-truncation-v1.json` sha256 `57200481d651ca2bf507dd5cc5928e32c8d23a156f3535ba7563ad56fd6de5aa`
 - 未追跡ファイルは detached worktree から材料を取るため0件で、予算は差分だけが使っている。生の差分が予算を超える案件が実際にも打ち切られたのは、この条件下での結果である
-- CLI は満たさない案件が1件でもあれば非ゼロで終わる。`materials.ts` や `applyDiffBudget()`、プロンプトの注意書きの文言を変えたら流し直す
+- CLI は満たさない案件が1件でもあれば非ゼロで終わる。1件が落ちても残りは続け、そこまでの結果を書き出してから止まる（`prepared` が偽なら「材料を組めなかった」で、pool の前提が崩れたという話ではない）。`materials.ts` や `applyDiffBudget()`、プロンプトの注意書きの文言を変えたら流し直す
 
 この出力は凍結しない。実装を直すたびに作り直して読み替えるファイルである。凍結してあるのは読む順（`indeterminate-order-v1.json`）の側で、確認は読む順を変えない。
 

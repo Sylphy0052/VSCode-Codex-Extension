@@ -6,6 +6,7 @@
  * ```
  * npx tsx test/bench/secondOpinionEval/indeterminateTruncation.ts \
  *   --order eval-results/indeterminate-order-v1.json \
+ *   --frame eval-results/sampling-frame-v3.json \
  *   --out eval-results/indeterminate-truncation-v1.json
  * ```
  *
@@ -117,7 +118,15 @@ interface CheckResult {
   changeSizeStratum: string | undefined;
   /** pool の規則が見た、生の `git diff` のバイト数。 */
   rawDiffBytes: number;
-  /** 実際に材料へ載った差分のバイト数。 */
+  /**
+   * 材料を組めたか。
+   *
+   * **「材料を組めなかった」と「組めたが打ち切りが立たなかった」を混ぜない。** 前者は
+   * 手元の環境の問題（gitの一時的な失敗など）で、pool の前提が崩れたという話ではない。
+   * 同じ `ok: false` でも、次に取るべき行動が違う。
+   */
+  prepared: boolean;
+  /** 実際に材料へ載った差分のバイト数。材料を組めなかった場合は 0。 */
   materialDiffBytes: number;
   truncated: boolean;
   diffOmissions: number;
@@ -192,6 +201,7 @@ async function checkCase(
       prNumber: entry.prNumber,
       changeSizeStratum: entry.changeSizeStratum,
       rawDiffBytes: entry.diffBytes,
+      prepared: true,
       materialDiffBytes: Buffer.byteLength(snapshot.diff, 'utf8'),
       truncated: snapshot.truncated,
       diffOmissions: omissions,
@@ -222,6 +232,10 @@ async function main(): Promise<void> {
   if (orderFile.poolId !== 'indeterminate') {
     throw new Error(`poolId が indeterminate ではありません: ${orderFile.poolId}`);
   }
+  if (orderFile.order.length === 0) {
+    // 0件なら「満たさない案件が0件」になり、確認していないものが allTruncated: true として残る
+    throw new Error('読む順が0件です。pool を確かめてください');
+  }
   if (orderFile.maxDiffBytes !== MAX_DIFF_BYTES) {
     throw new Error(
       `pool を凍結したときの予算（${orderFile.maxDiffBytes}）と現在の MAX_DIFF_BYTES` +
@@ -239,7 +253,28 @@ async function main(): Promise<void> {
     if (frameEntry === undefined) {
       throw new Error(`#${entry.prNumber} が frame にありません`);
     }
-    const result = await checkCase(entry, frameEntry, args.repoPath);
+    // 1件が落ちても残りを続け、そこまでの結果を必ず書き出す。1件ずつ worktree を作って
+    // 材料を組む処理なので、5件目のgitの一時的な失敗で1〜4件目まで捨てると流し直しになる
+    let result: CheckResult;
+    try {
+      result = await checkCase(entry, frameEntry, args.repoPath);
+    } catch (e) {
+      result = {
+        prNumber: entry.prNumber,
+        changeSizeStratum: entry.changeSizeStratum,
+        rawDiffBytes: entry.diffBytes,
+        prepared: false,
+        materialDiffBytes: 0,
+        truncated: false,
+        diffOmissions: 0,
+        diffPartials: 0,
+        untrackedFiles: 0,
+        untrackedOmissions: 0,
+        noticeInPrompt: false,
+        ok: false,
+        reason: `材料を組めなかった: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
     results.push(result);
     console.log(
       `#${result.prNumber} ${result.ok ? 'OK' : 'NG'} ` +
@@ -252,6 +287,7 @@ async function main(): Promise<void> {
   }
 
   const failed = results.filter((result) => !result.ok);
+  const unprepared = failed.filter((result) => !result.prepared);
   const output = {
     poolId: 'indeterminate',
     orderFile: path.basename(args.orderPath),
@@ -266,6 +302,8 @@ async function main(): Promise<void> {
     total: results.length,
     okCases: results.length - failed.length,
     failedCases: failed.length,
+    /** 材料を組めなかった件数。層の前提とは別の話なので分けて出す。 */
+    unpreparedCases: unprepared.length,
     allTruncated: failed.length === 0,
     results,
   };
@@ -277,11 +315,24 @@ async function main(): Promise<void> {
   );
   console.log(`出力: ${args.outPath}`);
   if (failed.length > 0) {
-    // 満たさない案件が残ったまま pool を使うと、留保を測れない案件が層へ混ざる
-    throw new Error(
-      `打ち切りが立たない案件が ${failed.length} 件あります: ` +
-        failed.map((result) => `#${result.prNumber}`).join(' '),
-    );
+    // 満たさない案件が残ったまま pool を使うと、留保を測れない案件が層へ混ざる。
+    // 材料を組めなかった件は pool の前提が崩れた話ではないので、文面を分ける
+    const notTruncated = failed.filter((result) => result.prepared);
+    const parts: string[] = [];
+    if (notTruncated.length > 0) {
+      parts.push(
+        `打ち切りが立たない案件が ${notTruncated.length} 件あります: ` +
+          notTruncated.map((result) => `#${result.prNumber}`).join(' '),
+      );
+    }
+    if (unprepared.length > 0) {
+      parts.push(
+        `材料を組めなかった案件が ${unprepared.length} 件あります（環境の問題の可能性があります。` +
+          `出力は書けているので、原因を直してから流し直してください）: ` +
+          unprepared.map((result) => `#${result.prNumber}`).join(' '),
+      );
+    }
+    throw new Error(parts.join('\n'));
   }
 }
 
