@@ -9,5 +9,6 @@
   "byChangeSizeStratum": {
     "XL": 7
   },
-  "meetsNeed": false
+  "suppliedCases": 7,
+  "meetsNeed": true
 }

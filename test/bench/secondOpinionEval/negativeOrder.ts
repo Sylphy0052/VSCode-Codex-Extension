@@ -25,7 +25,9 @@
  * 自動的に満たす。
  *
  * **先にPRのrefを取ってから流す。** 変更ファイルの一覧を `git diff` で引くので、手順1と
- * 同じく `git fetch origin '+refs/pull/*&#47;head:refs/remotes/pr/*'` が済んでいる必要がある。
+ * 同じく PR のrefを fetch してある必要がある（コマンドは `docs/second-opinion-eval.md` の
+ * 手順1にある）。取っていないcloneでは、squash / rebase でmergeされたPRの base / target が
+ * ローカルに無く、`git diff` がそこで落ちる。
  */
 
 import { createHash } from 'node:crypto';

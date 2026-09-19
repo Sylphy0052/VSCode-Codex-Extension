@@ -126,8 +126,10 @@ async function main(): Promise<void> {
       ? undefined
       : await summarizeFrom(args.decisionsPath, orderFile);
 
-  const confirmed = summary?.summary.confirmedCases ?? 0;
   const needed = orderFile.neededWithReserve;
+  // 読んで確定させる工程がある pool では確定数、無い pool では pool の件数を必要数と比べる。
+  // 2つの数を別々に持つと、JSON と標準出力で違う判定が出る
+  const supplied = summary === undefined ? orderFile.total : summary.summary.confirmedCases;
   const output = {
     poolId: known?.poolId ?? orderFile.poolId,
     registered: known !== undefined,
@@ -140,7 +142,9 @@ async function main(): Promise<void> {
     neededWithReserve: needed,
     byChangeSizeStratum: orderFile.byChangeSizeStratum,
     ...(summary?.summary ?? {}),
-    meetsNeed: needed === undefined ? undefined : Math.max(confirmed, 0) >= needed,
+    /** 必要数と比べた数。読んで確定させる工程が無い pool では pool の件数そのもの。 */
+    suppliedCases: supplied,
+    meetsNeed: needed === undefined ? undefined : supplied >= needed,
   };
   await fs.writeFile(args.outPath, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
 
@@ -158,11 +162,10 @@ async function main(): Promise<void> {
     }
   }
   if (needed !== undefined) {
-    const have = summary === undefined ? orderFile.total : confirmed;
     console.log(
-      have >= needed
+      supplied >= needed
         ? `必要数（予備込み ${needed} 件）を満たしています`
-        : `必要数（予備込み ${needed} 件）まであと ${needed - have} 件`,
+        : `必要数（予備込み ${needed} 件）まであと ${needed - supplied} 件`,
     );
   }
   console.log(`書き出し: ${args.outPath}`);
