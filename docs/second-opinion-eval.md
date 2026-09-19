@@ -895,16 +895,42 @@ strong pool を60件読んだ時点の実測。
 
 eligible pool から本測定の24件を機械的に抜く。**印象で並べず、抜いた結果を見て内訳を決め直さない。**
 
+#### 母集団を組み立てる
+
+抽出の母集団（`selection-pool`）は、4つの層の凍結済みファイルを束ねて作る。
+
+```
+npx tsx test/bench/secondOpinionEval/selectionPool.ts \
+  --difficulty eval-results/difficulty-v1.json \
+  --negative eval-results/negative-order-v1.json \
+  --negative-decisions eval-results/negative-decisions-v1.jsonl \
+  --indeterminate eval-results/indeterminate-order-v1.json \
+  --frame eval-results/sampling-frame-v3.json \
+  --condition A \
+  --out eval-results/selection-pool-v1.json \
+  --out-explore eval-results/explore-only-v1.json
+```
+
+**層の判断はここではしない。** 正例の難易度は `difficulty-v1.json`、`no-problem` は `negative-order-v1.json`、`indeterminate` は `indeterminate-order-v1.json` が既に凍結している。束ねる側で層を付け替えられるようにすると、抽出の直前に供給の多い層へ寄せられてしまう。`no-problem` は確認が済んだ（`confirmed`）案件だけを入れる。
+
+**`kind` は全案件 `codeReview` にする。** 母集団はすべてPRの差分で、依頼文も差分のレビューに揃えるためである。`rootCause` や `designDecision` として振り直せる案件はあるが、それは依頼文の書き方の選択であって案件そのものの属性ではない。ここで振り分けると実在しない `kind` の分布を作ることになる（上の「`kind` で層化しない」）。
+
+**正例に要求する条件は `A` にする。** primary benchmark の分母は条件A（現行bundle）で発見可能かで判定する、と「条件ごとに変わるもの」で決めてある。条件Aで発見できない正例（`difficulty-v1.json` の `eligibleIn` に `A` が無いもの）は捨てずに `--out-explore` へ分け、context-coverage 分析の `A-undiscoverable / C-repo-discoverable` に使う。**母集団へ混ぜないだけで、評価の対象からは外さない。** ラベルは共通なので再ラベルは要らない。
+
+`--out-explore` の側を母集団へ混ぜると、抽出された `hard-positive` の一部が prompt-placement の分母から落ちる。条件A・B-pos・B-repeat の比較は同じ分母で見るものなので、ここで正例が9件を割ると、測っているのが依頼文の位置効果なのか材料不足なのか分からなくなる。
+
+#### 24件を抜く
+
 ```
 npx tsx test/bench/secondOpinionEval/selectCases.ts \
   --pool eval-results/selection-pool-v1.json \
   --frame eval-results/sampling-frame-v3.json \
   --eligibility eval-results/eligibility-v1.json \
-  --condition C-repo \
+  --condition A \
   --out eval-results/selected-cases-v1.json
 ```
 
-`--pool` は screening の結果から人が作る母集団で、1件ごとに `caseId` / `prNumber` / `stratum`（難易度）/ `kind` / `changeSizeStratum` / `tags` を持つ。難易度の判断だけが人の入力で、**それ以外の属性は照合される**。
+`--pool` は上で組み立てた母集団で、1件ごとに `caseId` / `prNumber` / `stratum`（難易度）/ `kind` / `changeSizeStratum` / `tags` を持つ。難易度の判断だけが人の入力で、**それ以外の属性は照合される**。`--condition` は母集団を作ったときと同じ値を渡す。
 
 **規則は入力より先に決まっている。** 層ごとの必要数（`9 / 6 / 6 / 3`）・seed・変更規模のバランス制約は `stratifiedSample.ts` の定数で、pool の中身では変わらない。規則を変えるときは `SELECTION_VERSION` を上げ、前の版のファイルは残す。
 
@@ -917,6 +943,34 @@ npx tsx test/bench/secondOpinionEval/selectCases.ts \
 変更規模のバランス制約（4層それぞれ最低3件 / `extreme-tail` 最低1件）を満たさないときは、seed に試行番号を混ぜて引き直す。**引き直しは番号を1つずつ進めるだけで、途中で規則は変えない。** 落ちた試行も出力の `attempts` に残すので、何回引いたかは後から見える。上限（100回）に達したら、seed を足して引き直さずに止める。満たすまで回せる設計にすると「制約を満たした」ではなく「満たすまで回した」になるため、そこで母集団か制約のどちらかを人が見直す。
 
 出力は `writeFrozen` で凍結する。同じ入力から作り直して一致を確かめることはできるが、**1バイトでも違えば書かずに止まる**。
+
+#### 版1の結果（2026-09-19）
+
+母集団は42件で、4層すべてが必要数を上回った。条件Aで発見できない正例4件（#330 / #1031 / #405 / #935、いずれも `hard-positive`）は `explore-only-v1.json` へ分けた。
+
+| 層                | 母集団 | 必要数 | 抽出 |
+| ----------------- | ------ | ------ | ---- |
+| `hard-positive`   | 12     | 9      | 9    |
+| `normal-positive` | 11     | 6      | 6    |
+| `no-problem`      | 12     | 6      | 6    |
+| `indeterminate`   | 7      | 3      | 3    |
+
+**引き直しは起きず、1回目の試行がそのまま制約を満たした。** 変更規模は S 3 / M 5 / L 3 / XL 13 で4層それぞれ最低3件を満たし、`extreme-tail` は8件だった。`kind` は全件 `codeReview` である。
+
+選んだ24件は次のとおり。
+
+- `hard-positive`: #621 #504 #1014 #985 #503 #536 #417 #384 #139
+- `normal-positive`: #951 #343 #486 #501 #415 #90
+- `no-problem`: #183 #878 #220 #988 #179 #174
+- `indeterminate`: #510 #542 #447
+
+- `eval-results/selection-pool-v1.json` sha256 `bda6f01a8734889c42cece89f1f88bc044296cc1984950b6fc66ec5f79a5a608`
+- `eval-results/explore-only-v1.json` sha256 `e813077157235c09d53a9592b623c09c11801eb8c87e809541b916e0cbcda203`
+- `eval-results/selected-cases-v1.json` sha256 `024d9f66aa8dd9b6c58ef3d3200b33517cfe4ddaf50cbec20f0cf73ac58992b1`
+
+変更規模の S は母集団に5件しか無く、うち4件が `no-problem` 側にある。正例だけでは S と L の最低3件を満たせないという版3・76件時点の見立ては、24件の抽出でもそのまま当たった。**ここで S を増やすために層の必要数を動かさない。** 動かせば、測りたい難易度の内訳ではなく変更規模の都合で分母が決まる。
+
+抜かれなかった18件は予備である。**回答を見てから差し替えない。** 差し替えが要るのは、材料を作る段階（手順4）で `baseCommit` / `targetCommit` から材料を復元できないと分かった案件だけで、そのときも人が次の1件を選ばない。使えない案件を母集団から外し、`SELECTION_POOL_VERSION` と `SELECTION_VERSION` を上げて抽出をやり直し、前の版のファイルは残す。
 
 ### 4. 実行する
 
