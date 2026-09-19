@@ -1,12 +1,12 @@
 {
   "difficultyVersion": 1,
   "judgedAt": "2026-09-19",
-  "screenedCases": 96,
+  "screenedCases": 102,
   "rule": "hard-positive は、欠陥の成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要り、変更を順に読むだけでは気づきにくいもの。normal-positive は、変更対象のファイルを読めば直接見える論理欠陥で、成立条件が単純なもの。層は案件単位で付け、同じ案件に複数の finding があるときは難しいほうへ寄せる。",
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "0ab988ccf1fb178d9c83d333fedfcec32eddba99818555b786ef3ba696562f32",
+  "decisionsSha256": "54fdd4a3732e756143565e8bdc8c550c9d1763f598c012a509afbf37d6f7edde",
   "eligibilityFile": "eligibility-v1.json",
-  "eligibilitySha256": "7f756044cd9d05f2f4da87829524a34fb4248a018b9139484d31f3fb998de9c9",
+  "eligibilitySha256": "c6b4741d76956b1ff7ab9009ea4d46bfc21572bfcb32df1ba63953d0dea07232",
   "quotas": {
     "hard-positive": 9,
     "normal-positive": 6,
@@ -25,28 +25,28 @@
     {
       "conditionId": "A",
       "hard-positive": 12,
-      "normal-positive": 10,
+      "normal-positive": 11,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 3,
         "L": 4,
-        "XL": 14
+        "XL": 15
       },
       "extremeTail": 6
     },
     {
       "conditionId": "C-repo",
       "hard-positive": 16,
-      "normal-positive": 10,
+      "normal-positive": 11,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 6,
         "L": 4,
-        "XL": 15
+        "XL": 16
       },
       "extremeTail": 7
     }
@@ -426,6 +426,21 @@
         "touches-docs"
       ],
       "eligibleIn": [
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-415",
+      "prNumber": 415,
+      "orderIndex": 97,
+      "stratum": "normal-positive",
+      "rationale": "新設した基底と、継承へ切り替えた2つのサブクラスを並べて読めば、同名フィールドが両方に宣言されたままであることが直接見える",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "refactor"
+      ],
+      "eligibleIn": [
+        "A",
         "C-repo"
       ]
     }

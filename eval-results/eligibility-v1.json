@@ -6,8 +6,8 @@
     "C-repo"
   ],
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "0ab988ccf1fb178d9c83d333fedfcec32eddba99818555b786ef3ba696562f32",
-  "screenedCases": 96,
+  "decisionsSha256": "54fdd4a3732e756143565e8bdc8c550c9d1763f598c012a509afbf37d6f7edde",
+  "screenedCases": 102,
   "caseIdRule": "pr-<PR番号>。手順4で作る案件ファイルの id をこの形に揃える。",
   "findingIndexRule": "knownImportantFindings には screening の findings のうち primary: true のものだけを screening と同じ順に並べる。findingIndex はその並びの添字で、screening の findings 配列の添字は screeningFindingIndex に残す。",
   "criteria": "discoverable は「その条件で Advisor が実際にアクセスできる証拠から finding を合理的に導けるか」。条件Aの材料は changes.diff（全量）と base/<変更対象ファイル>、条件C-repo はそれに targetCommit の after-tree を足したもの（到達は差分の識別子から1〜2ホップの grep と読解まで）。",
@@ -650,6 +650,28 @@
       "discoverable": true,
       "explicitlyExposed": false,
       "rationale": "src/appserver/chatState.ts は targetCommit 143664b05ca914b6d8186dd397ce04abf0a60bde に実在し（76296 bytes）、turnResultText が turn/completed（1263行）で埋まることと thread/status/changed（1287行）が別ケースであることが読める。切り替え先のフィールド名 turnResultText を grep して1ホップで届く。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-415",
+      "prNumber": 415,
+      "orderIndex": 97,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "A",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "新設した src/view/chatManagerBase.ts の BaseChatPanel と、同じ差分で `extends BaseChatPanel` へ変えた src/view/chatView.ts の ChatPanel・src/view/claudeChatView.ts の ClaudePanel が、いずれも変更対象に入る。基底が宣言したフィールドと同名の宣言がサブクラス側に残っていることを、差分と base/<変更対象ファイル> の中だけで突き合わせられる。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-415",
+      "prNumber": 415,
+      "orderIndex": 97,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "C-repo",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "条件Aで discoverable と判定したため、docs/second-opinion-eval.md の規則（条件Aの base/<変更対象ファイル> は after-tree と changes.diff から復元できる）により C-repo でも discoverable。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
     }
   ]
 }
