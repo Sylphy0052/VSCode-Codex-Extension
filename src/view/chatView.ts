@@ -730,6 +730,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    *
    * 人がその場で押した操作なので、引き継げなかったときは必ず理由を出す。黙って返すと
    * 「ボタンが効かない」ようにしか見えず、実機で起きても切り分けられない（Issue #1166）。
+   *
+   * ここで`this.active`を読むのはコマンドパレット経由の入口だから。会話下のボタンからは
+   * `handoffToNewSessionIn`へ押下元のentryを渡す（Issue #1297）。
    */
   async handoffToNewSession(): Promise<void> {
     const entry = this.active;
@@ -740,15 +743,32 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       void vscode.window.showInformationMessage(message);
       return;
     }
-    const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
-    if (threadId === undefined) {
-      const message =
-        '引き継ぎ元のセッションIDを特定できなかったため引き継げませんでした（タブは開いたままです）';
-      this.log.warn(message);
-      void vscode.window.showErrorMessage(message);
-      return;
+    await this.handoffToNewSessionIn(entry);
+  }
+
+  private readonly handoffPreparing = new Set<ChatPanel>();
+
+  /**
+   * 引き継ぎ元をentryで固定する。webviewのpostMessageと、タブのフォーカス切替が起こす
+   * `onDidChangeViewState`は配送順が保証されない。ボタンを押した直後に別タブへ移ると
+   * viewStateが先に処理され、`this.active`が別の会話に変わってしまう（Issue #1297）。
+   */
+  private async handoffToNewSessionIn(entry: ChatPanel): Promise<void> {
+    if (this.handoffPreparing.has(entry)) return;
+    this.handoffPreparing.add(entry);
+    try {
+      const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+      if (threadId === undefined) {
+        const message =
+          '引き継ぎ元のセッションIDを特定できなかったため引き継げませんでした（タブは開いたままです）';
+        this.log.warn(message);
+        void vscode.window.showErrorMessage(message);
+        return;
+      }
+      await this.startHandoff(entry, threadId, { kind: 'manual' }, true);
+    } finally {
+      this.handoffPreparing.delete(entry);
     }
-    await this.startHandoff(entry, threadId, { kind: 'manual' }, true);
   }
 
   /**
@@ -1986,7 +2006,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'handoffToNewSession') {
-        await this.handoffToNewSession();
+        await this.handoffToNewSessionIn(entry);
         return;
       }
       if (type === 'secondOpinion') {
