@@ -47,4 +47,4 @@
 
 Claude Codeの動的追加は[公式Agent SDKリファレンス](https://code.claude.com/docs/en/agent-sdk/typescript)と、公開SDK 0.3.193の`setMcpServers`実装を参照した。既存の動的サーバー一式を渡す置換APIのため、`mcp_status`で取得した設定を保持する。
 
-CodexのCLI接続は[Playwright CLI公式README](https://github.com/microsoft/playwright-cli)の`--config`、名前付きセッション、`browser.cdpEndpoint`を参照した。会話がない場合・応答中・送信待ち・入力中のタブ終了では開始しない。CLI設定・生成物は拡張機能ストレージに残る。
+CodexのCLI接続は`@playwright/cli@0.1.20`の`--help attach`実測にもとづき、名前付きセッションと`attach --cdp=<CDP接続先>`を使う。`--config`は`open`/`attach`専用のオプションで共通引数には置けない。`open`は新規ブラウザを起動するため使わない。会話がない場合・応答中・送信待ち・入力中のタブ終了では開始しない。CLIの生成物は拡張機能ストレージに残る。
