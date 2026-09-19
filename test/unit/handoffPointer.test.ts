@@ -437,7 +437,7 @@ describe('自動引き継ぎの発火判定', () => {
   });
 
   it('安全な区切りが成立していなければ、提案があっても発火しない（Issue #1097）', () => {
-    // `loopRunning` / `taskManaged` は前段で落ちるため `safeBoundary` が立たない
+    // どれも前段で落ちるため `safeBoundary` が立たない
     for (const over of [
       { loopRunning: true },
       { taskManaged: true },
