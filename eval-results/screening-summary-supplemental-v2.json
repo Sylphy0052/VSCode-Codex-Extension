@@ -1,0 +1,39 @@
+{
+  "poolId": "supplemental",
+  "orderFile": "supplemental-order-v2.json",
+  "orderSha256": "46f119631e658ad6927aca3e48e7cee235d72ee1a6927d9c8227391b36722962",
+  "decisionsFile": "screening-decisions-supplemental-v2.jsonl",
+  "decisionsSha256": "fb5f194fbcf61677dd751e5b6b36ff535d82dc1e220ac809aed144632aac4537",
+  "reachedTarget": false,
+  "screenedCases": 4,
+  "primaryCases": 0,
+  "nonPrimaryCases": 4,
+  "unreadCases": 285,
+  "primaryFindings": 0,
+  "nonPrimaryBreakdown": [
+    {
+      "disposition": "model-derived-only",
+      "count": 3
+    },
+    {
+      "disposition": "retrospective-only",
+      "count": 0
+    },
+    {
+      "disposition": "mixed-only",
+      "count": 0
+    },
+    {
+      "disposition": "other-non-primary",
+      "count": 0
+    },
+    {
+      "disposition": "insufficient-evidence",
+      "count": 0
+    },
+    {
+      "disposition": "no-relevant-finding",
+      "count": 1
+    }
+  ]
+}
