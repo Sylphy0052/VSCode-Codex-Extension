@@ -1,12 +1,12 @@
 {
   "difficultyVersion": 1,
   "judgedAt": "2026-09-19",
-  "screenedCases": 84,
+  "screenedCases": 88,
   "rule": "hard-positive は、欠陥の成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要り、変更を順に読むだけでは気づきにくいもの。normal-positive は、変更対象のファイルを読めば直接見える論理欠陥で、成立条件が単純なもの。層は案件単位で付け、同じ案件に複数の finding があるときは難しいほうへ寄せる。",
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "1e50c8234aa81f41fb63564f7cc066fb836f98efb720bad670dcbe253dd88d7e",
+  "decisionsSha256": "bf7bdc4ec3ba66b7ac252f05aeba36ee1e745cddcda53f797fdc38d10ffab532",
   "eligibilityFile": "eligibility-v1.json",
-  "eligibilitySha256": "74c2abe9dca96161c93589eb0376ffccb6015b6996c7ccc53ef0c43f322de1a7",
+  "eligibilitySha256": "c8b20a01a3f60a6a39d9f48e65029eadb2d463d2c016113de94e0ac275bc5408",
   "quotas": {
     "hard-positive": 9,
     "normal-positive": 6,
@@ -25,30 +25,30 @@
     {
       "conditionId": "A",
       "hard-positive": 12,
-      "normal-positive": 7,
+      "normal-positive": 8,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 3,
         "L": 3,
-        "XL": 12
+        "XL": 13
       },
-      "extremeTail": 4
+      "extremeTail": 5
     },
     {
       "conditionId": "C-repo",
       "hard-positive": 15,
-      "normal-positive": 7,
+      "normal-positive": 8,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 5,
         "L": 3,
-        "XL": 13
+        "XL": 14
       },
-      "extremeTail": 5
+      "extremeTail": 6
     }
   ],
   "cases": [
@@ -59,8 +59,14 @@
       "stratum": "hard-positive",
       "rationale": "await を跨ぐ read→判断→write と fire-and-forget な購読の組で、同一プログラム配下の同時完了という並行条件が要る。run id 経由のプロトタイプ汚染も、代入がブラケット記法である点に気づく必要がある",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-486",
@@ -70,7 +76,10 @@
       "rationale": "約30MBの入力を通すテストが差分に全文あり、個別のタイムアウト指定が無いことも同じ場所で見える。巨大入力のテストの不安定さは順に読めば目に付く",
       "changeSizeStratum": "XL",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-330",
@@ -79,8 +88,13 @@
       "stratum": "hard-positive",
       "rationale": "壊した先が変更対象に入らないテストで、差分だけを順に読んでも到達しない",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"],
-      "eligibleIn": ["C-repo"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-139",
@@ -89,8 +103,13 @@
       "stratum": "hard-positive",
       "rationale": "413を書いた直後の destroy がRSTになりレスポンスを読めなくなる、というTCP側の挙動の知識が要る",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-1014",
@@ -100,7 +119,10 @@
       "rationale": "Object.hasOwn で直したつもりの経路のうち __proto__ だけが継承アクセサへ吸われる、という例外を見抜く必要がある",
       "changeSizeStratum": "S",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-483",
@@ -110,7 +132,10 @@
       "rationale": "追加した警告に対応するテストが差分に無い、というテスト不足の形で、差分を順に読めば見える",
       "changeSizeStratum": "L",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-951",
@@ -119,8 +144,14 @@
       "stratum": "normal-positive",
       "rationale": "新規追加した正規表現とテーブルが差分に全文あり、引用符付きのキー名に一致しないことも接頭辞の抜けも、その場で確かめられる",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-985",
@@ -129,8 +160,14 @@
       "stratum": "hard-positive",
       "rationale": "realpath による確認と open の間の差し替えというTOCTOUで、攻撃者の介在と時間差の前提が要る",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-1031",
@@ -139,8 +176,12 @@
       "stratum": "hard-positive",
       "rationale": "lint が赤くなる根拠が変更対象外の設定ファイル側にあり、差分だけを読んでも到達しない",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-504",
@@ -149,8 +190,13 @@
       "stratum": "hard-positive",
       "rationale": "検査が自己無矛盾であること（比較対象を検査対象自身から組み立てている）を見抜く必要があり、付いているテストも同じ欠陥を検出できない形になっている",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-219",
@@ -159,8 +205,13 @@
       "stratum": "normal-positive",
       "rationale": "存在確認だけ待って内容を読むという典型的な競合で、テスト本文が差分に全文ある",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-405",
@@ -170,7 +221,9 @@
       "rationale": "追随していない期待値が変更対象に入らないテストにあり、差分だけを順に読んでも到達しない",
       "changeSizeStratum": "M",
       "tags": [],
-      "eligibleIn": ["C-repo"]
+      "eligibleIn": [
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-307",
@@ -179,8 +232,13 @@
       "stratum": "normal-positive",
       "rationale": "新規関数が会話の作業ディレクトリを引数に取っていないことが、実装を読めば直接見える",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-384",
@@ -190,7 +248,10 @@
       "rationale": "HOME=/ という環境条件が要り、その場合に正規表現があらゆる区切りへ一致することまで詰める必要がある",
       "changeSizeStratum": "M",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-90",
@@ -199,8 +260,14 @@
       "stratum": "normal-positive",
       "rationale": "固定文字数でのスライスと、SVG の text が折り返しも省略もしないことの組で、差分を読めば見える",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-343",
@@ -209,8 +276,13 @@
       "stratum": "normal-positive",
       "rationale": "導出が3設定だけを見ていることと、bypass を有効にするとその3設定を渡さないという設定の説明を突き合わせれば見える",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-444",
@@ -220,7 +292,10 @@
       "rationale": "親ディレクトリをシンボリックリンクへ差し替える攻撃を想定したうえで、境界確認と .git 判定のどちらも素通りすることを見抜く必要がある",
       "changeSizeStratum": "XL",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-517",
@@ -229,8 +304,13 @@
       "stratum": "hard-positive",
       "rationale": "停止中の書き換えと復帰フィルタの要求条件という、同じ関数内の2つの状態遷移の相互作用で、複数の親からブロックされている場合という前提も要る",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-536",
@@ -239,8 +319,13 @@
       "stratum": "hard-positive",
       "rationale": "実行全体が停止している状態で再マージからセッションが開くという前提と、承認待ちタイマーが一度きりであることの組で、ガードが唯一の発火を握りつぶすところまで詰める必要がある",
       "changeSizeStratum": "L",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-417",
@@ -249,8 +334,13 @@
       "stratum": "hard-positive",
       "rationale": "プロセスの世代という非自明な観点が要り、kill のエスカレーション中に新しいプロセスが起動し、古いプロセスの exit が遅れて届くという時間差の前提も要る",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"],
-      "eligibleIn": ["A", "C-repo"]
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-395",
@@ -260,7 +350,10 @@
       "rationale": "永続化によってマニフェストのキーが外部入力へ変わったという前提の変化に気づいたうえで、シンボリックリンクを置ける攻撃者の介在を想定する必要がある。復元時の基準の取り直しも、リロードを挟んだ人の手動編集という時間差の前提が要る",
       "changeSizeStratum": "XL",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     },
     {
       "caseId": "pr-503",
@@ -270,7 +363,26 @@
       "rationale": "テストが欠陥を検出できないことを見抜くために、busy の間は pending へ積むだけという通知経路の状態と、テストがターン境界を挟んでいないことを突き合わせる必要がある",
       "changeSizeStratum": "L",
       "tags": [],
-      "eligibleIn": ["A", "C-repo"]
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-501",
+      "prNumber": 501,
+      "orderIndex": 87,
+      "stratum": "normal-positive",
+      "rationale": "引数を宣言したまま使わない表示関数と、同じ error フィールドへ拡張機能自身の文言を入れる呼び出し元が、どちらも変更対象のファイルにあり、順に読めば直接見える。並行実行や状態遷移の前提は要らない",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
     }
   ]
 }

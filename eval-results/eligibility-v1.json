@@ -1,10 +1,13 @@
 {
   "eligibilityVersion": 1,
   "judgedAt": "2026-09-19",
-  "conditions": ["A", "C-repo"],
+  "conditions": [
+    "A",
+    "C-repo"
+  ],
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "1e50c8234aa81f41fb63564f7cc066fb836f98efb720bad670dcbe253dd88d7e",
-  "screenedCases": 84,
+  "decisionsSha256": "bf7bdc4ec3ba66b7ac252f05aeba36ee1e745cddcda53f797fdc38d10ffab532",
+  "screenedCases": 88,
   "caseIdRule": "pr-<PR番号>。手順4で作る案件ファイルの id をこの形に揃える。",
   "findingIndexRule": "knownImportantFindings には screening の findings のうち primary: true のものだけを screening と同じ順に並べる。findingIndex はその並びの添字で、screening の findings 配列の添字は screeningFindingIndex に残す。",
   "criteria": "discoverable は「その条件で Advisor が実際にアクセスできる証拠から finding を合理的に導けるか」。条件Aの材料は changes.diff（全量）と base/<変更対象ファイル>、条件C-repo はそれに targetCommit の after-tree を足したもの（到達は差分の識別子から1〜2ホップの grep と読解まで）。",
@@ -553,6 +556,28 @@
       "caseId": "pr-503",
       "prNumber": 503,
       "orderIndex": 82,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "C-repo",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "条件Aで discoverable と判定したため、docs/second-opinion-eval.md の規則（条件Aの base/<変更対象ファイル> は after-tree と changes.diff から復元できる）により C-repo でも discoverable。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-501",
+      "prNumber": 501,
+      "orderIndex": 87,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "A",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "引数を宣言したまま使わない describeSideQuestionError は新設した変更対象の src/claude/sideQuestion.ts にあり、失敗時に拡張機能自身の文言（質問が空です / セッションが起動していません / セッションが終了しました）を同じ error へ入れる箇所も、それを describeSideQuestionError へ渡す finishedSideQuestionDisplay も、同じく変更対象の src/claude/streamSession.ts と src/claude/sideQuestion.ts にある。3つとも材料の中で突き合わせられるので、CLI起因でないエラーまでCLIのせいにして見せることを導ける。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-501",
+      "prNumber": 501,
+      "orderIndex": 87,
       "findingIndex": 0,
       "screeningFindingIndex": 0,
       "conditionId": "C-repo",
