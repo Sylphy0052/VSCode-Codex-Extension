@@ -393,4 +393,22 @@ export interface EvalRunManifest {
   caseCount: number;
   /** 実行開始時刻（ISO 8601）。 */
   startedAt: string;
+  /**
+   * 同じ結果ディレクトリで実行を再開したときの記録（Issue #1310）。
+   *
+   * 本測定は往復数が多く、1つのプロセスが生きている間に走り切るとは限らない。再開すると
+   * `harnessCommit` が初回と違うことがあり、1つだけ持っていると「別のコードで作った結果を
+   * 1つのコミットが作った」と読めてしまう。再開のたびに1件足す。
+   */
+  resumes?: EvalRunResume[];
+}
+
+/** 実行を再開した1回分の記録。 */
+export interface EvalRunResume {
+  /** 再開したときのハーネス側のコミット。 */
+  harnessCommit: string;
+  /** 再開した時刻（ISO 8601）。 */
+  startedAt: string;
+  /** 成功済みとして飛ばした往復の件数。 */
+  skipped: number;
 }
