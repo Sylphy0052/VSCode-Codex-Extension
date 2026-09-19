@@ -1355,6 +1355,12 @@
           "scope": "resource",
           "markdownDescription": "名前付きのセッションプリセット。コマンド`エージェント: プリセットから新しい会話を開く…`（コマンドパレット・履歴ビューのタイトルバー）から選んで、モデル・承認・サンドボックス・作業ディレクトリをまとめて指定した新しい会話を開ける。\n\n`approvalMode`（Codexの承認方針・Claudeの`permissionMode`）と`sandbox`（Codexのみ）は、拡張機能側の現在の設定（`codex.approvalMode` / `codex.sandbox` / `claude.permissionMode`）より緩い方向へは適用されない。緩める指定は無視し、選択時に警告を出す（ワークフロー定義YAMLのクランプと同じ方針。設計書 §14.56・§16.16）。`model` / `effort`はクランプ対象外で自由に指定できる。\n\n`workingDirectory`はワークスペースフォルダ配下の絶対パスに限る。外を指す値は無視して警告を出し、通常の作業ディレクトリの決め方（マルチルートならQuickPickで選択、単一フォルダならそのフォルダ）へフォールバックする。\n\nプリセット自体は拡張機能の設定より権限を緩められないため、`machine`スコープには固定していない。リポジトリの`.vscode/settings.json`からプリセットを追加できる。プリセットが1件も無いときはコマンドを出さない。"
         },
+        "agent.sessions.messaging": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "markdownDescription": "会話どうしが直接メッセージをやり取りできるようにする。有効にすると、会話を開くたびにメッセージング用のMCPサーバ（`task-messaging`）がその会話にだけ渡り、エージェントは`list_sessions`で他の会話（別のVS Codeウィンドウのものを含む）を一覧し、`send_message` / `ask_session`で話しかけられるようになる。Codexの会話とClaude Codeの会話のどちらからどちらへでも送れる。\n\n宛先は統括ページの各カードに出るセッションIDを使う。サーバは`127.0.0.1`のエフェメラルポートで待ち受け、会話ごとに発行した推測不能なトークン付きURLでしか到達できない。\n\n無効にすると、会話にはMCPサーバが渡らず、その分ツール定義がターンに載らない。ワークフローのタスク間メッセージング（run単位のサーバ）はこの設定とは無関係に動く。"
+        },
         "agent.workflows.dir": {
           "type": "string",
           "default": ".agents/workflows",

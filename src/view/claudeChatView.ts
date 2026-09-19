@@ -90,6 +90,10 @@ import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
+  SessionMessagingHost,
+  SessionMessagingRegistration,
+} from '../orchestrator/sessionMessagingHost';
+import type {
   ApprovalHandler,
   TaskSession,
   TaskSessionHost,
@@ -508,13 +512,68 @@ export class ClaudeChatViewManager
     return { model: config.model, effort: config.effort };
   }
 
+  /**
+   * 通常の会話へ見せるメッセージング用MCPサーバ（Issue #1305）。`extension.ts`が立てて渡す。
+   * 渡されなければ従来どおりMCPサーバ無しで開く。
+   */
+  private sessionMessaging: SessionMessagingHost | undefined;
+  /**
+   * 会話1つに割り当てたメッセージング用MCPの登録。`configFor`が起動引数を組むときに読み、
+   * タブを閉じたときに`onTeardown`が失効させる。
+   */
+  private readonly sessionMessagingRegistrations = new WeakMap<
+    ClaudePanel,
+    SessionMessagingRegistration
+  >();
+
+  /** 通常の会話へ見せるメッセージング用MCPサーバを配線する（Issue #1305）。 */
+  setSessionMessaging(host: SessionMessagingHost | undefined): void {
+    this.sessionMessaging = host;
+  }
+
+  /**
+   * この会話にメッセージング用MCPのURLを割り当て、宛先を束縛する（Issue #1305）。
+   * **`session.start`より前に呼ぶ**——`configFor`が起動引数を組むときに読むため。
+   *
+   * タスク経路（`entry.taskConfig`がある）は`runner.ts`が立てたrun用のサーバを既に
+   * `additionalArgs`へ持っているため何もしない。Claude Codeのセッションidは起動前に
+   * 決まる（`target.kind`が`new`でも`resume`でも呼び出し側が値を持っている）ので、
+   * Codexと違って発行と束縛を同時に済ませられる。分岐（`fork`）はCLIが新しいidを振り、
+   * 拡張機能側がそれを知る手段が無いため、呼び出し元がここを通らない。
+   */
+  private registerSessionMessaging(entry: ClaudePanel, sessionId: string): void {
+    if (entry.taskConfig !== undefined) {
+      return;
+    }
+    const registration = this.sessionMessaging?.register('claude');
+    if (registration === undefined) {
+      return;
+    }
+    registration.bind(sessionId);
+    this.sessionMessagingRegistrations.set(entry, registration);
+  }
+
   /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
   private configFor(entry: ClaudePanel): ClaudeConfig {
     const config = entry.taskConfig ?? readClaudeConfig().claude;
+    // 他のセッションと話すためのMCPサーバ（Issue #1305）。タスク経路の`toClaudeConfig`と
+    // 同じく`--mcp-config`で渡す。ここで足す値は拡張機能が完全に制御するもので、
+    // 利用者設定由来の`config.additionalArgs`とは混ざらない（後ろへ足すだけ）
+    const messagingUrl = this.sessionMessagingRegistrations.get(entry)?.url;
     return {
       ...config,
       model: entry.modelSettings.model,
       effort: entry.modelSettings.effort,
+      additionalArgs:
+        messagingUrl === undefined
+          ? config.additionalArgs
+          : [
+              ...config.additionalArgs,
+              '--mcp-config',
+              JSON.stringify({
+                mcpServers: { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: messagingUrl } },
+              }),
+            ],
     };
   }
 
@@ -801,6 +860,8 @@ export class ClaudeChatViewManager
     const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig, undefined, modelSettings);
     this.showPanel(entry, preserveFocus, targetViewColumn);
     this.panels.set(sessionId, entry);
+    // 起動引数を組む`configFor`より前に割り当てる（Issue #1305）
+    this.registerSessionMessaging(entry, sessionId);
     entry.session.start({
       cwd: targetCwd,
       target: { kind: 'new' },
@@ -1408,6 +1469,8 @@ export class ClaudeChatViewManager
     );
     this.showPanel(entry, false);
     this.panels.set(sessionId, entry);
+    // 起動引数を組む`configFor`より前に割り当てる（Issue #1305）
+    this.registerSessionMessaging(entry, sessionId);
     const transcript = await this.readTranscript(sessionId);
     entry.session.start({
       cwd: folder,
@@ -1699,6 +1762,9 @@ export class ClaudeChatViewManager
    * ロールアウトだけが増える。
    */
   protected override onTeardown(entry: ClaudePanel): void {
+    // タブを閉じたら、この会話に割り当てたメッセージング用MCPのURLを失効させる（Issue #1305）
+    this.sessionMessagingRegistrations.get(entry)?.dispose();
+    this.sessionMessagingRegistrations.delete(entry);
     this.cancelLimitAutoResume(entry);
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
     this.handoffDrafts.delete(entry.secondOpinionKey);
@@ -1941,6 +2007,8 @@ export class ClaudeChatViewManager
     );
     this.attachPanel(entry, panel);
     this.panels.set(sessionId, entry);
+    // 起動引数を組む`configFor`より前に割り当てる（Issue #1305）
+    this.registerSessionMessaging(entry, sessionId);
     const transcript = await this.readTranscript(sessionId);
     entry.session.start({
       cwd,

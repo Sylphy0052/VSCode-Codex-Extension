@@ -37,6 +37,7 @@ import {
   readActivityLogConfig,
   readClaudeConfig,
   readConfig,
+  readSessionMessagingEnabled,
   readSessionPresetsConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -64,6 +65,7 @@ import {
 import { ForgeHubService } from './forge/hub';
 import { ForgeOrchestrator } from './forge/orchestrator';
 import { startHttpMcpTransport } from './orchestrator/messaging';
+import { startSessionMessagingHost } from './orchestrator/sessionMessagingHost';
 import {
   formatSessionTarget,
   type SessionBridgePort,
@@ -1240,6 +1242,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       return { ok: true, status: side.status, answer: side.answer, reason: side.error };
     },
   };
+  // 通常の会話（`codex.newChat` / `claude.newChat`）にもメッセージング用のMCPサーバを
+  // 見せる（Issue #1305）。ウィンドウにつき1つのHTTPサーバを立て、セッションごとに
+  // トークン付きのURLを発行する。立ち上がりは非同期で、完了前に開かれた会話には
+  // サーバが渡らない（その会話は従来どおり他セッションと話せないまま動く）
+  if (readSessionMessagingEnabled()) {
+    void startSessionMessagingHost({
+      windowId,
+      sessionBridge: () => sessionBridgeHolder.current,
+      logPort: { error: (message) => log.error(message) },
+    })
+      .then((host) => {
+        chat.setSessionMessaging(host);
+        claudeChat.setSessionMessaging(host);
+        context.subscriptions.push({ dispose: () => void host.close() });
+        log.info('セッション間メッセージングのMCPサーバを起動しました');
+      })
+      .catch((e: unknown) => {
+        log.warn(
+          `セッション間メッセージングのMCPサーバを起動できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+  }
   const sessionKanban = new SessionKanbanViewManager(
     () => {
       const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import * as http from 'node:http';
 
+import { startHttpMcpServer } from './mcpHttpServer';
 import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
 import type { TaskState } from './runState';
 import {
@@ -1302,6 +1302,9 @@ export const SESSION_TOOLS: readonly McpToolDefinition[] = [
   ASK_SESSION_RESULT_TOOL,
 ];
 
+/** `SESSION_TOOLS`の名前の集合（1セッション用hubでの呼び出し可否の判定に使う。Issue #1305）。 */
+const SESSION_TOOL_NAMES = new Set(SESSION_TOOLS.map((tool) => tool.name));
+
 /**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
@@ -1444,6 +1447,19 @@ export interface TaskMessagingHubDeps {
    * 入っても次の`tools/list`から効く。
    */
   sessionBridge?: (() => SessionBridgePort | undefined) | undefined;
+  /**
+   * このhubがワークフローのrunではなく、1つのチャットセッションのためのものか（Issue #1305）。
+   *
+   * 通常のチャットセッション（`codex.newChat` / `claude.newChat`で開いたもの）にも
+   * メッセージング用のMCPサーバを見せるために、`src/orchestrator/sessionMessagingHost.ts`が
+   * セッション1つにつき1つのhubを作る。そのhubには走っているrunが無いため、
+   * `list_tasks` / `ask_orchestrator`（どちらもrun内のタスクを前提にした道具）を見せても
+   * 常に空・常に宛先不明になるだけで、エージェントを混乱させる。この印が立っている接続では
+   * セッション宛の道具（`SESSION_TOOLS`と`send_message`）だけを見せる。
+   *
+   * 省略時は`false`（従来どおりrun用のhub）。
+   */
+  sessionOnly?: boolean;
 }
 
 /**
@@ -1528,6 +1544,14 @@ export class TaskMessagingHub {
    */
   get sessionBridge(): SessionBridgePort | undefined {
     return this.deps.sessionBridge?.();
+  }
+
+  /**
+   * 1つのチャットセッションのためのhubか（Issue #1305、`TaskMessagingHubDeps.sessionOnly`）。
+   * 見せる道具を絞る判断にだけ使う。
+   */
+  get sessionOnly(): boolean {
+    return this.deps.sessionOnly === true;
   }
 
   /**
@@ -1942,6 +1966,12 @@ export class MessagingMcpServer {
    * （`orchestratorControl`未設定時の`base`のみ返却と同じ判断）。
    */
   private visibleTools(taskId: string): McpToolDefinition[] {
+    // 1セッション用のhub（Issue #1305）にはrunが無い。`send_message`（宛先はセッション宛
+    // だけが通る）とセッション宛の道具に絞る。`sessionBridge`が未設定ならそもそも
+    // 宛先解決ができないため、何も見せない
+    if (this.hub.sessionOnly) {
+      return this.hub.sessionBridge === undefined ? [] : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS];
+    }
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
     const handoffTools =
       this.hub.handoff === undefined ? [] : [...HANDOFF_TOOLS, ...ARTIFACT_TOOLS];
@@ -1995,6 +2025,12 @@ export class MessagingMcpServer {
     const params = rec(request.params);
     const name = str(params?.['name']);
     const args = rec(params?.['arguments']) ?? {};
+
+    // 1セッション用のhub（Issue #1305）では、run内の道具を名前を推測して呼ばれても通さない
+    // （`visibleTools`で見せていないものを、呼び出し時にも同じ条件で弾く多層防御の流儀）
+    if (this.hub.sessionOnly && name !== 'send_message' && !SESSION_TOOL_NAMES.has(name)) {
+      return failure(request.id, -32602, `未知のツールです: ${name}`);
+    }
 
     if (name === 'list_tasks') {
       return success(request.id, toolTextResult(JSON.stringify(this.hub.listTasks())));
@@ -2526,45 +2562,22 @@ export interface HttpMcpTransportHandle {
   close(): Promise<void>;
 }
 
-const MCP_TOKEN_PATTERN = /^[0-9a-f]{32}$/u;
-
 /**
- * HTTPリクエストボディの受信バイト数の上限（Issue #132 PRレビューでのセキュリティ監査、
- * Info）。`MAX_MESSAGE_BODY_LENGTH`（4000文字）はJSONをパースし終えた後の
- * `validateSendMessage`で効くため、パース前の受信量そのものには効かない。ローカル
- * ループバック（`127.0.0.1`）+ 128bitトークン付きURLでしか到達できず外部からの悪用は
- * 考えにくいが、そのタスクのCLIプロセス自身が巨大なボディを送る経路は残るため、受信を
- * 打ち切る上限を別に設ける。
- *
- * `tools/call`の正規のリクエストは`send_message`の本文（最大4000文字）にJSON-RPCの
- * envelope・UTF-8での多バイト文字・JSON文字列内のエスケープ（`\uXXXX`で1文字が最大6バイトに
- * 膨らみうる）を足しても数万バイトに収まる。64KiBは余裕を持たせつつ「数十KB程度」に収める値。
- */
-const MAX_MCP_REQUEST_BODY_BYTES = 64 * 1024;
-
-/**
- * `McpTransportPort` のNode実装。**方式の選定理由（最終報告にも記載）**:
+ * `McpTransportPort` のNode実装（HTTP）。HTTP層そのものは`mcpHttpServer.ts`へ切り出してあり
+ * （Issue #1305で通常のチャットセッション用と共有するため）、ここはrun用の「タスクごとに
+ * トークンを発行する」部分だけを持つ。
  *
  * - design.mdは「サーバはrunごとに立て」「送信元はサーバー側が接続で判別する」の2つを
  *   要件にしている。stdio（CLIがサーバを子プロセスとして起動する形）は「1タスク=1
  *   プロセス」になりやすく、「runごとに1つ」という単位と噛み合わない。HTTPで1サーバ・
  *   複数エンドポイントにすれば、両方の要件を1つのプロセスで自然に満たせる
- * - タスクごとに `registerTask` が推測不能なトークン（`randomBytes(16)`、128bit）を
- *   発行し、URLパス（`/mcp/<token>`）へ埋め込む。**トークンはURLの一部であり、ツールの
- *   引数ではない。** サーバは受け取ったリクエストのパスからしかタスクを判別せず、
- *   リクエストボディの中身（`tools/call`の`arguments`）は一切信用しない
- *   （design.md「引数で名乗らせない」を、サーバ実装のこの一点で構造的に保証する。
- *   `MessagingMcpServer.dispatch`も同じ方針を二重に守っている）
- * - HTTPの1リクエストは1接続に対応する短命なやり取りだが、`McpConnection`が要求する
- *   `onRequest`/`send`/`onClose`は「1回のリクエストに対して1回だけ呼ばれる」という
- *   形で問題なく満たせるため、`MessagingMcpServer`側のロジックを変えずに使える
- * - サーバは `127.0.0.1` のエフェメラルポート（OSが割り当てる空きポート）で待ち受ける。
- *   ワークスペースの外・他プロセスから推測されうる固定ポートを避けるため
+ * - タスクごとに `registerTask` が推測不能なトークンを発行し、URLパスへ埋め込む
+ *   （`mcpHttpServer.ts`のJSDoc参照）
  *
  * `logPort`は`MessagingMcpServer`へそのまま橋渡しするだけ（Issue #375）。省略時の挙動は
  * 変わらない（後方互換）。
  */
-export function startHttpMcpTransport(
+export async function startHttpMcpTransport(
   hub: TaskMessagingHub,
   logPort?: DispatchErrorLogPort,
 ): Promise<HttpMcpTransportHandle> {
@@ -2579,125 +2592,36 @@ export function startHttpMcpTransport(
   const mcpServer = new MessagingMcpServer(hub, transport, logPort);
   void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
 
-  const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const match = /^\/mcp\/([0-9a-f]{32})$/u.exec(url.pathname);
-    const token = match?.[1];
-    const taskId =
-      token !== undefined && MCP_TOKEN_PATTERN.test(token) ? tokenToTaskId.get(token) : undefined;
-
-    if (req.method !== 'POST' || token === undefined || taskId === undefined) {
-      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
-      return;
+  const server = await startHttpMcpServer((token) => {
+    const taskId = tokenToTaskId.get(token);
+    if (taskId === undefined || connectionHandler === undefined) {
+      return undefined;
     }
-
-    const chunks: Buffer[] = [];
-    let receivedBytes = 0;
-    let rejectedForSize = false;
-    req.on('data', (chunk: Buffer) => {
-      if (rejectedForSize) {
-        return;
-      }
-      receivedBytes += chunk.length;
-      // 上限を超えた時点でボディの蓄積を打ち切る（`MAX_MCP_REQUEST_BODY_BYTES`参照）。既に
-      // 受け取った分もチャンクへ積まず捨て、以後のチャンクも無視する
-      if (receivedBytes > MAX_MCP_REQUEST_BODY_BYTES) {
-        rejectedForSize = true;
-        chunks.length = 0;
-        res.writeHead(413, { 'content-type': 'text/plain' }).end('payload too large');
-        // ここで`req.destroy()`をするとソケットが即座に壊れ、まだ本文を送っている途中の
-        // クライアントはTCPのRSTを受けて`ECONNRESET`になる。413を返しても相手がそれを
-        // 読めないうえ、テストも並列実行で不安定になっていた（Issue #152）。残りの受信は
-        // `resume()`で読み流して捨てる。`chunks`へ積まないためメモリは増えず、
-        // 「上限を超えた分は受け取らない」という意図はそのまま満たせる
-        req.resume();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      if (rejectedForSize) {
-        return;
-      }
-      // ヘッダー受信時に決めた`taskId`を、本文の受信完了時にもう一度照合する（Issue #1113）。
-      // ヘッダーだけ送って本文を保留したまま`registerTask`が走ると、失効したはずの古い
-      // トークンの要求が新しいセッションと同じ`taskId`として処理されてしまう。トークンが
-      // まだ同じタスクへ紐づいていることをここで確かめ、失効していれば拒否する
-      // （`registerTask`は再登録時に古いトークンを`tokenToTaskId`から消すため、
-      // 失効後は`get`がundefinedになる）
-      if (tokenToTaskId.get(token) !== taskId) {
-        res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden');
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      } catch {
-        res.writeHead(400, { 'content-type': 'text/plain' }).end('invalid json');
-        return;
-      }
-      if (
-        connectionHandler === undefined ||
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        !('jsonrpc' in parsed) ||
-        !('method' in parsed)
-      ) {
-        res.writeHead(400, { 'content-type': 'text/plain' }).end('invalid request');
-        return;
-      }
-      const request = parsed as JsonRpcRequest;
-      // taskIdは常にURLのトークンから解決した値（上のJSDoc参照）。リクエスト自体に
-      // taskId/fromらしきフィールドがあっても、connection経由では一切渡していない
-      const connection: McpConnection = {
-        taskId,
-        send(response) {
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify(response));
-        },
-        onRequest(handler) {
-          handler(request);
-        },
-        onClose() {
-          // HTTPは1リクエストごとに完結するため、明示的に閉じる操作は無い
-        },
-      };
-      connectionHandler(connection);
-    });
+    const handler = connectionHandler;
+    return { connectionId: taskId, handle: (connection) => handler(connection) };
   });
 
-  return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address !== null ? address.port : 0;
-      const baseUrl = `http://127.0.0.1:${port}`;
-      resolve({
-        transport,
-        baseUrl,
-        registerTask(taskId: string): string {
-          // 同じtaskIdに対して以前発行したトークンをすべて無効化する（Issue #365）。
-          // これが無いと、再試行前の古いセッション（残存CLIプロセス）が同じタスクidを
-          // 名乗って`send_message`を送り続けられ、design.md「古いURLは以後404になる」が
-          // 成立しなくなる。
-          for (const [existingToken, existingTaskId] of tokenToTaskId) {
-            if (existingTaskId === taskId) {
-              tokenToTaskId.delete(existingToken);
-            }
-          }
-          const token = randomBytes(16).toString('hex');
-          tokenToTaskId.set(token, taskId);
-          return `${baseUrl}/mcp/${token}`;
-        },
-        close(): Promise<void> {
-          return new Promise((resolveClose) =>
-            server.close(() => {
-              tokenToTaskId.clear();
-              resolveClose();
-            }),
-          );
-        },
-      });
-    });
-  });
+  return {
+    transport,
+    baseUrl: server.baseUrl,
+    registerTask(taskId: string): string {
+      // 同じtaskIdに対して以前発行したトークンをすべて無効化する（Issue #365）。
+      // これが無いと、再試行前の古いセッション（残存CLIプロセス）が同じタスクidを
+      // 名乗って`send_message`を送り続けられ、design.md「古いURLは以後404になる」が
+      // 成立しなくなる。
+      for (const [existingToken, existingTaskId] of tokenToTaskId) {
+        if (existingTaskId === taskId) {
+          tokenToTaskId.delete(existingToken);
+        }
+      }
+      const token = randomBytes(16).toString('hex');
+      tokenToTaskId.set(token, taskId);
+      return server.urlForToken(token);
+    },
+    async close(): Promise<void> {
+      await server.close();
+      tokenToTaskId.clear();
+    },
+  };
 }
+
