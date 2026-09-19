@@ -1,0 +1,31 @@
+{
+  "poolId": "negative",
+  "registered": true,
+  "difficultyStratum": "no-problem",
+  "orderFile": "negative-order-v1.json",
+  "orderSha256": "04777c56c6a5d0159d414c5a39796059bbdf1a425a44f2cc9ba4e46f3c369f0b",
+  "decisionsFile": "negative-decisions-v1.jsonl",
+  "decisionsSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "poolSize": 12,
+  "neededWithReserve": 8,
+  "byChangeSizeStratum": {
+    "M": 5,
+    "S": 4,
+    "L": 3
+  },
+  "screenedCases": 0,
+  "confirmedCases": 0,
+  "rejectedCases": 0,
+  "unreadCases": 12,
+  "rejectedBreakdown": [
+    {
+      "disposition": "weakens-existing-check",
+      "count": 0
+    },
+    {
+      "disposition": "rule-mismatch",
+      "count": 0
+    }
+  ],
+  "meetsNeed": false
+}
