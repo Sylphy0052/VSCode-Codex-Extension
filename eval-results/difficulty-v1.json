@@ -1,11 +1,12 @@
 {
   "difficultyVersion": 1,
   "judgedAt": "2026-09-19",
+  "screenedCases": 80,
   "rule": "hard-positive は、欠陥の成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要り、変更を順に読むだけでは気づきにくいもの。normal-positive は、変更対象のファイルを読めば直接見える論理欠陥で、成立条件が単純なもの。層は案件単位で付け、同じ案件に複数の finding があるときは難しいほうへ寄せる。",
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "6d0c1b4272e73820f829fec089853ff84504219277acd3b41ca0389832fdc1bc",
+  "decisionsSha256": "06734703c4fed2e558dcc4723c23e318b4353d787d48d225b83f6cbdc973deaa",
   "eligibilityFile": "eligibility-v1.json",
-  "eligibilitySha256": "2ce3dc5d8a201e33fb4b1b88d60c86864cad52337cd3616afaef8cbfdd075164",
+  "eligibilitySha256": "cda45ca1e5232908c36225dae1906dc31aedb5ba120621ae66c54317a1215725",
   "quotas": {
     "hard-positive": 9,
     "normal-positive": 6,
@@ -23,29 +24,29 @@
   "supply": [
     {
       "conditionId": "A",
-      "hard-positive": 8,
+      "hard-positive": 10,
       "normal-positive": 7,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 3,
-        "L": 1,
-        "XL": 10
+        "L": 2,
+        "XL": 11
       },
       "extremeTail": 4
     },
     {
       "conditionId": "C-repo",
-      "hard-positive": 11,
+      "hard-positive": 13,
       "normal-positive": 7,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 5,
-        "L": 1,
-        "XL": 11
+        "L": 2,
+        "XL": 12
       },
       "extremeTail": 5
     }
@@ -228,6 +229,26 @@
       "stratum": "hard-positive",
       "rationale": "停止中の書き換えと復帰フィルタの要求条件という、同じ関数内の2つの状態遷移の相互作用で、複数の親からブロックされている場合という前提も要る",
       "changeSizeStratum": "M",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-536",
+      "prNumber": 536,
+      "orderIndex": 77,
+      "stratum": "hard-positive",
+      "rationale": "実行全体が停止している状態で再マージからセッションが開くという前提と、承認待ちタイマーが一度きりであることの組で、ガードが唯一の発火を握りつぶすところまで詰める必要がある",
+      "changeSizeStratum": "L",
+      "tags": ["touches-docs"],
+      "eligibleIn": ["A", "C-repo"]
+    },
+    {
+      "caseId": "pr-417",
+      "prNumber": 417,
+      "orderIndex": 78,
+      "stratum": "hard-positive",
+      "rationale": "プロセスの世代という非自明な観点が要り、kill のエスカレーション中に新しいプロセスが起動し、古いプロセスの exit が遅れて届くという時間差の前提も要る",
+      "changeSizeStratum": "XL",
       "tags": ["touches-docs"],
       "eligibleIn": ["A", "C-repo"]
     }
