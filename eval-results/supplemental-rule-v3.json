@@ -1,0 +1,44 @@
+{
+  "ruleId": "supplemental-reevaluation",
+  "supplementalRuleVersion": 3,
+  "poolId": "supplemental",
+  "orderFile": "supplemental-order-v2.json",
+  "orderSha256": "46f119631e658ad6927aca3e48e7cee235d72ee1a6927d9c8227391b36722962",
+  "orderTotal": 289,
+  "firstBatchCases": 10,
+  "supersedes": {
+    "field": "reEvaluationRule",
+    "inFile": "supplemental-order-v2.json",
+    "text": "この順の先頭 10 件を読んだ時点で、どちらの供給源を続けるかを決める。primary が3件以上ならこのpoolを続け、2件以下なら強い証拠のpoolの前回読み終えた位置の次へ戻って20件足し、再度判断する。到達目標の40 primary cases は、どちらの結果でも下げない",
+    "reason": "停止条件が 2026-08-31 に「primary 40件」から層の充足性へ変わり、強い証拠のpoolも102件すべて読み終えて未読0になったため、版2の規則は前提（到達目標40件・強い証拠のpoolの続き）を両方とも失っている"
+  },
+  "strongPoolState": {
+    "summaryFile": "screening-summary-v2.json",
+    "screenedCases": 102,
+    "primaryCases": 27,
+    "unreadCases": 0,
+    "decisionsFile": "screening-decisions-v2.jsonl",
+    "decisionsSha256": "54fdd4a3732e756143565e8bdc8c550c9d1763f598c012a509afbf37d6f7edde"
+  },
+  "suppliableStrata": {
+    "hard-positive": "supplied",
+    "normal-positive": "supplied",
+    "indeterminate": "supplied-via-insufficient-evidence",
+    "no-problem": "not-suppliable"
+  },
+  "suppliabilityRationale": "no-problem の負例は screening の disposition からは作れない。`no-relevant-finding` は「正解ラベルにできる欠陥を作れなかった」であって「重要な問題が無い」ではなく、そのまま負例にすると hallucinatedFindings の分母が壊れる（docs/second-opinion-eval.md の「問題の無い変更」は正例の余りではない）。負例は別工程で、変更の性質が整形・文書・テスト整備に限られるといった根拠を持たせて作る",
+  "stopCondition": {
+    "basis": "stratum-sufficiency",
+    "note": "案件（PR）単位で数える。primary の総数では止めない",
+    "requiredWithReserve": {
+      "hard-positive": 11,
+      "normal-positive": 8,
+      "no-problem": 8,
+      "indeterminate": 4
+    },
+    "weakConstraint": "変更規模 S / M / L / XL は各3件以上。S と L は正例側だけでは満たせない",
+    "countedPerAnalysis": "prompt-placement は条件A、context-coverage は条件C-repo の eligibility で数える。分析ごとに分母が違う"
+  },
+  "reEvaluationRule": "この順の先頭 10 件を読んだ時点で、この供給源を続けるかを決める。primary が3件以上なら追加poolを続ける。primary が2件以下でも insufficient-evidence が2件以上なら、indeterminate の供給源として追加poolを続ける。primary が2件以下かつ insufficient-evidence が1件以下なら、追加poolの screening をいったん止め、no-problem と indeterminate を作る別工程（証拠channelを持たない案件から機械的に抜く）の設計へ移る。強い証拠のpoolは未読0なので、版2の規則にあった「強い証拠のpoolへ戻って20件足す」は選べない。どの結果でも、primary と認める groundTruthBasis の基準は下げない",
+  "subsequentBatches": "先頭 10 件で続けると決めたら、以降も10件ごとに同じ判定をする。層の必要数（予備込み）を条件Aと条件C-repo の両方で満たし、変更規模の弱い制約も満たせた時点で止める"
+}

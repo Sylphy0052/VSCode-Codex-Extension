@@ -385,14 +385,38 @@ channel ごとに成立しやすさの見当は付くが、それは主観が入
 
 集計は混ぜない。順序ファイルの sha256 から `poolId`（`strong-evidence` / `supplemental`）を判別し、`screeningSummary.ts` がどちらの供給源の集計かを出す。最終的な primary pool は和集合でよいが、出所は残す。
 
-#### いつ供給源を選び直すか
+#### いつ供給源を選び直すか（版3、2026-09-19に差し替えた）
 
 追加poolの先頭10件を読んだ時点で決める。
 
-- primary が3件以上 → 追加poolを優先して続ける
-- 2件以下 → 強い証拠のpoolの前回読み終えた位置の次へ戻り、20件足して再評価する
+- primary が3件以上 → 追加poolを続ける
+- primary が2件以下でも `insufficient-evidence` が2件以上 → indeterminate の供給源として追加poolを続ける
+- primary が2件以下かつ `insufficient-evidence` が1件以下 → 追加poolの screening をいったん止め、`no-problem` と `indeterminate` を作る別工程（証拠channelを持たない案件から機械的に抜く）の設計へ移る
 
-どちらの結果でも、primary と認める根拠の基準は下げない。足りなければさらに対象を広げる。
+どの結果でも、primary と認める根拠の基準は下げない。続けると決めたら、以降も10件ごとに同じ判定をする。
+
+**この供給源から `no-problem` は作れない。** 取れるのは `hard-positive` / `normal-positive` の積み増しと、`insufficient-evidence` 経由の `indeterminate` だけである。理由は上の「『問題の無い変更』は正例の余りではない」と同じで、screening の `disposition` を負例へ流用すると `hallucinatedFindings` の分母が壊れる。
+
+##### 順序ファイルが持つ版2の規則は使わない
+
+`supplemental-order-v2.json` の `reEvaluationRule` は、版2の停止条件（「到達目標の40 primary」「2件以下なら強い証拠のpoolの続きを20件足す」）のまま書かれている。停止条件は 2026-08-31 に層の充足性へ変わり、強い証拠のpoolも102件すべて読み終えて未読0になったので、**前提を両方とも失っている**。
+
+順序ファイルは sha256 で凍結してあり、文言だけ直すと `order` の同一性を確かめられなくなる（`screeningSummary.ts` の `KNOWN_ORDERS` と、`supplementalOrder.ts` の `writeFrozen()`）。そこで**読む順は版2のまま凍結を保ち、規則の差し替えだけを別ファイルへ残す**。
+
+```
+npx tsx test/bench/secondOpinionEval/supplementalRule.ts \
+  --order eval-results/supplemental-order-v2.json \
+  --strong-summary eval-results/screening-summary-v2.json \
+  --out eval-results/supplemental-rule-v3.json
+```
+
+- `eval-results/supplemental-rule-v3.json` sha256 `99393cd16981436b9b7df5b37bfdb8488ffb51451d581a9ee1230fbf580a9dbf`
+- 差し替え対象（`supersedes`）・差し替え時点の強い証拠のpoolの状態（`decisionsSha256` 込み）・層ごとの供給可否・現行の停止条件を持つ
+- `writeFrozen()` で書くので、**1件も読む前に固定した**ことが後から確かめられる。強い証拠のpoolに未読が残っていれば（版2の規則がまだ実行できるので）生成そのものが止まる
+
+##### PR #1053 が引いた読む順との差（#938）
+
+PR #1053 には追加poolの先頭が `#782 #85 #884 #221 #938 #329 ...` と書かれているが、現物の `supplemental-order-v2.json` に #938 は無い。**版差であり、現物が正しい。** 証拠候補が版3（frame v2 由来）から版4（frame v3 由来）へ変わった際に、#938 の follow-up issue として #1044 が `openedAfterMerge` で検出されるようになり、#938 は強い証拠のpoolへ移った（`screening-order-v3.json` の `orderIndex 88`、判定は `no-relevant-finding`）。`verifyDisjoint()` が通っているので二重には入っていない。
 
 ### 3. 案件ファイルを作る
 
