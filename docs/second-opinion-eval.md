@@ -592,6 +592,30 @@ npx tsx test/bench/secondOpinionEval/negativeSummary.ts \
 
 出力は凍結しない。読み進めるたびに作り直すファイルである。
 
+#### 12件を読んだ結果（2026-09-19）
+
+凍結した順（`#174 #878 #664 #182 #988 #316 #1021 #183 #177 #220 #179 #151`）を先頭から飛ばさずに読み、**12件すべてを負例として確定した**。
+
+```
+screenedCases 12 / confirmedCases 12 / rejectedCases 0 / unreadCases 0
+weakens-existing-check 0 件 / rule-mismatch 0 件
+```
+
+- `eval-results/negative-decisions-v1.jsonl` sha256 `ef00e737a7087b68f4e93cd374da399f829c6957874d1ef7b63f77f13f0a7463`（13行。`decision` 12行と、#183 の削除行の内訳を実測へ直した `supersede` 1行）
+- `eval-results/negative-summary-v1.json` sha256 `8b53024c561f05ac0059681edeb7f5f16316dc25542c7497f24e5a5599a2e177`
+- 確定数12件は予備込みの必要数8件を満たす。変更規模の内訳は pool と同じ S 4 / M 5 / L 3 で、正例側で足りない S 4件と L 3件がここで確保できた
+
+削除行の確認（`needsDeletionReview` が真の9件）で見た削除は、次の4つの型に収まり、**検証の条件を緩めたものは1件も無かった**。
+
+- コメントだけの書き換え（#174 / #878）。テスト本体のアサーション・待ち条件には触れていない
+- 待ちの条件を強める置き換え（#664 / #220）。`waitFor`（存在）から `waitForFileContent`（内容）へ、あるいは待ちの読み取りを「まだ書き終わっていない」を例外にしない形へ変えたもので、後段のアサーションは残っている
+- フェイクとフィクスチャの拡張（#182 / #183 / #316）。空だったメソッドが呼び出し回数を数える実装になる、固定値の戻り値が既定値つきのフィールドになる、走査対象が作業ツリーから一時ディレクトリの既知構造へ移る、といった変更で、既存のアサーションは残ったまま検証できる対象が増えている
+- 型の厳格化（#177）。`readonly unknown[]` を `readonly WorkflowWarningLike[]` へ狭めたもの
+
+判断が分かれうるのは #179 で、フィクスチャの設定へ `agent.workflows.forge=none` / `pullRequest=none` / `finalMerge=pr-only` を足している。これは統合テストの実行がリモートへ到達しないための封じ込めだが、**当時の統合テストは `FakeTaskSessionHost` 越しに走りPR作成を検証していない**（forge の分岐は `test/unit/runner.test.ts` が自前の config で押さえており、そちらは触っていない）。よって既存の検証は弱まらないと判断した。
+
+**全件が確定したことを「この規則なら読まなくてよい」とは読まない。** 確定の根拠は規則が機械的に確かめた2点のままで、読む工程は「削除行が何をしたか」を確認するために要る。#179 のように、production を触らないまま**テストの実行条件**を変える削除は機械的な判定では拾えない。
+
 ### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。
