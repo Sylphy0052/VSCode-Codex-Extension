@@ -537,6 +537,61 @@ funnel は供給源ごとに分けて出す（`poolId` に `negative` / `indeter
 - 判定は追記のみの jsonl（`negative-decisions-v1.jsonl` / `indeterminate-decisions-v1.jsonl`）。訂正は `supersede` の行を足す
 - pool ファイルに絶対パスを入れない（frame と同じ理由で、cloneの置き場所でハッシュが変わる）
 
+#### 版1の結果（2026-09-19）
+
+```
+no-problem     12 件（S 4 / M 5 / L 3）  文書以外の変更が test/ 配下のみ 20件 から、後続が立っている 8件 を除いた残り
+indeterminate   7 件（XL 7）             差分が 200,000 byte を超える案件
+```
+
+必要数（予備20%込み）は `no-problem` 8件 / `indeterminate` 4件なので、どちらも満たしている。
+
+- `eval-results/negative-order-v1.json` sha256 `04777c56c6a5d0159d414c5a39796059bbdf1a425a44f2cc9ba4e46f3c369f0b`
+  - 読む順: `#174 #878 #664 #182 #988 #316 #1021 #183 #177 #220 #179 #151`
+  - 削除行があり、既存の検証を弱めていないかの確認が要るもの: 9件（`#174 #878 #664 #182 #316 #183 #177 #220 #179`）
+- `eval-results/indeterminate-order-v1.json` sha256 `01dbbe1cc2f1e8a4c2aa54dfe8bb7dec9964c5a615291055884bf2a29b33fe68`
+  - 読む順: `#648 #631 #81 #431 #542 #510 #447`
+  - 判定に使った `MAX_DIFF_BYTES`: 200000（出力へ書いてある。値が変われば pool も変わる）
+
+#### 負例の判定を記録する
+
+`no-problem` の判定は `eval-results/negative-decisions-v1.jsonl` へ**1件読み終えるたびに1行追記する**。既存の行は書き換えない。定義は `test/bench/secondOpinionEval/negativeResult.ts` にある。
+
+```jsonc
+{
+  "type": "decision",
+  "orderIndex": 0, // 凍結した読む順の位置（0始まり）
+  "prNumber": 174,
+  "confirmed": true, // 負例として確定したか。disposition === 'no-problem' と一致していること
+  "disposition": "no-problem", // no-problem / weakens-existing-check / rule-mismatch
+  "deletionReview": "削除3行は重複した期待値の整理で、検証の条件は変えていない",
+  "rationale": "production を触らず、後続も立っていない",
+}
+```
+
+**screening の記録とは別の語彙にしてある。** screening は「primary な finding が成立したか」を記録し、こちらは「機械的に決まった候補が、読んでも負例のままか」を記録する。同じ `disposition` へ混ぜると `no-relevant-finding`（正解ラベルにできる欠陥を作れなかった）と `no-problem`（重要な実装欠陥が無い）が区別できなくなり、この工程を別に作った理由そのものが消える。
+
+`deletionReview` は**空にできない**。削除行が0の案件でも「削除行が無い」と書く。空を許すと「読んだが何も書かなかった」が確定の根拠になり、この層の意味が消える。
+
+`indeterminate` には読んで確定させる工程が無い（規則が機械的に閉じている）。
+
+#### 供給状況を集計する
+
+```
+npx tsx test/bench/secondOpinionEval/negativeSummary.ts \
+  --order eval-results/negative-order-v1.json \
+  --decisions eval-results/negative-decisions-v1.jsonl \
+  --out eval-results/negative-summary-v1.json
+
+npx tsx test/bench/secondOpinionEval/negativeSummary.ts \
+  --order eval-results/indeterminate-order-v1.json \
+  --out eval-results/indeterminate-summary-v1.json
+```
+
+`screeningSummary.ts` とは別のCLIにしてある。語彙が違うものを1つへ入れると、`no-relevant-finding` と `no-problem` を同じ表で並べることになる。読む順のsha256が `KNOWN_ORDERS` のどれとも一致しなければ止まり、読んで確定させる工程がある pool で `--decisions` を省いても止まる（pool の件数がそのまま確定数に見えるため）。
+
+出力は凍結しない。読み進めるたびに作り直すファイルである。
+
 ### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。
