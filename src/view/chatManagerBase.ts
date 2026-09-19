@@ -14,11 +14,6 @@ import {
 } from './handoff';
 import { PendingHandoffChoice } from './handoffPending';
 import { playNotificationSound } from './notificationSound';
-import {
-  showOsNotification,
-  type OsNotificationKind,
-  type OsNotificationProvider,
-} from './osNotification';
 import type {
   SessionApprovalDetail,
   SessionHandoffDetail,
@@ -604,14 +599,6 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   protected abstract dispatchMessage(entry: TPanel, message: unknown): void;
 
   /**
-   * どちらのCLIの会話を扱う管理クラスか（Issue #1285）。
-   *
-   * OS通知のクリック先URIに載せ、押されたときにどちらの管理クラスへ開き直させるかを
-   * 決めるのに使う（`extension.ts`の`UriHandler`）。
-   */
-  protected abstract readonly osNotificationProvider: OsNotificationProvider;
-
-  /**
    * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
    * （design.md §16.10の4「reveal()でパネルを作り直し、ChatStateから会話を描き直す」）。
    * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
@@ -1054,30 +1041,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     // 要求ごとに鳴らすと連打になる。通知の可否（設定・可視性）とは独立に判定する
     if (firstNew !== undefined) {
       playNotificationSound('approvalPending', entry.panel?.visible === true);
-      // OS通知も同じ理由で1回だけ（Issue #1285）。補足には最初の1件の名前を載せる
-      this.showOsNotificationFor(entry, 'approvalPending', firstNew.title);
     }
-  }
-
-  /**
-   * OS通知を出す（Issue #1285）。VSCode内の通知・通知音とは独立に判定する。
-   *
-   * 会話のidは`entry.session.threadId`から取る。まだ始まっていない（`thread/start`の
-   * 応答待ち）ときは`undefined`で、その場合はクリックできないトーストになる。
-   */
-  protected showOsNotificationFor(
-    entry: TPanel,
-    kind: OsNotificationKind,
-    detail?: string | undefined,
-  ): void {
-    showOsNotification({
-      kind,
-      panelVisible: entry.panel?.visible === true,
-      sessionTitle: entry.title,
-      threadId: entry.session.threadId,
-      provider: this.osNotificationProvider,
-      detail,
-    });
   }
 
   /**
@@ -1117,8 +1081,6 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     // 音は通知（`agent.notifications.turnComplete`、既定オフ）とは別の設定で判定する
     // （issue #1242）。通知を出さずに音だけ鳴らしたい場合があるため、先に鳴らす
     playNotificationSound('turnComplete', entry.panel?.visible === true);
-    // OS通知も同じく別の設定で判定する（Issue #1285）
-    this.showOsNotificationFor(entry, 'turnComplete');
     if (!readNotificationsConfig().turnComplete) {
       return;
     }
