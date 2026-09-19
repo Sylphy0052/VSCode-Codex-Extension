@@ -653,7 +653,7 @@ npx tsx test/bench/secondOpinionEval/indeterminateTruncation.ts \
 
 ### 3. 案件ファイルを作る
 
-`test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。
+`test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。ここに書くのは案件ファイルが満たすべき条件で、実際の組み立て手順は「3-2. 案件ファイルを組み立てる」にある。
 
 `kind` は案件の属性として必ず持たせるが、**層化の軸には使わない**（2026-08-31にこう決めた。理由は下の「`kind` で層化しない」）。
 
@@ -978,6 +978,86 @@ npx tsx test/bench/secondOpinionEval/selectCases.ts \
 変更規模の S は母集団に5件しか無く、うち4件が `no-problem` 側にある。正例だけでは S と L の最低3件を満たせないという版3・76件時点の見立ては、24件の抽出でもそのまま当たった。**ここで S を増やすために層の必要数を動かさない。** 動かせば、測りたい難易度の内訳ではなく変更規模の都合で分母が決まる。
 
 抜かれなかった18件は予備である。**回答を見てから差し替えない。** 差し替えが要るのは、材料を作る段階（手順4）で `baseCommit` / `targetCommit` から材料を復元できないと分かった案件だけで、そのときも人が次の1件を選ばない。使えない案件を母集団から外し、`SELECTION_POOL_VERSION` と `SELECTION_VERSION` を上げて抽出をやり直し、前の版のファイルは残す。
+
+### 3-2. 案件ファイルを組み立てる（Issue #1046 手順4 / Issue #1304）
+
+抽出した24件を `run.ts` がそのまま流せる形にする。
+
+```
+npx tsx test/bench/secondOpinionEval/caseFile.ts \
+  --selected eval-results/selected-cases-v1.json \
+  --frame eval-results/sampling-frame-v3.json \
+  --screening eval-results/screening-decisions-v2.jsonl \
+  --known-findings eval-results/known-findings-v1.jsonl \
+  --eligibility eval-results/eligibility-v1.json \
+  --condition A \
+  --repo-path <リポジトリの絶対パス> \
+  --out eval-results/cases-v1.json
+```
+
+#### 人が書く分だけを別ファイルへ凍結する
+
+案件ファイル本体（`cases-*.json`）は実案件の絶対パスを含むのでリポジトリへコミットしない。一方 `recallCriteria` は採点の判定条件そのもので、実験の前に凍結しないと recall が採点者の解釈で動く。**追跡外のファイルにだけ判定条件を置くと、作業環境ごと失われたときに再現できない。** 版2の screening 判定60件を実際にそれで失い、作り直しになっている。
+
+そこで人が書く分だけを `eval-results/known-findings-v1.jsonl` へ分けて追跡対象にし、案件ファイルは凍結済みファイルから機械的に組み立てる。1行1 finding で、先頭行は入力にした screening 判定の sha256 を持つ（`negative-decisions-v1.jsonl` と同じ流儀）。
+
+| 値                                                             | 出どころ                              |
+| -------------------------------------------------------------- | ------------------------------------- |
+| `recallCriteria` / `severity` / `provenance` / `evidencePaths` | `known-findings-v1.jsonl`（人の入力） |
+| `finding` / `groundTruthBasis` / `evidence`                    | `screening-decisions-v2.jsonl`        |
+| `baseCommit` / `targetCommit`                                  | `sampling-frame-v3.json`              |
+| `id` / `kind` / 難易度層                                       | `selected-cases-v1.json`              |
+
+**`finding` / `groundTruthBasis` / `evidence` を人の入力側へ写さない。** screening 側が正本で、二重に持つと食い違ったときにどちらが正本か言えなくなる。
+
+**本測定の24件と `explore-only` の4件を同じファイルへ入れる。** ラベルは条件に依存しないので、条件Aと条件C-repo で同じものを使う。分けると、同じ finding の判定条件が2か所に生まれる。`--selected` に `explore-only-v1.json` と `--condition C-repo` を渡せば、context-coverage 用の案件ファイルも同じCLIで出る。
+
+#### 依頼文・背景・制約は案件ごとに書き分けない
+
+**`userRequest` は全件同じ固定文にする。** 母集団はすべてPRの差分で `kind` も全件 `codeReview` に揃えてあり、案件ごとに依頼文を書き分けると、測っているのが条件の差なのか依頼文の差なのか分からなくなる。`B-pos` / `B-repeat` は依頼文の**位置**だけを動かす条件なので、依頼文そのものは全案件・全条件で同一でなければならない。
+
+文面は「あれば挙げてください」にしてある。問題があることを前提にした依頼文にすると、`no-problem` 層で存在しない問題を作って答える方向へ押すことになり、`hallucinatedFindings` が依頼文の影響を含んでしまう。
+
+**`conversation` は全件空にする（`conversationKind` は `summary`）。** 対象は2026-08にマージされたPRで、当時の会話記録は残っていない。PR本文を貼る案は採らない。本文には解決した問題や設計判断が書かれていることがあり、`eligibility-v1.json` の `explicitlyExposed`（「現時点の材料だけで判定した」と明記して凍結してある）を全件やり直すことになる。空なら答えの漏れは構造的に起きない。
+
+空にすると条件Aは「本番のベースライン」ではなく「背景を固定したベースライン」になる。これは下の「測っていないもの」に既に書いてある限界で、ここで新たに増える制約ではない。
+
+**`knownConstraints` は全件空にする。** 「材料の中で確かめられる事実」を後から書くと、それ自体が何が重要かのヒントになる。
+
+#### 書き出す前に確かめ、1つでも通らなければ書かずに止まる
+
+判定条件を後から動かせる余地を残さないための検査なので、警告にはしない。
+
+- 入力ファイルの sha256 が、`known-findings-v1.jsonl` のヘッダおよび `selected-cases-v1.json` / `eligibility-v1.json` が記録している値と一致すること。時点のずれた screening 判定からラベルを引くと、`screeningFindingIndex` が別の finding を指したまま黙って通る。**記録が無いこと自体も止める条件にしてある**（無いものを「一致した」と見なすと、照合が黙って飛ぶ）。ただし `explore-only-*.json` は frame も eligibility も記録していない（抽出をしていない一覧なので）ため、そこだけは有るときにだけ照合する
+- 24件すべてに対応する frame entry があり、`baseSha` / `targetSha` が空でなく `snapshotStatus` が `unavailable` でないこと
+- 正例の各案件で、screening の `primary: true` な finding の件数と人の入力の件数が一致すること。多くても少なくても止める
+- `findingIndex` が primary の並びの添字と一致し、`screeningFindingIndex` が screening の並びと整合すること
+- `recallCriteria` が2件以上4件以下であること
+- `no-problem` / `indeterminate` の案件にラベルが1件も無いこと。層の定義上ラベルは常に空で、紛れ込めば `hallucinatedFindings` の分母が壊れる
+- 指定した条件について、**各 finding の判定が存在すること**。判定漏れをそのまま流すと recall が「判定していないだけ」の分だけ動く
+
+**通っていることまでは finding 単位で要求しない。** ラベルは条件に依存しないので、ある条件で `discoverable` でない finding も案件ファイルには載せ、分母から外すのは集計側（`recall.ts`）の仕事である。ここで落とすと、条件ごとに別のラベルを持つことになる。案件として使えるか（1件でも通る finding があるか）は従来どおり止める条件にしてある。
+
+最後に、**書き出す前に `run.ts` と同じ検査を通す**。この検査は `caseSchema.ts` へ切り出して両方から呼んでおり、組み立てのときは緑で実行しようとして初めて落ちる、という形を作らないためである。
+
+#### 版1の結果（2026-09-19）
+
+ラベルは21件書いた。本測定24件のうち正例15件が持つ primary finding 17件（#621 と #504 が2件、残る13件が1件ずつ）と、`explore-only` の4件が持つ4件である。`no-problem` 6件と `indeterminate` 3件はラベルを持たない。
+
+| 層                | 案件 | 正解ラベル |
+| ----------------- | ---- | ---------- |
+| `hard-positive`   | 9    | 11         |
+| `normal-positive` | 6    | 6          |
+| `no-problem`      | 6    | 0          |
+| `indeterminate`   | 3    | 0          |
+
+条件Aの判定は17件すべてに存在し、17件すべてが `discoverable` かつ `explicitlyExposed: false` だった（分母17件）。`explore-only` の4件は条件C-repo で4件すべてが分母に入る。
+
+- `eval-results/known-findings-v1.jsonl` sha256 `7d154631cba05f4ea478b372ef1c23fd3ccdc6f2f542807cd724fb0a42d7f04a`（追跡対象）
+- `eval-results/cases-v1.json` sha256 `16d6fd7b650e46a107dc87f7b91d21d0a1b0ce2e38417c7d25b48812351782e4`（追跡外）
+- `eval-results/cases-explore-only-v1.json` sha256 `595ca1c127906c99f6a8d6a23bdb580defc18cb481cf809383a52d5b2ad98323`（追跡外）
+
+24件の `baseCommit` / `targetCommit` 48個はすべてローカルのリポジトリに実在することを `git cat-file --batch-check` で確認した（48件とも `commit`）。`explore-only` の8個も同様である。同じ入力から作り直すと3ファイルとも `unchanged` になる。
 
 ### 4. 実行する
 
