@@ -5,7 +5,7 @@
   "orderFile": "negative-order-v1.json",
   "orderSha256": "04777c56c6a5d0159d414c5a39796059bbdf1a425a44f2cc9ba4e46f3c369f0b",
   "decisionsFile": "negative-decisions-v1.jsonl",
-  "decisionsSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "decisionsSha256": "cefbd8bbf0acf14fbd329f8684219951e7213ad1c4afa169c678e11f098cd77e",
   "poolSize": 12,
   "neededWithReserve": 8,
   "byChangeSizeStratum": {
@@ -13,10 +13,10 @@
     "S": 4,
     "L": 3
   },
-  "screenedCases": 0,
-  "confirmedCases": 0,
+  "screenedCases": 12,
+  "confirmedCases": 12,
   "rejectedCases": 0,
-  "unreadCases": 12,
+  "unreadCases": 0,
   "rejectedBreakdown": [
     {
       "disposition": "weakens-existing-check",
@@ -27,6 +27,6 @@
       "count": 0
     }
   ],
-  "suppliedCases": 0,
-  "meetsNeed": false
+  "suppliedCases": 12,
+  "meetsNeed": true
 }
