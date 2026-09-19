@@ -616,6 +616,41 @@ weakens-existing-check 0 件 / rule-mismatch 0 件
 
 **全件が確定したことを「この規則なら読まなくてよい」とは読まない。** 確定の根拠は規則が機械的に確かめた2点のままで、読む工程は「削除行が何をしたか」を確認するために要る。#179 のように、production を触らないまま**テストの実行条件**を変える削除は機械的な判定では拾えない。
 
+#### `indeterminate` の打ち切りを確認した（2026-09-19）
+
+pool を凍結したあとの確認（`postFreezeVerification`）を実施した。**7件すべてで条件Aの材料が打ち切られ、打ち切りの注意書きがプロンプトへ出た。**
+
+```
+npx tsx test/bench/secondOpinionEval/indeterminateTruncation.ts \
+  --order eval-results/indeterminate-order-v1.json \
+  --frame eval-results/sampling-frame-v3.json \
+  --out eval-results/indeterminate-truncation-v1.json
+```
+
+**`truncated` だけを見ない。** 3つを同時に確認する。
+
+1. `snapshot.truncated` が立つ（`applyDiffBudget()` が何かを落とした）
+2. 落とした対象（`diffOmissions` / `diffPartials`）が1件以上ある。件数0で真だけが立つ状態は、Advisor に「どこを見ていないか」が伝わらない
+3. 条件Aの**プロンプト本文**へ打ち切りの注意書きが出る。留保の手がかりはここにしか現れない
+
+材料は `prepareCaseMaterial()` と `buildSecondOpinionPrompt()`（どちらも本体と同じ関数）で組む。ハーネス側で予算やプロンプトを書き直すと、確認の対象が本体からずれる。**モデルは呼ばない**ので、結果を覗くことにはならない。
+
+| PR   | 生の差分 (byte) | 材料の差分 (byte) | 落とした対象 |
+| ---- | --------------- | ----------------- | ------------ |
+| #648 | 495,613         | 193,993           | 31           |
+| #631 | 1,251,190       | 199,185           | 42           |
+| #81  | 289,672         | 190,739           | 4            |
+| #431 | 487,949         | 199,664           | 13           |
+| #542 | 766,510         | 199,825           | 15           |
+| #510 | 249,828         | 184,998           | 4            |
+| #447 | 360,713         | 199,541           | 8            |
+
+- `eval-results/indeterminate-truncation-v1.json` sha256 `42f3435f80ae2224685d5c691ac0df3d231d6f7a11ba51cd8841b6beffda86cd`
+- 未追跡ファイルは detached worktree から材料を取るため0件で、予算は差分だけが使っている。生の差分が予算を超える案件が実際にも打ち切られたのは、この条件下での結果である
+- CLI は満たさない案件が1件でもあれば非ゼロで終わる。`materials.ts` や `applyDiffBudget()`、プロンプトの注意書きの文言を変えたら流し直す
+
+この出力は凍結しない。実装を直すたびに作り直して読み替えるファイルである。凍結してあるのは読む順（`indeterminate-order-v1.json`）の側で、確認は読む順を変えない。
+
 ### 3. 案件ファイルを作る
 
 `test/bench/secondOpinionEval/cases.example.json` を雛形にする。24件を目安に集める。
