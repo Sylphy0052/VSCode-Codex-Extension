@@ -21,6 +21,10 @@
  * 結果は1実行1ファイル（`<出力先>/<案件id>__<条件id>__<試行番号>.json`）で書く。1つの巨大な
  * JSONへまとめないのは、途中で失敗しても既に終わった分が残るようにするためである。runの素性は
  * `manifest.json` へ別に置く。
+ *
+ * **`--out` に `manifest.json` があるときは、その run の続きとして実行する（Issue #1310）。**
+ * `runId` を引き継ぎ、成功済みの往復を飛ばす。案件ファイル・判定ファイル・モデル・条件・試行回数
+ * のどれかが食い違えば、1件も実行せずに止まる。別の run を始めたいときは別のディレクトリを渡す。
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -133,6 +137,111 @@ async function readHarnessCommit(): Promise<string> {
   return result.code === 0 ? result.stdout.trim() : 'unknown';
 }
 
+/** 1往復を指す鍵。結果ファイル名と同じ組み合わせで作る。 */
+function resultKey(caseId: string, conditionId: string, attempt: number): string {
+  return `${caseId}__${conditionId}__${attempt}`;
+}
+
+/**
+ * 既にある `manifest.json` を読む。無ければ `undefined`。
+ *
+ * 読めない・壊れているときは投げる。「無い」と同じ扱いにして新しい run を始めると、既にある
+ * 結果の上に別の `runId` の結果が積まれ、採点シート生成まで気づけない。
+ */
+async function readExistingManifest(outDir: string): Promise<EvalRunManifest | undefined> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(outDir, 'manifest.json'), 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw e;
+  }
+  return JSON.parse(raw) as EvalRunManifest;
+}
+
+/**
+ * 再開してよい組み合わせかを確かめる。1つでも違えば投げる。
+ *
+ * 警告にして続けると、条件や正解ラベルが違う結果が同じ `runId` で1つのディレクトリへ混ざる。
+ * 採点シートは `runId` だけを見るので、混ざったことは件数にも現れない。
+ */
+function assertResumable(existing: EvalRunManifest, current: EvalRunManifest): void {
+  const mismatches: string[] = [];
+  const compare = (label: string, before: unknown, after: unknown): void => {
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      mismatches.push(`${label}: 既存 ${JSON.stringify(before)} / 指定 ${JSON.stringify(after)}`);
+    }
+  };
+  compare('casesSha256', existing.casesSha256, current.casesSha256);
+  compare('eligibilitySha256', existing.eligibilitySha256, current.eligibilitySha256);
+  compare('model', existing.model, current.model);
+  compare('effort', existing.effort, current.effort);
+  compare('conditionIds', [...existing.conditionIds].sort(), [...current.conditionIds].sort());
+  compare('attempts', existing.attempts, current.attempts);
+  compare('caseCount', existing.caseCount, current.caseCount);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `既にある manifest.json と指定が食い違うので再開できません（別の run なら別のディレクトリを使ってください）:\n  ${mismatches.join('\n  ')}`,
+    );
+  }
+}
+
+/** ある案件について、成功済みとして飛ばせる往復の件数を数える。 */
+function countCompletedFor(
+  completed: ReadonlySet<string>,
+  caseId: string,
+  conditions: readonly EvalCondition[],
+  attempts: number,
+): number {
+  let count = 0;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    for (const condition of conditions) {
+      if (completed.has(resultKey(caseId, condition.id, attempt))) {
+        count += 1;
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * 結果ディレクトリを走査し、**成功している**往復の鍵を集める。
+ *
+ * 失敗として残っている結果（`error` を持つ、または本文が空）は集めない。前回の失敗をそのまま
+ * 成果へ持ち越すと、失敗した条件だけ件数が減ったまま採点へ進むことになる。
+ */
+async function collectCompleted(outDir: string, runId: string): Promise<Set<string>> {
+  const completed = new Set<string>();
+  let entries: string[];
+  try {
+    entries = await fs.readdir(outDir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return completed;
+    }
+    throw e;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.json') || entry === 'manifest.json') {
+      continue;
+    }
+    let record: EvalRunRecord;
+    try {
+      record = JSON.parse(await fs.readFile(path.join(outDir, entry), 'utf8')) as EvalRunRecord;
+    } catch {
+      // 壊れた結果は無かったことにして作り直す（上書きされるので残りもしない）
+      continue;
+    }
+    if (record.runId !== runId || record.error !== undefined || record.response.trim() === '') {
+      continue;
+    }
+    completed.add(resultKey(record.caseId, record.conditionId, record.attempt));
+  }
+  return completed;
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const { cases, sha256 } = await loadCases(options.casesPath);
@@ -150,10 +259,11 @@ async function main(): Promise<void> {
   }
   await fs.mkdir(options.outDir, { recursive: true });
 
-  const runId = randomUUID();
-  const manifest: EvalRunManifest = {
-    runId,
-    harnessCommit: await readHarnessCommit(),
+  const harnessCommit = await readHarnessCommit();
+  const startedAt = new Date().toISOString();
+  const fresh: EvalRunManifest = {
+    runId: randomUUID(),
+    harnessCommit,
     casesSha256: sha256,
     casesPath: path.resolve(options.casesPath),
     eligibilitySha256,
@@ -164,23 +274,68 @@ async function main(): Promise<void> {
     conditionIds: options.conditions.map((condition) => condition.id),
     attempts: options.attempts,
     caseCount: cases.length,
-    startedAt: new Date().toISOString(),
+    startedAt,
   };
+  const existing = await readExistingManifest(options.outDir);
+  if (existing !== undefined) {
+    assertResumable(existing, fresh);
+  }
+  const runId = existing?.runId ?? fresh.runId;
+
+  // 成功済みの往復を先に数える。飛ばした件数を `manifest.json` へ残すため、実行前に確定させる
+  const completed =
+    existing === undefined ? new Set<string>() : await collectCompleted(options.outDir, runId);
+  let skipped = 0;
+  for (const evalCase of cases) {
+    for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+      for (const condition of options.conditions) {
+        if (completed.has(resultKey(evalCase.id, condition.id, attempt))) {
+          skipped += 1;
+        }
+      }
+    }
+  }
+
+  const manifest: EvalRunManifest =
+    existing === undefined
+      ? fresh
+      : {
+          ...existing,
+          resumes: [...(existing.resumes ?? []), { harnessCommit, startedAt, skipped }],
+        };
   await fs.writeFile(
     path.join(options.outDir, 'manifest.json'),
     `${JSON.stringify(manifest, null, 2)}\n`,
     'utf8',
   );
 
+  const planned = cases.length * options.conditions.length * options.attempts;
   console.log(
     `[eval] 案件${cases.length}件 × 条件${options.conditions.length}件 × ${options.attempts}回 = ` +
-      `${cases.length * options.conditions.length * options.attempts}往復`,
+      `${planned}往復`,
   );
+  if (existing !== undefined) {
+    console.log(
+      `[eval] 再開。成功済み ${skipped} 件を飛ばし、残り ${planned - skipped} 件を実行する` +
+        `（初回のハーネス: ${existing.harnessCommit} / 今回: ${harnessCommit}）`,
+    );
+  }
   console.log(`[eval] runId=${runId} model=${options.model} effort=${options.effort}`);
   console.log(`[eval] 案件の内訳: ${summarizeKinds(cases)}`);
 
   let failures = 0;
   for (const [caseIndex, evalCase] of cases.entries()) {
+    // 全ての往復が成功済みなら材料も作らない。材料の準備は案件ごとにワークツリーを切るので、
+    // 飛ばす案件のぶんだけ再開が遅くなる
+    const remaining =
+      options.conditions.length * options.attempts -
+      countCompletedFor(completed, evalCase.id, options.conditions, options.attempts);
+    if (remaining === 0) {
+      console.log(
+        `[eval] ${evalCase.id}: 全 ${options.conditions.length * options.attempts} 件が成功済み → 飛ばす`,
+      );
+      continue;
+    }
     const prepared = await prepareCaseMaterial(evalCase, options.conditions);
     if (!prepared.ok) {
       console.error(`[eval] ${evalCase.id}: 材料を作れませんでした: ${prepared.reason}`);
@@ -204,8 +359,12 @@ async function main(): Promise<void> {
       for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
         const ordered = rotate(options.conditions, caseIndex + attempt - 1);
         for (const [orderIndex, condition] of ordered.entries()) {
-          const prompt = buildSecondOpinionPrompt(condition.apply(material.input));
           const label = `${evalCase.id} / ${condition.id} / ${attempt}`;
+          if (completed.has(resultKey(evalCase.id, condition.id, attempt))) {
+            console.log(`[eval] ${label}: 成功済み → 飛ばす`);
+            continue;
+          }
+          const prompt = buildSecondOpinionPrompt(condition.apply(material.input));
           console.log(`[eval] ${label}: 送信（${Buffer.byteLength(prompt, 'utf8')} bytes）`);
           const turn = await runCodexTurn({
             // 条件C-repoだけ `after/` を持つ別のbundleで開く（Issue #1047）
