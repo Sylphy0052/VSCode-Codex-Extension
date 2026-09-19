@@ -6,8 +6,8 @@
     "C-repo"
   ],
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "bf7bdc4ec3ba66b7ac252f05aeba36ee1e745cddcda53f797fdc38d10ffab532",
-  "screenedCases": 88,
+  "decisionsSha256": "0ab988ccf1fb178d9c83d333fedfcec32eddba99818555b786ef3ba696562f32",
+  "screenedCases": 96,
   "caseIdRule": "pr-<PR番号>。手順4で作る案件ファイルの id をこの形に揃える。",
   "findingIndexRule": "knownImportantFindings には screening の findings のうち primary: true のものだけを screening と同じ順に並べる。findingIndex はその並びの添字で、screening の findings 配列の添字は screeningFindingIndex に残す。",
   "criteria": "discoverable は「その条件で Advisor が実際にアクセスできる証拠から finding を合理的に導けるか」。条件Aの材料は changes.diff（全量）と base/<変更対象ファイル>、条件C-repo はそれに targetCommit の after-tree を足したもの（到達は差分の識別子から1〜2ホップの grep と読解まで）。",
@@ -584,6 +584,72 @@
       "discoverable": true,
       "explicitlyExposed": false,
       "rationale": "条件Aで discoverable と判定したため、docs/second-opinion-eval.md の規則（条件Aの base/<変更対象ファイル> は after-tree と changes.diff から復元できる）により C-repo でも discoverable。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-711",
+      "prNumber": 711,
+      "orderIndex": 93,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "A",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "`role` フィールドを新設した差分と、変更対象の docs/design.md の両方が材料に入る。差分は design.md の末尾へ §16.44 を足す1ハンクだけなので、base/docs/design.md の §16.2 のフィールド一覧表に `role` 行が無いことを同じ材料の中で突き合わせられる。README.md は変更対象に入らないが、§16.2 側の欠落だけで指摘は成り立つ。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-711",
+      "prNumber": 711,
+      "orderIndex": 93,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "C-repo",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "条件Aで discoverable と判定したため、docs/second-opinion-eval.md の規則（条件Aの base/<変更対象ファイル> は after-tree と changes.diff から復元できる）により C-repo でも discoverable。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-537",
+      "prNumber": 537,
+      "orderIndex": 94,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "A",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "View の「タスク停止」ボタンを merging タスクへ出す変更（src/view/workflowScript.ts）、`stoppedByStopTask` を立てる入口（src/orchestrator/runner.ts）、stop_task 経由だけを想定した警告文言（src/orchestrator/runnerMerge.ts）の3つがいずれも変更対象に入る。経路が2つになったことと文言が1つしか想定していないことを、差分と base/<変更対象ファイル> の中だけで突き合わせられる。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-537",
+      "prNumber": 537,
+      "orderIndex": 94,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "C-repo",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "条件Aで discoverable と判定したため、docs/second-opinion-eval.md の規則（条件Aの base/<変更対象ファイル> は after-tree と changes.diff から復元できる）により C-repo でも discoverable。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-935",
+      "prNumber": 935,
+      "orderIndex": 95,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "A",
+      "discoverable": false,
+      "explicitlyExposed": false,
+      "rationale": "取得元を state.turnResultText へ切り替えたことは変更対象の src/loop/goalLoop.ts に現れるが、その値が turn/completed でしか埋まらないことと busy を落とす thread/status/changed がそれより先に届くことは src/appserver/chatState.ts 側の事実で、同ファイルは変更対象に入らず差分にも base/ にも現れない。worker-report が毎ターン欠落することを材料だけからは導けない。#330 / #405 / #1031 と同型。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
+    },
+    {
+      "caseId": "pr-935",
+      "prNumber": 935,
+      "orderIndex": 95,
+      "findingIndex": 0,
+      "screeningFindingIndex": 0,
+      "conditionId": "C-repo",
+      "discoverable": true,
+      "explicitlyExposed": false,
+      "rationale": "src/appserver/chatState.ts は targetCommit 143664b05ca914b6d8186dd397ce04abf0a60bde に実在し（76296 bytes）、turnResultText が turn/completed（1263行）で埋まることと thread/status/changed（1287行）が別ケースであることが読める。切り替え先のフィールド名 turnResultText を grep して1ホップで届く。 材料（changes.diff と base/<変更対象ファイル>）に、この欠陥が成立すると述べた記述は無いため explicitlyExposed は false。"
     }
   ]
 }

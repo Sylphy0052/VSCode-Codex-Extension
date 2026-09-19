@@ -1,12 +1,12 @@
 {
   "difficultyVersion": 1,
   "judgedAt": "2026-09-19",
-  "screenedCases": 88,
+  "screenedCases": 96,
   "rule": "hard-positive は、欠陥の成立に差分の外の事実か、並行実行・環境変数・攻撃者の介在・状態遷移の相互作用といった非自明な前提が要り、変更を順に読むだけでは気づきにくいもの。normal-positive は、変更対象のファイルを読めば直接見える論理欠陥で、成立条件が単純なもの。層は案件単位で付け、同じ案件に複数の finding があるときは難しいほうへ寄せる。",
   "decisionsFile": "screening-decisions-v2.jsonl",
-  "decisionsSha256": "bf7bdc4ec3ba66b7ac252f05aeba36ee1e745cddcda53f797fdc38d10ffab532",
+  "decisionsSha256": "0ab988ccf1fb178d9c83d333fedfcec32eddba99818555b786ef3ba696562f32",
   "eligibilityFile": "eligibility-v1.json",
-  "eligibilitySha256": "c8b20a01a3f60a6a39d9f48e65029eadb2d463d2c016113de94e0ac275bc5408",
+  "eligibilitySha256": "7f756044cd9d05f2f4da87829524a34fb4248a018b9139484d31f3fb998de9c9",
   "quotas": {
     "hard-positive": 9,
     "normal-positive": 6,
@@ -25,30 +25,30 @@
     {
       "conditionId": "A",
       "hard-positive": 12,
-      "normal-positive": 8,
+      "normal-positive": 10,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
         "M": 3,
-        "L": 3,
-        "XL": 13
+        "L": 4,
+        "XL": 14
       },
-      "extremeTail": 5
+      "extremeTail": 6
     },
     {
       "conditionId": "C-repo",
-      "hard-positive": 15,
-      "normal-positive": 8,
+      "hard-positive": 16,
+      "normal-positive": 10,
       "no-problem": 0,
       "indeterminate": 0,
       "byChangeSize": {
         "S": 1,
-        "M": 5,
-        "L": 3,
-        "XL": 14
+        "M": 6,
+        "L": 4,
+        "XL": 15
       },
-      "extremeTail": 6
+      "extremeTail": 7
     }
   ],
   "cases": [
@@ -381,6 +381,51 @@
       ],
       "eligibleIn": [
         "A",
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-711",
+      "prNumber": 711,
+      "orderIndex": 93,
+      "stratum": "normal-positive",
+      "rationale": "新設したフィールドと、変更対象の文書に既にあるフィールド一覧表を並べて読めば、一覧へ足されていないことが直接見える",
+      "changeSizeStratum": "XL",
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-537",
+      "prNumber": 537,
+      "orderIndex": 94,
+      "stratum": "normal-positive",
+      "rationale": "同じフラグを立てる入口が2つになったことと、警告文言が片方しか想定していないことが、どちらも変更対象のファイルに現れる",
+      "changeSizeStratum": "L",
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
+        "A",
+        "C-repo"
+      ]
+    },
+    {
+      "caseId": "pr-935",
+      "prNumber": 935,
+      "orderIndex": 95,
+      "stratum": "hard-positive",
+      "rationale": "取得元を切り替えた先のフィールドがいつ埋まるか、そしてターン完了とみなす通知がそれより先に届くという、変更対象の外にある通知順序の事実が要る。実機のイベント列を採らないと確かめられない",
+      "changeSizeStratum": "M",
+      "tags": [
+        "touches-docs"
+      ],
+      "eligibleIn": [
         "C-repo"
       ]
     }
