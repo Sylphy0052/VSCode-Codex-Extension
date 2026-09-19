@@ -34,6 +34,11 @@ eval-results/*
 !eval-results/supplemental-rule-*.json
 !eval-results/screening-decisions-*.jsonl
 !eval-results/screening-summary-*.json
+!eval-results/negative-order-*.json
+!eval-results/indeterminate-order-*.json
+!eval-results/negative-decisions-*.jsonl
+!eval-results/negative-summary-*.json
+!eval-results/indeterminate-summary-*.json
 !eval-results/eligibility-*.json
 !eval-results/difficulty-*.json
 !eval-results/primary-eligibility-*.json
