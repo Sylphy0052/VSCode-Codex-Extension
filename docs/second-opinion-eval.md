@@ -1028,7 +1028,7 @@ npx tsx test/bench/secondOpinionEval/caseFile.ts \
 
 判定条件を後から動かせる余地を残さないための検査なので、警告にはしない。
 
-- 入力ファイルの sha256 が、`known-findings-v1.jsonl` のヘッダおよび `selected-cases-v1.json` / `eligibility-v1.json` が記録している値と一致すること。時点のずれた screening 判定からラベルを引くと、`screeningFindingIndex` が別の finding を指したまま黙って通る
+- 入力ファイルの sha256 が、`known-findings-v1.jsonl` のヘッダおよび `selected-cases-v1.json` / `eligibility-v1.json` が記録している値と一致すること。時点のずれた screening 判定からラベルを引くと、`screeningFindingIndex` が別の finding を指したまま黙って通る。**記録が無いこと自体も止める条件にしてある**（無いものを「一致した」と見なすと、照合が黙って飛ぶ）。ただし `explore-only-*.json` は frame も eligibility も記録していない（抽出をしていない一覧なので）ため、そこだけは有るときにだけ照合する
 - 24件すべてに対応する frame entry があり、`baseSha` / `targetSha` が空でなく `snapshotStatus` が `unavailable` でないこと
 - 正例の各案件で、screening の `primary: true` な finding の件数と人の入力の件数が一致すること。多くても少なくても止める
 - `findingIndex` が primary の並びの添字と一致し、`screeningFindingIndex` が screening の並びと整合すること

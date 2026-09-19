@@ -65,7 +65,7 @@ export const CASE_KINDS: readonly EvalCase['kind'][] = [
  * 割りすぎると「全部言い当てろ」になり、同じ問題を別の言葉で指摘した回答を落とす。最小の
  * 因果鎖（発生条件・破れる性質・影響範囲）を書けば足りるので、その分だけに制限する。
  */
-const MAX_RECALL_CRITERIA = 4;
+export const MAX_RECALL_CRITERIA = 4;
 
 const PROVENANCES: readonly KnownFinding['provenance'][] = [
   'test',

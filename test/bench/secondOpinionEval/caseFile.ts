@@ -32,7 +32,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-import { parseCases } from './caseSchema';
+import { MAX_RECALL_CRITERIA, parseCases } from './caseSchema';
 import { writeFrozen } from './frozenFile';
 import {
   DIFFICULTY_STRATA,
@@ -102,14 +102,13 @@ const UNIFORM_CONVERSATION_KIND = 'summary' as const;
 const UNIFORM_KNOWN_CONSTRAINTS: readonly string[] = [];
 
 /**
- * `recallCriteria` の件数。
+ * `recallCriteria` の下限。
  *
- * 1本にすると、広く書けば何でも拾ったことになり、狭く書けば言い換えを落とす。上限は
- * `run.ts` の `MAX_RECALL_CRITERIA` と同じで、細かく割りすぎると1つの正解ラベルが実質
- * 「全部言い当てろ」になる。
+ * 1本にすると、広く書けば何でも拾ったことになり、狭く書けば言い換えを落とす。上限
+ * （{@link MAX_RECALL_CRITERIA}）は実行側と同じ値を使う。ここで別に持つと、片方だけ変えた
+ * ときに組み立ては通って実行で落ちる。
  */
 const MIN_RECALL_CRITERIA = 2;
-const MAX_RECALL_CRITERIA = 4;
 
 /** `selected-cases-*.json` / `explore-only-*.json` の1件。 */
 interface SelectedEntry {
@@ -259,23 +258,41 @@ function verifyLineage(params: {
   conditionId: string;
 }): void {
   const problems: string[] = [];
-  const compare = (what: string, recorded: string | undefined, actual: string): void => {
+  /**
+   * 記録が無いファイルもあるので、あるときだけ照合する。
+   *
+   * `explore-only-*.json` は frame も eligibility も記録していない（母集団から外した案件の
+   * 一覧で、抽出はしていないため）。
+   */
+  const compareIfRecorded = (what: string, recorded: string | undefined, actual: string): void => {
     if (recorded !== undefined && recorded !== actual) {
       problems.push(`${what}（記録: ${recorded} / 実測: ${actual}）`);
     }
   };
-  compare('抽出結果が記録している frame', params.selected.frameSha256, params.frameSha256);
-  compare(
+  /** 記録が無いこと自体を欠陥として扱う。無ければ照合が黙って飛ぶ。 */
+  const compareRequired = (what: string, recorded: string | undefined, actual: string): void => {
+    if (recorded === undefined || recorded === '') {
+      problems.push(`${what}が記録されていません`);
+      return;
+    }
+    compareIfRecorded(what, recorded, actual);
+  };
+  compareIfRecorded(
+    '抽出結果が記録している frame',
+    params.selected.frameSha256,
+    params.frameSha256,
+  );
+  compareIfRecorded(
     '抽出結果が記録している eligibility',
     params.selected.eligibilitySha256,
     params.eligibilitySha256,
   );
-  compare(
+  compareRequired(
     'eligibility が記録している screening 判定',
     params.eligibility.decisionsSha256,
     params.screeningSha256,
   );
-  compare(
+  compareRequired(
     '正解ラベルが記録している screening 判定',
     params.header.decisionsSha256,
     params.screeningSha256,
