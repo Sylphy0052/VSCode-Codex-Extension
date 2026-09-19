@@ -28,6 +28,7 @@ import * as path from 'node:path';
 import process from 'node:process';
 
 import { exists } from './frozenFile';
+import { requiresConfirmation } from './negativePool';
 import {
   parseNegativeDecisionsJsonl,
   summarizeNegative,
@@ -40,17 +41,14 @@ import {
  * **供給源ごとに別々に集計する。** 混ぜると、どの規則でそろえた案件なのかが後から読めない。
  * pool を作り直したら（版を上げたら）ここへ新しいsha256を足し、前の版の行は残す。
  */
-const KNOWN_ORDERS: readonly { sha256: string; poolId: string; needsDecisions: boolean }[] = [
+const KNOWN_ORDERS: readonly { sha256: string; poolId: string }[] = [
   {
     sha256: '04777c56c6a5d0159d414c5a39796059bbdf1a425a44f2cc9ba4e46f3c369f0b',
     poolId: 'negative',
-    needsDecisions: true,
   },
   {
     sha256: '01dbbe1cc2f1e8a4c2aa54dfe8bb7dec9964c5a615291055884bf2a29b33fe68',
     poolId: 'indeterminate',
-    // 規則が機械的に閉じているので、読んで確定させる工程が無い
-    needsDecisions: false,
   },
 ];
 
@@ -114,10 +112,12 @@ async function main(): Promise<void> {
     );
   }
   const orderFile = JSON.parse(rawOrder) as OrderFile;
-  if (known?.needsDecisions === true && args.decisionsPath === undefined) {
-    // 読んで確定させる工程がある pool で記録を省くと、pool の件数がそのまま確定数に見える
+  // 要否は凍結済みの pool 自身が持つ層から導く。KNOWN_ORDERS を見ると、未登録の pool
+  // （--allow-unregistered）で確認が丸ごと飛び、読む前の候補件数が確定件数として出る
+  const needsDecisions = requiresConfirmation(orderFile.difficultyStratum);
+  if (needsDecisions && args.decisionsPath === undefined) {
     throw new Error(
-      `${known.poolId} は読んで確定させる工程がある pool です。--decisions を指定してください`,
+      `${orderFile.poolId} は読んで確定させる工程がある pool です。--decisions を指定してください`,
     );
   }
 
@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   const needed = orderFile.neededWithReserve;
   // 読んで確定させる工程がある pool では確定数、無い pool では pool の件数を必要数と比べる。
   // 2つの数を別々に持つと、JSON と標準出力で違う判定が出る
-  const supplied = summary === undefined ? orderFile.total : summary.summary.confirmedCases;
+  const supplied = needsDecisions ? (summary?.summary.confirmedCases ?? 0) : orderFile.total;
   const output = {
     poolId: known?.poolId ?? orderFile.poolId,
     registered: known !== undefined,

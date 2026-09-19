@@ -123,3 +123,17 @@ export function verifySubsetOfEligible(
  * 足りていないことを出力へ残す（**足りないまま抜いて「そろった」ことにしない**）。
  */
 export const NEEDED_WITH_RESERVE = { 'no-problem': 8, indeterminate: 4 } as const;
+
+/**
+ * 読んで確定させる工程があるか。
+ *
+ * **凍結済みの pool 自身が持つ `difficultyStratum` から導く。** CLI 側の登録表を見て決めると、
+ * 未登録の pool（`--allow-unregistered`）で確認が丸ごと飛び、読む前の候補件数がそのまま
+ * 確定件数として書き出される。
+ *
+ * `no-problem` は、削除・書換が既存の検証を弱めていないかを読んで確かめて初めて確定する。
+ * `indeterminate` は規則が機械的に閉じているので、読んで確定させる工程が無い。
+ */
+export function requiresConfirmation(difficultyStratum: string): boolean {
+  return difficultyStratum === 'no-problem';
+}
