@@ -601,8 +601,8 @@ screenedCases 12 / confirmedCases 12 / rejectedCases 0 / unreadCases 0
 weakens-existing-check 0 件 / rule-mismatch 0 件
 ```
 
-- `eval-results/negative-decisions-v1.jsonl` sha256 `cefbd8bbf0acf14fbd329f8684219951e7213ad1c4afa169c678e11f098cd77e`
-- `eval-results/negative-summary-v1.json` sha256 `6c744266c30c51a04137d888d8d17acd125f3fad3da442ba39f35e665cea938a`
+- `eval-results/negative-decisions-v1.jsonl` sha256 `ef00e737a7087b68f4e93cd374da399f829c6957874d1ef7b63f77f13f0a7463`（13行。`decision` 12行と、#183 の削除行の内訳を実測へ直した `supersede` 1行）
+- `eval-results/negative-summary-v1.json` sha256 `8b53024c561f05ac0059681edeb7f5f16316dc25542c7497f24e5a5599a2e177`
 - 確定数12件は予備込みの必要数8件を満たす。変更規模の内訳は pool と同じ S 4 / M 5 / L 3 で、正例側で足りない S 4件と L 3件がここで確保できた
 
 削除行の確認（`needsDeletionReview` が真の9件）で見た削除は、次の4つの型に収まり、**検証の条件を緩めたものは1件も無かった**。
