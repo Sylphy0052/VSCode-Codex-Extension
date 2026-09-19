@@ -1,3 +1,4 @@
+import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import { isWithinAnyRoot, normalizeWorkspacePath } from '../util/paths';
 import type { SessionActivityState } from './sessionActivity';
 
@@ -38,6 +39,14 @@ export interface SessionKanbanCard extends Omit<ManagedSessionInput, 'cwd'> {
   column: SessionKanbanColumn;
   cwdLabel: string;
   cwdFull: string;
+  /**
+   * このセッションの宛先id（Issue #1305）。`session:<provider>:<windowId>:<threadId>`。
+   *
+   * エージェントが`send_message` / `ask_session`の`to`へそのまま渡せる値で、
+   * `list_sessions`が返す`ref`と同じもの。人が統括ページから読み取って別の会話へ
+   * 貼れるように、カードへ載せる。
+   */
+  ref: string;
   /** このカードが今の統括ページを開いているウィンドウ自身のものか（Issue #1244）。 */
   isCurrentWindow: boolean;
 }
@@ -78,6 +87,11 @@ export function buildSessionKanban(
     cards[column].push({
       ...rest,
       column,
+      ref: formatSessionTarget({
+        windowId: session.windowId,
+        provider: session.provider,
+        threadId: session.threadId,
+      }),
       cwdLabel: cwd === undefined ? '(不明)' : basename(cwd),
       cwdFull: cwd === undefined ? '(不明)' : normalizeWorkspacePath(cwd),
       isCurrentWindow,

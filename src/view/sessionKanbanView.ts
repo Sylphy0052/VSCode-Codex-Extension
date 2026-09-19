@@ -4,6 +4,7 @@ import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
 import { chatCsp } from './chatCsp';
 import type { SessionControlAction, SessionControlResult } from './chatManagerBase';
+import { parseSessionTarget } from '../orchestrator/sessionBridge';
 import { isSharedApprovalDecision, isSharedHandoffDecision } from './sessionHub';
 import type { SessionKanbanBoard } from './sessionKanbanModel';
 import { skinBodyClass } from './skin';
@@ -145,7 +146,32 @@ export class SessionKanbanViewManager implements vscode.Disposable {
     }
     if (message.type === 'control') {
       this.handleControl(message);
+      return;
     }
+    if (message.type === 'copyRef') {
+      this.handleCopyRef(message);
+    }
+  }
+
+  /**
+   * カードのセッションidをクリップボードへ書く（Issue #1305）。
+   *
+   * webviewは信頼境界の外側（`handleControl`と同じ扱い）。届いた文字列をそのまま
+   * 書き込まず、`parseSessionTarget`で宛先の形であることを確かめてから通す。
+   */
+  private handleCopyRef(message: Record<string, unknown>): void {
+    const ref = message.ref;
+    if (typeof ref !== 'string' || parseSessionTarget(ref)?.kind !== 'session') {
+      return;
+    }
+    void vscode.env.clipboard.writeText(ref).then(
+      () => {
+        void vscode.window.setStatusBarMessage('セッションidをコピーしました', 3000);
+      },
+      (e: unknown) => {
+        this.log.warn(`セッションidをコピーできませんでした: ${String(e)}`);
+      },
+    );
   }
 
   /**
@@ -575,6 +601,10 @@ setInterval(() => { if(document.hidden) return; if(turnsExpanded.size === 0 && b
 const windowAliases = new Map(); let windowAliasCounter = 0;
 function registerAlias(card) { if(card.isCurrentWindow || windowAliases.has(card.windowId)) return; windowAliasCounter += 1; windowAliases.set(card.windowId, windowAliasCounter); }
 function windowLabel(card) { if(card.isCurrentWindow) return 'このウィンドウ'; registerAlias(card); return 'ウィンドウ' + windowAliases.get(card.windowId); }
+// セッションid（Issue #1305）。完全な値は session:<provider>:<windowId>:<threadId> で
+// 長いため、メタ行には前後を詰めた短縮形を出し、完全な値はhoverとコピーで渡す
+function shortRef(ref) { const parts=(ref || '').split(':'); if(parts.length < 4) return ref || ''; const head=parts[2].slice(0, 6); const tail=parts.slice(3).join(':'); return 'id ' + head + '…/' + tail.slice(0, 6) + '…'; }
+function copyRef(card) { vscode.postMessage({ type:'copyRef', ref: card.ref }); }
 // 絞り込みはこのページの中だけで完結させる（Issue #1250）。拡張側は全件を送り続け、
 // 描画時に絞る。往復させないので入力に即応し、全体の件数も画面に残せる
 let latestBoard = { cards: { approvalPending: [], handoffPending: [], running: [], backgroundRunning: [], idle: [] }, total: 0 };
@@ -658,7 +688,7 @@ function buildCard(card, column) {
   const item = document.createElement('div'); item.className = 'card ' + column + (isOpen ? ' is-open' : '');
   const open = document.createElement('button'); open.type='button'; open.className='card-open'; open.dataset.cardKey=key; open.dataset.role='open'; open.title=card.title || '名称未設定';
   open.append(text('span', card.title || '名称未設定', 'card-title'));
-  const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const windowSpan=text('span', windowLabel(card), 'window-label' + (card.isCurrentWindow ? ' current' : '')); meta.append(text('span', card.provider, 'provider'), text('span', '•', 'sep'), cwdSpan, text('span', '•', 'sep'), windowSpan); open.append(meta);
+  const meta=document.createElement('span'); meta.className='meta'; const cwdSpan=text('span', card.cwdLabel); cwdSpan.title=card.cwdFull; const windowSpan=text('span', windowLabel(card), 'window-label' + (card.isCurrentWindow ? ' current' : '')); const idSpan=text('span', shortRef(card.ref), 'session-id'); idSpan.title=card.ref; meta.append(text('span', card.provider, 'provider'), text('span', '•', 'sep'), cwdSpan, text('span', '•', 'sep'), windowSpan, text('span', '•', 'sep'), idSpan); open.append(meta);
   open.addEventListener('click', () => sendControl(card, 'open'));
   item.append(open);
   const actions=document.createElement('div'); actions.className='card-actions';
@@ -689,6 +719,8 @@ function buildCard(card, column) {
   // 直近のやり取りはどの列のカードでも読める（Issue #1260）
   const turnsOpen = turnsExpanded.has(key);
   actions.append(actionButton(key, 'turns', turnsOpen ? 'やり取りを閉じる' : 'やり取りを見る', () => toggleTurns(card)));
+  // 他の会話のエージェントへ宛先として渡すためのセッションid（Issue #1305）
+  actions.append(actionButton(key, 'copyRef', 'idをコピー', () => copyRef(card)));
   if(turnsOpen) item.append(buildTurns(key));
   // 脇道の質問（Issue #1261）。回答待ちの間は、欄を閉じていてもボタンで判るようにする
   const btwOpen = btwExpanded.has(key); const run = btwRuns.get(key);
