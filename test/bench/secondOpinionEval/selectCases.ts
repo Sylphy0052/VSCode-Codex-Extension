@@ -1,11 +1,11 @@
 /* eslint-disable no-console -- 抽出結果を出すのがこのファイルの目的 */
 /**
- * eligible pool から本測定の24件を層化ランダム抽出して凍結する（Issue #1046 手順4）。
+ * eligible pool から本測定の36件を層化ランダム抽出して凍結する（Issue #1046 手順4 / #1318）。
  *
  * ```
  * npx tsx test/bench/secondOpinionEval/selectCases.ts \
  *   --pool eval-results/selection-pool-v1.json \
- *   --frame eval-results/sampling-frame-v2.json \
+ *   --frame eval-results/sampling-frame-v3.json \
  *   --eligibility eval-results/eligibility-v1.json \
  *   --condition C-repo \
  *   --out eval-results/selected-cases-v1.json
@@ -47,7 +47,7 @@ import {
 } from './stratifiedSample';
 
 /** 抽出の版。規則・seed・必要数を変えたら上げ、前の版のファイルは残す。 */
-const SELECTION_VERSION = 1;
+const SELECTION_VERSION = 2;
 
 interface FrameFile {
   prs: FramePullRequest[];
@@ -153,7 +153,7 @@ async function main(): Promise<void> {
     balanceConstraints: {
       minPerChangeSizeStratum: MIN_PER_CHANGE_SIZE_STRATUM,
       minExtremeTail: MIN_EXTREME_TAIL,
-      note: '層化の軸ではなく、選んだ24件が特定のサイズ帯へ寄っていないかの確認。満たすまで引き直すが、規則は変えない',
+      note: '層化の軸ではなく、選んだ案件が特定のサイズ帯へ寄っていないかの確認。満たすまで引き直すが、規則は変えない',
     },
     poolSize: candidates.length,
     poolByStratum: Object.fromEntries(

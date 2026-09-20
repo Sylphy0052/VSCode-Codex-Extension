@@ -37,22 +37,32 @@ export const POSITIVE_STRATA: ReadonlySet<DifficultyStratum> = new Set<Difficult
 ]);
 
 /**
- * 層ごとの必要数。合計24件。
+ * 層ごとの必要数。合計36件（版2、Issue #1318）。
  *
  * **抽出を始める前に固定する。** 抜いてから内訳を決めると、供給の多い層へ寄せた結果を
  * 「そういう設計だった」と後から言えてしまう。
+ *
+ * 版1は合計24件（`hard-positive` 9 / `normal-positive` 6 / `no-problem` 6 /
+ * `indeterminate` 3）だった。正例15件しか入らず、recall の分母が正解ラベル17件にとどまって、
+ * 条件間の差がラベル1〜2件で決まる状態になった（#1312 の本測定）。版2は**判定済みの正例を
+ * 取りこぼさない**ことを優先し、正例の枠を母集団の全件（`hard-positive` 12 /
+ * `normal-positive` 11）に合わせる。
+ *
+ * 負例と判断保留は、正例の比率（版1で 15/24 = 62.5%）を大きく動かさない範囲で置く。全在庫
+ * （`no-problem` 12 / `indeterminate` 7）を入れると合計42件になり、2条件2試行で168往復と
+ * なってCodexの週次枠を超える。36件なら144往復で版1と同じ枠に収まる。
  */
 export const STRATUM_QUOTAS: Readonly<Record<DifficultyStratum, number>> = {
-  'hard-positive': 9,
-  'normal-positive': 6,
-  'no-problem': 6,
-  indeterminate: 3,
+  'hard-positive': 12,
+  'normal-positive': 11,
+  'no-problem': 9,
+  indeterminate: 4,
 };
 
-export const SELECTION_TARGET_SIZE = 24;
+export const SELECTION_TARGET_SIZE = 36;
 
-/** 抽出の並べ替えseed。変えたら別の24件になるので、版と一緒に上げる。 */
-export const SELECTION_SHUFFLE_SEED = 'primary-selection-v1:';
+/** 抽出の並べ替えseed。変えたら別の36件になるので、版と一緒に上げる。 */
+export const SELECTION_SHUFFLE_SEED = 'primary-selection-v2:';
 
 /** 変更規模の層。`samplingFrame.ts` が付ける値と同じ。 */
 export type ChangeSizeStratum = 'S' | 'M' | 'L' | 'XL';
