@@ -7,8 +7,12 @@
  * ```
  * npx tsx test/bench/secondOpinionEval/summarize.ts \
  *   --results <結果ディレクトリ> --scores <採点ファイル> --key <対応表> --cases <案件ファイル> \
- *   --eligibility <条件ごとの判定> [--baseline A]
+ *   --eligibility <条件ごとの判定> [--baseline A] [--eligibility-condition A]
  * ```
+ *
+ * `--eligibility-condition` を渡すと、全条件の recall の分母をその条件の判定で数える。材料が
+ * 同じで依頼文の置き場所だけが違う条件どうし（prompt-placement の A / B-pos / B-repeat）を
+ * 比べるときに使う。材料が違う条件（context-coverage の C-repo）へ使ってはいけない。
  *
  * recall の分母は条件ごとに変わる（Issue #1046）。案件ファイルの正解ラベルへ、条件ごとの
  * `FindingEligibility`（その条件の材料から発見できるか / 入力に答えが書かれていないか）を
@@ -128,6 +132,15 @@ interface Args {
   cases: string;
   eligibility: string;
   baseline: string;
+  /**
+   * 全条件の分母を、この条件の判定で数える（省略時は回答自身の条件で数える）。
+   *
+   * 条件の間で材料が同じで、依頼文の置き場所だけが違う分析（prompt-placement の A / B-pos /
+   * B-repeat）向けである。材料が同じなら発見可能性も同じなので、条件ごとに判定を書き直す意味が
+   * 無い。材料が違う分析（context-coverage の C-repo）へ使ってはいけない。渡した条件は集計の
+   * 見出しへ必ず出す。どの判定で数えたかが表に出ないと、分母を黙って広げられるためである。
+   */
+  eligibilityCondition: string | undefined;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -162,6 +175,7 @@ function parseArgs(argv: readonly string[]): Args {
     cases,
     eligibility,
     baseline: values.get('baseline') ?? 'A',
+    eligibilityCondition: values.get('eligibility-condition'),
   };
 }
 
@@ -223,11 +237,27 @@ async function main(): Promise<void> {
   const findingsByCase = new Map(cases.map((c) => [c.id, c.knownImportantFindings]));
   // ここへ来る時点で verifyFrozenInputs が通っているので、判定ファイルは必ずある
   const eligibility = new Map<string, FindingEligibility>();
-  const eligibilityEntries = JSON.parse(
-    await fs.readFile(args.eligibility, 'utf8'),
-  ) as FindingEligibility[];
+  const eligibilityFile = JSON.parse(await fs.readFile(args.eligibility, 'utf8')) as {
+    entries?: FindingEligibility[];
+  };
+  const eligibilityEntries = eligibilityFile.entries;
+  if (!Array.isArray(eligibilityEntries)) {
+    throw new Error(
+      `${args.eligibility} に entries 配列がありません。判定ファイルは { "entries": [...] } の形式です`,
+    );
+  }
   for (const entry of eligibilityEntries) {
     eligibility.set(eligibilityKey(entry.caseId, entry.findingIndex, entry.conditionId), entry);
+  }
+  if (
+    args.eligibilityCondition !== undefined &&
+    !eligibilityEntries.some((entry) => entry.conditionId === args.eligibilityCondition)
+  ) {
+    // 判定が1件も無い条件を指定すると、全ラベルが「未判定」で分母から落ち、recall が空になる。
+    // 綴り違いで静かに分母が消えるのを防ぐ
+    throw new Error(
+      `--eligibility-condition ${args.eligibilityCondition} の判定が ${args.eligibility} に1件もありません`,
+    );
   }
 
   const byScoringId = new Map(key.map((entry) => [entry.scoringId, entry]));
@@ -291,11 +321,12 @@ async function main(): Promise<void> {
       brokenScores.push(`${score.scoringId}: ${invalid}`);
       continue;
     }
+    const eligibilityConditionId = args.eligibilityCondition ?? entry.conditionId;
     const selected = selectPrimaryFindingIndexes(
       findings,
       eligibility,
       entry.caseId,
-      entry.conditionId,
+      eligibilityConditionId,
     );
     const primary = new Set(selected.primary);
     const recalledPrimary = score.recalledFindingIndexes.filter((i) => primary.has(i));
@@ -383,6 +414,12 @@ async function main(): Promise<void> {
     );
   }
 
+  if (args.eligibilityCondition !== undefined) {
+    console.log(
+      `recall の分母は全条件とも条件 ${args.eligibilityCondition} の判定で数えている` +
+        '（材料が同じ条件どうしの比較のため）',
+    );
+  }
   printConditionTable(aggregates, args.baseline);
   printPaired(scoredItems, args.baseline);
 }
@@ -549,7 +586,11 @@ function printPaired(items: readonly Scored[], baselineId: string): void {
     console.log(`  ${conditionId} - ${baselineId}`);
     console.log(`    対になった案件:       ${precisionDeltas.length} 件`);
     console.log(`    precision の平均差:   ${format(mean(precisionDeltas))}`);
-    console.log(`    recall の平均差:      ${format(mean(recallDeltas))}`);
+    // recall は precision と対になる件数が違う（分母0の案件が落ちる）。件数を別に出さないと、
+    // 何件の平均を見ているのか分からない
+    console.log(
+      `    recall の平均差:      ${format(mean(recallDeltas))}（対 ${recallDeltas.length} 件）`,
+    );
     console.log(`    precision 勝敗:       ${win}勝 ${tie}分 ${loss}敗`);
   }
 }
