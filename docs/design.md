@@ -5300,7 +5300,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 
 #### ワークフロー設定の一覧
 
-`agent.workflows.*` の全16項目。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
+`agent.workflows.*` の全16項目と、送信本文の計測（Issue #1320）で使う `agent.orchestrator.promptMetrics.enabled`。実際に登録している値（型・既定値・markdownDescription）は `package.json` の `contributes.configuration` が正で、READMEの表がそれと対になっている（§7と同じ原則）。
 
 | 設定                                           | スコープ            | 用途・理由                                                                                                                                                                                                                                           |
 | ---------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -5320,6 +5320,7 @@ YAMLの解析には `yaml` パッケージを使う（現状ランタイム依�
 | `agent.workflows.finalMergeDecisionTimeoutSec` | machine-overridable | `finalMerge: orchestrator` の最終マージ判断待ちの上限秒数（既定900秒、§16.26）。タイムアウトすると `hold` へ倒す                                                                                                                                     |
 | `agent.workflows.ciWaitTimeoutSec`             | machine-overridable | 統合PR/MRをマージする前にCIチェックの完了を待つ上限秒数（既定1800秒、§16.36）。超えたら赤と同じ扱いで失敗にする。権限には関わらない                                                                                                                  |
 | `agent.workflows.ciUpdateBranchMaxRetries`     | machine-overridable | マージが「baseの最新でない」ことで拒否されたときの取り込み直しの最大リトライ回数（既定2、§16.36）。権限には関わらない                                                                                                                                |
+| `agent.orchestrator.promptMetrics.enabled`     | machine             | タスクへ送る本文の量を出力パネルへ記録するかどうか（既定 `false`）。計測だけを行い送信内容は変えないため権限には関わらない。セッションの記録ファイルを読み直す分だけ処理が増えるので常用は想定しない                                                 |
 
 push先のremoteをYAMLや設定から選ぶ手段は設けない。常に `origin` を使う。任意のURLへpushできると、リポジトリの中身を別の宛先へ出す経路になる。
 
