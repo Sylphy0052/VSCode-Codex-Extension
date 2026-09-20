@@ -1176,6 +1176,21 @@ export function readSessionMessagingEnabled(): boolean {
   return vscode.workspace.getConfiguration('agent').get<boolean>('sessions.messaging') !== false;
 }
 
+/**
+ * CLIへ送る本文のトークン量を出力パネルへ記録するか（Issue #1320）。
+ *
+ * 実行契約（`formatTaskExecutionContract`）がCLI側の会話履歴に積み上がるのかを実測する
+ * ための計測。有効にしても送信内容は変えない。1ターンごとにセッションの記録ファイルを
+ * 読み直す分だけ処理が増えるため、既定は無効。
+ */
+export function readPromptMetricsEnabled(): boolean {
+  return (
+    vscode.workspace
+      .getConfiguration('agent')
+      .get<boolean>('orchestrator.promptMetrics.enabled') === true
+  );
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);

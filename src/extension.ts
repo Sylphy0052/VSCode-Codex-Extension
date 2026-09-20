@@ -38,6 +38,7 @@ import {
   readClaudeConfig,
   readConfig,
   readSessionMessagingEnabled,
+  readPromptMetricsEnabled,
   readSessionPresetsConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -605,6 +606,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // `planWorkflowCommand`（#58）も同じ基準を使う。#52セキュリティ監査指摘の
     // クランプ入口を1つに保つのと同じ理由で、baselineの読み方も1箇所にまとめる
     readBaseline: readSafetyBaseline,
+    // 送信本文の計測（Issue #1320）。既定は無効で、有効にしたときだけターンごとに1行
+    // 出力パネルへ出す。記録ファイル（Codexのrollout・Claude Codeのtranscript）は
+    // 実行契約が会話履歴に積み上がるかを数えるために読む
+    promptMetrics: {
+      enabled: readPromptMetricsEnabled,
+      sessionFileDirs: {
+        codex: [paths.sessions, paths.archivedSessions],
+        claude: [claudeDirs.projects],
+      },
+    },
     // PR/MRの作成（design.md §16.18、Issue #105）。`agent.workflows.forge` は既定の
     // `auto`のままだと、`origin` remote・`gh`/`glab`の有無を実行のたびに確かめたうえで
     // 対応するホストへPR/MRを作る。前提が欠けていれば`runner.ts`側が警告のうえ
