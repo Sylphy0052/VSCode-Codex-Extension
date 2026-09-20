@@ -1246,7 +1246,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "会話が停止した（ターンが完了した）ときに音を鳴らすか。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
+          "markdownDescription": "会話が停止した（ターンが完了した）ときに音を鳴らすか。バックグラウンド実行だけが残っている（会話画面の外周が黄枠の）ときは鳴らさない。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
         },
         "agent.notifications.sound.approvalPending": {
           "type": "boolean",
@@ -1258,7 +1258,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "自動引き継ぎが発火したときに音を鳴らすか。手動（引き継ぎボタン）では鳴らさない。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
+          "markdownDescription": "自動引き継ぎの確認ダイアログが出たときに音を鳴らすか。手動（引き継ぎボタン）では鳴らさない。`#agent.notifications.sound.enabled#`が有効な場合にだけ効く。"
         },
         "agent.notifications.sound.onlyWhenHidden": {
           "type": "boolean",

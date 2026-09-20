@@ -702,8 +702,13 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 保留の有無が変わるたびにタブ名の印を付け直し、`onDidChangePanels`で統括ページと
    * 履歴ツリーを数え直させる。`onDidChangeState`は確認待ちの間`ChatState`が動かない
    * ため出ない（引き継ぎ元として残ったタブの印（Issue #1165）と同じ事情）。
+   *
+   * 音もここで鳴らす（Issue #1313）。引き継ぎが確定した後ではなく、確認で止まった
+   * 時点が人に気付いてほしい瞬間であるため。手動の引き継ぎは利用者自身の操作なので
+   * 鳴らさない（Issue #1246からの引き継ぎ）。
    */
   protected beginPendingHandoff(entry: TPanel, trigger: HandoffTrigger): PendingHandoffChoice {
+    let wasActive = false;
     const pending = new PendingHandoffChoice(triggerLabel(trigger), () => {
       // 触るのは自分がこの画面の保留でいる間だけ。引き継ぎを続けて始めたとき（手動と
       // 自動が重なる等）に、先に始まった方の再判定や後始末が、後から始まった保留を
@@ -711,7 +716,14 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       if (entry.pendingHandoff !== undefined && entry.pendingHandoff !== pending) {
         return;
       }
-      entry.pendingHandoff = pending.active ? pending : undefined;
+      const nowActive = pending.active;
+      // 確認待ちが立ち上がった1回だけ鳴らす。「再判定」で提案が差し替わる間は保留が
+      // 立ったままなので、ここは通らない（連打にならない）
+      if (nowActive && !wasActive && trigger.kind !== 'manual') {
+        playNotificationSound('handoff', entry.panel?.visible === true);
+      }
+      wasActive = nowActive;
+      entry.pendingHandoff = nowActive ? pending : undefined;
       this.refreshPanelTitle(entry);
       this.panelsChanged.fire();
     });
@@ -1076,11 +1088,18 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 承認待ちの通知と違い`requestId`のような一意な識別子が無いが、呼び出し元
    * （各サブクラスの`onSessionChange`）が`busy`の立ち下がり（`true→false`）を検知した
    * 1回だけ呼ぶ作りにより、同じターンで重複して呼ばれることは無い。
+   *
+   * @param state ターンが確定した時点の会話の状態。音を鳴らすかの判定にだけ使う
    */
-  protected notifyTurnComplete(entry: TPanel): void {
+  protected notifyTurnComplete(entry: TPanel, state: ChatState): void {
     // 音は通知（`agent.notifications.turnComplete`、既定オフ）とは別の設定で判定する
-    // （issue #1242）。通知を出さずに音だけ鳴らしたい場合があるため、先に鳴らす
-    playNotificationSound('turnComplete', entry.panel?.visible === true);
+    // （issue #1242）。通知を出さずに音だけ鳴らしたい場合があるため、先に鳴らす。
+    // ただしバックグラウンド実行だけが残る状態（会話画面の外周が黄枠、issue #905）では
+    // 鳴らさない（Issue #1313）。裏の作業はまだ続いており、区切りとして知らせる意味が
+    // 薄いため。判定材料は黄枠・`deriveSessionActivityState`と同じ`backgroundTerminals`
+    if (state.backgroundTerminals.length === 0) {
+      playNotificationSound('turnComplete', entry.panel?.visible === true);
+    }
     if (!readNotificationsConfig().turnComplete) {
       return;
     }
