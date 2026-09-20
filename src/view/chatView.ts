@@ -1041,6 +1041,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       enabled: state.autoHandoff,
       busy: state.busy,
       alreadyStarted: entry.autoHandoffStarted,
+      // バックグラウンド実行中は残量の閾値・自動圧縮の契機でも始めない（Issue #1315）
+      backgroundRunning: state.backgroundTerminals.length > 0,
       remainingPercent: state.context?.remainingPercent,
       compacted,
       thresholdPercent: readAutoHandoffThresholdPercent(),
@@ -1190,6 +1192,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       enabled: latest.autoHandoff,
       busy: latest.busy,
       alreadyStarted: entry.autoHandoffStarted,
+      // 分類器を待つ間にバックグラウンド実行が始まっていれば止める（Issue #1315）
+      backgroundRunning: latest.backgroundTerminals.length > 0,
       remainingPercent,
       compacted: false,
       thresholdPercent: readAutoHandoffThresholdPercent(),
