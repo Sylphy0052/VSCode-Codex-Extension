@@ -979,6 +979,35 @@ npx tsx test/bench/secondOpinionEval/selectCases.ts \
 
 抜かれなかった18件は予備である。**回答を見てから差し替えない。** 差し替えが要るのは、材料を作る段階（手順4）で `baseCommit` / `targetCommit` から材料を復元できないと分かった案件だけで、そのときも人が次の1件を選ばない。使えない案件を母集団から外し、`SELECTION_POOL_VERSION` と `SELECTION_VERSION` を上げて抽出をやり直し、前の版のファイルは残す。
 
+#### 版2の結果（2026-09-20、Issue #1318）
+
+**母集団は作り直していない。** `selection-pool-v1.json` をそのまま使い、層ごとの必要数（`STRATUM_QUOTAS`）と `SELECTION_TARGET_SIZE`、seed だけを上げた。供給の判定も難易度の割り付けも版1のまま凍結してある。
+
+変えた理由は #1312 の本測定である。版1の24件に入った正例は15件で、recall の分母は正解ラベル17件（延べ34件 = 17 × 2回）にとどまった。条件間の差がラベル1〜2件で決まってしまい、差の有無を読み取れない。**判定済みの正例を取りこぼしていることが分母不足の主因**で、screening を読み足さなくても正例は23案件・26ラベルある。
+
+| 層                | 母集団 | 必要数（版1 → 版2） | 抽出 |
+| ----------------- | ------ | ------------------- | ---- |
+| `hard-positive`   | 12     | 9 → **12**          | 12   |
+| `normal-positive` | 11     | 6 → **11**          | 11   |
+| `no-problem`      | 12     | 6 → **9**           | 9    |
+| `indeterminate`   | 7      | 3 → **4**           | 4    |
+
+合計36件。**正例は母集団の全件を採る**ので、正例側は抽出ではなく全数になる。負例と判断保留は在庫（12件 / 7件）を全部は入れず、正例の比率を版1（15/24 = 62.5%）から大きく動かさない範囲（23/36 = 63.9%）に置いた。在庫を全部入れた42件にすると2条件2試行で168往復になり、Codexの週次枠を超える（144往復で98%消費した実測がある）。36件なら144往復で版1と同じ枠に収まる。
+
+**引き直しは版1と同じく0回で、1回目の試行がそのまま制約を満たした。** 変更規模は S 3 / M 7 / L 7 / XL 19 で4層それぞれ最低3件を満たし、`extreme-tail` は10件、`kind` は全件 `codeReview` である。
+
+選んだ36件は次のとおり。
+
+- `hard-positive`: #1014 #985 #621 #536 #517 #504 #503 #444 #417 #395 #384 #139
+- `normal-positive`: #951 #711 #537 #501 #486 #483 #415 #343 #307 #219 #90
+- `no-problem`: #1021 #988 #878 #316 #183 #182 #179 #177 #174
+- `indeterminate`: #631 #510 #431 #81
+
+- `eval-results/selected-cases-v2.json` sha256 `0ef038080e5a7027bb01e62e4d6fa1e0334be67990f178094bf442c46e1729be`
+- 入力は `selection-pool-v1.json` と `sampling-frame-v3.json` と `eligibility-v1.json`（いずれも版1から1バイトも変えていない）
+
+**`explore-only-v1.json` の4件（#330 / #1031 / #405 / #935）は版2でも母集団へ入れない。** 条件Aで発見できない正例なので、prompt-placement の分母には入らない。context-coverage の分析で使う位置づけは版1のままである。
+
 ### 3-2. 案件ファイルを組み立てる（Issue #1046 手順4 / Issue #1304）
 
 抽出した24件を `run.ts` がそのまま流せる形にする。
@@ -1058,6 +1087,33 @@ npx tsx test/bench/secondOpinionEval/caseFile.ts \
 - `eval-results/cases-explore-only-v1.json` sha256 `595ca1c127906c99f6a8d6a23bdb580defc18cb481cf809383a52d5b2ad98323`（追跡外）
 
 24件の `baseCommit` / `targetCommit` 48個はすべてローカルのリポジトリに実在することを `git cat-file --batch-check` で確認した（48件とも `commit`）。`explore-only` の8個も同様である。同じ入力から作り直すと3ファイルとも `unchanged` になる。
+
+#### 版2の結果（2026-09-20、Issue #1318）
+
+ラベルは9件足して30件にした。版1の21件はそのまま引き継いでいる（**1件も書き換えていない**）。追加したのは、版1の24件へ入らなかったために判定条件を書いていなかった8案件ぶんである。
+
+- 追加: #219 / #307 / #395（2件） / #444 / #483 / #517 / #537 / #711
+- 30件の内訳は `empirical` 26件と `independent-human` 4件で、**これは screening 判定が持つ独立した根拠の finding 全件に当たる**
+
+| 層                | 案件 | 正解ラベル |
+| ----------------- | ---- | ---------- |
+| `hard-positive`   | 12   | 15         |
+| `normal-positive` | 11   | 11         |
+| `no-problem`      | 9    | 0          |
+| `indeterminate`   | 4    | 0          |
+
+条件Aの判定は26件すべてに存在し、26件すべてが `discoverable` かつ `explicitlyExposed: false` だった（**分母26件。版1は17件**）。残る4件は `explore-only` の分で、条件Aでは分母に入らない。
+
+**`eligibility` は作り直していない。** 判定が30件しか無いのは判定漏れではなく、残る9 findings が `model-derived`（AIのレビューだけが根拠）で、`INDEPENDENT_GROUND_TRUTH_BASES` に当たらないため分母へ入らないからである。独立した根拠を持つ30件と `eligibility-v1.json` の判定30件は完全に一致する。
+
+- `eval-results/known-findings-v2.jsonl` sha256 `605527a130ad0088d58a1ef6026602430ff4565cad01b12015248e54cd6c3ce5`（追跡対象）
+- `eval-results/cases-v2.json` sha256 `c0b54f2645b899e3f914935e744252e59e9cc3105911973c2d8405348ce74985`（追跡外）
+
+**版1のファイルは凍結したまま残す。** `cases-v1.json` と `known-findings-v1.jsonl` は `run-2026-09-19-prompt-placement` の `manifest.json` が `casesSha256` で照合しており、書き換えると過去の測定の集計が止まる。版2は別ファイルとして足すだけにしてある。`eligibility-v1.json` / `selection-pool-v1.json` / `selected-cases-v1.json` も同じ理由で無変更である。
+
+`caseFile.ts` が出す「案件ファイル v1」の表示は据え置きにした。組み立ての規則（人の入力と凍結済み判定の束ね方、依頼文・背景・制約の扱い、書き出し前の検査）は何も変えておらず、変わったのは入力の版だけだからである。どの入力から作ったかは、出力に記録される `selected-cases-v2.json` / `known-findings-v2.jsonl` のsha256で判別する。
+
+**次の測定は条件を2本へ絞る。** #1312 の結論のとおり `B-repeat` は採らず、`A` と `B-pos` だけを流す。36案件 × 2条件 × 2回 = 144往復で、版1の測定と同じ往復数・同じ枠に収まりながら、recall の分母は延べ34件から**延べ52件**（26ラベル × 2回）になる。
 
 ### 4. 実行する
 
