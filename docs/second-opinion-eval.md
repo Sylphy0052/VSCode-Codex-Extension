@@ -1106,8 +1106,8 @@ npx tsx test/bench/secondOpinionEval/caseFile.ts \
 
 **`eligibility` は作り直していない。** 判定が30件しか無いのは判定漏れではなく、残る9 findings が `model-derived`（AIのレビューだけが根拠）で、`INDEPENDENT_GROUND_TRUTH_BASES` に当たらないため分母へ入らないからである。独立した根拠を持つ30件と `eligibility-v1.json` の判定30件は完全に一致する。
 
-- `eval-results/known-findings-v2.jsonl` sha256 `605527a130ad0088d58a1ef6026602430ff4565cad01b12015248e54cd6c3ce5`（追跡対象）
-- `eval-results/cases-v2.json` sha256 `c0b54f2645b899e3f914935e744252e59e9cc3105911973c2d8405348ce74985`（追跡外）
+- `eval-results/known-findings-v2.jsonl` sha256 `af76bf19ffbfdd1628e8e00ed5921b44442bde89f5a83d952206605538d849bf`（追跡対象）
+- `eval-results/cases-v2.json` sha256 `4cdaf20ee8242b21091eee2ff94e84751108178c3d77c698635a3aad7c72c1de`（追跡外）
 
 **版1のファイルは凍結したまま残す。** `cases-v1.json` と `known-findings-v1.jsonl` は `run-2026-09-19-prompt-placement` の `manifest.json` が `casesSha256` で照合しており、書き換えると過去の測定の集計が止まる。版2は別ファイルとして足すだけにしてある。`eligibility-v1.json` / `selection-pool-v1.json` / `selected-cases-v1.json` も同じ理由で無変更である。
 
