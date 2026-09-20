@@ -26,9 +26,9 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { clearTimeout, setTimeout } from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -110,7 +110,10 @@ async function loadPromptMetrics() {
   const outFile = join(outDir, 'promptMetrics.mjs');
   const esbuild = await import('esbuild');
   await esbuild.build({
-    entryPoints: ['src/orchestrator/promptMetrics.ts'],
+    // 実行時のカレントディレクトリに依存させない（どこから起動しても同じものを測る）
+    entryPoints: [
+      resolve(dirname(fileURLToPath(import.meta.url)), '../src/orchestrator/promptMetrics.ts'),
+    ],
     bundle: true,
     format: 'esm',
     platform: 'node',
@@ -225,6 +228,26 @@ function terminateProcess(proc) {
   });
 }
 
+/**
+ * 子プロセスの起動失敗を、応答待ちのPromiseへ伝える。
+ *
+ * `spawn`はCLIが見つからない場合に`error`イベントを出す。これを誰も購読しないとNodeが
+ * 例外にして計測プロセスごと落ちるため、`--provider both`でCodexが無いだけでClaude Code
+ * 側の計測まで巻き添えで止まる。応答待ちと`race`させて、そのプロバイダの失敗として
+ * 扱えるようにする。stdinへの書き込みもプロセスが死んでいると`error`を出すので併せて拾う。
+ */
+function watchSpawnFailure(proc, bin) {
+  const failure = new Promise((_resolve, reject) => {
+    proc.on('error', (e) => {
+      reject(new Error(`${bin}の起動に失敗した: ${e.message}`));
+    });
+  });
+  // 誰も待っていない時点で起動に失敗しても未処理のrejectionにしない
+  failure.catch(() => {});
+  proc.stdin.on('error', () => {});
+  return failure;
+}
+
 /** 改行区切りJSONを読み、1件ずつコールバックへ渡す。 */
 function readJsonLines(stream, onMessage) {
   let buffer = '';
@@ -257,6 +280,7 @@ async function measureCodex(countFn, turns) {
   const sessionDirs = [join(codexHome, 'sessions'), join(codexHome, 'archived_sessions')];
 
   const proc = spawn(CODEX_BIN, ['app-server'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const spawnFailed = watchSpawnFailure(proc, CODEX_BIN);
   const pending = new Map();
   const turnWaiters = [];
   const stderrChunks = [];
@@ -298,7 +322,7 @@ async function measureCodex(countFn, turns) {
   function request(method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
     const id = nextId;
     nextId += 1;
-    return new Promise((resolve, reject) => {
+    const answered = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id);
@@ -312,10 +336,11 @@ async function measureCodex(countFn, turns) {
       });
       proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
     });
+    return Promise.race([spawnFailed, answered]);
   }
 
   function waitTurnEnd() {
-    return new Promise((resolve, reject) => {
+    const ended = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`ターンの完了通知がタイムアウトした。stderr: ${stderrChunks.join('')}`));
       }, TURN_TIMEOUT_MS);
@@ -325,6 +350,7 @@ async function measureCodex(countFn, turns) {
         resolve(event);
       });
     });
+    return Promise.race([spawnFailed, ended]);
   }
 
   const rows = [];
@@ -404,6 +430,7 @@ async function measureClaude(countFn, turns) {
     sessionId,
   ];
   const proc = spawn(CLAUDE_BIN, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const spawnFailed = watchSpawnFailure(proc, CLAUDE_BIN);
   const resultWaiters = [];
   const stderrChunks = [];
   let lastUsage;
@@ -422,7 +449,7 @@ async function measureClaude(countFn, turns) {
   });
 
   function waitResult() {
-    return new Promise((resolve, reject) => {
+    const answered = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`resultがタイムアウトした。stderr: ${stderrChunks.join('')}`));
       }, TURN_TIMEOUT_MS);
@@ -432,6 +459,7 @@ async function measureClaude(countFn, turns) {
         resolve(message);
       });
     });
+    return Promise.race([spawnFailed, answered]);
   }
 
   const rows = [];
