@@ -3259,9 +3259,9 @@ Codexの会話開始時は、選択済みの承認・サンドボックス設定
 - タブ名の印は英数記号のみ（`*` / `!`）。ローカライズや、印の意味を凡例として画面内に示す導線は無い（ホバーで見るタブのツールチップ自体がVS Code標準機能に無いため、意味は本ドキュメントとREADMEでのみ説明する）
 - ターン完了の通知は成功・失敗を区別しない（`turnFailed`の値を見ていない）。文言も「応答が終わりました」で共通
 
-### 14.55.1 通知音（issue #1242、issue #1246）
+### 14.55.1 通知音（issue #1242、issue #1246、Issue #1313）
 
-会話が停止したとき（ターン完了）、承認待ち・質問で止まったとき、自動引き継ぎ（§14.42、issue #1079）が発火したときに、**それぞれ別の音**を鳴らす。画面を見ていなくても「終わったのか」「待たれているのか」「タブが切り替わったのか」を聞き分けられるようにするのが狙い。§14.55の通知（トースト）とは独立した設定で制御する。
+会話が停止したとき（ターン完了）、承認待ち・質問で止まったとき、自動引き継ぎ（§14.42、issue #1079）の確認ダイアログが出たときに、**それぞれ別の音**を鳴らす。画面を見ていなくても「終わったのか」「待たれているのか」「タブが切り替わったのか」を聞き分けられるようにするのが狙い。§14.55の通知（トースト）とは独立した設定で制御する。
 
 **VSCodeの拡張APIには音を鳴らす口が無い。** webviewを常駐させてWeb Audioで鳴らす案もあるが、音が要るのはタブが隠れている場面であり、`retainContextWhenHidden`付きのwebviewを常駐させる負担に見合わない。そのため**拡張ホストのOSの再生コマンドを子プロセスとして起動する**方式を採った。端末のベル文字（`\x07`）を隠しterminalへ書く案は、2種類の音を鳴らし分けられないため要件を満たさず却下した。
 
@@ -3275,7 +3275,11 @@ Codexの会話開始時は、選択済みの承認・サンドボックス設定
 
 **音の判定は通知の判定と独立にした。** `agent.notifications.turnComplete`は既定オフだが、「通知は要らないが音は欲しい」が今回の動機そのものであり、通知の設定に相乗りすると音だけを有効にできない。また可視性の扱いも変えてあり、**既定ではタブが見えていても鳴らす**（`onlyWhenHidden`が既定`false`）。タブを開いたまま別のウィンドウを見ている・席を外している、という場面が主な用途で、`WebviewPanel.visible`では判定できないため。従来の通知側は§14.55のまま「見えていれば出さない」で固定で、この設定の影響を受けない。
 
-**自動引き継ぎの音は引き継ぎが確定してから鳴らす（issue #1246）。** 発火点は`startHandoff`が引き継ぎ先セッションを開く直前で、履歴の解決・model/effortの選択・ポインタファイルの書き込みがすべて済んだ後にあたる。手前で鳴らすと、確認ダイアログでの中止や書き込み失敗で引き継ぎが起きなかった場合にも鳴ってしまう。**手動（`trigger.kind === 'manual'`）では鳴らさない。** 引き継ぎボタンを押した本人はもう知っており、知らせる相手がいないため。
+**自動引き継ぎの音は確認ダイアログが出た時点で鳴らす（issue #1246、Issue #1313で変更）。** 発火点は`beginPendingHandoff`が作った`PendingHandoffChoice`が確認待ちを公開した（`active`が`false`→`true`になった）ときで、`chooseHandoffModelSettings`が人の答えを待ち始めた瞬間にあたる。当初（issue #1246）は引き継ぎが確定した後に鳴らしていたが、それでは**人が答えるまで先へ進まない間ずっと無音**で、席を外していると確認で止まっていることに気付けない。音の役目は「起きたことの事後報告」ではなく「対応が要ることの通知」であり、承認待ち（`approvalPending`）と揃えて止まった時点へ移した。中止された場合にも鳴ることになるが、それは「確認が出た」という事実そのものの通知であって誤りではない。
+
+**再判定では鳴らし直さない。** 「再判定」は`publish`をもう一度呼んで提案を差し替えるが、確認待ち自体は立ったままなので、`active`の立ち上がりを見る判定はここを通らない。**手動（`trigger.kind === 'manual'`）では鳴らさない。** 引き継ぎボタンを押した本人はもう知っており、知らせる相手がいないため。
+
+**バックグラウンド実行中のターン完了では鳴らさない（Issue #1313）。** `notifyTurnComplete`は`ChatState.backgroundTerminals`が空のときだけ`turnComplete`を鳴らす。裏でバックグラウンドターミナルが動き続けている区切りは、人が手を戻すべき「終わり」ではないため。判定材料を`backgroundTerminals`だけにするのは、会話画面の外周の黄枠（issue #905、`chatScript.ts`の`applyBackgroundRunning`）とカンバンの`backgroundRunning`列（`deriveSessionActivityState`）に条件を揃えるため。**見えている画面の黄枠と音の有無が食い違わない**ことを優先し、ここだけ独自の条件を足さない。通知（トースト）側の条件は変えていない。
 
 **承認待ちの音は1ターンに1回だけ。** 通知は要求ごとに出すが（§14.55のdedupはそのまま）、音は`notifyNewApprovals`で「新しい要求が1件以上あったか」を見て1回だけ鳴らす。1ターンで複数の承認要求が同時に現れることがあり、要求ごとに鳴らすと連打になるため。
 
@@ -3304,8 +3308,8 @@ Windowsの`System.Media.SoundPlayer`はPCMのWAVしか再生できない。設�
 - `src/util/soundPlayback.ts`: `resolvePlayCommand` / `parsePlayerCommandTemplate` / `commandExistsOnPath` / `candidatesFor`（ここまで純粋関数。`hasCommand`と`platform`を注入できる）と`spawnPlayCommand`。`vscode`をimportしないロジック層
 - `src/view/notificationSound.ts`: 設定の読み取りと同梱音源のパス解決（`vscode.Uri.joinPath`）という`vscode`が要る部分だけの薄い層。`initNotificationSounds` / `playNotificationSound` / `resetNotificationSounds`
 - `src/config.ts`: `readNotificationSoundConfig`（`NotificationSoundConfig`）
-- `src/view/chatManagerBase.ts`: `notifyTurnComplete`の冒頭と`notifyNewApprovals`の末尾から`playNotificationSound`を呼ぶ
-- `src/view/chatView.ts` / `src/view/claudeChatView.ts`: `startHandoff`が引き継ぎ先を開く直前に`playNotificationSound('handoff', …)`を呼ぶ（issue #1246）
+- `src/view/chatManagerBase.ts`: `notifyTurnComplete`の冒頭と`notifyNewApprovals`の末尾から`playNotificationSound`を呼ぶ。`notifyTurnComplete`は`ChatState.backgroundTerminals`が空のときだけ鳴らす（Issue #1313）
+- `src/view/chatManagerBase.ts`: `beginPendingHandoff`が確認待ちを公開した1回だけ`playNotificationSound('handoff', …)`を呼ぶ（issue #1246、Issue #1313で確定後から確認待ちの時点へ移した）
 - `src/extension.ts`: `activate`で`initNotificationSounds(context.extensionUri, log)`
 - `package.json`: `agent.notifications.sound.*`設定
 - `test/unit/soundPlayback.test.ts`: プラットフォーム別の候補選択、候補なし、上書き指定のパース（`${file}`の有無・引用符・複数箇所）、PowerShellの`'`エスケープ
@@ -3315,6 +3319,7 @@ Windowsの`System.Media.SoundPlayer`はPCMのWAVしか再生できない。設�
 - リモート開発（WSL / SSH / Dev Container）では拡張ホスト側で鳴る。音声デバイスが無い環境では鳴らないため、その場合は`playerCommand`でホスト側の再生（WSLなら`powershell.exe`経由）へ逃がす
 - `commandExistsOnPath`の結果をキャッシュしていない。鳴らすたびにPATHを走査する（`existsSync`の数回分であり、ターンの完了頻度から見て無視できる）
 - 自動引き継ぎの音（issue #1246）は、直前のターン完了の音に続けて鳴ることがある。自動引き継ぎの判定はターンの完了を契機に走るため、`turnComplete`と`handoff`が短い間隔で連続する。二重に聞こえるのが煩わしい場合は`agent.notifications.sound.turnComplete`を無効にする（引き継ぎ側だけを残せる）
+- バックグラウンド実行中（`backgroundTerminals`が残る状態）のターン完了では`turnComplete`を鳴らさない（Issue #1313）。裏の作業が続いている区切りは知らせる意味が薄いため。セカンドオピニオンの実行状態は`ChatState`から引けないため条件に含めない（黄枠・`deriveSessionActivityState`と同じ制約）
 - 音量は調整できない。音源そのものを差し替えて対応する
 - 再生コマンドがハングした場合、`detached`で放置した子プロセスが残る（`unref()`しているため拡張機能の終了は妨げない）
 - 通知の「開く」はタブをrevealするだけで、承認カード自体へスクロールする等の追加の誘導は無い（既存の承認カードは会話の最新項目に出るため、revealで大抵は視界に入る）
