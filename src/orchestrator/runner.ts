@@ -245,6 +245,52 @@ export function composeTaskExecutionContract(
 }
 
 /**
+ * 実行契約の同一性を表す短いハッシュ（Issue #1321）。
+ *
+ * 継続ターンでは全文の代わりにこの値を送り、受け取った側が「初回に読んだ契約と同じもの」
+ * だと辿れるようにする。内容が1文字でも変われば別の値になるため、拡張機能側は前のターンで
+ * 送った値と突き合わせるだけで再送の要否を判定できる。
+ *
+ * 12桁に切るのは、衝突がまず起きない長さを保ちつつ、毎ターン送る文字数を抑えるため。
+ * 暗号学的な用途（署名・認証）には使わない。単なる同一性の目印である。
+ */
+export function taskExecutionContractDigest(contract: string): string {
+  return createHash('sha256').update(contract, 'utf8').digest('hex').slice(0, 12);
+}
+
+/**
+ * 継続ターンで全文の代わりに送る、実行契約への参照（Issue #1321）。
+ *
+ * 見出しを `## 実行契約` にしないのは、契約の全文が何個履歴に積まれているかを数える
+ * 計測（`countContractOccurrences`。Issue #1320）へ参照まで混ぜないため。参照は数えたい
+ * 対象ではなく、混ぜると削減できたかどうかが読めなくなる。
+ */
+export function formatTaskExecutionContractReference(taskId: string, digest: string): string {
+  return [
+    '## 実行契約（参照）',
+    `Contract: ${taskId} / sha256:${digest}`,
+    'このスレッドの最初の指示に全文を載せた実行契約は変わっていない。全体ゴール・受入条件・前提・対象外・成果物・依存タスクから受け取る成果は、その全文のとおりに守って続行する。',
+  ].join('\n');
+}
+
+/**
+ * 継続ターンの指示へ、実行契約の参照だけを前置する（Issue #1321）。
+ *
+ * 全文を毎ターン送ると、契約入りのメッセージがCLI側の会話履歴へターンごとに積み上がる
+ * （Issue #1320で実測。Codex・Claude Codeのどちらも積み上がる）。固定文であっても
+ * コンテキスト窓は占有するため、2ターン目以降は参照に置き換える。
+ */
+export function composeTaskExecutionContractReference(
+  taskId: string,
+  digest: string,
+  prompt: string,
+): string {
+  return [formatTaskExecutionContractReference(taskId, digest), '', '## 今回の指示', prompt].join(
+    '\n',
+  );
+}
+
+/**
  * `startMessagingTransport`のMCPサーバ起動失敗警告を、1runにつき実際に記録する上限件数
  * （Issue #475/PR #495レビュー指摘: low〜medium）。
  *
@@ -1311,6 +1357,26 @@ export interface LiveTask {
   promptMetricsTurn: number;
   /** 計測した契約文字数の累計（Issue #1320）。計測が無効な間は0のまま。 */
   promptMetricsContractChars: number;
+  /**
+   * いまのCLIセッションの会話履歴へ全文を届け終えた実行契約のハッシュ（Issue #1321）。
+   *
+   * ここが埋まっている間、継続ターンには全文ではなく参照だけを前置する。契約の内容が
+   * 変わればハッシュも変わるため、突き合わせるだけで再送の要否が決まる。
+   *
+   * **セッションに紐づく値**なので、`setupTaskPrompting`が呼ばれるたびに未送信へ戻す。
+   * コンテキスト残量による分割（Issue #1273）は同じ`LiveTask`のまま別のセッションへ
+   * 載せ替えるため、ここを持ち越すと2代目のスレッドへ契約が一度も届かない。
+   */
+  sentContractDigest: string | undefined;
+  /**
+   * 全文を前置して送ったが、まだターンが確定していない実行契約のハッシュ（Issue #1321）。
+   *
+   * 送信直後ではなくターンの確定を待って`sentContractDigest`へ移すのは、送信が
+   * 届かなかった場合に「送ったつもり」で以降を参照だけにしてしまうと、そのスレッドの
+   * 契約が永久に欠けるため。取りこぼして全文を余分に1回送る側の失敗は文字数が増えるだけで
+   * 済むのに対し、逆向きの失敗は受入条件の遵守そのものを壊す。
+   */
+  pendingContractDigest: string | undefined;
   /**
    * オーケストレーターが差し替えた継続指示（design.md §16.23 `update_task_prompt`）。
    * 設定されている間、以降の送信では`continuePrompt`の代わりにこの本文を使う。
@@ -3887,6 +3953,8 @@ export class WorkflowRunner {
       pendingPromptMetrics: undefined,
       promptMetricsTurn: 0,
       promptMetricsContractChars: 0,
+      sentContractDigest: undefined,
+      pendingContractDigest: undefined,
       continuePromptOverride: undefined,
       waitingReplySinceMs: undefined,
       waitingApprovalSinceMs: undefined,
@@ -3918,6 +3986,14 @@ export class WorkflowRunner {
     // 分割（Issue #1273）が同じ乱数で囲いを作れるよう控える。囲いのnonceが送信時の
     // `expandTemplate` と食い違うと、人にもモデルにも「どこまでが引用か」が揃わなくなる
     liveTask.templateNonce = templateNonce;
+    // 実行契約の全文はこのセッションの最初の送信にだけ載せる（Issue #1321）。ここは
+    // タスク開始と、コンテキスト残量による分割（Issue #1273）で新しいセッションへ
+    // 載せ替えたときの両方で呼ばれる。どちらもCLI側の会話履歴は空から始まるので、
+    // 「届け終えた」という印はそのたびに捨てる
+    liveTask.sentContractDigest = undefined;
+    liveTask.pendingContractDigest = undefined;
+    const contract = formatTaskExecutionContract(live.def, task);
+    const contractDigest = contract === '' ? undefined : taskExecutionContractDigest(contract);
     session.setPromptTransform((text) => {
       // 差し替えられた継続指示があればそちらを基準の本文にする（design.md §16.23
       // `update_task_prompt`）。**テンプレート変数は展開しない**（リテラルとして送る）。
@@ -3926,7 +4002,17 @@ export class WorkflowRunner {
       const override = liveTask.continuePromptOverride;
       const expanded =
         override === undefined ? expandTemplate(text, resultsMap, templateNonce) : override;
-      const contracted = composeTaskExecutionContract(live.def, task, expanded);
+      // 契約の全文はこのセッションで一度だけ。届け終えていれば参照だけを前置する
+      // （Issue #1321）。契約が変わればハッシュも変わり、そのターンだけ全文へ戻る
+      let contracted: string;
+      if (contractDigest === undefined) {
+        contracted = expanded;
+      } else if (liveTask.sentContractDigest === contractDigest) {
+        contracted = composeTaskExecutionContractReference(taskId, contractDigest, expanded);
+      } else {
+        contracted = composeTaskExecutionContract(live.def, task, expanded);
+        liveTask.pendingContractDigest = contractDigest;
+      }
       // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
       // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
       // ため、送信のたびにここで取りに行く必要がある
@@ -3968,13 +4054,14 @@ export class WorkflowRunner {
     );
     // 継続プロンプト（2回目以降に送る指示）の展開結果もViewで確認できるようにする
     // （design.md §16.4、セキュリティ監査指摘#6）。上記のとおりresultsMapは以後の
-    // ターンでも変わらないため、ここで一度計算した値が実際に送られる値と一致し続ける
+    // ターンでも変わらないため、ここで一度計算した値が実際に送られる値と一致し続ける。
+    // 契約は継続ターンでは参照へ置き換わる（Issue #1321）ので、表示もその形で出す。
+    // 契約の全文は`expandedPrompt`（初回の指示）側で確認できる
+    const expandedContinue = expandTemplate(task.continuePrompt, resultsMap, templateNonce);
     liveTask.expandedContinuePrompt = stripControlCharsPreservingNewlines(
-      composeTaskExecutionContract(
-        live.def,
-        task,
-        expandTemplate(task.continuePrompt, resultsMap, templateNonce),
-      ),
+      contractDigest === undefined
+        ? expandedContinue
+        : composeTaskExecutionContractReference(taskId, contractDigest, expandedContinue),
     );
   }
 
@@ -5233,6 +5320,15 @@ export class WorkflowRunner {
     // `thread/status/changed`（idle）を`turn/completed`より先に送るため
     const turnCompleted = liveTask.lastTurnCompletionSeq !== state.turnCompletionSeq;
     liveTask.lastTurnCompletionSeq = state.turnCompletionSeq;
+    // 実行契約の全文が会話履歴へ載ったと見なすのは、そのターンが成功で確定したときだけ
+    // （Issue #1321）。失敗したターンは本文がCLIの履歴へ残ったかどうかが判らないため、
+    // 未送信のままにして次のターンでもう一度全文を送る
+    if (turnCompleted && liveTask.pendingContractDigest !== undefined) {
+      if (state.turnFailed !== true) {
+        liveTask.sentContractDigest = liveTask.pendingContractDigest;
+      }
+      liveTask.pendingContractDigest = undefined;
+    }
     // 送信本文の計測（Issue #1320）。送信時に測った値をここまで持ち越し、そのターンの
     // トークン数と突き合わせて1行に出す。記録ファイルの読み直しもこのときだけ
     const pendingMetrics = liveTask.pendingPromptMetrics;

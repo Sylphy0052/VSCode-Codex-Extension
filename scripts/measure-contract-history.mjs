@@ -14,21 +14,30 @@
 // モデルを実際に呼ぶターンを複数回まわす必要があり、認証と利用枠を消費する。テストとして
 // 置くとCIが恒常的に赤になるため、手元で明示的に走らせる計測スクリプトにしてある。
 //
-// 使い方:
-//   node scripts/measure-contract-history.mjs                 # codexとclaudeの両方を3ターン
-//   node scripts/measure-contract-history.mjs --provider codex
-//   node scripts/measure-contract-history.mjs --turns 4
+// 契約の送り方は2通りを測れる（Issue #1321）。
 //
-// 契約の出現回数を数えるロジックは本番実装（src/orchestrator/promptMetrics.ts）を
-// esbuildでその場にバンドルして読み込む。計測用に数え方を書き写すと、本番の
-// `[promptMetrics ...] history=` と違う数を出しても気づけないため。
+// - `--mode full`: 全ターンへ契約の全文を前置する（#1321より前の挙動）
+// - `--mode reference`: 初回だけ全文、2ターン目以降は識別子とハッシュの参照だけ（#1321の挙動）
+// - `--mode both`（既定）: 両方を別々のスレッドで走らせて並べる
+//
+// 使い方:
+//   node scripts/measure-contract-history.mjs                       # 全プロバイダ・両モード・3ターン
+//   node scripts/measure-contract-history.mjs --provider codex
+//   node scripts/measure-contract-history.mjs --mode reference --turns 4
+//
+// 送る本文と契約の出現回数の数え方は、どちらも本番実装をesbuildでその場にバンドルして
+// 読み込む（`src/orchestrator/runner.ts` の `composeTaskExecutionContract` /
+// `composeTaskExecutionContractReference`、`src/orchestrator/promptMetrics.ts` の
+// `countContractsInSessionRecord`）。計測用に写すと、本番が送る本文や出力パネルの
+// `[promptMetrics ...] history=` と食い違っても気づけないため。
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { clearTimeout, setTimeout } from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -42,44 +51,91 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** ターン完了から記録ファイルへ書き終わるまでの遅れを吸収するポーリング。 */
 const SESSION_FILE_POLL_INTERVAL_MS = 500;
 const SESSION_FILE_POLL_ATTEMPTS = 20;
+/** 契約が増えるのをどこまで待つか。ここを過ぎたら「増えない」を答えとして受け取る。 */
+const GROWTH_WAIT_ATTEMPTS = 6;
 /** セッション記録ファイルを探すときに降りる深さ（runner.tsのSESSION_FILE_SEARCH_DEPTHと同じ）。 */
 const SESSION_FILE_SEARCH_DEPTH = 4;
 
 const TERMINATE_GRACE_MS = 5_000;
 const TERMINATE_KILL_MS = 5_000;
 
-// 実行契約の代わりに送る本文。`formatTaskExecutionContract`（src/orchestrator/runner.ts:203）
-// が出す形を、計測に要る骨格だけ残して写してある。見出しの2行が
-// `measurePromptText` / `countContractsInSessionRecord` の数える対象そのもの。
-const CONTRACT_BLOCK = [
-  '## 実行契約',
-  '### 全体ゴール',
-  'Issue #1320の受入基準4を実測する。',
-  '',
-  '### 全体の受入条件',
-  '- 同一スレッドで複数ターン送ったとき、セッション記録に残る実行契約の数が増えるかを判定できる',
-  '',
-  '### このタスクの成果',
-  '計測用のダミー契約。内容に意味は無く、行数と見出しだけが計測対象。',
-].join('\n');
+// 契約の中身として使うワークフロー定義。`formatTaskExecutionContract` がそのまま読む形
+// （`WorkflowDefinition` / `WorkflowTask`）で、計測に要るフィールドだけを埋めてある。
+const MEASURE_DEPENDENCY = {
+  id: 'T0',
+  outcome: '計測対象のCLIとそのバージョンを確定させる。',
+  outputs: ['計測対象のCLI一覧'],
+  dependsOn: [],
+};
+
+const MEASURE_TASK = {
+  id: 'T1',
+  outcome: '計測用のダミータスク。内容に意味は無く、契約の分量と見出しだけが計測対象。',
+  evidence: ['src/orchestrator/runner.ts', 'src/orchestrator/promptMetrics.ts'],
+  outputs: ['計測ログ'],
+  risks: ['実CLIを呼ぶため認証と利用枠を消費する'],
+  // 契約の「依存タスクから受け取る成果」を埋めるために1件だけ依存させる。この節は
+  // `--probe` で遵守を確かめるときの問いの答えになる
+  dependsOn: ['T0'],
+};
+
+const MEASURE_DEFINITION = {
+  goal: '実行契約がCLI側の会話履歴へ積み上がるかを実測する（Issue #1320・#1321）。',
+  acceptance: [
+    '同一スレッドで複数ターン送ったとき、セッション記録に残る実行契約の数の増え方を判定できる',
+    '契約の送り方（全文／参照）を変えたときの差を同じ物差しで比べられる',
+  ],
+  assumptions: ['計測は実CLIを直接叩き、VSCodeとオーケストレーターを介さない'],
+  nonGoals: ['モデルの応答内容そのものの評価', '計測結果にもとづく削減の実装'],
+  tasks: [MEASURE_DEPENDENCY, MEASURE_TASK],
+};
+
+/**
+ * 契約の遵守を確かめる最後のターンの問い（`--probe`。Issue #1321 受入基準4）。
+ *
+ * 参照だけを前置したターンでも、初回に読んだ契約の内容を引き続き守れているかを見る。
+ * 答えは契約の「対象外」と「依存タスクから受け取る成果」にしか書かれていないため、
+ * 履歴の契約を参照できていなければ答えられない。
+ */
+const PROBE_INSTRUCTION =
+  '実行契約に書かれている「対象外」の項目と、「依存タスクから受け取る成果」の項目を、' +
+  '推測を混ぜずにそのまま列挙してください。契約に無い項目は足さないこと。';
 
 /** そのターンの指示。モデルにツールを使わせないよう、短く答えられるものにする。 */
-function turnPrompt(turn) {
-  return [
-    CONTRACT_BLOCK,
-    '',
-    '## 今回の指示',
-    `これは計測用のターン${turn}です。ツールは一切使わず、「ack ${turn}」とだけ返してください。`,
-  ].join('\n');
+function turnInstruction(turn) {
+  return `これは計測用のターン${turn}です。ツールは一切使わず、「ack ${turn}」とだけ返してください。`;
+}
+
+/**
+ * そのターンにCLIへ送る本文を、本番実装と同じ関数で組み立てる。
+ *
+ * `full`は全ターンへ全文を前置する（Issue #1321より前の挙動）。`reference`は初回だけ
+ * 全文で、2ターン目以降は識別子とハッシュの参照に置き換える（#1321の挙動）。
+ */
+function buildTurnPrompt(runner, mode, turn, instructionOverride) {
+  const instruction = instructionOverride ?? turnInstruction(turn);
+  if (mode === 'full' || turn === 1) {
+    return runner.composeTaskExecutionContract(MEASURE_DEFINITION, MEASURE_TASK, instruction);
+  }
+  const contract = runner.formatTaskExecutionContract(MEASURE_DEFINITION, MEASURE_TASK);
+  const digest = runner.taskExecutionContractDigest(contract);
+  return runner.composeTaskExecutionContractReference(MEASURE_TASK.id, digest, instruction);
 }
 
 function parseArgs(argv) {
   let provider = 'both';
+  let mode = 'both';
   let turns = 3;
+  let probe = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--provider') {
       provider = argv[i + 1] ?? provider;
+      i += 1;
+      continue;
+    }
+    if (arg === '--mode') {
+      mode = argv[i + 1] ?? mode;
       i += 1;
       continue;
     }
@@ -88,39 +144,59 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--probe') {
+      probe = true;
+      continue;
+    }
     throw new Error(`未知の引数: ${arg}`);
   }
   if (!['codex', 'claude', 'both'].includes(provider)) {
     throw new Error(`--providerはcodex/claude/bothのいずれか: ${provider}`);
   }
+  if (!['full', 'reference', 'both'].includes(mode)) {
+    throw new Error(`--modeはfull/reference/bothのいずれか: ${mode}`);
+  }
   if (!Number.isInteger(turns) || turns < 2) {
     throw new Error(`--turnsは2以上の整数（増えるかを見るため2ターン以上要る）: ${turns}`);
   }
-  return { provider, turns };
+  return { provider, mode, turns, probe };
 }
 
 /**
- * 本番の計測ロジックを読み込む。
+ * 本番の実装を読み込む。
  *
- * src/orchestrator/promptMetrics.ts はvscodeにも他モジュールにも依存していないため、
- * 単体でESMへバンドルできる。
+ * 数え方（`promptMetrics.ts`）と、CLIへ送る本文の組み立て（`runner.ts`）の両方を、
+ * 計測側で写さず本物のまま使う。`runner.ts` は `vscode` を型としてしか使っていないため、
+ * 外部化すればNodeから読み込める。
  */
-async function loadPromptMetrics() {
-  const outDir = mkdtempSync(join(tmpdir(), 'prompt-metrics-bundle-'));
-  const outFile = join(outDir, 'promptMetrics.mjs');
+async function loadProductionModules() {
+  const outDir = mkdtempSync(join(tmpdir(), 'contract-history-bundle-'));
+  const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src/orchestrator');
   const esbuild = await import('esbuild');
-  await esbuild.build({
-    // 実行時のカレントディレクトリに依存させない（どこから起動しても同じものを測る）
-    entryPoints: [
-      resolve(dirname(fileURLToPath(import.meta.url)), '../src/orchestrator/promptMetrics.ts'),
-    ],
-    bundle: true,
-    format: 'esm',
-    platform: 'node',
-    outfile: outFile,
-  });
-  const mod = await import(pathToFileURL(outFile).href);
-  return { mod, cleanup: () => rmSync(outDir, { recursive: true, force: true }) };
+  // CommonJSへ出す。`runner.ts` が依存する `yaml` はCJSで配布されており、ESMへ束ねると
+  // バンドル内の `require` 代替が実行時に `Dynamic require of "process" is not supported`
+  // で落ちる（実測）。読み込む側もCJSのまま扱えば、この差異に触れずに済む。
+  const require = createRequire(import.meta.url);
+  const build = async (name) => {
+    const outFile = join(outDir, `${name}.cjs`);
+    await esbuild.build({
+      // 実行時のカレントディレクトリに依存させない（どこから起動しても同じものを測る）
+      entryPoints: [join(srcDir, `${name}.ts`)],
+      bundle: true,
+      format: 'cjs',
+      platform: 'node',
+      external: ['vscode'],
+      outfile: outFile,
+    });
+    return require(outFile);
+  };
+  const promptMetrics = await build('promptMetrics');
+  const runner = await build('runner');
+  return {
+    promptMetrics,
+    runner,
+    cleanup: () => rmSync(outDir, { recursive: true, force: true }),
+  };
 }
 
 /** ディレクトリを深さ優先で辿り、名前が`suffix`で終わる最初のファイルを返す。 */
@@ -159,9 +235,11 @@ function findFileBySuffix(dir, suffix, depth) {
  *
  * ターン完了の通知が届いてもCLIが記録を書き終えているとは限らない。1ターン分の本文が
  * 複数のレコードに分かれて書かれるCLIもあるため（Codexは会話履歴用とUIイベント用の2件）、
- * 「読めた数が前ターンから増え、かつ連続して同じ値で落ち着いた」ところで確定させる。
- * 増えないまま上限回数に達した場合は、そのとき読めた数をそのまま返す（増えないという
- * 結果自体が答えでありうるため）。
+ * 「連続して同じ値で落ち着いた」ところで確定させる。
+ *
+ * 増えるはずのターン（全文を送ったターン）では、書き終わる前の値で早々に落ち着いたと
+ * 誤認しないよう、前ターンから増えるまで待つ。参照だけを送ったターン（Issue #1321）は
+ * そもそも増えないのが正しいので、一定回数まで待って増えなければその値を答えとする。
  */
 async function countContractsInSession(countFn, dirs, threadId, previous) {
   const suffix = `${threadId}.jsonl`;
@@ -187,11 +265,50 @@ async function countContractsInSession(countFn, dirs, threadId, previous) {
     }
     stableFor = current === last ? stableFor + 1 : 0;
     last = current;
-    if (last > previous && stableFor >= 2) {
+    if (stableFor >= 2 && (last > previous || attempt >= GROWTH_WAIT_ATTEMPTS)) {
       return last;
     }
   }
   return last;
+}
+
+/**
+ * Codexのrolloutから、直近のアシスタント応答の本文を取り出す（`--probe`用）。
+ *
+ * Claude Codeは`result`メッセージが最終応答をそのまま持つのに対し、Codexのapp-serverは
+ * 応答本文をターン完了の通知へ載せない。記録ファイル側から拾う。
+ */
+async function readLastAssistantText(dirs, threadId) {
+  const suffix = `${threadId}.jsonl`;
+  // 応答が書き終わるまでの遅れを、契約数の待ちと同じ間隔で吸収する
+  await delay(SESSION_FILE_POLL_INTERVAL_MS * 2);
+  for (const dir of dirs) {
+    const found = findFileBySuffix(dir, suffix, SESSION_FILE_SEARCH_DEPTH);
+    if (found === undefined) {
+      continue;
+    }
+    let text;
+    for (const line of readFileSync(found, 'utf8').split('\n')) {
+      if (line.trim() === '') {
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (parsed.type !== 'response_item' || parsed.payload?.role !== 'assistant') {
+        continue;
+      }
+      const content = parsed.payload?.content;
+      if (Array.isArray(content) && typeof content[0]?.text === 'string') {
+        text = content[0].text;
+      }
+    }
+    return text;
+  }
+  return undefined;
 }
 
 function terminateProcess(proc) {
@@ -272,7 +389,8 @@ function readJsonLines(stream, onMessage) {
 
 // ---------------------------------------------------------------- Codex
 
-async function measureCodex(countFn, turns) {
+async function measureCodex(ctx, turns, mode, probe) {
+  const { countFn, runner } = ctx;
   const cwd = mkdtempSync(join(tmpdir(), 'contract-history-codex-'));
   // CODEX_HOMEは既定（~/.codex）のまま使う。認証情報が要るうえ、記録ファイルの置き場所も
   // 拡張機能が実際に読む場所（extension.ts の paths.sessions）と揃えたいため。
@@ -380,10 +498,11 @@ async function measureCodex(countFn, turns) {
     let previousCount = 0;
     for (let turn = 1; turn <= turns; turn += 1) {
       lastUsage = undefined;
+      const prompt = buildTurnPrompt(runner, mode, turn);
       const ended = waitTurnEnd();
       const response = await request('turn/start', {
         threadId,
-        input: [{ type: 'text', text: turnPrompt(turn) }],
+        input: [{ type: 'text', text: prompt }],
       });
       if (response.error !== undefined) {
         throw new Error(`turn/startが失敗した: ${JSON.stringify(response.error)}`);
@@ -395,14 +514,30 @@ async function measureCodex(countFn, turns) {
       rows.push({
         turn,
         history,
+        promptChars: prompt.length,
         status: event.method === 'turn/failed' ? 'failed' : (status ?? 'completed'),
         usage: lastUsage,
       });
       process.stdout.write(
-        `[codex] turn=${turn} history=${history ?? '-'} status=${rows[rows.length - 1].status}\n`,
+        `[codex] turn=${turn} history=${history ?? '-'} chars=${prompt.length} status=${rows[rows.length - 1].status}\n`,
       );
     }
-    return { threadId, rows };
+    let probeAnswer;
+    if (probe) {
+      const ended = waitTurnEnd();
+      const response = await request('turn/start', {
+        threadId,
+        input: [
+          { type: 'text', text: buildTurnPrompt(runner, mode, turns + 1, PROBE_INSTRUCTION) },
+        ],
+      });
+      if (response.error !== undefined) {
+        throw new Error(`確認ターンのturn/startが失敗した: ${JSON.stringify(response.error)}`);
+      }
+      await ended;
+      probeAnswer = await readLastAssistantText(sessionDirs, threadId);
+    }
+    return { threadId, rows, probeAnswer };
   } finally {
     await terminateProcess(proc);
     rmSync(cwd, { recursive: true, force: true });
@@ -411,7 +546,8 @@ async function measureCodex(countFn, turns) {
 
 // ----------------------------------------------------------- Claude Code
 
-async function measureClaude(countFn, turns) {
+async function measureClaude(ctx, turns, mode, probe) {
+  const { countFn, runner } = ctx;
   const cwd = mkdtempSync(join(tmpdir(), 'contract-history-claude-'));
   const sessionId = randomUUID();
   const projectsDir = join(homedir(), '.claude', 'projects');
@@ -468,10 +604,14 @@ async function measureClaude(countFn, turns) {
     let previousCount = 0;
     for (let turn = 1; turn <= turns; turn += 1) {
       lastUsage = undefined;
+      const prompt = buildTurnPrompt(runner, mode, turn);
       const done = waitResult();
       const payload = {
         type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text: turnPrompt(turn) }] },
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: prompt }],
+        },
       };
       proc.stdin.write(`${JSON.stringify(payload)}\n`);
       const result = await done;
@@ -485,14 +625,31 @@ async function measureClaude(countFn, turns) {
       rows.push({
         turn,
         history,
+        promptChars: prompt.length,
         status: result.is_error === true ? 'failed' : (result.subtype ?? 'success'),
         usage: lastUsage,
       });
       process.stdout.write(
-        `[claude] turn=${turn} history=${history ?? '-'} status=${rows[rows.length - 1].status}\n`,
+        `[claude] turn=${turn} history=${history ?? '-'} chars=${prompt.length} status=${rows[rows.length - 1].status}\n`,
       );
     }
-    return { threadId: sessionId, rows };
+    let probeAnswer;
+    if (probe) {
+      const done = waitResult();
+      const payload = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: buildTurnPrompt(runner, mode, turns + 1, PROBE_INSTRUCTION) },
+          ],
+        },
+      };
+      proc.stdin.write(`${JSON.stringify(payload)}\n`);
+      const result = await done;
+      probeAnswer = typeof result.result === 'string' ? result.result : undefined;
+    }
+    return { threadId: sessionId, rows, probeAnswer };
   } finally {
     proc.stdin.end();
     await terminateProcess(proc);
@@ -514,64 +671,91 @@ async function measureClaude(countFn, turns) {
  * （会話履歴そのものの `response_item/message` と、UI向けの `event_msg/item_completed`）。
  * 判定に効くのは増分が一定かどうかであって、その値そのものではない。
  */
-function judge(rows) {
+function judge(rows, mode) {
   const counts = rows.map((row) => row.history);
   if (counts.some((count) => count === undefined)) {
     return '判定不能（セッション記録ファイルを読めなかったターンがある）';
   }
   const deltas = counts.map((count, index) => (index === 0 ? count : count - counts[index - 1]));
-  const step = deltas[0];
-  const steady = deltas.every((delta) => delta === step);
-  if (steady && step === 0) {
+  const first = deltas[0];
+  const rest = deltas.slice(1);
+  if (mode === 'reference') {
+    // 期待する形は「初回だけ積まれ、以降は増えない」（Issue #1321 受入基準1・3）
+    if (first > 0 && rest.every((delta) => delta === 0)) {
+      return `初回だけ積まれる（${counts.join(', ')}。継続ターンは契約を積まない）`;
+    }
+    return `期待と違う（${counts.join(', ')}。継続ターンでも契約が積まれている）`;
+  }
+  const steady = deltas.every((delta) => delta === first);
+  if (steady && first === 0) {
     return `積み上がらない（履歴の契約数が${counts[0]}のまま。#1321の二次膨張は成立しない）`;
   }
-  if (steady && step > 0) {
+  if (steady && first > 0) {
     return (
-      `積み上がる（1ターンあたり${step}件ずつ増える: ${counts.join(', ')}。` +
+      `積み上がる（1ターンあたり${first}件ずつ増える: ${counts.join(', ')}。` +
       '#1321の二次膨張は成立する）'
     );
   }
   return `一定でない伸び方（${counts.join(', ')}。記録の形を直接確かめる必要がある）`;
 }
 
-function formatUsage(usage) {
+/**
+ * そのターンの入力トークン数を、プロバイダごとの形から取り出す。
+ *
+ * Codexは`thread/tokenUsage/updated`の`tokenUsage.last`（そのターン分。`total`はスレッド
+ * 通算なので使わない）、Claude Codeは`result`の`usage`。キャッシュ読み取り分は名前が
+ * 違うだけで同じ意味の値なので、同じ列へ並べる。
+ */
+function readTurnTokens(provider, usage) {
   if (usage === undefined) {
-    return 'usage=-';
+    return { inputTokens: undefined, cachedInputTokens: undefined };
   }
-  return `usage=${JSON.stringify(usage)}`;
+  if (provider === 'codex') {
+    const last = usage.tokenUsage?.last;
+    return { inputTokens: last?.inputTokens, cachedInputTokens: last?.cachedInputTokens };
+  }
+  return {
+    inputTokens: usage.input_tokens,
+    cachedInputTokens: usage.cache_read_input_tokens,
+  };
 }
 
-function report(provider, outcome) {
-  process.stdout.write(`\n=== ${provider} ===\n`);
+function formatTokens(tokens) {
+  return `input=${tokens.inputTokens ?? '-'} cached=${tokens.cachedInputTokens ?? '-'}`;
+}
+
+function report(provider, mode, outcome) {
+  process.stdout.write(`\n=== ${provider} / mode=${mode} ===\n`);
   process.stdout.write(`threadId/sessionId: ${outcome.threadId}\n`);
   for (const row of outcome.rows) {
     process.stdout.write(
-      `turn=${row.turn} history=${row.history ?? '-'} status=${row.status} ${formatUsage(row.usage)}\n`,
+      `turn=${row.turn} history=${row.history ?? '-'} chars=${row.promptChars} ` +
+        `${formatTokens(readTurnTokens(provider, row.usage))} status=${row.status}\n`,
     );
   }
-  process.stdout.write(`判定: ${judge(outcome.rows)}\n`);
+  process.stdout.write(`判定: ${judge(outcome.rows, mode)}\n`);
+  if (outcome.probeAnswer !== undefined) {
+    process.stdout.write(`契約の遵守（確認ターンの応答）:\n${outcome.probeAnswer}\n`);
+  }
 }
 
 async function main() {
-  const { provider, turns } = parseArgs(process.argv.slice(2));
-  const { mod, cleanup } = await loadPromptMetrics();
-  const countFn = mod.countContractsInSessionRecord;
+  const { provider, mode, turns, probe } = parseArgs(process.argv.slice(2));
+  const { promptMetrics, runner, cleanup } = await loadProductionModules();
+  const ctx = { countFn: promptMetrics.countContractsInSessionRecord, runner };
+  const providers = provider === 'both' ? ['codex', 'claude'] : [provider];
+  const modes = mode === 'both' ? ['full', 'reference'] : [mode];
+  const measure = { codex: measureCodex, claude: measureClaude };
   const failures = [];
   try {
-    if (provider === 'codex' || provider === 'both') {
-      try {
-        report('codex', await measureCodex(countFn, turns));
-      } catch (e) {
-        failures.push(`codex: ${String(e)}`);
-        process.stderr.write(`[codex] 計測に失敗した: ${String(e)}\n`);
-      }
-    }
-    if (provider === 'claude' || provider === 'both') {
-      try {
-        report('claude', await measureClaude(countFn, turns));
-      } catch (e) {
-        failures.push(`claude: ${String(e)}`);
-        process.stderr.write(`[claude] 計測に失敗した: ${String(e)}\n`);
+    for (const target of providers) {
+      for (const currentMode of modes) {
+        try {
+          report(target, currentMode, await measure[target](ctx, turns, currentMode, probe));
+        } catch (e) {
+          failures.push(`${target}/${currentMode}: ${String(e)}`);
+          process.stderr.write(`[${target}] mode=${currentMode} の計測に失敗した: ${String(e)}\n`);
+        }
       }
     }
   } finally {
