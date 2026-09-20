@@ -743,6 +743,17 @@ export interface AutoHandoffDecisionInput {
   busy: boolean;
   /** このセッションで既に引き継ぎを始めたか。1セッションにつき1回だけにする。 */
   alreadyStarted: boolean;
+  /**
+   * バックグラウンドで走っているプロセスがあるか（Issue #1315）。
+   *
+   * 真の間はどの契機でも始めない。区切り待ちの契機は前段（`passesSafeBoundaryGate` の
+   * `backgroundRunning`、Issue #1307）が既に止めているが、残量の閾値（`threshold`）と
+   * 自動圧縮（`compactBoundary`）は前段を通らないため、ここでも見る必要がある。
+   *
+   * `alreadyStarted` は立てないため、これは取り消しではなく延期にあたる。走っていた
+   * プロセスが終われば`ChatState`が更新され、その時点で改めて判定が走る。
+   */
+  backgroundRunning?: boolean;
   /** コンテキストの残量。上限が判らないCLI・版では `undefined`。 */
   remainingPercent: number | undefined;
   /** 直前の状態から自動圧縮が走ったか。 */
@@ -888,9 +899,18 @@ export function safeBoundaryProbeKey(
  * 3つのうち `assistantSuggested` だけは分類器の `switchSafe` を要求せず、前段
  * （`boundaryGatePassed`）と `handoffSuggested` だけで成立する。他の2つは宣言が無いため、
  * 切り替えてよいかの判断を分類器に頼る必要がある。
+ *
+ * バックグラウンド実行中（`backgroundRunning`）はどの契機でも始めない（Issue #1315）。
+ * 残量の閾値と自動圧縮は「残量が尽きる方が損失が大きい」として区切りを待たずに発火する
+ * 作りだが、裏で走っているプロセスは完了時に引き継ぎ元を再び動かすため、そこで引き継ぐと
+ * 引き継ぎ先と引き継ぎ元が同じ作業を並行して進めることになる。
  */
 export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigger | undefined {
   if (!input.enabled || input.busy || input.alreadyStarted) {
+    return undefined;
+  }
+  // 契機の判定より先に見る。残量の閾値・自動圧縮もここで止める（Issue #1315）
+  if (input.backgroundRunning === true) {
     return undefined;
   }
   if (input.remainingPercent !== undefined && input.remainingPercent <= input.thresholdPercent) {
