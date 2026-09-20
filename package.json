@@ -1063,6 +1063,26 @@
           "scope": "window",
           "markdownDescription": "セカンドオピニオンの材料へ、押下時点のリポジトリ全体の写し（`after/`）を足し、判断に必要な範囲でその中を追加で読ませる。差分が触っていないファイル（依存先・型定義・設定・既存のテスト）にある問題を見つけられるようになる代わりに、1回答あたりのトークンが2割ほど増える。`false` にすると材料は差分と変更対象ファイルのベース側だけになり、リポジトリ全体の探索は行わない。写しを作れなかった場合は、この設定が `true` でも写し無しで実行する。"
         },
+        "agent.secondOpinion.diffIndex.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "セカンドオピニオンへ渡す差分が大きいとき、プロンプト本文へ差分の全文を貼る代わりに、変更の目次（ファイル一覧・増減行数・総サイズ・バイナリやリネームの有無）を置き、全量は材料ディレクトリの `changes.diff` を必ず読ませる。同じ差分を本文とファイルの両方へ渡す二重掲載が無くなり、1回の相談で送る量が減る。小さい差分は従来どおり本文へ全文を貼る（`agent.secondOpinion.diffIndex.inlineMaxTokens` 以下のとき）。`false` にすると常に本文へ全文を貼る従来の動作へ戻る。"
+        },
+        "agent.secondOpinion.diffIndex.inlineMaxTokens": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 0,
+          "scope": "window",
+          "markdownDescription": "差分をプロンプト本文へ全文貼る上限（トークンの概算）。これ以下なら従来どおり全文を貼る。超えると目次へ切り替わる。`agent.secondOpinion.diffIndex.enabled` が `false` のときは使わない。トークン数はtokenizerではなく概算（ASCIIを4文字/トークン、日本語などを1.2文字/トークン）で数える。"
+        },
+        "agent.secondOpinion.diffIndex.hunkMaxTokens": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 0,
+          "scope": "window",
+          "markdownDescription": "目次へ hunk のheader行（`@@ ... @@` と直近の関数名）を添える上限（トークンの概算）。`agent.secondOpinion.diffIndex.inlineMaxTokens` を超えてこの値以下なら「目次 + hunkのheader + `changes.diff` の参照」、この値を超えると「目次 + `changes.diff` の参照」になる。`inlineMaxTokens` より小さい値を指定した場合は `inlineMaxTokens` と同じ値として扱う。"
+        },
         "agent.secondOpinion.advisor.enabled": {
           "type": "boolean",
           "default": true,
@@ -1668,6 +1688,7 @@
     "test:integration:xvfb": "npm run build:integration && bash scripts/xvfb-vscode-test.sh",
     "test:external-cli": "node scripts/run-external-cli-tests.mjs",
     "measure:contract-history": "node scripts/measure-contract-history.mjs",
+    "measure:second-opinion-prompt": "node scripts/measure-second-opinion-prompt.mjs",
     "check": "bash scripts/check.sh",
     "package": "npm run build && vsce package --no-dependencies"
   },

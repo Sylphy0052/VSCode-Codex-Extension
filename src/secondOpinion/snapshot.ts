@@ -17,6 +17,7 @@ import {
   type GitCommandRunner,
 } from '../orchestrator/worktree';
 import { applyDiffBudget } from './diffBudget';
+import { buildDiffIndex } from './diffIndex';
 import type { WorkspaceSnapshot } from './prompt';
 import {
   collectUntrackedFiles,
@@ -242,6 +243,10 @@ export async function captureWorkspaceSnapshot(
       diffPartials: budgeted.partials,
       untrackedFiles: untracked.files,
       untrackedOmissions: untracked.omissions,
+      // 目次は**切り詰める前**の差分から作る（Issue #1322）。`budgeted.diff` から作ると、
+      // 上限で落としたファイルが目次からも消え、`changes.diff`（全量）の案内として
+      // 食い違う
+      diffIndex: buildDiffIndex(diff),
     },
   };
 }

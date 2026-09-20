@@ -465,7 +465,14 @@ export async function startSecondOpinion(
     // Advisorの作業ディレクトリを、押下時点の材料だけを置いた一時ディレクトリにする
     // （Issue #926 E）。作れなかったときは実行しない。親セッションの作業ツリーで開く形へ
     // 戻すのは、この変更で無くしたかった状態そのものである
-    const created = await createBundleFor(cwd, git, captured, config.afterTree, log);
+    const created = await createBundleFor(
+      cwd,
+      git,
+      captured,
+      config.afterTree,
+      config.diffPresentation !== undefined,
+      log,
+    );
     bundle = created?.bundle;
     if (created === undefined || bundle === undefined) {
       void vscode.window.showErrorMessage(
@@ -532,6 +539,9 @@ export async function startSecondOpinion(
         // 「この写しの中でなら追加で読んでよい」へ変わる（Issue #1062）
         afterTreeDir: created.afterTreeDir,
         afterTreeNoticeFile: created.afterTreeNoticeFile,
+        // 差分が大きいときに本文を目次へ置き換える（Issue #1322）。設定で切っていれば
+        // `undefined` で、本文は従来どおり差分の全文になる
+        diffPresentation: config.diffPresentation,
       },
       log,
     );
@@ -563,7 +573,7 @@ export async function startSecondOpinion(
       bundle,
       // 相談の途中で材料を最新へ更新する手段（Issue #975）。作業ツリーの変更を資料に
       // 選んだときだけ渡す（それ以外の資料には、更新すべき材料が無い）
-      materialWriterFor(cwd, git, captured, log),
+      materialWriterFor(cwd, git, captured, config.diffPresentation !== undefined, log),
       created.afterTreeDir,
     );
   } finally {
@@ -671,6 +681,11 @@ function materialWriterFor(
   cwd: string,
   git: GitCommandRunner,
   captured: CapturedArtifact,
+  /**
+   * 未追跡ファイルを `untracked/` へ書き出すか（Issue #1322）。1世代目と同じ条件にする。
+   * 世代ごとに構造が変わると、Advisorは前の世代で見た場所を次の世代で探して空振りする。
+   */
+  wantUntracked: boolean,
   log: Logger,
 ): AdvisorMaterialWriter | undefined {
   if (captured.artifact.kind !== 'workspaceChanges' || captured.material === undefined) {
@@ -696,6 +711,7 @@ function materialWriterFor(
       baseCommit: next.snapshot.baseCommit,
       fullDiff: next.material.fullDiff,
       changedPaths: next.material.changedPaths,
+      ...(wantUntracked ? { untrackedFiles: next.snapshot.untrackedFiles } : {}),
       log,
     });
   };
@@ -731,6 +747,11 @@ async function createBundleFor(
   git: GitCommandRunner,
   captured: CapturedArtifact,
   wantAfterTree: boolean,
+  /**
+   * 未追跡ファイルを `untracked/` へ書き出すか（Issue #1322）。差分を目次へ置き換える
+   * 設定のときだけ真になる。本文へ全文を貼る設定では参照先が要らない。
+   */
+  wantUntracked: boolean,
   log: Logger,
 ): Promise<CreatedBundle | undefined> {
   const root = defaultReviewBundleRoot();
@@ -747,6 +768,7 @@ async function createBundleFor(
       baseCommit: snapshot.baseCommit,
       fullDiff: material.fullDiff,
       changedPaths: material.changedPaths,
+      ...(wantUntracked ? { untrackedFiles: snapshot.untrackedFiles } : {}),
       log,
     };
     // 写しを作れる材料が揃っているときだけ試す。`applyDiff` が `undefined` なのは押下時の
