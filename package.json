@@ -1667,6 +1667,7 @@
     "test:integration": "npm run build:integration && vscode-test",
     "test:integration:xvfb": "npm run build:integration && bash scripts/xvfb-vscode-test.sh",
     "test:external-cli": "node scripts/run-external-cli-tests.mjs",
+    "measure:contract-history": "node scripts/measure-contract-history.mjs",
     "check": "bash scripts/check.sh",
     "package": "npm run build && vsce package --no-dependencies"
   },
