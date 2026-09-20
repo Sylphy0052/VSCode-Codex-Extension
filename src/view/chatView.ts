@@ -1110,6 +1110,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         enabled: state.autoHandoff,
         busy: state.busy,
         alreadyStarted: entry.autoHandoffStarted,
+        // 直前の`passesSafeBoundaryGate`で偽と確かめた値だが、呼び出しの形を揃えておく
+        // （Issue #1315）。ここだけ渡さないと、後で前段の条件が変わったときに漏れる
+        backgroundRunning: state.backgroundTerminals.length > 0,
         remainingPercent,
         compacted: false,
         thresholdPercent: readAutoHandoffThresholdPercent(),
