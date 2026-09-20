@@ -50,6 +50,8 @@ export const initialClaudeState: ChatState = {
   // Claude Codeには `thread/tokenUsage/updated` に相当する通知が無く、常にundefinedのまま
   // （Codexのみ、issue #294）
   sessionTokens: undefined,
+  // `result` イベントの `usage` から埋まる（Issue #1320）。最初のターンが終わるまでundefined
+  turnTokens: undefined,
   planMode: false,
   // 自動引き継ぎ（Issue #1079）は拡張機能側だけで完結する状態で、CLIには対応する概念が無い
   autoHandoff: false,
@@ -400,11 +402,30 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
   const subtype = str(event['subtype']);
   const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
+  // そのターンのトークン内訳（Issue #1320）。`result` はターン単位の集計なので、
+  // Codexの `last`（直近のAPI呼び出し1回分）と違ってターンと1対1で対応する。
+  // キャッシュ読み取り分は `cache_read_input_tokens`、初回書き込み分は
+  // `cache_creation_input_tokens` に分かれて来るため、投入量として両方を足す
+  const usage = rec(event['usage']);
+  const cacheRead = num(usage?.['cache_read_input_tokens']);
+  const cacheCreation = num(usage?.['cache_creation_input_tokens']);
+  const turnTokens =
+    usage === undefined
+      ? state.turnTokens
+      : {
+          inputTokens: num(usage['input_tokens']),
+          cachedInputTokens:
+            cacheRead === undefined && cacheCreation === undefined
+              ? undefined
+              : (cacheRead ?? 0) + (cacheCreation ?? 0),
+          outputTokens: num(usage['output_tokens']),
+        };
   return {
     ...state,
     busy: false,
     turnFailed: failed,
     turnResultText: str(event['result']),
+    turnTokens,
     // ターンの結果が確定した（issue #939）。Codexの `turn/completed` に対応する
     turnCompletionSeq: state.turnCompletionSeq + 1,
   };

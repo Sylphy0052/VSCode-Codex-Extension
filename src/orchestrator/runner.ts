@@ -68,6 +68,12 @@ import {
 } from './messaging';
 import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
 import { reviewTaskPullRequest } from './planner';
+import {
+  countContractsInSessionRecord,
+  formatPromptMetricsLine,
+  measurePromptText,
+  type PromptMetrics,
+} from './promptMetrics';
 import type { SessionBridgePort } from './sessionBridge';
 import {
   applyLoopStopReason,
@@ -379,6 +385,19 @@ export interface WorkflowRunnerDeps {
   readBaseline: () => ExtensionSafetyBaseline;
   /** PR/MRの作成（design.md §16.18）。省略時は行わない（上のJSDoc参照）。 */
   forge?: WorkflowRunnerForgeDeps;
+  /**
+   * 送信本文の計測（Issue #1320）。**省略可能**で、省略された場合は計測しない
+   * （`forge` / `pseudoWorktree` と同じ設計判断）。
+   *
+   * `enabled`は送信のたびに読み直す（設定を切り替えた直後のターンから効かせるため）。
+   * `sessionFileDirs`はセッションの記録ファイルを探すディレクトリで、Codexなら
+   * `CodexPaths.sessions`と`archivedSessions`、Claude Codeなら`ClaudePaths.projects`。
+   * 記録ファイルは計測が有効なターンの終わりにだけ読み直す。
+   */
+  promptMetrics?: {
+    enabled: () => boolean;
+    sessionFileDirs: Record<Provider, readonly string[]>;
+  };
   /**
    * 疑似worktree（design.md §16.20）。gitの作業ツリーでないワークスペースで
    * `isolation: worktree`（既定）のタスクを走らせるときの隔離手段。**省略可能。**
@@ -1279,6 +1298,19 @@ export interface LiveTask {
    * （Trojan Source対策。表示用は改行を残す）。
    */
   lastSentPrompt: string | undefined;
+  /**
+   * 送信本文の計測（Issue #1320）。`agent.orchestrator.promptMetrics.enabled` が有効な間だけ
+   * 埋まる。`setPromptTransform`が送信のたびに測って置き、ターンが確定した時点で
+   * `input_tokens`と突き合わせて1行に出す。出したら`undefined`へ戻す。
+   *
+   * 送信時点ではそのターンのトークン数がまだ判らないため、測った値をここで持ち越す。
+   * 永続化しない（`lastSentPrompt`と同じく表示・計測専用）。
+   */
+  pendingPromptMetrics: PromptMetrics | undefined;
+  /** 計測した送信の回数（1始まり、Issue #1320）。計測が無効な間は0のまま。 */
+  promptMetricsTurn: number;
+  /** 計測した契約文字数の累計（Issue #1320）。計測が無効な間は0のまま。 */
+  promptMetricsContractChars: number;
   /**
    * オーケストレーターが差し替えた継続指示（design.md §16.23 `update_task_prompt`）。
    * 設定されている間、以降の送信では`continuePrompt`の代わりにこの本文を使う。
@@ -3852,6 +3884,9 @@ export class WorkflowRunner {
       expandedPrompt: undefined,
       expandedContinuePrompt: undefined,
       lastSentPrompt: undefined,
+      pendingPromptMetrics: undefined,
+      promptMetricsTurn: 0,
+      promptMetricsContractChars: 0,
       continuePromptOverride: undefined,
       waitingReplySinceMs: undefined,
       waitingApprovalSinceMs: undefined,
@@ -3906,6 +3941,14 @@ export class WorkflowRunner {
       // §16.21）表示専用の値のため、Trojan Source対策として`stripControlCharsPreservingNewlines`
       // を通す（改行はプロンプトの整形を保つため残す。CLIへ送る`composed`自体は変更しない）
       liveTask.lastSentPrompt = stripControlCharsPreservingNewlines(composed);
+      // 送信本文の計測（Issue #1320）。数えるだけで`composed`へは何も足さない。
+      // 記録ファイルの読み直しとログ出力はターンが確定してから（`onTaskStateChanged`）
+      if (this.deps.promptMetrics?.enabled() === true) {
+        liveTask.promptMetricsTurn += 1;
+        const metrics = measurePromptText(composed);
+        liveTask.promptMetricsContractChars += metrics.contractChars;
+        liveTask.pendingPromptMetrics = metrics;
+      }
       return composed;
     });
     // Viewで「展開後のプロンプトを実際の文面として確認できる」ようにするための表示専用の値
@@ -5190,10 +5233,53 @@ export class WorkflowRunner {
     // `thread/status/changed`（idle）を`turn/completed`より先に送るため
     const turnCompleted = liveTask.lastTurnCompletionSeq !== state.turnCompletionSeq;
     liveTask.lastTurnCompletionSeq = state.turnCompletionSeq;
+    // 送信本文の計測（Issue #1320）。送信時に測った値をここまで持ち越し、そのターンの
+    // トークン数と突き合わせて1行に出す。記録ファイルの読み直しもこのときだけ
+    const pendingMetrics = liveTask.pendingPromptMetrics;
+    if (turnCompleted && pendingMetrics !== undefined) {
+      liveTask.pendingPromptMetrics = undefined;
+      void this.emitPromptMetrics(runId, taskId, live, liveTask, state, pendingMetrics);
+    }
     this.maybeActOnContextLow(runId, taskId, live, liveTask, state, turnCompleted);
     // 状態変化のたびにViewへ知らせる。永続化（persist）は送信回数の節目だけに絞ったままだが、
     // 表示専用の通知はストリーミング中の要約更新でも毎回出す
     this.notify(runId);
+  }
+
+  /**
+   * 送信本文の計測を出力パネルへ1行出す（Issue #1320）。
+   *
+   * 失敗しても走行には影響させない（計測のためにタスクを止めない）。記録ファイルが
+   * 読めなければ`history=-`のまま出す。
+   */
+  private async emitPromptMetrics(
+    runId: string,
+    taskId: string,
+    live: LiveRun,
+    liveTask: LiveTask,
+    state: ChatState,
+    metrics: PromptMetrics,
+  ): Promise<void> {
+    try {
+      const provider = live.def.tasks.find((t) => t.id === taskId)?.provider;
+      const dirs =
+        provider === undefined ? [] : (this.deps.promptMetrics?.sessionFileDirs[provider] ?? []);
+      const contractsInHistory = await countContractsInSessionFileFor(dirs, state.threadId);
+      this.deps.log.info(
+        formatPromptMetricsLine({
+          runId,
+          taskId,
+          turn: liveTask.promptMetricsTurn,
+          metrics,
+          cumulativeContractChars: liveTask.promptMetricsContractChars,
+          contractsInHistory,
+          inputTokens: state.turnTokens?.inputTokens,
+          cachedInputTokens: state.turnTokens?.cachedInputTokens,
+        }),
+      );
+    } catch (e) {
+      this.deps.log.info(`[promptMetrics ${runId}/${taskId}] 計測に失敗: ${String(e)}`);
+    }
   }
 
   private onTaskFinished(
@@ -5709,4 +5795,71 @@ export function retrySuffixOf(
 ): number | undefined {
   const total = (state?.retryCount ?? 0) + (state?.manualRetryCount ?? 0);
   return total > 0 ? total - 1 : undefined;
+}
+
+/** セッションの記録ファイルを探すときに降りるディレクトリの深さの上限（Issue #1320）。 */
+const SESSION_FILE_SEARCH_DEPTH = 4;
+
+/**
+ * セッションの記録ファイルに残っている実行契約の数を数える（Issue #1320）。
+ *
+ * ファイル名の末尾がスレッドidになっている点はCodexとClaude Codeで共通で、Codexは
+ * `rollout-<日時>-<id>.jsonl`、Claude Codeは`<id>.jsonl`。どちらも末尾一致で見つかる。
+ * 見つからない・読めない場合は`undefined`を返す（0と区別して`-`と出す）。
+ */
+async function countContractsInSessionFileFor(
+  dirs: readonly string[],
+  threadId: string | undefined,
+): Promise<number | undefined> {
+  if (threadId === undefined || threadId === '' || dirs.length === 0) {
+    return undefined;
+  }
+  const suffix = `${threadId}.jsonl`;
+  for (const dir of dirs) {
+    const found = await findFileBySuffix(dir, suffix, SESSION_FILE_SEARCH_DEPTH);
+    if (found === undefined) {
+      continue;
+    }
+    try {
+      return countContractsInSessionRecord(await fsPromises.readFile(found, 'utf8'));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** ディレクトリを深さ優先で辿り、名前が`suffix`で終わる最初のファイルを返す。 */
+async function findFileBySuffix(
+  dir: string,
+  suffix: string,
+  depth: number,
+): Promise<string | undefined> {
+  if (depth < 0) {
+    return undefined;
+  }
+  let entries;
+  try {
+    entries = await fsPromises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  const subdirs: string[] = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      subdirs.push(full);
+      continue;
+    }
+    if (entry.name.endsWith(suffix)) {
+      return full;
+    }
+  }
+  for (const sub of subdirs) {
+    const found = await findFileBySuffix(sub, suffix, depth - 1);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
 }

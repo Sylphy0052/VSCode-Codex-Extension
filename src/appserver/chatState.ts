@@ -387,6 +387,26 @@ export interface ContextUsage {
 }
 
 /**
+ * 直近のターンで消費したトークンの内訳（Issue #1320）。
+ *
+ * コンテキスト残量（`ContextUsage`）が「いま載っている総量」なのに対し、こちらは
+ * 「そのターンのAPI呼び出しで何トークン投入したか」を見るための値。送信本文の文字数と
+ * 突き合わせて、実行契約の再送がどれだけ入力を押し上げているかを測るのに使う。
+ *
+ * **Codexの値はターン厳密ではない**。`thread/tokenUsage/updated` の `last` は直近の
+ * API呼び出し1回分で、1ターンが複数回の呼び出しに分かれると最後の1回しか映らない
+ * （design.md §14.9）。Claude Codeの `result` イベントはターン単位の集計なので厳密。
+ */
+export interface TurnTokens {
+  /** キャッシュ読み取り分を含まない新規入力トークン。 */
+  inputTokens: number | undefined;
+  /** キャッシュから読んだ入力トークン。対応しないCLIでは undefined。 */
+  cachedInputTokens: number | undefined;
+  /** 出力トークン。 */
+  outputTokens: number | undefined;
+}
+
+/**
  * 使用量と上限から表示用の値を作る。
  *
  * 上限が無い・0以下・使用量が負といった信用できない値では割合を出さない。
@@ -568,6 +588,13 @@ export interface ChatState {
    */
   sessionTokens: number | undefined;
   /**
+   * 直近のターンで消費したトークンの内訳（Issue #1320）。まだ届いていない間は undefined。
+   *
+   * 送信本文の計測（`src/orchestrator/promptMetrics.ts`）と同じ行へ並べる用途だけに使う。
+   * 画面表示には使っていない。
+   */
+  turnTokens: TurnTokens | undefined;
+  /**
    * 追加クレジット（usage credits）の状態（Claude Codeのみ、issue #204、design.md §14.38）。
    *
    * `sessionCost`と同じく`get_usage`の応答から作る（同じ要求への同じ応答なので、追加の
@@ -698,6 +725,7 @@ export const initialChatState: ChatState = {
   context: undefined,
   sessionCost: undefined,
   sessionTokens: undefined,
+  turnTokens: undefined,
   planMode: false,
   autoHandoff: false,
   reviewing: false,
@@ -1529,18 +1557,27 @@ export function applyEvent(
       // `total` はスレッド全体の累計。コンテキストの占有量は `last` 側で、
       // 圧縮すると（実測で 21541 → 4831 のように）そちらだけが下がる
       const tokenUsage = rec(params['tokenUsage']);
-      const usedTokens = numberOf(rec(tokenUsage?.['last'])?.['totalTokens']);
+      const last = rec(tokenUsage?.['last']);
+      const usedTokens = numberOf(last?.['totalTokens']);
       if (tokenUsage === undefined || usedTokens === undefined) {
         return state;
       }
+      // 直近のAPI呼び出し1回分の内訳（Issue #1320）。`totalTokens` と同じ `last` の中にある。
+      // 1ターンが複数回の呼び出しに分かれると最後の1回しか映らない（design.md §14.9）
+      const turnTokens: TurnTokens = {
+        inputTokens: numberOf(last?.['inputTokens']),
+        cachedInputTokens: numberOf(last?.['cachedInputTokens']),
+        outputTokens: numberOf(last?.['outputTokens']),
+      };
       const context = buildContextUsage(usedTokens, numberOf(tokenUsage['modelContextWindow']));
       if (context === undefined) {
-        return state;
+        // 上限が読めず残量を出せない場合でも、内訳だけは計測へ回せるので残す
+        return { ...state, turnTokens };
       }
       // セッション累計のトークン数（issue #294）。読めない更新では前の値を保つ
       // （`account/rateLimits/updated` の usedPercent と同じ倒し方）
       const sessionTokens = numberOf(rec(tokenUsage['total'])?.['totalTokens']);
-      return { ...state, context, sessionTokens: sessionTokens ?? state.sessionTokens };
+      return { ...state, context, turnTokens, sessionTokens: sessionTokens ?? state.sessionTokens };
     }
 
     case 'turn/plan/updated': {
