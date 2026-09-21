@@ -953,7 +953,10 @@ export class LoopController {
     // 言われている状態で、達成の判定だけを見て続けない**
     if (advice?.severity === 'blocker') {
       // `blocker`と`achieved`は、優先順位の問題ではなく2つの役の判断の食い違いである
-      // （issue #964）。どちらかを黙って捨てず、食い違ったことごと人へ渡す
+      // （issue #964）。どちらかを黙って捨てず、食い違ったことごと人へ渡す。
+      // なお`conflicted`は現在は到達しない。`decideAdvisorTrigger`が`achieved`の周に
+      // `undefined`を返すため、達成した周にはAdvisorを呼ばないからである（issue #1323）。
+      // 分岐を残すのは、呼び出し条件を将来緩めたときの防御としてである
       this.stop(evaluation.verdict === 'achieved' ? 'conflicted' : 'advised');
       return;
     }

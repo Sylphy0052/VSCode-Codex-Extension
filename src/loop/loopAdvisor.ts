@@ -296,6 +296,11 @@ export const ADVISOR_COOLDOWN_TURNS = 3;
  *
  * ループ自体を止める停滞判定（`DEFAULT_STALL_REPEAT_COUNT`は4）より手前に置く。止める前に
  * 一度は別の目を入れて抜け道を探させるためで、止めてから人が見るのでは遅い。
+ *
+ * ただしこの前後関係が保たれるのは`agent.workflows.stallRepeatCount`が既定のときだけで
+ * ある。利用者が下限の`MIN_STALL_REPEAT_COUNT`（2）まで下げると、応答が2周同じになった
+ * 時点でループ自体が止まり、この理由でAdvisorを呼ぶ周は来なくなる。止める設定を明示的に
+ * 狭めた利用者の意図を優先し、こちらのしきい値は連動させない。
  */
 export const ADVISOR_NO_PROGRESS_THRESHOLD = 2;
 
@@ -304,6 +309,11 @@ export const ADVISOR_NO_PROGRESS_THRESHOLD = 2;
  *
  * `DEFAULT_MAX_INDETERMINATE`（3回で人へ渡す）より手前で呼ぶ。証拠が取れていない原因は
  * 進め方にあることが多く、人へ渡す前にAdvisorへ見せる価値がある。
+ *
+ * `ADVISOR_NO_PROGRESS_THRESHOLD`と同じく、この前後関係は
+ * `agent.chat.goalEvaluator.maxIndeterminate`が既定（3）のときのものである。利用者が1や2へ
+ * 下げると、Advisorを呼ぶ前に人へ渡る。人へ渡す回数を明示的に狭めた設定を、こちらの都合で
+ * 押し戻さない。
  */
 export const ADVISOR_INDETERMINATE_THRESHOLD = 2;
 

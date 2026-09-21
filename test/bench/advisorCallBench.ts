@@ -300,6 +300,17 @@ function main(): void {
   );
   const perTurn = (conditional.calls / conditional.iterations).toFixed(2);
   console.log(`1イテレーションあたりの呼び出し: ${perTurn}（変更前は 2.00）`);
+  // 平均だけでは「通常のイテレーションが2回から1回へ減った」ことを示せない（Advisorを呼ぶ
+  // 周が混ざった平均値にしかならない）ため、ターンの内訳を出す。受入基準4の根拠はここ
+  if (conditional.calls !== conditional.iterations + conditional.advisorCalls) {
+    throw new Error('呼び出しの内訳が合わない。1ターンあたりEvaluator1回という前提が崩れている');
+  }
+  const plainTurns = conditional.iterations - conditional.advisorCalls;
+  console.log(
+    `内訳: Advisorを呼ばなかった ${plainTurns}ターンは1回ずつ / ` +
+      `呼んだ ${conditional.advisorCalls}ターンは2回ずつ` +
+      `（変更前は全 ${legacy.iterations}ターンが2回ずつ）`,
+  );
 }
 
 main();
