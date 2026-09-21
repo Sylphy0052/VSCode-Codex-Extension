@@ -1,5 +1,6 @@
 import type { ChatItem, ChatState } from '../appserver/chatState';
 import {
+  countRepeatedTail,
   detectStalledLoop,
   extractTurnSignature,
   pushTurnSignature,
@@ -21,6 +22,7 @@ import {
   DEFAULT_MAX_INDETERMINATE,
   isSettledCommandItem,
   normalizeGoalDefinition,
+  type GoalEvaluation,
   type GoalEvaluator,
   type GoalEvidence,
   type GoalLoopConfig,
@@ -29,7 +31,10 @@ import { buildNextTurnPrompt, indeterminate } from './goalPrompt';
 import {
   ADVISOR_FAILURE_DISABLE_THRESHOLD,
   advisorFailed,
+  decideAdvisorTrigger,
+  gapsSignature,
   shouldAdvise,
+  toAdvisorEvidenceRefs,
   type LoopAdvisorConfig,
   type LoopAdvisorNote,
   type LoopAdvisorResult,
@@ -389,6 +394,21 @@ export class LoopController {
    */
   private stallHistory: string[] = [];
   /**
+   * 直近の評価で未達だった受入条件（`gaps`）の署名（issue #1323）。同じ場所で足踏みして
+   * いるかの比較にだけ使う。`start()`・`stop()`で戻す。
+   */
+  private lastGapsSignature: string | undefined;
+  /**
+   * 同じ未達の受入条件が続いた回数（issue #1323）。Advisorを呼ぶかの判断に使う。
+   * 未達の指摘が無い周・内容が変わった周で1に戻る。
+   */
+  private repeatedGapsStreak = 0;
+  /**
+   * 最後にAdvisorを呼んだターン（issue #1323）。まだ呼んでいなければ`undefined`。
+   * 呼ぶ間隔（`ADVISOR_COOLDOWN_TURNS`）の判定に使う。`start()`・`stop()`で戻す。
+   */
+  private lastAdvisedIteration: number | undefined;
+  /**
    * `start()`を呼んだ時刻（issue #891）。`LoopPlan.maxDurationMs`の判定に使う。
    * 走っていない間は`undefined`。`stop()`で戻す（前の実行の開始時刻を次へ持ち越さない）。
    */
@@ -608,6 +628,9 @@ export class LoopController {
     this.lastMessage = lastAgentMessage(existingItems);
     this.resultSeqAtTurnStart = undefined;
     this.indeterminateStreak = 0;
+    this.lastGapsSignature = undefined;
+    this.repeatedGapsStreak = 0;
+    this.lastAdvisedIteration = undefined;
     this.advisorFailureStreak = 0;
     this.advisorDisabled = false;
     this.runAbort = new AbortController();
@@ -656,6 +679,9 @@ export class LoopController {
     this.goalEvidence = [];
     this.seenEvidenceIds = new Set();
     this.indeterminateStreak = 0;
+    this.lastGapsSignature = undefined;
+    this.repeatedGapsStreak = 0;
+    this.lastAdvisedIteration = undefined;
     this.advisorFailureStreak = 0;
     this.advisorDisabled = false;
     // 待っている脇役のプロセスをその場で回収する。世代の判定で結果は既に捨てているが、
@@ -835,8 +861,9 @@ export class LoopController {
     const iteration = this.status.iteration;
     this.ingestEvidence(state, iteration);
 
-    // EvaluatorとAdvisorは**同じ材料**を見る（issue #957）。Advisorのために別途
-    // 材料を組み直すと、同じターンについて2人が違うものを見ることになる
+    // Evaluatorへ渡す材料。証拠の全文・直近の応答・要約を見るのはこちらだけで、
+    // Advisorへは同じものを渡さない（issue #1323。以前は同じ最大30,000字を毎ターン
+    // 2本へ送っていた）
     const input = {
       goal: goal.definition,
       evidence: this.goalEvidence,
@@ -844,32 +871,64 @@ export class LoopController {
       recentTurns: collectRecentTurns(state.items),
       iteration,
     };
-    // 連続失敗で呼ぶのをやめた後は、間隔の判定より先に降りる（issue #1009）
-    const advisor =
-      plan.advisor !== undefined &&
-      !this.advisorDisabled &&
-      shouldAdvise(iteration, plan.advisor.everyNTurns)
-        ? plan.advisor
-        : undefined;
-
-    // **Advisorを先に走らせてから、Evaluatorを待つ**（issue #957）。直列にすると1ターン
-    // あたりの待ち時間が素直に2倍になる。`Promise.all`で束ねないのは、Advisorを使わない
-    // ループのマイクロタスクの回数を変えないため（束ねると1tick増える）
     const signal = this.runAbort?.signal;
-    const advicePromise = advisor
-      ?.advise(input, signal)
-      .catch(() => advisorFailed('process-error'));
     // Evaluatorの実装が例外を投げてもループを壊さない。判定できなかったこと自体を
-    // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる。
-    // 両者は独立に`catch`しており、**片方が失敗しても他方の結果は使う**
+    // `indeterminate`として扱い、続けるか止めるかは下の共通の分岐へ委ねる
     const evaluation = await goal
       .evaluate(input, signal)
       .catch(() => indeterminate('Evaluatorの呼び出しが失敗しました'));
-    const adviceResult = advicePromise === undefined ? undefined : await advicePromise;
 
     // 評価を待っている間に止められた・別の実行が始まっていた場合は何もしない
     // （issue #933。`this.plan !== plan`だけでは、同じ計画のオブジェクトを使い回されると
     // 別の実行を自分の実行と取り違える）
+    if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
+      return;
+    }
+
+    // 行き詰まりの連続数は、Advisorを呼ぶ判断より前にまとめて更新する（issue #1323）。
+    // 判断のたびに数え直すと、同じ周について人へ渡す判定（`indeterminate`の連続上限）と
+    // Advisorを呼ぶ判定が別々の値を見ることになる
+    this.updateStallStreaks(evaluation);
+    const trigger = decideAdvisorTrigger({
+      verdict: evaluation.verdict,
+      turnsSinceLastAdvice:
+        this.lastAdvisedIteration === undefined ? undefined : iteration - this.lastAdvisedIteration,
+      repeatedGapsStreak: this.repeatedGapsStreak,
+      noProgressStreak: countRepeatedTail(this.stallHistory),
+      indeterminateStreak: this.indeterminateStreak,
+    });
+    // Advisorは**Evaluatorの判定を見てから、行き詰まった周にだけ**呼ぶ（issue #1323）。
+    // 連続失敗で呼ぶのをやめた後は、理由や間隔の判定より先に降りる（issue #1009）
+    const advisor =
+      plan.advisor !== undefined &&
+      !this.advisorDisabled &&
+      trigger !== undefined &&
+      shouldAdvise(iteration, plan.advisor.everyNTurns)
+        ? plan.advisor
+        : undefined;
+    const adviceResult =
+      advisor === undefined || trigger === undefined
+        ? undefined
+        : await advisor
+            .advise(
+              {
+                goal: goal.definition,
+                iteration,
+                evaluation,
+                evidenceRefs: toAdvisorEvidenceRefs(this.goalEvidence),
+                trigger,
+              },
+              signal,
+            )
+            .catch(() => advisorFailed('process-error'));
+    if (adviceResult !== undefined) {
+      // 呼んだ周を控える。**失敗した周も呼んだものとして数える**（issue #1323）。
+      // 失敗のたびに間隔を空けずに呼び直すと、不調のAdvisorへ毎ターン待たされる
+      this.lastAdvisedIteration = iteration;
+    }
+
+    // Advisorを待っている間に止められていないかをもう一度見る。直列にした分、ここでも
+    // 世代が変わりうる（issue #933と同じ理由）
     if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
       return;
     }
@@ -894,7 +953,10 @@ export class LoopController {
     // 言われている状態で、達成の判定だけを見て続けない**
     if (advice?.severity === 'blocker') {
       // `blocker`と`achieved`は、優先順位の問題ではなく2つの役の判断の食い違いである
-      // （issue #964）。どちらかを黙って捨てず、食い違ったことごと人へ渡す
+      // （issue #964）。どちらかを黙って捨てず、食い違ったことごと人へ渡す。
+      // なお`conflicted`は現在は到達しない。`decideAdvisorTrigger`が`achieved`の周に
+      // `undefined`を返すため、達成した周にはAdvisorを呼ばないからである（issue #1323）。
+      // 分岐を残すのは、呼び出し条件を将来緩めたときの防御としてである
       this.stop(evaluation.verdict === 'achieved' ? 'conflicted' : 'advised');
       return;
     }
@@ -907,16 +969,14 @@ export class LoopController {
       return;
     }
     if (evaluation.verdict === 'indeterminate') {
-      // 証拠不足は「未達」ではない。黙って回し続けず、続いたら人へ渡す
-      this.indeterminateStreak += 1;
+      // 証拠不足は「未達」ではない。黙って回し続けず、続いたら人へ渡す。連続数の更新は
+      // `updateStallStreaks`で済ませてある（issue #1323）
       // 0以下を設定されても最初の1回で止めない。少なくとも1回は判定を試みる
       const limit = Math.max(1, goal.maxIndeterminate ?? DEFAULT_MAX_INDETERMINATE);
       if (this.indeterminateStreak >= limit) {
         this.stop('escalated');
         return;
       }
-    } else {
-      this.indeterminateStreak = 0;
     }
     // ここへ来るのは終局でない判定のときだけ——`continue`か、連続上限に達していない
     // `indeterminate`（上限に達した分は上で`escalated`として返している）。Evaluatorの
@@ -924,6 +984,29 @@ export class LoopController {
     // `advice`はこのターンで受け取ったものだけを渡す。Advisorを呼ばない周へ前回の指摘を
     // 持ち越さない（古い指摘を新しいターンの評価として読ませない。issue #933と同じ罠）
     this.finishTurn(plan, buildNextTurnPrompt(evaluation, goal.definition.purpose, advice));
+  }
+
+  /**
+   * 行き詰まりの連続数を更新する（issue #1323）。
+   *
+   * `indeterminate`の連続数と、同じ未達の受入条件が続いた回数を、この周の判定で進める。
+   * **Advisorを呼ぶかの判断より前に1回だけ呼ぶ。** 判断のたびに数え直すと、人へ渡す判定
+   * （`indeterminate`の連続上限）とAdvisorを呼ぶ判定が同じ周について違う値を見ることになる。
+   */
+  private updateStallStreaks(evaluation: GoalEvaluation): void {
+    this.indeterminateStreak =
+      evaluation.verdict === 'indeterminate' ? this.indeterminateStreak + 1 : 0;
+    const signature = gapsSignature(evaluation.gaps);
+    if (signature === undefined) {
+      // 未達の指摘が無い周は比較不能として扱い、履歴を切る。空が続くことを
+      // 「同じ場所で足踏み」と読み替えない（`gapsSignature`のコメント参照）
+      this.repeatedGapsStreak = 0;
+    } else if (signature === this.lastGapsSignature) {
+      this.repeatedGapsStreak += 1;
+    } else {
+      this.repeatedGapsStreak = 1;
+    }
+    this.lastGapsSignature = signature;
   }
 
   /**

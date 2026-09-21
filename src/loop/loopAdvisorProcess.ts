@@ -1,6 +1,5 @@
 import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
 import { buildAdvisorPrompt, parseAdvice } from './advisorPrompt';
-import type { GoalEvaluatorInput } from './goalLoop';
 import {
   runHeadlessPromptDetailed,
   type HeadlessProvider,
@@ -9,6 +8,7 @@ import {
 import {
   advisorFailed,
   advisorOk,
+  type AdvisorInput,
   type LoopAdvisorFn,
   type LoopAdvisorResult,
 } from './loopAdvisor';
@@ -17,7 +17,8 @@ import {
  * ループのAdvisor（issue #957）を、CLIのヘッドレス実行として呼ぶ。
  *
  * 起動条件はEvaluator（`goalEvaluatorProcess.ts`）と同じ。ツールを渡さず、利用者の設定も
- * 読ませず、毎ターンstatelessに呼ぶ。**Advisorも作業はしない。**
+ * 読ませず、statelessに呼ぶ。**Advisorも作業はしない。** 呼ぶ周を選ぶのは`LoopController`
+ * 側の責務で、ここは渡された材料を送るだけである（issue #1323）。
  */
 
 /** 設定 `agent.chat.loopAdvisor.provider` の値。 */
@@ -32,7 +33,7 @@ export interface LoopAdvisorSettings {
   /** `auto` なら同一プロバイダの軽量モデルに任せる。 */
   model: string;
   timeoutSeconds: number;
-  /** 何ターンごとにAdvisorを呼ぶか。 */
+  /** Advisorを呼んでよい間隔（ターン数）。実際に呼ぶかは行き詰まりの判定による（issue #1323）。 */
   everyNTurns: number;
 }
 
@@ -56,9 +57,7 @@ export interface LoopAdvisorDeps {
  *
  * 送信経路と切り離してexportしてあるのは、伏せていることを単体テストで固定するため。
  */
-export function redactAdvisorPrompt(
-  input: GoalEvaluatorInput,
-): ReturnType<typeof redactCredentials> {
+export function redactAdvisorPrompt(input: AdvisorInput): ReturnType<typeof redactCredentials> {
   return redactCredentials(buildAdvisorPrompt(input));
 }
 
@@ -73,7 +72,7 @@ export function redactAdvisorPrompt(
  * 一度も動けなかった周を、呼び出し側が区別できるようにする。**
  */
 export function createLoopAdvisor(deps: LoopAdvisorDeps): LoopAdvisorFn {
-  return async (input: GoalEvaluatorInput, signal?: AbortSignal): Promise<LoopAdvisorResult> => {
+  return async (input: AdvisorInput, signal?: AbortSignal): Promise<LoopAdvisorResult> => {
     const redaction = redactAdvisorPrompt(input);
     const note = describeRedaction(redaction);
     if (note !== undefined) {

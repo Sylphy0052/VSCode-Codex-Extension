@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { initialChatState, type ChatItem, type ChatState } from '../../src/appserver/chatState';
 import {
+  countRepeatedTail,
   detectStalledLoop,
   extractTurnSignature,
   pushTurnSignature,
@@ -76,5 +77,17 @@ describe('detectStalledLoop', () => {
 
   it('履歴がしきい値より長くても直近N件だけを見る', () => {
     expect(detectStalledLoop(['違う', '同じ応答', '同じ応答', '同じ応答'], 3)).toBe(true);
+  });
+});
+
+describe('countRepeatedTail（issue #1323）', () => {
+  it('末尾から同じ応答が続いている回数を返す', () => {
+    expect(countRepeatedTail(['a', 'b', 'b', 'b'])).toBe(3);
+    expect(countRepeatedTail(['a', 'b'])).toBe(1);
+  });
+
+  it('空の履歴・比較不能なターン（空文字）は0', () => {
+    expect(countRepeatedTail([])).toBe(0);
+    expect(countRepeatedTail(['', ''])).toBe(0);
   });
 });
