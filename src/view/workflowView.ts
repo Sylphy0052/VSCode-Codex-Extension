@@ -78,6 +78,8 @@ export interface RoadmapViewPort {
   readRoadmap(relativePath: string): Promise<string | undefined>;
   /** Issue一覧（クローズ済みを含む）。取れなければ`undefined`（「取れなければ飛ばす」）。 */
   listIssues(): Promise<readonly RoadmapIssueSummary[] | undefined>;
+  /** 一覧の上限外にあるIssueを番号で照会する。省略時は一覧の結果だけを使う。 */
+  getIssueUrl?(issue: number): Promise<string | undefined>;
 }
 
 /**
@@ -528,11 +530,18 @@ export class WorkflowViewManager implements vscode.Disposable {
       await this.postRoadmap(this.activeRoadmapPath(), true);
       return;
     }
-    if (type === 'openRoadmapIssue' && typeof m['issue'] === 'number') {
+    if (
+      (type === 'openRoadmapIssue' || type === 'openTaskIssue') &&
+      typeof m['issue'] === 'number' &&
+      Number.isSafeInteger(m['issue']) &&
+      m['issue'] > 0
+    ) {
       // WebviewからはIssue番号だけを受け取り、URLは拡張機能側が持つ一覧から引く
       // （`openTaskPullRequest`と同じ方針。Webviewから渡されたURLは開かない）
-      const issue = this.roadmapIssueCache?.issues?.find((i) => i.number === m['issue']);
-      await this.openIssueUrl(issue?.url);
+      const issues = await this.listRoadmapIssues(false);
+      const issue = issues?.find((i) => i.number === m['issue']);
+      const url = issue?.url ?? (await this.roadmap?.getIssueUrl?.(m['issue']));
+      await this.openIssueUrl(url);
       return;
     }
 
@@ -895,7 +904,7 @@ ${workflowStyles()}
         <thead>
           <tr>
             <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th>
-            <th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th><th>送信回数</th><th>操作</th>
+            <th>Issue</th><th>cleanup</th><th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th><th>送信回数</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="taskTableBody"></tbody>
@@ -949,6 +958,8 @@ function buildPreviewSnapshot(
 ): WorkflowRunSnapshot {
   const tasks: TaskSnapshot[] = def.tasks.map((task) => ({
     id: task.id,
+    ...(task.issue === undefined ? {} : { issue: task.issue }),
+    cleanupStatus: 'notStarted',
     workSummary: buildTaskWorkSummary(task.prompt),
     contract: {
       ...(task.outcome === undefined ? {} : { outcome: task.outcome }),

@@ -1296,6 +1296,8 @@ export interface RoadmapIssueSummary {
 export interface IssueListPort {
   /** 取得できなければ `undefined`（design.md §16.19「取れなければ飛ばす」）。 */
   listIssues(cwd: string): Promise<RoadmapIssueSummary[] | undefined>;
+  /** 一覧の取得範囲外でも、番号を指定してIssueページURLを照会する。 */
+  getIssueUrl?(cwd: string, issue: number): Promise<string | undefined>;
 }
 
 /**
@@ -1360,6 +1362,20 @@ function parseNumberTitleArray(
   }
 }
 
+function parseIssueUrl(stdout: string): string | undefined {
+  try {
+    const value: unknown = JSON.parse(stdout);
+    if (typeof value !== 'object' || value === null) {
+      return undefined;
+    }
+    const rec = value as Record<string, unknown>;
+    const url = rec['url'] ?? rec['web_url'];
+    return typeof url === 'string' ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * `git remote get-url origin` でホストを判定し、`gh issue list` / `glab issue list` を
  * 実行するポートの実装（design.md §16.19「Issueは `gh issue list` / `glab issue list` で取る。
@@ -1407,6 +1423,24 @@ export function createCliIssueListPort(
         cwd,
       );
       return result.code === 0 ? parseNumberTitleArray(result.stdout, 'iid') : undefined;
+    },
+    async getIssueUrl(cwd: string, issue: number): Promise<string | undefined> {
+      if (!Number.isSafeInteger(issue) || issue <= 0) {
+        return undefined;
+      }
+      const remote = await git.run(['remote', 'get-url', 'origin'], cwd);
+      if (remote.code !== 0) {
+        return undefined;
+      }
+      const host = detectForgeHost(remote.stdout.trim());
+      if (host === undefined) {
+        return undefined;
+      }
+      const result =
+        host === 'github'
+          ? await cli.run('gh', ['issue', 'view', String(issue), '--json', 'url'], cwd)
+          : await cli.run('glab', ['api', `projects/:id/issues/${String(issue)}`], cwd);
+      return result.code === 0 ? parseIssueUrl(result.stdout) : undefined;
     },
   };
 }

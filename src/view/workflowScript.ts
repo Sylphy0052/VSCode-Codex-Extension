@@ -148,7 +148,7 @@ export function workflowScript(): string {
    * colSpan に使う。列を足したらここも直す——2箇所へ数字を直接書いていると、
    * 片方だけ古いままになって行の幅が足りなくなる。
    */
-  const TASK_TABLE_COLUMNS = 11;
+  const TASK_TABLE_COLUMNS = 13;
 
   /**
    * タスクの model / effort を1つのセルへ収める文言にする（Issue #1035）。
@@ -351,6 +351,14 @@ export function workflowScript(): string {
   // 同じ方針（Issue #104の再発防止）。
 
   const KANBAN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', done: 'Done', attention: '要対応' };
+  const CLEANUP_LABEL = {
+    notStarted: '未実施', pending: '実行中', completed: '完了', failed: '失敗', notRequired: '不要／保持',
+  };
+
+  function cleanupLabel(task) {
+    const status = task.cleanupStatus || 'notStarted';
+    return CLEANUP_LABEL[status] || status;
+  }
 
   /**
    * 押されているバッジのバケット（issue #752、issue #1037で表へも適用）。未選択は undefined。
@@ -590,7 +598,8 @@ export function workflowScript(): string {
     // 表示幅の違いで判別できてしまわないよう、idと同じ行へ併記する。ノードの縦幅が60pxしか無く
     // 別行を割く余地が無いため。idを置き換えるのではなく必ず併記する（同じ役割を複数タスクへ
     // 割り当てられるため、idの代わりにはできない）
-    idText.textContent = task.roleLabel ? task.id + '（' + task.roleLabel + '）' : task.id;
+    const taskLabel = task.issue === undefined ? task.id : task.id + ' / #' + task.issue;
+    idText.textContent = task.roleLabel ? taskLabel + '（' + task.roleLabel + '）' : taskLabel;
     group.appendChild(idText);
 
     const metaParts = [STATE_LABEL[task.state] || task.state];
@@ -647,6 +656,8 @@ export function workflowScript(): string {
 
     const title = svgEl('title');
     title.textContent = task.id + ' ・ ' + (STATE_LABEL[task.state] || task.state) +
+      (task.issue === undefined ? '' : ' ・ Issue #' + task.issue) +
+      ' ・ cleanup: ' + cleanupLabel(task) +
       (task.roleLabel ? ' ・ 役割: ' + task.roleLabel : '') +
       (task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '') +
       (task.lastResponseSummary ? ' ・ ' + task.lastResponseSummary : '');
@@ -1143,6 +1154,22 @@ export function workflowScript(): string {
       row.appendChild(
         text('td', 'verification-cell verification-' + verification.status, verificationText),
       );
+
+      const issueCell = el2('td', 'issue-cell');
+      if (task.issue === undefined) {
+        issueCell.textContent = '—';
+      } else {
+        const issueButton = text('button', 'issue-link', '#' + task.issue);
+        issueButton.type = 'button';
+        issueButton.addEventListener('click', (e) => {
+          e.stopPropagation();
+          vscode.postMessage({ type: 'openTaskIssue', issue: task.issue });
+        });
+        issueCell.appendChild(issueButton);
+      }
+      row.appendChild(issueCell);
+      const cleanupStatus = task.cleanupStatus || 'notStarted';
+      row.appendChild(text('td', 'cleanup-cell cleanup-' + cleanupStatus, cleanupLabel(task)));
 
       row.appendChild(text('td', '', task.provider));
 

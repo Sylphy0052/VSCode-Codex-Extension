@@ -44,7 +44,7 @@ import {
   type LiveTask,
   type PullRequestResult,
 } from './runner';
-import { notifyOrchestratorRunResumed } from './runnerOrchestrator';
+import { notifyOrchestrator, notifyOrchestratorRunResumed } from './runnerOrchestrator';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
@@ -755,6 +755,13 @@ async function mergeWithLease(
     // 「interrupted/manualでは撤去しない」を確かめるため、モジュール関数を直接呼ばない
     // （PR #157のレビュー指摘。分割時にこの2経路だけラッパーを迂回していた）
     self.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
+    if (!shouldRemoveWorktree(task.cleanup, 'done')) {
+      const terminalTask = live.tasks.get(taskId);
+      if (terminalTask !== undefined) {
+        terminalTask.sessionClosed = true;
+        terminalTask.session.dispose();
+      }
+    }
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
@@ -1350,6 +1357,13 @@ async function finishMergeResolution(
     // 「interrupted/manualでは撤去しない」を確かめるため、モジュール関数を直接呼ばない
     // （PR #157のレビュー指摘。分割時にこの2経路だけラッパーを迂回していた）
     self.cleanupWorktreeIfNeeded(live, task, taskId, live.tasks.get(taskId));
+    if (!shouldRemoveWorktree(task.cleanup, 'done')) {
+      const terminalTask = live.tasks.get(taskId);
+      if (terminalTask !== undefined) {
+        terminalTask.sessionClosed = true;
+        terminalTask.session.dispose();
+      }
+    }
     void self.persist(runId);
     self.notify(runId);
     self.pump(runId);
@@ -1455,6 +1469,8 @@ export function cleanupWorktreeIfNeeded(
   if (finalState === undefined || !shouldRemoveWorktree(task.cleanup, finalState)) {
     return;
   }
+  const issue = task.issue ?? live.createdTaskIssues.get(taskId);
+  liveTask.cleanupStatus = 'pending';
   const retry = retrySuffixOf(live.runState.tasks.get(taskId));
   void self.deps.worktreeQueue
     .remove(live.repoRoot, live.runId, taskId, retry, self.deps.git, self.deps.fs)
@@ -1463,6 +1479,32 @@ export function cleanupWorktreeIfNeeded(
         self.deps.log.warn(
           `[workflow ${live.runId}/${taskId}] worktreeの撤去に失敗しました: ${result.message}`,
         );
+      }
+      liveTask.cleanupStatus = result.ok ? 'completed' : 'failed';
+      if (issue !== undefined) {
+        notifyOrchestrator(self, live.runId, {
+          kind: 'taskCleanup',
+          body: result.ok
+            ? `Issue #${issue} のcleanupが完了しました: タスク用worktreeを撤去しました。`
+            : `Issue #${issue} のcleanupに失敗しました: タスク用worktreeを撤去できませんでした（${sanitizeForLog(result.message)}）。`,
+        });
+        const terminalTask = live.tasks.get(taskId);
+        if (terminalTask !== undefined) {
+          terminalTask.sessionClosed = true;
+          terminalTask.session.dispose();
+        }
+      }
+      if (issue === undefined) {
+        const terminalTask = live.tasks.get(taskId);
+        if (terminalTask !== undefined) {
+          terminalTask.sessionClosed = true;
+          terminalTask.session.dispose();
+        }
+      }
+      void self.persist(live.runId);
+      self.notify(live.runId);
+      if (issue !== undefined) {
+        self.finalizeTaskCleanup(live.runId);
       }
     });
 }

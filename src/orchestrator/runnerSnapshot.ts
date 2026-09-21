@@ -209,8 +209,14 @@ function buildTaskSnapshot(
   // リロード後も出す必要がある（design.md §16.11「リロードしてもPR/MRへのリンクが残る」・
   // Issue #118の受入基準）ため、永続化された値へフォールバックする
   const persistedTask = persisted?.tasks[task.id];
+  const issue = task.issue ?? live.createdTaskIssues.get(task.id);
   return {
     id: task.id,
+    ...(issue === undefined ? {} : { issue }),
+    cleanupStatus:
+      liveTask?.cleanupStatus ??
+      persistedTask?.cleanupStatus ??
+      (state?.state === 'done' ? 'notRequired' : 'notStarted'),
     workSummary: buildTaskWorkSummary(task.prompt),
     contract: {
       ...(task.outcome === undefined ? {} : { outcome: task.outcome }),
@@ -252,7 +258,7 @@ function buildTaskSnapshot(
     lastResponseSummary: liveTask?.lastResponseSummary ?? '',
     failure: state?.failure,
     pendingApproval: liveTask?.pendingApproval,
-    hasLiveSession: liveTask !== undefined,
+    hasLiveSession: liveTask !== undefined && !liveTask.sessionClosed,
     expandedPrompt: liveTask?.expandedPrompt,
     expandedContinuePrompt: liveTask?.expandedContinuePrompt,
     lastSentPrompt: liveTask?.lastSentPrompt,

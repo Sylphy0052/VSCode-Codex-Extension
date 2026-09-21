@@ -41,6 +41,8 @@ export interface PersistedTaskState {
   pullRequestNumber: number | undefined;
   /** タスクPR/MRのURL。番号と同じくホスト側にも残っている情報で機微は含まない。 */
   pullRequestUrl: string | undefined;
+  /** cleanupの結果。旧形式との互換性のため省略可能にする。 */
+  cleanupStatus?: 'pending' | 'completed' | 'failed';
 }
 
 export interface PersistedRun {
@@ -117,13 +119,34 @@ export function reconcileRunOnReload(run: PersistedRun): PersistedRun {
   let changed = false;
   const tasks: Record<string, PersistedTaskState> = {};
   for (const [id, task] of Object.entries(run.tasks)) {
+    // cleanupはセッション・worktreeに依存するため、リロードで継続できない。`pending`を
+    // 残すとViewが永遠に処理中と表示するので、失敗として確定して人が再実行できるようにする。
+    const cleanupStatus = task.cleanupStatus === 'pending' ? 'failed' : task.cleanupStatus;
     if (task.state === 'running' || task.state === 'waitingApproval') {
-      tasks[id] = { ...task, state: 'failed', failure: { kind: 'reloadInterrupted' } };
+      tasks[id] = {
+        ...task,
+        ...(cleanupStatus === undefined ? {} : { cleanupStatus }),
+        state: 'failed',
+        failure: { kind: 'reloadInterrupted' },
+      };
       changed = true;
       continue;
     }
     if (task.state === 'pending') {
-      tasks[id] = { ...task, state: 'skipped', failure: { kind: 'runHalted' } };
+      tasks[id] = {
+        ...task,
+        ...(cleanupStatus === undefined ? {} : { cleanupStatus }),
+        state: 'skipped',
+        failure: { kind: 'runHalted' },
+      };
+      changed = true;
+      continue;
+    }
+    if (cleanupStatus !== task.cleanupStatus) {
+      tasks[id] = {
+        ...task,
+        ...(cleanupStatus === undefined ? {} : { cleanupStatus }),
+      };
       changed = true;
       continue;
     }

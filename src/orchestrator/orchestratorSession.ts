@@ -72,6 +72,8 @@ export const MAX_ORCHESTRATOR_PROMPT_LENGTH = 60000;
 export type OrchestratorEventKind =
   | 'runStarted'
   | 'taskDone'
+  /** タスクのworktree cleanupが完了または失敗した。 */
+  | 'taskCleanup'
   | 'taskFailed'
   | 'taskWaitingApproval'
   | 'taskBlocked'

@@ -1653,7 +1653,7 @@ describe('workflowScript のタスクごとの model / effort 表示（Issue #10
 
   it('表に model / effort の列があり、provider の直後に並ぶ', () => {
     expect(viewSource()).toContain(
-      '<th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th>',
+      '<th>Issue</th><th>cleanup</th><th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th>',
     );
   });
 
@@ -1682,21 +1682,21 @@ describe('workflowScript のタスクごとの model / effort 表示（Issue #10
 
   it('承認行・展開行の colSpan は列数の定数に追随し、thead の列数と一致する', () => {
     const source = workflowScript();
-    expect(source).toContain('const TASK_TABLE_COLUMNS = 11;');
+    expect(source).toContain('const TASK_TABLE_COLUMNS = 13;');
     expect(source).not.toContain('cell.colSpan = 10;');
     expect((source.match(/cell\.colSpan = TASK_TABLE_COLUMNS;/g) ?? []).length).toBe(2);
     const view = viewSource();
     const thead = view.slice(view.indexOf('<thead>'), view.indexOf('</thead>'));
-    expect((thead.match(/<th>/g) ?? []).length).toBe(11);
+    expect((thead.match(/<th>/g) ?? []).length).toBe(13);
   });
 
   it('狭幅のカード表示でも列の見出しが1つずつずれて揃う', () => {
     const styles = workflowStyles();
-    expect(styles).toContain("td:nth-child(7)::before { content: 'model'; }");
-    expect(styles).toContain("td:nth-child(8)::before { content: 'コンテキスト'; }");
-    expect(styles).toContain("td:nth-child(11)::before { content: '操作'; }");
-    expect(styles).toContain('#taskTable tr.task-row td:nth-child(11) { grid-column: 1 / -1; }');
-    expect(styles).not.toContain("td:nth-child(10)::before { content: '操作'; }");
+    expect(styles).toContain("td:nth-child(9)::before { content: 'model'; }");
+    expect(styles).toContain("td:nth-child(10)::before { content: 'コンテキスト'; }");
+    expect(styles).toContain("td:nth-child(13)::before { content: '操作'; }");
+    expect(styles).toContain('#taskTable tr.task-row td:nth-child(13) { grid-column: 1 / -1; }');
+    expect(styles).not.toContain("td:nth-child(11)::before { content: '操作'; }");
   });
 
   it('狭幅のカード表示では省略を外して折り返す（見出しごと切れないように）', () => {

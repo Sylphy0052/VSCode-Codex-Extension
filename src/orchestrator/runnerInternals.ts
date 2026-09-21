@@ -59,6 +59,11 @@ export interface WorkflowRunnerInternals {
     liveTask: LiveTask | undefined,
   ): void;
   /**
+   * 非同期worktree cleanupの終了を受け、保留中のcleanupが無ければrunのメッセージングを閉じる。
+   * cleanup結果を受けたオーケストレーターがIssue/Roadmapを更新するため、完了前には閉じない。
+   */
+  finalizeTaskCleanup(runId: string): void;
+  /**
    * メッセージングトランスポート（MCPサーバ）を用意する（`runner.ts`の同名privateメソッドの
    * ラッパー）。自動再開（design.md §16.35、Issue #584、`runnerRestore.ts`）が、`start()`と
    * 同じ手順でオーケストレーターセッションを立て直すために外部へ公開する。

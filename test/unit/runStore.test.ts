@@ -80,6 +80,13 @@ describe('reconcileRunOnReload（design.md §16.11）', () => {
     expect(after).toBe(before);
   });
 
+  it('リロード中のpending cleanupをfailedへ確定する', () => {
+    const before = run({ tasks: { T1: { ...task('done'), cleanupStatus: 'pending' } } });
+    const after = reconcileRunOnReload(before);
+    expect(after.tasks['T1']?.state).toBe('done');
+    expect(after.tasks['T1']?.cleanupStatus).toBe('failed');
+  });
+
   it('変化が無ければ同一オブジェクトを返す（無駄な書き込みを避ける）', () => {
     const before = run({ tasks: { T1: task('done') } });
     expect(reconcileRunOnReload(before)).toBe(before);

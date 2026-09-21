@@ -926,6 +926,81 @@ export async function createIssue(
   }
 }
 
+/** オーケストレーターが許可された範囲でIssue本文とラベルだけを更新する入力。 */
+export interface UpdateIssueRequest {
+  host: ForgeHost;
+  cwd: string;
+  number: number;
+  /** 指定時は本文をこの値で置き換える。 */
+  body?: string;
+  /** 指定時は既存ラベルを消さずに追加する。 */
+  addLabels?: readonly string[];
+}
+
+/**
+ * Issueの本文とラベルを更新する。close/reopen・担当者・milestone・削除・タイトル変更は
+ * この口では扱わない。GitLabの`--raw-field`へ自由入力を渡さず、本文は一時ファイル経由にする。
+ */
+export async function updateIssue(
+  deps: CreatePullRequestDeps,
+  request: UpdateIssueRequest,
+): Promise<CreateIssueOutcome> {
+  if (!Number.isSafeInteger(request.number) || request.number <= 0) {
+    return { ok: false, reason: 'invalidInput', message: 'Issue番号が不正です' };
+  }
+  if (
+    request.body === undefined &&
+    (request.addLabels === undefined || request.addLabels.length === 0)
+  ) {
+    return { ok: false, reason: 'invalidInput', message: '本文または追加ラベルを指定してください' };
+  }
+  if (request.body !== undefined && request.body.trim() === '') {
+    return { ok: false, reason: 'invalidInput', message: 'Issue本文が空です' };
+  }
+  const labels = request.addLabels?.map((label) => stripControlChars(label).trim()) ?? [];
+  if (labels.some((label) => label === '' || /[\r\n]/u.test(label))) {
+    return { ok: false, reason: 'invalidInput', message: 'ラベルが不正です' };
+  }
+
+  const bodyFilePath =
+    request.body === undefined ? undefined : await deps.fs.writeTempFile(request.body);
+  try {
+    const args =
+      request.host === 'github'
+        ? [
+            'issue',
+            'edit',
+            String(request.number),
+            ...(bodyFilePath === undefined ? [] : [`--body-file=${bodyFilePath}`]),
+            ...labels.map((label) => `--add-label=${label}`),
+          ]
+        : [
+            'api',
+            `projects/:id/issues/${String(request.number)}`,
+            '--method=PUT',
+            ...(bodyFilePath === undefined ? [] : [`--field=description=@${bodyFilePath}`]),
+            ...(labels.length === 0 ? [] : [`--raw-field=add_labels=${labels.join(',')}`]),
+          ];
+    const command = request.host === 'github' ? 'gh' : 'glab';
+    const result = await deps.cli.run(command, args, request.cwd);
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        reason: 'cliError',
+        message:
+          result.stderr.trim() !== ''
+            ? sanitizeForLog(result.stderr)
+            : `${command} の実行に失敗しました（終了コード ${result.code}）`,
+      };
+    }
+    return { ok: true, url: undefined };
+  } finally {
+    if (bodyFilePath !== undefined) {
+      await deps.fs.removeTempFile(bodyFilePath);
+    }
+  }
+}
+
 /** Issueへ実装計画をコメントとして残す。既存本文を上書きしない。 */
 export async function postIssueComment(
   deps: CreatePullRequestDeps,

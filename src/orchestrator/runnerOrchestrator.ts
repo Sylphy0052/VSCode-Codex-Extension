@@ -8,6 +8,7 @@ import {
   type OrchestratorControlPort,
   type OrchestratorControlResult,
 } from './messaging';
+import { createIssue, updateIssue } from './forge';
 import {
   buildOrchestratorConfig,
   composeOrchestratorPrompt,
@@ -78,6 +79,9 @@ const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
   'write_handoff',
   'read_handoff',
   'list_handoffs',
+  'create_issue',
+  'update_issue',
+  'update_roadmap_issue',
 ]);
 
 /**
@@ -96,9 +100,10 @@ export function shouldAutoApproveOrchestratorElicitation(params: Record<string, 
 function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): string {
   const tasks = live.def.tasks
     .map((t) => {
+      const issue = t.issue === undefined ? '' : `（Issue #${t.issue}）`;
       const deps = t.dependsOn.length > 0 ? `（依存: ${t.dependsOn.join(', ')}）` : '';
       const outcome = t.outcome === undefined ? '' : `: ${t.outcome}`;
-      return `- ${t.id}${outcome}${deps}`;
+      return `- ${t.id}${issue}${outcome}${deps}`;
     })
     .join('\n');
   const safeTasks = formatUntrusted(tasks, {
@@ -169,6 +174,11 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
       '指示を調整する。追加・分割は、独立した成果物・受入条件がある、または並列化の効果が' +
       'ある場合だけにし、同じ縦切りの作業を工程やファイル単位へ細分化しないこと。不要に' +
       '細かいpendingタスクは統合または削除し、最小の計画へ見直してください',
+    '',
+    'Issue付きタスクの進行規約:',
+    '- Issue本文の受入条件・実装計画がSpecの正本です。再開後も、このrun定義とIssue番号を基準に同じ順序で進行してください。',
+    '- add_task / update_task_dependenciesでBlockと並列のタスクグラフを決めます。runnerが依存の完了と並列上限を満たしたタスクのセッションタブを開始し、Issueの完了時にはそのタブを閉じます。',
+    '- 実行タスクから届くcleanup結果を受け取り、Issue作成・Issue更新・ロードマップ改訂が必要かを判断して計画へ反映してください。create_issue / update_issue / update_roadmap_issueは現在のリポジトリだけへ自動実行でき、許可範囲はIssue作成、本文更新、ラベル追加、Roadmap Issue本文更新に限ります。close/reopen、担当変更、削除、マージ、push、権限変更はできません。',
     ...(live.programControl === undefined
       ? []
       : [
@@ -456,11 +466,114 @@ function runHaltedByUserReason(
  * runを1本に固定した口を返す。オーケストレーターは自分のrun以外を指定できない
  * （`runId` を引数に取るツールを置かない）。
  */
+const MAX_ORCHESTRATOR_ISSUE_BODY_LENGTH = 20_000;
+const MAX_ORCHESTRATOR_ISSUE_LABELS = 20;
+
+function validateOrchestratorIssueInput(
+  title: string | undefined,
+  body: string | undefined,
+  labels: readonly string[],
+): string | undefined {
+  if (title !== undefined && (title.trim() === '' || /[\r\n]/u.test(title))) {
+    return 'title は空または改行を含められません。';
+  }
+  if (
+    body !== undefined &&
+    (body.trim() === '' || body.length > MAX_ORCHESTRATOR_ISSUE_BODY_LENGTH)
+  ) {
+    return `body は空にできず、上限${MAX_ORCHESTRATOR_ISSUE_BODY_LENGTH}文字です。`;
+  }
+  if (labels.length > MAX_ORCHESTRATOR_ISSUE_LABELS) {
+    return `labels は${MAX_ORCHESTRATOR_ISSUE_LABELS}個までです。`;
+  }
+  if (labels.some((label) => label.trim() === '' || /[\r\n]/u.test(label) || label.length > 100)) {
+    return 'labels に空・改行・101文字以上の値は指定できません。';
+  }
+  return undefined;
+}
+
+async function mutateOrchestratorIssue(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  input:
+    | { kind: 'create'; title: string; body: string; labels: readonly string[] }
+    | { kind: 'update'; issue: number; body?: string; addLabels: readonly string[] }
+    | { kind: 'roadmap'; issue: number; body: string },
+): Promise<OrchestratorControlResult> {
+  const live = self.runs.get(runId);
+  const forge = self.deps.forge;
+  if (live === undefined || forge === undefined || live.forge.kind !== 'active') {
+    return no('このrunではForge連携が利用できないため、Issue操作はできません。');
+  }
+  if (live.runState.haltedByUser) {
+    return no('人がこの実行全体を停止したため、Issue操作はできません。');
+  }
+  const title = input.kind === 'create' ? input.title : undefined;
+  const body = input.body;
+  const labels =
+    input.kind === 'create' ? input.labels : input.kind === 'update' ? input.addLabels : [];
+  const invalid = validateOrchestratorIssueInput(title, body, labels);
+  if (invalid !== undefined) return no(invalid);
+  if (input.kind !== 'create' && (!Number.isSafeInteger(input.issue) || input.issue <= 0)) {
+    return no('Issue番号は正の整数で指定してください。');
+  }
+  if (input.kind === 'update' && body === undefined && labels.length === 0) {
+    return no('update_issueにはbodyまたはaddLabelsが必要です。');
+  }
+
+  const outcome =
+    input.kind === 'create'
+      ? await createIssue(
+          { cli: forge.cli, fs: forge.fs },
+          {
+            host: live.forge.host,
+            cwd: live.repoRoot,
+            title: title!,
+            body: body!,
+            ...(labels.length === 0 ? {} : { labels: labels.join(',') }),
+          },
+        )
+      : await updateIssue(
+          { cli: forge.cli, fs: forge.fs },
+          {
+            host: live.forge.host,
+            cwd: live.repoRoot,
+            number: input.issue,
+            ...(body === undefined ? {} : { body }),
+            ...(labels.length === 0 ? {} : { addLabels: labels }),
+          },
+        );
+  if (!outcome.ok) return no(`Issue操作に失敗しました: ${outcome.message}`);
+
+  const issueNumber = input.kind === 'create' ? undefined : input.issue;
+  const action =
+    input.kind === 'create'
+      ? 'Issueを作成'
+      : input.kind === 'roadmap'
+        ? `Roadmap Issue #${input.issue}の本文を更新`
+        : `Issue #${input.issue}を更新`;
+  live.warnings.push({
+    kind: 'orchestratorIssueChanged',
+    taskId: undefined,
+    message: `オーケストレーターが${action}しました（本文は履歴に保存しません）。`,
+  });
+  void self.persist(runId);
+  self.notify(runId);
+  return {
+    accepted: true,
+    reason: `${action}しました。`,
+    ...(issueNumber === undefined ? {} : { issueNumber }),
+    ...(outcome.url === undefined ? {} : { url: outcome.url }),
+  };
+}
+
 export function buildOrchestratorControlPort(
   self: WorkflowRunnerInternals,
   actions: OrchestratorControlActions,
   runId: string,
 ): OrchestratorControlPort {
+  const canManageIssues =
+    self.deps.forge !== undefined && self.runs.get(runId)?.forge.kind === 'active';
   return {
     hasProgramControl: () => self.runs.get(runId)?.programControl !== undefined,
     getProgramStatus: () =>
@@ -480,6 +593,36 @@ export function buildOrchestratorControlPort(
       self.runs.get(runId)?.programControl?.updateProgramRunDependencies(runRefId, dependsOn) ??
       Promise.resolve(no('このrunはprogramに属していません。')),
     getRunStatus: () => buildRunStatus(actions, runId),
+    ...(canManageIssues
+      ? {
+          createIssue: ({
+            title,
+            body,
+            labels,
+          }: {
+            title: string;
+            body: string;
+            labels: readonly string[];
+          }) => mutateOrchestratorIssue(self, runId, { kind: 'create', title, body, labels }),
+          updateIssue: ({
+            issue,
+            body,
+            addLabels,
+          }: {
+            issue: number;
+            body?: string;
+            addLabels?: readonly string[];
+          }) =>
+            mutateOrchestratorIssue(self, runId, {
+              kind: 'update',
+              issue,
+              ...(body === undefined ? {} : { body }),
+              addLabels: addLabels ?? [],
+            }),
+          updateRoadmapIssue: ({ roadmapIssue, body }: { roadmapIssue: number; body: string }) =>
+            mutateOrchestratorIssue(self, runId, { kind: 'roadmap', issue: roadmapIssue, body }),
+        }
+      : {}),
     stopTask: (taskId) => {
       const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
@@ -795,8 +938,14 @@ function deliverAskUserAnswer(self: WorkflowRunnerInternals, runId: string): voi
   live.pendingAskUser = undefined;
   void self.persist(runId);
   const answerText = `人がask_userの質問に答えました: "${pending.answeredChoice}"`;
-  const composed = composeOrchestratorPrompt(orchestrator.pending, answerText);
+  const events = orchestrator.pending;
+  const composed = composeOrchestratorPrompt(events, answerText);
   orchestrator.pending = [];
+  // cleanup通知のターンがask_userで止まった場合は、回答後の継続ターンまで接続を保つ。
+  // この配送で合流したcleanup通知も処理中件数へ反映する。
+  orchestrator.taskCleanupEventsInFlight += events.filter(
+    (event) => event.kind === 'taskCleanup',
+  ).length;
   orchestrator.busy = true;
   orchestrator.session.send(composed);
   self.notify(runId);
@@ -1205,6 +1354,7 @@ export async function setupOrchestratorForStart(
       busy: false,
       pending: [],
       eventsSent: 0,
+      taskCleanupEventsInFlight: 0,
       lastResponseSummary: '',
       unreadCount: 0,
       // 自動再開で引き継いだ未回答の問い（あれば）は、すでに1回分の`ask_user`を
@@ -1273,6 +1423,13 @@ function onOrchestratorStateChanged(
   orchestrator.busy = state.busy;
   const live = self.runs.get(runId);
   if (finishedTurn) {
+    // cleanup通知を受けたターン内でIssue/Roadmap更新ツールを実行できるよう、終了を
+    // 確認してから接続の解放を再評価する。ask_userの回答待ちは、回答後の継続ターンが
+    // 完了するまで処理中件数を残す。
+    const hasPendingAskUser = live?.pendingAskUser !== undefined;
+    if (!hasPendingAskUser) {
+      orchestrator.taskCleanupEventsInFlight = 0;
+    }
     if (live?.pendingAskUser?.answeredChoice !== undefined) {
       // ターンの最中に人が答えていた場合（`answerAskUser`がbusy中だったため送信を
       // 保留していた）は、ターンが終わった今まとめて送る
@@ -1282,6 +1439,7 @@ function onOrchestratorStateChanged(
       // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
       flushOrchestrator(self, runId);
     }
+    self.finalizeTaskCleanup(runId);
   }
   self.notify(runId);
 }
@@ -1323,11 +1481,15 @@ function flushOrchestrator(self: WorkflowRunnerInternals, runId: string): void {
   if (orchestrator === undefined || orchestrator.pending.length === 0) {
     return;
   }
-  const text = composeOrchestratorPrompt(orchestrator.pending, '');
+  const events = orchestrator.pending;
+  const text = composeOrchestratorPrompt(events, '');
   orchestrator.pending = [];
   if (text === '') {
     return;
   }
+  orchestrator.taskCleanupEventsInFlight += events.filter(
+    (event) => event.kind === 'taskCleanup',
+  ).length;
   orchestrator.busy = true;
   orchestrator.session.send(text);
 }
@@ -1354,8 +1516,12 @@ export function sendUserMessageToOrchestrator(
   if (live?.pendingAskUser !== undefined) {
     return false;
   }
-  const composed = composeOrchestratorPrompt(orchestrator.pending, text);
+  const events = orchestrator.pending;
+  const composed = composeOrchestratorPrompt(events, text);
   orchestrator.pending = [];
+  orchestrator.taskCleanupEventsInFlight += events.filter(
+    (event) => event.kind === 'taskCleanup',
+  ).length;
   orchestrator.busy = true;
   orchestrator.session.send(composed);
   self.notify(runId);

@@ -764,12 +764,31 @@ export interface OrchestratorControlPort {
    * 循環依存・未定義idへの参照になる変更は適用前に拒否する。
    */
   updateTaskDependencies(taskId: string, dependsOn: readonly string[]): OrchestratorControlResult;
+  /** 現在のリポジトリに限定したIssue作成。外部書き込みの許可範囲は実体側で固定する。 */
+  createIssue?(input: {
+    title: string;
+    body: string;
+    labels: readonly string[];
+  }): Promise<OrchestratorControlResult>;
+  /** Issue本文の置換とラベル追加だけを許可する。 */
+  updateIssue?(input: {
+    issue: number;
+    body?: string;
+    addLabels?: readonly string[];
+  }): Promise<OrchestratorControlResult>;
+  /** Roadmap Issueの本文だけを置き換える。 */
+  updateRoadmapIssue?(input: {
+    roadmapIssue: number;
+    body: string;
+  }): Promise<OrchestratorControlResult>;
 }
 
 /** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
 export interface OrchestratorControlResult {
   accepted: boolean;
   reason: string;
+  issueNumber?: number;
+  url?: string;
 }
 
 const TASK_ID_ARG = { type: 'string', description: '対象タスクのid' } as const;
@@ -1032,6 +1051,63 @@ export const UPDATE_TASK_DEPENDENCIES_TOOL: McpToolDefinition = {
       },
     },
     required: ['taskId', 'dependsOn'],
+    additionalProperties: false,
+  },
+};
+
+const ISSUE_NUMBER_ARG = { type: 'number', description: '対象Issue番号（正の整数）' } as const;
+const ISSUE_LABELS_ARG = {
+  type: 'array',
+  items: { type: 'string' },
+  maxItems: 20,
+  description: '追加するラベル。既存ラベルは削除しない。',
+} as const;
+
+export const CREATE_ISSUE_TOOL: McpToolDefinition = {
+  name: 'create_issue',
+  description:
+    '現在のリポジトリへIssueを作成する。title/bodyと任意のlabelsだけを指定できる。' +
+    '担当者・milestone・close/reopen・削除はできない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Issueタイトル（改行不可）' },
+      body: { type: 'string', description: 'Issue本文。受入条件と実装計画を含める。' },
+      labels: ISSUE_LABELS_ARG,
+    },
+    required: ['title', 'body'],
+    additionalProperties: false,
+  },
+};
+
+export const UPDATE_ISSUE_TOOL: McpToolDefinition = {
+  name: 'update_issue',
+  description:
+    '現在のリポジトリのIssue本文を置き換え、任意でラベルを追加する。少なくともbodyまたは' +
+    'addLabelsを指定する。既存ラベルの削除、close/reopen、担当変更、タイトル変更はできない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      issue: ISSUE_NUMBER_ARG,
+      body: { type: 'string', description: '置き換えるIssue本文（省略可）' },
+      addLabels: ISSUE_LABELS_ARG,
+    },
+    required: ['issue'],
+    additionalProperties: false,
+  },
+};
+
+export const UPDATE_ROADMAP_ISSUE_TOOL: McpToolDefinition = {
+  name: 'update_roadmap_issue',
+  description:
+    '現在のリポジトリのRoadmap Issue本文だけを置き換える。ラベル、状態、担当者、タイトルは変更できない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      roadmapIssue: ISSUE_NUMBER_ARG,
+      body: { type: 'string', description: '置き換えるRoadmap Issue本文' },
+    },
+    required: ['roadmapIssue', 'body'],
     additionalProperties: false,
   },
 };
@@ -1322,6 +1398,9 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   ADD_TASK_TOOL,
   REMOVE_TASK_TOOL,
   UPDATE_TASK_DEPENDENCIES_TOOL,
+  CREATE_ISSUE_TOOL,
+  UPDATE_ISSUE_TOOL,
+  UPDATE_ROADMAP_ISSUE_TOOL,
 ];
 
 /** program配下のrunだけへ追加公開するprogram単位の制御ツール。 */
@@ -2012,6 +2091,18 @@ export class MessagingMcpServer {
               if (tool.name === UPDATE_TASK_TOOL.name && control.updateTask === undefined) {
                 return false;
               }
+              if (tool.name === CREATE_ISSUE_TOOL.name && control.createIssue === undefined) {
+                return false;
+              }
+              if (tool.name === UPDATE_ISSUE_TOOL.name && control.updateIssue === undefined) {
+                return false;
+              }
+              if (
+                tool.name === UPDATE_ROADMAP_ISSUE_TOOL.name &&
+                control.updateRoadmapIssue === undefined
+              ) {
+                return false;
+              }
               return true;
             });
       const programTools = control?.hasProgramControl?.() === true ? PROGRAM_CONTROL_TOOLS : [];
@@ -2529,6 +2620,46 @@ export class MessagingMcpServer {
       const result = control.addTask(args);
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }
+    if (name === CREATE_ISSUE_TOOL.name) {
+      const rawLabels = args['labels'];
+      const labels = Array.isArray(rawLabels)
+        ? rawLabels.filter((label): label is string => typeof label === 'string')
+        : [];
+      const action = control.createIssue?.({
+        title: str(args['title']),
+        body: str(args['body']),
+        labels,
+      });
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
+    }
+    if (name === UPDATE_ISSUE_TOOL.name) {
+      const rawLabels = args['addLabels'];
+      const addLabels = Array.isArray(rawLabels)
+        ? rawLabels.filter((label): label is string => typeof label === 'string')
+        : [];
+      const action = control.updateIssue?.({
+        issue: typeof args['issue'] === 'number' ? args['issue'] : Number.NaN,
+        ...(typeof args['body'] === 'string' ? { body: args['body'] } : {}),
+        ...(addLabels.length === 0 ? {} : { addLabels }),
+      });
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
+    }
+    if (name === UPDATE_ROADMAP_ISSUE_TOOL.name) {
+      const action = control.updateRoadmapIssue?.({
+        roadmapIssue: typeof args['roadmapIssue'] === 'number' ? args['roadmapIssue'] : Number.NaN,
+        body: str(args['body']),
+      });
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
+    }
 
     const target = str(args['taskId']);
     // `default`は「未知のツール」で閉じる。`ORCHESTRATOR_CONTROL_TOOLS`へツールを足したのに
@@ -2658,4 +2789,3 @@ export async function startHttpMcpTransport(
     },
   };
 }
-

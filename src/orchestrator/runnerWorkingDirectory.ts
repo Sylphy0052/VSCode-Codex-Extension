@@ -421,6 +421,10 @@ export async function integratePseudoWorktree(
     );
     live.runState = markMergeFailed(live.runState, live.def.tasks, taskId);
   }
+  // 疑似worktreeは統合結果が確定した時点でこのタスクのライフサイクルが終わる。
+  // 実装ループのdone直後ではなく、統合成功・衝突・失敗の確定後にタブを閉じる。
+  liveTask.sessionClosed = true;
+  liveTask.session.dispose();
   void self.persist(runId);
   self.notify(runId);
   self.pump(runId);
