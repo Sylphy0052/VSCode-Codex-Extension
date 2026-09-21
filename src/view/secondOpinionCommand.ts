@@ -750,6 +750,10 @@ async function createBundleFor(
   /**
    * 未追跡ファイルを `untracked/` へ書き出すか（Issue #1322）。差分を目次へ置き換える
    * 設定のときだけ真になる。本文へ全文を貼る設定では参照先が要らない。
+   *
+   * その回に選ばれる段階（`resolveDiffPresentationTier`）では切り替えない。段階は世代ごとの
+   * 差分の量で変わるため、それに合わせると材料の構造が世代ごとに現れたり消えたりする。
+   * 設定が有効な間は常に置き、`inline` の世代では本文が参照しないだけにする。
    */
   wantUntracked: boolean,
   log: Logger,

@@ -652,6 +652,11 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
  *
  * `workspaceChanges` 以外の追加資料には段階が無い（`inline` のまま）。差分が無く、
  * `changes.diff` も置かれていない。
+ *
+ * 量を測る対象は**本文へ貼る側の差分**（`snapshot.diff`＝上限で切り詰めた後）であり、
+ * 目次を作る元（切り詰め前）ではない。ここで決めているのは「本文がどれだけ膨らむか」で、
+ * 膨らむのは貼る分だけだからである。切り詰めが起きるほどの差分は、切り詰め後でも既定の
+ * 閾値を優に超えるため、既定値では両者の判定は一致する。
  */
 export function resolveDiffPresentationTier(input: SecondOpinionInput): DiffPresentationTier {
   if (input.diffPresentation === undefined || input.artifact.kind !== 'workspaceChanges') {
