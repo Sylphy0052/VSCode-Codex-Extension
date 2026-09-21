@@ -1,9 +1,6 @@
 {
   "population": 548,
-  "window": [
-    "2026-08-10",
-    "2026-08-31"
-  ],
+  "window": ["2026-08-10", "2026-08-31"],
   "sourceFile": "sampling-source-v3.json",
   "sourceSha256": "6495b38d1c8b3de551a0dbc277d0dcfe193f54589ef93dcdfa100f5f6c4cd0e4",
   "capturedAt": "2026-09-18T14:50:04.875Z",
@@ -193,9 +190,7 @@
       "changedLines": 169,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1040,
@@ -221,9 +216,7 @@
       "changedLines": 599,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1031,
@@ -236,9 +229,7 @@
       "changedLines": 210,
       "changedFiles": 2,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1030,
@@ -275,10 +266,7 @@
       "changedLines": 22,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -292,10 +280,7 @@
       "changedLines": 184,
       "changedFiles": 1,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "test-only"
-      ]
+      "tags": ["single-file", "test-only"]
     },
     {
       "prNumber": 1020,
@@ -321,9 +306,7 @@
       "changedLines": 166,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1015,
@@ -362,9 +345,7 @@
       "changedLines": 456,
       "changedFiles": 16,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1008,
@@ -377,10 +358,7 @@
       "changedLines": 20,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -394,9 +372,7 @@
       "changedLines": 216,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1004,
@@ -409,9 +385,7 @@
       "changedLines": 381,
       "changedFiles": 10,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1002,
@@ -424,9 +398,7 @@
       "changedLines": 20,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 1000,
@@ -439,11 +411,7 @@
       "changedLines": 2466,
       "changedFiles": 25,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "extreme-tail", "refactor"]
     },
     {
       "prNumber": 998,
@@ -469,10 +437,7 @@
       "changedLines": 61,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -497,9 +462,7 @@
       "changedLines": 25,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "chore"
-      ]
+      "tags": ["chore"]
     },
     {
       "prNumber": 992,
@@ -523,9 +486,7 @@
       "changedLines": 1121,
       "changedFiles": 13,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 990,
@@ -551,9 +512,7 @@
       "changedLines": 193,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 987,
@@ -566,9 +525,7 @@
       "changedLines": 808,
       "changedFiles": 9,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 985,
@@ -581,10 +538,7 @@
       "changedLines": 1402,
       "changedFiles": 13,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 984,
@@ -597,10 +551,7 @@
       "changedLines": 44,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs",
-        "chore"
-      ]
+      "tags": ["touches-docs", "chore"]
     },
     {
       "prNumber": 982,
@@ -613,9 +564,7 @@
       "changedLines": 4,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 980,
@@ -628,9 +577,7 @@
       "changedLines": 411,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 979,
@@ -643,9 +590,7 @@
       "changedLines": 189,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 976,
@@ -658,9 +603,7 @@
       "changedLines": 12,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 973,
@@ -673,10 +616,7 @@
       "changedLines": 9,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -690,9 +630,7 @@
       "changedLines": 17,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 970,
@@ -705,10 +643,7 @@
       "changedLines": 2975,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 969,
@@ -721,9 +656,7 @@
       "changedLines": 505,
       "changedFiles": 9,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 968,
@@ -736,9 +669,7 @@
       "changedLines": 683,
       "changedFiles": 17,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 967,
@@ -751,9 +682,7 @@
       "changedLines": 222,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 966,
@@ -766,9 +695,7 @@
       "changedLines": 879,
       "changedFiles": 17,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 965,
@@ -781,9 +708,7 @@
       "changedLines": 706,
       "changedFiles": 7,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 960,
@@ -796,9 +721,7 @@
       "changedLines": 709,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 959,
@@ -811,10 +734,7 @@
       "changedLines": 1573,
       "changedFiles": 22,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 955,
@@ -827,9 +747,7 @@
       "changedLines": 163,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 953,
@@ -842,9 +760,7 @@
       "changedLines": 128,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -858,10 +774,7 @@
       "changedLines": 1956,
       "changedFiles": 17,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 950,
@@ -874,9 +787,7 @@
       "changedLines": 743,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 948,
@@ -889,9 +800,7 @@
       "changedLines": 663,
       "changedFiles": 13,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 946,
@@ -904,9 +813,7 @@
       "changedLines": 706,
       "changedFiles": 14,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 945,
@@ -919,9 +826,7 @@
       "changedLines": 77,
       "changedFiles": 7,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 941,
@@ -934,9 +839,7 @@
       "changedLines": 718,
       "changedFiles": 16,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 938,
@@ -949,9 +852,7 @@
       "changedLines": 336,
       "changedFiles": 5,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 936,
@@ -977,9 +878,7 @@
       "changedLines": 317,
       "changedFiles": 8,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 932,
@@ -992,9 +891,7 @@
       "changedLines": 1353,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 931,
@@ -1007,9 +904,7 @@
       "changedLines": 11,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 930,
@@ -1022,9 +917,7 @@
       "changedLines": 335,
       "changedFiles": 7,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 927,
@@ -1037,9 +930,7 @@
       "changedLines": 323,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 908,
@@ -1052,9 +943,7 @@
       "changedLines": 453,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 906,
@@ -1067,9 +956,7 @@
       "changedLines": 71,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 904,
@@ -1082,9 +969,7 @@
       "changedLines": 780,
       "changedFiles": 13,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 902,
@@ -1097,9 +982,7 @@
       "changedLines": 140,
       "changedFiles": 11,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 901,
@@ -1112,10 +995,7 @@
       "changedLines": 2076,
       "changedFiles": 20,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 899,
@@ -1128,10 +1008,7 @@
       "changedLines": 1590,
       "changedFiles": 24,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 898,
@@ -1157,9 +1034,7 @@
       "changedLines": 980,
       "changedFiles": 19,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 895,
@@ -1172,9 +1047,7 @@
       "changedLines": 67,
       "changedFiles": 5,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 890,
@@ -1239,9 +1112,7 @@
       "changedLines": 381,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 881,
@@ -1254,9 +1125,7 @@
       "changedLines": 1,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 880,
@@ -1295,9 +1164,7 @@
       "changedLines": 4,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "test-only"
-      ]
+      "tags": ["test-only"]
     },
     {
       "prNumber": 876,
@@ -1310,9 +1177,7 @@
       "changedLines": 7,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 875,
@@ -1325,9 +1190,7 @@
       "changedLines": 18,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 873,
@@ -1366,9 +1229,7 @@
       "changedLines": 121,
       "changedFiles": 10,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 867,
@@ -1394,9 +1255,7 @@
       "changedLines": 1,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 863,
@@ -1422,9 +1281,7 @@
       "changedLines": 92,
       "changedFiles": 9,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 860,
@@ -1463,9 +1320,7 @@
       "changedLines": 847,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 856,
@@ -1478,9 +1333,7 @@
       "changedLines": 553,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 855,
@@ -1493,9 +1346,7 @@
       "changedLines": 151,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 854,
@@ -1508,9 +1359,7 @@
       "changedLines": 291,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 853,
@@ -1523,9 +1372,7 @@
       "changedLines": 378,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 852,
@@ -1538,9 +1385,7 @@
       "changedLines": 493,
       "changedFiles": 4,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 851,
@@ -1553,9 +1398,7 @@
       "changedLines": 582,
       "changedFiles": 10,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 843,
@@ -1568,9 +1411,7 @@
       "changedLines": 28,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 841,
@@ -1583,9 +1424,7 @@
       "changedLines": 99,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 838,
@@ -1611,9 +1450,7 @@
       "changedLines": 128,
       "changedFiles": 9,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 833,
@@ -1626,9 +1463,7 @@
       "changedLines": 17,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -1642,9 +1477,7 @@
       "changedLines": 370,
       "changedFiles": 4,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 831,
@@ -1657,9 +1490,7 @@
       "changedLines": 10,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 830,
@@ -1711,9 +1542,7 @@
       "changedLines": 219,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 820,
@@ -1726,9 +1555,7 @@
       "changedLines": 226,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 818,
@@ -1754,10 +1581,7 @@
       "changedLines": 2270,
       "changedFiles": 17,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 815,
@@ -1770,9 +1594,7 @@
       "changedLines": 4,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 814,
@@ -1798,9 +1620,7 @@
       "changedLines": 239,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 810,
@@ -1813,9 +1633,7 @@
       "changedLines": 6,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 808,
@@ -1841,10 +1659,7 @@
       "changedLines": 460,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 806,
@@ -1857,9 +1672,7 @@
       "changedLines": 197,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 805,
@@ -1872,9 +1685,7 @@
       "changedLines": 398,
       "changedFiles": 9,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 804,
@@ -1887,9 +1698,7 @@
       "changedLines": 122,
       "changedFiles": 6,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 803,
@@ -1902,9 +1711,7 @@
       "changedLines": 139,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 802,
@@ -1917,9 +1724,7 @@
       "changedLines": 247,
       "changedFiles": 8,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 801,
@@ -1932,9 +1737,7 @@
       "changedLines": 284,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 800,
@@ -1947,9 +1750,7 @@
       "changedLines": 105,
       "changedFiles": 5,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 799,
@@ -1962,9 +1763,7 @@
       "changedLines": 93,
       "changedFiles": 6,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 798,
@@ -1977,9 +1776,7 @@
       "changedLines": 51,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 797,
@@ -1992,9 +1789,7 @@
       "changedLines": 184,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 796,
@@ -2007,9 +1802,7 @@
       "changedLines": 124,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 794,
@@ -2022,9 +1815,7 @@
       "changedLines": 87,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 793,
@@ -2037,9 +1828,7 @@
       "changedLines": 571,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 792,
@@ -2052,9 +1841,7 @@
       "changedLines": 475,
       "changedFiles": 10,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 791,
@@ -2080,9 +1867,7 @@
       "changedLines": 257,
       "changedFiles": 9,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 789,
@@ -2095,9 +1880,7 @@
       "changedLines": 112,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 788,
@@ -2175,9 +1958,7 @@
       "changedLines": 726,
       "changedFiles": 8,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 782,
@@ -2229,9 +2010,7 @@
       "changedLines": 102,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2258,9 +2037,7 @@
       "changedLines": 24,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2274,9 +2051,7 @@
       "changedLines": 129,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 772,
@@ -2302,9 +2077,7 @@
       "changedLines": 53,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 770,
@@ -2317,9 +2090,7 @@
       "changedLines": 123,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 769,
@@ -2332,9 +2103,7 @@
       "changedLines": 262,
       "changedFiles": 13,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 768,
@@ -2347,9 +2116,7 @@
       "changedLines": 76,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 767,
@@ -2375,9 +2142,7 @@
       "changedLines": 618,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 761,
@@ -2390,9 +2155,7 @@
       "changedLines": 108,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 732,
@@ -2405,9 +2168,7 @@
       "changedLines": 180,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 731,
@@ -2420,9 +2181,7 @@
       "changedLines": 145,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 730,
@@ -2435,9 +2194,7 @@
       "changedLines": 68,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2451,9 +2208,7 @@
       "changedLines": 147,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 727,
@@ -2466,9 +2221,7 @@
       "changedLines": 383,
       "changedFiles": 3,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 726,
@@ -2481,9 +2234,7 @@
       "changedLines": 1234,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 724,
@@ -2496,9 +2247,7 @@
       "changedLines": 95,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 723,
@@ -2511,10 +2260,7 @@
       "changedLines": 1,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2528,9 +2274,7 @@
       "changedLines": 73,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 711,
@@ -2543,10 +2287,7 @@
       "changedLines": 2641,
       "changedFiles": 28,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 710,
@@ -2559,9 +2300,7 @@
       "changedLines": 221,
       "changedFiles": 8,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 708,
@@ -2574,9 +2313,7 @@
       "changedLines": 94,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2603,10 +2340,7 @@
       "changedLines": 1,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2633,10 +2367,7 @@
       "changedLines": 2,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2650,10 +2381,7 @@
       "changedLines": 3,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2667,10 +2395,7 @@
       "changedLines": 1,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2788,10 +2513,7 @@
       "changedLines": 15,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2805,9 +2527,7 @@
       "changedLines": 260,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 681,
@@ -2820,9 +2540,7 @@
       "changedLines": 4,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file"
-      ]
+      "tags": ["single-file"]
     },
     {
       "prNumber": 680,
@@ -2861,10 +2579,7 @@
       "changedLines": 48,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2878,10 +2593,7 @@
       "changedLines": 58,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2921,10 +2633,7 @@
       "changedLines": 33,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "test-only"
-      ]
+      "tags": ["single-file", "test-only"]
     },
     {
       "prNumber": 667,
@@ -2937,10 +2646,7 @@
       "changedLines": 43,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2954,10 +2660,7 @@
       "changedLines": 30,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -2971,9 +2674,7 @@
       "changedLines": 190,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 662,
@@ -2987,9 +2688,7 @@
       "changedLines": 121,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3004,10 +2703,7 @@
       "changedLines": 186,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 660,
@@ -3021,9 +2717,7 @@
       "changedLines": 162,
       "changedFiles": 2,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3038,9 +2732,7 @@
       "changedLines": 247,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 658,
@@ -3054,9 +2746,7 @@
       "changedLines": 141,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 657,
@@ -3070,9 +2760,7 @@
       "changedLines": 324,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 656,
@@ -3086,9 +2774,7 @@
       "changedLines": 131,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3103,9 +2789,7 @@
       "changedLines": 339,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "refactor"
-      ]
+      "tags": ["refactor"]
     },
     {
       "prNumber": 654,
@@ -3133,9 +2817,7 @@
       "changedLines": 234,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 652,
@@ -3149,9 +2831,7 @@
       "changedLines": 501,
       "changedFiles": 5,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 651,
@@ -3165,9 +2845,7 @@
       "changedLines": 117,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3182,9 +2860,7 @@
       "changedLines": 168,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 648,
@@ -3198,11 +2874,7 @@
       "changedLines": 3762,
       "changedFiles": 134,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail",
-        "chore"
-      ]
+      "tags": ["touches-docs", "extreme-tail", "chore"]
     },
     {
       "prNumber": 647,
@@ -3216,9 +2888,7 @@
       "changedLines": 222,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 646,
@@ -3232,9 +2902,7 @@
       "changedLines": 532,
       "changedFiles": 4,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3248,9 +2916,7 @@
       "changedLines": 236,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 644,
@@ -3263,9 +2929,7 @@
       "changedLines": 1233,
       "changedFiles": 16,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 643,
@@ -3278,9 +2942,7 @@
       "changedLines": 211,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3294,9 +2956,7 @@
       "changedLines": 463,
       "changedFiles": 4,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 641,
@@ -3309,9 +2969,7 @@
       "changedLines": 100,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 640,
@@ -3324,10 +2982,7 @@
       "changedLines": 2,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3342,10 +2997,7 @@
       "changedLines": 12,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3359,10 +3011,7 @@
       "changedLines": 32,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3377,10 +3026,7 @@
       "changedLines": 56,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3395,10 +3041,7 @@
       "changedLines": 86,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3413,9 +3056,7 @@
       "changedLines": 113,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 632,
@@ -3429,9 +3070,7 @@
       "changedLines": 39,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3445,10 +3084,7 @@
       "changedLines": 16965,
       "changedFiles": 57,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 629,
@@ -3462,9 +3098,7 @@
       "changedLines": 15,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 627,
@@ -3478,9 +3112,7 @@
       "changedLines": 50,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3495,9 +3127,7 @@
       "changedLines": 209,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 623,
@@ -3511,9 +3141,7 @@
       "changedLines": 136,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 621,
@@ -3527,10 +3155,7 @@
       "changedLines": 1621,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 619,
@@ -3544,10 +3169,7 @@
       "changedLines": 12,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3562,10 +3184,7 @@
       "changedLines": 1433,
       "changedFiles": 13,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 616,
@@ -3579,9 +3198,7 @@
       "changedLines": 15,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3596,9 +3213,7 @@
       "changedLines": 266,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3613,9 +3228,7 @@
       "changedLines": 1203,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3630,9 +3243,7 @@
       "changedLines": 918,
       "changedFiles": 9,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 607,
@@ -3646,10 +3257,7 @@
       "changedLines": 34,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3664,10 +3272,7 @@
       "changedLines": 16,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3682,10 +3287,7 @@
       "changedLines": 54,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3700,9 +3302,7 @@
       "changedLines": 1361,
       "changedFiles": 14,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 597,
@@ -3716,9 +3316,7 @@
       "changedLines": 44,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3732,9 +3330,7 @@
       "changedLines": 46,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3748,10 +3344,7 @@
       "changedLines": 8,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3766,10 +3359,7 @@
       "changedLines": 1430,
       "changedFiles": 14,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 592,
@@ -3782,9 +3372,7 @@
       "changedLines": 1316,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 591,
@@ -3797,9 +3385,7 @@
       "changedLines": 1121,
       "changedFiles": 15,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 590,
@@ -3812,10 +3398,7 @@
       "changedLines": 14,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3829,9 +3412,7 @@
       "changedLines": 1227,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 587,
@@ -3845,10 +3426,7 @@
       "changedLines": 8,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3863,10 +3441,7 @@
       "changedLines": 12,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3881,9 +3456,7 @@
       "changedLines": 32,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3898,10 +3471,7 @@
       "changedLines": 16,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3916,9 +3486,7 @@
       "changedLines": 21,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3933,9 +3501,7 @@
       "changedLines": 263,
       "changedFiles": 2,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3949,9 +3515,7 @@
       "changedLines": 597,
       "changedFiles": 9,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 573,
@@ -3964,9 +3528,7 @@
       "changedLines": 762,
       "changedFiles": 22,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 572,
@@ -3980,10 +3542,7 @@
       "changedLines": 4,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -3998,9 +3557,7 @@
       "changedLines": 28,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4015,9 +3572,7 @@
       "changedLines": 24,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4032,10 +3587,7 @@
       "changedLines": 17,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4050,10 +3602,7 @@
       "changedLines": 49,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4068,10 +3617,7 @@
       "changedLines": 12,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4085,10 +3631,7 @@
       "changedLines": 1181,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 560,
@@ -4101,10 +3644,7 @@
       "changedLines": 1644,
       "changedFiles": 12,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 559,
@@ -4118,9 +3658,7 @@
       "changedLines": 57,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4135,10 +3673,7 @@
       "changedLines": 4,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4153,10 +3688,7 @@
       "changedLines": 18,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4171,10 +3703,7 @@
       "changedLines": 8,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4189,10 +3718,7 @@
       "changedLines": 25,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4206,9 +3732,7 @@
       "changedLines": 1237,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 548,
@@ -4221,9 +3745,7 @@
       "changedLines": 641,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 546,
@@ -4237,10 +3759,7 @@
       "changedLines": 42,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4255,10 +3774,7 @@
       "changedLines": 56,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4273,10 +3789,7 @@
       "changedLines": 10558,
       "changedFiles": 44,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 540,
@@ -4290,9 +3803,7 @@
       "changedLines": 166,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 538,
@@ -4306,9 +3817,7 @@
       "changedLines": 529,
       "changedFiles": 5,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 537,
@@ -4322,9 +3831,7 @@
       "changedLines": 582,
       "changedFiles": 13,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 536,
@@ -4338,9 +3845,7 @@
       "changedLines": 634,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 535,
@@ -4354,9 +3859,7 @@
       "changedLines": 143,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 534,
@@ -4370,10 +3873,7 @@
       "changedLines": 69,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4388,9 +3888,7 @@
       "changedLines": 338,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 525,
@@ -4404,9 +3902,7 @@
       "changedLines": 337,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 523,
@@ -4420,10 +3916,7 @@
       "changedLines": 143,
       "changedFiles": 1,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "test-only"
-      ]
+      "tags": ["single-file", "test-only"]
     },
     {
       "prNumber": 521,
@@ -4437,9 +3930,7 @@
       "changedLines": 1232,
       "changedFiles": 3,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 520,
@@ -4453,10 +3944,7 @@
       "changedLines": 12,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4485,9 +3973,7 @@
       "changedLines": 150,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 516,
@@ -4501,9 +3987,7 @@
       "changedLines": 53,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4518,9 +4002,7 @@
       "changedLines": 44,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4535,10 +4017,7 @@
       "changedLines": 3737,
       "changedFiles": 26,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 509,
@@ -4552,9 +4031,7 @@
       "changedLines": 454,
       "changedFiles": 4,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 508,
@@ -4568,9 +4045,7 @@
       "changedLines": 375,
       "changedFiles": 3,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 507,
@@ -4584,9 +4059,7 @@
       "changedLines": 430,
       "changedFiles": 16,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 506,
@@ -4614,9 +4087,7 @@
       "changedLines": 260,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 503,
@@ -4644,10 +4115,7 @@
       "changedLines": 1477,
       "changedFiles": 17,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 500,
@@ -4661,9 +4129,7 @@
       "changedLines": 344,
       "changedFiles": 3,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4678,10 +4144,7 @@
       "changedLines": 171,
       "changedFiles": 1,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4696,9 +4159,7 @@
       "changedLines": 44,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4727,9 +4188,7 @@
       "changedLines": 1264,
       "changedFiles": 14,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 492,
@@ -4757,9 +4216,7 @@
       "changedLines": 700,
       "changedFiles": 7,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 488,
@@ -4815,9 +4272,7 @@
       "changedLines": 14,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4832,10 +4287,7 @@
       "changedLines": 8,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4850,10 +4302,7 @@
       "changedLines": 52,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4952,9 +4401,7 @@
       "changedLines": 51,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "test-only"
-      ]
+      "tags": ["test-only"]
     },
     {
       "prNumber": 469,
@@ -4968,10 +4415,7 @@
       "changedLines": 39,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -4999,11 +4443,7 @@
       "changedLines": 1085,
       "changedFiles": 13,
       "changeSizeStratum": "XL",
-      "tags": [
-        "has-generated",
-        "touches-docs",
-        "chore"
-      ]
+      "tags": ["has-generated", "touches-docs", "chore"]
     },
     {
       "prNumber": 464,
@@ -5017,9 +4457,7 @@
       "changedLines": 127,
       "changedFiles": 5,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 462,
@@ -5033,9 +4471,7 @@
       "changedLines": 279,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "test-only"
-      ]
+      "tags": ["test-only"]
     },
     {
       "prNumber": 461,
@@ -5049,9 +4485,7 @@
       "changedLines": 243,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 457,
@@ -5065,10 +4499,7 @@
       "changedLines": 431,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "has-generated",
-        "touches-docs"
-      ]
+      "tags": ["has-generated", "touches-docs"]
     },
     {
       "prNumber": 453,
@@ -5082,10 +4513,7 @@
       "changedLines": 2,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5100,10 +4528,7 @@
       "changedLines": 17,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs",
-        "chore"
-      ]
+      "tags": ["touches-docs", "chore"]
     },
     {
       "prNumber": 449,
@@ -5117,10 +4542,7 @@
       "changedLines": 7,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "config-only"
-      ]
+      "tags": ["single-file", "config-only"]
     },
     {
       "prNumber": 447,
@@ -5133,10 +4555,7 @@
       "changedLines": 5759,
       "changedFiles": 34,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 444,
@@ -5164,9 +4583,7 @@
       "changedLines": 61,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 431,
@@ -5180,10 +4597,7 @@
       "changedLines": 7916,
       "changedFiles": 57,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 430,
@@ -5197,9 +4611,7 @@
       "changedLines": 90,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5214,10 +4626,7 @@
       "changedLines": 2460,
       "changedFiles": 12,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 428,
@@ -5231,10 +4640,7 @@
       "changedLines": 4,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5305,9 +4711,7 @@
       "changedLines": 1761,
       "changedFiles": 7,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail"
-      ]
+      "tags": ["extreme-tail"]
     },
     {
       "prNumber": 417,
@@ -5321,9 +4725,7 @@
       "changedLines": 1138,
       "changedFiles": 20,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 415,
@@ -5337,9 +4739,7 @@
       "changedLines": 843,
       "changedFiles": 3,
       "changeSizeStratum": "XL",
-      "tags": [
-        "refactor"
-      ]
+      "tags": ["refactor"]
     },
     {
       "prNumber": 414,
@@ -5381,10 +4781,7 @@
       "changedLines": 2536,
       "changedFiles": 3,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail",
-        "refactor"
-      ]
+      "tags": ["extreme-tail", "refactor"]
     },
     {
       "prNumber": 405,
@@ -5426,9 +4823,7 @@
       "changedLines": 544,
       "changedFiles": 10,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 398,
@@ -5484,9 +4879,7 @@
       "changedLines": 269,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 393,
@@ -5514,9 +4907,7 @@
       "changedLines": 45,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 390,
@@ -5530,10 +4921,7 @@
       "changedLines": 604,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 387,
@@ -5561,10 +4949,7 @@
       "changedLines": 661,
       "changedFiles": 1,
       "changeSizeStratum": "L",
-      "tags": [
-        "single-file",
-        "test-only"
-      ]
+      "tags": ["single-file", "test-only"]
     },
     {
       "prNumber": 384,
@@ -5592,9 +4977,7 @@
       "changedLines": 889,
       "changedFiles": 9,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 377,
@@ -5692,10 +5075,7 @@
       "changedLines": 180,
       "changedFiles": 1,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5710,11 +5090,7 @@
       "changedLines": 52,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "config-only",
-        "chore"
-      ]
+      "tags": ["single-file", "config-only", "chore"]
     },
     {
       "prNumber": 349,
@@ -5728,10 +5104,7 @@
       "changedLines": 2,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5746,9 +5119,7 @@
       "changedLines": 126,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5763,10 +5134,7 @@
       "changedLines": 35,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5781,9 +5149,7 @@
       "changedLines": 990,
       "changedFiles": 19,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 342,
@@ -5797,10 +5163,7 @@
       "changedLines": 1950,
       "changedFiles": 6,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 331,
@@ -5814,10 +5177,7 @@
       "changedLines": 2555,
       "changedFiles": 25,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 330,
@@ -5831,10 +5191,7 @@
       "changedLines": 2005,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 329,
@@ -5848,9 +5205,7 @@
       "changedLines": 217,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 325,
@@ -5864,9 +5219,7 @@
       "changedLines": 157,
       "changedFiles": 4,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 324,
@@ -5908,9 +5261,7 @@
       "changedLines": 444,
       "changedFiles": 10,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 318,
@@ -5924,10 +5275,7 @@
       "changedLines": 641,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 317,
@@ -5941,9 +5289,7 @@
       "changedLines": 309,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 316,
@@ -5957,10 +5303,7 @@
       "changedLines": 57,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "test-only"
-      ]
+      "tags": ["single-file", "test-only"]
     },
     {
       "prNumber": 314,
@@ -5974,10 +5317,7 @@
       "changedLines": 195,
       "changedFiles": 1,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -5992,9 +5332,7 @@
       "changedLines": 1111,
       "changedFiles": 15,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 312,
@@ -6008,9 +5346,7 @@
       "changedLines": 540,
       "changedFiles": 13,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 311,
@@ -6024,9 +5360,7 @@
       "changedLines": 1011,
       "changedFiles": 16,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 309,
@@ -6040,9 +5374,7 @@
       "changedLines": 203,
       "changedFiles": 8,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 307,
@@ -6056,9 +5388,7 @@
       "changedLines": 1336,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 306,
@@ -6072,9 +5402,7 @@
       "changedLines": 1020,
       "changedFiles": 8,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 304,
@@ -6088,9 +5416,7 @@
       "changedLines": 156,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 303,
@@ -6104,9 +5430,7 @@
       "changedLines": 466,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 302,
@@ -6120,10 +5444,7 @@
       "changedLines": 1387,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 301,
@@ -6137,9 +5458,7 @@
       "changedLines": 991,
       "changedFiles": 11,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 300,
@@ -6153,9 +5472,7 @@
       "changedLines": 602,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 299,
@@ -6169,9 +5486,7 @@
       "changedLines": 135,
       "changedFiles": 9,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 285,
@@ -6185,9 +5500,7 @@
       "changedLines": 375,
       "changedFiles": 10,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 283,
@@ -6201,9 +5514,7 @@
       "changedLines": 93,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 281,
@@ -6217,9 +5528,7 @@
       "changedLines": 57,
       "changedFiles": 4,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 279,
@@ -6233,9 +5542,7 @@
       "changedLines": 257,
       "changedFiles": 14,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 277,
@@ -6249,9 +5556,7 @@
       "changedLines": 60,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 275,
@@ -6265,9 +5570,7 @@
       "changedLines": 130,
       "changedFiles": 8,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 274,
@@ -6281,9 +5584,7 @@
       "changedLines": 500,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 273,
@@ -6297,9 +5598,7 @@
       "changedLines": 264,
       "changedFiles": 11,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 272,
@@ -6313,9 +5612,7 @@
       "changedLines": 241,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 271,
@@ -6329,9 +5626,7 @@
       "changedLines": 111,
       "changedFiles": 7,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 270,
@@ -6345,9 +5640,7 @@
       "changedLines": 320,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 269,
@@ -6361,9 +5654,7 @@
       "changedLines": 458,
       "changedFiles": 5,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 268,
@@ -6377,9 +5668,7 @@
       "changedLines": 270,
       "changedFiles": 9,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 267,
@@ -6393,10 +5682,7 @@
       "changedLines": 104,
       "changedFiles": 5,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 265,
@@ -6410,9 +5696,7 @@
       "changedLines": 390,
       "changedFiles": 7,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 264,
@@ -6426,9 +5710,7 @@
       "changedLines": 132,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 263,
@@ -6442,10 +5724,7 @@
       "changedLines": 25,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -6460,9 +5739,7 @@
       "changedLines": 181,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 257,
@@ -6476,9 +5753,7 @@
       "changedLines": 428,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 256,
@@ -6492,9 +5767,7 @@
       "changedLines": 23,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 255,
@@ -6508,9 +5781,7 @@
       "changedLines": 199,
       "changedFiles": 10,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 254,
@@ -6524,9 +5795,7 @@
       "changedLines": 274,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 251,
@@ -6540,9 +5809,7 @@
       "changedLines": 419,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 248,
@@ -6584,9 +5851,7 @@
       "changedLines": 492,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 242,
@@ -6600,9 +5865,7 @@
       "changedLines": 138,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 240,
@@ -6616,10 +5879,7 @@
       "changedLines": 35,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -6634,9 +5894,7 @@
       "changedLines": 824,
       "changedFiles": 15,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 238,
@@ -6650,9 +5908,7 @@
       "changedLines": 338,
       "changedFiles": 7,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 235,
@@ -6680,9 +5936,7 @@
       "changedLines": 264,
       "changedFiles": 11,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 232,
@@ -6696,9 +5950,7 @@
       "changedLines": 289,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 231,
@@ -6712,9 +5964,7 @@
       "changedLines": 1145,
       "changedFiles": 10,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 230,
@@ -6742,9 +5992,7 @@
       "changedLines": 29,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 221,
@@ -6758,9 +6006,7 @@
       "changedLines": 387,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 220,
@@ -6774,10 +6020,7 @@
       "changedLines": 19,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "test-only"
-      ]
+      "tags": ["single-file", "test-only"]
     },
     {
       "prNumber": 219,
@@ -6791,9 +6034,7 @@
       "changedLines": 1195,
       "changedFiles": 8,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 217,
@@ -6807,9 +6048,7 @@
       "changedLines": 931,
       "changedFiles": 8,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 216,
@@ -6823,10 +6062,7 @@
       "changedLines": 9,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -6841,9 +6077,7 @@
       "changedLines": 593,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 214,
@@ -6857,9 +6091,7 @@
       "changedLines": 677,
       "changedFiles": 13,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 213,
@@ -6873,9 +6105,7 @@
       "changedLines": 607,
       "changedFiles": 13,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 212,
@@ -6889,9 +6119,7 @@
       "changedLines": 290,
       "changedFiles": 8,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 211,
@@ -6905,10 +6133,7 @@
       "changedLines": 20,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -6923,9 +6148,7 @@
       "changedLines": 507,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 209,
@@ -6939,9 +6162,7 @@
       "changedLines": 601,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 208,
@@ -6955,9 +6176,7 @@
       "changedLines": 332,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 207,
@@ -6971,9 +6190,7 @@
       "changedLines": 152,
       "changedFiles": 10,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 206,
@@ -6987,9 +6204,7 @@
       "changedLines": 91,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7004,9 +6219,7 @@
       "changedLines": 506,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 196,
@@ -7020,9 +6233,7 @@
       "changedLines": 14,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7037,10 +6248,7 @@
       "changedLines": 2,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7055,9 +6263,7 @@
       "changedLines": 587,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 183,
@@ -7071,9 +6277,7 @@
       "changedLines": 456,
       "changedFiles": 7,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 182,
@@ -7087,9 +6291,7 @@
       "changedLines": 351,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 181,
@@ -7103,9 +6305,7 @@
       "changedLines": 670,
       "changedFiles": 8,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 180,
@@ -7119,9 +6319,7 @@
       "changedLines": 380,
       "changedFiles": 5,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 179,
@@ -7135,9 +6333,7 @@
       "changedLines": 260,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 177,
@@ -7151,9 +6347,7 @@
       "changedLines": 519,
       "changedFiles": 6,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 175,
@@ -7166,10 +6360,7 @@
       "changedLines": 1,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7184,9 +6375,7 @@
       "changedLines": 259,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 166,
@@ -7200,9 +6389,7 @@
       "changedLines": 138,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 165,
@@ -7216,9 +6403,7 @@
       "changedLines": 106,
       "changedFiles": 6,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 162,
@@ -7232,9 +6417,7 @@
       "changedLines": 388,
       "changedFiles": 17,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 161,
@@ -7247,9 +6430,7 @@
       "changedLines": 641,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 160,
@@ -7262,10 +6443,7 @@
       "changedLines": 326,
       "changedFiles": 9,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 157,
@@ -7278,11 +6456,7 @@
       "changedLines": 3771,
       "changedFiles": 7,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "extreme-tail", "refactor"]
     },
     {
       "prNumber": 156,
@@ -7308,11 +6482,7 @@
       "changedLines": 2382,
       "changedFiles": 19,
       "changeSizeStratum": "XL",
-      "tags": [
-        "has-generated",
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["has-generated", "touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 153,
@@ -7325,9 +6495,7 @@
       "changedLines": 1183,
       "changedFiles": 14,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 151,
@@ -7340,9 +6508,7 @@
       "changedLines": 131,
       "changedFiles": 2,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 150,
@@ -7355,9 +6521,7 @@
       "changedLines": 152,
       "changedFiles": 5,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 149,
@@ -7370,10 +6534,7 @@
       "changedLines": 867,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "refactor"
-      ]
+      "tags": ["touches-docs", "refactor"]
     },
     {
       "prNumber": 145,
@@ -7386,10 +6547,7 @@
       "changedLines": 105,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7403,10 +6561,7 @@
       "changedLines": 1705,
       "changedFiles": 14,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 141,
@@ -7419,9 +6574,7 @@
       "changedLines": 587,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 140,
@@ -7434,9 +6587,7 @@
       "changedLines": 405,
       "changedFiles": 3,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7450,9 +6601,7 @@
       "changedLines": 706,
       "changedFiles": 9,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 138,
@@ -7478,9 +6627,7 @@
       "changedLines": 350,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 135,
@@ -7506,9 +6653,7 @@
       "changedLines": 402,
       "changedFiles": 11,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 133,
@@ -7521,9 +6666,7 @@
       "changedLines": 233,
       "changedFiles": 8,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 131,
@@ -7549,9 +6692,7 @@
       "changedLines": 619,
       "changedFiles": 15,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 129,
@@ -7577,9 +6718,7 @@
       "changedLines": 183,
       "changedFiles": 9,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 127,
@@ -7592,9 +6731,7 @@
       "changedLines": 506,
       "changedFiles": 9,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 126,
@@ -7607,10 +6744,7 @@
       "changedLines": 2283,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 125,
@@ -7623,9 +6757,7 @@
       "changedLines": 713,
       "changedFiles": 15,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 124,
@@ -7638,10 +6770,7 @@
       "changedLines": 1379,
       "changedFiles": 10,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 122,
@@ -7654,9 +6783,7 @@
       "changedLines": 2030,
       "changedFiles": 13,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail"
-      ]
+      "tags": ["extreme-tail"]
     },
     {
       "prNumber": 121,
@@ -7669,9 +6796,7 @@
       "changedLines": 170,
       "changedFiles": 9,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 120,
@@ -7684,9 +6809,7 @@
       "changedLines": 399,
       "changedFiles": 3,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7700,9 +6823,7 @@
       "changedLines": 1020,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 117,
@@ -7728,9 +6849,7 @@
       "changedLines": 566,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 115,
@@ -7743,9 +6862,7 @@
       "changedLines": 310,
       "changedFiles": 6,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 114,
@@ -7758,9 +6875,7 @@
       "changedLines": 85,
       "changedFiles": 7,
       "changeSizeStratum": "S",
-      "tags": [
-        "refactor"
-      ]
+      "tags": ["refactor"]
     },
     {
       "prNumber": 112,
@@ -7773,9 +6888,7 @@
       "changedLines": 522,
       "changedFiles": 12,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 111,
@@ -7788,9 +6901,7 @@
       "changedLines": 61,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7804,9 +6915,7 @@
       "changedLines": 2039,
       "changedFiles": 16,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail"
-      ]
+      "tags": ["extreme-tail"]
     },
     {
       "prNumber": 109,
@@ -7819,10 +6928,7 @@
       "changedLines": 1818,
       "changedFiles": 12,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 108,
@@ -7835,9 +6941,7 @@
       "changedLines": 1658,
       "changedFiles": 7,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail"
-      ]
+      "tags": ["extreme-tail"]
     },
     {
       "prNumber": 107,
@@ -7850,9 +6954,7 @@
       "changedLines": 693,
       "changedFiles": 12,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 106,
@@ -7891,10 +6993,7 @@
       "changedLines": 1540,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 101,
@@ -7907,9 +7006,7 @@
       "changedLines": 1095,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 99,
@@ -7922,9 +7019,7 @@
       "changedLines": 1467,
       "changedFiles": 6,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail"
-      ]
+      "tags": ["extreme-tail"]
     },
     {
       "prNumber": 98,
@@ -7950,9 +7045,7 @@
       "changedLines": 107,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7966,10 +7059,7 @@
       "changedLines": 455,
       "changedFiles": 1,
       "changeSizeStratum": "L",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -7983,10 +7073,7 @@
       "changedLines": 2796,
       "changedFiles": 21,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 89,
@@ -7999,9 +7086,7 @@
       "changedLines": 1030,
       "changedFiles": 17,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 87,
@@ -8014,9 +7099,7 @@
       "changedLines": 565,
       "changedFiles": 22,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 86,
@@ -8029,9 +7112,7 @@
       "changedLines": 676,
       "changedFiles": 17,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 85,
@@ -8044,9 +7125,7 @@
       "changedLines": 542,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 84,
@@ -8059,9 +7138,7 @@
       "changedLines": 659,
       "changedFiles": 19,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 83,
@@ -8074,9 +7151,7 @@
       "changedLines": 477,
       "changedFiles": 15,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 82,
@@ -8089,9 +7164,7 @@
       "changedLines": 338,
       "changedFiles": 9,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 81,
@@ -8104,10 +7177,7 @@
       "changedLines": 6048,
       "changedFiles": 35,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 80,
@@ -8120,9 +7190,7 @@
       "changedLines": 833,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 79,
@@ -8135,9 +7203,7 @@
       "changedLines": 771,
       "changedFiles": 12,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 78,
@@ -8150,9 +7216,7 @@
       "changedLines": 57,
       "changedFiles": 3,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -8166,9 +7230,7 @@
       "changedLines": 270,
       "changedFiles": 3,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -8182,9 +7244,7 @@
       "changedLines": 1390,
       "changedFiles": 2,
       "changeSizeStratum": "XL",
-      "tags": [
-        "extreme-tail"
-      ]
+      "tags": ["extreme-tail"]
     },
     {
       "prNumber": 75,
@@ -8197,9 +7257,7 @@
       "changedLines": 141,
       "changedFiles": 9,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 74,
@@ -8212,9 +7270,7 @@
       "changedLines": 1036,
       "changedFiles": 10,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 73,
@@ -8227,9 +7283,7 @@
       "changedLines": 905,
       "changedFiles": 18,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 72,
@@ -8242,10 +7296,7 @@
       "changedLines": 1622,
       "changedFiles": 3,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 71,
@@ -8258,9 +7309,7 @@
       "changedLines": 571,
       "changedFiles": 15,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 70,
@@ -8273,9 +7322,7 @@
       "changedLines": 389,
       "changedFiles": 14,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 69,
@@ -8288,9 +7335,7 @@
       "changedLines": 1327,
       "changedFiles": 5,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 68,
@@ -8303,10 +7348,7 @@
       "changedLines": 81,
       "changedFiles": 1,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -8320,9 +7362,7 @@
       "changedLines": 581,
       "changedFiles": 13,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 65,
@@ -8335,11 +7375,7 @@
       "changedLines": 1737,
       "changedFiles": 5,
       "changeSizeStratum": "XL",
-      "tags": [
-        "has-generated",
-        "touches-docs",
-        "extreme-tail"
-      ]
+      "tags": ["has-generated", "touches-docs", "extreme-tail"]
     },
     {
       "prNumber": 64,
@@ -8352,9 +7388,7 @@
       "changedLines": 688,
       "changedFiles": 15,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 62,
@@ -8367,10 +7401,7 @@
       "changedLines": 516,
       "changedFiles": 1,
       "changeSizeStratum": "L",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -8384,10 +7415,7 @@
       "changedLines": 144,
       "changedFiles": 1,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "touches-docs"
-      ],
+      "tags": ["single-file", "touches-docs"],
       "excludedBy": "docs-only"
     },
     {
@@ -8401,9 +7429,7 @@
       "changedLines": 172,
       "changedFiles": 7,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ]
+      "tags": ["touches-docs"]
     },
     {
       "prNumber": 50,

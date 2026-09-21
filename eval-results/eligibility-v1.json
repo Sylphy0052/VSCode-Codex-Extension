@@ -1,10 +1,7 @@
 {
   "eligibilityVersion": 1,
   "judgedAt": "2026-09-19",
-  "conditions": [
-    "A",
-    "C-repo"
-  ],
+  "conditions": ["A", "C-repo"],
   "decisionsFile": "screening-decisions-v2.jsonl",
   "decisionsSha256": "54fdd4a3732e756143565e8bdc8c550c9d1763f598c012a509afbf37d6f7edde",
   "screenedCases": 102,

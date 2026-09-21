@@ -32,9 +32,7 @@
     {
       "prNumber": 174,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 1,
       "additions": 2,
       "deletions": 1,
@@ -44,9 +42,7 @@
     {
       "prNumber": 878,
       "changeSizeStratum": "S",
-      "tags": [
-        "test-only"
-      ],
+      "tags": ["test-only"],
       "nonDocsFiles": 2,
       "additions": 2,
       "deletions": 2,
@@ -56,9 +52,7 @@
     {
       "prNumber": 664,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 4,
       "additions": 160,
       "deletions": 18,
@@ -68,9 +62,7 @@
     {
       "prNumber": 182,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 4,
       "additions": 337,
       "deletions": 4,
@@ -80,9 +72,7 @@
     {
       "prNumber": 988,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 1,
       "additions": 190,
       "deletions": 0,
@@ -92,10 +82,7 @@
     {
       "prNumber": 316,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "test-only"
-      ],
+      "tags": ["single-file", "test-only"],
       "nonDocsFiles": 1,
       "additions": 52,
       "deletions": 5,
@@ -105,10 +92,7 @@
     {
       "prNumber": 1021,
       "changeSizeStratum": "M",
-      "tags": [
-        "single-file",
-        "test-only"
-      ],
+      "tags": ["single-file", "test-only"],
       "nonDocsFiles": 1,
       "additions": 184,
       "deletions": 0,
@@ -118,9 +102,7 @@
     {
       "prNumber": 183,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 5,
       "additions": 447,
       "deletions": 3,
@@ -130,9 +112,7 @@
     {
       "prNumber": 177,
       "changeSizeStratum": "L",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 4,
       "additions": 482,
       "deletions": 1,
@@ -142,10 +122,7 @@
     {
       "prNumber": 220,
       "changeSizeStratum": "S",
-      "tags": [
-        "single-file",
-        "test-only"
-      ],
+      "tags": ["single-file", "test-only"],
       "nonDocsFiles": 1,
       "additions": 16,
       "deletions": 3,
@@ -155,9 +132,7 @@
     {
       "prNumber": 179,
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 4,
       "additions": 243,
       "deletions": 2,
@@ -167,9 +142,7 @@
     {
       "prNumber": 151,
       "changeSizeStratum": "S",
-      "tags": [
-        "touches-docs"
-      ],
+      "tags": ["touches-docs"],
       "nonDocsFiles": 1,
       "additions": 125,
       "deletions": 0,

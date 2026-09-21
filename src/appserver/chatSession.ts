@@ -136,8 +136,7 @@ export class ChatSession {
     outputOffload?: OutputOffloadPort,
   ) {
     this.state = { ...initialChatState, autoHandoff: initialAutoHandoff };
-    this.offload =
-      outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
+    this.offload = outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
   }
 
   /** ツール出力のセッション総量の上限（issue #1325）を受け持つ係。 */
