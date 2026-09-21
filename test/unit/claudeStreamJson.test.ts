@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_OUTPUT_CHARS } from '../../src/appserver/chatState';
+import { MAX_OUTPUT_CHARS, MAX_TODO_HISTORY } from '../../src/appserver/chatState';
 import { applyStreamEvent, initialClaudeState } from '../../src/claude/streamJson';
 import { consumeNdjson } from '../../src/util/ndjson';
 
@@ -856,6 +856,38 @@ describe('TODO一覧（TodoWrite）', () => {
       { todos: [{ content: 'A', status: 'pending', activeForm: 'A中' }], turnIndex: 0 },
       { todos: [{ content: 'A', status: 'completed', activeForm: 'A中' }], turnIndex: 0 },
     ]);
+  });
+
+  it('履歴はMAX_TODO_HISTORY件で頭打ちにし、古い側から捨てる（issue #1325）', () => {
+    const write = (index: number): Record<string, unknown> => ({
+      type: 'assistant',
+      message: {
+        id: `m${index}`,
+        content: [
+          {
+            type: 'tool_use',
+            id: `t${index}`,
+            name: 'TodoWrite',
+            input: { todos: [{ content: `T${index}`, status: 'pending', activeForm: '実行中' }] },
+          },
+        ],
+      },
+    });
+
+    const overflow = 3;
+    const events: Record<string, unknown>[] = [];
+    for (let i = 0; i < MAX_TODO_HISTORY + overflow; i += 1) {
+      events.push(write(i));
+    }
+
+    const state = apply(events);
+
+    expect(state.todoHistory).toHaveLength(MAX_TODO_HISTORY);
+    // 残るのは新しい側。捨てられた先頭 `overflow` 件は含まれない
+    expect(state.todoHistory[0]?.todos[0]?.content).toBe(`T${overflow}`);
+    expect(state.todoHistory[state.todoHistory.length - 1]?.todos[0]?.content).toBe(
+      `T${MAX_TODO_HISTORY + overflow - 1}`,
+    );
   });
 
   it('TodoWriteを使わないセッションではtodosが空のまま', () => {

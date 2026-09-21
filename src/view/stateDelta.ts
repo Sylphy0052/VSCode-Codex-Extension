@@ -1,4 +1,4 @@
-import type { ChatItem } from '../appserver/chatState';
+import { NO_TODO_HISTORY, type ChatItem, type ChatState } from '../appserver/chatState';
 
 /**
  * 画面へ送る会話項目の差し分（issue #262）。
@@ -96,6 +96,23 @@ export function stripHostOnlyItems(items: readonly ChatItem[]): readonly ChatIte
   return items.some((item) => item.diffs.some((diff) => diff.editReplace !== undefined))
     ? items.map(stripHostOnlyFields)
     : items;
+}
+
+/**
+ * webviewへ送る状態から、ホスト側だけが使う項目を落とす（issue #1325）。
+ *
+ * `todoHistory`は進捗画面（issue #721）のタイムライン専用で、webview側のスクリプト
+ * （`src/view/chatScript.ts`）は一度も読まない。それでも`{ ...state }`に乗って
+ * 50msごとに送られており、TODOが書き換わるたびに伸びる履歴を毎回丸ごと渡していた。
+ * 進捗画面へは`fireStateChanged`が状態をそのまま別経路で渡すため、ここで落としても
+ * 表示は変わらない。
+ *
+ * `items`はこの関数では触らない。送り方が経路ごとに違う（差し分だけを別に送る
+ * `flushState`と、全量を`stripHostOnlyItems`へ通す`refreshSettings`）ため、
+ * 呼び出し側がそれぞれ上書きする。
+ */
+export function stripHostOnlyState(state: ChatState): ChatState {
+  return { ...state, todoHistory: NO_TODO_HISTORY };
 }
 
 /**

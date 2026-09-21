@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { ChatItem } from '../../src/appserver/chatState';
-import { MERGE_ITEMS_SOURCE, buildItemsDelta } from '../../src/view/stateDelta';
+import {
+  initialChatState,
+  type ChatItem,
+  type ChatState,
+  type TodoItem,
+} from '../../src/appserver/chatState';
+import { MERGE_ITEMS_SOURCE, buildItemsDelta, stripHostOnlyState } from '../../src/view/stateDelta';
 
 const item = (id: string, text = ''): ChatItem => ({
   id,
@@ -162,5 +167,45 @@ describe('mergeItems（webview側。issue #262）', () => {
     mergeItems([], { mode: 'full', items: source, total: 1 })?.push(item('b'));
 
     expect(source).toHaveLength(1);
+  });
+});
+
+describe('stripHostOnlyState（issue #1325）', () => {
+  const todo = (status: string): TodoItem => ({ content: 'A', status, activeForm: 'A中' });
+
+  it('webviewが読まないtodoHistoryを落とす', () => {
+    const state: ChatState = {
+      ...initialChatState,
+      todoHistory: [{ todos: [todo('pending')], turnIndex: 0 }],
+    };
+
+    expect(stripHostOnlyState(state).todoHistory).toEqual([]);
+  });
+
+  it('todoHistory以外はそのまま残す（現在のTODO一覧を含む）', () => {
+    const todos = [todo('in_progress')];
+    const state: ChatState = {
+      ...initialChatState,
+      busy: true,
+      todos,
+      items: [item('a')],
+      todoHistory: [{ todos, turnIndex: 0 }],
+    };
+
+    const stripped = stripHostOnlyState(state);
+
+    expect(stripped.busy).toBe(true);
+    expect(stripped.todos).toEqual(todos);
+    // `items` の送り方は経路ごとに違うため、この関数では触らない
+    expect(stripped.items).toEqual([item('a')]);
+  });
+
+  it('渡された状態は書き換えない', () => {
+    const history = [{ todos: [todo('pending')], turnIndex: 0 }];
+    const state: ChatState = { ...initialChatState, todoHistory: history };
+
+    stripHostOnlyState(state);
+
+    expect(state.todoHistory).toBe(history);
   });
 });

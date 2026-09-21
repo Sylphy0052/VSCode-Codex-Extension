@@ -1,5 +1,6 @@
 import {
   appendNotice,
+  appendTodoSnapshot,
   capOutput,
   currentTurnIndex,
   NO_BACKGROUND_TERMINALS,
@@ -182,8 +183,12 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
       if (name === TODO_WRITE_TOOL) {
         todos = normalizeTodos(part['input']);
         // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）。
-        // `items` はこのターンのユーザー発言を既に含むため、そこから何ターン目かが決まる
-        todoHistory = [...todoHistory, { todos, turnIndex: currentTurnIndex(items) }];
+        // `items` はこのターンのユーザー発言を既に含むため、そこから何ターン目かが決まる。
+        // 件数は `MAX_TODO_HISTORY` で頭打ちにする（issue #1325）
+        todoHistory = appendTodoSnapshot(todoHistory, {
+          todos,
+          turnIndex: currentTurnIndex(items),
+        });
         continue;
       }
       const input = rec(part['input']) ?? {};
