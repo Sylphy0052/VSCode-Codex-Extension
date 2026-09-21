@@ -54,6 +54,16 @@ export interface FileSystemPort {
    * 上限で切るのは、巨大な画像でメッセージが詰まるのを防ぐため。
    */
   readBase64File(filePath: string, maxBytes: number): Promise<string | undefined>;
+  /**
+   * 1行ずつ読み、`onLine` へ渡す。全文を一度にメモリへ載せないための専用メソッド
+   * （issue #1325）。ファイルが読めなければ `false`（呼び出し側は `readTextFile` が
+   * `undefined` を返す場合と同じに扱ってよい。読めなかった理由が変わらない限り、
+   * 読み直しても同じ結果になるため再試行しない）。
+   *
+   * 任意実装。**メソッド自体を持たない**ポート（テストのフェイク等）でのみ
+   * `readTextFile` へ退避する。実行した上で `false` が返った場合の退避は含まない。
+   */
+  forEachLine?(filePath: string, onLine: (line: string) => void): Promise<boolean>;
 }
 
 /**

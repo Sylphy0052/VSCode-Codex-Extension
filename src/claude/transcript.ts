@@ -155,42 +155,68 @@ export interface TranscriptItems {
  * 最後に呼ばれた内容だけを `todos` として別に返す（専用表示の初期値に使う）。
  */
 export function transcriptItems(lines: readonly string[]): TranscriptItems {
+  const builder = createTranscriptBuilder();
+  for (const line of lines) {
+    builder.push(line);
+  }
+  return builder.result();
+}
+
+/** 1行ずつ取り込める `transcriptItems` の逐次版（issue #1325）。 */
+export interface TranscriptBuilder {
+  /** 1行を取り込む。 */
+  push(line: string): void;
+  /** それまでに取り込んだ内容から結果を返す。 */
+  result(): TranscriptItems;
+}
+
+/**
+ * ファイルを1行ずつ読みながら使うための `transcriptItems` の逐次版（issue #1325）。
+ *
+ * `transcriptItems` は全文を行配列で受け取るため、呼び出し元がファイル全文・行配列・
+ * この関数が作る項目列の3重にメモリへ載せていた。逐次 `push` できる形にして、
+ * 呼び出し元がファイルをストリームで読みながら直接組み立てられるようにする。
+ */
+export function createTranscriptBuilder(): TranscriptBuilder {
   const items: ChatItem[] = [];
   /** tool_use id → items上の位置。tool_result で結果を書き戻すため。 */
   const toolIndex = new Map<string, number>();
   let todos: TodoItem[] = NO_TODOS;
   let todoHistory: TodoSnapshot[] = NO_TODO_HISTORY;
 
-  for (const line of lines) {
-    const entry = parseLine(line);
-    if (entry === undefined || entry['isSidechain'] === true) {
-      continue;
-    }
-
-    const type = str(entry['type']);
-    if (type === 'user') {
-      appendUserEntry(entry, items, toolIndex);
-      continue;
-    }
-    if (type === 'attachment') {
-      appendInvokedSkills(entry, items);
-      continue;
-    }
-    if (type === 'assistant') {
-      const found = appendAssistantEntry(entry, items, toolIndex);
-      if (found !== undefined) {
-        todos = found;
-        // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）。
-        // 件数は `MAX_TODO_HISTORY` で頭打ちにする（issue #1325）
-        todoHistory = appendTodoSnapshot(todoHistory, {
-          todos: found,
-          turnIndex: currentTurnIndex(items),
-        });
+  return {
+    push(line: string): void {
+      const entry = parseLine(line);
+      if (entry === undefined || entry['isSidechain'] === true) {
+        return;
       }
-    }
-  }
 
-  return { items, todos, todoHistory };
+      const type = str(entry['type']);
+      if (type === 'user') {
+        appendUserEntry(entry, items, toolIndex);
+        return;
+      }
+      if (type === 'attachment') {
+        appendInvokedSkills(entry, items);
+        return;
+      }
+      if (type === 'assistant') {
+        const found = appendAssistantEntry(entry, items, toolIndex);
+        if (found !== undefined) {
+          todos = found;
+          // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）。
+          // 件数は `MAX_TODO_HISTORY` で頭打ちにする（issue #1325）
+          todoHistory = appendTodoSnapshot(todoHistory, {
+            todos: found,
+            turnIndex: currentTurnIndex(items),
+          });
+        }
+      }
+    },
+    result(): TranscriptItems {
+      return { items, todos, todoHistory };
+    },
+  };
 }
 
 /**
