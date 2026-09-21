@@ -1958,7 +1958,6 @@ function buildHandoffPort(repoRoot: string, runId: string): HandoffPort {
     write: (taskId, slug, content) => store.write(runId, taskId, slug, content),
     read: (taskId, slug) => store.read(runId, taskId, slug),
     list: () => store.list(runId),
-    remove: (taskId, slug) => store.remove(runId, taskId, slug),
   };
 }
 

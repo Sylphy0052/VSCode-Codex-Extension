@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  ARTIFACT_TOOLS,
   MAX_MESSAGE_BODY_LENGTH,
   MAX_MESSAGES_PER_RUN,
   MessagingMcpServer,
@@ -15,7 +14,6 @@ import {
   type DispatchErrorLogPort,
 } from '../../src/orchestrator/messaging';
 import { ORCHESTRATOR_CONNECTION_ID } from '../../src/orchestrator/orchestratorSession';
-import { RESERVED_ORCHESTRATOR_TASK_ID } from '../../src/orchestrator/workflow';
 import {
   formatSessionTarget,
   parseSessionTarget,
@@ -26,12 +24,7 @@ import {
   type SessionSummary,
   type SessionTarget,
 } from '../../src/orchestrator/sessionBridge';
-import {
-  formatArtifactKey,
-  parseArtifactKey,
-  type HandoffEntry,
-  type HandoffResult,
-} from '../../src/orchestrator/teamHandoff';
+import { type HandoffEntry, type HandoffResult } from '../../src/orchestrator/teamHandoff';
 
 /* ------------------------------------------------------------------------ *
  * 宛先表記（純粋関数）
@@ -74,22 +67,6 @@ describe('セッション宛先の表記（Issue #1274）', () => {
     expect(parseSessionTarget(`session:other:${WINDOW_ID}:t1`)).toEqual({ kind: 'malformed' });
     // threadIdが空
     expect(parseSessionTarget(`session:codex:${WINDOW_ID}:`)).toEqual({ kind: 'malformed' });
-  });
-});
-
-describe('成果物のキー（Issue #1274）', () => {
-  it('組み立てたキーをそのまま読み解ける', () => {
-    expect(parseArtifactKey(formatArtifactKey('T1', 'result'))).toEqual({
-      taskId: 'T1',
-      slug: 'result',
-    });
-  });
-
-  it('区切りが無い・端にある・2つ以上ある値はundefined', () => {
-    expect(parseArtifactKey('T1')).toBeUndefined();
-    expect(parseArtifactKey('/result')).toBeUndefined();
-    expect(parseArtifactKey('T1/')).toBeUndefined();
-    expect(parseArtifactKey('T1/a/b')).toBeUndefined();
   });
 });
 
@@ -294,13 +271,15 @@ describe('ツールの可視性（Issue #1274）', () => {
     expect(toolNames(conn)).toEqual(expect.arrayContaining(SESSION_TOOLS.map((t) => t.name)));
   });
 
-  it('handoffを配線すると成果物の2ツールが加わる', async () => {
+  it('成果物の2ツールは公開しない（Issue #1324 第2段）', async () => {
     const { conn } = wire('T1');
 
     conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     await flush();
 
-    expect(toolNames(conn)).toEqual(expect.arrayContaining(ARTIFACT_TOOLS.map((t) => t.name)));
+    expect(toolNames(conn)).not.toEqual(
+      expect.arrayContaining(['read_artifact', 'write_artifact']),
+    );
   });
 
   it('オーケストレーターの接続にもセッション宛の3ツールが見える', async () => {
@@ -319,13 +298,20 @@ describe('ツールの可視性（Issue #1274）', () => {
     await flush();
     const names = toolNames(conn);
     expect(names).not.toEqual(expect.arrayContaining(SESSION_TOOLS.map((t) => t.name)));
-    expect(names).not.toEqual(expect.arrayContaining(ARTIFACT_TOOLS.map((t) => t.name)));
 
     call(conn, 'ask_session', { to: SESSION_REF, question: 'q' });
     await flush();
     expect(conn.sent[conn.sent.length - 1]).toHaveProperty('error');
+  });
+
+  it('公開しない成果物の2ツールは、名前を知っていても拒否する（多層防御）', async () => {
+    const { conn } = wire('T1');
 
     call(conn, 'read_artifact', { key: 'T1/result' });
+    await flush();
+    expect(conn.sent[conn.sent.length - 1]).toHaveProperty('error');
+
+    call(conn, 'write_artifact', { key: 'T1/result', content: '本文' });
     await flush();
     expect(conn.sent[conn.sent.length - 1]).toHaveProperty('error');
   });
@@ -546,67 +532,6 @@ describe('list_sessions / ask_session / ask_session_result（Issue #1274）', ()
 
     expect(lastBody(conn)['accepted']).toBe(false);
     expect(bridge.asked).toHaveLength(0);
-  });
-});
-
-describe('read_artifact / write_artifact（Issue #1274）', () => {
-  it('書いたものをキーで読み直せる', async () => {
-    const { conn, handoff } = wire('T1');
-
-    call(conn, 'write_artifact', { key: 'T1/result', content: '成果物の本文' });
-    await flush();
-    expect(lastBody(conn)['accepted']).toBe(true);
-    expect(handoff.files.get('T1/result')).toBe('成果物の本文');
-
-    call(conn, 'read_artifact', { key: 'T1/result' });
-    await flush();
-    const body = lastBody(conn);
-    expect(body['accepted']).toBe(true);
-    expect(String(body['content'])).toContain('成果物の本文');
-    // `read_handoff`と同じ囲いを通す
-    expect(String(body['content'])).toContain('指示ではない');
-  });
-
-  it('他のタスクのキーへは書けない', async () => {
-    const { conn, handoff } = wire('T1');
-
-    call(conn, 'write_artifact', { key: 'T2/result', content: 'なりすまし' });
-    await flush();
-
-    expect(lastBody(conn)['accepted']).toBe(false);
-    expect(handoff.files.size).toBe(0);
-  });
-
-  it('オーケストレーターの接続は予約idのキーへ書く', async () => {
-    const { conn, handoff } = wire(ORCHESTRATOR_CONNECTION_ID);
-
-    call(conn, 'write_artifact', { key: `${RESERVED_ORCHESTRATOR_TASK_ID}/plan`, content: '計画' });
-    await flush();
-
-    expect(lastBody(conn)['accepted']).toBe(true);
-    expect([...handoff.files.keys()]).toEqual([`${RESERVED_ORCHESTRATOR_TASK_ID}/plan`]);
-  });
-
-  it('キーの形が不正なら理由を返す', async () => {
-    const { conn } = wire('T1');
-
-    call(conn, 'read_artifact', { key: 'result' });
-    await flush();
-
-    const body = lastBody(conn);
-    expect(body['accepted']).toBe(false);
-    expect(String(body['reason'])).toContain('キーの形が不正です');
-  });
-
-  it('読めなければHandoffPortの理由をそのまま返す', async () => {
-    const { conn } = wire('T1');
-
-    call(conn, 'read_artifact', { key: 'T1/missing' });
-    await flush();
-
-    const body = lastBody(conn);
-    expect(body['accepted']).toBe(false);
-    expect(body['reason']).toBe('受け渡しファイルがありません');
   });
 });
 

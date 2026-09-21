@@ -137,45 +137,6 @@ export function formatHandoffReference(taskId: string, slug: string): string {
   return `read_handoff(taskId: "${taskId}", slug: "${slug}")`;
 }
 
-/** 成果物のキーの区切り（`formatArtifactKey` / `parseArtifactKey`）。 */
-const ARTIFACT_KEY_SEPARATOR = '/';
-
-/**
- * 成果物のキー（`read_artifact` / `write_artifact` の引数、Issue #1274）を組み立てる。
- *
- * `read_handoff` / `write_handoff` は `taskId` と `slug` を別の引数で取る。Phase 1
- * （Issue #1271）で受け渡しがpull型になり、下流タスクが受け取るのは「取りに行くための
- * 1つの識別子」なので、引数を1つにまとめた形も用意する。保管の実体・検証は
- * `TeamHandoffStore` のままで、この関数は表記だけを担う。
- *
- * 区切りに `/` を使うのは、`taskId`（`isValidTaskId`）にも `slug`（`SLUG_PATTERN`）にも
- * 含まれない文字だから。最初に現れた1つで割れば必ず元の組へ戻る。
- */
-export function formatArtifactKey(taskId: string, slug: string): string {
-  return `${taskId}${ARTIFACT_KEY_SEPARATOR}${slug}`;
-}
-
-/**
- * 成果物のキーを読み解く。形が合わなければ `undefined`。
- *
- * ここでは区切りの位置だけを見て、`taskId` / `slug` の字種は検証しない
- * （`handoffPath` が唯一の検証入口。`parseHandoffFileName` と違い、こちらは一覧の
- * フィルタではなく呼び出し引数の分解なので、不正な値は `TeamHandoffStore` 側の
- * `HandoffResult.error` として理由付きで返させる）。
- */
-export function parseArtifactKey(key: string): { taskId: string; slug: string } | undefined {
-  const cut = key.indexOf(ARTIFACT_KEY_SEPARATOR);
-  if (cut <= 0 || cut === key.length - 1) {
-    return undefined;
-  }
-  const rest = key.slice(cut + ARTIFACT_KEY_SEPARATOR.length);
-  // 区切りが2つ以上ある値は、どちらの側も元の組へ戻らないのでその場で落とす
-  if (rest.includes(ARTIFACT_KEY_SEPARATOR)) {
-    return undefined;
-  }
-  return { taskId: key.slice(0, cut), slug: rest };
-}
-
 /** 一覧の1件。 */
 export interface HandoffEntry {
   taskId: string;

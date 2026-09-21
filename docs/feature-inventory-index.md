@@ -229,7 +229,6 @@
 | `write_handoff`            | `WRITE_HANDOFF_TOOL`                   | [F32](feature-inventory.md#f32) |
 | `read_handoff`             | `READ_HANDOFF_TOOL`                    | [F32](feature-inventory.md#f32) |
 | `list_handoffs`            | `LIST_HANDOFFS_TOOL`                   | [F32](feature-inventory.md#f32) |
-| `delete_handoff`           | `DELETE_HANDOFF_TOOL`                  | [F32](feature-inventory.md#f32) |
 
 ## 全ソースファイル
 
