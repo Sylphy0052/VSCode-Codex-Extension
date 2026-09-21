@@ -45,6 +45,19 @@ export const REVIEW_BUNDLE_DIFF_FILE = 'changes.diff';
 export const REVIEW_BUNDLE_BASE_DIR = 'base';
 
 /**
+ * 未追跡ファイルの内容を置くディレクトリ名（Issue #1322）。
+ *
+ * `changes.diff` には未追跡ファイルが含まれない（`git diff` が出力しない）。差分を目次へ
+ * 置き換えたときに未追跡ファイルだけ本文へ貼り続けると、最大100KBがそのまま残る。参照先を
+ * 作るためにここへ書き出す。
+ *
+ * `after/` とは別に置く。あちらは設定で切れるうえ、資格情報を見つけたときは丸ごと作られない
+ * （Issue #1171）。プロンプトが名指しする参照先が、設定と押下時の内容で消えたり残ったり
+ * するのは避ける。
+ */
+export const REVIEW_BUNDLE_UNTRACKED_DIR = 'untracked';
+
+/**
  * 押下時点のリポジトリ全体の写しを置くディレクトリ名（Issue #1047 条件C-repo）。
  *
  * {@link CreateReviewBundleRequest.afterTree} を渡したときだけ実体化する。**拡張本体は既定で
@@ -136,6 +149,13 @@ export interface ReviewMaterialSource {
   fullDiff: string;
   /** 変更対象のパス一覧（workspace rootからの相対）。 */
   changedPaths: readonly string[];
+  /**
+   * 押下時に読み終えた未追跡ファイル（Issue #1322）。`untracked/<パス>` へ書き出す。
+   *
+   * 渡さなければ `untracked/` を作らない。差分を本文へ全文貼る設定（`inline` 固定）では
+   * 参照先が要らないため、呼び出し側は渡さなくてよい。
+   */
+  untrackedFiles?: readonly UntrackedFile[] | undefined;
   log?: Logger | undefined;
 }
 
@@ -364,10 +384,57 @@ async function writeMaterialInto(dir: string, source: ReviewMaterialSource): Pro
     used += bytes;
     written += 1;
   }
+  const untracked = await writeUntrackedInto(dir, source);
+  redacted += untracked.redacted;
   source.log?.info(
     `${LOG_PREFIX} bundle material written baseFiles=${written}/${source.changedPaths.length} ` +
+      `untrackedFiles=${untracked.written}/${source.untrackedFiles?.length ?? 0} ` +
       `diffChars=${source.fullDiff.length} redacted=${redacted}`,
   );
+}
+
+/**
+ * 未追跡ファイルの中身を `untracked/<パス>` へ書き出す（Issue #1322）。
+ *
+ * 中身は押下時に読み終えたものをそのまま使う。ここで読み直さないのは、`base/` と違って
+ * 作業ツリーのファイルであり、読み直した時点の内容はスナップショットと別物になりうるため。
+ *
+ * 書けなかったファイルは黙って飛ばす。プロンプトの一覧には載るので、読みに行って無ければ
+ * Advisorには「取得できなかった」と分かる。ここで失敗を投げると、参照先が1件書けないだけで
+ * 相談そのものが立ち上がらなくなる。
+ */
+async function writeUntrackedInto(
+  dir: string,
+  source: ReviewMaterialSource,
+): Promise<{ written: number; redacted: number }> {
+  const files = source.untrackedFiles ?? [];
+  if (files.length === 0) {
+    return { written: 0, redacted: 0 };
+  }
+  const root = path.join(dir, REVIEW_BUNDLE_UNTRACKED_DIR);
+  await fs.mkdir(root, { recursive: true });
+  let written = 0;
+  let redacted = 0;
+  for (const file of files) {
+    const target = path.resolve(root, file.path);
+    // `base/` と同じ理由で、書き出し先が `untracked/` の外を指さないことを自分で確かめる
+    if (!isInsideRoot(target, root)) {
+      continue;
+    }
+    // 相談先が読める資料には送信本文と同じ伏せ字を掛ける（Issue #1171）
+    const redaction = redactCredentials(file.content);
+    redacted += redaction.total;
+    try {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, redaction.text, 'utf8');
+      written += 1;
+    } catch (e) {
+      source.log?.warn(
+        `${LOG_PREFIX} 未追跡ファイルを材料へ書き出せませんでした（${file.path}）: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  return { written, redacted };
 }
 
 /**

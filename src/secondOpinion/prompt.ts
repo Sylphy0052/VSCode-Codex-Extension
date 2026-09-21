@@ -20,7 +20,21 @@ import {
   type DiffOmissionReason,
   type DiffPartialFile,
 } from './diffBudget';
-import { REVIEW_BUNDLE_BASE_DIR, REVIEW_BUNDLE_DIFF_FILE } from './reviewBundle';
+import {
+  buildDiffIndex,
+  chooseDiffPresentationTier,
+  MAX_DIFF_INDEX_ENTRIES,
+  type DiffChangeKind,
+  type DiffIndex,
+  type DiffIndexEntry,
+  type DiffPresentationThresholds,
+  type DiffPresentationTier,
+} from './diffIndex';
+import {
+  REVIEW_BUNDLE_BASE_DIR,
+  REVIEW_BUNDLE_DIFF_FILE,
+  REVIEW_BUNDLE_UNTRACKED_DIR,
+} from './reviewBundle';
 import type { UntrackedFile, UntrackedOmission, UntrackedOmissionReason } from './untracked';
 
 /** 起動時点で固定した、作業ツリーの変更。 */
@@ -48,6 +62,15 @@ export interface WorkspaceSnapshot {
   untrackedFiles: UntrackedFile[];
   /** 内容を載せなかった未追跡ファイル。パスとサイズだけをプロンプトへ載せる。 */
   untrackedOmissions: UntrackedOmission[];
+  /**
+   * 切り詰める前の差分から作った目次（Issue #1322）。
+   *
+   * 省略すると {@link diff}（切り詰めた後）から作り直す。上限（`MAX_DIFF_BYTES`）を
+   * 超えた差分では落ちたファイルが目次から消えるため、**取得側（`snapshot.ts`）は必ず
+   * 渡すこと**。省略を許してあるのは、目次を必要としない呼び出し（テスト・評価ハーネス）
+   * が `WorkspaceSnapshot` を手で組み立てるためである。
+   */
+  diffIndex?: DiffIndex | undefined;
 }
 
 /**
@@ -158,6 +181,18 @@ export interface SecondOpinionInput {
    * 受け取った名前をそのまま渡すこと。
    */
   afterTreeNoticeFile?: string | undefined;
+  /**
+   * 差分を本文へどこまで貼るかの閾値（Issue #1322）。
+   *
+   * **省略すると従来どおり差分の全文を本文へ貼る。** 既定を「全文」にしてあるのは、
+   * #1044 の評価ハーネス（`test/bench/secondOpinionEval/`）が条件Aの材料として
+   * 「差分の直貼り」を凍結しているためである。ここの既定を目次へ変えると、条件Aの
+   * プロンプトが黙って別物になり、過去に取った結果と比べられなくなる。
+   *
+   * 拡張機能の実運用の既定（8k / 20k で3段階）は設定
+   * `agent.secondOpinion.diffIndex.*` が持ち、`run.ts` がその値をここへ渡す。
+   */
+  diffPresentation?: DiffPresentationThresholds | undefined;
 }
 
 /** 依頼の区画の位置（Issue #1044 条件B-pos）。 */
@@ -178,6 +213,32 @@ export const DEFAULT_SECOND_OPINION_TEMPLATE =
  * フェンスを使うことで、中身が何であっても囲みが壊れないようにする
  * （CommonMarkのfenced code blockの規則）。
  */
+/**
+ * 本文をインラインのコードスパンで囲む（Issue #1322）。
+ *
+ * {@link fence} と同じ理由で、囲む側のバッククォートを中身より長くする。目次へ出すのは
+ * `git` が出したパスと hunk のheader行（`@@ ... @@ <直近の関数名など>`）で、どちらも
+ * **リポジトリの内容そのもの**である。ファイル名や関数シグネチャにバッククォートを混ぜて
+ * おけば、固定長の `` ` `` で囲むだけではコードスパンが途中で閉じ、以降が地の文として
+ * 読まれる——すぐ隣に「判断を述べる前に必ず読んでください」のような強い指示が並ぶ区画で、
+ * そこへ任意の文を混ぜ込まれる余地を残さない。
+ *
+ * 改行は空白へ潰す。インラインのコードスパンは改行を跨げず、跨いだ時点で囲みが壊れる。
+ *
+ * CommonMarkの規則により、中身の先頭か末尾がバッククォートのときは内側へ空白を1つ入れる
+ * 必要がある（入れないと囲みのバッククォートと連結して数が合わなくなる）。
+ */
+function codeSpan(body: string): string {
+  const text = body.replace(/\r?\n/g, ' ');
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) {
+    longest = Math.max(longest, run.length);
+  }
+  const marker = '`'.repeat(longest + 1);
+  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+  return `${marker}${pad}${text}${pad}${marker}`;
+}
+
 function fence(body: string, info: string): string {
   let longest = 0;
   for (const run of body.match(/`+/g) ?? []) {
@@ -203,6 +264,7 @@ function systemInstruction(
   backgroundKind: ConversationBackgroundKind,
   afterTreeDir: string | undefined,
   afterTreeNoticeFile: string | undefined,
+  tier: DiffPresentationTier,
 ): string {
   const lines = [
     'あなたは、別のAIエージェントが進めている作業について、独立した立場から意見を求められています。',
@@ -238,7 +300,7 @@ function systemInstruction(
       // では動かず、動く場所（絶対パスで辿った場合）では実行中に書き換わった状態を読む
       'この作業ディレクトリには、押下時点で固定したレビュー用の材料だけが置いてあります。リポジトリそのものではありません。',
       `ベース側のコードを読む必要がある場合は \`${REVIEW_BUNDLE_BASE_DIR}/<パス>\` を読んでください（変更対象ファイルの、baseCommit時点の内容です）。`,
-      `差分の全量は \`${REVIEW_BUNDLE_DIFF_FILE}\` にあります（下の区画は大きい場合に省略されていることがあります）。`,
+      ...diffLocationInstruction(tier),
       // 相談の途中で利用者が材料を更新できる（Issue #975）。更新は置き換えではなく
       // `updates/<世代>/` への追加として届くため、届いたときの扱いを先に知らせておく
       '相談の途中で利用者が材料を更新することがあります。そのときは更新の連絡が届き、以後はそこで示された材料が正本になります。連絡が無いうちは、この材料が最新です。',
@@ -291,6 +353,30 @@ function explorationInstruction(
   ];
 }
 
+/**
+ * 差分の全量がどこにあるかの指示（Issue #1322）。
+ *
+ * `inline` のときは従来の文面のまま。本文に差分があるので、`changes.diff` は「大きい場合に
+ * 省略されているかもしれない分の補い」として案内すれば足りる。
+ *
+ * 目次に置き換えたとき（`digest-hunks` / `digest`）は、`changes.diff` を読まない限り
+ * 変更の中身が一切目に入らない。案内のままにすると、モデルは目次だけで答えを書いてしまう
+ * （Issue #1322 の背景にある外部AIとの議論で、パスだけを渡す方式の失敗として挙がった）。
+ * ここだけは「読むこと」を必須として書き、判断を述べる前という順番も指定する。
+ */
+function diffLocationInstruction(tier: DiffPresentationTier): string[] {
+  if (tier === 'inline') {
+    return [
+      `差分の全量は \`${REVIEW_BUNDLE_DIFF_FILE}\` にあります（下の区画は大きい場合に省略されていることがあります）。`,
+    ];
+  }
+  return [
+    `今回は差分が大きいため、下の区画には差分そのものではなく**目次**を置いてあります。差分の全量は \`${REVIEW_BUNDLE_DIFF_FILE}\` にあります。`,
+    `**判断を述べる前に、必ず \`${REVIEW_BUNDLE_DIFF_FILE}\` を読んでください。** 目次だけを根拠に指摘や評価を書かないでください。`,
+    '大きい場合は分けて読んでかまいませんが、目次に挙げたファイルは一通り目を通してください。全体を読めなかった場合は、どこを読んでいないかを回答に明記してください。',
+  ];
+}
+
 /** 内容を載せなかった理由の、プロンプトへ出す文言（Issue #926 F）。 */
 const UNTRACKED_OMISSION_LABELS: Record<UntrackedOmissionReason, string> = {
   binary: 'バイナリ（NULを含む）',
@@ -319,9 +405,31 @@ function formatBytes(bytes: number | undefined): string {
  * 載せなかったものは必ず一覧に出す。**黙って落とさない。** 何を見ていないかが分からないと、
  * Advisorは「新規ファイルはこれで全部」という前提で判断してしまう。
  */
+/**
+ * 未追跡ファイルの区画の段階を決める（Issue #1322）。
+ *
+ * 差分が目次になっていれば、未追跡ファイルもそれに合わせる。差分が `inline` のままでも、
+ * **未追跡ファイル自身が大きければこちらだけを参照へ落とす**。未追跡ファイルは1回の相談で
+ * 最大100KB載りうるため（`MAX_UNTRACKED_TOTAL_BYTES`）、差分が小さいというだけで本文へ
+ * 全文を貼ると、`untracked/` に同じ中身がある状態＝この課題が消そうとしている二重掲載が
+ * そのまま残る。差分の量に未追跡の量を足して1つの段階に丸めないのは、その逆——未追跡が
+ * 多いだけで小さい差分まで目次へ落ちる——を避けるためである。
+ */
+function untrackedTier(
+  tier: DiffPresentationTier,
+  files: readonly UntrackedFile[],
+  thresholds: DiffPresentationThresholds | undefined,
+): DiffPresentationTier {
+  if (tier !== 'inline' || thresholds === undefined || files.length === 0) {
+    return tier;
+  }
+  return chooseDiffPresentationTier(files.map((file) => file.content).join('\n'), thresholds);
+}
+
 function untrackedSection(
   files: readonly UntrackedFile[],
   omissions: readonly UntrackedOmission[],
+  tier: DiffPresentationTier,
 ): string | undefined {
   if (files.length === 0 && omissions.length === 0) {
     return undefined;
@@ -331,8 +439,28 @@ function untrackedSection(
     '',
     '上の差分には現れません（`git diff` は未追跡ファイルを出力しないため）。',
   ];
-  for (const file of files) {
-    parts.push('', `### ${file.path}`, '', fence(file.content, ''));
+  if (tier === 'inline') {
+    for (const file of files) {
+      parts.push('', `### ${file.path}`, '', fence(file.content, ''));
+    }
+  } else if (files.length > 0) {
+    // 差分を目次へ置き換えたときは、未追跡ファイルも同じ扱いにする（Issue #1322 の確認点）。
+    // 未追跡ファイルは `changes.diff` に含まれないため、参照先として `untracked/` を
+    // 書き出してある（`reviewBundle.ts`）。inline のままにすると最大100KBがそのまま残り、
+    // 「主要な実装が全部新規ファイル」という新機能開発の典型で削減がほとんど効かない
+    parts.push(
+      '',
+      `内容は \`${REVIEW_BUNDLE_UNTRACKED_DIR}/<パス>\` に置いてあります。**判断を述べる前に必ず読んでください。**`,
+      // 書き出しに失敗したファイルは黙って飛ばす実装（`reviewBundle.ts`）なので、
+      // 一覧にあって実体が無いことがありうる。その場合に想像で埋めさせない
+      '見つからないものがあれば、その内容は未確認として扱い、どれが読めなかったかを回答に書いてください。',
+      '',
+    );
+    for (const file of files) {
+      parts.push(
+        `- ${codeSpan(`${REVIEW_BUNDLE_UNTRACKED_DIR}/${file.path}`)}（${formatBytes(file.bytes)}）`,
+      );
+    }
   }
   if (omissions.length > 0) {
     parts.push(
@@ -403,19 +531,89 @@ function diffOmissionSection(
   return lines.join('\n');
 }
 
-function artifactSection(artifact: SecondOpinionArtifact): string | undefined {
+/**
+ * 差分の目次（Issue #1322 受入基準2）。
+ *
+ * 差分そのものの代わりに置くので、**何が変わったかの見当が付く最小限**を出す。
+ * ファイルごとの増減行数と種類（追加・削除・リネーム）、全体の規模、バイナリの有無まで。
+ * ここに変更の中身（行の内容）は出さない——出し始めると結局は差分の写しになる。
+ *
+ * `digest-hunks` ではこれに hunk のheader行（`@@ ... @@ <直近の関数名など>`）を足す。
+ * 変更がファイルのどのあたりに散っているかが分かり、`changes.diff` のどこを読むかの
+ * 当たりを付けられる。
+ */
+function diffIndexSection(index: DiffIndex, tier: DiffPresentationTier): string {
+  const lines: string[] = [
+    '### 変更の目次',
+    '',
+    `- 変更ファイル数: ${index.entries.length}`,
+    `- 合計: +${index.totalAdded} / -${index.totalDeleted} 行`,
+    `- 差分の総サイズ: ${formatBytes(index.totalBytes)}`,
+    `- バイナリ: ${index.hasBinary ? 'あり' : 'なし'} / リネーム: ${index.hasRename ? 'あり' : 'なし'} / 削除: ${index.hasDelete ? 'あり' : 'なし'}`,
+    '',
+  ];
+  const shown = index.entries.slice(0, MAX_DIFF_INDEX_ENTRIES);
+  for (const entry of shown) {
+    lines.push(entryLine(entry));
+    if (tier === 'digest-hunks') {
+      for (const header of entry.hunkHeaders) {
+        lines.push(`  - ${codeSpan(header)}`);
+      }
+    }
+  }
+  if (index.entries.length > shown.length) {
+    lines.push(
+      `- ほか${index.entries.length - shown.length}件（`,
+      // 件数だけを伝えるのは省略の一覧と同じ扱い。目次自体が予算を食い潰さないため
+      `  パスは \`${REVIEW_BUNDLE_DIFF_FILE}\` で確認してください）`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/** 目次の1行。種類・増減行数・サイズを、パスの後ろへ短く並べる。 */
+function entryLine(entry: DiffIndexEntry): string {
+  const kind = DIFF_CHANGE_KIND_LABELS[entry.kind];
+  const from = entry.renamedFrom === undefined ? '' : `（${codeSpan(entry.renamedFrom)} から）`;
+  const counts = entry.binary ? 'バイナリ' : `+${entry.added} / -${entry.deleted}`;
+  return `- ${codeSpan(entry.path)} — ${kind}${from} ${counts}（${formatBytes(entry.bytes)}）`;
+}
+
+const DIFF_CHANGE_KIND_LABELS: Record<DiffChangeKind, string> = {
+  add: '新規',
+  delete: '削除',
+  rename: 'リネーム',
+  modify: '変更',
+};
+
+function artifactSection(
+  artifact: SecondOpinionArtifact,
+  tier: DiffPresentationTier,
+  thresholds: DiffPresentationThresholds | undefined,
+): string | undefined {
   switch (artifact.kind) {
     case 'workspaceChanges': {
       const { baseCommit, diff, truncated, untrackedFiles, untrackedOmissions } = artifact.snapshot;
-      const notice = truncated
-        ? '\n\n注意: 差分が大きいため一部を省略しています。省略した部分については判断を保留し、その旨を明記してください。'
-        : '';
+      // 上限超過の省略は目次へ置き換えても残す（Issue #1322 受入基準6）。目次は
+      // `changes.diff` の案内であり、本文へ載せる分を切り詰めた事実とは別の情報である
       const omitted =
         diffOmissionSection(artifact.snapshot.diffOmissions, artifact.snapshot.diffPartials) ?? '';
-      const diffSection =
-        `## 追加資料: 作業ツリーの変更（起動時点のスナップショット）\n\nbaseCommit: ${baseCommit}\n\n` +
-        `${fence(diff, 'diff')}${notice}${omitted}`;
-      const untracked = untrackedSection(untrackedFiles, untrackedOmissions);
+      const heading = `## 追加資料: 作業ツリーの変更（起動時点のスナップショット）\n\nbaseCommit: ${baseCommit}\n\n`;
+      let diffSection: string;
+      if (tier === 'inline') {
+        const notice = truncated
+          ? '\n\n注意: 差分が大きいため一部を省略しています。省略した部分については判断を保留し、その旨を明記してください。'
+          : '';
+        diffSection = `${heading}${fence(diff, 'diff')}${notice}${omitted}`;
+      } else {
+        const index = artifact.snapshot.diffIndex ?? buildDiffIndex(diff);
+        diffSection = `${heading}${diffIndexSection(index, tier)}${omitted}`;
+      }
+      const untracked = untrackedSection(
+        untrackedFiles,
+        untrackedOmissions,
+        untrackedTier(tier, untrackedFiles, thresholds),
+      );
       return untracked === undefined ? diffSection : `${diffSection}\n\n${untracked}`;
     }
     case 'lastAssistantResponse':
@@ -454,6 +652,7 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
   const backgroundKind = input.conversationBackgroundKind ?? 'summary';
   const position = input.requestPosition ?? 'front';
   const request = requestSection(input.userRequest);
+  const tier = resolveDiffPresentationTier(input);
   const sections = [
     systemInstruction(
       input.artifact,
@@ -461,14 +660,38 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
       backgroundKind,
       input.afterTreeDir,
       input.afterTreeNoticeFile,
+      tier,
     ),
     position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
-    artifactSection(input.artifact),
+    artifactSection(input.artifact, tier, input.diffPresentation),
     position === 'end' ? request : undefined,
     input.restateRequestAtEnd === true ? restatedRequestSection(input) : undefined,
   ].filter((section): section is string => section !== undefined);
   return sections.join('\n\n');
+}
+
+/**
+ * 本文への載せ方を決める（Issue #1322）。
+ *
+ * 判定に使うのは差分の量だけである。未追跡ファイルの量は足さない——未追跡ファイルが
+ * 多いだけで差分の inline をやめると、小さい差分まで目次へ落ちる。どちらの区画も
+ * 同じ段階に従うのは、片方だけをファイル参照にすると「読むもの」と「読まなくてよいもの」が
+ * 混ざり、指示が二重になるためである。
+ *
+ * `workspaceChanges` 以外の追加資料には段階が無い（`inline` のまま）。差分が無く、
+ * `changes.diff` も置かれていない。
+ *
+ * 量を測る対象は**本文へ貼る側の差分**（`snapshot.diff`＝上限で切り詰めた後）であり、
+ * 目次を作る元（切り詰め前）ではない。ここで決めているのは「本文がどれだけ膨らむか」で、
+ * 膨らむのは貼る分だけだからである。切り詰めが起きるほどの差分は、切り詰め後でも既定の
+ * 閾値を優に超えるため、既定値では両者の判定は一致する。
+ */
+export function resolveDiffPresentationTier(input: SecondOpinionInput): DiffPresentationTier {
+  if (input.diffPresentation === undefined || input.artifact.kind !== 'workspaceChanges') {
+    return 'inline';
+  }
+  return chooseDiffPresentationTier(input.artifact.snapshot.diff, input.diffPresentation);
 }
 
 /**

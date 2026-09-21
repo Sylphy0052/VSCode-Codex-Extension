@@ -19,8 +19,10 @@ import {
 } from '../orchestrator/planner';
 import type { TaskSession, TaskSessionHost, TaskSessionInput } from '../orchestrator/taskSession';
 import type { SecondOpinionCandidate } from './candidates';
+import type { DiffPresentationThresholds } from './diffIndex';
 import {
   buildSecondOpinionPrompt,
+  resolveDiffPresentationTier,
   type ConversationBackgroundKind,
   type SecondOpinionArtifact,
 } from './prompt';
@@ -107,6 +109,12 @@ export interface SecondOpinionRequest {
    * リポジトリにcommitされていた場合だけ、写し側を残して説明ファイルが別名になる。
    */
   afterTreeNoticeFile?: string | undefined;
+  /**
+   * 差分を本文へどこまで貼るかの閾値（Issue #1322、設定 `agent.secondOpinion.diffIndex.*`）。
+   *
+   * 渡さなければ従来どおり差分の全文を本文へ貼る。設定で無効にしたときは渡さない。
+   */
+  diffPresentation?: DiffPresentationThresholds | undefined;
   /** タブを開かずに走らせるか（設定 `agent.secondOpinion.headless`）。 */
   headless: boolean;
   timeoutMs?: number | undefined;
@@ -190,6 +198,7 @@ export async function runSecondOpinion(
     conversationBackgroundKind: request.conversationBackgroundKind,
     afterTreeDir: request.afterTreeDir,
     afterTreeNoticeFile: request.afterTreeNoticeFile,
+    diffPresentation: request.diffPresentation,
   });
   // 送信直前に資格情報らしき値を伏せる（Issue #1171）。依頼文・背景・差分・未追跡ファイルの
   // どれに混ざっていても送る本文は1本なので、ここで一括して掛ける。本文はログへ出さず件数だけ残す
@@ -206,6 +215,13 @@ export async function runSecondOpinion(
       `artifact=${request.artifact.kind} ` +
       `summary=${describeBackgroundForLog(request)} ` +
       `afterTree=${String(request.afterTreeDir !== undefined)} ` +
+      // 差分の載せ方（Issue #1322）。本文は出さないので、後から送信量を読むときに
+      // 「どの段階で送ったか」が残っていないと `promptChars` の増減を説明できない
+      `diff=${resolveDiffPresentationTier({
+        userRequest: request.request,
+        artifact: request.artifact,
+        diffPresentation: request.diffPresentation,
+      })} ` +
       `promptChars=${redaction.text.length}`,
   );
   // 保持する場合の所有権（Issue #929）。`runSingleTurnTask` に閉じさせない代わりに、

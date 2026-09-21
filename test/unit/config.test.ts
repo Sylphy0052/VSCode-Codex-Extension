@@ -20,8 +20,10 @@ import {
   DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT,
   readClaudeConfig,
   readNotificationsConfig,
+  readSecondOpinionConfig,
   readWorkflowsConfig,
 } from '../../src/config';
+import { DEFAULT_DIFF_PRESENTATION_THRESHOLDS } from '../../src/secondOpinion/diffIndex';
 import { DEFAULT_COMPOSER_BUTTONS } from '../../src/view/composerButtons';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION } from '../../src/view/turnSummary';
 import {
@@ -960,5 +962,55 @@ describe('readAutoHandoffEnabled（Issue #1091）', () => {
       __mock.setConfig('agent', { 'autoHandoff.enabled': bad });
       expect(readAutoHandoffEnabled()).toBe(true);
     }
+  });
+});
+
+describe('readSecondOpinionConfig: 差分の目次の閾値（Issue #1322）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('既定では3段階の既定値を返す', () => {
+    expect(readSecondOpinionConfig().diffPresentation).toEqual(
+      DEFAULT_DIFF_PRESENTATION_THRESHOLDS,
+    );
+  });
+
+  it('無効化すると undefined（＝従来どおり差分を本文へ全文貼る）', () => {
+    __mock.setConfig('agent', { 'secondOpinion.diffIndex.enabled': false });
+    expect(readSecondOpinionConfig().diffPresentation).toBeUndefined();
+  });
+
+  it.each([
+    ['非数値', 'many'],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ])('%s は既定値へ丸める', (_label, value) => {
+    __mock.setConfig('agent', { 'secondOpinion.diffIndex.inlineMaxTokens': value });
+    expect(readSecondOpinionConfig().diffPresentation?.inlineMaxTokens).toBe(
+      DEFAULT_DIFF_PRESENTATION_THRESHOLDS.inlineMaxTokens,
+    );
+  });
+
+  it('負値は0まで、小数は整数へ丸める', () => {
+    __mock.setConfig('agent', {
+      'secondOpinion.diffIndex.inlineMaxTokens': -100,
+      'secondOpinion.diffIndex.hunkMaxTokens': 1234.6,
+    });
+    expect(readSecondOpinionConfig().diffPresentation).toEqual({
+      inlineMaxTokens: 0,
+      hunkMaxTokens: 1235,
+    });
+  });
+
+  it('inline側がhunk側より大きい逆転は、hunk側を引き上げて吸収する', () => {
+    __mock.setConfig('agent', {
+      'secondOpinion.diffIndex.inlineMaxTokens': 30_000,
+      'secondOpinion.diffIndex.hunkMaxTokens': 1_000,
+    });
+    expect(readSecondOpinionConfig().diffPresentation).toEqual({
+      inlineMaxTokens: 30_000,
+      hunkMaxTokens: 30_000,
+    });
   });
 });

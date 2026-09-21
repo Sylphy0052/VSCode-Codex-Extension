@@ -632,6 +632,17 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
         untrackedOmissions: [],
         diffOmissions: [],
         diffPartials: [],
+        // 目次は切り詰める前の差分から作る（Issue #1322）。`diff --git` の無い形なので
+        // ファイル単位の区画は取れず、規模だけが入る
+        diffIndex: {
+          entries: [],
+          totalBytes: 14,
+          totalAdded: 0,
+          totalDeleted: 0,
+          hasBinary: false,
+          hasRename: false,
+          hasDelete: false,
+        },
       },
     });
   });
@@ -660,6 +671,15 @@ describe('captureWorkspaceSnapshot（Issue #894）', () => {
         untrackedOmissions: [],
         diffOmissions: [],
         diffPartials: [],
+        diffIndex: {
+          entries: [],
+          totalBytes: 29,
+          totalAdded: 0,
+          totalDeleted: 0,
+          hasBinary: false,
+          hasRename: false,
+          hasDelete: false,
+        },
       },
     });
   });

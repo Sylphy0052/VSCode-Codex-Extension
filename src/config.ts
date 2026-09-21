@@ -51,6 +51,10 @@ import {
   type SecondOpinionCandidate,
   type SecondOpinionSummarySettings,
 } from './secondOpinion/candidates';
+import {
+  DEFAULT_DIFF_PRESENTATION_THRESHOLDS,
+  type DiffPresentationThresholds,
+} from './secondOpinion/diffIndex';
 import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
 import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
 import { DEFAULT_ADVISOR_IDLE_TIMEOUT_MS } from './secondOpinion/advisorSession';
@@ -262,6 +266,15 @@ export interface SecondOpinionConfig {
    * 構築が失敗し続ける環境のための退避口である。
    */
   afterTree: boolean;
+  /**
+   * 差分をプロンプト本文へ全文貼る代わりに、目次 + `changes.diff` の参照へ切り替える
+   * （Issue #1322）。`undefined` のときは従来どおり全文を貼る。
+   *
+   * 設定 `agent.secondOpinion.diffIndex.enabled` を `false` にすると `undefined` になり、
+   * 本文は Issue #1322 以前と同じ「差分の直貼り」へ戻る（受入基準4）。#1044 の測定と
+   * 同時期に動かすときの退避口でもある。
+   */
+  diffPresentation: DiffPresentationThresholds | undefined;
 }
 
 /** Advisorセッション（Issue #929）の設定。 */
@@ -302,7 +315,48 @@ export function readSecondOpinionConfig(): SecondOpinionConfig {
     },
     autoSend: c.get<boolean>('secondOpinion.autoSend') ?? true,
     afterTree: c.get<boolean>('secondOpinion.afterTree') ?? true,
+    diffPresentation: readDiffPresentation(c),
   };
+}
+
+/**
+ * 差分の載せ方の閾値（Issue #1322。`agent.secondOpinion.diffIndex.*`）。
+ *
+ * 無効にしたときは `undefined` を返す。`prompt.ts` は値が来なければ全文を貼るため、
+ * ここで返さないことがそのまま「現行動作へ戻す」になる。
+ *
+ * `inlineMaxTokens` が `hunkMaxTokens` を超える設定は、上を下へ合わせて潰す。逆転した
+ * まま渡すと中間の段階（目次 + hunkのheader）が選ばれなくなり、閾値を上げたつもりが
+ * inline と目次だけの2段階になる。
+ */
+function readDiffPresentation(
+  c: vscode.WorkspaceConfiguration,
+): DiffPresentationThresholds | undefined {
+  if ((c.get<boolean>('secondOpinion.diffIndex.enabled') ?? true) === false) {
+    return undefined;
+  }
+  const inlineMaxTokens = normalizeDiffIndexTokens(
+    c.get<unknown>('secondOpinion.diffIndex.inlineMaxTokens'),
+    DEFAULT_DIFF_PRESENTATION_THRESHOLDS.inlineMaxTokens,
+  );
+  const hunkMaxTokens = normalizeDiffIndexTokens(
+    c.get<unknown>('secondOpinion.diffIndex.hunkMaxTokens'),
+    DEFAULT_DIFF_PRESENTATION_THRESHOLDS.hunkMaxTokens,
+  );
+  return { inlineMaxTokens, hunkMaxTokens: Math.max(inlineMaxTokens, hunkMaxTokens) };
+}
+
+/**
+ * 閾値の検証。数値でなければ既定へ戻し、0〜100万トークンへ丸める。
+ *
+ * 下限を0にしてあるのは、0が「常に目次へ落とす」という意味を持つためである（`inlineMaxTokens`
+ * を0にすると差分のある相談は必ず目次になる）。負値だけを弾く。
+ */
+function normalizeDiffIndexTokens(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(1_000_000, Math.max(0, Math.round(value)));
 }
 
 /**
