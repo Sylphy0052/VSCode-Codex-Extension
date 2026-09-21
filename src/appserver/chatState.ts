@@ -9,6 +9,10 @@ import {
   type RateLimitWindowInfo,
 } from '../codex/usage';
 import { readAutoApprovalReview } from './autoApprovalReview';
+// hookの標準出力は拡張機能の外から来るテキストなので、外部由来テキストの集約モジュール
+// （design.md §16.24）の整形を使う。`vscode` にも `src/orchestrator` の状態にも依存しない
+// 純粋な関数のため、この層から呼んでも依存の向きは壊れない。
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type { PendingPrompt } from './prompts';
 
 /**
@@ -801,6 +805,42 @@ const numberOf = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 const rec = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
+
+/** ブロック理由1件あたりの表示上限（コードポイント数）。 */
+const HOOK_BLOCK_REASON_MAX_LENGTH = 200;
+/** 注記へ載せるブロック理由の最大件数。 */
+const HOOK_BLOCK_REASON_MAX_COUNT = 3;
+
+/**
+ * `hook/completed` の `run.entries` からブロック理由のテキストを取り出す（issue #1343）。
+ *
+ * 取り出すのは `kind` が `stop`（hookが処理を止めた）と `error`（hook自身の失敗）の2種だけ。
+ * `warning` `feedback` `context` はモデルへの助言や補足であって拒否の理由とは限らないため
+ * 載せない。hookの出力は拡張機能の外から来るテキストなので、改行や制御文字で注記の行を
+ * 割られないよう `sanitizeInlineText` を通し、件数も絞る。
+ */
+function readHookBlockReasons(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const reasons: string[] = [];
+  for (const raw of value) {
+    const entry = rec(raw);
+    const kind = str(entry?.['kind']);
+    if (kind !== 'stop' && kind !== 'error') {
+      continue;
+    }
+    const text = sanitizeInlineText(str(entry?.['text']), HOOK_BLOCK_REASON_MAX_LENGTH).trim();
+    if (text === '') {
+      continue;
+    }
+    reasons.push(text);
+    if (reasons.length >= HOOK_BLOCK_REASON_MAX_COUNT) {
+      break;
+    }
+  }
+  return reasons;
+}
 
 /**
  * reasoning の `summary` / `content` からテキストを取り出す。
@@ -1733,20 +1773,24 @@ export function applyEvent(
     }
 
     /**
-     * hookの実行結果（issue #28）。
+     * hookの実行結果（issue #28、#1343）。
      *
-     * app-serverのプロトコルには「hookを信頼してください」という要求そのものが無い
-     * （`ServerRequest` の10種、`ServerNotification` の全種を実測・スキーマ双方で確認したが
-     * hook信頼専用のものは存在しない）。`HookRunStatus` には `blocked` という値があり、
-     * 信頼していないhookが動くタイミングでそれを伴う `hook/completed` が届くことを期待していた。
+     * `HookRunStatus` は `running` `completed` `failed` `blocked` `stopped` の5値
+     * （codex-cli 0.155.1 の `codex app-server generate-json-schema` が出す
+     * v2 `HookCompletedNotification.json` で確認）。`blocked` は**実行されたhookが操作を
+     * 拒否した**状態であって、hookの信頼状態ではない。信頼状態は `hooks/list` の
+     * `trustStatus`（`managed` `untrusted` `trusted` `modified`）という別系統で表される。
      *
-     * ただし Codex CLI 0.147.0 の実機では、未信頼のhookに対して `hook/started` も
-     * `hook/completed` も届かない（issue #249で実測。hookのコマンド自体も実行されない）。
-     * つまりこの分岐は現状のCLIでは発火しない。将来CLI側がブロックを通知するように
-     * なったときに効くよう、ハンドラはそのまま残してある。
+     * 未信頼のhookに対しては `hook/started` も `hook/completed` も届かない
+     * （issue #249で実測。hookのコマンド自体も実行されない）。したがって「未信頼だから
+     * blockedが届く」という当初の想定（issue #28）は成り立たず、ここでは
+     * 「hookが操作をブロックした」ことだけを伝える。未信頼のhookに気づく手立ては
+     * 設定パネルのhooks一覧の「未信頼」バッジが担う（design.md §14.15）。
      *
-     * 未信頼のhookに気づく手立ては設定パネルのhooks一覧の「未信頼」バッジが担う
-     * （会話画面から気づかせる案は issue #249 で「取らない」と判断済み。design.md §14.15）。
+     * 拒否の理由は `run.entries`（`{ kind, text }` の配列。`kind` は `warning` `stop`
+     * `feedback` `context` `error` の5種）に入る。ここでは拒否理由として確実な
+     * `stop` と `error` だけを拾う。hookの出力は拡張機能の外から来るテキストなので、
+     * 注記の行を割られないよう `sanitizeInlineText` を通し、件数と長さを制限する。
      */
     case 'hook/completed': {
       const run = rec(params['run']);
@@ -1755,10 +1799,15 @@ export function applyEvent(
       }
       const eventName = str(run?.['eventName']) || '不明なイベント';
       const sourcePath = str(run?.['sourcePath']);
+      const statusMessage = str(run?.['statusMessage']);
+      const reasons = readHookBlockReasons(run?.['entries']);
       const detail =
-        `hookがブロックされました（信頼されていないため実行されませんでした）: ${eventName}` +
+        `hookが操作をブロックしました: ${eventName}` +
+        (statusMessage === ''
+          ? ''
+          : ` / ${sanitizeInlineText(statusMessage, HOOK_BLOCK_REASON_MAX_LENGTH)}`) +
         (sourcePath === '' ? '' : ` (${sourcePath})`) +
-        '。設定パネルのhooks一覧で内容を確認してから信頼してください。';
+        (reasons.length === 0 ? '' : `。理由: ${reasons.join(' / ')}`);
       return appendNotice(state, `hookBlocked:${str(run?.['id'])}`, detail);
     }
 
