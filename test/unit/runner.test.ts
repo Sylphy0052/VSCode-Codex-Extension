@@ -1366,6 +1366,12 @@ tasks:
     await flush();
 
     const t2 = codexHost.byTaskId('T2');
+    // 継続ターンの前提を作る（Issue #1321）。実行契約の全文はスレッドの最初の指示にだけ
+    // 載り、そのターンが確定した時点で「届け終えた」と見なされる。表示用の
+    // `expandedContinuePrompt`は継続ターンの形（契約は参照だけ）で作られるため、
+    // 突き合わせる実際の送信も、契約を届け終えたあとのものにする
+    t2.promptTransform?.('最初: {{T1.result}}');
+    t2.emitState({ ...initialChatState, turnCompletionSeq: 1 });
     const actualContinueExpanded = t2.promptTransform?.('継続: {{T1.result}}') ?? '';
     const snapshot = runner.getSnapshot(runId)?.tasks.find((t) => t.id === 'T2');
     expect(snapshot?.expandedContinuePrompt).toBe(actualContinueExpanded);
