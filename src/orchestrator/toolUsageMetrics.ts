@@ -12,6 +12,8 @@
  * ツール呼び出しの結果は変わらない。
  */
 
+import { sanitizeInlineText } from './untrustedText';
+
 /**
  * 1つの接続（taskId）で数えた呼び出し回数。ツール名 → 回数。
  */
@@ -45,20 +47,34 @@ export class ToolUsageCounter {
   private static readonly MAX_TOOL_NAMES_PER_TASK = 64;
 
   /**
+   * ツール名として保持する最大長。
+   *
+   * 実在するツール名はすべて`update_task_dependencies`（25文字）以下なので、実運用の
+   * 集計がこの上限に当たることはない。
+   */
+  private static readonly MAX_TOOL_NAME_LENGTH = 64;
+
+  /**
    * 1回の呼び出しを数える。未知のツール名でも、上限内なら区別して数える
    * （「AIが存在しない道具を呼ぼうとしている」こと自体が判断材料になる）。
+   *
+   * **ツール名は外部由来のテキストとして扱う。** `tools/call`の`name`は呼び出し側が
+   * 任意の文字列を入れられ、そのまま出力パネルの1行へ出る。改行を残すと、1行の集計に
+   * 見せかけて偽の行を生やせる（`untrustedText.ts`の`sanitizeInlineText`のJSDocが
+   * 述べる脅威と同じ）ため、制御文字を畳み長さも切り詰めてから数える。
    */
   record(taskId: string, toolName: string): void {
+    const name = sanitizeInlineText(toolName, ToolUsageCounter.MAX_TOOL_NAME_LENGTH);
     let byTool = this.counts.get(taskId);
     if (byTool === undefined) {
       byTool = new Map<string, number>();
       this.counts.set(taskId, byTool);
     }
-    const current = byTool.get(toolName);
+    const current = byTool.get(name);
     if (current === undefined && byTool.size >= ToolUsageCounter.MAX_TOOL_NAMES_PER_TASK) {
       return;
     }
-    byTool.set(toolName, (current ?? 0) + 1);
+    byTool.set(name, (current ?? 0) + 1);
   }
 
   /** 何も数えていなければ`true`（出力する行が無い）。 */
