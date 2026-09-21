@@ -17,6 +17,14 @@ import { formatAbsoluteTime } from './relativeTime';
 export type ForkHandler = (session: SessionSummary, turnId: string) => Promise<boolean>;
 
 /**
+ * webviewへ渡すターン数の上限（Issue #1325）。
+ *
+ * rolloutは上限なく伸びるため、全ターンをHTMLへ展開すると開いたときのメモリとwebview描画が
+ * ターン数に比例して無制限に重くなる。直近のみを表示し、それより前は省略した旨だけ出す。
+ */
+const MAX_CONVERSATION_TURNS = 300;
+
+/**
  * 会話を読みながら分岐点を選ぶためのビューア。
  *
  * Codexの応答をそのまま再現するのが目的ではなく、「どの指示まで戻すか」を判断できる
@@ -57,6 +65,8 @@ export class ConversationViewManager {
       void vscode.window.showInformationMessage('分岐できる指示がまだありません');
       return;
     }
+    const omittedCount = Math.max(0, turns.length - MAX_CONVERSATION_TURNS);
+    const visibleTurns = omittedCount === 0 ? turns : turns.slice(omittedCount);
 
     const title = session.threadName ?? session.id.slice(0, 8);
     const panel = vscode.window.createWebviewPanel(
@@ -68,7 +78,7 @@ export class ConversationViewManager {
     this.panels.set(session.id, panel);
     panel.onDidDispose(() => this.panels.delete(session.id));
 
-    panel.webview.html = render(panel.webview, title, turns);
+    panel.webview.html = render(panel.webview, title, visibleTurns, omittedCount);
     panel.webview.onDidReceiveMessage((message: unknown) => {
       const turnId = readForkRequest(message);
       if (turnId === undefined) {
@@ -132,10 +142,15 @@ function escapeHtml(value: string): string {
  * 1ターンを描く。
  *
  * 分岐ボタンが渡すのは**このターン自身**のid（`thread/fork` の `beforeTurnId`。そのターンと
- * それ以降を除外する指定。Issue #1161）。会話の最初のターンは、除外すると何も残らないため
- * ボタンを出さない（`hasEarlierTurn`）。
+ * それ以降を除外する指定。Issue #1161）。除外すると何も残らないターンにはボタンを出さない
+ * （`hasEarlierTurn`）。表示を`MAX_CONVERSATION_TURNS`で絞っている場合、表示上の最初のターンでも
+ * その手前に非表示のターンが実在する（Issue #1325）ため、その場合はボタンを出す。
  */
-function renderTurn(turn: ConversationTurn, index: number, hasEarlierTurn: boolean): string {
+function renderTurn(
+  turn: ConversationTurn,
+  displayNumber: number,
+  hasEarlierTurn: boolean,
+): string {
   const time = turn.timestamp === undefined ? '' : formatAbsoluteTime(turn.timestamp);
   const tools = summarizeTools(turn.toolNames);
   const agent = turn.agentMessages
@@ -147,7 +162,7 @@ function renderTurn(turn: ConversationTurn, index: number, hasEarlierTurn: boole
 
   return `<article class="turn">
   <header>
-    <span class="meta">#${index + 1}${time === '' ? '' : ` ・ ${time}`}${tools === '' ? '' : ` ・ ${escapeHtml(tools)}`}</span>
+    <span class="meta">#${displayNumber}${time === '' ? '' : ` ・ ${time}`}${tools === '' ? '' : ` ・ ${escapeHtml(tools)}`}</span>
     ${forkButton}
   </header>
   <div class="bubble user">${escapeHtml(turn.userMessage)}</div>
@@ -166,7 +181,12 @@ function summarizeTools(names: readonly string[]): string {
   return [...counts].map(([name, count]) => (count === 1 ? name : `${name} ×${count}`)).join(', ');
 }
 
-function render(webview: vscode.Webview, title: string, turns: ConversationTurn[]): string {
+function render(
+  webview: vscode.Webview,
+  title: string,
+  turns: ConversationTurn[],
+  omittedCount: number,
+): string {
   const nonce = randomBytes(16).toString('base64');
   // このビューアは画像を扱わない（本文はすべてエスケープしてそのまま表示するだけ）ため、
   // chatCsp()の既定であるimg-src data:は意図的に含めない（chatCsp.ts参照）。
@@ -231,7 +251,8 @@ function render(webview: vscode.Webview, title: string, turns: ConversationTurn[
 <body>
   <h1>${escapeHtml(title)}</h1>
   <p class="lead">「ここから分岐」を押すと、<strong>その指示の手前まで</strong>を引き継いだ新しいセッションが別タブで開きます。押した指示からやり直せます。元のセッションは変更されません。</p>
-  ${turns.map((turn, i) => renderTurn(turn, i, i > 0)).join('\n')}
+  ${omittedCount === 0 ? '' : `<p class="lead">古いやり取り${omittedCount}件は表示を省略しています（直近${MAX_CONVERSATION_TURNS}件のみ表示）。</p>`}
+  ${turns.map((turn, i) => renderTurn(turn, omittedCount + i + 1, omittedCount > 0 || i > 0)).join('\n')}
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   document.body.addEventListener('click', (event) => {
