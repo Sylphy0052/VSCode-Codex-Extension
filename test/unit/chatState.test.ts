@@ -1312,10 +1312,10 @@ describe('applyEvent / item/reasoning/*', () => {
 });
 
 describe('applyEvent / hook/completed', () => {
-  // app-serverにはhookの信頼を求める専用の要求が無い（ServerRequest/ServerNotificationの
-  // 全種をスキーマで確認済み）。信頼していないhookが動くと status: 'blocked' の
-  // hook/completed が届くのが唯一の合図なので、これを会話への注記に変換する（issue #28）。
-  it('信頼されていないhookがブロックされたら会話に注記を残す', () => {
+  // status: 'blocked' は「実行されたhookが操作を拒否した」状態で、hookの信頼状態とは
+  // 別系統（信頼状態は hooks/list の trustStatus）。未信頼のhookでは hook/completed 自体が
+  // 届かないため、注記で信頼の話をしてはいけない（issue #1343）。
+  it('hookが操作をブロックしたら会話に注記を残す', () => {
     const state = applyEvent(initialChatState, 'hook/completed', {
       threadId: 'th-1',
       run: {
@@ -1328,7 +1328,63 @@ describe('applyEvent / hook/completed', () => {
     expect(state.items).toHaveLength(1);
     expect(state.items[0]?.detail).toContain('preToolUse');
     expect(state.items[0]?.detail).toContain('/workspace/repo/.codex/config.toml');
-    expect(state.items[0]?.detail).toContain('信頼されていない');
+    expect(state.items[0]?.detail).not.toContain('信頼されていない');
+  });
+
+  it('entriesのstop/errorをブロック理由として載せる', () => {
+    const state = applyEvent(initialChatState, 'hook/completed', {
+      run: {
+        id: 'run-4',
+        eventName: 'preToolUse',
+        status: 'blocked',
+        statusMessage: '危険操作と秘密情報を検査',
+        entries: [
+          { kind: 'context', text: '無関係な補足' },
+          { kind: 'stop', text: '機密ファイルへのアクセスを拒否しました' },
+          { kind: 'error', text: 'hookの実行に失敗しました' },
+        ],
+      },
+    });
+    const detail = state.items[0]?.detail ?? '';
+    expect(detail).toContain('危険操作と秘密情報を検査');
+    expect(detail).toContain('機密ファイルへのアクセスを拒否しました');
+    expect(detail).toContain('hookの実行に失敗しました');
+    expect(detail).not.toContain('無関係な補足');
+  });
+
+  it('entriesのテキストの改行と制御文字を落として1行に収める', () => {
+    const state = applyEvent(initialChatState, 'hook/completed', {
+      run: {
+        id: 'run-5',
+        eventName: 'preToolUse',
+        status: 'blocked',
+        entries: [{ kind: 'stop', text: '1行目\n- 偽の項目\r\n2行目' }],
+      },
+    });
+    const detail = state.items[0]?.detail ?? '';
+    expect(detail).not.toContain('\n');
+    expect(detail).not.toContain('\r');
+  });
+
+  it('長すぎる理由は切り詰め、4件目以降は載せない', () => {
+    const state = applyEvent(initialChatState, 'hook/completed', {
+      run: {
+        id: 'run-6',
+        eventName: 'preToolUse',
+        status: 'blocked',
+        entries: [
+          { kind: 'stop', text: 'あ'.repeat(300) },
+          { kind: 'stop', text: '理由2' },
+          { kind: 'stop', text: '理由3' },
+          { kind: 'stop', text: '理由4' },
+        ],
+      },
+    });
+    const detail = state.items[0]?.detail ?? '';
+    expect(detail).toContain(`${'あ'.repeat(200)}…`);
+    expect(detail).not.toContain('あ'.repeat(201));
+    expect(detail).toContain('理由3');
+    expect(detail).not.toContain('理由4');
   });
 
   it('blocked以外のstatusでは何もしない', () => {
