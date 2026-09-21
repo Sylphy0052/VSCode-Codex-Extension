@@ -65,6 +65,7 @@ import {
   type HandoffPort,
   type HttpMcpTransportHandle,
   type ProgramControlPort,
+  type ToolUsageMetricsPort,
 } from './messaging';
 import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
 import { reviewTaskPullRequest } from './planner';
@@ -75,6 +76,7 @@ import {
   type PromptMetrics,
 } from './promptMetrics';
 import type { SessionBridgePort } from './sessionBridge';
+import { ToolUsageCounter } from './toolUsageMetrics';
 import {
   applyLoopStopReason,
   clampWorktreeRemovalAttempts,
@@ -378,6 +380,7 @@ export interface WorkflowRunnerMessagingDeps {
   startTransport: (
     hub: TaskMessagingHub,
     logPort?: DispatchErrorLogPort,
+    toolUsagePort?: ToolUsageMetricsPort,
   ) => Promise<HttpMcpTransportHandle>;
   /**
    * `agent.workflows.replyTimeoutSec` の現在値（秒）。省略時は`DEFAULT_REPLY_TIMEOUT_SEC`
@@ -444,6 +447,15 @@ export interface WorkflowRunnerDeps {
     enabled: () => boolean;
     sessionFileDirs: Record<Provider, readonly string[]>;
   };
+  /**
+   * メッセージング用MCPツールの実利用率の計測（Issue #1324）。**省略可能。**
+   *
+   * 省略時・`enabled()`が`false`の間は何も数えず、何も出力しない（`promptMetrics`と同じ
+   * 「既定では計測しない」流儀）。`enabled()`はrunごとにMCPサーバを立てる時点で一度だけ
+   * 読む——runの途中でカウンタが現れたり消えたりすると、出力される回数が「runの一部分だけ
+   * の集計」になり、実利用率として読めなくなるため。
+   */
+  toolUsageMetrics?: { enabled: () => boolean };
   /**
    * 疑似worktree（design.md §16.20）。gitの作業ツリーでないワークスペースで
    * `isolation: worktree`（既定）のタスクを走らせるときの隔離手段。**省略可能。**
@@ -1649,6 +1661,16 @@ export interface LiveRun {
         hub: TaskMessagingHub;
         transport: HttpMcpTransportHandle;
         waitingReplyPollTimer: ReturnType<typeof setInterval>;
+        /**
+         * MCPツールの実利用率のカウンタ（Issue #1324）。計測が有効なときだけ入る。
+         *
+         * transportと同じ寿命にしてある——数えるのは`MessagingMcpServer`（transportと一緒に
+         * 作られ、一緒に閉じる）であり、集計を出すのも閉じる時点（`closeMessaging`）なので、
+         * ここに置けば「立てた時に作り、閉じる時に出す」が1組で完結する。hub側
+         * （`messagingHub`）に持たせると、再開（`ensureMessaging`）でtransportだけ作り直した
+         * ときに、出力済みの回数を繰り越すのかどうかという判断が余分に要る。
+         */
+        toolUsage: ToolUsageCounter | undefined;
       }
     | undefined;
   /**
@@ -2315,7 +2337,19 @@ export class WorkflowRunner {
       // dispatch例外の記録先（Issue #375）。`log.ts`はVSCode APIへ依存するため、
       // `messaging.ts`（VSCode非依存方針）へは直接渡さず最小限のportで包む
       const logPort: DispatchErrorLogPort = { error: (message) => this.deps.log.error(message) };
-      const transport = await messaging.startTransport(hub, logPort);
+      // 実利用率の計測（Issue #1324）。既定は無効で、有効なときだけカウンタを作って
+      // portとして渡す。集計はrunの終わり（`closeMessaging`）に出力パネルへ出す。
+      // 有効・無効の判定はここで一度だけ——runの途中で切り替わると、出す集計が
+      // 「runの一部分だけ」になり実利用率として読めなくなる
+      const toolUsage =
+        this.deps.toolUsageMetrics?.enabled() === true ? new ToolUsageCounter() : undefined;
+      const transport = await messaging.startTransport(
+        hub,
+        logPort,
+        toolUsage === undefined
+          ? undefined
+          : { record: (taskId, toolName) => toolUsage.record(taskId, toolName) },
+      );
       // `await`の間に`dispose()`が走り抜ける窓がある（Issue #475/PR #495レビュー指摘:
       // high）。ここで立て終えたtransportを`live.messaging`へ渡す前にもう一度確認し、
       // 破棄済みなら誰にも参照させずその場で閉じる。渡してしまうと、二度と呼ばれない
@@ -2334,7 +2368,7 @@ export class WorkflowRunner {
         WAITING_REPLY_POLL_INTERVAL_MS,
       );
       waitingReplyPollTimer.unref?.();
-      live.messaging = { hub, transport, waitingReplyPollTimer };
+      live.messaging = { hub, transport, waitingReplyPollTimer, toolUsage };
     } catch (e) {
       this.warnMessagingStartupFailure(runId, live, e);
     }
@@ -3021,7 +3055,7 @@ export class WorkflowRunner {
         clearTimeout(entry.approvalTimeoutTimer);
         disposeQuietly(this.deps.log, () => entry.session.dispose(), `merge resolution ${taskId}`);
       }
-      disposeQuietly(this.deps.log, () => closeMessaging(live), 'messaging');
+      disposeQuietly(this.deps.log, () => closeMessaging(live, this.deps.log), 'messaging');
       disposeQuietly(this.deps.log, () => closeReviewCommentPoll(live), 'reviewCommentPoll');
       // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
       // だけでなく、run正常終了時の`pump()`からも呼ばれる共通関数のため。そちらでは
@@ -3670,7 +3704,7 @@ export class WorkflowRunner {
     }
     // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
     // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
-    closeMessaging(live);
+    closeMessaging(live, this.deps.log);
     // レビューコメントのポーリング（design.md §16.30）も、最終マージ・判断が確定して
     // これ以上PR/MRの状態を追う必要が無くなった時点で一緒に閉じる
     closeReviewCommentPoll(live);

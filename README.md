@@ -1079,6 +1079,7 @@ tasks:
 | `agent.workflows.autoResume`                   | `true`                          | machine-overridable | ウィンドウのリロードやWSLの停止・再起動で中断されたrunを、条件を満たせば自動で再開するか。人が「全体の停止」で止めたrun・他の理由で失敗したタスクを含むrun・`allow` の確認が要るタスクを含むrunは対象外で、従来どおり手動で再実行する                      |
 | `agent.workflows.maxAutoResumeAttempts`        | `3`                             | machine-overridable | 自動再開を試みる回数の上限。上限に達した後はワークフローViewにその旨を出したまま自動再開をあきらめ、手動での再実行を待つ                                                                                                                                   |
 | `agent.orchestrator.promptMetrics.enabled`     | `false`                         | machine             | タスクへ送る本文の量を出力パネルへ1行ずつ記録する。送信本文の文字数、実行契約の個数と文字数、そのタスクでの累計、セッションの記録ファイルに残っている実行契約の個数、そのターンの入力トークン数を出す。有効にしても送信内容は変わらない                    |
+| `agent.orchestrator.toolUsageMetrics.enabled`  | `false`                         | machine             | タスク間メッセージングのMCPツールが実際に何回呼ばれたかを出力パネルへ記録する。run終了時に接続（タスク、およびオーケストレーター）ごとへ1行で、呼び出し回数の合計、呼ばれたツールの種類数、ツール名ごとの回数を出す。有効にしてもツールの見え方や呼び出しの結果は変わらない |
 
 **`allowAutoApprove` は既定 `false` の machine スコープ設定。** タスクのYAMLに `autoApprove: true` と書いても、この設定を有効にしない限り効かない（意図しない無人実行を、設定パネルを一度も開かないまま有効化させないための保護。[無人実行についての注意](#無人実行についての注意)参照）。
 
