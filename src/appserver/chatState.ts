@@ -806,8 +806,12 @@ const numberOf = (v: unknown): number | undefined =>
 const rec = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined;
 
-/** ブロック理由1件あたりの表示上限（コードポイント数）。 */
-const HOOK_BLOCK_REASON_MAX_LENGTH = 200;
+/**
+ * ブロック時の注記へ載せるテキスト1件あたりの長さ上限。`statusMessage` と理由の両方に使う。
+ *
+ * 単位は`sanitizeInlineText`に合わせてUTF-16コード単位（`String.length`）。
+ */
+const HOOK_BLOCK_TEXT_MAX_LENGTH = 200;
 /** 注記へ載せるブロック理由の最大件数。 */
 const HOOK_BLOCK_REASON_MAX_COUNT = 3;
 
@@ -830,7 +834,7 @@ function readHookBlockReasons(value: unknown): string[] {
     if (kind !== 'stop' && kind !== 'error') {
       continue;
     }
-    const text = sanitizeInlineText(str(entry?.['text']), HOOK_BLOCK_REASON_MAX_LENGTH).trim();
+    const text = sanitizeInlineText(str(entry?.['text']), HOOK_BLOCK_TEXT_MAX_LENGTH).trim();
     if (text === '') {
       continue;
     }
@@ -1805,7 +1809,7 @@ export function applyEvent(
         `hookが操作をブロックしました: ${eventName}` +
         (statusMessage === ''
           ? ''
-          : ` / ${sanitizeInlineText(statusMessage, HOOK_BLOCK_REASON_MAX_LENGTH)}`) +
+          : ` / ${sanitizeInlineText(statusMessage, HOOK_BLOCK_TEXT_MAX_LENGTH)}`) +
         (sourcePath === '' ? '' : ` (${sourcePath})`) +
         (reasons.length === 0 ? '' : `。理由: ${reasons.join(' / ')}`);
       return appendNotice(state, `hookBlocked:${str(run?.['id'])}`, detail);

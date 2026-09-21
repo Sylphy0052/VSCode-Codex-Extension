@@ -1366,6 +1366,27 @@ describe('applyEvent / hook/completed', () => {
     expect(detail).not.toContain('\r');
   });
 
+  it('長すぎる理由は切り詰め、4件目以降は載せない', () => {
+    const state = applyEvent(initialChatState, 'hook/completed', {
+      run: {
+        id: 'run-6',
+        eventName: 'preToolUse',
+        status: 'blocked',
+        entries: [
+          { kind: 'stop', text: 'あ'.repeat(300) },
+          { kind: 'stop', text: '理由2' },
+          { kind: 'stop', text: '理由3' },
+          { kind: 'stop', text: '理由4' },
+        ],
+      },
+    });
+    const detail = state.items[0]?.detail ?? '';
+    expect(detail).toContain(`${'あ'.repeat(200)}…`);
+    expect(detail).not.toContain('あ'.repeat(201));
+    expect(detail).toContain('理由3');
+    expect(detail).not.toContain('理由4');
+  });
+
   it('blocked以外のstatusでは何もしない', () => {
     const state = applyEvent(initialChatState, 'hook/completed', {
       run: { id: 'run-2', eventName: 'preToolUse', status: 'completed' },
