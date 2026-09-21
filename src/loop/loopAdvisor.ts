@@ -1,12 +1,20 @@
-import type { GoalEvaluatorInput } from './goalLoop';
+import type { GoalDefinition, GoalEvaluation, GoalEvidence, GoalVerdict } from './goalLoop';
 import type { TurnFocus } from './turnFocus';
 
 /**
  * ループのAdvisor（issue #957）の型。
  *
  * ゴール駆動ループ（issue #892）のEvaluatorは「ゴールを達成したか」だけを見る**止める側**
- * であり、進め方が妥当かは誰も問うていなかった。Advisorはその欠けを埋める第三者で、
- * Evaluatorと**並列に**走り、同じ材料を別の目で見る。
+ * であり、進め方が妥当かは誰も問うていなかった。Advisorはその欠けを埋める第三者である。
+ *
+ * **Advisorは毎ターンは呼ばない（issue #1323）。** Evaluatorの判定を受けてから、行き詰まり
+ * が見えた周にだけ呼ぶ。材料も証拠の全文ではなくEvaluatorの構造化された判定へ置き換える
+ * （`AdvisorInput`）。以前は毎ターンEvaluatorと並列に走らせ、同じ材料（最大30,000字）を
+ * 2本へ送っていたため、200ターンのループでは同じ本文を二重に送り続けていた。
+ *
+ * **統合はしない。** Evaluatorの判定とAdvisorの助言を1回の生成へまとめると、評価を前提に
+ * した助言になり（self-anchoring）、評価の誤りを助言側が独立して訂正できなくなる。止める
+ * 権限はEvaluatorに残したままで、呼ぶ回数だけを減らす。
  *
  * `goalLoop.ts`と同じく`vscode`には依存しない。実際の呼び出し（プロセス起動）は
  * `loopAdvisorProcess.ts`が持ち、ここには型だけを置く。
@@ -76,16 +84,78 @@ export function advisorFailed(reason: LoopAdvisorFailureReason): LoopAdvisorResu
 }
 
 /**
- * Advisorの呼び出し。
+ * 証拠の見出し（issue #1323）。**本文（`detail`）は持たない。**
  *
- * 入力はEvaluatorと同じ`GoalEvaluatorInput`を使い回す。Advisorのために別途
- * `thread/fork`して材料を作り直すと、1ターンあたりの待ち時間がもう1本増えるうえ、
- * 同じターンについてEvaluatorとAdvisorが違う材料を見ることになる。
+ * Advisorへ渡すのは「何をどこで測って、通ったか落ちたか」までで、出力の全文は渡さない。
+ * 進め方の妥当性を見るのに本文は要らず、本文こそが送信量の大半を占めていた。落ちた証拠の
+ * 中身まで読む必要があるのはEvaluator（達成判定の側）である。
+ */
+export interface AdvisorEvidenceRef {
+  kind: GoalEvidence['kind'];
+  /** 実行したコマンド行など、証拠の出どころ。関連するファイルパスはここに現れる。 */
+  source: string;
+  status: GoalEvidence['status'];
+  iteration: number;
+}
+
+/** Advisorへ渡す証拠の見出しの上限件数。新しいものを残す。 */
+export const ADVISOR_EVIDENCE_REF_LIMIT = 20;
+
+/**
+ * 証拠のledgerを見出しだけへ落とす（issue #1323）。**`detail`は落とす。**
+ *
+ * 件数の絞り込みはここでは行わない（`formatEvidenceRefs`が新しい分だけを載せる）。
+ * 何件あったかをAdvisorへ伝えられるよう、落とす判断はプロンプトの組み立て側に寄せる。
+ */
+export function toAdvisorEvidenceRefs(
+  evidence: readonly GoalEvidence[],
+): readonly AdvisorEvidenceRef[] {
+  return evidence.map((item) => ({
+    kind: item.kind,
+    source: item.source,
+    status: item.status,
+    iteration: item.iteration,
+  }));
+}
+
+/**
+ * Advisorを呼んだ理由（issue #1323）。**どれか1つが成立した周にだけ呼ぶ。**
+ *
+ * - `repeated-gaps`: 同じ未達の受入条件が続いている（同じ場所で足踏みしている）
+ * - `no-progress`: 応答テキストが変わっていない（作業自体が進んでいない）
+ * - `indeterminate-streak`: 証拠不足で判定できない周が続いている（測り方が噛み合っていない）
+ *
+ * 理由をそのままAdvisorへ渡すのは、「なぜ今あなたに訊いているか」が分かる方が指摘が
+ * 噛み合うためである。値は列挙であり、Advisorへ送る文面は`advisorPrompt.ts`の固定文から
+ * 組み立てる（自由文を外から差し込ませない）。
+ */
+export type AdvisorTrigger = 'repeated-gaps' | 'no-progress' | 'indeterminate-streak';
+
+/**
+ * Advisorへ渡す材料（issue #1323）。
+ *
+ * 証拠の全文・直近の応答本文・要約は渡さない。Evaluatorが構造化して出した判定
+ * （`evaluation`）と、ゴール本文、証拠の見出しだけを渡す。
+ */
+export interface AdvisorInput {
+  goal: GoalDefinition;
+  /** 何回目のターンか。 */
+  iteration: number;
+  /** この周のEvaluatorの判定。Advisorが見る「現状」はこれが正本。 */
+  evaluation: GoalEvaluation;
+  /** 証拠の見出し（本文なし）。 */
+  evidenceRefs: readonly AdvisorEvidenceRef[];
+  /** この周にAdvisorを呼んだ理由。 */
+  trigger: AdvisorTrigger;
+}
+
+/**
+ * Advisorの呼び出し。
  *
  * **失敗時も例外を投げず`advisorFailed(...)`を返す実装を期待する。**
  */
 export type LoopAdvisorFn = (
-  input: GoalEvaluatorInput,
+  input: AdvisorInput,
   signal?: AbortSignal,
 ) => Promise<LoopAdvisorResult>;
 
@@ -204,11 +274,117 @@ export function noAdvice(): LoopAdvice {
 }
 
 /**
- * このターンでAdvisorを呼ぶか。
+ * 同じ未達の受入条件が続いたと見なす回数（issue #1323）。**この回数に達した周で呼ぶ。**
+ *
+ * 3にしてあるのは、受入条件は達成までの何周かは未達のまま残るのが普通で、2周では
+ * 「足踏み」と「順当に進んでいる途中」を分けられないためである。1では未達が出た周に必ず
+ * 呼ぶことになり、条件付きにした意味が無くなる。
+ */
+export const ADVISOR_REPEATED_GAPS_THRESHOLD = 3;
+
+/**
+ * 一度Advisorを呼んだあと、次に呼べるようになるまでの間隔（issue #1323）。
+ *
+ * **これが無いと、行き詰まりの連続数は増え続けるため毎ターン呼ぶのと変わらなくなる。**
+ * 同じ受入条件が未達のまま10周続けば、しきい値を超えた後の8周はすべて条件を満たす。
+ * 助言を受けた周の次からは、その助言を試す周を与える。
+ */
+export const ADVISOR_COOLDOWN_TURNS = 3;
+
+/**
+ * 応答が変わらないターンが続いたと見なす回数（issue #1323）。
+ *
+ * ループ自体を止める停滞判定（`DEFAULT_STALL_REPEAT_COUNT`は4）より手前に置く。止める前に
+ * 一度は別の目を入れて抜け道を探させるためで、止めてから人が見るのでは遅い。
+ */
+export const ADVISOR_NO_PROGRESS_THRESHOLD = 2;
+
+/**
+ * 証拠不足の判定が続いたと見なす回数（issue #1323）。
+ *
+ * `DEFAULT_MAX_INDETERMINATE`（3回で人へ渡す）より手前で呼ぶ。証拠が取れていない原因は
+ * 進め方にあることが多く、人へ渡す前にAdvisorへ見せる価値がある。
+ */
+export const ADVISOR_INDETERMINATE_THRESHOLD = 2;
+
+/** `decideAdvisorTrigger`が見るループの状態。いずれの連続数もこのターンを含む。 */
+export interface AdvisorTriggerState {
+  /** この周のEvaluatorの判定。 */
+  verdict: GoalVerdict;
+  /**
+   * 前回Advisorを呼んでから何ターン経ったか。**まだ一度も呼んでいなければ`undefined`。**
+   *
+   * 0以下（同じ周で二度見る）はありえないが、来たときは呼ばない側へ倒す。
+   */
+  turnsSinceLastAdvice: number | undefined;
+  /** 同じ未達の受入条件（`gaps`）が続いた回数。 */
+  repeatedGapsStreak: number;
+  /** 応答テキストが変わらなかったターンの連続数。 */
+  noProgressStreak: number;
+  /** `indeterminate`の連続数。 */
+  indeterminateStreak: number;
+}
+
+/**
+ * この周でAdvisorを呼ぶ理由があるか（issue #1323）。無ければ`undefined`。
+ *
+ * **終局の判定（`achieved` / `escalate`）では呼ばない。** 達成した周に進め方を訊いても
+ * 次のターンは無く、人へ渡す周は人が見る。呼ぶのは「まだ続くが行き詰まっている」周だけ。
+ *
+ * 理由が複数成立したときは`repeated-gaps` → `no-progress` → `indeterminate-streak`の順で
+ * 返す。どれで呼んでも呼ぶこと自体は変わらないため、原因として具体的な順に並べてある。
+ *
+ * 一度呼んだ後は`ADVISOR_COOLDOWN_TURNS`の間は呼ばない。助言を試す周を与えないまま
+ * 続けて相談しても、同じ材料から同じ指摘が返るだけである。
+ */
+export function decideAdvisorTrigger(state: AdvisorTriggerState): AdvisorTrigger | undefined {
+  if (state.verdict === 'achieved' || state.verdict === 'escalate') {
+    return undefined;
+  }
+  // 直前に相談したばかりの周は呼ばない。行き詰まりの連続数は解消するまで増え続けるため、
+  // 間隔を空けないと「しきい値を超えて以降は毎ターン」になる
+  if (
+    state.turnsSinceLastAdvice !== undefined &&
+    state.turnsSinceLastAdvice < ADVISOR_COOLDOWN_TURNS
+  ) {
+    return undefined;
+  }
+  if (state.repeatedGapsStreak >= ADVISOR_REPEATED_GAPS_THRESHOLD) {
+    return 'repeated-gaps';
+  }
+  if (state.noProgressStreak >= ADVISOR_NO_PROGRESS_THRESHOLD) {
+    return 'no-progress';
+  }
+  if (state.indeterminateStreak >= ADVISOR_INDETERMINATE_THRESHOLD) {
+    return 'indeterminate-streak';
+  }
+  return undefined;
+}
+
+/**
+ * 未達の受入条件（`gaps`）の署名。**同じ場所で足踏みしているかの比較にだけ使う。**
+ *
+ * 並び順の違いで別物と見なさないよう並べ替える。空（未達の指摘が無い）ときは`undefined`を
+ * 返し、比較不能として扱う——空が続くことを「同じ場所で足踏み」と読み替えない。
+ */
+export function gapsSignature(gaps: readonly string[]): string | undefined {
+  const normalized = gaps.map((gap) => gap.trim()).filter((gap) => gap !== '');
+  if (normalized.length === 0) {
+    return undefined;
+  }
+  return [...normalized].sort().join('\n');
+}
+
+/**
+ * このターンでAdvisorを呼んでよい間隔か。
  *
  * `everyNTurns`が2以上のときは、そのターン数ごとにだけ呼ぶ。0以下・数値でない値は
  * 毎ターン（既定）として扱う——「呼ばない」に倒すと、設定の誤りでAdvisorが黙ったまま
  * 走り続けることになる。
+ *
+ * **これは上限であって呼ぶ条件ではない（issue #1323）。** 既定（毎ターン）でも実際に呼ぶ
+ * のは`decideAdvisorTrigger`が理由を返した周だけで、この関数は「その周に呼んでよいか」を
+ * 間隔の側から絞るだけである。
  */
 export function shouldAdvise(iteration: number, everyNTurns: number | undefined): boolean {
   const interval =

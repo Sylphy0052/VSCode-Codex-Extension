@@ -71,3 +71,25 @@ export function detectStalledLoop(history: readonly string[], threshold: number)
   }
   return tail.every((signature) => signature === first);
 }
+
+/**
+ * 履歴の末尾から、同じ応答テキストが何回続いているかを数える（issue #1323）。
+ *
+ * 空文字（比較不能なターン）は0を返す。`detectStalledLoop`が空文字の反復を停滞と見なさない
+ * のと同じ理由で、応答が読み取れなかった周の連続を「進んでいない」と読み替えない。
+ *
+ * 停滞でループを止める判定（`detectStalledLoop`）より手前でAdvisorへ相談するかを決めるのに
+ * 使う。しきい値を外から受けずに連続数そのものを返すのは、止める側と相談する側で違う
+ * しきい値を持たせるためである。
+ */
+export function countRepeatedTail(history: readonly string[]): number {
+  const last = history[history.length - 1];
+  if (last === undefined || last === '') {
+    return 0;
+  }
+  let count = 0;
+  for (let i = history.length - 1; i >= 0 && history[i] === last; i -= 1) {
+    count += 1;
+  }
+  return count;
+}
