@@ -13,13 +13,8 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
-      "eligibleIn": [
-        "C-repo"
-      ]
+      "tags": ["touches-docs", "extreme-tail"],
+      "eligibleIn": ["C-repo"]
     },
     {
       "caseId": "pr-1031",
@@ -27,12 +22,8 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
-      "eligibleIn": [
-        "C-repo"
-      ]
+      "tags": ["touches-docs"],
+      "eligibleIn": ["C-repo"]
     },
     {
       "caseId": "pr-405",
@@ -41,9 +32,7 @@
       "kind": "codeReview",
       "changeSizeStratum": "M",
       "tags": [],
-      "eligibleIn": [
-        "C-repo"
-      ]
+      "eligibleIn": ["C-repo"]
     },
     {
       "caseId": "pr-935",
@@ -51,12 +40,8 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "M",
-      "tags": [
-        "touches-docs"
-      ],
-      "eligibleIn": [
-        "C-repo"
-      ]
+      "tags": ["touches-docs"],
+      "eligibleIn": ["C-repo"]
     }
   ]
 }

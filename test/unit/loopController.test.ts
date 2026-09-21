@@ -2227,8 +2227,7 @@ describe('LoopController（Advisorの打ち切り、issue #1009）', () => {
     condition: '',
     goal: {
       definition: { purpose: '直す', acceptanceCriteria: 'テストが通る' },
-      evaluate: async () =>
-        evaluation({ nextFocus: '続ける', gaps: ['テストが落ちている'] }),
+      evaluate: async () => evaluation({ nextFocus: '続ける', gaps: ['テストが落ちている'] }),
     },
     advisor,
   });

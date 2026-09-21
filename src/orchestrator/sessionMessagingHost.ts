@@ -8,11 +8,7 @@ import {
   type McpConnection,
   type McpTransportPort,
 } from './messaging';
-import {
-  formatSessionTarget,
-  type SessionBridgePort,
-  type SessionProvider,
-} from './sessionBridge';
+import { formatSessionTarget, type SessionBridgePort, type SessionProvider } from './sessionBridge';
 
 /**
  * 通常のチャットセッション向けのメッセージング用MCPサーバ（Issue #1305）。

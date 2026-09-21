@@ -20,11 +20,7 @@
     {
       "prNumber": 648,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail",
-        "chore"
-      ],
+      "tags": ["touches-docs", "extreme-tail", "chore"],
       "diffBytes": 495613,
       "overBudgetBytes": 295613,
       "shuffleKey": "14e584763f3578162c681be51a0234d6342ddfb6ce41afba634a316e63caa32b"
@@ -32,10 +28,7 @@
     {
       "prNumber": 631,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
+      "tags": ["touches-docs", "extreme-tail"],
       "diffBytes": 1251190,
       "overBudgetBytes": 1051190,
       "shuffleKey": "245194fbf75f46f519cf1fb2d9cd608c16040ddfeadf8f080c519bdedae27c9d"
@@ -43,10 +36,7 @@
     {
       "prNumber": 81,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
+      "tags": ["touches-docs", "extreme-tail"],
       "diffBytes": 289672,
       "overBudgetBytes": 89672,
       "shuffleKey": "3967e84e1e37aaa6661f905fb3f127b5d4fb9b0e221500d91de356bef0dd08ad"
@@ -54,10 +44,7 @@
     {
       "prNumber": 431,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
+      "tags": ["touches-docs", "extreme-tail"],
       "diffBytes": 487949,
       "overBudgetBytes": 287949,
       "shuffleKey": "83fc1fd3a4b50bc413403cc1b50c40801f714590146bac2d894e7dc4ec8acb21"
@@ -65,10 +52,7 @@
     {
       "prNumber": 542,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
+      "tags": ["touches-docs", "extreme-tail"],
       "diffBytes": 766510,
       "overBudgetBytes": 566510,
       "shuffleKey": "8ae1392bacb8d37fe6102c2f0f07f4c10327fe47d0476a03472bd2a15dd7d686"
@@ -76,10 +60,7 @@
     {
       "prNumber": 510,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
+      "tags": ["touches-docs", "extreme-tail"],
       "diffBytes": 249828,
       "overBudgetBytes": 49828,
       "shuffleKey": "8ec65a7a40d581ca4c4ac5012276056b297b1d01150e47b439c65f630a803050"
@@ -87,10 +68,7 @@
     {
       "prNumber": 447,
       "changeSizeStratum": "XL",
-      "tags": [
-        "touches-docs",
-        "extreme-tail"
-      ],
+      "tags": ["touches-docs", "extreme-tail"],
       "diffBytes": 360713,
       "overBudgetBytes": 160713,
       "shuffleKey": "bd25952915917f30069f603cbe502a95c3d3b4408f49b747ca63b89be9394c9a"

@@ -14,10 +14,7 @@ function run(runId: string): LiveRunSummary {
   return { runId, name: runId, defPath: `${runId}.yaml`, outcome: 'running' };
 }
 
-function program(
-  programId: string,
-  runs: Record<string, string | undefined>,
-): PersistedProgram {
+function program(programId: string, runs: Record<string, string | undefined>): PersistedProgram {
   return {
     programId,
     defPath: `${programId}.yaml`,
@@ -43,10 +40,7 @@ describe('buildFeedRuns: run一覧へプログラム所属を付ける（Issue #
   });
 
   it('プログラムに属さない単発runは同じ配列に並び、programIdがundefinedになる', () => {
-    const feed = buildFeedRuns(
-      [run('run-1'), run('run-2')],
-      [program('p1', { R1: 'run-1' })],
-    );
+    const feed = buildFeedRuns([run('run-1'), run('run-2')], [program('p1', { R1: 'run-1' })]);
     expect(feed.map((r) => [r.runId, r.programId])).toEqual([
       ['run-1', 'p1'],
       ['run-2', undefined],
