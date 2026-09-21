@@ -73,6 +73,23 @@ async function readHeadUntil(
   }
 }
 
+/** 全文を一度にメモリへ載せず、1行ずつ `onLine` へ渡す（issue #1325）。 */
+async function forEachLine(filePath: string, onLine: (line: string) => void): Promise<boolean> {
+  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      onLine(line);
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
 /** 拡張子で絞ってディレクトリを再帰的に走査する。 */
 async function walkFiles(dir: string, accept: (name: string) => boolean): Promise<string[]> {
   const found: string[] = [];
@@ -167,6 +184,7 @@ export const nodeFileSystem: FileSystemPort = {
   },
 
   readHeadUntil,
+  forEachLine,
 };
 
 /** `MemoryFileSystemPort` の既定実装（issue #144。`nodeFileSystem` とは意図的に分ける）。 */

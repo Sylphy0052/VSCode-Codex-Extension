@@ -40,7 +40,7 @@ import {
 import type { SideQuestionHistoryEntry } from '../claude/control';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
 import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
-import { transcriptItems } from '../claude/transcript';
+import { createTranscriptBuilder } from '../claude/transcript';
 import { effortsFor } from '../codex/modelCatalog';
 import {
   currentWorkspaceFolder,
@@ -1973,8 +1973,21 @@ export class ClaudeChatViewManager
     if (filePath === undefined) {
       return empty;
     }
+    const builder = createTranscriptBuilder();
+    // 全文・行配列を経由せず1行ずつ流し込む。`forEachLine` を持たないポート（テストの
+    // フェイク等）では `readTextFile` へ退避する（issue #1325）
+    if (this.fs.forEachLine !== undefined) {
+      const ok = await this.fs.forEachLine(filePath, (line) => builder.push(line));
+      return ok ? builder.result() : empty;
+    }
     const content = await this.fs.readTextFile(filePath);
-    return content === undefined ? empty : transcriptItems(content.split('\n'));
+    if (content === undefined) {
+      return empty;
+    }
+    for (const line of content.split('\n')) {
+      builder.push(line);
+    }
+    return builder.result();
   }
 
   /**
