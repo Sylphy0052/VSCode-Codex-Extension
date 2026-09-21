@@ -97,6 +97,17 @@ export interface ChatItem {
   diffs: FileDiff[];
   /** 本文の先頭を捨てたか。コマンド出力が上限を超えたときだけ立つ。 */
   truncated?: boolean | undefined;
+  /**
+   * 本文をディスクへ退避したか（issue #1325）。
+   *
+   * ツール出力のセッション総量が `MAX_SESSION_OUTPUT_CHARS`（`outputOffload.ts`）を
+   * 超えたとき、古い項目の本文はディスクへ移し、`text` には末尾のプレビューだけを残す。
+   * 全文は項目のidで読み戻す（`OutputOffloadPort`）。パスをここへ持たせないのは、
+   * webviewから届くidをパスの組み立てへ混ぜないため。
+   */
+  outputOffloaded?: boolean | undefined;
+  /** 退避する前の本文の長さ（文字数）。退避した項目だけに入る。表示の注記に使う。 */
+  outputChars?: number | undefined;
   /** 会話に出す画像。持たない項目では空。 */
   images?: ChatImage[] | undefined;
   /**
@@ -178,6 +189,22 @@ export function imageGenerationText(result: string, savedPath: string): string {
 }
 
 /**
+ * 切り出した部分文字列を元の文字列から切り離す（issue #1325）。
+ *
+ * V8の `slice` は親への参照を持つ文字列（SlicedString）を返すため、切り詰めても元の全文が
+ * 回収されない。**上限を掛けてもメモリには効かない**ということで、200件×120万文字を末尾
+ * 4,000文字へ切り詰めて元を捨てた実測では `heapUsed` が237MBのまま残った（バイト列へ通して
+ * コピーすると10MB）。再現は
+ * `NODE_OPTIONS=--expose-gc npx tsx test/bench/outputOffloadBench.ts --retention slice|detach`。
+ *
+ * 切れ目でサロゲートペアが割れていた場合、その1文字はU+FFFDになる。切り出しの境界は
+ * どのみち文字の途中を通るため、そこは許容する。
+ */
+export function detachSubstring(text: string): string {
+  return Buffer.from(text, 'utf8').toString('utf8');
+}
+
+/**
  * コマンド出力を上限まで切り詰める。
  *
  * 印（「省略」など）は本文へ混ぜない。混ぜると「コピー」がそのまま使えなくなるため、
@@ -187,7 +214,7 @@ export function capOutput(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_OUTPUT_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(text.length - MAX_OUTPUT_CHARS), truncated: true };
+  return { text: detachSubstring(text.slice(text.length - MAX_OUTPUT_CHARS)), truncated: true };
 }
 
 /**
@@ -201,7 +228,7 @@ function capOutputDuringAppend(text: string): { text: string; truncated: boolean
   if (text.length <= OUTPUT_SOFT_CAP_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(text.length - MAX_OUTPUT_CHARS), truncated: true };
+  return { text: detachSubstring(text.slice(text.length - MAX_OUTPUT_CHARS)), truncated: true };
 }
 
 /** 差分を持たない項目のための空配列。 */
@@ -1279,6 +1306,12 @@ function upsertItem(items: readonly ChatItem[], item: ChatItem): ChatItem[] {
     // デルタで積んだ本文を、本文が空の completed で消さない
     text: item.text === '' && existing !== undefined ? existing.text : item.text,
     truncated: item.text === '' && existing !== undefined ? existing.truncated : item.truncated,
+    // 退避の印は本文と対で動かす（issue #1325）。本文をデルタの蓄積（退避済みなら
+    // プレビュー）で残したのに印だけ落とすと、プレビューを全文として見せてしまう
+    outputOffloaded:
+      item.text === '' && existing !== undefined ? existing.outputOffloaded : item.outputOffloaded,
+    outputChars:
+      item.text === '' && existing !== undefined ? existing.outputChars : item.outputChars,
     // reasoningの全文も同様。completedのcontentが空配列で届いてもデルタの蓄積を消さない
     reasoningFull:
       item.reasoningFull === undefined && existing !== undefined
@@ -1336,6 +1369,11 @@ function appendDelta(
       text: appended.text,
       // 一度でも捨てたら、その後の追記で上限を下回っても捨てた事実は残る
       truncated: existing.truncated === true || appended.truncated,
+      // 退避済みの項目へ追記が届いた（通知の順序が入れ替わった）ときは退避の印を落とす
+      // （issue #1325）。印を残すと、本文はプレビューへ継ぎ足して伸びていくのに
+      // 「全文を開く」が退避した時点の内容を指したままになり、二度と退避もされない
+      outputOffloaded: undefined,
+      outputChars: undefined,
     };
   }
   return next;

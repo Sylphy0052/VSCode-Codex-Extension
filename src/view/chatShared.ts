@@ -9,6 +9,8 @@ import {
 } from '../appserver/transcriptMarkdown';
 import type { ActivityKind } from '../activity/record';
 import { currentWorkspaceFolder, workspaceFolderPaths } from '../config';
+import type { OutputOffloadPort } from '../appserver/outputOffload';
+import { createNodeOutputOffload } from '../session/nodeOutputOffload';
 import type { FileSystemPort, SymlinkResolution } from '../session/ports';
 import {
   APPROVAL_LEVELS,
@@ -319,6 +321,42 @@ export function reportTurnResult(
  * 会話全体の取り出し（issue #25・design.md §14.23）で選ばせる操作。
  * `runReview` の対象選択と同じQuickPickの流儀に揃える。
  */
+/**
+ * ツール出力の退避先を作る（issue #1325）。Codex画面・Claude Code画面の両方で共有する。
+ *
+ * `globalStorageDir` が無い経路（統合テスト等）では退避しない。その場合もふるまいは
+ * 変わらず、従来どおり本文をすべてメモリに持つだけになる。
+ */
+export function createOutputOffloadPort(
+  globalStorageDir: string | undefined,
+  onError: (message: string) => void,
+): OutputOffloadPort | undefined {
+  return globalStorageDir === undefined
+    ? undefined
+    : createNodeOutputOffload(globalStorageDir, onError);
+}
+
+/**
+ * 退避したツール出力の全文を、新しいエディタタブへ出す（issue #1325）。
+ *
+ * webviewへ全文を送り返さないのは、退避した意味が無くなるため（画面側も同じ本文を
+ * 持ち直す）。通常のエディタとして開けば、コピー・検索・保存はVSCode標準の操作でできる
+ * ——`runExportTranscript` の「生テキストで開く」と同じ手を使う。
+ */
+export async function runOpenItemOutput(load: () => Promise<string | undefined>): Promise<void> {
+  const text = await load();
+  if (text === undefined || text === '') {
+    // 理由（読めなかった・まだ退避されていない・会話を閉じた後）を言い分けない。
+    // 呼び出し側から区別できず、断定すると外すため
+    void vscode.window.showWarningMessage(
+      'ツール出力の全文を読めませんでした。時間をおいて開き直してください（会話を閉じた後は控えを残していません）',
+    );
+    return;
+  }
+  const doc = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+
 const TRANSCRIPT_EXPORT_ITEMS: (vscode.QuickPickItem & { mode: 'copy' | 'save' | 'raw' })[] = [
   { mode: 'copy', label: 'クリップボードへコピー', detail: '会話全体をMarkdownでコピーします' },
   { mode: 'save', label: 'ファイルへ保存', detail: 'Markdownファイルとして保存します' },

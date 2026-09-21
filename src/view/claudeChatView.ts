@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { buildWebGptMcpConfig, WEB_GPT_MCP_SERVER } from '../webGpt/discussion';
 import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
 import { isApprovalDecision } from '../appserver/approvals';
+import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
   isOpenableSearchUrl,
   lastNonEmptyAgentMessageText,
@@ -108,6 +109,7 @@ import {
   confirmRunShellCommand,
   confirmStopBackgroundTask,
   confirmUsageCreditsRequest,
+  createOutputOffloadPort,
   handleOpenDiffEditor,
   handleOpenDiffFile,
   handleRevertDiff,
@@ -120,6 +122,7 @@ import {
   renderShell,
   reportTurnResult,
   runExportTranscript,
+  runOpenItemOutput,
   STATE_POST_INTERVAL_MS,
   stoppedByUsageLimit,
 } from './chatShared';
@@ -777,6 +780,13 @@ export class ClaudeChatViewManager
    * このメソッド）呼び出しへ揃えたため、設定もここに乗せないとループ実行中の設定反映が
    * 抜け落ちる。
    */
+  /**
+   * ツール出力の退避先（issue #1325）。会話ごとに作り、`session.dispose()` で破棄される。
+   */
+  private createOutputOffload(): OutputOffloadPort | undefined {
+    return createOutputOffloadPort(this.globalStorageDir, (message) => this.log.warn(message));
+  }
+
   private flushState(entry: ClaudePanel): void {
     if (entry.disposed) {
       return;
@@ -2149,6 +2159,7 @@ export class ClaudeChatViewManager
       // 自動引き継ぎの初期値（Issue #1091）。ClaudeStreamSessionはvscodeに依存しないため、
       // 設定の読み出しはここ（view層）で行う（下の`LoopController`と同じ）
       readAutoHandoffEnabled(),
+      this.createOutputOffload(),
     );
 
     const loop = new LoopController(
@@ -2909,6 +2920,15 @@ export class ClaudeChatViewManager
           m['id'],
           typeof m['command'] === 'string' ? m['command'] : m['id'],
         );
+        return;
+      }
+      if (type === 'openItemOutput') {
+        // ディスクへ退避したツール出力の全文を開く（issue #1325）。会話には触れないため
+        // ループへの割り込み扱いにもしない
+        const itemId = m['itemId'];
+        if (typeof itemId === 'string') {
+          void runOpenItemOutput(() => entry.session.loadOffloadedOutput(itemId));
+        }
         return;
       }
       if (type === 'exportTranscript') {
