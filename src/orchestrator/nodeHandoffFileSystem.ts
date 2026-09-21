@@ -7,7 +7,7 @@ import type { HandoffFileSystemPort } from './teamHandoff';
  *
  * `worktree.ts` の `nodeWorktreeFileSystem` と同じ流儀に揃える: 失敗は例外を投げず
  * `false` / `undefined` / 空配列で表す。書き換える操作（`makeDirectory` /
- * `writeTextFile` / `removeFile` / `removeDirectory`）は成否を`boolean`で返し、
+ * `writeTextFile` / `removeDirectory`）は成否を`boolean`で返し、
  * `TeamHandoffStore` がそれを `HandoffResult` の `ok: false` に変換する。`teamHandoff.ts` 側（`TeamHandoffStore`）は
  * この関数群が例外を投げないことを前提に書かれており（`readTextFile` が「存在しなければ
  * `undefined`」を返す設計で、try/catchをここへ閉じ込めている）、ここで例外を漏らすと
@@ -52,17 +52,6 @@ export const nodeHandoffFileSystem: HandoffFileSystemPort = {
       return await fsPromises.readdir(target);
     } catch {
       return [];
-    }
-  },
-  async removeFile(target: string): Promise<boolean> {
-    // `remove`は「無ければ成功」という流儀（`teamHandoff.ts`の`TeamHandoffStore.remove`
-    // JSDoc参照）のため、`force: true`で存在しない場合を吸収する。それ以外の失敗
-    // （権限等）は`false`として呼び出し側へ伝える。
-    try {
-      await fsPromises.rm(target, { force: true });
-      return true;
-    } catch {
-      return false;
     }
   },
   async removeDirectory(target: string): Promise<boolean> {

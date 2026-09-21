@@ -2095,11 +2095,11 @@ describe('ファイル受け渡しツール（design.md §16.44、Issue #693）'
     expect(lastBody(conn)['accepted']).toBe(false);
   });
 
-  it('list_handoffsは件数と一覧を返す', async () => {
+  it('list_handoffsはオーケストレーターの接続で件数と一覧を返す', async () => {
     const handoff = new FakeHandoffPort();
     await handoff.write('T1', 'a', 'x');
     await handoff.write('T2', 'b', 'y');
-    const { conn } = buildHandoffServer('T1', handoff);
+    const { conn } = buildHandoffServer(ORCHESTRATOR_CONNECTION_ID, handoff);
 
     conn.fireRequest({
       jsonrpc: '2.0',
@@ -2139,7 +2139,7 @@ describe('ファイル受け渡しツール（design.md §16.44、Issue #693）'
     }
   });
 
-  it('delete_handoffは対象を消し、消すものが無ければ拒否する', async () => {
+  it('delete_handoffは公開せず、名前を知っていても拒否する（Issue #1324 第2段）', async () => {
     const handoff = new FakeHandoffPort();
     await handoff.write('T1', 'a', 'x');
     const { conn } = buildHandoffServer('T1', handoff);
@@ -2151,59 +2151,36 @@ describe('ファイル受け渡しツール（design.md §16.44、Issue #693）'
       params: { name: 'delete_handoff', arguments: { taskId: 'T1', slug: 'a' } },
     });
     await flush();
-    expect(lastBody(conn)['accepted']).toBe(true);
-    expect(handoff.files.size).toBe(0);
+
+    expect(conn.sent[conn.sent.length - 1]).toHaveProperty('error');
+    // 拒否した以上、実体は残る
+    expect(handoff.files.size).toBe(1);
+  });
+
+  it('list_handoffsはタスクの接続には見えず、名前を知っていても拒否する（Issue #1324 第2段）', async () => {
+    const handoff = new FakeHandoffPort();
+    await handoff.write('T1', 'a', 'x');
+    const { conn } = buildHandoffServer('T1', handoff);
+
+    conn.fireRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    await flush();
+    const listed = conn.sent[conn.sent.length - 1] as { result: { tools: { name: string }[] } };
+    expect(listed.result.tools.map((t) => t.name)).not.toContain('list_handoffs');
 
     conn.fireRequest({
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/call',
-      params: { name: 'delete_handoff', arguments: { taskId: 'T1', slug: 'a' } },
+      params: { name: 'list_handoffs', arguments: {} },
     });
     await flush();
-    expect(lastBody(conn)['accepted']).toBe(false);
-  });
-  it('delete_handoffは他タスクが書いたファイルを拒否する（Issue #1033）', async () => {
-    const handoff = new FakeHandoffPort();
-    await handoff.write('T2', 'b', 'y');
-    const { conn } = buildHandoffServer('T1', handoff);
-
-    conn.fireRequest({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: { name: 'delete_handoff', arguments: { taskId: 'T2', slug: 'b' } },
-    });
-    await flush();
-
-    const body = lastBody(conn);
-    expect(body['accepted']).toBe(false);
-    expect(String(body['reason'])).toContain('T1');
-    // 拒否した以上、実体は残る
-    expect(handoff.files.size).toBe(1);
-  });
-
-  it('delete_handoffはオーケストレーターなら他タスクのファイルも消せる（Issue #1033）', async () => {
-    const handoff = new FakeHandoffPort();
-    await handoff.write('T2', 'b', 'y');
-    const { conn } = buildHandoffServer(ORCHESTRATOR_CONNECTION_ID, handoff);
-
-    conn.fireRequest({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: { name: 'delete_handoff', arguments: { taskId: 'T2', slug: 'b' } },
-    });
-    await flush();
-
-    expect(lastBody(conn)['accepted']).toBe(true);
-    expect(handoff.files.size).toBe(0);
+    expect(conn.sent[conn.sent.length - 1]).toHaveProperty('error');
   });
 
   it('list_handoffsはガードに弾かれたら理由付きで拒否する（Issue #1033）', async () => {
     const handoff = new FakeHandoffPort();
     handoff.listError = '受け渡しディレクトリの経路に安全でないリンクがあります';
-    const { conn } = buildHandoffServer('T1', handoff);
+    const { conn } = buildHandoffServer(ORCHESTRATOR_CONNECTION_ID, handoff);
 
     conn.fireRequest({
       jsonrpc: '2.0',

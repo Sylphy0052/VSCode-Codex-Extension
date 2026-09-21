@@ -39,9 +39,7 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
    * 書き換える操作を失敗させたいテスト用。ここへ操作名を入れると、その操作が`false`を
    * 返す（実ファイルシステムの権限エラー・容量不足に相当する）。
    */
-  readonly failing = new Set<
-    'makeDirectory' | 'writeTextFile' | 'removeFile' | 'removeDirectory'
-  >();
+  readonly failing = new Set<'makeDirectory' | 'writeTextFile' | 'removeDirectory'>();
 
   constructor(symlinks: readonly string[] = []) {
     this.symlinks = new Set(symlinks);
@@ -80,14 +78,6 @@ class FakeHandoffFileSystem implements HandoffFileSystemPort {
       }
     }
     return names;
-  }
-
-  async removeFile(target: string): Promise<boolean> {
-    if (this.failing.has('removeFile')) {
-      return false;
-    }
-    this.files.delete(target);
-    return true;
   }
 
   async removeDirectory(target: string): Promise<boolean> {
@@ -259,14 +249,14 @@ describe('TeamHandoffStore', () => {
       ]),
     );
 
-    // 片方を消してももう片方は残る
-    expect(await store.remove(RUN_ID, 'impl-design', 'memo')).toEqual({
-      ok: true,
-      value: undefined,
-    });
+    // 片方を読んでももう片方の本文は混ざらない
     expect(await store.read(RUN_ID, 'impl', 'design-memo')).toEqual({
       ok: true,
       value: '実装が書いたメモ',
+    });
+    expect(await store.read(RUN_ID, 'impl-design', 'memo')).toEqual({
+      ok: true,
+      value: '設計が書いたメモ',
     });
   });
 
@@ -302,28 +292,6 @@ describe('TeamHandoffStore', () => {
 
     const entries = listedEntries(await store.list(RUN_ID));
     expect(entries).toEqual([]);
-  });
-
-  it('write→removeの正常系: 消した後は読めなくなる', async () => {
-    const fs = new FakeHandoffFileSystem();
-    const store = new TeamHandoffStore(REPO_ROOT, fs);
-    await store.write(RUN_ID, 'T1', 'note', '内容');
-
-    const removeResult = await store.remove(RUN_ID, 'T1', 'note');
-    expect(removeResult).toEqual({ ok: true, value: undefined });
-
-    const readResult = await store.read(RUN_ID, 'T1', 'note');
-    expect(readResult).toEqual({
-      ok: false,
-      error: '受け渡しファイルが見つかりません: T1~note.md',
-    });
-  });
-
-  it('存在しないファイルのremoveも成功として扱う', async () => {
-    const fs = new FakeHandoffFileSystem();
-    const store = new TeamHandoffStore(REPO_ROOT, fs);
-    const removeResult = await store.remove(RUN_ID, 'T1', 'note');
-    expect(removeResult).toEqual({ ok: true, value: undefined });
   });
 
   it('removeRunの正常系: runのディレクトリごと消え、listが空になる', async () => {
@@ -449,18 +417,6 @@ describe('TeamHandoffStore', () => {
     }
   });
 
-  it('祖先にシンボリックリンクがあるとremoveを拒否する', async () => {
-    const linkedRunsDir = path.join(REPO_ROOT, '.agents', 'handoff', 'runs');
-    const fs = new FakeHandoffFileSystem([linkedRunsDir]);
-    const store = new TeamHandoffStore(REPO_ROOT, fs);
-
-    const result = await store.remove(RUN_ID, 'T1', 'note');
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toContain('シンボリックリンク');
-    }
-  });
-
   it('祖先にシンボリックリンクがあるとremoveRunを拒否する', async () => {
     const linkedRunsDir = path.join(REPO_ROOT, '.agents', 'handoff', 'runs');
     const fs = new FakeHandoffFileSystem([linkedRunsDir]);
@@ -511,20 +467,6 @@ describe('ファイルシステムの失敗を握り潰さない（PR #711 自�
     await store.write(RUN_ID, 'T1', 'notes', '本文');
 
     expect(fs.raw(handoffPath(REPO_ROOT, RUN_ID, 'T1', 'notes'))).toBeUndefined();
-  });
-
-  it('削除に失敗したらok: falseを返す', async () => {
-    const fs = new FakeHandoffFileSystem();
-    const store = new TeamHandoffStore(REPO_ROOT, fs);
-    await store.write(RUN_ID, 'T1', 'notes', '本文');
-    fs.failing.add('removeFile');
-
-    const result = await store.remove(RUN_ID, 'T1', 'notes');
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toContain('削除できませんでした');
-    }
   });
 
   it('runの片付けに失敗したらok: falseを返す（呼び出し側がログに残せる）', async () => {

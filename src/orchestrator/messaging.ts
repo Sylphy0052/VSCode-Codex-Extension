@@ -10,12 +10,7 @@ import {
 } from './sanitize';
 import { TEAM_ROLES } from './rolePresets';
 import { parseSessionTarget, type SessionBridgePort, type SessionTarget } from './sessionBridge';
-import {
-  MAX_HANDOFF_BYTES,
-  parseArtifactKey,
-  type HandoffEntry,
-  type HandoffResult,
-} from './teamHandoff';
+import { MAX_HANDOFF_BYTES, type HandoffEntry, type HandoffResult } from './teamHandoff';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import { RESERVED_ORCHESTRATOR_TASK_ID, truncateByCodePoint } from './workflow';
 
@@ -1176,8 +1171,8 @@ export const UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL: McpToolDefinition = {
  * ------------------------------------------------------------------------ */
 
 /**
- * `write_handoff` / `read_handoff` / `list_handoffs` / `delete_handoff` の4ツール
- * （design.md §16.44、Issue #693）。
+ * `write_handoff` / `read_handoff` / `list_handoffs` の3ツール
+ * （design.md §16.44、Issue #693。`delete_handoff`はIssue #1324 第2段で撤去した）。
  *
  * `send_message` / `ask_orchestrator`（メッセージ本文の上限`MAX_MESSAGE_BODY_LENGTH`に
  * 収まらない・後から読み返したい情報を運べない）を補う経路として、`.agents/handoff/runs/`
@@ -1192,8 +1187,8 @@ export const UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL: McpToolDefinition = {
  * （design.md §16.21「送信元はサーバー側が接続から判別する」）で、書き込む先の
  * ファイル名（`<taskId>-<slug>.md`）の`taskId`部分は接続そのもの（`connection.taskId`）
  * から決める。引数に`taskId`を持たせると、あるタスクが別のタスクの`taskId`を騙って
- * その名義でファイルを書けてしまう。`read_handoff`/`delete_handoff`は逆に、誰が書いた
- * ファイルでも読み書きの対象に指定できる必要がある（自分が書いたファイルしか読めないと
+ * その名義でファイルを書けてしまう。`read_handoff`は逆に、誰が書いた
+ * ファイルでも読み込みの対象に指定できる必要がある（自分が書いたファイルしか読めないと
  * 「別のタスクが読む」という想定利用そのものが成立しない）ため、`taskId`を対象指定の
  * 引数として持つ。
  */
@@ -1239,79 +1234,15 @@ export const LIST_HANDOFFS_TOOL: McpToolDefinition = {
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 };
 
-export const DELETE_HANDOFF_TOOL: McpToolDefinition = {
-  name: 'delete_handoff',
-  description:
-    '`write_handoff`が残したファイルを1件消す。不要になったら消すためのツールで、' +
-    '既に無い場合も成功として扱う。消せるのは自分（呼び出し元のtaskId）が書いたものだけで、' +
-    '他のタスクが書いたものを指定すると理由が返る（オーケストレーターだけは' +
-    'どのタスクのものでも消せる）。',
-  inputSchema: {
-    type: 'object',
-    properties: { taskId: TASK_ID_ARG, slug: { type: 'string', description: '対象のslug' } },
-    required: ['taskId', 'slug'],
-    additionalProperties: false,
-  },
-};
-
-/** ファイル受け渡しの4ツール。`visibleTools`が両方の接続種別へまとめて足すための束。 */
-export const HANDOFF_TOOLS: readonly McpToolDefinition[] = [
-  WRITE_HANDOFF_TOOL,
-  READ_HANDOFF_TOOL,
-  LIST_HANDOFFS_TOOL,
-  DELETE_HANDOFF_TOOL,
-];
-
-/* ------------------------------------------------------------------------ *
- * 成果物（Issue #1274）: handoffのキーを1つの引数で扱う口
- * ------------------------------------------------------------------------ */
-
 /**
- * 成果物のキー（`<taskId>/<slug>`。`teamHandoff.ts`の`formatArtifactKey`）。
+ * ファイル受け渡しのうち、接続の種別を問わず見せる2ツール（Issue #1324 第2段）。
  *
- * Phase 1（Issue #1271）で受け渡しはpull型になり、下流タスクが受け取るのは
- * 「取りに行くための1つの識別子」になった。`read_handoff`は`taskId`と`slug`を
- * 別々に取るため、その識別子をそのまま渡せない。保管の実体は`TeamHandoffStore`の
- * ままで、引数の形だけを揃える。
+ * `list_handoffs`（一覧）はオーケストレーターの接続にだけ足す（`visibleTools`）。
+ * タスク側には上流の参照が `{{T1.handoff}}`（`teamHandoff.ts`の`formatHandoffReference`）
+ * として指示文へ埋め込まれており、`read_handoff`へ渡す`taskId`と`slug`はそこから分かる。
+ * run全体の受け渡しを見渡す必要があるのは段取りを持つオーケストレーターだけ。
  */
-const ARTIFACT_KEY_ARG = {
-  type: 'string',
-  description: '成果物のキー。`<taskId>/<slug>` の形（例: `T1/result`）。',
-} as const;
-
-export const READ_ARTIFACT_TOOL: McpToolDefinition = {
-  name: 'read_artifact',
-  description:
-    '成果物（上流タスクが残した本文）をキーで読む。`{{T1.handoff}}`が示す参照と' +
-    '同じものを`<taskId>/<slug>`の形のキー1つで指定する。`read_handoff`と同じ領域を' +
-    '読むため、どちらで取っても中身は同じ。見つからなければ理由が返る。',
-  inputSchema: {
-    type: 'object',
-    properties: { key: ARTIFACT_KEY_ARG },
-    required: ['key'],
-    additionalProperties: false,
-  },
-};
-
-export const WRITE_ARTIFACT_TOOL: McpToolDefinition = {
-  name: 'write_artifact',
-  description:
-    '成果物をキーで書く（既存の場合は上書き）。書けるのは自分自身のtaskIdで始まる' +
-    'キーだけで、他のタスクのキーを指定すると理由が返る。runが終わると自動的に消える' +
-    '一時領域で、成果物そのものはPR/MRの側に残すこと。',
-  inputSchema: {
-    type: 'object',
-    properties: { key: ARTIFACT_KEY_ARG, content: { type: 'string', description: '書き込む本文' } },
-    required: ['key', 'content'],
-    additionalProperties: false,
-  },
-};
-
-/** 成果物の2ツール。`handoff`が設定されているときだけ見せる（`HANDOFF_TOOLS`と同じ条件）。 */
-export const ARTIFACT_TOOLS: readonly McpToolDefinition[] = [
-  READ_ARTIFACT_TOOL,
-  WRITE_ARTIFACT_TOOL,
-];
+export const HANDOFF_TOOLS: readonly McpToolDefinition[] = [WRITE_HANDOFF_TOOL, READ_HANDOFF_TOOL];
 
 /* ------------------------------------------------------------------------ *
  * セッション宛の口（Issue #1274）: 別ウィンドウを含むセッションへの問い合わせ
@@ -1543,7 +1474,7 @@ export interface TaskMessagingHubDeps {
 
 /**
  * `TaskMessagingHubDeps.handoff` が満たす形。`teamHandoff.ts`の`TeamHandoffStore`の
- * `write`/`read`/`list`/`remove`から`runId`引数を束縛（呼び出し側があらかじめ固定）した
+ * `write`/`read`/`list`から`runId`引数を束縛（呼び出し側があらかじめ固定）した
  * だけの薄い口。`OrchestratorControlPort`と同じ「実体は既存のクラスのメソッドをそのまま
  * 呼ぶ」方針で、モデル用の別経路のロジックは持たせない。
  */
@@ -1551,7 +1482,6 @@ export interface HandoffPort {
   write(taskId: string, slug: string, content: string): Promise<HandoffResult<HandoffEntry>>;
   read(taskId: string, slug: string): Promise<HandoffResult<string>>;
   list(): Promise<HandoffResult<readonly HandoffEntry[]>>;
-  remove(taskId: string, slug: string): Promise<HandoffResult<undefined>>;
 }
 
 /**
@@ -2059,8 +1989,8 @@ export class MessagingMcpServer {
    * この接続から見えるツール。制御ツールはオーケストレーターの接続にだけ足す
    * （design.md §16.23）。ここも `connection.taskId` だけで判断し、引数は見ない。
    *
-   * ファイル受け渡しの4ツール（`HANDOFF_TOOLS`、design.md §16.44）は接続の種別を問わず
-   * 足す。`this.hub.handoff`が未設定（省略可能）なら足さない——`tools/list`に出しておいて
+   * ファイル受け渡しの2ツール（`HANDOFF_TOOLS`、design.md §16.44）は接続の種別を問わず
+   * 足す（一覧の`list_handoffs`だけはオーケストレーターの接続に限る。Issue #1324 第2段）。`this.hub.handoff`が未設定（省略可能）なら足さない——`tools/list`に出しておいて
    * 呼び出し時に「未知のツール」で拒否するより、そもそも見せないほうが一貫している
    * （`orchestratorControl`未設定時の`base`のみ返却と同じ判断）。
    */
@@ -2072,8 +2002,13 @@ export class MessagingMcpServer {
       return this.hub.sessionBridge === undefined ? [] : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS];
     }
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
-    const handoffTools =
-      this.hub.handoff === undefined ? [] : [...HANDOFF_TOOLS, ...ARTIFACT_TOOLS];
+    const handoffTools = this.hub.handoff === undefined ? [] : HANDOFF_TOOLS;
+    // `list_handoffs`はオーケストレーターの接続にだけ足す（`HANDOFF_TOOLS`のJSDoc、
+    // Issue #1324 第2段）。呼び出し側（`handleHandoffToolCall`）でも同じ条件で弾く
+    const listHandoffTools =
+      this.hub.handoff !== undefined && taskId === ORCHESTRATOR_CONNECTION_ID
+        ? [LIST_HANDOFFS_TOOL]
+        : [];
     // セッション宛の3ツール（Issue #1274）。`handoff`と同じく接続の種別を問わず足す。
     // オーケストレーターも別ウィンドウの会話へ問い合わせたい場面があるため、
     // `ask_orchestrator`のような「タスク側だけの道具」にはしない
@@ -2106,7 +2041,14 @@ export class MessagingMcpServer {
               return true;
             });
       const programTools = control?.hasProgramControl?.() === true ? PROGRAM_CONTROL_TOOLS : [];
-      return [...base, ...handoffTools, ...sessionTools, ...controlTools, ...programTools];
+      return [
+        ...base,
+        ...handoffTools,
+        ...listHandoffTools,
+        ...sessionTools,
+        ...controlTools,
+        ...programTools,
+      ];
     }
     return [...base, ASK_ORCHESTRATOR_TOOL, ...handoffTools, ...sessionTools];
   }
@@ -2200,14 +2142,9 @@ export class MessagingMcpServer {
     if (
       name === WRITE_HANDOFF_TOOL.name ||
       name === READ_HANDOFF_TOOL.name ||
-      name === LIST_HANDOFFS_TOOL.name ||
-      name === DELETE_HANDOFF_TOOL.name
+      name === LIST_HANDOFFS_TOOL.name
     ) {
       return this.handleHandoffToolCall(taskId, request, name, args);
-    }
-
-    if (name === READ_ARTIFACT_TOOL.name || name === WRITE_ARTIFACT_TOOL.name) {
-      return this.handleArtifactToolCall(taskId, request, name, args);
     }
 
     if (
@@ -2226,7 +2163,8 @@ export class MessagingMcpServer {
   }
 
   /**
-   * ファイル受け渡し4ツール（`HANDOFF_TOOLS`、design.md §16.44、Issue #693）の呼び出し。
+   * ファイル受け渡し3ツール（`HANDOFF_TOOLS`の2つと`LIST_HANDOFFS_TOOL`。design.md
+   * §16.44、Issue #693）の呼び出し。
    *
    * `this.hub.handoff`が未設定なら「未知のツール」で拒否する（`visibleTools`が
    * そもそも見せていないが、ツール名を推測して呼ばれる余地に備えた多層防御。
@@ -2287,84 +2225,6 @@ export class MessagingMcpServer {
       request.id,
       toolTextResult(JSON.stringify({ ...result, reason, crossWindow: true }), !result.accepted),
     );
-  }
-
-  /**
-   * 成果物の2ツール（`ARTIFACT_TOOLS`、Issue #1274）の呼び出し。
-   *
-   * 保管の実体は`HANDOFF_TOOLS`と同じ`HandoffPort`で、違うのは引数の形
-   * （`<taskId>/<slug>`のキー1つ）だけ。`handleHandoffToolCall`と同じく、
-   * `this.hub.handoff`が未設定なら「未知のツール」で拒否する（多層防御）。
-   */
-  private async handleArtifactToolCall(
-    taskId: string,
-    request: JsonRpcRequest,
-    name: string,
-    args: Record<string, unknown>,
-  ): Promise<JsonRpcResponse> {
-    const handoff = this.hub.handoff;
-    if (handoff === undefined) {
-      return failure(request.id, -32602, `未知のツールです: ${name}`);
-    }
-    const key = str(args['key']);
-    const parsed = parseArtifactKey(key);
-    if (parsed === undefined) {
-      return success(
-        request.id,
-        toolTextResult(
-          JSON.stringify({
-            accepted: false,
-            reason: `キーの形が不正です（\`<taskId>/<slug>\` の形にしてください）: ${key}`,
-          }),
-          true,
-        ),
-      );
-    }
-
-    if (name === READ_ARTIFACT_TOOL.name) {
-      const result = await handoff.read(parsed.taskId, parsed.slug);
-      if (!result.ok) {
-        return success(
-          request.id,
-          toolTextResult(JSON.stringify({ accepted: false, reason: result.error }), true),
-        );
-      }
-      // `read_handoff`と同じ囲い（同じ領域を読む以上、脅威クラスも同じ）
-      const content = formatUntrusted(result.value, {
-        id: `${parsed.taskId}-${parsed.slug}`,
-        field: 'artifact',
-        maxLength: MAX_HANDOFF_BYTES,
-        preserveNewlines: true,
-      });
-      return success(
-        request.id,
-        toolTextResult(JSON.stringify({ accepted: true, reason: '読み込みました', content })),
-      );
-    }
-
-    // name === WRITE_ARTIFACT_TOOL.name
-    //
-    // 書けるのは自分のtaskIdで始まるキーだけ（`write_handoff`が接続のtaskIdへ固定して
-    // いるのと同じ制約。引数でキーを取る形にした分、ここで突き合わせる）。
-    // オーケストレーターの読み替えも`write_handoff`と同じ
-    const owner = taskId === ORCHESTRATOR_CONNECTION_ID ? RESERVED_ORCHESTRATOR_TASK_ID : taskId;
-    if (parsed.taskId !== owner) {
-      return success(
-        request.id,
-        toolTextResult(
-          JSON.stringify({
-            accepted: false,
-            reason: `自分のtaskIdで始まるキーだけを書けます（このセッションのtaskIdは ${owner}）`,
-          }),
-          true,
-        ),
-      );
-    }
-    const result = await handoff.write(owner, parsed.slug, str(args['content']));
-    const body = result.ok
-      ? { accepted: true, reason: '書き込みました', key, relativePath: result.value.relativePath }
-      : { accepted: false, reason: result.error };
-    return success(request.id, toolTextResult(JSON.stringify(body), !result.ok));
   }
 
   /**
@@ -2447,6 +2307,12 @@ export class MessagingMcpServer {
     }
 
     if (name === LIST_HANDOFFS_TOOL.name) {
+      // 一覧はオーケストレーターの接続だけ（Issue #1324 第2段）。`visibleTools`が
+      // タスク側へ出していないものを、呼び出し時にも同じ条件で弾く（制御ツールと
+      // 同じ多層防御の流儀）
+      if (taskId !== ORCHESTRATOR_CONNECTION_ID) {
+        return failure(request.id, -32602, `未知のツールです: ${name}`);
+      }
       // ガード失敗（`findSymlinkedAncestor`が祖先のシンボリックリンクを見つけた場合）を
       // 空配列で返すと「0件」と区別できない（Issue #1033）。他の3ツールと同じく理由を返す
       const result = await handoff.list();
@@ -2481,63 +2347,29 @@ export class MessagingMcpServer {
       return success(request.id, toolTextResult(JSON.stringify(body), !result.ok));
     }
 
-    // read_handoff / delete_handoff は対象を指定する`taskId`引数を取る（`HANDOFF_TOOLS`の
+    // name === READ_HANDOFF_TOOL.name（このメソッドを呼ぶ3分岐のうち残りの1つ）
+    //
+    // `read_handoff`だけが対象を指定する`taskId`引数を取る（`WRITE_HANDOFF_TOOL`の
     // JSDoc参照）
     const target = str(args['taskId']);
     const slug = str(args['slug']);
-
-    if (name === READ_HANDOFF_TOOL.name) {
-      const result = await handoff.read(target, slug);
-      if (!result.ok) {
-        return success(
-          request.id,
-          toolTextResult(JSON.stringify({ accepted: false, reason: result.error }), true),
-        );
-      }
-      const content = formatUntrusted(result.value, {
-        id: `${target}-${slug}`,
-        field: 'handoff',
-        maxLength: MAX_HANDOFF_BYTES,
-        preserveNewlines: true,
-      });
+    const result = await handoff.read(target, slug);
+    if (!result.ok) {
       return success(
         request.id,
-        toolTextResult(JSON.stringify({ accepted: true, reason: '読み込みました', content })),
+        toolTextResult(JSON.stringify({ accepted: false, reason: result.error }), true),
       );
     }
-
-    // name === DELETE_HANDOFF_TOOL.name（このメソッドを呼ぶ4分岐のうち残りの1つ）
-    //
-    // **消せるのは自分が書いたものだけ（Issue #1033）。** `read_handoff`の横断参照は
-    // 「役割セッションが設計メモを書き、オーケストレーターが読む」という想定利用そのもの
-    // なので開いたままにするが、削除にはその必要が無い。受け渡し領域がrun終了時に消える
-    // 一時領域であることは影響度を下げるだけで、実行中の連携情報を他のタスクが消せば
-    // runの進行は妨害できる。
-    //
-    // 判定は接続（`connection.taskId`）だけで行い、引数の値では分岐しない。
-    // オーケストレーターだけは配下のすべてを消せる——runの段取りを持つ側であり、
-    // 不要になった受け渡しを片付ける役目もここにあるため。オーケストレーターかどうかは
-    // `ORCHESTRATOR_CONNECTION_ID`との比較で決まり、`TASK_ID_PATTERN`に合致する文字列
-    // からは到達できない（`controlFor`と同じ方法）
-    const isOrchestrator = taskId === ORCHESTRATOR_CONNECTION_ID;
-    const owner = isOrchestrator ? RESERVED_ORCHESTRATOR_TASK_ID : taskId;
-    if (!isOrchestrator && target !== owner) {
-      return success(
-        request.id,
-        toolTextResult(
-          JSON.stringify({
-            accepted: false,
-            reason: `自分が書いた受け渡しファイルだけを削除できます（このセッションのtaskIdは ${owner}）`,
-          }),
-          true,
-        ),
-      );
-    }
-    const result = await handoff.remove(target, slug);
-    const body = result.ok
-      ? { accepted: true, reason: '削除しました' }
-      : { accepted: false, reason: result.error };
-    return success(request.id, toolTextResult(JSON.stringify(body), !result.ok));
+    const content = formatUntrusted(result.value, {
+      id: `${target}-${slug}`,
+      field: 'handoff',
+      maxLength: MAX_HANDOFF_BYTES,
+      preserveNewlines: true,
+    });
+    return success(
+      request.id,
+      toolTextResult(JSON.stringify({ accepted: true, reason: '読み込みました', content })),
+    );
   }
 
   /**

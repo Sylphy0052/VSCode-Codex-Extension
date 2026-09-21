@@ -1945,7 +1945,7 @@ function pushFinalMergeWarning(live: LiveRun, message: string): void {
 
 /**
  * `TaskMessagingHubDeps.handoff`（`messaging.ts`、design.md §16.44、Issue #693）の実体を
- * 組み立てる。`TeamHandoffStore`（`teamHandoff.ts`）の`write`/`read`/`list`/`remove`は
+ * 組み立てる。`TeamHandoffStore`（`teamHandoff.ts`）の`write`/`read`/`list`は
  * いずれも第1引数に`runId`を取るが、`HandoffPort`は`runId`を持たない薄い形（`messaging.ts`
  * がVSCode非依存・run単体の関心事だけを扱う方針を保つため）なので、ここで`runId`を
  * 束縛したクロージャに変換する。`buildOrchestratorControlPort`（`runnerOrchestrator.ts`）が
@@ -1958,7 +1958,6 @@ function buildHandoffPort(repoRoot: string, runId: string): HandoffPort {
     write: (taskId, slug, content) => store.write(runId, taskId, slug, content),
     read: (taskId, slug) => store.read(runId, taskId, slug),
     list: () => store.list(runId),
-    remove: (taskId, slug) => store.remove(runId, taskId, slug),
   };
 }
 
@@ -3783,7 +3782,7 @@ export class WorkflowRunner {
     }
     // チームモードの受け渡しファイル（design.md §16.44、Issue #693）を片付ける。
     //
-    // 消す位置を`closeMessaging`と揃えているのは、受け渡しファイルを読み書きする4ツールが
+    // 消す位置を`closeMessaging`と揃えているのは、受け渡しファイルを読み書きするツールが
     // MCPサーバ越しにしか使えず、サーバが閉じた時点でどのセッションからも到達できなく
     // なるため。「到達できなくなったものを残さない」という一点で位置が決まる。
     //

@@ -4394,7 +4394,7 @@ T4は「T2とT3のブランチをマージする」タスクではない。マ�
 
 `maxIterations`の組み込み既定は3回とする（Issue #848。旧既定20回）。3回で終了条件を満たせない場合は同じ指示を繰り返さず、失敗内容をオーケストレーターへ渡して`update_task`・追加・削除・依存変更で計画を調整する。
 
-オーケストレーターが`task-messaging`へ行うrun内の読取・タスク通信・handoffの読書き・停止・再試行・継続・計画変更は、通常の`autoApprove`設定とは分離してMCP elicitationを自動許可する。これらは当該runの状態と専用handoff領域だけを操作し、計画変更履歴を警告欄へ残す。危険操作の承認（`decide_approval`）、mainへの最終マージ（`decide_final_merge`）、handoff削除（`delete_handoff`）は自動許可しない。
+オーケストレーターが`task-messaging`へ行うrun内の読取・タスク通信・handoffの読書き・停止・再試行・継続・計画変更は、通常の`autoApprove`設定とは分離してMCP elicitationを自動許可する。これらは当該runの状態と専用handoff領域だけを操作し、計画変更履歴を警告欄へ残す。危険操作の承認（`decide_approval`）とmainへの最終マージ（`decide_final_merge`）は自動許可しない。
 
 生成ワークフローには`plannerPromptVersion`・`plannerProvider`・`plannerModel`・`reviewRevision`・レビュー指摘数を記録する。ワークフローViewはゴール、受入条件、前提、対象外、生成条件、レビュー・検証・復旧状態を表示する。タスク一覧は作業内容要約を表示し、作業ディレクトリと直近応答は一覧から外す。狭幅では横長表をカードへ切り替える。代表ゴールは`docs/fixtures/workflow-evaluation.json`、決定的な比較指標は`workflowEvaluation.ts`で管理する。
 
@@ -5796,21 +5796,19 @@ runをまたぐ通信と、ワークフローの外のセッションへの送�
 
 自ウィンドウか別ウィンドウかの分岐は `extension.ts` の `controlSessionAnywhere` に閉じている。統括ページ（カンバン）とMCPの口が同じこの関数を通る——入口ごとに宛先解決を持たせない。`SessionHub` 側のタイムアウト・TTL・未知の `kind` の扱いはそのまま使う。
 
-追加したツールは次の5つ。
+追加したツールは次の5つだった（`read_artifact` / `write_artifact` はIssue #1324 第2段で撤去した。下記）。
 
 | ツール               | 引数               | 返り値                                                        |
 | -------------------- | ------------------ | ------------------------------------------------------------- |
 | `list_sessions`      | なし               | 見えているセッションの `ref`・プロバイダ・タイトル・cwd・状態 |
 | `ask_session`        | `to`・`question`   | 受け付けたかどうかと `questionId`                             |
 | `ask_session_result` | `to`・`questionId` | 進み具合（`running` / `done` / `failed`）と回答               |
-| `read_artifact`      | `key`              | 成果物の本文（囲い付き）                                      |
-| `write_artifact`     | `key`・`content`   | 受け付けたかどうかと理由                                      |
 
 **`ask_session` はツールの中で回答を待たない。** この節の冒頭で `wait_reply` を置かないと決めたのと同じ理由（互いに待つとデッドロックする）による。問いを投げると `questionId` が返り、`ask_session_result` で取りに行く。`SessionHub` 側の脇道の質問（`sideQuestion` / `sideQuestionResult`、Issue #1261）がもともと同じ2段構えで、その口をそのまま使う。
 
-`read_artifact` / `write_artifact` は `TeamHandoffStore` の領域を `<taskId>/<slug>` のキー1つで読み書きする。保管の実体・検証は `read_handoff` / `write_handoff`（§16.44）と同じもので、違うのは引数の形だけである。Phase 1（Issue #1271）で受け渡しがpull型になり、下流タスクが受け取るのが「取りに行くための1つの識別子」になったため、その識別子をそのまま渡せる形を用意した。書けるのは自分のtaskIdで始まるキーだけで、これは `write_handoff` が接続のtaskIdへ固定しているのと同じ制約である。
+**`read_artifact` / `write_artifact` は撤去した（Issue #1324 第2段）。** 当初は `TeamHandoffStore` の領域を `<taskId>/<slug>` のキー1つで読み書きする口として置いた。保管の実体・検証は `read_handoff` / `write_handoff`（§16.44）と同じもので、違うのは引数の形だけである。しかし `{{T1.handoff}}` が指示文へ展開するのは `read_handoff(taskId: ..., slug: ...)`（`formatHandoffReference`）であり、キー1つの形を指示文へ埋める経路は最後まで作られなかった。どのプロンプトもこの2ツールの名前を出さないまま `tools/list` の全接続へ746字を載せ続けていたため、重複公開として外した。キーを組み立てる `formatArtifactKey` / `parseArtifactKey` も同時に落とした。
 
-可視性は従来の方針を踏襲する。`SESSION_TOOLS` は `sessionBridge` が、`ARTIFACT_TOOLS` は `handoff` が設定されているときだけ `tools/list` に出す。オーケストレーター専用の制御ツールを接続で絞る仕組み（`controlFor` / `visibleTools`、§16.23）は崩さない。セッション宛の3ツールは `handoff` 系と同じく接続の種別を問わず見せる——オーケストレーターも別ウィンドウの会話へ問い合わせたい場面があるため、`ask_orchestrator` のような「タスク側だけの道具」にはしない。
+可視性は従来の方針を踏襲する。`SESSION_TOOLS` は `sessionBridge` が設定されているときだけ `tools/list` に出す。オーケストレーター専用の制御ツールを接続で絞る仕組み（`controlFor` / `visibleTools`、§16.23）は崩さない。セッション宛の3ツールは `handoff` 系と同じく接続の種別を問わず見せる——オーケストレーターも別ウィンドウの会話へ問い合わせたい場面があるため、`ask_orchestrator` のような「タスク側だけの道具」にはしない。
 
 #### 越境して届く本文の扱いと、権限の非保証（Issue #1274）
 
@@ -9258,13 +9256,13 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 
 書き換える操作（`makeDirectory` / `writeTextFile` / `removeFile` / `removeDirectory`）は、`HandoffFileSystemPort`の側で成否を`boolean`で返す。失敗を`void`で握り潰すと、`write_handoff`が書けていないファイルに対して「書き込みました」と応答し、直後の`read_handoff`が「ありません」になる——呼び出したエージェントからは原因を追えない不整合になるためである。読む操作（`readTextFile` / `listDirectory`）は「無ければ空」という戻り値自体が失敗を表せるので`boolean`にしていない。
 
-`write_handoff`/`read_handoff`/`list_handoffs`/`delete_handoff`の4ツール（`messaging.ts:973-1026`）は、オーケストレーター・タスクの両方の接続へ見せる（`visibleTools`、`messaging.ts:1489-1506`）。想定利用が「役割セッションが設計メモを書き、オーケストレーターが読む」で書く側・読む側のどちらも固定できないためである。`write_handoff`だけ`taskId`引数を取らない——`send_message`の`from`と同じ理由（§16.21）で、書き込み先の`taskId`部分は接続そのもの（`connection.taskId`）から決め、別のタスクの名義を騙れないようにしている（`messaging.ts:964-971`）。
+`write_handoff`/`read_handoff`の2ツールは、オーケストレーター・タスクの両方の接続へ見せる（`visibleTools`）。想定利用が「役割セッションが設計メモを書き、オーケストレーターが読む」で書く側・読む側のどちらも固定できないためである。`list_handoffs`はオーケストレーターの接続にだけ見せ、`delete_handoff`は撤去した（どちらもIssue #1324 第2段。§16.48）。`write_handoff`だけ`taskId`引数を取らない——`send_message`の`from`と同じ理由（§16.21）で、書き込み先の`taskId`部分は接続そのもの（`connection.taskId`）から決め、別のタスクの名義を騙れないようにしている（`messaging.ts:964-971`）。
 
 **runが終わるとファイルは丸ごと消える。**`WorkflowRunner`の終了処理が`TeamHandoffStore.removeRun`を`closeMessaging`・`closeReviewCommentPoll`と同じ位置で呼ぶ（`runner.ts:3078-3105`）。受け渡し4ツールはMCPサーバ越しにしか使えず、サーバが閉じた時点でどのセッションからも到達できなくなるためで、「到達できなくなったものを残さない」という一点で消す位置が決まっている。**再開（`retryTask`/`continueTask`/`retryMerge`）した2周目は、受け渡し領域が空の状態から始まる**（`runner.ts:3084-3088`）。再開時は`ensureMessaging`がMCPサーバを作り直すのでツール自体は使えるが、1周目に書いたファイルは残っていない。これは§16.43が「再開しても制御ツールは戻らない」で書いた制約と同じ性質——MCPのURLが作り直され1周目の状態を引き継げない——であり、引き継ぎたい内容はオーケストレーターが自分の会話に持っている前提にする。
 
 オーケストレーターの接続id（`ORCHESTRATOR_CONNECTION_ID`、値は`-orchestrator-`）は`TASK_ID_PATTERN`に一致しないため、そのままではファイル名に使えない。`write_handoff`はオーケストレーターからの書き込みだけ`RESERVED_ORCHESTRATOR_TASK_ID`（`_orchestrator`、`workflow.ts:105`）へ読み替える（`messaging.ts:1625-1629`）。同名のタスクは`validateWorkflow`が定義できないよう弾いている（`workflow.ts:1345-1348`）ため、この読み替えがタスクのファイルと衝突することはない。
 
-**削除できるのは自分が書いたものだけにする（Issue #1033）。** `delete_handoff`は当初`taskId`と`slug`を引数に取るだけで、呼び出し元が誰かを見ていなかった。`write_handoff`が`connection.taskId`から書き込み先を決めて名義を守っている（上記）のに対し、削除側は他タスクの成果物を消せる状態で、名義の保護が書き込みだけの片側になっていた。現在は接続の`taskId`と削除対象の`taskId`が一致することを求め、一致しないときは`accepted: false`と「自分が書いた受け渡しファイルだけを削除できます」という理由を返す。オーケストレーターだけは例外で、どのタスクのファイルも削除できる——runの後片付けと、行き詰まったタスクの残骸を掃除する役割を担うためで、`decide_approval`と同じく`delete_handoff`はオーケストレーターでも自動許可の対象外にしてある（§16.2）。この制約は`DELETE_HANDOFF_TOOL.description`にも書き、エージェントが試す前に読めるようにする。
+**削除できるのは自分が書いたものだけにしていた（Issue #1033、現在は`delete_handoff`ごと撤去）。** `delete_handoff`は当初`taskId`と`slug`を引数に取るだけで、呼び出し元が誰かを見ていなかった。`write_handoff`が`connection.taskId`から書き込み先を決めて名義を守っている（上記）のに対し、削除側は他タスクの成果物を消せる状態で、名義の保護が書き込みだけの片側になっていた。そこで接続の`taskId`と削除対象の`taskId`の一致を求め、オーケストレーターだけを例外にしていた。Issue #1324 第2段でツールごと撤去したため、この非対称は無くなった——受け渡し領域はrun終了時に丸ごと消える一時領域で、実行中に個別のファイルを消す必要が実運用で現れなかったためである（§16.48）。
 
 **一覧はガードに弾かれたことを「0件」と区別する（Issue #1033）。** `TeamHandoffStore.list`は当初`HandoffEntry[]`を返し、`findSymlinkedAncestor`のガードに弾かれた場合も空配列を返していた。呼び出したエージェントからは「まだ誰も書いていない」と見分けが付かず、他のタスクが書いたはずのメモを探しているオーケストレーターが「無い」と判断して先へ進む。現在は`HandoffResult<HandoffEntry[]>`を返し、`list_handoffs`はガード失敗を`accepted: false`と理由で返す（`entries`は付けない）。`read_handoff`・`write_handoff`が既に`HandoffResult`で失敗を伝えていたのに`list`だけが例外だった、という不揃いの解消でもある。
 
@@ -9411,6 +9409,40 @@ Viewは変化の種類で送る内容を変えない。run一覧・プログラ�
 - `test/unit/runner.test.ts`: `WorkflowRunner`を通した配線。圧縮が実際に呼ばれること・ラッチが効いて1回だけであること・回復後は再び動くこと・失敗してもrunが止まらないこと、分割で2代目が開いて続きが走ること・古いタブの終了が無視されること・**起動に失敗したら元のセッションが再開されてタスクが宙に浮かないこと**、`none`では何も起きないこと
 - `test/unit/workflow.test.ts`: `onContextLow`のパース（`compact` / `split` をそのまま読む・未指定は`none`・未知の値は`none`へ倒して警告）
 - `test/unit/sessionTitle.test.ts`: `generation`が2以上のときだけ`(続きN)`が付くこと
+
+### 16.48 メッセージング用MCPツールの常時公開数を減らす（Issue #1324 第2段）
+
+`tools/list` が返すツール定義は接続のたびにCLIのシステムプロンプトへ載る。第1段（受入基準1）で実利用率を数える口（`agent.orchestrator.toolUsageMetrics.enabled`、`toolUsageMetrics.ts`）を入れたが、実運用の集計が貯まる前に、コードだけで判る重複と未使用を先に外した。
+
+#### フェーズ別の動的な公開はできない
+
+`McpConnection.send` は `JsonRpcResponse`（`id`を持つ応答）しか送れず、`SERVER_INFO_RESULT.capabilities` も `{ tools: {} }` で `listChanged` を宣言していない。サーバーから `notifications/tools/list_changed` を送る経路が無いため、CLIが接続時に読んだ一覧は途中で差し替えられない。したがってallowlistは**接続の種別とrunの配線だけで決まる静的なもの**になり、「実装フェーズでは制御ツールを隠す」のような作業フェーズ単位の絞り込みは、トランスポートの拡張なしには採れない。
+
+#### 外したもの
+
+| ツール                             | 判断                         | 根拠                                                                                                                                                                                                                     |
+| ---------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `read_artifact` / `write_artifact` | 撤去                         | `read_handoff` / `write_handoff` と同じ `TeamHandoffStore` を引数の形だけ変えて公開していた。`{{T1.handoff}}` が指示文へ展開するのは `read_handoff(...)` であり、キー1つの形はどのプロンプトからも案内されない（§16.24） |
+| `delete_handoff`                   | 撤去                         | 受け渡し領域はrun終了時に丸ごと消える。どのプロンプトも案内せず、`AUTO_APPROVED_ORCHESTRATOR_TOOLS` にも入れていない（自動許可の対象外）。実行中に個別のファイルを消す必要が実運用で現れなかった（§16.44）               |
+| `list_handoffs`                    | オーケストレーターの接続だけ | run全体の受け渡しを見渡すのは段取りを持つ側の仕事。タスク側は上流の参照が `{{T1.handoff}}` として指示文に入っており、`read_handoff` に渡す `taskId` と `slug` はそこから判る                                             |
+
+**隠すことと拒否することを一致させる（多層防御は崩さない）。** `visibleTools` から落としたものは `handleToolCall` 側でも同じ条件で拒否する——撤去した3ツールは分岐ごと消し、`list_handoffs` はタスクの接続から呼ばれたら「未知のツールです」を返す。`tools/list` に出さないだけでは名前を推測して呼ばれる余地が残る、という §16.23 以来の流儀をそのまま守る。
+
+#### 削減量
+
+`tools/list` が返すJSON（`JSON.stringify({ tools })`）の文字数。
+
+| 接続               | 変更前              | 変更後             | 差     |
+| ------------------ | ------------------- | ------------------ | ------ |
+| タスク             | 12ツール / 4,565字  | 8ツール / 3,264字  | −28.5% |
+| オーケストレーター | 26ツール / 10,976字 | 23ツール / 9,837字 | −10.4% |
+
+オーケストレーター側の削減が小さいのは、制御15ツールがすべて `buildOrchestratorControlPort` の実体を持ち、run開始時のintro（`buildIntroBody`）で役割まで説明されているためである。ここから先を削るには実利用率の実測が要る（受入基準2の残り）。
+
+#### 確かめ方
+
+- `test/unit/messaging.test.ts`: `list_handoffs` がオーケストレーターの接続では一覧と件数を返し、タスクの接続では `tools/list` に出ず呼んでも拒否されること。`delete_handoff` が名前を知っていても拒否され、実体が残ること
+- `test/unit/sessionMessaging.test.ts`: `read_artifact` / `write_artifact` が `tools/list` に出ず、呼んでも拒否されること
 
 ### 14.105 Advisorにskillを提示しない（Issue #1061）
 
