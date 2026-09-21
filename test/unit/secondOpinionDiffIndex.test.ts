@@ -249,6 +249,39 @@ describe('buildSecondOpinionPrompt: 目次への切り替え（受入基準3・4
     expect(prompt).not.toContain('export const a = 1;');
   });
 
+  it('差分が小さくても、未追跡ファイルが大きければそちらだけ参照先へ落とす', () => {
+    const content = `export const a = '${'x'.repeat(4 * 20_000)}';\n`;
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: snapshotOf(fileDiff('src/a.ts'), {
+          untrackedFiles: [{ path: 'src/new.ts', content, bytes: content.length }],
+        }),
+      },
+      diffPresentation: DEFAULT_DIFF_PRESENTATION_THRESHOLDS,
+    });
+    // 差分は小さいので本文へ貼ったまま
+    expect(prompt).toContain('```diff');
+    // 未追跡ファイルは中身ではなく参照先
+    expect(prompt).toContain('`untracked/src/new.ts`');
+    expect(prompt).not.toContain(content);
+  });
+
+  it('未追跡ファイルが小さければ本文へ貼ったままにする', () => {
+    const prompt = buildSecondOpinionPrompt({
+      userRequest: 'レビューして',
+      artifact: {
+        kind: 'workspaceChanges',
+        snapshot: snapshotOf(fileDiff('src/a.ts'), {
+          untrackedFiles: [{ path: 'src/new.ts', content: 'export const a = 1;\n', bytes: 20 }],
+        }),
+      },
+      diffPresentation: DEFAULT_DIFF_PRESENTATION_THRESHOLDS,
+    });
+    expect(prompt).toContain('export const a = 1;');
+  });
+
   it('目次のパスにバッククォートが混ざっても囲みが壊れない', () => {
     const diff = largeDiff(60) + fileDiff('src/`odd`.ts');
     const prompt = buildSecondOpinionPrompt({

@@ -405,6 +405,27 @@ function formatBytes(bytes: number | undefined): string {
  * 載せなかったものは必ず一覧に出す。**黙って落とさない。** 何を見ていないかが分からないと、
  * Advisorは「新規ファイルはこれで全部」という前提で判断してしまう。
  */
+/**
+ * 未追跡ファイルの区画の段階を決める（Issue #1322）。
+ *
+ * 差分が目次になっていれば、未追跡ファイルもそれに合わせる。差分が `inline` のままでも、
+ * **未追跡ファイル自身が大きければこちらだけを参照へ落とす**。未追跡ファイルは1回の相談で
+ * 最大100KB載りうるため（`MAX_UNTRACKED_TOTAL_BYTES`）、差分が小さいというだけで本文へ
+ * 全文を貼ると、`untracked/` に同じ中身がある状態＝この課題が消そうとしている二重掲載が
+ * そのまま残る。差分の量に未追跡の量を足して1つの段階に丸めないのは、その逆——未追跡が
+ * 多いだけで小さい差分まで目次へ落ちる——を避けるためである。
+ */
+function untrackedTier(
+  tier: DiffPresentationTier,
+  files: readonly UntrackedFile[],
+  thresholds: DiffPresentationThresholds | undefined,
+): DiffPresentationTier {
+  if (tier !== 'inline' || thresholds === undefined || files.length === 0) {
+    return tier;
+  }
+  return chooseDiffPresentationTier(files.map((file) => file.content).join('\n'), thresholds);
+}
+
 function untrackedSection(
   files: readonly UntrackedFile[],
   omissions: readonly UntrackedOmission[],
@@ -430,6 +451,9 @@ function untrackedSection(
     parts.push(
       '',
       `内容は \`${REVIEW_BUNDLE_UNTRACKED_DIR}/<パス>\` に置いてあります。**判断を述べる前に必ず読んでください。**`,
+      // 書き出しに失敗したファイルは黙って飛ばす実装（`reviewBundle.ts`）なので、
+      // 一覧にあって実体が無いことがありうる。その場合に想像で埋めさせない
+      '見つからないものがあれば、その内容は未確認として扱い、どれが読めなかったかを回答に書いてください。',
       '',
     );
     for (const file of files) {
@@ -565,6 +589,7 @@ const DIFF_CHANGE_KIND_LABELS: Record<DiffChangeKind, string> = {
 function artifactSection(
   artifact: SecondOpinionArtifact,
   tier: DiffPresentationTier,
+  thresholds: DiffPresentationThresholds | undefined,
 ): string | undefined {
   switch (artifact.kind) {
     case 'workspaceChanges': {
@@ -584,7 +609,11 @@ function artifactSection(
         const index = artifact.snapshot.diffIndex ?? buildDiffIndex(diff);
         diffSection = `${heading}${diffIndexSection(index, tier)}${omitted}`;
       }
-      const untracked = untrackedSection(untrackedFiles, untrackedOmissions, tier);
+      const untracked = untrackedSection(
+        untrackedFiles,
+        untrackedOmissions,
+        untrackedTier(tier, untrackedFiles, thresholds),
+      );
       return untracked === undefined ? diffSection : `${diffSection}\n\n${untracked}`;
     }
     case 'lastAssistantResponse':
@@ -635,7 +664,7 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
     ),
     position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
-    artifactSection(input.artifact, tier),
+    artifactSection(input.artifact, tier, input.diffPresentation),
     position === 'end' ? request : undefined,
     input.restateRequestAtEnd === true ? restatedRequestSection(input) : undefined,
   ].filter((section): section is string => section !== undefined);
