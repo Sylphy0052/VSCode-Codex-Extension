@@ -61,12 +61,22 @@ function parseArgs(argv: readonly string[]): Args {
 /** `key.json` から `caseId → opaqueCaseId` の対応を1つずつに畳む（条件×試行ぶん重複している）。 */
 function collectOpaqueIdByCaseId(entries: readonly ScoringKeyEntry[]): Map<string, string> {
   const map = new Map<string, string>();
+  const caseIdByOpaqueId = new Map<string, string>();
   for (const entry of entries) {
     const existing = map.get(entry.caseId);
     if (existing !== undefined && existing !== entry.opaqueCaseId) {
       throw new Error(`caseId ${entry.caseId} に複数の opaqueCaseId が対応しています`);
     }
+    // 逆向きも見る。別の案件へ同じ opaqueCaseId が振られていると、出力先が衝突して
+    // 2案件の材料が1つのディレクトリへ混ざる。
+    const owner = caseIdByOpaqueId.get(entry.opaqueCaseId);
+    if (owner !== undefined && owner !== entry.caseId) {
+      throw new Error(
+        `opaqueCaseId ${entry.opaqueCaseId} が複数の caseId (${owner}, ${entry.caseId}) に対応しています`,
+      );
+    }
     map.set(entry.caseId, entry.opaqueCaseId);
+    caseIdByOpaqueId.set(entry.opaqueCaseId, entry.caseId);
   }
   return map;
 }
@@ -101,6 +111,9 @@ async function main(): Promise<void> {
       continue;
     }
     try {
+      // 作り直しのとき、前回あって今回は無いファイルが残ると、古い材料が混ざったまま
+      // 採点者へ渡る。コピーの前に出力先ごと消す。
+      await fs.rm(dest, { recursive: true, force: true });
       await fs.cp(prepared.material.cwd, dest, { recursive: true });
       console.log(`[materials] ${evalCase.id} → ${opaqueCaseId}`);
     } finally {

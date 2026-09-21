@@ -120,6 +120,29 @@ function checkOne(scoringId: string, score: ScoreFile, findingCount: number): st
     );
   }
   if (score.recallEvidence !== undefined) {
+    // `recalledFindingIndexes` と同じく、添字の範囲と重複をここで見る。壊れたまま
+    // 通すと、後から一致を確かめる唯一の記録（`-details.json`）が壊れる。
+    const seen = new Set<number>();
+    for (const entry of score.recallEvidence) {
+      if (!Number.isInteger(entry.findingIndex) || entry.findingIndex < 0) {
+        problems.push(
+          `recallEvidence の findingIndex(${entry.findingIndex})が整数の添字ではありません`,
+        );
+        continue;
+      }
+      if (entry.findingIndex >= findingCount) {
+        problems.push(
+          `recallEvidence の findingIndex(${entry.findingIndex})が正解ラベル(${findingCount}件)の範囲外です`,
+        );
+        continue;
+      }
+      if (seen.has(entry.findingIndex)) {
+        problems.push(`recallEvidence の findingIndex(${entry.findingIndex})が重複しています`);
+        continue;
+      }
+      seen.add(entry.findingIndex);
+    }
+
     const matched = score.recallEvidence
       .filter((entry) => entry.matched)
       .map((entry) => entry.findingIndex)
@@ -208,6 +231,7 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  await fs.mkdir(path.dirname(args.outPath), { recursive: true });
   await fs.writeFile(args.outPath, `${JSON.stringify(scores, null, 2)}\n`, 'utf8');
   const detailsPath = path.join(
     path.dirname(args.outPath),

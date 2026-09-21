@@ -240,7 +240,14 @@ async function main(): Promise<void> {
     scorePath: string;
   }[] = [];
 
+  // `scoringId` はファイル名になる。重複していると先に書いたプロンプトを黙って踏む。
+  const seenScoringIds = new Set<string>();
+
   for (const item of sheet.items) {
+    if (seenScoringIds.has(item.scoringId)) {
+      throw new Error(`scoringId が重複しています: ${item.scoringId}`);
+    }
+    seenScoringIds.add(item.scoringId);
     const entry = rubricByCase.get(item.opaqueCaseId);
     if (entry === undefined) {
       throw new Error(`rubricに案件がありません: ${item.opaqueCaseId}`);
