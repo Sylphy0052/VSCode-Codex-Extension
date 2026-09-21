@@ -346,8 +346,10 @@ export function createOutputOffloadPort(
 export async function runOpenItemOutput(load: () => Promise<string | undefined>): Promise<void> {
   const text = await load();
   if (text === undefined || text === '') {
+    // 理由（読めなかった・まだ退避されていない・会話を閉じた後）を言い分けない。
+    // 呼び出し側から区別できず、断定すると外すため
     void vscode.window.showWarningMessage(
-      '退避したツール出力を読めませんでした。会話を閉じた後は控えを残していません',
+      'ツール出力の全文を読めませんでした。時間をおいて開き直してください（会話を閉じた後は控えを残していません）',
     );
     return;
   }

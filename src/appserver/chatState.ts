@@ -1369,6 +1369,11 @@ function appendDelta(
       text: appended.text,
       // 一度でも捨てたら、その後の追記で上限を下回っても捨てた事実は残る
       truncated: existing.truncated === true || appended.truncated,
+      // 退避済みの項目へ追記が届いた（通知の順序が入れ替わった）ときは退避の印を落とす
+      // （issue #1325）。印を残すと、本文はプレビューへ継ぎ足して伸びていくのに
+      // 「全文を開く」が退避した時点の内容を指したままになり、二度と退避もされない
+      outputOffloaded: undefined,
+      outputChars: undefined,
     };
   }
   return next;

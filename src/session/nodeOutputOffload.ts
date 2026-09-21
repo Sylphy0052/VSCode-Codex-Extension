@@ -52,7 +52,13 @@ export function createNodeOutputOffload(
         count += 1;
         const filePath = join(dir, `${count}.txt`);
         await writeFile(filePath, text, 'utf8');
+        // 同じ項目を2度退避することがある（1度目の差し替えが本文の不一致で見送られ、
+        // 次の見直しで選び直された場合）。前の分は誰も参照しなくなるので消す
+        const previous = paths.get(itemId);
         paths.set(itemId, filePath);
+        if (previous !== undefined) {
+          await rm(previous, { force: true });
+        }
         return true;
       } catch (e) {
         // 書けなければ退避しない（呼び出し側は本文をメモリに残したままにする）。
