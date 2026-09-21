@@ -375,6 +375,19 @@ export function chatScript(
     });
     actions.appendChild(copy);
 
+    // 退避したツール出力の全文を開く（issue #1325）。総量の上限を超えた古い出力は
+    // ディスクへ移してあり、この画面が持っているのは末尾のプレビューだけ。全文は
+    // webviewへ送り返さず、ホスト側が新しいエディタタブへ出す
+    const openOutput = document.createElement('button');
+    openOutput.className = 'secondary';
+    openOutput.textContent = '全文を開く';
+    openOutput.hidden = true;
+    openOutput.addEventListener('click', () => {
+      if (!node.outputTarget) return;
+      vscode.postMessage({ type: 'openItemOutput', itemId: node.outputTarget });
+    });
+    actions.appendChild(openOutput);
+
     // 送った指示を書き直して送り直す（issue #1073）。押すと本文の表示がその場で入力欄に
     // 変わる。入力欄（画面下の #input）へ移さないのは、どの指示を直しているのかを
     // 見失わないため。送るまでは会話・ファイル・タブのいずれも変えない
@@ -586,6 +599,9 @@ export function chatScript(
       diffs,
       diffKey: '',
       copy,
+      openOutput,
+      // 退避したツール出力を開く対象（issue #1325）。退避していない項目では undefined
+      outputTarget: undefined,
       edit,
       editBox,
       editInput,
@@ -1303,8 +1319,15 @@ export function chatScript(
       bits.push(detail);
     }
     if (item.status) bits.push(STATUS_LABEL[item.status] || item.status);
-    // 上限を超えて先頭を捨てた分は本文に印を混ぜず、ここで断る
-    if (item.truncated) bits.push('先頭は省略');
+    // 上限を超えて先頭を捨てた分は本文に印を混ぜず、ここで断る。本文ごとディスクへ
+    // 退避した項目（issue #1325）は、捨てたのではなく別の場所にあると伝える
+    if (item.outputOffloaded) {
+      bits.push(
+        item.outputChars ? '本文を退避（全文' + item.outputChars + '文字）' : '本文を退避',
+      );
+    } else if (item.truncated) bits.push('先頭は省略');
+    node.outputTarget = item.outputOffloaded ? item.id : undefined;
+    node.openOutput.hidden = !item.outputOffloaded;
     // 中断しても子プロセスは残る。止まって見えるだけかもしれないと断る（issue #246）
     if (item.interruptedWhileRunning) bits.push('中断後も継続中の可能性');
     const label = bits.join(' ・ ');

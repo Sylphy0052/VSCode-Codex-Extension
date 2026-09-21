@@ -142,6 +142,7 @@ import {
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
 import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
+import { purgeStaleOutputOffload } from './session/nodeOutputOffload';
 import { SessionModelSettingsStore } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
@@ -1096,6 +1097,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // CLI側の領域を汚さない。`windowId`はこの拡張ホストの起動ごとに生成し、プロセスidは
   // 再利用されるため使わない。
   const windowId = generateWindowId();
+  // 前回の実行が残したツール出力の退避ファイル（issue #1325）を掃除する。退避は会話が
+  // 生きている間の控えで、通常は`session.dispose()`で消える。異常終了した分だけが残る
+  void purgeStaleOutputOffload(context.globalStorageUri.fsPath);
   const sessionHubRootDir = sessionHubRoot(context.globalStorageUri.fsPath);
   // 共有ファイルへ出す項目はここで明示的に選ぶ。`...session`のままだと
   // `ManagedChatSession`へ項目が増えるたびに、意図しない値が共有ファイルへ流れ出す

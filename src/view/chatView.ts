@@ -21,6 +21,7 @@ import {
 import { FileRewindJournal, type FileRewindPlan } from '../appserver/fileRewind';
 import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { ChatSession } from '../appserver/chatSession';
+import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
   AppServerConnection,
   type AppServerConnectionPort,
@@ -179,6 +180,7 @@ import { isEditableKey, type SettingsProvider } from './settingsProvider';
 import {
   addAttachment,
   confirmCompact,
+  createOutputOffloadPort,
   handleOpenDiffEditor,
   handleOpenDiffFile,
   handleRevertDiff,
@@ -191,6 +193,7 @@ import {
   renderShell,
   reportTurnResult,
   runExportTranscript,
+  runOpenItemOutput,
   STATE_POST_INTERVAL_MS,
   stoppedByUsageLimit,
   type ChatActivity,
@@ -1404,6 +1407,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 自動引き継ぎの初期値（Issue #1091）。ChatSessionはvscodeに依存しないため、
       // 設定の読み出しはここ（view層）で行う（`LoopController`のしきい値と同じ）
       readAutoHandoffEnabled(),
+      this.createOutputOffload(),
     );
     const loop = new LoopController(
       (text) => this.sendFromLoop(entry, text),
@@ -2023,6 +2027,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'review') {
         entry.loop.noteUserAction();
         await this.runReview(entry);
+        return;
+      }
+      if (type === 'openItemOutput') {
+        // ディスクへ退避したツール出力の全文を開く（issue #1325）。会話には触れないため
+        // ループへの割り込み扱いにもしない
+        const itemId = m['itemId'];
+        if (typeof itemId === 'string') {
+          await runOpenItemOutput(() => entry.session.loadOffloadedOutput(itemId));
+        }
         return;
       }
       if (type === 'exportTranscript') {
@@ -2694,6 +2707,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 最初の1件はすぐ送り、以降は `STATE_POST_INTERVAL_MS` ごとにまとめる。まとめた分は
    * 必ず最後に1回送る（送り漏らして古い画面が残らないようにする）。
    */
+  /**
+   * ツール出力の退避先（issue #1325）。会話ごとに作り、`session.dispose()` で破棄される。
+   */
+  private createOutputOffload(): OutputOffloadPort | undefined {
+    return createOutputOffloadPort(this.globalStorageDir, (message) => this.log.warn(message));
+  }
+
   private postState(entry: ChatPanel): void {
     // タブが閉じていても間引きの経路自体は回す。進捗画面（issue #721）はチャットのタブとは
     // 別のタブで、タスク管理下のセッションはタブを閉じても動き続ける（design.md §16.10）。

@@ -80,7 +80,11 @@ function headingOf(item: ChatItem, agentLabel: string): string {
   if (item.status !== undefined && item.status !== '') {
     bits.push(item.status);
   }
-  if (item.truncated === true) {
+  // 本文をディスクへ退避した項目（issue #1325）は、書き出しにも末尾のプレビューしか
+  // 乗らない。「先頭は省略」だけだと全文がここにあるように読めるため、別の注記にする
+  if (item.outputOffloaded === true) {
+    bits.push('本文を退避・画面の「全文を開く」で読む');
+  } else if (item.truncated === true) {
     bits.push('先頭は省略');
   }
   if (item.interruptedWhileRunning === true) {

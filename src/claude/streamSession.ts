@@ -16,6 +16,7 @@ import {
   type PendingApproval,
   type QueuedMessage,
 } from '../appserver/chatState';
+import { OutputOffloadRunner, type OutputOffloadPort } from '../appserver/outputOffload';
 import type { LaunchTarget } from '../codex/types';
 import type { Logger } from '../log';
 import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
@@ -227,9 +228,19 @@ export class ClaudeStreamSession {
      * `claudeChatView.ts` に任せて値だけ受け取る。`LoopController` のしきい値と同じ流儀。
      */
     private readonly initialAutoHandoff: boolean = initialClaudeState.autoHandoff,
+    /**
+     * ツール出力の退避先（issue #1325）。渡さない場合は退避せず、従来どおり本文を
+     * すべてメモリに持つ（テストやディスクを使えない経路のため）。
+     */
+    outputOffload?: OutputOffloadPort,
   ) {
     this.state = { ...initialClaudeState, autoHandoff: initialAutoHandoff };
+    this.offload =
+      outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
   }
+
+  /** ツール出力のセッション総量の上限（issue #1325）を受け持つ係。 */
+  private readonly offload: OutputOffloadRunner | undefined;
 
   /**
    * 使えるスラッシュコマンド。
@@ -1469,6 +1480,21 @@ export class ClaudeStreamSession {
   private update(next: ChatState): void {
     this.state = next;
     this.onChange(next);
+    // 総量が上限を超えていれば古いツール出力をディスクへ移す（issue #1325）。書き出しは
+    // 非同期で、終わったら差し替えた状態がここへ戻ってくる（再入は係の側で止める）
+    this.offload?.schedule(
+      () => this.state,
+      (offloaded) => this.update(offloaded),
+    );
+  }
+
+  /**
+   * ディスクへ退避したツール出力の全文（issue #1325）。
+   *
+   * 退避していない項目、読めなかった項目では `undefined`。画面の「全文を開く」から呼ぶ。
+   */
+  async loadOffloadedOutput(itemId: string): Promise<string | undefined> {
+    return this.offload?.load(itemId);
   }
 
   /**
@@ -1593,6 +1619,8 @@ export class ClaudeStreamSession {
     }
     this.proc = undefined;
     this.buffer = '';
+    // 退避した本文はこのセッションの控えに過ぎない。閉じたら消す（issue #1325）
+    this.offload?.dispose();
   }
 }
 
