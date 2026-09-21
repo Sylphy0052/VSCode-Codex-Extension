@@ -213,6 +213,32 @@ export const DEFAULT_SECOND_OPINION_TEMPLATE =
  * フェンスを使うことで、中身が何であっても囲みが壊れないようにする
  * （CommonMarkのfenced code blockの規則）。
  */
+/**
+ * 本文をインラインのコードスパンで囲む（Issue #1322）。
+ *
+ * {@link fence} と同じ理由で、囲む側のバッククォートを中身より長くする。目次へ出すのは
+ * `git` が出したパスと hunk のheader行（`@@ ... @@ <直近の関数名など>`）で、どちらも
+ * **リポジトリの内容そのもの**である。ファイル名や関数シグネチャにバッククォートを混ぜて
+ * おけば、固定長の `` ` `` で囲むだけではコードスパンが途中で閉じ、以降が地の文として
+ * 読まれる——すぐ隣に「判断を述べる前に必ず読んでください」のような強い指示が並ぶ区画で、
+ * そこへ任意の文を混ぜ込まれる余地を残さない。
+ *
+ * 改行は空白へ潰す。インラインのコードスパンは改行を跨げず、跨いだ時点で囲みが壊れる。
+ *
+ * CommonMarkの規則により、中身の先頭か末尾がバッククォートのときは内側へ空白を1つ入れる
+ * 必要がある（入れないと囲みのバッククォートと連結して数が合わなくなる）。
+ */
+function codeSpan(body: string): string {
+  const text = body.replace(/\r?\n/g, ' ');
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) {
+    longest = Math.max(longest, run.length);
+  }
+  const marker = '`'.repeat(longest + 1);
+  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+  return `${marker}${pad}${text}${pad}${marker}`;
+}
+
 function fence(body: string, info: string): string {
   let longest = 0;
   for (const run of body.match(/`+/g) ?? []) {
@@ -407,7 +433,9 @@ function untrackedSection(
       '',
     );
     for (const file of files) {
-      parts.push(`- \`${REVIEW_BUNDLE_UNTRACKED_DIR}/${file.path}\`（${formatBytes(file.bytes)}）`);
+      parts.push(
+        `- ${codeSpan(`${REVIEW_BUNDLE_UNTRACKED_DIR}/${file.path}`)}（${formatBytes(file.bytes)}）`,
+      );
     }
   }
   if (omissions.length > 0) {
@@ -505,7 +533,7 @@ function diffIndexSection(index: DiffIndex, tier: DiffPresentationTier): string 
     lines.push(entryLine(entry));
     if (tier === 'digest-hunks') {
       for (const header of entry.hunkHeaders) {
-        lines.push(`  - \`${header}\``);
+        lines.push(`  - ${codeSpan(header)}`);
       }
     }
   }
@@ -522,9 +550,9 @@ function diffIndexSection(index: DiffIndex, tier: DiffPresentationTier): string 
 /** 目次の1行。種類・増減行数・サイズを、パスの後ろへ短く並べる。 */
 function entryLine(entry: DiffIndexEntry): string {
   const kind = DIFF_CHANGE_KIND_LABELS[entry.kind];
-  const from = entry.renamedFrom === undefined ? '' : `（\`${entry.renamedFrom}\` から）`;
+  const from = entry.renamedFrom === undefined ? '' : `（${codeSpan(entry.renamedFrom)} から）`;
   const counts = entry.binary ? 'バイナリ' : `+${entry.added} / -${entry.deleted}`;
-  return `- \`${entry.path}\` — ${kind}${from} ${counts}（${formatBytes(entry.bytes)}）`;
+  return `- ${codeSpan(entry.path)} — ${kind}${from} ${counts}（${formatBytes(entry.bytes)}）`;
 }
 
 const DIFF_CHANGE_KIND_LABELS: Record<DiffChangeKind, string> = {
