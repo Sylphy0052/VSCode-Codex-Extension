@@ -431,6 +431,7 @@ async function rebuildLiveRun(
     programControl: undefined,
     integrationReviewAttempts: 0,
     integrationReviewInProgress: false,
+    forgeFinalizationInProgress: false,
     handoffWrites: Promise.resolve(),
     warnings: reconcileWarnings,
     integration,

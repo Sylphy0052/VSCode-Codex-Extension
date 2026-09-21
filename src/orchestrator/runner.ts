@@ -216,6 +216,17 @@ export function formatTaskExecutionContract(
   addList('全体の受入条件', definition.acceptance);
   addList('前提', definition.assumptions);
   addList('対象外', definition.nonGoals);
+  if (task.issue !== undefined) {
+    contract.push(
+      '### Issueを正本にした開発手順',
+      `- Issue #${task.issue}の本文（受入条件・実装計画）を、このタスクのSpecの正本として扱う。`,
+      '- 実装の完了を宣言する前に、Issueの受入条件と実装計画に照らして成果を確認する。',
+      '- このタスクは実装・検証結果を報告して完了する。runnerが設定済みのPR/MR作成、独立レビュー、修正・再レビュー、マージ、cleanupを後続処理として実行する。',
+      '- runnerの後続処理の対象外となる工程（sharedタスク、またはPR/MR・レビューが無効な設定）は省略せず、このタスクが既存の開発手順に従って実施結果を報告する。',
+      '- Issueの作成・更新とロードマップ改訂は実行タスクでは扱わない。必要な変更はオーケストレーターへ報告し、runnerがcleanup結果をオーケストレーターへ渡す。',
+      '',
+    );
+  }
   if (task.outcome !== undefined) contract.push('### このタスクの成果', task.outcome, '');
   addList('根拠', task.evidence);
   addList('成果物', task.outputs);
@@ -851,6 +862,8 @@ export interface WorkflowWarning {
     | 'orchestratorDependenciesChanged'
     /** pendingタスクの実行契約をオーケストレーターが変更した。 */
     | 'orchestratorTaskUpdated'
+    /** 許可済みの外部Issue操作をオーケストレーターが実行した。本文は記録しない。 */
+    | 'orchestratorIssueChanged'
     /** オーケストレーターの失敗復旧待ちが期限切れになった。 */
     | 'orchestratorFailureRecoveryTimedOut'
     | 'integrationReview'
@@ -919,6 +932,10 @@ export interface TaskPendingApprovalSnapshot {
 /** タスク1件のView向けスナップショット。応答本文そのものではなく1行要約だけを持つ。 */
 export interface TaskSnapshot {
   id: string;
+  /** このタスクのSpec正本であるIssue。未指定なら `undefined`。 */
+  issue?: number;
+  /** cleanupの進捗。worktreeを作らないタスクは`notRequired`として表示する。 */
+  cleanupStatus?: 'notStarted' | 'pending' | 'completed' | 'failed' | 'notRequired';
   /** 定義された作業内容（prompt）の一覧表示用1行要約。 */
   workSummary?: string;
   /** タスク単位の成果・根拠・成果物・リスク。旧定義では未指定。 */
@@ -1258,6 +1275,10 @@ export interface LiveTask {
   boundary: TaskBoundary;
   /** `isolation: worktree` で実際にworktreeを使ったか。撤去してよいかの判定に使う。 */
   usedWorktree: boolean;
+  /** マージ後のworktree cleanupの進捗。完了・失敗はrun storeにも残す。 */
+  cleanupStatus: 'pending' | 'completed' | 'failed' | undefined;
+  /** 1 Issueの終端でタブを閉じた後は、Viewの「開く」操作を出さない。 */
+  sessionClosed: boolean;
   /** gitでないワークスペースで疑似worktree（design.md §16.20）を使ったか。 */
   usedPseudoWorktree: boolean;
   /** `usedPseudoWorktree`のときだけ埋まる。複製直後のスナップショット（差分計算の基準）。 */
@@ -1451,6 +1472,11 @@ export interface LiveOrchestrator {
   pending: OrchestratorEvent[];
   /** run全体で送ったイベント通知の総数（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`の判定用）。 */
   eventsSent: number;
+  /**
+   * 現在のターンでオーケストレーターへ渡した`taskCleanup`通知の件数。
+   * cleanup結果を受けたIssue/Roadmap更新が終わるまで接続を維持するために使う。
+   */
+  taskCleanupEventsInFlight: number;
   /** 直近の応答の1行要約（Viewのオーケストレーター欄。応答本文そのものは持たない）。 */
   lastResponseSummary: string;
   /** 人が最後に会話を開いてから増えた応答の数。Viewの未読の印に使う。 */
@@ -1574,6 +1600,8 @@ export interface LiveRun {
   integrationReviewAttempts: number;
   /** 非同期の統合差分レビュー中にMCPを先に閉じないための寿命フラグ。 */
   integrationReviewInProgress: boolean;
+  /** 非同期の統合PR/MR作成・最終マージ判定を待つ間、MCPを先に閉じないための寿命フラグ。 */
+  forgeFinalizationInProgress: boolean;
   /** design.md §16.8「警告欄」。発生した順に積む（`maxReached` はスナップショット生成時に動的に足す）。 */
   warnings: WorkflowWarning[];
   /**
@@ -2022,6 +2050,7 @@ export class WorkflowRunner {
       resolveForgeState: (repoRoot) => this.resolveForgeState(repoRoot),
       cleanupWorktreeIfNeeded: (live, task, taskId, liveTask) =>
         this.cleanupWorktreeIfNeeded(live, task, taskId, liveTask),
+      finalizeTaskCleanup: (runId) => this.finalizeTaskCleanup(runId),
       ensureMessaging: (runId, live) => this.ensureMessaging(runId, live),
     };
   }
@@ -2523,6 +2552,7 @@ export class WorkflowRunner {
       programControl: options?.programControl,
       integrationReviewAttempts: 0,
       integrationReviewInProgress: false,
+      forgeFinalizationInProgress: false,
       handoffWrites: Promise.resolve(),
       warnings,
       integration,
@@ -3509,6 +3539,12 @@ export class WorkflowRunner {
         live.forge.kind === 'active' &&
         live.forge.finalMerge === 'orchestrator';
       if (outcome === 'succeeded') {
+        // cleanupの完了通知より先に、統合PR/MR作成と最終マージ判断の状態を確定させる。
+        // その間は`finalizeTaskCleanup`からもMCPを閉じない。
+        const hasIssueLifecycle =
+          live.def.tasks.some((task) => task.issue !== undefined) ||
+          live.createdTaskIssues.size > 0;
+        live.forgeFinalizationInProgress = hasIssueLifecycle;
         if (mayAwaitFinalMergeDecision) {
           // `.catch`を`.then`より前に挟む（`.catch().then()`の順）ことが要。
           // `finalizeForge`が例外で終わっても（WF-Eのレビュー指摘、横断レビューで実測）
@@ -3528,15 +3564,31 @@ export class WorkflowRunner {
                 )}`,
               );
             })
-            .then(() => this.closeMessagingIfFinalMergeSettled(runId, outcome));
+            .finally(() => {
+              const current = this.runs.get(runId);
+              if (current !== undefined) {
+                current.forgeFinalizationInProgress = false;
+                this.closeMessagingIfFinalMergeSettled(runId, outcome);
+              }
+            });
         } else {
-          void this.finalizeForge(runId).catch((e: unknown) => {
-            this.deps.log.error(
-              `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
-                e instanceof Error ? e.message : String(e),
-              )}`,
-            );
-          });
+          void this.finalizeForge(runId)
+            .catch((e: unknown) => {
+              this.deps.log.error(
+                `[workflow ${runId}] finalizeForgeに失敗しました: ${sanitizeForLog(
+                  e instanceof Error ? e.message : String(e),
+                )}`,
+              );
+            })
+            .finally(() => {
+              const current = this.runs.get(runId);
+              if (current !== undefined) {
+                current.forgeFinalizationInProgress = false;
+                if (hasIssueLifecycle) {
+                  this.closeMessagingIfFinalMergeSettled(runId, outcome);
+                }
+              }
+            });
         }
       }
       // ロードマップの更新（design.md §16.19）もrunの結果を問わず行う。`done`になった
@@ -3689,7 +3741,25 @@ export class WorkflowRunner {
       live.finalMergeDecision !== undefined ||
       live.failureRecovery !== undefined ||
       live.integrationReviewInProgress ||
-      live.programRecoveryHold
+      live.forgeFinalizationInProgress ||
+      live.programRecoveryHold ||
+      live.pendingAskUser !== undefined
+    ) {
+      return;
+    }
+    // cleanup完了の通知を受けたオーケストレーターは、許可された範囲でIssue/Roadmapを更新する。
+    // 最後のタスクで先にMCPを閉じると、その更新ツールが届いた時点で使えなくなるため、全ての
+    // 非同期cleanupが確定するまで接続を保つ。完了時は`finalizeTaskCleanup`が再評価する。
+    if (
+      [...live.tasks.entries()].some(([taskId, task]) => {
+        const definitionTask = live.def.tasks.find((candidate) => candidate.id === taskId);
+        return (
+          task.cleanupStatus === 'pending' &&
+          (definitionTask?.issue !== undefined || live.createdTaskIssues.has(taskId))
+        );
+      }) ||
+      live.orchestrator?.pending.some((event) => event.kind === 'taskCleanup') === true ||
+      (live.orchestrator?.taskCleanupEventsInFlight ?? 0) > 0
     ) {
       return;
     }
@@ -3705,9 +3775,12 @@ export class WorkflowRunner {
     // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
     // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
     closeMessaging(live, this.deps.log);
-    // レビューコメントのポーリング（design.md §16.30）も、最終マージ・判断が確定して
-    // これ以上PR/MRの状態を追う必要が無くなった時点で一緒に閉じる
-    closeReviewCommentPoll(live);
+    // レビューコメントのポーリング（design.md §16.30）は、最終マージまで進める設定で
+    // 最終判断が確定したときだけ閉じる。`pr-only`はPR/MRを残してレビューを続けるため、
+    // MCP接続の終了と一緒に止めてはならない。
+    if (live.forge.kind !== 'active' || live.forge.finalMerge !== 'pr-only') {
+      closeReviewCommentPoll(live);
+    }
     // チームモードの受け渡しファイル（design.md §16.44、Issue #693）を片付ける。
     //
     // 消す位置を`closeMessaging`と揃えているのは、受け渡しファイルを読み書きする4ツールが
@@ -3749,6 +3822,18 @@ export class WorkflowRunner {
       .catch((e: unknown) => {
         warnCleanupFailure(e instanceof Error ? e.message : String(e));
       });
+  }
+
+  /** cleanupの完了・失敗後に、保留していた終了処理を再評価する。 */
+  private finalizeTaskCleanup(runId: string): void {
+    const live = this.runs.get(runId);
+    if (live === undefined || !live.finished || getRunOutcome(live.runState) === 'running') {
+      return;
+    }
+    // cleanupの有無にかかわらず、ask_userの回答待ちから戻った終了runもここを通る。
+    // closeMessagingIfFinalMergeSettled側がcleanup・最終マージ・回答待ちの各保留条件を
+    // 判定するため、ここでIssue駆動タスクだけに絞ると通常runが終了処理を再開できない。
+    this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
   }
 
   /**
@@ -3960,6 +4045,8 @@ export class WorkflowRunner {
       effectiveApprovalMode: prepared.effective.config.approvalMode,
       boundary: prepared.boundaryResult.boundary,
       usedWorktree: prepared.usedWorktree,
+      cleanupStatus: undefined,
+      sessionClosed: false,
       usedPseudoWorktree: prepared.usedPseudoWorktree,
       pseudoSnapshot: prepared.pseudoSnapshot,
       originCommit: prepared.originCommit,
@@ -4026,7 +4113,12 @@ export class WorkflowRunner {
     // 「届け終えた」という印はそのたびに捨てる
     liveTask.sentContractDigest = undefined;
     liveTask.pendingContractDigest = undefined;
-    const contract = formatTaskExecutionContract(live.def, task);
+    const effectiveIssue = task.issue ?? live.createdTaskIssues.get(taskId);
+    const contractTask =
+      effectiveIssue === undefined || task.issue !== undefined
+        ? task
+        : { ...task, issue: effectiveIssue };
+    const contract = formatTaskExecutionContract(live.def, contractTask);
     const contractDigest = contract === '' ? undefined : taskExecutionContractDigest(contract);
     session.setPromptTransform((text) => {
       // 差し替えられた継続指示があればそちらを基準の本文にする（design.md §16.23
@@ -4044,7 +4136,7 @@ export class WorkflowRunner {
       } else if (liveTask.sentContractDigest === contractDigest) {
         contracted = composeTaskExecutionContractReference(taskId, contractDigest, expanded);
       } else {
-        contracted = composeTaskExecutionContract(live.def, task, expanded);
+        contracted = composeTaskExecutionContract(live.def, contractTask, expanded);
         liveTask.pendingContractDigest = contractDigest;
       }
       // 受け取ったメッセージは、次の指示の先頭へ添える（design.md §16.21「配送」）。
@@ -5506,8 +5598,10 @@ export class WorkflowRunner {
       // run全体の`dispose`で解放される。worktreeは元から`done`のときしか撤去しない
       // （`shouldRemoveWorktree`）ので、こちらは変更しなくてよい。
       //
-      // それ以外（done / failed）は従来どおり解放する（design.md §16.10の4）。
-      // 再試行はここで新しいセッション・worktreeを新規に作るため、古いものは残さない
+      // failedは従来どおり解放する（design.md §16.10の4）。`done`はマージ・統合・
+      // cleanupの結果を受けてから解放する。これにより1 Issueの完了をタブ終了と揃えつつ、
+      // cleanup中の状態をViewへ表示できる。再試行は新しいセッション・worktreeを作るため、
+      // 古い失敗セッションは残さない
       //
       // 撤退の申告（`escalated`）と時間切れ（`timedOut`）も同じ集合に入れる（issue #891）。
       // どちらもセッションは生きたまま止まっているだけで、指示を変えれば続きを試せる
@@ -5518,9 +5612,13 @@ export class WorkflowRunner {
         reason !== 'escalated' &&
         reason !== 'advised' &&
         reason !== 'conflicted' &&
-        reason !== 'timedOut'
+        reason !== 'timedOut' &&
+        reason !== 'done'
       ) {
-        liveTask?.session.dispose();
+        if (liveTask !== undefined) {
+          liveTask.sessionClosed = true;
+          liveTask.session.dispose();
+        }
       }
 
       if (reason === 'done' && liveTask !== undefined) {
@@ -5545,6 +5643,8 @@ export class WorkflowRunner {
           // いる）ため、`merging`を経ずそのまま`done`にする（design.md §16.17の対象外の
           // 判断。ambiguousな点は最終報告で明記する）
           live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
+          liveTask.sessionClosed = true;
+          liveTask.session.dispose();
         }
       }
       this.cleanupWorktreeIfNeeded(live, task, taskId, liveTask);
@@ -5793,6 +5893,7 @@ export class WorkflowRunner {
         const tasks: Record<string, PersistedTaskState> = {};
         for (const [id, s] of live.runState.tasks) {
           const liveTask = live.tasks.get(id);
+          const cleanupStatus = liveTask?.cleanupStatus ?? current?.tasks[id]?.cleanupStatus;
           tasks[id] = {
             state: s.state,
             sessionId: s.sessionId,
@@ -5811,6 +5912,7 @@ export class WorkflowRunner {
             pullRequestNumber:
               liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
             pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
+            ...(cleanupStatus === undefined ? {} : { cleanupStatus }),
           };
         }
         return {

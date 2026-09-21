@@ -373,6 +373,14 @@ ${sharedStyles()}
   #taskTable .verification-passed { color: var(--vscode-charts-green); }
   #taskTable .verification-failed { color: var(--vscode-errorForeground); }
   #taskTable .verification-checking { color: var(--vscode-charts-blue); }
+  #taskTable .issue-link {
+    padding: 0; border: 0; color: var(--vscode-textLink-foreground); background: transparent;
+    font: inherit; cursor: pointer; text-decoration: underline;
+  }
+  #taskTable .cleanup-cell { white-space: nowrap; }
+  #taskTable .cleanup-pending { color: var(--vscode-charts-blue); }
+  #taskTable .cleanup-completed { color: var(--vscode-charts-green); }
+  #taskTable .cleanup-failed { color: var(--vscode-errorForeground); }
   /* 役割（design.md §16.44、Issue #693）。役割が無いタスクはこのセルが空になる */
   #taskTable .role-cell { color: var(--vscode-descriptionForeground); white-space: nowrap; }
   /* model / effort（Issue #1035）。モデル名は長くなりうるので折り返さず省略する */
@@ -421,18 +429,20 @@ ${sharedStyles()}
     #taskTable tr.task-row td:nth-child(3)::before { content: '作業内容'; }
     #taskTable tr.task-row td:nth-child(4)::before { content: '状態'; }
     #taskTable tr.task-row td:nth-child(5)::before { content: '検証'; }
-    #taskTable tr.task-row td:nth-child(6)::before { content: 'provider'; }
-    /* model / effort（Issue #1035）。providerの直後に入れたので、以降は1つずつ後ろへずれる */
-    #taskTable tr.task-row td:nth-child(7)::before { content: 'model'; }
-    #taskTable tr.task-row td:nth-child(8)::before { content: 'コンテキスト'; }
-    #taskTable tr.task-row td:nth-child(9)::before { content: '経過'; }
-    #taskTable tr.task-row td:nth-child(10)::before { content: '送信回数'; }
-    #taskTable tr.task-row td:nth-child(11)::before { content: '操作'; }
+    #taskTable tr.task-row td:nth-child(6)::before { content: 'Issue'; }
+    #taskTable tr.task-row td:nth-child(7)::before { content: 'cleanup'; }
+    #taskTable tr.task-row td:nth-child(8)::before { content: 'provider'; }
+    #taskTable tr.task-row td:nth-child(9)::before { content: 'model'; }
+    #taskTable tr.task-row td:nth-child(10)::before { content: 'コンテキスト'; }
+    #taskTable tr.task-row td:nth-child(11)::before { content: '経過'; }
+    #taskTable tr.task-row td:nth-child(12)::before { content: '送信回数'; }
+    #taskTable tr.task-row td:nth-child(13)::before { content: '操作'; }
     #taskTable tr.task-row td:nth-child(3),
     #taskTable tr.task-row td:nth-child(4),
     #taskTable tr.task-row td:nth-child(5),
-    #taskTable tr.task-row td:nth-child(8),
-    #taskTable tr.task-row td:nth-child(11) { grid-column: 1 / -1; }
+    #taskTable tr.task-row td:nth-child(7),
+    #taskTable tr.task-row td:nth-child(10),
+    #taskTable tr.task-row td:nth-child(13) { grid-column: 1 / -1; }
     #taskTable .summary-cell { max-width: none; white-space: normal; overflow-wrap: anywhere; }
     /* カードでは td が flex になり省略記号が効かず、見出し（::before）ごと途中で切れる。
        summary-cell と同じく幅の上限と省略を外して折り返す（Issue #1035） */

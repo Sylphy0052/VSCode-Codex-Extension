@@ -2410,6 +2410,13 @@ function createRoadmapViewPort(): RoadmapViewPort {
       }
       return issuePort.listIssues(root);
     },
+    async getIssueUrl(issue: number): Promise<string | undefined> {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (root === undefined) {
+        return undefined;
+      }
+      return issuePort.getIssueUrl?.(root, issue);
+    },
   };
 }
 
