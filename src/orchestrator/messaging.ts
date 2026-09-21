@@ -1474,7 +1474,7 @@ export interface TaskMessagingHubDeps {
 
 /**
  * `TaskMessagingHubDeps.handoff` が満たす形。`teamHandoff.ts`の`TeamHandoffStore`の
- * `write`/`read`/`list`/`remove`から`runId`引数を束縛（呼び出し側があらかじめ固定）した
+ * `write`/`read`/`list`から`runId`引数を束縛（呼び出し側があらかじめ固定）した
  * だけの薄い口。`OrchestratorControlPort`と同じ「実体は既存のクラスのメソッドをそのまま
  * 呼ぶ」方針で、モデル用の別経路のロジックは持たせない。
  */
@@ -1989,8 +1989,8 @@ export class MessagingMcpServer {
    * この接続から見えるツール。制御ツールはオーケストレーターの接続にだけ足す
    * （design.md §16.23）。ここも `connection.taskId` だけで判断し、引数は見ない。
    *
-   * ファイル受け渡しの4ツール（`HANDOFF_TOOLS`、design.md §16.44）は接続の種別を問わず
-   * 足す。`this.hub.handoff`が未設定（省略可能）なら足さない——`tools/list`に出しておいて
+   * ファイル受け渡しの2ツール（`HANDOFF_TOOLS`、design.md §16.44）は接続の種別を問わず
+   * 足す（一覧の`list_handoffs`だけはオーケストレーターの接続に限る。Issue #1324 第2段）。`this.hub.handoff`が未設定（省略可能）なら足さない——`tools/list`に出しておいて
    * 呼び出し時に「未知のツール」で拒否するより、そもそも見せないほうが一貫している
    * （`orchestratorControl`未設定時の`base`のみ返却と同じ判断）。
    */
@@ -2163,7 +2163,8 @@ export class MessagingMcpServer {
   }
 
   /**
-   * ファイル受け渡し4ツール（`HANDOFF_TOOLS`、design.md §16.44、Issue #693）の呼び出し。
+   * ファイル受け渡し3ツール（`HANDOFF_TOOLS`の2つと`LIST_HANDOFFS_TOOL`。design.md
+   * §16.44、Issue #693）の呼び出し。
    *
    * `this.hub.handoff`が未設定なら「未知のツール」で拒否する（`visibleTools`が
    * そもそも見せていないが、ツール名を推測して呼ばれる余地に備えた多層防御。

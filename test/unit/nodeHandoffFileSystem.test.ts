@@ -23,7 +23,7 @@ describe('nodeHandoffFileSystem（design.md §16.44、Issue #693）', () => {
     await rm(tmpRoot, { recursive: true, force: true });
   });
 
-  it('作る・書く・読む・並べる・消すが一通り動く', async () => {
+  it('作る・書く・読む・並べる・ディレクトリごと消すが一通り動く', async () => {
     const dir = path.join(tmpRoot, 'happy');
     const target = path.join(dir, 'T1-notes.md');
 
@@ -31,9 +31,8 @@ describe('nodeHandoffFileSystem（design.md §16.44、Issue #693）', () => {
     expect(await nodeHandoffFileSystem.writeTextFile(target, '本文')).toBe(true);
     expect(await nodeHandoffFileSystem.readTextFile(target)).toBe('本文');
     expect(await nodeHandoffFileSystem.listDirectory(dir)).toEqual(['T1-notes.md']);
-    expect(await nodeHandoffFileSystem.removeFile(target)).toBe(true);
-    expect(await nodeHandoffFileSystem.readTextFile(target)).toBeUndefined();
     expect(await nodeHandoffFileSystem.removeDirectory(dir)).toBe(true);
+    expect(await nodeHandoffFileSystem.readTextFile(target)).toBeUndefined();
   });
 
   it('既存のファイルは上書きする', async () => {
@@ -51,8 +50,7 @@ describe('nodeHandoffFileSystem（design.md §16.44、Issue #693）', () => {
 
     expect(await nodeHandoffFileSystem.readTextFile(missing)).toBeUndefined();
     expect(await nodeHandoffFileSystem.listDirectory(path.join(tmpRoot, 'missing'))).toEqual([]);
-    // 「無ければ成功」という流儀（`TeamHandoffStore.remove`のJSDoc）
-    expect(await nodeHandoffFileSystem.removeFile(missing)).toBe(true);
+    // 「無ければ成功」という流儀（`TeamHandoffStore.removeRun`のJSDoc）
     expect(await nodeHandoffFileSystem.removeDirectory(path.join(tmpRoot, 'missing'))).toBe(true);
   });
 

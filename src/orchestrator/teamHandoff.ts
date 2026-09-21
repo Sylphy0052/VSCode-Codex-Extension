@@ -74,8 +74,6 @@ export interface HandoffFileSystemPort extends SymlinkCheckPort {
   readTextFile(target: string): Promise<string | undefined>;
   /** ディレクトリ直下の名前一覧。存在しなければ空配列。 */
   listDirectory(target: string): Promise<string[]>;
-  /** ファイルを消す。存在しなければ何もしない（その場合も true）。 */
-  removeFile(target: string): Promise<boolean>;
   /** ディレクトリを中身ごと消す。存在しなければ何もしない（その場合も true）。 */
   removeDirectory(target: string): Promise<boolean>;
 }
@@ -307,27 +305,6 @@ export class TeamHandoffStore {
       }
     }
     return { ok: true, value: entries };
-  }
-
-  /**
-   * 1件消す。存在しなくても成功として扱う（不要になったものを消す操作であり、
-   * 既に無いことは目的の達成と同じ）。
-   */
-  async remove(runId: string, taskId: string, slug: string): Promise<HandoffResult<undefined>> {
-    let target: string;
-    try {
-      target = handoffPath(this.repoRoot, runId, taskId, slug);
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-    const guardMessage = await this.guard(target);
-    if (guardMessage !== undefined) {
-      return { ok: false, error: guardMessage };
-    }
-    if (!(await this.fs.removeFile(target))) {
-      return { ok: false, error: '受け渡しファイルを削除できませんでした' };
-    }
-    return { ok: true, value: undefined };
   }
 
   /**
