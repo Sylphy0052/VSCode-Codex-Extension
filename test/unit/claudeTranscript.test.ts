@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_TODO_HISTORY } from '../../src/appserver/chatState';
 import {
   claudeSearchResults,
   describeTool,
@@ -368,6 +369,40 @@ describe('transcriptItems', () => {
 
   it('TodoWriteを使っていないセッションでは履歴も空になる（issue #721）', () => {
     expect(transcriptItems([userLine('本文')]).todoHistory).toEqual([]);
+  });
+
+  it('履歴はMAX_TODO_HISTORY件で頭打ちにし、古い側から捨てる（issue #1325）', () => {
+    const call = (index: number): string =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid: `t${index}`,
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: `t${index}`,
+              name: 'TodoWrite',
+              input: { todos: [{ content: `T${index}`, status: 'pending', activeForm: '実行中' }] },
+            },
+          ],
+        },
+      });
+
+    const overflow = 3;
+    const lines = [userLine('最初の指示')];
+    for (let i = 0; i < MAX_TODO_HISTORY + overflow; i += 1) {
+      lines.push(call(i));
+    }
+
+    const { todoHistory } = transcriptItems(lines);
+
+    expect(todoHistory).toHaveLength(MAX_TODO_HISTORY);
+    // 残るのは新しい側。捨てられた先頭 `overflow` 件は含まれない
+    expect(todoHistory[0]?.todos[0]?.content).toBe(`T${overflow}`);
+    expect(todoHistory[todoHistory.length - 1]?.todos[0]?.content).toBe(
+      `T${MAX_TODO_HISTORY + overflow - 1}`,
+    );
   });
 });
 

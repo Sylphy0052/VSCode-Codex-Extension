@@ -156,6 +156,33 @@ describe('buildProgress', () => {
     expect(view.turns[0]?.todoChanges).toEqual([{ content: 'A', kind: 'completed' }]);
   });
 
+  it('先頭が切り詰められた履歴でも、残った分の差は積み上がる（issue #1325）', () => {
+    // 上限（`MAX_TODO_HISTORY`）で古い側が捨てられた状態。残った先頭は空との差として
+    // 読まれるため、途中から始まる履歴でも全件の追加として扱われ、そこから先はずれない
+    const history: TodoSnapshot[] = [
+      { todos: [todo('A', 'in_progress'), todo('B', 'pending')], turnIndex: 0 },
+      { todos: [todo('A', 'completed'), todo('B', 'in_progress')], turnIndex: 1 },
+    ];
+    const view = buildProgress(
+      stateWith([item('userMessage', { text: '指示' }), item('userMessage', { text: '続き' })], {
+        todos: [todo('A', 'completed'), todo('B', 'in_progress')],
+        todoHistory: history,
+      }),
+    );
+
+    expect(view.turns[0]?.todoChanges).toEqual([
+      { content: 'A', kind: 'added' },
+      { content: 'B', kind: 'added' },
+    ]);
+    expect(view.turns[1]?.todoChanges).toEqual([
+      { content: 'A', kind: 'completed' },
+      { content: 'B', kind: 'started' },
+    ]);
+    // 現在の一覧は `state.todos` が持つため、履歴を削っても集計はずれない
+    expect(view.summary.todoTotal).toBe(2);
+    expect(view.summary.todoCompleted).toBe(1);
+  });
+
   it('範囲外のturnIndexは最後のターンへ寄せる', () => {
     const view = buildProgress(
       stateWith([item('userMessage', { text: '指示' })], {

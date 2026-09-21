@@ -140,7 +140,7 @@ import {
   type MemoryModeMemento,
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
-import { buildItemsDelta, stripHostOnlyItems } from './stateDelta';
+import { buildItemsDelta, stripHostOnlyItems, stripHostOnlyState } from './stateDelta';
 import { abortAsRejection, BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
@@ -719,7 +719,7 @@ export class ClaudeChatViewManager
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
-        ...state,
+        ...stripHostOnlyState(state),
         // 描画に使わない項目を落としてから送る（issue #320）。Editツール由来の
         // `editReplace` を持つのはClaude Codeの会話項目だけなので、この経路が本命
         items: stripHostOnlyItems(state.items),
@@ -795,7 +795,7 @@ export class ClaudeChatViewManager
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
-        ...state,
+        ...stripHostOnlyState(state),
         items: [],
         loop: entry.loop.getStatus(),
         attachments: entry.attachments.snapshot(),

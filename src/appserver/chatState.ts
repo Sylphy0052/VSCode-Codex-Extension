@@ -267,6 +267,34 @@ export interface TodoSnapshot {
 export const NO_TODO_HISTORY: TodoSnapshot[] = [];
 
 /**
+ * `todoHistory` として保持するスナップショットの上限（issue #1325）。
+ *
+ * 1件は `TodoWrite` が送ってきた一覧の全件コピーで、書き換わるたびに積まれる。
+ * 上限が無いとセッションが伸びるほど増え続け、復元（`src/claude/transcript.ts`）では
+ * 過去のTODO全件がそのまま常駐へ乗る。
+ *
+ * 進捗画面（`src/view/progressModel.ts` の `applyTodoChanges`）は履歴を隣り合う2件の
+ * 差としてターンへ配るため、古い側を捨てても直近の変化は残る。捨てた分の変化表示は
+ * 失われるが、切り詰めた後の先頭は空との差＝全件の追加として扱われるので、そこから
+ * 先の差の積み上げはずれない。現在の一覧そのものは `ChatState.todos` が別に持つ。
+ */
+export const MAX_TODO_HISTORY = 200;
+
+/**
+ * `todoHistory` へ1件積む。上限を超えた分は古い側から捨てる。
+ *
+ * ライブ（`src/claude/streamJson.ts`）と復元（`src/claude/transcript.ts`）の両方が
+ * 同じ形で使う。どちらも状態の畳み込みなので、渡された配列は変更せず新しい配列を返す。
+ */
+export function appendTodoSnapshot(
+  history: readonly TodoSnapshot[],
+  snapshot: TodoSnapshot,
+): TodoSnapshot[] {
+  const next = [...history, snapshot];
+  return next.length > MAX_TODO_HISTORY ? next.slice(next.length - MAX_TODO_HISTORY) : next;
+}
+
+/**
  * 会話項目の並びから「いま何ターン目か」を数える（0起点、issue #721）。
  *
  * ターンの境界はユーザーの発言（`userMessage`）に置く。Claude Codeの項目は

@@ -95,7 +95,7 @@ import type {
 } from '../orchestrator/taskSession';
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildSessionPanelTitle } from './sessionTitle';
-import { buildItemsDelta } from './stateDelta';
+import { buildItemsDelta, stripHostOnlyState } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
@@ -2738,7 +2738,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     void entry.panel.webview.postMessage({
       type: 'state',
       state: {
-        ...state,
+        ...stripHostOnlyState(state),
         items: [],
         settings: this.settingsSnapshotFor(entry),
         loop: entry.loop.getStatus(),

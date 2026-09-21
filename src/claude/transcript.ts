@@ -1,4 +1,5 @@
 import {
+  appendTodoSnapshot,
   currentTurnIndex,
   NO_SEARCH_RESULTS,
   NO_TODO_HISTORY,
@@ -179,8 +180,12 @@ export function transcriptItems(lines: readonly string[]): TranscriptItems {
       const found = appendAssistantEntry(entry, items, toolIndex);
       if (found !== undefined) {
         todos = found;
-        // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）
-        todoHistory = [...todoHistory, { todos: found, turnIndex: currentTurnIndex(items) }];
+        // 進捗画面のタイムライン用に、書き換わった時点の一覧を積む（issue #721）。
+        // 件数は `MAX_TODO_HISTORY` で頭打ちにする（issue #1325）
+        todoHistory = appendTodoSnapshot(todoHistory, {
+          todos: found,
+          turnIndex: currentTurnIndex(items),
+        });
       }
     }
   }
