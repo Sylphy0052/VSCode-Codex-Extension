@@ -39,6 +39,7 @@ import {
   readConfig,
   readSessionMessagingEnabled,
   readPromptMetricsEnabled,
+  readToolUsageMetricsEnabled,
   readSessionPresetsConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -615,6 +616,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         codex: [paths.sessions, paths.archivedSessions],
         claude: [claudeDirs.projects],
       },
+    },
+    // メッセージング用MCPツールの実利用率の計測（Issue #1324）。既定は無効で、有効にした
+    // ときだけrunの終わりに接続ごとへ1行出力パネルへ出す。ツールの見え方は変えない
+    toolUsageMetrics: {
+      enabled: readToolUsageMetricsEnabled,
     },
     // PR/MRの作成（design.md §16.18、Issue #105）。`agent.workflows.forge` は既定の
     // `auto`のままだと、`origin` remote・`gh`/`glab`の有無を実行のたびに確かめたうえで

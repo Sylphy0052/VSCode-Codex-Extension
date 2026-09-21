@@ -16,6 +16,7 @@ import {
 } from './runState';
 import type { TaskSession } from './taskSession';
 import type { LiveRun } from './runner';
+import { formatToolUsageMetricsLine, type ToolUsageCounter } from './toolUsageMetrics';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 
 /**
@@ -304,13 +305,45 @@ export async function checkMessagingVisibility(
  * **冪等**。先に`live.messaging`を`undefined`へ戻してから閉じるので、run終了直後に
  * `dispose()`が来ても2度目は何もしない。`transport.close()`が投げても
  * `clearInterval`は必ず行う（1つの失敗でタイマーが残らないようにする）。
+ *
+ * `log`（Issue #1324）を渡すと、計測が有効なrunではMCPツールの実利用率を接続ごとに1行
+ * 出す。**出す位置をここにしているのは、ここがrunの計測を閉じる唯一の地点だから。**
+ * タスクの終了（`onTaskFinished`）ごとに出すと、オーケストレーター接続
+ * （`ORCHESTRATOR_CONNECTION_ID`）の分だけ出口が無くなり、最も件数の多い制御ツール群の
+ * 実利用率が取れない。冪等性はこの出力にもそのまま効く（2度目は`messaging`が
+ * `undefined`なので出ない）。
  */
-export function closeMessaging(live: LiveRun): void {
+/**
+ * MCPツールの実利用率を出力パネルへ出す（Issue #1324 受入基準1）。
+ *
+ * 計測が無効（`counter === undefined`）なとき、1度も呼ばれなかったとき、ログの口が
+ * 渡っていないときは何もしない。失敗しても後始末（transportとタイマーの解放）を
+ * 止めないよう、例外はここで握る——計測のためにMCPサーバを閉じ損なうほうが害が大きい。
+ */
+function emitToolUsageMetrics(
+  runId: string,
+  counter: ToolUsageCounter | undefined,
+  log: { info(message: string): void } | undefined,
+): void {
+  if (counter === undefined || log === undefined || counter.isEmpty()) {
+    return;
+  }
+  try {
+    for (const counts of counter.snapshot()) {
+      log.info(formatToolUsageMetricsLine(runId, counts));
+    }
+  } catch {
+    // 計測の失敗は後始末に影響させない
+  }
+}
+
+export function closeMessaging(live: LiveRun, log?: { info(message: string): void }): void {
   const messaging = live.messaging;
   if (messaging === undefined) {
     return;
   }
   live.messaging = undefined;
+  emitToolUsageMetrics(live.runId, messaging.toolUsage, log);
   try {
     // `close()`が拒否しても未処理のPromise拒否にしない（deactivate中はサーバが既に
     // 落ちていることがある）。同期で投げる実装もありうるのでtry/catchで囲む

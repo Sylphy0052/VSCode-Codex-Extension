@@ -1775,6 +1775,25 @@ export interface DispatchErrorLogPort {
   error(message: string): void;
 }
 
+/**
+ * MCPツールの呼び出し回数を数えるための最小限の口（Issue #1324 受入基準1）。
+ *
+ * `DispatchErrorLogPort`と同じ流儀で、集計と出力の実体（`toolUsageMetrics.ts`の
+ * `ToolUsageCounter`と`runner.ts`の`Logger`）はportの向こうに置く。本ファイルは
+ * 「VSCode APIには一切依存しない」方針を保ち、状態も増やさない。
+ *
+ * 渡さなければ何も数えない（後方互換）。既定では渡らない
+ * （`agent.orchestrator.toolUsageMetrics.enabled` が既定で無効）。
+ */
+export interface ToolUsageMetricsPort {
+  /**
+   * `taskId`は接続そのものから来た値（`tools/call`の引数は一切読まない。本ファイルの
+   * 「送信元の判別はここで一元化する」方針と同じ）。`toolName`は呼ばれた名前で、
+   * 実在しないツール名でもそのまま渡る。
+   */
+  record(taskId: string, toolName: string): void;
+}
+
 const SERVER_INFO_RESULT = {
   protocolVersion: '2024-11-05',
   serverInfo: { name: 'vscode-codex-extension-messaging', version: '1' },
@@ -1834,6 +1853,7 @@ export class MessagingMcpServer {
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
     private readonly logPort?: DispatchErrorLogPort,
+    private readonly toolUsagePort?: ToolUsageMetricsPort,
   ) {
     transport.onConnection((connection) => this.handleConnection(connection));
   }
@@ -2025,6 +2045,18 @@ export class MessagingMcpServer {
     const params = rec(request.params);
     const name = str(params?.['name']);
     const args = rec(params?.['arguments']) ?? {};
+
+    // 実利用率の計測（Issue #1324 受入基準1）。数えるだけで、この先の分岐・応答は変えない。
+    // 弾かれる呼び出し（未知の名前・権限外）も数える——「AIがどの道具を欲しがったか」は
+    // allowlistを決めるときの判断材料になるため、成否で区別せず入口の1箇所で数える。
+    // 計測のために呼び出しを失敗させないよう、portが投げても握って先へ進める
+    if (this.toolUsagePort !== undefined) {
+      try {
+        this.toolUsagePort.record(taskId, name);
+      } catch {
+        // 計測の失敗はツール呼び出しの成否に影響させない
+      }
+    }
 
     // 1セッション用のhub（Issue #1305）では、run内の道具を名前を推測して呼ばれても通さない
     // （`visibleTools`で見せていないものを、呼び出し時にも同じ条件で弾く多層防御の流儀）
@@ -2575,11 +2607,13 @@ export interface HttpMcpTransportHandle {
  *   （`mcpHttpServer.ts`のJSDoc参照）
  *
  * `logPort`は`MessagingMcpServer`へそのまま橋渡しするだけ（Issue #375）。省略時の挙動は
- * 変わらない（後方互換）。
+ * 変わらない（後方互換）。`toolUsagePort`（Issue #1324）も同じく橋渡しのみで、
+ * 渡さなければ何も数えない。
  */
 export async function startHttpMcpTransport(
   hub: TaskMessagingHub,
   logPort?: DispatchErrorLogPort,
+  toolUsagePort?: ToolUsageMetricsPort,
 ): Promise<HttpMcpTransportHandle> {
   const tokenToTaskId = new Map<string, string>();
   let connectionHandler: ((connection: McpConnection) => void) | undefined;
@@ -2589,7 +2623,7 @@ export async function startHttpMcpTransport(
       connectionHandler = handler;
     },
   };
-  const mcpServer = new MessagingMcpServer(hub, transport, logPort);
+  const mcpServer = new MessagingMcpServer(hub, transport, logPort, toolUsagePort);
   void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
 
   const server = await startHttpMcpServer((token) => {

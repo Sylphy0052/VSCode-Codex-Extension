@@ -1245,6 +1245,22 @@ export function readPromptMetricsEnabled(): boolean {
   );
 }
 
+/**
+ * メッセージング用MCPツールの実利用率を出力パネルへ記録するか（Issue #1324）。
+ *
+ * 30個近いツールのうち実際に呼ばれているのはどれかを実測し、接続種別・フェーズごとの
+ * allowlist（受入基準2）を決める材料にするための計測。有効にしてもツールの見え方・
+ * 呼び出しの結果は変わらない。run終了時に接続ごとへ1行出すだけだが、常用は想定して
+ * いないため既定は無効。`promptMetrics.enabled`とは責務が異なるため相乗りしない。
+ */
+export function readToolUsageMetricsEnabled(): boolean {
+  return (
+    vscode.workspace
+      .getConfiguration('agent')
+      .get<boolean>('orchestrator.toolUsageMetrics.enabled') === true
+  );
+}
+
 export function readWorkflowsConfig(): WorkflowsConfig {
   const c = vscode.workspace.getConfiguration('agent');
   const rawDir = str(c, 'workflows.dir', DEFAULT_WORKFLOWS_DIR);
