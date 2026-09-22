@@ -492,7 +492,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 設定パネル。Codex画面のインポートボタン（issue #227、下の`chat`構築）がパネルを
   // 表示してセクションを展開する経路（`revealSection`）を使うため、`chat`より先に
   // 構築しておく（以前はセッション一覧まわりの構築の後段でまとめて作っていた）
-  const panel = new ControlPanelViewProvider(settings, log);
+  const panel = new ControlPanelViewProvider(
+    settings,
+    log,
+    (context.extension.packageJSON as { version?: string }).version,
+  );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
   );

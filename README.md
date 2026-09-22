@@ -105,21 +105,23 @@ npm install
 npm run package    # vscode-codex-extension-<version>.vsix を生成
 ```
 
-`npm run package` はコンパイルと `vsce package` をまとめて実行する。成功するとリポジトリ直下に `vscode-codex-extension-0.0.1.vsix` ができる。これが拡張機能の本体。
+`npm run package` はバージョンの採番、コンパイル、`vsce package` をまとめて実行する。バージョンは実行した日付と連番で `YYYY.MDD.N` の形に振られる（例: 2026年9月23日の1回目は `2026.923.1`、同じ日の2回目は `2026.923.2`）。成功するとリポジトリ直下に `vscode-codex-extension-<version>.vsix` ができる。これが拡張機能の本体。
+
+採番のたびに `package.json` と `package-lock.json` の `version` が書き換わる。手元で使うためだけにビルドした場合は、`git checkout package.json package-lock.json` で戻しておくと次の `git pull` で衝突しない。
 
 ### 3. インストールする
 
 ```bash
-code --install-extension vscode-codex-extension-0.0.1.vsix
+code --install-extension vscode-codex-extension-<version>.vsix
 ```
 
-`code` コマンドが無い場合は、VSCodeの拡張機能ビュー右上の「...」→「Install from VSIX...」から同じファイルを選ぶ。
+`<version>` は `npm run package` の最後に出る `Packaged:` の行で確認できる。`code` コマンドが無い場合は、VSCodeの拡張機能ビュー右上の「...」→「Install from VSIX...」から同じファイルを選ぶ。
 
 WSLやDev Containerで使う場合は、**そのリモート側へインストールする**（リモートに接続したウィンドウで上のコマンドを実行するか、拡張機能ビューで「Install in WSL: ...」を選ぶ）。
 
 ### 4. リロードして確認する
 
-コマンドパレット（`Ctrl+Shift+P`）で `Developer: Reload Window` を実行する。アクティビティバーに **Agents** のアイコンが増えていれば成功。
+コマンドパレット（`Ctrl+Shift+P`）で `Developer: Reload Window` を実行する。アクティビティバーに **Agents** のアイコンが増えていれば成功。サイドバーの「設定」ビューのタイトル横に、いま動いているバージョン（例: `v2026.923.1`）が出る。
 
 アイコンが出ない場合は、そのフォルダが**信頼されていない**可能性がある（Workspace Trustが無効だと拡張機能は動かない）。コマンドパレットの `Workspaces: Manage Workspace Trust` で信頼する。
 
@@ -130,7 +132,7 @@ cd VSCode-Codex-Extension
 git pull
 npm install
 npm run package
-code --install-extension vscode-codex-extension-0.0.1.vsix --force
+code --install-extension vscode-codex-extension-<version>.vsix --force
 ```
 
 そのあとウィンドウをリロードする。同じバージョン番号のまま入れ直す場合は `--force` が要る。

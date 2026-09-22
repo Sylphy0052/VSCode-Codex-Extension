@@ -29,7 +29,7 @@ npm run check     # lint + format:check + typecheck + test
 | `npm run test:integration:xvfb` | 同上。ヘッドレスLinux/WSLでxvfb-run経由で実行する                                                                                 |
 | `npm run test:external-cli`     | 実CLI（`codex app-server`）を起動する検査（`test/external-cli/**`）。CODEX_BIN環境変数でパスを指定する（既定はPATH上の`codex`）   |
 | `npm run check`                 | lint / format:check / typecheck / testをまとめて実行する（integration・external-cliは含まない）                                   |
-| `npm run package`               | ビルドしてvsixを生成する                                                                                                          |
+| `npm run package`               | バージョンを日付と連番で振り直し、ビルドしてvsixを生成する                                                                        |
 
 `scripts/check.sh` はcommit前に全緑であることを必須とする。緑にするためにテストを弱めたりskipしたりしない。`test:integration`は実VSCodeのダウンロード・起動が要り重いため`check.sh`には含めていない。必要なときに明示的に呼ぶ。
 
@@ -165,8 +165,10 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 
 ```bash
 npm run package
-code --install-extension vscode-codex-extension-0.0.1.vsix
+code --install-extension vscode-codex-extension-<version>.vsix
 ```
+
+`npm run package` は先に `scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の `version` を `YYYY.MDD.N`（実行日と、その日の連番）へ書き換える。VS Code拡張のバージョンはsemverで先頭ゼロを付けられないため、月日は「月×100+日」の数値にしている。連番は今の `version` から数えるので、配布するビルドのバージョンはcommitして残す。インストールした版はサイドバーの「設定」ビューのタイトル横で確認できる。
 
 `.vscodeignore` で `src` `test` `docs` `scripts` `node_modules` を除いており、vsixにはバンドル済みの `dist/extension.js` とマニフェスト・README・LICENSE・アイコンだけが入る。
 
