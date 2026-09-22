@@ -1532,9 +1532,31 @@ export function chatScript(
     const wrap = document.createElement('div');
     wrap.className = 'approval';
 
+    // 見出し行。折りたたみボタンを置き、畳んでもこの行だけは残す（issue #1348）。
+    // 回答の判断材料である会話を読み返したいとき、拒否以外にカードを退ける手段が
+    // 無かったため。畳んだ状態は要素の使い回し（askUserQuestionNodes）で保たれる
+    const head = document.createElement('div');
+    head.className = 'question-head';
+    wrap.appendChild(head);
+
     const title = document.createElement('h3');
     title.textContent = approval.title;
-    wrap.appendChild(title);
+    head.appendChild(title);
+
+    const collapsedNote = document.createElement('span');
+    collapsedNote.className = 'question-collapsed-note';
+    collapsedNote.hidden = true;
+    head.appendChild(collapsedNote);
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'secondary question-toggle';
+    head.appendChild(toggle);
+
+    // 畳むときに隠す部分（タブ・質問本体・警告・送信/拒否）
+    const content = document.createElement('div');
+    content.className = 'question-content';
+    wrap.appendChild(content);
 
     const readers = [];
     const questions = approval.questions || [];
@@ -1543,11 +1565,11 @@ export function chatScript(
     tabBar.className = 'question-tabs';
     tabBar.setAttribute('role', 'tablist');
     // 1問しかないならタブは情報を増やさないので出さない
-    if (questions.length > 1) wrap.appendChild(tabBar);
+    if (questions.length > 1) content.appendChild(tabBar);
 
     const body = document.createElement('div');
     body.className = 'question-body';
-    wrap.appendChild(body);
+    content.appendChild(body);
 
     const tabs = [];
     const panels = [];
@@ -1581,7 +1603,7 @@ export function chatScript(
     const warning = document.createElement('div');
     warning.className = 'question-warning';
     warning.hidden = true;
-    wrap.appendChild(warning);
+    content.appendChild(warning);
 
     // 未回答のタブに印を付け、最初の未回答の位置を返す（全部答えていれば-1）
     const markUnanswered = (answers) => {
@@ -1635,7 +1657,26 @@ export function chatScript(
     });
     actions.appendChild(decline);
 
-    wrap.appendChild(actions);
+    content.appendChild(actions);
+
+    // 畳んだ見出しには未回答数を出す。見出しだけだと回答待ちなのか読み取れない
+    const setCollapsed = (collapsed) => {
+      content.hidden = collapsed;
+      wrap.classList.toggle('collapsed', collapsed);
+      toggle.textContent = collapsed ? '開く' : '畳む';
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (collapsed) {
+        const answers = {};
+        for (const read of readers) read(answers);
+        const unanswered = questions.filter((q) => (answers[q.question] || []).length === 0).length;
+        collapsedNote.textContent =
+          unanswered > 0 ? '未回答 ' + String(unanswered) + '問' : '回答済み（未送信）';
+      }
+      collapsedNote.hidden = !collapsed;
+    };
+    toggle.addEventListener('click', () => setCollapsed(!content.hidden));
+    setCollapsed(false);
+
     return wrap;
   }
 
