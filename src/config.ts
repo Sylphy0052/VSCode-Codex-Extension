@@ -558,6 +558,17 @@ export function readAutoHandoffOnAssistantSuggestion(): boolean {
 }
 
 /**
+ * 作業の節目（Issue起票後・PR/MR作成後・マージ後）で引き継ぐか（Issue #1351）。
+ *
+ * 既定はON。直前のターンで成功したコマンドから決定論的に判定し、残量にもmodel/effortの
+ * 変化にも分類器にも依存しない。
+ */
+export function readAutoHandoffOnMilestone(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.onMilestone');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
  * 引き継ぎ後、旧セッションのタブを確認なしで閉じるか（Issue #1090）。
  *
  * 既定はON。新セッションの初回ターンが**成功したときだけ**閉じ、失敗・時間切れなら残す。

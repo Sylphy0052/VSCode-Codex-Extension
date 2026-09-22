@@ -54,6 +54,7 @@ import {
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffOnMilestone,
   readAutoHandoffClassifierTimeoutMs,
   readAutoHandoffRouterEnabled,
   readAutoHandoffCloseOldTab,
@@ -102,6 +103,7 @@ import {
   advanceCompactionCount,
   buildHandoffPrompt,
   containsHandoffPrompt,
+  detectHandoffMilestone,
   countCompactions,
   decideAutoHandoff,
   deriveHandoffBaseName,
@@ -1085,9 +1087,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
     const onProfileChange = readAutoHandoffOnProfileChange();
     const onAssistantSuggestion = readAutoHandoffOnAssistantSuggestion();
+    const onMilestone = readAutoHandoffOnMilestone();
     const remainingPercent = state.context?.remainingPercent;
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
-    if (!withinSoft && !onProfileChange && !onAssistantSuggestion) {
+    if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
       // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
@@ -1143,6 +1146,31 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       entry.trace.info('handoffプロンプトを検知したが契機が成立しなかった');
+    }
+    // 作業の節目（Issue起票・PR/MR作成・マージ）のコマンドが成功して終わったターンは、
+    // 分類器を待たずに発火する（Issue #1351）。履歴から開いた直後は過去のターンを拾わない
+    // よう、このパネルでターンが1回以上終わっていることを求める
+    const milestone =
+      onMilestone && state.turnCompletionSeq > 0 ? detectHandoffMilestone(state.items) : undefined;
+    if (milestone !== undefined) {
+      entry.trace.info(`作業の節目を検知したため分類器を経由せず判定する（${milestone.command}）`);
+      const detected = decideAutoHandoff({
+        enabled: state.autoHandoff,
+        busy: state.busy,
+        alreadyStarted: entry.autoHandoffStarted,
+        backgroundRunning: state.backgroundTerminals.length > 0,
+        remainingPercent,
+        compacted: false,
+        thresholdPercent: readAutoHandoffThresholdPercent(),
+        boundaryGatePassed: true,
+        milestone,
+      });
+      if (detected !== undefined) {
+        entry.trace.info(describeDecision(detected));
+        this.beginAutoHandoff(entry, detected);
+        return;
+      }
+      entry.trace.info('作業の節目を検知したが契機が成立しなかった');
     }
     if (!readAutoHandoffRouterEnabled()) {
       // 分類器が無いと `switchSafe` も分類器経由の `handoffSuggested` も得られない。残りの
