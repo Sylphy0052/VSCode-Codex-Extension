@@ -1253,6 +1253,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h8M8.5 4.5 12 8l-3.5 3.5"/><path d="M2.5 3.5v9"/></svg>',
   autoHandoff:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 3v10"/><path d="M3.5 8h5M6.5 5.5 9 8l-2.5 2.5"/><path d="M14.2 9.6A3.4 3.4 0 1 1 13 6.2"/><path d="M11.2 4.2h2.2v2.2"/></svg>',
+  autoHandoffAutoApprove:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8.5 6 12l7.5-8"/></svg>',
   handoffPreset:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h11"/><path d="M4.5 12.5V9.5M8 12.5V6.5M11.5 12.5V3.5"/></svg>',
   secondOpinion:
@@ -1447,6 +1449,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: false,
         pressed: true,
         icon: COMPOSER_ICONS.autoHandoff,
+      };
+    case 'autoHandoffAutoApproveToggle':
+      return {
+        ariaLabel: '自動引き継ぎの自動承認',
+        title:
+          '自動で発火した引き継ぎ（手動の引き継ぎボタンは対象外）で、確認ダイアログとセッション統括ページの保留カードを出さず、提案されたmodel/effortでそのまま引き継ぎます（Issue #1350）',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.autoHandoffAutoApprove,
       };
     case 'handoffPresetPicker':
       return {

@@ -349,6 +349,10 @@ function showConfirmModal(
  * @param preassessed 区切り判定で既に取ってある見立て（Issue #1090）。初回の提案にだけ使い、
  *   「再判定」を押されたときは新たに分類器を起動する
  * @param pending 保留を統括ページへ公開する口（Issue #1280）。省略するとモーダルだけになる
+ * @param autoApprove 自動承認モード（Issue #1350）。真のときは確認そのものを省略し、
+ *   モーダルも`pending`（統括ページの保留カード）も経由せず`proposeHandoffModelSettings`の
+ *   提案をそのまま返す。自動発火（`HandoffTrigger.kind !== 'manual'`）のときだけ呼び出し側が
+ *   真を渡す想定で、手動の引き継ぎでは常に偽のまま呼ぶ
  */
 export async function chooseHandoffModelSettings(
   current: SessionModelSettings,
@@ -356,7 +360,12 @@ export async function chooseHandoffModelSettings(
   deps: HandoffModelChoiceDeps,
   preassessed?: TaskAssessment,
   pending?: HandoffPendingPort,
+  autoApprove = false,
 ): Promise<HandoffModelChoice | undefined> {
+  if (autoApprove) {
+    // 確認ダイアログも統括ページの保留カードも出さず、提案をそのまま採用する（Issue #1350）
+    return proposeHandoffModelSettings(current, input, deps, preassessed);
+  }
   const canReclassify = readAutoHandoffRouterEnabled();
   const presentation: HandoffPendingPresentation = {
     canReclassify,

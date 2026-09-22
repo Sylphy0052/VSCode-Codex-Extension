@@ -682,6 +682,16 @@ export interface ChatState {
    */
   autoHandoff: boolean;
   /**
+   * 自動引き継ぎの自動承認（Issue #1350）がこのセッションで有効か。
+   *
+   * `autoHandoff`と全く同じ二段構え。初期値はユーザー設定（`agent.autoHandoff.autoApprove`、
+   * 既定OFF）から入り、そこから先は会話ごとにセッション単位で持つ。ONのときは、自動発火
+   * （`HandoffTrigger.kind !== 'manual'`）の引き継ぎに限り確認ダイアログとセッション統括
+   * ページの保留カードを出さず、提案をそのまま採用する（`handoffModelChoice.ts`参照）。
+   * 手動の引き継ぎボタンでは、ONでも従来どおり確認する。
+   */
+  autoHandoffAutoApprove: boolean;
+  /**
    * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
    *
    * `initialize` の応答の `fast_mode_state` 由来。**Claude Code側にしか無い**概念で、
@@ -787,6 +797,7 @@ export const initialChatState: ChatState = {
   turnTokens: undefined,
   planMode: false,
   autoHandoff: false,
+  autoHandoffAutoApprove: false,
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],

@@ -55,6 +55,7 @@ import {
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
   readAutoHandoffEnabled,
+  readAutoHandoffAutoApprove,
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
@@ -1035,6 +1036,9 @@ export class ClaudeChatViewManager
     const state = entry.session.getState();
     const lastAssistantMessage = recentAssistantMessages(state, 1)[0];
     const gitBranch = await resolveGitBranch(entry.cwd);
+    // 自動承認は自動発火（`kind !== 'manual'`）でトグルONのときだけ（Issue #1350）。
+    // 手動の引き継ぎボタンでは、トグルONでも必ず確認する
+    const autoApprove = trigger.kind !== 'manual' && state.autoHandoffAutoApprove;
     const choice = await chooseHandoffModelSettings(
       entry.modelSettings,
       {
@@ -1053,13 +1057,24 @@ export class ClaudeChatViewManager
         logWarn: (message) => this.log.warn(message),
       },
       preassessed,
-      // 確認はこのウィンドウのモーダルと、セッション統括ページの両方で受ける（Issue #1280）
-      this.beginPendingHandoff(entry, trigger),
+      // 確認はこのウィンドウのモーダルと、セッション統括ページの両方で受ける（Issue #1280）。
+      // 自動承認のときは保留カード自体を出さないため、ここで作らない（Issue #1350）
+      autoApprove ? undefined : this.beginPendingHandoff(entry, trigger),
+      autoApprove,
     );
     if (choice === undefined) {
       // 確認で閉じられた。人が「今は引き継がない」と決めたのだから、エラーにも警告にもしない
       this.log.info('引き継ぎは確認ダイアログで中止されました');
       return false;
+    }
+    if (autoApprove) {
+      entry.session.noteLocalEvent(
+        `autoHandoffAutoApprove:${Date.now()}`,
+        `自動承認で引き継ぎます（${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}）`,
+      );
+      this.log.info(
+        `自動引き継ぎの自動承認により確認ダイアログを省略しました: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}`,
+      );
     }
     this.log.info(
       `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
@@ -1124,6 +1139,8 @@ export class ClaudeChatViewManager
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
     // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
     newEntry.session.setAutoHandoff(state.autoHandoff);
+    // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
+    newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
     // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
     // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
     // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
@@ -2159,6 +2176,8 @@ export class ClaudeChatViewManager
       // 自動引き継ぎの初期値（Issue #1091）。ClaudeStreamSessionはvscodeに依存しないため、
       // 設定の読み出しはここ（view層）で行う（下の`LoopController`と同じ）
       readAutoHandoffEnabled(),
+      // 自動引き継ぎの自動承認の初期値（Issue #1350）。仕組みは上と同じ二段構え
+      readAutoHandoffAutoApprove(),
       this.createOutputOffload(),
     );
 
@@ -3073,6 +3092,11 @@ export class ClaudeChatViewManager
           entry.autoHandoffStarted = false;
         }
         entry.session.setAutoHandoff(on);
+        return;
+      }
+      if (type === 'autoHandoffAutoApprove') {
+        entry.loop.noteUserAction();
+        entry.session.setAutoHandoffAutoApprove(m['on'] === true);
         return;
       }
       if (type === 'handoffCostPreset') {

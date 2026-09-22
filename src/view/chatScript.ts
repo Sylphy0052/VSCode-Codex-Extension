@@ -2474,6 +2474,7 @@ export function chatScript(
     if (sendDebugCommandButton) sendDebugCommandButton.disabled = !!state.busy;
     applyPlanMode(state.planMode);
     applyAutoHandoff(state.autoHandoff);
+    applyAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
     applyFastMode(state);
     renderAttachments(state.attachments);
     applyLoop(state.loop);
@@ -2592,6 +2593,18 @@ export function chatScript(
     if (!button) return;
     button.setAttribute('aria-pressed', autoHandoff ? 'true' : 'false');
     button.className = autoHandoff ? 'toggled' : 'secondary';
+  }
+
+  // いま自動引き継ぎの自動承認がONか（Issue #1350）。自動発火の引き継ぎだけが対象
+  let autoHandoffAutoApprove = false;
+
+  /** 自動承認ボタンの見た目。自動引き継ぎボタンと同じ流儀。 */
+  function applyAutoHandoffAutoApprove(on) {
+    autoHandoffAutoApprove = !!on;
+    const button = el('autoHandoffAutoApproveToggle');
+    if (!button) return;
+    button.setAttribute('aria-pressed', autoHandoffAutoApprove ? 'true' : 'false');
+    button.className = autoHandoffAutoApprove ? 'toggled' : 'secondary';
   }
 
   // いまFast modeか（Claude Codeのみ）。押したときに反転させるため覚えておく
@@ -3391,6 +3404,13 @@ export function chatScript(
   if (autoHandoffButton) {
     autoHandoffButton.addEventListener('click', () =>
       vscode.postMessage({ type: 'autoHandoff', on: !autoHandoff }),
+    );
+  }
+  // 自動引き継ぎの自動承認（Issue #1350）。自動発火のときだけ確認を省く設定
+  const autoHandoffAutoApproveButton = el('autoHandoffAutoApproveToggle');
+  if (autoHandoffAutoApproveButton) {
+    autoHandoffAutoApproveButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'autoHandoffAutoApprove', on: !autoHandoffAutoApprove }),
     );
   }
 

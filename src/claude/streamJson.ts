@@ -56,6 +56,8 @@ export const initialClaudeState: ChatState = {
   planMode: false,
   // 自動引き継ぎ（Issue #1079）は拡張機能側だけで完結する状態で、CLIには対応する概念が無い
   autoHandoff: false,
+  // 自動引き継ぎの自動承認（Issue #1350）も同様に拡張機能側だけで完結する状態
+  autoHandoffAutoApprove: false,
   // Codexのレビュー中フラグに相当する概念がClaude Codeには無い
   reviewing: false,
   turnResultText: '',

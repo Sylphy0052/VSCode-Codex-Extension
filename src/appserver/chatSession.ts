@@ -130,12 +130,23 @@ export class ChatSession {
      */
     initialAutoHandoff: boolean = initialChatState.autoHandoff,
     /**
+     * 自動引き継ぎの自動承認（Issue #1350）をこのセッションの初めからONにするか。
+     *
+     * 値の出どころはユーザー設定（`agent.autoHandoff.autoApprove`）だが、`initialAutoHandoff`
+     * と同じ理由でこの層は `vscode` をimportしないため、値だけ受け取る。
+     */
+    initialAutoHandoffAutoApprove: boolean = initialChatState.autoHandoffAutoApprove,
+    /**
      * ツール出力の退避先（issue #1325）。渡さない場合は退避せず、従来どおり本文を
      * すべてメモリに持つ（テストやディスクを使えない経路のため）。
      */
     outputOffload?: OutputOffloadPort,
   ) {
-    this.state = { ...initialChatState, autoHandoff: initialAutoHandoff };
+    this.state = {
+      ...initialChatState,
+      autoHandoff: initialAutoHandoff,
+      autoHandoffAutoApprove: initialAutoHandoffAutoApprove,
+    };
     this.offload = outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
   }
 
@@ -341,6 +352,18 @@ export class ChatSession {
       return;
     }
     this.update({ ...this.state, autoHandoff: on });
+  }
+
+  /**
+   * 自動引き継ぎの自動承認（Issue #1350）を切り替える。
+   *
+   * `setAutoHandoff`と同じく拡張機能側だけで完結する状態なのでapp-serverへは何も送らない。
+   */
+  setAutoHandoffAutoApprove(on: boolean): void {
+    if (this.state.autoHandoffAutoApprove === on) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoffAutoApprove: on });
   }
 
   /**
