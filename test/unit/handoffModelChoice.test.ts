@@ -231,6 +231,21 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
     // ボタンの並びは直接は取れないため、OFFでも承認経路が通ることだけを見る
     expect(__mock.messages.infos).toHaveLength(1);
   });
+
+  it('autoApprove=trueなら確認ダイアログを出さず提案をそのまま採用する（Issue #1350）', async () => {
+    stubClassifier(assess({ difficulty: 1, scope: 1 }));
+    const choice = await chooseHandoffModelSettings(
+      current,
+      input,
+      deps(),
+      undefined,
+      undefined,
+      true,
+    );
+    expect(choice?.settings).toEqual({ model: 'gpt-5.6-terra', effort: 'high' });
+    // 確認ダイアログ（モーダル）を一切出していないこと
+    expect(__mock.messages.infos).toHaveLength(0);
+  });
 });
 
 describe('probeSafeBoundary（Issue #1090）', () => {

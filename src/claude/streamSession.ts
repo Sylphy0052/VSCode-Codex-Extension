@@ -229,12 +229,23 @@ export class ClaudeStreamSession {
      */
     private readonly initialAutoHandoff: boolean = initialClaudeState.autoHandoff,
     /**
+     * 自動引き継ぎの自動承認（Issue #1350）をこのセッションの初めからONにするか。
+     *
+     * 値の出どころはユーザー設定（`agent.autoHandoff.autoApprove`）だが、`initialAutoHandoff`
+     * と同じ理由でこの層は `vscode` をimportしないため、値だけ受け取る。
+     */
+    private readonly initialAutoHandoffAutoApprove: boolean = initialClaudeState.autoHandoffAutoApprove,
+    /**
      * ツール出力の退避先（issue #1325）。渡さない場合は退避せず、従来どおり本文を
      * すべてメモリに持つ（テストやディスクを使えない経路のため）。
      */
     outputOffload?: OutputOffloadPort,
   ) {
-    this.state = { ...initialClaudeState, autoHandoff: initialAutoHandoff };
+    this.state = {
+      ...initialClaudeState,
+      autoHandoff: initialAutoHandoff,
+      autoHandoffAutoApprove: initialAutoHandoffAutoApprove,
+    };
     this.offload = outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
   }
 
@@ -397,6 +408,8 @@ export class ClaudeStreamSession {
       name: options.initialName,
       // ここが実効値になるため、構築時と同じ初期値を入れ直す（Issue #1091）
       autoHandoff: this.initialAutoHandoff,
+      // 自動承認（Issue #1350）も同じ理由で入れ直す
+      autoHandoffAutoApprove: this.initialAutoHandoffAutoApprove,
     });
 
     this.initializeControl();
@@ -490,6 +503,18 @@ export class ClaudeStreamSession {
       return;
     }
     this.update({ ...this.state, autoHandoff: on });
+  }
+
+  /**
+   * 自動引き継ぎの自動承認（Issue #1350）を切り替える。
+   *
+   * `setAutoHandoff`と同じく拡張機能側だけで完結する状態なのでCLIへは何も送らない。
+   */
+  setAutoHandoffAutoApprove(on: boolean): void {
+    if (this.state.autoHandoffAutoApprove === on) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoffAutoApprove: on });
   }
 
   /**

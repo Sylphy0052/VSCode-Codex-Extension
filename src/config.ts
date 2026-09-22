@@ -460,6 +460,23 @@ export function readAutoHandoffEnabled(): boolean {
 }
 
 /**
+ * 新しい会話で自動引き継ぎの自動承認（Issue #1350）を最初から有効にするか。
+ *
+ * 既定はOFF（人の確認を1段外すため）。この設定が決めるのは新規セッションの初期値だけで、
+ * 以降のON/OFFはセッション単位（`ChatState.autoHandoffAutoApprove`）に持つ。仕組みは
+ * `readAutoHandoffEnabled` と全く同じ二段構え。
+ *
+ * ONのときは、自動発火（`HandoffTrigger.kind !== 'manual'`）の引き継ぎに限り、確認
+ * ダイアログとセッション統括ページの保留カードを出さず、`proposeHandoffModelSettings`
+ * の提案をそのまま採用する（`handoffModelChoice.ts`の`chooseHandoffModelSettings`参照）。
+ * 手動の引き継ぎボタンでは、ONでも従来どおり確認する。
+ */
+export function readAutoHandoffAutoApprove(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.autoApprove');
+  return typeof raw === 'boolean' ? raw : false;
+}
+
+/**
  * 自動引き継ぎが始まるコンテキスト残量の割合（Issue #1079）。
  *
  * ON/OFFの初期値は `agent.autoHandoff.enabled`（`readAutoHandoffEnabled`）で、会話ごとの
