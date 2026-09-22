@@ -446,6 +446,49 @@ describe('AppServerClient.listThreads（issue #1346: cursorページングの頑
     });
   });
 
+  it('nextCursorが一巡して既出の値へ戻る場合もページングが進まないとして失敗させる', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listThreads(50, '/archived');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 0), {
+        data: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', updatedAt: 1700000000 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 1), {
+        data: [{ id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', updatedAt: 1700000001 }],
+        nextCursor: 'cursor-2',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 2), {
+        data: [{ id: 'cccccccc-cccc-cccc-cccc-cccccccccccc', updatedAt: 1700000002 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+
+    const result = await pending;
+    expect(result).toEqual({
+      ok: false,
+      error: 'thread/listのページングが進みませんでした',
+    });
+  });
+
   it('consumePageが指定されたら各ページを渡し、falseを返した時点で打ち切る', async () => {
     const fake = fakeChildProcess();
     spawnMock.mockReturnValueOnce(fake.proc);
@@ -762,7 +805,7 @@ describe('AppServerClient: 未テストだった単発要求メソッドの成�
     );
 
     const result = await pending;
-    expect(result.length).toBeGreaterThan(0);
+    expect(result.map((model) => model.slug)).toEqual(['gpt-x', 'gpt-y']);
   });
 
   it('listModels: model/listが失敗すれば空配列を返す', async () => {
