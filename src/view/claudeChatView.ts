@@ -148,7 +148,7 @@ import { buildItemsDelta, stripHostOnlyItems, stripHostOnlyState } from './state
 import { abortAsRejection, BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
-  buildHandoffPrompt,
+  chooseHandoffPrompt,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
@@ -1149,7 +1149,8 @@ export class ClaudeChatViewManager
     const giveUp = new AbortController();
     const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
     try {
-      this.dispatch(newEntry, buildHandoffPrompt(pointerPath));
+      // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
+      this.dispatch(newEntry, chooseHandoffPrompt(pointerPath, lastAssistantMessage));
     } catch (e) {
       giveUp.abort();
       throw e;
