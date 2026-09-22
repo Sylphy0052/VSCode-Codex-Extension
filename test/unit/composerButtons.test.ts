@@ -29,6 +29,7 @@ describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準�
       'handoffToNewSession',
       'autoHandoffToggle',
       'autoHandoffAutoApproveToggle',
+      'autoReplyToggle',
       'handoffPresetPicker',
       'secondOpinion',
     ]);
@@ -125,6 +126,7 @@ describe('overflowComposerButtons（「…」メニューへ畳むボタンの�
       'openProgress',
       'autoHandoffToggle',
       'autoHandoffAutoApproveToggle',
+      'autoReplyToggle',
       'handoffPresetPicker',
     ]);
   });

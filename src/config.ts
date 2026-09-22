@@ -67,6 +67,12 @@ import {
 import { DEFAULT_MAX_INDETERMINATE } from './loop/goalLoop';
 import { DEFAULT_ADVISOR_EVERY_N_TURNS, DEFAULT_ADVISOR_PROVIDER } from './loop/loopAdvisor';
 import type { LoopAdvisorSettings } from './loop/loopAdvisorProcess';
+import {
+  DEFAULT_AUTO_REPLY_MAX_TURNS,
+  DEFAULT_AUTO_REPLY_MODEL,
+  DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS,
+  type AutoReplySettings,
+} from './chat/autoReply';
 import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
   GoalEvaluatorProviderSetting,
@@ -755,6 +761,23 @@ export async function setLoopAdvisorEnabled(enabled: boolean): Promise<void> {
   await vscode.workspace
     .getConfiguration('agent')
     .update('chat.loopAdvisor.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/**
+ * 自動返信モード（Issue #1353）の設定を読む。
+ *
+ * `enabled` が決めるのは新規セッションの初期値だけで、以降のON/OFFはセッション単位
+ * （`ChatState.autoReply`）に持つ。入力欄の「…」メニューのトグルはその一時的な上書きで、
+ * ここへは書き戻さない（`readAutoHandoffEnabled` と同じ流儀）。
+ */
+export function readAutoReplyConfig(): AutoReplySettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('chat.autoReply.enabled') === true,
+    model: str(c, 'chat.autoReply.model', DEFAULT_AUTO_REPLY_MODEL),
+    timeoutSeconds: num(c, 'chat.autoReply.timeoutSeconds', DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS),
+    maxTurns: num(c, 'chat.autoReply.maxTurns', DEFAULT_AUTO_REPLY_MAX_TURNS),
+  };
 }
 
 /**

@@ -137,6 +137,13 @@ export class ChatSession {
      */
     initialAutoHandoffAutoApprove: boolean = initialChatState.autoHandoffAutoApprove,
     /**
+     * 自動返信モード（Issue #1353）をこのセッションの初めからONにするか。
+     *
+     * `initialAutoHandoff` と同じ理由で、値の出どころ（ユーザー設定
+     * `agent.chat.autoReply.enabled`）を読むのは呼び出し側の `chatView.ts` に任せる。
+     */
+    initialAutoReply: boolean = initialChatState.autoReply,
+    /**
      * ツール出力の退避先（issue #1325）。渡さない場合は退避せず、従来どおり本文を
      * すべてメモリに持つ（テストやディスクを使えない経路のため）。
      */
@@ -146,6 +153,7 @@ export class ChatSession {
       ...initialChatState,
       autoHandoff: initialAutoHandoff,
       autoHandoffAutoApprove: initialAutoHandoffAutoApprove,
+      autoReply: initialAutoReply,
     };
     this.offload = outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
   }
@@ -364,6 +372,18 @@ export class ChatSession {
       return;
     }
     this.update({ ...this.state, autoHandoffAutoApprove: on });
+  }
+
+  /**
+   * 自動返信モード（Issue #1353）を切り替える。
+   *
+   * `setAutoHandoff` と同じく拡張機能側だけで完結する状態なのでapp-serverへは何も送らない。
+   */
+  setAutoReply(on: boolean): void {
+    if (this.state.autoReply === on) {
+      return;
+    }
+    this.update({ ...this.state, autoReply: on });
   }
 
   /**
