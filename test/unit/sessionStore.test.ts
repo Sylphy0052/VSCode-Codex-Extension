@@ -516,7 +516,6 @@ describe('SessionStore.list（thread/listのページ走査、issue #1346）', (
         },
         {
           sessions: [threadSession(ID_B, '/work/alpha', '2026-08-06T15:10:00Z')],
-          nextCursor: undefined,
         },
       ]),
     );
@@ -529,7 +528,7 @@ describe('SessionStore.list（thread/listのページ走査、issue #1346）', (
   it('最終ページまで走査しても候補が0件ならファイル読みへ退避する', async () => {
     const fs = buildFs();
     const store = new SessionStore(fs, paths, new InMemoryMetaCache());
-    store.attachThreadList(pagedPort([{ sessions: [], nextCursor: undefined, rawCount: 0 }]));
+    store.attachThreadList(pagedPort([{ sessions: [], rawCount: 0 }]));
 
     const result = await store.list(options({ scope: 'all' }));
     expect(result.threadListFallbackReason).toBe('thread/listの応答が空でした');
