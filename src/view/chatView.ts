@@ -1001,6 +1001,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     newEntry.session.setAutoHandoff(state.autoHandoff);
     // 自動承認のON/OFFも同じ理由で引き継ぎ先へ持ち越す（Issue #1350）
     newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+    // 自動返信のON/OFFも持ち越し、引き継ぎ元では止める（`claudeChatView.ts`と同じ理由。
+    // Issue #1362）
+    const autoReply = entry.session.getState().autoReply;
+    newEntry.session.setAutoReply(autoReply);
+    if (autoReply) {
+      this.stopAutoReply(entry, 'handedOff');
+    }
     // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
     // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
     //

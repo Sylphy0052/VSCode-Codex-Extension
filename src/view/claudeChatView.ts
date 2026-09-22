@@ -1173,6 +1173,15 @@ export class ClaudeChatViewManager
     newEntry.session.setAutoHandoff(state.autoHandoff);
     // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
     newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+    // 自動返信のON/OFFも持ち越す（Issue #1362）。持ち越したら引き継ぎ元では止める。
+    // 旧タブを残したとき、新旧2つのセッションが同じ作業を自動で進めるのを防ぐ。
+    // `state`は確認ダイアログの前に取った値のため、待っている間のトグル操作を拾えるよう
+    // ここで読み直す
+    const autoReply = entry.session.getState().autoReply;
+    newEntry.session.setAutoReply(autoReply);
+    if (autoReply) {
+      this.stopAutoReply(entry, 'handedOff');
+    }
     // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
     // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
     // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
