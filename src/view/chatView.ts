@@ -101,7 +101,7 @@ import { buildItemsDelta, stripHostOnlyState } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
-  buildHandoffPrompt,
+  chooseHandoffPrompt,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
@@ -976,7 +976,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       .catch((e: unknown) =>
         this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
       );
-    const text = buildHandoffPrompt(pointerPath);
+    // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
+    const text = chooseHandoffPrompt(pointerPath, lastAssistantMessage);
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが

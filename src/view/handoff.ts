@@ -418,6 +418,31 @@ export function buildHandoffPrompt(pointerPath: string): string {
 }
 
 /**
+ * 引き継ぎ元がhandoffプロンプトを出力済みのときの初回プロンプト（Issue #1354）。
+ *
+ * 必要な申し送りはhandoffプロンプトに揃っているので、ポインタファイルを経由させず本文だけを
+ * 渡す。ポインタファイルは抽出コマンドでtranscriptを読ませる作りのため、パスを渡すと読みに行く。
+ */
+export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
+  return `${HANDOFF_PROMPT_HEAD}引き継ぎ元が書いた下のhandoffプロンプトの内容だけを引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
+}
+
+/**
+ * 引き継ぎ先への初回プロンプトを選ぶ（Issue #1354）。引き継ぎ元の最終応答にhandoffプロンプトが
+ * あればその本文だけを渡し、無ければポインタファイルを指す。
+ */
+export function chooseHandoffPrompt(
+  pointerPath: string,
+  lastAssistantMessage: string | undefined,
+): string {
+  const handoffPrompt =
+    lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
+  return handoffPrompt === undefined
+    ? buildHandoffPrompt(pointerPath)
+    : buildHandoffPromptFromHandoff(handoffPrompt);
+}
+
+/**
  * 初回プロンプトの書き出し（Issue #1228）。
  *
  * 引き継ぎ先の1件目のユーザー発言がこの手続き由来であることを見分けるための目印として
@@ -619,27 +644,49 @@ export const HANDOFF_PROMPT_DETECTED_REASON = 'アシスタントの応答にhan
  * が `busy` の間は通さない。
  */
 export function containsHandoffPrompt(text: string): boolean {
+  return extractHandoffPrompt(text) !== undefined;
+}
+
+/**
+ * アシスタントの応答からhandoffプロンプトの本文（フェンスの内側）を取り出す（Issue #1354）。
+ *
+ * 判定は `containsHandoffPrompt` と同じで、見出しを含むフェンスが複数あれば最後のものを返す。
+ * 閉じフェンスが無いときは末尾までを本文とする。見つからなければ `undefined`。
+ */
+export function extractHandoffPrompt(text: string): string | undefined {
   let fenceLength = 0;
+  let body: string[] = [];
+  let hasHeading = false;
+  let found: string | undefined;
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\r$/, '');
     const marks = HANDOFF_PROMPT_FENCE.exec(line)?.[1];
     if (fenceLength === 0) {
       if (marks !== undefined) {
         fenceLength = marks.length;
+        body = [];
+        hasHeading = false;
       }
       continue;
     }
     // 閉じフェンスは開きと同じ長さ以上で、後ろに情報文字列を付けられない（Markdownの規則）。
     // 開き行はバックティックの後ろに言語名が付くため、長さと余分な文字の両方を見て弾く
     if (marks !== undefined && marks.length >= fenceLength && line.trim() === marks) {
+      if (hasHeading) {
+        found = body.join('\n').trim();
+      }
       fenceLength = 0;
       continue;
     }
+    body.push(line);
     if (HANDOFF_PROMPT_HEADING.test(line)) {
-      return true;
+      hasHeading = true;
     }
   }
-  return false;
+  if (fenceLength !== 0 && hasHeading) {
+    found = body.join('\n').trim();
+  }
+  return found;
 }
 
 /**
