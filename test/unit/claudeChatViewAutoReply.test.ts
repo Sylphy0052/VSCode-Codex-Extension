@@ -247,6 +247,9 @@ describe('Claude Code画面の自動返信モードの配線（Issue #1360）', 
       session.receive(`${JSON.stringify({ type: 'result', subtype: 'error_during_execution' })}\n`);
       await flush();
 
+      // 失敗として積まれていることを先に確かめる。ここが崩れると、モードがOFFなのは
+      // 「ターンが失敗したから」ではなくなり、このテストが黙って別のことを見てしまう
+      expect(session.getState().turnFailed).toBe(true);
       expect(reply).not.toHaveBeenCalled();
       expect(session.getState().autoReply).toBe(false);
       manager.dispose();
