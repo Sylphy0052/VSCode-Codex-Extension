@@ -1256,6 +1256,32 @@
           "scope": "window",
           "markdownDescription": "Advisorを呼んでよい間隔（ターン数）。既定の `1` は毎ターン呼んでよいという意味で、**毎ターン呼ぶという意味ではない**。実際に呼ぶのは、同じ受入条件が続けて未達・応答が変わらない・証拠不足が続くといった行き詰まりが見えた周だけで、達成した周には呼ばない。増やすと待ち時間と費用はさらに減るが、方向が外れていることに気づくのが遅れる。Advisorを呼ばない周では、前の周の指摘を持ち越さない（古い指摘を新しいターンの評価として読ませないため）。"
         },
+        "agent.chat.autoReply.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "新しい会話で自動返信モード（issue #1353）を最初から有効にするか。ONのセッションはターンが終わるたびに、直前のエージェント出力を別に保持したセッション（返信役）へ送り、返信役の返事を次の発言として自動で送信する。既定は無効。この設定が決めるのは新規セッションの初期値だけで、以降のON/OFFは会話下の「…」メニューのトグルで会話ごとに切り替える（設定へは書き戻さない）。既存のループ（`loop/start`）とは排他で、どちらかが走っている間はもう片方を自動でOFFにする。**返信役へは直前の出力をそのまま渡すため、出力に紛れた指示が返信役を経由して会話へ戻ってくる余地がある**（`agent.chat.autoReply.maxTurns` 等の緩和策あり）。"
+        },
+        "agent.chat.autoReply.model": {
+          "type": "string",
+          "default": "auto",
+          "scope": "window",
+          "markdownDescription": "自動返信の返信役に使うモデル。既定の `auto` は実際に動かすプロバイダ（常にCodex）に合わせて解決する。"
+        },
+        "agent.chat.autoReply.timeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "scope": "window",
+          "markdownDescription": "自動返信の返信役の応答を待つ上限（秒）。超えた場合は自動返信モードをOFFにし、理由を会話へ残す。10未満を書いても10として扱う。"
+        },
+        "agent.chat.autoReply.maxTurns": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "scope": "window",
+          "markdownDescription": "自動返信の最大往復回数。達すると自動返信モードをOFFにし、理由を会話へ残す。返信役の実行はCodexの利用枠を消費するため、上限で歯止めを掛ける。20は出発点の値で、使ってみて調整する想定。"
+        },
         "agent.notifications.approvalPending": {
           "type": "boolean",
           "default": true,

@@ -236,6 +236,13 @@ export class ClaudeStreamSession {
      */
     private readonly initialAutoHandoffAutoApprove: boolean = initialClaudeState.autoHandoffAutoApprove,
     /**
+     * 自動返信モード（Issue #1353）をこのセッションの初めからONにするか。
+     *
+     * `initialAutoHandoff` と同じ理由・同じ流儀で、値の出どころ（ユーザー設定
+     * `agent.chat.autoReply.enabled`）を読むのは呼び出し側の `claudeChatView.ts` に任せる。
+     */
+    private readonly initialAutoReply: boolean = initialClaudeState.autoReply,
+    /**
      * ツール出力の退避先（issue #1325）。渡さない場合は退避せず、従来どおり本文を
      * すべてメモリに持つ（テストやディスクを使えない経路のため）。
      */
@@ -245,6 +252,7 @@ export class ClaudeStreamSession {
       ...initialClaudeState,
       autoHandoff: initialAutoHandoff,
       autoHandoffAutoApprove: initialAutoHandoffAutoApprove,
+      autoReply: initialAutoReply,
     };
     this.offload = outputOffload === undefined ? undefined : new OutputOffloadRunner(outputOffload);
   }
@@ -410,6 +418,8 @@ export class ClaudeStreamSession {
       autoHandoff: this.initialAutoHandoff,
       // 自動承認（Issue #1350）も同じ理由で入れ直す
       autoHandoffAutoApprove: this.initialAutoHandoffAutoApprove,
+      // 自動返信モード（Issue #1353）も同じ理由で入れ直す
+      autoReply: this.initialAutoReply,
     });
 
     this.initializeControl();
@@ -515,6 +525,18 @@ export class ClaudeStreamSession {
       return;
     }
     this.update({ ...this.state, autoHandoffAutoApprove: on });
+  }
+
+  /**
+   * 自動返信モード（Issue #1353）を切り替える。
+   *
+   * `setAutoHandoff` と同じく拡張機能側だけで完結する状態なのでCLIへは何も送らない。
+   */
+  setAutoReply(on: boolean): void {
+    if (this.state.autoReply === on) {
+      return;
+    }
+    this.update({ ...this.state, autoReply: on });
   }
 
   /**

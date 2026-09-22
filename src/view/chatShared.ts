@@ -1255,6 +1255,8 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 3v10"/><path d="M3.5 8h5M6.5 5.5 9 8l-2.5 2.5"/><path d="M14.2 9.6A3.4 3.4 0 1 1 13 6.2"/><path d="M11.2 4.2h2.2v2.2"/></svg>',
   autoHandoffAutoApprove:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8.5 6 12l7.5-8"/></svg>',
+  autoReply:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5 2.5 6.5l4 3"/><path d="M2.5 6.5h6.5a4 4 0 0 1 4 4v2"/></svg>',
   handoffPreset:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h11"/><path d="M4.5 12.5V9.5M8 12.5V6.5M11.5 12.5V3.5"/></svg>',
   secondOpinion:
@@ -1458,6 +1460,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: false,
         pressed: true,
         icon: COMPOSER_ICONS.autoHandoffAutoApprove,
+      };
+    case 'autoReplyToggle':
+      return {
+        ariaLabel: '自動返信',
+        title:
+          '席を外していても会話が進むよう、ターン終了ごとに直前の出力を別の読み取り専用セッション（返信役）へ渡し、返事を次の発言として自動で送ります。AskUserQuestionの質問にも返信役が自動で答えます。ループの実行中は動きません',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.autoReply,
       };
     case 'handoffPresetPicker':
       return {

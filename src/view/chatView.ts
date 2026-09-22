@@ -51,6 +51,7 @@ import {
   setChatTurnSummaryEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
+  readAutoReplyConfig,
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
@@ -80,6 +81,18 @@ import {
 import { buildGoalDraftReply, planGoalDraft } from './goalDraftFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
+import { lastAgentMessage } from '../loop/loopEngineering';
+import { pushTurnSignature, detectStalledLoop } from '../loop/stallDetector';
+import { AutoReplyAgent, autoReplyAgentCloseReasonFor } from '../chat/autoReplyAgent';
+import {
+  describeAutoReplyStopReason,
+  extractAutoReplyMessage,
+  firstUserMessageText,
+  hasReachedAutoReplyMaxTurns,
+  isAutoReplyStop,
+  shouldTriggerAutoReply,
+  type AutoReplyStopReason,
+} from '../chat/autoReply';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
@@ -355,6 +368,17 @@ interface ChatPanel extends BaseChatPanel {
    * 複数のタブで共有すると、タブを跨いだだけで抑制が外れたり効きすぎたりする。
    */
   trace: HandoffTrace;
+  /**
+   * 自動返信モード（Issue #1353）の返信役セッション。
+   *
+   * 最初に返事が必要になった時点で開く（ONにしただけでは開かない）。OFF・元タブを
+   * 閉じる・無操作継続（`AutoReplyAgent`内部のアイドルタイマー）で閉じる。
+   */
+  autoReplyAgent: AutoReplyAgent | undefined;
+  /** 自動返信の往復回数。`agent.chat.autoReply.maxTurns` に達したら自動でOFFにする。 */
+  autoReplyTurnCount: number;
+  /** 返信役の応答履歴（`stallDetector.ts`の署名列と同じ形）。同じ応答が続いた停滞検出に使う。 */
+  autoReplyHistory: readonly string[];
 }
 
 /**
@@ -493,7 +517,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         browserInstructions,
       );
       this.cancelLimitAutoResume(entry);
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       await entry.session.send(prompt, this.configFor(entry));
       this.reportActivity(entry, prompt);
     } catch (error) {
@@ -1089,6 +1113,147 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
+   * 自動返信モード（Issue #1353）の発火判定。`onSessionChange` から毎回呼ぶ。
+   *
+   * ゲーティングは`shouldTriggerAutoReply`（`chat/autoReply.ts`）に任せる。既存ループが
+   * 走っている間は自動返信しない排他もそこに含む。送る材料は`lastAgentMessage`
+   * （直前ターンの最後のエージェント発言）で、ターンが失敗していれば材料を待たずOFFにする
+   * （Issueの停止条件「ターンが失敗した」）。
+   */
+  private maybeAutoReply(entry: ChatPanel, state: ChatState, turnFinished: boolean): void {
+    if (entry.disposed || !state.autoReply) {
+      return;
+    }
+    if (turnFinished && state.turnFailed) {
+      this.stopAutoReply(entry, 'turnFailed');
+      return;
+    }
+    const shouldTrigger = shouldTriggerAutoReply({
+      autoReplyEnabled: state.autoReply,
+      loopRunning: entry.loop.getStatus().running && !entry.loop.isPaused,
+      turnFinished,
+      busy: state.busy,
+      approvalsPending: state.approvals.length,
+      queuedPending: state.queued.length,
+      turnFailed: state.turnFailed,
+    });
+    if (!shouldTrigger) {
+      return;
+    }
+    const message = lastAgentMessage(state.items);
+    if (message === undefined || message.text.trim() === '') {
+      return;
+    }
+    void this.runAutoReplyTurn(entry, message.text).catch((e: unknown) => {
+      this.reportError(e);
+    });
+  }
+
+  /**
+   * 自動返信モードをOFFにする。返信役があれば閉じ、往復回数・応答履歴をリセットする。
+   * 理由は会話へ1行残す（`noteLocalEvent`）。既にOFFなら何もしない（複数箇所から
+   * 呼んでも安全にするため）。
+   */
+  private stopAutoReply(entry: ChatPanel, reason: AutoReplyStopReason): void {
+    if (entry.disposed) {
+      return;
+    }
+    const wasOn = entry.session.getState().autoReply;
+    entry.session.setAutoReply(false);
+    entry.autoReplyTurnCount = 0;
+    entry.autoReplyHistory = [];
+    const agent = entry.autoReplyAgent;
+    entry.autoReplyAgent = undefined;
+    agent?.close(autoReplyAgentCloseReasonFor(reason));
+    if (wasOn) {
+      entry.session.noteLocalEvent(`autoReplyStop:${Date.now()}`, describeAutoReplyStopReason(reason));
+    }
+  }
+
+  /**
+   * 自動返信の1往復を実行する。返信役（`AutoReplyAgent`）が無ければ（またはこの往復のために
+   * 前回閉じられていれば）ここで開く。以降は同じ返信役へ送り、周をまたいで文脈を保つ。
+   *
+   * 応答が停止の目印・上限到達・停滞・失敗のいずれかならモードをOFFにする。それ以外は
+   * `sendFromLoop`で次のuserメッセージとして送り、会話へ「自動返信」の印を1行残す。
+   */
+  private async runAutoReplyTurn(entry: ChatPanel, lastAgentMessageText: string): Promise<void> {
+    if (entry.disposed) {
+      return;
+    }
+    const config = readAutoReplyConfig();
+    if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
+      const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+      if (cwd === undefined) {
+        this.log.warn('自動返信: ワークスペースの場所が分からないため返信役を開けません');
+        this.stopAutoReply(entry, 'advisorFailed');
+        return;
+      }
+      entry.autoReplyAgent = new AutoReplyAgent({
+        host: this,
+        cwd,
+        model: config.model,
+        timeoutMs: config.timeoutSeconds * 1000,
+        originalRequest: firstUserMessageText(entry.session.getState().items) ?? '',
+        log: this.log,
+      });
+    }
+    const agent = entry.autoReplyAgent;
+    if (agent.isBusy()) {
+      return;
+    }
+    const result = await agent.reply(lastAgentMessageText);
+    if (entry.disposed) {
+      agent.close('tabClosed');
+      return;
+    }
+    if (!entry.session.getState().autoReply) {
+      // 待っている間にOFFにされた（人の操作等）。ここでは何もしない
+      return;
+    }
+    if (!result.ok) {
+      this.stopAutoReply(entry, 'advisorFailed');
+      return;
+    }
+    if (isAutoReplyStop(result.response)) {
+      this.stopAutoReply(entry, 'stopMarker');
+      return;
+    }
+    entry.autoReplyTurnCount += 1;
+    if (hasReachedAutoReplyMaxTurns(entry.autoReplyTurnCount, config.maxTurns)) {
+      this.stopAutoReply(entry, 'maxTurns');
+      return;
+    }
+    const message = extractAutoReplyMessage(result.response);
+    const stallThreshold = readWorkflowsConfig().stallRepeatCount;
+    entry.autoReplyHistory = pushTurnSignature(entry.autoReplyHistory, message, stallThreshold);
+    if (detectStalledLoop(entry.autoReplyHistory, stallThreshold)) {
+      this.stopAutoReply(entry, 'stalled');
+      return;
+    }
+    entry.session.noteLocalEvent(`autoReply:${Date.now()}`, `自動返信: ${message}`);
+    try {
+      await this.sendFromLoop(entry, message);
+    } catch {
+      // 失敗は`sendFromLoop`内で既に報告済み。自動返信はここで止める
+      this.stopAutoReply(entry, 'turnFailed');
+    }
+  }
+
+  /**
+   * ループへの割り込み（`LoopController.noteUserAction`）と自動返信の終了（Issue #1353の
+   * 停止条件「人が入力欄から発言した、または中断ボタンを押した」）をまとめて行う。
+   *
+   * 自動返信のON/OFFトグル自体（`'autoReply'`メッセージ）と`'loop/start'`は、
+   * 意図が異なる（切り替えた直後に自分で自分を止めてしまう／理由を`loopStarted`で
+   * 正確に残したい）ため、このwrapperを経由せず`entry.loop.noteUserAction()`を直接呼ぶ。
+   */
+  private noteUserAction(entry: ChatPanel): void {
+    entry.loop.noteUserAction();
+    this.stopAutoReply(entry, 'userAction');
+  }
+
+  /**
    * 安全な区切りでの自動引き継ぎ（Issue #1090）。
    *
    * 前段（`passesSafeBoundaryGate`）を通ったら、まずhandoffプロンプトの出力を決定論的に
@@ -1467,6 +1632,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       readAutoHandoffEnabled(),
       // 自動引き継ぎの自動承認の初期値（Issue #1350）。仕組みは上と同じ二段構え
       readAutoHandoffAutoApprove(),
+      // 自動返信モードの初期値（Issue #1353）。同じ理由で値だけを渡す
+      readAutoReplyConfig().enabled,
       this.createOutputOffload(),
     );
     const loop = new LoopController(
@@ -1510,6 +1677,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
       safeBoundaryProbing: false,
+      autoReplyAgent: undefined,
+      autoReplyTurnCount: 0,
+      autoReplyHistory: [],
     };
     return entry;
   }
@@ -1589,7 +1759,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private buildTaskSession(entry: ChatPanel, threadId: string, mcpRequested = false): TaskSession {
     return {
       sessionId: threadId,
-      runLoop: (plan: LoopPlan) => entry.loop.start(plan, entry.session.getState().items),
+      runLoop: (plan: LoopPlan) => {
+        // ループと自動返信（Issue #1353）は排他。ループを始めるときは自動返信を切る
+        this.stopAutoReply(entry, 'loopStarted');
+        entry.loop.start(plan, entry.session.getState().items);
+      },
       send: (text: string) => {
         void this.sendOnce(entry, text);
       },
@@ -1680,6 +1854,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 誰にも見えないままCodexのプロセスとロールアウトだけが増える
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
     this.handoffDrafts.delete(entry.secondOpinionKey);
+    // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
+    entry.autoReplyAgent?.close('tabClosed');
+    entry.autoReplyAgent = undefined;
   }
 
   private onSessionChange(entry: ChatPanel, state: ChatState): void {
@@ -1718,6 +1895,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.notifyNewApprovals(entry, state);
     this.scheduleLimitAutoResume(entry, state, turnFinished);
     this.maybeAutoHandoff(entry, state);
+    // 自動返信（Issue #1353）もターン完了契機。ループへ渡す前に判定する
+    // （`loop/start`とautoReplyは排他のため、どちらが先でも実害は無い）
+    this.maybeAutoReply(entry, state, turnFinished);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -1896,7 +2076,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // 人が自分で送り直したら、中断で止めていた自動再開も再び有効にする（Issue #1202）
         this.clearLimitAutoResumeSuppression(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         // 擬似コマンドはCLIへ送らない。送っても文章として素通しされるだけ
         const pseudo = routePseudoCommand(CODEX_PSEUDO_COMMANDS, text);
         if (pseudo !== undefined) {
@@ -2026,7 +2206,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // 中断したターンの条件（上限による失敗）は状態に残る。タイマーを消すだけでは
         // 次の状態更新で予約が復活するため、明示的な操作まで止める（Issue #1202）
         this.suppressLimitAutoResume(entry);
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await entry.session.interrupt();
         return;
       }
@@ -2035,7 +2215,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           return;
         }
         // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await entry.session.compact();
         return;
       }
@@ -2044,7 +2224,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // よう割り込み扱いにする（`compact`と同じ）。会話を壊す・書き込みが起きるといった
         // 不可逆な操作ではないため、`compact`と違って確認ダイアログは挟まない
         // （`planMode`と同じ扱い。issue #228）
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await entry.session.recap(this.configFor(entry));
         return;
       }
@@ -2055,7 +2235,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'planMode') {
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         entry.session.setPlanMode(m['on'] === true);
         return;
       }
@@ -2072,6 +2252,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'autoHandoffAutoApprove') {
         entry.loop.noteUserAction();
         entry.session.setAutoHandoffAutoApprove(m['on'] === true);
+        return;
+      }
+      if (type === 'autoReply') {
+        // トグル自体の操作。`noteUserAction`（wrapper）経由だと自分でONにした直後に
+        // 自分でOFFへ戻してしまうため、ループへの割り込みだけ生で行う
+        entry.loop.noteUserAction();
+        const on = m['on'] === true;
+        if (on) {
+          entry.session.setAutoReply(true);
+        } else {
+          this.stopAutoReply(entry, 'userAction');
+        }
         return;
       }
       if (type === 'handoffCostPreset') {
@@ -2091,7 +2283,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'review') {
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await this.runReview(entry);
         return;
       }
@@ -2210,7 +2402,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'sendQueued' && typeof m['index'] === 'number') {
         // 待たせていた指示を人が通すのも明示的な送信（Issue #1202）
         this.clearLimitAutoResumeSuppression(entry);
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await entry.session.sendQueued(m['index'], this.configFor(entry));
         return;
       }
@@ -2225,7 +2417,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'flushQueue') {
         // 待たせていた指示を先に通すため、ループは割り込みとして止める
         this.clearLimitAutoResumeSuppression(entry);
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await entry.session.flushQueue(this.configFor(entry));
         return;
       }
@@ -2263,6 +2455,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
         // 人が回し直したら、中断で止めていた自動再開も再び有効にする（Issue #1202）
         this.clearLimitAutoResumeSuppression(entry);
+        // ループと自動返信（Issue #1353）は排他。ループを始めるときは自動返信を切る
+        this.stopAutoReply(entry, 'loopStarted');
         entry.loop.start(plan, entry.session.getState().items);
         return;
       }
@@ -2311,7 +2505,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (type === 'editResend' && typeof m['text'] === 'string') {
         // 送った指示の書き直し（issue #1073）。分岐と同じく新しいタブを開くだけで、
         // この会話（entry）そのものには何も送らない
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         await this.editAndResend(
           entry,
           typeof m['turnId'] === 'string' ? m['turnId'] : undefined,
@@ -2857,7 +3051,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     this.cancelLimitAutoResume(entry);
     this.clearLimitAutoResumeSuppression(entry);
-    entry.loop.noteUserAction();
+    this.noteUserAction(entry);
     try {
       const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
       await entry.session.send(sent, this.configFor(entry));

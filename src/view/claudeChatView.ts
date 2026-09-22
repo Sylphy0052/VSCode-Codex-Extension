@@ -14,6 +14,7 @@ import {
 } from '../appserver/chatState';
 import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
+import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
@@ -56,6 +57,7 @@ import {
   setChatLimitAutoResumeEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
+  readAutoReplyConfig,
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
@@ -75,6 +77,20 @@ import {
 } from '../config';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
+import { lastAgentMessage } from '../loop/loopEngineering';
+import { pushTurnSignature, detectStalledLoop } from '../loop/stallDetector';
+import { AutoReplyAgent, autoReplyAgentCloseReasonFor } from '../chat/autoReplyAgent';
+import {
+  buildAutoReplyAskUserQuestionPrompt,
+  describeAutoReplyStopReason,
+  extractAutoReplyMessage,
+  firstUserMessageText,
+  hasReachedAutoReplyMaxTurns,
+  isAutoReplyStop,
+  parseAutoReplyAskUserQuestionResponse,
+  shouldTriggerAutoReply,
+  type AutoReplyStopReason,
+} from '../chat/autoReply';
 import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
@@ -305,6 +321,20 @@ interface ClaudePanel extends BaseChatPanel {
    * 複数のタブで共有すると、タブを跨いだだけで抑制が外れたり効きすぎたりする。
    */
   trace: HandoffTrace;
+  /** 自動返信モード（Issue #1353）の「返信役」。開いていなければ`undefined`。 */
+  autoReplyAgent: AutoReplyAgent | undefined;
+  /** 自動返信の往復回数。上限判定（`agent.chat.autoReply.maxTurns`）に使う。 */
+  autoReplyTurnCount: number;
+  /** 自動返信の応答履歴（停滞検出`detectStalledLoop`用）。 */
+  autoReplyHistory: string[];
+  /**
+   * 自動返信中に自動回答を試みているAskUserQuestionの要求idの集合（Issue #1353）。
+   *
+   * 返信役への問い合わせは非同期で、その間に同じ要求へ二重に問い合わせないための
+   * ガード。回答できた・できなかったのいずれでも要求はここから外れる
+   * （回答できれば`state.approvals`からも消える。できなければ人の回答を待つカードが残る）。
+   */
+  autoReplyAskUserQuestionInFlight: Set<string>;
 }
 
 /**
@@ -991,7 +1021,7 @@ export class ClaudeChatViewManager
       );
       assertReady();
       this.cancelLimitAutoResume(entry);
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       this.dispatch(entry, request.prompt);
     } catch (error) {
       reportDiscussionError(error);
@@ -1256,6 +1286,230 @@ export class ClaudeChatViewManager
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
+  }
+
+  /**
+   * 自動返信モード（Issue #1353）のターン終了時の発火判定。判定の中身は`chatView.ts`の
+   * 同名メソッドと同じ（`shouldTriggerAutoReply`、`chat/autoReply.ts`へ集約）。
+   *
+   * ゲーティングは`shouldTriggerAutoReply`に任せる。既存ループが走っている間は自動返信
+   * しない排他もそこに含む。送る材料は`lastAgentMessage`（直前ターンの最後のエージェント
+   * 発言）で、ターンが失敗していれば材料を待たずOFFにする（Issueの停止条件
+   * 「ターンが失敗した」）。
+   */
+  private maybeAutoReply(entry: ClaudePanel, state: ChatState, turnFinished: boolean): void {
+    if (entry.disposed || !state.autoReply) {
+      return;
+    }
+    if (turnFinished && state.turnFailed) {
+      this.stopAutoReply(entry, 'turnFailed');
+      return;
+    }
+    const shouldTrigger = shouldTriggerAutoReply({
+      autoReplyEnabled: state.autoReply,
+      loopRunning: entry.loop.getStatus().running && !entry.loop.isPaused,
+      turnFinished,
+      busy: state.busy,
+      approvalsPending: state.approvals.length,
+      queuedPending: state.queued.length,
+      turnFailed: state.turnFailed,
+    });
+    if (!shouldTrigger) {
+      return;
+    }
+    const message = lastAgentMessage(state.items);
+    if (message === undefined || message.text.trim() === '') {
+      return;
+    }
+    void this.runAutoReplyTurn(entry, message.text).catch((e: unknown) => {
+      this.reportError(e);
+    });
+  }
+
+  /**
+   * 自動返信モードをOFFにする。返信役があれば閉じ、往復回数・応答履歴をリセットする。
+   * 理由は会話へ1行残す（`noteLocalEvent`）。既にOFFなら何もしない（複数箇所から
+   * 呼んでも安全にするため）。
+   */
+  private stopAutoReply(entry: ClaudePanel, reason: AutoReplyStopReason): void {
+    if (entry.disposed) {
+      return;
+    }
+    const wasOn = entry.session.getState().autoReply;
+    entry.session.setAutoReply(false);
+    entry.autoReplyTurnCount = 0;
+    entry.autoReplyHistory = [];
+    // もう一度ONにしたときは、残っているカードを改めて返信役へ聞けるようにする
+    entry.autoReplyAskUserQuestionInFlight.clear();
+    const agent = entry.autoReplyAgent;
+    entry.autoReplyAgent = undefined;
+    agent?.close(autoReplyAgentCloseReasonFor(reason));
+    if (wasOn) {
+      entry.session.noteLocalEvent(`autoReplyStop:${Date.now()}`, describeAutoReplyStopReason(reason));
+    }
+  }
+
+  /**
+   * 自動返信の1往復を実行する。返信役（`AutoReplyAgent`）が無ければ（またはこの往復のために
+   * 前回閉じられていれば）ここで開く。以降は同じ返信役へ送り、周をまたいで文脈を保つ。
+   *
+   * 応答が停止の目印・上限到達・停滞・失敗のいずれかならモードをOFFにする。それ以外は
+   * `sendFromLoop`で次のuserメッセージとして送り、会話へ「自動返信」の印を1行残す。
+   */
+  private async runAutoReplyTurn(entry: ClaudePanel, lastAgentMessageText: string): Promise<void> {
+    if (entry.disposed) {
+      return;
+    }
+    const config = readAutoReplyConfig();
+    if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
+      const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+      if (cwd === undefined) {
+        this.log.warn('自動返信: ワークスペースの場所が分からないため返信役を開けません');
+        this.stopAutoReply(entry, 'advisorFailed');
+        return;
+      }
+      entry.autoReplyAgent = new AutoReplyAgent({
+        host: this,
+        cwd,
+        model: config.model,
+        timeoutMs: config.timeoutSeconds * 1000,
+        originalRequest: firstUserMessageText(entry.session.getState().items) ?? '',
+        log: this.log,
+      });
+    }
+    const agent = entry.autoReplyAgent;
+    if (agent.isBusy()) {
+      return;
+    }
+    const result = await agent.reply(lastAgentMessageText);
+    if (entry.disposed) {
+      agent.close('tabClosed');
+      return;
+    }
+    if (!entry.session.getState().autoReply) {
+      // 待っている間にOFFにされた（人の操作等）。ここでは何もしない
+      return;
+    }
+    if (!result.ok) {
+      this.stopAutoReply(entry, 'advisorFailed');
+      return;
+    }
+    if (isAutoReplyStop(result.response)) {
+      this.stopAutoReply(entry, 'stopMarker');
+      return;
+    }
+    entry.autoReplyTurnCount += 1;
+    if (hasReachedAutoReplyMaxTurns(entry.autoReplyTurnCount, config.maxTurns)) {
+      this.stopAutoReply(entry, 'maxTurns');
+      return;
+    }
+    const message = extractAutoReplyMessage(result.response);
+    const stallThreshold = readWorkflowsConfig().stallRepeatCount;
+    entry.autoReplyHistory = pushTurnSignature(entry.autoReplyHistory, message, stallThreshold);
+    if (detectStalledLoop(entry.autoReplyHistory, stallThreshold)) {
+      this.stopAutoReply(entry, 'stalled');
+      return;
+    }
+    entry.session.noteLocalEvent(`autoReply:${Date.now()}`, `自動返信: ${message}`);
+    try {
+      this.sendFromLoop(entry, message);
+    } catch {
+      // 失敗は`sendFromLoop`内で既に報告済み。自動返信はここで止める
+      this.stopAutoReply(entry, 'turnFailed');
+    }
+  }
+
+  /**
+   * AskUserQuestionの承認カードへ、返信役に選ばせた答えを自動で返す（Issue #1353）。
+   *
+   * `onSessionChange`から`notifyNewApprovals`の直後に毎回呼ぶ。新しく現れた
+   * `kind: 'askUserQuestion'`の要求だけを対象にし、`autoReplyAskUserQuestionInFlight`で
+   * 同じ要求への二重の問い合わせを防ぐ。検証に通らない・失敗・タイムアウトのときは
+   * カードをそのまま残し、人の回答を待つ（コマンド実行などの承認は対象外、Issueの
+   * 確認点「対象はAskUserQuestionだけ」）。
+   */
+  private maybeAutoAnswerAskUserQuestion(entry: ClaudePanel, state: ChatState): void {
+    if (entry.disposed || !state.autoReply) {
+      return;
+    }
+    for (const approval of state.approvals) {
+      if (approval.kind !== 'askUserQuestion' || approval.questions === undefined) {
+        continue;
+      }
+      const key = String(approval.requestId);
+      if (entry.autoReplyAskUserQuestionInFlight.has(key)) {
+        continue;
+      }
+      // 終わっても集合から外さない。検証に通らずカードを残した要求を、状態が変わるたびに
+      // 返信役へ問い直すと、人が答えるまで利用枠を消費し続けるため、1つの要求には1回だけ聞く
+      entry.autoReplyAskUserQuestionInFlight.add(key);
+      void this.runAutoReplyAskUserQuestionTurn(entry, approval.requestId, approval.questions).catch(
+        (e: unknown) => {
+          this.reportError(e);
+        },
+      );
+    }
+  }
+
+  private async runAutoReplyAskUserQuestionTurn(
+    entry: ClaudePanel,
+    requestId: number | string,
+    questions: AskUserQuestionItem[],
+  ): Promise<void> {
+    if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
+      const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
+      if (cwd === undefined) {
+        return;
+      }
+      const config = readAutoReplyConfig();
+      entry.autoReplyAgent = new AutoReplyAgent({
+        host: this,
+        cwd,
+        model: config.model,
+        timeoutMs: config.timeoutSeconds * 1000,
+        originalRequest: firstUserMessageText(entry.session.getState().items) ?? '',
+        log: this.log,
+      });
+    }
+    const agent = entry.autoReplyAgent;
+    if (agent.isBusy()) {
+      // 通常ターンの往復と重ならない想定だが、重なった場合はカードを残して次回に譲る
+      return;
+    }
+    const result = await agent.reply(buildAutoReplyAskUserQuestionPrompt(questions));
+    if (entry.disposed || !entry.session.getState().autoReply || !result.ok) {
+      return;
+    }
+    const selections = parseAutoReplyAskUserQuestionResponse(result.response, questions);
+    if (selections === undefined) {
+      // 検証に通らない返事はカードを残す。会話には理由を残さない
+      // （AskUserQuestion自体が承認カードとして残るため、二重に通知しない）
+      return;
+    }
+    entry.session.answerAskUserQuestion(requestId, selections);
+    entry.session.noteLocalEvent(
+      `autoReplyAskUserQuestion:${Date.now()}`,
+      '自動返信: AskUserQuestionに自動回答しました',
+    );
+    // 自動回答も往復の1回に数える。数えないと、AskUserQuestionだけを出し続ける出力に
+    // 回数上限（agent.chat.autoReply.maxTurns）が効かない
+    entry.autoReplyTurnCount += 1;
+    if (hasReachedAutoReplyMaxTurns(entry.autoReplyTurnCount, readAutoReplyConfig().maxTurns)) {
+      this.stopAutoReply(entry, 'maxTurns');
+    }
+  }
+
+  /**
+   * ループへの割り込み（`LoopController.noteUserAction`）と自動返信の終了（Issue #1353の
+   * 停止条件「人が入力欄から発言した、または中断ボタンを押した」）をまとめて行う。
+   *
+   * 自動返信のON/OFFトグル自体（`'autoReply'`メッセージ）と`'loop/start'`は、
+   * 意図が異なる（切り替えた直後に自分で自分を止めてしまう／理由を`loopStarted`で
+   * 正確に残したい）ため、このwrapperを経由せず`entry.loop.noteUserAction()`を直接呼ぶ。
+   */
+  private noteUserAction(entry: ClaudePanel): void {
+    entry.loop.noteUserAction();
+    this.stopAutoReply(entry, 'userAction');
   }
 
   /**
@@ -1829,6 +2083,9 @@ export class ClaudeChatViewManager
     this.cancelLimitAutoResume(entry);
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
     this.handoffDrafts.delete(entry.secondOpinionKey);
+    // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
+    entry.autoReplyAgent?.close('tabClosed');
+    entry.autoReplyAgent = undefined;
   }
 
   /** 拡張機能の終了時に、残っている相談相手をすべて閉じる（Issue #929）。 */
@@ -2207,6 +2464,8 @@ export class ClaudeChatViewManager
       readAutoHandoffEnabled(),
       // 自動引き継ぎの自動承認の初期値（Issue #1350）。仕組みは上と同じ二段構え
       readAutoHandoffAutoApprove(),
+      // 自動返信モードの初期値（Issue #1353）。同じ理由で値だけを渡す
+      readAutoReplyConfig().enabled,
       this.createOutputOffload(),
     );
 
@@ -2250,6 +2509,10 @@ export class ClaudeChatViewManager
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
       safeBoundaryProbing: false,
+      autoReplyAgent: undefined,
+      autoReplyTurnCount: 0,
+      autoReplyHistory: [],
+      autoReplyAskUserQuestionInFlight: new Set(),
     };
     return entry;
   }
@@ -2343,7 +2606,11 @@ export class ClaudeChatViewManager
   ): TaskSession {
     return {
       sessionId,
-      runLoop: (plan: LoopPlan) => entry.loop.start(plan, entry.session.getState().items),
+      runLoop: (plan: LoopPlan) => {
+        // ループと自動返信（Issue #1353）は排他。ループを始めるときは自動返信を切る
+        this.stopAutoReply(entry, 'loopStarted');
+        entry.loop.start(plan, entry.session.getState().items);
+      },
       send: (text: string) => this.sendOnce(entry, text),
       setPromptTransform: (transform) => {
         entry.promptTransform = transform;
@@ -2418,6 +2685,10 @@ export class ClaudeChatViewManager
       );
     }
     this.notifyNewApprovals(entry, state);
+    // AskUserQuestionの自動回答（Issue #1353）はCodexには無いClaude Code固有の経路。
+    // 承認カードが増えるたびに判定する（ターン完了を待たない。ツール実行中に問い合わせが
+    // 来ることがあるため）
+    this.maybeAutoAnswerAskUserQuestion(entry, state);
     if (state.usage !== undefined) {
       this.onUsage(state.usage);
     }
@@ -2426,6 +2697,9 @@ export class ClaudeChatViewManager
     }
     this.scheduleLimitAutoResume(entry, state, turnFinished);
     this.maybeAutoHandoff(entry, state);
+    // 自動返信（Issue #1353）もターン完了契機。ループへ渡す前に判定する
+    // （`loop/start`とautoReplyは排他のため、どちらが先でも実害は無い）
+    this.maybeAutoReply(entry, state, turnFinished);
     // ターンの完了を見て次の指示を送るため、描画より先にループへ渡す
     entry.loop.observe(state);
     this.postState(entry);
@@ -2758,7 +3032,7 @@ export class ClaudeChatViewManager
     }
     this.cancelLimitAutoResume(entry);
     this.clearLimitAutoResumeSuppression(entry);
-    entry.loop.noteUserAction();
+    this.noteUserAction(entry);
     try {
       const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
       this.dispatch(entry, sent, true, text);
@@ -2802,7 +3076,7 @@ export class ClaudeChatViewManager
         // 人が自分で送り直したら、中断で止めていた自動再開も再び有効にする（Issue #1202）
         this.clearLimitAutoResumeSuppression(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         // 行頭が !/# の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5/#6、
         // design.md §14.29）。control_requestに相当する経路が無いため、Claudeへ発言として
         // 渡すとモデルのターンを消費して意図とずれる（design.mdの調査結果を参照）
@@ -2919,7 +3193,7 @@ export class ClaudeChatViewManager
         // `ClaudeStreamSession.interrupt`は`usage`を残したまま`busy:false`を通知する。
         // タイマーを消すだけでは、その通知から予約が作り直される（Issue #1202）
         this.suppressLimitAutoResume(entry);
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         entry.session.interrupt();
         return;
       }
@@ -3079,7 +3353,7 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'rewind' && typeof m['messageId'] === 'string') {
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         void this.rewindFiles(entry, m['messageId']);
         return;
       }
@@ -3096,12 +3370,12 @@ export class ClaudeChatViewManager
       ) {
         // 送った指示の書き直し（issue #1073）。分岐と同じく新しいタブを開くだけで、
         // この会話（entry）そのものには何も送らない
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         void this.forkFromTurn(entry, m['turnId'], m['text'], m['restoreFiles'] === true);
         return;
       }
       if (type === 'planMode') {
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         // 抜けるときは設定の承認方法へ戻す。タスク単位の設定があればそちらを優先する
         // （design.md §16.10の5。無ければ従来通りグローバル設定、空なら既定=manual）
         const fallback = (entry.taskConfig ?? readClaudeConfig().claude).permissionMode;
@@ -3109,7 +3383,7 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'fastMode') {
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         entry.session.setFastMode(m['on'] === true);
         return;
       }
@@ -3128,6 +3402,18 @@ export class ClaudeChatViewManager
         entry.session.setAutoHandoffAutoApprove(m['on'] === true);
         return;
       }
+      if (type === 'autoReply') {
+        // トグル自体の操作。`noteUserAction`（wrapper）経由だと自分でONにした直後に
+        // 自分でOFFへ戻してしまうため、ループへの割り込みだけ生で行う
+        entry.loop.noteUserAction();
+        const on = m['on'] === true;
+        if (on) {
+          entry.session.setAutoReply(true);
+        } else {
+          this.stopAutoReply(entry, 'userAction');
+        }
+        return;
+      }
       if (type === 'handoffCostPreset') {
         // 設定を選ぶだけで会話へは何も送らない。ループへの割り込み扱いにはしない。
         // このハンドラは同期のため、QuickPickの完了は待たずに投げっぱなしにする
@@ -3143,7 +3429,7 @@ export class ClaudeChatViewManager
       if (type === 'sendQueued' && typeof m['index'] === 'number') {
         // 待たせていた指示を人が通すのも明示的な送信（Issue #1202）
         this.clearLimitAutoResumeSuppression(entry);
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         entry.session.sendQueued(m['index']);
         return;
       }
@@ -3158,7 +3444,7 @@ export class ClaudeChatViewManager
       if (type === 'flushQueue') {
         // 待たせていた指示を先に通すため、ループは割り込みとして止める
         this.clearLimitAutoResumeSuppression(entry);
-        entry.loop.noteUserAction();
+        this.noteUserAction(entry);
         entry.session.flushQueue();
         return;
       }
@@ -3193,6 +3479,8 @@ export class ClaudeChatViewManager
         this.log.info(`ループ開始: 最大${plan.maxIterations}回`);
         // 人が回し直したら、中断で止めていた自動再開も再び有効にする（Issue #1202）
         this.clearLimitAutoResumeSuppression(entry);
+        // ループと自動返信（Issue #1353）は排他。ループを始めるときは自動返信を切る
+        this.stopAutoReply(entry, 'loopStarted');
         entry.loop.start(plan, entry.session.getState().items);
         return;
       }
@@ -3299,7 +3587,7 @@ export class ClaudeChatViewManager
     }
     try {
       // 圧縮は新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       entry.session.compact();
     } catch (e) {
       this.reportError(e);
@@ -3320,7 +3608,7 @@ export class ClaudeChatViewManager
     }
     try {
       // compactと同じく新しいターンを起こす。ループの指示と重ならないよう割り込み扱いにする
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       entry.session.importConfig();
     } catch (e) {
       this.reportError(e);
@@ -3342,7 +3630,7 @@ export class ClaudeChatViewManager
     try {
       // compact/importConfigと同じく新しいターンを起こす。ループの指示と重ならないよう
       // 割り込み扱いにする
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       entry.session.requestUsageCredits();
     } catch (e) {
       this.reportError(e);
@@ -3359,7 +3647,7 @@ export class ClaudeChatViewManager
    */
   private recap(entry: ClaudePanel): void {
     try {
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       entry.session.recap();
     } catch (e) {
       this.reportError(e);
@@ -3375,7 +3663,7 @@ export class ClaudeChatViewManager
    */
   private setAutocompactWindow(entry: ClaudePanel, window: string): void {
     try {
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       entry.session.setAutocompactWindow(window);
     } catch (e) {
       this.reportError(e);
@@ -3434,7 +3722,7 @@ export class ClaudeChatViewManager
     try {
       // compact/importConfig/requestUsageCreditsと同じく新しいターンを起こす。
       // ループの指示と重ならないよう割り込み扱いにする
-      entry.loop.noteUserAction();
+      this.noteUserAction(entry);
       entry.session.sendDebugCommand();
     } catch (e) {
       this.reportError(e);

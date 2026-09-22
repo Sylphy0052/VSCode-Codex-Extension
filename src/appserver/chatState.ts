@@ -692,6 +692,18 @@ export interface ChatState {
    */
   autoHandoffAutoApprove: boolean;
   /**
+   * 自動返信モード（Issue #1353）がこのセッションで有効か。
+   *
+   * 初期値はユーザー設定（`agent.chat.autoReply.enabled`、既定OFF）から入り、そこから先は
+   * `autoHandoff`と同じく会話ごとにセッション単位で持つ。切り替えは入力欄の「…」メニューの
+   * トグルからで、設定へは書き戻さない。既存のループ（`loop/start`）とは排他で、片方が
+   * 走っている間はもう片方をOFFにする。
+   *
+   * 下の `initialChatState` が `false` なのは `autoHandoff` と同じ理由（この層は `vscode`
+   * をimportしないため）。設定を読むのはview層で、セッションの構築時に初期値として渡される。
+   */
+  autoReply: boolean;
+  /**
    * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
    *
    * `initialize` の応答の `fast_mode_state` 由来。**Claude Code側にしか無い**概念で、
@@ -798,6 +810,7 @@ export const initialChatState: ChatState = {
   planMode: false,
   autoHandoff: false,
   autoHandoffAutoApprove: false,
+  autoReply: false,
   reviewing: false,
   turnResultText: '',
   turnEditedFiles: [],

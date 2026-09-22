@@ -2475,6 +2475,7 @@ export function chatScript(
     applyPlanMode(state.planMode);
     applyAutoHandoff(state.autoHandoff);
     applyAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+    applyAutoReply(state.autoReply);
     applyFastMode(state);
     renderAttachments(state.attachments);
     applyLoop(state.loop);
@@ -2605,6 +2606,18 @@ export function chatScript(
     if (!button) return;
     button.setAttribute('aria-pressed', autoHandoffAutoApprove ? 'true' : 'false');
     button.className = autoHandoffAutoApprove ? 'toggled' : 'secondary';
+  }
+
+  // いま自動返信がONか（Issue #1353）。押したときに反転させるため覚えておく
+  let autoReply = false;
+
+  /** 自動返信ボタンの見た目。自動引き継ぎボタンと同じく、押されているかが常に分かるようにする。 */
+  function applyAutoReply(on) {
+    autoReply = !!on;
+    const button = el('autoReplyToggle');
+    if (!button) return;
+    button.setAttribute('aria-pressed', autoReply ? 'true' : 'false');
+    button.className = autoReply ? 'toggled' : 'secondary';
   }
 
   // いまFast modeか（Claude Codeのみ）。押したときに反転させるため覚えておく
@@ -3411,6 +3424,14 @@ export function chatScript(
   if (autoHandoffAutoApproveButton) {
     autoHandoffAutoApproveButton.addEventListener('click', () =>
       vscode.postMessage({ type: 'autoHandoffAutoApprove', on: !autoHandoffAutoApprove }),
+    );
+  }
+
+  // 自動返信（Issue #1353）。これも見た目は状態が返ってきてから変える
+  const autoReplyButton = el('autoReplyToggle');
+  if (autoReplyButton) {
+    autoReplyButton.addEventListener('click', () =>
+      vscode.postMessage({ type: 'autoReply', on: !autoReply }),
     );
   }
 
