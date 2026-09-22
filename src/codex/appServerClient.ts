@@ -38,7 +38,12 @@ import {
 import { parseModelList, readNextCursor, type ModelInfo } from './modelCatalog';
 import { parsePluginInstalled, parsePluginProvides, type PluginReadRef } from './pluginsStatus';
 import { parseSkillsList } from './skillsStatus';
-import { normalizeThreadList, parseThreadListPage, type ThreadListOutcome } from './threadList';
+import {
+  normalizeThreadList,
+  parseThreadListPage,
+  type ThreadListOutcome,
+  type ThreadListPageConsumer,
+} from './threadList';
 
 export type ForkResult = { ok: true; threadId: string } | { ok: false; error: string };
 
@@ -63,7 +68,7 @@ const CLIENT_VERSION = '0.0.1';
 /** `model/list` のページ数の上限。応答が壊れて無限ループになるのを防ぐ。 */
 const MAX_MODEL_PAGES = 20;
 
-/** `thread/list` の1回あたりの要求件数。応答が壊れて無限ループになるのを防ぐページ数上限も併せて持つ。 */
+/** `thread/list` の1回あたりの要求件数。 */
 const THREAD_LIST_PAGE_SIZE = 100;
 const MAX_THREAD_LIST_PAGES = 20;
 
@@ -170,29 +175,61 @@ export class AppServerClient {
    * 退避する」のかを呼び出し側（SessionStore）が区別し、出力パネルに理由を残せるように
    * するため（他のメソッドのように内部で握りつぶさない）。
    */
-  async listThreads(limit: number, archivedSessionsDir: string): Promise<ThreadListOutcome> {
-    if (limit <= 0) {
+  async listThreads(
+    limit: number,
+    archivedSessionsDir: string,
+    consumePage?: ThreadListPageConsumer,
+  ): Promise<ThreadListOutcome> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
       return { ok: true, sessions: [] };
     }
 
     const result = await this.call<unknown[]>(async (request) => {
       const items: unknown[] = [];
+      const seenCursors = new Set<string>();
       let cursor: string | undefined;
-
-      for (let page = 0; page < MAX_THREAD_LIST_PAGES && items.length < limit; page += 1) {
+      for (
+        let page = 0;
+        consumePage !== undefined || (page < MAX_THREAD_LIST_PAGES && items.length < limit);
+        page += 1
+      ) {
+        const remaining = consumePage === undefined ? limit - items.length : limit;
         const response = await request('thread/list', {
-          limit: Math.min(THREAD_LIST_PAGE_SIZE, limit - items.length),
+          limit: Math.min(THREAD_LIST_PAGE_SIZE, remaining),
           ...(cursor === undefined ? {} : { cursor }),
         });
         if (response.error !== undefined) {
           return { ok: false, error: response.error.message };
         }
+
         const parsed = parseThreadListPage(response.result);
-        items.push(...parsed.items);
-        cursor = parsed.nextCursor;
-        if (cursor === undefined) {
-          break;
+        if (
+          parsed.nextCursor !== undefined &&
+          (parsed.items.length === 0 ||
+            parsed.nextCursor === cursor ||
+            seenCursors.has(parsed.nextCursor))
+        ) {
+          return { ok: false, error: 'thread/listのページングが進みませんでした' };
         }
+
+        if (consumePage !== undefined) {
+          const continueScan = await consumePage({
+            sessions: normalizeThreadList(parsed.items, archivedSessionsDir),
+            nextCursor: parsed.nextCursor,
+            rawCount: parsed.items.length,
+          });
+          if (!continueScan || parsed.nextCursor === undefined) {
+            return { ok: true, value: [] };
+          }
+        } else {
+          items.push(...parsed.items);
+          if (parsed.nextCursor === undefined) {
+            break;
+          }
+        }
+
+        seenCursors.add(parsed.nextCursor);
+        cursor = parsed.nextCursor;
       }
       return { ok: true, value: items };
     });

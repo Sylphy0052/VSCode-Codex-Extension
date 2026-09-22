@@ -1,4 +1,4 @@
-import type { ThreadListOutcome } from '../codex/threadList';
+import type { ThreadListOutcome, ThreadListPageConsumer } from '../codex/threadList';
 import type { SessionMeta } from '../codex/types';
 
 /**
@@ -103,12 +103,13 @@ export type SymlinkResolution =
  * `thread/list` を叩く口。SessionStoreはこれを介してのみapp-serverを知る
  * （app-serverの起動・JSON-RPC自体はAppServerClientの責務）。
  *
- * `limit` は取得したい件数の上限（`codex.history.maxEntries`）、`archivedSessionsDir` は
- * archived判定に使うディレクトリ（`CodexPaths.archivedSessions`）。
+ * `limit` は1回に取得する件数、`archivedSessionsDir` はarchived判定に使うディレクトリ
+ * （`CodexPaths.archivedSessions`）。`consumePage`があれば同じプロセスで後続を読む。
  */
 export type ThreadListPort = (
   limit: number,
   archivedSessionsDir: string,
+  consumePage?: ThreadListPageConsumer,
 ) => Promise<ThreadListOutcome>;
 
 /** `thread/list`で名前が空だったスレッドだけへ、導出した名前を保存する口。 */

@@ -28,6 +28,8 @@ export const MTIME_CONCURRENCY_LIMIT = 32;
 const HANDOFF_THREAD_LIST_LIMIT = 20;
 const FILE_FALLBACK_CACHE_MS = 30_000;
 
+const THREAD_LIST_BATCH_SIZE = 100;
+
 /**
  * 表示名を作るために読む先頭行数。
  * developerロールの前置きが数行入るため1行では足りない。
@@ -110,9 +112,9 @@ export class SessionStore {
   /**
    * 一覧を構築する。
    *
-   * まず `thread/list`（issue #45）を試す。空でない結果が返ればそれを使い、ファイルは
-   * 一切読まない。空か失敗のときはファイル読みへ退避し、その理由を
-   * `threadListFallbackReason` に残す（黙って表示が変わらないようにするため）。
+   * まず `thread/list`（issue #45）を試す。空でない結果は一覧の骨格に使い、rolloutの
+   * 実在確認と名称補完に限ってファイルを読む。空か失敗のときはファイル読みへ退避し、
+   * その理由を `threadListFallbackReason` に残す（黙って表示が変わらないようにするため）。
    */
   async list(options: ListOptions): Promise<ListResult> {
     const fallbackKey = JSON.stringify(options);
@@ -124,22 +126,68 @@ export class SessionStore {
       return this.fileFallback.result;
     }
     if (this.threadList !== undefined) {
+      const useFileFallback = async (reason: string): Promise<ListResult> => {
+        const fallback = await this.listFromFiles(options);
+        const result = { ...fallback, threadListFallbackReason: reason };
+        this.fileFallback = {
+          key: fallbackKey,
+          expiresAt: Date.now() + FILE_FALLBACK_CACHE_MS,
+          result,
+        };
+        return result;
+      };
+      if (!Number.isSafeInteger(options.maxEntries)) {
+        return useFileFallback('履歴の最大件数が安全な整数ではありません');
+      }
+      const maxEntries = Math.max(0, options.maxEntries);
+      const availableCandidates: SessionSummary[] = [];
+      let unresolved = 0;
+      let sawCandidates = false;
+      let scannedResult: ListResult | undefined;
+      let scanFallbackReason: string | undefined;
       const outcome = await this.threadList(
-        Math.max(0, options.maxEntries),
+        THREAD_LIST_BATCH_SIZE,
         this.paths.archivedSessions,
+        async (page) => {
+          if (page.rawCount === 0 && page.nextCursor !== undefined) {
+            scanFallbackReason = 'thread/listの空ページが続きました';
+            return false;
+          }
+
+          sawCandidates ||= page.sessions.length > 0;
+          const checked = await this.availableThreadListSessions(page.sessions, options);
+          availableCandidates.push(...checked.sessions);
+          unresolved += checked.unresolved;
+          if (availableCandidates.length >= maxEntries || page.nextCursor === undefined) {
+            if (sawCandidates) {
+              scannedResult = await this.finalizeThreadList(
+                availableCandidates,
+                maxEntries,
+                unresolved,
+              );
+            } else {
+              scanFallbackReason = 'thread/listの応答が空でした';
+            }
+            return false;
+          }
+          return true;
+        },
       );
-      if (outcome.ok && outcome.sessions.length > 0) {
+
+      if (!outcome.ok) {
+        return useFileFallback(outcome.error);
+      }
+      if (scannedResult !== undefined) {
+        return scannedResult;
+      }
+      if (scanFallbackReason !== undefined) {
+        return useFileFallback(scanFallbackReason);
+      }
+      // テスト用・旧実装のPortがconsumePageを処理しない場合は、従来の集約結果を使う。
+      if (outcome.sessions.length > 0) {
         return this.buildFromThreadList(outcome.sessions, options);
       }
-      const reason = outcome.ok ? 'thread/listの応答が空でした' : outcome.error;
-      const fallback = await this.listFromFiles(options);
-      const result = { ...fallback, threadListFallbackReason: reason };
-      this.fileFallback = {
-        key: fallbackKey,
-        expiresAt: Date.now() + FILE_FALLBACK_CACHE_MS,
-        result,
-      };
-      return result;
+      return useFileFallback('thread/listの応答が空でした');
     }
 
     return this.listFromFiles(options);
@@ -150,20 +198,38 @@ export class SessionStore {
     this.fileFallback = undefined;
   }
 
-  /** `thread/list`で得たセッションにスコープ絞り込み、名称補完、件数上限を適用する。 */
-  private async buildFromThreadList(
+  /** `thread/list`の1ページにスコープ絞り込みとrolloutの実在確認を適用する。 */
+  private async availableThreadListSessions(
     sessions: SessionSummary[],
     options: ListOptions,
-  ): Promise<ListResult> {
+  ): Promise<{ sessions: SessionSummary[]; unresolved: number }> {
     const scoped = sessions.filter(
-      (s) =>
+      (session) =>
         options.scope !== 'workspace' ||
-        (s.cwd !== undefined && isWithinAny(s.cwd, options.workspaceFolders)),
+        (session.cwd !== undefined && isWithinAny(session.cwd, options.workspaceFolders)),
     );
-    const sorted = [...scoped].sort((a, b) =>
+    const checked = await mapWithLimit(scoped, MTIME_CONCURRENCY_LIMIT, async (session) => {
+      if (session.rolloutPath === undefined) {
+        return session;
+      }
+      return (await this.fs.mtimeMs(session.rolloutPath)) === undefined ? undefined : session;
+    });
+    const available = checked.filter(
+      (session): session is SessionSummary => session !== undefined,
+    );
+    return { sessions: available, unresolved: scoped.length - available.length };
+  }
+
+  /** 利用可能な`thread/list`候補を並べ、件数制限と名称補完を適用する。 */
+  private async finalizeThreadList(
+    sessions: SessionSummary[],
+    maxEntries: number,
+    unresolved: number,
+  ): Promise<ListResult> {
+    const sorted = [...sessions].sort((a, b) =>
       a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
     );
-    const limited = sorted.slice(0, Math.max(0, options.maxEntries));
+    const limited = sorted.slice(0, maxEntries);
     const named = await mapWithLimit(limited, MTIME_CONCURRENCY_LIMIT, async (session) => {
       if (session.threadName !== undefined || session.rolloutPath === undefined) {
         return session;
@@ -175,11 +241,20 @@ export class SessionStore {
       this.requestThreadNameUpdate(session.id, threadName);
       return { ...session, threadName };
     });
-    return {
-      sessions: named,
-      skippedIndexLines: 0,
-      unresolved: 0,
-    };
+    return { sessions: named, skippedIndexLines: 0, unresolved };
+  }
+
+  /** `thread/list`の集約結果へスコープ絞り込み、実在確認、名称補完を適用する。 */
+  private async buildFromThreadList(
+    sessions: SessionSummary[],
+    options: ListOptions,
+  ): Promise<ListResult> {
+    const checked = await this.availableThreadListSessions(sessions, options);
+    return this.finalizeThreadList(
+      checked.sessions,
+      Math.max(0, options.maxEntries),
+      checked.unresolved,
+    );
   }
 
   /**

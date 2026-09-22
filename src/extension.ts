@@ -402,8 +402,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 履歴の取得はまずthread/listを試し、空か失敗ならファイル読みへ退避する（issue #45）。
   // storeの構築時点ではcodexPath（codexの解決結果）がまだ無いため、appServerを作った
   // ここで事後に配線する
-  store.attachThreadList((limit, archivedSessionsDir) =>
-    appServer.listThreads(limit, archivedSessionsDir),
+  store.attachThreadList((limit, archivedSessionsDir, consumePage) =>
+    appServer.listThreads(limit, archivedSessionsDir, consumePage),
   );
   store.attachThreadNameSetter((threadId, name) => appServer.setThreadName(threadId, name));
   const claudeModels = new ClaudeModelProbe(claudePath, log);
