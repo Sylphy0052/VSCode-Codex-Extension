@@ -214,9 +214,7 @@ export class SessionStore {
       }
       return (await this.fs.mtimeMs(session.rolloutPath)) === undefined ? undefined : session;
     });
-    const available = checked.filter(
-      (session): session is SessionSummary => session !== undefined,
-    );
+    const available = checked.filter((session): session is SessionSummary => session !== undefined);
     return { sessions: available, unresolved: scoped.length - available.length };
   }
 
