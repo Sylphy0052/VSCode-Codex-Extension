@@ -909,7 +909,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "作業の節目で自動引き継ぎする（Issue #1351）。直前のターンで次のコマンドが成功して終わったとき、コンテキスト残量・model/effortの変化・分類器の結果に関係なく引き継ぐ。Issue起票後は `gh issue create` / `glab issue create`、レビュー前は `gh pr create` / `glab mr create`、次のIssueへ進む前は `gh pr merge` / `glab mr merge`。回答待ち・承認待ち・`/loop` 実行中・タスク用セッション・バックグラウンド実行中は発火しない。PR作成と自己レビューを同じターンで続けた場合は、レビューを終えたターンの終わりで発火する。"
+          "markdownDescription": "作業の節目で自動引き継ぎする（Issue #1351 / #1357）。直前のターンで次のコマンド・呼び出しが成功して終わったとき、コンテキスト残量・model/effortの変化・分類器の結果に関係なく引き継ぐ。Issue起票後は `gh issue create` / `glab issue create`、レビュー前は `gh pr create` / `glab mr create`、レビュー後は `gh pr review` / `glab mr approve` か、名前に `review` を含むsubagent・skill（`review-spec` / `gitlab-review` など）と `security-auditor` の呼び出し（Claude Codeのみ）、次のIssueへ進む前は `gh pr merge` / `glab mr merge`。回答待ち・承認待ち・`/loop` 実行中・タスク用セッション・バックグラウンド実行中は発火しない。同じターンに複数の節目があれば、工程の後ろのもの（次のIssueへ進む前 > レビュー後 > レビュー前 > Issue起票後）で1回だけ発火する。"
         },
         "agent.autoHandoff.closeOldTab": {
           "type": "boolean",

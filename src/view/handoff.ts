@@ -694,24 +694,27 @@ export function extractHandoffPrompt(text: string): string | undefined {
  *
  * - `issueCreated`: Issue起票後（実装に着手する前）
  * - `prCreated`: PR/MR作成後（レビューに入る前）
+ * - `reviewed`: レビュー後（Issue #1357）
  * - `merged`: マージ後（次のIssueへ進む前）
  */
-export type HandoffMilestone = 'issueCreated' | 'prCreated' | 'merged';
+export type HandoffMilestone = 'issueCreated' | 'prCreated' | 'reviewed' | 'merged';
 
 export interface DetectedMilestone {
   milestone: HandoffMilestone;
-  /** 根拠にしたコマンド行。ポインタファイルとログへ出す。 */
+  /** 根拠にしたコマンド行（subagent・skillなら `Agent: review-spec` の形）。ポインタファイルとログへ出す。 */
   command: string;
 }
 
 const MILESTONE_LABEL: Record<HandoffMilestone, string> = {
   issueCreated: 'Issue起票後',
   prCreated: 'レビュー前',
+  reviewed: 'レビュー後',
   merged: '次のIssueへ進む前',
 };
 
 /**
  * 節目の判定規則。工程の後ろのものから並べ、複数当たったときは先頭を採る。
+ * `kind` は照合する会話ログの項目種別。
  *
  * `gh` / `glab` の直後に大域オプション（`-R owner/repo` など）が入る書き方もあるため、
  * コマンド名とサブコマンドの間はオプション（とその値）だけを許す。コマンド名はコマンドの先頭（行頭・`;` `&`
@@ -729,14 +732,37 @@ function commandPattern(ghSubcommand: string, glabSubcommand: string): RegExp {
   return new RegExp(`${COMMAND_HEAD}(?:${gh}|${glab})`, 'mu');
 }
 
-const MILESTONE_RULES: ReadonlyArray<{ milestone: HandoffMilestone; pattern: RegExp }> = [
-  { milestone: 'merged', pattern: commandPattern(String.raw`pr\s+merge`, String.raw`mr\s+merge`) },
+/**
+ * レビュー用のsubagent・skillの呼び出し（`describeTool` が付ける `Agent: review-spec` の形）。
+ * 種別名・skill名に `review` を含むもの（`review-spec` / `gitlab-review` / `code-review` など）と
+ * `security-auditor` を拾う。
+ */
+const REVIEW_TOOL_PATTERN = /^(?:Agent|Task|Skill): \S*(?:review|security-auditor)/iu;
+
+const MILESTONE_RULES: ReadonlyArray<{
+  milestone: HandoffMilestone;
+  kind: 'commandExecution' | 'mcpToolCall';
+  pattern: RegExp;
+}> = [
+  {
+    milestone: 'merged',
+    kind: 'commandExecution',
+    pattern: commandPattern(String.raw`pr\s+merge`, String.raw`mr\s+merge`),
+  },
+  {
+    milestone: 'reviewed',
+    kind: 'commandExecution',
+    pattern: commandPattern(String.raw`pr\s+review`, String.raw`mr\s+approve`),
+  },
+  { milestone: 'reviewed', kind: 'mcpToolCall', pattern: REVIEW_TOOL_PATTERN },
   {
     milestone: 'prCreated',
+    kind: 'commandExecution',
     pattern: commandPattern(String.raw`pr\s+create`, String.raw`mr\s+create`),
   },
   {
     milestone: 'issueCreated',
+    kind: 'commandExecution',
     pattern: commandPattern(String.raw`issue\s+create`, String.raw`issue\s+create`),
   },
 ];
@@ -751,7 +777,8 @@ function isSucceededCommand(status: string | undefined): boolean {
 const MILESTONE_COMMAND_LIMIT = 200;
 
 /**
- * 直前のターン（最後のユーザー指示より後）で成功したコマンドから、作業の節目を拾う（Issue #1351）。
+ * 直前のターン（最後のユーザー指示より後）で成功したコマンドとsubagent・skill呼び出しから、
+ * 作業の節目を拾う（Issue #1351 / #1357）。
  *
  * 分類器を経由しない決定論的な判定。見つからなければ `undefined`。
  */
@@ -765,13 +792,15 @@ export function detectHandoffMilestone(
       break;
     }
   }
-  const commands = items
+  // 同じ節目が複数あれば最後のものを根拠にするため逆順に持つ（`findLast` はES2022のlibに無い）
+  const succeeded = items
     .slice(start)
-    .filter((item) => item.kind === 'commandExecution' && isSucceededCommand(item.status))
-    .map((item) => item.detail);
+    .filter((item) => isSucceededCommand(item.status))
+    .reverse();
   for (const rule of MILESTONE_RULES) {
-    // 同じ節目が複数あれば最後のものを根拠にする（`findLast` はES2022のlibに無い）
-    const command = [...commands].reverse().find((c) => rule.pattern.test(c));
+    const command = succeeded.find(
+      (item) => item.kind === rule.kind && rule.pattern.test(item.detail),
+    )?.detail;
     if (command !== undefined) {
       const single = command.replace(/\s+/gu, ' ').trim();
       return {

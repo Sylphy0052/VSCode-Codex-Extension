@@ -459,9 +459,21 @@ export function describeTool(
       return { kind: 'webSearch', detail: str(input['url']), diffs: [] };
     case 'AskUserQuestion':
       return { kind: 'askUserQuestion', detail: summarizeAskUserQuestion(input), diffs: [] };
+    // 呼んだsubagent・skillの名前を残す。一覧で判るようにし、レビューの節目の判定にも使う（Issue #1357）
+    case 'Agent':
+    case 'Task':
+      return { kind: 'mcpToolCall', detail: namedTool(name, input['subagent_type']), diffs: [] };
+    case 'Skill':
+      return { kind: 'mcpToolCall', detail: namedTool(name, input['skill']), diffs: [] };
     default:
       return { kind: 'mcpToolCall', detail: name, diffs: [] };
   }
+}
+
+/** `Agent: review-spec` の形にする。名前が無ければツール名だけ。 */
+function namedTool(name: string, target: unknown): string {
+  const value = str(target).trim();
+  return value === '' ? name : `${name}: ${value}`;
 }
 
 /** 会話ログ（`kind: 'askUserQuestion'`）の一覧行に出す短い要約。 */
