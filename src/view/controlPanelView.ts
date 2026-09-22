@@ -98,6 +98,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly settings: SettingsProvider,
     private readonly log: Logger,
+    /** ビューのタイトル横に出す拡張のバージョン（issue #1364）。未指定なら何も出さない。 */
+    private readonly version?: string,
   ) {}
 
   /** 使用量が更新されたときに外から差し込む。読み取りはUsageReaderの責務。 */
@@ -125,6 +127,9 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    if (this.version !== undefined) {
+      view.description = `v${this.version}`;
+    }
     view.webview.options = { enableScripts: true };
     view.webview.html = this.render(view.webview);
 
