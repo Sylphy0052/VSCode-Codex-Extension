@@ -1456,7 +1456,7 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         title:
           '自動で発火した引き継ぎ（手動の引き継ぎボタンは対象外）で、確認ダイアログとセッション統括ページの保留カードを出さず、提案されたmodel/effortでそのまま引き継ぎます（Issue #1350）',
         hidden: false,
-        pressed: false,
+        pressed: true,
         icon: COMPOSER_ICONS.autoHandoffAutoApprove,
       };
     case 'handoffPresetPicker':
