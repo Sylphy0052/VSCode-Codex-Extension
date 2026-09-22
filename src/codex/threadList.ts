@@ -3,6 +3,16 @@ import type { SessionSummary } from './types';
 export type ThreadListOutcome =
   { ok: true; sessions: SessionSummary[] } | { ok: false; error: string };
 
+export interface NormalizedThreadListPage {
+  sessions: SessionSummary[];
+  /** 次ページのcursor。無ければ一覧の末尾。 */
+  nextCursor: string | undefined;
+  /** 正規化で除外する前に受け取った件数。空ページの異常判定に使う。 */
+  rawCount: number;
+}
+
+export type ThreadListPageConsumer = (page: NormalizedThreadListPage) => Promise<boolean>;
+
 export interface ThreadListPage {
   /** そのページに含まれる生のスレッド1件分。個々の形は `normalizeThread` で確定する。 */
   items: unknown[];

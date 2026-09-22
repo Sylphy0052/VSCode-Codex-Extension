@@ -235,6 +235,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function resumeFailureMessage(error: unknown): string {
+  const message = errorMessage(error);
+  if (message.includes('no rollout found for thread id')) {
+    return '会話の保存ファイルが見つかりません。履歴を再読み込みし、表示が残る場合はバックアップにrolloutがあるか確認してください。';
+  }
+  if (message.includes('already has an active writer')) {
+    return 'この会話は別のCodexプロセスで使用中です。同じ会話を開いている別のVS CodeまたはCodexを閉じ、もう一度「会話を読み込む」を押してください。';
+  }
+  return message;
+}
+
 interface ChatPanel extends BaseChatPanel {
   // `panel` / `loop` / `disposed` / `title` / `taskManaged` / `postTimer` /
   // `approvalResolvedListeners` / `notifiedApprovalRequestIds` は`BaseChatPanel`
@@ -1348,8 +1359,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     try {
       await entry.session.resume(threadId, cwd);
     } catch (e) {
-      entry.session.resumeFailed(errorMessage(e));
-      this.reportError(e);
+      const message = resumeFailureMessage(e);
+      entry.session.resumeFailed(message);
+      this.reportError(e, message);
     }
   }
 
@@ -1866,8 +1878,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         try {
           await entry.session.resume(threadId, entry.cwd);
         } catch (e) {
-          entry.session.resumeFailed(errorMessage(e));
-          this.reportError(e);
+          const message = resumeFailureMessage(e);
+          entry.session.resumeFailed(message);
+          this.reportError(e, message);
         }
         return;
       }
@@ -3377,10 +3390,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return this.pendingStarts.soleEntry();
   }
 
-  private reportError(e: unknown): void {
+  private reportError(e: unknown, displayMessage?: string): void {
     const message = e instanceof Error ? e.message : String(e);
     this.log.error(`Codex画面: ${message}`);
-    void vscode.window.showErrorMessage(`Codex: ${message}`);
+    void vscode.window.showErrorMessage(`Codex: ${displayMessage ?? message}`);
   }
 
   /**
