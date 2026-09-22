@@ -187,7 +187,8 @@ export type AutoReplyStopReason =
   | 'userAction'
   | 'loopStarted'
   | 'idleTimeout'
-  | 'tabClosed';
+  | 'tabClosed'
+  | 'handedOff';
 
 const AUTO_REPLY_STOP_REASON_LABELS: Record<AutoReplyStopReason, string> = {
   maxTurns: '自動返信の上限回数に達したため自動返信を終了しました',
@@ -199,6 +200,7 @@ const AUTO_REPLY_STOP_REASON_LABELS: Record<AutoReplyStopReason, string> = {
   loopStarted: 'ループを開始したため自動返信を終了しました',
   idleTimeout: '無操作が続いたため返信役を閉じました',
   tabClosed: 'タブが閉じられたため自動返信を終了しました',
+  handedOff: '新しいセッションへ引き継いだため、このセッションの自動返信を終了しました',
 };
 
 /** 停止理由を会話に残す1行の日本語文へ変換する。 */
