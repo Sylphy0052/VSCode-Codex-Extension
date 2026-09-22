@@ -195,4 +195,47 @@ describe('セッション開始の失敗経路（issue #460）', () => {
       expect(__mock.createdPanels).toHaveLength(0);
     });
   });
+
+  /**
+   * `openThread()`の`thread/resume`失敗時、`resumeFailureMessage()`（issue #1346）が
+   * エラーメッセージをユーザー向けの文言へ変換するかを確認する。
+   */
+  describe('openThread()（issue #1346: resumeFailureMessageによるエラー文言変換）', () => {
+    it('rolloutが見つからないエラーは案内文へ変換する', async () => {
+      const { manager, connection } = createManager();
+      const opened = manager.openThread('thread-a', 'タイトル', '/workspace/root');
+      await tick();
+
+      connection.rejectFirst('thread/resume', 'no rollout found for thread id thread-a');
+      await opened;
+
+      expect(__mock.messages.errors).toHaveLength(1);
+      expect(__mock.messages.errors[0]).toContain('会話の保存ファイルが見つかりません');
+      expect(__mock.messages.errors[0]).not.toContain('no rollout found');
+    });
+
+    it('多重書き込みのエラーは案内文へ変換する', async () => {
+      const { manager, connection } = createManager();
+      const opened = manager.openThread('thread-b', 'タイトル', '/workspace/root');
+      await tick();
+
+      connection.rejectFirst('thread/resume', 'thread thread-b already has an active writer');
+      await opened;
+
+      expect(__mock.messages.errors).toHaveLength(1);
+      expect(__mock.messages.errors[0]).toContain('別のCodexプロセスで使用中です');
+    });
+
+    it('該当しないエラーはそのままのメッセージを出す', async () => {
+      const { manager, connection } = createManager();
+      const opened = manager.openThread('thread-c', 'タイトル', '/workspace/root');
+      await tick();
+
+      connection.rejectFirst('thread/resume', '想定外のエラー');
+      await opened;
+
+      expect(__mock.messages.errors).toHaveLength(1);
+      expect(__mock.messages.errors[0]).toContain('想定外のエラー');
+    });
+  });
 });

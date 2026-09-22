@@ -302,3 +302,625 @@ describe('AppServerClient: 受信バッファの上限（issue #402、1点目・
     expect(fake.kill).toHaveBeenCalledTimes(1);
   });
 });
+
+/** `writes`からn番目（0始まり）に一致するmethodの要求idを取り出す。 */
+function requestIdAt(writes: string[], method: string, occurrence: number): number {
+  const matches = writes.filter((w) => w.includes(`"method":"${method}"`));
+  const line = matches[occurrence];
+  if (line === undefined) {
+    throw new Error(`${method}要求(${occurrence}番目)が送信されていません`);
+  }
+  return (JSON.parse(line) as { id: number }).id;
+}
+
+describe('AppServerClient.listThreads（issue #1346: cursorページングの頑健化）', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it('limitが0以下なら要求を送らず空配列を返す', async () => {
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+    await expect(client.listThreads(0, '/archived')).resolves.toEqual({ ok: true, sessions: [] });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('limitが安全な整数でなければ要求を送らず空配列を返す', async () => {
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+    await expect(client.listThreads(Number.POSITIVE_INFINITY, '/archived')).resolves.toEqual({
+      ok: true,
+      sessions: [],
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('nextCursorが無くなるまでページングし、正規化した結果を返す（consumePage無し）', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listThreads(50, '/archived');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 0), {
+        data: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', updatedAt: 1700000000 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 1), {
+        data: [{ id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', updatedAt: 1700000001 }],
+      }),
+    );
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.sessions.map((s) => s.id)).toEqual([
+      'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    ]);
+  });
+
+  it('thread/listがエラー応答なら失敗として返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listThreads(50, '/archived');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestIdAt(fake.writes, 'thread/list', 0),
+        error: { code: -1, message: '応答できません' },
+      }),
+    );
+
+    const result = await pending;
+    expect(result).toEqual({ ok: false, error: '応答できません' });
+  });
+
+  it('空ページなのにnextCursorが続く場合はページングが進まないとして失敗させる', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listThreads(50, '/archived');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 0), { data: [], nextCursor: 'cursor-1' }),
+    );
+
+    const result = await pending;
+    expect(result).toEqual({
+      ok: false,
+      error: 'thread/listのページングが進みませんでした',
+    });
+  });
+
+  it('nextCursorが直前と同じまま変化しない場合はページングが進まないとして失敗させる', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listThreads(50, '/archived');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 0), {
+        data: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', updatedAt: 1700000000 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 1), {
+        data: [{ id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', updatedAt: 1700000001 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+
+    const result = await pending;
+    expect(result).toEqual({
+      ok: false,
+      error: 'thread/listのページングが進みませんでした',
+    });
+  });
+
+  it('consumePageが指定されたら各ページを渡し、falseを返した時点で打ち切る', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const seenPages: number[] = [];
+    const pending = client.listThreads(50, '/archived', async (page) => {
+      seenPages.push(page.rawCount);
+      return false;
+    });
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 0), {
+        data: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', updatedAt: 1700000000 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+
+    const result = await pending;
+    // consumePageがfalseを返した時点で打ち切るため、2ページ目は要求しない
+    expect(seenPages).toEqual([1]);
+    expect(result).toEqual({ ok: true, sessions: [] });
+    expect(fake.writes.filter((w) => w.includes('"method":"thread/list"'))).toHaveLength(1);
+  });
+
+  it('consumePageがtrueを返し続けても、nextCursorが無くなればそこで打ち切る', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const seenPages: number[] = [];
+    const pending = client.listThreads(50, '/archived', async (page) => {
+      seenPages.push(page.rawCount);
+      return true;
+    });
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 1ページ目はnextCursorがあるため、continueScanがtrueなら通常どおり2ページ目へ進む
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 0), {
+        data: [{ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', updatedAt: 1700000000 }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'thread/list', 1), {
+        data: [{ id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', updatedAt: 1700000001 }],
+      }),
+    );
+
+    const result = await pending;
+    // 2ページ目でnextCursorが無いため、consumePageがtrueでもそこで打ち切る
+    expect(seenPages).toEqual([1, 1]);
+    expect(result).toEqual({ ok: true, sessions: [] });
+  });
+});
+
+describe('AppServerClient: 未テストだった単発要求メソッドの成功・失敗経路', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
+  it('setThreadName: 成功すればtrueを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setThreadName('11111111-1111-1111-1111-111111111111', '名前');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'thread/name/set'), {}));
+
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it('setThreadName: 失敗すればfalseを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setThreadName('11111111-1111-1111-1111-111111111111', '名前');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'thread/name/set'),
+        error: { code: -1, message: '保存できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toBe(false);
+  });
+
+  it('listMcpServers: mcpServerStatus/listが失敗すれば理由付きで失敗を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listMcpServers();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'mcpServerStatus/list'),
+        error: { code: -1, message: '取得できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, reason: '取得できません' });
+  });
+
+  it('listMcpServers: config/readが失敗すれば理由付きで失敗を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listMcpServers();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'mcpServerStatus/list'), { servers: [] }));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'config/read'),
+        error: { code: -1, message: '設定を読めません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, reason: '設定を読めません' });
+  });
+
+  it('listMcpServers: 両方成功すればサーバー一覧を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listMcpServers();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'mcpServerStatus/list'), { servers: [] }));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'config/read'), {}));
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+  });
+
+  it('setMcpServerEnabled: 不正なサーバー名は要求を送らずエラーを返す', async () => {
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+    await expect(client.setMcpServerEnabled('bad name!', true)).resolves.toEqual({
+      ok: false,
+      error: '不正なサーバー名です',
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('setMcpServerEnabled: config/value/writeが失敗すればエラーを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setMcpServerEnabled('my-server', true);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'config/value/write'),
+        error: { code: -1, message: '書き込めません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, error: '書き込めません' });
+  });
+
+  it('setMcpServerEnabled: config/mcpServer/reloadが失敗すればエラーを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setMcpServerEnabled('my-server', true);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'config/value/write'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'config/mcpServer/reload'),
+        error: { code: -1, message: '再読込できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, error: '再読込できません' });
+  });
+
+  it('setMcpServerEnabled: 両方成功すればokを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setMcpServerEnabled('my-server', false);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'config/value/write'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'config/mcpServer/reload'), {}));
+
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it('listHooks: cwdsを省略すると空paramsで要求し、成功すれば一覧を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listHooks([]);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const hooksReq = JSON.parse(
+      fake.writes.find((w) => w.includes('"method":"hooks/list"')) ?? '{}',
+    ) as { id: number; params: unknown };
+    expect(hooksReq.params).toEqual({});
+    fake.emitStdout(respond(hooksReq.id, { data: [] }));
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+  });
+
+  it('listHooks: cwdsを渡すとそのまま要求へ乗せ、失敗すれば理由を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listHooks(['/workspace/root']);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const hooksReq = JSON.parse(
+      fake.writes.find((w) => w.includes('"method":"hooks/list"')) ?? '{}',
+    ) as { id: number; params: unknown };
+    expect(hooksReq.params).toEqual({ cwds: ['/workspace/root'] });
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: hooksReq.id,
+        error: { code: -1, message: 'hooksを取得できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, reason: 'hooksを取得できません' });
+  });
+
+  it('listModels: nextCursorが無くなるまでページングし、モデル一覧を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listModels();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'model/list', 0), {
+        data: [{ id: 'gpt-x' }],
+        nextCursor: 'cursor-1',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      respond(requestIdAt(fake.writes, 'model/list', 1), { data: [{ id: 'gpt-y' }] }),
+    );
+
+    const result = await pending;
+    expect(result.length).toBeGreaterThan(0);
+  });
+
+  it('listModels: model/listが失敗すれば空配列を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listModels();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'model/list'),
+        error: { code: -1, message: 'モデルを取得できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual([]);
+  });
+
+  it('setHookTrusted: 不正なkeyは要求を送らずエラーを返す', async () => {
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+    await expect(client.setHookTrusted('', 'hash')).resolves.toEqual({
+      ok: false,
+      error: '不正なhookのkeyです: ',
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('setHookTrusted: config/batchWriteが失敗すればエラーを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setHookTrusted('PreToolUse', 'hash');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'config/batchWrite'),
+        error: { code: -1, message: '書き込めません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, error: '書き込めません' });
+  });
+
+  it('setHookTrusted: 成功すればokを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setHookTrusted('PreToolUse', 'hash');
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'config/batchWrite'), {}));
+
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it('listSkills: cwdsを省略すると空paramsで要求し、失敗すれば理由を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listSkills([]);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const skillsReq = JSON.parse(
+      fake.writes.find((w) => w.includes('"method":"skills/list"')) ?? '{}',
+    ) as { id: number; params: unknown };
+    expect(skillsReq.params).toEqual({});
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: skillsReq.id,
+        error: { code: -1, message: 'skillsを取得できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, reason: 'skillsを取得できません' });
+  });
+
+  it('listSkills: cwdsを渡すとそのまま要求へ乗せ、成功すれば一覧を返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.listSkills(['/workspace/root']);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const skillsReq = JSON.parse(
+      fake.writes.find((w) => w.includes('"method":"skills/list"')) ?? '{}',
+    ) as { id: number; params: unknown };
+    expect(skillsReq.params).toEqual({ cwds: ['/workspace/root'] });
+    fake.emitStdout(respond(skillsReq.id, { data: [] }));
+
+    const result = await pending;
+    expect(result.ok).toBe(true);
+  });
+
+  it('setSkillEnabled: 不正なパスは要求を送らずエラーを返す', async () => {
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+    await expect(client.setSkillEnabled('relative/path', true)).resolves.toEqual({
+      ok: false,
+      error: '不正なパスです',
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('setSkillEnabled: skills/config/writeが失敗すればエラーを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setSkillEnabled('/abs/path', true);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: requestId(fake.writes, 'skills/config/write'),
+        error: { code: -1, message: '切替できません' },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ ok: false, error: '切替できません' });
+  });
+
+  it('setSkillEnabled: 成功すればokを返す', async () => {
+    const fake = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(fake.proc);
+    const client = new AppServerClient(() => 'codex', fakeLogger());
+
+    const pending = client.setSkillEnabled('/abs/path', false);
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'initialize'), {}));
+    await Promise.resolve();
+    await Promise.resolve();
+    fake.emitStdout(respond(requestId(fake.writes, 'skills/config/write'), {}));
+
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+});

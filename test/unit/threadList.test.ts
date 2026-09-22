@@ -80,6 +80,19 @@ describe('normalizeThread', () => {
     expect(session?.archived).toBe(true);
   });
 
+  it('archivedSessionsDirが空文字なら常にarchived:falseにする', () => {
+    const session = normalizeThread(rawThread(), '');
+    expect(session?.archived).toBe(false);
+  });
+
+  it('末尾スラッシュ付きのarchivedSessionsDirでも配下判定できる', () => {
+    const session = normalizeThread(
+      rawThread({ path: `${ARCHIVED_DIR}/rollout-2026-08-11T19-06-41-019ff049.jsonl` }),
+      `${ARCHIVED_DIR}/`,
+    );
+    expect(session?.archived).toBe(true);
+  });
+
   it('threadSourceがuser以外の派生スレッドは除く', () => {
     expect(normalizeThread(rawThread({ threadSource: 'subagent' }), ARCHIVED_DIR)).toBeUndefined();
   });

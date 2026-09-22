@@ -35,6 +35,18 @@ const metaLine = (id: string, cwd: string) =>
 const userLine = (message: string) =>
   JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message } });
 
+/** サブエージェントなど派生スレッドのsession_meta（thread_sourceが'user'以外）。 */
+const subagentMetaLine = (id: string, cwd: string) =>
+  JSON.stringify({
+    type: 'session_meta',
+    payload: {
+      session_id: id,
+      cwd,
+      timestamp: '2026-08-06T15:00:00Z',
+      thread_source: 'subagent',
+    },
+  });
+
 const indexLine = (id: string, name: string, updated: string) =>
   JSON.stringify({ id, thread_name: name, updated_at: updated });
 
@@ -206,6 +218,43 @@ describe('SessionStore.list', () => {
     expect(result.sessions).toHaveLength(1);
     expect(result.skippedIndexLines).toBe(1);
   });
+
+  it('rolloutの先頭行がsession_metaでなければ未解決として数える', async () => {
+    const fs = new FakeFs({
+      [paths.sessionIndex]: indexLine(ID_A, '壊れ', '2026-08-06T15:09:29Z'),
+      [rollout(`${paths.sessions}/2026/08/07`, ID_A)]: userLine('メタ無し'),
+    });
+    const result = await new SessionStore(fs, paths, new InMemoryMetaCache()).list(
+      options({ scope: 'all' }),
+    );
+    expect(result.sessions).toEqual([]);
+    expect(result.unresolved).toBe(1);
+  });
+
+  it('サブエージェントなど派生スレッドは一覧から除きfilteredOutに数える', async () => {
+    const fs = new FakeFs({
+      [paths.sessionIndex]: indexLine(ID_A, 'サブ', '2026-08-06T15:09:29Z'),
+      [rollout(`${paths.sessions}/2026/08/07`, ID_A)]: subagentMetaLine(ID_A, '/work/alpha'),
+    });
+    const result = await new SessionStore(fs, paths, new InMemoryMetaCache()).list(
+      options({ scope: 'all' }),
+    );
+    expect(result.sessions).toEqual([]);
+    expect(result.filteredOut).toBe(1);
+  });
+
+  it('ファイル名からIDを取り出せないrolloutは有効・アーカイブどちらも無視する', async () => {
+    const fs = new FakeFs({
+      [paths.sessionIndex]: indexLine(ID_A, 'ok', '2026-08-06T15:09:29Z'),
+      [rollout(`${paths.sessions}/2026/08/07`, ID_A)]: metaLine(ID_A, '/work/alpha'),
+      [`${paths.sessions}/2026/08/07/rollout-broken.jsonl`]: 'not-json',
+      [`${paths.archivedSessions}/rollout-broken.jsonl`]: 'not-json',
+    });
+    const result = await new SessionStore(fs, paths, new InMemoryMetaCache()).list(
+      options({ scope: 'all' }),
+    );
+    expect(result.sessions.map((s) => s.id)).toEqual([ID_A]);
+  });
 });
 
 /** thread/list の1件を模したSessionSummary（正規化後の形。src/codex/threadList.tsのテスト対象外）。 */
@@ -325,6 +374,194 @@ describe('SessionStore.list（thread/list優先・ファイル読みへの退避
     expect(result.threadListFallbackReason).toBeUndefined();
     expect(result.sessions.length).toBeGreaterThan(0);
   });
+
+  it('rolloutPathが指すファイルが実在しなければ除外し、unresolvedに数える', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      okPort([
+        {
+          ...threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z'),
+          rolloutPath: '/no/such/rollout.jsonl',
+        },
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.sessions).toEqual([]);
+    expect(result.unresolved).toBe(1);
+  });
+
+  it('要約名もロールアウトも無ければ名称補完をスキップする', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      okPort([
+        {
+          ...threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z'),
+          threadName: undefined,
+          rolloutPath: undefined,
+        },
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.sessions[0]?.threadName).toBeUndefined();
+  });
+
+  it('最初のユーザー発言が無いロールアウトは表示名を補完できない', async () => {
+    const filePath = rollout(`${paths.sessions}/2026/08/07`, ID_A);
+    const fs = new FakeFs({ [filePath]: metaLine(ID_A, '/work/alpha') });
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      okPort([
+        {
+          ...threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z'),
+          threadName: undefined,
+          rolloutPath: filePath,
+        },
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.sessions[0]?.threadName).toBeUndefined();
+  });
+
+  it('ThreadNameSetterPort未接続なら名称補完の保存要求を送らない', async () => {
+    const filePath = rollout(`${paths.sessions}/2026/08/07`, ID_D);
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      okPort([
+        {
+          ...threadSession(ID_D, '/work/alpha', '2026-08-06T15:09:29Z'),
+          threadName: undefined,
+          rolloutPath: filePath,
+        },
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.sessions[0]?.threadName).toBe('テスト用の指示を書く');
+  });
+
+  it('名称補完の保存に失敗したら、次回の一覧取得で保存要求をやり直す', async () => {
+    const filePath = rollout(`${paths.sessions}/2026/08/07`, ID_D);
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    let calls = 0;
+    const setter: ThreadNameSetterPort = async () => {
+      calls++;
+      return false;
+    };
+    store.attachThreadList(
+      okPort([
+        {
+          ...threadSession(ID_D, '/work/alpha', '2026-08-06T15:09:29Z'),
+          threadName: undefined,
+          rolloutPath: filePath,
+        },
+      ]),
+    );
+    store.attachThreadNameSetter(setter);
+
+    await store.list(options({ scope: 'all' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await store.list(options({ scope: 'all' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 保存が失敗（false）扱いだと保留集合から外れ、次回また保存を試みる
+    expect(calls).toBe(2);
+  });
+});
+
+describe('SessionStore.list（thread/listのページ走査、issue #1346）', () => {
+  /** 実運用のAppServerClient.listThreadsを模した、consumePageを実際に呼ぶThreadListPort。 */
+  const pagedPort =
+    (
+      pages: Array<{ sessions: SessionSummary[]; nextCursor?: string; rawCount?: number }>,
+    ): ThreadListPort =>
+    async (_limit, _archivedDir, consumePage) => {
+      if (consumePage === undefined) {
+        return { ok: true, sessions: pages.flatMap((p) => p.sessions) };
+      }
+      for (const page of pages) {
+        const shouldContinue = await consumePage({
+          sessions: page.sessions,
+          nextCursor: page.nextCursor,
+          rawCount: page.rawCount ?? page.sessions.length,
+        });
+        if (!shouldContinue || page.nextCursor === undefined) {
+          break;
+        }
+      }
+      return { ok: true, sessions: [] };
+    };
+
+  it('空ページが続けば打ち切ってファイル読みへ退避する', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(pagedPort([{ sessions: [], nextCursor: 'cursor-1', rawCount: 0 }]));
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.threadListFallbackReason).toBe('thread/listの空ページが続きました');
+    expect(fs.firstLineReads).toBeGreaterThan(0);
+  });
+
+  it('複数ページにわたって候補を集め、maxEntriesに達したページで打ち切る', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    store.attachThreadList(
+      pagedPort([
+        {
+          sessions: [threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z')],
+          nextCursor: 'cursor-1',
+        },
+        {
+          sessions: [threadSession(ID_B, '/work/alpha', '2026-08-06T15:10:00Z')],
+          nextCursor: undefined,
+        },
+      ]),
+    );
+
+    const result = await store.list(options({ scope: 'all', maxEntries: 2 }));
+    expect(result.sessions.map((s) => s.id)).toEqual([ID_B, ID_A]);
+    expect(result.threadListFallbackReason).toBeUndefined();
+  });
+
+  it('最終ページまで走査しても候補が0件ならファイル読みへ退避する', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(pagedPort([{ sessions: [], nextCursor: undefined, rawCount: 0 }]));
+
+    const result = await store.list(options({ scope: 'all' }));
+    expect(result.threadListFallbackReason).toBe('thread/listの応答が空でした');
+    expect(fs.firstLineReads).toBeGreaterThan(0);
+  });
+
+  it('履歴の最大件数が安全な整数でなければファイル読みへ退避する', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    store.attachThreadList(okPort([threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z')]));
+
+    const result = await store.list(options({ scope: 'all', maxEntries: Infinity }));
+    expect(result.threadListFallbackReason).toBe('履歴の最大件数が安全な整数ではありません');
+    expect(fs.firstLineReads).toBeGreaterThan(0);
+  });
+
+  it('ファイル読みへの退避結果は同じ条件ならキャッシュを使い、thread/listを呼び直さない', async () => {
+    const fs = buildFs();
+    const store = new SessionStore(fs, paths, new InMemoryMetaCache());
+    let calls = 0;
+    store.attachThreadList(async (limit, archivedDir, consumePage) => {
+      calls++;
+      return failingPort('app-serverが応答しませんでした')(limit, archivedDir, consumePage);
+    });
+
+    await store.list(options({ scope: 'all' }));
+    const readsAfterFirst = fs.firstLineReads;
+    await store.list(options({ scope: 'all' }));
+
+    expect(calls).toBe(1);
+    expect(fs.firstLineReads).toBe(readsAfterFirst);
+  });
 });
 
 describe('SessionStore.resolveHandoffRolloutPath', () => {
@@ -335,6 +572,11 @@ describe('SessionStore.resolveHandoffRolloutPath', () => {
     await expect(store.resolveHandoffRolloutPath(ID_A)).resolves.toBe(
       rollout(`${paths.sessions}/2026/08/07`, ID_A),
     );
+  });
+
+  it('ロールアウト自体が存在しないセッションIDは返さない', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
+    await expect(store.resolveHandoffRolloutPath('not-a-known-id')).resolves.toBeUndefined();
   });
 
   it('thread/listに無い間は返さない', async () => {
@@ -350,6 +592,11 @@ describe('SessionStore.resolveHandoffRolloutPath', () => {
     const store = new SessionStore(fs, paths, new InMemoryMetaCache());
     store.attachThreadList(okPort([threadSession(ID_A, '/work/alpha', '2026-08-06T15:09:29Z')]));
 
+    await expect(store.resolveHandoffRolloutPath(ID_A)).resolves.toBeUndefined();
+  });
+
+  it('attachThreadListを呼んでいなければIDが一致しても返さない', async () => {
+    const store = new SessionStore(buildFs(), paths, new InMemoryMetaCache());
     await expect(store.resolveHandoffRolloutPath(ID_A)).resolves.toBeUndefined();
   });
 });
