@@ -1321,7 +1321,9 @@ export class ClaudeChatViewManager
     if (message === undefined || message.text.trim() === '') {
       return;
     }
-    void this.runAutoReplyTurn(entry, message.text);
+    void this.runAutoReplyTurn(entry, message.text).catch((e: unknown) => {
+      this.reportError(e);
+    });
   }
 
   /**
@@ -1337,6 +1339,8 @@ export class ClaudeChatViewManager
     entry.session.setAutoReply(false);
     entry.autoReplyTurnCount = 0;
     entry.autoReplyHistory = [];
+    // もう一度ONにしたときは、残っているカードを改めて返信役へ聞けるようにする
+    entry.autoReplyAskUserQuestionInFlight.clear();
     const agent = entry.autoReplyAgent;
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
@@ -1436,10 +1440,12 @@ export class ClaudeChatViewManager
       if (entry.autoReplyAskUserQuestionInFlight.has(key)) {
         continue;
       }
+      // 終わっても集合から外さない。検証に通らずカードを残した要求を、状態が変わるたびに
+      // 返信役へ問い直すと、人が答えるまで利用枠を消費し続けるため、1つの要求には1回だけ聞く
       entry.autoReplyAskUserQuestionInFlight.add(key);
-      void this.runAutoReplyAskUserQuestionTurn(entry, approval.requestId, approval.questions).finally(
-        () => {
-          entry.autoReplyAskUserQuestionInFlight.delete(key);
+      void this.runAutoReplyAskUserQuestionTurn(entry, approval.requestId, approval.questions).catch(
+        (e: unknown) => {
+          this.reportError(e);
         },
       );
     }
@@ -1485,6 +1491,12 @@ export class ClaudeChatViewManager
       `autoReplyAskUserQuestion:${Date.now()}`,
       '自動返信: AskUserQuestionに自動回答しました',
     );
+    // 自動回答も往復の1回に数える。数えないと、AskUserQuestionだけを出し続ける出力に
+    // 回数上限（agent.chat.autoReply.maxTurns）が効かない
+    entry.autoReplyTurnCount += 1;
+    if (hasReachedAutoReplyMaxTurns(entry.autoReplyTurnCount, readAutoReplyConfig().maxTurns)) {
+      this.stopAutoReply(entry, 'maxTurns');
+    }
   }
 
   /**

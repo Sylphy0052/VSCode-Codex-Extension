@@ -1144,7 +1144,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (message === undefined || message.text.trim() === '') {
       return;
     }
-    void this.runAutoReplyTurn(entry, message.text);
+    void this.runAutoReplyTurn(entry, message.text).catch((e: unknown) => {
+      this.reportError(e);
+    });
   }
 
   /**
