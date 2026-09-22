@@ -338,6 +338,21 @@ ${sharedStyles()}
     border-bottom-color: var(--vscode-focusBorder);
   }
   .approval .question-tab.unanswered { color: var(--vscode-errorForeground); }
+  /* 見出し行と折りたたみボタン（issue #1348）。畳むとこの行だけが残る */
+  .approval .question-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .approval .question-head h3 { flex: 1; margin: 0; min-width: 0; }
+  .approval.collapsed .question-head { margin-bottom: 0; }
+  .approval .question-collapsed-note {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    white-space: nowrap;
+  }
+  .approval .question-toggle { padding: 2px 8px; font-size: 0.85em; }
   .approval .question-body {
     max-height: 40vh;
     overflow-y: auto;
