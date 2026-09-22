@@ -108,6 +108,9 @@ export function describeDecision(trigger: HandoffTrigger | undefined): string {
   if (trigger.kind === 'profileChanged') {
     return `decision: profileChanged (${trigger.model || '既定'} / ${trigger.effort || '既定'})`;
   }
+  if (trigger.kind === 'milestone') {
+    return `decision: milestone (${trigger.milestone}: ${trigger.command})`;
+  }
   if (trigger.kind === 'assistantSuggested') {
     return `decision: assistantSuggested (${trigger.suggestReason || '根拠の記録なし'})`;
   }

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem, ChatState } from '../appserver/chatState';
 
 /**
  * セッションの引き継ぎ（issue #694、ポインタファイル方式はissue #1079）。
@@ -38,7 +38,8 @@ export type HandoffTrigger =
   | { kind: 'compactBoundary' }
   | { kind: 'softThreshold'; remainingPercent: number; switchReason: string }
   | { kind: 'assistantSuggested'; switchReason: string; suggestReason: string }
-  | { kind: 'profileChanged'; model: string; effort: string; switchReason: string };
+  | { kind: 'profileChanged'; model: string; effort: string; switchReason: string }
+  | { kind: 'milestone'; milestone: HandoffMilestone; command: string };
 
 /** ポインタファイルの材料。すべて拡張機能が既に持っている値だけで構成する。 */
 export interface HandoffPointerInput {
@@ -228,6 +229,9 @@ export function triggerLabel(trigger: HandoffTrigger): string {
   }
   if (trigger.kind === 'assistantSuggested') {
     return `アシスタント自身が引き継ぎを提案した（${trigger.suggestReason || '提案の根拠は記録されていない'}。${trigger.switchReason}）`;
+  }
+  if (trigger.kind === 'milestone') {
+    return `作業の節目（${MILESTONE_LABEL[trigger.milestone]}）に達した（${trigger.command}）`;
   }
   if (trigger.kind === 'profileChanged') {
     return `安全な区切りで、次の作業に合うmodel/effortが変わった（${trigger.model || '既定'} / ${trigger.effort || '既定'}。${trigger.switchReason}）`;
@@ -639,6 +643,103 @@ export function containsHandoffPrompt(text: string): boolean {
 }
 
 /**
+ * 自動引き継ぎを必ず挟む作業の節目（Issue #1351）。
+ *
+ * - `issueCreated`: Issue起票後（実装に着手する前）
+ * - `prCreated`: PR/MR作成後（レビューに入る前）
+ * - `merged`: マージ後（次のIssueへ進む前）
+ */
+export type HandoffMilestone = 'issueCreated' | 'prCreated' | 'merged';
+
+export interface DetectedMilestone {
+  milestone: HandoffMilestone;
+  /** 根拠にしたコマンド行。ポインタファイルとログへ出す。 */
+  command: string;
+}
+
+const MILESTONE_LABEL: Record<HandoffMilestone, string> = {
+  issueCreated: 'Issue起票後',
+  prCreated: 'レビュー前',
+  merged: '次のIssueへ進む前',
+};
+
+/**
+ * 節目の判定規則。工程の後ろのものから並べ、複数当たったときは先頭を採る。
+ *
+ * `gh` / `glab` の直後に大域オプション（`-R owner/repo` など）が入る書き方もあるため、
+ * コマンド名とサブコマンドの間はオプション（とその値）だけを許す。コマンド名はコマンドの先頭（行頭・`;` `&`
+ * `|` `(` の直後、Codexが包む `bash -lc '…'` の引数の先頭）にあるものだけを拾う。
+ * `echo "gh pr merge"` や `--body "… gh issue create …"` のような引数中の文言で発火させない。
+ */
+const COMMAND_HEAD = String.raw`(?:^|[;&|(]|-l?c\s+['"]?)\s*`;
+/** コマンド名とサブコマンドの間に入る大域オプション（`-R owner/repo` など）。 */
+const GLOBAL_OPTIONS = String.raw`(?:\s+-\S+(?:\s+(?!-)[^\s;&|]+)?)*`;
+
+/** `gh <sub>` と `glab <sub>` のどちらかに一致する正規表現を作る。 */
+function commandPattern(ghSubcommand: string, glabSubcommand: string): RegExp {
+  const gh = String.raw`gh${GLOBAL_OPTIONS}\s+${ghSubcommand}\b`;
+  const glab = String.raw`glab${GLOBAL_OPTIONS}\s+${glabSubcommand}\b`;
+  return new RegExp(`${COMMAND_HEAD}(?:${gh}|${glab})`, 'mu');
+}
+
+const MILESTONE_RULES: ReadonlyArray<{ milestone: HandoffMilestone; pattern: RegExp }> = [
+  { milestone: 'merged', pattern: commandPattern(String.raw`pr\s+merge`, String.raw`mr\s+merge`) },
+  {
+    milestone: 'prCreated',
+    pattern: commandPattern(String.raw`pr\s+create`, String.raw`mr\s+create`),
+  },
+  {
+    milestone: 'issueCreated',
+    pattern: commandPattern(String.raw`issue\s+create`, String.raw`issue\s+create`),
+  },
+];
+
+/** コマンドが成功して終わったか。Claude Codeは `completed`、Codexは `exit 0` か `completed`。 */
+function isSucceededCommand(status: string | undefined): boolean {
+  const value = status?.trim();
+  return value === 'completed' || value === 'exit 0';
+}
+
+/** コマンド行の上限。ポインタファイルへそのまま出すため長くしない。 */
+const MILESTONE_COMMAND_LIMIT = 200;
+
+/**
+ * 直前のターン（最後のユーザー指示より後）で成功したコマンドから、作業の節目を拾う（Issue #1351）。
+ *
+ * 分類器を経由しない決定論的な判定。見つからなければ `undefined`。
+ */
+export function detectHandoffMilestone(
+  items: ReadonlyArray<Pick<ChatItem, 'kind' | 'detail' | 'status'>>,
+): DetectedMilestone | undefined {
+  let start = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i]?.kind === 'userMessage') {
+      start = i + 1;
+      break;
+    }
+  }
+  const commands = items
+    .slice(start)
+    .filter((item) => item.kind === 'commandExecution' && isSucceededCommand(item.status))
+    .map((item) => item.detail);
+  for (const rule of MILESTONE_RULES) {
+    // 同じ節目が複数あれば最後のものを根拠にする（`findLast` はES2022のlibに無い）
+    const command = [...commands].reverse().find((c) => rule.pattern.test(c));
+    if (command !== undefined) {
+      const single = command.replace(/\s+/gu, ' ').trim();
+      return {
+        milestone: rule.milestone,
+        command:
+          single.length <= MILESTONE_COMMAND_LIMIT
+            ? single
+            : `${single.slice(0, MILESTONE_COMMAND_LIMIT)}…`,
+      };
+    }
+  }
+  return undefined;
+}
+
+/**
  * 回答待ちで終わったと判定する末尾の形（Issue #1191）。
  *
  * 疑問符だけでは足りない。日本語の問いかけは「この方針で進めてよいか。」のように疑問符を
@@ -807,6 +908,13 @@ export interface AutoHandoffDecisionInput {
    * 損失が大きく、その場合はポインタファイルへ回答待ちである旨を書いて引き継ぐ。
    */
   awaitingUserAnswer?: boolean;
+  /**
+   * 直前のターンで作業の節目に当たるコマンドが成功したか（Issue #1351）。
+   *
+   * 残量・model/effort・分類器の結果に関係なく発火する。前段（`boundaryGatePassed`）と
+   * 回答待ちの判定には従う。
+   */
+  milestone?: DetectedMilestone;
 }
 
 /** 安全な区切りの前段（決定論的・コストゼロ）の判断材料。すべて呼び出し側が持っている値。 */
@@ -927,6 +1035,9 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
   // ここで止める
   if (input.awaitingUserAnswer === true) {
     return undefined;
+  }
+  if (input.milestone !== undefined) {
+    return { kind: 'milestone', ...input.milestone };
   }
   const switchReason = input.switchReason ?? '';
   if (
