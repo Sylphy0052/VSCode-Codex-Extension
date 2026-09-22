@@ -667,12 +667,31 @@ const MILESTONE_LABEL: Record<HandoffMilestone, string> = {
  * 節目の判定規則。工程の後ろのものから並べ、複数当たったときは先頭を採る。
  *
  * `gh` / `glab` の直後に大域オプション（`-R owner/repo` など）が入る書き方もあるため、
- * コマンド名とサブコマンドの間は語の並びを許す。
+ * コマンド名とサブコマンドの間はオプション（とその値）だけを許す。コマンド名はコマンドの先頭（行頭・`;` `&`
+ * `|` `(` の直後、Codexが包む `bash -lc '…'` の引数の先頭）にあるものだけを拾う。
+ * `echo "gh pr merge"` や `--body "… gh issue create …"` のような引数中の文言で発火させない。
  */
+const COMMAND_HEAD = String.raw`(?:^|[;&|(]|-l?c\s+['"]?)\s*`;
+/** コマンド名とサブコマンドの間に入る大域オプション（`-R owner/repo` など）。 */
+const GLOBAL_OPTIONS = String.raw`(?:\s+-\S+(?:\s+(?!-)[^\s;&|]+)?)*`;
+
+/** `gh <sub>` と `glab <sub>` のどちらかに一致する正規表現を作る。 */
+function commandPattern(ghSubcommand: string, glabSubcommand: string): RegExp {
+  const gh = String.raw`gh${GLOBAL_OPTIONS}\s+${ghSubcommand}\b`;
+  const glab = String.raw`glab${GLOBAL_OPTIONS}\s+${glabSubcommand}\b`;
+  return new RegExp(`${COMMAND_HEAD}(?:${gh}|${glab})`, 'mu');
+}
+
 const MILESTONE_RULES: ReadonlyArray<{ milestone: HandoffMilestone; pattern: RegExp }> = [
-  { milestone: 'merged', pattern: /\b(?:gh\b[^|;&\n]*\bpr|glab\b[^|;&\n]*\bmr)\s+merge\b/u },
-  { milestone: 'prCreated', pattern: /\b(?:gh\b[^|;&\n]*\bpr|glab\b[^|;&\n]*\bmr)\s+create\b/u },
-  { milestone: 'issueCreated', pattern: /\b(?:gh|glab)\b[^|;&\n]*\bissue\s+create\b/u },
+  { milestone: 'merged', pattern: commandPattern(String.raw`pr\s+merge`, String.raw`mr\s+merge`) },
+  {
+    milestone: 'prCreated',
+    pattern: commandPattern(String.raw`pr\s+create`, String.raw`mr\s+create`),
+  },
+  {
+    milestone: 'issueCreated',
+    pattern: commandPattern(String.raw`issue\s+create`, String.raw`issue\s+create`),
+  },
 ];
 
 /** コマンドが成功して終わったか。Claude Codeは `completed`、Codexは `exit 0` か `completed`。 */
