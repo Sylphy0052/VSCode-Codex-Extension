@@ -3116,3 +3116,59 @@ describe('共通の自動再開設定を全会話へ反映する（Issue #1209�
     expect(toggles[toggles.length - 1]?.enabled).toBe(false);
   });
 });
+
+describe('ローカルレビューの指摘の送信（Issue #1376）', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('応答中の会話へ送った指摘はqueuedを返し、入力欄の添付を一緒に送らずパネルに残す', async () => {
+    const { sessions } = stubStartCapturing();
+    vi.spyOn(ClaudeStreamSession.prototype, 'send').mockImplementation(() => undefined);
+    const sendOrQueue = vi.spyOn(ClaudeStreamSession.prototype, 'sendOrQueue');
+    const { manager } = createManager();
+    const id = await manager.openNew('/workspace/root');
+    // `system init` 直後は応答中（busy）になる
+    sessions[0]!.receive(initLine(id!));
+    await manager.simulateWebviewMessage(id!, { type: 'attach', name: 'shot.png', dataUrl: PNG });
+    expect(__mock.messages.warnings).toHaveLength(0);
+
+    expect(manager.sendReviewFeedback(id!, 'レビュー指摘です')).toBe('queued');
+    expect(sendOrQueue).toHaveBeenLastCalledWith(expect.stringContaining('レビュー指摘です'), []);
+
+    // 添付は残っており、利用者の次の発言で送られる
+    await manager.simulateWebviewMessage(id!, { type: 'send', text: '次の発言' });
+    expect(sendOrQueue).toHaveBeenLastCalledWith(
+      '次の発言',
+      expect.arrayContaining([expect.objectContaining({ name: 'shot.png' })]),
+    );
+    manager.dispose();
+  });
+
+  it('待機中の会話へ送った指摘はsentを返す', async () => {
+    const { sessions } = stubStartCapturing();
+    vi.spyOn(ClaudeStreamSession.prototype, 'send').mockImplementation(() => undefined);
+    const { manager } = createManager();
+    const id = await manager.openNew('/workspace/root');
+    sessions[0]!.receive(initLine(id!));
+    sessions[0]!.receive(resultLine());
+
+    expect(manager.sendReviewFeedback(id!, 'レビュー指摘です')).toBe('sent');
+    manager.dispose();
+  });
+
+  it('存在しない会話へはsessionUnavailableを返す', () => {
+    const { manager } = createManager();
+    expect(manager.sendReviewFeedback('missing', 'レビュー指摘です')).toBe('sessionUnavailable');
+    manager.dispose();
+  });
+});

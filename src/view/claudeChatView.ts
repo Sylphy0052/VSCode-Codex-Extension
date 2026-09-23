@@ -201,6 +201,7 @@ import {
 } from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
 import { appendTurnSummaryInstruction } from './turnSummary';
+import type { ReviewDeliveryResult } from './localReview';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import {
   advisorDisplay,
@@ -3001,10 +3002,11 @@ export class ClaudeChatViewManager
     text: string,
     withAttachments = false,
     logText: string = text,
-  ): void {
+  ): 'sent' | 'queued' {
     const attachments = withAttachments ? entry.attachments.take() : [];
+    let result: 'sent' | 'queued';
     try {
-      entry.session.sendOrQueue(text, attachments);
+      result = entry.session.sendOrQueue(text, attachments);
     } catch (e) {
       // 取り出したまま失わない。貼り直しを強いない
       entry.attachments.restore(attachments);
@@ -3014,6 +3016,7 @@ export class ClaudeChatViewManager
     if (sessionId !== undefined) {
       this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text: logText });
     }
+    return result;
   }
 
   /**
@@ -3033,16 +3036,12 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
+   * Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。
    *
-   * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
-   * 作業記録には変換前の `text`（テンプレート展開前）を残す（design.md §16.12）。
+   * 送信先が応答中なら待ち行列に積み、`queued` を返す。入力欄に貼られた添付は
+   * 利用者が別の発言のために用意したものなので、指摘と一緒に送らずパネルに残す。
    */
-  /** Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。 */
-  sendReviewFeedback(
-    threadId: string,
-    text: string,
-  ): 'sent' | 'sessionUnavailable' | 'deliveryFailed' {
+  sendReviewFeedback(threadId: string, text: string): ReviewDeliveryResult {
     const entry = this.panels.get(threadId);
     if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
       return 'sessionUnavailable';
@@ -3052,15 +3051,21 @@ export class ClaudeChatViewManager
     this.noteUserAction(entry);
     try {
       const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
-      this.dispatch(entry, sent, true, text);
+      const result = this.dispatch(entry, sent, false, text);
       this.refreshSettings(entry);
-      return 'sent';
+      return result;
     } catch (e) {
       this.reportError(e);
       return 'deliveryFailed';
     }
   }
 
+  /**
+   * ループからの送信。失敗はループを止める理由になるため、報告したうえで投げ直す。
+   *
+   * `promptTransform` が設定されていれば、実際にCLIへ送る本文だけそちらを通す。
+   * 作業記録には変換前の `text`（テンプレート展開前）を残す（design.md §16.12）。
+   */
   private sendFromLoop(entry: ClaudePanel, text: string): void {
     const toSend = entry.promptTransform?.(text) ?? text;
     try {
