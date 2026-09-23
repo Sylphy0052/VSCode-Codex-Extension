@@ -63,9 +63,15 @@ export function deriveCompletionEvidence(
   const matchedTrusted = matched.filter((record) => record.trust === 'trusted');
   if (matchedTrusted.length > 0) {
     // 時間切れ・起動失敗（exit codeが無く `unknown`）も成功とは数えない
-    return matchedTrusted.every((record) => record.outcome === 'pass')
-      ? { category: 'verified', reason: '拡張機能が実行した検証がすべて成功' }
-      : { category: 'failed', reason: '拡張機能が実行した検証に失敗がある' };
+    if (matchedTrusted.every((record) => record.outcome === 'pass')) {
+      return { category: 'verified', reason: '拡張機能が実行した検証がすべて成功' };
+    }
+    return {
+      category: 'failed',
+      reason: matchedTrusted.some((record) => record.outcome === 'fail')
+        ? '拡張機能が実行した検証に失敗がある'
+        : '拡張機能が実行した検証に結果不明（時間切れ・起動失敗）がある',
+    };
   }
   if (records.some((record) => record.trust === 'trusted')) {
     return {
