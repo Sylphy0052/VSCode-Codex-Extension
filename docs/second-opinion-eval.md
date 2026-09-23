@@ -1423,6 +1423,79 @@ npx tsx test/bench/secondOpinionEval/summarize.ts \
 - `requestPosition`（B-pos）も**既定OFFのままにする**。悪化は見えないが、既定を変えるだけの根拠が無い。recall +0.050 は15案件中2件で起きた差であり、正解ラベル17件の分母では区別がつかない
 - 次に測るなら、条件を B-pos に絞り、**正解ラベルの数を増やす**（案件ではなくラベルが分母なので、案件を増やしても1件1ラベルの案件では効きが薄い）。条件を1つ落とせば同じ往復数で案件を1.5倍にできる
 
+#### prompt-placement 2回目の本測定の結果（2026-09-23）
+
+**1回目の判断を受けて、条件を A と B-pos に絞り、正解ラベルを増やした案件ファイル（版2）で測り直した。** 結論から書くと、**`requestPosition` は既定OFFのままにする**。1回目に見えた B-pos の recall の上積み（+0.050）は、分母を増やすと再現しなかった。precision も上がらず、不要な追加調査要求だけが増えた。
+
+実行の素性。
+
+- 結果: `eval-results/run-2026-09-20-placement-v2`（runId `64037d82-373c-4112-995e-54a834b63963`、harness `b9193888`）
+- 23案件 × 2条件（A / B-pos）× 2回 = **92往復。失敗0件、条件ごとに46件ずつ**
+- model `gpt-5.6-sol` / effort `high`
+- 案件ファイル `cases-v2-labeled.json`（sha256 `82df3db0…`、追跡外）。`cases-v2.json` の36件のうち `knownImportantFindings` を持つ23件だけを抜いたもので、正解ラベルは計26件（critical 13 / warning 13）。難易度層は `hard-positive` 12件 / `normal-positive` 11件で、`no-problem` / `indeterminate` は入っていない
+- 判定 `eligibility-v1.json`（sha256 `c6b4741d…`）。1回目と同じファイルである。2026-09-22のPrettier整形でバイト列が変わっていたので、#1370 で整形前へ戻し、`eval-results/` を `.prettierignore` へ入れた
+- 採点シート `eval-results/scoring-2026-09-21`（seed `1077903951`）。版1の採点プロンプトで1回答ずつ独立したセッションへ投げ、`key.json` は1巡目の92件が終わるまで開いていない
+
+二重採点は92件中**26件**（28.3%）を、条件 × 難易度層で層別して抜いた（`selectPass2.ts`。条件ごとに13件ずつ、`hard-positive` 14件 / `normal-positive` 12件）。1巡目とは別の採点者へ同じプロンプトを渡し直し、`comparePasses.ts` で突き合わせた。
+
+- recall の添字: **25/26 が完全一致**（Jaccard 平均 0.962）。条件別では A 12/13 / B-pos 13/13
+- actionable precision: 平均絶対差 **0.005**（precision を持つ26件）。条件別では A 0.000 / B-pos 0.011
+- `hallucinatedFindings`: 26/26 が一致
+- `totalFindings`: 完全一致 16/26（61.5%）、±1以内 25/26。条件別の完全一致は A 12/13 / **B-pos 4/13**
+- `indeterminateFindings`: 完全一致 21/26。条件別では A 12/13 / B-pos 9/13
+
+**主指標（recall と precision）のズレは1回目と同じく小さいので、基準は直さずに1巡目を本採点とした。** recall が食い違った1件（`9e3169010f96d7b6`、条件A）は、正解ラベルの条件にある「言及」をどこまで明示的に求めるかの解釈差で、1巡目は不成立、2巡目は成立と判定した。本採点は1巡目の値のままである。1回答の指摘をいくつに数えるかは、とくに B-pos で採点者によって動く。**1回答あたりの指摘数と判定不能の割合を結論に使うときは、このばらつきを併記すること。**
+
+集計コマンド。
+
+```
+npx tsx test/bench/secondOpinionEval/comparePasses.ts \
+  --pass1 eval-results/scoring-2026-09-21/pass1 \
+  --pass2 eval-results/scoring-2026-09-21/pass2 \
+  --selection eval-results/scoring-2026-09-21/pass2-selection.json \
+  --key eval-results/scoring-2026-09-21/key.json
+
+npx tsx test/bench/secondOpinionEval/summarize.ts \
+  --results eval-results/run-2026-09-20-placement-v2 \
+  --scores eval-results/scoring-2026-09-21/scores.json \
+  --key eval-results/scoring-2026-09-21/key.json \
+  --cases eval-results/cases-v2-labeled.json \
+  --eligibility eval-results/eligibility-v1.json \
+  --baseline A --eligibility-condition A
+```
+
+条件ごとの実測値（採点46件ずつ、micro 平均）。
+
+- actionable precision: A **0.952**（180/189） / B-pos **0.945**（225/238）
+- actionable yield: A 0.796 / B-pos 0.812
+- 判定不能の割合: A 0.164 / B-pos 0.141
+- 重要問題の recall: 両条件とも **0.327**（17/52）
+  - critical: 両条件とも 0.423（11/26）
+  - warning: 両条件とも 0.231（6/26）
+- 1回答あたりの指摘数: A 4.91 / B-pos 6.02
+- 存在しない問題の指摘: 両条件とも0件
+- 制約・既決事項の誤認: 両条件とも0件
+- 不要な追加調査要求: A 0.043件/回答 / **B-pos 0.261件/回答**
+- 平均latency: A 212.8秒 / B-pos 225.1秒。平均トークン: A 615,574 / B-pos 610,649
+- 依頼文より後ろのバイト数: A 69,101 / B-pos 0
+
+案件ごとに対にした差（基準A、対になった案件は23件）。
+
+- B-pos − A: precision の平均差 **−0.013**（4勝11分8敗） / recall の平均差 **−0.011**
+
+読み方。
+
+- **recall は B-pos でも上がらなかった。** micro 平均は両条件とも 17/52 で、critical・warning の内訳まで同じである。1回目の +0.050 は正解ラベル17件の分母で2案件に起きた差で、ラベルを26件へ増やすと消えた
+- **precision も B-pos で上がらない。** micro 平均の差は 0.007 で、案件ごとの対比は4勝8敗と B-pos がやや負け越している。二重採点での B-pos の precision のズレ（0.011）と同じ桁なので、悪化とまでは言えない
+- **不要な追加調査要求は B-pos で6倍になった**（0.043 → 0.261件/回答）。1回目は A と同じ 0.042 だったので、この測定で初めて出た差である。指摘数が1.2倍（4.91 → 6.02）に増えたのと同じ向きで、依頼文を末尾へ動かすと依頼へ寄せた発話は増えるが、正解ラベルを拾う力は変わらない
+- **判定不能の割合は1回目と大きく違う**（1回目 A 0.688、今回 A 0.164）。案件ファイルが違い、今回は正例だけなので、測定をまたいだ比較には使わない。条件間の差（0.164 → 0.141）は、二重採点で `indeterminateFindings` の完全一致が B-pos 9/13 だったことを考えると区別できない
+- **recall の絶対値は今回も 0.4 未満である。** 天井は依頼文の置き場所ではなく、条件Aの材料の側にある
+- 案件はすべて正例なので、問題の無い変更に対して指摘を増やすかどうか（1回目に `no-problem` で見えた precision の劣化）はこの測定では見ていない
+
+この結果を受けた判断。
+
+- `requestPosition`（B-pos）は**既定OFFのままにする**。正解ラベルを1.5倍にしても recall の差は出ず、precision と不要な調査要求はわずかに悪い向きだった
+
 ## 測っていないもの
 
 次の5つは、このハーネスの結果からは分からない。結論を書くときに混ぜないこと。
