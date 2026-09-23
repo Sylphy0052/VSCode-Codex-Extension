@@ -85,7 +85,13 @@ export class SessionTreeProvider
    * 保持済みの値をすぐ返す。取得を待つ間に右クリックのコマンドが要素を引けなくなるため。
    */
   private readonly sessions: BackgroundList<SessionSummary[]>;
-  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly refreshRequestEmitter = new vscode.EventEmitter<void>();
+  /**
+   * `refresh`で一覧の取り直しを依頼されたときに発火する（Issue #1402）。ファイル監視に
+   * 付いた`refreshSoon`では発火しない。後で実施ビューは、`onDidChangeTreeData`（取り直す
+   * たびに発火する）ではなくこちらを受けて取り直す。
+   */
+  readonly onDidRequestRefresh = this.refreshRequestEmitter.event;
   /** タイトルバーの絞り込み入力（issue #293）。表示だけを変え、読み込み件数には関与しない。 */
   private filterText = '';
 
@@ -170,18 +176,21 @@ export class SessionTreeProvider
 
   /** 一覧を裏で取り直し、取り終えたら描き直す（Issue #1396）。 */
   refresh(): void {
+    this.refreshRequestEmitter.fire();
     void this.sessions.reload();
   }
 
-  /** ファイル監視は短時間に何度も発火するため、まとめて1回にする。 */
-  refreshDebounced(delayMs = 300): void {
-    if (this.refreshTimer !== undefined) {
-      clearTimeout(this.refreshTimer);
-    }
-    this.refreshTimer = setTimeout(() => {
-      this.refreshTimer = undefined;
-      this.refresh();
-    }, delayMs);
+  /**
+   * ファイル監視は短時間に何度も発火するため、`delayMs`ごとに1回へまとめて取り直す
+   * （Issue #1402）。`onDidRequestRefresh`は発火しない。
+   */
+  refreshSoon(delayMs = 300): void {
+    this.sessions.reloadSoon(delayMs);
+  }
+
+  /** ビューの表示状態を受ける。見えていない間は取り直さない（Issue #1402）。 */
+  setVisible(visible: boolean): void {
+    this.sessions.setVisible(visible);
   }
 
   async getChildren(element?: TreeElement): Promise<TreeElement[]> {
@@ -299,11 +308,10 @@ export class SessionTreeProvider
   }
 
   dispose(): void {
-    if (this.refreshTimer !== undefined) {
-      clearTimeout(this.refreshTimer);
-    }
+    this.sessions.dispose();
     this.emitter.dispose();
     this.decorationEmitter.dispose();
+    this.refreshRequestEmitter.dispose();
   }
 }
 

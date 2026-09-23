@@ -36,7 +36,7 @@ function fakeMemento(): MementoLike {
  * `TreeItem.id` はメニュー経由のコマンドに要素を渡すための鍵（issue #236）。
  *
  * VS Codeは`id`が無いとラベルと位置から内部ハンドルを組み立てるが、このツリーの
- * ラベルは`threadName ?? '(名称未設定)'`で重複しやすく、`refreshDebounced`によって
+ * ラベルは`threadName ?? '(名称未設定)'`で重複しやすく、`refreshSoon`によって
  * 並びも変わる。その結果ハンドルと要素の対応がずれ、`view/item/context`から呼ぶ
  * コマンドの引数が`undefined`になっていた。ここでは`id`が常に一意になることを見る。
  *
