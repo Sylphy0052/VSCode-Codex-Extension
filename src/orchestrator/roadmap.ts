@@ -2311,6 +2311,9 @@ export async function convertMarkdownToRoadmap(
   }
   if (input.sourceIssue !== undefined) {
     markdown = withRoadmapSourceIssue(markdown, input.sourceIssue);
+    // 行を足した分だけ行番号がずれるため、返り値のmarkdownと揃えて取り直す
+    parsed = parseRoadmapMarkdown(markdown);
+    validation = validateRoadmap(parsed);
   }
   await deps.fs.writeTextFile(pathResult.path, markdown, input.workspaceRoot);
   generated.dispose?.();
@@ -2378,13 +2381,20 @@ export function readRoadmapSourceIssue(markdown: string): number | undefined {
 /**
  * ロードマップへ変換元Issueの記録を足す（Issue #1422）。変換セッションの出力に同じ形の行が
  * 混じっていても（Issue本文は外部由来なので、別のIssueを指す行を紛れ込ませうる）、
- * それらは消してから、タイトル行の直後（無ければ先頭）へ1行だけ入れる。
+ * それらは消してから、タイトル行の直後（無ければ先頭）へ1行だけ入れる。消すのは
+ * `readRoadmapSourceIssue` が読む範囲（最初のフェーズ見出しより前）だけで、項目の本文は触らない。
  */
 export function withRoadmapSourceIssue(markdown: string, issue: number): string {
   const lineEnding = detectLineEnding(markdown);
-  const lines = markdown
-    .split(/\r?\n/u)
-    .filter((line) => !ROADMAP_SOURCE_ISSUE_PATTERN.test(line.trim()));
+  const allLines = markdown.split(/\r?\n/u);
+  const firstPhaseIndex = allLines.findIndex((line) => PHASE_HEADING_PATTERN.test(line));
+  const headerEnd = firstPhaseIndex >= 0 ? firstPhaseIndex : allLines.length;
+  const lines = [
+    ...allLines
+      .slice(0, headerEnd)
+      .filter((line) => !ROADMAP_SOURCE_ISSUE_PATTERN.test(line.trim())),
+    ...allLines.slice(headerEnd),
+  ];
   const titleIndex = lines.findIndex((line) => TITLE_PATTERN.test(line));
   const record = `元Issue: #${String(issue)}`;
   if (titleIndex >= 0) {
