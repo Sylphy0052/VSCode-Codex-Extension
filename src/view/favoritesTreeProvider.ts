@@ -3,6 +3,7 @@ import type { SessionSummary } from '../codex/types';
 import type { Logger } from '../log';
 import type { ProviderRegistry } from '../provider/registry';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
+import { BackgroundList } from './backgroundList';
 import { buildSessionTreeItem } from './sessionTreeProvider';
 import type { SessionActivityState } from './sessionActivity';
 
@@ -19,16 +20,29 @@ import type { SessionActivityState } from './sessionActivity';
 export class FavoritesTreeProvider implements vscode.TreeDataProvider<SessionSummary> {
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.emitter.event;
+  /**
+   * 読み込んだ一覧（Issue #1396）。履歴ツリーと同じく、取得は`refresh`の契機で裏で済ませ、
+   * `getChildren`は保持済みの値をすぐ返す（右クリックのコマンドが要素を引けなくなるのを防ぐ）。
+   */
+  private readonly favorites: BackgroundList<SessionSummary[]>;
 
   constructor(
     private readonly providers: ProviderRegistry,
     private readonly getActivity: (session: SessionSummary) => SessionActivityState | undefined,
     private readonly log: Logger,
     private readonly pinnedStore: PinnedSessionStore = new PinnedSessionStore(),
-  ) {}
+  ) {
+    this.favorites = new BackgroundList(
+      () => this.loadFavorites(),
+      () => this.emitter.fire(),
+      log,
+      '後で実施の一覧',
+    );
+  }
 
+  /** 一覧を裏で取り直し、取り終えたら描き直す（Issue #1396）。 */
   refresh(): void {
-    this.emitter.fire();
+    void this.favorites.reload();
   }
 
   async getChildren(element?: SessionSummary): Promise<SessionSummary[]> {
@@ -36,7 +50,10 @@ export class FavoritesTreeProvider implements vscode.TreeDataProvider<SessionSum
       // 葉ノードなので子は無い（グループ化しない、`sessionTreeProvider.ts`と同じ形に統一）
       return [];
     }
+    return this.favorites.get();
+  }
 
+  private async loadFavorites(): Promise<SessionSummary[]> {
     // 全件一覧（`listSessions`）は使わず、ピン留めしたidだけを引く（Issue #1389）。
     // 全件一覧を`scope: 'all'`で取ると、履歴ビューの範囲で作ったClaude Codeの索引との間で
     // 作り直しと再描画が交互に続き、読み込みが終わらなかった。idで引くので、履歴の

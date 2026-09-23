@@ -47,7 +47,7 @@
         },
         {
           "id": "agent.favorites",
-          "name": "お気に入り"
+          "name": "後で実施"
         },
         {
           "id": "agent.attention",
@@ -62,7 +62,7 @@
       },
       {
         "view": "agent.favorites",
-        "contents": "会話画面の「…」メニューからお気に入りに追加できます。"
+        "contents": "会話画面の「…」メニューや履歴の右クリックメニューから「後で実施」に追加できます。"
       }
     ],
     "menus": {
@@ -386,13 +386,13 @@
       },
       {
         "command": "codex.pinSession",
-        "title": "お気に入りに追加",
+        "title": "後で実施に追加",
         "category": "Agent",
         "icon": "$(pinned)"
       },
       {
         "command": "codex.unpinSession",
-        "title": "お気に入りから外す",
+        "title": "後で実施から外す",
         "category": "Agent",
         "icon": "$(pin)"
       },
