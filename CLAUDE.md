@@ -4,6 +4,8 @@
 
 ## PR運用
 
+- 各PRの最後に `node scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の版上げを `chore: バージョンを<版>にする` として同じPRへcommitする。配布したvsixの版とmainのcommitを1対1にするため
+  - 並行する別PRが先にmergeされて `package.json` の版が衝突したら、mainを取り込んでから `bump-version.mjs` を実行し直す（連番はその時点のmainの版から数える）
 - PR作成後は自己レビュー必須。指摘があれば自分で修正してから次へ進む
 - CI (`checks` / `external-cli`) の確認、他者レビューは不要。自己マージしてよい
 - 自己レビュー・修正が済んでいれば、CI (`checks` / `external-cli`) の完了を待たずに自己mergeしてよい
@@ -20,7 +22,7 @@
 
 作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeとb90/b115のdev containersの3か所へ入れる。
 
-- ビルドはメインのworking treeで `npm run build` のあと `npx vsce package --no-dependencies -o /tmp/<名前>.vsix` を実行する。`npm run package` は版番号を自動で上げて `package.json` を書き換えるため使わない。版番号が同じでも、インストール時の `--force` で上書きされる
+- ビルドはメインのworking treeで `npm run build` のあと `npx vsce package --no-dependencies -o /tmp/<名前>.vsix` を実行する。`npm run package` はここでもう一度版番号を上げて `package.json` を書き換えるため使わない（版上げはPR側で済んでいる）。`<名前>` には `package.json` の版を入れる（例: `vscode-codex-extension-2026.923.3`）
 - WSL: `code --install-extension /tmp/<名前>.vsix --force`
 - b90/b115: WSLから `ssh -p 12290 kfuruhashi@localhost`（b90）、`ssh -p 12222 kfuruhashi@localhost`（b115）で入る。`ssh b90` は通らない
   - 両ホストのホームは同じNFS。vsixは `scp -P 12290` でb90へ送り、`~/.local/share/vsix/` に置けばb115からも見える
