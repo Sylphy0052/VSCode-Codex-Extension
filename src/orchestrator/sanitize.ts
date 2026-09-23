@@ -312,20 +312,50 @@ const OPENAI_STYLE_KEY_PATTERN = new RegExp(
 );
 
 /**
- * トークン様の文字列を代表的な3形状（`Bearer <token>` / GitHubトークン / `sk-`形式の
- * APIキー）に絞ってマスクする（Issue #474 指摘3。監査が「一番実害に近い」とした穴）。
+ * `Bearer`を伴わない裸のJWT（`eyJ<header>.<payload>.<signature>`）を検出する（Issue #1388）。
+ * `src/secondOpinion/redact.ts` の `KNOWN_TOKEN_FORMATS` と同じく、各部分に10文字以上を求める。
+ *
+ * 各部分は「固定長`{n}`＋同じ文字クラスの`*`」で書く。`{n,CAP}`の後に`*`と`\.`を続けると、
+ * `.`の無い長い英数字の並びで`{n,CAP}`と`*`の分け方を総当たりし、入力長×`CAP`の
+ * バックトラックになる。固定長なら分け方は1通りで、1つの並びにつき線形で済む。
+ * 先頭の否定後読みで、英数字の並びの途中からは照合を始めない。
+ */
+const JWT_PATTERN =
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{7}[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{10}[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{10}[A-Za-z0-9_-]*/gu;
+
+/**
+ * AWSのアクセスキーID（長期キーの`AKIA`、一時キーの`ASIA`に大文字英数字16文字）を
+ * 検出する（Issue #1388）。長さが固定なので前後を英数字でないことで区切る。
+ * シークレットアクセスキー（40文字のBase64）は接頭辞を持たず、ハッシュ等と区別できないため対象外。
+ */
+const AWS_ACCESS_KEY_PATTERN = /(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_])/gu;
+
+/**
+ * Slackのトークン（`xoxb-` `xoxp-` 等）を検出する（Issue #1388）。文字クラスは
+ * `src/secondOpinion/redact.ts` の `KNOWN_TOKEN_FORMATS` に揃え、量指定子は
+ * `TOKEN_LENGTH_CAP` のコメントの理由で`{10,CAP}`＋`*`にする。
+ */
+const SLACK_TOKEN_PATTERN = new RegExp(
+  `(?<![A-Za-z0-9_])xox[abposr]-[A-Za-z0-9-]{10,${TOKEN_LENGTH_CAP}}[A-Za-z0-9-]*`,
+  'gu',
+);
+
+/**
+ * トークン様の文字列を代表的な形状（`Bearer <token>` / GitHubトークン / `sk-`形式の
+ * APIキー / 裸のJWT / AWSアクセスキーID / Slackトークン）に絞ってマスクする
+ * （Issue #474 指摘3。監査が「一番実害に近い」とした穴。後の3形状はIssue #1388で追加）。
  *
  * 線引きの判断: 外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す経路が
  * 複数あり（`src/view/settingsProvider.ts`・`src/extension.ts` 等）、「マスク済みの
  * ログだから安全」という誤解を生む実害が最も大きい。一方でパターンを広げすぎると、
  * 障害調査に要る情報（どのファイルで失敗したか・エラーの種類）まで潰しかねない
  * （例: 汎用的すぎる正規表現は英数字の羅列であるファイルハッシュやIDまで拾う）。
- * そこで対象は「接頭辞・書式が固定されており、かつ実際にこのプロジェクトが連携する
- * 外部サービス（GitHub・OpenAI/Anthropic系）・標準的な認証ヘッダに由来する」3形状のみに
- * 絞った。`Bearer`を伴わない裸のJWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・
- * Slackトークン（`xox[bpsr]-...`）等、他の形状は対象外のまま残る（意図的な限界。
- * 必要になったら同じ考え方で追加する）。なお`Bearer <JWT>`の形は`BEARER_TOKEN_PATTERN`の
- * 文字クラスがJWTのBase64url＋`.`区切りを満たすため既にマスク対象。
+ * そこで対象は「接頭辞・書式が固定されている」形状のみに絞った。当初はこのプロジェクトが
+ * 連携する外部サービス（GitHub・OpenAI/Anthropic系）と標準的な認証ヘッダに由来する3形状
+ * だけだったが、`verify.commands` の出力（利用者のテストやビルドの出力）が検証記録と
+ * AIへの修正依頼に載るようになったため、同じ考え方で裸のJWT・AWSアクセスキーID・
+ * Slackトークンを足した（Issue #1388）。それ以外の形状は対象外のまま残る（意図的な限界）。
+ * なお`Bearer <JWT>`の形は`BEARER_TOKEN_PATTERN`が先にマスクする。
  *
  * 置換はいずれも冪等（`Bearer ***` の `***`・`***`単体はいずれも各パターンに
  * 再度一致しない）。
@@ -334,13 +364,17 @@ function maskTokenLike(value: string): string {
   return value
     .replace(BEARER_TOKEN_PATTERN, '$1***')
     .replace(GITHUB_TOKEN_PATTERN, '***')
-    .replace(OPENAI_STYLE_KEY_PATTERN, '***');
+    .replace(OPENAI_STYLE_KEY_PATTERN, '***')
+    .replace(JWT_PATTERN, '***')
+    .replace(AWS_ACCESS_KEY_PATTERN, '***')
+    .replace(SLACK_TOKEN_PATTERN, '***');
 }
 
 /**
  * ログ・理由文字列へ埋め込む値から、値そのものを削らずに秘匿情報だけを隠す。
  * URL中のuserinfo（トークン付きURL）・ホームディレクトリ配下のユーザー名・
- * トークン様文字列（`Bearer <token>` / GitHubトークン / `sk-`形式のAPIキー）の3種類。
+ * トークン様文字列（`Bearer <token>` / GitHubトークン / `sk-`形式のAPIキー / 裸のJWT /
+ * AWSアクセスキーID / Slackトークン）の3種類。
  *
  * `sanitizeForLog` から制御文字の畳み込みと長さの切り詰めを除いた部分にあたる。
  * 一般経路のログ（`src/log.ts` の `createLogger`）は、fsエラーやスタックトレースを
@@ -356,10 +390,10 @@ function maskTokenLike(value: string): string {
  *
  * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: マスクするのはURLの
  * userinfo・ホームディレクトリ配下のユーザー名・代表的なトークン形状
- * （`Bearer <token>` / `gh[oprsu]_...` / `sk-...`）のみ。`Bearer`を伴わない
- * 裸のJWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・Slackトークン（`xox[bpsr]-...`）
- * 等、他の形状の秘密情報は対象外のためそのまま素通りする（`Bearer <JWT>`の形は
- * `BEARER_TOKEN_PATTERN`が既にマスクする）。外部CLIのstderrをそのまま
+ * （`Bearer <token>` / `gh[oprsu]_...` / `sk-...` / `eyJ...`の裸のJWT /
+ * `AKIA...` `ASIA...` / `xox[abposr]-...`）のみ。AWSのシークレットアクセスキーや
+ * 独自形式のAPIキー等、接頭辞を持たない形状の秘密情報は対象外のためそのまま素通りする。
+ * 外部CLIのstderrをそのまま
  * `log.warn` / `log.error` へ渡す経路（`src/view/settingsProvider.ts`・
  * `src/extension.ts` 等）は、マスク済みのログでもこれらの文字列が含まれていれば
  * 漏れうる。「マスク済みだから安全」と誤解してログを共有しないこと。
@@ -374,9 +408,8 @@ function maskTokenLike(value: string): string {
  * - `ENCODED_URL_USERINFO_PATTERN` / `PARTIAL_ENCODED_URL_USERINFO_PATTERN` の
  *   上限（`{0,256}`）を超える長さのuserinfoは黙って素通りする（ReDoS対策の副作用。
  *   Issue #474 指摘4・5）
- * - `Bearer`を伴わない裸のJWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・
- *   Slackトークン（`xox[bpsr]-...`）等、`maskTokenLike` が対象とする3形状以外の
- *   トークン・APIキー形状（`Bearer <JWT>`の形は対象内）
+ * - `maskTokenLike` が対象とする形状以外のトークン・APIキー（AWSのシークレット
+ *   アクセスキー等、接頭辞を持たないもの）
  *
  * このマスク処理は、`GIT_MAX_BUFFER_BYTES`（`worktree.ts`）・`CLI_MAX_BUFFER_BYTES`
  * （`forge.ts`）がいずれも10MBであるため到達しうる規模の入力に対して、秒単位の

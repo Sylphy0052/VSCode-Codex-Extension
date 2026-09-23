@@ -5611,7 +5611,11 @@ export class WorkflowRunner {
     ) {
       if (!liveTask.verificationInProgress) {
         liveTask.verificationInProgress = true;
-        void this.verifyTaskCompletion(runId, taskId, task, state, liveTask);
+        void this.verifyTaskCompletion(runId, taskId, task, state, liveTask).catch(
+          (error: unknown) => {
+            this.onVerificationCrashed(runId, taskId, task, state, liveTask, error);
+          },
+        );
       }
       return;
     }
@@ -5834,6 +5838,50 @@ export class WorkflowRunner {
       clearInterval(watch);
       this.verifyCommandAborts.delete(controller);
     }
+  }
+
+  /**
+   * `verifyTaskCompletion` が想定外の例外で抜けたときの後始末（Issue #1388）。
+   *
+   * 検証中の印が立ったままだと、同じタスクの次のDONEが検証に入れず、タスクが終わらない。
+   * 印が立っていれば結果の適用前に落ちたので、印を下ろしてタスクを`failed`で確定させる。
+   * 停止・破棄・作り直しが挟まっていれば、`abortVerification`と同じ扱いにする。
+   * 印が下りていれば結果の適用（`onTaskFinished`・`runLoop`）の途中で落ちたので、
+   * 二重に確定させないようログに残すだけにする。
+   */
+  private onVerificationCrashed(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    state: ChatState,
+    liveTask: LiveTask,
+    error: unknown,
+  ): void {
+    const message = sanitizeForLog(error instanceof Error ? error.message : String(error));
+    this.deps.log.error(
+      `[workflow ${runId}/${taskId}] 独立検証が想定外の例外で終了しました: ${message}`,
+    );
+    if (!liveTask.verificationInProgress) {
+      return;
+    }
+    liveTask.verificationInProgress = false;
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    const reason = this.verificationAbortReason(runId, taskId, live, liveTask);
+    if (reason === 'halted') {
+      this.onTaskFinished(runId, taskId, task, 'taskStopped', state);
+    }
+    if (reason !== undefined) {
+      return;
+    }
+    live.warnings.push({
+      kind: 'taskVerification',
+      taskId,
+      message: `独立検証が想定外の例外で終了しました: ${message}`,
+    });
+    this.onTaskFinished(runId, taskId, task, 'failed', state);
   }
 
   /** DONE自己申告を、機械条件と別のread-onlyセッションで確認する。 */
