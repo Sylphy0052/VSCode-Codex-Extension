@@ -171,10 +171,16 @@ import {
 import {
   isChangedLineSelection,
   noReviewCandidateMessage,
+  PendingReviewFeedback,
+  REVIEW_DISCARD_ACTION,
+  REVIEW_QUEUED_MESSAGE,
+  REVIEW_RETRY_ACTION,
   reviewCandidates,
-  reviewDeliveryFailureMessage,
+  reviewFailureOf,
   reviewMessages,
+  reviewRetryPrompt,
   type LocalReviewSession,
+  type ReviewFailureReason,
 } from './view/localReview';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
@@ -799,6 +805,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         changedLineRanges: readonly { start: number; end: number }[];
       }
     | undefined;
+  // 送れなかった指摘はメモリ上に1件だけ持つ。永続化と一覧表示はA1（Issue #1381）の範囲。
+  const pendingReviewFeedback = new PendingReviewFeedback<object>();
   const isActiveReviewDiff = (): boolean => {
     const editor = vscode.window.activeTextEditor;
     const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
@@ -976,32 +984,57 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         '送信',
       );
       if (confirmed !== '送信') return;
-      // 入力・確認中にファイル、Diff、セッション状態、worktreeが変わった場合もfail closedにする。
-      const stillEligible =
-        isActiveReviewDiff() &&
-        !editor.document.isDirty &&
-        editor.document.getText() === review.after &&
-        editor.document.getText(editor.selection) === selected &&
-        candidates().some(
-          (candidate) =>
-            candidate.provider === target.session.provider &&
-            candidate.threadId === target.session.threadId,
+      // 入力・確認中や送り直しまでの間にファイル、Diff、セッション状態、worktreeが
+      // 変わった場合もfail closedにする。送り直しでは開き直したDiffを見るため、
+      // エディタは都度アクティブなものを取り直し、範囲は送信を決めた時点のものを使う。
+      const stillEligible = (): boolean => {
+        const current = vscode.window.activeTextEditor;
+        return (
+          isActiveReviewDiff() &&
+          current !== undefined &&
+          current.document.uri.toString() === editor.document.uri.toString() &&
+          !current.document.isDirty &&
+          current.document.getText() === review.after &&
+          current.document.getText(range) === selected &&
+          candidates().some(
+            (candidate) =>
+              candidate.provider === target.session.provider &&
+              candidate.threadId === target.session.threadId,
+          )
         );
-      if (!stillEligible) {
-        void vscode.window.showWarningMessage(
-          '対象のDiffまたは送信先の状態が変わりました。見直してから選び直してください',
+      };
+      const attempt = async (): Promise<ReviewFailureReason | undefined> => {
+        if (!stillEligible()) return 'stale';
+        const sent =
+          target.session.provider === 'codex'
+            ? await chat.sendReviewFeedback(target.session.threadId, payload)
+            : claudeChat.sendReviewFeedback(target.session.threadId, payload);
+        if (sent === 'queued') {
+          void vscode.window.showInformationMessage(REVIEW_QUEUED_MESSAGE);
+        }
+        return reviewFailureOf(sent);
+      };
+      // 送れなかった指摘は書き直させずに保持し、同じ内容で再検査して送り直すか破棄するかを選ばせる。
+      const feedback = {};
+      let failure = await attempt();
+      while (failure !== undefined) {
+        pendingReviewFeedback.hold(feedback);
+        const choice = await vscode.window.showWarningMessage(
+          reviewRetryPrompt(failure),
+          REVIEW_RETRY_ACTION,
+          REVIEW_DISCARD_ACTION,
         );
-        return;
+        const decision = pendingReviewFeedback.decide(feedback, choice);
+        if (decision === 'superseded') {
+          void vscode.window.showWarningMessage(
+            '後から送れなかった指摘を保持したため、この指摘は破棄しました',
+          );
+          return;
+        }
+        if (decision === 'discard') return;
+        failure = await attempt();
       }
-      const sent =
-        target.session.provider === 'codex'
-          ? await chat.sendReviewFeedback(target.session.threadId, payload)
-          : claudeChat.sendReviewFeedback(target.session.threadId, payload);
-      if (sent === 'sessionUnavailable') {
-        void vscode.window.showWarningMessage(reviewDeliveryFailureMessage(sent));
-      } else if (sent === 'deliveryFailed') {
-        void vscode.window.showWarningMessage(reviewDeliveryFailureMessage(sent));
-      }
+      pendingReviewFeedback.release(feedback);
     }),
     vscode.window.onDidChangeActiveTextEditor(refreshLocalReviewContext),
   );
