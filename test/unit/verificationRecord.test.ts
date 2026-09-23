@@ -89,6 +89,14 @@ describe('buildVerificationRecord', () => {
     expect(buildVerificationRecord(baseInput({ before: undefined })).subject).toBeUndefined();
   });
 
+  it('読み出せない形の入力は保存前に拒む', () => {
+    expect(() => buildVerificationRecord(baseInput({ actor: 'worker:' }))).toThrow(TypeError);
+    expect(() => buildVerificationRecord(baseInput({ exitCode: 1.5 }))).toThrow(TypeError);
+    expect(() => buildVerificationRecord(baseInput({ link: { attempt: Number.NaN } }))).toThrow(
+      TypeError,
+    );
+  });
+
   it('返す記録は凍結されていて書き換えられない', () => {
     const record = buildVerificationRecord(baseInput());
     expect(Object.isFrozen(record)).toBe(true);

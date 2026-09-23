@@ -179,17 +179,31 @@ export interface BuildRecordOptions {
 /**
  * 記録を組み立てる。信頼区分・結果・出力のマスクはここで決め、呼び出し側からは渡させない。
  * 返す記録は凍結する（保存後に書き換えさせない）。
+ *
+ * 読出時の検査（{@link parseVerificationRecord}）を通らない記録は作らず、例外を投げる
+ * （`worker:` の後が空・exit codeが整数でない等）。保存できても読み出せない記録を残さないため。
  */
 export function buildVerificationRecord(
   input: VerificationRecordInput,
   options: BuildRecordOptions = {},
+): VerificationRecord {
+  const record = assembleRecord(input, options);
+  if (parseVerificationRecord(JSON.parse(JSON.stringify(record))) === undefined) {
+    throw new TypeError('検証記録の入力が不正（actor・exit code・紐付けの形を確認する）');
+  }
+  return deepFreeze(record);
+}
+
+function assembleRecord(
+  input: VerificationRecordInput,
+  options: BuildRecordOptions,
 ): VerificationRecord {
   const subject = buildSubject(input.before, input.after);
   const outputRef: VerificationOutputRef =
     input.offloadId === undefined
       ? { tail: maskOutputTail(input.output, options.homeDir) }
       : { tail: maskOutputTail(input.output, options.homeDir), offloadId: input.offloadId };
-  return deepFreeze({
+  return {
     id: (options.newId ?? randomUUID)(),
     schemaVersion: VERIFICATION_RECORD_SCHEMA_VERSION,
     ...(subject === undefined ? {} : { subject }),
@@ -205,7 +219,7 @@ export function buildVerificationRecord(
     trust: trustForAcquisition(input.acquisition),
     outputRef,
     link: { ...input.link },
-  });
+  };
 }
 
 const ACQUISITIONS: readonly string[] = ['observed', 'agent-reported', 'imported'];
