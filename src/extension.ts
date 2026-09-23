@@ -151,6 +151,7 @@ import { SessionModelSettingsStore } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
+import { resolveRepoRoots } from './session/repoRoots';
 import { isWithinAny, SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
 import { SessionWatcher } from './session/sessionWatcher';
@@ -1450,6 +1451,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     getSessionActivity,
     log,
     pinnedSessions,
+    () => resolveRepoRoots(workspaceFolderPaths(), nodeGitCommandRunner),
   );
   const favoritesView = vscode.window.createTreeView('agent.favorites', {
     treeDataProvider: favoritesTree,
@@ -1460,6 +1462,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     favoritesTree,
     favoritesView,
     favoritesView.onDidChangeVisibility((e) => favoritesTree.setVisible(e.visible)),
+    // 開いているリポジトリだけに絞るため、フォルダの増減で求め直す（Issue #1406）
+    vscode.workspace.onDidChangeWorkspaceFolders(() => favoritesTree.refreshRepoRoots()),
   );
   // 履歴ツリーの取り直しを依頼された契機（手動更新・設定変更・名前変更・アーカイブなど）で
   // お気に入りも引き直し、タイトルと状態のアイコンを揃える（Issue #1366）。
