@@ -63,10 +63,10 @@ export interface VerificationRecord {
   readonly cwd: string;
   readonly exitCode: number | undefined;
   readonly outcome: VerificationOutcome;
-  /** ISO 8601 */
-  readonly startedAt: string;
-  /** ISO 8601 */
-  readonly endedAt: string;
+  /** ISO 8601。会話の項目から作る記録（`agent-reported`）のように時刻が取れない場合は無い */
+  readonly startedAt?: string;
+  /** ISO 8601。取れない場合は無い（`startedAt` と同じ） */
+  readonly endedAt?: string;
   /** 保存した時刻（ISO 8601）。保存期間・件数の上限はこの時刻の古い順に消す */
   readonly recordedAt: string;
   readonly actor: VerificationActor;
@@ -137,8 +137,9 @@ export interface VerificationRecordInput {
   readonly command: string;
   readonly cwd: string;
   readonly exitCode: number | undefined;
-  readonly startedAt: Date;
-  readonly endedAt: Date;
+  /** 取れない場合は `undefined`。推測した時刻（保存時刻など）で埋めない */
+  readonly startedAt: Date | undefined;
+  readonly endedAt: Date | undefined;
   readonly actor: VerificationActor;
   readonly acquisition: VerificationAcquisition;
   /** 生の出力。末尾だけをマスクして保存する */
@@ -211,8 +212,8 @@ function assembleRecord(
     cwd: input.cwd,
     exitCode: input.exitCode,
     outcome: outcomeForExitCode(input.exitCode),
-    startedAt: input.startedAt.toISOString(),
-    endedAt: input.endedAt.toISOString(),
+    ...(input.startedAt === undefined ? {} : { startedAt: input.startedAt.toISOString() }),
+    ...(input.endedAt === undefined ? {} : { endedAt: input.endedAt.toISOString() }),
     recordedAt: (options.now ?? new Date()).toISOString(),
     actor: input.actor,
     acquisition: input.acquisition,
@@ -269,8 +270,8 @@ export function parseVerificationRecord(value: unknown): VerificationRecord | un
     !isOptionalInt(r.exitCode) ||
     typeof r.outcome !== 'string' ||
     !OUTCOMES.includes(r.outcome) ||
-    !isIsoDate(r.startedAt) ||
-    !isIsoDate(r.endedAt) ||
+    (r.startedAt !== undefined && !isIsoDate(r.startedAt)) ||
+    (r.endedAt !== undefined && !isIsoDate(r.endedAt)) ||
     !isIsoDate(r.recordedAt) ||
     !isActor(r.actor) ||
     typeof r.acquisition !== 'string' ||

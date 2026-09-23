@@ -1891,6 +1891,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     if (turnFinished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+      // ループを止めうる`loop.observe`より前に記録する（最後のターンも残すため。issue #1379）
+      this.recordLoopCommands(entry, state);
       this.notifyTurnComplete(entry, state);
     }
     const title = deriveTitle(state, entry.pinnedName);
@@ -2061,6 +2063,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /** ループの状態変化。停止（running: true→false）を検知して `onFinished` を1度だけ呼ぶ。 */
   private onLoopStatus(entry: ChatPanel, status: LoopStatus): void {
     const stopped = entry.wasLoopRunning && !status.running;
+    if (!entry.wasLoopRunning && status.running) {
+      this.beginLoopCommandRecording(entry);
+    }
     entry.wasLoopRunning = status.running;
     this.postState(entry);
     if (stopped && status.stopReason !== undefined) {

@@ -215,6 +215,8 @@ import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import { WorkflowViewManager, type RoadmapViewPort } from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
+import { AgentReportedRecorder } from './verification/agentReported';
+import { VerificationStore } from './verification/store';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
 
@@ -600,6 +602,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 要約セッションのrolloutもCodex側に書かれるため、後始末の口も同じくここで渡す（Issue #942）
   claudeChat.setSummaryRollout(chat.summaryRolloutDeps());
 
+  // 検証結果の来歴の保存先（Issue #1377）。複数ウィンドウで共有するため`globalStorageUri`
+  // 配下に置く。ループのWorkerが会話中に実行したコマンドはチャット画面から、ワークフローの
+  // タスクのものは`WorkflowRunner`から、信頼できない記録として残す（Issue #1379）
+  const verificationStore = new VerificationStore(context.globalStorageUri.fsPath, {
+    homeDir: nodeLocatorDeps.homedir(),
+    onError: (message) => log.warn(`[verification] ${message}`),
+  });
+  const loopCommandRecorder = new AgentReportedRecorder(verificationStore, {
+    onError: (message) => log.warn(`[verification] ${message}`),
+  });
+  chat.setAgentReportedRecorder(loopCommandRecorder);
+  claudeChat.setAgentReportedRecorder(loopCommandRecorder);
+
   /**
    * エージェント向けのセッション宛の口（design.md §16.21、Issue #1274）。
    *
@@ -639,6 +654,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     toolUsageMetrics: {
       enabled: readToolUsageMetricsEnabled,
     },
+    verificationStore,
     // PR/MRの作成（design.md §16.18、Issue #105）。`agent.workflows.forge` は既定の
     // `auto`のままだと、`origin` remote・`gh`/`glab`の有無を実行のたびに確かめたうえで
     // 対応するホストへPR/MRを作る。前提が欠けていれば`runner.ts`側が警告のうえ
