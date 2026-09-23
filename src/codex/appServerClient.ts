@@ -194,8 +194,14 @@ export class AppServerClient {
         page += 1
       ) {
         const remaining = consumePage === undefined ? limit - items.length : limit;
+        // 既定の`thread/list`はページごとにrolloutを走査してメタデータを直すため、負荷が
+        // 高いと全ページで30秒を超える（issue #1404、実測で全325件29.6〜44.3秒）。状態DBは
+        // 初期化時に全rolloutをbackfillしてから使われるので、状態DBだけから返させる。
+        // フィールドを知らない旧CLIは無視して従来の走査で返し、状態DBを使えない環境では
+        // 空ページになるためSessionStoreがファイル読みへ退避する。
         const response = await request('thread/list', {
           limit: Math.min(THREAD_LIST_PAGE_SIZE, remaining),
+          useStateDbOnly: true,
           ...(cursor === undefined ? {} : { cursor }),
         });
         if (response.error !== undefined) {
