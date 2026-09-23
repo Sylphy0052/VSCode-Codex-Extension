@@ -33,11 +33,12 @@ export interface Logger {
  * **限界（セキュリティ監査指摘、Issue #474で一部対応）**: ここで一律に掛かる
  * `maskForLog` が隠すのはURLのuserinfo・ホームディレクトリ配下のユーザー名に加え、
  * `Bearer <token>` / `gh[oprsu]_...`（GitHubトークン）/ `sk-...`（OpenAI/Anthropic系
- * APIキー）の代表的な3形状。JWT（`eyJ...`）・AWSアクセスキー（`AKIA...`）・
- * Slackトークン（`xox[bpsr]-...`）等、他の形状のAPIキー・トークンは対象外でそのまま
- * ログへ出る。外部CLIのstderrをそのまま `log.warn` / `log.error` へ渡す既存の呼び出し
+ * APIキー）/ 裸のJWT（`eyJ...`）/ AWSアクセスキーID（`AKIA...` `ASIA...`）/
+ * Slackトークン（`xox[abposr]-...`）の代表的な形状。AWSのシークレットアクセスキー等、
+ * 接頭辞を持たない形状のAPIキー・トークンは対象外でそのままログへ出る。外部CLIの
+ * stderrをそのまま `log.warn` / `log.error` へ渡す既存の呼び出し
  * （例: `src/view/settingsProvider.ts`、`src/extension.ts`）はこの経路を通るため、
- * この3形状以外のトークンが含まれていれば漏れうる。「マスク済みだから安全」と
+ * これらの形状以外のトークンが含まれていれば漏れうる。「マスク済みだから安全」と
  * 誤解してログを共有しないこと。詳細は `maskForLog`（`src/orchestrator/sanitize.ts`）
  * のJSDocを参照。
  */
