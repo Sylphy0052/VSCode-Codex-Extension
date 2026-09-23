@@ -1,6 +1,7 @@
 import {
   appendNotice,
   appendTodoSnapshot,
+  buildContextUsage,
   capOutput,
   currentTurnIndex,
   NO_BACKGROUND_TERMINALS,
@@ -142,6 +143,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   let todos = state.todos;
   let todoHistory = state.todoHistory;
   let autocompactWindow = state.autocompactWindow;
+  const context = contextFromAssistant(state, event, message);
 
   for (const [position, part] of content.entries()) {
     const type = str(part['type']);
@@ -227,6 +229,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     editedFiles === state.turnEditedFiles &&
     todos === state.todos &&
     autocompactWindow === state.autocompactWindow &&
+    context === state.context &&
     state.streamingMessageId === undefined &&
     // ブロックを1つも運んでいないイベントは受け取り済みのブロック数も変えない
     content.length === 0
@@ -240,6 +243,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     todos,
     todoHistory,
     autocompactWindow,
+    context,
     // 次のイベントが同じメッセージの続きのブロックだったときに絶対番号を復元するための
     // 受け取り済みブロック数（issue #1239）。message.idが無ければ足し合わせる相手を
     // 決められないため持たない
@@ -413,6 +417,51 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 }
 
 /**
+ * キャッシュ読み取り分と初回書き込み分を足した入力トークン。どちらも無ければ undefined。
+ */
+function cachedInputTokensOf(usage: Record<string, unknown>): number | undefined {
+  const cacheRead = num(usage['cache_read_input_tokens']);
+  const cacheCreation = num(usage['cache_creation_input_tokens']);
+  return cacheRead === undefined && cacheCreation === undefined
+    ? undefined
+    : (cacheRead ?? 0) + (cacheCreation ?? 0);
+}
+
+/**
+ * `assistant` イベントの `usage` から、その応答を作ったAPI呼び出しの投入量を
+ * コンテキスト使用量として読む（issue #1400）。
+ *
+ * `get_context_usage` はターン終了時にしか問い合わせないため、1ターンの中でtool呼び出しが
+ * 続くと表示が前のターンの値のまま止まり、ターンの途中で発火したauto compactが低い値で
+ * 起きたように見えていた。応答ごとの `usage` は1回のAPI呼び出し分なので、その投入量が
+ * そのまま「いまコンテキストに載っている量」の近似になる。compact後の応答では投入量が
+ * 減るため、表示も下がる。正確な値はターン終了時の `get_context_usage` で上書きする。
+ *
+ * subagentの応答（`parent_tool_use_id` あり）は別のコンテキストなので使わない。
+ * `<synthetic>` 応答はモデル呼び出しを経ておらず `usage` が0で届くため使わない。
+ * 上限は直前の値（`get_context_usage` が返したもの）を引き継ぐ。
+ */
+function contextFromAssistant(
+  state: ChatState,
+  event: Record<string, unknown>,
+  message: Record<string, unknown> | undefined,
+): ChatState['context'] {
+  if (str(event['parent_tool_use_id']) !== '' || str(message?.['model']) === '<synthetic>') {
+    return state.context;
+  }
+  const usage = rec(message?.['usage']);
+  const inputTokens = num(usage?.['input_tokens']);
+  if (usage === undefined || inputTokens === undefined) {
+    return state.context;
+  }
+  const usedTokens = inputTokens + (cachedInputTokensOf(usage) ?? 0);
+  if (usedTokens <= 0 || usedTokens === state.context?.usedTokens) {
+    return state.context;
+  }
+  return buildContextUsage(usedTokens, state.context?.contextWindow) ?? state.context;
+}
+
+/**
  * ターンの終わり。`is_error` か `success` 以外のsubtypeは失敗として扱う。
  * ループ実行を止める判断に使うため、完了と区別して持つ。
  *
@@ -427,17 +476,12 @@ function applyResult(state: ChatState, event: Record<string, unknown>): ChatStat
   // キャッシュ読み取り分は `cache_read_input_tokens`、初回書き込み分は
   // `cache_creation_input_tokens` に分かれて来るため、投入量として両方を足す
   const usage = rec(event['usage']);
-  const cacheRead = num(usage?.['cache_read_input_tokens']);
-  const cacheCreation = num(usage?.['cache_creation_input_tokens']);
   const turnTokens =
     usage === undefined
       ? state.turnTokens
       : {
           inputTokens: num(usage['input_tokens']),
-          cachedInputTokens:
-            cacheRead === undefined && cacheCreation === undefined
-              ? undefined
-              : (cacheRead ?? 0) + (cacheCreation ?? 0),
+          cachedInputTokens: cachedInputTokensOf(usage),
           outputTokens: num(usage['output_tokens']),
         };
   return {
