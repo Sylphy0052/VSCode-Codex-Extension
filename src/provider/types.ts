@@ -46,6 +46,12 @@ export interface AgentProvider {
 
   locate(): LocateResult;
   listSessions(options: ListOptions): Promise<ListResult>;
+  /**
+   * idを指定してセッションを引く（Issue #1389）。お気に入りビューのように、少数の既知の
+   * idだけが要る場面で全件一覧を組み立てないための口。実体が見つからないidは結果に含めない。
+   * 順序は問わない（呼び出し側がidで引き直す）。
+   */
+  getSessions(ids: readonly string[]): Promise<SessionSummary[]>;
   /** 一覧に出すタブ名。プロバイダ名を接頭辞に付ける。 */
   tabTitle(session: Pick<SessionSummary, 'id' | 'threadName'>): string;
 }

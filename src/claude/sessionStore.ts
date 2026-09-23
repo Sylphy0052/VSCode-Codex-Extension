@@ -232,6 +232,53 @@ export class ClaudeSessionStore {
     };
   }
 
+  /**
+   * idを指定してセッションを引く（Issue #1389、お気に入りビュー用）。
+   *
+   * 索引は作り直さず、`onRefreshed` も呼ばない。お気に入りは全ワークスペースから出すため、
+   * `list` を `scope: 'all'` で呼ぶと、履歴ビューの範囲で作った索引との間で作り直しが交互に
+   * 続いていた（Issue #1389）。索引に載っているものはそこから返し、載っていないものだけ
+   * `projects/` を1回走査してtranscriptの先頭を読む。
+   */
+  async getSessions(ids: readonly string[]): Promise<SessionSummary[]> {
+    const sessions: SessionSummary[] = [];
+    const missing: string[] = [];
+    for (const id of ids) {
+      const indexed = this.index.findBySessionId(id);
+      if (indexed !== undefined && (await this.fs.mtimeMs(indexed.filePath)) !== undefined) {
+        sessions.push(indexed.session);
+      } else {
+        missing.push(id);
+      }
+    }
+
+    if (missing.length > 0) {
+      const files = new Map<string, string>();
+      for (const filePath of await this.fs.listJsonl(this.paths.projects)) {
+        const id = sessionIdFromTranscriptName(basenameOf(filePath));
+        if (id !== undefined) {
+          files.set(id, filePath);
+        }
+      }
+      for (const id of missing) {
+        const filePath = files.get(id);
+        if (filePath === undefined) {
+          continue;
+        }
+        const entry = await this.readIndexEntry(filePath, id, await this.fs.mtimeMs(filePath));
+        if (entry !== undefined && entry !== BACKGROUND_ONLY) {
+          sessions.push(entry.session);
+        }
+      }
+    }
+
+    // 解決順: 人が付けた名前 > transcriptの最初の発言（`listFromIndex` と同じ）
+    return sessions.map((session) => ({
+      ...session,
+      threadName: this.names.get(session.id) ?? session.threadName,
+    }));
+  }
+
   /** 人が付けた名前を読む（issue #199）。付けていなければ `undefined`。 */
   getName(sessionId: string): string | undefined {
     return this.names.get(sessionId);
