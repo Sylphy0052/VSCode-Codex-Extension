@@ -2249,6 +2249,11 @@ export interface ConvertMarkdownToRoadmapInput extends RoadmapConversionPromptIn
   roadmapDir: string;
   /** 保存先のファイル名（拡張子なし）。省略時は入力ファイル名から作る。 */
   slug?: string;
+  /**
+   * 変換元のロードマップIssueの番号（Issue #1422）。指定すると保存するMarkdownへ
+   * `元Issue: #<番号>` を記録し、runの完了時にそのIssueのチェックリストへ書き戻せるようにする。
+   */
+  sourceIssue?: number;
 }
 
 /** 任意のMarkdownをワークフロー用ロードマップへ変換して保存する。 */
@@ -2304,6 +2309,9 @@ export async function convertMarkdownToRoadmap(
     parsed = refined.parsed;
     validation = refined.validation;
   }
+  if (input.sourceIssue !== undefined) {
+    markdown = withRoadmapSourceIssue(markdown, input.sourceIssue);
+  }
   await deps.fs.writeTextFile(pathResult.path, markdown, input.workspaceRoot);
   generated.dispose?.();
   return { ok: true, path: pathResult.path, markdown, parsed, validation };
@@ -2341,6 +2349,108 @@ export function withRoadmapReference(
   };
 }
 
+/**
+ * 変換元のロードマップIssueを記録する行（Issue #1422）。トップレベルの平文行なので
+ * `parseRoadmapMarkdown`は警告を出さずに読み飛ばす。項目直下の `- Issue: #N` とは
+ * 先頭の `-` の有無で区別される。
+ */
+const ROADMAP_SOURCE_ISSUE_PATTERN = /^元Issue:\s*#(\d+)\s*$/u;
+
+/**
+ * ロードマップに記録された変換元Issueの番号を返す。記録はタイトルと最初のフェーズ見出しの
+ * 間にだけ置くため、フェーズ見出しより後ろの行は見ない（項目の本文に紛れた同じ形の行を
+ * 変換元と取り違えないため）。
+ */
+export function readRoadmapSourceIssue(markdown: string): number | undefined {
+  for (const line of markdown.split(/\r?\n/u)) {
+    if (PHASE_HEADING_PATTERN.test(line)) {
+      return undefined;
+    }
+    const match = ROADMAP_SOURCE_ISSUE_PATTERN.exec(line.trim());
+    if (match !== null) {
+      const issue = Number(match[1]);
+      return Number.isSafeInteger(issue) && issue > 0 ? issue : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * ロードマップへ変換元Issueの記録を足す（Issue #1422）。変換セッションの出力に同じ形の行が
+ * 混じっていても（Issue本文は外部由来なので、別のIssueを指す行を紛れ込ませうる）、
+ * それらは消してから、タイトル行の直後（無ければ先頭）へ1行だけ入れる。
+ */
+export function withRoadmapSourceIssue(markdown: string, issue: number): string {
+  const lineEnding = detectLineEnding(markdown);
+  const lines = markdown
+    .split(/\r?\n/u)
+    .filter((line) => !ROADMAP_SOURCE_ISSUE_PATTERN.test(line.trim()));
+  const titleIndex = lines.findIndex((line) => TITLE_PATTERN.test(line));
+  const record = `元Issue: #${String(issue)}`;
+  if (titleIndex >= 0) {
+    lines.splice(titleIndex + 1, 0, '', record);
+  } else {
+    lines.splice(0, 0, record, '');
+  }
+  return lines.join(lineEnding);
+}
+
+/** `checkIssueChecklistItems` の結果。 */
+export interface IssueChecklistUpdate {
+  body: string;
+  /** 今回 `[ ]` から `[x]` にした子Issueの番号。 */
+  checked: number[];
+  /** 既に `[x]` だった子Issueの番号。 */
+  alreadyChecked: number[];
+  /** 本文に行頭 `#<番号>` のチェックリスト行が無かった子Issueの番号。 */
+  missing: number[];
+}
+
+/**
+ * チェックボックスの直後が `#<番号>` で始まる行（gant書式の `- [ ] #123: タイトル`）。
+ * `- [ ] 評価基盤 (#19)` のように番号が行の途中にある行は対象にしない。
+ */
+const ISSUE_CHECKLIST_LINE_PATTERN = /^(\s*[-*+]\s+\[)([ xX])(\]\s+#(\d+)\b.*)$/u;
+
+/**
+ * ロードマップIssueの本文のうち、指定した子Issueのチェックリスト行だけを `[x]` にする
+ * （Issue #1422）。チェックの記号以外は1文字も変えない（行末の改行コードも保つ）。
+ */
+export function checkIssueChecklistItems(
+  body: string,
+  issues: readonly number[],
+): IssueChecklistUpdate {
+  const wanted = new Set(issues);
+  const found = new Set<number>();
+  const checked: number[] = [];
+  const alreadyChecked: number[] = [];
+  const lines = body.split('\n').map((rawLine) => {
+    const hasCarriageReturn = rawLine.endsWith('\r');
+    const line = hasCarriageReturn ? rawLine.slice(0, -1) : rawLine;
+    const match = ISSUE_CHECKLIST_LINE_PATTERN.exec(line);
+    if (match === null) {
+      return rawLine;
+    }
+    const issue = Number(match[4]);
+    if (!wanted.has(issue)) {
+      return rawLine;
+    }
+    found.add(issue);
+    if (match[2] !== ' ') {
+      alreadyChecked.push(issue);
+      return rawLine;
+    }
+    checked.push(issue);
+    return `${match[1] ?? ''}x${match[3] ?? ''}${hasCarriageReturn ? '\r' : ''}`;
+  });
+  return {
+    body: lines.join('\n'),
+    checked,
+    alreadyChecked,
+    missing: [...wanted].filter((issue) => !found.has(issue)),
+  };
+}
+
 export interface ApplyRunCompletionDeps {
   fs: RoadmapFileSystemPort;
 }
@@ -2348,6 +2458,8 @@ export interface ApplyRunCompletionDeps {
 export type ApplyRunCompletionOutcome =
   | {
       ok: true;
+      /** 書き戻し後のロードマップ本文（更新が無ければ読んだままの本文）。 */
+      markdown: string;
       updatedItemIds: string[];
       unmatchedTaskIds: string[];
       /** `applyRunCompletion`の`warnings`をそのまま引き継ぐ（Issue #408）。 */
@@ -2454,6 +2566,7 @@ async function applyRunCompletionToFileLocked(
   }
   return {
     ok: true,
+    markdown: result.markdown,
     updatedItemIds: result.updatedItemIds,
     unmatchedTaskIds: result.unmatchedTaskIds,
     warnings: result.warnings,

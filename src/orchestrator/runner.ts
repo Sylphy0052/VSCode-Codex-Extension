@@ -44,6 +44,7 @@ import {
 } from './forge';
 import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
 import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
+import { syncRoadmapCompletionToIssue } from './roadmapIssueSync';
 import type { TeamRole } from './rolePresets';
 import {
   formatHandoffReference,
@@ -4445,6 +4446,69 @@ export class WorkflowRunner {
     // `messaging.ts` は変更できないため、既存のログ経路（Output panelへ出る`Logger`）に乗せる）
     for (const warning of result.warnings) {
       this.deps.log.warn(`[workflow ${runId}] ロードマップの警告: ${warning.message}`);
+    }
+    if (result.updatedItemIds.length > 0) {
+      await this.syncRoadmapIssue(runId, live, result.markdown, result.updatedItemIds);
+    }
+  }
+
+  /**
+   * ロードマップIssueから変換したロードマップなら、今回チェックを入れた項目を変換元Issueの
+   * チェックリストへも書き戻す（Issue #1422）。Issueの操作は`forge`が有効なrunに限る
+   * （`agent.workflows.forge`が`none`、または`gh`/`glab`の前提が欠けるrunではIssueに触れない）。
+   * 失敗してもローカルの書き戻しとrunの完了処理には影響させず、ログに残すだけにする。
+   */
+  private async syncRoadmapIssue(
+    runId: string,
+    live: LiveRun,
+    roadmapMarkdown: string,
+    updatedItemIds: readonly string[],
+  ): Promise<void> {
+    const forge = live.forge;
+    const forgeDeps = this.deps.forge;
+    if (forge.kind !== 'active' || forgeDeps === undefined) {
+      return;
+    }
+    const log = (message: string): void => {
+      this.deps.log.info(`[workflow ${runId}] ${message}`);
+    };
+    try {
+      const outcome = await syncRoadmapCompletionToIssue(
+        { cli: forgeDeps.cli, fs: forgeDeps.fs },
+        { host: forge.host, cwd: live.repoRoot, roadmapMarkdown, updatedItemIds },
+      );
+      if (outcome.sourceIssue === undefined) {
+        return;
+      }
+      const source = `ロードマップIssue #${String(outcome.sourceIssue)}`;
+      if (outcome.itemsWithoutIssue.length > 0) {
+        log(
+          `${source} へ書き戻さない項目（Issue番号なし）: ${outcome.itemsWithoutIssue.join(', ')}`,
+        );
+      }
+      if (outcome.kind === 'failed') {
+        this.deps.log.warn(
+          `[workflow ${runId}] ${source} への書き戻しに失敗しました: ${outcome.message}`,
+        );
+        return;
+      }
+      if (outcome.kind === 'skipped') {
+        return;
+      }
+      if (outcome.missing.length > 0) {
+        log(
+          `${source} の本文に行頭が #番号 のチェックリスト行が無い子Issue: ${outcome.missing.map((n) => `#${String(n)}`).join(', ')}`,
+        );
+      }
+      if (outcome.kind === 'updated') {
+        log(
+          `${source} のチェックリストを更新しました: ${outcome.checked.map((n) => `#${String(n)}`).join(', ')}`,
+        );
+      }
+    } catch (err) {
+      this.deps.log.warn(
+        `[workflow ${runId}] ロードマップIssueへの書き戻しに失敗しました: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
+      );
     }
   }
 

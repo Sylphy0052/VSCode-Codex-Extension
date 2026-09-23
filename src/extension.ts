@@ -3088,6 +3088,7 @@ async function planWorkflowFromRoadmapIssueCommand(
           roadmapDir,
           slug: fileName,
           sourcePath: picked.issue.url ?? `Issue #${picked.issue.number}`,
+          sourceIssue: picked.issue.number,
           sourceMarkdown: body,
         },
       ),
