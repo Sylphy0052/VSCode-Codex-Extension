@@ -17,6 +17,13 @@ export function pinKeyFor(session: Pick<SessionSummary, 'provider' | 'id'>): str
  * 値を渡さない場合は何も永続化しないno-opの `MementoLike` を既定にする（同ファイルと同じ流儀）。
  */
 export class PinnedSessionStore {
+  /**
+   * 変更通知のリスナー（Issue #1366）。util層なのでvscode依存を持ち込まず、`dispose`
+   * だけを持つ最小の口にする（`vscode.Disposable`と構造的に一致するので呼び出し側は
+   * そのまま`context.subscriptions`へ積める）。
+   */
+  private readonly listeners = new Set<() => void>();
+
   constructor(
     private readonly memento: MementoLike = {
       get: (_key, defaultValue) => defaultValue,
@@ -39,6 +46,7 @@ export class PinnedSessionStore {
       return;
     }
     await this.memento.update(PINNED_SESSIONS_KEY, [...current, key]);
+    this.notifyChange();
   }
 
   async unpin(key: string): Promise<void> {
@@ -46,6 +54,22 @@ export class PinnedSessionStore {
       PINNED_SESSIONS_KEY,
       this.list().filter((k) => k !== key),
     );
+    this.notifyChange();
+  }
+
+  /**
+   * 変更（`pin`/`unpin`）の購読（Issue #1366）。履歴ツリー・お気に入りツリー・会話画面の
+   * 3か所が同じストアを見ているため、どこで切り替えても残り2か所へ反映させる契機に使う。
+   */
+  onDidChange(listener: () => void): { dispose(): void } {
+    this.listeners.add(listener);
+    return { dispose: () => this.listeners.delete(listener) };
+  }
+
+  private notifyChange(): void {
+    for (const listener of this.listeners) {
+      listener();
+    }
   }
 }
 

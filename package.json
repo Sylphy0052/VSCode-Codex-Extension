@@ -46,6 +46,10 @@
           "name": "履歴"
         },
         {
+          "id": "agent.favorites",
+          "name": "お気に入り"
+        },
+        {
           "id": "agent.attention",
           "name": "要対応"
         }
@@ -55,6 +59,10 @@
       {
         "view": "codex.sessions",
         "contents": "このワークスペースのセッションはまだありません。\n[新しい会話（Codex）](command:codex.newChat)\n[新しい会話（Claude Code）](command:claude.newChat)\n全ワークスペースのセッションを見るには表示範囲を切り替えてください。"
+      },
+      {
+        "view": "agent.favorites",
+        "contents": "会話画面の「…」メニューからお気に入りに追加できます。"
       }
     ],
     "menus": {
@@ -236,6 +244,16 @@
           "group": "2_manage@1"
         },
         {
+          "command": "codex.unpinSession",
+          "when": "view == agent.favorites && viewItem =~ /^codexSession\\..*\\.pinned$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "codex.unpinSession",
+          "when": "view == agent.favorites && viewItem =~ /^codexSession\\..*\\.pinned$/",
+          "group": "1_manage@1"
+        },
+        {
           "command": "codex.archiveSession",
           "when": "view == codex.sessions && viewItem =~ /^codexSession\\.codex(\\.pinned)?$/",
           "group": "2_manage@2"
@@ -368,13 +386,13 @@
       },
       {
         "command": "codex.pinSession",
-        "title": "ピン留めする",
+        "title": "お気に入りに追加",
         "category": "Agent",
         "icon": "$(pinned)"
       },
       {
         "command": "codex.unpinSession",
-        "title": "ピン留めを外す",
+        "title": "お気に入りから外す",
         "category": "Agent",
         "icon": "$(pin)"
       },

@@ -5,7 +5,7 @@ import type { Logger } from '../log';
 import type { ProviderRegistry } from '../provider/registry';
 import type { HistoryScope } from '../session/sessionStore';
 import { basenameOf } from '../util/paths';
-import { PinnedSessionStore, partitionPinned, pinKeyFor } from '../util/pinnedSessions';
+import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
 import { matchesSessionQuery, sessionNameHighlights } from '../util/sessionFilter';
 import { buildDateGroups, buildFolderGroups, type SessionGroup } from '../util/sessionGrouping';
 import { formatAbsoluteTime, formatRelativeTime } from './relativeTime';
@@ -19,7 +19,8 @@ import {
 } from './sessionDecorations';
 
 /**
- * グループの見出し用ツリー要素（issue #293。日付/作業ディレクトリ/ピン留めのグループ化）。
+ * グループの見出し用ツリー要素（issue #293。日付/作業ディレクトリのグループ化。ピン留めの
+ * グループは「お気に入り」ビューへ役目を移したため廃止した。Issue #1366）。
  *
  * セッションの葉ノードは`SessionGroupNode`で包まず`SessionSummary`をそのまま使う
  * （`TreeElement = SessionSummary | SessionGroupNode`という直和型）。包んでしまうと
@@ -31,7 +32,7 @@ import {
  */
 export interface SessionGroupNode {
   readonly kind: 'group';
-  readonly groupKind: 'pinned' | 'date' | 'folder';
+  readonly groupKind: 'date' | 'folder';
   /** `group:<groupKind>:<key>`の形。セッション側のidは`<provider>:<id>`（providerは
    * `codex` | `claude`のみ）で、`group:`から始まることは無いため衝突しない。 */
   readonly id: string;
@@ -50,7 +51,6 @@ function isGroupNode(element: TreeElement): element is SessionGroupNode {
 }
 
 const GROUP_ICON: Readonly<Record<SessionGroupNode['groupKind'], string>> = {
-  pinned: 'pinned',
   date: 'calendar',
   folder: 'folder',
 };
@@ -188,30 +188,19 @@ export class SessionTreeProvider
     this.decorationEmitter.fire();
 
     if (config.historyGroupBy === 'none') {
-      // `none`は既存の表示（更新時刻降順のフラットな1リスト）へそのまま戻す。ピン留めして
-      // いてもグループ化はしない（「noneで現状とまったく同じ」という受入基準を優先した判断。
-      // 判断の詳細はdesign.md §14.54）。ピン留めの解除自体はcontextValue経由でどのモードでも
-      // できる（getTreeItem参照）。
+      // `none`は既存の表示（更新時刻降順のフラットな1リスト）へそのまま戻す。お気に入り
+      // （旧ピン留め）は専用ビューへ移したため、履歴側はここでもグループ化しない
+      // （判断の詳細はdesign.md §14.54）。お気に入りの解除自体はcontextValue経由でどの
+      // モードでもできる（getTreeItem参照）。
       return visible;
     }
 
-    const { pinned, rest } = partitionPinned(visible, this.pinnedStore.list());
-
     const groups: SessionGroupNode[] = [];
-    if (pinned.length > 0) {
-      groups.push({
-        kind: 'group',
-        groupKind: 'pinned',
-        id: 'group:pinned',
-        label: 'ピン留め',
-        sessions: pinned,
-      });
-    }
 
     const contentGroups: SessionGroup[] =
       config.historyGroupBy === 'folder'
-        ? buildFolderGroups(rest)
-        : buildDateGroups(rest, Date.now());
+        ? buildFolderGroups(visible)
+        : buildDateGroups(visible, Date.now());
     for (const g of contentGroups) {
       groups.push({
         kind: 'group',
@@ -280,78 +269,15 @@ export class SessionTreeProvider
 
   private buildSessionTreeItem(session: SessionSummary): vscode.TreeItem {
     const activity = this.getActivity(session);
-    const item = new vscode.TreeItem(
-      this.buildSessionLabel(session),
-      vscode.TreeItemCollapsibleState.None,
-    );
-
-    // VS Codeはツリーの要素とTreeItemの対応を`id`で保持する。`id`が無いとラベルと位置から
-    // 内部ハンドルを組み立てるが、このツリーのラベルは`threadName ?? '(名称未設定)'`で
-    // 重複しやすく、`refreshDebounced`によって並びも頻繁に変わる。その結果ハンドルと要素の
-    // 対応がずれ、`view/item/context`（インラインアイコン・右クリックメニュー）から呼ぶ
-    // コマンドへ`SessionSummary`が渡らず`undefined`になる（issue #236）。
-    // プロバイダをまたいでも衝突しないよう、プロバイダ名とセッションIDの組で一意にする。
-    // グループ化（issue #293）後もこの値は変えていない。グループのidは常に`group:`から
-    // 始まり、プロバイダ名（`codex` / `claude`）が`group`になることは無いため衝突しない。
-    item.id = `${session.provider}:${session.id}`;
-
-    // 行末のデコレーション（issue #735）を効かせるための仮想URI。`FileDecorationProvider`
-    // は`resourceUri`を持つ項目にしか効かない。実ファイル（rolloutのjsonl）ではなく
-    // 専用スキームを指す（実パスにすると同じファイルを開いている他のUIへ装飾が波及する）。
-    // ラベルは`TreeItem.label`が優先されるので、表示名はこれで変わらない
-    item.resourceUri = sessionUri(session);
-
-    const label = this.providers.get(session.provider)?.label ?? session.provider;
-    // 補足はいちばん見たい「いつ更新されたか」を先頭に置く（issue #736）。CLI名
-    // （`Codex` / `Claude Code`）は載せない——サイドバーの幅が狭いと後ろから切れるため、
-    // 3つ並べると相対時刻が押し出される。CLI名はツールチップの`- CLI:`に残してある
-    const parts = [formatRelativeTime(session.updatedAt, Date.now())];
-    if (this.scope === 'all' && session.cwd !== undefined) {
-      parts.push(basenameOf(session.cwd));
-    }
-    // 実行中／承認待ちは他の情報より優先度が高いので先頭へ差し込む（issue #286、
-    // design.md §14.55）。`idle`（開いてはいるが動いていない）・未オープンでは何も足さない
-    if (activity === 'approvalPending') {
-      parts.unshift('承認待ち');
-    } else if (activity === 'handoffPending') {
-      parts.unshift('引き継ぎ確認待ち');
-    } else if (activity === 'running') {
-      parts.unshift('実行中');
-    }
-    // 区切りは中黒（issue #736）。全角スペース2個は幅を取るわりに切れ目が読み取りにくい
-    item.description = parts.filter((p) => p !== '').join(' · ');
-
-    const pinned = this.isPinned(session);
-
-    item.tooltip = new vscode.MarkdownString(
-      [
-        `**${session.threadName ?? '(名称未設定)'}**`,
-        '',
-        `- CLI: ${label}`,
-        `- 更新: ${formatAbsoluteTime(session.updatedAt)}`,
-        `- cwd: \`${session.cwd ?? '不明'}\``,
-        `- id: \`${session.id}\``,
-        ...(session.archived ? ['- アーカイブ済み'] : []),
-        ...(pinned ? ['- ピン留め済み'] : []),
-        // 親スレッドが分かる場合のみ（issue #34、design.md §14.26）。切替はできないため、
-        // ツリーからは「親が居る」ことが分かるだけに留める
-        ...(session.parentThreadId !== undefined
-          ? [`- 親スレッド: \`${session.parentThreadId}\``]
-          : []),
-      ].join('\n'),
-    );
-
-    item.iconPath = buildSessionIcon(session, activity);
-    // メニューの出し分けにプロバイダ・アーカイブ状態・ピン留め状態を含める
-    // （Claude Codeにはarchive/deleteが無い。`package.json`のwhen句は正規表現で
-    // `.pinned`サフィックスの有無に関わらずマッチするようにしてある）
-    item.contextValue = buildSessionContextValue(session, pinned);
-    item.command = {
-      command: 'codex.openSession',
-      title: 'Open',
-      arguments: [session],
-    };
-    return item;
+    return buildSessionTreeItem(session, activity, {
+      label: this.buildSessionLabel(session),
+      providerLabel: this.providers.get(session.provider)?.label ?? session.provider,
+      scope: this.scope,
+      favorite: this.isPinned(session),
+      // 行末のデコレーション（issue #735）は履歴ビューだけの機能。お気に入りビュー
+      // （`FavoritesTreeProvider`、Issue #1366）へは付けない
+      withResourceUri: true,
+    });
   }
 
   dispose(): void {
@@ -361,6 +287,102 @@ export class SessionTreeProvider
     this.emitter.dispose();
     this.decorationEmitter.dispose();
   }
+}
+
+/** {@link buildSessionTreeItem} が呼び出し側から受け取る、表示先ビュー固有の条件。 */
+export interface SessionTreeItemOptions {
+  /** 表示名。絞り込みハイライト（issue #738）は呼び出し側で組み立てて渡す。 */
+  label: string | vscode.TreeItemLabel;
+  /** CLI名（`Codex` / `Claude Code`）。ツールチップの`- CLI:`にだけ使う。 */
+  providerLabel: string;
+  scope: HistoryScope;
+  /** お気に入り（旧ピン留め、Issue #1366）に入っているか。 */
+  favorite: boolean;
+  /**
+   * 行末のデコレーション（issue #735）用の仮想URIを付けるか。装飾は履歴ビュー
+   * （`SessionTreeProvider`）だけの機能なので、お気に入りビュー（`FavoritesTreeProvider`）
+   * からは`false`を渡す（Issue #1366）。
+   */
+  withResourceUri: boolean;
+}
+
+/**
+ * セッション1件分の`TreeItem`を組み立てる（Issue #1366で履歴ビューから切り出し、
+ * 履歴・お気に入り両ビューで共有）。見た目・`id`・`command`・`contextValue`を揃える。
+ */
+export function buildSessionTreeItem(
+  session: SessionSummary,
+  activity: SessionActivityState | undefined,
+  options: SessionTreeItemOptions,
+): vscode.TreeItem {
+  const item = new vscode.TreeItem(options.label, vscode.TreeItemCollapsibleState.None);
+
+  // VS Codeはツリーの要素とTreeItemの対応を`id`で保持する。`id`が無いとラベルと位置から
+  // 内部ハンドルを組み立てるが、このツリーのラベルは`threadName ?? '(名称未設定)'`で
+  // 重複しやすく、`refreshDebounced`によって並びも頻繁に変わる。その結果ハンドルと要素の
+  // 対応がずれ、`view/item/context`（インラインアイコン・右クリックメニュー）から呼ぶ
+  // コマンドへ`SessionSummary`が渡らず`undefined`になる（issue #236）。
+  // プロバイダをまたいでも衝突しないよう、プロバイダ名とセッションIDの組で一意にする。
+  // 履歴・お気に入りの両ビューで同じ値になるが、別ビューなので衝突しない（Issue #1366）。
+  item.id = `${session.provider}:${session.id}`;
+
+  if (options.withResourceUri) {
+    // 行末のデコレーション（issue #735）を効かせるための仮想URI。`FileDecorationProvider`
+    // は`resourceUri`を持つ項目にしか効かない。実ファイル（rolloutのjsonl）ではなく
+    // 専用スキームを指す（実パスにすると同じファイルを開いている他のUIへ装飾が波及する）。
+    // ラベルは`TreeItem.label`が優先されるので、表示名はこれで変わらない
+    item.resourceUri = sessionUri(session);
+  }
+
+  // 補足はいちばん見たい「いつ更新されたか」を先頭に置く（issue #736）。CLI名
+  // （`Codex` / `Claude Code`）は載せない——サイドバーの幅が狭いと後ろから切れるため、
+  // 3つ並べると相対時刻が押し出される。CLI名はツールチップの`- CLI:`に残してある
+  const parts = [formatRelativeTime(session.updatedAt, Date.now())];
+  if (options.scope === 'all' && session.cwd !== undefined) {
+    parts.push(basenameOf(session.cwd));
+  }
+  // 実行中／承認待ちは他の情報より優先度が高いので先頭へ差し込む（issue #286、
+  // design.md §14.55）。`idle`（開いてはいるが動いていない）・未オープンでは何も足さない
+  if (activity === 'approvalPending') {
+    parts.unshift('承認待ち');
+  } else if (activity === 'handoffPending') {
+    parts.unshift('引き継ぎ確認待ち');
+  } else if (activity === 'running') {
+    parts.unshift('実行中');
+  }
+  // 区切りは中黒（issue #736）。全角スペース2個は幅を取るわりに切れ目が読み取りにくい
+  item.description = parts.filter((p) => p !== '').join(' · ');
+
+  item.tooltip = new vscode.MarkdownString(
+    [
+      `**${session.threadName ?? '(名称未設定)'}**`,
+      '',
+      `- CLI: ${options.providerLabel}`,
+      `- 更新: ${formatAbsoluteTime(session.updatedAt)}`,
+      `- cwd: \`${session.cwd ?? '不明'}\``,
+      `- id: \`${session.id}\``,
+      ...(session.archived ? ['- アーカイブ済み'] : []),
+      // 旧「ピン留め済み」から文言変更（Issue #1366）
+      ...(options.favorite ? ['- お気に入り'] : []),
+      // 親スレッドが分かる場合のみ（issue #34、design.md §14.26）。切替はできないため、
+      // ツリーからは「親が居る」ことが分かるだけに留める
+      ...(session.parentThreadId !== undefined
+        ? [`- 親スレッド: \`${session.parentThreadId}\``]
+        : []),
+    ].join('\n'),
+  );
+
+  item.iconPath = buildSessionIcon(session, activity);
+  // メニューの出し分けにプロバイダ・アーカイブ状態・お気に入り状態を含める
+  // （Claude Codeにはarchive/deleteが無い。`package.json`のwhen句は正規表現で
+  // `.pinned`サフィックスの有無に関わらずマッチするようにしてある）
+  item.contextValue = buildSessionContextValue(session, options.favorite);
+  item.command = {
+    command: 'codex.openSession',
+    title: 'Open',
+    arguments: [session],
+  };
+  return item;
 }
 
 /**

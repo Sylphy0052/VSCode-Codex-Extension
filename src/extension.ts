@@ -203,6 +203,7 @@ import { ForgeHubViewManager } from './view/forgeHubView';
 import { SessionDecorationProvider } from './view/sessionDecorations';
 import { defaultReviewBundleRoot, removeStaleReviewBundles } from './secondOpinion/reviewBundle';
 import { SessionTreeProvider } from './view/sessionTreeProvider';
+import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
@@ -501,6 +502,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
   );
   const sessionModelSettings = new SessionModelSettingsStore(context.globalState);
+  // お気に入り（Issue #1366）。履歴ツリー・お気に入りツリー・チャット画面の3箇所から
+  // 参照するため、それらより前に生成する
+  const pinnedSessions = new PinnedSessionStore(context.globalState);
 
   const chat = new ChatViewManager(
     codexPath,
@@ -540,6 +544,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     sessionModelSettings,
     // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
     context.globalStorageUri.fsPath,
+    pinnedSessions,
   );
   context.subscriptions.push(chat);
 
@@ -563,6 +568,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     sessionModelSettings,
     // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
     context.globalStorageUri.fsPath,
+    pinnedSessions,
   );
   context.subscriptions.push(claudeChat);
 
@@ -1346,9 +1352,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   const actions = new SessionActions(nodeCommandRunner, codexPath);
 
-  // ピン留め（issue #293）。セッションidはワークスペースをまたいでも一意なため、
-  // `ClaudeSessionNameStore`と同じくglobalStateへ持たせる
-  const pinnedSessions = new PinnedSessionStore(context.globalState);
+  // ピン留め＝お気に入り（issue #293、Issue #1366）。セッションidはワークスペースを
+  // またいでも一意なため、`ClaudeSessionNameStore`と同じくglobalStateへ持たせる
+  // （生成自体は`chat` / `claudeChat`の生成前、`pinnedSessions`変数として上で行っている）
   // 開いているかどうかはチャット画面が持つ
   // 開いているか・実行中か・承認待ちかはチャット画面（`chat` / `claudeChat`）が持つ
   // （issue #286、design.md §14.55）。providerでどちらのマネージャへ引くかを決める
@@ -1363,6 +1369,33 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     showCollapseAll: false,
   });
   context.subscriptions.push(tree, sessionsView);
+
+  // お気に入りビュー（Issue #1366）。履歴ツリーと同じ`SessionSummary`をそのまま
+  // 葉にするため、コマンド引数の互換性（issue #236）も同様に保たれる
+  const favoritesTree = new FavoritesTreeProvider(
+    providers,
+    getSessionActivity,
+    log,
+    pinnedSessions,
+  );
+  const favoritesView = vscode.window.createTreeView('agent.favorites', {
+    treeDataProvider: favoritesTree,
+    showCollapseAll: false,
+  });
+  context.subscriptions.push(favoritesTree, favoritesView);
+  // 履歴ツリーを引き直す契機（ファイル監視・活動状態の変化・手動更新など）で
+  // お気に入りも引き直し、タイトルと状態のアイコンを揃える（Issue #1366）
+  context.subscriptions.push(tree.onDidChangeTreeData(() => favoritesTree.refresh()));
+
+  // お気に入りの追加・解除は履歴ツリー／お気に入りツリー／開いているチャット画面の
+  // 3箇所に反映する必要がある（Issue #1366）
+  context.subscriptions.push(
+    pinnedSessions.onDidChange(() => {
+      tree.refresh();
+      chat.refreshFavorites();
+      claudeChat.refreshFavorites();
+    }),
+  );
 
   // 初回の履歴表示と同時に全ロールアウトを走査しない。掃除は表示が落ち着いた後に行う。
   const pruneTimer = setTimeout(() => {

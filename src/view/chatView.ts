@@ -151,6 +151,7 @@ import {
 } from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
 import type { SessionStore } from '../session/sessionStore';
+import type { PinnedSessionStore } from '../util/pinnedSessions';
 import {
   createNodeSummaryRolloutDeps,
   type SummaryRolloutDeps,
@@ -599,8 +600,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
      * working treeの汚れを避けるため）。未指定なら引き継ぎ自体を断る。
      */
     private readonly globalStorageDir?: string,
+    /** お気に入り（Issue #1366）の永続化先。未指定なら何も永続化しないno-op。 */
+    pinnedSessions?: PinnedSessionStore,
   ) {
-    super();
+    super(pinnedSessions, 'codex');
     this.catalog = new CommandCatalog(this.fs);
     this.connection = connectionFactory(
       (method, params) => this.routeNotification(method, params),
@@ -1173,7 +1176,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
     if (wasOn) {
-      entry.session.noteLocalEvent(`autoReplyStop:${Date.now()}`, describeAutoReplyStopReason(reason));
+      entry.session.noteLocalEvent(
+        `autoReplyStop:${Date.now()}`,
+        describeAutoReplyStopReason(reason),
+      );
     }
   }
 
@@ -2584,6 +2590,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         });
         return;
       }
+      if (type === 'toggleFavorite') {
+        this.toggleFavorite(entry);
+        return;
+      }
       if (type === 'toggleTurnSummary') {
         const enabled = !readChatTurnSummaryConfig().enabled;
         await setChatTurnSummaryEnabled(enabled);
@@ -2605,6 +2615,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           type: 'loopAutoGoal',
           enabled: readGoalDraftConfig().enabled,
         });
+        // お気に入り（Issue #1366）も作り直したwebviewへ送り直す（前回値と同じでも送る）
+        this.resendFavorite(entry);
         await this.postCommands(entry);
       }
     } catch (e) {

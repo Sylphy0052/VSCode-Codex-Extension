@@ -3589,6 +3589,25 @@ export function chatScript(
     renderLimitAutoResumeStatus({ enabled: enabled });
   }
 
+  el('favoriteToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleFavorite' }),
+  );
+
+  // お気に入り（Issue #1366）。スレッドがまだ始まっていない間は拡張側から
+  // favorite: nullが届き、ボタン自体を隠す。以後は真偽値で表示・ラベルを切り替える
+  function applyFavorite(favorite) {
+    const button = el('favoriteToggle');
+    if (favorite === null) {
+      button.hidden = true;
+      return;
+    }
+    button.hidden = false;
+    const label = favorite ? 'お気に入りから外す' : 'お気に入りに追加';
+    button.setAttribute('aria-pressed', String(favorite));
+    button.setAttribute('aria-label', label);
+    button.querySelector('.composerOverflowLabel').textContent = label;
+  }
+
   /**
    * アイコン列の「…」メニューの開閉（issue #296）。畳んだボタンはcomposerIconRowの
    * 中に実体をそのまま置いてあり、hidden属性で表と行き来させているだけなので、
@@ -4038,6 +4057,9 @@ export function chatScript(
     }
     if (data.type === 'limitAutoResume' && typeof data.enabled === 'boolean') {
       applyLimitAutoResumeEnabled(data.enabled);
+    }
+    if (data.type === 'favorite' && (data.favorite === null || typeof data.favorite === 'boolean')) {
+      applyFavorite(data.favorite);
     }
     if (data.type === 'loopAutoGoal' && typeof data.enabled === 'boolean') {
       autoGoalEnabled = data.enabled;
