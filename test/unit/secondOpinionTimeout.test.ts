@@ -109,11 +109,11 @@ class FakeHost implements TaskSessionHost {
 
 const SESSION_INPUT: TaskSessionInput = {
   cwd: '/repo',
-  config: { model: 'gpt-5.6-sol', effort: 'high', approvalMode: 'never' },
+  config: { model: 'gpt-6-sol', effort: 'high', approvalMode: 'never' },
   sandbox: 'read-only',
 };
 
-const CANDIDATE = { name: 'Sol (high)', model: 'gpt-5.6-sol', effort: 'high' };
+const CANDIDATE = { name: 'Sol (high)', model: 'gpt-6-sol', effort: 'high' };
 const SNAPSHOT_CONTEXT = {
   kind: 'workspaceChanges' as const,
   snapshot: {

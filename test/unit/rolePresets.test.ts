@@ -77,20 +77,20 @@ describe('roleDefaults（プロバイダごとのmodel/effort）', () => {
     }
   });
 
-  it('deep役割はcodexでgpt-5.6-terra、claudeでopusを返す', () => {
-    expect(roleDefaults('architect', 'codex').model).toBe('gpt-5.6-terra');
+  it('deep役割はcodexでgpt-6-sol、claudeでopusを返す', () => {
+    expect(roleDefaults('architect', 'codex').model).toBe('gpt-6-sol');
     expect(roleDefaults('architect', 'claude').model).toBe('opus');
     expect(roleDefaults('architect', 'codex').effort).toBe('high');
   });
 
-  it('light役割はcodexでgpt-5.6-luna、claudeでsonnetを返す', () => {
-    expect(roleDefaults('implementer', 'codex').model).toBe('gpt-5.6-luna');
+  it('light役割はcodexでgpt-6-luna、claudeでsonnetを返す', () => {
+    expect(roleDefaults('implementer', 'codex').model).toBe('gpt-6-luna');
     expect(roleDefaults('implementer', 'claude').model).toBe('sonnet');
     expect(roleDefaults('implementer', 'codex').effort).toBe('low');
   });
 
-  it('standard役割はcodexでgpt-5.6-luna、claudeでsonnetを返す（effortはmedium）', () => {
-    expect(roleDefaults('writer', 'codex').model).toBe('gpt-5.6-luna');
+  it('standard役割はcodexでgpt-6-sol、claudeでsonnetを返す（effortはmedium）', () => {
+    expect(roleDefaults('writer', 'codex').model).toBe('gpt-6-sol');
     expect(roleDefaults('writer', 'claude').model).toBe('sonnet');
     expect(roleDefaults('writer', 'codex').effort).toBe('medium');
   });
@@ -115,8 +115,8 @@ describe('escalation段はどの役割の既定値にもならない（Issue #69
     }
   });
 
-  it('escalationModelはcodexでgpt-5.6-sol、claudeでfableを返す', () => {
-    expect(escalationModel('codex')).toBe('gpt-5.6-sol');
+  it('escalationModelはcodexでgpt-6-astra、claudeでfableを返す', () => {
+    expect(escalationModel('codex')).toBe('gpt-6-astra');
     expect(escalationModel('claude')).toBe('fable');
   });
 });

@@ -14,8 +14,8 @@ const catalog = JSON.stringify({
   fetched_at: '2026-08-06T18:39:06Z',
   models: [
     {
-      slug: 'gpt-5.6-terra',
-      display_name: 'GPT-5.6-Terra',
+      slug: 'gpt-6-astra',
+      display_name: 'GPT-6-Astra',
       description: 'Balanced model.',
       default_reasoning_level: 'medium',
       visibility: 'list',
@@ -27,8 +27,8 @@ const catalog = JSON.stringify({
       ],
     },
     {
-      slug: 'gpt-5.6-sol',
-      display_name: 'GPT-5.6-Sol',
+      slug: 'gpt-6-sol',
+      display_name: 'GPT-6-Sol',
       default_reasoning_level: 'low',
       visibility: 'list',
       priority: 1,
@@ -42,7 +42,7 @@ const catalog = JSON.stringify({
       ],
     },
     {
-      slug: 'gpt-5.6-sol-wm',
+      slug: 'gpt-6-sol-wm',
       display_name: '内部用',
       visibility: 'hide',
       priority: 1,
@@ -53,16 +53,16 @@ const catalog = JSON.stringify({
 
 describe('parseModelCatalog', () => {
   it('priority昇順で並べる', () => {
-    expect(parseModelCatalog(catalog).map((m) => m.slug)).toEqual(['gpt-5.6-sol', 'gpt-5.6-terra']);
+    expect(parseModelCatalog(catalog).map((m) => m.slug)).toEqual(['gpt-6-sol', 'gpt-6-astra']);
   });
 
   it('visibilityがlistでないモデルを除く', () => {
-    expect(findModel(parseModelCatalog(catalog), 'gpt-5.6-sol-wm')).toBeUndefined();
+    expect(findModel(parseModelCatalog(catalog), 'gpt-6-sol-wm')).toBeUndefined();
   });
 
   it('表示名・説明・既定effortを取り出す', () => {
-    const model = findModel(parseModelCatalog(catalog), 'gpt-5.6-terra');
-    expect(model?.displayName).toBe('GPT-5.6-Terra');
+    const model = findModel(parseModelCatalog(catalog), 'gpt-6-astra');
+    expect(model?.displayName).toBe('GPT-6-Astra');
     expect(model?.description).toBe('Balanced model.');
     expect(model?.defaultEffort).toBe('medium');
     expect(model?.efforts.map((e) => e.effort)).toEqual(['low', 'medium', 'high']);
@@ -108,9 +108,9 @@ describe('parseModelCatalog', () => {
 const modelListResult = {
   data: [
     {
-      id: 'gpt-5.6-sol',
-      model: 'gpt-5.6-sol',
-      displayName: 'GPT-5.6-Sol',
+      id: 'gpt-6-sol',
+      model: 'gpt-6-sol',
+      displayName: 'GPT-6-Sol',
       description: 'Latest frontier agentic coding model.',
       hidden: false,
       isDefault: true,
@@ -121,9 +121,9 @@ const modelListResult = {
       ],
     },
     {
-      id: 'gpt-5.6-terra',
-      model: 'gpt-5.6-terra',
-      displayName: 'GPT-5.6-Terra',
+      id: 'gpt-6-astra',
+      model: 'gpt-6-astra',
+      displayName: 'GPT-6-Astra',
       description: 'Balanced agentic coding model for everyday work.',
       hidden: false,
       isDefault: false,
@@ -147,8 +147,8 @@ const modelListResult = {
 describe('parseModelList', () => {
   it('応答の順序のままモデルを取り出す', () => {
     expect(parseModelList(modelListResult).map((m) => m.slug)).toEqual([
-      'gpt-5.6-sol',
-      'gpt-5.6-terra',
+      'gpt-6-sol',
+      'gpt-6-astra',
     ]);
   });
 
@@ -157,8 +157,8 @@ describe('parseModelList', () => {
   });
 
   it('表示名・説明・既定effort・effortの説明を取り出す', () => {
-    const model = findModel(parseModelList(modelListResult), 'gpt-5.6-sol');
-    expect(model?.displayName).toBe('GPT-5.6-Sol');
+    const model = findModel(parseModelList(modelListResult), 'gpt-6-sol');
+    expect(model?.displayName).toBe('GPT-6-Sol');
     expect(model?.description).toBe('Latest frontier agentic coding model.');
     expect(model?.defaultEffort).toBe('low');
     expect(model?.supportsEffort).toBe(true);
@@ -220,7 +220,7 @@ describe('effortsFor', () => {
   const models = parseModelCatalog(catalog);
 
   it('指定モデルの対応effortを返す', () => {
-    expect(effortsFor(models, 'gpt-5.6-terra')).toEqual(['low', 'medium', 'high']);
+    expect(effortsFor(models, 'gpt-6-astra')).toEqual(['low', 'medium', 'high']);
   });
 
   it('モデル未指定なら全モデルの和集合を返す', () => {
@@ -228,7 +228,7 @@ describe('effortsFor', () => {
   });
 
   it('カタログが空ならフォールバックを返す', () => {
-    expect(effortsFor([], 'gpt-5.6-terra')).toEqual([...FALLBACK_EFFORTS]);
+    expect(effortsFor([], 'gpt-6-astra')).toEqual([...FALLBACK_EFFORTS]);
   });
 
   it('一覧にないモデルを指定したら和集合にフォールバックする', () => {

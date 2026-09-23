@@ -939,7 +939,7 @@ describe('buildOrchestratorTask（design.md §16.29、roadmap W4、Issue #338、
     expect('task' in result).toBe(true);
     if ('task' in result) {
       expect(result.task.role).toBe('architect');
-      expect(result.task.model).toBe('gpt-5.6-terra');
+      expect(result.task.model).toBe('gpt-6-sol');
       expect(result.task.effort).toBe('high');
     }
   });
@@ -1814,13 +1814,13 @@ defaults:
 tasks:
   - id: T1
     role: architect
-    model: gpt-5.6-custom
+    model: gpt-6-custom
     effort: xhigh
     prompt: 作業する
     done: 終わっている
 `;
     const def = parseWorkflowYaml(yaml);
-    expect(def.tasks[0]?.model).toBe('gpt-5.6-custom');
+    expect(def.tasks[0]?.model).toBe('gpt-6-custom');
     expect(def.tasks[0]?.effort).toBe('xhigh');
   });
 
@@ -1830,7 +1830,7 @@ version: 1
 name: テスト
 defaults:
   provider: codex
-  model: gpt-5.6-defaults-explicit
+  model: gpt-6-defaults-explicit
   effort: medium
 tasks:
   - id: T1
@@ -1839,8 +1839,8 @@ tasks:
     done: 終わっている
 `;
     const def = parseWorkflowYaml(yaml);
-    // architect（deep）はcodexでgpt-5.6-terra/high。defaultsの明示値より役割が勝つ
-    expect(def.tasks[0]?.model).toBe('gpt-5.6-terra');
+    // architect（deep）はcodexでgpt-6-sol/high。defaultsの明示値より役割が勝つ
+    expect(def.tasks[0]?.model).toBe('gpt-6-sol');
     expect(def.tasks[0]?.effort).toBe('high');
   });
 
@@ -1851,7 +1851,7 @@ name: テスト
 defaults:
   provider: codex
   role: architect
-  model: gpt-5.6-defaults-explicit
+  model: gpt-6-defaults-explicit
   effort: medium
 tasks:
   - id: T1
@@ -1860,8 +1860,8 @@ tasks:
 `;
     const def = parseWorkflowYaml(yaml);
     // タスク・defaultsのどちらもroleを明示していないが、defaultsのmodel/effort明示が
-    // defaults.roleの既定値（architect→gpt-5.6-terra/high）より優先される
-    expect(def.tasks[0]?.model).toBe('gpt-5.6-defaults-explicit');
+    // defaults.roleの既定値（architect→gpt-6-sol/high）より優先される
+    expect(def.tasks[0]?.model).toBe('gpt-6-defaults-explicit');
     expect(def.tasks[0]?.effort).toBe('medium');
   });
 
@@ -1878,7 +1878,7 @@ tasks:
     done: 終わっている
 `;
     const def = parseWorkflowYaml(yaml);
-    expect(def.tasks[0]?.model).toBe('gpt-5.6-terra');
+    expect(def.tasks[0]?.model).toBe('gpt-6-sol');
     expect(def.tasks[0]?.effort).toBe('high');
   });
 
@@ -1986,7 +1986,7 @@ tasks:
     const def = parseWorkflowYaml(yaml);
 
     expect(def.tasks[0]?.role).toBe('architect');
-    expect(def.tasks[0]?.model).toBe('gpt-5.6-terra');
+    expect(def.tasks[0]?.model).toBe('gpt-6-sol');
   });
 
   it('role未指定・defaults.role未指定なら、model/effortはundefined（従来どおり拡張機能の設定に従う）', () => {

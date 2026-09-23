@@ -37,7 +37,7 @@ const SECOND_OPINION_APPROVAL_MODE: ApprovalMode = 'never';
 /**
  * 既定のタイムアウト（15分）。設定 `agent.secondOpinion.timeoutMs` の既定値でもある。
  *
- * 当初は5分だったが、`gpt-5.6-sol` / `high` はそれを超えることがある（Issue #907）。
+ * 当初は5分だったが、従来の既定モデルでそれを超えたため15分へ延ばした（Issue #907）。
  * この機能はタブを開かず手も塞がないため、上限を短く保つ動機が弱い。
  */
 export const DEFAULT_SECOND_OPINION_TIMEOUT_MS = 15 * 60_000;

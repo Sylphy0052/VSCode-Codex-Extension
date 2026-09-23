@@ -7,7 +7,7 @@
  * ```
  * npx tsx test/bench/secondOpinionEval/run.ts --cases <cases.json> --out <出力ディレクトリ>
  *   [--eligibility <eligibility.json>]
- *   [--conditions A,B-pos] [--attempts 2] [--model gpt-5.6-sol] [--effort high]
+ *   [--conditions A,B-pos] [--attempts 2] [--model gpt-6-sol] [--effort high]
  * ```
  *
  * **本測定では `--eligibility` を必ず渡す。** recall の分母は案件ファイルの正解ラベルと、条件
@@ -47,7 +47,7 @@ import type {
 } from './types';
 
 /** 既定のモデルとeffort。Advisor本体の既定（`DEFAULT_SECOND_OPINION_CANDIDATES`）と同じ。 */
-const DEFAULT_MODEL = 'gpt-5.6-sol';
+const DEFAULT_MODEL = 'gpt-6-sol';
 const DEFAULT_EFFORT = 'high';
 
 /**

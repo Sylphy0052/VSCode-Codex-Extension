@@ -27,7 +27,7 @@ export interface SecondOpinionCandidate {
  * 必ずここへ丸める（受入基準13）。
  */
 export const DEFAULT_SECOND_OPINION_CANDIDATES: readonly SecondOpinionCandidate[] = [
-  { name: 'Sol (high)', model: 'gpt-5.6-sol', effort: 'high' },
+  { name: 'Sol (high)', model: 'gpt-6-sol', effort: 'high' },
 ];
 
 export interface ParsedSecondOpinionCandidates {
@@ -221,14 +221,14 @@ export interface SecondOpinionSummarySettings {
 /**
  * 要約の既定。
  *
- * モデルもeffortも既定の候補（`gpt-5.6-sol` / `high`）より下げてあるのは、要約に求めるのが
+ * モデルもeffortも既定の候補（`gpt-6-sol` / `high`）より下げてあるのは、要約に求めるのが
  * 判断ではなく事実の圧縮で、ここへ時間と費用を掛けても独立した意見の質は上がらないため。
  * しかも要約セッションは会話が `SUMMARY_SKIP_THRESHOLD_CHARS` を超えるたびに開く（Issue #1001）。
  * 要約が痩せて本体の判断が狂うようなら、設定でモデルを上げられる。
  */
 export const DEFAULT_SECOND_OPINION_SUMMARY: SecondOpinionSummarySettings = {
   enabled: true,
-  model: 'gpt-5.6-luna',
+  model: 'gpt-6-luna',
   effort: 'low',
 };
 

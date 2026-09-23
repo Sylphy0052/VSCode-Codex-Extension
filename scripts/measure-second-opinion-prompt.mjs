@@ -47,7 +47,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     out: undefined,
     consult: false,
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-sol',
     effort: 'medium',
   };
   for (let i = 0; i < argv.length; i += 1) {

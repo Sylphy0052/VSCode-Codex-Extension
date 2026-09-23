@@ -163,7 +163,7 @@ export interface SchemaDescriptionOptions {
  *
  * 役割の一覧も、役割ごとのmodel/effortも `rolePresets.ts` から引く。ここに語彙や
  * モデル名を手で書き写さない（`buildSchemaDescription` 全体の方針と同じ）。
- * `escalation` 段（Sol/Fable）はどの役割の既定にもならないので、必要なときだけ
+ * `escalation` 段（Astra/Fable）はどの役割の既定にもならないので、必要なときだけ
  * `model` を明示して上げる、という運用をそのまま説明文にしている。
  */
 function buildRoleDescription(provider: Provider): string[] {

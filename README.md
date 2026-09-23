@@ -656,7 +656,7 @@ Advisorは毎ターンは呼ばない。Evaluatorの判定を受けてから、*
 
 ### セカンドオピニオン
 
-進行中の作業について、**作業を担当しているAIとは独立した別セッション**へ判断・助言・レビューを求める導線。入力欄の「…」メニューの「セカンドオピニオン」から起動する。Codex画面・Claude Code画面のどちらから押しても、開くのは独立したCodexのセッション（既定は `gpt-5.6-sol` / effort `high`）。
+進行中の作業について、**作業を担当しているAIとは独立した別セッション**へ判断・助言・レビューを求める導線。入力欄の「…」メニューの「セカンドオピニオン」から起動する。Codex画面・Claude Code画面のどちらから押しても、開くのは独立したCodexのセッション（既定は `gpt-6-sol` / effort `high`）。
 
 置き換えたいのは「Claude Codeの回答をChatGPTへ貼り、意見をClaude Codeへ貼り戻す」という手作業の往復である。用途はコードレビューに限らず、「この実装で続けてよいか」「A / B / C ならどれを採るか」「次に何を検証すべきか」も同じ導線で扱う。
 
@@ -828,13 +828,13 @@ providerは `defaults.provider` に従う。cwdはworktreeではなくメイン�
 
 役割は10種類。それぞれ「どれくらい考えさせるか」が決まっていて、そこからモデルとeffortの既定値が引かれる。
 
-| 役割                                                         | 重さ | effort   | Codex           | Claude Code |
-| ------------------------------------------------------------ | ---- | -------- | --------------- | ----------- |
-| `implementer` / `reviewer` / `tester`                        | 軽い | `low`    | `gpt-5.6-luna`  | `sonnet`    |
-| `writer` / `researcher`                                      | 中   | `medium` | `gpt-5.6-luna`  | `sonnet`    |
-| `orchestrator` / `manager` / `em` / `architect` / `designer` | 重い | `high`   | `gpt-5.6-terra` | `opus`      |
+| 役割                                                         | 重さ | effort   | Codex        | Claude Code |
+| ------------------------------------------------------------ | ---- | -------- | ------------ | ----------- |
+| `implementer` / `reviewer` / `tester`                        | 軽い | `low`    | `gpt-6-luna` | `sonnet`    |
+| `writer` / `researcher`                                      | 中   | `medium` | `gpt-6-sol`  | `sonnet`    |
+| `orchestrator` / `manager` / `em` / `architect` / `designer` | 重い | `high`   | `gpt-6-sol`  | `opus`      |
 
-さらに上の段（Codex: `gpt-5.6-sol` / Claude Code: `fable`、effortは`high`）もあるが、**どの役割の既定値にもならない**。「詰まったときだけ使う」ためのもので、使うにはタスクの `model` に明示的に書く。
+さらに上の段（Codex: `gpt-6-astra` / Claude Code: `fable`、effortは`high`）もあるが、**どの役割の既定値にもならない**。「詰まったときだけ使う」ためのもので、使うにはタスクの `model` に明示的に書く。
 
 **役割が決めるのは `model` と `effort` の既定値だけで、権限には一切触れない。** `approvalMode` / `sandbox` / `autoApprove` は従来どおり、YAMLと拡張機能の設定から組み立てて安全側にだけ丸める（役割名を書き換えるだけで実効権限が動く、という経路を作らないため）。タスクが `model` / `effort` を自分で書いていればそちらが勝つ。知らない役割名を書いた場合は「役割なし」として扱い、警告に指定できる値の一覧を添えて残す。
 
@@ -1006,8 +1006,8 @@ tasks:
 | `agent.chat.skin`                                | `cyber`                                                                          | window   | [チャット画面の外装](#会話画面の見やすさ)。`cyber`はネオン色の枠・左のバー・背景の方眼で描き、`plain`は装飾を足す前の見た目に戻す（Codex/Claude Code両画面とセッション統括画面に共通）。本文の文字色・行間・行長は外装によらず同じ。高コントラストテーマでは装飾を自動で無効にする。反映には該当タブを開き直す                   |
 | `agent.chat.sendOn`                              | `ctrlEnter`                                                                      | window   | [入力欄の送信キー](#送信キーの切り替え)。`ctrlEnter` / `enter`（Codex/Claude Code両画面共通）                                                                                                                                                                                                                                    |
 | `agent.chat.composerButtons`                     | `[attach,loopToggle,compact,recap,planToggle,handoffToNewSession,secondOpinion]` | window   | 入力欄アイコン列の表に直接出すボタン。残りは「…」メニューへ畳む（[後述](#入力欄アイコン列の整理)）。未知のIDや重複を含む場合は既定へ丸める                                                                                                                                                                                       |
-| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-5.6-sol","effort":"high"}]`                  | window   | [セカンドオピニオン](#セカンドオピニオン)の依頼先候補（`name` / `model` / `effort` の配列）。1件だけなら選択UIを出さずにその候補で起動する。壊れた値・空配列は既定へ丸める。起動先はCodex固定で、sandbox（read-only）と承認の扱い（全て拒否）は変えられない                                                                      |
-| `agent.secondOpinion.summary`                    | `{"enabled":true,"model":"gpt-5.6-luna","effort":"low"}`                         | window   | 依頼へ添える会話の背景要約。要約を作るのは会話を進めているAIではなく別の独立したセッション。`enabled: false` で添えない                                                                                                                                                                                                          |
+| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-6-sol","effort":"high"}]`                    | window   | [セカンドオピニオン](#セカンドオピニオン)の依頼先候補（`name` / `model` / `effort` の配列）。1件だけなら選択UIを出さずにその候補で起動する。壊れた値・空配列は既定へ丸める。起動先はCodex固定で、sandbox（read-only）と承認の扱い（全て拒否）は変えられない                                                                      |
+| `agent.secondOpinion.summary`                    | `{"enabled":true,"model":"gpt-6-luna","effort":"low"}`                           | window   | 依頼へ添える会話の背景要約。要約を作るのは会話を進めているAIではなく別の独立したセッション。`enabled: false` で添えない                                                                                                                                                                                                          |
 | `agent.secondOpinion.headless`                   | `true`                                                                           | window   | 相談先のセッションをタブを開かずに走らせる。`false` にすると進行の見えるタブを開く                                                                                                                                                                                                                                               |
 | `agent.secondOpinion.timeoutMs`                  | `900000`                                                                         | window   | 1ターンを待つ上限（ミリ秒）。最初の相談と追加の相談のどちらにも同じ上限が効く                                                                                                                                                                                                                                                    |
 | `agent.secondOpinion.template`                   | [既定文](#セカンドオピニオン)                                                    | window   | 依頼文の既定値。実行のたびに編集できる                                                                                                                                                                                                                                                                                           |
@@ -1033,7 +1033,7 @@ tasks:
 | `agent.chat.loop.autoGoal.timeoutSeconds`        | `120`                                                                            | window   | 準備ターンの応答を待つ上限（秒）。超えたら3つの欄を空のまま残し、ループは始めない                                                                                                                                                                                                                                                |
 | `agent.chat.loopAdvisor.enabled`                 | `false`                                                                          | window   | ゴール駆動ループの各ターンのあとに、別のAI（[Advisor](#ループのadvisor)）へ進め方の妥当性を見せる。既定の相談先はCodex CLIで、Claude Codeの会話でも抜粋はCodexへ渡る                                                                                                                                                             |
 | `agent.chat.loopAdvisor.provider`                | `codex`                                                                          | window   | Advisorを動かすCLI。既定は `codex` 固定で、会話しているCLIによらず相談先は変わらない                                                                                                                                                                                                                                             |
-| `agent.chat.loopAdvisor.model`                   | `auto`                                                                           | window   | Advisorのモデル。`auto` は動かすプロバイダに合わせて解決する（codexは `gpt-5.6-sol`、claudeは `haiku`）                                                                                                                                                                                                                          |
+| `agent.chat.loopAdvisor.model`                   | `auto`                                                                           | window   | Advisorのモデル。`auto` は動かすプロバイダに合わせて解決する（codexは `gpt-6-sol`、claudeは `haiku`）                                                                                                                                                                                                                            |
 | `agent.chat.loopAdvisor.timeoutSeconds`          | `120`                                                                            | window   | Advisorの応答を待つ上限（秒）。超えたら評価できなかった周として会話へ残し、ループは止めない。10未満を書いても10として扱う                                                                                                                                                                                                        |
 | `agent.chat.loopAdvisor.everyNTurns`             | `1`                                                                              | window   | Advisorを呼んでよい間隔（ターン数）。既定の `1` は毎ターン呼んでよいという意味で、毎ターン呼ぶという意味ではない。増やすと待ち時間と費用はさらに減るが、方向のずれに気づくのが遅くなる                                                                                                                                           |
 | `agent.notifications.approvalPending`            | `true`                                                                           | window   | 承認要求が出た直後、そのタブが見えていなければ通知を出す（Codex/Claude Code両画面共通）。同じ要求での重複通知はしない                                                                                                                                                                                                            |
@@ -1049,7 +1049,7 @@ tasks:
 | `agent.notifications.sound.playerCommand`        | `""`                                                                             | window   | 音を鳴らす外部コマンドの上書き。`${file}` を音源のパスへ置換する。空なら環境から自動で探す（Linux: `paplay` / `pw-play` / `aplay` / `ffplay`、macOS: `afplay`、Windows: `powershell.exe`）。シェルは介さない。`${file}` は加工せずそのまま差し込むため、引用が要る構文（PowerShellなど）を書く場合の引用はこの設定を書く側で行う |
 | `agent.sessionPresets`                           | `[]`                                                                             | resource | [プリセットから新しい会話を開く](#プリセットから新しい会話を開く)。`name` / `provider` / `model` / `effort` / `approvalMode` / `sandbox` / `workingDirectory` を持つ配列。`approvalMode` / `sandbox` は拡張機能側の現在の設定より緩められない                                                                                    |
 
-空文字は「そのフラグを渡さない」を意味し、CLI側の設定（`~/.codex/config.toml` / `~/.claude/settings.json`）に委譲する。設定パネルには委譲先の実際の値が `既定: gpt-5.6-terra` のように表示される。パネル上部のタブでCodexとClaude Codeを切り替える。
+空文字は「そのフラグを渡さない」を意味し、CLI側の設定（`~/.codex/config.toml` / `~/.claude/settings.json`）に委譲する。設定パネルには委譲先の実際の値が `既定: gpt-6-astra` のように表示される。パネル上部のタブでCodexとClaude Codeを切り替える。
 
 ### ワークフロー
 

@@ -6,7 +6,7 @@ const realConfig = `# 共有可能な最小設定。
 hide_agent_reasoning = true
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
-model = "gpt-5.6-terra"
+model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 personality = "pragmatic"
 
@@ -23,7 +23,7 @@ trust_level = "trusted"
 describe('extractDefaults', () => {
   it('実データから既定値を取り出す', () => {
     expect(extractDefaults(realConfig)).toEqual({
-      model: 'gpt-5.6-terra',
+      model: 'gpt-6-astra',
       reasoningEffort: 'medium',
       approvalMode: 'on-request',
       sandbox: 'workspace-write',

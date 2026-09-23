@@ -182,7 +182,7 @@ export const DEFAULT_ADVISOR_PROVIDER = 'codex';
  * `claude` へ変えた利用者にCodex用のモデル名がそのまま渡る（`buildClaudeHeadlessArgs` は
  * `auto` 以外を素通しする）。解決は実効プロバイダが決まる場所で行う。
  */
-export const DEFAULT_ADVISOR_CODEX_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_ADVISOR_CODEX_MODEL = 'gpt-6-sol';
 
 /**
  * `agent.chat.loopAdvisor.model` を、実際に起動するCLIに合わせて解決する（issue #994）。
