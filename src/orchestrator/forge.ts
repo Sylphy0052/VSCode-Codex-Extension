@@ -927,6 +927,38 @@ export async function createIssue(
 }
 
 /** オーケストレーターが許可された範囲でIssue本文とラベルだけを更新する入力。 */
+/**
+ * Issue本文を1件取得する（Issue #1422）。取得できなければ `undefined`。
+ * GitHubは `gh issue view --json body`、GitLabは `glab api` の `description` を読む。
+ */
+export async function fetchIssueBody(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  issue: number,
+): Promise<string | undefined> {
+  if (!Number.isSafeInteger(issue) || issue <= 0) {
+    return undefined;
+  }
+  const result =
+    host === 'github'
+      ? await cli.run('gh', ['issue', 'view', String(issue), '--json', 'body'], cwd)
+      : await cli.run('glab', ['api', `projects/:id/issues/${String(issue)}`], cwd);
+  if (result.code !== 0) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (typeof parsed !== 'object' || parsed === null) {
+      return undefined;
+    }
+    const body = (parsed as Record<string, unknown>)[host === 'github' ? 'body' : 'description'];
+    return typeof body === 'string' ? body : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface UpdateIssueRequest {
   host: ForgeHost;
   cwd: string;
