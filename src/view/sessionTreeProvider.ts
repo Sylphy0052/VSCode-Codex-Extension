@@ -345,7 +345,7 @@ export function buildSessionTreeItem(
 
   // VS Codeはツリーの要素とTreeItemの対応を`id`で保持する。`id`が無いとラベルと位置から
   // 内部ハンドルを組み立てるが、このツリーのラベルは`threadName ?? '(名称未設定)'`で
-  // 重複しやすく、`refreshDebounced`によって並びも頻繁に変わる。その結果ハンドルと要素の
+  // 重複しやすく、`refreshSoon`によって並びも頻繁に変わる。その結果ハンドルと要素の
   // 対応がずれ、`view/item/context`（インラインアイコン・右クリックメニュー）から呼ぶ
   // コマンドへ`SessionSummary`が渡らず`undefined`になる（issue #236）。
   // プロバイダをまたいでも衝突しないよう、プロバイダ名とセッションIDの組で一意にする。
