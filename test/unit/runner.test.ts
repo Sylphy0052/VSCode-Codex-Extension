@@ -35,6 +35,7 @@ import {
   DEFAULT_MAX_ASK_USER_PER_RUN,
 } from '../../src/orchestrator/orchestratorSession';
 import type { RoadmapFileSystemPort } from '../../src/orchestrator/roadmap';
+import type { WorkflowVerifyCommandDeps } from '../../src/orchestrator/runnerVerifyCommands';
 import { formatPathList } from '../../src/orchestrator/runnerWorkingDirectory';
 import { roleDefaults } from '../../src/orchestrator/rolePresets';
 import type {
@@ -1162,6 +1163,8 @@ function createHarness(
     readContextLowPercent?: () => number;
     /** 実行のたびに内容が変わる定義ファイルを模すための差し替え口（Issue #1107）。 */
     filePort?: WorkflowFilePort;
+    /** `verify.commands` の実行（Issue #1378）。 */
+    verifyCommands?: WorkflowVerifyCommandDeps;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -1222,6 +1225,7 @@ function createHarness(
     ...(options?.readContextLowPercent !== undefined
       ? { readContextLowPercent: options.readContextLowPercent }
       : {}),
+    ...(options?.verifyCommands !== undefined ? { verifyCommands: options.verifyCommands } : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
   });
   return { runner, codexHost, claudeHost, store, git };
@@ -13611,6 +13615,113 @@ tasks:
 
     expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone + 1);
     expect(t1.runLoopCalls.at(-1)?.initialPrompt).toContain('必須ではない.txt');
+  });
+});
+
+describe('WorkflowRunner: verify.commandsを拡張機能が実行する（Issue #1378）', () => {
+  const COMMANDS_YAML = `
+version: 1
+name: verify-commands
+defaults:
+  maxParallel: 1
+tasks:
+  - id: T1
+    prompt: p
+    done: d
+    verify:
+      commands: ["npm test"]
+      semantic: false
+`;
+
+  const verifyDeps = (overrides: Partial<WorkflowVerifyCommandDeps> = {}) => {
+    const appended: unknown[] = [];
+    const deps: WorkflowVerifyCommandDeps = {
+      isWorkspaceTrusted: () => true,
+      confirm: vi.fn(async () => true),
+      store: {
+        append: async (input) => {
+          appended.push(input);
+        },
+      },
+      run: vi.fn(async () => ({
+        exitCode: 1,
+        output: 'FAIL a.test.ts',
+        timedOut: false,
+        aborted: false,
+        startedAt: new Date(0),
+        endedAt: new Date(1),
+      })),
+      captureSource: async () => undefined,
+      ...overrides,
+    };
+    return { deps, appended };
+  };
+
+  it('exit codeが0以外なら記録を残し、出力を添えて修正を依頼する', async () => {
+    const { deps, appended } = verifyDeps();
+    const { runner, codexHost } = createHarness(COMMANDS_YAML, { verifyCommands: deps });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    expect(result.runId).toBeDefined();
+    await flush();
+
+    const t1 = codexHost.byTaskId('T1');
+    const runLoopCallsBeforeDone = t1.runLoopCalls.length;
+    t1.finish('done' as LoopStopReason, doneState('[DONE]'));
+    await vi.waitFor(() => expect(t1.runLoopCalls).toHaveLength(runLoopCallsBeforeDone + 1));
+
+    expect(deps.confirm).toHaveBeenCalledTimes(1);
+    expect(deps.run).toHaveBeenCalledWith(expect.objectContaining({ command: 'npm test' }));
+    expect(appended).toHaveLength(1);
+    expect(appended[0]).toMatchObject({ actor: 'extension', acquisition: 'observed', exitCode: 1 });
+    const prompt = t1.runLoopCalls.at(-1)?.initialPrompt ?? '';
+    expect(prompt).toContain('検証コマンドが失敗しました（exit 1）: npm test');
+    expect(prompt).toContain('FAIL a.test.ts');
+  });
+
+  it('Workspace Trustが無効なら確認も実行もせず、警告を残して従来の検査だけで判定する', async () => {
+    const { deps, appended } = verifyDeps({ isWorkspaceTrusted: () => false });
+    const { runner, codexHost } = createHarness(COMMANDS_YAML, { verifyCommands: deps });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done' as LoopStopReason, doneState('[DONE]'));
+    await vi.waitFor(() =>
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.warnings.some(
+            (w) => w.kind === 'taskVerification' && w.message.includes('信頼されていない'),
+          ),
+      ).toBe(true),
+    );
+
+    expect(deps.confirm).not.toHaveBeenCalled();
+    expect(deps.run).not.toHaveBeenCalled();
+    expect(appended).toEqual([]);
+  });
+
+  it('確認で拒否されたら実行せず、警告を残して従来の検査だけで判定する', async () => {
+    const { deps, appended } = verifyDeps({ confirm: vi.fn(async () => false) });
+    const { runner, codexHost } = createHarness(COMMANDS_YAML, { verifyCommands: deps });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done' as LoopStopReason, doneState('[DONE]'));
+    await vi.waitFor(() =>
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.warnings.some(
+            (w) => w.kind === 'taskVerification' && w.message.includes('許可されなかった'),
+          ),
+      ).toBe(true),
+    );
+
+    expect(deps.confirm).toHaveBeenCalledTimes(1);
+    expect(deps.run).not.toHaveBeenCalled();
+    expect(appended).toEqual([]);
   });
 });
 

@@ -136,6 +136,12 @@ import {
 } from './runnerOrchestrator';
 import { sanitizeForLog, stripControlChars, stripControlCharsPreservingNewlines } from './sanitize';
 import { sanitizeInlineText } from './untrustedText';
+import {
+  executeVerifyCommands,
+  gateVerifyCommands,
+  type VerifyCommandConsent,
+  type WorkflowVerifyCommandDeps,
+} from './runnerVerifyCommands';
 import { MAX_MESSAGE_BODY_LENGTH } from './messaging';
 import {
   buildEffectiveTaskConfig,
@@ -430,6 +436,9 @@ export const DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC = 900;
 /** 最終マージの判断（design.md §16.26）。`merge`はmainへ進める、`hold`はPR/MRを残して確定する。 */
 export type FinalMergeDecision = 'merge' | 'hold';
 
+/** 検証コマンドの実行中に、停止・破棄・作り直しを確かめる間隔（ミリ秒） */
+const VERIFY_COMMAND_ABORT_POLL_MS = 250;
+
 export interface WorkflowRunnerDeps {
   /** provider別の `TaskSessionHost`。`runner.ts` はプロバイダを見ずにこの口だけを使う。 */
   hosts: Record<Provider, TaskSessionHost>;
@@ -589,6 +598,13 @@ export interface WorkflowRunnerDeps {
    * （`readCiWaitTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
    */
   readReviewCommentPollIntervalSec?: () => number;
+  /**
+   * `verify.commands` の実行（Issue #1378）。**省略可能**で、省略された場合は実行せず、
+   * 従来どおり意味レビューへ文章として渡すだけにする（`forge`と同じ設計判断）。
+   * 実行するのはWorkspace Trustが有効で、利用者がrunごとの確認で許可したときだけ
+   * （`runnerVerifyCommands.ts`のJSDoc参照）。
+   */
+  verifyCommands?: WorkflowVerifyCommandDeps;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -1599,6 +1615,11 @@ export interface LiveRun {
     | undefined;
   /** 復旧待ちが期限切れになったため、次のpumpで通常の最終失敗へ進める。 */
   failureRecoveryExhausted: boolean;
+  /**
+   * `verify.commands` の実行の許可（Issue #1378）。runごとに1回だけ確認し、メモリにだけ
+   * 持つ。復元したrun（`rebuildLiveRun`）には無いので、改めて確認を取る。
+   */
+  verifyCommandConsent?: VerifyCommandConsent;
   /** program配下のrun失敗後、program計画の変更が終わるまで制御MCPを維持する。 */
   programRecoveryHold: boolean;
   /** program配下でだけ注入される、run追加・削除・再試行・依存変更の制御口。 */
@@ -2026,6 +2047,12 @@ export class WorkflowRunner {
    * `abandoned`（`runnerMerge.ts`、Issue #412のレビュー指摘D）と同じ考え方。
    */
   private disposing = false;
+
+  /**
+   * 実行中の `verify.commands` の中断口（Issue #1378）。`dispose()` が全て中断し、
+   * 拡張機能の終了後に検証コマンドの子プロセスが残らないようにする。
+   */
+  private readonly verifyCommandAborts = new Set<AbortController>();
 
   /**
    * 分割後のファイル（`runnerSnapshot.ts`等、Issue #147）へ渡す内部の口
@@ -3068,6 +3095,10 @@ export class WorkflowRunner {
     // 同期的に呼び戻すため、この印が無いとrun全体が手動停止として永続化される
     // （フィールドのJSDoc参照）
     this.disposing = true;
+    for (const controller of this.verifyCommandAborts) {
+      controller.abort();
+    }
+    this.verifyCommandAborts.clear();
     for (const live of this.runs.values()) {
       // 解放より先に立てる。`session.dispose()`は`onFinished`を同期的に発火しうる
       // （`chatView.ts`。テスト「catchのsession.dispose()」参照）ため、この印が無いと
@@ -5737,6 +5768,74 @@ export class WorkflowRunner {
     return undefined;
   }
 
+  /**
+   * タスクの `verify.commands` を、タスクのworktreeをcwdにして実行する（Issue #1378）。
+   *
+   * 実行中も停止・破棄・作り直しを定期的に見て、当たれば子プロセスを中断する
+   * （打ち切りの確定は呼び出し側の`abortVerification`が受け持つ）。`executed`は全コマンドを
+   * 最後まで実行したときだけ真。
+   */
+  private async runTaskVerifyCommands(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    live: LiveRun,
+    liveTask: LiveTask,
+    attempt: number,
+  ): Promise<{ executed: boolean; failures: string[] }> {
+    const deps = this.deps.verifyCommands;
+    const commands = task.verify?.commands ?? [];
+    if (deps === undefined || commands.length === 0) {
+      return { executed: false, failures: [] };
+    }
+    const controller = new AbortController();
+    this.verifyCommandAborts.add(controller);
+    const watch = setInterval(() => {
+      if (this.verificationAbortReason(runId, taskId, live, liveTask) !== undefined) {
+        controller.abort();
+      }
+    }, VERIFY_COMMAND_ABORT_POLL_MS);
+    try {
+      const gate = await gateVerifyCommands({
+        commands,
+        runId,
+        def: live.def,
+        deps,
+        consentHolder: live,
+        signal: controller.signal,
+        log: this.deps.log,
+      });
+      if (gate === 'untrusted' || gate === 'denied') {
+        const message =
+          gate === 'untrusted'
+            ? 'ワークスペースが信頼されていないため、verify.commands を実行しませんでした'
+            : 'verify.commands の実行が許可されなかったため、実行しませんでした';
+        this.deps.log.warn(`[workflow ${runId}/${taskId}] ${message}`);
+        if (!live.warnings.some((w) => w.taskId === taskId && w.message === message)) {
+          live.warnings.push({ kind: 'taskVerification', taskId, message });
+        }
+        return { executed: false, failures: [] };
+      }
+      if (gate !== 'run') {
+        return { executed: false, failures: [] };
+      }
+      const result = await executeVerifyCommands({
+        commands,
+        cwd: liveTask.cwd,
+        runId,
+        taskId,
+        attempt,
+        deps,
+        signal: controller.signal,
+        log: this.deps.log,
+      });
+      return { executed: !result.aborted, failures: result.failures };
+    } finally {
+      clearInterval(watch);
+      this.verifyCommandAborts.delete(controller);
+    }
+  }
+
   /** DONE自己申告を、機械条件と別のread-onlyセッションで確認する。 */
   private async verifyTaskCompletion(
     runId: string,
@@ -5811,16 +5910,34 @@ export class WorkflowRunner {
       }
     }
 
+    if (abortVerification()) return;
+
+    // `verify.commands` を拡張機能自身が実行し、検証記録を残す（Issue #1378）。
+    // 実行を見送った場合（Trust無効・不許可・口の省略）は、従来どおり意味レビューへ
+    // 「実行して確認」として渡すだけにする
+    const commandRun = await this.runTaskVerifyCommands(
+      runId,
+      taskId,
+      task,
+      live,
+      liveTask,
+      attempt,
+    );
+    failures.push(...commandRun.failures);
+
     // 独立レビューは別セッションでCLIを起動する分だけ長い。入る前に一度見て、
     // 停止済みなら起動そのものを見送る
     if (abortVerification()) return;
 
     if (verify?.semantic === true) {
+      const commandLabel = commandRun.executed
+        ? '検証コマンド（拡張機能が実行済み。結果は別途判定する）'
+        : '検証コマンド（実行して確認）';
       const verificationContract = [
         task.prompt,
         '',
         `完了条件: ${task.done}`,
-        ...(verify?.commands ?? []).map((command) => `検証コマンド（実行して確認）: ${command}`),
+        ...(verify?.commands ?? []).map((command) => `${commandLabel}: ${command}`),
         ...(verify?.files ?? []).map((file) => `存在必須: ${file}`),
         ...(verify?.diff ?? []).map((file) => `変更必須: ${file}`),
       ].join('\n');

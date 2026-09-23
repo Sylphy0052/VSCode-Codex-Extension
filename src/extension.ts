@@ -102,6 +102,10 @@ import { WorkflowRunStore } from './orchestrator/runStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
+import {
+  formatVerifyCommandForDisplay,
+  type VerifyCommandConsentRequest,
+} from './orchestrator/runnerVerifyCommands';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
@@ -604,7 +608,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // 検証結果の来歴の保存先（Issue #1377）。複数ウィンドウで共有するため`globalStorageUri`
   // 配下に置く。ループのWorkerが会話中に実行したコマンドはチャット画面から、ワークフローの
-  // タスクのものは`WorkflowRunner`から、信頼できない記録として残す（Issue #1379）
+  // タスクのものは`WorkflowRunner`から、信頼できない記録として残す（Issue #1379）。
+  // 拡張機能自身が実行した`verify.commands`は、同じ保存先へ信頼できる記録として残す（Issue #1378）
   const verificationStore = new VerificationStore(context.globalStorageUri.fsPath, {
     homeDir: nodeLocatorDeps.homedir(),
     onError: (message) => log.warn(`[verification] ${message}`),
@@ -629,6 +634,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       claude: overridableHost('claude', claudeChat),
     },
     worktreeQueue: new WorktreeCreationQueue(),
+    // `verify.commands` の実行（Issue #1378）。Workspace Trustが有効で、runごとの確認で
+    // 許可されたときだけ実行する
+    verifyCommands: {
+      isWorkspaceTrusted: () => vscode.workspace.isTrusted,
+      confirm: confirmVerifyCommands,
+      store: verificationStore,
+    },
     git: {
       run: (args, cwd) => (forgeOverrides.git ?? nodeGitCommandRunner).run(args, cwd),
     },
@@ -2015,6 +2027,30 @@ async function applyPresetChat(
  * （design.md §16.7「実行開始時に...確認を取る」）。ここで確認し、了承が得られたときだけ
  * `allowConfirmed: true` を付けて呼び直す。
  */
+/**
+ * `verify.commands` を実行してよいかを利用者に確かめる（Issue #1378）。runごとに1回だけ
+ * 呼ばれる。コマンドは実行する文字列そのままを見せるため、切り詰めずに、
+ * 制御文字・不可視文字をエスケープして見える形にしてから並べる。
+ */
+async function confirmVerifyCommands(request: VerifyCommandConsentRequest): Promise<boolean> {
+  const lines = request.commands.map(formatVerifyCommandForDisplay);
+  const choice = await vscode.window.showWarningMessage(
+    `ワークフロー「${request.workflowName}」の検証コマンドを実行しますか？`,
+    {
+      modal: true,
+      detail:
+        '各タスクのworktreeで、次のコマンドをシェル経由で実行します。' +
+        'AIのサンドボックスの外で、拡張機能の権限で動きます。' +
+        'コマンドが読むファイル（package.jsonのscriptなど）はタスクのAIが書き換えている場合があります。\n' +
+        '許可はこの実行（run）の間だけ有効です。許可しない場合は実行せず、' +
+        'ファイル・diffの検査と意味レビューだけを行います。\n\n' +
+        lines.join('\n'),
+    },
+    '実行を許可',
+  );
+  return choice === '実行を許可';
+}
+
 async function runWorkflow(
   runner: WorkflowRunner,
   view: WorkflowViewManager,
