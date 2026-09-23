@@ -1595,6 +1595,7 @@ ${chatStyles()}
     <span id="loopProgress"></span>
     <button id="loopStop" type="button" class="secondary" hidden>ループ停止</button>
   </div>
+  <div id="loopEvidence" hidden></div>
   <div id="attachments" hidden></div>
   <div id="argumentHint" hidden></div>
   <div id="inputModeHint" hidden></div>

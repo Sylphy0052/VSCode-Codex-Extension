@@ -619,6 +619,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   });
   chat.setAgentReportedRecorder(loopCommandRecorder);
   claudeChat.setAgentReportedRecorder(loopCommandRecorder);
+  // ループ終了表示の完了根拠（Issue #1380）。同じ保存先から読む
+  chat.setCompletionEvidenceStore(verificationStore);
+  claudeChat.setCompletionEvidenceStore(verificationStore);
 
   /**
    * エージェント向けのセッション宛の口（design.md §16.21、Issue #1274）。
@@ -792,6 +795,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       onChanged: (listener) => programRunner.onChanged(listener),
     },
     createRoadmapViewPort(),
+    // 完了根拠の列（Issue #1380）。上で作った唯一の保存先から読む
+    verificationStore,
   );
   context.subscriptions.push(workflowView);
 

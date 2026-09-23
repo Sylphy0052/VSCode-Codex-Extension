@@ -2068,6 +2068,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     entry.wasLoopRunning = status.running;
     this.postState(entry);
+    if (stopped) {
+      void this.postLoopEvidence(entry);
+    }
     if (stopped && status.stopReason !== undefined) {
       const state = entry.session.getState();
       for (const listener of entry.finishedListeners) {
@@ -2487,6 +2490,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // 人が止めた自動送信を、上限の条件が残っているだけで再開しない（Issue #1202）
         this.suppressLimitAutoResume(entry);
         entry.loop.stop('manual');
+        return;
+      }
+      if (type === 'refreshLoopEvidence') {
+        await this.postLoopEvidence(entry);
         return;
       }
       if (type === 'approve' && isApprovalDecision(m['decision'])) {

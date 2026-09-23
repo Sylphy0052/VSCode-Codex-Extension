@@ -37,6 +37,11 @@ import {
   type ProgressSegment,
   type ProgressSummary,
 } from './workflowGraph';
+import type { VerificationStore } from '../verification/store';
+import {
+  loadTaskCompletionEvidence,
+  type CompletionEvidenceView,
+} from '../verification/completionEvidence';
 import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
 import { buildTaskWorkSummary } from '../orchestrator/taskSummary';
@@ -161,6 +166,14 @@ export class WorkflowViewManager implements vscode.Disposable {
    */
   private roadmapRequestSeq = 0;
   private readonly unsubscribeChanged: () => void;
+  /** 実行中の完了根拠の導出（Issue #1380）。`refreshCompletionEvidence` のJSDoc参照 */
+  private evidenceRefresh: Promise<void> | undefined;
+  private evidenceRefreshQueued = false;
+  /**
+   * 最後に完了根拠を導いたときの、表示中のrunと完了タスクの組。feedの変化（実行中は
+   * タスクの状態が変わるたびに届く）では、この組が変わったときだけ導き直す。
+   */
+  private evidenceDoneKey: string | undefined;
   /**
    * 単発runとプログラムの変化・状態を1本にまとめた口（Issue #1272）。Viewが購読する
    * イベントも、読むスナップショットもこれ1つだけにする（`workflowFeed.ts`のJSDoc参照）。
@@ -180,6 +193,11 @@ export class WorkflowViewManager implements vscode.Disposable {
      * ロードマップ欄（Issue #1257）。省略可能（`RoadmapViewPort`のJSDoc参照）。
      */
     private readonly roadmap?: RoadmapViewPort,
+    /**
+     * 検証記録の読出口（Issue #1380）。完了根拠の列に使う。省略時は列を「—」のままにする。
+     * `extension.ts` が作る唯一の `VerificationStore` を渡す。
+     */
+    private readonly verificationStore?: Pick<VerificationStore, 'list'>,
   ) {
     this.feed = createWorkflowFeed({ runner, ...(programs === undefined ? {} : { programs }) });
     this.unsubscribeChanged = this.feed.onChanged((change) => this.onFeedChanged(change));
@@ -287,7 +305,9 @@ export class WorkflowViewManager implements vscode.Disposable {
     // プロセスが増える。統合前の`onRunnerChanged`も、表示中のrunの変化でなければ
     // `postState`（その中の`postRoadmap`）を呼んでいなかった
     const affectsActiveRun = change.kind !== 'run' || change.runId === this.activeRunId;
-    this.postAll({ refreshRoadmap: affectsActiveRun });
+    // 完了根拠もgitの起動を伴う。完了タスクの顔ぶれが変わらない変化では導き直さない
+    // （完了後のファイル変更は、画面を開き直すか「再確認」で反映する）
+    this.postAll({ refreshRoadmap: affectsActiveRun, evidenceOnlyIfDoneChanged: true });
   }
 
   /**
@@ -298,7 +318,9 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 「状態が変わっていないのに送らない」という意味で解釈している。runIdあたり最大
    * 50タスクという上限があるため、スナップショット全体を送っても軽い）。
    */
-  private postAll(options: { refreshRoadmap?: boolean } = {}): void {
+  private postAll(
+    options: { refreshRoadmap?: boolean; evidenceOnlyIfDoneChanged?: boolean } = {},
+  ): void {
     if (this.panel === undefined) {
       return;
     }
@@ -321,6 +343,65 @@ export class WorkflowViewManager implements vscode.Disposable {
     if (options.refreshRoadmap !== false) {
       void this.postRoadmap(snapshot?.roadmapPath);
     }
+    const doneKey =
+      feed.activeRun === undefined ? undefined : completionEvidenceKey(feed.activeRun);
+    if (options.evidenceOnlyIfDoneChanged !== true || doneKey !== this.evidenceDoneKey) {
+      this.evidenceDoneKey = doneKey;
+      this.refreshCompletionEvidence();
+    }
+  }
+
+  /**
+   * 完了根拠（Issue #1380）を導き直して送る。gitの起動と記録の読出を伴うため、実行中に
+   * 呼ばれたら終わってから1回だけやり直す（状態が変わるたびに重ねて走らせない）。
+   */
+  private refreshCompletionEvidence(): void {
+    if (this.verificationStore === undefined) {
+      return;
+    }
+    if (this.evidenceRefresh !== undefined) {
+      this.evidenceRefreshQueued = true;
+      return;
+    }
+    this.evidenceRefresh = this.postCompletionEvidence().finally(() => {
+      this.evidenceRefresh = undefined;
+      if (this.evidenceRefreshQueued) {
+        this.evidenceRefreshQueued = false;
+        this.refreshCompletionEvidence();
+      }
+    });
+  }
+
+  private async postCompletionEvidence(): Promise<void> {
+    const store = this.verificationStore;
+    if (this.panel === undefined || store === undefined) {
+      return;
+    }
+    const snapshot = this.feed.getSnapshot(this.activeRunId).activeRun;
+    if (snapshot === undefined) {
+      return;
+    }
+    // 完了（done）したタスクだけを対象にする。途中のタスクの区分は完了根拠ではない
+    const tasks = snapshot.tasks
+      .filter((task) => task.state === 'done')
+      .map((task) => ({ id: task.id, cwd: task.cwd }));
+    let evidence: Record<string, CompletionEvidenceView>;
+    try {
+      evidence = await loadTaskCompletionEvidence(store, snapshot.runId, tasks);
+    } catch (e) {
+      this.log.warn(
+        `[workflowView] 完了根拠を読めません: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return;
+    }
+    if (this.panel === undefined) {
+      return;
+    }
+    void this.panel.webview.postMessage({
+      type: 'completionEvidence',
+      runId: snapshot.runId,
+      tasks: evidence,
+    });
   }
 
   private buildStateMessage(snapshot: WorkflowRunSnapshot): WorkflowStateMessage {
@@ -524,6 +605,10 @@ export class WorkflowViewManager implements vscode.Disposable {
       return;
     }
 
+    if (type === 'refreshCompletionEvidence') {
+      this.refreshCompletionEvidence();
+      return;
+    }
     if (type === 'roadmapRefresh') {
       // 人が押したときはキャッシュの窓を無視して取り直す（Issue #1257）。下書きプレビューでも
       // 効かせたいので、`activeRunId`の有無を問わないこの位置に置く
@@ -903,7 +988,7 @@ ${workflowStyles()}
       <table id="taskTable">
         <thead>
           <tr>
-            <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th>
+            <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th><th>完了根拠</th>
             <th>Issue</th><th>cleanup</th><th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th><th>送信回数</th><th>操作</th>
           </tr>
         </thead>
@@ -1042,4 +1127,10 @@ function buildPreviewSnapshot(
     // 元にしたロードマップの項目とIssueの状態は読めたほうがよい
     roadmapPath: def.roadmap,
   };
+}
+
+/** 完了根拠を導き直すかの判定に使う、runと完了タスクの組（Issue #1380） */
+function completionEvidenceKey(snapshot: WorkflowRunSnapshot): string {
+  const done = snapshot.tasks.filter((task) => task.state === 'done').map((task) => task.id);
+  return JSON.stringify([snapshot.runId, done]);
 }
