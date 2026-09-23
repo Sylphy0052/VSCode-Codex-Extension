@@ -96,7 +96,9 @@ import {
   type RoadmapIssueCreationPort,
   type RoadmapIssueSummary,
   type RoadmapItem,
+  type GenerateRoadmapResult,
 } from './orchestrator/roadmap';
+import { sanitizeInlineText } from './orchestrator/untrustedText';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { ProgramStore } from './orchestrator/programStore';
@@ -2791,6 +2793,24 @@ async function convertMarkdownFileToRoadmap(
         },
       ),
   );
+  const savedPath = await finishRoadmapConversion(result, log);
+  if (savedPath === undefined) {
+    return;
+  }
+  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(savedPath));
+}
+
+/**
+ * ロードマップへの変換結果を人へ伝え、保存できたときだけ保存先を返す。
+ *
+ * 失敗時は生の応答をエディタで開いてエラーを表示し、成功時は検証の警告をログへ残す。
+ * ファイルからの変換（`convertMarkdownFileToRoadmap`）とIssueからの変換
+ * （`planWorkflowFromRoadmapIssueCommand`）で扱いを揃えるために共有する。
+ */
+async function finishRoadmapConversion(
+  result: GenerateRoadmapResult,
+  log: Logger,
+): Promise<string | undefined> {
   if (!result.ok) {
     log.error(`ロードマップへ変換できません: ${result.message}`);
     if (result.rawResponse !== undefined) {
@@ -2801,14 +2821,14 @@ async function convertMarkdownFileToRoadmap(
       await vscode.window.showTextDocument(doc, { preview: false });
     }
     void vscode.window.showErrorMessage(`ロードマップへ変換できません: ${result.message}`);
-    return;
+    return undefined;
   }
   if (result.validation.warnings.length > 0) {
     log.warn(
       `変換したロードマップに警告があります:\n${formatRoadmapWarningsDetail(result.validation.warnings, '\n')}`,
     );
   }
-  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(result.path));
+  return result.path;
 }
 
 /**
@@ -2839,6 +2859,11 @@ async function planWorkflowCommand(
         description: '既存のロードマップの1フェーズをタスクへ変換する（design.md §16.19）',
         sourceKind: 'roadmap' as const,
       },
+      {
+        label: 'ロードマップIssueから生成',
+        description: 'roadmapラベルのIssueをロードマップへ変換してから生成する（Issue #1419）',
+        sourceKind: 'roadmapIssue' as const,
+      },
     ],
     { placeHolder: 'ワークフローの生成方法を選択', ignoreFocusOut: true },
   );
@@ -2851,6 +2876,10 @@ async function planWorkflowCommand(
   }
   if (source.sourceKind === 'roadmap') {
     await planWorkflowFromRoadmapCommand(chat, claudeChat, view, log, folder, provider);
+    return;
+  }
+  if (source.sourceKind === 'roadmapIssue') {
+    await planWorkflowFromRoadmapIssueCommand(chat, claudeChat, view, log, folder, provider);
     return;
   }
   await planWorkflowFromGoalCommand(chat, claudeChat, view, log, folder, provider, false);
@@ -2981,7 +3010,117 @@ async function planWorkflowFromRoadmapCommand(
     return;
   }
 
-  const doc = await vscode.workspace.openTextDocument(pickedFile.file);
+  await planWorkflowFromRoadmapFile(chat, claudeChat, view, log, folder, provider, pickedFile.file);
+}
+
+/** ロードマップIssueとして扱うラベル名（大文字小文字は区別しない）。 */
+const ROADMAP_ISSUE_LABEL = 'roadmap';
+
+/** QuickPickに出すIssueタイトルの上限文字数。 */
+const ROADMAP_ISSUE_TITLE_MAX_LENGTH = 200;
+
+/**
+ * ロードマップIssueを選び、ロードマップへ変換してからワークフロー定義を生成する（Issue #1419）。
+ *
+ * `gh`/`glab`でのIssue取得は、人がこの経路を選んだ後にだけ行う。起動時やメニュー表示時に
+ * 先回りして取得したり、キャッシュを事前に埋めたりしない。変換結果は`roadmapDir`へ保存し、
+ * 以降はファイルを選んだ場合と同じ`planWorkflowFromRoadmapFile`で進める。
+ */
+async function planWorkflowFromRoadmapIssueCommand(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+  folder: vscode.WorkspaceFolder,
+  provider: Provider,
+): Promise<void> {
+  const workspaceRoot = folder.uri.fsPath;
+  const issuePort = createCliIssueListPort(nodeGitCommandRunner, nodeCliCommandRunner);
+  const issues = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ロードマップIssueを取得しています…' },
+    () => issuePort.listIssues(workspaceRoot),
+  );
+  if (issues === undefined) {
+    void vscode.window.showErrorMessage(
+      'Issueを取得できません（originがGitHub/GitLabでない、またはgh/glabが使えない可能性があります）',
+    );
+    return;
+  }
+  const roadmapIssues = issues.filter((issue) =>
+    (issue.labels ?? []).some((label) => label.toLowerCase() === ROADMAP_ISSUE_LABEL),
+  );
+  if (roadmapIssues.length === 0) {
+    void vscode.window.showInformationMessage(
+      `「${ROADMAP_ISSUE_LABEL}」ラベルの付いたopenのIssueが見つかりません`,
+    );
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    roadmapIssues.map((issue) => ({
+      label: `#${issue.number} ${sanitizeInlineText(issue.title, ROADMAP_ISSUE_TITLE_MAX_LENGTH)}`,
+      issue,
+    })),
+    { placeHolder: 'ワークフローの元にするロードマップIssueを選択', ignoreFocusOut: true },
+  );
+  if (picked === undefined) {
+    return;
+  }
+  const body = picked.issue.body ?? '';
+  if (body.trim() === '') {
+    void vscode.window.showErrorMessage(`#${picked.issue.number} の本文が空のため変換できません`);
+    return;
+  }
+
+  const roadmapDir = readWorkflowsConfig().roadmapDir;
+  const fileName = await askOutputFileName(picked.issue.title, roadmapDir, '.md');
+  if (fileName === undefined) {
+    log.info('ロードマップIssueからの生成を取り消しました');
+    return;
+  }
+
+  const host = provider === 'claude' ? claudeChat : chat;
+  const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'ロードマップへ変換しています…' },
+    () =>
+      convertMarkdownToRoadmap(
+        { generation, review: generation, fs: nodeRoadmapFileSystem },
+        {
+          workspaceRoot,
+          roadmapDir,
+          slug: fileName,
+          sourcePath: picked.issue.url ?? `Issue #${picked.issue.number}`,
+          sourceMarkdown: body,
+        },
+      ),
+  );
+  const savedPath = await finishRoadmapConversion(result, log);
+  if (savedPath === undefined) {
+    return;
+  }
+  const savedUri = vscode.Uri.file(savedPath);
+  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(savedUri), {
+    preview: false,
+  });
+  await planWorkflowFromRoadmapFile(chat, claudeChat, view, log, folder, provider, savedUri);
+}
+
+/**
+ * 選んだロードマップファイルから、フェーズ選択・YAML生成・保存までを進める。
+ *
+ * ファイル選択からの経路（`planWorkflowFromRoadmapCommand`）と、ロードマップIssueを
+ * 変換して保存した直後の経路（`planWorkflowFromRoadmapIssueCommand`、Issue #1419）が共有する。
+ */
+async function planWorkflowFromRoadmapFile(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+  folder: vscode.WorkspaceFolder,
+  provider: Provider,
+  roadmapFile: vscode.Uri,
+): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument(roadmapFile);
   const parsed = parseRoadmapMarkdown(doc.getText());
   if (parsed.phases.length === 0) {
     void vscode.window.showErrorMessage('選択したロードマップにフェーズ・項目がありません');
@@ -3039,7 +3178,7 @@ async function planWorkflowFromRoadmapCommand(
 
   const host = provider === 'claude' ? claudeChat : chat;
   const workspaceRoot = folder.uri.fsPath;
-  const roadmapPath = vscode.workspace.asRelativePath(pickedFile.file, false);
+  const roadmapPath = vscode.workspace.asRelativePath(roadmapFile, false);
   let failed = 0;
 
   for (const [index, chunk] of chunks.entries()) {
