@@ -79,4 +79,31 @@ export class ProviderRegistry {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(0, Math.max(0, options.maxEntries));
   }
+
+  /**
+   * `<provider>:<id>` の組（`pinKeyFor` と同じ形）を指定してセッションを引く（Issue #1389）。
+   * プロバイダごとにまとめて1回ずつ問い合わせる。片方が失敗しても、もう片方の分は返す。
+   * 順序は問わない（呼び出し側がキーで引き直す）。
+   */
+  async getSessions(keys: readonly string[], log: Logger): Promise<SessionSummary[]> {
+    const sessions: SessionSummary[] = [];
+
+    await Promise.all(
+      this.all().map(async (provider) => {
+        const prefix = `${provider.id}:`;
+        const ids = keys.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+        if (ids.length === 0) {
+          return;
+        }
+        try {
+          sessions.push(...(await provider.getSessions(ids)));
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : String(e);
+          log.error(`${provider.label} のセッションを引けませんでした: ${reason}`);
+        }
+      }),
+    );
+
+    return sessions;
+  }
 }

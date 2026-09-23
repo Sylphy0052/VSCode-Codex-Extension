@@ -38,6 +38,10 @@ export class ClaudeProvider implements AgentProvider {
     return this.store.list(options);
   }
 
+  async getSessions(ids: readonly string[]): Promise<SessionSummary[]> {
+    return this.store.getSessions(ids);
+  }
+
   tabTitle(session: Pick<SessionSummary, 'id' | 'threadName'>): string {
     return `Claude: ${session.threadName ?? session.id.slice(0, 8)}`;
   }

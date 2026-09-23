@@ -369,6 +369,49 @@ export class SessionStore {
     );
   }
 
+  /**
+   * idを指定してセッションを引く（Issue #1389、お気に入りビュー用）。
+   *
+   * `list`と違って`thread/list`は使わず、ロールアウトの所在と`session_index.jsonl`から
+   * 指定idの分だけを組み立てる。1件ずつ引くために`thread/list`を全ページ辿るのは割に合わない。
+   * 項目の組み立て方は`listFromFiles`と同じにする（派生スレッドの除外とスコープの絞り込みは
+   * しない。お気に入りは人が選んだものを全ワークスペースから出すため）。
+   */
+  async getSessions(ids: readonly string[]): Promise<SessionSummary[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+    const content = await this.fs.readTextFile(this.paths.sessionIndex);
+    const entries = content === undefined ? [] : parseSessionIndex(content).entries;
+    const indexed = new Map(entries.map((e) => [e.id, e]));
+    const locations = await this.locateRollouts();
+
+    const resolved = await mapWithLimit(ids, MTIME_CONCURRENCY_LIMIT, async (id) => {
+      const location = locations.get(id);
+      if (location === undefined) {
+        return undefined;
+      }
+      const meta = await this.resolveMeta(id, location.filePath);
+      if (meta === undefined) {
+        return undefined;
+      }
+      const entry = indexed.get(id);
+      const updatedAt =
+        entry?.updatedAt ??
+        new Date((await this.fs.mtimeMs(location.filePath)) ?? 0).toISOString();
+      const session: SessionSummary = {
+        id,
+        provider: 'codex',
+        threadName: entry?.threadName ?? (await this.firstInstruction(location.filePath)),
+        updatedAt,
+        cwd: meta.cwd,
+        archived: location.archived,
+      };
+      return session;
+    });
+    return resolved.filter((s): s is SessionSummary => s !== undefined);
+  }
+
   /** 会話ビューアなど、全文を読む用途のためにロールアウトの場所を解決する。 */
   async resolveRolloutPath(sessionId: string): Promise<string | undefined> {
     return (await this.locateRollouts()).get(sessionId)?.filePath;

@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import type { SessionSummary } from '../codex/types';
-import { readConfig, workspaceFolderPaths } from '../config';
 import type { Logger } from '../log';
 import type { ProviderRegistry } from '../provider/registry';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
@@ -15,7 +14,7 @@ import type { SessionActivityState } from './sessionActivity';
  * グループ化は行わない（お気に入りは元々少数のはずで、日付・作業ディレクトリで畳む意味が薄い）。
  *
  * 履歴の表示範囲（ワークスペース／すべて）や絞り込みに関わらず、常に全ワークスペースから
- * 拾う（`scope: 'all'`固定。Issue #1366の受入基準）。
+ * 拾う（Issue #1366の受入基準）。全件一覧ではなく、ピン留めしたidだけを引く（Issue #1389）。
  */
 export class FavoritesTreeProvider implements vscode.TreeDataProvider<SessionSummary> {
   private readonly emitter = new vscode.EventEmitter<void>();
@@ -38,22 +37,18 @@ export class FavoritesTreeProvider implements vscode.TreeDataProvider<SessionSum
       return [];
     }
 
-    const config = readConfig();
-    // 履歴の絞り込み範囲に関わらず常に全ワークスペースから拾う（Issue #1366の受入基準）
-    const sessions = await this.providers.listSessions(
-      {
-        scope: 'all',
-        workspaceFolders: workspaceFolderPaths(),
-        maxEntries: config.historyMaxEntries,
-      },
-      this.log,
-    );
+    // 全件一覧（`listSessions`）は使わず、ピン留めしたidだけを引く（Issue #1389）。
+    // 全件一覧を`scope: 'all'`で取ると、履歴ビューの範囲で作ったClaude Codeの索引との間で
+    // 作り直しと再描画が交互に続き、読み込みが終わらなかった。idで引くので、履歴の
+    // 絞り込み範囲に関わらず全ワークスペースから拾える（Issue #1366の受入基準）
+    const keys = this.pinnedStore.list();
+    const sessions = await this.providers.getSessions(keys, this.log);
 
     const byKey = new Map(sessions.map((s) => [pinKeyFor(s), s] as const));
     const favorites: SessionSummary[] = [];
-    // ストアの並び順（ピンした順、先頭が最も古い）のまま出す。実体が一覧から消えた
-    // （アーカイブ済みが対象外の一覧に落ちた・削除された等）キーは自然に読み飛ばす
-    for (const key of this.pinnedStore.list()) {
+    // ストアの並び順（ピンした順、先頭が最も古い）のまま出す。実体が見つからない
+    // （削除された等）キーは自然に読み飛ばす
+    for (const key of keys) {
       const session = byKey.get(key);
       if (session !== undefined) {
         favorites.push(session);
