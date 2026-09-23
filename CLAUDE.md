@@ -5,7 +5,7 @@
 ## PR運用
 
 - 各PRの最後に `node scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の版上げを `chore: バージョンを<版>にする` として同じPRへcommitする。配布したvsixの版とmainのcommitを1対1にするため
-  - 並行する別PRが先にmergeされて `package.json` の版が衝突したら、mainを取り込んでから `bump-version.mjs` を実行し直す（連番はその時点のmainの版から数える）
+  - merge直前に `git fetch origin` し、`origin/main` の版が版上げ前の版から変わっていたら、mainを取り込んでから `bump-version.mjs` を実行し直す。並行する2つのPRが同じ版へ上げた場合、変更が同一なのでgitは衝突として止めず、同じ版番号の中身違いが2回配布されてしまう
 - PR作成後は自己レビュー必須。指摘があれば自分で修正してから次へ進む
 - CI (`checks` / `external-cli`) の確認、他者レビューは不要。自己マージしてよい
 - 自己レビュー・修正が済んでいれば、CI (`checks` / `external-cli`) の完了を待たずに自己mergeしてよい
