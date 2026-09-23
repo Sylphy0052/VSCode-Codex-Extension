@@ -271,10 +271,11 @@ function appendUserEntry(
       continue;
     }
     const toolUseResult = toolUseResultOf(entry);
+    const text = toolResultText(part['content']);
     items[target] = {
       ...existing,
-      text: toolResultText(part['content']),
-      status: part['is_error'] === true ? 'エラー' : 'completed',
+      text,
+      status: claudeToolResultStatus(existing.kind, part['is_error'] === true, text),
       searchResults:
         existing.kind === 'webSearch'
           ? claudeSearchResults(toolUseResult, toolResultCount)
@@ -820,6 +821,25 @@ function messageText(entry: Record<string, unknown>): string {
     .map((part) => str(part['text']))
     .filter((text) => text !== '')
     .join('\n');
+}
+
+/**
+ * ツール結果から項目の`status`を決める（issue #1375）。
+ *
+ * Claude CLIはBashの終了コードを専用の欄で返さない。0以外で終わると`is_error: true`になり、
+ * 本文の先頭に`Exit code 3`の行が付く（実測、stream-json）。この形のときだけCodexと同じ
+ * `exit N`へ寄せ、ゴール駆動ループが終了コードの証拠として拾えるようにする。
+ * 成功時は`is_error: false`で終了コードが載らないため、推測で`exit 0`にはせず`completed`のまま置く
+ * （`goalLoop.ts`が「終了済み・結果不明」として扱う）。
+ */
+export function claudeToolResultStatus(kind: string, isError: boolean, text: string): string {
+  if (kind === 'commandExecution' && isError) {
+    const matched = /^Exit code (-?\d+)(?:\n|$)/u.exec(text);
+    if (matched?.[1] !== undefined) {
+      return `exit ${matched[1]}`;
+    }
+  }
+  return isError ? 'エラー' : 'completed';
 }
 
 function toolResultText(content: unknown): string {

@@ -1045,7 +1045,7 @@ export class LoopController {
   private ingestEvidence(state: ChatState, iteration: number): void {
     const added = collectCommandEvidence(state.items, this.seenEvidenceIds, iteration);
     for (const item of state.items) {
-      // **終了コードが読める項目だけを「拾った」ものとして記録する（issue #909）。**
+      // **終わった項目だけを「拾った」ものとして記録する（issue #909、#1375）。**
       // 実行中の項目まで記録すると、終了コードが出た次のターンで`collectCommandEvidence`が
       // `seen`に弾かれ、そのコマンドは二度と証拠にならない。「実行中のものは次のターンで
       // 拾う」という`collectCommandEvidence`の前提を壊さないため、判定を揃える

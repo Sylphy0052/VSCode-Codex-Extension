@@ -5,6 +5,7 @@ import {
   buildWorkerReportEvidence,
   collectCommandEvidence,
   collectRecentTurns,
+  isSettledCommandItem,
   MAX_EVIDENCE_ITEMS,
   MAX_RECENT_TURNS,
   normalizeGoalDefinition,
@@ -92,6 +93,26 @@ describe('collectCommandEvidence', () => {
     );
   });
 
+  // Claudeの項目は終了コードが無いまま `completed` / `エラー` で終わる（issue #1375）
+  it('終了コードの無い終了は unknown として拾い、pass にしない', () => {
+    const collected = collectCommandEvidence(
+      [command('c1', 'npm test', 'completed', 'ok'), command('c2', 'npm test', 'エラー', 'denied')],
+      new Set(),
+      2,
+    );
+    expect(collected).toHaveLength(2);
+    expect(collected[0]).toMatchObject({ kind: 'test', status: 'unknown', iteration: 2 });
+    expect(collected[0]?.detail).toBe('終了コード不明（status: completed）\nok');
+    expect(collected[1]).toMatchObject({ status: 'unknown' });
+    expect(collected[1]?.detail.startsWith('終了コード不明（status: エラー）')).toBe(true);
+  });
+
+  it('Claudeの実行中（running）は証拠にしない', () => {
+    expect(collectCommandEvidence([command('c1', 'npm test', 'running')], new Set(), 1)).toEqual(
+      [],
+    );
+  });
+
   it('既に拾ったidは積み直さない', () => {
     const items = [command('c1', 'npm test', 'exit 0')];
     expect(collectCommandEvidence(items, new Set(['c1']), 2)).toEqual([]);
@@ -130,6 +151,20 @@ describe('collectCommandEvidence', () => {
     expect(collected?.detail.startsWith('exit 1\n')).toBe(true);
     expect(collected?.detail.endsWith('FAILED')).toBe(true);
     expect(collected?.detail.length).toBeLessThan(1_000);
+  });
+});
+
+describe('isSettledCommandItem', () => {
+  it('終了コードか実行中でない status があれば終わったとみなす', () => {
+    expect(isSettledCommandItem(command('c1', 'npm test', 'exit 1'))).toBe(true);
+    expect(isSettledCommandItem(command('c1', 'npm test', 'completed'))).toBe(true);
+    expect(isSettledCommandItem(command('c1', 'npm test', 'エラー'))).toBe(true);
+    expect(isSettledCommandItem(command('c1', 'npm test', 'inProgress'))).toBe(false);
+    expect(isSettledCommandItem(command('c1', 'npm test', 'running'))).toBe(false);
+    expect(isSettledCommandItem(command('c1', 'npm test', undefined))).toBe(false);
+    expect(isSettledCommandItem(item({ id: 'a1', kind: 'agentMessage', status: 'completed' }))).toBe(
+      false,
+    );
   });
 });
 

@@ -15,6 +15,7 @@ import { parseAutocompactReport } from './autocompactText';
 import {
   applyFileChangeResult,
   claudeSearchResults,
+  claudeToolResultStatus,
   describeTool,
   isSkillContextEntry,
   normalizeTodos,
@@ -274,7 +275,8 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         continue;
       }
       // ツールの出力は際限なく長くなりうる。Codex側と同じ上限で末尾だけ残す
-      const output = capOutput(resultText(part['content']));
+      const rawText = resultText(part['content']);
+      const output = capOutput(rawText);
       const toolUseResult = toolUseResultOf(event);
       const next = [...items];
       next[index] = {
@@ -283,7 +285,8 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         truncated: output.truncated,
         // 画像を読むツール（Read）は base64 の image ブロックで返す（実測）
         images: readClaudeResultImages(part['content']),
-        status: part['is_error'] === true ? 'エラー' : 'completed',
+        // 切り詰める前の本文で読む。`Exit code N`の行は先頭に付く（issue #1375）
+        status: claudeToolResultStatus(existing.kind, part['is_error'] === true, rawText),
         // WebSearchの結果（issue #18）。メッセージ本体には無く、イベントに別枠で
         // 添えられる tool_use_result から取り出す（詳細は transcript.ts の関数を参照）
         searchResults:
