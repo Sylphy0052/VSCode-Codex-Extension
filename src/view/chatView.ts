@@ -1020,14 +1020,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // プロンプトごと止まってしまう。名前が付かなくても引き継ぎ自体は成立するため、
     // 失敗は記録に留める。
     //
-    // タブ名の本体は引き継ぎ元をそのまま継ぎ、世代の印だけを進める（Issue #1255）。
-    // 作業内容からの推測はしない。引き継ぎ元に名前が無いときだけ、handoffプロンプトの
-    // `作業:` 行かブランチ名で本体を補う（Issue #1407。印だけのタブが並ぶのを防ぐ）
+    // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
+    // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
     const previousName = deriveHandoffBaseName(state, entry.pinnedName);
     const handoffPrompt =
       lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
     const handoffName = buildHandoffSessionName({
       ...(previousName === undefined ? {} : { previousName }),
+      isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
       ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
       ...(gitBranch === undefined ? {} : { gitBranch }),
     });

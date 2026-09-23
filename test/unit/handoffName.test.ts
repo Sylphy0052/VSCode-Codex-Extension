@@ -45,59 +45,73 @@ describe('buildHandoffSessionName（issue #1145、材料はissue #1255）', () =
   });
 });
 
-describe('buildHandoffSessionName: 名前の無い引き継ぎ元の本体を補う（issue #1407）', () => {
+describe('buildHandoffSessionName: handoffプロンプトから本体を作り直す（issue #1407、#1410）', () => {
   const handoffPrompt = [
     '# 継続 2026-09-23 fix/1407/handoff-tab-name',
     '',
-    '前提: cwd=/repo',
-    '作業: 引き継ぎ先のタブ名を補う',
+    '前提: cwd=/repo / Issue #1410 / MR !1411 / skill=gitlab-develop 実装',
+    '作業: 引き継ぎ先のタブ名を作り直す',
     '',
     '次:',
     '1. テストを書く',
   ].join('\n');
 
-  it('引き継ぎ元に名前があれば作業行やブランチより優先する', () => {
+  it('Issue・MR・作業行を並べ、引き継ぎ元の名前より優先する', () => {
     expect(
       buildHandoffSessionName({
         previousName: '前の名前 (続き2)',
         handoffPrompt,
-        gitBranch: 'fix/1407/handoff-tab-name',
+        gitBranch: 'main',
       }),
-    ).toBe('前の名前 (続き3)');
+    ).toBe('#1410 !1411 引き継ぎ先のタブ名を作り直す (続き3)');
   });
 
-  it('名前が無ければhandoffプロンプトの作業行を本体にする', () => {
-    expect(
-      buildHandoffSessionName({ handoffPrompt, gitBranch: 'fix/1407/handoff-tab-name' }),
-    ).toBe('引き継ぎ先のタブ名を補う (続き2)');
-  });
-
-  it('印だけの名前から引き継ぐときも本体を補い、世代は進める', () => {
+  it('印だけの名前から引き継ぐときも本体を作り、世代は進める', () => {
     expect(buildHandoffSessionName({ previousName: '(続き4)', handoffPrompt })).toBe(
-      '引き継ぎ先のタブ名を補う (続き5)',
+      '#1410 !1411 引き継ぎ先のタブ名を作り直す (続き5)',
+    );
+  });
+
+  it('前提行にIssueが無ければ見出しのブランチ名からIssue番号を取る', () => {
+    const prompt = '# 継続 2026-09-23 fix/1407/x\n\n前提: PR #1409\n作業: 直す';
+    expect(buildHandoffSessionName({ handoffPrompt: prompt, gitBranch: 'main' })).toBe(
+      '#1407 PR#1409 直す (続き2)',
+    );
+  });
+
+  it('見出しにブランチが無ければcwdのブランチ名からIssue番号を取る', () => {
+    expect(
+      buildHandoffSessionName({ handoffPrompt: '作業: 直す', gitBranch: 'feat/12/x' }),
+    ).toBe('#12 直す (続き2)');
+    expect(buildHandoffSessionName({ previousName: '(続き3)', gitBranch: 'feat/12/x' })).toBe(
+      '#12 (続き4)',
     );
   });
 
   it('長い作業行は切り詰める', () => {
     const long = `作業: ${'あ'.repeat(50)}`;
     expect(buildHandoffSessionName({ handoffPrompt: long })).toBe(
-      `${'あ'.repeat(40)}… (続き2)`,
+      `${'あ'.repeat(30)}… (続き2)`,
     );
   });
 
-  it('作業行が無ければブランチ名を本体にする', () => {
-    expect(
-      buildHandoffSessionName({ handoffPrompt: '# 継続 2026-09-23', gitBranch: 'feat/12/x' }),
-    ).toBe('feat/12/x (続き2)');
-    expect(buildHandoffSessionName({ previousName: '(続き3)', gitBranch: 'feat/12/x' })).toBe(
-      'feat/12/x (続き4)',
-    );
+  it('Issue番号も作業行も無ければ、規約外のブランチ名を本体にする', () => {
+    expect(buildHandoffSessionName({ gitBranch: 'topic-x' })).toBe('topic-x (続き2)');
   });
 
-  it('main・master・HEADは手掛かりにならないので使わない', () => {
+  it('main・master・HEADは手掛かりにならないので、引き継ぎ元の名前を継ぐ', () => {
     for (const gitBranch of ['main', 'master', 'HEAD']) {
       expect(buildHandoffSessionName({ gitBranch })).toBe('(続き2)');
+      expect(buildHandoffSessionName({ previousName: '前の名前', gitBranch })).toBe(
+        '前の名前 (続き2)',
+      );
     }
+  });
+
+  it('オーケストレーターが指定した名前は作り直さない', () => {
+    expect(
+      buildHandoffSessionName({ previousName: 'task-1 実装', isPinned: true, handoffPrompt }),
+    ).toBe('task-1 実装 (続き2)');
   });
 });
 
