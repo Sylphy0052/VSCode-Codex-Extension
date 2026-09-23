@@ -171,6 +171,7 @@ import {
   countCompactions,
   decideAutoHandoff,
   deriveHandoffBaseName,
+  extractHandoffPrompt,
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   buildHandoffSessionName,
@@ -1192,9 +1193,16 @@ export class ClaudeChatViewManager
     // 引き継ぎ自体は成立するので、失敗は記録に留める。
     //
     // タブ名の本体は引き継ぎ元をそのまま継ぎ、世代の印だけを進める（Issue #1255）。
-    // 作業内容からの推測はしない
+    // 作業内容からの推測はしない。引き継ぎ元に名前が無いときだけ、handoffプロンプトの
+    // `作業:` 行かブランチ名で本体を補う（Issue #1407。印だけのタブが並ぶのを防ぐ）
     const previousName = deriveHandoffBaseName(state, entry.pinnedName);
-    const handoffName = buildHandoffSessionName(previousName === undefined ? {} : { previousName });
+    const handoffPrompt =
+      lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
+    const handoffName = buildHandoffSessionName({
+      ...(previousName === undefined ? {} : { previousName }),
+      ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
+      ...(gitBranch === undefined ? {} : { gitBranch }),
+    });
     try {
       await this.store.rename(newSessionId, handoffName);
       newEntry.session.setName(handoffName);
