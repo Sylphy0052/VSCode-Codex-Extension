@@ -17,6 +17,7 @@ import {
   claudeSearchResults,
   claudeToolResultStatus,
   describeTool,
+  isBackgroundCommand,
   isSkillContextEntry,
   normalizeTodos,
   skillContextName,
@@ -208,6 +209,8 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         diffs: tool.diffs,
         // tool_useの時点では結果が判らない。tool_resultが届いたときにapplyUserが埋める
         searchResults: [],
+        // 起動直後に成功のtool_resultが返るため、終了と区別する印を持つ（issue #1385）
+        ...(isBackgroundCommand(tool.kind, input) ? { background: true } : {}),
       });
       // Edit/Write/NotebookEdit はファイル編集。作業記録の成果行に使うため集めておく
       if (tool.kind === 'fileChange') {
@@ -286,7 +289,12 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
         // 画像を読むツール（Read）は base64 の image ブロックで返す（実測）
         images: readClaudeResultImages(part['content']),
         // 切り詰める前の本文で読む。`Exit code N`の行は先頭に付く（issue #1375）
-        status: claudeToolResultStatus(existing.kind, part['is_error'] === true, rawText),
+        status: claudeToolResultStatus(
+          existing.kind,
+          part['is_error'] === true,
+          rawText,
+          existing.background === true,
+        ),
         // WebSearchの結果（issue #18）。メッセージ本体には無く、イベントに別枠で
         // 添えられる tool_use_result から取り出す（詳細は transcript.ts の関数を参照）
         searchResults:
@@ -434,6 +442,7 @@ function applyResult(state: ChatState, event: Record<string, unknown>): ChatStat
         };
   return {
     ...state,
+    items: settleUnansweredCommands(state.items),
     busy: false,
     turnFailed: failed,
     turnResultText: str(event['result']),
@@ -441,6 +450,26 @@ function applyResult(state: ChatState, event: Record<string, unknown>): ChatStat
     // ターンの結果が確定した（issue #939）。Codexの `turn/completed` に対応する
     turnCompletionSeq: state.turnCompletionSeq + 1,
   };
+}
+
+/**
+ * ターンが終わった時点でtool_resultが届いていないコマンドを`interrupted`にする（issue #1385）。
+ *
+ * 中断したターンでは、tool_useに対するtool_resultが届かないことがある。`running`のまま残すと、
+ * 画面では実行中に見え続け、ゴール駆動ループの証拠台帳にも入らない。終了コードは無いため、
+ * 証拠台帳では`unknown`として扱われ、`pass`にはならない。
+ */
+function settleUnansweredCommands(items: ChatItem[]): ChatItem[] {
+  if (!items.some(isUnansweredCommand)) {
+    return items;
+  }
+  return items.map((item) =>
+    isUnansweredCommand(item) ? { ...item, status: 'interrupted' } : item,
+  );
+}
+
+function isUnansweredCommand(item: ChatItem): boolean {
+  return item.kind === 'commandExecution' && item.status === 'running';
 }
 
 /**

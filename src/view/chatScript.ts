@@ -226,6 +226,8 @@ export function chatScript(
     started: '開始',
     interacted: '応答',
     interrupted: '中断',
+    // Claude Codeのバックグラウンド実行。起動しただけで結果は未確定（issue #1385）
+    background: 'バックグラウンド実行中',
     // 承認要求の自動レビュー（GuardianApprovalReviewStatus）
     approved: '承認',
     denied: '拒否',
@@ -253,6 +255,7 @@ export function chatScript(
   const STATUS_CLASS = {
     inProgress: 'status-running',
     running: 'status-running',
+    background: 'status-running',
     started: 'status-running',
     failed: 'status-failed',
     declined: 'status-failed',
@@ -1334,10 +1337,11 @@ export function chatScript(
     const label = bits.join(' ・ ');
     if (node.label.textContent !== label) node.label.textContent = label;
 
-    // 実行中のコマンドは見た目でも区別する（Codexは inProgress、Claude Codeは running）
+    // 実行中のコマンドは見た目でも区別する（Codexは inProgress、Claude Codeは running。
+    // Claude Codeのバックグラウンド実行 background も結果が出ていないため含める。issue #1385）
     const running =
       item.kind === 'commandExecution' &&
-      (item.status === 'inProgress' || item.status === 'running');
+      (item.status === 'inProgress' || item.status === 'running' || item.status === 'background');
     node.wrap.classList.toggle('running', running);
 
     // 成否を見出しの色で示す（issue #715）。畳んだままでも失敗が見つかるようにする

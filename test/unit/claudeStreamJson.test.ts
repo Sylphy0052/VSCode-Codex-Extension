@@ -262,6 +262,95 @@ describe('applyStreamEvent', () => {
     ]);
   });
 
+  // 起動直後に成功のtool_resultが返るため、終わったものとして扱わない（issue #1385）
+  it('バックグラウンド実行のBashは background になり、証拠台帳に入らない', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'Bash',
+              input: { command: 'sleep 30', run_in_background: true },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content: 'Command running in background with ID: b1',
+              is_error: false,
+            },
+          ],
+        },
+      },
+      { type: 'result', subtype: 'success', result: 'started' },
+    ]);
+    expect(state.items[0]?.background).toBe(true);
+    // ターンが終わってもinterruptedへは変えない（tool_resultは届いている）
+    expect(state.items[0]?.status).toBe('background');
+    expect(collectCommandEvidence(state.items, new Set(), 1)).toEqual([]);
+  });
+
+  it('バックグラウンド実行のBashでも、起動の失敗は通常の失敗として扱う', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'Bash',
+              input: { command: 'x', run_in_background: true },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Exit code 2', is_error: true },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.status).toBe('exit 2');
+  });
+
+  it('ターン終了時にtool_resultが届いていないBashは interrupted になり、pass にならない', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } },
+            { type: 'tool_use', id: 't2', name: 'Read', input: { file_path: '/x' } },
+          ],
+        },
+      },
+      { type: 'result', subtype: 'error_during_execution', is_error: true },
+    ]);
+    expect(state.items[0]?.status).toBe('interrupted');
+    // コマンド以外のツールは対象にしない
+    expect(state.items[1]?.status).toBe('running');
+    const evidence = collectCommandEvidence(state.items, new Set(), 1);
+    expect(evidence.map((e) => ({ source: e.source, status: e.status }))).toEqual([
+      { source: 'npm test', status: 'unknown' },
+    ]);
+  });
+
   // Web検索の結果（issue #18）。ライブのstream-jsonでも同じ tool_use_result を実測している
   // （transcript.tsのテストと同じ実測データ）ため、履歴の読み直しと同じ経路で拾えることを確かめる
   it('WebSearchのtool_use_resultから検索結果を積む', () => {

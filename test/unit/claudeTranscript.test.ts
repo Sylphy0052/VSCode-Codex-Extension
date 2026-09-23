@@ -222,6 +222,43 @@ describe('transcriptItems', () => {
     expect(items[2]?.text).toBe('ok');
   });
 
+  it('バックグラウンド実行のBashは履歴の読み直しでも background になる（issue #1385）', () => {
+    const { items } = transcriptItems([
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'a1',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'Bash',
+              input: { command: 'sleep 30', run_in_background: true },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content: 'Command running in background with ID: b1',
+              is_error: false,
+            },
+          ],
+        },
+      }),
+    ]);
+    expect(items[0]?.background).toBe(true);
+    expect(items[0]?.status).toBe('background');
+  });
+
   it('sidechainと壊れた行を除く', () => {
     const { items } = transcriptItems([
       '{壊れ',
