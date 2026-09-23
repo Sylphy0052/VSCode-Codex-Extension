@@ -20,9 +20,13 @@ export async function resolveRepoRoots(
 ): Promise<string[]> {
   const roots = new Set<string>();
   for (const folder of folders) {
-    const result = await git.run(['rev-parse', '--show-toplevel', '--git-common-dir'], folder);
-    const [toplevel, commonDir] = result.stdout.trim().split(/\r?\n/u);
-    if (result.code !== 0 || toplevel === undefined || toplevel === '') {
+    // 例外もフォルダ自身へ倒す。呼び出し側は結果を使い回すため、失敗を返すとフォルダが
+    // 変わるまで一覧が取れなくなる
+    const result = await git
+      .run(['rev-parse', '--show-toplevel', '--git-common-dir'], folder)
+      .catch(() => undefined);
+    const [toplevel, commonDir] = result?.stdout.trim().split(/\r?\n/u) ?? [];
+    if (result === undefined || result.code !== 0 || toplevel === undefined || toplevel === '') {
       roots.add(folder);
       continue;
     }
