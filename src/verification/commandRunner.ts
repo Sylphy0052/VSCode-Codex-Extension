@@ -8,7 +8,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
  * 書かれ、利用者に示して許可を得たものそのままで、外から来た値を埋め込まない。
  *
  * 子プロセスが残らないよう、POSIXではプロセスグループとして起動し、時間切れ・中断時は
- * グループごと終了させる（シェルが起こした孫プロセスまで届かせるため）。
+ * グループごと終了させる（シェルが起こした孫プロセスまで届かせるため）。時間切れは
+ * SIGTERMから猶予を置いてSIGKILL、中断は即座にSIGKILLを送る。
  */
 
 /** 1コマンドの時間切れ（ミリ秒） */
@@ -145,9 +146,11 @@ export function runVerifyCommand(options: RunVerifyCommandOptions): Promise<Veri
       timedOut = true;
       terminate();
     }, timeoutMs);
+    // 中断は停止・拡張機能の終了から来る。終了時は猶予のタイマーを待たずにホストが
+    // 落ちうるため、SIGTERMの猶予を置かずグループごと即座に終了させる
     const onAbort = (): void => {
       aborted = true;
-      terminate();
+      killProcessTree(child, 'SIGKILL', platform);
     };
     options.signal?.addEventListener('abort', onAbort, { once: true });
 

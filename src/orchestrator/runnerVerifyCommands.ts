@@ -70,6 +70,27 @@ export function verifyCommandsDigest(commands: readonly VerifyCommandEntry[]): s
     .digest('hex');
 }
 
+/**
+ * 確認の画面に載せる1行。実行する文字列と見た目がずれないよう、除去ではなく
+ * エスケープで見える形にする。`JSON.stringify` は改行などのC0制御文字しか
+ * エスケープしないため、双方向制御文字・ゼロ幅文字（Unicodeの書式文字）と
+ * 行・段落区切りも `\u{XXXX}` に置き換える（Trojan Source対策）。
+ */
+export function formatVerifyCommandForDisplay(entry: VerifyCommandEntry): string {
+  return `[${escapeInvisible(JSON.stringify(entry.taskId))}] ${escapeInvisible(
+    JSON.stringify(entry.command),
+  )}`;
+}
+
+const INVISIBLE_OR_SEPARATOR = /[\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+function escapeInvisible(value: string): string {
+  return value.replace(
+    INVISIBLE_OR_SEPARATOR,
+    (ch) => `\\u{${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}}`,
+  );
+}
+
 export type VerifyCommandGate = 'none' | 'run' | 'untrusted' | 'denied' | 'aborted';
 
 /**
@@ -112,6 +133,10 @@ export async function gateVerifyCommands(input: {
   const allowed = await raceAbort(consent.decision, input.signal);
   if (allowed === undefined) {
     return 'aborted';
+  }
+  // 確認を待つ間にTrustが外されていれば実行しない
+  if (!input.deps.isWorkspaceTrusted()) {
+    return 'untrusted';
   }
   return allowed ? 'run' : 'denied';
 }
@@ -163,12 +188,25 @@ export async function executeVerifyCommands(input: {
       return { failures, aborted: true };
     }
     const before = await safeCapture();
-    const result = await run({
-      command,
-      cwd: input.cwd,
-      signal: input.signal,
-      ...(deps.timeoutMs === undefined ? {} : { timeoutMs: deps.timeoutMs }),
-    });
+    // 起動時の例外（不正な引数など）も失敗として扱い、検証を宙に浮かせない
+    const result = await Promise.resolve()
+      .then(() =>
+        run({
+          command,
+          cwd: input.cwd,
+          signal: input.signal,
+          ...(deps.timeoutMs === undefined ? {} : { timeoutMs: deps.timeoutMs }),
+        }),
+      )
+      .catch((error: unknown): VerifyCommandResult => ({
+        exitCode: undefined,
+        output: '',
+        timedOut: false,
+        aborted: false,
+        error: error instanceof Error ? error.message : String(error),
+        startedAt: new Date(),
+        endedAt: new Date(),
+      }));
     if (result.aborted) {
       return { failures, aborted: true };
     }

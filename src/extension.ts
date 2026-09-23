@@ -102,7 +102,10 @@ import { WorkflowRunStore } from './orchestrator/runStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
-import type { VerifyCommandConsentRequest } from './orchestrator/runnerVerifyCommands';
+import {
+  formatVerifyCommandForDisplay,
+  type VerifyCommandConsentRequest,
+} from './orchestrator/runnerVerifyCommands';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
@@ -2026,13 +2029,11 @@ async function applyPresetChat(
  */
 /**
  * `verify.commands` を実行してよいかを利用者に確かめる（Issue #1378）。runごとに1回だけ
- * 呼ばれる。コマンドは実行する文字列そのままを見せるため、切り詰めずに
- * `JSON.stringify` で制御文字（改行など）を見える形にしてから並べる。
+ * 呼ばれる。コマンドは実行する文字列そのままを見せるため、切り詰めずに、
+ * 制御文字・不可視文字をエスケープして見える形にしてから並べる。
  */
 async function confirmVerifyCommands(request: VerifyCommandConsentRequest): Promise<boolean> {
-  const lines = request.commands.map(
-    (entry) => `[${JSON.stringify(entry.taskId)}] ${JSON.stringify(entry.command)}`,
-  );
+  const lines = request.commands.map(formatVerifyCommandForDisplay);
   const choice = await vscode.window.showWarningMessage(
     `ワークフロー「${request.workflowName}」の検証コマンドを実行しますか？`,
     {

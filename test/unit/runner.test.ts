@@ -13700,6 +13700,29 @@ tasks:
     expect(deps.run).not.toHaveBeenCalled();
     expect(appended).toEqual([]);
   });
+
+  it('確認で拒否されたら実行せず、警告を残して従来の検査だけで判定する', async () => {
+    const { deps, appended } = verifyDeps({ confirm: vi.fn(async () => false) });
+    const { runner, codexHost } = createHarness(COMMANDS_YAML, { verifyCommands: deps });
+    const result = await startWithAllowConfirmed(runner, '/repo/.agents/workflows/a.yaml');
+    const runId = result.runId as string;
+    await flush();
+
+    codexHost.byTaskId('T1').finish('done' as LoopStopReason, doneState('[DONE]'));
+    await vi.waitFor(() =>
+      expect(
+        runner
+          .getSnapshot(runId)
+          ?.warnings.some(
+            (w) => w.kind === 'taskVerification' && w.message.includes('許可されなかった'),
+          ),
+      ).toBe(true),
+    );
+
+    expect(deps.confirm).toHaveBeenCalledTimes(1);
+    expect(deps.run).not.toHaveBeenCalled();
+    expect(appended).toEqual([]);
+  });
 });
 
 describe('WorkflowRunner のスナップショットに解決済みの model / effort を載せる（Issue #1035）', () => {
