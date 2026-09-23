@@ -18,7 +18,7 @@
 
 ## 作業後のビルドとインストール
 
-作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeとb90/b115のdev containersの3か所へ入れる。ドキュメントだけの変更など、拡張機能の中身が変わらない作業では省く。
+作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeとb90/b115のdev containersの3か所へ入れる。
 
 - ビルドはメインのworking treeで `npm run build` のあと `npx vsce package --no-dependencies -o /tmp/<名前>.vsix` を実行する。`npm run package` は版番号を自動で上げて `package.json` を書き換えるため使わない。版番号が同じでも、インストール時の `--force` で上書きされる
 - WSL: `code --install-extension /tmp/<名前>.vsix --force`
