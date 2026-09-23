@@ -14,6 +14,7 @@ import {
   type ForgeHost,
 } from './forge';
 import { checkIssueChecklistItems, parseRoadmapMarkdown, readRoadmapSourceIssue } from './roadmap';
+import { SerialQueue } from './serialQueue';
 
 export interface SyncRoadmapIssueDeps {
   cli: CliCommandRunner;
@@ -58,6 +59,43 @@ export async function syncRoadmapCompletionToIssue(
     return { kind: 'skipped', sourceIssue, itemsWithoutIssue };
   }
 
+  return runExclusiveOnIssue(`${input.host}:${input.cwd}:${String(sourceIssue)}`, () =>
+    checkIssueAndUpdate(deps, input, sourceIssue, issues, itemsWithoutIssue),
+  );
+}
+
+/**
+ * 本文の取得から更新までは read-modify-write で、`updateIssue` は本文をまるごと置き換える。
+ * 同じロードマップIssueの子を別々のrunが同時に完了させると、後から書いた側が先のチェックを
+ * 消すため、Issueごとに直列化する。ローカルの `.md` 側（`runExclusiveOnRoadmapFile`）と同じく
+ * プロセス内の排他だけで、別ウィンドウや人の手による同時編集は防げない。
+ */
+const issueWriteQueues = new Map<string, { queue: SerialQueue; pending: number }>();
+
+async function runExclusiveOnIssue<T>(key: string, task: () => Promise<T>): Promise<T> {
+  let entry = issueWriteQueues.get(key);
+  if (entry === undefined) {
+    entry = { queue: new SerialQueue(), pending: 0 };
+    issueWriteQueues.set(key, entry);
+  }
+  entry.pending += 1;
+  try {
+    return await entry.queue.enqueue(task);
+  } finally {
+    entry.pending -= 1;
+    if (entry.pending === 0) {
+      issueWriteQueues.delete(key);
+    }
+  }
+}
+
+async function checkIssueAndUpdate(
+  deps: SyncRoadmapIssueDeps,
+  input: SyncRoadmapIssueInput,
+  sourceIssue: number,
+  issues: number[],
+  itemsWithoutIssue: string[],
+): Promise<SyncRoadmapIssueOutcome> {
   const body = await fetchIssueBody(deps.cli, input.host, input.cwd, sourceIssue);
   if (body === undefined) {
     return {
