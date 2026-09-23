@@ -79,15 +79,12 @@ Start-Process -FilePath $chrome -ArgumentList @(
 
 ## インストール
 
-Marketplaceには未公開のため、リポジトリからvsixを作ってインストールする。
+Marketplaceには未公開。[GitHub Releaseの最新版](https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest)からVSIXを入手してインストールする。
 
 ### 1. 前提を確認する
 
 ```bash
 code --version    # 1.90以降
-node --version    # v20以降
-npm --version
-git --version
 codex --version   # Codexを使う場合
 claude --version  # Claude Codeを使う場合
 ```
@@ -96,46 +93,60 @@ CodexとClaude Codeは、どちらか一方でよい（両方でもよい）。*
 
 **WSL・Dev Container・SSHで開発している場合は、上のコマンドをすべてそのリモート側で実行して確認する。** この拡張機能は `extensionKind: ["workspace"]` として動くため、UI側（Windowsなど）に入れたCLIは参照しない。
 
-### 2. vsixを作る
+### 2. VSIXを入手する
+
+[最新版のVSIX](https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix)をダウンロードする。コマンドで取得する場合は次を実行する。
 
 ```bash
-git clone https://github.com/Sylphy0052/VSCode-Codex-Extension.git
-cd VSCode-Codex-Extension
-npm install
-npm run package    # vscode-codex-extension-<version>.vsix を生成
+curl -fL -o vscode-codex-extension.vsix https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix
 ```
 
-`npm run package` はバージョンの採番、コンパイル、`vsce package` をまとめて実行する。バージョンは実行した日付と連番で `YYYY.MDD.N` の形に振られる（例: 2026年9月23日の1回目は `2026.923.1`、同じ日の2回目は `2026.923.2`）。成功するとリポジトリ直下に `vscode-codex-extension-<version>.vsix` ができる。これが拡張機能の本体。
-
-採番のたびに `package.json` と `package-lock.json` の `version` が書き換わる。手元で使うためだけにビルドした場合は、`git checkout package.json package-lock.json` で戻しておくと次の `git pull` で衝突しない。
+mainの更新ごとにGitHub Actionsが起動し、ビルドに成功した最新版のVSIXを公開する。URLはバージョンが変わっても同じ。
 
 ### 3. インストールする
 
 ```bash
-code --install-extension vscode-codex-extension-<version>.vsix
+code --install-extension vscode-codex-extension.vsix --force
 ```
 
-`<version>` は `npm run package` の最後に出る `Packaged:` の行で確認できる。`code` コマンドが無い場合は、VSCodeの拡張機能ビュー右上の「...」→「Install from VSIX...」から同じファイルを選ぶ。
+`code`コマンドが無い場合は、VS Codeの拡張機能ビュー右上の「...」→「Install from VSIX...」からダウンロードしたファイルを選ぶ。
 
 WSLやDev Containerで使う場合は、**そのリモート側へインストールする**（リモートに接続したウィンドウで上のコマンドを実行するか、拡張機能ビューで「Install in WSL: ...」を選ぶ）。
 
 ### 4. リロードして確認する
 
-コマンドパレット（`Ctrl+Shift+P`）で `Developer: Reload Window` を実行する。アクティビティバーに **Agents** のアイコンが増えていれば成功。サイドバーの「設定」ビューのタイトル横に、いま動いているバージョン（例: `v2026.923.1`）が出る。
+コマンドパレット（`Ctrl+Shift+P`）で`Developer: Reload Window`を実行する。アクティビティバーに**Agents**のアイコンが増えていれば成功。サイドバーの「設定」ビューのタイトル横に、いま動いているバージョンが出る。
 
-アイコンが出ない場合は、そのフォルダが**信頼されていない**可能性がある（Workspace Trustが無効だと拡張機能は動かない）。コマンドパレットの `Workspaces: Manage Workspace Trust` で信頼する。
+アイコンが出ない場合は、そのフォルダが**信頼されていない**可能性がある（Workspace Trustが無効だと拡張機能は動かない）。コマンドパレットの`Workspaces: Manage Workspace Trust`で信頼する。
+
+### 自分でVSIXを作る
+
+Node.js、npm、gitが必要。リポジトリをcloneしてパッケージを作る。
+
+```bash
+git clone https://github.com/Sylphy0052/VSCode-Codex-Extension.git
+cd VSCode-Codex-Extension
+npm ci
+npm run package    # vscode-codex-extension-<version>.vsix を生成
+```
+
+`npm run package` はバージョンの採番、コンパイル、`vsce package` をまとめて実行する。バージョンは実行した日付と連番で `YYYY.MDD.N` の形に振られる（例: 2026年9月23日の1回目は `2026.923.1`、同じ日の2回目は `2026.923.2`）。成功するとリポジトリ直下に `vscode-codex-extension-<version>.vsix` ができる。これが拡張機能の本体。
+
+採番のたびに`package.json`と`package-lock.json`の`version`が書き換わる。手元で使うためだけにビルドした場合は、この2ファイルの採番差分を戻しておくと次の`git pull`で衝突しない。
+
+作ったVSIXは次のコマンドでインストールできる。
+
+```bash
+code --install-extension vscode-codex-extension-<version>.vsix
+```
+
+`<version>`は`npm run package`の最後に出る`Packaged:`の行で確認できる。
 
 ### 更新する
 
-```bash
-cd VSCode-Codex-Extension
-git pull
-npm install
-npm run package
-code --install-extension vscode-codex-extension-<version>.vsix --force
-```
+最新版のVSIXを再度ダウンロードし、`code --install-extension vscode-codex-extension.vsix --force`で入れ直す。そのあとウィンドウをリロードする。
 
-そのあとウィンドウをリロードする。同じバージョン番号のまま入れ直す場合は `--force` が要る。
+同じバージョン番号のまま入れ直す場合も`--force`が要る。
 
 ### アンインストールする
 

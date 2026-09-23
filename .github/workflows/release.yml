@@ -1,0 +1,117 @@
+name: VSIX Release
+
+on:
+  push:
+    branches:
+      - main
+
+# 古い実行が最新版の公開を妨げないよう、同時実行を避ける。
+concurrency:
+  group: vsix-release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build VSIX
+        env:
+          RELEASE_SEQUENCE: ${{ github.run_number }}
+          TZ: Asia/Tokyo
+        run: npm run package
+
+      - name: Prepare latest asset
+        id: asset
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          mv "vscode-codex-extension-${version}.vsix" vscode-codex-extension.vsix
+          packaged_version="$(unzip -p vscode-codex-extension.vsix extension/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")"
+          test "$packaged_version" = "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.asset.outputs.version }}
+        run: |
+          tag="v${RELEASE_VERSION}"
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "main moved to $main_sha; skipping obsolete build $GITHUB_SHA"
+            exit 0
+          fi
+
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::${tag} points to a different commit"
+            exit 1
+          fi
+
+          if release_draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ -z "$tag_sha" ]; then
+              release_target="$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)"
+              if [ "$release_target" != "$GITHUB_SHA" ]; then
+                echo "::error::${tag} draft targets a different commit"
+                exit 1
+              fi
+            fi
+          else
+            gh release create "$tag" --draft \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "mainの${GITHUB_SHA}から自動生成したVSIXです。"
+            release_draft=true
+          fi
+
+          asset_count="$(gh release view "$tag" --json assets --jq '[.assets[] | select(.name == "vscode-codex-extension.vsix")] | length')"
+          if [ "$asset_count" = 0 ]; then
+            if [ "$release_draft" != true ]; then
+              echo "::error::${tag} is published without a VSIX"
+              exit 1
+            fi
+            gh release upload "$tag" vscode-codex-extension.vsix
+          fi
+
+          release_id="$(gh release view "$tag" --json databaseId --jq .databaseId)"
+          if [ "$release_draft" = true ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -F draft=false -f make_latest=false >/dev/null
+          fi
+
+          published_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha)"
+          if [ "$published_tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::${tag} points to a different commit after publication"
+            exit 1
+          fi
+
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "main moved to $main_sha; leaving $tag out of Latest"
+            exit 0
+          fi
+
+          gh release edit "$tag" --latest
+
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -f make_latest=false >/dev/null
+            echo "main moved to $main_sha; removed $tag from Latest"
+          fi

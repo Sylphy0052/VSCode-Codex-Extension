@@ -168,7 +168,9 @@ npm run package
 code --install-extension vscode-codex-extension-<version>.vsix
 ```
 
-`npm run package` は先に `scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の `version` を `YYYY.MDD.N`（実行日と、その日の連番）へ書き換える。VS Code拡張のバージョンはsemverで先頭ゼロを付けられないため、月日は「月×100+日」の数値にしている。連番は今の `version` から数えるので、配布するビルドのバージョンはcommitして残す。インストールした版はサイドバーの「設定」ビューのタイトル横で確認できる。
+手元で`npm run package`を実行すると、`scripts/bump-version.mjs`が`package.json`と`package-lock.json`の`version`を`YYYY.MDD.N`（実行日と、その日の連番）へ書き換える。VS Code拡張のバージョンはsemverで先頭ゼロを付けられないため、月日は「月×100+日」の数値にしている。手元の連番は現在の`version`から数える。インストールした版はサイドバーの「設定」ビューのタイトル横で確認できる。
+
+mainへのpushでは`.github/workflows/release.yml`が自動でVSIXを作り、GitHub Releaseへ公開する。公開版の連番にはワークフロー実行番号を使うため、リポジトリの`package.json`の採番は変更しない。日付は日本時間で決める。タグ`vYYYY.MDD.N`は対象のmainコミットを指し、Releaseには固定名`vscode-codex-extension.vsix`を添付する。古いmainコミットの実行は公開を見送る。ダウンロードURLは`https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix`。
 
 `.vscodeignore` で `src` `test` `docs` `scripts` `node_modules` を除いており、vsixにはバンドル済みの `dist/extension.js` とマニフェスト・README・LICENSE・アイコンだけが入る。
 
