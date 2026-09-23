@@ -417,11 +417,7 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 }
 
 /**
- * ターンの終わり。`is_error` か `success` 以外のsubtypeは失敗として扱う。
- * ループ実行を止める判断に使うため、完了と区別して持つ。
- *
- * `result` フィールドにはそのターンのアシスタントの最終応答テキストが入る
- * （作業記録の成果行に使う。`turnEditedFiles` は tool_use から積んだものをそのまま使う）。
+ * キャッシュ読み取り分と初回書き込み分を足した入力トークン。どちらも無ければ undefined。
  */
 function cachedInputTokensOf(usage: Record<string, unknown>): number | undefined {
   const cacheRead = num(usage['cache_read_input_tokens']);
@@ -465,6 +461,13 @@ function contextFromAssistant(
   return buildContextUsage(usedTokens, state.context?.contextWindow) ?? state.context;
 }
 
+/**
+ * ターンの終わり。`is_error` か `success` 以外のsubtypeは失敗として扱う。
+ * ループ実行を止める判断に使うため、完了と区別して持つ。
+ *
+ * `result` フィールドにはそのターンのアシスタントの最終応答テキストが入る
+ * （作業記録の成果行に使う。`turnEditedFiles` は tool_use から積んだものをそのまま使う）。
+ */
 function applyResult(state: ChatState, event: Record<string, unknown>): ChatState {
   const subtype = str(event['subtype']);
   const failed = event['is_error'] === true || (subtype !== '' && subtype !== 'success');
