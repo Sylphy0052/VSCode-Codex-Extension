@@ -58,7 +58,14 @@ jobs:
             exit 0
           fi
 
-          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null || true)"
+          if tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null)"; then
+            :
+          elif [ "$(printf '%s' "$tag_sha" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).status' 2>/dev/null)" = 404 ]; then
+            tag_sha=""
+          else
+            echo "::error::Failed to inspect ${tag}"
+            exit 1
+          fi
           if [ -n "$tag_sha" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
             echo "::error::${tag} points to a different commit"
             exit 1
