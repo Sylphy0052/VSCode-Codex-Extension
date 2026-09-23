@@ -1,6 +1,5 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
@@ -104,7 +103,6 @@ import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
 import type { VerifyCommandConsentRequest } from './orchestrator/runnerVerifyCommands';
-import { VerificationStore } from './verification/store';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
@@ -607,7 +605,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // 検証結果の来歴の保存先（Issue #1377）。複数ウィンドウで共有するため`globalStorageUri`
   // 配下に置く。ループのWorkerが会話中に実行したコマンドはチャット画面から、ワークフローの
-  // タスクのものは`WorkflowRunner`から、信頼できない記録として残す（Issue #1379）
+  // タスクのものは`WorkflowRunner`から、信頼できない記録として残す（Issue #1379）。
+  // 拡張機能自身が実行した`verify.commands`は、同じ保存先へ信頼できる記録として残す（Issue #1378）
   const verificationStore = new VerificationStore(context.globalStorageUri.fsPath, {
     homeDir: nodeLocatorDeps.homedir(),
     onError: (message) => log.warn(`[verification] ${message}`),
@@ -626,11 +625,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
    * には毎回`current`を読む関数を渡す。
    */
   const sessionBridgeHolder: { current: SessionBridgePort | undefined } = { current: undefined };
-  // 検証記録の保存先（Issue #1377・#1378）。複数ウィンドウで同じ保存先を共有する
-  const verificationStore = new VerificationStore(context.globalStorageUri.fsPath, {
-    homeDir: os.homedir(),
-    onError: (message) => log.warn(`[verification] ${message}`),
-  });
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
