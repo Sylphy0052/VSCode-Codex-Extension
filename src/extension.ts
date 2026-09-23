@@ -151,11 +151,11 @@ import { SessionModelSettingsStore } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
-import { SessionStore } from './session/sessionStore';
+import { isWithinAny, SessionStore } from './session/sessionStore';
 import { SessionActions, nodeCommandRunner, type SessionAction } from './session/sessionActions';
 import { SessionWatcher } from './session/sessionWatcher';
 import { UsageReader } from './session/usageReader';
-import { PinnedSessionStore } from './util/pinnedSessions';
+import { PinnedSessionStore, pinKeyFor } from './util/pinnedSessions';
 import {
   buildSelectionPayload,
   computeSelectionLineRange,
@@ -1429,12 +1429,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       ? claudeChat.getActivityState(session.id)
       : chat.getActivityState(session.id);
   const tree = new SessionTreeProvider(providers, getSessionActivity, log, pinnedSessions);
-  claudeStore.setOnRefreshed(() => tree.refresh());
+  // 索引の照合が終わったとき。ファイル監視に付いた取り直しと同じく後で実施ビューは動かさない
+  claudeStore.setOnRefreshed(() => tree.refreshSoon());
   const sessionsView = vscode.window.createTreeView('codex.sessions', {
     treeDataProvider: tree,
     showCollapseAll: false,
   });
-  context.subscriptions.push(tree, sessionsView);
+  // 見えていない間は一覧を取り直さない（Issue #1402）。取り直すたびにapp-serverを起動する
+  tree.setVisible(sessionsView.visible);
+  context.subscriptions.push(
+    tree,
+    sessionsView,
+    sessionsView.onDidChangeVisibility((e) => tree.setVisible(e.visible)),
+  );
 
   // お気に入りビュー（Issue #1366）。履歴ツリーと同じ`SessionSummary`をそのまま
   // 葉にするため、コマンド引数の互換性（issue #236）も同様に保たれる
@@ -1448,18 +1455,25 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     treeDataProvider: favoritesTree,
     showCollapseAll: false,
   });
-  context.subscriptions.push(favoritesTree, favoritesView);
-  // 履歴ツリーを引き直す契機（ファイル監視・活動状態の変化・手動更新など）で
-  // お気に入りも引き直し、タイトルと状態のアイコンを揃える（Issue #1366）
-  context.subscriptions.push(tree.onDidChangeTreeData(() => favoritesTree.refresh()));
+  favoritesTree.setVisible(favoritesView.visible);
+  context.subscriptions.push(
+    favoritesTree,
+    favoritesView,
+    favoritesView.onDidChangeVisibility((e) => favoritesTree.setVisible(e.visible)),
+  );
+  // 履歴ツリーの取り直しを依頼された契機（手動更新・設定変更・名前変更・アーカイブなど）で
+  // お気に入りも引き直し、タイトルと状態のアイコンを揃える（Issue #1366）。
+  // `onDidChangeTreeData`は受けない。ファイル監視に付いた取り直しのたびに後で実施の
+  // 一覧まで読み直していたため（Issue #1402）。監視の契機は下の各watcherで個別に判断する
+  context.subscriptions.push(tree.onDidRequestRefresh(() => favoritesTree.refresh()));
 
   // お気に入りの追加・解除は履歴ツリー／お気に入りツリー／開いているチャット画面の
   // 3箇所に反映する必要がある（Issue #1366）。お気に入りツリーは履歴の取り直し
-  // （数秒かかることがある）を待たずに直接取り直す（Issue #1396）
+  // （数秒かかることがある）を待たずに取り直す（Issue #1396）。`tree.refresh`が
+  // `onDidRequestRefresh`を先に発火するので、ここで直接呼ぶと二重になる（Issue #1402）
   context.subscriptions.push(
     pinnedSessions.onDidChange(() => {
       tree.refresh();
-      favoritesTree.refresh();
       chat.refreshFavorites();
       claudeChat.refreshFavorites();
     }),
@@ -1565,16 +1579,33 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     onRolloutChanged: () => readUsageDebounced(),
     onIndexChanged: () => {
       store.invalidateFileFallback();
-      tree.refreshDebounced();
+      tree.refreshSoon();
+      // 名前変更は索引にだけ現れる。後で実施のタイトルも揃える
+      favoritesTree.refresh();
       void persistCache(context, cache);
     },
   });
   context.subscriptions.push(watcher);
 
-  // Claude Codeには索引が無いため、transcriptの作成・追記を一覧更新の契機にする
+  // Claude Codeには索引が無いため、transcriptの作成・追記を一覧更新の契機にする。
+  // 追記は会話中ずっと続き、別リポジトリのセッションも同じ場所へ書くため、一覧に出る
+  // セッションのときだけ、間引いて取り直す（Issue #1402）
   const claudeWatcher = new ClaudeTranscriptWatcher(claudeDirs, {
     onTranscriptChanged: (filePath) => {
-      void claudeStore.refreshFile(filePath);
+      void claudeStore.refreshFile(filePath).then((change) => {
+        if (change === undefined) {
+          return;
+        }
+        const listed =
+          tree.scope === 'all' ||
+          change.cwds.some((cwd) => isWithinAny(cwd, workspaceFolderPaths()));
+        if (listed) {
+          tree.refreshSoon(CLAUDE_TRANSCRIPT_REFRESH_DELAY_MS);
+        }
+        if (pinnedSessions.isPinned(pinKeyFor({ provider: 'claude', id: change.sessionId }))) {
+          favoritesTree.refreshSoon(CLAUDE_TRANSCRIPT_REFRESH_DELAY_MS);
+        }
+      });
     },
   });
   context.subscriptions.push(claudeWatcher);
@@ -3681,6 +3712,12 @@ async function runAction(
   }
   tree.refresh();
 }
+
+/**
+ * Claude Codeのtranscriptの追記を受けて一覧を取り直す間隔（Issue #1402）。短いと
+ * 間引きの効果が薄く、長いと新しいセッションが一覧に出るのが遅れる。
+ */
+const CLAUDE_TRANSCRIPT_REFRESH_DELAY_MS = 2_000;
 
 function debounce(fn: () => void, delayMs: number): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;

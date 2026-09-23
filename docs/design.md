@@ -2845,7 +2845,7 @@ Claude Code側（§14.34）のボタンは`/import`のプレビューを会話�
 
 #### 原因は`TreeItem.id`の未設定
 
-VS Codeはツリーの要素と`TreeItem`の対応を`id`で保持する。`id`を渡さないとラベルと位置から内部ハンドルを組み立てるが、このツリーのラベルは`threadName ?? '(名称未設定)'`で重複しやすく、さらに`refreshDebounced`（ファイル監視からの再描画。300ms）で並びも頻繁に変わる。その結果ハンドルと要素の対応がずれ、メニュー経由の呼び出しで引数が`undefined`になっていた。
+VS Codeはツリーの要素と`TreeItem`の対応を`id`で保持する。`id`を渡さないとラベルと位置から内部ハンドルを組み立てるが、このツリーのラベルは`threadName ?? '(名称未設定)'`で重複しやすく、さらに`refreshSoon`（ファイル監視からの再描画。300ms、Claude Codeのtranscriptは2秒）で並びも頻繁に変わる。その結果ハンドルと要素の対応がずれ、メニュー経由の呼び出しで引数が`undefined`になっていた。
 
 `getTreeItem`で`item.id`を`` `${session.provider}:${session.id}` ``に固定する。プロバイダをまたいでも衝突しないよう、プロバイダ名とセッションIDの組にする（`SessionSummary.id`はプロバイダごとに採番されるため、id単体では理論上ぶつかりうる）。
 
@@ -3372,7 +3372,7 @@ CLIを混在させている利用者にとっては情報が1つ減るが、ア�
 
 **状態はキャッシュしない**。`SessionDecorationProvider` は問い合わせのたびに `SessionTreeProvider.decorationStateFor(uri)` を引く。装飾側に状態の写しを持つと、ツリーの更新と装飾の更新がずれたときに古いバッジが残る。ツリー側は `getChildren` で組んだ表示中の一覧（絞り込み後）を `<provider>:<id>` で引ける形に持ち直す——VS Codeは `provideFileDecoration` へURIしか渡さないため。絞り込みで消えた行・別スキームのURIには何も返さない（このプロバイダは全URIに対して呼ばれる）。
 
-**依存の向きはツリー→装飾の一方向**。装飾側がツリーのイベントを購読して `onDidChangeFileDecorations` を発火する。ツリー側から装飾を突く形にすると両方が互いを持つ配線になる。この向きにしたことで、`tree.refresh()` を呼ぶ既存の経路（`refreshDebounced` を含む）がそのまま装飾の更新にもなる。どの行が変わったかはツリー側も持っていないため、URIを絞らず `undefined`（全体を無効化）で発火する。
+**依存の向きはツリー→装飾の一方向**。装飾側がツリーのイベントを購読して `onDidChangeFileDecorations` を発火する。ツリー側から装飾を突く形にすると両方が互いを持つ配線になる。この向きにしたことで、`tree.refresh()` を呼ぶ既存の経路（`refreshSoon` を含む）がそのまま装飾の更新にもなる。どの行が変わったかはツリー側も持っていないため、URIを絞らず `undefined`（全体を無効化）で発火する。
 
 購読するのは `onDidChangeTreeData` ではなく専用の `onDidChangeDecorations`（`getChildren` のルート呼び出しの末尾で発火する）。`onDidChangeTreeData` はツリーの再読込を**依頼した**時点で発火するため、そこで装飾を引き直させると、`visibleSessions` がまだ入れ替わっていない状態で読んでしまう。しかも次に一覧が届いたときには誰も装飾を引き直さないので、古いバッジがそのまま残る。
 

@@ -89,6 +89,13 @@ interface RefreshScope {
   limit?: number;
 }
 
+/** `ClaudeSessionStore.refreshFile` が返す、索引が変わったセッション（Issue #1402）。 */
+export interface ClaudeTranscriptChange {
+  sessionId: string;
+  /** 変化の前後のcwd（分かるものだけ）。空なら、どのワークスペースの一覧にも出ない。 */
+  cwds: string[];
+}
+
 /** 索引がどの範囲で作られたかを表す鍵（Issue #885）。 */
 function scopeKey(scope: RefreshScope | undefined): string {
   if (scope === undefined) {
@@ -155,30 +162,39 @@ export class ClaudeSessionStore {
     return this.listFromIndex(options);
   }
 
-  /** バックグラウンド照合の完了を受ける。履歴ツリーの再描画に使う。 */
+  /**
+   * バックグラウンド照合の完了を受ける。履歴ツリーの再描画に使う。watcherからの差分更新
+   * （`refreshFile`）では呼ばない（Issue #1402）。
+   */
   setOnRefreshed(listener: (() => void) | undefined): void {
     this.onRefreshed = listener;
   }
 
   /**
    * watcherから呼ぶ差分更新。変更されたtranscriptだけを読み直し、全件のmtime取得を避ける。
+   *
+   * `onRefreshed`は呼ばず、変わったセッションを返す（Issue #1402）。一覧を作り直すかは
+   * 呼び出し側が範囲（ワークスペース外のセッションか）を見て決め、間引いて行う。
+   * 索引に変化が無ければ`undefined`。
    */
-  async refreshFile(filePath: string): Promise<void> {
+  async refreshFile(filePath: string): Promise<ClaudeTranscriptChange | undefined> {
     const id = sessionIdFromTranscriptName(basenameOf(filePath));
     if (id === undefined) {
-      return;
+      return undefined;
     }
+    const previous = this.index.get(filePath);
     const mtimeMs = await this.fs.mtimeMs(filePath);
+    let cwd: string | undefined;
     if (mtimeMs === undefined) {
       this.index.delete(filePath);
     } else {
-      const previous = this.index.get(filePath);
       if (previous !== undefined && previous.mtimeMs === mtimeMs) {
-        return;
+        return undefined;
       }
       const meta = await this.readHeadMeta(filePath);
       // 裏の指示だけのセッションは索引に入れない（Issue #1145）。`/usage` を打つたびに
       // 履歴が1件増えるのを防ぐ
+      cwd = meta?.cwd;
       if (meta === undefined || isBackgroundOnly(meta)) {
         this.index.delete(filePath);
       } else {
@@ -197,7 +213,9 @@ export class ClaudeSessionStore {
       }
     }
     await this.index.persist();
-    this.onRefreshed?.();
+    // 消えた・一覧から外れたセッションは、索引にあったときのcwdで範囲を判定する
+    const cwds = [previous?.session.cwd, cwd].filter((c): c is string => c !== undefined);
+    return { sessionId: id, cwds };
   }
 
   private listFromIndex(options: ListOptions): ListResult {

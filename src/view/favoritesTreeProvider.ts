@@ -45,6 +45,16 @@ export class FavoritesTreeProvider implements vscode.TreeDataProvider<SessionSum
     void this.favorites.reload();
   }
 
+  /** `delayMs`ごとに1回へまとめて取り直す（Issue #1402）。ファイル監視の契機に使う。 */
+  refreshSoon(delayMs: number): void {
+    this.favorites.reloadSoon(delayMs);
+  }
+
+  /** ビューの表示状態を受ける。見えていない間は取り直さない（Issue #1402）。 */
+  setVisible(visible: boolean): void {
+    this.favorites.setVisible(visible);
+  }
+
   async getChildren(element?: SessionSummary): Promise<SessionSummary[]> {
     if (element !== undefined) {
       // 葉ノードなので子は無い（グループ化しない、`sessionTreeProvider.ts`と同じ形に統一）
@@ -88,6 +98,7 @@ export class FavoritesTreeProvider implements vscode.TreeDataProvider<SessionSum
   }
 
   dispose(): void {
+    this.favorites.dispose();
     this.emitter.dispose();
   }
 }
