@@ -2883,6 +2883,9 @@ export class ClaudeChatViewManager
     }
     entry.wasLoopRunning = status.running;
     this.postState(entry);
+    if (stopped) {
+      void this.postLoopEvidence(entry);
+    }
     if (stopped && status.stopReason !== undefined) {
       const state = entry.session.getState();
       for (const listener of entry.finishedListeners) {
@@ -3519,6 +3522,10 @@ export class ClaudeChatViewManager
         // 人が止めた自動送信を、上限の条件が残っているだけで再開しない（Issue #1202）
         this.suppressLimitAutoResume(entry);
         entry.loop.stop('manual');
+        return;
+      }
+      if (type === 'refreshLoopEvidence') {
+        void this.postLoopEvidence(entry);
         return;
       }
       if (type === 'stateFull') {

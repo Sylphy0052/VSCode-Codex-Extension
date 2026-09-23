@@ -1,3 +1,4 @@
+import { completionEvidenceStyles } from './completionEvidenceScript';
 import { reducedMotionStyles } from './reducedMotion';
 import { sharedStyles } from './sharedStyles';
 
@@ -11,6 +12,7 @@ import { sharedStyles } from './sharedStyles';
 export function chatStyles(): string {
   return `
 ${sharedStyles()}
+${completionEvidenceStyles()}
   .modelInput { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
   .modelInput input {
     flex: 1 1 12em;
@@ -876,6 +878,7 @@ ${sharedStyles()}
     color: var(--vscode-descriptionForeground);
     font-size: 0.85em;
   }
+  #loopEvidence { padding: 0 16px 6px; font-size: 0.85em; }
   .diffs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
   .diff {
     border: 1px solid var(--agent-border);

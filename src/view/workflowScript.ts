@@ -1,3 +1,5 @@
+import { COMPLETION_EVIDENCE_SOURCE } from './completionEvidenceScript';
+
 /**
  * ワークフローViewのWebviewで動くスクリプト（design.md §16.8）。
  *
@@ -13,6 +15,7 @@
 export function workflowScript(): string {
   return `
   const vscode = acquireVsCodeApi();
+  ${COMPLETION_EVIDENCE_SOURCE}
   const SVGNS = 'http://www.w3.org/2000/svg';
   const el = (id) => document.getElementById(id);
 
@@ -70,6 +73,11 @@ export function workflowScript(): string {
 
   let currentRuns = [];
   let currentSnapshot = null;
+  // 完了根拠（Issue #1380）。拡張機能側が記録から導いた表示を、runIdとタスクidで引く。
+  // 区分はここでも保存せず、届いた表示をそのまま描く
+  let completionEvidence = { runId: undefined, tasks: {} };
+  // 再描画のたびに開閉が戻らないよう、開いているタスクidを覚えておく
+  const openEvidenceTaskIds = new Set();
   let currentLayout = null;
 
   // ---- グラフの表示倍率（design.md §16.8「依存グラフ」） ----
@@ -148,7 +156,7 @@ export function workflowScript(): string {
    * colSpan に使う。列を足したらここも直す——2箇所へ数字を直接書いていると、
    * 片方だけ古いままになって行の幅が足りなくなる。
    */
-  const TASK_TABLE_COLUMNS = 13;
+  const TASK_TABLE_COLUMNS = 14;
 
   /**
    * タスクの model / effort を1つのセルへ収める文言にする（Issue #1035）。
@@ -1155,6 +1163,27 @@ export function workflowScript(): string {
         text('td', 'verification-cell verification-' + verification.status, verificationText),
       );
 
+      // 完了根拠（Issue #1380）。上の検証列（意味レビューなどAIの判定を含む）とは別の列に出し、
+      // 拡張機能が観測した検証記録だけから導いた区分を示す
+      const evidenceCell = el2('td', 'evidence-cell');
+      const evidence =
+        completionEvidence.runId === snapshot.runId ? completionEvidence.tasks[task.id] : undefined;
+      if (evidence) {
+        evidenceCell.appendChild(
+          renderCompletionEvidence(evidence, {
+            open: openEvidenceTaskIds.has(task.id),
+            onToggle: (open) => {
+              if (open) openEvidenceTaskIds.add(task.id);
+              else openEvidenceTaskIds.delete(task.id);
+            },
+            onRefresh: () => vscode.postMessage({ type: 'refreshCompletionEvidence' }),
+          }),
+        );
+      } else {
+        evidenceCell.textContent = '—';
+      }
+      row.appendChild(evidenceCell);
+
       const issueCell = el2('td', 'issue-cell');
       if (task.issue === undefined) {
         issueCell.textContent = '—';
@@ -1707,6 +1736,9 @@ export function workflowScript(): string {
       }
     } else if (msg.type === 'roadmap') {
       applyRoadmap(msg.roadmap, msg.path, msg.pending, msg.error);
+    } else if (msg.type === 'completionEvidence') {
+      completionEvidence = { runId: msg.runId, tasks: msg.tasks || {} };
+      if (currentSnapshot) renderTable(currentSnapshot);
     }
   });
 

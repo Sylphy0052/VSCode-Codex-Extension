@@ -1,4 +1,5 @@
 import type { ProviderId } from '../provider/id';
+import { COMPLETION_EVIDENCE_SOURCE } from './completionEvidenceScript';
 import { HIGHLIGHT_SOURCE } from './highlight';
 import { MARKDOWN_PARSE_SOURCE } from './markdown';
 import { SEND_KEY_SOURCE, type SendOnMode } from './sendKey';
@@ -2948,9 +2949,46 @@ export function chatScript(
     timedOut: '時間上限に達したため止めました',
   };
 
+  ${COMPLETION_EVIDENCE_SOURCE}
+
+  // ループ終了時の完了根拠（Issue #1380）。停止理由の文言（評価役などAIの判定を含む）とは
+  // 別の欄に出す。拡張機能側が停止時と再確認の要求時に導き直して loopEvidence で送る。
+  let loopEvidence = null;
+  let loopEvidenceOpen = false;
+  let loopStoppedShown = false;
+
+  function renderLoopEvidence() {
+    const box = el('loopEvidence');
+    box.replaceChildren();
+    if (!loopStoppedShown || !loopEvidence) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.appendChild(
+      renderCompletionEvidence(loopEvidence, {
+        open: loopEvidenceOpen,
+        onToggle: (open) => {
+          loopEvidenceOpen = open;
+        },
+        onRefresh: () => vscode.postMessage({ type: 'refreshLoopEvidence' }),
+      }),
+    );
+  }
+
   function applyLoop(loop) {
     el('loopStart').disabled = !!(loop && loop.running);
     const bar = el('loopBar');
+    const stoppedShown = !!(loop && !loop.running && loop.stopReason);
+    if (loopStoppedShown !== stoppedShown) {
+      loopStoppedShown = stoppedShown;
+      // 次のループを始めたら前のループの根拠は消す（停止時に改めて届く）
+      if (!stoppedShown) {
+        loopEvidence = null;
+        loopEvidenceOpen = false;
+      }
+      renderLoopEvidence();
+    }
     if (!loop || (!loop.running && !loop.stopReason)) {
       bar.hidden = true;
       el('loopStop').hidden = true;
@@ -4039,6 +4077,11 @@ export function chatScript(
       mergedItems = items;
       apply(Object.assign({}, data.state, { items: items }));
     }
+    if (data.type === 'loopEvidence') {
+      loopEvidence = data.evidence || null;
+      renderLoopEvidence();
+      return;
+    }
     if (data.type === 'commands') {
       commands = data.commands || [];
       // コマンド一覧に無ければボタンを出さない（押しても何も起きない状態を作らない）
@@ -4134,5 +4177,7 @@ export function chatScript(
   });
 
   vscode.postMessage({ type: 'ready' });
+  // 開き直した画面でも、直前のループの完了根拠を出し直す（Issue #1380）
+  vscode.postMessage({ type: 'refreshLoopEvidence' });
 `;
 }

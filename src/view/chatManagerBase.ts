@@ -7,6 +7,11 @@ import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
 import type { AgentReportedRecorder } from '../verification/agentReported';
+import {
+  loadCompletionEvidence,
+  type CompletionEvidenceView,
+} from '../verification/completionEvidence';
+import type { VerificationStore } from '../verification/store';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import {
   needsAttentionAfterHandoff,
@@ -1174,12 +1179,60 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
+   * ループ終了表示の完了根拠（Issue #1380）を読む口。渡されていなければ表示しない。
+   */
+  private completionEvidenceStore: Pick<VerificationStore, 'list'> | undefined;
+
+  /**
+   * 直近のループを始めた時刻。同じ会話の前のループの記録を完了根拠へ混ぜないために使う
+   * （記録の紐付けは会話のidだけで、ループの回を区別しない）。
+   */
+  private readonly loopStartedAt = new WeakMap<TPanel, string>();
+
+  setCompletionEvidenceStore(store: Pick<VerificationStore, 'list'>): void {
+    this.completionEvidenceStore = store;
+  }
+
+  /**
+   * ループ終了表示の完了根拠を導き直してwebviewへ送る（Issue #1380）。ループの停止時と、
+   * webviewからの `refreshLoopEvidence`（起動時・「再確認」ボタン）で呼ぶ。区分は保存せず、
+   * 毎回記録と表示時点のソースから導く。
+   *
+   * タスク管理下の会話はワークフローのタスク行に出すため、ここでは扱わない。
+   */
+  protected async postLoopEvidence(entry: TPanel): Promise<void> {
+    const store = this.completionEvidenceStore;
+    const since = this.loopStartedAt.get(entry);
+    const sessionId = entry.session.threadId;
+    if (
+      store === undefined ||
+      since === undefined ||
+      sessionId === undefined ||
+      entry.taskManaged ||
+      entry.loop.getStatus().running
+    ) {
+      return;
+    }
+    let evidence: CompletionEvidenceView;
+    try {
+      evidence = await loadCompletionEvidence(store, { sessionId }, entry.cwd, { since });
+    } catch {
+      return;
+    }
+    if (entry.disposed || entry.panel === undefined || entry.loop.getStatus().running) {
+      return;
+    }
+    void entry.panel.webview.postMessage({ type: 'loopEvidence', evidence });
+  }
+
+  /**
    * ループが始まった瞬間に呼ぶ。それまでの会話で実行されたコマンドは記録しない。
    *
    * タスク管理下のセッションは`WorkflowRunner`がタスクとして記録するため、ここでは扱わない
    * （同じ項目を二重に記録しない）。
    */
   protected beginLoopCommandRecording(entry: TPanel): void {
+    this.loopStartedAt.set(entry, new Date().toISOString());
     if (this.agentReported === undefined || entry.taskManaged || entry.cwd === undefined) {
       return;
     }

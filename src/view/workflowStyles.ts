@@ -1,3 +1,4 @@
+import { completionEvidenceStyles } from './completionEvidenceScript';
 import { reducedMotionStyles } from './reducedMotion';
 import { sharedStyles } from './sharedStyles';
 
@@ -10,6 +11,7 @@ import { sharedStyles } from './sharedStyles';
 export function workflowStyles(): string {
   return `
 ${sharedStyles()}
+${completionEvidenceStyles()}
   * { box-sizing: border-box; }
   body {
     font-family: var(--vscode-font-family);
@@ -370,6 +372,7 @@ ${sharedStyles()}
   #taskTable .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #taskTable .task-summary-cell { min-width: 220px; }
   #taskTable .verification-cell { white-space: nowrap; }
+  #taskTable .evidence-cell { white-space: nowrap; }
   #taskTable .verification-passed { color: var(--vscode-charts-green); }
   #taskTable .verification-failed { color: var(--vscode-errorForeground); }
   #taskTable .verification-checking { color: var(--vscode-charts-blue); }
@@ -429,20 +432,22 @@ ${sharedStyles()}
     #taskTable tr.task-row td:nth-child(3)::before { content: '作業内容'; }
     #taskTable tr.task-row td:nth-child(4)::before { content: '状態'; }
     #taskTable tr.task-row td:nth-child(5)::before { content: '検証'; }
-    #taskTable tr.task-row td:nth-child(6)::before { content: 'Issue'; }
-    #taskTable tr.task-row td:nth-child(7)::before { content: 'cleanup'; }
-    #taskTable tr.task-row td:nth-child(8)::before { content: 'provider'; }
-    #taskTable tr.task-row td:nth-child(9)::before { content: 'model'; }
-    #taskTable tr.task-row td:nth-child(10)::before { content: 'コンテキスト'; }
-    #taskTable tr.task-row td:nth-child(11)::before { content: '経過'; }
-    #taskTable tr.task-row td:nth-child(12)::before { content: '送信回数'; }
-    #taskTable tr.task-row td:nth-child(13)::before { content: '操作'; }
+    #taskTable tr.task-row td:nth-child(6)::before { content: '完了根拠'; }
+    #taskTable tr.task-row td:nth-child(7)::before { content: 'Issue'; }
+    #taskTable tr.task-row td:nth-child(8)::before { content: 'cleanup'; }
+    #taskTable tr.task-row td:nth-child(9)::before { content: 'provider'; }
+    #taskTable tr.task-row td:nth-child(10)::before { content: 'model'; }
+    #taskTable tr.task-row td:nth-child(11)::before { content: 'コンテキスト'; }
+    #taskTable tr.task-row td:nth-child(12)::before { content: '経過'; }
+    #taskTable tr.task-row td:nth-child(13)::before { content: '送信回数'; }
+    #taskTable tr.task-row td:nth-child(14)::before { content: '操作'; }
     #taskTable tr.task-row td:nth-child(3),
     #taskTable tr.task-row td:nth-child(4),
     #taskTable tr.task-row td:nth-child(5),
-    #taskTable tr.task-row td:nth-child(7),
-    #taskTable tr.task-row td:nth-child(10),
-    #taskTable tr.task-row td:nth-child(13) { grid-column: 1 / -1; }
+    #taskTable tr.task-row td:nth-child(6),
+    #taskTable tr.task-row td:nth-child(8),
+    #taskTable tr.task-row td:nth-child(11),
+    #taskTable tr.task-row td:nth-child(14) { grid-column: 1 / -1; }
     #taskTable .summary-cell { max-width: none; white-space: normal; overflow-wrap: anywhere; }
     /* カードでは td が flex になり省略記号が効かず、見出し（::before）ごと途中で切れる。
        summary-cell と同じく幅の上限と省略を外して折り返す（Issue #1035） */
