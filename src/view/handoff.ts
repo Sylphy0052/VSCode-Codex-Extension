@@ -489,7 +489,11 @@ function deriveFallbackName(input: HandoffNameInput): string | undefined {
     input.handoffPrompt === undefined ? undefined : WORK_LINE.exec(input.handoffPrompt)?.[1],
   );
   if (work !== undefined) {
-    return work.length > FALLBACK_NAME_MAX ? `${work.slice(0, FALLBACK_NAME_MAX)}…` : work;
+    // サロゲートペアの途中で切らないよう、コードポイント単位で数える
+    const chars = [...work];
+    return chars.length > FALLBACK_NAME_MAX
+      ? `${chars.slice(0, FALLBACK_NAME_MAX).join('')}…`
+      : work;
   }
   const branch = collapse(input.gitBranch);
   return branch === undefined || UNINFORMATIVE_BRANCHES.has(branch) ? undefined : branch;
