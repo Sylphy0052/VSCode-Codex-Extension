@@ -357,19 +357,17 @@ describe('SessionTreeProvider のグループ見出しの内訳（issue #737）'
     expect(await groupDescriptions(provider)).toEqual(['2件 · 承認待ち1']);
   });
 
-  it('ピン留めグループでも同じ形式で出る', async () => {
+  it('お気に入り（旧ピン留め）にしても専用グループは作らない（Issue #1366）', async () => {
     const pinnedSession = session({ id: 's1', updatedAt: new Date().toISOString() });
     const store = new PinnedSessionStore(fakeMemento());
     const provider = makeProvider([pinnedSession], store, [], () => 'running');
     await provider.pin(pinnedSession);
 
     const children = await provider.getChildren();
-    const pinnedGroup = children.filter(isGroup).find((g) => g.groupKind === 'pinned');
+    const pinnedGroup = children.filter(isGroup).find((g) => (g.groupKind as string) === 'pinned');
 
-    expect(pinnedGroup, 'ピン留めグループが無い').toBeDefined();
-    expect(String(provider.getTreeItem(pinnedGroup as TreeElement).description)).toBe(
-      '1件 · 実行中1',
-    );
+    expect(pinnedGroup, 'ピン留めグループは廃止済みのため存在しないはず').toBeUndefined();
+    expect(await groupDescriptions(provider)).toEqual(['1件 · 実行中1']);
   });
 
   it('groupBy: none では見出し自体が出ない（表示が変わらない）', async () => {
@@ -607,7 +605,7 @@ describe('SessionTreeProvider の絞り込み（issue #293）', () => {
 });
 
 describe('SessionTreeProvider のピン留め（issue #293）', () => {
-  it('ピン留めしたセッションは先頭のグループへ出る', async () => {
+  it('ピン留め（お気に入り）しても専用グループへは出ない（Issue #1366）', async () => {
     const s1 = session({ id: 's1', updatedAt: new Date().toISOString() });
     const s2 = session({ id: 's2', updatedAt: new Date().toISOString() });
     const provider = makeProvider([s1, s2], new PinnedSessionStore(fakeMemento()));
@@ -615,11 +613,8 @@ describe('SessionTreeProvider のピン留め（issue #293）', () => {
     await provider.pin(s2);
     const children = await provider.getChildren();
 
-    const first = children[0];
-    expect(first !== undefined && isGroup(first) && first.label === 'ピン留め').toBe(true);
-    if (first !== undefined && isGroup(first)) {
-      expect(first.sessions.map((s) => s.id)).toEqual(['s2']);
-    }
+    expect(children.some((c) => isGroup(c) && c.label === 'ピン留め')).toBe(false);
+    expect(children.some((c) => isGroup(c) && c.sessions.some((s) => s.id === 's2'))).toBe(true);
   });
 
   it('unpinすると通常のグループへ戻る', async () => {

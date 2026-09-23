@@ -216,6 +216,7 @@ import {
   isApprovalLevel,
 } from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
+import type { PinnedSessionStore } from '../util/pinnedSessions';
 import type {
   ClaudeEditableKey,
   ClaudeSettingsSnapshot,
@@ -528,8 +529,10 @@ export class ClaudeChatViewManager
      * working treeの汚れを避けるため）。未指定なら引き継ぎ自体を断る。
      */
     private readonly globalStorageDir?: string,
+    /** お気に入り（Issue #1366）の永続化先。未指定なら何も永続化しないno-op。 */
+    pinnedSessions?: PinnedSessionStore,
   ) {
-    super();
+    super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
   }
@@ -1354,7 +1357,10 @@ export class ClaudeChatViewManager
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
     if (wasOn) {
-      entry.session.noteLocalEvent(`autoReplyStop:${Date.now()}`, describeAutoReplyStopReason(reason));
+      entry.session.noteLocalEvent(
+        `autoReplyStop:${Date.now()}`,
+        describeAutoReplyStopReason(reason),
+      );
     }
   }
 
@@ -1452,11 +1458,13 @@ export class ClaudeChatViewManager
       // 終わっても集合から外さない。検証に通らずカードを残した要求を、状態が変わるたびに
       // 返信役へ問い直すと、人が答えるまで利用枠を消費し続けるため、1つの要求には1回だけ聞く
       entry.autoReplyAskUserQuestionInFlight.add(key);
-      void this.runAutoReplyAskUserQuestionTurn(entry, approval.requestId, approval.questions).catch(
-        (e: unknown) => {
-          this.reportError(e);
-        },
-      );
+      void this.runAutoReplyAskUserQuestionTurn(
+        entry,
+        approval.requestId,
+        approval.questions,
+      ).catch((e: unknown) => {
+        this.reportError(e);
+      });
     }
   }
 
@@ -3520,6 +3528,8 @@ export class ClaudeChatViewManager
           type: 'loopAutoGoal',
           enabled: readGoalDraftConfig().enabled,
         });
+        // お気に入り（Issue #1366）も作り直したwebviewへ送り直す（前回値と同じでも送る）
+        this.resendFavorite(entry);
         void this.postCommands(entry);
         return;
       }
@@ -3565,6 +3575,10 @@ export class ClaudeChatViewManager
             }),
           )
           .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleFavorite') {
+        this.toggleFavorite(entry);
         return;
       }
       if (type === 'approve' && isApprovalDecision(m['decision'])) {

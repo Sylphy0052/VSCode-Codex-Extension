@@ -5,6 +5,7 @@ import type { ChatState, PendingApproval } from '../appserver/chatState';
 import { readNotificationsConfig } from '../config';
 import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
+import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import {
   needsAttentionAfterHandoff,
@@ -500,6 +501,22 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   readonly onDidChangePanels = this.panelsChanged.event;
 
   /**
+   * お気に入り（Issue #1366）の直近送信値。webviewへ送るのは値が変わったときだけに
+   * 絞り、応答中の毎デルタで`postMessage`しないようにする（`postFavorite`参照）。
+   */
+  private readonly lastFavoriteSent = new WeakMap<TPanel, boolean | null>();
+
+  constructor(
+    /**
+     * お気に入り（旧ピン留め）の永続化先（Issue #1366）。既定は何も永続化しないno-opの
+     * ストア（構築時に渡さない統合テスト等でも壊れないよう、他の任意依存と同じ流儀）。
+     */
+    private readonly favoriteStore: PinnedSessionStore = new PinnedSessionStore(),
+    /** `pinKeyFor`に渡すプロバイダ名。サブクラスごとに固定値を渡す。 */
+    private readonly favoriteProvider: 'codex' | 'claude' = 'codex',
+  ) {}
+
+  /**
    * 進捗画面（issue #721）が開く対象。表に出ているチャットが無い・スレッドがまだ
    * 始まっていない（`thread/start`の応答待ち）ときは`undefined`。
    */
@@ -547,11 +564,74 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   /** サブクラスの`postState`から呼ぶ。webviewへ送るのと同じ内容を進捗画面へも配る。 */
   protected fireStateChanged(entry: TPanel, state: ChatState): void {
     this.clearHandoffKeptIfReused(entry, state);
+    // お気に入り（Issue #1366）はスレッドIDが未確定の間`null`（メニュー非表示）、
+    // 確定したタイミングで実値を送りたいので、下の早期returnより前に置く
+    this.postFavorite(entry);
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
       return;
     }
     this.stateChanged.fire({ threadId, state, title: entry.title });
+  }
+
+  /**
+   * お気に入り（Issue #1366）のキー。`pinnedSessions.ts`の`pinKeyFor`と同じ形
+   * （`<provider>:<threadId>`）にする——履歴ビューの`getActivityState`もthreadIdで
+   * 引いており、セッションid=threadIdという前提を揃える。スレッドがまだ始まっていない
+   * （`threadId`未確定）間は`undefined`（メニュー自体を出さない、Issue #1366の受入基準）。
+   */
+  private favoriteKeyFor(entry: TPanel): string | undefined {
+    const threadId = entry.session.threadId;
+    return threadId === undefined
+      ? undefined
+      : pinKeyFor({ provider: this.favoriteProvider, id: threadId });
+  }
+
+  /** `null`はスレッド未確定（メニュー非表示）を表す。真偽値はお気に入りの現在値。 */
+  protected favoriteStateFor(entry: TPanel): boolean | null {
+    const key = this.favoriteKeyFor(entry);
+    return key === undefined ? null : this.favoriteStore.isPinned(key);
+  }
+
+  /** 会話画面の「…」メニューの`toggleFavorite`から呼ぶ（Issue #1366）。 */
+  protected toggleFavorite(entry: TPanel): void {
+    const key = this.favoriteKeyFor(entry);
+    if (key === undefined) {
+      return;
+    }
+    const next = !this.favoriteStore.isPinned(key);
+    void (next ? this.favoriteStore.pin(key) : this.favoriteStore.unpin(key));
+    this.postFavorite(entry);
+  }
+
+  /**
+   * webviewへお気に入りの現在値を送る（Issue #1366）。前回送った値と同じときは送らない
+   * （応答中は`fireStateChanged`が毎デルタで呼ばれるため、間引かないと無駄なpostMessageが
+   * 積み重なる）。webview再生成時（`ready`）は`resendFavorite`で強制的に送り直す。
+   */
+  protected postFavorite(entry: TPanel): void {
+    const value = this.favoriteStateFor(entry);
+    if (this.lastFavoriteSent.get(entry) === value) {
+      return;
+    }
+    this.lastFavoriteSent.set(entry, value);
+    void entry.panel?.webview.postMessage({ type: 'favorite', favorite: value });
+  }
+
+  /** webviewを作り直した直後（`ready`）用。前回値と同じでもキャッシュを捨てて送り直す。 */
+  protected resendFavorite(entry: TPanel): void {
+    this.lastFavoriteSent.delete(entry);
+    this.postFavorite(entry);
+  }
+
+  /**
+   * ストア側の変更（他ビューでの切替）を、開いている全パネルへ反映する（Issue #1366）。
+   * `extension.ts`が`PinnedSessionStore.onDidChange`から呼ぶ。
+   */
+  refreshFavorites(): void {
+    for (const entry of this.allPanels()) {
+      this.postFavorite(entry);
+    }
   }
 
   /**

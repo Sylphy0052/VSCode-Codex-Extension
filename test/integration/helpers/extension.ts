@@ -27,7 +27,7 @@ export interface SessionSummaryLike {
  */
 export interface SessionGroupNodeLike {
   kind: 'group';
-  groupKind: 'pinned' | 'date' | 'folder';
+  groupKind: 'date' | 'folder';
   id: string;
   label: string;
   sessions: SessionSummaryLike[];
