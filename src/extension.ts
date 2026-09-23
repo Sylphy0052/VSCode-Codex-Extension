@@ -1,5 +1,6 @@
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
@@ -102,6 +103,8 @@ import { WorkflowRunStore } from './orchestrator/runStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
+import type { VerifyCommandConsentRequest } from './orchestrator/runnerVerifyCommands';
+import { VerificationStore } from './verification/store';
 import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
@@ -623,12 +626,24 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
    * には毎回`current`を読む関数を渡す。
    */
   const sessionBridgeHolder: { current: SessionBridgePort | undefined } = { current: undefined };
+  // 検証記録の保存先（Issue #1377・#1378）。複数ウィンドウで同じ保存先を共有する
+  const verificationStore = new VerificationStore(context.globalStorageUri.fsPath, {
+    homeDir: os.homedir(),
+    onError: (message) => log.warn(`[verification] ${message}`),
+  });
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
       claude: overridableHost('claude', claudeChat),
     },
     worktreeQueue: new WorktreeCreationQueue(),
+    // `verify.commands` の実行（Issue #1378）。Workspace Trustが有効で、runごとの確認で
+    // 許可されたときだけ実行する
+    verifyCommands: {
+      isWorkspaceTrusted: () => vscode.workspace.isTrusted,
+      confirm: confirmVerifyCommands,
+      store: verificationStore,
+    },
     git: {
       run: (args, cwd) => (forgeOverrides.git ?? nodeGitCommandRunner).run(args, cwd),
     },
@@ -2015,6 +2030,32 @@ async function applyPresetChat(
  * （design.md §16.7「実行開始時に...確認を取る」）。ここで確認し、了承が得られたときだけ
  * `allowConfirmed: true` を付けて呼び直す。
  */
+/**
+ * `verify.commands` を実行してよいかを利用者に確かめる（Issue #1378）。runごとに1回だけ
+ * 呼ばれる。コマンドは実行する文字列そのままを見せるため、切り詰めずに
+ * `JSON.stringify` で制御文字（改行など）を見える形にしてから並べる。
+ */
+async function confirmVerifyCommands(request: VerifyCommandConsentRequest): Promise<boolean> {
+  const lines = request.commands.map(
+    (entry) => `[${JSON.stringify(entry.taskId)}] ${JSON.stringify(entry.command)}`,
+  );
+  const choice = await vscode.window.showWarningMessage(
+    `ワークフロー「${request.workflowName}」の検証コマンドを実行しますか？`,
+    {
+      modal: true,
+      detail:
+        '各タスクのworktreeで、次のコマンドをシェル経由で実行します。' +
+        'AIのサンドボックスの外で、拡張機能の権限で動きます。' +
+        'コマンドが読むファイル（package.jsonのscriptなど）はタスクのAIが書き換えている場合があります。\n' +
+        '許可はこの実行（run）の間だけ有効です。許可しない場合は実行せず、' +
+        'ファイル・diffの検査と意味レビューだけを行います。\n\n' +
+        lines.join('\n'),
+    },
+    '実行を許可',
+  );
+  return choice === '実行を許可';
+}
+
 async function runWorkflow(
   runner: WorkflowRunner,
   view: WorkflowViewManager,
