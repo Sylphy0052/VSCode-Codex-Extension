@@ -922,6 +922,13 @@ export interface WorkflowsConfig {
    */
   roadmapDir: string;
   /**
+   * 「ロードマップIssueから生成」で候補にするIssueのラベル名（`agent.workflows.
+   * roadmapIssueLabel`、既定 `roadmap`、Issue #1421）。比較は大文字小文字を区別しない。
+   * 候補の絞り込みに使うだけで権限には関わらないため、`roadmapDir`と同じく
+   * `machine-overridable`。前後の空白は除き、空になった場合は既定値へ戻す。
+   */
+  roadmapIssueLabel: string;
+  /**
    * 疑似worktree（design.md §16.20）の複製から除外するディレクトリ名（`agent.workflows.
    * pseudoWorktreeExclude`。`machine-overridable`）。`package.json`の`contributes.
    * configuration`が定義を持ち、既定値は`pseudoWorktree.ts`の`DEFAULT_PSEUDO_WORKTREE_EXCLUDE`
@@ -1086,6 +1093,7 @@ export interface WorkflowsConfig {
 
 const DEFAULT_WORKFLOWS_DIR = '.agents/workflows';
 const DEFAULT_ROADMAP_DIR = 'docs/roadmap';
+const DEFAULT_ROADMAP_ISSUE_LABEL = 'roadmap';
 
 /**
  * `agent.workflows.dir` の値として安全か。絶対パス、または `..` セグメントを含む値は拒否する。
@@ -1325,6 +1333,9 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     allowAutoApprove: permissionFlag(c, 'workflows.allowAutoApprove'),
     allowClaudeBypassPermissions: permissionFlag(c, 'workflows.allowClaudeBypassPermissions'),
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
+    roadmapIssueLabel:
+      str(c, 'workflows.roadmapIssueLabel', DEFAULT_ROADMAP_ISSUE_LABEL).trim() ||
+      DEFAULT_ROADMAP_ISSUE_LABEL,
     pseudoWorktreeExclude: pseudoWorktreeExclude.exclude,
     pseudoWorktreeExcludeWarnings: pseudoWorktreeExclude.warnings,
     forge: normalizeForgeHostConfig(str(c, 'workflows.forge', 'auto')),

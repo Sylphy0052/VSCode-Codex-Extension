@@ -3013,9 +3013,6 @@ async function planWorkflowFromRoadmapCommand(
   await planWorkflowFromRoadmapFile(chat, claudeChat, view, log, folder, provider, pickedFile.file);
 }
 
-/** ロードマップIssueとして扱うラベル名（大文字小文字は区別しない）。 */
-const ROADMAP_ISSUE_LABEL = 'roadmap';
-
 /** QuickPickに出すIssueタイトルの上限文字数。 */
 const ROADMAP_ISSUE_TITLE_MAX_LENGTH = 200;
 
@@ -3046,12 +3043,14 @@ async function planWorkflowFromRoadmapIssueCommand(
     );
     return;
   }
+  const { roadmapDir, roadmapIssueLabel } = readWorkflowsConfig();
+  const wantedLabel = roadmapIssueLabel.toLowerCase();
   const roadmapIssues = issues.filter((issue) =>
-    (issue.labels ?? []).some((label) => label.toLowerCase() === ROADMAP_ISSUE_LABEL),
+    (issue.labels ?? []).some((label) => label.toLowerCase() === wantedLabel),
   );
   if (roadmapIssues.length === 0) {
     void vscode.window.showInformationMessage(
-      `「${ROADMAP_ISSUE_LABEL}」ラベルの付いたopenのIssueが見つかりません`,
+      `「${roadmapIssueLabel}」ラベルの付いたopenのIssueが見つかりません`,
     );
     return;
   }
@@ -3071,7 +3070,6 @@ async function planWorkflowFromRoadmapIssueCommand(
     return;
   }
 
-  const roadmapDir = readWorkflowsConfig().roadmapDir;
   const fileName = await askOutputFileName(picked.issue.title, roadmapDir, '.md');
   if (fileName === undefined) {
     log.info('ロードマップIssueからの生成を取り消しました');

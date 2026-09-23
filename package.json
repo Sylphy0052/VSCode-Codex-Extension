@@ -1537,6 +1537,12 @@
           "scope": "machine-overridable",
           "markdownDescription": "ロードマップ（`workflow.roadmap` で生成するMarkdown）の出力先ディレクトリ。ワークスペースフォルダからの相対パス。出力先はワークスペースフォルダの配下に限る（設計書 §16.16・§16.19）。"
         },
+        "agent.workflows.roadmapIssueLabel": {
+          "type": "string",
+          "default": "roadmap",
+          "scope": "machine-overridable",
+          "markdownDescription": "「ゴール文からワークフローを生成…」の「ロードマップIssueから生成」で候補にするIssueのラベル名。大文字小文字は区別しない。空にした場合は `roadmap` として扱う。"
+        },
         "agent.workflows.pseudoWorktreeExclude": {
           "type": "array",
           "items": {
