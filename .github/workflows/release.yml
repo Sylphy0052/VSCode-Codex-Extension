@@ -51,28 +51,67 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.asset.outputs.version }}
         run: |
+          tag="v${RELEASE_VERSION}"
           main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
           if [ "$main_sha" != "$GITHUB_SHA" ]; then
             echo "main moved to $main_sha; skipping obsolete build $GITHUB_SHA"
             exit 0
           fi
 
-          if release_draft="$(gh release view "v${RELEASE_VERSION}" --json isDraft --jq .isDraft 2>/dev/null)"; then
-            if [ "$release_draft" = false ]; then
-              echo "v${RELEASE_VERSION} is already published"
-              exit 0
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::${tag} points to a different commit"
+            exit 1
+          fi
+
+          if release_draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ -z "$tag_sha" ]; then
+              release_target="$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)"
+              if [ "$release_target" != "$GITHUB_SHA" ]; then
+                echo "::error::${tag} draft targets a different commit"
+                exit 1
+              fi
             fi
-            echo "::error::v${RELEASE_VERSION} already exists as a draft release"
+          else
+            gh release create "$tag" --draft \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "mainの${GITHUB_SHA}から自動生成したVSIXです。"
+            release_draft=true
+          fi
+
+          asset_count="$(gh release view "$tag" --json assets --jq '[.assets[] | select(.name == "vscode-codex-extension.vsix")] | length')"
+          if [ "$asset_count" = 0 ]; then
+            if [ "$release_draft" != true ]; then
+              echo "::error::${tag} is published without a VSIX"
+              exit 1
+            fi
+            gh release upload "$tag" vscode-codex-extension.vsix
+          fi
+
+          release_id="$(gh release view "$tag" --json databaseId --jq .databaseId)"
+          if [ "$release_draft" = true ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -F draft=false -f make_latest=false >/dev/null
+          fi
+
+          published_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq .object.sha)"
+          if [ "$published_tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::${tag} points to a different commit after publication"
             exit 1
           fi
 
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" >/dev/null 2>&1; then
-            echo "::error::v${RELEASE_VERSION} already exists as a tag"
-            exit 1
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "main moved to $main_sha; leaving $tag out of Latest"
+            exit 0
           fi
 
-          gh release create "v${RELEASE_VERSION}" vscode-codex-extension.vsix \
-            --target "$GITHUB_SHA" \
-            --title "v${RELEASE_VERSION}" \
-            --latest \
-            --notes "mainの${GITHUB_SHA}から自動生成したVSIXです。"
+          gh release edit "$tag" --latest
+
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -f make_latest=false >/dev/null
+            echo "main moved to $main_sha; removed $tag from Latest"
+          fi
