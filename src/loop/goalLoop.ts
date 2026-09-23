@@ -282,8 +282,12 @@ function classifyCommand(command: string): GoalEvidence['kind'] {
   return 'build';
 }
 
-/** 実行中を表す`status`。Codexは`inProgress`、Claudeは`running`を入れる。 */
-const RUNNING_STATUSES: ReadonlySet<string> = new Set(['inProgress', 'running']);
+/**
+ * 実行中を表す`status`。Codexは`inProgress`、Claudeは`running`を入れる。
+ * Claudeのバックグラウンド実行（`background`）は起動しただけで結果が未確定のため、
+ * 終わったものとして扱わない（issue #1385）。
+ */
+const RUNNING_STATUSES: ReadonlySet<string> = new Set(['inProgress', 'running', 'background']);
 
 /**
  * 証拠として確定した（終わった）コマンド実行の項目か。

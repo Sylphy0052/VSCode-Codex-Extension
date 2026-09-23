@@ -275,7 +275,12 @@ function appendUserEntry(
     items[target] = {
       ...existing,
       text,
-      status: claudeToolResultStatus(existing.kind, part['is_error'] === true, text),
+      status: claudeToolResultStatus(
+        existing.kind,
+        part['is_error'] === true,
+        text,
+        existing.background === true,
+      ),
       searchResults:
         existing.kind === 'webSearch'
           ? claudeSearchResults(toolUseResult, toolResultCount)
@@ -381,9 +386,15 @@ function appendAssistantEntry(
         todos = normalizeTodos(part['input']);
         continue;
       }
-      const tool = describeTool(name, rec(part['input']) ?? {});
+      const input = rec(part['input']) ?? {};
+      const tool = describeTool(name, input);
       items.push(
-        item(entry, tool.kind, { detail: tool.detail, id: str(part['id']), diffs: tool.diffs }),
+        item(entry, tool.kind, {
+          detail: tool.detail,
+          id: str(part['id']),
+          diffs: tool.diffs,
+          background: isBackgroundCommand(tool.kind, input),
+        }),
       );
       toolIndex.set(str(part['id']), items.length - 1);
     }
@@ -709,7 +720,13 @@ function reinvocationSkillName(head: string): string {
 function item(
   entry: Record<string, unknown>,
   kind: string,
-  overrides: { text?: string; detail?: string; id?: string; diffs?: FileDiff[] },
+  overrides: {
+    text?: string;
+    detail?: string;
+    id?: string;
+    diffs?: FileDiff[];
+    background?: boolean;
+  },
 ): ChatItem {
   return {
     id: overrides.id !== undefined && overrides.id !== '' ? overrides.id : str(entry['uuid']),
@@ -721,7 +738,16 @@ function item(
     diffs: overrides.diffs ?? [],
     // tool_useの時点では結果が判らない。tool_resultが届いたときにappendUserEntryが埋める
     searchResults: NO_SEARCH_RESULTS,
+    ...(overrides.background === true ? { background: true } : {}),
   };
+}
+
+/**
+ * `run_in_background: true`で起動したコマンドか（issue #1385）。
+ * ライブのstream-json（`streamJson.ts`）と履歴の読み直しで同じ判定を使う。
+ */
+export function isBackgroundCommand(kind: string, input: Record<string, unknown>): boolean {
+  return kind === 'commandExecution' && input['run_in_background'] === true;
 }
 
 /**
@@ -831,8 +857,19 @@ function messageText(entry: Record<string, unknown>): string {
  * `exit N`へ寄せ、ゴール駆動ループが終了コードの証拠として拾えるようにする。
  * 成功時は`is_error: false`で終了コードが載らないため、推測で`exit 0`にはせず`completed`のまま置く
  * （`goalLoop.ts`が「終了済み・結果不明」として扱う）。
+ *
+ * `run_in_background: true`で起動したBash（`background`）の成功は、起動できたことしか表さない
+ * （issue #1385）。終わったとは言えないため`background`にし、証拠台帳へ入れない。
  */
-export function claudeToolResultStatus(kind: string, isError: boolean, text: string): string {
+export function claudeToolResultStatus(
+  kind: string,
+  isError: boolean,
+  text: string,
+  background: boolean,
+): string {
+  if (kind === 'commandExecution' && background && !isError) {
+    return 'background';
+  }
   if (kind === 'commandExecution' && isError) {
     const matched = /^Exit code (-?\d+)(?:\n|$)/u.exec(text);
     if (matched?.[1] !== undefined) {

@@ -226,6 +226,8 @@ export function chatScript(
     started: '開始',
     interacted: '応答',
     interrupted: '中断',
+    // Claude Codeのバックグラウンド実行。起動しただけで結果は未確定（issue #1385）
+    background: 'バックグラウンド実行中',
     // 承認要求の自動レビュー（GuardianApprovalReviewStatus）
     approved: '承認',
     denied: '拒否',

@@ -142,6 +142,14 @@ export interface ChatItem {
    */
   interruptedWhileRunning?: boolean | undefined;
   /**
+   * バックグラウンドで起動したコマンド（issue #1385）。Claude Codeの`commandExecution`のみ。
+   *
+   * `run_in_background: true`のBashは、起動した直後に成功のtool_resultが返る。その時点では
+   * コマンドは終わっていないため、この印が立っている項目はtool_resultを`completed`ではなく
+   * `background`（結果未確定）として扱う。
+   */
+  background?: boolean | undefined;
+  /**
    * 実行中のPTYプロセスの識別子。`commandExecution` が `status: inProgress` の間だけ、
    * 実測で分かる場合がある（issue #33）。
    *
