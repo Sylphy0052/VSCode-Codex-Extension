@@ -400,7 +400,7 @@ Claude Code画面でも同じ操作ができるので、L-19で同じことを�
 
 - 準備: `codex app-server` に `model/list` を投げた結果を控えておく（`docs/tui-parity-backlog.md` の「調査データの再取得方法」）
 - 確認: 設定パネルのモデルの選択肢が、`model/list` の `hidden: false` のモデルと**一致する**（数も並びも）
-- 確認: 表示名（`GPT-5.6-Sol` など）で並び、選ぶと下に説明文が出る
+- 確認: 表示名（`GPT-6-Sol` など）で並び、選ぶと下に説明文が出る
 - 操作: モデルを切り替える
 - 期待: effortの選択肢がそのモデルの `supportedReasoningEfforts` に入れ替わる。effortを選ぶと説明文が出る
 - 操作: effort に `ultra` を選んでから、`ultra` を持たないモデルへ切り替える
@@ -2717,12 +2717,12 @@ MCP越しに受け渡し4ツールが実際に呼べるか、そして実ファ�
 - 期待: `チームで達成したいゴール`になっている（通常の分解は別の文言）
 - 操作: 複数の工程に分かれるゴール（例: 「設計・実装・レビュー・ドキュメントまで通す」）を入れて生成させる
 - 期待: 生成されたYAMLの**全てのタスクに`role`が入っている**。値は`orchestrator`/`manager`/`em`/`architect`/`designer`/`implementer`/`reviewer`/`tester`/`writer`/`researcher`のいずれか。**生成しただけでは実行されず**、ファイルとして保存されるだけである（§16.13）
-- 期待: `gpt-5.6-sol`（Claude Codeなら`fable`）が既定として全タスクに入っていない。使うとしても、詰まりそうな一部のタスクに`model`として明示されている形に限る
+- 期待: `gpt-6-astra`（Claude Codeなら`fable`）が既定として全タスクに入っていない。使うとしても、詰まりそうな一部のタスクに`model`として明示されている形に限る
 - 操作: 生成されたYAMLをワークフローViewから実行する
 - 期待: カンバンの上部に`ToDo: N`/`InProgress: N`/`Done: N`の件数バッジが出て、タスクが進むにつれて件数が移る。`要対応: N`は失敗・停止・スキップが1件以上のときだけ追加で出る
 - 期待: 各タスクのカードのidが`T1（実装）`のように役割つきで出ている。**役割を書いていない従来のワークフローを開くと括弧ごと出ず、`T1`のままである**（見た目が変わらないこと）
 - 操作: 役割セッションのタブを開き、設定欄の1行サマリでモデルとeffortを見る
-- 期待: `implementer`/`reviewer`/`tester`は軽い段（Codex: `gpt-5.6-luna`、Claude Code: `sonnet`）、`architect`/`manager`/`em`/`designer`は重い段（Codex: `gpt-5.6-terra`、Claude Code: `opus`）で起動している。タスクが`model`/`effort`を明示していればそちらが優先される
+- 期待: `implementer`/`reviewer`/`tester`は軽い段（Codex: `gpt-6-luna`、Claude Code: `sonnet`）、`writer`/`researcher`は中の段（Codex: `gpt-6-sol`、Claude Code: `sonnet`）、`architect`/`manager`/`em`/`designer`は重い段（Codex: `gpt-6-sol`、Claude Code: `opus`）で起動している。タスクが`model`/`effort`を明示していればそちらが優先される
 - 操作: 役割セッションのどれかに「`write_handoff`で設計メモを書いて」と指示する
 - 期待: ツールが呼べて成功する。ワークスペースに`.agents/handoff/runs/<runId>/<taskId>-<slug>.md`が実際に作られている
 - 操作: オーケストレーター欄で「`list_handoffs`と`read_handoff`で今のメモを読んで」と指示する
@@ -3695,7 +3695,7 @@ Claude Code CLI 2.1.235 での実測。design.md §14.61 / §14.62）。CLIが�
 依頼先の変更:
 
 - 操作: `agent.secondOpinion.candidates` を未設定のまま押す
-- 期待: 依頼先のQuickPickが出ず、`gpt-5.6-sol` / `high` で走る（出力チャンネルの `start provider=codex model=... effort=...` で確認する）
+- 期待: 依頼先のQuickPickが出ず、`gpt-6-sol` / `high` で走る（出力チャンネルの `start provider=codex model=... effort=...` で確認する）
 - 操作: `agent.secondOpinion.candidates` へ別のモデルを1件だけ書いて押す
 - 期待: QuickPickは出ないまま、書いたモデル・effortで走る
 

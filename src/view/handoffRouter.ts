@@ -11,7 +11,7 @@ import { effortsFor, type ModelInfo } from '../codex/modelCatalog';
  *
  * effortとmodelは別の軸で決める。effortは「どれだけ深く考えるか」（difficulty）、modelは
  * 「どれだけ広く・曖昧で・危険で・自律的か」（scope / ambiguity / risk / autonomy）。この
- * 分離があると「モデルは上げないが深く考えさせる」（Sonnet / xhigh、Terra / xhigh）と
+ * 分離があると「モデルは上げないが深く考えさせる」（Sonnet / xhigh、GPT-6-Sol / xhigh）と
  * 「深く考える必要は無いが広い」（Opus / high、Sol / high）を区別できる。
  */
 
@@ -126,16 +126,16 @@ export function isTaskType(value: unknown): value is TaskType {
  * モデルのティア（低い順）。カタログ（`ModelInfo`）はティア情報を持たないため、slugの部分
  * 一致で順位付けする。
  *
- * Claude Codeは Sonnet < Opus < Fable、Codexは Terra < Sol < Astra。**haikuとlunaは載せない**
- * ——引き継ぎ先は「続きの作業をする側」であり、最下位のモデルまで落とす選択肢を持たせない。
+ * Claude Codeは Sonnet < Opus < Fable、Codexは GPT-6-Luna < GPT-6-Sol < GPT-6-Astra。
+ * haikuは載せない——引き継ぎ先は「続きの作業をする側」であり、Claudeの最下位モデルまで落とさない。
  *
  * 求めたティアのモデルがカタログに無ければモデルを変えない（引き継ぎ元をそのまま使う）。
  * 知らないモデルを順位の分からないまま並べて選ぶより、変えない方が壊れ方が小さい。
  */
 export const MODEL_TIERS: readonly (readonly string[])[] = [
-  ['sonnet', 'terra'],
-  ['opus', 'sol'],
-  ['fable', 'astra'],
+  ['sonnet', 'gpt-6-luna'],
+  ['opus', 'gpt-6-sol'],
+  ['fable', 'gpt-6-astra'],
 ];
 
 /**

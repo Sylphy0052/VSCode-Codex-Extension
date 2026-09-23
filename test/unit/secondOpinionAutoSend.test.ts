@@ -131,7 +131,7 @@ class FakePort implements SecondOpinionPanelPort {
 
 const CANDIDATE: SecondOpinionCandidate = {
   name: 'Sol (high)',
-  model: 'gpt-5.6-sol',
+  model: 'gpt-6-sol',
   effort: 'high',
 };
 

@@ -33,14 +33,9 @@ function claudeModels(): ModelInfo[] {
   return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE), model('fable', FIVE)];
 }
 
-/** Codex側のカタログを模した一覧（Terra < Sol < Astra）。 */
+/** Codex側のカタログを模した一覧（GPT-6-Luna < GPT-6-Sol < GPT-6-Astra）。 */
 function codexModels(): ModelInfo[] {
-  return [
-    model('gpt-5.6-luna', FIVE),
-    model('gpt-5.6-terra', FIVE),
-    model('gpt-5.6-sol', FIVE),
-    model('gpt-5.6-astra', FIVE),
-  ];
+  return [model('gpt-6-luna', FIVE), model('gpt-6-sol', FIVE), model('gpt-6-astra', FIVE)];
 }
 
 function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
@@ -64,7 +59,7 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
 }
 
 const noFailure = { turnFailed: false };
-const current = { model: 'gpt-5.6-terra', effort: 'medium' };
+const current = { model: 'gpt-6-astra', effort: 'medium' };
 
 /** 最上位のティアとeffortを引き当てる見立て（scope + ambiguity + risk + autonomy = 8）。 */
 const heaviest = assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 });
@@ -85,7 +80,7 @@ describe('コスト方針のプリセット（Issue #1214）', () => {
     ).toMatchObject({ model: 'opus', effort: 'high' });
     expect(
       resolveProfile(heaviest, noFailure, codexModels(), current, undefined, 'low'),
-    ).toMatchObject({ model: 'gpt-5.6-sol', effort: 'high' });
+    ).toMatchObject({ model: 'gpt-6-sol', effort: 'high' });
   });
 
   it('low は制限を掛けた理由を残す', () => {

@@ -1121,10 +1121,10 @@ npx tsx test/bench/secondOpinionEval/caseFile.ts \
 npx tsx test/bench/secondOpinionEval/run.ts \
   --cases <案件ファイル> \
   --out <結果ディレクトリ> \
-  [--conditions A,B-pos,B-repeat] [--attempts 2] [--model gpt-5.6-sol] [--effort high]
+  [--conditions A,B-pos,B-repeat] [--attempts 2] [--model gpt-6-sol] [--effort high]
 ```
 
-モデルとeffortは既定で `gpt-5.6-sol` / `high`（Advisor本体の既定と同じ）。**全条件で同じ値を使うこと。** 条件ごとに変えると、測っているのが介入の差なのかモデルの差なのか分からなくなる。
+モデルとeffortは既定で `gpt-6-sol` / `high`（Advisor本体の既定と同じ）。**全条件で同じ値を使うこと。** 条件ごとに変えると、測っているのが介入の差なのかモデルの差なのか分からなくなる。
 
 `--attempts` の既定は2。1回では、条件の差なのか同じ条件内のばらつきなのかを区別できない。同じ案件で条件の勝ち負けが試行ごとに反転するなら、介入の効果よりばらつきのほうが大きいということになる。
 

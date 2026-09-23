@@ -114,9 +114,9 @@ describe('ログの1行の中身（Issue #1097）', () => {
         awaitingUserAnswer: false,
         awaitingUserAnswerReason: '',
         profileChanged: true,
-        profile: { model: 'gpt-5.6-astra', effort: 'high' },
+        profile: { model: 'gpt-6-astra', effort: 'high' },
       }),
-    ).toBe('model=gpt-5.6-astra effort=high profileChanged=true');
+    ).toBe('model=gpt-6-astra effort=high profileChanged=true');
   });
 
   it('発火した契機と、発火しなかった旨をどちらも出す', () => {

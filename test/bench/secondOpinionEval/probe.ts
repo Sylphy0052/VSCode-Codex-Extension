@@ -27,7 +27,7 @@ import process from 'node:process';
 
 import { runCodexTurn } from './codexTurn';
 
-const MODEL = process.env['PROBE_MODEL'] ?? 'gpt-5.6-sol';
+const MODEL = process.env['PROBE_MODEL'] ?? 'gpt-6-sol';
 const EFFORT = process.env['PROBE_EFFORT'] ?? 'low';
 
 function parseOut(argv: readonly string[]): string | undefined {

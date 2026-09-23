@@ -39,7 +39,7 @@ export type TeamRole = (typeof TEAM_ROLES)[number];
  * 役割に割り当てる思考の重さ。実際のモデル名・effortはプロバイダごとに違うため、
  * 役割はまずこの段階の抽象へ寄せ、プロバイダごとの対応表（`TIER_MODELS`）で解決する。
  *
- * `escalation`（Codex: Sol / Claude: Fable）は**どの役割の既定値にもしない**。
+ * `escalation`（Codex: Astra / Claude: Fable）は**どの役割の既定値にもしない**。
  * 「詰まったときだけ使う」という運用方針（Issue #693）を、既定値から到達できないという
  * 構造で担保する。使うときはタスクの `model` / `effort` で明示的に指定する。
  */
@@ -65,10 +65,10 @@ const ROLE_TIERS: Record<TeamRole, RoleTier> = {
 
 /** 重さ → プロバイダごとのモデルslug。 */
 const TIER_MODELS: Record<RoleTier, Record<Provider, string>> = {
-  light: { codex: 'gpt-5.6-luna', claude: 'sonnet' },
-  standard: { codex: 'gpt-5.6-luna', claude: 'sonnet' },
-  deep: { codex: 'gpt-5.6-terra', claude: 'opus' },
-  escalation: { codex: 'gpt-5.6-sol', claude: 'fable' },
+  light: { codex: 'gpt-6-luna', claude: 'sonnet' },
+  standard: { codex: 'gpt-6-sol', claude: 'sonnet' },
+  deep: { codex: 'gpt-6-sol', claude: 'opus' },
+  escalation: { codex: 'gpt-6-astra', claude: 'fable' },
 };
 
 /**
@@ -134,7 +134,7 @@ export function roleDefaults(role: TeamRole, provider: Provider): RoleDefaults {
 }
 
 /**
- * `escalation` 段のモデル（Codex: Sol / Claude: Fable）。
+ * `escalation` 段のモデル（Codex: Astra / Claude: Fable）。
  *
  * 既定値としては使わない。呼び出し元は `planner.ts` の `buildRoleDescription` だけで、
  * 分解セッションへ渡すプロンプトに「詰まりそうなタスクに限り明示してよいモデル」として入れる。

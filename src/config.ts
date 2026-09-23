@@ -754,7 +754,7 @@ export function readLoopAdvisorConfig(): LoopAdvisorSettings {
  * ループのAdvisorを使うかを、ユーザー設定へ保存する（issue #994）。
  *
  * **書くのは `enabled` だけ。** 相談先（`provider` / `model`）はこの機能の既定値として
- * Codexの `gpt-5.6-sol` に寄せてあり、トグルからは触らない。切り替えのたびに設定を
+ * Codexの `gpt-6-sol` に寄せてあり、トグルからは触らない。切り替えのたびに設定を
  * 書き換えると、利用者が設定で指定した相談先を黙って上書きすることになる。
  */
 export async function setLoopAdvisorEnabled(enabled: boolean): Promise<void> {

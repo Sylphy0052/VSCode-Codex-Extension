@@ -18,8 +18,8 @@ import type { SecondOpinionCandidate } from '../../src/secondOpinion/candidates'
 import { runSecondOpinion, type SecondOpinionRequest } from '../../src/secondOpinion/run';
 
 const CANDIDATE: SecondOpinionCandidate = {
-  name: 'GPT-5.6 sol',
-  model: 'gpt-5.6-sol',
+  name: 'GPT-6 sol',
+  model: 'gpt-6-sol',
   effort: 'high',
 };
 

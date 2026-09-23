@@ -21,13 +21,9 @@ function model(slug: string, efforts: readonly string[]): ModelInfo {
 }
 
 const FIVE = ['low', 'medium', 'high', 'xhigh', 'max'];
-const models = [
-  model('gpt-5.6-terra', FIVE),
-  model('gpt-5.6-sol', FIVE),
-  model('gpt-5.6-astra', FIVE),
-];
+const models = [model('gpt-6-luna', FIVE), model('gpt-6-sol', FIVE), model('gpt-6-astra', FIVE)];
 
-const current = { model: 'gpt-5.6-sol', effort: 'medium' };
+const current = { model: 'gpt-6-sol', effort: 'medium' };
 const input = {
   recentUserMessages: ['続きをやって'],
   recentAssistantMessages: [],
@@ -77,7 +73,7 @@ describe('proposeHandoffModelSettings', () => {
       assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2, reasons: ['広い'] }),
     );
     const { settings, reasons } = await proposeHandoffModelSettings(current, input, deps());
-    expect(settings).toEqual({ model: 'gpt-5.6-astra', effort: 'xhigh' });
+    expect(settings).toEqual({ model: 'gpt-6-astra', effort: 'xhigh' });
     expect(reasons.some((r) => r.startsWith('implementation difficulty=2'))).toBe(true);
     expect(reasons).toContain('分類器: 広い');
     expect(reasons).toContain('confidence=0.90');
@@ -87,7 +83,7 @@ describe('proposeHandoffModelSettings', () => {
     stubClassifier(assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 }));
     __mock.setConfig('agent', { 'autoHandoff.costPreset': 'low' });
     const { settings, reasons } = await proposeHandoffModelSettings(current, input, deps());
-    expect(settings).toEqual({ model: 'gpt-5.6-sol', effort: 'high' });
+    expect(settings).toEqual({ model: 'gpt-6-sol', effort: 'high' });
     expect(reasons).toContain('コスト方針=low: モデルのティアを1へ制限');
   });
 
@@ -95,11 +91,11 @@ describe('proposeHandoffModelSettings', () => {
     stubClassifier(assess());
     __mock.setConfig('agent', {
       'autoHandoff.costPreset': 'low',
-      'autoHandoff.model': 'gpt-5.6-astra',
+      'autoHandoff.model': 'gpt-6-astra',
       'autoHandoff.effort': 'xhigh',
     });
     const { settings } = await proposeHandoffModelSettings(current, input, deps());
-    expect(settings).toEqual({ model: 'gpt-5.6-astra', effort: 'xhigh' });
+    expect(settings).toEqual({ model: 'gpt-6-astra', effort: 'xhigh' });
   });
 
   it('分類に失敗したら引き継ぎ元を踏襲する（グローバル設定へ戻さない）', async () => {
@@ -121,11 +117,11 @@ describe('proposeHandoffModelSettings', () => {
   it('明示設定は分類より優先する', async () => {
     stubClassifier(assess());
     __mock.setConfig('agent', {
-      'autoHandoff.model': 'gpt-5.6-astra',
+      'autoHandoff.model': 'gpt-6-astra',
       'autoHandoff.effort': 'xhigh',
     });
     const { settings } = await proposeHandoffModelSettings(current, input, deps());
-    expect(settings).toEqual({ model: 'gpt-5.6-astra', effort: 'xhigh' });
+    expect(settings).toEqual({ model: 'gpt-6-astra', effort: 'xhigh' });
   });
 
   it('明示モデルで非対応のeffortは未指定へ戻す', async () => {
@@ -166,8 +162,8 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
     stubClassifier(assess({ difficulty: 1, scope: 1 }));
     __mock.showInformationMessageAnswer = '引き継ぐ';
     const choice = await chooseHandoffModelSettings(current, input, deps());
-    expect(choice?.settings).toEqual({ model: 'gpt-5.6-terra', effort: 'high' });
-    expect(__mock.messages.infos[0]).toContain('Model: gpt-5.6-terra / Effort: high');
+    expect(choice?.settings).toEqual({ model: 'gpt-6-luna', effort: 'high' });
+    expect(__mock.messages.infos[0]).toContain('Model: gpt-6-luna / Effort: high');
   });
 
   it('ダイアログを閉じたら undefined（引き継ぎを中止）', async () => {
@@ -181,11 +177,11 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
     __mock.showInformationMessageAnswer = 'モデルを選び直す';
     __mock.showQuickPickAnswer = (items) => {
       const list = items as { label: string; slug?: string; effort?: string }[];
-      return list.find((i) => i.slug === 'gpt-5.6-astra') ?? list.find((i) => i.effort === 'high');
+      return list.find((i) => i.slug === 'gpt-6-astra') ?? list.find((i) => i.effort === 'high');
     };
     const choice = await chooseHandoffModelSettings(current, input, deps());
-    expect(choice?.settings).toEqual({ model: 'gpt-5.6-astra', effort: 'high' });
-    expect(choice?.reasons[0]).toContain('手動で指定（提案は gpt-5.6-terra / medium）');
+    expect(choice?.settings).toEqual({ model: 'gpt-6-astra', effort: 'high' });
+    expect(choice?.reasons[0]).toContain('手動で指定（提案は gpt-6-luna / medium）');
   });
 
   it('一覧を閉じただけなら確認へ戻る', async () => {
@@ -199,7 +195,7 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
       return undefined;
     };
     const choice = await chooseHandoffModelSettings(current, input, deps());
-    expect(choice?.settings).toEqual({ model: 'gpt-5.6-terra', effort: 'medium' });
+    expect(choice?.settings).toEqual({ model: 'gpt-6-luna', effort: 'medium' });
     expect(__mock.messages.infos).toHaveLength(2);
     __mock.showInformationMessageAnswer = original;
   });
@@ -219,7 +215,7 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
     });
     const choice = await chooseHandoffModelSettings(current, input, deps());
     expect(spy).toHaveBeenCalledTimes(2);
-    expect(choice?.settings).toEqual({ model: 'gpt-5.6-astra', effort: 'xhigh' });
+    expect(choice?.settings).toEqual({ model: 'gpt-6-astra', effort: 'xhigh' });
     __mock.showInformationMessageAnswer = originalInfo;
   });
 
@@ -242,7 +238,7 @@ describe('chooseHandoffModelSettings（引き継ぎ前の確認）', () => {
       undefined,
       true,
     );
-    expect(choice?.settings).toEqual({ model: 'gpt-5.6-terra', effort: 'high' });
+    expect(choice?.settings).toEqual({ model: 'gpt-6-luna', effort: 'high' });
     // 確認ダイアログ（モーダル）を一切出していないこと
     expect(__mock.messages.infos).toHaveLength(0);
   });
@@ -284,7 +280,7 @@ describe('probeSafeBoundary（Issue #1090）', () => {
       profileChanged: false,
     });
     // 解決自体は行う（ログへ出すため）。`switchSafe` が false でも `profileChanged` は立たない
-    expect(probe?.profile).toEqual({ model: 'gpt-5.6-astra', effort: 'high' });
+    expect(probe?.profile).toEqual({ model: 'gpt-6-astra', effort: 'high' });
   });
 
   it('switch_safe が true でモデルが変わるなら profileChanged', async () => {
@@ -302,7 +298,7 @@ describe('probeSafeBoundary（Issue #1090）', () => {
     expect(probe).toMatchObject({
       switchSafe: true,
       profileChanged: true,
-      profile: { model: 'gpt-5.6-astra', effort: 'high' },
+      profile: { model: 'gpt-6-astra', effort: 'high' },
     });
   });
 
@@ -363,7 +359,7 @@ describe('probeSafeBoundary（Issue #1090）', () => {
     vi.spyOn(classifier, 'classifyHandoff').mockResolvedValue(
       assess({ switchSafe: true, difficulty: 1, scope: 1, ambiguity: 1, risk: 1, autonomy: 1 }),
     );
-    const probe = await probeSafeBoundary({ model: 'gpt-5.6-sol', effort: 'high' }, input, deps());
+    const probe = await probeSafeBoundary({ model: 'gpt-6-sol', effort: 'high' }, input, deps());
     expect(probe).toMatchObject({ switchSafe: true, profileChanged: false });
   });
 

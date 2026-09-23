@@ -26,7 +26,7 @@ import type { GitCommandRunner } from '../../src/orchestrator/worktree';
 
 const SAFE_INPUT: TaskSessionInput = {
   cwd: '/repo',
-  config: { model: 'gpt-5.6-sol', effort: 'high', approvalMode: 'never' },
+  config: { model: 'gpt-6-sol', effort: 'high', approvalMode: 'never' },
   sandbox: 'read-only',
 };
 

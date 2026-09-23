@@ -20,8 +20,8 @@ import type { ReviewBundle } from '../../src/secondOpinion/reviewBundle';
 import type { SecondOpinionCandidate } from '../../src/secondOpinion/candidates';
 
 const CANDIDATE: SecondOpinionCandidate = {
-  name: 'GPT-5.6 sol',
-  model: 'gpt-5.6-sol',
+  name: 'GPT-6 sol',
+  model: 'gpt-6-sol',
   effort: 'high',
 };
 

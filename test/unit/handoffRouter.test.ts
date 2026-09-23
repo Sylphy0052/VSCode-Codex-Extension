@@ -24,14 +24,9 @@ function model(slug: string, efforts: readonly string[]): ModelInfo {
 
 const FIVE = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-/** Codex側のカタログを模した一覧（Terra < Sol < Astra）。 */
+/** Codex側のカタログを模した一覧（GPT-6-Luna < GPT-6-Sol < GPT-6-Astra）。 */
 function codexModels(): ModelInfo[] {
-  return [
-    model('gpt-5.6-luna', FIVE),
-    model('gpt-5.6-terra', FIVE),
-    model('gpt-5.6-sol', FIVE),
-    model('gpt-5.6-astra', FIVE),
-  ];
+  return [model('gpt-6-luna', FIVE), model('gpt-6-sol', FIVE), model('gpt-6-astra', FIVE)];
 }
 
 /** Claude Code側のカタログを模した一覧（Sonnet < Opus < Fable）。 */
@@ -59,15 +54,17 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
   };
 }
 
-const current = { model: 'gpt-5.6-sol', effort: 'high' };
+const current = { model: 'gpt-6-sol', effort: 'high' };
 const noFailure = { turnFailed: false };
 
 describe('段の定義', () => {
-  it('ティアは3段で、最下位にhaiku/lunaを含めない', () => {
+  it('ティアは3段で、haikuを含めない', () => {
     expect(MODEL_TIERS).toHaveLength(3);
     const flat = MODEL_TIERS.flat();
     expect(flat).not.toContain('haiku');
-    expect(flat).not.toContain('luna');
+    expect(flat).toContain('gpt-6-luna');
+    expect(flat).toContain('gpt-6-sol');
+    expect(flat).toContain('gpt-6-astra');
   });
 
   it('effortは3段でlowとmaxを含めない', () => {
@@ -165,17 +162,17 @@ describe('補正', () => {
 });
 
 describe('resolveProfile: Codexのカタログ', () => {
-  it('局所・明確・定型 → Terra / medium', () => {
+  it('局所・明確・定型 → GPT-6-Luna / medium', () => {
     expect(resolveProfile(assess(), noFailure, codexModels(), current)).toMatchObject({
-      model: 'gpt-5.6-terra',
+      model: 'gpt-6-luna',
       effort: 'medium',
     });
   });
 
-  it('複数ファイル・複数ステップ → Terra / high', () => {
+  it('複数ファイル・複数ステップ → GPT-6-Luna / high', () => {
     expect(
       resolveProfile(assess({ difficulty: 1, scope: 1 }), noFailure, codexModels(), current),
-    ).toMatchObject({ model: 'gpt-5.6-terra', effort: 'high' });
+    ).toMatchObject({ model: 'gpt-6-luna', effort: 'high' });
   });
 
   it('リポジトリ横断・曖昧・高リスク・自律 → Astra / xhigh', () => {
@@ -186,11 +183,11 @@ describe('resolveProfile: Codexのカタログ', () => {
         codexModels(),
         current,
       ),
-    ).toMatchObject({ model: 'gpt-5.6-astra', effort: 'xhigh' });
+    ).toMatchObject({ model: 'gpt-6-astra', effort: 'xhigh' });
   });
 
-  it('lunaはどの見立てでも選ばれない', () => {
-    expect(resolveProfile(assess(), noFailure, codexModels(), current).model).not.toContain('luna');
+  it('軽い見立てではGPT-6-Lunaを選ぶ', () => {
+    expect(resolveProfile(assess(), noFailure, codexModels(), current).model).toBe('gpt-6-luna');
   });
 
   it('理由に見立ての内訳と補正を残す', () => {
@@ -207,12 +204,12 @@ describe('resolveProfile: Codexのカタログ', () => {
 
 describe('resolveProfile: カタログが揃わないとき', () => {
   it('ティアに合うモデルがカタログに無ければ引き継ぎ元のモデルを据え置く', () => {
-    const onlyTop = [model('gpt-5.6-astra', FIVE)];
+    const onlyTop = [model('gpt-6-astra', FIVE)];
     expect(resolveProfile(assess(), noFailure, onlyTop, current).model).toBe(current.model);
     expect(
       resolveProfile(assess({ scope: 2, ambiguity: 2, risk: 2 }), noFailure, onlyTop, current)
         .model,
-    ).toBe('gpt-5.6-astra');
+    ).toBe('gpt-6-astra');
   });
 
   it('effort非対応のモデルにはeffortを渡さない', () => {
@@ -223,14 +220,14 @@ describe('resolveProfile: カタログが揃わないとき', () => {
   });
 
   it('カタログのeffortが一部しか無ければ、選べる中の最上位へ丸める', () => {
-    const models = [model('gpt-5.6-terra', ['low', 'medium'])];
+    const models = [model('gpt-6-astra', ['low', 'medium'])];
     expect(resolveProfile(assess({ difficulty: 2 }), noFailure, models, current).effort).toBe(
       'medium',
     );
   });
 
   it('カタログのeffortがladderに載っていない値だけなら未指定にする', () => {
-    const models = [model('gpt-5.6-terra', ['max'])];
+    const models = [model('gpt-6-astra', ['max'])];
     expect(resolveProfile(assess(), noFailure, models, current).effort).toBe('');
   });
 
