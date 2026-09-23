@@ -170,16 +170,20 @@ export function collectCommandEvidence(
     if (item.kind !== 'commandExecution' || seen.has(item.id)) {
       continue;
     }
-    const exitCode = readExitCode(item.status);
-    if (exitCode === undefined) {
-      // まだ実行中。終了コードが出てから証拠にする（次のターンで拾われる）
+    if (!isSettledCommandItem(item)) {
+      // まだ実行中。終わってから証拠にする（次のターンで拾われる）
       continue;
     }
+    // 終わったが終了コードが無い項目（Claudeの成功したBashなど、issue #1375）は、
+    // 成功とは言えないため`unknown`で積む
+    const exitCode = readExitCode(item.status);
     collected.push({
       kind: classifyCommand(item.detail),
       source: truncate(item.detail, 200),
-      status: exitCode === 0 ? 'pass' : 'fail',
-      detail: `exit ${exitCode}\n${tailOf(item.text, MAX_EVIDENCE_DETAIL_LENGTH)}`.trimEnd(),
+      status: exitCode === undefined ? 'unknown' : exitCode === 0 ? 'pass' : 'fail',
+      detail: `${
+        exitCode === undefined ? `終了コード不明（status: ${item.status ?? ''}）` : `exit ${exitCode}`
+      }\n${tailOf(item.text, MAX_EVIDENCE_DETAIL_LENGTH)}`.trimEnd(),
       iteration,
     });
   }
@@ -243,16 +247,28 @@ function classifyCommand(command: string): GoalEvidence['kind'] {
   return 'build';
 }
 
+/** 実行中を表す`status`。Codexは`inProgress`、Claudeは`running`を入れる。 */
+const RUNNING_STATUSES: ReadonlySet<string> = new Set(['inProgress', 'running']);
+
 /**
- * 証拠として確定した（終了コードを読める）コマンド実行の項目か。
+ * 証拠として確定した（終わった）コマンド実行の項目か。
  *
  * `collectCommandEvidence`がその項目を拾う条件と同じ判定を、呼び出し側からも使えるように
  * する。`LoopController`が「拾ったid」を記録するときに実行中のものまで含めてしまうと、
  * 終了コードが出た次のターンで拾い直せなくなる（issue #909）。
+ *
+ * 終了コードを読めなくても、実行中の印でない`status`（Claudeの`completed`・`エラー`など）は
+ * 終わったものとみなす。終了コードでだけ判定すると、Claudeの項目が実行中のまま残り続ける
+ * （issue #1375）。
  */
 export function isSettledCommandItem(item: ChatItem): boolean {
-  return item.kind === 'commandExecution' && readExitCode(item.status) !== undefined;
+  if (item.kind !== 'commandExecution') {
+    return false;
+  }
+  const status = item.status?.trim() ?? '';
+  return status !== '' && !RUNNING_STATUSES.has(status);
 }
+
 
 /** `exit 0` の形をした`status`から終了コードを読む。読めなければ`undefined`。 */
 function readExitCode(status: string | undefined): number | undefined {

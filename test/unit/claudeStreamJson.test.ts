@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_OUTPUT_CHARS, MAX_TODO_HISTORY } from '../../src/appserver/chatState';
 import { applyStreamEvent, initialClaudeState } from '../../src/claude/streamJson';
+import { collectCommandEvidence } from '../../src/loop/goalLoop';
 import { consumeNdjson } from '../../src/util/ndjson';
 
 const ID = 'e71f0acf-2b5b-4ea5-b6c7-24ca8d7668f9';
@@ -174,6 +175,91 @@ describe('applyStreamEvent', () => {
       },
     ]);
     expect(state.items[0]?.status).toBe('エラー');
+  });
+
+  // Bashが0以外で終わると、本文の先頭に `Exit code N` が付く（実測、issue #1375）
+  it('Bashの失敗は本文の終了コードを exit N として持つ', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'echo ng; exit 3' } },
+            { type: 'tool_use', id: 't2', name: 'Read', input: { file_path: '/x' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Exit code 3\nng', is_error: true },
+          ],
+        },
+        tool_use_result: 'Error: Exit code 3\nng',
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't2', content: 'Exit code 1', is_error: true },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.status).toBe('exit 3');
+    // コマンド以外のツールは本文が同じ形でも読み替えない
+    expect(state.items[1]?.status).toBe('エラー');
+  });
+
+  // 実測したstream-jsonをそのまま畳み込み、ゴール駆動ループの証拠まで通す（issue #1375）
+  it('Claude Bashの終了項目が証拠台帳に入り、成功は pass にならない', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'echo ok' } }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok', is_error: false }],
+        },
+        tool_use_result: {
+          stdout: 'ok',
+          stderr: '',
+          interrupted: false,
+          isImage: false,
+          noOutputExpected: false,
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          id: 'm2',
+          content: [
+            { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'echo ng; exit 3' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't2', content: 'Exit code 3\nng', is_error: true },
+          ],
+        },
+        tool_use_result: 'Error: Exit code 3\nng',
+      },
+    ]);
+    const evidence = collectCommandEvidence(state.items, new Set(), 1);
+    expect(evidence.map((e) => ({ source: e.source, status: e.status }))).toEqual([
+      { source: 'echo ok', status: 'unknown' },
+      { source: 'echo ng; exit 3', status: 'fail' },
+    ]);
   });
 
   // Web検索の結果（issue #18）。ライブのstream-jsonでも同じ tool_use_result を実測している
