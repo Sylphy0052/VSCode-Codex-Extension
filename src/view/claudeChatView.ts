@@ -2687,6 +2687,8 @@ export class ClaudeChatViewManager
     }
     if (turnFinished) {
       reportTurnResult(this.onActivity, entry.session.threadId, entry.cwd, state);
+      // ループを止めうる`loop.observe`より前に記録する（最後のターンも残すため。issue #1379）
+      this.recordLoopCommands(entry, state);
       this.notifyTurnComplete(entry, state);
     }
     const next = deriveTitle(state, entry.pinnedName);
@@ -2876,6 +2878,9 @@ export class ClaudeChatViewManager
    */
   private onLoopStatus(entry: ClaudePanel, status: LoopStatus): void {
     const stopped = entry.wasLoopRunning && !status.running;
+    if (!entry.wasLoopRunning && status.running) {
+      this.beginLoopCommandRecording(entry);
+    }
     entry.wasLoopRunning = status.running;
     this.postState(entry);
     if (stopped && status.stopReason !== undefined) {

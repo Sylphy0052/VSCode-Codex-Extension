@@ -6,6 +6,7 @@ import { readNotificationsConfig } from '../config';
 import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
+import type { AgentReportedRecorder } from '../verification/agentReported';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import {
   needsAttentionAfterHandoff,
@@ -1160,6 +1161,53 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
           this.showPanel(entry, false);
         }
       });
+  }
+
+  /**
+   * ループのWorkerが会話中に実行したコマンドを、信頼できない検証記録として残す口（issue #1379）。
+   * 渡されていなければ記録しない。
+   */
+  private agentReported: AgentReportedRecorder | undefined;
+
+  setAgentReportedRecorder(recorder: AgentReportedRecorder): void {
+    this.agentReported = recorder;
+  }
+
+  /**
+   * ループが始まった瞬間に呼ぶ。それまでの会話で実行されたコマンドは記録しない。
+   *
+   * タスク管理下のセッションは`WorkflowRunner`がタスクとして記録するため、ここでは扱わない
+   * （同じ項目を二重に記録しない）。
+   */
+  protected beginLoopCommandRecording(entry: TPanel): void {
+    if (this.agentReported === undefined || entry.taskManaged || entry.cwd === undefined) {
+      return;
+    }
+    this.agentReported.begin(entry, entry.session.getState().items, entry.cwd);
+  }
+
+  /**
+   * ターンが確定した瞬間に呼ぶ。ループの走行中のターンで終わったコマンドを記録する。
+   * 最後のターンも記録するため、`LoopController.observe`（ループを止めうる）より前に呼ぶ。
+   */
+  protected recordLoopCommands(entry: TPanel, state: ChatState): void {
+    if (
+      this.agentReported === undefined ||
+      entry.taskManaged ||
+      entry.cwd === undefined ||
+      !entry.loop.running
+    ) {
+      return;
+    }
+    const threadId = entry.session.threadId;
+    void this.agentReported.record(entry, state.items, {
+      provider: this.favoriteProvider,
+      cwd: entry.cwd,
+      link: {
+        ...(threadId === undefined ? {} : { sessionId: threadId }),
+        iteration: entry.loop.getStatus().iteration,
+      },
+    });
   }
 
   /**

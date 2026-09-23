@@ -164,6 +164,8 @@ import {
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from './worktree';
+import { AgentReportedRecorder } from '../verification/agentReported';
+import type { VerificationStore } from '../verification/store';
 import {
   expandTemplate,
   MAX_WORKFLOW_FILE_BYTES,
@@ -467,6 +469,11 @@ export interface WorkflowRunnerDeps {
    * の集計」になり、実利用率として読めなくなるため。
    */
   toolUsageMetrics?: { enabled: () => boolean };
+  /**
+   * 検証記録の保存先（Issue #1379）。**省略可能。** 渡されていれば、Workerが会話中に
+   * 実行したコマンドを信頼できない検証記録（`agent-reported`）として残す。
+   */
+  verificationStore?: VerificationStore;
   /**
    * 疑似worktree（design.md §16.20）。gitの作業ツリーでないワークスペースで
    * `isolation: worktree`（既定）のタスクを走らせるときの隔離手段。**省略可能。**
@@ -2035,8 +2042,16 @@ export class WorkflowRunner {
    * 呼び出しにスパイが効く。
    */
   private readonly internals: WorkflowRunnerInternals;
+  /** Workerが会話中に実行したコマンドの記録（Issue #1379）。保存先が無ければ記録しない */
+  private readonly agentReported: AgentReportedRecorder | undefined;
 
   constructor(private readonly deps: WorkflowRunnerDeps) {
+    this.agentReported =
+      deps.verificationStore === undefined
+        ? undefined
+        : new AgentReportedRecorder(deps.verificationStore, {
+            onError: (message) => deps.log.warn(`[workflow] ${message}`),
+          });
     this.integrationQueue = new IntegrationMergeQueue(deps.worktreeQueue);
     this.internals = {
       deps: this.deps,
@@ -5445,6 +5460,7 @@ export class WorkflowRunner {
     // `thread/status/changed`（idle）を`turn/completed`より先に送るため
     const turnCompleted = liveTask.lastTurnCompletionSeq !== state.turnCompletionSeq;
     liveTask.lastTurnCompletionSeq = state.turnCompletionSeq;
+    this.recordWorkerCommands(runId, taskId, live, liveTask, state, startedTurn, turnCompleted);
     // 実行契約の全文が会話履歴へ載ったと見なすのは、そのターンが成功で確定したときだけ
     // （Issue #1321）。失敗したターンは本文がCLIの履歴へ残ったかどうかが判らないため、
     // 未送信のままにして次のターンでもう一度全文を送る
@@ -5465,6 +5481,40 @@ export class WorkflowRunner {
     // 状態変化のたびにViewへ知らせる。永続化（persist）は送信回数の節目だけに絞ったままだが、
     // 表示専用の通知はストリーミング中の要約更新でも毎回出す
     this.notify(runId);
+  }
+
+  /**
+   * Workerが会話中に実行したコマンドを検証記録へ残す（Issue #1379）。
+   *
+   * ターンの確定時に、そのターンで終わったコマンドを記録する。ターンの開始時には、
+   * それまでに終わった項目（読み直した履歴など）を記録済みとして扱い、開始時点の
+   * ソースを取る。会話はセッションで区別するため、分割（Issue #1273）で差し替わった
+   * セッションは別の会話として扱う。
+   */
+  private recordWorkerCommands(
+    runId: string,
+    taskId: string,
+    live: LiveRun,
+    liveTask: LiveTask,
+    state: ChatState,
+    startedTurn: boolean,
+    turnCompleted: boolean,
+  ): void {
+    const recorder = this.agentReported;
+    if (recorder === undefined) {
+      return;
+    }
+    const provider = live.def.tasks.find((t) => t.id === taskId)?.provider;
+    if (turnCompleted && provider !== undefined) {
+      void recorder.record(liveTask.session, state.items, {
+        provider,
+        cwd: liveTask.cwd,
+        link: { runId, taskId, sessionId: liveTask.session.sessionId },
+      });
+    }
+    if (startedTurn) {
+      recorder.begin(liveTask.session, state.items, liveTask.cwd);
+    }
   }
 
   /**

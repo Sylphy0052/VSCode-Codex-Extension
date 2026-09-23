@@ -167,27 +167,62 @@ export function collectCommandEvidence(
 ): GoalEvidence[] {
   const collected: GoalEvidence[] = [];
   for (const item of items) {
-    if (item.kind !== 'commandExecution' || seen.has(item.id)) {
+    if (seen.has(item.id)) {
       continue;
     }
-    if (!isSettledCommandItem(item)) {
-      // まだ実行中。終わってから証拠にする（次のターンで拾われる）
+    // 実行中の項目は読めない。終わってから証拠にする（次のターンで拾われる）
+    const command = readSettledCommand(item);
+    if (command === undefined) {
       continue;
     }
     // 終わったが終了コードが無い項目（Claudeの成功したBashなど、issue #1375）は、
     // 成功とは言えないため`unknown`で積む
-    const exitCode = readExitCode(item.status);
+    const { exitCode } = command;
     collected.push({
-      kind: classifyCommand(item.detail),
-      source: truncate(item.detail, 200),
+      kind: classifyCommand(command.command),
+      source: truncate(command.command, 200),
       status: exitCode === undefined ? 'unknown' : exitCode === 0 ? 'pass' : 'fail',
       detail: `${
-        exitCode === undefined ? `終了コード不明（status: ${item.status ?? ''}）` : `exit ${exitCode}`
-      }\n${tailOf(item.text, MAX_EVIDENCE_DETAIL_LENGTH)}`.trimEnd(),
+        exitCode === undefined ? `終了コード不明（status: ${command.status}）` : `exit ${exitCode}`
+      }\n${tailOf(command.output, MAX_EVIDENCE_DETAIL_LENGTH)}`.trimEnd(),
       iteration,
     });
   }
   return collected;
+}
+
+/** 終わったコマンド実行の項目から読んだ内容。 */
+export interface SettledCommand {
+  /** 項目のid。同じ項目を二度拾わないための鍵 */
+  id: string;
+  /** 実行したコマンド行 */
+  command: string;
+  /** `exit N` の形から読んだ終了コード。Claudeの成功時のように載らなければ`undefined` */
+  exitCode: number | undefined;
+  /** 項目の`status`そのもの */
+  status: string;
+  /** 出力 */
+  output: string;
+}
+
+/**
+ * 終わったコマンド実行の項目を読む。コマンド実行でない・まだ実行中なら`undefined`。
+ *
+ * ループの証拠台帳（`collectCommandEvidence`）と検証記録（`src/verification/agentReported.ts`、
+ * issue #1379）が同じ判定で項目を読むための入口。
+ */
+export function readSettledCommand(item: ChatItem): SettledCommand | undefined {
+  if (!isSettledCommandItem(item)) {
+    return undefined;
+  }
+  const status = item.status ?? '';
+  return {
+    id: item.id,
+    command: item.detail,
+    exitCode: readExitCode(status),
+    status,
+    output: item.text,
+  };
 }
 
 /**
@@ -268,7 +303,6 @@ export function isSettledCommandItem(item: ChatItem): boolean {
   const status = item.status?.trim() ?? '';
   return status !== '' && !RUNNING_STATUSES.has(status);
 }
-
 
 /** `exit 0` の形をした`status`から終了コードを読む。読めなければ`undefined`。 */
 function readExitCode(status: string | undefined): number | undefined {
