@@ -3644,7 +3644,7 @@ export function chatScript(
       return;
     }
     button.hidden = false;
-    const label = favorite ? 'お気に入りから外す' : 'お気に入りに追加';
+    const label = favorite ? '後で実施から外す' : '後で実施に追加';
     button.setAttribute('aria-pressed', String(favorite));
     button.setAttribute('aria-label', label);
     button.querySelector('.composerOverflowLabel').textContent = label;

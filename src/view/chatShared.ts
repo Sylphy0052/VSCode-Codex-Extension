@@ -1267,7 +1267,7 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v9M5.3 8.3 8 11l2.7-2.7"/><path d="M3.5 13.5h9"/></svg>',
   scrollToBottom:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v9M5.3 8.3 8 11l2.7-2.7"/><path d="M3.5 13.5h9"/></svg>',
-  // お気に入り（Issue #1366）。サイドバーの「お気に入り」ビューと同じ意味の星
+  // お気に入り（Issue #1366）。サイドバーの「後で実施」ビューと同じ意味の星
   favorite:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.5l-3.8 2.1.7-4.3-3.1-3 4.3-.6z"/></svg>',
 } as const satisfies Record<string, string>;
@@ -1622,7 +1622,7 @@ ${chatStyles()}
           <button id="loopEngineeringToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopEngineeringEnabled === true}" aria-label="ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}" title="ループが送る指示の末尾へ、機械的な検証・方針変更・撤退の申告の方針を毎回付けるか切り替えます">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="loopAdvisorToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopAdvisorEnabled === true}" aria-label="ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}" title="ゴール駆動ループの各ターンのあとに、独立したAdvisorセッション（既定ではCodexのgpt-5.6-sol）へ進め方の妥当性を確認させるか切り替えます。目的と受入基準を入れたループでのみ動きます。毎ターンCLIの呼び出しが1本増え、Claude Codeの会話でも抜粋はCodexへ送られます。相談先を変えるにはsettings.jsonのagent.chat.loopAdvisor.provider / .modelを指定します">${COMPOSER_ICONS.secondOpinion}<span class="composerOverflowLabel">ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="limitAutoResumeToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.limitAutoResumeEnabled === true}" aria-label="上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}" title="使用量上限のリセット時刻から30秒後に継続指示を送ります。時刻がない場合は30分後に確認し、再開しても上限中なら1分後に再試行します。会話を閉じた場合、承認待ちの場合、手動で中断した場合は送信しません。">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}</span></button>
-          <button id="favoriteToggle" type="button" class="secondary" role="menuitem" aria-pressed="false" aria-label="お気に入りに追加" title="サイドバーの「お気に入り」ビューへ追加します。タブを閉じても一覧に残り、クリックで再開できます（Issue #1366）" hidden>${COMPOSER_ICONS.favorite}<span class="composerOverflowLabel">お気に入りに追加</span></button>
+          <button id="favoriteToggle" type="button" class="secondary" role="menuitem" aria-pressed="false" aria-label="後で実施に追加" title="サイドバーの「後で実施」ビューへ追加します。タブを閉じても一覧に残り、クリックで再開できます（Issue #1366）" hidden>${COMPOSER_ICONS.favorite}<span class="composerOverflowLabel">後で実施に追加</span></button>
         </div>
       </div>
     </div>

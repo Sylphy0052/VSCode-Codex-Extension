@@ -8,6 +8,7 @@ import { basenameOf } from '../util/paths';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
 import { matchesSessionQuery, sessionNameHighlights } from '../util/sessionFilter';
 import { buildDateGroups, buildFolderGroups, type SessionGroup } from '../util/sessionGrouping';
+import { BackgroundList } from './backgroundList';
 import { formatAbsoluteTime, formatRelativeTime } from './relativeTime';
 import type { SessionActivityState } from './sessionActivity';
 import {
@@ -79,6 +80,11 @@ export class SessionTreeProvider
   readonly onDidChangeDecorations = this.decorationEmitter.event;
 
   private scopeOverride: HistoryScope | undefined;
+  /**
+   * 読み込んだ一覧（Issue #1396）。取得は`refresh`の契機で裏で済ませ、`getChildren`は
+   * 保持済みの値をすぐ返す。取得を待つ間に右クリックのコマンドが要素を引けなくなるため。
+   */
+  private readonly sessions: BackgroundList<SessionSummary[]>;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   /** タイトルバーの絞り込み入力（issue #293）。表示だけを変え、読み込み件数には関与しない。 */
   private filterText = '';
@@ -94,7 +100,24 @@ export class SessionTreeProvider
     private readonly getActivity: (session: SessionSummary) => SessionActivityState | undefined,
     private readonly log: Logger,
     private readonly pinnedStore: PinnedSessionStore = new PinnedSessionStore(),
-  ) {}
+  ) {
+    this.sessions = new BackgroundList(
+      () => {
+        const config = readConfig();
+        return this.providers.listSessions(
+          {
+            scope: this.scope,
+            workspaceFolders: workspaceFolderPaths(),
+            maxEntries: config.historyMaxEntries,
+          },
+          this.log,
+        );
+      },
+      () => this.emitter.fire(),
+      this.log,
+      '履歴の一覧',
+    );
+  }
 
   get scope(): HistoryScope {
     return this.scopeOverride ?? readConfig().historyScope;
@@ -103,7 +126,7 @@ export class SessionTreeProvider
   async setScope(scope: HistoryScope): Promise<void> {
     this.scopeOverride = scope;
     await vscode.commands.executeCommand('setContext', 'codex.historyScope', scope);
-    this.refresh();
+    await this.sessions.reload();
   }
 
   /** 絞り込みの現在値（生の入力。前後空白を含む）。入力欄の初期値の復元に使う。 */
@@ -123,7 +146,8 @@ export class SessionTreeProvider
       'codex.sessionFilterActive',
       this.filterActive,
     );
-    this.refresh();
+    // 絞り込みは表示だけを変えるので、一覧は取り直さず描き直すだけ
+    this.emitter.fire();
   }
 
   async clearFilter(): Promise<void> {
@@ -136,16 +160,17 @@ export class SessionTreeProvider
 
   async pin(session: SessionSummary): Promise<void> {
     await this.pinnedStore.pin(pinKeyFor(session));
-    this.refresh();
+    await this.sessions.reload();
   }
 
   async unpin(session: SessionSummary): Promise<void> {
     await this.pinnedStore.unpin(pinKeyFor(session));
-    this.refresh();
+    await this.sessions.reload();
   }
 
+  /** 一覧を裏で取り直し、取り終えたら描き直す（Issue #1396）。 */
   refresh(): void {
-    this.emitter.fire();
+    void this.sessions.reload();
   }
 
   /** ファイル監視は短時間に何度も発火するため、まとめて1回にする。 */
@@ -167,14 +192,7 @@ export class SessionTreeProvider
     }
 
     const config = readConfig();
-    const sessions = await this.providers.listSessions(
-      {
-        scope: this.scope,
-        workspaceFolders: workspaceFolderPaths(),
-        maxEntries: config.historyMaxEntries,
-      },
-      this.log,
-    );
+    const sessions = await this.sessions.get();
 
     // 絞り込みは表示だけを変える。読み込み件数（maxEntries）はここより前で決まっている
     const visible = this.filterActive
@@ -363,7 +381,7 @@ export function buildSessionTreeItem(
       `- id: \`${session.id}\``,
       ...(session.archived ? ['- アーカイブ済み'] : []),
       // 旧「ピン留め済み」から文言変更（Issue #1366）
-      ...(options.favorite ? ['- お気に入り'] : []),
+      ...(options.favorite ? ['- 後で実施'] : []),
       // 親スレッドが分かる場合のみ（issue #34、design.md §14.26）。切替はできないため、
       // ツリーからは「親が居る」ことが分かるだけに留める
       ...(session.parentThreadId !== undefined

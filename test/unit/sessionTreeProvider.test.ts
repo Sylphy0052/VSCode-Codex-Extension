@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionSummary } from '../../src/codex/types';
 import type { Logger } from '../../src/log';
 import type { ProviderRegistry } from '../../src/provider/registry';
@@ -450,7 +450,7 @@ describe('SessionTreeProvider の行末デコレーション（issue #735）', (
     provider.onDidChangeDecorations(() => order.push('decorations'));
 
     provider.refresh();
-    expect(order).toEqual(['tree']);
+    await vi.waitFor(() => expect(order).toEqual(['tree']));
 
     await provider.getChildren();
 
@@ -551,7 +551,7 @@ describe('SessionTreeProvider.getChildren のグループ化（issue #293、既�
     expect(children).toEqual(sessions);
   });
 
-  it('絞り込みは読み込み件数（maxEntries）を変えない', async () => {
+  it('絞り込みは一覧を取り直さない（読み込み件数も変わらない）', async () => {
     const calls: ListSessionsCall[] = [];
     const sessions = [session({ id: 's1', threadName: 'foo' })];
     const provider = makeProvider(sessions, new PinnedSessionStore(), calls);
@@ -560,8 +560,7 @@ describe('SessionTreeProvider.getChildren のグループ化（issue #293、既�
     await provider.setFilter('foo');
     await provider.getChildren();
 
-    expect(calls).toHaveLength(2);
-    expect(calls[0]?.maxEntries).toBe(calls[1]?.maxEntries);
+    expect(calls).toHaveLength(1);
   });
 });
 
@@ -719,5 +718,40 @@ describe('絞り込み中のラベルの強調（issue #738）', () => {
     expect(provider.getTreeItem(named).label).not.toBe('認証まわりの相談');
     await provider.clearFilter();
     expect(provider.getTreeItem(named).label).toBe('認証まわりの相談');
+  });
+
+  it('取り直し中でも保持済みの一覧をすぐ返す（Issue #1396）', async () => {
+    __mock.setConfig('codex', { 'history.groupBy': 'none' });
+    const s1 = session({ id: 's1' });
+    const s2 = session({ id: 's2' });
+    let current = [s1];
+    let gate: Promise<void> = Promise.resolve();
+    const providers = {
+      get: () => ({ label: 'Codex' }),
+      listSessions: async () => {
+        const snapshot = current;
+        await gate;
+        return snapshot;
+      },
+    } as unknown as ProviderRegistry;
+    const provider = new SessionTreeProvider(providers, () => undefined, fakeLogger());
+    expect(await provider.getChildren()).toEqual([s1]);
+
+    const fired: string[] = [];
+    provider.onDidChangeTreeData(() => fired.push('tree'));
+    let open: () => void = () => undefined;
+    gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    current = [s1, s2];
+    provider.refresh();
+
+    // 取得が終わっていない間は、待たずに直前の一覧を返し、描き直しも促さない
+    expect(await provider.getChildren()).toEqual([s1]);
+    expect(fired).toEqual([]);
+
+    open();
+    await vi.waitFor(() => expect(fired).toEqual(['tree']));
+    expect(await provider.getChildren()).toEqual([s1, s2]);
   });
 });

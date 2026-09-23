@@ -1454,10 +1454,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(tree.onDidChangeTreeData(() => favoritesTree.refresh()));
 
   // お気に入りの追加・解除は履歴ツリー／お気に入りツリー／開いているチャット画面の
-  // 3箇所に反映する必要がある（Issue #1366）
+  // 3箇所に反映する必要がある（Issue #1366）。お気に入りツリーは履歴の取り直し
+  // （数秒かかることがある）を待たずに直接取り直す（Issue #1396）
   context.subscriptions.push(
     pinnedSessions.onDidChange(() => {
       tree.refresh();
+      favoritesTree.refresh();
       chat.refreshFavorites();
       claudeChat.refreshFavorites();
     }),
