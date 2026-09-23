@@ -459,6 +459,44 @@ export interface HandoffNameInput {
    * 引き継ぎ元の表示名（`deriveHandoffBaseName`）。名前の本体と世代番号の両方をここから取る。
    */
   previousName?: string;
+  /**
+   * 引き継ぎ元の最終応答にあるhandoffプロンプトの本文（`extractHandoffPrompt`）。
+   * 引き継ぎ元に名前が無いときだけ、`作業:` 行を名前の本体に使う（Issue #1407）。
+   */
+  handoffPrompt?: string;
+  /** 引き継ぎ元のブランチ名。名前も `作業:` 行も無いときの本体に使う（Issue #1407）。 */
+  gitBranch?: string;
+}
+
+/** 補った名前の本体の上限。`作業:` 行は1行とはいえ長くなりうるため切り詰める（Issue #1407）。 */
+const FALLBACK_NAME_MAX = 40;
+
+/** handoffプロンプトの `作業: <1行>` 行（`~/.claude/skills/handoff` の書式）。 */
+const WORK_LINE = /^作業[:：]\s*(.+)$/mu;
+
+/** 名前の本体にしても作業の手掛かりにならないブランチ。 */
+const UNINFORMATIVE_BRANCHES = new Set(['main', 'master', 'HEAD']);
+
+/**
+ * 引き継ぎ元に名前が無いときの本体（Issue #1407）。「handoffプロンプトの `作業:` 行 >
+ * ブランチ名」の順で選び、どちらも無ければ `undefined`。
+ *
+ * 一度補えば次の世代からは引き継ぎ元の名前として継がれるため、世代ごとに名前が変わる
+ * ことはない（Issue #1255の方針は保つ）。
+ */
+function deriveFallbackName(input: HandoffNameInput): string | undefined {
+  const work = collapse(
+    input.handoffPrompt === undefined ? undefined : WORK_LINE.exec(input.handoffPrompt)?.[1],
+  );
+  if (work !== undefined) {
+    // サロゲートペアの途中で切らないよう、コードポイント単位で数える
+    const chars = [...work];
+    return chars.length > FALLBACK_NAME_MAX
+      ? `${chars.slice(0, FALLBACK_NAME_MAX).join('')}…`
+      : work;
+  }
+  const branch = collapse(input.gitBranch);
+  return branch === undefined || UNINFORMATIVE_BRANCHES.has(branch) ? undefined : branch;
 }
 
 /**
@@ -475,14 +513,16 @@ export interface HandoffNameInput {
  * かどうかは人が決められる（タブの付け直し）ので、自動では推測しない。
  *
  * `(続き2)` から始めて引き継ぐたびに1つ増やす（元が1代目なので次が2）。引き継ぎ元の
- * 名前が取れなければ印だけを返す。
+ * 名前が取れなければ `deriveFallbackName` で本体を補い（Issue #1407。印だけのタブが
+ * 並ぶと何の作業か判らないため）、それも無ければ印だけを返す。
  *
  * タブに収まらない長さは切り詰めない。引き継ぎ元のタブに既に出ていた名前をそのまま
  * 継ぐだけなので、表示の省略はVSCode側に任せる。
  */
 export function buildHandoffSessionName(input: HandoffNameInput): string {
   const previous = collapse(input.previousName?.replace(PROVIDER_PREFIX, ''));
-  const head = previous === undefined ? undefined : stripGeneration(previous);
+  const head =
+    (previous === undefined ? undefined : stripGeneration(previous)) ?? deriveFallbackName(input);
   const generation = nextGeneration(input.previousName);
   return head === undefined ? `(続き${generation})` : `${head} (続き${generation})`;
 }
