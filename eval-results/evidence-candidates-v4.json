@@ -22,7 +22,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1041,
@@ -60,7 +62,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1040,
@@ -78,7 +83,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1038,
@@ -96,7 +103,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1031,
@@ -125,7 +134,11 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1030,
@@ -143,7 +156,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 1021,
@@ -161,7 +177,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 1020,
@@ -179,7 +198,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 1016,
@@ -197,7 +219,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 1015,
@@ -329,7 +354,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 1006,
@@ -347,7 +375,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1004,
@@ -365,7 +395,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1002,
@@ -383,7 +415,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 1000,
@@ -401,7 +435,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 998,
@@ -419,7 +455,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 993,
@@ -437,7 +475,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 991,
@@ -455,7 +496,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 990,
@@ -473,7 +517,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 988,
@@ -491,7 +538,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 987,
@@ -509,7 +558,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 985,
@@ -531,7 +583,11 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 984,
@@ -549,7 +605,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 982,
@@ -567,7 +626,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 980,
@@ -613,7 +675,11 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 979,
@@ -633,7 +699,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 976,
@@ -713,7 +781,12 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 971,
@@ -742,7 +815,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 970,
@@ -760,7 +836,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 969,
@@ -778,7 +856,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 968,
@@ -805,7 +885,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 967,
@@ -823,7 +906,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 966,
@@ -841,7 +927,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 965,
@@ -859,7 +948,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 960,
@@ -894,7 +985,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 959,
@@ -921,7 +1015,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 955,
@@ -978,7 +1075,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 950,
@@ -996,7 +1096,10 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 948,
@@ -1014,7 +1117,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 946,
@@ -1032,7 +1137,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 945,
@@ -1050,7 +1157,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 941,
@@ -1068,7 +1177,9 @@
       "modelCommentCount": 1,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 938,
@@ -1095,7 +1206,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 936,
@@ -1113,7 +1227,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 935,
@@ -1140,7 +1257,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 932,
@@ -1160,7 +1280,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 931,
@@ -1182,7 +1304,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 930,
@@ -1200,7 +1326,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 927,
@@ -1239,7 +1367,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 908,
@@ -1266,7 +1399,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 906,
@@ -1284,7 +1420,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 904,
@@ -1302,7 +1440,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 902,
@@ -1320,7 +1460,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 901,
@@ -1338,7 +1480,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 899,
@@ -1356,7 +1500,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 898,
@@ -1374,7 +1520,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 896,
@@ -1392,7 +1540,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 895,
@@ -1410,7 +1561,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 890,
@@ -1428,7 +1581,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 888,
@@ -1446,7 +1601,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 886,
@@ -1475,7 +1633,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 884,
@@ -1493,7 +1654,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 882,
@@ -1504,7 +1668,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["account-comment"]
+      "channels": [
+        "account-comment"
+      ]
     },
     {
       "prNumber": 881,
@@ -1515,7 +1681,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 880,
@@ -1526,7 +1694,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 879,
@@ -1537,7 +1707,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["account-comment"]
+      "channels": [
+        "account-comment"
+      ]
     },
     {
       "prNumber": 878,
@@ -1555,7 +1727,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 876,
@@ -1573,7 +1747,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 875,
@@ -1591,7 +1768,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 873,
@@ -1602,7 +1782,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-comment", "account-review"]
+      "channels": [
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 871,
@@ -1620,7 +1803,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 870,
@@ -1638,7 +1824,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 867,
@@ -1656,7 +1845,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 865,
@@ -1674,7 +1866,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 863,
@@ -1692,7 +1887,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 861,
@@ -1703,7 +1901,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["account-comment"]
+      "channels": [
+        "account-comment"
+      ]
     },
     {
       "prNumber": 860,
@@ -1714,7 +1914,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-comment", "account-review"]
+      "channels": [
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 859,
@@ -1732,7 +1935,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 857,
@@ -1765,7 +1971,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 856,
@@ -1800,7 +2010,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 855,
@@ -1827,7 +2041,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 854,
@@ -1854,7 +2072,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 853,
@@ -1881,7 +2103,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 852,
@@ -1908,7 +2134,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 851,
@@ -1926,7 +2156,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 843,
@@ -1944,7 +2177,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 841,
@@ -1962,7 +2198,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 838,
@@ -1980,7 +2219,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 835,
@@ -1998,7 +2240,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 832,
@@ -2009,7 +2253,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 831,
@@ -2038,7 +2284,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 828,
@@ -2056,7 +2305,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 824,
@@ -2074,7 +2325,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 822,
@@ -2092,7 +2346,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 820,
@@ -2110,7 +2366,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 818,
@@ -2121,7 +2380,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-comment", "account-review"]
+      "channels": [
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 817,
@@ -2139,7 +2401,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 815,
@@ -2168,7 +2433,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 812,
@@ -2186,7 +2453,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 810,
@@ -2204,7 +2473,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 808,
@@ -2242,7 +2514,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 806,
@@ -2269,7 +2545,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 805,
@@ -2287,7 +2567,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 804,
@@ -2305,7 +2587,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 803,
@@ -2323,7 +2608,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 802,
@@ -2341,7 +2629,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 801,
@@ -2359,7 +2650,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 800,
@@ -2377,7 +2671,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 799,
@@ -2395,7 +2692,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 798,
@@ -2413,7 +2713,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 797,
@@ -2431,7 +2734,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 796,
@@ -2449,7 +2755,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 794,
@@ -2467,7 +2776,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 793,
@@ -2485,7 +2797,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 792,
@@ -2503,7 +2818,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 791,
@@ -2521,7 +2839,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 790,
@@ -2539,7 +2860,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 789,
@@ -2557,7 +2881,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 788,
@@ -2575,7 +2902,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 787,
@@ -2593,7 +2923,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 786,
@@ -2611,7 +2944,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 785,
@@ -2629,7 +2965,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 784,
@@ -2647,7 +2986,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 783,
@@ -2665,7 +3007,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 782,
@@ -2683,7 +3028,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 780,
@@ -2701,7 +3049,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 779,
@@ -2719,7 +3070,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 776,
@@ -2737,7 +3091,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 773,
@@ -2766,7 +3123,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 771,
@@ -2784,7 +3144,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 770,
@@ -2802,7 +3165,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 769,
@@ -2820,7 +3186,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 768,
@@ -2838,7 +3207,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 767,
@@ -2856,7 +3228,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 763,
@@ -2885,7 +3260,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 761,
@@ -2903,7 +3283,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 732,
@@ -2921,7 +3304,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 731,
@@ -2939,7 +3325,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 728,
@@ -2968,7 +3357,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 727,
@@ -2995,7 +3387,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 726,
@@ -3013,7 +3408,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 724,
@@ -3052,7 +3450,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 722,
@@ -3175,7 +3576,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 707,
@@ -3193,7 +3596,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 704,
@@ -3222,7 +3627,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 699,
@@ -3261,7 +3668,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 697,
@@ -3290,7 +3699,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 695,
@@ -3308,7 +3719,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 692,
@@ -3326,7 +3739,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 689,
@@ -3344,7 +3759,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 687,
@@ -3362,7 +3779,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-comment"]
+      "channels": [
+        "closing-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 686,
@@ -3373,7 +3793,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["account-comment"]
+      "channels": [
+        "account-comment"
+      ]
     },
     {
       "prNumber": 684,
@@ -3413,7 +3835,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 681,
@@ -3442,7 +3868,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 677,
@@ -3453,7 +3881,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["account-comment"]
+      "channels": [
+        "account-comment"
+      ]
     },
     {
       "prNumber": 673,
@@ -3471,7 +3901,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 672,
@@ -3498,7 +3930,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 669,
@@ -3552,7 +3987,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 664,
@@ -3579,7 +4017,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 661,
@@ -3608,7 +4049,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 659,
@@ -3637,7 +4080,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 658,
@@ -3666,7 +4111,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 657,
@@ -3695,7 +4142,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 655,
@@ -3724,7 +4173,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 654,
@@ -3832,7 +4283,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 652,
@@ -3871,7 +4326,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 650,
@@ -3903,7 +4362,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test"
+      ]
     },
     {
       "prNumber": 648,
@@ -3932,7 +4394,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 647,
@@ -3980,7 +4444,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 645,
@@ -4054,7 +4523,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 644,
@@ -4102,7 +4574,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 642,
@@ -4148,7 +4623,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 641,
@@ -4194,7 +4672,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 633,
@@ -4212,7 +4693,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 631,
@@ -4278,7 +4761,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 629,
@@ -4298,7 +4784,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 626,
@@ -4329,7 +4817,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 623,
@@ -4368,7 +4860,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 621,
@@ -4415,7 +4911,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 617,
@@ -4446,7 +4946,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 611,
@@ -4485,7 +4987,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 598,
@@ -4505,7 +5009,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 593,
@@ -4525,7 +5031,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 592,
@@ -4556,7 +5064,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 591,
@@ -4587,7 +5097,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 588,
@@ -4618,7 +5130,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 574,
@@ -4669,7 +5183,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 573,
@@ -4720,7 +5236,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 561,
@@ -4740,7 +5258,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 560,
@@ -4779,7 +5299,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 549,
@@ -4810,7 +5332,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 548,
@@ -4851,7 +5375,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 542,
@@ -4968,7 +5494,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 540,
@@ -5007,7 +5535,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 538,
@@ -5035,7 +5565,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 537,
@@ -5082,7 +5614,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 536,
@@ -5145,7 +5679,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 535,
@@ -5216,7 +5752,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 532,
@@ -5255,7 +5793,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 525,
@@ -5299,7 +5840,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 523,
@@ -5335,7 +5879,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 521,
@@ -5363,7 +5909,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 518,
@@ -5399,7 +5947,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 517,
@@ -5454,7 +6004,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 510,
@@ -5535,7 +6089,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 509,
@@ -5574,7 +6130,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 508,
@@ -5602,7 +6162,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 507,
@@ -5633,7 +6195,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 506,
@@ -5661,7 +6225,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 504,
@@ -5718,7 +6284,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 503,
@@ -5770,7 +6340,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 501,
@@ -5827,7 +6399,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 495,
@@ -5866,7 +6440,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 494,
@@ -5923,7 +6499,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 492,
@@ -5959,7 +6537,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 489,
@@ -6016,7 +6596,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 488,
@@ -6081,7 +6663,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 486,
@@ -6125,7 +6712,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 483,
@@ -6206,7 +6796,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 478,
@@ -6242,7 +6837,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 477,
@@ -6299,7 +6897,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 476,
@@ -6330,7 +6932,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 473,
@@ -6358,7 +6964,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 472,
@@ -6386,7 +6995,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 471,
@@ -6414,7 +7026,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment"
+      ]
     },
     {
       "prNumber": 470,
@@ -6441,7 +7056,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 468,
@@ -6469,7 +7087,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 465,
@@ -6504,7 +7124,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 464,
@@ -6524,7 +7147,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 462,
@@ -6560,7 +7185,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 461,
@@ -6580,7 +7207,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 457,
@@ -6600,7 +7229,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 452,
@@ -6620,7 +7251,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 449,
@@ -6638,7 +7271,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["closing-issue"]
+      "channels": [
+        "closing-issue"
+      ]
     },
     {
       "prNumber": 447,
@@ -6765,7 +7400,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 444,
@@ -6855,7 +7492,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 442,
@@ -6901,7 +7542,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 431,
@@ -6956,7 +7599,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 429,
@@ -6987,7 +7632,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 426,
@@ -7034,7 +7681,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 425,
@@ -7072,7 +7721,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 422,
@@ -7121,7 +7772,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 421,
@@ -7159,7 +7812,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 0,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue"]
+      "channels": [
+        "follow-up-issue"
+      ]
     },
     {
       "prNumber": 418,
@@ -7197,7 +7852,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 417,
@@ -7254,7 +7913,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 415,
@@ -7313,7 +7977,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 414,
@@ -7351,7 +8020,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 411,
@@ -7389,7 +8061,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 409,
@@ -7456,7 +8132,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 405,
@@ -7614,7 +8295,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 399,
@@ -7671,7 +8357,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 398,
@@ -7717,7 +8408,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 397,
@@ -7774,7 +8469,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 395,
@@ -7812,7 +8512,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 394,
@@ -7875,7 +8579,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 393,
@@ -7942,7 +8650,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 392,
@@ -7996,7 +8709,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 390,
@@ -8035,7 +8751,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 387,
@@ -8073,7 +8792,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 385,
@@ -8128,7 +8851,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 384,
@@ -8273,7 +8999,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 377,
@@ -8402,7 +9133,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 373,
@@ -8496,7 +9232,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 371,
@@ -8544,7 +9283,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 370,
@@ -8574,7 +9318,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 367,
@@ -8628,7 +9376,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 343,
@@ -8761,7 +9512,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 342,
@@ -8802,7 +9558,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 331,
@@ -8820,7 +9579,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 330,
@@ -8938,7 +9700,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 325,
@@ -8956,7 +9721,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 324,
@@ -8974,7 +9742,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 323,
@@ -8992,7 +9763,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 319,
@@ -9108,7 +9882,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 317,
@@ -9126,7 +9903,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 316,
@@ -9144,7 +9924,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 313,
@@ -9182,7 +9965,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 312,
@@ -9220,7 +10007,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 311,
@@ -9258,7 +10049,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 309,
@@ -9296,7 +10091,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 307,
@@ -9396,7 +10195,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 304,
@@ -9444,7 +10247,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 303,
@@ -9492,7 +10299,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 302,
@@ -9530,7 +10341,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 301,
@@ -9578,7 +10393,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 300,
@@ -9596,7 +10415,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 299,
@@ -9634,7 +10456,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 285,
@@ -9652,7 +10478,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 283,
@@ -9670,7 +10499,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 281,
@@ -9688,7 +10520,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 279,
@@ -9706,7 +10541,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 277,
@@ -9724,7 +10562,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 275,
@@ -9735,7 +10576,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 274,
@@ -9746,7 +10589,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 273,
@@ -9757,7 +10602,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 272,
@@ -9779,7 +10626,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "account-review"
+      ]
     },
     {
       "prNumber": 271,
@@ -9828,7 +10679,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 270,
@@ -9870,7 +10726,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "account-review"
+      ]
     },
     {
       "prNumber": 269,
@@ -9892,7 +10752,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "account-review"
+      ]
     },
     {
       "prNumber": 268,
@@ -9903,7 +10767,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 267,
@@ -9921,7 +10787,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 265,
@@ -9939,7 +10808,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 264,
@@ -9957,7 +10829,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 260,
@@ -9975,7 +10850,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 257,
@@ -10004,7 +10882,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 256,
@@ -10022,7 +10905,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 255,
@@ -10040,7 +10926,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 254,
@@ -10058,7 +10947,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 251,
@@ -10076,7 +10968,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 248,
@@ -10094,7 +10989,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 245,
@@ -10121,7 +11019,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 243,
@@ -10139,7 +11041,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 242,
@@ -10166,7 +11071,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 239,
@@ -10206,7 +11115,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 238,
@@ -10239,7 +11151,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 235,
@@ -10266,7 +11182,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 233,
@@ -10293,7 +11213,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 232,
@@ -10320,7 +11244,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 231,
@@ -10347,7 +11275,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 230,
@@ -10374,7 +11306,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 229,
@@ -10401,7 +11337,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 221,
@@ -10419,7 +11359,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 220,
@@ -10447,7 +11390,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 219,
@@ -10486,7 +11432,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-fix", "follow-up-test", "follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 217,
@@ -10506,7 +11457,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 215,
@@ -10524,7 +11478,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 214,
@@ -10535,7 +11492,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 213,
@@ -10546,7 +11505,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 212,
@@ -10557,7 +11518,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 210,
@@ -10568,7 +11531,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-comment", "account-review"]
+      "channels": [
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 209,
@@ -10590,7 +11556,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 208,
@@ -10612,7 +11580,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 207,
@@ -10630,7 +11600,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 197,
@@ -10650,7 +11623,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 184,
@@ -10668,7 +11644,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 183,
@@ -10686,7 +11665,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 182,
@@ -10704,7 +11686,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 181,
@@ -10722,7 +11707,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 180,
@@ -10740,7 +11728,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 179,
@@ -10758,7 +11749,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 177,
@@ -10776,7 +11770,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 174,
@@ -10787,7 +11784,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 166,
@@ -10805,7 +11804,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 165,
@@ -10823,7 +11825,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 162,
@@ -10850,7 +11856,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 161,
@@ -10905,7 +11915,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["account-comment", "account-review"]
+      "channels": [
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 157,
@@ -10927,7 +11940,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 156,
@@ -10956,7 +11971,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 154,
@@ -10974,7 +11992,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 153,
@@ -10992,7 +12013,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 151,
@@ -11010,7 +12034,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 150,
@@ -11021,7 +12048,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 149,
@@ -11050,7 +12079,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-fix", "follow-up-test", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-fix",
+        "follow-up-test",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 143,
@@ -11068,7 +12102,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 141,
@@ -11162,7 +12199,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 138,
@@ -11189,7 +12230,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 136,
@@ -11207,7 +12252,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 135,
@@ -11323,7 +12371,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 133,
@@ -11341,7 +12392,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 131,
@@ -11368,7 +12422,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 130,
@@ -11386,7 +12444,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 129,
@@ -11421,7 +12482,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 128,
@@ -11439,7 +12504,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 127,
@@ -11457,7 +12525,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 126,
@@ -11475,7 +12546,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 125,
@@ -11493,7 +12567,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 124,
@@ -11582,7 +12659,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 121,
@@ -11600,7 +12680,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 119,
@@ -11618,7 +12701,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 117,
@@ -11636,7 +12722,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 116,
@@ -11654,7 +12743,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 115,
@@ -11672,7 +12764,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 114,
@@ -11699,7 +12794,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 112,
@@ -11717,7 +12816,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 110,
@@ -11735,7 +12837,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 109,
@@ -11762,7 +12867,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 108,
@@ -11789,7 +12899,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 107,
@@ -11807,7 +12921,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 106,
@@ -11834,7 +12951,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 103,
@@ -11861,7 +12982,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 102,
@@ -11879,7 +13004,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 101,
@@ -11897,7 +13025,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 99,
@@ -11915,7 +13046,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 98,
@@ -11942,7 +13076,11 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 90,
@@ -11969,7 +13107,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 89,
@@ -11987,7 +13130,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 87,
@@ -12005,7 +13151,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 86,
@@ -12016,7 +13165,9 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["account-review"]
+      "channels": [
+        "account-review"
+      ]
     },
     {
       "prNumber": 85,
@@ -12034,7 +13185,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 84,
@@ -12052,7 +13206,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 83,
@@ -12070,7 +13227,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 82,
@@ -12088,7 +13248,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 81,
@@ -12115,7 +13278,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 80,
@@ -12133,7 +13301,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 79,
@@ -12151,7 +13322,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 76,
@@ -12178,7 +13352,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 75,
@@ -12207,7 +13386,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 74,
@@ -12248,7 +13430,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 0,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 73,
@@ -12266,7 +13451,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 72,
@@ -12293,7 +13481,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 71,
@@ -12311,7 +13504,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 70,
@@ -12329,7 +13525,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 69,
@@ -12356,7 +13555,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 66,
@@ -12380,7 +13584,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 65,
@@ -12407,7 +13614,12 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["follow-up-issue", "closing-issue", "account-comment", "account-review"]
+      "channels": [
+        "follow-up-issue",
+        "closing-issue",
+        "account-comment",
+        "account-review"
+      ]
     },
     {
       "prNumber": 64,
@@ -12431,7 +13643,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 60,
@@ -12449,7 +13664,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 50,
@@ -12467,7 +13685,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     },
     {
       "prNumber": 47,
@@ -12485,7 +13706,10 @@
       "modelCommentCount": 0,
       "accountReviewCount": 1,
       "modelReviewCount": 1,
-      "channels": ["closing-issue", "account-review"]
+      "channels": [
+        "closing-issue",
+        "account-review"
+      ]
     }
   ]
 }

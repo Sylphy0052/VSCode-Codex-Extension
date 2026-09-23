@@ -59,7 +59,10 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-504",
@@ -67,7 +70,9 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-1014",
@@ -83,7 +88,10 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-503",
@@ -99,7 +107,9 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "L",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-417",
@@ -107,7 +117,9 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-384",
@@ -123,7 +135,9 @@
       "stratum": "hard-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-951",
@@ -131,7 +145,10 @@
       "stratum": "normal-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-343",
@@ -139,7 +156,9 @@
       "stratum": "normal-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-486",
@@ -155,7 +174,10 @@
       "stratum": "normal-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-415",
@@ -163,7 +185,9 @@
       "stratum": "normal-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["refactor"]
+      "tags": [
+        "refactor"
+      ]
     },
     {
       "caseId": "pr-90",
@@ -171,7 +195,10 @@
       "stratum": "normal-positive",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-183",
@@ -179,7 +206,9 @@
       "stratum": "no-problem",
       "kind": "codeReview",
       "changeSizeStratum": "L",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-878",
@@ -187,7 +216,9 @@
       "stratum": "no-problem",
       "kind": "codeReview",
       "changeSizeStratum": "S",
-      "tags": ["test-only"]
+      "tags": [
+        "test-only"
+      ]
     },
     {
       "caseId": "pr-220",
@@ -195,7 +226,10 @@
       "stratum": "no-problem",
       "kind": "codeReview",
       "changeSizeStratum": "S",
-      "tags": ["single-file", "test-only"]
+      "tags": [
+        "single-file",
+        "test-only"
+      ]
     },
     {
       "caseId": "pr-988",
@@ -203,7 +237,9 @@
       "stratum": "no-problem",
       "kind": "codeReview",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-179",
@@ -211,7 +247,9 @@
       "stratum": "no-problem",
       "kind": "codeReview",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-174",
@@ -219,7 +257,9 @@
       "stratum": "no-problem",
       "kind": "codeReview",
       "changeSizeStratum": "M",
-      "tags": ["touches-docs"]
+      "tags": [
+        "touches-docs"
+      ]
     },
     {
       "caseId": "pr-510",
@@ -227,7 +267,10 @@
       "stratum": "indeterminate",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-542",
@@ -235,7 +278,10 @@
       "stratum": "indeterminate",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     },
     {
       "caseId": "pr-447",
@@ -243,7 +289,10 @@
       "stratum": "indeterminate",
       "kind": "codeReview",
       "changeSizeStratum": "XL",
-      "tags": ["touches-docs", "extreme-tail"]
+      "tags": [
+        "touches-docs",
+        "extreme-tail"
+      ]
     }
   ]
 }
