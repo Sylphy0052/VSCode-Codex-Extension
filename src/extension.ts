@@ -806,7 +806,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       }
     | undefined;
   // 送れなかった指摘はメモリ上に1件だけ持つ。永続化と一覧表示はA1（Issue #1381）の範囲。
-  const pendingReviewFeedback = new PendingReviewFeedback<object>();
+  const pendingReviewFeedback = new PendingReviewFeedback<{ threadId: string; payload: string }>();
   const isActiveReviewDiff = (): boolean => {
     const editor = vscode.window.activeTextEditor;
     const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
@@ -1015,7 +1015,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return reviewFailureOf(sent);
       };
       // 送れなかった指摘は書き直させずに保持し、同じ内容で再検査して送り直すか破棄するかを選ばせる。
-      const feedback = {};
+      const feedback = { threadId: target.session.threadId, payload };
       let failure = await attempt();
       while (failure !== undefined) {
         pendingReviewFeedback.hold(feedback);
