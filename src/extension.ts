@@ -159,6 +159,7 @@ import { SessionActions, nodeCommandRunner, type SessionAction } from './session
 import { SessionWatcher } from './session/sessionWatcher';
 import { UsageReader } from './session/usageReader';
 import { PinnedSessionStore, pinKeyFor } from './util/pinnedSessions';
+import { ManuallyNamedSessionStore } from './view/sessionAutoName';
 import {
   buildSelectionPayload,
   computeSelectionLineRange,
@@ -520,6 +521,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // お気に入り（Issue #1366）。履歴ツリー・お気に入りツリー・チャット画面の3箇所から
   // 参照するため、それらより前に生成する
   const pinnedSessions = new PinnedSessionStore(context.globalState);
+  // 手で名前を変えたセッションの印（Issue #1426）。両画面で同じ保存先を使う
+  const manuallyNamedSessions = new ManuallyNamedSessionStore(context.globalState);
 
   const chat = new ChatViewManager(
     codexPath,
@@ -560,6 +563,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
     context.globalStorageUri.fsPath,
     pinnedSessions,
+    { marks: manuallyNamedSessions },
   );
   context.subscriptions.push(chat);
 
@@ -584,6 +588,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 引き継ぎのポインタファイル（Issue #1079）の置き場所。リポジトリ外に置く
     context.globalStorageUri.fsPath,
     pinnedSessions,
+    { marks: manuallyNamedSessions },
   );
   context.subscriptions.push(claudeChat);
 

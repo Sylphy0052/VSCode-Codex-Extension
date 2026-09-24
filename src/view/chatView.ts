@@ -59,6 +59,7 @@ import {
   readAutoHandoffOnMilestone,
   readAutoHandoffClassifierTimeoutMs,
   readAutoHandoffRouterEnabled,
+  readSessionAutoNameEnabled,
   readAutoHandoffCloseOldTab,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
@@ -152,8 +153,14 @@ import {
   probeSafeBoundary,
 } from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
+import {
+  SerialRerun,
+  type SessionAutoNameHost,
+  shouldAutoName,
+  summarizeSessionName,
+} from './sessionAutoName';
 import type { SessionStore } from '../session/sessionStore';
-import type { PinnedSessionStore } from '../util/pinnedSessions';
+import { pinKeyFor, type PinnedSessionStore } from '../util/pinnedSessions';
 import {
   createNodeSummaryRolloutDeps,
   type SummaryRolloutDeps,
@@ -604,6 +611,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     private readonly globalStorageDir?: string,
     /** お気に入り（Issue #1366）の永続化先。未指定なら何も永続化しないno-op。 */
     pinnedSessions?: PinnedSessionStore,
+    /** タブ名の自動付け直し（Issue #1426）。渡さなければ自動で付け直さない。 */
+    private readonly autoName?: SessionAutoNameHost,
   ) {
     super(pinnedSessions, 'codex');
     this.catalog = new CommandCatalog(this.fs);
@@ -1129,6 +1138,72 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
+  }
+
+  /** タブ名の自動付け直し（Issue #1426）の実行役。1セッション1本に限るためパネルごとに持つ。 */
+  private readonly autoNamers = new WeakMap<ChatPanel, SerialRerun>();
+
+  /**
+   * タブ名の自動付け直し（Issue #1426）の発火判定。ターン完了時に呼ぶ。
+   *
+   * 手で名前を変えたセッション、オーケストレータが名前を指定したタスク、再開できない
+   * ephemeralな脇道（名前を保存できない）は対象外。
+   */
+  private maybeAutoName(entry: ChatPanel, state: ChatState): void {
+    const threadId = entry.session.threadId;
+    if (
+      this.autoName === undefined ||
+      threadId === undefined ||
+      !entry.persistModelSettings ||
+      (entry.pinnedName !== undefined && entry.pinnedName.trim() !== '') ||
+      !readSessionAutoNameEnabled() ||
+      this.autoName.marks.has(pinKeyFor({ provider: 'codex', id: threadId })) ||
+      !shouldAutoName(state.items)
+    ) {
+      return;
+    }
+    let runner = this.autoNamers.get(entry);
+    if (runner === undefined) {
+      runner = new SerialRerun(() => this.runAutoName(entry));
+      this.autoNamers.set(entry, runner);
+    }
+    runner.request();
+  }
+
+  /** 要約して名前を付け直す。材料は実行の時点の会話から読む（走らせ直しで最新を拾うため）。 */
+  private async runAutoName(entry: ChatPanel): Promise<void> {
+    const threadId = entry.session.threadId;
+    if (entry.disposed || threadId === undefined) {
+      return;
+    }
+    const state = entry.session.getState();
+    const name = await summarizeSessionName(
+      {
+        provider: 'codex',
+        executable: readConfig().executablePath,
+        logWarn: (message) => this.log.warn(message),
+        run: this.autoName?.run,
+      },
+      { items: state.items, currentName: state.name, gitBranch: await resolveGitBranch(entry.cwd) },
+    );
+    // 待っている間にタブが閉じられた・会話が切り替わった・手で名前を変えられたときは捨てる
+    if (
+      name === undefined ||
+      entry.disposed ||
+      entry.session.threadId !== threadId ||
+      this.autoName?.marks.has(pinKeyFor({ provider: 'codex', id: threadId })) ||
+      name === entry.session.getState().name
+    ) {
+      return;
+    }
+    try {
+      await entry.session.setName(name);
+      this.log.info(`タブ名を自動で付け直しました: ${name}`);
+    } catch (e) {
+      this.log.warn(
+        `タブ名の自動付け直しを保存できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /**
@@ -1902,6 +1977,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // ループを止めうる`loop.observe`より前に記録する（最後のターンも残すため。issue #1379）
       this.recordLoopCommands(entry, state);
       this.notifyTurnComplete(entry, state);
+      this.maybeAutoName(entry, state);
     }
     const title = deriveTitle(state, entry.pinnedName);
     if (title !== undefined && entry.title !== title) {
@@ -3418,6 +3494,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
     try {
       await entry.session.setName(name.trim());
+      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない
+      await this.autoName?.marks.add(pinKeyFor({ provider: 'codex', id: entry.session.threadId }));
     } catch (e) {
       this.reportError(e);
     }

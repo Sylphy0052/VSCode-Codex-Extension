@@ -21,6 +21,10 @@ import {
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import {
+  ManuallyNamedSessionStore,
+  type SessionAutoNameHost,
+} from '../../src/view/sessionAutoName';
+import {
   buildClaudeChatPanelOptions,
   ClaudeChatViewManager,
   deriveTitle,
@@ -124,6 +128,8 @@ function createManager(options?: {
   sessionSettings?: SessionModelSettingsStore;
   /** 引き継ぎのポインタファイル（Issue #1079）の置き場所。 */
   globalStorageDir?: string;
+  /** タブ名の自動付け直し（Issue #1426）。 */
+  autoName?: SessionAutoNameHost;
 }): {
   manager: ClaudeChatViewManager;
   store: ClaudeSessionStore;
@@ -145,6 +151,8 @@ function createManager(options?: {
     undefined,
     options?.sessionSettings,
     options?.globalStorageDir ?? mkdtempSync(join(tmpdir(), 'claude-handoff-')),
+    undefined,
+    options?.autoName,
   );
   return { manager, store };
 }
@@ -1040,6 +1048,104 @@ describe('ClaudeChatViewManager', () => {
  * 直接流し込み、`stubStart` で実プロセスを起こさずに `threadId` だけ確定させる
  * （既存の pauseLoop/resumeLoop テストと同じ手法）。
  */
+/** ユーザー発言1件分のstream-json行。 */
+const userTextLine = (uuid: string, text: string): string =>
+  `${JSON.stringify({ type: 'user', uuid, message: { role: 'user', content: [{ type: 'text', text }] } })}\n`;
+
+/**
+ * タブ名の自動付け直し（Issue #1426）。要約のCLIは `autoName.run` で差し替え、実際には
+ * 起こさない。
+ */
+describe('ClaudeChatViewManagerのタブ名の自動付け直し（Issue #1426）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function fakeAutoName(text: string): SessionAutoNameHost & { prompts: string[] } {
+    const prompts: string[] = [];
+    return {
+      prompts,
+      marks: new ManuallyNamedSessionStore(fakeMemento()),
+      run: (_deps, prompt) => {
+        prompts.push(prompt);
+        return Promise.resolve({ ok: true, text });
+      },
+    };
+  }
+
+  async function openWithFirstTurn(
+    manager: ClaudeChatViewManager,
+    sessions: ClaudeStreamSession[],
+    sessionId: string,
+  ): Promise<ClaudeStreamSession> {
+    await manager.openNew('/workspace/root');
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    session.receive(initLine(sessionId));
+    session.receive(userTextLine('u1', 'Issue #1426 のタブ名を実装して'));
+    session.receive(assistantTextLine('a1', '実装します'));
+    return session;
+  }
+
+  it('最初のターンが終わると要約した名前をストアとタブ名へ反映する', async () => {
+    const { sessions } = stubStartCapturing();
+    const store = fakeStore();
+    const autoName = fakeAutoName(
+      '{"issue": 1426, "mr": null, "pr": null, "slug": "タブ名の自動付け直し"}',
+    );
+    const { manager } = createManager({ store, autoName });
+
+    const session = await openWithFirstTurn(manager, sessions, 'session-auto');
+    session.receive(resultLine());
+
+    await vi.waitFor(() => {
+      expect(store.getName('session-auto')).toBe('#1426 タブ名の自動付け直し');
+    });
+    expect(autoName.prompts).toHaveLength(1);
+    expect(autoName.prompts[0]).toContain('Issue #1426 のタブ名を実装して');
+    await flush();
+    expect(__mock.lastCreatedPanel()?.title).toContain('#1426 タブ名の自動付け直し');
+  });
+
+  it('手で名前を変えたセッションは付け直さない', async () => {
+    const { sessions } = stubStartCapturing();
+    const store = fakeStore();
+    const autoName = fakeAutoName('{"issue": 1426, "slug": "自動の名前"}');
+    const { manager } = createManager({ store, autoName });
+
+    const session = await openWithFirstTurn(manager, sessions, 'session-manual');
+    __mock.showInputBoxAnswer = '手で付けた名前';
+    await manager.renameActive();
+    expect(autoName.marks.has('claude:session-manual')).toBe(true);
+
+    session.receive(resultLine());
+    await flush();
+    expect(autoName.prompts).toHaveLength(0);
+    expect(store.getName('session-manual')).toBe('手で付けた名前');
+  });
+
+  it('設定で無効にすると付け直さない', async () => {
+    __mock.setConfig('agent', { 'sessionAutoName.enabled': false });
+    const { sessions } = stubStartCapturing();
+    const autoName = fakeAutoName('{"issue": 1426, "slug": "自動の名前"}');
+    const { manager } = createManager({ autoName });
+
+    const session = await openWithFirstTurn(manager, sessions, 'session-off');
+    session.receive(resultLine());
+    await flush();
+    expect(autoName.prompts).toHaveLength(0);
+  });
+});
+
 describe('ClaudeChatViewManagerの名前変更（issue #199）', () => {
   beforeEach(() => {
     __mock.reset();

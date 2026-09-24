@@ -567,8 +567,18 @@ function nextGeneration(previousName: string | undefined): number {
   return Number.isSafeInteger(generation) ? generation + 1 : generation;
 }
 
+/**
+ * 名前の末尾にある世代の印 `(続きN)` を返す。無ければ `undefined`。
+ *
+ * タブ名の自動付け直し（Issue #1426）で、本体だけを差し替えて印を残すために使う。
+ */
+export function generationMarkOf(name: string | undefined): string | undefined {
+  const matched = CONTINUATION_SUFFIX.exec(collapse(name) ?? '');
+  return matched === null ? undefined : `(続き${matched[2]})`;
+}
+
 /** 既に付いている世代の印を落とす。付け直しで `(続き2) (続き3)` にしないため。 */
-function stripGeneration(name: string): string | undefined {
+export function stripGeneration(name: string): string | undefined {
   const matched = CONTINUATION_SUFFIX.exec(name);
   if (matched === null) {
     return name;
