@@ -1382,9 +1382,10 @@ export class ClaudeChatViewManager
     try {
       await this.store.rename(sessionId, name);
       // 保存を待つ間に手で名前を変えられたら、タブ名は手で付けた方を残す（ストアも後から
-      // 書いた手の名前が勝つ）
+      // 書いた手の名前が勝つ）。会話が切り替わったら、今の会話のタブ名は変えない
       if (
         entry.disposed ||
+        entry.session.threadId !== sessionId ||
         this.autoName?.marks.has(pinKeyFor({ provider: 'claude', id: sessionId }))
       ) {
         return;

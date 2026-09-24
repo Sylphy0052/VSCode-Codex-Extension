@@ -1133,6 +1133,30 @@ describe('ClaudeChatViewManagerのタブ名の自動付け直し（Issue #1426�
     expect(store.getName('session-manual')).toBe('手で付けた名前');
   });
 
+  it('保存を待つ間に会話が切り替わったら、今の会話のタブ名は変えない', async () => {
+    const { sessions } = stubStartCapturing();
+    const names = new Map<string, string>();
+    const store = fakeStore({
+      getName: (sessionId: string) => names.get(sessionId),
+      rename: async (sessionId: string, name: string) => {
+        sessions[sessions.length - 1]?.receive(initLine('session-next'));
+        names.set(sessionId, name);
+      },
+    });
+    const autoName = fakeAutoName('{"issue": 1426, "slug": "前の会話の名前"}');
+    const { manager } = createManager({ store, autoName });
+
+    const session = await openWithFirstTurn(manager, sessions, 'session-prev');
+    session.receive(resultLine());
+
+    await vi.waitFor(() => {
+      expect(names.get('session-prev')).toBe('#1426 前の会話の名前');
+    });
+    await flush();
+    expect(session.threadId).toBe('session-next');
+    expect(session.getState().name).toBeUndefined();
+  });
+
   it('設定で無効にすると付け直さない', async () => {
     __mock.setConfig('agent', { 'sessionAutoName.enabled': false });
     const { sessions } = stubStartCapturing();
