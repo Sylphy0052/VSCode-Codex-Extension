@@ -26,12 +26,17 @@ const USER_MESSAGE_LIMIT = 600;
 const ASSISTANT_MESSAGE_LIMIT = 800;
 
 /**
- * 付け直しの契機になる語（Issue #1426）。大文字小文字を区別しない。
+ * 付け直しの契機になる語（Issue #1426）。
  *
  * 前後が英字でないことを単語境界とみなす。`\b` だと `MR102` のように番号が続く書き方を
  * 拾えず、`PRD` や `prompt` は英字が続くので除外したい。
+ *
+ * `Issue` は大文字小文字を区別しない。`MR` / `PR` は大文字で書かれたときか、直後に
+ * `#` / `!` / 数字が続くときだけ拾う。大小を無視すると英文の敬称 `Mr.` でも反応する（Issue #1428）。
  */
-const WORK_REFERENCE = /(?<![A-Za-z])(?:issue|mr|pr)(?![A-Za-z])/iu;
+const ISSUE_REFERENCE = /(?<![A-Za-z])issue(?![A-Za-z])/iu;
+const UPPER_MR_PR_REFERENCE = /(?<![A-Za-z])(?:MR|PR)(?![A-Za-z])/u;
+const NUMBERED_MR_PR_REFERENCE = /(?<![A-Za-z])(?:mr|pr)\s?[#!\d]/iu;
 
 /** 1ターン分の発言。応答が複数に分かれていれば改行でつなぐ。 */
 export interface AutoNameTurn {
@@ -58,7 +63,11 @@ export function splitTurns(items: readonly ChatItem[]): AutoNameTurn[] {
 
 /** 発言に `Issue` / `MR` / `PR` の語が出ているか。 */
 export function hasWorkReference(text: string): boolean {
-  return WORK_REFERENCE.test(text);
+  return (
+    ISSUE_REFERENCE.test(text) ||
+    UPPER_MR_PR_REFERENCE.test(text) ||
+    NUMBERED_MR_PR_REFERENCE.test(text)
+  );
 }
 
 /**

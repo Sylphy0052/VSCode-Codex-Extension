@@ -51,14 +51,23 @@ describe('splitTurns', () => {
 });
 
 describe('hasWorkReference', () => {
-  it.each(['Issue #12', 'issueを見て', 'MR!3', 'mr102', 'PRを作る', 'pr#5', 'GitLabのMR'])(
-    '%s は契機になる',
-    (text) => {
-      expect(hasWorkReference(text)).toBe(true);
-    },
-  );
+  it.each([
+    'Issue #12',
+    'issueを見て',
+    'issue 56',
+    'MR!3',
+    'MR !12',
+    'mr102',
+    'mr !7',
+    'PRを作る',
+    'PR#34',
+    'pr#5',
+    'GitLabのMR',
+  ])('%s は契機になる', (text) => {
+    expect(hasWorkReference(text)).toBe(true);
+  });
 
-  it.each(['PRDを書く', 'promptを直す', 'issues', 'Mrs', 'express'])(
+  it.each(['PRDを書く', 'promptを直す', 'issues', 'Mrs', 'express', 'Mr. Smith', 'prのレビュー'])(
     '%s は契機にならない',
     (text) => {
       expect(hasWorkReference(text)).toBe(false);
