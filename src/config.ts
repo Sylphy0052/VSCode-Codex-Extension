@@ -531,6 +531,14 @@ export function readAutoHandoffSoftThresholdPercent(): number {
 }
 
 /**
+ * タブ名を会話の要約から自動で付け直すか（Issue #1426）。既定はON。
+ */
+export function readSessionAutoNameEnabled(): boolean {
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('sessionAutoName.enabled');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
  * 安全な区切りで、次の作業に合うmodel/effortが変わったときに引き継ぐか（Issue #1090）。
  *
  * 既定はON。残量に関係なく発火するため、OFFにすると引き継ぎは残量の2つの閾値だけになる。

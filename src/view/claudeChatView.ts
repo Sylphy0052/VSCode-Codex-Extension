@@ -65,6 +65,7 @@ import {
   readAutoHandoffOnMilestone,
   readAutoHandoffClassifierTimeoutMs,
   readAutoHandoffRouterEnabled,
+  readSessionAutoNameEnabled,
   readAutoHandoffCloseOldTab,
   readChatLoopEngineeringConfig,
   readGoalDraftConfig,
@@ -201,6 +202,12 @@ import {
   probeSafeBoundary,
 } from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
+import {
+  SerialRerun,
+  type SessionAutoNameHost,
+  shouldAutoName,
+  summarizeSessionName,
+} from './sessionAutoName';
 import { appendTurnSummaryInstruction } from './turnSummary';
 import type { ReviewDeliveryResult } from './localReview';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
@@ -218,7 +225,7 @@ import {
   isApprovalLevel,
 } from '../provider/approvalLevel';
 import type { ClaudeConfig } from '../claude/types';
-import type { PinnedSessionStore } from '../util/pinnedSessions';
+import { pinKeyFor, type PinnedSessionStore } from '../util/pinnedSessions';
 import type {
   ClaudeEditableKey,
   ClaudeSettingsSnapshot,
@@ -533,6 +540,8 @@ export class ClaudeChatViewManager
     private readonly globalStorageDir?: string,
     /** お気に入り（Issue #1366）の永続化先。未指定なら何も永続化しないno-op。 */
     pinnedSessions?: PinnedSessionStore,
+    /** タブ名の自動付け直し（Issue #1426）。渡さなければ自動で付け直さない。 */
+    private readonly autoName?: SessionAutoNameHost,
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
@@ -1307,6 +1316,87 @@ export class ClaudeChatViewManager
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
+  }
+
+  /** タブ名の自動付け直し（Issue #1426）の実行役。1セッション1本に限るためパネルごとに持つ。 */
+  private readonly autoNamers = new WeakMap<ClaudePanel, SerialRerun>();
+
+  /**
+   * タブ名の自動付け直し（Issue #1426）の発火判定。ターン完了時に呼ぶ。
+   *
+   * 手で名前を変えたセッションと、オーケストレータが名前を指定したタスクは対象外。
+   */
+  private maybeAutoName(entry: ClaudePanel, state: ChatState): void {
+    const sessionId = entry.session.threadId;
+    if (
+      this.autoName === undefined ||
+      sessionId === undefined ||
+      (entry.pinnedName !== undefined && entry.pinnedName.trim() !== '') ||
+      !readSessionAutoNameEnabled() ||
+      this.autoName.marks.has(pinKeyFor({ provider: 'claude', id: sessionId })) ||
+      !shouldAutoName(state.items)
+    ) {
+      return;
+    }
+    let runner = this.autoNamers.get(entry);
+    if (runner === undefined) {
+      runner = new SerialRerun(
+        () => this.runAutoName(entry),
+        (e) =>
+          this.log.warn(
+            `タブ名の自動付け直しで例外が出ました: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+      );
+      this.autoNamers.set(entry, runner);
+    }
+    runner.request();
+  }
+
+  /** 要約して名前を付け直す。材料は実行の時点の会話から読む（走らせ直しで最新を拾うため）。 */
+  private async runAutoName(entry: ClaudePanel): Promise<void> {
+    const sessionId = entry.session.threadId;
+    if (entry.disposed || sessionId === undefined) {
+      return;
+    }
+    const state = entry.session.getState();
+    const currentName = state.name ?? this.store.getName(sessionId);
+    const name = await summarizeSessionName(
+      {
+        provider: 'claude',
+        executable: this.claudePath(),
+        logWarn: (message) => this.log.warn(message),
+        run: this.autoName?.run,
+      },
+      { items: state.items, currentName, gitBranch: await resolveGitBranch(entry.cwd) },
+    );
+    // 待っている間にタブが閉じられた・会話が切り替わった・手で名前を変えられたときは捨てる
+    if (
+      name === undefined ||
+      entry.disposed ||
+      entry.session.threadId !== sessionId ||
+      this.autoName?.marks.has(pinKeyFor({ provider: 'claude', id: sessionId })) ||
+      name === (entry.session.getState().name ?? this.store.getName(sessionId))
+    ) {
+      return;
+    }
+    try {
+      await this.store.rename(sessionId, name);
+      // 保存を待つ間に手で名前を変えられたら、タブ名は手で付けた方を残す（ストアも後から
+      // 書いた手の名前が勝つ）。会話が切り替わったら、今の会話のタブ名は変えない
+      if (
+        entry.disposed ||
+        entry.session.threadId !== sessionId ||
+        this.autoName?.marks.has(pinKeyFor({ provider: 'claude', id: sessionId }))
+      ) {
+        return;
+      }
+      entry.session.setName(name);
+      this.log.info(`タブ名を自動で付け直しました: ${name}`);
+    } catch (e) {
+      this.log.warn(
+        `タブ名の自動付け直しを保存できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /**
@@ -2408,6 +2498,9 @@ export class ClaudeChatViewManager
     }
 
     try {
+      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
+      // 付け直しが保存の直前に印を見るため、保存より先に付ける
+      await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
       await this.store.rename(sessionId, name.trim());
       entry.session.setName(name.trim());
     } catch (e) {
@@ -2698,6 +2791,7 @@ export class ClaudeChatViewManager
       // ループを止めうる`loop.observe`より前に記録する（最後のターンも残すため。issue #1379）
       this.recordLoopCommands(entry, state);
       this.notifyTurnComplete(entry, state);
+      this.maybeAutoName(entry, state);
     }
     const next = deriveTitle(state, entry.pinnedName);
     if (next !== undefined && entry.title !== next) {

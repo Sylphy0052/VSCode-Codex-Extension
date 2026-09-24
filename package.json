@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.924.3",
+  "version": "2026.924.4",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -916,6 +916,12 @@
           "maximum": 600000,
           "scope": "window",
           "markdownDescription": "引き継ぎ先の作業を分類するヘッドレス実行（`agent.autoHandoff.router`）の待ち時間（ミリ秒。Issue #1097）。時間切れになると分類が得られず、安全な区切りを待つ契機（`softThreshold` / `onProfileChange` / `onAssistantSuggestion`）は発火しない。範囲外の値と数値でない値は既定の120000へ丸める。"
+        },
+        "agent.sessionAutoName.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "タブ名を会話の要約から `#<Issue> !<MR> <日本語の短い名前>` の形へ自動で付け直す（Issue #1426）。最初のターンの完了時と、以降のターンでユーザー発言か応答に `Issue` / `MR` / `PR` の語が出たときに、ヘッドレスCLIを1回呼んで要約する。手で名前を変えたセッションとタスク用セッション（名前を指定されたもの）は付け直さない。OFFにすると、従来どおり最初の指示の先頭を名前にする。"
         },
         "agent.autoHandoff.onAssistantSuggestion": {
           "type": "boolean",

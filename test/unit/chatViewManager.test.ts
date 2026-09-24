@@ -12,6 +12,10 @@ import type { MementoLike } from '../../src/util/memento';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ChatViewManager, deriveTitle } from '../../src/view/chatView';
+import {
+  ManuallyNamedSessionStore,
+  type SessionAutoNameHost,
+} from '../../src/view/sessionAutoName';
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import { RECAP_INSTRUCTION, type ChatSession } from '../../src/appserver/chatSession';
 import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
@@ -118,6 +122,8 @@ function createManager(options?: {
   sessionSettings?: SessionModelSettingsStore;
   /** 引き継ぎのポインタファイル（Issue #1079）の置き場所。 */
   globalStorageDir?: string;
+  /** タブ名の自動付け直し（Issue #1426）。 */
+  autoName?: SessionAutoNameHost;
 }): {
   manager: ChatViewManager;
   connection: FakeAppServerConnection;
@@ -138,6 +144,8 @@ function createManager(options?: {
     options?.sessionSettings,
     options?.globalStorageDir ??
       nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-handoff-')),
+    undefined,
+    options?.autoName,
   );
   return { manager, connection: connection() };
 }
@@ -1045,6 +1053,84 @@ describe('ChatViewManager', () => {
       panel?.webview.simulateMessage({ type: 'approve', requestId: 5, decision: 'accept' });
 
       await expect(responsePromise).resolves.toEqual({ decision: 'accept' });
+    });
+
+    describe('タブ名の自動付け直し（Issue #1426）', () => {
+      function fakeAutoName(text: string): SessionAutoNameHost & { prompts: string[] } {
+        const prompts: string[] = [];
+        return {
+          prompts,
+          marks: new ManuallyNamedSessionStore(fakeMemento()),
+          run: (_deps, prompt) => {
+            prompts.push(prompt);
+            return Promise.resolve({ ok: true, text });
+          },
+        };
+      }
+
+      const openWithFirstTurn = async (autoName: SessionAutoNameHost) => {
+        const { manager, connection } = createManager({ autoName });
+        const p = manager.openNew();
+        await tick();
+        connection.resolveFirst('thread/start', threadStartResult('thread-auto'));
+        await p;
+        connection.notify('item/completed', {
+          threadId: 'thread-auto',
+          turnId: 'turn-1',
+          item: {
+            type: 'userMessage',
+            id: 'u1',
+            content: [{ type: 'text', text: 'Issue #1426 のタブ名を実装して' }],
+          },
+        });
+        connection.notify('item/completed', {
+          threadId: 'thread-auto',
+          turnId: 'turn-1',
+          item: { id: 'a1', type: 'agentMessage', text: '実装します' },
+        });
+        return { manager, connection };
+      };
+
+      const nameRequests = (connection: FakeAppServerConnection) =>
+        connection.requests
+          .filter((r) => r.method === 'thread/name/set')
+          .map((r) => (r.params as { name?: string } | undefined)?.name);
+
+      it('最初のターンが終わると要約した名前をthreadへ保存する', async () => {
+        const autoName = fakeAutoName(
+          '{"issue": 1426, "mr": null, "pr": 7, "slug": "タブ名の自動付け直し"}',
+        );
+        const { connection } = await openWithFirstTurn(autoName);
+        connection.notify('turn/completed', {
+          threadId: 'thread-auto',
+          turn: { id: 'turn-1', status: 'completed' },
+        });
+
+        // PR#7 は材料に無いので捨てる
+        await vi.waitFor(() => {
+          expect(nameRequests(connection)).toEqual(['#1426 タブ名の自動付け直し']);
+        });
+        expect(autoName.prompts[0]).toContain('Issue #1426 のタブ名を実装して');
+      });
+
+      it('手で名前を変えたセッションは付け直さない', async () => {
+        const autoName = fakeAutoName('{"issue": 1426, "slug": "自動の名前"}');
+        const { manager, connection } = await openWithFirstTurn(autoName);
+        __mock.showInputBoxAnswer = '手で付けた名前';
+        const renamePromise = manager.renameActive();
+        await tick();
+        connection.resolveFirst('thread/name/set', {});
+        await renamePromise;
+        expect(autoName.marks.has('codex:thread-auto')).toBe(true);
+
+        connection.notify('turn/completed', {
+          threadId: 'thread-auto',
+          turn: { id: 'turn-1', status: 'completed' },
+        });
+        await tick();
+        expect(autoName.prompts).toHaveLength(0);
+        expect(nameRequests(connection)).toEqual(['手で付けた名前']);
+      });
     });
 
     it('名前変更（renameActive）は選択中の画面へ反映する', async () => {
