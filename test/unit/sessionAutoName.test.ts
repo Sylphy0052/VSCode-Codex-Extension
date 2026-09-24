@@ -269,10 +269,13 @@ describe('SerialRerun', () => {
   it('実行中の契機は終了後に1回だけ走らせ直す', async () => {
     const releases: (() => void)[] = [];
     let runs = 0;
-    const serial = new SerialRerun(() => {
-      runs += 1;
-      return new Promise<void>((resolve) => releases.push(resolve));
-    });
+    const serial = new SerialRerun(
+      () => {
+        runs += 1;
+        return new Promise<void>((resolve) => releases.push(resolve));
+      },
+      () => undefined,
+    );
     serial.request();
     serial.request();
     serial.request();
@@ -288,17 +291,22 @@ describe('SerialRerun', () => {
     releases[2]?.();
   });
 
-  it('jobが失敗しても次の契機で走る', async () => {
+  it('jobが失敗したら報告し、次の契機でも走る', async () => {
     let runs = 0;
-    const serial = new SerialRerun(() => {
-      runs += 1;
-      return Promise.reject(new Error('失敗'));
-    });
+    const errors: unknown[] = [];
+    const serial = new SerialRerun(
+      () => {
+        runs += 1;
+        return Promise.reject(new Error('失敗'));
+      },
+      (e) => errors.push(e),
+    );
     serial.request();
     await new Promise((resolve) => setTimeout(resolve, 0));
     serial.request();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runs).toBe(2);
+    expect(errors).toHaveLength(2);
   });
 });
 

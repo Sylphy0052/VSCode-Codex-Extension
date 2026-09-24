@@ -1340,7 +1340,13 @@ export class ClaudeChatViewManager
     }
     let runner = this.autoNamers.get(entry);
     if (runner === undefined) {
-      runner = new SerialRerun(() => this.runAutoName(entry));
+      runner = new SerialRerun(
+        () => this.runAutoName(entry),
+        (e) =>
+          this.log.warn(
+            `タブ名の自動付け直しで例外が出ました: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+      );
       this.autoNamers.set(entry, runner);
     }
     runner.request();
@@ -1375,6 +1381,14 @@ export class ClaudeChatViewManager
     }
     try {
       await this.store.rename(sessionId, name);
+      // 保存を待つ間に手で名前を変えられたら、タブ名は手で付けた方を残す（ストアも後から
+      // 書いた手の名前が勝つ）
+      if (
+        entry.disposed ||
+        this.autoName?.marks.has(pinKeyFor({ provider: 'claude', id: sessionId }))
+      ) {
+        return;
+      }
       entry.session.setName(name);
       this.log.info(`タブ名を自動で付け直しました: ${name}`);
     } catch (e) {
@@ -2483,10 +2497,11 @@ export class ClaudeChatViewManager
     }
 
     try {
+      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
+      // 付け直しが保存の直前に印を見るため、保存より先に付ける
+      await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
       await this.store.rename(sessionId, name.trim());
       entry.session.setName(name.trim());
-      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない
-      await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
     } catch (e) {
       this.reportError(e);
     }

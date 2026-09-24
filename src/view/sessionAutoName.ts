@@ -359,7 +359,11 @@ export class SerialRerun {
   private running = false;
   private again = false;
 
-  constructor(private readonly job: () => Promise<void>) {}
+  constructor(
+    private readonly job: () => Promise<void>,
+    /** `job` が例外を投げたときの報告先。投げても次の契機では走らせる。 */
+    private readonly onError: (error: unknown) => void,
+  ) {}
 
   request(): void {
     if (this.running) {
@@ -374,7 +378,7 @@ export class SerialRerun {
     try {
       do {
         this.again = false;
-        await this.job().catch(() => undefined);
+        await this.job().catch(this.onError);
       } while (this.again);
     } finally {
       this.running = false;

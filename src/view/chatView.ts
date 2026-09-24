@@ -1164,7 +1164,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     let runner = this.autoNamers.get(entry);
     if (runner === undefined) {
-      runner = new SerialRerun(() => this.runAutoName(entry));
+      runner = new SerialRerun(
+        () => this.runAutoName(entry),
+        (e) =>
+          this.log.warn(
+            `タブ名の自動付け直しで例外が出ました: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+      );
       this.autoNamers.set(entry, runner);
     }
     runner.request();
@@ -3493,9 +3499,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
 
     try {
-      await entry.session.setName(name.trim());
-      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない
+      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
+      // 付け直しが保存の直前に印を見るため、保存より先に付ける
       await this.autoName?.marks.add(pinKeyFor({ provider: 'codex', id: entry.session.threadId }));
+      await entry.session.setName(name.trim());
     } catch (e) {
       this.reportError(e);
     }
