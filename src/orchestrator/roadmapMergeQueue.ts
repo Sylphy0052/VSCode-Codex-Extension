@@ -166,6 +166,10 @@ function describeFailure(result: VerifyCommandResult): string {
   return result.error ?? `終了コード ${String(result.exitCode)}`;
 }
 
+function abortFailedMessage(reason: string, abortMessage: string): string {
+  return `${reason}。取り込みを取り消せず、worktreeが取り込みの途中のまま残っています。手で git merge --abort してから再開してください: ${abortMessage}`;
+}
+
 export class RoadmapMergeQueue {
   /** リポジトリごとの列。同じリポジトリのmergeは別runでも直列にする。 */
   private readonly lanes = new Map<string, SerialQueue>();
@@ -414,12 +418,15 @@ export class RoadmapMergeQueue {
     }
     const dirty = await this.git(['status', '--porcelain', '--untracked-files=no'], cwd);
     if (!dirty.ok || dirty.stdout.trim() !== '') {
-      return { kind: 'failed', message: '検証コマンドが追跡中のファイルを書き換えました' };
+      return {
+        kind: 'failed',
+        message: await this.discardTrackedChanges(cwd, '検証コマンドが追跡中のファイルを書き換えました'),
+      };
     }
 
     const bumped = await this.bumpVersion(cwd, settings.versionBumpCommand);
     if (!bumped.ok) {
-      return { kind: 'failed', message: bumped.message };
+      return { kind: 'failed', message: await this.discardTrackedChanges(cwd, bumped.message) };
     }
 
     const pushed = await this.git(['push', 'origin', `HEAD:refs/heads/${branch}`], cwd);
@@ -484,8 +491,7 @@ export class RoadmapMergeQueue {
       ? listed.stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '')
       : [];
     if (conflicted.length === 0) {
-      await this.git(['merge', '--abort'], cwd);
-      return { kind: 'failed', message: merge.message };
+      return { kind: 'failed', message: await this.abortMerge(cwd, merge.message) };
     }
     const remaining: string[] = [];
     for (const file of conflicted) {
@@ -496,16 +502,31 @@ export class RoadmapMergeQueue {
     if (remaining.length > 0) {
       const aborted = await this.git(['merge', '--abort'], cwd);
       if (!aborted.ok) {
-        return { kind: 'failed', message: aborted.message };
+        return { kind: 'failed', message: abortFailedMessage(merge.message, aborted.message) };
       }
       return { kind: 'repair', request: { mainVersion, conflictedFiles: remaining } };
     }
     const committed = await this.git(['commit', '--no-edit'], cwd);
     if (!committed.ok) {
-      await this.git(['merge', '--abort'], cwd);
-      return { kind: 'failed', message: committed.message };
+      return { kind: 'failed', message: await this.abortMerge(cwd, committed.message) };
     }
     return { kind: 'ok', mainVersion };
+  }
+
+  /** 取り込みを取り消す。取り消せなければ、worktreeを手で戻す必要があることを理由へ足す。 */
+  private async abortMerge(cwd: string, reason: string): Promise<string> {
+    const aborted = await this.git(['merge', '--abort'], cwd);
+    return aborted.ok ? reason : abortFailedMessage(reason, aborted.message);
+  }
+
+  /**
+   * 検証・版上げのコマンドが書き換えた追跡中のファイルをHEADへ戻す。取り込みの前に未commitの
+   * 変更が無いことを確かめているので、ここで消えるのはコマンドの書き換えだけ。戻さないと次の
+   * 取り込みが冒頭の検査で同じ理由のまま失敗し続ける。
+   */
+  private async discardTrackedChanges(cwd: string, reason: string): Promise<string> {
+    const reset = await this.git(['reset', '--hard', 'HEAD'], cwd);
+    return reset.ok ? reason : `${reason}。書き換えを戻せませんでした: ${reset.message}`;
   }
 
   private async resolveVersionFile(cwd: string, file: string): Promise<boolean> {

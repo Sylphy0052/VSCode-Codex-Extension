@@ -57,7 +57,7 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from './taskSession';
-import { formatUntrusted } from './untrustedText';
+import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import type { GitCommandRunner, WorktreeCreationQueue, WorktreeFileSystemPort } from './worktree';
 
 /** Issueのタイトルをプロンプトへ入れるときの上限。 */
@@ -181,6 +181,8 @@ export interface MergeRepairRequest {
 
 /** 検証の出力として指示へ入れる上限。 */
 const MAX_VERIFY_OUTPUT_LENGTH = 4000;
+/** 衝突したファイル名1件の上限。ファイル名もリポジトリ由来の外部入力として1行へ畳む。 */
+const MAX_FILE_NAME_LENGTH = 300;
 
 function buildMergeRepairPrompt(
   issue: RoadmapIssueExecution,
@@ -197,7 +199,10 @@ function buildMergeRepairPrompt(
     lines.push(`最新のmainの版: ${request.mainVersion}`);
   }
   if (request.conflictedFiles.length > 0) {
-    lines.push('mainの取り込みで衝突したファイル:', ...request.conflictedFiles.map((f) => `- ${f}`));
+    lines.push(
+      'mainの取り込みで衝突したファイル:',
+      ...request.conflictedFiles.map((f) => `- ${sanitizeInlineText(f, MAX_FILE_NAME_LENGTH)}`),
+    );
   }
   const failed = request.failedVerification;
   if (failed !== undefined) {
