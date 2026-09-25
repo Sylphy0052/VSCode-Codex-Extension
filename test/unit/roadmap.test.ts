@@ -229,7 +229,7 @@ describe('parseRoadmapMarkdown: チェックボックス行の揺れ（Issue #40
   });
 
   it('太字の見出し行（自由記述のロードマップに実在する形）を項目として誤認しない', () => {
-    // docs/roadmap/review-and-feature-consolidation.md:58 に実在する形
+    // docs/archive/roadmap/review-and-feature-consolidation.md:58 に実在する形
     const md = '# g\n\n## Phase 1\n\n- **WF-A オーケストレーター実行系**（11項目）\n  - T02 foo\n';
     const parsed = parseRoadmapMarkdown(md);
     expect(parsed.phases[0]?.items).toEqual([]);
@@ -237,7 +237,7 @@ describe('parseRoadmapMarkdown: チェックボックス行の揺れ（Issue #40
   });
 
   it('Markdownリンクの箇条書き（自由記述のロードマップに実在する形）を項目として誤認せず、警告も出さない', () => {
-    // docs/roadmap/review-and-feature-consolidation.md:22 に実在する形
+    // docs/archive/roadmap/review-and-feature-consolidation.md:22 に実在する形
     const md = '# g\n\n## Phase 1\n\n- [ux-improvements.md](ux-improvements.md) — 説明文\n';
     const parsed = parseRoadmapMarkdown(md);
     expect(parsed.phases[0]?.items).toEqual([]);
@@ -287,7 +287,7 @@ describe('parseRoadmapMarkdown: Issue行の揺れ（Issue #408 根拠1）', () =
   });
 
   it('「未起票」のように番号でないものは番号として拾わず、警告に倒す', () => {
-    // docs/roadmap/review-and-feature-consolidation.md:132 に実在する文言
+    // docs/archive/roadmap/review-and-feature-consolidation.md:132 に実在する文言
     const md = '# g\n\n## Phase 1\n\n- [ ] R1 foo\n  - Issue: 未起票（着手時に起票する）\n';
     const parsed = parseRoadmapMarkdown(md);
     const item = parsed.phases[0]?.items[0];
@@ -397,7 +397,7 @@ describe('parseRoadmapMarkdown: 警告件数の上限（レビュー指摘: low 
 // 箇条書き）を必ず含める。
 
 /**
- * `docs/roadmap/ux-improvements.md`のチェックボックス形式（フェーズ見出し・依存・Issue付き
+ * `docs/archive/roadmap/ux-improvements.md`のチェックボックス形式（フェーズ見出し・依存・Issue付き
  * 項目）を代表する行を抜き出したfixture。実際の項目本文・Issue番号はそのまま使わず、
  * 構造（見出しの深さ・依存の書式・Issueの余剰テキスト）だけを保っている。
  */
@@ -420,7 +420,7 @@ const CHECKBOX_ROADMAP_FIXTURE = `# 利用者目線のUX改善
 `;
 
 /**
- * `docs/roadmap/review-and-feature-consolidation.md`の自由記述形式（チェックボックスを
+ * `docs/archive/roadmap/review-and-feature-consolidation.md`の自由記述形式（チェックボックスを
  * 使わず太字見出し・Markdownリンクの箇条書きで構成）を代表する行を抜き出したfixture。
  */
 const FREEFORM_ROADMAP_FIXTURE = `# レビュー指摘と機能追加の統合ロードマップ
@@ -441,7 +441,7 @@ const FREEFORM_ROADMAP_FIXTURE = `# レビュー指摘と機能追加の統合�
 `;
 
 describe('parseRoadmapMarkdown: 運用中のロードマップの形式が従来どおりパースできる（Issue #408 の受入基準）', () => {
-  it('チェックボックス形式（docs/roadmap/ux-improvements.md由来）は項目集合・依存・Issueをそのまま読む', () => {
+  it('チェックボックス形式（docs/archive/roadmap/ux-improvements.md由来）は項目集合・依存・Issueをそのまま読む', () => {
     const parsed = parseRoadmapMarkdown(CHECKBOX_ROADMAP_FIXTURE);
     const ids = parsed.phases.flatMap((p) => p.items.map((it) => it.id));
     expect(ids).toEqual(['R1', 'R2', 'R3']);
@@ -453,7 +453,7 @@ describe('parseRoadmapMarkdown: 運用中のロードマップの形式が従来
   });
 
   it(
-    '自由記述・非チェックボックス形式（docs/roadmap/review-and-feature-consolidation.md由来）は' +
+    '自由記述・非チェックボックス形式（docs/archive/roadmap/review-and-feature-consolidation.md由来）は' +
       '項目0件のまま、太字見出し（WF-A行）・Markdownリンクの箇条書き（ux-improvements.md行）を' +
       '誤って項目化・警告化しない',
     () => {

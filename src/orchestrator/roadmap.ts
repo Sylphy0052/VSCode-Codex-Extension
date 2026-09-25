@@ -104,7 +104,7 @@ const CHECKBOX_ITEM_PATTERN = /^\s*[-*+]\s*\[([ xX])\]\s+(\S+)\s*(.*)$/u;
  * チェックボックスらしき行のうち、`CHECKBOX_ITEM_PATTERN`に一致しなかったものを検出する
  * ための緩いパターン（Issue #408）。`[]`の中身を短く限定し、`(`が直後に続く場合
  * （Markdownリンク `- [text](url)`）を除外することで、自由記述のロードマップに実在する
- * リンクの箇条書き（例: `docs/roadmap/review-and-feature-consolidation.md:22`）を
+ * リンクの箇条書き（例: `docs/archive/roadmap/review-and-feature-consolidation.md:22`）を
  * 誤検出しないようにしてある。
  *
  * **`[]`の中身は0〜3文字までしか警告対象にしない（4文字以上は無音で読み飛ばす）。**
@@ -135,7 +135,7 @@ const ISSUE_LINE_PATTERN = /^\s*-\s*Issue:\s*#?(\d+).*$/u;
  * `Issue:` 行そのものの検出用（数字が読めるかは問わない）。`ISSUE_LINE_PATTERN`が不一致でも
  * この緩いパターンが一致すれば「Issue行のつもりだが数値として読めなかった」と判定できる
  * （Issue #408。`- Issue: 未起票（着手時に起票する）`のような実例が
- * `docs/roadmap/review-and-feature-consolidation.md:132`にある）。
+ * `docs/archive/roadmap/review-and-feature-consolidation.md:132`にある）。
  */
 const ISSUE_LINE_CANDIDATE_PATTERN = /^\s*-\s*Issue:\s*(.*)$/u;
 /** `依存: なし` のような「無い」ことを表す値。 */

@@ -2,6 +2,11 @@
 
 グローバル規約 (`~/.claude/CLAUDE.md`) を前提とし、本ファイルは本リポジトリ固有の差分のみ記載する。矛盾する場合は本ファイルを優先する。
 
+## ロードマップ
+
+- ロードマップの正本はGitHubの `roadmap` ラベルのIssue（2026-09-26時点で #1457 の1本）とする。着手順・優先度・進捗はそこだけに書き、ロードマップIssueを増やさずこの1本へ足す
+- `docs/archive/` は凍結記録。参照せず、書き換えない（旧 `docs/roadmap/` はここへ移した。Issue #1458）
+
 ## PR運用
 
 - 各PRの最後に `node scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の版上げを `chore: バージョンを<版>にする` として同じPRへcommitする。配布したvsixの版とmainのcommitを1対1にするため

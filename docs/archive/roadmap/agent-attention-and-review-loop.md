@@ -18,11 +18,11 @@
 
 ## 現状から確認できること
 
-会話には`idle`、`running`、`approvalPending`があり、承認待ちは実行中より優先して表示される。[src/view/sessionActivity.ts](../../src/view/sessionActivity.ts)
+会話には`idle`、`running`、`approvalPending`があり、承認待ちは実行中より優先して表示される。[src/view/sessionActivity.ts](../../../src/view/sessionActivity.ts)
 
-ワークフローのタスクには`waitingApproval`と`waitingReply`があり、人の承認や返信を待つ状態を実行状態から区別している。[src/orchestrator/runState.ts](../../src/orchestrator/runState.ts)
+ワークフローのタスクには`waitingApproval`と`waitingReply`があり、人の承認や返信を待つ状態を実行状態から区別している。[src/orchestrator/runState.ts](../../../src/orchestrator/runState.ts)
 
-会話用のSession Kanbanとワークフロー用のKanbanは既にある。全セッションの状態を再分類して並べる「Global Control Center」は重複する。現在のDiff表示は会話画面から開けるが、行コメントをエージェントへ返す共通の文脈や配送契約はない。[src/view/chatView.ts](../../src/view/chatView.ts)
+会話用のSession Kanbanとワークフロー用のKanbanは既にある。全セッションの状態を再分類して並べる「Global Control Center」は重複する。現在のDiff表示は会話画面から開けるが、行コメントをエージェントへ返す共通の文脈や配送契約はない。[src/view/chatView.ts](../../../src/view/chatView.ts)
 
 ## C0:Global Attention Index
 
