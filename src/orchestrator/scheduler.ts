@@ -20,6 +20,8 @@ import type { WorkflowDefinition } from './workflow';
  *   未満であること（`waitingApproval` も人待ちのセッションが生きているため枠を占め、
  *   `waitingReply` も返信待ちのセッションが生きているため枠を占め、`merging` も
  *   マージが終わるまでそのタスクの成果は確定しないため枠を占める。design.md §16.3）
+ * - `waitingOverlap`（走行中の変更ファイルの交差で待たせているタスク。Issue #1469）は
+ *   枠を占めない。待っている間は交差していない別のタスクへ枠を譲る
  * - 実行全体が停止している（`failed` の確定、または人の割り込み）ときは何も返さない
  * - 同じ段で複数開始できるとき、`def.tasks` に書かれた順で埋める（再現性のため）
  *
@@ -83,7 +85,7 @@ export type RunOutcome = 'running' | 'succeeded' | 'failed' | 'blocked' | 'abort
 /**
  * 実行全体の終了判定（design.md §16.5 / §16.17）。判定は次の順。
  *
- * 1. `pending` / `running` / `waitingApproval` / `waitingReply` / `merging` が
+ * 1. `pending` / `running` / `waitingApproval` / `waitingReply` / `waitingOverlap` / `merging` が
  *    1件でもあれば `running`
  * 2. `failed` が1件でもあれば `failed`
  * 3. `blocked` が1件でもあれば `blocked`（作業は終わったが統合できていない）
@@ -109,7 +111,9 @@ export function getRunOutcome(run: RunState): RunOutcome {
     // `isActiveTaskState`（枠を占める4状態）に加えて`pending`（まだ始まっていない）も
     // ここでは「まだ終わっていない」に含める。「枠を占める」より広い問いのため、
     // `pending`はここでだけ明示的に足す（`isActiveTaskState`のコメント参照）。
-    if (s.state === 'pending' || isActiveTaskState(s.state)) {
+    // `waitingOverlap`（交差の待機。Issue #1469）は枠を占めないが、セッションは生きていて
+    // 相手のマージ後に再開するため、まだ終わっていない側に数える
+    if (s.state === 'pending' || s.state === 'waitingOverlap' || isActiveTaskState(s.state)) {
       return 'running';
     }
     if (s.state === 'failed') {

@@ -12353,12 +12353,13 @@ tasks:
     expect(t2.disposed).toBe(true);
     expect(state.handle?.closed).toBe(true);
     expect(state.handle?.closeCount).toBe(1);
-    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+    // 返信待ちのポーリングと、変更ファイルの交差の実測（Issue #1469）の2本
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
 
     // 二重に呼ばれても安全（冪等）。もう1度閉じにいかない
     expect(() => runner.dispose()).not.toThrow();
     expect(state.handle?.closeCount).toBe(1);
-    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
   });
 
   it('衝突解決セッション（live.mergeResolutions）も解放する', async () => {
@@ -12415,7 +12416,8 @@ tasks:
     expect(() => runner.dispose()).not.toThrow();
 
     expect(state.handle?.closeCount).toBe(1);
-    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+    // 返信待ちのポーリングと、変更ファイルの交差の実測（Issue #1469）の2本
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
   });
 
   it('run終了で閉じたあとにdispose()が来ても二重解放にならない', async () => {

@@ -122,7 +122,12 @@ export function reconcileRunOnReload(run: PersistedRun): PersistedRun {
     // cleanupはセッション・worktreeに依存するため、リロードで継続できない。`pending`を
     // 残すとViewが永遠に処理中と表示するので、失敗として確定して人が再実行できるようにする。
     const cleanupStatus = task.cleanupStatus === 'pending' ? 'failed' : task.cleanupStatus;
-    if (task.state === 'running' || task.state === 'waitingApproval') {
+    // `waitingOverlap`（Issue #1469）も一時停止中のセッションごと失われるため`running`と同じ扱い
+    if (
+      task.state === 'running' ||
+      task.state === 'waitingApproval' ||
+      task.state === 'waitingOverlap'
+    ) {
       tasks[id] = {
         ...task,
         ...(cleanupStatus === undefined ? {} : { cleanupStatus }),

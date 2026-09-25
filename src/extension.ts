@@ -757,6 +757,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // レビューコメントの取得間隔（design.md §16.30、roadmap W5、Issue #339）。他のreadXxxと
     // 同じくトップレベルへ配線し、`finalizeForge`が呼ぶたびに現在値を読み直す
     readReviewCommentPollIntervalSec: () => readWorkflowsConfig().reviewCommentPollIntervalSec,
+    // 変更ファイルの交差の実測（Issue #1469）。周期の開始時と判定のたびに現在値を読み直す
+    readOverlapCheckIntervalSec: () => readWorkflowsConfig().overlapCheckIntervalSec,
+    readOverlapIgnore: () => readWorkflowsConfig().overlapIgnore,
     // ask_user（design.md §16.33、Issue #583）の呼び出し上限。他のreadXxxと同じく
     // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
     readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,

@@ -16,6 +16,7 @@ import { DEFAULT_MERGE_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerMerge';
 import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval';
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
+import { DEFAULT_OVERLAP_CHECK_INTERVAL_SEC } from './orchestrator/taskOverlap';
 import { normalizeChatDensity, type ChatDensity } from './view/density';
 import { normalizeChatSkin, type ChatSkin } from './view/skin';
 import { isCostPreset, type CostPreset } from './view/handoffRouter';
@@ -1157,6 +1158,16 @@ export interface WorkflowsConfig {
    */
   reviewCommentPollIntervalSec: number;
   /**
+   * 走行中のタスクの変更ファイルを実測する間隔（秒）（`agent.workflows.overlapCheckIntervalSec`、
+   * 既定30秒、Issue #1469）。ターンの確定時には常に測る。0にすると周期では測らない。
+   */
+  overlapCheckIntervalSec: number;
+  /**
+   * 変更ファイルの交差の判定から外すパス（`agent.workflows.overlapIgnore`、Issue #1469）。
+   * リポジトリ相対。`/`で終わる要素はその配下すべてに一致し、それ以外は完全一致する。
+   */
+  overlapIgnore: readonly string[];
+  /**
    * オーケストレーターが`ask_user`（design.md §16.33、Issue #583）を1つのrunで呼べる回数の
    * 上限（`agent.workflows.maxAskUserPerRun`、既定3、`machine-overridable`）。方針1
    * 「確認は最低限」を仕組みで担保する唯一の機械的な手段。上限に達した以降の`ask_user`は
@@ -1494,6 +1505,10 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     reviewCommentPollIntervalSec: normalizeReviewCommentPollIntervalSec(
       c.get<unknown>('workflows.reviewCommentPollIntervalSec'),
     ),
+    overlapCheckIntervalSec: normalizeOverlapCheckIntervalSec(
+      c.get<unknown>('workflows.overlapCheckIntervalSec'),
+    ),
+    overlapIgnore: normalizeOverlapIgnore(c.get<unknown>('workflows.overlapIgnore')),
     maxAskUserPerRun: normalizeMaxAskUserPerRun(c.get<unknown>('workflows.maxAskUserPerRun')),
     autoResume: c.get<boolean>('workflows.autoResume') ?? DEFAULT_AUTO_RESUME,
     maxAutoResumeAttempts: normalizeMaxAutoResumeAttempts(
@@ -1625,6 +1640,34 @@ function normalizeReviewCommentPollIntervalSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? value
     : DEFAULT_REVIEW_COMMENT_POLL_INTERVAL_SEC;
+}
+
+/**
+ * `agent.workflows.overlapCheckIntervalSec` の生値を秒数へ丸める（Issue #1469）。
+ * `normalizeReviewCommentPollIntervalSec`と同じく0（周期では測らない）を許し、非数値・
+ * 非整数・負値・`MAX_TIMEOUT_SEC`超過は既定値へ丸める。
+ */
+function normalizeOverlapCheckIntervalSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_TIMEOUT_SEC
+    ? value
+    : DEFAULT_OVERLAP_CHECK_INTERVAL_SEC;
+}
+
+/**
+ * `agent.workflows.overlapIgnore` の生値をリポジトリ相対のパスの配列へ丸める（Issue #1469）。
+ * 文字列でない要素と空文字は捨て、先頭の`./`は外す（gitが返すパスには付かないため）。
+ */
+function normalizeOverlapIgnore(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim().replace(/^(\.\/)+/, ''))
+    .filter((entry) => entry !== '');
 }
 
 /**
