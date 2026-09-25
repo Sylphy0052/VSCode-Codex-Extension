@@ -397,8 +397,7 @@ export class SessionStore {
       }
       const entry = indexed.get(id);
       const updatedAt =
-        entry?.updatedAt ??
-        new Date((await this.fs.mtimeMs(location.filePath)) ?? 0).toISOString();
+        entry?.updatedAt ?? new Date((await this.fs.mtimeMs(location.filePath)) ?? 0).toISOString();
       const session: SessionSummary = {
         id,
         provider: 'codex',
