@@ -71,7 +71,10 @@ export function shouldSelectSkill(text: string): boolean {
  *
  * @param withPath Codexのように、`SkillView.key`をパスとして候補へ持たせるか
  */
-export function toSkillCandidates(skills: readonly SkillView[], withPath: boolean): SkillCandidate[] {
+export function toSkillCandidates(
+  skills: readonly SkillView[],
+  withPath: boolean,
+): SkillCandidate[] {
   const seen = new Set<string>([normalizeReflexLabel(SKILL_NONE)]);
   const candidates: SkillCandidate[] = [];
   for (const s of skills) {

@@ -3329,9 +3329,10 @@ export class ClaudeChatViewManager
     const gate = (entry.skillSelectGate ??= new SkillSelectGate());
     try {
       await gate.run(async (signal) => {
-        const skillName = shouldSelectSkill(text)
-          ? await this.chooseClaudeSkill(entry, text, threshold, signal)
-          : undefined;
+        const skillName =
+          shouldSelectSkill(text) && !signal.aborted
+            ? await this.chooseClaudeSkill(entry, text, threshold, signal)
+            : undefined;
         if (signal.aborted) {
           entry.attachments.restore(attachments);
           void entry.panel?.webview.postMessage({

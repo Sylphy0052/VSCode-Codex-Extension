@@ -2327,9 +2327,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
             // 判定中に来た発言が追い越さないよう、有効な間は`/`始まりも含めて関門を通す
             const gate = (entry.skillSelectGate ??= new SkillSelectGate());
             const delivered = await gate.run(async (signal) => {
-              const skill = shouldSelectSkill(text)
-                ? await this.chooseCodexSkill(entry, text, skillSelect.threshold, signal)
-                : undefined;
+              const skill =
+                shouldSelectSkill(text) && !signal.aborted
+                  ? await this.chooseCodexSkill(entry, text, skillSelect.threshold, signal)
+                  : undefined;
               if (signal.aborted) {
                 entry.attachments.restore(attachments);
                 void entry.panel?.webview.postMessage({
