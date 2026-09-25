@@ -102,6 +102,7 @@ import {
 import { sanitizeInlineText } from './orchestrator/untrustedText';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
+import { RoadmapRunStore } from './orchestrator/roadmapRunStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
@@ -496,8 +497,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // worktreeで走っていたタスクのタブが汎用復元へ拾われ、ワークスペース直下のcwdで
   // セッションが復活していた）。`workflowRunnerRef` 自体は再代入しないため `const`。
   const workflowRunnerRef: { current: WorkflowRunner | undefined } = { current: undefined };
+  // ロードマップ実行（Issue #1465）のIssueセッションも同じ口で答える（Issue #1491）。
+  // 汎用復元に拾わせると、入力を閉じていたタブが通常のチャットとしてworktreeで戻るため
+  const roadmapRunStore = new RoadmapRunStore(context.workspaceState);
   const isTaskManagedThread = (id: string): boolean =>
-    workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false;
+    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
+    roadmapRunStore.hasSessionRef(id);
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
@@ -785,6 +790,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(
     ...setupRoadmapRun({
       context,
+      store: roadmapRunStore,
       hosts: {
         codex: overridableHost('codex', chat),
         claude: overridableHost('claude', claudeChat),
