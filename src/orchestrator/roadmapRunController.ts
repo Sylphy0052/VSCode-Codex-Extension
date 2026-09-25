@@ -207,7 +207,9 @@ export class RoadmapRunController {
       }
     }
     if (next.finishedAt === undefined && finishRunIfDone(next, this.now()) !== next) {
-      void this.updateRun(next.runId, (r) => finishRunIfDone(r, this.now()));
+      void this.updateRun(next.runId, (r) => finishRunIfDone(r, this.now())).catch((e: unknown) => {
+        this.deps.log(`[roadmap run] runの終了を保存できませんでした: ${String(e)}`);
+      });
     }
     this.checkStalled(next);
     if (pickIssuesToStart(next).length > 0) {
@@ -345,9 +347,15 @@ export class RoadmapRunController {
       if (run.finishedAt !== undefined || run.mode !== 'auto' || run.haltedByUser) {
         continue;
       }
-      await this.deps.store.update(run.runId, (current) =>
-        setRunHaltedByUser(current ?? run, true),
-      );
+      try {
+        await this.deps.store.update(run.runId, (current) =>
+          setRunHaltedByUser(current ?? run, true),
+        );
+      } catch (e: unknown) {
+        // 1件の保存失敗で残りのrunの停止とセッションの突き合わせを止めない
+        this.deps.log(`[roadmap run] ${run.runId}の自動実行を止められませんでした: ${String(e)}`);
+        continue;
+      }
       this.addEvent(
         run.runId,
         '再読み込みのため自動実行を止めました。続けるには「再開」を押してください',
