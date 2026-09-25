@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
 import type { RoadmapRunController } from '../orchestrator/roadmapRunController';
+import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import { isValidIssueNumber, type RoadmapRunMode } from '../orchestrator/roadmapRunState';
 import { chatCsp } from './chatCsp';
 import { skinBodyClass } from './skin';
@@ -171,6 +172,9 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
       case 'stopIssue':
         await this.stopIssue(runId, issueNumber);
         return;
+      case 'answerQuestion':
+        await this.answerQuestion(runId, issueNumber, message.questionId, message.answer);
+        return;
       case 'revealIssue':
         if (!this.controller.revealIssue(runId, issueNumber)) {
           void vscode.window.showInformationMessage(
@@ -178,6 +182,27 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
           );
         }
         return;
+    }
+  }
+
+  /** 質問への回答。回答待ちでなくなっていれば（既に回答済み・実行回が終わった）知らせる。 */
+  private async answerQuestion(
+    runId: string,
+    issueNumber: number,
+    questionId: unknown,
+    raw: unknown,
+  ): Promise<void> {
+    const answer = parseUserAnswer(raw);
+    if (typeof questionId !== 'string' || answer === undefined) {
+      void vscode.window.showWarningMessage(
+        `ロードマップ実行: 回答は1〜${String(MAX_USER_ANSWER_LENGTH)}文字で入力してください`,
+      );
+      return;
+    }
+    if (!(await this.controller.answerQuestion(runId, issueNumber, questionId, answer))) {
+      void vscode.window.showInformationMessage(
+        `#${String(issueNumber)}の質問は回答待ちではありません（回答済み、または実行回が終わっています）`,
+      );
     }
   }
 
@@ -289,6 +314,10 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .link { appearance: none; background: none; border: 0; padding: 0; color: var(--vscode-textLink-foreground); font: inherit; font-size: 12px; cursor: pointer; }
 .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 14px; }
+.question { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
+.question-text { font-weight: 650; white-space: pre-wrap; overflow-wrap: anywhere; }
+.question-note { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.question textarea { width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
 `;
 
 // webview側のスクリプト。外部由来のテキストは`textContent`でだけ入れる（innerHTMLへ入れない）
@@ -300,6 +329,9 @@ const script = `
   const eventsEl = document.getElementById('events');
   const boardEl = document.getElementById('board');
   let current;
+  // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
+  const drafts = new Map();
+  let focusedQuestion;
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -386,6 +418,43 @@ const script = `
     });
   }
 
+  function renderQuestion(card, q) {
+    const box = el('div', 'question');
+    box.appendChild(el('div', 'question-text', (q.blocking ? '[回答待ちで停止中] ' : '') + q.question));
+    box.appendChild(el('div', 'question-note', '理由: ' + q.reason));
+    if (q.evidence) { box.appendChild(el('div', 'question-note', '材料: ' + q.evidence)); }
+    if (q.reflexSummary) { box.appendChild(el('div', 'question-note', 'Reflex: ' + q.reflexSummary)); }
+    function answer(text) {
+      drafts.delete(q.questionId);
+      send('answerQuestion', { issueNumber: card.issueNumber, questionId: q.questionId, answer: text });
+    }
+    if (q.options.length > 0) {
+      const options = el('div', 'actions');
+      q.options.forEach(function (o) {
+        const recommended = o === q.recommended;
+        options.appendChild(button(recommended ? o + '（推奨）' : o, recommended ? 'primary' : '', function () { answer(o); }));
+      });
+      box.appendChild(options);
+    }
+    const input = el('textarea');
+    input.setAttribute('aria-label', '自由記述の回答');
+    input.placeholder = q.options.length > 0 ? '選択肢以外で答える' : '回答を入力';
+    input.value = drafts.get(q.questionId) || '';
+    input.addEventListener('input', function () { drafts.set(q.questionId, input.value); });
+    input.addEventListener('focus', function () { focusedQuestion = q.questionId; });
+    input.addEventListener('blur', function () { focusedQuestion = undefined; });
+    box.appendChild(input);
+    if (focusedQuestion === q.questionId) {
+      setTimeout(function () { input.focus(); input.setSelectionRange(input.value.length, input.value.length); });
+    }
+    const submit = el('div', 'actions');
+    submit.appendChild(button('回答を送る', '', function () {
+      if (input.value.trim() !== '') { answer(input.value); }
+    }));
+    box.appendChild(submit);
+    return box;
+  }
+
   function renderCard(card) {
     const c = el('article', 'card ' + card.column);
     c.appendChild(el('span', 'card-title', '#' + card.issueNumber + ' ' + card.title));
@@ -425,6 +494,7 @@ const script = `
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopIssue', target); })); }
     if (card.canReveal) { actions.appendChild(button('セッションを開く', '', function () { send('revealIssue', target); })); }
     if (actions.childNodes.length > 0) { c.appendChild(actions); }
+    card.questions.forEach(function (q) { c.appendChild(renderQuestion(card, q)); });
     return c;
   }
 

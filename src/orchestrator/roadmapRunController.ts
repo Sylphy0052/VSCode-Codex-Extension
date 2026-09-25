@@ -50,7 +50,13 @@ export interface RoadmapRunControllerDeps {
   store: Pick<RoadmapRunStore, 'list' | 'find' | 'findActive' | 'update'>;
   runner: Pick<
     RoadmapIssueRunner,
-    'startIssue' | 'pauseIssue' | 'stopIssue' | 'pump' | 'restoreRuns' | 'revealIssueSession'
+    | 'startIssue'
+    | 'pauseIssue'
+    | 'stopIssue'
+    | 'pump'
+    | 'restoreRuns'
+    | 'revealIssueSession'
+    | 'answerQuestion'
   >;
   detectHost(workspaceRoot: string): Promise<ForgeHost | undefined>;
   resolvePlan(target: RoadmapImportTarget, engine: RoadmapRunEngine): Promise<ResolveRoadmapPlanOutcome>;
@@ -332,6 +338,16 @@ export class RoadmapRunController {
 
   stopIssue(runId: string, issueNumber: number): Promise<boolean> {
     return this.deps.runner.stopIssue(runId, issueNumber);
+  }
+
+  /** Kanbanで入力された、ユーザー判断待ちの質問への回答。 */
+  answerQuestion(
+    runId: string,
+    issueNumber: number,
+    questionId: string,
+    answer: string,
+  ): Promise<boolean> {
+    return this.deps.runner.answerQuestion(runId, issueNumber, questionId, answer);
   }
 
   revealIssue(runId: string, issueNumber: number): boolean {

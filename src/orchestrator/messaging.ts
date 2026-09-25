@@ -1356,7 +1356,7 @@ export interface McpToolResult {
   isError?: boolean;
 }
 
-function toolTextResult(text: string, isError = false): McpToolResult {
+export function toolTextResult(text: string, isError = false): McpToolResult {
   return isError
     ? { content: [{ type: 'text', text }], isError: true }
     : { content: [{ type: 'text', text }] };
@@ -1386,11 +1386,11 @@ export interface JsonRpcErrorResponse {
 
 export type JsonRpcResponse = JsonRpcSuccess | JsonRpcErrorResponse;
 
-function success(id: JsonRpcId, result: unknown): JsonRpcSuccess {
+export function success(id: JsonRpcId, result: unknown): JsonRpcSuccess {
   return { jsonrpc: '2.0', id, result };
 }
 
-function failure(id: JsonRpcId, code: number, message: string): JsonRpcErrorResponse {
+export function failure(id: JsonRpcId, code: number, message: string): JsonRpcErrorResponse {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
