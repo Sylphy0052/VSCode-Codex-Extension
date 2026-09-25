@@ -40,6 +40,7 @@ import {
   type LoopAdvisorResult,
 } from './loopAdvisor';
 import { buildResponseSummary } from '../orchestrator/taskSummary';
+import { buildRejectedDonePrompt, type LoopDoneCheckConfig } from './loopDoneCheck';
 
 /**
  * ループの終了をエージェント自身に宣言させるための合図。
@@ -98,6 +99,14 @@ export interface LoopPlan {
    * 「妥当な進め方か」を判断する基準が無い。
    */
   advisor?: LoopAdvisorConfig;
+  /**
+   * 完了宣言の検証（issue #1447）。省略すると`<<LOOP_DONE>>`を受けた時点で止まる（従来どおり）。
+   *
+   * 有効なとき、`<<LOOP_DONE>>`を受けたら止める前にReflex判定を1回走らせ、終了条件を
+   * 満たしたと確信できなければ次の周へ進める。終了条件（`condition`）を持つ、ゴール駆動では
+   * ないループでだけ付く。ゴール駆動ループはEvaluatorが完了を判定している。
+   */
+  doneCheck?: LoopDoneCheckConfig;
 }
 
 export type LoopStopReason =
@@ -225,6 +234,7 @@ export function normalizeLoopPlan(
   engineering?: LoopEngineeringConfig,
   goalOptions?: GoalLoopOptions,
   advisor?: LoopAdvisorConfig,
+  doneCheck?: LoopDoneCheckConfig,
 ): LoopPlan | undefined {
   if (typeof raw !== 'object' || raw === null) {
     return undefined;
@@ -245,19 +255,23 @@ export function normalizeLoopPlan(
     return undefined;
   }
 
+  // ゴール駆動では終了条件をWorkerへ渡さない（完了判定はEvaluatorが持つ）。
+  // 計画の時点で落としておき、「画面に入っているのに効かない値」を残さない
+  const condition = goal === undefined ? str(value['condition']).trim() : '';
   return {
     initialPrompt,
     continuePrompt,
     maxIterations: Math.min(Math.floor(parsed), LOOP_ITERATION_LIMIT),
-    // ゴール駆動では終了条件をWorkerへ渡さない（完了判定はEvaluatorが持つ）。
-    // 計画の時点で落としておき、「画面に入っているのに効かない値」を残さない
-    condition: goal === undefined ? str(value['condition']).trim() : '',
+    condition,
     ...normalizeMaxDuration(value['maxDurationMinutes']),
     ...(engineering === undefined ? {} : { engineering }),
     ...(goal === undefined ? {} : { goal }),
     // Advisorはゴール駆動ループでだけ動く（`LoopPlan.advisor`のコメント参照）。
     // ゴールが無いのに設定だけ載せると、画面に無効な設定が効いているように見える
     ...(goal === undefined || advisor === undefined ? {} : { advisor }),
+    // 完了宣言の検証（issue #1447）は`<<LOOP_DONE>>`を頼むループ（終了条件があり、
+    // ゴール駆動でない）でだけ意味がある
+    ...(condition === '' || doneCheck === undefined ? {} : { doneCheck }),
   };
 }
 
@@ -769,12 +783,12 @@ export class LoopController {
     }
     // ゴール駆動ループ（issue #892）ではWorkerへ`<<LOOP_DONE>>`を頼まないため、
     // 自己申告による完了は見ない。完了判定はEvaluatorだけが持つ
-    if (
+    const doneDeclared =
       newMessage !== undefined &&
       plan.goal === undefined &&
       plan.condition !== '' &&
-      declaresDone(newMessage)
-    ) {
+      declaresDone(newMessage);
+    if (doneDeclared && plan.doneCheck === undefined) {
       this.stop('done');
       return;
     }
@@ -802,7 +816,61 @@ export class LoopController {
       });
       return;
     }
+    // 完了宣言の検証（issue #1447）。判定を待つ間は`evaluating`で次のターンの処理を止める。
+    // 差し戻したときは通常のターンと同じ後段（停滞・時間・回数の判定）へ進むため、
+    // 停滞の履歴は上で更新済みのものを使う
+    if (doneDeclared && plan.doneCheck !== undefined) {
+      this.evaluating = true;
+      const generation = this.runGeneration;
+      void this.runDoneCheck(plan, plan.doneCheck, state, generation).finally(() => {
+        if (generation === this.runGeneration) {
+          this.evaluating = false;
+        }
+      });
+      return;
+    }
     this.finishTurn(plan, plan.continuePrompt);
+  }
+
+  /**
+   * `<<LOOP_DONE>>`を受けたターンの検証（issue #1447）。
+   *
+   * 満たしたと判定されたとき・判定できなかったときは`done`で止める。判定できなかったときに
+   * 止めるのは、検証が無かったときと同じ動きにするため。差し戻したときは、足りない点を
+   * 添えた継続指示で次の周へ進む。
+   */
+  private async runDoneCheck(
+    plan: LoopPlan,
+    doneCheck: LoopDoneCheckConfig,
+    state: ChatState,
+    generation: number,
+  ): Promise<void> {
+    const iteration = this.status.iteration;
+    // ゴール駆動でないループでは`seenEvidenceIds`は開始時点の値のまま動かないため、
+    // ここで拾うのはループを始めてから実行されたコマンドの全体になる
+    const input = {
+      condition: plan.condition,
+      recentTurns: collectRecentTurns(state.items),
+      evidence: collectCommandEvidence(state.items, this.seenEvidenceIds, iteration),
+    };
+    const result = await doneCheck
+      .check(input, this.runAbort?.signal)
+      .catch(() => ({ kind: 'unavailable' }) as const);
+
+    // 待っている間にループが止められた・別の実行が始まった。結果は捨てる
+    if (!this.status.running || this.plan !== plan || generation !== this.runGeneration) {
+      return;
+    }
+    try {
+      doneCheck.note?.(result, iteration);
+    } catch {
+      // 表示の不調でループを止めない（`noteAdvisor`と同じ扱い）
+    }
+    if (result.kind !== 'rejected') {
+      this.stop('done');
+      return;
+    }
+    this.finishTurn(plan, buildRejectedDonePrompt(plan.continuePrompt, result.feedback));
   }
 
   /**

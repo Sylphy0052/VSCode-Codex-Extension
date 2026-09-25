@@ -69,6 +69,7 @@ import {
   setChatLoopEngineeringEnabled,
   readLoopAdvisorConfig,
   setLoopAdvisorEnabled,
+  readLoopDoneCheckConfig,
   readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -85,6 +86,7 @@ import { buildGoalDraftReply, planGoalDraft } from './goalDraftFactory';
 import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import { lastAgentMessage } from '../loop/loopEngineering';
+import { createLoopDoneCheckConfig, describeLoopDoneCheck } from '../loop/loopDoneCheck';
 import { pushTurnSignature, detectStalledLoop } from '../loop/stallDetector';
 import { AutoReplyAgent, autoReplyAgentCloseReasonFor } from '../chat/autoReplyAgent';
 import {
@@ -2651,11 +2653,26 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
             advisorDisplay(advice, iteration),
           ),
         );
+        // 完了宣言の検証（issue #1447）。設定で無効なら`undefined`が返り、計画にも載らない
+        const doneCheck = createLoopDoneCheckConfig(
+          readLoopDoneCheckConfig(),
+          {
+            provider: 'codex',
+            executable: readConfig().executablePath,
+            logWarn: (message) => this.log.warn(message),
+          },
+          (result, iteration) =>
+            entry.session.noteLocalEvent(
+              `loopDoneCheck:${Date.now()}:${iteration}`,
+              describeLoopDoneCheck(result),
+            ),
+        );
         const plan = normalizeLoopPlan(
           m['plan'],
           readChatLoopEngineeringConfig(),
           createGoalLoopOptions('codex', this.log),
           advisor,
+          doneCheck,
         );
         if (plan === undefined) {
           void vscode.window.showErrorMessage('ループの継続指示と最大回数を入力してください');

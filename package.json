@@ -1306,6 +1306,20 @@
           "scope": "window",
           "markdownDescription": "自動返信の最大往復回数。達すると自動返信モードをOFFにし、理由を会話へ残す。返信役の実行はCodexの利用枠を消費するため、上限で歯止めを掛ける。20は出発点の値で、使ってみて調整する想定。"
         },
+        "agent.chat.loopDoneCheck.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "条件付きループで `<<LOOP_DONE>>` を受けたとき、止める前にReflex判定（issue #1447）で終了条件を本当に満たしたかを確かめるか。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、ループ中に実行したコマンドの記録と直近の応答を渡す。確信が持てなければ止めずに次の周へ進み、足りない点を指示文へ添える。判定が失敗したときは宣言どおり止める。判定結果は会話に残る。ゴールで回すループと通常の会話では判定しない。"
+        },
+        "agent.chat.loopDoneCheck.threshold": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "完了宣言の検証で、「終了条件を満たした」の確率がこの値以上ならループを終了する。下回れば次の周へ進む。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
+        },
         "agent.chat.autoReply.reflex.enabled": {
           "type": "boolean",
           "default": true,
