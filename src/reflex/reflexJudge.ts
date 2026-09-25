@@ -113,8 +113,8 @@ function findInvalidQuestion(questions: readonly ReflexQuestion[]): string | und
     if (labels.length < 2) {
       return `${questionId(i)}の選択肢が2つ未満です`;
     }
-    if (new Set(labels).size !== labels.length) {
-      return `${questionId(i)}の選択肢が重複しています`;
+    if (new Set(labels.map(normalizeReflexLabel)).size !== labels.length) {
+      return `${questionId(i)}の選択肢が重複しています（全角・半角の違いを除く）`;
     }
   }
   return undefined;
@@ -122,6 +122,14 @@ function findInvalidQuestion(questions: readonly ReflexQuestion[]): string | und
 
 function questionId(index: number): string {
   return `q${index + 1}`;
+}
+
+/**
+ * 選択肢名を照合するときの形。モデルは応答のキーで全角の約物を半角へ書き換えることがあるため
+ * （Claudeで全角括弧を確認）、NFKCで全角・半角の違いを揃える。
+ */
+export function normalizeReflexLabel(label: string): string {
+  return label.normalize('NFKC');
 }
 
 export function buildReflexPrompt(request: ReflexRequest): string {
@@ -250,14 +258,25 @@ export function parseReflexAnswers(
  * 未知の選択肢・書かれていない選択肢・範囲外の確率があるとき、または全て0のときは`undefined`。
  * 書かれていない選択肢を0とみなすと、`{"x":0.2}`のような答えが正規化でxの確率1に膨らみ、
  * 閾値の判定を誤らせる。
+ *
+ * 選択肢名は`normalizeReflexLabel`で揃えて照合する。正規化すると重なるキーが答えにあるときは、
+ * どちらを採るかで結果が変わるため`undefined`。
  */
 function readDistribution(value: unknown, labels: readonly string[]): number[] | undefined {
   if (!isRecord(value) || Object.keys(value).length !== labels.length) {
     return undefined;
   }
+  const byLabel = new Map<string, unknown>();
+  for (const [key, p] of Object.entries(value)) {
+    const label = normalizeReflexLabel(key);
+    if (byLabel.has(label)) {
+      return undefined;
+    }
+    byLabel.set(label, p);
+  }
   const probs: number[] = [];
   for (const label of labels) {
-    const p = Object.hasOwn(value, label) ? value[label] : undefined;
+    const p = byLabel.get(normalizeReflexLabel(label));
     if (!isProbability(p)) {
       return undefined;
     }

@@ -1,6 +1,11 @@
 import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
-import { judge, type ReflexAnswer, type ReflexJudgeDeps } from '../reflex/reflexJudge';
+import {
+  judge,
+  normalizeReflexLabel,
+  type ReflexAnswer,
+  type ReflexJudgeDeps,
+} from '../reflex/reflexJudge';
 
 /**
  * 自動返信モードに挟むReflex判定（Issue #1435）。
@@ -42,8 +47,9 @@ const COMPLETION_OPTIONS = [COMPLETED, NEEDS_HUMAN, CAN_CONTINUE] as const;
 /**
  * AskUserQuestionの選択肢に足す「どれでもない」。これが選ばれた質問は人へ回す。
  *
- * 括弧などの約物を入れない。Claudeは応答のキーで全角括弧を半角に書き換えることがあり、
- * 選択肢名と一致しなくなって判定全体が無効になるため。
+ * 括弧などの約物を入れない。Claudeは応答のキーで全角括弧を半角に書き換えることがある。
+ * 照合は`normalizeReflexLabel`で全角・半角を揃えて行うが、こちらで決める名前は書き換えの
+ * 余地そのものを無くしておく。
  */
 export const ASK_USER_QUESTION_NONE_OPTION = '選択肢に合うものが無い';
 
@@ -201,12 +207,16 @@ export async function judgeAutoReplyAskUserQuestion(
   const labelsPerQuestion = questions.map((q) =>
     q.options.map((option) => sanitizeInlineText(option.label, ASK_LABEL_MAX_LENGTH)),
   );
-  // 整形後に重なったラベルは、位置で元のラベルへ戻せない（`indexOf`が先頭の方を返す）
+  // 整形後に重なったラベルは、位置で元のラベルへ戻せない（`indexOf`が先頭の方を返す）。
+  // 判定は全角・半角の違いを揃えて照合するため、揃えると重なるラベルも判定へ渡せない
   if (
-    labelsPerQuestion.some(
-      (labels) =>
-        labels.includes(ASK_USER_QUESTION_NONE_OPTION) || new Set(labels).size !== labels.length,
-    )
+    labelsPerQuestion.some((labels) => {
+      const keys = labels.map(normalizeReflexLabel);
+      return (
+        keys.includes(normalizeReflexLabel(ASK_USER_QUESTION_NONE_OPTION)) ||
+        new Set(keys).size !== keys.length
+      );
+    })
   ) {
     return { kind: 'delegate' };
   }
