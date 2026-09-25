@@ -28,6 +28,8 @@ export interface VerifyStagesResult {
   readonly measurements?: string;
   /** 作業ツリーを元へ戻せなかった理由 */
   readonly restoreError?: string;
+  /** 指定されていたのに実行を見送った理由（利用者へ警告として見せる） */
+  readonly skipped?: string;
   readonly aborted: boolean;
 }
 
@@ -43,6 +45,7 @@ export async function runVerifyStages(input: {
     commands: readonly string[],
     stage: VerificationStage,
   ) => Promise<ExecuteVerifyCommandsResult>;
+  readonly signal: AbortSignal;
   readonly log: Logger;
   readonly logPrefix: string;
 }): Promise<VerifyStagesResult> {
@@ -54,10 +57,10 @@ export async function runVerifyStages(input: {
     return { failures, aborted: false };
   }
   if (input.originCommit === '') {
-    input.log.warn(
-      `${input.logPrefix} 分岐元のコミットが分からないため、verify.revertCheck / verify.baseline を実行しませんでした`,
-    );
-    return { failures, aborted: false };
+    const skipped =
+      '分岐元のコミットが分からない（worktreeを使わないタスクなど）ため、verify.revertCheck / verify.baseline を実行しませんでした';
+    input.log.warn(`${input.logPrefix} ${skipped}`);
+    return { failures, skipped, aborted: false };
   }
 
   const runReverted = (scope: RevertScope, commands: readonly string[], stage: VerificationStage) =>
@@ -67,6 +70,7 @@ export async function runVerifyStages(input: {
       originCommit: input.originCommit,
       scope,
       body: () => input.execute(commands, stage),
+      signal: input.signal,
     });
 
   if (wantsRevert) {
@@ -76,6 +80,9 @@ export async function runVerifyStages(input: {
       (reverted.kind === 'ran' && reverted.restoreError !== undefined)
     ) {
       return fail(failures, reverted, input);
+    }
+    if (reverted.kind === 'aborted') {
+      return { failures, aborted: true };
     }
     if (reverted.kind === 'noChanges') {
       input.log.info(
@@ -102,6 +109,9 @@ export async function runVerifyStages(input: {
   const based = await runReverted('all', baseline, 'baseline');
   if (based.kind === 'failed' || (based.kind === 'ran' && based.restoreError !== undefined)) {
     return fail(failures, based, input);
+  }
+  if (based.kind === 'aborted') {
+    return { failures, aborted: true };
   }
   if (based.kind === 'noChanges') {
     input.log.info(`${input.logPrefix} 分岐元からの変更が無いため、verify.baseline を見送りました`);

@@ -5931,11 +5931,18 @@ export class WorkflowRunner {
         git: this.deps.git,
         taskRun: result.executed,
         execute,
+        signal: controller.signal,
         log: this.deps.log,
         logPrefix: `[workflow ${runId}/${taskId}]`,
       });
+      if (
+        stages.skipped !== undefined &&
+        !live.warnings.some((w) => w.taskId === taskId && w.message === stages.skipped)
+      ) {
+        live.warnings.push({ kind: 'taskVerification', taskId, message: stages.skipped });
+      }
       return {
-        executed: true,
+        executed: !stages.aborted,
         failures: stages.failures,
         ...(stages.measurements === undefined ? {} : { measurements: stages.measurements }),
         ...(stages.restoreError === undefined ? {} : { restoreError: stages.restoreError }),
@@ -6082,13 +6089,14 @@ export class WorkflowRunner {
     // 変更を戻して測った後に作業ツリーを元へ戻せなかった。壊れた作業ツリーのまま担当に
     // 続けさせず、タスクを`failed`にする（Issue #1468 受入基準5）
     if (commandRun.restoreError !== undefined) {
-      if (abortVerification()) return;
-      liveTask.verificationInProgress = false;
+      // 停止と重なっても、作業ツリーが壊れていることは必ず画面へ残す
       live.warnings.push({
         kind: 'taskVerification',
         taskId,
         message: `変更を戻して検証した後、作業ツリーを元の状態へ戻せませんでした。worktreeを確認してください: ${sanitizeForLog(commandRun.restoreError)}`,
       });
+      if (abortVerification()) return;
+      liveTask.verificationInProgress = false;
       this.onTaskFinished(runId, taskId, task, 'failed', state);
       return;
     }

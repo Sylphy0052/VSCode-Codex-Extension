@@ -28,6 +28,13 @@ import type { GitCommandRunner } from './worktree';
  * 未追跡のファイルを足していても、それも消える。復元の後にもう一度スナップショットを取り、
  * 戻す前のtreeと一致することを確かめる（Issue #1468 受入基準5）。一致しなければもう一度だけ
  * 試み、それでも駄目なら `restoreError` を返す。
+ *
+ * ## 対象外
+ *
+ * サブモジュール（gitlink）は戻さず、中身の変化もスナップショットに入らない。一致確認は
+ * サブモジュールの中を見ない。戻した状態でコマンドがサブモジュールの中を書き換えても
+ * 検知できないが、これは通常の `verify.commands` の実行と同じ扱いである。
+ * ignoreされたファイル（ビルド成果物など）も同じく戻さず、確認もしない。
  */
 
 /** 変更を戻す範囲。`production` はテスト以外のファイルだけ、`all` は変更全体 */
@@ -43,6 +50,8 @@ export type TemporaryRevertResult<T> =
     }
   /** 戻す対象が無かった（`body` は走らせていない） */
   | { readonly kind: 'noChanges' }
+  /** 戻す前に中断された（`body` は走らせていない。作業ツリーは元のまま） */
+  | { readonly kind: 'aborted' }
   /** 戻せなかった（`body` は走らせていない）。`restoreError` があれば作業ツリーを元へ戻せていない */
   | { readonly kind: 'failed'; readonly error: string; readonly restoreError?: string };
 
@@ -68,6 +77,9 @@ export function isTestPath(file: string): boolean {
 }
 
 class GitStepError extends Error {}
+
+/** サブモジュールを指すtreeの要素のmode */
+const GITLINK_MODE = '160000';
 
 async function runGit(
   git: GitCommandRunner,
@@ -116,12 +128,17 @@ async function listChanges(
   from: string,
   to: string,
 ): Promise<PathChange[]> {
-  const out = await runGit(git, ['diff', '--name-status', '-z', '--no-renames', from, to], cwd);
+  // `--raw` の1件は `:<旧mode> <新mode> <旧sha> <新sha> <状態>\0<パス>\0`
+  const out = await runGit(git, ['diff', '--raw', '-z', '--no-renames', from, to], cwd);
   const fields = out.split('\0').filter((field) => field !== '');
   const changes: PathChange[] = [];
   for (let i = 0; i + 1 < fields.length; i += 2) {
-    const status = fields[i] ?? '';
+    const [oldMode = '', newMode = '', , , status = ''] = (fields[i] ?? '').slice(1).split(' ');
     const file = fields[i + 1] ?? '';
+    // サブモジュール（gitlink）は触らない。中身はスナップショットにも入らない
+    if (oldMode === GITLINK_MODE || newMode === GITLINK_MODE) {
+      continue;
+    }
     changes.push({ file, deleted: status.startsWith('D') });
   }
   return changes;
@@ -134,19 +151,31 @@ async function applyChanges(
   to: string,
   changes: readonly PathChange[],
 ): Promise<void> {
+  // 先に消す。ファイルとディレクトリが入れ替わったパス（`a` と `a/x`）で、書く先の
+  // 親がファイルのまま残らないようにする
+  for (const change of changes) {
+    if (change.deleted) {
+      await fs.rm(path.join(cwd, change.file), { recursive: true, force: true });
+    }
+  }
   const restore = changes.filter((change) => !change.deleted).map((change) => change.file);
-  // 引数長の上限を避けるため、まとめて渡す数を抑える
+  for (const file of restore) {
+    // 書く先がディレクトリになっていると `git restore` が書けない
+    const stat = await fs.lstat(path.join(cwd, file)).catch(() => undefined);
+    if (stat?.isDirectory() === true) {
+      await fs.rm(path.join(cwd, file), { recursive: true, force: true });
+    }
+  }
+  // 引数長の上限を避けるため、まとめて渡す数を抑える。パスは字義どおりに解釈させる
+  // （`:` で始まる名前や `*` を含む名前をpathspecの記法として読ませない）
+  const env = { ...ENV_WITHOUT_REPO_OVERRIDES, GIT_LITERAL_PATHSPECS: '1' };
   for (let i = 0; i < restore.length; i += 200) {
     await runGit(
       git,
       ['restore', `--source=${to}`, '--worktree', '--', ...restore.slice(i, i + 200)],
       cwd,
+      env,
     );
-  }
-  for (const change of changes) {
-    if (change.deleted) {
-      await fs.rm(path.join(cwd, change.file), { force: true });
-    }
   }
 }
 
@@ -186,6 +215,11 @@ export async function withTemporaryRevert<T>(input: {
   readonly originCommit: string;
   readonly scope: RevertScope;
   readonly body: () => Promise<T>;
+  /**
+   * 中断されていれば戻す前に見送る。戻した後の復元は中断されても必ず最後まで行うため、
+   * git呼び出しへは渡さない（途中で止めると作業ツリーが戻す前にも後にもならない）
+   */
+  readonly signal?: AbortSignal;
 }): Promise<TemporaryRevertResult<T>> {
   const { git, cwd, originCommit } = input;
   let before: string;
@@ -200,6 +234,9 @@ export async function withTemporaryRevert<T>(input: {
   }
   if (targets.length === 0) {
     return { kind: 'noChanges' };
+  }
+  if (input.signal?.aborted === true) {
+    return { kind: 'aborted' };
   }
 
   try {
