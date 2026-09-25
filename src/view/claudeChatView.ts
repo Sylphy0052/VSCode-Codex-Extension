@@ -14,7 +14,7 @@ import {
 } from '../appserver/chatState';
 import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
-import type { AskUserQuestionItem } from '../claude/askUserQuestion';
+import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
 import { describeForkFromTurnError } from '../claude/forkFromTurn';
 import { SecondOpinionRegistry } from '../secondOpinion/run';
@@ -58,6 +58,7 @@ import {
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
   readAutoReplyConfig,
+  readAutoReplyReflexConfig,
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
@@ -92,6 +93,13 @@ import {
   shouldTriggerAutoReply,
   type AutoReplyStopReason,
 } from '../chat/autoReply';
+import {
+  checkAutoReplyCompletion,
+  checkAutoReplyDanger,
+  describeAskUserQuestionSelections,
+  judgeAutoReplyAskUserQuestion,
+} from '../chat/autoReplyReflex';
+import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
 import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
@@ -337,6 +345,11 @@ interface ClaudePanel extends BaseChatPanel {
   autoReplyTurnCount: number;
   /** 自動返信の応答履歴（停滞検出`detectStalledLoop`用）。 */
   autoReplyHistory: string[];
+  /**
+   * 自動返信のReflex判定（Issue #1435）の打ち切り。OFFにしたときとタブを閉じたときに
+   * abortし、結果を捨てる判定のCLIを走らせ続けない。OFFにしたら作り直す。
+   */
+  autoReplyReflexAbort: AbortController;
   /**
    * 自動返信中に自動回答を試みているAskUserQuestionの要求idの集合（Issue #1353）。
    *
@@ -1440,9 +1453,9 @@ export class ClaudeChatViewManager
   /**
    * 自動返信モードをOFFにする。返信役があれば閉じ、往復回数・応答履歴をリセットする。
    * 理由は会話へ1行残す（`noteLocalEvent`）。既にOFFなら何もしない（複数箇所から
-   * 呼んでも安全にするため）。
+   * 呼んでも安全にするため）。`detail`（Reflex判定の確率など）は理由に括弧で添える。
    */
-  private stopAutoReply(entry: ClaudePanel, reason: AutoReplyStopReason): void {
+  private stopAutoReply(entry: ClaudePanel, reason: AutoReplyStopReason, detail?: string): void {
     if (entry.disposed) {
       return;
     }
@@ -1452,13 +1465,15 @@ export class ClaudeChatViewManager
     entry.autoReplyHistory = [];
     // もう一度ONにしたときは、残っているカードを改めて返信役へ聞けるようにする
     entry.autoReplyAskUserQuestionInFlight.clear();
+    entry.autoReplyReflexAbort.abort();
+    entry.autoReplyReflexAbort = new AbortController();
     const agent = entry.autoReplyAgent;
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
     if (wasOn) {
       entry.session.noteLocalEvent(
         `autoReplyStop:${Date.now()}`,
-        describeAutoReplyStopReason(reason),
+        describeAutoReplyStopReason(reason, detail),
       );
     }
   }
@@ -1475,6 +1490,9 @@ export class ClaudeChatViewManager
       return;
     }
     const config = readAutoReplyConfig();
+    if (!(await this.passesAutoReplyCompletionCheck(entry, lastAgentMessageText))) {
+      return;
+    }
     if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
       const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
       if (cwd === undefined) {
@@ -1524,6 +1542,9 @@ export class ClaudeChatViewManager
       this.stopAutoReply(entry, 'stalled');
       return;
     }
+    if (!(await this.passesAutoReplyDangerGate(entry, message, lastAgentMessageText))) {
+      return;
+    }
     entry.session.noteLocalEvent(`autoReply:${Date.now()}`, `自動返信: ${message}`);
     try {
       this.sendFromLoop(entry, message);
@@ -1531,6 +1552,93 @@ export class ClaudeChatViewManager
       // 失敗は`sendFromLoop`内で既に報告済み。自動返信はここで止める
       this.stopAutoReply(entry, 'turnFailed');
     }
+  }
+
+  /** 自動返信のReflex判定（Issue #1435）は、会話しているClaude Codeの軽量モデルで走らせる。 */
+  private autoReplyReflexDeps(entry: ClaudePanel): ReflexJudgeDeps {
+    return {
+      provider: 'claude',
+      executable: this.claudePath(),
+      logWarn: (message) => this.log.warn(message),
+      signal: entry.autoReplyReflexAbort.signal,
+    };
+  }
+
+  /**
+   * 返信役を呼ぶ前の完了の検証（Issue #1435）。返信役へ進んでよければtrue。
+   *
+   * 「完了した」「人の判断が要る」と判定されたら、返信役を呼ばずに自動返信を止める。
+   * 判定が失敗したときは、判定が無かったときと同じく返信役に任せる。
+   */
+  private async passesAutoReplyCompletionCheck(
+    entry: ClaudePanel,
+    lastAgentMessageText: string,
+  ): Promise<boolean> {
+    const reflex = readAutoReplyReflexConfig();
+    if (!reflex.enabled) {
+      return true;
+    }
+    const verdict = await checkAutoReplyCompletion(
+      this.autoReplyReflexDeps(entry),
+      lastAgentMessageText,
+      reflex.completionThreshold,
+    );
+    if (entry.disposed || !entry.session.getState().autoReply) {
+      return false;
+    }
+    if (verdict.kind === 'stop') {
+      this.stopAutoReply(
+        entry,
+        verdict.reason === 'completed' ? 'reflexCompleted' : 'reflexNeedsHuman',
+        verdict.summary,
+      );
+      return false;
+    }
+    entry.session.noteLocalEvent(
+      `autoReplyReflex:${Date.now()}:completion`,
+      verdict.kind === 'continue'
+        ? `Reflex判定（完了の検証）: ${verdict.summary}`
+        : 'Reflex判定（完了の検証）: 判定できなかったため返信役に任せます',
+    );
+    return true;
+  }
+
+  /**
+   * 自動で送る発言・AskUserQuestionへの回答の危険度ゲート（Issue #1435）。送ってよければtrue。
+   *
+   * 危険と判定されたとき、判定が失敗したときは、送らずに自動返信を止める（安全側）。
+   */
+  private async passesAutoReplyDangerGate(
+    entry: ClaudePanel,
+    outgoing: string,
+    context: string,
+  ): Promise<boolean> {
+    const reflex = readAutoReplyReflexConfig();
+    if (!reflex.enabled) {
+      return true;
+    }
+    const verdict = await checkAutoReplyDanger(
+      this.autoReplyReflexDeps(entry),
+      outgoing,
+      context,
+      reflex.dangerThreshold,
+    );
+    if (entry.disposed || !entry.session.getState().autoReply) {
+      return false;
+    }
+    if (verdict.kind === 'danger') {
+      this.stopAutoReply(entry, 'reflexDanger', verdict.summary);
+      return false;
+    }
+    if (verdict.kind === 'unavailable') {
+      this.stopAutoReply(entry, 'reflexDangerUnavailable');
+      return false;
+    }
+    entry.session.noteLocalEvent(
+      `autoReplyReflex:${Date.now()}:danger`,
+      `Reflex判定（危険度ゲート）: ${verdict.summary}`,
+    );
+    return true;
   }
 
   /**
@@ -1572,6 +1680,39 @@ export class ClaudeChatViewManager
     requestId: number | string,
     questions: AskUserQuestionItem[],
   ): Promise<void> {
+    const context = lastAgentMessage(entry.session.getState().items)?.text ?? '';
+    const reflex = readAutoReplyReflexConfig();
+    if (reflex.enabled) {
+      // 選択肢を判定で選べるなら返信役を通さない（Issue #1435）。確信度が足りない質問が
+      // あれば人へ回し、判定できない（失敗・複数選択）ときだけ返信役に任せる
+      const verdict = await judgeAutoReplyAskUserQuestion(
+        this.autoReplyReflexDeps(entry),
+        questions,
+        context,
+        reflex.answerThreshold,
+      );
+      if (entry.disposed || !entry.session.getState().autoReply) {
+        return;
+      }
+      if (verdict.kind === 'human') {
+        entry.session.noteLocalEvent(
+          `autoReplyReflex:${Date.now()}:ask`,
+          `Reflex判定（質問への回答）: 確信度が足りないため人の回答を待ちます（${verdict.summary}）`,
+        );
+        return;
+      }
+      if (verdict.kind === 'answer') {
+        await this.answerAskUserQuestionAutomatically(
+          entry,
+          requestId,
+          questions,
+          verdict.selections,
+          context,
+          `Reflex判定: ${verdict.summary}`,
+        );
+        return;
+      }
+    }
     if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
       const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
       if (cwd === undefined) {
@@ -1602,10 +1743,36 @@ export class ClaudeChatViewManager
       // （AskUserQuestion自体が承認カードとして残るため、二重に通知しない）
       return;
     }
+    await this.answerAskUserQuestionAutomatically(
+      entry,
+      requestId,
+      questions,
+      selections,
+      context,
+      '返信役',
+    );
+  }
+
+  /**
+   * AskUserQuestionへ自動で回答する。送る前に危険度ゲート（Issue #1435）を通し、通らなければ
+   * カードを残したまま自動返信を止める。`source`は誰が選んだかで、会話へ残す1行に添える。
+   */
+  private async answerAskUserQuestionAutomatically(
+    entry: ClaudePanel,
+    requestId: number | string,
+    questions: AskUserQuestionItem[],
+    selections: AskUserQuestionSelections,
+    context: string,
+    source: string,
+  ): Promise<void> {
+    const outgoing = describeAskUserQuestionSelections(questions, selections);
+    if (!(await this.passesAutoReplyDangerGate(entry, outgoing, context))) {
+      return;
+    }
     entry.session.answerAskUserQuestion(requestId, selections);
     entry.session.noteLocalEvent(
       `autoReplyAskUserQuestion:${Date.now()}`,
-      '自動返信: AskUserQuestionに自動回答しました',
+      `自動返信: AskUserQuestionに自動回答しました（${source}）`,
     );
     // 自動回答も往復の1回に数える。数えないと、AskUserQuestionだけを出し続ける出力に
     // 回数上限（agent.chat.autoReply.maxTurns）が効かない
@@ -2202,6 +2369,7 @@ export class ClaudeChatViewManager
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
     entry.autoReplyAgent?.close('tabClosed');
     entry.autoReplyAgent = undefined;
+    entry.autoReplyReflexAbort.abort();
   }
 
   /** 拡張機能の終了時に、残っている相談相手をすべて閉じる（Issue #929）。 */
@@ -2631,6 +2799,7 @@ export class ClaudeChatViewManager
       autoReplyAgent: undefined,
       autoReplyTurnCount: 0,
       autoReplyHistory: [],
+      autoReplyReflexAbort: new AbortController(),
       autoReplyAskUserQuestionInFlight: new Set(),
     };
     return entry;

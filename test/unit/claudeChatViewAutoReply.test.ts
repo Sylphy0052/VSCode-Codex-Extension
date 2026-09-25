@@ -196,6 +196,8 @@ async function openAutoReplyPanel(maxTurns = 10): Promise<{
     'chat.autoReply.enabled': true,
     'chat.autoReply.maxTurns': maxTurns,
     'chat.autoReply.timeoutSeconds': 60,
+    // 返信役の配線だけを見る。Reflex判定（Issue #1435）は実際のCLIを起動するため切る
+    'chat.autoReply.reflex.enabled': false,
   });
   const sessions = stubStartCapturing();
   const manager = createManager();

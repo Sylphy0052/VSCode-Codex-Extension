@@ -192,7 +192,11 @@ export type AutoReplyStopReason =
   | 'loopStarted'
   | 'idleTimeout'
   | 'tabClosed'
-  | 'handedOff';
+  | 'handedOff'
+  | 'reflexCompleted'
+  | 'reflexNeedsHuman'
+  | 'reflexDanger'
+  | 'reflexDangerUnavailable';
 
 const AUTO_REPLY_STOP_REASON_LABELS: Record<AutoReplyStopReason, string> = {
   maxTurns: '自動返信の上限回数に達したため自動返信を終了しました',
@@ -205,11 +209,19 @@ const AUTO_REPLY_STOP_REASON_LABELS: Record<AutoReplyStopReason, string> = {
   idleTimeout: '無操作が続いたため返信役を閉じました',
   tabClosed: 'タブが閉じられたため自動返信を終了しました',
   handedOff: '新しいセッションへ引き継いだため、このセッションの自動返信を終了しました',
+  reflexCompleted: 'Reflex判定で作業が完了したと判断したため自動返信を終了しました',
+  reflexNeedsHuman: 'Reflex判定で人の判断が要ると判断したため自動返信を終了しました',
+  reflexDanger: 'Reflex判定で送る内容が危険と判断したため、送らずに自動返信を終了しました',
+  reflexDangerUnavailable: '送る内容の危険度を判定できなかったため、送らずに自動返信を終了しました',
 };
 
-/** 停止理由を会話に残す1行の日本語文へ変換する。 */
-export function describeAutoReplyStopReason(reason: AutoReplyStopReason): string {
-  return AUTO_REPLY_STOP_REASON_LABELS[reason];
+/**
+ * 停止理由を会話に残す1行の日本語文へ変換する。`detail`（Reflex判定の確率など）があれば
+ * 括弧で添える。
+ */
+export function describeAutoReplyStopReason(reason: AutoReplyStopReason, detail?: string): string {
+  const label = AUTO_REPLY_STOP_REASON_LABELS[reason];
+  return detail === undefined ? label : `${label}（${detail}）`;
 }
 
 /** 自動返信の回数が上限へ達したか。 */
