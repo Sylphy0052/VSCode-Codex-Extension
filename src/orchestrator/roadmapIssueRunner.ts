@@ -44,6 +44,7 @@ import {
 } from './roadmapRunState';
 import type { RoadmapRunStore } from './roadmapRunStore';
 import { decideStartIssue, pickIssuesToStart, type StartIssueRejection } from './roadmapScheduler';
+import { SerialQueue } from './serialQueue';
 import { buildStructuredSummary, formatBrief } from './taskSummary';
 import type {
   TaskSession,
@@ -178,6 +179,12 @@ export class RoadmapIssueRunner {
   private readonly live = new Map<string, LiveIssueSession>();
   /** 開始処理の途中（worktree作成・セッション起動の`await`中）のIssue。二重起動を防ぐ。 */
   private readonly starting = new Set<string>();
+  /**
+   * Issueごとの操作（開始・一時停止・停止・引き継ぎ・終了の処理）を直列にする。どの操作も
+   * `await`を挟んで状態とセッションを書き換えるため、並ぶと停止した直後に開始が状態を
+   * `running`へ戻す等の取り違えが起きる。
+   */
+  private readonly locks = new Map<string, SerialQueue>();
   private disposed = false;
 
   constructor(private readonly deps: RoadmapIssueRunnerDeps) {}
@@ -193,6 +200,19 @@ export class RoadmapIssueRunner {
   private findIssue(runId: string, issueNumber: number): RoadmapIssueExecution | undefined {
     const run = this.deps.store.find(runId);
     return run === undefined ? undefined : getIssue(run, issueNumber);
+  }
+
+  /**
+   * Issueごとの直列化。`fn`の中から同じIssueの`withIssueLock`を待つと噛み合わなくなるため、
+   * `pump`など別のIssueを始めうる処理はロックの外で呼ぶ。
+   */
+  private withIssueLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    let queue = this.locks.get(key);
+    if (queue === undefined) {
+      queue = new SerialQueue();
+      this.locks.set(key, queue);
+    }
+    return queue.enqueue(fn);
   }
 
   /** 状態を純粋関数で進めて永続化する。runが無ければ何もしない。 */
@@ -233,7 +253,7 @@ export class RoadmapIssueRunner {
     }
     this.starting.add(key);
     try {
-      return await this.startIssueInner(runId, issueNumber, options);
+      return await this.withIssueLock(key, () => this.startIssueInner(runId, issueNumber, options));
     } finally {
       this.starting.delete(key);
     }
@@ -452,7 +472,8 @@ export class RoadmapIssueRunner {
         entry.session === session &&
         this.live.get(liveKey(entry.runId, entry.issueNumber)) === entry
       ) {
-        void this.onFinished(entry, reason);
+        entry.loopEnded = true;
+        void this.onFinished(entry, session, reason);
       }
     });
   }
@@ -498,7 +519,10 @@ export class RoadmapIssueRunner {
       return;
     }
     entry.contextLowInFlight = true;
-    void this.handoff(entry, state)
+    const session = entry.session;
+    void this.withIssueLock(liveKey(entry.runId, entry.issueNumber), () =>
+      this.handoff(entry, session, state),
+    )
       .catch((e: unknown) => {
         this.deps.onWarning?.(
           entry.runId,
@@ -516,13 +540,26 @@ export class RoadmapIssueRunner {
    * 続きの指示だけ止めてタブを残す。新しいセッションは`handoff`の実行回として紐付け直し、
    * 以後は古い実行回からの報告を拒否する。
    */
-  private async handoff(entry: LiveIssueSession, state: ChatState): Promise<void> {
-    const run = this.deps.store.find(entry.runId);
-    const issue = run === undefined ? undefined : getIssue(run, entry.issueNumber);
-    if (run === undefined || issue === undefined || this.disposed) {
+  private async handoff(
+    entry: LiveIssueSession,
+    previous: TaskSession,
+    state: ChatState,
+  ): Promise<void> {
+    // ロックを待つ間に一時停止・停止・終了・再実行が先に済んでいれば引き継がない
+    if (
+      this.disposed ||
+      entry.session !== previous ||
+      entry.stopRequest !== undefined ||
+      entry.loopEnded ||
+      this.live.get(liveKey(entry.runId, entry.issueNumber)) !== entry ||
+      this.currentRef(entry) === undefined
+    ) {
       return;
     }
-    const previous = entry.session;
+    const run = this.deps.store.find(entry.runId);
+    if (run === undefined) {
+      return;
+    }
     const generation = entry.generation + 1;
     const n = String(entry.issueNumber);
     const brief = formatBrief(
@@ -586,18 +623,42 @@ export class RoadmapIssueRunner {
     session.runLoop(this.buildLoopPlan(entry, prompt));
   }
 
-  private async onFinished(entry: LiveIssueSession, reason: LoopStopReason): Promise<void> {
-    entry.loopEnded = true;
-    const { runId, issueNumber } = entry;
-    const ref = this.currentRef(entry);
-    if (entry.stopRequest === 'stop' || reason === 'taskStopped') {
-      // 停止の完了は`stopIssue`が確かめて記録する
-      return;
+  private async onFinished(
+    entry: LiveIssueSession,
+    session: TaskSession,
+    reason: LoopStopReason,
+  ): Promise<void> {
+    const released = await this.withIssueLock(liveKey(entry.runId, entry.issueNumber), () =>
+      this.settleFinished(entry, session, reason),
+    );
+    if (released) {
+      // 動いているセッションが1つ減ったので、自動実行モードなら空き枠で次を始める。
+      // 次のIssueの開始はそのIssueのロックを取るため、このIssueのロックの外で呼ぶ
+      await this.pump(entry.runId);
     }
+  }
+
+  /** ループの終わりを状態へ反映する。動いているセッションが減ったら`true`。 */
+  private async settleFinished(
+    entry: LiveIssueSession,
+    session: TaskSession,
+    reason: LoopStopReason,
+  ): Promise<boolean> {
+    const { runId, issueNumber } = entry;
+    if (
+      entry.session !== session ||
+      this.live.get(liveKey(runId, issueNumber)) !== entry ||
+      entry.stopRequest === 'stop' ||
+      reason === 'taskStopped'
+    ) {
+      // ロックを待つ間に引き継ぎ・再実行で替わったか、停止の完了は`stopIssue`が確かめて記録する
+      return false;
+    }
+    const ref = this.currentRef(entry);
     if (entry.stopRequest === 'pause' || ref === undefined) {
       // 一時停止の要求中に中断したターンでループが終わった（再開は同じセッションへ`runLoop`する）か、
       // 既に閉じた実行回の終了。どちらも状態は変えない
-      return;
+      return false;
     }
     if (reason === 'done') {
       await this.finishWithPullRequest(entry, ref);
@@ -611,8 +672,7 @@ export class RoadmapIssueRunner {
         markIssueFailed(r, issueNumber, `Issueセッションが終了しました（${reason}）`, this.now()),
       );
     }
-    // 動いているセッションが1つ減ったので、自動実行モードなら空き枠で次を始める
-    await this.pump(runId);
+    return true;
   }
 
   /** 実行回が永続化した状態と一致していれば、その報告用の識別子を返す。 */
@@ -661,7 +721,12 @@ export class RoadmapIssueRunner {
    * ノードを一時停止する。進行中のターンを中断し、ターンの終わりを確かめてから
    * 一時停止にする。セッションは残し、再開では同じセッションを使う。
    */
-  async pauseIssue(runId: string, issueNumber: number): Promise<boolean> {
+  pauseIssue(runId: string, issueNumber: number): Promise<boolean> {
+    const key = liveKey(runId, issueNumber);
+    return this.withIssueLock(key, () => this.pauseIssueInner(runId, issueNumber));
+  }
+
+  private async pauseIssueInner(runId: string, issueNumber: number): Promise<boolean> {
     const entry = this.live.get(liveKey(runId, issueNumber));
     if (entry === undefined || entry.stopRequest !== undefined) {
       return false;
@@ -693,7 +758,12 @@ export class RoadmapIssueRunner {
    * ノードを停止する。ループを止め、ターンの終わりを確かめてからセッションを閉じる。
    * worktreeとブランチは残し、再実行（`retry`）で引き継ぐ。
    */
-  async stopIssue(runId: string, issueNumber: number): Promise<boolean> {
+  stopIssue(runId: string, issueNumber: number): Promise<boolean> {
+    const key = liveKey(runId, issueNumber);
+    return this.withIssueLock(key, () => this.stopIssueInner(runId, issueNumber));
+  }
+
+  private async stopIssueInner(runId: string, issueNumber: number): Promise<boolean> {
     const key = liveKey(runId, issueNumber);
     const entry = this.live.get(key);
     if (entry === undefined) {
@@ -705,14 +775,16 @@ export class RoadmapIssueRunner {
     entry.stopRequest = 'stop';
     entry.session.stopLoop();
     const idle = await this.interruptAndWaitIdle(entry);
+    // 終わりを確かめられなくてもセッションは閉じる。残すと、止めたはずのセッションの
+    // 終了が`stopRequest`で無視され続け、プロセスも残る
+    this.live.delete(key);
+    entry.session.dispose();
     if (!idle) {
       await this.mutate(runId, (r) =>
         markIssueFailed(r, issueNumber, '停止でターンの終わりを確かめられませんでした', this.now()),
       );
       return false;
     }
-    this.live.delete(key);
-    entry.session.dispose();
     await this.mutate(runId, (r) => markIssueStopped(r, issueNumber, this.now()));
     return true;
   }
@@ -743,11 +815,12 @@ export class RoadmapIssueRunner {
     if (run === undefined || this.disposed) {
       return;
     }
-    for (const issueNumber of pickIssuesToStart(run)) {
-      if (!this.starting.has(liveKey(runId, issueNumber))) {
-        await this.startIssue(runId, issueNumber, { overrideDependencies: false });
-      }
-    }
+    // 空き枠の分を並行して始める（worktreeの作成は`WorktreeCreationQueue`が直列にする）
+    await Promise.all(
+      pickIssuesToStart(run)
+        .filter((issueNumber) => !this.starting.has(liveKey(runId, issueNumber)))
+        .map((issueNumber) => this.startIssue(runId, issueNumber, { overrideDependencies: false })),
+    );
   }
 
   /**
