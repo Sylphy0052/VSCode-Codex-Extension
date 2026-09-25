@@ -1,6 +1,12 @@
 import { writeFile } from 'node:fs/promises';
 import * as vscode from 'vscode';
-import { readClaudeConfig, readConfig, readWorkflowsConfig } from '../config';
+import {
+  readAutoReplyReflexConfig,
+  readClaudeConfig,
+  readConfig,
+  readReflexEnabled,
+  readWorkflowsConfig,
+} from '../config';
 import type { Logger } from '../log';
 import { nodeForgeFileSystem, type CliCommandRunner } from '../orchestrator/forge';
 import { RoadmapIssueRunner } from '../orchestrator/roadmapIssueRunner';
@@ -15,6 +21,7 @@ import {
   resolveRoadmapPlan,
   type RoadmapPlanProposal,
 } from '../orchestrator/roadmapPlanProposal';
+import { judgeRoadmapQuestion, RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
 import { RoadmapRunController } from '../orchestrator/roadmapRunController';
 import {
   detectRoadmapForgeHost,
@@ -69,6 +76,12 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   // Controller・Runner・Viewは互いを参照するため、後から入れる箱を介して繋ぐ
   const holder: { controller?: RoadmapRunController; view?: RoadmapKanbanViewManager } = {};
 
+  const executableFor = (engine: RoadmapRunEngine): string =>
+    engine === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath;
+  const questionServer = new RoadmapQuestionMcpServer({
+    logWarn: (message) => log.warn(`[roadmap run] ${message}`),
+  });
+
   const runner = new RoadmapIssueRunner({
     hosts: deps.hosts,
     store,
@@ -83,10 +96,22 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     readContextLowPercent: deps.readContextLowPercent,
     onRunChanged: (run) => holder.controller?.handleRunChanged(run),
     onWarning: (runId, n, message) => holder.controller?.recordWarning(runId, n, message),
+    questionServer,
+    // Reflexモードが無効なら判定せず、すべての質問をユーザーへ回す
+    judgeQuestion: async (engine, question) =>
+      readReflexEnabled()
+        ? judgeRoadmapQuestion(
+            {
+              provider: engine,
+              executable: executableFor(engine),
+              logWarn: (message) => log.warn(`[roadmap run] ${message}`),
+            },
+            question,
+            readAutoReplyReflexConfig().answerThreshold,
+          )
+        : { kind: 'human', summary: undefined },
   });
 
-  const executableFor = (engine: RoadmapRunEngine): string =>
-    engine === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath;
   const importDeps = { cli: deps.cli, fs: nodeForgeFileSystem };
 
   const mergeQueue = new RoadmapMergeQueue({
@@ -149,6 +174,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   return [
     { dispose: () => mergeQueue.dispose() },
     { dispose: () => runner.dispose() },
+    { dispose: () => questionServer.dispose() },
     view,
     vscode.commands.registerCommand('agent.roadmapRun.start', () =>
       startRunCommand(controller, view, log),

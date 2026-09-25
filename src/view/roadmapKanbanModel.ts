@@ -1,9 +1,12 @@
 import {
   getIssue,
+  isPendingQuestion,
+  questionsAwaitingUser,
   type IssueAttention,
   type IssuePhase,
   type IssueResult,
   type RoadmapIssueExecution,
+  type RoadmapQuestion,
   type RoadmapRun,
   type RoadmapRunEngine,
   type RoadmapRunMode,
@@ -76,6 +79,19 @@ export interface RoadmapKanbanBadge {
   tone: 'neutral' | 'warn' | 'ok';
 }
 
+/** ユーザー判断待ちの質問。本文は外部由来のため、画面側では`textContent`で出す。 */
+export interface RoadmapKanbanQuestion {
+  questionId: string;
+  question: string;
+  reason: string;
+  evidence: string | undefined;
+  options: readonly string[];
+  recommended: string | undefined;
+  blocking: boolean;
+  /** 人へ回した理由（Reflexの判定の要約）。 */
+  reflexSummary: string | undefined;
+}
+
 export interface RoadmapKanbanCard {
   issueNumber: number;
   /** 1行へ均した外部由来のテキスト。画面側でもエスケープして出す。 */
@@ -99,6 +115,8 @@ export interface RoadmapKanbanCard {
   canStop: boolean;
   /** セッションタブを前面に出せる（セッションが生きている見込みがある）。 */
   canReveal: boolean;
+  /** 現在の実行回で、ユーザーの回答を待つ質問。 */
+  questions: RoadmapKanbanQuestion[];
 }
 
 export interface RoadmapKanbanRunSummary {
@@ -138,7 +156,11 @@ export interface RoadmapKanbanEvent {
   tone: 'info' | 'warn';
 }
 
-function columnFor(issue: RoadmapIssueExecution, unmet: number): RoadmapKanbanColumn {
+function columnFor(
+  issue: RoadmapIssueExecution,
+  unmet: number,
+  awaitingQuestions: number,
+): RoadmapKanbanColumn {
   switch (issue.progress) {
     case 'done':
       return 'done';
@@ -147,14 +169,24 @@ function columnFor(issue: RoadmapIssueExecution, unmet: number): RoadmapKanbanCo
     case 'halted':
       return 'attention';
     case 'running':
-      return USER_ATTENTIONS.includes(issue.attention) ? 'attention' : 'running';
+      return USER_ATTENTIONS.includes(issue.attention) || awaitingQuestions > 0 ? 'attention' : 'running';
   }
 }
 
-function badgesFor(issue: RoadmapIssueExecution): RoadmapKanbanBadge[] {
+function badgesFor(issue: RoadmapIssueExecution, awaitingQuestions: number): RoadmapKanbanBadge[] {
   const badges: RoadmapKanbanBadge[] = [];
   if (issue.phase !== undefined) {
     badges.push({ kind: 'phase', label: PHASE_LABELS[issue.phase], tone: 'neutral' });
+  }
+  // 質問の状態は注意（attention）とは別に持つ。回答待ちが消えればバッジも消える
+  if (awaitingQuestions > 0) {
+    badges.push({
+      kind: 'attention',
+      label: `ユーザー判断待ち（質問${String(awaitingQuestions)}件）`,
+      tone: 'warn',
+    });
+  } else if ((issue.questions ?? []).some(isPendingQuestion)) {
+    badges.push({ kind: 'attention', label: 'Orchestrator検討中', tone: 'neutral' });
   }
   const attention = ATTENTION_LABELS[issue.attention];
   if (attention !== undefined) {
@@ -195,11 +227,12 @@ function buildCard(run: RoadmapRun, issueNumber: number, dependsOn: readonly num
   const finished = run.finishedAt !== undefined;
   const isPaused = issue.progress === 'halted' && issue.attention === 'paused';
   const lastAttempt = issue.attempts.at(-1);
+  const questions = questionsAwaitingUser(issue).map(toKanbanQuestion);
   return {
     issueNumber,
     title: sanitizeInlineText(issue.title, TITLE_MAX_LENGTH),
-    column: columnFor(issue, unmet.length),
-    badges: badgesFor(issue),
+    column: columnFor(issue, unmet.length, questions.length),
+    badges: badgesFor(issue, questions.length),
     dependsOn: dependsOn.map((dep) => ({ issueNumber: dep, satisfied: !unmetSet.has(dep) })),
     wave,
     startedAt: issue.attempts[0]?.startedAt,
@@ -213,6 +246,20 @@ function buildCard(run: RoadmapRun, issueNumber: number, dependsOn: readonly num
     canPause: !finished && active && issue.attention !== 'stopping',
     canStop: !finished && ((active && issue.attention !== 'stopping') || isPaused),
     canReveal: active || isPaused,
+    questions,
+  };
+}
+
+function toKanbanQuestion(q: RoadmapQuestion): RoadmapKanbanQuestion {
+  return {
+    questionId: q.questionId,
+    question: q.question,
+    reason: q.reason,
+    evidence: q.evidence,
+    options: q.options,
+    recommended: q.recommended,
+    blocking: q.blocking,
+    reflexSummary: q.reflexSummary,
   };
 }
 

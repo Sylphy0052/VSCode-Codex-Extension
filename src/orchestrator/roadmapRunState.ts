@@ -80,6 +80,60 @@ export interface IssueAttempt {
   sessionRef: string | undefined;
 }
 
+/**
+ * Issueセッションが`ask_orchestrator`で尋ねた質問を、Reflexを通さずに人へ回す理由。
+ * 1つでも付いた質問は、選択肢があってもユーザーの判断を待つ。
+ */
+export const ROADMAP_QUESTION_ESCALATIONS = [
+  'scopeChange',
+  'requirementChange',
+  'publicInterface',
+  'destructiveOperation',
+  'securityAuth',
+  'largeDependency',
+  'outsideRepoWrite',
+  'secrets',
+  'release',
+  'specConflict',
+] as const;
+export type RoadmapQuestionEscalation = (typeof ROADMAP_QUESTION_ESCALATIONS)[number];
+
+/**
+ * 質問の状態: Reflexが検討中 / ユーザー判断待ち / Reflexが回答した / ユーザーが回答した /
+ * 実行回が終わって取り消した。
+ */
+export type RoadmapQuestionStatus =
+  'considering' | 'awaitingUser' | 'answeredByReflex' | 'answeredByUser' | 'cancelled';
+
+/** Issueセッションからの質問1件。文字列はどれも外部由来で、長さは受付時に抑えてある。 */
+export interface RoadmapQuestion {
+  questionId: string;
+  /** 質問を受け付けた実行回。 */
+  attemptId: string;
+  question: string;
+  reason: string;
+  /** 選択肢。無ければ自由記述で答える。 */
+  options: readonly string[];
+  recommended: string | undefined;
+  /** 回答が届くまで次のターンへ進まない。 */
+  blocking: boolean;
+  evidence: string | undefined;
+  escalation: readonly RoadmapQuestionEscalation[];
+  status: RoadmapQuestionStatus;
+  /** ISO8601。 */
+  askedAt: string;
+  answer: string | undefined;
+  /** ISO8601。 */
+  answeredAt: string | undefined;
+  /** Reflexの判定の要約（選んだ選択肢と確率）。判定していなければ`undefined`。 */
+  reflexSummary: string | undefined;
+}
+
+/** まだ回答していない質問か。 */
+export function isPendingQuestion(q: RoadmapQuestion): boolean {
+  return q.status === 'considering' || q.status === 'awaitingUser';
+}
+
 /** 1つの子Issueの実行。runの中でIssue1件につき1つだけ作る。 */
 export interface RoadmapIssueExecution {
   issueNumber: number;
@@ -101,6 +155,11 @@ export interface RoadmapIssueExecution {
   pullRequest: { number: number; url: string } | undefined;
   /** `attention === 'failed'`のときの理由。 */
   failure: string | undefined;
+  /**
+   * Issueセッションからの質問。古い版で保存したrunには無いため省略可能にする
+   * （スキーマ版は上げない）。
+   */
+  questions?: readonly RoadmapQuestion[];
   /** ISO8601。 */
   updatedAt: string;
 }
@@ -245,19 +304,171 @@ function withIssue(run: RoadmapRun, next: RoadmapIssueExecution): RoadmapRun {
   return { ...run, issues: { ...run.issues, [issueKey(next.issueNumber)]: next } };
 }
 
-/** 現在の実行回を閉じる。実行回が無ければそのまま返す。 */
+/**
+ * 現在の実行回を閉じる。実行回が無ければそのまま返す。その実行回で未回答の質問は
+ * 取り消す（回答を届けるセッションがもう無いため）。
+ */
 function endCurrentAttempt(issue: RoadmapIssueExecution, at: string): RoadmapIssueExecution {
   if (issue.currentAttemptId === undefined) {
     return issue;
   }
   const id = issue.currentAttemptId;
-  return {
+  const closed: RoadmapIssueExecution = {
     ...issue,
     attempts: issue.attempts.map((a) =>
       a.attemptId === id && a.endedAt === undefined ? { ...a, endedAt: at } : a,
     ),
     currentAttemptId: undefined,
   };
+  return issue.questions?.some(isPendingQuestion) === true
+    ? {
+        ...closed,
+        questions: issue.questions.map((q) =>
+          isPendingQuestion(q) ? { ...q, status: 'cancelled' as const } : q,
+        ),
+      }
+    : closed;
+}
+
+/** 質問として受け付ける内容。長さと件数は呼び出し側（MCPの検証）で抑えてある前提。 */
+export type RoadmapQuestionInput = Pick<
+  RoadmapQuestion,
+  | 'questionId'
+  | 'question'
+  | 'reason'
+  | 'options'
+  | 'recommended'
+  | 'blocking'
+  | 'evidence'
+  | 'escalation'
+>;
+
+/**
+ * Issueセッションからの質問を受け付け、Reflexの検討中として積む。現在の実行と実行回に
+ * 一致しない報告と、同じ`questionId`の二重登録は受け付けない。
+ */
+/** 1つの実行回で受け付ける質問の上限。子セッションの質問の連打で状態を肥大させない。 */
+export const MAX_QUESTIONS_PER_ATTEMPT = 20;
+/** Issueに残す質問の上限。超えたら回答待ちでない古いものから捨てる。 */
+const MAX_STORED_QUESTIONS = 50;
+
+export function addIssueQuestion(
+  run: RoadmapRun,
+  ref: IssueReportRef,
+  input: RoadmapQuestionInput,
+  now: Date,
+): RoadmapRun {
+  const checked = checkReport(run, ref);
+  if (!checked.ok || checked.issue.progress !== 'running') {
+    return run;
+  }
+  const { issue } = checked;
+  const existing = issue.questions ?? [];
+  if (
+    existing.some((q) => q.questionId === input.questionId) ||
+    existing.filter((q) => q.attemptId === ref.attemptId).length >= MAX_QUESTIONS_PER_ATTEMPT
+  ) {
+    return run;
+  }
+  const at = now.toISOString();
+  const question: RoadmapQuestion = {
+    ...input,
+    attemptId: ref.attemptId,
+    status: 'considering',
+    askedAt: at,
+    answer: undefined,
+    answeredAt: undefined,
+    reflexSummary: undefined,
+  };
+  const questions = [...existing, question];
+  let overflow = questions.length - MAX_STORED_QUESTIONS;
+  const kept =
+    overflow <= 0
+      ? questions
+      : questions.filter((q) => {
+          if (overflow > 0 && !isPendingQuestion(q)) {
+            overflow -= 1;
+            return false;
+          }
+          return true;
+        });
+  return withIssue(run, { ...issue, questions: kept, updatedAt: at });
+}
+
+function updateQuestion(
+  run: RoadmapRun,
+  issueNumber: number,
+  questionId: string,
+  fn: (q: RoadmapQuestion) => RoadmapQuestion | undefined,
+  now: Date,
+): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  const current = issue?.questions?.find((q) => q.questionId === questionId);
+  if (issue?.questions === undefined || current === undefined) {
+    return run;
+  }
+  const next = fn(current);
+  if (next === undefined) {
+    return run;
+  }
+  return withIssue(run, {
+    ...issue,
+    questions: issue.questions.map((q) => (q.questionId === questionId ? next : q)),
+    updatedAt: now.toISOString(),
+  });
+}
+
+/** Reflexが答えられなかった（または判定を通さない）質問を、ユーザーの判断待ちにする。 */
+export function markQuestionAwaitingUser(
+  run: RoadmapRun,
+  issueNumber: number,
+  questionId: string,
+  reflexSummary: string | undefined,
+  now: Date,
+): RoadmapRun {
+  return updateQuestion(
+    run,
+    issueNumber,
+    questionId,
+    (q) =>
+      q.status === 'considering' ? { ...q, status: 'awaitingUser', reflexSummary } : undefined,
+    now,
+  );
+}
+
+/**
+ * 質問へ回答する。Reflexは検討中の質問だけに、ユーザーは判断待ちの質問だけに答えられる。
+ * 取り消し済み・回答済みの質問は変えない。
+ */
+export function answerIssueQuestion(
+  run: RoadmapRun,
+  issueNumber: number,
+  questionId: string,
+  answer: { by: 'reflex' | 'user'; text: string; reflexSummary?: string },
+  now: Date,
+): RoadmapRun {
+  const expected: RoadmapQuestionStatus = answer.by === 'reflex' ? 'considering' : 'awaitingUser';
+  return updateQuestion(
+    run,
+    issueNumber,
+    questionId,
+    (q) =>
+      q.status === expected
+        ? {
+            ...q,
+            status: answer.by === 'reflex' ? 'answeredByReflex' : 'answeredByUser',
+            answer: answer.text,
+            answeredAt: now.toISOString(),
+            reflexSummary: answer.reflexSummary ?? q.reflexSummary,
+          }
+        : undefined,
+    now,
+  );
+}
+
+/** Issueのユーザー判断待ちの質問。 */
+export function questionsAwaitingUser(issue: RoadmapIssueExecution): readonly RoadmapQuestion[] {
+  return (issue.questions ?? []).filter((q) => q.status === 'awaitingUser');
 }
 
 /**
