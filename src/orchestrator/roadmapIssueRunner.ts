@@ -869,5 +869,6 @@ export class RoadmapIssueRunner {
       entry.session.dispose();
     }
     this.live.clear();
+    this.locks.clear();
   }
 }

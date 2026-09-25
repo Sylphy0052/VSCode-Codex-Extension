@@ -488,6 +488,10 @@ export function recordIssueWorktree(
  * ノードを失敗（要対応）にする。セッションの異常終了、`ready_for_merge`で終えたのにPRが
  * 見つからない、worktreeを作れないなど、人の対応が要る事象で呼ぶ。実行回は閉じ、
  * worktreeとブランチは残す（再実行で引き継ぐ）。終わったノードとユーザーが停止したノードでは何もしない。
+ *
+ * Issueセッションからの報告ではなくController自身の判定なので、`checkReport`の照合は通さない。
+ * 古い実行回の結果で今の実行回を落とさないよう、呼び出し側が実行回の一致を確かめてから呼ぶ
+ * （`RoadmapIssueRunner`はIssueごとの直列化の中で確かめる）。
  */
 export function markIssueFailed(
   run: RoadmapRun,
