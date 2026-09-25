@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.8",
+  "version": "2026.926.9",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1142,6 +1142,18 @@
           "default": "最後に次の3点を必ず示すこと。1) 今回受け取った指示、2) この会話で実施した内容の要約、3) 次の推奨アクション。",
           "scope": "window",
           "markdownDescription": "`agent.chat.turnSummary.enabled` が有効なときに発言の末尾へ付け足す指示文。本文との間には空行が入る。空文字にすると付け足さない（無効化と同じ）。"
+        },
+        "agent.chat.prosCons.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "チャット画面から手動で送る発言の末尾へ、`agent.chat.prosCons.instruction` の指示文を毎回付け足す。AIが複数の案を示すとき、案ごとのメリット・デメリットと推奨案を添えさせるための設定（Codex/Claude Code両画面共通）。既定は無効で、有効にするまで送信内容は変わらない。`agent.chat.turnSummary.enabled` と両方有効なときは、本文 → この指示 → ターン要約の指示の順に付く。擬似コマンド（`/btw` 等）・入力モード（行頭 `!` `#`）・ループの自動送信には付かない。"
+        },
+        "agent.chat.prosCons.instruction": {
+          "type": "string",
+          "default": "複数の案・方針・選択肢を示すときは、案ごとにメリットとデメリットを示し、推奨する案とその理由を添えること。",
+          "scope": "window",
+          "markdownDescription": "`agent.chat.prosCons.enabled` が有効なときに発言の末尾へ付け足す指示文。本文との間には空行が入る。空文字にすると付け足さない（無効化と同じ）。"
         },
         "agent.chat.loopEngineering.enabled": {
           "type": "boolean",

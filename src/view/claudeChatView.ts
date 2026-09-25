@@ -52,8 +52,10 @@ import {
   readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  readChatProsConsConfig,
   readSkillSelectConfig,
   setChatTurnSummaryEnabled,
+  setChatProsConsEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
   readReflexEnabled,
@@ -230,7 +232,7 @@ import {
   shouldAutoName,
   summarizeSessionName,
 } from './sessionAutoName';
-import { appendTurnSummaryInstruction } from './turnSummary';
+import { appendManualSendInstructions } from './prosCons';
 import type { ReviewDeliveryResult } from './localReview';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import {
@@ -2883,6 +2885,7 @@ export class ClaudeChatViewManager
       showAgentSelector: true,
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
+      prosConsEnabled: readChatProsConsConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
@@ -3474,7 +3477,11 @@ export class ClaudeChatViewManager
     this.clearLimitAutoResumeSuppression(entry);
     this.noteUserAction(entry);
     try {
-      const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+      const sent = appendManualSendInstructions(
+        text,
+        readChatProsConsConfig(),
+        readChatTurnSummaryConfig(),
+      );
       const result = this.dispatch(entry, sent, false, text);
       this.refreshSettings(entry);
       return result;
@@ -3538,10 +3545,14 @@ export class ClaudeChatViewManager
           void this.runPseudoCommand(entry, pseudo);
           return;
         }
-        // 手動の発言にだけ要約指示を足す（issue #709）。擬似コマンド・入力モードより後に
-        // 置いてあるので、CLIへ送らない入力には付かない。ループの自動送信も対象外。
+        // 手動の発言にだけメリデメ説明・要約の指示を足す（issue #1474・#709）。擬似コマンド・
+        // 入力モードより後に置いてあるので、CLIへ送らない入力には付かない。ループの自動送信も対象外。
         // 作業記録には元の文面を残す（`logText`。テンプレート展開前を記録する§16.12と同じ扱い）
-        const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+        const sent = appendManualSendInstructions(
+          text,
+          readChatProsConsConfig(),
+          readChatTurnSummaryConfig(),
+        );
         const skillSelect = readSkillSelectConfig();
         if (skillSelect.enabled) {
           void this.dispatchWithSkillSelect(entry, text, sent, skillSelect.threshold);
@@ -3988,6 +3999,13 @@ export class ClaudeChatViewManager
         const enabled = !readChatTurnSummaryConfig().enabled;
         void setChatTurnSummaryEnabled(enabled)
           .then(() => entry.panel?.webview.postMessage({ type: 'turnSummary', enabled }))
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleProsCons') {
+        const enabled = !readChatProsConsConfig().enabled;
+        void setChatProsConsEnabled(enabled)
+          .then(() => entry.panel?.webview.postMessage({ type: 'prosCons', enabled }))
           .catch((e: unknown) => this.reportError(e));
         return;
       }

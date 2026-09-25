@@ -49,8 +49,10 @@ import {
   readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  readChatProsConsConfig,
   readSkillSelectConfig,
   setChatTurnSummaryEnabled,
+  setChatProsConsEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
   readAutoReplyConfig,
@@ -78,7 +80,7 @@ import {
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
-import { appendTurnSummaryInstruction } from './turnSummary';
+import { appendManualSendInstructions } from './prosCons';
 import type { ReviewDeliveryResult } from './localReview';
 import { createGoalLoopOptions } from './goalEvaluatorFactory';
 import {
@@ -1976,6 +1978,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       showSettings: true,
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
+      prosConsEnabled: readChatProsConsConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
@@ -2367,9 +2370,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           await this.runPseudoCommand(entry, pseudo);
           return;
         }
-        // 手動の発言にだけ要約指示を足す（issue #709）。擬似コマンドより後に置いてあるので、
-        // CLIへ送らない入力には付かない。ループの自動送信（`sendFromLoop`）も対象外
-        const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+        // 手動の発言にだけメリデメ説明・要約の指示を足す（issue #1474・#709）。擬似コマンドより
+        // 後に置いてあるので、CLIへ送らない入力には付かない。ループの自動送信（`sendFromLoop`）も対象外
+        const sent = appendManualSendInstructions(
+          text,
+          readChatProsConsConfig(),
+          readChatTurnSummaryConfig(),
+        );
         const attachments = entry.attachments.take();
         try {
           const skillSelect = readSkillSelectConfig();
@@ -2913,6 +2920,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         void entry.panel?.webview.postMessage({ type: 'turnSummary', enabled });
         return;
       }
+      if (type === 'toggleProsCons') {
+        const enabled = !readChatProsConsConfig().enabled;
+        await setChatProsConsEnabled(enabled);
+        void entry.panel?.webview.postMessage({ type: 'prosCons', enabled });
+        return;
+      }
       if (type === 'stateFull') {
         // webview側が会話の取りこぼしに気付いたときの作り直し要求（issue #262）。
         // 間引きに巻き込むと戻りが遅れるため、その場で送る
@@ -3382,7 +3395,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.clearLimitAutoResumeSuppression(entry);
     this.noteUserAction(entry);
     try {
-      const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+      const sent = appendManualSendInstructions(
+        text,
+        readChatProsConsConfig(),
+        readChatTurnSummaryConfig(),
+      );
       await entry.session.send(sent, this.configFor(entry));
       this.reportActivity(entry, text);
       this.refreshSettings();
