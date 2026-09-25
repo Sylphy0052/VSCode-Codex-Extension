@@ -1306,6 +1306,36 @@
           "scope": "window",
           "markdownDescription": "自動返信の最大往復回数。達すると自動返信モードをOFFにし、理由を会話へ残す。返信役の実行はCodexの利用枠を消費するため、上限で歯止めを掛ける。20は出発点の値で、使ってみて調整する想定。"
         },
+        "agent.chat.autoReply.reflex.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "自動返信モードの返信役の前後にReflex判定（issue #1435）を挟むか。有効にすると、ターン終了時の完了の検証、AskUserQuestionへの自動回答、送る内容の危険度ゲートを、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で判定する。判定結果（型と確率）は会話に残る。無効にすると返信役だけで動く（issue #1353の挙動）。"
+        },
+        "agent.chat.autoReply.reflex.completionThreshold": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "ターン終了時の完了の検証で、「完了した」または「人の判断が要る」の確率がこの値以上なら、返信役を呼ばずに自動返信を終了する。判定が失敗したときは返信役に任せる。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
+        },
+        "agent.chat.autoReply.reflex.answerThreshold": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "AskUserQuestionの各質問で、最上位の選択肢の確率がこの値以上なら自動で選ぶ。下回る質問が1つでもあれば人の回答を待つ。複数選択の質問と、判定が失敗したときは返信役に任せる。初期値は仮置き。"
+        },
+        "agent.chat.autoReply.reflex.dangerThreshold": {
+          "type": "number",
+          "default": 0.3,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "自動で送る発言・回答が、取り消せない操作・外部への公開・秘密情報への接触を招く確率がこの値以上なら、送らずに自動返信を終了する。判定が失敗したときも送らない。**判定に渡す出力に紛れた指示で判定をすり抜けられる余地は残る**ため、迷ったら止まるよう低めにしてある。初期値は仮置き。"
+        },
         "agent.notifications.approvalPending": {
           "type": "boolean",
           "default": true,

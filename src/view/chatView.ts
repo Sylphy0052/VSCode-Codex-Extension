@@ -52,6 +52,7 @@ import {
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
   readAutoReplyConfig,
+  readAutoReplyReflexConfig,
   readAutoHandoffThresholdPercent,
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
@@ -95,6 +96,8 @@ import {
   shouldTriggerAutoReply,
   type AutoReplyStopReason,
 } from '../chat/autoReply';
+import { checkAutoReplyCompletion, checkAutoReplyDanger } from '../chat/autoReplyReflex';
+import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
@@ -1252,9 +1255,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /**
    * 自動返信モードをOFFにする。返信役があれば閉じ、往復回数・応答履歴をリセットする。
    * 理由は会話へ1行残す（`noteLocalEvent`）。既にOFFなら何もしない（複数箇所から
-   * 呼んでも安全にするため）。
+   * 呼んでも安全にするため）。`detail`（Reflex判定の確率など）は理由に括弧で添える。
    */
-  private stopAutoReply(entry: ChatPanel, reason: AutoReplyStopReason): void {
+  private stopAutoReply(entry: ChatPanel, reason: AutoReplyStopReason, detail?: string): void {
     if (entry.disposed) {
       return;
     }
@@ -1268,7 +1271,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (wasOn) {
       entry.session.noteLocalEvent(
         `autoReplyStop:${Date.now()}`,
-        describeAutoReplyStopReason(reason),
+        describeAutoReplyStopReason(reason, detail),
       );
     }
   }
@@ -1285,6 +1288,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     const config = readAutoReplyConfig();
+    if (!(await this.passesAutoReplyCompletionCheck(entry, lastAgentMessageText))) {
+      return;
+    }
     if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
       const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
       if (cwd === undefined) {
@@ -1334,6 +1340,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.stopAutoReply(entry, 'stalled');
       return;
     }
+    if (!(await this.passesAutoReplyDangerGate(entry, message, lastAgentMessageText))) {
+      return;
+    }
     entry.session.noteLocalEvent(`autoReply:${Date.now()}`, `自動返信: ${message}`);
     try {
       await this.sendFromLoop(entry, message);
@@ -1341,6 +1350,92 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 失敗は`sendFromLoop`内で既に報告済み。自動返信はここで止める
       this.stopAutoReply(entry, 'turnFailed');
     }
+  }
+
+  /** 自動返信のReflex判定（Issue #1435）は、会話しているCodexの軽量モデルで走らせる。 */
+  private autoReplyReflexDeps(): ReflexJudgeDeps {
+    return {
+      provider: 'codex',
+      executable: readConfig().executablePath,
+      logWarn: (message) => this.log.warn(message),
+    };
+  }
+
+  /**
+   * 返信役を呼ぶ前の完了の検証（Issue #1435）。返信役へ進んでよければtrue。
+   *
+   * 「完了した」「人の判断が要る」と判定されたら、返信役を呼ばずに自動返信を止める。
+   * 判定が失敗したときは、判定が無かったときと同じく返信役に任せる。
+   */
+  private async passesAutoReplyCompletionCheck(
+    entry: ChatPanel,
+    lastAgentMessageText: string,
+  ): Promise<boolean> {
+    const reflex = readAutoReplyReflexConfig();
+    if (!reflex.enabled) {
+      return true;
+    }
+    const verdict = await checkAutoReplyCompletion(
+      this.autoReplyReflexDeps(),
+      lastAgentMessageText,
+      reflex.completionThreshold,
+    );
+    if (entry.disposed || !entry.session.getState().autoReply) {
+      return false;
+    }
+    if (verdict.kind === 'stop') {
+      this.stopAutoReply(
+        entry,
+        verdict.reason === 'completed' ? 'reflexCompleted' : 'reflexNeedsHuman',
+        verdict.summary,
+      );
+      return false;
+    }
+    entry.session.noteLocalEvent(
+      `autoReplyReflex:${Date.now()}:completion`,
+      verdict.kind === 'continue'
+        ? `Reflex判定（完了の検証）: ${verdict.summary}`
+        : 'Reflex判定（完了の検証）: 判定できなかったため返信役に任せます',
+    );
+    return true;
+  }
+
+  /**
+   * 自動で送る発言の危険度ゲート（Issue #1435）。送ってよければtrue。
+   *
+   * 危険と判定されたとき、判定が失敗したときは、送らずに自動返信を止める（安全側）。
+   */
+  private async passesAutoReplyDangerGate(
+    entry: ChatPanel,
+    outgoing: string,
+    context: string,
+  ): Promise<boolean> {
+    const reflex = readAutoReplyReflexConfig();
+    if (!reflex.enabled) {
+      return true;
+    }
+    const verdict = await checkAutoReplyDanger(
+      this.autoReplyReflexDeps(),
+      outgoing,
+      context,
+      reflex.dangerThreshold,
+    );
+    if (entry.disposed || !entry.session.getState().autoReply) {
+      return false;
+    }
+    if (verdict.kind === 'danger') {
+      this.stopAutoReply(entry, 'reflexDanger', verdict.summary);
+      return false;
+    }
+    if (verdict.kind === 'unavailable') {
+      this.stopAutoReply(entry, 'reflexDangerUnavailable');
+      return false;
+    }
+    entry.session.noteLocalEvent(
+      `autoReplyReflex:${Date.now()}:danger`,
+      `Reflex判定（危険度ゲート）: ${verdict.summary}`,
+    );
+    return true;
   }
 
   /**
