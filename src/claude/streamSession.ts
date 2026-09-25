@@ -3,6 +3,7 @@ import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
   appendNotice,
+  appendEndSummary,
   appendSecondOpinion,
   appendSideQuestion,
   enqueue,
@@ -314,6 +315,11 @@ export class ClaudeStreamSession {
    */
   noteSecondOpinion(id: string, display: { status: string; text: string; detail: string }): void {
     this.update(appendSecondOpinion(this.state, id, display));
+  }
+
+  /** 要約エージェント（issue #1473）の注記を足す/更新する。CLIへは送らない。 */
+  noteEndSummary(id: string, display: { status: string; text: string; detail: string }): void {
+    this.update(appendEndSummary(this.state, id, display));
   }
 
   /** プロセスを起動する。発言はこの後 `send` で流す。 */

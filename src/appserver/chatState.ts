@@ -2034,6 +2034,30 @@ export function appendSecondOpinion(
 }
 
 /**
+ * 要約エージェント（issue #1473）の注記を足す/更新する。同じidなら上書きする。
+ *
+ * 別のAIに作らせた要約を会話へ残すだけで、作業中のAIの履歴には入らない。
+ */
+export function appendEndSummary(
+  state: ChatState,
+  id: string,
+  display: { status: string; text: string; detail: string },
+): ChatState {
+  return {
+    ...state,
+    items: upsertItem(state.items, {
+      id,
+      kind: 'endSummary',
+      text: display.text,
+      detail: display.detail,
+      status: display.status,
+      turnId: undefined,
+      diffs: NO_DIFFS,
+    }),
+  };
+}
+
+/**
  * 中断の注記のid（issue #258）。
  *
  * ターンごとに別のidにする。中断はターンを終わらせるので、1回の中断につき1行になり、

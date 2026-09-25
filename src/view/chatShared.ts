@@ -1187,6 +1187,10 @@ export interface ChatShellOptions {
   composerButtons?: readonly ComposerButtonId[];
   /** 手動送信時のターン要約。入力欄の「…」メニューで切り替える。 */
   turnSummaryEnabled?: boolean;
+  /** 手動送信時のメリデメ説明（issue #1474）。入力欄の「…」メニューで切り替える。 */
+  prosConsEnabled?: boolean;
+  /** 要約エージェント（issue #1473）。入力欄の「…」メニューで切り替える。 */
+  endSummaryEnabled?: boolean;
   /**
    * ループエンジニアリングモード（`agent.chat.loopEngineering.enabled`、issue #891）が
    * 有効か。「…」メニューのトグルの初期状態に使う。
@@ -1236,6 +1240,10 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v7M5 6.3l3 2.7 3-2.7"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>',
   recap:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 4h10M3 8h10M3 12h6"/></svg>',
+  prosCons:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2.5 8h4M4.5 6v4M9.5 8h4M8 3v10"/></svg>',
+  endSummary:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10M3 6.5h10M3 9.5h5"/><path d="M10.5 11.5l1.5 1.5 2.5-3"/></svg>',
   plan: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="2.5" width="10" height="11.5" rx="1"/><path d="M6 1.5h4v1.6H6z" fill="currentColor" stroke="none"/><path d="M5.5 7.2l1.3 1.3L9.6 5.7M5.5 10.8h5"/></svg>',
   fast: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8.6 1.3 3 9h4l-.9 5.7L13 7H9z" fill="currentColor"/></svg>',
   localReview:
@@ -1627,6 +1635,8 @@ ${chatStyles()}
             .map((id) => renderComposerButton(id, composerButtonCtx, 'menu'))
             .join('\n          ')}
           <button id="turnSummaryToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.turnSummaryEnabled === true}" aria-label="ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}" title="手動で送る発言の末尾へ要約指示を毎回付けるか切り替えます">${COMPOSER_ICONS.recap}<span class="composerOverflowLabel">ターン要約を${options.turnSummaryEnabled === true ? '無効にする' : '有効にする'}</span></button>
+          <button id="prosConsToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.prosConsEnabled === true}" aria-label="メリデメ説明を${options.prosConsEnabled === true ? '無効にする' : '有効にする'}" title="手動で送る発言の末尾へ、案ごとのメリット・デメリットを添えさせる指示を毎回付けるか切り替えます">${COMPOSER_ICONS.prosCons}<span class="composerOverflowLabel">メリデメ説明を${options.prosConsEnabled === true ? '無効にする' : '有効にする'}</span></button>
+          <button id="endSummaryToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.endSummaryEnabled === true}" aria-label="要約エージェントを${options.endSummaryEnabled === true ? '無効にする' : '有効にする'}" title="ターンが終わるたびに、そのターンでやったことを別のAIに要約させて会話へ表示するか切り替えます（作業中のAIには送りません）">${COMPOSER_ICONS.endSummary}<span class="composerOverflowLabel">要約エージェントを${options.endSummaryEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="loopEngineeringToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopEngineeringEnabled === true}" aria-label="ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}" title="ループが送る指示の末尾へ、機械的な検証・方針変更・撤退の申告の方針を毎回付けるか切り替えます">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="loopAdvisorToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopAdvisorEnabled === true}" aria-label="ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}" title="ゴール駆動ループの各ターンのあとに、独立したAdvisorセッション（既定ではCodexのgpt-6-sol）へ進め方の妥当性を確認させるか切り替えます。目的と受入基準を入れたループでのみ動きます。毎ターンCLIの呼び出しが1本増え、Claude Codeの会話でも抜粋はCodexへ送られます。相談先を変えるにはsettings.jsonのagent.chat.loopAdvisor.provider / .modelを指定します">${COMPOSER_ICONS.secondOpinion}<span class="composerOverflowLabel">ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="limitAutoResumeToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.limitAutoResumeEnabled === true}" aria-label="上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}" title="使用量上限のリセット時刻から30秒後に継続指示を送ります。時刻がない場合は30分後に確認し、再開しても上限中なら1分後に再試行します。会話を閉じた場合、承認待ちの場合、手動で中断した場合は送信しません。">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}</span></button>

@@ -327,6 +327,8 @@ export type RoadmapImportOutcome =
   | { kind: 'failed'; message: string }
   | {
       kind: 'imported';
+      /** 取得した本文（外部由来）。計画の提案で入力に使う。 */
+      body: string;
       children: RoadmapChild[];
       duplicates: number[];
       plan:
@@ -356,7 +358,7 @@ export async function importRoadmap(
       message: `ロードマップIssue #${String(target.roadmapIssueNumber)} に行頭が「- [ ] #番号」の子Issueがありません`,
     };
   }
-  return { kind: 'imported', children, duplicates, plan: readPlan(body, children) };
+  return { kind: 'imported', body, children, duplicates, plan: readPlan(body, children) };
 }
 
 function readPlan(

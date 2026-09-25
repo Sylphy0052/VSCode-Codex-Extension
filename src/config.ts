@@ -60,6 +60,8 @@ import { DEFAULT_SECOND_OPINION_TEMPLATE } from './secondOpinion/prompt';
 import { DEFAULT_SECOND_OPINION_TIMEOUT_MS } from './secondOpinion/run';
 import { DEFAULT_ADVISOR_IDLE_TIMEOUT_MS } from './secondOpinion/advisorSession';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
+import { DEFAULT_PROS_CONS_INSTRUCTION, type ProsConsConfig } from './view/prosCons';
+import type { EndSummarySettings } from './view/endSummary';
 import {
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
@@ -422,6 +424,48 @@ export async function setChatTurnSummaryEnabled(enabled: boolean): Promise<void>
   await vscode.workspace
     .getConfiguration('agent')
     .update('chat.turnSummary.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/**
+ * メリデメ説明の指示（`agent.chat.prosCons.*`、issue #1474）。連結の判断と実体は
+ * `src/view/prosCons.ts`が持ち、ここでは生値を渡すだけ（`readChatTurnSummaryConfig`と
+ * 同じ流儀・同じスコープ）。
+ */
+export function readChatProsConsConfig(): ProsConsConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const instruction = c.get<string>('chat.prosCons.instruction');
+  return {
+    enabled: c.get<boolean>('chat.prosCons.enabled') ?? false,
+    instruction: typeof instruction === 'string' ? instruction : DEFAULT_PROS_CONS_INSTRUCTION,
+  };
+}
+
+/** 手動送信時にメリデメ説明の指示を付けるかを、ユーザー設定へ保存する。 */
+export async function setChatProsConsEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.prosCons.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/**
+ * 要約エージェントの設定（`agent.chat.endSummary.*`、issue #1473）。ターンが終わるたびに
+ * 別のAIを1回呼ぶため、既定は無効。モデルの既定`auto`はAdvisorと同じ軽量モデルへ解決する。
+ */
+export function readChatEndSummaryConfig(): EndSummarySettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('chat.endSummary.enabled') === true,
+    provider: normalizeEvaluatorProvider(c.get<string>('chat.endSummary.provider')),
+    model: str(c, 'chat.endSummary.model', 'auto'),
+    effort: str(c, 'chat.endSummary.effort', 'low'),
+  };
+}
+
+/** 要約エージェントを使うかを、ユーザー設定へ保存する。 */
+export async function setChatEndSummaryEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.endSummary.enabled', enabled, vscode.ConfigurationTarget.Global);
 }
 
 /**
