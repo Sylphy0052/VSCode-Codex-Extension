@@ -213,8 +213,11 @@ export class SessionHubWriter {
   private writeTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWriteAt = 0;
   private readonly filePath: string;
-  /** `write()`が実行中か。同じファイルへの書き込みを直列化する（Issue #1461）。 */
-  private writing = false;
+  /**
+   * 実行中の書き込み。同じファイルへの書き込みを直列化し、`dispose()`はこれを待ってから
+   * `unlink`する（待たないと、後から`rename`が済んで消したファイルが復活する。Issue #1461）。
+   */
+  private writeInFlight: Promise<void> | undefined;
   /** 実行中に次の状態が来た印。終わった直後にもう1回だけ書く。 */
   private writePending = false;
   /** tmpファイル名の一意性をpidと組み合わせて保つための世代番号。 */
@@ -262,34 +265,38 @@ export class SessionHubWriter {
     if (this.disposed) {
       return;
     }
-    if (this.writing) {
+    if (this.writeInFlight !== undefined) {
       this.writePending = true;
       return;
     }
-    this.writing = true;
+    this.writeInFlight = this.writeLoop();
     try {
-      do {
-        this.writePending = false;
-        this.lastWriteAt = Date.now();
-        const payload: SharedSessionFile = {
-          windowId: this.windowId,
-          updatedAt: Date.now(),
-          sessions: [...this.getSessions()],
-        };
-        try {
-          await mkdir(sessionsDir(this.root), { recursive: true });
-          await writeAtomic(
-            this.filePath,
-            JSON.stringify(payload),
-            `${process.pid}-${this.writeGeneration++}`,
-          );
-        } catch (e) {
-          this.log.warn(`セッション統括: 共有ファイルの書き込みに失敗しました: ${String(e)}`);
-        }
-      } while (this.writePending && !this.disposed);
+      await this.writeInFlight;
     } finally {
-      this.writing = false;
+      this.writeInFlight = undefined;
     }
+  }
+
+  private async writeLoop(): Promise<void> {
+    do {
+      this.writePending = false;
+      this.lastWriteAt = Date.now();
+      const payload: SharedSessionFile = {
+        windowId: this.windowId,
+        updatedAt: Date.now(),
+        sessions: [...this.getSessions()],
+      };
+      try {
+        await mkdir(sessionsDir(this.root), { recursive: true });
+        await writeAtomic(
+          this.filePath,
+          JSON.stringify(payload),
+          `${process.pid}-${this.writeGeneration++}`,
+        );
+      } catch (e) {
+        this.log.warn(`セッション統括: 共有ファイルの書き込みに失敗しました: ${String(e)}`);
+      }
+    } while (this.writePending && !this.disposed);
   }
 
   /** 拡張機能の終了時（`deactivate`）に呼ぶ。消せなくてもheartbeat失効で自然に除外される。 */
@@ -303,6 +310,8 @@ export class SessionHubWriter {
       clearTimeout(this.writeTimer);
       this.writeTimer = undefined;
     }
+    // `disposed`が立ったので、実行中の書き込みは今の1回で止まる
+    await this.writeInFlight?.catch(() => undefined);
     try {
       await unlink(this.filePath);
     } catch {
@@ -311,10 +320,16 @@ export class SessionHubWriter {
   }
 }
 
-/** 他ウィンドウ1つ分の読み込み状態。`mtimeMs`・`size`が前回と同じなら読み直さない（Issue #1461）。 */
+/**
+ * 他ウィンドウ1つ分の読み込み状態。`mtimeMs`・`size`・`ino`が前回と同じなら読み直さない（Issue #1461）。
+ *
+ * 書き込みは`rename`で置き換えるので、書くたびに`ino`が変わる。同じ長さの中身への
+ * 書き換えや、mtimeの分解能が粗いファイルシステム（NFS等）でも変化を見落とさない。
+ */
 interface SessionFileCacheEntry {
   mtimeMs: number;
   size: number;
+  ino: number;
   /** 読めた・staleでなかった場合の中身。stale判定だけ通った場合は無い（キャッシュから消す）。 */
   state: SharedWindowSessions | undefined;
 }
@@ -357,6 +372,10 @@ export class SessionHubReader implements vscode.Disposable {
     this.scheduleReload(null);
     void mkdir(sessionsDir(this.root), { recursive: true })
       .then(() => {
+        // `mkdir`を待つ間に破棄されていれば、監視とタイマーを張らない（張ると後から消せない）
+        if (this.disposed) {
+          return;
+        }
         this.watcher = watch(sessionsDir(this.root), (_eventType, filename) => {
           this.scheduleReload(filename);
         });
@@ -484,7 +503,7 @@ export class SessionHubReader implements vscode.Disposable {
       return;
     }
     const filePath = path.join(sessionsDir(this.root), name);
-    let info: { mtimeMs: number; size: number };
+    let info: { mtimeMs: number; size: number; ino: number };
     try {
       info = await stat(filePath);
     } catch {
@@ -498,7 +517,12 @@ export class SessionHubReader implements vscode.Disposable {
       return;
     }
     const cached = this.fileState.get(windowId);
-    if (cached !== undefined && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
+    if (
+      cached !== undefined &&
+      cached.mtimeMs === info.mtimeMs &&
+      cached.size === info.size &&
+      cached.ino === info.ino
+    ) {
       return; // 変化なし。読み直さない
     }
     try {
@@ -515,6 +539,7 @@ export class SessionHubReader implements vscode.Disposable {
       this.fileState.set(windowId, {
         mtimeMs: info.mtimeMs,
         size: info.size,
+        ino: info.ino,
         state: { ...parsed, windowId },
       });
     } catch {
@@ -523,9 +548,14 @@ export class SessionHubReader implements vscode.Disposable {
   }
 
   private rebuildCacheAndFire(): void {
+    // 変化の無いファイルは読み直さないため、落ちたウィンドウの分はここで失効させる
+    const now = Date.now();
     this.cache = [...this.fileState.values()]
       .map((entry) => entry.state)
-      .filter((state): state is SharedWindowSessions => state !== undefined);
+      .filter(
+        (state): state is SharedWindowSessions =>
+          state !== undefined && now - state.updatedAt <= STALE_MS,
+      );
     this.fireIfAlive();
   }
 
