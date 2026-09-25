@@ -73,6 +73,12 @@ import {
   DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS,
   type AutoReplySettings,
 } from './chat/autoReply';
+import {
+  DEFAULT_AUTO_REPLY_REFLEX_ANSWER_THRESHOLD,
+  DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
+  DEFAULT_AUTO_REPLY_REFLEX_DANGER_THRESHOLD,
+  type AutoReplyReflexSettings,
+} from './chat/autoReplyReflex';
 import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
   GoalEvaluatorProviderSetting,
@@ -785,6 +791,28 @@ export function readAutoReplyConfig(): AutoReplySettings {
     model: str(c, 'chat.autoReply.model', DEFAULT_AUTO_REPLY_MODEL),
     timeoutSeconds: num(c, 'chat.autoReply.timeoutSeconds', DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS),
     maxTurns: num(c, 'chat.autoReply.maxTurns', DEFAULT_AUTO_REPLY_MAX_TURNS),
+  };
+}
+
+/** 自動返信モードに挟むReflex判定（Issue #1435）の設定を読む。閾値は0〜1へ丸める。 */
+export function readAutoReplyReflexConfig(): AutoReplyReflexSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  const threshold = (key: string, fallback: number): number =>
+    Math.min(1, Math.max(0, num(c, key, fallback)));
+  return {
+    enabled: c.get<boolean>('chat.autoReply.reflex.enabled') !== false,
+    completionThreshold: threshold(
+      'chat.autoReply.reflex.completionThreshold',
+      DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
+    ),
+    answerThreshold: threshold(
+      'chat.autoReply.reflex.answerThreshold',
+      DEFAULT_AUTO_REPLY_REFLEX_ANSWER_THRESHOLD,
+    ),
+    dangerThreshold: threshold(
+      'chat.autoReply.reflex.dangerThreshold',
+      DEFAULT_AUTO_REPLY_REFLEX_DANGER_THRESHOLD,
+    ),
   };
 }
 
