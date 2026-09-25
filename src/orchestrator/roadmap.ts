@@ -2716,7 +2716,7 @@ export interface IssueChecklistUpdate {
  * チェックボックスの直後が `#<番号>` で始まる行（gant書式の `- [ ] #123: タイトル`）。
  * `- [ ] 評価基盤 (#19)` のように番号が行の途中にある行は対象にしない。
  */
-const ISSUE_CHECKLIST_LINE_PATTERN = /^(\s*[-*+]\s+\[)([ xX])(\]\s+#(\d+)\b.*)$/u;
+export const ISSUE_CHECKLIST_LINE_PATTERN = /^(\s*[-*+]\s+\[)([ xX])(\]\s+#(\d+)\b.*)$/u;
 
 /**
  * ロードマップIssueの本文のうち、指定した子Issueのチェックリスト行だけを `[x]` にする

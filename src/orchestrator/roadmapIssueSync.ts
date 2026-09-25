@@ -59,9 +59,22 @@ export async function syncRoadmapCompletionToIssue(
     return { kind: 'skipped', sourceIssue, itemsWithoutIssue };
   }
 
-  return runExclusiveOnIssue(`${input.host}:${input.cwd}:${String(sourceIssue)}`, () =>
+  return runExclusiveOnRoadmapIssue(input.host, input.cwd, sourceIssue, () =>
     checkIssueAndUpdate(deps, input, sourceIssue, issues, itemsWithoutIssue),
   );
+}
+
+/**
+ * 同じロードマップIssueの本文への read-modify-write を直列化する。子Issueのチェックと
+ * 計画区画の書き戻し（`roadmapImport.ts`）は同じ本文を置き換えるため、同じ列に並べる。
+ */
+export function runExclusiveOnRoadmapIssue<T>(
+  host: ForgeHost,
+  cwd: string,
+  issue: number,
+  task: () => Promise<T>,
+): Promise<T> {
+  return runExclusiveOnIssue(`${host}:${cwd}:${String(issue)}`, task);
 }
 
 /**
