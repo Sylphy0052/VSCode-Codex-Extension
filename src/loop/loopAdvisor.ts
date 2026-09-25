@@ -181,13 +181,17 @@ export const DEFAULT_ADVISOR_PROVIDER = 'codex';
  * 既定は `auto` のままにしてある。設定側をモデル名で固定してしまうと、`provider` だけを
  * `claude` へ変えた利用者にCodex用のモデル名がそのまま渡る（`buildClaudeHeadlessArgs` は
  * `auto` 以外を素通しする）。解決は実効プロバイダが決まる場所で行う。
+ *
+ * ループAdvisor自体は Issue #1490 でReflexと同じ軽量モデル（`resolveLoopAdvisorModel`）へ
+ * 移った。この定数は`resolveAdvisorModel`を共用する終了サマリ・自動返信の既定として残る。
  */
 export const DEFAULT_ADVISOR_CODEX_MODEL = 'gpt-6-sol';
 
 /**
- * `agent.chat.loopAdvisor.model` を、実際に起動するCLIに合わせて解決する（issue #994）。
+ * モデル設定の`auto`を、実際に起動するCLIに合わせて解決する（issue #994）。
  *
  * 明示されたモデル名は必ず優先する。`auto` のときだけプロバイダごとの既定へ倒す。
+ * 終了サマリ・自動返信が使う。ループAdvisorは`resolveLoopAdvisorModel`（Issue #1490）。
  */
 export function resolveAdvisorModel(model: string, provider: 'claude' | 'codex'): string {
   if (model !== 'auto' && model !== '') {
