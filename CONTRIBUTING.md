@@ -41,8 +41,8 @@ npm run check     # lint + format:check + typecheck + test
 マージされることはない。
 
 対象外にしているものは `.prettierignore` にある。ビルド成果物（`dist/` `out/` `coverage/`
-`.vscode-test/`）と `node_modules/` `.claude/` のほか、**`docs/archive/` を対象外にしている**。
-`docs/archive/` は旧ロードマップ（`docs/roadmap/`）を移した凍結記録で、書き換えないため
+`.vscode-test/`）と `node_modules/` `.claude/` のほか、**`docs/archive/roadmap/` を対象外にしている**。
+旧ロードマップ（`docs/roadmap/`）を移した凍結記録で、書き換えないため
 整形もしない（Issue #1458。移す前は並行更新との衝突を避けるために `docs/roadmap/` を
 対象外にしていた。Issue #551）。
 

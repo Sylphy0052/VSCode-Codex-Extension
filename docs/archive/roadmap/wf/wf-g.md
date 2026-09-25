@@ -681,7 +681,7 @@ for m in re.findall(r'\*/\n(export (?:function|const|type|interface|class) [A-Za
       予測可能なままのため、境界外の既存ファイルを上書きし、ロールバックがそれを削除しうる
       （任意ファイル破壊）性質を残している。
       **送る理由**: 本番で実際に使われるポート（`nodePseudoWorktreeFileSystem`）は `rename` を
-      持つためこの経路には落ちない。残存リスクとして [design.md](../../design.md) §16.20 に
+      持つためこの経路には落ちない。残存リスクとして [design.md](../../../design.md) §16.20 に
       **正直に記述済み**であり、「守られている」という誤った記録にはなっていない
     - [#490](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/490)
       worktree撤去の試行回数に上限が無い（git側・疑似worktree側の両方）。
@@ -740,7 +740,7 @@ for m in re.findall(r'\*/\n(export (?:function|const|type|interface|class) [A-Za
       **移送の過程でこの規約が崩れると、そのまま XSS 経路になる。**分割PRのレビューでは
       この規約が維持されているかを独立した観点として確認すること
     - **TS実装と webview 実装の二重管理があり、パリティテストは片方へ寄せるまで消さない。**
-      [markdown.ts](../../../src/view/markdown.ts) の `parseMarkdown` と、webview へ埋め込む
+      [markdown.ts](../../../../src/view/markdown.ts) の `parseMarkdown` と、webview へ埋め込む
       `MARKDOWN_PARSE_SOURCE`（JSのソース文字列）が同じトークン列を返すことをテストで固定している。
       実ファイル化はこの二重管理を解消できる好機だが、**統合の際にパリティテストを消すと、
       TS側だけ直して webview 側が置き去りになる事故が検出できなくなる**

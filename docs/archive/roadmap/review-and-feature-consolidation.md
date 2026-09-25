@@ -8,7 +8,7 @@
 この日、独立した2つのセッションが別々の成果を出した。
 
 - **全体レビュー**: 50k LOC / 162ファイルを7領域で並列監査し、26件の指摘を
-  [.agents/workflows/](../../.agents/workflows/) の3本のYAML（core / ui / final）へ計画としてまとめた
+  [.agents/workflows/](../../../.agents/workflows/) の3本のYAML（core / ui / final）へ計画としてまとめた
 - **ワークフロー確認**: 拡張のワークフロー機能とチャット画面の不足を洗い出し、
   [workflow-autonomy.md](workflow-autonomy.md)（W1〜W5、epic [#341](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/341)）と
   [chat-conversation-parity.md](chat-conversation-parity.md)（X1〜X3、epic [#340](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/340)）を書いた
@@ -105,7 +105,7 @@ WF-E / WF-F / WF-H は上の「5本の関係」で挙げた既存の担当文書
 
 ### YAMLの行番号は古い
 
-[.agents/workflows/](../../.agents/workflows/) の各タスクが根拠として挙げている行番号は、
+[.agents/workflows/](../../../.agents/workflows/) の各タスクが根拠として挙げている行番号は、
 全体レビューを実施した時点のmain（`cac40c73`）のものである。その後 PR
 [#343](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/343)（承認方法をCodexとClaude Codeで
 共通の3段階に揃える）がマージされ、次が変わっている。

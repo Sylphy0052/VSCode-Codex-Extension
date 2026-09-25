@@ -19,9 +19,9 @@
 2026-08-22に現状を確認したところ、次の不足があった。
 
 - エラーや新しい発見があっても、**タスクの追加・削除・依存の変更ができない**。
-  [design.md](../design.md) §16.23 が「オーケストレーター自身はワークフロー定義を書き換えない」と
+  [design.md](../../design.md) §16.23 が「オーケストレーター自身はワークフロー定義を書き換えない」と
   明示しており、方針転換は継続指示の差し替えと `send_message` の範囲に留まる
-- **ループを検知できない**。[loopController.ts](../../src/loop/loopController.ts) は送信回数の
+- **ループを検知できない**。[loopController.ts](../../../src/loop/loopController.ts) は送信回数の
   上限でしか止まらず、回数切れ（`maxReached`）は `retries` を消費せず即失敗になるため自動回復もない
 - **分解の妥当性を確かめる段が無い**。検証は構文的なもの（循環依存・上限件数など）だけで、
   生成プロンプトの指針に従っているかは見ていない
@@ -45,9 +45,9 @@
 一方で、次の2つは既に実装済みだった（新しく作る必要はない）。
 
 - 一時ブランチ（統合ブランチ `wf/<runId>/integration`）を作り、そこからタスクのworktreeを
-  派生させる構成（[integration.ts](../../src/orchestrator/integration.ts)）
+  派生させる構成（[integration.ts](../../../src/orchestrator/integration.ts)）
 - タスク間メッセージング。Codexは `thread/start` の `config.mcp_servers`、Claude Codeは
-  `--mcp-config` で、**両方とも実装済み**（[messaging.ts](../../src/orchestrator/messaging.ts)）
+  `--mcp-config` で、**両方とも実装済み**（[messaging.ts](../../../src/orchestrator/messaging.ts)）
 
 方針は次の5つ。**1と2は2026-08-22に人手で7ワークフローを回した実運用から出た要求で、
 当初の「人の承認を必ず挟む」という方針を置き換えている。**
@@ -61,12 +61,12 @@
    （`update_task_prompt` と同じ扱い）。承認を挟まない分、記録が唯一の追跡手段になる
 4. **外から入るテキストは指示ではなくデータとして扱う。** レビューコメントもタスクの応答も同じ
 5. **providerを問わない。** ここで足す道具はすべてMCPサーバのツールとして実装し、Codexと
-   Claude Codeの双方へ同じ形で配る。[design.md](../design.md) §16.22 のとおり、Codexは
+   Claude Codeの双方へ同じ形で配る。[design.md](../../design.md) §16.22 のとおり、Codexは
    `thread/start` の `config.mcp_servers`、Claude Codeは `--mcp-config` で渡せることが
    実測で確認済み（Issue #123）。**Claude Codeのセッション間メッセージングのような
    provider固有の機能には依存しない**（Codexで再現できないため）
 
-各項目の `依存` はロードマップのパーサ（[roadmap.ts](../../src/orchestrator/roadmap.ts)）が読む
+各項目の `依存` はロードマップのパーサ（[roadmap.ts](../../../src/orchestrator/roadmap.ts)）が読む
 形式に合わせてある。
 
 ## フェーズ1 止めどころを作る
@@ -74,7 +74,7 @@
 - [x] W1 mainへの最終マージをオーケストレーターが判断する
   - 依存: なし
   - Issue: #335
-  - 現状: `FinalMergeConfig` は `'auto' | 'pr-only'`（[forge.ts](../../src/orchestrator/forge.ts)）で
+  - 現状: `FinalMergeConfig` は `'auto' | 'pr-only'`（[forge.ts](../../../src/orchestrator/forge.ts)）で
     **既定が `auto`**。全タスクが `done` になると統合ブランチからmainへのPR/MRを作り、そのまま
     `gh pr merge` / `glab mr merge` まで進む。人の目を通さずmainが進む。
     既存の `pr-only` はPR/MRを作った時点で**runを終える**設定で、そのあと人がマージしたかどうかを
@@ -98,16 +98,16 @@
     それぞれの挙動になる／前提チェックが通らずPR/MRを作れなかった場合は従来どおり
     mainへマージしない／**オーケストレーターが応答しない場合は `hold` として扱う**
     （判断を待って無限に止まらない）
-  - 影響: [forge.ts](../../src/orchestrator/forge.ts) / [config.ts](../../src/config.ts) /
-    [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /
+  - 影響: [forge.ts](../../../src/orchestrator/forge.ts) / [config.ts](../../../src/config.ts) /
+    [runner.ts](../../../src/orchestrator/runner.ts) / [workflowView.ts](../../../src/view/workflowView.ts) /
     package.json / README.md
 
 - [x] W3 生成したワークフローの分解が妥当かをレビューする段を足す
   - 依存: なし
   - Issue: #337
-  - 現状: [validateWorkflow](../../src/orchestrator/workflow.ts) が見るのは構文的な妥当性だけ
+  - 現状: [validateWorkflow](../../../src/orchestrator/workflow.ts) が見るのは構文的な妥当性だけ
     （タスク数・id形式・循環依存・未定義参照・プロンプト長・権限の緩和）。生成プロンプト
-    （[planner.ts](../../src/orchestrator/planner.ts)）には「並列にできるタスクを直列にしない」
+    （[planner.ts](../../../src/orchestrator/planner.ts)）には「並列にできるタスクを直列にしない」
     「合流タスクを置く」「外から判定できる `done` を書く」という指針があるが、従っているかは
     検証していない
   - 変更: 生成したYAMLを別の読み取り専用セッションでレビューさせる段を足す。観点は4つ
@@ -120,18 +120,18 @@
     修正後のYAMLが構文検証を通らなければ保存済みYAMLを変えない／利用者の未保存編集を上書きしない／
     上限後に残る指摘は保存時の警告として出る／レビュー・修正セッションがファイルを書き換えない／
     既存の構文的な検証と再生成の挙動が変わらない
-  - 影響: [planner.ts](../../src/orchestrator/planner.ts) / [roadmap.ts](../../src/orchestrator/roadmap.ts) /
-    [workflowView.ts](../../src/view/workflowView.ts)
+  - 影響: [planner.ts](../../../src/orchestrator/planner.ts) / [roadmap.ts](../../../src/orchestrator/roadmap.ts) /
+    [workflowView.ts](../../../src/view/workflowView.ts)
 
 ## フェーズ2 詰まりを検知する
 
 - [x] W2 タスクのループ・停滞を検知して止める
   - 依存: W1
   - Issue: #336
-  - 現状: [loopController.ts](../../src/loop/loopController.ts) の停止条件は6つ（`done` /
+  - 現状: [loopController.ts](../../../src/loop/loopController.ts) の停止条件は6つ（`done` /
     `maxReached` / `failed` / `manual` / `interrupted` / `taskStopped`）だけ。同じ応答の反復も
     進捗のないターンの連続も見ていない。回数切れは `retries` を消費せず即 `failed` になる
-    （[runState.ts](../../src/orchestrator/runState.ts) の `applyLoopStopReason`）ため自動回復もない
+    （[runState.ts](../../../src/orchestrator/runState.ts) の `applyLoopStopReason`）ため自動回復もない
   - 変更: 停滞の判定を `vscode` 非依存の純粋関数として実装する（判定の候補は「直近N回の応答要約が
     同一」「編集ファイルが0のターンがN回続く」「同じエラー文字列がN回出る」。採る条件と理由は
     design.md へ書く）。検知したらループを止め、`failed` とは区別できる停止理由を足す。
@@ -139,9 +139,9 @@
   - 受入基準: 同じ応答が続くタスクが `maxIterations` を使い切る前に止まる／停滞で止まったタスクが
     失敗とは区別できる状態でViewに出る／オーケストレーターに通知が届く／しきい値の設定が効く／
     正常に進んでいるタスクが誤検知で止まらない
-  - 影響: [loopController.ts](../../src/loop/loopController.ts) / [runner.ts](../../src/orchestrator/runner.ts) /
-    [runState.ts](../../src/orchestrator/runState.ts) /
-    [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) / [config.ts](../../src/config.ts)
+  - 影響: [loopController.ts](../../../src/loop/loopController.ts) / [runner.ts](../../../src/orchestrator/runner.ts) /
+    [runState.ts](../../../src/orchestrator/runState.ts) /
+    [runnerOrchestrator.ts](../../../src/orchestrator/runnerOrchestrator.ts) / [config.ts](../../../src/config.ts)
 
 ## フェーズ3 計画を直せるようにする
 
@@ -164,18 +164,18 @@
   - 受入基準: `add_task` でタスクが増え依存グラフとタスク一覧に反映される／循環依存や上限超過は
     適用前に拒否され理由がオーケストレーターへ返る／権限を緩める追加が拒否される／走行中の
     タスクは削除できない／適用した変更が全文で警告欄に残る／YAMLファイルが書き換わらない
-  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
-    [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) /
-    [runner.ts](../../src/orchestrator/runner.ts) / [runState.ts](../../src/orchestrator/runState.ts) /
-    [scheduler.ts](../../src/orchestrator/scheduler.ts) / [workflow.ts](../../src/orchestrator/workflow.ts) /
-    [workflowView.ts](../../src/view/workflowView.ts)
+  - 影響: [messaging.ts](../../../src/orchestrator/messaging.ts) /
+    [runnerOrchestrator.ts](../../../src/orchestrator/runnerOrchestrator.ts) /
+    [runner.ts](../../../src/orchestrator/runner.ts) / [runState.ts](../../../src/orchestrator/runState.ts) /
+    [scheduler.ts](../../../src/orchestrator/scheduler.ts) / [workflow.ts](../../../src/orchestrator/workflow.ts) /
+    [workflowView.ts](../../../src/view/workflowView.ts)
 
 ## フェーズ4 レビューを取り込む
 
 - [x] W5 PR/MRのレビュー結果を取り込んでタスクへ反映する
   - 依存: W4
   - Issue: [#339](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/339)
-  - 現状: [forge.ts](../../src/orchestrator/forge.ts) はPR/MRの作成・マージと番号・URLの保持だけを
+  - 現状: [forge.ts](../../../src/orchestrator/forge.ts) はPR/MRの作成・マージと番号・URLの保持だけを
     扱い、レビューコメントを読む経路が無い
   - 変更: 統合PR/MRのレビューコメントを取得し（GitHubは `gh pr view --json reviews,comments`、
     GitLabは `glab mr note list` 相当）、オーケストレーターへ通知として渡す。対応タスクの追加・調整は
@@ -184,9 +184,9 @@
   - 受入基準: レビューコメントが付くとオーケストレーターへ通知が届く／コメント本文が指示として
     実行されない／タスク調整がW4と同じ承認フローを通る／CLIや認証が無い環境では警告を出してrunは
     止めずに進む
-  - 影響: [forge.ts](../../src/orchestrator/forge.ts) /
-    [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) /
-    [runner.ts](../../src/orchestrator/runner.ts) / [config.ts](../../src/config.ts)
+  - 影響: [forge.ts](../../../src/orchestrator/forge.ts) /
+    [runnerOrchestrator.ts](../../../src/orchestrator/runnerOrchestrator.ts) /
+    [runner.ts](../../../src/orchestrator/runner.ts) / [config.ts](../../../src/config.ts)
 
 ## フェーズ5 やりとりをオーケストレーターへ集約する
 
@@ -196,7 +196,7 @@
 - [x] W9 タスク間の直接メッセージングを廃し、オーケストレーターの中継にする（Issue [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547)）
   - 依存: なし
   - Issue: [#547](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/547)
-  - 現状: `send_message` の宛先は「同じrunのタスク」に限られ（[messaging.ts](../../src/orchestrator/messaging.ts)
+  - 現状: `send_message` の宛先は「同じrunのタスク」に限られ（[messaging.ts](../../../src/orchestrator/messaging.ts)
     の `knownTaskIds` 判定）、タスクからタスクへ直接届く。オーケストレーターは中継に関与せず、
     どのタスクが何を伝えたのかを知らない。タスクが n 個あれば経路は n×(n-1) 本になる
   - 変更: タスクが持つ `send_message` の宛先を**オーケストレーターに固定する**。タスク宛の指定は
@@ -208,10 +208,10 @@
   - 受入基準: タスクからタスクへ直接メッセージが届かない／タスクが宛先にタスクidを書くと拒否され
     理由が返る／オーケストレーターが転送するとタスクへ届く／往復の内容がViewへ残る／
     `expectReply` の返信待ち（`waitingReply`）が中継を挟んでも成立する／自己宛の拒否は従来どおり
-  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
-    [runnerMessaging.ts](../../src/orchestrator/runnerMessaging.ts) /
-    [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts) /
-    [design.md](../design.md) §16.21
+  - 影響: [messaging.ts](../../../src/orchestrator/messaging.ts) /
+    [runnerMessaging.ts](../../../src/orchestrator/runnerMessaging.ts) /
+    [runner.ts](../../../src/orchestrator/runner.ts) / [workflowView.ts](../../../src/view/workflowView.ts) /
+    [design.md](../../design.md) §16.21
 
 - [x] W7 タスクからオーケストレーターへ判断を仰ぐ経路を作る
   - 依存: W9
@@ -229,10 +229,10 @@
     `waitingReply` になり答えが来ると再開する／`blocking: false` なら待たずに進む／問いと答えの
     両方がViewへ残る／答えが来ないまま `maxIterations` に達した場合はタスクが失敗として確定する
     （返事待ちで枠を占有し続けない）／問いの本文は外部由来テキストとして扱われる
-  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
-    [runnerMessaging.ts](../../src/orchestrator/runnerMessaging.ts) /
-    [runState.ts](../../src/orchestrator/runState.ts) /
-    [runner.ts](../../src/orchestrator/runner.ts) / [workflowView.ts](../../src/view/workflowView.ts)
+  - 影響: [messaging.ts](../../../src/orchestrator/messaging.ts) /
+    [runnerMessaging.ts](../../../src/orchestrator/runnerMessaging.ts) /
+    [runState.ts](../../../src/orchestrator/runState.ts) /
+    [runner.ts](../../../src/orchestrator/runner.ts) / [workflowView.ts](../../../src/view/workflowView.ts)
 
 - [x] W8 オーケストレーターからユーザーへ確認する経路を作る
   - 依存: W7
@@ -253,11 +253,11 @@
     選んだ結果がオーケストレーターへ返る／上限を超えた呼び出しが拒否される／人が答えないまま
     runを閉じた場合もrunの状態が壊れない（永続化して再開時に問い直す。W10と組み合わせる）／
     問いの本文は外部由来テキストとして扱われる
-  - 影響: [messaging.ts](../../src/orchestrator/messaging.ts) /
-    [runnerOrchestrator.ts](../../src/orchestrator/runnerOrchestrator.ts) /
-    [runState.ts](../../src/orchestrator/runState.ts) /
-    [runStore.ts](../../src/orchestrator/runStore.ts) /
-    [workflowView.ts](../../src/view/workflowView.ts) / [config.ts](../../src/config.ts)
+  - 影響: [messaging.ts](../../../src/orchestrator/messaging.ts) /
+    [runnerOrchestrator.ts](../../../src/orchestrator/runnerOrchestrator.ts) /
+    [runState.ts](../../../src/orchestrator/runState.ts) /
+    [runStore.ts](../../../src/orchestrator/runStore.ts) /
+    [workflowView.ts](../../../src/view/workflowView.ts) / [config.ts](../../../src/config.ts)
 
 ## フェーズ6 落ちても続くようにする
 
@@ -267,7 +267,7 @@
     矛盾していた**。Issue [#586](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/586)
     で修正）
   - Issue: [#584](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/584)
-  - 現状: リロード後の復元は実装済みで（[runnerRestore.ts](../../src/orchestrator/runnerRestore.ts)、
+  - 現状: リロード後の復元は実装済みで（[runnerRestore.ts](../../../src/orchestrator/runnerRestore.ts)、
     design.md §16.11）、`workspaceState` に残ったrunをメモリへ戻し、`merging` で切れたものは
     マージからやり直す。**ただし復元したrunは自動では進まない。** 走行中だったタスクは中断扱いへ
     倒され、そこから先は人がワークフローViewで「再実行」を押す必要がある。VSCodeのリロードは
@@ -286,17 +286,17 @@
     人が止めたrunは自動再開しない／`autoResume: false` で従来どおり手動再開になる／
     再開の試行が上限を超えたrunは止まったままになり理由がViewへ出る／再開したタスクが
     worktreeを二重に作らない／`ask_user` 待ちだったrunは問いを出し直す
-  - 影響: [runnerRestore.ts](../../src/orchestrator/runnerRestore.ts) /
-    [runStore.ts](../../src/orchestrator/runStore.ts) /
-    [runState.ts](../../src/orchestrator/runState.ts) /
-    [runner.ts](../../src/orchestrator/runner.ts) /
-    [scheduler.ts](../../src/orchestrator/scheduler.ts) / [config.ts](../../src/config.ts) /
-    [design.md](../design.md) §16.11
+  - 影響: [runnerRestore.ts](../../../src/orchestrator/runnerRestore.ts) /
+    [runStore.ts](../../../src/orchestrator/runStore.ts) /
+    [runState.ts](../../../src/orchestrator/runState.ts) /
+    [runner.ts](../../../src/orchestrator/runner.ts) /
+    [scheduler.ts](../../../src/orchestrator/scheduler.ts) / [config.ts](../../../src/config.ts) /
+    [design.md](../../design.md) §16.11
 
 - [x] W11 CIの完了待ちとブランチ保護への対応
   - 依存: なし
   - Issue: [#556](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/556)
-  - 現状: [forge.ts](../../src/orchestrator/forge.ts) が呼ぶGitHub/GitLabの操作は
+  - 現状: [forge.ts](../../../src/orchestrator/forge.ts) が呼ぶGitHub/GitLabの操作は
     `pr create` / `pr merge` / `pr ready` の3つだけ。**CIの結果を見ずにマージする。**
     また `pr update-branch` 相当が無い
   - 変更: 2つ足す。
@@ -314,9 +314,9 @@
     待ち時間の上限を超えたら赤と同じ扱いになる／`not up to date` で拒否されたら取り込み直して
     再試行する／再試行の上限を超えたら失敗として確定する／CIが設定されていないリポジトリでは
     従来どおり即マージする（チェックが0件なのと赤なのを取り違えない）
-  - 影響: [forge.ts](../../src/orchestrator/forge.ts) /
-    [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) /
-    [config.ts](../../src/config.ts) / README.md
+  - 影響: [forge.ts](../../../src/orchestrator/forge.ts) /
+    [runnerMerge.ts](../../../src/orchestrator/runnerMerge.ts) /
+    [config.ts](../../../src/config.ts) / README.md
 
 ## フェーズ7 複数のワークフローを束ねる
 
@@ -348,16 +348,16 @@
   - 受入基準: 複数のrunを1つのプログラムとして定義できる／依存の無いrunが同時に走る／
     依存のあるrunが前段の完了を待つ／前段が失敗したとき後段が走らない／プログラムの状態が
     永続化され、リロードやWSLの停止をまたいでも続きから進む／プログラムを人の手で止められる
-  - 影響: `src/orchestrator/` 全域 / [workflowView.ts](../../src/view/workflowView.ts) /
-    [config.ts](../../src/config.ts) / [design.md](../design.md)
+  - 影響: `src/orchestrator/` 全域 / [workflowView.ts](../../../src/view/workflowView.ts) /
+    [config.ts](../../../src/config.ts) / [design.md](../../design.md)
 
 ## 進め方
 
 - 1項目1 Issue・1ブランチ・1 PRとする
 - ロジック層（`vscode` を import しない層）へ寄せられる部分はユニットテストを付ける
-- 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../manual-test.md) へ追記する
+- 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../../manual-test.md) へ追記する
 - 各項目の完了時にREADMEの該当箇所（ワークフローの節・設定・既知の制約）を同じPRで更新する
-- 権限や信頼境界に触れる変更は、[design.md](../design.md) §16.16（設定の信頼境界）の方針から
+- 権限や信頼境界に触れる変更は、[design.md](../../design.md) §16.16（設定の信頼境界）の方針から
   外れないことを確かめてから入れる
 
 ## 番号の事前割り当て
@@ -450,8 +450,8 @@ PR #542 の時点で design.md の実在する最大は §16.24 で、その直�
 §16.24〜§16.28 と W-22〜W-32 を割り当てていた。
 
 - **§16.24 は WF-B の T10（外部由来テキストの整形、`untrustedText.ts`）が使用済み**
-  （[design.md](../design.md) の §16.24）
-- **W-22 以降という番号は現行の [manual-test.md](../manual-test.md) に存在しない。**
+  （[design.md](../../design.md) の §16.24）
+- **W-22 以降という番号は現行の [manual-test.md](../../manual-test.md) に存在しない。**
   W群は Issue #186 の仕分けで W-01〜W-21 の数字体系から W-A〜W-E の観点別体系へ再編済みで、
   旧番号との対応表だけが残っている。新規ケースはその続きとして W-F 以降を充てる
 
@@ -506,8 +506,8 @@ WF-E として運営したときの依存・前提・決定・申し送りであ
 - **申し送り**（2026-08-22、WF-B の担当から。着手時の起動プロンプトへ含めること）
   - **W6 が通すべき集約点の実体**。W6 は外部由来テキストの整形をT10の集約点へ通す前提であり、
     新規に整形処理を書き起こすと集約が崩れる。モジュールは
-    [untrustedText.ts](../../src/orchestrator/untrustedText.ts)、仕様は
-    [design.md](../design.md) §16.24。公開関数は
+    [untrustedText.ts](../../../src/orchestrator/untrustedText.ts)、仕様は
+    [design.md](../../design.md) §16.24。公開関数は
     `formatUntrusted(text, options)`（`options` は `{ id, field, maxLength, preserveNewlines?, nonce? }`。
     nonce は省略時に `randomUUID()`。**1回の展開で複数フィールドを囲む場合は呼び出し側が
     同じ nonce を明示的に渡す**）、`sanitizeInlineText(text, maxLength)`（一覧の要素向け）、
@@ -523,10 +523,10 @@ WF-E として運営したときの依存・前提・決定・申し送りであ
 - 依存: W1
 - Issue: [#596](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/596)
 - 現状: **タスクごとのPR作成は既に実装されている。** `agent.workflows.pullRequest` の既定が
-  `per-task` で（[config.ts](../../src/config.ts) の `normalizePullRequestLayerConfig`）、
-  [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) が
+  `per-task` で（[config.ts](../../../src/config.ts) の `normalizePullRequestLayerConfig`）、
+  [runnerMerge.ts](../../../src/orchestrator/runnerMerge.ts) が
   `shouldCreateTaskPullRequest` を見て
-  [forge.ts](../../src/orchestrator/forge.ts) の `runTaskPullRequestFlow` を回す。その段取りは
+  [forge.ts](../../../src/orchestrator/forge.ts) の `runTaskPullRequestFlow` を回す。その段取りは
   「タスクブランチをpush → 統合ブランチをpush → PRを作る → ローカルでマージして統合ブランチをpush →
   PRをready化」である。PR作成時の宛先ブランチも引数（`baseBranch`）で受け取っている。
   無いのは次の2つだけ。
@@ -542,7 +542,7 @@ WF-E として運営したときの依存・前提・決定・申し送りであ
 - 受入基準: タスクの開始でIssueが起票されPR本文から参照される／PRがレビューを経てからマージされる／
   Issueを起票できない環境（CLIや認証が無い）では警告を出して従来どおり進み、runは止まらない／
   設定で従来の挙動へ戻せる／`per-task` 以外（`none` / `integration`）を選んだときの挙動が変わらない
-- 影響: [forge.ts](../../src/orchestrator/forge.ts) /
-  [runnerMerge.ts](../../src/orchestrator/runnerMerge.ts) /
-  [runner.ts](../../src/orchestrator/runner.ts) /
-  [config.ts](../../src/config.ts) / [workflowView.ts](../../src/view/workflowView.ts)
+- 影響: [forge.ts](../../../src/orchestrator/forge.ts) /
+  [runnerMerge.ts](../../../src/orchestrator/runnerMerge.ts) /
+  [runner.ts](../../../src/orchestrator/runner.ts) /
+  [config.ts](../../../src/config.ts) / [workflowView.ts](../../../src/view/workflowView.ts)

@@ -25,19 +25,19 @@
 - レビューはsubagent（`code-reviewer` / `security-auditor`）で行い、指摘は潰してからマージする。
   潰せないものはPR本文へ残す
 - タスクの詳細な指示（根拠・行番号・変更内容・受入基準・自己レビュー手順）は
-  [.agents/workflows/](../../.agents/workflows/) の該当タスクをそのまま使う。
+  [.agents/workflows/](../../../.agents/workflows/) の該当タスクをそのまま使う。
   YAMLのファイル分け（core / ui / final）は本ドキュメントの分割で置き換わっており、
   参照するのは各タスクの `prompt` と `done` だけとする
 - YAMLの `prompt` には「検証済み」「未検証」が明記してある。**未検証のタスクは、修正の前に
   再現条件の確認から始める**。確認の結果として指摘が成立しなかった場合は、直さずにその旨を報告する
 - ロジック層（`vscode` を import しない層）へ寄せられる部分はユニットテストを付ける
-- 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../manual-test.md) へ追記する
-- 権限や信頼境界に触れる変更は、[design.md](../design.md) §16.16（設定の信頼境界）の方針から
+- 実VSCodeでしか確かめられない受入基準は [docs/manual-test.md](../../manual-test.md) へ追記する
+- 権限や信頼境界に触れる変更は、[design.md](../../design.md) §16.16（設定の信頼境界）の方針から
   外れないことを確かめてから入れる
 - **横断レビューの結果は epic Issue と、統合ブランチから main へ出すPRの本文へ残す。docs配下に
   別の文書は作らない。** WF-A（epic #352 / PR #447）・WF-B（PR #429）・WF-C（PR #431）はいずれも
   この形で残しており、docs配下にレビュー記録の文書は存在しない。
-  [.agents/workflows/](../../.agents/workflows/)（`review-fixes-core.yaml` の `Z01_core_review`、
+  [.agents/workflows/](../../../.agents/workflows/)（`review-fixes-core.yaml` の `Z01_core_review`、
   `review-fixes-ui.yaml` の `Z02_ui_review`）の `done` にある「docs配下の文書に残る」という記述は、
   この運用に置き換わっている。YAML自体は第1波の全タスクが終わった時点で歴史的な資料であり、
   文言は直さない
@@ -128,7 +128,7 @@
   対処は次に別のテストで同じことを起こす。**規律を文章で残すときは「どの起点か」まで特定して
   書く**: Issue #526 では「ルート起点で検査する」とだけ書いたため `.agents/worktrees` 起点が
   正解として扱われ、同じ循環が1段上で再発した（正しくは `workspaceRoot` 起点）
-- **テストが本当に何かを検証しているかの確認は [design.md](../design.md) §16.25 に従う**
+- **テストが本当に何かを検証しているかの確認は [design.md](../../design.md) §16.25 に従う**
   （一般則と確認項目8件）。ここには内容を持たない（二重管理を避ける）
 - **Issueを起票したら、同じ操作の中で行き先の一覧へ足す。** 「送り先を決めた」ことと
   「送り先の一覧に載せた」ことは別である。**一覧を更新した後に新しく起票したものは、
@@ -153,7 +153,7 @@
   `-orchestrator-` になり `live.def.tasks` に無いため、毎回 `continue` する）。
   design.md へ書いてもワークフローViewを見る人には届かず、**「警告が出ていない」を
   「権限差が無かった」と読む**。死んだ防御には、関数のJSDocとテストの両方に
-  「不発火が意図的であること」と再実装のIssue番号を書き、[manual-test.md](../manual-test.md)
+  「不発火が意図的であること」と再実装のIssue番号を書き、[manual-test.md](../../manual-test.md)
   にも「出ないのが現在の仕様」と書く（実機確認する人はコードを読まない）。
   現物は Issue [#562](https://github.com/Sylphy0052/VSCode-Codex-Extension/issues/562)
 - **委譲先が完了記録を残さず消えることがある。完了は報告ではなく作業ツリーの実測で
