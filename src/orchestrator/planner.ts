@@ -1436,8 +1436,8 @@ export function awaitSingleTurn(
 /**
  * 分解専用のセッションを1つ開き、1ターンだけ送って応答を受け取り、閉じる。
  *
- * 実体は {@link runSingleTurnTask}。従来の引数の並びを保つラッパで、`planner.ts` /
- * `roadmap.ts` の既存の呼び出しはこちらを使い続ける（挙動は変えていない。タブは開く）。
+ * 実体は {@link runSingleTurnTask}。従来の引数の並びを保つラッパで、タブは開く。
+ * ワークフロー生成の2ターンはタブを開かないため、`runSingleTurnTask`を直接呼ぶ（Issue #1449）。
  */
 export async function sendSingleTurn(
   host: TaskSessionHost,
@@ -1506,13 +1506,17 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
     // 分解に使ったエージェントを、そのまま実行にも使う（issue #321）
     provider: input.provider,
   });
-  const firstResponse = await sendSingleTurn(
+  // 1ターンで閉じるため、タブを開いても中身を読む前に消える。開かずに走らせる（Issue #1449）
+  const firstResponse = await runSingleTurnTask(
     input.host,
     input.provider,
     sessionInput,
     firstPrompt,
-    PLANNER_TURN_TIMEOUT_MS,
-    input.log,
+    {
+      timeoutMs: PLANNER_TURN_TIMEOUT_MS,
+      log: input.log,
+      openPanel: false,
+    },
   );
   const first = extractAndRepair(firstResponse, input.provider, input.log);
   const firstYaml = first.yaml;
@@ -1534,13 +1538,16 @@ export async function planWorkflow(input: PlanWorkflowInput): Promise<PlanWorkfl
       .join(' / ')}`,
   );
   const retryPrompt = buildRetryPrompt(firstYaml, firstAttempt.errors);
-  const secondResponse = await sendSingleTurn(
+  const secondResponse = await runSingleTurnTask(
     input.host,
     input.provider,
     sessionInput,
     retryPrompt,
-    PLANNER_TURN_TIMEOUT_MS,
-    input.log,
+    {
+      timeoutMs: PLANNER_TURN_TIMEOUT_MS,
+      log: input.log,
+      openPanel: false,
+    },
   );
   const second = extractAndRepair(secondResponse, input.provider, input.log);
   const secondYaml = second.yaml;
