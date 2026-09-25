@@ -630,7 +630,6 @@ export class ClaudeChatViewManager
     this.sessionMessagingRegistrations.set(entry, registration);
   }
 
-  /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
   /**
    * 完了宣言の検証（issue #1447）の設定を組み立てる。設定で無効なら`undefined`を返す。
    * 判定の結果は`entry`の会話へ1行残す。
@@ -663,6 +662,7 @@ export class ClaudeChatViewManager
     return doneCheck === undefined ? plan : { ...plan, doneCheck };
   }
 
+  /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
   private configFor(entry: ClaudePanel): ClaudeConfig {
     const config = entry.taskConfig ?? readClaudeConfig().claude;
     // 他のセッションと話すためのMCPサーバ（Issue #1305）。タスク経路の`toClaudeConfig`と
