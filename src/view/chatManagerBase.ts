@@ -20,6 +20,7 @@ import {
   type OldTabKeptReason,
 } from './handoff';
 import { PendingHandoffChoice } from './handoffPending';
+import type { SkillSelectGate } from './skillSelectGate';
 import { playNotificationSound } from './notificationSound';
 import type {
   SessionApprovalDetail,
@@ -110,6 +111,8 @@ export interface BaseChatPanel {
    * 人が手で開いた画面（`false`）は従来通りタブを閉じたらセッションも終わる。
    */
   taskManaged: boolean;
+  /** skill選択（issue #1451）で人の発言を順に送る関門。初めて使うときに作る。 */
+  skillSelectGate?: SkillSelectGate;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
   /**
@@ -1322,6 +1325,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     // 引き継ぎの確認待ちのままタブを閉じた分を中止する（Issue #1280）。放っておくと
     // 誰も答えない確認を`chooseHandoffModelSettings`が待ち続ける
     entry.pendingHandoff?.cancelForTeardown();
+    // skill選択（issue #1451）の判定中に閉じたら、判定のプロセスも止める
+    entry.skillSelectGate?.abortAll();
     entry.session.dispose();
     entry.panel?.dispose();
     entry.panel = undefined;

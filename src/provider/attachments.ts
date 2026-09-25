@@ -106,17 +106,33 @@ export function checkRoom(existing: readonly Attachment[], next: Attachment): st
 }
 
 /**
+ * 発言に添えて読み込ませるCodexのskill（issue #1451）。`skills/list`が返す名前とSKILL.mdのパス。
+ */
+export interface CodexSkillInput {
+  name: string;
+  path: string;
+}
+
+/**
  * Codexの `turn/start` へ渡す `input`。
  *
  * `UserInput` はタグ付きunionで、画像はデータURLを `url` に入れる形が通る（実測）。
- * テキストは最後に置く。画像を見てから指示を読ませたいため。
+ * テキストは画像の後に置く。画像を見てから指示を読ませたいため。skillはテキストの後に
+ * `{type:'skill', name, path}`で足すと、skillの一覧を外したスレッドでも中身が注入される（実測）。
  */
-export function buildCodexInput(text: string, attachments: readonly Attachment[]): unknown[] {
+export function buildCodexInput(
+  text: string,
+  attachments: readonly Attachment[],
+  skill?: CodexSkillInput,
+): unknown[] {
   const input: unknown[] = attachments.map((a) => ({
     type: 'image',
     url: toDataUrl(a),
   }));
   input.push({ type: 'text', text });
+  if (skill !== undefined) {
+    input.push({ type: 'skill', name: skill.name, path: skill.path });
+  }
   return input;
 }
 

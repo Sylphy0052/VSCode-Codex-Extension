@@ -1320,6 +1320,20 @@
           "scope": "window",
           "markdownDescription": "完了宣言の検証で、「終了条件を満たした」の確率がこの値以上ならループを終了する。下回れば次の周へ進む。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
         },
+        "agent.chat.skillSelect.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "skillの一覧をモデルへ渡さず、発言のたびにReflex判定（issue #1451）で依頼に合うskillを1つ選んで読み込ませるか。一覧の分だけ毎ターンの入力が減る。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、発言ごとに数秒〜十数秒待つ。合うものが無い・判定が失敗したときはskillを付けずに送る。`/` で始まる発言、ループ・自動返信・ゴールの指示文では判定しない。Codexは有効にした後に開いた会話から効く。"
+        },
+        "agent.chat.skillSelect.threshold": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "skill選択で、選んだskillの確率がこの値以上なら読み込ませる。下回ればskillを付けずに送る。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
+        },
         "agent.chat.autoReply.reflex.enabled": {
           "type": "boolean",
           "default": true,

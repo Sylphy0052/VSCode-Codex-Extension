@@ -596,6 +596,17 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 - **Claude Codeは主会話の文脈を暗黙に共有する（実測で確定）**: `history`を渡さなくても、それまでの主会話の内容を踏まえて答えることを確認した。**脇道の質問自体はtranscriptに残らない一方で、主会話の内容はモデルに見えている**という非対称がある。質問の中身が主会話に影響することは無いが、「本流を汚さない」＝「本流の内容も見えていない」ではない点に注意
 - Claude Codeで応答が失敗した場合（CLI内部のエラー、モデルがツール呼び出しを試みた、APIエラー等）は、CLIの内部エラー文言をそのまま出さず日本語の説明に丸めて表示する。空の質問（`/btw` だけを送る等）は拡張機能側で弾き、CLIへは送らない
 
+### 依頼に合うskillの選択
+
+CLIは会話の最初にskillの一覧（名前と説明）をモデルへ渡し、使うかどうかをモデルに任せている。skillが増えるほど一覧が長くなり、毎ターンの入力を圧迫する。`agent.chat.skillSelect.enabled` を有効にすると、一覧をモデルへ渡さない代わりに、手動で送る発言のたびにReflex判定（別のAI）で依頼に合うskillを1つ選び、選んだものだけを読み込ませる。
+
+- Codex: 新しい会話の開始時に一覧を外し、選んだskillを発言と一緒に渡す。再開した会話では一覧は外れないが、選んだskillは渡す
+- Claude Code: 一覧からskillを隠し、選んだskillをSkillツールで読み込むよう指示する一文を発言の前に置く。隠したskillも`/skill名`やSkillツールでは呼べる
+- 選んだskillの確率が `agent.chat.skillSelect.threshold` 未満のとき、合うものが無いとき、判定できなかったときは、skillなしでそのまま送る。選んだときだけ会話に1行残る
+- 判定には数秒〜十数秒かかる。判定中はステータスバーに表示が出て、その間に送った発言は順番を守って後に続く。停止ボタンを押すと、判定中・待機中の発言は送らずに入力欄へ戻す
+- `/`で始まる発言（自分でコマンドやskillを選んでいる）は判定しない。ループ・自動返信・ゴール駆動ループが送る指示も対象外
+- 途中で無効にしても、Claude Codeで隠したskillはそのセッションのCLIプロセスが終わるまで隠れたまま
+
 ### コスト
 
 チャット画面のフッター（入力欄の下、レート制限の消費率・コンテキスト残量と同じ行）に、現在のセッションの推定コストを出す（Claude Codeのみ。issue #37・design.mdの TP-60）。TUIの `/cost` に相当する。
@@ -1035,6 +1046,8 @@ tasks:
 | `agent.secondOpinion.advisor.idleTimeoutMs`      | `1800000`                                                                        | window   | 保持した相談相手を、無操作が続いたときに閉じるまでの時間（ミリ秒）。1分〜4時間の範囲に丸める                                                                                                                                                                                                                                     |
 | `agent.chat.turnSummary.enabled`                 | `false`                                                                          | window   | [応答末尾に要約と次アクションを出させる](#応答末尾の要約と次の推奨アクション)。手動で送る発言の末尾へ指示文を毎回足す。既定は無効                                                                                                                                                                                                |
 | `agent.chat.turnSummary.instruction`             | [既定文](#応答末尾の要約と次の推奨アクション)                                    | window   | 有効なときに発言の末尾へ足す指示文。空文字なら足さない（無効化と同じ）                                                                                                                                                                                                                                                           |
+| `agent.chat.skillSelect.enabled`                 | `false`                                                                          | window   | [依頼に合うskillだけを読み込ませる](#依頼に合うskillの選択)。skillの一覧をモデルへ渡さず、手動で送る発言のたびにReflex判定で合うskillを1つ選ぶ                                                                                                                                                                                   |
+| `agent.chat.skillSelect.threshold`               | `0.6`                                                                            | window   | 選んだskillの確率がこれ以上なら読み込ませる（0〜1）                                                                                                                                                                                                                                                                              |
 | `agent.chat.loopEngineering.enabled`             | `false`                                                                          | window   | [ループ](#同じ指示を繰り返すループ)が送る指示の末尾へ、機械的な検証・行き詰まりでの方針変更・撤退の申告を促す指示文を足す                                                                                                                                                                                                        |
 | `agent.chat.loopEngineering.initialInstruction`  | 既定文                                                                           | window   | 有効なときにループの**1回目**の指示へ足す文                                                                                                                                                                                                                                                                                      |
 | `agent.chat.loopEngineering.continueInstruction` | 既定文                                                                           | window   | 有効なときにループの**2回目以降**の指示へ足す文                                                                                                                                                                                                                                                                                  |

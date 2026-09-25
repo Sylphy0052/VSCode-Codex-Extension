@@ -74,6 +74,7 @@ import {
   type AutoReplySettings,
 } from './chat/autoReply';
 import { DEFAULT_LOOP_DONE_CHECK_THRESHOLD, type LoopDoneCheckSettings } from './loop/loopDoneCheck';
+import { DEFAULT_SKILL_SELECT_THRESHOLD, type SkillSelectSettings } from './reflex/skillSelect';
 import {
   DEFAULT_AUTO_REPLY_REFLEX_ANSWER_THRESHOLD,
   DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
@@ -825,6 +826,18 @@ export function readLoopDoneCheckConfig(): LoopDoneCheckSettings {
     threshold: Math.min(
       1,
       Math.max(0, num(c, 'chat.loopDoneCheck.threshold', DEFAULT_LOOP_DONE_CHECK_THRESHOLD)),
+    ),
+  };
+}
+
+/** 依頼に合うskillの選択（issue #1451）の設定を読む。閾値は0〜1へ丸める。 */
+export function readSkillSelectConfig(): SkillSelectSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('chat.skillSelect.enabled') === true,
+    threshold: Math.min(
+      1,
+      Math.max(0, num(c, 'chat.skillSelect.threshold', DEFAULT_SKILL_SELECT_THRESHOLD)),
     ),
   };
 }
