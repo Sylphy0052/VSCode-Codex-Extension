@@ -809,6 +809,19 @@ export class RoadmapIssueRunner {
     return idle;
   }
 
+  /**
+   * Issueのセッションタブを前面に出す（Kanbanの「セッションを開く」）。生きている
+   * セッションが無ければ（未着手・停止後・リロード後）`false`。
+   */
+  revealIssueSession(runId: string, issueNumber: number): boolean {
+    const entry = this.live.get(liveKey(runId, issueNumber));
+    if (entry === undefined) {
+      return false;
+    }
+    entry.session.reveal();
+    return true;
+  }
+
   /** 自動実行モードで、空き枠の分だけ実行できるノードを始める。 */
   async pump(runId: string): Promise<void> {
     const run = this.deps.store.find(runId);

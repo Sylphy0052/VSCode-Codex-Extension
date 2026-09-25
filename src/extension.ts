@@ -109,7 +109,7 @@ import {
   formatVerifyCommandForDisplay,
   type VerifyCommandConsentRequest,
 } from './orchestrator/runnerVerifyCommands';
-import type { ExtensionSafetyBaseline } from './orchestrator/taskConfig';
+import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './orchestrator/taskConfig';
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
   buildWorkspaceSummary,
@@ -202,6 +202,7 @@ import type { SessionControlAction, SessionControlResult } from './view/chatMana
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
+import { setupRoadmapRun } from './view/roadmapRunSetup';
 import {
   generateWindowId,
   sessionHubRoot,
@@ -646,12 +647,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
    * には毎回`current`を読む関数を渡す。
    */
   const sessionBridgeHolder: { current: SessionBridgePort | undefined } = { current: undefined };
+  // worktreeの作成はワークフローとロードマップ実行（Issue #1465）で同じ列に並べる
+  const worktreeQueue = new WorktreeCreationQueue();
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
       claude: overridableHost('claude', claudeChat),
     },
-    worktreeQueue: new WorktreeCreationQueue(),
+    worktreeQueue,
     // `verify.commands` の実行（Issue #1378）。Workspace Trustが有効で、runごとの確認で
     // 許可されたときだけ実行する
     verifyCommands: {
@@ -777,6 +780,29 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 一度も呼ばれない（Issue #363）。`dispose()`は複数回呼ばれても安全
   // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
   context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
+
+  // ロードマップ実行（Issue #1465）。子Issueを依存順にセッションへ送り、Kanbanで操作する
+  context.subscriptions.push(
+    ...setupRoadmapRun({
+      context,
+      hosts: {
+        codex: overridableHost('codex', chat),
+        claude: overridableHost('claude', claudeChat),
+      },
+      worktreeQueue,
+      git: { run: (args, cwd) => (forgeOverrides.git ?? nodeGitCommandRunner).run(args, cwd) },
+      cli: {
+        run: (command, args, cwd) =>
+          (forgeOverrides.cli ?? nodeCliCommandRunner).run(command, args, cwd),
+      },
+      sessionConfig: (engine) => {
+        const effective = buildEffectiveTaskConfig({ provider: engine }, readSafetyBaseline());
+        return { config: effective.config, sandbox: effective.sandbox };
+      },
+      readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
+      log,
+    }),
+  );
 
   // プログラム（design.md §16.37、roadmap W12-1・W12-2、Issue #604・#605）の永続化状態も、
   // 単発runと同じタイミングでリロード直後の中断扱いへ書き換える（W10の自動再開の対象に
