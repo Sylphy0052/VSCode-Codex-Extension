@@ -384,7 +384,8 @@ export type WriteRoadmapPlanOutcome =
 
 /**
  * 検証済みの計画を、区画が無いロードマップIssueへ書き戻す。書く直前に本文を読み直して
- * 子Issueで検証し直し、区画以外の本文が変わらないことを確かめてから送る。
+ * 子Issueで検証し直してから送る。区画が無い本文にだけ書くため、元の本文の末尾へ区画を
+ * 足すだけになり、区画以外の本文は変わらない（`replaceRoadmapPlanSection`）。
  * 子Issueのチェック（`syncRoadmapCompletionToIssue`）と同じ列で直列化する。
  */
 export async function writeRoadmapPlan(
@@ -421,8 +422,8 @@ export async function writeRoadmapPlan(
         return { kind: 'invalid', errors };
       }
       const next = replaceRoadmapPlanSection(body, formatRoadmapPlanSection(nodes));
-      if (next === undefined || !next.startsWith(body.replace(/(\r?\n)*$/u, ''))) {
-        return { kind: 'failed', message: '計画区画以外の本文が変わるため書き戻しを中止しました' };
+      if (next === undefined) {
+        return { kind: 'invalid', errors: ['計画区画の目印が壊れています'] };
       }
       const outcome = await updateIssue(deps, {
         host: target.host,
