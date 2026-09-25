@@ -476,6 +476,27 @@ ${completionEvidenceStyles()}
     padding: 10px 16px 14px;
     border-top: 1px solid var(--agent-border);
   }
+  /*
+   * 入力を閉じたタブ（ロードマップ実行のIssueセッション。issue #1465）。入力欄・設定・
+   * ループ停止を隠し、閲覧・指示・停止の操作列だけを出す。
+   */
+  body.inputLocked #composer,
+  body.inputLocked #settingsBox,
+  body.inputLocked #loopStop {
+    display: none !important;
+  }
+  #lockedTabBar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px 14px;
+    border-top: 1px solid var(--agent-border);
+  }
+  #lockedTabBar .lockedTabNote {
+    flex: 1 1 100%;
+    opacity: 0.8;
+  }
   #composerInputRow {
     display: flex;
     gap: 8px;

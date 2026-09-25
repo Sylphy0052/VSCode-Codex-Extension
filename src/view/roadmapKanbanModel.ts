@@ -113,6 +113,8 @@ export interface RoadmapKanbanCard {
   runLabel: string;
   canPause: boolean;
   canStop: boolean;
+  /** Orchestrator経由でセッションへ指示を渡せる（issue #1465。一時停止中なら再開時に届く）。 */
+  canInstruct: boolean;
   /** セッションタブを前面に出せる（セッションが生きている見込みがある）。 */
   canReveal: boolean;
   /** 現在の実行回で、ユーザーの回答を待つ質問。 */
@@ -245,6 +247,7 @@ function buildCard(run: RoadmapRun, issueNumber: number, dependsOn: readonly num
     runLabel: runLabelFor(issue),
     canPause: !finished && active && issue.attention !== 'stopping',
     canStop: !finished && ((active && issue.attention !== 'stopping') || isPaused),
+    canInstruct: !finished && (active || isPaused) && issue.attention !== 'stopping',
     canReveal: active || isPaused,
     questions,
   };
