@@ -183,39 +183,99 @@ export class ClaudeSessionStore {
       return undefined;
     }
     const previous = this.index.get(filePath);
-    const mtimeMs = await this.fs.mtimeMs(filePath);
+    const stat = await this.statFile(filePath);
     let cwd: string | undefined;
-    if (mtimeMs === undefined) {
+    if (stat.mtimeMs === undefined) {
       this.index.delete(filePath);
     } else {
-      if (previous !== undefined && previous.mtimeMs === mtimeMs) {
+      if (previous !== undefined && previous.mtimeMs === stat.mtimeMs) {
         return undefined;
       }
-      const meta = await this.readHeadMeta(filePath);
-      // 裏の指示だけのセッションは索引に入れない（Issue #1145）。`/usage` を打つたびに
-      // 履歴が1件増えるのを防ぐ
-      cwd = meta?.cwd;
-      if (meta === undefined || isBackgroundOnly(meta)) {
-        this.index.delete(filePath);
-      } else {
+      if (this.canSkipHeadRead(previous, stat)) {
+        // 索引に既にあるファイルへの通常の追記（サイズ増加・inode不変）。先頭は変わらない
+        // ため読み直さず、mtime/size/ino/updatedAtだけ更新する（Issue #1460）
+        cwd = previous.session.cwd;
         this.index.set({
           filePath,
-          mtimeMs,
-          session: {
-            id,
-            provider: 'claude',
-            threadName: displayName(meta),
-            updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
-            cwd: meta.cwd,
-            archived: false,
-          },
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          ino: stat.ino,
+          session: { ...previous.session, updatedAt: new Date(stat.mtimeMs).toISOString() },
         });
+      } else {
+        const meta = await this.readHeadMeta(filePath);
+        // 裏の指示だけのセッションは索引に入れない（Issue #1145）。`/usage` を打つたびに
+        // 履歴が1件増えるのを防ぐ
+        cwd = meta?.cwd;
+        if (meta === undefined || isBackgroundOnly(meta)) {
+          this.index.delete(filePath);
+        } else {
+          this.index.set({
+            filePath,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            ino: stat.ino,
+            session: {
+              id,
+              provider: 'claude',
+              threadName: displayName(meta),
+              updatedAt: new Date(
+                (stat.mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0,
+              ).toISOString(),
+              cwd: meta.cwd,
+              archived: false,
+            },
+          });
+        }
       }
     }
-    await this.index.persist();
+    this.index.requestPersist();
     // 消えた・一覧から外れたセッションは、索引にあったときのcwdで範囲を判定する
     const cwds = [previous?.session.cwd, cwd].filter((c): c is string => c !== undefined);
     return { sessionId: id, cwds };
+  }
+
+  /** `refreshFile` の即時flush（Issue #1460）。deactivateからの最適化用の呼び出しを想定する。 */
+  async flushIndex(): Promise<void> {
+    await this.index.flush();
+  }
+
+  /**
+   * `mtimeMs` に加えてサイズ・inodeも取る（Issue #1460）。`statLite` を持たないポート
+   * （テストのフェイク等）では `mtimeMs` だけ取り、`canSkipHeadRead` を常に false にして
+   * 安全側（先頭を読み直す）へ倒す。
+   */
+  private async statFile(
+    filePath: string,
+  ): Promise<{ mtimeMs: number | undefined; size: number | undefined; ino: number | undefined }> {
+    const statLite = this.fs.statLite?.bind(this.fs);
+    if (statLite === undefined) {
+      return { mtimeMs: await this.fs.mtimeMs(filePath), size: undefined, ino: undefined };
+    }
+    const stat = await statLite(filePath);
+    return stat ?? { mtimeMs: undefined, size: undefined, ino: undefined };
+  }
+
+  /**
+   * 索引にある `previous` へ、`readHeadMeta` を省いて先頭の読み直しを飛ばせるか
+   * （Issue #1460）。新しいファイル・サイズ縮小（切り詰め）・inode変化（同じパスへの
+   * 置き換え）・旧schema（sizeが無い）のいずれかなら false を返し、呼び出し側に
+   * 先頭を読み直させる。
+   */
+  private canSkipHeadRead(
+    previous: ClaudeSessionIndexEntry | undefined,
+    stat: { mtimeMs: number | undefined; size: number | undefined; ino: number | undefined },
+  ): previous is ClaudeSessionIndexEntry {
+    if (previous === undefined || previous.size === undefined || stat.size === undefined) {
+      return false;
+    }
+    if (stat.size < previous.size) {
+      return false;
+    }
+    if (previous.ino !== undefined && stat.ino !== undefined && previous.ino !== stat.ino) {
+      return false;
+    }
+    return true;
   }
 
   private listFromIndex(options: ListOptions): ListResult {
@@ -283,7 +343,7 @@ export class ClaudeSessionStore {
         if (filePath === undefined) {
           continue;
         }
-        const entry = await this.readIndexEntry(filePath, id, await this.fs.mtimeMs(filePath));
+        const entry = await this.readIndexEntry(filePath, id, await this.statFile(filePath));
         if (entry !== undefined && entry !== BACKGROUND_ONLY) {
           sessions.push(entry.session);
         }
@@ -363,7 +423,7 @@ export class ClaudeSessionStore {
       // 件数で打ち切ったなら索引は途中までなので、あとで走査し直す必要がある
       this.stale = scope?.limit !== undefined;
       this.indexedScopeKey = scopeKey(scope);
-      await this.index.persist();
+      this.index.requestPersist();
       this.onRefreshed?.();
     } finally {
       this.refreshing = false;
@@ -439,20 +499,20 @@ export class ClaudeSessionStore {
       .filter((entry): entry is { filePath: string; id: string } => entry.id !== undefined);
 
     const ordered = await mapWithLimit(named, MTIME_CONCURRENCY_LIMIT, async ({ filePath, id }) => {
-      const mtimeMs = await this.fs.mtimeMs(filePath);
-      return { filePath, id, mtimeMs };
+      const stat = await this.statFile(filePath);
+      return { filePath, id, ...stat };
     });
     ordered.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
 
     const entries: ClaudeSessionIndexEntry[] = [];
     let unresolved = 0;
     let filteredOut = 0;
-    for (const { filePath, id, mtimeMs } of ordered) {
+    for (const { filePath, id, mtimeMs, size, ino } of ordered) {
       const cached = this.index.get(filePath);
       const entry =
         cached !== undefined && cached.mtimeMs === mtimeMs
           ? cached
-          : await this.readIndexEntry(filePath, id, mtimeMs);
+          : await this.readIndexEntry(filePath, id, { mtimeMs, size, ino });
       if (entry === BACKGROUND_ONLY) {
         filteredOut += 1;
         continue;
@@ -501,7 +561,7 @@ export class ClaudeSessionStore {
   private async readIndexEntry(
     filePath: string,
     id: string,
-    mtimeMs: number | undefined,
+    stat: { mtimeMs: number | undefined; size: number | undefined; ino: number | undefined },
   ): Promise<ClaudeSessionIndexEntry | undefined | typeof BACKGROUND_ONLY> {
     const meta = await this.readHeadMeta(filePath);
     if (meta === undefined) {
@@ -512,12 +572,16 @@ export class ClaudeSessionStore {
     }
     return {
       filePath,
-      mtimeMs,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      ino: stat.ino,
       session: {
         id,
         provider: 'claude' as const,
         threadName: displayName(meta),
-        updatedAt: new Date((mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
+        updatedAt: new Date(
+          (stat.mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0,
+        ).toISOString(),
         cwd: meta.cwd,
         archived: false,
       },

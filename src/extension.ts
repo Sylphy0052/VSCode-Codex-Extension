@@ -17,6 +17,7 @@ import { ClaudeProvider } from './claude/provider';
 import { ClaudeSessionNameStore } from './claude/sessionNames';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSessionIndex } from './claude/sessionIndex';
+import { claudeSessionIndexFilePath } from './claude/sessionIndexFile';
 import { ClaudeSkillsProbe } from './claude/skillsProbe';
 import { ClaudeTranscriptWatcher } from './claude/transcriptWatcher';
 import { CodexAccountActions } from './codex/accountActions';
@@ -386,7 +387,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     nodeFileSystem,
     claudeDirs,
     claudeSessionNames,
-    new ClaudeSessionIndex(context.globalState),
+    // 索引の保存先はウィンドウ間で配信されない`globalStorageUri`配下のファイル
+    // （Issue #1460）。旧globalStateからの移行は`ClaudeSessionIndex`が起動をブロックせず行う
+    new ClaudeSessionIndex(
+      claudeSessionIndexFilePath(context.globalStorageUri.fsPath),
+      context.globalState,
+    ),
   );
 
   const codex = new CodexProvider(store);
@@ -1620,6 +1626,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
   });
   context.subscriptions.push(claudeWatcher);
+  // 索引の書き出しは間引かれているため、破棄時に即時flushしておく（Issue #1460）。
+  // あくまで最適化で、失敗・未実行でも次回起動時の照合で回復する
+  context.subscriptions.push({ dispose: () => void claudeStore.flushIndex() });
 
   // リロード後にチャット画面のタブを復元する
   context.subscriptions.push(
