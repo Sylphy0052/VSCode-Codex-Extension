@@ -135,7 +135,7 @@ describe('chatScript', () => {
     expect(source).toContain("type: 'fork', turnId: node.forkTarget");
   });
 
-  it('脇道の質問（sideQuestion）とセカンドオピニオン（Issue #894）の本文もMarkdown描画経路に載る（issue #332×#334、issue #340横断レビュー指摘）', () => {
+  it('脇道の質問（sideQuestion）とセカンドオピニオン（Issue #894）、ターン終了時の要約（endSummary、Issue #1473）の本文もMarkdown描画経路に載る（issue #332×#334、issue #340横断レビュー指摘）', () => {
     // chatScript.tsのuseMarkdown判定はvitestのnode環境では実行できない
     // （実VSCode webviewが無いため。design.md §14.60参照）ため、生成されたソースの
     // 判定条件に'sideQuestion'が含まれることを固定し、回帰（X1のMarkdown描画対象から
@@ -147,7 +147,8 @@ describe('chatScript', () => {
         "(item.kind === 'userMessage' ||",
         "        item.kind === 'agentMessage' ||",
         "        item.kind === 'sideQuestion' ||",
-        "        item.kind === 'secondOpinion')",
+        "        item.kind === 'secondOpinion' ||",
+        "        item.kind === 'endSummary')",
       ].join('\n'),
     );
   });
