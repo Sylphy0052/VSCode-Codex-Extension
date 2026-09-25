@@ -35,6 +35,7 @@ import type {
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import {
   buildOrchestratorTask,
+  findMissingVerifyWarnings,
   truncateByCodePoint,
   validateWorkflow,
   type WorkflowDefinition,
@@ -1145,6 +1146,9 @@ function addTask(
   if (validation.errors.length > 0) {
     return no(`タスクを追加できません: ${validation.errors.map((e) => e.message).join(' / ')}`);
   }
+  // 生成時と同じ「verify.commands の無いコード変更タスク」の警告（Issue #1468）。追加は
+  // 拒否せず、履歴と返答の両方へ載せてオーケストレーターが気づけるようにする
+  const verifyWarnings = findMissingVerifyWarnings([task]).map((w) => w.message);
   live.def = candidateDef;
   live.runState = addTaskState(live.runState, task.id);
   pushPlanChangeHistoryWarning(live, {
@@ -1155,12 +1159,16 @@ function addTask(
       'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。\n' +
       `prompt: ${task.prompt}\n` +
       `done: ${task.done}\n` +
-      `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}`,
+      `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}` +
+      verifyWarnings.map((message) => `\n警告: ${message}`).join(''),
   });
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
-  return ok(`タスク ${task.id} を追加しました。`);
+  return ok(
+    `タスク ${task.id} を追加しました。` +
+      verifyWarnings.map((message) => `警告: ${message}`).join(' '),
+  );
 }
 
 /**
@@ -1579,8 +1587,20 @@ function buildTaskEvent(
   const withSummary = (head: string): string =>
     summary === '' ? head : `${head}\n直近の応答: ${summary}`;
   switch (state) {
-    case 'done':
-      return { kind: 'taskDone', body: withSummary(`タスク ${taskId} が完了しました。`) };
+    case 'done': {
+      // 完了根拠の区分（Issue #1468）。verify.commands の無いタスクは自己申告だけで
+      // 完了が確定しているため、検算済みのタスクと同じ文面で報告しない
+      const commandCount =
+        live.def.tasks.find((task) => task.id === taskId)?.verify?.commands.length ?? 0;
+      const evidence =
+        commandCount === 0
+          ? '完了根拠: 未検算（verify.commands が指定されておらず、完了は自己申告のみ）。'
+          : `完了根拠: 拡張機能が verify.commands（${commandCount}件）を実行して確認済み。`;
+      return {
+        kind: 'taskDone',
+        body: withSummary(`タスク ${taskId} が完了しました。${evidence}`),
+      };
+    }
     case 'failed': {
       // 停滞（design.md §16.27、Issue #336）は`failed`と同じ状態だが、通知は
       // `taskFailed`とは別の`taskStalled`にする（Issue #336の受入基準

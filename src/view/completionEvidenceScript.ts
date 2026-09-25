@@ -15,8 +15,10 @@ export const COMPLETION_EVIDENCE_SOURCE = `var EVIDENCE_LABEL = {
     verified: '確認済み',
     failed: '失敗',
     selfReportedOnly: '自己申告のみ',
+    notRequested: '未検算（verify未指定）',
     unverified: '未確認',
   };
+  var EVIDENCE_STAGE_LABEL = { revert: '変更を戻した状態', baseline: '分岐元' };
   var EVIDENCE_ACQUISITION_LABEL = {
     observed: '拡張機能が実行',
     'agent-reported': 'AIの報告',
@@ -92,6 +94,7 @@ export const COMPLETION_EVIDENCE_SOURCE = `var EVIDENCE_LABEL = {
         (EVIDENCE_TIME_KIND_LABEL[entry.timeKind] || '') + ' ' + evidenceTime(entry.time),
         'ソース ' + (EVIDENCE_SOURCE_MATCH_LABEL[entry.sourceMatch] || entry.sourceMatch),
       ];
+      if (EVIDENCE_STAGE_LABEL[entry.stage]) meta.unshift(EVIDENCE_STAGE_LABEL[entry.stage]);
       item.appendChild(evidenceText('div', 'evidence-meta', meta.join(' ・ ')));
       if (entry.outputTail) {
         item.appendChild(evidenceText('div', 'evidence-output', entry.outputTail));
@@ -116,6 +119,10 @@ export function completionEvidenceStyles(): string {
   }
   .completion-evidence.evidence-verified .evidence-badge {
     border-color: var(--vscode-testing-iconPassed);
+  }
+  .completion-evidence.evidence-notRequested .evidence-badge {
+    border-color: var(--vscode-editorWarning-foreground);
+    color: var(--vscode-editorWarning-foreground);
   }
   .completion-evidence.evidence-failed .evidence-badge {
     border-color: var(--vscode-errorForeground);

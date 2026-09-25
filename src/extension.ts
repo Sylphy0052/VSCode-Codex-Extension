@@ -126,6 +126,7 @@ import {
   type PlanWorkflowResult,
 } from './orchestrator/planner';
 import {
+  findMissingVerifyWarnings,
   MAX_PROMPT_LENGTH,
   MAX_TASK_COUNT,
   withWorkflowReviewStatus,
@@ -3576,6 +3577,20 @@ async function handlePlanSuccess(
       log,
       `dependsOnに挙げていないタスクを参照していたテンプレート変数を${result.droppedTemplateRefs.length}件` +
         '落としました（そのままでは検証を通らないため）。参照が消えて文意が通らないタスクがないか確認してください（詳しくはログ）',
+    );
+  }
+
+  const verifyWarnings = findMissingVerifyWarnings(pendingReview.definition.tasks);
+  if (verifyWarnings.length > 0) {
+    log.warn(
+      `[planner] verify.commands の無いコード変更タスクがあります: ${verifyWarnings
+        .map((w) => w.message)
+        .join(' / ')}`,
+    );
+    void warnWithLogLink(
+      log,
+      `verify.commands の無いコード変更タスクが${verifyWarnings.length}件あります。` +
+        'これらの完了は自己申告だけで確定します（詳しくはログ）',
     );
   }
 

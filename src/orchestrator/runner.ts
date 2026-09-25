@@ -973,6 +973,8 @@ export interface TaskSnapshot {
   verification?: {
     status: 'notConfigured' | 'pending' | 'checking' | 'passed' | 'failed';
     attempts: number;
+    /** `verify.commands` の件数（Issue #1468。0なら完了根拠を「未検算」と表示する） */
+    commandCount: number;
   };
   /**
    * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は役割なし。
