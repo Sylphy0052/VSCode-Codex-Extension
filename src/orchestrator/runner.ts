@@ -104,6 +104,13 @@ import { scheduleTaskApprovalTimeout } from './runnerApproval';
 import { cleanupWorktreeIfNeeded, retryMerge, startMerge } from './runnerMerge';
 import { restoreRunsForView } from './runnerRestore';
 import {
+  checkTaskOverlap,
+  releaseOverlapWaits,
+  startOverlapPoll,
+  stopOverlapPoll,
+} from './runnerOverlap';
+import type { OverlapWait } from './taskOverlap';
+import {
   buildRunTaskSnapshots,
   checkMessagingVisibility,
   checkWaitingReplyStalls,
@@ -614,6 +621,17 @@ export interface WorkflowRunnerDeps {
    */
   readReviewCommentPollIntervalSec?: () => number;
   /**
+   * `agent.workflows.overlapCheckIntervalSec`の現在値（秒）。省略時は
+   * `DEFAULT_OVERLAP_CHECK_INTERVAL_SEC`（既定30秒）。走行中のタスクの変更ファイルを
+   * ターンの確定を待たずに測る間隔（Issue #1469）。0ならターンの確定時だけ測る
+   */
+  readOverlapCheckIntervalSec?: () => number;
+  /**
+   * `agent.workflows.overlapIgnore`の現在値。変更ファイルの交差の判定から外すパス
+   * （リポジトリ相対。`/`で終わる要素はその配下すべて。Issue #1469）。省略時は空
+   */
+  readOverlapIgnore?: () => readonly string[];
+  /**
    * `verify.commands` の実行（Issue #1378）。**省略可能**で、省略された場合は実行せず、
    * 従来どおり意味レビューへ文章として渡すだけにする（`forge`と同じ設計判断）。
    * 実行するのはWorkspace Trustが有効で、利用者がrunごとの確認で許可したときだけ
@@ -953,7 +971,12 @@ export interface WorkflowWarning {
      */
     | 'taskPullRequestReview'
     /** DONE後の独立検証が失敗し、同じworktreeへ修正を返した。 */
-    | 'taskVerification';
+    | 'taskVerification'
+    /**
+     * 変更ファイルの交差で待たせたタスク（Issue #1469）を再開する際、相手のマージ後の
+     * 統合ブランチを取り込めなかった。取り込まずに再開し、衝突は最終マージ時の衝突解決へ回す。
+     */
+    | 'overlapSyncFailed';
   /** ワークフロー全体に関わる警告（gitignoreなど）は undefined。 */
   taskId: string | undefined;
   message: string;
@@ -1019,6 +1042,8 @@ export interface TaskSnapshot {
   lastResponseSummary: string;
   failure: TaskFailureReason | undefined;
   pendingApproval: TaskPendingApprovalSnapshot | undefined;
+  /** `waitingOverlap`の間だけ埋まる。待っている相手と交差したファイル（Issue #1469） */
+  overlapWait?: OverlapWait;
   /**
    * このウィンドウでセッションが生きているか。`reveal` / `中断` / `タスク停止` /
    * `承認` はこれが `true` のときだけ意味を持つ（design.md §16.11「リロード後の実行再開」。
@@ -1491,6 +1516,17 @@ export interface LiveTask {
    */
   taskApprovalTimedOut: boolean;
   /**
+   * 走り始めた順（runnerごとの通し番号）。変更ファイルの交差（Issue #1469）で、どちらを
+   * 待たせるかを決める。再試行で作り直したタスクは新しい番号になる（後から走り始めた扱い）
+   */
+  startSeq: number;
+  /** 直近に実測した変更ファイル（リポジトリ相対）。まだ測っていなければ`undefined` */
+  touchedFiles: ReadonlySet<string> | undefined;
+  /** `waitingOverlap`の間だけ埋まる。待っている相手と交差したファイル */
+  overlapWait: OverlapWait | undefined;
+  /** 交差の待機を解き、統合ブランチを取り込んでいる最中 */
+  overlapResuming: boolean;
+  /**
    * このタスクのPR/MRの結果（design.md §16.11・§16.18、Issue #118）。`attemptMerge`
    * （`mergeTaskWithForge`が返す`flow.pullRequest.created && url !== undefined`の分岐）で
    * 書き込む。作られていなければ`undefined`。
@@ -1800,6 +1836,13 @@ export interface LiveRun {
       }
     | undefined;
   /**
+   * 変更ファイルの交差の周期実測（Issue #1469、`runnerOverlap.ts`）。`pump`が初回に立て、
+   * runの終了後の最初の周期と`dispose()`で閉じる。`.unref()`済み
+   */
+  overlapPollTimer: ReturnType<typeof setInterval> | undefined;
+  /** 交差の実測が走っている間`true`（重ねて測らない） */
+  overlapMeasuring: boolean;
+  /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
@@ -2064,6 +2107,8 @@ export class WorkflowRunner {
    * `abandoned`（`runnerMerge.ts`、Issue #412のレビュー指摘D）と同じ考え方。
    */
   private disposing = false;
+  /** `LiveTask.startSeq`の払い出し（Issue #1469） */
+  private nextTaskStartSeq = 0;
 
   /**
    * 実行中の `verify.commands` の中断口（Issue #1378）。`dispose()` が全て中断し、
@@ -2626,6 +2671,8 @@ export class WorkflowRunner {
       messagingSetupInFlight: undefined,
       messagingStartupWarnCount: 0,
       reviewCommentPoll: undefined,
+      overlapPollTimer: undefined,
+      overlapMeasuring: false,
       mergeResolutions: new Map(),
       createdTaskIssues: new Map(),
       orchestrator: undefined,
@@ -2707,7 +2754,12 @@ export class WorkflowRunner {
     // 対象を先に確定させてから止める
     const targets = [...live.tasks.entries()].filter(([taskId]) => {
       const state = live.runState.tasks.get(taskId)?.state;
-      return state === 'running' || state === 'waitingApproval' || state === 'waitingReply';
+      return (
+        state === 'running' ||
+        state === 'waitingApproval' ||
+        state === 'waitingReply' ||
+        state === 'waitingOverlap'
+      );
     });
     for (const [, liveTask] of targets) {
       liveTask.session.stopLoop();
@@ -3149,6 +3201,7 @@ export class WorkflowRunner {
       }
       disposeQuietly(this.deps.log, () => closeMessaging(live, this.deps.log), 'messaging');
       disposeQuietly(this.deps.log, () => closeReviewCommentPoll(live), 'reviewCommentPoll');
+      stopOverlapPoll(live);
       // `closeMessaging`自体は`messagingHub`をクリアしない（`closeMessaging`は`dispose()`
       // だけでなく、run正常終了時の`pump()`からも呼ばれる共通関数のため。そちらでは
       // `retryTask`による再開が`messagingHub`を再利用する前提＝Issue #475の案A「hubを
@@ -3548,6 +3601,9 @@ export class WorkflowRunner {
         excludeFromActiveCount.add(taskId);
       }
     }
+    // 交差で待たせたタスクの再開（Issue #1469）を新しいタスクの開始より先に枠へ入れる
+    releaseOverlapWaits(this.internals, runId, live, excludeFromActiveCount);
+    startOverlapPoll(this.internals, runId, live);
     const toStart = nextTasksToStart(live.def, live.runState, excludeFromActiveCount);
     for (const taskId of toStart) {
       // 開始の意思決定と同時にrunningへ倒す。非同期のstartTaskが終わるまで待つと、
@@ -3837,6 +3893,7 @@ export class WorkflowRunner {
     // `closeMessaging`自体は`live.messaging === undefined`なら即returnする既に冪等な
     // 実装なので、`finishedNotified`では絞らない（絞ると意味が重複するだけ）
     closeMessaging(live, this.deps.log);
+    stopOverlapPoll(live);
     // レビューコメントのポーリング（design.md §16.30）は、最終マージまで進める設定で
     // 最終判断が確定したときだけ閉じる。`pr-only`はPR/MRを残してレビューを続けるため、
     // MCP接続の終了と一緒に止めてはならない。
@@ -4143,6 +4200,10 @@ export class WorkflowRunner {
       waitingApprovalSinceMs: undefined,
       taskApprovalTimeoutTimer: undefined,
       taskApprovalTimedOut: false,
+      startSeq: this.nextTaskStartSeq++,
+      touchedFiles: undefined,
+      overlapWait: undefined,
+      overlapResuming: false,
       pullRequest: undefined,
     };
   }
@@ -5589,6 +5650,14 @@ export class WorkflowRunner {
       void this.emitPromptMetrics(runId, taskId, live, liveTask, state, pendingMetrics);
     }
     this.maybeActOnContextLow(runId, taskId, live, liveTask, state, turnCompleted);
+    // 変更ファイルの交差の実測（Issue #1469）。ターンが確定するたびに測り直す。
+    // 待機中のタスクはこのターンの確定で手が止まるため、再開できるかを`pump`で見直す
+    if (turnCompleted) {
+      if (live.runState.tasks.get(taskId)?.state === 'waitingOverlap') {
+        this.pump(runId);
+      }
+      void checkTaskOverlap(this.internals, runId);
+    }
     // 状態変化のたびにViewへ知らせる。永続化（persist）は送信回数の節目だけに絞ったままだが、
     // 表示専用の通知はストリーミング中の要約更新でも毎回出す
     this.notify(runId);

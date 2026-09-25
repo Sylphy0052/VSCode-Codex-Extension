@@ -458,6 +458,8 @@ async function rebuildLiveRun(
     // 新たに始める実行にだけ立てる（復元では作らない。`finalizeForge`が統合PR/MR作成後に
     // 改めて開始する）
     reviewCommentPoll: undefined,
+    overlapPollTimer: undefined,
+    overlapMeasuring: false,
     mergeResolutions: new Map(),
     createdTaskIssues: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。

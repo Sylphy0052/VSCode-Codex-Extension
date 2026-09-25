@@ -290,6 +290,8 @@ ${completionEvidenceStyles()}
   }
   /* waitingReply / merging / blocked（design.md §16.8「依存グラフ」の表・Issue #104） */
   .wf-node.state-waitingReply .wf-node-rect { stroke: var(--vscode-charts-yellow); stroke-width: 2.5; stroke-dasharray: 2 2; }
+  /* waitingOverlap（変更ファイルの交差で相手のマージ待ち。Issue #1469） */
+  .wf-node.state-waitingOverlap .wf-node-rect { stroke: var(--vscode-charts-orange); stroke-width: 2.5; stroke-dasharray: 6 3; }
   .wf-node.state-merging .wf-node-rect {
     stroke: var(--vscode-charts-green);
     fill: color-mix(in srgb, var(--vscode-charts-green) 16%, var(--vscode-editorWidget-background));
@@ -365,6 +367,7 @@ ${completionEvidenceStyles()}
   .state-pill.state-running { --wf-state-color: var(--vscode-charts-blue); }
   .state-pill.state-waitingApproval,
   .state-pill.state-waitingReply,
+  .state-pill.state-waitingOverlap,
   .state-pill.state-blocked { --wf-state-color: var(--vscode-charts-yellow); }
   .state-pill.state-done,
   .state-pill.state-merging { --wf-state-color: var(--vscode-charts-green); }
