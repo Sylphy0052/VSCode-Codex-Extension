@@ -141,6 +141,8 @@ export function chatScript(
     // セカンドオピニオン（Issue #894）。脇道の質問と違い、この会話の内容は渡さずに
     // 独立したセッションへ依頼した結果なので、種類を分けて見分けられるようにする
     secondOpinion: 'セカンドオピニオン',
+    // 要約エージェント（issue #1473）。別のAIがターンの終わりに作った要約
+    endSummary: '要約エージェント',
     // Claude CodeのReadツール。describeTool（claude/transcript.ts）が作る種類で、
     // Codex側には対応する項目種別が無い
     fileRead: 'ファイル読み取り',
@@ -985,7 +987,8 @@ export function chatScript(
       (item.kind === 'userMessage' ||
         item.kind === 'agentMessage' ||
         item.kind === 'sideQuestion' ||
-        item.kind === 'secondOpinion');
+        item.kind === 'secondOpinion' ||
+        item.kind === 'endSummary');
     const bodyMode = useMarkdown ? 'markdown' : 'text';
     if (node.bodyMode !== bodyMode || node.bodyKey !== primary) {
       node.bodyMode = bodyMode;
@@ -3599,6 +3602,19 @@ export function chatScript(
     button.querySelector('.composerOverflowLabel').textContent = 'メリデメ説明を' + action;
   }
 
+  el('endSummaryToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleEndSummary' }),
+  );
+
+  // 要約エージェント（issue #1473）。ターン要約と同じ形のトグル
+  function applyEndSummaryEnabled(enabled) {
+    const button = el('endSummaryToggle');
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', '要約エージェントを' + action);
+    button.querySelector('.composerOverflowLabel').textContent = '要約エージェントを' + action;
+  }
+
   el('loopEngineeringToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'toggleLoopEngineering' }),
   );
@@ -4125,6 +4141,9 @@ export function chatScript(
     }
     if (data.type === 'prosCons' && typeof data.enabled === 'boolean') {
       applyProsConsEnabled(data.enabled);
+    }
+    if (data.type === 'endSummary' && typeof data.enabled === 'boolean') {
+      applyEndSummaryEnabled(data.enabled);
     }
     if (data.type === 'loopEngineering' && typeof data.enabled === 'boolean') {
       applyLoopEngineeringEnabled(data.enabled);

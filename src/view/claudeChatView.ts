@@ -52,9 +52,11 @@ import {
   readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  readChatEndSummaryConfig,
   readChatProsConsConfig,
   readSkillSelectConfig,
   setChatTurnSummaryEnabled,
+  setChatEndSummaryEnabled,
   setChatProsConsEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
@@ -80,6 +82,7 @@ import {
   setLoopAdvisorEnabled,
   readLoopDoneCheckConfig,
   readClaudeConfig,
+  readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
@@ -2886,6 +2889,7 @@ export class ClaudeChatViewManager
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       prosConsEnabled: readChatProsConsConfig().enabled,
+      endSummaryEnabled: readChatEndSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
@@ -3011,6 +3015,15 @@ export class ClaudeChatViewManager
       this.recordLoopCommands(entry, state);
       this.notifyTurnComplete(entry, state);
       this.maybeAutoName(entry, state);
+      // 会話しているのと別のCLIを指定されることがあるため、実行ファイルは要約先に合わせて読む
+      this.maybeEndSummary(
+        entry,
+        state,
+        'claude',
+        (provider) => (provider === 'claude' ? this.claudePath() : readConfig().executablePath),
+        this.log,
+        (id, display) => entry.session.noteEndSummary(id, display),
+      );
     }
     const next = deriveTitle(state, entry.pinnedName);
     if (next !== undefined && entry.title !== next) {
@@ -4006,6 +4019,16 @@ export class ClaudeChatViewManager
         const enabled = !readChatProsConsConfig().enabled;
         void setChatProsConsEnabled(enabled)
           .then(() => entry.panel?.webview.postMessage({ type: 'prosCons', enabled }))
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleEndSummary') {
+        const enabled = !readChatEndSummaryConfig().enabled;
+        if (!enabled) {
+          entry.endSummary?.cancel('要約エージェントを無効にしたため');
+        }
+        void setChatEndSummaryEnabled(enabled)
+          .then(() => entry.panel?.webview.postMessage({ type: 'endSummary', enabled }))
           .catch((e: unknown) => this.reportError(e));
         return;
       }

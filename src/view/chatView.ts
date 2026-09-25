@@ -49,9 +49,11 @@ import {
   readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  readChatEndSummaryConfig,
   readChatProsConsConfig,
   readSkillSelectConfig,
   setChatTurnSummaryEnabled,
+  setChatEndSummaryEnabled,
   setChatProsConsEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
@@ -76,6 +78,7 @@ import {
   readLoopAdvisorConfig,
   setLoopAdvisorEnabled,
   readLoopDoneCheckConfig,
+  readClaudeConfig,
   readConfig,
   readWorkflowsConfig,
   workspaceFolderPaths,
@@ -1979,6 +1982,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       composerButtons: composerButtonsConfig.buttons,
       turnSummaryEnabled: readChatTurnSummaryConfig().enabled,
       prosConsEnabled: readChatProsConsConfig().enabled,
+      endSummaryEnabled: readChatEndSummaryConfig().enabled,
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
@@ -2146,6 +2150,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.recordLoopCommands(entry, state);
       this.notifyTurnComplete(entry, state);
       this.maybeAutoName(entry, state);
+      // 会話しているのと別のCLIを指定されることがあるため、実行ファイルは要約先に合わせて読む
+      this.maybeEndSummary(
+        entry,
+        state,
+        'codex',
+        (provider) =>
+          provider === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath,
+        this.log,
+        (id, display) => entry.session.noteEndSummary(id, display),
+      );
     }
     const title = deriveTitle(state, entry.pinnedName);
     if (title !== undefined && entry.title !== title) {
@@ -2924,6 +2938,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const enabled = !readChatProsConsConfig().enabled;
         await setChatProsConsEnabled(enabled);
         void entry.panel?.webview.postMessage({ type: 'prosCons', enabled });
+        return;
+      }
+      if (type === 'toggleEndSummary') {
+        const enabled = !readChatEndSummaryConfig().enabled;
+        await setChatEndSummaryEnabled(enabled);
+        void entry.panel?.webview.postMessage({ type: 'endSummary', enabled });
+        if (!enabled) {
+          entry.endSummary?.cancel('要約エージェントを無効にしたため');
+        }
         return;
       }
       if (type === 'stateFull') {

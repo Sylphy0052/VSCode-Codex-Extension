@@ -12,6 +12,7 @@ import {
   addApproval,
   addPrompt,
   appendNotice,
+  appendEndSummary,
   appendSecondOpinion,
   applyEvent,
   deriveCodexBackgroundTerminals,
@@ -273,6 +274,11 @@ export class ChatSession {
    */
   noteSecondOpinion(id: string, display: { status: string; text: string; detail: string }): void {
     this.update(appendSecondOpinion(this.state, id, display));
+  }
+
+  /** 要約エージェント（issue #1473）の注記を足す/更新する。CLIへは送らない。 */
+  noteEndSummary(id: string, display: { status: string; text: string; detail: string }): void {
+    this.update(appendEndSummary(this.state, id, display));
   }
 
   /** CLIへ送らない拡張機能側の通知を会話へ残す。 */

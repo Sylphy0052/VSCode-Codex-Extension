@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
-import { readNotificationsConfig } from '../config';
+import { readChatEndSummaryConfig, readNotificationsConfig } from '../config';
+import type { HeadlessProvider } from '../loop/headlessCli';
+import type { Logger } from '../log';
 import type { LoopController } from '../loop/loopController';
 import type { ApprovalOutcome } from '../orchestrator/taskSession';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
@@ -21,6 +23,11 @@ import {
 } from './handoff';
 import { PendingHandoffChoice } from './handoffPending';
 import type { SkillSelectGate } from './skillSelectGate';
+import {
+  buildEndSummaryMaterial,
+  EndSummaryRunner,
+  type EndSummaryDisplay,
+} from './endSummary';
 import { playNotificationSound } from './notificationSound';
 import type {
   SessionApprovalDetail,
@@ -113,6 +120,8 @@ export interface BaseChatPanel {
   taskManaged: boolean;
   /** skill選択（issue #1451）で人の発言を順に送る関門。初めて使うときに作る。 */
   skillSelectGate?: SkillSelectGate;
+  /** 要約エージェント（issue #1473）の実行役。初めて要約するときに作る。 */
+  endSummary?: EndSummaryRunner;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
   /**
@@ -1327,6 +1336,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     entry.pendingHandoff?.cancelForTeardown();
     // skill選択（issue #1451）の判定中に閉じたら、判定のプロセスも止める
     entry.skillSelectGate?.abortAll();
+    // 要約エージェント（issue #1473）の実行中に閉じたら、要約のプロセスも止める
+    entry.endSummary?.dispose();
     entry.session.dispose();
     entry.panel?.dispose();
     entry.panel = undefined;
@@ -1340,6 +1351,45 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       }
     }
     this.panelsChanged.fire();
+  }
+
+  /**
+   * 要約エージェント（issue #1473）の発火判定。ターン完了時に呼ぶ。
+   *
+   * 無効のときは何も起動しない。ループ・ワークフロー（タスク管理下のセッション）・
+   * 自動返信の実行中は、人が1ターンずつ読む場面ではないため要約しない。擬似コマンドと
+   * 入力モードはCLIへ送らずターンが進まないため、ここへは来ない。
+   */
+  protected maybeEndSummary(
+    entry: TPanel,
+    state: ChatState,
+    host: HeadlessProvider,
+    executableFor: (provider: HeadlessProvider) => string,
+    log: Logger,
+    note: (id: string, display: EndSummaryDisplay) => void,
+  ): void {
+    const settings = readChatEndSummaryConfig();
+    if (!settings.enabled || entry.taskManaged || entry.loop.running || state.autoReply) {
+      return;
+    }
+    const material = buildEndSummaryMaterial(
+      state.items,
+      state.turnResultText,
+      state.turnEditedFiles,
+    );
+    if (material === undefined) {
+      return;
+    }
+    entry.endSummary ??= new EndSummaryRunner();
+    entry.endSummary.start({
+      settings,
+      host,
+      executableFor,
+      material,
+      note,
+      logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
+    });
   }
 
   /**
