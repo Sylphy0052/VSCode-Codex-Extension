@@ -415,6 +415,57 @@ export function markIssueStopped(run: RoadmapRun, issueNumber: number, now: Date
   });
 }
 
+/**
+ * 一時停止か停止の要求を出した。ターンの中断と子プロセスの停止を確かめるまでは
+ * 「停止処理中」とし、中断の要求を送っただけで一時停止・停止とは表示しない。
+ * セッションが動いていないノード（未着手、merge待ち以降、止まっているノード）では何もしない。
+ */
+export function markIssueStopping(run: RoadmapRun, issueNumber: number, now: Date): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (
+    issue === undefined ||
+    issue.progress !== 'running' ||
+    issue.currentAttemptId === undefined ||
+    issue.attention === 'stopping'
+  ) {
+    return run;
+  }
+  return withIssue(run, { ...issue, attention: 'stopping', updatedAt: now.toISOString() });
+}
+
+/**
+ * ターンの中断と子プロセスの停止を確かめた。実行回を閉じて一時停止にする。
+ * 以後、中断したセッションからの報告は`noActiveAttempt`で拒否される。再開は
+ * `resume`の実行回で行い、閉じた実行回の`sessionRef`から同じセッションを優先して使う。
+ */
+export function markIssuePaused(run: RoadmapRun, issueNumber: number, now: Date): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (issue === undefined || issue.progress !== 'running' || issue.currentAttemptId === undefined) {
+    return run;
+  }
+  const at = now.toISOString();
+  return withIssue(run, {
+    ...endCurrentAttempt(issue, at),
+    progress: 'halted',
+    attention: 'paused',
+    updatedAt: at,
+  });
+}
+
+/** run全体を止める・止めを解く。止めている間、スケジューラは新しいノードを始めない。 */
+export function setRunHaltedByUser(run: RoadmapRun, halted: boolean): RoadmapRun {
+  return run.haltedByUser === halted ? run : { ...run, haltedByUser: halted };
+}
+
+/** すべてのノードが終わっていれば、runの終了時刻を記録する。 */
+export function finishRunIfDone(run: RoadmapRun, now: Date): RoadmapRun {
+  if (run.finishedAt !== undefined) {
+    return run;
+  }
+  const allDone = Object.values(run.issues).every((issue) => issue.progress === 'done');
+  return allDone ? { ...run, finishedAt: now.toISOString() } : run;
+}
+
 /** モードと並列上限を変える。実行中のセッションには影響しない（止めるかどうかはスケジューラが決める）。 */
 export function setRunMode(run: RoadmapRun, mode: RoadmapRunMode, maxParallel: number): RoadmapRun {
   if (!isValidMaxParallel(maxParallel)) {
