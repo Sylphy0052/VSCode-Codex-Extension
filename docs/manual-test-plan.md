@@ -23,8 +23,8 @@
 完了済み（PR [#510](https://github.com/Sylphy0052/VSCode-Codex-Extension/pull/510)）。
 U-26〜U-33 がこの回で増えている。
 
-進捗は [roadmap/review-and-feature-consolidation.md](roadmap/review-and-feature-consolidation.md) の
-状態表を見る。
+当時の進捗は [archive/roadmap/review-and-feature-consolidation.md](archive/roadmap/review-and-feature-consolidation.md) の
+状態表に残っている（凍結記録）。現在の計画はGitHubの`roadmap`ラベルのIssueで管理する。
 
 ## 対象と件数
 

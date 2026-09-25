@@ -39,7 +39,7 @@ afterAll(() => {
  * 触れない」ことは `process.on('exit', ...)` に張ったフックの中身であり、フックは
  * プロセスが実際に終了するときにしか走らないため、このテストの実行中には観測できない
  * （振る舞いのテストで書けない不変条件はソースの並び順で守ってよい、
- * docs/roadmap/ops-rules.md）。目視でも `createFixturesRoot` の実装内で
+ * docs/archive/roadmap/ops-rules.md）。目視でも `createFixturesRoot` の実装内で
  * `rmSync` の対象が関数自身の返り値（`root`）のみであることを確認済み。
  */
 describe('createFixturesRoot', () => {

@@ -41,9 +41,10 @@ npm run check     # lint + format:check + typecheck + test
 マージされることはない。
 
 対象外にしているものは `.prettierignore` にある。ビルド成果物（`dist/` `out/` `coverage/`
-`.vscode-test/`）と `node_modules/` `.claude/` のほか、**`docs/roadmap/` を対象外にしている**。
-ロードマップは複数の作業が並行して書き換えるため、整形差分が進行中の更新と衝突するのを
-避けている（Issue #551。WF-Gの完了後に扱いを決め直す）。
+`.vscode-test/`）と `node_modules/` `.claude/` のほか、**`docs/archive/` を対象外にしている**。
+`docs/archive/` は旧ロードマップ（`docs/roadmap/`）を移した凍結記録で、書き換えないため
+整形もしない（Issue #1458。移す前は並行更新との衝突を避けるために `docs/roadmap/` を
+対象外にしていた。Issue #551）。
 
 以前は状況が逆で、mainが121ファイル分 prettier 非準拠のまま、`npm run lint`（eslint）が
 prettier を見ていないためCIもlintも緑で通っていた。`npm run format` を走らせると触っていない
@@ -160,6 +161,16 @@ CLI固有の事情（ファイル配置・引数・セッションIDの決まり
 4. `npm run check` を全緑にする
 5. Conventional Commits の短い形式でcommitする（`feat:` `fix:` `refactor:` `docs:` `test:` `chore:` `perf:` `ci:`）
 6. CLIの挙動や仕様判断が変わったら設計書も同じcommitで更新する
+
+### 過去の失敗から残している決まり
+
+旧 `docs/roadmap/ops-rules.md`・`numbering.md`（現在は `docs/archive/roadmap/` の凍結記録）から、今の運用にも当てはまるものだけを移した。
+
+- `docs/design.md` の節番号と `docs/manual-test.md` のケース記号は、末尾に追記するだけにする。既存の番号を差し替えたり繰り上げたりしない。Issue本文などが番号を文字列で参照しているため、動かすと参照が気付かれないまま別の節を指すようになる
+- 文書を分割・移動するときは、その文書が参照している文書と、その文書を参照している文書の両方を洗い出す。「◯◯にある」という記述はリンクが切れずに内容だけ古くなるので、移動元を名指ししている文も探して直す
+- 検査が緑だった、grepが0件だった、と報告する前に、対象がその検査や検索の範囲に入っているかを確かめる。できれば実装を一度わざと壊して検査が落ちること、既知の例をパターンが拾えることを確かめる
+- 既存の宣言とそのJSDocの間に新しい定義を挿入すると、JSDocが別の宣言に付け替わる。挿入した後は、宣言とJSDocの対応が崩れていないかを確かめる
+- 受入条件に数値のしきい値を置くときは、それがCI（`scripts/check.sh` など）で強制されている値か、一度測っただけの値かを区別して書く
 
 ## パッケージング
 

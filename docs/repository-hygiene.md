@@ -102,8 +102,8 @@ $ git branch -r
   origin/wf/wf-d/integration
 ```
 
-`origin/feat/327/workflow-branch-naming-conventions` は**着手時点で既に存在しない**。`docs/roadmap/review-and-feature-consolidation.md`
-の「着手前の整理」（[該当箇所](roadmap/review-and-feature-consolidation.md)）に、2026-08-22付けで
+`origin/feat/327/workflow-branch-naming-conventions` は**着手時点で既に存在しない**。`docs/archive/roadmap/review-and-feature-consolidation.md`
+の「着手前の整理」（[該当箇所](archive/roadmap/review-and-feature-consolidation.md)）に、2026-08-22付けで
 「リモートの `feat/327/workflow-branch-naming-conventions`（PR #330でマージ済み）を削除した」旨の記載があり、実測結果と一致する。
 
 上記スナップショット時点のリモートブランチ一覧に含まれる `docs/346/...` `docs/348/...` `wf/wf-a/integration` 〜 `wf/wf-d/integration`
