@@ -37,6 +37,7 @@ import {
   type DisabledMcpServersOverlayResult,
 } from '../codex/mcpDisable';
 import { SKILLS_DISABLED_CONFIG_OVERLAY } from '../codex/skillDisable';
+import { parseSkillsList } from '../codex/skillsStatus';
 import { effortsFor } from '../codex/modelCatalog';
 import { readSkillsList } from '../codex/skillsList';
 import { readRateLimits, type UsageSnapshot } from '../codex/usage';
@@ -48,6 +49,7 @@ import {
   readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  readSkillSelectConfig,
   setChatTurnSummaryEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
@@ -100,6 +102,13 @@ import {
 } from '../chat/autoReply';
 import { checkAutoReplyCompletion, checkAutoReplyDanger } from '../chat/autoReplyReflex';
 import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
+import {
+  describeSkillSelect,
+  selectSkill,
+  shouldSelectSkill,
+  toSkillCandidates,
+} from '../reflex/skillSelect';
+import { SkillSelectGate } from './skillSelectGate';
 import type { Logger } from '../log';
 import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
@@ -172,7 +181,7 @@ import {
 } from '../secondOpinion/summaryRollout';
 import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
 import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
-import { AttachmentBox } from '../provider/attachments';
+import { AttachmentBox, type CodexSkillInput } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
 import { FileMentionCatalog } from '../provider/fileMentions';
 import {
@@ -796,12 +805,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 応答でしか判らないため、先にURLだけ発行し、idが確定してから宛先を束縛する。
     // 束縛するまでこのURLは404のままで、誰も名乗れない
     const messaging = this.sessionMessaging?.register('codex');
+    // skill選択（issue #1451）を有効にしているなら、skillの一覧をモデルへ渡さない。
+    // 選んだskillは発言のたびに`turn/start`の`input`で渡す
+    const hideSkills = readSkillSelectConfig().enabled;
+    const threadConfig =
+      messaging === undefined && !hideSkills
+        ? undefined
+        : {
+            ...(messaging === undefined ? {} : this.sessionMessagingThreadConfig(messaging.url)),
+            ...(hideSkills ? SKILLS_DISABLED_CONFIG_OVERLAY : {}),
+          };
     try {
-      const threadId = await entry.session.start(
-        targetCwd,
-        this.configFor(entry),
-        messaging === undefined ? undefined : this.sessionMessagingThreadConfig(messaging.url),
-      );
+      const threadId = await entry.session.start(targetCwd, this.configFor(entry), threadConfig);
       messaging?.bind(threadId);
       if (messaging !== undefined) {
         this.sessionMessagingRegistrations.set(entry, messaging);
@@ -2307,7 +2322,33 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
         const attachments = entry.attachments.take();
         try {
-          await entry.session.sendOrQueue(sent, this.configFor(entry), attachments);
+          const skillSelect = readSkillSelectConfig();
+          if (skillSelect.enabled) {
+            // 判定中に来た発言が追い越さないよう、有効な間は`/`始まりも含めて関門を通す
+            const gate = (entry.skillSelectGate ??= new SkillSelectGate());
+            const delivered = await gate.run(async (signal) => {
+              const skill =
+                shouldSelectSkill(text) && !signal.aborted
+                  ? await this.chooseCodexSkill(entry, text, skillSelect.threshold, signal)
+                  : undefined;
+              if (signal.aborted) {
+                entry.attachments.restore(attachments);
+                void entry.panel?.webview.postMessage({
+                  type: 'restoreQueuedText',
+                  text: gate.collectAborted(text),
+                });
+                return false;
+              }
+              await entry.session.sendOrQueue(sent, this.configFor(entry), attachments, skill);
+              return true;
+            });
+            if (!delivered) {
+              this.postState(entry);
+              return;
+            }
+          } else {
+            await entry.session.sendOrQueue(sent, this.configFor(entry), attachments);
+          }
         } catch (e) {
           // 取り出したまま失わない。貼り直しを強いない
           entry.attachments.restore(attachments);
@@ -2426,6 +2467,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         // 次の状態更新で予約が復活するため、明示的な操作まで止める（Issue #1202）
         this.suppressLimitAutoResume(entry);
         this.noteUserAction(entry);
+        // skillの判定中・待機中の発言は送らずに入力欄へ戻す（issue #1451）
+        entry.skillSelectGate?.abortAll();
         await entry.session.interrupt();
         return;
       }
@@ -3703,6 +3746,54 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.log.warn(`使用量を取得できませんでした: ${e instanceof Error ? e.message : e}`);
       return undefined;
     }
+  }
+
+  /**
+   * 発言に合うskillをReflex判定で1つ選ぶ（issue #1451）。選ばなかったとき・判定できなかった
+   * ときは`undefined`で、発言はskillなしで送る。選んだときは会話へ1行残す。
+   */
+  private async chooseCodexSkill(
+    entry: ChatPanel,
+    text: string,
+    threshold: number,
+    signal: AbortSignal,
+  ): Promise<CodexSkillInput | undefined> {
+    const judging = (async () => {
+      const response = await this.connection.request('skills/list', { cwds: [entry.cwd] });
+      if (response.error !== undefined) {
+        this.log.warn(`skill選択: skill一覧を取得できませんでした: ${response.error.message}`);
+        return undefined;
+      }
+      const candidates = toSkillCandidates(parseSkillsList(response.result).skills, true);
+      return selectSkill(
+        {
+          provider: 'codex',
+          executable: readConfig().executablePath,
+          logWarn: (message) => this.log.warn(message),
+          signal,
+        },
+        text,
+        candidates,
+        threshold,
+      );
+    })();
+    vscode.window.setStatusBarMessage('$(sync~spin) skillを選んでいます…', judging);
+    let result;
+    try {
+      result = await judging;
+    } catch (e) {
+      this.log.warn(`skill選択に失敗しました: ${e instanceof Error ? e.message : e}`);
+      return undefined;
+    }
+    if (result === undefined || signal.aborted) {
+      return undefined;
+    }
+    const note = describeSkillSelect(result);
+    if (result.kind !== 'selected' || result.skill.path === undefined || note === undefined) {
+      return undefined;
+    }
+    entry.session.noteLocalEvent(`skillSelect:${Date.now()}`, note);
+    return { name: result.skill.name, path: result.skill.path };
   }
 
   /**

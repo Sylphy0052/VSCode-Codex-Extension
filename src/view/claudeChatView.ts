@@ -52,6 +52,7 @@ import {
   readChatSkinConfig,
   readChatSendOnConfig,
   readChatTurnSummaryConfig,
+  readSkillSelectConfig,
   setChatTurnSummaryEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
@@ -102,6 +103,14 @@ import {
   judgeAutoReplyAskUserQuestion,
 } from '../chat/autoReplyReflex';
 import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
+import {
+  buildClaudeSkillPrompt,
+  describeSkillSelect,
+  selectSkill,
+  shouldSelectSkill,
+  toSkillCandidates,
+} from '../reflex/skillSelect';
+import { SkillSelectGate } from './skillSelectGate';
 import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
@@ -116,7 +125,7 @@ import {
   type PseudoCommandCall,
 } from '../provider/pseudoCommands';
 import type { SlashCommand } from '../provider/slashCommands';
-import { AttachmentBox } from '../provider/attachments';
+import { AttachmentBox, type Attachment } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import type {
   SessionMessagingHost,
@@ -3281,10 +3290,15 @@ export class ClaudeChatViewManager
   private dispatch(
     entry: ClaudePanel,
     text: string,
-    withAttachments = false,
+    withAttachments: boolean | Attachment[] = false,
     logText: string = text,
   ): 'sent' | 'queued' {
-    const attachments = withAttachments ? entry.attachments.take() : [];
+    // 配列なら取り出し済みの添付（skill選択の判定を待つ間に取り出したもの）
+    const attachments = Array.isArray(withAttachments)
+      ? withAttachments
+      : withAttachments
+        ? entry.attachments.take()
+        : [];
     let result: 'sent' | 'queued';
     try {
       result = entry.session.sendOrQueue(text, attachments);
@@ -3298,6 +3312,86 @@ export class ClaudeChatViewManager
       this.onActivity({ sessionId, cwd: entry.cwd, kind: 'prompt', text: logText });
     }
     return result;
+  }
+
+  /**
+   * 発言に合うskillをReflex判定で選んでから送る（issue #1451）。判定中に来た発言が追い越さない
+   * よう、有効な間は`/`始まりも含めて関門を通す。選んだときは読み込ませる固定文を前に置く。
+   * 取り消されたら送らず、本文と添付を入力欄へ戻す。
+   */
+  private async dispatchWithSkillSelect(
+    entry: ClaudePanel,
+    text: string,
+    sent: string,
+    threshold: number,
+  ): Promise<void> {
+    const attachments = entry.attachments.take();
+    const gate = (entry.skillSelectGate ??= new SkillSelectGate());
+    try {
+      await gate.run(async (signal) => {
+        const skillName =
+          shouldSelectSkill(text) && !signal.aborted
+            ? await this.chooseClaudeSkill(entry, text, threshold, signal)
+            : undefined;
+        if (signal.aborted) {
+          entry.attachments.restore(attachments);
+          void entry.panel?.webview.postMessage({
+            type: 'restoreQueuedText',
+            text: gate.collectAborted(text),
+          });
+          this.postState(entry);
+          return;
+        }
+        const prompt = skillName === undefined ? sent : buildClaudeSkillPrompt(skillName, sent);
+        this.dispatch(entry, prompt, attachments, text);
+        this.refreshSettings(entry);
+      });
+    } catch (e) {
+      this.reportError(e);
+    }
+  }
+
+  /** 発言に合うskillの名前。選ばなかったとき・判定できなかったときは`undefined`。 */
+  private async chooseClaudeSkill(
+    entry: ClaudePanel,
+    text: string,
+    threshold: number,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    const judging = (async () => {
+      const skills = await entry.session.prepareSkillSelection();
+      if (skills === undefined) {
+        return undefined;
+      }
+      return selectSkill(
+        {
+          provider: 'claude',
+          executable: this.claudePath(),
+          logWarn: (message) => this.log.warn(message),
+          signal,
+        },
+        text,
+        toSkillCandidates(skills, false),
+        threshold,
+      );
+    })();
+    vscode.window.setStatusBarMessage('$(sync~spin) skillを選んでいます…', judging);
+    let result;
+    try {
+      result = await judging;
+    } catch (e) {
+      this.log.warn(`skill選択に失敗しました: ${e instanceof Error ? e.message : e}`);
+      return undefined;
+    }
+    if (result === undefined || signal.aborted) {
+      return undefined;
+    }
+    const note = describeSkillSelect(result);
+    if (result.kind !== 'selected' || note === undefined) {
+      return undefined;
+    }
+    entry.session.noteLocalEvent(`skillSelect:${Date.now()}`, note);
+    return result.skill.name;
   }
 
   /**
@@ -3399,6 +3493,11 @@ export class ClaudeChatViewManager
         // 置いてあるので、CLIへ送らない入力には付かない。ループの自動送信も対象外。
         // 作業記録には元の文面を残す（`logText`。テンプレート展開前を記録する§16.12と同じ扱い）
         const sent = appendTurnSummaryInstruction(text, readChatTurnSummaryConfig());
+        const skillSelect = readSkillSelectConfig();
+        if (skillSelect.enabled) {
+          void this.dispatchWithSkillSelect(entry, text, sent, skillSelect.threshold);
+          return;
+        }
         this.dispatch(entry, sent, true, text);
         this.refreshSettings(entry);
         return;
@@ -3497,6 +3596,8 @@ export class ClaudeChatViewManager
         // タイマーを消すだけでは、その通知から予約が作り直される（Issue #1202）
         this.suppressLimitAutoResume(entry);
         this.noteUserAction(entry);
+        // skillの判定中・待機中の発言は送らずに入力欄へ戻す（issue #1451）
+        entry.skillSelectGate?.abortAll();
         entry.session.interrupt();
         return;
       }

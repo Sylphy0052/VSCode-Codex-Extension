@@ -303,6 +303,24 @@ export function buildSetEffortRequest(requestId: string, effort: string): string
 }
 
 /**
+ * skillをモデルへ渡す一覧から隠す（issue #1451）。
+ *
+ * `skillOverrides`の値を`user-invocable-only`にすると一覧からは消えるが、Skillツールでは
+ * 呼び出せる（実測）。`apply_flag_settings`は送るたびに前の値と結合され、別の設定
+ * （`effortLevel`など）を送っても隠した状態は残る（実測）。
+ */
+export function buildHideSkillsRequest(requestId: string, names: readonly string[]): string {
+  const skillOverrides: Record<string, string> = {};
+  for (const name of names) {
+    skillOverrides[name] = 'user-invocable-only';
+  }
+  return buildControlRequest(requestId, {
+    subtype: 'apply_flag_settings',
+    settings: { skillOverrides },
+  });
+}
+
+/**
  * 会話の名前を変える（issue #199、design.md §14.35）。
  *
  * **実測で見つけた専用の制御要求**（バイナリのstrings解析で `rename_session` /

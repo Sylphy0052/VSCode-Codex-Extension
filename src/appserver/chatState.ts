@@ -1,6 +1,6 @@
 import type { RewindChange } from './fileRewind';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
-import type { Attachment } from '../provider/attachments';
+import type { Attachment, CodexSkillInput } from '../provider/attachments';
 import { NO_IMAGES, readUserInputImages, type ChatImage } from '../provider/imageRefs';
 import {
   mergeRateLimitWindows,
@@ -392,6 +392,8 @@ export const NO_BACKGROUND_TERMINALS: BackgroundTerminalItem[] = [];
 export interface QueuedMessage {
   text: string;
   attachments: Attachment[];
+  /** 送るときに読み込ませるskill（issue #1451）。 */
+  skill?: CodexSkillInput;
 }
 
 export interface PendingApproval {
@@ -1882,11 +1884,17 @@ export function routeSend(state: ChatState): SendRoute {
  *
  * 添えた画像も一緒に積む。テキストだけ積むと、応答中に貼った画像が黙って消える。
  */
-export function enqueue(state: ChatState, text: string, attachments: Attachment[] = []): ChatState {
+export function enqueue(
+  state: ChatState,
+  text: string,
+  attachments: Attachment[] = [],
+  skill?: CodexSkillInput,
+): ChatState {
   if (text.trim() === '' && attachments.length === 0) {
     return state;
   }
-  return { ...state, queued: [...state.queued, { text, attachments }] };
+  const message: QueuedMessage = skill === undefined ? { text, attachments } : { text, attachments, skill };
+  return { ...state, queued: [...state.queued, message] };
 }
 
 /** 先頭の指示を取り出す。空なら取り出さない。 */

@@ -34,7 +34,7 @@ import {
   type QueuedMessage,
 } from './chatState';
 import { OutputOffloadRunner, type OutputOffloadPort } from './outputOffload';
-import { buildCodexInput, type Attachment } from '../provider/attachments';
+import { buildCodexInput, type Attachment, type CodexSkillInput } from '../provider/attachments';
 import type { AppServerConnectionPort, ServerRequest } from './connection';
 import { readTurnPolicy, turnPolicyFor, type TurnPolicy } from './planMode';
 import {
@@ -398,6 +398,7 @@ export class ChatSession {
     text: string,
     config: CodexConfig,
     attachments: readonly Attachment[] = [],
+    skill?: CodexSkillInput,
   ): Promise<void> {
     const threadId = this.state.threadId;
     if (threadId === undefined) {
@@ -406,7 +407,7 @@ export class ChatSession {
 
     const params: Record<string, unknown> = {
       threadId,
-      input: buildCodexInput(text, attachments),
+      input: buildCodexInput(text, attachments, skill),
     };
     if (config.model !== '') {
       params['model'] = config.model;
@@ -461,7 +462,11 @@ export class ChatSession {
    * app-serverは割り込む先のターンidを要求し、それが現在のターンと違えば失敗する。
    * 応答は止まらないので、途中で方針を足すのに使える。
    */
-  async steer(text: string, attachments: readonly Attachment[] = []): Promise<void> {
+  async steer(
+    text: string,
+    attachments: readonly Attachment[] = [],
+    skill?: CodexSkillInput,
+  ): Promise<void> {
     const threadId = this.state.threadId;
     const turnId = this.state.turnId;
     if (threadId === undefined || turnId === undefined) {
@@ -470,7 +475,7 @@ export class ChatSession {
     await this.connection.request('turn/steer', {
       threadId,
       expectedTurnId: turnId,
-      input: buildCodexInput(text, attachments),
+      input: buildCodexInput(text, attachments, skill),
     });
   }
 
@@ -483,13 +488,14 @@ export class ChatSession {
     text: string,
     config: CodexConfig,
     attachments: Attachment[] = [],
+    skill?: CodexSkillInput,
   ): Promise<'sent' | 'queued'> {
     if (!this.state.busy) {
-      await this.send(text, config, attachments);
+      await this.send(text, config, attachments, skill);
       return 'sent';
     }
 
-    this.update(enqueue(this.state, text, attachments));
+    this.update(enqueue(this.state, text, attachments, skill));
     return 'queued';
   }
 
@@ -542,10 +548,10 @@ export class ChatSession {
     this.update(next);
     try {
       if (route === 'steer') {
-        await this.steer(queued.text, queued.attachments);
+        await this.steer(queued.text, queued.attachments, queued.skill);
         return;
       }
-      await this.send(queued.text, config, queued.attachments);
+      await this.send(queued.text, config, queued.attachments, queued.skill);
     } catch (e) {
       this.update(restoreQueued(this.state, index, queued));
       throw e instanceof Error ? e : new Error(message(e));

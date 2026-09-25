@@ -59,6 +59,7 @@ import {
   readRewindFilesResult,
   readSessionCost,
   readSideQuestionResult,
+  buildHideSkillsRequest,
   type ControlResponse,
   type ControlRequestProgress,
   type IncomingControlRequest,
@@ -71,7 +72,7 @@ import { forkFromTurn, type ForkFromTurnResult } from './forkFromTurn';
 import { mergeDynamicMcpServer } from './mcpDynamic';
 import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
-import type { SkillsSnapshot } from '../provider/skills';
+import type { SkillView, SkillsSnapshot } from '../provider/skills';
 import type { SlashCommand } from '../provider/slashCommands';
 import { buildSkillsSnapshot } from './skillsList';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
@@ -190,6 +191,17 @@ export class ClaudeStreamSession {
     string,
     (snapshot: SkillsSnapshot | undefined) => void
   >();
+
+  /** skillを一覧から隠す`apply_flag_settings`の応答待ち（issue #1451）。成否だけを返す。 */
+  private readonly hideSkillsWaiting = new Map<string, (ok: boolean) => void>();
+
+  /**
+   * skill選択（issue #1451）のために一覧から隠したskill。`reload_skills`は隠したskillを返さない
+   * （実測）ため、候補としてここに覚えておく。隠す設定はプロセスごとの状態なので、
+   * `hiddenSkillsProc`と`this.proc`が食い違ったら空から数え直す。
+   */
+  private hiddenSkills = new Map<string, SkillView>();
+  private hiddenSkillsProc: ChildProcessWithoutNullStreams | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -970,6 +982,42 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * skill選択（issue #1451）の候補を返す。まだ隠していないskillがあれば、モデルへ渡す一覧から
+   * 隠してから返す。隠し終えるまで待つので、戻ってから送った発言には一覧が載らない。
+   *
+   * プロセスが無い・一覧を取れない・隠せなかったときは`undefined`（選択を諦め、そのまま送る）。
+   */
+  async prepareSkillSelection(): Promise<SkillView[] | undefined> {
+    const proc = this.proc;
+    if (proc === undefined) {
+      return undefined;
+    }
+    if (this.hiddenSkillsProc !== proc) {
+      this.hiddenSkills = new Map();
+      this.hiddenSkillsProc = proc;
+    }
+    const snapshot = await this.reloadSkills();
+    if (snapshot?.ok !== true || this.proc !== proc) {
+      return undefined;
+    }
+    const added = snapshot.skills.filter((s) => !this.hiddenSkills.has(s.name));
+    if (added.length > 0) {
+      const requestId = this.claim('hideSkills');
+      const ok = await new Promise<boolean>((resolve) => {
+        this.hideSkillsWaiting.set(requestId, resolve);
+        this.write(buildHideSkillsRequest(requestId, added.map((s) => s.name)));
+      });
+      if (!ok || this.proc !== proc) {
+        return undefined;
+      }
+      for (const s of added) {
+        this.hiddenSkills.set(s.name, s);
+      }
+    }
+    return [...this.hiddenSkills.values()];
+  }
+
+  /**
    * 会話の途中のターンから分岐する（issue #333、design.md §14.61）。
    *
    * `--fork-session` で開いたセッションだけに限る。forkしていないセッションへ送ると
@@ -1458,6 +1506,15 @@ export class ClaudeStreamSession {
       return;
     }
 
+    if (outgoing?.kind === 'hideSkills') {
+      if (!response.ok) {
+        this.log.warn('skillを一覧から隠せませんでした（apply_flag_settingsが失敗）');
+      }
+      this.hideSkillsWaiting.get(response.requestId)?.(response.ok);
+      this.hideSkillsWaiting.delete(response.requestId);
+      return;
+    }
+
     // `initialize` の応答が使えるコマンドを全部返す。一覧のハードコードは要らない
     const commands = readCommandList(response.payload);
     if (commands !== undefined) {
@@ -1654,6 +1711,10 @@ export class ClaudeStreamSession {
       resolve(undefined);
     }
     this.skillsWaiting.clear();
+    for (const resolve of this.hideSkillsWaiting.values()) {
+      resolve(false);
+    }
+    this.hideSkillsWaiting.clear();
     this.outgoing.clear();
   }
 
@@ -1681,7 +1742,8 @@ type OutgoingKind =
   | 'sideQuestion'
   | 'mcpStatus'
   | 'mcpConfigure'
-  | 'reloadSkills';
+  | 'reloadSkills'
+  | 'hideSkills';
 
 interface Outgoing {
   kind: OutgoingKind;
