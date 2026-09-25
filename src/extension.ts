@@ -2525,6 +2525,64 @@ export async function warnWithLogLink(log: Logger, message: string): Promise<voi
   }
 }
 
+/**
+ * ロードマップの生成・変換の失敗を人へ伝える（Issue #1442）。
+ *
+ * 通知には1行の要約だけを出し、検証エラー・レビュー指摘の本文は1件1行でログへ書く。
+ * 本文を通知へ連結すると長すぎて読めなかった。生の応答があればエディタで開く。
+ * 利用者が中断した場合は、中断した時点の候補を開くだけでエラー扱いしない。
+ */
+async function reportRoadmapFailure(
+  result: Extract<GenerateRoadmapResult, { ok: false }>,
+  prefix: string,
+  log: Logger,
+): Promise<void> {
+  const details = result.details ?? [];
+  const detailText = details.map((detail) => `\n- ${detail}`).join('');
+  if (result.reason === 'cancelled') {
+    log.info(`${prefix}: ${result.message}${detailText}`);
+  } else {
+    log.error(`${prefix}: ${result.message}${detailText}`);
+  }
+  if (result.rawResponse !== undefined) {
+    const doc = await vscode.workspace.openTextDocument({
+      content: result.rawResponse,
+      language: 'markdown',
+    });
+    await vscode.window.showTextDocument(doc, { preview: false });
+  }
+  if (result.reason === 'cancelled') {
+    void vscode.window.showInformationMessage(`${prefix}: ${result.message}`);
+    return;
+  }
+  const picked = await vscode.window.showErrorMessage(
+    `${prefix}: ${result.message}`,
+    ...(details.length > 0 ? [OPEN_LOG_ACTION] : []),
+  );
+  if (picked === OPEN_LOG_ACTION) {
+    log.show();
+  }
+}
+
+/**
+ * ロードマップの生成・変換を、取消ボタン付きの進捗通知の下で走らせる（Issue #1442）。
+ * 意味レビューの反復に回数の上限が無いため、利用者が止められるようにする。取消は
+ * `AbortSignal`へ写し、実行中のターンと次のパスの両方を止める。
+ */
+function withCancellableRoadmapProgress<T>(
+  title: string,
+  task: (signal: AbortSignal) => Promise<T>,
+): Thenable<T> {
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+    (_progress, token) => {
+      const controller = new AbortController();
+      const subscription = token.onCancellationRequested(() => controller.abort());
+      return task(controller.signal).finally(() => subscription.dispose());
+    },
+  );
+}
+
 function buildRoadmapTaskIssueBody(item: RoadmapItem): string {
   const dependencies = item.dependsOn.length > 0 ? item.dependsOn.join(', ') : 'なし';
   return [
@@ -2669,7 +2727,6 @@ async function runRoadmap(
   }
   const workspaceRoot = folder.uri.fsPath;
   const host = provider === 'claude' ? claudeChat : chat;
-  const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
   const [workspaceSummary, hasAgentsFile, hasClaudeFile] = await Promise.all([
     listWorkspaceSummary(folder),
     fileExists(folder, 'AGENTS.md'),
@@ -2683,36 +2740,37 @@ async function runRoadmap(
     return;
   }
 
-  const result = await generateRoadmap(
-    {
-      generation,
-      review: generation,
-      issues,
-      fs: nodeRoadmapFileSystem,
-      issueCreation: createRoadmapIssueCreationPort(),
-      log: (message) => log.info(message),
-    },
-    {
-      goal,
+  const result = await withCancellableRoadmapProgress('ロードマップを生成しています…', (signal) => {
+    const generation = createTaskSessionRoadmapGenerationPort(
+      host,
+      provider,
       workspaceRoot,
-      roadmapDir,
-      workspaceSummary,
-      hasAgentsFile,
-      hasClaudeFile,
-      slug: fileName,
-    },
-  );
+      signal,
+    );
+    return generateRoadmap(
+      {
+        generation,
+        review: generation,
+        issues,
+        fs: nodeRoadmapFileSystem,
+        issueCreation: createRoadmapIssueCreationPort(),
+        log: (message) => log.info(message),
+        signal,
+      },
+      {
+        goal,
+        workspaceRoot,
+        roadmapDir,
+        workspaceSummary,
+        hasAgentsFile,
+        hasClaudeFile,
+        slug: fileName,
+      },
+    );
+  });
 
   if (!result.ok) {
-    log.error(`ロードマップを生成できません: ${result.message}`);
-    if (result.rawResponse !== undefined) {
-      const doc = await vscode.workspace.openTextDocument({
-        content: result.rawResponse,
-        language: 'markdown',
-      });
-      await vscode.window.showTextDocument(doc, { preview: false });
-    }
-    void vscode.window.showErrorMessage(`ロードマップを生成できません: ${result.message}`);
+    await reportRoadmapFailure(result, 'ロードマップを生成できません', log);
     return;
   }
 
@@ -2780,26 +2838,30 @@ async function convertMarkdownFileToRoadmap(
   }
 
   const host = provider === 'claude' ? claudeChat : chat;
-  const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'ロードマップへ変換しています…' },
-    () =>
-      convertMarkdownToRoadmap(
-        {
-          generation,
-          review: generation,
-          fs: nodeRoadmapFileSystem,
-          log: (message) => log.info(message),
-        },
-        {
-          workspaceRoot,
-          roadmapDir,
-          slug: fileName,
-          sourcePath,
-          sourceMarkdown: source.getText(),
-        },
-      ),
-  );
+  const result = await withCancellableRoadmapProgress('ロードマップへ変換しています…', (signal) => {
+    const generation = createTaskSessionRoadmapGenerationPort(
+      host,
+      provider,
+      workspaceRoot,
+      signal,
+    );
+    return convertMarkdownToRoadmap(
+      {
+        generation,
+        review: generation,
+        fs: nodeRoadmapFileSystem,
+        log: (message) => log.info(message),
+        signal,
+      },
+      {
+        workspaceRoot,
+        roadmapDir,
+        slug: fileName,
+        sourcePath,
+        sourceMarkdown: source.getText(),
+      },
+    );
+  });
   const savedPath = await finishRoadmapConversion(result, log);
   if (savedPath === undefined) {
     return;
@@ -2810,7 +2872,7 @@ async function convertMarkdownFileToRoadmap(
 /**
  * ロードマップへの変換結果を人へ伝え、保存できたときだけ保存先を返す。
  *
- * 失敗時は生の応答をエディタで開いてエラーを表示し、成功時は検証の警告をログへ残す。
+ * 失敗時は`reportRoadmapFailure`で要約を通知し、成功時は検証の警告をログへ残す。
  * ファイルからの変換（`convertMarkdownFileToRoadmap`）とIssueからの変換
  * （`planWorkflowFromRoadmapIssueCommand`）で扱いを揃えるために共有する。
  */
@@ -2819,15 +2881,7 @@ async function finishRoadmapConversion(
   log: Logger,
 ): Promise<string | undefined> {
   if (!result.ok) {
-    log.error(`ロードマップへ変換できません: ${result.message}`);
-    if (result.rawResponse !== undefined) {
-      const doc = await vscode.workspace.openTextDocument({
-        content: result.rawResponse,
-        language: 'markdown',
-      });
-      await vscode.window.showTextDocument(doc, { preview: false });
-    }
-    void vscode.window.showErrorMessage(`ロードマップへ変換できません: ${result.message}`);
+    await reportRoadmapFailure(result, 'ロードマップへ変換できません', log);
     return undefined;
   }
   if (result.validation.warnings.length > 0) {
@@ -3084,27 +3138,31 @@ async function planWorkflowFromRoadmapIssueCommand(
   }
 
   const host = provider === 'claude' ? claudeChat : chat;
-  const generation = createTaskSessionRoadmapGenerationPort(host, provider, workspaceRoot);
-  const result = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'ロードマップへ変換しています…' },
-    () =>
-      convertMarkdownToRoadmap(
-        {
-          generation,
-          review: generation,
-          fs: nodeRoadmapFileSystem,
-          log: (message) => log.info(message),
-        },
-        {
-          workspaceRoot,
-          roadmapDir,
-          slug: fileName,
-          sourcePath: picked.issue.url ?? `Issue #${picked.issue.number}`,
-          sourceIssue: picked.issue.number,
-          sourceMarkdown: body,
-        },
-      ),
-  );
+  const result = await withCancellableRoadmapProgress('ロードマップへ変換しています…', (signal) => {
+    const generation = createTaskSessionRoadmapGenerationPort(
+      host,
+      provider,
+      workspaceRoot,
+      signal,
+    );
+    return convertMarkdownToRoadmap(
+      {
+        generation,
+        review: generation,
+        fs: nodeRoadmapFileSystem,
+        log: (message) => log.info(message),
+        signal,
+      },
+      {
+        workspaceRoot,
+        roadmapDir,
+        slug: fileName,
+        sourcePath: picked.issue.url ?? `Issue #${picked.issue.number}`,
+        sourceIssue: picked.issue.number,
+        sourceMarkdown: body,
+      },
+    );
+  });
   const savedPath = await finishRoadmapConversion(result, log);
   if (savedPath === undefined) {
     return;
