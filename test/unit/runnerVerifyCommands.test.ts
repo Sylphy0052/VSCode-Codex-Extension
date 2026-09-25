@@ -210,7 +210,8 @@ describe('executeVerifyCommands', () => {
   it('各コマンドをタスクのworktreeで実行し、observed / trusted の記録を残す', async () => {
     const run = vi.fn<NonNullable<WorkflowVerifyCommandDeps['run']>>(async () => result());
     const outcome = await execute(['npm run lint', 'npm test'], deps(run));
-    expect(outcome).toEqual({ failures: [], aborted: false });
+    expect(outcome).toMatchObject({ failures: [], aborted: false });
+    expect(outcome.executed.map((entry) => entry.command)).toEqual(['npm run lint', 'npm test']);
     expect(run.mock.calls.map(([options]) => [options.command, options.cwd])).toEqual([
       ['npm run lint', '/repo/.agents/worktrees/t1'],
       ['npm test', '/repo/.agents/worktrees/t1'],

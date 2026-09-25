@@ -140,9 +140,11 @@ import { sanitizeInlineText } from './untrustedText';
 import {
   executeVerifyCommands,
   gateVerifyCommands,
+  type ExecuteVerifyCommandsResult,
   type VerifyCommandConsent,
   type WorkflowVerifyCommandDeps,
 } from './runnerVerifyCommands';
+import { runVerifyStages } from './runnerVerifyStages';
 import { MAX_MESSAGE_BODY_LENGTH } from './messaging';
 import {
   buildEffectiveTaskConfig,
@@ -172,6 +174,7 @@ import {
   type WorktreeFileSystemPort,
 } from './worktree';
 import { AgentReportedRecorder } from '../verification/agentReported';
+import type { VerificationStage } from '../verification/record';
 import type { VerificationStore } from '../verification/store';
 import {
   expandTemplate,
@@ -439,6 +442,17 @@ export type FinalMergeDecision = 'merge' | 'hold';
 
 /** 検証コマンドの実行中に、停止・破棄・作り直しを確かめる間隔（ミリ秒） */
 const VERIFY_COMMAND_ABORT_POLL_MS = 250;
+
+/** `verify.commands` を拡張機能が実行した結果（`runTaskVerifyCommands`） */
+interface TaskVerifyCommandsOutcome {
+  /** 実行を終えたか（見送り・中断なら `false`） */
+  readonly executed: boolean;
+  readonly failures: string[];
+  /** 分岐元とタスク後の結果を並べた文字列（`verify.baseline`、Issue #1468） */
+  readonly measurements?: string;
+  /** 変更を戻して測った後に作業ツリーを元へ戻せなかった理由（Issue #1468） */
+  readonly restoreError?: string;
+}
 
 export interface WorkflowRunnerDeps {
   /** provider別の `TaskSessionHost`。`runner.ts` はプロバイダを見ずにこの口だけを使う。 */
@@ -5852,7 +5866,7 @@ export class WorkflowRunner {
     live: LiveRun,
     liveTask: LiveTask,
     attempt: number,
-  ): Promise<{ executed: boolean; failures: string[] }> {
+  ): Promise<TaskVerifyCommandsOutcome> {
     const deps = this.deps.verifyCommands;
     const commands = task.verify?.commands ?? [];
     if (deps === undefined || commands.length === 0) {
@@ -5889,17 +5903,43 @@ export class WorkflowRunner {
       if (gate !== 'run') {
         return { executed: false, failures: [] };
       }
-      const result = await executeVerifyCommands({
-        commands,
-        cwd: liveTask.cwd,
-        runId,
+      const execute = (
+        targets: readonly string[],
+        stage: VerificationStage,
+      ): Promise<ExecuteVerifyCommandsResult> =>
+        executeVerifyCommands({
+          commands: targets,
+          cwd: liveTask.cwd,
+          runId,
+          taskId,
+          attempt,
+          stage,
+          deps,
+          signal: controller.signal,
+          log: this.deps.log,
+        });
+      const result = await execute(commands, 'task');
+      if (result.aborted || result.failures.length > 0) {
+        return { executed: !result.aborted, failures: result.failures };
+      }
+      // タスクの状態で全部通ったときだけ、変更を戻して測り直す（Issue #1468）
+      const stages = await runVerifyStages({
+        task,
         taskId,
-        attempt,
-        deps,
-        signal: controller.signal,
+        cwd: liveTask.cwd,
+        originCommit: liveTask.originCommit,
+        git: this.deps.git,
+        taskRun: result.executed,
+        execute,
         log: this.deps.log,
+        logPrefix: `[workflow ${runId}/${taskId}]`,
       });
-      return { executed: !result.aborted, failures: result.failures };
+      return {
+        executed: true,
+        failures: stages.failures,
+        ...(stages.measurements === undefined ? {} : { measurements: stages.measurements }),
+        ...(stages.restoreError === undefined ? {} : { restoreError: stages.restoreError }),
+      };
     } finally {
       clearInterval(watch);
       this.verifyCommandAborts.delete(controller);
@@ -6039,6 +6079,20 @@ export class WorkflowRunner {
     );
     failures.push(...commandRun.failures);
 
+    // 変更を戻して測った後に作業ツリーを元へ戻せなかった。壊れた作業ツリーのまま担当に
+    // 続けさせず、タスクを`failed`にする（Issue #1468 受入基準5）
+    if (commandRun.restoreError !== undefined) {
+      if (abortVerification()) return;
+      liveTask.verificationInProgress = false;
+      live.warnings.push({
+        kind: 'taskVerification',
+        taskId,
+        message: `変更を戻して検証した後、作業ツリーを元の状態へ戻せませんでした。worktreeを確認してください: ${sanitizeForLog(commandRun.restoreError)}`,
+      });
+      this.onTaskFinished(runId, taskId, task, 'failed', state);
+      return;
+    }
+
     // 独立レビューは別セッションでCLIを起動する分だけ長い。入る前に一度見て、
     // 停止済みなら起動そのものを見送る
     if (abortVerification()) return;
@@ -6063,6 +6117,7 @@ export class WorkflowRunner {
         host: this.deps.hosts[task.provider],
         cwd: liveTask.cwd,
         log: this.deps.log,
+        ...(commandRun.measurements === undefined ? {} : { measurements: commandRun.measurements }),
       });
       if (reviewed.error !== undefined) {
         failures.push(`独立レビューに失敗しました: ${reviewed.error}`);
