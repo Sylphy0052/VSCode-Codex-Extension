@@ -56,6 +56,11 @@ const PROPOSAL_REASON_MAX_LENGTH = 120;
 
 export interface RoadmapRunSetupDeps {
   context: vscode.ExtensionContext;
+  /**
+   * `extension.ts`が先に作って渡す。リロード後の汎用復元がIssueセッションのタブを
+   * 見分けるために、チャット画面の組み立てより前から要る（Issue #1491）。
+   */
+  store: RoadmapRunStore;
   hosts: Record<RoadmapRunEngine, TaskSessionHost>;
   worktreeQueue: WorktreeCreationQueue;
   git: GitCommandRunner;
@@ -72,7 +77,7 @@ export interface RoadmapRunSetupDeps {
 export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] {
   const { log } = deps;
   const ports: RoadmapRunForgePorts = { git: deps.git, cli: deps.cli };
-  const store = new RoadmapRunStore(deps.context.workspaceState);
+  const { store } = deps;
   // Controller・Runner・Viewは互いを参照するため、後から入れる箱を介して繋ぐ
   const holder: { controller?: RoadmapRunController; view?: RoadmapKanbanViewManager } = {};
 

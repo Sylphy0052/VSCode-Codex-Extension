@@ -74,6 +74,24 @@ export class RoadmapRunStore {
   }
 
   /**
+   * このsessionIdがいずれかのrunのIssueセッション（過去の実行回を含む）かどうか（Issue #1491）。
+   * リロード後の汎用復元（`restorePanel`）から、入力を閉じるべきタブを外す判定に使う。
+   * メモリ上の実行状態はリロード直後に空なので、`WorkflowRunner.isTaskManagedSessionId`と
+   * 同じく永続化した側を見る。
+   */
+  hasSessionRef(sessionId: string): boolean {
+    if (sessionId === '') {
+      return false;
+    }
+    return this.list().some((run) =>
+      Object.values(run.issues).some(
+        (issue) =>
+          Array.isArray(issue.attempts) && issue.attempts.some((a) => a.sessionRef === sessionId),
+      ),
+    );
+  }
+
+  /**
    * 指定runIdの内容を関数で更新する。直列化されるため、読み・書きの間に別の更新が
    * 割り込まない。未登録なら新規追加する。更新後の値を返す。
    */
