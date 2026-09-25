@@ -534,6 +534,16 @@
         "icon": "$(project)"
       },
       {
+        "command": "agent.roadmapRun.start",
+        "title": "ロードマップを実行",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.roadmapRun.kanban",
+        "title": "ロードマップ実行のKanbanを開く",
+        "category": "Agent"
+      },
+      {
         "command": "agent.forgeHub",
         "title": "Forge Hubを開く",
         "category": "Agent",
