@@ -437,10 +437,16 @@ export function markIssueStopping(run: RoadmapRun, issueNumber: number, now: Dat
  * ターンの中断と子プロセスの停止を確かめた。実行回を閉じて一時停止にする。
  * 以後、中断したセッションからの報告は`noActiveAttempt`で拒否される。再開は
  * `resume`の実行回で行い、閉じた実行回の`sessionRef`から同じセッションを優先して使う。
+ * 停止処理中（`markIssueStopping`の後）のノードだけを受け付ける。
  */
 export function markIssuePaused(run: RoadmapRun, issueNumber: number, now: Date): RoadmapRun {
   const issue = getIssue(run, issueNumber);
-  if (issue === undefined || issue.progress !== 'running' || issue.currentAttemptId === undefined) {
+  if (
+    issue === undefined ||
+    issue.progress !== 'running' ||
+    issue.currentAttemptId === undefined ||
+    issue.attention !== 'stopping'
+  ) {
     return run;
   }
   const at = now.toISOString();
@@ -452,7 +458,10 @@ export function markIssuePaused(run: RoadmapRun, issueNumber: number, now: Date)
   });
 }
 
-/** run全体を止める・止めを解く。止めている間、スケジューラは新しいノードを始めない。 */
+/**
+ * run全体を止める・止めを解く。止めている間、スケジューラは自動では新しいノードを始めない
+ * （ユーザーがノードを選んで明示で実行するのは妨げない）。
+ */
 export function setRunHaltedByUser(run: RoadmapRun, halted: boolean): RoadmapRun {
   return run.haltedByUser === halted ? run : { ...run, haltedByUser: halted };
 }

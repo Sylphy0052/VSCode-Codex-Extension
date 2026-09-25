@@ -27,7 +27,7 @@ function isSatisfiedDependency(issue: RoadmapIssueExecution | undefined): boolea
   return issue !== undefined && issue.progress === 'done' && issue.result === 'succeeded';
 }
 
-/** ノードの依存先のうち、まだ満たされていないIssue番号。計画の順に返す。 */
+/** ノードの依存先のうち、まだ満たされていないIssue番号。`dependsOn`の並び順に返す。 */
 export function unmetDependencies(run: RoadmapRun, node: RoadmapPlanNode): number[] {
   return node.dependsOn.filter((dep) => !isSatisfiedDependency(getIssue(run, dep)));
 }
@@ -147,6 +147,8 @@ function isProgressingWithoutUser(issue: RoadmapIssueExecution): boolean {
 export type RunAssessment =
   | { kind: 'finished' }
   | { kind: 'progressing' }
+  /** 人がrun全体を止めていて、人の対応なしに進むノードも無い。人自身の操作なので通知しない。 */
+  | { kind: 'haltedByUser' }
   /** 実行できるノードも、人の対応なしに進むノードも無い。`blockers`は人の対応を待つノード。 */
   | { kind: 'stalled'; blockers: readonly number[] };
 
@@ -156,7 +158,7 @@ export type RunAssessment =
  *
  * 実行できるノードがあれば`progressing`とする（自動実行ならControllerが始め、
  * ユーザー選択なら人が選べる）。run全体を人が止めている間は、実行できるノードがあっても
- * 始まらないため数えない。
+ * 始まらないため`haltedByUser`とし、人の対応待ちの`stalled`と区別する。
  */
 export function assessRun(run: RoadmapRun): RunAssessment {
   const issues = Object.values(run.issues);
@@ -166,7 +168,10 @@ export function assessRun(run: RoadmapRun): RunAssessment {
   if (issues.some(isProgressingWithoutUser)) {
     return { kind: 'progressing' };
   }
-  if (!run.haltedByUser && listRunnableIssues(run).length > 0) {
+  if (run.haltedByUser) {
+    return { kind: 'haltedByUser' };
+  }
+  if (listRunnableIssues(run).length > 0) {
     return { kind: 'progressing' };
   }
   const blockers = run.plan.nodes
