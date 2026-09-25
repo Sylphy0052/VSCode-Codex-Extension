@@ -200,7 +200,12 @@ export function createLoopDoneCheckConfig(
     return undefined;
   }
   return {
-    check: (input, signal) => checkLoopDone({ ...deps, signal }, input, settings.threshold),
+    check: (input, signal) =>
+      checkLoopDone(
+        { ...deps, ...(signal !== undefined ? { signal } : {}) },
+        input,
+        settings.threshold,
+      ),
     note,
   };
 }
