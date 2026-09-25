@@ -57,9 +57,14 @@ const GAP_FEEDBACK: Readonly<Record<string, string>> = {
 };
 const GAP_FEEDBACK_FALLBACK = '終了条件を満たしたと判断できる根拠が足りません。';
 
-/** 判定へ渡すコマンドの記録の上限件数。新しいものを残す。 */
-export const LOOP_DONE_CHECK_EVIDENCE_LIMIT = 40;
+/**
+ * 判定へ渡すコマンドの記録の上限件数。新しいものを残す。1件は最大で約450文字になるため、
+ * 直近の応答と合わせても`judge`の上限（20000文字）に収まる件数にしてある
+ */
+export const LOOP_DONE_CHECK_EVIDENCE_LIMIT = 25;
 const EVIDENCE_SOURCE_MAX_LENGTH = 200;
+/** 出力は末尾（テストの集計行など、結果が出る側）を残す。 */
+const EVIDENCE_OUTPUT_MAX_LENGTH = 200;
 const CONDITION_MAX_LENGTH = 1000;
 
 export type LoopDoneCheckResult =
@@ -90,7 +95,10 @@ function formatProbability(p: number): string {
   return p.toFixed(2);
 }
 
-/** コマンドの記録を1件1行へ均す。コマンド行は外部由来なので改行を潰し、偽の行を作らせない。 */
+/**
+ * コマンドの記録を1件1行へ均す。コマンド行も出力も外部由来なので改行を潰し、偽の行を
+ * 作らせない。
+ */
 function formatEvidenceLines(evidence: readonly GoalEvidence[]): string {
   const recent = evidence.slice(-LOOP_DONE_CHECK_EVIDENCE_LIMIT);
   if (recent.length === 0) {
@@ -99,7 +107,14 @@ function formatEvidenceLines(evidence: readonly GoalEvidence[]): string {
   return recent
     .map((e) => {
       const source = sanitizeInlineText(e.source.replace(/\s+/gu, ' '), EVIDENCE_SOURCE_MAX_LENGTH);
-      return `- [${e.status}] ${e.kind}: ${source}`;
+      const flatOutput = e.detail.replace(/\s+/gu, ' ').trim();
+      const output = sanitizeInlineText(
+        flatOutput.length > EVIDENCE_OUTPUT_MAX_LENGTH
+          ? `…${flatOutput.slice(-EVIDENCE_OUTPUT_MAX_LENGTH)}`
+          : flatOutput,
+        EVIDENCE_OUTPUT_MAX_LENGTH + 1,
+      );
+      return `- [${e.status}] ${e.kind}: ${source}${output === '' ? '' : ` → 出力末尾: ${output}`}`;
     })
     .join('\n');
 }
