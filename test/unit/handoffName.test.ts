@@ -80,9 +80,9 @@ describe('buildHandoffSessionName: handoffプロンプトから本体を作り�
   });
 
   it('見出しにブランチが無ければcwdのブランチ名からIssue番号を取る', () => {
-    expect(
-      buildHandoffSessionName({ handoffPrompt: '作業: 直す', gitBranch: 'feat/12/x' }),
-    ).toBe('#12 直す (続き2)');
+    expect(buildHandoffSessionName({ handoffPrompt: '作業: 直す', gitBranch: 'feat/12/x' })).toBe(
+      '#12 直す (続き2)',
+    );
     expect(buildHandoffSessionName({ previousName: '(続き3)', gitBranch: 'feat/12/x' })).toBe(
       '#12 (続き4)',
     );
@@ -90,9 +90,7 @@ describe('buildHandoffSessionName: handoffプロンプトから本体を作り�
 
   it('長い作業行は切り詰める', () => {
     const long = `作業: ${'あ'.repeat(50)}`;
-    expect(buildHandoffSessionName({ handoffPrompt: long })).toBe(
-      `${'あ'.repeat(30)}… (続き2)`,
-    );
+    expect(buildHandoffSessionName({ handoffPrompt: long })).toBe(`${'あ'.repeat(30)}… (続き2)`);
   });
 
   it('Issue番号も作業行も無ければ、規約外のブランチ名を本体にする', () => {

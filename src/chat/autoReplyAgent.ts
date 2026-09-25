@@ -56,18 +56,11 @@ export function buildAutoReplySessionInput(cwd: string, model: string): TaskSess
 }
 
 export type AutoReplyTurnResult =
-  | { ok: true; response: string }
-  | { ok: false; kind: 'failed' | 'cancelled'; reason: string };
+  { ok: true; response: string } | { ok: false; kind: 'failed' | 'cancelled'; reason: string };
 
 /** 返信役を閉じた理由。`describeAutoReplyStopReason`とは別に、返信役固有の理由を持つ。 */
 export type AutoReplyAgentCloseReason =
-  | 'userDisabled'
-  | 'tabClosed'
-  | 'idleTimeout'
-  | 'replaced'
-  | 'shutdown'
-  | 'stopMarker'
-  | 'failed';
+  'userDisabled' | 'tabClosed' | 'idleTimeout' | 'replaced' | 'shutdown' | 'stopMarker' | 'failed';
 
 const AUTO_REPLY_CLOSE_REASON_LABELS: Record<AutoReplyAgentCloseReason, string> = {
   userDisabled: '自動返信がOFFにされました',
@@ -87,7 +80,9 @@ const AUTO_REPLY_CLOSE_REASON_LABELS: Record<AutoReplyAgentCloseReason, string> 
  * （回数上限・停滞・利用者の操作・ループ開始等、いずれもモードを明示的にOFFにした結果）は
  * `userDisabled`へ、返信役自体の失敗・タイムアウトは`failed`へまとめる。
  */
-export function autoReplyAgentCloseReasonFor(reason: AutoReplyStopReason): AutoReplyAgentCloseReason {
+export function autoReplyAgentCloseReasonFor(
+  reason: AutoReplyStopReason,
+): AutoReplyAgentCloseReason {
   switch (reason) {
     case 'stopMarker':
       return 'stopMarker';
@@ -174,7 +169,11 @@ export class AutoReplyAgent {
       const response =
         this.session === undefined
           ? await this.openAndSendFirstTurn(lastAgentMessage, controller.signal)
-          : await this.sendTurn(this.session, buildAutoReplyTurnPrompt(lastAgentMessage), controller.signal);
+          : await this.sendTurn(
+              this.session,
+              buildAutoReplyTurnPrompt(lastAgentMessage),
+              controller.signal,
+            );
       if (response.trim() === '') {
         return { ok: false, kind: 'failed', reason: '返信役の応答が空でした' };
       }
@@ -198,7 +197,10 @@ export class AutoReplyAgent {
     }
   }
 
-  private async openAndSendFirstTurn(lastAgentMessage: string, signal: AbortSignal): Promise<string> {
+  private async openAndSendFirstTurn(
+    lastAgentMessage: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     const model = resolveAdvisorModel(this.options.model, AUTO_REPLY_PROVIDER);
     const prompt = `${buildAutoReplyRolePrompt(this.options.originalRequest)}\n\n${buildAutoReplyTurnPrompt(lastAgentMessage)}`;
     const redaction = redactCredentials(prompt);
@@ -225,7 +227,11 @@ export class AutoReplyAgent {
     );
   }
 
-  private async sendTurn(session: TaskSession, prompt: string, signal: AbortSignal): Promise<string> {
+  private async sendTurn(
+    session: TaskSession,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     const redaction = redactCredentials(prompt);
     this.logRedaction(redaction);
     return awaitSingleTurn(session, redaction.text, {

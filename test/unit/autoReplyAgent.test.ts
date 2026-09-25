@@ -10,7 +10,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
-import type { TaskSession, TaskSessionHost, TaskSessionInput } from '../../src/orchestrator/taskSession';
+import type {
+  TaskSession,
+  TaskSessionHost,
+  TaskSessionInput,
+} from '../../src/orchestrator/taskSession';
 import {
   AutoReplyAgent,
   autoReplyAgentCloseReasonFor,
@@ -220,7 +224,13 @@ describe('autoReplyAgentCloseReasonFor', () => {
   });
 
   it('それ以外（回数上限・停滞・利用者操作・ループ開始）はuserDisabledへまとめる', () => {
-    const rest: AutoReplyStopReason[] = ['maxTurns', 'stalled', 'turnFailed', 'userAction', 'loopStarted'];
+    const rest: AutoReplyStopReason[] = [
+      'maxTurns',
+      'stalled',
+      'turnFailed',
+      'userAction',
+      'loopStarted',
+    ];
     for (const reason of rest) {
       const closeReason: AutoReplyAgentCloseReason = autoReplyAgentCloseReasonFor(reason);
       expect(closeReason).toBe('userDisabled');

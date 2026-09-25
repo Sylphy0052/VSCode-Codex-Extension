@@ -90,9 +90,13 @@ export function buildAutoReplyAskUserQuestionPrompt(
     '',
   ];
   questions.forEach((question, index) => {
-    lines.push(`質問${index + 1}: ${sanitizeInlineText(question.question, ASK_USER_QUESTION_TEXT_MAX_LENGTH)}`);
+    lines.push(
+      `質問${index + 1}: ${sanitizeInlineText(question.question, ASK_USER_QUESTION_TEXT_MAX_LENGTH)}`,
+    );
     if (question.header !== '') {
-      lines.push(`見出し: ${sanitizeInlineText(question.header, ASK_USER_QUESTION_LABEL_MAX_LENGTH)}`);
+      lines.push(
+        `見出し: ${sanitizeInlineText(question.header, ASK_USER_QUESTION_LABEL_MAX_LENGTH)}`,
+      );
     }
     lines.push(question.multiSelect ? '（複数選択可）' : '（1つだけ選択）');
     for (const option of question.options) {

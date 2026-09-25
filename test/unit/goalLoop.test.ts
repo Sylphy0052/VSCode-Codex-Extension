@@ -162,9 +162,9 @@ describe('isSettledCommandItem', () => {
     expect(isSettledCommandItem(command('c1', 'npm test', 'inProgress'))).toBe(false);
     expect(isSettledCommandItem(command('c1', 'npm test', 'running'))).toBe(false);
     expect(isSettledCommandItem(command('c1', 'npm test', undefined))).toBe(false);
-    expect(isSettledCommandItem(item({ id: 'a1', kind: 'agentMessage', status: 'completed' }))).toBe(
-      false,
-    );
+    expect(
+      isSettledCommandItem(item({ id: 'a1', kind: 'agentMessage', status: 'completed' })),
+    ).toBe(false);
   });
 });
 

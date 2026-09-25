@@ -204,14 +204,14 @@ describe('parseAutoReplyAskUserQuestionResponse', () => {
 
   it('キーが渡した質問文と一致しなければundefined', () => {
     expect(
-      parseAutoReplyAskUserQuestionResponse(JSON.stringify({ '違う質問': ['はい'] }), [QUESTION]),
+      parseAutoReplyAskUserQuestionResponse(JSON.stringify({ 違う質問: ['はい'] }), [QUESTION]),
     ).toBeUndefined();
   });
 
   it('質問数より多い・少ないキーがあればundefined', () => {
     expect(
       parseAutoReplyAskUserQuestionResponse(
-        JSON.stringify({ '続けますか？': ['はい'], '余分な質問': ['x'] }),
+        JSON.stringify({ '続けますか？': ['はい'], 余分な質問: ['x'] }),
         [QUESTION],
       ),
     ).toBeUndefined();
@@ -219,7 +219,9 @@ describe('parseAutoReplyAskUserQuestionResponse', () => {
 
   it('選択肢に存在しないラベルはundefined', () => {
     expect(
-      parseAutoReplyAskUserQuestionResponse(JSON.stringify({ '続けますか？': ['たぶん'] }), [QUESTION]),
+      parseAutoReplyAskUserQuestionResponse(JSON.stringify({ '続けますか？': ['たぶん'] }), [
+        QUESTION,
+      ]),
     ).toBeUndefined();
   });
 
