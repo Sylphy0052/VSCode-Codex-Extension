@@ -39,7 +39,7 @@ import {
  * - 自動実行が人の対応待ちで止まったら、デスクトップ通知で知らせる（同じ待ちは1回だけ）
  * - Kanbanへ出す出来事（実行可能になった・終了した・警告）をrunごとに溜める
  *
- * mergeと後片付け（分割案7）は未実装のため、PRを作ったノードは`awaitingMerge`で止まる。
+ * - merge待ち・後片付け中のノードは、状態が変わるたびにmergeの列（`RoadmapMergeQueue`）へ渡す
  */
 
 /** runごとに残す出来事の上限。 */
@@ -61,6 +61,8 @@ export interface RoadmapRunControllerDeps {
   notifyStalled(run: RoadmapRun, blockers: readonly number[]): void;
   /** Kanbanの再描画。 */
   onDidChange(): void;
+  /** merge待ち・後片付け中のノードを列へ並べる（分割案7）。 */
+  mergeQueue?: { sync(run: RoadmapRun): void };
   log(message: string): void;
   now?: () => Date;
   newId?: () => string;
@@ -212,6 +214,7 @@ export class RoadmapRunController {
       });
     }
     this.checkStalled(next);
+    this.deps.mergeQueue?.sync(next);
     if (pickIssuesToStart(next).length > 0) {
       this.schedulePump(next.runId);
     }
@@ -267,7 +270,8 @@ export class RoadmapRunController {
     this.pumping.set(runId, task);
   }
 
-  private async updateRun(
+  /** 状態を純粋関数で進めて永続化し、変わったら`handleRunChanged`へ通す。 */
+  async updateRun(
     runId: string,
     updater: (run: RoadmapRun) => RoadmapRun,
   ): Promise<RoadmapRun | undefined> {
@@ -367,6 +371,7 @@ export class RoadmapRunController {
       if (!this.lastSeen.has(run.runId)) {
         this.lastSeen.set(run.runId, run);
       }
+      this.deps.mergeQueue?.sync(run);
     }
     this.deps.onDidChange();
   }

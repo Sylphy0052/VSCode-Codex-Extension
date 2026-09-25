@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.16",
+  "version": "2026.926.17",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1640,6 +1640,21 @@
           "maximum": 2147483,
           "scope": "machine-overridable",
           "markdownDescription": "統合PR/MRをマージする前に、CIチェック（`statusCheckRollup` / パイプライン）の完了を待つ時間の上限（秒）。超えたら赤（CI失敗）と同じ扱いでタスクを失敗として確定する（設計書 §16.36）。CIが1件も設定されていないリポジトリでは待たずに即マージする。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（1800秒）にフォールバックする。"
+        },
+        "agent.roadmapRun.merge.versionBumpCommand": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "ロードマップ実行（Issue #1465）でPRをmergeする直前に、Issueのworktreeで実行する版上げコマンド（例: `node scripts/bump-version.mjs`）。シェル経由で実行し、変更があれば`chore: バージョンを<版>にする`としてcommitする。空なら版上げしない。信頼されたワークスペースでだけ、runごとに1回の許可を得てから実行する。"
+        },
+        "agent.roadmapRun.merge.verifyCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "markdownDescription": "ロードマップ実行（Issue #1465）でPRをmergeする前に、`origin/main`を取り込んだIssueのworktreeで順に実行する検証コマンド（例: `npx tsc --noEmit`）。どれかが失敗したら、修復用のセッションへ差し戻す。空なら検証しない。信頼されたワークスペースでだけ、runごとに1回の許可を得てから実行する。"
         },
         "agent.workflows.ciUpdateBranchMaxRetries": {
           "type": "number",

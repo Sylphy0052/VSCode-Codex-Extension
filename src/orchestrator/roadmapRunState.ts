@@ -514,6 +514,80 @@ export function markIssueFailed(
   });
 }
 
+/** mergeの鍵を取って手順を始める工程（merge待ち・merge中・cleanup）。セッションは持たない。 */
+export const MERGE_STAGE_PHASES: readonly IssuePhase[] = ['awaitingMerge', 'merging', 'cleanup'];
+
+/** merge待ちのノードでmergeの鍵を取った。merge待ちで動いているノードだけを受け付ける。 */
+export function markMerging(run: RoadmapRun, issueNumber: number, now: Date): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (
+    issue === undefined ||
+    issue.progress !== 'running' ||
+    issue.phase !== 'awaitingMerge' ||
+    issue.attention !== 'none'
+  ) {
+    return run;
+  }
+  return withIssue(run, { ...issue, phase: 'merging', updatedAt: now.toISOString() });
+}
+
+/** mergeをリモートで確かめた。後片付け（cleanup）の工程へ進める。 */
+export function markMergeCleanup(run: RoadmapRun, issueNumber: number, now: Date): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (
+    issue === undefined ||
+    issue.progress !== 'running' ||
+    (issue.phase !== 'merging' && issue.phase !== 'awaitingMerge')
+  ) {
+    return run;
+  }
+  return withIssue(run, { ...issue, phase: 'cleanup', updatedAt: now.toISOString() });
+}
+
+/**
+ * merge・cleanupの手順が修復のセッションでは直せない理由で止まった（push・mergeの失敗、
+ * 許可されなかった等）。失敗（要対応）にし、merge中だったらmerge待ちへ戻す
+ * （再実行で`requeueMerge`から並び直す）。
+ */
+export function markMergeFailed(
+  run: RoadmapRun,
+  issueNumber: number,
+  reason: string,
+  now: Date,
+): RoadmapRun {
+  const failed = markIssueFailed(run, issueNumber, reason, now);
+  const issue = getIssue(failed, issueNumber);
+  if (failed === run || issue === undefined || issue.phase !== 'merging') {
+    return failed;
+  }
+  return withIssue(failed, { ...issue, phase: 'awaitingMerge' });
+}
+
+/**
+ * merge・cleanupの途中で失敗したノードを、セッションを開かずにmergeの列へ戻す。
+ * 工程がmerge待ち・merge中・cleanupで、止まっているノードだけを受け付ける。
+ */
+export function requeueMerge(run: RoadmapRun, issueNumber: number, now: Date): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (
+    issue === undefined ||
+    issue.progress !== 'halted' ||
+    issue.phase === undefined ||
+    !MERGE_STAGE_PHASES.includes(issue.phase)
+  ) {
+    return run;
+  }
+  return withIssue(run, {
+    ...issue,
+    progress: 'running',
+    phase: issue.phase === 'merging' ? 'awaitingMerge' : issue.phase,
+    attention: 'none',
+    result: undefined,
+    failure: undefined,
+    updatedAt: now.toISOString(),
+  });
+}
+
 /**
  * run全体を止める・止めを解く。止めている間、スケジューラは自動では新しいノードを始めない
  * （ユーザーがノードを選んで明示で実行するのは妨げない）。
