@@ -10,7 +10,8 @@ import { detectForgeHost, type CliCommandRunner } from './forge';
 import {
   buildPlannerSessionInput,
   planWorkflow,
-  sendSingleTurn,
+  runSingleTurnTask,
+  SingleTurnCancelledError,
   slugifyGoal,
   type PlanWorkflowFailure,
   type PlanWorkflowInput,
@@ -1635,17 +1636,21 @@ export interface RoadmapIssueCreationPort {
  * 相当で起動し、承認要求は全て拒否する。プロンプトの指示ではなく起動時の設定で縛る）を
  * 課される（design.md §16.19「生成セッションは§16.9の分解セッションと同じ制限で走らせる」）
  * ため、独自に実装し直さず `planner.ts` がexportする `buildPlannerSessionInput` /
- * `sendSingleTurn` をそのまま使う。この2関数は「最も安全な値を直接指定し、起動直前に
+ * `runSingleTurnTask` をそのまま使う。この2関数は「最も安全な値を直接指定し、起動直前に
  * ずれていないか確認してから開く」（`assertPlannerSessionIsSafe`）を内包しているため、
  * ここで安全設定を再実装する必要が無い。
  *
  * 生成は1ターンで終わらせる。形式外の応答を利用者が会話画面で確認できるよう、
  * ロードマップ生成セッションは自動で閉じない。
+ *
+ * `signal` を渡すと、中断されたときに実行中のターンも止める（Issue #1442。意味レビューの
+ * 反復に上限が無いため、利用者が止める手段を持たせる）。
  */
 export function createTaskSessionRoadmapGenerationPort(
   host: TaskSessionHost,
   provider: Provider,
   cwd: string,
+  signal?: AbortSignal,
 ): RoadmapGenerationPort {
   return {
     async generate(request: RoadmapGenerationRequest): Promise<RoadmapGenerationResult> {
@@ -1653,21 +1658,16 @@ export function createTaskSessionRoadmapGenerationPort(
       let dispose: (() => void) | undefined;
       let reportFailure: ((message: string) => void) | undefined;
       try {
-        const text = await sendSingleTurn(
-          host,
-          provider,
-          input,
-          request.prompt,
-          undefined,
-          undefined,
-          false,
-          (session) => {
+        const text = await runSingleTurnTask(host, provider, input, request.prompt, {
+          disposeSession: false,
+          onSessionOpened: (session) => {
             dispose = () => session.dispose();
             reportFailure = (message) => {
               session.send(`ロードマップ生成は失敗しました。理由: ${message}`);
             };
           },
-        );
+          signal,
+        });
         return {
           ok: true,
           text,
@@ -1675,6 +1675,10 @@ export function createTaskSessionRoadmapGenerationPort(
           ...(reportFailure !== undefined ? { reportFailure } : {}),
         };
       } catch (e) {
+        // 利用者が止めたターンのセッションは呼び出し側へ渡らないため、ここで閉じる（Issue #1442）
+        if (e instanceof SingleTurnCancelledError) {
+          dispose?.();
+        }
         const message = e instanceof Error ? e.message : String(e);
         return { ok: false, message: `ロードマップ生成セッションが失敗しました: ${message}` };
       }
@@ -1838,6 +1842,11 @@ export interface GenerateRoadmapDeps {
   issueCreation?: RoadmapIssueCreationPort;
   /** 構造検証エラーを生成AIへ差し戻したときの記録先。 */
   log?: (message: string) => void;
+  /**
+   * 利用者の中断（Issue #1442）。意味レビューの反復に上限が無いため、パスの合間に確かめて
+   * 止める。実行中のターンを止めるのは`createTaskSessionRoadmapGenerationPort`へ渡す側の役目。
+   */
+  signal?: AbortSignal;
 }
 
 export interface GenerateRoadmapInput {
@@ -1867,8 +1876,11 @@ export type GenerateRoadmapResult =
     }
   | {
       ok: false;
-      reason: 'pathOutsideWorkspace' | 'generationFailed' | 'invalidRoadmap';
+      reason: 'pathOutsideWorkspace' | 'generationFailed' | 'invalidRoadmap' | 'cancelled';
+      /** 通知に出す1行の要約。個々のエラー・指摘の本文は`details`へ分ける（Issue #1442）。 */
       message: string;
+      /** 検証エラー・レビュー指摘の本文。1件1要素で、出力チャネルへ1行ずつ書く。 */
+      details?: readonly string[];
       /** 形式外の生成結果を保存せず人へ見せるための生の応答。 */
       rawResponse?: string;
     };
@@ -1891,9 +1903,6 @@ export interface RoadmapReviewFinding {
   itemIds: readonly string[];
   message: string;
 }
-
-/** 初回生成を含めて最大3回の候補を評価する。 */
-export const MAX_ROADMAP_GENERATION_PASSES = 3;
 
 const MAX_ROADMAP_REVIEW_FINDINGS = 30;
 const MAX_ROADMAP_REVIEW_MESSAGE_LENGTH = 500;
@@ -2096,7 +2105,7 @@ type StructuredRoadmapResult =
       parsed: ParsedRoadmap;
       validation: RoadmapValidationResult;
     }
-  | { ok: false; message: string; rawResponse: string };
+  | { ok: false; message: string; details?: readonly string[]; rawResponse: string };
 
 /**
  * 構造検証（`validateRoadmap`）のエラーを生成AIへ差し戻し、直った候補を返す（Issue #1430）。
@@ -2115,7 +2124,12 @@ async function repairRoadmapStructure(
     if (validation.errors.length === 0) return { ok: true, markdown, parsed, validation };
     const errors = validation.errors.map((error) => error.message);
     if (pass >= MAX_ROADMAP_STRUCTURE_PASSES) {
-      return { ok: false, message: errors.join(' / '), rawResponse: markdown };
+      return {
+        ok: false,
+        message: `構造検証エラーが${errors.length}件残りました`,
+        details: errors,
+        rawResponse: markdown,
+      };
     }
     log?.(
       `ロードマップの構造検証エラー${errors.length}件を生成AIへ差し戻します（${pass}/${MAX_ROADMAP_STRUCTURE_PASSES - 1}回目）`,
@@ -2136,24 +2150,69 @@ type RefinedRoadmapResult =
       parsed: ParsedRoadmap;
       validation: RoadmapValidationResult;
     }
-  | { ok: false; message: string; rawResponse?: string };
+  | {
+      ok: false;
+      cancelled?: true;
+      message: string;
+      details?: readonly string[];
+      rawResponse?: string;
+    };
 
+function cancelledRefinement(
+  markdown: string,
+  findings: readonly RoadmapReviewFinding[] | undefined,
+): Extract<RefinedRoadmapResult, { ok: false }> {
+  return {
+    ok: false,
+    cancelled: true,
+    message:
+      findings === undefined
+        ? 'ロードマップの意味レビューを中断しました'
+        : `ロードマップの意味レビューを中断しました（指摘が${findings.length}件残っています）`,
+    ...(findings !== undefined ? { details: findings.map((finding) => finding.message) } : {}),
+    rawResponse: markdown,
+  };
+}
+
+/**
+ * `signal.aborted`を直接比べると、TypeScriptが`await`をまたいでも最初の比較の結果で
+ * 絞り込んだままにするため、関数越しに読む。
+ */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/**
+ * 意味レビューと修正を、指摘が無くなるまで繰り返す（Issue #1442）。
+ *
+ * 以前は初回を含めて3候補で打ち切り、指摘が残れば失敗にしていたが、細部の指摘が
+ * 収束しきらずに変換全体が止まっていた。回数では打ち切らず、利用者の中断（`signal`）で
+ * だけ止める。
+ */
 async function refineRoadmap(
   review: RoadmapGenerationPort,
   goal: string,
   initialMarkdown: string,
   log?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<RefinedRoadmapResult> {
   let markdown = initialMarkdown;
-  for (let pass = 1; pass <= MAX_ROADMAP_GENERATION_PASSES; pass += 1) {
+  for (let pass = 1; ; pass += 1) {
+    if (isAborted(signal)) return cancelledRefinement(markdown, undefined);
     // 修正版が構造エラーを持てば、修正を出した側へ差し戻してから意味レビューへ進む
     const structured = await repairRoadmapStructure(review, markdown, log);
-    if (!structured.ok) return structured;
+    if (!structured.ok) {
+      return isAborted(signal) ? cancelledRefinement(markdown, undefined) : structured;
+    }
     markdown = structured.markdown;
     const { parsed, validation } = structured;
 
     const reviewed = await review.generate({ prompt: buildRoadmapReviewPrompt(goal, markdown) });
-    if (!reviewed.ok) return { ok: false, message: reviewed.message, rawResponse: markdown };
+    if (!reviewed.ok) {
+      return isAborted(signal)
+        ? cancelledRefinement(markdown, undefined)
+        : { ok: false, message: reviewed.message, rawResponse: markdown };
+    }
     const semanticFindings = parseRoadmapReviewFindings(reviewed.text);
     reviewed.dispose?.();
     if (semanticFindings === undefined) {
@@ -2168,24 +2227,44 @@ async function refineRoadmap(
       MAX_ROADMAP_REVIEW_FINDINGS,
     );
     if (findings.length === 0) return { ok: true, markdown, parsed, validation };
-    if (pass === MAX_ROADMAP_GENERATION_PASSES) {
-      return {
-        ok: false,
-        message: `ロードマップの意味レビュー指摘が${findings.length}件残りました: ${findings
-          .map((finding) => finding.message)
-          .join(' / ')}`,
-        rawResponse: markdown,
-      };
-    }
+    log?.(
+      `ロードマップの意味レビュー指摘${findings.length}件を修正させます（${pass}回目）:\n` +
+        findings.map((finding) => `- ${finding.message}`).join('\n'),
+    );
+    if (isAborted(signal)) return cancelledRefinement(markdown, findings);
 
     const revised = await review.generate({
       prompt: buildRoadmapRevisionPrompt(goal, markdown, findings),
     });
-    if (!revised.ok) return { ok: false, message: revised.message, rawResponse: markdown };
+    if (!revised.ok) {
+      return isAborted(signal)
+        ? cancelledRefinement(markdown, findings)
+        : { ok: false, message: revised.message, rawResponse: markdown };
+    }
     markdown = stripMarkdownCodeFence(revised.text);
     revised.dispose?.();
   }
-  return { ok: false, message: 'ロードマップの意味レビューに失敗しました' };
+}
+
+/**
+ * 構造検証・意味レビューの失敗を、生成セッションへ伝えてから結果の形へ直す。
+ * セッションへは要約だけでなく本文も渡す（会話画面で何が駄目だったかを読めるように）。
+ */
+function reportRefinementFailure(
+  generated: Extract<RoadmapGenerationResult, { ok: true }>,
+  failure: Extract<RefinedRoadmapResult, { ok: false }>,
+  signal?: AbortSignal,
+): Extract<GenerateRoadmapResult, { ok: false }> {
+  const details = failure.details ?? [];
+  generated.reportFailure?.([failure.message, ...details.map((d) => `- ${d}`)].join('\n'));
+  return {
+    ok: false,
+    // 構造修正のターンを止めた場合も、生成の失敗ではなく中断として扱う
+    reason: failure.cancelled === true || isAborted(signal) ? 'cancelled' : 'invalidRoadmap',
+    message: failure.message,
+    ...(details.length > 0 ? { details } : {}),
+    ...(failure.rawResponse !== undefined ? { rawResponse: failure.rawResponse } : {}),
+  };
 }
 
 /**
@@ -2217,7 +2296,11 @@ export async function generateRoadmap(
     await deps.generation.generate({ prompt }),
   );
   if (!generated.ok) {
-    return { ok: false, reason: 'generationFailed', message: generated.message };
+    return {
+      ok: false,
+      reason: isAborted(deps.signal) ? 'cancelled' : 'generationFailed',
+      message: generated.message,
+    };
   }
 
   const structured = await repairRoadmapStructure(
@@ -2226,30 +2309,26 @@ export async function generateRoadmap(
     deps.log,
   );
   if (!structured.ok) {
-    generated.reportFailure?.(structured.message);
-    return {
-      ok: false,
-      reason: 'invalidRoadmap',
-      message: structured.message,
-      rawResponse: structured.rawResponse,
-    };
+    return reportRefinementFailure(generated, structured, deps.signal);
   }
   let { markdown, parsed, validation } = structured;
 
   if (deps.review !== undefined) {
-    const refined = await refineRoadmap(deps.review, input.goal, markdown, deps.log);
+    const refined = await refineRoadmap(deps.review, input.goal, markdown, deps.log, deps.signal);
     if (!refined.ok) {
-      generated.reportFailure?.(refined.message);
-      return {
-        ok: false,
-        reason: 'invalidRoadmap',
-        message: refined.message,
-        ...(refined.rawResponse !== undefined ? { rawResponse: refined.rawResponse } : {}),
-      };
+      return reportRefinementFailure(generated, refined, deps.signal);
     }
     markdown = refined.markdown;
     parsed = refined.parsed;
     validation = refined.validation;
+  }
+  // 最後のレビューが通った直後に取消された場合も、起票・保存へ進まない（Issue #1442）
+  if (isAborted(deps.signal)) {
+    return reportRefinementFailure(
+      generated,
+      cancelledRefinement(markdown, undefined),
+      deps.signal,
+    );
   }
 
   if (deps.issueCreation !== undefined) {
@@ -2270,14 +2349,12 @@ export async function generateRoadmap(
       parsed = parseRoadmapMarkdown(markdown);
       validation = validateRoadmap(parsed);
       if (validation.errors.length > 0) {
-        const message = validation.errors.map((error) => error.message).join(' / ');
-        generated.reportFailure?.(message);
-        return {
+        return reportRefinementFailure(generated, {
           ok: false,
-          reason: 'invalidRoadmap',
-          message,
+          message: `Issue番号を書き戻した後の構造検証エラーが${validation.errors.length}件あります`,
+          details: validation.errors.map((error) => error.message),
           rawResponse: generated.text,
-        };
+        });
       }
     }
   }
@@ -2341,7 +2418,7 @@ export interface ConvertMarkdownToRoadmapInput extends RoadmapConversionPromptIn
 /** 任意のMarkdownをワークフロー用ロードマップへ変換して保存する。 */
 export async function convertMarkdownToRoadmap(
   deps: Pick<GenerateRoadmapDeps, 'generation' | 'fs'> &
-    Partial<Pick<GenerateRoadmapDeps, 'review' | 'log'>>,
+    Partial<Pick<GenerateRoadmapDeps, 'review' | 'log' | 'signal'>>,
   input: ConvertMarkdownToRoadmapInput,
 ): Promise<GenerateRoadmapResult> {
   const slug =
@@ -2356,7 +2433,11 @@ export async function convertMarkdownToRoadmap(
     await deps.generation.generate({ prompt: buildRoadmapConversionPrompt(input) }),
   );
   if (!generated.ok) {
-    return { ok: false, reason: 'generationFailed', message: generated.message };
+    return {
+      ok: false,
+      reason: isAborted(deps.signal) ? 'cancelled' : 'generationFailed',
+      message: generated.message,
+    };
   }
 
   const structured = await repairRoadmapStructure(
@@ -2365,13 +2446,7 @@ export async function convertMarkdownToRoadmap(
     deps.log,
   );
   if (!structured.ok) {
-    generated.reportFailure?.(structured.message);
-    return {
-      ok: false,
-      reason: 'invalidRoadmap',
-      message: structured.message,
-      rawResponse: structured.rawResponse,
-    };
+    return reportRefinementFailure(generated, structured, deps.signal);
   }
   let { markdown, parsed, validation } = structured;
   if (deps.review !== undefined) {
@@ -2380,19 +2455,22 @@ export async function convertMarkdownToRoadmap(
       `入力Markdown「${input.sourcePath}」を忠実に成果中心のロードマップへ変換する`,
       markdown,
       deps.log,
+      deps.signal,
     );
     if (!refined.ok) {
-      generated.reportFailure?.(refined.message);
-      return {
-        ok: false,
-        reason: 'invalidRoadmap',
-        message: refined.message,
-        ...(refined.rawResponse !== undefined ? { rawResponse: refined.rawResponse } : {}),
-      };
+      return reportRefinementFailure(generated, refined, deps.signal);
     }
     markdown = refined.markdown;
     parsed = refined.parsed;
     validation = refined.validation;
+  }
+  // 最後のレビューが通った直後に取消された場合も、起票・保存へ進まない（Issue #1442）
+  if (isAborted(deps.signal)) {
+    return reportRefinementFailure(
+      generated,
+      cancelledRefinement(markdown, undefined),
+      deps.signal,
+    );
   }
   if (input.sourceIssue !== undefined) {
     markdown = withRoadmapSourceIssue(markdown, input.sourceIssue);
