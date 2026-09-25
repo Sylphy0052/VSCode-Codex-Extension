@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  CLASSIFIER_MODELS,
   CLASSIFIER_TIMEOUT_MS,
   buildClassifierPrompt,
   classifyHandoff,
   parseAssessment,
   type HandoffClassifierInput,
 } from '../../src/view/handoffClassifier';
+import { REFLEX_MODELS } from '../../src/reflex/reflexCli';
 
 function input(over: Partial<HandoffClassifierInput> = {}): HandoffClassifierInput {
   return {
@@ -199,10 +199,10 @@ describe('classifyHandoff', () => {
     expect(run.mock.calls[0]?.[0]).toMatchObject({
       provider: 'codex',
       executable: '/usr/bin/codex',
-      model: CLASSIFIER_MODELS.codex,
+      model: REFLEX_MODELS.codex,
     });
-    expect(CLASSIFIER_MODELS.claude).toBe('sonnet');
-    expect(CLASSIFIER_MODELS.codex).toBe('gpt-6-luna');
+    expect(REFLEX_MODELS.claude).toBe('sonnet');
+    expect(REFLEX_MODELS.codex).toBe('gpt-6-luna');
   });
 
   it('既定のタイムアウトは120秒で、設定された値はそのまま渡す（Issue #1097）', async () => {

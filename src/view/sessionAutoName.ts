@@ -1,13 +1,9 @@
 import type { ChatItem } from '../appserver/chatState';
-import {
-  runHeadlessPromptDetailed,
-  type HeadlessCliDeps,
-  type HeadlessOutcome,
-  type HeadlessProvider,
-} from '../loop/headlessCli';
+import type { HeadlessCliDeps, HeadlessOutcome, HeadlessProvider } from '../loop/headlessCli';
+import { runReflexPrompt } from '../reflex/reflexCli';
 import type { MementoLike } from '../util/memento';
 import { generationMarkOf, stripGeneration } from './handoff';
-import { CLASSIFIER_MODELS, CLASSIFIER_TIMEOUT_MS } from './handoffClassifier';
+import { CLASSIFIER_TIMEOUT_MS } from './handoffClassifier';
 
 /**
  * タブ名の自動付け直し（Issue #1426）。
@@ -319,16 +315,15 @@ export async function summarizeSessionName(
   if (material === undefined) {
     return undefined;
   }
-  const run = deps.run ?? runHeadlessPromptDetailed;
   const timeoutMs = deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS;
   try {
-    const outcome = await run(
+    const outcome = await runReflexPrompt(
       {
         provider: deps.provider,
         executable: deps.executable,
-        model: CLASSIFIER_MODELS[deps.provider],
         timeoutMs,
         ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
+        ...(deps.run === undefined ? {} : { run: deps.run }),
       },
       buildPrompt(material),
     );

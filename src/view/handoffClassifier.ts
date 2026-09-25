@@ -1,9 +1,5 @@
-import {
-  runHeadlessPromptDetailed,
-  type HeadlessCliDeps,
-  type HeadlessOutcome,
-  type HeadlessProvider,
-} from '../loop/headlessCli';
+import type { HeadlessCliDeps, HeadlessOutcome, HeadlessProvider } from '../loop/headlessCli';
+import { runReflexPrompt } from '../reflex/reflexCli';
 import {
   TASK_TYPES,
   isAssessmentScore,
@@ -31,19 +27,6 @@ import {
  * `undefined` を返し、呼び出し側は引き継ぎ元のmodel / effortをそのまま持ち越す。分類の
  * 失敗で引き継ぎそのものを止めない。
  */
-
-/**
- * 分類に使うモデル（ティアの最下位）。
- *
- * 分類は短いJSONを1つ返すだけの作業のため、重いモデルを起動する理由が無い。既存の脇役
- * （Evaluator / Advisor）は `haiku` を既定にしているが、作業の重さの見積もりには荷が勝つ
- * 場面がある。1段上を固定で使う。
- */
-export const CLASSIFIER_MODELS: Record<HeadlessProvider, string> = {
-  claude: 'sonnet',
-  // CodexはClaude Codeのような短縮名を受け付けないため、正式なモデルslugを渡す。
-  codex: 'gpt-6-luna',
-};
 
 /**
  * 分類の待ち時間の既定（Issue #1097で30秒から延長）。
@@ -371,15 +354,15 @@ export async function classifyHandoff(
   deps: HandoffClassifierDeps,
   input: HandoffClassifierInput,
 ): Promise<TaskAssessment | undefined> {
-  const run = deps.run ?? runHeadlessPromptDetailed;
   try {
-    const outcome = await run(
+    // モデルは会話しているCLIに合わせる（`REFLEX_MODELS`。Issue #1434で共通化）
+    const outcome = await runReflexPrompt(
       {
         provider: deps.provider,
         executable: deps.executable,
-        model: CLASSIFIER_MODELS[deps.provider],
         timeoutMs: deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS,
         ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
+        ...(deps.run === undefined ? {} : { run: deps.run }),
       },
       buildClassifierPrompt(input),
     );
