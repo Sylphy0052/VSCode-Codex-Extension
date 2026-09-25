@@ -11,6 +11,7 @@ import {
   buildPlannerSessionInput,
   planWorkflow,
   runSingleTurnTask,
+  SingleTurnCancelledError,
   slugifyGoal,
   type PlanWorkflowFailure,
   type PlanWorkflowInput,
@@ -1674,6 +1675,10 @@ export function createTaskSessionRoadmapGenerationPort(
           ...(reportFailure !== undefined ? { reportFailure } : {}),
         };
       } catch (e) {
+        // 利用者が止めたターンのセッションは呼び出し側へ渡らないため、ここで閉じる（Issue #1442）
+        if (e instanceof SingleTurnCancelledError) {
+          dispose?.();
+        }
         const message = e instanceof Error ? e.message : String(e);
         return { ok: false, message: `ロードマップ生成セッションが失敗しました: ${message}` };
       }
@@ -2156,7 +2161,7 @@ type RefinedRoadmapResult =
 function cancelledRefinement(
   markdown: string,
   findings: readonly RoadmapReviewFinding[] | undefined,
-): RefinedRoadmapResult {
+): Extract<RefinedRoadmapResult, { ok: false }> {
   return {
     ok: false,
     cancelled: true,
@@ -2317,6 +2322,14 @@ export async function generateRoadmap(
     parsed = refined.parsed;
     validation = refined.validation;
   }
+  // 最後のレビューが通った直後に取消された場合も、起票・保存へ進まない（Issue #1442）
+  if (isAborted(deps.signal)) {
+    return reportRefinementFailure(
+      generated,
+      cancelledRefinement(markdown, undefined),
+      deps.signal,
+    );
+  }
 
   if (deps.issueCreation !== undefined) {
     const missingIssueItems = allItems(parsed).filter((item) => item.issue === undefined);
@@ -2450,6 +2463,14 @@ export async function convertMarkdownToRoadmap(
     markdown = refined.markdown;
     parsed = refined.parsed;
     validation = refined.validation;
+  }
+  // 最後のレビューが通った直後に取消された場合も、起票・保存へ進まない（Issue #1442）
+  if (isAborted(deps.signal)) {
+    return reportRefinementFailure(
+      generated,
+      cancelledRefinement(markdown, undefined),
+      deps.signal,
+    );
   }
   if (input.sourceIssue !== undefined) {
     markdown = withRoadmapSourceIssue(markdown, input.sourceIssue);
