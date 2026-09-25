@@ -69,8 +69,22 @@ const HEARTBEAT_MS = 15_000;
  * （`sessionKanbanView.ts`の`schedulePost`と同じ流儀）。
  */
 const WRITE_INTERVAL_MS = 1_000;
-/** これを超えて`updatedAt`が更新されていないウィンドウは、落ちたものとして除外する。 */
-const STALE_MS = 30_000;
+/**
+ * これを超えて`updatedAt`が更新されていないウィンドウは、落ちたものとして除外する。
+ *
+ * heartbeatは`HEARTBEAT_MS`（15秒）ごと。高負荷でheartbeatが1〜2回遅れても
+ * stale⇔生存を行き来しないよう、3回分の余裕を持たせる（Issue #1461）。
+ */
+const STALE_MS = 45_000;
+/** `fs.watch`通知による読み直しの間引き間隔（Issue #1461）。 */
+const RELOAD_DEBOUNCE_MS = 300;
+/**
+ * 通知の取りこぼしに備えた全件照合の周期。60〜120秒の間で選ぶ（Issue #1461）。
+ * `fs.watch`はホストをまたぐ書き込み（NFS）を通知しないため、これが実質的な追従手段になる。
+ */
+const FULL_RECONCILE_MS = 90_000;
+/** これより古い`sessions/*.json`・その`.tmp-*`は使われていないとみなして消す（Issue #1461）。 */
+const SESSION_FILE_MAX_AGE_MS = 60 * 60 * 1000;
 
 export function generateWindowId(): string {
   return randomUUID();
@@ -168,9 +182,18 @@ function parseSharedSessionFile(raw: string): SharedSessionFile | undefined {
   };
 }
 
-/** 書き込みは常に一時ファイル→`rename`で行う。読み手が書きかけの内容を拾わないようにする。 */
-async function writeAtomic(filePath: string, content: string): Promise<void> {
-  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+/**
+ * 書き込みは常に一時ファイル→`rename`で行う。読み手が書きかけの内容を拾わないようにする。
+ *
+ * `tmpId`省略時はpidと時刻で作る。同じファイルへ繰り返し書くもの（`SessionHubWriter`）は
+ * 世代番号を渡し、同一ミリ秒内の衝突を避ける（Issue #1461）。
+ */
+async function writeAtomic(
+  filePath: string,
+  content: string,
+  tmpId: string = `${process.pid}-${Date.now()}`,
+): Promise<void> {
+  const tmp = `${filePath}.tmp-${tmpId}`;
   await writeFile(tmp, content, 'utf8');
   await rename(tmp, filePath);
 }
@@ -190,6 +213,15 @@ export class SessionHubWriter {
   private writeTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWriteAt = 0;
   private readonly filePath: string;
+  /**
+   * 実行中の書き込み。同じファイルへの書き込みを直列化し、`dispose()`はこれを待ってから
+   * `unlink`する（待たないと、後から`rename`が済んで消したファイルが復活する。Issue #1461）。
+   */
+  private writeInFlight: Promise<void> | undefined;
+  /** 実行中に次の状態が来た印。終わった直後にもう1回だけ書く。 */
+  private writePending = false;
+  /** tmpファイル名の一意性をpidと組み合わせて保つための世代番号。 */
+  private writeGeneration = 0;
 
   constructor(
     private readonly root: string,
@@ -225,22 +257,46 @@ export class SessionHubWriter {
     }, WRITE_INTERVAL_MS - since);
   }
 
+  /**
+   * 実行中に呼ばれたら、印だけ付けて即座に戻る。終わった側がもう1回書き直すため、
+   * 同じファイルへの`writeAtomic`が重ならない（Issue #1461）。
+   */
   async write(): Promise<void> {
     if (this.disposed) {
       return;
     }
-    this.lastWriteAt = Date.now();
-    const payload: SharedSessionFile = {
-      windowId: this.windowId,
-      updatedAt: Date.now(),
-      sessions: [...this.getSessions()],
-    };
-    try {
-      await mkdir(sessionsDir(this.root), { recursive: true });
-      await writeAtomic(this.filePath, JSON.stringify(payload));
-    } catch (e) {
-      this.log.warn(`セッション統括: 共有ファイルの書き込みに失敗しました: ${String(e)}`);
+    if (this.writeInFlight !== undefined) {
+      this.writePending = true;
+      return;
     }
+    this.writeInFlight = this.writeLoop();
+    try {
+      await this.writeInFlight;
+    } finally {
+      this.writeInFlight = undefined;
+    }
+  }
+
+  private async writeLoop(): Promise<void> {
+    do {
+      this.writePending = false;
+      this.lastWriteAt = Date.now();
+      const payload: SharedSessionFile = {
+        windowId: this.windowId,
+        updatedAt: Date.now(),
+        sessions: [...this.getSessions()],
+      };
+      try {
+        await mkdir(sessionsDir(this.root), { recursive: true });
+        await writeAtomic(
+          this.filePath,
+          JSON.stringify(payload),
+          `${process.pid}-${this.writeGeneration++}`,
+        );
+      } catch (e) {
+        this.log.warn(`セッション統括: 共有ファイルの書き込みに失敗しました: ${String(e)}`);
+      }
+    } while (this.writePending && !this.disposed);
   }
 
   /** 拡張機能の終了時（`deactivate`）に呼ぶ。消せなくてもheartbeat失効で自然に除外される。 */
@@ -254,6 +310,8 @@ export class SessionHubWriter {
       clearTimeout(this.writeTimer);
       this.writeTimer = undefined;
     }
+    // `disposed`が立ったので、実行中の書き込みは今の1回で止まる
+    await this.writeInFlight?.catch(() => undefined);
     try {
       await unlink(this.filePath);
     } catch {
@@ -262,15 +320,46 @@ export class SessionHubWriter {
   }
 }
 
-/** 全ウィンドウの共有ファイルを読み、`fs.watch`で追従する。 */
+/**
+ * 他ウィンドウ1つ分の読み込み状態。`mtimeMs`・`size`・`ino`が前回と同じなら読み直さない（Issue #1461）。
+ *
+ * 書き込みは`rename`で置き換えるので、書くたびに`ino`が変わる。同じ長さの中身への
+ * 書き換えや、mtimeの分解能が粗いファイルシステム（NFS等）でも変化を見落とさない。
+ */
+interface SessionFileCacheEntry {
+  mtimeMs: number;
+  size: number;
+  ino: number;
+  /** 読めた・staleでなかった場合の中身。stale判定だけ通った場合は無い（キャッシュから消す）。 */
+  state: SharedWindowSessions | undefined;
+}
+
+/**
+ * 全ウィンドウの共有ファイルを読み、`fs.watch`で追従する。
+ *
+ * 通知ごとの全件読み直しをやめ、通知に付くファイル名だけを`stat`し、`mtimeMs`・`size`が
+ * 変わっていなければ読まない（Issue #1461）。取りこぼしに備え、通知が無い・ファイル名が
+ * 取れない・起動時・定期の場合だけ全件を照合する。
+ */
 export class SessionHubReader implements vscode.Disposable {
   private cache: SharedWindowSessions[] = [];
+  /** ウィンドウごとの読み込み状態。キーはファイル名から取った`windowId`。 */
+  private readonly fileState = new Map<string, SessionFileCacheEntry>();
   private watcher: FSWatcher | undefined;
   /** `dispose()`済みか。監視の通知で走り出した読み込みが、破棄後に発火しないようにする。 */
   private disposed = false;
   private readonly emitter = new vscode.EventEmitter<void>();
   /** 他ウィンドウの一覧が変わったとき。呼び出し側は`getOthers()`を読み直して再描画する。 */
   readonly onDidChange = this.emitter.event;
+
+  /** 次に読むべきファイル名。全件照合が要る場合は`pendingFullScan`だけを立てる。 */
+  private readonly pendingNames = new Set<string>();
+  private pendingFullScan = false;
+  private reloadRunning = false;
+  private reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastReloadAt = 0;
+  private fullReconcileTimer: ReturnType<typeof setInterval> | undefined;
+  private cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly root: string,
@@ -279,18 +368,29 @@ export class SessionHubReader implements vscode.Disposable {
   ) {}
 
   start(): void {
-    void this.reload();
+    // 起動時は全件照合。取りこぼしなく最初の一覧を作る
+    this.scheduleReload(null);
     void mkdir(sessionsDir(this.root), { recursive: true })
       .then(() => {
-        this.watcher = watch(sessionsDir(this.root), () => void this.reload());
+        // `mkdir`を待つ間に破棄されていれば、監視とタイマーを張らない（張ると後から消せない）
+        if (this.disposed) {
+          return;
+        }
+        this.watcher = watch(sessionsDir(this.root), (_eventType, filename) => {
+          this.scheduleReload(filename);
+        });
         // 監視先が消える・権限が変わると非同期の`error`が飛ぶ。拾わないと拡張ホストごと落ちる
         this.watcher.on('error', (e: unknown) => {
           this.log.warn(`セッション統括: 共有ディレクトリの監視が止まりました: ${String(e)}`);
         });
+        // 通知の取りこぼし（NFS越しの他ホストからの書き込み等）に備えた定期の全件照合
+        this.fullReconcileTimer = setInterval(() => this.scheduleReload(null), FULL_RECONCILE_MS);
       })
       .catch((e: unknown) => {
         this.log.warn(`セッション統括: 共有ディレクトリの監視開始に失敗しました: ${String(e)}`);
       });
+    void this.cleanupStaleSessionFiles();
+    this.cleanupTimer = setInterval(() => void this.cleanupStaleSessionFiles(), REQUEST_TTL_MS);
   }
 
   /** 直近に読み込んだ、自分以外のウィンドウのセッション一覧（同期・キャッシュ値）。 */
@@ -298,7 +398,174 @@ export class SessionHubReader implements vscode.Disposable {
     return this.cache;
   }
 
-  private async reload(): Promise<void> {
+  /**
+   * `fs.watch`の通知（または`null`＝全件照合の要求）を受け、読み直しを予約する。
+   *
+   * 一時ファイル・無関係な拡張子の通知はここで捨てる。実行中に来た分は`pendingNames`/
+   * `pendingFullScan`に積むだけにし、終わった直後の1回にまとめる（Issue #1461）。
+   */
+  private scheduleReload(filename: string | Buffer | null): void {
+    if (this.disposed) {
+      return;
+    }
+    if (filename === null) {
+      this.pendingFullScan = true;
+    } else {
+      const name = typeof filename === 'string' ? filename : filename.toString('utf8');
+      if (name.includes('.tmp-') || !name.endsWith('.json')) {
+        return;
+      }
+      this.pendingNames.add(name);
+    }
+    this.requestReload();
+  }
+
+  private requestReload(): void {
+    if (this.disposed || this.reloadRunning || this.reloadTimer !== undefined) {
+      // 実行中・予約済みなら何もしない。積んだ分は終了後の再実行で拾われる
+      return;
+    }
+    const since = Date.now() - this.lastReloadAt;
+    if (since >= RELOAD_DEBOUNCE_MS) {
+      void this.runReload();
+      return;
+    }
+    this.reloadTimer = setTimeout(() => {
+      this.reloadTimer = undefined;
+      void this.runReload();
+    }, RELOAD_DEBOUNCE_MS - since);
+  }
+
+  private async runReload(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.reloadRunning = true;
+    this.lastReloadAt = Date.now();
+    try {
+      if (this.pendingFullScan) {
+        this.pendingFullScan = false;
+        this.pendingNames.clear();
+        await this.reconcileAll();
+      } else if (this.pendingNames.size > 0) {
+        const names = [...this.pendingNames];
+        this.pendingNames.clear();
+        await this.reconcileNames(names);
+      }
+    } finally {
+      this.reloadRunning = false;
+      // 実行中に新しい通知が積まれていれば、間引きを挟んでもう1回だけ実行する
+      if (!this.disposed && (this.pendingFullScan || this.pendingNames.size > 0)) {
+        this.requestReload();
+      }
+    }
+  }
+
+  /** 通知の取りこぼし対策の全件照合。`stat`で変化を見て、変わったファイルだけ読む。 */
+  private async reconcileAll(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(sessionsDir(this.root));
+    } catch {
+      this.fileState.clear();
+      this.rebuildCacheAndFire();
+      return;
+    }
+    const jsonNames = names.filter((name) => name.endsWith('.json'));
+    const present = new Set(jsonNames);
+    // 消えたファイルはキャッシュからも消す
+    for (const windowId of this.fileState.keys()) {
+      if (!present.has(`${windowId}.json`)) {
+        this.fileState.delete(windowId);
+      }
+    }
+    for (const name of jsonNames) {
+      await this.checkFile(name);
+    }
+    this.rebuildCacheAndFire();
+  }
+
+  private async reconcileNames(names: readonly string[]): Promise<void> {
+    for (const name of names) {
+      await this.checkFile(name);
+    }
+    this.rebuildCacheAndFire();
+  }
+
+  /**
+   * 1ファイルだけ`stat`し、`mtimeMs`・`size`が前回と同じなら読まない。staleなら読まずに
+   * 除外する（Issue #1461 受入基準1・3）。
+   */
+  private async checkFile(name: string): Promise<void> {
+    const windowId = name.slice(0, -'.json'.length);
+    // 形の合わないファイル名は読まない。この値は要求の置き場所になる（Issue #1258）
+    if (windowId === this.selfWindowId || !isSafeId(windowId)) {
+      return;
+    }
+    const filePath = path.join(sessionsDir(this.root), name);
+    let info: { mtimeMs: number; size: number; ino: number };
+    try {
+      info = await stat(filePath);
+    } catch {
+      // 消えた
+      this.fileState.delete(windowId);
+      return;
+    }
+    if (Date.now() - info.mtimeMs > STALE_MS) {
+      // staleなファイルは読まずに除外する
+      this.fileState.delete(windowId);
+      return;
+    }
+    const cached = this.fileState.get(windowId);
+    if (
+      cached !== undefined &&
+      cached.mtimeMs === info.mtimeMs &&
+      cached.size === info.size &&
+      cached.ino === info.ino
+    ) {
+      return; // 変化なし。読み直さない
+    }
+    try {
+      const raw = await readFile(filePath, 'utf8');
+      const parsed = parseSharedSessionFile(raw);
+      const now = Date.now();
+      if (parsed === undefined || now - parsed.updatedAt > STALE_MS) {
+        this.fileState.delete(windowId);
+        return;
+      }
+      // 採用するのはファイル名から取った`windowId`で、ファイルの中身の値ではない
+      // （Issue #1258）。この値は要求ファイルの置き場所（`requests/<windowId>/`）を
+      // 組み立てるのに使われるため、中身を信じると共有ディレクトリの外へ書かせられる
+      this.fileState.set(windowId, {
+        mtimeMs: info.mtimeMs,
+        size: info.size,
+        ino: info.ino,
+        state: { ...parsed, windowId },
+      });
+    } catch {
+      // 書き込み途中・破損したファイルは無視する（次の通知・heartbeatで直る）
+    }
+  }
+
+  private rebuildCacheAndFire(): void {
+    // 変化の無いファイルは読み直さないため、落ちたウィンドウの分はここで失効させる
+    const now = Date.now();
+    this.cache = [...this.fileState.values()]
+      .map((entry) => entry.state)
+      .filter(
+        (state): state is SharedWindowSessions =>
+          state !== undefined && now - state.updatedAt <= STALE_MS,
+      );
+    this.fireIfAlive();
+  }
+
+  /**
+   * mtimeが`SESSION_FILE_MAX_AGE_MS`より古い`sessions/*.json`と`.tmp-*`を消す（Issue #1461）。
+   *
+   * 生きているウィンドウは`HEARTBEAT_MS`ごとに自分のファイルを書き直すため、閾値を
+   * 1時間に取れば誤って消さない。起動時と`REQUEST_TTL_MS`と同じ周期で呼ぶ。
+   */
+  private async cleanupStaleSessionFiles(): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -306,38 +573,28 @@ export class SessionHubReader implements vscode.Disposable {
     try {
       names = await readdir(sessionsDir(this.root));
     } catch {
-      this.cache = [];
-      this.fireIfAlive();
       return;
     }
     const now = Date.now();
-    const results: SharedWindowSessions[] = [];
     for (const name of names) {
-      if (!name.endsWith('.json')) {
-        continue;
+      const isSessionFile = name.endsWith('.json');
+      if (!isSessionFile && !name.includes('.tmp-')) {
+        continue; // 無関係のファイルには触れない
       }
-      const windowId = name.slice(0, -'.json'.length);
-      // 形の合わないファイル名は読まない。この値は要求の置き場所になる（Issue #1258）
-      if (windowId === this.selfWindowId || !isSafeId(windowId)) {
-        continue;
-      }
+      const filePath = path.join(sessionsDir(this.root), name);
       try {
-        const raw = await readFile(path.join(sessionsDir(this.root), name), 'utf8');
-        const parsed = parseSharedSessionFile(raw);
-        if (parsed === undefined || now - parsed.updatedAt > STALE_MS) {
+        const info = await stat(filePath);
+        if (now - info.mtimeMs <= SESSION_FILE_MAX_AGE_MS) {
           continue;
         }
-        // 採用するのはファイル名から取った`windowId`で、ファイルの中身の値ではない
-        // （Issue #1258）。この値は要求ファイルの置き場所（`requests/<windowId>/`）を
-        // 組み立てるのに使われるため、中身を信じると共有ディレクトリの外へ書かせられる
-        results.push({ ...parsed, windowId });
+        await unlink(filePath);
+        if (isSessionFile) {
+          this.fileState.delete(name.slice(0, -'.json'.length));
+        }
       } catch {
-        // 書き込み途中・破損したファイルは無視する（次のheartbeatで直る）
-        continue;
+        // 統計・削除に失敗しても次の周回に任せる（他ウィンドウが同時に書き換えた等）
       }
     }
-    this.cache = results;
-    this.fireIfAlive();
   }
 
   /** 読み込みの待ち時間のうちに破棄されていることがあるため、発火の直前にも確かめる。 */
@@ -351,6 +608,18 @@ export class SessionHubReader implements vscode.Disposable {
   dispose(): void {
     this.disposed = true;
     this.watcher?.close();
+    if (this.reloadTimer !== undefined) {
+      clearTimeout(this.reloadTimer);
+      this.reloadTimer = undefined;
+    }
+    if (this.fullReconcileTimer !== undefined) {
+      clearInterval(this.fullReconcileTimer);
+      this.fullReconcileTimer = undefined;
+    }
+    if (this.cleanupTimer !== undefined) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
     this.emitter.dispose();
   }
 }
