@@ -2690,6 +2690,7 @@ async function runRoadmap(
       issues,
       fs: nodeRoadmapFileSystem,
       issueCreation: createRoadmapIssueCreationPort(),
+      log: (message) => log.info(message),
     },
     {
       goal,
@@ -2788,6 +2789,7 @@ async function convertMarkdownFileToRoadmap(
           generation,
           review: generation,
           fs: nodeRoadmapFileSystem,
+          log: (message) => log.info(message),
         },
         {
           workspaceRoot,
@@ -3087,7 +3089,12 @@ async function planWorkflowFromRoadmapIssueCommand(
     { location: vscode.ProgressLocation.Notification, title: 'ロードマップへ変換しています…' },
     () =>
       convertMarkdownToRoadmap(
-        { generation, review: generation, fs: nodeRoadmapFileSystem },
+        {
+          generation,
+          review: generation,
+          fs: nodeRoadmapFileSystem,
+          log: (message) => log.info(message),
+        },
         {
           workspaceRoot,
           roadmapDir,
