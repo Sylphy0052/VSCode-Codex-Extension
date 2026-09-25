@@ -18,7 +18,7 @@ import {
   type PlanWorkflowSuccess,
   type WorkspaceSummary,
 } from './planner';
-import { sanitizeForLog } from './sanitize';
+import { sanitizeForLog, stripControlCharsPreservingNewlines } from './sanitize';
 import { SerialQueue } from './serialQueue';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSessionHost } from './taskSession';
@@ -2040,8 +2040,10 @@ function formatRefinementSource(
   id: string,
   nonce: string,
 ): string {
+  // `formatUntrusted`と同じく制御文字を除いた後の長さで判定する（除いて上限内に収まる場合に
+  // 切り詰めたと書かないため）
   const { truncated } = truncateByCodePoint(
-    basis.sourceMarkdown,
+    stripControlCharsPreservingNewlines(basis.sourceMarkdown),
     MAX_ROADMAP_REVIEW_CONTENT_LENGTH,
   );
   return [
