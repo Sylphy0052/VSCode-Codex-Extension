@@ -330,6 +330,9 @@ export function startAttempt(
  * Issueセッションが報告した工程を表示へ反映する。受け付けない報告と、
  * セッションが自己申告してよい工程（`SESSION_REPORTABLE_PHASES`）以外は無視する。
  * merge以降の工程はControllerが観測した事実でだけ進める。
+ *
+ * 同じ実行回の中での報告の順序は保証しない（遅れて届いた報告で表示が一時的に戻りうる）。
+ * 表示を補うだけの値のため、順序番号は持たせない。
  */
 export function applySessionPhase(
   run: RoadmapRun,
@@ -407,6 +410,7 @@ export function markIssueStopped(run: RoadmapRun, issueNumber: number, now: Date
     progress: 'halted',
     attention: 'none',
     result: 'stopped',
+    failure: undefined,
     updatedAt: at,
   });
 }
@@ -436,6 +440,7 @@ export interface IssueExternalFacts {
  *   （以後、旧セッションからの報告は`noActiveAttempt`で拒否される）
  * - merge中だったノードはmergeの鍵が失われているため、merge待ちへ戻して並び直させる
  * - 着手済みでworktreeが無くなっていたら、失敗（要対応）にする
+ * - ユーザーが停止したノードは、PRがmerge済みのときだけ上の通り進め、それ以外は触らない
  *
  * merge待ち・cleanupのノードはセッションを持たないので、そのまま残す（Controllerが再開する）。
  */
@@ -471,7 +476,14 @@ export function reconcileRoadmapRunOnReload(
               result: undefined,
               failure: undefined,
             };
-    } else if (issue.worktreePath !== undefined && facts.worktreeExists === false) {
+    } else if (issue.result === 'stopped') {
+      // ユーザーが止めたノード。停止後にworktreeを片付けても失敗へすり替えない
+      continue;
+    } else if (
+      issue.worktreePath !== undefined &&
+      facts.worktreeExists === false &&
+      issue.attention !== 'failed'
+    ) {
       updated = {
         ...endCurrentAttempt(issue, at),
         progress: 'halted',

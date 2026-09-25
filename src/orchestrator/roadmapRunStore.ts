@@ -24,6 +24,27 @@ function trimRuns(runs: readonly RoadmapRun[]): RoadmapRun[] {
     .slice(0, MAX_STORED_ROADMAP_RUNS);
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * 遷移関数が前提にする骨格（版、識別子、`issues`、`plan.nodes`）だけを確かめる。
+ * 骨格の壊れた要素を読んで遷移関数が例外で落ちないようにする。
+ */
+function isStoredRoadmapRun(r: unknown): r is RoadmapRun {
+  return (
+    isPlainObject(r) &&
+    r.schemaVersion === ROADMAP_RUN_SCHEMA_VERSION &&
+    typeof r.runId === 'string' &&
+    typeof r.startedAt === 'string' &&
+    isPlainObject(r.issues) &&
+    Object.values(r.issues).every(isPlainObject) &&
+    isPlainObject(r.plan) &&
+    Array.isArray(r.plan.nodes)
+  );
+}
+
 export class RoadmapRunStore {
   private readonly queue = new SerialQueue();
 
@@ -35,12 +56,7 @@ export class RoadmapRunStore {
     if (!Array.isArray(raw)) {
       return [];
     }
-    return raw.filter(
-      (r): r is RoadmapRun =>
-        typeof r === 'object' &&
-        r !== null &&
-        (r as { schemaVersion?: unknown }).schemaVersion === ROADMAP_RUN_SCHEMA_VERSION,
-    );
+    return raw.filter(isStoredRoadmapRun);
   }
 
   find(runId: string): RoadmapRun | undefined {
