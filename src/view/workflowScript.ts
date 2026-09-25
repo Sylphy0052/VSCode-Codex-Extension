@@ -939,6 +939,7 @@ export function workflowScript(): string {
     if (
       task.state === 'running'
       || task.state === 'waitingApproval'
+      || task.state === 'waitingOverlap'
       || (task.state === 'merging' && task.mergeResolutionActive)
     ) {
       const stopBtn = text('button', 'danger', 'タスク停止');

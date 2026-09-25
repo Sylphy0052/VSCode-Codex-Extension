@@ -54,12 +54,11 @@ export async function checkTaskOverlap(
     });
     await Promise.all(
       targets.map(async ([, liveTask]) => {
-        const files = await measureWorktreeFiles(
-          self.deps.git,
-          liveTask.cwd,
-          liveTask.originCommit,
-        );
-        if (files !== undefined) {
+        const origin = liveTask.originCommit;
+        const files = await measureWorktreeFiles(self.deps.git, liveTask.cwd, origin);
+        // 測っている間に統合ブランチを取り込んで分岐元が進んだ場合、古い分岐元からの差分には
+        // 取り込んだ相手の変更が混ざるため捨てる
+        if (files !== undefined && liveTask.originCommit === origin) {
           liveTask.touchedFiles = files;
         }
       }),
@@ -119,9 +118,13 @@ function applyOverlapWaits(self: WorkflowRunnerInternals, runId: string, live: L
  * ターンの途中で待機にしたタスクは、そのターンが終わるまで再開しない。worktreeへの
  * 取り込み（commit・merge）が走行中のエージェントの書き込みと重ならないようにするため。
  *
- * 人が止めたrun（`haltedByUser`）では再開しない（`stop()`が待機中のセッションにも
- * `stopLoop`を送っている）。他のタスクの`failed`で止まったrunでは、走行中のタスクと同じく
- * 最後まで走らせる。再開しないと`waitingOverlap`が残り、runが終わらない。
+ * `haltedByUser`のrunでも再開する。`stop()`は待機中のセッションにも`stopLoop`を送り、
+ * タスクはその場で`failed`へ確定するため、ここには来ない。タブへの介入（`manual`/
+ * `interrupted`）で立った場合は、走行中のタスクと同じく最後まで走らせる。再開しないと
+ * `waitingOverlap`が残り、runが終わらない。
+ *
+ * 相手が失敗から再試行されて自分より後に走り始めた場合も待機を解く。相手の方が後発になり、
+ * 次の実測では相手が自分を待つ側になるため、待ち続けると互いに待ち合って止まる。
  */
 export function releaseOverlapWaits(
   self: WorkflowRunnerInternals,
@@ -129,9 +132,6 @@ export function releaseOverlapWaits(
   live: LiveRun,
   excludeFromActiveCount: ReadonlySet<string>,
 ): void {
-  if (live.runState.haltedByUser) {
-    return;
-  }
   let activeCount = 0;
   for (const [taskId, s] of live.runState.tasks) {
     if (isActiveTaskState(s.state) && !excludeFromActiveCount.has(taskId)) {
@@ -142,12 +142,19 @@ export function releaseOverlapWaits(
   const releasable = [...live.tasks.entries()]
     .filter(([taskId, liveTask]) => {
       const wait = liveTask.overlapWait;
-      return (
-        live.runState.tasks.get(taskId)?.state === 'waitingOverlap' &&
-        wait !== undefined &&
-        !isOverlapHoldingState(live.runState.tasks.get(wait.withTaskId)?.state) &&
-        !liveTask.wasBusy
-      );
+      if (
+        live.runState.tasks.get(taskId)?.state !== 'waitingOverlap' ||
+        wait === undefined ||
+        liveTask.wasBusy
+      ) {
+        return false;
+      }
+      const leader = live.tasks.get(wait.withTaskId);
+      const leaderHolds =
+        isOverlapHoldingState(live.runState.tasks.get(wait.withTaskId)?.state) &&
+        leader !== undefined &&
+        leader.startSeq < liveTask.startSeq;
+      return !leaderHolds;
     })
     .sort(([, a], [, b]) => a.startSeq - b.startSeq);
   for (const [taskId, liveTask] of releasable) {
@@ -163,6 +170,25 @@ export function releaseOverlapWaits(
     liveTask.overlapResuming = true;
     void resumeAfterOverlap(self, runId, live, taskId, liveTask, withTaskId, leaderState);
   }
+}
+
+/**
+ * 待機を取り込みなしでその場で解く。タスクが動かざるを得ない事象（ループの終了、承認要求、
+ * context-lowによるセッションの作り直し）で呼ぶ。待機のまま検証・マージ・承認へ進むと、
+ * 再開時の取り込みがそれらと同じworktreeで並走し、承認待ちのタイムアウトも効かない。
+ *
+ * 並列枠の空きは見ない（一時的に`maxParallel`を超え得る）。交差が続いていれば、次の
+ * ターンの確定時の実測で待機し直す。
+ */
+export function cancelOverlapWait(live: LiveRun, taskId: string, liveTask: LiveTask): void {
+  if (live.runState.tasks.get(taskId)?.state !== 'waitingOverlap') {
+    return;
+  }
+  live.runState = resumeFromWaitingOverlap(live.runState, taskId);
+  liveTask.overlapWait = undefined;
+  // ターンの途中なら一時停止の印を外すだけで、ターンの完了後に次の指示が送られる。
+  // 終わったループ・まだ始めていないループには何もしない
+  liveTask.session.resumeLoop();
 }
 
 async function resumeAfterOverlap(
@@ -185,8 +211,7 @@ async function resumeAfterOverlap(
       !self.isDisposing() &&
       current === live &&
       live.tasks.get(taskId) === liveTask &&
-      live.runState.tasks.get(taskId)?.state === 'running' &&
-      !live.runState.haltedByUser
+      live.runState.tasks.get(taskId)?.state === 'running'
     ) {
       self.deps.log.info(`[workflow ${runId}] ${taskId}: 交差の待機を解いて再開します`);
       liveTask.session.resumeLoop();

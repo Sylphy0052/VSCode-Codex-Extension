@@ -104,6 +104,7 @@ import { scheduleTaskApprovalTimeout } from './runnerApproval';
 import { cleanupWorktreeIfNeeded, retryMerge, startMerge } from './runnerMerge';
 import { restoreRunsForView } from './runnerRestore';
 import {
+  cancelOverlapWait,
   checkTaskOverlap,
   releaseOverlapWaits,
   startOverlapPoll,
@@ -5177,6 +5178,9 @@ export class WorkflowRunner {
       title: sanitizeForLog(approval.title),
       detail: stripControlChars(approval.detail),
     };
+    // 交差待ちのまま承認要求が来た場合は待機を解く。`markWaitingApproval`は`running`から
+    // しか遷移せず、承認待ちのタイムアウトが張られないまま止まる（Issue #1469）
+    cancelOverlapWait(live, taskId, liveTask);
     live.runState = markWaitingApproval(live.runState, taskId);
     // 承認待ちタイムアウト（Issue #579、design.md §16.39）。`runnerMerge.ts`の
     // `startMergeResolution`が`onStateChanged`で承認待ちへ入るたびにタイマーを張るのと
@@ -5559,7 +5563,9 @@ export class WorkflowRunner {
     this.setupTaskPrompting(live, task, taskId, liveTask, session);
 
     // 5. 続きから走らせる。回数の上限はタスク全体で通した数を使う（分割のたびに
-    //    上限が増えると`maxReached`の歯止めが効かなくなる）
+    //    上限が増えると`maxReached`の歯止めが効かなくなる）。新しいセッションのループは
+    //    一時停止していないため、交差待ちは解いてから走らせる（Issue #1469）
+    cancelOverlapWait(live, taskId, liveTask);
     session.note(
       `contextLow:splitFrom:${Date.now()}`,
       `${taskId} の${generation}代目のセッションです。${generation - 1}代目のタブに、ここまでの会話が残っています`,
@@ -5751,6 +5757,11 @@ export class WorkflowRunner {
       return;
     }
     const liveTask = live.tasks.get(taskId);
+    // ループが終わった以上、交差の待機は意味を失う。待機のまま検証・マージへ進むと、
+    // 待機を解くときの取り込みが同じworktreeで並走する（Issue #1469）
+    if (liveTask !== undefined) {
+      cancelOverlapWait(live, taskId, liveTask);
+    }
 
     if (
       reason === 'done' &&
