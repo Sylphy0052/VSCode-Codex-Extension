@@ -24,12 +24,21 @@ export function workflowScript(): string {
     running: '実行中',
     waitingApproval: '承認待ち',
     waitingReply: '返信待ち',
+    waitingOverlap: '交差待ち',
     merging: '統合中',
     done: '完了',
     failed: '失敗',
     blocked: 'ブロック（統合できず）',
     skipped: 'スキップ',
   };
+
+  // 交差の待機の理由（Issue #1469）。ファイルは先頭2件まで出し、残りは件数だけにする
+  function describeOverlapWait(wait) {
+    const files = wait.files || [];
+    const shown = files.slice(0, 2).join(', ');
+    const rest = files.length > 2 ? ' ほか' + (files.length - 2) + '件' : '';
+    return wait.withTaskId + 'と交差: ' + shown + rest;
+  }
 
   const FAILURE_LABEL = {
     maxReached: '回数切れ',
@@ -247,6 +256,7 @@ export function workflowScript(): string {
       (counts.merging > 0 ? ' / ' + counts.merging + '統合中' : '') +
       (counts.waitingApproval > 0 ? ' / ' + counts.waitingApproval + '承認待ち' : '') +
       (counts.waitingReply > 0 ? ' / ' + counts.waitingReply + '返信待ち' : '') +
+      (counts.waitingOverlap > 0 ? ' / ' + counts.waitingOverlap + '交差待ち' : '') +
       (counts.failed > 0 ? ' / ' + counts.failed + '失敗' : '') +
       (counts.blocked > 0 ? ' / ' + counts.blocked + 'ブロック' : '') +
       (counts.skipped > 0 ? ' / ' + counts.skipped + 'スキップ' : '');
@@ -544,7 +554,7 @@ export function workflowScript(): string {
     const group = svgEl('g', { class: 'wf-mark' });
     if (state === 'running') {
       group.appendChild(svgEl('circle', { class: 'wf-mark-running', cx: 0, cy: 0, r: 7 }));
-    } else if (state === 'waitingApproval') {
+    } else if (state === 'waitingApproval' || state === 'waitingOverlap') {
       group.appendChild(svgEl('rect', { class: 'wf-mark-waiting', x: -5, y: -6, width: 3, height: 12 }));
       group.appendChild(svgEl('rect', { class: 'wf-mark-waiting', x: 2, y: -6, width: 3, height: 12 }));
     } else if (state === 'done') {
@@ -618,6 +628,9 @@ export function workflowScript(): string {
       const reason = describeFailure(task);
       if (reason) metaParts.push(reason);
     }
+    if (task.state === 'waitingOverlap' && task.overlapWait) {
+      metaParts.push(describeOverlapWait(task.overlapWait));
+    }
     const metaText = svgEl('text', {
       class: 'wf-meta',
       x: -w / 2 + 10,
@@ -664,6 +677,9 @@ export function workflowScript(): string {
 
     const title = svgEl('title');
     title.textContent = task.id + ' ・ ' + (STATE_LABEL[task.state] || task.state) +
+      (task.state === 'waitingOverlap' && task.overlapWait
+        ? '（' + describeOverlapWait(task.overlapWait) + '）'
+        : '') +
       (task.issue === undefined ? '' : ' ・ Issue #' + task.issue) +
       ' ・ cleanup: ' + cleanupLabel(task) +
       (task.roleLabel ? ' ・ 役割: ' + task.roleLabel : '') +
@@ -923,6 +939,7 @@ export function workflowScript(): string {
     if (
       task.state === 'running'
       || task.state === 'waitingApproval'
+      || task.state === 'waitingOverlap'
       || (task.state === 'merging' && task.mergeResolutionActive)
     ) {
       const stopBtn = text('button', 'danger', 'タスク停止');
@@ -1149,6 +1166,9 @@ export function workflowScript(): string {
       const failureText = describeFailure(task);
       if (failureText) {
         stateCell.appendChild(text('span', 'hint', '（' + failureText + '）'));
+      }
+      if (task.state === 'waitingOverlap' && task.overlapWait) {
+        stateCell.appendChild(text('span', 'hint', '（' + describeOverlapWait(task.overlapWait) + '）'));
       }
       if (task.mergeResolutionActive) {
         stateCell.appendChild(text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）'));

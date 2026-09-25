@@ -234,6 +234,7 @@ const EMPTY_COUNTS = (): Record<TaskState, number> => ({
   running: 0,
   waitingApproval: 0,
   waitingReply: 0,
+  waitingOverlap: 0,
   merging: 0,
   done: 0,
   failed: 0,
@@ -281,7 +282,8 @@ export function progressSegments(progress: ProgressSummary): ProgressSegment[] {
   const c = progress.counts;
   // 分類はカンバンの3バケット（summarizeKanban）と揃える。同じ状態が画面の2箇所で
   // 別の枠に入っていると、どちらが正しいのか読み手には分からない
-  const active = c.running + c.waitingApproval + c.waitingReply + c.merging;
+  const active =
+    c.running + c.waitingApproval + c.waitingReply + c.waitingOverlap + c.merging;
   const attention = c.failed + c.blocked + c.skipped;
   const segments: ProgressSegment[] = [
     { kind: 'done', count: c.done, percent: 0 },
@@ -328,6 +330,11 @@ export function kanbanBucket(state: TaskState): KanbanBucket {
   }
   if (state === 'failed' || state === 'blocked' || state === 'skipped') {
     return 'attention';
+  }
+  // 交差の待機（Issue #1469）は枠を占めないため`isActiveTaskState`に含まれないが、
+  // 途中まで進めたタスクが相手のマージを待っているだけなので進行中に数える
+  if (state === 'waitingOverlap') {
+    return 'inProgress';
   }
   // 残りは running/waitingApproval/waitingReply/merging の4状態のみ（`TaskState`の全9値から
   // 上で判定済みの5値を除いた残り）。`isActiveTaskState`と一致する前提だが、分類関数としては

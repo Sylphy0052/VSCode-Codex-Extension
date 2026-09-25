@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.12",
+  "version": "2026.926.14",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1646,6 +1646,23 @@
           "maximum": 2147483,
           "scope": "machine-overridable",
           "markdownDescription": "統合PR/MRのレビューコメントを取得する間隔（秒）。統合PR/MRを作成できた実行だけが対象で、新しく見つかったコメントはオーケストレーターへ通知され（設計書 §16.30・§16.23）、対応するタスクの調整（`add_task`等）に人の承認は挟まない。適用した内容はワークフローViewの警告欄へ全文で残る。0にすると取得しない（既定は控えめに置き、APIを叩き続けない設計判断）。範囲外（0未満・上限超過・非整数）の値は既定値（600秒）にフォールバックする。"
+        },
+        "agent.workflows.overlapCheckIntervalSec": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "ワークフローで並列に走るタスクの変更ファイルを実測する間隔（秒）。ターンが確定したときには常に測る。後から走り始めたタスクの変更ファイルが、先に走り始めてまだ統合ブランチへ入っていないタスクの変更ファイルと重なったら、後発を「交差待ち」にし、先発のマージ後に統合ブランチを取り込んでから再開する。対象はgitのworktreeで走るタスクだけ。0にすると周期では測らない。範囲外（0未満・上限超過・非整数）の値は既定値（30秒）にフォールバックする。"
+        },
+        "agent.workflows.overlapIgnore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine-overridable",
+          "markdownDescription": "変更ファイルの交差の判定から外すパス（リポジトリ相対）。`/` で終わる要素はその配下すべてに一致し、それ以外は完全一致する。多くのタスクが追記するだけのファイル（例: `CHANGELOG.md`）で待機が増えすぎるときに使う。"
         },
         "agent.workflows.roadmapDir": {
           "type": "string",

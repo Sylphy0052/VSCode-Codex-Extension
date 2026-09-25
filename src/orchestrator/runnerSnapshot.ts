@@ -259,6 +259,9 @@ function buildTaskSnapshot(
     lastResponseSummary: liveTask?.lastResponseSummary ?? '',
     failure: state?.failure,
     pendingApproval: liveTask?.pendingApproval,
+    ...(state?.state === 'waitingOverlap' && liveTask?.overlapWait !== undefined
+      ? { overlapWait: liveTask.overlapWait }
+      : {}),
     hasLiveSession: liveTask !== undefined && !liveTask.sessionClosed,
     expandedPrompt: liveTask?.expandedPrompt,
     expandedContinuePrompt: liveTask?.expandedContinuePrompt,

@@ -14,6 +14,7 @@ export const TASK_STATES = [
   'running',
   'waitingApproval',
   'waitingReply',
+  'waitingOverlap',
   'merging',
   'done',
   'failed',
@@ -368,7 +369,8 @@ function isUnsettled(state: TaskState): boolean {
     state === 'pending' ||
     state === 'running' ||
     state === 'waitingApproval' ||
-    state === 'waitingReply'
+    state === 'waitingReply' ||
+    state === 'waitingOverlap'
   );
 }
 
@@ -890,6 +892,30 @@ export function markWaitingReply(run: RunState, taskId: string): RunState {
 export function resumeFromWaitingReply(run: RunState, taskId: string): RunState {
   const current = run.tasks.get(taskId);
   if (current === undefined || current.state !== 'waitingReply') {
+    return run;
+  }
+  return setTask(run, taskId, { ...current, state: 'running' });
+}
+
+/**
+ * `running` のタスクを `waitingOverlap` にする（Issue #1469）。走行中に実測した変更ファイルが
+ * 先に走り始めたタスクと重なったので、次のターンの区切りから指示を送らずに待たせる。
+ *
+ * `waitingReply` と違い、この状態は並列枠を占めない（`isActiveTaskState` に含めない）。
+ * 待っている間は交差していない別のタスクに枠を譲る。
+ */
+export function markWaitingOverlap(run: RunState, taskId: string): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'running') {
+    return run;
+  }
+  return setTask(run, taskId, { ...current, state: 'waitingOverlap' });
+}
+
+/** `waitingOverlap` から `running` へ戻る（交差の相手がマージされた・止まった）。 */
+export function resumeFromWaitingOverlap(run: RunState, taskId: string): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'waitingOverlap') {
     return run;
   }
   return setTask(run, taskId, { ...current, state: 'running' });
