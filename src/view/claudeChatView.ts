@@ -83,6 +83,7 @@ import { LoopController, normalizeLoopPlan } from '../loop/loopController';
 import type { LoopPlan, LoopStatus, LoopStopReason } from '../loop/loopController';
 import { lastAgentMessage } from '../loop/loopEngineering';
 import { createLoopDoneCheckConfig, describeLoopDoneCheck } from '../loop/loopDoneCheck';
+import type { LoopDoneCheckConfig } from '../loop/loopDoneCheck';
 import { pushTurnSignature, detectStalledLoop } from '../loop/stallDetector';
 import { AutoReplyAgent, autoReplyAgentCloseReasonFor } from '../chat/autoReplyAgent';
 import {
@@ -630,6 +631,38 @@ export class ClaudeChatViewManager
   }
 
   /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
+  /**
+   * 完了宣言の検証（issue #1447）の設定を組み立てる。設定で無効なら`undefined`を返す。
+   * 判定の結果は`entry`の会話へ1行残す。
+   */
+  private buildLoopDoneCheck(entry: ClaudePanel): LoopDoneCheckConfig | undefined {
+    return createLoopDoneCheckConfig(
+      readLoopDoneCheckConfig(),
+      {
+        provider: 'claude',
+        executable: this.claudePath(),
+        logWarn: (message) => this.log.warn(message),
+      },
+      (result, iteration) =>
+        entry.session.noteLocalEvent(
+          `loopDoneCheck:${Date.now()}:${iteration}`,
+          describeLoopDoneCheck(result),
+        ),
+    );
+  }
+
+  /**
+   * ワークフローのタスクが始めるループ（`TaskSession.runLoop`）へ完了宣言の検証を足す
+   * （issue #1450。`chatView.ts`側と同じ）
+   */
+  private withLoopDoneCheck(entry: ClaudePanel, plan: LoopPlan): LoopPlan {
+    if (plan.condition === '' || plan.doneCheck !== undefined) {
+      return plan;
+    }
+    const doneCheck = this.buildLoopDoneCheck(entry);
+    return doneCheck === undefined ? plan : { ...plan, doneCheck };
+  }
+
   private configFor(entry: ClaudePanel): ClaudeConfig {
     const config = entry.taskConfig ?? readClaudeConfig().claude;
     // 他のセッションと話すためのMCPサーバ（Issue #1305）。タスク経路の`toClaudeConfig`と
@@ -2908,7 +2941,7 @@ export class ClaudeChatViewManager
       runLoop: (plan: LoopPlan) => {
         // ループと自動返信（Issue #1353）は排他。ループを始めるときは自動返信を切る
         this.stopAutoReply(entry, 'loopStarted');
-        entry.loop.start(plan, entry.session.getState().items);
+        entry.loop.start(this.withLoopDoneCheck(entry, plan), entry.session.getState().items);
       },
       send: (text: string) => this.sendOnce(entry, text),
       setPromptTransform: (transform) => {
@@ -3864,19 +3897,7 @@ export class ClaudeChatViewManager
           ),
         );
         // 完了宣言の検証（issue #1447）。設定で無効なら`undefined`が返り、計画にも載らない
-        const doneCheck = createLoopDoneCheckConfig(
-          readLoopDoneCheckConfig(),
-          {
-            provider: 'claude',
-            executable: this.claudePath(),
-            logWarn: (message) => this.log.warn(message),
-          },
-          (result, iteration) =>
-            entry.session.noteLocalEvent(
-              `loopDoneCheck:${Date.now()}:${iteration}`,
-              describeLoopDoneCheck(result),
-            ),
-        );
+        const doneCheck = this.buildLoopDoneCheck(entry);
         const plan = normalizeLoopPlan(
           m['plan'],
           readChatLoopEngineeringConfig(),
