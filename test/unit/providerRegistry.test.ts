@@ -41,6 +41,12 @@ const fake = (
       }
       return { sessions: options.sessions ?? [], skippedIndexLines: 0, unresolved: 0 };
     },
+    getSessions: async (ids: readonly string[]): Promise<SessionSummary[]> => {
+      if (options.fail === true) {
+        throw new Error('読めない');
+      }
+      return (options.sessions ?? []).filter((s) => ids.includes(s.id));
+    },
     tabTitle: (s) => `${id}: ${s.id}`,
   }) as AgentProvider;
 
