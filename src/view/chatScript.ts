@@ -3631,6 +3631,20 @@ export function chatScript(
     renderLimitAutoResumeStatus({ enabled: enabled });
   }
 
+  // Reflexモード（issue #1455）の親スイッチ。共通の設定なので、表示はホストが読み直した
+  // 実効値で揃える（押した会話以外のタブにも届く）
+  el('reflexToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleReflex' }),
+  );
+
+  function applyReflexEnabled(enabled) {
+    const button = el('reflexToggle');
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', 'Reflexモードを' + action);
+    button.querySelector('.composerOverflowLabel').textContent = 'Reflexモードを' + action;
+  }
+
   el('favoriteToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'toggleFavorite' }),
   );
@@ -4104,6 +4118,9 @@ export function chatScript(
     }
     if (data.type === 'limitAutoResume' && typeof data.enabled === 'boolean') {
       applyLimitAutoResumeEnabled(data.enabled);
+    }
+    if (data.type === 'reflex' && typeof data.enabled === 'boolean') {
+      applyReflexEnabled(data.enabled);
     }
     if (data.type === 'favorite' && (data.favorite === null || typeof data.favorite === 'boolean')) {
       applyFavorite(data.favorite);

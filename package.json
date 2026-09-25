@@ -1306,11 +1306,17 @@
           "scope": "window",
           "markdownDescription": "自動返信の最大往復回数。達すると自動返信モードをOFFにし、理由を会話へ残す。返信役の実行はCodexの利用枠を消費するため、上限で歯止めを掛ける。20は出発点の値で、使ってみて調整する想定。"
         },
-        "agent.chat.loopDoneCheck.enabled": {
+        "agent.chat.reflex.enabled": {
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "markdownDescription": "条件付きループで `<<LOOP_DONE>>` を受けたとき、止める前にReflex判定（issue #1447）で終了条件を本当に満たしたかを確かめるか。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、ループ中に実行したコマンドの記録と直近の応答を渡す。確信が持てなければ止めずに次の周へ進み、足りない点を指示文へ添える。判定が失敗したときは宣言どおり止める。判定結果は会話に残る。チャット画面から始めたループに加え、ワークフローのタスクのループ（issue #1450）にも効く。ゴールで回すループと通常の会話では判定しない。"
+          "markdownDescription": "Reflexモード（issue #1455）を有効にするか。入力欄の「…」メニューからも切り替えられる。有効にすると、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で次の3つを判定する。自動返信モードの完了検証・質問への自動回答・危険度ゲート（`#agent.chat.autoReply.reflex.enabled#`）、条件付きループの完了宣言の検証（`#agent.chat.loopDoneCheck.enabled#`）、依頼ごとのskill選択（`#agent.chat.skillSelect.enabled#`）。一部だけ止めるには、それぞれの設定を `false` にする。判定1回に数秒〜十数秒かかり、利用枠も使う。"
+        },
+        "agent.chat.loopDoneCheck.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。条件付きループで `<<LOOP_DONE>>` を受けたとき、止める前にReflex判定（issue #1447）で終了条件を本当に満たしたかを確かめる。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、ループ中に実行したコマンドの記録と直近の応答を渡す。確信が持てなければ止めずに次の周へ進み、足りない点を指示文へ添える。判定が失敗したときは宣言どおり止める。判定結果は会話に残る。チャット画面から始めたループに加え、ワークフローのタスクのループ（issue #1450）にも効く。ゴールで回すループと通常の会話では判定しない。"
         },
         "agent.chat.loopDoneCheck.threshold": {
           "type": "number",
@@ -1322,9 +1328,9 @@
         },
         "agent.chat.skillSelect.enabled": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
-          "markdownDescription": "skillの一覧をモデルへ渡さず、発言のたびにReflex判定（issue #1451）で依頼に合うskillを1つ選んで読み込ませるか。一覧の分だけ毎ターンの入力が減る。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、発言ごとに数秒〜十数秒待つ。合うものが無い・判定が失敗したときはskillを付けずに送る。`/` で始まる発言、ループ・自動返信・ゴールの指示文では判定しない。Codexは有効にした後に開いた会話から効く。"
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。skillの一覧をモデルへ渡さず、発言のたびにReflex判定（issue #1451）で依頼に合うskillを1つ選んで読み込ませる。一覧の分だけ毎ターンの入力が減る。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、発言ごとに数秒〜十数秒待つ。合うものが無い・判定が失敗したときはskillを付けずに送る。`/` で始まる発言、ループ・自動返信・ゴールの指示文では判定しない。Codexは有効にした後に開いた会話から効く。"
         },
         "agent.chat.skillSelect.threshold": {
           "type": "number",
@@ -1338,7 +1344,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "自動返信モードの返信役の前後にReflex判定（issue #1435）を挟むか。有効にすると、ターン終了時の完了の検証、AskUserQuestionへの自動回答、送る内容の危険度ゲートを、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で判定する。判定結果（型と確率）は会話に残る。無効にすると返信役だけで動く（issue #1353の挙動）。"
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。自動返信モードの返信役の前後にReflex判定（issue #1435）を挟む。有効なときは、ターン終了時の完了の検証、AskUserQuestionへの自動回答、送る内容の危険度ゲートを、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で判定する。判定結果（型と確率）は会話に残る。無効にすると返信役だけで動く（issue #1353の挙動）。"
         },
         "agent.chat.autoReply.reflex.completionThreshold": {
           "type": "number",

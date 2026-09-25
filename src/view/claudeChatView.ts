@@ -56,6 +56,8 @@ import {
   setChatTurnSummaryEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
+  readReflexEnabled,
+  setReflexEnabled,
   readAutoHandoffEnabled,
   readAutoHandoffAutoApprove,
   readAutoReplyConfig,
@@ -2884,6 +2886,7 @@ export class ClaudeChatViewManager
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
+      reflexEnabled: readReflexEnabled(),
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
@@ -3085,6 +3088,19 @@ export class ClaudeChatViewManager
       }
       this.postState(entry);
       void entry.panel?.webview.postMessage({ type: 'limitAutoResume', enabled });
+    }
+  }
+
+  /**
+   * Reflexモード（issue #1455）のトグルの表示を全会話で揃える。設定の書き込み時は
+   * `extension.ts`の`onDidChangeConfiguration`からCodex画面・Claude Code画面の両方で呼ばれる。
+   * 表示には書いた値ではなく実効値を使う（ワークスペース側の上書きがあると、Globalへ
+   * 書いた値は動かない）。
+   */
+  refreshReflex(): void {
+    const enabled = readReflexEnabled();
+    for (const entry of this.allPanels()) {
+      void entry.panel?.webview.postMessage({ type: 'reflex', enabled });
     }
   }
 
@@ -3988,6 +4004,14 @@ export class ClaudeChatViewManager
           // 届くのはClaude Code画面の会話だけで、Codex画面へは`extension.ts`の
           // `onDidChangeConfiguration`（設定の書き込みで発火する）経由で届く
           .then(() => this.refreshLimitAutoResume())
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleReflex') {
+        void setReflexEnabled(!readReflexEnabled())
+          // 共通設定なので、全会話の表示は`extension.ts`の`onDidChangeConfiguration`で揃える。
+          // 書き込みで実効値が変わらなかった場合（ワークスペース側の上書き）は設定変更が発火しないので、ここでも揃える
+          .then(() => this.refreshReflex())
           .catch((e: unknown) => this.reportError(e));
         return;
       }
