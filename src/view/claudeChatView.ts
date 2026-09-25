@@ -1039,7 +1039,7 @@ export class ClaudeChatViewManager
    * viewStateが先に処理され、`this.active`が別の会話に変わってしまう（Issue #1297）。
    */
   private async handoffToNewSessionIn(entry: ClaudePanel): Promise<void> {
-    if (this.handoffPreparing.has(entry)) return;
+    if (this.handoffPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
     this.handoffPreparing.add(entry);
     try {
       const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
@@ -1069,7 +1069,7 @@ export class ClaudeChatViewManager
   }
 
   private async discussWithWebGptIn(entry: ClaudePanel): Promise<void> {
-    if (this.webGptPreparing.has(entry)) return;
+    if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
     this.webGptPreparing.add(entry);
     const assertReady = () => {
       const state = entry.session.getState();
@@ -2083,6 +2083,8 @@ export class ClaudeChatViewManager
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, LABEL);
     const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
+    // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
+    entry.inputLock = input.inputLock === true;
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: input.cwd,
@@ -2826,6 +2828,8 @@ export class ClaudeChatViewManager
       title,
       pinnedName,
       taskManaged,
+      inputLock: false,
+      lockedActionListeners: [],
       taskConfig,
       modelSettings,
       secondOpinionKey: randomUUID(),
@@ -2880,6 +2884,7 @@ export class ClaudeChatViewManager
       this.log.warn(composerButtonsConfig.warning);
     }
     return renderShell(panel.webview, {
+      inputLock: entry.inputLock,
       agentLabel: LABEL,
       provider: 'claude',
       approvalModes: CLAUDE_PERMISSION_MODES,
@@ -2992,6 +2997,7 @@ export class ClaudeChatViewManager
       note: (id, text) => entry.session.noteLocalEvent(id, text),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
+      onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
       dispose: () => this.teardown(entry),
     };
   }
@@ -3483,7 +3489,12 @@ export class ClaudeChatViewManager
    */
   sendReviewFeedback(threadId: string, text: string): ReviewDeliveryResult {
     const entry = this.panels.get(threadId);
-    if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
+    if (
+      entry === undefined ||
+      entry.disposed ||
+      entry.inputLock ||
+      entry.session.getState().restore !== undefined
+    ) {
       return 'sessionUnavailable';
     }
     this.cancelLimitAutoResume(entry);

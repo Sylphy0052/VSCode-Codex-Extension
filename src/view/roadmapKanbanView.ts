@@ -172,6 +172,9 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
       case 'stopIssue':
         await this.stopIssue(runId, issueNumber);
         return;
+      case 'instructIssue':
+        await this.instructIssue(runId, issueNumber);
+        return;
       case 'answerQuestion':
         await this.answerQuestion(runId, issueNumber, message.questionId, message.answer);
         return;
@@ -239,6 +242,35 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
     );
     if (choice === '停止する') {
       await this.controller.stopIssue(runId, issueNumber);
+    }
+  }
+
+  /**
+   * Orchestrator経由の指示（issue #1465）。Issueのタブは入力を閉じているため、ユーザーの
+   * 指示はここかタブの操作列から渡す。次の指示の頭に添えて届く。
+   */
+  private async instructIssue(runId: string, issueNumber: number): Promise<void> {
+    const raw = await vscode.window.showInputBox({
+      title: `#${String(issueNumber)}へOrchestrator経由で指示`,
+      prompt: 'Issueセッションへ渡す指示。次の指示の頭に添えて届けます（実行中のターンには割り込みません）',
+      ignoreFocusOut: true,
+      validateInput: (value) =>
+        parseUserAnswer(value) === undefined
+          ? `1〜${String(MAX_USER_ANSWER_LENGTH)}文字で入力してください`
+          : undefined,
+    });
+    const instruction = parseUserAnswer(raw);
+    if (instruction === undefined) {
+      return;
+    }
+    if (await this.controller.instructIssue(runId, issueNumber, instruction)) {
+      void vscode.window.showInformationMessage(
+        `#${String(issueNumber)}への指示を受け付けました。次の指示の頭に添えて届けます`,
+      );
+    } else {
+      void vscode.window.showWarningMessage(
+        `#${String(issueNumber)}のセッションは動いていないため、指示を渡せませんでした`,
+      );
     }
   }
 
@@ -490,6 +522,7 @@ const script = `
     if (card.canRun) {
       actions.appendChild(button(card.needsOverride ? card.runLabel + '（依存を無視）' : card.runLabel, 'primary', function () { send('runIssue', target); }));
     }
+    if (card.canInstruct) { actions.appendChild(button('指示', '', function () { send('instructIssue', target); })); }
     if (card.canPause) { actions.appendChild(button('一時停止', '', function () { send('pauseIssue', target); })); }
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopIssue', target); })); }
     if (card.canReveal) { actions.appendChild(button('セッションを開く', '', function () { send('revealIssue', target); })); }

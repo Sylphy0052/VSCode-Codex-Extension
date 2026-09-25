@@ -6,7 +6,7 @@ import { readChatEndSummaryConfig, readNotificationsConfig } from '../config';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { Logger } from '../log';
 import type { LoopController } from '../loop/loopController';
-import type { ApprovalOutcome } from '../orchestrator/taskSession';
+import type { ApprovalOutcome, LockedTabAction } from '../orchestrator/taskSession';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
 import type { AgentReportedRecorder } from '../verification/agentReported';
 import {
@@ -118,6 +118,14 @@ export interface BaseChatPanel {
    * 人が手で開いた画面（`false`）は従来通りタブを閉じたらセッションも終わる。
    */
   taskManaged: boolean;
+  /**
+   * 入力欄を閉じたタブか（Issue #1465 分割案6b、`TaskSessionInput.inputLock`）。
+   * `true`ならwebviewからの操作は`LOCKED_TAB_MESSAGE_TYPES`だけを通し、外からの送信・
+   * 中断（`controlSession`等）も断る。
+   */
+  inputLock: boolean;
+  /** `TaskSession.onLockedAction` のリスナー。 */
+  lockedActionListeners: Array<(action: LockedTabAction) => void>;
   /** skill選択（issue #1451）で人の発言を順に送る関門。初めて使うときに作る。 */
   skillSelectGate?: SkillSelectGate;
   /** 要約エージェント（issue #1473）の実行役。初めて要約するときに作る。 */
@@ -455,6 +463,38 @@ export interface ManagedChatSession {
 }
 
 /**
+ * 入力欄を閉じたタブ（`BaseChatPanel.inputLock`）でも通すwebviewの操作（Issue #1465 分割案6b）。
+ *
+ * 閲覧（描画の要求、リンク・差分・出力・進捗を開く、書き出し）と、承認・質問カードへの応答
+ * だけを通す。承認や質問への応答を捨てると、ロードマップ実行は承認の代行をしないため
+ * セッションが止まったままになる。送信・中断・ループ・設定・分岐などは許可しない
+ * （許可リストにしてあるのは、webviewに操作を足したときに黙って通さないため）。
+ */
+const LOCKED_TAB_MESSAGE_TYPES: ReadonlySet<string> = new Set([
+  'ready',
+  'stateFull',
+  'openUrl',
+  'insertCode',
+  'openCodeFile',
+  'openDiffFile',
+  'openDiffEditor',
+  'openItemOutput',
+  'exportTranscript',
+  'openProgress',
+  'refreshLoopEvidence',
+  'approve',
+  'prompt',
+  'answerAskUserQuestion',
+]);
+
+/** 入力欄を閉じたタブへの操作を断るときの案内。 */
+export const INPUT_LOCKED_MESSAGE =
+  'ロードマップ実行のIssueセッションには直接入力できません。タブの「Orchestrator経由で指示」かKanbanから指示してください';
+
+/** 入力欄を閉じたタブから送れる指示の最大文字数（Kanbanの回答欄と揃える）。 */
+const MAX_LOCKED_INSTRUCTION_LENGTH = 2000;
+
+/**
  * `ChatViewManager`（Codex、chatView.ts）と`ClaudeChatViewManager`（Claude Code、
  * claudeChatView.ts）の重複を抽出した基底クラス（issue #410）。
  *
@@ -697,6 +737,90 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   protected abstract dispatchMessage(entry: TPanel, message: unknown): void;
 
   /**
+   * webviewから届いたメッセージの入口。入力欄を閉じたタブ（`inputLock`）では、タブ専用の
+   * 操作（指示・即時停止）をここで受け、それ以外は`LOCKED_TAB_MESSAGE_TYPES`に載る操作だけを
+   * `dispatchMessage`へ渡す。画面で隠すだけだと、古いwebviewや細工したメッセージで送れてしまう。
+   */
+  private receiveWebviewMessage(entry: TPanel, message: unknown): void {
+    if (!entry.inputLock) {
+      this.dispatchMessage(entry, message);
+      return;
+    }
+    const type =
+      typeof message === 'object' && message !== null
+        ? (message as Record<string, unknown>)['type']
+        : undefined;
+    if (type === 'lockedInstruct') {
+      void this.promptLockedInstruction(entry);
+      return;
+    }
+    if (type === 'lockedStop') {
+      void this.confirmLockedStop(entry);
+      return;
+    }
+    if (typeof type === 'string' && LOCKED_TAB_MESSAGE_TYPES.has(type)) {
+      this.dispatchMessage(entry, message);
+    }
+  }
+
+  /** 入力欄を閉じたタブへの操作なら案内を出して`true`を返す。コマンド経由の入口で使う。 */
+  protected rejectIfInputLocked(entry: TPanel): boolean {
+    if (!entry.inputLock) {
+      return false;
+    }
+    void vscode.window.showInformationMessage(INPUT_LOCKED_MESSAGE);
+    return true;
+  }
+
+  private async promptLockedInstruction(entry: TPanel): Promise<void> {
+    const text = await vscode.window.showInputBox({
+      title: `${entry.title}: Orchestrator経由で指示`,
+      prompt: 'Issueセッションへ渡す指示。次の指示の頭に添えて届けます（実行中のターンには割り込みません）',
+      ignoreFocusOut: true,
+      validateInput: (value) =>
+        value.trim() === '' || value.length > MAX_LOCKED_INSTRUCTION_LENGTH
+          ? `1〜${String(MAX_LOCKED_INSTRUCTION_LENGTH)}文字で入力してください`
+          : undefined,
+    });
+    if (text === undefined || text.trim() === '' || text.length > MAX_LOCKED_INSTRUCTION_LENGTH) {
+      return;
+    }
+    if (this.emitLockedAction(entry, { kind: 'instruct', text })) {
+      void vscode.window.showInformationMessage(
+        `${entry.title}への指示を受け付けました。次の指示の頭に添えて届けます`,
+      );
+    }
+  }
+
+  private async confirmLockedStop(entry: TPanel): Promise<void> {
+    const choice = await vscode.window.showWarningMessage(
+      `${entry.title}を停止しますか？ worktreeとブランチは残り、後で再実行できます。`,
+      { modal: true },
+      '停止する',
+    );
+    if (choice === '停止する') {
+      this.emitLockedAction(entry, { kind: 'stop' });
+    }
+  }
+
+  /** タブの操作をロードマップ実行へ渡す。渡し先が無ければ案内を出して`false`。 */
+  private emitLockedAction(entry: TPanel, action: LockedTabAction): boolean {
+    if (entry.disposed) {
+      return false;
+    }
+    if (entry.lockedActionListeners.length === 0) {
+      void vscode.window.showWarningMessage(
+        'このセッションはロードマップ実行から外れています。Kanbanから操作してください',
+      );
+      return false;
+    }
+    for (const listener of entry.lockedActionListeners) {
+      listener(action);
+    }
+    return true;
+  }
+
+  /**
    * パネルを表に出す。既にタブがあれば `reveal`、閉じていれば作り直す
    * （design.md §16.10の4「reveal()でパネルを作り直し、ChatStateから会話を描き直す」）。
    * 会話の再描画は、webview起動時の `ready` 通知への応答（`postState`）に任せる。
@@ -738,7 +862,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.renderPanelHtml(entry, panel);
-    panel.webview.onDidReceiveMessage((message: unknown) => this.dispatchMessage(entry, message));
+    panel.webview.onDidReceiveMessage((message: unknown) => this.receiveWebviewMessage(entry, message));
     panel.onDidChangeViewState(() => {
       if (panel.visible) {
         entry.lastKnownViewColumn = panel.viewColumn;
@@ -893,6 +1017,10 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     const entry = this.panels.get(threadId);
     if (entry === undefined || entry.disposed) {
       return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    // 入力欄を閉じたタブ（Issue #1465 分割案6b）は、統括ページからも開くことしか許さない
+    if (entry.inputLock && action.kind !== 'open') {
+      return { ok: false, error: INPUT_LOCKED_MESSAGE };
     }
     switch (action.kind) {
       case 'open':
@@ -1098,7 +1226,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   getActiveComposerTarget(): ActiveComposerTarget | undefined {
     const entry = this.active;
-    if (entry === undefined || entry.panel === undefined) {
+    if (entry === undefined || entry.panel === undefined || entry.inputLock) {
       return undefined;
     }
     return {

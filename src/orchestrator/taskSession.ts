@@ -170,7 +170,19 @@ export interface TaskSessionInput {
    * 揃える（`view/sessionTitle.ts`）。
    */
   generation?: number;
+  /**
+   * タブの入力欄を閉じる（Issue #1465 分割案6b）。ロードマップ実行のIssueセッションだけが
+   * `true`を渡す。ユーザーはIssueセッションと直接会話せず、タブからできるのは閲覧・
+   * Orchestrator経由の指示・即時停止だけになる（押された操作は`onLockedAction`で届く）。
+   *
+   * 画面で隠すだけでなく、host側でもwebviewからの送信・中断・設定変更などを捨てる。
+   * 承認や質問カードへの応答は、捨てるとセッションが止まったままになるため通す。
+   */
+  inputLock?: boolean;
 }
+
+/** 入力欄を閉じたタブ（`TaskSessionInput.inputLock`）で押された操作。 */
+export type LockedTabAction = { kind: 'instruct'; text: string } | { kind: 'stop' };
 
 export interface TaskSessionHost {
   /** タスク用のセッションを開く。cwdとタスク単位の設定を渡せる。 */
@@ -303,6 +315,12 @@ export interface TaskSession {
    * `id` は同じ事象を二重に積まないための鍵。
    */
   note(id: string, text: string): void;
+  /**
+   * 入力欄を閉じたタブ（`TaskSessionInput.inputLock`）で、指示の送信・即時停止が押されたときに
+   * 呼ばれる。本文の入力と停止の確認は画面側で済ませてから届く。入力欄を閉じていない
+   * セッションでは呼ばれない。
+   */
+  onLockedAction?(listener: (action: LockedTabAction) => void): void;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /** タブを背面で用意する。開始時に呼ぶ。 */

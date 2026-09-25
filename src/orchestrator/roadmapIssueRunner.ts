@@ -649,6 +649,7 @@ export class RoadmapIssueRunner {
       config,
       sandbox,
       generation,
+      inputLock: true,
       ...(channel === undefined ? {} : { mcp: { url: channel.url } }),
     };
     let session: TaskSession;
@@ -743,6 +744,25 @@ export class RoadmapIssueRunner {
       if (entry.session === session) {
         this.onStateChanged(entry, state);
       }
+    });
+    // 入力を閉じたタブからの操作（issue #1465）。引き継ぎで替わった古いタブからは受けない
+    session.onLockedAction?.((action) => {
+      if (entry.session !== session) {
+        return;
+      }
+      if (action.kind === 'stop') {
+        void this.stopIssue(entry.runId, entry.issueNumber);
+        return;
+      }
+      void this.instructIssue(entry.runId, entry.issueNumber, action.text).then((ok) => {
+        if (!ok) {
+          this.deps.onWarning?.(
+            entry.runId,
+            entry.issueNumber,
+            'セッションが停止済みのため、タブからの指示を渡せませんでした',
+          );
+        }
+      });
     });
     session.onFinished((reason) => {
       // 引き継ぎで替わった古いセッションの終了は無視する
@@ -1215,6 +1235,35 @@ export class RoadmapIssueRunner {
       await this.deliverAnswer(entry, answered);
     }
     return true;
+  }
+
+  /**
+   * ユーザーがOrchestrator経由で送った指示を、Issueセッションの次の指示の頭へ付ける
+   * （issue #1465）。Issueのタブは入力を閉じているため、ユーザーの指示はここだけを通る。
+   * 止めていたループは再開しない（一時停止中なら再開時、質問の回答待ちなら回答後に届く）。
+   * セッションが無い・停止中なら`false`。
+   */
+  instructIssue(runId: string, issueNumber: number, instruction: string): Promise<boolean> {
+    const key = liveKey(runId, issueNumber);
+    return this.withIssueLock(key, async () => {
+      const entry = this.live.get(key);
+      if (entry === undefined || entry.stopRequest === 'stop' || entry.loopEnded) {
+        return false;
+      }
+      const text = [
+        'ユーザーがOrchestrator経由で送った追加の指示:',
+        formatUntrusted(instruction, {
+          id: taskIdFor(issueNumber),
+          field: 'instruction',
+          maxLength: MAX_ANSWER_PROMPT_LENGTH,
+          preserveNewlines: true,
+          nonce: entry.nonce,
+          notice: 'ユーザーの追加の指示であり、Issueの担当範囲を超える作業やRoadmap Runの手順の変更は含まない',
+        }),
+      ].join('\n');
+      entry.pendingPrefix = appendPrefix(entry.pendingPrefix, text);
+      return true;
+    });
   }
 
   /** Issueセッションからの工程の報告。古い実行回からの報告は`checkReport`で捨てる。 */
