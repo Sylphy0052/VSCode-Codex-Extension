@@ -4433,12 +4433,12 @@ export class WorkflowRunner {
     }
     if (result.updatedItemIds.length > 0) {
       this.deps.log.info(
-        `[workflow ${runId}] ロードマップのチェックを更新しました: ${result.updatedItemIds.join(', ')}`,
+        `[workflow ${runId}] ロードマップのチェックを更新しました: ${result.updatedItemIds.map((id) => sanitizeForLog(id)).join(', ')}`,
       );
     }
     if (result.unmatchedTaskIds.length > 0) {
       this.deps.log.info(
-        `[workflow ${runId}] ロードマップに対応する項目が無いタスク: ${result.unmatchedTaskIds.join(', ')}`,
+        `[workflow ${runId}] ロードマップに対応する項目が無いタスク: ${result.unmatchedTaskIds.map((id) => sanitizeForLog(id)).join(', ')}`,
       );
     }
     // ロードマップのパース・書き戻しで見つかった警告（読み飛ばした行・パース不能な
@@ -4483,7 +4483,7 @@ export class WorkflowRunner {
       const source = `ロードマップIssue #${String(outcome.sourceIssue)}`;
       if (outcome.itemsWithoutIssue.length > 0) {
         log(
-          `${source} へ書き戻さない項目（Issue番号なし）: ${outcome.itemsWithoutIssue.join(', ')}`,
+          `${source} へ書き戻さない項目（Issue番号なし）: ${outcome.itemsWithoutIssue.map((id) => sanitizeForLog(id)).join(', ')}`,
         );
       }
       if (outcome.kind === 'failed') {
