@@ -14,6 +14,19 @@ export interface FileSystemPort {
   readTail(filePath: string, maxBytes: number): Promise<string | undefined>;
   /** 最終更新時刻（ミリ秒）。読めなければ undefined。 */
   mtimeMs(filePath: string): Promise<number | undefined>;
+  /**
+   * 更新時刻・サイズ・inode番号をまとめて返す（Issue #1460）。
+   *
+   * `mtimeMs` 単体と同じ `fs.stat` 呼び出しで取れるため追加コストは無い。Claude Codeの
+   * 索引がtranscriptへの通常の追記（サイズ増加・inode不変）を検出し、先頭の読み直し
+   * （`readHeadMeta`）を省くために使う。
+   *
+   * 任意実装。持たないポート（テストのフェイク等）では `mtimeMs` へ退避し、
+   * 常に先頭を読み直す（安全側）。
+   */
+  statLite?(
+    filePath: string,
+  ): Promise<{ mtimeMs: number; size: number; ino: number } | undefined>;
   /** ディレクトリを再帰的に走査し、rollout-*.jsonl の絶対パスを返す。 */
   listRollouts(dir: string): Promise<string[]>;
   /** ディレクトリを再帰的に走査し、*.jsonl の絶対パスを返す。 */

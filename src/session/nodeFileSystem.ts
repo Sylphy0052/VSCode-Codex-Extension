@@ -162,6 +162,17 @@ export const nodeFileSystem: FileSystemPort = {
     }
   },
 
+  async statLite(
+    filePath: string,
+  ): Promise<{ mtimeMs: number; size: number; ino: number } | undefined> {
+    try {
+      const stat = await fs.stat(filePath);
+      return { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino };
+    } catch {
+      return undefined;
+    }
+  },
+
   async listRollouts(dir: string): Promise<string[]> {
     return walkFiles(dir, (name) => name.startsWith('rollout-') && name.endsWith('.jsonl'));
   },
