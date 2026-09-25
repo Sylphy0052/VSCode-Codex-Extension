@@ -333,13 +333,25 @@ function endCurrentAttempt(issue: RoadmapIssueExecution, at: string): RoadmapIss
 /** 質問として受け付ける内容。長さと件数は呼び出し側（MCPの検証）で抑えてある前提。 */
 export type RoadmapQuestionInput = Pick<
   RoadmapQuestion,
-  'questionId' | 'question' | 'reason' | 'options' | 'recommended' | 'blocking' | 'evidence' | 'escalation'
+  | 'questionId'
+  | 'question'
+  | 'reason'
+  | 'options'
+  | 'recommended'
+  | 'blocking'
+  | 'evidence'
+  | 'escalation'
 >;
 
 /**
  * Issueセッションからの質問を受け付け、Reflexの検討中として積む。現在の実行と実行回に
  * 一致しない報告と、同じ`questionId`の二重登録は受け付けない。
  */
+/** 1つの実行回で受け付ける質問の上限。子セッションの質問の連打で状態を肥大させない。 */
+export const MAX_QUESTIONS_PER_ATTEMPT = 20;
+/** Issueに残す質問の上限。超えたら回答待ちでない古いものから捨てる。 */
+const MAX_STORED_QUESTIONS = 50;
+
 export function addIssueQuestion(
   run: RoadmapRun,
   ref: IssueReportRef,
@@ -352,7 +364,10 @@ export function addIssueQuestion(
   }
   const { issue } = checked;
   const existing = issue.questions ?? [];
-  if (existing.some((q) => q.questionId === input.questionId)) {
+  if (
+    existing.some((q) => q.questionId === input.questionId) ||
+    existing.filter((q) => q.attemptId === ref.attemptId).length >= MAX_QUESTIONS_PER_ATTEMPT
+  ) {
     return run;
   }
   const at = now.toISOString();
@@ -365,7 +380,19 @@ export function addIssueQuestion(
     answeredAt: undefined,
     reflexSummary: undefined,
   };
-  return withIssue(run, { ...issue, questions: [...existing, question], updatedAt: at });
+  const questions = [...existing, question];
+  let overflow = questions.length - MAX_STORED_QUESTIONS;
+  const kept =
+    overflow <= 0
+      ? questions
+      : questions.filter((q) => {
+          if (overflow > 0 && !isPendingQuestion(q)) {
+            overflow -= 1;
+            return false;
+          }
+          return true;
+        });
+  return withIssue(run, { ...issue, questions: kept, updatedAt: at });
 }
 
 function updateQuestion(
@@ -403,7 +430,8 @@ export function markQuestionAwaitingUser(
     run,
     issueNumber,
     questionId,
-    (q) => (q.status === 'considering' ? { ...q, status: 'awaitingUser', reflexSummary } : undefined),
+    (q) =>
+      q.status === 'considering' ? { ...q, status: 'awaitingUser', reflexSummary } : undefined,
     now,
   );
 }

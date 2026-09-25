@@ -48,6 +48,7 @@ import {
   markIssueStopped,
   markIssueStopping,
   markQuestionAwaitingUser,
+  MAX_QUESTIONS_PER_ATTEMPT,
   markReadyForMerge,
   MERGE_STAGE_PHASES,
   reconcileRoadmapRunOnReload,
@@ -107,11 +108,17 @@ export interface RoadmapIssueRunnerDeps {
    * 実体は`RoadmapQuestionMcpServer`で、終了はそれを作った側が行う。
    */
   questionServer?: {
-    register(connectionId: string, handler: RoadmapAskHandler): Promise<{ url: string; token: string }>;
+    register(
+      connectionId: string,
+      handler: RoadmapAskHandler,
+    ): Promise<{ url: string; token: string }>;
     unregister(token: string): void;
   };
   /** 選択肢のある質問をReflexで判定する。無ければ全ての質問を人の判断へ回す。 */
-  judgeQuestion?: (engine: RoadmapRunEngine, question: RoadmapQuestion) => Promise<RoadmapQuestionVerdict>;
+  judgeQuestion?: (
+    engine: RoadmapRunEngine,
+    question: RoadmapQuestion,
+  ) => Promise<RoadmapQuestionVerdict>;
   now?: () => Date;
   newId?: () => string;
 }
@@ -752,7 +759,9 @@ export class RoadmapIssueRunner {
   private buildLoopPlan(entry: LiveIssueSession, initialPrompt: string): LoopPlan {
     return {
       initialPrompt:
-        entry.questionToken === undefined ? initialPrompt : `${initialPrompt}\n${QUESTION_GUIDANCE}`,
+        entry.questionToken === undefined
+          ? initialPrompt
+          : `${initialPrompt}\n${QUESTION_GUIDANCE}`,
       continuePrompt: `続けて。${scopeReminder(entry.issueNumber)}`,
       maxIterations: remainingIterations(this.deps.maxIterations, entry.submissionCount),
       condition: `#${String(entry.issueNumber)}のPRを作成し、自己レビューの指摘を直し終えた（mergeはしていない）`,
@@ -1020,6 +1029,11 @@ export class RoadmapIssueRunner {
   /**
    * Issueセッションからの質問（`ask_orchestrator`）を受け付ける。振り分けは待たずに
    * 返し、blockingな質問は回答が届くまで次の指示を止める。
+   *
+   * Issueのロックは取らない。一時停止・停止はロックを持ったままターンの終わりを待つため、
+   * ターンの中で呼ばれるこのツールがロックを待つと互いに待ち合って止まる。代わりに質問の
+   * 登録後にセッションと実行回を確かめ直す。登録後に実行回が終わった（引き継ぎ・停止）
+   * 質問は`endCurrentAttempt`が`cancelled`にする。
    */
   private async onAsk(binding: QuestionBinding, args: RoadmapAskArgs): Promise<RoadmapAskOutcome> {
     const entry = binding.entry;
@@ -1031,7 +1045,10 @@ export class RoadmapIssueRunner {
     ) {
       // 引き継ぎ・停止で替わった古いセッションのトークン。以後は404にする
       this.releaseQuestionToken(binding.token);
-      return { isError: true, text: 'このセッションの作業は終わっている。質問せずにターンを終えること。' };
+      return {
+        isError: true,
+        text: 'このセッションの作業は終わっている。質問せずにターンを終えること。',
+      };
     }
     const ref = this.currentRef(entry);
     if (ref === undefined || entry.stopRequest !== undefined) {
@@ -1046,7 +1063,21 @@ export class RoadmapIssueRunner {
         ? undefined
         : getIssue(next, entry.issueNumber)?.questions?.find((q) => q.questionId === questionId);
     if (question === undefined) {
-      return { isError: true, text: '質問を受け付けられなかった（実行回が替わった等）。' };
+      return {
+        isError: true,
+        text: `質問を受け付けられなかった（実行回が替わった、または1回の作業での質問が上限の${String(MAX_QUESTIONS_PER_ATTEMPT)}件に達した）。`,
+      };
+    }
+    if (
+      entry.session !== binding.session ||
+      this.live.get(liveKey(entry.runId, entry.issueNumber)) !== entry ||
+      entry.attemptId !== question.attemptId ||
+      entry.stopRequest !== undefined
+    ) {
+      return {
+        isError: true,
+        text: '作業が切り替わったため質問は取り消された。質問せずにターンを終えること。',
+      };
     }
     if (question.blocking) {
       entry.session.pauseLoop();
@@ -1124,13 +1155,14 @@ export class RoadmapIssueRunner {
 
   /**
    * 回答を次の指示の頭へ付ける。blockingな質問で、回答待ちのblockingな質問が他に
-   * 残っていなければ止めていた指示を再開する。質問した実行回が終わっていれば届けない。
+   * 残っていなければ止めていた指示を再開する。回答の記録と配信の間に引き継ぎで実行回が
+   * 替わっても、同じIssueのセッションが続いていれば回答は新しいセッションへ届ける
+   * （再開は質問した実行回のときだけ）。セッションが閉じていれば届けない。
    */
   private deliverAnswer(entry: LiveIssueSession, question: RoadmapQuestion): Promise<void> {
     return this.withIssueLock(liveKey(entry.runId, entry.issueNumber), async () => {
       if (
         this.live.get(liveKey(entry.runId, entry.issueNumber)) !== entry ||
-        entry.attemptId !== question.attemptId ||
         this.currentRef(entry) === undefined ||
         question.answer === undefined
       ) {
@@ -1151,6 +1183,7 @@ export class RoadmapIssueRunner {
       entry.pendingPrefix = appendPrefix(entry.pendingPrefix, text);
       if (
         question.blocking &&
+        entry.attemptId === question.attemptId &&
         entry.stopRequest === undefined &&
         !entry.loopEnded &&
         !this.hasPendingBlockingQuestion(entry)

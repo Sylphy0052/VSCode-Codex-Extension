@@ -13,10 +13,7 @@ import {
   toolTextResult,
 } from './messaging';
 import { type HttpMcpServerHandle, startHttpMcpServer, type McpHttpTarget } from './mcpHttpServer';
-import {
-  ROADMAP_QUESTION_ESCALATIONS,
-  type RoadmapQuestionEscalation,
-} from './roadmapRunState';
+import { ROADMAP_QUESTION_ESCALATIONS, type RoadmapQuestionEscalation } from './roadmapRunState';
 import { sanitizeInlineText } from './untrustedText';
 
 /**
@@ -305,7 +302,10 @@ export class RoadmapQuestionMcpServer {
    * Issueセッション1つ分の接続先を登録し、CLIへ渡すURLを返す。トークンは推測できない
    * 128bitで、`unregister`した後のURLは404になる。
    */
-  async register(connectionId: string, handler: RoadmapAskHandler): Promise<{ url: string; token: string }> {
+  async register(
+    connectionId: string,
+    handler: RoadmapAskHandler,
+  ): Promise<{ url: string; token: string }> {
     if (this.disposed) {
       throw new Error('ロードマップの質問用MCPサーバは終了済み');
     }
@@ -332,7 +332,13 @@ export class RoadmapQuestionMcpServer {
     this.registrations.clear();
     const server = this.server;
     this.server = undefined;
-    void server?.then((h) => h.close()).catch(() => undefined);
+    void server
+      ?.then((h) => h.close())
+      .catch((e: unknown) => {
+        this.deps.logWarn?.(
+          `質問用MCPサーバを閉じられなかった: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
   }
 
   private resolve(token: string): McpHttpTarget | undefined {
@@ -359,7 +365,10 @@ export class RoadmapQuestionMcpServer {
     });
   }
 
-  private async dispatch(registration: Registration, request: JsonRpcRequest): Promise<JsonRpcResponse> {
+  private async dispatch(
+    registration: Registration,
+    request: JsonRpcRequest,
+  ): Promise<JsonRpcResponse> {
     switch (request.method) {
       case 'initialize':
         return success(request.id, SERVER_INFO_RESULT);
