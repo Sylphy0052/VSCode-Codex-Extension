@@ -1883,7 +1883,7 @@ function parseReviewFindings(response: string, log?: Logger): WorkflowReviewFind
  * **読み取り専用であることは、プロンプトの指示ではなく起動設定で担保する。**
  * `buildPlannerSessionInput`（分解セッションと共通、design.md §16.9）がそのまま
  * `sandbox: read-only`相当・承認要求は理由を問わず全て拒否する構成を組み立て、
- * `sendSingleTurn`がそれを`assertPlannerSessionIsSafe`で起動直前に確認する。
+ * `runSingleTurnTask`がそれを`assertPlannerSessionIsSafe`で起動直前に確認する。
  * レビューセッション専用の権限経路は新設しない（既存の分解セッションの安全機構を
  * そのまま再利用し、新しい抜け道を作らない）。
  *
@@ -1900,14 +1900,13 @@ export async function reviewWorkflowPlan(
   const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
   const prompt = buildWorkflowReviewPrompt(input.goal, input.yaml);
   try {
-    const response = await sendSingleTurn(
-      input.host,
-      input.provider,
-      sessionInput,
-      prompt,
-      PLANNER_TURN_TIMEOUT_MS,
-      input.log,
-    );
+    // 1ターンで閉じるため、タブを開いても中身を読む前に消える。開かずに走らせる（Issue #1440）
+    const response = await runSingleTurnTask(input.host, input.provider, sessionInput, prompt, {
+      timeoutMs: PLANNER_TURN_TIMEOUT_MS,
+      log: input.log,
+      openPanel: false,
+      label: 'レビューセッション',
+    });
     const findings = parseReviewFindings(response, input.log);
     return findings === undefined
       ? { findings: [], error: 'レビュー応答をJSON配列として解釈できませんでした' }
@@ -1934,14 +1933,13 @@ export async function reviseWorkflowPlan(
   const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
   const prompt = buildWorkflowRevisionPrompt(input.goal, input.yaml, input.findings);
   try {
-    const response = await sendSingleTurn(
-      input.host,
-      input.provider,
-      sessionInput,
-      prompt,
-      PLANNER_TURN_TIMEOUT_MS,
-      input.log,
-    );
+    // レビューと同じ理由でタブを開かない（Issue #1440）
+    const response = await runSingleTurnTask(input.host, input.provider, sessionInput, prompt, {
+      timeoutMs: PLANNER_TURN_TIMEOUT_MS,
+      log: input.log,
+      openPanel: false,
+      label: '修正セッション',
+    });
     const repaired = extractAndRepair(response, input.provider, input.log);
     const attempt = tryParseAndValidate(repaired.yaml);
     if (!attempt.ok || attempt.definition === undefined) {
