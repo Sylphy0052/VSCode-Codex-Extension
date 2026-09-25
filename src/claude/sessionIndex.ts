@@ -1,7 +1,7 @@
 import type { SessionSummary } from '../codex/types';
 import type { MementoLike } from '../util/memento';
 import {
-  migrateLegacyIndex,
+  reconcileLegacyIndex,
   readSessionIndexFileSync,
   writeSessionIndexFile,
 } from './sessionIndexFile';
@@ -51,7 +51,8 @@ const noopMemento: MementoLike = {
  *
  * 旧 `globalState`（`CLAUDE_SESSION_INDEX_KEY`）からの移行は起動を止めずバックグラウンドで
  * 行う。ファイルが既にあればそちらを正として使う。ファイルが無いときだけ旧キーを暫定の
- * 初期値として使い（移行が終わるまで一覧を空にしないため）、移行を1回走らせる。
+ * 初期値として使う（移行が終わるまで一覧を空にしないため）。旧キーが残っている限り、
+ * ファイルの有無に関わらず起動のたびに片付けを試みる（`reconcileLegacyIndex`）。
  */
 export class ClaudeSessionIndex {
   private readonly entries = new Map<string, ClaudeSessionIndexEntry>();
@@ -66,6 +67,17 @@ export class ClaudeSessionIndex {
   private persistTimer: NodeJS.Timeout | undefined;
   /** `flush` すべき変更があるか。デバウンス中の予約と、失敗後の再試行判定に使う。 */
   private dirty = false;
+  /**
+   * 起動時の照合（`ClaudeSessionStore.refreshIndex` の初回完了）が済んだか（Issue #1460レビュー指摘）。
+   * 済むまでは `requestPersist`/`flush` を実際には書かず、`dirty` を立てるだけにする。
+   * 索引ファイルも旧キーも無い初回起動で、watcherが拾った断片だけの不完全な索引を
+   * 全量スキャン完了前に書いてしまわないため。
+   */
+  private ready = false;
+  /** 書き込み中の`writeSessionIndexFile`呼び出し（Issue #1460レビュー指摘: flushの再入防止）。 */
+  private writing: Promise<void> | undefined;
+  /** 書き込み中にもう一度書く必要があるか（実行中に届いた新しい変更の印）。 */
+  private pendingAfterWrite = false;
 
   constructor(
     /** 索引ファイルの絶対パス。`undefined` ならファイル永続化をしない（テスト等）。 */
@@ -83,10 +95,13 @@ export class ClaudeSessionIndex {
           this.remember(entry);
         }
       }
-      if (filePath !== undefined) {
-        // 起動をブロックしない。失敗しても次回起動の照合でやり直せる（キャッシュのため）
-        void migrateLegacyIndex(filePath, legacyMemento).catch(() => undefined);
-      }
+    }
+    if (filePath !== undefined) {
+      // ファイルの有無に関わらず毎回呼ぶ。旧キーが残っている限り消しにいく
+      // （Issue #1460レビュー指摘: ファイル有無だけで移行要否を決めると、検証失敗が
+      // 一度でもあると旧キーが永久に残る）。起動はブロックしない。失敗しても
+      // 次回起動でやり直せる（キャッシュのため）
+      void reconcileLegacyIndex(filePath, legacyMemento, fromFile.length > 0).catch(() => undefined);
     }
   }
 
@@ -136,13 +151,28 @@ export class ClaudeSessionIndex {
   }
 
   /**
+   * 起動時の照合（`refreshIndex` の初回完了）が済んだことを知らせる（Issue #1460レビュー指摘）。
+   * これより前の `requestPersist` は書き込みを予約せず、`dirty` を立てるだけで待っていた。
+   * ここで初めて本来の予約を行う（待っていた分もまとめて拾える。2回目以降の呼び出しは
+   * 単に予約をやり直すだけで害はない）。
+   */
+  markReady(): void {
+    this.ready = true;
+    this.requestPersist();
+  }
+
+  /**
    * 保存を予約する（Issue #1460）。最後の呼び出しから `PERSIST_DEBOUNCE_MS` 後に1回だけ
    * 書く。連続する追記1回ごとには書かない。タイマーは `unref` し、プロセス終了を妨げない
    * （書き出せずに終わっても、次回起動時の照合で復元される）。
+   *
+   * 起動時の照合が済むまでは`dirty`を立てるだけで、実際の予約はしない（Issue #1460レビュー
+   * 指摘: 索引ファイルも旧キーも無い初回起動で、watcher発の断片的な更新が全量スキャン完了前
+   * に書き込まれるのを防ぐ）。
    */
   requestPersist(): void {
     this.dirty = true;
-    if (this.filePath === undefined) {
+    if (this.filePath === undefined || !this.ready) {
       return;
     }
     if (this.persistTimer !== undefined) {
@@ -156,27 +186,61 @@ export class ClaudeSessionIndex {
   }
 
   /**
-   * 直ちに書く。`deactivate` からの最適化用の呼び出しを想定する（あくまで最適化であり、
-   * 失敗しても次回起動時の照合で回復できるため、ここでの例外は投げずに握りつぶす）。
+   * 直ちに書く。`deactivate` からの最適化用の呼び出しと、デバウンス満了時の両方から呼ばれる
+   * （あくまで最適化であり、失敗しても次回起動時の照合で回復できるため、ここでの例外は
+   * 投げずに握りつぶす）。
+   *
+   * 再入防止（Issue #1460レビュー指摘）: 書き込み中に別の`flush`が来たら、実行中のPromiseに
+   * 相乗りしつつ「終わったらもう一度」の印を立てる。古いスナップショットの`rename`が新しい
+   * ものより後に勝つ事態を防ぐ。
    */
   async flush(): Promise<void> {
-    if (this.filePath === undefined || !this.dirty) {
+    const filePath = this.filePath;
+    if (filePath === undefined || !this.ready) {
+      return;
+    }
+    if (this.writing !== undefined) {
+      if (this.dirty) {
+        this.pendingAfterWrite = true;
+      }
+      await this.writing;
+      return;
+    }
+    if (!this.dirty) {
       return;
     }
     if (this.persistTimer !== undefined) {
       clearTimeout(this.persistTimer);
       this.persistTimer = undefined;
     }
-    // 新しいものから順に上限まで残す。mtimeが読めなかったものは最後に回す
-    const ordered = this.all().sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
+    this.writing = this.writeAndMaybeRepeat(filePath);
     try {
-      await writeSessionIndexFile(
-        this.filePath,
-        ordered.slice(0, CLAUDE_SESSION_INDEX_MAX_PERSISTED),
-      );
+      await this.writing;
+    } finally {
+      this.writing = undefined;
+    }
+  }
+
+  /** 1回書いてから、書いている間に新しい変更が来ていればもう1回だけ書き直す。 */
+  private async writeAndMaybeRepeat(filePath: string): Promise<void> {
+    for (;;) {
+      this.pendingAfterWrite = false;
       this.dirty = false;
-    } catch {
-      // 書けなくても次回起動時の照合で復元できる（キャッシュのため）。ここでは投げない
+      // 新しいものから順に上限まで残す。mtimeが読めなかったものは最後に回す
+      const ordered = this.all().sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
+      try {
+        await writeSessionIndexFile(
+          filePath,
+          ordered.slice(0, CLAUDE_SESSION_INDEX_MAX_PERSISTED),
+        );
+      } catch {
+        // 書けなくても次回起動時の照合で復元できる（キャッシュのため）。ここでは投げない
+        this.dirty = true;
+        return;
+      }
+      if (!this.pendingAfterWrite) {
+        return;
+      }
     }
   }
 }

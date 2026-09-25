@@ -423,7 +423,9 @@ export class ClaudeSessionStore {
       // 件数で打ち切ったなら索引は途中までなので、あとで走査し直す必要がある
       this.stale = scope?.limit !== undefined;
       this.indexedScopeKey = scopeKey(scope);
-      this.index.requestPersist();
+      // 初回のrefreshIndex完了を索引へ知らせる（Issue #1460レビュー指摘）。これより前の
+      // watcher発requestPersistは書き込みを予約せず待っていたので、ここで初めて予約が動く
+      this.index.markReady();
       this.onRefreshed?.();
     } finally {
       this.refreshing = false;

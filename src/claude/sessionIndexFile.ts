@@ -49,6 +49,20 @@ function isValidEntry(value: unknown): value is ClaudeSessionIndexEntry {
   );
 }
 
+/**
+ * `size`/`ino` は数値でなければ未設定扱いに落とす（Issue #1460レビュー指摘）。
+ * どちらも `canSkipHeadRead` の安全側フォールバック（未設定なら先頭を読み直す）に
+ * 乗るだけなので、エントリ全体を捨てずに済む。
+ */
+function sanitizeEntry(entry: ClaudeSessionIndexEntry): ClaudeSessionIndexEntry {
+  const size = typeof entry.size === 'number' ? entry.size : undefined;
+  const ino = typeof entry.ino === 'number' ? entry.ino : undefined;
+  if (size === entry.size && ino === entry.ino) {
+    return entry;
+  }
+  return { ...entry, size, ino };
+}
+
 /** JSONを索引エントリの配列へ解釈する。壊れている・schemaが古いときは空を返す。 */
 function parsePersisted(raw: string): ClaudeSessionIndexEntry[] {
   try {
@@ -60,7 +74,7 @@ function parsePersisted(raw: string): ClaudeSessionIndexEntry[] {
     if (file.version !== SCHEMA_VERSION || !Array.isArray(file.entries)) {
       return [];
     }
-    return file.entries.filter(isValidEntry);
+    return file.entries.filter(isValidEntry).map(sanitizeEntry);
   } catch {
     return [];
   }
@@ -77,15 +91,31 @@ export function readSessionIndexFileSync(filePath: string): ClaudeSessionIndexEn
   return parsePersisted(raw);
 }
 
-/** 書き込み直後の検証読み戻し用（Issue #1460 移行手順の3.）。 */
-export async function readSessionIndexFile(filePath: string): Promise<ClaudeSessionIndexEntry[]> {
+/**
+ * 書き込み直後の検証読み戻し用（Issue #1460 旧キー削除の可否判定）。
+ *
+ * 各エントリの意味的な妥当性（`isValidEntry`）までは見ない。索引は作り直せるキャッシュ
+ * なので、トップレベルのschema（版・配列であること）さえ壊れていなければ十分とする
+ * （レビュー指摘: 件数の完全一致を求めると、書き込みと検証の間に他ウィンドウの書き込みが
+ * 割り込んだだけで旧キーが永久に残ってしまう）。
+ */
+async function verifySessionIndexFile(filePath: string): Promise<boolean> {
   let raw: string;
   try {
     raw = await readFile(filePath, 'utf8');
   } catch {
-    return [];
+    return false;
   }
-  return parsePersisted(raw);
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) {
+      return false;
+    }
+    const file = parsed as Partial<PersistedIndexFile>;
+    return file.version === SCHEMA_VERSION && Array.isArray(file.entries);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -106,22 +136,33 @@ export async function writeSessionIndexFile(
 }
 
 /**
- * globalStateの旧キー（`CLAUDE_SESSION_INDEX_KEY`）からファイルへ移す（Issue #1460）。
+ * globalStateの旧キー（`CLAUDE_SESSION_INDEX_KEY`）を片付ける（Issue #1460）。
  *
- * 手順: 旧キーを読む → tmp経由でファイルへ書く → 読み戻して検証する → 件数が一致した
- * ときだけ旧キーを`undefined`で消す。検証できなければ旧キーは残す（次回起動でやり直す）。
+ * ファイルの有無だけで移行要否を決めない（レビュー指摘: 一度検証に失敗すると、次回起動時
+ * ファイルが既にあるので移行分岐へ二度と入らず、旧キーが1MB近く残ったままになる）。
+ * 旧キーがまだ残っている限り、起動のたびに毎回この関数を呼ぶ。
+ *
+ * - ファイルに既にエントリがある（`fileHasEntries`）→ ファイルを正として使う。上書きせず
+ *   検証だけして旧キーを消す
+ * - ファイルが無い・空 → 旧キーからファイルを作り、検証してから旧キーを消す
+ *
+ * 検証は件数の完全一致を求めない（schema的に読めれば十分。索引は作り直せるキャッシュ）。
  * 呼び出し側は起動をブロックしないよう、この関数の完了を待たずに進んでよい。
  */
-export async function migrateLegacyIndex(filePath: string, memento: MementoLike): Promise<void> {
-  const legacy = memento
-    .get<ClaudeSessionIndexEntry[]>(CLAUDE_SESSION_INDEX_KEY, [])
-    .filter((entry) => entry.filePath !== '' && entry.session.provider === 'claude');
-  if (legacy.length === 0) {
-    return;
+export async function reconcileLegacyIndex(
+  filePath: string,
+  memento: MementoLike,
+  fileHasEntries: boolean,
+): Promise<void> {
+  const legacyRaw = memento.get<ClaudeSessionIndexEntry[] | undefined>(CLAUDE_SESSION_INDEX_KEY, undefined);
+  if (legacyRaw === undefined) {
+    return; // 旧キー自体が無い
   }
-  await writeSessionIndexFile(filePath, legacy);
-  const verified = await readSessionIndexFile(filePath);
-  if (verified.length === legacy.length) {
+  if (!fileHasEntries) {
+    const legacy = legacyRaw.filter((entry) => entry.filePath !== '' && entry.session.provider === 'claude');
+    await writeSessionIndexFile(filePath, legacy);
+  }
+  if (await verifySessionIndexFile(filePath)) {
     await memento.update(CLAUDE_SESSION_INDEX_KEY, undefined);
   }
 }
