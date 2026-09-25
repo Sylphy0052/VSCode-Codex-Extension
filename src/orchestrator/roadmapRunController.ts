@@ -53,6 +53,7 @@ export interface RoadmapRunControllerDeps {
     | 'startIssue'
     | 'pauseIssue'
     | 'stopIssue'
+    | 'instructIssue'
     | 'pump'
     | 'restoreRuns'
     | 'revealIssueSession'
@@ -338,6 +339,11 @@ export class RoadmapRunController {
 
   stopIssue(runId: string, issueNumber: number): Promise<boolean> {
     return this.deps.runner.stopIssue(runId, issueNumber);
+  }
+
+  /** Kanbanで入力された、Issueセッションへの指示（Orchestrator経由）。 */
+  instructIssue(runId: string, issueNumber: number, instruction: string): Promise<boolean> {
+    return this.deps.runner.instructIssue(runId, issueNumber, instruction);
   }
 
   /** Kanbanで入力された、ユーザー判断待ちの質問への回答。 */

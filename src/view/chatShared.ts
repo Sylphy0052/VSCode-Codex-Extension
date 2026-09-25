@@ -1040,6 +1040,12 @@ export interface ChatShellOptions {
   /** 画面に出すCLIの名前。発言の見出しと入力欄の案内に使う。 */
   agentLabel: string;
   /**
+   * 入力欄を閉じるか（Issue #1465 分割案6b。ロードマップ実行のIssueセッション）。
+   * `true`なら入力欄・ループ・設定を隠し、閲覧・Orchestrator経由の指示・即時停止の
+   * ボタンだけを出す。host側でも操作を捨てる（`BaseChatViewManager.receiveWebviewMessage`）。
+   */
+  inputLock?: boolean;
+  /**
    * この画面のプロバイダ。承認レベル（3段階）が実際にどの値へ展開されるかの
    * 出し分けに使う（Codexは承認方法とサンドボックスの2軸、Claude Codeは1軸）。
    */
@@ -1538,6 +1544,17 @@ function renderComposerButton(
 }
 
 /**
+ * 入力を閉じたタブ（`ChatShellOptions.inputLock`）で入力欄の代わりに出す操作列。
+ * 押下はhostへ送り、host側で指示文の入力や停止の確認を行う。
+ */
+const LOCKED_TAB_BAR = `<div id="lockedTabBar" role="toolbar" aria-label="Issueセッションの操作">
+      <span class="lockedTabNote">ロードマップ実行のIssueセッションです。直接は入力できません。</span>
+      <button id="lockedInspect" type="button" class="secondary" title="ロードマップの進捗を開く">閲覧</button>
+      <button id="lockedInstruct" type="button" class="secondary" title="Orchestratorを通して次の指示へ文を足す">Orchestrator経由で指示</button>
+      <button id="lockedStop" type="button" class="secondary" title="このIssueの実行を止める">即時停止</button>
+    </div>`;
+
+/**
  * チャット画面のHTMLを組み立てる。CodexとClaude Codeで共有する。
  * 描画するのは `ChatState` だけなので、プロバイダごとの差はここでは扱わない。
  */
@@ -1572,7 +1589,7 @@ export function renderShell(webview: vscode.Webview, options: ChatShellOptions):
 ${chatStyles()}
 </style>
 </head>
-<body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)} ${skinBodyClass(options.skin ?? DEFAULT_CHAT_SKIN)}">
+<body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)} ${skinBodyClass(options.skin ?? DEFAULT_CHAT_SKIN)}${options.inputLock === true ? ' inputLocked' : ''}">
   <div id="logWrap">
     <div id="log"></div>
     <div id="deferredRestore" hidden>
@@ -1615,6 +1632,7 @@ ${chatStyles()}
   <div id="attachments" hidden></div>
   <div id="argumentHint" hidden></div>
   <div id="inputModeHint" hidden></div>
+  ${options.inputLock === true ? LOCKED_TAB_BAR : ''}
   <div id="composer">
     <div id="commands" hidden></div>
     <div id="composerInputRow">

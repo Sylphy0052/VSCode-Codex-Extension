@@ -3964,6 +3964,16 @@ export function chatScript(
   }
   el('flushQueue').addEventListener('click', () => vscode.postMessage({ type: 'flushQueue' }));
   el('stop').addEventListener('click', () => vscode.postMessage({ type: 'interrupt' }));
+  // 入力を閉じたタブの操作列（issue #1465）。通常のタブには無い
+  const lockedTabActions = [
+    ['lockedInspect', 'openProgress'],
+    ['lockedInstruct', 'lockedInstruct'],
+    ['lockedStop', 'lockedStop'],
+  ];
+  for (const [id, type] of lockedTabActions) {
+    const button = document.getElementById(id);
+    if (button) button.addEventListener('click', () => vscode.postMessage({ type }));
+  }
   // 応答中のEscで中断する。画面のどこにフォーカスがあっても効くようにする
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || el('stop').hidden) return;

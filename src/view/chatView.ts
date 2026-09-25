@@ -520,7 +520,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   private async discussWithWebGptIn(entry: ChatPanel): Promise<void> {
-    if (this.webGptPreparing.has(entry)) return;
+    if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
     this.webGptPreparing.add(entry);
     const assertReady = () => {
       const state = entry.session.getState();
@@ -922,7 +922,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * viewStateが先に処理され、`this.active`が別の会話に変わってしまう（Issue #1297）。
    */
   private async handoffToNewSessionIn(entry: ChatPanel): Promise<void> {
-    if (this.handoffPreparing.has(entry)) return;
+    if (this.handoffPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
     this.handoffPreparing.add(entry);
     try {
       const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
@@ -1759,6 +1759,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           ? await this.disabledMcpServersConfig()
           : undefined;
     const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
+    // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
+    entry.inputLock = input.inputLock === true;
     const pendingKey = this.pendingStarts.begin(entry);
     // skillを提示させないセッション（セカンドオピニオン。Issue #1061）は、`thread/start` の
     // configへ重ねる。MCPの指定とは独立なので、両方指定されたら両方載る
@@ -1918,6 +1920,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       title,
       pinnedName,
       taskManaged,
+      inputLock: false,
+      lockedActionListeners: [],
       taskConfig,
       modelSettings,
       persistModelSettings,
@@ -1973,6 +1977,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.log.warn(composerButtonsConfig.warning);
     }
     return renderShell(panel.webview, {
+      inputLock: entry.inputLock,
       agentLabel: 'Codex',
       provider: 'codex',
       approvalModes: APPROVAL_MODES,
@@ -2061,6 +2066,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       note: (id, text) => entry.session.noteLocalEvent(id, text),
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus),
+      onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
       dispose: () => this.teardown(entry),
     };
   }
@@ -3411,7 +3417,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /** Diffで確定したレビュー指摘を、明示された会話へ1回だけ送る。送信を待つため `queued` は返さない。 */
   async sendReviewFeedback(threadId: string, text: string): Promise<ReviewDeliveryResult> {
     const entry = this.panels.get(threadId);
-    if (entry === undefined || entry.disposed || entry.session.getState().restore !== undefined) {
+    if (
+      entry === undefined ||
+      entry.disposed ||
+      entry.inputLock ||
+      entry.session.getState().restore !== undefined
+    ) {
       return 'sessionUnavailable';
     }
     this.cancelLimitAutoResume(entry);
