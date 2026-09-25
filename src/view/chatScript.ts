@@ -3586,6 +3586,19 @@ export function chatScript(
     button.querySelector('.composerOverflowLabel').textContent = 'ターン要約を' + action;
   }
 
+  el('prosConsToggle').addEventListener('click', () =>
+    vscode.postMessage({ type: 'toggleProsCons' }),
+  );
+
+  // メリデメ説明（issue #1474）。ターン要約と同じ形のトグル
+  function applyProsConsEnabled(enabled) {
+    const button = el('prosConsToggle');
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', 'メリデメ説明を' + action);
+    button.querySelector('.composerOverflowLabel').textContent = 'メリデメ説明を' + action;
+  }
+
   el('loopEngineeringToggle').addEventListener('click', () =>
     vscode.postMessage({ type: 'toggleLoopEngineering' }),
   );
@@ -4109,6 +4122,9 @@ export function chatScript(
     }
     if (data.type === 'turnSummary' && typeof data.enabled === 'boolean') {
       applyTurnSummaryEnabled(data.enabled);
+    }
+    if (data.type === 'prosCons' && typeof data.enabled === 'boolean') {
+      applyProsConsEnabled(data.enabled);
     }
     if (data.type === 'loopEngineering' && typeof data.enabled === 'boolean') {
       applyLoopEngineeringEnabled(data.enabled);
