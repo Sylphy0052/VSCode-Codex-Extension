@@ -73,6 +73,7 @@ import {
   DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS,
   type AutoReplySettings,
 } from './chat/autoReply';
+import { DEFAULT_LOOP_DONE_CHECK_THRESHOLD, type LoopDoneCheckSettings } from './loop/loopDoneCheck';
 import {
   DEFAULT_AUTO_REPLY_REFLEX_ANSWER_THRESHOLD,
   DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
@@ -812,6 +813,18 @@ export function readAutoReplyReflexConfig(): AutoReplyReflexSettings {
     dangerThreshold: threshold(
       'chat.autoReply.reflex.dangerThreshold',
       DEFAULT_AUTO_REPLY_REFLEX_DANGER_THRESHOLD,
+    ),
+  };
+}
+
+/** 条件付きループの完了宣言の検証（issue #1447）の設定を読む。閾値は0〜1へ丸める。 */
+export function readLoopDoneCheckConfig(): LoopDoneCheckSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: c.get<boolean>('chat.loopDoneCheck.enabled') === true,
+    threshold: Math.min(
+      1,
+      Math.max(0, num(c, 'chat.loopDoneCheck.threshold', DEFAULT_LOOP_DONE_CHECK_THRESHOLD)),
     ),
   };
 }
