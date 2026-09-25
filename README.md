@@ -596,9 +596,21 @@ Codexがサブエージェントを起動したとき、その活動を会話の
 - **Claude Codeは主会話の文脈を暗黙に共有する（実測で確定）**: `history`を渡さなくても、それまでの主会話の内容を踏まえて答えることを確認した。**脇道の質問自体はtranscriptに残らない一方で、主会話の内容はモデルに見えている**という非対称がある。質問の中身が主会話に影響することは無いが、「本流を汚さない」＝「本流の内容も見えていない」ではない点に注意
 - Claude Codeで応答が失敗した場合（CLI内部のエラー、モデルがツール呼び出しを試みた、APIエラー等）は、CLIの内部エラー文言をそのまま出さず日本語の説明に丸めて表示する。空の質問（`/btw` だけを送る等）は拡張機能側で弾き、CLIへは送らない
 
+### Reflexモード
+
+会話しているCLIの軽量モデル（Claude Codeは`sonnet`、Codexは`gpt-6-luna`）に、会話の節目で短い判定をさせるモード。入力欄の「…」メニューの「Reflexモードを有効にする」か、設定`agent.chat.reflex.enabled`で切り替える。設定として保存され、Codex画面・Claude Code画面のすべての会話に効く。既定は無効。
+
+有効にすると、次の3つを判定する。一部だけ止めたいときは、それぞれの設定を`false`にする。
+
+- 自動返信モードの完了検証・質問への自動回答・危険度ゲート（`agent.chat.autoReply.reflex.enabled`）
+- [条件付きループの完了宣言の検証](#同じ指示を繰り返すループ)（`agent.chat.loopDoneCheck.enabled`）
+- [依頼に合うskillの選択](#依頼に合うskillの選択)（`agent.chat.skillSelect.enabled`）
+
+判定1回に数秒〜十数秒かかり、利用枠も使う。判定の確率はモデルの自己申告で、較正されていない。
+
 ### 依頼に合うskillの選択
 
-CLIは会話の最初にskillの一覧（名前と説明）をモデルへ渡し、使うかどうかをモデルに任せている。skillが増えるほど一覧が長くなり、毎ターンの入力を圧迫する。`agent.chat.skillSelect.enabled` を有効にすると、一覧をモデルへ渡さない代わりに、手動で送る発言のたびにReflex判定（別のAI）で依頼に合うskillを1つ選び、選んだものだけを読み込ませる。
+CLIは会話の最初にskillの一覧（名前と説明）をモデルへ渡し、使うかどうかをモデルに任せている。skillが増えるほど一覧が長くなり、毎ターンの入力を圧迫する。[Reflexモード](#reflexモード)を有効にすると、一覧をモデルへ渡さない代わりに、手動で送る発言のたびにReflex判定（別のAI）で依頼に合うskillを1つ選び、選んだものだけを読み込ませる。
 
 - Codex: 新しい会話の開始時に一覧を外し、選んだskillを発言と一緒に渡す。再開した会話では一覧は外れないが、選んだskillは渡す
 - Claude Code: 一覧からskillを隠し、選んだskillをSkillツールで読み込むよう指示する一文を発言の前に置く。隠したskillも`/skill名`やSkillツールでは呼べる
@@ -647,7 +659,7 @@ CLIは会話の最初にskillの一覧（名前と説明）をモデルへ渡し
 
 承認カードが出ている間や、手で送った指示が待ち行列に残っている間は次の指示を送らず、それらが片付いてから続きへ進む。止まった理由は次のループを始めるまで画面に残る。
 
-終了の合図はエージェントの自己申告なので、条件を満たしていないのに止まることがある。`agent.chat.loopDoneCheck.enabled` を有効にすると、合図を検出した時点でReflex判定（別のAI）に直近の応答とループ中に実行したコマンドの記録を見せ、「終了条件を本当に満たしたか」を確かめる。満たした確率が `agent.chat.loopDoneCheck.threshold` 未満なら止めずに次の周へ進み、足りない点（検証が未実行・検証が失敗・条件の一部が未達・根拠が不明）を継続指示の前に添える。判定できなかったときは合図どおり止める。判定の結果は会話に1行残る。差し戻しの周も最大回数に数えるため、回数の上限は変わらない。ゴール駆動ループは対象外（Evaluatorが完了を判定する）。
+終了の合図はエージェントの自己申告なので、条件を満たしていないのに止まることがある。[Reflexモード](#reflexモード)を有効にすると、合図を検出した時点でReflex判定（別のAI）に直近の応答とループ中に実行したコマンドの記録を見せ、「終了条件を本当に満たしたか」を確かめる。満たした確率が `agent.chat.loopDoneCheck.threshold` 未満なら止めずに次の周へ進み、足りない点（検証が未実行・検証が失敗・条件の一部が未達・根拠が不明）を継続指示の前に添える。判定できなかったときは合図どおり止める。判定の結果は会話に1行残る。差し戻しの周も最大回数に数えるため、回数の上限は変わらない。ゴール駆動ループは対象外（Evaluatorが完了を判定する）。
 
 ### ゴール駆動ループ
 
@@ -1046,12 +1058,13 @@ tasks:
 | `agent.secondOpinion.advisor.idleTimeoutMs`      | `1800000`                                                                        | window   | 保持した相談相手を、無操作が続いたときに閉じるまでの時間（ミリ秒）。1分〜4時間の範囲に丸める                                                                                                                                                                                                                                     |
 | `agent.chat.turnSummary.enabled`                 | `false`                                                                          | window   | [応答末尾に要約と次アクションを出させる](#応答末尾の要約と次の推奨アクション)。手動で送る発言の末尾へ指示文を毎回足す。既定は無効                                                                                                                                                                                                |
 | `agent.chat.turnSummary.instruction`             | [既定文](#応答末尾の要約と次の推奨アクション)                                    | window   | 有効なときに発言の末尾へ足す指示文。空文字なら足さない（無効化と同じ）                                                                                                                                                                                                                                                           |
-| `agent.chat.skillSelect.enabled`                 | `false`                                                                          | window   | [依頼に合うskillだけを読み込ませる](#依頼に合うskillの選択)。skillの一覧をモデルへ渡さず、手動で送る発言のたびにReflex判定で合うskillを1つ選ぶ                                                                                                                                                                                   |
+| `agent.chat.reflex.enabled`                      | `false`                                                                          | window   | [Reflexモード](#reflexモード)を有効にする。入力欄の「…」メニューからも切り替えられる。自動返信の判定・ループの完了宣言の検証・skillの選択を、会話しているCLIの軽量モデルで行う                                                                                                                                                   |
+| `agent.chat.skillSelect.enabled`                 | `true`                                                                           | window   | [Reflexモード](#reflexモード)が有効のとき、[依頼に合うskillだけを読み込ませる](#依頼に合うskillの選択)。skillの一覧をモデルへ渡さず、手動で送る発言のたびにReflex判定で合うskillを1つ選ぶ                                                                                                                                        |
 | `agent.chat.skillSelect.threshold`               | `0.6`                                                                            | window   | 選んだskillの確率がこれ以上なら読み込ませる（0〜1）                                                                                                                                                                                                                                                                              |
 | `agent.chat.loopEngineering.enabled`             | `false`                                                                          | window   | [ループ](#同じ指示を繰り返すループ)が送る指示の末尾へ、機械的な検証・行き詰まりでの方針変更・撤退の申告を促す指示文を足す                                                                                                                                                                                                        |
 | `agent.chat.loopEngineering.initialInstruction`  | 既定文                                                                           | window   | 有効なときにループの**1回目**の指示へ足す文                                                                                                                                                                                                                                                                                      |
 | `agent.chat.loopEngineering.continueInstruction` | 既定文                                                                           | window   | 有効なときにループの**2回目以降**の指示へ足す文                                                                                                                                                                                                                                                                                  |
-| `agent.chat.loopDoneCheck.enabled`               | `false`                                                                          | window   | [ループ](#同じ指示を繰り返すループ)が終了の合図を出したとき、止める前にReflex判定で終了条件を満たしたかを確かめ、確信が持てなければ次の周へ進む。ゴール駆動ループには効かない                                                                                                                                                    |
+| `agent.chat.loopDoneCheck.enabled`               | `true`                                                                           | window   | [Reflexモード](#reflexモード)が有効のとき、[ループ](#同じ指示を繰り返すループ)が終了の合図を出したとき、止める前にReflex判定で終了条件を満たしたかを確かめ、確信が持てなければ次の周へ進む。ゴール駆動ループには効かない                                                                                                         |
 | `agent.chat.loopDoneCheck.threshold`             | `0.7`                                                                            | window   | 終了条件を満たした確率がこれ以上なら止める（0〜1）                                                                                                                                                                                                                                                                               |
 | `agent.chat.goalEvaluator.provider`              | `inherit`                                                                        | window   | [ゴール駆動ループ](#ゴール駆動ループ)の達成を判定する評価役を動かすCLI。`inherit` は会話と同じCLI。評価役にはツールを渡さない。`claude` / `codex` を明示すると会話の抜粋が別のプロバイダへ渡る                                                                                                                                   |
 | `agent.chat.goalEvaluator.model`                 | `auto`                                                                           | window   | 評価役のモデル。`auto` は軽量なモデルに任せる（claudeは `haiku`、codexはCLIの既定）                                                                                                                                                                                                                                              |

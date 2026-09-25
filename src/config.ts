@@ -796,13 +796,31 @@ export function readAutoReplyConfig(): AutoReplySettings {
   };
 }
 
-/** 自動返信モードに挟むReflex判定（Issue #1435）の設定を読む。閾値は0〜1へ丸める。 */
+/**
+ * Reflexモード（issue #1455）の親スイッチ。OFFの間は、自動返信の判定・完了宣言の検証・
+ * skill選択のどれも判定しない。各機能の`enabled`は、ONのときに一部だけ止めるためのキー。
+ */
+export function readReflexEnabled(): boolean {
+  return vscode.workspace.getConfiguration('agent').get<boolean>('chat.reflex.enabled') === true;
+}
+
+/** Reflexモードの親スイッチを、ユーザー設定へ保存する。 */
+export async function setReflexEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('agent')
+    .update('chat.reflex.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
+/**
+ * 自動返信モードに挟むReflex判定（Issue #1435）の設定を読む。閾値は0〜1へ丸める。
+ * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
+ */
 export function readAutoReplyReflexConfig(): AutoReplyReflexSettings {
   const c = vscode.workspace.getConfiguration('agent');
   const threshold = (key: string, fallback: number): number =>
     Math.min(1, Math.max(0, num(c, key, fallback)));
   return {
-    enabled: c.get<boolean>('chat.autoReply.reflex.enabled') !== false,
+    enabled: readReflexEnabled() && c.get<boolean>('chat.autoReply.reflex.enabled') !== false,
     completionThreshold: threshold(
       'chat.autoReply.reflex.completionThreshold',
       DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
@@ -818,11 +836,14 @@ export function readAutoReplyReflexConfig(): AutoReplyReflexSettings {
   };
 }
 
-/** 条件付きループの完了宣言の検証（issue #1447）の設定を読む。閾値は0〜1へ丸める。 */
+/**
+ * 条件付きループの完了宣言の検証（issue #1447）の設定を読む。閾値は0〜1へ丸める。
+ * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
+ */
 export function readLoopDoneCheckConfig(): LoopDoneCheckSettings {
   const c = vscode.workspace.getConfiguration('agent');
   return {
-    enabled: c.get<boolean>('chat.loopDoneCheck.enabled') === true,
+    enabled: readReflexEnabled() && c.get<boolean>('chat.loopDoneCheck.enabled') !== false,
     threshold: Math.min(
       1,
       Math.max(0, num(c, 'chat.loopDoneCheck.threshold', DEFAULT_LOOP_DONE_CHECK_THRESHOLD)),
@@ -830,11 +851,14 @@ export function readLoopDoneCheckConfig(): LoopDoneCheckSettings {
   };
 }
 
-/** 依頼に合うskillの選択（issue #1451）の設定を読む。閾値は0〜1へ丸める。 */
+/**
+ * 依頼に合うskillの選択（issue #1451）の設定を読む。閾値は0〜1へ丸める。
+ * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
+ */
 export function readSkillSelectConfig(): SkillSelectSettings {
   const c = vscode.workspace.getConfiguration('agent');
   return {
-    enabled: c.get<boolean>('chat.skillSelect.enabled') === true,
+    enabled: readReflexEnabled() && c.get<boolean>('chat.skillSelect.enabled') !== false,
     threshold: Math.min(
       1,
       Math.max(0, num(c, 'chat.skillSelect.threshold', DEFAULT_SKILL_SELECT_THRESHOLD)),
