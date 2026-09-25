@@ -459,6 +459,58 @@ export function markIssuePaused(run: RoadmapRun, issueNumber: number, now: Date)
 }
 
 /**
+ * Issueのworktreeとブランチを記録する。再開・再実行・自動引き継ぎでは同じworktreeを使い回す。
+ * 終わったノードと、同じ値が記録済みのときは何もしない。
+ */
+export function recordIssueWorktree(
+  run: RoadmapRun,
+  issueNumber: number,
+  worktree: { worktreePath: string; branch: string },
+  now: Date,
+): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (
+    issue === undefined ||
+    issue.progress === 'done' ||
+    (issue.worktreePath === worktree.worktreePath && issue.branch === worktree.branch)
+  ) {
+    return run;
+  }
+  return withIssue(run, {
+    ...issue,
+    worktreePath: worktree.worktreePath,
+    branch: worktree.branch,
+    updatedAt: now.toISOString(),
+  });
+}
+
+/**
+ * ノードを失敗（要対応）にする。セッションの異常終了、`ready_for_merge`で終えたのにPRが
+ * 見つからない、worktreeを作れないなど、人の対応が要る事象で呼ぶ。実行回は閉じ、
+ * worktreeとブランチは残す（再実行で引き継ぐ）。終わったノードとユーザーが停止したノードでは何もしない。
+ */
+export function markIssueFailed(
+  run: RoadmapRun,
+  issueNumber: number,
+  reason: string,
+  now: Date,
+): RoadmapRun {
+  const issue = getIssue(run, issueNumber);
+  if (issue === undefined || issue.progress === 'done' || issue.result === 'stopped') {
+    return run;
+  }
+  const at = now.toISOString();
+  return withIssue(run, {
+    ...endCurrentAttempt(issue, at),
+    progress: 'halted',
+    attention: 'failed',
+    result: 'failed',
+    failure: reason,
+    updatedAt: at,
+  });
+}
+
+/**
  * run全体を止める・止めを解く。止めている間、スケジューラは自動では新しいノードを始めない
  * （ユーザーがノードを選んで明示で実行するのは妨げない）。
  */
