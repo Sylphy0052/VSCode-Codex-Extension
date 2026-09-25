@@ -163,7 +163,7 @@ export function buildEndSummaryPrompt(material: EndSummaryMaterial): string {
   ].join('\n');
 }
 
-/** `auto`を実際に起動するCLIに合わせて解決する。Advisorと同じ軽量モデルを既定にする。 */
+/** `auto`を実際に起動するCLIに合わせて解決する。`resolveAdvisorModel`の既定に従う。 */
 export function resolveEndSummaryModel(model: string, provider: HeadlessProvider): string {
   return resolveAdvisorModel(model, provider);
 }

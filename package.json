@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.19",
+  "version": "2026.926.20",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1320,7 +1320,7 @@
           "type": "string",
           "default": "auto",
           "scope": "window",
-          "markdownDescription": "Advisorに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて解決する（codex は `gpt-6-sol`、claude は `haiku`）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
+          "markdownDescription": "Advisorに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて解決する（codex は `gpt-6-luna`、claude は `sonnet`。Reflexと同じ軽量モデル）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。ループの中では候補をその場で選べない（毎ターン選択を出すことになる）ため、ここで固定する。"
         },
         "agent.chat.loopAdvisor.timeoutSeconds": {
           "type": "number",

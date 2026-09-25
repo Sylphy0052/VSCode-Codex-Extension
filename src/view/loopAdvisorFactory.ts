@@ -5,11 +5,25 @@ import {
   type LoopAdvisorConfig,
   type LoopAdvisorFailureReason,
   type LoopAdvisorNote,
-  resolveAdvisorModel,
 } from '../loop/loopAdvisor';
 import { resolveHeadlessProvider, type HeadlessProvider } from '../loop/headlessCli';
 import { createLoopAdvisor } from '../loop/loopAdvisorProcess';
 import type { Logger } from '../log';
+import { REFLEX_MODELS } from '../reflex/reflexCli';
+
+/**
+ * `agent.chat.loopAdvisor.model`を、実際に起動するCLIに合わせて解決する（Issue #1490）。
+ *
+ * 明示されたモデル名は必ず優先する。`auto`のときはReflexと同じ軽量モデル
+ * （`REFLEX_MODELS`）へ倒す。Advisorは毎ターン呼ばれるため、重いモデルを既定にしない。
+ * 終了サマリ・自動返信が使う`resolveAdvisorModel`の既定は変えない。
+ */
+export function resolveLoopAdvisorModel(model: string, provider: HeadlessProvider): string {
+  if (model !== 'auto' && model !== '') {
+    return model;
+  }
+  return REFLEX_MODELS[provider];
+}
 
 /**
  * ループのAdvisor（issue #957）を設定から組み立てる。
@@ -38,7 +52,7 @@ export function createLoopAdvisorConfig(
       provider,
       executable,
       // 設定が`auto`のときのモデル名は、呼ぶ先が決まってからでないと選べない（issue #994）
-      model: resolveAdvisorModel(settings.model, provider),
+      model: resolveLoopAdvisorModel(settings.model, provider),
       timeoutMs: settings.timeoutSeconds * 1000,
       logWarn: (message) => log.warn(message),
       logInfo: (message) => log.info(message),

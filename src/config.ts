@@ -449,7 +449,7 @@ export async function setChatProsConsEnabled(enabled: boolean): Promise<void> {
 
 /**
  * 要約エージェントの設定（`agent.chat.endSummary.*`、issue #1473）。ターンが終わるたびに
- * 別のAIを1回呼ぶため、既定は無効。モデルの既定`auto`はAdvisorと同じ軽量モデルへ解決する。
+ * 別のAIを1回呼ぶため、既定は無効。モデルの既定`auto`は`resolveAdvisorModel`で解決する。
  */
 export function readChatEndSummaryConfig(): EndSummarySettings {
   const c = vscode.workspace.getConfiguration('agent');
@@ -788,7 +788,7 @@ export function readGoalEvaluatorConfig(): GoalEvaluatorSettings {
  * 出所が安定しない。変えたい場合は設定で上書きする。
  *
  * `model` はここでは `auto` のまま返す。実際のモデル名は実効プロバイダが決まってから
- * `resolveAdvisorModel` が解決する（`loopAdvisorFactory.ts`）。
+ * `resolveLoopAdvisorModel` が解決する（`loopAdvisorFactory.ts`）。
  */
 const MIN_ADVISOR_TIMEOUT_SECONDS = 10;
 
