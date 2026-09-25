@@ -346,6 +346,11 @@ interface ClaudePanel extends BaseChatPanel {
   /** 自動返信の応答履歴（停滞検出`detectStalledLoop`用）。 */
   autoReplyHistory: string[];
   /**
+   * 自動返信のReflex判定（Issue #1435）の打ち切り。OFFにしたときとタブを閉じたときに
+   * abortし、結果を捨てる判定のCLIを走らせ続けない。OFFにしたら作り直す。
+   */
+  autoReplyReflexAbort: AbortController;
+  /**
    * 自動返信中に自動回答を試みているAskUserQuestionの要求idの集合（Issue #1353）。
    *
    * 返信役への問い合わせは非同期で、その間に同じ要求へ二重に問い合わせないための
@@ -1460,6 +1465,8 @@ export class ClaudeChatViewManager
     entry.autoReplyHistory = [];
     // もう一度ONにしたときは、残っているカードを改めて返信役へ聞けるようにする
     entry.autoReplyAskUserQuestionInFlight.clear();
+    entry.autoReplyReflexAbort.abort();
+    entry.autoReplyReflexAbort = new AbortController();
     const agent = entry.autoReplyAgent;
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
@@ -1548,11 +1555,12 @@ export class ClaudeChatViewManager
   }
 
   /** 自動返信のReflex判定（Issue #1435）は、会話しているClaude Codeの軽量モデルで走らせる。 */
-  private autoReplyReflexDeps(): ReflexJudgeDeps {
+  private autoReplyReflexDeps(entry: ClaudePanel): ReflexJudgeDeps {
     return {
       provider: 'claude',
       executable: this.claudePath(),
       logWarn: (message) => this.log.warn(message),
+      signal: entry.autoReplyReflexAbort.signal,
     };
   }
 
@@ -1571,7 +1579,7 @@ export class ClaudeChatViewManager
       return true;
     }
     const verdict = await checkAutoReplyCompletion(
-      this.autoReplyReflexDeps(),
+      this.autoReplyReflexDeps(entry),
       lastAgentMessageText,
       reflex.completionThreshold,
     );
@@ -1610,7 +1618,7 @@ export class ClaudeChatViewManager
       return true;
     }
     const verdict = await checkAutoReplyDanger(
-      this.autoReplyReflexDeps(),
+      this.autoReplyReflexDeps(entry),
       outgoing,
       context,
       reflex.dangerThreshold,
@@ -1678,7 +1686,7 @@ export class ClaudeChatViewManager
       // 選択肢を判定で選べるなら返信役を通さない（Issue #1435）。確信度が足りない質問が
       // あれば人へ回し、判定できない（失敗・複数選択）ときだけ返信役に任せる
       const verdict = await judgeAutoReplyAskUserQuestion(
-        this.autoReplyReflexDeps(),
+        this.autoReplyReflexDeps(entry),
         questions,
         context,
         reflex.answerThreshold,
@@ -2361,6 +2369,7 @@ export class ClaudeChatViewManager
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
     entry.autoReplyAgent?.close('tabClosed');
     entry.autoReplyAgent = undefined;
+    entry.autoReplyReflexAbort.abort();
   }
 
   /** 拡張機能の終了時に、残っている相談相手をすべて閉じる（Issue #929）。 */
@@ -2790,6 +2799,7 @@ export class ClaudeChatViewManager
       autoReplyAgent: undefined,
       autoReplyTurnCount: 0,
       autoReplyHistory: [],
+      autoReplyReflexAbort: new AbortController(),
       autoReplyAskUserQuestionInFlight: new Set(),
     };
     return entry;

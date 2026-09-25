@@ -201,7 +201,13 @@ export async function judgeAutoReplyAskUserQuestion(
   const labelsPerQuestion = questions.map((q) =>
     q.options.map((option) => sanitizeInlineText(option.label, ASK_LABEL_MAX_LENGTH)),
   );
-  if (labelsPerQuestion.some((labels) => labels.includes(ASK_USER_QUESTION_NONE_OPTION))) {
+  // 整形後に重なったラベルは、位置で元のラベルへ戻せない（`indexOf`が先頭の方を返す）
+  if (
+    labelsPerQuestion.some(
+      (labels) =>
+        labels.includes(ASK_USER_QUESTION_NONE_OPTION) || new Set(labels).size !== labels.length,
+    )
+  ) {
     return { kind: 'delegate' };
   }
   const answers = await judge(deps, {

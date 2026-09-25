@@ -392,6 +392,11 @@ interface ChatPanel extends BaseChatPanel {
   autoReplyTurnCount: number;
   /** 返信役の応答履歴（`stallDetector.ts`の署名列と同じ形）。同じ応答が続いた停滞検出に使う。 */
   autoReplyHistory: readonly string[];
+  /**
+   * 自動返信のReflex判定（Issue #1435）の打ち切り。OFFにしたときとタブを閉じたときに
+   * abortし、結果を捨てる判定のCLIを走らせ続けない。OFFにしたら作り直す。
+   */
+  autoReplyReflexAbort: AbortController;
 }
 
 /**
@@ -1265,6 +1270,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.session.setAutoReply(false);
     entry.autoReplyTurnCount = 0;
     entry.autoReplyHistory = [];
+    entry.autoReplyReflexAbort.abort();
+    entry.autoReplyReflexAbort = new AbortController();
     const agent = entry.autoReplyAgent;
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
@@ -1353,11 +1360,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /** 自動返信のReflex判定（Issue #1435）は、会話しているCodexの軽量モデルで走らせる。 */
-  private autoReplyReflexDeps(): ReflexJudgeDeps {
+  private autoReplyReflexDeps(entry: ChatPanel): ReflexJudgeDeps {
     return {
       provider: 'codex',
       executable: readConfig().executablePath,
       logWarn: (message) => this.log.warn(message),
+      signal: entry.autoReplyReflexAbort.signal,
     };
   }
 
@@ -1376,7 +1384,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return true;
     }
     const verdict = await checkAutoReplyCompletion(
-      this.autoReplyReflexDeps(),
+      this.autoReplyReflexDeps(entry),
       lastAgentMessageText,
       reflex.completionThreshold,
     );
@@ -1415,7 +1423,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return true;
     }
     const verdict = await checkAutoReplyDanger(
-      this.autoReplyReflexDeps(),
+      this.autoReplyReflexDeps(entry),
       outgoing,
       context,
       reflex.dangerThreshold,
@@ -1878,6 +1886,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       autoReplyAgent: undefined,
       autoReplyTurnCount: 0,
       autoReplyHistory: [],
+      autoReplyReflexAbort: new AbortController(),
     };
     return entry;
   }
@@ -2055,6 +2064,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
     entry.autoReplyAgent?.close('tabClosed');
     entry.autoReplyAgent = undefined;
+    entry.autoReplyReflexAbort.abort();
   }
 
   private onSessionChange(entry: ChatPanel, state: ChatState): void {
