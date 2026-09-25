@@ -460,6 +460,8 @@ async function rebuildLiveRun(
     reviewCommentPoll: undefined,
     overlapPollTimer: undefined,
     overlapMeasuring: false,
+    launchingTasks: new Set(),
+    stopping: false,
     mergeResolutions: new Map(),
     createdTaskIssues: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。

@@ -1844,6 +1844,17 @@ export interface LiveRun {
   /** 交差の実測が走っている間`true`（重ねて測らない） */
   overlapMeasuring: boolean;
   /**
+   * `startTask`がセッションを開いている途中のタスク。`live.tasks`には前回の試行の
+   * `LiveTask`（古い`startSeq`・実測値・止まったセッション）が残っているため、交差の
+   * 実測と判定から外す
+   */
+  launchingTasks: Set<string>;
+  /**
+   * `stop()`が対象のタスクを順に止めている間`true`。先に止めたタスクの完了処理から
+   * 呼ばれる`pump`が、まだ止めていない交差待ちのタスクを解放して取り込みを始めないようにする
+   */
+  stopping: boolean;
+  /**
    * 衝突解決セッション（design.md §16.17「コンフリクト」5.「解決用セッションは依存グラフの
    * ノードにはしない」）。`live.tasks`（グラフのノード＝通常のタスク）とは別に持つ。
    * taskIdをキーにする（1タスクにつき同時に1件のマージしか走らない）。
@@ -2674,6 +2685,8 @@ export class WorkflowRunner {
       reviewCommentPoll: undefined,
       overlapPollTimer: undefined,
       overlapMeasuring: false,
+      launchingTasks: new Set(),
+      stopping: false,
       mergeResolutions: new Map(),
       createdTaskIssues: new Map(),
       orchestrator: undefined,
@@ -2762,14 +2775,19 @@ export class WorkflowRunner {
         state === 'waitingOverlap'
       );
     });
-    for (const [, liveTask] of targets) {
-      liveTask.session.stopLoop();
-    }
-    // 衝突解決セッションは`live.tasks`に無い別枠の管理（`revealTask`と同じ扱い）のため、
-    // 上のフィルタには乗らない。生きているものへ全て送る（対象は`merging`のタスクだけの
-    // はずで、常に1件ずつしか無いが、複数あっても構わない形にしておく）
-    for (const entry of live.mergeResolutions.values()) {
-      entry.session.stopLoop();
+    live.stopping = true;
+    try {
+      for (const [, liveTask] of targets) {
+        liveTask.session.stopLoop();
+      }
+      // 衝突解決セッションは`live.tasks`に無い別枠の管理（`revealTask`と同じ扱い）のため、
+      // 上のフィルタには乗らない。生きているものへ全て送る（対象は`merging`のタスクだけの
+      // はずで、常に1件ずつしか無いが、複数あっても構わない形にしておく）
+      for (const entry of live.mergeResolutions.values()) {
+        entry.session.stopLoop();
+      }
+    } finally {
+      live.stopping = false;
     }
     // 停止直後は走行中タスクの`stopLoop()`がまだ確定していない（進行中のターンには
     // 割り込まない）ため、オーケストレーターの視点では通常の`taskFailed`しか届かず
@@ -4355,6 +4373,7 @@ export class WorkflowRunner {
       return;
     }
 
+    live.launchingTasks.add(taskId);
     try {
       const prepared = await this.prepareTaskLaunch(live, task, taskId, runId);
 
@@ -4397,6 +4416,8 @@ export class WorkflowRunner {
       void this.persist(runId);
       this.notify(runId);
       this.pump(runId);
+    } finally {
+      live.launchingTasks.delete(taskId);
     }
   }
 

@@ -50,7 +50,12 @@ export async function checkTaskOverlap(
     // `merging`のタスクはworktreeがマージの途中にあり得るため測り直さず、直前の実測値を使う
     const targets = [...live.tasks.entries()].filter(([taskId, liveTask]) => {
       const state = live.runState.tasks.get(taskId)?.state;
-      return isOverlapHoldingState(state) && state !== 'merging' && isMeasurable(liveTask);
+      return (
+        isOverlapHoldingState(state) &&
+        state !== 'merging' &&
+        !live.launchingTasks.has(taskId) &&
+        isMeasurable(liveTask)
+      );
     });
     await Promise.all(
       targets.map(async ([, liveTask]) => {
@@ -79,7 +84,12 @@ function applyOverlapWaits(self: WorkflowRunnerInternals, runId: string, live: L
   const entries: OverlapEntry[] = [];
   for (const [taskId, liveTask] of live.tasks) {
     const state = live.runState.tasks.get(taskId)?.state;
-    if (state === undefined || liveTask.touchedFiles === undefined) {
+    // 開始途中のタスクは前回の試行の実測値しか持たないため、待つ側にも待たせる側にもしない
+    if (
+      state === undefined ||
+      liveTask.touchedFiles === undefined ||
+      live.launchingTasks.has(taskId)
+    ) {
       continue;
     }
     entries.push({ taskId, startSeq: liveTask.startSeq, state, files: liveTask.touchedFiles });
@@ -132,6 +142,9 @@ export function releaseOverlapWaits(
   live: LiveRun,
   excludeFromActiveCount: ReadonlySet<string>,
 ): void {
+  if (live.stopping) {
+    return;
+  }
   let activeCount = 0;
   for (const [taskId, s] of live.runState.tasks) {
     if (isActiveTaskState(s.state) && !excludeFromActiveCount.has(taskId)) {
