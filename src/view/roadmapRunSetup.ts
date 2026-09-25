@@ -1,8 +1,14 @@
+import { writeFile } from 'node:fs/promises';
 import * as vscode from 'vscode';
-import { readClaudeConfig, readConfig } from '../config';
+import { readClaudeConfig, readConfig, readWorkflowsConfig } from '../config';
 import type { Logger } from '../log';
 import { nodeForgeFileSystem, type CliCommandRunner } from '../orchestrator/forge';
 import { RoadmapIssueRunner } from '../orchestrator/roadmapIssueRunner';
+import {
+  RoadmapMergeQueue,
+  type RoadmapMergeConsentRequest,
+  type RoadmapMergeSettings,
+} from '../orchestrator/roadmapMergeQueue';
 import {
   applyRoadmapPlanProposal,
   createHeadlessRoadmapPlanProposer,
@@ -25,6 +31,7 @@ import {
   type RoadmapRunMode,
 } from '../orchestrator/roadmapRunState';
 import { RoadmapRunStore } from '../orchestrator/roadmapRunStore';
+import { formatVerifyCommandForDisplay } from '../orchestrator/runnerVerifyCommands';
 import type { TaskSessionConfig, TaskSessionHost } from '../orchestrator/taskSession';
 import {
   nodeWorktreeFileSystem,
@@ -82,6 +89,25 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     engine === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath;
   const importDeps = { cli: deps.cli, fs: nodeForgeFileSystem };
 
+  const mergeQueue = new RoadmapMergeQueue({
+    git: deps.git,
+    cli: deps.cli,
+    fs: nodeWorktreeFileSystem,
+    writeTextFile: (target, text) => writeFile(target, text, 'utf8'),
+    worktreeQueue: deps.worktreeQueue,
+    detectHost: (root) => detectRoadmapForgeHost(ports, root),
+    isPullRequestMerged: (root, n) => isRoadmapPullRequestMerged(ports, root, n),
+    readSettings: readMergeSettings,
+    isWorkspaceTrusted: () => vscode.workspace.isTrusted,
+    confirm: confirmMerge,
+    ciWaitTimeoutMs: () => readWorkflowsConfig().ciWaitTimeoutSec * 1000,
+    getRun: (runId) => store.find(runId),
+    updateRun: async (runId, fn) => holder.controller?.updateRun(runId, fn),
+    startMergeRepair: (runId, n, request) => runner.startMergeRepair(runId, n, request),
+    warn: (runId, n, message) => holder.controller?.recordWarning(runId, n, message),
+    log: (message) => log.info(message),
+  });
+
   const controller = new RoadmapRunController({
     store,
     runner,
@@ -109,6 +135,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     confirmPlan,
     notifyStalled: (run, blockers) => notifyStalled(run, blockers, () => holder.view?.show(run.runId)),
     onDidChange: () => holder.view?.refresh(),
+    mergeQueue,
     log: (message) => log.info(message),
   });
   holder.controller = controller;
@@ -120,6 +147,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   });
 
   return [
+    { dispose: () => mergeQueue.dispose() },
     { dispose: () => runner.dispose() },
     view,
     vscode.commands.registerCommand('agent.roadmapRun.start', () =>
@@ -141,6 +169,48 @@ async function confirmPlan(proposal: RoadmapPlanProposal): Promise<boolean> {
     approve,
   );
   return choice === approve;
+}
+
+/** `agent.roadmapRun.merge.*`を読む。不正な値は空（実行しない）として扱う。 */
+function readMergeSettings(root: string): RoadmapMergeSettings {
+  const c = vscode.workspace.getConfiguration('agent.roadmapRun.merge', vscode.Uri.file(root));
+  const bump = c.get<unknown>('versionBumpCommand');
+  const verify = c.get<unknown>('verifyCommands');
+  return {
+    versionBumpCommand: typeof bump === 'string' ? bump.trim() : '',
+    verifyCommands: Array.isArray(verify)
+      ? verify
+          .filter((v): v is string => typeof v === 'string')
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+      : [],
+  };
+}
+
+/**
+ * mergeと後片付け、検証・版上げコマンドの実行を許可してもらう。runごとに1回（コマンドが
+ * 変わったら聞き直す）。コマンドは実行する文字列そのままを、不可視文字をエスケープして見せる。
+ */
+async function confirmMerge(request: RoadmapMergeConsentRequest): Promise<boolean> {
+  const lines = request.commands.map(formatVerifyCommandForDisplay);
+  const allow = 'mergeを許可';
+  const choice = await vscode.window.showWarningMessage(
+    `ロードマップ #${String(request.roadmapIssueNumber)}のPRを順にmergeしますか？`,
+    {
+      modal: true,
+      detail:
+        'merge待ちのIssueごとに、worktreeでorigin/mainを取り込み、検証・版上げのあとpushして' +
+        'CIの完了を待ってmergeします。merge後はリモートとローカルのブランチ、worktreeを消します。\n' +
+        '許可はこの実行（run）の間だけ有効です。' +
+        (lines.length === 0
+          ? '検証・版上げのコマンドは設定されていません（agent.roadmapRun.merge.*）。'
+          : '次のコマンドをworktreeでシェル経由で実行します。AIのサンドボックスの外で、' +
+            '拡張機能の権限で動きます。コマンドが読むファイルはIssueのAIが書き換えている場合があります。\n\n' +
+            lines.join('\n')),
+    },
+    allow,
+  );
+  return choice === allow;
 }
 
 function notifyStalled(run: RoadmapRun, blockers: readonly number[], open: () => void): void {
