@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.10",
+  "version": "2026.926.11",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1154,6 +1154,40 @@
           "default": "複数の案・方針・選択肢を示すときは、案ごとにメリットとデメリットを示し、推奨する案とその理由を添えること。",
           "scope": "window",
           "markdownDescription": "`agent.chat.prosCons.enabled` が有効なときに発言の末尾へ付け足す指示文。本文との間には空行が入る。空文字にすると付け足さない（無効化と同じ）。"
+        },
+        "agent.chat.endSummary.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "ターンが終わるたびに、そのターンでやったことを別のAI（要約エージェント）に要約させ、応答の下へ注記として表示する（Codex/Claude Code両画面共通）。要約は作業中のAIへは送らず、会話の履歴にも入らない。材料はそのターンの発言・最終応答・実行したコマンド・変更したファイルだけで、送る前に資格情報らしい文字列を伏せる。既定は無効で、無効のあいだは追加のCLIを起動しない。ループ・ワークフロー・自動返信の実行中と、擬似コマンド・入力モードだけのターンでは動かない。`agent.chat.turnSummary.enabled`（作業中のAI自身に要約させる指示）とは別の機能で、併用できる。"
+        },
+        "agent.chat.endSummary.provider": {
+          "type": "string",
+          "enum": [
+            "inherit",
+            "claude",
+            "codex"
+          ],
+          "enumDescriptions": [
+            "会話しているのと同じCLIで要約する",
+            "常に claude で要約する",
+            "常に codex で要約する"
+          ],
+          "default": "inherit",
+          "scope": "window",
+          "markdownDescription": "要約エージェントに使うCLI。"
+        },
+        "agent.chat.endSummary.model": {
+          "type": "string",
+          "default": "auto",
+          "scope": "window",
+          "markdownDescription": "要約エージェントに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて軽量モデルへ解決する（codex は `gpt-6-sol`、claude は `haiku`）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。"
+        },
+        "agent.chat.endSummary.effort": {
+          "type": "string",
+          "default": "low",
+          "scope": "window",
+          "markdownDescription": "要約エージェントの推論の強さ（`low` / `medium` / `high` など）。claude には `--effort`、codex には `-c model_reasoning_effort=` として渡す。空文字にするとCLIの既定に任せる。"
         },
         "agent.chat.loopEngineering.enabled": {
           "type": "boolean",

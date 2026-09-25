@@ -42,6 +42,7 @@ const KIND_TITLE: Record<string, string> = {
   exitedReviewMode: 'レビュー終了',
   sideQuestion: '脇道の質問',
   secondOpinion: 'セカンドオピニオン',
+  endSummary: '要約エージェント',
   subAgentActivity: 'サブエージェント',
   collabAgentToolCall: 'サブエージェント操作',
   autoApprovalReview: '自動承認レビュー',
