@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isEffortToken } from '../codex/modelCatalog';
 import { killWithEscalation } from '../process/childProcess';
 import { canWriteStdin, guardStdinErrors } from '../process/stdinSafety';
 
@@ -47,8 +48,9 @@ export function resolveHeadlessProvider(
  *   判断が汚染される。** 実測では、リポジトリ直下でこれを付けずに呼ぶと、利用者側の
  *   口調規約やプロンプトインジェクション警戒の指示を被り、JSONを返さなかった。
  * - `--output-format json`: 応答本文を`result`フィールドで受け取る。
+ * - `--effort <level>`: `effort`を渡したときだけ付ける（issue #1473。実測: claude 2.1.x、haikuでも受け付ける）。
  */
-export function buildClaudeHeadlessArgs(model: string): string[] {
+export function buildClaudeHeadlessArgs(model: string, effort = ''): string[] {
   const resolved = model === 'auto' || model === '' ? AUTO_CLAUDE_MODEL : model;
   return [
     '-p',
@@ -60,7 +62,17 @@ export function buildClaudeHeadlessArgs(model: string): string[] {
     'json',
     '--model',
     resolved,
+    ...effortArgs(effort, (value) => ['--effort', value]),
   ];
+}
+
+/**
+ * effortの指定を引数にする。空文字・引数として安全でない形は付けない（CLIの既定に任せる）。
+ *
+ * Codexには専用フラグが無いため`-c model_reasoning_effort=<値>`で渡す（`codex/types.ts`と同じ）。
+ */
+function effortArgs(effort: string, build: (value: string) => string[]): string[] {
+  return effort !== '' && isEffortToken(effort) ? build(effort) : [];
 }
 
 /**
@@ -131,7 +143,11 @@ export const CODEX_CONFIG_OVERRIDES = [
  * 露出するツール一覧を測り直し、許可していない新しい能力が増えていないか確認する**
  * 必要がある（issue #962の受入基準）。
  */
-export function buildCodexHeadlessArgs(model: string, outputFile: string): string[] {
+export function buildCodexHeadlessArgs(
+  model: string,
+  outputFile: string,
+  effort = '',
+): string[] {
   const modelArgs = model === 'auto' || model === '' ? [] : ['-m', model];
   const denyArgs = CODEX_DENIED_FEATURES.flatMap((feature) => ['--disable', feature]);
   const configArgs = CODEX_CONFIG_OVERRIDES.flatMap((override) => ['-c', override]);
@@ -145,6 +161,7 @@ export function buildCodexHeadlessArgs(model: string, outputFile: string): strin
     ...denyArgs,
     ...configArgs,
     ...modelArgs,
+    ...effortArgs(effort, (value) => ['-c', `model_reasoning_effort=${value}`]),
     '-o',
     outputFile,
   ];
@@ -155,6 +172,8 @@ export interface HeadlessCliDeps {
   executable: string;
   model: string;
   timeoutMs: number;
+  /** 推論の強さ（`low`など）。省略・空文字ならCLIの既定に任せる（issue #1473）。 */
+  effort?: string;
   /** 失敗の記録先。判断そのものは呼び出し側で安全側へ倒すため、ここでは記録だけ行う。 */
   logWarn?: (message: string) => void;
   /**
@@ -216,7 +235,7 @@ export async function runHeadlessPromptDetailed(
 async function runClaude(deps: HeadlessCliDeps, prompt: string): Promise<HeadlessOutcome> {
   const result = await runProcess(
     deps.executable,
-    buildClaudeHeadlessArgs(deps.model),
+    buildClaudeHeadlessArgs(deps.model, deps.effort),
     prompt,
     deps.timeoutMs,
     undefined,
@@ -258,7 +277,7 @@ async function runCodex(deps: HeadlessCliDeps, prompt: string): Promise<Headless
     // 渡す理由が無い以上、渡さない側へ倒す（issue #962）
     const result = await runProcess(
       deps.executable,
-      buildCodexHeadlessArgs(deps.model, outputFile),
+      buildCodexHeadlessArgs(deps.model, outputFile, deps.effort),
       prompt,
       deps.timeoutMs,
       dir,
