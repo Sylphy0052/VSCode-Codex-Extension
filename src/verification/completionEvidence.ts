@@ -4,6 +4,7 @@ import {
   type VerificationAcquisition,
   type VerificationOutcome,
   type VerificationRecord,
+  type VerificationStage,
   type VerificationTrust,
 } from './record';
 import { captureSourceIdentity, type SourceIdentity } from './sourceIdentity';
@@ -21,9 +22,14 @@ import type { VerificationRecordFilter, VerificationStore } from './store';
  * - `verified`: ソースが一致する `trusted` の記録があり、すべて成功
  * - `failed`: ソースが一致する `trusted` の記録に成功以外（失敗・結果不明）がある
  * - `selfReportedOnly`: `trusted` の記録が無く、ソースが一致する `agent-reported` の記録だけがある
+ * - `notRequested`: `verify.commands` が指定されておらず、記録も無い（完了は自己申告だけで確定した。Issue #1468）
  * - `unverified`: 上のどれでもない（`trusted` の記録が無い、ソースが一致しない、ソースを取れない）
+ *
+ * 区分は段階が `task` の記録（`stage` 省略を含む）だけから導く。変更を戻した状態（`revert`）や
+ * 分岐元（`baseline`）での実行は、失敗して当然の記録なので数えない（Issue #1468）。
  */
-export type CompletionEvidenceCategory = 'verified' | 'failed' | 'selfReportedOnly' | 'unverified';
+export type CompletionEvidenceCategory =
+  'verified' | 'failed' | 'selfReportedOnly' | 'notRequested' | 'unverified';
 
 /**
  * 記録のソースと表示時点のソースの関係。
@@ -54,11 +60,23 @@ export function sourceMatchOf(
   return isSameSource(record.subject, current) ? 'match' : 'mismatch';
 }
 
+export interface DeriveCompletionEvidenceOptions {
+  /**
+   * 拡張機能が実行する検証（`verify.commands`）が指定されていたか。`false` のとき、記録が
+   * 無ければ `notRequested` にする。省略は `true`（会話画面のループなど、指定の概念が無い経路）
+   */
+  readonly commandsRequested?: boolean;
+}
+
+const stageOf = (record: VerificationRecord): VerificationStage => record.link.stage ?? 'task';
+
 /** 記録と表示時点のソース同一性から表示区分を導く（純粋関数） */
 export function deriveCompletionEvidence(
-  records: readonly VerificationRecord[],
+  allRecords: readonly VerificationRecord[],
   current: SourceIdentity | undefined,
+  options: DeriveCompletionEvidenceOptions = {},
 ): CompletionEvidenceDerivation {
+  const records = allRecords.filter((record) => stageOf(record) === 'task');
   const matched = records.filter((record) => sourceMatchOf(record, current) === 'match');
   const matchedTrusted = matched.filter((record) => record.trust === 'trusted');
   if (matchedTrusted.length > 0) {
@@ -88,6 +106,12 @@ export function deriveCompletionEvidence(
   if (current === undefined && records.length > 0) {
     return { category: 'unverified', reason: '現在のソースの状態を取得できない' };
   }
+  if (options.commandsRequested === false && records.length === 0) {
+    return {
+      category: 'notRequested',
+      reason: 'verify.commands が指定されておらず、完了は自己申告だけで確定した',
+    };
+  }
   return { category: 'unverified', reason: '現在のソースと一致する検証記録が無い' };
 }
 
@@ -103,6 +127,7 @@ export interface CompletionEvidenceEntryView {
   readonly timeKind: 'ended' | 'started' | 'recorded';
   readonly sourceMatch: SourceMatch;
   readonly outputTail: string;
+  readonly stage: VerificationStage;
 }
 
 export interface CompletionEvidenceView extends CompletionEvidenceDerivation {
@@ -126,8 +151,9 @@ export const EVIDENCE_MAX_ENTRIES = 20;
 export function buildCompletionEvidenceView(
   records: readonly VerificationRecord[],
   current: SourceIdentity | undefined,
+  options: DeriveCompletionEvidenceOptions = {},
 ): CompletionEvidenceView {
-  const derivation = deriveCompletionEvidence(records, current);
+  const derivation = deriveCompletionEvidence(records, current, options);
   const newestFirst = [...records].reverse();
   const shown = newestFirst.slice(0, EVIDENCE_MAX_ENTRIES);
   return {
@@ -161,6 +187,7 @@ function toEntryView(
       record.outputRef.tail.slice(-EVIDENCE_OUTPUT_TAIL_MAX_CHARS),
       EVIDENCE_OUTPUT_TAIL_MAX_CHARS,
     ),
+    stage: stageOf(record),
   };
 }
 
@@ -201,7 +228,12 @@ export async function loadCompletionEvidence(
 export async function loadTaskCompletionEvidence(
   store: Pick<VerificationStore, 'list'>,
   runId: string,
-  tasks: readonly { readonly id: string; readonly cwd: string | undefined }[],
+  tasks: readonly {
+    readonly id: string;
+    readonly cwd: string | undefined;
+    /** `verify.commands` が指定されていたか（{@link DeriveCompletionEvidenceOptions}） */
+    readonly commandsRequested?: boolean;
+  }[],
   options: Pick<LoadCompletionEvidenceOptions, 'capture'> = {},
 ): Promise<Record<string, CompletionEvidenceView>> {
   const capture = options.capture ?? captureSourceIdentity;
@@ -211,7 +243,14 @@ export async function loadTaskCompletionEvidence(
       const current =
         task.cwd === undefined ? undefined : await capture(task.cwd).catch(() => undefined);
       const own = records.filter((record) => record.link.taskId === task.id);
-      return [task.id, buildCompletionEvidenceView(own, current)];
+      return [
+        task.id,
+        buildCompletionEvidenceView(own, current, {
+          ...(task.commandsRequested === undefined
+            ? {}
+            : { commandsRequested: task.commandsRequested }),
+        }),
+      ];
     }),
   );
   return Object.fromEntries(entries);

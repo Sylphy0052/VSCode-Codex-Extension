@@ -230,7 +230,11 @@ export function buildSchemaDescription(options: SchemaDescriptionOptions = {}): 
       '（例:「テストが通っている」。「頑張って実装した」のような自己申告に頼る書き方は避ける）',
     '- verify（必須）: DONE宣言後に独立して確認する契約。commands（検証コマンド文字列の配列）、' +
       'files（存在必須の相対パス配列）、diff（変更必須の相対パス配列）、semantic（意味レビューの真偽）を持つ。' +
-      'commandsは拡張機能ホストのシェルではなくread-onlyの検証セッションが実行する',
+      'commandsは拡張機能ホストのシェルではなくread-onlyの検証セッションが実行する。' +
+      'コードを変えるタスク（feat/fix/refactor/perf/test）にはcommandsを必ず付けること。' +
+      '省略可: revertCheck（真にすると、テスト以外の変更を戻してもcommandsが通る場合に失敗とする。' +
+      'テストを足すタスク向け）、baseline（commandsのうち分岐元でも実行して結果を並べるコマンドの配列。' +
+      '件数・速度などの変化を確かめるタスク向け）',
     '- dependsOn（省略可、既定 []）: 先に完了していなければならないタスクidの配列。' +
       '独立して並列実行するタスクだけを別々のdependsOnに分ける。並列タスクを置いた場合に' +
       '結果を統合・レビューする必要があれば、両方をdependsOnに挙げた合流タスクを置くこと',
@@ -1998,6 +2002,11 @@ export interface ReviewTaskPullRequestInput {
   /** レビューセッションの作業ディレクトリ。読み取り専用なのでworktreeは作らない。 */
   cwd: string;
   log: Logger;
+  /**
+   * 拡張機能が分岐元とタスク後の両方で実行した検証コマンドの結果（`verify.baseline`、
+   * Issue #1468）。無ければ省略する。
+   */
+  measurements?: string;
 }
 
 export interface ReviewTaskPullRequestResult {
@@ -2033,7 +2042,12 @@ const MAX_TASK_REVIEW_FINDING_MESSAGE_LENGTH = 500;
  * （`sandbox: read-only`相当・承認全拒否）で起動する。**読み取り専用であることは
  * プロンプトの指示ではなく起動設定で担保する**（design.md §16.28と同じ考え方）。
  */
-function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: string): string {
+function buildTaskPullRequestReviewPrompt(
+  prompt: string,
+  done: string,
+  diff: string,
+  measurements?: string,
+): string {
   const nonce = randomUUID();
   const parts = [
     'あなたはPull Request/Merge Requestのレビュー担当です。次のタスクの指示・完了条件と、' +
@@ -2041,6 +2055,7 @@ function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: st
       'ください。',
     'あなた自身はコードを書き換えません（読み取りとレビューのみ）。',
     'タスクの指示に「検証コマンド（実行して確認）」が含まれる場合は、読み取り専用環境で実行し、失敗を指摘として返してください。実行できない場合も指摘にしてください。',
+    '件数・速度・違反数などが「変化した」「改善した」「新たに生じた」という主張は、分岐元（変更前）の値と並べて示されていなければ指摘にしてください。分岐元の値は下の「分岐元とタスク後の計測」にあるものだけを根拠にしてください。',
     '',
     `## タスクの指示\n${formatUntrusted(prompt, {
       id: 'taskReviewer',
@@ -2066,6 +2081,18 @@ function buildTaskPullRequestReviewPrompt(prompt: string, done: string, diff: st
       nonce,
     })}`,
     '',
+    ...(measurements === undefined
+      ? []
+      : [
+          `## 分岐元とタスク後の計測（拡張機能が実行）\n${formatUntrusted(measurements, {
+            id: 'taskReviewer',
+            field: 'measurements',
+            maxLength: MAX_PROMPT_LENGTH,
+            preserveNewlines: true,
+            nonce,
+          })}`,
+          '',
+        ]),
     '## 出力形式（厳守）',
     '指摘が無ければ空配列 `[]` だけを出力すること。指摘があれば、次の形のJSON配列だけを' +
       '出力すること（前置き・説明文・コードフェンスなど、JSON以外の文字は一切含めない' +
@@ -2139,7 +2166,12 @@ export async function reviewTaskPullRequest(
   input: ReviewTaskPullRequestInput,
 ): Promise<ReviewTaskPullRequestResult> {
   const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
-  const prompt = buildTaskPullRequestReviewPrompt(input.prompt, input.done, input.diff);
+  const prompt = buildTaskPullRequestReviewPrompt(
+    input.prompt,
+    input.done,
+    input.diff,
+    input.measurements,
+  );
   try {
     const response = await sendSingleTurn(
       input.host,

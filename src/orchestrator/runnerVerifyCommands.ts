@@ -5,7 +5,11 @@ import {
   type RunVerifyCommandOptions,
   type VerifyCommandResult,
 } from '../verification/commandRunner';
-import { maskOutputTail, type VerificationRecordInput } from '../verification/record';
+import {
+  maskOutputTail,
+  type VerificationRecordInput,
+  type VerificationStage,
+} from '../verification/record';
 import { captureSourceIdentity, type SourceIdentity } from '../verification/sourceIdentity';
 import type { Logger } from '../log';
 import { formatUntrusted } from './untrustedText';
@@ -156,9 +160,16 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | und
   });
 }
 
+export interface ExecutedVerifyCommand {
+  readonly command: string;
+  readonly result: VerifyCommandResult;
+}
+
 export interface ExecuteVerifyCommandsResult {
   readonly failures: string[];
   readonly aborted: boolean;
+  /** 実行を終えたコマンドと結果（中断したコマンドは含めない） */
+  readonly executed: readonly ExecutedVerifyCommand[];
 }
 
 /**
@@ -172,6 +183,8 @@ export async function executeVerifyCommands(input: {
   readonly runId: string;
   readonly taskId: string;
   readonly attempt: number;
+  /** 記録に残す段階（Issue #1468）。省略時はタスクの状態そのもの（`task`）として記録する */
+  readonly stage?: VerificationStage;
   readonly deps: WorkflowVerifyCommandDeps;
   readonly signal: AbortSignal;
   readonly log: Logger;
@@ -182,10 +195,11 @@ export async function executeVerifyCommands(input: {
   const safeCapture = (): Promise<SourceIdentity | undefined> =>
     capture(input.cwd).catch(() => undefined);
   const failures: string[] = [];
+  const executed: ExecutedVerifyCommand[] = [];
 
   for (const command of input.commands) {
     if (input.signal.aborted) {
-      return { failures, aborted: true };
+      return { failures, aborted: true, executed };
     }
     const before = await safeCapture();
     // 起動時の例外（不正な引数など）も失敗として扱い、検証を宙に浮かせない
@@ -208,7 +222,7 @@ export async function executeVerifyCommands(input: {
         endedAt: new Date(),
       }));
     if (result.aborted) {
-      return { failures, aborted: true };
+      return { failures, aborted: true, executed };
     }
     const after = await safeCapture();
     try {
@@ -223,7 +237,12 @@ export async function executeVerifyCommands(input: {
         actor: 'extension',
         acquisition: 'observed',
         output: result.output,
-        link: { runId: input.runId, taskId: input.taskId, attempt: input.attempt },
+        link: {
+          runId: input.runId,
+          taskId: input.taskId,
+          attempt: input.attempt,
+          ...(input.stage === undefined || input.stage === 'task' ? {} : { stage: input.stage }),
+        },
       });
     } catch (error) {
       log.warn(
@@ -232,12 +251,13 @@ export async function executeVerifyCommands(input: {
         }`,
       );
     }
+    executed.push({ command, result });
     const failure = describeFailure(command, result, input.taskId);
     if (failure !== undefined) {
       failures.push(failure);
     }
   }
-  return { failures, aborted: false };
+  return { failures, aborted: false, executed };
 }
 
 /** 失敗でなければ `undefined`。出力の末尾はマスクし、データとして囲って添える */

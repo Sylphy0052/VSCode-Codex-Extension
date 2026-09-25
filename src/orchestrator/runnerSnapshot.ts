@@ -236,6 +236,7 @@ function buildTaskSnapshot(
                 ? 'failed'
                 : 'pending',
       attempts: liveTask?.verificationAttempts ?? 0,
+      commandCount: task.verify?.commands.length ?? 0,
     },
     // 役割は定義ファイル（`live.def.tasks`）から都度導出する。`deriveAllowWarnings` と
     // 同じ考え方で、定義から決まる情報は状態として持たない——永続化しないので、

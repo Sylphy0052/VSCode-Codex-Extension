@@ -180,6 +180,17 @@ export interface WorkflowTask {
     files: string[];
     diff: string[];
     semantic: boolean;
+    /**
+     * 本番側（テスト以外）の変更を一時的に戻して `commands` を再実行し、テストが変更を
+     * 検出するか確かめる（Issue #1468）。戻した状態で全コマンドが成功したら検証の失敗に積む。
+     * 既定は `false`（テストを足さないリファクタや文書の修正を失敗扱いにしないため）。
+     */
+    revertCheck: boolean;
+    /**
+     * 分岐元の状態でも実行し、タスク側と結果を並べて意味レビューへ渡すコマンド（Issue #1468）。
+     * 各要素は同じタスクの `commands` に含まれる文字列に限る（実行許可を `commands` と共有するため）。
+     */
+    baseline: string[];
   };
   /**
    * チームモードの役割（design.md §16.44、Issue #693）。`undefined` は「役割なし」で、
@@ -672,10 +683,14 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
   const verifyDiff = filterStringArray(
     arrayField(verifyRaw?.['diff'], 'verify.diff', 'diff: ["src/index.ts"]', parseErrors),
   );
+  const verifyBaseline = filterStringArray(
+    arrayField(verifyRaw?.['baseline'], 'verify.baseline', 'baseline: ["npm test"]', parseErrors),
+  );
   for (const [field, filtered] of [
     ['verify.commands', verifyCommands],
     ['verify.files', verifyFiles],
     ['verify.diff', verifyDiff],
+    ['verify.baseline', verifyBaseline],
   ] as const) {
     if (filtered.hadNonStringElements) {
       parseWarnings.push(`${field} に文字列でない要素が含まれていたため無視しました`);
@@ -695,6 +710,8 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
             files: verifyFiles.values,
             diff: verifyDiff.values,
             semantic: bool(verifyRaw['semantic'], true),
+            revertCheck: bool(verifyRaw['revertCheck'], false),
+            baseline: verifyBaseline.values,
           },
         }
       : {}),
@@ -805,6 +822,8 @@ export function buildOrchestratorTask(
             files: filterStringArray(arr(verifyRaw['files'])).values,
             diff: filterStringArray(arr(verifyRaw['diff'])).values,
             semantic: bool(verifyRaw['semantic'], true),
+            revertCheck: bool(verifyRaw['revertCheck'], false),
+            baseline: filterStringArray(arr(verifyRaw['baseline'])).values,
           },
         }
       : {}),
@@ -1278,6 +1297,31 @@ function ancestorsOf(
   return result;
 }
 
+/** コードを変更するタスクとみなす `type`（Issue #1468）。`docs`・`chore`・`ci` は含めない。 */
+const CODE_CHANGING_TYPES: ReadonlySet<CommitType> = new Set([
+  'feat',
+  'fix',
+  'refactor',
+  'perf',
+  'test',
+]);
+
+/**
+ * コードを変更するタスク（`type` が `CODE_CHANGING_TYPES`）に `verify.commands` が無ければ
+ * 警告として返す（Issue #1468）。無いまま完了すると、完了は自己申告だけで確定する。
+ * `type` を省略したタスクは既定の `chore` になるため、ここでは対象から漏れる。
+ */
+export function findMissingVerifyWarnings(tasks: readonly WorkflowTask[]): WorkflowWarning[] {
+  return tasks
+    .filter((t) => CODE_CHANGING_TYPES.has(t.type) && (t.verify?.commands.length ?? 0) === 0)
+    .map((t) => ({
+      taskIds: [t.id],
+      message:
+        `タスク ${t.id}（type: ${t.type}）に verify.commands がありません。` +
+        '完了は自己申告だけで確定し、拡張機能は検算しません',
+    }));
+}
+
 /**
  * `isolation: shared` のタスク同士が、依存関係の上で同時に走りうる組を警告として返す。
  * どちらの祖先にも相手が含まれていなければ、実行順序が確定していない＝並列で走りうる。
@@ -1698,6 +1742,20 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
           });
         }
       }
+      for (const command of t.verify.baseline) {
+        if (!t.verify.commands.includes(command)) {
+          errors.push({
+            taskIds: [t.id],
+            message: `verify.baseline は verify.commands に含まれるコマンドにしてください: ${command}`,
+          });
+        }
+      }
+      if (t.verify.revertCheck && t.verify.commands.length === 0) {
+        errors.push({
+          taskIds: [t.id],
+          message: 'verify.revertCheck を使うときは verify.commands を指定してください',
+        });
+      }
       for (const [field, value] of [
         ['verify.commands', t.verify.commands.join('\n')],
         ['verify.files', t.verify.files.join('\n')],
@@ -1811,6 +1869,7 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     }
   }
 
+  warnings.push(...findMissingVerifyWarnings(tasks));
   warnings.push(...findSharedIsolationWarnings(tasks));
   warnings.push(...findPermissionEscalationWarnings(tasks));
 

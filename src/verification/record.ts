@@ -52,7 +52,16 @@ export interface VerificationLink {
   readonly attempt?: number;
   readonly sessionId?: string;
   readonly iteration?: number;
+  /**
+   * 記録を取った段階（Issue #1468）。省略は `task`（従来の記録）。
+   * - `task`: タスクの変更をそのまま検証した実行。完了根拠はこれだけで導く
+   * - `revert`: 本番側の変更を一時的に戻した状態での実行（テストが変更を検出するかの確認）
+   * - `baseline`: 変更全体を戻した分岐元の状態での実行（比較元の測定）
+   */
+  readonly stage?: VerificationStage;
 }
+
+export type VerificationStage = 'task' | 'revert' | 'baseline';
 
 export interface VerificationRecord {
   readonly id: string;
@@ -302,7 +311,13 @@ export function parseVerificationRecord(value: unknown): VerificationRecord | un
     !isOptionalString(link.taskId) ||
     !isOptionalInt(link.attempt) ||
     !isOptionalString(link.sessionId) ||
-    !isOptionalInt(link.iteration)
+    !isOptionalInt(link.iteration) ||
+    !(
+      link.stage === undefined ||
+      link.stage === 'task' ||
+      link.stage === 'revert' ||
+      link.stage === 'baseline'
+    )
   ) {
     return undefined;
   }

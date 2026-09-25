@@ -384,7 +384,11 @@ export class WorkflowViewManager implements vscode.Disposable {
     // 完了（done）したタスクだけを対象にする。途中のタスクの区分は完了根拠ではない
     const tasks = snapshot.tasks
       .filter((task) => task.state === 'done')
-      .map((task) => ({ id: task.id, cwd: task.cwd }));
+      .map((task) => ({
+        id: task.id,
+        cwd: task.cwd,
+        commandsRequested: (task.verification?.commandCount ?? 0) > 0,
+      }));
     let evidence: Record<string, CompletionEvidenceView>;
     try {
       evidence = await loadTaskCompletionEvidence(store, snapshot.runId, tasks);
@@ -1055,6 +1059,7 @@ function buildPreviewSnapshot(
     verification: {
       status: task.verify === undefined ? 'notConfigured' : 'pending',
       attempts: 0,
+      commandCount: task.verify?.commands.length ?? 0,
     },
     role: task.role,
     model: task.model,
