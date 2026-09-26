@@ -33,6 +33,7 @@ import {
   resumeTaskRun,
   setTaskRunHaltedByUser,
   setTaskRunMaxParallel,
+  setTaskRunTitle,
   suspendTaskRun,
   type StageDecision,
   type StageGateChoice,
@@ -334,6 +335,8 @@ export class TaskRunController {
     workspaceRoot: string;
     engine: TaskRunEngine;
     maxParallel: number;
+    /** 表示名（Issue #1561）。空なら付けない。既存のrunを返すときは使わない。 */
+    title?: string;
   }): Promise<StartTaskRunOutcome> {
     return this.startQueue.enqueue(async (): Promise<StartTaskRunOutcome> => {
       const active = this.deps.store.findActive(input.workspaceRoot);
@@ -359,6 +362,11 @@ export class TaskRunController {
     if (next !== undefined && !halted) {
       this.pumpLater(runId);
     }
+  }
+
+  /** runの表示名を付け替える（Issue #1561）。空なら名前を外す。runが無ければ`false`。 */
+  async setTitle(runId: string, title: string): Promise<boolean> {
+    return (await this.updateRun(runId, (r) => setTaskRunTitle(r, title))) !== undefined;
   }
 
   /** 同じフォルダの動いているrun（`startRun`が再利用するもの）。中断中のrunは含まない。 */
@@ -565,9 +573,12 @@ export class TaskRunController {
     return new Map(entries);
   }
 
-  /** Kanbanの盤面。`selectedRunId`が無ければ終わっていない新しいrunを選ぶ。 */
-  board(selectedRunId: string | undefined): TaskRunKanbanBoard {
-    return buildTaskRunKanban(this.deps.store.list(), selectedRunId);
+  /**
+   * Kanbanの盤面。`selectedRunId`が無ければ、いま開いているフォルダ（`currentFolders`）の動いているrun、
+   * 無ければそのフォルダの最も新しいrunを選ぶ。
+   */
+  board(selectedRunId: string | undefined, currentFolders: readonly string[]): TaskRunKanbanBoard {
+    return buildTaskRunKanban(this.deps.store.list(), selectedRunId, currentFolders);
   }
 
   /**

@@ -18,6 +18,7 @@ import {
   isTaskDone,
   isTaskRunActive,
   listTasks,
+  TASK_RUN_TITLE_MAX_LENGTH,
   type OrchestratedTask,
   type StageGate,
   type StageGateChoice,
@@ -112,10 +113,19 @@ export interface TaskRunKanbanRunSummary {
   finished: boolean;
   /** 中断中（Issue #1560）。 */
   suspended: boolean;
+  /** 表示名。名前が無ければ開始時刻とエンジン（Issue #1561）。 */
+  label: string;
+  /** runの状態（計画作成中、実行中、一時停止中、中断中、終了）。 */
+  status: string;
+  /** いま開いているフォルダのrunか。一覧では先に並べる。 */
+  inCurrentFolder: boolean;
 }
 
 export interface TaskRunKanbanRun {
   runId: string;
+  /** 人が付けた表示名。名前の変更の初期値にする。 */
+  title: string | undefined;
+  label: string;
   workspaceRoot: string;
   engine: TaskRunEngine;
   maxParallel: number;
@@ -287,17 +297,60 @@ function emptyColumns(): Record<TaskRunKanbanColumn, TaskRunKanbanCard[]> {
   };
 }
 
+const ENGINE_LABELS: Record<TaskRunEngine, string> = { codex: 'Codex', claude: 'Claude' };
+
+/** runの表示名。名前が無ければ開始時刻（UTC、分まで）とエンジン。 */
+export function taskRunLabel(run: TaskRun): string {
+  const title = run.title === undefined ? '' : sanitizeInlineText(run.title, TASK_RUN_TITLE_MAX_LENGTH).trim();
+  return title !== '' ? title : `${run.startedAt.slice(0, 16).replace('T', ' ')} ${ENGINE_LABELS[run.engine]}`;
+}
+
+/** runの状態の表示（一覧用）。 */
+export function taskRunStatusLabel(run: TaskRun): string {
+  if (run.finishedAt !== undefined) {
+    return '終了';
+  }
+  if (run.suspendedAt !== undefined) {
+    return '中断中';
+  }
+  if (run.planStatus === 'drafting') {
+    return '計画作成中';
+  }
+  if (run.planStatus === 'awaitingApproval') {
+    return '計画の承認待ち';
+  }
+  return run.haltedByUser ? '一時停止中' : '実行中';
+}
+
 /**
- * 盤面を組み立てる。`selectedRunId`が見つからなければ、動いている（終わっておらず中断していない）runのうち新しいもの、
- * 無ければ最も新しいrunを選ぶ。
+ * 一覧の並び: いま開いているフォルダ（`currentFolders`）のrunを先に、他のフォルダのrunを後ろに
+ * まとめ、それぞれ新しい順にする（Issue #1561）。
+ */
+export function sortTaskRunsForList(runs: readonly TaskRun[], currentFolders: readonly string[]): TaskRun[] {
+  const current = new Set(currentFolders);
+  return [...runs].sort((a, b) => {
+    const byFolder = Number(current.has(b.workspaceRoot)) - Number(current.has(a.workspaceRoot));
+    return byFolder !== 0 ? byFolder : b.startedAt.localeCompare(a.startedAt);
+  });
+}
+
+/**
+ * 盤面を組み立てる。`selectedRunId`が見つからなければ、いま開いているフォルダの動いている（終わっておらず
+ * 中断していない）run、無ければそのフォルダの最も新しいrunを選ぶ。開いているフォルダにrunが無ければ、
+ * 他のフォルダの動いているrun、無ければ最も新しいrunを選ぶ。
  */
 export function buildTaskRunKanban(
   runs: readonly TaskRun[],
   selectedRunId: string | undefined,
+  currentFolders: readonly string[],
 ): TaskRunKanbanBoard {
-  const sorted = [...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  const sorted = sortTaskRunsForList(runs, currentFolders);
+  const current = new Set(currentFolders);
+  const inCurrent = sorted.filter((r) => current.has(r.workspaceRoot));
   const selected =
     sorted.find((r) => r.runId === selectedRunId) ??
+    inCurrent.find(isTaskRunActive) ??
+    inCurrent[0] ??
     sorted.find(isTaskRunActive) ??
     sorted[0];
   const summaries = sorted.map((r) => ({
@@ -307,6 +360,9 @@ export function buildTaskRunKanban(
     startedAt: r.startedAt,
     finished: r.finishedAt !== undefined,
     suspended: r.suspendedAt !== undefined,
+    label: taskRunLabel(r),
+    status: taskRunStatusLabel(r),
+    inCurrentFolder: current.has(r.workspaceRoot),
   }));
   if (selected === undefined) {
     return { runs: summaries, run: undefined };
@@ -320,6 +376,8 @@ export function buildTaskRunKanban(
     runs: summaries,
     run: {
       runId: selected.runId,
+      title: selected.title === undefined ? undefined : sanitizeInlineText(selected.title, TASK_RUN_TITLE_MAX_LENGTH),
+      label: taskRunLabel(selected),
       workspaceRoot: selected.workspaceRoot,
       engine: selected.engine,
       maxParallel: selected.maxParallel,
