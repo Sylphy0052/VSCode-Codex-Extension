@@ -16,11 +16,19 @@
  * 差し戻せない失敗（push・mergeの拒否、許可されなかった等）はノードを失敗（要対応）にする。
  * 人が「実行」を押すと`requeueMerge`で列へ戻る。コマンドの実行はrunごとに1回、利用者の
  * 許可を取る（信頼されていないワークスペースでは実行しない）。
+ *
+ * リポジトリごとの鍵、リモートでのmergeの確認、後片付けは`mergeLanes.ts`の共通部品を使う。
  */
 
 import * as path from 'node:path';
 
 import { runFinalMergeWithCiGate, type CliCommandRunner, type ForgeHost } from './forge';
+import {
+  cleanupMergedBranch,
+  confirmPullRequestMerged,
+  isSafeBranchName,
+  MergeLanes,
+} from './mergeLanes';
 import type { MergeRepairRequest, StartIssueOutcome } from './roadmapIssueRunner';
 import {
   getIssue,
@@ -32,26 +40,16 @@ import {
   type RoadmapRun,
 } from './roadmapRunState';
 import { verifyCommandsDigest, type VerifyCommandEntry } from './runnerVerifyCommands';
-import { SerialQueue } from './serialQueue';
 import type { GitCommandRunner, WorktreeCreationQueue, WorktreeFileSystemPort } from './worktree';
 import { runVerifyCommand, type VerifyCommandResult } from '../verification/commandRunner';
 
 /** 検証の出力として修復の指示へ渡す上限（末尾から）。 */
 const VERIFY_OUTPUT_TAIL_LENGTH = 4000;
-/**
- * merge後、リモートでmerge済みになったかを確かめる回数と間隔（issue #1487）。mergeコマンドは
- * 成功していてAPIの反映が遅いだけのことがあるため、間隔を3秒から倍々に伸ばし（上限30秒）、
- * 合計約105秒確かめる。その間は同じリポジトリの次のmergeも待つ。
- */
-const MERGE_CONFIRM_ATTEMPTS = 7;
-const MERGE_CONFIRM_BASE_INTERVAL_MS = 3_000;
-const MERGE_CONFIRM_MAX_INTERVAL_MS = 30_000;
 /** 版の衝突を自動で解いてよいファイル（worktreeの直下）。 */
 const VERSION_FILES: ReadonlySet<string> = new Set(['package.json', 'package-lock.json']);
 const VERSION_LINE = /^\s*"version":\s*"[^"\\]*",?\s*$/;
 /** commitメッセージへ入れてよい版の形。 */
 const SAFE_VERSION = /^[0-9A-Za-z.+-]{1,64}$/;
-const SAFE_BRANCH = /^[A-Za-z0-9._/-]+$/;
 
 export interface RoadmapMergeSettings {
   /** 空なら版上げしない。 */
@@ -108,7 +106,11 @@ type StepOutcome =
 export function resolveVersionOnlyConflicts(text: string): string | undefined {
   const out: string[] = [];
   let section: 'none' | 'ours' | 'base' | 'theirs' = 'none';
-  let sides: { ours: string[]; base: string[]; theirs: string[] } = { ours: [], base: [], theirs: [] };
+  let sides: { ours: string[]; base: string[]; theirs: string[] } = {
+    ours: [],
+    base: [],
+    theirs: [],
+  };
   let found = false;
   const isVersionOnly = (lines: readonly string[]): boolean =>
     lines.every((line) => VERSION_LINE.test(line.replace(/\r$/, '')));
@@ -176,10 +178,8 @@ function abortFailedMessage(reason: string, abortMessage: string): string {
 }
 
 export class RoadmapMergeQueue {
-  /** リポジトリごとの列。同じリポジトリのmergeは別runでも直列にする。 */
-  private readonly lanes = new Map<string, SerialQueue>();
-  /** 列に並んでいる・処理中のノード（`runId#N`）。 */
-  private readonly queued = new Set<string>();
+  /** リポジトリごとの列。同じリポジトリのmergeは別runでも直列にする。項目は`runId#N`。 */
+  private readonly lanes = new MergeLanes();
   /** runごとの許可（コマンド一覧のdigest）。メモリだけに持ち、再読み込み後は聞き直す。 */
   private readonly consents = new Map<string, string>();
   private readonly abort = new AbortController();
@@ -217,35 +217,20 @@ export class RoadmapMergeQueue {
   }
 
   private enqueue(runId: string, workspaceRoot: string, issueNumber: number): void {
-    const key = `${runId}#${String(issueNumber)}`;
-    if (this.queued.has(key)) {
-      return;
-    }
-    this.queued.add(key);
-    let lane = this.lanes.get(workspaceRoot);
-    if (lane === undefined) {
-      lane = new SerialQueue();
-      this.lanes.set(workspaceRoot, lane);
-    }
-    void lane
-      .enqueue(async () => {
-        try {
-          return await this.process(runId, issueNumber);
-        } finally {
-          this.queued.delete(key);
+    const queued = this.lanes.enqueue(workspaceRoot, `${runId}#${String(issueNumber)}`, () =>
+      this.process(runId, issueNumber),
+    );
+    void queued?.then(
+      (repair) => {
+        // 修復のセッションは列の鍵を放してから起こす（修復の間も他のノードのmergeを進める）
+        if (repair !== undefined && !this.disposed) {
+          void this.startRepair(runId, issueNumber, repair);
         }
-      })
-      .then(
-        (repair) => {
-          // 修復のセッションは列の鍵を放してから起こす（修復の間も他のノードのmergeを進める）
-          if (repair !== undefined && !this.disposed) {
-            void this.startRepair(runId, issueNumber, repair);
-          }
-        },
-        (error: unknown) => {
-          this.deps.log(`[roadmap run] #${String(issueNumber)}のmergeで例外: ${String(error)}`);
-        },
-      );
+      },
+      (error: unknown) => {
+        this.deps.log(`[roadmap run] #${String(issueNumber)}のmergeで例外: ${String(error)}`);
+      },
+    );
   }
 
   private async startRepair(
@@ -265,7 +250,10 @@ export class RoadmapMergeQueue {
   }
 
   /** 1ノードを進める。修復へ差し戻すときだけ依頼を返す。 */
-  private async process(runId: string, issueNumber: number): Promise<MergeRepairRequest | undefined> {
+  private async process(
+    runId: string,
+    issueNumber: number,
+  ): Promise<MergeRepairRequest | undefined> {
     const run = this.deps.getRun(runId);
     const issue = run === undefined ? undefined : getIssue(run, issueNumber);
     if (
@@ -347,7 +335,10 @@ export class RoadmapMergeQueue {
     return { ok: true };
   }
 
-  private async git(args: readonly string[], cwd: string): Promise<{ ok: boolean; stdout: string; message: string }> {
+  private async git(
+    args: readonly string[],
+    cwd: string,
+  ): Promise<{ ok: boolean; stdout: string; message: string }> {
     const result = await this.deps.git.run(args, cwd);
     const detail = result.stderr.trim() !== '' ? result.stderr.trim() : result.stdout.trim();
     return {
@@ -370,7 +361,7 @@ export class RoadmapMergeQueue {
     if (pullRequest === undefined || cwd === undefined || branch === undefined) {
       return { kind: 'failed', message: 'PR・worktree・ブランチの記録が揃っていません' };
     }
-    if (!SAFE_BRANCH.test(branch) || branch.startsWith('-')) {
+    if (!isSafeBranchName(branch)) {
       return { kind: 'failed', message: `扱えないブランチ名です: ${branch}` };
     }
     const settings = this.deps.readSettings(run.workspaceRoot);
@@ -425,7 +416,10 @@ export class RoadmapMergeQueue {
     if (!dirty.ok || dirty.stdout.trim() !== '') {
       return {
         kind: 'failed',
-        message: await this.discardTrackedChanges(cwd, '検証コマンドが追跡中のファイルを書き換えました'),
+        message: await this.discardTrackedChanges(
+          cwd,
+          '検証コマンドが追跡中のファイルを書き換えました',
+        ),
       };
     }
 
@@ -460,25 +454,25 @@ export class RoadmapMergeQueue {
           merged.reason === 'cancelled' ? 'run全体の停止でmergeを中断しました' : merged.message,
       };
     }
-    for (let i = 0; i < MERGE_CONFIRM_ATTEMPTS; i += 1) {
-      if ((await this.deps.isPullRequestMerged(run.workspaceRoot, pullRequest.number)) === true) {
-        return { kind: 'merged' };
-      }
-      if (i < MERGE_CONFIRM_ATTEMPTS - 1) {
-        const interval = Math.min(
-          MERGE_CONFIRM_BASE_INTERVAL_MS * 2 ** i,
-          MERGE_CONFIRM_MAX_INTERVAL_MS,
-        );
-        await this.wait(interval);
-      }
+    const confirmed = await confirmPullRequestMerged(
+      () => this.deps.isPullRequestMerged(run.workspaceRoot, pullRequest.number),
+      (ms) => this.wait(ms),
+    );
+    if (confirmed) {
+      return { kind: 'merged' };
     }
-    return { kind: 'failed', message: `PR #${String(pullRequest.number)}のmergeを確かめられませんでした` };
+    return {
+      kind: 'failed',
+      message: `PR #${String(pullRequest.number)}のmergeを確かめられませんでした`,
+    };
   }
 
   /** worktreeへ`origin/main`を取り込む。版の行だけの衝突は自動で解く。 */
   private async integrateMain(
     cwd: string,
-  ): Promise<{ kind: 'ok'; mainVersion: string | undefined } | Exclude<StepOutcome, { kind: 'merged' }>> {
+  ): Promise<
+    { kind: 'ok'; mainVersion: string | undefined } | Exclude<StepOutcome, { kind: 'merged' }>
+  > {
     const status = await this.git(['status', '--porcelain'], cwd);
     if (!status.ok) {
       return { kind: 'failed', message: status.message };
@@ -499,7 +493,10 @@ export class RoadmapMergeQueue {
     }
     const listed = await this.git(['diff', '--name-only', '--diff-filter=U'], cwd);
     const conflicted = listed.ok
-      ? listed.stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '')
+      ? listed.stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line !== '')
       : [];
     if (conflicted.length === 0) {
       return { kind: 'failed', message: await this.abortMerge(cwd, merge.message) };
@@ -578,42 +575,21 @@ export class RoadmapMergeQueue {
 
   /** リモートのブランチ・worktree・ローカルのブランチを消してノードを終了にする。 */
   private async cleanup(run: RoadmapRun, issue: RoadmapIssueExecution): Promise<void> {
-    const root = run.workspaceRoot;
     const n = issue.issueNumber;
-    const branch = issue.branch;
-    const safeBranch = branch !== undefined && SAFE_BRANCH.test(branch) && !branch.startsWith('-');
-    if (safeBranch) {
-      const ref = `refs/heads/${branch}`;
-      const remote = await this.git(['ls-remote', '--heads', 'origin', ref], root);
-      if (remote.ok && remote.stdout.trim() !== '') {
-        const deleted = await this.git(['push', 'origin', '--delete', ref], root);
-        if (!deleted.ok) {
-          this.deps.warn(run.runId, n, `リモートのブランチを消せませんでした: ${deleted.message}`);
-        }
-      }
+    const cleaned = await cleanupMergedBranch(this.deps, {
+      repoRoot: run.workspaceRoot,
+      runId: run.runId,
+      worktreeTaskId: `issue-${String(n)}`,
+      branch: issue.branch,
+      worktreePath: issue.worktreePath,
+      deleteRemoteBranch: true,
+    });
+    for (const warning of cleaned.warnings) {
+      this.deps.warn(run.runId, n, warning);
     }
-    if (issue.worktreePath !== undefined && (await this.deps.fs.pathExists(issue.worktreePath))) {
-      const removed = await this.deps.worktreeQueue.remove(
-        root,
-        run.runId,
-        `issue-${String(n)}`,
-        undefined,
-        this.deps.git,
-        this.deps.fs,
-      );
-      if (!removed.ok) {
-        await this.fail(run.runId, n, `worktreeを撤去できませんでした: ${removed.message}`);
-        return;
-      }
-    }
-    if (safeBranch) {
-      const local = await this.git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], root);
-      if (local.ok) {
-        const deleted = await this.git(['branch', '-D', branch], root);
-        if (!deleted.ok) {
-          this.deps.warn(run.runId, n, `ローカルのブランチを消せませんでした: ${deleted.message}`);
-        }
-      }
+    if (!cleaned.ok) {
+      await this.fail(run.runId, n, cleaned.message);
+      return;
     }
     await this.deps.updateRun(run.runId, (r) => markIssueDone(r, n, this.now()));
   }
