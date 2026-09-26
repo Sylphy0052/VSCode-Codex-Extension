@@ -25,6 +25,7 @@ import {
   type RoadmapRunEngine,
 } from './roadmapRunState';
 import { assessRun } from './roadmapScheduler';
+import { stripControlCharsPreservingNewlines } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { ApprovalHandler, TaskSession, TaskSessionHost } from './taskSession';
 import { sanitizeInlineText } from './untrustedText';
@@ -357,11 +358,17 @@ export class RoadmapOrchestrator {
     if (issue === undefined || question === undefined || question.status !== 'awaitingUser') {
       return { text: 'ユーザーの回答を待っている質問が見つかりません', isError: true };
     }
+    // 確認に見せる本文と渡す本文を一致させる。不可視文字や双方向制御文字で見た目を偽れないよう、
+    // 改行以外の制御文字を落とした本文を見せ、同じ本文を渡す
+    const answer = stripControlCharsPreservingNewlines(call.answer).trim();
+    if (answer === '') {
+      return { text: 'answerが空です', isError: true };
+    }
     const confirmed = await this.deps.confirmAnswer({
       issueNumber: call.issueNumber,
       title: issue.title,
       question: question.question,
-      answer: call.answer,
+      answer,
     });
     if (!confirmed) {
       return { text: 'ユーザーが回答を確認しませんでした。会話でユーザーに確かめてください', isError: true };
@@ -370,7 +377,7 @@ export class RoadmapOrchestrator {
       runId,
       call.issueNumber,
       call.questionId,
-      call.answer,
+      answer,
     );
     return ok
       ? { text: `#${String(call.issueNumber)}の質問に回答しました`, isError: false }
