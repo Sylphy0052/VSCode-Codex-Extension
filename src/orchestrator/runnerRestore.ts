@@ -594,6 +594,8 @@ async function autoResumeIfEligible(
     );
   }
   if (resumed.kind !== 'resumed') {
+    // 実測の間に人が再実行・中止等でrunを動かした結果、戻すタスクが無くなった。人が
+    // 操作した後なので`autoResumeBlocked`（手動で再実行するよう促す警告）は出さない
     self.notify(p.runId);
     return;
   }

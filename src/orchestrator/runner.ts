@@ -4569,7 +4569,11 @@ export class WorkflowRunner {
         // 次の再試行は新しいworktreeで始まるため、前の試行の作業は自動では引き継がれない。
         // 「同じ作業場所で続きから再開します」の警告を差し替え、残った作業の場所を示す
         live.warnings = live.warnings.filter(
-          (w) => !(w.kind === 'resumedWithUncommittedWork' && w.taskId === taskId),
+          (w) =>
+            !(
+              (w.kind === 'resumedWithUncommittedWork' || w.kind === 'resumeInspectionFailed') &&
+              w.taskId === taskId
+            ),
         );
         live.warnings.push({
           kind: 'resumeInspectionFailed',
