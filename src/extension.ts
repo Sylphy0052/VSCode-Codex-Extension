@@ -802,7 +802,17 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           (forgeOverrides.cli ?? nodeCliCommandRunner).run(command, args, cwd),
       },
       sessionConfig: (engine) => {
-        const effective = buildEffectiveTaskConfig({ provider: engine }, readSafetyBaseline());
+        const effective = buildEffectiveTaskConfig(
+          {
+            provider: engine,
+            model: '',
+            effort: '',
+            approvalMode: '',
+            sandbox: '',
+            autoApprove: false,
+          },
+          readSafetyBaseline(),
+        );
         return { config: effective.config, sandbox: effective.sandbox };
       },
       readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
