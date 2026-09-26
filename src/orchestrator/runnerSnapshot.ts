@@ -194,6 +194,9 @@ function buildOrchestratorSnapshot(live: LiveRun): OrchestratorSnapshot {
     busy: orchestrator.busy,
     lastResponseSummary: orchestrator.lastResponseSummary,
     unreadCount: orchestrator.unreadCount,
+    health: orchestrator.health,
+    respawnCount: orchestrator.respawnCount,
+    lastActivityAt: orchestrator.lastActivityAt,
   };
 }
 

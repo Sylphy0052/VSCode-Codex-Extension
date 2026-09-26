@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { startHttpMcpServer } from './mcpHttpServer';
-import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
+import { ORCHESTRATOR_CONNECTION_ID, type OrchestratorStatus } from './orchestratorSession';
 import type { TaskState } from './runState';
 import {
   escapeAngleBrackets,
@@ -167,6 +167,11 @@ export interface SendMessageValidationInput {
 export interface SendMessageValidationResult {
   accepted: boolean;
   reason: string;
+  /**
+   * タスクからオーケストレーターへ受け付けたときの宛先の状態（Issue #1513）。
+   * `recovering`なら立て直し後に届く、`unavailable`なら届かない（返事を待たずに進める）。
+   */
+  orchestratorStatus?: OrchestratorStatus;
 }
 
 /**
@@ -1662,7 +1667,23 @@ export interface TaskMessagingHubDeps {
    * 省略時は`false`（従来どおりrun用のhub）。
    */
   sessionOnly?: boolean;
+  /**
+   * オーケストレーターが今メッセージを受け取れるか（Issue #1513）。タスクから
+   * オーケストレーターへの送信を受け付けたときにだけ呼ぶ。`recovering`・`unavailable`なら
+   * 結果の`reason`へその旨を足し、`unavailable`では`expectReply`を落として積む
+   * （届かない返事を待って送信元タスクが`waitingReply`で止まらないようにする）。
+   *
+   * 省略時は常に`alive`とみなす（チャットセッション用のhub・テスト）。
+   */
+  orchestratorStatus?: () => OrchestratorStatus;
 }
+
+/** オーケストレーターの状態に応じて、受け付けた結果の`reason`へ足す一文（Issue #1513）。 */
+const ORCHESTRATOR_STATUS_NOTES: Record<Exclude<OrchestratorStatus, 'alive'>, string> = {
+  recovering: 'オーケストレーターは立て直し中です。立て直した後に届きます。',
+  unavailable:
+    'オーケストレーターは利用できないため、このメッセージは届きません。返事を待たずに作業を進めてください。',
+};
 
 /**
  * `TaskMessagingHubDeps.handoff` が満たす形。`teamHandoff.ts`の`TeamHandoffStore`の
@@ -1927,6 +1948,12 @@ export class TaskMessagingHub {
     }
 
     const kind = input.kind ?? 'message';
+    // タスクからオーケストレーター宛ての送信だけ、宛先の状態を応答へ載せる（Issue #1513）。
+    // 状態を問い合わせる口が無い（runnerを介さない）場合は載せない
+    const orchestratorStatus =
+      input.from !== ORCHESTRATOR_CONNECTION_ID && input.to === ORCHESTRATOR_CONNECTION_ID
+        ? this.deps.orchestratorStatus?.()
+        : undefined;
     // オーケストレーターからタスクへの送信はすべて指示として扱う（Issue #1502）。
     // `validateSendMessage`を通った時点で、オーケストレーター発の宛先は同じrunのタスクに限られる
     const isInstruction =
@@ -1936,7 +1963,7 @@ export class TaskMessagingHub {
       from: input.from,
       to: input.to,
       body: input.body,
-      expectReply: input.expectReply,
+      expectReply: input.expectReply && orchestratorStatus !== 'unavailable',
       createdAtMs: this.deps.now?.() ?? Date.now(),
       kind,
       ...(isInstruction ? { instruction: { countUnit: input.countUnit } } : {}),
@@ -1954,7 +1981,17 @@ export class TaskMessagingHub {
     }
     this.store = enqueueMessage(this.store, message);
     this.deps.onAccepted?.(message);
-    return validation;
+    if (orchestratorStatus === undefined) {
+      return validation;
+    }
+    if (orchestratorStatus === 'alive') {
+      return { ...validation, orchestratorStatus };
+    }
+    return {
+      ...validation,
+      reason: `${validation.reason}。${ORCHESTRATOR_STATUS_NOTES[orchestratorStatus]}`,
+      orchestratorStatus,
+    };
   }
 
   /**

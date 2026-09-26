@@ -776,6 +776,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // トップレベルへ配線し、`restoreRunsForView`が呼ぶたびに現在値を読み直す
     readAutoResume: () => readWorkflowsConfig().autoResume,
     readMaxAutoResumeAttempts: () => readWorkflowsConfig().maxAutoResumeAttempts,
+    // オーケストレーターの無応答判定と立て直しの上限（Issue #1513）。判定・立て直しのたびに
+    // 現在値を読み直す
+    readOrchestratorUnresponsiveSec: () => readWorkflowsConfig().orchestratorUnresponsiveSec,
+    readMaxOrchestratorRespawns: () => readWorkflowsConfig().maxOrchestratorRespawns,
   });
   // isTaskManagedThreadのクロージャが参照する箱を埋める。以降の`workflowRunner`
   // （コマンド登録などで使う）はこの束縛を指し、常にWorkflowRunnerとして扱える

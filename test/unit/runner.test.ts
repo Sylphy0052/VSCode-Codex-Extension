@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initialChatState, type ChatState } from '../../src/appserver/chatState';
 import type { ApprovalDecision } from '../../src/appserver/approvals';
-import type { LoopPlan, LoopStopReason } from '../../src/loop/loopController';
+import { LoopController, type LoopPlan, type LoopStopReason } from '../../src/loop/loopController';
 import type {
   ApprovalHandler,
   ApprovalOutcome,
@@ -293,8 +293,17 @@ class FakeHost implements TaskSessionHost {
   /** オーケストレーターセッション（design.md §16.23）の生成だけを失敗させる。 */
   rejectOrchestrator: Error | undefined;
 
+  /**
+   * 設定すると、オーケストレーターセッションの生成をこのPromiseが解決するまで止める
+   * （立て直しの最中に届いたイベントの扱いを確かめるため。Issue #1513）。
+   */
+  orchestratorGate: Promise<void> | undefined;
+
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     if (input.role === 'orchestrator') {
+      if (this.orchestratorGate !== undefined) {
+        await this.orchestratorGate;
+      }
       if (this.rejectOrchestrator !== undefined) {
         throw this.rejectOrchestrator;
       }
@@ -1161,6 +1170,10 @@ function createHarness(
     readReviewCommentPollIntervalSec?: () => number;
     /** `agent.workflows.contextLowPercent`（Issue #1273）。 */
     readContextLowPercent?: () => number;
+    /** `agent.workflows.orchestratorUnresponsiveSec`（Issue #1513）。既定は0（判定しない）。 */
+    readOrchestratorUnresponsiveSec?: () => number;
+    /** `agent.workflows.maxOrchestratorRespawns`（Issue #1513）。 */
+    readMaxOrchestratorRespawns?: () => number;
     /** 実行のたびに内容が変わる定義ファイルを模すための差し替え口（Issue #1107）。 */
     filePort?: WorkflowFilePort;
     /** `verify.commands` の実行（Issue #1378）。 */
@@ -1224,6 +1237,12 @@ function createHarness(
       : {}),
     ...(options?.readContextLowPercent !== undefined
       ? { readContextLowPercent: options.readContextLowPercent }
+      : {}),
+    // 無応答の判定（Issue #1513）は、フェイクタイマーで時間を進める既存テストへ波及しない
+    // よう、ここでは既定で無効にする。判定そのものを確かめるテストが個別に有効化する
+    readOrchestratorUnresponsiveSec: options?.readOrchestratorUnresponsiveSec ?? (() => 0),
+    ...(options?.readMaxOrchestratorRespawns !== undefined
+      ? { readMaxOrchestratorRespawns: options.readMaxOrchestratorRespawns }
       : {}),
     ...(options?.verifyCommands !== undefined ? { verifyCommands: options.verifyCommands } : {}),
     randomId: () => `00000000-0000-4000-8000-${String((seq += 1)).padStart(12, '0')}`,
@@ -14152,6 +14171,450 @@ tasks:
       expect(session.pauseLoopCount).toBe(0);
       expect(harness.codexHost.sessions.length).toBe(sessionsBefore);
       expect(harness.runner.getSnapshot(runId)?.warnings).toHaveLength(0);
+    });
+  });
+});
+
+describe('WorkflowRunner: オーケストレーターの生存確認と立て直し（Issue #1513）', () => {
+  const YAML = `
+version: 1
+name: orchestrator-health
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** ターンを1つ進める。`failure`を渡すとそのターンは失敗で終わる。 */
+  function runTurn(session: FakeTaskSession, failure?: 'other' | 'usageLimit'): void {
+    session.emitState({ ...initialChatState, busy: true });
+    session.emitState({
+      ...initialChatState,
+      busy: false,
+      ...(failure === undefined ? {} : { turnFailed: true, turnFailureKind: failure }),
+    });
+  }
+
+  /** 導入文のターンを終え、タスクからオーケストレーターへ1件送る（送った直後はbusy）。 */
+  async function startAndSendFromTask(options?: {
+    readMaxOrchestratorRespawns?: () => number;
+  }): Promise<{
+    harness: Harness;
+    state: FakeMessagingState;
+    runId: string;
+    orchestrator: FakeTaskSession;
+  }> {
+    const { deps, state } = fakeMessagingDeps();
+    const harness = createHarness(YAML, { messaging: deps, ...options });
+    const result = await harness.runner.start('/repo/.agents/workflows/health.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = harness.codexHost.orchestratorSessions[0] as FakeTaskSession;
+    runTurn(orchestrator);
+    state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '最初の相談',
+      expectReply: false,
+    });
+    await flush();
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+    return { harness, state, runId, orchestrator };
+  }
+
+  it('ターンが2回続けてotherで失敗すると新しい会話で立て直し、失敗したターンのイベントを導入文と一緒に渡す', async () => {
+    const { harness, runId, orchestrator } = await startAndSendFromTask();
+    const sentBefore = orchestrator.sentTexts.length;
+
+    runTurn(orchestrator, 'other');
+    // 1回目は同じ会話へ送り直す
+    expect(orchestrator.sentTexts).toHaveLength(sentBefore + 1);
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+
+    runTurn(orchestrator, 'other');
+    await flush();
+
+    expect(orchestrator.disposed).toBe(true);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(2);
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned.sentTexts).toHaveLength(1);
+    const first = respawned.sentTexts[0] as string;
+    expect(first).toContain('最初の相談');
+    expect(first).toContain('実行の途中で立て直したものです（1回目）');
+    // 導入文は届けられなかったイベントより後ろに置く（長すぎるとき古い側から落ちるため）
+    expect(first.indexOf('最初の相談')).toBeLessThan(first.indexOf('立て直したもの'));
+    const snapshot = harness.runner.getSnapshot(runId);
+    expect(snapshot?.orchestrator?.health).toBe('alive');
+    expect(snapshot?.orchestrator?.respawnCount).toBe(1);
+    const warning = snapshot?.warnings.find((w) => w.kind === 'orchestratorRespawned');
+    expect(warning?.message).toContain('ターンが続けて失敗した');
+    expect(warning?.message).toContain('1回目');
+
+    // 古い会話からの変化はもう見ない
+    runTurn(orchestrator, 'other');
+    await flush();
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(2);
+  });
+
+  it('1回だけ失敗して送り直しが成功すれば立て直さず、イベントも失わない', async () => {
+    const { harness, state, runId, orchestrator } = await startAndSendFromTask();
+
+    runTurn(orchestrator, 'other');
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+    runTurn(orchestrator);
+    await flush();
+
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+    expect(orchestrator.disposed).toBe(false);
+    expect(harness.runner.getSnapshot(runId)?.orchestrator?.respawnCount).toBe(0);
+
+    // 失敗の計数は成功で戻る。次の1回の失敗でも立て直さない
+    state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '次の相談',
+      expectReply: false,
+    });
+    await flush();
+    runTurn(orchestrator, 'other');
+    await flush();
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+    expect(orchestrator.sentTexts.at(-1)).toContain('次の相談');
+  });
+
+  it('usageLimitの失敗では立て直さず、送ったイベントは次の送信に合流する', async () => {
+    const { harness, state, runId, orchestrator } = await startAndSendFromTask();
+    const sentBefore = orchestrator.sentTexts.length;
+
+    runTurn(orchestrator, 'usageLimit');
+    runTurn(orchestrator, 'usageLimit');
+    await flush();
+    // 送り直さない（利用上限は待てば解けるため、次のきっかけまで溜める）
+    expect(orchestrator.sentTexts).toHaveLength(sentBefore);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+    expect(harness.runner.getSnapshot(runId)?.orchestrator?.respawnCount).toBe(0);
+
+    state.hub?.sendMessage({
+      from: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '次の相談',
+      expectReply: false,
+    });
+    await flush();
+    const last = orchestrator.sentTexts.at(-1) as string;
+    expect(last).toContain('最初の相談');
+    expect(last).toContain('次の相談');
+  });
+
+  it('busyのままorchestratorUnresponsiveSecを超えると応答なしを経て立て直す', async () => {
+    vi.useFakeTimers();
+    const { deps, state } = fakeMessagingDeps();
+    const harness = createHarness(YAML, {
+      messaging: deps,
+      readOrchestratorUnresponsiveSec: () => 60,
+    });
+    const result = await harness.runner.start('/repo/.agents/workflows/health.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = harness.codexHost.orchestratorSessions[0] as FakeTaskSession;
+    runTurn(orchestrator);
+    state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '固まる前の相談',
+      expectReply: false,
+    });
+    await flush();
+
+    // 変化がある間は判定の起点がずれる
+    await vi.advanceTimersByTimeAsync(50_000);
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(orchestrator.interruptCount).toBe(0);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+
+    const healths: Array<string | undefined> = [];
+    harness.runner.onChanged(() => {
+      healths.push(harness.runner.getSnapshot(runId)?.orchestrator?.health);
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+
+    expect(healths).toContain('unresponsive');
+    expect(healths).toContain('recovering');
+    expect(orchestrator.interruptCount).toBe(1);
+    expect(orchestrator.disposed).toBe(true);
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned.sentTexts[0]).toContain('固まる前の相談');
+    expect(respawned.sentTexts[0]).toContain('応答中のまま反応しなくなった');
+    expect(harness.runner.getSnapshot(runId)?.orchestrator?.health).toBe('alive');
+  });
+
+  it('busyでない間はorchestratorUnresponsiveSecを超えても何も起きない', async () => {
+    vi.useFakeTimers();
+    const harness = createHarness(YAML, { readOrchestratorUnresponsiveSec: () => 60 });
+    const result = await harness.runner.start('/repo/.agents/workflows/health.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+    const orchestrator = harness.codexHost.orchestratorSessions[0] as FakeTaskSession;
+    runTurn(orchestrator);
+
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await flush();
+
+    expect(orchestrator.interruptCount).toBe(0);
+    expect(orchestrator.disposed).toBe(false);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+    expect(harness.runner.getSnapshot(runId)?.orchestrator?.health).toBe('alive');
+  });
+
+  it('orchestratorUnresponsiveSecが0なら、busyのままでも判定しない', async () => {
+    vi.useFakeTimers();
+    const harness = createHarness(YAML, { readOrchestratorUnresponsiveSec: () => 0 });
+    await harness.runner.start('/repo/.agents/workflows/health.yaml', '/repo');
+    await flush();
+    const orchestrator = harness.codexHost.orchestratorSessions[0] as FakeTaskSession;
+    orchestrator.emitState({ ...initialChatState, busy: true });
+
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await flush();
+
+    expect(orchestrator.interruptCount).toBe(0);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+  });
+
+  it('立て直しはmaxOrchestratorRespawns回までで、超えるとorchestratorUnavailableを積んでオーケストレーター無しで続く', async () => {
+    const { harness, state, runId, orchestrator } = await startAndSendFromTask({
+      readMaxOrchestratorRespawns: () => 1,
+    });
+    runTurn(orchestrator, 'other');
+    runTurn(orchestrator, 'other');
+    await flush();
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned).toBeDefined();
+
+    runTurn(respawned, 'other');
+    runTurn(respawned, 'other');
+    await flush();
+
+    expect(respawned.disposed).toBe(true);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(2);
+    const snapshot = harness.runner.getSnapshot(runId);
+    expect(snapshot?.orchestrator?.available).toBe(false);
+    const unavailable = snapshot?.warnings.find((w) => w.kind === 'orchestratorUnavailable');
+    expect(unavailable?.message).toContain('立て直しの上限（1回）');
+    // runはオーケストレーター無しで続く
+    harness.codexHost.byTaskId('T1').finish('done', doneState('ok'));
+    harness.codexHost.byTaskId('T2').finish('done', doneState('ok'));
+    await flush();
+    expect(harness.store.find(runId)?.tasks['T1']?.state).toBe('done');
+    expect(harness.store.find(runId)?.tasks['T2']?.state).toBe('done');
+    // 宛先オーケストレーターの送信は、届かないことを伝え返信待ちにしない
+    const sent = state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '誰かいますか',
+      expectReply: true,
+    });
+    expect(sent?.orchestratorStatus).toBe('unavailable');
+  });
+
+  it('maxOrchestratorRespawnsが0なら立て直さず、最初の判定で諦める', async () => {
+    const { harness, runId, orchestrator } = await startAndSendFromTask({
+      readMaxOrchestratorRespawns: () => 0,
+    });
+    runTurn(orchestrator, 'other');
+    runTurn(orchestrator, 'other');
+    await flush();
+
+    expect(orchestrator.disposed).toBe(true);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+    expect(harness.runner.getSnapshot(runId)?.orchestrator?.available).toBe(false);
+  });
+
+  it('立て直し中に届いたタスクのメッセージは溜められ、新しい会話へ渡る', async () => {
+    const { harness, state, runId, orchestrator } = await startAndSendFromTask();
+    let release: () => void = () => undefined;
+    harness.codexHost.orchestratorGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    runTurn(orchestrator, 'other');
+    runTurn(orchestrator, 'other');
+    await flush();
+    expect(harness.runner.getSnapshot(runId)?.orchestrator?.health).toBe('recovering');
+
+    const sent = state.hub?.sendMessage({
+      from: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '立て直し中の相談',
+      expectReply: true,
+    });
+    await flush();
+    expect(sent?.accepted).toBe(true);
+    expect(sent?.orchestratorStatus).toBe('recovering');
+    expect(sent?.reason).toContain('立て直した後に届きます');
+    // 立て直し中は届く見込みがあるため、返信待ちにする
+    expect(harness.store.find(runId)?.tasks['T2']?.state).toBe('waitingReply');
+    // 人の発話は立て直し中は受け付けない（届け先の会話が無い）
+    expect(harness.runner.sendToOrchestrator(runId, 'いまどう？')).toBe(false);
+
+    harness.codexHost.orchestratorGate = undefined;
+    release();
+    await flush();
+
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    const first = respawned.sentTexts[0] as string;
+    expect(first).toContain('最初の相談');
+    expect(first).toContain('立て直し中の相談');
+    expect(first).toContain('イベント2件');
+  });
+
+  it('宛先オーケストレーターのsend_messageとask_orchestratorの応答に、稼働中ならalive が入る', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const harness = createHarness(YAML, { messaging: deps });
+    await harness.runner.start('/repo/.agents/workflows/health.yaml', '/repo');
+    await flush();
+
+    const message = state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '相談',
+      expectReply: false,
+    });
+    const question = state.hub?.sendMessage({
+      from: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '質問',
+      expectReply: true,
+      kind: 'question',
+    });
+    expect(message?.orchestratorStatus).toBe('alive');
+    expect(question?.orchestratorStatus).toBe('alive');
+    // オーケストレーターからタスクへの送信には載せない
+    const toTask = state.hub?.sendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: 'T1',
+      body: '指示',
+      expectReply: false,
+    });
+    expect(toTask?.orchestratorStatus).toBeUndefined();
+  });
+
+  it('オーケストレーターが居ないとき、blockingのask_orchestratorでも送信元を返信待ちにしない', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const harness = createHarness(YAML, { messaging: deps });
+    harness.codexHost.rejectOrchestrator = new Error('生成失敗');
+    const result = await harness.runner.start('/repo/.agents/workflows/health.yaml', '/repo');
+    const runId = result.runId as string;
+    await flush();
+
+    const question = state.hub?.sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '質問',
+      expectReply: true,
+      kind: 'question',
+    });
+    await flush();
+
+    expect(question?.accepted).toBe(true);
+    expect(question?.orchestratorStatus).toBe('unavailable');
+    expect(question?.reason).toContain('届きません');
+    expect(harness.store.find(runId)?.tasks['T1']?.state).toBe('running');
+    expect(harness.codexHost.byTaskId('T1').pauseLoopCount).toBe(0);
+  });
+
+  describe('「待っている」と「止まっている」の独立（詳細6）', () => {
+    const SINGLE_TASK_YAML = `
+version: 1
+name: ci-wait
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+`;
+
+    /** 最終マージ段のCI待ちへ入れる。CIは終わらないまま（IN_PROGRESS）にする。 */
+    async function startCiWait(): Promise<{
+      harness: Harness;
+      runId: string;
+      cli: FakeForgeCli;
+      orchestrator: FakeTaskSession;
+    }> {
+      vi.useFakeTimers();
+      const git = fakeGit({ originRemoteUrl: 'git@github.com:acme/repo.git', headBranch: 'main' });
+      const cli = fakeForgeCli({ ciStatusCheckRollup: [{ status: 'IN_PROGRESS' }] });
+      const harness = createHarness(SINGLE_TASK_YAML, {
+        git,
+        forge: fakeForgeDeps(cli),
+        readCiWaitTimeoutSec: () => 7200,
+        readOrchestratorUnresponsiveSec: () => 60,
+      });
+      const result = await harness.runner.start('/repo/.agents/workflows/ci.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      harness.codexHost.byTaskId('T1').finish('done', doneState('ok'));
+      await flush();
+      const orchestrator = harness.codexHost.orchestratorSessions[0] as FakeTaskSession;
+      // 届いたイベントのターンを終わらせ、busyでない待機にする
+      for (let i = 0; i < 5; i += 1) {
+        runTurn(orchestrator);
+        await flush();
+      }
+      return { harness, runId, cli, orchestrator };
+    }
+
+    const ciStatusCalls = (cli: FakeForgeCli): number =>
+      cli.calls.filter(
+        (c) => c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
+      ).length;
+
+    it('最終マージ段のCI待ちの間、LoopController.observeは呼ばれず停滞と判定されない', async () => {
+      const observe = vi.spyOn(LoopController.prototype, 'observe');
+      try {
+        const { harness, runId, cli } = await startCiWait();
+        const callsBefore = ciStatusCalls(cli);
+        expect(callsBefore).toBeGreaterThan(0);
+
+        await vi.advanceTimersByTimeAsync(1_800_000);
+        await flush();
+
+        // CI待ちは続いている（確認を繰り返している）
+        expect(ciStatusCalls(cli)).toBeGreaterThan(callsBefore);
+        expect(harness.runner.getSnapshot(runId)?.finalMergeOutcome).toBeUndefined();
+        expect(observe).not.toHaveBeenCalled();
+        const snapshot = harness.runner.getSnapshot(runId);
+        expect(snapshot?.tasks.find((t) => t.id === 'T1')?.state).toBe('done');
+        expect(snapshot?.warnings.some((w) => /停滞/.test(w.message))).toBe(false);
+      } finally {
+        observe.mockRestore();
+      }
+    });
+
+    it('最終マージ段のCI待ちがorchestratorUnresponsiveSecを超えても、busyでないオーケストレーターは落ちたとみなさない', async () => {
+      const { harness, runId, cli, orchestrator } = await startCiWait();
+      const callsBefore = ciStatusCalls(cli);
+
+      await vi.advanceTimersByTimeAsync(1_800_000);
+      await flush();
+
+      expect(ciStatusCalls(cli)).toBeGreaterThan(callsBefore);
+      expect(orchestrator.interruptCount).toBe(0);
+      expect(orchestrator.disposed).toBe(false);
+      expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+      const snapshot = harness.runner.getSnapshot(runId);
+      expect(snapshot?.orchestrator?.health).toBe('alive');
+      expect(snapshot?.warnings.some((w) => w.kind === 'orchestratorRespawned')).toBe(false);
     });
   });
 });
