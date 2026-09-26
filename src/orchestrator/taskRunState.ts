@@ -15,6 +15,7 @@
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
 
+import { stripControlChars } from './sanitize';
 import { sanitizeInlineText } from './untrustedText';
 
 /** 工程セッションの実行エンジン。runの開始時に1つ選び、全工程で共通にする。 */
@@ -841,6 +842,16 @@ export function resumeTaskRun(run: TaskRun): TaskRun {
 export function normalizeTaskRunTitle(title: string | undefined): string | undefined {
   const trimmed = sanitizeInlineText(title ?? '', TASK_RUN_TITLE_MAX_LENGTH).trim();
   return trimmed === '' ? undefined : trimmed;
+}
+
+/**
+ * 名前の入力欄（開始時とKanbanでの付け替え）の検証。保存時の`normalizeTaskRunTitle`が切り詰めるのと
+ * 同じ条件（制御文字と不可視文字を均した後の長さ）で上限を測り、入力欄の判定と保存後の名前を揃える。
+ */
+export function validateTaskRunTitleInput(value: string): string | undefined {
+  return stripControlChars(value).length > TASK_RUN_TITLE_MAX_LENGTH
+    ? `${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内で入力してください`
+    : undefined;
 }
 
 const ENGINE_LABELS: Record<TaskRunEngine, string> = { codex: 'Codex', claude: 'Claude' };
