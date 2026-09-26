@@ -44,13 +44,17 @@ export function suggestTaskSplits(
     if (exceeded.length === 0) {
       continue;
     }
-    liveTask.splitSuggested = true;
-    notifyOrchestrator(self, runId, {
+    const accepted = notifyOrchestrator(self, runId, {
       kind: 'taskSplitSuggested',
       body: buildTaskSplitSuggestedEventBody(taskId, exceeded, [
         ...(liveTask.touchedFiles ?? []),
       ]),
     });
+    // runごとのイベント総数の上限で捨てられたら、提案済みにしない（Viewへ「提案済み」と出さない）
+    if (!accepted) {
+      continue;
+    }
+    liveTask.splitSuggested = true;
     self.deps.log.info(
       `[workflow ${runId}] ${taskId}: 規模が閾値を超えたため、オーケストレーターへ分割を提案しました` +
         `（${exceeded.map((e) => `${e.metric}=${e.actual}>${e.threshold}`).join(', ')}）`,

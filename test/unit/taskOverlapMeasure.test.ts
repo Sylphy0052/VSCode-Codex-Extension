@@ -8,6 +8,8 @@ import {
   countTextLines,
   measureWorktreeChanges,
   parseNumstat,
+  UNTRACKED_LINE_COUNT_MAX_BYTES,
+  UNTRACKED_LINE_COUNT_MAX_FILES,
 } from '../../src/orchestrator/taskOverlap';
 import type { GitCommandRunner, GitCommandResult } from '../../src/orchestrator/worktree';
 
@@ -132,6 +134,34 @@ describe('measureWorktreeChanges', () => {
         addedLines: 0,
         deletedLines: 0,
       });
+    });
+  });
+
+  it('上限ちょうどの大きさの未追跡ファイルは数え、1バイト超えたものは数えない', async () => {
+    await withTmpDir(async (dir) => {
+      await fs.writeFile(path.join(dir, 'at-limit.txt'), Buffer.alloc(UNTRACKED_LINE_COUNT_MAX_BYTES, 0x0a));
+      await fs.writeFile(
+        path.join(dir, 'over-limit.txt'),
+        Buffer.alloc(UNTRACKED_LINE_COUNT_MAX_BYTES + 1, 0x0a),
+      );
+      const git = fakeGit({ numstatStdout: '', lsFilesStdout: 'at-limit.txt\0over-limit.txt\0' });
+      const result = await measureWorktreeChanges(git, dir, 'origin-sha');
+      expect(result?.files.size).toBe(2);
+      expect(result?.addedLines).toBe(UNTRACKED_LINE_COUNT_MAX_BYTES);
+    });
+  });
+
+  it('未追跡ファイルの行数は上限の件数までだけ数える（ファイルには全件含める）', async () => {
+    await withTmpDir(async (dir) => {
+      const names = Array.from(
+        { length: UNTRACKED_LINE_COUNT_MAX_FILES + 1 },
+        (_, index) => `f${String(index).padStart(4, '0')}.txt`,
+      );
+      await Promise.all(names.map((name) => fs.writeFile(path.join(dir, name), 'x\n')));
+      const git = fakeGit({ numstatStdout: '', lsFilesStdout: names.join('\0') + '\0' });
+      const result = await measureWorktreeChanges(git, dir, 'origin-sha');
+      expect(result?.files.size).toBe(UNTRACKED_LINE_COUNT_MAX_FILES + 1);
+      expect(result?.addedLines).toBe(UNTRACKED_LINE_COUNT_MAX_FILES);
     });
   });
 

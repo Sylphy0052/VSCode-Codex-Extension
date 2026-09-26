@@ -1703,7 +1703,7 @@
           "minimum": 0,
           "maximum": 1000000,
           "scope": "machine-overridable",
-          "markdownDescription": "走行中のタスクの変更行数（追加と削除の合計）がこの値を超えたら、オーケストレーターへ分割を判断するよう知らせる（`agent.workflows.splitSuggestFileCount` と同じ仕組み）。未追跡のファイルは全行を追加として数え、バイナリと1MiBを超える未追跡のファイルは数えない。0にするとこの指標では知らせない。範囲外（0未満・上限超過・非整数）の値は既定値（800）にフォールバックする。"
+          "markdownDescription": "走行中のタスクの変更行数（追加と削除の合計）がこの値を超えたら、オーケストレーターへ分割を判断するよう知らせる（`agent.workflows.splitSuggestFileCount` と同じ仕組み）。未追跡のファイルは全行を追加として数える。ただしバイナリと1MiBを超える未追跡のファイルは数えず、未追跡のファイルが200件を超えるときは200件分だけ数える。0にするとこの指標では知らせない。範囲外（0未満・上限超過・非整数）の値は既定値（800）にフォールバックする。"
         },
         "agent.workflows.splitSuggestTurnCount": {
           "type": "number",

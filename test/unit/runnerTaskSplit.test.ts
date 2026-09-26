@@ -96,6 +96,24 @@ describe('observeTaskSize', () => {
 describe('suggestTaskSplits', () => {
   beforeEach(() => {
     notifyOrchestratorMock.mockReset();
+    notifyOrchestratorMock.mockReturnValue(true);
+  });
+
+  it('runごとのイベント上限で捨てられたら、splitSuggestedを立てず、次の判定で送り直す', () => {
+    const notifyMock = vi.fn();
+    const self = makeSelf(notifyMock);
+    const live = makeLive({});
+    notifyOrchestratorMock.mockReturnValueOnce(false);
+
+    suggestTaskSplits(self, 'R1', live);
+
+    expect(live.tasks.get('T1')?.splitSuggested).toBe(false);
+    expect(notifyMock).not.toHaveBeenCalled();
+
+    suggestTaskSplits(self, 'R1', live);
+
+    expect(notifyOrchestratorMock).toHaveBeenCalledTimes(2);
+    expect(live.tasks.get('T1')?.splitSuggested).toBe(true);
   });
 
   it('閾値を超えたタスクへ、taskSplitSuggestedイベントを1回送り、splitSuggestedを立てる', () => {
