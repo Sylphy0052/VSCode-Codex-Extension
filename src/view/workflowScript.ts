@@ -1587,7 +1587,7 @@ export function workflowScript(): string {
     const taskIdSet = {};
     for (const w of snapshot.warnings) {
       const messageText = stripWarningTaskPrefix(w);
-      const key = w.kind + '\u0000' + messageText;
+      const key = w.kind + '\\u0000' + messageText;
       let group = groupByKey[key];
       if (!group) {
         group = { kind: w.kind, message: messageText, taskIds: [] };
@@ -1806,11 +1806,19 @@ export function workflowScript(): string {
     return badge;
   }
 
+  // 完了フェーズのdetailsは再描画で作り直すため、開いていたフェーズ名を覚えて戻す
+  const openRoadmapPhases = new Set();
+
   function applyRoadmap(roadmap, path, pending, error) {
     const section = el('roadmapSection');
     const body = el('roadmapBody');
     const status = el('roadmapStatus');
     const pathLabel = el('roadmapPath');
+    for (const d of body.querySelectorAll('details.roadmap-phase')) {
+      const name = d.dataset.phase || '';
+      if (d.open) openRoadmapPhases.add(name);
+      else openRoadmapPhases.delete(name);
+    }
     body.replaceChildren();
     if (!roadmap) {
       // 定義がロードマップを持たない・読めなかった場合。読めなかったときだけ理由を出す
@@ -1850,6 +1858,8 @@ export function workflowScript(): string {
       }
       if (isFullyDone) {
         const details = el2('details', 'roadmap-phase');
+        details.dataset.phase = phase.name || '';
+        details.open = openRoadmapPhases.has(phase.name || '');
         const summary = text(
           'summary',
           'roadmap-phase-name',

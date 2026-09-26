@@ -137,15 +137,13 @@ export function computeAncestors(tasks: readonly GraphTaskInput[]): Map<string, 
 
   function resolve(id: string): Set<string> {
     const cached = ancestors.get(id);
-    if (status.get(id) === 'done' && cached) {
+    if (cached) {
+      // done なら確定値。visiting なら循環で、探索中のフレームが持つ集合をそのまま返す
+      // （新しい集合で上書きすると、探索中のフレームが集めた分が消える）
       return cached;
     }
     const result = new Set<string>();
     ancestors.set(id, result);
-    if (status.get(id) === 'visiting') {
-      // 循環。これ以上辿らず、これまでの分だけを返す
-      return result;
-    }
     status.set(id, 'visiting');
     for (const dep of byId.get(id)?.dependsOn ?? []) {
       if (!byId.has(dep)) continue;

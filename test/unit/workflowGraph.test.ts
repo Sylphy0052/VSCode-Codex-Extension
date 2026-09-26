@@ -4,6 +4,7 @@ import {
   formatTaskChangeSize,
   formatTaskContext,
   progressSegments,
+  computeAncestors,
   computeRanks,
   kanbanBucket,
   layoutGraph,
@@ -138,6 +139,17 @@ describe('layoutGraph（design.md §16.8「依存グラフ」の段レイアウ�
       ]),
     );
     expect(layout.edges).toHaveLength(3);
+  });
+
+  it('循環があっても、探索中のノードの祖先集合を空で上書きしない（Issue #1546）', () => {
+    const CYCLE: GraphTaskInput[] = [
+      { id: 'T1', dependsOn: ['T2'] },
+      { id: 'T2', dependsOn: ['T1'] },
+      { id: 'T3', dependsOn: ['T2'] },
+    ];
+    const ancestors = computeAncestors(CYCLE);
+    expect([...(ancestors.get('T1') ?? [])].sort()).toEqual(['T1', 'T2']);
+    expect([...(ancestors.get('T3') ?? [])].sort()).toEqual(['T1', 'T2']);
   });
 
   it('タスクが0件なら段もノードも空', () => {
