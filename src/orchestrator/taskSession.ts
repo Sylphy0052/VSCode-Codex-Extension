@@ -179,6 +179,12 @@ export interface TaskSessionInput {
    * 承認や質問カードへの応答は、捨てるとセッションが止まったままになるため通す。
    */
   inputLock?: boolean;
+  /**
+   * 自動引き継ぎ（`agent.autoHandoff`）を発火させない（Issue #1465 分割案8b）。ロードマップ実行の
+   * Orchestratorセッションだけが`true`を渡す。会話の続きはKanbanの「Orchestratorを開く」で
+   * 新しい世代として開き直す。
+   */
+  disableAutoHandoff?: boolean;
 }
 
 /** 入力欄を閉じたタブ（`TaskSessionInput.inputLock`）で押された操作。 */
@@ -323,7 +329,10 @@ export interface TaskSession {
   onLockedAction?(listener: (action: LockedTabAction) => void): void;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
-  /** タブを背面で用意する。開始時に呼ぶ。 */
-  open(options: { preserveFocus: boolean }): void;
+  /**
+   * タブを背面で用意する。開始時に呼ぶ。`viewColumn`（`vscode.ViewColumn`の値）を渡すとその列へ開く（Issue #1465 分割案8b。
+   * ロードマップ実行ではKanbanを左、Orchestratorを右に置く）。既に開いているタブは動かさない。
+   */
+  open(options: { preserveFocus: boolean; viewColumn?: number }): void;
   dispose(): void;
 }

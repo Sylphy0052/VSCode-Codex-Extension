@@ -1362,7 +1362,7 @@ export class ClaudeChatViewManager
     );
     entry.lastCompactionCount = lastCompactionCount;
 
-    if (entry.disposed || entry.panel === undefined) {
+    if (entry.disposed || entry.panel === undefined || entry.autoHandoffDisabled) {
       return;
     }
     const trigger = decideAutoHandoff({
@@ -2085,6 +2085,7 @@ export class ClaudeChatViewManager
     const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
     // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
     entry.inputLock = input.inputLock === true;
+    entry.autoHandoffDisabled = input.disableAutoHandoff === true;
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: input.cwd,
@@ -2829,6 +2830,7 @@ export class ClaudeChatViewManager
       pinnedName,
       taskManaged,
       inputLock: false,
+      autoHandoffDisabled: false,
       lockedActionListeners: [],
       taskConfig,
       modelSettings,
@@ -2996,7 +2998,7 @@ export class ClaudeChatViewManager
       },
       note: (id, text) => entry.session.noteLocalEvent(id, text),
       reveal: () => this.showPanel(entry, false),
-      open: (options) => this.showPanel(entry, options.preserveFocus),
+      open: (options) => this.showPanel(entry, options.preserveFocus, options.viewColumn),
       onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
       dispose: () => this.teardown(entry),
     };

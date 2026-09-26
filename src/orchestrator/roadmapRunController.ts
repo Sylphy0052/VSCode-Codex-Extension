@@ -70,6 +70,8 @@ export interface RoadmapRunControllerDeps {
   onDidChange(): void;
   /** merge待ち・後片付け中のノードを列へ並べる（分割案7）。 */
   mergeQueue?: { sync(run: RoadmapRun): void };
+  /** runの状態が変わった（Orchestratorへのイベント通知用。分割案8b-1）。`prev`は初めて見たrunで`undefined`。 */
+  onRunTransition?: (prev: RoadmapRun | undefined, next: RoadmapRun) => void;
   log(message: string): void;
   now?: () => Date;
   newId?: () => string;
@@ -222,6 +224,7 @@ export class RoadmapRunController {
     }
     this.checkStalled(next);
     this.deps.mergeQueue?.sync(next);
+    this.deps.onRunTransition?.(prev, next);
     if (pickIssuesToStart(next).length > 0) {
       this.schedulePump(next.runId);
     }

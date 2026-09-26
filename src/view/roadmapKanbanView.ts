@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
+import type { RoadmapOrchestratorStatus } from '../orchestrator/roadmapOrchestrator';
 import type { RoadmapRunController } from '../orchestrator/roadmapRunController';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import { isValidIssueNumber, type RoadmapRunMode } from '../orchestrator/roadmapRunState';
@@ -10,6 +11,12 @@ import { skinBodyClass } from './skin';
 
 /** 盤面を送る間隔。`sessionKanbanView.ts`と同じく、最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
+
+/** Kanbanから使うOrchestratorの口（Issue #1465 分割案8b-1）。 */
+export interface RoadmapKanbanOrchestratorPort {
+  open(runId: string, renew: boolean): Promise<boolean>;
+  status(runId: string): RoadmapOrchestratorStatus;
+}
 
 /**
  * ロードマップ実行（Issue #1465）のKanban。runのノードを5列（未着手 / 実行可能 / 進行中 /
@@ -30,6 +37,7 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
   constructor(
     private readonly controller: RoadmapRunController,
     private readonly log: Logger,
+    private readonly orchestrator?: RoadmapKanbanOrchestratorPort,
   ) {}
 
   show(runId?: string): void {
@@ -40,7 +48,8 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
       this.panel = vscode.window.createWebviewPanel(
         RoadmapKanbanViewManager.viewType,
         'ロードマップ実行',
-        vscode.ViewColumn.Beside,
+        // 左の列にKanban、右の列（Two）にOrchestratorのチャットタブを並べる（分割案8b-1）
+        vscode.ViewColumn.One,
         { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true },
       );
       this.panel.onDidDispose(() => {
@@ -107,7 +116,11 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
     this.dirty = false;
     this.lastPostAt = Date.now();
     const board = this.controller.board(this.selectedRunId);
-    void this.panel.webview.postMessage({ type: 'board', board });
+    const orchestrator =
+      this.orchestrator === undefined || board.run === undefined
+        ? undefined
+        : this.orchestrator.status(board.run.runId);
+    void this.panel.webview.postMessage({ type: 'board', board, orchestrator });
   }
 
   private receive(message: unknown): void {
@@ -156,6 +169,9 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
         return;
       case 'openPullRequest':
         this.openPullRequest(message.url);
+        return;
+      case 'openOrchestrator':
+        await this.openOrchestrator(runId, message.renew === true);
         return;
     }
     const issueNumber = message.issueNumber;
@@ -284,6 +300,19 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
       .find((c) => c.issueNumber === issueNumber);
   }
 
+  private async openOrchestrator(runId: string, renew: boolean): Promise<void> {
+    if (this.orchestrator === undefined) {
+      return;
+    }
+    const opened = await this.orchestrator.open(runId, renew);
+    if (!opened) {
+      void vscode.window.showWarningMessage(
+        'ロードマップ実行: Orchestratorを開けませんでした。詳細は出力パネルを確認してください',
+      );
+    }
+    this.schedulePost();
+  }
+
   /** PRのURLは外部由来。httpsのURLであることを確かめてから開く。 */
   private openPullRequest(url: unknown): void {
     if (typeof url !== 'string') {
@@ -361,6 +390,7 @@ const script = `
   const eventsEl = document.getElementById('events');
   const boardEl = document.getElementById('board');
   let current;
+  let orchestratorStatus;
   // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
   const drafts = new Map();
   let focusedQuestion;
@@ -416,6 +446,7 @@ const script = `
     if (!run) { return; }
     const status = assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
+    renderOrchestratorControls();
     if (run.finished) { return; }
     const mode = el('select');
     mode.setAttribute('aria-label', 'モード');
@@ -438,6 +469,17 @@ const script = `
     controls.appendChild(button(run.haltedByUser ? '再開' : '全体を停止', run.haltedByUser ? 'primary' : '', function () {
       send('setHalted', { halted: !run.haltedByUser });
     }));
+  }
+
+  const ORCHESTRATOR_LABELS = { notStarted: '未起動', idle: '待機中', busy: '応答中' };
+
+  function renderOrchestratorControls() {
+    if (!orchestratorStatus) { return; }
+    controls.appendChild(el('span', 'status', 'Orchestrator: ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
+    controls.appendChild(button('Orchestratorを開く', '', function () { send('openOrchestrator', { renew: false }); }));
+    if (orchestratorStatus !== 'notStarted') {
+      controls.appendChild(button('開き直す', '', function () { send('openOrchestrator', { renew: true }); }));
+    }
   }
 
   function renderEvents(board) {
@@ -557,6 +599,7 @@ const script = `
     const message = event.data;
     if (!message || message.type !== 'board') { return; }
     current = message.board;
+    orchestratorStatus = message.orchestrator;
     renderControls(current);
     renderEvents(current);
     renderBoard(current);
