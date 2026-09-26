@@ -1281,8 +1281,34 @@ export class RoadmapIssueRunner {
     // 別の一時停止/停止のinterruptAndWaitIdle（最大60秒）等が握っていても、続きの指示
     // だけはロック待ちの前に止める（Issue #1484）。状態の更新と中断の確認は
     // 引き続きロックの中（`pauseIssueInner`）で行う
-    this.live.get(key)?.session.pauseLoop();
-    return this.withIssueLock(key, () => this.pauseIssueInner(runId, issueNumber));
+    const early = this.live.get(key)?.session;
+    early?.pauseLoop();
+    return this.withIssueLock(key, async () => {
+      const paused = await this.pauseIssueInner(runId, issueNumber);
+      if (!paused && early !== undefined) {
+        this.undoEarlyPause(runId, issueNumber, early);
+      }
+      return paused;
+    });
+  }
+
+  /**
+   * 一時停止を受け付けなかった（実行中でない、既に止める要求がある等）とき、ロック待ちの前に
+   * 止めたループを戻す。一時停止を試みて失敗にしたノードや、回答待ちで止めているループは戻さない。
+   */
+  private undoEarlyPause(runId: string, issueNumber: number, early: TaskSession): void {
+    const entry = this.live.get(liveKey(runId, issueNumber));
+    const issue = this.findIssue(runId, issueNumber);
+    if (
+      entry?.session === early &&
+      entry.stopRequest === undefined &&
+      !entry.loopEnded &&
+      !this.hasPendingBlockingQuestion(entry) &&
+      issue?.progress === 'running' &&
+      issue.attention !== 'stopping'
+    ) {
+      early.resumeLoop();
+    }
   }
 
   private async pauseIssueInner(runId: string, issueNumber: number): Promise<boolean> {

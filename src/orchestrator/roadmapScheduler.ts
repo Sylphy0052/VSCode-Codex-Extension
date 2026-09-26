@@ -75,7 +75,12 @@ export function pickIssuesToStart(
   if (run.mode !== 'auto' || run.haltedByUser || run.finishedAt !== undefined) {
     return [];
   }
-  const slots = run.maxParallel - countActiveSessions(run) - startingIssueNumbers.size;
+  // 開始処理の終わり際（`running`を永続化した後）は`countActiveSessions`と二重に数えない
+  const startingNotActive = [...startingIssueNumbers].filter((issueNumber) => {
+    const issue = getIssue(run, issueNumber);
+    return issue === undefined || !hasActiveSession(issue);
+  }).length;
+  const slots = run.maxParallel - countActiveSessions(run) - startingNotActive;
   if (slots <= 0) {
     return [];
   }
