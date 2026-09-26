@@ -1481,7 +1481,7 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
       return {
         ariaLabel: '自動引き継ぎの自動承認',
         title:
-          '自動で発火した引き継ぎ（手動の引き継ぎボタンは対象外）で、確認ダイアログとセッション統括ページの保留カードを出さず、提案されたmodel/effortでそのまま引き継ぎます（Issue #1350）',
+          '引き継ぎ（自動で発火したものと、手動の引き継ぎボタンの両方）で、確認ダイアログとセッション統括ページの保留カードを出さず、提案されたmodel/effortでそのまま引き継ぎます（Issue #1350）',
         hidden: false,
         pressed: true,
         icon: COMPOSER_ICONS.autoHandoffAutoApprove,
