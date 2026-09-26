@@ -203,10 +203,25 @@ export function buildOrchestratorConfig(
   );
 }
 
+/**
+ * イベントの囲い方。ワークフロー実行は`<workflow-event>`、ロードマップ実行（Issue #1465 分割案8b）は
+ * `<roadmap-event>`で囲み、それぞれの注意書きを先頭に添える。
+ */
+export interface OrchestratorEventEnvelope {
+  /** 囲いのタグ名。英小文字とハイフンだけの固定値を渡す（外部由来の文字列を渡さない）。 */
+  tag: string;
+  guidance: string;
+}
+
+const WORKFLOW_EVENT_ENVELOPE: OrchestratorEventEnvelope = {
+  tag: 'workflow-event',
+  guidance: ORCHESTRATOR_EVENT_GUIDANCE,
+};
+
 /** 1件のイベントを囲う。本文の `<` `>` は実体参照へ変換し、囲いの偽装を成立させない。 */
-function wrapEvent(event: OrchestratorEvent): string {
+function wrapEvent(event: { kind: string; body: string }, tag: string): string {
   const sanitized = escapeAngleBrackets(stripControlCharsPreservingNewlines(event.body));
-  return `<workflow-event kind="${event.kind}">\n${sanitized}\n</workflow-event>`;
+  return `<${tag} kind="${event.kind}">\n${sanitized}\n</${tag}>`;
 }
 
 /**
@@ -220,15 +235,16 @@ function wrapEvent(event: OrchestratorEvent): string {
  * 戻り値が空文字なら送るものが無い（呼び出し側は送信しない）。
  */
 export function composeOrchestratorPrompt(
-  events: readonly OrchestratorEvent[],
+  events: readonly { kind: string; body: string }[],
   userText: string,
+  envelope: OrchestratorEventEnvelope = WORKFLOW_EVENT_ENVELOPE,
 ): string {
   const base = userText;
   if (events.length === 0) {
     return base;
   }
 
-  const wrapped = events.map(wrapEvent);
+  const wrapped = events.map((event) => wrapEvent(event, envelope.tag));
   // 新しい側から入るだけ入れる（落とすのは古い側）
   const kept: string[] = [];
   let used = base.length;
@@ -251,7 +267,7 @@ export function composeOrchestratorPrompt(
   }
 
   const notice = dropped > 0 ? [omittedNotice(dropped)] : [];
-  const header = [ORCHESTRATOR_EVENT_GUIDANCE, ...notice];
+  const header = [envelope.guidance, ...notice];
   const parts = [...header, ...kept];
   if (base !== '') {
     parts.push(base);
@@ -261,5 +277,5 @@ export function composeOrchestratorPrompt(
     return composed;
   }
   // ヘッダのぶんだけ超えた場合は、いちばん古い残存イベントをもう1件落とす
-  return composeOrchestratorPrompt(events.slice(1), userText);
+  return composeOrchestratorPrompt(events.slice(1), userText, envelope);
 }

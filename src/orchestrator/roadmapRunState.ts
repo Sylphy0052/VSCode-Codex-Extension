@@ -200,6 +200,16 @@ export interface RoadmapRun {
   issues: Record<string, RoadmapIssueExecution>;
   /** 人がrun全体を止めた。真の間は新しいノードを始めない。 */
   haltedByUser: boolean;
+  /**
+   * Orchestratorセッションを開いた回数（Issue #1465 分割案8b）。開くたびに+1し、MCPのトークンを
+   * 世代ごとに発行する。旧データには無いため、読むときは未設定を0として扱う（スキーマ版は上げない）。
+   */
+  orchestratorGeneration?: number;
+  /**
+   * 開いたOrchestratorセッションのsessionId（全世代）。リロード後の汎用復元から外す判定
+   * （`RoadmapRunStore.hasSessionRef`）に使う。旧データには無い。
+   */
+  orchestratorSessionRefs?: string[];
 }
 
 /** Issueセッションからの報告に必ず付ける識別子。 */
@@ -901,4 +911,24 @@ export function reconcileRoadmapRunOnReload(
     }
   }
   return next;
+}
+
+/** 記録しておくOrchestratorのsessionIdの上限。開くのは人の操作だけなので、通常は届かない。 */
+const MAX_ORCHESTRATOR_SESSION_REFS = 100;
+
+/** 次に開くOrchestratorセッションの世代へ進める（Issue #1465 分割案8b）。 */
+export function nextOrchestratorGeneration(run: RoadmapRun): RoadmapRun {
+  return { ...run, orchestratorGeneration: (run.orchestratorGeneration ?? 0) + 1 };
+}
+
+/** 開いたOrchestratorセッションのsessionIdを記録する。 */
+export function recordOrchestratorSession(run: RoadmapRun, sessionId: string): RoadmapRun {
+  const refs = run.orchestratorSessionRefs ?? [];
+  if (sessionId === '' || refs.includes(sessionId)) {
+    return run;
+  }
+  return {
+    ...run,
+    orchestratorSessionRefs: [...refs, sessionId].slice(-MAX_ORCHESTRATOR_SESSION_REFS),
+  };
 }

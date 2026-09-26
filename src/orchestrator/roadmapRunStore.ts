@@ -74,7 +74,8 @@ export class RoadmapRunStore {
   }
 
   /**
-   * このsessionIdがいずれかのrunのIssueセッション（過去の実行回を含む）かどうか（Issue #1491）。
+   * このsessionIdがいずれかのrunのIssueセッション（過去の実行回を含む）かOrchestratorセッション（全世代。
+   * Issue #1465 分割案8b）かどうか（Issue #1491）。
    * リロード後の汎用復元（`restorePanel`）から、入力を閉じるべきタブを外す判定に使う。
    * メモリ上の実行状態はリロード直後に空なので、`WorkflowRunner.isTaskManagedSessionId`と
    * 同じく永続化した側を見る。
@@ -83,11 +84,13 @@ export class RoadmapRunStore {
     if (sessionId === '') {
       return false;
     }
-    return this.list().some((run) =>
-      Object.values(run.issues).some(
-        (issue) =>
-          Array.isArray(issue.attempts) && issue.attempts.some((a) => a.sessionRef === sessionId),
-      ),
+    return this.list().some(
+      (run) =>
+        (Array.isArray(run.orchestratorSessionRefs) && run.orchestratorSessionRefs.includes(sessionId)) ||
+        Object.values(run.issues).some(
+          (issue) =>
+            Array.isArray(issue.attempts) && issue.attempts.some((a) => a.sessionRef === sessionId),
+        ),
     );
   }
 

@@ -124,6 +124,11 @@ export interface BaseChatPanel {
    * 中断（`controlSession`等）も断る。
    */
   inputLock: boolean;
+  /**
+   * 自動引き継ぎを発火させないタブか（Issue #1465 分割案8b、`TaskSessionInput.disableAutoHandoff`）。
+   * ロードマップ実行のOrchestratorは世代をKanbanから開き直すため、別タブへの引き継ぎを始めない。
+   */
+  autoHandoffDisabled: boolean;
   /** `TaskSession.onLockedAction` のリスナー。 */
   lockedActionListeners: Array<(action: LockedTabAction) => void>;
   /** skill選択（issue #1451）で人の発言を順に送る関門。初めて使うときに作る。 */

@@ -1186,7 +1186,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
     entry.lastCompactionCount = lastCompactionCount;
 
-    if (entry.disposed || entry.panel === undefined) {
+    if (entry.disposed || entry.panel === undefined || entry.autoHandoffDisabled) {
       return;
     }
     const trigger = decideAutoHandoff({
@@ -1761,6 +1761,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
     // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
     entry.inputLock = input.inputLock === true;
+    entry.autoHandoffDisabled = input.disableAutoHandoff === true;
     const pendingKey = this.pendingStarts.begin(entry);
     // skillを提示させないセッション（セカンドオピニオン。Issue #1061）は、`thread/start` の
     // configへ重ねる。MCPの指定とは独立なので、両方指定されたら両方載る
@@ -1921,6 +1922,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       pinnedName,
       taskManaged,
       inputLock: false,
+      autoHandoffDisabled: false,
       lockedActionListeners: [],
       taskConfig,
       modelSettings,
@@ -2065,7 +2067,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       compact: () => entry.session.compact(),
       note: (id, text) => entry.session.noteLocalEvent(id, text),
       reveal: () => this.showPanel(entry, false),
-      open: (options) => this.showPanel(entry, options.preserveFocus),
+      open: (options) => this.showPanel(entry, options.preserveFocus, options.viewColumn),
       onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
       dispose: () => this.teardown(entry),
     };

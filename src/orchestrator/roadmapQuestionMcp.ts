@@ -17,15 +17,16 @@ import { ROADMAP_QUESTION_ESCALATIONS, type RoadmapQuestionEscalation } from './
 import { sanitizeInlineText } from './untrustedText';
 
 /**
- * ロードマップ実行（Issue #1465 分割案6a）のIssueセッションが質問を送るためのMCPサーバ。
+ * ロードマップ実行（Issue #1465）のMCPサーバ。
  *
- * ワークフロー実行用の`MessagingMcpServer`（`messaging.ts`）とは別に、`ask_orchestrator`の
- * 1ツールだけを公開する。HTTP層は`startHttpMcpServer`を使い、接続元のIssueセッションは
- * URLのトークンからだけ決める（ツールの引数からは決めない）。サーバはウィンドウごとに1つで、
- * 最初の登録のときに立てる。
+ * ワークフロー実行用の`MessagingMcpServer`（`messaging.ts`）とは別に、トークンごとに見せる
+ * ツールの組を分ける。Issueセッション（分割案6a）には`ask_orchestrator`の1ツールだけ、
+ * Orchestratorセッション（分割案8b-1）には`roadmapOrchestratorTools.ts`の操作ツールだけを見せる。
+ * HTTP層は`startHttpMcpServer`を使い、接続元とツールの組はURLのトークンからだけ決める
+ * （ツールの引数からは決めない）。サーバはウィンドウごとに1つで、最初の登録のときに立てる。
  *
- * 質問の振り分けと回答の届け方は`RoadmapIssueRunner`が持つ。ここは引数の検証と
- * JSON-RPCの受け答えだけを行う。
+ * 質問の振り分けと回答の届け方は`RoadmapIssueRunner`、操作ツールの処理は`RoadmapOrchestrator`が
+ * 持つ。ここはJSON-RPCの受け答えと、登録先への振り分けだけを行う。
  */
 
 export const MAX_QUESTION_LENGTH = 1000;
@@ -286,9 +287,16 @@ export interface RoadmapQuestionMcpDeps {
   logWarn?: (message: string) => void;
 }
 
+/**
+ * 1つのトークンに結び付けた接続先。見せるツールの組はトークンを登録するときに決める
+ * （Issueセッションは`ask_orchestrator`だけ、Orchestratorセッションは`roadmapOrchestratorTools.ts`の
+ * 操作ツールだけ。Issue #1465 分割案8b）。
+ */
 interface Registration {
   connectionId: string;
-  handler: RoadmapAskHandler;
+  tools: readonly McpToolDefinition[];
+  /** ツール名は`tools`のどれかであることを確かめてから呼ぶ。 */
+  call: (name: string, rawArgs: unknown) => Promise<RoadmapAskOutcome>;
 }
 
 export class RoadmapQuestionMcpServer {
@@ -302,10 +310,30 @@ export class RoadmapQuestionMcpServer {
    * Issueセッション1つ分の接続先を登録し、CLIへ渡すURLを返す。トークンは推測できない
    * 128bitで、`unregister`した後のURLは404になる。
    */
-  async register(
+  register(connectionId: string, handler: RoadmapAskHandler): Promise<{ url: string; token: string }> {
+    return this.add({
+      connectionId,
+      tools: [ROADMAP_ASK_ORCHESTRATOR_TOOL],
+      call: async (_name, rawArgs) => {
+        const parsed = parseRoadmapAskArgs(rawArgs);
+        return parsed.ok ? handler(parsed.args) : { text: parsed.message, isError: true };
+      },
+    });
+  }
+
+  /**
+   * Orchestratorセッション1つ分（1世代）の接続先を登録する（Issue #1465 分割案8b）。
+   * 見せるのは`tools`だけで、`ask_orchestrator`は見せない。
+   */
+  registerTools(
     connectionId: string,
-    handler: RoadmapAskHandler,
+    tools: readonly McpToolDefinition[],
+    call: (name: string, rawArgs: unknown) => Promise<RoadmapAskOutcome>,
   ): Promise<{ url: string; token: string }> {
+    return this.add({ connectionId, tools, call });
+  }
+
+  private async add(registration: Registration): Promise<{ url: string; token: string }> {
     if (this.disposed) {
       throw new Error('ロードマップの質問用MCPサーバは終了済み');
     }
@@ -319,7 +347,7 @@ export class RoadmapQuestionMcpServer {
       throw e;
     }
     const token = randomBytes(16).toString('hex');
-    this.registrations.set(token, { connectionId, handler });
+    this.registrations.set(token, registration);
     return { url: handle.urlForToken(token), token };
   }
 
@@ -373,7 +401,7 @@ export class RoadmapQuestionMcpServer {
       case 'initialize':
         return success(request.id, SERVER_INFO_RESULT);
       case 'tools/list':
-        return success(request.id, { tools: [ROADMAP_ASK_ORCHESTRATOR_TOOL] });
+        return success(request.id, { tools: registration.tools });
       case 'tools/call':
         return this.handleToolCall(registration, request);
       default:
@@ -389,14 +417,11 @@ export class RoadmapQuestionMcpServer {
       typeof request.params === 'object' && request.params !== null
         ? (request.params as Record<string, unknown>)
         : {};
-    if (params.name !== ROADMAP_ASK_ORCHESTRATOR_TOOL.name) {
-      return failure(request.id, -32602, `未知のツールです: ${String(params.name)}`);
+    const name = params.name;
+    if (typeof name !== 'string' || !registration.tools.some((t) => t.name === name)) {
+      return failure(request.id, -32602, `未知のツールです: ${String(name)}`);
     }
-    const parsed = parseRoadmapAskArgs(params.arguments);
-    if (!parsed.ok) {
-      return success(request.id, toolTextResult(parsed.message, true));
-    }
-    const outcome = await registration.handler(parsed.args);
+    const outcome = await registration.call(name, params.arguments);
     return success(request.id, toolTextResult(outcome.text, outcome.isError));
   }
 }

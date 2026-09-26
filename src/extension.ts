@@ -806,6 +806,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return { config: effective.config, sandbox: effective.sandbox };
       },
       readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
+      readBaseline: readSafetyBaseline,
       log,
     }),
   );

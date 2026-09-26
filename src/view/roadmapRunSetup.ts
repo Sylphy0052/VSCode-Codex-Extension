@@ -10,6 +10,7 @@ import {
 import type { Logger } from '../log';
 import { nodeForgeFileSystem, type CliCommandRunner } from '../orchestrator/forge';
 import { RoadmapIssueRunner } from '../orchestrator/roadmapIssueRunner';
+import { RoadmapOrchestrator } from '../orchestrator/roadmapOrchestrator';
 import {
   RoadmapMergeQueue,
   type RoadmapMergeConsentRequest,
@@ -39,6 +40,8 @@ import {
 } from '../orchestrator/roadmapRunState';
 import { RoadmapRunStore } from '../orchestrator/roadmapRunStore';
 import { formatVerifyCommandForDisplay } from '../orchestrator/runnerVerifyCommands';
+import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type { TaskSessionConfig, TaskSessionHost } from '../orchestrator/taskSession';
 import {
   nodeWorktreeFileSystem,
@@ -53,6 +56,8 @@ const ROADMAP_ISSUE_MAX_ITERATIONS = 10;
 const PLAN_PROPOSAL_TIMEOUT_MS = 10 * 60_000;
 /** 提案をモーダルへ出すときの、ノードあたりの根拠の上限。 */
 const PROPOSAL_REASON_MAX_LENGTH = 120;
+const CONFIRM_TITLE_MAX_LENGTH = 200;
+const CONFIRM_TEXT_MAX_LENGTH = 1000;
 
 export interface RoadmapRunSetupDeps {
   context: vscode.ExtensionContext;
@@ -67,6 +72,8 @@ export interface RoadmapRunSetupDeps {
   cli: CliCommandRunner;
   sessionConfig(engine: RoadmapRunEngine): { config: TaskSessionConfig; sandbox: string };
   readContextLowPercent: () => number;
+  /** Orchestratorセッション（分割案8b-1）の権限の上限。 */
+  readBaseline(): ExtensionSafetyBaseline;
   log: Logger;
 }
 
@@ -79,7 +86,11 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   const ports: RoadmapRunForgePorts = { git: deps.git, cli: deps.cli };
   const { store } = deps;
   // Controller・Runner・Viewは互いを参照するため、後から入れる箱を介して繋ぐ
-  const holder: { controller?: RoadmapRunController; view?: RoadmapKanbanViewManager } = {};
+  const holder: {
+    controller?: RoadmapRunController;
+    view?: RoadmapKanbanViewManager;
+    orchestrator?: RoadmapOrchestrator;
+  } = {};
 
   const executableFor = (engine: RoadmapRunEngine): string =>
     engine === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath;
@@ -166,10 +177,22 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     notifyStalled: (run, blockers) => notifyStalled(run, blockers, () => holder.view?.show(run.runId)),
     onDidChange: () => holder.view?.refresh(),
     mergeQueue,
+    onRunTransition: (prev, next) => holder.orchestrator?.handleRunTransition(prev, next),
     log: (message) => log.info(message),
   });
   holder.controller = controller;
-  const view = new RoadmapKanbanViewManager(controller, log);
+  const orchestrator = new RoadmapOrchestrator({
+    hosts: deps.hosts,
+    controller,
+    findRun: (runId) => store.find(runId),
+    server: questionServer,
+    readBaseline: () => deps.readBaseline(),
+    confirmAnswer: confirmOrchestratorAnswer,
+    onDidChange: () => holder.view?.refresh(),
+    log: (message) => log.warn(message),
+  });
+  holder.orchestrator = orchestrator;
+  const view = new RoadmapKanbanViewManager(controller, log, orchestrator);
   holder.view = view;
 
   void controller.restore().catch((e: unknown) => {
@@ -179,10 +202,12 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   return [
     { dispose: () => mergeQueue.dispose() },
     { dispose: () => runner.dispose() },
+    // Orchestratorはトークンを外してからセッションを閉じるため、サーバより先に片付ける
+    { dispose: () => orchestrator.dispose() },
     { dispose: () => questionServer.dispose() },
     view,
     vscode.commands.registerCommand('agent.roadmapRun.start', () =>
-      startRunCommand(controller, view, log),
+      startRunCommand(controller, view, orchestrator, log),
     ),
     vscode.commands.registerCommand('agent.roadmapRun.kanban', () => view.show()),
   ];
@@ -261,6 +286,7 @@ function notifyStalled(run: RoadmapRun, blockers: readonly number[], open: () =>
 async function startRunCommand(
   controller: RoadmapRunController,
   view: RoadmapKanbanViewManager,
+  orchestrator: RoadmapOrchestrator,
   log: Logger,
 ): Promise<void> {
   const folder = await pickFolder();
@@ -316,6 +342,39 @@ async function startRunCommand(
     void vscode.window.showInformationMessage('同じロードマップの実行中のrunを開きます');
   }
   view.show(outcome.runId);
+  if (!outcome.reused) {
+    // Kanbanを左の列に出してから、右の列にOrchestratorを開く。開けなくてもrunは続ける
+    void orchestrator.open(outcome.runId).then((opened) => {
+      if (!opened) {
+        void vscode.window.showWarningMessage(
+          'ロードマップ実行: Orchestratorを開けませんでした。Kanbanの「Orchestratorを開く」で開き直せます',
+        );
+      }
+    });
+  }
+}
+
+/** Orchestratorが`answer_question`で渡そうとしている回答を、人に確かめる。 */
+async function confirmOrchestratorAnswer(input: {
+  issueNumber: number;
+  title: string;
+  question: string;
+  answer: string;
+}): Promise<boolean> {
+  const detail = [
+    `#${String(input.issueNumber)} ${sanitizeInlineText(input.title, CONFIRM_TITLE_MAX_LENGTH)}`,
+    '',
+    `質問: ${sanitizeInlineText(input.question, CONFIRM_TEXT_MAX_LENGTH)}`,
+    '',
+    // 回答は渡す本文そのものを見せる（切り詰めると確かめていない部分が通る）
+    `回答: ${input.answer}`,
+  ].join('\n');
+  const choice = await vscode.window.showWarningMessage(
+    'Orchestratorがこの回答をIssueセッションへ渡そうとしています。あなたの答えと一致していれば「回答する」を押してください',
+    { modal: true, detail },
+    '回答する',
+  );
+  return choice === '回答する';
 }
 
 async function pickFolder(): Promise<string | undefined> {
