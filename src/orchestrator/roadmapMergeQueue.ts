@@ -39,12 +39,9 @@ import { runVerifyCommand, type VerifyCommandResult } from '../verification/comm
 /** 検証の出力として修復の指示へ渡す上限（末尾から）。 */
 const VERIFY_OUTPUT_TAIL_LENGTH = 4000;
 /**
- * merge後、リモートでmerge済みになったかを確かめる回数と間隔（Issue #1487）。
- * mergeコマンド自体は成功しており、GitHub/GitLab側のAPI反映が遅いだけの可能性があるため、
- * 間隔を指数的に伸ばして合計で1〜2分程度は確かめ続ける（伸ばしても、待つのはこのノードの
- * confirmだけで、同じリポジトリの次のノードは次のmergeへ進む前に改めて`git fetch`するため
- * 順番待ちの意味は壊れない）。それでも確かめられなければ要対応にする（再開時、`merge()`冒頭の
- * `isPullRequestMerged`確認で自己回復する）。
+ * merge後、リモートでmerge済みになったかを確かめる回数と間隔（issue #1487）。mergeコマンドは
+ * 成功していてAPIの反映が遅いだけのことがあるため、間隔を3秒から倍々に伸ばし（上限30秒）、
+ * 合計約105秒確かめる。その間は同じリポジトリの次のmergeも待つ。
  */
 const MERGE_CONFIRM_ATTEMPTS = 7;
 const MERGE_CONFIRM_BASE_INTERVAL_MS = 3_000;
