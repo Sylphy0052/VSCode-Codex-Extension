@@ -46,6 +46,7 @@ export interface TaskRunKanbanBadge {
   tone: '' | 'warn' | 'ok';
 }
 
+/** ユーザー判断待ちの質問。本文は外部由来のため、画面側では`textContent`で出す。 */
 export interface TaskRunKanbanQuestion {
   questionId: string;
   question: string;
