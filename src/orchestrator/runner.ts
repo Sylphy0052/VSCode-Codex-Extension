@@ -5530,12 +5530,24 @@ export class WorkflowRunner {
     // 指摘: high）。戻さないと、`pauseLoop()`で続きの指示を止めたまま新しいセッションも
     // 立たず、タスクは「実行中」の帳簿のまま誰も進めない状態で固まる。run全体が完了判定へ
     // 到達しなくなるため、警告1件で済む失敗ではない
+    // 失敗時に元のセッションを戻す（上のコメント参照）。ただし`waitingOverlap`（交差待ち、
+    // Issue #1469）に入っている最中の分割なら戻さない。`pauseLoop()`は本来この待機由来で、
+    // 状態は`waitingOverlap`のまま。ここで無条件に`resumeLoop()`すると、待機を解いていないのに
+    // ループだけ動き出し、`releaseOverlapWaits`の取り込みと並走してしまう（Issue #1480）。
+    // `waitingOverlap`のままなら、待機の解消は既存の経路（`releaseOverlapWaits`・
+    // `cancelOverlapWait`）に任せる
+    const resumePreviousOnFailure = (): void => {
+      if (liveTask.overlapWait === undefined) {
+        previous.resumeLoop();
+      }
+    };
+
     const input: TaskSessionInput = { ...liveTask.input, generation };
     let session: TaskSession;
     try {
       session = await this.deps.hosts[task.provider].openTaskSession(input);
     } catch (e) {
-      previous.resumeLoop();
+      resumePreviousOnFailure();
       throw e;
     }
     if (this.disposing) {
@@ -5550,7 +5562,7 @@ export class WorkflowRunner {
     } catch (e) {
       // タブを開けなかった。開きかけのセッションを閉じ、元のセッションで続ける
       session.dispose();
-      previous.resumeLoop();
+      resumePreviousOnFailure();
       throw e;
     }
 
