@@ -643,7 +643,7 @@ export class ClaudeChatViewManager
    */
   private buildLoopDoneCheck(entry: ClaudePanel): LoopDoneCheckConfig | undefined {
     return createLoopDoneCheckConfig(
-      readLoopDoneCheckConfig(),
+      readLoopDoneCheckConfig(this.reflexEnabledFor(entry)),
       {
         provider: 'claude',
         executable: this.claudePath(),
@@ -1146,9 +1146,8 @@ export class ClaudeChatViewManager
     const state = entry.session.getState();
     const lastAssistantMessage = recentAssistantMessages(state, 1)[0];
     const gitBranch = await resolveGitBranch(entry.cwd);
-    // 自動承認は自動発火（`kind !== 'manual'`）でトグルONのときだけ（Issue #1350）。
-    // 手動の引き継ぎボタンでは、トグルONでも必ず確認する
-    const autoApprove = trigger.kind !== 'manual' && state.autoHandoffAutoApprove;
+    // 自動承認はトグルONのとき（Issue #1350）。手動の引き継ぎボタンも対象に含める（Issue #1510）
+    const autoApprove = state.autoHandoffAutoApprove;
     const choice = await chooseHandoffModelSettings(
       entry.modelSettings,
       {
@@ -1217,6 +1216,16 @@ export class ClaudeChatViewManager
       return false;
     }
 
+    if (entry.handoffDelegate !== undefined) {
+      return this.delegateHandoff(
+        entry.handoffDelegate,
+        choice.settings,
+        chooseHandoffPrompt(pointerPath, lastAssistantMessage),
+        trigger,
+        this.log,
+      );
+    }
+
     // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
     // 裏で回っているループの引き継ぎは止めたくないが、ユーザーが別のタブで作業している
     // 最中に前面を奪うのも避けたい。発火は止めず、前面化だけをやめる。
@@ -1251,6 +1260,13 @@ export class ClaudeChatViewManager
     newEntry.session.setAutoHandoff(state.autoHandoff);
     // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
     newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+    // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
+    // 時点のグローバル設定で描かれているため、上書きした値で描き直す
+    newEntry.reflexOverride = entry.reflexOverride;
+    void newEntry.panel?.webview.postMessage({
+      type: 'reflex',
+      enabled: this.reflexEnabledFor(newEntry),
+    });
     // 自動返信のON/OFFも持ち越す（Issue #1362）。持ち越したら引き継ぎ元では止める。
     // 旧タブを残したとき、新旧2つのセッションが同じ作業を自動で進めるのを防ぐ。
     // `state`は確認ダイアログの前に取った値のため、待っている間のトグル操作を拾えるよう
@@ -1625,7 +1641,7 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     lastAgentMessageText: string,
   ): Promise<boolean> {
-    const reflex = readAutoReplyReflexConfig();
+    const reflex = readAutoReplyReflexConfig(this.reflexEnabledFor(entry));
     if (!reflex.enabled) {
       return true;
     }
@@ -1664,7 +1680,7 @@ export class ClaudeChatViewManager
     outgoing: string,
     context: string,
   ): Promise<boolean> {
-    const reflex = readAutoReplyReflexConfig();
+    const reflex = readAutoReplyReflexConfig(this.reflexEnabledFor(entry));
     if (!reflex.enabled) {
       return true;
     }
@@ -1732,7 +1748,7 @@ export class ClaudeChatViewManager
     questions: AskUserQuestionItem[],
   ): Promise<void> {
     const context = lastAgentMessage(entry.session.getState().items)?.text ?? '';
-    const reflex = readAutoReplyReflexConfig();
+    const reflex = readAutoReplyReflexConfig(this.reflexEnabledFor(entry));
     if (reflex.enabled) {
       // 選択肢を判定で選べるなら返信役を通さない（Issue #1435）。確信度が足りない質問が
       // あれば人へ回し、判定できない（失敗・複数選択）ときだけ返信役に任せる
@@ -2086,6 +2102,7 @@ export class ClaudeChatViewManager
     // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
     entry.inputLock = input.inputLock === true;
     entry.autoHandoffDisabled = input.disableAutoHandoff === true;
+    this.applyTaskSessionSwitches(entry, input);
     this.panels.set(sessionId, entry);
     entry.session.start({
       cwd: input.cwd,
@@ -2831,6 +2848,8 @@ export class ClaudeChatViewManager
       taskManaged,
       inputLock: false,
       autoHandoffDisabled: false,
+      handoffDelegate: undefined,
+      reflexOverride: undefined,
       lockedActionListeners: [],
       taskConfig,
       modelSettings,
@@ -2900,7 +2919,7 @@ export class ClaudeChatViewManager
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
-      reflexEnabled: readReflexEnabled(),
+      reflexEnabled: this.reflexEnabledFor(entry),
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
         'モデルと承認は今の会話にすぐ効きます。Effortは送りますが、CLIが結果を返さないため反映は確かめられません。エージェントは起動引数でのみ決まるため、変更は次のセッションから効きます。「既定」へ戻す操作も次のセッションから効きます。',
@@ -3122,9 +3141,12 @@ export class ClaudeChatViewManager
    * 書いた値は動かない）。
    */
   refreshReflex(): void {
-    const enabled = readReflexEnabled();
     for (const entry of this.allPanels()) {
-      void entry.panel?.webview.postMessage({ type: 'reflex', enabled });
+      // タブ単位で上書きしたタブ（Issue #1505）はグローバル設定の変更で表示を変えない
+      void entry.panel?.webview.postMessage({
+        type: 'reflex',
+        enabled: this.reflexEnabledFor(entry),
+      });
     }
   }
 
@@ -3579,7 +3601,7 @@ export class ClaudeChatViewManager
           readChatProsConsConfig(),
           readChatTurnSummaryConfig(),
         );
-        const skillSelect = readSkillSelectConfig();
+        const skillSelect = readSkillSelectConfig(this.reflexEnabledFor(entry));
         if (skillSelect.enabled) {
           void this.dispatchWithSkillSelect(entry, text, sent, skillSelect.threshold);
           return;

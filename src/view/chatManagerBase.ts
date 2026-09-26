@@ -2,11 +2,17 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
-import { readChatEndSummaryConfig, readNotificationsConfig } from '../config';
+import { readChatEndSummaryConfig, readNotificationsConfig, readReflexEnabled } from '../config';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { Logger } from '../log';
+import type { SessionModelSettings } from '../sessionModelSettings';
 import type { LoopController } from '../loop/loopController';
-import type { ApprovalOutcome, LockedTabAction } from '../orchestrator/taskSession';
+import type {
+  ApprovalOutcome,
+  LockedTabAction,
+  TaskHandoffDelegate,
+  TaskSessionInput,
+} from '../orchestrator/taskSession';
 import { PinnedSessionStore, pinKeyFor } from '../util/pinnedSessions';
 import type { AgentReportedRecorder } from '../verification/agentReported';
 import {
@@ -23,11 +29,7 @@ import {
 } from './handoff';
 import { PendingHandoffChoice } from './handoffPending';
 import type { SkillSelectGate } from './skillSelectGate';
-import {
-  buildEndSummaryMaterial,
-  EndSummaryRunner,
-  type EndSummaryDisplay,
-} from './endSummary';
+import { buildEndSummaryMaterial, EndSummaryRunner, type EndSummaryDisplay } from './endSummary';
 import { playNotificationSound } from './notificationSound';
 import type {
   SessionApprovalDetail,
@@ -56,6 +58,8 @@ export interface ChatSessionLike {
   getState(): ChatState;
   dispose(): void;
   decide(requestId: number | string, decision: ApprovalDecision): void;
+  setAutoHandoff(on: boolean): void;
+  setAutoHandoffAutoApprove(on: boolean): void;
 }
 
 /**
@@ -129,6 +133,16 @@ export interface BaseChatPanel {
    * ロードマップ実行のOrchestratorは世代をKanbanから開き直すため、別タブへの引き継ぎを始めない。
    */
   autoHandoffDisabled: boolean;
+  /**
+   * 自動引き継ぎで新しいセッションを開く処理の委譲先（Issue #1505、
+   * `TaskSessionInput.handoffDelegate`）。未設定なら従来どおりホストが通常のタブを開く。
+   */
+  handoffDelegate: TaskHandoffDelegate | undefined;
+  /**
+   * Reflexモードの親スイッチのタブ単位の上書き（Issue #1505、`TaskSessionInput.reflex`）。
+   * 未設定ならグローバル設定（`readReflexEnabled`）に従う。
+   */
+  reflexOverride: boolean | undefined;
   /** `TaskSession.onLockedAction` のリスナー。 */
   lockedActionListeners: Array<(action: LockedTabAction) => void>;
   /** skill選択（issue #1451）で人の発言を順に送る関門。初めて使うときに作る。 */
@@ -768,6 +782,62 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
   }
 
+  /**
+   * 工程セッション（Issue #1505 仕様6）の設定を`openTaskSession`の入力からタブへ写す。
+   * パネルを作る前、`buildEntry`の直後に呼ぶ。指定の無い項目は`buildEntry`がグローバル設定から
+   * 決めた値のまま残す。
+   */
+  protected applyTaskSessionSwitches(entry: TPanel, input: TaskSessionInput): void {
+    if (input.forceAutoHandoff === true && !entry.autoHandoffDisabled) {
+      entry.session.setAutoHandoff(true);
+    }
+    if (input.autoHandoffAutoApprove === true) {
+      entry.session.setAutoHandoffAutoApprove(true);
+    }
+    entry.reflexOverride = input.reflex;
+    entry.handoffDelegate = input.handoffDelegate;
+  }
+
+  /**
+   * 自動引き継ぎの新しいセッションを開く処理を、`TaskSessionInput.handoffDelegate`へ委ねる
+   * （Issue #1505 仕様6）。引き継ぎ文書の作成とModel/Effortの選択が済んだ後、ホストが
+   * `openNew`で通常のタブを開く代わりに呼ぶ。引き継ぎ元の停止の確認は出さない（後始末は
+   * 委譲先が行う）。委譲先が見送ったか失敗したときは`false`を返し、引き継ぎ元はそのまま続く。
+   */
+  protected async delegateHandoff(
+    delegate: TaskHandoffDelegate,
+    settings: SessionModelSettings,
+    prompt: string,
+    trigger: HandoffTrigger,
+    log: Pick<Logger, 'info' | 'warn'>,
+  ): Promise<boolean> {
+    try {
+      const handedOff = await delegate({
+        model: settings.model,
+        effort: settings.effort,
+        prompt,
+        trigger: trigger.kind === 'manual' ? 'manual' : 'auto',
+      });
+      if (!handedOff) {
+        log.info('引き継ぎは呼び出し側が見送りました（旧タブはそのまま続きます）');
+      }
+      return handedOff;
+    } catch (e) {
+      log.warn(
+        `引き継ぎの委譲先が失敗しました（旧タブはそのまま続きます）: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * このタブで効くReflexモードの親スイッチ。タブ単位の上書き（`TaskSessionInput.reflex`、
+   * Issue #1505）があればそれを、無ければグローバル設定を返す。
+   */
+  protected reflexEnabledFor(entry: TPanel): boolean {
+    return entry.reflexOverride ?? readReflexEnabled();
+  }
+
   /** 入力欄を閉じたタブへの操作なら案内を出して`true`を返す。コマンド経由の入口で使う。 */
   protected rejectIfInputLocked(entry: TPanel): boolean {
     if (!entry.inputLock) {
@@ -780,7 +850,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   private async promptLockedInstruction(entry: TPanel): Promise<void> {
     const text = await vscode.window.showInputBox({
       title: `${entry.title}: Orchestrator経由で指示`,
-      prompt: 'Issueセッションへ渡す指示。次の指示の頭に添えて届けます（実行中のターンには割り込みません）',
+      prompt:
+        'Issueセッションへ渡す指示。次の指示の頭に添えて届けます（実行中のターンには割り込みません）',
       ignoreFocusOut: true,
       validateInput: (value) =>
         value.trim() === '' || value.length > MAX_LOCKED_INSTRUCTION_LENGTH
@@ -867,7 +938,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.renderPanelHtml(entry, panel);
-    panel.webview.onDidReceiveMessage((message: unknown) => this.receiveWebviewMessage(entry, message));
+    panel.webview.onDidReceiveMessage((message: unknown) =>
+      this.receiveWebviewMessage(entry, message),
+    );
     panel.onDidChangeViewState(() => {
       if (panel.visible) {
         entry.lastKnownViewColumn = panel.viewColumn;
