@@ -968,13 +968,27 @@ ${workflowStyles()}
            hidden の要素は読み上げられないため、解除・自動解除を伝えられない -->
       <div id="kanbanHighlightLive" class="sr-only" aria-live="polite"></div>
     </div>
-    <section id="qualitySection" hidden>
-      <div class="quality-head">
-        <h2>計画・品質契約</h2>
-        <span id="qualityPhase" class="quality-phase"></span>
+    <div class="section-head">
+      <h2>タスク一覧</h2>
+      <div class="task-view-tools">
+        <button id="taskViewBoardBtn" type="button" class="secondary" aria-pressed="true">盤面</button>
+        <button id="taskViewTableBtn" type="button" class="secondary" aria-pressed="false">表</button>
       </div>
-      <div id="qualityContract" class="quality-contract"></div>
-    </section>
+    </div>
+    <section id="kanbanBoard" class="kanban-board"></section>
+    <div id="taskTableCommon" class="hint" hidden></div>
+    <div id="taskTableWrap" tabindex="0" aria-label="タスク一覧。横にスクロールできます" hidden>
+      <table id="taskTable">
+        <thead>
+          <tr>
+            <th class="col-id">id</th><th class="col-role">役割</th><th class="col-summary">作業内容要約</th><th class="col-state">状態</th><th class="col-verification">検証</th><th class="col-evidence">完了根拠</th>
+            <th class="col-issue">Issue</th><th class="col-cleanup">cleanup</th><th class="col-provider">provider</th><th class="col-model">model / effort</th><th class="col-context">コンテキスト</th><th class="col-elapsed">経過</th><th class="col-submissions">送信回数</th><th class="col-ops">操作</th>
+          </tr>
+        </thead>
+        <tbody id="taskTableBody"></tbody>
+      </table>
+    </div>
+
     <div class="section-head">
       <h2>依存グラフ</h2>
       <div class="graph-tools">
@@ -991,18 +1005,16 @@ ${workflowStyles()}
       <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>
 
-    <h2>タスク一覧</h2>
-    <div id="taskTableWrap" tabindex="0" aria-label="タスク一覧。横にスクロールできます">
-      <table id="taskTable">
-        <thead>
-          <tr>
-            <th>id</th><th>役割</th><th>作業内容要約</th><th>状態</th><th>検証</th><th>完了根拠</th>
-            <th>Issue</th><th>cleanup</th><th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th><th>送信回数</th><th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="taskTableBody"></tbody>
-      </table>
-    </div>
+    <section id="qualitySection" hidden>
+      <div class="quality-head">
+        <h2>計画・品質契約</h2>
+        <span id="qualityPhase" class="quality-phase"></span>
+      </div>
+      <details id="qualityDetails">
+        <summary id="qualitySummary"></summary>
+        <div id="qualityContract" class="quality-contract"></div>
+      </details>
+    </section>
 
     <section id="roadmapSection" hidden>
       <div class="section-head">
@@ -1022,8 +1034,10 @@ ${workflowStyles()}
     </div>
 
     <div id="warningsSection" hidden>
-      <h2>警告</h2>
-      <div id="warnings"></div>
+      <details id="warningsDetails">
+        <summary id="warningsSummary">警告</summary>
+        <div id="warnings"></div>
+      </details>
     </div>
   </div>
 

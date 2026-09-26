@@ -141,6 +141,13 @@ ${completionEvidenceStyles()}
   }
   .quality-phase.phase-verificationFailed { border-color: var(--vscode-errorForeground); }
   .quality-phase.phase-recovering { border-color: var(--vscode-charts-yellow); }
+  #qualityDetails summary {
+    cursor: pointer;
+    margin-top: 4px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
+  }
   .quality-contract {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
@@ -372,6 +379,61 @@ ${completionEvidenceStyles()}
   .state-pill.state-done,
   .state-pill.state-merging { --wf-state-color: var(--vscode-charts-green); }
   .state-pill.state-failed { --wf-state-color: var(--vscode-errorForeground); }
+
+  /* ---- タスク一覧: 盤面表示（Issue #1546、taskRunKanbanView.tsと同じ発想） ---- */
+  .task-view-tools { display: flex; gap: 4px; }
+  .kanban-board { display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; margin-bottom: 12px; }
+  .kanban-column {
+    flex: 1 1 220px;
+    min-width: 200px;
+    background-color: var(--vscode-editorWidget-background);
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: var(--agent-radius-md, 6px);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  /* 空の列は縦にも横にも場所を取らせない（オーケストレーターモード画面と同じ発想） */
+  .kanban-column.is-empty { flex: 0 0 140px; min-width: 140px; }
+  .kanban-column-head {
+    font-weight: 600;
+    font-size: 0.9em;
+    color: var(--vscode-descriptionForeground);
+  }
+  .kanban-column-body { display: flex; flex-direction: column; gap: 6px; }
+  .kanban-card {
+    cursor: pointer;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: var(--agent-radius-md, 6px);
+    background-color: var(--vscode-editor-background);
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .kanban-card:hover { background-color: var(--vscode-list-hoverBackground); }
+  /* 表の行の強調（issue #1037）と同じ見た目を盤面のカードにも適用する */
+  .kanban-card.highlighted { border-color: var(--vscode-focusBorder); background-color: var(--vscode-list-hoverBackground); }
+  .kanban-card-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+  .kanban-card-id { font-weight: 600; }
+  .kanban-card-role { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
+  .kanban-card-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .kanban-card-deps { font-size: 0.85em; }
+  .kanban-card-ops { display: flex; gap: 4px; flex-wrap: wrap; }
+  /* 作業内容要約は3行までクランプし、クリックで全文へ展開する（taskRunKanbanView.tsの.summary.clampと同じ） */
+  .kanban-card .summary.clamp {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .kanban-card .summary.clamp.expanded {
+    display: block;
+    -webkit-line-clamp: unset;
+  }
+
   #taskTable .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #taskTable .task-summary-cell { min-width: 220px; }
   #taskTable .verification-cell { white-space: nowrap; }
@@ -399,6 +461,28 @@ ${completionEvidenceStyles()}
   /* コンテキスト残量・累計トークン数（Issue #1272）。列が伸びすぎないよう折り返さない */
   #taskTable .context-cell { white-space: nowrap; color: var(--vscode-descriptionForeground); }
   #taskTable .hint, #integrationInfo .hint { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+  /* 作業内容要約は2行までにして、あふれた分はクリックで展開する（既存のプロンプト展開行を使う） */
+  #taskTable .summary-cell.clamp2 {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  /* 全行が同じ値の列・下書きで意味の無い列を隠す（Issue #1546）。共通値は#taskTableCommonへ */
+  #taskTableCommon { margin-bottom: 4px; }
+  #taskTable.hide-col-role th.col-role, #taskTable.hide-col-role td.col-role,
+  #taskTable.hide-col-verification th.col-verification, #taskTable.hide-col-verification td.col-verification,
+  #taskTable.hide-col-evidence th.col-evidence, #taskTable.hide-col-evidence td.col-evidence,
+  #taskTable.hide-col-issue th.col-issue, #taskTable.hide-col-issue td.col-issue,
+  #taskTable.hide-col-cleanup th.col-cleanup, #taskTable.hide-col-cleanup td.col-cleanup,
+  #taskTable.hide-col-provider th.col-provider, #taskTable.hide-col-provider td.col-provider,
+  #taskTable.hide-col-model th.col-model, #taskTable.hide-col-model td.col-model,
+  #taskTable.hide-col-context th.col-context, #taskTable.hide-col-context td.col-context,
+  #taskTable.hide-col-elapsed th.col-elapsed, #taskTable.hide-col-elapsed td.col-elapsed,
+  #taskTable.hide-col-submissions th.col-submissions, #taskTable.hide-col-submissions td.col-submissions {
+    display: none;
+  }
 
   /* 狭幅では横長表をカードへ切り替える。主要情報と操作を最初の画面内で読めるようにする。 */
   @media (max-width: 680px) {
@@ -491,8 +575,11 @@ ${completionEvidenceStyles()}
     overflow: auto;
   }
 
-  /* ---- 警告欄 ---- */
-  #warnings { display: flex; flex-direction: column; gap: 4px; }
+  /* ---- 警告欄（Issue #1546で件数まとめ＋畳みに変更） ---- */
+  #warningsDetails summary { cursor: pointer; font-weight: 600; font-size: 0.95em; margin: 16px 0 6px; color: var(--vscode-descriptionForeground); }
+  #warnings { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .warning-tasks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .warning-task-btn { padding: 1px 8px; font-size: 0.85em; }
   .warning-item {
     padding: 4px 8px;
     border-left: 3px solid var(--vscode-charts-yellow);
@@ -579,6 +666,8 @@ ${completionEvidenceStyles()}
     color: var(--vscode-descriptionForeground);
     margin-bottom: 2px;
   }
+  /* 完了済みフェーズは畳んで出す（Issue #1546）。summaryとして使うときだけ押せる見た目にする */
+  summary.roadmap-phase-name { cursor: pointer; }
   .roadmap-item {
     display: flex;
     align-items: baseline;
@@ -602,7 +691,7 @@ ${completionEvidenceStyles()}
   .roadmap-badge.state-open { color: var(--vscode-charts-green); }
   .roadmap-badge.state-closed { color: var(--vscode-descriptionForeground); }
   .roadmap-badge.state-unlinked { color: var(--vscode-charts-yellow); }
-  .roadmap-badge.state-notFound { color: var(--vscode-charts-red); }
+  .roadmap-badge.state-notFound { color: var(--vscode-descriptionForeground); }
   .roadmap-badge.state-unknown { color: var(--vscode-descriptionForeground); }
 
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }

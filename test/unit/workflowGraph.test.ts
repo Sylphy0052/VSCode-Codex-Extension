@@ -112,13 +112,32 @@ describe('layoutGraph（design.md §16.8「依存グラフ」の段レイアウ�
     const layout = layoutGraph(DIAMOND);
     expect(layout.edges).toEqual(
       expect.arrayContaining([
-        { from: 'T1', to: 'T2' },
-        { from: 'T1', to: 'T3' },
-        { from: 'T2', to: 'T4' },
-        { from: 'T3', to: 'T4' },
+        { from: 'T1', to: 'T2', transitive: false },
+        { from: 'T1', to: 'T3', transitive: false },
+        { from: 'T2', to: 'T4', transitive: false },
+        { from: 'T3', to: 'T4', transitive: false },
       ]),
     );
     expect(layout.edges).toHaveLength(4);
+  });
+
+  it('別の依存を経由した多段の経路でも到達できる辺はtransitive: trueになる（Issue #1546）', () => {
+    // T3はT2にもT1にも直接依存しているが、T1 → T2 → T3という経路でもT1からT3へ到達できるため、
+    // T1 → T3 の直接の辺は「省いても依存関係の情報が落ちない」推移辺になる
+    const REDUNDANT: GraphTaskInput[] = [
+      { id: 'T1', dependsOn: [] },
+      { id: 'T2', dependsOn: ['T1'] },
+      { id: 'T3', dependsOn: ['T1', 'T2'] },
+    ];
+    const layout = layoutGraph(REDUNDANT);
+    expect(layout.edges).toEqual(
+      expect.arrayContaining([
+        { from: 'T1', to: 'T2', transitive: false },
+        { from: 'T1', to: 'T3', transitive: true },
+        { from: 'T2', to: 'T3', transitive: false },
+      ]),
+    );
+    expect(layout.edges).toHaveLength(3);
   });
 
   it('タスクが0件なら段もノードも空', () => {
