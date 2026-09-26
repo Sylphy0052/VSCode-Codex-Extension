@@ -29,7 +29,7 @@ export interface TaskRunKanbanViewDeps {
 
 /**
  * オーケストレータモード（Issue #1505）のKanban。タスクを工程別の列に並べ、計画の承認、
- * 並列上限、run全体の一時停止と再開、工程の停止・やり直し、質問への回答を受け付ける。
+ * 並列上限、run全体の一時停止と再開、工程の停止・やり直し、質問への回答、関門の決着を受け付ける。
  *
  * 盤面の組み立ては`taskRunKanbanModel.ts`、操作の判断は`TaskRunController`が持つ。
  * webviewは信頼境界の外側として扱い、届いた値は形を確かめてから使う。
@@ -191,6 +191,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'answerQuestion':
         await this.answerQuestion(runId, taskId, message.questionId, message.answer);
         return;
+      case 'resolveGate':
+        await this.resolveGate(runId, taskId, message.gateId, message.choice);
+        return;
       case 'revealStage':
         if (!this.deps.revealStage(runId, taskId)) {
           void vscode.window.showInformationMessage(
@@ -226,6 +229,17 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       return;
     }
     const result = await this.deps.controller.answerQuestion(runId, taskId, questionId, answer);
+    if (!result.ok) {
+      void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
+    }
+  }
+
+  /** レビューの関門の決着（差し戻す・このまま進める）。失敗の関門は「やり直す」で決着させる。 */
+  private async resolveGate(runId: string, taskId: string, gateId: unknown, choice: unknown): Promise<void> {
+    if (typeof gateId !== 'string' || (choice !== 'sendBack' && choice !== 'proceed')) {
+      return;
+    }
+    const result = await this.deps.controller.resolveGate(runId, taskId, gateId, choice);
     if (!result.ok) {
       void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
     }
@@ -319,6 +333,8 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .question { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
 .question-text { font-weight: 650; white-space: pre-wrap; overflow-wrap: anywhere; }
 .question-note { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gate { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
+.gate-detail { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow-y: auto; }
 .question textarea { width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
 `;
 
@@ -459,6 +475,24 @@ const script = `
     return box;
   }
 
+  function renderGate(card, gate) {
+    const box = el('div', 'gate');
+    const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : '「' + gate.stageLabel + '」の失敗の関門';
+    box.appendChild(el('div', 'question-text', title + (gate.judging ? '（Reflexが判定中）' : '（判断待ち）')));
+    box.appendChild(el('div', 'gate-detail', gate.detail));
+    if (gate.reflexSummary) { box.appendChild(el('div', 'question-note', 'Reflex: ' + gate.reflexSummary)); }
+    if (gate.choices.length > 0) {
+      const actions = el('div', 'actions');
+      gate.choices.forEach(function (c) {
+        actions.appendChild(button(c.label, '', function () {
+          send('resolveGate', { taskId: card.taskId, gateId: gate.gateId, choice: c.choice });
+        }));
+      });
+      box.appendChild(actions);
+    }
+    return box;
+  }
+
   function renderCard(card) {
     const warn = card.badges.some(function (b) { return b.tone === 'warn'; });
     const running = card.badges.some(function (b) { return b.tone === 'ok'; });
@@ -473,6 +507,7 @@ const script = `
     const meta = el('div', 'meta');
     if (card.issueNumber !== undefined && card.issueNumber !== null) { meta.appendChild(el('span', undefined, 'Issue #' + card.issueNumber)); }
     if (card.attempts > 1) { meta.appendChild(el('span', undefined, card.attempts + '回目')); }
+    if (card.reviewRounds) { meta.appendChild(el('span', undefined, '差し戻し ' + card.reviewRounds)); }
     if (card.dependsOn.length > 0) {
       const deps = el('span', undefined, '依存: ');
       card.dependsOn.forEach(function (d, i) {
@@ -495,6 +530,8 @@ const script = `
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopStage', { taskId: card.taskId }); })); }
     if (card.canRetry) { actions.appendChild(button('やり直す', 'primary', function () { send('retryStage', { taskId: card.taskId }); })); }
     if (actions.childNodes.length > 0) { c.appendChild(actions); }
+    if (card.gate) { c.appendChild(renderGate(card, card.gate)); }
+    if (card.lastGateDecision) { c.appendChild(el('div', 'summary', card.lastGateDecision)); }
     card.questions.forEach(function (q) { c.appendChild(renderQuestion(card, q)); });
     return c;
   }

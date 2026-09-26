@@ -7,6 +7,13 @@ import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
 import { parsePlanArgs, resolveTaskPlan, type PlanTaskInput } from './taskRunPlan';
 import { findStageQuestion } from './taskRunQuestions';
+import {
+  findOpenGate,
+  findStageGate,
+  GATE_CHOICE_LABELS,
+  isGateChoiceAllowed,
+  resolveStageGate,
+} from './taskRunGates';
 import { reconcileTaskRunOnReload, type TaskExternalFacts } from './taskRunReload';
 import { decideStageStart, type StageRef, type StartStageRejection } from './taskRunScheduler';
 import {
@@ -24,6 +31,7 @@ import {
   setTaskRunHaltedByUser,
   setTaskRunMaxParallel,
   type StageDecision,
+  type StageGateChoice,
   type TaskRun,
   type TaskRunEngine,
 } from './taskRunState';
@@ -93,6 +101,8 @@ const REJECTION_MESSAGES: Record<StartStageRejection, string> = {
   notCurrentStage: 'その工程はこのタスクの現在の工程ではない（get_run_stateで現在の工程を確かめる）',
   alreadyRunning: 'その工程は既に実行中',
   halted: 'このタスクは停止処理中、またはユーザーの対応を待っている',
+  gatePending:
+    'このタスクには、Reflexが判定中またはユーザーの判断待ちの関門がある（ユーザーの判断はresolve_gateで渡す）',
   dependenciesUnmet: '依存先のタスクが終わっていない',
 };
 
@@ -348,7 +358,8 @@ export class TaskRunController {
 
   /**
    * 止まった工程をやり直せる状態へ戻す（Kanbanから）。工程は未着手に戻り、Orchestratorが
-   * 設定を決め直すのを待つ（判断待ちのイベントがOrchestratorへ届く）。
+   * 設定を決め直すのを待つ（判断待ちのイベントがOrchestratorへ届く）。失敗の関門が開いていれば、
+   * ユーザーの「やり直す」判断として決着させる（Reflexの判定より優先する）。
    */
   async retryStage(runId: string, taskId: string): Promise<ControllerResult> {
     let rejection: string | undefined;
@@ -367,7 +378,19 @@ export class TaskRunController {
         rejection = '停止処理中';
         return r;
       }
-      return resetStageForRetry(r, taskId, this.now());
+      const gate = findOpenGate(task);
+      if (gate === undefined) {
+        return resetStageForRetry(r, taskId, this.now());
+      }
+      if (gate.kind === 'reviewFindings') {
+        rejection = 'レビューの関門を先に決着させる（差し戻す、または指摘を残したまま進める）';
+        return r;
+      }
+      const resolved = resolveStageGate(r, taskId, gate.gateId, { choice: 'retry', by: 'user' }, this.now());
+      if (resolved === r) {
+        rejection = '関門を決着させられなかった';
+      }
+      return resolved;
     });
     if (next === undefined) {
       return { ok: false, message: 'runが見つからない' };
@@ -564,6 +587,62 @@ export class TaskRunController {
     return ok
       ? { ok: true, message: `${taskId}の質問に回答した` }
       : { ok: false, message: '回答を受け付けられなかった（既に回答済み、または取り消された可能性がある）' };
+  }
+
+  /** 決着待ちの関門か。決着の確認（モーダル）の前に確かめる。 */
+  findOpenGateForUser(
+    runId: string,
+    taskId: string,
+    gateId: string,
+  ): { title: string; detail: string } | undefined {
+    const run = this.deps.store.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
+    if (task === undefined || gate === undefined || gate.status === 'resolved') {
+      return undefined;
+    }
+    return { title: task.title, detail: gate.detail };
+  }
+
+  /**
+   * 関門をユーザーの判断で決着させる（KanbanとOrchestratorの`resolve_gate`から）。Reflexが
+   * 判定中でもユーザーの判断を優先する。決着後はスケジューラを回す。
+   */
+  async resolveGate(
+    runId: string,
+    taskId: string,
+    gateId: string,
+    choice: StageGateChoice,
+  ): Promise<ControllerResult> {
+    let rejection: string | undefined;
+    const next = await this.updateRun(runId, (r) => {
+      const gate = findStageGate(r, taskId, gateId);
+      if (r.finishedAt !== undefined) {
+        rejection = 'このrunは終わっている';
+        return r;
+      }
+      if (gate === undefined || gate.status === 'resolved') {
+        rejection = '決着待ちの関門ではない（既に決着済み、または存在しない）';
+        return r;
+      }
+      if (!isGateChoiceAllowed(gate.kind, choice)) {
+        rejection = `この関門では「${GATE_CHOICE_LABELS[choice]}」を選べない`;
+        return r;
+      }
+      const resolved = resolveStageGate(r, taskId, gateId, { choice, by: 'user' }, this.now());
+      if (resolved === r) {
+        rejection = 'タスクの状態が関門を開いたときから変わっている';
+      }
+      return resolved;
+    });
+    if (next === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    if (rejection !== undefined) {
+      return { ok: false, message: `${taskId}の関門を決着させられない: ${rejection}` };
+    }
+    this.pumpLater(runId);
+    return { ok: true, message: `${taskId}の関門を「${GATE_CHOICE_LABELS[choice]}」で決着させた` };
   }
 
   /** runを忘れる（runの削除・拡張機能の終了時）。 */

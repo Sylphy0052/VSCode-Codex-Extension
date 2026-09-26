@@ -139,8 +139,39 @@ export interface OrchestratedTask {
    * 追加前に保存したrunには無い。操作は`taskRunQuestions.ts`。
    */
   questions?: readonly StageQuestion[];
+  /**
+   * 工程の失敗とレビュー後の残った指摘で開いた判断の関門（開いた順）。追加前に保存したrunには
+   * 無い。操作は`taskRunGates.ts`。
+   */
+  gates?: readonly StageGate[];
+  /** レビュー後に実装へ差し戻した回数。追加前に保存したrunには無い（0回として扱う）。 */
+  reviewRounds?: number;
   /** ISO8601。 */
   updatedAt: string;
+}
+
+/** 関門の種類: レビューで直さずに残した指摘がある / 工程が失敗・要対応で止まった。 */
+export type StageGateKind = 'reviewFindings' | 'stageFailed';
+
+/** 関門の決着: 実装へ差し戻す / 指摘を残したまま進める / 同じ工程をやり直す。 */
+export type StageGateChoice = 'sendBack' | 'proceed' | 'retry';
+
+/** 関門の状態。`judging`はReflexの判定中、`awaitingUser`はユーザーの判断待ち。 */
+export type StageGateStatus = 'judging' | 'awaitingUser' | 'resolved';
+
+export interface StageGate {
+  gateId: string;
+  kind: StageGateKind;
+  /** 関門を開いた工程（`reviewFindings`なら`review`、`stageFailed`なら止まった工程）。 */
+  stage: TaskStage;
+  status: StageGateStatus;
+  /** 残った指摘の一覧、または止まった理由。外部由来のテキストを含む。 */
+  detail: string;
+  /** Reflexの判定の要約（人へ回した理由を含む）。 */
+  reflexSummary: string | undefined;
+  resolution: { choice: StageGateChoice; by: 'reflex' | 'user'; at: string } | undefined;
+  /** ISO8601。 */
+  openedAt: string;
 }
 
 /**

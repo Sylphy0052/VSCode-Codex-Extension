@@ -1,3 +1,4 @@
+import { escalateJudgingGatesOnReload } from './taskRunGates';
 import { cancelOpenQuestions } from './taskRunQuestions';
 import {
   completeMergedTask,
@@ -43,6 +44,7 @@ type HaltAttention = Extract<TaskAttention, 'needsAction' | 'failed'>;
  * - 人が止めていたタスク: そのまま残す
  * - PRがmergeされずに閉じられた、記録したworktreeが無い、既存のIssueが閉じられた: 工程を止めて理由を残す
  * - 実行中だった工程: 再読み込みで止まった理由を残して止める
+ * - Reflexが判定中だった関門: ユーザーの判断待ちにする（判定し直さない）
  */
 export function reconcileTaskRunOnReload(
   run: TaskRun,
@@ -84,7 +86,7 @@ export function reconcileTaskRunOnReload(
       next = haltStage(next, task.taskId, 'stopped', RELOAD_HALT_REASON, now);
     }
   }
-  return finishTaskRunIfDone(next, now);
+  return finishTaskRunIfDone(escalateJudgingGatesOnReload(next, now), now);
 }
 
 /** merge済みでない前提で、外部の状態が工程を続けられないものか。 */
