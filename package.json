@@ -1666,6 +1666,12 @@
           "scope": "machine-overridable",
           "markdownDescription": "オーケストレータモード（Issue #1562）で、同じフォルダの全runを合わせて同時に動かす工程セッションの上限。runごとの並列上限とは別に掛かり、どちらかに達すると新しい工程を始めずに待たせる。上限を下げても実行中の工程セッションは止めない。範囲外（1未満・64超・非数値）の値は既定値（8）にフォールバックする。"
         },
+        "agent.taskRun.planAutoApprove.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード（Issue #1505）でOrchestratorが提案した計画を、Reflexが妥当と判定したとき自動で承認する（Issue #1554）。ロードマップ実行（Issue #1465）の計画審査と同じ判定器・閾値を使い、計画そのものの整合だけを見る。判定を得られない（時間切れ・不正な応答）ときや「妥当」と言い切らないときは、これまでどおりユーザーの承認待ちにする。無効にすると判定を試みず、常に承認待ちにする。"
+        },
         "agent.roadmapRun.merge.versionBumpCommand": {
           "type": "string",
           "default": "",
