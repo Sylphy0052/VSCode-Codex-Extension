@@ -872,7 +872,7 @@ export class TaskStageRunner {
     }
     // 工程が終わった・止まったら、答えを届ける先が無いため未回答の質問を取り消す
     void this.mutate(entry.runId, (r) =>
-      cancelOpenQuestions(r, entry.ref.taskId, this.now()),
+      cancelOpenQuestions(r, entry.ref.taskId, entry.ref.attemptId, this.now()),
     ).catch((e: unknown) => {
       this.warn(
         entry.runId,

@@ -148,18 +148,30 @@ export function answerStageQuestion(
   });
 }
 
-/** 未回答の質問をすべて取り消す（工程が終わった・止まったとき）。 */
-export function cancelOpenQuestions(run: TaskRun, taskId: string, now: Date): TaskRun {
+/**
+ * 未回答の質問を取り消す（工程セッションが終わった・止まったとき）。`releasedAttemptId`は
+ * 終わったセッションの実行回。取り消しは非同期に遅れて走るため、その間に別のセッションが
+ * 始めた実行回（タスクの現在の実行回が`releasedAttemptId`と異なる）の質問は残す。
+ */
+export function cancelOpenQuestions(
+  run: TaskRun,
+  taskId: string,
+  releasedAttemptId: string,
+  now: Date,
+): TaskRun {
   const task = getTask(run, taskId);
   const questions = task?.questions;
-  if (task === undefined || questions === undefined || !questions.some(isOpen)) {
+  const current = task?.currentAttemptId;
+  const keep = current !== undefined && current !== releasedAttemptId ? current : undefined;
+  const cancellable = (q: StageQuestion): boolean => isOpen(q) && q.attemptId !== keep;
+  if (task === undefined || questions === undefined || !questions.some(cancellable)) {
     return run;
   }
   const at = now.toISOString();
   return withQuestions(
     run,
     task,
-    questions.map((q) => (isOpen(q) ? { ...q, status: 'cancelled' } : q)),
+    questions.map((q) => (cancellable(q) ? { ...q, status: 'cancelled' } : q)),
     at,
   );
 }
