@@ -25,6 +25,8 @@ export interface TaskRunKanbanViewDeps {
   orchestrator: TaskRunKanbanOrchestratorPort;
   /** 工程セッションのタブを前面へ出す。開いていなければ`false`。 */
   revealStage(runId: string, taskId: string): boolean;
+  /** runを終える。工程セッションとOrchestratorを止めてから`finishedAt`を立てる（Issue #1558）。 */
+  finishRun(runId: string): Promise<{ ok: boolean; message: string }>;
   log: Logger;
 }
 
@@ -177,6 +179,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'openOrchestrator':
         await this.openOrchestrator(runId, message.renew === true);
         return;
+      case 'finishRun':
+        await this.finishRun(runId);
+        return;
     }
     const taskId = message.taskId;
     if (typeof taskId !== 'string' || !isValidTaskId(taskId)) {
@@ -263,6 +268,23 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
         'オーケストレータモード: Orchestratorを開けませんでした。詳細は出力パネルを確認してください',
       );
     }
+    this.schedulePost();
+  }
+
+  private async finishRun(runId: string): Promise<void> {
+    const choice = await vscode.window.showWarningMessage(
+      'このrunを終えますか？',
+      {
+        modal: true,
+        detail:
+          '動いている工程セッションとOrchestratorを止めます。終えたrunは再開できません。終えた後は、同じフォルダで新しいrunを始められます。',
+      },
+      'runを終える',
+    );
+    if (choice !== 'runを終える') {
+      return;
+    }
+    warnIfRejected(await this.deps.finishRun(runId));
     this.schedulePost();
   }
 
@@ -477,6 +499,7 @@ const script = `
     controls.appendChild(button(run.haltedByUser ? '再開' : '全体を一時停止', run.haltedByUser ? 'primary' : '', function () {
       send('setHalted', { halted: !run.haltedByUser });
     }));
+    controls.appendChild(button('runを終える', '', function () { send('finishRun'); }));
   }
 
   function renderPlan(board) {

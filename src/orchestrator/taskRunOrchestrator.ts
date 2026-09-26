@@ -187,6 +187,18 @@ export class TaskRunOrchestrator {
     }
   }
 
+  /** runを終えたときにOrchestratorのセッションを閉じる（Issue #1558）。開いていなければ何もしない。 */
+  close(runId: string): void {
+    const live = this.live.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    this.live.delete(runId);
+    this.deps.server.unregister(live.token);
+    live.session.dispose();
+    this.deps.onDidChange();
+  }
+
   dispose(): void {
     this.disposed = true;
     for (const live of this.live.values()) {

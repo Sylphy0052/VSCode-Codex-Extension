@@ -20,6 +20,7 @@ import {
   approveTaskPlan,
   createTaskRun,
   currentStage,
+  finishTaskRun,
   getTask,
   isTaskDone,
   isValidMaxParallel,
@@ -354,6 +355,34 @@ export class TaskRunController {
     if (next !== undefined && !halted) {
       this.pumpLater(runId);
     }
+  }
+
+  /** 同じフォルダの終わっていないrun（`startRun`が再利用するもの）。 */
+  findActive(workspaceRoot: string): TaskRun | undefined {
+    return this.deps.store.findActive(workspaceRoot);
+  }
+
+  /**
+   * 人がrunを終える（Issue #1558）。先に一時停止して新しい工程を始めないようにし、動いている
+   * 工程セッションを止めてから`finishedAt`を立てる。Orchestratorのセッションは呼び出し側が閉じる。
+   */
+  async finishRun(runId: string): Promise<ControllerResult> {
+    const halted = await this.updateRun(runId, (r) =>
+      r.finishedAt === undefined ? setTaskRunHaltedByUser(r, true) : r,
+    );
+    if (halted === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    if (halted.finishedAt !== undefined) {
+      return { ok: true, message: 'runは終わっている' };
+    }
+    const running = listTasks(halted).filter((task) => {
+      const stage = currentStage(task);
+      return stage !== undefined && task.stages[stage].status === 'running';
+    });
+    await Promise.all(running.map((task) => this.deps.runner.stopStage(runId, task.taskId)));
+    await this.updateRun(runId, (r) => finishTaskRun(r, this.now()));
+    return { ok: true, message: 'runを終えた' };
   }
 
   /**
