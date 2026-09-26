@@ -19,7 +19,7 @@ export interface CarriedOverWork {
   readonly retry: number | undefined;
   /** 統合ブランチとの分岐点。変更の実測と、以後の交差判定・検証の基準に使う */
   readonly originCommit: string;
-  /** `git status --porcelain`の行数 */
+  /** `git status --porcelain -z`の件数（`countPorcelainEntries`） */
   readonly uncommittedCount: number;
   /** 統合ブランチから進んだコミット数 */
   readonly commitCount: number;
@@ -56,11 +56,11 @@ export async function inspectInterruptedWorktree(
     return { kind: 'failed', message: `前回の作業場所が見つかりません: ${cwd}` };
   }
   const options = { env: ENV_WITHOUT_REPO_OVERRIDES };
-  const status = await git.run(['status', '--porcelain'], cwd, options);
+  const status = await git.run(['status', '--porcelain', '-z'], cwd, options);
   if (status.code !== 0) {
     return { kind: 'failed', message: gitFailure('git status', status) };
   }
-  const uncommittedCount = status.stdout.split('\n').filter((line) => line.trim() !== '').length;
+  const uncommittedCount = countPorcelainEntries(status.stdout);
   const revList = await git.run(
     ['rev-list', '--count', `${target.integrationBranch}..HEAD`],
     cwd,
@@ -72,6 +72,20 @@ export async function inspectInterruptedWorktree(
   }
   if (uncommittedCount === 0 && commitCount === 0) {
     return { kind: 'nothingLeft' };
+  }
+  // 永続化したブランチ名は中断時点の記録にすぎない。worktree側で別のブランチへ切り替えられて
+  // いたら、そのまま引き継ぐと別ブランチの作業をこのタスクの成果として統合してしまう
+  // （Issue #1521）。detached HEADでは`HEAD`が返り、記録と一致しないので同じく失敗にする
+  const head = await git.run(['rev-parse', '--abbrev-ref', 'HEAD'], cwd, options);
+  if (head.code !== 0) {
+    return { kind: 'failed', message: gitFailure('git rev-parse', head) };
+  }
+  const actualBranch = head.stdout.trim();
+  if (actualBranch !== target.branch) {
+    return {
+      kind: 'failed',
+      message: `前回の作業場所のブランチが記録と異なります（記録: ${sanitizeInlineText(target.branch, 200)}、実際: ${sanitizeInlineText(actualBranch, 200)}）`,
+    };
   }
   const mergeBase = await git.run(['merge-base', 'HEAD', target.integrationBranch], cwd, options);
   const originCommit = mergeBase.stdout.trim();
@@ -96,6 +110,28 @@ export async function inspectInterruptedWorktree(
       deletedLines: changes.deletedLines,
     },
   };
+}
+
+/**
+ * `git status --porcelain -z`の出力から変更の件数を数える（Issue #1521）。改行を含む
+ * ファイル名でも1件に数えるためNUL区切りで読む。リネーム・コピー（`R`/`C`）は
+ * 「新しいパス」「元のパス」の2要素で1件なので、次の要素を読み飛ばす。
+ */
+export function countPorcelainEntries(stdout: string): number {
+  const fields = stdout.split('\0');
+  let count = 0;
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i] ?? '';
+    if (entry === '') {
+      continue;
+    }
+    count++;
+    const xy = entry.slice(0, 2);
+    if (xy.includes('R') || xy.includes('C')) {
+      i++;
+    }
+  }
+  return count;
 }
 
 function gitFailure(label: string, result: { code: number; stderr: string }): string {
