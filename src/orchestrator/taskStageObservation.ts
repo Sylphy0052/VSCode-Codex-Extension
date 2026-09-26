@@ -14,9 +14,13 @@ import type { OrchestratedTask, StageOutput } from './taskRunState';
 
 export type PullRequestState = 'open' | 'merged' | 'closed' | 'unknown';
 
+/** Issueの状態。Issueが存在しない場合と問い合わせに失敗した場合は、どちらも`unknown`になる。 */
+export type IssueState = 'open' | 'closed' | 'unknown';
+
 /** 観測に使う外部の口。`undefined`は「確かめられなかった」を表す。 */
 export interface StageObservationPorts {
   fetchIssueTitle(repoRoot: string, issueNumber: number): Promise<string | undefined>;
+  fetchIssueState(repoRoot: string, issueNumber: number): Promise<IssueState>;
   findPullRequest(
     repoRoot: string,
     branch: string,
@@ -123,44 +127,63 @@ export async function observeStageCompletion(
   }
 }
 
-/** `gh issue view --json title`と`glab api projects/:id/issues/<n>`の出力は、どちらも`title`を持つ。 */
-function parseIssueTitle(stdout: string): string | undefined {
+/**
+ * `gh issue view --json title,state`と`glab api projects/:id/issues/<n>`の出力を読む。
+ * どちらも`title`と`state`を持つ（ghは`OPEN`／`CLOSED`、glabは`opened`／`closed`）。
+ */
+function parseIssueView(stdout: string): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(stdout);
-    if (typeof parsed !== 'object' || parsed === null) {
-      return undefined;
-    }
-    const title = (parsed as Record<string, unknown>).title;
-    return typeof title === 'string' ? title : undefined;
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
   } catch {
     return undefined;
   }
+}
+
+function toIssueState(value: unknown): IssueState {
+  if (typeof value !== 'string') {
+    return 'unknown';
+  }
+  const state = value.toLowerCase();
+  if (state === 'open' || state === 'opened') {
+    return 'open';
+  }
+  return state === 'closed' ? 'closed' : 'unknown';
+}
+
+/** forgeからIssueを1件取る。取れなければ`undefined`。 */
+async function viewIssue(
+  ports: RoadmapRunForgePorts,
+  repoRoot: string,
+  issueNumber: number,
+): Promise<Record<string, unknown> | undefined> {
+  if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+    return undefined;
+  }
+  const host = await detectRoadmapForgeHost(ports, repoRoot);
+  if (host === undefined) {
+    return undefined;
+  }
+  const result =
+    host === 'github'
+      ? await ports.cli.run(
+          'gh',
+          ['issue', 'view', String(issueNumber), '--json', 'title,state'],
+          repoRoot,
+        )
+      : await ports.cli.run('glab', ['api', `projects/:id/issues/${String(issueNumber)}`], repoRoot);
+  return result.code === 0 ? parseIssueView(result.stdout) : undefined;
 }
 
 /** `git`と`gh`／`glab`で観測の口を作る。 */
 export function createStageObservationPorts(ports: RoadmapRunForgePorts): StageObservationPorts {
   return {
     async fetchIssueTitle(repoRoot, issueNumber) {
-      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
-        return undefined;
-      }
-      const host = await detectRoadmapForgeHost(ports, repoRoot);
-      if (host === undefined) {
-        return undefined;
-      }
-      const result =
-        host === 'github'
-          ? await ports.cli.run(
-              'gh',
-              ['issue', 'view', String(issueNumber), '--json', 'title'],
-              repoRoot,
-            )
-          : await ports.cli.run(
-              'glab',
-              ['api', `projects/:id/issues/${String(issueNumber)}`],
-              repoRoot,
-            );
-      return result.code === 0 ? parseIssueTitle(result.stdout) : undefined;
+      const title = (await viewIssue(ports, repoRoot, issueNumber))?.title;
+      return typeof title === 'string' ? title : undefined;
+    },
+    async fetchIssueState(repoRoot, issueNumber) {
+      return toIssueState((await viewIssue(ports, repoRoot, issueNumber))?.state);
     },
     findPullRequest: (repoRoot, branch) => findRoadmapPullRequest(ports, repoRoot, branch),
     async fetchPullRequestState(repoRoot, pullRequestNumber) {
