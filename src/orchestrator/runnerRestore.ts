@@ -575,12 +575,26 @@ async function autoResumeIfEligible(
 
   // 中断した試行のworktreeを実測し、作業が残っていれば同じ試行番号のまま使い直す
   // （Issue #1514）。`applyAutoResume`は純粋関数なので、引き継ぐタスクを渡して引き直す
-  const carried = await inspectCarriedOverWork(self, p, rebuilt);
-  const resumed =
-    carried.size === 0
-      ? outcome
-      : applyAutoResume(rebuilt.runState, rebuilt.def.tasks, new Set(carried.keys()));
+  // 実測の`await`の間に人が手動で再実行（`retryTask`）したタスクは、もう`reloadInterrupted`
+  // ではない。`outcome`は実測前の状態から作った値なので、使うとその再実行を巻き戻してしまう。
+  // 実測の後の状態から必ず引き直し、実際に戻すタスクの分だけ引き継ぎを残す
+  const inspected = await inspectCarriedOverWork(self, p, rebuilt);
+  const resumed = applyAutoResume(rebuilt.runState, rebuilt.def.tasks, new Set(inspected.keys()));
+  const resumedTaskIds = new Set(resumed.kind === 'resumed' ? resumed.resumedTaskIds : []);
+  const carried = new Map([...inspected].filter(([taskId]) => resumedTaskIds.has(taskId)));
+  if (carried.size !== inspected.size) {
+    rebuilt.warnings = rebuilt.warnings.filter(
+      (w) =>
+        !(
+          w.kind === 'resumedWithUncommittedWork' &&
+          w.taskId !== undefined &&
+          inspected.has(w.taskId) &&
+          !carried.has(w.taskId)
+        ),
+    );
+  }
   if (resumed.kind !== 'resumed') {
+    self.notify(p.runId);
     return;
   }
   rebuilt.carriedOverWork = carried;
@@ -590,7 +604,7 @@ async function autoResumeIfEligible(
   rebuilt.warnings.push({
     kind: 'autoResume',
     taskId: undefined,
-    message: `中断からの自動再開により、次のタスクをpendingへ戻しました: ${outcome.resumedTaskIds.join(', ')}`,
+    message: `中断からの自動再開により、次のタスクをpendingへ戻しました: ${resumed.resumedTaskIds.join(', ')}`,
   });
   // `current`が無い（このrunがどこかで消えた等）ことは通常起きないが、`update`の
   // updaterはPersistedRunを必ず返す必要があるため、その場合は`p`（このrunがまだ

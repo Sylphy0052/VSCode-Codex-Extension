@@ -11494,13 +11494,13 @@ tasks:
       };
     }
 
-    async function startAndInterrupt(): Promise<{
+    async function startAndInterrupt(yaml: string = YAML): Promise<{
       store: WorkflowRunStore;
       runId: string;
       cwd: string;
       branch: string;
     }> {
-      const { runner, store } = createHarness(YAML);
+      const { runner, store } = createHarness(yaml);
       const result = await runner.start('/repo/.agents/workflows/carry-over.yaml', '/repo');
       const runId = result.runId as string;
       await flush();
@@ -11654,6 +11654,115 @@ tasks:
       await flush();
       expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
       expect(git.calls.some((c) => c.args[0] === 'rev-list')).toBe(false);
+    });
+
+    it('実測の途中で人が手動で再実行したら、その再実行を巻き戻さず、引き継ぎもしない', async () => {
+      const { store, runId, cwd } = await startAndInterrupt();
+      const leftover = leftoverGit({ status: ' M src/a.ts\n', numstat: '3\t1\tsrc/a.ts\0' });
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const git: FakeGitHandle = {
+        ...leftover,
+        async run(args, runCwd, runOptions) {
+          if (runCwd === cwd && args[0] === 'status') {
+            await gate;
+          }
+          return leftover.run(args, runCwd, runOptions);
+        },
+      };
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+      await flush();
+      release();
+      await vi.waitFor(() => expect(newCodexHost.sessions).toHaveLength(1));
+      await flush();
+
+      expect(newCodexHost.sessions).toHaveLength(1);
+      expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('running');
+      expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(1);
+      const kinds = reloadedRunner.getSnapshot(runId)?.warnings.map((w) => w.kind) ?? [];
+      expect(kinds).not.toContain('resumedWithUncommittedWork');
+    });
+
+    it('引き継いだタスクの起動に失敗したら、残った作業の場所を警告に残す', async () => {
+      const { store, runId, cwd, branch } = await startAndInterrupt();
+      const git = leftoverGit({ status: ' M src/a.ts\n', numstat: '3\t1\tsrc/a.ts\0' });
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      newCodexHost.rejectNext(new Error('app-serverに接続できません'));
+      await reloadedRunner.restoreRunsForView();
+      // 中断で既に`failed`（reloadInterrupted）なので、状態ではなく警告の出現を待つ
+      await vi.waitFor(() =>
+        expect(
+          reloadedRunner.getSnapshot(runId)?.warnings.map((w) => w.kind),
+        ).toContain('resumeInspectionFailed'),
+      );
+
+      expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
+      expect(store.find(runId)?.tasks['T1']?.failure?.kind).not.toBe('reloadInterrupted');
+      expect(newCodexHost.sessions).toHaveLength(0);
+      const warnings = reloadedRunner.getSnapshot(runId)?.warnings ?? [];
+      expect(warnings.map((w) => w.kind)).not.toContain('resumedWithUncommittedWork');
+      const warning = warnings.find((w) => w.kind === 'resumeInspectionFailed');
+      expect(warning?.taskId).toBe('T1');
+      expect(warning?.message).toContain('前回の作業を引き継いでタスクを開始できませんでした');
+      expect(warning?.message).toContain(cwd);
+      expect(warning?.message).toContain(branch);
+    });
+
+    it('複数のタスクを確かめ、引き継げたタスクだけ同じworktreeで再開し、確かめられなかったタスクは新しいworktreeで始める', async () => {
+      const TWO_TASKS_YAML = `
+version: 1
+name: carry-over-two
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+      const { store, runId, cwd } = await startAndInterrupt(TWO_TASKS_YAML);
+      const t2Cwd = store.find(runId)?.tasks['T2']?.cwd ?? '';
+      expect(t2Cwd.endsWith('/T2')).toBe(true);
+      const git = leftoverGit({ status: ' M src/a.ts\n', numstat: '3\t1\tsrc/a.ts\0' });
+      const fs: WorktreeFileSystemPort = {
+        ...identityFs,
+        pathExists: async (target) => target !== t2Cwd,
+      };
+      const { reloadedRunner, newCodexHost } = reloadWith(store, TWO_TASKS_YAML, {
+        readAutoResume: () => true,
+        git,
+        fs,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await vi.waitFor(() => expect(newCodexHost.sessions).toHaveLength(2));
+
+      const cwds = newCodexHost.openInputs.map((i) => i.cwd);
+      expect(cwds).toContain(cwd);
+      expect(cwds).not.toContain(t2Cwd);
+      expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(0);
+      expect(store.find(runId)?.tasks['T2']?.manualRetryCount).toBe(1);
+      const warnings = reloadedRunner.getSnapshot(runId)?.warnings ?? [];
+      expect(
+        warnings.find((w) => w.kind === 'resumedWithUncommittedWork')?.taskId,
+      ).toBe('T1');
+      expect(warnings.find((w) => w.kind === 'resumeInspectionFailed')?.taskId).toBe('T2');
+      // 自動再開の警告は、実際にpendingへ戻したタスクを並べる
+      expect(warnings.find((w) => w.kind === 'autoResume')?.message).toContain('T1, T2');
     });
   });
 });

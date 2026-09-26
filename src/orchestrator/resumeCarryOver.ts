@@ -121,6 +121,8 @@ export function describeCarriedOverWork(work: CarriedOverWork): string {
 /**
  * 引き継いだタスクの最初のプロンプトの先頭に添える文。ファイル名はエージェントが作った
  * 名前そのものなので、1行化して長さを切る（改行で偽の指示行を生やせないようにする）。
+ * 一覧に載せるのは先頭30件（`MAX_LISTED_FILES`）までで、残りは「ほかN件」と件数だけ書く
+ * （大量の変更でプロンプトが膨らまないようにする）。
  */
 export function formatCarryOverPromptNote(work: CarriedOverWork): string {
   const listed = work.files

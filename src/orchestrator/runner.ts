@@ -4520,6 +4520,9 @@ export class WorkflowRunner {
     }
 
     live.launchingTasks.add(taskId);
+    // 引き継ぐ作業の情報は`prepareTaskLaunch`の中で取り出した時点で消える（Issue #1514）。
+    // 起動に失敗したとき、残った作業の場所を警告で知らせるために先に控えておく
+    const carriedOver = live.carriedOverWork.get(taskId);
     try {
       const prepared = await this.prepareTaskLaunch(live, task, taskId, runId);
 
@@ -4562,6 +4565,18 @@ export class WorkflowRunner {
       // （レビュー指摘: warning。sanitizeForLogは冪等に近く、二重に通しても実害は無い）
       const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
       this.deps.log.error(`[workflow ${runId}/${taskId}] タスクを開始できませんでした: ${message}`);
+      if (carriedOver !== undefined) {
+        // 次の再試行は新しいworktreeで始まるため、前の試行の作業は自動では引き継がれない。
+        // 「同じ作業場所で続きから再開します」の警告を差し替え、残った作業の場所を示す
+        live.warnings = live.warnings.filter(
+          (w) => !(w.kind === 'resumedWithUncommittedWork' && w.taskId === taskId),
+        );
+        live.warnings.push({
+          kind: 'resumeInspectionFailed',
+          taskId,
+          message: `前回の作業を引き継いでタスクを開始できませんでした。再実行は新しい作業場所で最初から始まります。前回の作業は ${sanitizeInlineText(carriedOver.cwd, 500)} （ブランチ ${sanitizeInlineText(carriedOver.branch, 200)}）に残っています`,
+        });
+      }
       live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, 'failed');
       void this.persist(runId);
       this.notify(runId);
