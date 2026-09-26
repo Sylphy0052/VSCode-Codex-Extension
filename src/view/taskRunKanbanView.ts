@@ -340,7 +340,8 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .gate { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
 .gate-detail { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow-y: auto; }
 .question textarea { width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
-.task-id { font-family: var(--vscode-editor-font-family, var(--vscode-font-family)); font-size: 12px; margin-right: 6px; color: var(--vscode-descriptionForeground); }
+/* plainではタイトルと同じ見た目のまま、従来の空白1つ分だけ空ける */
+.task-id { margin-right: .3em; }
 /* 工程ごとの件数を幅へ比例させた進捗バー。セグメントは件数が1以上の工程だけ置く */
 .progress { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 12px; } .progress:empty { display: none; }
 .progress-bar { flex: 1 1 auto; display: flex; gap: 2px; height: 6px; min-width: 120px; }
@@ -377,7 +378,7 @@ body.skin-cyber .card:hover { border-color: color-mix(in srgb, var(--agent-neon-
 body.skin-cyber .card.running { border-left-color: var(--agent-neon-1); background-image: linear-gradient(to right, color-mix(in srgb, var(--agent-neon-1) 10%, transparent), transparent 45%); }
 body.skin-cyber .card.attention { border-left-color: var(--agent-neon-3); background-image: linear-gradient(to right, color-mix(in srgb, var(--agent-neon-3) 12%, transparent), transparent 45%); }
 body.skin-cyber .col-done .card { opacity: .72; } body.skin-cyber .col-done .card:hover { opacity: 1; }
-body.skin-cyber .task-id { color: var(--col, var(--agent-neon-1)); letter-spacing: var(--agent-head-tracking); }
+body.skin-cyber .task-id { font-family: var(--agent-head-font); font-size: 12px; font-weight: 600; margin-right: 6px; color: var(--col, var(--agent-neon-1)); letter-spacing: var(--agent-head-tracking); }
 body.skin-cyber .card.running .card-title::before, body.skin-cyber .card.attention .card-title::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--agent-neon-1); box-shadow: 0 0 6px var(--agent-neon-glow); animation: agent-task-pulse 1.6s ease-in-out infinite; }
 body.skin-cyber .card.attention .card-title::before { background: var(--agent-neon-3); box-shadow: 0 0 6px var(--agent-neon-3); animation: none; }
 body.skin-cyber .badge { font-family: var(--agent-head-font); letter-spacing: .02em; } body.skin-cyber .badge.ok { border-color: var(--agent-neon-1); color: var(--agent-neon-1); } body.skin-cyber .badge.warn { border-color: var(--agent-neon-3); color: var(--agent-neon-3); }
