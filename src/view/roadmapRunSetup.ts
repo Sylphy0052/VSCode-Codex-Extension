@@ -174,7 +174,8 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
       ),
     applyPlan: (target, proposal) => applyRoadmapPlanProposal(importDeps, target, proposal),
     confirmPlan,
-    notifyStalled: (run, blockers) => notifyStalled(run, blockers, () => holder.view?.show(run.runId)),
+    notifyStalled: (run, blockers) =>
+      notifyStalled(run, blockers, () => holder.view?.show(run.runId)),
     onDidChange: () => holder.view?.refresh(),
     mergeQueue,
     onRunTransition: (prev, next) => holder.orchestrator?.handleRunTransition(prev, next),
@@ -215,7 +216,10 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
 
 async function confirmPlan(proposal: RoadmapPlanProposal): Promise<boolean> {
   const lines = proposal.nodes.map((node) => {
-    const deps = node.dependsOn.length > 0 ? `（依存: ${node.dependsOn.map((d) => `#${String(d)}`).join(', ')}）` : '';
+    const deps =
+      node.dependsOn.length > 0
+        ? `（依存: ${node.dependsOn.map((d) => `#${String(d)}`).join(', ')}）`
+        : '';
     return `#${String(node.issueNumber)}${deps}: ${node.reason.slice(0, PROPOSAL_REASON_MAX_LENGTH)}`;
   });
   const approve = '承認して書き戻す';
@@ -298,7 +302,9 @@ async function startRunCommand(
     prompt: 'ロードマップIssueの番号',
     placeHolder: '例: 1457',
     validateInput: (value) =>
-      isValidIssueNumber(Number(value.trim().replace(/^#/, ''))) ? undefined : '正の整数で入力してください',
+      isValidIssueNumber(Number(value.trim().replace(/^#/, '')))
+        ? undefined
+        : '正の整数で入力してください',
   });
   if (issueText === undefined) {
     return;
@@ -323,7 +329,10 @@ async function startRunCommand(
     return;
   }
   const outcome = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'ロードマップの計画を準備しています…' },
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'ロードマップの計画を準備しています…',
+    },
     () =>
       controller.startRun({
         workspaceRoot: folder,
@@ -394,7 +403,9 @@ async function pick<T extends string>(
   title: string,
   options: readonly (readonly [T, string, string?])[],
 ): Promise<T | undefined> {
-  const items = options.map(([value, label, detail]) => ({ label, detail, value }));
+  const items = options.map(([value, label, detail]): vscode.QuickPickItem & { value: T } =>
+    detail === undefined ? { label, value } : { label, detail, value },
+  );
   const chosen = await vscode.window.showQuickPick(items, { title });
   return chosen?.value;
 }
