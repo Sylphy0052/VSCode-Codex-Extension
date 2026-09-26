@@ -2098,7 +2098,8 @@ export class ClaudeChatViewManager
    * （`TaskSession.open()` の役目。design.md §16.10の2）。
    */
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
-    // `taskConfig`へ入れるので、同じパネルでの再起動（モデル変更・中断後の再開）でも外れない
+    // sandboxの起動引数は`taskConfig.additionalArgs`へ入れる。同じパネルでCLIを起動し直す
+    // （モデル変更・中断後の再開）ときも`configFor`がこれを読むため、sandboxが外れない
     const taskConfig = toClaudeConfig(input, await this.resolveSandboxArgs(input));
     const sessionId = randomSessionId();
     // オーケストレーターセッション（design.md §16.23）・衝突解決セッション

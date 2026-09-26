@@ -460,6 +460,12 @@ export class TaskStageRunner {
       );
       return false;
     }
+    // 開くのを待つ間（sandboxの確認。Issue #1541）に拡張機能が終了した。`dispose`は呼ばれた
+    // 時点の`live`しか閉じないため、ここで開いたセッションは自分で閉じる
+    if (this.disposed) {
+      this.release(entry, { dispose: true });
+      return false;
+    }
     this.live.set(liveKey(runId, taskId), entry);
     await this.mutate(runId, (r) =>
       recordAttemptSession(r, ref, entry.session.sessionId, this.now()),

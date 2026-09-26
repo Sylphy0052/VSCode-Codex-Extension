@@ -49,6 +49,9 @@ const CLI_PREFLIGHT_TIMEOUT_MS = 30_000;
 /** ログへ残す失敗理由の長さの上限。 */
 const MAX_REASON_LENGTH = 300;
 
+/** 空起動のstderrを溜める上限。空白を詰めてから{@link MAX_REASON_LENGTH}で切るため、多めに持つ。 */
+const MAX_STDERR_LENGTH = MAX_REASON_LENGTH * 4;
+
 export interface ClaudeSandboxEnvironment {
   /**
    * `sandbox.enableWeakerNestedSandbox`を付けるか。コンテナ内では`/proc`を新しくmountできず
@@ -191,8 +194,10 @@ function tryCli(claudePath: string, settingsJson: string): Promise<SandboxComman
       killWithEscalation(proc);
       finish({ ok: false, detail: `${String(CLI_PREFLIGHT_TIMEOUT_MS)}ms以内に終了しませんでした` });
     }, CLI_PREFLIGHT_TIMEOUT_MS);
+    // 確認の途中でも拡張ホストの終了を引き留めない
+    timer.unref();
     proc.stderr.on('data', (chunk: Buffer) => {
-      if (stderr.length < MAX_REASON_LENGTH * 4) {
+      if (stderr.length < MAX_STDERR_LENGTH) {
         stderr += chunk.toString('utf8');
       }
     });
@@ -254,7 +259,9 @@ export async function probeClaudeSandbox(
     }
   }
   const environment: ClaudeSandboxEnvironment = { weakerNested };
-  // 依存の確認に作業ディレクトリは関わらないため、書き込みを塞がない形で確かめる
+  // 依存の確認に作業ディレクトリは関わらないため、書き込みを塞がない形で確かめる。
+  // `read-only`だけが足す`filesystem.denyWrite`（絶対パス1つ）は、CLI 2.1.280で受理される
+  // ことを実測済みで、ここで確かめなくても起動を妨げない
   const settings = JSON.stringify(buildClaudeSandboxSettings('workspace-write', '', environment));
   const cli = await ports.tryCli(settings);
   if (!cli.ok) {
