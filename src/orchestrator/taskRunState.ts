@@ -134,8 +134,43 @@ export interface OrchestratedTask {
   branch: string | undefined;
   pullRequest: { number: number; url: string } | undefined;
   review: StageReviewResult | undefined;
+  /**
+   * 工程セッションが`ask_orchestrator`で尋ねた質問（新しい順ではなく受け付けた順）。
+   * 追加前に保存したrunには無い。操作は`taskRunQuestions.ts`。
+   */
+  questions?: readonly StageQuestion[];
   /** ISO8601。 */
   updatedAt: string;
+}
+
+/**
+ * 質問の状態。`judging`はReflexの判定中、`awaitingUser`はユーザーの判断待ち。
+ * 回答済み・取り消し済みは変えない。
+ */
+export type StageQuestionStatus =
+  | 'judging'
+  | 'awaitingUser'
+  | 'answeredByReflex'
+  | 'answeredByUser'
+  | 'cancelled';
+
+export interface StageQuestion {
+  questionId: string;
+  stage: TaskStage;
+  attemptId: string;
+  question: string;
+  reason: string;
+  options: readonly string[];
+  recommended: string | undefined;
+  blocking: boolean;
+  evidence: string | undefined;
+  status: StageQuestionStatus;
+  /** Reflexの判定の要約（人へ回した理由を含む）。 */
+  reflexSummary: string | undefined;
+  answer: string | undefined;
+  /** ISO8601。 */
+  askedAt: string;
+  answeredAt: string | undefined;
 }
 
 /** 計画の状態: Orchestratorが作成中 / ユーザーの承認待ち / 承認済み。 */
@@ -395,7 +430,7 @@ export function proposeTaskPlan(
 }
 
 /** 工程を1つでも始めた（飛ばした工程は数えない）。 */
-function hasStarted(task: OrchestratedTask): boolean {
+export function hasStarted(task: OrchestratedTask): boolean {
   return TASK_STAGES.some((stage) => {
     const status = task.stages[stage].status;
     return status !== 'notStarted' && status !== 'skipped';
