@@ -1,3 +1,9 @@
+import {
+  findLastResolvedGate,
+  findOpenGate,
+  GATE_CHOICE_LABELS,
+  MAX_REVIEW_ROUNDS,
+} from '../orchestrator/taskRunGates';
 import { listQuestionsAwaitingUser } from '../orchestrator/taskRunQuestions';
 import {
   assessTaskRun,
@@ -12,12 +18,15 @@ import {
   isTaskDone,
   listTasks,
   type OrchestratedTask,
+  type StageGate,
+  type StageGateChoice,
   type StageQuestion,
   type TaskPlanStatus,
   type TaskRun,
   type TaskRunEngine,
   type TaskStage,
 } from '../orchestrator/taskRunState';
+import { STAGE_LABELS } from '../orchestrator/taskStagePrompts';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 
 /**
@@ -40,6 +49,7 @@ export type TaskRunKanbanColumn = (typeof TASK_RUN_KANBAN_COLUMNS)[number];
 const TITLE_MAX_LENGTH = 200;
 const SUMMARY_MAX_LENGTH = 300;
 const FAILURE_MAX_LENGTH = 300;
+const GATE_DETAIL_MAX_LENGTH = 2000;
 
 export interface TaskRunKanbanBadge {
   label: string;
@@ -58,6 +68,18 @@ export interface TaskRunKanbanQuestion {
   reflexSummary: string | undefined;
 }
 
+/** 決着待ちの関門。本文は外部由来のため、画面側では`textContent`で出す。 */
+export interface TaskRunKanbanGate {
+  gateId: string;
+  kind: StageGate['kind'];
+  stageLabel: string;
+  judging: boolean;
+  detail: string;
+  reflexSummary: string | undefined;
+  /** 画面で選べる決着。失敗の関門は「やり直す」ボタン（`canRetry`）で決着させるため空。 */
+  choices: { choice: StageGateChoice; label: string }[];
+}
+
 export interface TaskRunKanbanCard {
   taskId: string;
   title: string;
@@ -74,6 +96,11 @@ export interface TaskRunKanbanCard {
   canRetry: boolean;
   canReveal: boolean;
   questions: TaskRunKanbanQuestion[];
+  gate: TaskRunKanbanGate | undefined;
+  /** 直近に決着した関門（誰が何を選んだか）。 */
+  lastGateDecision: string | undefined;
+  /** 実装への差し戻しの回数と上限。差し戻していなければ`undefined`。 */
+  reviewRounds: string | undefined;
 }
 
 export interface TaskRunKanbanRunSummary {
@@ -155,10 +182,45 @@ function badgesFor(run: TaskRun, task: OrchestratedTask, unmet: readonly string[
   if (isTaskDone(task)) {
     return [];
   }
+  const gate = findOpenGate(task);
+  if (gate !== undefined) {
+    // 関門が開いている間は工程を始めないため、工程のバッジ（判断待ち等）を出さない
+    const attention = attentionBadge(task);
+    const gateBadge: TaskRunKanbanBadge =
+      gate.status === 'judging'
+        ? { label: 'Reflexが判定中', tone: '' }
+        : { label: '関門の判断待ち', tone: 'warn' };
+    return attention === undefined || attention.label === 'ユーザー判断待ち'
+      ? [gateBadge]
+      : [attention, gateBadge];
+  }
   const stage = currentStage(task);
   const badges = stage === undefined ? [] : stageBadges(run, task, stage, unmet);
   const attention = attentionBadge(task);
   return attention === undefined ? badges : [attention, ...badges];
+}
+
+function toKanbanGate(gate: StageGate): TaskRunKanbanGate {
+  const choices: StageGateChoice[] = gate.kind === 'reviewFindings' ? ['sendBack', 'proceed'] : [];
+  return {
+    gateId: gate.gateId,
+    kind: gate.kind,
+    stageLabel: STAGE_LABELS[gate.stage],
+    judging: gate.status === 'judging',
+    detail: gate.detail.slice(0, GATE_DETAIL_MAX_LENGTH),
+    reflexSummary:
+      gate.reflexSummary === undefined ? undefined : sanitizeInlineText(gate.reflexSummary, SUMMARY_MAX_LENGTH),
+    choices: choices.map((choice) => ({ choice, label: GATE_CHOICE_LABELS[choice] })),
+  };
+}
+
+function lastGateDecision(task: OrchestratedTask): string | undefined {
+  const gate = findLastResolvedGate(task);
+  if (gate?.resolution === undefined) {
+    return undefined;
+  }
+  const by = gate.resolution.by === 'reflex' ? 'Reflex' : 'ユーザー';
+  return `${STAGE_LABELS[gate.stage]}の関門: ${by}が「${GATE_CHOICE_LABELS[gate.resolution.choice]}」を選んだ`;
 }
 
 function toKanbanQuestion(q: StageQuestion): TaskRunKanbanQuestion {
@@ -179,6 +241,7 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
   const stage = currentStage(task);
   const record = stage === undefined ? undefined : task.stages[stage];
   const stopping = task.attention === 'stopping';
+  const gate = findOpenGate(task);
   return {
     taskId: task.taskId,
     title: sanitizeInlineText(task.title, TITLE_MAX_LENGTH),
@@ -191,9 +254,19 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
     failure: task.failure === undefined ? undefined : sanitizeInlineText(task.failure, FAILURE_MAX_LENGTH),
     attempts: record?.attempts.length ?? 0,
     canStop: record?.status === 'running' && !stopping,
-    canRetry: record?.status === 'halted' && !stopping && run.finishedAt === undefined,
+    canRetry:
+      record?.status === 'halted' &&
+      !stopping &&
+      run.finishedAt === undefined &&
+      gate?.kind !== 'reviewFindings',
     canReveal: record !== undefined && record.attempts.length > 0,
     questions: listQuestionsAwaitingUser(task).map(toKanbanQuestion),
+    gate: gate === undefined || run.finishedAt !== undefined ? undefined : toKanbanGate(gate),
+    lastGateDecision: lastGateDecision(task),
+    reviewRounds:
+      (task.reviewRounds ?? 0) > 0
+        ? `${String(task.reviewRounds)}/${String(MAX_REVIEW_ROUNDS)}`
+        : undefined,
   };
 }
 

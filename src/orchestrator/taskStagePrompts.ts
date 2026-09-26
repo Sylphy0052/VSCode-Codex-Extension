@@ -152,6 +152,16 @@ function stageBody(input: StagePromptInput, nonce: string): string[] {
         'ファイルは編集しない。報告ではissueNumberに起票したIssueの番号を入れる。',
       ];
     case 'implement':
+      if (pr !== undefined) {
+        // レビュー後の差し戻し。同じブランチとPRで直す（taskRunGates.ts）
+        return [
+          `作業ディレクトリはこのタスク専用のworktree（ブランチ ${task.branch ?? '(不明)'}）。`,
+          `レビューで指摘が残ったため差し戻された。PR ${pr}は既にある。新しいPRは作らない。`,
+          '手順: 前回のレビューで残った指摘を直す → commitして同じブランチへpushする（PRに追加のcommitとして載る）。',
+          'mergeはしない。PRは閉じない。merge直前の手順（版上げ等）もしない（後の工程で行う）。',
+          '報告ではpullRequestNumberとpullRequestUrlに、既存のPRの番号とURLを入れる。',
+        ];
+      }
       return [
         `作業ディレクトリはこのタスク専用のworktree（ブランチ ${task.branch ?? '(不明)'}）。`,
         `手順: Issue ${issue ?? '(不明)'}の本文と受入基準を確かめる → 実装 → commitとpush → ` +

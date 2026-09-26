@@ -11,10 +11,15 @@ import {
 } from '../config';
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
-import { judgeRoadmapQuestion, RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
+import {
+  judgeRoadmapQuestion,
+  RoadmapQuestionMcpServer,
+  type RoadmapQuestionVerdict,
+} from '../orchestrator/roadmapQuestionMcp';
 import { resolveRoadmapBaseCommit, type RoadmapRunForgePorts } from '../orchestrator/roadmapRunForge';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import { TaskRunController } from '../orchestrator/taskRunController';
+import type { GateJudgeQuestion } from '../orchestrator/taskRunGates';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
@@ -85,6 +90,18 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ? { models: deps.settings.claudeSnapshot().models, fallbackEfforts: CLAUDE_EFFORTS }
       : { models: deps.settings.snapshot().models, fallbackEfforts: FALLBACK_EFFORTS };
 
+  const judgeByReflex = async (
+    engine: TaskRunEngine,
+    question: GateJudgeQuestion,
+  ): Promise<RoadmapQuestionVerdict> =>
+    readReflexEnabled()
+      ? judgeRoadmapQuestion(
+          { provider: engine, executable: executableFor(engine), logWarn: warn },
+          question,
+          readAutoReplyReflexConfig().answerThreshold,
+        )
+      : { kind: 'human', summary: undefined };
+
   const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
 
   const observation = createStageObservationPorts(ports);
@@ -102,15 +119,9 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     autoApprove: () => deps.readBaseline().allowAutoApprove,
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     mcpServer: questionServer,
-    // Reflexモードが無効なら判定せず、すべての質問をユーザーへ回す
-    judgeQuestion: async (engine, question) =>
-      readReflexEnabled()
-        ? judgeRoadmapQuestion(
-            { provider: engine, executable: executableFor(engine), logWarn: warn },
-            question,
-            readAutoReplyReflexConfig().answerThreshold,
-          )
-        : { kind: 'human', summary: undefined },
+    // Reflexモードが無効なら判定せず、すべての質問と関門をユーザーへ回す
+    judgeQuestion: (engine, question) => judgeByReflex(engine, question),
+    judgeGate: (engine, question) => judgeByReflex(engine, question),
     onRunChanged: (run) => holder.controller?.handleRunChanged(run),
     onWarning: (runId, taskId, message) => warn(`${runId} ${taskId}: ${message}`),
   });
@@ -158,6 +169,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     server: questionServer,
     readBaseline: () => deps.readBaseline(),
     confirmAnswer: confirmOrchestratorAnswer,
+    confirmGateResolution: confirmOrchestratorGateResolution,
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
   });
@@ -321,6 +333,28 @@ async function confirmOrchestratorAnswer(input: {
     '回答する',
   );
   return choice === '回答する';
+}
+
+/** Orchestratorが`resolve_gate`で渡そうとしている関門の判断を、人に確かめる。 */
+async function confirmOrchestratorGateResolution(input: {
+  taskId: string;
+  title: string;
+  detail: string;
+  choiceLabel: string;
+}): Promise<boolean> {
+  const detail = [
+    `${input.taskId} ${sanitizeInlineText(input.title, CONFIRM_TITLE_MAX_LENGTH)}`,
+    '',
+    `関門: ${sanitizeInlineText(input.detail, CONFIRM_TEXT_MAX_LENGTH)}`,
+    '',
+    `判断: ${input.choiceLabel}`,
+  ].join('\n');
+  const choice = await vscode.window.showWarningMessage(
+    'Orchestratorがこの判断で関門を決着させようとしています。あなたの判断と一致していれば「決着させる」を押してください',
+    { modal: true, detail },
+    '決着させる',
+  );
+  return choice === '決着させる';
 }
 
 async function pickFolder(): Promise<string | undefined> {

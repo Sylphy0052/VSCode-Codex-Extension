@@ -7,6 +7,7 @@ import {
   MAX_PLAN_TASKS,
   MAX_PLAN_TITLE_LENGTH,
 } from './taskRunPlan';
+import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
 import { listQuestionsAwaitingUser } from './taskRunQuestions';
 import {
   assessTaskRun,
@@ -20,6 +21,7 @@ import {
   listTasks,
   MAX_TASK_RUN_PARALLEL,
   TASK_STAGES,
+  type StageGateChoice,
   type TaskRun,
   type TaskStage,
 } from './taskRunState';
@@ -37,6 +39,7 @@ const TASK_ID_SCHEMA = { type: 'string', description: 'タスクのID（T<数字
 const MAX_QUESTION_ID_LENGTH = 200;
 const MAX_REASON_LENGTH = 500;
 const MAX_SETTING_LENGTH = 100;
+const STAGE_GATE_CHOICES: readonly StageGateChoice[] = ['sendBack', 'proceed', 'retry'];
 /** 状態の本文（タスク一覧）の上限。 */
 const MAX_RUN_STATE_LENGTH = 50_000;
 const STATE_TITLE_MAX_LENGTH = 200;
@@ -149,6 +152,26 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     },
   },
   {
+    name: 'resolve_gate',
+    description:
+      'Reflexが判定できずユーザーの判断待ちになった関門（レビュー後の差し戻し、工程の失敗）を決着させる。ユーザーと会話で決めた判断だけを送る。送る前にユーザーへ確認する。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: TASK_ID_SCHEMA,
+        gateId: { type: 'string', description: 'get_run_stateで得た関門のID' },
+        choice: {
+          type: 'string',
+          enum: [...STAGE_GATE_CHOICES],
+          description:
+            'sendBack=実装へ差し戻す / proceed=指摘を残したまま進める（この2つはレビューの関門）/ retry=同じ工程をやり直す（失敗の関門）',
+        },
+      },
+      required: ['taskId', 'gateId', 'choice'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'stop_stage',
     description:
       'タスクの工程を止める。worktreeとブランチは残り、後でstart_stageでやり直せる。人の承認を経てから実行される。',
@@ -173,8 +196,8 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
 
 /**
  * 人の承認を経ずに呼べるツール。計画の提案はユーザーの承認を経るまで工程を始めないため含める。
- * 取り消せない操作（工程の停止）とrun全体の方針（並列上限）は含めない。`answer_question`は
- * ツールの処理の中で回答の本文をモーダルで確認するため、チャットの承認には回さない。
+ * 取り消せない操作（工程の停止）とrun全体の方針（並列上限）は含めない。`answer_question`と
+ * `resolve_gate`はツールの処理の中で本文をモーダルで確認するため、チャットの承認には回さない。
  */
 export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = new Set([
   'propose_plan',
@@ -182,6 +205,7 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
   'start_stage',
   'instruct_task',
   'answer_question',
+  'resolve_gate',
 ]);
 
 export type TaskRunOrchestratorCall =
@@ -198,10 +222,15 @@ export type TaskRunOrchestratorCall =
     }
   | { tool: 'instruct_task'; taskId: string; instruction: string }
   | { tool: 'answer_question'; taskId: string; questionId: string; answer: string }
+  | { tool: 'resolve_gate'; taskId: string; gateId: string; choice: StageGateChoice }
   | { tool: 'stop_stage'; taskId: string }
   | { tool: 'set_max_parallel'; maxParallel: number };
 
 type ParseResult = { ok: true; call: TaskRunOrchestratorCall } | { ok: false; message: string };
+
+function isGateChoice(value: unknown): value is StageGateChoice {
+  return typeof value === 'string' && (STAGE_GATE_CHOICES as readonly string[]).includes(value);
+}
 
 function isStage(value: unknown): value is TaskStage {
   return typeof value === 'string' && (TASK_STAGES as readonly string[]).includes(value);
@@ -291,6 +320,16 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       }
       return { ok: true, call: { tool: 'answer_question', taskId, questionId, answer } };
     }
+    case 'resolve_gate': {
+      const { gateId, choice } = a;
+      if (typeof gateId !== 'string' || gateId === '' || gateId.length > MAX_QUESTION_ID_LENGTH) {
+        return { ok: false, message: 'gateIdはget_run_stateで得た関門のIDを指定する' };
+      }
+      if (!isGateChoice(choice)) {
+        return { ok: false, message: `choiceは${STAGE_GATE_CHOICES.join(' / ')}のいずれかを指定する` };
+      }
+      return { ok: true, call: { tool: 'resolve_gate', taskId, gateId, choice } };
+    }
     default:
       return { ok: false, message: `未知のツールです: ${name}` };
   }
@@ -376,6 +415,20 @@ export function formatTaskRunState(
         `  ユーザー判断待ちの質問 questionId=${inline(q.questionId, MAX_QUESTION_ID_LENGTH)}: ${inline(q.question)}${options}`,
         `    理由: ${inline(q.reason)}${q.recommended === undefined ? '' : ` / 推奨: ${inline(q.recommended)}`}`,
       );
+    }
+    if ((task.reviewRounds ?? 0) > 0) {
+      lines.push(`  実装への差し戻し: ${String(task.reviewRounds)}回（上限${String(MAX_REVIEW_ROUNDS)}回）`);
+    }
+    const gate = findOpenGate(task);
+    if (gate !== undefined) {
+      const status = gate.status === 'judging' ? 'Reflexが判定中' : 'ユーザーの判断待ち';
+      lines.push(
+        `  関門 gateId=${inline(gate.gateId, MAX_QUESTION_ID_LENGTH)} 種類=${gate.kind} 工程=${gate.stage} 状態=${status}`,
+        `    内容: ${inline(gate.detail)}`,
+      );
+      if (gate.reflexSummary !== undefined) {
+        lines.push(`    Reflex: ${inline(gate.reflexSummary)}`);
+      }
     }
   }
   const tasks = formatUntrusted(lines.join('\n'), {

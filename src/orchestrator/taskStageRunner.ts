@@ -44,6 +44,18 @@ import {
   type TaskRunEngine,
   type TaskStage,
 } from './taskRunState';
+import {
+  buildGateQuestion,
+  escalateStageGate,
+  findStageGate,
+  GATE_CHOICE_LABELS,
+  gateChoiceFromAnswer,
+  type GateJudgeQuestion,
+  needsReviewGate,
+  openStageGate,
+  resolveStageGate,
+  reviewGateDetail,
+} from './taskRunGates';
 import type { MergeKeyLease, TaskRunMergeKeys } from './taskRunMergeKey';
 import {
   addStageQuestion,
@@ -126,6 +138,11 @@ export interface TaskStageRunnerDeps {
    * なら）すべての質問をユーザーの判断待ちにする。ユーザーの回答は`answerQuestion`で受ける。
    */
   judgeQuestion?: (engine: TaskRunEngine, question: StageQuestion) => Promise<RoadmapQuestionVerdict>;
+  /**
+   * 工程の失敗とレビュー後の残った指摘で開いた関門（`taskRunGates.ts`）をReflexで判定する。
+   * 無ければすべての関門をユーザーの判断待ちにする。ユーザーの判断はControllerが受ける。
+   */
+  judgeGate?: (engine: TaskRunEngine, question: GateJudgeQuestion) => Promise<RoadmapQuestionVerdict>;
   /** runの状態が変わったとき（Kanbanの再描画・通知用）。 */
   onRunChanged?: (run: TaskRun) => void;
   /** 実行を止めずに人へ知らせる事象（後片付けに失敗した等）。 */
@@ -234,6 +251,99 @@ export class TaskStageRunner {
   }
 
   /**
+   * 工程を止め、次の手を決める関門を開く（Reflexの判定は`judgeGateLater`）。人が止めた工程と
+   * 既に止まっている工程には関門を開かない。
+   */
+  private async haltAndOpenGate(
+    runId: string,
+    taskId: string,
+    attention: 'needsAction' | 'failed',
+    failure: string,
+  ): Promise<void> {
+    const gateId = this.newId();
+    const next = await this.mutate(runId, (r) => {
+      const halted = haltStage(r, taskId, attention, failure, this.now());
+      return halted === r
+        ? r
+        : openStageGate(halted, taskId, { gateId, kind: 'stageFailed', detail: failure }, this.now());
+    });
+    this.judgeGateLater(runId, taskId, gateId, next);
+  }
+
+  /** レビューが直さずに残した指摘を持って終わったなら、差し戻すかどうかの関門を開く。 */
+  private openReviewGate(run: TaskRun, taskId: string, gateId: string): TaskRun {
+    const task = getTask(run, taskId);
+    const review = task?.stages.review.status === 'done' ? task.review : undefined;
+    if (review === undefined || !needsReviewGate(review)) {
+      return run;
+    }
+    return openStageGate(
+      run,
+      taskId,
+      { gateId, kind: 'reviewFindings', detail: reviewGateDetail(review) },
+      this.now(),
+    );
+  }
+
+  /** 判定中で開いた関門をReflexに判定させる（待たない）。 */
+  private judgeGateLater(
+    runId: string,
+    taskId: string,
+    gateId: string,
+    run: TaskRun | undefined,
+  ): void {
+    if (run === undefined || findStageGate(run, taskId, gateId)?.status !== 'judging') {
+      return;
+    }
+    void this.judgeGate(runId, taskId, gateId).catch((e: unknown) => {
+      this.warn(runId, taskId, `${taskId}の関門の判定に失敗しました: ${errorMessage(e)}`);
+    });
+  }
+
+  /**
+   * 関門をReflexで判定する。Reflexが無効・判定の失敗・「ユーザーに判断を上げる」、または
+   * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。
+   */
+  private async judgeGate(runId: string, taskId: string, gateId: string): Promise<void> {
+    const run = this.deps.store.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
+    if (run === undefined || task === undefined || gate?.status !== 'judging') {
+      return;
+    }
+    const judge = this.deps.judgeGate;
+    let verdict: RoadmapQuestionVerdict;
+    if (judge === undefined) {
+      verdict = { kind: 'human', summary: undefined };
+    } else {
+      try {
+        verdict = await judge(run.engine, buildGateQuestion(task, gate));
+      } catch (e) {
+        verdict = { kind: 'human', summary: `Reflexの判定に失敗: ${errorMessage(e)}` };
+      }
+    }
+    const choice =
+      verdict.kind === 'answer' ? gateChoiceFromAnswer(gate.kind, verdict.answer) : undefined;
+    let summary = verdict.summary;
+    if (choice !== undefined) {
+      const resolved = await this.mutate(runId, (r) =>
+        resolveStageGate(
+          r,
+          taskId,
+          gateId,
+          { choice, by: 'reflex', reflexSummary: verdict.summary },
+          this.now(),
+        ),
+      );
+      if (resolved === undefined || findStageGate(resolved, taskId, gateId)?.status !== 'judging') {
+        return;
+      }
+      summary = `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
+    }
+    await this.mutate(runId, (r) => escalateStageGate(r, taskId, gateId, summary, this.now()));
+  }
+
+  /**
    * 空き枠（とmergeの鍵）の分だけ、設定を受け付けた工程を始める。設定の受け付け・工程の
    * 終わり・並列上限の変更のたびに呼ぶ。
    */
@@ -282,14 +392,11 @@ export class TaskStageRunner {
         lease = undefined;
       }
     } catch (e) {
-      await this.mutate(runId, (r) =>
-        haltStage(
-          r,
-          target.taskId,
-          'failed',
-          `${STAGE_LABELS[target.stage]}を始められませんでした: ${errorMessage(e)}`,
-          this.now(),
-        ),
+      await this.haltAndOpenGate(
+        runId,
+        target.taskId,
+        'failed',
+        `${STAGE_LABELS[target.stage]}を始められませんでした: ${errorMessage(e)}`,
       );
     } finally {
       lease?.release();
@@ -317,9 +424,7 @@ export class TaskStageRunner {
     if (WORKTREE_STAGES.has(stage)) {
       const worktree = await this.ensureWorktree(run, taskId, stage === 'implement');
       if (!worktree.ok) {
-        await this.mutate(runId, (r) =>
-          haltStage(r, taskId, 'failed', worktree.message, this.now()),
-        );
+        await this.haltAndOpenGate(runId, taskId, 'failed', worktree.message);
         return false;
       }
       run = worktree.run;
@@ -347,14 +452,11 @@ export class TaskStageRunner {
     try {
       entry = await this.openStageSession(started, ref, cwd, decision, lease);
     } catch (e) {
-      await this.mutate(runId, (r) =>
-        haltStage(
-          r,
-          taskId,
-          'failed',
-          `${STAGE_LABELS[stage]}のセッションを開けませんでした: ${errorMessage(e)}`,
-          this.now(),
-        ),
+      await this.haltAndOpenGate(
+        runId,
+        taskId,
+        'failed',
+        `${STAGE_LABELS[stage]}のセッションを開けませんでした: ${errorMessage(e)}`,
       );
       return false;
     }
@@ -637,14 +739,11 @@ export class TaskStageRunner {
         };
       }
       if (report.outcome === 'failed') {
-        await this.mutate(entry.runId, (r) =>
-          haltStage(
-            r,
-            taskId,
-            'needsAction',
-            `工程セッションが失敗を報告しました: ${sanitizeInlineText(report.summary, MAX_FAILURE_SUMMARY_LENGTH)}`,
-            this.now(),
-          ),
+        await this.haltAndOpenGate(
+          entry.runId,
+          taskId,
+          'needsAction',
+          `工程セッションが失敗を報告しました: ${sanitizeInlineText(report.summary, MAX_FAILURE_SUMMARY_LENGTH)}`,
         );
         this.markReported(entry);
         return { text: '失敗の報告を受け付けました。このターンで作業を終える。', isError: false };
@@ -664,14 +763,19 @@ export class TaskStageRunner {
           isError: true,
         };
       }
+      const gateId = this.newId();
       const next = await this.mutate(entry.runId, (r) =>
-        finishTaskRunIfDone(completeStage(r, binding.ref, observed.output, this.now()), this.now()),
+        finishTaskRunIfDone(
+          this.openReviewGate(completeStage(r, binding.ref, observed.output, this.now()), taskId, gateId),
+          this.now(),
+        ),
       );
       const done = next === undefined ? undefined : getTask(next, taskId);
       if (done?.stages[binding.ref.stage].status !== 'done') {
         return { text: '完了を記録できませんでした。改めて報告する。', isError: true };
       }
       this.markReported(entry);
+      this.judgeGateLater(entry.runId, taskId, gateId, next);
       return { text: '完了を受け付けました。このターンで作業を終える。', isError: false };
     });
   }
@@ -798,14 +902,11 @@ export class TaskStageRunner {
         if (entry.session !== session || entry.reported || entry.stopping || entry.closed) {
           return;
         }
-        await this.mutate(entry.runId, (r) =>
-          haltStage(
-            r,
-            entry.ref.taskId,
-            'needsAction',
-            `工程セッションが報告なしに終わりました（${reason}）`,
-            this.now(),
-          ),
+        await this.haltAndOpenGate(
+          entry.runId,
+          entry.ref.taskId,
+          'needsAction',
+          `工程セッションが報告なしに終わりました（${reason}）`,
         );
         this.release(entry, { dispose: false });
       });

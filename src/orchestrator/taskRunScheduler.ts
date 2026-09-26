@@ -28,6 +28,7 @@ import {
   unmetDependencies,
   type RunAssessment,
 } from './runScheduling';
+import { findOpenGate } from './taskRunGates';
 
 /** 工程セッションが動いている（停止処理中を含む）。並列上限の対象。 */
 export function hasActiveStageSession(task: OrchestratedTask): boolean {
@@ -58,14 +59,15 @@ function isRunAccepting(run: TaskRun): boolean {
 
 /**
  * 現在の工程を始められる状態か。前の工程が終わり（`currentStage`がそれを表す）、未着手で、
- * 止まっておらず、「実装とPR作成」なら依存先がすべて終わっている。
+ * 止まっておらず、判断の関門（`taskRunGates.ts`）が開いておらず、「実装とPR作成」なら依存先が
+ * すべて終わっている。
  */
 function isStageStartable(run: TaskRun, task: OrchestratedTask): boolean {
   const stage = currentStage(task);
   if (stage === undefined || task.stages[stage].status !== 'notStarted') {
     return false;
   }
-  if (task.attention !== 'none') {
+  if (task.attention !== 'none' || findOpenGate(task) !== undefined) {
     return false;
   }
   return !DEPENDENCY_GATED_STAGES.includes(stage) || unmetTaskDependencies(run, task).length === 0;
@@ -151,6 +153,7 @@ export type StartStageRejection =
   | 'notCurrentStage'
   | 'alreadyRunning'
   | 'halted'
+  | 'gatePending'
   | 'dependenciesUnmet';
 
 export type StartStageDecision =
@@ -195,6 +198,9 @@ export function decideStageStart(
   if (status === 'running') {
     return reject('alreadyRunning');
   }
+  if (findOpenGate(task) !== undefined) {
+    return reject('gatePending');
+  }
   if (status === 'halted' || task.attention !== 'none') {
     return reject('halted');
   }
@@ -209,9 +215,13 @@ export function decideStageStart(
 
 /**
  * 人の対応が無くても進むタスクか。工程セッションが動いていて人を待っていない、または
- * 始められる工程があり、Orchestrator・Controllerが進める。
+ * 始められる工程があり、Orchestrator・Controllerが進める。関門をReflexが判定中のタスクも
+ * 進むものとして扱う。
  */
 function isProgressingWithoutUser(run: TaskRun, task: OrchestratedTask): boolean {
+  if (findOpenGate(task)?.status === 'judging') {
+    return true;
+  }
   if (hasActiveStageSession(task)) {
     return task.attention === 'none' || task.attention === 'stopping';
   }
