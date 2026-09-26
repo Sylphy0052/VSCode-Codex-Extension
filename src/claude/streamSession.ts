@@ -1006,7 +1006,13 @@ export class ClaudeStreamSession {
     if (snapshot?.ok !== true || this.proc !== proc) {
       return undefined;
     }
-    const added = snapshot.skills.filter((s) => !this.hiddenSkills.has(s.name));
+    // 選んだskillは`/<skill名>`で送る（issue #1529）。`user-invocable: false`のskillは
+    // `/`で呼べず、送ると依頼ごと空振りする。`initialize`のコマンド一覧には載らない（実測）ので、
+    // 一覧にあるものだけを隠して候補にし、それ以外はモデルに任せたまま残す
+    const invocable = new Set(this.commandList.map((c) => c.name));
+    const added = snapshot.skills.filter(
+      (s) => invocable.has(s.name) && !this.hiddenSkills.has(s.name),
+    );
     if (added.length > 0) {
       const requestId = this.claim('hideSkills');
       const ok = await new Promise<boolean>((resolve) => {

@@ -11,8 +11,9 @@ import type { SkillView } from '../provider/skills';
  * 読み込ませる。
  *
  * - Codex: `thread/start`の`config`で一覧を外し、`turn/start`の`input`へskillを足す
- * - Claude Code: `apply_flag_settings`の`skillOverrides`で一覧から隠し、発言の前に
- *   Skillツールで読み込むよう固定文を添える（隠したskillもSkillツールで呼べる）
+ * - Claude Code: `apply_flag_settings`の`skillOverrides`で一覧から隠し、発言を`/<skill名>`で
+ *   始める。隠したskillはSkillツールでは呼べず、`/<skill名>`で始まる発言だけが展開される
+ *   （issue #1529）
  *
  * `vscode`へは依存させず、設定の読み出しと判定の実行手段は呼び出し側（view層）から渡す。
  */
@@ -37,7 +38,7 @@ const DESCRIPTION_MAX_LENGTH = 200;
 const SKILL_NONE = 'なし';
 
 /**
- * skill名として受け付ける形。名前は選択肢として判定器へ渡し、Claudeでは固定文へ埋め込むため、
+ * skill名として受け付ける形。名前は選択肢として判定器へ渡し、Claudeではスラッシュコマンドにするため、
  * 空白・約物・制御文字を含むものは候補から外す。プラグイン由来の`plugin:skill`は通す。
  */
 const SKILL_NAME_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/u;
@@ -153,11 +154,12 @@ export async function selectSkill(
 }
 
 /**
- * Claude Codeへ送る本文。選んだskillをSkillツールで読み込むよう、依頼の前に固定文を置く。
- * 埋め込むのは`SKILL_NAME_PATTERN`を通った名前だけ。
+ * Claude Codeへ送る本文。`/<skill名> <依頼>`にして、CLIにskillを展開させる。依頼はskillの
+ * 引数として渡る。隠したskillはSkillツールでは呼べないため、固定文でSkillツールを促す形は
+ * 使えない（issue #1529）。埋め込むのは`SKILL_NAME_PATTERN`を通った名前だけ。
  */
 export function buildClaudeSkillPrompt(skillName: string, text: string): string {
-  return `（この依頼にはskill「${skillName}」が合うと判定しました。Skillツールで${skillName}を読み込んでから取りかかってください）\n\n${text}`;
+  return `/${skillName} ${text}`;
 }
 
 /** 会話へ残す1行。選んだときだけ残す。 */

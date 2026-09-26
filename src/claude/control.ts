@@ -305,8 +305,10 @@ export function buildSetEffortRequest(requestId: string, effort: string): string
 /**
  * skillをモデルへ渡す一覧から隠す（issue #1451）。
  *
- * `skillOverrides`の値を`user-invocable-only`にすると一覧からは消えるが、Skillツールでは
- * 呼び出せる（実測）。`apply_flag_settings`は送るたびに前の値と結合され、別の設定
+ * `skillOverrides`の値を`user-invocable-only`にすると一覧から消え、モデルがSkillツールで
+ * 呼ぶと`Skill <name> is disabled for model invocation in skillOverrides settings`で
+ * 拒否される。ユーザーが`/name`と打った発言だけは展開される（実測、issue #1529）。
+ * `apply_flag_settings`は送るたびに前の値と結合され、別の設定
  * （`effortLevel`など）を送っても隠した状態は残る（実測）。
  */
 export function buildHideSkillsRequest(requestId: string, names: readonly string[]): string {
