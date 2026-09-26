@@ -456,6 +456,8 @@ export class TaskRunController {
   /**
    * 人がrunを中断する（Issue #1560）。`finishRun`と同じ手順で、`finishedAt`の代わりに中断を立てる。
    * worktreeとブランチは残す。Orchestratorのセッションは呼び出し側が閉じる。
+   * 既に中断しているrunには`ok: true`を返す（冪等）。「開始」の選択肢やKanbanでのrunの入れ替えは、
+   * 中断の成否だけを見て次へ進むため、別の操作が先に中断していても失敗扱いにしない（Issue #1565）。
    */
   async suspendRun(runId: string): Promise<ControllerResult> {
     const halted = await this.updateRun(runId, (r) =>

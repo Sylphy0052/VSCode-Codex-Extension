@@ -506,7 +506,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 汎用復元に拾わせると、入力を閉じていたタブが通常のチャットとしてworktreeで戻るため
   const roadmapRunStore = new RoadmapRunStore(context.workspaceState);
   // オーケストレータモード（Issue #1505）の工程セッションとOrchestratorセッションも同じ
-  const taskRunStore = new TaskRunStore(context.workspaceState);
+  const taskRunStore = new TaskRunStore(context.workspaceState, (message) => log.warn(message));
   const isTaskManagedThread = (id: string): boolean =>
     (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
     roadmapRunStore.hasSessionRef(id) ||

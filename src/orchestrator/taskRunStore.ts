@@ -1,4 +1,4 @@
-import { isTaskRunActive, TASK_RUN_SCHEMA_VERSION, type TaskRun } from './taskRunState';
+import { isTaskRunActive, TASK_RUN_SCHEMA_VERSION, taskRunLabel, type TaskRun } from './taskRunState';
 import type { MementoLike } from '../util/memento';
 import { isPlainObject, MementoRunStore } from './mementoRunStore';
 
@@ -40,13 +40,21 @@ function isStoredTaskRun(r: unknown): r is TaskRun {
 }
 
 export class TaskRunStore extends MementoRunStore<TaskRun> {
-  constructor(memento: MementoLike) {
+  constructor(memento: MementoLike, log?: (message: string) => void) {
     super(memento, {
       key: TASK_RUNS_KEY,
       maxStored: MAX_STORED_TASK_RUNS,
       isValid: isStoredTaskRun,
       // 中断中のrunを、新しいrunを重ねたときに捨てない（Issue #1560）
       isFinished: (run) => run.finishedAt !== undefined,
+      // 動いているrunと中断中のrunだけで上限を超えると古い方を捨てるので、ログに残す（Issue #1565）
+      onDiscardUnfinished: (runs) => {
+        for (const run of runs) {
+          log?.(
+            `[task run] 保存できるrunの上限（${String(MAX_STORED_TASK_RUNS)}件）を超えたため、終わっていないrun「${taskRunLabel(run)}」（${run.runId}）の記録を捨てました`,
+          );
+        }
+      },
     });
   }
 
