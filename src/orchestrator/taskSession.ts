@@ -185,7 +185,51 @@ export interface TaskSessionInput {
    * 新しい世代として開き直す。
    */
   disableAutoHandoff?: boolean;
+  /**
+   * 自動引き継ぎ（`agent.autoHandoff.enabled`）を、グローバル設定がOFFでもこのセッションでは
+   * ONにする（Issue #1505 仕様6）。オーケストレータモードの工程セッションだけが`true`を渡す。
+   * `disableAutoHandoff`と両方指定したときは`disableAutoHandoff`が勝つ。
+   */
+  forceAutoHandoff?: boolean;
+  /**
+   * 自動引き継ぎの自動承認（`agent.autoHandoff.autoApprove`）を、グローバル設定によらず
+   * このセッションではONにする（Issue #1505 仕様6）。手動の引き継ぎボタンは従来どおり確認する。
+   */
+  autoHandoffAutoApprove?: boolean;
+  /**
+   * Reflexモード（`agent.chat.reflex.enabled`）の親スイッチを、このセッションだけ上書きする
+   * （Issue #1505 仕様6）。省略時はグローバル設定に従う。個別の機能のON/OFF
+   * （`agent.chat.loopDoneCheck.enabled`など）と閾値はグローバル設定のまま使う。
+   */
+  reflex?: boolean;
+  /**
+   * 自動引き継ぎで新しいセッションを開く処理を呼び出し側へ委ねる（Issue #1505 仕様6）。
+   *
+   * 渡すと、引き継ぎの発火判定・引き継ぎ文書の作成・引き継ぎ先のModel/Effortの選択まではホストが
+   * 行い、新しいセッションはホストが開かずにこの関数を呼ぶ。呼び出し側は`openTaskSession`で
+   * 入力欄のロック・MCP・承認の扱いを保ったまま開き直し、同じ工程の新しい実行回として紐付ける。
+   * 引き継ぎ元のセッションの後始末も呼び出し側が行う（ホストは停止の確認を出さない）。
+   * 渡さないときは従来どおりホストが通常のタブを開く。
+   */
+  handoffDelegate?: TaskHandoffDelegate;
 }
+
+/** `TaskSessionInput.handoffDelegate`へ渡す引き継ぎの依頼。 */
+export interface TaskHandoffRequest {
+  /** ホストが選んだ引き継ぎ先のModel/Effort。空文字は既定値。 */
+  model: string;
+  effort: string;
+  /** 引き継ぎ先へ最初に送る本文（引き継ぎ文書へのポインタ、または引き継ぎ元が書いたプロンプト）。 */
+  prompt: string;
+  /** 発火の契機。手動のボタン操作なら`manual`。 */
+  trigger: 'manual' | 'auto';
+}
+
+/**
+ * 自動引き継ぎの委譲先。新しいセッションへ乗り換えたら`true`、乗り換えなかったら`false`を返す。
+ * `false`のとき、引き継ぎ元のセッションはそのまま続く。
+ */
+export type TaskHandoffDelegate = (request: TaskHandoffRequest) => Promise<boolean>;
 
 /** 入力欄を閉じたタブ（`TaskSessionInput.inputLock`）で押された操作。 */
 export type LockedTabAction = { kind: 'instruct'; text: string } | { kind: 'stop' };
