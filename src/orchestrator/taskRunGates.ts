@@ -292,6 +292,10 @@ export function resolveStageGate(
       if (stage !== 'mergeCleanup' || (status !== 'notStarted' && status !== 'halted')) {
         return undefined;
       }
+      if (status === 'halted' && resolution.choice === 'proceed') {
+        // 止まった理由は関門と別の外部要因なので消さない。ユーザーが理由を見てやり直す
+        return closed;
+      }
       const reset = getTask(resetStageForRetry(withTaskUpdate(run, closed), taskId, now), taskId);
       const base: OrchestratedTask = { ...(reset ?? closed), attention: 'none', failure: undefined };
       return resolution.choice === 'sendBack' ? sendBackToImplement(base) : base;
