@@ -112,6 +112,7 @@ import {
   stopOverlapPoll,
 } from './runnerOverlap';
 import type { OverlapWait } from './taskOverlap';
+import { formatCarryOverPromptNote, type CarriedOverWork } from './resumeCarryOver';
 import type { SplitSuggestThresholds } from './taskSplit';
 import { notifyUnansweredInstructions } from './runnerInstruction';
 import {
@@ -924,6 +925,17 @@ export interface WorkflowWarning {
      */
     | 'autoResumeBlocked'
     /**
+     * 自動再開の前に中断した試行のworktreeを実測し、残っていた作業（未コミットの変更か
+     * 進んだコミット）を同じworktreeで引き継いだ（Issue #1514）。変更ファイル数・行数・
+     * コミット数を書く。タスクごとに直近1件へ丸める。
+     */
+    | 'resumedWithUncommittedWork'
+    /**
+     * 自動再開の前に中断した試行のworktreeを実測できなかった（worktreeが無い・gitの失敗。
+     * Issue #1514）。そのタスクは今までどおり新しいworktreeで最初からやり直す。
+     */
+    | 'resumeInspectionFailed'
+    /**
      * オーケストレーターが`add_task`で実行中の定義へ新しいタスクを加えた（design.md §16.29、
      * roadmap W4、Issue #338）。人の承認を挟まない以上、この警告が唯一の追跡手段になるため、
      * 追加したタスクのid・prompt・done・dependsOnを全文で残す。ウィンドウのリロード後は
@@ -1583,6 +1595,11 @@ export interface LiveTask {
   splitSuggested: boolean;
   /** `waitingOverlap`の間だけ埋まる。待っている相手と交差したファイル */
   overlapWait: OverlapWait | undefined;
+  /**
+   * 前の試行から作業を引き継いだとき、最初のプロンプトの先頭に一度だけ添える文
+   * （Issue #1514）。送った時点で`undefined`へ戻す
+   */
+  pendingCarryOverNote: string | undefined;
   /** 交差の待機を解き、統合ブランチを取り込んでいる最中 */
   overlapResuming: boolean;
   /**
@@ -1846,6 +1863,11 @@ export interface LiveRun {
    */
   pseudoRestoreFailure: string | undefined;
   /**
+   * 自動再開で前の試行の作業を引き継ぐタスク（Issue #1514）。`resolveWorkingDirectory`が
+   * 次の開始で取り出し、新しいworktreeを作らずにこの作業場所を使う
+   */
+  carriedOverWork: Map<string, CarriedOverWork>;
+  /**
    * タスク間メッセージング（design.md §16.21）。`WorkflowRunnerDeps.messaging`が渡され、
    * かつMCPサーバの起動に成功したときだけ実行開始時に一度作る。
    *
@@ -2072,6 +2094,8 @@ interface TaskLaunchPreparation {
   usedPseudoWorktree: boolean;
   pseudoSnapshot: Snapshot | undefined;
   originCommit: string;
+  /** 前の試行から作業を引き継いだとき、最初のプロンプトの先頭に添える文（Issue #1514） */
+  carryOverNote: string | undefined;
   effective: EffectiveTaskConfig;
   input: TaskSessionInput;
   boundaryResult: { boundary: TaskBoundary; warning: string | undefined };
@@ -2778,6 +2802,7 @@ export class WorkflowRunner {
       // 実行開始時は統合先の作成に失敗した時点で実行自体を始めない
       // （`createPseudoWorktreeForStart`）ため、ここへ理由が入ることはない
       pseudoRestoreFailure: undefined,
+      carriedOverWork: new Map(),
       messaging: undefined,
       messagingHub: undefined,
       messagingSetupInFlight: undefined,
@@ -4179,8 +4204,15 @@ export class WorkflowRunner {
   ): Promise<TaskLaunchPreparation> {
     const taskRunState = live.runState.tasks.get(taskId);
     const retry = retrySuffixOf(taskRunState);
-    const { cwd, branch, usedWorktree, usedPseudoWorktree, pseudoSnapshot, originCommit } =
-      await resolveWorkingDirectory(this.internals, live, task, retry);
+    const {
+      cwd,
+      branch,
+      usedWorktree,
+      usedPseudoWorktree,
+      pseudoSnapshot,
+      originCommit,
+      carriedOver,
+    } = await resolveWorkingDirectory(this.internals, live, task, retry);
 
     const baseline = this.deps.readBaseline();
     // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
@@ -4267,6 +4299,7 @@ export class WorkflowRunner {
       usedPseudoWorktree,
       pseudoSnapshot,
       originCommit,
+      carryOverNote: carriedOver === undefined ? undefined : formatCarryOverPromptNote(carriedOver),
       effective,
       input,
       boundaryResult,
@@ -4325,6 +4358,7 @@ export class WorkflowRunner {
       changedLines: undefined,
       splitSuggested: false,
       overlapWait: undefined,
+      pendingCarryOverNote: prepared.carryOverNote,
       overlapResuming: false,
       overlapResumingPromise: undefined,
       overlapMergeAbortFailed: false,
@@ -4393,7 +4427,12 @@ export class WorkflowRunner {
       // この本文を載せるターンの番号を渡す（Issue #1502）。送信回数はターンの開始
       // （busyの立ち上がり）で数えるため、送る時点ではまだ1つ手前の値になっている
       const delivered = hub?.takeDeliverableMessages(taskId, liveTask.submissionCount + 1) ?? [];
-      const composed = composeNextPrompt(contracted, delivered);
+      const carryOverNote = liveTask.pendingCarryOverNote;
+      liveTask.pendingCarryOverNote = undefined;
+      const composed =
+        carryOverNote === undefined
+          ? composeNextPrompt(contracted, delivered)
+          : `${carryOverNote}\n\n${composeNextPrompt(contracted, delivered)}`;
       // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
       // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを
       // 経由しないため、メッセージ経由で注入された内容を映せなかった。ここは
@@ -4508,6 +4547,10 @@ export class WorkflowRunner {
       live.tasks.get(taskId)?.session.dispose();
       live.tasks.set(taskId, liveTask);
       live.runState = recordSessionInfo(live.runState, taskId, session.sessionId, prepared.cwd);
+      // 作業場所とブランチはここで永続化する。次の状態変化（最初のターンの終わり等）まで
+      // 待つと、最初のターンの途中でリロードしたときに前の試行のworktreeを辿れず、
+      // 残った作業を引き継げない（Issue #1514）
+      void this.persist(runId);
 
       this.attachTaskSession(runId, taskId, task, session);
 

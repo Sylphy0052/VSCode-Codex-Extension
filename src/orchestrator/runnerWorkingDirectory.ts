@@ -14,6 +14,7 @@ import {
   IntegrationQueue as PseudoWorktreeIntegrationQueue,
   type Snapshot,
 } from './pseudoWorktree';
+import type { CarriedOverWork } from './resumeCarryOver';
 import { markMergeBlocked, markMergeFailed, markMergeSucceeded } from './runState';
 import { issue, type LiveRun, type LiveTask } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
@@ -88,6 +89,8 @@ interface WorkingDirectoryResolution {
   usedPseudoWorktree: boolean;
   pseudoSnapshot: Snapshot | undefined;
   originCommit: string;
+  /** 前の試行の作業場所を使い直したとき、その実測値（Issue #1514） */
+  carriedOver?: CarriedOverWork;
 }
 
 export async function resolveWorkingDirectory(
@@ -214,6 +217,22 @@ async function resolveWorktreeWorkingDirectory(
   // `sharedFallback`/`error`のいずれかへ倒すため、ここへは来ない
   if (live.integration === undefined) {
     throw new Error('内部矛盾: 統合worktreeが無い状態でworktree隔離のタスクを開始しようとしました');
+  }
+  // 自動再開で前の試行の作業を引き継ぐタスク（Issue #1514）。試行番号が変わっていなければ
+  // 同じworktreeとブランチをそのまま使う。取り出した時点で消し、以後の再試行は
+  // 今までどおり新しいworktreeで始める
+  const carried = live.carriedOverWork.get(task.id);
+  live.carriedOverWork.delete(task.id);
+  if (carried !== undefined && carried.retry === retry) {
+    return {
+      cwd: carried.cwd,
+      branch: carried.branch,
+      usedWorktree: true,
+      usedPseudoWorktree: false,
+      pseudoSnapshot: undefined,
+      originCommit: carried.originCommit,
+      carriedOver: carried,
+    };
   }
   // HEAD読み取りとworktree作成を同一のキュー項目へまとめる（Issue #380）。分けて
   // 呼ぶと、両者の間に他タスクのマージが割り込み、分岐元が1マージ分古くなりえる

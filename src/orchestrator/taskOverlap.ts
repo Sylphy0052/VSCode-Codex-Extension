@@ -96,7 +96,7 @@ export function findOverlapWaits(
 }
 
 /** 呼び出し元の環境変数で別のリポジトリを指さないようにする（`runnerRevert.ts`と同じ） */
-const ENV_WITHOUT_REPO_OVERRIDES = {
+export const ENV_WITHOUT_REPO_OVERRIDES = {
   GIT_DIR: undefined,
   GIT_WORK_TREE: undefined,
   GIT_INDEX_FILE: undefined,

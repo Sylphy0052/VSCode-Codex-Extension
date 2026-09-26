@@ -11145,7 +11145,12 @@ tasks:
   function reloadWith(
     store: WorkflowRunStore,
     yaml: string,
-    options?: { readAutoResume?: () => boolean; readMaxAutoResumeAttempts?: () => number },
+    options?: {
+      readAutoResume?: () => boolean;
+      readMaxAutoResumeAttempts?: () => number;
+      git?: FakeGitHandle;
+      fs?: WorktreeFileSystemPort;
+    },
   ): { reloadedRunner: WorkflowRunner; newCodexHost: FakeHost } {
     const newCodexHost = new FakeHost();
     const reloadedRunner = new WorkflowRunner({
@@ -11155,8 +11160,8 @@ tasks:
         : {}),
       hosts: { codex: newCodexHost, claude: newCodexHost },
       worktreeQueue: new WorktreeCreationQueue(),
-      git: fakeGit(),
-      fs: identityFs,
+      git: options?.git ?? fakeGit(),
+      fs: options?.fs ?? identityFs,
       filePort: filePort(yaml),
       store,
       log: fakeLogger,
@@ -11448,6 +11453,208 @@ tasks:
     expect(sent).toContain('自動再開です');
     expect(sent).toContain('どちらへ進める？');
     expect(sent).toContain('A案');
+  });
+
+  describe('中断した試行の作業を引き継ぐ（Issue #1514、H5b）', () => {
+    /** 中断した試行のworktreeに残った作業を模すgit。タスクT1のworktree以外は既定の応答 */
+    function leftoverGit(leftover: {
+      status?: string;
+      commitCount?: string;
+      failRevList?: boolean;
+      numstat?: string;
+      untracked?: string;
+    }): FakeGitHandle {
+      const base = fakeGit();
+      return {
+        ...base,
+        async run(args, cwd, runOptions) {
+          if (!cwd.endsWith('/T1')) {
+            return base.run(args, cwd, runOptions);
+          }
+          base.calls.push({ args: [...args], cwd });
+          if (args[0] === 'status' && args[1] === '--porcelain') {
+            return { code: 0, stdout: leftover.status ?? '', stderr: '' };
+          }
+          if (args[0] === 'rev-list' && args[1] === '--count') {
+            return leftover.failRevList === true
+              ? { code: 128, stdout: '', stderr: 'fatal: bad revision' }
+              : { code: 0, stdout: `${leftover.commitCount ?? '0'}\n`, stderr: '' };
+          }
+          if (args[0] === 'merge-base' && args[1] === 'HEAD') {
+            return { code: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' };
+          }
+          if (args[0] === '--no-optional-locks' && args[1] === 'diff') {
+            return { code: 0, stdout: leftover.numstat ?? '', stderr: '' };
+          }
+          if (args[0] === '--no-optional-locks' && args[1] === 'ls-files') {
+            return { code: 0, stdout: leftover.untracked ?? '', stderr: '' };
+          }
+          return base.run(args, cwd, runOptions);
+        },
+      };
+    }
+
+    async function startAndInterrupt(): Promise<{
+      store: WorkflowRunStore;
+      runId: string;
+      cwd: string;
+      branch: string;
+    }> {
+      const { runner, store } = createHarness(YAML);
+      const result = await runner.start('/repo/.agents/workflows/carry-over.yaml', '/repo');
+      const runId = result.runId as string;
+      await flush();
+      const persisted = store.find(runId)?.tasks['T1'];
+      expect(persisted?.state).toBe('running');
+      const cwd = persisted?.cwd ?? '';
+      const branch = persisted?.branch ?? '';
+      expect(cwd.endsWith('/T1')).toBe(true);
+      expect(branch).not.toBe('');
+      return { store, runId, cwd, branch };
+    }
+
+    it('未コミットの変更が残っていれば、同じworktreeとブランチで続きから再開し、最初のプロンプトへ変更の一覧を添える', async () => {
+      const { store, runId, cwd, branch } = await startAndInterrupt();
+      const git = leftoverGit({
+        status: ' M src/a.ts\n?? new.ts\n',
+        numstat: '3\t1\tsrc/a.ts\0',
+        untracked: 'new.ts\0',
+      });
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      // 未追跡のファイルの行数は実際のファイルシステムを読みに行く（存在しないので数えない）
+      // ため、マイクロタスクを回すだけでは開始まで届かない
+      await vi.waitFor(() => expect(newCodexHost.sessions).toHaveLength(1));
+
+      expect(newCodexHost.openInputs[0]?.cwd).toBe(cwd);
+      expect(store.find(runId)?.tasks['T1']?.cwd).toBe(cwd);
+      expect(store.find(runId)?.tasks['T1']?.branch).toBe(branch);
+      // 試行の添字を進めない（進めると新しいworktreeを作ってしまう）
+      expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(0);
+      expect(git.calls.some((c) => c.args[0] === 'worktree' && c.args[1] === 'add')).toBe(false);
+
+      // 最初の送信にだけ、引き継いだ作業の実測を添える
+      const session = newCodexHost.sessions[0] as FakeTaskSession;
+      const first = session.promptTransform?.('p') ?? '';
+      expect(first).toContain('前回の中断時点の作業がこの作業場所に残っている');
+      expect(first).toContain('未コミットの変更2件、進んだコミット0件、変更ファイル2件');
+      expect(first).toContain('- new.ts');
+      expect(first).toContain('- src/a.ts');
+      expect(first.endsWith('p')).toBe(true);
+      const second = session.promptTransform?.('続けて') ?? '';
+      expect(second).not.toContain('前回の中断時点の作業');
+
+      const warning = reloadedRunner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'resumedWithUncommittedWork');
+      expect(warning?.taskId).toBe('T1');
+      expect(warning?.message).toContain('同じ作業場所で続きから再開します');
+
+      // オーケストレーターにも、最初からやり直していないことを伝える
+      const orchestrator = newCodexHost.orchestratorSessions[0] as FakeTaskSession;
+      orchestrator.emitState({ ...initialChatState, busy: false });
+      await flush();
+      const sent = orchestrator.sentTexts.join('\n');
+      expect(sent).toContain('同じworktreeとブランチで続きから再開します');
+      expect(sent).toContain('- T1: 未コミットの変更2件');
+    });
+
+    it('未コミットの変更が無くても進んだコミットがあれば、同じworktreeで再開する', async () => {
+      const { store, runId, cwd } = await startAndInterrupt();
+      const git = leftoverGit({ commitCount: '2', numstat: '10\t0\tsrc/b.ts\0' });
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      expect(newCodexHost.openInputs[0]?.cwd).toBe(cwd);
+      const warning = reloadedRunner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'resumedWithUncommittedWork');
+      expect(warning?.message).toContain('進んだコミット2件');
+    });
+
+    it('何も残っていなければ、今までどおり試行の添字を進めて新しいworktreeで始める', async () => {
+      const { store, runId, cwd } = await startAndInterrupt();
+      const git = leftoverGit({});
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      expect(newCodexHost.sessions).toHaveLength(1);
+      expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
+      expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(1);
+      const kinds = reloadedRunner.getSnapshot(runId)?.warnings.map((w) => w.kind) ?? [];
+      expect(kinds).not.toContain('resumedWithUncommittedWork');
+      expect(kinds).not.toContain('resumeInspectionFailed');
+      const session = newCodexHost.sessions[0] as FakeTaskSession;
+      expect(session.promptTransform?.('p')).not.toContain('前回の中断時点の作業');
+    });
+
+    it('前回のworktreeが無ければ、新しいworktreeで始め、確かめられなかったことを警告に残す', async () => {
+      const { store, runId, cwd } = await startAndInterrupt();
+      const git = leftoverGit({ status: ' M src/a.ts\n' });
+      const fs: WorktreeFileSystemPort = {
+        ...identityFs,
+        pathExists: async (target) => target !== cwd,
+      };
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+        fs,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
+      const warning = reloadedRunner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'resumeInspectionFailed');
+      expect(warning?.taskId).toBe('T1');
+      expect(warning?.message).toContain('前回の作業場所が見つかりません');
+    });
+
+    it('gitが失敗したら、新しいworktreeで始め、確かめられなかったことを警告に残す', async () => {
+      const { store, runId, cwd } = await startAndInterrupt();
+      const git = leftoverGit({ status: ' M src/a.ts\n', failRevList: true });
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
+      const warning = reloadedRunner
+        .getSnapshot(runId)
+        ?.warnings.find((w) => w.kind === 'resumeInspectionFailed');
+      expect(warning?.message).toContain('git rev-listに失敗しました: fatal: bad revision');
+    });
+
+    it('人の手動の再実行は、作業が残っていても今までどおり新しいworktreeで始める', async () => {
+      const { store, runId, cwd } = await startAndInterrupt();
+      const git = leftoverGit({ status: ' M src/a.ts\n' });
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => false,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+      expect(newCodexHost.sessions).toHaveLength(0);
+
+      expect(reloadedRunner.retryTask(runId, 'T1')).toEqual({ ok: true });
+      await flush();
+      expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
+      expect(git.calls.some((c) => c.args[0] === 'rev-list')).toBe(false);
+    });
   });
 });
 
@@ -14576,7 +14783,8 @@ tasks:
 
     const ciStatusCalls = (cli: FakeForgeCli): number =>
       cli.calls.filter(
-        (c) => c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
+        (c) =>
+          c.args[0] === 'pr' && c.args[1] === 'view' && c.args[3] === '--json=statusCheckRollup',
       ).length;
 
     it('最終マージ段のCI待ちの間、LoopController.observeは呼ばれず停滞と判定されない', async () => {
