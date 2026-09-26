@@ -1126,6 +1126,10 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
  * 無いことをここで確認済みのため、`runHalted`を作りうる経路がこのリロード以外に無い）。
  * `markMergeSucceeded`が依存先の`skipped(mergeBlocked)`を戻すのと同じ考え方で、これらも
  * まとめて`pending`へ戻し、スケジューラ（`nextTasksToStart`）の依存充足チェックに委ねる。
+ *
+ * **`carryOverTaskIds`に含むタスクは`manualRetryCount`を進めない**（Issue #1514）。
+ * 前の試行のworktreeに作業が残っていたタスクで、同じ試行番号のまま同じworktree・
+ * ブランチを使い直す（`createWorktree`は呼ばないので`branchExists`とは衝突しない）。
  */
 export type AutoResumeOutcome =
   | { readonly kind: 'nothingToResume' }
@@ -1137,7 +1141,11 @@ export type AutoResumeOutcome =
       readonly resumedTaskIds: readonly string[];
     };
 
-export function applyAutoResume(run: RunState, tasks: readonly WorkflowTask[]): AutoResumeOutcome {
+export function applyAutoResume(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  carryOverTaskIds: ReadonlySet<string> = new Set(),
+): AutoResumeOutcome {
   const reloadInterruptedIds: string[] = [];
   let hasOtherFailure = false;
   for (const [id, s] of run.tasks) {
@@ -1175,8 +1183,8 @@ export function applyAutoResume(run: RunState, tasks: readonly WorkflowTask[]): 
       ...s,
       state: 'pending',
       // `retryCount`ではなく`manualRetryCount`を進める（`task.retries`の予算を消費させない
-      // ため。上のJSDoc参照）
-      manualRetryCount: s.manualRetryCount + 1,
+      // ため。上のJSDoc参照）。作業を引き継ぐタスクは同じ試行番号のまま使い直す
+      manualRetryCount: carryOverTaskIds.has(id) ? s.manualRetryCount : s.manualRetryCount + 1,
       submissionCount: 0,
       failure: undefined,
     });

@@ -16,7 +16,12 @@ import {
 } from './runState';
 import type { PersistedRun } from './runStore';
 import { getRunOutcome } from './scheduler';
-import { isGitWorkingTree, resolveHeadCommit } from './worktree';
+import { isGitWorkingTree, resolveHeadCommit, worktreePath } from './worktree';
+import {
+  describeCarriedOverWork,
+  inspectInterruptedWorktree,
+  type CarriedOverWork,
+} from './resumeCarryOver';
 import {
   MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
@@ -25,6 +30,7 @@ import {
 } from './workflow';
 import {
   resolveBranchNamingAndDraft,
+  retrySuffixOf,
   type LiveRun,
   type LiveRunForgeState,
   type WorkflowWarning,
@@ -440,6 +446,7 @@ async function rebuildLiveRun(
     draftPullRequest,
     pseudo: restoredPseudo.pseudo,
     pseudoRestoreFailure: restoredPseudo.failure,
+    carriedOverWork: new Map(),
     // タスク間メッセージング（design.md §16.21）はこのウィンドウで新たに始める実行にだけ
     // 立てる（リロード直後の復元では作らない。再実行すればstartTask()相当の経路で
     // 改めてタスクが動き出すが、メッセージングはrunそのものに紐づく短命なサーバのため、
@@ -566,13 +573,40 @@ async function autoResumeIfEligible(
     return;
   }
 
-  rebuilt.runState = outcome.run;
+  // 中断した試行のworktreeを実測し、作業が残っていれば同じ試行番号のまま使い直す
+  // （Issue #1514）。`applyAutoResume`は純粋関数なので、引き継ぐタスクを渡して引き直す
+  // 実測の`await`の間に人が手動で再実行（`retryTask`）したタスクは、もう`reloadInterrupted`
+  // ではない。`outcome`は実測前の状態から作った値なので、使うとその再実行を巻き戻してしまう。
+  // 実測の後の状態から必ず引き直し、実際に戻すタスクの分だけ引き継ぎを残す
+  const inspected = await inspectCarriedOverWork(self, p, rebuilt);
+  const resumed = applyAutoResume(rebuilt.runState, rebuilt.def.tasks, new Set(inspected.keys()));
+  const resumedTaskIds = new Set(resumed.kind === 'resumed' ? resumed.resumedTaskIds : []);
+  const carried = new Map([...inspected].filter(([taskId]) => resumedTaskIds.has(taskId)));
+  if (carried.size !== inspected.size) {
+    rebuilt.warnings = rebuilt.warnings.filter(
+      (w) =>
+        !(
+          w.kind === 'resumedWithUncommittedWork' &&
+          w.taskId !== undefined &&
+          inspected.has(w.taskId) &&
+          !carried.has(w.taskId)
+        ),
+    );
+  }
+  if (resumed.kind !== 'resumed') {
+    // 実測の間に人が再実行・中止等でrunを動かした結果、戻すタスクが無くなった。人が
+    // 操作した後なので`autoResumeBlocked`（手動で再実行するよう促す警告）は出さない
+    self.notify(p.runId);
+    return;
+  }
+  rebuilt.carriedOverWork = carried;
+  rebuilt.runState = resumed.run;
   rebuilt.finished = getRunOutcome(rebuilt.runState) !== 'running';
   rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResume');
   rebuilt.warnings.push({
     kind: 'autoResume',
     taskId: undefined,
-    message: `中断からの自動再開により、次のタスクをpendingへ戻しました: ${outcome.resumedTaskIds.join(', ')}`,
+    message: `中断からの自動再開により、次のタスクをpendingへ戻しました: ${resumed.resumedTaskIds.join(', ')}`,
   });
   // `current`が無い（このrunがどこかで消えた等）ことは通常起きないが、`update`の
   // updaterはPersistedRunを必ず返す必要があるため、その場合は`p`（このrunがまだ
@@ -584,11 +618,82 @@ async function autoResumeIfEligible(
 
   await self.ensureMessaging(p.runId, rebuilt);
   // `exactOptionalPropertyTypes`のため、答え待ちが無ければキー自体を渡さない
-  void setupOrchestratorForStart(
-    self,
-    p.runId,
-    rebuilt,
-    p.pendingAskUser === undefined ? {} : { pendingAskUser: p.pendingAskUser },
-  );
+  void setupOrchestratorForStart(self, p.runId, rebuilt, {
+    ...(p.pendingAskUser === undefined ? {} : { pendingAskUser: p.pendingAskUser }),
+    ...(carried.size === 0
+      ? {}
+      : { carriedOverWork: [...carried].map(([taskId, work]) => ({ taskId, work })) }),
+  });
   self.pump(p.runId);
+}
+
+/**
+ * 自動再開の対象（`reloadInterrupted`）のうち、gitのworktreeで走っていたタスクについて、
+ * 中断した試行のworktreeを実測する（Issue #1514）。作業が残っていたタスクを返し、
+ * 引き継ぎ・実測の失敗をそれぞれ警告へ積む。実測できなかったタスクと何も残っていない
+ * タスクは返さない（今までどおり新しいworktreeで最初からやり直す）。
+ */
+async function inspectCarriedOverWork(
+  self: WorkflowRunnerInternals,
+  p: PersistedRun,
+  rebuilt: LiveRun,
+): Promise<Map<string, CarriedOverWork>> {
+  const carried = new Map<string, CarriedOverWork>();
+  const integration = rebuilt.integration;
+  if (integration === undefined) {
+    return carried;
+  }
+  for (const [taskId, s] of rebuilt.runState.tasks) {
+    if (s.state !== 'failed' || s.failure?.kind !== 'reloadInterrupted' || s.cwd === undefined) {
+      continue;
+    }
+    const retry = retrySuffixOf(s);
+    // 共有・明示cwdのタスクはcwdが試行のworktreeと一致しない。worktreeで走ったタスクだけ見る
+    let expectedCwd: string;
+    try {
+      expectedCwd = worktreePath(rebuilt.repoRoot, p.runId, taskId, retry);
+    } catch {
+      continue;
+    }
+    const branch = p.tasks[taskId]?.branch;
+    if (s.cwd !== expectedCwd || branch === undefined || branch === '') {
+      continue;
+    }
+    rebuilt.warnings = rebuilt.warnings.filter(
+      (w) =>
+        !(
+          (w.kind === 'resumedWithUncommittedWork' || w.kind === 'resumeInspectionFailed') &&
+          w.taskId === taskId
+        ),
+    );
+    let inspection: Awaited<ReturnType<typeof inspectInterruptedWorktree>>;
+    try {
+      inspection = await inspectInterruptedWorktree(self.deps.git, self.deps.fs, {
+        cwd: s.cwd,
+        branch,
+        retry,
+        integrationBranch: integration.branch,
+      });
+    } catch (e) {
+      inspection = {
+        kind: 'failed',
+        message: sanitizeForLog(e instanceof Error ? e.message : String(e)),
+      };
+    }
+    if (inspection.kind === 'failed') {
+      const message = `前回の作業場所を確かめられなかったため、新しい作業場所で最初からやり直します: ${inspection.message}`;
+      self.deps.log.warn(`[workflow ${p.runId}/${taskId}] ${message}`);
+      rebuilt.warnings.push({ kind: 'resumeInspectionFailed', taskId, message });
+      continue;
+    }
+    if (inspection.kind === 'carried') {
+      carried.set(taskId, inspection.work);
+      rebuilt.warnings.push({
+        kind: 'resumedWithUncommittedWork',
+        taskId,
+        message: `前回の中断時点の作業が残っていたため、同じ作業場所で続きから再開します: ${describeCarriedOverWork(inspection.work)}`,
+      });
+    }
+  }
+  return carried;
 }
