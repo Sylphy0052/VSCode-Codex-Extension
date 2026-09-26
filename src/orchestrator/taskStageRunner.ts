@@ -331,7 +331,11 @@ export class TaskStageRunner {
           r,
           taskId,
           gateId,
-          { choice, by: 'reflex', reflexSummary: verdict.summary },
+          {
+            choice,
+            by: 'reflex',
+            ...(verdict.summary !== undefined ? { reflexSummary: verdict.summary } : {}),
+          },
           this.now(),
         ),
       );
