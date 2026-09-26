@@ -2,19 +2,25 @@ import { randomUUID } from 'node:crypto';
 
 import type { ModelInfo } from '../codex/modelCatalog';
 import type { HandoffClassifierInput } from '../view/handoffClassifier';
+import { buildTaskRunKanban, type TaskRunKanbanBoard } from '../view/taskRunKanbanModel';
+import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
 import { parsePlanArgs, resolveTaskPlan } from './taskRunPlan';
-import { findStageQuestion } from './taskRunQuestions';
+import { cancelOpenQuestions, findStageQuestion } from './taskRunQuestions';
 import { decideStageStart, type StageRef, type StartStageRejection } from './taskRunScheduler';
 import {
   approveTaskPlan,
+  createTaskRun,
   currentStage,
   getTask,
+  haltStage,
   isValidMaxParallel,
+  listTasks,
   MAX_TASK_RUN_PARALLEL,
   proposeTaskPlan,
   recordStageDecision,
   resetStageForRetry,
+  setTaskRunHaltedByUser,
   setTaskRunMaxParallel,
   type StageDecision,
   type TaskRun,
@@ -40,8 +46,15 @@ import {
 
 export type ControllerResult = { ok: true; message: string } | { ok: false; message: string };
 
+export type StartTaskRunOutcome =
+  | { ok: true; runId: string; reused: boolean }
+  | { ok: false; message: string };
+
+/** 再読み込みで工程セッションが終わった工程へ残す理由。 */
+const RELOAD_HALT_REASON = '拡張機能の再読み込みで工程セッションが終わりました。「やり直す」で始め直せます';
+
 export interface TaskRunControllerDeps {
-  store: Pick<TaskRunStore, 'find' | 'update'>;
+  store: Pick<TaskRunStore, 'find' | 'update' | 'list' | 'findActive'>;
   runner: Pick<TaskStageRunner, 'pump' | 'stopStage' | 'instructStage' | 'answerQuestion'>;
   /** エンジンのモデル一覧と、カタログからeffortを取れないときの退避先。 */
   modelCatalog(engine: TaskRunEngine): {
@@ -81,6 +94,8 @@ export class TaskRunController {
   /** 求めている途中・求め終えた推奨値。キーは`runId`と`recommendationKey`。 */
   private readonly recommending = new Map<string, Promise<StageSettingsRecommendation | undefined>>();
   private readonly recommended = new Map<string, Map<string, StageSettingsRecommendation>>();
+  /** runの開始を直列にする。同じフォルダでrunを2つ作らないため。 */
+  private readonly startQueue = new SerialQueue();
 
   constructor(private readonly deps: TaskRunControllerDeps) {}
 
@@ -243,6 +258,113 @@ export class TaskRunController {
     }
     this.pumpLater(runId);
     return true;
+  }
+
+  /**
+   * runを始める。同じフォルダに終わっていないrunがあれば、新しく作らずにそれを返す
+   * （1ワークスペースにつき実行中は1つ）。
+   */
+  startRun(input: {
+    workspaceRoot: string;
+    engine: TaskRunEngine;
+    maxParallel: number;
+  }): Promise<StartTaskRunOutcome> {
+    return this.startQueue.enqueue(async (): Promise<StartTaskRunOutcome> => {
+      const active = this.deps.store.findActive(input.workspaceRoot);
+      if (active !== undefined) {
+        return { ok: true, runId: active.runId, reused: true };
+      }
+      if (!isValidMaxParallel(input.maxParallel)) {
+        return { ok: false, message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+      }
+      const run = createTaskRun({ ...input, runId: this.newId(), now: this.now() });
+      await this.deps.store.update(run.runId, () => run);
+      this.handleRunChanged(run);
+      return { ok: true, runId: run.runId, reused: false };
+    });
+  }
+
+  /** run全体の一時停止と再開（Kanbanから）。停止中は新しい工程を始めない。実行中の工程は止めない。 */
+  async setHalted(runId: string, halted: boolean): Promise<void> {
+    const next = await this.updateRun(runId, (r) =>
+      r.finishedAt === undefined ? setTaskRunHaltedByUser(r, halted) : r,
+    );
+    if (next !== undefined && !halted) {
+      this.pumpLater(runId);
+    }
+  }
+
+  /**
+   * 止まった工程をやり直せる状態へ戻す（Kanbanから）。工程は未着手に戻り、Orchestratorが
+   * 設定を決め直すのを待つ（判断待ちのイベントがOrchestratorへ届く）。
+   */
+  async retryStage(runId: string, taskId: string): Promise<ControllerResult> {
+    let rejection: string | undefined;
+    const next = await this.updateRun(runId, (r) => {
+      const task = getTask(r, taskId);
+      const stage = task === undefined ? undefined : currentStage(task);
+      if (r.finishedAt !== undefined) {
+        rejection = 'このrunは終わっている';
+        return r;
+      }
+      if (task === undefined || stage === undefined || task.stages[stage].status !== 'halted') {
+        rejection = '止まっている工程が無い';
+        return r;
+      }
+      if (task.attention === 'stopping') {
+        rejection = '停止処理中';
+        return r;
+      }
+      return resetStageForRetry(r, taskId, this.now());
+    });
+    if (next === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    if (rejection !== undefined) {
+      return { ok: false, message: `${taskId}をやり直せない: ${rejection}` };
+    }
+    return { ok: true, message: `${taskId}をやり直せる状態へ戻した。Orchestratorが設定を決め直す` };
+  }
+
+  /**
+   * 再読み込み後の復元。工程セッションとOrchestratorは再読み込みで終わっているため、実行中だった
+   * 工程を止め（回答待ちの質問は取り消す）、終わっていないrunは人が「再開」するまで止めておく。
+   */
+  async restore(): Promise<void> {
+    for (const run of this.deps.store.list()) {
+      if (run.finishedAt !== undefined) {
+        this.lastSeen.set(run.runId, run);
+        continue;
+      }
+      try {
+        const next = await this.deps.store.update(run.runId, (current) =>
+          this.haltForReload(current ?? run),
+        );
+        this.lastSeen.set(run.runId, next);
+      } catch (e: unknown) {
+        // 1件の保存失敗で残りのrunの復元を止めない
+        this.deps.log(`[task run] ${run.runId}を復元できませんでした: ${String(e)}`);
+      }
+    }
+  }
+
+  private haltForReload(run: TaskRun): TaskRun {
+    const now = this.now();
+    let next = run.planStatus === 'approved' ? setTaskRunHaltedByUser(run, true) : run;
+    for (const task of listTasks(run)) {
+      const stage = currentStage(task);
+      if (stage === undefined || task.stages[stage].status !== 'running') {
+        continue;
+      }
+      next = cancelOpenQuestions(next, task.taskId, task.currentAttemptId ?? '', now);
+      next = haltStage(next, task.taskId, 'stopped', RELOAD_HALT_REASON, now);
+    }
+    return next;
+  }
+
+  /** Kanbanの盤面。`selectedRunId`が無ければ終わっていない新しいrunを選ぶ。 */
+  board(selectedRunId: string | undefined): TaskRunKanbanBoard {
+    return buildTaskRunKanban(this.deps.store.list(), selectedRunId);
   }
 
   /**

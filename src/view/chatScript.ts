@@ -3565,6 +3565,9 @@ export function chatScript(
   el('forgeHub').addEventListener('click', () =>
     vscode.postMessage({ type: 'forgeHub' }),
   );
+  el('orchestratorMode').addEventListener('click', () =>
+    vscode.postMessage({ type: 'orchestratorMode' }),
+  );
   el('openProgress').addEventListener('click', () =>
     vscode.postMessage({ type: 'openProgress' }),
   );

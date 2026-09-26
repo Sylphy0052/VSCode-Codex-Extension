@@ -2688,6 +2688,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await vscode.commands.executeCommand('agent.forgeHub', 'codex');
         return;
       }
+      if (type === 'orchestratorMode') {
+        await vscode.commands.executeCommand('agent.taskRun.start', 'codex');
+        return;
+      }
       if (type === 'openProgress') {
         await vscode.commands.executeCommand('agent.openProgress');
         return;
