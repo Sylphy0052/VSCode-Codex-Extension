@@ -768,6 +768,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 変更ファイルの交差の実測（Issue #1469）。周期の開始時と判定のたびに現在値を読み直す
     readOverlapCheckIntervalSec: () => readWorkflowsConfig().overlapCheckIntervalSec,
     readOverlapIgnore: () => readWorkflowsConfig().overlapIgnore,
+    readSplitSuggestThresholds: () => readWorkflowsConfig().splitSuggestThresholds,
     // ask_user（design.md §16.33、Issue #583）の呼び出し上限。他のreadXxxと同じく
     // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
     readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,

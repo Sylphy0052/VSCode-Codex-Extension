@@ -112,6 +112,7 @@ import {
   stopOverlapPoll,
 } from './runnerOverlap';
 import type { OverlapWait } from './taskOverlap';
+import type { SplitSuggestThresholds } from './taskSplit';
 import { notifyUnansweredInstructions } from './runnerInstruction';
 import {
   buildRunTaskSnapshots,
@@ -635,6 +636,12 @@ export interface WorkflowRunnerDeps {
    */
   readOverlapIgnore?: () => readonly string[];
   /**
+   * `agent.workflows.splitSuggest*`の現在値。走行中のタスクの規模がこれを超えたら、
+   * オーケストレーターへ分割を提案する（Issue #1508）。省略時は
+   * `DEFAULT_SPLIT_SUGGEST_THRESHOLDS`
+   */
+  readSplitSuggestThresholds?: () => SplitSuggestThresholds;
+  /**
    * `verify.commands` の実行（Issue #1378）。**省略可能**で、省略された場合は実行せず、
    * 従来どおり意味レビューへ文章として渡すだけにする（`forge`と同じ設計判断）。
    * 実行するのはWorkspace Trustが有効で、利用者がrunごとの確認で許可したときだけ
@@ -1047,6 +1054,13 @@ export interface TaskSnapshot {
   pendingApproval: TaskPendingApprovalSnapshot | undefined;
   /** `waitingOverlap`の間だけ埋まる。待っている相手と交差したファイル（Issue #1469） */
   overlapWait?: OverlapWait;
+  /**
+   * 直近に実測した変更の規模（Issue #1508）。gitのworktreeで走るタスクを測れたときだけ埋まる。
+   * リロード復元直後など、このウィンドウで測っていなければ省く
+   */
+  changeSize?: { files: number; addedLines: number; deletedLines: number };
+  /** この試行で、オーケストレーターへ分割を提案済みか（Issue #1508） */
+  splitSuggested?: boolean;
   /**
    * このウィンドウでセッションが生きているか。`reveal` / `中断` / `タスク停止` /
    * `承認` はこれが `true` のときだけ意味を持つ（design.md §16.11「リロード後の実行再開」。
@@ -1531,6 +1545,13 @@ export interface LiveTask {
   startSeq: number;
   /** 直近に実測した変更ファイル（リポジトリ相対）。まだ測っていなければ`undefined` */
   touchedFiles: ReadonlySet<string> | undefined;
+  /**
+   * 直近に実測した変更行数（Issue #1508）。`touchedFiles`と同じ測定で埋まる。
+   * まだ測っていなければ`undefined`
+   */
+  changedLines: { added: number; deleted: number } | undefined;
+  /** この試行で、分割の提案（`taskSplitSuggested`）を送り済みか（Issue #1508） */
+  splitSuggested: boolean;
   /** `waitingOverlap`の間だけ埋まる。待っている相手と交差したファイル */
   overlapWait: OverlapWait | undefined;
   /** 交差の待機を解き、統合ブランチを取り込んでいる最中 */
@@ -4244,6 +4265,8 @@ export class WorkflowRunner {
       taskApprovalTimedOut: false,
       startSeq: this.nextTaskStartSeq++,
       touchedFiles: undefined,
+      changedLines: undefined,
+      splitSuggested: false,
       overlapWait: undefined,
       overlapResuming: false,
       overlapResumingPromise: undefined,
@@ -5726,9 +5749,10 @@ export class WorkflowRunner {
       if (live.runState.tasks.get(taskId)?.state === 'waitingOverlap') {
         this.pump(runId);
       }
+      // 確定したターン数は、交差の実測に続く分割の判定（Issue #1508）でも使うため先に数える
+      liveTask.completedTurnCount += 1;
       void checkTaskOverlap(this.internals, runId);
       // 指示を添えたターンが応答なしで確定したら知らせる（Issue #1502）
-      liveTask.completedTurnCount += 1;
       const unanswered =
         live.messaging?.hub.takeUnansweredInstructions(taskId, liveTask.completedTurnCount) ?? [];
       void notifyUnansweredInstructions(this.internals, runId, live, taskId, unanswered);

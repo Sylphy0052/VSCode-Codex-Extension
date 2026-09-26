@@ -630,6 +630,7 @@ export function workflowScript(): string {
       ' ・ cleanup: ' + cleanupLabel(task) +
       (task.roleLabel ? ' ・ 役割: ' + task.roleLabel : '') +
       (task.mergeResolutionActive ? ' ・ ' + mergeResolutionBadgeLabel(task) : '') +
+      (task.sizeLabel ? ' ・ ' + task.sizeLabel : '') +
       (task.lastResponseSummary ? ' ・ ' + task.lastResponseSummary : '');
     group.appendChild(title);
 
@@ -1093,6 +1094,10 @@ export function workflowScript(): string {
       }
       if (task.mergeResolutionActive) {
         stateCell.appendChild(text('span', 'hint', '（' + mergeResolutionBadgeLabel(task) + '）'));
+      }
+      // 変更の規模と分割の提案済みの印（Issue #1508）。文字列はworkflowView.ts側で組み立て済み
+      if (task.sizeLabel) {
+        stateCell.appendChild(text('span', 'hint', '（' + task.sizeLabel + '）'));
       }
       row.appendChild(stateCell);
 
