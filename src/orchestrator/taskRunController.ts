@@ -330,7 +330,7 @@ export class TaskRunController {
    * 書き込みの間に割り込まれないよう、`updateRun`の更新関数の中（storeの書き込みの直列の中）で呼ぶ。
    */
   private findIssueConflict(run: TaskRun, tasks?: readonly PlanTaskInput[]): string | undefined {
-    const numbers = new Set(
+    const plannedIssueNumbers = new Set(
       (tasks ?? listTasks(run))
         .map((t) => t.existingIssueNumber)
         .filter((n): n is number => n !== undefined),
@@ -343,11 +343,11 @@ export class TaskRunController {
         if (isTaskDone(task)) {
           continue;
         }
-        const taken = [task.existingIssueNumber, task.issueNumber].find(
-          (n): n is number => n !== undefined && numbers.has(n),
+        const takenIssueNumber = [task.existingIssueNumber, task.issueNumber].find(
+          (n): n is number => n !== undefined && plannedIssueNumbers.has(n),
         );
-        if (taken !== undefined) {
-          return `既存のIssue #${String(taken)}は別のrun「${taskRunLabel(other)}」が扱っている`;
+        if (takenIssueNumber !== undefined) {
+          return `既存のIssue #${String(takenIssueNumber)}は別のrun「${taskRunLabel(other)}」が扱っている`;
         }
       }
     }

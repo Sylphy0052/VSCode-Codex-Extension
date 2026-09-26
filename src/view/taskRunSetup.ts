@@ -397,26 +397,11 @@ async function startRunCommand(
   let startParallel = false;
   if (active.length > 0) {
     const only = active.length === 1 ? active[0] : undefined;
-    const action = await pick<'parallel' | 'open' | 'suspend' | 'finish'>(
+    const action = await pick(
       only === undefined
         ? `このフォルダには動いているrunが${String(active.length)}本あります`
         : 'このフォルダには動いているrunがあります',
-      [
-        [
-          'parallel',
-          '既存のrunと並行して新しく始める（工程セッションの数はフォルダ全体で設定`agent.taskRun.maxParallelPerFolder`まで）',
-        ],
-        ['open', only === undefined ? '既存のrunを選んで開く' : '既存のrunを開く'],
-        ...(only === undefined
-          ? []
-          : ([
-              [
-                'suspend',
-                '既存のrunを中断して新しく始める（動いている工程セッションとOrchestratorを止めます。中断したrunは後で再開できます）',
-              ],
-              ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
-            ] as const)),
-      ],
+      activeRunActions(active.length),
     );
     if (action === undefined) {
       return;
@@ -548,6 +533,32 @@ async function confirmOrchestratorGateResolution(input: {
     '決着させる',
   );
   return choice === '決着させる';
+}
+
+type ActiveRunAction = 'parallel' | 'open' | 'suspend' | 'finish';
+
+/**
+ * 同じフォルダに動いているrunがあるときに、新しいrunの始め方として出す選択肢。
+ * 既存のrunの中断・終了による入れ替えは、動いているrunが1本のときだけ出す。
+ */
+function activeRunActions(activeCount: number): [ActiveRunAction, string][] {
+  const actions: [ActiveRunAction, string][] = [
+    [
+      'parallel',
+      '既存のrunと並行して新しく始める（工程セッションの数はフォルダ全体で設定`agent.taskRun.maxParallelPerFolder`まで）',
+    ],
+    ['open', activeCount === 1 ? '既存のrunを開く' : '既存のrunを選んで開く'],
+  ];
+  if (activeCount === 1) {
+    actions.push(
+      [
+        'suspend',
+        '既存のrunを中断して新しく始める（動いている工程セッションとOrchestratorを止めます。中断したrunは後で再開できます）',
+      ],
+      ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
+    );
+  }
+  return actions;
 }
 
 async function pickFolder(): Promise<string | undefined> {

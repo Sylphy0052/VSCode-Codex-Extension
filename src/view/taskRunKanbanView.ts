@@ -389,7 +389,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
             '並行して再開すると、工程セッションの数はフォルダ全体で設定`agent.taskRun.maxParallelPerFolder`までに抑えます。' +
             (active.length === 1
               ? '中断して再開すると、動いているrunの工程セッションとOrchestratorを止めます。中断したrunは後で「runを再開する」で続けられます。'
-              : ''),
+              : '動いているrunのどれかと入れ替えたいときは、Kanbanでそのrunを選んで中断してから、このrunを再開してください。'),
         },
         ...(active.length === 1 ? [alongside, replace] : [alongside]),
       );
