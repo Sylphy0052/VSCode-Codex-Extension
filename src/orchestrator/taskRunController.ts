@@ -442,7 +442,17 @@ export class TaskRunController {
       const stage = currentStage(task);
       return stage !== undefined && task.stages[stage].status === 'running';
     });
-    await Promise.all(running.map((task) => this.deps.runner.stopStage(run.runId, task.taskId)));
+    // 1つの工程で止め損ねても、残りの工程を止めて終了・中断まで進める
+    const results = await Promise.allSettled(
+      running.map((task) => this.deps.runner.stopStage(run.runId, task.taskId)),
+    );
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        this.deps.log(
+          `[task run] ${running[i]?.taskId ?? ''}の工程を止められませんでした: ${String(result.reason)}`,
+        );
+      }
+    });
   }
 
   /**
