@@ -1277,6 +1277,11 @@ export class RoadmapIssueRunner {
    */
   pauseIssue(runId: string, issueNumber: number): Promise<boolean> {
     const key = liveKey(runId, issueNumber);
+    // 同じIssueのロックを自動引き継ぎのopenTaskSession・終了処理のfindPullRequest・
+    // 別の一時停止/停止のinterruptAndWaitIdle（最大60秒）等が握っていても、続きの指示
+    // だけはロック待ちの前に止める（Issue #1484）。状態の更新と中断の確認は
+    // 引き続きロックの中（`pauseIssueInner`）で行う
+    this.live.get(key)?.session.pauseLoop();
     return this.withIssueLock(key, () => this.pauseIssueInner(runId, issueNumber));
   }
 
@@ -1314,6 +1319,8 @@ export class RoadmapIssueRunner {
    */
   stopIssue(runId: string, issueNumber: number): Promise<boolean> {
     const key = liveKey(runId, issueNumber);
+    // pauseIssueと同じ理由（Issue #1484）。ロック待ちの前に停止だけ先に効かせる
+    this.live.get(key)?.session.stopLoop();
     return this.withIssueLock(key, () => this.stopIssueInner(runId, issueNumber));
   }
 
@@ -1382,11 +1389,20 @@ export class RoadmapIssueRunner {
     if (run === undefined || this.disposed) {
       return;
     }
+    // 開始処理中（`this.starting`）だがまだ`progress: 'running'`として永続化されていない
+    // Issueも空き枠の計算に含める。`pump`を短い間隔で複数回呼んだとき、この分を数えずに
+    // 呼ぶと同じ空き枠を数え直し、並列上限を超えて着手する余地がある（Issue #1484）
+    const runPrefix = `${runId}#`;
+    const startingIssueNumbers = new Set(
+      [...this.starting]
+        .filter((key) => key.startsWith(runPrefix))
+        .map((key) => Number(key.slice(runPrefix.length))),
+    );
     // 空き枠の分を並行して始める（worktreeの作成は`WorktreeCreationQueue`が直列にする）
     await Promise.all(
-      pickIssuesToStart(run)
-        .filter((issueNumber) => !this.starting.has(liveKey(runId, issueNumber)))
-        .map((issueNumber) => this.startIssue(runId, issueNumber, { overrideDependencies: false })),
+      pickIssuesToStart(run, startingIssueNumbers).map((issueNumber) =>
+        this.startIssue(runId, issueNumber, { overrideDependencies: false }),
+      ),
     );
   }
 
