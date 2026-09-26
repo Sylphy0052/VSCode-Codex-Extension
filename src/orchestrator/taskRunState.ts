@@ -221,6 +221,11 @@ export interface TaskRun {
   startedAt: string;
   /** 実行中は`undefined`。 */
   finishedAt: string | undefined;
+  /**
+   * 人がrunを中断した時刻（ISO8601、Issue #1560）。中断中は動いているrunとして数えず、同じフォルダで
+   * 新しいrunを始められる。再開すると外す。項目の無い保存データは中断していないと読む。
+   */
+  suspendedAt?: string;
   planStatus: TaskPlanStatus;
   /** 着手順（計画の並び）の`taskId`。 */
   taskOrder: readonly string[];
@@ -796,6 +801,26 @@ export function finishTaskRunIfDone(run: TaskRun, now: Date): TaskRun {
 /** 人がrunを終える。実行中の工程セッションは呼び出し側が先に止める前提。 */
 export function finishTaskRun(run: TaskRun, now: Date): TaskRun {
   return run.finishedAt !== undefined ? run : { ...run, finishedAt: now.toISOString() };
+}
+
+/** 終わっておらず中断もしていない。1フォルダにつき1本だけ持てる。 */
+export function isTaskRunActive(run: TaskRun): boolean {
+  return run.finishedAt === undefined && run.suspendedAt === undefined;
+}
+
+/** 人がrunを中断する。実行中の工程セッションは呼び出し側が先に止める前提。 */
+export function suspendTaskRun(run: TaskRun, now: Date): TaskRun {
+  return isTaskRunActive(run) ? { ...run, suspendedAt: now.toISOString() } : run;
+}
+
+/** 中断を外す。一時停止は呼び出し側が解く。 */
+export function resumeTaskRun(run: TaskRun): TaskRun {
+  if (run.suspendedAt === undefined) {
+    return run;
+  }
+  const next = { ...run };
+  delete next.suspendedAt;
+  return next;
 }
 
 /** Orchestratorセッションを開く前に世代を進める。 */

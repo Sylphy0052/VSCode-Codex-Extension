@@ -23,14 +23,17 @@ import {
   finishTaskRun,
   getTask,
   isTaskDone,
+  isTaskRunActive,
   isValidMaxParallel,
   listTasks,
   MAX_TASK_RUN_PARALLEL,
   proposeTaskPlan,
   recordStageDecision,
   resetStageForRetry,
+  resumeTaskRun,
   setTaskRunHaltedByUser,
   setTaskRunMaxParallel,
+  suspendTaskRun,
   type StageDecision,
   type StageGateChoice,
   type TaskRun,
@@ -349,15 +352,16 @@ export class TaskRunController {
 
   /** run全体の一時停止と再開（Kanbanから）。停止中は新しい工程を始めない。実行中の工程は止めない。 */
   async setHalted(runId: string, halted: boolean): Promise<void> {
+    // 中断中のrunは再開（`resumeRun`）で一時停止を解く
     const next = await this.updateRun(runId, (r) =>
-      r.finishedAt === undefined ? setTaskRunHaltedByUser(r, halted) : r,
+      isTaskRunActive(r) ? setTaskRunHaltedByUser(r, halted) : r,
     );
     if (next !== undefined && !halted) {
       this.pumpLater(runId);
     }
   }
 
-  /** 同じフォルダの終わっていないrun（`startRun`が再利用するもの）。 */
+  /** 同じフォルダの動いているrun（`startRun`が再利用するもの）。中断中のrunは含まない。 */
   findActive(workspaceRoot: string): TaskRun | undefined {
     return this.deps.store.findActive(workspaceRoot);
   }
@@ -376,13 +380,69 @@ export class TaskRunController {
     if (halted.finishedAt !== undefined) {
       return { ok: true, message: 'runは終わっている' };
     }
-    const running = listTasks(halted).filter((task) => {
+    await this.stopRunningStages(halted);
+    await this.updateRun(runId, (r) => finishTaskRun(r, this.now()));
+    return { ok: true, message: 'runを終えた' };
+  }
+
+  /**
+   * 人がrunを中断する（Issue #1560）。`finishRun`と同じ手順で、`finishedAt`の代わりに中断を立てる。
+   * worktreeとブランチは残す。Orchestratorのセッションは呼び出し側が閉じる。
+   */
+  async suspendRun(runId: string): Promise<ControllerResult> {
+    const halted = await this.updateRun(runId, (r) =>
+      isTaskRunActive(r) ? setTaskRunHaltedByUser(r, true) : r,
+    );
+    if (halted === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    if (halted.finishedAt !== undefined) {
+      return { ok: false, message: 'runは終わっている' };
+    }
+    if (halted.suspendedAt !== undefined) {
+      return { ok: true, message: 'runは中断している' };
+    }
+    await this.stopRunningStages(halted);
+    await this.updateRun(runId, (r) => suspendTaskRun(r, this.now()));
+    return { ok: true, message: 'runを中断した' };
+  }
+
+  /**
+   * 中断したrunを再開する（Issue #1560）。同じフォルダに動いているrunがあれば拒否する（呼び出し側が
+   * 先にそちらを中断させる）。中断で止めた工程は自動では始めず、「やり直す」かOrchestratorの判断で
+   * 動かす。Orchestratorは呼び出し側が開く。
+   */
+  resumeRun(runId: string): Promise<ControllerResult> {
+    // `startRun`と同じキューに通し、同じフォルダで動いているrunを2本にしない
+    return this.startQueue.enqueue(async (): Promise<ControllerResult> => {
+      const run = this.deps.store.find(runId);
+      if (run === undefined) {
+        return { ok: false, message: 'runが見つからない' };
+      }
+      if (run.finishedAt !== undefined) {
+        return { ok: false, message: 'runは終わっている' };
+      }
+      if (run.suspendedAt === undefined) {
+        return { ok: true, message: 'runは中断していない' };
+      }
+      if (this.deps.store.findActive(run.workspaceRoot) !== undefined) {
+        return { ok: false, message: 'このフォルダには動いているrunがある。先にそのrunを中断する' };
+      }
+      await this.updateRun(runId, (r) =>
+        r.finishedAt === undefined ? setTaskRunHaltedByUser(resumeTaskRun(r), false) : r,
+      );
+      this.pumpLater(runId);
+      return { ok: true, message: 'runを再開した' };
+    });
+  }
+
+  /** 実行中の工程セッションを止める。先に一時停止にして、新しい工程を始めない状態で呼ぶ。 */
+  private async stopRunningStages(run: TaskRun): Promise<void> {
+    const running = listTasks(run).filter((task) => {
       const stage = currentStage(task);
       return stage !== undefined && task.stages[stage].status === 'running';
     });
-    await Promise.all(running.map((task) => this.deps.runner.stopStage(runId, task.taskId)));
-    await this.updateRun(runId, (r) => finishTaskRun(r, this.now()));
-    return { ok: true, message: 'runを終えた' };
+    await Promise.all(running.map((task) => this.deps.runner.stopStage(run.runId, task.taskId)));
   }
 
   /**
@@ -397,6 +457,10 @@ export class TaskRunController {
       const stage = task === undefined ? undefined : currentStage(task);
       if (r.finishedAt !== undefined) {
         rejection = 'このrunは終わっている';
+        return r;
+      }
+      if (r.suspendedAt !== undefined) {
+        rejection = 'このrunは中断している。先に再開する';
         return r;
       }
       if (task === undefined || stage === undefined || task.stages[stage].status !== 'halted') {
@@ -648,6 +712,10 @@ export class TaskRunController {
       const gate = findStageGate(r, taskId, gateId);
       if (r.finishedAt !== undefined) {
         rejection = 'このrunは終わっている';
+        return r;
+      }
+      if (r.suspendedAt !== undefined) {
+        rejection = 'このrunは中断している。先に再開する';
         return r;
       }
       if (gate === undefined || gate.status === 'resolved') {
