@@ -594,10 +594,8 @@ export function readTaskRunMaxParallelPerFolder(): number {
  * 既定はそれに合わせて有効。無効にすると判定を試みず、常にユーザーの承認待ちにする。
  */
 export function readTaskRunPlanAutoApproveEnabled(): boolean {
-  return (
-    vscode.workspace.getConfiguration('agent').get<boolean>('taskRun.planAutoApprove.enabled') !==
-    false
-  );
+  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('taskRun.planAutoApprove.enabled');
+  return typeof raw === 'boolean' ? raw : true;
 }
 
 /** @see readAutoHandoffSoftThresholdPercent */
