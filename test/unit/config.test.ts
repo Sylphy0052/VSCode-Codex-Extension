@@ -23,6 +23,8 @@ import {
   readSecondOpinionConfig,
   readWorkflowsConfig,
   normalizeSplitSuggestThreshold,
+  normalizeOrchestratorUnresponsiveSec,
+  normalizeMaxOrchestratorRespawns,
 } from '../../src/config';
 import { DEFAULT_DIFF_PRESENTATION_THRESHOLDS } from '../../src/secondOpinion/diffIndex';
 import {
@@ -1041,6 +1043,62 @@ describe('normalizeSplitSuggestThreshold（Issue #1508）', () => {
     expect(normalizeSplitSuggestThreshold(MAX_SPLIT_SUGGEST_THRESHOLD, 15)).toBe(
       MAX_SPLIT_SUGGEST_THRESHOLD,
     );
+  });
+});
+
+describe('normalizeOrchestratorUnresponsiveSec（Issue #1513）', () => {
+  it('0は判定しない値として許容し、小数は切り捨てる', () => {
+    expect(normalizeOrchestratorUnresponsiveSec(0)).toBe(0);
+    expect(normalizeOrchestratorUnresponsiveSec(120.9)).toBe(120);
+    expect(normalizeOrchestratorUnresponsiveSec(2147483)).toBe(2147483);
+  });
+
+  it.each([
+    ['負値', -1],
+    ['非数値', '900'],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['上限超過', 2147484],
+  ])('%s は既定値（900秒）へ丸める', (_label, value) => {
+    expect(normalizeOrchestratorUnresponsiveSec(value)).toBe(900);
+  });
+});
+
+describe('normalizeMaxOrchestratorRespawns（Issue #1513）', () => {
+  it('0から20までの整数は通す', () => {
+    expect(normalizeMaxOrchestratorRespawns(0)).toBe(0);
+    expect(normalizeMaxOrchestratorRespawns(20)).toBe(20);
+  });
+
+  it.each([
+    ['負値', -1],
+    ['非整数', 1.5],
+    ['非数値', 'three'],
+    ['上限超過', 21],
+  ])('%s は既定値（3回）へ丸める', (_label, value) => {
+    expect(normalizeMaxOrchestratorRespawns(value)).toBe(3);
+  });
+});
+
+describe('readWorkflowsConfig()のオーケストレーター生存確認（Issue #1513）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未設定は既定値', () => {
+    const config = readWorkflowsConfig();
+    expect(config.orchestratorUnresponsiveSec).toBe(900);
+    expect(config.maxOrchestratorRespawns).toBe(3);
+  });
+
+  it('設定値を読み、範囲外は既定値へ戻す', () => {
+    __mock.setConfig('agent', {
+      'workflows.orchestratorUnresponsiveSec': 0,
+      'workflows.maxOrchestratorRespawns': 99,
+    });
+    const config = readWorkflowsConfig();
+    expect(config.orchestratorUnresponsiveSec).toBe(0);
+    expect(config.maxOrchestratorRespawns).toBe(3);
   });
 });
 

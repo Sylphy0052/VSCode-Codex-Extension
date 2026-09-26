@@ -131,6 +131,16 @@ export function workflowScript(): string {
     return h > 0 ? h + ':' + mm + ':' + ss : mm + ':' + ss;
   }
 
+  // オーケストレーター欄の状態の文言（Issue #1513）。応答中は最後の変化からの経過時間を
+  // 足すため、毎秒の更新からも呼ぶ。材料は描画時に要素の属性へ置いておく
+  function formatOrchStatus(node) {
+    const label = node.getAttribute('data-label') || '';
+    const suffix = node.getAttribute('data-suffix') || '';
+    const since = Number(node.getAttribute('data-active-since') || '0');
+    const elapsed = since > 0 ? '（最後の変化から ' + formatElapsed(Date.now() - since) + '）' : '';
+    return label + elapsed + suffix;
+  }
+
   function findTask(taskId) {
     if (!currentSnapshot) return undefined;
     return currentSnapshot.tasks.find((t) => t.id === taskId);
@@ -1220,14 +1230,39 @@ export function workflowScript(): string {
     openBtn.disabled = !orch.available;
 
     if (!orch.available) {
-      el('orchStatus').textContent = '利用できません';
+      const unavailableStatus = el('orchStatus');
+      // 前の描画の経過時間表示が毎秒の更新で書き戻さないよう、材料を消す
+      unavailableStatus.setAttribute('data-active-since', '0');
+      unavailableStatus.textContent = '利用できません';
       el('orchSummary').textContent =
-        'このrunではオーケストレーターセッションを開けていません（生成に失敗した、または拡張機能をリロードして復元したrunです）。';
+        'このrunではオーケストレーターセッションを開けていません（生成に失敗した、立て直せなかった、または拡張機能をリロードして復元したrunです）。';
       el('orchUnread').hidden = true;
       return;
     }
 
-    el('orchStatus').textContent = orch.busy ? '応答中' : '待機';
+    // 立て直し中・応答なしの間は受け取れる会話が無いため、発話を送らせない
+    const healthy = !orch.health || orch.health === 'alive';
+    input.disabled = !healthy;
+    sendBtn.disabled = !healthy;
+    const status = el('orchStatus');
+    const label =
+      orch.health === 'unresponsive'
+        ? '応答なし'
+        : orch.health === 'recovering'
+          ? '立て直し中'
+          : orch.busy
+            ? '応答中'
+            : '待機';
+    status.setAttribute('data-label', label);
+    status.setAttribute(
+      'data-suffix',
+      orch.respawnCount > 0 ? ' 立て直し ' + orch.respawnCount + '回' : '',
+    );
+    status.setAttribute(
+      'data-active-since',
+      String(healthy && orch.busy && orch.lastActivityAt ? orch.lastActivityAt : 0),
+    );
+    status.textContent = formatOrchStatus(status);
     el('orchSummary').textContent = orch.lastResponseSummary || 'まだ応答はありません。';
     const unread = el('orchUnread');
     unread.hidden = orch.unreadCount <= 0;
@@ -1585,6 +1620,10 @@ export function workflowScript(): string {
     const ts = Number(started.getAttribute('data-started') || '0');
     if (ts > 0) {
       started.textContent = '経過 ' + formatElapsed(Date.now() - ts);
+    }
+    const orchStatus = el('orchStatus');
+    if (Number(orchStatus.getAttribute('data-active-since') || '0') > 0) {
+      orchStatus.textContent = formatOrchStatus(orchStatus);
     }
     document.querySelectorAll('.elapsed-cell[data-live="1"]').forEach((cellNode) => {
       const cell = cellNode;

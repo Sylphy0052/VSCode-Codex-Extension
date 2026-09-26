@@ -132,7 +132,7 @@ import {
 } from './runnerWorkingDirectory';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedTaskState } from './runStore';
-import type { OrchestratorEvent } from './orchestratorSession';
+import type { OrchestratorEvent, OrchestratorHealth } from './orchestratorSession';
 import {
   answerAskUser as answerAskUserImpl,
   buildOrchestratorControlPort,
@@ -605,6 +605,18 @@ export interface WorkflowRunnerDeps {
    */
   readMaxAutoResumeAttempts?: () => number;
   /**
+   * `agent.workflows.orchestratorUnresponsiveSec`の現在値（Issue #1513）。省略時は
+   * `DEFAULT_ORCHESTRATOR_UNRESPONSIVE_SEC`（`orchestratorSession.ts`、既定900秒）を使う。0で判定しない
+   * （`readMaxAskUserPerRun`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readOrchestratorUnresponsiveSec?: () => number;
+  /**
+   * `agent.workflows.maxOrchestratorRespawns`の現在値（Issue #1513）。省略時は
+   * `DEFAULT_MAX_ORCHESTRATOR_RESPAWNS`（`orchestratorSession.ts`、既定3）を使う。0で立て直さない
+   * （`readMaxAskUserPerRun`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
+   */
+  readMaxOrchestratorRespawns?: () => number;
+  /**
    * `agent.workflows.ciWaitTimeoutSec`の現在値（秒）。省略時は`DEFAULT_CI_WAIT_TIMEOUT_SEC`
    * （既定1800秒）を使う（design.md §16.36、Issue #556）。統合PR/MRをマージする前に
    * CIチェックの完了を待つ時間の上限で、超えたら赤（CI失敗）と同じ扱いにする
@@ -846,6 +858,11 @@ export interface WorkflowWarning {
      * （§16.21の`messagingUnavailable`と同じ方針）。
      */
     | 'orchestratorUnavailable'
+    /**
+     * オーケストレーターが落ちた（ターンが続けて失敗した）か固まった（busyのまま応答が
+     * 無い）ため、状況を引き継いだ新しい会話で立て直した（Issue #1513）。理由と回数を本文に書く。
+     */
+    | 'orchestratorRespawned'
     /**
      * オーケストレーターが `update_task_prompt` で走行中タスクの継続指示を差し替えた
      * （design.md §16.23「道具」）。人がYAMLに書いた指示が実行中に別のものへ変わるのは
@@ -1256,6 +1273,18 @@ export interface OrchestratorSnapshot {
   lastResponseSummary: string;
   /** 人が最後に会話を開いてから増えた応答の数（未読の印）。 */
   unreadCount: number;
+  /**
+   * オーケストレーターの状態（Issue #1513）。`available: false`なら`undefined`。
+   * 欄の状態表示「応答なし」「立て直し中」に使う。
+   */
+  health?: OrchestratorHealth | undefined;
+  /** このrunで立て直した回数（Issue #1513）。1以上なら欄に併記する。 */
+  respawnCount?: number | undefined;
+  /**
+   * 最後に状態の変化を受けた時刻（epoch ms、Issue #1513）。応答中の経過時間の表示に使う。
+   * `available: false`なら`undefined`。
+   */
+  lastActivityAt?: number | undefined;
 }
 
 /**
@@ -1607,6 +1636,25 @@ export interface LiveOrchestrator {
    * 数えない（乱発ではなく実際に人を待たせた回数を数えるため）。
    */
   askUserCount: number;
+  /**
+   * オーケストレーターの状態（Issue #1513）。諦めた後は`LiveRun.orchestrator`自体を
+   * `undefined`にするため、ここに「利用できない」は無い。`alive`以外の間は`session`が
+   * 破棄済み・破棄予定のものなので、送信もイベントの送り出しもしない（`pending`へ溜める）。
+   */
+  health: OrchestratorHealth;
+  /** 最後に`ChatState`の変化を受けた（または送信した）時刻（epoch ms、Issue #1513）。 */
+  lastActivityAt: number;
+  /**
+   * 現在のターンで送ったイベント（Issue #1513）。ターンが失敗したら`pending`の先頭へ戻して
+   * 送り直す・立て直した会話へ渡す。ターンが成功して終わったら空にする。
+   */
+  inFlight: OrchestratorEvent[];
+  /** `turnFailureKind === 'other'`で続けて失敗したターンの数（Issue #1513）。2で落ちたとみなす。 */
+  consecutiveFailures: number;
+  /** このrunで立て直した回数（Issue #1513、`agent.workflows.maxOrchestratorRespawns`との比較用）。 */
+  respawnCount: number;
+  /** 無応答の判定用タイマー（Issue #1513）。busyの間だけ張る。 */
+  unresponsiveTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 /**
@@ -2518,6 +2566,15 @@ export class WorkflowRunner {
         // ここで値へ解決すると、復元されたrunだけが`undefined`を掴んだままになる
         // （`TaskMessagingHubDeps.sessionBridge`のJSDoc参照）
         sessionBridge: messaging.sessionBridge,
+        // タスクからオーケストレーターへ送るときに、宛先が今受け取れるかを返す（Issue #1513）。
+        // `live.orchestrator`は立て直し・断念で入れ替わるため、値ではなく関数で渡す
+        orchestratorStatus: () => {
+          const orch = live.orchestrator;
+          if (orch === undefined) {
+            return 'unavailable';
+          }
+          return orch.health === 'alive' ? 'alive' : 'recovering';
+        },
       });
     live.messagingHub = hub;
     try {

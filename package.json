@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.35",
+  "version": "2026.926.36",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1817,6 +1817,22 @@
           "maximum": 20,
           "scope": "machine-overridable",
           "markdownDescription": "オーケストレーターが `ask_user`（人へ確認する道具。設計書 §16.33）を1つの実行で呼べる回数の上限。担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・同じ失敗を3回繰り返して打つ手が尽きた場合に限って使う道具で、乱発を防ぐため設定ではなく既定の挙動として回数に上限を置く。上限に達した以降の呼び出しは拒否され、オーケストレーターは自分で判断するか `decide_final_merge` の `hold` で止めるよう促される。範囲外（1未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
+        },
+        "agent.workflows.orchestratorUnresponsiveSec": {
+          "type": "number",
+          "default": 900,
+          "minimum": 0,
+          "maximum": 2147483,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレーターが応答中のまま、何の変化も無く固まったとみなすまでの秒数。超えると応答を中断し、状況を引き継いだ新しい会話で立て直す（回数の上限は `agent.workflows.maxOrchestratorRespawns`）。応答していない（待機中の）オーケストレーターは、どれだけ時間が経っても固まったとはみなさない。`0` で判定しない。範囲外・数値でない値は既定値（900秒）にフォールバックする。"
+        },
+        "agent.workflows.maxOrchestratorRespawns": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 20,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレーターが落ちた（ターンが続けて2回失敗した）か固まったときに、新しい会話で立て直す回数の上限（1つの実行あたり）。上限を超えるとオーケストレーター無しで実行を続け、タスクから届くメッセージには「届かない」と返す。`0` で立て直さない。範囲外（0未満・20超過・非整数）の値は既定値（3回）にフォールバックする。"
         },
         "agent.workflows.autoResume": {
           "type": "boolean",

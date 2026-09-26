@@ -13,6 +13,8 @@ import {
   buildOrchestratorConfig,
   composeOrchestratorPrompt,
   DEFAULT_MAX_ASK_USER_PER_RUN,
+  DEFAULT_MAX_ORCHESTRATOR_RESPAWNS,
+  DEFAULT_ORCHESTRATOR_UNRESPONSIVE_SEC,
   MAX_ORCHESTRATOR_EVENTS_PER_RUN,
   ORCHESTRATOR_CONNECTION_ID,
   pickOrchestratorProvider,
@@ -33,6 +35,7 @@ import type {
   WorkflowWarning,
 } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
+import type { TaskSession } from './taskSession';
 import {
   buildOrchestratorTask,
   findMissingVerifyWarnings,
@@ -97,8 +100,34 @@ export function shouldAutoApproveOrchestratorElicitation(params: Record<string, 
   return match !== null && AUTO_APPROVED_ORCHESTRATOR_TOOLS.has(match[1] ?? '');
 }
 
-/** run開始時にオーケストレーターへ渡す、役割と道具の説明。 */
-function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): string {
+/** オーケストレーターを立て直した理由（Issue #1513）。 */
+type OrchestratorRespawnReason = 'turnFailed' | 'unresponsive';
+
+/** 警告欄・導入文に書く、立て直した理由の言い回し。 */
+const RESPAWN_REASON_LABELS: Record<OrchestratorRespawnReason, string> = {
+  turnFailed: 'ターンが続けて失敗した',
+  unresponsive: '応答中のまま反応しなくなった',
+};
+
+/** 立て直した会話の導入文に書き添える文脈（Issue #1513）。 */
+interface OrchestratorRespawnContext {
+  reason: OrchestratorRespawnReason;
+  /** 何回目の立て直しか（1から）。 */
+  count: number;
+  /** 前の会話へ届けられず、この導入文の直前に並べたイベントの数。 */
+  carriedCount: number;
+}
+
+/**
+ * run開始時にオーケストレーターへ渡す、役割と道具の説明。
+ *
+ * `respawn`を渡すと、runの途中で立て直した会話向けの一文を足す（Issue #1513）。
+ */
+function buildIntroBody(
+  live: LiveRun,
+  resume?: OrchestratorResumeContext,
+  respawn?: OrchestratorRespawnContext,
+): string {
   const tasks = live.def.tasks
     .map((t) => {
       const issue = t.issue === undefined ? '' : `（Issue #${t.issue}）`;
@@ -115,14 +144,29 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
     nonce: randomUUID(),
   });
   const pendingAskUser = resume?.pendingAskUser;
+  const respawnNote =
+    respawn === undefined
+      ? []
+      : [
+          '',
+          `このセッションは、前のオーケストレーターの会話が${RESPAWN_REASON_LABELS[respawn.reason]}` +
+            `ため、実行の途中で立て直したものです（${respawn.count}回目）。前の会話の内容は` +
+            '引き継げないため、進行状況は list_tasks / get_run_status で確かめてください。' +
+            (respawn.carriedCount > 0
+              ? `このメッセージの前に並んだイベント${respawn.carriedCount}件は、前の会話へ` +
+                '届けられなかったものです。'
+              : ''),
+        ];
   const resumeNote =
     pendingAskUser === undefined
       ? []
       : [
           '',
-          'このセッションは中断（ウィンドウのリロード等）からの自動再開です。前回のセッションで' +
-            '次の質問を出したまま、まだ回答されていません（会話そのものは復元できないため、' +
-            'この文脈だけを引き継いでいます）:',
+          (respawn === undefined
+            ? 'このセッションは中断（ウィンドウのリロード等）からの自動再開です。'
+            : '') +
+            '前回のセッションで次の質問を出したまま、まだ回答されていません（会話そのものは' +
+            '復元できないため、この文脈だけを引き継いでいます）:',
           `質問: "${pendingAskUser.question}"`,
           `選択肢: ${pendingAskUser.choices.join(' / ')}`,
           '人が選ぶと「人がask_userの質問に答えました: "<選択肢>"」という発話が届きます。それまで' +
@@ -198,6 +242,7 @@ function buildIntroBody(live: LiveRun, resume?: OrchestratorResumeContext): stri
     '',
     `タスク（${live.def.tasks.length}件、並列上限 ${live.def.maxParallel}）:`,
     safeTasks,
+    ...respawnNote,
     ...resumeNote,
   ].join('\n');
 }
@@ -914,7 +959,8 @@ export function answerAskUser(
   live.pendingAskUser = { ...pending, answeredChoice: choice };
   void self.persist(runId);
   self.notify(runId);
-  if (!orchestrator.busy) {
+  // 立て直し中（Issue #1513）は、立て直した会話へ導入文と一緒に送る（`respawnOrchestrator`）
+  if (!orchestrator.busy && orchestrator.health === 'alive') {
     deliverAskUserAnswer(self, runId);
   }
   return true;
@@ -943,12 +989,8 @@ function deliverAskUserAnswer(self: WorkflowRunnerInternals, runId: string): voi
   const composed = composeOrchestratorPrompt(events, answerText);
   orchestrator.pending = [];
   // cleanup通知のターンがask_userで止まった場合は、回答後の継続ターンまで接続を保つ。
-  // この配送で合流したcleanup通知も処理中件数へ反映する。
-  orchestrator.taskCleanupEventsInFlight += events.filter(
-    (event) => event.kind === 'taskCleanup',
-  ).length;
-  orchestrator.busy = true;
-  orchestrator.session.send(composed);
+  // この配送で合流したcleanup通知も処理中件数へ反映する（`sendToOrchestrator`）
+  sendToOrchestrator(self, runId, orchestrator, composed, events);
   self.notify(runId);
 }
 
@@ -1329,31 +1371,9 @@ export async function setupOrchestratorForStart(
   resume?: OrchestratorResumeContext,
 ): Promise<void> {
   const provider = pickOrchestratorProvider(live.def);
-  const effective = buildOrchestratorConfig(provider, self.deps.readBaseline());
-  // 制御ツール用の接続。タスクidとして妥当でない識別子を使うため、タスク側からは名乗れない
-  const url = live.messaging?.transport.registerTask(ORCHESTRATOR_CONNECTION_ID);
 
   try {
-    const host = self.deps.hosts[provider];
-    const session = await host.openTaskSession({
-      role: 'orchestrator',
-      // worktreeは作らない。書かせないため（§16.23「権限」）
-      cwd: live.repoRoot,
-      config: effective.config,
-      sandbox: effective.sandbox,
-      ...(url !== undefined ? { mcp: { url } } : {}),
-    });
-    if (effective.autoApprove) {
-      // オーケストレーターはread-only sandboxで起動する。machineスコープの
-      // allowAutoApproveを明示的に有効化した利用者に限り、通常の承認待ちを自動で許可する。
-      session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'accept' }));
-    }
-    // run内に閉じたtask-messaging操作は、通常のshell/ファイル操作のautoApproveとは
-    // 分離して常に自動許可する。ここを上の条件内に置くと、read-onlyのlist/statusまで
-    // 毎回「入力を求められています」になり、無人復旧が成立しない（Issue #848）。
-    // decide_approval/decide_final_mergeは許可集合に含めず、危険な決定は従来どおり人へ回す。
-    session.setMcpElicitationHandler?.(shouldAutoApproveOrchestratorElicitation);
-    session.open({ preserveFocus: true });
+    const session = await openOrchestratorSession(self, live, provider);
 
     const pendingAskUser = resume?.pendingAskUser;
     const orchestrator: LiveOrchestrator = {
@@ -1365,6 +1385,12 @@ export async function setupOrchestratorForStart(
       taskCleanupEventsInFlight: 0,
       lastResponseSummary: '',
       unreadCount: 0,
+      health: 'alive',
+      lastActivityAt: nowMs(self),
+      inFlight: [],
+      consecutiveFailures: 0,
+      respawnCount: 0,
+      unresponsiveTimer: undefined,
       // 自動再開で引き継いだ未回答の問い（あれば）は、すでに1回分の`ask_user`を
       // 消費している。ここで0から始めると、リロードのたびに実質無料で上限を
       // すり抜けられてしまう（design.md §16.33「呼び出し回数の上限」の意図が崩れる）
@@ -1380,7 +1406,7 @@ export async function setupOrchestratorForStart(
         since: Date.parse(pendingAskUser.askedAt) || (self.deps.now?.() ?? new Date()).getTime(),
       };
     }
-    session.onStateChanged((state) => onOrchestratorStateChanged(self, runId, state));
+    watchOrchestratorSession(self, runId, session);
 
     notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live, resume) });
     if (live.failureRecovery !== undefined) {
@@ -1406,6 +1432,342 @@ export async function setupOrchestratorForStart(
   }
 }
 
+function nowMs(self: WorkflowRunnerInternals): number {
+  return (self.deps.now?.() ?? new Date()).getTime();
+}
+
+/**
+ * オーケストレーターのセッションを開いてタブを出す（`setupOrchestratorForStart`と
+ * 立て直し`respawnOrchestrator`で共有する。Issue #1513）。失敗したら例外を投げる。
+ *
+ * 制御ツール用の接続は開くたびに登録し直す。`registerTask`は同じidの古いトークンを
+ * 無効化するため、立て直し前のセッション（残存プロセス）は以後ツールを呼べない。
+ */
+async function openOrchestratorSession(
+  self: WorkflowRunnerInternals,
+  live: LiveRun,
+  provider: LiveOrchestrator['provider'],
+): Promise<TaskSession> {
+  const effective = buildOrchestratorConfig(provider, self.deps.readBaseline());
+  // 制御ツール用の接続。タスクidとして妥当でない識別子を使うため、タスク側からは名乗れない
+  const url = live.messaging?.transport.registerTask(ORCHESTRATOR_CONNECTION_ID);
+  const host = self.deps.hosts[provider];
+  const session = await host.openTaskSession({
+    role: 'orchestrator',
+    // worktreeは作らない。書かせないため（§16.23「権限」）
+    cwd: live.repoRoot,
+    config: effective.config,
+    sandbox: effective.sandbox,
+    ...(url !== undefined ? { mcp: { url } } : {}),
+  });
+  if (effective.autoApprove) {
+    // オーケストレーターはread-only sandboxで起動する。machineスコープの
+    // allowAutoApproveを明示的に有効化した利用者に限り、通常の承認待ちを自動で許可する。
+    session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'accept' }));
+  }
+  // run内に閉じたtask-messaging操作は、通常のshell/ファイル操作のautoApproveとは
+  // 分離して常に自動許可する。ここを上の条件内に置くと、read-onlyのlist/statusまで
+  // 毎回「入力を求められています」になり、無人復旧が成立しない（Issue #848）。
+  // decide_approval/decide_final_mergeは許可集合に含めず、危険な決定は従来どおり人へ回す。
+  session.setMcpElicitationHandler?.(shouldAutoApproveOrchestratorElicitation);
+  session.open({ preserveFocus: true });
+  return session;
+}
+
+/**
+ * セッションの状態の変化を購読する。購読したセッションを覚えておき、立て直しで
+ * 入れ替わった古いセッションから遅れて届いた変化は捨てる（Issue #1513）。
+ */
+function watchOrchestratorSession(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  session: TaskSession,
+): void {
+  session.onStateChanged((state) => onOrchestratorStateChanged(self, runId, session, state));
+}
+
+/**
+ * オーケストレーターへ1ターン分を送る（Issue #1513）。送信はすべてここを通す。
+ *
+ * 送ったイベントは`inFlight`へ覚えておき、ターンが失敗したら`pending`へ戻す。
+ * busyの間だけ無応答の判定用タイマーを張る。
+ */
+function sendToOrchestrator(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+  text: string,
+  events: readonly OrchestratorEvent[],
+): void {
+  orchestrator.taskCleanupEventsInFlight += events.filter(
+    (event) => event.kind === 'taskCleanup',
+  ).length;
+  // busy中の人の発話（`sendUserMessageToOrchestrator`）は同じターンへ積まれるため足していく。
+  // ターンが終わったら空にする
+  orchestrator.inFlight = [...orchestrator.inFlight, ...events];
+  orchestrator.busy = true;
+  orchestrator.lastActivityAt = nowMs(self);
+  armUnresponsiveTimer(self, runId, orchestrator);
+  orchestrator.session.send(text);
+}
+
+function clearUnresponsiveTimer(orchestrator: LiveOrchestrator): void {
+  if (orchestrator.unresponsiveTimer !== undefined) {
+    clearTimeout(orchestrator.unresponsiveTimer);
+    orchestrator.unresponsiveTimer = undefined;
+  }
+}
+
+/**
+ * 無応答の判定用タイマーを張り直す（Issue #1513）。busyの間、状態の変化を受けるたびに
+ * 呼ぶ。`agent.workflows.orchestratorUnresponsiveSec`が0なら張らない。
+ *
+ * busyでない間は張らない。イベントも人の発話も来ていない待機は、どれだけ長く黙って
+ * いても固まったとはみなさない（最終マージ段のCI待ちもこれに当たる）。
+ */
+function armUnresponsiveTimer(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+): void {
+  clearUnresponsiveTimer(orchestrator);
+  const sec =
+    self.deps.readOrchestratorUnresponsiveSec?.() ?? DEFAULT_ORCHESTRATOR_UNRESPONSIVE_SEC;
+  if (sec <= 0) {
+    return;
+  }
+  const session = orchestrator.session;
+  const timer = setTimeout(() => {
+    orchestrator.unresponsiveTimer = undefined;
+    if (
+      self.runs.get(runId)?.orchestrator !== orchestrator ||
+      orchestrator.session !== session ||
+      !orchestrator.busy ||
+      orchestrator.health !== 'alive'
+    ) {
+      return;
+    }
+    onOrchestratorUnresponsive(self, runId, orchestrator, sec);
+  }, sec * 1000);
+  // runの残りと同じく、タイマーだけでプロセス終了を妨げない
+  timer.unref?.();
+  orchestrator.unresponsiveTimer = timer;
+}
+
+/** busyのまま状態の変化が`sec`秒無かった。応答を中断し、立て直す（Issue #1513）。 */
+function onOrchestratorUnresponsive(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+  sec: number,
+): void {
+  orchestrator.health = 'unresponsive';
+  self.deps.log.warn(
+    `[workflow ${runId}] オーケストレーターが${sec}秒応答しません。中断して立て直します`,
+  );
+  self.notify(runId);
+  // 固まったプロセスはinterruptにも応じないことがあるため待たない。立て直しで破棄する
+  orchestrator.session.interrupt().catch(() => undefined);
+  void respawnOrchestrator(self, runId, 'unresponsive');
+}
+
+/**
+ * busyでない時点で、溜まったものを送る。`ask_user`の答えが保持されていればそれを、
+ * 答えを待っていなければ溜まったイベントを送る（答えを待っている間は送らない）。
+ */
+function drainOrchestrator(self: WorkflowRunnerInternals, runId: string): void {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (
+    live === undefined ||
+    orchestrator === undefined ||
+    orchestrator.busy ||
+    orchestrator.health !== 'alive'
+  ) {
+    return;
+  }
+  if (live.pendingAskUser?.answeredChoice !== undefined) {
+    // ターンの最中に人が答えていた場合（`answerAskUser`がbusy中だったため送信を
+    // 保留していた）は、ターンが終わった今まとめて送る
+    deliverAskUserAnswer(self, runId);
+  } else if (live.pendingAskUser === undefined) {
+    // `pendingAskUser`が立っている（まだ答えていない）間は、まだ答えを待つターン
+    // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
+    flushOrchestrator(self, runId);
+  }
+}
+
+/**
+ * ターンが失敗して終わった（Issue #1513）。送ったイベントを`pending`の先頭へ戻す。
+ *
+ * - 利用上限（`usageLimit`）: 待てば解けるため落ちたとはみなさず、次のイベントか人の発話の
+ *   ときに一緒に送る
+ * - それ以外: 1回目は送り直す。送り直したターンも失敗したら落ちたとみなして立て直す
+ */
+function onOrchestratorTurnFailed(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+  failureKind: ChatState['turnFailureKind'],
+): void {
+  orchestrator.pending = [...orchestrator.inFlight, ...orchestrator.pending];
+  orchestrator.inFlight = [];
+  // 戻したcleanup通知は、送り直すときに`sendToOrchestrator`が数え直す
+  orchestrator.taskCleanupEventsInFlight = 0;
+  if (failureKind === 'usageLimit') {
+    self.deps.log.warn(
+      `[workflow ${runId}] オーケストレーターのターンが利用上限で失敗しました。` +
+        '送ったイベントは次の送信に合流させます',
+    );
+    return;
+  }
+  orchestrator.consecutiveFailures += 1;
+  if (orchestrator.consecutiveFailures >= 2) {
+    void respawnOrchestrator(self, runId, 'turnFailed');
+    return;
+  }
+  self.deps.log.warn(
+    `[workflow ${runId}] オーケストレーターのターンが失敗しました。送ったイベントを送り直します`,
+  );
+  drainOrchestrator(self, runId);
+}
+
+/**
+ * 落ちた・固まったオーケストレーターを、状況を引き継いだ新しい会話で立て直す
+ * （Issue #1513）。
+ *
+ * `LiveOrchestrator`は作り直さず、セッションだけを入れ替える。`eventsSent`・
+ * `askUserCount`（run全体の上限の計数）と、未読・直近の要約はそのまま引き継ぐ。
+ * 立て直し中（`recovering`）に届いたイベントは`pending`へ溜まり、届けられなかった
+ * イベントと一緒に新しい会話へ渡す。`agent.workflows.maxOrchestratorRespawns`回を
+ * 超えたら諦め、オーケストレーター無しでrunを続ける。
+ */
+async function respawnOrchestrator(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  reason: OrchestratorRespawnReason,
+): Promise<void> {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (live === undefined || orchestrator === undefined) {
+    return;
+  }
+  clearUnresponsiveTimer(orchestrator);
+  orchestrator.pending = [...orchestrator.inFlight, ...orchestrator.pending];
+  orchestrator.inFlight = [];
+  orchestrator.taskCleanupEventsInFlight = 0;
+  orchestrator.busy = false;
+  const oldSession = orchestrator.session;
+  const label = RESPAWN_REASON_LABELS[reason];
+  const max = self.deps.readMaxOrchestratorRespawns?.() ?? DEFAULT_MAX_ORCHESTRATOR_RESPAWNS;
+  if (orchestrator.respawnCount >= max) {
+    oldSession.dispose();
+    giveUpOrchestrator(
+      self,
+      runId,
+      live,
+      orchestrator,
+      `${label}ため立て直そうとしましたが、立て直しの上限（${max}回）に達しています`,
+    );
+    return;
+  }
+  orchestrator.respawnCount += 1;
+  orchestrator.health = 'recovering';
+  self.deps.log.warn(
+    `[workflow ${runId}] オーケストレーターが${label}ため立て直します（${orchestrator.respawnCount}回目）`,
+  );
+  self.notify(runId);
+  oldSession.dispose();
+
+  let session: TaskSession;
+  try {
+    session = await openOrchestratorSession(self, live, orchestrator.provider);
+  } catch (e) {
+    if (live.orchestrator === orchestrator) {
+      const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+      giveUpOrchestrator(
+        self,
+        runId,
+        live,
+        orchestrator,
+        `立て直しの会話を開けませんでした: ${message}`,
+      );
+    }
+    return;
+  }
+  // 開いている間にrunが破棄された（`disposeOrchestrator`）なら、新しい会話は要らない
+  if (self.runs.get(runId) !== live || live.orchestrator !== orchestrator) {
+    session.dispose();
+    return;
+  }
+  orchestrator.session = session;
+  orchestrator.health = 'alive';
+  orchestrator.busy = false;
+  orchestrator.consecutiveFailures = 0;
+  orchestrator.lastActivityAt = nowMs(self);
+  watchOrchestratorSession(self, runId, session);
+
+  const carried = orchestrator.pending;
+  live.warnings.push({
+    kind: 'orchestratorRespawned',
+    taskId: undefined,
+    message:
+      `オーケストレーターが${label}ため、新しい会話で立て直しました` +
+      `（${orchestrator.respawnCount}回目）。届けられなかったイベント${carried.length}件を引き継ぎました。`,
+  });
+  const pendingAskUser = live.pendingAskUser;
+  const resume: OrchestratorResumeContext | undefined =
+    pendingAskUser === undefined
+      ? undefined
+      : {
+          pendingAskUser: {
+            question: pendingAskUser.question,
+            choices: pendingAskUser.choices,
+            askedAt: new Date(pendingAskUser.since).toISOString(),
+          },
+        };
+  // 導入文は最後に置く。送信本文が長すぎると古い側から落とすため（`composeOrchestratorPrompt`）、
+  // 役割を伝える導入文を落とさないよう最も新しい位置にする
+  orchestrator.pending = [
+    ...carried,
+    {
+      kind: 'runStarted',
+      body: buildIntroBody(live, resume, {
+        reason,
+        count: orchestrator.respawnCount,
+        carriedCount: carried.length,
+      }),
+    },
+  ];
+  drainOrchestrator(self, runId);
+  self.notify(runId);
+}
+
+/**
+ * オーケストレーターを諦める（Issue #1513）。起動に失敗したときと同じく
+ * `orchestratorUnavailable`の警告を積み、オーケストレーター無しでrunを続ける。
+ * セッションの破棄は呼び出し側が済ませること。
+ */
+function giveUpOrchestrator(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  live: LiveRun,
+  orchestrator: LiveOrchestrator,
+  detail: string,
+): void {
+  clearUnresponsiveTimer(orchestrator);
+  live.orchestrator = undefined;
+  self.deps.log.warn(`[workflow ${runId}] オーケストレーターを諦めました: ${detail}`);
+  live.warnings.push({
+    kind: 'orchestratorUnavailable',
+    taskId: undefined,
+    message: `オーケストレーターを立て直せませんでした（実行はオーケストレーター無しで続きます）: ${detail}`,
+  });
+  self.notify(runId);
+  // 溜まっていたcleanup通知がrunの後片付けを止めていた場合に備えて再評価する
+  self.finalizeTaskCleanup(runId);
+}
+
 /**
  * オーケストレーターのターンの状況を追う。直近の応答の1行要約はワークフローViewの
  * オーケストレーター欄に出す（応答本文そのものは持たない。§16.11）。
@@ -1416,12 +1778,22 @@ export async function setupOrchestratorForStart(
 function onOrchestratorStateChanged(
   self: WorkflowRunnerInternals,
   runId: string,
+  session: TaskSession,
   state: ChatState,
 ): void {
-  const orchestrator = self.runs.get(runId)?.orchestrator;
-  if (orchestrator === undefined) {
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  // 立て直しで入れ替えた古いセッションからの変化と、立て直しを始めた後の変化は見ない
+  // （Issue #1513）
+  if (
+    live === undefined ||
+    orchestrator === undefined ||
+    orchestrator.session !== session ||
+    orchestrator.health !== 'alive'
+  ) {
     return;
   }
+  orchestrator.lastActivityAt = nowMs(self);
   const summary = buildResponseSummary(state);
   if (summary !== '' && summary !== orchestrator.lastResponseSummary) {
     orchestrator.lastResponseSummary = summary;
@@ -1429,26 +1801,32 @@ function onOrchestratorStateChanged(
   }
   const finishedTurn = orchestrator.busy && !state.busy;
   orchestrator.busy = state.busy;
-  const live = self.runs.get(runId);
-  if (finishedTurn) {
-    // cleanup通知を受けたターン内でIssue/Roadmap更新ツールを実行できるよう、終了を
-    // 確認してから接続の解放を再評価する。ask_userの回答待ちは、回答後の継続ターンが
-    // 完了するまで処理中件数を残す。
-    const hasPendingAskUser = live?.pendingAskUser !== undefined;
-    if (!hasPendingAskUser) {
-      orchestrator.taskCleanupEventsInFlight = 0;
+  if (!finishedTurn) {
+    // 変化があった以上、固まってはいない。busyの間は判定の起点をここへずらす
+    if (orchestrator.busy) {
+      armUnresponsiveTimer(self, runId, orchestrator);
+    } else {
+      clearUnresponsiveTimer(orchestrator);
     }
-    if (live?.pendingAskUser?.answeredChoice !== undefined) {
-      // ターンの最中に人が答えていた場合（`answerAskUser`がbusy中だったため送信を
-      // 保留していた）は、ターンが終わった今まとめて送る
-      deliverAskUserAnswer(self, runId);
-    } else if (live?.pendingAskUser === undefined) {
-      // `pendingAskUser`が立っている（まだ答えていない）間は、まだ答えを待つターン
-      // （ask_userを呼んだ返答が届いた直後等）なので、溜まったイベントは送らない
-      flushOrchestrator(self, runId);
-    }
-    self.finalizeTaskCleanup(runId);
+    self.notify(runId);
+    return;
   }
+  clearUnresponsiveTimer(orchestrator);
+  if (state.turnFailed) {
+    onOrchestratorTurnFailed(self, runId, orchestrator, state.turnFailureKind);
+    self.notify(runId);
+    return;
+  }
+  orchestrator.consecutiveFailures = 0;
+  orchestrator.inFlight = [];
+  // cleanup通知を受けたターン内でIssue/Roadmap更新ツールを実行できるよう、終了を
+  // 確認してから接続の解放を再評価する。ask_userの回答待ちは、回答後の継続ターンが
+  // 完了するまで処理中件数を残す。
+  if (live.pendingAskUser === undefined) {
+    orchestrator.taskCleanupEventsInFlight = 0;
+  }
+  drainOrchestrator(self, runId);
+  self.finalizeTaskCleanup(runId);
   self.notify(runId);
 }
 
@@ -1481,7 +1859,8 @@ export function notifyOrchestrator(
   // 同期的にすぐ返る（HTTPレスポンスを保留しない。`messaging.ts`のASK_USER_TOOLの
   // JSDoc参照）ため、待たせる仕組みはこの送信ゲートだけが担う。溜まったイベントは
   // `answerAskUser`が答えを送るときに合流させる
-  if (!orchestrator.busy && live.pendingAskUser === undefined) {
+  // 立て直し中（Issue #1513）も送らずに溜め、立て直した会話へ渡す（`respawnOrchestrator`）
+  if (!orchestrator.busy && orchestrator.health === 'alive' && live.pendingAskUser === undefined) {
     flushOrchestrator(self, runId);
   }
   return true;
@@ -1499,11 +1878,7 @@ function flushOrchestrator(self: WorkflowRunnerInternals, runId: string): void {
   if (text === '') {
     return;
   }
-  orchestrator.taskCleanupEventsInFlight += events.filter(
-    (event) => event.kind === 'taskCleanup',
-  ).length;
-  orchestrator.busy = true;
-  orchestrator.session.send(text);
+  sendToOrchestrator(self, runId, orchestrator, text, events);
 }
 
 /**
@@ -1528,14 +1903,14 @@ export function sendUserMessageToOrchestrator(
   if (live?.pendingAskUser !== undefined) {
     return false;
   }
+  // 立て直し中（Issue #1513）は受け取れる会話が無い。発話は溜める先が無いため受け付けない
+  if (orchestrator.health !== 'alive') {
+    return false;
+  }
   const events = orchestrator.pending;
   const composed = composeOrchestratorPrompt(events, text);
   orchestrator.pending = [];
-  orchestrator.taskCleanupEventsInFlight += events.filter(
-    (event) => event.kind === 'taskCleanup',
-  ).length;
-  orchestrator.busy = true;
-  orchestrator.session.send(composed);
+  sendToOrchestrator(self, runId, orchestrator, composed, events);
   self.notify(runId);
   return true;
 }
@@ -1770,6 +2145,9 @@ export function notifyOrchestratorRunHalted(self: WorkflowRunnerInternals, runId
 
 /** run終了時にオーケストレーターのセッションを解放する（`WorkflowRunner.dispose`から呼ぶ）。 */
 export function disposeOrchestrator(live: LiveRun): void {
-  live.orchestrator?.session.dispose();
+  if (live.orchestrator !== undefined) {
+    clearUnresponsiveTimer(live.orchestrator);
+    live.orchestrator.session.dispose();
+  }
   live.orchestrator = undefined;
 }
