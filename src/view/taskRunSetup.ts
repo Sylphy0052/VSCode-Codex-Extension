@@ -133,6 +133,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       return { model: choice.settings.model, effort: choice.settings.effort, reasons: choice.reasons };
     },
     observation,
+    pathExists: (target) => nodeWorktreeFileSystem.pathExists(target),
     log: (message) => log.info(message),
   });
   holder.controller = controller;

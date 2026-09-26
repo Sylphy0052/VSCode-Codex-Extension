@@ -6,14 +6,15 @@ import { buildTaskRunKanban, type TaskRunKanbanBoard } from '../view/taskRunKanb
 import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
 import { parsePlanArgs, resolveTaskPlan, type PlanTaskInput } from './taskRunPlan';
-import { cancelOpenQuestions, findStageQuestion } from './taskRunQuestions';
+import { findStageQuestion } from './taskRunQuestions';
+import { reconcileTaskRunOnReload, type TaskExternalFacts } from './taskRunReload';
 import { decideStageStart, type StageRef, type StartStageRejection } from './taskRunScheduler';
 import {
   approveTaskPlan,
   createTaskRun,
   currentStage,
   getTask,
-  haltStage,
+  isTaskDone,
   isValidMaxParallel,
   listTasks,
   MAX_TASK_RUN_PARALLEL,
@@ -51,12 +52,12 @@ export type StartTaskRunOutcome =
   | { ok: true; runId: string; reused: boolean }
   | { ok: false; message: string };
 
-/** 再読み込みで工程セッションが終わった工程へ残す理由。 */
-const RELOAD_HALT_REASON = '拡張機能の再読み込みで工程セッションが終わりました。「やり直す」で始め直せます';
-
 export interface TaskRunControllerDeps {
   store: Pick<TaskRunStore, 'find' | 'update' | 'list' | 'findActive'>;
-  runner: Pick<TaskStageRunner, 'pump' | 'stopStage' | 'instructStage' | 'answerQuestion'>;
+  runner: Pick<
+    TaskStageRunner,
+    'pump' | 'stopStage' | 'instructStage' | 'answerQuestion' | 'cleanupRestoredTask'
+  >;
   /** エンジンのモデル一覧と、カタログからeffortを取れないときの退避先。 */
   modelCatalog(engine: TaskRunEngine): {
     models: readonly ModelInfo[];
@@ -70,8 +71,10 @@ export interface TaskRunControllerDeps {
     engine: TaskRunEngine,
     input: HandoffClassifierInput,
   ): Promise<StageSettingsRecommendation | undefined>;
-  /** 計画で指定された既存のIssueがopenかを確かめる。 */
-  observation: Pick<StageObservationPorts, 'fetchIssueState'>;
+  /** 計画で指定された既存のIssueがopenかを確かめる。再読み込み後の復元ではPRの状態も見る。 */
+  observation: Pick<StageObservationPorts, 'fetchIssueState' | 'fetchPullRequestState'>;
+  /** 再読み込み後の復元で、記録したworktreeが残っているかを確かめる。 */
+  pathExists(path: string): Promise<boolean>;
   log(message: string): void;
   now?: () => Date;
   newId?: () => string;
@@ -373,8 +376,9 @@ export class TaskRunController {
   }
 
   /**
-   * 再読み込み後の復元。工程セッションとOrchestratorは再読み込みで終わっているため、実行中だった
-   * 工程を止め（回答待ちの質問は取り消す）、終わっていないrunは人が「再開」するまで止めておく。
+   * 再読み込み後の復元。工程セッションとOrchestratorは再読み込みで終わっているため、外部の状態
+   * （PR・worktree・Issue）と突き合わせて工程を止め・終え（`taskRunReload.ts`）、終わっていない
+   * runは人が「再開」するまで止めておく。再読み込みの間にmergeされたタスクは後片付けまで行う。
    */
   async restore(): Promise<void> {
     for (const run of this.deps.store.list()) {
@@ -382,30 +386,54 @@ export class TaskRunController {
         this.lastSeen.set(run.runId, run);
         continue;
       }
+      let merged: string[] = [];
       try {
+        const facts = await this.collectReloadFacts(run);
         const next = await this.deps.store.update(run.runId, (current) =>
-          this.haltForReload(current ?? run),
+          reconcileTaskRunOnReload(current ?? run, facts, this.now()),
         );
         this.lastSeen.set(run.runId, next);
+        merged = [...facts]
+          .filter(([, fact]) => fact.pullRequestState === 'merged')
+          .map(([taskId]) => taskId);
       } catch (e: unknown) {
         // 1件の保存失敗で残りのrunの復元を止めない
         this.deps.log(`[task run] ${run.runId}を復元できませんでした: ${String(e)}`);
       }
+      for (const taskId of merged) {
+        try {
+          await this.deps.runner.cleanupRestoredTask(run.runId, taskId);
+        } catch (e: unknown) {
+          this.deps.log(`[task run] ${taskId}のmerge後の後片付けに失敗しました: ${String(e)}`);
+        }
+      }
     }
   }
 
-  private haltForReload(run: TaskRun): TaskRun {
-    const now = this.now();
-    let next = run.planStatus === 'approved' ? setTaskRunHaltedByUser(run, true) : run;
-    for (const task of listTasks(run)) {
-      const stage = currentStage(task);
-      if (stage === undefined || task.stages[stage].status !== 'running') {
-        continue;
-      }
-      next = cancelOpenQuestions(next, task.taskId, task.currentAttemptId ?? '', now);
-      next = haltStage(next, task.taskId, 'stopped', RELOAD_HALT_REASON, now);
-    }
-    return next;
+  /** 終わっていないタスクの外部の状態を集める。取得に失敗した事実は`undefined`にする。 */
+  private async collectReloadFacts(run: TaskRun): Promise<Map<string, TaskExternalFacts>> {
+    const root = run.workspaceRoot;
+    const { observation } = this.deps;
+    const orUndefined = <T>(p: Promise<T>): Promise<T | undefined> => p.catch(() => undefined);
+    const entries = await Promise.all(
+      listTasks(run)
+        .filter((task) => !isTaskDone(task))
+        .map(async (task): Promise<[string, TaskExternalFacts]> => {
+          const { pullRequest, worktreePath, issueNumber } = task;
+          const [pullRequestState, worktreeExists, issueState] = await Promise.all([
+            pullRequest === undefined
+              ? undefined
+              : orUndefined(observation.fetchPullRequestState(root, pullRequest.number)),
+            worktreePath === undefined ? undefined : orUndefined(this.deps.pathExists(worktreePath)),
+            // PRを作った後のIssueは見ない（reconcileTaskRunOnReloadの規則）
+            issueNumber === undefined || pullRequest !== undefined
+              ? undefined
+              : orUndefined(observation.fetchIssueState(root, issueNumber)),
+          ]);
+          return [task.taskId, { pullRequestState, worktreeExists, issueState }];
+        }),
+    );
+    return new Map(entries);
   }
 
   /** Kanbanの盤面。`selectedRunId`が無ければ終わっていない新しいrunを選ぶ。 */
