@@ -357,20 +357,34 @@ export function proposeTaskPlan(
   if (removedStarted !== undefined) {
     throw new Error(`着手済みのタスクは削除できません: ${removedStarted.taskId}`);
   }
+  const relinkedStarted = drafts.find((draft) => {
+    const existing = getTask(run, draft.taskId);
+    return (
+      existing !== undefined &&
+      hasStarted(existing) &&
+      existing.existingIssueNumber !== draft.existingIssueNumber
+    );
+  });
+  if (relinkedStarted !== undefined) {
+    throw new Error(`着手済みのタスクの既存Issueは変えられません: ${relinkedStarted.taskId}`);
+  }
   const tasks: Record<string, OrchestratedTask> = {};
   for (const draft of drafts) {
     const existing = getTask(run, draft.taskId);
+    // 未着手のタスクで既存Issueが変わったら、Issue工程を飛ばすかどうかから作り直す
     tasks[draft.taskId] =
       existing === undefined
         ? newTask(draft, newExecutionId(draft.taskId), at)
-        : {
-            ...existing,
-            title: draft.title,
-            summary: draft.summary,
-            acceptanceCriteria: draft.acceptanceCriteria,
-            dependsOn: draft.dependsOn,
-            updatedAt: at,
-          };
+        : existing.existingIssueNumber !== draft.existingIssueNumber
+          ? newTask(draft, existing.executionId, at)
+          : {
+              ...existing,
+              title: draft.title,
+              summary: draft.summary,
+              acceptanceCriteria: draft.acceptanceCriteria,
+              dependsOn: draft.dependsOn,
+              updatedAt: at,
+            };
   }
   return {
     ...run,
@@ -528,6 +542,10 @@ export function recordAttemptSession(
     return run;
   }
   const { task } = checked;
+  const attempt = task.stages[ref.stage].attempts.find((a) => a.attemptId === ref.attemptId);
+  if (attempt === undefined || attempt.sessionRef === sessionRef) {
+    return run;
+  }
   return withTask(run, {
     ...withStage(task, ref.stage, {
       attempts: task.stages[ref.stage].attempts.map((a) =>
@@ -606,6 +624,9 @@ export function recordTaskWorktree(
  * - `failed`: 工程の実行に失敗した（セッションを開けなかった等）
  * - `stopped`: 人が止めた（worktreeとブランチは残す）
  * - `awaitingUser`: ユーザーの判断を待つ
+ *
+ * 既に止まっている工程はそのまま返す。人が止めた直後に古いセッションから遅れて届いた失敗で
+ * `stopped`を上書きしないため。止めた状態から動かすのは`resetStageForRetry`だけにする。
  */
 export function haltStage(
   run: TaskRun,
@@ -616,7 +637,7 @@ export function haltStage(
 ): TaskRun {
   const task = getTask(run, taskId);
   const stage = task === undefined ? undefined : currentStage(task);
-  if (task === undefined || stage === undefined) {
+  if (task === undefined || stage === undefined || task.stages[stage].status === 'halted') {
     return run;
   }
   const at = now.toISOString();

@@ -123,17 +123,11 @@ export function pickStagesToStart(
   startingTaskIds: ReadonlySet<string>,
   isMergeKeyBusy: boolean,
 ): StageRef[] {
-  let mergePicked = isMergeKeyBusy;
-  const runnable = listQueuedStages(run).filter((ref) => {
-    if (ref.stage !== 'mergeCleanup') {
-      return true;
-    }
-    if (mergePicked || startingTaskIds.has(ref.taskId)) {
-      return false;
-    }
-    mergePicked = true;
-    return true;
-  });
+  const queued = listQueuedStages(run);
+  const firstMerge = isMergeKeyBusy
+    ? undefined
+    : queued.find((ref) => ref.stage === 'mergeCleanup' && !startingTaskIds.has(ref.taskId));
+  const runnable = queued.filter((ref) => ref.stage !== 'mergeCleanup' || ref === firstMerge);
   const picked = new Set(
     pickToStart({
       runnable: runnable.map((ref) => ref.taskId),
