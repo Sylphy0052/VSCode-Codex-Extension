@@ -643,6 +643,27 @@ export function markTaskApprovalTimedOut(
   return markFailed(run, tasks, taskId, { kind: 'taskApprovalTimedOut' });
 }
 
+/**
+ * 交差待ちの取り込み（`runnerOverlap.ts`の`mergeIntegrationIntoTask`）で`git merge`と
+ * 続く`merge --abort`が両方失敗した（Issue #1480）。worktreeがマージ途中のまま残るため、
+ * `taskApprovalTimedOut`と同じく`markFailed`（`retries`の自動再試行に乗せない）を直接
+ * 呼ぶ。`kind`は既存の`mergeFailed`（「マージが衝突以外の理由で失敗した」）を再利用する。
+ * 呼び出し元（`runnerOverlap.ts`が`session.stopLoop()`の直前に立てる`overlapMergeAbortFailed`
+ * の印を、`runner.ts`の`onTaskFinished`が`'taskStopped'`到着時に見て合流させる）は
+ * 実行層の責務。対象タスクが`running`のときだけ動く。
+ */
+export function markOverlapMergeAbortFailed(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'running') {
+    return run;
+  }
+  return markFailed(run, tasks, taskId, { kind: 'mergeFailed' });
+}
+
 // ---------------------------------------------------------------------------
 // マージの結果に応じた遷移（design.md §16.17）。
 //
@@ -876,10 +897,18 @@ export function resumeFromApproval(run: RunState, taskId: string): RunState {
  * 送ったタスクは、自分のターンを終えたあと、返信が届くまで次の指示を受け取らない」）。
  * `messaging.ts`の判定（`validateSendMessage`等）は状態を変えないため、実際の遷移は
  * ここで行う。
+ *
+ * `waitingOverlap`（交差待ち、Issue #1469）からも動く。交差待ちの最中に`expectReply`付きで
+ * 送ると、送信自体は成立するのに返信待ちへ遷移せず、`checkWaitingReplyStalls`の
+ * タイムアウト網から外れて止まり得るため（Issue #1480）。交差の待機自体（`overlapWait`）は
+ * 消さず、`waitingReply`から戻った後の次の実測（`applyOverlapWaits`）で改めて掛け直される
  */
 export function markWaitingReply(run: RunState, taskId: string): RunState {
   const current = run.tasks.get(taskId);
-  if (current === undefined || current.state !== 'running') {
+  if (
+    current === undefined ||
+    (current.state !== 'running' && current.state !== 'waitingOverlap')
+  ) {
     return run;
   }
   return setTask(run, taskId, { ...current, state: 'waitingReply' });

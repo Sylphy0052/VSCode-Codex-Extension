@@ -47,12 +47,15 @@ export async function checkTaskOverlap(
   }
   live.overlapMeasuring = true;
   try {
-    // `merging`のタスクはworktreeがマージの途中にあり得るため測り直さず、直前の実測値を使う
+    // `merging`のタスクはworktreeがマージの途中にあり得るため測り直さず、直前の実測値を使う。
+    // 取り込み中（`overlapResuming`）も同様に、統合ブランチのマージ完了から`originCommit`への
+    // 代入までの間に実測すると、相手の変更が混ざって無関係な後発を待たせ得る
     const targets = [...live.tasks.entries()].filter(([taskId, liveTask]) => {
       const state = live.runState.tasks.get(taskId)?.state;
       return (
         isOverlapHoldingState(state) &&
         state !== 'merging' &&
+        !liveTask.overlapResuming &&
         !live.launchingTasks.has(taskId) &&
         isMeasurable(liveTask)
       );
@@ -181,7 +184,17 @@ export function releaseOverlapWaits(
     live.runState = resumeFromWaitingOverlap(live.runState, taskId);
     liveTask.overlapWait = undefined;
     liveTask.overlapResuming = true;
-    void resumeAfterOverlap(self, runId, live, taskId, liveTask, withTaskId, leaderState);
+    // `onTaskFinished`（Issue #1469再発防止、Issue #1480）が、検証・マージを始める前に
+    // この取り込みの完了を待てるよう、Promiseを`LiveTask`へ持たせておく
+    liveTask.overlapResumingPromise = resumeAfterOverlap(
+      self,
+      runId,
+      live,
+      taskId,
+      liveTask,
+      withTaskId,
+      leaderState,
+    );
   }
 }
 
@@ -219,12 +232,17 @@ async function resumeAfterOverlap(
     }
   } finally {
     liveTask.overlapResuming = false;
+    liveTask.overlapResumingPromise = undefined;
     const current = self.runs.get(runId);
     if (
       !self.isDisposing() &&
       current === live &&
       live.tasks.get(taskId) === liveTask &&
-      live.runState.tasks.get(taskId)?.state === 'running'
+      live.runState.tasks.get(taskId)?.state === 'running' &&
+      // 取り込みの`merge`・`merge --abort`が両方失敗し、`stopLoop()`で止めた直後は
+      // `onTaskFinished`の確定（`markOverlapMergeAbortFailed`）待ちのため、ここで
+      // 再開してはいけない（Issue #1480）
+      !liveTask.overlapMergeAbortFailed
     ) {
       self.deps.log.info(`[workflow ${runId}] ${taskId}: 交差の待機を解いて再開します`);
       liveTask.session.resumeLoop();
@@ -279,7 +297,28 @@ async function mergeIntegrationIntoTask(
     }
     const merged = await git.run(['merge', '--no-ff', '--no-edit', head], liveTask.cwd);
     if (merged.code !== 0) {
-      await git.run(['merge', '--abort'], liveTask.cwd);
+      const aborted = await git.run(['merge', '--abort'], liveTask.cwd);
+      if (aborted.code !== 0) {
+        // abortも失敗：worktreeがマージ途中のまま残り、再開してもエージェントが壊れた
+        // 状態で書き込みを続けてしまう（Issue #1480）。症状を隠さず、既存の失敗経路
+        // （`taskApprovalTimedOut`と同じ「印を立てて`stopLoop()`、`onTaskFinished`で
+        // 確定」の手口）でタスクを失敗させる
+        live.warnings.push({
+          kind: 'overlapSyncFailed',
+          taskId,
+          message:
+            `${withTaskId}のマージ後の統合ブランチの取り込みに失敗し、` +
+            `取り消し（merge --abort、終了コード ${aborted.code}）も失敗しました。` +
+            'worktreeがマージ途中のまま残るため、タスクを失敗させます',
+        });
+        self.deps.log.error(
+          `[workflow ${runId}] ${taskId}: 統合ブランチの取り込み失敗後のmerge --abortも失敗` +
+            `（終了コード ${aborted.code}）。タスクを失敗させます`,
+        );
+        liveTask.overlapMergeAbortFailed = true;
+        liveTask.session.stopLoop();
+        return;
+      }
       warn(`git merge が終了コード ${merged.code} で失敗`);
       return;
     }
