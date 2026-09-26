@@ -263,7 +263,8 @@ export class TaskRunController {
     tasks: readonly PlanTaskInput[],
   ): Promise<string | undefined> {
     const run = this.deps.store.find(runId);
-    if (run === undefined) {
+    // 構造の不正はこの後のresolveTaskPlanが理由を返すので、forgeへ問い合わせない
+    if (run === undefined || !resolveTaskPlan(run, tasks).ok) {
       return undefined;
     }
     const known = new Set(listTasks(run).map((t) => t.existingIssueNumber));
