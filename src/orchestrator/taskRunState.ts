@@ -269,6 +269,21 @@ export interface TaskRun {
    * 追加前に保存したrunには無い（`undefined`として扱う）。
    */
   planReview?: TaskPlanReview;
+  /**
+   * Orchestratorがコンテキストの残量不足で次の世代へ自動で引き継いだ記録（Issue #1553）。
+   * Kanbanに出す。一度も起きていなければ省略する。
+   */
+  orchestratorAutoHandoffs?: OrchestratorAutoHandoffRecord;
+}
+
+/** Orchestratorの自動引き継ぎの記録（Issue #1553）。 */
+export interface OrchestratorAutoHandoffRecord {
+  /** 自動引き継ぎの回数。 */
+  count: number;
+  /** 直近の自動引き継ぎで起こした世代。 */
+  lastGeneration: number;
+  /** 直近の自動引き継ぎの時刻（ISO 8601）。 */
+  lastAt: string;
 }
 
 /** 工程セッションからの報告に必ず付ける識別子。 */
@@ -916,4 +931,16 @@ export function recordOrchestratorSession(run: TaskRun, sessionId: string): Task
     return run;
   }
   return { ...run, orchestratorSessionRefs: [...run.orchestratorSessionRefs, sessionId] };
+}
+
+/** 自動引き継ぎで世代`generation`を起こしたことを記録する（Issue #1553）。 */
+export function recordOrchestratorAutoHandoff(run: TaskRun, generation: number, now: Date): TaskRun {
+  return {
+    ...run,
+    orchestratorAutoHandoffs: {
+      count: (run.orchestratorAutoHandoffs?.count ?? 0) + 1,
+      lastGeneration: generation,
+      lastAt: now.toISOString(),
+    },
+  };
 }

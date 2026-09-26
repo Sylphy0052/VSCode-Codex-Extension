@@ -21,6 +21,7 @@ import {
   TASK_RUN_TITLE_MAX_LENGTH,
   taskRunLabel,
   type OrchestratedTask,
+  type OrchestratorAutoHandoffRecord,
   type StageGate,
   type StageGateChoice,
   type StageQuestion,
@@ -147,6 +148,10 @@ export interface TaskRunKanbanRun {
   suspended: boolean;
   assessment: TaskRunAssessment;
   activeSessions: number;
+  /** Orchestratorの現在の世代（開いた回数）。0は未起動（Issue #1553）。 */
+  orchestratorGeneration: number;
+  /** Orchestratorの自動引き継ぎの記録。起きていなければ`undefined`（Issue #1553）。 */
+  orchestratorAutoHandoffs: OrchestratorAutoHandoffRecord | undefined;
   columns: Record<TaskRunKanbanColumn, TaskRunKanbanCard[]>;
 }
 
@@ -402,6 +407,8 @@ export function buildTaskRunKanban(
       suspended: selected.suspendedAt !== undefined,
       assessment: assessTaskRun(selected),
       activeSessions: countActiveStageSessions(selected),
+      orchestratorGeneration: selected.orchestratorGeneration,
+      orchestratorAutoHandoffs: selected.orchestratorAutoHandoffs,
       columns,
     },
   };

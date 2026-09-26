@@ -579,7 +579,7 @@ const script = `
 (function () {
   const vscode = acquireVsCodeApi();
   const COLUMNS = [['planApproval', '計画承認待ち'], ['issuePlan', 'Issue計画'], ['issueCreate', 'Issue作成'], ['implement', '実装'], ['review', 'レビュー'], ['mergeCleanup', 'mergeとcleanup'], ['done', '完了']];
-  const ORCHESTRATOR_LABELS = { notStarted: '未起動', idle: '待機中', busy: '応答中' };
+  const ORCHESTRATOR_LABELS = { notStarted: '未起動', idle: '待機中', busy: '応答中', handingOff: '次の世代へ引き継ぎ中' };
   const controls = document.getElementById('controls');
   const planEl = document.getElementById('plan');
   const boardEl = document.getElementById('board');
@@ -672,7 +672,16 @@ const script = `
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
     controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {
-      controls.appendChild(el('span', 'status', 'Orchestrator: ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
+      // 世代番号と自動引き継ぎの発生を並べて出す（Issue #1553）
+      const generation = orchestratorStatus !== 'notStarted' && run.orchestratorGeneration > 0 ? '（第' + run.orchestratorGeneration + '世代）' : '';
+      controls.appendChild(el('span', 'status' + (orchestratorStatus === 'handingOff' ? ' warn' : ''), 'Orchestrator' + generation + ': ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
+      const handoffs = run.orchestratorAutoHandoffs;
+      if (handoffs && handoffs.count > 0) {
+        const handoffEl = el('span', 'status', '自動引き継ぎ ' + handoffs.count + '回（直近は第' + handoffs.lastGeneration + '世代へ）');
+        const at = new Date(handoffs.lastAt);
+        handoffEl.title = 'コンテキストが少なくなったため、Orchestratorを自動で次の世代へ引き継ぎました。直近: ' + (isNaN(at.getTime()) ? handoffs.lastAt : at.toLocaleString());
+        controls.appendChild(handoffEl);
+      }
       controls.appendChild(button('Orchestratorを開く', '', function () { send('openOrchestrator', { renew: false }); }));
       if (orchestratorStatus !== 'notStarted') {
         controls.appendChild(button('開き直す', '', function () { send('openOrchestrator', { renew: true }); }));
