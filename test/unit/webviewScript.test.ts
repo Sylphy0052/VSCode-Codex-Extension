@@ -1191,6 +1191,19 @@ describe('workflowScript', () => {
     expect(source).toContain('利用できません');
   });
 
+  it('オーケストレーター欄に応答なし・立て直し中と立て直した回数を出す（Issue #1513）', () => {
+    const source = workflowScript();
+    expect(source).toContain('orch.health');
+    expect(source).toContain('応答なし');
+    expect(source).toContain('立て直し中');
+    expect(source).toContain('orch.respawnCount');
+    expect(source).toContain('立て直し ');
+    // 応答中は最後の変化からの経過時間を出す（1秒ごとの再描画で進める）
+    expect(source).toContain('orch.lastActivityAt');
+    expect(source).toContain('最後の変化から');
+    expect(source).toContain('data-active-since');
+  });
+
   it('未読の印を出す（design.md §16.23「人が最後に見てから応答が増えていれば」）', () => {
     const source = workflowScript();
     expect(source).toContain('orch.unreadCount');

@@ -63,6 +63,33 @@ export const MIN_MAX_ASK_USER_PER_RUN = 1;
 export const MAX_MAX_ASK_USER_PER_RUN = 20;
 
 /**
+ * オーケストレーターがbusyのまま状態の変化を返さなくなってから、応答なしとみなすまでの
+ * 秒数の既定値（`agent.workflows.orchestratorUnresponsiveSec`、Issue #1513）。0で判定しない。
+ * 長いツール実行（テストの全件実行等）でも状態の変化は届くため、15分を既定にする。
+ */
+export const DEFAULT_ORCHESTRATOR_UNRESPONSIVE_SEC = 900;
+
+/**
+ * 1つのrunでオーケストレーターを立て直す回数の既定値（`agent.workflows.maxOrchestratorRespawns`、
+ * Issue #1513）。0で立て直さない。落ち続ける原因がある場合に作り直し続けないための上限。
+ */
+export const DEFAULT_MAX_ORCHESTRATOR_RESPAWNS = 3;
+/** `agent.workflows.maxOrchestratorRespawns` の上限。`maxAskUserPerRun`と同じ20に揃える。 */
+export const MAX_MAX_ORCHESTRATOR_RESPAWNS = 20;
+
+/**
+ * オーケストレーターの状態（Issue #1513）。オーケストレーターを諦めた後は`LiveRun.orchestrator`
+ * 自体が`undefined`になるため、ここには「利用できない」を含めない。
+ */
+export type OrchestratorHealth = 'alive' | 'unresponsive' | 'recovering';
+
+/**
+ * タスクから見たオーケストレーターの状態（Issue #1513）。`send_message`（宛先オーケストレーター）
+ * と`ask_orchestrator`の応答に載せる。応答なしと判定した直後は立て直しへ進むため`recovering`に含める。
+ */
+export type OrchestratorStatus = 'alive' | 'recovering' | 'unavailable';
+
+/**
  * 1回の送信本文の総量の上限。§16.4 の `MAX_EXPANDED_PROMPT_LENGTH` /
  * §16.21 の `MAX_COMPOSED_PROMPT_LENGTH` と同じ値・同じ動機（粗い安全弁）。
  */

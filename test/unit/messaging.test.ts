@@ -573,6 +573,73 @@ function buildHub(tasks: RunTaskSnapshot[]): TaskMessagingHub {
   });
 }
 
+describe('TaskMessagingHubDeps.orchestratorStatus（Issue #1513）', () => {
+  function hubWithStatus(
+    status: 'alive' | 'recovering' | 'unavailable',
+    accepted: StoredMessage[],
+  ): TaskMessagingHub {
+    return new TaskMessagingHub({
+      listRunTasks: () => [{ id: 'T1', state: 'running', summary: '' }],
+      now: () => 0,
+      randomId: () => 'msg-1',
+      onAccepted: (m) => accepted.push(m),
+      orchestratorStatus: () => status,
+    });
+  }
+
+  it('稼働中なら状態aliveだけを添え、理由の本文は変えない', () => {
+    const accepted: StoredMessage[] = [];
+    const result = hubWithStatus('alive', accepted).sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      expectReply: true,
+    });
+    expect(result.orchestratorStatus).toBe('alive');
+    expect(result.reason).not.toContain('立て直し');
+    expect(accepted[0]?.expectReply).toBe(true);
+  });
+
+  it('立て直し中なら立て直し後に届くと伝え、返信待ちは保つ', () => {
+    const accepted: StoredMessage[] = [];
+    const result = hubWithStatus('recovering', accepted).sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      expectReply: true,
+      kind: 'question',
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.orchestratorStatus).toBe('recovering');
+    expect(result.reason).toContain('立て直した後に届きます');
+    expect(accepted[0]?.expectReply).toBe(true);
+  });
+
+  it('利用できないなら届かないと伝え、expectReplyを落として返信待ちにさせない', () => {
+    const accepted: StoredMessage[] = [];
+    const result = hubWithStatus('unavailable', accepted).sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      expectReply: true,
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.orchestratorStatus).toBe('unavailable');
+    expect(result.reason).toContain('届きません');
+    expect(accepted[0]?.expectReply).toBe(false);
+  });
+
+  it('状態を問い合わせる口が無ければ応答に状態を載せない', () => {
+    const result = buildHub([{ id: 'T1', state: 'running', summary: '' }]).sendMessage({
+      from: 'T1',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: 'hi',
+      expectReply: false,
+    });
+    expect(result.orchestratorStatus).toBeUndefined();
+  });
+});
+
 describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへの遷移」・Issue #123）', () => {
   it('sendMessageが受け付けたメッセージをそのままonAcceptedへ渡す', () => {
     const accepted: StoredMessage[] = [];

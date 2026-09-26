@@ -39,8 +39,11 @@ import {
 } from './loop/stallDetector';
 import {
   DEFAULT_MAX_ASK_USER_PER_RUN,
+  DEFAULT_MAX_ORCHESTRATOR_RESPAWNS,
+  DEFAULT_ORCHESTRATOR_UNRESPONSIVE_SEC,
   MIN_MAX_ASK_USER_PER_RUN,
   MAX_MAX_ASK_USER_PER_RUN,
+  MAX_MAX_ORCHESTRATOR_RESPAWNS,
 } from './orchestrator/orchestratorSession';
 import {
   DEFAULT_AUTO_RESUME,
@@ -1216,6 +1219,17 @@ export interface WorkflowsConfig {
    */
   maxAutoResumeAttempts: number;
   /**
+   * オーケストレーターがbusyのまま状態の変化を返さなくなってから、応答なしとみなして
+   * 立て直すまでの秒数（`agent.workflows.orchestratorUnresponsiveSec`、既定900、0で判定しない、
+   * `machine-overridable`、Issue #1513）。
+   */
+  orchestratorUnresponsiveSec: number;
+  /**
+   * 1つのrunでオーケストレーターを立て直す回数の上限（`agent.workflows.maxOrchestratorRespawns`、
+   * 既定3、0で立て直さない、`machine-overridable`、Issue #1513）。
+   */
+  maxOrchestratorRespawns: number;
+  /**
    * タスクブランチの命名方式（design.md §16.6「ブランチの命名方式」）。`machine-overridable`。
    * ブランチ名の形を決めるだけで、push先も権限も変えないため`forge`/`finalMerge`ほど
    * 強い制限は要らない。
@@ -1553,6 +1567,12 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     maxAutoResumeAttempts: normalizeMaxAutoResumeAttempts(
       c.get<unknown>('workflows.maxAutoResumeAttempts'),
     ),
+    orchestratorUnresponsiveSec: normalizeOrchestratorUnresponsiveSec(
+      c.get<unknown>('workflows.orchestratorUnresponsiveSec'),
+    ),
+    maxOrchestratorRespawns: normalizeMaxOrchestratorRespawns(
+      c.get<unknown>('workflows.maxOrchestratorRespawns'),
+    ),
   };
 }
 
@@ -1766,6 +1786,34 @@ function normalizeMaxAutoResumeAttempts(value: unknown): number {
     value <= MAX_MAX_AUTO_RESUME_ATTEMPTS
     ? value
     : DEFAULT_MAX_AUTO_RESUME_ATTEMPTS;
+}
+
+/**
+ * `agent.workflows.orchestratorUnresponsiveSec` の生値を安全な秒数へ丸める（Issue #1513）。
+ * 0は「判定しない」として通す。負・非有限・`MAX_TIMEOUT_SEC`超過は既定値へ丸める
+ * （`normalizeMergeApprovalTimeoutSec`と同じ「範囲外は既定へ」方針）。
+ */
+export function normalizeOrchestratorUnresponsiveSec(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= MAX_TIMEOUT_SEC
+    ? Math.floor(value)
+    : DEFAULT_ORCHESTRATOR_UNRESPONSIVE_SEC;
+}
+
+/**
+ * `agent.workflows.maxOrchestratorRespawns` の生値を安全な回数へ丸める（Issue #1513）。
+ * 0は「立て直さない」として通す。整数でない・負・`MAX_MAX_ORCHESTRATOR_RESPAWNS`超過は
+ * 既定値へ丸める。
+ */
+export function normalizeMaxOrchestratorRespawns(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_MAX_ORCHESTRATOR_RESPAWNS
+    ? value
+    : DEFAULT_MAX_ORCHESTRATOR_RESPAWNS;
 }
 
 /** アクティブエディタが属するワークスペースフォルダ。無ければ先頭（設計書 §10）。 */
