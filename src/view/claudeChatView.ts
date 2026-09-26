@@ -1261,6 +1261,13 @@ export class ClaudeChatViewManager
     newEntry.session.setAutoHandoff(state.autoHandoff);
     // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
     newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+    // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
+    // 時点のグローバル設定で描かれているため、上書きした値で描き直す
+    newEntry.reflexOverride = entry.reflexOverride;
+    void newEntry.panel?.webview.postMessage({
+      type: 'reflex',
+      enabled: this.reflexEnabledFor(newEntry),
+    });
     // 自動返信のON/OFFも持ち越す（Issue #1362）。持ち越したら引き継ぎ元では止める。
     // 旧タブを残したとき、新旧2つのセッションが同じ作業を自動で進めるのを防ぐ。
     // `state`は確認ダイアログの前に取った値のため、待っている間のトグル操作を拾えるよう
