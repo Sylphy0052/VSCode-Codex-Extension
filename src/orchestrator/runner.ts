@@ -112,6 +112,7 @@ import {
   stopOverlapPoll,
 } from './runnerOverlap';
 import type { OverlapWait } from './taskOverlap';
+import { notifyUnansweredInstructions } from './runnerInstruction';
 import {
   buildRunTaskSnapshots,
   checkMessagingVisibility,
@@ -1413,6 +1414,12 @@ export interface LiveTask {
    */
   templateNonce: string;
   submissionCount: number;
+  /**
+   * 確定したターンの数（Issue #1502）。指示を添えたターンが応答なしで確定したかを
+   * `submissionCount`と突き合わせて判定する。`lastTurnCompletionSeq`は分割（Issue #1273）で
+   * 0へ戻るため、こちらを別に数える。
+   */
+  completedTurnCount: number;
   /** タスクが開始された時刻（ISO8601）。Viewの経過時間表示に使う。 */
   startedAt: string;
   /** 直近の応答の1行要約（design.md §16.8）。応答本文そのものは持たない。 */
@@ -4218,6 +4225,7 @@ export class WorkflowRunner {
       contextLowInFlight: false,
       templateNonce: '',
       submissionCount: 0,
+      completedTurnCount: 0,
       startedAt: (this.deps.now?.() ?? new Date()).toISOString(),
       lastResponseSummary: '',
       pendingApproval: undefined,
@@ -4302,7 +4310,9 @@ export class WorkflowRunner {
       // `takeDeliverableMessages`は呼ぶたびに未配送分を取り出す（配送済みとして消費する）
       // ため、送信のたびにここで取りに行く必要がある
       const hub = live.messaging?.hub;
-      const delivered = hub?.takeDeliverableMessages(taskId) ?? [];
+      // この本文を載せるターンの番号を渡す（Issue #1502）。送信回数はターンの開始
+      // （busyの立ち上がり）で数えるため、送る時点ではまだ1つ手前の値になっている
+      const delivered = hub?.takeDeliverableMessages(taskId, liveTask.submissionCount + 1) ?? [];
       const composed = composeNextPrompt(contracted, delivered);
       // Viewで実際に送った文面を確認できるようにする（design.md §16.21、Issue #132
       // 「4. 人が目視確認できるようにする」）。`expandedPrompt`はcomposeNextPromptを
@@ -5717,6 +5727,11 @@ export class WorkflowRunner {
         this.pump(runId);
       }
       void checkTaskOverlap(this.internals, runId);
+      // 指示を添えたターンが応答なしで確定したら知らせる（Issue #1502）
+      liveTask.completedTurnCount += 1;
+      const unanswered =
+        live.messaging?.hub.takeUnansweredInstructions(taskId, liveTask.completedTurnCount) ?? [];
+      void notifyUnansweredInstructions(this.internals, runId, live, taskId, unanswered);
     }
     // 状態変化のたびにViewへ知らせる。永続化（persist）は送信回数の節目だけに絞ったままだが、
     // 表示専用の通知はストリーミング中の要約更新でも毎回出す

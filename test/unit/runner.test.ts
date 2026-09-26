@@ -8144,6 +8144,183 @@ tasks:
   );
 });
 
+/**
+ * 指示(instruction)の配線（Issue #1502）。
+ *
+ * `TaskMessagingHub`単体（指示idの付与・本文組立の純粋関数）は`test/unit/instructionResult.test.ts`
+ * で確認済み。ここでは`WorkflowRunner`が実際に`hub.takeDeliverableMessages`（配送・
+ * `deliveredForTurn`の記録）・`hub.takeUnansweredInstructions`（ターン確定時の判定）・
+ * `notifyInstructionResult`/`notifyUnansweredInstructions`（オーケストレーターへの通知）を
+ * 正しく結線しているかを、既存の慣例どおり`state.hub.sendMessage(...)`等を直接呼んで確かめる。
+ */
+describe('WorkflowRunner: 指示(instruction)の配線（Issue #1502）', () => {
+  const INSTRUCTION_YAML = `
+version: 1
+name: instruction-wiring-test
+defaults:
+  maxParallel: 2
+tasks:
+  - id: T1
+    prompt: p1
+    done: d1
+  - id: T2
+    prompt: p2
+    done: d2
+`;
+
+  /** run開始通知のターンを終わらせ、以降のイベントを即座に観測できるようにする */
+  function finishOrchestratorTurn(orchestrator: FakeTaskSession): void {
+    orchestrator.emitState({ ...initialChatState, busy: true });
+    orchestrator.emitState({ ...initialChatState, busy: false });
+  }
+
+  it(
+    '指示は次のターンのプロンプトへ指示id・report_instruction_resultの注記付きで届き、' +
+      '応答が無いまま確定するとtaskInstructionUnansweredが1回だけ届く' +
+      '（次のターンが確定しても2回目は来ない）',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(INSTRUCTION_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/instruction.yaml', '/repo');
+      await flush();
+
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      finishOrchestratorTurn(orchestrator);
+
+      const sendResult = state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: 'この項目を直してください',
+        expectReply: false,
+      });
+      expect(sendResult?.accepted).toBe(true);
+      const instructionId = state.hub?.openInstructionIds('T1')[0] as string;
+      expect(instructionId).toBeDefined();
+
+      const t1 = codexHost.byTaskId('T1');
+      const composed = t1.promptTransform?.('続けてください') ?? '';
+      expect(composed).toContain(`指示id: ${instructionId}`);
+      expect(composed).toContain('report_instruction_result');
+
+      // 1ターン目: 応答せず確定させる
+      t1.emitState({ ...initialChatState, busy: true });
+      t1.emitState({ ...initialChatState, busy: false, turnCompletionSeq: 1 });
+      await flush();
+      finishOrchestratorTurn(orchestrator);
+
+      const matching = orchestrator.sentTexts.filter((text) =>
+        text.includes('kind="taskInstructionUnanswered"'),
+      );
+      expect(matching.length).toBe(1);
+      expect(matching[0]).toContain(`指示id: ${instructionId}`);
+
+      // 2ターン目: 別の確定が来ても再送しない
+      t1.emitState({ ...initialChatState, busy: true });
+      t1.emitState({ ...initialChatState, busy: false, turnCompletionSeq: 2 });
+      await flush();
+      finishOrchestratorTurn(orchestrator);
+
+      const matchingAfter = orchestrator.sentTexts.filter((text) =>
+        text.includes('kind="taskInstructionUnanswered"'),
+      );
+      expect(matchingAfter.length).toBe(1);
+    },
+  );
+
+  it('タスクがreport_instruction_resultで応答するとtaskInstructionResultイベントが届き、本文に申告と実測を含む', async () => {
+    const { deps, state } = fakeMessagingDeps();
+    const { runner, codexHost } = createHarness(INSTRUCTION_YAML, { messaging: deps });
+    await runner.start('/repo/.agents/workflows/instruction.yaml', '/repo');
+    await flush();
+
+    const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+    finishOrchestratorTurn(orchestrator);
+
+    const sendResult = state.hub?.sendMessage({
+      from: ORCHESTRATOR_CONNECTION_ID,
+      to: 'T1',
+      body: '仕様を確認して直してください',
+      expectReply: false,
+    });
+    expect(sendResult?.accepted).toBe(true);
+    const instructionId = state.hub?.openInstructionIds('T1')[0] as string;
+    expect(instructionId).toBeDefined();
+
+    const t1 = codexHost.byTaskId('T1');
+    const composed = t1.promptTransform?.('続けてください') ?? '';
+    expect(composed).toContain(`指示id: ${instructionId}`);
+
+    const reportResult = state.hub?.reportInstructionResult({
+      from: 'T1',
+      instructionId,
+      result: '仕様どおり直した',
+      unresolved: [],
+      count: undefined,
+    });
+    expect(reportResult?.accepted).toBe(true);
+    await flush();
+    finishOrchestratorTurn(orchestrator);
+
+    const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
+    expect(last).toContain('kind="taskInstructionResult"');
+    expect(last).toContain('## 申告');
+    expect(last).toContain('## 実測');
+    // 応答を受け付けた指示は閉じる
+    expect(state.hub?.openInstructionIds('T1')).toEqual([]);
+  });
+
+  it(
+    '配送より前に始まったターンの確定が配送より後に処理されても' +
+      '（指示を積んだターンより前のターンの確定では）taskInstructionUnansweredを出さない。' +
+      '指示を積んだターン自身が確定して初めて出す',
+    async () => {
+      const { deps, state } = fakeMessagingDeps();
+      const { runner, codexHost } = createHarness(INSTRUCTION_YAML, { messaging: deps });
+      await runner.start('/repo/.agents/workflows/instruction.yaml', '/repo');
+      await flush();
+
+      const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
+      finishOrchestratorTurn(orchestrator);
+
+      const t1 = codexHost.byTaskId('T1');
+      // ターン1を配送より前に開始させておく
+      t1.emitState({ ...initialChatState, busy: true });
+
+      // ターン1が走っている間に指示を送る。配送は次の送信（ターン2）に載る
+      const sendResult = state.hub?.sendMessage({
+        from: ORCHESTRATOR_CONNECTION_ID,
+        to: 'T1',
+        body: '次の送信で確認してください',
+        expectReply: false,
+      });
+      expect(sendResult?.accepted).toBe(true);
+      const instructionId = state.hub?.openInstructionIds('T1')[0] as string;
+      const composed = t1.promptTransform?.('続けてください') ?? '';
+      expect(composed).toContain(`指示id: ${instructionId}`);
+
+      // ターン1（指示を積む前に始まったターン）の確定が、配送より後に処理される
+      t1.emitState({ ...initialChatState, busy: false, turnCompletionSeq: 1 });
+      await flush();
+      finishOrchestratorTurn(orchestrator);
+      expect(
+        orchestrator.sentTexts.some((text) => text.includes('kind="taskInstructionUnanswered"')),
+      ).toBe(false);
+
+      // 指示を積んだターン2が応答無しで確定して、初めて知らせる
+      t1.emitState({ ...initialChatState, busy: true });
+      t1.emitState({ ...initialChatState, busy: false, turnCompletionSeq: 2 });
+      await flush();
+      finishOrchestratorTurn(orchestrator);
+
+      const matching = orchestrator.sentTexts.filter((text) =>
+        text.includes('kind="taskInstructionUnanswered"'),
+      );
+      expect(matching.length).toBe(1);
+      expect(matching[0]).toContain(`指示id: ${instructionId}`);
+    },
+  );
+});
+
 describe('WorkflowRunner: run終了処理の回数（Issue #432-2、Issue #491で上書き）', () => {
   /**
    * オーケストレーターへの通知はターン中は`pending`に溜まり、ターンが終わって
