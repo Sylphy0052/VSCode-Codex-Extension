@@ -1,5 +1,6 @@
 import { isBranchOrTagDelete, normalizeCommand } from './escalation';
 import { MESSAGING_MCP_SERVER_NAME } from './messaging';
+import { isReadOnlyCommandApproval } from './readOnlyCommand';
 import { ROADMAP_ASK_ORCHESTRATOR_TOOL } from './roadmapQuestionMcp';
 import type { TaskStage } from './taskRunState';
 import type { ApprovalHandler } from './taskSession';
@@ -53,6 +54,10 @@ export function isMergeOrRemoteBranchDelete(command: string): boolean {
   );
 }
 
+/**
+ * 工程セッションの承認ハンドラ。merge・リモートブランチ削除は`mergeCleanup`工程以外で人へ回し、
+ * 読み取り専用のコマンド（`isReadOnlyCommandApproval`）は`allowAutoApprove`が無効でも許可する（Issue #1535）。
+ */
 export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): ApprovalHandler {
   return async (_approval, rawParams) => {
     const tool = stageToolName(rawParams);
@@ -62,7 +67,10 @@ export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): Ap
     if (stage !== 'mergeCleanup' && isMergeOrRemoteBranchDelete(commandOf(rawParams))) {
       return { kind: 'ask' };
     }
-    return autoApprove ? { kind: 'auto', decision: 'accept' } : { kind: 'ask' };
+    if (autoApprove || isReadOnlyCommandApproval(rawParams)) {
+      return { kind: 'auto', decision: 'accept' };
+    }
+    return { kind: 'ask' };
   };
 }
 

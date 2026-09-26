@@ -7,6 +7,7 @@ import {
   type OrchestratorEventEnvelope,
 } from './orchestratorSession';
 import type { RoadmapAskOutcome } from './roadmapQuestionMcp';
+import { isReadOnlyCommandApproval } from './readOnlyCommand';
 import { stripControlCharsPreservingNewlines } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { ControllerResult, TaskRunController } from './taskRunController';
@@ -431,6 +432,7 @@ function taskRunToolName(rawParams: Record<string, unknown>): string | undefined
  *
  * 自動許可の集合に入るツールは常に許可し、入らないツール（`stop_stage`・`set_max_parallel`）は
  * `allowAutoApprove`でも人へ回す。それ以外の承認は、`allowAutoApprove`を人が有効にしたときだけ許可する。
+ * ただし読み取り専用のコマンド（`isReadOnlyCommandApproval`）は無効のときも許可する（Issue #1535）。
  */
 export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
   return async (_approval, rawParams) => {
@@ -440,7 +442,10 @@ export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
         ? { kind: 'auto', decision: 'accept' }
         : { kind: 'ask' };
     }
-    return autoApprove ? { kind: 'auto', decision: 'accept' } : { kind: 'ask' };
+    if (autoApprove || isReadOnlyCommandApproval(rawParams)) {
+      return { kind: 'auto', decision: 'accept' };
+    }
+    return { kind: 'ask' };
   };
 }
 
