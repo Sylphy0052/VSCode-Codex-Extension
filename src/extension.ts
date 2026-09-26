@@ -2206,6 +2206,15 @@ async function confirmVerifyCommands(request: VerifyCommandConsentRequest): Prom
   return choice === '実行を許可';
 }
 
+function formatWorkflowMtime(mtime: number): string {
+  const d = new Date(mtime);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
 async function runWorkflow(
   runner: WorkflowRunner,
   view: WorkflowViewManager,
@@ -2225,9 +2234,25 @@ async function runWorkflow(
     );
     return;
   }
+  // レビューで定義が増えても最新を選べるよう、更新日時の新しい順に並べて日時を添える（Issue #1547）
+  const entries = await Promise.all(
+    files.map(async (f) => {
+      const mtime = await vscode.workspace.fs.stat(f).then(
+        (s) => s.mtime,
+        () => 0,
+      );
+      return { file: f, mtime };
+    }),
+  );
+  entries.sort((a, b) => b.mtime - a.mtime);
   const picked = await vscode.window.showQuickPick(
-    files.map((f) => ({ label: vscode.workspace.asRelativePath(f), file: f })),
-    { placeHolder: '実行するワークフロー定義を選択' },
+    entries.map(({ file, mtime }) => ({
+      label: path.basename(file.fsPath),
+      description: mtime > 0 ? `更新 ${formatWorkflowMtime(mtime)}` : '',
+      detail: vscode.workspace.asRelativePath(file),
+      file,
+    })),
+    { placeHolder: '実行するワークフロー定義を選択（更新日時の新しい順）', matchOnDetail: true },
   );
   if (picked === undefined) {
     return;
