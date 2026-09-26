@@ -554,6 +554,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.taskRun.switch",
+        "title": "オーケストレータモードのrunを切り替える",
+        "category": "Agent"
+      },
+      {
         "command": "agent.forgeHub",
         "title": "Forge Hubを開く",
         "category": "Agent",

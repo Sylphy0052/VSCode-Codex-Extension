@@ -27,6 +27,7 @@ import {
   isTaskRunActive,
   listTasks,
   MAX_TASK_RUN_PARALLEL,
+  TASK_RUN_TITLE_MAX_LENGTH,
   type TaskRun,
   type TaskRunEngine,
 } from '../orchestrator/taskRunState';
@@ -42,7 +43,8 @@ import {
 } from '../orchestrator/worktree';
 import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
-import { TaskRunKanbanViewManager } from './taskRunKanbanView';
+import { taskRunLabel } from './taskRunKanbanModel';
+import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanbanView';
 
 /** 1つの工程セッションで送る指示の上限（引き継ぎを含む）。 */
 const TASK_STAGE_MAX_ITERATIONS = 10;
@@ -212,10 +214,21 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   });
   holder.view = view;
 
+  // 動いているrunはOrchestratorのタブも合わせる。中断中・終了したrunはKanbanだけに出す（Issue #1561）
+  const switchToRun = (runId: string): void => {
+    const run = controller.find(runId);
+    if (run !== undefined && isTaskRunActive(run)) {
+      showRun(view, orchestrator, runId);
+    } else {
+      view.show(runId);
+    }
+  };
+
+  // 通知が出ただけでは見ているrunを変えない。「Kanbanを開く」を押したときだけ切り替える
   const transitions = controller.onTransition((prev, next) => {
     orchestrator.handleRunTransition(prev, next);
     view.refresh();
-    notifyTransition(prev, next, () => view.show(next.runId));
+    notifyTransition(prev, next, () => switchToRun(next.runId));
   });
 
   void controller.restore().catch((e: unknown) => {
@@ -240,7 +253,58 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ),
     ),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
+    vscode.commands.registerCommand('agent.taskRun.switch', () =>
+      switchRunCommand(controller, view, switchToRun),
+    ),
   ];
+}
+
+/**
+ * runの一覧（Kanbanと同じ並び）から選んだrunをKanbanとOrchestratorへ出す。中断中のrunを選んだら、
+ * 続けて再開するかを尋ねる（Issue #1561）。
+ */
+async function switchRunCommand(
+  controller: TaskRunController,
+  view: TaskRunKanbanViewManager,
+  switchToRun: (runId: string) => void,
+): Promise<void> {
+  const { runs } = controller.board(undefined, currentWorkspaceFolders());
+  if (runs.length === 0) {
+    void vscode.window.showInformationMessage(
+      'オーケストレータモード: runがありません。「オーケストレータモードを開始」で始めてください',
+    );
+    return;
+  }
+  const items: (vscode.QuickPickItem & { runId?: string })[] = [];
+  let separated = false;
+  for (const r of runs) {
+    if (!r.inCurrentFolder && !separated) {
+      items.push({ label: '他のフォルダ', kind: vscode.QuickPickItemKind.Separator });
+      separated = true;
+    }
+    items.push({ label: r.label, description: r.status, detail: r.workspaceRoot, runId: r.runId });
+  }
+  const chosen = await vscode.window.showQuickPick(items, {
+    title: '表示するrun',
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  const run = chosen?.runId === undefined ? undefined : controller.find(chosen.runId);
+  if (run === undefined) {
+    return;
+  }
+  if (run.finishedAt === undefined && run.suspendedAt !== undefined) {
+    view.show(run.runId);
+    const choice = await vscode.window.showInformationMessage(
+      `オーケストレータモード: 「${taskRunLabel(run)}」は中断中です。再開しますか？`,
+      '再開する',
+    );
+    if (choice === '再開する') {
+      await view.resumeRun(run.runId);
+    }
+    return;
+  }
+  switchToRun(run.runId);
 }
 
 function parseEngine(value: unknown): TaskRunEngine | undefined {
@@ -255,17 +319,19 @@ function notifyTransition(prev: TaskRun | undefined, next: TaskRun, open: () => 
   if (!isTaskRunActive(next)) {
     return;
   }
+  // どのrunの通知かを名前で示す（Issue #1561）
+  const prefix = `オーケストレータモード「${taskRunLabel(next)}」`;
   if (prev?.planStatus !== 'awaitingApproval' && next.planStatus === 'awaitingApproval') {
-    notify('オーケストレータモード: 計画の承認待ちです。Kanbanで確かめて承認してください', open);
+    notify(`${prefix}: 計画の承認待ちです。Kanbanで確かめて承認してください`, open);
   }
   const asked = newQuestionsAwaitingUser(prev, next);
   if (asked.length > 0) {
-    notify(`オーケストレータモード: ユーザー判断待ちの質問があります（${asked.join(', ')}）`, open);
+    notify(`${prefix}: ユーザー判断待ちの質問があります（${asked.join(', ')}）`, open);
   }
   const before = prev === undefined ? undefined : assessTaskRun(prev);
   const after = assessTaskRun(next);
   if (after.kind === 'stalled' && before?.kind !== 'stalled') {
-    notify(`オーケストレータモード: 人の対応待ちで止まりました（${after.blockers.join(', ')}）`, open);
+    notify(`${prefix}: 人の対応待ちで止まりました（${after.blockers.join(', ')}）`, open);
   }
 }
 
@@ -352,10 +418,22 @@ async function startRunCommand(
   if (parallel === undefined) {
     return;
   }
+  const title = await vscode.window.showInputBox({
+    title: 'runの名前（Kanbanの一覧と通知に出します）',
+    prompt: '空のままEnterで開始時刻とCLIを名前にします。後でKanbanから変えられます',
+    validateInput: (value) =>
+      value.length > TASK_RUN_TITLE_MAX_LENGTH
+        ? `${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内で入力してください`
+        : undefined,
+  });
+  if (title === undefined) {
+    return;
+  }
   const outcome = await controller.startRun({
     workspaceRoot: folder,
     engine,
     maxParallel: Number(parallel),
+    title,
   });
   if (!outcome.ok) {
     log.warn(`[task run] ${outcome.message}`);
@@ -364,7 +442,7 @@ async function startRunCommand(
   }
   if (outcome.reused) {
     void vscode.window.showInformationMessage(
-      'このフォルダには動いているrunがあるため、それを開きます（選んだCLIと並列上限は使いません）',
+      'このフォルダには動いているrunがあるため、それを開きます（選んだCLI・並列上限・名前は使いません）',
     );
   }
   showRun(view, orchestrator, outcome.runId);

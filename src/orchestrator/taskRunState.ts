@@ -15,11 +15,16 @@
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
 
+import { sanitizeInlineText } from './untrustedText';
+
 /** 工程セッションの実行エンジン。runの開始時に1つ選び、全工程で共通にする。 */
 export type TaskRunEngine = 'codex' | 'claude';
 
 /** 並列上限として受け付ける最大値。 */
 export const MAX_TASK_RUN_PARALLEL = 8;
+
+/** runの表示名の上限（文字数）。 */
+export const TASK_RUN_TITLE_MAX_LENGTH = 80;
 
 /** 工程。この順に進む。 */
 export const TASK_STAGES = [
@@ -226,6 +231,11 @@ export interface TaskRun {
    * 新しいrunを始められる。再開すると外す。項目の無い保存データは中断していないと読む。
    */
   suspendedAt?: string;
+  /**
+   * 人が付けた表示名（Issue #1561）。1行へ均して保存する。無ければ開始時刻とエンジンで表示する。
+   * 項目の無い保存データは名前なしと読む。
+   */
+  title?: string;
   planStatus: TaskPlanStatus;
   /** 着手順（計画の並び）の`taskId`。 */
   taskOrder: readonly string[];
@@ -271,6 +281,8 @@ export interface CreateTaskRunInput {
   workspaceRoot: string;
   engine: TaskRunEngine;
   maxParallel: number;
+  /** 表示名。空なら付けない。 */
+  title?: string;
   now: Date;
 }
 
@@ -279,6 +291,7 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
   if (!isValidMaxParallel(input.maxParallel)) {
     throw new Error(`並列上限は1〜${MAX_TASK_RUN_PARALLEL}の整数: ${String(input.maxParallel)}`);
   }
+  const title = normalizeTaskRunTitle(input.title);
   return {
     schemaVersion: TASK_RUN_SCHEMA_VERSION,
     runId: input.runId,
@@ -287,6 +300,7 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
     maxParallel: input.maxParallel,
     startedAt: input.now.toISOString(),
     finishedAt: undefined,
+    ...(title === undefined ? {} : { title }),
     planStatus: 'drafting',
     taskOrder: [],
     tasks: {},
@@ -821,6 +835,27 @@ export function resumeTaskRun(run: TaskRun): TaskRun {
   const next = { ...run };
   delete next.suspendedAt;
   return next;
+}
+
+/** 表示名を1行へ均し、上限で切り詰める。空白だけなら`undefined`（名前なし）。 */
+export function normalizeTaskRunTitle(title: string | undefined): string | undefined {
+  const trimmed = sanitizeInlineText(title ?? '', TASK_RUN_TITLE_MAX_LENGTH).trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/** 表示名を付け替える。空なら名前を外す。 */
+export function setTaskRunTitle(run: TaskRun, title: string | undefined): TaskRun {
+  const next = normalizeTaskRunTitle(title);
+  if (next === run.title) {
+    return run;
+  }
+  const updated = { ...run };
+  if (next === undefined) {
+    delete updated.title;
+  } else {
+    updated.title = next;
+  }
+  return updated;
 }
 
 /** Orchestratorセッションを開く前に世代を進める。 */

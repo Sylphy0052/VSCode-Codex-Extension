@@ -5,7 +5,7 @@ import type { Logger } from '../log';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
-import { isTaskRunActive, isValidTaskId } from '../orchestrator/taskRunState';
+import { isTaskRunActive, isValidTaskId, TASK_RUN_TITLE_MAX_LENGTH } from '../orchestrator/taskRunState';
 import { chatCsp } from './chatCsp';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
@@ -126,7 +126,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     this.dirty = false;
     this.lastPostAt = Date.now();
-    const board = this.deps.controller.board(this.selectedRunId);
+    const board = this.deps.controller.board(this.selectedRunId, currentWorkspaceFolders());
     const orchestrator = board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
     void this.panel.webview.postMessage({ type: 'board', board, orchestrator });
   }
@@ -141,8 +141,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     if (message.type === 'selectRun') {
       if (typeof message.runId === 'string') {
-        this.selectedRunId = message.runId;
-        this.schedulePost();
+        this.selectRun(message.runId);
       }
       return;
     }
@@ -191,6 +190,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
         return;
       case 'resumeRun':
         await this.resumeRun(runId);
+        return;
+      case 'renameRun':
+        await this.renameRun(runId);
         return;
     }
     const taskId = message.taskId;
@@ -262,7 +264,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   }
 
   private findCard(runId: string, taskId: string): TaskRunKanbanCard | undefined {
-    const board = this.deps.controller.board(runId);
+    const board = this.deps.controller.board(runId, currentWorkspaceFolders());
     if (board.run?.runId !== runId) {
       return undefined;
     }
@@ -326,8 +328,46 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     this.schedulePost();
   }
 
-  /** 中断したrunを再開する。同じフォルダに動いているrunがあれば、確かめてからそちらを中断して入れ替える。 */
-  private async resumeRun(runId: string): Promise<void> {
+  /**
+   * Kanbanで表示するrunを切り替える。動いているrunならOrchestratorのタブも合わせて前面へ出す
+   * （閉じていれば新しい世代で開く）。中断中・終了したrunではOrchestratorを開かない（Issue #1561）。
+   */
+  private selectRun(runId: string): void {
+    const run = this.deps.controller.find(runId);
+    if (run === undefined) {
+      return;
+    }
+    this.selectedRunId = runId;
+    this.schedulePost();
+    if (isTaskRunActive(run)) {
+      void this.openOrchestrator(runId, false);
+    }
+  }
+
+  private async renameRun(runId: string): Promise<void> {
+    const run = this.deps.controller.find(runId);
+    if (run === undefined) {
+      return;
+    }
+    const title = await vscode.window.showInputBox({
+      title: 'runの名前',
+      prompt: '空にすると開始時刻とCLIで表示します',
+      value: run.title ?? '',
+      validateInput: (value) =>
+        value.length > TASK_RUN_TITLE_MAX_LENGTH ? `${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内で入力してください` : undefined,
+    });
+    if (title === undefined) {
+      return;
+    }
+    await this.deps.controller.setTitle(runId, title);
+    this.schedulePost();
+  }
+
+  /**
+   * 中断したrunを再開する。同じフォルダに動いているrunがあれば、確かめてからそちらを中断して入れ替える。
+   * runの切り替えコマンド（Issue #1561）からも呼ぶ。
+   */
+  async resumeRun(runId: string): Promise<void> {
     const run = this.deps.controller.find(runId);
     if (run === undefined || run.finishedAt !== undefined || run.suspendedAt === undefined) {
       return;
@@ -379,6 +419,11 @@ function warnIfRejected(result: { ok: boolean; message: string }): void {
   if (!result.ok) {
     void vscode.window.showWarningMessage(`オーケストレータモード: ${result.message}`);
   }
+}
+
+/** いま開いているワークスペースフォルダ。runの一覧でこれらのrunを先に並べる。 */
+export function currentWorkspaceFolders(): string[] {
+  return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -487,7 +532,6 @@ const script = `
   const vscode = acquireVsCodeApi();
   const COLUMNS = [['planApproval', '計画承認待ち'], ['issuePlan', 'Issue計画'], ['issueCreate', 'Issue作成'], ['implement', '実装'], ['review', 'レビュー'], ['mergeCleanup', 'mergeとcleanup'], ['done', '完了']];
   const ORCHESTRATOR_LABELS = { notStarted: '未起動', idle: '待機中', busy: '応答中' };
-  const ENGINE_LABELS = { codex: 'Codex', claude: 'Claude' };
   const controls = document.getElementById('controls');
   const planEl = document.getElementById('plan');
   const boardEl = document.getElementById('board');
@@ -532,12 +576,20 @@ const script = `
     if (board.runs.length > 0) {
       const select = el('select');
       select.setAttribute('aria-label', '表示するrun');
+      // 今のフォルダのrunが先に届く。他のフォルダのrunは後ろのグループにまとめる
+      let otherGroup;
       board.runs.forEach(function (r) {
-        const o = el('option', undefined, r.startedAt.slice(0, 16).replace('T', ' ') + ' ' + (ENGINE_LABELS[r.engine] || r.engine) + (r.finished ? '（終了）' : r.suspended ? '（中断中）' : ''));
+        const o = el('option', undefined, r.label + '（' + r.status + '）');
         o.value = r.runId;
         o.title = r.workspaceRoot;
         if (board.run && board.run.runId === r.runId) { o.selected = true; }
-        select.appendChild(o);
+        if (r.inCurrentFolder) { select.appendChild(o); return; }
+        if (!otherGroup) {
+          otherGroup = el('optgroup');
+          otherGroup.label = '他のフォルダ';
+          select.appendChild(otherGroup);
+        }
+        otherGroup.appendChild(o);
       });
       select.addEventListener('change', function () {
         vscode.postMessage({ type: 'selectRun', runId: select.value });
@@ -548,6 +600,7 @@ const script = `
     if (!run) { return; }
     const status = run.suspended && !run.finished ? ['中断中', 'warn'] : assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
+    controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {
       controls.appendChild(el('span', 'status', 'Orchestrator: ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
       controls.appendChild(button('Orchestratorを開く', '', function () { send('openOrchestrator', { renew: false }); }));
