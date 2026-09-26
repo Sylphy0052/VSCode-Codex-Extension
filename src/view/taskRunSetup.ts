@@ -1,3 +1,5 @@
+import * as fsPromises from 'node:fs/promises';
+
 import * as vscode from 'vscode';
 import { CLAUDE_EFFORTS } from '../claude/types';
 import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
@@ -133,6 +135,19 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       return { model: choice.settings.model, effort: choice.settings.effort, reasons: choice.reasons };
     },
     observation,
+    pathExists: async (target) => {
+      try {
+        await fsPromises.stat(target);
+        return true;
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          return false;
+        }
+        // 一時的なI/Oエラー（NFSのESTALE等）を「消えた」と誤判定しない
+        throw e;
+      }
+    },
     log: (message) => log.info(message),
   });
   holder.controller = controller;

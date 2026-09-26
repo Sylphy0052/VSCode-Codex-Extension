@@ -839,6 +839,25 @@ export class TaskStageRunner {
     }
   }
 
+  /**
+   * 再読み込みの間にPRがmergeされたタスクの後片付け。工程セッションは再読み込みで終わっているため、
+   * 復元で「mergeとcleanup」を完了にしたタスクのworktreeとローカルのブランチをここで片付ける。
+   */
+  async cleanupRestoredTask(runId: string, taskId: string): Promise<void> {
+    await this.withTaskLock(liveKey(runId, taskId), async () => {
+      const run = this.deps.store.find(runId);
+      const task = run === undefined ? undefined : getTask(run, taskId);
+      if (run === undefined || task === undefined || task.stages.mergeCleanup.status !== 'done') {
+        return;
+      }
+      const result = await cleanupAfterMerge(this.deps, { repoRoot: run.workspaceRoot, runId, task });
+      result.warnings.forEach((w) => this.warn(runId, taskId, w));
+      if (!result.ok) {
+        this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
+      }
+    });
+  }
+
   private async cleanupIfMerged(entry: LiveStageSession): Promise<void> {
     const { runId } = entry;
     const { taskId, stage } = entry.ref;

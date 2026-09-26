@@ -718,6 +718,26 @@ export function resetStageForRetry(run: TaskRun, taskId: string, now: Date): Tas
   });
 }
 
+/**
+ * 工程セッションの外（再読み込みの間など）でPRがmergeされたタスクを終える。実行回（あれば）を
+ * 閉じ、終わっていない工程（PRがあるので残りは実装・レビュー・mergeとcleanupだけ）を完了にする。
+ */
+export function completeMergedTask(run: TaskRun, taskId: string, now: Date): TaskRun {
+  const task = getTask(run, taskId);
+  if (task === undefined || task.pullRequest === undefined || isTaskDone(task)) {
+    return run;
+  }
+  const at = now.toISOString();
+  let next = endCurrentAttempt(task, at);
+  for (const stage of TASK_STAGES) {
+    const status = next.stages[stage].status;
+    if (status !== 'done' && status !== 'skipped') {
+      next = withStage(next, stage, { status: 'done', pendingDecision: undefined, completedAt: at });
+    }
+  }
+  return withTask(run, { ...next, attention: 'none', failure: undefined, updatedAt: at });
+}
+
 /** 並列上限を変える。範囲外は例外にする。下げても実行中のセッションは止めない。 */
 export function setTaskRunMaxParallel(run: TaskRun, maxParallel: number): TaskRun {
   if (!isValidMaxParallel(maxParallel)) {
