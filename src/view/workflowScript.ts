@@ -267,8 +267,28 @@ export function workflowScript(): string {
 
     const stopBtn = el('stopAllBtn');
     stopBtn.disabled = snapshot.outcome !== 'running';
+    updateHeaderButtons(snapshot);
 
     renderBanner(snapshot, progress);
+  }
+
+  /**
+   * ヘッダーのボタンを状態に応じて出し分ける（Issue #1546）。id・登録済みのイベントは
+   * そのまま、hiddenだけを切り替える。disabledの既存ロジック（stopAllBtnはoutcomeが
+   * runningでないとき、openIntegrationPrBtnはrenderIntegration側）はそのまま残す。
+   */
+  function updateHeaderButtons(snapshot) {
+    const isDraft = snapshot.isDraft === true;
+    const isRunning = !isDraft && snapshot.outcome === 'running';
+    const isFinished = !isDraft && !isRunning;
+
+    el('runBtn').hidden = !isDraft;
+    el('stopAllBtn').hidden = !isRunning;
+    el('removeWorktreesBtn').hidden = !isFinished;
+    el('openIntegrationPrBtn').hidden = !isFinished;
+    el('cleanupIntegrationBtn').hidden = !isFinished;
+    // 定義ファイルを開くボタンはどの状態でも出す
+    el('openDefBtn').hidden = false;
   }
 
   function appendQualityItem(box, label, values) {
@@ -283,6 +303,17 @@ export function workflowScript(): string {
   }
 
   /** 計画の根拠・前提・受入条件と現在の品質ゲートをまとめて表示する（Issue #849）。 */
+  // 再描画のたびに開閉状態を作り直さないよう、直前のdetailsの開閉を覚えておく
+  let qualityDetailsOpen = false;
+
+  /** 長いゴール文をsummary用に1行へ短縮する。 */
+  function summarizeQualityGoal(goal) {
+    if (!goal) return '';
+    const firstLine = String(goal).split('\\n')[0];
+    const MAX = 40;
+    return firstLine.length > MAX ? firstLine.slice(0, MAX) + '…' : firstLine;
+  }
+
   function renderQuality(snapshot) {
     const section = el('qualitySection');
     const quality = snapshot.quality;
@@ -294,6 +325,21 @@ export function workflowScript(): string {
     const phase = el('qualityPhase');
     phase.textContent = QUALITY_PHASE_LABEL[quality.phase] || quality.phase;
     phase.className = 'quality-phase phase-' + quality.phase;
+
+    const details = el('qualityDetails');
+    if (details) qualityDetailsOpen = details.open;
+    const summary = el('qualitySummary');
+    if (summary) {
+      const acceptanceCount = (quality.acceptance || []).length;
+      const assumptionsCount = (quality.assumptions || []).length;
+      const nonGoalsCount = (quality.nonGoals || []).length;
+      const goalPart = summarizeQualityGoal(quality.goal);
+      summary.textContent =
+        (goalPart ? goalPart + ' ・ ' : '') +
+        '受入条件' + acceptanceCount + ' / 前提' + assumptionsCount + ' / 対象外' + nonGoalsCount;
+    }
+    if (details) details.open = qualityDetailsOpen;
+
     const box = el('qualityContract');
     box.replaceChildren();
     appendQualityItem(box, 'ゴール', quality.goal);
@@ -540,7 +586,7 @@ export function workflowScript(): string {
     return group;
   }
 
-  function buildNode(task, pos) {
+  function buildNode(task, pos, isDraft) {
     const group = svgEl('g', {
       class:
         'wf-node state-' + task.state +
@@ -576,7 +622,13 @@ export function workflowScript(): string {
     idText.textContent = task.roleLabel ? taskLabel + '（' + task.roleLabel + '）' : taskLabel;
     group.appendChild(idText);
 
-    const metaParts = [STATE_LABEL[task.state] || task.state];
+    // 下書き（まだ実行していない）は全ノードが「待機」一色で、実行前に見比べたい役割・
+    // 作業内容が図から読めない。下書きだけは状態の代わりに役割＋短い要約を出す（Issue #1546）
+    const draftMetaParts =
+      isDraft && task.state === 'pending'
+        ? [task.roleLabel, summarizeQualityGoal(task.workSummary)].filter((v) => v)
+        : [];
+    const metaParts = draftMetaParts.length > 0 ? draftMetaParts : [STATE_LABEL[task.state] || task.state];
     if (task.state === 'running' && task.submissionCount > 0) {
       metaParts.push(task.submissionCount + '回目');
     }
@@ -793,9 +845,13 @@ export function workflowScript(): string {
       const from = posById[edge.from];
       const to = posById[edge.to];
       if (!from || !to) continue;
+      const related = hasSelection && (edge.from === selectedTaskId || edge.to === selectedTaskId);
+      // 推移辺（別の依存を経由した多段の経路でも到達できる辺、Issue #1546）は、情報としては
+      // 他の辺から読み取れるので、常に描くと選択していないときの図が線だらけになる。
+      // ノードを選んで、かつその辺がそのノードに関係するときだけ描く
+      if (edge.transitive && !related) continue;
       const fromTask = byId[edge.from];
       const dim = !fromTask || fromTask.state !== 'done';
-      const related = hasSelection && (edge.from === selectedTaskId || edge.to === selectedTaskId);
       const faded = hasSelection && !related;
       const classes = 'wf-edge' + (dim ? ' dim' : '') + (related ? ' related' : '') +
         (faded ? ' faded' : '');
@@ -812,7 +868,7 @@ export function workflowScript(): string {
     for (const n of layout.nodes) {
       const task = byId[n.id];
       if (!task) continue;
-      nodeGroup.appendChild(buildNode(task, n));
+      nodeGroup.appendChild(buildNode(task, n, snapshot.isDraft === true));
     }
     svg.appendChild(nodeGroup);
     // 文字の切り詰めはSVGへ入れたあと（getComputedTextLengthはDOMへ接続され描画されて
@@ -845,7 +901,7 @@ export function workflowScript(): string {
   }
 
   function buildOpsCell(task) {
-    const cell = el2('td', 'ops');
+    const cell = el2('td', 'ops col-ops');
     if (task.hasLiveSession) {
       const openBtn = text('button', 'secondary', '開く');
       openBtn.type = 'button';
@@ -1062,9 +1118,45 @@ export function workflowScript(): string {
     return row;
   }
 
+  // 「意味の無い列」の判定（Issue #1546）。id・作業内容要約・状態・操作は常に表示する。
+  // 下書き（isDraft）ではまだ実行していないので検証・完了根拠・cleanup・コンテキスト・
+  // 経過・送信回数は意味を持たない
+  const TASK_TABLE_DRAFT_HIDDEN_COLUMNS = [
+    'verification',
+    'evidence',
+    'cleanup',
+    'context',
+    'elapsed',
+    'submissions',
+  ];
+  // 「全行が同じ値の列」を隠したとき、表の上の共通値の行に出すラベル。経過は
+  // タイマーが後から書き込むため、render時点の値では判定しない（elapsedは対象外）
+  const TASK_TABLE_COMMON_LABEL = {
+    role: '役割',
+    verification: '検証',
+    evidence: '完了根拠',
+    issue: 'Issue',
+    cleanup: 'cleanup',
+    provider: 'provider',
+    model: 'model・effort',
+    context: 'コンテキスト',
+    submissions: '送信回数',
+  };
+
   function renderTable(snapshot) {
     const body = el('taskTableBody');
     body.replaceChildren();
+    // 列ごとに見た値をため、後で「全行が同じ値の列」を判定する
+    const columnStats = {};
+    const noteColumn = (name, rawValue, displayText) => {
+      let stat = columnStats[name];
+      if (!stat) {
+        stat = { values: new Set(), display: displayText };
+        columnStats[name] = stat;
+      }
+      stat.values.add(rawValue);
+    };
+
     for (const task of snapshot.tasks) {
       // 強調中の対象行は非表示にせず、色だけに依存しない方法（背景と枠）で強調する
       // （issue #1037）。対象外の行の文字は薄くしない
@@ -1073,7 +1165,7 @@ export function workflowScript(): string {
       row.setAttribute('data-task-id', task.id);
       row.addEventListener('click', () => selectAndReveal(task.id));
 
-      const idCell = text('td', '', task.id);
+      const idCell = text('td', 'col-id', task.id);
       if (isHighlighted) {
         // 視覚非表示テキスト。色・背景での強調が伝わらない支援技術の利用者にも
         // 「対象であること」を伝える
@@ -1084,14 +1176,20 @@ export function workflowScript(): string {
       // 役割（design.md §16.44、Issue #693）。roleが無い（undefined）タスクは何も出さない。
       // idの代わりではなく専用の列に併記する（表は元々idごとに1行のため、この列自体が
       // 「同じ役割の複数タスク」を一覧で見比べられる場所になる）
-      const roleCell = text('td', 'role-cell', task.roleLabel || '');
+      const roleText = task.roleLabel || '';
+      const roleCell = text('td', 'role-cell col-role', roleText);
+      noteColumn('role', roleText, roleText || '—');
       row.appendChild(roleCell);
 
-      const workSummaryCell = text('td', 'summary-cell task-summary-cell', task.workSummary || '');
+      const workSummaryCell = text(
+        'td',
+        'summary-cell task-summary-cell col-summary clamp2',
+        task.workSummary || '',
+      );
       workSummaryCell.title = task.workSummary || '';
       row.appendChild(workSummaryCell);
 
-      const stateCell = el2('td', 'state-badge');
+      const stateCell = el2('td', 'state-badge col-state');
       stateCell.appendChild(
         text('span', 'state-pill state-' + task.state, STATE_LABEL[task.state] || task.state),
       );
@@ -1115,13 +1213,18 @@ export function workflowScript(): string {
       const verificationText =
         (VERIFICATION_LABEL[verification.status] || verification.status) +
         (verification.attempts > 0 ? '（' + verification.attempts + '回）' : '');
+      noteColumn('verification', verification.status + '|' + verification.attempts, verificationText);
       row.appendChild(
-        text('td', 'verification-cell verification-' + verification.status, verificationText),
+        text(
+          'td',
+          'verification-cell verification-' + verification.status + ' col-verification',
+          verificationText,
+        ),
       );
 
       // 完了根拠（Issue #1380）。上の検証列（意味レビューなどAIの判定を含む）とは別の列に出し、
       // 拡張機能が観測した検証記録だけから導いた区分を示す
-      const evidenceCell = el2('td', 'evidence-cell');
+      const evidenceCell = el2('td', 'evidence-cell col-evidence');
       const evidence =
         completionEvidence.runId === snapshot.runId ? completionEvidence.tasks[task.id] : undefined;
       if (evidence) {
@@ -1135,14 +1238,17 @@ export function workflowScript(): string {
             onRefresh: () => vscode.postMessage({ type: 'refreshCompletionEvidence' }),
           }),
         );
+        noteColumn('evidence', evidence.kind || 'x', 'あり');
       } else {
         evidenceCell.textContent = '—';
+        noteColumn('evidence', '', '—');
       }
       row.appendChild(evidenceCell);
 
-      const issueCell = el2('td', 'issue-cell');
+      const issueCell = el2('td', 'issue-cell col-issue');
       if (task.issue === undefined) {
         issueCell.textContent = '—';
+        noteColumn('issue', '', '—');
       } else {
         const issueButton = text('button', 'issue-link', '#' + task.issue);
         issueButton.type = 'button';
@@ -1151,41 +1257,48 @@ export function workflowScript(): string {
           vscode.postMessage({ type: 'openTaskIssue', issue: task.issue });
         });
         issueCell.appendChild(issueButton);
+        noteColumn('issue', String(task.issue), '#' + task.issue);
       }
       row.appendChild(issueCell);
       const cleanupStatus = task.cleanupStatus || 'notStarted';
-      row.appendChild(text('td', 'cleanup-cell cleanup-' + cleanupStatus, cleanupLabel(task)));
+      const cleanupText = cleanupLabel(task);
+      noteColumn('cleanup', cleanupStatus, cleanupText);
+      row.appendChild(text('td', 'cleanup-cell cleanup-' + cleanupStatus + ' col-cleanup', cleanupText));
 
-      row.appendChild(text('td', '', task.provider));
+      noteColumn('provider', task.provider, task.provider);
+      row.appendChild(text('td', 'col-provider', task.provider));
 
       // 解決済みの model / effort（Issue #1035）。どちらも指定が無いタスクは
       // 「既定」と出す（空欄だと「読み取れないのか、指定が無いのか」が分からない）
       const modelText = describeTaskModel(task);
-      const modelCell = text('td', 'model-cell', modelText);
+      const modelCell = text('td', 'model-cell col-model', modelText);
       // セル幅を超えたときの補助。可視テキスト側にも同じ値が出ているので、
       // ここだけに情報を置くことにはならない
       modelCell.title = modelText;
       if (!task.model && !task.effort) {
         modelCell.classList.add('hint');
       }
+      noteColumn('model', modelText, modelText);
       row.appendChild(modelCell);
 
       // コンテキスト残量と累計トークン数（Issue #1272）。文字列の組み立ては拡張機能側の
       // 純粋関数（workflowGraph.tsのformatTaskContext、テスト済み）が済ませている。
       // 取れない値は「不明」と書いてあり、0とは区別が付く
       const contextText = task.contextLabel || '';
-      const contextCell = text('td', 'context-cell', contextText);
+      const contextCell = text('td', 'context-cell col-context', contextText);
       contextCell.title = contextText;
+      noteColumn('context', contextText, contextText || '—');
       row.appendChild(contextCell);
 
-      const elapsedCell = text('td', 'elapsed-cell', '');
+      const elapsedCell = text('td', 'elapsed-cell col-elapsed', '');
       if (task.startedAt) {
         elapsedCell.setAttribute('data-started', String(Date.parse(task.startedAt) || 0));
         elapsedCell.setAttribute('data-live', task.state === 'running' || task.state === 'waitingApproval' ? '1' : '0');
       }
       row.appendChild(elapsedCell);
 
-      row.appendChild(text('td', '', String(task.submissionCount)));
+      noteColumn('submissions', task.submissionCount, String(task.submissionCount));
+      row.appendChild(text('td', 'col-submissions', String(task.submissionCount)));
 
       row.appendChild(buildOpsCell(task));
 
@@ -1197,7 +1310,135 @@ export function workflowScript(): string {
         body.appendChild(buildPromptRow(task));
       }
     }
-    el('taskTable').hidden = snapshot.tasks.length === 0;
+    const table = el('taskTable');
+    table.hidden = snapshot.tasks.length === 0;
+    updateTaskTableColumnVisibility(table, snapshot, columnStats);
+    renderBoard(snapshot);
+  }
+
+  // ---- タスク一覧: 盤面表示（Issue #1546）----
+
+  const KANBAN_COLUMN_ORDER = ['todo', 'inProgress', 'attention', 'done'];
+  const KANBAN_COLUMN_LABEL = { todo: 'ToDo', inProgress: 'InProgress', attention: '要対応', done: 'Done' };
+
+  // 表と盤面のどちらを表示するか。既定は盤面（オーケストレーターモード画面に合わせる）
+  let taskViewMode = 'board';
+
+  /** 表/盤面ボタンのaria-pressedと、それぞれの要素のhiddenを切り替える。 */
+  function applyTaskViewMode() {
+    const isBoard = taskViewMode === 'board';
+    el('kanbanBoard').hidden = !isBoard;
+    el('taskTableWrap').hidden = isBoard;
+    const commonBox = el('taskTableCommon');
+    if (commonBox && isBoard) commonBox.hidden = true;
+    // 表側の「列の共通値」表示は列の実測（columnStats）が要るため、表を出すときは
+    // renderTableをやり直して数え直す（盤面表示中は数えていない）
+    else if (currentSnapshot) renderTable(currentSnapshot);
+    el('taskViewBoardBtn').setAttribute('aria-pressed', isBoard ? 'true' : 'false');
+    el('taskViewTableBtn').setAttribute('aria-pressed', isBoard ? 'false' : 'true');
+  }
+
+  // カードの作業内容要約は3行までにして、クリックで全文展開する（taskRunKanbanView.tsの
+  // .summary.clampと同じ発想）。展開状態はタスクidで覚え、再描画をまたいで保持する
+  const expandedBoardSummaries = new Set();
+
+  /** 盤面の1カードを作る。表の行と同じ操作（クリックで選択、opsボタン）を再利用する。 */
+  function buildBoardCard(task) {
+    const isHighlighted = kanbanHighlight !== undefined && task.kanbanBucket === kanbanHighlight;
+    const card = el2('div', 'kanban-card' + (isHighlighted ? ' highlighted' : ''));
+    card.setAttribute('data-task-id', task.id);
+    card.addEventListener('click', () => selectAndReveal(task.id));
+
+    const head = el2('div', 'kanban-card-head');
+    head.appendChild(text('span', 'kanban-card-id', task.id));
+    if (task.roleLabel) {
+      head.appendChild(text('span', 'kanban-card-role', task.roleLabel));
+    }
+    card.appendChild(head);
+
+    if (task.workSummary) {
+      const expanded = expandedBoardSummaries.has(task.id);
+      const summary = text('div', 'summary clamp' + (expanded ? ' expanded' : ''), task.workSummary);
+      summary.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (expandedBoardSummaries.has(task.id)) expandedBoardSummaries.delete(task.id);
+        else expandedBoardSummaries.add(task.id);
+        renderBoard(currentSnapshot);
+      });
+      card.appendChild(summary);
+    }
+
+    const stateRow = el2('div', 'kanban-card-meta');
+    stateRow.appendChild(text('span', 'state-pill state-' + task.state, STATE_LABEL[task.state] || task.state));
+    if (task.issue !== undefined) {
+      const issueButton = text('button', 'issue-link', '#' + task.issue);
+      issueButton.type = 'button';
+      issueButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'openTaskIssue', issue: task.issue });
+      });
+      stateRow.appendChild(issueButton);
+    }
+    card.appendChild(stateRow);
+
+    if (task.dependsOn && task.dependsOn.length > 0) {
+      card.appendChild(text('div', 'kanban-card-deps hint', '依存: ' + task.dependsOn.join(', ')));
+    }
+
+    const ops = buildOpsCell(task);
+    ops.classList.add('kanban-card-ops');
+    card.appendChild(ops);
+    return card;
+  }
+
+  /** 盤面（ToDo/要対応/InProgress/Doneの列）を組み立てる。表示中でなくても値は最新化する。 */
+  function renderBoard(snapshot) {
+    const board = el('kanbanBoard');
+    board.replaceChildren();
+    const byBucket = { todo: [], inProgress: [], attention: [], done: [] };
+    for (const task of snapshot.tasks) {
+      (byBucket[task.kanbanBucket] || byBucket.todo).push(task);
+    }
+    for (const bucket of KANBAN_COLUMN_ORDER) {
+      const tasks = byBucket[bucket];
+      const column = el2('div', 'kanban-column' + (tasks.length === 0 ? ' is-empty' : ''));
+      column.appendChild(text('div', 'kanban-column-head', KANBAN_COLUMN_LABEL[bucket] + '（' + tasks.length + '）'));
+      const list = el2('div', 'kanban-column-body');
+      for (const task of tasks) {
+        list.appendChild(buildBoardCard(task));
+      }
+      column.appendChild(list);
+      board.appendChild(column);
+    }
+  }
+
+  /**
+   * 全行が同じ値の列・下書きで意味の無い列を隠し、隠した列の共通値を表の上に1行で出す
+   * （Issue #1546）。id・作業内容要約・状態・操作は対象外（常に表示）。
+   */
+  function updateTaskTableColumnVisibility(table, snapshot, columnStats) {
+    const hasTasks = snapshot.tasks.length > 0;
+    const isDraft = snapshot.isDraft === true;
+    const commonParts = [];
+    for (const name of Object.keys(TASK_TABLE_COMMON_LABEL)) {
+      const stat = columnStats[name];
+      const sameValue = hasTasks && (!stat || stat.values.size <= 1);
+      const draftHidden = hasTasks && isDraft && TASK_TABLE_DRAFT_HIDDEN_COLUMNS.indexOf(name) !== -1;
+      const hideColumn = sameValue || draftHidden;
+      table.classList.toggle('hide-col-' + name, hideColumn);
+      if (hideColumn && sameValue && stat) {
+        commonParts.push(TASK_TABLE_COMMON_LABEL[name] + '=' + stat.display);
+      }
+    }
+    // 経過は描画直後は空でタイマーが後から埋めるため、共通値判定の対象にはしない。
+    // 下書きのときだけ隠す
+    table.classList.toggle('hide-col-elapsed', hasTasks && isDraft);
+
+    const commonBox = el('taskTableCommon');
+    if (commonBox) {
+      commonBox.hidden = commonParts.length === 0;
+      commonBox.textContent = commonParts.length > 0 ? '全タスク共通: ' + commonParts.join(' / ') : '';
+    }
   }
 
   // ---- 警告欄 ----
@@ -1321,16 +1562,76 @@ export function workflowScript(): string {
     input.value = '';
   }
 
+  /** plannerのmessageは既に taskId + ': ' で始まっているので、まとめる前にそれを外す。 */
+  function stripWarningTaskPrefix(w) {
+    const prefix = w.taskId ? w.taskId + ': ' : '';
+    return prefix && w.message.indexOf(prefix) === 0 ? w.message.slice(prefix.length) : w.message;
+  }
+
+  // 再描画のたびに開閉状態を作り直さないよう、直前のdetailsの開閉を覚えておく
+  let warningsDetailsOpen = false;
+
+  /**
+   * 同じ文言・種別の警告をタスク横断でまとめ、件数とタスクidの小ボタン群にする
+   * （Issue #1546）。表示はdetails要素で畳み、summaryに種類数とタスク件数を出す。
+   */
   function renderWarnings(snapshot) {
+    const details = el('warningsDetails');
+    if (details) warningsDetailsOpen = details.open;
+
     const box = el('warnings');
     box.replaceChildren();
+
+    const groups = [];
+    const groupByKey = {};
+    const taskIdSet = {};
     for (const w of snapshot.warnings) {
-      const item = el2('div', 'warning-item ' + w.kind);
-      const prefix = w.taskId ? '[' + w.taskId + '] ' : '';
-      item.textContent = prefix + w.message;
+      const messageText = stripWarningTaskPrefix(w);
+      const key = w.kind + '\\u0000' + messageText;
+      let group = groupByKey[key];
+      if (!group) {
+        group = { kind: w.kind, message: messageText, taskIds: [] };
+        groupByKey[key] = group;
+        groups.push(group);
+      }
+      if (w.taskId && group.taskIds.indexOf(w.taskId) === -1) {
+        group.taskIds.push(w.taskId);
+      }
+      if (w.taskId) taskIdSet[w.taskId] = true;
+    }
+
+    for (const group of groups) {
+      const item = el2('div', 'warning-item ' + group.kind);
+      const count = group.taskIds.length;
+      item.appendChild(
+        text('div', 'warning-line', group.message + (count > 0 ? '（' + count + '件）' : '')),
+      );
+      if (count > 0) {
+        const taskRow = el2('div', 'warning-tasks');
+        for (const taskId of group.taskIds) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'secondary warning-task-btn';
+          btn.textContent = taskId;
+          btn.addEventListener('click', () => selectAndReveal(taskId));
+          taskRow.appendChild(btn);
+        }
+        item.appendChild(taskRow);
+      }
       box.appendChild(item);
     }
+
     el('warningsSection').hidden = snapshot.warnings.length === 0;
+    const summary = el('warningsSummary');
+    if (summary) {
+      const taskCount = Object.keys(taskIdSet).length;
+      summary.textContent =
+        '警告' +
+        (snapshot.warnings.length > 0
+          ? '（' + groups.length + '種類 / ' + taskCount + 'タスク）'
+          : '');
+    }
+    if (details) details.open = warningsDetailsOpen;
   }
 
   // ---- そのほか: 統合の状況（design.md §16.8「そのほか」・§16.11・§16.17・§16.18） ----
@@ -1483,7 +1784,7 @@ export function workflowScript(): string {
   const ROADMAP_ISSUE_LABEL = {
     unlinked: '未起票',
     unknown: '照合できません',
-    notFound: '一覧に見つかりません',
+    notFound: '一覧外',
     open: '対応中',
     closed: '完了',
   };
@@ -1505,11 +1806,19 @@ export function workflowScript(): string {
     return badge;
   }
 
+  // 完了フェーズのdetailsは再描画で作り直すため、開いていたフェーズ名を覚えて戻す
+  const openRoadmapPhases = new Set();
+
   function applyRoadmap(roadmap, path, pending, error) {
     const section = el('roadmapSection');
     const body = el('roadmapBody');
     const status = el('roadmapStatus');
     const pathLabel = el('roadmapPath');
+    for (const d of body.querySelectorAll('details.roadmap-phase')) {
+      const name = d.dataset.phase || '';
+      if (d.open) openRoadmapPhases.add(name);
+      else openRoadmapPhases.delete(name);
+    }
     body.replaceChildren();
     if (!roadmap) {
       // 定義がロードマップを持たない・読めなかった場合。読めなかったときだけ理由を出す
@@ -1534,17 +1843,37 @@ export function workflowScript(): string {
       body.appendChild(text('div', 'roadmap-title', roadmap.title));
     }
     for (const phase of roadmap.phases) {
-      const group = el2('div', 'roadmap-phase');
-      group.appendChild(text('div', 'roadmap-phase-name', phase.name || '（フェーズ未指定）'));
+      const doneCount = phase.items.filter((item) => item.checked).length;
+      // 全項目が完了したフェーズは畳んでおく（Issue #1546）。もう見る必要が薄い一方、
+      // 件数は要約に残して「何件終えたフェーズか」だけは畳んだままでも分かるようにする
+      const isFullyDone = phase.items.length > 0 && doneCount === phase.items.length;
+      const itemsBox = el2('div', 'roadmap-phase-items');
       for (const item of phase.items) {
         const row = el2('div', 'roadmap-item' + (item.checked ? ' checked' : ''));
         row.appendChild(text('span', 'roadmap-check', item.checked ? '✓' : '□'));
         row.appendChild(text('span', 'roadmap-id', item.id));
         row.appendChild(text('span', 'roadmap-text', item.text));
         row.appendChild(roadmapIssueBadge(item));
-        group.appendChild(row);
+        itemsBox.appendChild(row);
       }
-      body.appendChild(group);
+      if (isFullyDone) {
+        const details = el2('details', 'roadmap-phase');
+        details.dataset.phase = phase.name || '';
+        details.open = openRoadmapPhases.has(phase.name || '');
+        const summary = text(
+          'summary',
+          'roadmap-phase-name',
+          (phase.name || '（フェーズ未指定）') + '（' + doneCount + '/' + phase.items.length + '）',
+        );
+        details.appendChild(summary);
+        details.appendChild(itemsBox);
+        body.appendChild(details);
+      } else {
+        const group = el2('div', 'roadmap-phase');
+        group.appendChild(text('div', 'roadmap-phase-name', phase.name || '（フェーズ未指定）'));
+        group.appendChild(itemsBox);
+        body.appendChild(group);
+      }
     }
   }
 
@@ -1665,6 +1994,17 @@ export function workflowScript(): string {
     kanbanHighlight = undefined;
     applyKanbanHighlight();
   });
+
+  // タスク一覧の盤面/表切替（Issue #1546）。既定は盤面
+  el('taskViewBoardBtn').addEventListener('click', () => {
+    taskViewMode = 'board';
+    applyTaskViewMode();
+  });
+  el('taskViewTableBtn').addEventListener('click', () => {
+    taskViewMode = 'table';
+    applyTaskViewMode();
+  });
+  applyTaskViewMode();
 
   el('runSelect').addEventListener('change', (e) => {
     vscode.postMessage({ type: 'selectRun', runId: e.target.value });

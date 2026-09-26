@@ -37,6 +37,13 @@ export interface GraphNodeLayout {
 export interface GraphEdgeLayout {
   from: string;
   to: string;
+  /**
+   * `from → to` 以外に、別の依存を経由した多段の経路でも到達できる辺か（Issue #1546）。
+   * 例えば `A → C` が `A → B → C` でも到達できるなら、`A → C` は省いても依存関係の
+   * 情報は落ちない「推移辺」。全辺を常に描くと選択していないときの図が線だらけになるため、
+   * Webview側はこの値が`true`の辺を選択中のノードに関係するときだけ描く判断に使う。
+   */
+  transitive: boolean;
 }
 
 export interface GraphLayout {
@@ -119,6 +126,43 @@ export function computeRanks(tasks: readonly GraphTaskInput[]): Map<string, numb
 }
 
 /**
+ * 各タスクの推移的な依存（直接・間接を問わず、依存を辿って届く全id）を求める
+ * （Issue #1546、辺の間引き判定に使う）。`computeRanks`と同じくvisiting集合で循環を防ぐ。
+ * 循環に含まれるidの結果は「そこまでに辿れた分」で打ち切り、無限再帰しない。
+ */
+export function computeAncestors(tasks: readonly GraphTaskInput[]): Map<string, Set<string>> {
+  const byId = new Map(tasks.map((t) => [t.id, t] as const));
+  const ancestors = new Map<string, Set<string>>();
+  const status = new Map<string, 'visiting' | 'done'>();
+
+  function resolve(id: string): Set<string> {
+    const cached = ancestors.get(id);
+    if (cached) {
+      // done なら確定値。visiting なら循環で、探索中のフレームが持つ集合をそのまま返す
+      // （新しい集合で上書きすると、探索中のフレームが集めた分が消える）
+      return cached;
+    }
+    const result = new Set<string>();
+    ancestors.set(id, result);
+    status.set(id, 'visiting');
+    for (const dep of byId.get(id)?.dependsOn ?? []) {
+      if (!byId.has(dep)) continue;
+      result.add(dep);
+      for (const anc of resolve(dep)) {
+        result.add(anc);
+      }
+    }
+    status.set(id, 'done');
+    return result;
+  }
+
+  for (const t of tasks) {
+    resolve(t.id);
+  }
+  return ancestors;
+}
+
+/**
  * 描画幅 `maxWidth` に何ノードまで横並びできるかを求める。
  * `n` ノードの並びは `n * NODE_WIDTH + (n - 1) * NODE_GAP_X + MARGIN_X * 2` の幅を要する。
  * 1ノードすら入らない極端に狭い幅でも、行が空にならないよう最低1を返す（残りは
@@ -193,12 +237,18 @@ export function layoutGraph(
     });
   });
 
+  // 「別の依存を経由した多段の経路でも到達できるか」の判定に使う（Issue #1546）
+  const ancestorsOf = computeAncestors(tasks);
   const edges: GraphEdgeLayout[] = [];
   for (const t of tasks) {
     for (const dep of t.dependsOn) {
-      if (rankOf.has(dep)) {
-        edges.push({ from: dep, to: t.id });
-      }
+      if (!rankOf.has(dep)) continue;
+      // depから t.dependsOn の他のどれかへ（間接的にでも）辿り着けるなら、
+      // dep → t という直接の辺が無くても依存関係自体はその経路から読み取れる
+      const transitive = t.dependsOn.some(
+        (other) => other !== dep && (ancestorsOf.get(other)?.has(dep) ?? false),
+      );
+      edges.push({ from: dep, to: t.id, transitive });
     }
   }
 
