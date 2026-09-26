@@ -112,6 +112,12 @@ const RESPAWN_REASON_LABELS: Record<OrchestratorRespawnReason, string> = {
   unresponsive: '応答中のまま反応しなくなった',
 };
 
+/**
+ * 利用上限でターンが失敗してから送り直すまでの時間（Issue #1517）。解除時刻が分からない
+ * ため、チャットの自動続行がリセット時刻の無いときに待つ時間（30分）と揃える。
+ */
+const ORCHESTRATOR_USAGE_LIMIT_RETRY_MS = 30 * 60_000;
+
 /** 立て直した会話の導入文に書き添える文脈（Issue #1513）。 */
 interface OrchestratorRespawnContext {
   reason: OrchestratorRespawnReason;
@@ -1004,12 +1010,10 @@ function deliverAskUserAnswer(self: WorkflowRunnerInternals, runId: string): voi
   live.pendingAskUser = undefined;
   void self.persist(runId);
   const answerText = `人がask_userの質問に答えました: "${pending.answeredChoice}"`;
-  const events = orchestrator.pending;
-  const composed = composeOrchestratorPrompt(events, answerText);
-  orchestrator.pending = [];
   // cleanup通知のターンがask_userで止まった場合は、回答後の継続ターンまで接続を保つ。
-  // この配送で合流したcleanup通知も処理中件数へ反映する（`sendToOrchestrator`）
-  sendToOrchestrator(self, runId, orchestrator, composed, events);
+  // この配送で合流したcleanup通知も処理中件数へ反映する（`sendToOrchestrator`）。
+  // 答えは人の発話と同じく扱い、ターンが失敗したら送り直す（Issue #1517）
+  sendComposedToOrchestrator(self, runId, orchestrator, [answerText]);
   self.notify(runId);
 }
 
@@ -1407,9 +1411,12 @@ export async function setupOrchestratorForStart(
       health: 'alive',
       lastActivityAt: nowMs(self),
       inFlight: [],
+      inFlightUserTexts: [],
+      pendingUserTexts: [],
       consecutiveFailures: 0,
       respawnCount: 0,
       unresponsiveTimer: undefined,
+      usageLimitRetryTimer: undefined,
       // 自動再開で引き継いだ未回答の問い（あれば）は、すでに1回分の`ask_user`を
       // 消費している。ここで0から始めると、リロードのたびに実質無料で上限を
       // すり抜けられてしまう（design.md §16.33「呼び出し回数の上限」の意図が崩れる）
@@ -1517,17 +1524,73 @@ function sendToOrchestrator(
   orchestrator: LiveOrchestrator,
   text: string,
   events: readonly OrchestratorEvent[],
+  userTexts: readonly string[],
 ): void {
-  orchestrator.taskCleanupEventsInFlight += events.filter(
-    (event) => event.kind === 'taskCleanup',
-  ).length;
+  clearUsageLimitRetryTimer(orchestrator);
+  orchestrator.taskCleanupEventsInFlight += countTaskCleanup(events);
   // busy中の人の発話（`sendUserMessageToOrchestrator`）は同じターンへ積まれるため足していく。
   // ターンが終わったら空にする
   orchestrator.inFlight = [...orchestrator.inFlight, ...events];
+  orchestrator.inFlightUserTexts = [...orchestrator.inFlightUserTexts, ...userTexts];
   orchestrator.busy = true;
   orchestrator.lastActivityAt = nowMs(self);
   armUnresponsiveTimer(self, runId, orchestrator);
   orchestrator.session.send(text);
+}
+
+function countTaskCleanup(events: readonly OrchestratorEvent[]): number {
+  return events.filter((event) => event.kind === 'taskCleanup').length;
+}
+
+/**
+ * 失敗したターン・立て直す前のターンで送ったものを、送り直せるよう`pending`側の先頭へ
+ * 戻す（Issue #1513・#1517）。
+ *
+ * `taskCleanupEventsInFlight`は、戻したcleanup通知の件数だけ減らす（送り直すときに
+ * `sendToOrchestrator`が数え直す）。0へ戻すと、`ask_user`で止まった前のターンが
+ * 持っていた件数まで消え、回答後の継続ターンより先に接続を閉じてしまう。
+ */
+export function returnInFlightToPending(orchestrator: LiveOrchestrator): void {
+  orchestrator.taskCleanupEventsInFlight = Math.max(
+    0,
+    orchestrator.taskCleanupEventsInFlight - countTaskCleanup(orchestrator.inFlight),
+  );
+  orchestrator.pending = [...orchestrator.inFlight, ...orchestrator.pending];
+  orchestrator.inFlight = [];
+  orchestrator.pendingUserTexts = [
+    ...orchestrator.inFlightUserTexts,
+    ...orchestrator.pendingUserTexts,
+  ];
+  orchestrator.inFlightUserTexts = [];
+}
+
+function clearUsageLimitRetryTimer(orchestrator: LiveOrchestrator): void {
+  if (orchestrator.usageLimitRetryTimer !== undefined) {
+    clearTimeout(orchestrator.usageLimitRetryTimer);
+    orchestrator.usageLimitRetryTimer = undefined;
+  }
+}
+
+/**
+ * 利用上限で失敗したターンの送り直しを予約する（Issue #1517）。イベントも人の発話も
+ * 来なければ戻したものが届かないままになるため、時間を置いて送り直す。
+ */
+function armUsageLimitRetryTimer(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+): void {
+  clearUsageLimitRetryTimer(orchestrator);
+  const timer = setTimeout(() => {
+    orchestrator.usageLimitRetryTimer = undefined;
+    if (self.runs.get(runId)?.orchestrator !== orchestrator) {
+      return;
+    }
+    drainOrchestrator(self, runId);
+    self.notify(runId);
+  }, ORCHESTRATOR_USAGE_LIMIT_RETRY_MS);
+  timer.unref?.();
+  orchestrator.usageLimitRetryTimer = timer;
 }
 
 function clearUnresponsiveTimer(orchestrator: LiveOrchestrator): void {
@@ -1629,15 +1692,13 @@ function onOrchestratorTurnFailed(
   orchestrator: LiveOrchestrator,
   failureKind: ChatState['turnFailureKind'],
 ): void {
-  orchestrator.pending = [...orchestrator.inFlight, ...orchestrator.pending];
-  orchestrator.inFlight = [];
-  // 戻したcleanup通知は、送り直すときに`sendToOrchestrator`が数え直す
-  orchestrator.taskCleanupEventsInFlight = 0;
+  returnInFlightToPending(orchestrator);
   if (failureKind === 'usageLimit') {
     self.deps.log.warn(
       `[workflow ${runId}] オーケストレーターのターンが利用上限で失敗しました。` +
-        '送ったイベントは次の送信に合流させます',
+        `送ったイベントは次の送信に合流させ、${ORCHESTRATOR_USAGE_LIMIT_RETRY_MS / 60_000}分後にも送り直します`,
     );
+    armUsageLimitRetryTimer(self, runId, orchestrator);
     return;
   }
   orchestrator.consecutiveFailures += 1;
@@ -1672,9 +1733,8 @@ async function respawnOrchestrator(
     return;
   }
   clearUnresponsiveTimer(orchestrator);
-  orchestrator.pending = [...orchestrator.inFlight, ...orchestrator.pending];
-  orchestrator.inFlight = [];
-  orchestrator.taskCleanupEventsInFlight = 0;
+  clearUsageLimitRetryTimer(orchestrator);
+  returnInFlightToPending(orchestrator);
   orchestrator.busy = false;
   const oldSession = orchestrator.session;
   const label = RESPAWN_REASON_LABELS[reason];
@@ -1758,7 +1818,13 @@ async function respawnOrchestrator(
       }),
     },
   ];
-  drainOrchestrator(self, runId);
+  if (pendingAskUser !== undefined && pendingAskUser.answeredChoice === undefined) {
+    // 回答待ちの間は`drainOrchestrator`が送らない。導入文と引き継いだイベントが新しい会話へ
+    // 届かないままになるため、ここだけは回答を待たずに送る（Issue #1517）
+    flushOrchestrator(self, runId);
+  } else {
+    drainOrchestrator(self, runId);
+  }
   self.notify(runId);
 }
 
@@ -1775,6 +1841,7 @@ function giveUpOrchestrator(
   detail: string,
 ): void {
   clearUnresponsiveTimer(orchestrator);
+  clearUsageLimitRetryTimer(orchestrator);
   live.orchestrator = undefined;
   self.deps.log.warn(`[workflow ${runId}] オーケストレーターを諦めました: ${detail}`);
   live.warnings.push({
@@ -1838,6 +1905,7 @@ function onOrchestratorStateChanged(
   }
   orchestrator.consecutiveFailures = 0;
   orchestrator.inFlight = [];
+  orchestrator.inFlightUserTexts = [];
   // cleanup通知を受けたターン内でIssue/Roadmap更新ツールを実行できるよう、終了を
   // 確認してから接続の解放を再評価する。ask_userの回答待ちは、回答後の継続ターンが
   // 完了するまで処理中件数を残す。
@@ -1885,19 +1953,40 @@ export function notifyOrchestrator(
   return true;
 }
 
-/** 溜まったイベントを送る。人の発話は伴わない（自発的な報告）。 */
+/**
+ * 溜まったイベントを送る。新しい人の発話は伴わない（自発的な報告）が、失敗したターンから
+ * 戻った人の発話（`pendingUserTexts`、Issue #1517）があれば一緒に送り直す。
+ */
 function flushOrchestrator(self: WorkflowRunnerInternals, runId: string): void {
   const orchestrator = self.runs.get(runId)?.orchestrator;
-  if (orchestrator === undefined || orchestrator.pending.length === 0) {
+  if (
+    orchestrator === undefined ||
+    (orchestrator.pending.length === 0 && orchestrator.pendingUserTexts.length === 0)
+  ) {
     return;
   }
+  sendComposedToOrchestrator(self, runId, orchestrator, []);
+}
+
+/**
+ * `pending`のイベントと、戻った人の発話（`pendingUserTexts`）の後ろへ`newUserTexts`を
+ * 足したものを1ターンにまとめて送る（Issue #1517）。人の発話はworkflow-eventで包まない。
+ */
+function sendComposedToOrchestrator(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+  newUserTexts: readonly string[],
+): void {
   const events = orchestrator.pending;
-  const text = composeOrchestratorPrompt(events, '');
+  const userTexts = [...orchestrator.pendingUserTexts, ...newUserTexts];
+  const text = composeOrchestratorPrompt(events, userTexts.join('\n\n'));
   orchestrator.pending = [];
+  orchestrator.pendingUserTexts = [];
   if (text === '') {
     return;
   }
-  sendToOrchestrator(self, runId, orchestrator, text, events);
+  sendToOrchestrator(self, runId, orchestrator, text, events, userTexts);
 }
 
 /**
@@ -1926,10 +2015,7 @@ export function sendUserMessageToOrchestrator(
   if (orchestrator.health !== 'alive') {
     return false;
   }
-  const events = orchestrator.pending;
-  const composed = composeOrchestratorPrompt(events, text);
-  orchestrator.pending = [];
-  sendToOrchestrator(self, runId, orchestrator, composed, events);
+  sendComposedToOrchestrator(self, runId, orchestrator, [text]);
   self.notify(runId);
   return true;
 }
@@ -2166,6 +2252,7 @@ export function notifyOrchestratorRunHalted(self: WorkflowRunnerInternals, runId
 export function disposeOrchestrator(live: LiveRun): void {
   if (live.orchestrator !== undefined) {
     clearUnresponsiveTimer(live.orchestrator);
+    clearUsageLimitRetryTimer(live.orchestrator);
     live.orchestrator.session.dispose();
   }
   live.orchestrator = undefined;
