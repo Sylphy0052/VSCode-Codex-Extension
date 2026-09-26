@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.43",
+  "version": "2026.926.44",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
