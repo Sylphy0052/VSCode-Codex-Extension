@@ -19,6 +19,7 @@ import {
   type RunAssessment,
 } from '../orchestrator/roadmapScheduler';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { layoutGraph, type GraphLayout } from './workflowGraph';
 
 /**
  * ロードマップ実行（Issue #1465）のKanbanの盤面。Controllerの状態（`RoadmapRun`）から
@@ -318,4 +319,25 @@ export function buildRoadmapKanban(
     },
     events: [...eventsFor(selected.runId)],
   };
+}
+
+/**
+ * グラフ表示（Issue #1465 分割案8b-2）のノード配置。ワークフロー画面と同じ`layoutGraph`で
+ * 依存の段に並べる。辺にするのはrunの中にあるノードへの依存だけで、段の中は番号順にする。
+ */
+export function layoutRoadmapGraph(
+  columns: Record<RoadmapKanbanColumn, readonly RoadmapKanbanCard[]>,
+  maxWidth: number | undefined,
+): GraphLayout {
+  const cards = ROADMAP_KANBAN_COLUMNS.flatMap((column) => columns[column]).sort(
+    (a, b) => a.issueNumber - b.issueNumber,
+  );
+  const ids = new Set(cards.map((card) => String(card.issueNumber)));
+  return layoutGraph(
+    cards.map((card) => ({
+      id: String(card.issueNumber),
+      dependsOn: card.dependsOn.map((d) => String(d.issueNumber)).filter((id) => ids.has(id)),
+    })),
+    { maxWidth },
+  );
 }
