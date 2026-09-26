@@ -85,6 +85,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
 
+  const observation = createStageObservationPorts(ports);
+
   const runner = new TaskStageRunner({
     hosts: deps.hosts,
     store,
@@ -92,7 +94,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     worktreeQueue: deps.worktreeQueue,
     git: deps.git,
     fs: nodeWorktreeFileSystem,
-    observation: createStageObservationPorts(ports),
+    observation,
     resolveBaseCommit: (root) => resolveRoadmapBaseCommit(ports, root),
     sessionConfig: (engine) => deps.sessionConfig(engine),
     autoApprove: () => deps.readBaseline().allowAutoApprove,
@@ -130,6 +132,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       });
       return { model: choice.settings.model, effort: choice.settings.effort, reasons: choice.reasons };
     },
+    observation,
     log: (message) => log.info(message),
   });
   holder.controller = controller;

@@ -510,6 +510,7 @@ function buildIntroPrompt(
     '- task-messagingのMCPツールでControllerへ命令するだけで、runの状態を直接変えない。ファイルは書かない',
     '- 状態の正本はget_run_stateとする。会話の記憶や前の世代の発言より、get_run_stateの結果を信じる',
     '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。あなたは承認できない',
+    '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
     '- 承認後、Model/Effortの判断を待つ工程はstart_stageで始める。推奨値を基本にし、変えるときは理由をreasonに書く',
     '- stop_stage・set_max_parallelを使う前と、answer_questionでユーザーの判断を代わりに渡す前は、会話でユーザーに確かめる。answer_questionにはユーザーが答えた内容だけを渡す',
     '- merge・cleanupも工程セッションが行う。あなたはコードを書かず、mergeもしない',
