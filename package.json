@@ -544,6 +544,16 @@
         "category": "Agent"
       },
       {
+        "command": "agent.taskRun.start",
+        "title": "オーケストレータモードを開始",
+        "category": "Agent"
+      },
+      {
+        "command": "agent.taskRun.kanban",
+        "title": "オーケストレータモードのKanbanを開く",
+        "category": "Agent"
+      },
+      {
         "command": "agent.forgeHub",
         "title": "Forge Hubを開く",
         "category": "Agent",
@@ -844,6 +854,7 @@
               "workflowView",
               "sessionKanban",
               "forgeHub",
+              "orchestratorMode",
               "openProgress",
               "handoffToNewSession",
               "autoHandoffToggle",
@@ -866,6 +877,7 @@
               "ワークフローViewを開く",
               "このワークスペースで開いている会話を状態別に表示する",
               "Forge Hubを開く",
+              "オーケストレータモードを開始する",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ",
               "自動引き継ぎ（コンテキスト逼迫時に自動で新セッションへ引き継ぐ）を切り替える",

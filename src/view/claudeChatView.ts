@@ -3794,6 +3794,10 @@ export class ClaudeChatViewManager
         void vscode.commands.executeCommand('agent.forgeHub', 'claude');
         return;
       }
+      if (type === 'orchestratorMode') {
+        void vscode.commands.executeCommand('agent.taskRun.start', 'claude');
+        return;
+      }
       if (type === 'openProgress') {
         void vscode.commands.executeCommand('agent.openProgress');
         return;

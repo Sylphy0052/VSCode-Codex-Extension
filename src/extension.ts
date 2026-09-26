@@ -103,6 +103,7 @@ import { sanitizeInlineText } from './orchestrator/untrustedText';
 import { sanitizeForLog } from './orchestrator/sanitize';
 import { WorkflowRunStore } from './orchestrator/runStore';
 import { RoadmapRunStore } from './orchestrator/roadmapRunStore';
+import { TaskRunStore } from './orchestrator/taskRunStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
@@ -204,6 +205,7 @@ import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
 import { setupRoadmapRun } from './view/roadmapRunSetup';
+import { setupTaskRun } from './view/taskRunSetup';
 import {
   generateWindowId,
   sessionHubRoot,
@@ -500,9 +502,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // ロードマップ実行（Issue #1465）のIssueセッションも同じ口で答える（Issue #1491）。
   // 汎用復元に拾わせると、入力を閉じていたタブが通常のチャットとしてworktreeで戻るため
   const roadmapRunStore = new RoadmapRunStore(context.workspaceState);
+  // オーケストレータモード（Issue #1505）の工程セッションとOrchestratorセッションも同じ
+  const taskRunStore = new TaskRunStore(context.workspaceState);
   const isTaskManagedThread = (id: string): boolean =>
     (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
-    roadmapRunStore.hasSessionRef(id);
+    roadmapRunStore.hasSessionRef(id) ||
+    taskRunStore.hasSessionRef(id);
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
@@ -822,6 +827,40 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
       readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
       readBaseline: readSafetyBaseline,
+      log,
+    }),
+  );
+
+  // オーケストレータモード（Issue #1505）。ホストとgit・CLIの口はロードマップ実行と同じものを使う
+  context.subscriptions.push(
+    ...setupTaskRun({
+      store: taskRunStore,
+      hosts: {
+        codex: overridableHost('codex', chat),
+        claude: overridableHost('claude', claudeChat),
+      },
+      worktreeQueue,
+      git: { run: (args, cwd) => (forgeOverrides.git ?? nodeGitCommandRunner).run(args, cwd) },
+      cli: {
+        run: (command, args, cwd) =>
+          (forgeOverrides.cli ?? nodeCliCommandRunner).run(command, args, cwd),
+      },
+      sessionConfig: (engine) => {
+        const effective = buildEffectiveTaskConfig(
+          {
+            provider: engine,
+            model: '',
+            effort: '',
+            approvalMode: '',
+            sandbox: '',
+            autoApprove: false,
+          },
+          readSafetyBaseline(),
+        );
+        return { config: effective.config, sandbox: effective.sandbox };
+      },
+      readBaseline: readSafetyBaseline,
+      settings,
       log,
     }),
   );

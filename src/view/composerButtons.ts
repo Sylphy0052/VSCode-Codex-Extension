@@ -22,6 +22,7 @@ export const COMPOSER_BUTTON_IDS = [
   'workflowView',
   'sessionKanban',
   'forgeHub',
+  'orchestratorMode',
   'openProgress',
   'handoffToNewSession',
   'autoHandoffToggle',
