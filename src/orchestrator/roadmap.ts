@@ -2627,24 +2627,46 @@ export async function convertMarkdownToRoadmap(
  * `version:` の直後（無ければ先頭）へ1行だけ挿入する。値はダブルクォートで囲み、パス区切りは
  * POSIX形式（`/`）へ揃える。既に `roadmap:` を持つ定義（人が手で書いた場合など）はその値を
  * 尊重してそのまま返す。
+ *
+ * `chunk` を渡すと、同じ位置へ `roadmapChunk:` ブロックも足す（Issue #1549）。複数フェーズが
+ * タスク数上限を超えて分割されたとき、どのYAMLが分割全体の何番目かをrun後も辿れるように
+ * するためで、直前のYAMLの成功を検知して次を自動実行する側（`extension.ts`）が読む。
+ * 既に `roadmapChunk` を持つ定義はその値を尊重する。
  */
 export function withRoadmapReference(
   yaml: string,
   definition: WorkflowDefinition,
   roadmapRelativePath: string,
+  chunk?: { batch: string; index: number; total: number },
 ): { yaml: string; definition: WorkflowDefinition } {
   const normalized = roadmapRelativePath.split(/[\\/]/u).join('/');
-  if (definition.roadmap !== undefined) {
+  const needsRoadmap = definition.roadmap === undefined;
+  const needsChunk = chunk !== undefined && definition.roadmapChunk === undefined;
+  if (!needsRoadmap && !needsChunk) {
     return { yaml, definition };
   }
   const lines = yaml.split(/\r?\n/u);
   const versionIndex = lines.findIndex((line) => /^version\s*:/u.test(line));
-  const inserted = `roadmap: ${JSON.stringify(normalized)}`;
   const at = versionIndex >= 0 ? versionIndex + 1 : 0;
-  lines.splice(at, 0, inserted);
+  const insertedLines: string[] = [];
+  let nextDefinition = definition;
+  if (needsRoadmap) {
+    insertedLines.push(`roadmap: ${JSON.stringify(normalized)}`);
+    nextDefinition = { ...nextDefinition, roadmap: normalized };
+  }
+  if (needsChunk && chunk !== undefined) {
+    insertedLines.push(
+      'roadmapChunk:',
+      `  batch: ${JSON.stringify(chunk.batch)}`,
+      `  index: ${chunk.index}`,
+      `  total: ${chunk.total}`,
+    );
+    nextDefinition = { ...nextDefinition, roadmapChunk: chunk };
+  }
+  lines.splice(at, 0, ...insertedLines);
   return {
     yaml: lines.join('\n'),
-    definition: { ...definition, roadmap: normalized },
+    definition: nextDefinition,
   };
 }
 

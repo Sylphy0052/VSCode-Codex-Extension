@@ -310,6 +310,17 @@ export interface WorkflowDefinition {
    * 向けられないようにする（§8の引数インジェクション対策と同じ動機）。
    */
   roadmap?: string;
+  /**
+   * ロードマップの複数フェーズがタスク数上限を超え、複数のYAMLへ分割されたときの
+   * 自分の位置（Issue #1549）。`batch` は同じ分割から生まれたYAML群を束ねる識別子、
+   * `index`/`total` は1始まりの通し番号と分割総数。分割したYAMLを順に自動実行するために
+   * 使う（`extension.ts` が直前のrunの成功を検知して `index + 1` のYAMLを探す）。
+   *
+   * 手書きYAMLでは通常指定しない。壊れた値（`batch` が空・許可外の文字・`index`/`total` が
+   * 正の整数でない・`index > total`）は読み捨てて未指定として扱う（`parseWorkflowYaml` 側で
+   * 検証済みの形しか持ち回らないようにするため、`validateWorkflow` にエラーは足さない）。
+   */
+  roadmapChunk?: { batch: string; index: number; total: number };
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -382,6 +393,40 @@ const num = (v: unknown, fallback: number): number => {
 
 export function isProvider(v: string): v is Provider {
   return (PROVIDERS as readonly string[]).includes(v);
+}
+
+/** `roadmapChunk.batch` に許す文字集合（Issue #1549）。ファイル名やログへそのまま出しうるため、英数字とハイフンのみに絞る。 */
+const ROADMAP_CHUNK_BATCH_PATTERN = /^[A-Za-z0-9-]{1,64}$/u;
+
+/**
+ * `roadmapChunk` を読む。壊れた値は`undefined`を返して読み捨てる（呼び出し側は
+ * 「ロードマップの分割ではない」と同じ扱いにできる）。
+ */
+function parseRoadmapChunk(
+  value: unknown,
+): { batch: string; index: number; total: number } | undefined {
+  const r = rec(value);
+  if (r === undefined) {
+    return undefined;
+  }
+  const batch = str(r['batch']);
+  const index = r['index'];
+  const total = r['total'];
+  if (!ROADMAP_CHUNK_BATCH_PATTERN.test(batch)) {
+    return undefined;
+  }
+  if (
+    typeof index !== 'number' ||
+    typeof total !== 'number' ||
+    !Number.isInteger(index) ||
+    !Number.isInteger(total) ||
+    index < 1 ||
+    total < 1 ||
+    index > total
+  ) {
+    return undefined;
+  }
+  return { batch, index, total };
 }
 function isIsolation(v: string): v is Isolation {
   return (ISOLATIONS as readonly string[]).includes(v);
@@ -872,6 +917,7 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
   const { defaults, warnings: defaultsWarnings } = resolveDefaults(root['defaults']);
   const tasksRaw = arr(root['tasks']);
   const roadmap = str(root['roadmap']);
+  const roadmapChunk = parseRoadmapChunk(root['roadmapChunk']);
   const nonGoals = filterStringArray(arr(root['nonGoals']));
   const acceptance = filterStringArray(arr(root['acceptance']));
   const assumptions = filterStringArray(arr(root['assumptions']));
@@ -918,6 +964,7 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
     defaultsWarnings,
     // 未指定と空文字は同じ「ロードマップ由来ではない」扱いにする（検証側で分岐を増やさない）
     ...(roadmap !== '' ? { roadmap } : {}),
+    ...(roadmapChunk !== undefined ? { roadmapChunk } : {}),
   };
 }
 

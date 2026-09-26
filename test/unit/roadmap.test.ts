@@ -1844,6 +1844,35 @@ describe('withRoadmapReference', () => {
 
     expect(result.yaml.split('\n')[0]).toBe('roadmap: "docs/roadmap/goal.md"');
   });
+
+  it('chunk を渡すと roadmapChunk ブロックも version の直後へ足す（Issue #1549）', () => {
+    const result = withRoadmapReference(yaml, definition, 'docs/roadmap/goal.md', {
+      batch: 'batch-1',
+      index: 1,
+      total: 3,
+    });
+
+    const lines = result.yaml.split('\n');
+    expect(lines[1]).toBe('roadmap: "docs/roadmap/goal.md"');
+    expect(lines[2]).toBe('roadmapChunk:');
+    expect(lines[3]).toBe('  batch: "batch-1"');
+    expect(lines[4]).toBe('  index: 1');
+    expect(lines[5]).toBe('  total: 3');
+    expect(result.definition.roadmapChunk).toEqual({ batch: 'batch-1', index: 1, total: 3 });
+  });
+
+  it('既に roadmapChunk を持つ定義は chunk 引数より値を尊重する', () => {
+    const already = { ...definition, roadmapChunk: { batch: 'kept', index: 2, total: 2 } };
+
+    const result = withRoadmapReference(yaml, already, 'docs/roadmap/goal.md', {
+      batch: 'new',
+      index: 1,
+      total: 2,
+    });
+
+    expect(result.yaml).not.toContain('roadmapChunk:');
+    expect(result.definition.roadmapChunk).toEqual({ batch: 'kept', index: 2, total: 2 });
+  });
 });
 
 describe('alignRoadmapIssues（design.md §16.19。誤ったCloses #<N>を防ぐ）', () => {
