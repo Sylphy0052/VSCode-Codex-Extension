@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildInstructionNote,
   composeNextPrompt,
+  MAX_MESSAGES_PER_RUN,
   MAX_UNRESOLVED_ITEMS,
   MessagingMcpServer,
   parseInstructionResultArgs,
@@ -159,7 +160,7 @@ describe('指示へのid付与とタスクへの注記（Issue #1502）', () => 
     const delivered = sendInstruction(ctx, { countUnit: '変更したファイル' });
     expect(delivered[0]?.instruction).toEqual({ countUnit: '変更したファイル' });
     expect(composeNextPrompt('続けて', delivered)).toContain(
-      '件数は「変更したファイル」を1件として',
+      '単位「変更したファイル」を1件として',
     );
   });
 
@@ -343,6 +344,31 @@ describe('report_instruction_result（Issue #1502）', () => {
     expect(parseInstructionResultArgs({ ...base, count: 1.5 }).ok).toBe(false);
     expect(parseInstructionResultArgs({ ...base, count: '3' }).ok).toBe(false);
     expect(parseInstructionResultArgs({ ...base, result: ' ' }).ok).toBe(false);
+  });
+
+  it('内容は妥当でも、run全体の送信上限に達していれば下層のsendMessageが拒否し、指示は開いたままにする', () => {
+    const ctx = setup();
+    const [instruction] = sendInstruction(ctx);
+    const id = instruction!.id;
+    // 指示の配送で1件使っているため、残りを埋めて上限ちょうどにする
+    for (let i = 0; i < MAX_MESSAGES_PER_RUN - 1; i += 1) {
+      const filler = ctx.hub.sendMessage({
+        from: 'T1',
+        to: ORCHESTRATOR_CONNECTION_ID,
+        body: `埋め草${i}`,
+        expectReply: false,
+      });
+      expect(filler.accepted).toBe(true);
+    }
+    call(ctx.t1, REPORT_INSTRUCTION_RESULT_TOOL.name, {
+      instructionId: id,
+      result: '対応した',
+      unresolved: [],
+    });
+    const body = lastBody(ctx.t1);
+    expect(body.accepted).toBe(false);
+    expect(body.reason).toContain(`上限${MAX_MESSAGES_PER_RUN}`);
+    expect(ctx.hub.openInstructionIds('T1')).toEqual([id]);
   });
 });
 

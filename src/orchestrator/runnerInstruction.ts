@@ -276,14 +276,18 @@ export async function notifyInstructionResult(
   taskId: string,
   report: InstructionReport,
 ): Promise<void> {
-  const observation = await collectInstructionObservation(self, runId, live, taskId);
-  if (self.runs.get(runId) !== live) {
-    return;
+  try {
+    const observation = await collectInstructionObservation(self, runId, live, taskId);
+    if (self.runs.get(runId) !== live) {
+      return;
+    }
+    notifyOrchestrator(self, runId, {
+      kind: 'taskInstructionResult',
+      body: buildInstructionResultEventBody(taskId, report, observation),
+    });
+  } catch (e) {
+    warnNotifyFailure(self, runId, taskId, e);
   }
-  notifyOrchestrator(self, runId, {
-    kind: 'taskInstructionResult',
-    body: buildInstructionResultEventBody(taskId, report, observation),
-  });
 }
 
 /** 応答なしで確定した指示を知らせる（1つの指示につき1回。`takeUnansweredInstructions`が保証する） */
@@ -297,14 +301,34 @@ export async function notifyUnansweredInstructions(
   if (instructionIds.length === 0) {
     return;
   }
-  const observation = await collectInstructionObservation(self, runId, live, taskId);
-  if (self.runs.get(runId) !== live) {
-    return;
+  try {
+    const observation = await collectInstructionObservation(self, runId, live, taskId);
+    if (self.runs.get(runId) !== live) {
+      return;
+    }
+    for (const instructionId of instructionIds) {
+      notifyOrchestrator(self, runId, {
+        kind: 'taskInstructionUnanswered',
+        body: buildInstructionUnansweredEventBody(taskId, instructionId, observation),
+      });
+    }
+  } catch (e) {
+    warnNotifyFailure(self, runId, taskId, e);
   }
-  for (const instructionId of instructionIds) {
-    notifyOrchestrator(self, runId, {
-      kind: 'taskInstructionUnanswered',
-      body: buildInstructionUnansweredEventBody(taskId, instructionId, observation),
-    });
-  }
+}
+
+/**
+ * 通知は呼び出し側から投げっぱなし（`void`）で呼ぶため、ここで例外を止めてログに残す。
+ * 通知が落ちてもrunは止めない。
+ */
+function warnNotifyFailure(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  taskId: string,
+  e: unknown,
+): void {
+  self.deps.log.warn(
+    `[workflow ${runId}] ${taskId}: 指示の応答をオーケストレーターへ通知できません: ` +
+      (e instanceof Error ? e.message : String(e)),
+  );
 }

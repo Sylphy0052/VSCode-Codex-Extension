@@ -111,8 +111,8 @@ import {
   startOverlapPoll,
   stopOverlapPoll,
 } from './runnerOverlap';
-import { notifyUnansweredInstructions } from './runnerInstruction';
 import type { OverlapWait } from './taskOverlap';
+import { notifyUnansweredInstructions } from './runnerInstruction';
 import {
   buildRunTaskSnapshots,
   checkMessagingVisibility,
