@@ -73,7 +73,10 @@ export interface TaskRunControllerDeps {
   ): Promise<StageSettingsRecommendation | undefined>;
   /** 計画で指定された既存のIssueがopenかを確かめる。再読み込み後の復元ではPRの状態も見る。 */
   observation: Pick<StageObservationPorts, 'fetchIssueState' | 'fetchPullRequestState'>;
-  /** 再読み込み後の復元で、記録したworktreeが残っているかを確かめる。 */
+  /**
+   * 再読み込み後の復元で、記録したworktreeが残っているかを確かめる。無ければ`false`、
+   * 確かめられなければreject（消えたと誤判定しないため）。
+   */
   pathExists(path: string): Promise<boolean>;
   log(message: string): void;
   now?: () => Date;

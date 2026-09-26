@@ -25,8 +25,8 @@ export const RELOAD_HALT_REASON =
   '拡張機能の再読み込みで工程セッションが終わりました。「やり直す」で始め直せます';
 
 /**
- * タスクごとに観測した外部の状態。記録が無い・取得に失敗したものは`undefined`（その事実では
- * 状態を変えない）。
+ * タスクごとに観測した外部の状態。記録が無い・取得に失敗したものは`undefined`。`undefined`と
+ * `'unknown'`（forgeに問い合わせられなかった）では状態を変えない。
  */
 export interface TaskExternalFacts {
   pullRequestState: PullRequestState | undefined;
