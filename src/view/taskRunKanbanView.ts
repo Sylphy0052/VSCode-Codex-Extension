@@ -5,7 +5,7 @@ import type { Logger } from '../log';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
-import { isTaskRunActive, isValidTaskId, TASK_RUN_TITLE_MAX_LENGTH, taskRunLabel } from '../orchestrator/taskRunState';
+import { isTaskRunActive, isValidTaskId, taskRunLabel, validateTaskRunTitleInput } from '../orchestrator/taskRunState';
 import { chatCsp } from './chatCsp';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
@@ -356,8 +356,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       title: 'runの名前',
       prompt: '空にすると開始時刻とCLIで表示します',
       value: run.title ?? '',
-      validateInput: (value) =>
-        value.length > TASK_RUN_TITLE_MAX_LENGTH ? `${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内で入力してください` : undefined,
+      validateInput: validateTaskRunTitleInput,
     });
     if (title === undefined) {
       return;

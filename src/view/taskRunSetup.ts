@@ -28,9 +28,9 @@ import {
   isTaskRunActive,
   listTasks,
   MAX_TASK_RUN_PARALLEL,
-  TASK_RUN_TITLE_MAX_LENGTH,
   type TaskRun,
   type TaskRunEngine,
+  validateTaskRunTitleInput,
 } from '../orchestrator/taskRunState';
 import type { TaskRunStore } from '../orchestrator/taskRunStore';
 import type { TaskSessionConfig, TaskSessionHost } from '../orchestrator/taskSession';
@@ -284,7 +284,7 @@ async function switchRunCommand(
       items.push({ label: '他のフォルダ', kind: vscode.QuickPickItemKind.Separator });
       separated = true;
     }
-    items.push({ label: r.label, description: r.status, detail: r.workspaceRoot, runId: r.runId });
+    items.push({ label: escapeCodicons(r.label), description: r.status, detail: r.workspaceRoot, runId: r.runId });
   }
   const chosen = await vscode.window.showQuickPick(items, {
     title: '表示するrun',
@@ -313,6 +313,14 @@ async function switchRunCommand(
     return;
   }
   switchToRun(run.runId);
+}
+
+/**
+ * QuickPickの項目名は`$(name)`をcodiconとして描くため、人が付けたrunの名前に含まれる`$(`を
+ * ゼロ幅スペースで切って文字のまま出す（Issue #1567）。
+ */
+function escapeCodicons(text: string): string {
+  return text.replaceAll('$(', '$\u200B(');
 }
 
 function parseEngine(value: unknown): TaskRunEngine | undefined {
@@ -418,7 +426,7 @@ async function startRunCommand(
         only?.runId ??
         (await pick<string>(
           '開くrun',
-          active.map((r): [string, string] => [r.runId, taskRunLabel(r)]),
+          active.map((r): [string, string] => [r.runId, escapeCodicons(taskRunLabel(r))]),
         ));
       if (runId !== undefined) {
         showRun(view, orchestrator, runId);
@@ -456,10 +464,7 @@ async function startRunCommand(
   const title = await vscode.window.showInputBox({
     title: 'runの名前（Kanbanの一覧と通知に出します）',
     prompt: '空のままEnterで開始時刻とCLIを名前にします。後でKanbanから変えられます',
-    validateInput: (value) =>
-      value.length > TASK_RUN_TITLE_MAX_LENGTH
-        ? `${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内で入力してください`
-        : undefined,
+    validateInput: validateTaskRunTitleInput,
   });
   if (title === undefined) {
     return;
