@@ -7,6 +7,7 @@ import type { SessionControlAction, SessionControlResult } from './chatManagerBa
 import { parseSessionTarget } from '../orchestrator/sessionBridge';
 import { isSharedApprovalDecision, isSharedHandoffDecision } from './sessionHub';
 import type { SessionKanbanBoard } from './sessionKanbanModel';
+import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
 
 export type SessionKanbanReader = () => SessionKanbanBoard;
@@ -394,32 +395,7 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
  * マゼンタ=対応を待っているもの）。ネオンはテーマ変数から作れないため、外装を選んだ
  * ときだけ効く独自色としてここに閉じ込め、地の色はテーマ変数のままにする。
  */
-body.skin-cyber {
-  --agent-neon-1: #4fe3ff;
-  --agent-neon-2: #b388ff;
-  --agent-neon-3: #ff5c8a;
-  --agent-neon-edge: color-mix(in srgb, var(--agent-neon-1) 28%, var(--vscode-panel-border));
-  --agent-neon-glow: color-mix(in srgb, var(--agent-neon-1) 45%, transparent);
-  --agent-grid-line: color-mix(in srgb, var(--agent-neon-1) 7%, transparent);
-  --agent-grid-step: 48px;
-  --agent-panel-bg: color-mix(in srgb, var(--agent-neon-1) 4%, var(--vscode-editorWidget-background));
-  /* パネル右上の切り欠き。0px にすると角が戻る（高コントラストテーマで使う） */
-  --agent-notch: 12px;
-  --agent-head-font: var(--vscode-editor-font-family, var(--vscode-font-family));
-  --agent-head-tracking: .06em;
-  --agent-scan-opacity: .5;
-  /* 待機中カードの左のバー。他の種別は地の border-left をネオンで塗り直す */
-  --agent-card-accent: color-mix(in srgb, var(--agent-neon-1) 35%, transparent);
-}
-/* lightテーマでは彩度と発光を落とす。白地では明るいネオンが本文より目立つ */
-body.skin-cyber.vscode-light { --agent-neon-1: #0f7f9c; --agent-neon-2: #6b3fd4; --agent-neon-3: #c2185b; --agent-grid-line: color-mix(in srgb, var(--agent-neon-1) 5%, transparent); --agent-neon-glow: color-mix(in srgb, var(--agent-neon-1) 25%, transparent); --agent-panel-bg: color-mix(in srgb, var(--agent-neon-1) 2%, var(--vscode-editorWidget-background)); --agent-scan-opacity: .35; }
-/*
- * 高コントラストテーマでは装飾を無効化する。規則を1つずつ名指しで消すと後から足した
- * 装飾が漏れるため、装飾が参照している変数を無色・無寸法へ倒す。
- */
-body.skin-cyber.vscode-high-contrast, body.skin-cyber.vscode-high-contrast-light { --agent-neon-1: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); --agent-neon-2: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); --agent-neon-3: var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder)); --agent-neon-edge: var(--vscode-panel-border); --agent-neon-glow: transparent; --agent-grid-line: transparent; --agent-panel-bg: var(--vscode-editorWidget-background); --agent-notch: 0px; --agent-head-font: var(--vscode-font-family); --agent-head-tracking: normal; --agent-card-accent: transparent; }
-/* 背景の方眼。1枚の背景画像で出すので要素は増えない */
-body.skin-cyber { background-image: repeating-linear-gradient(to right, var(--agent-grid-line) 0 1px, transparent 1px var(--agent-grid-step)), repeating-linear-gradient(to bottom, var(--agent-grid-line) 0 1px, transparent 1px var(--agent-grid-step)); }
+${KANBAN_CYBER_BASE_STYLES}
 /* 見出し。端末寄りの書体と字間にし、発光は見出しの文字だけに載せる */
 body.skin-cyber .eyebrow { color: var(--agent-neon-1); font-family: var(--agent-head-font); letter-spacing: .18em; }
 body.skin-cyber h1 { font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); text-shadow: 0 0 12px var(--agent-neon-glow); }
@@ -486,7 +462,6 @@ body.skin-cyber .toast { border-color: var(--agent-neon-1); box-shadow: inset 0 
 body.skin-cyber.has-approval::before { content: ''; position: fixed; left: 0; right: 0; top: 0; height: 2px; pointer-events: none; z-index: 1; background-image: linear-gradient(to right, transparent, var(--agent-neon-3), transparent); opacity: var(--agent-scan-opacity); animation: agent-kanban-scanline 3.2s linear infinite; }
 /* 高コントラストテーマでは走査線そのものを出さない（動きごと止める） */
 body.skin-cyber.vscode-high-contrast.has-approval::before, body.skin-cyber.vscode-high-contrast-light.has-approval::before { content: none; }
-@keyframes agent-kanban-scanline { from { transform: translateY(0); } to { transform: translateY(100vh); } }
 `;
 
 const script = `
