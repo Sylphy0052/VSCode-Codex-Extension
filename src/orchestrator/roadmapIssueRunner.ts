@@ -1282,7 +1282,38 @@ export class RoadmapIssueRunner {
    */
   pauseIssue(runId: string, issueNumber: number): Promise<boolean> {
     const key = liveKey(runId, issueNumber);
-    return this.withIssueLock(key, () => this.pauseIssueInner(runId, issueNumber));
+    // 同じIssueのロックを自動引き継ぎのopenTaskSession・終了処理のfindPullRequest・
+    // 別の一時停止/停止のinterruptAndWaitIdle（最大60秒）等が握っていても、続きの指示
+    // だけはロック待ちの前に止める（Issue #1484）。状態の更新と中断の確認は
+    // 引き続きロックの中（`pauseIssueInner`）で行う
+    const early = this.live.get(key)?.session;
+    early?.pauseLoop();
+    return this.withIssueLock(key, async () => {
+      const paused = await this.pauseIssueInner(runId, issueNumber);
+      if (!paused && early !== undefined) {
+        this.undoEarlyPause(runId, issueNumber, early);
+      }
+      return paused;
+    });
+  }
+
+  /**
+   * 一時停止を受け付けなかった（実行中でない、既に止める要求がある等）とき、ロック待ちの前に
+   * 止めたループを戻す。一時停止を試みて失敗にしたノードや、回答待ちで止めているループは戻さない。
+   */
+  private undoEarlyPause(runId: string, issueNumber: number, early: TaskSession): void {
+    const entry = this.live.get(liveKey(runId, issueNumber));
+    const issue = this.findIssue(runId, issueNumber);
+    if (
+      entry?.session === early &&
+      entry.stopRequest === undefined &&
+      !entry.loopEnded &&
+      !this.hasPendingBlockingQuestion(entry) &&
+      issue?.progress === 'running' &&
+      issue.attention !== 'stopping'
+    ) {
+      early.resumeLoop();
+    }
   }
 
   private async pauseIssueInner(runId: string, issueNumber: number): Promise<boolean> {
@@ -1319,6 +1350,8 @@ export class RoadmapIssueRunner {
    */
   stopIssue(runId: string, issueNumber: number): Promise<boolean> {
     const key = liveKey(runId, issueNumber);
+    // pauseIssueと同じ理由（Issue #1484）。ロック待ちの前に停止だけ先に効かせる
+    this.live.get(key)?.session.stopLoop();
     return this.withIssueLock(key, () => this.stopIssueInner(runId, issueNumber));
   }
 
@@ -1387,11 +1420,20 @@ export class RoadmapIssueRunner {
     if (run === undefined || this.disposed) {
       return;
     }
+    // 開始処理中（`this.starting`）だがまだ`progress: 'running'`として永続化されていない
+    // Issueも空き枠の計算に含める。`pump`を短い間隔で複数回呼んだとき、この分を数えずに
+    // 呼ぶと同じ空き枠を数え直し、並列上限を超えて着手する余地がある（Issue #1484）
+    const runPrefix = `${runId}#`;
+    const startingIssueNumbers = new Set(
+      [...this.starting]
+        .filter((key) => key.startsWith(runPrefix))
+        .map((key) => Number(key.slice(runPrefix.length))),
+    );
     // 空き枠の分を並行して始める（worktreeの作成は`WorktreeCreationQueue`が直列にする）
     await Promise.all(
-      pickIssuesToStart(run)
-        .filter((issueNumber) => !this.starting.has(liveKey(runId, issueNumber)))
-        .map((issueNumber) => this.startIssue(runId, issueNumber, { overrideDependencies: false })),
+      pickIssuesToStart(run, startingIssueNumbers).map((issueNumber) =>
+        this.startIssue(runId, issueNumber, { overrideDependencies: false }),
+      ),
     );
   }
 

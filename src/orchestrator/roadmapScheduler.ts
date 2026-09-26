@@ -62,13 +62,31 @@ export function listRunnableIssues(run: RoadmapRun): number[] {
 /**
  * 自動実行モードで今始めるノード。並列上限から動いているセッション数を引いた空き枠の分だけ、
  * 実行できるノードを着手順に返す。ユーザー選択モード、run全体の停止中、終了後は空にする。
+ *
+ * `startingIssueNumbers`には、まだ`run.issues`へ`running`として反映されていない
+ * （worktree作成・セッション起動が途中の）Issueを渡す。`countActiveSessions`は永続化した
+ * 状態しか見えないため、これを渡さずに呼ぶと、`pump`を短い間隔で複数回呼んだときに
+ * 同じ空き枠を数え直してしまい、並列上限を超えて着手する余地がある（Issue #1484）。
  */
-export function pickIssuesToStart(run: RoadmapRun): number[] {
+export function pickIssuesToStart(
+  run: RoadmapRun,
+  startingIssueNumbers: ReadonlySet<number> = new Set(),
+): number[] {
   if (run.mode !== 'auto' || run.haltedByUser || run.finishedAt !== undefined) {
     return [];
   }
-  const slots = run.maxParallel - countActiveSessions(run);
-  return slots > 0 ? listRunnableIssues(run).slice(0, slots) : [];
+  // 開始処理の終わり際（`running`を永続化した後）は`countActiveSessions`と二重に数えない
+  const startingNotActive = [...startingIssueNumbers].filter((issueNumber) => {
+    const issue = getIssue(run, issueNumber);
+    return issue === undefined || !hasActiveSession(issue);
+  }).length;
+  const slots = run.maxParallel - countActiveSessions(run) - startingNotActive;
+  if (slots <= 0) {
+    return [];
+  }
+  return listRunnableIssues(run)
+    .filter((issueNumber) => !startingIssueNumbers.has(issueNumber))
+    .slice(0, slots);
 }
 
 export type StartIssueRejection =
