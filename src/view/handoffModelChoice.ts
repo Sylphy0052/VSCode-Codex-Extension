@@ -351,8 +351,8 @@ function showConfirmModal(
  * @param pending 保留を統括ページへ公開する口（Issue #1280）。省略するとモーダルだけになる
  * @param autoApprove 自動承認モード（Issue #1350）。真のときは確認そのものを省略し、
  *   モーダルも`pending`（統括ページの保留カード）も経由せず`proposeHandoffModelSettings`の
- *   提案をそのまま返す。自動発火（`HandoffTrigger.kind !== 'manual'`）のときだけ呼び出し側が
- *   真を渡す想定で、手動の引き継ぎでは常に偽のまま呼ぶ
+ *   提案をそのまま返す。呼び出し側は会話の自動承認トグルがONなら、自動発火か手動の
+ *   引き継ぎかを問わず真を渡す（Issue #1510）
  */
 export async function chooseHandoffModelSettings(
   current: SessionModelSettings,
