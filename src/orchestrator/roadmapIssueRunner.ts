@@ -688,7 +688,8 @@ export class RoadmapIssueRunner {
       channel.binding.session = session;
     }
     this.attach(entry, session);
-    session.open({ preserveFocus: true });
+    // Kanbanは左の列にある。Orchestratorのチャットと同じ右の列へ開き、Kanbanを前面に残す
+    session.open({ preserveFocus: true, viewColumn: 2 });
     return entry;
   }
 
@@ -904,7 +905,7 @@ export class RoadmapIssueRunner {
       return;
     }
     try {
-      session.open({ preserveFocus: true });
+      session.open({ preserveFocus: true, viewColumn: 2 });
     } catch (e) {
       this.releaseQuestionToken(channel?.token);
       session.dispose();
