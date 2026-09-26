@@ -47,12 +47,15 @@ export async function checkTaskOverlap(
   }
   live.overlapMeasuring = true;
   try {
-    // `merging`のタスクはworktreeがマージの途中にあり得るため測り直さず、直前の実測値を使う
+    // `merging`のタスクはworktreeがマージの途中にあり得るため測り直さず、直前の実測値を使う。
+    // 取り込み中（`overlapResuming`）も同様に、統合ブランチのマージ完了から`originCommit`への
+    // 代入までの間に実測すると、相手の変更が混ざって無関係な後発を待たせ得る
     const targets = [...live.tasks.entries()].filter(([taskId, liveTask]) => {
       const state = live.runState.tasks.get(taskId)?.state;
       return (
         isOverlapHoldingState(state) &&
         state !== 'merging' &&
+        !liveTask.overlapResuming &&
         !live.launchingTasks.has(taskId) &&
         isMeasurable(liveTask)
       );
