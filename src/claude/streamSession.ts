@@ -60,7 +60,6 @@ import {
   readRewindFilesResult,
   readSessionCost,
   readSideQuestionResult,
-  buildHideSkillsRequest,
   type ControlResponse,
   type ControlRequestProgress,
   type IncomingControlRequest,
@@ -192,17 +191,6 @@ export class ClaudeStreamSession {
     string,
     (snapshot: SkillsSnapshot | undefined) => void
   >();
-
-  /** skillを一覧から隠す`apply_flag_settings`の応答待ち（issue #1451）。成否だけを返す。 */
-  private readonly hideSkillsWaiting = new Map<string, (ok: boolean) => void>();
-
-  /**
-   * skill選択（issue #1451）のために一覧から隠したskill。`reload_skills`は隠したskillを返さない
-   * （実測）ため、候補としてここに覚えておく。隠す設定はプロセスごとの状態なので、
-   * `hiddenSkillsProc`と`this.proc`が食い違ったら空から数え直す。
-   */
-  private hiddenSkills = new Map<string, SkillView>();
-  private hiddenSkillsProc: ChildProcessWithoutNullStreams | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -988,19 +976,18 @@ export class ClaudeStreamSession {
   }
 
   /**
-   * skill選択（issue #1451）の候補を返す。まだ隠していないskillがあれば、モデルへ渡す一覧から
-   * 隠してから返す。隠し終えるまで待つので、戻ってから送った発言には一覧が載らない。
+   * skill選択（issue #1451）の候補を返す。
    *
-   * プロセスが無い・一覧を取れない・隠せなかったときは`undefined`（選択を諦め、そのまま送る）。
+   * モデルへ渡す一覧からは隠さない。隠すとモデルが自分でSkillツールを呼んだときに
+   * `Skill <name> is disabled for model invocation in skillOverrides settings`で拒否され、
+   * 選ばなかったターンで手順どおりにskillを使えなくなる（issue #1531）。
+   *
+   * プロセスが無い・一覧を取れないときは`undefined`（選択を諦め、そのまま送る）。
    */
   async prepareSkillSelection(): Promise<SkillView[] | undefined> {
     const proc = this.proc;
     if (proc === undefined) {
       return undefined;
-    }
-    if (this.hiddenSkillsProc !== proc) {
-      this.hiddenSkills = new Map();
-      this.hiddenSkillsProc = proc;
     }
     const snapshot = await this.reloadSkills();
     if (snapshot?.ok !== true || this.proc !== proc) {
@@ -1008,25 +995,9 @@ export class ClaudeStreamSession {
     }
     // 選んだskillは`/<skill名>`で送る（issue #1529）。`user-invocable: false`のskillは
     // `/`で呼べず、送ると依頼ごと空振りする。`initialize`のコマンド一覧には載らない（実測）ので、
-    // 一覧にあるものだけを隠して候補にし、それ以外はモデルに任せたまま残す
+    // 一覧にあるものだけを候補にする
     const invocable = new Set(this.commandList.map((c) => c.name));
-    const added = snapshot.skills.filter(
-      (s) => invocable.has(s.name) && !this.hiddenSkills.has(s.name),
-    );
-    if (added.length > 0) {
-      const requestId = this.claim('hideSkills');
-      const ok = await new Promise<boolean>((resolve) => {
-        this.hideSkillsWaiting.set(requestId, resolve);
-        this.write(buildHideSkillsRequest(requestId, added.map((s) => s.name)));
-      });
-      if (!ok || this.proc !== proc) {
-        return undefined;
-      }
-      for (const s of added) {
-        this.hiddenSkills.set(s.name, s);
-      }
-    }
-    return [...this.hiddenSkills.values()];
+    return snapshot.skills.filter((s) => invocable.has(s.name));
   }
 
   /**
@@ -1518,15 +1489,6 @@ export class ClaudeStreamSession {
       return;
     }
 
-    if (outgoing?.kind === 'hideSkills') {
-      if (!response.ok) {
-        this.log.warn('skillを一覧から隠せませんでした（apply_flag_settingsが失敗）');
-      }
-      this.hideSkillsWaiting.get(response.requestId)?.(response.ok);
-      this.hideSkillsWaiting.delete(response.requestId);
-      return;
-    }
-
     // `initialize` の応答が使えるコマンドを全部返す。一覧のハードコードは要らない
     const commands = readCommandList(response.payload);
     if (commands !== undefined) {
@@ -1723,10 +1685,6 @@ export class ClaudeStreamSession {
       resolve(undefined);
     }
     this.skillsWaiting.clear();
-    for (const resolve of this.hideSkillsWaiting.values()) {
-      resolve(false);
-    }
-    this.hideSkillsWaiting.clear();
     this.outgoing.clear();
   }
 
@@ -1754,8 +1712,7 @@ type OutgoingKind =
   | 'sideQuestion'
   | 'mcpStatus'
   | 'mcpConfigure'
-  | 'reloadSkills'
-  | 'hideSkills';
+  | 'reloadSkills';
 
 interface Outgoing {
   kind: OutgoingKind;

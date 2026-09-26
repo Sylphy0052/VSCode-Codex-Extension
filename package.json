@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.45",
+  "version": "2026.926.46",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1398,7 +1398,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。skillの一覧をモデルへ渡さず、発言のたびにReflex判定（issue #1451）で依頼に合うskillを1つ選んで読み込ませる。一覧の分だけ毎ターンの入力が減る。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、発言ごとに数秒〜十数秒待つ。合うものが無い・判定が失敗したときはskillを付けずに送る。`/` で始まる発言、ループ・自動返信・ゴールの指示文では判定しない。Codexは有効にした後に開いた会話から効く。"
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。発言のたびにReflex判定（issue #1451）で依頼に合うskillを1つ選んで読み込ませる。Codexではskillの一覧をモデルへ渡さず、一覧の分だけ毎ターンの入力が減る。Claude Codeでは一覧を隠さない（隠すとモデルが自分でskillを呼べなくなる。issue #1531）。判定には会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）を使い、発言ごとに数秒〜十数秒待つ。合うものが無い・判定が失敗したときはskillを付けずに送る。`/` で始まる発言、ループ・自動返信・ゴールの指示文では判定しない。Codexは有効にした後に開いた会話から効く。"
         },
         "agent.chat.skillSelect.threshold": {
           "type": "number",
