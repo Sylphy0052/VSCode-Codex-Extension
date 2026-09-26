@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 import type { TaskState } from './runState';
 import type { GitCommandRunner } from './worktree';
 
@@ -104,23 +106,115 @@ function splitNul(stdout: string): string[] {
   return stdout.split('\0').filter((entry) => entry !== '');
 }
 
+/** worktreeの変更の実測値（Issue #1508）。 */
+export interface WorktreeChanges {
+  /** 変更ファイル（リポジトリ相対）。commit済み・未commit・未追跡のすべてを含む */
+  readonly files: ReadonlySet<string>;
+  /**
+   * 追加行数。未追跡のファイルは全行を追加として数える。バイナリと、
+   * `UNTRACKED_LINE_COUNT_MAX_BYTES`を超える未追跡のファイルは数えない
+   */
+  readonly addedLines: number;
+  /** 削除行数。バイナリは数えない */
+  readonly deletedLines: number;
+}
+
+/** 行数を数える未追跡のファイルの大きさの上限。超えたものは生成物とみなして数えない */
+export const UNTRACKED_LINE_COUNT_MAX_BYTES = 1024 * 1024;
+/** 行数を数える未追跡のファイルの数の上限。周期ごとに読み直すため、読む量を抑える */
+export const UNTRACKED_LINE_COUNT_MAX_FILES = 200;
+/** gitと同じく、先頭のこのバイト数にNULを含むファイルをバイナリとみなす */
+const BINARY_SNIFF_BYTES = 8000;
+
 /**
- * gitのworktreeで、分岐元からの変更ファイルを実測する。commit済み・未commit・未追跡の
- * すべてを含む。取れなければ`undefined`（交差の判定に使わない）。
+ * `git diff --numstat -z --no-renames`の出力を読む。1件は「追加、タブ、削除、タブ、パス、NUL」
+ * の形で、バイナリは追加・削除が`-`になる。
+ */
+export function parseNumstat(stdout: string): {
+  files: string[];
+  addedLines: number;
+  deletedLines: number;
+} {
+  const files: string[] = [];
+  let addedLines = 0;
+  let deletedLines = 0;
+  for (const entry of splitNul(stdout)) {
+    const match = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(entry);
+    if (match === null) {
+      continue;
+    }
+    const [, added, deleted, file] = match;
+    if (added === undefined || deleted === undefined || file === undefined) {
+      continue;
+    }
+    files.push(file);
+    if (added !== '-') {
+      addedLines += Number(added);
+    }
+    if (deleted !== '-') {
+      deletedLines += Number(deleted);
+    }
+  }
+  return { files, addedLines, deletedLines };
+}
+
+/** テキストの行数。末尾に改行が無い最終行も1行に数える（`git diff --numstat`と同じ） */
+export function countTextLines(content: Uint8Array): number {
+  if (content.length === 0) {
+    return 0;
+  }
+  let lines = 0;
+  for (const byte of content) {
+    if (byte === 0x0a) {
+      lines += 1;
+    }
+  }
+  return content[content.length - 1] === 0x0a ? lines : lines + 1;
+}
+
+/**
+ * 未追跡のファイルの行数を数える。通常のファイルだけを読み、シンボリックリンクは辿らない
+ * （worktreeの外を読まないため）。読めないもの・バイナリ・大きすぎるものは数えない。
+ */
+async function countUntrackedLines(cwd: string, files: readonly string[]): Promise<number> {
+  let total = 0;
+  for (const file of files.slice(0, UNTRACKED_LINE_COUNT_MAX_FILES)) {
+    try {
+      const fullPath = path.join(cwd, file);
+      const stat = await fs.lstat(fullPath);
+      if (!stat.isFile() || stat.size > UNTRACKED_LINE_COUNT_MAX_BYTES) {
+        continue;
+      }
+      const content = await fs.readFile(fullPath);
+      if (content.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
+        continue;
+      }
+      total += countTextLines(content);
+    } catch {
+      // 測っている間に消えた等。数えずに進む
+    }
+  }
+  return total;
+}
+
+/**
+ * gitのworktreeで、分岐元からの変更ファイルと変更行数を実測する。commit済み・未commit・
+ * 未追跡のすべてを含む。取れなければ`undefined`（交差の判定・規模の判定に使わない）。
  *
  * `--no-optional-locks`を付けるのは、走行中のエージェントが同じworktreeでgitを使っている
- * ところへ`index.lock`を取りに行かないため。
+ * ところへ`index.lock`を取りに行かないため。行数は`--numstat`で変更ファイルと同時に取り、
+ * gitの呼び出しを増やさない（Issue #1508）。
  */
-export async function measureWorktreeFiles(
+export async function measureWorktreeChanges(
   git: GitCommandRunner,
   cwd: string,
   originCommit: string,
-): Promise<ReadonlySet<string> | undefined> {
+): Promise<WorktreeChanges | undefined> {
   const options = { env: ENV_WITHOUT_REPO_OVERRIDES };
   try {
     const [tracked, untracked] = await Promise.all([
       git.run(
-        ['--no-optional-locks', 'diff', '--name-only', '-z', '--no-renames', originCommit, '--'],
+        ['--no-optional-locks', 'diff', '--numstat', '-z', '--no-renames', originCommit, '--'],
         cwd,
         options,
       ),
@@ -133,7 +227,14 @@ export async function measureWorktreeFiles(
     if (tracked.code !== 0 || untracked.code !== 0) {
       return undefined;
     }
-    return new Set([...splitNul(tracked.stdout), ...splitNul(untracked.stdout)]);
+    const numstat = parseNumstat(tracked.stdout);
+    const untrackedFiles = splitNul(untracked.stdout);
+    const untrackedLines = await countUntrackedLines(cwd, untrackedFiles);
+    return {
+      files: new Set([...numstat.files, ...untrackedFiles]),
+      addedLines: numstat.addedLines + untrackedLines,
+      deletedLines: numstat.deletedLines,
+    };
   } catch {
     return undefined;
   }

@@ -262,6 +262,16 @@ function buildTaskSnapshot(
     ...(state?.state === 'waitingOverlap' && liveTask?.overlapWait !== undefined
       ? { overlapWait: liveTask.overlapWait }
       : {}),
+    ...(liveTask?.touchedFiles !== undefined && liveTask.changedLines !== undefined
+      ? {
+          changeSize: {
+            files: liveTask.touchedFiles.size,
+            addedLines: liveTask.changedLines.added,
+            deletedLines: liveTask.changedLines.deleted,
+          },
+        }
+      : {}),
+    ...(liveTask?.splitSuggested === true ? { splitSuggested: true } : {}),
     hasLiveSession: liveTask !== undefined && !liveTask.sessionClosed,
     expandedPrompt: liveTask?.expandedPrompt,
     expandedContinuePrompt: liveTask?.expandedContinuePrompt,

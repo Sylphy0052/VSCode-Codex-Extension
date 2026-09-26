@@ -22,8 +22,15 @@ import {
   readNotificationsConfig,
   readSecondOpinionConfig,
   readWorkflowsConfig,
+  normalizeSplitSuggestThreshold,
 } from '../../src/config';
 import { DEFAULT_DIFF_PRESENTATION_THRESHOLDS } from '../../src/secondOpinion/diffIndex';
+import {
+  DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
+  DEFAULT_SPLIT_SUGGEST_LINE_COUNT,
+  DEFAULT_SPLIT_SUGGEST_TURN_COUNT,
+  MAX_SPLIT_SUGGEST_THRESHOLD,
+} from '../../src/orchestrator/taskSplit';
 import { DEFAULT_COMPOSER_BUTTONS } from '../../src/view/composerButtons';
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION } from '../../src/view/turnSummary';
 import {
@@ -1011,6 +1018,67 @@ describe('readSecondOpinionConfig: 差分の目次の閾値（Issue #1322）', (
     expect(readSecondOpinionConfig().diffPresentation).toEqual({
       inlineMaxTokens: 30_000,
       hunkMaxTokens: 30_000,
+    });
+  });
+});
+
+describe('normalizeSplitSuggestThreshold（Issue #1508）', () => {
+  it('0は判定に使わない指標として許容する', () => {
+    expect(normalizeSplitSuggestThreshold(0, 15)).toBe(0);
+  });
+
+  it.each([
+    ['負値', -1],
+    ['非整数', 1.5],
+    ['非数値', 'many'],
+    ['NaN', Number.NaN],
+    ['上限超過', MAX_SPLIT_SUGGEST_THRESHOLD + 1],
+  ])('%s は既定値へ丸める', (_label, value) => {
+    expect(normalizeSplitSuggestThreshold(value, 15)).toBe(15);
+  });
+
+  it('上限ちょうどは許容する', () => {
+    expect(normalizeSplitSuggestThreshold(MAX_SPLIT_SUGGEST_THRESHOLD, 15)).toBe(
+      MAX_SPLIT_SUGGEST_THRESHOLD,
+    );
+  });
+});
+
+describe('readWorkflowsConfig().splitSuggestThresholds（Issue #1508）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未設定は既定値', () => {
+    expect(readWorkflowsConfig().splitSuggestThresholds).toEqual({
+      fileCount: DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
+      lineCount: DEFAULT_SPLIT_SUGGEST_LINE_COUNT,
+      turnCount: DEFAULT_SPLIT_SUGGEST_TURN_COUNT,
+    });
+  });
+
+  it('3つの設定値をそれぞれ読む', () => {
+    __mock.setConfig('agent', {
+      'workflows.splitSuggestFileCount': 5,
+      'workflows.splitSuggestLineCount': 200,
+      'workflows.splitSuggestTurnCount': 3,
+    });
+    expect(readWorkflowsConfig().splitSuggestThresholds).toEqual({
+      fileCount: 5,
+      lineCount: 200,
+      turnCount: 3,
+    });
+  });
+
+  it('不正な値は個別に既定値へ丸める（他の指標には波及しない）', () => {
+    __mock.setConfig('agent', {
+      'workflows.splitSuggestFileCount': -1,
+      'workflows.splitSuggestLineCount': 200,
+    });
+    expect(readWorkflowsConfig().splitSuggestThresholds).toEqual({
+      fileCount: DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
+      lineCount: 200,
+      turnCount: DEFAULT_SPLIT_SUGGEST_TURN_COUNT,
     });
   });
 });

@@ -124,6 +124,12 @@ export type OrchestratorEventKind =
    */
   | 'taskInstructionUnanswered'
   /**
+   * 走行中のタスクの規模（変更ファイル数・変更行数・確定したターン数）が閾値を超えた
+   * （Issue #1508、ロードマップH4）。1つのタスクの1回の試行につき1回だけ送る。
+   * 分けるかどうかはオーケストレーターが決める（`runnerTaskSplit.ts`）。
+   */
+  | 'taskSplitSuggested'
+  /**
    * 統合PR/MRにレビューコメントが付いた（design.md §16.30、roadmap W5、Issue #339）。
    * `runnerReviewComments.ts`の`pollReviewComments`が、設定 `agent.workflows.
    * reviewCommentPollIntervalSec` の間隔で統合PR/MRのレビューコメントを取得し、前回までに

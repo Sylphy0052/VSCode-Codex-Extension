@@ -11,9 +11,10 @@ import {
   DEFAULT_OVERLAP_CHECK_INTERVAL_SEC,
   findOverlapWaits,
   isOverlapHoldingState,
-  measureWorktreeFiles,
+  measureWorktreeChanges,
   type OverlapEntry,
 } from './taskOverlap';
+import { suggestTaskSplits } from './runnerTaskSplit';
 import { resolveHeadCommit } from './worktree';
 
 /**
@@ -63,11 +64,12 @@ export async function checkTaskOverlap(
     await Promise.all(
       targets.map(async ([, liveTask]) => {
         const origin = liveTask.originCommit;
-        const files = await measureWorktreeFiles(self.deps.git, liveTask.cwd, origin);
+        const changes = await measureWorktreeChanges(self.deps.git, liveTask.cwd, origin);
         // 測っている間に統合ブランチを取り込んで分岐元が進んだ場合、古い分岐元からの差分には
         // 取り込んだ相手の変更が混ざるため捨てる
-        if (files !== undefined && liveTask.originCommit === origin) {
-          liveTask.touchedFiles = files;
+        if (changes !== undefined && liveTask.originCommit === origin) {
+          liveTask.touchedFiles = changes.files;
+          liveTask.changedLines = { added: changes.addedLines, deleted: changes.deletedLines };
         }
       }),
     );
@@ -78,6 +80,8 @@ export async function checkTaskOverlap(
     return;
   }
   applyOverlapWaits(self, runId, live);
+  // 同じ実測値で規模も判定する（Issue #1508、ロードマップH4）
+  suggestTaskSplits(self, runId, live);
 }
 
 function applyOverlapWaits(self: WorkflowRunnerInternals, runId: string, live: LiveRun): void {

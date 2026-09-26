@@ -17,6 +17,13 @@ import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
 import { DEFAULT_OVERLAP_CHECK_INTERVAL_SEC } from './orchestrator/taskOverlap';
+import {
+  DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
+  DEFAULT_SPLIT_SUGGEST_LINE_COUNT,
+  DEFAULT_SPLIT_SUGGEST_TURN_COUNT,
+  MAX_SPLIT_SUGGEST_THRESHOLD,
+  type SplitSuggestThresholds,
+} from './orchestrator/taskSplit';
 import { normalizeChatDensity, type ChatDensity } from './view/density';
 import { normalizeChatSkin, type ChatSkin } from './view/skin';
 import { isCostPreset, type CostPreset } from './view/handoffRouter';
@@ -1168,6 +1175,12 @@ export interface WorkflowsConfig {
    */
   overlapIgnore: readonly string[];
   /**
+   * 走行中のタスクの分割をオーケストレーターへ提案する閾値（Issue #1508）。
+   * `agent.workflows.splitSuggestFileCount`（既定15）・`splitSuggestLineCount`（既定800）・
+   * `splitSuggestTurnCount`（既定10）。0の指標は判定に使わない。
+   */
+  splitSuggestThresholds: SplitSuggestThresholds;
+  /**
    * オーケストレーターが`ask_user`（design.md §16.33、Issue #583）を1つのrunで呼べる回数の
    * 上限（`agent.workflows.maxAskUserPerRun`、既定3、`machine-overridable`）。方針1
    * 「確認は最低限」を仕組みで担保する唯一の機械的な手段。上限に達した以降の`ask_user`は
@@ -1509,6 +1522,20 @@ export function readWorkflowsConfig(): WorkflowsConfig {
       c.get<unknown>('workflows.overlapCheckIntervalSec'),
     ),
     overlapIgnore: normalizeOverlapIgnore(c.get<unknown>('workflows.overlapIgnore')),
+    splitSuggestThresholds: {
+      fileCount: normalizeSplitSuggestThreshold(
+        c.get<unknown>('workflows.splitSuggestFileCount'),
+        DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
+      ),
+      lineCount: normalizeSplitSuggestThreshold(
+        c.get<unknown>('workflows.splitSuggestLineCount'),
+        DEFAULT_SPLIT_SUGGEST_LINE_COUNT,
+      ),
+      turnCount: normalizeSplitSuggestThreshold(
+        c.get<unknown>('workflows.splitSuggestTurnCount'),
+        DEFAULT_SPLIT_SUGGEST_TURN_COUNT,
+      ),
+    },
     maxAskUserPerRun: normalizeMaxAskUserPerRun(c.get<unknown>('workflows.maxAskUserPerRun')),
     autoResume: c.get<boolean>('workflows.autoResume') ?? DEFAULT_AUTO_RESUME,
     maxAutoResumeAttempts: normalizeMaxAutoResumeAttempts(
@@ -1654,6 +1681,20 @@ function normalizeOverlapCheckIntervalSec(value: unknown): number {
     value <= MAX_TIMEOUT_SEC
     ? value
     : DEFAULT_OVERLAP_CHECK_INTERVAL_SEC;
+}
+
+/**
+ * `agent.workflows.splitSuggest*` の生値を閾値へ丸める（Issue #1508）。0（その指標を
+ * 判定に使わない）を許し、非数値・非整数・負値・`MAX_SPLIT_SUGGEST_THRESHOLD`超過は
+ * 既定値へ丸める。
+ */
+export function normalizeSplitSuggestThreshold(value: unknown, fallback: number): number {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_SPLIT_SUGGEST_THRESHOLD
+    ? value
+    : fallback;
 }
 
 /**
