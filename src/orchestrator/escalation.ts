@@ -323,7 +323,7 @@ function isWorktreeReset(command: string): boolean {
  * ブランチ/タグの削除、またはリモートからの削除push。
  * `/i` を付け、大文字化での回避を防ぐ。
  */
-function isBranchOrTagDelete(command: string): boolean {
+export function isBranchOrTagDelete(command: string): boolean {
   return (
     /\bgit\s+branch\b[^\n]*\s(-[A-Za-z]*d[A-Za-z]*|--delete)\b/i.test(command) ||
     /\bgit\s+tag\b[^\n]*\s(-d|--delete)\b/i.test(command) ||
