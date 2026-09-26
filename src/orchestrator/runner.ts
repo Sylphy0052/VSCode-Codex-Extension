@@ -86,6 +86,7 @@ import {
   markApprovalRejected,
   markMergeSucceeded,
   markRunning,
+  markOverlapMergeAbortFailed,
   markTaskApprovalTimedOut,
   markWaitingApproval,
   recordSessionInfo,
@@ -1527,6 +1528,20 @@ export interface LiveTask {
   overlapWait: OverlapWait | undefined;
   /** 交差の待機を解き、統合ブランチを取り込んでいる最中 */
   overlapResuming: boolean;
+  /**
+   * `overlapResuming`中の取り込み（`resumeAfterOverlap`）が返すPromise。取り込みが
+   * 同じworktreeでの`git`操作を伴うため、ループがDONEで終わったとき（`onTaskFinished`）は
+   * 検証・マージを始める前にこれを`await`し、取り込みと並走して`index.lock`等で
+   * 衝突しないようにする（Issue #1469の再発、Issue #1480）。待機中でなければ`undefined`
+   */
+  overlapResumingPromise: Promise<void> | undefined;
+  /**
+   * 交差待ちの取り込み（`mergeIntegrationIntoTask`）で`git merge`が失敗し、続く
+   * `merge --abort`も失敗した印。worktreeがマージ途中のまま残るため、`stopLoop()`で
+   * ループを止めたうえで、`onTaskFinished`がこの印を見て`markOverlapMergeAbortFailed`へ
+   * 分岐する（`taskApprovalTimedOut`と同じ手口。Issue #1480）
+   */
+  overlapMergeAbortFailed: boolean;
   /**
    * このタスクのPR/MRの結果（design.md §16.11・§16.18、Issue #118）。`attemptMerge`
    * （`mergeTaskWithForge`が返す`flow.pullRequest.created && url !== undefined`の分岐）で
@@ -4223,6 +4238,8 @@ export class WorkflowRunner {
       touchedFiles: undefined,
       overlapWait: undefined,
       overlapResuming: false,
+      overlapResumingPromise: undefined,
+      overlapMergeAbortFailed: false,
       pullRequest: undefined,
     };
   }
@@ -5772,7 +5789,30 @@ export class WorkflowRunner {
     }
   }
 
+  /**
+   * `onTaskFinished`本体の前段。交差待ちの取り込み（`overlapResumingPromise`、Issue #1469の
+   * 再発防止・Issue #1480）が同じworktreeで並走中なら、それが終わるまで検証・マージの
+   * 開始を遅らせる。取り込みと検証・マージの`git`操作が同時に走ると`index.lock`等で
+   * 衝突し得るため。待機中でなければ即座に本体へ入る
+   */
   private onTaskFinished(
+    runId: string,
+    taskId: string,
+    task: WorkflowTask,
+    reason: LoopStopReason,
+    state: ChatState,
+  ): void {
+    const pending = this.runs.get(runId)?.tasks.get(taskId)?.overlapResumingPromise;
+    if (pending !== undefined) {
+      void pending.finally(() => {
+        this.onTaskFinishedAfterOverlapResume(runId, taskId, task, reason, state);
+      });
+      return;
+    }
+    this.onTaskFinishedAfterOverlapResume(runId, taskId, task, reason, state);
+  }
+
+  private onTaskFinishedAfterOverlapResume(
     runId: string,
     taskId: string,
     task: WorkflowTask,
@@ -5859,6 +5899,13 @@ export class WorkflowRunner {
       liveTask.taskApprovalTimedOut = false;
       liveTask.waitingApprovalSinceMs = undefined;
       live.runState = markTaskApprovalTimedOut(live.runState, live.def.tasks, taskId);
+    } else if (reason === 'taskStopped' && liveTask?.overlapMergeAbortFailed === true) {
+      // 交差待ちの取り込み中に`git merge`と`merge --abort`が両方失敗した（Issue #1480）。
+      // `runnerOverlap.ts`の`mergeIntegrationIntoTask`が`stopLoop()`の直前に立てた印を見て、
+      // 通常の`'taskStopped'`（`manualStop`）とは別の`markOverlapMergeAbortFailed`へ倒す
+      // （`taskApprovalTimedOut`分岐と同じ手口）
+      liveTask.overlapMergeAbortFailed = false;
+      live.runState = markOverlapMergeAbortFailed(live.runState, live.def.tasks, taskId);
     } else {
       live.runState = applyLoopStopReason(live.runState, live.def.tasks, taskId, reason);
     }

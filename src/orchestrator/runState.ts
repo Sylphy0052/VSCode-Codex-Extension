@@ -643,6 +643,27 @@ export function markTaskApprovalTimedOut(
   return markFailed(run, tasks, taskId, { kind: 'taskApprovalTimedOut' });
 }
 
+/**
+ * 交差待ちの取り込み（`runnerOverlap.ts`の`mergeIntegrationIntoTask`）で`git merge`と
+ * 続く`merge --abort`が両方失敗した（Issue #1480）。worktreeがマージ途中のまま残るため、
+ * `taskApprovalTimedOut`と同じく`markFailed`（`retries`の自動再試行に乗せない）を直接
+ * 呼ぶ。`kind`は既存の`mergeFailed`（「マージが衝突以外の理由で失敗した」）を再利用する。
+ * 呼び出し元（`runnerOverlap.ts`が`session.stopLoop()`の直前に立てる`overlapMergeAbortFailed`
+ * の印を、`runner.ts`の`onTaskFinished`が`'taskStopped'`到着時に見て合流させる）は
+ * 実行層の責務。対象タスクが`running`のときだけ動く。
+ */
+export function markOverlapMergeAbortFailed(
+  run: RunState,
+  tasks: readonly WorkflowTask[],
+  taskId: string,
+): RunState {
+  const current = run.tasks.get(taskId);
+  if (current === undefined || current.state !== 'running') {
+    return run;
+  }
+  return markFailed(run, tasks, taskId, { kind: 'mergeFailed' });
+}
+
 // ---------------------------------------------------------------------------
 // マージの結果に応じた遷移（design.md §16.17）。
 //
