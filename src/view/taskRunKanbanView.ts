@@ -7,6 +7,7 @@ import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
 import { isValidTaskId } from '../orchestrator/taskRunState';
 import { chatCsp } from './chatCsp';
+import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
 import { TASK_RUN_KANBAN_COLUMNS, type TaskRunKanbanCard } from './taskRunKanbanModel';
 
@@ -297,7 +298,7 @@ function render(webview: vscode.Webview): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ORCHESTRATOR MODE</p><h1>オーケストレータモード</h1><p class="description">Orchestratorが計画したタスクを、工程（Issue計画 / Issue作成 / 実装 / レビュー / mergeとcleanup）ごとのセッションで並列に進めます。計画は「計画を承認」を押すまで始まりません。</p></div><div id="controls" class="controls"></div></header><section id="plan" class="plan"></section><section id="board" class="board" aria-label="タスクの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ORCHESTRATOR MODE</p><h1>オーケストレータモード</h1><p class="description">Orchestratorが計画したタスクを、工程（Issue計画 / Issue作成 / 実装 / レビュー / mergeとcleanup）ごとのセッションで並列に進めます。計画は「計画を承認」を押すまで始まりません。</p></div><div id="controls" class="controls"></div></header><section id="progress" class="progress" aria-label="工程ごとの件数"></section><section id="plan" class="plan"></section><section id="board" class="board" aria-label="タスクの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -339,6 +340,54 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .gate { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
 .gate-detail { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow-y: auto; }
 .question textarea { width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
+/* plainではタイトルと同じ見た目のまま、従来の空白1つ分だけ空ける */
+.task-id { margin-right: .3em; }
+/* 工程ごとの件数を幅へ比例させた進捗バー。セグメントは件数が1以上の工程だけ置く */
+.progress { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 12px; } .progress:empty { display: none; }
+.progress-bar { flex: 1 1 auto; display: flex; gap: 2px; height: 6px; min-width: 120px; }
+.progress-seg { min-width: 4px; border-radius: 2px; background: var(--col, var(--vscode-panel-border)); }
+.progress-label { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.col-planApproval { --col: var(--vscode-charts-yellow); } .col-issuePlan, .col-issueCreate { --col: var(--vscode-charts-purple); } .col-implement, .col-review, .col-mergeCleanup { --col: var(--vscode-charts-blue); } .col-done { --col: var(--vscode-charts-green); }
+${KANBAN_CYBER_BASE_STYLES}
+/*
+ * サイバー外装（issue #1538）。規則はすべて body.skin-cyber の配下に置き、plain の見た目は変えない。
+ * 軽さのため filter / backdrop-filter は使わない。常時動くのは進行中カードの点（opacity だけ）と、
+ * 要対応があるときの走査線1本（transform だけ）で、どちらも prefers-reduced-motion で止める。
+ */
+body.skin-cyber .col-planApproval { --col: var(--agent-neon-3); } body.skin-cyber .col-issuePlan, body.skin-cyber .col-issueCreate { --col: var(--agent-neon-2); } body.skin-cyber .col-implement, body.skin-cyber .col-review, body.skin-cyber .col-mergeCleanup { --col: var(--agent-neon-1); } body.skin-cyber .col-done { --col: color-mix(in srgb, var(--agent-neon-1) 45%, var(--vscode-descriptionForeground)); }
+body.skin-cyber .eyebrow { color: var(--agent-neon-1); font-family: var(--agent-head-font); letter-spacing: .18em; }
+body.skin-cyber h1 { font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); text-shadow: 0 0 12px var(--agent-neon-glow); }
+body.skin-cyber header { border-bottom: 1px solid var(--agent-neon-edge); padding-bottom: 16px; }
+body.skin-cyber .status { border-color: var(--agent-neon-edge); background: var(--agent-panel-bg); font-family: var(--agent-head-font); } body.skin-cyber .status.warn { border-color: var(--agent-neon-3); color: var(--agent-neon-3); box-shadow: inset 0 0 14px -10px var(--agent-neon-3); }
+body.skin-cyber .btn:hover { border-color: var(--agent-neon-1); } body.skin-cyber .btn.primary:hover { box-shadow: 0 0 10px -4px var(--agent-neon-glow); }
+body.skin-cyber .btn:focus-visible, body.skin-cyber .controls select:focus-visible, body.skin-cyber .controls input:focus-visible { outline-color: var(--agent-neon-1); }
+body.skin-cyber .plan-box { border-color: var(--agent-neon-3); background: var(--agent-panel-bg); box-shadow: inset 0 0 20px -12px var(--agent-neon-3); }
+body.skin-cyber .progress-label { font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); } body.skin-cyber .progress-label strong { color: var(--agent-neon-1); }
+body.skin-cyber .progress-seg { box-shadow: 0 0 6px -1px var(--col); }
+/* 列。上端に工程色の線、見出しに工程番号（CSSカウンタなので要素は増えない）、右上を切り欠く */
+body.skin-cyber .board { counter-reset: stage; }
+body.skin-cyber .column { counter-increment: stage; background: var(--agent-panel-bg); border-color: var(--agent-neon-edge); border-top: 2px solid var(--col, var(--agent-neon-edge)); clip-path: polygon(0 0, calc(100% - var(--agent-notch)) 0, 100% var(--agent-notch), 100% 100%, 0 100%); }
+body.skin-cyber .column.is-empty { border-top-color: var(--agent-neon-edge); }
+body.skin-cyber .column-head { border-bottom-color: var(--agent-neon-edge); font-family: var(--agent-head-font); letter-spacing: var(--agent-head-tracking); }
+body.skin-cyber .column-head::before { content: counter(stage, decimal-leading-zero); color: var(--col, var(--agent-neon-1)); font-size: 11px; opacity: .85; }
+body.skin-cyber .column:not(.is-empty) .count { color: var(--col, var(--agent-neon-1)); border: 1px solid currentColor; border-radius: 999px; padding: 0 7px; min-width: 1ch; text-align: center; }
+/* カード。発光は枠と左バーだけに載せ、本文には掛けない */
+body.skin-cyber .card { border-color: var(--agent-neon-edge); clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 0 100%); }
+body.skin-cyber .card:hover { border-color: color-mix(in srgb, var(--agent-neon-1) 55%, var(--vscode-panel-border)); box-shadow: inset 0 0 20px -10px var(--agent-neon-glow); }
+/* 左バーの滲みは box-shadow ではなく背景のグラデーションで出す（切り欠きの clip-path と inset の影が重なると角から斜めに崩れる） */
+body.skin-cyber .card.running { border-left-color: var(--agent-neon-1); background-image: linear-gradient(to right, color-mix(in srgb, var(--agent-neon-1) 10%, transparent), transparent 45%); }
+body.skin-cyber .card.attention { border-left-color: var(--agent-neon-3); background-image: linear-gradient(to right, color-mix(in srgb, var(--agent-neon-3) 12%, transparent), transparent 45%); }
+body.skin-cyber .col-done .card { opacity: .72; } body.skin-cyber .col-done .card:hover { opacity: 1; }
+body.skin-cyber .task-id { font-family: var(--agent-head-font); font-size: 12px; font-weight: 600; margin-right: 6px; color: var(--col, var(--agent-neon-1)); letter-spacing: var(--agent-head-tracking); }
+body.skin-cyber .card.running .card-title::before, body.skin-cyber .card.attention .card-title::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--agent-neon-1); box-shadow: 0 0 6px var(--agent-neon-glow); animation: agent-task-pulse 1.6s ease-in-out infinite; }
+body.skin-cyber .card.attention .card-title::before { background: var(--agent-neon-3); box-shadow: 0 0 6px var(--agent-neon-3); animation: none; }
+body.skin-cyber .badge { font-family: var(--agent-head-font); letter-spacing: .02em; } body.skin-cyber .badge.ok { border-color: var(--agent-neon-1); color: var(--agent-neon-1); } body.skin-cyber .badge.warn { border-color: var(--agent-neon-3); color: var(--agent-neon-3); }
+body.skin-cyber .question, body.skin-cyber .gate { border-top-color: var(--agent-neon-edge); }
+@keyframes agent-task-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+/* 要対応のカードか計画の承認待ちがあるときだけ、画面上端に走査線を1本流す */
+body.skin-cyber.has-attention::before { content: ''; position: fixed; left: 0; right: 0; top: 0; height: 2px; pointer-events: none; z-index: 1; background-image: linear-gradient(to right, transparent, var(--agent-neon-3), transparent); opacity: var(--agent-scan-opacity); animation: agent-kanban-scanline 3.2s linear infinite; }
+body.skin-cyber.vscode-high-contrast.has-attention::before, body.skin-cyber.vscode-high-contrast-light.has-attention::before { content: none; }
+@media (prefers-reduced-motion: reduce) { body.skin-cyber *, body.skin-cyber *::before, body.skin-cyber::before { animation: none !important; } }
 `;
 
 // webview側のスクリプト。外部由来のテキストはtextContentでだけ入れる（innerHTMLへ入れない）
@@ -351,6 +400,7 @@ const script = `
   const controls = document.getElementById('controls');
   const planEl = document.getElementById('plan');
   const boardEl = document.getElementById('board');
+  const progressEl = document.getElementById('progress');
   let current;
   // 概要を展開したカード。盤面の再描画で畳まれないよう覚えておく
   const expandedSummaries = new Set();
@@ -502,7 +552,10 @@ const script = `
     const warn = card.badges.some(function (b) { return b.tone === 'warn'; });
     const running = card.badges.some(function (b) { return b.tone === 'ok'; });
     const c = el('article', 'card' + (warn ? ' attention' : running ? ' running' : ''));
-    c.appendChild(el('span', 'card-title', card.taskId + ' ' + card.title));
+    const title = el('span', 'card-title');
+    title.appendChild(el('span', 'task-id', card.taskId));
+    title.appendChild(document.createTextNode(card.title));
+    c.appendChild(title);
     if (card.summary) {
       // 長い概要は3行に畳み、クリックで全文を出す
       const summary = el('div', 'summary clamp' + (expandedSummaries.has(card.taskId) ? ' expanded' : ''), card.summary);
@@ -549,15 +602,41 @@ const script = `
     return c;
   }
 
+  function renderProgress(board) {
+    progressEl.replaceChildren();
+    if (!board.run) { return; }
+    let total = 0;
+    const bar = el('div', 'progress-bar');
+    COLUMNS.forEach(function (col) {
+      const count = (board.run.columns[col[0]] || []).length;
+      total += count;
+      if (count === 0) { return; }
+      const seg = el('span', 'progress-seg col-' + col[0]);
+      seg.style.flexGrow = String(count);
+      seg.title = col[1] + ': ' + count;
+      bar.appendChild(seg);
+    });
+    if (total === 0) { return; }
+    const done = (board.run.columns.done || []).length;
+    const label = el('span', 'progress-label', '完了 ');
+    label.appendChild(el('strong', undefined, done + '/' + total));
+    progressEl.appendChild(bar);
+    progressEl.appendChild(label);
+  }
+
   function renderBoard(board) {
     boardEl.replaceChildren();
+    const attention = !!board.run && (board.run.planStatus === 'awaitingApproval' || COLUMNS.some(function (col) {
+      return (board.run.columns[col[0]] || []).some(function (card) { return card.badges.some(function (b) { return b.tone === 'warn'; }); });
+    }));
+    document.body.classList.toggle('has-attention', attention);
     if (!board.run) {
       boardEl.appendChild(el('div', 'empty', 'runがありません。コマンド「オーケストレータモードを開始」で始めます。'));
       return;
     }
     COLUMNS.forEach(function (col) {
       const cards = board.run.columns[col[0]] || [];
-      const column = el('section', 'column' + (cards.length === 0 ? ' is-empty' : ''));
+      const column = el('section', 'column col-' + col[0] + (cards.length === 0 ? ' is-empty' : ''));
       const head = el('div', 'column-head');
       head.appendChild(el('span', undefined, col[1]));
       head.appendChild(el('span', 'count', String(cards.length)));
@@ -576,6 +655,7 @@ const script = `
     current = message.board;
     orchestratorStatus = message.orchestrator;
     renderControls(current);
+    renderProgress(current);
     renderPlan(current);
     renderBoard(current);
   });
