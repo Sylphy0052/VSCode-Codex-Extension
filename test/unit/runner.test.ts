@@ -14667,6 +14667,87 @@ tasks:
     expect(last).toContain('次の相談');
   });
 
+  it('usageLimitで失敗した後、次のきっかけが無くても30分後に送り直す（Issue #1517）', async () => {
+    vi.useFakeTimers();
+    const { harness, orchestrator } = await startAndSendFromTask();
+    const sentBefore = orchestrator.sentTexts.length;
+
+    runTurn(orchestrator, 'usageLimit');
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+    expect(orchestrator.sentTexts).toHaveLength(sentBefore);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(orchestrator.sentTexts).toHaveLength(sentBefore + 1);
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+  });
+
+  it('usageLimitの送り直しは、先に別の送信があれば取りやめ、破棄後も送らない（Issue #1517）', async () => {
+    vi.useFakeTimers();
+    const { harness, state, orchestrator } = await startAndSendFromTask();
+
+    runTurn(orchestrator, 'usageLimit');
+    state.hub?.sendMessage({
+      from: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '次の相談',
+      expectReply: false,
+    });
+    await flush();
+    const sentAfterMerge = orchestrator.sentTexts.length;
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+
+    runTurn(orchestrator, 'usageLimit');
+    harness.runner.dispose();
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(orchestrator.sentTexts).toHaveLength(sentAfterMerge);
+  });
+
+  it('人の発話を送ったターンが失敗したら、送り直しと立て直した会話へ発話も渡す（Issue #1517）', async () => {
+    const { harness, runId, orchestrator } = await startAndSendFromTask();
+    runTurn(orchestrator);
+
+    expect(harness.runner.sendToOrchestrator(runId, '人からの指示')).toBe(true);
+    runTurn(orchestrator, 'other');
+    // 1回目は同じ会話へ送り直す。発話はworkflow-eventで包まずに入る
+    const resent = orchestrator.sentTexts.at(-1) as string;
+    expect(resent).toContain('人からの指示');
+    expect(resent.endsWith('人からの指示')).toBe(true);
+
+    runTurn(orchestrator, 'other');
+    await flush();
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned.sentTexts).toHaveLength(1);
+    expect(respawned.sentTexts[0]).toContain('人からの指示');
+
+    // 成功したターンの発話は、次の送信へ持ち越さない
+    runTurn(respawned);
+    expect(harness.runner.sendToOrchestrator(runId, '次の指示')).toBe(true);
+    expect(respawned.sentTexts.at(-1)).not.toContain('人からの指示');
+  });
+
+  it('ask_userの回答待ち中に立て直しても、導入文と引き継いだイベントを新しい会話へ送る（Issue #1517）', async () => {
+    const { harness, state, runId, orchestrator } = await startAndSendFromTask();
+    const port = state.hub?.orchestratorControl;
+    expect(port?.askUser('どちらにしますか', ['A', 'B']).accepted).toBe(true);
+
+    runTurn(orchestrator, 'other');
+    runTurn(orchestrator, 'other');
+    await flush();
+
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned.sentTexts).toHaveLength(1);
+    expect(respawned.sentTexts[0]).toContain('最初の相談');
+    expect(respawned.sentTexts[0]).toContain('立て直したもの');
+    expect(respawned.sentTexts[0]).toContain('どちらにしますか');
+    expect(harness.runner.getSnapshot(runId)?.pendingAskUser).toBeDefined();
+
+    // 答えは立て直した会話へ、ターンが終わってから届く
+    runTurn(respawned);
+    expect(harness.runner.answerAskUser(runId, 1)).toBe(true);
+    expect(respawned.sentTexts.at(-1)).toContain('人がask_userの質問に答えました: "B"');
+  });
+
   it('busyのままorchestratorUnresponsiveSecを超えると応答なしを経て立て直す', async () => {
     vi.useFakeTimers();
     const { deps, state } = fakeMessagingDeps();
