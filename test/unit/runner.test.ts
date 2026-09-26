@@ -11650,10 +11650,14 @@ tasks:
       expect(warning?.message).toContain('git rev-listに失敗しました: fatal: bad revision');
     });
 
-    it('worktreeが記録と別のブランチへ切り替わっていたら、引き継がずに新しいworktreeで始める（Issue #1521）', async () => {
+    it.each([
+      ['別のブランチへ切り替わっていたら', 'feature/other'],
+      // detached HEADでは`rev-parse --abbrev-ref HEAD`が`HEAD`を返す
+      ['detached HEADになっていたら', 'HEAD'],
+    ])('worktreeが%s、引き継がずに新しいworktreeで始める（Issue #1521）', async (_label, head) => {
       const { store, runId, cwd, branch } = await startAndInterrupt();
       const git = leftoverGit({
-        head: 'feature/other',
+        head,
         status: ' M src/a.ts\0',
         numstat: '3\t1\tsrc/a.ts\0',
       });
@@ -11671,7 +11675,7 @@ tasks:
       const warning = warnings.find((w) => w.kind === 'resumeInspectionFailed');
       expect(warning?.taskId).toBe('T1');
       expect(warning?.message).toContain('ブランチが記録と異なります');
-      expect(warning?.message).toContain('feature/other');
+      expect(warning?.message).toContain(`実際: ${head}`);
     });
 
     it('人の手動の再実行は、作業が残っていても今までどおり新しいworktreeで始める', async () => {
