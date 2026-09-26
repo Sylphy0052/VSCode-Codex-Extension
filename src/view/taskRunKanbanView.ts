@@ -7,9 +7,10 @@ import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
 import { isTaskRunActive, isValidTaskId, taskRunLabel, validateTaskRunTitleInput } from '../orchestrator/taskRunState';
 import { chatCsp } from './chatCsp';
+import { GRAPH_SVG_SOURCE } from './graphSvgScript';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
-import { TASK_RUN_KANBAN_COLUMNS, type TaskRunKanbanCard } from './taskRunKanbanModel';
+import { layoutTaskRunGraph, TASK_RUN_KANBAN_COLUMNS, type TaskRunKanbanCard } from './taskRunKanbanModel';
 
 /** 盤面を送る間隔。`roadmapKanbanView.ts`と同じく、最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
@@ -51,6 +52,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   private postTimer: ReturnType<typeof setTimeout> | undefined;
   private lastPostAt = 0;
   private selectedRunId: string | undefined;
+  /** グラフ表示の描画領域の幅（`layoutGraph`の`maxWidth`）。webviewの`viewport`で受け取る。 */
+  private graphViewportWidth: number | undefined;
 
   constructor(private readonly deps: TaskRunKanbanViewDeps) {}
 
@@ -131,7 +134,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     this.lastPostAt = Date.now();
     const board = this.deps.controller.board(this.selectedRunId, currentWorkspaceFolders());
     const orchestrator = board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
-    void this.panel.webview.postMessage({ type: 'board', board, orchestrator });
+    const graph = board.run === undefined ? undefined : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
+    void this.panel.webview.postMessage({ type: 'board', board, orchestrator, graph });
   }
 
   private receive(message: unknown): void {
@@ -140,6 +144,19 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     if (message.type === 'ready') {
       this.post();
+      return;
+    }
+    if (message.type === 'viewport') {
+      // 値の扱いはロードマップ実行のKanban（`roadmapKanbanView.ts`）の`viewport`と揃える
+      const raw = message.width;
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+        return;
+      }
+      const width = Math.min(20000, Math.max(0, Math.round(raw)));
+      if (width !== this.graphViewportWidth) {
+        this.graphViewportWidth = width;
+        this.schedulePost();
+      }
       return;
     }
     if (message.type === 'selectRun') {
@@ -447,7 +464,7 @@ function render(webview: vscode.Webview): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ORCHESTRATOR MODE</p><h1>オーケストレータモード</h1><p class="description">Orchestratorが計画したタスクを、工程（Issue計画 / Issue作成 / 実装 / レビュー / mergeとcleanup）ごとのセッションで並列に進めます。計画は「計画を承認」を押すまで始まりません。</p></div><div id="controls" class="controls"></div></header><section id="progress" class="progress" aria-label="工程ごとの件数"></section><section id="plan" class="plan"></section><section id="board" class="board" aria-label="タスクの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ORCHESTRATOR MODE</p><h1>オーケストレータモード</h1><p class="description">Orchestratorが計画したタスクを、工程（Issue計画 / Issue作成 / 実装 / レビュー / mergeとcleanup）ごとのセッションで並列に進めます。計画は「計画を承認」を押すまで始まりません。</p></div><div id="controls" class="controls"></div></header><section id="progress" class="progress" aria-label="工程ごとの件数"></section><section id="plan" class="plan"></section><div id="view-toggle" class="view-toggle" role="group" aria-label="表示の切り替え"></div><section id="board" class="board" aria-label="タスクの状態"></section><section id="graph-view" class="graph-view" aria-label="タスクの依存グラフ" hidden><div id="graph-scroll" class="graph-scroll"><svg id="graph" class="graph" role="img" aria-label="依存グラフ"></svg></div><div id="graph-detail" class="graph-detail"></div></section></main><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -489,6 +506,21 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .gate { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
 .gate-detail { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow-y: auto; }
 .question textarea { width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
+/* 列表示とグラフ表示の切り替え（Issue #1552）。ノードの枠は列表示の工程色（--col）、要対応・実行中はカードの左バーと同じ色にする */
+.view-toggle { display: flex; gap: 4px; margin-bottom: 12px; }
+.view-toggle .btn[aria-pressed=true] { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+.board[hidden], .graph-view[hidden] { display: none; }
+.graph-scroll { overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 8px; }
+.graph { display: block; }
+.tr-edge { fill: none; stroke: var(--vscode-descriptionForeground); stroke-width: 1.5; } .tr-edge.unmet { stroke-dasharray: 4 3; opacity: .6; }
+.tr-arrow-head { fill: var(--vscode-descriptionForeground); }
+.tr-node { cursor: pointer; } .tr-node:focus { outline: none; }
+.tr-node-rect { fill: var(--vscode-editor-background); stroke: var(--col, var(--vscode-panel-border)); stroke-width: 1.5; }
+.tr-node.running .tr-node-rect { stroke: var(--vscode-charts-blue); stroke-width: 2.5; } .tr-node.attention .tr-node-rect { stroke: var(--vscode-charts-yellow); stroke-width: 2.5; }
+.tr-node.col-done .tr-node-rect { fill: color-mix(in srgb, var(--vscode-charts-green) 12%, var(--vscode-editor-background)); }
+.tr-node.selected .tr-node-rect, .tr-node:focus-visible .tr-node-rect { stroke: var(--vscode-focusBorder); stroke-width: 3; }
+.tr-node-title { fill: var(--vscode-foreground); font-size: 12px; font-weight: 650; } .tr-node-meta { fill: var(--vscode-descriptionForeground); font-size: 11px; }
+.graph-detail { margin-top: 12px; max-width: 480px; } .graph-detail .empty { padding: 8px 0; }
 /* plainではタイトルと同じ見た目のまま、従来の空白1つ分だけ空ける */
 .task-id { margin-right: .3em; }
 /* 工程ごとの件数を幅へ比例させた進捗バー。セグメントは件数が1以上の工程だけ置く */
@@ -532,6 +564,9 @@ body.skin-cyber .card.running .card-title::before, body.skin-cyber .card.attenti
 body.skin-cyber .card.attention .card-title::before { background: var(--agent-neon-3); box-shadow: 0 0 6px var(--agent-neon-3); animation: none; }
 body.skin-cyber .badge { font-family: var(--agent-head-font); letter-spacing: .02em; } body.skin-cyber .badge.ok { border-color: var(--agent-neon-1); color: var(--agent-neon-1); } body.skin-cyber .badge.warn { border-color: var(--agent-neon-3); color: var(--agent-neon-3); }
 body.skin-cyber .question, body.skin-cyber .gate { border-top-color: var(--agent-neon-edge); }
+body.skin-cyber .graph-scroll { border-color: var(--agent-neon-edge); background: var(--agent-panel-bg); }
+body.skin-cyber .tr-node.running .tr-node-rect { stroke: var(--agent-neon-1); } body.skin-cyber .tr-node.attention .tr-node-rect { stroke: var(--agent-neon-3); }
+body.skin-cyber .tr-node-title { font-family: var(--agent-head-font); }
 @keyframes agent-task-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 /* 要対応のカードか計画の承認待ちがあるときだけ、画面上端に走査線を1本流す */
 body.skin-cyber.has-attention::before { content: ''; position: fixed; left: 0; right: 0; top: 0; height: 2px; pointer-events: none; z-index: 1; background-image: linear-gradient(to right, transparent, var(--agent-neon-3), transparent); opacity: var(--agent-scan-opacity); animation: agent-kanban-scanline 3.2s linear infinite; }
@@ -549,6 +584,28 @@ const script = `
   const planEl = document.getElementById('plan');
   const boardEl = document.getElementById('board');
   const progressEl = document.getElementById('progress');
+  const toggleEl = document.getElementById('view-toggle');
+  const graphViewEl = document.getElementById('graph-view');
+  const graphScrollEl = document.getElementById('graph-scroll');
+  const graphEl = document.getElementById('graph');
+  const graphDetailEl = document.getElementById('graph-detail');
+  const COLUMN_LABELS = {};
+  COLUMNS.forEach(function (col) { COLUMN_LABELS[col[0]] = col[1]; });
+  // グラフのノードの大きさはlayoutGraph（workflowGraph.ts）のNODE_WIDTH・NODE_HEIGHTと揃える
+  const NODE_W = 168;
+  const NODE_H = 60;
+  const NODE_TEXT_MAX_WIDTH = 148;
+  const NODE_CLIP_ID = 'trNodeClip';
+  const ARROW_ID = 'trArrow';
+  // 表示の切り替え（Issue #1552）。webviewの状態へ残し、開き直しても戻す。
+  // タスクIDはrunごとに振り直されるため、選んだタスクはrunIdと組で持つ
+  const savedState = vscode.getState() || {};
+  let viewMode = savedState.viewMode === 'graph' ? 'graph' : 'board';
+  let selectedTask = typeof savedState.selectedTask === 'string' && typeof savedState.selectedTaskRunId === 'string'
+    ? { runId: savedState.selectedTaskRunId, taskId: savedState.selectedTask }
+    : undefined;
+  let currentGraph;
+  let reportedGraphWidth = -1;
   let current;
   // 概要を展開したカード。盤面の再描画で畳まれないよう覚えておく
   const expandedSummaries = new Set();
@@ -788,12 +845,16 @@ const script = `
     progressEl.appendChild(label);
   }
 
-  function renderBoard(board) {
-    boardEl.replaceChildren();
+  // 走査線はどちらの表示でも出すため、盤面の描画とは別に切り替える
+  function renderAttention(board) {
     const attention = !!board.run && (board.run.planStatus === 'awaitingApproval' || COLUMNS.some(function (col) {
       return (board.run.columns[col[0]] || []).some(function (card) { return card.badges.some(function (b) { return b.tone === 'warn'; }); });
     }));
     document.body.classList.toggle('has-attention', attention);
+  }
+
+  function renderBoard(board) {
+    boardEl.replaceChildren();
     if (!board.run) {
       boardEl.appendChild(el('div', 'empty', 'runがありません。コマンド「オーケストレータモードを開始」で始めます。'));
       return;
@@ -813,16 +874,196 @@ const script = `
     });
   }
 
+  ${GRAPH_SVG_SOURCE}
+
+  function saveViewState() {
+    vscode.setState({
+      viewMode: viewMode,
+      selectedTask: selectedTask ? selectedTask.taskId : undefined,
+      selectedTaskRunId: selectedTask ? selectedTask.runId : undefined,
+    });
+  }
+
+  function findCard(run, taskId) {
+    let found;
+    COLUMNS.forEach(function (col) {
+      (run.columns[col[0]] || []).forEach(function (card) { if (card.taskId === taskId) { found = card; } });
+    });
+    return found;
+  }
+
+  function isSelected(run, taskId) {
+    return !!selectedTask && selectedTask.runId === run.runId && selectedTask.taskId === taskId;
+  }
+
+  function renderViewToggle() {
+    toggleEl.replaceChildren();
+    [['board', '列'], ['graph', 'グラフ']].forEach(function (m) {
+      const b = button(m[1], '', function () {
+        if (viewMode === m[0]) { return; }
+        viewMode = m[0];
+        saveViewState();
+        renderView();
+      });
+      b.setAttribute('aria-pressed', viewMode === m[0] ? 'true' : 'false');
+      toggleEl.appendChild(b);
+    });
+  }
+
+  function buildGraphNode(run, card, pos) {
+    // 状態の色は列表示のカード（renderCard）と同じ判断にする
+    const warn = card.badges.some(function (b) { return b.tone === 'warn'; });
+    const running = card.badges.some(function (b) { return b.tone === 'ok'; });
+    const group = svgEl('g', {
+      class: 'tr-node col-' + card.column + (warn ? ' attention' : running ? ' running' : '') + (isSelected(run, card.taskId) ? ' selected' : ''),
+      transform: 'translate(' + pos.x + ',' + pos.y + ')',
+      tabindex: 0,
+      role: 'button',
+      'data-task': card.taskId,
+    });
+    group.appendChild(svgEl('rect', { class: 'tr-node-rect', x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 6 }));
+    const body = svgEl('g', { 'clip-path': 'url(#' + NODE_CLIP_ID + ')' });
+    // タイトルは外部由来。必ずtextContentへ代入する（SVGとして解釈させない）
+    const title = svgEl('text', { class: 'tr-node-title', x: -NODE_W / 2 + 10, y: -6, 'data-fit': NODE_TEXT_MAX_WIDTH });
+    title.textContent = card.taskId + ' ' + card.title;
+    body.appendChild(title);
+    const meta = svgEl('text', { class: 'tr-node-meta', x: -NODE_W / 2 + 10, y: 14, 'data-fit': NODE_TEXT_MAX_WIDTH });
+    const labels = [COLUMN_LABELS[card.column]];
+    if (card.badges.length > 0) { labels.push(card.badges[0].label); }
+    if (card.questions.length > 0) { labels.push('質問' + card.questions.length + '件'); }
+    meta.textContent = labels.join(' · ');
+    body.appendChild(meta);
+    group.appendChild(body);
+    const tip = svgEl('title');
+    tip.textContent = card.taskId + ' ' + card.title;
+    group.appendChild(tip);
+    function select() {
+      selectedTask = { runId: run.runId, taskId: card.taskId };
+      saveViewState();
+      renderGraph(current, currentGraph);
+    }
+    group.addEventListener('click', select);
+    group.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
+    });
+    return group;
+  }
+
+  function renderGraph(board, layout) {
+    // 描き直しでノードの要素が入れ替わるとフォーカスが外れる。選択の操作や実行中の自動更新のたびに
+    // キーボードでの移動位置が飛ばないよう、同じタスクのノードへ戻す
+    const active = document.activeElement;
+    const focusedNode = active && graphEl.contains(active) ? active.getAttribute('data-task') : null;
+    graphEl.replaceChildren();
+    graphDetailEl.replaceChildren();
+    if (!board.run || !layout) {
+      graphDetailEl.appendChild(el('p', 'empty', 'runがありません。コマンド「オーケストレータモードを開始」で始めます。'));
+      return;
+    }
+    const run = board.run;
+    const height = Math.max(1, layout.height);
+    graphEl.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + height);
+    graphEl.setAttribute('width', String(Math.max(1, layout.width)));
+    graphEl.setAttribute('height', String(height));
+    const defs = svgEl('defs');
+    defs.appendChild(arrowMarker(ARROW_ID, 'tr-arrow-head'));
+    // 文字の切り詰め（fitNodeText）が測れなかったときの下支え。矩形より少し内側で文字だけを切る
+    const clip = svgEl('clipPath', { id: NODE_CLIP_ID });
+    clip.appendChild(svgEl('rect', { x: -NODE_W / 2 + 4, y: -NODE_H / 2, width: NODE_W - 8, height: NODE_H }));
+    defs.appendChild(clip);
+    graphEl.appendChild(defs);
+
+    const posById = {};
+    layout.nodes.forEach(function (n) { posById[n.id] = n; });
+    const edges = svgEl('g', { class: 'tr-edges' });
+    layout.edges.forEach(function (edge) {
+      const from = posById[edge.from];
+      const to = posById[edge.to];
+      if (!from || !to) { return; }
+      const target = findCard(run, edge.to);
+      const dep = target ? target.dependsOn.find(function (d) { return d.taskId === edge.from; }) : undefined;
+      const unmet = dep !== undefined && !dep.satisfied;
+      edges.appendChild(svgEl('path', {
+        class: 'tr-edge' + (unmet ? ' unmet' : ''),
+        d: edgePath(from.x, from.y + NODE_H / 2, to.x, to.y - NODE_H / 2),
+        'marker-end': 'url(#' + ARROW_ID + ')',
+      }));
+    });
+    graphEl.appendChild(edges);
+
+    const nodes = svgEl('g', { class: 'tr-nodes' });
+    layout.nodes.forEach(function (n) {
+      const card = findCard(run, n.id);
+      if (card) { nodes.appendChild(buildGraphNode(run, card, n)); }
+    });
+    graphEl.appendChild(nodes);
+    // 実測での切り詰めはSVGへ入れたあと（getComputedTextLengthは描画中の要素でしか測れない）
+    nodes.querySelectorAll('text[data-fit]').forEach(function (t) {
+      fitNodeText(t, Number(t.getAttribute('data-fit')));
+    });
+    if (focusedNode !== null) {
+      // タスクIDは外部由来なので、属性セレクタの文字列へ埋め込まずに値で比べる
+      const again = Array.prototype.find.call(nodes.querySelectorAll('[data-task]'), function (n) { return n.getAttribute('data-task') === focusedNode; });
+      if (again) { again.focus(); }
+    }
+
+    const selected = selectedTask && selectedTask.runId === run.runId ? findCard(run, selectedTask.taskId) : undefined;
+    if (selected) {
+      graphDetailEl.appendChild(renderCard(selected));
+    } else {
+      graphDetailEl.appendChild(el('p', 'empty', 'ノードを押すと、ここにカードの詳細と操作が出ます。'));
+    }
+  }
+
+  // 段の折り返しに使う幅を拡張機能へ伝える（layoutGraphのmaxWidth）。非表示のあいだは測れないので送らない
+  function reportViewport() {
+    if (viewMode !== 'graph') { return; }
+    const width = Math.floor(graphScrollEl.clientWidth) - 16;
+    if (width <= 0 || width === reportedGraphWidth) { return; }
+    reportedGraphWidth = width;
+    vscode.postMessage({ type: 'viewport', width: width });
+  }
+
+  // 出していない方の表示は描かない。列とグラフの詳細に同じ質問の入力欄を2つ作ると、
+  // 書きかけの回答と入力位置の持ち越し（drafts・focusedQuestion）がどちらへ効くか定まらない
+  function renderView() {
+    renderViewToggle();
+    const isGraph = viewMode === 'graph';
+    boardEl.hidden = isGraph;
+    graphViewEl.hidden = !isGraph;
+    if (!current) { return; }
+    if (isGraph) {
+      boardEl.replaceChildren();
+      renderGraph(current, currentGraph);
+      reportViewport();
+    } else {
+      graphEl.replaceChildren();
+      graphDetailEl.replaceChildren();
+      renderBoard(current);
+    }
+  }
+
+  // ドラッグでのリサイズ中に幅を送り続けないよう、止まってから送る（ロードマップ実行のKanbanと同じ150ms）
+  let viewportTimer;
+  new ResizeObserver(function () {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(reportViewport, 150);
+  }).observe(graphScrollEl);
+
   window.addEventListener('message', function (event) {
     const message = event.data;
     if (!message || message.type !== 'board') { return; }
     current = message.board;
     orchestratorStatus = message.orchestrator;
+    currentGraph = message.graph;
     renderControls(current);
     renderProgress(current);
     renderPlan(current);
-    renderBoard(current);
+    renderAttention(current);
+    renderView();
   });
+  // 復元した表示を最初のboardより前に反映する（静的HTMLの列表示が一瞬出ないように）
+  renderView();
   vscode.postMessage({ type: 'ready' });
 })();
 `;
