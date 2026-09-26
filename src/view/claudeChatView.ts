@@ -1146,9 +1146,8 @@ export class ClaudeChatViewManager
     const state = entry.session.getState();
     const lastAssistantMessage = recentAssistantMessages(state, 1)[0];
     const gitBranch = await resolveGitBranch(entry.cwd);
-    // 自動承認は自動発火（`kind !== 'manual'`）でトグルONのときだけ（Issue #1350）。
-    // 手動の引き継ぎボタンでは、トグルONでも必ず確認する
-    const autoApprove = trigger.kind !== 'manual' && state.autoHandoffAutoApprove;
+    // 自動承認はトグルONのとき（Issue #1350）。手動の引き継ぎボタンも対象に含める（Issue #1510）
+    const autoApprove = state.autoHandoffAutoApprove;
     const choice = await chooseHandoffModelSettings(
       entry.modelSettings,
       {
