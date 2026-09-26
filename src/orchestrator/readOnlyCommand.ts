@@ -23,12 +23,6 @@ function lex(command: string): Segment[] | undefined {
   let word = '';
   let inWord = false;
 
-  // クォート内の`\`+改行はbashでは行の継続として消え、`"\<改行>/etc"`が`/etc`になる。
-  // クォートの内外を問わず改行を含むものは読み切らない
-  if (/[\n\r]/.test(command)) {
-    return undefined;
-  }
-
   const endWord = (): void => {
     if (inWord) {
       words.push(word);
@@ -128,9 +122,8 @@ function lex(command: string): Segment[] | undefined {
       return undefined;
     }
     // リダイレクト、展開、サブシェル、クォート外のglob（ファイル名がオプションとして
-    // 解釈される経路がある）、ブレース展開（`{/etc/x,y}`）、チルダ展開（`a=~/x`）は
-    // 読み切らずに人へ回す
-    if ('<>$`()*?[{}~'.includes(ch)) {
+    // 解釈される経路がある）、改行は読み切らずに人へ回す
+    if ('<>$`()*?[\n\r'.includes(ch)) {
       return undefined;
     }
     word += ch;
@@ -200,6 +193,7 @@ const PLAIN_COMMANDS: ReadonlySet<string> = new Set([
   'realpath',
   'readlink',
   'which',
+  'cd',
   'grep',
   'egrep',
   'fgrep',
@@ -317,8 +311,7 @@ function isReadOnlyAwk(args: readonly string[]): boolean {
     return false;
   }
   // コマンド実行・ファイル入出力・環境変数の読み出しに当たる語。比較の`>`も巻き込むが安全側に倒す
-  // gawkの`@load`（共有ライブラリの読み込み）・`@include`も同じ扱い
-  if (/system|getline|ENVIRON|@|[|>]/.test(program)) {
+  if (/system|getline|ENVIRON|[|>]/.test(program)) {
     return false;
   }
   return !anyArgEscapes(rest);
@@ -368,10 +361,8 @@ function isReadOnlyJq(args: readonly string[]): boolean {
       files.push(arg);
     }
   }
-  // 環境変数（トークン等）を出せる`env` / `$ENV`と、`~/.jq`等を読むモジュール読み込み
-  return (
-    filter !== undefined && !/env|import|include/i.test(filter) && !anyArgEscapes(files)
-  );
+  // 環境変数（トークン等）を出せる`env` / `$ENV`
+  return filter !== undefined && !/env/i.test(filter) && !anyArgEscapes(files);
 }
 
 function isReadOnlyGit(args: readonly string[]): boolean {
@@ -389,7 +380,7 @@ function isReadOnlyGit(args: readonly string[]): boolean {
       (arg) =>
         arg.startsWith('--output') ||
         arg === '--ext-diff' ||
-        arg.startsWith('--open-files-in-pager') ||
+        arg === '--open-files-in-pager' ||
         (sub === 'grep' && shortFlagIncludes(arg, 'O')),
     ) && !anyArgEscapes(rest)
   );
@@ -403,9 +394,6 @@ function isReadOnlyGh(args: readonly string[]): boolean {
       .some(
         (arg) =>
           ['-X', '--method', '-f', '-F', '--field', '--raw-field', '--input'].includes(arg) ||
-          // GitHub以外のホストへの送信
-          arg.includes('://') ||
-          arg.startsWith('--hostname') ||
           /^(-X|-f|-F).|^--(method|field|raw-field|input)=/.test(arg),
       );
   }
@@ -422,9 +410,6 @@ function isReadOnlySegment(words: readonly string[]): boolean {
     return !anyArgEscapes(args);
   }
   switch (name) {
-    case 'cd':
-      // 引数なしはHOME、`-`は直前のディレクトリへ移る
-      return args.length === 1 && !(args[0] ?? '-').startsWith('-') && !anyArgEscapes(args);
     case 'sed':
       return isReadOnlySed(args);
     case 'awk':
