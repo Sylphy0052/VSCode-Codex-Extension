@@ -5,7 +5,7 @@ import type { Logger } from '../log';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
-import { isValidTaskId } from '../orchestrator/taskRunState';
+import { isTaskRunActive, isValidTaskId } from '../orchestrator/taskRunState';
 import { chatCsp } from './chatCsp';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
@@ -27,6 +27,10 @@ export interface TaskRunKanbanViewDeps {
   revealStage(runId: string, taskId: string): boolean;
   /** runを終える。工程セッションとOrchestratorを止めてから`finishedAt`を立てる（Issue #1558）。 */
   finishRun(runId: string): Promise<{ ok: boolean; message: string }>;
+  /** runを中断する。工程セッションとOrchestratorを止めてから中断を立てる（Issue #1560）。 */
+  suspendRun(runId: string): Promise<{ ok: boolean; message: string }>;
+  /** 中断したrunを再開し、Orchestratorを新しい世代で開く（Issue #1560）。 */
+  resumeRun(runId: string): Promise<{ ok: boolean; message: string }>;
   log: Logger;
 }
 
@@ -182,6 +186,12 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'finishRun':
         await this.finishRun(runId);
         return;
+      case 'suspendRun':
+        await this.suspendRun(runId);
+        return;
+      case 'resumeRun':
+        await this.resumeRun(runId);
+        return;
     }
     const taskId = message.taskId;
     if (typeof taskId !== 'string' || !isValidTaskId(taskId)) {
@@ -262,6 +272,13 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   }
 
   private async openOrchestrator(runId: string, renew: boolean): Promise<void> {
+    const run = this.deps.controller.find(runId);
+    if (run?.suspendedAt !== undefined) {
+      void vscode.window.showWarningMessage(
+        'オーケストレータモード: 中断中のrunです。「runを再開する」で再開してからOrchestratorを開いてください',
+      );
+      return;
+    }
     const opened = await this.deps.orchestrator.open(runId, renew);
     if (!opened) {
       void vscode.window.showWarningMessage(
@@ -285,6 +302,58 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       return;
     }
     warnIfRejected(await this.deps.finishRun(runId));
+    this.schedulePost();
+  }
+
+  private async suspendRun(runId: string): Promise<void> {
+    const run = this.deps.controller.find(runId);
+    if (run === undefined || !isTaskRunActive(run)) {
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      'このrunを中断しますか？',
+      {
+        modal: true,
+        detail:
+          '動いている工程セッションとOrchestratorを止めます。worktreeとブランチは残り、後で「runを再開する」で続けられます。中断した後は、同じフォルダで新しいrunを始められます。',
+      },
+      'runを中断する',
+    );
+    if (choice !== 'runを中断する') {
+      return;
+    }
+    warnIfRejected(await this.deps.suspendRun(runId));
+    this.schedulePost();
+  }
+
+  /** 中断したrunを再開する。同じフォルダに動いているrunがあれば、確かめてからそちらを中断して入れ替える。 */
+  private async resumeRun(runId: string): Promise<void> {
+    const run = this.deps.controller.find(runId);
+    if (run === undefined || run.finishedAt !== undefined || run.suspendedAt === undefined) {
+      return;
+    }
+    const active = this.deps.controller.findActive(run.workspaceRoot);
+    if (active !== undefined && active.runId !== runId) {
+      const choice = await vscode.window.showWarningMessage(
+        'このフォルダには動いているrunがあります。そのrunを中断して、このrunを再開しますか？',
+        {
+          modal: true,
+          detail:
+            '動いているrunの工程セッションとOrchestratorを止めます。中断したrunは後で「runを再開する」で続けられます。',
+        },
+        'そのrunを中断して再開する',
+      );
+      if (choice !== 'そのrunを中断して再開する') {
+        return;
+      }
+      const suspended = await this.deps.suspendRun(active.runId);
+      if (!suspended.ok) {
+        warnIfRejected(suspended);
+        return;
+      }
+    }
+    warnIfRejected(await this.deps.resumeRun(runId));
+    this.selectedRunId = runId;
     this.schedulePost();
   }
 
@@ -464,7 +533,7 @@ const script = `
       const select = el('select');
       select.setAttribute('aria-label', '表示するrun');
       board.runs.forEach(function (r) {
-        const o = el('option', undefined, r.startedAt.slice(0, 16).replace('T', ' ') + ' ' + (ENGINE_LABELS[r.engine] || r.engine) + (r.finished ? '（終了）' : ''));
+        const o = el('option', undefined, r.startedAt.slice(0, 16).replace('T', ' ') + ' ' + (ENGINE_LABELS[r.engine] || r.engine) + (r.finished ? '（終了）' : r.suspended ? '（中断中）' : ''));
         o.value = r.runId;
         o.title = r.workspaceRoot;
         if (board.run && board.run.runId === r.runId) { o.selected = true; }
@@ -477,9 +546,9 @@ const script = `
     }
     const run = board.run;
     if (!run) { return; }
-    const status = assessmentLabel(run.assessment);
+    const status = run.suspended && !run.finished ? ['中断中', 'warn'] : assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
-    if (orchestratorStatus) {
+    if (orchestratorStatus && !run.suspended) {
       controls.appendChild(el('span', 'status', 'Orchestrator: ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
       controls.appendChild(button('Orchestratorを開く', '', function () { send('openOrchestrator', { renew: false }); }));
       if (orchestratorStatus !== 'notStarted') {
@@ -487,6 +556,11 @@ const script = `
       }
     }
     if (run.finished) { return; }
+    if (run.suspended) {
+      controls.appendChild(button('runを再開する', 'primary', function () { send('resumeRun'); }));
+      controls.appendChild(button('runを終える', '', function () { send('finishRun'); }));
+      return;
+    }
     const parallel = el('input');
     parallel.type = 'number'; parallel.min = '1'; parallel.max = '8'; parallel.step = '1';
     parallel.value = String(run.maxParallel);
@@ -499,13 +573,14 @@ const script = `
     controls.appendChild(button(run.haltedByUser ? '再開' : '全体を一時停止', run.haltedByUser ? 'primary' : '', function () {
       send('setHalted', { halted: !run.haltedByUser });
     }));
+    controls.appendChild(button('runを中断する', '', function () { send('suspendRun'); }));
     controls.appendChild(button('runを終える', '', function () { send('finishRun'); }));
   }
 
   function renderPlan(board) {
     planEl.replaceChildren();
     const run = board.run;
-    if (!run || run.finished || run.planStatus === 'approved') { return; }
+    if (!run || run.finished || run.suspended || run.planStatus === 'approved') { return; }
     const box = el('div', 'plan-box');
     if (run.planStatus === 'awaitingApproval') {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列を確かめて承認してください。変更したいときはOrchestratorのチャットで伝えます。'));

@@ -16,6 +16,7 @@ import {
   DEPENDENCY_GATED_STAGES,
   hasStarted,
   isTaskDone,
+  isTaskRunActive,
   listTasks,
   type OrchestratedTask,
   type StageGate,
@@ -109,6 +110,8 @@ export interface TaskRunKanbanRunSummary {
   engine: TaskRunEngine;
   startedAt: string;
   finished: boolean;
+  /** 中断中（Issue #1560）。 */
+  suspended: boolean;
 }
 
 export interface TaskRunKanbanRun {
@@ -119,6 +122,8 @@ export interface TaskRunKanbanRun {
   planStatus: TaskPlanStatus;
   haltedByUser: boolean;
   finished: boolean;
+  /** 中断中（Issue #1560）。再開するまで工程の操作と関門の決着は出さない。 */
+  suspended: boolean;
   assessment: TaskRunAssessment;
   activeSessions: number;
   columns: Record<TaskRunKanbanColumn, TaskRunKanbanCard[]>;
@@ -257,11 +262,11 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
     canRetry:
       record?.status === 'halted' &&
       !stopping &&
-      run.finishedAt === undefined &&
+      isTaskRunActive(run) &&
       gate?.kind !== 'reviewFindings',
     canReveal: record !== undefined && record.attempts.length > 0,
     questions: listQuestionsAwaitingUser(task).map(toKanbanQuestion),
-    gate: gate === undefined || run.finishedAt !== undefined ? undefined : toKanbanGate(gate),
+    gate: gate === undefined || !isTaskRunActive(run) ? undefined : toKanbanGate(gate),
     lastGateDecision: lastGateDecision(task),
     reviewRounds:
       (task.reviewRounds ?? 0) > 0
@@ -283,7 +288,7 @@ function emptyColumns(): Record<TaskRunKanbanColumn, TaskRunKanbanCard[]> {
 }
 
 /**
- * 盤面を組み立てる。`selectedRunId`が見つからなければ、終わっていないrunのうち新しいもの、
+ * 盤面を組み立てる。`selectedRunId`が見つからなければ、動いている（終わっておらず中断していない）runのうち新しいもの、
  * 無ければ最も新しいrunを選ぶ。
  */
 export function buildTaskRunKanban(
@@ -293,7 +298,7 @@ export function buildTaskRunKanban(
   const sorted = [...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   const selected =
     sorted.find((r) => r.runId === selectedRunId) ??
-    sorted.find((r) => r.finishedAt === undefined) ??
+    sorted.find(isTaskRunActive) ??
     sorted[0];
   const summaries = sorted.map((r) => ({
     runId: r.runId,
@@ -301,6 +306,7 @@ export function buildTaskRunKanban(
     engine: r.engine,
     startedAt: r.startedAt,
     finished: r.finishedAt !== undefined,
+    suspended: r.suspendedAt !== undefined,
   }));
   if (selected === undefined) {
     return { runs: summaries, run: undefined };
@@ -320,6 +326,7 @@ export function buildTaskRunKanban(
       planStatus: selected.planStatus,
       haltedByUser: selected.haltedByUser,
       finished: selected.finishedAt !== undefined,
+      suspended: selected.suspendedAt !== undefined,
       assessment: assessTaskRun(selected),
       activeSessions: countActiveStageSessions(selected),
       columns,

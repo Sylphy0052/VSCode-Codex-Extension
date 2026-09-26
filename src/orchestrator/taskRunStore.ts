@@ -1,4 +1,4 @@
-import { TASK_RUN_SCHEMA_VERSION, type TaskRun } from './taskRunState';
+import { isTaskRunActive, TASK_RUN_SCHEMA_VERSION, type TaskRun } from './taskRunState';
 import type { MementoLike } from '../util/memento';
 import { isPlainObject, MementoRunStore } from './mementoRunStore';
 
@@ -45,12 +45,14 @@ export class TaskRunStore extends MementoRunStore<TaskRun> {
       key: TASK_RUNS_KEY,
       maxStored: MAX_STORED_TASK_RUNS,
       isValid: isStoredTaskRun,
+      // 中断中のrunを、新しいrunを重ねたときに捨てない（Issue #1560）
+      isFinished: (run) => run.finishedAt !== undefined,
     });
   }
 
-  /** 同じワークスペースで実行中のrun。あれば新しいrunを作らずにこれを開く。 */
+  /** 同じワークスペースで動いているrun（中断中を除く）。あれば新しいrunを作らずにこれを開く。 */
   findActive(workspaceRoot: string): TaskRun | undefined {
-    return this.list().find((r) => r.workspaceRoot === workspaceRoot && r.finishedAt === undefined);
+    return this.list().find((r) => r.workspaceRoot === workspaceRoot && isTaskRunActive(r));
   }
 
   /**

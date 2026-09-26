@@ -24,6 +24,7 @@ import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
 import {
+  isTaskRunActive,
   listTasks,
   MAX_TASK_RUN_PARALLEL,
   type TaskRun,
@@ -183,11 +184,30 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     return result;
   };
 
+  const suspendRun = async (runId: string): Promise<ControllerResult> => {
+    const result = await controller.suspendRun(runId);
+    if (result.ok) {
+      await orchestrator.close(runId);
+    }
+    return result;
+  };
+
+  // Orchestratorは新しい世代で開く（リロード後の開き直しと同じ経路。新しい世代はget_run_stateで状態を取り直す）
+  const resumeRun = async (runId: string): Promise<ControllerResult> => {
+    const result = await controller.resumeRun(runId);
+    if (result.ok) {
+      showRun(view, orchestrator, runId);
+    }
+    return result;
+  };
+
   const view = new TaskRunKanbanViewManager({
     controller,
     orchestrator,
     revealStage: (runId, taskId) => runner.revealStageSession(runId, taskId),
     finishRun,
+    suspendRun,
+    resumeRun,
     log,
   });
   holder.view = view;
@@ -210,7 +230,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     { dispose: () => questionServer.dispose() },
     view,
     vscode.commands.registerCommand('agent.taskRun.start', (engineHint?: unknown) =>
-      startRunCommand(controller, view, orchestrator, finishRun, log, parseEngine(engineHint)),
+      startRunCommand(
+        controller,
+        view,
+        orchestrator,
+        { finish: finishRun, suspend: suspendRun },
+        log,
+        parseEngine(engineHint),
+      ),
     ),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
   ];
@@ -225,7 +252,7 @@ function parseEngine(value: unknown): TaskRunEngine | undefined {
  * runが止まった（`stalled`）。
  */
 function notifyTransition(prev: TaskRun | undefined, next: TaskRun, open: () => void): void {
-  if (next.finishedAt !== undefined) {
+  if (!isTaskRunActive(next)) {
     return;
   }
   if (prev?.planStatus !== 'awaitingApproval' && next.planStatus === 'awaitingApproval') {
@@ -271,7 +298,10 @@ async function startRunCommand(
   controller: TaskRunController,
   view: TaskRunKanbanViewManager,
   orchestrator: TaskRunOrchestrator,
-  finishRun: (runId: string) => Promise<ControllerResult>,
+  closeRun: {
+    finish(runId: string): Promise<ControllerResult>;
+    suspend(runId: string): Promise<ControllerResult>;
+  },
   log: Logger,
   engineHint: TaskRunEngine | undefined,
 ): Promise<void> {
@@ -279,11 +309,16 @@ async function startRunCommand(
   if (folder === undefined) {
     return;
   }
-  // 終わっていないrunがあると`startRun`はそれを返すため、新しく始めたいなら先に終える（Issue #1558）
+  // 動いているrunがあると`startRun`はそれを返すため、新しく始めたいなら先に終えるか中断する
+  // （Issue #1558、#1560）
   const active = controller.findActive(folder);
   if (active !== undefined) {
-    const action = await pick<'open' | 'finish'>('このフォルダには終わっていないrunがあります', [
+    const action = await pick<'open' | 'suspend' | 'finish'>('このフォルダには動いているrunがあります', [
       ['open', '既存のrunを開く'],
+      [
+        'suspend',
+        '既存のrunを中断して新しく始める（動いている工程セッションとOrchestratorを止めます。中断したrunは後で再開できます）',
+      ],
       ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
     ]);
     if (action === undefined) {
@@ -293,10 +328,10 @@ async function startRunCommand(
       showRun(view, orchestrator, active.runId);
       return;
     }
-    const finished = await finishRun(active.runId);
-    if (!finished.ok) {
-      log.warn(`[task run] ${finished.message}`);
-      void vscode.window.showErrorMessage(`オーケストレータモード: ${finished.message}`);
+    const closed = await closeRun[action](active.runId);
+    if (!closed.ok) {
+      log.warn(`[task run] ${closed.message}`);
+      void vscode.window.showErrorMessage(`オーケストレータモード: ${closed.message}`);
       return;
     }
   }
@@ -329,7 +364,7 @@ async function startRunCommand(
   }
   if (outcome.reused) {
     void vscode.window.showInformationMessage(
-      'このフォルダには終わっていないrunがあるため、それを開きます（選んだCLIと並列上限は使いません）',
+      'このフォルダには動いているrunがあるため、それを開きます（選んだCLIと並列上限は使いません）',
     );
   }
   showRun(view, orchestrator, outcome.runId);

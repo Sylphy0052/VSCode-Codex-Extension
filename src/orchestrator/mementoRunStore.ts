@@ -6,7 +6,8 @@ import { SerialQueue } from './serialQueue';
  * （Issue #1465、`roadmapRunStore.ts`）とオーケストレータモード（Issue #1505）が共通で使う。
  *
  * 読み書きを1本のキューに通して直列化し、read-modify-writeの間に別の更新が割り込まない
- * ようにする。保存する件数は開始時刻の新しい順に上限まで残す。読み込み時は`isValid`で
+ * ようにする。保存する件数は開始時刻の新しい順に上限まで残す（`isFinished`を渡せば走り終えた
+ * runから先に捨てる）。読み込み時は`isValid`で
  * 骨格を確かめ、版の合わない（将来の形式や壊れた）要素を読み飛ばす。
  */
 
@@ -22,6 +23,11 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
   maxStored: number;
   /** 遷移関数が前提にする骨格を持つか。持たない要素は読み飛ばす。 */
   isValid(value: unknown): value is T;
+  /**
+   * 走り終えたか。指定すると、上限を超えたときに走り終えたrunから先に捨てる。
+   * 省略時は走り終えたかに関わらず開始時刻の古い順に捨てる。
+   */
+  isFinished?(run: T): boolean;
 }
 
 export class MementoRunStore<T extends StoredRun> {
@@ -70,9 +76,16 @@ export class MementoRunStore<T extends StoredRun> {
   }
 
   private trim(runs: readonly T[]): T[] {
-    return [...runs]
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-      .slice(0, this.options.maxStored);
+    const sorted = [...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    const { isFinished, maxStored } = this.options;
+    if (isFinished === undefined || sorted.length <= maxStored) {
+      return sorted.slice(0, maxStored);
+    }
+    // 走り終えていないrunを先に残し、空いた枠へ走り終えたrunを新しい順に入れる
+    const unfinished = sorted.filter((r) => !isFinished(r)).slice(0, maxStored);
+    const finished = sorted.filter((r) => isFinished(r)).slice(0, maxStored - unfinished.length);
+    const kept = new Set([...unfinished, ...finished]);
+    return sorted.filter((r) => kept.has(r));
   }
 }
 
