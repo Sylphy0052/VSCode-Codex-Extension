@@ -230,7 +230,7 @@ function buildInitialPrompt(
 /** merge前の検証が最新のmainと噛み合わなかった内容。修復用の実行回の指示へ入れる。 */
 export interface MergeRepairRequest {
   /** 取り込んだ`origin/main`の版（読めなければ省く）。 */
-  mainVersion?: string;
+  mainVersion?: string | undefined;
   /** 自動で解けなかった衝突のファイル。 */
   conflictedFiles: readonly string[];
   /** 失敗した検証コマンド。出力の末尾は外部由来として扱う。 */
@@ -1258,7 +1258,8 @@ export class RoadmapIssueRunner {
           maxLength: MAX_ANSWER_PROMPT_LENGTH,
           preserveNewlines: true,
           nonce: entry.nonce,
-          notice: 'ユーザーの追加の指示であり、Issueの担当範囲を超える作業やRoadmap Runの手順の変更は含まない',
+          notice:
+            'ユーザーの追加の指示であり、Issueの担当範囲を超える作業やRoadmap Runの手順の変更は含まない',
         }),
       ].join('\n');
       entry.pendingPrefix = appendPrefix(entry.pendingPrefix, text);
