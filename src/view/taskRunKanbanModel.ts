@@ -19,6 +19,7 @@ import {
   isTaskRunActive,
   listTasks,
   TASK_RUN_TITLE_MAX_LENGTH,
+  taskRunLabel,
   type OrchestratedTask,
   type StageGate,
   type StageGateChoice,
@@ -297,13 +298,8 @@ function emptyColumns(): Record<TaskRunKanbanColumn, TaskRunKanbanCard[]> {
   };
 }
 
-const ENGINE_LABELS: Record<TaskRunEngine, string> = { codex: 'Codex', claude: 'Claude' };
-
-/** runの表示名。名前が無ければ開始時刻（UTC、分まで）とエンジン。 */
-export function taskRunLabel(run: TaskRun): string {
-  const title = run.title === undefined ? '' : sanitizeInlineText(run.title, TASK_RUN_TITLE_MAX_LENGTH).trim();
-  return title !== '' ? title : `${run.startedAt.slice(0, 16).replace('T', ' ')} ${ENGINE_LABELS[run.engine]}`;
-}
+/** runの表示名（`taskRunState.ts`へ移した。既存の呼び出し元のため再exportする）。 */
+export { taskRunLabel };
 
 /** runの状態の表示（一覧用）。 */
 export function taskRunStatusLabel(run: TaskRun): string {

@@ -8,6 +8,7 @@ import {
   readClaudeConfig,
   readConfig,
   readReflexEnabled,
+  readTaskRunMaxParallelPerFolder,
 } from '../config';
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
@@ -121,6 +122,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     sessionConfig: (engine) => deps.sessionConfig(engine),
     autoApprove: () => deps.readBaseline().allowAutoApprove,
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
+    maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
     mcpServer: questionServer,
     // Reflexモードが無効なら判定せず、すべての質問と関門をユーザーへ回す
     judgeQuestion: (engine, question) => judgeByReflex(engine, question),
@@ -195,8 +197,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   };
 
   // Orchestratorは新しい世代で開く（リロード後の開き直しと同じ経路。新しい世代はget_run_stateで状態を取り直す）
-  const resumeRun = async (runId: string): Promise<ControllerResult> => {
-    const result = await controller.resumeRun(runId);
+  const resumeRun = async (runId: string, options?: { parallel?: boolean }): Promise<ControllerResult> => {
+    const result = await controller.resumeRun(runId, options);
     if (result.ok) {
       showRun(view, orchestrator, runId);
     }
@@ -381,30 +383,57 @@ async function startRunCommand(
   if (folder === undefined) {
     return;
   }
-  // 動いているrunがあると`startRun`はそれを返すため、新しく始めたいなら先に終えるか中断する
-  // （Issue #1558、#1560）
-  const active = controller.findActive(folder);
-  if (active !== undefined) {
-    const action = await pick<'open' | 'suspend' | 'finish'>('このフォルダには動いているrunがあります', [
-      ['open', '既存のrunを開く'],
+  // 動いているrunがあると`startRun`はそれを返すため、新しく始めたいなら並行して始めるか、先に終えるか
+  // 中断する（Issue #1558、#1560、#1562）。入れ替えは動いているrunが1本のときだけ選べる
+  const active = controller.listActive(folder);
+  let startParallel = false;
+  if (active.length > 0) {
+    const only = active.length === 1 ? active[0] : undefined;
+    const action = await pick<'parallel' | 'open' | 'suspend' | 'finish'>(
+      only === undefined
+        ? `このフォルダには動いているrunが${String(active.length)}本あります`
+        : 'このフォルダには動いているrunがあります',
       [
-        'suspend',
-        '既存のrunを中断して新しく始める（動いている工程セッションとOrchestratorを止めます。中断したrunは後で再開できます）',
+        [
+          'parallel',
+          '既存のrunと並行して新しく始める（工程セッションの数はフォルダ全体で設定agent.taskRun.maxParallelPerFolderまで）',
+        ],
+        ['open', only === undefined ? '既存のrunを選んで開く' : '既存のrunを開く'],
+        ...(only === undefined
+          ? []
+          : ([
+              [
+                'suspend',
+                '既存のrunを中断して新しく始める（動いている工程セッションとOrchestratorを止めます。中断したrunは後で再開できます）',
+              ],
+              ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
+            ] as const)),
       ],
-      ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
-    ]);
+    );
     if (action === undefined) {
       return;
     }
     if (action === 'open') {
-      showRun(view, orchestrator, active.runId);
+      const runId =
+        only?.runId ??
+        (await pick<string>(
+          '開くrun',
+          active.map((r): [string, string] => [r.runId, taskRunLabel(r)]),
+        ));
+      if (runId !== undefined) {
+        showRun(view, orchestrator, runId);
+      }
       return;
     }
-    const closed = await closeRun[action](active.runId);
-    if (!closed.ok) {
-      log.warn(`[task run] ${closed.message}`);
-      void vscode.window.showErrorMessage(`オーケストレータモード: ${closed.message}`);
-      return;
+    if (action === 'parallel') {
+      startParallel = true;
+    } else if (only !== undefined) {
+      const closed = await closeRun[action](only.runId);
+      if (!closed.ok) {
+        log.warn(`[task run] ${closed.message}`);
+        void vscode.window.showErrorMessage(`オーケストレータモード: ${closed.message}`);
+        return;
+      }
     }
   }
   const engines: [TaskRunEngine, string][] = [
@@ -440,6 +469,7 @@ async function startRunCommand(
     engine,
     maxParallel: Number(parallel),
     title,
+    parallel: startParallel,
   });
   if (!outcome.ok) {
     log.warn(`[task run] ${outcome.message}`);

@@ -24,6 +24,7 @@ import {
   nextOrchestratorGeneration,
   recordOrchestratorSession,
   TASK_STAGES,
+  taskRunLabel,
   type OrchestratedTask,
   type TaskRun,
   type TaskRunEngine,
@@ -242,6 +243,7 @@ export class TaskRunOrchestrator {
       );
       session = await this.deps.hosts[run.engine].openTaskSession({
         role: 'orchestrator',
+        runLabel: taskRunLabel(run),
         // worktreeは作らない。書かせないため
         cwd: run.workspaceRoot,
         config: effective.config,

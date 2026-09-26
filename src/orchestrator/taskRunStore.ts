@@ -50,9 +50,17 @@ export class TaskRunStore extends MementoRunStore<TaskRun> {
     });
   }
 
-  /** 同じワークスペースで動いているrun（中断中を除く）。あれば新しいrunを作らずにこれを開く。 */
-  findActive(workspaceRoot: string): TaskRun | undefined {
-    return this.list().find((r) => r.workspaceRoot === workspaceRoot && isTaskRunActive(r));
+  /**
+   * 同じワークスペースで動いているrun（中断中を除く）。並行して動かせるため複数ありうる
+   * （Issue #1562）。並びは`list()`の順。
+   */
+  listActive(workspaceRoot: string): TaskRun[] {
+    return this.list().filter((r) => r.workspaceRoot === workspaceRoot && isTaskRunActive(r));
+  }
+
+  /** 同じワークスペースのrun（終わったものを含む）。フォルダ全体の同時セッション数を数えるのに使う。 */
+  listInFolder(workspaceRoot: string): TaskRun[] {
+    return this.list().filter((r) => r.workspaceRoot === workspaceRoot);
   }
 
   /**

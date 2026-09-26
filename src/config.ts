@@ -572,6 +572,22 @@ export function readAutoHandoffThresholdPercent(): number {
   return Math.round(raw);
 }
 
+/** @see readTaskRunMaxParallelPerFolder */
+export const DEFAULT_TASK_RUN_MAX_PARALLEL_PER_FOLDER = 8;
+const MAX_TASK_RUN_MAX_PARALLEL_PER_FOLDER = 64;
+
+/**
+ * オーケストレータモードで、同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。
+ * runごとの並列上限とは別に掛ける。壊れた値（数値でない・範囲外）は既定へ丸める。
+ */
+export function readTaskRunMaxParallelPerFolder(): number {
+  const raw = vscode.workspace.getConfiguration('agent').get<number>('taskRun.maxParallelPerFolder');
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1 || raw > MAX_TASK_RUN_MAX_PARALLEL_PER_FOLDER) {
+    return DEFAULT_TASK_RUN_MAX_PARALLEL_PER_FOLDER;
+  }
+  return Math.floor(raw);
+}
+
 /** @see readAutoHandoffSoftThresholdPercent */
 export const DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT = 40;
 
