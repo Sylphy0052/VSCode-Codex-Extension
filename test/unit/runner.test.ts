@@ -11463,6 +11463,8 @@ tasks:
       failRevList?: boolean;
       numstat?: string;
       untracked?: string;
+      /** `rev-parse --abbrev-ref HEAD`の応答。省略時はfakeGitの既定（`main`） */
+      head?: string;
     }): FakeGitHandle {
       const base = fakeGit();
       return {
@@ -11482,6 +11484,14 @@ tasks:
           }
           if (args[0] === 'merge-base' && args[1] === 'HEAD') {
             return { code: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' };
+          }
+          if (
+            leftover.head !== undefined &&
+            args[0] === 'rev-parse' &&
+            args[1] === '--abbrev-ref' &&
+            args[2] === 'HEAD'
+          ) {
+            return { code: 0, stdout: `${leftover.head}\n`, stderr: '' };
           }
           if (args[0] === '--no-optional-locks' && args[1] === 'diff') {
             return { code: 0, stdout: leftover.numstat ?? '', stderr: '' };
@@ -11516,7 +11526,8 @@ tasks:
     it('未コミットの変更が残っていれば、同じworktreeとブランチで続きから再開し、最初のプロンプトへ変更の一覧を添える', async () => {
       const { store, runId, cwd, branch } = await startAndInterrupt();
       const git = leftoverGit({
-        status: ' M src/a.ts\n?? new.ts\n',
+        head: branch,
+        status: ' M src/a.ts\0?? new.ts\0',
         numstat: '3\t1\tsrc/a.ts\0',
         untracked: 'new.ts\0',
       });
@@ -11563,8 +11574,8 @@ tasks:
     });
 
     it('未コミットの変更が無くても進んだコミットがあれば、同じworktreeで再開する', async () => {
-      const { store, runId, cwd } = await startAndInterrupt();
-      const git = leftoverGit({ commitCount: '2', numstat: '10\t0\tsrc/b.ts\0' });
+      const { store, runId, cwd, branch } = await startAndInterrupt();
+      const git = leftoverGit({ head: branch, commitCount: '2', numstat: '10\t0\tsrc/b.ts\0' });
       const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
         readAutoResume: () => true,
         git,
@@ -11601,7 +11612,7 @@ tasks:
 
     it('前回のworktreeが無ければ、新しいworktreeで始め、確かめられなかったことを警告に残す', async () => {
       const { store, runId, cwd } = await startAndInterrupt();
-      const git = leftoverGit({ status: ' M src/a.ts\n' });
+      const git = leftoverGit({ status: ' M src/a.ts\0' });
       const fs: WorktreeFileSystemPort = {
         ...identityFs,
         pathExists: async (target) => target !== cwd,
@@ -11624,7 +11635,7 @@ tasks:
 
     it('gitが失敗したら、新しいworktreeで始め、確かめられなかったことを警告に残す', async () => {
       const { store, runId, cwd } = await startAndInterrupt();
-      const git = leftoverGit({ status: ' M src/a.ts\n', failRevList: true });
+      const git = leftoverGit({ status: ' M src/a.ts\0', failRevList: true });
       const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
         readAutoResume: () => true,
         git,
@@ -11639,9 +11650,37 @@ tasks:
       expect(warning?.message).toContain('git rev-listに失敗しました: fatal: bad revision');
     });
 
+    it.each([
+      ['別のブランチへ切り替わっていたら', 'feature/other'],
+      // detached HEADでは`rev-parse --abbrev-ref HEAD`が`HEAD`を返す
+      ['detached HEADになっていたら', 'HEAD'],
+    ])('worktreeが%s、引き継がずに新しいworktreeで始める（Issue #1521）', async (_label, head) => {
+      const { store, runId, cwd, branch } = await startAndInterrupt();
+      const git = leftoverGit({
+        head,
+        status: ' M src/a.ts\0',
+        numstat: '3\t1\tsrc/a.ts\0',
+      });
+      const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
+        readAutoResume: () => true,
+        git,
+      });
+      await reloadedRunner.restoreRunsForView();
+      await flush();
+
+      expect(newCodexHost.openInputs[0]?.cwd).not.toBe(cwd);
+      expect(store.find(runId)?.tasks['T1']?.branch).not.toBe(branch);
+      const warnings = reloadedRunner.getSnapshot(runId)?.warnings ?? [];
+      expect(warnings.map((w) => w.kind)).not.toContain('resumedWithUncommittedWork');
+      const warning = warnings.find((w) => w.kind === 'resumeInspectionFailed');
+      expect(warning?.taskId).toBe('T1');
+      expect(warning?.message).toContain('ブランチが記録と異なります');
+      expect(warning?.message).toContain(`実際: ${head}`);
+    });
+
     it('人の手動の再実行は、作業が残っていても今までどおり新しいworktreeで始める', async () => {
       const { store, runId, cwd } = await startAndInterrupt();
-      const git = leftoverGit({ status: ' M src/a.ts\n' });
+      const git = leftoverGit({ status: ' M src/a.ts\0' });
       const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
         readAutoResume: () => false,
         git,
@@ -11657,8 +11696,8 @@ tasks:
     });
 
     it('実測の途中で人が手動で再実行したら、その再実行を巻き戻さず、引き継ぎもしない', async () => {
-      const { store, runId, cwd } = await startAndInterrupt();
-      const leftover = leftoverGit({ status: ' M src/a.ts\n', numstat: '3\t1\tsrc/a.ts\0' });
+      const { store, runId, cwd, branch } = await startAndInterrupt();
+      const leftover = leftoverGit({ head: branch, status: ' M src/a.ts\0', numstat: '3\t1\tsrc/a.ts\0' });
       let release: () => void = () => {};
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -11695,7 +11734,7 @@ tasks:
 
     it('引き継いだタスクの起動に失敗したら、残った作業の場所を警告に残す', async () => {
       const { store, runId, cwd, branch } = await startAndInterrupt();
-      const git = leftoverGit({ status: ' M src/a.ts\n', numstat: '3\t1\tsrc/a.ts\0' });
+      const git = leftoverGit({ head: branch, status: ' M src/a.ts\0', numstat: '3\t1\tsrc/a.ts\0' });
       const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
         readAutoResume: () => true,
         git,
@@ -11735,10 +11774,10 @@ tasks:
     prompt: p2
     done: d2
 `;
-      const { store, runId, cwd } = await startAndInterrupt(TWO_TASKS_YAML);
+      const { store, runId, cwd, branch } = await startAndInterrupt(TWO_TASKS_YAML);
       const t2Cwd = store.find(runId)?.tasks['T2']?.cwd ?? '';
       expect(t2Cwd.endsWith('/T2')).toBe(true);
-      const git = leftoverGit({ status: ' M src/a.ts\n', numstat: '3\t1\tsrc/a.ts\0' });
+      const git = leftoverGit({ head: branch, status: ' M src/a.ts\0', numstat: '3\t1\tsrc/a.ts\0' });
       const fs: WorktreeFileSystemPort = {
         ...identityFs,
         pathExists: async (target) => target !== t2Cwd,
@@ -14630,6 +14669,87 @@ tasks:
     const last = orchestrator.sentTexts.at(-1) as string;
     expect(last).toContain('最初の相談');
     expect(last).toContain('次の相談');
+  });
+
+  it('usageLimitで失敗した後、次のきっかけが無くても30分後に送り直す（Issue #1517）', async () => {
+    vi.useFakeTimers();
+    const { harness, orchestrator } = await startAndSendFromTask();
+    const sentBefore = orchestrator.sentTexts.length;
+
+    runTurn(orchestrator, 'usageLimit');
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+    expect(orchestrator.sentTexts).toHaveLength(sentBefore);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(orchestrator.sentTexts).toHaveLength(sentBefore + 1);
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(1);
+  });
+
+  it('usageLimitの送り直しは、先に別の送信があれば取りやめ、破棄後も送らない（Issue #1517）', async () => {
+    vi.useFakeTimers();
+    const { harness, state, orchestrator } = await startAndSendFromTask();
+
+    runTurn(orchestrator, 'usageLimit');
+    state.hub?.sendMessage({
+      from: 'T2',
+      to: ORCHESTRATOR_CONNECTION_ID,
+      body: '次の相談',
+      expectReply: false,
+    });
+    await flush();
+    const sentAfterMerge = orchestrator.sentTexts.length;
+    expect(orchestrator.sentTexts.at(-1)).toContain('最初の相談');
+
+    runTurn(orchestrator, 'usageLimit');
+    harness.runner.dispose();
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(orchestrator.sentTexts).toHaveLength(sentAfterMerge);
+  });
+
+  it('人の発話を送ったターンが失敗したら、送り直しと立て直した会話へ発話も渡す（Issue #1517）', async () => {
+    const { harness, runId, orchestrator } = await startAndSendFromTask();
+    runTurn(orchestrator);
+
+    expect(harness.runner.sendToOrchestrator(runId, '人からの指示')).toBe(true);
+    runTurn(orchestrator, 'other');
+    // 1回目は同じ会話へ送り直す。発話はworkflow-eventで包まずに入る
+    const resent = orchestrator.sentTexts.at(-1) as string;
+    expect(resent).toContain('人からの指示');
+    expect(resent.endsWith('人からの指示')).toBe(true);
+
+    runTurn(orchestrator, 'other');
+    await flush();
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned.sentTexts).toHaveLength(1);
+    expect(respawned.sentTexts[0]).toContain('人からの指示');
+
+    // 成功したターンの発話は、次の送信へ持ち越さない
+    runTurn(respawned);
+    expect(harness.runner.sendToOrchestrator(runId, '次の指示')).toBe(true);
+    expect(respawned.sentTexts.at(-1)).not.toContain('人からの指示');
+  });
+
+  it('ask_userの回答待ち中に立て直しても、導入文と引き継いだイベントを新しい会話へ送る（Issue #1517）', async () => {
+    const { harness, state, runId, orchestrator } = await startAndSendFromTask();
+    const port = state.hub?.orchestratorControl;
+    expect(port?.askUser('どちらにしますか', ['A', 'B']).accepted).toBe(true);
+
+    runTurn(orchestrator, 'other');
+    runTurn(orchestrator, 'other');
+    await flush();
+
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    expect(respawned.sentTexts).toHaveLength(1);
+    expect(respawned.sentTexts[0]).toContain('最初の相談');
+    expect(respawned.sentTexts[0]).toContain('立て直したもの');
+    expect(respawned.sentTexts[0]).toContain('どちらにしますか');
+    expect(harness.runner.getSnapshot(runId)?.pendingAskUser).toBeDefined();
+
+    // 答えは立て直した会話へ、ターンが終わってから届く
+    runTurn(respawned);
+    expect(harness.runner.answerAskUser(runId, 1)).toBe(true);
+    expect(respawned.sentTexts.at(-1)).toContain('人がask_userの質問に答えました: "B"');
   });
 
   it('busyのままorchestratorUnresponsiveSecを超えると応答なしを経て立て直す', async () => {

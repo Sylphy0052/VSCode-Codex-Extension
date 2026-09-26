@@ -1666,12 +1666,27 @@ export interface LiveOrchestrator {
    * 送り直す・立て直した会話へ渡す。ターンが成功して終わったら空にする。
    */
   inFlight: OrchestratorEvent[];
+  /**
+   * 現在のターンで送った人の発話と`ask_user`の答え（Issue #1517）。`inFlight`と同じく、
+   * ターンが失敗したら`pendingUserTexts`の先頭へ戻し、成功したら空にする。
+   */
+  inFlightUserTexts: string[];
+  /**
+   * 届けられずに戻った人の発話と`ask_user`の答え（Issue #1517）。次の送信で、イベントの
+   * 後ろへ人の発話として合流させる（workflow-eventでは包まない）。
+   */
+  pendingUserTexts: string[];
   /** `turnFailureKind === 'other'`で続けて失敗したターンの数（Issue #1513）。2で落ちたとみなす。 */
   consecutiveFailures: number;
   /** このrunで立て直した回数（Issue #1513、`agent.workflows.maxOrchestratorRespawns`との比較用）。 */
   respawnCount: number;
   /** 無応答の判定用タイマー（Issue #1513）。busyの間だけ張る。 */
   unresponsiveTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * 利用上限でターンが失敗した後、戻したものを送り直すタイマー（Issue #1517）。
+   * 次の送信・立て直し・諦め・破棄で解除する。
+   */
+  usageLimitRetryTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 /**
