@@ -25,6 +25,7 @@ import {
   type RoadmapRunEngine,
 } from './roadmapRunState';
 import { assessRun } from './roadmapScheduler';
+import { isReadOnlyCommandApproval } from './readOnlyCommand';
 import { stripControlCharsPreservingNewlines } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { ApprovalHandler, TaskSession, TaskSessionHost } from './taskSession';
@@ -397,7 +398,8 @@ function roadmapToolName(rawParams: Record<string, unknown>): string | undefined
  *
  * 自動許可の集合に入るツールは常に許可し、入らないツール（`stop_issue`・`set_mode`・
  * `set_halted`）は`allowAutoApprove`でも人へ回す。それ以外の承認はワークフロー実行の
- * Orchestratorと同じく、`allowAutoApprove`を人が有効にしたときだけ許可する。
+ * Orchestratorと同じく、`allowAutoApprove`を人が有効にしたときだけ許可する。ただし読み取り
+ * 専用のコマンド（`isReadOnlyCommandApproval`）は無効のときも許可する（Issue #1535）。
  */
 export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
   return async (_approval, rawParams) => {
@@ -407,7 +409,10 @@ export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
         ? { kind: 'auto', decision: 'accept' }
         : { kind: 'ask' };
     }
-    return autoApprove ? { kind: 'auto', decision: 'accept' } : { kind: 'ask' };
+    if (autoApprove || isReadOnlyCommandApproval(rawParams)) {
+      return { kind: 'auto', decision: 'accept' };
+    }
+    return { kind: 'ask' };
   };
 }
 
