@@ -111,6 +111,19 @@ export type OrchestratorEventKind =
    */
   | 'taskQuestion'
   /**
+   * タスクが`report_instruction_result`で指示に応答した（Issue #1502、ロードマップH3）。
+   * 配送経路は`taskMessage`と同じで、`StoredMessage.kind`が`'instructionResult'`のときに
+   * この種別を使う。本文は拡張機能が組み立て、タスクの申告（結果・解消されなかった残り・
+   * 件数と単位）と、拡張機能の実測（完了根拠の区分・他タスクとの変更ファイルの交差）を
+   * 分けて書く（`runnerInstruction.ts`）。
+   */
+  | 'taskInstructionResult'
+  /**
+   * 指示を添えたターンが、`report_instruction_result`の無いまま確定した（Issue #1502）。
+   * 1つの指示につき1回だけ送る。指示は開いたままで、遅れた応答は受け付ける。
+   */
+  | 'taskInstructionUnanswered'
+  /**
    * 統合PR/MRにレビューコメントが付いた（design.md §16.30、roadmap W5、Issue #339）。
    * `runnerReviewComments.ts`の`pollReviewComments`が、設定 `agent.workflows.
    * reviewCommentPollIntervalSec` の間隔で統合PR/MRのレビューコメントを取得し、前回までに

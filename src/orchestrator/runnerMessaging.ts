@@ -7,6 +7,7 @@ import {
   type StoredMessage,
 } from './messaging';
 import { ORCHESTRATOR_CONNECTION_ID } from './orchestratorSession';
+import { notifyInstructionResult } from './runnerInstruction';
 import { notifyOrchestrator } from './runnerOrchestrator';
 import {
   isActiveTaskState,
@@ -179,6 +180,13 @@ function deliverTaskMessageToOrchestrator(
   live: LiveRun,
   message: StoredMessage,
 ): void {
+  // 指示への応答（Issue #1502）は実測値を添えるため、読み出しを待ってから届ける。
+  // キューからはこの場で取り除く（待ちぼうけ検出を壊さないため。上のJSDoc参照）
+  if (message.kind === 'instructionResult' && message.instructionReport !== undefined) {
+    live.messaging?.hub.takeDeliverableMessages(ORCHESTRATOR_CONNECTION_ID);
+    void notifyInstructionResult(self, runId, live, message.from, message.instructionReport);
+    return;
+  }
   // 「問い」（ask_orchestrator、design.md §16.32、Issue #571）は種別を分けて伝える。
   // 配送経路そのもの（notifyOrchestrator→キュー消費）はkindを問わず共通
   const event =
