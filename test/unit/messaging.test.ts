@@ -41,6 +41,7 @@ import {
   type RunTaskSnapshot,
   type OrchestratorControlPort,
   type StoredMessage,
+  REPORT_INSTRUCTION_RESULT_TOOL,
 } from '../../src/orchestrator/messaging';
 import { ORCHESTRATOR_CONNECTION_ID } from '../../src/orchestrator/orchestratorSession';
 import type { HandoffEntry, HandoffResult } from '../../src/orchestrator/teamHandoff';
@@ -634,7 +635,7 @@ describe('TaskMessagingHubDeps.onAccepted（design.md §16.21「waitingReplyへ�
 });
 
 describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側が接続で判別する」）', () => {
-  it('tools/listでlist_tasks・send_message・ask_orchestratorの3つが見える（design.md §16.32、Issue #571）', () => {
+  it('tools/listでlist_tasks・send_message・ask_orchestrator・report_instruction_resultが見える（design.md §16.32、Issue #571・#1502）', () => {
     const transport = new FakeTransport();
     const hub = buildHub([{ id: 'T1', state: 'running', summary: '' }]);
     new MessagingMcpServer(hub, transport);
@@ -646,7 +647,12 @@ describe('MessagingMcpServer（design.md §16.21「送信元はサーバー側�
     expect(response && 'result' in response).toBe(true);
     if (response && 'result' in response) {
       const result = response.result as { tools: unknown[] };
-      expect(result.tools).toEqual([LIST_TASKS_TOOL, SEND_MESSAGE_TOOL, ASK_ORCHESTRATOR_TOOL]);
+      expect(result.tools).toEqual([
+        LIST_TASKS_TOOL,
+        SEND_MESSAGE_TOOL,
+        ASK_ORCHESTRATOR_TOOL,
+        REPORT_INSTRUCTION_RESULT_TOOL,
+      ]);
     }
   });
 
@@ -1634,7 +1640,12 @@ describe('オーケストレーター専用の制御ツール（design.md §16.2
 
     const names = toolNames(wire(port)('T1'));
 
-    expect(names).toEqual(['list_tasks', 'send_message', 'ask_orchestrator']);
+    expect(names).toEqual([
+      'list_tasks',
+      'send_message',
+      'ask_orchestrator',
+      'report_instruction_result',
+    ]);
   });
 
   it('タスクの接続から制御ツールを名指しで呼んでも拒否される', () => {
