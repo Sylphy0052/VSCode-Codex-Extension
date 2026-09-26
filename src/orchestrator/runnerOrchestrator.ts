@@ -104,12 +104,13 @@ export function shouldAutoApproveOrchestratorElicitation(params: Record<string, 
 }
 
 /** オーケストレーターを立て直した理由（Issue #1513）。 */
-type OrchestratorRespawnReason = 'turnFailed' | 'unresponsive';
+type OrchestratorRespawnReason = 'turnFailed' | 'unresponsive' | 'contextLow';
 
 /** 警告欄・導入文に書く、立て直した理由の言い回し。 */
 const RESPAWN_REASON_LABELS: Record<OrchestratorRespawnReason, string> = {
   turnFailed: 'ターンが続けて失敗した',
   unresponsive: '応答中のまま反応しなくなった',
+  contextLow: 'コンテキスト残量が少なくなった',
 };
 
 /**
@@ -159,7 +160,10 @@ function buildIntroBody(
       : [
           '',
           `このセッションは、前のオーケストレーターの会話が${RESPAWN_REASON_LABELS[respawn.reason]}` +
-            `ため、実行の途中で立て直したものです（${respawn.count}回目）。前の会話の内容は` +
+            `ため、実行の途中で立て直したものです` +
+            // 引き継ぎ（`contextLow`）は失敗ではないため立て直しの回数に数えない（Issue #1549）
+            (respawn.reason === 'contextLow' ? '。' : `（${respawn.count}回目）。`) +
+            '前の会話の内容は' +
             '引き継げないため、進行状況は list_tasks / get_run_status で確かめてください。' +
             (respawn.carriedCount > 0
               ? `このメッセージの前に並んだイベント${respawn.carriedCount}件は、前の会話へ` +
@@ -1485,6 +1489,11 @@ async function openOrchestratorSession(
     config: effective.config,
     sandbox: effective.sandbox,
     ...(url !== undefined ? { mcp: { url } } : {}),
+    // 自動引き継ぎでホストが通常のタブを開くと、runnerは旧セッションを握ったまま止まる
+    // （Issue #1549）。新しい会話は立て直しの経路で開き直す。無人で回すため確認も出さない
+    autoHandoffAutoApprove: true,
+    // 委譲先が呼ばれるのは開き終えた後のため、`session`は初期化済みになっている
+    handoffDelegate: () => onOrchestratorHandoff(self, live.runId, session),
   });
   if (effective.autoApprove) {
     // オーケストレーターはread-only sandboxで起動する。machineスコープの
@@ -1498,6 +1507,34 @@ async function openOrchestratorSession(
   session.setMcpElicitationHandler?.(shouldAutoApproveOrchestratorElicitation);
   session.open({ preserveFocus: true });
   return session;
+}
+
+/**
+ * オーケストレーターの自動引き継ぎ（Issue #1549）。ホストに新しいタブを開かせず、
+ * 立て直し（`respawnOrchestrator`）で同じ`LiveOrchestrator`のセッションを入れ替える。
+ *
+ * 旧セッションの破棄はホストの引き継ぎ処理が戻った後に行う。委譲先の中で破棄すると、
+ * ホストが破棄済みのパネルを触ることになるため。
+ */
+function onOrchestratorHandoff(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  session: TaskSession,
+): Promise<boolean> {
+  const orchestrator = self.runs.get(runId)?.orchestrator;
+  if (
+    orchestrator === undefined ||
+    orchestrator.session !== session ||
+    orchestrator.health !== 'alive'
+  ) {
+    return Promise.resolve(false);
+  }
+  // 立て直しが始まるまでに溜まったイベントを旧セッションへ送らせない
+  orchestrator.health = 'recovering';
+  setTimeout(() => {
+    void respawnOrchestrator(self, runId, 'contextLow');
+  }, 0);
+  return Promise.resolve(true);
 }
 
 /**
@@ -1739,7 +1776,9 @@ async function respawnOrchestrator(
   const oldSession = orchestrator.session;
   const label = RESPAWN_REASON_LABELS[reason];
   const max = self.deps.readMaxOrchestratorRespawns?.() ?? DEFAULT_MAX_ORCHESTRATOR_RESPAWNS;
-  if (orchestrator.respawnCount >= max) {
+  // 引き継ぎは失敗ではないため、上限に数えない（Issue #1549）
+  const countsTowardLimit = reason !== 'contextLow';
+  if (countsTowardLimit && orchestrator.respawnCount >= max) {
     oldSession.dispose();
     giveUpOrchestrator(
       self,
@@ -1750,11 +1789,12 @@ async function respawnOrchestrator(
     );
     return;
   }
-  orchestrator.respawnCount += 1;
+  if (countsTowardLimit) {
+    orchestrator.respawnCount += 1;
+  }
   orchestrator.health = 'recovering';
-  self.deps.log.warn(
-    `[workflow ${runId}] オーケストレーターが${label}ため立て直します（${orchestrator.respawnCount}回目）`,
-  );
+  const countLabel = countsTowardLimit ? `（${orchestrator.respawnCount}回目）` : '';
+  self.deps.log.warn(`[workflow ${runId}] オーケストレーターが${label}ため立て直します${countLabel}`);
   self.notify(runId);
   oldSession.dispose();
 
@@ -1792,7 +1832,7 @@ async function respawnOrchestrator(
     taskId: undefined,
     message:
       `オーケストレーターが${label}ため、新しい会話で立て直しました` +
-      `（${orchestrator.respawnCount}回目）。届けられなかったイベント${carried.length}件を引き継ぎました。`,
+      `${countLabel}。届けられなかったイベント${carried.length}件を引き継ぎました。`,
   });
   const pendingAskUser = live.pendingAskUser;
   const resume: OrchestratorResumeContext | undefined =
