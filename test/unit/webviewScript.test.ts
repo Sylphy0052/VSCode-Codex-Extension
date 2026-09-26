@@ -1667,7 +1667,9 @@ describe('workflowScript のタスクごとの model / effort 表示（Issue #10
 
   it('表に model / effort の列があり、provider の直後に並ぶ', () => {
     expect(viewSource()).toContain(
-      '<th>Issue</th><th>cleanup</th><th>provider</th><th>model / effort</th><th>コンテキスト</th><th>経過</th>',
+      '<th class="col-issue">Issue</th><th class="col-cleanup">cleanup</th>' +
+        '<th class="col-provider">provider</th><th class="col-model">model / effort</th>' +
+        '<th class="col-context">コンテキスト</th><th class="col-elapsed">経過</th>',
     );
   });
 
@@ -1690,7 +1692,7 @@ describe('workflowScript のタスクごとの model / effort 表示（Issue #10
 
   it('title だけに情報を置かず、可視テキストにも同じ値を出す', () => {
     const source = workflowScript();
-    expect(source).toContain("const modelCell = text('td', 'model-cell', modelText);");
+    expect(source).toContain("const modelCell = text('td', 'model-cell col-model', modelText);");
     expect(source).toContain('modelCell.title = modelText;');
   });
 
@@ -1701,7 +1703,7 @@ describe('workflowScript のタスクごとの model / effort 表示（Issue #10
     expect((source.match(/cell\.colSpan = TASK_TABLE_COLUMNS;/g) ?? []).length).toBe(2);
     const view = viewSource();
     const thead = view.slice(view.indexOf('<thead>'), view.indexOf('</thead>'));
-    expect((thead.match(/<th>/g) ?? []).length).toBe(14);
+    expect((thead.match(/<th\b/g) ?? []).length).toBe(14);
   });
 
   it('狭幅のカード表示でも列の見出しが1つずつずれて揃う', () => {
