@@ -1457,19 +1457,22 @@ function onOrchestratorStateChanged(
  *
  * ターンが走っている間は溜めておき、そのターンが終わってからまとめて送る。run全体で
  * 送れる総数には上限（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`）を置く。
+ *
+ * 受け付けたら`true`、オーケストレーターが居ない・上限に達したため捨てたら`false`を返す
+ * （送り済みの印を持つ呼び出し元が、捨てられたのに送り済みと扱わないため。Issue #1508）。
  */
 export function notifyOrchestrator(
   self: WorkflowRunnerInternals,
   runId: string,
   event: OrchestratorEvent,
-): void {
+): boolean {
   const live = self.runs.get(runId);
   const orchestrator = live?.orchestrator;
   if (live === undefined || orchestrator === undefined) {
-    return;
+    return false;
   }
   if (orchestrator.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
-    return;
+    return false;
   }
   orchestrator.eventsSent += 1;
   orchestrator.pending.push(event);
@@ -1481,6 +1484,7 @@ export function notifyOrchestrator(
   if (!orchestrator.busy && live.pendingAskUser === undefined) {
     flushOrchestrator(self, runId);
   }
+  return true;
 }
 
 /** 溜まったイベントを送る。人の発話は伴わない（自発的な報告）。 */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   aggregateProgress,
+  formatTaskChangeSize,
   formatTaskContext,
   progressSegments,
   computeRanks,
@@ -506,5 +507,39 @@ describe('formatTaskContext: タスク単位のコンテキスト使用量（Iss
         sessionTokens: 0,
       }),
     ).toBe('残り0%（0/1.0k） / 累計0');
+  });
+});
+
+describe('formatTaskChangeSize: タスクの変更規模と分割提案の表示（Issue #1508）', () => {
+  it('未測定・未提案は空文字（表示しない）', () => {
+    expect(formatTaskChangeSize({})).toBe('');
+  });
+
+  it('測定済みなら「Nファイル +A -D」を出す', () => {
+    expect(
+      formatTaskChangeSize({ changeSize: { files: 12, addedLines: 340, deletedLines: 25 } }),
+    ).toBe('12ファイル +340 -25');
+  });
+
+  it('提案済みのみ（規模は測れていない）なら「分割を提案済み」だけ出す', () => {
+    expect(formatTaskChangeSize({ splitSuggested: true })).toBe('分割を提案済み');
+  });
+
+  it('測定済み・提案済みの両方があれば「・」で繋げる', () => {
+    expect(
+      formatTaskChangeSize({
+        changeSize: { files: 12, addedLines: 340, deletedLines: 25 },
+        splitSuggested: true,
+      }),
+    ).toBe('12ファイル +340 -25・分割を提案済み');
+  });
+
+  it('splitSuggested: falseは提案済みに数えない', () => {
+    expect(
+      formatTaskChangeSize({
+        changeSize: { files: 1, addedLines: 0, deletedLines: 0 },
+        splitSuggested: false,
+      }),
+    ).toBe('1ファイル +0 -0');
   });
 });

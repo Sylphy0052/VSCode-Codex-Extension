@@ -500,6 +500,30 @@ export function formatTaskContext(task: TaskContextInput): string {
   return `${remaining} / ${total}`;
 }
 
+// ---- タスクの規模と分割の提案（Issue #1508、ロードマップH4） ----
+
+/** `formatTaskChangeSize`が受け取る最小限の形（`TaskSnapshot`の一部）。 */
+export interface TaskChangeSizeInput {
+  changeSize?: { files: number; addedLines: number; deletedLines: number };
+  splitSuggested?: boolean;
+}
+
+/**
+ * タスクの変更規模の表示文字列（純粋関数）。測れていなければ空文字（表示しない）。
+ *
+ * - 測れた: `12ファイル +340 -25`
+ * - 分割を提案済み: `12ファイル +340 -25・分割を提案済み`
+ * - 規模は測れていないが提案済み（ターン数で超えた等）: `分割を提案済み`
+ */
+export function formatTaskChangeSize(task: TaskChangeSizeInput): string {
+  const size =
+    task.changeSize === undefined
+      ? ''
+      : `${task.changeSize.files}ファイル +${task.changeSize.addedLines} -${task.changeSize.deletedLines}`;
+  const suggested = task.splitSuggested === true ? '分割を提案済み' : '';
+  return [size, suggested].filter((part) => part !== '').join('・');
+}
+
 // HTML文字列への埋め込みを前提にした`escapeHtml`はここに置かない（以前あったが未結線の
 // まま残っていた。レビュー指摘: info「デッドコードのまま『対策済み』に見えるのが一番良くない」）。
 // `workflowView.ts`は初期HTMLシェルへ動的な値を一切埋め込まず（`postMessage`のJSON経由のみ）、

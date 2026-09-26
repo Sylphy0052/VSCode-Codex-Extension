@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.926.33",
+  "version": "2026.926.34",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1688,6 +1688,30 @@
           "default": [],
           "scope": "machine-overridable",
           "markdownDescription": "変更ファイルの交差の判定から外すパス（リポジトリ相対）。`/` で終わる要素はその配下すべてに一致し、それ以外は完全一致する。多くのタスクが追記するだけのファイル（例: `CHANGELOG.md`）で待機が増えすぎるときに使う。"
+        },
+        "agent.workflows.splitSuggestFileCount": {
+          "type": "number",
+          "default": 15,
+          "minimum": 0,
+          "maximum": 1000000,
+          "scope": "machine-overridable",
+          "markdownDescription": "走行中のタスクの変更ファイル数がこの値を超えたら、オーケストレーターへ「このタスクを分けたほうがよいか」を判断するよう知らせる。分けるかどうかはオーケストレーターが決め、自動では分けない。知らせるのは1つのタスクの1回の試行につき1回だけ。対象はgitのworktreeで走るタスクだけ。0にするとこの指標では知らせない。範囲外（0未満・上限超過・非整数）の値は既定値（15）にフォールバックする。"
+        },
+        "agent.workflows.splitSuggestLineCount": {
+          "type": "number",
+          "default": 800,
+          "minimum": 0,
+          "maximum": 1000000,
+          "scope": "machine-overridable",
+          "markdownDescription": "走行中のタスクの変更行数（追加と削除の合計）がこの値を超えたら、オーケストレーターへ分割を判断するよう知らせる（`agent.workflows.splitSuggestFileCount` と同じ仕組み）。未追跡のファイルは全行を追加として数える。ただしバイナリと1MiBを超える未追跡のファイルは数えず、未追跡のファイルが200件を超えるときは200件分だけ数える。0にするとこの指標では知らせない。範囲外（0未満・上限超過・非整数）の値は既定値（800）にフォールバックする。"
+        },
+        "agent.workflows.splitSuggestTurnCount": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 1000000,
+          "scope": "machine-overridable",
+          "markdownDescription": "走行中のタスクで確定したターン数（今回の試行の分）がこの値を超えたら、オーケストレーターへ分割を判断するよう知らせる（`agent.workflows.splitSuggestFileCount` と同じ仕組み）。ターン数はgitのworktreeで走らないタスクでも数える。0にするとこの指標では知らせない。範囲外（0未満・上限超過・非整数）の値は既定値（10）にフォールバックする。"
         },
         "agent.workflows.roadmapDir": {
           "type": "string",

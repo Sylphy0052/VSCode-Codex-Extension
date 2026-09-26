@@ -30,6 +30,7 @@ import {
   summarizeKanban,
   taskRoleLabel,
   formatTaskContext,
+  formatTaskChangeSize,
   type GraphLayout,
   type IntegrationSummary,
   type KanbanBucket,
@@ -100,6 +101,7 @@ interface WorkflowStateMessage {
       roleLabel: string | undefined;
       kanbanBucket: KanbanBucket;
       contextLabel: string;
+      sizeLabel: string;
     })[];
   };
   layout: GraphLayout;
@@ -439,6 +441,8 @@ export class WorkflowViewManager implements vscode.Disposable {
       // （純粋関数、テスト済み）で済ませ、Webview側は受け取った文字列を出すだけにする
       // （役割ラベル・進捗の集計と同じ方針。Issue #104の再発防止）
       contextLabel: formatTaskContext(t),
+      // 変更の規模と分割の提案済みの印（Issue #1508）。空文字なら表示しない
+      sizeLabel: formatTaskChangeSize(t),
     }));
     return {
       snapshot: { ...snapshot, tasks: tasksWithRoleLabel },
