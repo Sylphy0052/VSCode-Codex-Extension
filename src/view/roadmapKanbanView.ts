@@ -7,6 +7,8 @@ import type { RoadmapRunController } from '../orchestrator/roadmapRunController'
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import { isValidIssueNumber, type RoadmapRunMode } from '../orchestrator/roadmapRunState';
 import { chatCsp } from './chatCsp';
+import { GRAPH_SVG_SOURCE } from './graphSvgScript';
+import { layoutRoadmapGraph } from './roadmapKanbanModel';
 import { skinBodyClass } from './skin';
 
 /** 盤面を送る間隔。`sessionKanbanView.ts`と同じく、最初はすぐ送り以降はまとめる。 */
@@ -33,6 +35,8 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
   private postTimer: ReturnType<typeof setTimeout> | undefined;
   private lastPostAt = 0;
   private selectedRunId: string | undefined;
+  /** グラフ表示の描画領域の幅（`layoutGraph`の`maxWidth`）。webviewの`viewport`で受け取る。 */
+  private graphViewportWidth: number | undefined;
 
   constructor(
     private readonly controller: RoadmapRunController,
@@ -120,7 +124,8 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
       this.orchestrator === undefined || board.run === undefined
         ? undefined
         : this.orchestrator.status(board.run.runId);
-    void this.panel.webview.postMessage({ type: 'board', board, orchestrator });
+    const graph = board.run === undefined ? undefined : layoutRoadmapGraph(board.run.columns, this.graphViewportWidth);
+    void this.panel.webview.postMessage({ type: 'board', board, orchestrator, graph });
   }
 
   private receive(message: unknown): void {
@@ -129,6 +134,19 @@ export class RoadmapKanbanViewManager implements vscode.Disposable {
     }
     if (message.type === 'ready') {
       this.post();
+      return;
+    }
+    if (message.type === 'viewport') {
+      // 値の扱いはワークフロー画面（`workflowView.ts`）の`viewport`と揃える
+      const raw = message.width;
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+        return;
+      }
+      const width = Math.min(20000, Math.max(0, Math.round(raw)));
+      if (width !== this.graphViewportWidth) {
+        this.graphViewportWidth = width;
+        this.schedulePost();
+      }
       return;
     }
     if (message.type === 'selectRun') {
@@ -343,7 +361,7 @@ function render(webview: vscode.Webview): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ROADMAP RUN</p><h1>ロードマップ実行</h1><p class="description">ロードマップIssueの子Issueを依存順に実行します。自動実行では並列上限まで順に始め、ユーザー選択では「実行」を押したノードだけを始めます。PRを作ったノードはmerge待ちで止まります（mergeの自動化は未実装）。</p></div><div id="controls" class="controls"></div></header><section id="events" class="events" aria-live="polite"></section><section id="board" class="board" aria-label="ノードの状態"></section></main><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ROADMAP RUN</p><h1>ロードマップ実行</h1><p class="description">ロードマップIssueの子Issueを依存順に実行します。自動実行では並列上限まで順に始め、ユーザー選択では「実行」を押したノードだけを始めます。PRを作ったノードはmerge待ちで止まります（mergeの自動化は未実装）。</p></div><div id="controls" class="controls"></div></header><section id="events" class="events" aria-live="polite"></section><div id="view-toggle" class="view-toggle" role="group" aria-label="表示の切り替え"></div><section id="board" class="board" aria-label="ノードの状態"></section><section id="graph-view" class="graph-view" aria-label="ノードの依存グラフ" hidden><div id="graph-scroll" class="graph-scroll"><svg id="graph" class="graph" role="img" aria-label="依存グラフ"></svg></div><div id="graph-detail" class="graph-detail"></div></section></main><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -378,6 +396,20 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .question { border-top: 1px solid var(--vscode-panel-border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
 .question-text { font-weight: 650; white-space: pre-wrap; overflow-wrap: anywhere; }
 .question-note { color: var(--vscode-descriptionForeground); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.view-toggle { display: flex; gap: 4px; margin-bottom: 12px; }
+.view-toggle .btn[aria-pressed=true] { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+.board[hidden], .graph-view[hidden] { display: none; }
+.graph-scroll { overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 8px; }
+.graph { display: block; }
+.rk-edge { fill: none; stroke: var(--vscode-descriptionForeground); stroke-width: 1.5; } .rk-edge.unmet { stroke-dasharray: 4 3; opacity: .6; }
+.rk-arrow-head { fill: var(--vscode-descriptionForeground); }
+.rk-node { cursor: pointer; } .rk-node:focus { outline: none; }
+.rk-node-rect { fill: var(--vscode-editor-background); stroke: var(--vscode-panel-border); stroke-width: 1.5; }
+.rk-node.runnable .rk-node-rect { stroke: var(--vscode-textLink-foreground); } .rk-node.running .rk-node-rect { stroke: var(--vscode-charts-blue); stroke-width: 2.5; }
+.rk-node.attention .rk-node-rect { stroke: var(--vscode-charts-yellow); stroke-width: 2.5; } .rk-node.done .rk-node-rect { stroke: var(--vscode-charts-green); fill: color-mix(in srgb, var(--vscode-charts-green) 12%, var(--vscode-editor-background)); }
+.rk-node.selected .rk-node-rect, .rk-node:focus-visible .rk-node-rect { stroke: var(--vscode-focusBorder); stroke-width: 3; }
+.rk-node-title { fill: var(--vscode-foreground); font-size: 12px; font-weight: 650; } .rk-node-meta { fill: var(--vscode-descriptionForeground); font-size: 11px; }
+.graph-detail { margin-top: 12px; max-width: 480px; } .graph-detail .empty { padding: 8px 0; }
 .question textarea { width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 48px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
 `;
 
@@ -389,6 +421,25 @@ const script = `
   const controls = document.getElementById('controls');
   const eventsEl = document.getElementById('events');
   const boardEl = document.getElementById('board');
+  const toggleEl = document.getElementById('view-toggle');
+  const graphViewEl = document.getElementById('graph-view');
+  const graphScrollEl = document.getElementById('graph-scroll');
+  const graphEl = document.getElementById('graph');
+  const graphDetailEl = document.getElementById('graph-detail');
+  const COLUMN_LABELS = {};
+  COLUMNS.forEach(function (col) { COLUMN_LABELS[col[0]] = col[1]; });
+  // グラフのノードの大きさはlayoutGraph（workflowGraph.ts）のNODE_WIDTH・NODE_HEIGHTと揃える
+  const NODE_W = 168;
+  const NODE_H = 60;
+  const NODE_TEXT_MAX_WIDTH = 148;
+  const NODE_CLIP_ID = 'rkNodeClip';
+  const ARROW_ID = 'rkArrow';
+  // 表示の切り替え（Issue #1465 分割案8b-2）。webviewの状態へ残し、開き直しても戻す
+  const savedState = vscode.getState() || {};
+  let viewMode = savedState.viewMode === 'graph' ? 'graph' : 'board';
+  let selectedIssue = typeof savedState.selectedIssue === 'number' ? savedState.selectedIssue : undefined;
+  let currentGraph;
+  let reportedGraphWidth = -1;
   let current;
   let orchestratorStatus;
   // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
@@ -439,7 +490,12 @@ const script = `
         if (board.run && board.run.runId === r.runId) { o.selected = true; }
         select.appendChild(o);
       });
-      select.addEventListener('change', function () { vscode.postMessage({ type: 'selectRun', runId: select.value }); });
+      select.addEventListener('change', function () {
+        // 別runの同じ番号のカードを選択済みとして出さない
+        selectedIssue = undefined;
+        saveViewState();
+        vscode.postMessage({ type: 'selectRun', runId: select.value });
+      });
       controls.appendChild(select);
     }
     const run = board.run;
@@ -595,15 +651,182 @@ const script = `
     });
   }
 
+  ${GRAPH_SVG_SOURCE}
+
+  function saveViewState() {
+    vscode.setState({ viewMode: viewMode, selectedIssue: selectedIssue });
+  }
+
+  function findCard(run, issueNumber) {
+    let found;
+    COLUMNS.forEach(function (col) {
+      run.columns[col[0]].forEach(function (card) { if (card.issueNumber === issueNumber) { found = card; } });
+    });
+    return found;
+  }
+
+  function renderViewToggle() {
+    toggleEl.replaceChildren();
+    [['board', 'ボード'], ['graph', 'グラフ']].forEach(function (m) {
+      const b = button(m[1], '', function () {
+        if (viewMode === m[0]) { return; }
+        viewMode = m[0];
+        saveViewState();
+        renderView();
+      });
+      b.setAttribute('aria-pressed', viewMode === m[0] ? 'true' : 'false');
+      toggleEl.appendChild(b);
+    });
+  }
+
+  function buildGraphNode(card, pos) {
+    const group = svgEl('g', {
+      class: 'rk-node ' + card.column + (card.issueNumber === selectedIssue ? ' selected' : ''),
+      transform: 'translate(' + pos.x + ',' + pos.y + ')',
+      tabindex: 0,
+      role: 'button',
+      'data-issue': card.issueNumber,
+    });
+    group.appendChild(svgEl('rect', { class: 'rk-node-rect', x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 6 }));
+    const body = svgEl('g', { 'clip-path': 'url(#' + NODE_CLIP_ID + ')' });
+    // タイトルは外部由来。必ずtextContentへ代入する（SVGとして解釈させない）
+    const title = svgEl('text', { class: 'rk-node-title', x: -NODE_W / 2 + 10, y: -6, 'data-fit': NODE_TEXT_MAX_WIDTH });
+    title.textContent = '#' + card.issueNumber + ' ' + card.title;
+    body.appendChild(title);
+    const meta = svgEl('text', { class: 'rk-node-meta', x: -NODE_W / 2 + 10, y: 14, 'data-fit': NODE_TEXT_MAX_WIDTH });
+    const labels = [COLUMN_LABELS[card.column]];
+    if (card.badges.length > 0) { labels.push(card.badges[0].label); }
+    if (card.questions.length > 0) { labels.push('質問' + card.questions.length + '件'); }
+    meta.textContent = labels.join(' · ');
+    body.appendChild(meta);
+    group.appendChild(body);
+    const tip = svgEl('title');
+    tip.textContent = '#' + card.issueNumber + ' ' + card.title;
+    group.appendChild(tip);
+    function select() {
+      selectedIssue = card.issueNumber;
+      saveViewState();
+      renderGraph(current, currentGraph);
+    }
+    group.addEventListener('click', select);
+    group.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
+    });
+    return group;
+  }
+
+  function renderGraph(board, layout) {
+    // 描き直しでノードの要素が入れ替わるとフォーカスが外れる。選択の操作や実行中の自動更新のたびに
+    // キーボードでの移動位置が飛ばないよう、同じ番号のノードへ戻す
+    const active = document.activeElement;
+    const focusedNode = active && graphEl.contains(active) ? active.getAttribute('data-issue') : null;
+    graphEl.replaceChildren();
+    graphDetailEl.replaceChildren();
+    if (!board.run || !layout) {
+      graphDetailEl.appendChild(el('p', 'empty', 'ロードマップの実行はまだありません。コマンド「Agent: ロードマップを実行」から始めてください。'));
+      return;
+    }
+    const run = board.run;
+    const height = Math.max(1, layout.height);
+    graphEl.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + height);
+    graphEl.setAttribute('width', String(Math.max(1, layout.width)));
+    graphEl.setAttribute('height', String(height));
+    const defs = svgEl('defs');
+    defs.appendChild(arrowMarker(ARROW_ID, 'rk-arrow-head'));
+    // 文字の切り詰め（fitNodeText）が測れなかったときの下支え。矩形より少し内側で文字だけを切る
+    const clip = svgEl('clipPath', { id: NODE_CLIP_ID });
+    clip.appendChild(svgEl('rect', { x: -NODE_W / 2 + 4, y: -NODE_H / 2, width: NODE_W - 8, height: NODE_H }));
+    defs.appendChild(clip);
+    graphEl.appendChild(defs);
+
+    const posById = {};
+    layout.nodes.forEach(function (n) { posById[n.id] = n; });
+    const edges = svgEl('g', { class: 'rk-edges' });
+    layout.edges.forEach(function (edge) {
+      const from = posById[edge.from];
+      const to = posById[edge.to];
+      if (!from || !to) { return; }
+      const target = findCard(run, Number(edge.to));
+      const dep = target ? target.dependsOn.find(function (d) { return String(d.issueNumber) === edge.from; }) : undefined;
+      const unmet = dep !== undefined && !dep.satisfied;
+      edges.appendChild(svgEl('path', {
+        class: 'rk-edge' + (unmet ? ' unmet' : ''),
+        d: edgePath(from.x, from.y + NODE_H / 2, to.x, to.y - NODE_H / 2),
+        'marker-end': 'url(#' + ARROW_ID + ')',
+      }));
+    });
+    graphEl.appendChild(edges);
+
+    const nodes = svgEl('g', { class: 'rk-nodes' });
+    layout.nodes.forEach(function (n) {
+      const card = findCard(run, Number(n.id));
+      if (card) { nodes.appendChild(buildGraphNode(card, n)); }
+    });
+    graphEl.appendChild(nodes);
+    // 実測での切り詰めはSVGへ入れたあと（getComputedTextLengthは描画中の要素でしか測れない）
+    nodes.querySelectorAll('text[data-fit]').forEach(function (t) {
+      fitNodeText(t, Number(t.getAttribute('data-fit')));
+    });
+    if (focusedNode !== null) {
+      const again = nodes.querySelector('[data-issue="' + focusedNode + '"]');
+      if (again) { again.focus(); }
+    }
+
+    const selected = selectedIssue === undefined ? undefined : findCard(run, selectedIssue);
+    if (selected) {
+      graphDetailEl.appendChild(renderCard(selected));
+    } else {
+      graphDetailEl.appendChild(el('p', 'empty', 'ノードを押すと、ここにカードの詳細と操作が出ます。'));
+    }
+  }
+
+  // 段の折り返しに使う幅を拡張機能へ伝える（layoutGraphのmaxWidth）。非表示のあいだは測れないので送らない
+  function reportViewport() {
+    if (viewMode !== 'graph') { return; }
+    const width = Math.floor(graphScrollEl.clientWidth) - 16;
+    if (width <= 0 || width === reportedGraphWidth) { return; }
+    reportedGraphWidth = width;
+    vscode.postMessage({ type: 'viewport', width: width });
+  }
+
+  // 出していない方の表示は描かない。ボードとグラフの詳細に同じ質問の入力欄を2つ作ると、
+  // 書きかけの回答と入力位置の持ち越し（drafts・focusedQuestion）がどちらへ効くか定まらない
+  function renderView() {
+    renderViewToggle();
+    const isGraph = viewMode === 'graph';
+    boardEl.hidden = isGraph;
+    graphViewEl.hidden = !isGraph;
+    if (!current) { return; }
+    if (isGraph) {
+      boardEl.replaceChildren();
+      renderGraph(current, currentGraph);
+      reportViewport();
+    } else {
+      graphEl.replaceChildren();
+      graphDetailEl.replaceChildren();
+      renderBoard(current);
+    }
+  }
+
+  // ドラッグでのリサイズ中に幅を送り続けないよう、止まってから送る（ワークフロー画面と同じ150ms）
+  let viewportTimer;
+  new ResizeObserver(function () {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(reportViewport, 150);
+  }).observe(graphScrollEl);
+
   window.addEventListener('message', function (event) {
     const message = event.data;
     if (!message || message.type !== 'board') { return; }
     current = message.board;
     orchestratorStatus = message.orchestrator;
+    currentGraph = message.graph;
     renderControls(current);
     renderEvents(current);
-    renderBoard(current);
+    renderView();
   });
+  // 復元した表示を最初のboardより前に反映する（静的HTMLのボード表示が一瞬出ないように）
+  renderView();
   vscode.postMessage({ type: 'ready' });
 })();
 `;

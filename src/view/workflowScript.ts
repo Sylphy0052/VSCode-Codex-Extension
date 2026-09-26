@@ -1,4 +1,5 @@
 import { COMPLETION_EVIDENCE_SOURCE } from './completionEvidenceScript';
+import { GRAPH_SVG_SOURCE } from './graphSvgScript';
 
 /**
  * ワークフローViewのWebviewで動くスクリプト（design.md §16.8）。
@@ -16,7 +17,7 @@ export function workflowScript(): string {
   return `
   const vscode = acquireVsCodeApi();
   ${COMPLETION_EVIDENCE_SOURCE}
-  const SVGNS = 'http://www.w3.org/2000/svg';
+  ${GRAPH_SVG_SOURCE}
   const el = (id) => document.getElementById(id);
 
   const STATE_LABEL = {
@@ -107,16 +108,6 @@ export function workflowScript(): string {
   let viewportTimer = 0;
 
   // ---- ユーティリティ ----
-
-  function svgEl(tag, attrs) {
-    const node = document.createElementNS(SVGNS, tag);
-    if (attrs) {
-      for (const key of Object.keys(attrs)) {
-        node.setAttribute(key, String(attrs[key]));
-      }
-    }
-    return node;
-  }
 
   function el2(tag, className) {
     const node = document.createElement(tag);
@@ -505,51 +496,6 @@ export function workflowScript(): string {
   // （stroke-width: 3）の外側半分まで切ってしまう
   const NODE_CLIP_ID = 'wfNodeClip';
 
-  /**
-   * ノード内の文字を、実測幅がmaxWidthに収まるまで末尾から削って省略記号を付ける
-   * （issue #1011）。
-   *
-   * **SVGへappendしたあとに呼ぶこと。** getComputedTextLengthはDOMへ接続され描画されて
-   * いる要素でしか測れず、未接続・非表示では0を返す。0が返ったときは何もしない
-   * （クリップ（NODE_CLIP_ID）が隣のノードへのはみ出しだけは防ぐ）。
-   *
-   * **測定の回数を抑える。** textContentの書き換えと測定を交互に行うと、そのたびに
-   * レイアウトが同期で走る。タスクは1runあたり最大50件、1ノードに3つの文字列があるので、
-   * 1文字列あたりの測定回数がそのまま効いてくる。幅は文字数にほぼ比例するため、直前の
-   * 測定値から次の候補を比率で推定し、推定が範囲外へ出たときだけ二分探索へ落とす。
-   * 日本語26文字の要約で測定3回（二分探索のみなら5回）だった。
-   */
-  function fitNodeText(node, maxWidth) {
-    const full = node.textContent;
-    if (full === '') return;
-    let width = node.getComputedTextLength();
-    if (width === 0 || width <= maxWidth) return;
-    // lo: 収まると確認できた文字数。hi: 収まる可能性が残っている上限
-    // （full全体は超過すると分かっているので、最低1文字は削る）
-    let lo = 0;
-    let hi = full.length - 1;
-    let count = full.length;
-    let probe = Math.min(hi, Math.max(1, Math.floor((full.length * maxWidth) / width)));
-    while (lo < hi) {
-      node.textContent = full.slice(0, probe) + '…';
-      width = node.getComputedTextLength();
-      count = probe;
-      if (width <= maxWidth) {
-        lo = probe;
-      } else {
-        hi = probe - 1;
-      }
-      if (lo >= hi) break;
-      // 比率での推定がloより先へ進まない・hiを超えるときは二分探索へ落とす
-      // （進まない候補を測り続けると終わらない）
-      const next = Math.floor((count * maxWidth) / width);
-      probe = next > lo && next <= hi ? next : Math.ceil((lo + hi) / 2);
-    }
-    // 1文字＋省略記号すら入らないとき（極端に幅の広い文字）は空にする。
-    // 枠の外へ出すよりは何も出さないほうがよい
-    node.textContent = lo > 0 ? full.slice(0, lo) + '…' : '';
-  }
-
   function markForState(state, submissionCount) {
     const group = svgEl('g', { class: 'wf-mark' });
     if (state === 'running') {
@@ -803,23 +749,8 @@ export function workflowScript(): string {
 
   function buildArrowDefs() {
     const defs = svgEl('defs');
-    const variants = [
-      { id: ARROW_IDS.normal, cls: 'wf-arrow-head' },
-      { id: ARROW_IDS.related, cls: 'wf-arrow-head related' },
-    ];
-    for (const v of variants) {
-      const marker = svgEl('marker', {
-        id: v.id,
-        viewBox: '0 0 10 10',
-        refX: 9,
-        refY: 5,
-        markerWidth: 6,
-        markerHeight: 6,
-        orient: 'auto-start-reverse',
-      });
-      marker.appendChild(svgEl('path', { class: v.cls, d: 'M 0 0 L 10 5 L 0 10 z' }));
-      defs.appendChild(marker);
-    }
+    defs.appendChild(arrowMarker(ARROW_IDS.normal, 'wf-arrow-head'));
+    defs.appendChild(arrowMarker(ARROW_IDS.related, 'wf-arrow-head related'));
     // ノードの文字がはみ出さないための下支え（issue #1011）。主役は実測での切り詰め
     // （fitNodeText）で、これは測れなかったとき（パネルが非表示のまま組み立てた等）に
     // 隣のノードの領域へ文字を潜り込ませないための保険。ノードのローカル座標で当たるので
@@ -828,16 +759,6 @@ export function workflowScript(): string {
     clip.appendChild(svgEl('rect', { x: -80, y: -30, width: 160, height: 60 }));
     defs.appendChild(clip);
     return defs;
-  }
-
-  /**
-   * 依存元の下端から依存先の上端へ引く3次ベジェ。制御点を縦方向へ伸ばして、
-   * 出入りの向きを縦に揃える（同じ段へ折り返した辺でも破綻しないよう最低量を確保する）
-   */
-  function edgePath(x1, y1, x2, y2) {
-    const k = Math.max(18, Math.abs(y2 - y1) / 2);
-    return 'M ' + x1 + ' ' + y1 +
-      ' C ' + x1 + ' ' + (y1 + k) + ', ' + x2 + ' ' + (y2 - k) + ', ' + x2 + ' ' + y2;
   }
 
   function renderGraph(snapshot, layout) {
