@@ -1,5 +1,6 @@
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
+import type { ClaudeSandboxMode } from '../claude/sandbox';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
 import type { TeamRole } from './rolePresets';
 
@@ -117,6 +118,16 @@ export interface TaskSessionInput {
    * Claude側は起動引数に相当するものが無いため無視する。
    */
   sandbox: string;
+  /**
+   * Claude CLIのsandbox（Issue #1541）で、Bashの書き込み先を制限し、その内側で済むコマンドを
+   * 承認ダイアログなしで通す。オーケストレータモードとロードマップ実行のセッションだけが渡す
+   * （通常のチャットと従来のワークフローは渡さず、起動引数を変えない）。
+   *
+   * Claude側（`claudeChatView.ts`）だけが読む。依存（bubblewrap・socat）が揃わない環境では
+   * sandboxを付けず従来どおり起動し、その旨をログへ残す。Codex側は無視する（Codexの
+   * 権限は{@link sandbox}と承認方針のクランプが担い、利用者の設定より緩めない）。
+   */
+  cliSandbox?: ClaudeSandboxMode;
   /**
    * タスク間メッセージング（design.md §16.21）専用のMCPサーバへの接続先。runner.tsが
    * runごとに立てたサーバ（`messaging.ts`の`startHttpMcpTransport`）から、タスクごとに

@@ -613,6 +613,9 @@ export class TaskStageRunner {
       cwd,
       config,
       sandbox,
+      // worktreeで動く工程だけ作業ディレクトリへ書ける（Issue #1541）。それ以外の工程の
+      // cwdは利用者の作業ツリーなので書かせない
+      cliSandbox: WORKTREE_STAGES.has(ref.stage) ? 'workspace-write' : 'read-only',
       mcp: { url: channel.url },
       generation,
       inputLock: true,
