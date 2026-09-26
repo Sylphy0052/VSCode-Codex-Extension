@@ -181,6 +181,32 @@ describe('parseWorkflowYaml の roadmap（Issue #173）', () => {
   });
 });
 
+describe('parseWorkflowYaml の roadmapChunk（Issue #1549）', () => {
+  const withChunk = (chunkYaml: string): ReturnType<typeof parseWorkflowYaml> =>
+    parseWorkflowYaml(`version: 1\n${chunkYaml}\ntasks:\n  - id: T1\n`);
+
+  it('正しい形のroadmapChunkを保持する', () => {
+    const def = withChunk('roadmapChunk:\n  batch: "batch-1"\n  index: 1\n  total: 3');
+
+    expect(def.roadmapChunk).toEqual({ batch: 'batch-1', index: 1, total: 3 });
+  });
+
+  it('roadmapChunkが無ければundefined', () => {
+    expect(parseWorkflowYaml('version: 1\ntasks:\n  - id: T1\n').roadmapChunk).toBeUndefined();
+  });
+
+  it.each([
+    ['batchが空文字', 'roadmapChunk:\n  batch: ""\n  index: 1\n  total: 1'],
+    ['batchに許可外の文字', 'roadmapChunk:\n  batch: "batch/1"\n  index: 1\n  total: 1'],
+    ['indexが整数でない', 'roadmapChunk:\n  batch: "b"\n  index: 1.5\n  total: 2'],
+    ['indexが0以下', 'roadmapChunk:\n  batch: "b"\n  index: 0\n  total: 2'],
+    ['indexがtotalを超える', 'roadmapChunk:\n  batch: "b"\n  index: 3\n  total: 2'],
+    ['totalが数値でない', 'roadmapChunk:\n  batch: "b"\n  index: 1\n  total: "many"'],
+  ])('壊れた値（%s）は読み捨ててundefinedにする', (_label, chunkYaml) => {
+    expect(withChunk(chunkYaml).roadmapChunk).toBeUndefined();
+  });
+});
+
 describe('validateWorkflow の roadmap（Issue #173）', () => {
   const withRoadmap = (roadmap: string): ReturnType<typeof parseWorkflowYaml> =>
     parseWorkflowYaml(

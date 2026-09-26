@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -131,7 +132,9 @@ import {
   findMissingVerifyWarnings,
   MAX_PROMPT_LENGTH,
   MAX_TASK_COUNT,
+  parseWorkflowYaml,
   withWorkflowReviewStatus,
+  type WorkflowDefinition,
 } from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
 import {
@@ -904,6 +907,25 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     verificationStore,
   );
   context.subscriptions.push(workflowView);
+
+  // ロードマップの分割runを自動で繋ぐ（Issue #1549）。直前のチャンクが`succeeded`で
+  // 終わったら、同じ`batch`の次の`index`のYAMLを探して起動する。`onChanged`は状態が
+  // 変わるたびに何度も呼ばれるため、1つのrunIdにつき一度しか処理しない
+  // （`succeeded`と判定した直後、awaitより前に印を付けて二重起動を防ぐ）
+  const roadmapChunkContinued = new Set<string>();
+  context.subscriptions.push({
+    dispose: workflowRunner.onChanged((runId) => {
+      if (roadmapChunkContinued.has(runId)) {
+        return;
+      }
+      const live = workflowRunner.listLive().find((run) => run.runId === runId);
+      if (live === undefined || live.outcome !== 'succeeded') {
+        return;
+      }
+      roadmapChunkContinued.add(runId);
+      void continueNextRoadmapChunk(workflowRunner, workflowView, log, live.defPath);
+    }),
+  });
 
   // 要対応は会話とワークフローが既に持つ状態（承認待ちと、引き継ぎ元として残ったタブ。
   // Issue #1165）を横断表示する。ここでは状態を保存・更新しないため、元の画面で解決すれば
@@ -2215,6 +2237,113 @@ function formatWorkflowMtime(mtime: number): string {
   );
 }
 
+/**
+ * ワークフロー定義ファイルを実際に起動する（QuickPickで選んだあと、または分割ロードマップ
+ * runの続きを自動起動するときの共通処理。Issue #1549）。allow確認モーダル・エラー表示・
+ * View表示まで含めて`runWorkflow`と自動起動の両方から呼べるようにここへ切り出した。
+ */
+async function startWorkflowFile(
+  runner: WorkflowRunner,
+  view: WorkflowViewManager,
+  log: Logger,
+  fileFsPath: string,
+  workspaceRootFsPath: string,
+  label: string,
+): Promise<void> {
+  let result = await runner.start(fileFsPath, workspaceRootFsPath);
+  if (!result.ok && result.needsAllowConfirmation === true) {
+    const ids = (result.allowTaskIds ?? []).join(', ');
+    const choice = await vscode.window.showWarningMessage(
+      `このワークフローは既定の危険操作チェックを解除しているタスクがあります（${ids}）。` +
+        'これらのタスクでは allow に一致する操作が承認なしで実行されます。実行しますか？',
+      { modal: true },
+      '実行する',
+    );
+    if (choice !== '実行する') {
+      return;
+    }
+    // 確認したのは、確認時に読んだ内容そのもの。呼び直しの時点で定義が書き換わっていれば
+    // ダイジェストが食い違い、`runner.start` がもう一度確認を求める（Issue #1107）
+    result = await runner.start(fileFsPath, workspaceRootFsPath, {
+      allowConfirmed: true,
+      ...(result.allowDigest === undefined ? {} : { allowConfirmedDigest: result.allowDigest }),
+    });
+  }
+  if (!result.ok) {
+    const detail = (result.errors ?? []).map((e) => e.message).join('\n');
+    log.error(`ワークフローを開始できません:\n${detail}`);
+    void vscode.window.showErrorMessage(`ワークフローを開始できません: ${detail}`);
+    return;
+  }
+  void vscode.window.showInformationMessage(`ワークフローを開始しました: ${label}`);
+  view.show(result.runId);
+}
+
+/**
+ * ロードマップ分割の次のチャンクを自動起動する（Issue #1549）。終わったrunの定義ファイルを
+ * 読み直して`roadmapChunk`を取り出し、同じ`batch`で`index + 1`のYAMLを
+ * `readWorkflowsConfig().dir`配下から探して起動する。
+ *
+ * `WorkflowRunSnapshot`/`LiveRunSummary`はどちらも`roadmapChunk`を運ばないため
+ * （Viewが必要とする形に絞ってある）、ここでは`defPath`から`parseWorkflowYaml`で読み直す。
+ * 見つからない・読めない場合はrunそのものは既に成功しているため、エラーではなく
+ * 情報メッセージに留めて処理を止める。
+ */
+async function continueNextRoadmapChunk(
+  runner: WorkflowRunner,
+  view: WorkflowViewManager,
+  log: Logger,
+  defPath: string,
+): Promise<void> {
+  let finished: WorkflowDefinition;
+  try {
+    finished = parseWorkflowYaml(await fsPromises.readFile(defPath, 'utf8'));
+  } catch (err) {
+    log.warn(
+      `[roadmap] 完了したワークフロー定義を読み直せませんでした（${defPath}）: ${sanitizeForLog(String(err))}`,
+    );
+    return;
+  }
+  const chunk = finished.roadmapChunk;
+  if (chunk === undefined || chunk.index >= chunk.total) {
+    return;
+  }
+  const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(defPath));
+  if (folder === undefined) {
+    log.warn('[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません');
+    return;
+  }
+  const dir = readWorkflowsConfig().dir;
+  const pattern = new vscode.RelativePattern(folder, `${dir}/**/*.{yaml,yml}`);
+  const files = await vscode.workspace.findFiles(pattern, undefined, 200);
+  for (const file of files) {
+    let candidate: WorkflowDefinition;
+    try {
+      candidate = parseWorkflowYaml(await fsPromises.readFile(file.fsPath, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (
+      candidate.roadmapChunk?.batch === chunk.batch &&
+      candidate.roadmapChunk.index === chunk.index + 1
+    ) {
+      await startWorkflowFile(
+        runner,
+        view,
+        log,
+        file.fsPath,
+        folder.uri.fsPath,
+        path.basename(file.fsPath),
+      );
+      return;
+    }
+  }
+  void vscode.window.showInformationMessage(
+    `ロードマップの分割runが完了しましたが、続き（${chunk.index + 1}/${chunk.total}）の` +
+      `ワークフロー定義が見つかりませんでした（${dir} 配下を確認してください）`,
+  );
+}
+
 async function runWorkflow(
   runner: WorkflowRunner,
   view: WorkflowViewManager,
@@ -2258,33 +2387,7 @@ async function runWorkflow(
     return;
   }
 
-  let result = await runner.start(picked.file.fsPath, folder.uri.fsPath);
-  if (!result.ok && result.needsAllowConfirmation === true) {
-    const ids = (result.allowTaskIds ?? []).join(', ');
-    const choice = await vscode.window.showWarningMessage(
-      `このワークフローは既定の危険操作チェックを解除しているタスクがあります（${ids}）。` +
-        'これらのタスクでは allow に一致する操作が承認なしで実行されます。実行しますか？',
-      { modal: true },
-      '実行する',
-    );
-    if (choice !== '実行する') {
-      return;
-    }
-    // 確認したのは、確認時に読んだ内容そのもの。呼び直しの時点で定義が書き換わっていれば
-    // ダイジェストが食い違い、`runner.start` がもう一度確認を求める（Issue #1107）
-    result = await runner.start(picked.file.fsPath, folder.uri.fsPath, {
-      allowConfirmed: true,
-      ...(result.allowDigest === undefined ? {} : { allowConfirmedDigest: result.allowDigest }),
-    });
-  }
-  if (!result.ok) {
-    const detail = (result.errors ?? []).map((e) => e.message).join('\n');
-    log.error(`ワークフローを開始できません:\n${detail}`);
-    void vscode.window.showErrorMessage(`ワークフローを開始できません: ${detail}`);
-    return;
-  }
-  void vscode.window.showInformationMessage(`ワークフローを開始しました: ${picked.label}`);
-  view.show(result.runId);
+  await startWorkflowFile(runner, view, log, picked.file.fsPath, folder.uri.fsPath, picked.label);
 }
 
 /**
@@ -3368,11 +3471,15 @@ async function planWorkflowFromRoadmapFile(
   // 選んだフェーズをまとめて1本のYAMLにする。合計がタスク数の上限を超える選択では
   // フェーズ単位で複数のYAMLへ分ける（design.md §16.19 2段目）
   const chunks = splitRoadmapPhasesIntoChunks(pickedPhases);
+  // 分割したYAML群を束ねる識別子（Issue #1549）。複数チャンクのときだけ発行し、
+  // `withRoadmapReference`経由で各YAMLの`roadmapChunk`へ書き込む。runが`succeeded`で
+  // 終わるたびに、この`batch`が一致する次の`index`のYAMLを`extension.ts`側が自動実行する
+  const roadmapChunkBatch = chunks.length > 1 ? randomUUID() : undefined;
   if (chunks.length > 1) {
     void vscode.window.showInformationMessage(
       `選んだフェーズの項目数がタスク数の上限（${MAX_TASK_COUNT}件）を超えるため、` +
         `${chunks.length}個のワークフローへ分けて生成します。` +
-        '分けた分は別々のrunになるため、前のrunが終わってから次を実行してください。',
+        '前のrunが成功すると、次のrunを自動的に開始します。',
     );
   }
 
@@ -3415,7 +3522,14 @@ async function planWorkflowFromRoadmapFile(
 
     // 生成した定義に「どのロードマップから作ったか」を残す（design.md §16.19）。runが
     // 終わったとき、この値を頼りにチェックを書き戻す。
-    const withRoadmap = withRoadmapReference(result.yaml, result.definition, roadmapPath);
+    const withRoadmap = withRoadmapReference(
+      result.yaml,
+      result.definition,
+      roadmapPath,
+      roadmapChunkBatch === undefined
+        ? undefined
+        : { batch: roadmapChunkBatch, index: index + 1, total: chunks.length },
+    );
     const resultWithRoadmap = {
       ...result,
       yaml: withRoadmap.yaml,

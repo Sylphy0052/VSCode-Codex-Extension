@@ -270,6 +270,8 @@ class FakeHost implements TaskSessionHost {
   sessions: FakeTaskSession[] = [];
   orchestratorSessions: FakeTaskSession[] = [];
   openInputs: TaskSessionInput[] = [];
+  /** オーケストレーターセッションを開いたときの入力（`openInputs`とは分ける。理由は上と同じ）。 */
+  orchestratorInputs: TaskSessionInput[] = [];
   private counter = 0;
   /** 次の`openTaskSession`呼び出しだけ失敗させる（例: app-serverが落ちている等の再現）。 */
   private pendingRejection: Error | undefined;
@@ -323,6 +325,7 @@ class FakeHost implements TaskSessionHost {
       configure(session);
     }
     if (input.role === 'orchestrator') {
+      this.orchestratorInputs.push(input);
       this.orchestratorSessions.push(session);
       return session;
     }
@@ -14619,6 +14622,36 @@ tasks:
     runTurn(orchestrator, 'other');
     await flush();
     expect(harness.codexHost.orchestratorSessions).toHaveLength(2);
+  });
+
+  it('自動引き継ぎは新しいタブを開かせず立て直しで会話を入れ替え、上限に数えない（Issue #1549）', async () => {
+    const { harness, runId, orchestrator } = await startAndSendFromTask({
+      readMaxOrchestratorRespawns: () => 0,
+    });
+    const input = harness.codexHost.orchestratorInputs[0];
+    expect(input?.autoHandoffAutoApprove).toBe(true);
+    const delegate = input?.handoffDelegate;
+    expect(delegate).toBeDefined();
+
+    const handedOff = await delegate?.({ model: '', effort: '', prompt: 'p', trigger: 'auto' });
+    expect(handedOff).toBe(true);
+    // 旧セッションの破棄はホストの引き継ぎ処理が戻った後
+    expect(orchestrator.disposed).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
+
+    expect(orchestrator.disposed).toBe(true);
+    expect(harness.codexHost.orchestratorSessions).toHaveLength(2);
+    const respawned = harness.codexHost.orchestratorSessions[1] as FakeTaskSession;
+    const first = respawned.sentTexts[0] as string;
+    expect(first).toContain('最初の相談');
+    expect(first).toContain('コンテキスト残量が少なくなったため、実行の途中で立て直したものです。');
+    const snapshot = harness.runner.getSnapshot(runId);
+    expect(snapshot?.orchestrator?.health).toBe('alive');
+    expect(snapshot?.orchestrator?.respawnCount).toBe(0);
+
+    // 入れ替わった古いセッションからの引き継ぎは受けない
+    expect(await delegate?.({ model: '', effort: '', prompt: 'p', trigger: 'auto' })).toBe(false);
   });
 
   it('1回だけ失敗して送り直しが成功すれば立て直さず、イベントも失わない', async () => {
