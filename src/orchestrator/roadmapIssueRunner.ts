@@ -652,6 +652,9 @@ export class RoadmapIssueRunner {
       cwd: issue.worktreePath ?? run.workspaceRoot,
       config,
       sandbox,
+      // worktreeで動くときだけ作業ディレクトリへ書ける（Issue #1541）。worktreeが無いときの
+      // cwdは利用者の作業ツリーなので書かせない
+      cliSandbox: issue.worktreePath === undefined ? 'read-only' : 'workspace-write',
       generation,
       inputLock: true,
       ...(channel === undefined ? {} : { mcp: { url: channel.url } }),

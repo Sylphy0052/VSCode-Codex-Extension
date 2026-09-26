@@ -460,6 +460,12 @@ export class TaskStageRunner {
       );
       return false;
     }
+    // 開くのを待つ間（sandboxの確認。Issue #1541）に拡張機能が終了した。`dispose`は呼ばれた
+    // 時点の`live`しか閉じないため、ここで開いたセッションは自分で閉じる
+    if (this.disposed) {
+      this.release(entry, { dispose: true });
+      return false;
+    }
     this.live.set(liveKey(runId, taskId), entry);
     await this.mutate(runId, (r) =>
       recordAttemptSession(r, ref, entry.session.sessionId, this.now()),
@@ -614,6 +620,9 @@ export class TaskStageRunner {
       cwd,
       config,
       sandbox,
+      // worktreeで動く工程だけ作業ディレクトリへ書ける（Issue #1541）。それ以外の工程の
+      // cwdは利用者の作業ツリーなので書かせない
+      cliSandbox: WORKTREE_STAGES.has(ref.stage) ? 'workspace-write' : 'read-only',
       mcp: { url: channel.url },
       generation,
       inputLock: true,

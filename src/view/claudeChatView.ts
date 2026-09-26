@@ -124,6 +124,7 @@ import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
 import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
+import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CommandCatalog } from '../provider/commandCatalog';
 import {
   CLAUDE_PSEUDO_COMMANDS,
@@ -461,21 +462,23 @@ function openShellCommandTerminal(cwd: string, command: string): void {
  * ユーザー設定・YAMLの経路とは無関係（§16.16の信頼境界を壊さない。`TaskSessionConfig`
  * 自体に`additionalArgs`が無いことがそれを裏付ける）。
  */
-function toClaudeConfig(input: TaskSessionInput): ClaudeConfig {
+function toClaudeConfig(input: TaskSessionInput, sandboxArgs: readonly string[]): ClaudeConfig {
   return {
     model: input.config.model,
     effort: input.config.effort,
     permissionMode: input.config.approvalMode,
     agent: '',
-    additionalArgs:
-      input.mcp !== undefined
+    additionalArgs: [
+      ...(input.mcp !== undefined
         ? [
             '--mcp-config',
             JSON.stringify({
               mcpServers: { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: input.mcp.url } },
             }),
           ]
-        : [],
+        : []),
+      ...sandboxArgs,
+    ],
   };
 }
 
@@ -495,6 +498,8 @@ export class ClaudeChatViewManager
 
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
+  /** Claude CLIのsandboxを使えるかの確認（Issue #1541）。拡張ホストの間、結果を共有する。 */
+  private readonly sandboxProbe: ClaudeSandboxProbe;
   private commands: SlashCommand[] | undefined;
   /** セカンドオピニオン（Issue #894）の実行中管理。親セッションごとに1本へ絞る。 */
   private readonly secondOpinionRegistry = new SecondOpinionRegistry();
@@ -578,6 +583,7 @@ export class ClaudeChatViewManager
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
     this.usageProbe = new ClaudeUsageProbe(claudePath, log);
+    this.sandboxProbe = new ClaudeSandboxProbe(nodeSandboxProbePorts(claudePath), log);
   }
 
   private initialModelSettings(
@@ -2092,7 +2098,9 @@ export class ClaudeChatViewManager
    * （`TaskSession.open()` の役目。design.md §16.10の2）。
    */
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
-    const taskConfig = toClaudeConfig(input);
+    // sandboxの起動引数は`taskConfig.additionalArgs`へ入れる。同じパネルでCLIを起動し直す
+    // （モデル変更・中断後の再開）ときも`configFor`がこれを読むため、sandboxが外れない
+    const taskConfig = toClaudeConfig(input, await this.resolveSandboxArgs(input));
     const sessionId = randomSessionId();
     // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
@@ -2112,6 +2120,27 @@ export class ClaudeChatViewManager
     });
     await this.persistModelSettings(entry, sessionId);
     return this.buildTaskSession(entry, sessionId, input.mcp !== undefined);
+  }
+
+  /**
+   * `cliSandbox`を渡されたセッションへ付けるsandboxの起動引数（Issue #1541）。
+   *
+   * 使えない環境では空を返し、従来どおりsandbox無しで起動する（承認は人へ回る）。
+   * 起動後に`failIfUnavailable`で落ちてから起動し直すのではなく、起動前の確認で
+   * 同じ判断を済ませる（`probeClaudeSandbox`）。
+   */
+  private async resolveSandboxArgs(input: TaskSessionInput): Promise<string[]> {
+    if (input.cliSandbox === undefined) {
+      return [];
+    }
+    const availability = await this.sandboxProbe.check();
+    if (!availability.ok) {
+      this.log.warn(
+        `[claude sandbox] sandbox無しで起動します（承認は従来どおり人へ回ります）: ${availability.reason}`,
+      );
+      return [];
+    }
+    return claudeSandboxArgs(input.cliSandbox, input.cwd, availability.environment);
   }
 
   /** 既存のセッションを開く。過去のやり取りはtranscriptから復元する。 */

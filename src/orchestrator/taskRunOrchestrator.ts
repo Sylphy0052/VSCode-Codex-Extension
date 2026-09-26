@@ -230,6 +230,8 @@ export class TaskRunOrchestrator {
         cwd: run.workspaceRoot,
         config: effective.config,
         sandbox: effective.sandbox,
+        // 作業ディレクトリへの書き込みも塞ぐ（Issue #1541）
+        cliSandbox: 'read-only',
         mcp: { url: registered.url },
         // コンテキストが尽きたら「Orchestratorを開く」で次の世代を起こす。新しい世代は
         // get_run_stateで状態を取り直すため、会話の引き継ぎは要らない
