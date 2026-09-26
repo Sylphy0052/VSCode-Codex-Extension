@@ -31,6 +31,7 @@ import {
 } from '../orchestrator/taskRunState';
 import { STAGE_LABELS } from '../orchestrator/taskStagePrompts';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { layoutGraph, type GraphLayout } from './workflowGraph';
 
 /**
  * オーケストレータモード（Issue #1505）のKanbanの盤面。列は工程別（計画承認待ち / Issue計画 /
@@ -386,4 +387,26 @@ export function buildTaskRunKanban(
       columns,
     },
   };
+}
+
+/**
+ * グラフ表示（Issue #1552）のノード配置。ロードマップ実行の`layoutRoadmapGraph`と同じく
+ * `layoutGraph`で依存の段に並べる。辺にするのはrunの中にあるタスクへの依存だけで、段の中は
+ * タスクIDの番号順（`T2`を`T10`より前）にする。
+ */
+export function layoutTaskRunGraph(
+  columns: Record<TaskRunKanbanColumn, readonly TaskRunKanbanCard[]>,
+  maxWidth: number | undefined,
+): GraphLayout {
+  const cards = TASK_RUN_KANBAN_COLUMNS.flatMap((column) => columns[column]).sort((a, b) =>
+    a.taskId.localeCompare(b.taskId, undefined, { numeric: true }),
+  );
+  const ids = new Set(cards.map((card) => card.taskId));
+  return layoutGraph(
+    cards.map((card) => ({
+      id: card.taskId,
+      dependsOn: card.dependsOn.map((d) => d.taskId).filter((id) => ids.has(id)),
+    })),
+    { maxWidth },
+  );
 }
