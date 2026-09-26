@@ -599,7 +599,8 @@ export class TaskStageRunner {
     channel.binding.entry = entry;
     channel.binding.session = session;
     this.attach(entry, session);
-    session.open({ preserveFocus: true });
+    // Kanbanは左の列にある。Orchestratorのチャットと同じ右の列へ開き、Kanbanを前面に残す
+    session.open({ preserveFocus: true, viewColumn: 2 });
     return entry;
   }
 
@@ -881,7 +882,7 @@ export class TaskStageRunner {
       previous.resumeLoop();
       return false;
     }
-    session.open({ preserveFocus: true });
+    session.open({ preserveFocus: true, viewColumn: 2 });
     previous.note(
       `task:handoff:${ref.attemptId}`,
       `${ref.taskId}の「${STAGE_LABELS[ref.stage]}」を${String(generation)}代目のセッションへ引き継ぎました。このタブはこのまま残ります`,
