@@ -7,13 +7,11 @@ import type { SkillView } from '../provider/skills';
  *
  * CLIは会話の最初にskillの一覧（名前と説明）をモデルへ渡し、使うかどうかをモデルに任せている。
  * skillが増えるほど一覧が長くなり、毎ターンの入力を圧迫する。この機能を有効にすると、
- * 一覧をモデルへ渡さない代わりに、発言のたびにReflex判定で合うskillを1つ選び、選んだものだけを
- * 読み込ませる。
+ * 発言のたびにReflex判定で合うskillを1つ選んで読み込ませる。Codexでは一覧もモデルへ渡さない。
  *
  * - Codex: `thread/start`の`config`で一覧を外し、`turn/start`の`input`へskillを足す
- * - Claude Code: `apply_flag_settings`の`skillOverrides`で一覧から隠し、発言を`/<skill名>`で
- *   始める。隠したskillはSkillツールでは呼べず、`/<skill名>`で始まる発言だけが展開される
- *   （issue #1529）
+ * - Claude Code: 一覧は隠さず、発言を`/<skill名>`で始める（issue #1529）。隠すとモデルが
+ *   自分でSkillツールを呼んだときに拒否されるため、一覧を減らす効果は諦める（issue #1531）
  *
  * `vscode`へは依存させず、設定の読み出しと判定の実行手段は呼び出し側（view層）から渡す。
  */
@@ -155,8 +153,7 @@ export async function selectSkill(
 
 /**
  * Claude Codeへ送る本文。`/<skill名> <依頼>`にして、CLIにskillを展開させる。依頼はskillの
- * 引数として渡る。隠したskillはSkillツールでは呼べないため、固定文でSkillツールを促す形は
- * 使えない（issue #1529）。埋め込むのは`SKILL_NAME_PATTERN`を通った名前だけ。
+ * 引数として渡る。埋め込むのは`SKILL_NAME_PATTERN`を通った名前だけ。
  */
 export function buildClaudeSkillPrompt(skillName: string, text: string): string {
   return `/${skillName} ${text}`;
