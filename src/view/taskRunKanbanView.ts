@@ -335,6 +335,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   private selectRun(runId: string): void {
     const run = this.deps.controller.find(runId);
     if (run === undefined) {
+      // 一覧を出した後にrunが消えた。描き直して一覧の選択を今の盤面へ戻す
+      this.schedulePost();
       return;
     }
     this.selectedRunId = runId;

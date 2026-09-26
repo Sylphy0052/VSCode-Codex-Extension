@@ -289,8 +289,14 @@ async function switchRunCommand(
     matchOnDescription: true,
     matchOnDetail: true,
   });
-  const run = chosen?.runId === undefined ? undefined : controller.find(chosen.runId);
+  if (chosen?.runId === undefined) {
+    return;
+  }
+  const run = controller.find(chosen.runId);
   if (run === undefined) {
+    void vscode.window.showWarningMessage(
+      'オーケストレータモード: 選んだrunが見つかりません。もう一度一覧を開いてください',
+    );
     return;
   }
   if (run.finishedAt === undefined && run.suspendedAt !== undefined) {

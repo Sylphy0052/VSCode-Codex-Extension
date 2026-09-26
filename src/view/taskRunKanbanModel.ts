@@ -18,6 +18,7 @@ import {
   isTaskDone,
   isTaskRunActive,
   listTasks,
+  TASK_RUN_TITLE_MAX_LENGTH,
   type OrchestratedTask,
   type StageGate,
   type StageGateChoice,
@@ -300,7 +301,7 @@ const ENGINE_LABELS: Record<TaskRunEngine, string> = { codex: 'Codex', claude: '
 
 /** runの表示名。名前が無ければ開始時刻（UTC、分まで）とエンジン。 */
 export function taskRunLabel(run: TaskRun): string {
-  const title = run.title === undefined ? '' : sanitizeInlineText(run.title, TITLE_MAX_LENGTH).trim();
+  const title = run.title === undefined ? '' : sanitizeInlineText(run.title, TASK_RUN_TITLE_MAX_LENGTH).trim();
   return title !== '' ? title : `${run.startedAt.slice(0, 16).replace('T', ' ')} ${ENGINE_LABELS[run.engine]}`;
 }
 
@@ -375,7 +376,7 @@ export function buildTaskRunKanban(
     runs: summaries,
     run: {
       runId: selected.runId,
-      title: selected.title === undefined ? undefined : sanitizeInlineText(selected.title, TITLE_MAX_LENGTH),
+      title: selected.title === undefined ? undefined : sanitizeInlineText(selected.title, TASK_RUN_TITLE_MAX_LENGTH),
       label: taskRunLabel(selected),
       workspaceRoot: selected.workspaceRoot,
       engine: selected.engine,
