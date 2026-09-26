@@ -25,6 +25,7 @@ import {
   type StageGate,
   type StageGateChoice,
   type StageQuestion,
+  type TaskPlanReview,
   type TaskPlanStatus,
   type TaskRun,
   type TaskRunEngine,
@@ -124,6 +125,12 @@ export interface TaskRunKanbanRunSummary {
   inCurrentFolder: boolean;
 }
 
+/** 計画のReflex審査結果の表示用（Issue #1554）。 */
+export interface TaskRunKanbanPlanReview {
+  autoApproved: boolean;
+  summary: string;
+}
+
 export interface TaskRunKanbanRun {
   runId: string;
   /** 人が付けた表示名。名前の変更の初期値にする。 */
@@ -133,6 +140,8 @@ export interface TaskRunKanbanRun {
   engine: TaskRunEngine;
   maxParallel: number;
   planStatus: TaskPlanStatus;
+  /** 計画をReflexが審査したか、その結果（未審査なら`undefined`。Issue #1554）。 */
+  planReview: TaskRunKanbanPlanReview | undefined;
   haltedByUser: boolean;
   finished: boolean;
   /** 中断中（Issue #1560）。再開するまで工程の操作と関門の決着は出さない。 */
@@ -307,6 +316,14 @@ function emptyColumns(): Record<TaskRunKanbanColumn, TaskRunKanbanCard[]> {
 /** runの表示名（`taskRunState.ts`へ移した。既存の呼び出し元のため再exportする）。 */
 export { taskRunLabel };
 
+/** 計画のReflex審査結果を表示用に変換する（Issue #1554）。 */
+function toKanbanPlanReview(review: TaskPlanReview | undefined): TaskRunKanbanPlanReview | undefined {
+  if (review === undefined) {
+    return undefined;
+  }
+  return { autoApproved: review.autoApproved, summary: sanitizeInlineText(review.summary, SUMMARY_MAX_LENGTH) };
+}
+
 /** runの状態の表示（一覧用）。 */
 export function taskRunStatusLabel(run: TaskRun): string {
   if (run.finishedAt !== undefined) {
@@ -384,6 +401,7 @@ export function buildTaskRunKanban(
       engine: selected.engine,
       maxParallel: selected.maxParallel,
       planStatus: selected.planStatus,
+      planReview: toKanbanPlanReview(selected.planReview),
       haltedByUser: selected.haltedByUser,
       finished: selected.finishedAt !== undefined,
       suspended: selected.suspendedAt !== undefined,

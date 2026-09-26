@@ -9,9 +9,11 @@ import {
   readConfig,
   readReflexEnabled,
   readTaskRunMaxParallelPerFolder,
+  readTaskRunPlanAutoApproveEnabled,
 } from '../config';
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
+import { DEFAULT_PLAN_APPROVE_THRESHOLD } from '../orchestrator/planReflexReview';
 import {
   judgeRoadmapQuestion,
   RoadmapQuestionMcpServer,
@@ -131,10 +133,20 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     onWarning: (runId, taskId, message) => warn(`${runId} ${taskId}: ${message}`),
   });
 
+  // 設定が無効なら判定せず、計画提案は常に承認待ちにする（ロードマップ実行と同じ判定器・閾値を使う）
+  const planAutoApprove = (engine: TaskRunEngine) =>
+    readTaskRunPlanAutoApproveEnabled()
+      ? {
+          reflex: { provider: engine, executable: executableFor(engine), logWarn: warn },
+          threshold: DEFAULT_PLAN_APPROVE_THRESHOLD,
+        }
+      : undefined;
+
   const controller = new TaskRunController({
     store,
     runner,
     modelCatalog,
+    planAutoApprove,
     recommendStageSettings: async (engine, input) => {
       const current =
         engine === 'claude'

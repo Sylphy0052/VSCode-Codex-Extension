@@ -14,6 +14,7 @@ import {
   isGateChoiceAllowed,
   resolveStageGate,
 } from './taskRunGates';
+import type { ReflexJudgeDeps } from './planReflexReview';
 import { reconcileTaskRunOnReload, type TaskExternalFacts } from './taskRunReload';
 import { decideStageStart, type StageRef, type StartStageRejection } from './taskRunScheduler';
 import {
@@ -31,6 +32,7 @@ import {
   recordStageDecision,
   resetStageForRetry,
   resumeTaskRun,
+  setTaskPlanReview,
   setTaskRunHaltedByUser,
   setTaskRunMaxParallel,
   setTaskRunTitle,
@@ -41,6 +43,7 @@ import {
   type TaskRun,
   type TaskRunEngine,
 } from './taskRunState';
+import { reviewTaskRunPlanProposal } from './taskRunPlanReview';
 import type { TaskRunStore } from './taskRunStore';
 import type { StageObservationPorts } from './taskStageObservation';
 import type { TaskStageRunner } from './taskStageRunner';
@@ -95,6 +98,11 @@ export interface TaskRunControllerDeps {
   log(message: string): void;
   now?: () => Date;
   newId?: () => string;
+  /**
+   * 計画の提案をReflexで判定し、自動承認する（Issue #1554）。設定
+   * `agent.taskRun.planAutoApprove.enabled`が無効なら`undefined`（判定を試みずに承認待ちのまま）。
+   */
+  planAutoApprove(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
 }
 
 export type TaskRunTransitionListener = (prev: TaskRun | undefined, next: TaskRun) => void;
@@ -233,6 +241,12 @@ export class TaskRunController {
   /**
    * 計画の提案（`propose_plan`）。検証を通れば承認待ちにし、仮キーと採番した`taskId`の
    * 対応を返す。承認済みの計画を変えた場合も承認待ちへ戻る。
+   *
+   * `planAutoApprove`が有効なら、書き込み前（forgeへの問い合わせと同様、直列書き込みの外）に
+   * Reflexで計画を判定する（Issue #1554）。判定は書き込みの直列に入る前の内容に対して行うため、
+   * 書き込み時に同じ内容へ解決できたときだけ承認まで進める（待っている間に他の変更が割り込んで
+   * いれば、判定済みの内容と食い違うため承認待ちへ戻す。ロードマップ計画審査
+   * `roadmapPlanProposal.ts`と同じ判定器・同じ既定閾値を使う）。
    */
   async proposePlan(runId: string, rawArgs: unknown): Promise<ControllerResult> {
     const parsed = parsePlanArgs(rawArgs);
@@ -246,8 +260,10 @@ export class TaskRunController {
     if (issueProblem !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${issueProblem}` };
     }
+    const review = await this.reviewPlanIfEnabled(current, parsed.value);
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
+    let autoApproved = false;
     const next = await this.updateRun(runId, (r) => {
       // forgeへの問い合わせの間に別のrunが同じIssueを計画へ入れていないか、書き込みの直列の中で確かめ直す
       const conflict = this.findIssueConflict(r, parsed.value);
@@ -262,7 +278,29 @@ export class TaskRunController {
       }
       assigned = resolved.value.assigned;
       try {
-        return proposeTaskPlan(resolved.value.run, resolved.value.drafts, () => this.newId(), this.now());
+        let proposed = proposeTaskPlan(
+          resolved.value.run,
+          resolved.value.drafts,
+          () => this.newId(),
+          this.now(),
+        );
+        if (review !== undefined) {
+          // Reflexへ渡した内容から書き込み時までに変わっていなければ判定を適用する
+          const unchanged = JSON.stringify(resolved.value.drafts) === review.reviewedDrafts;
+          proposed = setTaskPlanReview(proposed, {
+            autoApproved: unchanged && review.verdict.kind === 'approved',
+            summary: review.verdict.summary,
+            reviewedAt: this.now().toISOString(),
+          });
+          if (unchanged && review.verdict.kind === 'approved') {
+            proposed = approveTaskPlan(proposed);
+            autoApproved = true;
+          }
+        } else {
+          // 判定を試みていない（設定が無効、またはrunが無い）。前回の判定結果を残さない
+          proposed = setTaskPlanReview(proposed, undefined);
+        }
+        return proposed;
       } catch (e: unknown) {
         failure = e instanceof Error ? e.message : String(e);
         return r;
@@ -274,14 +312,43 @@ export class TaskRunController {
     if (failure !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${failure}` };
     }
+    if (autoApproved) {
+      this.pumpLater(runId);
+    }
     const mapping = [...assigned].map(([key, taskId]) => `${key} → ${taskId}`).join(', ');
     return {
       ok: true,
       message: [
-        `計画を受け付けた（${String(next.taskOrder.length)}タスク）。ユーザーの承認を待っている。承認されるまで工程は始まらない。`,
+        autoApproved
+          ? `計画を受け付け、Reflexの判定により自動承認した（${String(next.taskOrder.length)}タスク）。工程を始める。`
+          : `計画を受け付けた（${String(next.taskOrder.length)}タスク）。ユーザーの承認を待っている。承認されるまで工程は始まらない。`,
         mapping === '' ? '新しいタスクは無い。' : `採番したtaskId: ${mapping}`,
       ].join('\n'),
     };
+  }
+
+  /**
+   * `planAutoApprove`が有効なら、提案された計画をReflexで判定する。無効・runが無い・計画の
+   * 検証に通らない場合は`undefined`（判定を試みない。検証エラーは後続の`updateRun`内の
+   * `resolveTaskPlan`が理由を返す）。
+   */
+  private async reviewPlanIfEnabled(
+    current: TaskRun | undefined,
+    tasks: readonly PlanTaskInput[],
+  ): Promise<{ verdict: Awaited<ReturnType<typeof reviewTaskRunPlanProposal>>; reviewedDrafts: string } | undefined> {
+    if (current === undefined) {
+      return undefined;
+    }
+    const config = this.deps.planAutoApprove(current.engine);
+    if (config === undefined) {
+      return undefined;
+    }
+    const resolved = resolveTaskPlan(current, tasks);
+    if (!resolved.ok) {
+      return undefined;
+    }
+    const verdict = await reviewTaskRunPlanProposal(config.reflex, resolved.value.drafts, config.threshold);
+    return { verdict, reviewedDrafts: JSON.stringify(resolved.value.drafts) };
   }
 
   /**

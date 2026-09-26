@@ -213,6 +213,20 @@ export interface StageQuestion {
 /** 計画の状態: Orchestratorが作成中 / ユーザーの承認待ち / 承認済み。 */
 export type TaskPlanStatus = 'drafting' | 'awaitingApproval' | 'approved';
 
+/**
+ * 直近の計画提案に対するReflex判定の記録（Issue #1554）。設定で自動承認を無効にした場合や、
+ * 判定より先に検証で計画が拒否された場合は判定を試みないため`undefined`のまま
+ * （`TaskRun.planReview`）。Kanbanで自動承認の有無と理由を見せるために持つ。
+ */
+export interface TaskPlanReview {
+  /** Reflexが「妥当」を閾値以上で答え、承認まで進めた。 */
+  autoApproved: boolean;
+  /** Reflexの判定の要約（人へ回した理由を含む）。 */
+  summary: string;
+  /** ISO8601。 */
+  reviewedAt: string;
+}
+
 export const TASK_RUN_SCHEMA_VERSION = 1;
 
 /** Controllerの実行（run）。1ワークスペースにつき実行中は1つ。 */
@@ -250,6 +264,11 @@ export interface TaskRun {
   orchestratorGeneration: number;
   /** 開いたOrchestratorセッションのsessionId（全世代）。リロード後の汎用復元から外す判定に使う。 */
   orchestratorSessionRefs: readonly string[];
+  /**
+   * 直近の計画提案に対するReflex判定（Issue #1554）。判定を試みていなければ`undefined`。
+   * 追加前に保存したrunには無い（`undefined`として扱う）。
+   */
+  planReview?: TaskPlanReview;
   /**
    * Orchestratorがコンテキストの残量不足で次の世代へ自動で引き継いだ記録（Issue #1553）。
    * Kanbanに出す。一度も起きていなければ省略する。
@@ -506,6 +525,17 @@ export function hasStarted(task: OrchestratedTask): boolean {
 /** 承認待ちの計画を承認する。承認待ちでなければそのまま返す。 */
 export function approveTaskPlan(run: TaskRun): TaskRun {
   return run.planStatus === 'awaitingApproval' ? { ...run, planStatus: 'approved' } : run;
+}
+
+/** 直近の計画提案に対するReflex判定を記録する（Issue #1554）。判定を試みていなければ`undefined`。 */
+export function setTaskPlanReview(run: TaskRun, review: TaskPlanReview | undefined): TaskRun {
+  const updated = { ...run };
+  if (review === undefined) {
+    delete updated.planReview;
+  } else {
+    updated.planReview = review;
+  }
+  return updated;
 }
 
 /**

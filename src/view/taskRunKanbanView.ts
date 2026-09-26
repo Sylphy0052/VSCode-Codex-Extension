@@ -464,7 +464,7 @@ function render(webview: vscode.Webview): string {
   const nonce = randomBytes(16).toString('base64');
   const csp = chatCsp(webview.cspSource, nonce, { includeImgData: false });
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ORCHESTRATOR MODE</p><h1>オーケストレータモード</h1><p class="description">Orchestratorが計画したタスクを、工程（Issue計画 / Issue作成 / 実装 / レビュー / mergeとcleanup）ごとのセッションで並列に進めます。計画は「計画を承認」を押すまで始まりません。</p></div><div id="controls" class="controls"></div></header><section id="progress" class="progress" aria-label="工程ごとの件数"></section><section id="plan" class="plan"></section><div id="view-toggle" class="view-toggle" role="group" aria-label="表示の切り替え"></div><section id="board" class="board" aria-label="タスクの状態"></section><section id="graph-view" class="graph-view" aria-label="タスクの依存グラフ" hidden><div id="graph-scroll" class="graph-scroll"><svg id="graph" class="graph" role="img" aria-label="依存グラフ"></svg></div><div id="graph-detail" class="graph-detail"></div></section></main><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ORCHESTRATOR MODE</p><h1>オーケストレータモード</h1><p class="description">Orchestratorが計画したタスクを、工程（Issue計画 / Issue作成 / 実装 / レビュー / mergeとcleanup）ごとのセッションで並列に進めます。計画は「計画を承認」を押すまで始まりません（自動承認が有効なら、Reflexが妥当と判定した計画はそのまま始まります）。</p></div><div id="controls" class="controls"></div></header><section id="progress" class="progress" aria-label="工程ごとの件数"></section><section id="plan" class="plan"></section><div id="view-toggle" class="view-toggle" role="group" aria-label="表示の切り替え"></div><section id="board" class="board" aria-label="タスクの状態"></section><section id="graph-view" class="graph-view" aria-label="タスクの依存グラフ" hidden><div id="graph-scroll" class="graph-scroll"><svg id="graph" class="graph" role="img" aria-label="依存グラフ"></svg></div><div id="graph-detail" class="graph-detail"></div></section></main><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -712,10 +712,23 @@ const script = `
   function renderPlan(board) {
     planEl.replaceChildren();
     const run = board.run;
-    if (!run || run.finished || run.suspended || run.planStatus === 'approved') { return; }
+    if (!run || run.finished || run.suspended) { return; }
+    if (run.planStatus === 'approved') {
+      // 自動承認（Issue #1554）のときだけ、判定理由を短く残す
+      if (run.planReview && run.planReview.autoApproved) {
+        const box = el('div', 'plan-box');
+        box.appendChild(el('span', undefined, 'Reflexが計画を妥当と判定し、自動で承認しました。'));
+        box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+        planEl.appendChild(box);
+      }
+      return;
+    }
     const box = el('div', 'plan-box');
     if (run.planStatus === 'awaitingApproval') {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列を確かめて承認してください。変更したいときはOrchestratorのチャットで伝えます。'));
+      if (run.planReview) {
+        box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+      }
       box.appendChild(button('計画を承認', 'primary', function () { send('approvePlan'); }));
     } else {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を作成中です。やりたいことはOrchestratorのチャットで伝えます。'));
