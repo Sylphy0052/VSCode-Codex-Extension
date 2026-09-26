@@ -38,9 +38,17 @@ import { runVerifyCommand, type VerifyCommandResult } from '../verification/comm
 
 /** 検証の出力として修復の指示へ渡す上限（末尾から）。 */
 const VERIFY_OUTPUT_TAIL_LENGTH = 4000;
-/** merge後、リモートでmerge済みになったかを確かめる回数と間隔。 */
-const MERGE_CONFIRM_ATTEMPTS = 5;
-const MERGE_CONFIRM_INTERVAL_MS = 3_000;
+/**
+ * merge後、リモートでmerge済みになったかを確かめる回数と間隔（Issue #1487）。
+ * mergeコマンド自体は成功しており、GitHub/GitLab側のAPI反映が遅いだけの可能性があるため、
+ * 間隔を指数的に伸ばして合計で1〜2分程度は確かめ続ける（伸ばしても、待つのはこのノードの
+ * confirmだけで、同じリポジトリの次のノードは次のmergeへ進む前に改めて`git fetch`するため
+ * 順番待ちの意味は壊れない）。それでも確かめられなければ要対応にする（再開時、`merge()`冒頭の
+ * `isPullRequestMerged`確認で自己回復する）。
+ */
+const MERGE_CONFIRM_ATTEMPTS = 7;
+const MERGE_CONFIRM_BASE_INTERVAL_MS = 3_000;
+const MERGE_CONFIRM_MAX_INTERVAL_MS = 30_000;
 /** 版の衝突を自動で解いてよいファイル（worktreeの直下）。 */
 const VERSION_FILES: ReadonlySet<string> = new Set(['package.json', 'package-lock.json']);
 const VERSION_LINE = /^\s*"version":\s*"[^"\\]*",?\s*$/;
@@ -459,7 +467,13 @@ export class RoadmapMergeQueue {
       if ((await this.deps.isPullRequestMerged(run.workspaceRoot, pullRequest.number)) === true) {
         return { kind: 'merged' };
       }
-      await this.wait(MERGE_CONFIRM_INTERVAL_MS);
+      if (i < MERGE_CONFIRM_ATTEMPTS - 1) {
+        const interval = Math.min(
+          MERGE_CONFIRM_BASE_INTERVAL_MS * 2 ** i,
+          MERGE_CONFIRM_MAX_INTERVAL_MS,
+        );
+        await this.wait(interval);
+      }
     }
     return { kind: 'failed', message: `PR #${String(pullRequest.number)}のmergeを確かめられませんでした` };
   }
