@@ -490,7 +490,12 @@ const script = `
         if (board.run && board.run.runId === r.runId) { o.selected = true; }
         select.appendChild(o);
       });
-      select.addEventListener('change', function () { vscode.postMessage({ type: 'selectRun', runId: select.value }); });
+      select.addEventListener('change', function () {
+        // 別runの同じ番号のカードを選択済みとして出さない
+        selectedIssue = undefined;
+        saveViewState();
+        vscode.postMessage({ type: 'selectRun', runId: select.value });
+      });
       controls.appendChild(select);
     }
     const run = board.run;
@@ -680,6 +685,7 @@ const script = `
       transform: 'translate(' + pos.x + ',' + pos.y + ')',
       tabindex: 0,
       role: 'button',
+      'data-issue': card.issueNumber,
     });
     group.appendChild(svgEl('rect', { class: 'rk-node-rect', x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 6 }));
     const body = svgEl('g', { 'clip-path': 'url(#' + NODE_CLIP_ID + ')' });
@@ -710,6 +716,10 @@ const script = `
   }
 
   function renderGraph(board, layout) {
+    // 描き直しでノードの要素が入れ替わるとフォーカスが外れる。選択の操作や実行中の自動更新のたびに
+    // キーボードでの移動位置が飛ばないよう、同じ番号のノードへ戻す
+    const active = document.activeElement;
+    const focusedNode = active && graphEl.contains(active) ? active.getAttribute('data-issue') : null;
     graphEl.replaceChildren();
     graphDetailEl.replaceChildren();
     if (!board.run || !layout) {
@@ -757,6 +767,10 @@ const script = `
     nodes.querySelectorAll('text[data-fit]').forEach(function (t) {
       fitNodeText(t, Number(t.getAttribute('data-fit')));
     });
+    if (focusedNode !== null) {
+      const again = nodes.querySelector('[data-issue="' + focusedNode + '"]');
+      if (again) { again.focus(); }
+    }
 
     const selected = selectedIssue === undefined ? undefined : findCard(run, selectedIssue);
     if (selected) {
@@ -794,7 +808,12 @@ const script = `
     }
   }
 
-  new ResizeObserver(function () { reportViewport(); }).observe(graphScrollEl);
+  // ドラッグでのリサイズ中に幅を送り続けないよう、止まってから送る（ワークフロー画面と同じ150ms）
+  let viewportTimer;
+  new ResizeObserver(function () {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(reportViewport, 150);
+  }).observe(graphScrollEl);
 
   window.addEventListener('message', function (event) {
     const message = event.data;
@@ -806,7 +825,8 @@ const script = `
     renderEvents(current);
     renderView();
   });
-  renderViewToggle();
+  // 復元した表示を最初のboardより前に反映する（静的HTMLのボード表示が一瞬出ないように）
+  renderView();
   vscode.postMessage({ type: 'ready' });
 })();
 `;
