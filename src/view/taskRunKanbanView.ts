@@ -703,10 +703,23 @@ const script = `
   function renderPlan(board) {
     planEl.replaceChildren();
     const run = board.run;
-    if (!run || run.finished || run.suspended || run.planStatus === 'approved') { return; }
+    if (!run || run.finished || run.suspended) { return; }
+    if (run.planStatus === 'approved') {
+      // 自動承認（Issue #1554）のときだけ、判定理由を短く残す
+      if (run.planReview && run.planReview.autoApproved) {
+        const box = el('div', 'plan-box');
+        box.appendChild(el('span', undefined, 'Reflexが計画を妥当と判定し、自動で承認しました。'));
+        box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+        planEl.appendChild(box);
+      }
+      return;
+    }
     const box = el('div', 'plan-box');
     if (run.planStatus === 'awaitingApproval') {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列を確かめて承認してください。変更したいときはOrchestratorのチャットで伝えます。'));
+      if (run.planReview) {
+        box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+      }
       box.appendChild(button('計画を承認', 'primary', function () { send('approvePlan'); }));
     } else {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を作成中です。やりたいことはOrchestratorのチャットで伝えます。'));
