@@ -28,6 +28,11 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
    * 省略時は走り終えたかに関わらず開始時刻の古い順に捨てる。
    */
   isFinished?(run: T): boolean;
+  /**
+   * 走り終えていないrunだけで上限を超え、そのうち古いものを捨てたときに呼ぶ（Issue #1565）。
+   * 黙って消えないよう、呼び出し側でログに残す。`isFinished`を渡したときだけ呼ぶ。
+   */
+  onDiscardUnfinished?(runs: readonly T[]): void;
 }
 
 export class MementoRunStore<T extends StoredRun> {
@@ -82,7 +87,11 @@ export class MementoRunStore<T extends StoredRun> {
       return sorted.slice(0, maxStored);
     }
     // 走り終えていないrunを先に残し、空いた枠へ走り終えたrunを新しい順に入れる
-    const unfinished = sorted.filter((r) => !isFinished(r)).slice(0, maxStored);
+    const allUnfinished = sorted.filter((r) => !isFinished(r));
+    const unfinished = allUnfinished.slice(0, maxStored);
+    if (allUnfinished.length > maxStored) {
+      this.options.onDiscardUnfinished?.(allUnfinished.slice(maxStored));
+    }
     const finished = sorted.filter((r) => isFinished(r)).slice(0, maxStored - unfinished.length);
     const kept = new Set([...unfinished, ...finished]);
     return sorted.filter((r) => kept.has(r));
