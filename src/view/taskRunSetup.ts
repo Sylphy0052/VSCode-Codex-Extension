@@ -396,7 +396,7 @@ async function startRunCommand(
       [
         [
           'parallel',
-          '既存のrunと並行して新しく始める（工程セッションの数はフォルダ全体で設定agent.taskRun.maxParallelPerFolderまで）',
+          '既存のrunと並行して新しく始める（工程セッションの数はフォルダ全体で設定`agent.taskRun.maxParallelPerFolder`まで）',
         ],
         ['open', only === undefined ? '既存のrunを選んで開く' : '既存のrunを開く'],
         ...(only === undefined

@@ -1663,7 +1663,7 @@
           "default": 8,
           "minimum": 1,
           "maximum": 64,
-          "scope": "window",
+          "scope": "machine-overridable",
           "markdownDescription": "オーケストレータモード（Issue #1562）で、同じフォルダの全runを合わせて同時に動かす工程セッションの上限。runごとの並列上限とは別に掛かり、どちらかに達すると新しい工程を始めずに待たせる。上限を下げても実行中の工程セッションは止めない。範囲外（1未満・64超・非数値）の値は既定値（8）にフォールバックする。"
         },
         "agent.roadmapRun.merge.versionBumpCommand": {

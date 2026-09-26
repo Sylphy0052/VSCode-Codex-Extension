@@ -239,14 +239,22 @@ export class TaskRunController {
     if (!parsed.ok) {
       return parsed;
     }
+    const current = this.deps.store.find(runId);
     const issueProblem =
-      this.findIssueConflict(runId, parsed.value) ?? (await this.checkExistingIssues(runId, parsed.value));
+      (current === undefined ? undefined : this.findIssueConflict(current, parsed.value)) ??
+      (await this.checkExistingIssues(runId, parsed.value));
     if (issueProblem !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${issueProblem}` };
     }
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
     const next = await this.updateRun(runId, (r) => {
+      // forgeへの問い合わせの間に別のrunが同じIssueを計画へ入れていないか、書き込みの直列の中で確かめ直す
+      const conflict = this.findIssueConflict(r, parsed.value);
+      if (conflict !== undefined) {
+        failure = conflict;
+        return r;
+      }
       const resolved = resolveTaskPlan(r, parsed.value);
       if (!resolved.ok) {
         failure = resolved.message;
@@ -318,20 +326,17 @@ export class TaskRunController {
   /**
    * 同じフォルダの終わっていない別のrunが、まだ終えていないタスクで扱っている既存のIssueを、
    * 計画が指定していないか（Issue #1562）。同じIssueを2本のrunで実装しないように、見つかれば理由を返す。
-   * `tasks`を省くと、run自身の計画にあるタスクを確かめる（承認時の再確認）。
+   * `tasks`を省くと、run自身の計画にあるタスクを確かめる（承認時の再確認）。runをまたいで確認と
+   * 書き込みの間に割り込まれないよう、`updateRun`の更新関数の中（storeの書き込みの直列の中）で呼ぶ。
    */
-  private findIssueConflict(runId: string, tasks?: readonly PlanTaskInput[]): string | undefined {
-    const run = this.deps.store.find(runId);
-    if (run === undefined) {
-      return undefined;
-    }
+  private findIssueConflict(run: TaskRun, tasks?: readonly PlanTaskInput[]): string | undefined {
     const numbers = new Set(
       (tasks ?? listTasks(run))
         .map((t) => t.existingIssueNumber)
         .filter((n): n is number => n !== undefined),
     );
     for (const other of this.deps.store.list()) {
-      if (other.runId === runId || other.workspaceRoot !== run.workspaceRoot || other.finishedAt !== undefined) {
+      if (other.runId === run.runId || other.workspaceRoot !== run.workspaceRoot || other.finishedAt !== undefined) {
         continue;
       }
       for (const task of listTasks(other)) {
@@ -358,11 +363,14 @@ export class TaskRunController {
     if (run?.planStatus !== 'awaitingApproval') {
       return { ok: false, message: '承認待ちの計画がありません' };
     }
-    const conflict = this.findIssueConflict(runId);
+    let conflict: string | undefined;
+    const next = await this.updateRun(runId, (r) => {
+      conflict = this.findIssueConflict(r);
+      return conflict === undefined ? approveTaskPlan(r) : r;
+    });
     if (conflict !== undefined) {
       return { ok: false, message: `計画を承認できません: ${conflict}。Orchestratorに計画を直させてください` };
     }
-    const next = await this.updateRun(runId, approveTaskPlan);
     if (next?.planStatus !== 'approved') {
       return { ok: false, message: '承認待ちの計画がありません' };
     }

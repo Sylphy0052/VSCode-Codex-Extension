@@ -367,6 +367,8 @@ export class TaskStageRunner {
     if (run === undefined) {
       return;
     }
+    // 枠の数え上げから`startStage`の`starting`への予約までに`await`を挟まない。挟むと、並べて呼んだ
+    // `pumpFolder`の各`pump`が同じ空き枠を数えて上限を超える
     const picked = pickStagesToStart(
       run,
       this.startingTaskIds(runId),
