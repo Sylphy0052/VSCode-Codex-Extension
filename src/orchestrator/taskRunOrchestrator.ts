@@ -187,6 +187,22 @@ export class TaskRunOrchestrator {
     }
   }
 
+  /**
+   * runを終えたときにOrchestratorのセッションを閉じる（Issue #1558）。開いている途中なら開き
+   * 終わるのを待ってから閉じる（待たないと、後から開いたセッションが残る）。
+   */
+  async close(runId: string): Promise<void> {
+    await this.opening.get(runId);
+    const live = this.live.get(runId);
+    if (live === undefined) {
+      return;
+    }
+    this.live.delete(runId);
+    this.deps.server.unregister(live.token);
+    live.session.dispose();
+    this.deps.onDidChange();
+  }
+
   dispose(): void {
     this.disposed = true;
     for (const live of this.live.values()) {

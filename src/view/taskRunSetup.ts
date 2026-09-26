@@ -18,7 +18,7 @@ import {
 } from '../orchestrator/roadmapQuestionMcp';
 import { resolveRoadmapBaseCommit, type RoadmapRunForgePorts } from '../orchestrator/roadmapRunForge';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
-import { TaskRunController } from '../orchestrator/taskRunController';
+import { TaskRunController, type ControllerResult } from '../orchestrator/taskRunController';
 import type { GateJudgeQuestion } from '../orchestrator/taskRunGates';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
@@ -175,10 +175,19 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   });
   holder.orchestrator = orchestrator;
 
+  const finishRun = async (runId: string): Promise<ControllerResult> => {
+    const result = await controller.finishRun(runId);
+    if (result.ok) {
+      await orchestrator.close(runId);
+    }
+    return result;
+  };
+
   const view = new TaskRunKanbanViewManager({
     controller,
     orchestrator,
     revealStage: (runId, taskId) => runner.revealStageSession(runId, taskId),
+    finishRun,
     log,
   });
   holder.view = view;
@@ -201,7 +210,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     { dispose: () => questionServer.dispose() },
     view,
     vscode.commands.registerCommand('agent.taskRun.start', (engineHint?: unknown) =>
-      startRunCommand(controller, view, orchestrator, log, parseEngine(engineHint)),
+      startRunCommand(controller, view, orchestrator, finishRun, log, parseEngine(engineHint)),
     ),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
   ];
@@ -262,12 +271,34 @@ async function startRunCommand(
   controller: TaskRunController,
   view: TaskRunKanbanViewManager,
   orchestrator: TaskRunOrchestrator,
+  finishRun: (runId: string) => Promise<ControllerResult>,
   log: Logger,
   engineHint: TaskRunEngine | undefined,
 ): Promise<void> {
   const folder = await pickFolder();
   if (folder === undefined) {
     return;
+  }
+  // 終わっていないrunがあると`startRun`はそれを返すため、新しく始めたいなら先に終える（Issue #1558）
+  const active = controller.findActive(folder);
+  if (active !== undefined) {
+    const action = await pick<'open' | 'finish'>('このフォルダには終わっていないrunがあります', [
+      ['open', '既存のrunを開く'],
+      ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
+    ]);
+    if (action === undefined) {
+      return;
+    }
+    if (action === 'open') {
+      showRun(view, orchestrator, active.runId);
+      return;
+    }
+    const finished = await finishRun(active.runId);
+    if (!finished.ok) {
+      log.warn(`[task run] ${finished.message}`);
+      void vscode.window.showErrorMessage(`オーケストレータモード: ${finished.message}`);
+      return;
+    }
   }
   const engines: [TaskRunEngine, string][] = [
     ['codex', 'Codex'],
@@ -301,9 +332,17 @@ async function startRunCommand(
       'このフォルダには終わっていないrunがあるため、それを開きます（選んだCLIと並列上限は使いません）',
     );
   }
-  view.show(outcome.runId);
+  showRun(view, orchestrator, outcome.runId);
+}
+
+function showRun(
+  view: TaskRunKanbanViewManager,
+  orchestrator: TaskRunOrchestrator,
+  runId: string,
+): void {
+  view.show(runId);
   // Kanbanを左の列に出してから、右の列にOrchestratorを開く（開いていれば前面へ出す）
-  void orchestrator.open(outcome.runId).then((opened) => {
+  void orchestrator.open(runId).then((opened) => {
     if (!opened) {
       void vscode.window.showWarningMessage(
         'オーケストレータモード: Orchestratorを開けませんでした。Kanbanの「Orchestratorを開く」で開き直せます',
