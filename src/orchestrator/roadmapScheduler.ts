@@ -7,6 +7,9 @@
  * 並列上限は「動いているIssueセッションの数」に掛ける。merge待ち以降のノードは
  * セッションを持たないため数えない。上限を下げても実行中のセッションは止めず、
  * 動いている数が上限を下回るまで新しいノードを始めないだけにする。
+ *
+ * ノードの識別子に依らない部分は`runScheduling.ts`にあり、ここはIssue番号をノードにした
+ * 状態をそこへ渡すアダプタになっている。
  */
 
 import {
@@ -16,6 +19,13 @@ import {
   type RoadmapPlanNode,
   type RoadmapRun,
 } from './roadmapRunState';
+import {
+  assessRunProgress,
+  newlyAppeared,
+  pickToStart,
+  unmetDependencies as unmetDependencyIds,
+  type RunAssessment as GenericRunAssessment,
+} from './runScheduling';
 
 /** Issueセッションが動いている（停止処理中を含む）。並列上限の対象。 */
 export function hasActiveSession(issue: RoadmapIssueExecution): boolean {
@@ -29,7 +39,7 @@ function isSatisfiedDependency(issue: RoadmapIssueExecution | undefined): boolea
 
 /** ノードの依存先のうち、まだ満たされていないIssue番号。`dependsOn`の並び順に返す。 */
 export function unmetDependencies(run: RoadmapRun, node: RoadmapPlanNode): number[] {
-  return node.dependsOn.filter((dep) => !isSatisfiedDependency(getIssue(run, dep)));
+  return unmetDependencyIds(node.dependsOn, (dep) => isSatisfiedDependency(getIssue(run, dep)));
 }
 
 function planNodeFor(run: RoadmapRun, issueNumber: number): RoadmapPlanNode | undefined {
@@ -75,18 +85,16 @@ export function pickIssuesToStart(
   if (run.mode !== 'auto' || run.haltedByUser || run.finishedAt !== undefined) {
     return [];
   }
-  // 開始処理の終わり際（`running`を永続化した後）は`countActiveSessions`と二重に数えない
-  const startingNotActive = [...startingIssueNumbers].filter((issueNumber) => {
-    const issue = getIssue(run, issueNumber);
-    return issue === undefined || !hasActiveSession(issue);
-  }).length;
-  const slots = run.maxParallel - countActiveSessions(run) - startingNotActive;
-  if (slots <= 0) {
-    return [];
-  }
-  return listRunnableIssues(run)
-    .filter((issueNumber) => !startingIssueNumbers.has(issueNumber))
-    .slice(0, slots);
+  return pickToStart({
+    runnable: listRunnableIssues(run),
+    maxParallel: run.maxParallel,
+    activeCount: countActiveSessions(run),
+    starting: startingIssueNumbers,
+    isActive: (issueNumber) => {
+      const issue = getIssue(run, issueNumber);
+      return issue !== undefined && hasActiveSession(issue);
+    },
+  });
 }
 
 export type StartIssueRejection =
@@ -162,44 +170,29 @@ function isProgressingWithoutUser(issue: RoadmapIssueExecution): boolean {
   );
 }
 
-export type RunAssessment =
-  | { kind: 'finished' }
-  | { kind: 'progressing' }
-  /** 人がrun全体を止めていて、人の対応なしに進むノードも無い。人自身の操作なので通知しない。 */
-  | { kind: 'haltedByUser' }
-  /** 実行できるノードも、人の対応なしに進むノードも無い。`blockers`は人の対応を待つノード。 */
-  | { kind: 'stalled'; blockers: readonly number[] };
+export type RunAssessment = GenericRunAssessment<number>;
 
 /**
- * runが進んでいるか、人の対応を待って止まっているかを判定する。自動実行モードで
- * `stalled`になったら、Controllerは自動実行を止めてKanbanとデスクトップ通知で知らせる。
- *
- * 実行できるノードがあれば`progressing`とする（自動実行ならControllerが始め、
- * ユーザー選択なら人が選べる）。run全体を人が止めている間は、実行できるノードがあっても
- * 始まらないため`haltedByUser`とし、人の対応待ちの`stalled`と区別する。
+ * runが進んでいるか、人の対応を待って止まっているかを判定する（判定の順は
+ * `assessRunProgress`）。自動実行モードで`stalled`になったら、Controllerは自動実行を
+ * 止めてKanbanとデスクトップ通知で知らせる。
  */
 export function assessRun(run: RoadmapRun): RunAssessment {
   const issues = Object.values(run.issues);
-  if (issues.every((issue) => issue.progress === 'done')) {
-    return { kind: 'finished' };
-  }
-  if (issues.some(isProgressingWithoutUser)) {
-    return { kind: 'progressing' };
-  }
-  if (run.haltedByUser) {
-    return { kind: 'haltedByUser' };
-  }
-  if (listRunnableIssues(run).length > 0) {
-    return { kind: 'progressing' };
-  }
-  const blockers = run.plan.nodes
-    .map((node) => getIssue(run, node.issueNumber))
-    .filter(
-      (issue): issue is RoadmapIssueExecution =>
-        issue !== undefined && issue.progress !== 'done' && issue.progress !== 'notStarted',
-    )
-    .map((issue) => issue.issueNumber);
-  return { kind: 'stalled', blockers };
+  return assessRunProgress({
+    allDone: issues.every((issue) => issue.progress === 'done'),
+    anyProgressingWithoutUser: issues.some(isProgressingWithoutUser),
+    haltedByUser: run.haltedByUser,
+    hasRunnable: listRunnableIssues(run).length > 0,
+    blockers: () =>
+      run.plan.nodes
+        .map((node) => getIssue(run, node.issueNumber))
+        .filter(
+          (issue): issue is RoadmapIssueExecution =>
+            issue !== undefined && issue.progress !== 'done' && issue.progress !== 'notStarted',
+        )
+        .map((issue) => issue.issueNumber),
+  });
 }
 
 /**
@@ -207,16 +200,16 @@ export function assessRun(run: RoadmapRun): RunAssessment {
  * 「ノードが実行可能になった」とKanbanで知らせるために使う。
  */
 export function newlyRunnableIssues(prev: RoadmapRun, next: RoadmapRun): number[] {
-  const before = new Set(listRunnableIssues(prev));
-  return listRunnableIssues(next).filter((n) => !before.has(n));
+  return newlyAppeared(listRunnableIssues(prev), listRunnableIssues(next));
+}
+
+function doneIssues(run: RoadmapRun): number[] {
+  return Object.values(run.issues)
+    .filter((issue) => issue.progress === 'done')
+    .map((issue) => issue.issueNumber);
 }
 
 /** 状態の更新で終了したノード。Issueの終了をKanbanで知らせるために使う。 */
 export function newlyFinishedIssues(prev: RoadmapRun, next: RoadmapRun): number[] {
-  return Object.values(next.issues)
-    .filter(
-      (issue) =>
-        issue.progress === 'done' && getIssue(prev, issue.issueNumber)?.progress !== 'done',
-    )
-    .map((issue) => issue.issueNumber);
+  return newlyAppeared(doneIssues(prev), doneIssues(next));
 }
