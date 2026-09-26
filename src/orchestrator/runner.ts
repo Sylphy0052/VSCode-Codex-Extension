@@ -5552,9 +5552,13 @@ export class WorkflowRunner {
     // 状態は`waitingOverlap`のまま。ここで無条件に`resumeLoop()`すると、待機を解いていないのに
     // ループだけ動き出し、`releaseOverlapWaits`の取り込みと並走してしまう（Issue #1480）。
     // `waitingOverlap`のままなら、待機の解消は既存の経路（`releaseOverlapWaits`・
-    // `cancelOverlapWait`）に任せる
+    // `cancelOverlapWait`）に任せる。
+    //
+    // 判定は`overlapWait`ではなく状態で行う。`waitingOverlap`から返信待ちを経て`running`へ
+    // 戻る経路では`overlapWait`が消されずに残るため、それを見ると`running`のタスクまで
+    // 止めたままにしてしまう
     const resumePreviousOnFailure = (): void => {
-      if (liveTask.overlapWait === undefined) {
+      if (live.runState.tasks.get(taskId)?.state !== 'waitingOverlap') {
         previous.resumeLoop();
       }
     };
@@ -5816,9 +5820,17 @@ export class WorkflowRunner {
     runId: string,
     taskId: string,
     task: WorkflowTask,
-    reason: LoopStopReason,
+    stopReason: LoopStopReason,
     state: ChatState,
   ): void {
+    // 交差待ちの取り込みで`merge --abort`まで失敗した印（Issue #1480）は、ループの終了理由
+    // より優先する。ループが先に`done`で終わっていると、印を立てた側の`stopLoop()`は空振りし、
+    // 理由は`done`のまま届く。そのまま進むとマージ途中のworktreeで検証・マージへ入るため、
+    // `stopLoop()`が届いた場合と同じ`taskStopped`として扱い、下の失敗の分岐へ倒す
+    const reason: LoopStopReason =
+      this.runs.get(runId)?.tasks.get(taskId)?.overlapMergeAbortFailed === true
+        ? 'taskStopped'
+        : stopReason;
     if (this.disposing) {
       // 拡張機能の終了時の解放が呼び戻した終了（`reason`は`manual`）。ここから先は
       // `runState`の書き換え・`persist`・マージの開始まで一式が走るため、印を見て黙る
