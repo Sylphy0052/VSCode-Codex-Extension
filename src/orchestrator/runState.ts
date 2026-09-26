@@ -876,10 +876,18 @@ export function resumeFromApproval(run: RunState, taskId: string): RunState {
  * 送ったタスクは、自分のターンを終えたあと、返信が届くまで次の指示を受け取らない」）。
  * `messaging.ts`の判定（`validateSendMessage`等）は状態を変えないため、実際の遷移は
  * ここで行う。
+ *
+ * `waitingOverlap`（交差待ち、Issue #1469）からも動く。交差待ちの最中に`expectReply`付きで
+ * 送ると、送信自体は成立するのに返信待ちへ遷移せず、`checkWaitingReplyStalls`の
+ * タイムアウト網から外れて止まり得るため（Issue #1480）。交差の待機自体（`overlapWait`）は
+ * 消さず、`waitingReply`から戻った後の次の実測（`applyOverlapWaits`）で改めて掛け直される
  */
 export function markWaitingReply(run: RunState, taskId: string): RunState {
   const current = run.tasks.get(taskId);
-  if (current === undefined || current.state !== 'running') {
+  if (
+    current === undefined ||
+    (current.state !== 'running' && current.state !== 'waitingOverlap')
+  ) {
     return run;
   }
   return setTask(run, taskId, { ...current, state: 'waitingReply' });

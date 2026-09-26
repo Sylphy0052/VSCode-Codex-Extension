@@ -76,7 +76,13 @@ export function onMessageAccepted(
   if (message.expectReply) {
     const senderTask = live.tasks.get(message.from);
     const senderState = live.runState.tasks.get(message.from);
-    if (senderTask !== undefined && senderState?.state === 'running') {
+    // `waitingOverlap`（交差待ち）中の送信も対象にする。ここで外すと返信待ち
+    // （`waitingReply`）にならず、`checkWaitingReplyStalls`のタイムアウト網からも
+    // 外れて止まり得る（Issue #1480）
+    if (
+      senderTask !== undefined &&
+      (senderState?.state === 'running' || senderState?.state === 'waitingOverlap')
+    ) {
       live.runState = markWaitingReply(live.runState, message.from);
       senderTask.waitingReplySinceMs = (self.deps.now?.() ?? new Date()).getTime();
       senderTask.session.pauseLoop();
