@@ -34,6 +34,7 @@ import type {
   WorkflowRunSnapshot,
   WorkflowWarning,
 } from './runner';
+import { describeCarriedOverWork, type CarriedOverWork } from './resumeCarryOver';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import type { TaskSession } from './taskSession';
 import {
@@ -61,6 +62,8 @@ import {
  */
 export interface OrchestratorResumeContext {
   pendingAskUser?: { question: string; choices: readonly string[]; askedAt: string };
+  /** 前の試行の作業を同じworktreeで引き継いだタスク（Issue #1514） */
+  carriedOverWork?: readonly { taskId: string; work: CarriedOverWork }[];
 }
 
 const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
@@ -172,6 +175,21 @@ function buildIntroBody(
           '人が選ぶと「人がask_userの質問に答えました: "<選択肢>"」という発話が届きます。それまで' +
             '新しい ask_user は呼べません（回答待ちは1runにつき同時に1問だけ）。',
         ];
+  const carriedOverWork = resume?.carriedOverWork ?? [];
+  const carryOverNote =
+    carriedOverWork.length === 0
+      ? []
+      : [
+          '',
+          (resumeNote.length === 0
+            ? 'このセッションは中断（ウィンドウのリロード等）からの自動再開です。'
+            : '') +
+            '次のタスクは前回の中断時点の作業が作業場所に残っていたため、最初からやり直さず' +
+            '同じworktreeとブランチで続きから再開します:',
+          ...carriedOverWork.map(
+            ({ taskId, work }) => `- ${taskId}: ${describeCarriedOverWork(work)}`,
+          ),
+        ];
   const contractText = [
     ...(live.def.goal === undefined ? [] : [`ゴール: ${live.def.goal}`]),
     ...(live.def.acceptance ?? []).map((value) => `受入条件: ${value}`),
@@ -244,6 +262,7 @@ function buildIntroBody(
     safeTasks,
     ...respawnNote,
     ...resumeNote,
+    ...carryOverNote,
   ].join('\n');
 }
 
