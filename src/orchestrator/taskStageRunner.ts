@@ -64,7 +64,13 @@ import {
   findStageQuestion,
   markQuestionAwaitingUser,
 } from './taskRunQuestions';
-import { listQueuedStages, pickStagesToStart, type StageRef } from './taskRunScheduler';
+import {
+  countActiveStageSessions,
+  hasActiveStageSession,
+  listQueuedStages,
+  pickStagesToStart,
+  type StageRef,
+} from './taskRunScheduler';
 import type { TaskRunStore } from './taskRunStore';
 import type {
   TaskHandoffRequest,
@@ -143,6 +149,8 @@ export interface TaskStageRunnerDeps {
    * 無ければすべての関門をユーザーの判断待ちにする。ユーザーの判断はControllerが受ける。
    */
   judgeGate?: (engine: TaskRunEngine, question: GateJudgeQuestion) => Promise<RoadmapQuestionVerdict>;
+  /** 同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。無ければ掛けない。 */
+  maxParallelPerFolder?: () => number;
   /** runの状態が変わったとき（Kanbanの再描画・通知用）。 */
   onRunChanged?: (run: TaskRun) => void;
   /** 実行を止めずに人へ知らせる事象（後片付けに失敗した等）。 */
@@ -359,17 +367,54 @@ export class TaskStageRunner {
     if (run === undefined) {
       return;
     }
-    const startingTaskIds = new Set(
-      [...this.starting]
-        .filter((key) => key.startsWith(`${runId}#`))
-        .map((key) => key.slice(runId.length + 1)),
-    );
+    // 枠の数え上げから`startStage`の`starting`への予約までに`await`を挟まない。挟むと、並べて呼んだ
+    // `pumpFolder`の各`pump`が同じ空き枠を数えて上限を超える
     const picked = pickStagesToStart(
       run,
-      startingTaskIds,
+      this.startingTaskIds(runId),
       this.deps.mergeKeys.isBusy(run.workspaceRoot),
+      this.deps.maxParallelPerFolder === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.deps.maxParallelPerFolder() - this.countFolderSessions(run.workspaceRoot),
     );
     await Promise.all(picked.map((target) => this.startStage(runId, target)));
+  }
+
+  /**
+   * 同じフォルダの動いているrunをすべて`pump`する。空いた枠（フォルダ全体の上限）とmergeの鍵は
+   * 別のrunが待っていることがあるため、工程が終わって枠や鍵を放したときに呼ぶ（Issue #1562）。
+   * 枠を放したrunを先に回す。各`pump`は開始の予約（`starting`）までを同期で済ませるので、
+   * 並べて呼んでも枠を二重に数えない。
+   */
+  private async pumpFolder(runId: string): Promise<void> {
+    const run = this.deps.store.find(runId);
+    if (run === undefined) {
+      return;
+    }
+    const others = this.deps.store
+      .listActive(run.workspaceRoot)
+      .filter((r) => r.runId !== runId)
+      .map((r) => r.runId);
+    await Promise.all([runId, ...others].map((id) => this.pump(id)));
+  }
+
+  /** 開始処理の途中にあるこのrunのタスク。 */
+  private startingTaskIds(runId: string): Set<string> {
+    const prefix = `${runId}#`;
+    return new Set(
+      [...this.starting].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)),
+    );
+  }
+
+  /** 同じフォルダの全runで、動いている工程セッションと開始処理の途中（まだ動いていない）の数。 */
+  private countFolderSessions(workspaceRoot: string): number {
+    return this.deps.store.listInFolder(workspaceRoot).reduce((sum, r) => {
+      const startingOnly = [...this.startingTaskIds(r.runId)].filter((taskId) => {
+        const task = getTask(r, taskId);
+        return task === undefined || !hasActiveStageSession(task);
+      }).length;
+      return sum + countActiveStageSessions(r) + startingOnly;
+    }, 0);
   }
 
   private async startStage(runId: string, target: StageRef): Promise<void> {
@@ -928,7 +973,7 @@ export class TaskStageRunner {
         );
         this.release(entry, { dispose: false });
       });
-      await this.pump(entry.runId);
+      await this.pumpFolder(entry.runId);
       return;
     }
     if (entry.reported) {
@@ -954,7 +999,7 @@ export class TaskStageRunner {
       return true;
     });
     if (cleaned) {
-      await this.pump(entry.runId);
+      await this.pumpFolder(entry.runId);
     }
   }
 
@@ -1261,7 +1306,7 @@ export class TaskStageRunner {
       return true;
     });
     if (stopped) {
-      await this.pump(runId);
+      await this.pumpFolder(runId);
     }
     return stopped;
   }

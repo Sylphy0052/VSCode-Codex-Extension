@@ -7,6 +7,7 @@
  * タスクは同時に1つの工程しか動かないので、ノードの識別子は`taskId`にする。
  * - 依存が効くのは「実装とPR作成」だけ。依存先のタスクがmergeとcleanupまで終わるまで始めない
  * - 並列上限は「動いている工程セッションの数」に掛ける。Orchestratorのセッションは数えない
+ * - 同じフォルダの全runを合わせた上限も掛ける（Issue #1562）。数え方は呼び出し側（Runner）が持つ
  * - 「mergeとcleanup」は並列枠に加えて、リポジトリごとのmergeの鍵が空いているときだけ始める
  * - 上限を下げても実行中のセッションは止めず、動いている数が上限を下回るまで新しい工程を始めない
  */
@@ -119,11 +120,14 @@ export function listQueuedStages(run: TaskRun): StageRef[] {
  *   起動・mergeの鍵の取得が途中の）タスクを渡す（空き枠の二重計上を防ぐ。Issue #1484）
  * - 「mergeとcleanup」は、`isMergeKeyBusy`が偽のときに先頭の1件だけを選ぶ。鍵の取得を始めた
  *   時点で`TaskRunMergeKeys.isBusy`が真になるので、次の呼び出しでは選ばれない
+ * - `folderSlots`には、同じフォルダの全runを合わせた上限の空き（Issue #1562）を渡す。選ぶ数を
+ *   これ以下に抑える
  */
 export function pickStagesToStart(
   run: TaskRun,
   startingTaskIds: ReadonlySet<string>,
   isMergeKeyBusy: boolean,
+  folderSlots = Number.POSITIVE_INFINITY,
 ): StageRef[] {
   const queued = listQueuedStages(run);
   const firstMerge = isMergeKeyBusy
@@ -142,7 +146,7 @@ export function pickStagesToStart(
       },
     }),
   );
-  return runnable.filter((ref) => picked.has(ref.taskId));
+  return runnable.filter((ref) => picked.has(ref.taskId)).slice(0, Math.max(0, folderSlots));
 }
 
 export type StartStageRejection =

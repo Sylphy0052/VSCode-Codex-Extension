@@ -817,7 +817,7 @@ export function finishTaskRun(run: TaskRun, now: Date): TaskRun {
   return run.finishedAt !== undefined ? run : { ...run, finishedAt: now.toISOString() };
 }
 
-/** 終わっておらず中断もしていない。1フォルダにつき1本だけ持てる。 */
+/** 終わっておらず中断もしていない。同じフォルダで複数を並行して動かせる（Issue #1562）。 */
 export function isTaskRunActive(run: TaskRun): boolean {
   return run.finishedAt === undefined && run.suspendedAt === undefined;
 }
@@ -841,6 +841,13 @@ export function resumeTaskRun(run: TaskRun): TaskRun {
 export function normalizeTaskRunTitle(title: string | undefined): string | undefined {
   const trimmed = sanitizeInlineText(title ?? '', TASK_RUN_TITLE_MAX_LENGTH).trim();
   return trimmed === '' ? undefined : trimmed;
+}
+
+const ENGINE_LABELS: Record<TaskRunEngine, string> = { codex: 'Codex', claude: 'Claude' };
+
+/** runの表示名。名前が無ければ開始時刻（UTC、分まで）とエンジン。 */
+export function taskRunLabel(run: TaskRun): string {
+  return normalizeTaskRunTitle(run.title) ?? `${run.startedAt.slice(0, 16).replace('T', ' ')} ${ENGINE_LABELS[run.engine]}`;
 }
 
 /** 表示名を付け替える。空なら名前を外す。 */

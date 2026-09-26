@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.927.7",
+  "version": "2026.927.8",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1657,6 +1657,14 @@
           "maximum": 2147483,
           "scope": "machine-overridable",
           "markdownDescription": "統合PR/MRをマージする前に、CIチェック（`statusCheckRollup` / パイプライン）の完了を待つ時間の上限（秒）。超えたら赤（CI失敗）と同じ扱いでタスクを失敗として確定する（設計書 §16.36）。CIが1件も設定されていないリポジトリでは待たずに即マージする。権限には関わらないため`forge`/`finalMerge`ほど強い制限は要らない。上限は`2147483`秒（約24.8日、`setTimeout`の32bit上限）。範囲外（1未満・上限超過・非数値）の値は既定値（1800秒）にフォールバックする。"
+        },
+        "agent.taskRun.maxParallelPerFolder": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 64,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレータモード（Issue #1562）で、同じフォルダの全runを合わせて同時に動かす工程セッションの上限。runごとの並列上限とは別に掛かり、どちらかに達すると新しい工程を始めずに待たせる。上限を下げても実行中の工程セッションは止めない。範囲外（1未満・64超・非数値）の値は既定値（8）にフォールバックする。"
         },
         "agent.roadmapRun.merge.versionBumpCommand": {
           "type": "string",

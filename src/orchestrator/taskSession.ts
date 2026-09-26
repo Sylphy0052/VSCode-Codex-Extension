@@ -182,6 +182,12 @@ export interface TaskSessionInput {
    */
   generation?: number;
   /**
+   * オーケストレータモードのrunの表示名（Issue #1562）。Orchestratorのタブ名に添え、同じフォルダで
+   * 並行して動くrunの進行役を見分けられるようにする。`role`と同じく**タブ名を分ける用途だけに
+   * 使う**（権限の決定には使わない）。
+   */
+  runLabel?: string;
+  /**
    * タブの入力欄を閉じる（Issue #1465 分割案6b）。ロードマップ実行のIssueセッションだけが
    * `true`を渡す。ユーザーはIssueセッションと直接会話せず、タブからできるのは閲覧・
    * Orchestrator経由の指示・即時停止だけになる（押された操作は`onLockedAction`で届く）。

@@ -35,6 +35,7 @@ import {
   setTaskRunMaxParallel,
   setTaskRunTitle,
   suspendTaskRun,
+  taskRunLabel,
   type StageDecision,
   type StageGateChoice,
   type TaskRun,
@@ -66,7 +67,7 @@ export type StartTaskRunOutcome =
   | { ok: false; message: string };
 
 export interface TaskRunControllerDeps {
-  store: Pick<TaskRunStore, 'find' | 'update' | 'list' | 'findActive'>;
+  store: Pick<TaskRunStore, 'find' | 'update' | 'list' | 'listActive'>;
   runner: Pick<
     TaskStageRunner,
     'pump' | 'stopStage' | 'instructStage' | 'answerQuestion' | 'cleanupRestoredTask'
@@ -118,7 +119,7 @@ export class TaskRunController {
   /** 求めている途中・求め終えた推奨値。キーは`runId`と`recommendationKey`。 */
   private readonly recommending = new Map<string, Promise<StageSettingsRecommendation | undefined>>();
   private readonly recommended = new Map<string, Map<string, StageSettingsRecommendation>>();
-  /** runの開始を直列にする。同じフォルダでrunを2つ作らないため。 */
+  /** runの開始と再開を直列にする。動いているrunの確認と作成の間に別の開始が割り込まないため。 */
   private readonly startQueue = new SerialQueue();
 
   constructor(private readonly deps: TaskRunControllerDeps) {}
@@ -238,13 +239,22 @@ export class TaskRunController {
     if (!parsed.ok) {
       return parsed;
     }
-    const issueProblem = await this.checkExistingIssues(runId, parsed.value);
+    const current = this.deps.store.find(runId);
+    const issueProblem =
+      (current === undefined ? undefined : this.findIssueConflict(current, parsed.value)) ??
+      (await this.checkExistingIssues(runId, parsed.value));
     if (issueProblem !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${issueProblem}` };
     }
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
     const next = await this.updateRun(runId, (r) => {
+      // forgeへの問い合わせの間に別のrunが同じIssueを計画へ入れていないか、書き込みの直列の中で確かめ直す
+      const conflict = this.findIssueConflict(r, parsed.value);
+      if (conflict !== undefined) {
+        failure = conflict;
+        return r;
+      }
       const resolved = resolveTaskPlan(r, parsed.value);
       if (!resolved.ok) {
         failure = resolved.message;
@@ -313,23 +323,64 @@ export class TaskRunController {
     return problems.length === 0 ? undefined : problems.join('。');
   }
 
-  /** ユーザーが計画を承認する（Kanbanのボタンから呼ぶ。Orchestratorからは呼べない）。 */
-  async approvePlan(runId: string): Promise<boolean> {
-    const run = this.deps.store.find(runId);
-    if (run?.planStatus !== 'awaitingApproval') {
-      return false;
+  /**
+   * 同じフォルダの終わっていない別のrunが、まだ終えていないタスクで扱っている既存のIssueを、
+   * 計画が指定していないか（Issue #1562）。同じIssueを2本のrunで実装しないように、見つかれば理由を返す。
+   * `tasks`を省くと、run自身の計画にあるタスクを確かめる（承認時の再確認）。runをまたいで確認と
+   * 書き込みの間に割り込まれないよう、`updateRun`の更新関数の中（storeの書き込みの直列の中）で呼ぶ。
+   */
+  private findIssueConflict(run: TaskRun, tasks?: readonly PlanTaskInput[]): string | undefined {
+    const numbers = new Set(
+      (tasks ?? listTasks(run))
+        .map((t) => t.existingIssueNumber)
+        .filter((n): n is number => n !== undefined),
+    );
+    for (const other of this.deps.store.list()) {
+      if (other.runId === run.runId || other.workspaceRoot !== run.workspaceRoot || other.finishedAt !== undefined) {
+        continue;
+      }
+      for (const task of listTasks(other)) {
+        if (isTaskDone(task)) {
+          continue;
+        }
+        const taken = [task.existingIssueNumber, task.issueNumber].find(
+          (n): n is number => n !== undefined && numbers.has(n),
+        );
+        if (taken !== undefined) {
+          return `既存のIssue #${String(taken)}は別のrun「${taskRunLabel(other)}」が扱っている`;
+        }
+      }
     }
-    const next = await this.updateRun(runId, approveTaskPlan);
-    if (next?.planStatus !== 'approved') {
-      return false;
-    }
-    this.pumpLater(runId);
-    return true;
+    return undefined;
   }
 
   /**
-   * runを始める。同じフォルダに終わっていないrunがあれば、新しく作らずにそれを返す
-   * （1ワークスペースにつき実行中は1つ）。
+   * ユーザーが計画を承認する（Kanbanのボタンから呼ぶ。Orchestratorからは呼べない）。提案の後に
+   * 別のrunが同じIssueを扱い始めていれば承認しない（Issue #1562）。
+   */
+  async approvePlan(runId: string): Promise<ControllerResult> {
+    const run = this.deps.store.find(runId);
+    if (run?.planStatus !== 'awaitingApproval') {
+      return { ok: false, message: '承認待ちの計画がありません' };
+    }
+    let conflict: string | undefined;
+    const next = await this.updateRun(runId, (r) => {
+      conflict = this.findIssueConflict(r);
+      return conflict === undefined ? approveTaskPlan(r) : r;
+    });
+    if (conflict !== undefined) {
+      return { ok: false, message: `計画を承認できません: ${conflict}。Orchestratorに計画を直させてください` };
+    }
+    if (next?.planStatus !== 'approved') {
+      return { ok: false, message: '承認待ちの計画がありません' };
+    }
+    this.pumpLater(runId);
+    return { ok: true, message: '計画を承認した' };
+  }
+
+  /**
+   * runを始める。同じフォルダに動いているrunがあれば、新しく作らずにそのうち1本を返す。
+   * `parallel`なら動いているrunがあっても新しく作り、並行して動かす（Issue #1562）。
    */
   startRun(input: {
     workspaceRoot: string;
@@ -337,16 +388,25 @@ export class TaskRunController {
     maxParallel: number;
     /** 表示名（Issue #1561）。空なら付けない。既存のrunを返すときは使わない。 */
     title?: string;
+    /** 動いているrunを再利用せず、並行して新しく始める（Issue #1562）。 */
+    parallel?: boolean;
   }): Promise<StartTaskRunOutcome> {
     return this.startQueue.enqueue(async (): Promise<StartTaskRunOutcome> => {
-      const active = this.deps.store.findActive(input.workspaceRoot);
-      if (active !== undefined) {
+      const active = this.deps.store.listActive(input.workspaceRoot)[0];
+      if (active !== undefined && input.parallel !== true) {
         return { ok: true, runId: active.runId, reused: true };
       }
       if (!isValidMaxParallel(input.maxParallel)) {
         return { ok: false, message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
       }
-      const run = createTaskRun({ ...input, runId: this.newId(), now: this.now() });
+      const run = createTaskRun({
+        workspaceRoot: input.workspaceRoot,
+        engine: input.engine,
+        maxParallel: input.maxParallel,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        runId: this.newId(),
+        now: this.now(),
+      });
       await this.deps.store.update(run.runId, () => run);
       this.handleRunChanged(run);
       return { ok: true, runId: run.runId, reused: false };
@@ -369,9 +429,9 @@ export class TaskRunController {
     return (await this.updateRun(runId, (r) => setTaskRunTitle(r, title))) !== undefined;
   }
 
-  /** 同じフォルダの動いているrun（`startRun`が再利用するもの）。中断中のrunは含まない。 */
-  findActive(workspaceRoot: string): TaskRun | undefined {
-    return this.deps.store.findActive(workspaceRoot);
+  /** 同じフォルダの動いているrun（並行して動かせるため複数ありうる）。中断中のrunは含まない。 */
+  listActive(workspaceRoot: string): TaskRun[] {
+    return this.deps.store.listActive(workspaceRoot);
   }
 
   /**
@@ -416,12 +476,13 @@ export class TaskRunController {
   }
 
   /**
-   * 中断したrunを再開する（Issue #1560）。同じフォルダに動いているrunがあれば拒否する（呼び出し側が
-   * 先にそちらを中断させる）。中断で止めた工程は自動では始めず、「やり直す」かOrchestratorの判断で
-   * 動かす。Orchestratorは呼び出し側が開く。
+   * 中断したrunを再開する（Issue #1560）。同じフォルダに動いているrunがあれば、`parallel`のときだけ
+   * 並行して再開し（Issue #1562）、それ以外は拒否する（呼び出し側が先にそちらを中断させる）。
+   * 中断で止めた工程は自動では始めず、「やり直す」かOrchestratorの判断で動かす。Orchestratorは
+   * 呼び出し側が開く。
    */
-  resumeRun(runId: string): Promise<ControllerResult> {
-    // `startRun`と同じキューに通し、同じフォルダで動いているrunを2本にしない
+  resumeRun(runId: string, options: { parallel?: boolean } = {}): Promise<ControllerResult> {
+    // `startRun`と同じキューに通し、動いているrunの確認と再開の間に別のrunが割り込まないようにする
     return this.startQueue.enqueue(async (): Promise<ControllerResult> => {
       const run = this.deps.store.find(runId);
       if (run === undefined) {
@@ -433,7 +494,7 @@ export class TaskRunController {
       if (run.suspendedAt === undefined) {
         return { ok: true, message: 'runは中断していない' };
       }
-      if (this.deps.store.findActive(run.workspaceRoot) !== undefined) {
+      if (options.parallel !== true && this.deps.store.listActive(run.workspaceRoot).length > 0) {
         return { ok: false, message: 'このフォルダには動いているrunがある。先にそのrunを中断する' };
       }
       await this.updateRun(runId, (r) =>

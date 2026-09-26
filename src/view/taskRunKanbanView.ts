@@ -5,7 +5,7 @@ import type { Logger } from '../log';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
-import { isTaskRunActive, isValidTaskId, TASK_RUN_TITLE_MAX_LENGTH } from '../orchestrator/taskRunState';
+import { isTaskRunActive, isValidTaskId, TASK_RUN_TITLE_MAX_LENGTH, taskRunLabel } from '../orchestrator/taskRunState';
 import { chatCsp } from './chatCsp';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
@@ -29,8 +29,11 @@ export interface TaskRunKanbanViewDeps {
   finishRun(runId: string): Promise<{ ok: boolean; message: string }>;
   /** runを中断する。工程セッションとOrchestratorを止めてから中断を立てる（Issue #1560）。 */
   suspendRun(runId: string): Promise<{ ok: boolean; message: string }>;
-  /** 中断したrunを再開し、Orchestratorを新しい世代で開く（Issue #1560）。 */
-  resumeRun(runId: string): Promise<{ ok: boolean; message: string }>;
+  /**
+   * 中断したrunを再開し、Orchestratorを新しい世代で開く（Issue #1560）。`parallel`なら同じフォルダで
+   * 動いているrunと並行して再開する（Issue #1562）。
+   */
+  resumeRun(runId: string, options?: { parallel?: boolean }): Promise<{ ok: boolean; message: string }>;
   log: Logger;
 }
 
@@ -159,9 +162,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     const controller = this.deps.controller;
     switch (message.type) {
       case 'approvePlan':
-        if (!(await controller.approvePlan(runId))) {
-          void vscode.window.showWarningMessage('オーケストレータモード: 承認待ちの計画がありません');
-        }
+        warnIfRejected(await controller.approvePlan(runId));
         return;
       case 'setMaxParallel': {
         const maxParallel = message.maxParallel;
@@ -366,35 +367,46 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   }
 
   /**
-   * 中断したrunを再開する。同じフォルダに動いているrunがあれば、確かめてからそちらを中断して入れ替える。
-   * runの切り替えコマンド（Issue #1561）からも呼ぶ。
+   * 中断したrunを再開する。同じフォルダに動いているrunがあれば、並行して再開するか、（1本だけなら）
+   * そちらを中断して入れ替えるかを確かめる（Issue #1562）。runの切り替えコマンド（Issue #1561）からも呼ぶ。
    */
   async resumeRun(runId: string): Promise<void> {
     const run = this.deps.controller.find(runId);
     if (run === undefined || run.finishedAt !== undefined || run.suspendedAt === undefined) {
       return;
     }
-    const active = this.deps.controller.findActive(run.workspaceRoot);
-    if (active !== undefined && active.runId !== runId) {
+    const active = this.deps.controller.listActive(run.workspaceRoot).filter((r) => r.runId !== runId);
+    let parallel = false;
+    if (active.length > 0) {
+      const alongside = '並行して再開する';
+      const replace = 'そのrunを中断して再開する';
       const choice = await vscode.window.showWarningMessage(
-        'このフォルダには動いているrunがあります。そのrunを中断して、このrunを再開しますか？',
+        active.length === 1
+          ? `このフォルダには動いているrun「${taskRunLabel(active[0]!)}」があります。どう再開しますか？`
+          : `このフォルダには動いているrunが${String(active.length)}本あります。並行して再開しますか？`,
         {
           modal: true,
           detail:
-            '動いているrunの工程セッションとOrchestratorを止めます。中断したrunは後で「runを再開する」で続けられます。',
+            '並行して再開すると、工程セッションの数はフォルダ全体で設定`agent.taskRun.maxParallelPerFolder`までに抑えます。' +
+            (active.length === 1
+              ? '中断して再開すると、動いているrunの工程セッションとOrchestratorを止めます。中断したrunは後で「runを再開する」で続けられます。'
+              : ''),
         },
-        'そのrunを中断して再開する',
+        ...(active.length === 1 ? [alongside, replace] : [alongside]),
       );
-      if (choice !== 'そのrunを中断して再開する') {
-        return;
-      }
-      const suspended = await this.deps.suspendRun(active.runId);
-      if (!suspended.ok) {
-        warnIfRejected(suspended);
+      if (choice === alongside) {
+        parallel = true;
+      } else if (choice === replace && active.length === 1) {
+        const suspended = await this.deps.suspendRun(active[0]!.runId);
+        if (!suspended.ok) {
+          warnIfRejected(suspended);
+          return;
+        }
+      } else {
         return;
       }
     }
-    warnIfRejected(await this.deps.resumeRun(runId));
+    warnIfRejected(await this.deps.resumeRun(runId, { parallel }));
     this.selectedRunId = runId;
     this.schedulePost();
   }

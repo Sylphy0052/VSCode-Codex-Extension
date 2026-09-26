@@ -15,6 +15,7 @@
 
 import { roleLabel } from '../orchestrator/rolePresets';
 import type { TaskSessionInput } from '../orchestrator/taskSession';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 
 /**
  * タブ名の組み立てが読む入力。**`TaskSessionInput`から必要な項目だけを導く**
@@ -27,8 +28,11 @@ import type { TaskSessionInput } from '../orchestrator/taskSession';
  */
 export type SessionPanelTitleInput = Pick<
   TaskSessionInput,
-  'role' | 'mergeResolutionTaskId' | 'taskId' | 'issue' | 'teamRole' | 'generation'
+  'role' | 'mergeResolutionTaskId' | 'taskId' | 'issue' | 'teamRole' | 'generation' | 'runLabel'
 >;
+
+/** Orchestratorのタブ名に添えるrunの表示名の上限。タブの幅に収めるため短く切る。 */
+const RUN_LABEL_TITLE_MAX_LENGTH = 24;
 
 /**
  * 同じタスクを分割（`onContextLow: split`。Issue #1273）で開き直したときの世代の印。
@@ -63,7 +67,8 @@ export function buildSessionPanelTitle(input: SessionPanelTitleInput, label: str
     return `衝突解決 ${input.mergeResolutionTaskId}${suffix}`;
   }
   if (input.role === 'orchestrator') {
-    return `進行役${suffix}`;
+    const runLabel = sanitizeInlineText(input.runLabel ?? '', RUN_LABEL_TITLE_MAX_LENGTH).trim();
+    return runLabel === '' ? `進行役${suffix}` : `進行役 ${runLabel}${suffix}`;
   }
   // Issue番号はタスクidより人にとっての意味が強い（何の作業かを追える）ため優先する。
   // どちらも無いタスク（定義ファイルに`issue`が無く、自動起票もされていない）では
