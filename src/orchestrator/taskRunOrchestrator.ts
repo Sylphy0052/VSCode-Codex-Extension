@@ -21,6 +21,7 @@ import { GATE_CHOICE_LABELS, MAX_AUTO_RETRIES, MAX_REVIEW_ROUNDS } from './taskR
 import { assessTaskRun, newlyAwaitingDecision, type StageRef } from './taskRunScheduler';
 import {
   getTask,
+  isTaskRunActive,
   nextOrchestratorGeneration,
   recordOrchestratorAutoHandoff,
   recordOrchestratorSession,
@@ -196,11 +197,12 @@ export class TaskRunOrchestrator {
    * 自動引き継ぎ（Issue #1553）。ホストに新しいタブを開かせず、`renew`と同じ手順で次の世代を
    * 起こす。ワークフロー実行のOrchestrator（`runnerOrchestrator.ts`の`onOrchestratorHandoff`、
    * Issue #1549）と同じく、引き継ぎ文書は使わない。新しい世代はget_run_stateで状態を取り直す。
+   * Orchestratorのタブで手動の引き継ぎを押したときも同じ委譲先へ来るので、契機は`trigger`で分ける。
    *
    * 次の世代を起こすのはホストの引き継ぎ処理が戻った後にする。委譲先の中で前の世代を閉じると、
    * ホストが破棄済みのパネルを触ることになるため。
    */
-  private onHandoff(runId: string, generation: number): Promise<boolean> {
+  private onHandoff(runId: string, generation: number, trigger: GenerationTrigger): Promise<boolean> {
     const live = this.live.get(runId);
     if (
       this.disposed ||
@@ -214,7 +216,7 @@ export class TaskRunOrchestrator {
     // 次の世代が立ち上がるまでに届いたイベントを前の世代へ送らせない
     live.handingOff = true;
     this.deps.log(
-      `[task run orchestrator] ${runId}のOrchestrator（第${String(generation)}世代）のコンテキストが少なくなったため、次の世代へ引き継ぎます`,
+      `[task run orchestrator] ${runId}のOrchestrator（第${String(generation)}世代）を${trigger === 'autoHandoff' ? 'コンテキストが少なくなったため' : 'ユーザーの操作で'}次の世代へ引き継ぎます`,
     );
     this.deps.onDidChange();
     setTimeout(() => {
@@ -222,7 +224,7 @@ export class TaskRunOrchestrator {
       if (this.disposed || this.live.get(runId) !== live) {
         return;
       }
-      void this.startNewGeneration(runId, 'autoHandoff').then((opened) => {
+      void this.startNewGeneration(runId, trigger).then((opened) => {
         if (!opened) {
           this.abandonHandoff(runId, live);
         }
@@ -302,6 +304,11 @@ export class TaskRunOrchestrator {
   }
 
   private async openNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
+    // 引き継ぎを待つ間にrunが中断・完了していたら、次の世代は起こさない（中断・完了の側が`close`する）
+    const before = this.deps.controller.find(runId);
+    if (trigger === 'autoHandoff' && (before === undefined || !isTaskRunActive(before))) {
+      return false;
+    }
     const run = await this.deps.controller.updateRun(runId, nextOrchestratorGeneration);
     if (run === undefined) {
       return false;
@@ -331,7 +338,8 @@ export class TaskRunOrchestrator {
         // 新しいセッションはホストに開かせず、`renew`と同じ手順で開き直す（`onHandoff`）
         forceAutoHandoff: true,
         autoHandoffAutoApprove: true,
-        handoffDelegate: () => this.onHandoff(runId, generation),
+        handoffDelegate: (request) =>
+          this.onHandoff(runId, generation, request.trigger === 'manual' ? 'manual' : 'autoHandoff'),
       });
       await this.deps.controller.updateRun(runId, (r) => {
         const recorded = recordOrchestratorSession(r, session?.sessionId ?? '');
