@@ -314,14 +314,17 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .status { border: 1px solid var(--vscode-panel-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; white-space: nowrap; } .status.warn { border-color: var(--vscode-charts-yellow); }
 .plan { margin-bottom: 16px; } .plan:empty { display: none; }
 .plan-box { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border: 1px solid var(--vscode-charts-yellow); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
-.board { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; align-items: start; }
-.column { min-width: 0; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; }
+/* 7列を等分すると狭いパネルで1行数文字まで潰れるため、列に下限幅を持たせて横スクロールにする。空の列は細くする */
+.board { display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
+.column { flex: 1 1 240px; min-width: 220px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; }
+.column.is-empty { flex: 0 0 104px; min-width: 104px; min-height: 0; } .column.is-empty .empty { padding: 8px 12px; }
 .column-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; font-size: 13px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 .cards { display: grid; gap: 9px; padding: 8px; min-width: 0; }
 .card { min-width: 0; overflow: hidden; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 10px; }
 .card.attention { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); }
 .card-title { display: block; font-weight: 650; overflow-wrap: anywhere; }
 .summary { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+.summary.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; } .summary.clamp.expanded { display: block; }
 .meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
 .badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .badge { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 11px; padding: 1px 7px; } .badge.warn { border-color: var(--vscode-charts-yellow); color: var(--vscode-charts-yellow); } .badge.ok { border-color: var(--vscode-charts-blue); color: var(--vscode-charts-blue); }
@@ -349,6 +352,8 @@ const script = `
   const planEl = document.getElementById('plan');
   const boardEl = document.getElementById('board');
   let current;
+  // 概要を展開したカード。盤面の再描画で畳まれないよう覚えておく
+  const expandedSummaries = new Set();
   let orchestratorStatus;
   // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
   const drafts = new Map();
@@ -498,7 +503,15 @@ const script = `
     const running = card.badges.some(function (b) { return b.tone === 'ok'; });
     const c = el('article', 'card' + (warn ? ' attention' : running ? ' running' : ''));
     c.appendChild(el('span', 'card-title', card.taskId + ' ' + card.title));
-    if (card.summary) { c.appendChild(el('div', 'summary', card.summary)); }
+    if (card.summary) {
+      // 長い概要は3行に畳み、クリックで全文を出す
+      const summary = el('div', 'summary clamp' + (expandedSummaries.has(card.taskId) ? ' expanded' : ''), card.summary);
+      summary.title = card.summary;
+      summary.addEventListener('click', function () {
+        if (summary.classList.toggle('expanded')) { expandedSummaries.add(card.taskId); } else { expandedSummaries.delete(card.taskId); }
+      });
+      c.appendChild(summary);
+    }
     if (card.badges.length > 0) {
       const badges = el('div', 'badges');
       card.badges.forEach(function (b) { badges.appendChild(el('span', 'badge ' + b.tone, b.label)); });
@@ -544,7 +557,7 @@ const script = `
     }
     COLUMNS.forEach(function (col) {
       const cards = board.run.columns[col[0]] || [];
-      const column = el('section', 'column');
+      const column = el('section', 'column' + (cards.length === 0 ? ' is-empty' : ''));
       const head = el('div', 'column-head');
       head.appendChild(el('span', undefined, col[1]));
       head.appendChild(el('span', 'count', String(cards.length)));
