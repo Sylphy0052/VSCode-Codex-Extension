@@ -22,6 +22,7 @@ import { assessTaskRun, newlyAwaitingDecision, type StageRef } from './taskRunSc
 import {
   getTask,
   nextOrchestratorGeneration,
+  recordOrchestratorAutoHandoff,
   recordOrchestratorSession,
   TASK_STAGES,
   taskRunLabel,
@@ -42,8 +43,14 @@ import { sanitizeInlineText } from './untrustedText';
  * `roadmapOrchestrator.ts`に揃えている（世代ごとのトークン、ターンの終わりでのイベント配信）。
  */
 
-/** Orchestratorの状態。Kanbanのヘッダに出す。 */
-export type TaskRunOrchestratorStatus = 'notStarted' | 'idle' | 'busy';
+/**
+ * Orchestratorの状態。Kanbanのヘッダに出す。`handingOff`はコンテキストの残量不足で次の世代を
+ * 起こしている途中（Issue #1553）。
+ */
+export type TaskRunOrchestratorStatus = 'notStarted' | 'idle' | 'busy' | 'handingOff';
+
+/** 次の世代を起こした契機。`manual`はKanbanの「開き直す」、`autoHandoff`は自動引き継ぎ（Issue #1553）。 */
+type GenerationTrigger = 'manual' | 'autoHandoff';
 
 /** Orchestratorへ届けるイベント。本文は`composeOrchestratorPrompt`が囲って無害化する。 */
 export interface TaskRunOrchestratorEvent {
@@ -132,6 +139,11 @@ interface LiveOrchestrator {
   busy: boolean;
   pending: TaskRunOrchestratorEvent[];
   eventsSent: number;
+  /**
+   * 自動引き継ぎで次の世代を起こしている途中（Issue #1553）。この間に届いたイベントは送らずに
+   * `pending`へ溜め、次の世代が立ち上がってから渡す。この世代からのツール呼び出しは拒否する。
+   */
+  handingOff: boolean;
 }
 
 export class TaskRunOrchestrator {
@@ -147,12 +159,16 @@ export class TaskRunOrchestrator {
     if (live === undefined) {
       return 'notStarted';
     }
+    if (live.handingOff) {
+      return 'handingOff';
+    }
     return live.busy ? 'busy' : 'idle';
   }
 
   /**
    * Orchestratorのタブを開く。生きているセッションがあれば前へ出すだけにし、無ければ次の世代を
-   * 起こす。`renew`なら生きているセッションを閉じて次の世代を起こす（コンテキストが尽きたとき用）。
+   * 起こす。`renew`なら生きているセッションを閉じて次の世代を起こす（人が手で開き直すとき用。
+   * コンテキストが尽きかけたときは自動引き継ぎ`onHandoff`が同じ手順で起こす。Issue #1553）。
    * 失敗してもrunは止めない（ログへ残し、`false`を返す）。
    */
   open(runId: string, renew = false): Promise<boolean> {
@@ -161,15 +177,74 @@ export class TaskRunOrchestrator {
       existing.session.reveal();
       return Promise.resolve(true);
     }
+    return this.startNewGeneration(runId, 'manual');
+  }
+
+  private startNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
     const inFlight = this.opening.get(runId);
     if (inFlight !== undefined) {
       return inFlight;
     }
-    const task = this.openNewGeneration(runId).finally(() => {
+    const task = this.openNewGeneration(runId, trigger).finally(() => {
       this.opening.delete(runId);
     });
     this.opening.set(runId, task);
     return task;
+  }
+
+  /**
+   * 自動引き継ぎ（Issue #1553）。ホストに新しいタブを開かせず、`renew`と同じ手順で次の世代を
+   * 起こす。ワークフロー実行のOrchestrator（`runnerOrchestrator.ts`の`onOrchestratorHandoff`、
+   * Issue #1549）と同じく、引き継ぎ文書は使わない。新しい世代はget_run_stateで状態を取り直す。
+   *
+   * 次の世代を起こすのはホストの引き継ぎ処理が戻った後にする。委譲先の中で前の世代を閉じると、
+   * ホストが破棄済みのパネルを触ることになるため。
+   */
+  private onHandoff(runId: string, generation: number): Promise<boolean> {
+    const live = this.live.get(runId);
+    if (
+      this.disposed ||
+      live === undefined ||
+      live.generation !== generation ||
+      live.handingOff ||
+      this.opening.has(runId)
+    ) {
+      return Promise.resolve(false);
+    }
+    // 次の世代が立ち上がるまでに届いたイベントを前の世代へ送らせない
+    live.handingOff = true;
+    this.deps.log(
+      `[task run orchestrator] ${runId}のOrchestrator（第${String(generation)}世代）のコンテキストが少なくなったため、次の世代へ引き継ぎます`,
+    );
+    this.deps.onDidChange();
+    setTimeout(() => {
+      // 待つ間にrunを終えた（`close`）・拡張機能を終了した（`dispose`）なら、次の世代は要らない
+      if (this.disposed || this.live.get(runId) !== live) {
+        return;
+      }
+      void this.startNewGeneration(runId, 'autoHandoff').then((opened) => {
+        if (!opened) {
+          this.abandonHandoff(runId, live);
+        }
+      });
+    }, 0);
+    return Promise.resolve(true);
+  }
+
+  /**
+   * 自動引き継ぎで次の世代を開けなかった（Issue #1553）。前の世代をそのまま使い続け、溜めていた
+   * イベントを渡す。runは止めない。
+   */
+  private abandonHandoff(runId: string, live: LiveOrchestrator): void {
+    if (this.live.get(runId) !== live || !live.handingOff) {
+      return;
+    }
+    live.handingOff = false;
+    this.deps.log(`[task run orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`);
+    if (!live.busy) {
+      this.flush(live);
+    }
+    this.deps.onDidChange();
   }
 
   /**
@@ -226,7 +301,7 @@ export class TaskRunOrchestrator {
     });
   }
 
-  private async openNewGeneration(runId: string): Promise<boolean> {
+  private async openNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
     const run = await this.deps.controller.updateRun(runId, nextOrchestratorGeneration);
     if (run === undefined) {
       return false;
@@ -251,13 +326,19 @@ export class TaskRunOrchestrator {
         // 作業ディレクトリへの書き込みも塞ぐ（Issue #1541）
         cliSandbox: 'read-only',
         mcp: { url: registered.url },
-        // コンテキストが尽きたら「Orchestratorを開く」で次の世代を起こす。新しい世代は
-        // get_run_stateで状態を取り直すため、会話の引き継ぎは要らない
-        disableAutoHandoff: true,
+        // コンテキストが尽きかけたら、ユーザーの操作なしに次の世代を起こす（Issue #1553）。
+        // 工程セッションと同じく、グローバル設定によらず自動引き継ぎをONにし、確認も出さない。
+        // 新しいセッションはホストに開かせず、`renew`と同じ手順で開き直す（`onHandoff`）
+        forceAutoHandoff: true,
+        autoHandoffAutoApprove: true,
+        handoffDelegate: () => this.onHandoff(runId, generation),
       });
-      await this.deps.controller.updateRun(runId, (r) =>
-        recordOrchestratorSession(r, session?.sessionId ?? ''),
-      );
+      await this.deps.controller.updateRun(runId, (r) => {
+        const recorded = recordOrchestratorSession(r, session?.sessionId ?? '');
+        return trigger === 'autoHandoff'
+          ? recordOrchestratorAutoHandoff(recorded, generation, new Date())
+          : recorded;
+      });
       if (this.disposed) {
         throw new Error('拡張機能の終了中です');
       }
@@ -272,17 +353,21 @@ export class TaskRunOrchestrator {
 
     session.setApprovalHandler(approvalHandlerFor(effective.autoApprove));
     session.setMcpElicitationHandler?.(shouldAutoApproveTaskRunElicitation);
+    // 開き直し（`renew`・自動引き継ぎ）のときは前の世代を外す。古い世代からの命令は接続の時点で
+    // 届かなくなる。前の世代へ送れずに溜まっていたイベントは、導入文の後で新しい世代へ渡す
+    const previous = this.live.get(runId);
+    const carried = previous?.pending ?? [];
     const live: LiveOrchestrator = {
       generation,
       session,
       token: registered.token,
       busy: false,
-      pending: [],
+      pending: [...carried],
       eventsSent: 0,
+      handingOff: false,
     };
-    // 開き直し（`renew`）のときは前の世代を外す。古い世代からの命令は接続の時点で届かなくなる
-    const previous = this.live.get(runId);
     if (previous !== undefined) {
+      previous.pending = [];
       this.deps.server.unregister(previous.token);
       previous.session.dispose();
     }
@@ -291,7 +376,12 @@ export class TaskRunOrchestrator {
     session.open({ preserveFocus: true, viewColumn: 2 });
     live.busy = true;
     const current = this.deps.controller.find(runId) ?? run;
-    session.send(buildIntroPrompt(current, generation, this.deps.controller.recommendations(runId)));
+    session.send(
+      buildIntroPrompt(current, generation, this.deps.controller.recommendations(runId), {
+        trigger,
+        carriedCount: carried.length,
+      }),
+    );
     this.deps.onDidChange();
     return true;
   }
@@ -323,9 +413,9 @@ export class TaskRunOrchestrator {
     }
   }
 
-  /** 溜まったイベントを送る。ターンの最中には割り込まない。 */
+  /** 溜まったイベントを送る。ターンの最中と、次の世代への引き継ぎの途中には送らない。 */
   private flush(live: LiveOrchestrator): void {
-    if (live.pending.length === 0) {
+    if (live.pending.length === 0 || live.handingOff) {
       return;
     }
     const text = composeOrchestratorPrompt(live.pending, '', TASK_RUN_EVENT_ENVELOPE);
@@ -345,8 +435,13 @@ export class TaskRunOrchestrator {
     rawArgs: unknown,
   ): Promise<RoadmapAskOutcome> {
     // トークンは世代ごとに外しているが、外す前に届いていた呼び出しもここで落とす
-    if (this.live.get(runId)?.generation !== generation) {
+    const live = this.live.get(runId);
+    if (live?.generation !== generation) {
       return { text: 'このOrchestratorは新しい世代に置き換えられました', isError: true };
+    }
+    // 自動引き継ぎの途中（Issue #1553）。次の世代が状態を取り直すため、この世代には命令させない
+    if (live.handingOff) {
+      return { text: 'このOrchestratorは新しい世代へ引き継ぎ中です', isError: true };
     }
     const parsed = parseTaskRunOrchestratorCall(name, rawArgs);
     if (!parsed.ok) {
@@ -592,9 +687,11 @@ function buildIntroPrompt(
   run: TaskRun,
   generation: number,
   recommendations: ReadonlyMap<string, StageSettingsRecommendation>,
+  handover: { trigger: GenerationTrigger; carriedCount: number },
 ): string {
   return [
     `あなたはオーケストレータモードの実行（run: ${run.runId}）を指揮するOrchestratorです（第${String(generation)}世代）。`,
+    ...buildHandoverLines(generation, handover),
     '',
     '役割:',
     '- task-messagingのMCPツールでControllerへ命令するだけで、runの状態を直接変えない。ファイルは書かない',
@@ -615,4 +712,29 @@ function buildIntroPrompt(
       ? 'まずユーザーに何をしたいかを尋ね、計画を立ててpropose_planで提案してください。'
       : 'まず現在の状態をユーザーに短く伝え、次にできることを示してください。',
   ].join('\n');
+}
+
+/**
+ * 2世代目以降の導入文に足す、前の世代からの引き継ぎの説明（Issue #1553）。会話は引き継がず、
+ * 状態はget_run_stateで取り直させる。
+ */
+function buildHandoverLines(
+  generation: number,
+  handover: { trigger: GenerationTrigger; carriedCount: number },
+): string[] {
+  if (generation <= 1) {
+    return [];
+  }
+  const lines = [
+    handover.trigger === 'autoHandoff'
+      ? '前の世代のコンテキストが少なくなったため、自動であなたへ引き継ぎました。'
+      : 'ユーザーの操作で、前の世代からあなたへ引き継ぎました。',
+    '前の世代の会話は引き継いでいません。状態はget_run_stateで取り直し、その結果を正本として進めてください。',
+  ];
+  if (handover.carriedCount > 0) {
+    lines.push(
+      `引き継ぎの間に届いた進行状況の通知${String(handover.carriedCount)}件を、この後の <${TASK_RUN_EVENT_ENVELOPE.tag}> で渡します。`,
+    );
+  }
+  return lines;
 }
