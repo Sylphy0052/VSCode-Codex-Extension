@@ -5,7 +5,7 @@ import type { HandoffClassifierInput } from '../view/handoffClassifier';
 import { buildTaskRunKanban, type TaskRunKanbanBoard } from '../view/taskRunKanbanModel';
 import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
-import { parsePlanArgs, resolveTaskPlan } from './taskRunPlan';
+import { parsePlanArgs, resolveTaskPlan, type PlanTaskInput } from './taskRunPlan';
 import { cancelOpenQuestions, findStageQuestion } from './taskRunQuestions';
 import { decideStageStart, type StageRef, type StartStageRejection } from './taskRunScheduler';
 import {
@@ -27,6 +27,7 @@ import {
   type TaskRunEngine,
 } from './taskRunState';
 import type { TaskRunStore } from './taskRunStore';
+import type { StageObservationPorts } from './taskStageObservation';
 import type { TaskStageRunner } from './taskStageRunner';
 import {
   buildStageClassifierInput,
@@ -69,6 +70,8 @@ export interface TaskRunControllerDeps {
     engine: TaskRunEngine,
     input: HandoffClassifierInput,
   ): Promise<StageSettingsRecommendation | undefined>;
+  /** 計画で指定された既存のIssueがopenかを確かめる。 */
+  observation: Pick<StageObservationPorts, 'fetchIssueState'>;
   log(message: string): void;
   now?: () => Date;
   newId?: () => string;
@@ -214,6 +217,10 @@ export class TaskRunController {
     if (!parsed.ok) {
       return parsed;
     }
+    const issueProblem = await this.checkExistingIssues(runId, parsed.value);
+    if (issueProblem !== undefined) {
+      return { ok: false, message: `計画を受け付けられない: ${issueProblem}` };
+    }
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
     const next = await this.updateRun(runId, (r) => {
@@ -244,6 +251,44 @@ export class TaskRunController {
         mapping === '' ? '新しいタスクは無い。' : `採番したtaskId: ${mapping}`,
       ].join('\n'),
     };
+  }
+
+  /**
+   * 計画で新しく指定された既存のIssueが、forgeにopenで存在するかを確かめる。問題があれば理由を返す。
+   * すでに計画にあるタスクのIssueは確かめない（mergeでcloseされたIssueを持つ完了済みのタスクを含む
+   * 計画の変更を拒まないため）。
+   */
+  private async checkExistingIssues(
+    runId: string,
+    tasks: readonly PlanTaskInput[],
+  ): Promise<string | undefined> {
+    const run = this.deps.store.find(runId);
+    if (run === undefined) {
+      return undefined;
+    }
+    const known = new Set(listTasks(run).map((t) => t.existingIssueNumber));
+    const numbers = [
+      ...new Set(
+        tasks
+          .map((t) => t.existingIssueNumber)
+          .filter((n): n is number => n !== undefined && !known.has(n)),
+      ),
+    ];
+    const states = await Promise.all(
+      numbers.map((n) => this.deps.observation.fetchIssueState(run.workspaceRoot, n)),
+    );
+    const problems = numbers.flatMap((n, i) => {
+      const state = states[i];
+      if (state === 'open') {
+        return [];
+      }
+      return [
+        state === 'closed'
+          ? `既存のIssue #${String(n)}はcloseされている`
+          : `既存のIssue #${String(n)}を確かめられない（存在しないか、forgeへ問い合わせられない）`,
+      ];
+    });
+    return problems.length === 0 ? undefined : problems.join('。');
   }
 
   /** ユーザーが計画を承認する（Kanbanのボタンから呼ぶ。Orchestratorからは呼べない）。 */

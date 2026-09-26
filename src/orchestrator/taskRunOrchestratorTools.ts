@@ -343,7 +343,8 @@ export function formatTaskRunState(
       lines.push(`  依存: ${task.dependsOn.map((d) => `${d}${unmet.has(d) ? '(未)' : '(済)'}`).join(' ')}`);
     }
     if (task.issueNumber !== undefined) {
-      lines.push(`  Issue: #${String(task.issueNumber)}`);
+      const existing = task.existingIssueNumber === undefined ? '' : '（既存のIssue。Issue計画とIssue作成は飛ばした）';
+      lines.push(`  Issue: #${String(task.issueNumber)}${existing}`);
     }
     if (task.pullRequest !== undefined) {
       lines.push(`  PR: #${String(task.pullRequest.number)} ${inline(task.pullRequest.url)}`);
