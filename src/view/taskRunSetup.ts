@@ -178,7 +178,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   const finishRun = async (runId: string): Promise<ControllerResult> => {
     const result = await controller.finishRun(runId);
     if (result.ok) {
-      orchestrator.close(runId);
+      await orchestrator.close(runId);
     }
     return result;
   };

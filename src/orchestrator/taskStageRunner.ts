@@ -437,14 +437,18 @@ export class TaskStageRunner {
 
     const attemptId = this.newId();
     const hasAttempts = (getTask(run, taskId)?.stages[stage].attempts.length ?? 0) > 0;
+    // worktreeを用意する間に人がrunを止めた・終えた（Issue #1558）なら始めない。帳簿の更新と
+    // 同じ直列の中で確かめ、止めた側が「動いている工程」を数える時点と食い違わないようにする
     const started = await this.mutate(runId, (r) =>
-      startStageAttempt(
-        r,
-        taskId,
-        stage,
-        { attemptId, kind: hasAttempts ? 'retry' : 'initial', sessionRef: undefined },
-        this.now(),
-      ),
+      listQueuedStages(r).some((ref) => ref.taskId === taskId && ref.stage === stage)
+        ? startStageAttempt(
+            r,
+            taskId,
+            stage,
+            { attemptId, kind: hasAttempts ? 'retry' : 'initial', sessionRef: undefined },
+            this.now(),
+          )
+        : r,
     );
     const task = started === undefined ? undefined : getTask(started, taskId);
     const decision = task?.stages[stage].attempts.at(-1)?.decision;
