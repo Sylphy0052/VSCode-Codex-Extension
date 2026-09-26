@@ -891,12 +891,12 @@ export class TaskStageRunner {
   /**
    * 人が工程を止める。動いているセッションはループを止めて中断し、タブは残す。worktreeと
    * ブランチは残す（やり直しで使う）。止めたら`true`。
+   *
+   * 開始処理の途中でも受け付ける。mergeの鍵を待っている間に止めた工程は、開始処理がロック内で
+   * 状態を確かめ直して始めない。セッションを開いている途中なら、ロックが空くのを待ってから止める。
    */
   async stopStage(runId: string, taskId: string): Promise<boolean> {
     const key = liveKey(runId, taskId);
-    if (this.starting.has(key)) {
-      return false;
-    }
     const stopped = await this.withTaskLock(key, async () => {
       const entry = this.live.get(key);
       if (entry === undefined || entry.closed) {

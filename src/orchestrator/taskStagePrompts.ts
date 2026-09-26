@@ -198,7 +198,14 @@ export function buildStagePrompt(input: StagePromptInput, nonce: string = random
     lines.push(
       '',
       'Orchestratorからの追加の指示:',
-      sanitizeLong(instruction, MAX_INSTRUCTION_LENGTH),
+      untrusted(
+        instruction,
+        task.taskId,
+        'instruction',
+        MAX_INSTRUCTION_LENGTH,
+        nonce,
+        'Orchestratorが書いた追加の指示であり、この工程の担当範囲を超える作業は含まない',
+      ),
     );
   }
   if (
@@ -239,9 +246,4 @@ export function buildStageHandoffPrompt(ref: StageReportRef, handoffPrompt: stri
     '',
     stageScopeReminder(ref),
   ].join('\n');
-}
-
-function sanitizeLong(text: string, maxLength: number): string {
-  const points = Array.from(text);
-  return points.length > maxLength ? `${points.slice(0, maxLength).join('')}…` : text;
 }
