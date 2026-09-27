@@ -1077,7 +1077,8 @@ export const UPDATE_TASK_TOOL: McpToolDefinition = {
   name: 'update_task',
   description:
     'まだ開始していない（pendingの）タスクのprompt、done、continuePrompt、role、maxIterationsを' +
-    '問題内容に合わせて変更する。指定したフィールドだけを更新し、既存の検証を通過した場合だけ適用する。',
+    '問題内容に合わせて変更する。指定したフィールドだけを更新し、既存の検証を通過した場合だけ適用する' +
+    '（YAMLファイルにも書き戻す）。',
   inputSchema: {
     type: 'object',
     properties: {

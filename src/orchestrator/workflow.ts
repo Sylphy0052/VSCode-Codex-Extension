@@ -1033,7 +1033,7 @@ export function removeTaskFromWorkflowYaml(source: string, taskId: string): stri
     if (!isMap(item)) continue;
     const deps = item.get('dependsOn', true);
     if (!isSeq(deps)) continue;
-    const kept = deps.items.filter((dep) => !(isScalar(dep) && dep.value === taskId));
+    const kept = deps.items.filter((dep) => !(isScalar(dep) && String(dep.value) === taskId));
     if (kept.length === deps.items.length) continue;
     if (kept.length === 0) item.delete('dependsOn');
     else deps.items = kept;
@@ -1081,8 +1081,8 @@ function parseWorkflowTasksYaml(
 }
 
 /**
- * 書き換えたノード以外の見た目を変えないよう、flow形式の配列を`[a, b]`のまま書き出す
- * （`yaml`の既定では文書全体の`[a]`が`[ a ]`に書き換わる）。
+ * flow形式の配列を`[a, b]`の形で書き出す（`yaml`の既定では文書全体の`[a]`が`[ a ]`に
+ * 書き換わる）。この設定は文書全体に効くため、人が`[ a ]`と書いた箇所は`[a]`になる。
  */
 function stringifyWorkflowYaml(doc: ReturnType<typeof parseDocument>): string {
   return doc.toString({ flowCollectionPadding: false });
@@ -1099,8 +1099,11 @@ function preferBlockLiteral(node: unknown): void {
   });
 }
 
-function yamlTaskId(item: unknown): unknown {
-  return isMap(item) ? item.get('id') : undefined;
+/** クォートしない数字だけのid（`id: 42`）は数値として読まれるため、文字列にそろえて比べる。 */
+function yamlTaskId(item: unknown): string | undefined {
+  if (!isMap(item)) return undefined;
+  const id = item.get('id');
+  return id === undefined || id === null ? undefined : String(id);
 }
 
 /** 生成YAMLのレビュー状態だけを書き換え、他の行を可能な限り維持する。 */
