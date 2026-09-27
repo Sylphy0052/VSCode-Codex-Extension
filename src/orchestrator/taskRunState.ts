@@ -448,8 +448,10 @@ function newTask(draft: TaskDraft, executionId: string, at: string): Orchestrate
  * 依存先は例外にする（形式、重複、循環の検証は呼び出し側が先に済ませる前提）。
  *
  * 着手済みタスクの削除・既存Issueの付け替えも許す（Orchestratorの自律運用のため）。
- * 削除された着手済みタスクのworktree/branch/PRは、この関数では後始末しない
- * （呼び出し側・スケジューラ側で孤立リソースを扱う前提）。
+ * 削除された着手済みタスクのworktree/branch/PRは、この関数では消さない。呼び出し側
+ * （`TaskRunController.proposePlan`）が`findRetiredStartedTasks`で適用前後のrunを比べて
+ * 検出し、後片付け（工程セッションを止める・PRを閉じる・ブランチとworktreeを消す）を
+ * 引き継ぐ（Issue #1619）。
  */
 export function proposeTaskPlan(
   run: TaskRun,
@@ -506,6 +508,31 @@ export function hasStarted(task: OrchestratedTask): boolean {
     const status = task.stages[stage].status;
     return status !== 'notStarted' && status !== 'skipped';
   });
+}
+
+/**
+ * `proposeTaskPlan`の適用前後のrunを比べ、片付けが要る着手済みタスクを求める（Issue #1619）。
+ * 「片付けが要る」は次のいずれか: 計画から外れて消えた（後のrunに存在しない）、既存Issueの
+ * 付け替えで作り直された（`newTask`によりworktree/branch/PRの記録がリセットされ、後の
+ * runでは未着手扱いに戻る）。作り直される前のタスクのスナップショットを返す
+ * （worktree/branch/PRの記録は作り直し後には残っていないため）。
+ */
+export function findRetiredStartedTasks(
+  before: TaskRun,
+  after: TaskRun,
+): readonly OrchestratedTask[] {
+  const retired: OrchestratedTask[] = [];
+  for (const taskId of Object.keys(before.tasks)) {
+    const beforeTask = before.tasks[taskId];
+    if (beforeTask === undefined || !hasStarted(beforeTask)) {
+      continue;
+    }
+    const afterTask = after.tasks[taskId];
+    if (afterTask === undefined || !hasStarted(afterTask)) {
+      retired.push(beforeTask);
+    }
+  }
+  return retired;
 }
 
 /** 承認待ちの計画を承認する。承認待ちでなければそのまま返す。 */
