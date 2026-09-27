@@ -39,6 +39,7 @@ import {
 } from './planReflexReview';
 import {
   MAX_ROADMAP_PLAN_NODES,
+  childTitles,
   extractRoadmapChildren,
   findRoadmapPlanSection,
   importRoadmap,
@@ -219,7 +220,10 @@ export function useCurrentPlanSection(decision: RoadmapPlanDecision): ResolveRoa
     plan: decision.current.plan,
     proposal: undefined,
     notices: [
-      `子Issue側の変更（${describeRoadmapSourceDiff(decision.change.source)}）を確かめたうえで、今の計画区画のまま使います`,
+      `子Issue側の変更（${describeRoadmapSourceDiff(
+        decision.change.source,
+        childTitles(decision.children),
+      )}）を確かめたうえで、今の計画区画のまま使います`,
     ],
   };
 }

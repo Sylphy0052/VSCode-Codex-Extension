@@ -13,9 +13,11 @@ import {
   type RoadmapPlanMeta,
 } from '../../src/orchestrator/roadmapPlanHash';
 import {
+  childTitles,
   findRoadmapPlanSection,
   formatRoadmapPlanSection,
   parseRoadmapPlanSection,
+  type RoadmapChild,
 } from '../../src/orchestrator/roadmapImport';
 import { useCurrentPlanSection } from '../../src/orchestrator/roadmapPlanProposal';
 import type { RoadmapPlanNode } from '../../src/orchestrator/roadmapRunState';
@@ -178,6 +180,17 @@ describe('diffRoadmapSource / describeRoadmapSourceDiff', () => {
       '追加: #104, #105 / 削除: #103 / 本文の変更: #101',
     );
   });
+
+  it('titlesを渡すと追加・本文の変更にタイトルを添える（削除は番号だけ）', () => {
+    const diff = { added: [104], removed: [103], bodyChanged: [101] };
+    const titles = childTitles([
+      { issueNumber: 104, title: '新機能A', checked: false },
+      { issueNumber: 101, title: '既存B', checked: true },
+    ]);
+    expect(describeRoadmapSourceDiff(diff, titles)).toBe(
+      '追加: #104（新機能A） / 削除: #103 / 本文の変更: #101（既存B）',
+    );
+  });
 });
 
 describe('classifyRoadmapPlanChange', () => {
@@ -267,15 +280,16 @@ describe('useCurrentPlanSection', () => {
     source: { added: [], removed: [], bodyChanged: [101] },
   };
 
-  it('今の区画が検証に通ればreadyにして知らせを付ける', () => {
+  it('今の区画が検証に通ればreadyにして知らせを付ける（子のタイトルを添える）', () => {
     const plan = {
       nodes: NODES,
       source: 'existingSection' as const,
       planOrigin: 'generated' as const,
     };
+    const children: RoadmapChild[] = [{ issueNumber: 101, title: '既存B', checked: false }];
     const outcome = useCurrentPlanSection({
       kind: 'planDecisionNeeded',
-      children: [],
+      children,
       duplicates: [],
       change,
       current: { kind: 'valid', plan },
@@ -284,7 +298,7 @@ describe('useCurrentPlanSection', () => {
     expect(outcome.kind).toBe('ready');
     if (outcome.kind === 'ready') {
       expect(outcome.plan).toBe(plan);
-      expect(outcome.notices?.[0]).toContain('本文の変更: #101');
+      expect(outcome.notices?.[0]).toContain('本文の変更: #101（既存B）');
     }
   });
 

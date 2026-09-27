@@ -253,10 +253,22 @@ export function classifyRoadmapPlanChange(
     : { kind: 'sourceChanged', source: diff };
 }
 
-/** 子Issue側の違いを1行で表す（番号だけ。本文は出さない）。 */
-export function describeRoadmapSourceDiff(diff: RoadmapSourceDiff): string {
-  const list = (numbers: readonly number[]): string =>
-    numbers.map((n) => `#${String(n)}`).join(', ');
+/**
+ * 子Issue側の違いを1行で表す（番号だけ。本文は出さない）。
+ *
+ * `titles`を渡すと、追加・本文の変更の番号に今のタイトルを添える（削除された番号は
+ * 今の子Issue一覧に無いためタイトルを持たず、番号だけになる）。何が変わったかを番号だけで
+ * 見せると、確認する人が対象を確かめるために毎回子Issueを開き直す必要があった（#1581）。
+ */
+export function describeRoadmapSourceDiff(
+  diff: RoadmapSourceDiff,
+  titles?: ReadonlyMap<number, string>,
+): string {
+  const label = (n: number): string => {
+    const title = titles?.get(n);
+    return title === undefined ? `#${String(n)}` : `#${String(n)}（${title}）`;
+  };
+  const list = (numbers: readonly number[]): string => numbers.map(label).join(', ');
   const parts: string[] = [];
   if (diff.added.length > 0) {
     parts.push(`追加: ${list(diff.added)}`);

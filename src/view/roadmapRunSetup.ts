@@ -29,6 +29,7 @@ import {
   type RoadmapPlanResolveDeps,
 } from '../orchestrator/roadmapPlanProposal';
 import { describeRoadmapSourceDiff } from '../orchestrator/roadmapPlanHash';
+import { childTitles } from '../orchestrator/roadmapImport';
 import { judgeRoadmapQuestion, RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
 import { RoadmapRunController } from '../orchestrator/roadmapRunController';
 import {
@@ -293,7 +294,7 @@ async function decidePlanChange(
   const regenerate = '計画を作り直す';
   const useCurrent = '今の区画のまま使う';
   const detail = [
-    `子Issue側の変更: ${describeRoadmapSourceDiff(decision.change.source)}`,
+    `子Issue側の変更: ${describeRoadmapSourceDiff(decision.change.source, childTitles(decision.children))}`,
     ...(decision.change.kind === 'bothChanged'
       ? ['計画区画の変更: 生成の後に区画が手で直されています（作り直すと手修正は置き換わります）']
       : []),

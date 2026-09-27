@@ -52,6 +52,11 @@ export interface RoadmapChild {
   checked: boolean;
 }
 
+/** 子Issueの番号→タイトルの対応。変更の説明にタイトルを添えるときに使う（#1581）。 */
+export function childTitles(children: readonly RoadmapChild[]): ReadonlyMap<number, string> {
+  return new Map(children.map((child) => [child.issueNumber, child.title]));
+}
+
 export interface ExtractedRoadmapChildren {
   /** 本文での出現順。同じ番号は最初の行だけを採る。 */
   children: RoadmapChild[];
