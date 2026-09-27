@@ -224,7 +224,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       }
       case 'setHalted':
         if (typeof message.halted === 'boolean') {
-          await controller.setHalted(runId, message.halted);
+          warnIfRejected(await controller.setHalted(runId, message.halted));
         }
         return;
       case 'openPullRequest':
@@ -245,9 +245,18 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'renameRun':
         await this.renameRun(runId);
         return;
-      case 'transferLease':
-        warnIfRejected(await controller.transferLease(runId));
+      case 'transferLease': {
+        // 元のウィンドウは専有権を失ったことに気づくと、動いている工程を止める（Issue #1636）
+        const choice = await vscode.window.showWarningMessage(
+          '専有権をこのウィンドウへ移しますか？ 元のウィンドウで動いている工程は止まります。worktreeとブランチは残り、このウィンドウの「やり直す」で始め直せます。',
+          { modal: true },
+          '移す',
+        );
+        if (choice === '移す') {
+          warnIfRejected(await controller.transferLease(runId));
+        }
         return;
+      }
     }
     const taskId = message.taskId;
     if (typeof taskId !== 'string' || !isValidTaskId(taskId)) {

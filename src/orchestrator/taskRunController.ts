@@ -108,6 +108,7 @@ export interface TaskRunControllerDeps {
     TaskStageRunner,
     | 'pump'
     | 'stopStage'
+    | 'stopLiveStagesOfRun'
     | 'pauseStage'
     | 'resumeStage'
     | 'instructStage'
@@ -246,8 +247,11 @@ export class TaskRunController {
 
   /**
    * このウィンドウがrunの専有権を持っているか確かめ、持っていなければ取る（Issue #1628）。
-   * 計画の変更・承認・工程の起動・runの再開の共通の関門にする。`lease`未設定
-   * （テスト等）なら常に許可する。
+   * run状態を書き換える操作（計画の変更・承認、工程の起動・停止・一時停止・指示、質問への回答、
+   * 関門の決着、runの一時停止・終了・中断・再開、並列上限の変更）の共通の関門にする（Issue #1636）。
+   * 工程セッションと質問の待ち受けは専有権を持つウィンドウにしか無く、他のウィンドウから
+   * 状態だけを書き換えると動いている工程と食い違うため。例外はrunの名前変更（`setTitle`）だけ。
+   * `lease`未設定（テスト等）なら常に許可する。
    */
   async ensureLease(runId: string): Promise<ControllerResult> {
     if (this.deps.lease === undefined || this.deps.lease.holds(runId)) {
@@ -294,11 +298,22 @@ export class TaskRunController {
 
   /**
    * 持っていた専有権を別のウィンドウに取られた（`TaskRunLeaseManager`のheartbeatが検知して
-   * 呼ぶ）。runのデータ自体は変えず、Kanbanへ再描画を促すだけにする（Issue #1628）。
+   * 呼ぶ）。このウィンドウで動いている工程セッションは止める（Issue #1636。理由は
+   * `TaskStageRunner.stopLiveStagesOfRun`）。止めた工程は移した先のウィンドウで「やり直す」から始め直す。
    */
   handleLeaseLost(runId: string, holder: TaskRunLease | undefined): void {
     this.deps.log(`[task run] ${runId}の専有権を${formatTaskRunLeaseHolder(holder, this.now())}に取られた`);
     this.refreshKanban(runId);
+    void this.deps.runner
+      .stopLiveStagesOfRun(runId, '専有権が別のウィンドウへ移ったため止めました')
+      .then((count) => {
+        if (count > 0) {
+          this.deps.log(`[task run] ${runId}の専有権を失ったため、動いていた工程を${String(count)}件止めた`);
+        }
+      })
+      .catch((e: unknown) => {
+        this.deps.log(`[task run] ${runId}の専有権を失った後、工程を止められませんでした: ${String(e)}`);
+      });
   }
 
   /** 状態を純粋関数で進めて永続化する。runが無ければ`undefined`。 */
@@ -757,17 +772,29 @@ export class TaskRunController {
   }
 
   /** run全体の一時停止と再開（Kanbanから）。停止中は新しい工程を始めない。実行中の工程は止めない。 */
-  async setHalted(runId: string, halted: boolean): Promise<void> {
+  async setHalted(runId: string, halted: boolean): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     // 中断中のrunは再開（`resumeRun`）で一時停止を解く
     const next = await this.updateRun(runId, (r) =>
       isTaskRunActive(r) ? setTaskRunHaltedByUser(r, halted) : r,
     );
-    if (next !== undefined && !halted) {
+    if (next === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    if (!halted) {
       this.pumpLater(runId);
     }
+    return { ok: true, message: halted ? 'runを一時停止した' : 'runの一時停止を解いた' };
   }
 
-  /** runの表示名を付け替える（Issue #1561）。空なら名前を外す。runが無ければ`false`。 */
+  /**
+   * runの表示名を付け替える（Issue #1561）。空なら名前を外す。runが無ければ`false`。
+   * 表示だけの変更で工程の動きに関わらないため、専有権を持たないウィンドウからも受け付ける
+   * （Issue #1636。他の書き換えは`ensureLease`で専有権を持つウィンドウに限る）。
+   */
   async setTitle(runId: string, title: string): Promise<boolean> {
     return (await this.updateRun(runId, (r) => setTaskRunTitle(r, title))) !== undefined;
   }
@@ -787,6 +814,10 @@ export class TaskRunController {
    * 工程セッションを止めてから`finishedAt`を立てる。Orchestratorのセッションは呼び出し側が閉じる。
    */
   async finishRun(runId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const halted = await this.updateRun(runId, (r) =>
       r.finishedAt === undefined ? setTaskRunHaltedByUser(r, true) : r,
     );
@@ -809,6 +840,10 @@ export class TaskRunController {
    * 中断の成否だけを見て次へ進むため、別の操作が先に中断していても失敗扱いにしない（Issue #1565）。
    */
   async suspendRun(runId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const halted = await this.updateRun(runId, (r) =>
       isTaskRunActive(r) ? setTaskRunHaltedByUser(r, true) : r,
     );
@@ -931,6 +966,10 @@ export class TaskRunController {
    * ユーザーの「やり直す」判断として決着させる（Reflexの判定より優先する）。
    */
   async retryStage(runId: string, taskId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     let rejection: string | undefined;
     const next = await this.updateRun(runId, (r) => {
       const task = getTask(r, taskId);
@@ -1117,6 +1156,10 @@ export class TaskRunController {
   }
 
   async stopStage(runId: string, taskId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const stopped = await this.deps.runner.stopStage(runId, taskId);
     return stopped
       ? { ok: true, message: `${taskId}の工程を止めた` }
@@ -1172,6 +1215,10 @@ export class TaskRunController {
   }
 
   async instructTask(runId: string, taskId: string, instruction: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const ok = await this.deps.runner.instructStage(runId, taskId, instruction);
     return ok
       ? { ok: true, message: `${taskId}へ指示を渡した。次の指示の頭に添えて届く` }
@@ -1181,6 +1228,10 @@ export class TaskRunController {
   async setMaxParallel(runId: string, maxParallel: number): Promise<ControllerResult> {
     if (!isValidMaxParallel(maxParallel)) {
       return { ok: false, message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+    }
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
     }
     const next = await this.updateRun(runId, (r) => setTaskRunMaxParallel(r, maxParallel));
     if (next === undefined) {
@@ -1211,6 +1262,10 @@ export class TaskRunController {
     questionId: string,
     answer: string,
   ): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const ok = await this.deps.runner.answerQuestion(runId, taskId, questionId, answer);
     return ok
       ? { ok: true, message: `${taskId}の質問に回答した` }
@@ -1242,6 +1297,10 @@ export class TaskRunController {
     gateId: string,
     choice: StageGateChoice,
   ): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     let rejection: string | undefined;
     const next = await this.updateRun(runId, (r) => {
       const gate = findStageGate(r, taskId, gateId);

@@ -543,6 +543,15 @@ export class TaskStageRunner {
     if (this.disposed || run === undefined) {
       return false;
     }
+    // mergeの鍵やロックを待つ間に専有権を別のウィンドウへ移した（Issue #1636）。移した先の
+    // ウィンドウも同じ工程を始めうるため、このウィンドウでは始めない
+    if (this.deps.canDrive !== undefined && !(await this.deps.canDrive(runId))) {
+      return false;
+    }
+    run = this.deps.store.find(runId);
+    if (run === undefined) {
+      return false;
+    }
     if (listResumingStages(run).some(matches)) {
       return this.reopenPausedStage(run, target);
     }
@@ -1566,16 +1575,25 @@ export class TaskStageRunner {
    *
    * 開始処理の途中でも受け付ける。mergeの鍵を待っている間に止めた工程は、開始処理がロック内で
    * 状態を確かめ直して始めない。セッションを開いている途中なら、ロックが空くのを待ってから止める。
+   *
+   * `liveOnly`はこのウィンドウでセッションが動いている工程だけを止め、セッションが無ければ状態に
+   * 触らない（専有権を失ったとき。移した先のウィンドウが始めた工程を止めないため）。
    */
-  async stopStage(runId: string, taskId: string): Promise<boolean> {
+  async stopStage(
+    runId: string,
+    taskId: string,
+    options: { reason?: string; liveOnly?: boolean } = {},
+  ): Promise<boolean> {
     const key = liveKey(runId, taskId);
+    const reason = options.reason ?? '人が止めました';
     const stopped = await this.withTaskLock(key, async () => {
       const entry = this.live.get(key);
       if (entry === undefined || entry.closed) {
+        if (options.liveOnly === true) {
+          return false;
+        }
         // セッションが無い（設定を受け付けて空きを待っている）工程は状態だけ止める
-        const next = await this.mutate(runId, (r) =>
-          haltStage(r, taskId, 'stopped', '人が止めました', this.now()),
-        );
+        const next = await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', reason, this.now()));
         return next !== undefined;
       }
       if (entry.reported) {
@@ -1585,9 +1603,7 @@ export class TaskStageRunner {
       await this.mutate(runId, (r) => markStageStopping(r, taskId, this.now()));
       entry.session.stopLoop();
       await entry.session.interrupt().catch(() => undefined);
-      await this.mutate(runId, (r) =>
-        haltStage(r, taskId, 'stopped', '人が止めました', this.now()),
-      );
+      await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', reason, this.now()));
       this.release(entry, { dispose: false });
       return true;
     });
@@ -1595,6 +1611,25 @@ export class TaskStageRunner {
       await this.pumpFolder(runId);
     }
     return stopped;
+  }
+
+  /**
+   * このウィンドウで動いているrunの工程セッションをすべて止める（専有権を失ったとき。Issue #1636）。
+   * 工程セッションとその停止手段はこのウィンドウにしか無く、専有権を移した先のウィンドウからは
+   * 止められない。動かし続けると2つのウィンドウがrunを動かすことになるため、ここで止めて、
+   * 移した先で「やり直す」から始め直させる。止めた工程の数を返す。
+   */
+  async stopLiveStagesOfRun(runId: string, reason: string): Promise<number> {
+    const taskIds = [...this.live.values()].filter((e) => e.runId === runId).map((e) => e.ref.taskId);
+    const results = await Promise.allSettled(
+      taskIds.map((taskId) => this.stopStage(runId, taskId, { reason, liveOnly: true })),
+    );
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        this.warn(runId, taskIds[i] ?? '', `${taskIds[i] ?? ''}の工程を止められませんでした: ${errorMessage(result.reason)}`);
+      }
+    });
+    return results.filter((r) => r.status === 'fulfilled' && r.value).length;
   }
 
   /**
