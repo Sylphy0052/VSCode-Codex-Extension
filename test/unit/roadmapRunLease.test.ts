@@ -30,6 +30,7 @@ function lease(overrides: Partial<RoadmapRunLease> = {}): RoadmapRunLease {
     runId: 'run-1',
     roadmapIssueNumber: 1457,
     hostname: 'host-a',
+    hostIdentity: '',
     pid: 100,
     acquiredAt: T0.toISOString(),
     heartbeatAt: T0.toISOString(),
@@ -41,31 +42,49 @@ function after(ms: number): Date {
   return new Date(T0.getTime() + ms);
 }
 
-const ownerB: RoadmapLeaseOwner = { windowId: 'window-b', hostname: 'host-b', pid: 200 };
+const ownerB: RoadmapLeaseOwner = {
+  windowId: 'window-b',
+  hostname: 'host-b',
+  hostIdentity: '',
+  pid: 200,
+};
 
 describe('judgeRoadmapRunLease', () => {
   it('誰も持っていなければfree', () => {
-    expect(judgeRoadmapRunLease(undefined, ownerB, T0, alive)).toBe('free');
+    expect(judgeRoadmapRunLease(undefined, ownerB, 'run-1', T0, alive)).toBe('free');
   });
 
   it('別ホストのウィンドウが持っていてheartbeatが新しければbusy（PIDは見ない）', () => {
-    expect(judgeRoadmapRunLease(lease(), ownerB, after(59_000), dead)).toBe('busy');
+    expect(judgeRoadmapRunLease(lease(), ownerB, 'run-1', after(59_000), dead)).toBe('busy');
   });
 
   it('heartbeatが失効時間以上止まっていればstale', () => {
-    expect(judgeRoadmapRunLease(lease(), ownerB, after(ROADMAP_LEASE_STALE_MS), alive)).toBe('stale');
+    expect(judgeRoadmapRunLease(lease(), ownerB, 'run-1', after(ROADMAP_LEASE_STALE_MS), alive)).toBe(
+      'stale',
+    );
   });
 
   it('同じホストでPIDが死んでいれば、heartbeatを待たずにstale', () => {
     const self = { ...ownerB, hostname: 'host-a' };
-    expect(judgeRoadmapRunLease(lease(), self, after(1_000), dead)).toBe('stale');
-    expect(judgeRoadmapRunLease(lease(), self, after(1_000), alive)).toBe('busy');
+    expect(judgeRoadmapRunLease(lease(), self, 'run-1', after(1_000), dead)).toBe('stale');
+    expect(judgeRoadmapRunLease(lease(), self, 'run-1', after(1_000), alive)).toBe('busy');
+  });
+
+  it('同じホスト名でもhostIdentityが違えばPID生死を見ずbusy（--network=hostでPID名前空間が別）', () => {
+    const self = { ...ownerB, hostname: 'host-a', hostIdentity: 'boot-b:ns-b' };
+    const holder = lease({ hostIdentity: 'boot-a:ns-a' });
+    expect(judgeRoadmapRunLease(holder, self, 'run-1', after(1_000), dead)).toBe('busy');
   });
 
   it('自分のものは新しいうちはown、失効時間の半分を過ぎたらstale（上書きせず取り直す）', () => {
     const self = { ...ownerB, windowId: 'window-a' };
-    expect(judgeRoadmapRunLease(lease(), self, after(29_000), alive)).toBe('own');
-    expect(judgeRoadmapRunLease(lease(), self, after(30_000), alive)).toBe('stale');
+    expect(judgeRoadmapRunLease(lease(), self, 'run-1', after(29_000), alive)).toBe('own');
+    expect(judgeRoadmapRunLease(lease(), self, 'run-1', after(30_000), alive)).toBe('stale');
+  });
+
+  it('同windowでも別runIdなら自分のものではなくstale（マルチルートの別フォルダ）', () => {
+    const self = { ...ownerB, windowId: 'window-a' };
+    expect(judgeRoadmapRunLease(lease(), self, 'run-other', after(1_000), alive)).toBe('stale');
   });
 
   it('heartbeatの時刻が読めなければ失効扱い', () => {
@@ -140,7 +159,12 @@ describe('RoadmapRunLeaseManager', () => {
     return m;
   }
 
-  const ownerA: RoadmapLeaseOwner = { windowId: 'window-a', hostname: 'host-a', pid: 100 };
+  const ownerA: RoadmapLeaseOwner = {
+    windowId: 'window-a',
+    hostname: 'host-a',
+    hostIdentity: '',
+    pid: 100,
+  };
   const target = (runId: string, workspaceRoot = '/work/a') => ({
     runId,
     workspaceRoot,
@@ -215,7 +239,7 @@ describe('RoadmapRunLeaseManager', () => {
     now = after(ROADMAP_LEASE_STALE_MS + 1);
     await b.acquire(target('run-b'));
     await a.release('run-a');
-    const c = manager({ windowId: 'window-c', hostname: 'host-c', pid: 300 });
+    const c = manager({ windowId: 'window-c', hostname: 'host-c', hostIdentity: '', pid: 300 });
     expect((await c.acquire(target('run-c'))).ok).toBe(false);
   });
 
@@ -277,6 +301,9 @@ describe('RoadmapRunControllerの専有権', () => {
       resolvePlan: vi.fn(),
       applyPlan: vi.fn(),
       confirmPlan: vi.fn(),
+      decidePlanChange: vi.fn(),
+      useCurrentPlan: vi.fn(),
+      regeneratePlan: vi.fn(),
       notifyStalled: vi.fn(),
       onDidChange: vi.fn(),
       lease: { acquire, holds: () => false, release: vi.fn(() => Promise.resolve()) },

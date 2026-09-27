@@ -335,6 +335,9 @@ export class RoadmapRunController {
         'このウィンドウからの自動実行とmergeを止めました',
       'warn',
     );
+    void this.updateRun(runId, (r) => setRunHaltedByUser(r, true)).catch((e: unknown) => {
+      this.deps.log(`[roadmap run] ${runId}の停止を保存できませんでした: ${String(e)}`);
+    });
     this.deps.onDidChange();
   }
 

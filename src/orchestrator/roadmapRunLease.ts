@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync, unlinkSync } from 'node:fs';
 import { link, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -42,6 +42,8 @@ export interface RoadmapRunLease {
   runId: string;
   roadmapIssueNumber: number;
   hostname: string;
+  /** boot_id＋PID名前空間から作る識別子。読めない環境では''（`computeHostIdentity`参照）。 */
+  hostIdentity: string;
   pid: number;
   acquiredAt: string;
   heartbeatAt: string;
@@ -51,7 +53,25 @@ export interface RoadmapRunLease {
 export interface RoadmapLeaseOwner {
   windowId: string;
   hostname: string;
+  hostIdentity: string;
   pid: number;
+}
+
+/**
+ * ホストのboot_idと自分のPID名前空間を組み合わせた識別子。同じhostnameでもPID名前空間が
+ * 違えば別プロセス（`--network=host`のdevcontainerがホストとhostnameを共有する場合等）が
+ * 同じPIDを名乗りうるため、hostnameだけでのPID生死判定を補う。
+ * `/proc`が無い環境（macOS/Windows）や読めない環境では空文字列を返し、呼び出し側は
+ * hostnameだけでの判定へフォールバックする。
+ */
+export function computeHostIdentity(): string {
+  try {
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const pidNamespace = readlinkSync('/proc/self/ns/pid');
+    return bootId === '' || pidNamespace === '' ? '' : `${bootId}:${pidNamespace}`;
+  } catch {
+    return '';
+  }
 }
 
 export type RoadmapLeaseJudgement =
@@ -94,6 +114,8 @@ export function parseRoadmapRunLease(text: string): RoadmapRunLease | undefined 
     runId: r.runId,
     roadmapIssueNumber: r.roadmapIssueNumber,
     hostname: r.hostname,
+    // 追加前に書かれたリースファイルにはhostIdentityが無い。無ければ''（未識別）として読む
+    hostIdentity: typeof r.hostIdentity === 'string' ? r.hostIdentity : '',
     pid: r.pid,
     acquiredAt: r.acquiredAt,
     heartbeatAt: r.heartbeatAt,
@@ -109,10 +131,12 @@ function heartbeatAge(lease: RoadmapRunLease, now: Date): number {
 /**
  * 失効しているか。heartbeatが`staleMs`以上止まっていれば失効。同じホストのものに限り、
  * PIDが生きていなければheartbeatを待たずに失効とする（別ホストのPIDは確かめようがない）。
+ * 双方の`hostIdentity`が読めている場合はそれも一致を確かめる。`--network=host`のdevcontainer等、
+ * hostnameを共有しつつPID名前空間が違う相手にPIDだけで即時失効と誤判定しないため。
  */
 export function isRoadmapRunLeaseStale(
   lease: RoadmapRunLease,
-  self: Pick<RoadmapLeaseOwner, 'hostname'>,
+  self: Pick<RoadmapLeaseOwner, 'hostname' | 'hostIdentity'>,
   now: Date,
   isPidAlive: (pid: number) => boolean,
   staleMs: number = ROADMAP_LEASE_STALE_MS,
@@ -120,7 +144,13 @@ export function isRoadmapRunLeaseStale(
   if (heartbeatAge(lease, now) >= staleMs) {
     return true;
   }
-  return lease.hostname === self.hostname && lease.pid > 0 && !isPidAlive(lease.pid);
+  if (lease.hostname !== self.hostname || lease.pid <= 0) {
+    return false;
+  }
+  if (lease.hostIdentity !== '' && self.hostIdentity !== '' && lease.hostIdentity !== self.hostIdentity) {
+    return false;
+  }
+  return !isPidAlive(lease.pid);
 }
 
 /**
@@ -133,6 +163,7 @@ export function isRoadmapRunLeaseStale(
 export function judgeRoadmapRunLease(
   existing: RoadmapRunLease | undefined,
   self: RoadmapLeaseOwner,
+  targetRunId: string,
   now: Date,
   isPidAlive: (pid: number) => boolean,
   staleMs: number = ROADMAP_LEASE_STALE_MS,
@@ -141,6 +172,10 @@ export function judgeRoadmapRunLease(
     return 'free';
   }
   if (existing.windowId === self.windowId) {
+    // 同windowでも別runId（マルチルートの別フォルダ等）は自分のものではない。stale扱いで取り直す
+    if (existing.runId !== targetRunId) {
+      return 'stale';
+    }
     return heartbeatAge(existing, now) < staleMs / 2 ? 'own' : 'stale';
   }
   return isRoadmapRunLeaseStale(existing, self, now, isPidAlive, staleMs) ? 'stale' : 'busy';
@@ -402,6 +437,7 @@ export class RoadmapRunLeaseManager {
       runId: target.runId,
       roadmapIssueNumber: target.roadmapIssueNumber,
       hostname: owner.hostname,
+      hostIdentity: owner.hostIdentity,
       pid: owner.pid,
       acquiredAt,
       heartbeatAt: this.now().toISOString(),
@@ -423,7 +459,16 @@ export class RoadmapRunLeaseManager {
       }
       const existing = await this.readLease(file);
       last = existing;
-      switch (judgeRoadmapRunLease(existing, this.deps.owner, this.now(), (pid) => this.isPidAlive(pid), this.staleMs)) {
+      switch (
+        judgeRoadmapRunLease(
+          existing,
+          this.deps.owner,
+          target.runId,
+          this.now(),
+          (pid) => this.isPidAlive(pid),
+          this.staleMs,
+        )
+      ) {
         case 'free':
           // 読む前に消えた。作り直す
           continue;
@@ -513,6 +558,7 @@ export class RoadmapRunLeaseManager {
         runId: '',
         roadmapIssueNumber: 0,
         hostname: '',
+        hostIdentity: '',
         pid: 0,
         acquiredAt: mtime.toISOString(),
         heartbeatAt: mtime.toISOString(),

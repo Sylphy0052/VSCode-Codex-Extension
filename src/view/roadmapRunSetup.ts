@@ -32,6 +32,7 @@ import { describeRoadmapSourceDiff } from '../orchestrator/roadmapPlanHash';
 import { judgeRoadmapQuestion, RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
 import { RoadmapRunController } from '../orchestrator/roadmapRunController';
 import {
+  computeHostIdentity,
   normalizeRepoIdentity,
   ROADMAP_LEASE_DIR_NAME,
   RoadmapRunLeaseManager,
@@ -185,7 +186,12 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   // globalStorageを共有する全ウィンドウ（NFSで共有された別ホストを含む）から見えるようにする
   const leases = new RoadmapRunLeaseManager({
     dir: path.join(sessionHubRoot(deps.context.globalStorageUri.fsPath), ROADMAP_LEASE_DIR_NAME),
-    owner: { windowId: deps.windowId, hostname: hostname(), pid: process.pid },
+    owner: {
+      windowId: deps.windowId,
+      hostname: hostname(),
+      hostIdentity: computeHostIdentity(),
+      pid: process.pid,
+    },
     // ホストによってworkspaceRootのパスが違っても同じrepoを同じ専有権にするため、originで見分ける。
     // originが無ければパスで代える
     resolveRepoIdentity: async (root) => {
