@@ -109,14 +109,20 @@ export function canonicalRemaining(record: RemainingRecord): RemainingRecord {
 }
 
 /** 入力から残件を作る。本文が空になるものは`undefined`（登録しない）。 */
-export function buildRemainingRecord(input: RemainingInput, now: Date): RemainingRecord | undefined {
+export function buildRemainingRecord(
+  input: RemainingInput,
+  now: Date,
+): RemainingRecord | undefined {
   const text = sanitizeRemainingText(input.text, MAX_REMAINING_TEXT_LENGTH);
   if (text === '') {
     return undefined;
   }
   const taskId =
-    input.taskId === undefined ? undefined : sanitizeRemainingText(input.taskId, MAX_ID_FIELD_LENGTH);
-  const url = input.url === undefined ? undefined : sanitizeRemainingText(input.url, MAX_URL_LENGTH);
+    input.taskId === undefined
+      ? undefined
+      : sanitizeRemainingText(input.taskId, MAX_ID_FIELD_LENGTH);
+  const url =
+    input.url === undefined ? undefined : sanitizeRemainingText(input.url, MAX_URL_LENGTH);
   return canonicalRemaining({
     v: 1,
     kind: 'remaining',
@@ -128,7 +134,9 @@ export function buildRemainingRecord(input: RemainingInput, now: Date): Remainin
     source: input.source,
     text,
     ...(taskId === undefined || taskId === '' ? {} : { taskId }),
-    ...(input.issueNumber !== undefined && Number.isSafeInteger(input.issueNumber) && input.issueNumber > 0
+    ...(input.issueNumber !== undefined &&
+    Number.isSafeInteger(input.issueNumber) &&
+    input.issueNumber > 0
       ? { issueNumber: input.issueNumber }
       : {}),
     ...(url === undefined || url === '' ? {} : { url }),
@@ -202,10 +210,13 @@ export function pruneRemainingForIncoming(
   return existing.filter((record) => !dropped.has(record.id));
 }
 
-/** Roadmap Issueの本文に出てくるIssue番号（`#123`）。 */
+/**
+ * Roadmap Issue本文のうち、gant互換のチェックリスト行（行頭`- [ ] #N`/`- [x] #N`）に
+ * 出てくる番号だけを拾う。本文中の無関係な`#N`言及（`関連: #N`等）は含めない。
+ */
 export function extractIssueNumbers(body: string): Set<number> {
   const numbers = new Set<number>();
-  for (const match of body.matchAll(/(?<![\w/])#(\d{1,9})\b/g)) {
+  for (const match of body.matchAll(/^- \[[ x]\] #(\d{1,9})\b/gmu)) {
     numbers.add(Number(match[1]));
   }
   return numbers;
@@ -234,7 +245,10 @@ function formatRemainingLine(record: RemainingRecord): string {
  * runの導入文へ差し込む未処理の残件ブロック（`formatLessonsForIntro`と同じ流儀）。
  * `records`は新しい順の未処理の残件。上限を超える分は行単位で古い方から落とす。空なら`''`。
  */
-export function formatRemainingForIntro(records: readonly RemainingRecord[], nonce?: string): string {
+export function formatRemainingForIntro(
+  records: readonly RemainingRecord[],
+  nonce?: string,
+): string {
   if (records.length === 0) {
     return '';
   }

@@ -153,11 +153,17 @@ export function parseLessonArgs(raw: unknown): ParseLessonResult {
       : {};
   const observation = readLessonText(a.observation, MAX_LESSON_FIELD_LENGTH);
   if (observation === undefined) {
-    return { ok: false, message: `observationは1〜${String(MAX_LESSON_FIELD_LENGTH)}文字で指定する` };
+    return {
+      ok: false,
+      message: `observationは1〜${String(MAX_LESSON_FIELD_LENGTH)}文字で指定する`,
+    };
   }
   const instruction = readLessonText(a.instruction, MAX_LESSON_FIELD_LENGTH);
   if (instruction === undefined) {
-    return { ok: false, message: `instructionは1〜${String(MAX_LESSON_FIELD_LENGTH)}文字で指定する` };
+    return {
+      ok: false,
+      message: `instructionは1〜${String(MAX_LESSON_FIELD_LENGTH)}文字で指定する`,
+    };
   }
   const rawEvidence = a.evidence;
   if (rawEvidence !== undefined && !Array.isArray(rawEvidence)) {
@@ -350,15 +356,28 @@ export function formatLessonsForIntro(lessons: readonly LessonRecord[], nonce?: 
 }
 
 /**
+ * `runFinished`イベントへ、教訓を残せる旨の一文を足す（Issue #1606。roadmapOrchestrator.ts /
+ * taskRunOrchestrator.tsでほぼ同じ実装が2つあった重複を解消）。`runNotesEnabled`が`false`
+ * （教訓欄が無効）なら何もしない。`event.body`が句点で終わらない場合の区切りに`。`を挟む。
+ */
+export function withLessonReminder<T extends { kind: string; body: string }>(
+  event: T,
+  runNotesEnabled: boolean,
+): T {
+  if (event.kind !== 'runFinished' || !runNotesEnabled) {
+    return event;
+  }
+  return { ...event, body: `${event.body}。次のrunへ残す教訓があればrecord_lessonで記録する。` };
+}
+
+/**
  * `readTextFile`の結果。「存在しない（ENOENT）」と「読めない（権限・I/O等）」を呼び出し側が
  * 区別できるようにする（自己レビュー指摘: medium。以前は両方`undefined`で潰していたため、
  * `listLessons`は権限エラーでも「記録が無い」、`deleteLesson`は「指定の教訓は見つかりません」
  * という誤った理由を返していた）。
  */
 export type ReadTextFileResult =
-  | { kind: 'missing' }
-  | { kind: 'ok'; text: string }
-  | { kind: 'error'; message: string };
+  { kind: 'missing' } | { kind: 'ok'; text: string } | { kind: 'error'; message: string };
 
 /** `RunNotesStore`が必要とする最小限のファイルシステム操作。`teamHandoff.ts`の`HandoffFileSystemPort`と同じ流儀。 */
 export interface RunNotesFileSystemPort extends SymlinkCheckPort {
@@ -420,8 +439,14 @@ export class RunNotesStore {
     }
   }
 
+  /**
+   * 例外メッセージ等（`e.message`）を直接連結して渡す呼び出し元があり、fs起因のエラーが
+   * secretを含む文字列を巻き込む経路になりうる（Issue #1606。自己レビュー指摘: low）。
+   * `sanitizeForLog`の`maskForLog`は代表的な形状のみ対象のため、ここで`redactCredentials`も
+   * 掛けて二重に防ぐ。
+   */
   private logFailure(message: string): void {
-    this.log?.warn(`[runNotes] ${sanitizeForLog(message)}`);
+    this.log?.warn(`[runNotes] ${sanitizeForLog(redactCredentials(message).text)}`);
   }
 
   /**
@@ -443,7 +468,9 @@ export class RunNotesStore {
         const target = notesPath(workspaceRoot);
         const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
         if (symlinked !== undefined) {
-          this.logFailure(`教訓の書き込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+          this.logFailure(
+            `教訓の書き込み先の経路にシンボリックリンクが含まれています: ${symlinked}`,
+          );
           return { ok: false, message: '教訓を書き込めませんでした（経路が不正です）。' };
         }
         const madeDir = await this.fs.makeDirectory(path.dirname(target));
@@ -454,7 +481,9 @@ export class RunNotesStore {
         const record = buildLessonRecord(input, this.now);
         const readResult = await this.fs.readTextFile(target);
         if (readResult.kind === 'error') {
-          this.logFailure(`教訓の既存記録を読めませんでした（追記のみ行います）: ${readResult.message}`);
+          this.logFailure(
+            `教訓の既存記録を読めませんでした（追記のみ行います）: ${readResult.message}`,
+          );
         }
         const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
         // 読めなかった場合は既存件数が分からないため、刈り込み判定（上限整理）を飛ばして
@@ -476,7 +505,9 @@ export class RunNotesStore {
         this.notifyChanged();
         return { ok: true };
       } catch (e) {
-        this.logFailure(`教訓の記録中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+        this.logFailure(
+          `教訓の記録中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`,
+        );
         return { ok: false, message: '教訓を書き込めませんでした。' };
       }
     });
@@ -494,7 +525,9 @@ export class RunNotesStore {
       // 指摘: medium）
       const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
       if (symlinked !== undefined) {
-        this.logFailure(`教訓一覧の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+        this.logFailure(
+          `教訓一覧の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`,
+        );
         return [];
       }
       const readResult = await this.fs.readTextFile(target);
@@ -547,7 +580,9 @@ export class RunNotesStore {
         this.notifyChanged();
         return { ok: true };
       } catch (e) {
-        this.logFailure(`教訓の削除中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+        this.logFailure(
+          `教訓の削除中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`,
+        );
         return { ok: false, message: '教訓を削除できませんでした。' };
       }
     });
@@ -572,7 +607,9 @@ export class RunNotesStore {
         .map((input) => buildRemainingRecord(input, now))
         .filter((record): record is RemainingRecord => record !== undefined);
     } catch (e) {
-      this.logFailure(`残件の組み立て中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+      this.logFailure(
+        `残件の組み立て中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`,
+      );
       return { ok: false, message: '残件を書き込めませんでした。' };
     }
     if (records.length === 0) {
@@ -583,7 +620,9 @@ export class RunNotesStore {
         const target = notesPath(workspaceRoot);
         const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
         if (symlinked !== undefined) {
-          this.logFailure(`残件の書き込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+          this.logFailure(
+            `残件の書き込み先の経路にシンボリックリンクが含まれています: ${symlinked}`,
+          );
           return { ok: false, message: '残件を書き込めませんでした（経路が不正です）。' };
         }
         if (!(await this.fs.makeDirectory(path.dirname(target)))) {
@@ -592,7 +631,9 @@ export class RunNotesStore {
         }
         const readResult = await this.fs.readTextFile(target);
         if (readResult.kind === 'error') {
-          this.logFailure(`残件の既存記録を読めませんでした（追記のみ行います）: ${readResult.message}`);
+          this.logFailure(
+            `残件の既存記録を読めませんでした（追記のみ行います）: ${readResult.message}`,
+          );
         }
         const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
         const keptRemaining =
@@ -601,7 +642,10 @@ export class RunNotesStore {
             : pruneRemainingForIncoming(existing.filter(isRemaining), records.length);
         let written: boolean;
         if (keptRemaining === undefined) {
-          written = await this.fs.appendLine(target, records.map((r) => `${toJsonLine(r)}\n`).join(''));
+          written = await this.fs.appendLine(
+            target,
+            records.map((r) => `${toJsonLine(r)}\n`).join(''),
+          );
         } else {
           const keptIds = new Set(keptRemaining.map((r) => r.id));
           const next = existing.filter((r) => !isRemaining(r) || keptIds.has(r.id));
@@ -614,7 +658,9 @@ export class RunNotesStore {
         this.notifyChanged();
         return { ok: true };
       } catch (e) {
-        this.logFailure(`残件の記録中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+        this.logFailure(
+          `残件の記録中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`,
+        );
         return { ok: false, message: '残件を書き込めませんでした。' };
       }
     });
@@ -631,7 +677,9 @@ export class RunNotesStore {
     return this.rewriteRemaining(workspaceRoot, '残件を済にできませんでした', (record) =>
       record.id === id && record.status === 'open' ? { ...record, status: 'done', doneAt } : record,
     ).then((result) =>
-      result.ok && !result.changed ? { ok: false, message: '指定の未処理の残件は見つかりませんでした。' } : result,
+      result.ok && !result.changed
+        ? { ok: false, message: '指定の未処理の残件は見つかりませんでした。' }
+        : result,
     );
   }
 
@@ -639,18 +687,24 @@ export class RunNotesStore {
    * Roadmap Issueの本文を置き換えたときに呼ぶ。本文に`#N`が出てくる未処理の`issue`残件を
    * ロードマップ掲載済みにする。1件も変わらなければ書き直さない。
    */
-  async markIssuesOnRoadmap(workspaceRoot: string, roadmapBody: string): Promise<RunNotesWriteResult> {
+  async markIssuesOnRoadmap(
+    workspaceRoot: string,
+    roadmapBody: string,
+  ): Promise<RunNotesWriteResult> {
     const numbers = extractIssueNumbers(roadmapBody);
     if (numbers.size === 0) {
       return { ok: true };
     }
-    return this.rewriteRemaining(workspaceRoot, '残件のロードマップ掲載を記録できませんでした', (record) =>
-      record.source === 'issue' &&
-      record.onRoadmap !== true &&
-      record.issueNumber !== undefined &&
-      numbers.has(record.issueNumber)
-        ? { ...record, onRoadmap: true }
-        : record,
+    return this.rewriteRemaining(
+      workspaceRoot,
+      '残件のロードマップ掲載を記録できませんでした',
+      (record) =>
+        record.source === 'issue' &&
+        record.onRoadmap !== true &&
+        record.issueNumber !== undefined &&
+        numbers.has(record.issueNumber)
+          ? { ...record, onRoadmap: true }
+          : record,
     );
   }
 
@@ -661,7 +715,10 @@ export class RunNotesStore {
   async readIntroBlock(workspaceRoot: string): Promise<string> {
     const records = await this.readAll(workspaceRoot, '導入文用の記録');
     const lessons = records.filter(isLesson).reverse();
-    const open = records.filter(isRemaining).filter((r) => r.status === 'open').reverse();
+    const open = records
+      .filter(isRemaining)
+      .filter((r) => r.status === 'open')
+      .reverse();
     return [formatLessonsForIntro(lessons), formatRemainingForIntro(open)]
       .filter((block) => block !== '')
       .join('\n\n');
@@ -673,7 +730,9 @@ export class RunNotesStore {
       const target = notesPath(workspaceRoot);
       const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
       if (symlinked !== undefined) {
-        this.logFailure(`${label}の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+        this.logFailure(
+          `${label}の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`,
+        );
         return [];
       }
       const readResult = await this.fs.readTextFile(target);

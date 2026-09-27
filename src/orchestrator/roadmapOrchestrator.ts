@@ -31,6 +31,7 @@ import {
 import { assessRun } from './roadmapScheduler';
 import {
   MAX_RECORD_LESSON_CALLS_PER_RUN,
+  withLessonReminder,
   type LessonInput,
   type RunNotesStore,
 } from './runNotes';
@@ -223,7 +224,11 @@ export class RoadmapOrchestrator {
    * 次の世代を起こすのはホストの引き継ぎ処理が戻った後にする。委譲先の中で前の世代を閉じると、
    * ホストが破棄済みのパネルを触ることになるため。
    */
-  private onHandoff(runId: string, generation: number, trigger: GenerationTrigger): Promise<boolean> {
+  private onHandoff(
+    runId: string,
+    generation: number,
+    trigger: GenerationTrigger,
+  ): Promise<boolean> {
     const live = this.live.get(runId);
     if (
       this.disposed ||
@@ -268,7 +273,9 @@ export class RoadmapOrchestrator {
     // ホストは自動引き継ぎを始めた時点で二度と発火しない印を付ける。次に閾値を超えたとき
     // もう一度引き継げるよう外す（Issue #1580）
     live.session.rearmAutoHandoff?.();
-    this.deps.log(`[roadmap orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`);
+    this.deps.log(
+      `[roadmap orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`,
+    );
     if (!live.busy) {
       this.flush(live);
     }
@@ -290,21 +297,8 @@ export class RoadmapOrchestrator {
       return;
     }
     for (const event of events) {
-      this.notify(runId, this.withLessonReminder(event));
+      this.notify(runId, withLessonReminder(event, this.deps.runNotes !== undefined));
     }
-  }
-
-  /**
-   * `runFinished`イベントに、記録済みなら次のrunへ教訓を残せる旨の一文を足す（自己レビュー
-   * 指摘: medium。workflow runと違いroadmap-runのOrchestratorは`runFinished`後もセッションが
-   * 生き続けるため、intro文の「気付いた時点、またはrunFinishedを受けたときに記録する」の
-   * 後半をここで実現する）。`runNotes`が未設定（教訓欄が無効）なら何もしない。
-   */
-  private withLessonReminder(event: RoadmapOrchestratorEvent): RoadmapOrchestratorEvent {
-    if (event.kind !== 'runFinished' || this.deps.runNotes === undefined) {
-      return event;
-    }
-    return { ...event, body: `${event.body}次のrunへ残す教訓があればrecord_lessonで記録する。` };
   }
 
   dispose(): void {
@@ -353,7 +347,11 @@ export class RoadmapOrchestrator {
         forceAutoHandoff: true,
         autoHandoffAutoApprove: true,
         handoffDelegate: (request) =>
-          this.onHandoff(runId, generation, request.trigger === 'manual' ? 'manual' : 'autoHandoff'),
+          this.onHandoff(
+            runId,
+            generation,
+            request.trigger === 'manual' ? 'manual' : 'autoHandoff',
+          ),
         // 終わったrunでは自動引き継ぎを見送るため、ホストに引き継ぎ文書を作らせない（Issue #1580）
         handoffPrecheck: (trigger) => trigger === 'manual' || this.isRunActive(runId),
       });
@@ -371,7 +369,9 @@ export class RoadmapOrchestrator {
         this.deps.server.unregister(registered.token);
       }
       session?.dispose();
-      this.deps.log(`[roadmap orchestrator] ${runId}のOrchestratorを開けませんでした: ${String(e)}`);
+      this.deps.log(
+        `[roadmap orchestrator] ${runId}のOrchestratorを開けませんでした: ${String(e)}`,
+      );
       return false;
     }
 
@@ -483,7 +483,10 @@ export class RoadmapOrchestrator {
       return;
     }
     for (const e of live.pending) {
-      if (e.seq !== undefined && (live.lastDeliveredSeq === undefined || e.seq > live.lastDeliveredSeq)) {
+      if (
+        e.seq !== undefined &&
+        (live.lastDeliveredSeq === undefined || e.seq > live.lastDeliveredSeq)
+      ) {
         live.lastDeliveredSeq = e.seq;
       }
     }
@@ -548,7 +551,9 @@ export class RoadmapOrchestrator {
     const done = (text: string): RoadmapAskOutcome => ({ text, isError: false });
     const refused = (text: string): RoadmapAskOutcome => ({ text, isError: true });
     const issueResult = (ok: boolean, n: number, what: string): RoadmapAskOutcome =>
-      ok ? done(`#${String(n)}を${what}しました`) : refused(`#${String(n)}を${what}できませんでした`);
+      ok
+        ? done(`#${String(n)}を${what}しました`)
+        : refused(`#${String(n)}を${what}できませんでした`);
     switch (call.tool) {
       case 'get_run_state':
         return done(formatRoadmapRunState(controller.board(runId)));
@@ -562,9 +567,17 @@ export class RoadmapOrchestrator {
           : refused(`#${String(call.issueNumber)}を始められませんでした: ${outcome.message}`);
       }
       case 'pause_issue':
-        return issueResult(await controller.pauseIssue(runId, call.issueNumber), call.issueNumber, '一時停止');
+        return issueResult(
+          await controller.pauseIssue(runId, call.issueNumber),
+          call.issueNumber,
+          '一時停止',
+        );
       case 'stop_issue':
-        return issueResult(await controller.stopIssue(runId, call.issueNumber), call.issueNumber, '停止');
+        return issueResult(
+          await controller.stopIssue(runId, call.issueNumber),
+          call.issueNumber,
+          '停止',
+        );
       case 'instruct_issue':
         return issueResult(
           await controller.instructIssue(runId, call.issueNumber, call.instruction),
@@ -595,9 +608,7 @@ export class RoadmapOrchestrator {
     }
     if (live.recordLessonCount >= MAX_RECORD_LESSON_CALLS_PER_RUN) {
       return {
-        text:
-          `このrunでのrecord_lessonの呼び出し回数が上限（${String(MAX_RECORD_LESSON_CALLS_PER_RUN)}回）` +
-          'に達しました。',
+        text: `このrunでのrecord_lessonの呼び出し回数が上限（${String(MAX_RECORD_LESSON_CALLS_PER_RUN)}回）に達しました。`,
         isError: true,
       };
     }
@@ -640,7 +651,10 @@ export class RoadmapOrchestrator {
       answer,
     });
     if (!confirmed) {
-      return { text: 'ユーザーが回答を確認しませんでした。会話でユーザーに確かめてください', isError: true };
+      return {
+        text: 'ユーザーが回答を確認しませんでした。会話でユーザーに確かめてください',
+        isError: true,
+      };
     }
     const ok = await this.deps.controller.answerQuestion(
       runId,
@@ -658,7 +672,9 @@ export class RoadmapOrchestrator {
 function roadmapToolName(rawParams: Record<string, unknown>): string | undefined {
   const name = rawParams['tool_name'];
   const prefix = `mcp__${MESSAGING_MCP_SERVER_NAME}__`;
-  return typeof name === 'string' && name.startsWith(prefix) ? name.slice(prefix.length) : undefined;
+  return typeof name === 'string' && name.startsWith(prefix)
+    ? name.slice(prefix.length)
+    : undefined;
 }
 
 /**
@@ -694,7 +710,10 @@ function issueLabel(issue: RoadmapIssueExecution): string {
 }
 
 /** 前後のrunの差分から、Orchestratorへ届けるイベントを作る。 */
-export function diffRoadmapRunEvents(prev: RoadmapRun, next: RoadmapRun): RoadmapOrchestratorEvent[] {
+export function diffRoadmapRunEvents(
+  prev: RoadmapRun,
+  next: RoadmapRun,
+): RoadmapOrchestratorEvent[] {
   const events: RoadmapOrchestratorEvent[] = [];
   for (const issue of Object.values(next.issues)) {
     const before = getIssue(prev, issue.issueNumber);
@@ -712,7 +731,10 @@ export function diffRoadmapRunEvents(prev: RoadmapRun, next: RoadmapRun): Roadma
       });
     }
     if (before.phase !== 'awaitingMerge' && issue.phase === 'awaitingMerge') {
-      events.push({ kind: 'readyForMerge', body: `${label}がmerge待ちになりました（ready_for_merge）` });
+      events.push({
+        kind: 'readyForMerge',
+        body: `${label}がmerge待ちになりました（ready_for_merge）`,
+      });
     }
     if (before.phase !== 'cleanup' && issue.phase === 'cleanup') {
       events.push({ kind: 'merged', body: `${label}のPRをmergeしました` });
@@ -722,7 +744,9 @@ export function diffRoadmapRunEvents(prev: RoadmapRun, next: RoadmapRun): Roadma
     }
     if (before.attention !== 'failed' && issue.attention === 'failed') {
       const reason =
-        issue.failure === undefined ? '' : `（${sanitizeInlineText(issue.failure, EVENT_TEXT_MAX_LENGTH)}）`;
+        issue.failure === undefined
+          ? ''
+          : `（${sanitizeInlineText(issue.failure, EVENT_TEXT_MAX_LENGTH)}）`;
       events.push({ kind: 'issueFailed', body: `${label}が失敗しました${reason}` });
     }
     if (before.result !== 'stopped' && issue.result === 'stopped') {
@@ -749,7 +773,10 @@ export function diffRoadmapRunEvents(prev: RoadmapRun, next: RoadmapRun): Roadma
       stalledBefore.kind === 'stalled' &&
       stalledBefore.blockers.map((n) => `#${String(n)}`).join(', ') === blockers;
     if (!same) {
-      events.push({ kind: 'runStalled', body: `人の対応待ちで進めるノードがありません（${blockers}）` });
+      events.push({
+        kind: 'runStalled',
+        body: `人の対応待ちで進めるノードがありません（${blockers}）`,
+      });
     }
   }
   if (prev.finishedAt === undefined && next.finishedAt !== undefined) {
@@ -817,8 +844,12 @@ function buildHandoverLines(
     return [];
   }
   const cards = board.run === undefined ? [] : Object.values(board.run.columns).flat();
-  const withQuestions = cards.filter((c) => c.questions.length > 0).map((c) => `#${String(c.issueNumber)}`);
-  const failed = cards.filter((c) => c.failure !== undefined).map((c) => `#${String(c.issueNumber)}`);
+  const withQuestions = cards
+    .filter((c) => c.questions.length > 0)
+    .map((c) => `#${String(c.issueNumber)}`);
+  const failed = cards
+    .filter((c) => c.failure !== undefined)
+    .map((c) => `#${String(c.issueNumber)}`);
   const lines = [
     '',
     '前の世代からの引き継ぎ:',

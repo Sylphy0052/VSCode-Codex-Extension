@@ -9,6 +9,7 @@ import {
 import type { RoadmapAskOutcome } from './roadmapQuestionMcp';
 import {
   MAX_RECORD_LESSON_CALLS_PER_RUN,
+  withLessonReminder,
   type LessonInput,
   type RunNotesStore,
 } from './runNotes';
@@ -227,7 +228,11 @@ export class TaskRunOrchestrator {
    * 次の世代を起こすのはホストの引き継ぎ処理が戻った後にする。委譲先の中で前の世代を閉じると、
    * ホストが破棄済みのパネルを触ることになるため。
    */
-  private onHandoff(runId: string, generation: number, trigger: GenerationTrigger): Promise<boolean> {
+  private onHandoff(
+    runId: string,
+    generation: number,
+    trigger: GenerationTrigger,
+  ): Promise<boolean> {
     const live = this.live.get(runId);
     if (
       this.disposed ||
@@ -270,7 +275,9 @@ export class TaskRunOrchestrator {
     // ホストは自動引き継ぎを始めた時点で二度と発火しない印を付ける。次に閾値を超えたとき
     // もう一度引き継げるよう外す（Issue #1580）
     live.session.rearmAutoHandoff?.();
-    this.deps.log(`[task run orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`);
+    this.deps.log(
+      `[task run orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`,
+    );
     if (!live.busy) {
       this.flush(live);
     }
@@ -286,24 +293,11 @@ export class TaskRunOrchestrator {
       return;
     }
     for (const event of diffTaskRunEvents(prev, next)) {
-      this.notify(next.runId, this.withLessonReminder(event));
+      this.notify(next.runId, withLessonReminder(event, this.deps.runNotes !== undefined));
     }
     for (const ref of newlyAwaitingDecision(prev, next)) {
       void this.notifyAwaitingDecision(next.runId, ref);
     }
-  }
-
-  /**
-   * `runFinished`イベントに、記録済みなら次のrunへ教訓を残せる旨の一文を足す（自己レビュー
-   * 指摘: medium。workflow runと違いtask-run/roadmap-runのOrchestratorは`runFinished`後も
-   * セッションが生き続けるため、intro文の「気付いた時点、またはrunFinishedを受けたときに
-   * 記録する」の後半をここで実現する）。`runNotes`が未設定（教訓欄が無効）なら何もしない。
-   */
-  private withLessonReminder(event: TaskRunOrchestratorEvent): TaskRunOrchestratorEvent {
-    if (event.kind !== 'runFinished' || this.deps.runNotes === undefined) {
-      return event;
-    }
-    return { ...event, body: `${event.body}次のrunへ残す教訓があればrecord_lessonで記録する。` };
   }
 
   /**
@@ -383,7 +377,11 @@ export class TaskRunOrchestrator {
         forceAutoHandoff: true,
         autoHandoffAutoApprove: true,
         handoffDelegate: (request) =>
-          this.onHandoff(runId, generation, request.trigger === 'manual' ? 'manual' : 'autoHandoff'),
+          this.onHandoff(
+            runId,
+            generation,
+            request.trigger === 'manual' ? 'manual' : 'autoHandoff',
+          ),
       });
       await this.deps.controller.updateRun(runId, (r) => {
         const recorded = recordOrchestratorSession(r, session?.sessionId ?? '');
@@ -399,7 +397,9 @@ export class TaskRunOrchestrator {
         this.deps.server.unregister(registered.token);
       }
       session?.dispose();
-      this.deps.log(`[task run orchestrator] ${runId}のOrchestratorを開けませんでした: ${String(e)}`);
+      this.deps.log(
+        `[task run orchestrator] ${runId}のOrchestratorを開けませんでした: ${String(e)}`,
+      );
       return false;
     }
 
@@ -596,9 +596,7 @@ export class TaskRunOrchestrator {
     }
     if (live.recordLessonCount >= MAX_RECORD_LESSON_CALLS_PER_RUN) {
       return {
-        text:
-          `このrunでのrecord_lessonの呼び出し回数が上限（${String(MAX_RECORD_LESSON_CALLS_PER_RUN)}回）` +
-          'に達しました。',
+        text: `このrunでのrecord_lessonの呼び出し回数が上限（${String(MAX_RECORD_LESSON_CALLS_PER_RUN)}回）に達しました。`,
         isError: true,
       };
     }
@@ -633,9 +631,17 @@ export class TaskRunOrchestrator {
       choiceLabel: GATE_CHOICE_LABELS[call.choice],
     });
     if (!confirmed) {
-      return { text: 'ユーザーが判断を確認しませんでした。会話でユーザーに確かめてください', isError: true };
+      return {
+        text: 'ユーザーが判断を確認しませんでした。会話でユーザーに確かめてください',
+        isError: true,
+      };
     }
-    const result = await this.deps.controller.resolveGate(runId, call.taskId, call.gateId, call.choice);
+    const result = await this.deps.controller.resolveGate(
+      runId,
+      call.taskId,
+      call.gateId,
+      call.choice,
+    );
     return { text: result.message, isError: !result.ok };
   }
 
@@ -643,7 +649,11 @@ export class TaskRunOrchestrator {
     runId: string,
     call: Extract<TaskRunOrchestratorCall, { tool: 'answer_question' }>,
   ): Promise<RoadmapAskOutcome> {
-    const target = this.deps.controller.findQuestionAwaitingUser(runId, call.taskId, call.questionId);
+    const target = this.deps.controller.findQuestionAwaitingUser(
+      runId,
+      call.taskId,
+      call.questionId,
+    );
     if (target === undefined) {
       return { text: 'ユーザーの回答を待っている質問が見つかりません', isError: true };
     }
@@ -660,9 +670,17 @@ export class TaskRunOrchestrator {
       answer,
     });
     if (!confirmed) {
-      return { text: 'ユーザーが回答を確認しませんでした。会話でユーザーに確かめてください', isError: true };
+      return {
+        text: 'ユーザーが回答を確認しませんでした。会話でユーザーに確かめてください',
+        isError: true,
+      };
     }
-    const result = await this.deps.controller.answerQuestion(runId, call.taskId, call.questionId, answer);
+    const result = await this.deps.controller.answerQuestion(
+      runId,
+      call.taskId,
+      call.questionId,
+      answer,
+    );
     return { text: result.message, isError: !result.ok };
   }
 }
@@ -671,7 +689,9 @@ export class TaskRunOrchestrator {
 function taskRunToolName(rawParams: Record<string, unknown>): string | undefined {
   const name = rawParams['tool_name'];
   const prefix = `mcp__${MESSAGING_MCP_SERVER_NAME}__`;
-  return typeof name === 'string' && name.startsWith(prefix) ? name.slice(prefix.length) : undefined;
+  return typeof name === 'string' && name.startsWith(prefix)
+    ? name.slice(prefix.length)
+    : undefined;
 }
 
 /**
@@ -735,14 +755,22 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
       const was = before.stages[stage].status;
       const now = task.stages[stage].status;
       if (was !== 'running' && now === 'running') {
-        events.push({ kind: 'stageStarted', body: `${label}の「${STAGE_LABELS[stage]}」を始めました` });
+        events.push({
+          kind: 'stageStarted',
+          body: `${label}の「${STAGE_LABELS[stage]}」を始めました`,
+        });
       }
       if (was !== 'done' && now === 'done') {
-        events.push({ kind: 'stageDone', body: `${label}の「${STAGE_LABELS[stage]}」が終わりました` });
+        events.push({
+          kind: 'stageDone',
+          body: `${label}の「${STAGE_LABELS[stage]}」が終わりました`,
+        });
       }
     }
     const reason =
-      task.failure === undefined ? '' : `（${sanitizeInlineText(task.failure, EVENT_TEXT_MAX_LENGTH)}）`;
+      task.failure === undefined
+        ? ''
+        : `（${sanitizeInlineText(task.failure, EVENT_TEXT_MAX_LENGTH)}）`;
     if (before.attention !== 'needsAction' && task.attention === 'needsAction') {
       events.push({ kind: 'taskNeedsAction', body: `${label}が要対応になりました${reason}` });
     }
@@ -772,7 +800,10 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
     const blockers = stalledAfter.blockers.join(', ');
     const same = stalledBefore.kind === 'stalled' && stalledBefore.blockers.join(', ') === blockers;
     if (!same) {
-      events.push({ kind: 'runStalled', body: `人の対応待ちで進めるタスクがありません（${blockers}）` });
+      events.push({
+        kind: 'runStalled',
+        body: `人の対応待ちで進めるタスクがありません（${blockers}）`,
+      });
     }
   }
   if (prev.finishedAt === undefined && next.finishedAt !== undefined) {
