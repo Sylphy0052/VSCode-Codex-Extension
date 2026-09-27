@@ -56,7 +56,8 @@ export interface RoadmapOrchestratorEvent {
     | 'issueStopped'
     | 'questionAwaitingUser'
     | 'runStalled'
-    | 'runFinished';
+    | 'runFinished'
+    | 'eventsCapReached';
   body: string;
 }
 
@@ -119,6 +120,11 @@ interface LiveOrchestrator {
   busy: boolean;
   pending: RoadmapOrchestratorEvent[];
   eventsSent: number;
+  /**
+   * イベント総数の上限（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`）に達したことを知らせる通知を
+   * 送り済みか（Issue #1520）。`TaskRunOrchestrator`と同じく一度きりに絞る。
+   */
+  capNoticeSent: boolean;
 }
 
 export class RoadmapOrchestrator {
@@ -230,6 +236,7 @@ export class RoadmapOrchestrator {
       busy: false,
       pending: [],
       eventsSent: 0,
+      capNoticeSent: false,
     };
     // 開き直し（`renew`）のときは前の世代を外す。古い世代からの命令は接続の時点で届かなくなる
     const previous = this.live.get(runId);
@@ -263,11 +270,38 @@ export class RoadmapOrchestrator {
 
   private notify(runId: string, event: RoadmapOrchestratorEvent): void {
     const live = this.live.get(runId);
-    if (live === undefined || live.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
+    if (live === undefined) {
+      return;
+    }
+    if (live.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
+      // 上限に達すると`issueFailed`・`runFinished`を含め以降は無言で捨てていた（Issue #1520）。
+      // 気付ける手がかりを1回だけ残す（ログ＋通知）。この通知自体は`eventsSent`を消費しない
+      this.noticeEventsCapOnce(runId, live);
       return;
     }
     live.eventsSent += 1;
     live.pending.push(event);
+    if (!live.busy) {
+      this.flush(live);
+    }
+  }
+
+  private noticeEventsCapOnce(runId: string, live: LiveOrchestrator): void {
+    if (live.capNoticeSent) {
+      return;
+    }
+    live.capNoticeSent = true;
+    this.deps.log(
+      `[roadmap orchestrator] ${runId}のイベント通知が上限（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）に達したため、以降の通知は届きません`,
+    );
+    live.pending.push({
+      kind: 'eventsCapReached',
+      body: [
+        `イベント通知が上限（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）に達しました。`,
+        'これ以降のIssueの失敗やマージ・run終了を含む通知はもう届きません。',
+        'get_run_stateで状態を取り直して判断してください。',
+      ].join('\n'),
+    });
     if (!live.busy) {
       this.flush(live);
     }

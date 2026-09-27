@@ -67,7 +67,8 @@ export interface TaskRunOrchestratorEvent {
     | 'gateAwaitingUser'
     | 'gateResolved'
     | 'runStalled'
-    | 'runFinished';
+    | 'runFinished'
+    | 'eventsCapReached';
   body: string;
 }
 
@@ -140,6 +141,12 @@ interface LiveOrchestrator {
   busy: boolean;
   pending: TaskRunOrchestratorEvent[];
   eventsSent: number;
+  /**
+   * イベント総数の上限（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`）に達したことを知らせる通知を
+   * 送り済みか（Issue #1520）。以降`notify`が無言で捨て続けるのは1度知らせれば十分なため、
+   * 二重に積み増さないようここで一度きりに絞る。
+   */
+  capNoticeSent: boolean;
   /**
    * 自動引き継ぎで次の世代を起こしている途中（Issue #1553）。この間に届いたイベントは送らずに
    * `pending`へ溜め、次の世代が立ち上がってから渡す。この世代からのツール呼び出しは拒否する。
@@ -372,6 +379,7 @@ export class TaskRunOrchestrator {
       busy: false,
       pending: [...carried],
       eventsSent: 0,
+      capNoticeSent: false,
       handingOff: false,
     };
     if (previous !== undefined) {
@@ -411,11 +419,39 @@ export class TaskRunOrchestrator {
 
   private notify(runId: string, event: TaskRunOrchestratorEvent): void {
     const live = this.live.get(runId);
-    if (live === undefined || live.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
+    if (live === undefined) {
+      return;
+    }
+    if (live.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
+      // 上限に達すると`taskFailed`・`runFinished`を含め以降は無言で捨てていた（Issue #1520）。
+      // 気付ける手がかりを1回だけ残す（ログ＋通知）。この通知自体は`eventsSent`を消費しない
+      // （消費すると上限をさらに縮めてしまい、本末転倒になる）
+      this.noticeEventsCapOnce(runId, live);
       return;
     }
     live.eventsSent += 1;
     live.pending.push(event);
+    if (!live.busy) {
+      this.flush(live);
+    }
+  }
+
+  private noticeEventsCapOnce(runId: string, live: LiveOrchestrator): void {
+    if (live.capNoticeSent) {
+      return;
+    }
+    live.capNoticeSent = true;
+    this.deps.log(
+      `[task run orchestrator] ${runId}のイベント通知が上限（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）に達したため、以降の通知は届きません`,
+    );
+    live.pending.push({
+      kind: 'eventsCapReached',
+      body: [
+        `イベント通知が上限（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）に達しました。`,
+        'これ以降のタスクの失敗や工程の完了・run終了を含む通知はもう届きません。',
+        'get_run_stateで状態を取り直して判断してください。',
+      ].join('\n'),
+    });
     if (!live.busy) {
       this.flush(live);
     }
