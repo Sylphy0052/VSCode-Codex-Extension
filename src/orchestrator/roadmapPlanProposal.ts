@@ -39,6 +39,7 @@ import {
 } from './planReflexReview';
 import {
   MAX_ROADMAP_PLAN_NODES,
+  childTitles,
   extractRoadmapChildren,
   findRoadmapPlanSection,
   importRoadmap,
@@ -219,7 +220,10 @@ export function useCurrentPlanSection(decision: RoadmapPlanDecision): ResolveRoa
     plan: decision.current.plan,
     proposal: undefined,
     notices: [
-      `子Issue側の変更（${describeRoadmapSourceDiff(decision.change.source)}）を確かめたうえで、今の計画区画のまま使います`,
+      `子Issue側の変更（${describeRoadmapSourceDiff(
+        decision.change.source,
+        childTitles(decision.children),
+      )}）を確かめたうえで、今の計画区画のまま使います`,
     ],
   };
 }
@@ -514,8 +518,13 @@ async function useExistingSection(
 /** 子Issueの本文（`undefined`は取得の失敗）。 */
 type ChildBodies = ReadonlyMap<number, string | undefined>;
 
-/** 子Issueの本文を取る。ハッシュに使うため終了済みの子も取る。 */
-async function fetchChildBodies(
+/**
+ * 子Issueの本文を取る。ハッシュに使うため終了済みの子も取る。
+ *
+ * `FETCH_CONCURRENCY`件を上限に並列で取る（子Issueが多いロードマップで直列取得が遅くなるのを
+ * 避ける。#1581）。テストから並列度を確かめられるようexportする。
+ */
+export async function fetchChildBodies(
   deps: RoadmapImportDeps,
   target: RoadmapImportTarget,
   children: readonly RoadmapChild[],
