@@ -956,8 +956,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     notifyFailure: boolean,
     preassessed?: TaskAssessment,
   ): Promise<boolean> {
-    if (this.handoffDeclinedByDelegate(entry, trigger)) {
-      this.log.info('引き継ぎは呼び出し側が見送りました（旧タブはそのまま続きます）');
+    if (this.handoffDeclinedByDelegate(entry, trigger, this.log)) {
       return false;
     }
     if (this.store === undefined || this.globalStorageDir === undefined) {

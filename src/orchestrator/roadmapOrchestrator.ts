@@ -356,9 +356,10 @@ export class RoadmapOrchestrator {
       busy: false,
       pending: [...carried],
       lastDeliveredSeq: previous?.lastDeliveredSeq,
-      // 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
+      // eventsSent: 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
       eventsSent: previous?.eventsSent ?? 0,
-      // 上限に達したことは新しい世代も知らないため、次に捨てるときにもう1回だけ知らせる
+      // capNoticeSent: 上限到達の通知は前の世代のセッションにしか届いていない。新しい世代が知らないと
+      // 「イベントが来ない＝何も起きていない」と誤解しかねないため、世代ごとに1回知らせる（Issue #1594）
       capNoticeSent: false,
       handingOff: false,
     };
