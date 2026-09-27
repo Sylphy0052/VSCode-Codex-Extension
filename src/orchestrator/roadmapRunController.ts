@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ForgeHost } from './forge';
 import type { RoadmapImportTarget } from './roadmapImport';
 import type { RoadmapIssueRunner, StartIssueOutcome } from './roadmapIssueRunner';
+import { diffRoadmapRunEvents, type RoadmapOrchestratorEvent } from './roadmapOrchestrator';
 import {
   type ResolveRoadmapPlanOutcome,
   type RoadmapPlanDecision,
@@ -25,6 +26,12 @@ import {
   type RoadmapRunEngine,
   type RoadmapRunMode,
 } from './roadmapRunState';
+import {
+  selectRoadmapRunEvents,
+  type RoadmapRunEventInput,
+  type RoadmapRunEventsPage,
+  type RoadmapRunEventStore,
+} from './roadmapRunEventLog';
 import type { RoadmapRunStore } from './roadmapRunStore';
 import {
   assessRun,
@@ -48,6 +55,8 @@ import {
  *   来た要求は1回へまとめる（同時に走らせると並列上限を超えて始めうるため。#1484）
  * - 自動実行が人の対応待ちで止まったら、デスクトップ通知で知らせる（同じ待ちは1回だけ）
  * - Kanbanへ出す出来事（実行可能になった・終了した・警告）をrunごとに溜める
+ * - 状態の差分・Kanbanの出来事・Orchestratorの命令・専有権の取得を、runごとのイベントログ
+ *   （Issue #1576、`roadmapRunEventLog.ts`）へ連番付きで追記する
  *
  * - merge待ち・後片付け中のノードは、状態が変わるたびにmergeの列（`RoadmapMergeQueue`）へ渡す
  * - runの開始・再開（再読み込み後の復元を含む）の前にウィンドウの専有権（Issue #1555、
@@ -102,8 +111,13 @@ export interface RoadmapRunControllerDeps {
   onDidChange(): void;
   /** merge待ち・後片付け中のノードを列へ並べる（分割案7）。 */
   mergeQueue?: { sync(run: RoadmapRun): void };
-  /** runの状態が変わった（Orchestratorへのイベント通知用。分割案8b-1）。`prev`は初めて見たrunで`undefined`。 */
-  onRunTransition?: (prev: RoadmapRun | undefined, next: RoadmapRun) => void;
+  /**
+   * runの状態の差分から作ったイベント（Orchestratorへの通知用。分割案8b-1）。イベントログへ
+   * 追記した後に呼び、振った番号を`seq`に入れる（Issue #1576）。
+   */
+  onRunEvents?: (runId: string, events: readonly RoadmapOrchestratorEvent[]) => void;
+  /** runごとのイベントログ（Issue #1576）。無ければ記録しない。 */
+  eventLog?: Pick<RoadmapRunEventStore, 'append' | 'find'>;
   /** 同じロードマップを複数のウィンドウから同時に動かさないための専有権（Issue #1555）。無ければ取らない。 */
   lease?: Pick<RoadmapRunLeaseManager, 'acquire' | 'holds' | 'release'>;
   log(message: string): void;
@@ -127,6 +141,8 @@ export class RoadmapRunController {
   /** 最後に見たrunの状態。差分から「実行可能になった」「終了した」を出す。 */
   private readonly lastSeen = new Map<string, RoadmapRun>();
   private readonly events = new Map<string, RoadmapKanbanEvent[]>();
+  /** イベントログの保存に失敗して記録できなかった件数（run単位）。`get_run_events`で知らせる。 */
+  private readonly unrecordedEvents = new Map<string, number>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpAgain = new Set<string>();
   /** 通知済みの待ち（runId → blockersの並び）。同じ待ちで通知を繰り返さない。 */
@@ -298,6 +314,14 @@ export class RoadmapRunController {
         workspaceRoot: run.workspaceRoot,
         roadmapIssueNumber: run.roadmapIssueNumber,
       });
+      if (outcome.ok) {
+        void this.appendLog(run.runId, [
+          {
+            kind: 'leaseAcquired',
+            message: `このウィンドウがロードマップ #${String(run.roadmapIssueNumber)}の専有権を取りました`,
+          },
+        ]);
+      }
       return outcome.ok
         ? outcome
         : {
@@ -368,7 +392,12 @@ export class RoadmapRunController {
     if (this.holdsLease(next.runId)) {
       this.deps.mergeQueue?.sync(next);
     }
-    this.deps.onRunTransition?.(prev, next);
+    if (prev !== undefined) {
+      const events = diffRoadmapRunEvents(prev, next);
+      if (events.length > 0) {
+        void this.logAndDeliver(next, events);
+      }
+    }
     if (next.finishedAt !== undefined) {
       void this.releaseLease(next.runId);
     } else if (pickIssuesToStart(next).length > 0) {
@@ -604,5 +633,61 @@ export class RoadmapRunController {
       tone,
     };
     this.events.set(runId, [event, ...list].slice(0, MAX_EVENTS_PER_RUN));
+    void this.appendLog(runId, [{ kind: tone === 'warn' ? 'warning' : 'notice', message }]);
+  }
+
+  /* ------------------------------------------------------------------------------------------ */
+  /* イベントログ（Issue #1576）                                                                 */
+  /* ------------------------------------------------------------------------------------------ */
+
+  /** Orchestratorからの命令とその受理・拒否を記録する。 */
+  recordOrchestratorCommand(runId: string, message: string): void {
+    void this.appendLog(runId, [{ kind: 'orchestratorCommand', message }]);
+  }
+
+  /** `after`より後のイベントログ（`get_run_events`）。 */
+  runEvents(runId: string, after: number | undefined): RoadmapRunEventsPage {
+    return {
+      ...selectRoadmapRunEvents(this.deps.eventLog?.find(runId), after),
+      unrecorded: this.unrecordedEvents.get(runId) ?? 0,
+    };
+  }
+
+  /**
+   * イベントログへ追記し、振った番号付きの記録を返す。保存に失敗しても実行は止めない
+   * （ログに残して空を返す）。まだ保存されていないrun（開始の途中）は今の時刻を開始時刻に使う。
+   */
+  private async appendLog(
+    runId: string,
+    inputs: readonly RoadmapRunEventInput[],
+  ): Promise<readonly { seq: number }[]> {
+    const log = this.deps.eventLog;
+    if (log === undefined) {
+      return [];
+    }
+    const now = this.now();
+    const startedAt = this.deps.store.find(runId)?.startedAt ?? now.toISOString();
+    try {
+      return await log.append({ runId, startedAt }, inputs, now);
+    } catch (e: unknown) {
+      this.unrecordedEvents.set(runId, (this.unrecordedEvents.get(runId) ?? 0) + inputs.length);
+      this.deps.log(`[roadmap run] ${runId}のイベントログを保存できませんでした: ${String(e)}`);
+      return [];
+    }
+  }
+
+  /** 状態の差分から作ったイベントを記録し、番号を付けてOrchestratorへ渡す。 */
+  private async logAndDeliver(run: RoadmapRun, events: RoadmapOrchestratorEvent[]): Promise<void> {
+    const records = await this.appendLog(
+      run.runId,
+      events.map((e) => ({ kind: e.kind, message: e.body })),
+    );
+    this.deps.onRunEvents?.(
+      run.runId,
+      events.map((e, i) => {
+        const seq = records[i]?.seq;
+        return seq === undefined ? e : { ...e, seq };
+      }),
+    );
   }
 }
