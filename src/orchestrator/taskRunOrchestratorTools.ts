@@ -499,6 +499,13 @@ export function formatTaskRunState(
     `判断待ちの工程: ${awaiting.length === 0 ? 'なし' : awaiting.map((r) => `${r.taskId}:${r.stage}`).join(', ')}`,
   ];
   const lines: string[] = [];
+  if (run.roadmap !== undefined) {
+    const { snapshot } = run.roadmap;
+    lines.push(
+      `ロードマップ: Issue #${String(run.roadmap.issueNumber)} ${inline(run.roadmap.title, STATE_TITLE_MAX_LENGTH)}` +
+        `（子Issue ${String(snapshot.children.length)}件、うち完了${String(snapshot.children.filter((c) => c.completed).length)}件。${snapshot.readAt}に読んだ）`,
+    );
+  }
   for (const task of listTasks(run)) {
     const stage = currentStage(task);
     const stages = TASK_STAGES.map((s) => `${s}=${task.stages[s].status}`).join(' ');
@@ -511,6 +518,9 @@ export function formatTaskRunState(
     if (task.issueNumber !== undefined) {
       const existing = task.existingIssueNumber === undefined ? '' : '（既存のIssue。Issue計画とIssue作成は飛ばした）';
       lines.push(`  Issue: #${String(task.issueNumber)}${existing}`);
+    }
+    if (task.completedInRoadmap === true) {
+      lines.push('  ロードマップで完了済み（全工程を飛ばした。提案で省いても計画に残る）');
     }
     if (task.pullRequest !== undefined) {
       lines.push(`  PR: #${String(task.pullRequest.number)} ${inline(task.pullRequest.url)}`);

@@ -669,6 +669,9 @@ const script = `
     if (!run) { return; }
     const status = run.suspended && !run.finished ? ['中断中', 'warn'] : assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
+    if (run.roadmap) {
+      controls.appendChild(el('span', 'status', 'ロードマップ #' + run.roadmap.issueNumber + ' ' + run.roadmap.title));
+    }
     controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {
       // 世代番号と自動引き継ぎの発生を並べて出す（Issue #1553）

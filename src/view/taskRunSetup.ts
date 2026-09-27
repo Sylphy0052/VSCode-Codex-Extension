@@ -49,6 +49,11 @@ import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
 import { taskRunLabel } from './taskRunKanbanModel';
 import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanbanView';
+import {
+  startRoadmapRunCommand,
+  type RoadmapRunStartDeps,
+  type RunSettings,
+} from './taskRunRoadmapStart';
 
 /** 1つの工程セッションで送る指示の上限（引き継ぎを含む）。 */
 const TASK_STAGE_MAX_ITERATIONS = 10;
@@ -257,6 +262,16 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     notifyTransition(prev, next, () => switchToRun(next.runId));
   });
 
+  const roadmapStartDeps = (engineHint: TaskRunEngine | undefined): RoadmapRunStartDeps => ({
+    controller,
+    git: deps.git,
+    cli: deps.cli,
+    log,
+    askSettings: (defaultTitle) => askRunSettings(engineHint, defaultTitle),
+    resumeRun: (runId) => resumeRun(runId, { parallel: true }),
+    showRun: (runId) => showRun(view, orchestrator, runId),
+  });
+
   void controller.restore().catch((e: unknown) => {
     warn(`再読み込み後の復元に失敗: ${String(e)}`);
   });
@@ -276,8 +291,16 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         { finish: finishRun, suspend: suspendRun },
         log,
         parseEngine(engineHint),
+        (folder) => startRoadmapRunCommand(roadmapStartDeps(parseEngine(engineHint)), folder, undefined),
       ),
     ),
+    // ワークフローViewのロードマップ欄からはIssue番号を付けて呼ぶ（Issue #1623）
+    vscode.commands.registerCommand('agent.taskRun.startFromRoadmap', async (issueNumber?: unknown) => {
+      const folder = await pickFolder();
+      if (folder !== undefined) {
+        await startRoadmapRunCommand(roadmapStartDeps(undefined), folder, parseIssueNumber(issueNumber));
+      }
+    }),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
     vscode.commands.registerCommand('agent.taskRun.switch', () =>
       switchRunCommand(controller, view, switchToRun),
@@ -347,6 +370,10 @@ function escapeCodicons(text: string): string {
   return text.replaceAll('$(', '$\u200B(');
 }
 
+function parseIssueNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 function parseEngine(value: unknown): TaskRunEngine | undefined {
   return value === 'codex' || value === 'claude' ? value : undefined;
 }
@@ -410,9 +437,21 @@ async function startRunCommand(
   },
   log: Logger,
   engineHint: TaskRunEngine | undefined,
+  startFromRoadmap: (folder: string) => Promise<void>,
 ): Promise<void> {
   const folder = await pickFolder();
   if (folder === undefined) {
+    return;
+  }
+  const source = await pick('始め方', [
+    ['free', '自由な指示から始める（Orchestratorと話して計画を作ります）'],
+    ['roadmap', 'ロードマップIssueから始める（子Issueをタスクにします）'],
+  ] as const);
+  if (source === undefined) {
+    return;
+  }
+  if (source === 'roadmap') {
+    await startFromRoadmap(folder);
     return;
   }
   // 動いているrunがあると`startRun`はそれを返すため、新しく始めたいなら並行して始めるか、先に終えるか
@@ -453,36 +492,13 @@ async function startRunCommand(
       }
     }
   }
-  const engines: [TaskRunEngine, string][] = [
-    ['codex', 'Codex'],
-    ['claude', 'Claude Code'],
-  ];
-  // 呼び出し元のチャットのエンジンを先頭に出す
-  const ordered = engineHint === 'claude' ? [...engines].reverse() : engines;
-  const engine = await pick<TaskRunEngine>('Orchestratorと工程セッションに使うCLI', ordered);
-  if (engine === undefined) {
-    return;
-  }
-  const parallelItems = Array.from({ length: MAX_TASK_RUN_PARALLEL }, (_, i) => String(i + 1));
-  const parallel = await vscode.window.showQuickPick(parallelItems, {
-    title: '並列上限（同時に動かす工程セッションの数）',
-  });
-  if (parallel === undefined) {
-    return;
-  }
-  const title = await vscode.window.showInputBox({
-    title: 'runの名前（Kanbanの一覧と通知に出します）',
-    prompt: '空のままEnterで開始時刻とCLIを名前にします。後でKanbanから変えられます',
-    validateInput: validateTaskRunTitleInput,
-  });
-  if (title === undefined) {
+  const settings = await askRunSettings(engineHint, undefined);
+  if (settings === undefined) {
     return;
   }
   const outcome = await controller.startRun({
     workspaceRoot: folder,
-    engine,
-    maxParallel: Number(parallel),
-    title,
+    ...settings,
     parallel: startParallel,
   });
   if (!outcome.ok) {
@@ -496,6 +512,40 @@ async function startRunCommand(
     );
   }
   showRun(view, orchestrator, outcome.runId);
+}
+
+/** 新しいrunのCLI・並列上限・名前を尋ねる。`defaultTitle`は名前の入力欄へ入れておく。 */
+async function askRunSettings(
+  engineHint: TaskRunEngine | undefined,
+  defaultTitle: string | undefined,
+): Promise<RunSettings | undefined> {
+  const engines: [TaskRunEngine, string][] = [
+    ['codex', 'Codex'],
+    ['claude', 'Claude Code'],
+  ];
+  // 呼び出し元のチャットのエンジンを先頭に出す
+  const ordered = engineHint === 'claude' ? [...engines].reverse() : engines;
+  const engine = await pick<TaskRunEngine>('Orchestratorと工程セッションに使うCLI', ordered);
+  if (engine === undefined) {
+    return undefined;
+  }
+  const parallelItems = Array.from({ length: MAX_TASK_RUN_PARALLEL }, (_, i) => String(i + 1));
+  const parallel = await vscode.window.showQuickPick(parallelItems, {
+    title: '並列上限（同時に動かす工程セッションの数）',
+  });
+  if (parallel === undefined) {
+    return undefined;
+  }
+  const title = await vscode.window.showInputBox({
+    title: 'runの名前（Kanbanの一覧と通知に出します）',
+    prompt: '空のままEnterで開始時刻とCLIを名前にします。後でKanbanから変えられます',
+    ...(defaultTitle === undefined ? {} : { value: defaultTitle }),
+    validateInput: validateTaskRunTitleInput,
+  });
+  if (title === undefined) {
+    return undefined;
+  }
+  return { engine, maxParallel: Number(parallel), title };
 }
 
 function showRun(

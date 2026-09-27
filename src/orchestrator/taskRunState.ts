@@ -125,6 +125,11 @@ export interface OrchestratedTask {
   dependsOn: readonly string[];
   /** 計画の時点で指定された既存のIssue番号。 */
   existingIssueNumber: number | undefined;
+  /**
+   * ロードマップで完了済みの子Issueとして置いたタスク（Issue #1623）。全工程を飛ばした状態で作り、
+   * 依存先としてだけ使う。着手していないため、計画から外れても片付け（#1619）の対象にならない。
+   */
+  completedInRoadmap?: true;
   executionId: string;
   stages: Record<TaskStage, TaskStageRecord>;
   /** 報告を受け付ける実行回。実行中のセッションが無ければ`undefined`（どの報告も受け付けない）。 */
@@ -274,6 +279,37 @@ export interface TaskRun {
    * Kanbanに出す。一度も起きていなければ省略する。
    */
   orchestratorAutoHandoffs?: OrchestratorAutoHandoffRecord;
+  /**
+   * ロードマップIssueから始めたrunの対象（Issue #1623）。自由な指示から始めたrunには無い。
+   * 同じフォルダで同じロードマップIssueを扱う終わっていないrunは1本までとする。
+   */
+  roadmap?: TaskRunRoadmap;
+}
+
+/** runが対象にするロードマップIssue（Issue #1623）。 */
+export interface TaskRunRoadmap {
+  issueNumber: number;
+  /** ロードマップIssueのタイトル。外部由来のテキスト。 */
+  title: string;
+  /** 直近に読んだロードマップの内容。次に読み直したときの差分の基準にする。 */
+  snapshot: TaskRunRoadmapSnapshot;
+}
+
+export interface TaskRunRoadmapSnapshot {
+  /** 本文の並びの子Issue。 */
+  children: readonly TaskRunRoadmapChild[];
+  /** 計画区画の依存（着手順の早い順）。区画が無い・読めなければ`undefined`。 */
+  plan: readonly { issueNumber: number; dependsOn: readonly number[] }[] | undefined;
+  /** ISO8601。 */
+  readAt: string;
+}
+
+export interface TaskRunRoadmapChild {
+  issueNumber: number;
+  /** チェックリストの行のタイトル。外部由来のテキスト。 */
+  title: string;
+  /** `- [x]`の行、またはcloseされたIssue。 */
+  completed: boolean;
 }
 
 /** Orchestratorの自動引き継ぎの記録（Issue #1553）。 */
@@ -318,6 +354,8 @@ export interface CreateTaskRunInput {
   maxParallel: number;
   /** 表示名。空なら付けない。 */
   title?: string;
+  /** ロードマップIssueから始めるときの対象（Issue #1623）。 */
+  roadmap?: TaskRunRoadmap;
   now: Date;
 }
 
@@ -343,6 +381,7 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
     haltedByUser: false,
     orchestratorGeneration: 0,
     orchestratorSessionRefs: [],
+    ...(input.roadmap === undefined ? {} : { roadmap: input.roadmap }),
   };
 }
 
@@ -396,6 +435,8 @@ export interface TaskDraft {
   acceptanceCriteria: readonly string[];
   dependsOn: readonly string[];
   existingIssueNumber: number | undefined;
+  /** ロードマップで完了済みの子Issue（Issue #1623）。全工程を飛ばした状態で作る。 */
+  completedInRoadmap?: true;
 }
 
 /**
@@ -417,17 +458,20 @@ function emptyStage(status: StageStatus): TaskStageRecord {
 }
 
 function newTask(draft: TaskDraft, executionId: string, at: string): OrchestratedTask {
-  const skipIssueStages = draft.existingIssueNumber !== undefined;
+  // ロードマップで完了済みの子Issueは全工程を飛ばす（完了済みとして盤面に出し、依存を満たす）
+  const completed = draft.completedInRoadmap === true;
+  const skipIssueStages = completed || draft.existingIssueNumber !== undefined;
   const issueStage = skipIssueStages ? 'skipped' : 'notStarted';
+  const workStage = completed ? 'skipped' : 'notStarted';
   return {
     ...draft,
     executionId,
     stages: {
       issuePlan: emptyStage(issueStage),
       issueCreate: emptyStage(issueStage),
-      implement: emptyStage('notStarted'),
-      review: emptyStage('notStarted'),
-      mergeCleanup: emptyStage('notStarted'),
+      implement: emptyStage(workStage),
+      review: emptyStage(workStage),
+      mergeCleanup: emptyStage(workStage),
     },
     currentAttemptId: undefined,
     attention: 'none',

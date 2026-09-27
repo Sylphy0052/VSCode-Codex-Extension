@@ -539,6 +539,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.taskRun.startFromRoadmap",
+        "title": "ロードマップIssueからオーケストレータモードを開始",
+        "category": "Agent"
+      },
+      {
         "command": "agent.taskRun.kanban",
         "title": "オーケストレータモードのKanbanを開く",
         "category": "Agent"

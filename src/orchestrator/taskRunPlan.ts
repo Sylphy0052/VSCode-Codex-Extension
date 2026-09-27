@@ -3,6 +3,7 @@ import {
   allocateTaskIds,
   getTask,
   isValidTaskId,
+  listTasks,
   type TaskDraft,
   type TaskRun,
 } from './taskRunState';
@@ -35,6 +36,11 @@ export interface PlanTaskInput {
   acceptanceCriteria: readonly string[];
   dependsOn: readonly string[];
   existingIssueNumber: number | undefined;
+  /**
+   * ロードマップで完了済み（`- [x] #N`、またはcloseされた）の子Issue（Issue #1623）。Controllerが
+   * ロードマップから作る初期計画だけが付ける（`propose_plan`の引数からは読まない）。
+   */
+  completedInRoadmap?: true;
 }
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string };
@@ -178,11 +184,16 @@ export interface ResolvedTaskPlan {
  * - 依存先は計画内のキーだけ。循環は循環するキーの組を挙げて拒否する
  * - 着手済みのタスクも計画から外せ、既存のIssue番号も変えられる（Issue #1614。自律運用のため）
  * - 既存のIssue番号は計画内で重複させない
+ * - ロードマップで完了済みのタスクは、提案が省いても計画に残す（`withCarriedCompletedTasks`）
  */
-export function resolveTaskPlan(run: TaskRun, tasks: readonly PlanTaskInput[]): Parsed<ResolvedTaskPlan> {
+export function resolveTaskPlan(
+  run: TaskRun,
+  proposed: readonly PlanTaskInput[],
+): Parsed<ResolvedTaskPlan> {
   if (run.finishedAt !== undefined) {
     return fail('このrunは終わっている');
   }
+  const tasks = withCarriedCompletedTasks(run, proposed);
   const keys = new Set(tasks.map((t) => t.id));
   if (keys.size !== tasks.length) {
     return fail('idが重複している');
@@ -227,10 +238,37 @@ export function resolveTaskPlan(run: TaskRun, tasks: readonly PlanTaskInput[]): 
       acceptanceCriteria: t.acceptanceCriteria,
       dependsOn: t.dependsOn.map(toTaskId),
       existingIssueNumber: t.existingIssueNumber,
+      ...(t.completedInRoadmap === true ? { completedInRoadmap: true } : {}),
     }),
   );
   if (drafts.some((d) => !isValidTaskId(d.taskId))) {
     return fail('taskIdを採番できなかった');
   }
   return { ok: true, value: { run: allocated.run, drafts, assigned } };
+}
+
+/**
+ * ロードマップで完了済みの子Issueのタスク（Issue #1623）のうち、提案が省いたものを計画の先頭へ
+ * 戻す。Orchestratorに毎回送り直させず、`dependsOn`から`taskId`で指せるようにするため。
+ * 完了済みのタスクは計画から外せない。依存は持たせない（完了済みのため着手の判断に使わない）。
+ */
+function withCarriedCompletedTasks(
+  run: TaskRun,
+  proposed: readonly PlanTaskInput[],
+): readonly PlanTaskInput[] {
+  const proposedKeys = new Set(proposed.map((t) => t.id));
+  const carried = listTasks(run)
+    .filter((t) => t.completedInRoadmap === true && !proposedKeys.has(t.taskId))
+    .map(
+      (t): PlanTaskInput => ({
+        id: t.taskId,
+        title: t.title,
+        summary: t.summary,
+        acceptanceCriteria: t.acceptanceCriteria,
+        dependsOn: [],
+        existingIssueNumber: t.existingIssueNumber,
+        completedInRoadmap: true,
+      }),
+    );
+  return carried.length === 0 ? proposed : [...carried, ...proposed];
 }

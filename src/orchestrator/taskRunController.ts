@@ -5,7 +5,16 @@ import type { HandoffClassifierInput } from '../view/handoffClassifier';
 import { buildTaskRunKanban, type TaskRunKanbanBoard } from '../view/taskRunKanbanModel';
 import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
-import { parsePlanArgs, resolveTaskPlan, type PlanTaskInput } from './taskRunPlan';
+import type { RoadmapChild } from './roadmapImport';
+import type { RoadmapPlanNode } from './roadmapShared';
+import {
+  MAX_PLAN_TITLE_LENGTH,
+  parsePlanArgs,
+  resolveTaskPlan,
+  type PlanTaskInput,
+} from './taskRunPlan';
+import { buildRoadmapInitialPlan } from './taskRunRoadmap';
+import { sanitizeInlineText } from './untrustedText';
 import { findStageQuestion } from './taskRunQuestions';
 import {
   findOpenGate,
@@ -270,14 +279,22 @@ export class TaskRunController {
     if (!parsed.ok) {
       return parsed;
     }
+    return this.applyPlan(runId, parsed.value);
+  }
+
+  /**
+   * 形式の検証を済ませた計画を受け付ける（`proposePlan`と、ロードマップIssueから作る初期計画
+   * `startRoadmapRun`が共有する。Issue #1623）。Issueの検証、Reflex審査、片付けは両者で同じ。
+   */
+  private async applyPlan(runId: string, tasks: readonly PlanTaskInput[]): Promise<ControllerResult> {
     const current = this.deps.store.find(runId);
     const issueProblem =
-      (current === undefined ? undefined : this.findIssueConflict(current, parsed.value)) ??
-      (await this.checkExistingIssues(runId, parsed.value));
+      (current === undefined ? undefined : this.findIssueConflict(current, tasks)) ??
+      (await this.checkExistingIssues(runId, tasks));
     if (issueProblem !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${issueProblem}` };
     }
-    const review = await this.reviewPlanIfEnabled(current, parsed.value);
+    const review = await this.reviewPlanIfEnabled(current, tasks);
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
     let autoApproved = false;
@@ -288,12 +305,12 @@ export class TaskRunController {
     const next = await this.updateRun(runId, (r) => {
       retired = [];
       // forgeへの問い合わせの間に別のrunが同じIssueを計画へ入れていないか、書き込みの直列の中で確かめ直す
-      const conflict = this.findIssueConflict(r, parsed.value);
+      const conflict = this.findIssueConflict(r, tasks);
       if (conflict !== undefined) {
         failure = conflict;
         return r;
       }
-      const resolved = resolveTaskPlan(r, parsed.value);
+      const resolved = resolveTaskPlan(r, tasks);
       if (!resolved.ok) {
         failure = resolved.message;
         return r;
@@ -420,6 +437,8 @@ export class TaskRunController {
     const numbers = [
       ...new Set(
         tasks
+          // ロードマップで完了済みの子Issue（Issue #1623）はcloseされていてよい
+          .filter((t) => t.completedInRoadmap !== true)
           .map((t) => t.existingIssueNumber)
           .filter((n): n is number => n !== undefined && !known.has(n)),
       ),
@@ -450,6 +469,8 @@ export class TaskRunController {
   private findIssueConflict(run: TaskRun, tasks?: readonly PlanTaskInput[]): string | undefined {
     const plannedIssueNumbers = new Set(
       (tasks ?? listTasks(run))
+        // ロードマップで完了済みの子Issue（Issue #1623）は実装しないため、他のrunと重なってよい
+        .filter((t) => t.completedInRoadmap !== true)
         .map((t) => t.existingIssueNumber)
         .filter((n): n is number => n !== undefined),
     );
@@ -529,6 +550,82 @@ export class TaskRunController {
       this.handleRunChanged(run);
       return { ok: true, runId: run.runId, reused: false };
     });
+  }
+
+  /**
+   * 同じフォルダで同じロードマップIssueを対象にする、終わっていないrun（中断中を含む。Issue #1623）。
+   */
+  findRoadmapRun(workspaceRoot: string, roadmapIssueNumber: number): TaskRun | undefined {
+    return this.listInFolder(workspaceRoot).find(
+      (r) => r.finishedAt === undefined && r.roadmap?.issueNumber === roadmapIssueNumber,
+    );
+  }
+
+  /**
+   * ロードマップIssueから始める（Issue #1623）。子Issueをタスクにした初期計画を`propose_plan`と
+   * 同じ経路（`applyPlan`）で受け付ける。同じロードマップIssueの終わっていないrunがあれば新しく作らず
+   * それを返す。他のrunとは並行して動かす（同じIssueの重複は`findIssueConflict`が防ぐ）。
+   * 初期計画が受け付けられなくてもrunは作り、理由を`planMessage`で返す（Orchestratorが提案し直す）。
+   */
+  async startRoadmapRun(input: {
+    workspaceRoot: string;
+    engine: TaskRunEngine;
+    maxParallel: number;
+    title?: string;
+    roadmapIssueNumber: number;
+    roadmapTitle: string;
+    children: readonly RoadmapChild[];
+    planNodes: readonly RoadmapPlanNode[] | undefined;
+  }): Promise<StartTaskRunOutcome & { planMessage?: ControllerResult }> {
+    const closedIssueNumbers = await this.findClosedChildren(input.workspaceRoot, input.children);
+    const plan = buildRoadmapInitialPlan({
+      roadmapIssueNumber: input.roadmapIssueNumber,
+      children: input.children,
+      planNodes: input.planNodes,
+      closedIssueNumbers,
+      now: this.now(),
+    });
+    const started = await this.startQueue.enqueue(async (): Promise<StartTaskRunOutcome> => {
+      const existing = this.findRoadmapRun(input.workspaceRoot, input.roadmapIssueNumber);
+      if (existing !== undefined) {
+        return { ok: true, runId: existing.runId, reused: true };
+      }
+      if (!isValidMaxParallel(input.maxParallel)) {
+        return { ok: false, message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+      }
+      const run = createTaskRun({
+        workspaceRoot: input.workspaceRoot,
+        engine: input.engine,
+        maxParallel: input.maxParallel,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        roadmap: {
+          issueNumber: input.roadmapIssueNumber,
+          title: sanitizeInlineText(input.roadmapTitle, MAX_PLAN_TITLE_LENGTH),
+          snapshot: plan.snapshot,
+        },
+        runId: this.newId(),
+        now: this.now(),
+      });
+      await this.deps.store.update(run.runId, () => run);
+      this.handleRunChanged(run);
+      return { ok: true, runId: run.runId, reused: false };
+    });
+    if (!started.ok || started.reused) {
+      return started;
+    }
+    return { ...started, planMessage: await this.applyPlan(started.runId, plan.tasks) };
+  }
+
+  /** `- [ ]`のままcloseされている子Issue。状態を確かめられないIssueは含めない。 */
+  private async findClosedChildren(
+    workspaceRoot: string,
+    children: readonly RoadmapChild[],
+  ): Promise<ReadonlySet<number>> {
+    const open = children.filter((c) => !c.checked).map((c) => c.issueNumber);
+    const states = await Promise.all(
+      open.map((n) => this.deps.observation.fetchIssueState(workspaceRoot, n)),
+    );
+    return new Set(open.filter((_, i) => states[i] === 'closed'));
   }
 
   /** run全体の一時停止と再開（Kanbanから）。停止中は新しい工程を始めない。実行中の工程は止めない。 */

@@ -2115,6 +2115,9 @@ export function workflowScript(): string {
   el('roadmapRefreshBtn').addEventListener('click', () =>
     vscode.postMessage({ type: 'roadmapRefresh' }),
   );
+  el('roadmapTaskRunBtn').addEventListener('click', () =>
+    vscode.postMessage({ type: 'startTaskRunFromRoadmap' }),
+  );
   el('runBtn').addEventListener('click', () => vscode.postMessage({ type: 'run' }));
   el('stopAllBtn').addEventListener('click', () => vscode.postMessage({ type: 'stopAll' }));
   el('removeWorktreesBtn').addEventListener('click', () =>

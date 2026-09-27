@@ -748,6 +748,11 @@ export class WorkflowViewManager implements vscode.Disposable {
       await this.postRoadmap(this.activeRoadmapPath(), true);
       return;
     }
+    if (type === 'startTaskRunFromRoadmap') {
+      // ロードマップIssueの選択と開始は`taskRunRoadmapStart.ts`の入口に集約する（Issue #1623）
+      await vscode.commands.executeCommand('agent.taskRun.startFromRoadmap');
+      return;
+    }
     if (
       (type === 'openRoadmapIssue' || type === 'openTaskIssue') &&
       typeof m['issue'] === 'number' &&
@@ -1213,6 +1218,7 @@ ${workflowStyles()}
           <span id="roadmapPath" class="hint"></span>
           <span id="roadmapStatus" class="hint"></span>
           <button id="roadmapRefreshBtn" type="button" class="secondary">Issueの状態を更新</button>
+          <button id="roadmapTaskRunBtn" type="button" class="secondary">ロードマップIssueをオーケストレータモードで実行</button>
         </div>
       </div>
       <div id="roadmapBody"></div>

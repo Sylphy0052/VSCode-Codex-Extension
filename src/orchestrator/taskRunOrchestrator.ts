@@ -990,15 +990,36 @@ function buildIntroPrompt(
           '- record_lesson: 次のrunへ残す教訓。気付いた時点（工程の失敗・やり直し・最後の' +
             'タスクの完了前）、またはrunFinishedを受けたときに記録する',
         ]),
+    ...(run.roadmap === undefined ? [] : buildRoadmapLines(run.roadmap.issueNumber)),
     '',
     '現在の状態:',
     formatTaskRunState(run, recommendations),
     '',
-    run.planStatus === 'drafting'
-      ? 'まずユーザーに何をしたいかを尋ね、計画を立ててpropose_planで提案してください。'
-      : 'まず現在の状態をユーザーに短く伝え、次にできることを示してください。',
+    buildOpeningInstruction(run),
     ...(lessonsBlock === undefined || lessonsBlock === '' ? [] : ['', lessonsBlock]),
   ].join('\n');
+}
+
+/**
+ * ロードマップIssueから始めたrun（Issue #1623）の役割の補足。題は外部由来のため導入文へ書かず、
+ * `formatTaskRunState`の囲いの中でだけ見せる。
+ */
+function buildRoadmapLines(roadmapIssueNumber: number): string[] {
+  return [
+    `- このrunはロードマップIssue #${String(roadmapIssueNumber)}の子Issueをタスクにして始めた。` +
+      '子Issueのタスクは既存のIssueのタスク（existingIssueNumber）として扱う',
+    '- ロードマップで完了済みの子Issueのタスクは全工程を飛ばしてある。propose_planで省いても計画に残るため、送り直さなくてよい',
+  ];
+}
+
+/** 導入文の最後に置く、最初にすることの指示。 */
+function buildOpeningInstruction(run: TaskRun): string {
+  if (run.planStatus !== 'drafting') {
+    return 'まず現在の状態をユーザーに短く伝え、次にできることを示してください。';
+  }
+  return run.roadmap === undefined
+    ? 'まずユーザーに何をしたいかを尋ね、計画を立ててpropose_planで提案してください。'
+    : 'ロードマップの子Issueから作った計画を置けていません。子Issueをタスクにした計画をpropose_planで提案してください。';
 }
 
 /**
