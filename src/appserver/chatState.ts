@@ -696,9 +696,8 @@ export interface ChatState {
    *
    * `autoHandoff`と全く同じ二段構え。初期値はユーザー設定（`agent.autoHandoff.autoApprove`、
    * 既定ON）から入り、そこから先は会話ごとにセッション単位で持つ。ONのときは、自動発火
-   * （`HandoffTrigger.kind !== 'manual'`）の引き継ぎに限り確認ダイアログとセッション統括
+   * の引き継ぎでも手動の引き継ぎボタンでも（Issue #1510）確認ダイアログとセッション統括
    * ページの保留カードを出さず、提案をそのまま採用する（`handoffModelChoice.ts`参照）。
-   * 手動の引き継ぎボタンでは、ONでも従来どおり確認する。
    */
   autoHandoffAutoApprove: boolean;
   /**
