@@ -820,6 +820,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(
     ...setupTaskRun({
       store: taskRunStore,
+      windowId,
+      globalStorageDir: context.globalStorageUri.fsPath,
       hosts: {
         codex: overridableHost('codex', chat),
         claude: overridableHost('claude', claudeChat),

@@ -1,4 +1,6 @@
 import * as fsPromises from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 import { CLAUDE_EFFORTS } from '../claude/types';
@@ -24,6 +26,11 @@ import type { RunNotesStore } from '../orchestrator/runNotes';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import { TaskRunController, type ControllerResult } from '../orchestrator/taskRunController';
 import type { GateJudgeQuestion } from '../orchestrator/taskRunGates';
+import {
+  computeHostIdentity,
+  TASK_LEASE_DIR_NAME,
+  TaskRunLeaseManager,
+} from '../orchestrator/taskRunLease';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
@@ -50,6 +57,7 @@ import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
 import { taskRunLabel } from './taskRunKanbanModel';
 import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanbanView';
+import { sessionHubRoot } from './sessionHub';
 import {
   startRoadmapRunCommand,
   type RoadmapRunStartDeps,
@@ -69,6 +77,10 @@ export interface TaskRunSetupDeps {
    * タブを見分けるために、チャット画面の組み立てより前から要る。
    */
   store: TaskRunStore;
+  /** このウィンドウの識別子（`extension.ts`が起動時に1回作る）。runの専有権（Issue #1628）の持ち主に使う。 */
+  windowId: string;
+  /** 専有権ファイルの置き場を決める（`sessionHubRoot`の下）。`context.globalStorageUri.fsPath`。 */
+  globalStorageDir: string;
   hosts: Record<TaskRunEngine, TaskSessionHost>;
   worktreeQueue: WorktreeCreationQueue;
   git: GitCommandRunner;
@@ -149,6 +161,19 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
 
+  // runごとのウィンドウ専有権（Issue #1628）。廃止したロードマップ実行の`roadmapRunLease.ts`をrunId単位へ移植
+  const lease = new TaskRunLeaseManager({
+    dir: path.join(sessionHubRoot(deps.globalStorageDir), TASK_LEASE_DIR_NAME),
+    owner: {
+      windowId: deps.windowId,
+      hostname: os.hostname(),
+      hostIdentity: computeHostIdentity(),
+      pid: process.pid,
+    },
+    onLost: (runId, holderLease) => holder.controller?.handleLeaseLost(runId, holderLease),
+    log: warn,
+  });
+
   // 設定が無効なら判定せず、計画提案は常に承認待ちにする（ロードマップ実行と同じ判定器・閾値を使う）
   const planAutoApprove = (engine: TaskRunEngine) =>
     readTaskRunPlanAutoApproveEnabled()
@@ -180,6 +205,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     },
     observation,
     roadmap: createTaskRunRoadmapPort(ports),
+    lease,
     pathExists: async (target) => {
       try {
         await fsPromises.stat(target);
@@ -281,6 +307,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   return [
     transitions,
+    { dispose: () => lease.dispose() },
     { dispose: () => runner.dispose() },
     // Orchestratorはトークンを外してからセッションを閉じるため、サーバより先に片付ける
     { dispose: () => orchestrator.dispose() },
