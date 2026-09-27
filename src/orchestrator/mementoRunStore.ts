@@ -34,7 +34,8 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
    */
   onDiscardUnfinished?(runs: readonly T[]): void;
   /**
-   * `isValid`が弾いた（骨格の合わない）要素があったとき、読み込むたびに呼ぶ（Issue #1590）。
+   * `isValid`が弾いた（骨格の合わない）要素があったとき、その件数が前回と変わったときだけ呼ぶ
+   * （Issue #1590。`list`は`find`・`update`のたびに読むため、毎回呼ぶとログが埋まる）。
    * 黙って消えないよう、呼び出し側でログに残す。壊れた中身は渡さず件数だけ渡す。
    */
   onDiscardInvalid?(count: number): void;
@@ -42,6 +43,7 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
 
 export class MementoRunStore<T extends StoredRun> {
   private readonly queue = new SerialQueue();
+  private lastDiscarded = 0;
 
   constructor(
     private readonly memento: MementoLike,
@@ -54,8 +56,12 @@ export class MementoRunStore<T extends StoredRun> {
       return [];
     }
     const valid = raw.filter((r): r is T => this.options.isValid(r));
-    if (valid.length < raw.length) {
-      this.options.onDiscardInvalid?.(raw.length - valid.length);
+    const discarded = raw.length - valid.length;
+    if (discarded !== this.lastDiscarded) {
+      this.lastDiscarded = discarded;
+      if (discarded > 0) {
+        this.options.onDiscardInvalid?.(discarded);
+      }
     }
     return valid;
   }
