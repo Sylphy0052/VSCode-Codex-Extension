@@ -10,9 +10,11 @@
  *   今の子Issue側・区画を比べる（Issue #1555）。どちらも変わっていなければそのまま使い、計画だけが
  *   変わっていれば手修正として検証してから使う（`planOrigin = manually_modified`）。子Issue側が
  *   変わっていれば変更点を添えて返し、作り直すか今の区画のまま使うかを人に決めてもらう
- *   （`planDecisionNeeded`）。どの場合も区画を自動で上書きしない
+ *   （`planDecisionNeeded`）。どの場合も区画を自動で上書きしない。人が「今の区画のまま使う」と
+ *   決めたときは、メタデータの行の子Issue側だけを今の姿へ書き直す（次のrunで同じ確認を出さない）
  * - メタデータの無い区画（#1555より前に書いた区画）は比べる基準が無いため、そのまま使い、基準が
- *   無いことを知らせる。メタデータを自動で書き足さない。作り直して書き戻すときに付く
+ *   無いことを知らせる。メタデータを自動で書き足さない。区画が今の子Issueと合わず検証に通らない
+ *   ときは、子Issueと区画の差を変更点として人に作り直すかを決めてもらう
  *
  * Orchestratorのセッションはまだ無いため、提案は`RoadmapPlanProposer`の口で受ける。既定は
  * ヘッドレスCLIの1回実行（`createHeadlessRoadmapPlanProposer`）。
@@ -41,6 +43,7 @@ import {
   findRoadmapPlanSection,
   importRoadmap,
   parseRoadmapPlanSection,
+  rewriteRoadmapPlanMeta,
   validateRoadmapPlan,
   writeRoadmapPlan,
   type RoadmapChild,
@@ -49,6 +52,7 @@ import {
   type RoadmapImportTarget,
 } from './roadmapImport';
 import {
+  ROADMAP_PLAN_VERSION,
   classifyRoadmapPlanChange,
   computeRoadmapPlanHash,
   computeRoadmapSourceSnapshot,
@@ -56,6 +60,7 @@ import {
   findRoadmapPlanMeta,
   hashRoadmapPlanSectionContent,
   type RoadmapPlanChange,
+  type RoadmapSourceDiff,
   type RoadmapSourceSnapshot,
 } from './roadmapPlanHash';
 import { isValidIssueNumber, type RoadmapPlan, type RoadmapPlanNode } from './roadmapRunState';
@@ -127,6 +132,11 @@ export type RoadmapPlanDecision = ImportedChildren & {
   current: { kind: 'valid'; plan: RoadmapPlan } | { kind: 'invalid'; errors: string[] };
   /** 作り直して置き換えるとき、区画がこのときから変わっていないことを確かめる。 */
   sectionHash: string;
+  /**
+   * 「今の区画のまま使う」ときにメタデータの行へ書く基準（今の子Issue側と、生成時の計画の
+   * ハッシュ）。メタデータが無い区画では`undefined`で、書き直さない。
+   */
+  rebase?: { source: RoadmapSourceSnapshot; generatedPlanHash: string } | undefined;
 };
 
 export type ResolveRoadmapPlanOutcome =
@@ -215,6 +225,46 @@ export function useCurrentPlanSection(decision: RoadmapPlanDecision): ResolveRoa
 }
 
 /**
+ * 「今の区画のまま使う」をControllerから呼ぶ口。区画が使えれば、メタデータの行の子Issue側を
+ * 今の姿へ書き直す（`generatedPlanHash`は変えず、手修正の判定は残す）。人が見た後に区画が
+ * 書き換えられていれば使わない。
+ */
+export async function applyCurrentPlanSection(
+  deps: RoadmapImportDeps,
+  target: RoadmapImportTarget,
+  decision: RoadmapPlanDecision,
+): Promise<ResolveRoadmapPlanOutcome> {
+  const outcome = useCurrentPlanSection(decision);
+  if (outcome.kind !== 'ready' || decision.rebase === undefined) {
+    return outcome;
+  }
+  const written = await rewriteRoadmapPlanMeta(deps, target, decision.sectionHash, {
+    planVersion: ROADMAP_PLAN_VERSION,
+    sourceHash: decision.rebase.source.sourceHash,
+    generatedPlanHash: decision.rebase.generatedPlanHash,
+    children: decision.rebase.source.children,
+  });
+  switch (written.kind) {
+    case 'sectionChanged':
+      return {
+        kind: 'failed',
+        message:
+          '確認の後に計画区画が書き換えられたため、実行を取りやめました。もう一度実行してください',
+      };
+    case 'failed':
+      return {
+        ...outcome,
+        notices: [
+          ...(outcome.notices ?? []),
+          `変更検出の基準を今の子Issueへ合わせられませんでした（${sanitizeInlineText(written.message, REASON_MAX_LENGTH)}）。次の実行でも同じ確認が出ます`,
+        ],
+      };
+    case 'written':
+      return outcome;
+  }
+}
+
+/**
  * 既にある区画を、メタデータのハッシュと今の子Issue側・区画を比べて扱う（Issue #1555）。
  * 区画は書き換えない。
  */
@@ -245,9 +295,22 @@ async function resolveExistingPlanSection(
           notices,
         };
   if (found.kind !== 'present') {
+    const unmatched =
+      plan.kind === 'invalid' ? diffPlanAgainstChildren(plan.content, children) : undefined;
+    if (plan.kind === 'invalid' && unmatched !== undefined) {
+      // 基準は無いが、区画が今の子Issueと合わない。作り直すかを人に決めてもらう
+      return {
+        kind: 'planDecisionNeeded',
+        children,
+        duplicates,
+        change: { kind: 'sourceChanged', source: unmatched },
+        current: { kind: 'invalid', errors: plan.errors },
+        sectionHash: hashRoadmapPlanSectionContent(plan.content),
+      };
+    }
     return ready(undefined, [
       found.kind === 'absent'
-        ? '計画区画に変更検出の基準（メタデータ）が無いため、子Issueと区画の変更を確かめずにそのまま使います。計画を作り直して書き戻すと基準が付きます'
+        ? '計画区画に変更検出の基準（メタデータ）が無いため、子Issueと区画の変更を確かめずにそのまま使います。基準を付けるには、区画を消して実行し直し、計画を作り直してください'
         : `計画区画のメタデータを使えないため（${found.message}）、子Issueと区画の変更を確かめずにそのまま使います`,
     ]);
   }
@@ -282,8 +345,26 @@ async function resolveExistingPlanSection(
             ? { kind: 'valid', plan: { nodes: plan.nodes, source: 'existingSection', planOrigin } }
             : { kind: 'invalid', errors: plan.errors },
         sectionHash: hashRoadmapPlanSectionContent(plan.content),
+        rebase: { source, generatedPlanHash: meta.generatedPlanHash },
       };
   }
+}
+
+/**
+ * 区画のノードと今の子Issueの差（子Issue側から見た追加・削除）。差が無ければ`undefined`
+ * （区画が検証に通らない理由が子Issueの増減ではない）。
+ */
+function diffPlanAgainstChildren(
+  content: readonly string[],
+  children: readonly RoadmapChild[],
+): RoadmapSourceDiff | undefined {
+  const planned = new Set(parseRoadmapPlanSection(content).nodes.map((node) => node.issueNumber));
+  const current = new Set(children.map((child) => child.issueNumber));
+  const added = [...current].filter((issue) => !planned.has(issue)).sort((a, b) => a - b);
+  const removed = [...planned].filter((issue) => !current.has(issue)).sort((a, b) => a - b);
+  return added.length === 0 && removed.length === 0
+    ? undefined
+    : { added, removed, bodyChanged: [] };
 }
 
 /** 子Issueの本文が全件そろったときだけ子Issue側の姿を作る。 */

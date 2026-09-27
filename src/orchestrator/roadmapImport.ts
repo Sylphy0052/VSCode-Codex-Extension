@@ -28,6 +28,8 @@ import {
   computeRoadmapPlanHash,
   formatRoadmapPlanMeta,
   hashRoadmapPlanSectionContent,
+  replaceRoadmapPlanMetaLine,
+  type RoadmapPlanMeta,
   type RoadmapSourceSnapshot,
 } from './roadmapPlanHash';
 import { isValidIssueNumber, type RoadmapPlanNode } from './roadmapRunState';
@@ -486,6 +488,66 @@ export async function writeRoadmapPlan(
       return outcome.ok
         ? { kind: 'written', body: next }
         : { kind: 'failed', message: outcome.message };
+    },
+  );
+}
+
+export type RewriteRoadmapPlanMetaOutcome =
+  | { kind: 'written' }
+  /** 読み直した区画が、人が見て決めたときの区画から変わっていた。書かない。 */
+  | { kind: 'sectionChanged' }
+  | { kind: 'failed'; message: string };
+
+/**
+ * 区画のメタデータの行だけを書き直す（Issue #1555）。子Issue側の変更を見た利用者が「今の区画の
+ * まま使う」と決めたときに、変更検出の基準を今の子Issue側へ合わせる。区画の他の行と区画以外の
+ * 本文は変えない。`sectionHash`（人が見たときの区画のハッシュ）が今の区画と合わなければ書かない。
+ */
+export async function rewriteRoadmapPlanMeta(
+  deps: RoadmapImportDeps,
+  target: RoadmapImportTarget,
+  sectionHash: string,
+  meta: RoadmapPlanMeta,
+): Promise<RewriteRoadmapPlanMetaOutcome> {
+  return runExclusiveOnRoadmapIssue(
+    target.host,
+    target.cwd,
+    target.roadmapIssueNumber,
+    async () => {
+      const body = await fetchIssueBody(
+        deps.cli,
+        target.host,
+        target.cwd,
+        target.roadmapIssueNumber,
+      );
+      if (body === undefined || body.trim() === '') {
+        return {
+          kind: 'failed',
+          message: `ロードマップIssue #${String(target.roadmapIssueNumber)} の本文を取得できませんでした`,
+        };
+      }
+      const section = findRoadmapPlanSection(body);
+      if (
+        section.kind !== 'present' ||
+        hashRoadmapPlanSectionContent(section.content) !== sectionHash
+      ) {
+        return { kind: 'sectionChanged' };
+      }
+      const next = replaceRoadmapPlanSection(body, [
+        ROADMAP_PLAN_START_MARKER,
+        ...replaceRoadmapPlanMetaLine(section.content, meta),
+        ROADMAP_PLAN_END_MARKER,
+      ]);
+      if (next === undefined) {
+        return { kind: 'sectionChanged' };
+      }
+      const outcome = await updateIssue(deps, {
+        host: target.host,
+        cwd: target.cwd,
+        number: target.roadmapIssueNumber,
+        body: next,
+      });
+      return outcome.ok ? { kind: 'written' } : { kind: 'failed', message: outcome.message };
     },
   );
 }

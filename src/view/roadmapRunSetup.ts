@@ -17,6 +17,7 @@ import {
   type RoadmapMergeSettings,
 } from '../orchestrator/roadmapMergeQueue';
 import {
+  applyCurrentPlanSection,
   applyRoadmapPlanProposal,
   createHeadlessRoadmapPlanProposer,
   regenerateRoadmapPlan,
@@ -178,6 +179,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     applyPlan: (target, proposal) => applyRoadmapPlanProposal(importDeps, target, proposal),
     confirmPlan,
     decidePlanChange,
+    useCurrentPlan: (target, decision) => applyCurrentPlanSection(importDeps, target, decision),
     regeneratePlan: (target, engine, sectionHash) =>
       regenerateRoadmapPlan(resolveDeps(engine), target, sectionHash),
     notifyStalled: (run, blockers) =>

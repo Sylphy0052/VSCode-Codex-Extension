@@ -7,7 +7,8 @@
  *   `<!-- roadmap-kanban:plan-meta planVersion=1 sourceHash=… generatedPlanHash=… children=101:…,102:… -->`
  * - `sourceHash`は子Issueの番号の集合と各子の本文から決まる。子ごとのハッシュ（`children`）も
  *   残し、追加・削除・本文の変わった子を示せるようにする。チェックの有無は入れない（進むたびに
- *   変わるため）
+ *   変わるため）。ロードマップ側のチェックに加え、子の本文の中のチェックボックス（受入基準の
+ *   `- [x]`など）も未チェックへ均してからハッシュにする
  * - `generatedPlanHash`はメタデータの行を除いた区画の中身を、改行コードと行末の空白、前後の
  *   空行を均してから計算する
  *
@@ -78,9 +79,13 @@ function normalizeLines(lines: readonly string[]): string {
   return trimmed.slice(start, end).join('\n');
 }
 
-/** 子Issue1件の本文のハッシュ。 */
+/** 行頭のチェックボックス（`- [x]`・`1. [X]`など）。 */
+const CHECKED_BOX_PATTERN = /^(\s*(?:[-*+]|\d+[.)])\s+)\[[xX]\]/u;
+
+/** 子Issue1件の本文のハッシュ。チェックボックスは未チェックへ均す（作業が進むたびに変わるため）。 */
 export function hashRoadmapChildBody(body: string): string {
-  return sha256Hex(normalizeLines(body.split(/\r?\n/u))).slice(0, CHILD_HASH_LENGTH);
+  const lines = body.split(/\r?\n/u).map((line) => line.replace(CHECKED_BOX_PATTERN, '$1[ ]'));
+  return sha256Hex(normalizeLines(lines)).slice(0, CHILD_HASH_LENGTH);
 }
 
 function hashChildren(children: ReadonlyMap<number, string>): string {
@@ -130,6 +135,14 @@ export function formatRoadmapPlanMeta(meta: RoadmapPlanMeta): string {
     `${META_PREFIX} planVersion=${String(meta.planVersion)} sourceHash=${meta.sourceHash}` +
     ` generatedPlanHash=${meta.generatedPlanHash} children=${children} ${META_SUFFIX}`
   );
+}
+
+/** 区画の中身（目印の行を除く）のメタデータの行を`meta`で差し替える。無ければ先頭へ入れる。 */
+export function replaceRoadmapPlanMetaLine(
+  content: readonly string[],
+  meta: RoadmapPlanMeta,
+): string[] {
+  return [formatRoadmapPlanMeta(meta), ...content.filter((line) => !isMetaLine(line))];
 }
 
 const META_BODY_PATTERN =

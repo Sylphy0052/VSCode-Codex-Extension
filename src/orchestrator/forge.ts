@@ -953,6 +953,10 @@ export async function fetchIssueBody(
       return undefined;
     }
     const body = (parsed as Record<string, unknown>)[host === 'github' ? 'body' : 'description'];
+    // GitLabは説明が空のIssueで`description: null`を返す。取得の失敗と分けて空の本文として扱う
+    if (body === null) {
+      return '';
+    }
     return typeof body === 'string' ? body : undefined;
   } catch {
     return undefined;

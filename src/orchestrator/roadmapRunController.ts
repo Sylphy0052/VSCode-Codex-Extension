@@ -3,7 +3,6 @@ import type { ForgeHost } from './forge';
 import type { RoadmapImportTarget } from './roadmapImport';
 import type { RoadmapIssueRunner, StartIssueOutcome } from './roadmapIssueRunner';
 import {
-  useCurrentPlanSection,
   type ResolveRoadmapPlanOutcome,
   type RoadmapPlanDecision,
   type RoadmapPlanProposal,
@@ -74,6 +73,14 @@ export interface RoadmapRunControllerDeps {
    * Issue #1555）。`undefined`は取りやめ。
    */
   decidePlanChange(decision: RoadmapPlanDecision): Promise<'regenerate' | 'useCurrent' | undefined>;
+  /**
+   * 今の区画のまま使う（`applyCurrentPlanSection`）。区画のメタデータの子Issue側を今の姿へ
+   * 書き直す。
+   */
+  useCurrentPlan(
+    target: RoadmapImportTarget,
+    decision: RoadmapPlanDecision,
+  ): Promise<ResolveRoadmapPlanOutcome>;
   /** 計画を作り直す（既存の提案の流れ）。`sectionHash`は利用者が見たときの区画のハッシュ。 */
   regeneratePlan(
     target: RoadmapImportTarget,
@@ -175,7 +182,7 @@ export class RoadmapRunController {
       }
       outcome =
         decision === 'useCurrent'
-          ? useCurrentPlanSection(outcome)
+          ? await this.deps.useCurrentPlan(target, outcome)
           : await this.deps.regeneratePlan(target, input.engine, outcome.sectionHash);
     }
     if (outcome.kind === 'awaitingApproval') {
@@ -194,7 +201,11 @@ export class RoadmapRunController {
       case 'awaitingApproval':
         return { ok: false, message: '計画を書き戻せませんでした' };
       case 'planDecisionNeeded':
-        return { ok: false, message: '計画区画の扱いを決められませんでした' };
+        return {
+          ok: false,
+          message:
+            '確認の後に計画区画が書き換えられたため、実行を取りやめました。もう一度実行してください',
+        };
       case 'ready':
         break;
     }
