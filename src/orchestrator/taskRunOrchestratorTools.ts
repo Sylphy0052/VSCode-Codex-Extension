@@ -9,6 +9,7 @@ import {
   MAX_PLAN_TITLE_LENGTH,
 } from './taskRunPlan';
 import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
+import { taskIssueNumber } from './taskRunRoadmap';
 import { listQuestionsAwaitingUser } from './taskRunQuestions';
 import {
   assessTaskRun,
@@ -518,6 +519,22 @@ export function formatTaskRunState(
       `ロードマップ: Issue #${String(run.roadmap.issueNumber)} ${inline(run.roadmap.title, STATE_TITLE_MAX_LENGTH)}` +
         `（子Issue ${String(snapshot.children.length)}件、うち完了${String(snapshot.children.filter((c) => c.completed).length)}件。${snapshot.readAt}に読んだ）`,
     );
+    // 読み直しで知った子Issueの完了（[x]またはclose）は、propose_planで計画を出し直すまでタスクへ反映されない。
+    // その間は完了数と完了済みのタスクの数が食い違って見えるため、出し直し待ちのIssueを添える。
+    // runがmergeを見届けた子Issueは除く（後片付けの結果次第でmergeCleanupがdoneにならないため、
+    // taskRunRoadmapFollowerと同じくmergedIssueNumbersでも見る）
+    const merged = new Set(run.roadmap.mergedIssueNumbers ?? []);
+    const completedChildren = new Set(snapshot.children.filter((c) => c.completed).map((c) => c.issueNumber));
+    const awaitingReplan = listTasks(run)
+      .filter((t) => t.completedInRoadmap !== true && t.stages.mergeCleanup.status !== 'done')
+      .map(taskIssueNumber)
+      .filter((n): n is number => n !== undefined && completedChildren.has(n) && !merged.has(n));
+    if (awaitingReplan.length > 0) {
+      lines.push(
+        `  計画の出し直し待ち: ${awaitingReplan.map((n) => `#${String(n)}`).join(', ')}はロードマップで完了したが、` +
+          'タスクは計画に残っている（外すならpropose_planでそのタスクを除いた計画を出す）',
+      );
+    }
     for (const notice of (run.roadmap.notices ?? []).slice(-STATE_ROADMAP_NOTICES_SHOWN)) {
       lines.push(`  ${notice.at} ${notice.kind}: ${inline(notice.body)}`);
     }
