@@ -178,16 +178,16 @@ export class AutoReplyAgent {
    *
    * 失敗（途中までの応答も無いタイムアウトを含む）したときは、セッションを閉じて開き直し、
    * `retryCount`回まで再試行する（Issue #1602）。打ち切られた（`cancelled`）ときと、
-   * 返信役自体が閉じられたときは再試行しない。`onAttempt`は各試行の直前に1始まりの試行番号で
-   * 呼ばれ、画面の表示に使う。
+   * 返信役自体が閉じられたときは再試行しない。`onAttempt`は各試行の直前に1始まりの試行番号と
+   * 試行回数の上限で呼ばれ、画面の表示に使う。
    */
   async reply(
     lastAgentMessage: string,
-    onAttempt?: (attempt: number) => void,
+    onAttempt?: (attempt: number, attempts: number) => void,
   ): Promise<AutoReplyTurnResult> {
     const attempts = this.options.retryCount + 1;
     for (let attempt = 1; ; attempt++) {
-      onAttempt?.(attempt);
+      onAttempt?.(attempt, attempts);
       const result = await this.replyOnce(lastAgentMessage);
       if (result.ok || result.kind === 'cancelled' || this.closed || attempt >= attempts) {
         return result;

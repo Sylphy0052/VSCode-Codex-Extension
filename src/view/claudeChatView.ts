@@ -1610,9 +1610,9 @@ export class ClaudeChatViewManager
     if (agent.isBusy()) {
       return;
     }
-    const result = await agent.reply(lastAgentMessageText, (attempt) =>
+    const result = await agent.reply(lastAgentMessageText, (attempt, attempts) =>
       entry.session.setAutoReplyActivity(
-        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.thinking, attempt, config.retryCount),
+        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.thinking, attempt, attempts),
       ),
     );
     if (entry.disposed) {
@@ -1854,10 +1854,12 @@ export class ClaudeChatViewManager
       // 通常ターンの往復と重ならない想定だが、重なった場合はカードを残して次回に譲る
       return;
     }
-    const result = await agent.reply(buildAutoReplyAskUserQuestionPrompt(questions), (attempt) =>
-      entry.session.setAutoReplyActivity(
-        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.askUserQuestion, attempt, config.retryCount),
-      ),
+    const result = await agent.reply(
+      buildAutoReplyAskUserQuestionPrompt(questions),
+      (attempt, attempts) =>
+        entry.session.setAutoReplyActivity(
+          describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.askUserQuestion, attempt, attempts),
+        ),
     );
     if (entry.disposed || !entry.session.getState().autoReply || !result.ok) {
       return;

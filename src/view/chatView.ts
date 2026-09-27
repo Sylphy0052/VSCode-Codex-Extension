@@ -1416,9 +1416,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (agent.isBusy()) {
       return;
     }
-    const result = await agent.reply(lastAgentMessageText, (attempt) =>
+    const result = await agent.reply(lastAgentMessageText, (attempt, attempts) =>
       entry.session.setAutoReplyActivity(
-        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.thinking, attempt, config.retryCount),
+        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.thinking, attempt, attempts),
       ),
     );
     if (entry.disposed) {

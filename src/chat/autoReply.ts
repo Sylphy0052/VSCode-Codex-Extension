@@ -235,8 +235,8 @@ export const AUTO_REPLY_ACTIVITY = {
 } as const;
 
 /** 返信役の試行中の文言。再試行中（2回目以降）だけ試行回数を添える。 */
-export function describeAutoReplyAttempt(base: string, attempt: number, retryCount: number): string {
-  return attempt <= 1 ? base : `${base}（${attempt}/${retryCount + 1}回目）`;
+export function describeAutoReplyAttempt(base: string, attempt: number, attempts: number): string {
+  return attempt <= 1 ? base : `${base}（${attempt}/${attempts}回目）`;
 }
 
 /** 自動返信の回数が上限へ達したか。 */
