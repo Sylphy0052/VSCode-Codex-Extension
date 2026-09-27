@@ -32,7 +32,7 @@ import {
   type RoadmapPlanMeta,
   type RoadmapSourceSnapshot,
 } from './roadmapPlanHash';
-import { isValidIssueNumber, type RoadmapPlanNode } from './roadmapRunState';
+import { isValidIssueNumber, type RoadmapPlanNode } from './roadmapShared';
 import { sanitizeInlineText } from './untrustedText';
 import { findCycleGroups } from './workflow';
 

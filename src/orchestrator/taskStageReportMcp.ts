@@ -1,5 +1,5 @@
 import type { McpToolDefinition } from './messaging';
-import { isValidIssueNumber } from './roadmapRunState';
+import { isValidIssueNumber } from './roadmapShared';
 import { TASK_STAGES, type StageOutput, type StageReportRef, type TaskStage } from './taskRunState';
 import { REPORT_STAGE_RESULT_TOOL } from './taskStagePrompts';
 

@@ -13,7 +13,7 @@ import {
   toolTextResult,
 } from './messaging';
 import { type HttpMcpServerHandle, startHttpMcpServer, type McpHttpTarget } from './mcpHttpServer';
-import { ROADMAP_QUESTION_ESCALATIONS, type RoadmapQuestionEscalation } from './roadmapRunState';
+import { ROADMAP_QUESTION_ESCALATIONS, type RoadmapQuestionEscalation } from './roadmapShared';
 import { sanitizeInlineText } from './untrustedText';
 
 /**

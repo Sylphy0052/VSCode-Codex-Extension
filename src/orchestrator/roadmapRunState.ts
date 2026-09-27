@@ -13,6 +13,22 @@
  * （`__proto__`等の危険なキーが入らない）。
  */
 
+import {
+  isValidIssueNumber,
+  ROADMAP_QUESTION_ESCALATIONS,
+  type RoadmapPlan,
+  type RoadmapPlanNode,
+  type RoadmapQuestionEscalation,
+} from './roadmapShared';
+
+export {
+  isValidIssueNumber,
+  ROADMAP_QUESTION_ESCALATIONS,
+  type RoadmapPlan,
+  type RoadmapPlanNode,
+  type RoadmapQuestionEscalation,
+};
+
 /** Issueセッションの実行エンジン。runの開始時に1つ選び、全Issueで共通にする。 */
 export type RoadmapRunEngine = 'codex' | 'claude';
 
@@ -81,24 +97,6 @@ export interface IssueAttempt {
 }
 
 /**
- * Issueセッションが`ask_orchestrator`で尋ねた質問を、Reflexを通さずに人へ回す理由。
- * 1つでも付いた質問は、選択肢があってもユーザーの判断を待つ。
- */
-export const ROADMAP_QUESTION_ESCALATIONS = [
-  'scopeChange',
-  'requirementChange',
-  'publicInterface',
-  'destructiveOperation',
-  'securityAuth',
-  'largeDependency',
-  'outsideRepoWrite',
-  'secrets',
-  'release',
-  'specConflict',
-] as const;
-export type RoadmapQuestionEscalation = (typeof ROADMAP_QUESTION_ESCALATIONS)[number];
-
-/**
  * 質問の状態: Reflexが検討中 / ユーザー判断待ち / Reflexが回答した / ユーザーが回答した /
  * 実行回が終わって取り消した。
  */
@@ -164,28 +162,6 @@ export interface RoadmapIssueExecution {
   updatedAt: string;
 }
 
-/** 着手順（計画）の1ノード。波（`wave`）は表示のためだけに使う。 */
-export interface RoadmapPlanNode {
-  issueNumber: number;
-  dependsOn: readonly number[];
-  wave: number | undefined;
-}
-
-export interface RoadmapPlan {
-  /** 着手順の早い順。 */
-  nodes: readonly RoadmapPlanNode[];
-  /** ロードマップ本文の計画区画をそのまま使ったか、このrunで生成して書き戻したか。 */
-  source: 'existingSection' | 'generated';
-  /**
-   * 計画の出どころ（Issue #1555）。区画のハッシュが生成時のままなら`generated`、人が区画を
-   * 手で直していれば`manually_modified`。メタデータの無い区画では判定できず`undefined`。
-   * 後から足したため、永続化済みの古い状態では無い。
-   */
-  planOrigin?: RoadmapPlanOrigin | undefined;
-}
-
-export type RoadmapPlanOrigin = 'generated' | 'manually_modified';
-
 export const ROADMAP_RUN_SCHEMA_VERSION = 1;
 
 /** Controllerの実行（run）。1ロードマップにつき1つ。 */
@@ -244,10 +220,6 @@ export interface IssueReportRef {
 
 export type ReportRejection =
   'unknownIssue' | 'executionMismatch' | 'noActiveAttempt' | 'attemptMismatch';
-
-export function isValidIssueNumber(n: number): boolean {
-  return Number.isSafeInteger(n) && n > 0;
-}
 
 /** `RoadmapRun.issues`のキー。不正な番号は例外にする（キーへ任意の文字列を入れない）。 */
 export function issueKey(issueNumber: number): string {

@@ -20,7 +20,7 @@ import {
   type RoadmapChild,
 } from '../../src/orchestrator/roadmapImport';
 import { useCurrentPlanSection } from '../../src/orchestrator/roadmapPlanProposal';
-import type { RoadmapPlanNode } from '../../src/orchestrator/roadmapRunState';
+import type { RoadmapPlanNode } from '../../src/orchestrator/roadmapShared';
 
 const bodies = (entries: [number, string][]): Map<number, string> => new Map(entries);
 
