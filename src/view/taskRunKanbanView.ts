@@ -156,7 +156,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     const seq = ++this.postSeq;
     const lease = board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
     // 選択していないrunも、run一覧で別のウィンドウが持っていると分かるようにする（Issue #1641）。
-    // 終わったrunは専有権を取らないため読まない
+    // 終わったrunは専有権を取らないため読まない。読むのは未終了のrunの数だけの小さなファイルで、
+    // 未終了のrunは通常数件のため、`post`のたびに読み直す
     const others = board.runs.filter((r) => !r.finished && r.runId !== board.run?.runId);
     const statuses = await Promise.all(others.map((r) => this.deps.controller.leaseStatus(r.runId)));
     const heldElsewhere = others.filter((_, i) => statuses[i]?.heldByOther === true).map((r) => r.runId);
