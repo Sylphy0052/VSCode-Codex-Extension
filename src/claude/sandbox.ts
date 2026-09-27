@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import type { Logger } from '../log';
-import { killWithEscalation } from '../process/childProcess';
+import { killWithEscalation, type KillableProcess } from '../process/childProcess';
 
 /**
  * Claude CLIのsandbox（Issue #1541）。オーケストレータモードとロードマップ実行のセッションに限り、
@@ -22,6 +22,17 @@ export type ClaudeSandboxMode = 'read-only' | 'workspace-write';
  * sandbox内で接続に失敗する。ここに載ったコマンドはsandbox外で走り、従来どおり
  * `can_use_tool`で拡張機能の承認判定（mergeとリモートブランチの削除を人へ回す判定を含む）を
  * 通る。載せても自動で通るようにはならず、承認へ回る範囲が広がるだけなので、安全側の一覧になる。
+ *
+ * 一致の判定はCLIの内部実装（パターンをコマンド文字列全体に当てるのか、分解した各コマンドに
+ * 当てるのか）に依存する。`bash -c "gh pr merge 1"`のような合成コマンドは`gh *`に一致せず、
+ * sandbox内で走る可能性がある（Issue #1545）。その場合も`network.strictAllowlist`が接続を
+ * 拒否するため、mergeやリモートブランチの削除が承認を経ずに成功することはない（fail-closed）。
+ *
+ * CLIの版を上げたときは、sandbox付きのセッション（オーケストレータモード）で次を確かめる。
+ * 1. `bash -c "gh pr view <番号>"`と`sh -c "git push --dry-run origin HEAD"`を実行させる
+ * 2. どちらも承認の確認が届く（sandbox外へ回った）か、承認なしで接続に失敗して終わる
+ *    （sandbox内で拒否された）ことを確かめる。承認なしで接続に成功したら、sandboxの外へ
+ *    漏れているので、この一覧と`network`の設定を見直すまでその版を使わない
  */
 const EXCLUDED_COMMANDS: readonly string[] = [
   'gh *',
@@ -117,10 +128,34 @@ export interface ClaudeSandboxProbePorts {
   platform: NodeJS.Platform;
   /** コンテナ内で動いているか。 */
   inContainer: () => boolean;
-  /** bubblewrapを試し起動する。`withProc`が偽なら`/proc`をmountしない。 */
-  tryBwrap: (withProc: boolean) => Promise<SandboxCommandResult>;
+  /**
+   * bubblewrapを試し起動する。`withProc`が偽なら`/proc`をmountしない。
+   * `signal`が中止されたら、起動した子プロセスを止める（以下同じ）。
+   */
+  tryBwrap: (withProc: boolean, signal: AbortSignal) => Promise<SandboxCommandResult>;
   /** sandboxの設定を付けてCLIを空起動し、正常に終わるかを見る。 */
-  tryCli: (settingsJson: string) => Promise<SandboxCommandResult>;
+  tryCli: (settingsJson: string, signal: AbortSignal) => Promise<SandboxCommandResult>;
+}
+
+/** 確認を中止したときの理由。 */
+const ABORTED_REASON = '拡張機能の終了により確認を中止しました';
+
+/**
+ * `signal`の中止で子プロセスを止める（Issue #1545）。戻り値は購読を外す関数で、子プロセスが
+ * 終わったら呼ぶ。
+ */
+function stopOnAbort(proc: KillableProcess, signal: AbortSignal): () => void {
+  const stop = (): void => {
+    killWithEscalation(proc);
+  };
+  if (signal.aborted) {
+    stop();
+    return () => undefined;
+  }
+  signal.addEventListener('abort', stop, { once: true });
+  return () => {
+    signal.removeEventListener('abort', stop);
+  };
 }
 
 function truncateReason(text: string): string {
@@ -138,7 +173,7 @@ export function detectContainer(): boolean {
   );
 }
 
-function tryBwrap(withProc: boolean): Promise<SandboxCommandResult> {
+function tryBwrap(withProc: boolean, signal: AbortSignal): Promise<SandboxCommandResult> {
   // CLIが組むsandboxと同じく全ての名前空間を分ける。パッケージがあっても、seccompや
   // AppArmorの既定プロファイルで名前空間を作れない環境がある（#1541の実機確認）
   const args = [
@@ -153,15 +188,21 @@ function tryBwrap(withProc: boolean): Promise<SandboxCommandResult> {
     'true',
   ];
   return new Promise((resolve) => {
-    execFile('bwrap', args, { timeout: BWRAP_TIMEOUT_MS }, (error, _stdout, stderr) => {
+    const proc = execFile('bwrap', args, { timeout: BWRAP_TIMEOUT_MS }, (error, _stdout, stderr) => {
+      release();
       resolve(
         error === null ? { ok: true, detail: '' } : { ok: false, detail: stderr || error.message },
       );
     });
+    const release = stopOnAbort(proc, signal);
   });
 }
 
-function tryCli(claudePath: string, settingsJson: string): Promise<SandboxCommandResult> {
+function tryCli(
+  claudePath: string,
+  settingsJson: string,
+  signal: AbortSignal,
+): Promise<SandboxCommandResult> {
   // 入力を与えずに起動すると、sandboxの確認を済ませた後にAPIを呼ばず終了する。依存が
   // 足りなければ`failIfUnavailable`で非0終了する（CLI 2.1.280で実測）。`--bare`は利用者の
   // hookを走らせないため、`--no-session-persistence`はtranscriptを残さないため
@@ -182,12 +223,14 @@ function tryCli(claudePath: string, settingsJson: string): Promise<SandboxComman
     let settled = false;
     // 作業ディレクトリに依らない確認なので、拡張ホストのcwd（`/`になりうる）ではなく一時領域で起動する
     const proc = spawn(claudePath, args, { cwd: tmpdir(), stdio: ['ignore', 'ignore', 'pipe'] });
+    const release = stopOnAbort(proc, signal);
     const finish = (result: SandboxCommandResult): void => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
+      release();
       resolve(result);
     };
     const timer = setTimeout(() => {
@@ -219,7 +262,7 @@ export function nodeSandboxProbePorts(claudePath: () => string): ClaudeSandboxPr
     platform: process.platform,
     inContainer: detectContainer,
     tryBwrap,
-    tryCli: (settingsJson) => tryCli(claudePath(), settingsJson),
+    tryCli: (settingsJson, signal) => tryCli(claudePath(), settingsJson, signal),
   };
 }
 
@@ -234,21 +277,31 @@ export function nodeSandboxProbePorts(claudePath: () => string): ClaudeSandboxPr
  * 2.は「`failIfUnavailable`で起動に失敗したら、sandbox無しで起動し直す」を、セッションを
  * 起動する前に済ませる形にしたもの。起動後に失敗を拾って起動し直すと、最初の発言が
  * 失われたセッションの後始末が要る。
+ *
+ * `signal`が中止されたら、次の段の子プロセスを起動せずに打ち切る。
  */
 export async function probeClaudeSandbox(
   ports: ClaudeSandboxProbePorts,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<ClaudeSandboxAvailability> {
   if (ports.platform === 'win32') {
     return { ok: false, reason: 'Windowsではsandboxを使えません' };
   }
+  const aborted: ClaudeSandboxAvailability = { ok: false, reason: ABORTED_REASON };
   let weakerNested = false;
   if (ports.platform === 'linux') {
-    const full = await ports.tryBwrap(true);
+    if (signal.aborted) {
+      return aborted;
+    }
+    const full = await ports.tryBwrap(true, signal);
     if (!full.ok) {
+      if (signal.aborted) {
+        return aborted;
+      }
       if (!ports.inContainer()) {
         return { ok: false, reason: `bubblewrapを起動できません: ${truncateReason(full.detail)}` };
       }
-      const nested = await ports.tryBwrap(false);
+      const nested = await ports.tryBwrap(false, signal);
       if (!nested.ok) {
         return {
           ok: false,
@@ -263,7 +316,13 @@ export async function probeClaudeSandbox(
   // `read-only`だけが足す`filesystem.denyWrite`（絶対パス1つ）は、CLI 2.1.280で受理される
   // ことを実測済みで、ここで確かめなくても起動を妨げない
   const settings = JSON.stringify(buildClaudeSandboxSettings('workspace-write', '', environment));
-  const cli = await ports.tryCli(settings);
+  if (signal.aborted) {
+    return aborted;
+  }
+  const cli = await ports.tryCli(settings, signal);
+  if (signal.aborted) {
+    return aborted;
+  }
   if (!cli.ok) {
     return { ok: false, reason: `sandbox付きでclaudeを起動できません: ${truncateReason(cli.detail)}` };
   }
@@ -278,6 +337,7 @@ export async function probeClaudeSandbox(
 export class ClaudeSandboxProbe {
   private available: ClaudeSandboxEnvironment | undefined;
   private inflight: Promise<ClaudeSandboxAvailability> | undefined;
+  private readonly abort = new AbortController();
 
   constructor(
     private readonly ports: ClaudeSandboxProbePorts,
@@ -285,11 +345,14 @@ export class ClaudeSandboxProbe {
   ) {}
 
   async check(): Promise<ClaudeSandboxAvailability> {
+    if (this.abort.signal.aborted) {
+      return { ok: false, reason: ABORTED_REASON };
+    }
     if (this.available !== undefined) {
       return { ok: true, environment: this.available };
     }
     if (this.inflight === undefined) {
-      this.inflight = probeClaudeSandbox(this.ports)
+      this.inflight = probeClaudeSandbox(this.ports, this.abort.signal)
         .catch(
           (e: unknown): ClaudeSandboxAvailability => ({
             ok: false,
@@ -308,5 +371,13 @@ export class ClaudeSandboxProbe {
         });
     }
     return this.inflight;
+  }
+
+  /**
+   * 拡張機能の終了時に呼ぶ（Issue #1545）。進行中の確認の子プロセス（bubblewrapの試し起動、
+   * CLIの空起動）を止め、以後は確認を始めない。止めないと、各時間上限まで子プロセスが残りうる。
+   */
+  dispose(): void {
+    this.abort.abort();
   }
 }
