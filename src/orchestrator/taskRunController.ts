@@ -921,7 +921,7 @@ export class TaskRunController {
         return leased;
       }
       await this.updateRun(runId, (r) =>
-        isTaskRunActive(r) ? r : setTaskRunHaltedByUser(reopenTaskRun(r), false),
+        isTaskRunActive(r) ? r : setTaskRunHaltedByUser(reopenTaskRun(r, this.now()), false),
       );
       this.pumpLater(runId);
       return { ok: true, message: 'runを再開した' };

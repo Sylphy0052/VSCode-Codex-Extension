@@ -311,6 +311,12 @@ export interface TaskRun {
    * 同じフォルダで同じロードマップIssueを扱う終わっていないrunは1本までとする。
    */
   roadmap?: TaskRunRoadmap;
+  /**
+   * 終わったrunを再開した時刻（ISO8601、Issue #1626）。これより後に終わった工程が無い間は、全タスクが
+   * 完了していても自動では終えない（再開直後の再読み込みで終了へ戻さないため）。計画を出し直すと外す。
+   * 項目の無い保存データは再開していないと読む。
+   */
+  reopenedAt?: string;
 }
 
 /** runが対象にするロードマップIssue（Issue #1623）。 */
@@ -602,12 +608,15 @@ export function proposeTaskPlan(
               updatedAt: at,
             };
   }
-  return {
+  const next: TaskRun = {
     ...run,
     planStatus: 'awaitingApproval',
     taskOrder: drafts.map((d) => d.taskId),
     tasks,
   };
+  // 計画を出し直したら、再開したrunも通常どおり全タスクの完了で終える（Issue #1626）
+  delete next.reopenedAt;
+  return next;
 }
 
 /** 工程を1つでも始めた（飛ばした工程は数えない）。 */
@@ -1039,7 +1048,10 @@ export function setTaskRunHaltedByUser(run: TaskRun, halted: boolean): TaskRun {
   return run.haltedByUser === halted ? run : { ...run, haltedByUser: halted };
 }
 
-/** 承認済みの計画のタスクがすべて終わっていればrunを終える。 */
+/**
+ * 承認済みの計画のタスクがすべて終わっていればrunを終える。再開したrunは、再開より後に終わった工程が
+ * 無ければ終えない（Issue #1626）。
+ */
 export function finishTaskRunIfDone(run: TaskRun, now: Date): TaskRun {
   if (run.finishedAt !== undefined || run.planStatus !== 'approved') {
     return run;
@@ -1048,7 +1060,22 @@ export function finishTaskRunIfDone(run: TaskRun, now: Date): TaskRun {
   if (tasks.length === 0 || !tasks.every(isTaskDone)) {
     return run;
   }
-  return { ...run, finishedAt: now.toISOString() };
+  const { reopenedAt } = run;
+  if (reopenedAt !== undefined && !tasks.some((task) => hasStageCompletedSince(task, reopenedAt))) {
+    return run;
+  }
+  const next: TaskRun = { ...run, finishedAt: now.toISOString() };
+  delete next.reopenedAt;
+  return next;
+}
+
+/** `since`（ISO8601）以後に終わった工程がある。 */
+function hasStageCompletedSince(task: OrchestratedTask, since: string): boolean {
+  const sinceMs = Date.parse(since);
+  return TASK_STAGES.some((stage) => {
+    const { completedAt } = task.stages[stage];
+    return completedAt !== undefined && Date.parse(completedAt) >= sinceMs;
+  });
 }
 
 /** 人がrunを終える。実行中の工程セッションは呼び出し側が先に止める前提。 */
@@ -1078,13 +1105,16 @@ export function resumeTaskRun(run: TaskRun): TaskRun {
 
 /**
  * 終わったrunか中断中のrunを動作中へ戻す（Issue #1620）。`finishedAt`と中断をともに外す（中断中に
- * 終えたrunは両方を持つ）。一時停止は呼び出し側が解く。
+ * 終えたrunは両方を持つ）。終わったrunには再開した時刻を残す（Issue #1626）。一時停止は呼び出し側が解く。
  */
-export function reopenTaskRun(run: TaskRun): TaskRun {
+export function reopenTaskRun(run: TaskRun, now: Date): TaskRun {
   if (isTaskRunActive(run)) {
     return run;
   }
-  return { ...resumeTaskRun(run), finishedAt: undefined };
+  const resumed = resumeTaskRun(run);
+  return run.finishedAt === undefined
+    ? resumed
+    : { ...resumed, finishedAt: undefined, reopenedAt: now.toISOString() };
 }
 
 /** 表示名を1行へ均し、上限で切り詰める。空白だけなら`undefined`（名前なし）。 */
