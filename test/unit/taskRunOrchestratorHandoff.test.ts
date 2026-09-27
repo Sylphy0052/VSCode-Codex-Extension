@@ -117,6 +117,9 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       answerQuestion: vi.fn(),
       findOpenGateForUser: vi.fn(),
       resolveGate: vi.fn(),
+      listInFolder: vi.fn(() => []),
+      reopenRun: vi.fn(),
+      startRun: vi.fn(),
     },
     server: {
       registerTools: vi.fn(async () => {
@@ -128,6 +131,7 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
     readBaseline: () => LOOSE_BASELINE,
     confirmAnswer: vi.fn(async () => true),
     confirmGateResolution: vi.fn(async () => true),
+    showKanban: vi.fn(),
     onDidChange: vi.fn(),
     log: vi.fn(),
   };

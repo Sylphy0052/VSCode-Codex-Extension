@@ -869,6 +869,17 @@ export function resumeTaskRun(run: TaskRun): TaskRun {
   return next;
 }
 
+/**
+ * 終わったrunか中断中のrunを動作中へ戻す（Issue #1620）。`finishedAt`と中断をともに外す（中断中に
+ * 終えたrunは両方を持つ）。一時停止は呼び出し側が解く。
+ */
+export function reopenTaskRun(run: TaskRun): TaskRun {
+  if (isTaskRunActive(run)) {
+    return run;
+  }
+  return { ...resumeTaskRun(run), finishedAt: undefined };
+}
+
 /** 表示名を1行へ均し、上限で切り詰める。空白だけなら`undefined`（名前なし）。 */
 export function normalizeTaskRunTitle(title: string | undefined): string | undefined {
   const trimmed = sanitizeInlineText(title ?? '', TASK_RUN_TITLE_MAX_LENGTH).trim();
