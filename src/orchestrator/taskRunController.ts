@@ -30,6 +30,7 @@ import {
   MAX_TASK_RUN_PARALLEL,
   proposeTaskPlan,
   recordStageDecision,
+  reopenTaskRun,
   resetStageForRetry,
   resumeTaskRun,
   setTaskPlanReview,
@@ -515,6 +516,11 @@ export class TaskRunController {
     return this.deps.store.listActive(workspaceRoot);
   }
 
+  /** 同じフォルダのrun（中断中・終了を含む。保存の上限で消えたrunは含まない）。 */
+  listInFolder(workspaceRoot: string): TaskRun[] {
+    return this.deps.store.list().filter((r) => r.workspaceRoot === workspaceRoot);
+  }
+
   /**
    * 人がrunを終える（Issue #1558）。先に一時停止して新しい工程を始めないようにし、動いている
    * 工程セッションを止めてから`finishedAt`を立てる。Orchestratorのセッションは呼び出し側が閉じる。
@@ -582,6 +588,30 @@ export class TaskRunController {
       }
       await this.updateRun(runId, (r) =>
         r.finishedAt === undefined ? setTaskRunHaltedByUser(resumeTaskRun(r), false) : r,
+      );
+      this.pumpLater(runId);
+      return { ok: true, message: 'runを再開した' };
+    });
+  }
+
+  /**
+   * 終わったrunか中断中のrunを、同じフォルダの動いているrunと並行して再び動かす（Issue #1620）。
+   * `finishedAt`と中断を外して一時停止を解く。終了・中断で止めた工程は自動では始めず、
+   * 「やり直す」かOrchestratorの判断で動かす。`finishRun`はworktreeとブランチを片付けないため、
+   * 工程はそのまま続けられる。Orchestratorは呼び出し側が開く。
+   */
+  reopenRun(runId: string): Promise<ControllerResult> {
+    // `startRun`・`resumeRun`と同じキューに通す
+    return this.startQueue.enqueue(async (): Promise<ControllerResult> => {
+      const run = this.deps.store.find(runId);
+      if (run === undefined) {
+        return { ok: false, message: 'runが見つからない' };
+      }
+      if (isTaskRunActive(run)) {
+        return { ok: false, message: 'runは動いている' };
+      }
+      await this.updateRun(runId, (r) =>
+        isTaskRunActive(r) ? r : setTaskRunHaltedByUser(reopenTaskRun(r), false),
       );
       this.pumpLater(runId);
       return { ok: true, message: 'runを再開した' };
