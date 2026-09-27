@@ -331,17 +331,33 @@ export function describeRoadmapOrchestratorCall(name: string, raw: unknown): str
  * 1行へ均した記録の一覧ごと`formatUntrusted`で囲む。
  */
 export function formatRoadmapRunEvents(page: RoadmapRunEventsPage, after: number | undefined): string {
+  const notes: string[] = [];
+  if (page.afterUnknown && after !== undefined) {
+    notes.push(
+      `イベント#${String(after)}はこのrunの記録にありません（記録が失われた可能性があります）。残っている記録を古い順に返します`,
+    );
+  }
+  if (page.unrecorded > 0) {
+    notes.push(
+      `保存に失敗して記録できなかった出来事が${String(page.unrecorded)}件あります（通知には届いています）。状態はget_run_stateで確かめてください`,
+    );
+  }
   if (page.latestSeq === undefined) {
-    return 'まだ記録はありません';
+    return [...notes, 'まだ記録はありません'].join('\n');
   }
   const header = [
+    ...notes,
     after === undefined
       ? `最新の記録${String(page.events.length)}件（最後の番号: イベント#${String(page.latestSeq)}）`
-      : `イベント#${String(after)}より後の記録${String(page.events.length)}件（最後の番号: イベント#${String(page.latestSeq)}）`,
+      : page.afterUnknown
+        ? `残っている記録${String(page.events.length)}件（最後の番号: イベント#${String(page.latestSeq)}）`
+        : `イベント#${String(after)}より後の記録${String(page.events.length)}件（最後の番号: イベント#${String(page.latestSeq)}）`,
   ];
   if (page.missed > 0) {
     header.push(
-      `1runあたり${String(MAX_ROADMAP_RUN_EVENTS)}件の上限を超えたため、この範囲のうち古い${String(page.missed)}件は残っていません`,
+      after === undefined || page.afterUnknown
+        ? `1runあたり${String(MAX_ROADMAP_RUN_EVENTS)}件の上限を超えたため、このrunの古い${String(page.missed)}件は残っていません`
+        : `1runあたり${String(MAX_ROADMAP_RUN_EVENTS)}件の上限を超えたため、この範囲のうち古い${String(page.missed)}件は残っていません`,
     );
   }
   const lines = page.events.map(

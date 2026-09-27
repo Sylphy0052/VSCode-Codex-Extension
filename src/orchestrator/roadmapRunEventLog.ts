@@ -102,31 +102,71 @@ export interface RoadmapRunEventsPage {
   events: RoadmapRunEventRecord[];
   /** 記録した最後の番号。まだ1件も無ければ`undefined`。 */
   latestSeq: number | undefined;
-  /** `after`より後で、上限のため既に落として返せない件数。 */
+  /**
+   * `after`より後で、上限のため既に落として返せない件数。`after`を省いたときはrun全体で落とした件数。
+   */
   missed: number;
   /** この後にまだ記録がある（`after`に最後の番号を渡して続きを取る）。 */
   hasMore: boolean;
+  /**
+   * `after`が記録した最後の番号より先を指していた。保存データが壊れて作り直された等でログが
+   * 失われたときに起きるため、残っている記録を古い順に返す。
+   */
+  afterUnknown: boolean;
+  /** 保存に失敗して記録できなかった件数（このウィンドウで数えた分。Orchestratorへの通知は届いている）。 */
+  unrecorded: number;
 }
 
 /**
  * `after`より後の記録を古い順に`limit`件まで返す。`after`を省くと最新の`limit`件を返す。
+ * `unrecorded`は数えていないため0で返す（呼び出し側で入れる）。
  */
 export function selectRoadmapRunEvents(
   log: RoadmapRunEventLog | undefined,
   after: number | undefined,
   limit: number = ROADMAP_RUN_EVENTS_PAGE_SIZE,
 ): RoadmapRunEventsPage {
+  const empty = { afterUnknown: false, unrecorded: 0 };
   if (log === undefined) {
-    return { events: [], latestSeq: undefined, missed: 0, hasMore: false };
+    return {
+      ...empty,
+      events: [],
+      latestSeq: undefined,
+      missed: 0,
+      hasMore: false,
+      afterUnknown: after !== undefined && after > 0,
+    };
   }
   const latestSeq = log.nextSeq > 1 ? log.nextSeq - 1 : undefined;
   if (after === undefined) {
-    return { events: log.events.slice(-limit), latestSeq, missed: 0, hasMore: false };
+    return {
+      ...empty,
+      events: log.events.slice(-limit),
+      latestSeq,
+      missed: log.dropped,
+      hasMore: false,
+    };
+  }
+  if (after >= log.nextSeq) {
+    return {
+      ...empty,
+      events: log.events.slice(0, limit),
+      latestSeq,
+      missed: log.dropped,
+      hasMore: log.events.length > limit,
+      afterUnknown: true,
+    };
   }
   const newer = log.events.filter((e) => e.seq > after);
   const oldestKept = log.events[0]?.seq ?? log.nextSeq;
   const missed = Math.max(0, Math.min(oldestKept, log.nextSeq) - after - 1);
-  return { events: newer.slice(0, limit), latestSeq, missed, hasMore: newer.length > limit };
+  return {
+    ...empty,
+    events: newer.slice(0, limit),
+    latestSeq,
+    missed,
+    hasMore: newer.length > limit,
+  };
 }
 
 function isStoredEventRecord(e: unknown): e is RoadmapRunEventRecord {

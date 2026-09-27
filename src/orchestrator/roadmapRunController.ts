@@ -141,6 +141,8 @@ export class RoadmapRunController {
   /** 最後に見たrunの状態。差分から「実行可能になった」「終了した」を出す。 */
   private readonly lastSeen = new Map<string, RoadmapRun>();
   private readonly events = new Map<string, RoadmapKanbanEvent[]>();
+  /** イベントログの保存に失敗して記録できなかった件数（run単位）。`get_run_events`で知らせる。 */
+  private readonly unrecordedEvents = new Map<string, number>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpAgain = new Set<string>();
   /** 通知済みの待ち（runId → blockersの並び）。同じ待ちで通知を繰り返さない。 */
@@ -645,7 +647,10 @@ export class RoadmapRunController {
 
   /** `after`より後のイベントログ（`get_run_events`）。 */
   runEvents(runId: string, after: number | undefined): RoadmapRunEventsPage {
-    return selectRoadmapRunEvents(this.deps.eventLog?.find(runId), after);
+    return {
+      ...selectRoadmapRunEvents(this.deps.eventLog?.find(runId), after),
+      unrecorded: this.unrecordedEvents.get(runId) ?? 0,
+    };
   }
 
   /**
@@ -665,6 +670,7 @@ export class RoadmapRunController {
     try {
       return await log.append({ runId, startedAt }, inputs, now);
     } catch (e: unknown) {
+      this.unrecordedEvents.set(runId, (this.unrecordedEvents.get(runId) ?? 0) + inputs.length);
       this.deps.log(`[roadmap run] ${runId}のイベントログを保存できませんでした: ${String(e)}`);
       return [];
     }
