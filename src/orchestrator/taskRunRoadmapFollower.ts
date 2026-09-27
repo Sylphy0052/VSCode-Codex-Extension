@@ -49,11 +49,6 @@ export interface TaskRunRoadmapFollowerDeps {
 
 export class TaskRunRoadmapFollower {
   private readonly queue = new SerialQueue();
-  /**
-   * runごとの、mergeを見届けたIssue番号。読み直しで「close」として届けないため。工程の状態は
-   * 後片付けの結果次第で`done`にならないことがあるため、状態からではなくここで覚える。
-   */
-  private readonly merged = new Map<string, Set<number>>();
 
   constructor(private readonly deps: TaskRunRoadmapFollowerDeps) {}
 
@@ -64,16 +59,24 @@ export class TaskRunRoadmapFollower {
 
   /** タスクのmergeと後片付けが済んだ。該当行を`[x]`にしてから読み直す。 */
   handleTaskMerged(runId: string, taskId: string): void {
-    void this.queue.enqueue(async () => {
+    this.enqueueInBackground(runId, async () => {
       const run = this.deps.find(runId);
       const task = run === undefined ? undefined : getTask(run, taskId);
       const issueNumber = task === undefined ? undefined : taskIssueNumber(task);
       if (run?.roadmap === undefined || issueNumber === undefined) {
         return;
       }
-      const merged = this.merged.get(runId) ?? new Set<number>();
-      merged.add(issueNumber);
-      this.merged.set(runId, merged);
+      await this.deps.updateRun(runId, (r) =>
+        r.roadmap === undefined || r.roadmap.mergedIssueNumbers?.includes(issueNumber) === true
+          ? r
+          : {
+              ...r,
+              roadmap: {
+                ...r.roadmap,
+                mergedIssueNumbers: [...(r.roadmap.mergedIssueNumbers ?? []), issueNumber],
+              },
+            },
+      );
       const edited = await this.deps.port.edit(run.workspaceRoot, run.roadmap.issueNumber, (body) => {
         const update = checkIssueChecklistItems(body, [issueNumber]);
         return update.checked.length > 0 ? update.body : undefined;
@@ -106,14 +109,14 @@ export class TaskRunRoadmapFollower {
       ) {
         const issueNumber = task.issueNumber;
         const title = task.issueDraft?.title ?? task.title;
-        void this.queue.enqueue(() => this.appendChild(next.runId, issueNumber, title));
+        this.enqueueInBackground(next.runId, () => this.appendChild(next.runId, issueNumber, title));
       }
     }
     if (
       next.planStatus === 'approved' &&
       (prev.planStatus !== 'approved' || planKey(prev) !== planKey(next))
     ) {
-      void this.queue.enqueue(() => this.writePlan(next.runId));
+      this.enqueueInBackground(next.runId, () => this.writePlan(next.runId));
     }
   }
 
@@ -136,6 +139,7 @@ export class TaskRunRoadmapFollower {
     const warnings: string[] = [];
     let planNodes: TaskRunRoadmapSnapshot['plan'];
     let planSectionHash: string | undefined;
+    let planErrors: string | undefined;
     switch (read.plan.kind) {
       case 'absent':
         break;
@@ -147,20 +151,27 @@ export class TaskRunRoadmapFollower {
         // 読めない区画で計画の差分を作らない。人が直すまで前回の区画を基準にする
         planNodes = before.plan;
         planSectionHash = before.planSectionHash;
-        warnings.push(`ロードマップの計画区画を読めません: ${read.plan.errors.join(' / ')}`);
+        planErrors = read.plan.errors.join(' / ');
+        // 前回と同じ理由なら警告し直さない（差分が無ければ知らせない）
+        if (planErrors !== before.planErrors) {
+          warnings.push(`ロードマップの計画区画を読めません: ${planErrors}`);
+        }
         break;
     }
-    const after = buildRoadmapSnapshot({
-      children: read.children,
-      planNodes: planNodes?.map((n) => ({ ...n, wave: undefined })),
-      planSectionHash,
-      closedIssueNumbers,
-      now: this.deps.now(),
-    });
+    const after: TaskRunRoadmapSnapshot = {
+      ...buildRoadmapSnapshot({
+        children: read.children,
+        planNodes: planNodes?.map((n) => ({ ...n, wave: undefined })),
+        planSectionHash,
+        closedIssueNumbers,
+        now: this.deps.now(),
+      }),
+      ...(planErrors === undefined ? {} : { planErrors }),
+    };
     const drafts = diffRoadmapSnapshots(
       before,
       after,
-      ownRoadmapChanges(run, this.merged.get(runId) ?? new Set()),
+      ownRoadmapChanges(run),
     );
     const snapshotChanged = snapshotKey(before) !== snapshotKey(after);
     if (snapshotChanged || drafts.length > 0 || warnings.length > 0) {
@@ -251,6 +262,16 @@ export class TaskRunRoadmapFollower {
     }
   }
 
+  /** 呼び出し元が待たない処理を積む。失敗は呼び出し元へ届かないため、ここでログと警告に残す。 */
+  private enqueueInBackground(runId: string, job: () => Promise<unknown>): void {
+    void this.queue.enqueue(job).catch(async (error: unknown) => {
+      const message = `ロードマップの追従に失敗しました: ${error instanceof Error ? error.message : String(error)}`;
+      await this.warn(runId, message).catch(() => {
+        this.deps.log(`[task run] ${runId}: ${message}`);
+      });
+    });
+  }
+
   private async warn(runId: string, message: string): Promise<void> {
     this.deps.log(`[task run] ${runId}: ${message}`);
     await this.deps.updateRun(runId, (r) =>
@@ -267,7 +288,9 @@ export async function findClosedRoadmapChildren(
   children: readonly RoadmapChild[],
 ): Promise<ReadonlySet<number>> {
   const open = children.filter((c) => !c.checked).map((c) => c.issueNumber);
-  const states = await Promise.all(open.map((n) => fetchIssueState(n)));
+  const states = await Promise.all(
+    open.map((n) => fetchIssueState(n).catch((): IssueState => 'unknown')),
+  );
   return new Set(open.filter((_, i) => states[i] === 'closed'));
 }
 
@@ -297,10 +320,7 @@ export function withRoadmapNotices(
   };
 }
 
-function ownRoadmapChanges(
-  run: TaskRun,
-  merged: ReadonlySet<number>,
-): {
+function ownRoadmapChanges(run: TaskRun): {
   taskIssueNumbers: ReadonlySet<number>;
   mergedIssueNumbers: ReadonlySet<number>;
 } {
@@ -312,7 +332,7 @@ function ownRoadmapChanges(
   return {
     taskIssueNumbers: numbered(tasks),
     mergedIssueNumbers: new Set([
-      ...merged,
+      ...(run.roadmap?.mergedIssueNumbers ?? []),
       ...numbered(
         tasks.filter((t) => t.completedInRoadmap !== true && t.stages.mergeCleanup.status === 'done'),
       ),

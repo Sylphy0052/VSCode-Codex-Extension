@@ -298,6 +298,12 @@ export interface TaskRunRoadmap {
    * Orchestratorへイベントとして届け、Kanbanに出す。
    */
   notices?: readonly TaskRunRoadmapNotice[];
+  /**
+   * mergeを見届けた子Issueの番号。読み直しで「close」として届けないため。工程の状態は後片付けの
+   * 結果次第で`done`にならないことがあるため、状態からではなくここで覚える。拡張を再読み込みしても
+   * 忘れないようrunと一緒に保存する。
+   */
+  mergedIssueNumbers?: readonly number[];
 }
 
 /** ロードマップの読み直し・書き戻しの記録を残す上限。古いものから捨てる。 */
@@ -326,6 +332,11 @@ export interface TaskRunRoadmapSnapshot {
    * 計画を書き戻すとき、読み直した区画がこれと違えば人が手で直したとみなして上書きしない。
    */
   planSectionHash?: string | undefined;
+  /**
+   * 計画区画を読めなかった理由。読めていれば`undefined`。同じ理由の警告を読み直すたびに
+   * 出さないために覚える。
+   */
+  planErrors?: string | undefined;
   /** ISO8601。 */
   readAt: string;
 }
