@@ -31,13 +31,17 @@ import {
 } from './runScheduling';
 import { findOpenGate } from './taskRunGates';
 
-/** 工程セッションが動いている（停止処理中を含む）。並列上限の対象。 */
+/**
+ * 工程セッションが動いている（停止処理中と、一時停止を受け付けてターンの終わりを待っている間を
+ * 含む）。並列上限の対象。一時停止で閉じた・再開待ちの工程は枠を使わない（Issue #1629）。
+ */
 export function hasActiveStageSession(task: OrchestratedTask): boolean {
   const stage = currentStage(task);
   return (
     stage !== undefined &&
     task.stages[stage].status === 'running' &&
-    task.currentAttemptId !== undefined
+    task.currentAttemptId !== undefined &&
+    (task.pause === undefined || task.pause.phase === 'requested')
   );
 }
 
@@ -113,6 +117,25 @@ export function listQueuedStages(run: TaskRun): StageRef[] {
 }
 
 /**
+ * `resume_stage`を受け付け、並列枠の空きを待っている一時停止中の工程（Issue #1629）。run全体の
+ * 停止中は再開しない。
+ */
+export function listResumingStages(run: TaskRun): StageRef[] {
+  if (!isRunAccepting(run)) {
+    return [];
+  }
+  return listTasks(run).flatMap((task) => {
+    const stage = currentStage(task);
+    return stage !== undefined &&
+      task.stages[stage].status === 'running' &&
+      task.pause?.phase === 'resuming' &&
+      task.attention === 'none'
+      ? [{ taskId: task.taskId, stage }]
+      : [];
+  });
+}
+
+/**
  * 今始める工程。並列上限から動いているセッション数を引いた空き枠の分だけ、設定を受け付けた
  * 工程を着手順に返す。
  *
@@ -129,7 +152,8 @@ export function pickStagesToStart(
   isMergeKeyBusy: boolean,
   folderSlots = Number.POSITIVE_INFINITY,
 ): StageRef[] {
-  const queued = listQueuedStages(run);
+  // 再開待ちの工程は、新しく始める工程より先に枠を渡す（途中まで進んだ作業を先に片付ける）
+  const queued = [...listResumingStages(run), ...listQueuedStages(run)];
   const firstMerge = isMergeKeyBusy
     ? undefined
     : queued.find((ref) => ref.stage === 'mergeCleanup' && !startingTaskIds.has(ref.taskId));
@@ -156,6 +180,7 @@ export type StartStageRejection =
   | 'taskDone'
   | 'notCurrentStage'
   | 'alreadyRunning'
+  | 'paused'
   | 'halted'
   | 'gatePending'
   | 'dependenciesUnmet';
@@ -199,6 +224,9 @@ export function decideStageStart(
     return reject('notCurrentStage');
   }
   const status = task.stages[stage].status;
+  if (task.pause !== undefined) {
+    return reject('paused');
+  }
   if (status === 'running') {
     return reject('alreadyRunning');
   }
@@ -228,6 +256,10 @@ function isProgressingWithoutUser(run: TaskRun, task: OrchestratedTask): boolean
   }
   if (hasActiveStageSession(task)) {
     return task.attention === 'none' || task.attention === 'stopping';
+  }
+  // 一時停止中の工程はOrchestratorの`resume_stage`で進む（人の対応は要らない。Issue #1629）
+  if (task.pause !== undefined) {
+    return task.attention === 'none';
   }
   return !run.haltedByUser && isStageStartable(run, task);
 }

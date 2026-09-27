@@ -479,3 +479,40 @@ function collectTree(
   }
   return queue;
 }
+
+/** 一時停止で子孫プロセスへSIGTERMを送ってから、残っていればSIGKILLを送るまでの猶予。 */
+const DESCENDANT_KILL_GRACE_MS = 3000;
+
+/**
+ * 根のプロセスの子孫を終わらせる（工程の一時停止。Issue #1629）。根そのものは呼び出し側が
+ * 止める。根を止めると子孫は親を失って`init`の子になり、ツリーからたどれなくなるため、
+ * 根より先に呼ぶ。SIGTERMを送り、猶予の後も残っていればSIGKILLを送る。
+ *
+ * Windowsは`taskkill /T /F`で根ごと止める（シグナルの段階は無い）。
+ */
+export async function terminateDescendants(
+  rootPid: number,
+  ports: ResourceSamplerPorts = defaultResourceSamplerPorts(),
+): Promise<void> {
+  if (ports.platform === 'win32') {
+    await ports.execFile('taskkill', ['/PID', String(rootPid), '/T', '/F']);
+    return;
+  }
+  const pids = await new ResourceSampler(ports).listDescendantPids(rootPid);
+  const signal = (sig: NodeJS.Signals): void => {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, sig);
+      } catch {
+        // 既に終わった
+      }
+    }
+  };
+  signal('SIGTERM');
+  if (pids.length === 0) {
+    return;
+  }
+  const timer = setTimeout(() => signal('SIGKILL'), DESCENDANT_KILL_GRACE_MS);
+  // このタイマーだけで拡張機能ホストの終了を止めない
+  timer.unref();
+}

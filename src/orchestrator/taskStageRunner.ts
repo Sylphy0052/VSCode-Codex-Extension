@@ -29,15 +29,20 @@ import type { RunNotesStore } from './runNotes';
 import { SerialQueue } from './serialQueue';
 import {
   checkStageReport,
+  clearStagePause,
   completeStage,
   finishTaskRunIfDone,
   getTask,
   haltStage,
   isTaskRunActive,
+  markStagePaused,
+  MAX_PAUSE_REASON_LENGTH,
   markStageStopping,
   type OrchestratedTask,
   recordAttemptSession,
   recordTaskWorktree,
+  requestStagePause,
+  requestStageResume,
   type StageDecision,
   type StageOutput,
   type StageQuestion,
@@ -71,6 +76,7 @@ import {
   countActiveStageSessions,
   hasActiveStageSession,
   listQueuedStages,
+  listResumingStages,
   pickStagesToStart,
   type StageRef,
 } from './taskRunScheduler';
@@ -182,6 +188,11 @@ export interface TaskStageRunnerDeps {
   runNotes?: Pick<RunNotesStore, 'recordRemaining'>;
 }
 
+/** `pauseStage`の結果。受け付けなかったときは理由を返す。 */
+export type PauseStageOutcome =
+  | { ok: true; waitingForTurn: boolean }
+  | { ok: false; reason: 'noSession' | 'mergeCleanup' | 'finishing' | 'alreadyPaused' };
+
 /** 動いている工程セッションのプロセス（`listStageProcesses`）。 */
 export interface StageProcess {
   runId: string;
@@ -212,6 +223,10 @@ interface LiveStageSession {
   closed: boolean;
   /** 次に送る指示の頭へ1回だけ付ける文（タブから送られた指示）。 */
   pendingPrefix: string | undefined;
+  /** 一時停止を受け付けた（Issue #1629）。ターンが終わったらセッションを閉じる。 */
+  pausing: boolean;
+  /** ターンの途中か。`runLoop`で指示を送った直後から立て、状態の通知で更新する。 */
+  busy: boolean;
 }
 
 /**
@@ -513,12 +528,15 @@ export class TaskStageRunner {
   ): Promise<boolean> {
     const { taskId, stage } = target;
     let run = this.deps.store.find(runId);
+    const matches = (ref: StageRef): boolean => ref.taskId === taskId && ref.stage === stage;
+    if (this.disposed || run === undefined) {
+      return false;
+    }
+    if (listResumingStages(run).some(matches)) {
+      return this.reopenPausedStage(run, target);
+    }
     // 鍵やロックを待つ間に人が止めた・設定が取り消された工程は始めない
-    if (
-      this.disposed ||
-      run === undefined ||
-      !listQueuedStages(run).some((ref) => ref.taskId === taskId && ref.stage === stage)
-    ) {
+    if (!listQueuedStages(run).some(matches)) {
       return false;
     }
     let cwd = run.workspaceRoot;
@@ -575,13 +593,91 @@ export class TaskStageRunner {
     await this.mutate(runId, (r) =>
       recordAttemptSession(r, ref, entry.session.sessionId, this.now()),
     );
-    entry.session.runLoop(
+    this.runLoop(
+      entry,
       this.buildLoopPlan(
         ref,
         buildStagePrompt({ task, ref, instruction: decision.instruction, cwd }, this.newId()),
       ),
     );
     return true;
+  }
+
+  /**
+   * 一時停止した工程を、同じ実行回・同じ会話（`sessionRef`）で開き直して続きを送る（Issue #1629）。
+   * 帳簿へ載せたら`true`。開けなければ工程を止めて関門を開く。
+   */
+  private async reopenPausedStage(run: TaskRun, target: StageRef): Promise<boolean> {
+    const { runId } = run;
+    const { taskId, stage } = target;
+    const task = getTask(run, taskId);
+    const attempt = task?.stages[stage].attempts.find((a) => a.attemptId === task.currentAttemptId);
+    if (task === undefined || attempt === undefined) {
+      return false;
+    }
+    const cwd = WORKTREE_STAGES.has(stage) ? task.worktreePath : run.workspaceRoot;
+    if (attempt.sessionRef === undefined || cwd === undefined) {
+      await this.haltAndOpenGate(
+        runId,
+        taskId,
+        'failed',
+        `${STAGE_LABELS[stage]}を再開できませんでした: 一時停止した会話か作業ディレクトリの記録が無い`,
+      );
+      return false;
+    }
+    const ref: StageReportRef = {
+      taskId,
+      executionId: task.executionId,
+      stage,
+      attemptId: attempt.attemptId,
+    };
+    let entry: LiveStageSession;
+    try {
+      entry = await this.openStageSession(
+        run,
+        ref,
+        cwd,
+        attempt.decision,
+        undefined,
+        attempt.sessionRef,
+      );
+    } catch (e) {
+      await this.haltAndOpenGate(
+        runId,
+        taskId,
+        'failed',
+        `${STAGE_LABELS[stage]}のセッションを再開できませんでした: ${errorMessage(e)}`,
+      );
+      return false;
+    }
+    // 開くのを待つ間に拡張機能が終了した・人が止めた・runが止まったなら続きを送らない
+    const reopened = this.disposed
+      ? undefined
+      : await this.mutate(runId, (r) =>
+          listResumingStages(r).some((s) => s.taskId === taskId && s.stage === stage)
+            ? clearStagePause(r, taskId, this.now())
+            : r,
+        );
+    const current = reopened === undefined ? undefined : getTask(reopened, taskId);
+    if (current?.pause !== undefined || current?.currentAttemptId !== attempt.attemptId) {
+      this.release(entry, { dispose: true });
+      return false;
+    }
+    this.live.set(liveKey(runId, taskId), entry);
+    this.runLoop(
+      entry,
+      this.buildLoopPlan(
+        ref,
+        `一時停止していた工程を再開した。一時停止する前の続きから進める。${stageScopeReminder(ref)}`,
+      ),
+    );
+    return true;
+  }
+
+  /** 工程セッションのループを始める。指示を送った直後からターンの途中として扱う。 */
+  private runLoop(entry: LiveStageSession, plan: LoopPlan): void {
+    entry.busy = true;
+    entry.session.runLoop(plan);
   }
 
   /**
@@ -676,11 +772,15 @@ export class TaskStageRunner {
     cwd: string,
     decision: StageDecision,
     lease: MergeKeyLease | undefined,
+    resumeSessionId?: string,
   ): Promise<LiveStageSession> {
     const { config, sandbox } = this.configFor(run.engine, decision);
     const channel = await this.openChannel(run.runId, ref);
     const generation = 1;
-    const input = this.sessionInput(ref, cwd, config, sandbox, generation, channel);
+    const input = {
+      ...this.sessionInput(ref, cwd, config, sandbox, generation, channel),
+      ...(resumeSessionId === undefined ? {} : { resume: { sessionId: resumeSessionId } }),
+    };
     let session: TaskSession;
     try {
       session = await this.deps.hosts[run.engine].openTaskSession(input);
@@ -700,6 +800,8 @@ export class TaskStageRunner {
       stopping: false,
       closed: false,
       pendingPrefix: undefined,
+      pausing: false,
+      busy: false,
     };
     channel.binding.entry = entry;
     channel.binding.session = session;
@@ -802,9 +904,15 @@ export class TaskStageRunner {
   }
 
   private onStateChanged(entry: LiveStageSession, state: ChatState): void {
+    entry.busy = state.busy;
     // 報告を受け付けたターンが終わったら、セッションを閉じて後片付けする
     if (entry.reported && !entry.closed && !state.busy) {
       void this.settle(entry, entry.session);
+      return;
+    }
+    // 一時停止を受け付けたターンが終わったら、セッションを閉じて保留する（Issue #1629）
+    if (entry.pausing && !entry.closed && !state.busy) {
+      void this.finishPause(entry, entry.session);
     }
   }
 
@@ -941,6 +1049,7 @@ export class TaskStageRunner {
         entry.session !== previous ||
         entry.reported ||
         entry.stopping ||
+        entry.pausing ||
         entry.closed ||
         this.live.get(key) !== entry
       ) {
@@ -1025,7 +1134,7 @@ export class TaskStageRunner {
     channel.binding.entry = entry;
     channel.binding.session = session;
     this.attach(entry, session);
-    session.runLoop(this.buildLoopPlan(ref, buildStageHandoffPrompt(ref, request.prompt)));
+    this.runLoop(entry, this.buildLoopPlan(ref, buildStageHandoffPrompt(ref, request.prompt)));
     return true;
   }
 
@@ -1034,6 +1143,11 @@ export class TaskStageRunner {
     session: TaskSession,
     reason: LoopStopReason,
   ): Promise<void> {
+    // 一時停止を受け付けた後にループが終わった（回数の上限など）。一時停止として閉じる
+    if (entry.pausing && !entry.reported && !entry.stopping) {
+      await this.finishPause(entry, session);
+      return;
+    }
     if (!entry.reported && !entry.stopping) {
       // 報告なしにループが終わった。人の対応を待つ（タブは残して経緯を見られるようにする）
       await this.withTaskLock(liveKey(entry.runId, entry.ref.taskId), async () => {
@@ -1470,6 +1584,110 @@ export class TaskStageRunner {
       await this.pumpFolder(runId);
     }
     return stopped;
+  }
+
+  /**
+   * 工程を一時停止する（Issue #1629）。進行中のターンには割り込まず、ターンが終わったところで
+   * 次の指示を送らずにセッションを閉じる（`finishPause`）。実行回と会話は残し、`resumeStage`で
+   * 同じ会話を開き直す。「mergeとcleanup」はmergeの鍵を持ったまま止められないため受け付けない。
+   */
+  pauseStage(runId: string, taskId: string, reason: string): Promise<PauseStageOutcome> {
+    const key = liveKey(runId, taskId);
+    return this.withTaskLock(key, async (): Promise<PauseStageOutcome> => {
+      const run = this.deps.store.find(runId);
+      const task = run === undefined ? undefined : getTask(run, taskId);
+      if (task?.pause !== undefined) {
+        return { ok: false, reason: 'alreadyPaused' };
+      }
+      const entry = this.live.get(key);
+      if (entry === undefined || entry.closed) {
+        return { ok: false, reason: 'noSession' };
+      }
+      if (entry.ref.stage === 'mergeCleanup') {
+        return { ok: false, reason: 'mergeCleanup' };
+      }
+      if (entry.reported || entry.stopping || entry.pausing) {
+        return { ok: false, reason: 'finishing' };
+      }
+      // 理由はOrchestrator（LLM）の出力。制御文字を落として1行・上限までにしてから残す
+      const text = sanitizeInlineText(reason.replace(/\s+/g, ' ').trim(), MAX_PAUSE_REASON_LENGTH);
+      const next = await this.mutate(runId, (r) => requestStagePause(r, taskId, text, this.now()));
+      if (next === undefined || getTask(next, taskId)?.pause?.phase !== 'requested') {
+        return { ok: false, reason: 'noSession' };
+      }
+      entry.pausing = true;
+      entry.session.pauseLoop();
+      const waitingForTurn = entry.busy;
+      if (!waitingForTurn) {
+        void this.finishPause(entry, entry.session);
+      }
+      return { ok: true, waitingForTurn };
+    });
+  }
+
+  /** 一時停止を受け付けた工程セッションを閉じ、並列枠を放す。 */
+  private async finishPause(entry: LiveStageSession, session: TaskSession): Promise<void> {
+    const { runId } = entry;
+    const { taskId } = entry.ref;
+    const paused = await this.withTaskLock(liveKey(runId, taskId), async () => {
+      if (
+        entry.session !== session ||
+        entry.closed ||
+        !entry.pausing ||
+        entry.reported ||
+        entry.stopping
+      ) {
+        return false;
+      }
+      // 先に帳簿から外し、閉じるときの`onFinished`を一時停止の結果として扱わせない
+      this.release(entry, { dispose: false });
+      try {
+        if (session.releaseForPause === undefined) {
+          session.dispose();
+        } else {
+          await session.releaseForPause();
+        }
+      } catch (e) {
+        this.warn(
+          runId,
+          taskId,
+          `${taskId}の一時停止でセッションを閉じられませんでした: ${errorMessage(e)}`,
+        );
+        session.dispose();
+      }
+      await this.mutate(runId, (r) => markStagePaused(r, taskId, this.now()));
+      return true;
+    });
+    if (paused) {
+      await this.pumpFolder(runId);
+    }
+  }
+
+  /**
+   * 一時停止した工程の再開を受け付ける（Issue #1629）。並列枠と資源の保留が空いたら`pump`が
+   * 同じ会話を開き直す。ターンの終わりを待っている（まだ閉じていない）なら一時停止を取り消して
+   * そのまま続ける。受け付けたら`true`。
+   */
+  async resumeStage(runId: string, taskId: string): Promise<boolean> {
+    const key = liveKey(runId, taskId);
+    const accepted = await this.withTaskLock(key, async () => {
+      const entry = this.live.get(key);
+      if (entry !== undefined && entry.pausing && !entry.closed) {
+        const next = await this.mutate(runId, (r) => clearStagePause(r, taskId, this.now()));
+        if (next === undefined || getTask(next, taskId)?.pause !== undefined) {
+          return false;
+        }
+        entry.pausing = false;
+        entry.session.resumeLoop();
+        return true;
+      }
+      const next = await this.mutate(runId, (r) => requestStageResume(r, taskId, this.now()));
+      return next !== undefined && getTask(next, taskId)?.pause?.phase === 'resuming';
+    });
+    if (accepted) {
+      await this.pumpFolder(runId);
+    }
+    return accepted;
   }
 
   /** 工程セッションのタブを前面に出す。 */

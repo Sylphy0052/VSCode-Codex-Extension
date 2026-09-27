@@ -1820,7 +1820,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
             ...(input.disableSkills === true ? SKILLS_DISABLED_CONFIG_OVERLAY : {}),
           };
     try {
-      const threadId = await entry.session.start(input.cwd, taskConfig, threadConfig);
+      const threadId = await this.startOrResumeTaskThread(entry, input, taskConfig, threadConfig);
       this.pendingStarts.end(pendingKey);
       this.panels.set(threadId, entry);
       await this.persistModelSettings(entry, threadId);
@@ -1831,6 +1831,28 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.reportError(e);
       throw e instanceof Error ? e : new Error(String(e));
     }
+  }
+
+  /**
+   * タスク用のスレッドを始める。一時停止した工程の再開（`input.resume`。Issue #1629）なら
+   * 新しいスレッドを作らず、同じスレッドを同じ設定で`thread/resume`する。
+   */
+  private async startOrResumeTaskThread(
+    entry: ChatPanel,
+    input: TaskSessionInput,
+    config: CodexConfig,
+    threadConfig: Record<string, unknown> | undefined,
+  ): Promise<string> {
+    const resumeId = input.resume?.sessionId;
+    if (resumeId === undefined) {
+      return entry.session.start(input.cwd, config, threadConfig);
+    }
+    // 同じスレッドを2つのタブで購読させない（人が履歴から開いている等）
+    if (this.panels.has(resumeId)) {
+      throw new Error('再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください');
+    }
+    await entry.session.resume(resumeId, input.cwd, { config, threadConfig });
+    return resumeId;
   }
 
   /**
@@ -2126,6 +2148,16 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       processInfo: () => {
         const pid = this.connection.pid;
         return pid === undefined ? undefined : { pid, shared: true };
+      },
+      // 一時停止（Issue #1629）。app-serverは止めず（他の工程が使っている）、スレッドの購読を
+      // 外してタブを閉じるだけ。app-serverが読み込んだスレッドの分のメモリは空かない
+      releaseForPause: async () => {
+        try {
+          await entry.session.unsubscribe();
+        } finally {
+          this.teardown(entry);
+        }
+        return { memoryFreed: false };
       },
       dispose: () => this.teardown(entry),
     };

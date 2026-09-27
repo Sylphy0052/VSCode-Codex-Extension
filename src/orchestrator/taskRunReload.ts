@@ -6,6 +6,7 @@ import {
   finishTaskRunIfDone,
   haltStage,
   listTasks,
+  markStagePaused,
   resetStageForRetry,
   setTaskRunHaltedByUser,
   type OrchestratedTask,
@@ -43,6 +44,7 @@ type HaltAttention = Extract<TaskAttention, 'needsAction' | 'failed'>;
  * - PRがmerge済み: 止め方に関係なく（人が止めたタスクも）残りの工程を完了にする
  * - 人が止めていたタスク: そのまま残す
  * - PRがmergeされずに閉じられた、記録したworktreeが無い、既存のIssueが閉じられた: 工程を止めて理由を残す
+ * - 一時停止していた工程: 一時停止のまま残す（`resume_stage`で同じ会話から続ける）
  * - 実行中だった工程: 再読み込みで止まった理由を残して止める
  * - Reflexが判定中だった関門: ユーザーの判断待ちにする（判定し直さない）
  */
@@ -82,6 +84,10 @@ export function reconcileTaskRunOnReload(
         problem.failure,
         now,
       );
+    } else if (status === 'running' && task.pause !== undefined) {
+      // 一時停止した工程は会話が残っているため止めず、一時停止のまま残す（Issue #1629）。
+      // ターンの終わりを待っていた・開き直す途中だった工程も、resume_stageまで開き直さない
+      next = markStagePaused(next, task.taskId, now);
     } else if (status === 'running') {
       next = haltStage(next, task.taskId, 'stopped', RELOAD_HALT_REASON, now);
     }

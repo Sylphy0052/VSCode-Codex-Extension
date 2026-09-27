@@ -233,6 +233,11 @@ export interface TaskSessionInput {
    * 引き継ぎ文書を作らずに見送る。`handoffDelegate`を渡したときだけ見る。省略時は常に始める。
    */
   handoffPrecheck?: (trigger: TaskHandoffRequest['trigger']) => boolean;
+  /**
+   * 一時停止した工程の再開（Issue #1629）。新しい会話を始めず、このセッションIDの会話を開き直す
+   * （claudeは`-r`、codexは`thread/resume`）。
+   */
+  resume?: { sessionId: string };
 }
 
 /** `TaskSessionInput.handoffDelegate`へ渡す引き継ぎの依頼。 */
@@ -404,6 +409,13 @@ export interface TaskSession {
    * 終了したなら`undefined`。
    */
   processInfo?(): { pid: number; shared: boolean } | undefined;
+  /**
+   * 一時停止（Issue #1629）のためにセッションを閉じる。会話は捨てず、`TaskSessionInput.resume`で
+   * 開き直せる形で残す。claudeはCLIとその子プロセスを終わらせる（メモリが空く）。codexは
+   * app-serverを全スレッドで共有するため、スレッドの購読を外すだけでメモリは空かない
+   * （`memoryFreed: false`）。呼んだ後のセッションは`dispose`済みとして扱う。
+   */
+  releaseForPause?(): Promise<{ memoryFreed: boolean }>;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /**

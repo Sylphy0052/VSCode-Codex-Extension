@@ -207,28 +207,7 @@ export class ChatSession {
     threadConfig?: Record<string, unknown>,
   ): Promise<string> {
     await this.connection.ensureStarted();
-    const params: Record<string, unknown> = { cwd };
-    // `thread/start` は `SandboxMode` の3値しか取らず、サンドボックスを張らない指定
-    // （`externalSandbox`）を表現できない。bypassのときは承認まわりを一切載せず、
-    // ターン側の `sandboxPolicy` で決める（issue #222。`turnPolicyFor` 参照）
-    if (!config.bypassApprovalsAndSandbox) {
-      if (config.sandbox !== '') {
-        params['sandbox'] = config.sandbox;
-      }
-      if (config.approvalMode !== '') {
-        params['approvalPolicy'] = config.approvalMode;
-      }
-      if (isApprovalsReviewer(config.approvalsReviewer)) {
-        params['approvalsReviewer'] = config.approvalsReviewer;
-      }
-    }
-    if (config.model !== '') {
-      params['model'] = config.model;
-    }
-    if (threadConfig !== undefined) {
-      params['config'] = threadConfig;
-    }
-
+    const params: Record<string, unknown> = { cwd, ...threadSettingsParams(config, threadConfig) };
     const response = await this.connection.request('thread/start', params);
     const threadId = readThreadId(response.result);
     if (threadId === undefined) {
@@ -240,20 +219,42 @@ export class ChatSession {
     return threadId;
   }
 
-  /** 既存のスレッドを読み込む。 */
-  async resume(threadId: string, cwd: string | undefined): Promise<void> {
+  /**
+   * 既存のスレッドを読み込む。`settings`を渡すと`thread/start`と同じ設定（権限・モデル・
+   * スレッド限定のconfig）を`thread/resume`へ載せる（一時停止した工程の再開。Issue #1629）。
+   */
+  async resume(
+    threadId: string,
+    cwd: string | undefined,
+    settings?: { config: CodexConfig; threadConfig?: Record<string, unknown> | undefined },
+  ): Promise<void> {
     this.update({
       ...this.state,
       threadId,
       restore: { state: 'loading', message: undefined },
     });
     await this.connection.ensureStarted();
-    const params: Record<string, unknown> = { threadId };
+    const params: Record<string, unknown> = {
+      threadId,
+      ...(settings === undefined ? {} : threadSettingsParams(settings.config, settings.threadConfig)),
+    };
     if (cwd !== undefined) {
       params['cwd'] = cwd;
     }
     const response = await this.connection.request('thread/resume', params);
     this.applyThreadSnapshot(threadId, response.result);
+  }
+
+  /**
+   * このスレッドの購読を外す（`thread/unsubscribe`。一時停止。Issue #1629）。app-serverは
+   * 全スレッドで共有するため止めず、スレッドの読み込み済みの状態も残る（メモリは空かない）。
+   */
+  async unsubscribe(): Promise<void> {
+    const threadId = this.state.threadId;
+    if (threadId === undefined) {
+      return;
+    }
+    await this.connection.request('thread/unsubscribe', { threadId });
   }
 
   /** VS Codeが復元したタブを、会話本文を取らない状態で保持する。 */
@@ -988,4 +989,36 @@ function readInitialItems(result: unknown): ChatState['items'] {
     }
   }
   return items;
+}
+
+/**
+ * `thread/start`と`thread/resume`に共通の設定（権限・モデル・スレッド限定のconfig）。
+ * `thread/resume`も同じ項目を受ける（`ThreadResumeParams`。CLI 0.155.1のスキーマで確認）。
+ */
+function threadSettingsParams(
+  config: CodexConfig,
+  threadConfig: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  // `thread/start` は `SandboxMode` の3値しか取らず、サンドボックスを張らない指定
+  // （`externalSandbox`）を表現できない。bypassのときは承認まわりを一切載せず、
+  // ターン側の `sandboxPolicy` で決める（issue #222。`turnPolicyFor` 参照）
+  if (!config.bypassApprovalsAndSandbox) {
+    if (config.sandbox !== '') {
+      params['sandbox'] = config.sandbox;
+    }
+    if (config.approvalMode !== '') {
+      params['approvalPolicy'] = config.approvalMode;
+    }
+    if (isApprovalsReviewer(config.approvalsReviewer)) {
+      params['approvalsReviewer'] = config.approvalsReviewer;
+    }
+  }
+  if (config.model !== '') {
+    params['model'] = config.model;
+  }
+  if (threadConfig !== undefined) {
+    params['config'] = threadConfig;
+  }
+  return params;
 }

@@ -222,9 +222,10 @@ export function describeResourceChange(prev: ResourceLevel, snapshot: ResourceSn
   if (snapshot.level === 'critical') {
     lines.push(
       'criticalの間は新しい工程セッションを始めません。start_stageは受け付けて、状態が下がるまで待たせます。動いている工程は止めません。',
+      '使用量の大きい工程はpause_stageで一時停止できます（codexの工程はメモリが空きません）。',
     );
   } else if (prev === 'critical') {
-    lines.push('保留していた工程の開始を再開します。');
+    lines.push('保留していた工程の開始を再開します。一時停止した工程はresume_stageで再開できます。');
   }
   lines.push('工程ごとの使用量はget_run_stateで確かめてください。');
   return lines.join('\n');

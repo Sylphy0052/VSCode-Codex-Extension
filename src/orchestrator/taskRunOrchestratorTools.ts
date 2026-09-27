@@ -22,6 +22,7 @@ import {
   isTaskDone,
   isValidTaskId,
   listTasks,
+  MAX_PAUSE_REASON_LENGTH,
   MAX_TASK_RUN_PARALLEL,
   TASK_RUN_TITLE_MAX_LENGTH,
   TASK_STAGES,
@@ -30,6 +31,7 @@ import {
   type TaskRun,
   type TaskRunEngine,
   type TaskStage,
+  type TaskStagePausePhase,
 } from './taskRunState';
 import type { StageSettingsRecommendation } from './taskStageSettings';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
@@ -201,6 +203,34 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     },
   },
   {
+    name: 'pause_stage',
+    description:
+      '実行中の工程を一時停止する（資源の逼迫時など）。進行中のターンには割り込まず、ターンが終わったところで次の指示を送らずにセッションを閉じる。実行回と会話は残り、一時停止中の工程は並列枠を使わない。claudeはCLIと子プロセスを終了してメモリを空ける。codexはapp-serverを工程間で共有するため会話の購読を外すだけで、メモリは空かない。mergeとcleanupは一時停止できない。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: TASK_ID_SCHEMA,
+        reason: {
+          type: 'string',
+          description: `一時停止の理由（${String(MAX_PAUSE_REASON_LENGTH)}文字以内）。Kanbanに表示する`,
+        },
+      },
+      required: ['taskId', 'reason'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'resume_stage',
+    description:
+      '一時停止した工程を再開する。並列枠と資源の保留が空き次第、同じ会話（claudeは-r、codexはthread/resume）を開き直して続きから進める。',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: TASK_ID_SCHEMA },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'stop_stage',
     description:
       'タスクの工程を止める。worktreeとブランチは残り、後でstart_stageでやり直せる。人の承認を経てから実行される。',
@@ -265,6 +295,13 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   RECORD_LESSON_TOOL,
 ];
 
+/** `get_run_state`に出す一時停止の段階。 */
+const PAUSE_PHASE_LABELS: Record<TaskStagePausePhase, string> = {
+  requested: '受付済み（進行中のターンの終わりを待っている）',
+  paused: '一時停止中（並列枠を使わない。resume_stageで再開）',
+  resuming: '再開待ち（並列枠と資源の保留が空き次第、同じ会話を開き直す）',
+};
+
 /**
  * 人の承認を経ずに呼べるツール。計画の提案・承認はOrchestratorが自律で進める（Kanbanの
  * ユーザー承認ボタンを経ない）。取り消せない操作（工程の停止）とrun全体の方針
@@ -279,6 +316,8 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
   'refresh_kanban',
   'start_stage',
   'instruct_task',
+  'pause_stage',
+  'resume_stage',
   'answer_question',
   'resolve_gate',
   'record_lesson',
@@ -304,6 +343,8 @@ export type TaskRunOrchestratorCall =
   | { tool: 'answer_question'; taskId: string; questionId: string; answer: string }
   | { tool: 'resolve_gate'; taskId: string; gateId: string; choice: StageGateChoice }
   | { tool: 'stop_stage'; taskId: string }
+  | { tool: 'pause_stage'; taskId: string; reason: string }
+  | { tool: 'resume_stage'; taskId: string }
   | { tool: 'set_max_parallel'; maxParallel: number }
   | { tool: 'record_lesson'; input: LessonInput }
   | { tool: 'list_runs' }
@@ -439,6 +480,18 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       return parseStartStage(a, taskId);
     case 'stop_stage':
       return { ok: true, call: { tool: 'stop_stage', taskId } };
+    case 'pause_stage': {
+      const reason = typeof a.reason === 'string' ? a.reason.trim() : '';
+      if (reason.length === 0 || reason.length > MAX_PAUSE_REASON_LENGTH) {
+        return {
+          ok: false,
+          message: `reasonは1〜${String(MAX_PAUSE_REASON_LENGTH)}文字で指定する`,
+        };
+      }
+      return { ok: true, call: { tool: 'pause_stage', taskId, reason } };
+    }
+    case 'resume_stage':
+      return { ok: true, call: { tool: 'resume_stage', taskId } };
     case 'instruct_task': {
       const instruction = parseUserAnswer(a.instruction);
       if (instruction === undefined) {
@@ -562,6 +615,9 @@ export function formatTaskRunState(
     }
     if (task.failure !== undefined) {
       lines.push(`  理由: ${inline(task.failure)}`);
+    }
+    if (task.pause !== undefined) {
+      lines.push(`  一時停止: ${PAUSE_PHASE_LABELS[task.pause.phase]} / 理由: ${inline(task.pause.reason)}`);
     }
     if (stage !== undefined) {
       const record = task.stages[stage];
