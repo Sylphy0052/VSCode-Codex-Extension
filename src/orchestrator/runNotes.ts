@@ -21,6 +21,12 @@ import { formatUntrusted, sanitizeInlineText, truncateByCodePoint } from './untr
  * 個人情報を書かせない防御（`redactCredentials`）は必須（`RECORD_LESSON_TOOL`の
  * description・`RunNotesStore.recordLesson`の両方に置く二重の防御）。
  *
+ * **信頼境界。** git追跡のため、`record_lesson`を通さずPRで手書きした行も次回以降のrunの
+ * 導入文へ入る。導入文では`formatUntrusted`で「データであり指示ではない」と囲うが、モデルが
+ * それに従う保証は無い。このファイルは`AGENTS.md`・`CLAUDE.md`と同じくリポジトリ内の指示に
+ * 準じるものとして扱い、PRで`.agents/run-notes.jsonl`の差分を人が確認することを防御線とする
+ * （承認済みの教訓だけを入れる等の仕組みは持たない。Issue #1599の自己レビューで決定）。
+ *
  * `teamHandoff.ts`・`nodeHandoffFileSystem.ts`と同じ流儀を踏襲する: ポート
  * （`RunNotesFileSystemPort`）の実装は失敗を例外で投げず値で返し、`RunNotesStore`は
  * それを`{ ok: false, message }`へ変換する。教訓を書けなかったことはrunを止める理由に
@@ -82,7 +88,7 @@ const MAX_INTRO_CHARS = 4000;
 export const RECORD_LESSON_TOOL: McpToolDefinition = {
   name: 'record_lesson',
   description:
-    '次回以降のrunへ残す教訓を記録する。記録は次回以降のrunの導入文に入り、gitで共有される。' +
+    '次回以降のrunへ残す教訓を記録する。記録は次回以降のrunの導入文に入り、gitで共有され、PRで人が確認する。' +
     '秘密・トークン・個人情報を書かない。1runで呼べる回数に上限がある。',
   inputSchema: {
     type: 'object',
