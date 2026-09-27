@@ -193,6 +193,9 @@ interface LiveOrchestrator {
  */
 export const MAX_RUN_OPERATIONS_PER_RUN = 3;
 
+/** `resume_run`・`start_run`で動かしたrun。 */
+type OtherRunResult = { ok: true; runId: string; message: string } | { ok: false; message: string };
+
 export class TaskRunOrchestrator {
   private readonly live = new Map<string, LiveOrchestrator>();
   /** 開いている途中のrun。二重に開かないため。 */
@@ -638,10 +641,16 @@ export class TaskRunOrchestrator {
       };
     }
     live.runOperationCount += 1;
-    const result =
-      call.tool === 'resume_run'
-        ? await this.reopenOtherRun(self, call.runId)
-        : await this.startOtherRun(self, call);
+    let result: OtherRunResult;
+    try {
+      result =
+        call.tool === 'resume_run'
+          ? await this.reopenOtherRun(self, call.runId)
+          : await this.startOtherRun(self, call);
+    } catch (e: unknown) {
+      live.runOperationCount -= 1;
+      throw e;
+    }
     if (!result.ok) {
       live.runOperationCount -= 1;
       return { text: result.message, isError: true };
@@ -659,7 +668,7 @@ export class TaskRunOrchestrator {
   private async reopenOtherRun(
     self: TaskRun,
     targetRunId: string,
-  ): Promise<{ ok: true; runId: string; message: string } | { ok: false; message: string }> {
+  ): Promise<OtherRunResult> {
     if (targetRunId === self.runId) {
       return { ok: false, message: '自分のrunは再開できません' };
     }
@@ -677,7 +686,7 @@ export class TaskRunOrchestrator {
   private async startOtherRun(
     self: TaskRun,
     call: Extract<TaskRunOrchestratorCall, { tool: 'start_run' }>,
-  ): Promise<{ ok: true; runId: string; message: string } | { ok: false; message: string }> {
+  ): Promise<OtherRunResult> {
     const outcome = await this.deps.controller.startRun({
       workspaceRoot: self.workspaceRoot,
       engine: call.engine ?? self.engine,
