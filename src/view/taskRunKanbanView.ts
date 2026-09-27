@@ -19,6 +19,8 @@ const POST_INTERVAL_MS = 250;
 export interface TaskRunKanbanOrchestratorPort {
   open(runId: string, renew: boolean): Promise<boolean>;
   status(runId: string): TaskRunOrchestratorStatus;
+  /** Kanbanから人が直接送った指示をOrchestratorへイベントとして知らせる（Issue #1627）。 */
+  notifyTaskInstructed(runId: string, taskId: string, instruction: string): void;
 }
 
 export interface TaskRunKanbanViewDeps {
@@ -235,6 +237,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'answerQuestion':
         await this.answerQuestion(runId, taskId, message.questionId, message.answer);
         return;
+      case 'instructTask':
+        await this.instructTask(runId, taskId, message.instruction);
+        return;
       case 'resolveGate':
         await this.resolveGate(runId, taskId, message.gateId, message.choice);
         return;
@@ -274,6 +279,27 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     const result = await this.deps.controller.answerQuestion(runId, taskId, questionId, answer);
     if (!result.ok) {
+      void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
+    }
+  }
+
+  /**
+   * Kanbanの動作中工程カードから人が直接送る指示（Issue #1627）。`instruct_task`と同じ検証
+   * （`parseUserAnswer`）と経路（`TaskRunController.instructTask`）を使う。届いたらOrchestrator
+   * にもイベントとして知らせ、人の指示を知らずに重ねて指示を送らないようにする。
+   */
+  private async instructTask(runId: string, taskId: string, raw: unknown): Promise<void> {
+    const instruction = parseUserAnswer(raw);
+    if (instruction === undefined) {
+      void vscode.window.showWarningMessage(
+        `オーケストレータモード: 指示は1〜${String(MAX_USER_ANSWER_LENGTH)}文字で入力してください`,
+      );
+      return;
+    }
+    const result = await this.deps.controller.instructTask(runId, taskId, instruction);
+    if (result.ok) {
+      this.deps.orchestrator.notifyTaskInstructed(runId, taskId, instruction);
+    } else {
       void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
     }
   }
@@ -621,6 +647,10 @@ const script = `
   // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
   const drafts = new Map();
   let focusedQuestion;
+  // 工程への指示（Issue #1627）。入力欄を開いたタスクIDと書きかけの文面をタスクIDごとに持っておく
+  const instructOpen = new Set();
+  const instructDrafts = new Map();
+  let focusedInstruct;
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -798,6 +828,45 @@ const script = `
     return box;
   }
 
+  // 動作中の工程への指示（Issue #1627）。押して入力欄を出し、送るとinstruct_taskと同じ経路で届く
+  function renderInstruct(card) {
+    const box = el('div', 'question');
+    if (!instructOpen.has(card.taskId)) {
+      box.appendChild(button('指示を送る', '', function () {
+        instructOpen.add(card.taskId);
+        renderView();
+      }));
+      return box;
+    }
+    box.appendChild(el('div', 'question-text', '工程への指示'));
+    const input = el('textarea');
+    input.setAttribute('aria-label', '工程への指示');
+    input.placeholder = '指示を入力';
+    input.value = instructDrafts.get(card.taskId) || '';
+    input.addEventListener('input', function () { instructDrafts.set(card.taskId, input.value); });
+    input.addEventListener('focus', function () { focusedInstruct = card.taskId; });
+    input.addEventListener('blur', function () { focusedInstruct = undefined; });
+    box.appendChild(input);
+    if (focusedInstruct === card.taskId) {
+      setTimeout(function () { input.focus(); input.setSelectionRange(input.value.length, input.value.length); });
+    }
+    const actions = el('div', 'actions');
+    actions.appendChild(button('送る', 'primary', function () {
+      if (input.value.trim() === '') { return; }
+      send('instructTask', { taskId: card.taskId, instruction: input.value });
+      instructDrafts.delete(card.taskId);
+      instructOpen.delete(card.taskId);
+      renderView();
+    }));
+    actions.appendChild(button('やめる', '', function () {
+      instructDrafts.delete(card.taskId);
+      instructOpen.delete(card.taskId);
+      renderView();
+    }));
+    box.appendChild(actions);
+    return box;
+  }
+
   function renderGate(card, gate) {
     const box = el('div', 'gate');
     const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : '「' + gate.stageLabel + '」の失敗の関門';
@@ -866,6 +935,7 @@ const script = `
     if (actions.childNodes.length > 0) { c.appendChild(actions); }
     if (card.gate) { c.appendChild(renderGate(card, card.gate)); }
     if (card.lastGateDecision) { c.appendChild(el('div', 'summary', card.lastGateDecision)); }
+    if (card.canInstruct) { c.appendChild(renderInstruct(card)); }
     card.questions.forEach(function (q) { c.appendChild(renderQuestion(card, q)); });
     return c;
   }

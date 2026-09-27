@@ -104,6 +104,8 @@ export interface TaskRunKanbanCard {
   canStop: boolean;
   canRetry: boolean;
   canReveal: boolean;
+  /** 工程セッションが動作中で、人から直接指示を送れる（Issue #1627）。 */
+  canInstruct: boolean;
   questions: TaskRunKanbanQuestion[];
   gate: TaskRunKanbanGate | undefined;
   /** 直近に決着した関門（誰が何を選んだか）。 */
@@ -300,6 +302,7 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
     failure: task.failure === undefined ? undefined : sanitizeInlineText(task.failure, FAILURE_MAX_LENGTH),
     attempts: record?.attempts.length ?? 0,
     canStop: record?.status === 'running' && !stopping,
+    canInstruct: record?.status === 'running' && !stopping,
     canRetry:
       record?.status === 'halted' &&
       !stopping &&
