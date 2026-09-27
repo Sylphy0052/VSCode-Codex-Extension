@@ -538,10 +538,9 @@ export function readAutoHandoffEnabled(): boolean {
  * 以降のON/OFFはセッション単位（`ChatState.autoHandoffAutoApprove`）に持つ。仕組みは
  * `readAutoHandoffEnabled` と全く同じ二段構え。
  *
- * ONのときは、自動発火（`HandoffTrigger.kind !== 'manual'`）の引き継ぎに限り、確認
+ * ONのときは、自動発火の引き継ぎでも手動の引き継ぎボタンでも（Issue #1510）、確認
  * ダイアログとセッション統括ページの保留カードを出さず、`proposeHandoffModelSettings`
  * の提案をそのまま採用する（`handoffModelChoice.ts`の`chooseHandoffModelSettings`参照）。
- * 手動の引き継ぎボタンでは、ONでも従来どおり確認する。
  */
 export function readAutoHandoffAutoApprove(): boolean {
   const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.autoApprove');
