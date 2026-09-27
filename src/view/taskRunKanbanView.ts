@@ -557,6 +557,7 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .badge { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 11px; padding: 1px 7px; } .badge.warn { border-color: var(--vscode-charts-yellow); color: var(--vscode-charts-yellow); } .badge.ok { border-color: var(--vscode-charts-blue); color: var(--vscode-charts-blue); }
 .dep.unmet { text-decoration: underline dotted; color: var(--vscode-charts-yellow); }
 .failure { color: var(--vscode-errorForeground); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.paused { color: var(--vscode-editorWarning-foreground); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .link { appearance: none; background: none; border: 0; padding: 0; color: var(--vscode-textLink-foreground); font: inherit; font-size: 12px; cursor: pointer; }
 .empty { color: var(--vscode-descriptionForeground); font-size: 13px; padding: 16px 12px; }
@@ -963,6 +964,7 @@ const script = `
     }
     if (meta.childNodes.length > 0) { c.appendChild(meta); }
     if (card.failure) { c.appendChild(el('div', 'failure', card.failure)); }
+    if (card.pauseReason) { c.appendChild(el('div', 'paused', '一時停止の理由: ' + card.pauseReason)); }
     const actions = el('div', 'actions');
     if (card.canReveal) { actions.appendChild(button('セッションを開く', '', function () { send('revealStage', { taskId: card.taskId }); })); }
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopStage', { taskId: card.taskId }); })); }

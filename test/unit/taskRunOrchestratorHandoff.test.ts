@@ -109,6 +109,8 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       refreshKanban: vi.fn(),
       startStage: vi.fn(),
       stopStage: vi.fn(),
+      pauseStage: vi.fn(),
+      resumeStage: vi.fn(),
       instructTask: vi.fn(),
       setMaxParallel: vi.fn(),
       findQuestionAwaitingUser: vi.fn(),

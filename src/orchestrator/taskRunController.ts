@@ -50,6 +50,7 @@ import {
   isTaskRunActive,
   isValidMaxParallel,
   listTasks,
+  markStagePaused,
   MAX_TASK_RUN_PARALLEL,
   proposeTaskPlan,
   recordStageDecision,
@@ -71,7 +72,7 @@ import {
 import { reviewTaskRunPlanProposal } from './taskRunPlanReview';
 import type { TaskRunStore } from './taskRunStore';
 import type { StageObservationPorts } from './taskStageObservation';
-import type { TaskStageRunner } from './taskStageRunner';
+import type { PauseStageOutcome, TaskStageRunner } from './taskStageRunner';
 import {
   buildStageClassifierInput,
   checkStageSettings,
@@ -88,6 +89,13 @@ import {
  * - 状態が変わるたびに前後のrunを`onTransition`の購読者へ渡す（Orchestratorへのイベントの元）
  */
 
+const PAUSE_REJECTIONS: Record<Exclude<PauseStageOutcome, { ok: true }>['reason'], string> = {
+  noSession: '工程セッションが動いていない',
+  mergeCleanup: 'mergeとcleanupはmergeの鍵を持つため一時停止できない',
+  finishing: '工程が報告済み・止めている途中・一時停止の受付済み',
+  alreadyPaused: '既に一時停止している',
+};
+
 export type ControllerResult = { ok: true; message: string } | { ok: false; message: string };
 
 export type StartTaskRunOutcome =
@@ -98,7 +106,14 @@ export interface TaskRunControllerDeps {
   store: Pick<TaskRunStore, 'find' | 'update' | 'list' | 'listActive'>;
   runner: Pick<
     TaskStageRunner,
-    'pump' | 'stopStage' | 'instructStage' | 'answerQuestion' | 'cleanupRestoredTask' | 'retireTask'
+    | 'pump'
+    | 'stopStage'
+    | 'pauseStage'
+    | 'resumeStage'
+    | 'instructStage'
+    | 'answerQuestion'
+    | 'cleanupRestoredTask'
+    | 'retireTask'
   >;
   /** エンジンのモデル一覧と、カタログからeffortを取れないときの退避先。 */
   modelCatalog(engine: TaskRunEngine): {
@@ -146,6 +161,7 @@ const REJECTION_MESSAGES: Record<StartStageRejection, string> = {
   taskDone: 'このタスクはすべての工程を終えている',
   notCurrentStage: 'その工程はこのタスクの現在の工程ではない（get_run_stateで現在の工程を確かめる）',
   alreadyRunning: 'その工程は既に実行中',
+  paused: 'その工程は一時停止中（続けるならresume_stageで再開する）',
   halted: 'このタスクは停止処理中、またはユーザーの対応を待っている',
   gatePending:
     'このタスクには、Reflexが判定中またはユーザーの判断待ちの関門がある（ユーザーの判断はresolve_gateで渡す）',
@@ -805,7 +821,8 @@ export class TaskRunController {
     if (halted.suspendedAt !== undefined) {
       return { ok: true, message: 'runは中断している' };
     }
-    await this.stopRunningStages(halted);
+    // 一時停止中の工程はセッションが無いため止めず、一時停止のまま残す（Issue #1629）
+    await this.stopRunningStages(halted, { keepPaused: true });
     await this.updateRun(runId, (r) => suspendTaskRun(r, this.now()));
     await this.deps.lease?.release(runId);
     return { ok: true, message: 'runを中断した' };
@@ -874,10 +891,26 @@ export class TaskRunController {
   }
 
   /** 実行中の工程セッションを止める。先に一時停止にして、新しい工程を始めない状態で呼ぶ。 */
-  private async stopRunningStages(run: TaskRun): Promise<void> {
+  private async stopRunningStages(
+    run: TaskRun,
+    options: { keepPaused?: boolean } = {},
+  ): Promise<void> {
+    if (options.keepPaused === true) {
+      // 再開を受け付けて開き直す前の工程は一時停止へ戻す。runを再開しても勝手に開き直さない
+      for (const task of listTasks(run)) {
+        if (task.pause?.phase === 'resuming') {
+          await this.updateRun(run.runId, (r) => markStagePaused(r, task.taskId, this.now()));
+        }
+      }
+    }
     const running = listTasks(run).filter((task) => {
       const stage = currentStage(task);
-      return stage !== undefined && task.stages[stage].status === 'running';
+      const paused = task.pause !== undefined && task.pause.phase !== 'requested';
+      return (
+        stage !== undefined &&
+        task.stages[stage].status === 'running' &&
+        !(options.keepPaused === true && paused)
+      );
     });
     // 1つの工程で止め損ねても、残りの工程を止めて終了・中断まで進める
     const results = await Promise.allSettled(
@@ -1088,6 +1121,54 @@ export class TaskRunController {
     return stopped
       ? { ok: true, message: `${taskId}の工程を止めた` }
       : { ok: false, message: `${taskId}の工程を止められなかった（動いていない、または報告済み）` };
+  }
+
+  /**
+   * 工程を一時停止する（Issue #1629）。進行中のターンは止めず、終わったところでセッションを閉じる。
+   * codexはapp-serverを工程間で共有するため、会話の購読を外すだけでメモリは空かない。
+   */
+  async pauseStage(runId: string, taskId: string, reason: string): Promise<ControllerResult> {
+    // 工程セッションを持つのは専有権のあるウィンドウだけ（Issue #1628）
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
+    const run = this.deps.store.find(runId);
+    if (run === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    const outcome = await this.deps.runner.pauseStage(runId, taskId, reason);
+    if (!outcome.ok) {
+      return {
+        ok: false,
+        message: `${taskId}を一時停止できなかった（${PAUSE_REJECTIONS[outcome.reason]}）`,
+      };
+    }
+    const timing = outcome.waitingForTurn
+      ? '進行中のターンが終わったところでセッションを閉じる'
+      : 'セッションを閉じた';
+    const memory =
+      run.engine === 'codex'
+        ? '。codexはapp-serverを工程間で共有するため会話の購読を外すだけで、メモリは空かない'
+        : '。CLIと子プロセスを終了してメモリを空ける';
+    return {
+      ok: true,
+      message: `${taskId}の一時停止を受け付けた。${timing}${memory}。並列枠は使わない。resume_stageで同じ会話から再開する`,
+    };
+  }
+
+  async resumeStage(runId: string, taskId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
+    const accepted = await this.deps.runner.resumeStage(runId, taskId);
+    return accepted
+      ? {
+          ok: true,
+          message: `${taskId}の再開を受け付けた。並列枠と資源の保留が空き次第、同じ会話を開き直して続きから進める`,
+        }
+      : { ok: false, message: `${taskId}を再開できなかった（一時停止していない）` };
   }
 
   async instructTask(runId: string, taskId: string, instruction: string): Promise<ControllerResult> {

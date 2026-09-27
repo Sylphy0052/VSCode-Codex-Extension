@@ -33,6 +33,8 @@ export interface AppServerConnectionPort {
   ensureStarted(): Promise<void>;
   request(method: string, params: unknown): Promise<JsonRpcMessage>;
   dispose(): void;
+  /** 動いているapp-serverのpid（資源の計測用。Issue #1629）。起動前・終了後は`undefined`。 */
+  readonly pid?: number | undefined;
 }
 
 const CLIENT_NAME = 'vscode-codex-extension';
@@ -52,6 +54,10 @@ export class AppServerConnection {
   private nextId = 1;
   private readonly pending = new Map<number, (message: JsonRpcMessage) => void>();
   private starting: Promise<void> | undefined;
+
+  get pid(): number | undefined {
+    return this.proc?.pid;
+  }
   /**
    * `reset()`が後始末すべき状態を持っているか（issue #354のレビュー指摘・LOW）。
    *

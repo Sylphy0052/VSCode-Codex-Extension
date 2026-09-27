@@ -138,6 +138,7 @@ import {
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox, type Attachment } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
+import { terminateDescendants } from '../orchestrator/resourceSampler';
 import type {
   SessionMessagingHost,
   SessionMessagingRegistration,
@@ -2155,7 +2156,12 @@ export class ClaudeChatViewManager
     // sandboxの起動引数は`taskConfig.additionalArgs`へ入れる。同じパネルでCLIを起動し直す
     // （モデル変更・中断後の再開）ときも`configFor`がこれを読むため、sandboxが外れない
     const taskConfig = toClaudeConfig(input, await this.resolveSandboxArgs(input));
-    const sessionId = randomSessionId();
+    // 一時停止した工程の再開（Issue #1629）は新しい会話を作らず、同じ会話を`-r`で開き直す
+    const resumeId = input.resume?.sessionId;
+    if (resumeId !== undefined && this.panels.has(resumeId)) {
+      throw new Error('再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください');
+    }
+    const sessionId = resumeId ?? randomSessionId();
     // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
@@ -2166,12 +2172,26 @@ export class ClaudeChatViewManager
     entry.autoHandoffDisabled = input.disableAutoHandoff === true;
     this.applyTaskSessionSwitches(entry, input);
     this.panels.set(sessionId, entry);
-    entry.session.start({
-      cwd: input.cwd,
-      target: { kind: 'new' },
-      sessionId,
-      config: this.configFor(entry),
-    });
+    if (resumeId === undefined) {
+      entry.session.start({
+        cwd: input.cwd,
+        target: { kind: 'new' },
+        sessionId,
+        config: this.configFor(entry),
+      });
+    } else {
+      // 過去のやり取りはtranscriptから復元する（`openThread`と同じ）
+      const transcript = await this.readTranscript(resumeId);
+      entry.session.start({
+        cwd: input.cwd,
+        target: { kind: 'resume', sessionId: resumeId },
+        sessionId: undefined,
+        config: this.configFor(entry),
+        initialItems: transcript.items,
+        initialTodos: transcript.todos,
+        initialTodoHistory: transcript.todoHistory,
+      });
+    }
     await this.persistModelSettings(entry, sessionId);
     return this.buildTaskSession(entry, sessionId, input.mcp !== undefined);
   }
@@ -3113,6 +3133,24 @@ export class ClaudeChatViewManager
       onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
       rearmAutoHandoff: () => {
         entry.autoHandoffStarted = false;
+      },
+      processInfo: () => {
+        const pid = entry.session.pid;
+        return pid === undefined ? undefined : { pid, shared: false };
+      },
+      // 一時停止（Issue #1629）。CLIとその子プロセス（MCPサーバ・Bashの子など）を終わらせて
+      // タブを閉じる。会話はtranscriptに残り、再開は`-r`で開き直す
+      releaseForPause: async () => {
+        const pid = entry.session.pid;
+        if (pid !== undefined) {
+          await terminateDescendants(pid).catch((e: unknown) => {
+            this.log.warn(
+              `[task pause] 子プロセスを止められませんでした: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          });
+        }
+        this.teardown(entry);
+        return { memoryFreed: true };
       },
       dispose: () => this.teardown(entry),
     };

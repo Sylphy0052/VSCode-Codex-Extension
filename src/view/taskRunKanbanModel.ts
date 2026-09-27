@@ -31,6 +31,7 @@ import {
   type TaskRunEngine,
   type TaskRunRoadmapNotice,
   type TaskStage,
+  type TaskStagePausePhase,
 } from '../orchestrator/taskRunState';
 import { STAGE_LABELS } from '../orchestrator/taskStagePrompts';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
@@ -99,6 +100,8 @@ export interface TaskRunKanbanCard {
   issueNumber: number | undefined;
   pullRequest: { number: number; url: string } | undefined;
   failure: string | undefined;
+  /** 一時停止の理由（Issue #1629）。無害化して1行にした外部由来のテキスト。 */
+  pauseReason: string | undefined;
   /** 今の工程の実行回数。 */
   attempts: number;
   canStop: boolean;
@@ -203,6 +206,13 @@ function attentionBadge(task: OrchestratedTask): TaskRunKanbanBadge | undefined 
   }
 }
 
+/** 一時停止の段階ごとのバッジ（Issue #1629）。 */
+const PAUSE_BADGE_LABELS: Record<TaskStagePausePhase, string> = {
+  requested: '一時停止中（ターンの終わり待ち）',
+  paused: '一時停止中',
+  resuming: '一時停止中（再開待ち）',
+};
+
 function stageBadges(
   run: TaskRun,
   task: OrchestratedTask,
@@ -211,7 +221,9 @@ function stageBadges(
 ): TaskRunKanbanBadge[] {
   const record = task.stages[stage];
   if (record.status === 'running') {
-    return [{ label: '実行中', tone: 'ok' }];
+    return task.pause === undefined
+      ? [{ label: '実行中', tone: 'ok' }]
+      : [{ label: PAUSE_BADGE_LABELS[task.pause.phase], tone: 'warn' }];
   }
   if (record.status !== 'notStarted' || run.planStatus !== 'approved') {
     return [];
@@ -300,9 +312,15 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
     issueNumber: task.issueNumber,
     pullRequest: task.pullRequest,
     failure: task.failure === undefined ? undefined : sanitizeInlineText(task.failure, FAILURE_MAX_LENGTH),
+    pauseReason:
+      task.pause === undefined ? undefined : sanitizeInlineText(task.pause.reason, FAILURE_MAX_LENGTH),
     attempts: record?.attempts.length ?? 0,
     canStop: record?.status === 'running' && !stopping,
-    canInstruct: record?.status === 'running' && !stopping,
+    // 一時停止で閉じた工程にはセッションが無く、指示を届ける先が無い
+    canInstruct:
+      record?.status === 'running' &&
+      !stopping &&
+      (task.pause === undefined || task.pause.phase === 'requested'),
     canRetry:
       record?.status === 'halted' &&
       !stopping &&

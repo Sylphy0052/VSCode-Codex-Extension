@@ -112,6 +112,31 @@ export interface StageReviewResult {
   passed: boolean;
 }
 
+/**
+ * 工程の一時停止の段階（Issue #1629）。
+ * - requested: 受け付けた。進行中のターンが終わるのを待っている（セッションはまだ動いている）
+ * - paused: セッションを閉じた。並列枠を使わない
+ * - resuming: 再開を受け付けた。並列枠と資源の保留が空くのを待っている
+ */
+export type TaskStagePausePhase = 'requested' | 'paused' | 'resuming';
+
+/** 一時停止の理由（Orchestratorが書く）の上限。 */
+export const MAX_PAUSE_REASON_LENGTH = 200;
+
+/**
+ * 実行中の工程の一時停止（Issue #1629）。工程は`running`のまま、実行回（`currentAttemptId`と
+ * `sessionRef`）も残し、再開では同じ会話を開き直す。実行回を閉じると一緒に消える。
+ */
+export interface TaskStagePause {
+  /** 一時停止の理由。外部由来（LLMの出力）のテキスト。表示やプロンプトへ入れるときは無害化する。 */
+  reason: string;
+  phase: TaskStagePausePhase;
+  /** ISO8601。 */
+  requestedAt: string;
+  /** ISO8601。セッションを閉じた時刻。 */
+  pausedAt?: string | undefined;
+}
+
 /** 1つのタスク。runの中でタスク1件につき1つだけ作る。 */
 export interface OrchestratedTask {
   taskId: string;
@@ -157,6 +182,8 @@ export interface OrchestratedTask {
   gates?: readonly StageGate[];
   /** レビュー後に実装へ差し戻した回数。追加前に保存したrunには無い（0回として扱う）。 */
   reviewRounds?: number;
+  /** 実行中の工程の一時停止（Issue #1629）。一時停止していなければ`undefined`。 */
+  pause?: TaskStagePause | undefined;
   /** ISO8601。 */
   updatedAt: string;
 }
@@ -665,7 +692,8 @@ function endCurrentAttempt(task: OrchestratedTask, at: string): OrchestratedTask
   if (id === undefined) {
     return task;
   }
-  const next: OrchestratedTask = { ...task, currentAttemptId: undefined };
+  // 一時停止は実行回に付くため、実行回を閉じたら外す（Issue #1629）
+  const next: OrchestratedTask = { ...task, currentAttemptId: undefined, pause: undefined };
   const stage = TASK_STAGES.find((s) => task.stages[s].attempts.some((a) => a.attemptId === id));
   if (stage === undefined) {
     return next;
@@ -888,6 +916,77 @@ export function markStageStopping(run: TaskRun, taskId: string, now: Date): Task
     return run;
   }
   return withTask(run, { ...task, attention: 'stopping', updatedAt: now.toISOString() });
+}
+
+/** 実行中の工程が一時停止中（受け付けた・閉じた・再開待ちのいずれか）か。 */
+export function isStagePaused(task: OrchestratedTask): boolean {
+  return task.pause !== undefined;
+}
+
+/** 実行中の工程の一時停止の段階を変える。実行中でない工程・段階が`from`でない工程はそのまま返す。 */
+function setStagePause(
+  run: TaskRun,
+  taskId: string,
+  from: readonly (TaskStagePausePhase | undefined)[],
+  make: (task: OrchestratedTask, at: string) => TaskStagePause | undefined,
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  const stage = task === undefined ? undefined : currentStage(task);
+  if (
+    task === undefined ||
+    stage === undefined ||
+    task.stages[stage].status !== 'running' ||
+    task.currentAttemptId === undefined ||
+    !from.includes(task.pause?.phase)
+  ) {
+    return run;
+  }
+  const at = now.toISOString();
+  return withTask(run, { ...task, pause: make(task, at), updatedAt: at });
+}
+
+/** 一時停止を受け付ける（Issue #1629）。進行中のターンが終わるまでセッションは動く。 */
+export function requestStagePause(
+  run: TaskRun,
+  taskId: string,
+  reason: string,
+  now: Date,
+): TaskRun {
+  return setStagePause(
+    run,
+    taskId,
+    [undefined],
+    (_task, at) => ({ reason, phase: 'requested', requestedAt: at }),
+    now,
+  );
+}
+
+/** 一時停止のためにセッションを閉じた。以後は並列枠を使わない。 */
+export function markStagePaused(run: TaskRun, taskId: string, now: Date): TaskRun {
+  return setStagePause(
+    run,
+    taskId,
+    ['requested', 'resuming'],
+    (task, at) => task.pause && { ...task.pause, phase: 'paused', pausedAt: at },
+    now,
+  );
+}
+
+/** 再開を受け付ける。並列枠と資源の保留が空いたら同じ会話を開き直す。 */
+export function requestStageResume(run: TaskRun, taskId: string, now: Date): TaskRun {
+  return setStagePause(
+    run,
+    taskId,
+    ['paused'],
+    (task) => task.pause && { ...task.pause, phase: 'resuming' },
+    now,
+  );
+}
+
+/** 再開して会話を開き直した。一時停止を外す。 */
+export function clearStagePause(run: TaskRun, taskId: string, now: Date): TaskRun {
+  return setStagePause(run, taskId, ['requested', 'paused', 'resuming'], () => undefined, now);
 }
 
 /**

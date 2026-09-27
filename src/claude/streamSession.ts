@@ -271,6 +271,11 @@ export class ClaudeStreamSession {
     return this.commandList;
   }
 
+  /** 動いているCLIのpid（資源の計測と一時停止の子孫プロセスの終了に使う。Issue #1629）。 */
+  get pid(): number | undefined {
+    return this.proc?.pid;
+  }
+
   get threadId(): string | undefined {
     return this.state.threadId;
   }

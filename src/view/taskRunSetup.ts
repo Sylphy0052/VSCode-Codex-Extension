@@ -12,10 +12,14 @@ import {
   readReflexEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunPlanAutoApproveEnabled,
+  readTaskRunResourceIntervalMs,
+  readTaskRunResourceThresholds,
 } from '../config';
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
 import { DEFAULT_PLAN_APPROVE_THRESHOLD } from '../orchestrator/planReflexReview';
+import { describeResourceChange, formatResourceLines, ResourceMonitor } from '../orchestrator/resourceMonitor';
+import { ResourceSampler } from '../orchestrator/resourceSampler';
 import {
   judgeRoadmapQuestion,
   RoadmapQuestionMcpServer,
@@ -111,6 +115,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     controller?: TaskRunController;
     view?: TaskRunKanbanViewManager;
     orchestrator?: TaskRunOrchestrator;
+    monitor?: ResourceMonitor;
   } = {};
 
   const executableFor = (engine: TaskRunEngine): string =>
@@ -165,6 +170,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     autoApprove: () => deps.readBaseline().allowAutoApprove,
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
+    isStartHeld: () => holder.monitor?.level === 'critical',
     mcpServer: questionServer,
     // Reflexモードが無効なら判定せず、すべての質問と関門をユーザーへ回す
     judgeQuestion: (engine, question) => judgeByReflex(engine, question),
@@ -236,8 +242,29 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
+    resourceLines: (runId) => formatResourceLines(holder.monitor?.snapshot, runId),
+    isStartHeld: () => holder.monitor?.level === 'critical',
   });
   holder.orchestrator = orchestrator;
+
+  // 動いているrunがある間だけCPUとメモリを計り、状態が変わったらOrchestratorへ知らせる（Issue #1629）
+  const monitor = new ResourceMonitor({
+    sampler: new ResourceSampler(),
+    hasActiveRuns: () => store.list().some((r) => isTaskRunActive(r)),
+    listStageProcesses: () => runner.listStageProcesses(),
+    thresholds: readTaskRunResourceThresholds,
+    intervalMs: readTaskRunResourceIntervalMs,
+    onLevelChanged: (prev, snapshot) => {
+      log.info(`[task run] 資源の状態: ${prev} -> ${snapshot.level}`);
+      orchestrator.notifyResourcePressure(describeResourceChange(prev, snapshot));
+      if (prev === 'critical') {
+        // 保留していた開始（start_stageで受け付けた工程と再開待ちの工程）を空き枠の分だけ始める
+        void runner.pumpAll().catch((e: unknown) => warn(`保留した工程の開始に失敗: ${String(e)}`));
+      }
+    },
+    log: (message) => log.warn(message),
+  });
+  holder.monitor = monitor;
 
   const finishRun = async (runId: string): Promise<ControllerResult> => {
     const result = await controller.finishRun(runId);
@@ -287,6 +314,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   // 通知が出ただけでは見ているrunを変えない。「Kanbanを開く」を押したときだけ切り替える
   const transitions = controller.onTransition((prev, next) => {
+    monitor.refresh();
     orchestrator.handleRunTransition(prev, next);
     view.refresh();
     notifyTransition(prev, next, () => switchToRun(next.runId));
@@ -302,12 +330,16 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     showRun: (runId) => showRun(view, orchestrator, runId),
   });
 
-  void controller.restore().catch((e: unknown) => {
-    warn(`再読み込み後の復元に失敗: ${String(e)}`);
-  });
+  void controller
+    .restore()
+    .then(() => monitor.refresh())
+    .catch((e: unknown) => {
+      warn(`再読み込み後の復元に失敗: ${String(e)}`);
+    });
 
   return [
     transitions,
+    { dispose: () => monitor.dispose() },
     { dispose: () => lease.dispose() },
     { dispose: () => runner.dispose() },
     // Orchestratorはトークンを外してからセッションを閉じるため、サーバより先に片付ける
