@@ -1,8 +1,9 @@
-import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
+import { SANDBOX_MODES } from '../codex/types';
 import type { Logger } from '../log';
-import { resolveAdvisorModel } from '../loop/loopAdvisor';
+import { DEFAULT_ADVISOR_CODEX_MODEL } from '../loop/loopAdvisor';
 import {
   awaitSingleTurn,
+  plannerApprovalModeFor,
   runSingleTurnTask,
   SingleTurnCancelledError,
   SingleTurnTimeoutError,
@@ -17,19 +18,21 @@ import { buildAutoReplyRolePrompt, buildAutoReplyTurnPrompt } from './autoReply'
  * 自動返信モード（Issue #1353）の「返信役」セッション管理。
  *
  * `vscode` には依存しない。`runSingleTurnTask` / `awaitSingleTurn`（`planner.ts`）・
- * `redactCredentials`（`secondOpinion/redact.ts`）・`resolveAdvisorModel`
- * （`loop/loopAdvisor.ts`）という、`AdvisorSession`（`secondOpinion/advisorSession.ts`）と
+ * `redactCredentials`（`secondOpinion/redact.ts`）という、`AdvisorSession`（`secondOpinion/advisorSession.ts`）と
  * 同じ基盤プリミティブを使う。`AdvisorSession`自体を直接使わないのは、あちらが
  * セカンドオピニオン固有の概念（候補・下書き・材料の世代管理・bundle）を多く抱えており、
  * 自動返信には要らないため。同じ基盤の上に、必要な分だけの薄いラッパーを別に持つ。
  *
- * 返信役は常にCodexセッションとして開く（Issue本文「返信役は...Codexセッションとし」）。
+ * 返信役は会話中のCLIと同じプロバイダで開く（Issue #1602）。当初は常にCodexで開いていたが、
+ * ホストにはClaude Code画面自身を渡していたため、Claudeのセッションへ Codex向けの入力
+ * （`approvalMode: never`・`gpt-6-sol`）が渡り、起動直後に失敗していた。
  */
 
-const AUTO_REPLY_APPROVAL_MODE: ApprovalMode = 'never';
 const AUTO_REPLY_LABEL = '自動返信の返信役';
 const AUTO_REPLY_LOG_PREFIX = '[autoReply]';
-const AUTO_REPLY_PROVIDER: Provider = 'codex';
+
+/** `agent.chat.autoReply.model`が`auto`のとき、Claude Code画面の返信役に使うモデル。 */
+export const DEFAULT_AUTO_REPLY_CLAUDE_MODEL = 'sonnet';
 
 /**
  * 無操作で返信役を閉じるまでの既定時間。`AdvisorSession`の
@@ -39,16 +42,34 @@ const AUTO_REPLY_PROVIDER: Provider = 'codex';
 export const DEFAULT_AUTO_REPLY_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 /**
+ * 返信役のモデル設定の`auto`を、返信役を開くプロバイダに合わせて解決する（Issue #1602）。
+ *
+ * 明示されたモデル名はそのまま使う。終了サマリと共用の`resolveAdvisorModel`はClaudeの
+ * `auto`をCLIの既定モデルへ委ねるが、返信役は往復のたびに走るため軽量な`sonnet`へ倒す。
+ */
+export function resolveAutoReplyModel(model: string, provider: Provider): string {
+  if (model !== 'auto' && model !== '') {
+    return model;
+  }
+  return provider === 'claude' ? DEFAULT_AUTO_REPLY_CLAUDE_MODEL : DEFAULT_ADVISOR_CODEX_MODEL;
+}
+
+/**
  * 自動返信用の`TaskSessionInput`を組み立てる。
  *
- * `secondOpinion/run.ts`の`buildSecondOpinionSessionInput`と同じ方針で権限を固定する
- * （`sandbox: 'read-only'` / `approvalMode: 'never'` / MCP・skill無効）。`effort`は
+ * 権限は分解セッションと同じ固定値（Codex: `approvalMode: never`、Claude: `manual`。
+ * `plannerApprovalModeFor`）にする。`runSingleTurnTask`の起動前検査がこの値と照合する。
+ * `sandbox: 'read-only'`とMCP・skill無効はCodex側だけに効き、Claude側は無視する。`effort`は
  * 空文字（拡張機能の既定に委ねる）で、Issueはeffortの設定を要求していない。
  */
-export function buildAutoReplySessionInput(cwd: string, model: string): TaskSessionInput {
+export function buildAutoReplySessionInput(
+  provider: Provider,
+  cwd: string,
+  model: string,
+): TaskSessionInput {
   return {
     cwd,
-    config: { model, effort: '', approvalMode: AUTO_REPLY_APPROVAL_MODE },
+    config: { model, effort: '', approvalMode: plannerApprovalModeFor(provider) },
     sandbox: SANDBOX_MODES[0],
     disableMcpServers: true,
     disableSkills: true,
@@ -100,12 +121,16 @@ export function autoReplyAgentCloseReasonFor(
 export interface AutoReplyAgentOptions {
   /** 返信役のセッションを開く土台（`chatView.ts` / `claudeChatView.ts` 自身）。 */
   host: TaskSessionHost;
+  /** 返信役を開くプロバイダ。`host`の画面が会話しているCLIと揃える。 */
+  provider: Provider;
   /** 元セッションと同じ作業ディレクトリ。 */
   cwd: string;
-  /** 設定 `agent.chat.autoReply.model`（`'auto'`等、`resolveAdvisorModel`で解決する前の生値）。 */
+  /** 設定 `agent.chat.autoReply.model`（`'auto'`等、`resolveAutoReplyModel`で解決する前の生値）。 */
   model: string;
   /** 1ターンあたりのタイムアウト（設定 `agent.chat.autoReply.timeoutSeconds` 由来）。 */
   timeoutMs: number;
+  /** 失敗・タイムアウト時に開き直して再試行する回数（設定 `agent.chat.autoReply.retryCount` 由来）。 */
+  retryCount: number;
   /** 元セッションの最初の依頼文。役割文に含める。 */
   originalRequest: string;
   idleTimeoutMs?: number;
@@ -151,11 +176,37 @@ export class AutoReplyAgent {
   /**
    * 直前のエージェント出力を渡し、返信役の返事を受け取る。
    *
-   * 初回呼び出し時だけセッションを開き、役割文（`buildAutoReplyRolePrompt`）と最初の材料を
-   * まとめて送る。2回目以降は同じセッションへ`buildAutoReplyTurnPrompt`だけを送り、
+   * 失敗（途中までの応答も無いタイムアウトを含む）したときは、セッションを閉じて開き直し、
+   * `retryCount`回まで再試行する（Issue #1602）。打ち切られた（`cancelled`）ときと、
+   * 返信役自体が閉じられたときは再試行しない。`onAttempt`は各試行の直前に1始まりの試行番号と
+   * 試行回数の上限で呼ばれ、画面の表示に使う。
+   */
+  async reply(
+    lastAgentMessage: string,
+    onAttempt?: (attempt: number, attempts: number) => void,
+  ): Promise<AutoReplyTurnResult> {
+    const attempts = this.options.retryCount + 1;
+    for (let attempt = 1; ; attempt++) {
+      onAttempt?.(attempt, attempts);
+      const result = await this.replyOnce(lastAgentMessage);
+      if (result.ok || result.kind === 'cancelled' || this.closed || attempt >= attempts) {
+        return result;
+      }
+      this.options.log?.warn(
+        `${AUTO_REPLY_LOG_PREFIX} 返信役が失敗したため開き直して再試行します（${attempt}/${attempts - 1}回目）: ${result.reason}`,
+      );
+      this.discardSession();
+    }
+  }
+
+  /**
+   * 1回だけ問い合わせる。
+   *
+   * セッションが無ければ開き、役割文（`buildAutoReplyRolePrompt`）と最初の材料を
+   * まとめて送る。あれば同じセッションへ`buildAutoReplyTurnPrompt`だけを送り、
    * 周をまたいで文脈を保つ。
    */
-  async reply(lastAgentMessage: string): Promise<AutoReplyTurnResult> {
+  private async replyOnce(lastAgentMessage: string): Promise<AutoReplyTurnResult> {
     if (this.closed) {
       return { ok: false, kind: 'failed', reason: 'この返信役は既に終了しています' };
     }
@@ -201,14 +252,15 @@ export class AutoReplyAgent {
     lastAgentMessage: string,
     signal: AbortSignal,
   ): Promise<string> {
-    const model = resolveAdvisorModel(this.options.model, AUTO_REPLY_PROVIDER);
+    const { provider } = this.options;
+    const model = resolveAutoReplyModel(this.options.model, provider);
     const prompt = `${buildAutoReplyRolePrompt(this.options.originalRequest)}\n\n${buildAutoReplyTurnPrompt(lastAgentMessage)}`;
     const redaction = redactCredentials(prompt);
     this.logRedaction(redaction);
     return runSingleTurnTask(
       this.options.host,
-      AUTO_REPLY_PROVIDER,
-      buildAutoReplySessionInput(this.options.cwd, model),
+      provider,
+      buildAutoReplySessionInput(provider, this.options.cwd, model),
       redaction.text,
       {
         timeoutMs: this.options.timeoutMs,
@@ -242,6 +294,22 @@ export class AutoReplyAgent {
       partialOnTimeout: true,
       signal,
     });
+  }
+
+  /**
+   * 再試行の前に今のセッションを閉じ、次の問い合わせで役割文から開き直させる。
+   * 失敗したセッションは応答待ちのまま固まっていることがあり、同じセッションへ送り直さない。
+   */
+  private discardSession(): void {
+    const session = this.session;
+    this.session = undefined;
+    try {
+      session?.dispose();
+    } catch (e) {
+      this.options.log?.warn(
+        `${AUTO_REPLY_LOG_PREFIX} 再試行前に返信役を閉じられませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   private logRedaction(redaction: ReturnType<typeof redactCredentials>): void {

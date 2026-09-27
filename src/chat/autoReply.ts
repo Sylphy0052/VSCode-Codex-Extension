@@ -224,6 +224,21 @@ export function describeAutoReplyStopReason(reason: AutoReplyStopReason, detail?
   return detail === undefined ? label : `${label}（${detail}）`;
 }
 
+/**
+ * 自動返信が処理中の間、入力欄の近くへ出す文言（Issue #1602）。画面は先頭に「自動返信: 」を付ける。
+ */
+export const AUTO_REPLY_ACTIVITY = {
+  completionCheck: '完了を検証中',
+  thinking: '返信を考え中',
+  dangerCheck: '送信前の危険度を確認中',
+  askUserQuestion: '質問への回答を選択中',
+} as const;
+
+/** 返信役の試行中の文言。再試行中（2回目以降）だけ試行回数を添える。 */
+export function describeAutoReplyAttempt(base: string, attempt: number, attempts: number): string {
+  return attempt <= 1 ? base : `${base}（${attempt}/${attempts}回目）`;
+}
+
 /** 自動返信の回数が上限へ達したか。 */
 export function hasReachedAutoReplyMaxTurns(turnCount: number, maxTurns: number): boolean {
   return turnCount >= maxTurns;
@@ -236,17 +251,32 @@ export function hasReachedAutoReplyMaxTurns(turnCount: number, maxTurns: number)
 export interface AutoReplySettings {
   /** 新規セッションの初期値だけを決める。以降のON/OFFはセッション単位（`ChatState.autoReply`）。 */
   enabled: boolean;
-  /** 返信役のモデル（`'auto'`等、`resolveAdvisorModel`で解決する前の生値）。 */
+  /** 返信役のモデル（`'auto'`等、`resolveAutoReplyModel`で解決する前の生値）。 */
   model: string;
   /** 返信役の1ターンあたりのタイムアウト（秒）。 */
   timeoutSeconds: number;
   /** 自動返信の最大往復回数。達したら自動でOFFにする（プロンプトインジェクション対策）。 */
   maxTurns: number;
+  /**
+   * 返信役が失敗・タイムアウトしたときに開き直して再試行する回数（Issue #1602）。
+   * 0なら1回失敗した時点で自動返信を終了する。
+   */
+  retryCount: number;
 }
 
 export const DEFAULT_AUTO_REPLY_MODEL = 'auto';
-export const DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS = 120;
+export const DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS = 180;
 export const DEFAULT_AUTO_REPLY_MAX_TURNS = 20;
+export const DEFAULT_AUTO_REPLY_RETRY_COUNT = 1;
+export const MAX_AUTO_REPLY_RETRY_COUNT = 3;
+
+/** 設定の再試行回数を0〜`MAX_AUTO_REPLY_RETRY_COUNT`の整数へ丸める。数でなければ既定値。 */
+export function normalizeAutoReplyRetryCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_AUTO_REPLY_RETRY_COUNT;
+  }
+  return Math.min(MAX_AUTO_REPLY_RETRY_COUNT, Math.max(0, Math.floor(value)));
+}
 
 /**
  * ターン終了時に自動返信を発火してよいかの判定に要る入力。

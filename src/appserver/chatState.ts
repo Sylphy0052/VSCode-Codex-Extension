@@ -713,6 +713,13 @@ export interface ChatState {
    */
   autoReply: boolean;
   /**
+   * 自動返信（Issue #1602）が今している処理を、入力欄の近くへ出す1行の文言。
+   *
+   * 完了の検証・返信役の応答待ち・危険度の確認・質問への自動回答の間だけ入れ、終わったら
+   * `undefined`へ戻す。拡張機能側だけで完結する一時的な表示で、CLIへは何も送らない。
+   */
+  autoReplyActivity?: string | undefined;
+  /**
    * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
    *
    * `initialize` の応答の `fast_mode_state` 由来。**Claude Code側にしか無い**概念で、

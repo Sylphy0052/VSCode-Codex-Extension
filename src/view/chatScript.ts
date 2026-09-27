@@ -2500,6 +2500,7 @@ export function chatScript(
     queuedMessages = state.queued || [];
     renderQueue(queuedMessages);
     renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
+    renderAutoReplyActivity(state.autoReplyActivity);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
     hasBackgroundTerminals = (state.backgroundTerminals || []).length > 0;
@@ -2698,6 +2699,15 @@ export function chatScript(
     button.title = unsupportedModel
       ? 'このモデルはFast modeに対応していません'
       : '応答を速くします（Fast mode）';
+  }
+
+  // 自動返信が処理中の間だけ出す1行（Issue #1602）。文言はホスト側が決める
+  function renderAutoReplyActivity(activity) {
+    const node = el('autoReplyActivity');
+    if (!node) return;
+    const text = typeof activity === 'string' ? activity : '';
+    node.hidden = text === '';
+    node.textContent = text === '' ? '' : '自動返信: ' + text;
   }
 
   function renderLimitAutoResumeStatus(status) {

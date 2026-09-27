@@ -94,7 +94,9 @@ import type { LoopDoneCheckConfig } from '../loop/loopDoneCheck';
 import { pushTurnSignature, detectStalledLoop } from '../loop/stallDetector';
 import { AutoReplyAgent, autoReplyAgentCloseReasonFor } from '../chat/autoReplyAgent';
 import {
+  AUTO_REPLY_ACTIVITY,
   buildAutoReplyAskUserQuestionPrompt,
+  describeAutoReplyAttempt,
   describeAutoReplyStopReason,
   extractAutoReplyMessage,
   firstUserMessageText,
@@ -1546,6 +1548,9 @@ export class ClaudeChatViewManager
     const agent = entry.autoReplyAgent;
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
+    if (!entry.disposed) {
+      entry.session.setAutoReplyActivity(undefined);
+    }
     if (wasOn) {
       entry.session.noteLocalEvent(
         `autoReplyStop:${Date.now()}`,
@@ -1562,9 +1567,23 @@ export class ClaudeChatViewManager
    * `sendFromLoop`で次のuserメッセージとして送り、会話へ「自動返信」の印を1行残す。
    */
   private async runAutoReplyTurn(entry: ClaudePanel, lastAgentMessageText: string): Promise<void> {
-    if (entry.disposed) {
+    if (entry.disposed || entry.autoReplyAgent?.isBusy() === true) {
       return;
     }
+    // 処理中の表示（Issue #1602）は、どの経路で抜けても消す
+    try {
+      await this.runAutoReplyTurnSteps(entry, lastAgentMessageText);
+    } finally {
+      if (!entry.disposed) {
+        entry.session.setAutoReplyActivity(undefined);
+      }
+    }
+  }
+
+  private async runAutoReplyTurnSteps(
+    entry: ClaudePanel,
+    lastAgentMessageText: string,
+  ): Promise<void> {
     const config = readAutoReplyConfig();
     if (!(await this.passesAutoReplyCompletionCheck(entry, lastAgentMessageText))) {
       return;
@@ -1578,9 +1597,11 @@ export class ClaudeChatViewManager
       }
       entry.autoReplyAgent = new AutoReplyAgent({
         host: this,
+        provider: 'claude',
         cwd,
         model: config.model,
         timeoutMs: config.timeoutSeconds * 1000,
+        retryCount: config.retryCount,
         originalRequest: firstUserMessageText(entry.session.getState().items) ?? '',
         log: this.log,
       });
@@ -1589,7 +1610,11 @@ export class ClaudeChatViewManager
     if (agent.isBusy()) {
       return;
     }
-    const result = await agent.reply(lastAgentMessageText);
+    const result = await agent.reply(lastAgentMessageText, (attempt, attempts) =>
+      entry.session.setAutoReplyActivity(
+        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.thinking, attempt, attempts),
+      ),
+    );
     if (entry.disposed) {
       agent.close('tabClosed');
       return;
@@ -1654,6 +1679,7 @@ export class ClaudeChatViewManager
     if (!reflex.enabled) {
       return true;
     }
+    entry.session.setAutoReplyActivity(AUTO_REPLY_ACTIVITY.completionCheck);
     const verdict = await checkAutoReplyCompletion(
       this.autoReplyReflexDeps(entry),
       lastAgentMessageText,
@@ -1693,6 +1719,7 @@ export class ClaudeChatViewManager
     if (!reflex.enabled) {
       return true;
     }
+    entry.session.setAutoReplyActivity(AUTO_REPLY_ACTIVITY.dangerCheck);
     const verdict = await checkAutoReplyDanger(
       this.autoReplyReflexDeps(entry),
       outgoing,
@@ -1756,6 +1783,22 @@ export class ClaudeChatViewManager
     requestId: number | string,
     questions: AskUserQuestionItem[],
   ): Promise<void> {
+    // 処理中の表示（Issue #1602）は、どの経路で抜けても消す
+    try {
+      await this.runAutoReplyAskUserQuestionSteps(entry, requestId, questions);
+    } finally {
+      if (!entry.disposed) {
+        entry.session.setAutoReplyActivity(undefined);
+      }
+    }
+  }
+
+  private async runAutoReplyAskUserQuestionSteps(
+    entry: ClaudePanel,
+    requestId: number | string,
+    questions: AskUserQuestionItem[],
+  ): Promise<void> {
+    entry.session.setAutoReplyActivity(AUTO_REPLY_ACTIVITY.askUserQuestion);
     const context = lastAgentMessage(entry.session.getState().items)?.text ?? '';
     const reflex = readAutoReplyReflexConfig(this.reflexEnabledFor(entry));
     if (reflex.enabled) {
@@ -1789,17 +1832,19 @@ export class ClaudeChatViewManager
         return;
       }
     }
+    const config = readAutoReplyConfig();
     if (entry.autoReplyAgent === undefined || entry.autoReplyAgent.isClosed()) {
       const cwd = entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath;
       if (cwd === undefined) {
         return;
       }
-      const config = readAutoReplyConfig();
       entry.autoReplyAgent = new AutoReplyAgent({
         host: this,
+        provider: 'claude',
         cwd,
         model: config.model,
         timeoutMs: config.timeoutSeconds * 1000,
+        retryCount: config.retryCount,
         originalRequest: firstUserMessageText(entry.session.getState().items) ?? '',
         log: this.log,
       });
@@ -1809,7 +1854,13 @@ export class ClaudeChatViewManager
       // 通常ターンの往復と重ならない想定だが、重なった場合はカードを残して次回に譲る
       return;
     }
-    const result = await agent.reply(buildAutoReplyAskUserQuestionPrompt(questions));
+    const result = await agent.reply(
+      buildAutoReplyAskUserQuestionPrompt(questions),
+      (attempt, attempts) =>
+        entry.session.setAutoReplyActivity(
+          describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.askUserQuestion, attempt, attempts),
+        ),
+    );
     if (entry.disposed || !entry.session.getState().autoReply || !result.ok) {
       return;
     }
