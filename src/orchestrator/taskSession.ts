@@ -228,6 +228,11 @@ export interface TaskSessionInput {
    * 渡さないときは従来どおりホストが通常のタブを開く。
    */
   handoffDelegate?: TaskHandoffDelegate;
+  /**
+   * 引き継ぎを始める前に、委譲先が受けるかを確かめる（Issue #1580）。`false`を返すと、ホストは
+   * 引き継ぎ文書を作らずに見送る。`handoffDelegate`を渡したときだけ見る。省略時は常に始める。
+   */
+  handoffPrecheck?: (trigger: TaskHandoffRequest['trigger']) => boolean;
 }
 
 /** `TaskSessionInput.handoffDelegate`へ渡す引き継ぎの依頼。 */
@@ -387,6 +392,12 @@ export interface TaskSession {
    * セッションでは呼ばれない。
    */
   onLockedAction?(listener: (action: LockedTabAction) => void): void;
+  /**
+   * 自動引き継ぎをもう一度発火できるようにする（Issue #1580）。ホストは自動引き継ぎを始めた時点で
+   * そのタブでは二度と発火させないため、委譲先（`TaskSessionInput.handoffDelegate`）が`true`を
+   * 返した後で乗り換えを諦めたときに呼ぶ。
+   */
+  rearmAutoHandoff?(): void;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /**

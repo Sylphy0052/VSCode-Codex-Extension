@@ -956,6 +956,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     notifyFailure: boolean,
     preassessed?: TaskAssessment,
   ): Promise<boolean> {
+    if (this.handoffDeclinedByDelegate(entry, trigger)) {
+      this.log.info('引き継ぎは呼び出し側が見送りました（旧タブはそのまま続きます）');
+      return false;
+    }
     if (this.store === undefined || this.globalStorageDir === undefined) {
       this.log.warn('引き継ぎに必要な履歴の解決口か置き場所が渡されていないため引き継げません');
       return false;
@@ -1941,6 +1945,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       inputLock: false,
       autoHandoffDisabled: false,
       handoffDelegate: undefined,
+      handoffPrecheck: undefined,
       reflexOverride: undefined,
       lockedActionListeners: [],
       taskConfig,
@@ -2088,6 +2093,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus, options.viewColumn),
       onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
+      rearmAutoHandoff: () => {
+        entry.autoHandoffStarted = false;
+      },
       dispose: () => this.teardown(entry),
     };
   }
