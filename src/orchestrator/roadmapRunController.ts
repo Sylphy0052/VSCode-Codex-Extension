@@ -546,8 +546,11 @@ export class RoadmapRunController {
   async setHalted(runId: string, halted: boolean): Promise<void> {
     const run = this.deps.store.find(runId);
     if (!halted && run !== undefined) {
-      // 再開の前に専有権を取る（再読み込みで止めた自動実行の再開を含む）
-      const leased = await this.ensureLease(run);
+      // 再開の前に専有権を取る（再読み込みで止めた自動実行の再開を含む）。停止解除でrunが
+      // 変わるときは、このあとの`updateRun`が`handleRunChanged`で突き合わせをやり直すため、
+      // ここでの再同期（停止解除の反映前のrunを読んでしまい効かない）は省く。runが変わらない
+      // （もともと止めていない）ときは`handleRunChanged`が呼ばれないので、ここで再同期する
+      const leased = await this.ensureLease(run, { resync: !run.haltedByUser });
       if (!leased.ok) {
         this.addEvent(runId, leased.message, 'warn');
         this.deps.onDidChange();

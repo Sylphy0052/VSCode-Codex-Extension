@@ -420,6 +420,8 @@ export class RoadmapRunLeaseManager {
     const current = await this.readLease(file);
     if (current !== undefined && this.isMine(current, runId)) {
       await unlink(file).catch(() => undefined);
+      // ファイルを消したので、次に見る中身は別物になる。古い観測を残さない
+      this.sightings.delete(file);
     }
   }
 
@@ -531,7 +533,8 @@ export class RoadmapRunLeaseManager {
         )
       ) {
         case 'free':
-          // 読む前に消えた。作り直す
+          // 読む前に消えた。古い観測が残っていれば捨てて作り直す
+          this.sightings.delete(file);
           continue;
         case 'busy':
           return { ok: false, holder: existing };
@@ -619,6 +622,8 @@ export class RoadmapRunLeaseManager {
       await rename(file, moved);
     } catch (e) {
       if (errorCode(e) === 'ENOENT') {
+        // 判定した中身は既に無い。観測も古くなっているので捨てる
+        this.sightings.delete(file);
         return;
       }
       throw e;
@@ -630,6 +635,9 @@ export class RoadmapRunLeaseManager {
       }
     } finally {
       await unlink(moved).catch(() => undefined);
+      // 退避を終えた時点で、判定に使った観測はもう役に立たない
+      // （消えたか、他ウィンドウの新しい中身に置き換わったか）
+      this.sightings.delete(file);
     }
   }
 
