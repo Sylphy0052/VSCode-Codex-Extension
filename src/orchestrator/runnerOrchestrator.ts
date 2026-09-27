@@ -21,7 +21,8 @@ import {
   type OrchestratorEvent,
 } from './orchestratorSession';
 import { sanitizeForLog, stripControlChars } from './sanitize';
-import { formatLessonsForIntro, MAX_RECORD_LESSON_CALLS_PER_RUN } from './runNotes';
+import { MAX_RECORD_LESSON_CALLS_PER_RUN } from './runNotes';
+import { issueNumberFromUrl } from './runRemaining';
 import { buildResponseSummary } from './taskSummary';
 import { formatUntrusted } from './untrustedText';
 import { isTeamRole } from './rolePresets';
@@ -140,7 +141,7 @@ function buildIntroBody(
   resume?: OrchestratorResumeContext,
   respawn?: OrchestratorRespawnContext,
   /**
-   * 過去のrunの教訓ブロック（`formatLessonsForIntro`の戻り値。Issue #1599）。
+   * 過去のrunの教訓と未処理の残件のブロック（`RunNotesStore.readIntroBlock`の戻り値。Issue #1599・#1600）。
    * `undefined`は`RunNotesStore`が無い（`runNotes`未設定）ことを表し、この場合
    * `record_lesson`ツール自体を導入文へ書かない（ツール一覧に無いのに説明だけ出ると
    * 矛盾するため）。空文字は「機能はあるが記録がまだ無い」を表し、ブロックだけ省く。
@@ -650,12 +651,43 @@ async function mutateOrchestratorIssue(
   });
   void self.persist(runId);
   self.notify(runId);
+  await recordIssueRemaining(self, runId, live.repoRoot, input, outcome.url);
   return {
     accepted: true,
     reason: `${action}しました。`,
     ...(issueNumber === undefined ? {} : { issueNumber }),
     ...(outcome.url === undefined ? {} : { url: outcome.url }),
   };
+}
+
+/**
+ * 起票したIssueを残件へ積み、Roadmap Issueの本文へ載った残件を掲載済みにする（Issue #1600）。
+ * 残件の記録に失敗してもIssue操作の結果は変えない（`RunNotesStore`がログへ1行残す）。
+ */
+async function recordIssueRemaining(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  repoRoot: string,
+  input: { kind: 'create'; title: string } | { kind: 'update' } | { kind: 'roadmap'; body: string },
+  url: string | undefined,
+): Promise<void> {
+  const runNotes = self.deps.runNotes;
+  if (runNotes === undefined) return;
+  if (input.kind === 'create') {
+    const issueNumber = issueNumberFromUrl(url);
+    await runNotes.recordRemaining(repoRoot, [
+      {
+        runId,
+        runKind: 'workflow',
+        source: 'issue',
+        text: input.title,
+        ...(issueNumber === undefined ? {} : { issueNumber }),
+        ...(url === undefined ? {} : { url }),
+      },
+    ]);
+  } else if (input.kind === 'roadmap') {
+    await runNotes.markIssuesOnRoadmap(repoRoot, input.body);
+  }
 }
 
 export function buildOrchestratorControlPort(
@@ -1485,9 +1517,8 @@ export async function setupOrchestratorForStart(
     }
     watchOrchestratorSession(self, runId, session);
 
-    const lessons =
-      self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.listLessons(live.repoRoot);
-    const lessonsBlock = lessons === undefined ? undefined : formatLessonsForIntro(lessons);
+    const lessonsBlock =
+      self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.readIntroBlock(live.repoRoot);
     notifyOrchestrator(self, runId, {
       kind: 'runStarted',
       body: buildIntroBody(live, resume, undefined, lessonsBlock),
@@ -1898,9 +1929,8 @@ async function respawnOrchestrator(
             askedAt: new Date(pendingAskUser.since).toISOString(),
           },
         };
-  const lessons =
-    self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.listLessons(live.repoRoot);
-  const lessonsBlock = lessons === undefined ? undefined : formatLessonsForIntro(lessons);
+  const lessonsBlock =
+    self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.readIntroBlock(live.repoRoot);
   // 導入文は最後に置く。送信本文が長すぎると古い側から落とすため（`composeOrchestratorPrompt`）、
   // 役割を伝える導入文を落とさないよう最も新しい位置にする
   orchestrator.pending = [

@@ -276,6 +276,19 @@ export async function notifyInstructionResult(
   taskId: string,
   report: InstructionReport,
 ): Promise<void> {
+  // 指示で解消されなかった残りを残件へ積む（Issue #1600）。記録の成否は通知に影響させない
+  if (self.deps.runNotes !== undefined && report.unresolved.length > 0) {
+    void self.deps.runNotes.recordRemaining(
+      live.repoRoot,
+      report.unresolved.map((text) => ({
+        runId,
+        runKind: 'workflow' as const,
+        source: 'unresolved' as const,
+        text,
+        taskId,
+      })),
+    );
+  }
   try {
     const observation = await collectInstructionObservation(self, runId, live, taskId);
     if (self.runs.get(runId) !== live) {

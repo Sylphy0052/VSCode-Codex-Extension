@@ -1926,6 +1926,60 @@ export function workflowScript(): string {
     }
   }
 
+  // ---- 残件（Issue #1600） ----
+
+  function applyRemaining(remaining) {
+    const section = el('remainingSection');
+    const hint = el('remainingHint');
+    const list = el('remainingList');
+    list.replaceChildren();
+    if (!remaining) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const notOnRoadmap = remaining.filter(
+      (r) => r.issueNumber !== undefined && r.onRoadmap === false,
+    ).length;
+    hint.textContent =
+      remaining.length === 0
+        ? '未処理の残件はありません'
+        : '未処理 ' + remaining.length + '件（うちロードマップ未掲載 ' + notOnRoadmap + '件）';
+    for (const r of remaining) {
+      const item = el2('li', 'lesson-item');
+      const head = el2('div', 'lesson-head');
+      head.appendChild(text('span', 'lesson-kind', r.sourceLabel));
+      head.appendChild(
+        text(
+          'span',
+          'lesson-time',
+          (LESSON_RUN_KIND_LABEL[r.runKind] || r.runKind) +
+            ' ' +
+            new Date(r.recordedAt).toLocaleString(),
+        ),
+      );
+      const doneBtn = el2('button', 'secondary lesson-delete');
+      doneBtn.type = 'button';
+      doneBtn.textContent = '済にする';
+      doneBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'markRemainingDone', id: r.id });
+      });
+      head.appendChild(doneBtn);
+      item.appendChild(head);
+      const where =
+        r.issueNumber !== undefined
+          ? '#' + r.issueNumber + (r.onRoadmap === false ? '（ロードマップ未掲載）' : '')
+          : r.taskId !== undefined
+            ? 'タスク ' + r.taskId
+            : '';
+      if (where !== '') {
+        item.appendChild(text('div', 'remaining-where', where));
+      }
+      item.appendChild(text('div', 'lesson-instruction', r.text));
+      list.appendChild(item);
+    }
+  }
+
   // ---- プログラム（design.md §16.37.3、roadmap W12-3、Issue #606） ----
 
   const PROGRAM_SKIP_REASON_LABEL = {
@@ -2112,6 +2166,8 @@ export function workflowScript(): string {
       applyRoadmap(msg.roadmap, msg.path, msg.pending, msg.error);
     } else if (msg.type === 'lessons') {
       applyLessons(msg.lessons);
+    } else if (msg.type === 'remaining') {
+      applyRemaining(msg.remaining);
     } else if (msg.type === 'completionEvidence') {
       completionEvidence = { runId: msg.runId, tasks: msg.tasks || {} };
       if (currentSnapshot) renderTable(currentSnapshot);

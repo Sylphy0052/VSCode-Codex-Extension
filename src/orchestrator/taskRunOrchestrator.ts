@@ -8,7 +8,6 @@ import {
 } from './orchestratorSession';
 import type { RoadmapAskOutcome } from './roadmapQuestionMcp';
 import {
-  formatLessonsForIntro,
   MAX_RECORD_LESSON_CALLS_PER_RUN,
   type LessonInput,
   type RunNotesStore,
@@ -432,11 +431,10 @@ export class TaskRunOrchestrator {
     session.open({ preserveFocus: true, viewColumn: 2 });
     live.busy = true;
     const current = this.deps.controller.find(runId) ?? run;
-    const lessons =
+    const lessonsBlock =
       this.deps.runNotes === undefined
         ? undefined
-        : await this.deps.runNotes.listLessons(current.workspaceRoot);
-    const lessonsBlock = lessons === undefined ? undefined : formatLessonsForIntro(lessons);
+        : await this.deps.runNotes.readIntroBlock(current.workspaceRoot);
     session.send(
       buildIntroPrompt(
         current,

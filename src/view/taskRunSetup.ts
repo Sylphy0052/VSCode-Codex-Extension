@@ -138,6 +138,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeGate: (engine, question) => judgeByReflex(engine, question),
     onRunChanged: (run) => holder.controller?.handleRunChanged(run),
     onWarning: (runId, taskId, message) => warn(`${runId} ${taskId}: ${message}`),
+    ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
 
   // 設定が無効なら判定せず、計画提案は常に承認待ちにする（ロードマップ実行と同じ判定器・閾値を使う）
