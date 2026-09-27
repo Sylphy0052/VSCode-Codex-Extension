@@ -381,9 +381,13 @@ export class TaskRunOrchestrator {
       token: registered.token,
       busy: false,
       pending: [...carried],
-      // 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
+      // eventsSent: 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
       eventsSent: previous?.eventsSent ?? 0,
-      // 上限に達したことは新しい世代も知らないため、次に捨てるときにもう1回だけ知らせる
+      // capNoticeSent: 上限に達した事実そのものは世代を跨いでも変わらないが、新しい世代の
+      // セッションはまだ知らない（`get_run_events`で捨てられた側なので届いていない）。知らないと
+      // 「イベントが来ない＝何も起きていない」と誤解しかねないため、世代ごとに1回だけ知らせる
+      // 目的でfalseに戻す（意図的。Issue #1594で見送ったlow：ユーザー向けのログ出力が世代分
+      // 重複する点は、runの節目ごとの1行に過ぎず実害が薄いためそのまま残す）
       capNoticeSent: false,
       handingOff: false,
     };
