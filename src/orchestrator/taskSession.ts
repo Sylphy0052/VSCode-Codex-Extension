@@ -209,7 +209,7 @@ export interface TaskSessionInput {
   forceAutoHandoff?: boolean;
   /**
    * 自動引き継ぎの自動承認（`agent.autoHandoff.autoApprove`）を、グローバル設定によらず
-   * このセッションではONにする（Issue #1505 仕様6）。手動の引き継ぎボタンは従来どおり確認する。
+   * このセッションではONにする（Issue #1505 仕様6）。手動の引き継ぎボタンにも効く（Issue #1510）。
    */
   autoHandoffAutoApprove?: boolean;
   /**
