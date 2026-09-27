@@ -804,13 +804,22 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   /**
    * 委譲先が今回の引き継ぎを受けないと先に答えたか（Issue #1580）。受けないと分かっている
    * 引き継ぎのために、引き継ぎ文書の作成とModel/Effortの選択を走らせないため`startHandoff`の
-   * 冒頭で見る。
+   * 冒頭で見る。見送りのログはここで出す（`delegateHandoff`と同じ文言。Issue #1594で
+   * 呼び出し側の重複を解消し、判定とログを1か所へ寄せた）。
    */
-  protected handoffDeclinedByDelegate(entry: TPanel, trigger: HandoffTrigger): boolean {
+  protected handoffDeclinedByDelegate(
+    entry: TPanel,
+    trigger: HandoffTrigger,
+    log: Pick<Logger, 'info'>,
+  ): boolean {
     if (entry.handoffDelegate === undefined || entry.handoffPrecheck === undefined) {
       return false;
     }
-    return !entry.handoffPrecheck(trigger.kind === 'manual' ? 'manual' : 'auto');
+    if (entry.handoffPrecheck(trigger.kind === 'manual' ? 'manual' : 'auto')) {
+      return false;
+    }
+    log.info('引き継ぎは呼び出し側が見送りました（旧タブはそのまま続きます）');
+    return true;
   }
 
   /**
