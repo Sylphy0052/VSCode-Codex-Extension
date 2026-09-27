@@ -483,10 +483,13 @@ function collectTree(
 /** 一時停止で子孫プロセスへSIGTERMを送ってから、残っていればSIGKILLを送るまでの猶予。 */
 const DESCENDANT_KILL_GRACE_MS = 3000;
 
+/** 猶予の間に子孫が終わったかを確かめる間隔。 */
+const DESCENDANT_POLL_MS = 200;
+
 /**
  * 根のプロセスの子孫を終わらせる（工程の一時停止。Issue #1629）。根そのものは呼び出し側が
  * 止める。根を止めると子孫は親を失って`init`の子になり、ツリーからたどれなくなるため、
- * 根より先に呼ぶ。SIGTERMを送り、猶予の後も残っていればSIGKILLを送る。
+ * 根より先に呼ぶ。SIGTERMを送り、猶予の後も残っていればSIGKILLを送る。終わるまで待ってから返る。
  *
  * Windowsは`taskkill /T /F`で根ごと止める（シグナルの段階は無い）。
  */
@@ -498,9 +501,10 @@ export async function terminateDescendants(
     await ports.execFile('taskkill', ['/PID', String(rootPid), '/T', '/F']);
     return;
   }
-  const pids = await new ResourceSampler(ports).listDescendantPids(rootPid);
-  const signal = (sig: NodeJS.Signals): void => {
-    for (const pid of pids) {
+  const sampler = new ResourceSampler(ports);
+  const pids = await sampler.listDescendantPids(rootPid);
+  const signal = (targets: readonly number[], sig: NodeJS.Signals): void => {
+    for (const pid of targets) {
       try {
         process.kill(pid, sig);
       } catch {
@@ -508,11 +512,27 @@ export async function terminateDescendants(
       }
     }
   };
-  signal('SIGTERM');
+  signal(pids, 'SIGTERM');
   if (pids.length === 0) {
     return;
   }
-  const timer = setTimeout(() => signal('SIGKILL'), DESCENDANT_KILL_GRACE_MS);
-  // このタイマーだけで拡張機能ホストの終了を止めない
-  timer.unref();
+  // 呼び出し側がメモリを空けたと報告できるよう、終わるまで待つ（全部終われば猶予を待たずに抜ける）
+  const deadline = ports.now() + DESCENDANT_KILL_GRACE_MS;
+  while (ports.now() < deadline && pids.some(isPidAlive)) {
+    await new Promise((resolve) => setTimeout(resolve, DESCENDANT_POLL_MS));
+  }
+  // 猶予の後も根の子孫として残るものだけに送る。猶予の前の一覧をそのまま使うと、その間に
+  // 終わったpidが無関係なプロセスへ再利用されていた場合に誤って止める
+  const remaining = new Set(await sampler.listDescendantPids(rootPid));
+  signal(pids.filter((pid) => remaining.has(pid)), 'SIGKILL');
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // 権限が無いだけなら生きている
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
