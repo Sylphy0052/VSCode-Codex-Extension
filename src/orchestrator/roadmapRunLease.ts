@@ -39,8 +39,10 @@ const LEASE_VERSION = 1;
 const MAX_ACQUIRE_ATTEMPTS = 3;
 /** 専有権を持つウィンドウの表示で、hostnameを切り詰める長さ。 */
 const HOLDER_HOSTNAME_MAX_LENGTH = 64;
+/** 専有権を持つウィンドウの表示で、windowIdの先頭から見せる長さ。 */
+const HOLDER_WINDOW_ID_LENGTH = 8;
 /** 作成・退避の途中で残った一時ファイル（`*.tmp-*` / `*.stale-*`）。 */
-const LEFTOVER_FILE_PATTERN = /\.json\.(?:tmp|stale)-/u;
+const LEFTOVER_FILE_PATTERN = /^[0-9a-f]{32}\.json\.(?:tmp|stale)-/u;
 
 export interface RoadmapRunLease {
   version: typeof LEASE_VERSION;
@@ -260,9 +262,13 @@ export function formatRoadmapLeaseHolder(lease: RoadmapRunLease | undefined, now
   }
   const age = heartbeatAge(lease, now);
   const seconds = Number.isFinite(age) ? Math.max(0, Math.round(age / 1000)) : undefined;
-  // 専有権ファイルは共有ディレクトリにあり、別のウィンドウ（別ホスト）が書いた外部由来のテキスト
+  // 専有権ファイルは共有ディレクトリにあり、別のウィンドウ（別ホスト）が書ける。
+  // 制御文字や長すぎる値を通知へそのまま出さないよう、表示の前に整える
   const host = sanitizeInlineText(lease.hostname, HOLDER_HOSTNAME_MAX_LENGTH);
-  const windowId = sanitizeInlineText(lease.windowId.slice(0, 8), 8);
+  const windowId = sanitizeInlineText(
+    lease.windowId.slice(0, HOLDER_WINDOW_ID_LENGTH),
+    HOLDER_WINDOW_ID_LENGTH,
+  );
   const parts = [
     `ホスト ${host === '' ? '不明' : host}`,
     lease.pid > 0 ? `PID ${String(lease.pid)}` : undefined,

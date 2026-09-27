@@ -364,9 +364,14 @@ export class RoadmapRunController {
     if (run === undefined || run.finishedAt !== undefined) {
       return;
     }
-    this.deps.mergeQueue?.sync(run);
-    if (pickIssuesToStart(run).length > 0) {
-      this.schedulePump(runId);
+    try {
+      this.deps.mergeQueue?.sync(run);
+      if (pickIssuesToStart(run).length > 0) {
+        this.schedulePump(runId);
+      }
+    } catch (e: unknown) {
+      // 専有権は取れている。取得の失敗として報告しないよう、ここで受けて記録だけする
+      this.deps.log(`[roadmap run] ${runId}の専有権取得後の再同期に失敗しました: ${String(e)}`);
     }
   }
 
