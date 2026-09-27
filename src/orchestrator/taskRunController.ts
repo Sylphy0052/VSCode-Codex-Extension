@@ -1128,6 +1128,11 @@ export class TaskRunController {
    * codexはapp-serverを工程間で共有するため、会話の購読を外すだけでメモリは空かない。
    */
   async pauseStage(runId: string, taskId: string, reason: string): Promise<ControllerResult> {
+    // 工程セッションを持つのは専有権のあるウィンドウだけ（Issue #1628）
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const run = this.deps.store.find(runId);
     if (run === undefined) {
       return { ok: false, message: 'runが見つからない' };
@@ -1153,6 +1158,10 @@ export class TaskRunController {
   }
 
   async resumeStage(runId: string, taskId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const accepted = await this.deps.runner.resumeStage(runId, taskId);
     return accepted
       ? {
