@@ -516,8 +516,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // worktreeで戻るため
   const taskRunStore = new TaskRunStore(context.workspaceState, (message) => log.warn(message));
   const isTaskManagedThread = (id: string): boolean =>
-    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
-    taskRunStore.hasSessionRef(id);
+    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) || taskRunStore.hasSessionRef(id);
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
@@ -2319,9 +2318,7 @@ async function continueNextRoadmapChunk(
   }
   const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(defPath));
   if (folder === undefined) {
-    log.warn(
-      '[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません',
-    );
+    log.warn('[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません');
     return;
   }
   const dir = readWorkflowsConfig().dir;

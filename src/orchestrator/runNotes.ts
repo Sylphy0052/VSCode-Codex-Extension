@@ -718,7 +718,7 @@ export class RunNotesStore {
     const timedOut = new Promise<RunNoteRecord[]>((resolve) => {
       timer = setTimeout(() => {
         this.logFailure(
-          `${label}の読み込みが${READ_TIMEOUT_MS / 1000}秒以内に終わりませんでした。`,
+          `${label}の読み込みが${String(READ_TIMEOUT_MS / 1000)}秒以内に終わりませんでした。`,
         );
         resolve([]);
       }, READ_TIMEOUT_MS);
