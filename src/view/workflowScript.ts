@@ -33,6 +33,13 @@ export function workflowScript(): string {
     skipped: 'スキップ',
   };
 
+  // 教訓（Issue #1599）の記録元run種別のラベル。'runNotes.ts'の'RunKind'と対応させる
+  const LESSON_RUN_KIND_LABEL = {
+    workflow: 'ワークフロー',
+    taskRun: 'タスクrun',
+    roadmapRun: 'ロードマップrun',
+  };
+
   // 交差の待機の理由（Issue #1469）。ファイルは先頭2件まで出し、残りは件数だけにする
   function describeOverlapWait(wait) {
     const files = wait.files || [];
@@ -1877,6 +1884,48 @@ export function workflowScript(): string {
     }
   }
 
+  // ---- 教訓（Issue #1599） ----
+
+  function applyLessons(lessons) {
+    const section = el('lessonsSection');
+    const hint = el('lessonsHint');
+    const list = el('lessonsList');
+    list.replaceChildren();
+    if (!lessons) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    hint.textContent = lessons.length === 0 ? '記録された教訓はまだありません' : '';
+    for (const lesson of lessons) {
+      const item = el2('li', 'lesson-item');
+      const head = el2('div', 'lesson-head');
+      head.appendChild(
+        text('span', 'lesson-kind', LESSON_RUN_KIND_LABEL[lesson.runKind] || lesson.runKind),
+      );
+      head.appendChild(text('span', 'lesson-time', new Date(lesson.recordedAt).toLocaleString()));
+      const deleteBtn = el2('button', 'secondary lesson-delete');
+      deleteBtn.type = 'button';
+      deleteBtn.textContent = '削除';
+      deleteBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'deleteLesson', id: lesson.id });
+      });
+      head.appendChild(deleteBtn);
+      item.appendChild(head);
+      item.appendChild(text('div', 'lesson-observation', lesson.observation));
+      const evidence = lesson.evidence || [];
+      if (evidence.length > 0) {
+        const evidenceList = el2('ul', 'lesson-evidence');
+        for (const e of evidence) {
+          evidenceList.appendChild(text('li', '', e));
+        }
+        item.appendChild(evidenceList);
+      }
+      item.appendChild(text('div', 'lesson-instruction', lesson.instruction));
+      list.appendChild(item);
+    }
+  }
+
   // ---- プログラム（design.md §16.37.3、roadmap W12-3、Issue #606） ----
 
   const PROGRAM_SKIP_REASON_LABEL = {
@@ -2061,6 +2110,8 @@ export function workflowScript(): string {
       }
     } else if (msg.type === 'roadmap') {
       applyRoadmap(msg.roadmap, msg.path, msg.pending, msg.error);
+    } else if (msg.type === 'lessons') {
+      applyLessons(msg.lessons);
     } else if (msg.type === 'completionEvidence') {
       completionEvidence = { runId: msg.runId, tasks: msg.tasks || {} };
       if (currentSnapshot) renderTable(currentSnapshot);

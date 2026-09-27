@@ -21,6 +21,7 @@ import {
   type OrchestratorEvent,
 } from './orchestratorSession';
 import { sanitizeForLog, stripControlChars } from './sanitize';
+import { formatLessonsForIntro, MAX_RECORD_LESSON_CALLS_PER_RUN } from './runNotes';
 import { buildResponseSummary } from './taskSummary';
 import { formatUntrusted } from './untrustedText';
 import { isTeamRole } from './rolePresets';
@@ -89,6 +90,7 @@ const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
   'create_issue',
   'update_issue',
   'update_roadmap_issue',
+  'record_lesson',
 ]);
 
 /**
@@ -137,6 +139,13 @@ function buildIntroBody(
   live: LiveRun,
   resume?: OrchestratorResumeContext,
   respawn?: OrchestratorRespawnContext,
+  /**
+   * 過去のrunの教訓ブロック（`formatLessonsForIntro`の戻り値。Issue #1599）。
+   * `undefined`は`RunNotesStore`が無い（`runNotes`未設定）ことを表し、この場合
+   * `record_lesson`ツール自体を導入文へ書かない（ツール一覧に無いのに説明だけ出ると
+   * 矛盾するため）。空文字は「機能はあるが記録がまだ無い」を表し、ブロックだけ省く。
+   */
+  lessonsBlock?: string,
 ): string {
   const tasks = live.def.tasks
     .map((t) => {
@@ -264,6 +273,12 @@ function buildIntroBody(
       '回数に上限あり）。add_task/remove_task/update_task_dependenciesで方針そのものが' +
       '変わる場合（担当領域をまたぐ・設計の前提を変える・受入基準を下げる）は、適用する前に' +
       'ask_userで人に確認すること',
+    ...(lessonsBlock === undefined
+      ? []
+      : [
+          '- record_lesson: 次のrunへ残す教訓。run終了時にはツールが閉じるため、気付いた' +
+            '時点（タスク失敗・やり直し・最後のタスクの完了前）で記録する',
+        ]),
     '',
     'あなた自身はファイルを書き換えられません（読み取り専用）。実際の作業は各タスクが行います。',
     ...contract,
@@ -273,6 +288,7 @@ function buildIntroBody(
     ...respawnNote,
     ...resumeNote,
     ...carryOverNote,
+    ...(lessonsBlock === undefined || lessonsBlock === '' ? [] : ['', lessonsBlock]),
   ].join('\n');
 }
 
@@ -698,6 +714,36 @@ export function buildOrchestratorControlPort(
             mutateOrchestratorIssue(self, runId, { kind: 'roadmap', issue: roadmapIssue, body }),
         }
       : {}),
+    ...(self.deps.runNotes === undefined
+      ? {}
+      : {
+          recordLesson: async (input: {
+            observation: string;
+            evidence: readonly string[];
+            instruction: string;
+          }) => {
+            const live = self.runs.get(runId);
+            const orchestrator = live?.orchestrator;
+            if (live === undefined || orchestrator === undefined) {
+              return no('オーケストレーターのセッションが見つかりません。');
+            }
+            if (orchestrator.recordLessonCount >= MAX_RECORD_LESSON_CALLS_PER_RUN) {
+              return no(
+                `このrunでのrecord_lessonの呼び出し回数が上限（${MAX_RECORD_LESSON_CALLS_PER_RUN}回）に達しました。`,
+              );
+            }
+            const result = await self.deps.runNotes!.recordLesson(live.repoRoot, {
+              ...input,
+              runId,
+              runKind: 'workflow',
+            });
+            if (!result.ok) {
+              return no(result.message);
+            }
+            orchestrator.recordLessonCount += 1;
+            return ok('教訓を記録しました。');
+          },
+        }),
     stopTask: (taskId) => {
       const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
@@ -1425,6 +1471,7 @@ export async function setupOrchestratorForStart(
       // 消費している。ここで0から始めると、リロードのたびに実質無料で上限を
       // すり抜けられてしまう（design.md §16.33「呼び出し回数の上限」の意図が崩れる）
       askUserCount: pendingAskUser !== undefined ? 1 : 0,
+      recordLessonCount: 0,
     };
     live.orchestrator = orchestrator;
     if (pendingAskUser !== undefined) {
@@ -1438,7 +1485,13 @@ export async function setupOrchestratorForStart(
     }
     watchOrchestratorSession(self, runId, session);
 
-    notifyOrchestrator(self, runId, { kind: 'runStarted', body: buildIntroBody(live, resume) });
+    const lessons =
+      self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.listLessons(live.repoRoot);
+    const lessonsBlock = lessons === undefined ? undefined : formatLessonsForIntro(lessons);
+    notifyOrchestrator(self, runId, {
+      kind: 'runStarted',
+      body: buildIntroBody(live, resume, undefined, lessonsBlock),
+    });
     if (live.failureRecovery !== undefined) {
       notifyOrchestrator(self, runId, {
         kind: 'failureRecovery',
@@ -1845,17 +1898,25 @@ async function respawnOrchestrator(
             askedAt: new Date(pendingAskUser.since).toISOString(),
           },
         };
+  const lessons =
+    self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.listLessons(live.repoRoot);
+  const lessonsBlock = lessons === undefined ? undefined : formatLessonsForIntro(lessons);
   // 導入文は最後に置く。送信本文が長すぎると古い側から落とすため（`composeOrchestratorPrompt`）、
   // 役割を伝える導入文を落とさないよう最も新しい位置にする
   orchestrator.pending = [
     ...carried,
     {
       kind: 'runStarted',
-      body: buildIntroBody(live, resume, {
-        reason,
-        count: orchestrator.respawnCount,
-        carriedCount: carried.length,
-      }),
+      body: buildIntroBody(
+        live,
+        resume,
+        {
+          reason,
+          count: orchestrator.respawnCount,
+          carriedCount: carried.length,
+        },
+        lessonsBlock,
+      ),
     },
   ];
   if (pendingAskUser !== undefined && pendingAskUser.answeredChoice === undefined) {

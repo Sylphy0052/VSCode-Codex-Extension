@@ -1,5 +1,6 @@
 import type { McpToolDefinition } from './messaging';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from './roadmapQuestionMcp';
+import { RECORD_LESSON_TOOL, parseLessonArgs, type LessonInput } from './runNotes';
 import {
   MAX_PLAN_CRITERIA,
   MAX_PLAN_CRITERION_LENGTH,
@@ -192,6 +193,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  RECORD_LESSON_TOOL,
 ];
 
 /**
@@ -206,6 +208,7 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
   'instruct_task',
   'answer_question',
   'resolve_gate',
+  'record_lesson',
 ]);
 
 export type TaskRunOrchestratorCall =
@@ -224,7 +227,8 @@ export type TaskRunOrchestratorCall =
   | { tool: 'answer_question'; taskId: string; questionId: string; answer: string }
   | { tool: 'resolve_gate'; taskId: string; gateId: string; choice: StageGateChoice }
   | { tool: 'stop_stage'; taskId: string }
-  | { tool: 'set_max_parallel'; maxParallel: number };
+  | { tool: 'set_max_parallel'; maxParallel: number }
+  | { tool: 'record_lesson'; input: LessonInput };
 
 type ParseResult = { ok: true; call: TaskRunOrchestratorCall } | { ok: false; message: string };
 
@@ -288,6 +292,13 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       return { ok: false, message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
     }
     return { ok: true, call: { tool: 'set_max_parallel', maxParallel: n } };
+  }
+  if (name === 'record_lesson') {
+    const parsed = parseLessonArgs(raw);
+    if (!parsed.ok) {
+      return { ok: false, message: parsed.message };
+    }
+    return { ok: true, call: { tool: 'record_lesson', input: parsed.value } };
   }
   const taskId = a.taskId;
   if (typeof taskId !== 'string' || !isValidTaskId(taskId)) {
