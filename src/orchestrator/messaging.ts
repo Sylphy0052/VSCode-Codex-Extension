@@ -942,8 +942,8 @@ export interface OrchestratorControlPort {
   decideFinalMerge(decision: string, reason: string): OrchestratorControlResult;
   /**
    * 実行中の定義へ新しいタスクを加える（design.md §16.29、roadmap W4、Issue #338）。
-   * 適用先は実行中の定義（`live.def`）だけで、YAMLファイルは書き換えない。追加する
-   * タスクにも既存の検証（id形式・循環依存・上限件数・プロンプト長）をそのまま通す。
+   * 適用先は実行中の定義（`live.def`）で、YAMLファイルへもベストエフォートで追記する
+   * （Issue #1614）。追加するタスクにも既存の検証（id形式・循環依存・上限件数・プロンプト長）をそのまま通す。
    * `autoApprove`/`allow`/`sandbox`/`approvalMode`は受け取らず、指定されていれば拒否する。
    */
   addTask(input: Record<string, unknown>): OrchestratorControlResult;
@@ -1158,14 +1158,14 @@ export const DECIDE_FINAL_MERGE_TOOL: McpToolDefinition = {
 
 /**
  * `add_task`ツール（design.md §16.29、roadmap W4、Issue #338）。実行中の定義へ新しい
- * タスクを加える。YAMLファイルは書き換えない。`autoApprove`/`allow`/`sandbox`/
+ * タスクを加える。YAMLファイルへもベストエフォートで追記する（Issue #1614）。`autoApprove`/`allow`/`sandbox`/
  * `approvalMode`はスキーマに含めていない。もし指定されていれば（値によらず）拒否する
  * （`OrchestratorControlPort.addTask`実体側で検証する）。
  */
 export const ADD_TASK_TOOL: McpToolDefinition = {
   name: 'add_task',
   description:
-    '実行中の定義へ新しいタスクを追加する（YAMLファイルは書き換えない）。id/prompt/done' +
+    '実行中の定義へ新しいタスクを追加する（YAMLファイルの末尾へも追記する）。id/prompt/done' +
     'は必須。dependsOnは省略時[]。既存の検証（id形式・循環依存・上限件数・プロンプト長）を' +
     'そのまま通し、違反すれば適用前に拒否され理由が返る。autoApprove/allow/sandbox/' +
     'approvalMode/escalateは指定できない（指定すると拒否される。権限の緩和は人が書いた' +

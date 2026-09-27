@@ -1716,7 +1716,7 @@ export interface RoadmapFileSystemPort {
  * 一次防御と同じ考え方。ロードマップ側のポートは`isSymbolicLink`を持たないため、
  * Node実装の中で`lstat`を直接使う。
  */
-async function findSymlinkedSegment(
+export async function findSymlinkedSegment(
   workspaceRoot: string,
   target: string,
 ): Promise<string | undefined> {
@@ -1747,7 +1747,7 @@ async function findSymlinkedSegment(
  * 必ず一致し、検査が自己無矛盾になって何も検知できない（`pseudoWorktree.ts`が
  * Issue #505で3度再発を確認した構造と同じ）。
  */
-async function isExpectedRealPath(
+export async function isExpectedRealPath(
   workspaceRoot: string,
   target: string,
 ): Promise<{ ok: true } | { ok: false; actual: string }> {

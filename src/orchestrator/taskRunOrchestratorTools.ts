@@ -50,7 +50,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'propose_plan',
     description:
-      '作業の計画（タスクの分割と依存）を提案する。計画全体を毎回送る（差分ではない）。既存のタスクはget_run_stateのtaskId（T<数字>）で、新しいタスクは任意の仮キーで書く。応答で仮キーと採番したtaskIdの対応を返す。ユーザーが承認するまで工程は始まらず、承認後に計画を変えると再び承認待ちになる。',
+      '作業の計画（タスクの分割と依存）を提案する。計画全体を毎回送る（差分ではない）。既存のタスクはget_run_stateのtaskId（T<数字>）で、新しいタスクは任意の仮キーで書く。応答で仮キーと採番したtaskIdの対応を返す。承認するまで工程は始まらず（approve_planツール、またはKanbanの承認ボタン）、承認後に計画を変えると再び承認待ちになる。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -94,9 +94,21 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     },
   },
   {
+    name: 'approve_plan',
+    description:
+      '承認待ちの計画を承認し、工程を始める。承認待ちの計画が無ければ失敗する。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
     name: 'get_run_state',
     description:
       'この実行の現在の状態（計画の承認状況・並列上限・各タスクの工程・判断待ちの工程と推奨値・ユーザー判断待ちの質問）を返す。状態の正本はこれで、通知の内容より優先する。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'refresh_kanban',
+    description:
+      'Kanban画面へ現在の状態を再通知する。状態変更は通常自動で反映されるため、画面が古いまま止まって見えるときのリカバリ用途に限って使う。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -197,13 +209,16 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
 ];
 
 /**
- * 人の承認を経ずに呼べるツール。計画の提案はユーザーの承認を経るまで工程を始めないため含める。
- * 取り消せない操作（工程の停止）とrun全体の方針（並列上限）は含めない。`answer_question`と
- * `resolve_gate`はツールの処理の中で本文をモーダルで確認するため、チャットの承認には回さない。
+ * 人の承認を経ずに呼べるツール。計画の提案・承認はOrchestratorが自律で進める（Kanbanの
+ * ユーザー承認ボタンを経ない）。取り消せない操作（工程の停止）とrun全体の方針
+ * （並列上限）は含めない。`answer_question`と`resolve_gate`はツールの処理の中で本文を
+ * モーダルで確認するため、チャットの承認には回さない。
  */
 export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = new Set([
   'propose_plan',
+  'approve_plan',
   'get_run_state',
+  'refresh_kanban',
   'start_stage',
   'instruct_task',
   'answer_question',
@@ -213,7 +228,9 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
 
 export type TaskRunOrchestratorCall =
   | { tool: 'propose_plan'; rawArgs: unknown }
+  | { tool: 'approve_plan' }
   | { tool: 'get_run_state' }
+  | { tool: 'refresh_kanban' }
   | {
       tool: 'start_stage';
       taskId: string;
@@ -283,8 +300,14 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
   if (name === 'propose_plan') {
     return { ok: true, call: { tool: 'propose_plan', rawArgs: raw } };
   }
+  if (name === 'approve_plan') {
+    return { ok: true, call: { tool: 'approve_plan' } };
+  }
   if (name === 'get_run_state') {
     return { ok: true, call: { tool: 'get_run_state' } };
+  }
+  if (name === 'refresh_kanban') {
+    return { ok: true, call: { tool: 'refresh_kanban' } };
   }
   if (name === 'set_max_parallel') {
     const n = a.maxParallel;

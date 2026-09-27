@@ -165,6 +165,20 @@ export class TaskRunController {
     }
   }
 
+  /**
+   * Kanban画面へ現在の状態を強制的に再通知する（Orchestratorの`refresh_kanban`ツール）。
+   *
+   * 状態変更は`updateRun`が`handleRunChanged`を都度呼ぶため通常は自動で反映されるが、
+   * webview側の描画が古いまま止まって見える場合の手動リカバリ手段として設ける。
+   * runが見つからなければ何もしない。
+   */
+  refreshKanban(runId: string): void {
+    const run = this.deps.store.find(runId);
+    if (run !== undefined) {
+      this.handleRunChanged(run);
+    }
+  }
+
   /** 状態を純粋関数で進めて永続化する。runが無ければ`undefined`。 */
   async updateRun(runId: string, fn: (run: TaskRun) => TaskRun): Promise<TaskRun | undefined> {
     if (this.deps.store.find(runId) === undefined) {
@@ -422,8 +436,8 @@ export class TaskRunController {
   }
 
   /**
-   * ユーザーが計画を承認する（Kanbanのボタンから呼ぶ。Orchestratorからは呼べない）。提案の後に
-   * 別のrunが同じIssueを扱い始めていれば承認しない（Issue #1562）。
+   * 計画を承認する（Kanbanのボタン、またはOrchestratorの`approve_plan`ツールから呼ぶ）。
+   * 提案の後に別のrunが同じIssueを扱い始めていれば承認しない（Issue #1562）。
    */
   async approvePlan(runId: string): Promise<ControllerResult> {
     const run = this.deps.store.find(runId);

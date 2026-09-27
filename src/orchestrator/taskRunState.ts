@@ -444,9 +444,12 @@ function newTask(draft: TaskDraft, executionId: string, at: string): Orchestrate
 
 /**
  * 検証を通った計画を承認待ちとして置く。載っていない未着手のタスクは消し、既存のタスクは
- * 内容（タイトル、要約、受入基準、依存）だけを差し替える。着手済みのタスクを消す計画、
- * 不正な`taskId`・Issue番号・依存先は例外にする（形式、重複、循環の検証は呼び出し側が
- * 先に済ませる前提）。
+ * 内容（タイトル、要約、受入基準、依存）だけを差し替える。不正な`taskId`・Issue番号・
+ * 依存先は例外にする（形式、重複、循環の検証は呼び出し側が先に済ませる前提）。
+ *
+ * 着手済みタスクの削除・既存Issueの付け替えも許す（Orchestratorの自律運用のため）。
+ * 削除された着手済みタスクのworktree/branch/PRは、この関数では後始末しない
+ * （呼び出し側・スケジューラ側で孤立リソースを扱う前提）。
  */
 export function proposeTaskPlan(
   run: TaskRun,
@@ -470,23 +473,6 @@ export function proposeTaskPlan(
   }
   if (proposedIds.size !== drafts.length) {
     throw new Error('taskIdが重複しています');
-  }
-  const removedStarted = listTasks(run).find(
-    (task) => !proposedIds.has(task.taskId) && hasStarted(task),
-  );
-  if (removedStarted !== undefined) {
-    throw new Error(`着手済みのタスクは削除できません: ${removedStarted.taskId}`);
-  }
-  const relinkedStarted = drafts.find((draft) => {
-    const existing = getTask(run, draft.taskId);
-    return (
-      existing !== undefined &&
-      hasStarted(existing) &&
-      existing.existingIssueNumber !== draft.existingIssueNumber
-    );
-  });
-  if (relinkedStarted !== undefined) {
-    throw new Error(`着手済みのタスクの既存Issueは変えられません: ${relinkedStarted.taskId}`);
   }
   const tasks: Record<string, OrchestratedTask> = {};
   for (const draft of drafts) {

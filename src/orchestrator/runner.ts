@@ -43,7 +43,12 @@ import {
   type PullRequestLayerConfig,
 } from './forge';
 import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
-import { applyRunCompletionToFile, type RoadmapFileSystemPort } from './roadmap';
+import {
+  applyRunCompletionToFile,
+  findSymlinkedSegment,
+  isExpectedRealPath,
+  type RoadmapFileSystemPort,
+} from './roadmap';
 import { syncRoadmapCompletionToIssue } from './roadmapIssueSync';
 import type { TeamRole } from './rolePresets';
 import {
@@ -216,6 +221,12 @@ export interface WorkflowFilePort {
   /** バイト数。存在しない・読めない場合は undefined。 */
   fileSize(path: string): Promise<number | undefined>;
   readTextFile(path: string): Promise<string | undefined>;
+  /**
+   * Orchestratorによる定義変更（`add_task`等）をYAMLファイルへ反映する書き込み口
+   * （Issue #1614）。既存の`WorkflowFilePort`実装（テストのモック含む）を壊さないよう
+   * optionalにする。無い場合、呼び出し側は永続化を諦めて`live.def`のみの更新にとどめる。
+   */
+  writeTextFile?(target: string, content: string, workspaceRoot: string): Promise<void>;
 }
 
 /**
@@ -361,6 +372,48 @@ export const nodeWorkflowFilePort: WorkflowFilePort = {
       return await fsPromises.readFile(path, 'utf8');
     } catch {
       return undefined;
+    }
+  },
+  /**
+   * `roadmap.ts`の`nodeRoadmapFileSystem.writeTextFile`と同じ手順（Issue #1120と同じ
+   * シンボリックリンク差し替え対策）。一時ファイルへ書いてから`rename`で確定させる。
+   */
+  async writeTextFile(target: string, content: string, workspaceRoot: string): Promise<void> {
+    const relative = path.relative(workspaceRoot, target);
+    if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(`ワークフロー定義の書き込み先がワークスペースフォルダの外です: ${sanitizeForLog(target)}`);
+    }
+
+    const symlinked = await findSymlinkedSegment(workspaceRoot, target);
+    if (symlinked !== undefined) {
+      throw new Error(
+        `ワークフロー定義の書き込み先の経路にシンボリックリンクが含まれています。書き込みを中止しました: ${sanitizeForLog(symlinked)}`,
+      );
+    }
+
+    const dirPath = path.dirname(target);
+    await fsPromises.mkdir(dirPath, { recursive: true });
+
+    const dirCheck = await isExpectedRealPath(workspaceRoot, dirPath);
+    if (!dirCheck.ok) {
+      throw new Error(
+        `ワークフロー定義の書き込み先が実際には想定した場所以外を指しているため、書き込みを中止しました: ${sanitizeForLog(dirCheck.actual)}`,
+      );
+    }
+
+    const tempPath = path.join(dirPath, `.workflow-${randomUUID()}.tmp`);
+    try {
+      await fsPromises.writeFile(tempPath, content, 'utf8');
+      const tempCheck = await isExpectedRealPath(workspaceRoot, tempPath);
+      if (!tempCheck.ok) {
+        throw new Error(
+          `ワークフロー定義の書き込み先が実際には想定した場所以外を指していたため、書き込みを取り消しました: ${sanitizeForLog(tempCheck.actual)}`,
+        );
+      }
+      await fsPromises.rename(tempPath, target);
+    } catch (e) {
+      await fsPromises.rm(tempPath, { force: true });
+      throw e;
     }
   },
 };

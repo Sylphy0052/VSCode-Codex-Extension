@@ -2,9 +2,7 @@ import { stripControlCharsPreservingNewlines } from './sanitize';
 import {
   allocateTaskIds,
   getTask,
-  hasStarted,
   isValidTaskId,
-  listTasks,
   type TaskDraft,
   type TaskRun,
 } from './taskRunState';
@@ -14,8 +12,8 @@ import { findCycleGroups } from './workflow';
  * オーケストレータモード（Issue #1505）の計画の提案（`propose_plan`）の検証。
  *
  * Orchestratorは新しいタスクを仮のキーで書き、Controllerがここで`taskId`を採番して置き換える。
- * 既存のタスクは`taskId`（`T<n>`）で指す。形式、重複、存在しない依存先、循環、着手済みの
- * タスクの削除をここで拒否し、理由をOrchestratorへ返す。状態へ置くのは`proposeTaskPlan`。
+ * 既存のタスクは`taskId`（`T<n>`）で指す。形式、重複、存在しない依存先、循環をここで
+ * 拒否し、理由をOrchestratorへ返す。状態へ置くのは`proposeTaskPlan`。
  */
 
 export const MAX_PLAN_TASKS = 30;
@@ -178,7 +176,7 @@ export interface ResolvedTaskPlan {
  *
  * - `T<n>`の形のキーは既存のタスクだけを指せる（Controllerが採番する番号を名乗らせない）
  * - 依存先は計画内のキーだけ。循環は循環するキーの組を挙げて拒否する
- * - 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない
+ * - 着手済みのタスクも計画から外せ、既存のIssue番号も変えられる（Issue #1614。自律運用のため）
  * - 既存のIssue番号は計画内で重複させない
  */
 export function resolveTaskPlan(run: TaskRun, tasks: readonly PlanTaskInput[]): Parsed<ResolvedTaskPlan> {
@@ -217,21 +215,6 @@ export function resolveTaskPlan(run: TaskRun, tasks: readonly PlanTaskInput[]): 
     }
     issueOwner.set(task.existingIssueNumber, task.id);
   }
-  const removed = listTasks(run).find((t) => !keys.has(t.taskId) && hasStarted(t));
-  if (removed !== undefined) {
-    return fail(`着手済みのタスク${removed.taskId}は計画から外せない`);
-  }
-  for (const task of tasks) {
-    const existing = getTask(run, task.id);
-    if (
-      existing !== undefined &&
-      hasStarted(existing) &&
-      existing.existingIssueNumber !== task.existingIssueNumber
-    ) {
-      return fail(`着手済みのタスク${task.id}の既存のIssue番号は変えられない`);
-    }
-  }
-
   const fresh = tasks.filter((t) => getTask(run, t.id) === undefined);
   const allocated = allocateTaskIds(run, fresh.length);
   const assigned = new Map(fresh.map((t, i) => [t.id, allocated.taskIds[i] ?? '']));

@@ -968,6 +968,38 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
   };
 }
 
+/**
+ * Orchestratorの`add_task`が加えたタスクを、定義ファイルの`tasks`配列へ追記する
+ * （Issue #1614、Orchestratorの自律運用のため）。
+ *
+ * `roadmap.ts`の`alignRoadmapIssues`と同じく`yaml`パッケージのDocument APIで
+ * 既存ノードには触れず末尾へ足すだけにし、コメントや整形を保つ。パース不能・
+ * `tasks`が配列でない等、安全に追記できない場合は`source`をそのまま返す
+ * （呼び出し側はベストエフォートの永続化として扱い、失敗させない）。
+ */
+export function appendTaskToWorkflowYaml(source: string, task: WorkflowTask): string {
+  let doc;
+  try {
+    doc = parseDocument(source);
+  } catch {
+    return source;
+  }
+  if (doc.errors.length > 0) {
+    return source;
+  }
+  const tasksNode = doc.get('tasks', true);
+  if (!isSeq(tasksNode)) {
+    return source;
+  }
+  // 解析結果の保持用フィールドと、taskごとの指定がスキーマに無い`cleanup`はYAMLへ書かない
+  const fields: Partial<WorkflowTask> = { ...task };
+  delete fields.parseErrors;
+  delete fields.parseWarnings;
+  delete fields.cleanup;
+  tasksNode.add(doc.createNode(fields));
+  return String(doc);
+}
+
 /** 生成YAMLのレビュー状態だけを書き換え、他の行を可能な限り維持する。 */
 export function withWorkflowReviewStatus(
   source: string,

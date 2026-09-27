@@ -100,6 +100,8 @@ export interface TaskRunOrchestratorDeps {
     | 'recommend'
     | 'recommendations'
     | 'proposePlan'
+    | 'approvePlan'
+    | 'refreshKanban'
     | 'startStage'
     | 'stopStage'
     | 'instructTask'
@@ -560,6 +562,15 @@ export class TaskRunOrchestrator {
       }
       case 'propose_plan':
         return toOutcome(await controller.proposePlan(runId, call.rawArgs));
+      case 'approve_plan':
+        return toOutcome(await controller.approvePlan(runId));
+      case 'refresh_kanban': {
+        if (controller.find(runId) === undefined) {
+          return { text: 'runが見つかりません', isError: true };
+        }
+        controller.refreshKanban(runId);
+        return { text: 'Kanban画面へ再通知しました', isError: false };
+      }
       case 'start_stage':
         return toOutcome(await controller.startStage(runId, call));
       case 'stop_stage':

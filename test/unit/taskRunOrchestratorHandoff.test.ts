@@ -107,6 +107,8 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       recommend: vi.fn(),
       recommendations: vi.fn(() => new Map()),
       proposePlan: vi.fn(),
+      approvePlan: vi.fn(),
+      refreshKanban: vi.fn(),
       startStage: vi.fn(),
       stopStage: vi.fn(),
       instructTask: vi.fn(),
