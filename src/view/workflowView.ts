@@ -810,6 +810,12 @@ export class WorkflowViewManager implements vscode.Disposable {
         await this.listOpenRemainingInRoots(this.runNotes, this.runNotes.getWorkspaceRoots())
       ).find(({ record }) => record.id === requestedId);
       if (found === undefined) {
+        // 既に済にした後の古いクリック等。一覧はonDidChangeで既に最新化されているはずなので、
+        // 状況を一言だけ伝える（教訓欄の削除は無言のまま、こちらは`markRemainingDone`が
+        // 対象未発見の`RunNotesWriteResult`を返せないため呼び出し側で判定する必要があった）
+        void vscode.window.showInformationMessage(
+          '指定の未処理の残件は見つかりませんでした（既に済かもしれません）。',
+        );
         return;
       }
       // 欄の再送は`runNotes.onDidChange`購読に任せる（`deleteLesson`と同じ）
