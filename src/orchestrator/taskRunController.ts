@@ -1208,9 +1208,11 @@ export class TaskRunController {
     if (!leased.ok) {
       return leased;
     }
+    // 開き直しの失敗は`failed`で止める。人の`stop_task`（`stopped`）が同じ間に割り込んでも取り違えない
     const failureOf = (): string | undefined => {
       const run = this.deps.store.find(runId);
-      return run === undefined ? undefined : getTask(run, taskId)?.failure;
+      const task = run === undefined ? undefined : getTask(run, taskId);
+      return task?.attention === 'failed' ? task.failure : undefined;
     };
     const failureBefore = failureOf();
     const accepted = await this.deps.runner.resumeStage(runId, taskId);
