@@ -38,7 +38,9 @@ export type RoadmapRunEventKind =
   | 'warning'
   /** Orchestratorからの命令とその受理・拒否。 */
   | 'orchestratorCommand'
-  | 'leaseAcquired';
+  | 'leaseAcquired'
+  /** 持っていた専有権を別のウィンドウに取られた（Issue #1590。旧`warning`から分離）。 */
+  | 'leaseLost';
 
 export interface RoadmapRunEventInput {
   kind: RoadmapRunEventKind;
@@ -196,11 +198,18 @@ function isStoredEventLog(r: unknown): r is RoadmapRunEventLog {
 
 /** イベントログの永続化。runの状態と同じ開始時刻・同じ件数で並べて捨てる。 */
 export class RoadmapRunEventStore extends MementoRunStore<RoadmapRunEventLog> {
-  constructor(memento: MementoLike) {
+  /** `log`を渡すと、骨格の壊れた保存データを読み飛ばしたとき1行だけ残す（Issue #1590）。 */
+  constructor(memento: MementoLike, log?: (message: string) => void) {
     super(memento, {
       key: ROADMAP_RUN_EVENTS_KEY,
       maxStored: MAX_STORED_ROADMAP_RUNS,
       isValid: isStoredEventLog,
+      ...(log === undefined
+        ? {}
+        : {
+            onDiscardInvalid: (count: number) =>
+              log(`[roadmap run] イベントログのうち${String(count)}件を骨格不一致で読み飛ばしました`),
+          }),
     });
   }
 

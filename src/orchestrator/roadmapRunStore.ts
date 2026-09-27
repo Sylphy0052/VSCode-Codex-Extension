@@ -37,11 +37,18 @@ function isStoredRoadmapRun(r: unknown): r is RoadmapRun {
 }
 
 export class RoadmapRunStore extends MementoRunStore<RoadmapRun> {
-  constructor(memento: MementoLike) {
+  /** `log`を渡すと、骨格の壊れた保存データを読み飛ばしたとき1行だけ残す（Issue #1590）。 */
+  constructor(memento: MementoLike, log?: (message: string) => void) {
     super(memento, {
       key: ROADMAP_RUNS_KEY,
       maxStored: MAX_STORED_ROADMAP_RUNS,
       isValid: isStoredRoadmapRun,
+      ...(log === undefined
+        ? {}
+        : {
+            onDiscardInvalid: (count: number) =>
+              log(`[roadmap run] 保存データのうち${String(count)}件を骨格不一致で読み飛ばしました`),
+          }),
     });
   }
 

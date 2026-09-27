@@ -229,7 +229,9 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     onDidChange: () => holder.view?.refresh(),
     mergeQueue,
     onRunEvents: (runId, events) => holder.orchestrator?.handleRunEvents(runId, events),
-    eventLog: new RoadmapRunEventStore(deps.context.workspaceState),
+    eventLog: new RoadmapRunEventStore(deps.context.workspaceState, (message) =>
+      log.warn(`[roadmap run] ${message}`),
+    ),
     lease: leases,
     log: (message) => log.info(message),
   });
