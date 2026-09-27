@@ -6,7 +6,15 @@
  * - 提案はLLMの判断のため、必ずReflexを通す。Reflexが「妥当」を閾値以上で答えたときだけ自動で
  *   書き戻し、それ以外（誤りがある・判定できない・判定の失敗）は利用者の承認待ちにする
  * - Reflexの結果に関わらず、Controllerの検証（`validateRoadmapPlan`）に通らない提案は使わない
- * - 区画が既にあれば提案せずにそのまま使う（MVP。ハッシュによる変更の検出は後続）
+ * - 区画が既にあれば、区画のメタデータ（生成時の子Issue側と計画のハッシュ。`roadmapPlanHash.ts`）と
+ *   今の子Issue側・区画を比べる（Issue #1555）。どちらも変わっていなければそのまま使い、計画だけが
+ *   変わっていれば手修正として検証してから使う（`planOrigin = manually_modified`）。子Issue側が
+ *   変わっていれば変更点を添えて返し、作り直すか今の区画のまま使うかを人に決めてもらう
+ *   （`planDecisionNeeded`）。どの場合も区画を自動で上書きしない。人が「今の区画のまま使う」と
+ *   決めたときは、メタデータの行の子Issue側だけを今の姿へ書き直す（次のrunで同じ確認を出さない）
+ * - メタデータの無い区画（#1555より前に書いた区画）は比べる基準が無いため、そのまま使い、基準が
+ *   無いことを知らせる。メタデータを自動で書き足さない。区画が今の子Issueと合わず検証に通らない
+ *   ときは、子Issueと区画の差を変更点として人に作り直すかを決めてもらう
  *
  * Orchestratorのセッションはまだ無いため、提案は`RoadmapPlanProposer`の口で受ける。既定は
  * ヘッドレスCLIの1回実行（`createHeadlessRoadmapPlanProposer`）。
@@ -35,12 +43,26 @@ import {
   findRoadmapPlanSection,
   importRoadmap,
   parseRoadmapPlanSection,
+  rewriteRoadmapPlanMeta,
   validateRoadmapPlan,
   writeRoadmapPlan,
   type RoadmapChild,
   type RoadmapImportDeps,
+  type RoadmapImportOutcome,
   type RoadmapImportTarget,
 } from './roadmapImport';
+import {
+  ROADMAP_PLAN_VERSION,
+  classifyRoadmapPlanChange,
+  computeRoadmapPlanHash,
+  computeRoadmapSourceSnapshot,
+  describeRoadmapSourceDiff,
+  findRoadmapPlanMeta,
+  hashRoadmapPlanSectionContent,
+  type RoadmapPlanChange,
+  type RoadmapSourceDiff,
+  type RoadmapSourceSnapshot,
+} from './roadmapPlanHash';
 import { isValidIssueNumber, type RoadmapPlan, type RoadmapPlanNode } from './roadmapRunState';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 
@@ -79,6 +101,13 @@ export interface RoadmapPlanProposal {
   nodes: ProposedRoadmapPlanNode[];
   /** Reflexの判定。判断の入力（`nodes`の根拠）と一緒にノードの詳細へ残す。 */
   review: RoadmapPlanReview;
+  /**
+   * 提案の時点の子Issue側。区画のメタデータに残す。子Issueの本文を1件でも取れなかったときは
+   * `undefined`で、メタデータを付けずに書き戻す。
+   */
+  source?: RoadmapSourceSnapshot | undefined;
+  /** 既にある区画を作り直すとき、人が見て決めたときの区画のハッシュ（`writeRoadmapPlan`）。 */
+  replaceSectionHash?: string | undefined;
 }
 
 export interface RoadmapPlanResolveDeps extends RoadmapImportDeps {
@@ -93,6 +122,23 @@ interface ImportedChildren {
   duplicates: number[];
 }
 
+type ImportedRoadmap = Extract<RoadmapImportOutcome, { kind: 'imported' }>;
+
+/** 子Issue側が変わった区画（`planDecisionNeeded`）で、人に決めてもらうための材料。 */
+export type RoadmapPlanDecision = ImportedChildren & {
+  kind: 'planDecisionNeeded';
+  change: Extract<RoadmapPlanChange, { kind: 'sourceChanged' | 'bothChanged' }>;
+  /** 今の区画。検証に通れば「今の区画のまま使う」を選べる（子が増えた・減ったときは通らない）。 */
+  current: { kind: 'valid'; plan: RoadmapPlan } | { kind: 'invalid'; errors: string[] };
+  /** 作り直して置き換えるとき、区画がこのときから変わっていないことを確かめる。 */
+  sectionHash: string;
+  /**
+   * 「今の区画のまま使う」ときにメタデータの行へ書く基準（今の子Issue側と、生成時の計画の
+   * ハッシュ）。メタデータが無い区画では`undefined`で、書き直さない。
+   */
+  rebase?: { source: RoadmapSourceSnapshot; generatedPlanHash: string } | undefined;
+};
+
 export type ResolveRoadmapPlanOutcome =
   | { kind: 'failed'; message: string }
   /** 本文の計画区画が読めない・検証に通らない。実行前に拒否する。 */
@@ -102,7 +148,11 @@ export type ResolveRoadmapPlanOutcome =
       plan: RoadmapPlan;
       /** このrunで提案して書き戻した場合だけ入る。 */
       proposal: RoadmapPlanProposal | undefined;
+      /** 利用者へ知らせること（手修正を使った、変更検出の基準が無い、など）。 */
+      notices?: readonly string[];
     })
+  /** 子Issue側が変わった。区画を上書きせず、作り直すかどうかを人に決めてもらう。 */
+  | RoadmapPlanDecision
   /** 提案はControllerの検証を通ったが、Reflexが妥当と言い切らなかった。利用者の承認を待つ。 */
   | (ImportedChildren & { kind: 'awaitingApproval'; proposal: RoadmapPlanProposal })
   /** 提案がControllerの検証に通らなかった。書き戻さない。 */
@@ -113,8 +163,8 @@ export type ResolveRoadmapPlanOutcome =
     });
 
 /**
- * runの開始時に計画を決める（Controllerの入口）。区画があれば検証して使い、無ければ提案させて
- * Reflexが妥当と判定したときだけ書き戻す。
+ * runの開始時に計画を決める（Controllerの入口）。区画があればハッシュで変更を判定して使い
+ * （`resolveExistingPlanSection`）、無ければ提案させてReflexが妥当と判定したときだけ書き戻す。
  */
 export async function resolveRoadmapPlan(
   deps: RoadmapPlanResolveDeps,
@@ -124,21 +174,234 @@ export async function resolveRoadmapPlan(
   if (imported.kind === 'failed') {
     return imported;
   }
-  const { body, children, duplicates } = imported;
-  if (imported.plan.kind === 'invalid') {
-    return { kind: 'invalidPlan', errors: imported.plan.errors };
+  if (imported.plan.kind === 'absent') {
+    return proposeRoadmapPlan(deps, target, imported, undefined);
   }
-  if (imported.plan.kind === 'valid') {
+  return resolveExistingPlanSection(deps, target, imported);
+}
+
+/**
+ * 子Issue側が変わった区画を、人が「作り直す」と決めたときに呼ぶ。`sectionHash`は人が見たときの
+ * 区画のハッシュで、その後に区画が書き換えられていれば作り直さない（人の手修正を上書きしない）。
+ */
+export async function regenerateRoadmapPlan(
+  deps: RoadmapPlanResolveDeps,
+  target: RoadmapImportTarget,
+  sectionHash: string,
+): Promise<ResolveRoadmapPlanOutcome> {
+  const imported = await importRoadmap(deps, target);
+  if (imported.kind === 'failed') {
+    return imported;
+  }
+  if (imported.plan.kind === 'absent') {
+    return proposeRoadmapPlan(deps, target, imported, undefined);
+  }
+  const { content } = imported.plan;
+  if (content === undefined || hashRoadmapPlanSectionContent(content) !== sectionHash) {
     return {
-      kind: 'ready',
-      children,
-      duplicates,
-      plan: { nodes: imported.plan.nodes, source: 'existingSection' },
-      proposal: undefined,
+      kind: 'failed',
+      message:
+        '確認の後に計画区画が書き換えられたため、作り直しを取りやめました。もう一度実行してください',
     };
   }
+  return proposeRoadmapPlan(deps, target, imported, sectionHash);
+}
 
-  const bodies = await fetchChildBodies(deps, target, children);
+/** 人が「今の区画のまま使う」と決めたときの結果。区画が検証に通らなければ拒否する。 */
+export function useCurrentPlanSection(decision: RoadmapPlanDecision): ResolveRoadmapPlanOutcome {
+  if (decision.current.kind === 'invalid') {
+    return { kind: 'invalidPlan', errors: decision.current.errors };
+  }
+  return {
+    kind: 'ready',
+    children: decision.children,
+    duplicates: decision.duplicates,
+    plan: decision.current.plan,
+    proposal: undefined,
+    notices: [
+      `子Issue側の変更（${describeRoadmapSourceDiff(decision.change.source)}）を確かめたうえで、今の計画区画のまま使います`,
+    ],
+  };
+}
+
+/**
+ * 「今の区画のまま使う」をControllerから呼ぶ口。区画が使えれば、メタデータの行の子Issue側を
+ * 今の姿へ書き直す（`generatedPlanHash`は変えず、手修正の判定は残す）。人が見た後に区画が
+ * 書き換えられていれば使わない。
+ */
+export async function applyCurrentPlanSection(
+  deps: RoadmapImportDeps,
+  target: RoadmapImportTarget,
+  decision: RoadmapPlanDecision,
+): Promise<ResolveRoadmapPlanOutcome> {
+  const outcome = useCurrentPlanSection(decision);
+  if (outcome.kind !== 'ready' || decision.rebase === undefined) {
+    return outcome;
+  }
+  const written = await rewriteRoadmapPlanMeta(deps, target, decision.sectionHash, {
+    planVersion: ROADMAP_PLAN_VERSION,
+    sourceHash: decision.rebase.source.sourceHash,
+    generatedPlanHash: decision.rebase.generatedPlanHash,
+    children: decision.rebase.source.children,
+  });
+  switch (written.kind) {
+    case 'sectionChanged':
+      return {
+        kind: 'failed',
+        message:
+          '確認の後に計画区画が書き換えられたため、実行を取りやめました。もう一度実行してください',
+      };
+    case 'failed':
+      return {
+        ...outcome,
+        notices: [
+          ...(outcome.notices ?? []),
+          `変更検出の基準を今の子Issueへ合わせられませんでした（${sanitizeInlineText(written.message, REASON_MAX_LENGTH)}）。次の実行でも同じ確認が出ます`,
+        ],
+      };
+    case 'written':
+      return outcome;
+  }
+}
+
+/**
+ * 既にある区画を、メタデータのハッシュと今の子Issue側・区画を比べて扱う（Issue #1555）。
+ * 区画は書き換えない。
+ */
+async function resolveExistingPlanSection(
+  deps: RoadmapImportDeps,
+  target: RoadmapImportTarget,
+  imported: ImportedRoadmap,
+): Promise<ResolveRoadmapPlanOutcome> {
+  const { children, duplicates, plan } = imported;
+  if (plan.kind === 'absent' || plan.content === undefined) {
+    return plan.kind === 'invalid'
+      ? { kind: 'invalidPlan', errors: plan.errors }
+      : { kind: 'failed', message: '計画区画が見つかりませんでした' };
+  }
+  const found = findRoadmapPlanMeta(plan.content);
+  const ready = (
+    planOrigin: RoadmapPlan['planOrigin'],
+    notices: string[],
+  ): ResolveRoadmapPlanOutcome =>
+    plan.kind === 'invalid'
+      ? { kind: 'invalidPlan', errors: plan.errors }
+      : {
+          kind: 'ready',
+          children,
+          duplicates,
+          plan: { nodes: plan.nodes, source: 'existingSection', planOrigin },
+          proposal: undefined,
+          notices,
+        };
+  if (found.kind !== 'present') {
+    const unmatched =
+      plan.kind === 'invalid' ? diffPlanAgainstChildren(plan.content, children) : undefined;
+    if (plan.kind === 'invalid' && unmatched !== undefined) {
+      // 基準は無いが、区画が今の子Issueと合わない。作り直すかを人に決めてもらう
+      return {
+        kind: 'planDecisionNeeded',
+        children,
+        duplicates,
+        change: { kind: 'sourceChanged', source: unmatched },
+        current: { kind: 'invalid', errors: plan.errors },
+        sectionHash: hashRoadmapPlanSectionContent(plan.content),
+      };
+    }
+    return ready(undefined, [
+      found.kind === 'absent'
+        ? '計画区画に変更検出の基準（メタデータ）が無いため、子Issueと区画の変更を確かめずにそのまま使います。基準を付けるには、区画を消して実行し直し、計画を作り直してください'
+        : `計画区画のメタデータを使えないため（${found.message}）、子Issueと区画の変更を確かめずにそのまま使います`,
+    ]);
+  }
+  const { meta } = found;
+  const planHash = computeRoadmapPlanHash(plan.content);
+  const planOrigin = planHash === meta.generatedPlanHash ? 'generated' : 'manually_modified';
+  const manualNotice =
+    '計画区画は手で直されています。手修正として尊重し、検証したうえでそのまま使います';
+  const source = toSourceSnapshot(await fetchChildBodies(deps, target, children), children);
+  if (source === undefined) {
+    // 子Issue側を比べられない。計画の手修正だけを判定する
+    return ready(planOrigin, [
+      '子Issueの本文を取得できなかったため、子Issue側の変更を確かめずに計画区画を使います',
+      ...(planOrigin === 'manually_modified' ? [manualNotice] : []),
+    ]);
+  }
+  const change = classifyRoadmapPlanChange(meta, source, planHash);
+  switch (change.kind) {
+    case 'unchanged':
+      return ready('generated', []);
+    case 'manuallyModified':
+      return ready('manually_modified', [manualNotice]);
+    case 'sourceChanged':
+    case 'bothChanged':
+      return {
+        kind: 'planDecisionNeeded',
+        children,
+        duplicates,
+        change,
+        current:
+          plan.kind === 'valid'
+            ? { kind: 'valid', plan: { nodes: plan.nodes, source: 'existingSection', planOrigin } }
+            : { kind: 'invalid', errors: plan.errors },
+        sectionHash: hashRoadmapPlanSectionContent(plan.content),
+        rebase: { source, generatedPlanHash: meta.generatedPlanHash },
+      };
+  }
+}
+
+/**
+ * 区画のノードと今の子Issueの差（子Issue側から見た追加・削除）。差が無ければ`undefined`
+ * （区画が検証に通らない理由が子Issueの増減ではない）。
+ */
+function diffPlanAgainstChildren(
+  content: readonly string[],
+  children: readonly RoadmapChild[],
+): RoadmapSourceDiff | undefined {
+  const planned = new Set(parseRoadmapPlanSection(content).nodes.map((node) => node.issueNumber));
+  const current = new Set(children.map((child) => child.issueNumber));
+  const added = [...current].filter((issue) => !planned.has(issue)).sort((a, b) => a - b);
+  const removed = [...planned].filter((issue) => !current.has(issue)).sort((a, b) => a - b);
+  return added.length === 0 && removed.length === 0
+    ? undefined
+    : { added, removed, bodyChanged: [] };
+}
+
+/** 子Issueの本文が全件そろったときだけ子Issue側の姿を作る。 */
+function toSourceSnapshot(
+  bodies: ChildBodies,
+  children: readonly RoadmapChild[],
+): RoadmapSourceSnapshot | undefined {
+  const complete = new Map<number, string>();
+  for (const child of children) {
+    const body = bodies.get(child.issueNumber);
+    if (body === undefined) {
+      return undefined;
+    }
+    complete.set(child.issueNumber, body);
+  }
+  return computeRoadmapSourceSnapshot(complete);
+}
+
+/**
+ * 子Issueの記述から計画を提案させ、Reflexが妥当と判定したときだけ書き戻す。`replaceSectionHash`は
+ * 既にある区画を作り直すときだけ渡す。
+ */
+async function proposeRoadmapPlan(
+  deps: RoadmapPlanResolveDeps,
+  target: RoadmapImportTarget,
+  imported: ImportedRoadmap,
+  replaceSectionHash: string | undefined,
+): Promise<ResolveRoadmapPlanOutcome> {
+  const { body, children, duplicates } = imported;
+  // ハッシュには終了済みの子の本文も入れる。提案とReflexへは従来どおり終了していない子だけを渡す
+  const allBodies = await fetchChildBodies(deps, target, children);
+  const source = toSourceSnapshot(allBodies, children);
+  const bodies: ChildBodies = new Map(
+    children
+      .filter((child) => !child.checked)
+      .map((child) => [child.issueNumber, allBodies.get(child.issueNumber)]),
+  );
   const outcome = await deps.propose(buildRoadmapPlanProposalPrompt(body, children, bodies));
   if (!outcome.ok) {
     return {
@@ -165,7 +428,7 @@ export async function resolveRoadmapPlan(
     bodies,
     deps.approveThreshold ?? DEFAULT_ROADMAP_PLAN_APPROVE_THRESHOLD,
   );
-  const proposal: RoadmapPlanProposal = { nodes: parsed.nodes, review };
+  const proposal: RoadmapPlanProposal = { nodes: parsed.nodes, review, source, replaceSectionHash };
   if (review.kind === 'needsUser') {
     return { kind: 'awaitingApproval', children, duplicates, proposal };
   }
@@ -175,14 +438,17 @@ export async function resolveRoadmapPlan(
 /**
  * 提案を区画へ書き戻す。Reflexが妥当と判定したとき、または利用者が承認したときに呼ぶ。
  * 書く直前に本文を読み直してControllerが検証し直す（`writeRoadmapPlan`）。その間に区画が
- * 書かれていれば、上書きせずにその区画を使う。
+ * 書かれて（作り直しでは書き換えられて）いれば、上書きせずにその区画を変更の判定から扱い直す。
  */
 export async function applyRoadmapPlanProposal(
   deps: RoadmapImportDeps,
   target: RoadmapImportTarget,
   proposal: RoadmapPlanProposal,
 ): Promise<ResolveRoadmapPlanOutcome> {
-  const written = await writeRoadmapPlan(deps, target, proposal.nodes);
+  const written = await writeRoadmapPlan(deps, target, proposal.nodes, {
+    source: proposal.source,
+    replaceSectionHash: proposal.replaceSectionHash,
+  });
   if (written.kind === 'failed') {
     return written;
   }
@@ -215,8 +481,15 @@ export async function applyRoadmapPlanProposal(
     plan: {
       nodes: nodes.map(({ issueNumber, dependsOn, wave }) => ({ issueNumber, dependsOn, wave })),
       source: 'generated',
+      planOrigin: 'generated',
     },
     proposal,
+    notices:
+      proposal.source === undefined
+        ? [
+            '子Issueの本文を取得できなかったため、計画区画に変更検出の基準（メタデータ）を付けずに書き戻しました',
+          ]
+        : [],
   };
 }
 
@@ -228,34 +501,26 @@ async function useExistingSection(
   if (imported.kind === 'failed') {
     return imported;
   }
-  if (imported.plan.kind === 'invalid') {
-    return { kind: 'invalidPlan', errors: imported.plan.errors };
-  }
   if (imported.plan.kind === 'absent') {
     return { kind: 'failed', message: '計画区画を書き戻した直後に区画が見つかりませんでした' };
   }
-  return {
-    kind: 'ready',
-    children: imported.children,
-    duplicates: imported.duplicates,
-    plan: { nodes: imported.plan.nodes, source: 'existingSection' },
-    proposal: undefined,
-  };
+  return resolveExistingPlanSection(deps, target, imported);
 }
 
 /* -------------------------------------------------------------------------------------------- */
 /* 提案の入力                                                                                     */
 /* -------------------------------------------------------------------------------------------- */
 
-/** 子Issueの本文。終了済みの子は取りに行かない（`undefined`は取得の失敗）。 */
+/** 子Issueの本文（`undefined`は取得の失敗）。 */
 type ChildBodies = ReadonlyMap<number, string | undefined>;
 
+/** 子Issueの本文を取る。ハッシュに使うため終了済みの子も取る。 */
 async function fetchChildBodies(
   deps: RoadmapImportDeps,
   target: RoadmapImportTarget,
   children: readonly RoadmapChild[],
 ): Promise<ChildBodies> {
-  const pending = children.filter((child) => !child.checked).map((child) => child.issueNumber);
+  const pending = children.map((child) => child.issueNumber);
   const bodies = new Map<number, string | undefined>();
   const worker = async (): Promise<void> => {
     for (let issue = pending.shift(); issue !== undefined; issue = pending.shift()) {

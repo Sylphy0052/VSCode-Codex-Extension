@@ -7,8 +7,9 @@
  *   `[x]`も子として返し、runの側で「終了」として置く
  * - 計画は本文の`<!-- roadmap-kanban:plan -->`〜`<!-- /roadmap-kanban:plan -->`の区画に置く。
  *   書き戻すのは区画だけで、区画以外の本文は1文字も変えない
- * - MVPでは区画があれば生成せずにそのまま使い、区画を自動で上書きしない。子Issue側と計画の
- *   ハッシュによる変更の検出は後続（Issue #1465 決定事項）
+ * - 区画を自動で上書きしない。区画には生成時の子Issue側と計画のハッシュをメタデータとして残し
+ *   （`roadmapPlanHash.ts`）、どちらが変わったかは`roadmapPlanProposal.ts`で判定して人に決めて
+ *   もらう（Issue #1555）。置き換えは、人が見た区画から変わっていないときだけ行う
  *
  * Issueのタイトルは外部由来のテキストのため、1行へ均して長さを切るだけにし、表示や
  * プロンプトへ入れる側で`formatUntrusted`等を通す。
@@ -22,6 +23,15 @@ import {
 } from './forge';
 import { ISSUE_CHECKLIST_LINE_PATTERN } from './roadmap';
 import { runExclusiveOnRoadmapIssue } from './roadmapIssueSync';
+import {
+  ROADMAP_PLAN_VERSION,
+  computeRoadmapPlanHash,
+  formatRoadmapPlanMeta,
+  hashRoadmapPlanSectionContent,
+  replaceRoadmapPlanMetaLine,
+  type RoadmapPlanMeta,
+  type RoadmapSourceSnapshot,
+} from './roadmapPlanHash';
 import { isValidIssueNumber, type RoadmapPlanNode } from './roadmapRunState';
 import { sanitizeInlineText } from './untrustedText';
 import { findCycleGroups } from './workflow';
@@ -231,11 +241,30 @@ export function validateRoadmapPlan(
 /**
  * 計画区画の本文（目印の行を含む）を作る。段が無いノードは、依存を辿った深さ
  * （依存の無いノードを1段目）で埋める。検証済み（循環なし）の計画を渡す前提。
+ * `source`（生成時の子Issue側）を渡すと、開始の目印の直後にメタデータの行を入れる。
  */
-export function formatRoadmapPlanSection(nodes: readonly RoadmapPlanNode[]): string[] {
+export function formatRoadmapPlanSection(
+  nodes: readonly RoadmapPlanNode[],
+  source?: RoadmapSourceSnapshot,
+): string[] {
+  const content = formatRoadmapPlanContent(nodes);
+  const meta =
+    source === undefined
+      ? []
+      : [
+          formatRoadmapPlanMeta({
+            planVersion: ROADMAP_PLAN_VERSION,
+            sourceHash: source.sourceHash,
+            generatedPlanHash: computeRoadmapPlanHash(content),
+            children: source.children,
+          }),
+        ];
+  return [ROADMAP_PLAN_START_MARKER, ...meta, ...content, ROADMAP_PLAN_END_MARKER];
+}
+
+function formatRoadmapPlanContent(nodes: readonly RoadmapPlanNode[]): string[] {
   const waves = computeWaves(nodes);
   return [
-    ROADMAP_PLAN_START_MARKER,
     '## 着手順',
     '',
     'Kanban実行用の着手順。依存に並べたIssueがすべて終わってから着手する。段は表示のためだけに使う。',
@@ -248,7 +277,6 @@ export function formatRoadmapPlanSection(nodes: readonly RoadmapPlanNode[]): str
           : node.dependsOn.map((dep) => `#${String(dep)}`).join(', ');
       return `- #${String(node.issueNumber)} 段${String(wave)} 依存: ${deps}`;
     }),
-    ROADMAP_PLAN_END_MARKER,
   ];
 }
 
@@ -333,10 +361,16 @@ export type RoadmapImportOutcome =
       duplicates: number[];
       plan:
         | { kind: 'absent' }
-        /** 区画があり、検証を通った。MVPではそのまま使う。 */
-        | { kind: 'valid'; nodes: RoadmapPlanNode[] }
-        /** 区画はあるが読めない・検証に通らない。実行前に拒否する。 */
-        | { kind: 'invalid'; errors: string[] };
+        /**
+         * 区画があり、検証を通った。`content`は区画の中身（目印の行を除く）で、変更の判定
+         * （`roadmapPlanHash.ts`）に使う。
+         */
+        | { kind: 'valid'; nodes: RoadmapPlanNode[]; content: string[] }
+        /**
+         * 区画はあるが読めない・検証に通らない。子Issueが増えただけでも検証に通らないため、
+         * 変更の判定用に中身を添える（目印が壊れていれば`undefined`）。
+         */
+        | { kind: 'invalid'; errors: string[]; content: string[] | undefined };
     };
 
 /** ロードマップIssueの本文を取り、子Issueと計画区画を読む。 */
@@ -370,30 +404,44 @@ function readPlan(
     return { kind: 'absent' };
   }
   if (section.kind === 'malformed') {
-    return { kind: 'invalid', errors: [section.message] };
+    return { kind: 'invalid', errors: [section.message], content: undefined };
   }
-  const parsed = parseRoadmapPlanSection(section.content);
+  const { content } = section;
+  const parsed = parseRoadmapPlanSection(content);
   const errors = [...parsed.errors, ...validateRoadmapPlan(parsed.nodes, children)];
-  return errors.length > 0 ? { kind: 'invalid', errors } : { kind: 'valid', nodes: parsed.nodes };
+  return errors.length > 0
+    ? { kind: 'invalid', errors, content }
+    : { kind: 'valid', nodes: parsed.nodes, content };
+}
+
+export interface WriteRoadmapPlanOptions {
+  /** 生成時の子Issue側。渡すと区画にメタデータ（ハッシュ）を残す。 */
+  source?: RoadmapSourceSnapshot | undefined;
+  /**
+   * 既にある区画を作り直した計画で置き換えるとき、人が見て決めたときの区画の中身のハッシュ
+   * （`hashRoadmapPlanSectionContent`）。読み直した区画がこれと違えば上書きしない。
+   */
+  replaceSectionHash?: string | undefined;
 }
 
 export type WriteRoadmapPlanOutcome =
   | { kind: 'written'; body: string }
-  /** 読み直した本文に区画が既にあった。MVPでは上書きしない。 */
+  /** 読み直した本文に区画が既にあった（置き換えの指定が無い、または人が見た区画から変わった）。上書きしない。 */
   | { kind: 'sectionExists' }
   | { kind: 'invalid'; errors: string[] }
   | { kind: 'failed'; message: string };
 
 /**
- * 検証済みの計画を、区画が無いロードマップIssueへ書き戻す。書く直前に本文を読み直して
- * 子Issueで検証し直してから送る。区画が無い本文にだけ書くため、元の本文の末尾へ区画を
- * 足すだけになり、区画以外の本文は変わらない（`replaceRoadmapPlanSection`）。
+ * 検証済みの計画をロードマップIssueへ書き戻す。書く直前に本文を読み直して子Issueで検証し
+ * 直してから送る。区画が無ければ元の本文の末尾へ区画を足し、`replaceSectionHash`が今の区画と
+ * 合うときだけ区画を置き換える。どちらも区画以外の本文は変わらない（`replaceRoadmapPlanSection`）。
  * 子Issueのチェック（`syncRoadmapCompletionToIssue`）と同じ列で直列化する。
  */
 export async function writeRoadmapPlan(
   deps: RoadmapImportDeps,
   target: RoadmapImportTarget,
   nodes: readonly RoadmapPlanNode[],
+  options: WriteRoadmapPlanOptions = {},
 ): Promise<WriteRoadmapPlanOutcome> {
   return runExclusiveOnRoadmapIssue(
     target.host,
@@ -413,7 +461,11 @@ export async function writeRoadmapPlan(
         };
       }
       const section = findRoadmapPlanSection(body);
-      if (section.kind === 'present') {
+      if (
+        section.kind === 'present' &&
+        (options.replaceSectionHash === undefined ||
+          hashRoadmapPlanSectionContent(section.content) !== options.replaceSectionHash)
+      ) {
         return { kind: 'sectionExists' };
       }
       if (section.kind === 'malformed') {
@@ -423,7 +475,7 @@ export async function writeRoadmapPlan(
       if (errors.length > 0) {
         return { kind: 'invalid', errors };
       }
-      const next = replaceRoadmapPlanSection(body, formatRoadmapPlanSection(nodes));
+      const next = replaceRoadmapPlanSection(body, formatRoadmapPlanSection(nodes, options.source));
       if (next === undefined) {
         return { kind: 'invalid', errors: ['計画区画の目印が壊れています'] };
       }
@@ -436,6 +488,66 @@ export async function writeRoadmapPlan(
       return outcome.ok
         ? { kind: 'written', body: next }
         : { kind: 'failed', message: outcome.message };
+    },
+  );
+}
+
+export type RewriteRoadmapPlanMetaOutcome =
+  | { kind: 'written' }
+  /** 読み直した区画が、人が見て決めたときの区画から変わっていた。書かない。 */
+  | { kind: 'sectionChanged' }
+  | { kind: 'failed'; message: string };
+
+/**
+ * 区画のメタデータの行だけを書き直す（Issue #1555）。子Issue側の変更を見た利用者が「今の区画の
+ * まま使う」と決めたときに、変更検出の基準を今の子Issue側へ合わせる。区画の他の行と区画以外の
+ * 本文は変えない。`sectionHash`（人が見たときの区画のハッシュ）が今の区画と合わなければ書かない。
+ */
+export async function rewriteRoadmapPlanMeta(
+  deps: RoadmapImportDeps,
+  target: RoadmapImportTarget,
+  sectionHash: string,
+  meta: RoadmapPlanMeta,
+): Promise<RewriteRoadmapPlanMetaOutcome> {
+  return runExclusiveOnRoadmapIssue(
+    target.host,
+    target.cwd,
+    target.roadmapIssueNumber,
+    async () => {
+      const body = await fetchIssueBody(
+        deps.cli,
+        target.host,
+        target.cwd,
+        target.roadmapIssueNumber,
+      );
+      if (body === undefined || body.trim() === '') {
+        return {
+          kind: 'failed',
+          message: `ロードマップIssue #${String(target.roadmapIssueNumber)} の本文を取得できませんでした`,
+        };
+      }
+      const section = findRoadmapPlanSection(body);
+      if (
+        section.kind !== 'present' ||
+        hashRoadmapPlanSectionContent(section.content) !== sectionHash
+      ) {
+        return { kind: 'sectionChanged' };
+      }
+      const next = replaceRoadmapPlanSection(body, [
+        ROADMAP_PLAN_START_MARKER,
+        ...replaceRoadmapPlanMetaLine(section.content, meta),
+        ROADMAP_PLAN_END_MARKER,
+      ]);
+      if (next === undefined) {
+        return { kind: 'sectionChanged' };
+      }
+      const outcome = await updateIssue(deps, {
+        host: target.host,
+        cwd: target.cwd,
+        number: target.roadmapIssueNumber,
+        body: next,
+      });
+      return outcome.ok ? { kind: 'written' } : { kind: 'failed', message: outcome.message };
     },
   );
 }

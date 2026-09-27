@@ -17,11 +17,16 @@ import {
   type RoadmapMergeSettings,
 } from '../orchestrator/roadmapMergeQueue';
 import {
+  applyCurrentPlanSection,
   applyRoadmapPlanProposal,
   createHeadlessRoadmapPlanProposer,
+  regenerateRoadmapPlan,
   resolveRoadmapPlan,
+  type RoadmapPlanDecision,
   type RoadmapPlanProposal,
+  type RoadmapPlanResolveDeps,
 } from '../orchestrator/roadmapPlanProposal';
+import { describeRoadmapSourceDiff } from '../orchestrator/roadmapPlanHash';
 import { judgeRoadmapQuestion, RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
 import { RoadmapRunController } from '../orchestrator/roadmapRunController';
 import {
@@ -58,6 +63,8 @@ const PLAN_PROPOSAL_TIMEOUT_MS = 10 * 60_000;
 const PROPOSAL_REASON_MAX_LENGTH = 120;
 const CONFIRM_TITLE_MAX_LENGTH = 200;
 const CONFIRM_TEXT_MAX_LENGTH = 1000;
+/** 計画区画の扱いを聞くモーダルへ出す検証エラーの上限。 */
+const PLAN_ERRORS_SHOWN = 10;
 
 export interface RoadmapRunSetupDeps {
   context: vscode.ExtensionContext;
@@ -129,6 +136,21 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   });
 
   const importDeps = { cli: deps.cli, fs: nodeForgeFileSystem };
+  const resolveDeps = (engine: RoadmapRunEngine): RoadmapPlanResolveDeps => ({
+    ...importDeps,
+    propose: createHeadlessRoadmapPlanProposer({
+      provider: engine,
+      executable: executableFor(engine),
+      model: 'auto',
+      timeoutMs: PLAN_PROPOSAL_TIMEOUT_MS,
+      logWarn: (message) => log.warn(`[roadmap run] ${message}`),
+    }),
+    reflex: {
+      provider: engine,
+      executable: executableFor(engine),
+      logWarn: (message) => log.warn(`[roadmap run] ${message}`),
+    },
+  });
 
   const mergeQueue = new RoadmapMergeQueue({
     git: deps.git,
@@ -153,27 +175,13 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     store,
     runner,
     detectHost: (root) => detectRoadmapForgeHost(ports, root),
-    resolvePlan: (target, engine) =>
-      resolveRoadmapPlan(
-        {
-          ...importDeps,
-          propose: createHeadlessRoadmapPlanProposer({
-            provider: engine,
-            executable: executableFor(engine),
-            model: 'auto',
-            timeoutMs: PLAN_PROPOSAL_TIMEOUT_MS,
-            logWarn: (message) => log.warn(`[roadmap run] ${message}`),
-          }),
-          reflex: {
-            provider: engine,
-            executable: executableFor(engine),
-            logWarn: (message) => log.warn(`[roadmap run] ${message}`),
-          },
-        },
-        target,
-      ),
+    resolvePlan: (target, engine) => resolveRoadmapPlan(resolveDeps(engine), target),
     applyPlan: (target, proposal) => applyRoadmapPlanProposal(importDeps, target, proposal),
     confirmPlan,
+    decidePlanChange,
+    useCurrentPlan: (target, decision) => applyCurrentPlanSection(importDeps, target, decision),
+    regeneratePlan: (target, engine, sectionHash) =>
+      regenerateRoadmapPlan(resolveDeps(engine), target, sectionHash),
     notifyStalled: (run, blockers) =>
       notifyStalled(run, blockers, () => holder.view?.show(run.runId)),
     onDidChange: () => holder.view?.refresh(),
@@ -229,6 +237,45 @@ async function confirmPlan(proposal: RoadmapPlanProposal): Promise<boolean> {
     approve,
   );
   return choice === approve;
+}
+
+/**
+ * 子Issue側が変わった計画区画を、作り直すか今の区画のまま使うかを決めてもらう（#1555）。
+ * 今の区画が検証に通らない（子が増えた・減った）ときは「作り直す」だけを出す。
+ */
+async function decidePlanChange(
+  decision: RoadmapPlanDecision,
+): Promise<'regenerate' | 'useCurrent' | undefined> {
+  const regenerate = '計画を作り直す';
+  const useCurrent = '今の区画のまま使う';
+  const detail = [
+    `子Issue側の変更: ${describeRoadmapSourceDiff(decision.change.source)}`,
+    ...(decision.change.kind === 'bothChanged'
+      ? ['計画区画の変更: 生成の後に区画が手で直されています（作り直すと手修正は置き換わります）']
+      : []),
+    '',
+    '作り直す場合は計画を提案し直し、Reflexの判定を通してから区画だけを置き換えます。',
+    ...(decision.current.kind === 'invalid'
+      ? [
+          '今の区画は検証に通らないため、そのままでは使えません:',
+          ...decision.current.errors
+            .slice(0, PLAN_ERRORS_SHOWN)
+            .map((error) => `- ${sanitizeInlineText(error, CONFIRM_TEXT_MAX_LENGTH)}`),
+        ]
+      : []),
+  ].join('\n');
+  const choice = await vscode.window.showWarningMessage(
+    decision.change.kind === 'bothChanged'
+      ? '計画を生成した後に、子Issueと計画区画の両方が変わっています。計画をどうしますか？'
+      : '計画を生成した後に、子Issueが変わっています。計画をどうしますか？',
+    { modal: true, detail },
+    regenerate,
+    ...(decision.current.kind === 'valid' ? [useCurrent] : []),
+  );
+  if (choice === regenerate) {
+    return 'regenerate';
+  }
+  return choice === useCurrent ? 'useCurrent' : undefined;
 }
 
 /** `agent.roadmapRun.merge.*`を読む。不正な値は空（実行しない）として扱う。 */
