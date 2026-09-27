@@ -210,6 +210,21 @@ export interface RoadmapRun {
    * （`RoadmapRunStore.hasSessionRef`）に使う。旧データには無い。
    */
   orchestratorSessionRefs?: string[];
+  /**
+   * Orchestratorがコンテキストの残量不足で次の世代へ自動で引き継いだ記録（Issue #1555）。
+   * Kanbanに出す。一度も起きていなければ省略する。
+   */
+  orchestratorAutoHandoffs?: RoadmapOrchestratorAutoHandoffRecord;
+}
+
+/** Orchestratorの自動引き継ぎの記録（Issue #1555。オーケストレータモードの#1553と同じ形）。 */
+export interface RoadmapOrchestratorAutoHandoffRecord {
+  /** 自動引き継ぎの回数。 */
+  count: number;
+  /** 直近の自動引き継ぎで起こした世代。 */
+  lastGeneration: number;
+  /** 直近の自動引き継ぎの時刻（ISO 8601）。 */
+  lastAt: string;
 }
 
 /** Issueセッションからの報告に必ず付ける識別子。 */
@@ -913,7 +928,10 @@ export function reconcileRoadmapRunOnReload(
   return next;
 }
 
-/** 記録しておくOrchestratorのsessionIdの上限。開くのは人の操作だけなので、通常は届かない。 */
+/**
+ * 記録しておくOrchestratorのsessionIdの上限。開くのは人の操作とコンテキストの残量不足による
+ * 自動引き継ぎ（Issue #1555）だけなので、通常は届かない。
+ */
 const MAX_ORCHESTRATOR_SESSION_REFS = 100;
 
 /** 次に開くOrchestratorセッションの世代へ進める（Issue #1465 分割案8b）。 */
@@ -930,5 +948,21 @@ export function recordOrchestratorSession(run: RoadmapRun, sessionId: string): R
   return {
     ...run,
     orchestratorSessionRefs: [...refs, sessionId].slice(-MAX_ORCHESTRATOR_SESSION_REFS),
+  };
+}
+
+/** 自動引き継ぎで世代`generation`を起こしたことを記録する（Issue #1555）。 */
+export function recordOrchestratorAutoHandoff(
+  run: RoadmapRun,
+  generation: number,
+  now: Date,
+): RoadmapRun {
+  return {
+    ...run,
+    orchestratorAutoHandoffs: {
+      count: (run.orchestratorAutoHandoffs?.count ?? 0) + 1,
+      lastGeneration: generation,
+      lastAt: now.toISOString(),
+    },
   };
 }

@@ -6,6 +6,7 @@ import {
   type IssuePhase,
   type IssueResult,
   type RoadmapIssueExecution,
+  type RoadmapOrchestratorAutoHandoffRecord,
   type RoadmapQuestion,
   type RoadmapRun,
   type RoadmapRunEngine,
@@ -145,6 +146,10 @@ export interface RoadmapKanbanBoard {
         finished: boolean;
         activeSessions: number;
         assessment: RunAssessment;
+        /** Orchestratorの現在の世代（開いた回数）。0は未起動（Issue #1555）。 */
+        orchestratorGeneration: number;
+        /** Orchestratorの自動引き継ぎの記録。起きていなければ`undefined`（Issue #1555）。 */
+        orchestratorAutoHandoffs: RoadmapOrchestratorAutoHandoffRecord | undefined;
         columns: Record<RoadmapKanbanColumn, RoadmapKanbanCard[]>;
       }
     | undefined;
@@ -315,6 +320,8 @@ export function buildRoadmapKanban(
       finished: selected.finishedAt !== undefined,
       activeSessions: countActiveSessions(selected),
       assessment: assessRun(selected),
+      orchestratorGeneration: selected.orchestratorGeneration ?? 0,
+      orchestratorAutoHandoffs: selected.orchestratorAutoHandoffs,
       columns,
     },
     events: [...eventsFor(selected.runId)],
