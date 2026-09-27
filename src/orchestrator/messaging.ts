@@ -1214,8 +1214,8 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
 export const REMOVE_TASK_TOOL: McpToolDefinition = {
   name: 'remove_task',
   description:
-    'まだ開始していない（pendingの）タスクを実行中の定義から取り除く（YAMLファイルは' +
-    '書き換えない）。走行中・完了済み・失敗済みのタスクは対象にできない（走行中は' +
+    'まだ開始していない（pendingの）タスクを実行中の定義から取り除く（YAMLファイルからも' +
+    '取り除く）。走行中・完了済み・失敗済みのタスクは対象にできない（走行中は' +
     'stop_taskを使うこと）。他のタスクがこのタスクへdependsOnしていた場合、その依存は' +
     '取り除いて孤立させない。依存を取り除いた後の定義は既存の検証をそのまま通すため、' +
     '他のタスクが消すタスクの成果をテンプレート変数（{{<消すタスクのid>.cwd}}等）で' +
@@ -1238,8 +1238,8 @@ export const REMOVE_TASK_TOOL: McpToolDefinition = {
 export const UPDATE_TASK_DEPENDENCIES_TOOL: McpToolDefinition = {
   name: 'update_task_dependencies',
   description:
-    'まだ開始していない（pendingの）タスクのdependsOnを丸ごと差し替える（YAMLファイルは' +
-    '書き換えない）。循環依存になる・未定義のidを参照する変更は適用前に拒否され理由が' +
+    'まだ開始していない（pendingの）タスクのdependsOnを丸ごと差し替える（YAMLファイルにも' +
+    '書き戻す）。循環依存になる・未定義のidを参照する変更は適用前に拒否され理由が' +
     '返る。走行中・完了済みのタスクのdependsOnは変えられない（変えても以降のスケジューリングに' +
     '影響しないため）。',
   inputSchema: {

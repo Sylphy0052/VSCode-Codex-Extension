@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 
-import { isMap, isScalar, isSeq, parse, parseDocument } from 'yaml';
+import { isMap, isScalar, isSeq, parse, parseDocument, Scalar, visit, type YAMLSeq } from 'yaml';
 
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import {
@@ -974,30 +974,133 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
  *
  * `roadmap.ts`の`alignRoadmapIssues`と同じく`yaml`パッケージのDocument APIで
  * 既存ノードには触れず末尾へ足すだけにし、コメントや整形を保つ。パース不能・
- * `tasks`が配列でない等、安全に追記できない場合は`source`をそのまま返す
+ * `tasks`が配列でない等、安全に追記できない場合は`undefined`を返す
  * （呼び出し側はベストエフォートの永続化として扱い、失敗させない）。
  */
-export function appendTaskToWorkflowYaml(source: string, task: WorkflowTask): string {
-  let doc;
-  try {
-    doc = parseDocument(source);
-  } catch {
-    return source;
-  }
-  if (doc.errors.length > 0) {
-    return source;
-  }
-  const tasksNode = doc.get('tasks', true);
-  if (!isSeq(tasksNode)) {
-    return source;
-  }
+export function appendTaskToWorkflowYaml(source: string, task: WorkflowTask): string | undefined {
+  const parsed = parseWorkflowTasksYaml(source);
+  if (parsed === undefined) return undefined;
   // 解析結果の保持用フィールドと、taskごとの指定がスキーマに無い`cleanup`はYAMLへ書かない
   const fields: Partial<WorkflowTask> = { ...task };
   delete fields.parseErrors;
   delete fields.parseWarnings;
   delete fields.cleanup;
-  tasksNode.add(doc.createNode(fields));
-  return String(doc);
+  const node = parsed.doc.createNode(fields);
+  preferBlockLiteral(node);
+  parsed.tasks.add(node);
+  return stringifyWorkflowYaml(parsed.doc);
+}
+
+/** Orchestratorの`update_task`が変更しうるフィールド（YAMLのキー名と同じ）。 */
+export type WorkflowTaskYamlChanges = Partial<
+  Pick<WorkflowTask, 'prompt' | 'done' | 'continuePrompt' | 'role' | 'maxIterations'>
+>;
+
+/**
+ * Orchestratorの`update_task`が変えたフィールドを、定義ファイルの該当タスクへ書き戻す
+ * （Issue #1618）。変えたキーの値だけを差し替え、他のキーやコメントには触れない。
+ * 安全に書き換えられない場合（パース不能・該当idのタスクが無い等）は`undefined`を返す。
+ */
+export function updateTaskInWorkflowYaml(
+  source: string,
+  taskId: string,
+  changes: WorkflowTaskYamlChanges,
+): string | undefined {
+  const parsed = parseWorkflowTasksYaml(source);
+  const taskNode = parsed?.tasks.items.find((item) => yamlTaskId(item) === taskId);
+  if (parsed === undefined || !isMap(taskNode)) return undefined;
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === undefined) continue;
+    const node = parsed.doc.createNode(value);
+    preferBlockLiteral(node);
+    taskNode.set(key, node);
+  }
+  return stringifyWorkflowYaml(parsed.doc);
+}
+
+/**
+ * Orchestratorの`remove_task`が取り除いたタスクを定義ファイルからも消す（Issue #1618）。
+ * 実行中の定義と同じく、他タスクの`dependsOn`に残る参照も外し、空になったら
+ * `dependsOn`キーごと消す。安全に書き換えられない場合は`undefined`を返す。
+ */
+export function removeTaskFromWorkflowYaml(source: string, taskId: string): string | undefined {
+  const parsed = parseWorkflowTasksYaml(source);
+  if (parsed === undefined) return undefined;
+  const index = parsed.tasks.items.findIndex((item) => yamlTaskId(item) === taskId);
+  if (index < 0) return undefined;
+  parsed.tasks.items.splice(index, 1);
+  for (const item of parsed.tasks.items) {
+    if (!isMap(item)) continue;
+    const deps = item.get('dependsOn', true);
+    if (!isSeq(deps)) continue;
+    const kept = deps.items.filter((dep) => !(isScalar(dep) && dep.value === taskId));
+    if (kept.length === deps.items.length) continue;
+    if (kept.length === 0) item.delete('dependsOn');
+    else deps.items = kept;
+  }
+  return stringifyWorkflowYaml(parsed.doc);
+}
+
+/**
+ * Orchestratorの`update_task_dependencies`が差し替えた`dependsOn`を定義ファイルへ書き戻す
+ * （Issue #1618）。既存の`dependsOn`が`[a, b]`のflow形式ならその形式を保ち、空なら
+ * キーごと消す。安全に書き換えられない場合は`undefined`を返す。
+ */
+export function setTaskDependenciesInWorkflowYaml(
+  source: string,
+  taskId: string,
+  dependsOn: readonly string[],
+): string | undefined {
+  const parsed = parseWorkflowTasksYaml(source);
+  const taskNode = parsed?.tasks.items.find((item) => yamlTaskId(item) === taskId);
+  if (parsed === undefined || !isMap(taskNode)) return undefined;
+  if (dependsOn.length === 0) {
+    taskNode.delete('dependsOn');
+    return stringifyWorkflowYaml(parsed.doc);
+  }
+  const previous = taskNode.get('dependsOn', true);
+  const next = parsed.doc.createNode([...dependsOn]);
+  if (isSeq(previous) && previous.flow === true) next.flow = true;
+  taskNode.set('dependsOn', next);
+  return stringifyWorkflowYaml(parsed.doc);
+}
+
+/** 定義ファイルを編集用に読み、`tasks`配列のノードを返す。安全に編集できなければ`undefined`。 */
+function parseWorkflowTasksYaml(
+  source: string,
+): { doc: ReturnType<typeof parseDocument>; tasks: YAMLSeq } | undefined {
+  let doc;
+  try {
+    doc = parseDocument(source);
+  } catch {
+    return undefined;
+  }
+  if (doc.errors.length > 0) return undefined;
+  const tasks = doc.get('tasks', true);
+  return isSeq(tasks) ? { doc, tasks } : undefined;
+}
+
+/**
+ * 書き換えたノード以外の見た目を変えないよう、flow形式の配列を`[a, b]`のまま書き出す
+ * （`yaml`の既定では文書全体の`[a]`が`[ a ]`に書き換わる）。
+ */
+function stringifyWorkflowYaml(doc: ReturnType<typeof parseDocument>): string {
+  return doc.toString({ flowCollectionPadding: false });
+}
+
+/** 改行を含む文字列は、人が書くYAMLと同じ`|`のブロック形式で書き出す。 */
+function preferBlockLiteral(node: unknown): void {
+  visit(node as Parameters<typeof visit>[0], {
+    Scalar(_key, scalar) {
+      if (typeof scalar.value === 'string' && scalar.value.includes('\n')) {
+        scalar.type = Scalar.BLOCK_LITERAL;
+      }
+    },
+  });
+}
+
+function yamlTaskId(item: unknown): unknown {
+  return isMap(item) ? item.get('id') : undefined;
 }
 
 /** 生成YAMLのレビュー状態だけを書き換え、他の行を可能な限り維持する。 */

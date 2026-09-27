@@ -6292,7 +6292,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 
 #### 変えないもの（Issue #338の非交渉事項）
 
-- **YAMLファイルは書き換えない。** 3つのツール自身は実行中の定義（`LiveRun.def`、メモリ上のみ）を直接書き換え、この3ツール自身の経路からは`persist`を呼ばない。既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」の流儀を踏襲した
+- **YAMLファイルへの反映はベストエフォートにする。** 3つのツール自身は実行中の定義（`LiveRun.def`）を直接書き換え、この3ツール自身の経路からは`persist`を呼ばない。当初は既存の`update_task_prompt`（`continuePromptOverride`）と同じ「実行中だけの上書き」にしていたが、Orchestratorの自律運用のため、`add_task`はIssue #1614から、`remove_task`・`update_task_dependencies`・`update_task`はIssue #1618から定義ファイルへも書き戻す（`runnerOrchestrator.ts`の`persistTaskChangeToYaml`）。書き戻しは`yaml`のDocument APIで該当ノードだけを変え、コメントを保つ。同じファイルへの書き込みは1本ずつ流す。書き込みに失敗しても変更自体は成功させ、ログに警告を残すだけにする。`update_task_prompt`は従来どおり実行中だけの上書き
 
   **ただし`live.runState`（タスクの状態）は、この3ツール自身が呼ばなくても別の経路（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）で結果的に永続化される（レビューblocking指摘、2026-08-23）。** `add_task`で加えたタスクのidが、後続の何らかのpersistでたまたま永続データに紛れ込むことがあり、`remove_task`で消したタスクのidは、後続のpersistで永続データから消える。ウィンドウを再読み込みすると、リロード後の復元（`runnerRestore.ts`の`reconcileRestoredTaskStates`）が、この永続データと再読み込みした定義ファイル（YAML本来の内容）を**突き合わせて**ずれを解消する：定義に無いタスクの永続状態は復元しない、永続データに無い定義側のタスクは`pending`として補う。突き合わせで実際に何かを落とす・補うと`reloadTaskDefMismatch`警告が出る。この突き合わせがあって初めて「ウィンドウを再読み込みすればYAML本来の内容へ戻る」が成り立つ（突き合わせ自体の詳細は`runnerRestore.ts`のJSDoc参照。人がrunの途中でYAMLを直接編集してからリロードしたときにも起こりうる、元からあった穴の恒久修正でもある）
 
