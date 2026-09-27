@@ -68,6 +68,18 @@ import {
 const MAX_EVENTS_PER_RUN = 30;
 const EVENT_MESSAGE_MAX_LENGTH = 300;
 
+/** mergeの流れ（merge待ち〜cleanup）にある、まだ終わっていないIssueがあるか。 */
+function hasPendingMerge(run: RoadmapRun): boolean {
+  return Object.values(run.issues).some(
+    (issue) =>
+      issue.progress !== 'done' &&
+      (issue.phase === 'awaitingMerge' ||
+        issue.phase === 'merging' ||
+        issue.phase === 'mergeRepair' ||
+        issue.phase === 'cleanup'),
+  );
+}
+
 export interface RoadmapRunControllerDeps {
   store: Pick<RoadmapRunStore, 'list' | 'find' | 'findActive' | 'update'>;
   runner: Pick<
@@ -300,9 +312,14 @@ export class RoadmapRunController {
   /**
    * runの専有権を取る（持っていれば何もしない）。自分のrunの専有権がウィンドウの異常終了で
    * 残っていても、失効していれば取り直せる。ファイル操作の失敗は、取れなかったものとして扱う。
+   *
+   * 新たに取れたら、専有権が無い間に見送ったmergeの突き合わせと`pump`をやり直す
+   * （`handleRunChanged`・`schedulePump`は専有権が無いと何もしない）。`restore`は自動実行を
+   * 止める前に取るため`resync: false`で呼び、突き合わせは`restore`の最後でまとめて行う。
    */
   private async ensureLease(
     run: Pick<RoadmapRun, 'runId' | 'workspaceRoot' | 'roadmapIssueNumber'>,
+    { resync = true }: { resync?: boolean } = {},
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const lease = this.deps.lease;
     if (lease === undefined || lease.holds(run.runId)) {
@@ -321,6 +338,9 @@ export class RoadmapRunController {
             message: `このウィンドウがロードマップ #${String(run.roadmapIssueNumber)}の専有権を取りました`,
           },
         ]);
+        if (resync) {
+          this.resyncAfterLease(run.runId);
+        }
       }
       return outcome.ok
         ? outcome
@@ -335,6 +355,18 @@ export class RoadmapRunController {
         ok: false,
         message: `ロードマップ #${String(run.roadmapIssueNumber)}の専有権を取れませんでした: ${message}`,
       };
+    }
+  }
+
+  /** 専有権を取った直後に、mergeの突き合わせと`pump`をやり直す。準備中でまだ無いrunは何もしない。 */
+  private resyncAfterLease(runId: string): void {
+    const run = this.deps.store.find(runId);
+    if (run === undefined || run.finishedAt !== undefined) {
+      return;
+    }
+    this.deps.mergeQueue?.sync(run);
+    if (pickIssuesToStart(run).length > 0) {
+      this.schedulePump(runId);
     }
   }
 
@@ -571,15 +603,21 @@ export class RoadmapRunController {
   /**
    * ウィンドウの再読み込みの後に呼ぶ。自動実行のrunは止めた状態で戻し、再開は人が選ぶ
    * （リロードのたびに黙ってセッションを始めないため）。
+   *
+   * runは`workspaceState`から読むため、落ちたウィンドウのrunを取り直して再開できるのは、同じ
+   * ワークスペースを開き直した（再読み込みした）ウィンドウに限る。別のワークスペースのウィンドウ
+   * からは、失効した専有権を取れても、そのrunは見えない。
    */
   async restore(): Promise<void> {
     // 走り終えていないrunの専有権を取り直す。ウィンドウが落ちて残った自分の専有権は、失効して
-    // いれば取り直せる。取れないrunは別のウィンドウが動かしているため、ここからは動かさない
+    // いれば取り直せる。取れないrunは別のウィンドウが動かしているため、ここからは動かさない。
+    // 人が止めていてmerge待ちも無いrunは取らない（別のウィンドウで扱えるよう空けておき、
+    // 再開・操作の時に取る）。merge待ちのあるrunは、止めていてもmergeを進めるため取る
     for (const run of this.deps.store.list()) {
-      if (run.finishedAt !== undefined) {
+      if (run.finishedAt !== undefined || (run.haltedByUser && !hasPendingMerge(run))) {
         continue;
       }
-      const leased = await this.ensureLease(run);
+      const leased = await this.ensureLease(run, { resync: false });
       if (!leased.ok) {
         this.addEvent(run.runId, leased.message, 'warn');
       }
