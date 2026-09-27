@@ -81,8 +81,10 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from './taskSession';
+import type { CliCommandRunner } from './forge';
+import { detectRoadmapForgeHost } from './roadmapRunForge';
 import { shouldAutoApproveStageElicitation, stageApprovalHandler } from './taskStageApproval';
-import { cleanupAfterMerge } from './taskStageCleanup';
+import { cleanupAfterMerge, cleanupRetiredTask } from './taskStageCleanup';
 import { observeStageCompletion, type StageObservationPorts } from './taskStageObservation';
 import {
   buildStageHandoffPrompt,
@@ -121,6 +123,8 @@ export interface TaskStageRunnerDeps {
   worktreeQueue: WorktreeCreationQueue;
   git: GitCommandRunner;
   fs: WorktreeFileSystemPort;
+  /** `gh` / `glab` の実行ポート。計画から外れた着手済みタスクのPRを閉じるときに使う（Issue #1619）。 */
+  cli: CliCommandRunner;
   observation: StageObservationPorts;
   /** タスクのブランチの分岐元のcommit。依存先のmergeを含む最新のmainを返す想定。 */
   resolveBaseCommit(repoRoot: string): Promise<string | undefined>;
@@ -1050,6 +1054,51 @@ export class TaskStageRunner {
         this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
       }
     });
+  }
+
+  /**
+   * 計画から外れた・既存Issueの付け替えで作り直された着手済みタスクの後片付け（Issue #1619）。
+   * 動いている工程セッションを止め、PRがあればmergeせず閉じ、リモートのブランチ・worktree・
+   * ローカルのブランチを消す。ベストエフォート（失敗は止めず`onWarning`経由でKanbanへ）。
+   *
+   * `task`は計画を置く前（作り直される前）のスナップショットを呼び出し側（Controller）から
+   * 受け取る。この時点で`run.tasks`には既に存在しない、または未着手へ作り直されているため、
+   * `cleanupRestoredTask`のように状態から`getTask`で引き直せない。
+   *
+   * worktreeの削除は工程セッションを止めた後にのみ行う。`stopStage`はrun.tasksに存在しない
+   * taskIdでも安全に動く（生きているセッションの帳簿はtaskIdのkeyだけで管理しており、状態上の
+   * タスクの有無に依存しない）ため、専用の停止メソッドは追加せずそのまま使う。
+   */
+  async retireTask(
+    runId: string,
+    repoRoot: string,
+    task: OrchestratedTask,
+  ): Promise<{ closedPullRequest: number | undefined }> {
+    try {
+      await this.stopStage(runId, task.taskId);
+    } catch (e) {
+      this.warn(
+        runId,
+        task.taskId,
+        `${task.taskId}の工程セッションを止められなかったため、後片付けを見送りました: ${errorMessage(e)}`,
+      );
+      return { closedPullRequest: undefined };
+    }
+    try {
+      const host =
+        task.pullRequest === undefined
+          ? undefined
+          : await detectRoadmapForgeHost({ git: this.deps.git, cli: this.deps.cli }, repoRoot);
+      const result = await cleanupRetiredTask(this.deps, { repoRoot, runId, task, host });
+      result.warnings.forEach((w) => this.warn(runId, task.taskId, w));
+      if (!result.ok) {
+        this.warn(runId, task.taskId, `${task.taskId}の後片付けに失敗しました: ${result.message}`);
+      }
+      return { closedPullRequest: result.closedPullRequest };
+    } catch (e) {
+      this.warn(runId, task.taskId, `${task.taskId}の後片付けで例外が起きました: ${errorMessage(e)}`);
+      return { closedPullRequest: undefined };
+    }
   }
 
   private async cleanupIfMerged(entry: LiveStageSession): Promise<void> {
