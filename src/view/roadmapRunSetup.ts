@@ -75,6 +75,8 @@ const CONFIRM_TITLE_MAX_LENGTH = 200;
 const CONFIRM_TEXT_MAX_LENGTH = 1000;
 /** 計画区画の扱いを聞くモーダルへ出す検証エラーの上限。 */
 const PLAN_ERRORS_SHOWN = 10;
+/** `git remote get-url`が、そのremoteが無いときに返す終了コード。 */
+const GIT_NO_SUCH_REMOTE_EXIT_CODE = 2;
 
 export interface RoadmapRunSetupDeps {
   context: vscode.ExtensionContext;
@@ -194,10 +196,17 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
       pid: process.pid,
     },
     // ホストによってworkspaceRootのパスが違っても同じrepoを同じ専有権にするため、originで見分ける。
-    // originが無ければパスで代える
+    // originが無ければパスで代える。それ以外の失敗は、パスを識別子として覚えないよう例外にする
+    // （覚えると、originが読めるようになっても別ホストのウィンドウと別の専有権になり続ける）
     resolveRepoIdentity: async (root) => {
       const remote = await deps.git.run(['remote', 'get-url', 'origin'], root);
-      return (remote.code === 0 ? normalizeRepoIdentity(remote.stdout) : undefined) ?? path.resolve(root);
+      if (remote.code === GIT_NO_SUCH_REMOTE_EXIT_CODE) {
+        return path.resolve(root);
+      }
+      if (remote.code !== 0) {
+        throw new Error(`originのURLを読めませんでした（git exit ${String(remote.code)}）`);
+      }
+      return normalizeRepoIdentity(remote.stdout) ?? path.resolve(root);
     },
     onLost: (runId, lost) => holder.controller?.handleLeaseLost(runId, lost),
     log: (message) => log.warn(`[roadmap run] ${message}`),
