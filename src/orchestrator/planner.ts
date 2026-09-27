@@ -961,7 +961,7 @@ export function providerHintToProvider(hint: unknown): Provider | undefined {
 }
 
 /** 分解セッションの`approvalMode`（Codex）/`permissionMode`（Claude）。 */
-function plannerApprovalModeFor(provider: Provider): string {
+export function plannerApprovalModeFor(provider: Provider): string {
   return provider === 'claude' ? PLANNER_CLAUDE_PERMISSION_MODE : PLANNER_CODEX_APPROVAL_MODE;
 }
 

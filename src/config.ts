@@ -84,6 +84,7 @@ import {
   DEFAULT_AUTO_REPLY_MAX_TURNS,
   DEFAULT_AUTO_REPLY_MODEL,
   DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS,
+  normalizeAutoReplyRetryCount,
   type AutoReplySettings,
 } from './chat/autoReply';
 import {
@@ -876,6 +877,7 @@ export function readAutoReplyConfig(): AutoReplySettings {
     model: str(c, 'chat.autoReply.model', DEFAULT_AUTO_REPLY_MODEL),
     timeoutSeconds: num(c, 'chat.autoReply.timeoutSeconds', DEFAULT_AUTO_REPLY_TIMEOUT_SECONDS),
     maxTurns: num(c, 'chat.autoReply.maxTurns', DEFAULT_AUTO_REPLY_MAX_TURNS),
+    retryCount: normalizeAutoReplyRetryCount(c.get<unknown>('chat.autoReply.retryCount')),
   };
 }
 

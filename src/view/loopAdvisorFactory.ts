@@ -16,7 +16,7 @@ import { REFLEX_MODELS } from '../reflex/reflexCli';
  *
  * 明示されたモデル名は必ず優先する。`auto`のときはReflexと同じ軽量モデル
  * （`REFLEX_MODELS`）へ倒す。Advisorは毎ターン呼ばれるため、重いモデルを既定にしない。
- * 終了サマリ・自動返信が使う`resolveAdvisorModel`の既定は変えない。
+ * 終了サマリが使う`resolveAdvisorModel`の既定は変えない。
  */
 export function resolveLoopAdvisorModel(model: string, provider: HeadlessProvider): string {
   if (model !== 'auto' && model !== '') {
