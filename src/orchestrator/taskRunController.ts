@@ -21,6 +21,13 @@ import {
   withRoadmapNotices,
 } from './taskRunRoadmapFollower';
 import { sanitizeInlineText } from './untrustedText';
+import {
+  formatTaskRunLeaseHolder,
+  formatTaskRunLeaseRejection,
+  TASK_LEASE_STALE_MS,
+  type TaskRunLease,
+  type TaskRunLeasePort,
+} from './taskRunLease';
 import { findStageQuestion } from './taskRunQuestions';
 import {
   findOpenGate,
@@ -138,6 +145,11 @@ export interface TaskRunControllerDeps {
   planAutoApprove(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
   /** ロードマップIssueの読み書き（Issue #1623）。無ければ実行中の追従と書き戻しをしない。 */
   roadmap?: TaskRunRoadmapPort;
+  /**
+   * runごとのウィンドウ専有権（Issue #1628）。無ければ専有権の確認をせず全ウィンドウで操作できる
+   * （テスト用のフェイクdepsを壊さないための省略可能な依存注入。`roadmap`と同じパターン）。
+   */
+  lease?: TaskRunLeasePort;
 }
 
 export type TaskRunTransitionListener = (prev: TaskRun | undefined, next: TaskRun) => void;
@@ -230,6 +242,63 @@ export class TaskRunController {
     if (run !== undefined) {
       this.handleRunChanged(run);
     }
+  }
+
+  /**
+   * このウィンドウがrunの専有権を持っているか確かめ、持っていなければ取る（Issue #1628）。
+   * 計画の変更・承認・工程の起動・runの再開の共通の関門にする。`lease`未設定
+   * （テスト等）なら常に許可する。
+   */
+  async ensureLease(runId: string): Promise<ControllerResult> {
+    if (this.deps.lease === undefined || this.deps.lease.holds(runId)) {
+      return { ok: true, message: '' };
+    }
+    const outcome = await this.deps.lease.acquire(runId);
+    if (outcome.ok) {
+      return { ok: true, message: '' };
+    }
+    return { ok: false, message: formatTaskRunLeaseRejection(outcome.holder, this.now()) };
+  }
+
+  /**
+   * Kanban表示用。このウィンドウが専有権を持たず、かつ別のウィンドウが持っているように
+   * 見えるときだけ、持ち主の説明文を返す（Issue #1628）。PIDの生死までは確かめず、
+   * heartbeatの新しさだけで簡易に判定する（正確な判定は`ensureLease`が操作の直前に行う）。
+   */
+  async leaseStatus(runId: string): Promise<{ heldByOther: boolean; holderText?: string }> {
+    if (this.deps.lease === undefined || this.deps.lease.holds(runId)) {
+      return { heldByOther: false };
+    }
+    const lease = await this.deps.lease.peek(runId);
+    if (lease === undefined) {
+      return { heldByOther: false };
+    }
+    const age = this.now().getTime() - Date.parse(lease.heartbeatAt);
+    if (!Number.isFinite(age) || age >= TASK_LEASE_STALE_MS) {
+      return { heldByOther: false };
+    }
+    return { heldByOther: true, holderText: formatTaskRunLeaseHolder(lease, this.now()) };
+  }
+
+  /**
+   * 専有権を明示的にこのウィンドウへ移す（受入基準4）。動作中のウィンドウからも無条件で奪う。
+   */
+  async transferLease(runId: string): Promise<ControllerResult> {
+    if (this.deps.lease === undefined) {
+      return { ok: false, message: '専有権の仕組みが無効になっている' };
+    }
+    await this.deps.lease.forceAcquire(runId);
+    this.refreshKanban(runId);
+    return { ok: true, message: '専有権をこのウィンドウへ移した' };
+  }
+
+  /**
+   * 持っていた専有権を別のウィンドウに取られた（`TaskRunLeaseManager`のheartbeatが検知して
+   * 呼ぶ）。runのデータ自体は変えず、Kanbanへ再描画を促すだけにする（Issue #1628）。
+   */
+  handleLeaseLost(runId: string, holder: TaskRunLease | undefined): void {
+    this.deps.log(`[task run] ${runId}の専有権を${formatTaskRunLeaseHolder(holder, this.now())}に取られた`);
+    this.refreshKanban(runId);
   }
 
   /** 状態を純粋関数で進めて永続化する。runが無ければ`undefined`。 */
@@ -328,6 +397,10 @@ export class TaskRunController {
    * `startRoadmapRun`が共有する。Issue #1623）。Issueの検証、Reflex審査、片付けは両者で同じ。
    */
   private async applyPlan(runId: string, tasks: readonly PlanTaskInput[]): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const current = this.deps.store.find(runId);
     const issueProblem =
       (current === undefined ? undefined : this.findIssueConflict(current, tasks)) ??
@@ -539,6 +612,10 @@ export class TaskRunController {
    * 提案の後に別のrunが同じIssueを扱い始めていれば承認しない（Issue #1562）。
    */
   async approvePlan(runId: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const run = this.deps.store.find(runId);
     if (run?.planStatus !== 'awaitingApproval') {
       return { ok: false, message: '承認待ちの計画がありません' };
@@ -721,6 +798,7 @@ export class TaskRunController {
     }
     await this.stopRunningStages(halted);
     await this.updateRun(runId, (r) => finishTaskRun(r, this.now()));
+    await this.deps.lease?.release(runId);
     return { ok: true, message: 'runを終えた' };
   }
 
@@ -746,6 +824,7 @@ export class TaskRunController {
     // 一時停止中の工程はセッションが無いため止めず、一時停止のまま残す（Issue #1629）
     await this.stopRunningStages(halted, { keepPaused: true });
     await this.updateRun(runId, (r) => suspendTaskRun(r, this.now()));
+    await this.deps.lease?.release(runId);
     return { ok: true, message: 'runを中断した' };
   }
 
@@ -771,6 +850,10 @@ export class TaskRunController {
       if (options.parallel !== true && this.deps.store.listActive(run.workspaceRoot).length > 0) {
         return { ok: false, message: 'このフォルダには動いているrunがある。先にそのrunを中断する' };
       }
+      const leased = await this.ensureLease(runId);
+      if (!leased.ok) {
+        return leased;
+      }
       await this.updateRun(runId, (r) =>
         r.finishedAt === undefined ? setTaskRunHaltedByUser(resumeTaskRun(r), false) : r,
       );
@@ -794,6 +877,10 @@ export class TaskRunController {
       }
       if (isTaskRunActive(run)) {
         return { ok: false, message: 'runは動いている' };
+      }
+      const leased = await this.ensureLease(runId);
+      if (!leased.ok) {
+        return leased;
       }
       await this.updateRun(runId, (r) =>
         isTaskRunActive(r) ? r : setTaskRunHaltedByUser(reopenTaskRun(r), false),
@@ -964,6 +1051,10 @@ export class TaskRunController {
     runId: string,
     call: Extract<TaskRunOrchestratorCall, { tool: 'start_stage' }>,
   ): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
     const run = this.deps.store.find(runId);
     if (run === undefined) {
       return { ok: false, message: 'runが見つからない' };

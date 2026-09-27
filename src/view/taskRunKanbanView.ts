@@ -6,6 +6,7 @@ import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmap
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
 import { isTaskRunActive, isValidTaskId, taskRunLabel, validateTaskRunTitleInput } from '../orchestrator/taskRunState';
+import { TASK_LEASE_HEARTBEAT_MS } from '../orchestrator/taskRunLease';
 import { chatCsp } from './chatCsp';
 import { GRAPH_SVG_SOURCE } from './graphSvgScript';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
@@ -52,6 +53,10 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
   private dirty = false;
   private postTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 専有権（Issue #1628）の表示を追従させる定期の再描画。ロック解放後の書き換えはKanbanに来ないため必要。 */
+  private leasePollTimer: ReturnType<typeof setInterval> | undefined;
+  /** `post`の連番。専有権の読み取りを待つ間に始まった後の`post`を優先する。 */
+  private postSeq = 0;
   private lastPostAt = 0;
   private selectedRunId: string | undefined;
   /** グラフ表示の描画領域の幅（`layoutGraph`の`maxWidth`）。webviewの`viewport`で受け取る。 */
@@ -73,9 +78,11 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       );
       this.panel.onDidDispose(() => {
         this.clearTimer();
+        this.clearLeasePollTimer();
         this.dirty = false;
         this.panel = undefined;
       });
+      this.leasePollTimer = setInterval(() => this.refresh(), TASK_LEASE_HEARTBEAT_MS);
       this.panel.onDidChangeViewState(() => {
         if (this.panel?.visible === true && this.dirty) {
           this.schedulePost();
@@ -103,6 +110,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
 
   dispose(): void {
     this.clearTimer();
+    this.clearLeasePollTimer();
     this.panel?.dispose();
   }
 
@@ -112,12 +120,12 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     const since = Date.now() - this.lastPostAt;
     if (since >= POST_INTERVAL_MS) {
-      this.post();
+      void this.post();
       return;
     }
     this.postTimer = setTimeout(() => {
       this.postTimer = undefined;
-      this.post();
+      void this.post();
     }, POST_INTERVAL_MS - since);
   }
 
@@ -128,7 +136,14 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
   }
 
-  private post(): void {
+  private clearLeasePollTimer(): void {
+    if (this.leasePollTimer !== undefined) {
+      clearInterval(this.leasePollTimer);
+      this.leasePollTimer = undefined;
+    }
+  }
+
+  private async post(): Promise<void> {
     if (this.panel === undefined) {
       return;
     }
@@ -137,7 +152,15 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     const board = this.deps.controller.board(this.selectedRunId, currentWorkspaceFolders());
     const orchestrator = board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
     const graph = board.run === undefined ? undefined : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
-    void this.panel.webview.postMessage({ type: 'board', board, orchestrator, graph });
+    // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
+    const seq = ++this.postSeq;
+    const lease = board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
+    const panel = this.panel;
+    // 専有権を読む間に次の`post`が始まっていたら、古い盤面で上書きしないよう捨てる
+    if (panel === undefined || seq !== this.postSeq) {
+      return;
+    }
+    void panel.webview.postMessage({ type: 'board', board, orchestrator, graph, lease });
   }
 
   private receive(message: unknown): void {
@@ -221,6 +244,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
         return;
       case 'renameRun':
         await this.renameRun(runId);
+        return;
+      case 'transferLease':
+        warnIfRejected(await controller.transferLease(runId));
         return;
     }
     const taskId = message.taskId;
@@ -645,6 +671,8 @@ const script = `
   // 概要を展開したカード。盤面の再描画で畳まれないよう覚えておく
   const expandedSummaries = new Set();
   let orchestratorStatus;
+  // 専有権（Issue #1628）。他ウィンドウが持っているときだけ{ heldByOther: true, holderText }が届く
+  let leaseStatus;
   // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
   const drafts = new Map();
   let focusedQuestion;
@@ -709,6 +737,13 @@ const script = `
     if (!run) { return; }
     const status = run.suspended && !run.finished ? ['中断中', 'warn'] : assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
+    if (leaseStatus && leaseStatus.heldByOther) {
+      // 別ウィンドウが専有権を持つ。計画の変更・工程の開始・承認は送ってもcontroller側で拒否されるが、
+      // ここでも案内と移す手段を出す（Issue #1628）
+      const holder = leaseStatus.holderText ? '（' + leaseStatus.holderText + '）' : '';
+      controls.appendChild(el('span', 'status warn', '別のウィンドウで実行中' + holder + ': 読み取り専用'));
+      controls.appendChild(button('専有権をこのウィンドウへ移す', '', function () { send('transferLease'); }));
+    }
     if (run.roadmap) {
       controls.appendChild(el('span', 'status', 'ロードマップ #' + run.roadmap.issueNumber + ' ' + run.roadmap.title));
       if (!run.finished) {
@@ -1175,6 +1210,7 @@ const script = `
     current = message.board;
     orchestratorStatus = message.orchestrator;
     currentGraph = message.graph;
+    leaseStatus = message.lease;
     renderControls(current);
     renderProgress(current);
     renderPlan(current);

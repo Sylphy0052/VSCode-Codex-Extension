@@ -170,6 +170,11 @@ export interface TaskStageRunnerDeps {
    * 解けたら呼び出し側が`pumpAll`を呼ぶ。無ければ保留しない。
    */
   isStartHeld?: () => boolean;
+  /**
+   * このウィンドウがrunの工程を始めてよいか（runの専有権。Issue #1628）。持っていなければ取りに
+   * 行き、別のウィンドウが持っていれば`false`を返す。無ければ常に始める。
+   */
+  canDrive?: (runId: string) => Promise<boolean>;
   /** runの状態が変わったとき（Kanbanの再描画・通知用）。 */
   onRunChanged?: (run: TaskRun) => void;
   /** 実行を止めずに人へ知らせる事象（後片付けに失敗した等）。 */
@@ -408,11 +413,17 @@ export class TaskStageRunner {
    * 終わり・並列上限の変更のたびに呼ぶ。
    */
   async pump(runId: string): Promise<void> {
-    if (this.disposed) {
+    const current = this.deps.store.find(runId);
+    if (this.disposed || current === undefined || current.finishedAt !== undefined || current.suspendedAt !== undefined) {
+      return;
+    }
+    // 別のウィンドウが専有権を持つrunの工程は始めない（Issue #1628）。`pumpFolder`は同じフォルダの
+    // 他のrunも回すため、Controllerの操作ごとの関門だけでは他のウィンドウのrunを始めてしまう
+    if (this.deps.canDrive !== undefined && !(await this.deps.canDrive(runId))) {
       return;
     }
     const run = this.deps.store.find(runId);
-    if (run === undefined || this.deps.isStartHeld?.() === true) {
+    if (this.disposed || run === undefined || this.deps.isStartHeld?.() === true) {
       return;
     }
     // 枠の数え上げから`startStage`の`starting`への予約までに`await`を挟まない。挟むと、並べて呼んだ
