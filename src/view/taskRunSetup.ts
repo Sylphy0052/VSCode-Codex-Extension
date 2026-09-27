@@ -242,7 +242,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
-    resourceLines: (runId) => formatResourceLines(holder.monitor?.snapshot, runId),
+    resourceLines: (runId) =>
+      formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),
     isStartHeld: () => holder.monitor?.level === 'critical',
   });
   holder.orchestrator = orchestrator;

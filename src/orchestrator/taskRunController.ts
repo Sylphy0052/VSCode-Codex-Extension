@@ -89,6 +89,9 @@ import {
  * - 状態が変わるたびに前後のrunを`onTransition`の購読者へ渡す（Orchestratorへのイベントの元）
  */
 
+// resume_stageの応答へ載せる失敗理由の上限。get_run_stateの「理由:」と同じ長さで切る
+const RESUME_FAILURE_MAX_LENGTH = 1000;
+
 const PAUSE_REJECTIONS: Record<Exclude<PauseStageOutcome, { ok: true }>['reason'], string> = {
   noSession: '工程セッションが動いていない',
   mergeCleanup: 'mergeとcleanupはmergeの鍵を持つため一時停止できない',
@@ -1205,13 +1208,32 @@ export class TaskRunController {
     if (!leased.ok) {
       return leased;
     }
+    // 開き直しの失敗は`failed`で止める。人の`stop_task`（`stopped`）が同じ間に割り込んでも取り違えない
+    const failureOf = (): string | undefined => {
+      const run = this.deps.store.find(runId);
+      const task = run === undefined ? undefined : getTask(run, taskId);
+      return task?.attention === 'failed' ? task.failure : undefined;
+    };
+    const failureBefore = failureOf();
     const accepted = await this.deps.runner.resumeStage(runId, taskId);
-    return accepted
-      ? {
-          ok: true,
-          message: `${taskId}の再開を受け付けた。並列枠と資源の保留が空き次第、同じ会話を開き直して続きから進める`,
-        }
-      : { ok: false, message: `${taskId}を再開できなかった（一時停止していない）` };
+    if (!accepted) {
+      return { ok: false, message: `${taskId}を再開できなかった（一時停止していない）` };
+    }
+    // 並列枠が空いていれば、受け付けた流れのまま開き直しまで済んでいる。開き直せずに工程が止まった
+    // （worktreeや会話の記録が無い等）なら、その理由をここで返す（Issue #1638）
+    const failure = failureOf();
+    if (failure !== undefined && failure !== failureBefore) {
+      return {
+        ok: false,
+        message: `${taskId}を再開できなかった: ${sanitizeInlineText(failure, RESUME_FAILURE_MAX_LENGTH)}`,
+      };
+    }
+    return {
+      ok: true,
+      message:
+        `${taskId}の再開を受け付けた。並列枠と資源の保留が空き次第、同じ会話を開き直して続きから進める。` +
+        '開き直せなければ工程は失敗になり、理由はget_run_stateの「理由:」に出る',
+    };
   }
 
   async instructTask(runId: string, taskId: string, instruction: string): Promise<ControllerResult> {
