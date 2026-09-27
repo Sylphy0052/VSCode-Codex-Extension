@@ -2476,6 +2476,8 @@ export class ClaudeChatViewManager
   protected override onDispose(): void {
     this.advisorStore.closeAll('shutdown');
     this.handoffDrafts.clear();
+    // 進行中のsandboxの確認が起動した子プロセスを残さない（Issue #1545）
+    this.sandboxProbe.dispose();
   }
 
   /**
