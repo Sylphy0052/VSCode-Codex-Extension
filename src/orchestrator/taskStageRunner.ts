@@ -863,7 +863,13 @@ export class TaskStageRunner {
     if (findings.length === 0) return;
     void this.deps.runNotes.recordRemaining(
       workspaceRoot,
-      findings.map((text) => ({ runId, runKind: 'taskRun' as const, source: 'reviewFinding' as const, text, taskId })),
+      findings.map((text) => ({
+        runId,
+        runKind: 'taskRun' as const,
+        source: 'reviewFinding' as const,
+        text,
+        taskId,
+      })),
     );
   }
 

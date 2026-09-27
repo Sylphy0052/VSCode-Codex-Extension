@@ -263,6 +263,7 @@ export function parseRunNotes(text: string): RunNoteRecord[] {
   return records;
 }
 
+/** 検証済みの記録を種別で絞る（JSONの形を検証する`isLessonRecord`・`isRemainingRecord`とは別）。 */
 function isLesson(record: RunNoteRecord): record is LessonRecord {
   return record.kind === 'lesson';
 }
@@ -563,10 +564,17 @@ export class RunNotesStore {
     workspaceRoot: string,
     inputs: readonly RemainingInput[],
   ): Promise<RunNotesWriteResult> {
-    const now = this.now();
-    const records = inputs
-      .map((input) => buildRemainingRecord(input, now))
-      .filter((record): record is RemainingRecord => record !== undefined);
+    // 呼び出し側は結果を待たない（`void`）ため、組み立ての例外もここで`{ ok: false }`へ畳む
+    let records: RemainingRecord[];
+    try {
+      const now = this.now();
+      records = inputs
+        .map((input) => buildRemainingRecord(input, now))
+        .filter((record): record is RemainingRecord => record !== undefined);
+    } catch (e) {
+      this.logFailure(`残件の組み立て中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+      return { ok: false, message: '残件を書き込めませんでした。' };
+    }
     if (records.length === 0) {
       return { ok: true };
     }
