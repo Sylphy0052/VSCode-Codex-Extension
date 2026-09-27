@@ -197,9 +197,8 @@ export interface TaskSessionInput {
    */
   inputLock?: boolean;
   /**
-   * 自動引き継ぎ（`agent.autoHandoff`）を発火させない（Issue #1465 分割案8b）。ロードマップ実行の
-   * Orchestratorセッションだけが`true`を渡す。会話の続きはKanbanの「Orchestratorを開く」で
-   * 新しい世代として開き直す。
+   * 自動引き継ぎ（`agent.autoHandoff`）を発火させない（Issue #1465 分割案8b）。現在`true`を渡す
+   * 呼び出し元は無い（ロードマップ実行のOrchestratorもIssue #1555から自動引き継ぎを使う）。
    */
   disableAutoHandoff?: boolean;
   /**

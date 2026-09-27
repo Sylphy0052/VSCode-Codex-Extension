@@ -502,7 +502,7 @@ const script = `
     if (!run) { return; }
     const status = assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
-    renderOrchestratorControls();
+    renderOrchestratorControls(run);
     if (run.finished) { return; }
     const mode = el('select');
     mode.setAttribute('aria-label', 'モード');
@@ -527,11 +527,20 @@ const script = `
     }));
   }
 
-  const ORCHESTRATOR_LABELS = { notStarted: '未起動', idle: '待機中', busy: '応答中' };
+  const ORCHESTRATOR_LABELS = { notStarted: '未起動', idle: '待機中', busy: '応答中', handingOff: '次の世代へ引き継ぎ中' };
 
-  function renderOrchestratorControls() {
+  function renderOrchestratorControls(run) {
     if (!orchestratorStatus) { return; }
-    controls.appendChild(el('span', 'status', 'Orchestrator: ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
+    // 世代番号と自動引き継ぎの発生を並べて出す（Issue #1555）
+    const generation = orchestratorStatus !== 'notStarted' && run.orchestratorGeneration > 0 ? '（第' + run.orchestratorGeneration + '世代）' : '';
+    controls.appendChild(el('span', 'status' + (orchestratorStatus === 'handingOff' ? ' warn' : ''), 'Orchestrator' + generation + ': ' + (ORCHESTRATOR_LABELS[orchestratorStatus] || orchestratorStatus)));
+    const handoffs = run.orchestratorAutoHandoffs;
+    if (handoffs && handoffs.count > 0) {
+      const handoffEl = el('span', 'status', '自動引き継ぎ ' + handoffs.count + '回（直近は第' + handoffs.lastGeneration + '世代へ）');
+      const at = new Date(handoffs.lastAt);
+      handoffEl.title = 'コンテキストが少なくなったため、Orchestratorを自動で次の世代へ引き継ぎました。直近: ' + (isNaN(at.getTime()) ? handoffs.lastAt : at.toLocaleString());
+      controls.appendChild(handoffEl);
+    }
     controls.appendChild(button('Orchestratorを開く', '', function () { send('openOrchestrator', { renew: false }); }));
     if (orchestratorStatus !== 'notStarted') {
       controls.appendChild(button('開き直す', '', function () { send('openOrchestrator', { renew: true }); }));

@@ -19,6 +19,7 @@ import type { RoadmapRunController } from './roadmapRunController';
 import {
   getIssue,
   nextOrchestratorGeneration,
+  recordOrchestratorAutoHandoff,
   recordOrchestratorSession,
   type RoadmapIssueExecution,
   type RoadmapRun,
@@ -41,8 +42,14 @@ import { sanitizeInlineText } from './untrustedText';
  * トークンを外すため、古いセッションからの命令は接続の時点で届かない。
  */
 
-/** Orchestratorの状態。Kanbanのヘッダに出す。 */
-export type RoadmapOrchestratorStatus = 'notStarted' | 'idle' | 'busy';
+/**
+ * Orchestratorの状態。Kanbanのヘッダに出す。`handingOff`はコンテキストの残量不足で次の世代を
+ * 起こしている途中（Issue #1555）。
+ */
+export type RoadmapOrchestratorStatus = 'notStarted' | 'idle' | 'busy' | 'handingOff';
+
+/** 次の世代を起こした契機。`manual`は人の操作による開き直し、`autoHandoff`は自動引き継ぎ（Issue #1555）。 */
+type GenerationTrigger = 'manual' | 'autoHandoff';
 
 /** Orchestratorへ届けるイベント。本文は`composeOrchestratorPrompt`が囲って無害化する。 */
 export interface RoadmapOrchestratorEvent {
@@ -125,6 +132,11 @@ interface LiveOrchestrator {
    * 送り済みか（Issue #1520）。`TaskRunOrchestrator`と同じく一度きりに絞る。
    */
   capNoticeSent: boolean;
+  /**
+   * 自動引き継ぎで次の世代を起こしている途中（Issue #1555）。この間に届いたイベントは送らずに
+   * `pending`へ溜め、次の世代が立ち上がってから渡す。この世代からのツール呼び出しは拒否する。
+   */
+  handingOff: boolean;
 }
 
 export class RoadmapOrchestrator {
@@ -140,12 +152,16 @@ export class RoadmapOrchestrator {
     if (live === undefined) {
       return 'notStarted';
     }
+    if (live.handingOff) {
+      return 'handingOff';
+    }
     return live.busy ? 'busy' : 'idle';
   }
 
   /**
    * Orchestratorのタブを開く。生きているセッションがあれば前へ出すだけにし、無ければ次の世代を
-   * 起こす。`renew`なら生きているセッションを閉じて次の世代を起こす（コンテキストが尽きたとき用）。
+   * 起こす。`renew`なら生きているセッションを閉じて次の世代を起こす（人が手で開き直すとき用。
+   * コンテキストが尽きかけたときは自動引き継ぎ`onHandoff`が同じ手順で起こす。Issue #1555）。
    * 失敗してもrunは止めない（ログへ残し、`false`を返す）。
    */
   open(runId: string, renew = false): Promise<boolean> {
@@ -154,15 +170,84 @@ export class RoadmapOrchestrator {
       existing.session.reveal();
       return Promise.resolve(true);
     }
+    return this.startNewGeneration(runId, 'manual');
+  }
+
+  private startNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
     const inFlight = this.opening.get(runId);
     if (inFlight !== undefined) {
       return inFlight;
     }
-    const task = this.openNewGeneration(runId).finally(() => {
+    const task = this.openNewGeneration(runId, trigger).finally(() => {
       this.opening.delete(runId);
     });
     this.opening.set(runId, task);
     return task;
+  }
+
+  /**
+   * 自動引き継ぎ（Issue #1555）。オーケストレータモードのOrchestrator（`taskRunOrchestrator.ts`の
+   * `onHandoff`、Issue #1553）と同じく、ホストに新しいタブを開かせず、`renew`と同じ手順で次の
+   * 世代を起こす。ホストの引き継ぎ文書（会話の抜粋）は使わない。新しい世代には導入文で引き継ぎの
+   * 要点を構造化して渡し、各Issueの状態はget_run_stateで取り直させる。
+   * Orchestratorのタブで手動の引き継ぎを押したときも同じ委譲先へ来るので、契機は`trigger`で分ける。
+   *
+   * 次の世代を起こすのはホストの引き継ぎ処理が戻った後にする。委譲先の中で前の世代を閉じると、
+   * ホストが破棄済みのパネルを触ることになるため。
+   */
+  private onHandoff(runId: string, generation: number, trigger: GenerationTrigger): Promise<boolean> {
+    const live = this.live.get(runId);
+    if (
+      this.disposed ||
+      live === undefined ||
+      live.generation !== generation ||
+      live.handingOff ||
+      this.opening.has(runId) ||
+      // 終わったrunでは次の世代を起こさない。前の世代をそのまま使い続ける
+      (trigger === 'autoHandoff' && !this.isRunActive(runId))
+    ) {
+      return Promise.resolve(false);
+    }
+    // 次の世代が立ち上がるまでに届いたイベントを前の世代へ送らせない
+    live.handingOff = true;
+    this.deps.log(
+      `[roadmap orchestrator] ${runId}のOrchestrator（第${String(generation)}世代）を${trigger === 'autoHandoff' ? 'コンテキストが少なくなったため' : 'ユーザーの操作で'}次の世代へ引き継ぎます`,
+    );
+    this.deps.onDidChange();
+    setTimeout(() => {
+      // 待つ間に拡張機能を終了した（`dispose`）・人が開き直した（`renew`）なら、次の世代は要らない
+      if (this.disposed || this.live.get(runId) !== live) {
+        return;
+      }
+      void this.startNewGeneration(runId, trigger).then((opened) => {
+        if (!opened) {
+          this.abandonHandoff(runId, live);
+        }
+      });
+    }, 0);
+    return Promise.resolve(true);
+  }
+
+  /**
+   * 自動引き継ぎで次の世代を開けなかった（Issue #1555）。前の世代をそのまま使い続け、溜めていた
+   * イベントを渡す。runは止めない。
+   */
+  private abandonHandoff(runId: string, live: LiveOrchestrator): void {
+    if (this.live.get(runId) !== live || !live.handingOff) {
+      return;
+    }
+    live.handingOff = false;
+    this.deps.log(`[roadmap orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`);
+    if (!live.busy) {
+      this.flush(live);
+    }
+    this.deps.onDidChange();
+  }
+
+  /** runが残っていて、まだ終わっていない。ロードマップ実行には中断が無く、全体の停止中も会話は続ける。 */
+  private isRunActive(runId: string): boolean {
+    const run = this.deps.findRun(runId);
+    return run !== undefined && run.finishedAt === undefined;
   }
 
   /** runの状態が変わった（Controllerの`handleRunChanged`から呼ぶ）。差分からイベントを作って届ける。 */
@@ -184,7 +269,11 @@ export class RoadmapOrchestrator {
     this.live.clear();
   }
 
-  private async openNewGeneration(runId: string): Promise<boolean> {
+  private async openNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
+    // 引き継ぎを待つ間にrunが終わった・消えたなら、次の世代は起こさない
+    if (trigger === 'autoHandoff' && !this.isRunActive(runId)) {
+      return false;
+    }
     const run = await this.deps.controller.updateRun(runId, nextOrchestratorGeneration);
     if (run === undefined) {
       return false;
@@ -208,13 +297,20 @@ export class RoadmapOrchestrator {
         // 作業ディレクトリへの書き込みも塞ぐ（Issue #1541）
         cliSandbox: 'read-only',
         mcp: { url: registered.url },
-        // コンテキストが尽きたら「Orchestratorを開く」で次の世代を起こす。新しい世代は
-        // get_run_stateで状態を取り直すため、会話の引き継ぎは要らない
-        disableAutoHandoff: true,
+        // コンテキストが尽きかけたら、ユーザーの操作なしに次の世代を起こす（Issue #1555）。
+        // Issueセッションと同じく、グローバル設定によらず自動引き継ぎをONにし、確認も出さない。
+        // 新しいセッションはホストに開かせず、`renew`と同じ手順で開き直す（`onHandoff`）
+        forceAutoHandoff: true,
+        autoHandoffAutoApprove: true,
+        handoffDelegate: (request) =>
+          this.onHandoff(runId, generation, request.trigger === 'manual' ? 'manual' : 'autoHandoff'),
       });
-      await this.deps.controller.updateRun(runId, (r) =>
-        recordOrchestratorSession(r, session?.sessionId ?? ''),
-      );
+      await this.deps.controller.updateRun(runId, (r) => {
+        const recorded = recordOrchestratorSession(r, session?.sessionId ?? '');
+        return trigger === 'autoHandoff'
+          ? recordOrchestratorAutoHandoff(recorded, generation, new Date())
+          : recorded;
+      });
       if (this.disposed) {
         throw new Error('拡張機能の終了中です');
       }
@@ -229,18 +325,22 @@ export class RoadmapOrchestrator {
 
     session.setApprovalHandler(approvalHandlerFor(effective.autoApprove));
     session.setMcpElicitationHandler?.(shouldAutoApproveRoadmapElicitation);
+    // 開き直し（`renew`・自動引き継ぎ）のときは前の世代を外す。古い世代からの命令は接続の時点で
+    // 届かなくなる。前の世代へ送れずに溜まっていたイベントは、導入文の後で新しい世代へ渡す
+    const previous = this.live.get(runId);
+    const carried = previous?.pending ?? [];
     const live: LiveOrchestrator = {
       generation,
       session,
       token: registered.token,
       busy: false,
-      pending: [],
+      pending: [...carried],
       eventsSent: 0,
       capNoticeSent: false,
+      handingOff: false,
     };
-    // 開き直し（`renew`）のときは前の世代を外す。古い世代からの命令は接続の時点で届かなくなる
-    const previous = this.live.get(runId);
     if (previous !== undefined) {
+      previous.pending = [];
       this.deps.server.unregister(previous.token);
       previous.session.dispose();
     }
@@ -248,7 +348,13 @@ export class RoadmapOrchestrator {
     session.onStateChanged((state) => this.onStateChanged(runId, live, state));
     session.open({ preserveFocus: true, viewColumn: 2 });
     live.busy = true;
-    session.send(buildIntroPrompt(run, generation, this.deps.controller.board(runId)));
+    const current = this.deps.findRun(runId) ?? run;
+    session.send(
+      buildIntroPrompt(current, generation, this.deps.controller.board(runId), {
+        trigger,
+        carriedCount: carried.length,
+      }),
+    );
     this.deps.onDidChange();
     return true;
   }
@@ -307,9 +413,9 @@ export class RoadmapOrchestrator {
     }
   }
 
-  /** 溜まったイベントを送る。ターンの最中には割り込まない。 */
+  /** 溜まったイベントを送る。ターンの最中と、次の世代への引き継ぎの途中には送らない。 */
   private flush(live: LiveOrchestrator): void {
-    if (live.pending.length === 0) {
+    if (live.pending.length === 0 || live.handingOff) {
       return;
     }
     const text = composeOrchestratorPrompt(live.pending, '', ROADMAP_EVENT_ENVELOPE);
@@ -329,8 +435,13 @@ export class RoadmapOrchestrator {
     rawArgs: unknown,
   ): Promise<RoadmapAskOutcome> {
     // トークンは世代ごとに外しているが、外す前に届いていた呼び出しもここで落とす
-    if (this.live.get(runId)?.generation !== generation) {
+    const live = this.live.get(runId);
+    if (live?.generation !== generation) {
       return { text: 'このOrchestratorは新しい世代に置き換えられました', isError: true };
+    }
+    // 自動引き継ぎの途中（Issue #1555）。次の世代が状態を取り直すため、この世代には命令させない
+    if (live.handingOff) {
+      return { text: 'このOrchestratorは新しい世代へ引き継ぎ中です', isError: true };
     }
     const parsed = parseRoadmapOrchestratorCall(name, rawArgs);
     if (!parsed.ok) {
@@ -526,9 +637,15 @@ export function diffRoadmapRunEvents(prev: RoadmapRun, next: RoadmapRun): Roadma
 }
 
 /** 開いた直後に送る、役割と現在の状態。 */
-function buildIntroPrompt(run: RoadmapRun, generation: number, board: RoadmapKanbanBoard): string {
+function buildIntroPrompt(
+  run: RoadmapRun,
+  generation: number,
+  board: RoadmapKanbanBoard,
+  handover: { trigger: GenerationTrigger; carriedCount: number },
+): string {
   return [
     `あなたはロードマップIssue #${String(run.roadmapIssueNumber)}の実行（run: ${run.runId}）を見守るOrchestratorです（第${String(generation)}世代）。`,
+    ...buildHandoverLines(generation, board, handover),
     '',
     '役割:',
     '- task-messagingのMCPツールでControllerへ命令するだけで、runの状態を直接変えない。ファイルは書かない',
@@ -545,4 +662,41 @@ function buildIntroPrompt(run: RoadmapRun, generation: number, board: RoadmapKan
     '',
     'まず現在の状態をユーザーに短く伝え、次にできることを示してください。',
   ].join('\n');
+}
+
+/**
+ * 2世代目以降の導入文に足す、前の世代からの引き継ぎ（Issue #1555）。会話は引き継がず、続けるのに
+ * 要る意味の情報（契機、前の世代、要対応のノード、引き継ぎの間に届いた通知の件数）だけを構造化して
+ * 渡す。各Issueの状態・イベントログ・差分は渡さず、get_run_stateで取り直させる。
+ */
+function buildHandoverLines(
+  generation: number,
+  board: RoadmapKanbanBoard,
+  handover: { trigger: GenerationTrigger; carriedCount: number },
+): string[] {
+  if (generation <= 1) {
+    return [];
+  }
+  const cards = board.run === undefined ? [] : Object.values(board.run.columns).flat();
+  const withQuestions = cards.filter((c) => c.questions.length > 0).map((c) => `#${String(c.issueNumber)}`);
+  const failed = cards.filter((c) => c.failure !== undefined).map((c) => `#${String(c.issueNumber)}`);
+  const lines = [
+    '',
+    '前の世代からの引き継ぎ:',
+    `- 契機: ${handover.trigger === 'autoHandoff' ? '前の世代のコンテキストが少なくなったための自動引き継ぎ' : 'ユーザーの操作による開き直し'}`,
+    `- 前の世代: 第${String(generation - 1)}世代。会話は引き継いでいない。状態はget_run_stateで取り直し、その結果を正本とする`,
+    '- 前の世代がユーザーと決めた方針のうち状態に残らないもの（止めた理由、次に始める予定のノード等）は分からない。必要ならユーザーに確かめる',
+  ];
+  if (withQuestions.length > 0) {
+    lines.push(`- 回答待ちの質問があるノード: ${withQuestions.join(', ')}`);
+  }
+  if (failed.length > 0) {
+    lines.push(`- 失敗したノード: ${failed.join(', ')}`);
+  }
+  if (handover.carriedCount > 0) {
+    lines.push(
+      `- 引き継ぎの間に届いた進行状況の通知${String(handover.carriedCount)}件を、この後の <${ROADMAP_EVENT_ENVELOPE.tag}> で渡す`,
+    );
+  }
+  return lines;
 }
