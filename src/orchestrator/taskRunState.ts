@@ -1080,7 +1080,12 @@ function hasStageCompletedSince(task: OrchestratedTask, since: string): boolean 
 
 /** 人がrunを終える。実行中の工程セッションは呼び出し側が先に止める前提。 */
 export function finishTaskRun(run: TaskRun, now: Date): TaskRun {
-  return run.finishedAt !== undefined ? run : { ...run, finishedAt: now.toISOString() };
+  if (run.finishedAt !== undefined) {
+    return run;
+  }
+  const next: TaskRun = { ...run, finishedAt: now.toISOString() };
+  delete next.reopenedAt;
+  return next;
 }
 
 /** 終わっておらず中断もしていない。同じフォルダで複数を並行して動かせる（Issue #1562）。 */
