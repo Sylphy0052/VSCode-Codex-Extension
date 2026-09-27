@@ -59,9 +59,9 @@ describe('judgeRoadmapRunLease', () => {
   });
 
   it('heartbeatが失効時間以上止まっていればstale', () => {
-    expect(judgeRoadmapRunLease(lease(), ownerB, 'run-1', after(ROADMAP_LEASE_STALE_MS), alive)).toBe(
-      'stale',
-    );
+    expect(
+      judgeRoadmapRunLease(lease(), ownerB, 'run-1', after(ROADMAP_LEASE_STALE_MS), alive),
+    ).toBe('stale');
   });
 
   it('同じホストでPIDが死んでいれば、heartbeatを待たずにstale', () => {
@@ -88,9 +88,7 @@ describe('judgeRoadmapRunLease', () => {
   });
 
   it('heartbeatの時刻が読めなければ失効扱い', () => {
-    expect(
-      isRoadmapRunLeaseStale(lease({ heartbeatAt: 'broken' }), ownerB, T0, alive),
-    ).toBe(true);
+    expect(isRoadmapRunLeaseStale(lease({ heartbeatAt: 'broken' }), ownerB, T0, alive)).toBe(true);
   });
 });
 
@@ -100,6 +98,15 @@ describe('parseRoadmapRunLease', () => {
     expect(parseRoadmapRunLease('')).toBeUndefined();
     expect(parseRoadmapRunLease(JSON.stringify({ ...lease(), pid: '1' }))).toBeUndefined();
   });
+
+  it('hostIdentityの無い古いリースファイルは、未識別（空文字列）として読む', () => {
+    const legacy: Partial<RoadmapRunLease> = lease({ hostIdentity: 'boot:pid:[1]' });
+    delete legacy.hostIdentity;
+    expect(parseRoadmapRunLease(JSON.stringify(legacy))).toEqual(lease({ hostIdentity: '' }));
+    expect(parseRoadmapRunLease(JSON.stringify({ ...lease(), hostIdentity: 1 }))).toEqual(
+      lease({ hostIdentity: '' }),
+    );
+  });
 });
 
 describe('normalizeRepoIdentity', () => {
@@ -107,9 +114,9 @@ describe('normalizeRepoIdentity', () => {
     const ssh = normalizeRepoIdentity('git@github.com:Sylphy0052/VSCode-Codex-Extension.git\n');
     expect(ssh).toBe('github.com/sylphy0052/vscode-codex-extension');
     expect(normalizeRepoIdentity('https://github.com/Sylphy0052/VSCode-Codex-Extension')).toBe(ssh);
-    expect(normalizeRepoIdentity('ssh://git@github.com/Sylphy0052/VSCode-Codex-Extension.git/')).toBe(
-      ssh,
-    );
+    expect(
+      normalizeRepoIdentity('ssh://git@github.com/Sylphy0052/VSCode-Codex-Extension.git/'),
+    ).toBe(ssh);
   });
 
   it('読めない形はundefined', () => {
@@ -250,7 +257,10 @@ describe('RoadmapRunLeaseManager', () => {
     await a.acquire(target('run-a'));
     // heartbeatの書き直しより前にbが失効とみなして取り直した状況を作る
     const file = path.join(dir, (await readdir(dir))[0] ?? '');
-    await writeFile(file, JSON.stringify(lease({ windowId: 'window-b', runId: 'run-b', hostname: 'host-b' })));
+    await writeFile(
+      file,
+      JSON.stringify(lease({ windowId: 'window-b', runId: 'run-b', hostname: 'host-b' })),
+    );
     await vi.waitFor(() => expect(onLost).toHaveBeenCalled());
     expect(onLost.mock.calls[0]?.[0]).toBe('run-a');
     expect(a.holds('run-a')).toBe(false);
@@ -289,12 +299,14 @@ describe('RoadmapRunControllerの専有権', () => {
   function controller(active: RoadmapRun | undefined) {
     const detectHost = vi.fn(() => Promise.resolve(undefined));
     const acquire = vi.fn(() => Promise.resolve({ ok: false as const, holder }));
+    const update = vi.fn();
+    const onDidChange = vi.fn();
     const c = new RoadmapRunController({
       store: {
         list: () => (active === undefined ? [] : [active]),
         find: () => active,
         findActive: () => active,
-        update: vi.fn(),
+        update,
       },
       runner: {} as never,
       detectHost,
@@ -305,12 +317,12 @@ describe('RoadmapRunControllerの専有権', () => {
       useCurrentPlan: vi.fn(),
       regeneratePlan: vi.fn(),
       notifyStalled: vi.fn(),
-      onDidChange: vi.fn(),
+      onDidChange,
       lease: { acquire, holds: () => false, release: vi.fn(() => Promise.resolve()) },
       log: () => undefined,
       now: () => T0,
     });
-    return { c, detectHost, acquire };
+    return { c, detectHost, acquire, update, onDidChange };
   }
 
   const input = {
@@ -336,5 +348,16 @@ describe('RoadmapRunControllerの専有権', () => {
     const { c } = controller(run);
     const outcome = await c.startRun(input);
     expect(outcome.ok).toBe(false);
+  });
+
+  it('専有権を失ったら、runを止める（haltedByUser）更新を保存する', () => {
+    const { c, update, onDidChange } = controller(run);
+    c.handleLeaseLost('run-1', holder);
+    expect(update).toHaveBeenCalledTimes(1);
+    const [runId, updater] = update.mock.calls[0] as [string, (r: RoadmapRun) => RoadmapRun];
+    expect(runId).toBe('run-1');
+    const running = { ...run, haltedByUser: false } as RoadmapRun;
+    expect(updater(running).haltedByUser).toBe(true);
+    expect(onDidChange).toHaveBeenCalled();
   });
 });
