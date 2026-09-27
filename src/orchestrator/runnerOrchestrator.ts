@@ -40,6 +40,7 @@ import { describeCarriedOverWork, type CarriedOverWork } from './resumeCarryOver
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import type { TaskSession } from './taskSession';
 import {
+  appendTaskToWorkflowYaml,
   buildOrchestratorTask,
   findMissingVerifyWarnings,
   truncateByCodePoint,
@@ -1264,12 +1265,46 @@ function updatePendingTask(
 }
 
 /**
- * `add_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。適用先は実行中の
- * 定義（`live.def`）だけで、YAMLファイルは書き換えない。追加するタスクは`buildOrchestratorTask`
- * （`workflow.ts`。権限フィールドを拒否する）で組み立てたうえ、既存の全タスクと合わせた
- * 候補定義を`validateWorkflow`にそのまま通す（id形式・循環依存・上限件数・プロンプト長を
- * 人が書いたYAMLと同じ基準で検証する）。適用した内容は全文で警告欄へ残す（人の承認を
- * 挟まない以上、これが唯一の追跡手段になるため）。
+ * `add_task`が加えたタスクをYAMLファイルへも反映する（Issue #1505、Orchestratorの
+ * 自律運用のため。ウィンドウのリロード後も変更が残るようにする）。
+ *
+ * `live.def`の更新（実行に効く本体）とは切り離したベストエフォートの後処理にする。
+ * ファイル読み書きはI/O（symlink差し替え検知等）を含み失敗しうるが、その失敗で
+ * タスク追加自体を失敗させると「実行時には追加できたのにYAMLの書き込み失敗だけで
+ * エラー扱いになる」体験になるため、失敗はログへ残すだけに留める。
+ */
+function persistAddedTaskToYaml(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  live: LiveRun,
+  task: WorkflowTask,
+): void {
+  const writeTextFile = self.deps.filePort.writeTextFile;
+  if (writeTextFile === undefined) return;
+  void (async () => {
+    try {
+      const source = await self.deps.filePort.readTextFile(live.defPath);
+      if (source === undefined) return;
+      const updated = appendTaskToWorkflowYaml(source, task);
+      if (updated === source) return;
+      await writeTextFile(live.defPath, updated, live.repoRoot);
+    } catch (e) {
+      self.deps.log.warn(
+        `[workflow ${runId}] タスク ${task.id} の追加をYAMLファイルへ書き込めませんでした` +
+          `（実行中の状態には反映済み）: ${sanitizeForLog(e instanceof Error ? e.message : String(e))}`,
+      );
+    }
+  })();
+}
+
+/**
+ * `add_task`（design.md §16.29、roadmap W4、Issue #338）を受け付ける。追加するタスクは
+ * `buildOrchestratorTask`（`workflow.ts`。権限フィールドを拒否する）で組み立てたうえ、
+ * 既存の全タスクと合わせた候補定義を`validateWorkflow`にそのまま通す（id形式・循環依存・
+ * 上限件数・プロンプト長を人が書いたYAMLと同じ基準で検証する）。適用先は実行中の定義
+ * （`live.def`）に加え、YAMLファイルへも`persistAddedTaskToYaml`でベストエフォートに
+ * 反映する（Issue #1505）。適用した内容は全文で警告欄へ残す（人の承認を挟まない以上、
+ * これが唯一の追跡手段になるため）。
  */
 function addTask(
   self: WorkflowRunnerInternals,
@@ -1302,13 +1337,14 @@ function addTask(
     kind: 'orchestratorTaskAdded',
     taskId: task.id,
     message:
-      `オーケストレーターがタスク ${task.id} を追加しました（YAMLファイルは書き換えて` +
-      'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。\n' +
+      `オーケストレーターがタスク ${task.id} を追加しました（YAMLファイルへの反映も` +
+      '試みます。書き込みに失敗した場合はログへ警告を残します）。\n' +
       `prompt: ${task.prompt}\n` +
       `done: ${task.done}\n` +
       `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}` +
       verifyWarnings.map((message) => `\n警告: ${message}`).join(''),
   });
+  persistAddedTaskToYaml(self, runId, live, task);
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
