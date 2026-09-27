@@ -249,6 +249,9 @@ export class TaskRunOrchestrator {
       return;
     }
     live.handingOff = false;
+    // ホストは自動引き継ぎを始めた時点で二度と発火しない印を付ける。次に閾値を超えたとき
+    // もう一度引き継げるよう外す（Issue #1580）
+    live.session.rearmAutoHandoff?.();
     this.deps.log(`[task run orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`);
     if (!live.busy) {
       this.flush(live);
@@ -378,7 +381,9 @@ export class TaskRunOrchestrator {
       token: registered.token,
       busy: false,
       pending: [...carried],
-      eventsSent: 0,
+      // 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
+      eventsSent: previous?.eventsSent ?? 0,
+      // 上限に達したことは新しい世代も知らないため、次に捨てるときにもう1回だけ知らせる
       capNoticeSent: false,
       handingOff: false,
     };

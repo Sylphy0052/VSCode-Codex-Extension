@@ -11,7 +11,8 @@ import type { Logger } from '../../src/log';
 import type { FileSystemPort, MemoryFileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import { MESSAGING_MCP_SERVER_NAME } from '../../src/orchestrator/messaging';
-import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
+import type { TaskHandoffRequest, TaskSessionConfig } from '../../src/orchestrator/taskSession';
+import { buildControlResponse } from '../../src/claude/control';
 import { SessionModelSettingsStore } from '../../src/sessionModelSettings';
 import type { McpServerView } from '../../src/provider/mcpServers';
 import {
@@ -2867,6 +2868,166 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     const sessions = await finishTurnWith(HANDOFF_PROMPT);
     await flush();
     expect(sessions).toHaveLength(1);
+  });
+});
+
+describe('handoffPrecheckとrearmAutoHandoff（Issue #1580）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    // 既定ONの自動承認（Issue #1585）のまま進める。ここで見たいのはprecheckと委譲先の
+    // 呼び分けなので、確認ダイアログの分岐は関心の外
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function attachFakeProc(session: ClaudeStreamSession): string[] {
+    const written: string[] = [];
+    (
+      session as unknown as {
+        proc: {
+          killed: boolean;
+          stdin: { write: (line: string) => void; destroyed: boolean; writable: boolean };
+        };
+      }
+    ).proc = {
+      killed: false,
+      stdin: { write: (line) => written.push(line), destroyed: false, writable: true },
+    };
+    return written;
+  }
+
+  /** タスクセッションを1枚開き、アクティブなタブにする。 */
+  async function openActiveTaskSession(
+    sessions: ClaudeStreamSession[],
+    manager: ClaudeChatViewManager,
+    handoffDelegate: (request: TaskHandoffRequest) => Promise<boolean>,
+    handoffPrecheck?: (trigger: 'manual' | 'auto') => boolean,
+  ): Promise<{
+    task: Awaited<ReturnType<ClaudeChatViewManager['openTaskSession']>>;
+    session: ClaudeStreamSession;
+  }> {
+    const task = await manager.openTaskSession({
+      cwd: '/workspace/root/task-a',
+      config: EMPTY_TASK_CONFIG,
+      sandbox: '',
+      handoffDelegate,
+      // exactOptionalPropertyTypesのため、未指定なら省略する（`undefined`を明示的に渡さない）
+      ...(handoffPrecheck !== undefined ? { handoffPrecheck } : {}),
+    });
+    // アクティブなタブにする（`preserveFocus: false` → mockの`panel.active`がtrueになる）。
+    // 手動引き継ぎ（`handoffToNewSession`）はアクティブなタブしか見ない
+    task.open({ preserveFocus: false });
+    const session = sessions[sessions.length - 1];
+    if (session === undefined) {
+      throw new Error('セッションが記録されていません');
+    }
+    return { task, session };
+  }
+
+  it('handoffPrecheckがfalseなら、履歴解決とhandoffDelegateへ進まず手動引き継ぎを見送る', async () => {
+    const resolveTranscriptPath = vi.fn(async () => '/home/user/.claude/x.jsonl');
+    const store = fakeStore({ resolveTranscriptPath });
+    const handoffDelegate = vi.fn(async () => true);
+    const handoffPrecheck = vi.fn(() => false);
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager({ store });
+    await openActiveTaskSession(sessions, manager, handoffDelegate, handoffPrecheck);
+
+    await manager.handoffToNewSession();
+
+    expect(handoffPrecheck).toHaveBeenCalledWith('manual');
+    expect(resolveTranscriptPath).not.toHaveBeenCalled();
+    expect(handoffDelegate).not.toHaveBeenCalled();
+    // 委譲先も開かないので、タブは元の1枚のまま
+    expect(__mock.createdPanels.length).toBe(1);
+  });
+
+  it('handoffPrecheckがtrueなら、従来どおりhandoffDelegateまで届く', async () => {
+    const resolveTranscriptPath = vi.fn(async () => '/home/user/.claude/x.jsonl');
+    const store = fakeStore({ resolveTranscriptPath });
+    const handoffDelegate = vi.fn<(request: TaskHandoffRequest) => Promise<boolean>>(
+      async () => true,
+    );
+    const handoffPrecheck = vi.fn(() => true);
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager({ store });
+    await openActiveTaskSession(sessions, manager, handoffDelegate, handoffPrecheck);
+
+    await manager.handoffToNewSession();
+
+    expect(handoffPrecheck).toHaveBeenCalledWith('manual');
+    expect(resolveTranscriptPath).toHaveBeenCalledTimes(1);
+    expect(handoffDelegate).toHaveBeenCalledTimes(1);
+    const request = handoffDelegate.mock.calls[0]?.[0];
+    expect(request?.trigger).toBe('manual');
+    expect(typeof request?.prompt).toBe('string');
+    // 委譲先が代わりに開くので、タブは元の1枚のまま
+    expect(__mock.createdPanels.length).toBe(1);
+  });
+
+  it('自動引き継ぎは1回発火したら再発火せず、rearmAutoHandoffで次の契機に発火し直す', async () => {
+    // タスク管理下のセッションは「安全な区切り」判定を通らない（`!taskManaged`が前提の
+    // `passesSafeBoundaryGate`）。ここでは残量の閾値による発火（hard threshold）を使う。
+    // 既定の閾値は20%（`DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT`）
+    const store = fakeStore({ resolveTranscriptPath: async () => '/home/user/.claude/x.jsonl' });
+    const handoffDelegate = vi.fn<(request: TaskHandoffRequest) => Promise<boolean>>(
+      async () => true,
+    );
+    const { sessions } = stubStartCapturing();
+    const { manager } = createManager({ store });
+    const { task, session } = await openActiveTaskSession(sessions, manager, handoffDelegate);
+    const written = attachFakeProc(session);
+
+    /**
+     * 1ターン完了させ、`get_context_usage`の往復でコンテキスト残量を`remainingPercent`まで下げる。
+     * busy: true→falseの遷移で`refreshContext()`が自動的に呼ばれ、control_requestが書かれる
+     * （`refreshSessionCost()`分も同時に書かれるため、subtypeで絞って探す）。
+     */
+    function finishTurn(uuid: string, remainingPercent: number): void {
+      const before = written.length;
+      session.receive(assistantTextLine(uuid, '作業しました'));
+      session.receive(resultLine());
+      const contextRequestLine = written
+        .slice(before)
+        .find(
+          (line) =>
+            (JSON.parse(line) as { request?: { subtype?: string } }).request?.subtype ===
+            'get_context_usage',
+        );
+      if (contextRequestLine === undefined) {
+        throw new Error('get_context_usageが送られていません');
+      }
+      const { request_id: requestId } = JSON.parse(contextRequestLine) as { request_id: string };
+      const contextWindow = 100000;
+      const totalTokens = Math.round(contextWindow * (1 - remainingPercent / 100));
+      session.receive(buildControlResponse(requestId, { totalTokens, maxTokens: contextWindow }));
+    }
+
+    finishTurn('t1', 5);
+    await vi.waitFor(() => {
+      expect(handoffDelegate).toHaveBeenCalledTimes(1);
+    });
+
+    // もう一度同じ契機（残量僅少）を満たしても、発火済みなので再発火しない
+    finishTurn('t2', 5);
+    await flush();
+    expect(handoffDelegate).toHaveBeenCalledTimes(1);
+
+    // rearmAutoHandoffで発火済みフラグを戻せば、次の契機成立で再び発火する
+    task.rearmAutoHandoff?.();
+    finishTurn('t3', 5);
+    await vi.waitFor(() => {
+      expect(handoffDelegate).toHaveBeenCalledTimes(2);
+    });
+
+    // 委譲先が代わりに開くので、タブは元の1枚のまま
+    expect(__mock.createdPanels.length).toBe(1);
   });
 });
 

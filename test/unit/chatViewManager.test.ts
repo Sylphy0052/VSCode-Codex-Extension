@@ -18,7 +18,7 @@ import {
 } from '../../src/view/sessionAutoName';
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import { RECAP_INSTRUCTION, type ChatSession } from '../../src/appserver/chatSession';
-import type { TaskSessionConfig } from '../../src/orchestrator/taskSession';
+import type { TaskHandoffRequest, TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { __mock, ViewColumn, window as fakeWindow } from '../mocks/vscode';
 import {
   fakeConnectionFactory,
@@ -2511,6 +2511,140 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     const connection = await finishTurnWith(HANDOFF_PROMPT);
     await tick(20);
     expect(threadStarts(connection)).toBe(1);
+  });
+});
+
+describe('handoffPrecheckとrearmAutoHandoff（Issue #1580）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    // 既定ONの自動承認（Issue #1585）のまま進める。ここで見たいのはprecheckと委譲先の
+    // 呼び分けなので、確認ダイアログの分岐は関心の外
+    __mock.setConfig('agent', { 'autoHandoff.router': false });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** タスクセッションを1枚開き、アクティブなタブにする。 */
+  async function openActiveTaskSession(
+    manager: ChatViewManager,
+    connection: FakeAppServerConnection,
+    handoffDelegate: (request: TaskHandoffRequest) => Promise<boolean>,
+    handoffPrecheck?: (trigger: 'manual' | 'auto') => boolean,
+  ): Promise<Awaited<ReturnType<ChatViewManager['openTaskSession']>>> {
+    const p = manager.openTaskSession({
+      cwd: '/workspace/root/task-a',
+      config: EMPTY_TASK_CONFIG,
+      sandbox: '',
+      handoffDelegate,
+      // exactOptionalPropertyTypesのため、未指定なら省略する（`undefined`を明示的に渡さない）
+      ...(handoffPrecheck !== undefined ? { handoffPrecheck } : {}),
+    });
+    await tick();
+    connection.resolveFirst('thread/start', threadStartResult('thread-A'));
+    const task = await p;
+    // アクティブなタブにする（`preserveFocus: false` → mockの`panel.active`がtrueになる）。
+    // 手動引き継ぎ（`handoffToNewSession`）はアクティブなタブしか見ない
+    task.open({ preserveFocus: false });
+    return task;
+  }
+
+  it('handoffPrecheckがfalseなら、履歴解決とhandoffDelegateへ進まず手動引き継ぎを見送る', async () => {
+    const resolveHandoffRolloutPath = vi.fn(async () => '/home/user/.codex/sessions/rollout-x.jsonl');
+    const store = fakeSessionStore({ resolveHandoffRolloutPath });
+    const handoffDelegate = vi.fn(async () => true);
+    const handoffPrecheck = vi.fn(() => false);
+    const { manager, connection } = createManager({ store });
+    await openActiveTaskSession(manager, connection, handoffDelegate, handoffPrecheck);
+
+    await manager.handoffToNewSession();
+
+    expect(handoffPrecheck).toHaveBeenCalledWith('manual');
+    expect(resolveHandoffRolloutPath).not.toHaveBeenCalled();
+    expect(handoffDelegate).not.toHaveBeenCalled();
+    // 委譲先も開かないので、このタブからthread/startは1本のまま
+    expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1);
+  });
+
+  it('handoffPrecheckがtrueなら、従来どおりhandoffDelegateまで届く', async () => {
+    const resolveHandoffRolloutPath = vi.fn(async () => '/home/user/.codex/sessions/rollout-x.jsonl');
+    const store = fakeSessionStore({ resolveHandoffRolloutPath });
+    const handoffDelegate = vi.fn<(request: TaskHandoffRequest) => Promise<boolean>>(
+      async () => true,
+    );
+    const handoffPrecheck = vi.fn(() => true);
+    const { manager, connection } = createManager({ store });
+    await openActiveTaskSession(manager, connection, handoffDelegate, handoffPrecheck);
+
+    await manager.handoffToNewSession();
+
+    expect(handoffPrecheck).toHaveBeenCalledWith('manual');
+    expect(resolveHandoffRolloutPath).toHaveBeenCalledTimes(1);
+    expect(handoffDelegate).toHaveBeenCalledTimes(1);
+    const request = handoffDelegate.mock.calls[0]?.[0];
+    expect(request?.trigger).toBe('manual');
+    expect(typeof request?.prompt).toBe('string');
+    // 委譲先が代わりに開くので、このタブからthread/startは1本のまま
+    expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1);
+  });
+
+  it('自動引き継ぎは1回発火したら再発火せず、rearmAutoHandoffで次の契機に発火し直す', async () => {
+    // タスク管理下のセッションは「安全な区切り」判定を通らない（`!taskManaged`が前提の
+    // `passesSafeBoundaryGate`）。ここでは残量の閾値による発火（Issue #1079のhard threshold）
+    // を使う。既定の閾値は20%（`DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT`）
+    const store = fakeSessionStore({
+      resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    });
+    const handoffDelegate = vi.fn<(request: TaskHandoffRequest) => Promise<boolean>>(
+      async () => true,
+    );
+    const { manager, connection } = createManager({ store });
+    const task = await openActiveTaskSession(manager, connection, handoffDelegate);
+
+    /** 1ターン完了させ、コンテキスト残量を`remainingPercent`まで下げる。 */
+    function finishTurn(turnId: string, remainingPercent: number): void {
+      const contextWindow = 100000;
+      const usedTokens = Math.round(contextWindow * (1 - remainingPercent / 100));
+      connection.notify('turn/started', { threadId: 'thread-A', turn: { id: turnId } });
+      connection.notify('item/completed', {
+        threadId: 'thread-A',
+        turnId,
+        item: { id: `i-${turnId}`, type: 'agentMessage', text: '作業しました' },
+      });
+      connection.notify('turn/completed', { threadId: 'thread-A', turnId });
+      connection.notify('thread/status/changed', { threadId: 'thread-A', status: { type: 'idle' } });
+      connection.notify('thread/tokenUsage/updated', {
+        threadId: 'thread-A',
+        turnId,
+        tokenUsage: {
+          last: { totalTokens: usedTokens, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+          modelContextWindow: contextWindow,
+        },
+      });
+    }
+
+    finishTurn('turn-1', 5);
+    await vi.waitFor(() => {
+      expect(handoffDelegate).toHaveBeenCalledTimes(1);
+    });
+
+    // もう一度同じ契機（残量僅少）を満たしても、発火済みなので再発火しない
+    finishTurn('turn-2', 5);
+    await tick(20);
+    expect(handoffDelegate).toHaveBeenCalledTimes(1);
+
+    // rearmAutoHandoffで発火済みフラグを戻せば、次の契機成立で再び発火する
+    task.rearmAutoHandoff?.();
+    finishTurn('turn-3', 5);
+    await vi.waitFor(() => {
+      expect(handoffDelegate).toHaveBeenCalledTimes(2);
+    });
+
+    // 委譲先が代わりに開くので、このタブからthread/startは1本のまま
+    expect(connection.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1);
   });
 });
 

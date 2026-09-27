@@ -138,6 +138,8 @@ export interface BaseChatPanel {
    * `TaskSessionInput.handoffDelegate`）。未設定なら従来どおりホストが通常のタブを開く。
    */
   handoffDelegate: TaskHandoffDelegate | undefined;
+  /** 引き継ぎを始める前の委譲先の確認（Issue #1580、`TaskSessionInput.handoffPrecheck`）。 */
+  handoffPrecheck: TaskSessionInput['handoffPrecheck'];
   /**
    * Reflexモードの親スイッチのタブ単位の上書き（Issue #1505、`TaskSessionInput.reflex`）。
    * 未設定ならグローバル設定（`readReflexEnabled`）に従う。
@@ -796,6 +798,19 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     entry.reflexOverride = input.reflex;
     entry.handoffDelegate = input.handoffDelegate;
+    entry.handoffPrecheck = input.handoffPrecheck;
+  }
+
+  /**
+   * 委譲先が今回の引き継ぎを受けないと先に答えたか（Issue #1580）。受けないと分かっている
+   * 引き継ぎのために、引き継ぎ文書の作成とModel/Effortの選択を走らせないため`startHandoff`の
+   * 冒頭で見る。
+   */
+  protected handoffDeclinedByDelegate(entry: TPanel, trigger: HandoffTrigger): boolean {
+    if (entry.handoffDelegate === undefined || entry.handoffPrecheck === undefined) {
+      return false;
+    }
+    return !entry.handoffPrecheck(trigger.kind === 'manual' ? 'manual' : 'auto');
   }
 
   /**
