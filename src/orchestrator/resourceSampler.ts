@@ -144,9 +144,15 @@ export class ResourceSampler {
   private sampleHostCpu(): number | undefined {
     if (this.ports.platform !== 'win32') {
       const load = os.loadavg()[0];
+      // cgroupのCPU上限（v2の`cpu.max`、v1の`cpu.cfs_quota_us`）は読まない（Issue #1638）。loadavgは
+      // コンテナの中でもホスト全体の値で、上限のコア数で割っても「このコンテナの負荷」にはならない。
+      // 割る側だけを合わせると逆に高く出て工程を止めすぎるため、ホスト全体の負荷として揃えて見る
       const cores = os.availableParallelism();
       return load === undefined || cores <= 0 ? undefined : load / cores;
     }
+    // Windowsは前回の計測からの全コアの使用率（0〜1）で、他のOSの「1コアあたりの負荷」の近似にすぎない。
+    // 使用率は1を超えないため、閾値が1を超えるとcriticalにならない。負荷平均に当たる値（実行待ちの
+    // キュー長）はパフォーマンスカウンタにしか無く、計測ごとにPowerShellを起こす費用に見合わない
     let busy = 0;
     let total = 0;
     for (const cpu of os.cpus()) {
@@ -491,7 +497,9 @@ const DESCENDANT_POLL_MS = 200;
  * 止める。根を止めると子孫は親を失って`init`の子になり、ツリーからたどれなくなるため、
  * 根より先に呼ぶ。SIGTERMを送り、猶予の後も残っていればSIGKILLを送る。終わるまで待ってから返る。
  *
- * Windowsは`taskkill /T /F`で根ごと止める（シグナルの段階は無い）。
+ * Windowsは`taskkill /T /F`で根ごと止める（シグナルの段階は無い）。コンソールのプロセスへ終了を
+ * 頼む手段（`/F`を付けない`taskkill`）はウィンドウを持つプロセスにしか届かず、CLIの子孫には効かない
+ * ため、猶予を置かずに強制終了する（Issue #1638）。
  */
 export async function terminateDescendants(
   rootPid: number,
@@ -522,7 +530,10 @@ export async function terminateDescendants(
     await new Promise((resolve) => setTimeout(resolve, DESCENDANT_POLL_MS));
   }
   // 猶予の後も根の子孫として残るものだけに送る。猶予の前の一覧をそのまま使うと、その間に
-  // 終わったpidが無関係なプロセスへ再利用されていた場合に誤って止める
+  // 終わったpidが無関係なプロセスへ再利用されていた場合に誤って止める。
+  // SIGTERMで中間のプロセスが先に終わると、その子は`init`の子になってここで取りこぼす（Issue #1638）。
+  // その子もSIGTERMは受けており、止まらないのはSIGTERMを無視するものだけ。pidの再利用と区別するには
+  // 起動時刻まで照合する必要があり、その手間に見合わないため取りこぼしを許す
   const remaining = new Set(await sampler.listDescendantPids(rootPid));
   signal(pids.filter((pid) => remaining.has(pid)), 'SIGKILL');
 }

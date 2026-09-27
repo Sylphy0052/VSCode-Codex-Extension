@@ -1,6 +1,7 @@
 import type { TaskRunResourceThresholds } from '../config';
 import type { HostResources, ProcessTreeUsage, ResourceSampler } from './resourceSampler';
 import type { StageProcess } from './taskStageRunner';
+import { sanitizeInlineText } from './untrustedText';
 
 /**
  * オーケストレータモードの資源の状態（Issue #1629）。
@@ -20,6 +21,9 @@ const CPU_RELEASE_MARGIN = 0.1;
 // メモリ: 空きの割合が閾値より5ポイント増えるまで下げない。ビルドやテストの一時的な確保で数ポイントは揺れる
 const MEMORY_RELEASE_MARGIN = 0.05;
 
+// 計測失敗の行に載せるエラー文の上限。psやpowershell.exeの標準エラーをそのまま含むことがあり、見出しを押し流さないよう切る
+const FAILURE_MESSAGE_MAX_LENGTH = 200;
+
 const LEVEL_ORDER: Record<ResourceLevel, number> = { ok: 0, warning: 1, critical: 2 };
 
 /** 1回の計測の結果。`/proc`等の文字列は持たず、解釈済みの数値だけを持つ。 */
@@ -29,6 +33,15 @@ export interface ResourceSnapshot {
   /** 工程セッションごとのプロセスツリーの使用量。共有プロセスは同じ`pid`の工程が同じ値を持つ。 */
   stages: Array<StageProcess & { usage: ProcessTreeUsage | undefined }>;
   sampledAt: Date;
+}
+
+/** 計測が続けて失敗している間の記録。成功するか計測を止めると消える。 */
+export interface ResourceSampleFailure {
+  /** 続けて失敗した回数。 */
+  count: number;
+  lastMessage: string;
+  /** 続けて失敗し始めた時刻。 */
+  since: Date;
 }
 
 export interface ResourceMonitorDeps {
@@ -84,6 +97,7 @@ export class ResourceMonitor {
   private cpuLevel: ResourceLevel = 'ok';
   private memoryLevel: ResourceLevel = 'ok';
   private latest: ResourceSnapshot | undefined;
+  private failure: ResourceSampleFailure | undefined;
 
   constructor(private readonly deps: ResourceMonitorDeps) {}
 
@@ -93,6 +107,14 @@ export class ResourceMonitor {
 
   get snapshot(): ResourceSnapshot | undefined {
     return this.latest;
+  }
+
+  /**
+   * 計測が続けて失敗しているときの記録。失敗の間は`snapshot`が最後に計れた値のまま残り、状態も
+   * 上げ下げしないため、`get_run_state`で「余裕がある」と「計れていない」を分けて出すのに使う。
+   */
+  get sampleFailure(): ResourceSampleFailure | undefined {
+    return this.failure;
   }
 
   /** runの状態が変わったときに呼ぶ。動いているrunの有無に合わせて計測を始める・止める。 */
@@ -122,6 +144,7 @@ export class ResourceMonitor {
     }
     this.epoch += 1;
     this.latest = undefined;
+    this.failure = undefined;
     this.cpuLevel = 'ok';
     this.memoryLevel = 'ok';
   }
@@ -133,10 +156,19 @@ export class ResourceMonitor {
     try {
       const snapshot = await this.sample();
       if (epoch === this.epoch && !this.disposed) {
+        this.failure = undefined;
         this.apply(snapshot);
       }
     } catch (e: unknown) {
-      this.deps.log(`[task run] 資源の計測に失敗: ${e instanceof Error ? e.message : String(e)}`);
+      const message = e instanceof Error ? e.message : String(e);
+      this.deps.log(`[task run] 資源の計測に失敗: ${message}`);
+      if (epoch === this.epoch && !this.disposed) {
+        this.failure = {
+          count: (this.failure?.count ?? 0) + 1,
+          lastMessage: message,
+          since: this.failure?.since ?? (this.deps.now ?? (() => new Date()))(),
+        };
+      }
     } finally {
       this.sampling = false;
     }
@@ -235,11 +267,26 @@ export function describeResourceChange(prev: ResourceLevel, snapshot: ResourceSn
  * `get_run_state`の見出しへ足す行。このrunの工程ごとの使用量を並べる。codexの工程はapp-serverを
  * 共有しているため工程ごとに分けられず、共有プロセス全体の使用量を「共有」として1行で出す。
  */
-export function formatResourceLines(snapshot: ResourceSnapshot | undefined, runId: string): string[] {
+export function formatResourceLines(
+  snapshot: ResourceSnapshot | undefined,
+  runId: string,
+  failure?: ResourceSampleFailure,
+): string[] {
+  // 計測の失敗中は状態を上げ下げしない。okのままでも余裕があるとは限らないことを見出しの直後に出す
+  const failureLine =
+    failure === undefined
+      ? []
+      : [
+          `  計測失敗: ${failure.since.toISOString()}から${String(failure.count)}回続けて失敗（最後: ` +
+            `${sanitizeInlineText(failure.lastMessage, FAILURE_MESSAGE_MAX_LENGTH)}）。状態は最後に計れた値のまま`,
+        ];
   if (snapshot === undefined) {
-    return ['資源: 未計測'];
+    return ['資源: 未計測', ...failureLine];
   }
-  const lines = [`資源: ${snapshot.level} / ${formatHost(snapshot.host)}（${snapshot.sampledAt.toISOString()}に計測）`];
+  const lines = [
+    `資源: ${snapshot.level} / ${formatHost(snapshot.host)}（${snapshot.sampledAt.toISOString()}に計測）`,
+    ...failureLine,
+  ];
   const own = snapshot.stages.filter((s) => s.runId === runId);
   for (const stage of own.filter((s) => !s.shared)) {
     lines.push(`  工程 ${stage.taskId}:${stage.stage} ${formatUsage(stage.usage)}`);

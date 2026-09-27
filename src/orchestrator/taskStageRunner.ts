@@ -832,6 +832,10 @@ export class TaskStageRunner {
     return entry;
   }
 
+  /**
+   * 工程セッションの入力。`resume`は返さない型にしてある。`openStageSession`は一時停止からの再開で
+   * `resume`をこの戻り値の後ろへ合成するため、ここが`resume`を持つと合成の順番次第で食い違う（Issue #1638）。
+   */
   private sessionInput(
     ref: StageReportRef,
     cwd: string,
@@ -839,7 +843,7 @@ export class TaskStageRunner {
     sandbox: string,
     generation: number,
     channel: { url: string; binding: SessionBinding },
-  ): TaskSessionInput {
+  ): Omit<TaskSessionInput, 'resume'> {
     const task = this.findTask(channel.binding, ref);
     return {
       role: 'task',
@@ -1694,6 +1698,12 @@ export class TaskStageRunner {
       }
       // 先に帳簿から外し、閉じるときの`onFinished`を一時停止の結果として扱わせない
       this.release(entry, { dispose: false });
+      // ここから子孫の終了を待つ間（最大で猶予の3秒）にウィンドウを再読み込みすると、帳簿に無いため
+      // `dispose`はこのセッションに届かない。SIGTERMの後なら取りこぼすのはSIGTERMを無視して
+      // SIGKILLの段を待っていたものだけだが、子孫の一覧を取り終える前ならSIGTERMも送れていない。
+      // 拡張機能の終了処理は非同期の完了を待たないため、
+      // `dispose`から後始末を始めてもSIGKILLの段まで届く保証が無く、この取りこぼしは許す（Issue #1638）。
+      // 工程は再読み込み後に一時停止中へ戻り、resume_stageで続けられる
       try {
         if (session.releaseForPause === undefined) {
           session.dispose();
