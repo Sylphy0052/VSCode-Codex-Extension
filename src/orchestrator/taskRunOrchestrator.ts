@@ -72,6 +72,7 @@ export interface TaskRunOrchestratorEvent {
     | 'taskNeedsAction'
     | 'taskFailed'
     | 'taskStopped'
+    | 'taskInstructed'
     | 'questionAwaitingUser'
     | 'gateAwaitingUser'
     | 'gateResolved'
@@ -225,6 +226,22 @@ export class TaskRunOrchestrator {
       return 'handingOff';
     }
     return live.busy ? 'busy' : 'idle';
+  }
+
+  /**
+   * Kanbanの動作中工程カードから人が直接送った指示をOrchestratorへ知らせる（Issue #1627）。
+   * 指示自体は`instruct_task`と同じ経路（`TaskRunController.instructTask`）で工程セッションへ
+   * 届け終えたあとに呼ぶ想定。ここではその事実をイベントとして積むだけで、Orchestratorが人の
+   * 指示を知らずに重ねて指示を送らないようにする。
+   */
+  notifyTaskInstructed(runId: string, taskId: string, instruction: string): void {
+    const run = this.deps.controller.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    const label = task === undefined ? taskId : taskLabel(task);
+    this.notify(runId, {
+      kind: 'taskInstructed',
+      body: `人がKanbanから${label}へ直接指示を送りました:\n${sanitizeInlineText(instruction, EVENT_TEXT_MAX_LENGTH)}`,
+    });
   }
 
   /**
