@@ -1,18 +1,12 @@
 /**
- * ロードマップ実行（Issue #1465）の実行層が使う外部処理（git・`gh`・`glab`）。
- * `RoadmapIssueRunnerDeps`の`resolveBaseCommit`・`findPullRequest`・`isPullRequestMerged`と、
- * Controllerが使うforgeの判定を実装する。
+ * git・`gh`・`glab`を使うforge関連の処理。ブランチの分岐元コミット解決と、
+ * 対応するPR/MRの検索を行う（taskStageObservation・taskRunSetupが使う）。
  *
  * コマンドは`execFile`系のrunner（シェルを経由しない）で実行し、ブランチ名などは引数の
  * 配列で渡す。応答は外部由来のため、番号とURLの形を確かめてから使う。
  */
 
-import {
-  detectForgeHost,
-  fetchPullRequestStatus,
-  type CliCommandRunner,
-  type ForgeHost,
-} from './forge';
+import { detectForgeHost, type CliCommandRunner, type ForgeHost } from './forge';
 import type { GitCommandRunner } from './worktree';
 
 export interface RoadmapRunForgePorts {
@@ -113,18 +107,4 @@ export async function findRoadmapPullRequest(
     return result.code === 0 ? parseGitlabMergeRequestList(result.stdout) : undefined;
   }
   return undefined;
-}
-
-/** PR/MRがmerge済みか。確かめられなければ`undefined`。 */
-export async function isRoadmapPullRequestMerged(
-  ports: RoadmapRunForgePorts,
-  repoRoot: string,
-  pullRequestNumber: number,
-): Promise<boolean | undefined> {
-  const host = await detectRoadmapForgeHost(ports, repoRoot);
-  if (host === undefined) {
-    return undefined;
-  }
-  const status = await fetchPullRequestStatus(ports.cli, host, repoRoot, pullRequestNumber);
-  return status.state === 'unknown' ? undefined : status.state === 'merged';
 }

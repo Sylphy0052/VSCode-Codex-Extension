@@ -64,7 +64,7 @@ import {
   type RoadmapSourceDiff,
   type RoadmapSourceSnapshot,
 } from './roadmapPlanHash';
-import { isValidIssueNumber, type RoadmapPlan, type RoadmapPlanNode } from './roadmapRunState';
+import { isValidIssueNumber, type RoadmapPlan, type RoadmapPlanNode } from './roadmapShared';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 
 /** 提案役の口。プロンプトを受け、応答本文を返す。 */

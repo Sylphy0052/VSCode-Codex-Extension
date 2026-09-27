@@ -36,6 +36,7 @@ import {
   taskRunLabel,
   type OrchestratedTask,
   type TaskRun,
+  type TaskRunRoadmapNotice,
   type TaskRunEngine,
 } from './taskRunState';
 import type { ApprovalHandler, TaskSession, TaskSessionHost } from './taskSession';
@@ -47,8 +48,9 @@ import { sanitizeInlineText } from './untrustedText';
  * オーケストレータモード（Issue #1505）のOrchestratorセッション。
  *
  * 1つのrunにセッションを1つ持つ。Orchestratorは`taskRunOrchestratorTools.ts`のMCPツールで
- * Controllerへ命令するだけで、runの状態を直接書き換えない。作りはロードマップ実行の
- * `roadmapOrchestrator.ts`に揃えている（世代ごとのトークン、ターンの終わりでのイベント配信）。
+ * Controllerへ命令するだけで、runの状態を直接書き換えない。作りは廃止済みの旧ロードマップ実行の
+ * `roadmapOrchestrator.ts`（Issue #1465、廃止: Issue #1623）に揃えていた
+ * （世代ごとのトークン、ターンの終わりでのイベント配信）。
  */
 
 /**
@@ -75,6 +77,10 @@ export interface TaskRunOrchestratorEvent {
     | 'gateResolved'
     | 'runStalled'
     | 'runFinished'
+    | 'roadmapChildrenAdded'
+    | 'roadmapChildrenRemoved'
+    | 'roadmapPlanChanged'
+    | 'roadmapWarning'
     | 'eventsCapReached';
   body: string;
 }
@@ -114,6 +120,7 @@ export interface TaskRunOrchestratorDeps {
     | 'listInFolder'
     | 'reopenRun'
     | 'startRun'
+    | 'syncRoadmap'
   >;
   server: {
     registerTools(
@@ -588,6 +595,8 @@ export class TaskRunOrchestrator {
         return toOutcome(await controller.proposePlan(runId, call.rawArgs));
       case 'approve_plan':
         return toOutcome(await controller.approvePlan(runId));
+      case 'sync_roadmap':
+        return toOutcome(await controller.syncRoadmap(runId));
       case 'refresh_kanban': {
         if (controller.find(runId) === undefined) {
           return { text: 'runが見つかりません', isError: true };
@@ -917,10 +926,26 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
       });
     }
   }
+  events.push(...diffRoadmapNoticeEvents(prev, next));
   if (prev.finishedAt === undefined && next.finishedAt !== undefined) {
     events.push({ kind: 'runFinished', body: 'runが終了しました' });
   }
   return events;
+}
+
+const ROADMAP_NOTICE_EVENT_KINDS: Record<TaskRunRoadmapNotice['kind'], TaskRunOrchestratorEvent['kind']> = {
+  childrenAdded: 'roadmapChildrenAdded',
+  childrenRemoved: 'roadmapChildrenRemoved',
+  planChanged: 'roadmapPlanChanged',
+  warning: 'roadmapWarning',
+};
+
+/** ロードマップの記録のうち、前回に無かったもの（Issue #1623）。本文は番号と定型文だけ。 */
+function diffRoadmapNoticeEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestratorEvent[] {
+  const seen = new Set((prev.roadmap?.notices ?? []).map((n) => n.noticeId));
+  return (next.roadmap?.notices ?? [])
+    .filter((n) => !seen.has(n.noticeId))
+    .map((n) => ({ kind: ROADMAP_NOTICE_EVENT_KINDS[n.kind], body: n.body }));
 }
 
 /** 関門がユーザーの判断待ちになった・決着したイベント。 */
@@ -989,15 +1014,41 @@ function buildIntroPrompt(
           '- record_lesson: 次のrunへ残す教訓。気付いた時点（工程の失敗・やり直し・最後の' +
             'タスクの完了前）、またはrunFinishedを受けたときに記録する',
         ]),
+    ...(run.roadmap === undefined ? [] : buildRoadmapLines(run.roadmap.issueNumber)),
     '',
     '現在の状態:',
     formatTaskRunState(run, recommendations),
     '',
-    run.planStatus === 'drafting'
-      ? 'まずユーザーに何をしたいかを尋ね、計画を立ててpropose_planで提案してください。'
-      : 'まず現在の状態をユーザーに短く伝え、次にできることを示してください。',
+    buildOpeningInstruction(run),
     ...(lessonsBlock === undefined || lessonsBlock === '' ? [] : ['', lessonsBlock]),
   ].join('\n');
+}
+
+/**
+ * ロードマップIssueから始めたrun（Issue #1623）の役割の補足。題は外部由来のため導入文へ書かず、
+ * `formatTaskRunState`の囲いの中でだけ見せる。
+ */
+function buildRoadmapLines(roadmapIssueNumber: number): string[] {
+  return [
+    `- このrunはロードマップIssue #${String(roadmapIssueNumber)}の子Issueをタスクにして始めた。` +
+      '子Issueのタスクは既存のIssueのタスク（existingIssueNumber）として扱う',
+    '- ロードマップで完了済みの子Issueのタスクは全工程を飛ばしてある。propose_planで省いても計画に残るため、送り直さなくてよい',
+    '- 実行中に人がロードマップを直すと、子Issueの追加・削除・close、計画区画の変更がイベント（roadmapChildrenAdded など）で届く。' +
+      '計画は自動では変わらない。取り込むならpropose_planで計画を出し直す。タスクのmerge後は自動で読み直す。' +
+      '人に頼まれたときなど、すぐ読み直すにはsync_roadmapを使う',
+    '- mergeした子Issueの行の[x]、作ったIssueの行の追加、承認された計画の計画区画への書き戻しは自動で行う。' +
+      'ロードマップIssueの本文を自分で書き換えない',
+  ];
+}
+
+/** 導入文の最後に置く、最初にすることの指示。 */
+function buildOpeningInstruction(run: TaskRun): string {
+  if (run.planStatus !== 'drafting') {
+    return 'まず現在の状態をユーザーに短く伝え、次にできることを示してください。';
+  }
+  return run.roadmap === undefined
+    ? 'まずユーザーに何をしたいかを尋ね、計画を立ててpropose_planで提案してください。'
+    : 'ロードマップの子Issueから作った計画を置けていません。子Issueをタスクにした計画をpropose_planで提案してください。';
 }
 
 /**

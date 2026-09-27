@@ -15,7 +15,7 @@
  * メタデータはIssueの本文（外部由来）から読むため、形式を厳しく確かめ、合わなければ使わない。
  */
 import { createHash } from 'node:crypto';
-import { isValidIssueNumber } from './roadmapRunState';
+import { isValidIssueNumber } from './roadmapShared';
 
 /** 区画の書式の版。書式を変えたら上げる。 */
 export const ROADMAP_PLAN_VERSION = 1;

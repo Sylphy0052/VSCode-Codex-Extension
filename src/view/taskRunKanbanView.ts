@@ -12,7 +12,7 @@ import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
 import { layoutTaskRunGraph, TASK_RUN_KANBAN_COLUMNS, type TaskRunKanbanCard } from './taskRunKanbanModel';
 
-/** 盤面を送る間隔。`roadmapKanbanView.ts`と同じく、最初はすぐ送り以降はまとめる。 */
+/** 盤面を送る間隔。最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
 
 /** Kanbanから使うOrchestratorの口。 */
@@ -147,7 +147,6 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       return;
     }
     if (message.type === 'viewport') {
-      // 値の扱いはロードマップ実行のKanban（`roadmapKanbanView.ts`）の`viewport`と揃える
       const raw = message.width;
       if (typeof raw !== 'number' || !Number.isFinite(raw)) {
         return;
@@ -181,6 +180,15 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'approvePlan':
         warnIfRejected(await controller.approvePlan(runId));
         return;
+      case 'syncRoadmap': {
+        const result = await controller.syncRoadmap(runId);
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`オーケストレータモード: ${result.message}`);
+        } else {
+          warnIfRejected(result);
+        }
+        return;
+      }
       case 'setMaxParallel': {
         const maxParallel = message.maxParallel;
         if (typeof maxParallel !== 'number') {
@@ -670,6 +678,23 @@ const script = `
     if (!run) { return; }
     const status = run.suspended && !run.finished ? ['中断中', 'warn'] : assessmentLabel(run.assessment);
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
+    if (run.roadmap) {
+      controls.appendChild(el('span', 'status', 'ロードマップ #' + run.roadmap.issueNumber + ' ' + run.roadmap.title));
+      if (!run.finished) {
+        controls.appendChild(button('ロードマップを読み直す', '', function () { send('syncRoadmap'); }));
+      }
+      const notices = run.roadmap.notices;
+      if (notices.length > 0) {
+        // 最新の1件を出し、直近の数件はツールチップで見せる
+        const last = notices[notices.length - 1];
+        const noticeEl = el('span', 'status' + (last.kind === 'warning' ? ' warn' : ''), 'ロードマップ: ' + last.body);
+        noticeEl.title = notices.map(function (n) {
+          const at = new Date(n.at);
+          return (isNaN(at.getTime()) ? n.at : at.toLocaleString()) + ' ' + n.body;
+        }).join(String.fromCharCode(10));
+        controls.appendChild(noticeEl);
+      }
+    }
     controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {
       // 世代番号と自動引き継ぎの発生を並べて出す（Issue #1553）

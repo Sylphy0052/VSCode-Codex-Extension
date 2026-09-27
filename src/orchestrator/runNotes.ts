@@ -21,7 +21,8 @@ import { formatUntrusted, sanitizeInlineText, truncateByCodePoint } from './untr
 /**
  * runをまたいで教訓を蓄積する仕組み（Issue #1599）。
  *
- * オーケストレーター（workflow / taskRun / roadmapRun のいずれか）が`record_lesson`で
+ * オーケストレーター（workflow / taskRunのいずれか。`roadmapRun`は廃止: Issue #1623、
+ * 過去に記録された`kind`の読み込みだけ残す）が`record_lesson`で
  * 書いた教訓を、ワークスペース直下の1ファイル（`RUN_NOTES_RELATIVE_PATH`）へJSON Lines
  * として積み、次回以降のrun開始時の導入文（`formatLessonsForIntro`）へ差し込む。
  *
@@ -356,7 +357,7 @@ export function formatLessonsForIntro(lessons: readonly LessonRecord[], nonce?: 
 }
 
 /**
- * `runFinished`イベントへ、教訓を残せる旨の一文を足す（Issue #1606。roadmapOrchestrator.ts /
+ * `runFinished`イベントへ、教訓を残せる旨の一文を足す（Issue #1606。廃止済みのroadmapOrchestrator.ts /
  * taskRunOrchestrator.tsでほぼ同じ実装が2つあった重複を解消）。`runNotesEnabled`が`false`
  * （教訓欄が無効）なら何もしない。`event.body`が句点で終わらない場合の区切りに`。`を挟む。
  */
@@ -407,8 +408,8 @@ function notesPath(workspaceRoot: string): string {
  * `.agents/run-notes.jsonl`の読み書きを直列化し、`OrchestratorControlPort.recordLesson`等の
  * 実体を提供する（Issue #1599）。
  *
- * 1インスタンスを拡張機能全体で共有する（`extension.ts`が1つ作り、workflow / taskRun /
- * roadmapRunの3種のオーケストレーターへ配る）。`SerialQueue`はインスタンスにつき1本のため、
+ * 1インスタンスを拡張機能全体で共有する（`extension.ts`が1つ作り、workflow / taskRunの
+ * 2種のオーケストレーターへ配る）。`SerialQueue`はインスタンスにつき1本のため、
  * 複数インスタンスを作ると別々の待ち行列になり、同時書き込みの直列化が効かなくなる
  * （`WorktreeCreationQueue`等と同じ注意点）。
  *

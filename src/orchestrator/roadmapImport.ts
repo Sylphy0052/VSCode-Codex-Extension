@@ -32,7 +32,7 @@ import {
   type RoadmapPlanMeta,
   type RoadmapSourceSnapshot,
 } from './roadmapPlanHash';
-import { isValidIssueNumber, type RoadmapPlanNode } from './roadmapRunState';
+import { isValidIssueNumber, type RoadmapPlanNode } from './roadmapShared';
 import { sanitizeInlineText } from './untrustedText';
 import { findCycleGroups } from './workflow';
 
@@ -445,7 +445,8 @@ export type WriteRoadmapPlanOutcome =
 export async function writeRoadmapPlan(
   deps: RoadmapImportDeps,
   target: RoadmapImportTarget,
-  nodes: readonly RoadmapPlanNode[],
+  /** 計画。読み直した本文の子Issueから組み立てるなら関数で渡す（オーケストレータモード。Issue #1623）。 */
+  plan: readonly RoadmapPlanNode[] | ((children: readonly RoadmapChild[]) => readonly RoadmapPlanNode[]),
   options: WriteRoadmapPlanOptions = {},
 ): Promise<WriteRoadmapPlanOutcome> {
   return runExclusiveOnRoadmapIssue(
@@ -476,7 +477,9 @@ export async function writeRoadmapPlan(
       if (section.kind === 'malformed') {
         return { kind: 'invalid', errors: [section.message] };
       }
-      const errors = validateRoadmapPlan(nodes, extractRoadmapChildren(body).children);
+      const { children } = extractRoadmapChildren(body);
+      const nodes = typeof plan === 'function' ? plan(children) : plan;
+      const errors = validateRoadmapPlan(nodes, children);
       if (errors.length > 0) {
         return { kind: 'invalid', errors };
       }

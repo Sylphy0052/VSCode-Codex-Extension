@@ -8,9 +8,9 @@
  * 現在の実行（`executionId`）・工程・実行回（`attemptId`）に一致するものだけを受け付け、
  * 自動引き継ぎ前の古いセッションから遅れて届いた報告で状態が変わらないようにする。
  *
- * ロードマップ実行（Issue #1465、`roadmapRunState.ts`）とは別の型にする。あちらはノードの
+ * ロードマップ実行（Issue #1465、廃止: Issue #1623）とは別の型にしていた。あちらはノードの
  * キーがIssue番号で1ノード＝1セッション系列を前提にしており、共通化すると#1465の退行
- * リスクが大きいため。遷移関数はすべて純粋関数で、変化が無ければ同じ参照を返す。
+ * リスクが大きかったため。遷移関数はすべて純粋関数で、変化が無ければ同じ参照を返す。
  * 永続化は`taskRunStore.ts`が担う。`workspaceState`は素の`JSON`を通るため`Record`で持ち、
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
@@ -125,6 +125,11 @@ export interface OrchestratedTask {
   dependsOn: readonly string[];
   /** 計画の時点で指定された既存のIssue番号。 */
   existingIssueNumber: number | undefined;
+  /**
+   * ロードマップで完了済みの子Issueとして置いたタスク（Issue #1623）。全工程を飛ばした状態で作り、
+   * 依存先としてだけ使う。着手していないため、計画から外れても片付け（#1619）の対象にならない。
+   */
+  completedInRoadmap?: true;
   executionId: string;
   stages: Record<TaskStage, TaskStageRecord>;
   /** 報告を受け付ける実行回。実行中のセッションが無ければ`undefined`（どの報告も受け付けない）。 */
@@ -274,6 +279,74 @@ export interface TaskRun {
    * Kanbanに出す。一度も起きていなければ省略する。
    */
   orchestratorAutoHandoffs?: OrchestratorAutoHandoffRecord;
+  /**
+   * ロードマップIssueから始めたrunの対象（Issue #1623）。自由な指示から始めたrunには無い。
+   * 同じフォルダで同じロードマップIssueを扱う終わっていないrunは1本までとする。
+   */
+  roadmap?: TaskRunRoadmap;
+}
+
+/** runが対象にするロードマップIssue（Issue #1623）。 */
+export interface TaskRunRoadmap {
+  issueNumber: number;
+  /** ロードマップIssueのタイトル。外部由来のテキスト。 */
+  title: string;
+  /** 直近に読んだロードマップの内容。次に読み直したときの差分の基準にする。 */
+  snapshot: TaskRunRoadmapSnapshot;
+  /**
+   * 読み直しと書き戻しで起きたこと（古い順、`MAX_ROADMAP_NOTICES`件まで）。増えた分を
+   * Orchestratorへイベントとして届け、Kanbanに出す。
+   */
+  notices?: readonly TaskRunRoadmapNotice[];
+  /**
+   * mergeを見届けた子Issueの番号。読み直しで「close」として届けないため。工程の状態は後片付けの
+   * 結果次第で`done`にならないことがあるため、状態からではなくここで覚える。拡張を再読み込みしても
+   * 忘れないようrunと一緒に保存する。
+   */
+  mergedIssueNumbers?: readonly number[];
+}
+
+/** ロードマップの読み直し・書き戻しの記録を残す上限。古いものから捨てる。 */
+export const MAX_ROADMAP_NOTICES = 20;
+
+export interface TaskRunRoadmapNotice {
+  noticeId: string;
+  /**
+   * `childrenAdded`は子Issueの追加、`childrenRemoved`は子Issueの削除・close、`planChanged`は
+   * 計画区画の依存・並び順の変更、`warning`は読み直し・書き戻しの失敗や計画の注意点。
+   */
+  kind: 'childrenAdded' | 'childrenRemoved' | 'planChanged' | 'warning';
+  /** 拡張が組み立てた文。外部由来のテキスト（Issueのタイトル等）は含めない。 */
+  body: string;
+  /** ISO8601。 */
+  at: string;
+}
+
+export interface TaskRunRoadmapSnapshot {
+  /** 本文の並びの子Issue。 */
+  children: readonly TaskRunRoadmapChild[];
+  /** 計画区画の依存（着手順の早い順）。区画が無い・読めなければ`undefined`。 */
+  plan: readonly { issueNumber: number; dependsOn: readonly number[] }[] | undefined;
+  /**
+   * 計画区画の中身のハッシュ（`hashRoadmapPlanSectionContent`）。区画が無ければ`undefined`。
+   * 計画を書き戻すとき、読み直した区画がこれと違えば人が手で直したとみなして上書きしない。
+   */
+  planSectionHash?: string | undefined;
+  /**
+   * 計画区画を読めなかった理由。読めていれば`undefined`。同じ理由の警告を読み直すたびに
+   * 出さないために覚える。
+   */
+  planErrors?: string | undefined;
+  /** ISO8601。 */
+  readAt: string;
+}
+
+export interface TaskRunRoadmapChild {
+  issueNumber: number;
+  /** チェックリストの行のタイトル。外部由来のテキスト。 */
+  title: string;
+  /** `- [x]`の行、またはcloseされたIssue。 */
+  completed: boolean;
 }
 
 /** Orchestratorの自動引き継ぎの記録（Issue #1553）。 */
@@ -318,6 +391,8 @@ export interface CreateTaskRunInput {
   maxParallel: number;
   /** 表示名。空なら付けない。 */
   title?: string;
+  /** ロードマップIssueから始めるときの対象（Issue #1623）。 */
+  roadmap?: TaskRunRoadmap;
   now: Date;
 }
 
@@ -343,6 +418,7 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
     haltedByUser: false,
     orchestratorGeneration: 0,
     orchestratorSessionRefs: [],
+    ...(input.roadmap === undefined ? {} : { roadmap: input.roadmap }),
   };
 }
 
@@ -396,6 +472,8 @@ export interface TaskDraft {
   acceptanceCriteria: readonly string[];
   dependsOn: readonly string[];
   existingIssueNumber: number | undefined;
+  /** ロードマップで完了済みの子Issue（Issue #1623）。全工程を飛ばした状態で作る。 */
+  completedInRoadmap?: true;
 }
 
 /**
@@ -417,17 +495,20 @@ function emptyStage(status: StageStatus): TaskStageRecord {
 }
 
 function newTask(draft: TaskDraft, executionId: string, at: string): OrchestratedTask {
-  const skipIssueStages = draft.existingIssueNumber !== undefined;
+  // ロードマップで完了済みの子Issueは全工程を飛ばす（完了済みとして盤面に出し、依存を満たす）
+  const completed = draft.completedInRoadmap === true;
+  const skipIssueStages = completed || draft.existingIssueNumber !== undefined;
   const issueStage = skipIssueStages ? 'skipped' : 'notStarted';
+  const workStage = completed ? 'skipped' : 'notStarted';
   return {
     ...draft,
     executionId,
     stages: {
       issuePlan: emptyStage(issueStage),
       issueCreate: emptyStage(issueStage),
-      implement: emptyStage('notStarted'),
-      review: emptyStage('notStarted'),
-      mergeCleanup: emptyStage('notStarted'),
+      implement: emptyStage(workStage),
+      review: emptyStage(workStage),
+      mergeCleanup: emptyStage(workStage),
     },
     currentAttemptId: undefined,
     attention: 'none',

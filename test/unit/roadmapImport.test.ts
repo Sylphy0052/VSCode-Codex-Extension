@@ -14,7 +14,7 @@ import {
   hashRoadmapPlanSectionContent,
   type RoadmapPlanMeta,
 } from '../../src/orchestrator/roadmapPlanHash';
-import type { RoadmapPlanNode } from '../../src/orchestrator/roadmapRunState';
+import type { RoadmapPlanNode } from '../../src/orchestrator/roadmapShared';
 
 /**
  * レビュー指摘（Issue #1581 item3）: 確認したときの区画のハッシュ（`sectionHash` /

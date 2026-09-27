@@ -75,16 +75,17 @@ export type ProgramViewPort = WorkflowFeedProgramPort;
  * 教訓欄（Issue #1599）が使う口。**省略可能**で、渡さなければ欄を一切出さない
  * （`ProgramViewPort`/`RoadmapViewPort`と同じ方針）。`listLessons`/`deleteLesson`/
  * `onDidChange`の実体は`runNotes.ts`の`RunNotesStore`（`extension.ts`が拡張機能全体で
- * 共有する1インスタンスから束ねる。`onDidChange`はワークフローView以外——taskRun/
- * roadmapRunの各オーケストレーター——が記録・削除した場合にも発火するため、ここでの
+ * 共有する1インスタンスから束ねる。`onDidChange`はワークフローView以外——taskRunの
+ * オーケストレーター——が記録・削除した場合にも発火するため、ここでの
  * 購読だけで両方を拾える）。
  *
  * 教訓を読むルートは`getWorkspaceRoots`（`extension.ts`が`vscode.workspace.workspaceFolders`
  * の全フォルダを呼ぶたびに解決する）で得る。**表示中のワークフローrunの`repoRoot`には
  * 依存させない**（自己レビュー指摘: medium）。依存させると、ワークフローrunが1件も動いて
- * いない（`activeRunId`が無い）ときに教訓欄が消え、タスク実行・ロードマップ実行だけを使う
- * 人が教訓を見る・消す手段を失う（教訓はworkflow/taskRun/roadmapRunの3種で共有する）。
- * 先頭フォルダだけにしないのは、マルチルートではtaskRun/roadmapRunが選ばれたフォルダへ
+ * いない（`activeRunId`が無い）ときに教訓欄が消え、タスク実行だけを使う
+ * 人が教訓を見る・消す手段を失う（教訓はworkflow/taskRunの2種で共有する。廃止した
+ * roadmapRunの過去分は`kind`として読めるだけ残る）。
+ * 先頭フォルダだけにしないのは、マルチルートではtaskRunが選ばれたフォルダへ
  * 記録するため（自己レビュー2巡目指摘: high）。起動時に固定しないのは、フォルダを後から
  * 開いた・足したときにも欄を出すため（同: medium。`onDidChange`はフォルダの増減でも発火する）。
  */
@@ -747,6 +748,11 @@ export class WorkflowViewManager implements vscode.Disposable {
       await this.postRoadmap(this.activeRoadmapPath(), true);
       return;
     }
+    if (type === 'startTaskRunFromRoadmap') {
+      // ロードマップIssueの選択と開始は`taskRunRoadmapStart.ts`の入口に集約する（Issue #1623）
+      await vscode.commands.executeCommand('agent.taskRun.startFromRoadmap');
+      return;
+    }
     if (
       (type === 'openRoadmapIssue' || type === 'openTaskIssue') &&
       typeof m['issue'] === 'number' &&
@@ -1212,6 +1218,7 @@ ${workflowStyles()}
           <span id="roadmapPath" class="hint"></span>
           <span id="roadmapStatus" class="hint"></span>
           <button id="roadmapRefreshBtn" type="button" class="secondary">Issueの状態を更新</button>
+          <button id="roadmapTaskRunBtn" type="button" class="secondary">ロードマップIssueをオーケストレータモードで実行</button>
         </div>
       </div>
       <div id="roadmapBody"></div>
