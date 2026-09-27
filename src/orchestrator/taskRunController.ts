@@ -335,9 +335,6 @@ export class TaskRunController {
     if (failure !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${failure}` };
     }
-    if (autoApproved) {
-      this.pumpLater(runId);
-    }
     // 片付けはベストエフォート。`retireTask`自体は失敗を`onWarning`（Kanbanの警告）へ流す
     // だけで例外を投げない設計のため、ここでは結果を待って返答へ載せるだけでよい
     // （失敗しても計画の受け付けは成功扱いのまま。Issue #1619）
@@ -351,6 +348,11 @@ export class TaskRunController {
         return { taskId: task.taskId, closedPullRequest };
       }),
     );
+    // 片付けより先に工程を始めると、付け替えで同じtaskIdのまま作り直したタスクが古いworktreeを
+    // 消される前に動き出しうるため、片付けを待ってから始める
+    if (autoApproved) {
+      this.pumpLater(runId);
+    }
     const mapping = [...assigned].map(([key, taskId]) => `${key} → ${taskId}`).join(', ');
     const closedPrNumbers = retiredResults
       .map((r) => r.closedPullRequest)

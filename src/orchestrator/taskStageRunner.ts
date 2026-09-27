@@ -1065,9 +1065,9 @@ export class TaskStageRunner {
    * 受け取る。この時点で`run.tasks`には既に存在しない、または未着手へ作り直されているため、
    * `cleanupRestoredTask`のように状態から`getTask`で引き直せない。
    *
-   * worktreeの削除は工程セッションを止めた後にのみ行う。`stopStage`はrun.tasksに存在しない
-   * taskIdでも安全に動く（生きているセッションの帳簿はtaskIdのkeyだけで管理しており、状態上の
-   * タスクの有無に依存しない）ため、専用の停止メソッドは追加せずそのまま使う。
+   * worktreeの削除は工程セッションを止めた後にのみ行う。止めるのは`stopStage`ではなく
+   * `stopRetiredSession`にする。`stopStage`は状態側の工程も`haltStage`で止めるため、既存Issueの
+   * 付け替えで同じtaskIdのまま作り直した未着手のタスクまで「止めた」扱いにしてしまう。
    */
   async retireTask(
     runId: string,
@@ -1075,7 +1075,7 @@ export class TaskStageRunner {
     task: OrchestratedTask,
   ): Promise<{ closedPullRequest: number | undefined }> {
     try {
-      await this.stopStage(runId, task.taskId);
+      await this.stopRetiredSession(runId, task.taskId);
     } catch (e) {
       this.warn(
         runId,
@@ -1099,6 +1099,25 @@ export class TaskStageRunner {
       this.warn(runId, task.taskId, `${task.taskId}の後片付けで例外が起きました: ${errorMessage(e)}`);
       return { closedPullRequest: undefined };
     }
+  }
+
+  /**
+   * 計画から外れたタスクの工程セッションを止めて閉じる（Issue #1619）。状態（`run.tasks`）には
+   * 触れない。タスクは既に計画から消えたか、同じtaskIdの未着手のタスクへ作り直されているため。
+   * 完了を報告済みのセッションは報告の処理が自分で片付けるため触れない。
+   */
+  private async stopRetiredSession(runId: string, taskId: string): Promise<void> {
+    const key = liveKey(runId, taskId);
+    await this.withTaskLock(key, async () => {
+      const entry = this.live.get(key);
+      if (entry === undefined || entry.closed || entry.reported) {
+        return;
+      }
+      entry.stopping = true;
+      entry.session.stopLoop();
+      await entry.session.interrupt().catch(() => undefined);
+      this.release(entry, { dispose: true });
+    });
   }
 
   private async cleanupIfMerged(entry: LiveStageSession): Promise<void> {
