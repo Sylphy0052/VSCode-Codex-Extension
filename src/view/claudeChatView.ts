@@ -3114,6 +3114,10 @@ export class ClaudeChatViewManager
       rearmAutoHandoff: () => {
         entry.autoHandoffStarted = false;
       },
+      processInfo: () => {
+        const pid = entry.session.pid;
+        return pid === undefined ? undefined : { pid, shared: false };
+      },
       dispose: () => this.teardown(entry),
     };
   }

@@ -33,6 +33,7 @@ import {
   finishTaskRunIfDone,
   getTask,
   haltStage,
+  isTaskRunActive,
   markStageStopping,
   type OrchestratedTask,
   recordAttemptSession,
@@ -157,6 +158,12 @@ export interface TaskStageRunnerDeps {
   judgeGate?: (engine: TaskRunEngine, question: GateJudgeQuestion) => Promise<RoadmapQuestionVerdict>;
   /** 同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。無ければ掛けない。 */
   maxParallelPerFolder?: () => number;
+  /**
+   * 新しい工程セッションの開始を保留するか（資源がcritical。Issue #1629）。`true`の間は`pump`が
+   * 何も始めず、`start_stage`で受け付けた工程は空き待ちのまま残る。動いている工程は止めない。
+   * 解けたら呼び出し側が`pumpAll`を呼ぶ。無ければ保留しない。
+   */
+  isStartHeld?: () => boolean;
   /** runの状態が変わったとき（Kanbanの再描画・通知用）。 */
   onRunChanged?: (run: TaskRun) => void;
   /** 実行を止めずに人へ知らせる事象（後片付けに失敗した等）。 */
@@ -173,6 +180,16 @@ export interface TaskStageRunnerDeps {
    * 未設定なら積まない。
    */
   runNotes?: Pick<RunNotesStore, 'recordRemaining'>;
+}
+
+/** 動いている工程セッションのプロセス（`listStageProcesses`）。 */
+export interface StageProcess {
+  runId: string;
+  taskId: string;
+  stage: TaskStage;
+  pid: number;
+  /** 他の工程と共有するプロセス（codexのapp-server）。 */
+  shared: boolean;
 }
 
 /** 生きている工程セッションの帳簿。タスクごとに1つ持つ（タスクは同時に1つの工程しか動かない）。 */
@@ -380,7 +397,7 @@ export class TaskStageRunner {
       return;
     }
     const run = this.deps.store.find(runId);
-    if (run === undefined) {
+    if (run === undefined || this.deps.isStartHeld?.() === true) {
       return;
     }
     // 枠の数え上げから`startStage`の`starting`への予約までに`await`を挟まない。挟むと、並べて呼んだ
@@ -412,6 +429,25 @@ export class TaskStageRunner {
       .filter((r) => r.runId !== runId)
       .map((r) => r.runId);
     await Promise.all([runId, ...others].map((id) => this.pump(id)));
+  }
+
+  /** 動いているすべてのrunを`pump`する。資源のcriticalが解けたとき（Issue #1629）に呼ぶ。 */
+  async pumpAll(): Promise<void> {
+    // `pumpFolder`と同じく並べて呼ぶ（各`pump`は予約までを同期で済ませるので枠を二重に数えない）
+    const active = this.deps.store.list().filter((r) => isTaskRunActive(r));
+    await Promise.all(active.map((r) => this.pump(r.runId)));
+  }
+
+  /** 資源の計測（Issue #1629）に使う、動いている工程セッションのプロセス。 */
+  listStageProcesses(): StageProcess[] {
+    const result: StageProcess[] = [];
+    for (const entry of this.live.values()) {
+      const info = entry.session.processInfo?.();
+      if (info !== undefined) {
+        result.push({ runId: entry.runId, taskId: entry.ref.taskId, stage: entry.ref.stage, ...info });
+      }
+    }
+    return result;
   }
 
   /** 開始処理の途中にあるこのrunのタスク。 */

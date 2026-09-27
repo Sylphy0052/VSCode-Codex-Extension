@@ -398,6 +398,12 @@ export interface TaskSession {
    * 返した後で乗り換えを諦めたときに呼ぶ。
    */
   rearmAutoHandoff?(): void;
+  /**
+   * 資源の計測（Issue #1629）に使う、このセッションを動かしているプロセス。`shared`は他の
+   * セッションと共有しているか（codexのapp-serverは全スレッドで1つ）。まだ起動していない・
+   * 終了したなら`undefined`。
+   */
+  processInfo?(): { pid: number; shared: boolean } | undefined;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /**

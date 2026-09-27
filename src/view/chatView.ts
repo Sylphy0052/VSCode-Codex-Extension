@@ -2122,6 +2122,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       rearmAutoHandoff: () => {
         entry.autoHandoffStarted = false;
       },
+      // app-serverは全スレッドで1つ（Issue #1629）。使用量はこのスレッドの分だけを切り出せない
+      processInfo: () => {
+        const pid = this.connection.pid;
+        return pid === undefined ? undefined : { pid, shared: true };
+      },
       dispose: () => this.teardown(entry),
     };
   }

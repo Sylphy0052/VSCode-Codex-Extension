@@ -504,6 +504,7 @@ function formatAssessment(run: TaskRun): string {
 export function formatTaskRunState(
   run: TaskRun,
   recommendations: ReadonlyMap<string, StageSettingsRecommendation>,
+  resourceLines: readonly string[] = [],
 ): string {
   const awaiting = listStagesAwaitingDecision(run);
   const header = [
@@ -511,6 +512,7 @@ export function formatTaskRunState(
     `エンジン: ${run.engine} / 計画: ${run.planStatus} / 並列上限: ${String(run.maxParallel)} / 動いている工程: ${String(countActiveStageSessions(run))}`,
     `run全体の停止: ${run.haltedByUser ? 'あり' : 'なし'} / 終了: ${run.finishedAt === undefined ? 'いいえ' : 'はい'} / 全体: ${formatAssessment(run)}`,
     `判断待ちの工程: ${awaiting.length === 0 ? 'なし' : awaiting.map((r) => `${r.taskId}:${r.stage}`).join(', ')}`,
+    ...resourceLines,
   ];
   const lines: string[] = [];
   if (run.roadmap !== undefined) {
