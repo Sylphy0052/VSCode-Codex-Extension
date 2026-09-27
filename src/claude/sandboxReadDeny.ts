@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { type Dirent, promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { killWithEscalation } from '../process/childProcess';
@@ -64,6 +64,10 @@ function listReadDenyRules(
     '--bare',
     '--no-session-persistence',
   ];
+  const aborted: ReadDenyRulesResult = { ok: false, detail: '拡張機能の終了により確認を中止しました' };
+  if (signal.aborted) {
+    return Promise.resolve(aborted);
+  }
   return new Promise((resolve) => {
     let settled = false;
     let stdoutLine = '';
@@ -77,29 +81,30 @@ function listReadDenyRules(
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       // 応答を得た後はCLIの終了を待たない
-      killWithEscalation(proc);
+      if (proc.exitCode === null && proc.signalCode === null) {
+        killWithEscalation(proc);
+      }
       resolve(result);
     };
-    const onAbort = (): void => {
-      finish({ ok: false, detail: '拡張機能の終了により確認を中止しました' });
-    };
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => {
       finish({ ok: false, detail: `${String(LIST_RULES_TIMEOUT_MS)}ms以内に応答がありませんでした` });
     }, LIST_RULES_TIMEOUT_MS);
+    // 確認の途中でも拡張ホストの終了を引き留めない
     timer.unref();
+    const onAbort = (): void => {
+      finish(aborted);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
     const handleLine = (line: string): void => {
       const rules = parseListRulesResponse(line);
       if (rules !== undefined) {
         finish(rules);
       }
     };
-    proc.stdout.on('data', (chunk: Buffer) => {
-      const lines = (stdoutLine + chunk.toString('utf8')).split('\n');
+    proc.stdout.setEncoding('utf8');
+    proc.stderr.setEncoding('utf8');
+    proc.stdout.on('data', (chunk: string) => {
+      const lines = (stdoutLine + chunk).split('\n');
       stdoutLine = lines.pop() ?? '';
       if (stdoutLine.length > MAX_STDOUT_LINE_LENGTH) {
         finish({ ok: false, detail: 'CLIの出力の1行が長すぎます' });
@@ -109,21 +114,22 @@ function listReadDenyRules(
         handleLine(line);
       }
     });
-    proc.stderr.on('data', (chunk: Buffer) => {
+    proc.stderr.on('data', (chunk: string) => {
       if (stderr.length < MAX_STDERR_LENGTH) {
-        stderr += chunk.toString('utf8');
+        stderr += chunk;
       }
     });
     proc.on('error', (e) => {
       finish({ ok: false, detail: e.message });
     });
-    proc.on('exit', (code) => {
+    // 'exit'はstdoutを読み終える前に届きうるため、stdioが閉じた'close'で判定する
+    proc.on('close', (code) => {
       finish({
         ok: false,
         detail: `ルールの一覧を返す前に終了しました（exit code ${String(code)}）: ${stderr.trim()}`,
       });
     });
-    // 起動に失敗した場合の書き込みエラー（EPIPE）は、'error'・'exit'の側で結果にする
+    // 起動に失敗した場合の書き込みエラー（EPIPE）は、'error'・'close'の側で結果にする
     proc.stdin.on('error', () => undefined);
     proc.stdin.end(
       [
@@ -314,7 +320,7 @@ export async function findDeniedDirectory(
       return { kind: 'aborted' };
     }
     const dir = queue[index] as string;
-    let entries: import('node:fs').Dirent[];
+    let entries: Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
