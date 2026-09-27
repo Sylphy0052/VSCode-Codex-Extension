@@ -13,6 +13,7 @@ import type { Logger } from '../log';
 import { nodeForgeFileSystem, type CliCommandRunner } from '../orchestrator/forge';
 import { RoadmapIssueRunner } from '../orchestrator/roadmapIssueRunner';
 import { RoadmapOrchestrator } from '../orchestrator/roadmapOrchestrator';
+import type { RunNotesStore } from '../orchestrator/runNotes';
 import {
   RoadmapMergeQueue,
   type RoadmapMergeConsentRequest,
@@ -97,6 +98,12 @@ export interface RoadmapRunSetupDeps {
   /** このウィンドウの識別子（`sessionHub.ts`の`generateWindowId`）。専有権の持ち主の表記に使う。 */
   windowId: string;
   log: Logger;
+  /**
+   * runをまたいで教訓を蓄積する仕組み(Issue #1599)。**省略可能**で、省略時は
+   * `record_lesson`ツール自体を出さない。`extension.ts`が拡張機能全体で共有する
+   * 1インスタンスを渡す。
+   */
+  runNotes?: RunNotesStore;
 }
 
 /**
@@ -245,6 +252,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     confirmAnswer: confirmOrchestratorAnswer,
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
+    ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
   holder.orchestrator = orchestrator;
   const view = new RoadmapKanbanViewManager(controller, log, orchestrator);

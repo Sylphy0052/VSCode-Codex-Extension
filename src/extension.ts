@@ -108,6 +108,8 @@ import { TaskRunStore } from './orchestrator/taskRunStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
 import { WorkflowRunner, nodeWorkflowFilePort } from './orchestrator/runner';
+import { RunNotesStore } from './orchestrator/runNotes';
+import { nodeRunNotesFileSystem } from './orchestrator/nodeRunNotesFileSystem';
 import {
   formatVerifyCommandForDisplay,
   type VerifyCommandConsentRequest,
@@ -230,7 +232,11 @@ import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
-import { WorkflowViewManager, type RoadmapViewPort } from './view/workflowView';
+import {
+  WorkflowViewManager,
+  type RoadmapViewPort,
+  type RunNotesViewPort,
+} from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
 import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
@@ -662,6 +668,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionBridgeHolder: { current: SessionBridgePort | undefined } = { current: undefined };
   // worktreeの作成はワークフローとロードマップ実行（Issue #1465）で同じ列に並べる
   const worktreeQueue = new WorktreeCreationQueue();
+  // runをまたいで教訓を蓄積する仕組み（Issue #1599）。拡張機能全体で1インスタンスを
+  // 共有し、workflow / taskRun / roadmapRunの3種のオーケストレーターへ同じものを配る
+  // （`onDidChange`購読者がワークフローViewだけに閉じないようにするため。`runNotes.ts`
+  // の`RunNotesStore`のJSDoc参照）
+  const runNotes = new RunNotesStore(nodeRunNotesFileSystem, {
+    warn: (message) => log.warn(message),
+  });
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
@@ -701,6 +714,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       enabled: readToolUsageMetricsEnabled,
     },
     verificationStore,
+    runNotes,
     // PR/MRの作成（design.md §16.18、Issue #105）。`agent.workflows.forge` は既定の
     // `auto`のままだと、`origin` remote・`gh`/`glab`の有無を実行のたびに確かめたうえで
     // 対応するホストへPR/MRを作る。前提が欠けていれば`runner.ts`側が警告のうえ
@@ -836,6 +850,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       readBaseline: readSafetyBaseline,
       windowId,
       log,
+      runNotes,
     }),
   );
 
@@ -870,6 +885,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       readBaseline: readSafetyBaseline,
       settings,
       log,
+      runNotes,
     }),
   );
 
@@ -897,6 +913,24 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   programRunner.attach();
   context.subscriptions.push({ dispose: () => programRunner.dispose() });
 
+  // 教訓欄（Issue #1599）のワークスペースルート。表示中のワークフローrunの`repoRoot`に
+  // 依存させず、全ワークスペースフォルダを呼ぶたびに解決する（`RunNotesViewPort`のJSDoc
+  // 参照）。フォルダの増減でも欄を送り直すため、`onDidChange`にフォルダ変更を重ねる
+  const runNotesViewPort: RunNotesViewPort = {
+    getWorkspaceRoots: () =>
+      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+    listLessons: runNotes.listLessons.bind(runNotes),
+    deleteLesson: runNotes.deleteLesson.bind(runNotes),
+    onDidChange: (listener) => {
+      const unsubscribe = runNotes.onDidChange(listener);
+      const folderSubscription = vscode.workspace.onDidChangeWorkspaceFolders(() => listener());
+      return () => {
+        unsubscribe();
+        folderSubscription.dispose();
+      };
+    },
+  };
+
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
   const workflowView = new WorkflowViewManager(
@@ -910,6 +944,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     createRoadmapViewPort(),
     // 完了根拠の列（Issue #1380）。上で作った唯一の保存先から読む
     verificationStore,
+    // 教訓欄（Issue #1599）。workflow / taskRun / roadmapRunの3種で共有する唯一のインスタンス
+    runNotesViewPort,
   );
   context.subscriptions.push(workflowView);
 

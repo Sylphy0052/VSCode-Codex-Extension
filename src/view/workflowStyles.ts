@@ -694,6 +694,20 @@ ${completionEvidenceStyles()}
   .roadmap-badge.state-notFound { color: var(--vscode-descriptionForeground); }
   .roadmap-badge.state-unknown { color: var(--vscode-descriptionForeground); }
 
+  /* ---- 教訓欄（Issue #1599） ---- */
+  .lessons-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .lesson-item {
+    border: 1px solid var(--agent-border);
+    border-radius: var(--agent-radius-md);
+    padding: 6px 10px;
+  }
+  .lesson-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .lesson-kind { font-weight: 600; font-size: 0.85em; }
+  .lesson-time { color: var(--vscode-descriptionForeground); font-size: 0.8em; flex: 1; }
+  .lesson-observation { font-weight: 600; margin-bottom: 2px; }
+  .lesson-evidence { margin: 2px 0 4px 1.2em; padding: 0; font-size: 0.9em; color: var(--vscode-descriptionForeground); }
+  .lesson-instruction { font-size: 0.95em; }
+
   #empty { color: var(--vscode-descriptionForeground); padding: 24px 0; }
 ${reducedMotionStyles()}
 `;

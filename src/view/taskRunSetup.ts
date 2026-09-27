@@ -20,6 +20,7 @@ import {
   type RoadmapQuestionVerdict,
 } from '../orchestrator/roadmapQuestionMcp';
 import { resolveRoadmapBaseCommit, type RoadmapRunForgePorts } from '../orchestrator/roadmapRunForge';
+import type { RunNotesStore } from '../orchestrator/runNotes';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import { TaskRunController, type ControllerResult } from '../orchestrator/taskRunController';
 import type { GateJudgeQuestion } from '../orchestrator/taskRunGates';
@@ -72,6 +73,12 @@ export interface TaskRunSetupDeps {
   /** エンジンごとのモデル一覧（工程の推奨値を求めるのに使う）。 */
   settings: Pick<SettingsProvider, 'snapshot' | 'claudeSnapshot'>;
   log: Logger;
+  /**
+   * runをまたいで教訓を蓄積する仕組み（Issue #1599）。**省略可能**で、省略時は
+   * `record_lesson`ツール自体を出さない。`extension.ts`が拡張機能全体で共有する
+   * 1インスタンスを渡す。
+   */
+  runNotes?: RunNotesStore;
 }
 
 /**
@@ -189,6 +196,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     confirmGateResolution: confirmOrchestratorGateResolution,
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
+    ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
   holder.orchestrator = orchestrator;
 

@@ -9,6 +9,7 @@ import {
   stripControlCharsPreservingNewlines,
 } from './sanitize';
 import { TEAM_ROLES } from './rolePresets';
+import { RECORD_LESSON_TOOL, parseLessonArgs } from './runNotes';
 import { parseSessionTarget, type SessionBridgePort, type SessionTarget } from './sessionBridge';
 import { MAX_HANDOFF_BYTES, type HandoffEntry, type HandoffResult } from './teamHandoff';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
@@ -973,6 +974,15 @@ export interface OrchestratorControlPort {
     roadmapIssue: number;
     body: string;
   }): Promise<OrchestratorControlResult>;
+  /**
+   * 次回以降のrunへ残す教訓を記録する（Issue #1599）。`RunNotesStore`が無い環境
+   * （`runNotes`未設定）では未定義のままにし、ツール自体を非公開にする。
+   */
+  recordLesson?(input: {
+    observation: string;
+    evidence: readonly string[];
+    instruction: string;
+  }): Promise<OrchestratorControlResult>;
 }
 
 /** 制御ツールの結果。`send_message` と同じく「受け付けたかどうかと、その理由」を返す。 */
@@ -1529,6 +1539,7 @@ export const ORCHESTRATOR_CONTROL_TOOLS: readonly McpToolDefinition[] = [
   CREATE_ISSUE_TOOL,
   UPDATE_ISSUE_TOOL,
   UPDATE_ROADMAP_ISSUE_TOOL,
+  RECORD_LESSON_TOOL,
 ];
 
 /** program配下のrunだけへ追加公開するprogram単位の制御ツール。 */
@@ -2407,6 +2418,9 @@ export class MessagingMcpServer {
               ) {
                 return false;
               }
+              if (tool.name === RECORD_LESSON_TOOL.name && control.recordLesson === undefined) {
+                return false;
+              }
               return true;
             });
       const programTools = control?.hasProgramControl?.() === true ? PROGRAM_CONTROL_TOOLS : [];
@@ -2889,6 +2903,17 @@ export class MessagingMcpServer {
         roadmapIssue: typeof args['roadmapIssue'] === 'number' ? args['roadmapIssue'] : Number.NaN,
         body: str(args['body']),
       });
+      if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
+      return action.then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
+    }
+    if (name === RECORD_LESSON_TOOL.name) {
+      const parsed = parseLessonArgs(args);
+      if (!parsed.ok) {
+        return success(request.id, toolTextResult(parsed.message, true));
+      }
+      const action = control.recordLesson?.(parsed.value);
       if (action === undefined) return failure(request.id, -32602, `未知のツールです: ${name}`);
       return action.then((result) =>
         success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),

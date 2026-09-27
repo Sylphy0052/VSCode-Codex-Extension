@@ -148,6 +148,7 @@ import {
   syncOrchestratorTaskEvents,
 } from './runnerOrchestrator';
 import { sanitizeForLog, stripControlChars, stripControlCharsPreservingNewlines } from './sanitize';
+import type { RunNotesStore } from './runNotes';
 import { sanitizeInlineText } from './untrustedText';
 import {
   executeVerifyCommands,
@@ -661,6 +662,14 @@ export interface WorkflowRunnerDeps {
    * （`runnerVerifyCommands.ts`のJSDoc参照）。
    */
   verifyCommands?: WorkflowVerifyCommandDeps;
+  /**
+   * runをまたいで教訓を蓄積する仕組み（`runNotes.ts`、Issue #1599）。**省略可能**で、
+   * 省略された場合は`record_lesson`ツール自体を導入文・ツール一覧へ出さない
+   * （`forge` / `pseudoWorktree`と同じ設計判断）。拡張機能全体で1インスタンスを共有し、
+   * taskRun / roadmapRunの各オーケストレーターへも同じインスタンスを渡すこと
+   * （`onDidChange`購読者がワークフローViewだけに閉じないようにするため）。
+   */
+  runNotes?: RunNotesStore;
   /** テスト用の差し替え口。既定は `node:crypto` の `randomUUID`。 */
   randomId?: () => string;
   /** テスト用の差し替え口。既定は `Date.now`。 */
@@ -1653,6 +1662,12 @@ export interface LiveOrchestrator {
    * 数えない（乱発ではなく実際に人を待たせた回数を数えるため）。
    */
   askUserCount: number;
+  /**
+   * `record_lesson`（design.md §16.23、Issue #1599）をこのrunで受け付けた
+   * （`accepted: true`を返した）回数。`MAX_RECORD_LESSON_CALLS_PER_RUN`（`runNotes.ts`）
+   * との比較に使う。`askUserCount`と同じく、拒否した呼び出しは数えない。
+   */
+  recordLessonCount: number;
   /**
    * オーケストレーターの状態（Issue #1513）。諦めた後は`LiveRun.orchestrator`自体を
    * `undefined`にするため、ここに「利用できない」は無い。`alive`以外の間は`session`が

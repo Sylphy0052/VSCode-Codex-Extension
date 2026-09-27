@@ -7,6 +7,7 @@ import {
   type RoadmapRunEventsPage,
 } from './roadmapRunEventLog';
 import { isValidIssueNumber, MAX_ROADMAP_PARALLEL, type RoadmapRunMode } from './roadmapRunState';
+import { RECORD_LESSON_TOOL, parseLessonArgs, type LessonInput } from './runNotes';
 import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 
 /**
@@ -132,6 +133,7 @@ export const ROADMAP_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  RECORD_LESSON_TOOL,
 ];
 
 /**
@@ -146,6 +148,7 @@ export const AUTO_APPROVED_ROADMAP_ORCHESTRATOR_TOOLS: ReadonlySet<string> = new
   'pause_issue',
   'instruct_issue',
   'answer_question',
+  'record_lesson',
 ]);
 
 /** 状態を読むだけのツール。イベントログ（Issue #1576）に命令として残さない。 */
@@ -163,7 +166,8 @@ export type RoadmapOrchestratorCall =
   | { tool: 'stop_issue'; issueNumber: number }
   | { tool: 'answer_question'; issueNumber: number; questionId: string; answer: string }
   | { tool: 'set_mode'; mode: RoadmapRunMode; maxParallel: number }
-  | { tool: 'set_halted'; halted: boolean };
+  | { tool: 'set_halted'; halted: boolean }
+  | { tool: 'record_lesson'; input: LessonInput };
 
 type ParseResult = { ok: true; call: RoadmapOrchestratorCall } | { ok: false; message: string };
 
@@ -204,6 +208,13 @@ export function parseRoadmapOrchestratorCall(name: string, raw: unknown): ParseR
       return { ok: false, message: 'haltedはtrueかfalseで指定する' };
     }
     return { ok: true, call: { tool: 'set_halted', halted: a.halted } };
+  }
+  if (name === 'record_lesson') {
+    const parsed = parseLessonArgs(raw);
+    if (!parsed.ok) {
+      return { ok: false, message: parsed.message };
+    }
+    return { ok: true, call: { tool: 'record_lesson', input: parsed.value } };
   }
   const issueNumber = readIssueNumber(a);
   if (issueNumber === undefined) {
