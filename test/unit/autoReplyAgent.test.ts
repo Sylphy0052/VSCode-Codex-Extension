@@ -18,9 +18,11 @@ import type {
 import {
   AutoReplyAgent,
   autoReplyAgentCloseReasonFor,
+  buildAutoReplySessionInput,
+  resolveAutoReplyModel,
   type AutoReplyAgentCloseReason,
 } from '../../src/chat/autoReplyAgent';
-import type { AutoReplyStopReason } from '../../src/chat/autoReply';
+import { normalizeAutoReplyRetryCount, type AutoReplyStopReason } from '../../src/chat/autoReply';
 
 /** `secondOpinionAdvisorSession.test.ts`と同じ最小フェイク。応答を即返す既定と、待たせる`hold`。 */
 class FakeSession implements TaskSession {
@@ -30,6 +32,8 @@ class FakeSession implements TaskSession {
   prompts: string[] = [];
   hold = false;
   response = '続けてください';
+  /** この回数だけ`runLoop`をfailedで終わらせる（再試行のテスト用）。 */
+  failTurns = 0;
   private finished: ((reason: LoopStopReason, state: ChatState) => void) | undefined;
 
   send(): void {}
@@ -60,6 +64,11 @@ class FakeSession implements TaskSession {
     if (this.hold) {
       return;
     }
+    if (this.failTurns > 0) {
+      this.failTurns -= 1;
+      this.finished?.('failed', { ...initialChatState });
+      return;
+    }
     this.finished?.('maxReached', { ...initialChatState, turnResultText: this.response });
   }
   async interrupt(): Promise<void> {
@@ -80,14 +89,17 @@ class FakeHost implements TaskSessionHost {
   }
 }
 
-function createAgent(host: FakeHost, overrides: { idleTimeoutMs?: number } = {}): AutoReplyAgent {
+function createAgent(
+  host: FakeHost,
+  overrides: { idleTimeoutMs?: number; retryCount?: number } = {},
+): AutoReplyAgent {
   return new AutoReplyAgent({
     host,
     provider: 'codex',
     cwd: '/workspace',
     model: 'auto',
     timeoutMs: 60_000,
-    retryCount: 0,
+    retryCount: overrides.retryCount ?? 0,
     originalRequest: 'ログイン機能を実装して',
     ...(overrides.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: overrides.idleTimeoutMs }),
   });
@@ -239,5 +251,119 @@ describe('autoReplyAgentCloseReasonFor', () => {
       const closeReason: AutoReplyAgentCloseReason = autoReplyAgentCloseReasonFor(reason);
       expect(closeReason).toBe('userDisabled');
     }
+  });
+});
+
+describe('AutoReplyAgent の再試行（Issue #1602）', () => {
+  it('失敗しても開き直して再試行し、成功すればokを返す', async () => {
+    const host = new FakeHost();
+    host.session.failTurns = 1;
+    const agent = createAgent(host, { retryCount: 1 });
+    const onAttempt = vi.fn();
+    const result = await agent.reply('出力', onAttempt);
+    expect(result).toEqual({ ok: true, response: '続けてください' });
+    // 失敗したセッションを閉じ、開き直している
+    expect(host.session.disposeCalls).toBe(1);
+    expect(host.openCalls).toHaveLength(2);
+    expect(onAttempt).toHaveBeenNthCalledWith(1, 1, 2);
+    expect(onAttempt).toHaveBeenNthCalledWith(2, 2, 2);
+    agent.close('userDisabled');
+  });
+
+  it('retryCount回まで試して使い切ったらfailedを返す', async () => {
+    const host = new FakeHost();
+    host.session.failTurns = 99;
+    const agent = createAgent(host, { retryCount: 2 });
+    const onAttempt = vi.fn();
+    const result = await agent.reply('出力', onAttempt);
+    expect(result).toEqual({
+      ok: false,
+      kind: 'failed',
+      reason: '自動返信の返信役のターンが失敗しました',
+    });
+    // 初回 + 再試行2回 = 3回開いている
+    expect(host.openCalls).toHaveLength(3);
+    expect(onAttempt).toHaveBeenCalledTimes(3);
+    expect(onAttempt).toHaveBeenNthCalledWith(3, 3, 3);
+    agent.close('userDisabled');
+  });
+
+  it('cancelledのときは再試行しない', async () => {
+    const host = new FakeHost();
+    host.session.hold = true;
+    const agent = createAgent(host, { retryCount: 2 });
+    const onAttempt = vi.fn();
+    const pending = agent.reply('出力', onAttempt);
+    agent.close('userDisabled');
+    const result = await pending;
+    expect(result).toEqual({
+      ok: false,
+      kind: 'cancelled',
+      reason: expect.stringContaining('利用者の操作で停止しました'),
+    });
+    expect(onAttempt).toHaveBeenCalledTimes(1);
+    expect(host.openCalls).toHaveLength(1);
+  });
+
+  it('返信役が閉じられているときは再試行せずfailedを返す', async () => {
+    const host = new FakeHost();
+    const agent = createAgent(host, { retryCount: 2 });
+    agent.close('userDisabled');
+    const onAttempt = vi.fn();
+    const result = await agent.reply('出力', onAttempt);
+    expect(result).toEqual({
+      ok: false,
+      kind: 'failed',
+      reason: 'この返信役は既に終了しています',
+    });
+    expect(onAttempt).toHaveBeenCalledTimes(1);
+    expect(host.openCalls).toHaveLength(0);
+  });
+});
+
+describe('resolveAutoReplyModel', () => {
+  it('providerがclaudeで自動解決ならsonnetを返す', () => {
+    expect(resolveAutoReplyModel('auto', 'claude')).toBe('sonnet');
+    expect(resolveAutoReplyModel('', 'claude')).toBe('sonnet');
+  });
+
+  it('明示されたモデル名はそのまま返す', () => {
+    expect(resolveAutoReplyModel('opus', 'claude')).toBe('opus');
+  });
+});
+
+describe('buildAutoReplySessionInput', () => {
+  it('providerがclaudeのときapprovalModeはmanualになる', () => {
+    const input = buildAutoReplySessionInput('claude', '/workspace', 'sonnet');
+    expect(input.config.approvalMode).toBe('manual');
+    expect(input.config.model).toBe('sonnet');
+    expect(input.sandbox).toBe('read-only');
+  });
+
+  it('providerがcodexのときapprovalModeはneverになる', () => {
+    const input = buildAutoReplySessionInput('codex', '/workspace', 'gpt-5');
+    expect(input.config.approvalMode).toBe('never');
+  });
+});
+
+describe('normalizeAutoReplyRetryCount', () => {
+  it('範囲内の整数はそのまま返す', () => {
+    expect(normalizeAutoReplyRetryCount(2)).toBe(2);
+  });
+
+  it('範囲外は上限・下限へ丸める', () => {
+    expect(normalizeAutoReplyRetryCount(-1)).toBe(0);
+    expect(normalizeAutoReplyRetryCount(99)).toBe(3);
+  });
+
+  it('小数は切り捨てる', () => {
+    expect(normalizeAutoReplyRetryCount(1.9)).toBe(1);
+  });
+
+  it('非数・NaN・Infinityは既定値へ丸める', () => {
+    expect(normalizeAutoReplyRetryCount('2')).toBe(1);
+    expect(normalizeAutoReplyRetryCount(Number.NaN)).toBe(1);
+    expect(normalizeAutoReplyRetryCount(Number.POSITIVE_INFINITY)).toBe(1);
+    expect(normalizeAutoReplyRetryCount(undefined)).toBe(1);
   });
 });
