@@ -47,8 +47,9 @@ import { sanitizeInlineText } from './untrustedText';
  * オーケストレータモード（Issue #1505）のOrchestratorセッション。
  *
  * 1つのrunにセッションを1つ持つ。Orchestratorは`taskRunOrchestratorTools.ts`のMCPツールで
- * Controllerへ命令するだけで、runの状態を直接書き換えない。作りはロードマップ実行の
- * `roadmapOrchestrator.ts`に揃えている（世代ごとのトークン、ターンの終わりでのイベント配信）。
+ * Controllerへ命令するだけで、runの状態を直接書き換えない。作りは廃止済みの旧ロードマップ実行の
+ * `roadmapOrchestrator.ts`（Issue #1465、廃止: Issue #1623）に揃えていた
+ * （世代ごとのトークン、ターンの終わりでのイベント配信）。
  */
 
 /**

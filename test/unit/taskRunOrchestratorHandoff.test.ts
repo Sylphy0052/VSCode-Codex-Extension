@@ -11,12 +11,10 @@ import { TASK_RUN_SCHEMA_VERSION, type TaskRun } from '../../src/orchestrator/ta
 import type { TaskSession, TaskSessionHost, TaskSessionInput } from '../../src/orchestrator/taskSession';
 
 /**
- * Issue #1580 のtaskRunOrchestrator向け単体テスト。roadmapOrchestratorHandoff.test.tsと同じ観点のうち、
- * このrunnerに存在する2点だけを確かめる:
+ * Issue #1580 のtaskRunOrchestrator向け単体テスト。次の2点を確かめる:
  * - 世代をまたいだイベント総数の上限（run全体でMAX_ORCHESTRATOR_EVENTS_PER_RUNを超えない）
  * - 自動引き継ぎに失敗したときrearmAutoHandoffを呼び、前の世代を使い続けられること
- * （handoffPrecheckとhandingOff中の持ち越しはroadmapOrchestratorと共通実装ではなく、
- * taskRunOrchestratorにはhandoffPrecheckが渡されていない。持ち越し自体はroadmap側で検証済み）
+ * （taskRunOrchestratorにはhandoffPrecheckが渡されていない）
  */
 
 const LOOSE_BASELINE: ExtensionSafetyBaseline = {

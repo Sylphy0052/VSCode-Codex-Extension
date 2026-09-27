@@ -12,7 +12,7 @@ import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
 import { layoutTaskRunGraph, TASK_RUN_KANBAN_COLUMNS, type TaskRunKanbanCard } from './taskRunKanbanModel';
 
-/** 盤面を送る間隔。`roadmapKanbanView.ts`と同じく、最初はすぐ送り以降はまとめる。 */
+/** 盤面を送る間隔。最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
 
 /** Kanbanから使うOrchestratorの口。 */
@@ -147,7 +147,6 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       return;
     }
     if (message.type === 'viewport') {
-      // 値の扱いはロードマップ実行のKanban（`roadmapKanbanView.ts`）の`viewport`と揃える
       const raw = message.width;
       if (typeof raw !== 'number' || !Number.isFinite(raw)) {
         return;

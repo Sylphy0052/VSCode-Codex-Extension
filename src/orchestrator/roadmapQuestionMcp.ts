@@ -17,16 +17,19 @@ import { ROADMAP_QUESTION_ESCALATIONS, type RoadmapQuestionEscalation } from './
 import { sanitizeInlineText } from './untrustedText';
 
 /**
- * ロードマップ実行（Issue #1465）のMCPサーバ。
+ * `ask_orchestrator`を仲介するMCPサーバ。元はロードマップ実行（Issue #1465）が導入し、
+ * 廃止（Issue #1623）後はオーケストレータモード（Issue #1505）のtaskStage報告・質問の
+ * 受け口として`taskStageReportMcp.ts`が使う。
  *
  * ワークフロー実行用の`MessagingMcpServer`（`messaging.ts`）とは別に、トークンごとに見せる
- * ツールの組を分ける。Issueセッション（分割案6a）には`ask_orchestrator`の1ツールだけ、
- * Orchestratorセッション（分割案8b-1）には`roadmapOrchestratorTools.ts`の操作ツールだけを見せる。
- * HTTP層は`startHttpMcpServer`を使い、接続元とツールの組はURLのトークンからだけ決める
- * （ツールの引数からは決めない）。サーバはウィンドウごとに1つで、最初の登録のときに立てる。
+ * ツールの組を分ける。`register`は単体の`ask_orchestrator`ツールだけを見せる登録、
+ * `registerTools`は呼び出し側が渡した任意のツール一覧を見せる登録で、taskStageセッション・
+ * taskRunオーケストレータのどちらもこちらを使う。HTTP層は`startHttpMcpServer`を使い、
+ * 接続元とツールの組はURLのトークンからだけ決める（ツールの引数からは決めない）。
+ * サーバはウィンドウごとに1つで、最初の登録のときに立てる。
  *
- * 質問の振り分けと回答の届け方は`RoadmapIssueRunner`、操作ツールの処理は`RoadmapOrchestrator`が
- * 持つ。ここはJSON-RPCの受け答えと、登録先への振り分けだけを行う。
+ * ここはJSON-RPCの受け答えと、登録先への振り分けだけを行う。質問の振り分けと回答の届け方、
+ * 操作ツールの処理は呼び出し側（taskStage・taskRunオーケストレータ）が持つ。
  */
 
 export const MAX_QUESTION_LENGTH = 1000;
@@ -289,8 +292,8 @@ export interface RoadmapQuestionMcpDeps {
 
 /**
  * 1つのトークンに結び付けた接続先。見せるツールの組はトークンを登録するときに決める
- * （Issueセッションは`ask_orchestrator`だけ、Orchestratorセッションは`roadmapOrchestratorTools.ts`の
- * 操作ツールだけ。Issue #1465 分割案8b）。
+ * （Issueセッションは`ask_orchestrator`だけ、Orchestratorセッションは呼び出し側が渡した
+ * 操作ツールだけ）。
  */
 interface Registration {
   connectionId: string;

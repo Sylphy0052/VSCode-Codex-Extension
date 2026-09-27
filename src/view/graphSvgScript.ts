@@ -1,6 +1,6 @@
 /**
  * 依存グラフのSVG描画に使う部品（Issue #1465 分割案8b-2）。ワークフロー画面
- * （`workflowScript.ts`）とロードマップのKanban（`roadmapKanbanView.ts`）の両方に埋め込む
+ * （`workflowScript.ts`）とtaskRunのKanban（`taskRunKanbanView.ts`）の両方に埋め込む
  * （`COMPLETION_EVIDENCE_SOURCE` と同じ流儀）。
  *
  * 座標は拡張機能側の `layoutGraph`（`workflowGraph.ts`）が決める。ここにあるのは

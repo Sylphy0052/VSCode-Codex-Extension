@@ -102,8 +102,8 @@ import {
 } from './orchestrator/roadmap';
 import { sanitizeInlineText } from './orchestrator/untrustedText';
 import { sanitizeForLog } from './orchestrator/sanitize';
+import { purgeRoadmapRunSavedData } from './orchestrator/roadmapRunPurge';
 import { WorkflowRunStore } from './orchestrator/runStore';
-import { RoadmapRunStore } from './orchestrator/roadmapRunStore';
 import { TaskRunStore } from './orchestrator/taskRunStore';
 import { ProgramStore } from './orchestrator/programStore';
 import { ProgramRunner } from './orchestrator/programRunner';
@@ -209,7 +209,6 @@ import type { SessionControlAction, SessionControlResult } from './view/chatMana
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
-import { setupRoadmapRun } from './view/roadmapRunSetup';
 import { setupTaskRun } from './view/taskRunSetup';
 import {
   generateWindowId,
@@ -382,6 +381,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 消すので、別ウィンドウで使用中のものは巻き込まない。起動を待たせる必要は無い
   void removeStaleReviewBundles(defaultReviewBundleRoot(), Date.now(), undefined, log);
 
+  // ロードマップ実行（Issue #1465）の廃止（Issue #1623）。残っている保存データ
+  // （`workspaceState`の2キーと専有権ファイル）を消す。起動を待たせる必要は無い
+  void purgeRoadmapRunSavedData(context.workspaceState, context.globalStorageUri.fsPath, log);
+
   const home = resolveCodexHome(readConfig().codexHome, nodeLocatorDeps);
   const paths = codexPaths(home);
   log.info(`CODEX_HOME=${home}`);
@@ -508,15 +511,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // worktreeで走っていたタスクのタブが汎用復元へ拾われ、ワークスペース直下のcwdで
   // セッションが復活していた）。`workflowRunnerRef` 自体は再代入しないため `const`。
   const workflowRunnerRef: { current: WorkflowRunner | undefined } = { current: undefined };
-  // ロードマップ実行（Issue #1465）のIssueセッションも同じ口で答える（Issue #1491）。
-  // 汎用復元に拾わせると、入力を閉じていたタブが通常のチャットとしてworktreeで戻るため
-  const roadmapRunStore = new RoadmapRunStore(context.workspaceState, (message) => log.warn(message));
-  // オーケストレータモード（Issue #1505）の工程セッションとOrchestratorセッションも同じ
+  // オーケストレータモード（Issue #1505）の工程セッションとOrchestratorセッションも同じ口で
+  // 答える（Issue #1491）。汎用復元に拾わせると、入力を閉じていたタブが通常のチャットとして
+  // worktreeで戻るため
   const taskRunStore = new TaskRunStore(context.workspaceState, (message) => log.warn(message));
   const isTaskManagedThread = (id: string): boolean =>
-    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
-    roadmapRunStore.hasSessionRef(id) ||
-    taskRunStore.hasSessionRef(id);
+    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) || taskRunStore.hasSessionRef(id);
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
@@ -666,10 +666,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
    * には毎回`current`を読む関数を渡す。
    */
   const sessionBridgeHolder: { current: SessionBridgePort | undefined } = { current: undefined };
-  // worktreeの作成はワークフローとロードマップ実行（Issue #1465）で同じ列に並べる
+  // worktreeの作成はワークフローとオーケストレータモードで同じ列に並べる
   const worktreeQueue = new WorktreeCreationQueue();
   // runをまたいで教訓を蓄積する仕組み（Issue #1599）。拡張機能全体で1インスタンスを
-  // 共有し、workflow / taskRun / roadmapRunの3種のオーケストレーターへ同じものを配る
+  // 共有し、workflow / taskRunの2種のオーケストレーターへ同じものを配る
   // （`onDidChange`購読者がワークフローViewだけに閉じないようにするため。`runNotes.ts`
   // の`RunNotesStore`のJSDoc参照）
   const runNotes = new RunNotesStore(nodeRunNotesFileSystem, {
@@ -813,48 +813,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
   context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
-  // このウィンドウ（拡張ホストの起動）の識別子。セッション統括（下の`sessionHubRootDir`）と
-  // ロードマップ実行の専有権（Issue #1555）で同じ値を使うため、両方より先に作る
+  // このウィンドウ（拡張ホストの起動）の識別子。セッション統括（下の`sessionHubRootDir`）で使うため先に作る
   const windowId = generateWindowId();
 
-  // ロードマップ実行（Issue #1465）。子Issueを依存順にセッションへ送り、Kanbanで操作する
-  context.subscriptions.push(
-    ...setupRoadmapRun({
-      context,
-      store: roadmapRunStore,
-      hosts: {
-        codex: overridableHost('codex', chat),
-        claude: overridableHost('claude', claudeChat),
-      },
-      worktreeQueue,
-      git: { run: (args, cwd) => (forgeOverrides.git ?? nodeGitCommandRunner).run(args, cwd) },
-      cli: {
-        run: (command, args, cwd) =>
-          (forgeOverrides.cli ?? nodeCliCommandRunner).run(command, args, cwd),
-      },
-      sessionConfig: (engine) => {
-        const effective = buildEffectiveTaskConfig(
-          {
-            provider: engine,
-            model: '',
-            effort: '',
-            approvalMode: '',
-            sandbox: '',
-            autoApprove: false,
-          },
-          readSafetyBaseline(),
-        );
-        return { config: effective.config, sandbox: effective.sandbox };
-      },
-      readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
-      readBaseline: readSafetyBaseline,
-      windowId,
-      log,
-      runNotes,
-    }),
-  );
-
-  // オーケストレータモード（Issue #1505）。ホストとgit・CLIの口はロードマップ実行と同じものを使う
+  // オーケストレータモード（Issue #1505）
   context.subscriptions.push(
     ...setupTaskRun({
       store: taskRunStore,
@@ -946,7 +908,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     createRoadmapViewPort(),
     // 完了根拠の列（Issue #1380）。上で作った唯一の保存先から読む
     verificationStore,
-    // 教訓欄（Issue #1599）。workflow / taskRun / roadmapRunの3種で共有する唯一のインスタンス
+    // 教訓欄（Issue #1599）。workflow / taskRunの2種で共有する唯一のインスタンス
     runNotesViewPort,
   );
   context.subscriptions.push(workflowView);

@@ -4,7 +4,7 @@ import { isPlainObject, MementoRunStore } from './mementoRunStore';
 
 /**
  * オーケストレータモード（Issue #1505）のController状態の永続化。直列化と保存の骨組みは
- * `mementoRunStore.ts`で、ロードマップ実行（`roadmapRunStore.ts`）とはキーを分ける。
+ * `mementoRunStore.ts`が担う。
  * `workspaceState`は暗号化されない平文ストレージのため、応答本文や会話履歴は持たない
  * （`TaskRun`が持つのは状態と識別子、計画とIssue下書き等の工程の成果だけ）。
  */

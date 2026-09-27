@@ -2,8 +2,9 @@ import type { MementoLike } from '../util/memento';
 import { SerialQueue } from './serialQueue';
 
 /**
- * 実行（run）の状態を`workspaceState`の1つのキーへ配列で保存する骨組み。ロードマップ実行
- * （Issue #1465、`roadmapRunStore.ts`）とオーケストレータモード（Issue #1505）が共通で使う。
+ * 実行（run）の状態を`workspaceState`の1つのキーへ配列で保存する骨組み。オーケストレータ
+ * モード（Issue #1505、`taskRunStore.ts`）が使う。旧ロードマップ実行（Issue #1465）の
+ * `roadmapRunStore.ts`も同じ骨組みを使っていたが、廃止（Issue #1623）に伴い削除した。
  *
  * 読み書きを1本のキューに通して直列化し、read-modify-writeの間に別の更新が割り込まない
  * ようにする。保存する件数は開始時刻の新しい順に上限まで残す（`isFinished`を渡せば走り終えた

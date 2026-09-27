@@ -719,7 +719,7 @@ export interface WorkflowRunnerDeps {
    * runをまたいで教訓を蓄積する仕組み（`runNotes.ts`、Issue #1599）。**省略可能**で、
    * 省略された場合は`record_lesson`ツール自体を導入文・ツール一覧へ出さない
    * （`forge` / `pseudoWorktree`と同じ設計判断）。拡張機能全体で1インスタンスを共有し、
-   * taskRun / roadmapRunの各オーケストレーターへも同じインスタンスを渡すこと
+   * taskRunのオーケストレーターへも同じインスタンスを渡すこと
    * （`onDidChange`購読者がワークフローViewだけに閉じないようにするため）。
    */
   runNotes?: RunNotesStore;

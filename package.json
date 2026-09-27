@@ -534,16 +534,6 @@
         "icon": "$(project)"
       },
       {
-        "command": "agent.roadmapRun.start",
-        "title": "ロードマップを実行",
-        "category": "Agent"
-      },
-      {
-        "command": "agent.roadmapRun.kanban",
-        "title": "ロードマップ実行のKanbanを開く",
-        "category": "Agent"
-      },
-      {
         "command": "agent.taskRun.start",
         "title": "オーケストレータモードを開始",
         "category": "Agent"
@@ -1679,21 +1669,6 @@
           "default": true,
           "scope": "window",
           "markdownDescription": "オーケストレータモード（Issue #1505）でOrchestratorが提案した計画を、Reflexが妥当と判定したとき自動で承認する（Issue #1554）。ロードマップ実行（Issue #1465）の計画審査と同じ判定器・閾値を使い、計画そのものの整合だけを見る。判定を得られない（時間切れ・不正な応答）ときや「妥当」と言い切らないときは、これまでどおりユーザーの承認待ちにする。無効にすると判定を試みず、常に承認待ちにする。"
-        },
-        "agent.roadmapRun.merge.versionBumpCommand": {
-          "type": "string",
-          "default": "",
-          "scope": "resource",
-          "markdownDescription": "ロードマップ実行（Issue #1465）でPRをmergeする直前に、Issueのworktreeで実行する版上げコマンド（例: `node scripts/bump-version.mjs`）。シェル経由で実行し、変更があれば`chore: バージョンを<版>にする`としてcommitする。空なら版上げしない。信頼されたワークスペースでだけ、runごとに1回の許可を得てから実行する。"
-        },
-        "agent.roadmapRun.merge.verifyCommands": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "scope": "resource",
-          "markdownDescription": "ロードマップ実行（Issue #1465）でPRをmergeする前に、`origin/main`を取り込んだIssueのworktreeで順に実行する検証コマンド（例: `npx tsc --noEmit`）。どれかが失敗したら、修復用のセッションへ差し戻す。空なら検証しない。信頼されたワークスペースでだけ、runごとに1回の許可を得てから実行する。"
         },
         "agent.workflows.ciUpdateBranchMaxRetries": {
           "type": "number",
