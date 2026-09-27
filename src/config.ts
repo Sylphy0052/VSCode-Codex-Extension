@@ -588,6 +588,72 @@ export function readTaskRunMaxParallelPerFolder(): number {
   return Math.floor(raw);
 }
 
+/** オーケストレータモードの資源の閾値（Issue #1629）。判定は`resourceMonitor.ts`。 */
+export interface TaskRunResourceThresholds {
+  /** 1分平均の負荷÷コア数（Windowsは使用率）がこの値以上で`warning`。 */
+  cpuWarningLoadPerCore: number;
+  /** 同じくこの値以上で`critical`。 */
+  cpuCriticalLoadPerCore: number;
+  /** 使えるメモリの割合（0〜1）がこの値以下で`warning`。 */
+  memoryWarningAvailableRatio: number;
+  /** 同じくこの値以下で`critical`。 */
+  memoryCriticalAvailableRatio: number;
+}
+
+/**
+ * 既定の閾値。根拠はpackage.jsonの各設定の説明にもある。
+ * - CPU 1.0: 全コアが埋まった状態。これ以上は工程を増やすほど各工程が遅くなる
+ * - CPU 1.5: コア数の1.5倍の処理が走行を待つ状態。ビルドやテストが目に見えて遅れ始める
+ * - メモリ20%: 工程セッション1つが数GBを使うことがあり、次の工程で逼迫しうる残り
+ * - メモリ10%: OOM killerやスワップによる大幅な遅延が起きやすくなる残り
+ */
+export const DEFAULT_TASK_RUN_RESOURCE_THRESHOLDS: TaskRunResourceThresholds = {
+  cpuWarningLoadPerCore: 1,
+  cpuCriticalLoadPerCore: 1.5,
+  memoryWarningAvailableRatio: 0.2,
+  memoryCriticalAvailableRatio: 0.1,
+};
+
+/** 既定の計測間隔（秒）。1分平均の負荷の変化を1分以内に4回見られ、`/proc`を読む負担が無視できる。 */
+export const DEFAULT_TASK_RUN_RESOURCE_INTERVAL_SECONDS = 15;
+
+function readNumberInRange(key: string, min: number, max: number): number | undefined {
+  const raw = vscode.workspace.getConfiguration('agent').get<number>(key);
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= min && raw <= max ? raw : undefined;
+}
+
+/** 資源を測る間隔（ミリ秒）。壊れた値（数値でない・範囲外）は既定へ丸める。 */
+export function readTaskRunResourceIntervalMs(): number {
+  const seconds =
+    readNumberInRange('taskRun.resource.intervalSeconds', 5, 300) ??
+    DEFAULT_TASK_RUN_RESOURCE_INTERVAL_SECONDS;
+  return Math.round(seconds * 1000);
+}
+
+/**
+ * 資源の閾値。範囲外の値、`warning`と`critical`の大小が逆になる組み合わせは、その指標（CPU・
+ * メモリ）ごと既定へ戻す（片方だけ直すと、もう片方の意図と食い違うため）。
+ */
+export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
+  const d = DEFAULT_TASK_RUN_RESOURCE_THRESHOLDS;
+  const cpuWarning = readNumberInRange('taskRun.resource.cpuWarningLoadPerCore', 0.1, 16);
+  const cpuCritical = readNumberInRange('taskRun.resource.cpuCriticalLoadPerCore', 0.1, 16);
+  const memWarning = readNumberInRange('taskRun.resource.memoryWarningAvailablePercent', 1, 99);
+  const memCritical = readNumberInRange('taskRun.resource.memoryCriticalAvailablePercent', 1, 99);
+  const cpu =
+    cpuWarning !== undefined && cpuCritical !== undefined && cpuWarning <= cpuCritical
+      ? { cpuWarningLoadPerCore: cpuWarning, cpuCriticalLoadPerCore: cpuCritical }
+      : { cpuWarningLoadPerCore: d.cpuWarningLoadPerCore, cpuCriticalLoadPerCore: d.cpuCriticalLoadPerCore };
+  const memory =
+    memWarning !== undefined && memCritical !== undefined && memCritical <= memWarning
+      ? { memoryWarningAvailableRatio: memWarning / 100, memoryCriticalAvailableRatio: memCritical / 100 }
+      : {
+          memoryWarningAvailableRatio: d.memoryWarningAvailableRatio,
+          memoryCriticalAvailableRatio: d.memoryCriticalAvailableRatio,
+        };
+  return { ...cpu, ...memory };
+}
+
 /**
  * オーケストレータモードの計画提案を、Reflexが妥当と判定したときに自動承認する（Issue #1554）。
  * ロードマップ計画審査（`roadmapPlanProposal.ts`）は無効化する設定が無く常に自動で書き戻すため、
