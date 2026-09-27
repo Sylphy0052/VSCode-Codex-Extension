@@ -25,6 +25,7 @@ import {
   type RoadmapAskOutcome,
   type RoadmapQuestionVerdict,
 } from './roadmapQuestionMcp';
+import type { RunNotesStore } from './runNotes';
 import { SerialQueue } from './serialQueue';
 import {
   checkStageReport,
@@ -37,6 +38,7 @@ import {
   recordAttemptSession,
   recordTaskWorktree,
   type StageDecision,
+  type StageOutput,
   type StageQuestion,
   type StageReportRef,
   startStageAttempt,
@@ -157,6 +159,11 @@ export interface TaskStageRunnerDeps {
   onWarning?: (runId: string, taskId: string, message: string) => void;
   now?: () => Date;
   newId?: () => string;
+  /**
+   * run横断の記録（Issue #1600）。review工程が残した指摘（`remainingFindings`）を残件として積む。
+   * 未設定なら積まない。
+   */
+  runNotes?: Pick<RunNotesStore, 'recordRemaining'>;
 }
 
 /** 生きている工程セッションの帳簿。タスクごとに1つ持つ（タスクは同時に1つの工程しか動かない）。 */
@@ -838,9 +845,32 @@ export class TaskStageRunner {
         return { text: '完了を記録できませんでした。改めて報告する。', isError: true };
       }
       this.markReported(entry);
+      this.recordReviewFindings(entry.runId, run.workspaceRoot, taskId, observed.output);
       this.judgeGateLater(entry.runId, taskId, gateId, next);
       return { text: '完了を受け付けました。このターンで作業を終える。', isError: false };
     });
+  }
+
+  /** review工程が直さずに残した指摘を残件へ積む。記録の成否は工程の完了に影響させない。 */
+  private recordReviewFindings(
+    runId: string,
+    workspaceRoot: string,
+    taskId: string,
+    output: StageOutput,
+  ): void {
+    if (this.deps.runNotes === undefined || output.stage !== 'review') return;
+    const findings = output.review.remainingFindings;
+    if (findings.length === 0) return;
+    void this.deps.runNotes.recordRemaining(
+      workspaceRoot,
+      findings.map((text) => ({
+        runId,
+        runKind: 'taskRun' as const,
+        source: 'reviewFinding' as const,
+        text,
+        taskId,
+      })),
+    );
   }
 
   /** 報告を受け付けた。続きの指示を止め、ターンが終わったところで閉じる（`onStateChanged`）。 */

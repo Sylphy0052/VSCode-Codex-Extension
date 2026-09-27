@@ -47,6 +47,7 @@ import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
 import { buildTaskWorkSummary } from '../orchestrator/taskSummary';
 import type { LessonRecord, RunNotesStore } from '../orchestrator/runNotes';
+import { remainingSourceLabel, type RemainingRecord } from '../orchestrator/runRemaining';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 
 /**
@@ -89,7 +90,7 @@ export type ProgramViewPort = WorkflowFeedProgramPort;
  */
 export interface RunNotesViewPort extends Pick<
   RunNotesStore,
-  'listLessons' | 'deleteLesson' | 'onDidChange'
+  'listLessons' | 'deleteLesson' | 'listRemaining' | 'markRemainingDone' | 'onDidChange'
 > {
   /** 教訓を読むワークスペースルート群。空なら欄を隠す。 */
   getWorkspaceRoots(): readonly string[];
@@ -582,15 +583,49 @@ export class WorkflowViewManager implements vscode.Disposable {
     const roots = this.runNotes?.getWorkspaceRoots() ?? [];
     if (this.runNotes === undefined || roots.length === 0) {
       void this.panel.webview.postMessage({ type: 'lessons', lessons: undefined });
+      void this.panel.webview.postMessage({ type: 'remaining', remaining: undefined });
       return;
     }
-    const lessons = (await this.listLessonsInRoots(this.runNotes, roots)).map(
-      ({ lesson }) => lesson,
-    );
+    const [lessonEntries, remainingEntries] = await Promise.all([
+      this.listLessonsInRoots(this.runNotes, roots),
+      this.listOpenRemainingInRoots(this.runNotes, roots),
+    ]);
     if (this.panel === undefined) {
       return;
     }
-    void this.panel.webview.postMessage({ type: 'lessons', lessons });
+    void this.panel.webview.postMessage({
+      type: 'lessons',
+      lessons: lessonEntries.map(({ lesson }) => lesson),
+    });
+    // 残件欄（Issue #1600）。未処理の残件だけを出す。出所は表示用の名前へ変えて渡す
+    void this.panel.webview.postMessage({
+      type: 'remaining',
+      remaining: remainingEntries.map(({ record }) => ({
+        id: record.id,
+        recordedAt: record.recordedAt,
+        runKind: record.runKind,
+        sourceLabel: remainingSourceLabel(record.source),
+        text: record.text,
+        ...(record.taskId === undefined ? {} : { taskId: record.taskId }),
+        ...(record.issueNumber === undefined ? {} : { issueNumber: record.issueNumber }),
+        ...(record.onRoadmap === undefined ? {} : { onRoadmap: record.onRoadmap }),
+      })),
+    });
+  }
+
+  /** 各ワークスペースルートの未処理の残件を、ルートと組にして新しい順で返す（Issue #1600）。 */
+  private async listOpenRemainingInRoots(
+    runNotes: RunNotesViewPort,
+    roots: readonly string[],
+  ): Promise<{ root: string; record: RemainingRecord }[]> {
+    const perRoot = await Promise.all(
+      roots.map(async (root) =>
+        (await runNotes.listRemaining(root))
+          .filter((record) => record.status === 'open')
+          .map((record) => ({ root, record })),
+      ),
+    );
+    return perRoot.flat().sort((a, b) => b.record.recordedAt.localeCompare(a.record.recordedAt));
   }
 
   /**
@@ -761,6 +796,27 @@ export class WorkflowViewManager implements vscode.Disposable {
         // 非modalの警告でも見せる
         this.log.warn(`[workflowView] 教訓を削除できませんでした: ${result.message}`);
         void vscode.window.showWarningMessage(`教訓を削除できませんでした: ${result.message}`);
+      }
+      return;
+    }
+    if (type === 'markRemainingDone' && typeof m['id'] === 'string') {
+      // 教訓欄と同じく表示中のrunに依存しない。Webviewは信頼境界の外側のため、
+      // 一覧に実在する未処理の残件のidだけを受け付ける
+      if (this.runNotes === undefined) {
+        return;
+      }
+      const requestedId = m['id'];
+      const found = (
+        await this.listOpenRemainingInRoots(this.runNotes, this.runNotes.getWorkspaceRoots())
+      ).find(({ record }) => record.id === requestedId);
+      if (found === undefined) {
+        return;
+      }
+      // 欄の再送は`runNotes.onDidChange`購読に任せる（`deleteLesson`と同じ）
+      const result = await this.runNotes.markRemainingDone(found.root, requestedId);
+      if (!result.ok) {
+        this.log.warn(`[workflowView] 残件を済にできませんでした: ${result.message}`);
+        void vscode.window.showWarningMessage(`残件を済にできませんでした: ${result.message}`);
       }
       return;
     }
@@ -1161,6 +1217,14 @@ ${workflowStyles()}
         <span id="lessonsHint" class="hint"></span>
       </div>
       <ul id="lessonsList" class="lessons-list"></ul>
+    </section>
+
+    <section id="remainingSection" hidden>
+      <div class="section-head">
+        <h2>残件</h2>
+        <span id="remainingHint" class="hint"></span>
+      </div>
+      <ul id="remainingList" class="lessons-list"></ul>
     </section>
 
     <div id="integrationSection" hidden>

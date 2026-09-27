@@ -4,6 +4,16 @@ import * as path from 'node:path';
 import { findSymlinkedAncestor, type SymlinkCheckPort } from './fsGuards';
 import type { McpToolDefinition } from './messaging';
 import { redactCredentials } from '../secondOpinion/redact';
+import {
+  buildRemainingRecord,
+  canonicalRemaining,
+  extractIssueNumbers,
+  formatRemainingForIntro,
+  isRemainingRecord,
+  pruneRemainingForIncoming,
+  type RemainingInput,
+  type RemainingRecord,
+} from './runRemaining';
 import { SerialQueue } from './serialQueue';
 import { sanitizeForLog, stripControlCharsPreservingNewlines } from './sanitize';
 import { formatUntrusted, sanitizeInlineText, truncateByCodePoint } from './untrustedText';
@@ -59,11 +69,10 @@ export interface LessonRecord {
 }
 
 /**
- * ファイルに積む記録の種類の合併型。現在は`LessonRecord`だけだが、`kind`で分岐できる形に
- * しておく（#1600でこのファイルへ別種の記録が増える想定。`parseRunNotes`は未知の`kind`の
- * 行を黙って読み飛ばすため、型を増やしても既存の読み手が壊れない）。
+ * ファイルに積む記録の種類の合併型。教訓（`lesson`）と残件（`remaining`、Issue #1600。
+ * `runRemaining.ts`）を`kind`で分ける。`parseRunNotes`は未知の`kind`の行を黙って読み飛ばす。
  */
-export type RunNoteRecord = LessonRecord;
+export type RunNoteRecord = LessonRecord | RemainingRecord;
 
 /** 教訓1件のフィールド（`observation`・`instruction`）の文字数上限。 */
 export const MAX_LESSON_FIELD_LENGTH = 500;
@@ -247,15 +256,43 @@ export function parseRunNotes(text: string): RunNoteRecord[] {
     } catch {
       continue;
     }
-    if (isLessonRecord(parsed)) {
+    if (isLessonRecord(parsed) || isRemainingRecord(parsed, isRunKind)) {
       records.push(parsed);
     }
   }
   return records;
 }
 
+/** 検証済みの記録を種別で絞る（JSONの形を検証する`isLessonRecord`・`isRemainingRecord`とは別）。 */
+function isLesson(record: RunNoteRecord): record is LessonRecord {
+  return record.kind === 'lesson';
+}
+
+function isRemaining(record: RunNoteRecord): record is RemainingRecord {
+  return record.kind === 'remaining';
+}
+
+/** 1行分のJSON。残件はキーの順序を固定する（`runRemaining.ts`冒頭の「行頭の構造で数えられる形」）。 */
+function toJsonLine(record: RunNoteRecord): string {
+  return JSON.stringify(isRemaining(record) ? canonicalRemaining(record) : record);
+}
+
 function toJsonlText(records: readonly RunNoteRecord[]): string {
-  return records.map((record) => JSON.stringify(record)).join('\n') + (records.length > 0 ? '\n' : '');
+  return records.map(toJsonLine).join('\n') + (records.length > 0 ? '\n' : '');
+}
+
+/**
+ * 教訓を1件足す前提で、教訓の件数を`MAX_LESSONS_STORED`へ収める。古い教訓から落とし、
+ * 残件（`remaining`）には手を付けない。落とす必要が無ければ`undefined`。
+ */
+function pruneLessonsForIncoming(existing: readonly RunNoteRecord[]): RunNoteRecord[] | undefined {
+  const lessons = existing.filter(isLesson);
+  const excess = lessons.length + 1 - MAX_LESSONS_STORED;
+  if (excess <= 0) {
+    return undefined;
+  }
+  const dropped = new Set(lessons.slice(0, excess).map((lesson) => lesson.id));
+  return existing.filter((record) => !(isLesson(record) && dropped.has(record.id)));
 }
 
 function formatLessonLine(lesson: LessonRecord): string {
@@ -422,10 +459,9 @@ export class RunNotesStore {
         const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
         // 読めなかった場合は既存件数が分からないため、刈り込み判定（上限整理）を飛ばして
         // 追記だけ行う（このメソッドのJSDoc参照）
-        if (readResult.kind !== 'error' && existing.length >= MAX_LESSONS_STORED) {
-          const capacityForOld = Math.max(0, MAX_LESSONS_STORED - 1);
-          const kept = capacityForOld === 0 ? [] : existing.slice(-capacityForOld);
-          const rewritten = await this.fs.replaceTextFile(target, toJsonlText([...kept, record]));
+        const pruned = readResult.kind === 'error' ? undefined : pruneLessonsForIncoming(existing);
+        if (pruned !== undefined) {
+          const rewritten = await this.fs.replaceTextFile(target, toJsonlText([...pruned, record]));
           if (!rewritten) {
             this.logFailure('教訓の記録を書き直せませんでした（上限のための整理）。');
             return { ok: false, message: '教訓を書き込めませんでした。' };
@@ -469,7 +505,7 @@ export class RunNotesStore {
         this.logFailure(`教訓一覧を読めませんでした: ${readResult.message}`);
         return [];
       }
-      return [...parseRunNotes(readResult.text)].reverse();
+      return parseRunNotes(readResult.text).filter(isLesson).reverse();
     } catch (e) {
       this.logFailure(`教訓一覧を読めませんでした: ${e instanceof Error ? e.message : String(e)}`);
       return [];
@@ -499,7 +535,7 @@ export class RunNotesStore {
           return { ok: false, message: '教訓を削除できませんでした（記録を読めませんでした）。' };
         }
         const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
-        const next = existing.filter((record) => record.id !== id);
+        const next = existing.filter((record) => !(isLesson(record) && record.id === id));
         if (next.length === existing.length) {
           return { ok: false, message: '指定の教訓は見つかりませんでした。' };
         }
@@ -513,6 +549,183 @@ export class RunNotesStore {
       } catch (e) {
         this.logFailure(`教訓の削除中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
         return { ok: false, message: '教訓を削除できませんでした。' };
+      }
+    });
+  }
+
+  /**
+   * 残件を登録する（Issue #1600）。残件の登録口はこれ1つで、追記が済んだ時点で
+   * `onDidChange`が発火し一覧に出る。本文が空になる項目は登録しない。
+   *
+   * `recordLesson`と同じく、既存の記録を読めないときは刈り込み（`MAX_REMAINING_STORED`）を
+   * 飛ばして追記だけ行う。書けなくても例外は投げず、ログへ1行残して`{ ok: false }`を返す。
+   */
+  async recordRemaining(
+    workspaceRoot: string,
+    inputs: readonly RemainingInput[],
+  ): Promise<RunNotesWriteResult> {
+    // 呼び出し側は結果を待たない（`void`）ため、組み立ての例外もここで`{ ok: false }`へ畳む
+    let records: RemainingRecord[];
+    try {
+      const now = this.now();
+      records = inputs
+        .map((input) => buildRemainingRecord(input, now))
+        .filter((record): record is RemainingRecord => record !== undefined);
+    } catch (e) {
+      this.logFailure(`残件の組み立て中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+      return { ok: false, message: '残件を書き込めませんでした。' };
+    }
+    if (records.length === 0) {
+      return { ok: true };
+    }
+    return this.queue.enqueue(async () => {
+      try {
+        const target = notesPath(workspaceRoot);
+        const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
+        if (symlinked !== undefined) {
+          this.logFailure(`残件の書き込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+          return { ok: false, message: '残件を書き込めませんでした（経路が不正です）。' };
+        }
+        if (!(await this.fs.makeDirectory(path.dirname(target)))) {
+          this.logFailure('残件の置き場ディレクトリを作れませんでした。');
+          return { ok: false, message: '残件を書き込めませんでした。' };
+        }
+        const readResult = await this.fs.readTextFile(target);
+        if (readResult.kind === 'error') {
+          this.logFailure(`残件の既存記録を読めませんでした（追記のみ行います）: ${readResult.message}`);
+        }
+        const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
+        const keptRemaining =
+          readResult.kind === 'error'
+            ? undefined
+            : pruneRemainingForIncoming(existing.filter(isRemaining), records.length);
+        let written: boolean;
+        if (keptRemaining === undefined) {
+          written = await this.fs.appendLine(target, records.map((r) => `${toJsonLine(r)}\n`).join(''));
+        } else {
+          const keptIds = new Set(keptRemaining.map((r) => r.id));
+          const next = existing.filter((r) => !isRemaining(r) || keptIds.has(r.id));
+          written = await this.fs.replaceTextFile(target, toJsonlText([...next, ...records]));
+        }
+        if (!written) {
+          this.logFailure('残件を書き込めませんでした。');
+          return { ok: false, message: '残件を書き込めませんでした。' };
+        }
+        this.notifyChanged();
+        return { ok: true };
+      } catch (e) {
+        this.logFailure(`残件の記録中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`);
+        return { ok: false, message: '残件を書き込めませんでした。' };
+      }
+    });
+  }
+
+  /** 残件を新しい順で一覧する。読めないときは空配列（`listLessons`と同じ）。 */
+  async listRemaining(workspaceRoot: string): Promise<RemainingRecord[]> {
+    return (await this.readAll(workspaceRoot, '残件一覧')).filter(isRemaining).reverse();
+  }
+
+  /** ワークフローViewの「済にする」の実体。 */
+  async markRemainingDone(workspaceRoot: string, id: string): Promise<RunNotesWriteResult> {
+    const doneAt = this.now().toISOString();
+    return this.rewriteRemaining(workspaceRoot, '残件を済にできませんでした', (record) =>
+      record.id === id && record.status === 'open' ? { ...record, status: 'done', doneAt } : record,
+    ).then((result) =>
+      result.ok && !result.changed ? { ok: false, message: '指定の未処理の残件は見つかりませんでした。' } : result,
+    );
+  }
+
+  /**
+   * Roadmap Issueの本文を置き換えたときに呼ぶ。本文に`#N`が出てくる未処理の`issue`残件を
+   * ロードマップ掲載済みにする。1件も変わらなければ書き直さない。
+   */
+  async markIssuesOnRoadmap(workspaceRoot: string, roadmapBody: string): Promise<RunNotesWriteResult> {
+    const numbers = extractIssueNumbers(roadmapBody);
+    if (numbers.size === 0) {
+      return { ok: true };
+    }
+    return this.rewriteRemaining(workspaceRoot, '残件のロードマップ掲載を記録できませんでした', (record) =>
+      record.source === 'issue' &&
+      record.onRoadmap !== true &&
+      record.issueNumber !== undefined &&
+      numbers.has(record.issueNumber)
+        ? { ...record, onRoadmap: true }
+        : record,
+    );
+  }
+
+  /**
+   * run開始時の導入文へ入れるブロック（教訓と未処理の残件）。ファイルは1回だけ読む。
+   * どちらも無ければ`''`。
+   */
+  async readIntroBlock(workspaceRoot: string): Promise<string> {
+    const records = await this.readAll(workspaceRoot, '導入文用の記録');
+    const lessons = records.filter(isLesson).reverse();
+    const open = records.filter(isRemaining).filter((r) => r.status === 'open').reverse();
+    return [formatLessonsForIntro(lessons), formatRemainingForIntro(open)]
+      .filter((block) => block !== '')
+      .join('\n\n');
+  }
+
+  /** 全記録を古い順で読む。読めないときは空配列を返し、ログへ1行残す。 */
+  private async readAll(workspaceRoot: string, label: string): Promise<RunNoteRecord[]> {
+    try {
+      const target = notesPath(workspaceRoot);
+      const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
+      if (symlinked !== undefined) {
+        this.logFailure(`${label}の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+        return [];
+      }
+      const readResult = await this.fs.readTextFile(target);
+      if (readResult.kind === 'error') {
+        this.logFailure(`${label}を読めませんでした: ${readResult.message}`);
+      }
+      return readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
+    } catch (e) {
+      this.logFailure(`${label}を読めませんでした: ${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
+  }
+
+  /** 残件を1件ずつ`update`へ通して書き直す。何も変わらなければ書かない（`changed: false`）。 */
+  private async rewriteRemaining(
+    workspaceRoot: string,
+    failure: string,
+    update: (record: RemainingRecord) => RemainingRecord,
+  ): Promise<{ ok: true; changed: boolean } | { ok: false; message: string }> {
+    return this.queue.enqueue(async () => {
+      try {
+        const target = notesPath(workspaceRoot);
+        const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
+        if (symlinked !== undefined) {
+          this.logFailure(`${failure}（経路にシンボリックリンク）: ${symlinked}`);
+          return { ok: false, message: `${failure}（経路が不正です）。` };
+        }
+        const readResult = await this.fs.readTextFile(target);
+        if (readResult.kind === 'error') {
+          this.logFailure(`${failure}（記録を読めません）: ${readResult.message}`);
+          return { ok: false, message: `${failure}（記録を読めませんでした）。` };
+        }
+        const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
+        let changed = false;
+        const next = existing.map((record) => {
+          if (!isRemaining(record)) return record;
+          const updated = update(record);
+          if (updated !== record) changed = true;
+          return updated;
+        });
+        if (!changed) {
+          return { ok: true, changed: false };
+        }
+        if (!(await this.fs.replaceTextFile(target, toJsonlText(next)))) {
+          this.logFailure(failure);
+          return { ok: false, message: `${failure}。` };
+        }
+        this.notifyChanged();
+        return { ok: true, changed: true };
+      } catch (e) {
+        this.logFailure(`${failure}: ${e instanceof Error ? e.message : String(e)}`);
+        return { ok: false, message: `${failure}。` };
       }
     });
   }

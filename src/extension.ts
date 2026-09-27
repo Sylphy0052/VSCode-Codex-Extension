@@ -921,6 +921,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
     listLessons: runNotes.listLessons.bind(runNotes),
     deleteLesson: runNotes.deleteLesson.bind(runNotes),
+    listRemaining: runNotes.listRemaining.bind(runNotes),
+    markRemainingDone: runNotes.markRemainingDone.bind(runNotes),
     onDidChange: (listener) => {
       const unsubscribe = runNotes.onDidChange(listener);
       const folderSubscription = vscode.workspace.onDidChangeWorkspaceFolders(() => listener());
