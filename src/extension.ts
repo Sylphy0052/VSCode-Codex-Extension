@@ -879,10 +879,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // 教訓欄（Issue #1599）のワークスペースルート。表示中のワークフローrunの`repoRoot`に
   // 依存させず、全ワークスペースフォルダを呼ぶたびに解決する（`RunNotesViewPort`のJSDoc
-  // 参照）。フォルダの増減でも欄を送り直すため、`onDidChange`にフォルダ変更を重ねる
+  // 参照）。フォルダの増減でも欄を送り直すため、`onDidChange`にフォルダ変更を重ねる。
+  // 同じパスが重なると同じ教訓・残件を二重に出すため、重複を除いてから返す（Issue #1613）
   const runNotesViewPort: RunNotesViewPort = {
-    getWorkspaceRoots: () =>
-      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+    getWorkspaceRoots: () => [
+      ...new Set((vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath)),
+    ],
     listLessons: runNotes.listLessons.bind(runNotes),
     deleteLesson: runNotes.deleteLesson.bind(runNotes),
     listRemaining: runNotes.listRemaining.bind(runNotes),
