@@ -445,7 +445,7 @@ export class TaskStageRunner {
    * 枠を放したrunを先に回す。各`pump`は開始の予約（`starting`）までを同期で済ませるので、
    * 並べて呼んでも枠を二重に数えない。
    */
-  private async pumpFolder(runId: string): Promise<void> {
+  private async pumpFolder(runId: string, options: { skipSelf?: boolean } = {}): Promise<void> {
     const run = this.deps.store.find(runId);
     if (run === undefined) {
       return;
@@ -454,7 +454,8 @@ export class TaskStageRunner {
       .listActive(run.workspaceRoot)
       .filter((r) => r.runId !== runId)
       .map((r) => r.runId);
-    await Promise.all([runId, ...others].map((id) => this.pump(id)));
+    const targets = options.skipSelf === true ? others : [runId, ...others];
+    await Promise.all(targets.map((id) => this.pump(id)));
   }
 
   /** 動いているすべてのrunを`pump`する。資源のcriticalが解けたとき（Issue #1629）に呼ぶ。 */
@@ -1607,7 +1608,8 @@ export class TaskStageRunner {
       this.release(entry, { dispose: false });
       return true;
     });
-    if (stopped) {
+    // 専有権を失って止めたとき（`liveOnly`）は`stopLiveStagesOfRun`がまとめて空きを配る
+    if (stopped && options.liveOnly !== true) {
       await this.pumpFolder(runId);
     }
     return stopped;
@@ -1629,7 +1631,12 @@ export class TaskStageRunner {
         this.warn(runId, taskIds[i] ?? '', `${taskIds[i] ?? ''}の工程を止められませんでした: ${errorMessage(result.reason)}`);
       }
     });
-    return results.filter((r) => r.status === 'fulfilled' && r.value).length;
+    const stopped = results.filter((r) => r.status === 'fulfilled' && r.value).length;
+    // 空いた枠は同じフォルダの他のrunへ配る。このrunは`pump`すると専有権を取り直しに行くため除く
+    if (stopped > 0) {
+      await this.pumpFolder(runId, { skipSelf: true });
+    }
+    return stopped;
   }
 
   /**
