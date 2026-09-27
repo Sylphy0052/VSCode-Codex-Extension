@@ -108,13 +108,42 @@ export function buildClaudeSandboxSettings(
   };
 }
 
-/** `ClaudeConfig.additionalArgs`へ足す引数。 */
+/**
+ * sandbox付きのセッションへ`--append-system-prompt`で伝える指示（Issue #1610）。
+ *
+ * `excludedCommands`は単独のコマンドにしか一致せず、`gh issue view 1 2>&1; echo ---`のように
+ * 連結するとsandbox内で走る。sandbox内では利用者のRead denyがdenyReadへ反映されて認証情報を
+ * 読めず、ネットワークも拒否されるため、`gh auth login`を促す未認証エラーで失敗する。
+ * 認証情報をsandboxへ渡すと承認なしのコマンドから読み出せてしまうので、連結させない側で塞ぐ。
+ */
+export function buildClaudeSandboxPrompt(): string {
+  const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
+  return [
+    'Bashのコマンドはsandbox内で走り、ネットワークと認証情報を使えない。',
+    `次のコマンドは、単独で実行したときだけsandboxの外で走る: ${commands}。`,
+    'これらは1回のBash呼び出しに1つだけ書き、;、&&、||、パイプで他のコマンドと連結しない。',
+    '前にcdも付けない（git -C <dir> pushのように引数でディレクトリを渡す）。',
+    'これらが認証やネットワークのエラーで失敗したら、使えないと判断する前に単独で打ち直す。',
+  ].join('\n');
+}
+
+/**
+ * `ClaudeConfig.additionalArgs`へ足す引数。
+ *
+ * `--append-system-prompt`は複数渡すと最後の1つだけが効く（CLI 2.1.280で実測）。タスク
+ * セッションの`additionalArgs`は拡張機能だけが組むため（`toClaudeConfig`）、ここで1回だけ渡す。
+ */
 export function claudeSandboxArgs(
   mode: ClaudeSandboxMode,
   cwd: string,
   environment: ClaudeSandboxEnvironment,
 ): string[] {
-  return ['--settings', JSON.stringify(buildClaudeSandboxSettings(mode, cwd, environment))];
+  return [
+    '--settings',
+    JSON.stringify(buildClaudeSandboxSettings(mode, cwd, environment)),
+    '--append-system-prompt',
+    buildClaudeSandboxPrompt(),
+  ];
 }
 
 /** 外部コマンドの実行結果。テストから差し替える。 */
