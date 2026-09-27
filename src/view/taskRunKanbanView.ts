@@ -155,12 +155,17 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
     const seq = ++this.postSeq;
     const lease = board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
+    // 選択していないrunも、run一覧で別のウィンドウが持っていると分かるようにする（Issue #1641）。
+    // 終わったrunは専有権を取らないため読まない
+    const others = board.runs.filter((r) => !r.finished && r.runId !== board.run?.runId);
+    const statuses = await Promise.all(others.map((r) => this.deps.controller.leaseStatus(r.runId)));
+    const heldElsewhere = others.filter((_, i) => statuses[i]?.heldByOther === true).map((r) => r.runId);
     const panel = this.panel;
     // 専有権を読む間に次の`post`が始まっていたら、古い盤面で上書きしないよう捨てる
     if (panel === undefined || seq !== this.postSeq) {
       return;
     }
-    void panel.webview.postMessage({ type: 'board', board, orchestrator, graph, lease });
+    void panel.webview.postMessage({ type: 'board', board, orchestrator, graph, lease, heldElsewhere });
   }
 
   private receive(message: unknown): void {
@@ -682,6 +687,8 @@ const script = `
   let orchestratorStatus;
   // 専有権（Issue #1628）。他ウィンドウが持っているときだけ{ heldByOther: true, holderText }が届く
   let leaseStatus;
+  // 選択していないrunのうち、別のウィンドウが専有権を持つもののrunId（Issue #1641）
+  let heldElsewhere = [];
   // 盤面は更新のたびに描き直すため、書きかけの回答は質問IDごとに持っておく
   const drafts = new Map();
   let focusedQuestion;
@@ -725,7 +732,8 @@ const script = `
       // 今のフォルダのrunが先に届く。他のフォルダのrunは後ろのグループにまとめる
       let otherGroup;
       board.runs.forEach(function (r) {
-        const o = el('option', undefined, r.label + '（' + r.status + '）');
+        const elsewhere = heldElsewhere.indexOf(r.runId) >= 0 ? '・別のウィンドウで実行中' : '';
+        const o = el('option', undefined, r.label + '（' + r.status + elsewhere + '）');
         o.value = r.runId;
         o.title = r.workspaceRoot;
         if (board.run && board.run.runId === r.runId) { o.selected = true; }
@@ -1220,6 +1228,7 @@ const script = `
     orchestratorStatus = message.orchestrator;
     currentGraph = message.graph;
     leaseStatus = message.lease;
+    heldElsewhere = message.heldElsewhere || [];
     renderControls(current);
     renderProgress(current);
     renderPlan(current);

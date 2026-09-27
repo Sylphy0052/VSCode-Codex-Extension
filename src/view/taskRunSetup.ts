@@ -159,6 +159,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     hosts: deps.hosts,
     store,
     canDrive: async (runId) => lease.holds(runId) || (await lease.acquire(runId)).ok,
+    holdsDrive: (runId) => lease.holds(runId),
     mergeKeys: new TaskRunMergeKeys(),
     worktreeQueue: deps.worktreeQueue,
     git: deps.git,

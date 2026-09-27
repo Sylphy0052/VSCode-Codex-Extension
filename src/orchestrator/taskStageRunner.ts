@@ -175,6 +175,11 @@ export interface TaskStageRunnerDeps {
    * 行き、別のウィンドウが持っていれば`false`を返す。無ければ常に始める。
    */
   canDrive?: (runId: string) => Promise<boolean>;
+  /**
+   * このウィンドウがいまrunの専有権を持っているか（取りには行かない）。タスクのロックの中で
+   * 確かめ直すのに使う（Issue #1641）。無ければ確かめ直さない。
+   */
+  holdsDrive?: (runId: string) => boolean;
   /** runの状態が変わったとき（Kanbanの再描画・通知用）。 */
   onRunChanged?: (run: TaskRun) => void;
   /** 実行を止めずに人へ知らせる事象（後片付けに失敗した等）。 */
@@ -513,6 +518,11 @@ export class TaskStageRunner {
         }
         lease = await pending;
       }
+      // 専有権を取りに行く（ファイルI/Oと再試行を伴う）のはロックの外で済ませる。ロックの中で
+      // 取りに行くと、同じタスクへの`stopStage`などがその間待たされる（Issue #1641）
+      if (this.deps.canDrive !== undefined && !(await this.deps.canDrive(runId))) {
+        return;
+      }
       const held = lease;
       const started = await this.withTaskLock(key, () => this.startStageInner(runId, target, held));
       if (started) {
@@ -545,8 +555,9 @@ export class TaskStageRunner {
       return false;
     }
     // mergeの鍵やロックを待つ間に専有権を別のウィンドウへ移した（Issue #1636）。移した先の
-    // ウィンドウも同じ工程を始めうるため、このウィンドウでは始めない
-    if (this.deps.canDrive !== undefined && !(await this.deps.canDrive(runId))) {
+    // ウィンドウも同じ工程を始めうるため、このウィンドウでは始めない。取り直しはロックの外の
+    // `startStage`で済ませたので、ここでは持っているかだけを見る（Issue #1641）
+    if (this.deps.holdsDrive !== undefined && !this.deps.holdsDrive(runId)) {
       return false;
     }
     run = this.deps.store.find(runId);
