@@ -43,10 +43,14 @@ import {
   appendTaskToWorkflowYaml,
   buildOrchestratorTask,
   findMissingVerifyWarnings,
+  removeTaskFromWorkflowYaml,
+  setTaskDependenciesInWorkflowYaml,
   truncateByCodePoint,
+  updateTaskInWorkflowYaml,
   validateWorkflow,
   type WorkflowDefinition,
   type WorkflowTask,
+  type WorkflowTaskYamlChanges,
 } from './workflow';
 
 /**
@@ -1256,37 +1260,46 @@ function updatePendingTask(
     taskId,
     message:
       `オーケストレーターがpendingタスク ${taskId} を変更しました` +
-      `（${changedFields.join(', ')}。YAMLは変更せず、リロード後は元に戻ります）。`,
+      `（${changedFields.join(', ')}。定義ファイルにも書き戻します）。`,
   });
+  const yamlChanges: WorkflowTaskYamlChanges = Object.fromEntries(
+    changedFields.map((field) => [field, candidate[field as keyof WorkflowTaskYamlChanges]]),
+  );
+  persistTaskChangeToYaml(self, runId, live, `タスク ${taskId} の変更`, (source) =>
+    updateTaskInWorkflowYaml(source, taskId, yamlChanges),
+  );
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
   return ok(`${taskId} の${changedFields.join(', ')}を変更しました。`);
 }
 
-/** 定義ファイルごとのYAML書き込みの待ち行列（`persistAddedTaskToYaml`）。 */
+/** 定義ファイルごとのYAML書き込みの待ち行列（`persistTaskChangeToYaml`）。 */
 const yamlWriteChains = new Map<string, Promise<void>>();
 
 /**
- * `add_task`が加えたタスクをYAMLファイルへも反映する（Issue #1614、Orchestratorの
+ * Orchestratorが実行中の定義へ加えた変更（`add_task`/`update_task`/`remove_task`/
+ * `update_task_dependencies`）をYAMLファイルへも反映する（Issue #1614・#1618、Orchestratorの
  * 自律運用のため。ウィンドウのリロード後も変更が残るようにする）。
  *
  * `live.def`の更新（実行に効く本体）とは切り離したベストエフォートの後処理にする。
  * ファイル読み書きはI/O（symlink差し替え検知等）を含み失敗しうるが、その失敗で
- * タスク追加自体を失敗させると「実行時には追加できたのにYAMLの書き込み失敗だけで
- * エラー扱いになる」体験になるため、失敗はログへ残すだけに留める。
+ * 変更自体を失敗させると「実行時には変更できたのにYAMLの書き込み失敗だけで
+ * エラー扱いになる」体験になるため、失敗はログへ残すだけに留める。`edit`が
+ * `undefined`を返したら安全に書き換えられなかったものとして警告し、内容が同じなら書かない。
  */
-function persistAddedTaskToYaml(
+function persistTaskChangeToYaml(
   self: WorkflowRunnerInternals,
   runId: string,
   live: LiveRun,
-  task: WorkflowTask,
+  change: string,
+  edit: (source: string) => string | undefined,
 ): void {
   const filePort = self.deps.filePort;
   if (filePort.writeTextFile === undefined) return;
   const warn = (reason: string): void => {
     self.deps.log.warn(
-      `[workflow ${runId}] タスク ${task.id} の追加をYAMLファイルへ書き込めませんでした` +
+      `[workflow ${runId}] ${change}をYAMLファイルへ書き込めませんでした` +
         `（実行中の状態には反映済み）: ${sanitizeForLog(reason)}`,
     );
   };
@@ -1297,17 +1310,18 @@ function persistAddedTaskToYaml(
         warn('定義ファイルを読めませんでした');
         return;
       }
-      const updated = appendTaskToWorkflowYaml(source, task);
-      if (updated === source) {
-        warn('定義ファイルのtasksへ安全に追記できませんでした');
+      const updated = edit(source);
+      if (updated === undefined) {
+        warn('定義ファイルのtasksを安全に書き換えられませんでした');
         return;
       }
+      if (updated === source) return;
       await filePort.writeTextFile?.(live.defPath, updated, live.repoRoot);
     } catch (e) {
       warn(e instanceof Error ? e.message : String(e));
     }
   };
-  // 読んでから書くまでの間に次の`add_task`が同じファイルを読むと、先の追記が上書きで
+  // 読んでから書くまでの間に次の変更が同じファイルを読むと、先の書き込みが上書きで
   // 消えるため、同じ定義ファイルへの書き込みは1本ずつ順に流す
   const chained = (yamlWriteChains.get(live.defPath) ?? Promise.resolve()).then(job);
   yamlWriteChains.set(live.defPath, chained);
@@ -1323,7 +1337,7 @@ function persistAddedTaskToYaml(
  * `buildOrchestratorTask`（`workflow.ts`。権限フィールドを拒否する）で組み立てたうえ、
  * 既存の全タスクと合わせた候補定義を`validateWorkflow`にそのまま通す（id形式・循環依存・
  * 上限件数・プロンプト長を人が書いたYAMLと同じ基準で検証する）。適用先は実行中の定義
- * （`live.def`）に加え、YAMLファイルへも`persistAddedTaskToYaml`でベストエフォートに
+ * （`live.def`）に加え、YAMLファイルへも`persistTaskChangeToYaml`でベストエフォートに
  * 反映する（Issue #1614）。適用した内容は全文で警告欄へ残す（人の承認を挟まない以上、
  * これが唯一の追跡手段になるため）。
  */
@@ -1365,7 +1379,9 @@ function addTask(
       `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}` +
       verifyWarnings.map((message) => `\n警告: ${message}`).join(''),
   });
-  persistAddedTaskToYaml(self, runId, live, task);
+  persistTaskChangeToYaml(self, runId, live, `タスク ${task.id} の追加`, (source) =>
+    appendTaskToWorkflowYaml(source, task),
+  );
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
@@ -1444,12 +1460,14 @@ function removeTask(
     kind: 'orchestratorTaskRemoved',
     taskId,
     message:
-      `オーケストレーターがタスク ${taskId} を取り除きました（YAMLファイルは書き換えて` +
-      'いません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。' +
+      `オーケストレーターがタスク ${taskId} を取り除きました（定義ファイルからも取り除きます）。` +
       (strippedFrom.length > 0
         ? ` このタスクへ依存していたタスクのdependsOnからも取り除きました: ${strippedFrom.join(', ')}`
         : ''),
   });
+  persistTaskChangeToYaml(self, runId, live, `タスク ${taskId} の削除`, (source) =>
+    removeTaskFromWorkflowYaml(source, taskId),
+  );
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
@@ -1509,11 +1527,13 @@ function updateTaskDependencies(
     kind: 'orchestratorDependenciesChanged',
     taskId,
     message:
-      `オーケストレーターがタスク ${taskId} のdependsOnを変更しました（YAMLファイルは` +
-      '書き換えていません。ウィンドウのリロード後は定義ファイルの内容に戻ります）。' +
+      `オーケストレーターがタスク ${taskId} のdependsOnを変更しました（定義ファイルにも書き戻します）。` +
       `変更前: ${before.length > 0 ? before.join(', ') : '(なし)'} → ` +
       `変更後: ${nextDependsOn.length > 0 ? nextDependsOn.join(', ') : '(なし)'}`,
   });
+  persistTaskChangeToYaml(self, runId, live, `タスク ${taskId} の依存変更`, (source) =>
+    setTaskDependenciesInWorkflowYaml(source, taskId, nextDependsOn),
+  );
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
