@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import type { ForgeHost } from './forge';
 import type { RoadmapImportTarget } from './roadmapImport';
 import type { RoadmapIssueRunner, StartIssueOutcome } from './roadmapIssueRunner';
-import type { ResolveRoadmapPlanOutcome, RoadmapPlanProposal } from './roadmapPlanProposal';
+import {
+  useCurrentPlanSection,
+  type ResolveRoadmapPlanOutcome,
+  type RoadmapPlanDecision,
+  type RoadmapPlanProposal,
+} from './roadmapPlanProposal';
 import {
   createRoadmapRun,
   finishRunIfDone,
@@ -64,6 +69,17 @@ export interface RoadmapRunControllerDeps {
   applyPlan(target: RoadmapImportTarget, proposal: RoadmapPlanProposal): Promise<ResolveRoadmapPlanOutcome>;
   /** Reflexが妥当と言い切らなかった提案を、利用者に承認してもらう（モーダル）。 */
   confirmPlan(proposal: RoadmapPlanProposal): Promise<boolean>;
+  /**
+   * 子Issue側が変わった計画区画を、作り直すか今のまま使うかを利用者に決めてもらう（モーダル。
+   * Issue #1555）。`undefined`は取りやめ。
+   */
+  decidePlanChange(decision: RoadmapPlanDecision): Promise<'regenerate' | 'useCurrent' | undefined>;
+  /** 計画を作り直す（既存の提案の流れ）。`sectionHash`は利用者が見たときの区画のハッシュ。 */
+  regeneratePlan(
+    target: RoadmapImportTarget,
+    engine: RoadmapRunEngine,
+    sectionHash: string,
+  ): Promise<ResolveRoadmapPlanOutcome>;
   /** 自動実行が人の対応待ちで止まった（デスクトップ通知）。 */
   notifyStalled(run: RoadmapRun, blockers: readonly number[]): void;
   /** Kanbanの再描画。 */
@@ -151,6 +167,17 @@ export class RoadmapRunController {
       roadmapIssueNumber: input.roadmapIssueNumber,
     };
     let outcome = await this.deps.resolvePlan(target, input.engine);
+    if (outcome.kind === 'planDecisionNeeded') {
+      // 子Issue側が変わった。区画は自動で上書きせず、利用者に決めてもらう
+      const decision = await this.deps.decidePlanChange(outcome);
+      if (decision === undefined) {
+        return { ok: false, message: '計画区画の扱いを決めなかったため、実行を始めませんでした' };
+      }
+      outcome =
+        decision === 'useCurrent'
+          ? useCurrentPlanSection(outcome)
+          : await this.deps.regeneratePlan(target, input.engine, outcome.sectionHash);
+    }
     if (outcome.kind === 'awaitingApproval') {
       if (!(await this.deps.confirmPlan(outcome.proposal))) {
         return { ok: false, message: '計画の提案を承認しなかったため、実行を始めませんでした' };
@@ -166,6 +193,8 @@ export class RoadmapRunController {
         return { ok: false, message: `計画の提案が検証に通りませんでした: ${outcome.errors.join(' / ')}` };
       case 'awaitingApproval':
         return { ok: false, message: '計画を書き戻せませんでした' };
+      case 'planDecisionNeeded':
+        return { ok: false, message: '計画区画の扱いを決められませんでした' };
       case 'ready':
         break;
     }
@@ -194,6 +223,9 @@ export class RoadmapRunController {
         `ロードマップ本文で重複した子Issueの行を読み飛ばしました: ${outcome.duplicates.map((n) => `#${String(n)}`).join(', ')}`,
         'warn',
       );
+    }
+    for (const notice of outcome.notices ?? []) {
+      this.addEvent(runId, notice, 'info');
     }
     this.handleRunChanged(stored);
     return { ok: true, runId, reused: false };

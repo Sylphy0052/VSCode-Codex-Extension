@@ -176,7 +176,15 @@ export interface RoadmapPlan {
   nodes: readonly RoadmapPlanNode[];
   /** ロードマップ本文の計画区画をそのまま使ったか、このrunで生成して書き戻したか。 */
   source: 'existingSection' | 'generated';
+  /**
+   * 計画の出どころ（Issue #1555）。区画のハッシュが生成時のままなら`generated`、人が区画を
+   * 手で直していれば`manually_modified`。メタデータの無い区画では判定できず`undefined`。
+   * 後から足したため、永続化済みの古い状態では無い。
+   */
+  planOrigin?: RoadmapPlanOrigin | undefined;
 }
+
+export type RoadmapPlanOrigin = 'generated' | 'manually_modified';
 
 export const ROADMAP_RUN_SCHEMA_VERSION = 1;
 
