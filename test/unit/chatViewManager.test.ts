@@ -2193,6 +2193,8 @@ describe('handoffToNewSession（issue #694）', () => {
     ['応答を1件も返さずターンが終われば旧タブを残す', 'turn/completed', false],
     ['ターンが失敗したら旧タブを残す', 'turn/failed', false],
   ] as const)('新セッションが%s（Issue #1090 / #1165）', async (_name, method, closed) => {
+    // 引き継ぐ前の確認が出る前提で数えるため、既定ONの自動承認（Issue #1585）を切る
+    __mock.setConfig('agent', { 'autoHandoff.router': false, 'autoHandoff.autoApprove': false });
     const store = fakeSessionStore({
       resolveHandoffRolloutPath: async () => '/home/user/.codex/sessions/rollout-x.jsonl',
     });
