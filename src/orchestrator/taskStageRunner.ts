@@ -445,7 +445,7 @@ export class TaskStageRunner {
    * 枠を放したrunを先に回す。各`pump`は開始の予約（`starting`）までを同期で済ませるので、
    * 並べて呼んでも枠を二重に数えない。
    */
-  private async pumpFolder(runId: string): Promise<void> {
+  private async pumpFolder(runId: string, options: { skipSelf?: boolean } = {}): Promise<void> {
     const run = this.deps.store.find(runId);
     if (run === undefined) {
       return;
@@ -454,7 +454,8 @@ export class TaskStageRunner {
       .listActive(run.workspaceRoot)
       .filter((r) => r.runId !== runId)
       .map((r) => r.runId);
-    await Promise.all([runId, ...others].map((id) => this.pump(id)));
+    const targets = options.skipSelf === true ? others : [runId, ...others];
+    await Promise.all(targets.map((id) => this.pump(id)));
   }
 
   /** 動いているすべてのrunを`pump`する。資源のcriticalが解けたとき（Issue #1629）に呼ぶ。 */
@@ -541,6 +542,15 @@ export class TaskStageRunner {
     let run = this.deps.store.find(runId);
     const matches = (ref: StageRef): boolean => ref.taskId === taskId && ref.stage === stage;
     if (this.disposed || run === undefined) {
+      return false;
+    }
+    // mergeの鍵やロックを待つ間に専有権を別のウィンドウへ移した（Issue #1636）。移した先の
+    // ウィンドウも同じ工程を始めうるため、このウィンドウでは始めない
+    if (this.deps.canDrive !== undefined && !(await this.deps.canDrive(runId))) {
+      return false;
+    }
+    run = this.deps.store.find(runId);
+    if (run === undefined) {
       return false;
     }
     if (listResumingStages(run).some(matches)) {
@@ -1566,16 +1576,25 @@ export class TaskStageRunner {
    *
    * 開始処理の途中でも受け付ける。mergeの鍵を待っている間に止めた工程は、開始処理がロック内で
    * 状態を確かめ直して始めない。セッションを開いている途中なら、ロックが空くのを待ってから止める。
+   *
+   * `liveOnly`はこのウィンドウでセッションが動いている工程だけを止め、セッションが無ければ状態に
+   * 触らない（専有権を失ったとき。移した先のウィンドウが始めた工程を止めないため）。
    */
-  async stopStage(runId: string, taskId: string): Promise<boolean> {
+  async stopStage(
+    runId: string,
+    taskId: string,
+    options: { reason?: string; liveOnly?: boolean } = {},
+  ): Promise<boolean> {
     const key = liveKey(runId, taskId);
+    const reason = options.reason ?? '人が止めました';
     const stopped = await this.withTaskLock(key, async () => {
       const entry = this.live.get(key);
       if (entry === undefined || entry.closed) {
+        if (options.liveOnly === true) {
+          return false;
+        }
         // セッションが無い（設定を受け付けて空きを待っている）工程は状態だけ止める
-        const next = await this.mutate(runId, (r) =>
-          haltStage(r, taskId, 'stopped', '人が止めました', this.now()),
-        );
+        const next = await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', reason, this.now()));
         return next !== undefined;
       }
       if (entry.reported) {
@@ -1585,14 +1604,37 @@ export class TaskStageRunner {
       await this.mutate(runId, (r) => markStageStopping(r, taskId, this.now()));
       entry.session.stopLoop();
       await entry.session.interrupt().catch(() => undefined);
-      await this.mutate(runId, (r) =>
-        haltStage(r, taskId, 'stopped', '人が止めました', this.now()),
-      );
+      await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', reason, this.now()));
       this.release(entry, { dispose: false });
       return true;
     });
-    if (stopped) {
+    // 専有権を失って止めたとき（`liveOnly`）は`stopLiveStagesOfRun`がまとめて空きを配る
+    if (stopped && options.liveOnly !== true) {
       await this.pumpFolder(runId);
+    }
+    return stopped;
+  }
+
+  /**
+   * このウィンドウで動いているrunの工程セッションをすべて止める（専有権を失ったとき。Issue #1636）。
+   * 工程セッションとその停止手段はこのウィンドウにしか無く、専有権を移した先のウィンドウからは
+   * 止められない。動かし続けると2つのウィンドウがrunを動かすことになるため、ここで止めて、
+   * 移した先で「やり直す」から始め直させる。止めた工程の数を返す。
+   */
+  async stopLiveStagesOfRun(runId: string, reason: string): Promise<number> {
+    const taskIds = [...this.live.values()].filter((e) => e.runId === runId).map((e) => e.ref.taskId);
+    const results = await Promise.allSettled(
+      taskIds.map((taskId) => this.stopStage(runId, taskId, { reason, liveOnly: true })),
+    );
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        this.warn(runId, taskIds[i] ?? '', `${taskIds[i] ?? ''}の工程を止められませんでした: ${errorMessage(result.reason)}`);
+      }
+    });
+    const stopped = results.filter((r) => r.status === 'fulfilled' && r.value).length;
+    // 空いた枠は同じフォルダの他のrunへ配る。このrunは`pump`すると専有権を取り直しに行くため除く
+    if (stopped > 0) {
+      await this.pumpFolder(runId, { skipSelf: true });
     }
     return stopped;
   }
