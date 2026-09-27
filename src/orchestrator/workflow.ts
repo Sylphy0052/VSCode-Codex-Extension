@@ -970,7 +970,7 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
 
 /**
  * Orchestratorの`add_task`が加えたタスクを、定義ファイルの`tasks`配列へ追記する
- * （Issue #1505、Orchestratorの自律運用のため）。
+ * （Issue #1614、Orchestratorの自律運用のため）。
  *
  * `roadmap.ts`の`alignRoadmapIssues`と同じく`yaml`パッケージのDocument APIで
  * 既存ノードには触れず末尾へ足すだけにし、コメントや整形を保つ。パース不能・

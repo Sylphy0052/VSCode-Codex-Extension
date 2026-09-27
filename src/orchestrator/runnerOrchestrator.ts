@@ -1264,8 +1264,11 @@ function updatePendingTask(
   return ok(`${taskId} の${changedFields.join(', ')}を変更しました。`);
 }
 
+/** 定義ファイルごとのYAML書き込みの待ち行列（`persistAddedTaskToYaml`）。 */
+const yamlWriteChains = new Map<string, Promise<void>>();
+
 /**
- * `add_task`が加えたタスクをYAMLファイルへも反映する（Issue #1505、Orchestratorの
+ * `add_task`が加えたタスクをYAMLファイルへも反映する（Issue #1614、Orchestratorの
  * 自律運用のため。ウィンドウのリロード後も変更が残るようにする）。
  *
  * `live.def`の更新（実行に効く本体）とは切り離したベストエフォートの後処理にする。
@@ -1279,22 +1282,40 @@ function persistAddedTaskToYaml(
   live: LiveRun,
   task: WorkflowTask,
 ): void {
-  const writeTextFile = self.deps.filePort.writeTextFile;
-  if (writeTextFile === undefined) return;
-  void (async () => {
+  const filePort = self.deps.filePort;
+  if (filePort.writeTextFile === undefined) return;
+  const warn = (reason: string): void => {
+    self.deps.log.warn(
+      `[workflow ${runId}] タスク ${task.id} の追加をYAMLファイルへ書き込めませんでした` +
+        `（実行中の状態には反映済み）: ${sanitizeForLog(reason)}`,
+    );
+  };
+  const job = async (): Promise<void> => {
     try {
-      const source = await self.deps.filePort.readTextFile(live.defPath);
-      if (source === undefined) return;
+      const source = await filePort.readTextFile(live.defPath);
+      if (source === undefined) {
+        warn('定義ファイルを読めませんでした');
+        return;
+      }
       const updated = appendTaskToWorkflowYaml(source, task);
-      if (updated === source) return;
-      await writeTextFile(live.defPath, updated, live.repoRoot);
+      if (updated === source) {
+        warn('定義ファイルのtasksへ安全に追記できませんでした');
+        return;
+      }
+      await filePort.writeTextFile?.(live.defPath, updated, live.repoRoot);
     } catch (e) {
-      self.deps.log.warn(
-        `[workflow ${runId}] タスク ${task.id} の追加をYAMLファイルへ書き込めませんでした` +
-          `（実行中の状態には反映済み）: ${sanitizeForLog(e instanceof Error ? e.message : String(e))}`,
-      );
+      warn(e instanceof Error ? e.message : String(e));
     }
-  })();
+  };
+  // 読んでから書くまでの間に次の`add_task`が同じファイルを読むと、先の追記が上書きで
+  // 消えるため、同じ定義ファイルへの書き込みは1本ずつ順に流す
+  const chained = (yamlWriteChains.get(live.defPath) ?? Promise.resolve()).then(job);
+  yamlWriteChains.set(live.defPath, chained);
+  void chained.finally(() => {
+    if (yamlWriteChains.get(live.defPath) === chained) {
+      yamlWriteChains.delete(live.defPath);
+    }
+  });
 }
 
 /**
@@ -1303,7 +1324,7 @@ function persistAddedTaskToYaml(
  * 既存の全タスクと合わせた候補定義を`validateWorkflow`にそのまま通す（id形式・循環依存・
  * 上限件数・プロンプト長を人が書いたYAMLと同じ基準で検証する）。適用先は実行中の定義
  * （`live.def`）に加え、YAMLファイルへも`persistAddedTaskToYaml`でベストエフォートに
- * 反映する（Issue #1505）。適用した内容は全文で警告欄へ残す（人の承認を挟まない以上、
+ * 反映する（Issue #1614）。適用した内容は全文で警告欄へ残す（人の承認を挟まない以上、
  * これが唯一の追跡手段になるため）。
  */
 function addTask(

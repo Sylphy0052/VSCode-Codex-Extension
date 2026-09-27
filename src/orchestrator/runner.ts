@@ -223,7 +223,7 @@ export interface WorkflowFilePort {
   readTextFile(path: string): Promise<string | undefined>;
   /**
    * Orchestratorによる定義変更（`add_task`等）をYAMLファイルへ反映する書き込み口
-   * （Issue #1505）。既存の`WorkflowFilePort`実装（テストのモック含む）を壊さないよう
+   * （Issue #1614）。既存の`WorkflowFilePort`実装（テストのモック含む）を壊さないよう
    * optionalにする。無い場合、呼び出し側は永続化を諦めて`live.def`のみの更新にとどめる。
    */
   writeTextFile?(target: string, content: string, workspaceRoot: string): Promise<void>;
