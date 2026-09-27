@@ -393,6 +393,18 @@ export class ChatSession {
   }
 
   /**
+   * 自動返信（Issue #1602）が処理中であることを示す1行を差し替える。`undefined`で消す。
+   *
+   * `setAutoReply` と同じく拡張機能側だけで完結する状態なのでapp-serverへは何も送らない。
+   */
+  setAutoReplyActivity(activity: string | undefined): void {
+    if (this.state.autoReplyActivity === activity) {
+      return;
+    }
+    this.update({ ...this.state, autoReplyActivity: activity });
+  }
+
+  /**
    * 発言を送る。モデル・effort・承認方針・サンドボックスはここで毎回渡す。
    *
    * `turn/start` の指定は「このターン以降」に効くため、会話の途中で権限を変えられる。

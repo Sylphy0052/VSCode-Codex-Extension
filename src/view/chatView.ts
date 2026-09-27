@@ -100,6 +100,8 @@ import type { LoopDoneCheckConfig } from '../loop/loopDoneCheck';
 import { pushTurnSignature, detectStalledLoop } from '../loop/stallDetector';
 import { AutoReplyAgent, autoReplyAgentCloseReasonFor } from '../chat/autoReplyAgent';
 import {
+  AUTO_REPLY_ACTIVITY,
+  describeAutoReplyAttempt,
   describeAutoReplyStopReason,
   extractAutoReplyMessage,
   firstUserMessageText,
@@ -1352,6 +1354,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const agent = entry.autoReplyAgent;
     entry.autoReplyAgent = undefined;
     agent?.close(autoReplyAgentCloseReasonFor(reason));
+    if (!entry.disposed) {
+      entry.session.setAutoReplyActivity(undefined);
+    }
     if (wasOn) {
       entry.session.noteLocalEvent(
         `autoReplyStop:${Date.now()}`,
@@ -1368,9 +1373,23 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `sendFromLoop`で次のuserメッセージとして送り、会話へ「自動返信」の印を1行残す。
    */
   private async runAutoReplyTurn(entry: ChatPanel, lastAgentMessageText: string): Promise<void> {
-    if (entry.disposed) {
+    if (entry.disposed || entry.autoReplyAgent?.isBusy() === true) {
       return;
     }
+    // 処理中の表示（Issue #1602）は、どの経路で抜けても消す
+    try {
+      await this.runAutoReplyTurnSteps(entry, lastAgentMessageText);
+    } finally {
+      if (!entry.disposed) {
+        entry.session.setAutoReplyActivity(undefined);
+      }
+    }
+  }
+
+  private async runAutoReplyTurnSteps(
+    entry: ChatPanel,
+    lastAgentMessageText: string,
+  ): Promise<void> {
     const config = readAutoReplyConfig();
     if (!(await this.passesAutoReplyCompletionCheck(entry, lastAgentMessageText))) {
       return;
@@ -1384,9 +1403,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       entry.autoReplyAgent = new AutoReplyAgent({
         host: this,
+        provider: 'codex',
         cwd,
         model: config.model,
         timeoutMs: config.timeoutSeconds * 1000,
+        retryCount: config.retryCount,
         originalRequest: firstUserMessageText(entry.session.getState().items) ?? '',
         log: this.log,
       });
@@ -1395,7 +1416,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (agent.isBusy()) {
       return;
     }
-    const result = await agent.reply(lastAgentMessageText);
+    const result = await agent.reply(lastAgentMessageText, (attempt, attempts) =>
+      entry.session.setAutoReplyActivity(
+        describeAutoReplyAttempt(AUTO_REPLY_ACTIVITY.thinking, attempt, attempts),
+      ),
+    );
     if (entry.disposed) {
       agent.close('tabClosed');
       return;
@@ -1460,6 +1485,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (!reflex.enabled) {
       return true;
     }
+    entry.session.setAutoReplyActivity(AUTO_REPLY_ACTIVITY.completionCheck);
     const verdict = await checkAutoReplyCompletion(
       this.autoReplyReflexDeps(entry),
       lastAgentMessageText,
@@ -1499,6 +1525,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (!reflex.enabled) {
       return true;
     }
+    entry.session.setAutoReplyActivity(AUTO_REPLY_ACTIVITY.dangerCheck);
     const verdict = await checkAutoReplyDanger(
       this.autoReplyReflexDeps(entry),
       outgoing,

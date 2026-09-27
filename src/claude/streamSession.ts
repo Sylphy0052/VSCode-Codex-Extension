@@ -546,6 +546,18 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 自動返信（Issue #1602）が処理中であることを示す1行を差し替える。`undefined`で消す。
+   *
+   * `setAutoReply` と同じく拡張機能側だけで完結する状態なのでCLIへは何も送らない。
+   */
+  setAutoReplyActivity(activity: string | undefined): void {
+    if (this.state.autoReplyActivity === activity) {
+      return;
+    }
+    this.update({ ...this.state, autoReplyActivity: activity });
+  }
+
+  /**
    * 会話中にeffortを変える。
    *
    * 専用の制御要求が無いため `apply_flag_settings` に載せる。**効いたことは観測できない**

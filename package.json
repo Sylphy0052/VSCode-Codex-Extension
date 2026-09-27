@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.927.29",
+  "version": "2026.927.30",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1363,14 +1363,22 @@
           "type": "string",
           "default": "auto",
           "scope": "window",
-          "markdownDescription": "自動返信の返信役に使うモデル。既定の `auto` は実際に動かすプロバイダ（常にCodex）に合わせて解決する。"
+          "markdownDescription": "自動返信の返信役に使うモデル。返信役は会話中のCLIと同じプロバイダで開き、既定の `auto` はClaude Code画面では `sonnet`、Codex画面では `gpt-6-sol` に解決する。明示したモデル名はそのまま使う。"
         },
         "agent.chat.autoReply.timeoutSeconds": {
           "type": "number",
-          "default": 120,
+          "default": 180,
           "minimum": 10,
           "scope": "window",
-          "markdownDescription": "自動返信の返信役の応答を待つ上限（秒）。超えた場合は自動返信モードをOFFにし、理由を会話へ残す。10未満を書いても10として扱う。"
+          "markdownDescription": "自動返信の返信役の応答を待つ上限（秒）。途中までの応答も無いまま超えた場合は `agent.chat.autoReply.retryCount` 回まで返信役を開き直して再試行し、使い切ったら自動返信モードをOFFにして理由を会話へ残す。10未満を書いても10として扱う。"
+        },
+        "agent.chat.autoReply.retryCount": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 3,
+          "scope": "window",
+          "markdownDescription": "自動返信の返信役が失敗・タイムアウトしたときに、返信役のセッションを閉じて開き直し再試行する回数。0なら1回失敗した時点で自動返信モードをOFFにする。利用者の操作で打ち切られたときは再試行しない。"
         },
         "agent.chat.autoReply.maxTurns": {
           "type": "number",

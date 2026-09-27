@@ -83,9 +83,11 @@ class FakeHost implements TaskSessionHost {
 function createAgent(host: FakeHost, overrides: { idleTimeoutMs?: number } = {}): AutoReplyAgent {
   return new AutoReplyAgent({
     host,
+    provider: 'codex',
     cwd: '/workspace',
     model: 'auto',
     timeoutMs: 60_000,
+    retryCount: 0,
     originalRequest: 'ログイン機能を実装して',
     ...(overrides.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: overrides.idleTimeoutMs }),
   });
@@ -199,9 +201,11 @@ describe('AutoReplyAgent の後始末', () => {
     const onClosed = vi.fn();
     const agent = new AutoReplyAgent({
       host,
+      provider: 'codex',
       cwd: '/workspace',
       model: 'auto',
       timeoutMs: 60_000,
+      retryCount: 0,
       originalRequest: '依頼文',
       onClosed,
     });

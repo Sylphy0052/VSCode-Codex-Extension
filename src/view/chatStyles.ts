@@ -681,7 +681,8 @@ ${completionEvidenceStyles()}
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  #limitAutoResumeStatus {
+  #limitAutoResumeStatus,
+  #autoReplyActivity {
     margin: 0 16px 6px;
     padding: 6px 8px;
     border-left: 3px solid var(--vscode-charts-blue, var(--vscode-focusBorder));
