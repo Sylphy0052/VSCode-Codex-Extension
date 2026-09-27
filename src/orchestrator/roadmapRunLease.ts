@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readlinkSync, unlinkSync } from 'node:fs';
-import { link, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { sanitizeInlineText } from './untrustedText';
 
 /**
  * ロードマップ実行（Issue #1465 / #1555）のウィンドウの専有権（lease）。
@@ -22,7 +23,8 @@ import * as path from 'node:path';
  *   したものと違えば（判定の後に別のウィンドウが取り直していた）、元へ戻して諦める。作成は
  *   常に`link`なので、2つのウィンドウが同時に取れることは無い
  *
- * heartbeatの時刻は各ホストの時計で書く。ホスト間の時計はNTP等で揃っている前提とする。
+ * heartbeatの時刻は各ホストの時計で書く。失効はその時刻に加えて、このウィンドウが自分の
+ * 時計で観測した「中身が変わらない時間」でも判定する（`isRoadmapRunLeaseStale`、時計のずれ対策）。
  */
 
 /** heartbeatを書き直す間隔。 */
@@ -35,6 +37,12 @@ export const ROADMAP_LEASE_DIR_NAME = 'roadmap-leases';
 const LEASE_VERSION = 1;
 /** 取り合いが続いたときに作成・退避を繰り返す上限。 */
 const MAX_ACQUIRE_ATTEMPTS = 3;
+/** 専有権を持つウィンドウの表示で、hostnameを切り詰める長さ。 */
+const HOLDER_HOSTNAME_MAX_LENGTH = 64;
+/** 専有権を持つウィンドウの表示で、windowIdの先頭から見せる長さ。 */
+const HOLDER_WINDOW_ID_LENGTH = 8;
+/** 作成・退避の途中で残った一時ファイル（`*.tmp-*` / `*.stale-*`）。 */
+const LEFTOVER_FILE_PATTERN = /^[0-9a-f]{32}\.json\.(?:tmp|stale)-/u;
 
 export interface RoadmapRunLease {
   version: typeof LEASE_VERSION;
@@ -101,8 +109,11 @@ export function parseRoadmapRunLease(text: string): RoadmapRunLease | undefined 
     typeof r.windowId !== 'string' ||
     typeof r.runId !== 'string' ||
     typeof r.roadmapIssueNumber !== 'number' ||
+    !Number.isSafeInteger(r.roadmapIssueNumber) ||
     typeof r.hostname !== 'string' ||
     typeof r.pid !== 'number' ||
+    // `process.kill`へ渡すため、小数・巨大値・NaNは読まない
+    !Number.isSafeInteger(r.pid) ||
     typeof r.acquiredAt !== 'string' ||
     typeof r.heartbeatAt !== 'string'
   ) {
@@ -129,10 +140,24 @@ function heartbeatAge(lease: RoadmapRunLease, now: Date): number {
 }
 
 /**
+ * 専有権ファイルについて、このウィンドウが観測した変化の記録。heartbeatの時刻は持ち主の
+ * 時計で書かれているため、自分の時計と比べるだけでは時計のずれに左右される。
+ */
+export interface RoadmapLeaseObservation {
+  /** 同じ中身（windowId・runId・heartbeatAt）を最初に読んでから、自分の時計で経ったミリ秒。 */
+  unchangedMs: number;
+}
+
+/**
  * 失効しているか。heartbeatが`staleMs`以上止まっていれば失効。同じホストのものに限り、
  * PIDが生きていなければheartbeatを待たずに失効とする（別ホストのPIDは確かめようがない）。
  * 双方の`hostIdentity`が読めている場合はそれも一致を確かめる。`--network=host`のdevcontainer等、
  * hostnameを共有しつつPID名前空間が違う相手にPIDだけで即時失効と誤判定しないため。
+ *
+ * `observation`があれば、自分の時計で測って`staleMs`の間中身が変わっていないものも失効とする。
+ * 持ち主の時計が進んでいてheartbeatの時刻が未来になっていても、いつまでも取れなくならないため。
+ * 持ち主の時計が遅れていて早く失効と判定した場合は、持ち主が次のheartbeatで取られたことに
+ * 気づいて止まる（`onLost`）。
  */
 export function isRoadmapRunLeaseStale(
   lease: RoadmapRunLease,
@@ -140,8 +165,9 @@ export function isRoadmapRunLeaseStale(
   now: Date,
   isPidAlive: (pid: number) => boolean,
   staleMs: number = ROADMAP_LEASE_STALE_MS,
+  observation?: RoadmapLeaseObservation,
 ): boolean {
-  if (heartbeatAge(lease, now) >= staleMs) {
+  if (heartbeatAge(lease, now) >= staleMs || (observation?.unchangedMs ?? 0) >= staleMs) {
     return true;
   }
   if (lease.hostname !== self.hostname || lease.pid <= 0) {
@@ -159,6 +185,10 @@ export function isRoadmapRunLeaseStale(
  * 自分の専有権でも、heartbeatが`staleMs`の半分以上止まっていたら（スリープ明けなど）上書き
  * せず`stale`として取り直す。失効の間際に上書きすると、失効と判定して取り直した別の
  * ウィンドウの専有権を`rename`で潰しうるため。
+ *
+ * 同じウィンドウでも`runId`が`targetRunId`と違えば、heartbeatの新しさを問わず`stale`とする。
+ * 同じウィンドウの別のrun（マルチルートで同じrepoの別フォルダ等）が持っているもので、取り直すと
+ * そちらのrunは次のheartbeatで`onLost`になる。同じウィンドウの中では後から操作したrunを優先する。
  */
 export function judgeRoadmapRunLease(
   existing: RoadmapRunLease | undefined,
@@ -167,6 +197,7 @@ export function judgeRoadmapRunLease(
   now: Date,
   isPidAlive: (pid: number) => boolean,
   staleMs: number = ROADMAP_LEASE_STALE_MS,
+  observation?: RoadmapLeaseObservation,
 ): RoadmapLeaseJudgement {
   if (existing === undefined) {
     return 'free';
@@ -178,7 +209,9 @@ export function judgeRoadmapRunLease(
     }
     return heartbeatAge(existing, now) < staleMs / 2 ? 'own' : 'stale';
   }
-  return isRoadmapRunLeaseStale(existing, self, now, isPidAlive, staleMs) ? 'stale' : 'busy';
+  return isRoadmapRunLeaseStale(existing, self, now, isPidAlive, staleMs, observation)
+    ? 'stale'
+    : 'busy';
 }
 
 /**
@@ -200,7 +233,8 @@ export function normalizeRepoIdentity(originUrl: string): string | undefined {
   } else {
     try {
       const url = new URL(trimmed);
-      host = url.host;
+      // `ssh://git@host:2222/owner/repo`と`git@host:owner/repo`を同じにするため、sshではポートを落とす
+      host = url.protocol === 'ssh:' || url.protocol === 'git+ssh:' ? url.hostname : url.host;
       repoPath = url.pathname;
     } catch {
       return undefined;
@@ -228,10 +262,17 @@ export function formatRoadmapLeaseHolder(lease: RoadmapRunLease | undefined, now
   }
   const age = heartbeatAge(lease, now);
   const seconds = Number.isFinite(age) ? Math.max(0, Math.round(age / 1000)) : undefined;
+  // 専有権ファイルは共有ディレクトリにあり、別のウィンドウ（別ホスト）が書ける。
+  // 制御文字や長すぎる値を通知へそのまま出さないよう、表示の前に整える
+  const host = sanitizeInlineText(lease.hostname, HOLDER_HOSTNAME_MAX_LENGTH);
+  const windowId = sanitizeInlineText(
+    lease.windowId.slice(0, HOLDER_WINDOW_ID_LENGTH),
+    HOLDER_WINDOW_ID_LENGTH,
+  );
   const parts = [
-    `ホスト ${lease.hostname === '' ? '不明' : lease.hostname}`,
+    `ホスト ${host === '' ? '不明' : host}`,
     lease.pid > 0 ? `PID ${String(lease.pid)}` : undefined,
-    lease.windowId === '' ? undefined : `ウィンドウ ${lease.windowId.slice(0, 8)}`,
+    windowId === '' ? undefined : `ウィンドウ ${windowId}`,
     seconds === undefined ? undefined : `最終応答 ${String(seconds)}秒前`,
   ].filter((p): p is string => p !== undefined);
   return `別のウィンドウ（${parts.join('、')}）`;
@@ -244,7 +285,7 @@ export function formatRoadmapLeaseRejection(
   now: Date,
 ): string {
   return (
-    `ロードマップ #${String(roadmapIssueNumber)}は${formatRoadmapLeaseHolder(holder, now)}が実行中のため、` +
+    `ロードマップ #${String(roadmapIssueNumber)}は${formatRoadmapLeaseHolder(holder, now)}が専有権を持っているため、` +
     `このウィンドウでは実行できません。そのウィンドウで操作するか、そのウィンドウが閉じてから` +
     `（落ちた場合は応答が${String(ROADMAP_LEASE_STALE_MS / 1000)}秒途絶えてから）もう一度実行してください`
   );
@@ -280,6 +321,14 @@ interface HeldLease {
   file: string;
   target: RoadmapLeaseTarget;
   acquiredAt: string;
+  /** 最後に自分のものだと確かめられた時刻（ミリ秒）。heartbeatが失敗し続けたときの判断に使う。 */
+  confirmedAtMs: number;
+}
+
+/** `RoadmapRunLeaseManager`が専有権ファイルごとに覚える、最後に読んだ中身と読み始めた時刻。 */
+interface LeaseSighting {
+  key: string;
+  firstSeenMs: number;
 }
 
 function errorCode(e: unknown): string | undefined {
@@ -309,6 +358,7 @@ function sameLease(a: RoadmapRunLease, b: RoadmapRunLease): boolean {
 export class RoadmapRunLeaseManager {
   private readonly held = new Map<string, HeldLease>();
   private readonly identities = new Map<string, Promise<string>>();
+  private readonly sightings = new Map<string, LeaseSighting>();
   private queue: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
   private seq = 0;
@@ -340,10 +390,17 @@ export class RoadmapRunLeaseManager {
     const identity = await this.identityOf(target.workspaceRoot);
     const file = path.join(this.deps.dir, roadmapLeaseFileName(identity, target.roadmapIssueNumber));
     return this.serialize(async () => {
+      await this.sweepLeftovers();
       const outcome = await this.acquireFile(file, target, this.now().toISOString());
-      if (outcome.ok) {
-        this.hold(target, file);
+      if (!outcome.ok) {
+        return outcome;
       }
+      if (this.disposed) {
+        // 取っている間に`dispose`が済んだ。`dispose`は`held`に無いこのファイルを消さない
+        await this.removeIfMine(file, target.runId);
+        return { ok: false, holder: undefined };
+      }
+      this.hold(target, file);
       return outcome;
     });
   }
@@ -356,12 +413,14 @@ export class RoadmapRunLeaseManager {
     }
     this.held.delete(runId);
     this.stopTimerIfIdle();
-    await this.serialize(async () => {
-      const current = await this.readLease(entry.file);
-      if (current !== undefined && this.isMine(current, runId)) {
-        await unlink(entry.file).catch(() => undefined);
-      }
-    });
+    await this.serialize(() => this.removeIfMine(entry.file, runId));
+  }
+
+  private async removeIfMine(file: string, runId: string): Promise<void> {
+    const current = await this.readLease(file);
+    if (current !== undefined && this.isMine(current, runId)) {
+      await unlink(file).catch(() => undefined);
+    }
   }
 
   /** 拡張機能の終了。終了処理は待ってもらえないため、同期I/Oで自分の専有権だけ消す。 */
@@ -411,6 +470,7 @@ export class RoadmapRunLeaseManager {
       file,
       target,
       acquiredAt: previous?.acquiredAt ?? this.now().toISOString(),
+      confirmedAtMs: this.now().getTime(),
     });
     if (this.timer === undefined && !this.disposed) {
       this.timer = setInterval(() => {
@@ -467,6 +527,7 @@ export class RoadmapRunLeaseManager {
           this.now(),
           (pid) => this.isPidAlive(pid),
           this.staleMs,
+          existing === undefined ? undefined : this.observe(file, existing),
         )
       ) {
         case 'free':
@@ -486,6 +547,42 @@ export class RoadmapRunLeaseManager {
       }
     }
     return { ok: false, holder: last };
+  }
+
+  /** 読んだ専有権の中身が、自分の時計でどれだけ変わっていないか（`isRoadmapRunLeaseStale`参照）。 */
+  private observe(file: string, lease: RoadmapRunLease): RoadmapLeaseObservation {
+    const key = `${lease.windowId}\n${lease.runId}\n${lease.heartbeatAt}`;
+    const nowMs = this.now().getTime();
+    const seen = this.sightings.get(file);
+    if (seen === undefined || seen.key !== key) {
+      this.sightings.set(file, { key, firstSeenMs: nowMs });
+      return { unchangedMs: 0 };
+    }
+    return { unchangedMs: nowMs - seen.firstSeenMs };
+  }
+
+  /**
+   * 作成・退避の途中でウィンドウが落ちて残った一時ファイルを消す。作成中・退避中のものを
+   * 消さないよう、更新から`staleMs`以上経ったものに限る。掃除の失敗は取得を止めない。
+   */
+  private async sweepLeftovers(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.deps.dir);
+    } catch {
+      return;
+    }
+    const nowMs = this.now().getTime();
+    for (const name of names.filter((n) => LEFTOVER_FILE_PATTERN.test(n))) {
+      const file = path.join(this.deps.dir, name);
+      try {
+        if (nowMs - (await stat(file)).mtimeMs >= this.staleMs) {
+          await unlink(file);
+        }
+      } catch {
+        // 他のウィンドウが先に消した等。次の取得でまた見る
+      }
+    }
   }
 
   /** 一時ファイルを書いてから`link`で名前を付ける。既にあれば`false`。 */
@@ -569,6 +666,7 @@ export class RoadmapRunLeaseManager {
   /**
    * 持っている専有権のheartbeatを書き直す。別のウィンドウのものに替わっていたら手放して
    * `onLost`で知らせる。自分のものが失効間際・消えていた場合は、取得と同じ手順で取り直す。
+   * 1件の失敗で残りの専有権のheartbeatを止めない。
    */
   private async heartbeat(): Promise<void> {
     for (const [runId, entry] of [...this.held]) {
@@ -579,21 +677,54 @@ export class RoadmapRunLeaseManager {
         // 待っている間に解放された
         continue;
       }
-      const current = await this.readLease(entry.file);
-      let lost = current !== undefined && !this.isMine(current, runId);
-      let holder = current;
-      if (!lost) {
-        const outcome = await this.acquireFile(entry.file, entry.target, entry.acquiredAt);
-        if (!outcome.ok) {
-          lost = true;
-          holder = outcome.holder;
-        }
-      }
-      if (lost && this.held.get(runId) === entry) {
-        this.held.delete(runId);
-        this.deps.onLost(runId, holder);
+      try {
+        await this.heartbeatOne(runId, entry);
+      } catch (e) {
+        this.deps.log(`専有権のheartbeatに失敗しました（${runId}）: ${String(e)}`);
+        this.dropIfUnconfirmed(runId, entry);
       }
     }
     this.stopTimerIfIdle();
+  }
+
+  private async heartbeatOne(runId: string, entry: HeldLease): Promise<void> {
+    const current = await this.readLease(entry.file);
+    let lost = current !== undefined && !this.isMine(current, runId);
+    let holder = current;
+    if (!lost) {
+      const outcome = await this.acquireFile(entry.file, entry.target, entry.acquiredAt);
+      if (this.disposed) {
+        // 書き直している間に`dispose`が済んだ。書き直しで復活したファイルを消す
+        await this.removeIfMine(entry.file, runId);
+        return;
+      }
+      if (!outcome.ok) {
+        lost = true;
+        holder = outcome.holder;
+      }
+    }
+    if (this.held.get(runId) !== entry) {
+      return;
+    }
+    if (lost) {
+      this.held.delete(runId);
+      this.deps.onLost(runId, holder);
+    } else {
+      this.held.set(runId, { ...entry, confirmedAtMs: this.now().getTime() });
+    }
+  }
+
+  /**
+   * heartbeatが失敗し続け、最後に自分のものと確かめてから`staleMs`以上経った専有権は、
+   * 別のウィンドウに失効と判定されて取られうる。持ち続けずに手放して`onLost`で知らせる。
+   */
+  private dropIfUnconfirmed(runId: string, entry: HeldLease): void {
+    if (this.held.get(runId) !== entry) {
+      return;
+    }
+    if (this.now().getTime() - entry.confirmedAtMs >= this.staleMs) {
+      this.held.delete(runId);
+      this.deps.onLost(runId, undefined);
+    }
   }
 }
