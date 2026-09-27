@@ -235,7 +235,7 @@ export class TaskRunOrchestrator {
     const label = task === undefined ? taskId : taskLabel(task);
     this.notify(runId, {
       kind: 'taskInstructed',
-      body: `人が${label}へKanbanから直接指示を送った:\n${sanitizeInlineText(instruction, EVENT_TEXT_MAX_LENGTH)}`,
+      body: `人がKanbanから${label}へ直接指示を送りました:\n${sanitizeInlineText(instruction, EVENT_TEXT_MAX_LENGTH)}`,
     });
   }
 
