@@ -75,6 +75,7 @@ function pendingPorts(): { ports: ClaudeSandboxProbePorts; bwrap: Pending[]; cli
       new Promise((resolve) => {
         cli.push({ signal, resolve });
       }),
+    inspectReadOnlyCwd: () => Promise.resolve({ ok: true }),
   };
   return { ports, bwrap, cli };
 }
@@ -135,8 +136,9 @@ describe('ClaudeSandboxProbe.dispose（Issue #1545）', () => {
   it('dispose後は新たな確認を始めない', async () => {
     const tryBwrap = vi.fn();
     const tryCli = vi.fn();
+    const inspectReadOnlyCwd = vi.fn();
     const probe = new ClaudeSandboxProbe(
-      { platform: 'linux', inContainer: () => false, tryBwrap, tryCli },
+      { platform: 'linux', inContainer: () => false, tryBwrap, tryCli, inspectReadOnlyCwd },
       silentLogger(),
     );
 

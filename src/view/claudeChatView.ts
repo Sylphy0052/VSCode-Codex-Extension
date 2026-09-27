@@ -2181,18 +2181,24 @@ export class ClaudeChatViewManager
    *
    * 使えない環境では空を返し、従来どおりsandbox無しで起動する（承認は人へ回る）。
    * 起動後に`failIfUnavailable`で落ちてから起動し直すのではなく、起動前の確認で
-   * 同じ判断を済ませる（`probeClaudeSandbox`）。
+   * 同じ判断を済ませる（`probeClaudeSandbox`）。作業ディレクトリの中身のせいでsandbox内の
+   * Bashが全て失敗する場合も、sandbox無しで起動する（`ClaudeSandboxProbe.checkCwd`、Issue #1630）。
    */
   private async resolveSandboxArgs(input: TaskSessionInput): Promise<string[]> {
     if (input.cliSandbox === undefined) {
       return [];
     }
+    const withoutSandbox = (reason: string): string[] => {
+      this.log.warn(`[claude sandbox] sandbox無しで起動します（承認は従来どおり人へ回ります）: ${reason}`);
+      return [];
+    };
     const availability = await this.sandboxProbe.check();
     if (!availability.ok) {
-      this.log.warn(
-        `[claude sandbox] sandbox無しで起動します（承認は従来どおり人へ回ります）: ${availability.reason}`,
-      );
-      return [];
+      return withoutSandbox(availability.reason);
+    }
+    const inspection = await this.sandboxProbe.checkCwd(input.cliSandbox, input.cwd);
+    if (!inspection.ok) {
+      return withoutSandbox(inspection.reason);
     }
     return claudeSandboxArgs(input.cliSandbox, input.cwd, availability.environment);
   }

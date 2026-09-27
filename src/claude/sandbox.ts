@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import type { Logger } from '../log';
 import { killWithEscalation, type KillableProcess } from '../process/childProcess';
+import { inspectReadOnlyCwd, type ReadOnlyCwdInspection } from './sandboxReadDeny';
 
 /**
  * Claude CLIのsandbox（Issue #1541）。オーケストレータモードとロードマップ実行のセッションに限り、
@@ -101,7 +102,9 @@ export function buildClaudeSandboxSettings(
       // `excludedCommands`経由で通常の承認へ回す
       network: { strictAllowlist: true, allowedDomains: [] },
       // 作業ディレクトリは既定で書き込めるため、読み取り専用のセッションでは明示的に塞ぐ
-      // （CLI 2.1.280で、denyWriteが既定の書き込み許可より優先されることを実測）
+      // （CLI 2.1.280で、denyWriteが既定の書き込み許可より優先されることを実測）。
+      // 作業ディレクトリ配下にRead denyへ一致するディレクトリがあるとBashが全て失敗するため、
+      // その場合は起動前に`ClaudeSandboxProbe.checkCwd`がsandboxを外す（Issue #1630）
       ...(mode === 'read-only' ? { filesystem: { denyWrite: [cwd] } } : {}),
       ...(environment.weakerNested ? { enableWeakerNestedSandbox: true } : {}),
     },
@@ -164,6 +167,8 @@ export interface ClaudeSandboxProbePorts {
   tryBwrap: (withProc: boolean, signal: AbortSignal) => Promise<SandboxCommandResult>;
   /** sandboxの設定を付けてCLIを空起動し、正常に終わるかを見る。 */
   tryCli: (settingsJson: string, signal: AbortSignal) => Promise<SandboxCommandResult>;
+  /** 読み取り専用のsandboxを`cwd`へ付けられるかを見る（Issue #1630）。 */
+  inspectReadOnlyCwd: (cwd: string, signal: AbortSignal) => Promise<ReadOnlyCwdInspection>;
 }
 
 /** 確認を中止したときの理由。 */
@@ -292,6 +297,7 @@ export function nodeSandboxProbePorts(claudePath: () => string): ClaudeSandboxPr
     inContainer: detectContainer,
     tryBwrap,
     tryCli: (settingsJson, signal) => tryCli(claudePath(), settingsJson, signal),
+    inspectReadOnlyCwd: (cwd, signal) => inspectReadOnlyCwd(claudePath(), cwd, signal),
   };
 }
 
@@ -343,7 +349,8 @@ export async function probeClaudeSandbox(
   const environment: ClaudeSandboxEnvironment = { weakerNested };
   // 依存の確認に作業ディレクトリは関わらないため、書き込みを塞がない形で確かめる。
   // `read-only`だけが足す`filesystem.denyWrite`（絶対パス1つ）は、CLI 2.1.280で受理される
-  // ことを実測済みで、ここで確かめなくても起動を妨げない
+  // ことを実測済みで、ここで確かめなくても起動を妨げない。作業ディレクトリの中身次第で
+  // 失敗する場合は`ClaudeSandboxProbe.checkCwd`が別に確かめる（Issue #1630）
   const settings = JSON.stringify(buildClaudeSandboxSettings('workspace-write', '', environment));
   if (signal.aborted) {
     return aborted;
@@ -403,8 +410,27 @@ export class ClaudeSandboxProbe {
   }
 
   /**
+   * `check()`が通った後に、作業ディレクトリごとの事情でsandboxを付けられないかを見る
+   * （Issue #1630）。作業ディレクトリの中身は変わりうるため覚えない。
+   */
+  async checkCwd(mode: ClaudeSandboxMode, cwd: string): Promise<ReadOnlyCwdInspection> {
+    if (mode === 'workspace-write') {
+      return { ok: true };
+    }
+    if (this.abort.signal.aborted) {
+      return { ok: false, reason: ABORTED_REASON };
+    }
+    try {
+      const result = await this.ports.inspectReadOnlyCwd(cwd, this.abort.signal);
+      return result.ok ? result : { ok: false, reason: truncateReason(result.reason) };
+    } catch (e: unknown) {
+      return { ok: false, reason: `作業ディレクトリの確認に失敗しました: ${String(e)}` };
+    }
+  }
+
+  /**
    * 拡張機能の終了時に呼ぶ（Issue #1545）。進行中の確認の子プロセス（bubblewrapの試し起動、
-   * CLIの空起動）を止め、以後は確認を始めない。止めないと、各時間上限まで子プロセスが残りうる。
+   * CLIの空起動、Read denyルールの取得）を止め、以後は確認を始めない。止めないと、各時間上限まで子プロセスが残りうる。
    */
   dispose(): void {
     this.abort.abort();
