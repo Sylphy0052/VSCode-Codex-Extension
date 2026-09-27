@@ -55,6 +55,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   private postTimer: ReturnType<typeof setTimeout> | undefined;
   /** 専有権（Issue #1628）の表示を追従させる定期の再描画。ロック解放後の書き換えはKanbanに来ないため必要。 */
   private leasePollTimer: ReturnType<typeof setInterval> | undefined;
+  /** `post`の連番。専有権の読み取りを待つ間に始まった後の`post`を優先する。 */
+  private postSeq = 0;
   private lastPostAt = 0;
   private selectedRunId: string | undefined;
   /** グラフ表示の描画領域の幅（`layoutGraph`の`maxWidth`）。webviewの`viewport`で受け取る。 */
@@ -151,9 +153,11 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     const orchestrator = board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
     const graph = board.run === undefined ? undefined : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
     // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
+    const seq = ++this.postSeq;
     const lease = board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
     const panel = this.panel;
-    if (panel === undefined) {
+    // 専有権を読む間に次の`post`が始まっていたら、古い盤面で上書きしないよう捨てる
+    if (panel === undefined || seq !== this.postSeq) {
       return;
     }
     void panel.webview.postMessage({ type: 'board', board, orchestrator, graph, lease });
