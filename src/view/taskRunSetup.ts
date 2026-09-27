@@ -196,6 +196,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     readBaseline: () => deps.readBaseline(),
     confirmAnswer: confirmOrchestratorAnswer,
     confirmGateResolution: confirmOrchestratorGateResolution,
+    // Orchestratorは`resume_run`・`start_run`の処理の中で自分で開く（Issue #1620）
+    showKanban: (runId) => holder.view?.show(runId),
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),

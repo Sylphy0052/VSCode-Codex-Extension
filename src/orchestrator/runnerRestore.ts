@@ -221,11 +221,12 @@ async function loadPersistedWorkflowDefinition(
  *
  * **ただし`def`自体は別の理由で改めて必要になった（design.md §16.29「リロード時の
  * 突き合わせ」、レビューblocking指摘、2026-08-23）。** オーケストレーターの`add_task`/
- * `remove_task`（§16.29）は`live.def`と`live.runState`だけを書き換えYAMLファイルは
- * 書き換えないが、`live.runState`はこの2ツール自身がpersistしなくても、その後に
+ * `remove_task`（§16.29）はYAMLファイルへの反映をベストエフォートにしている（Issue #1614・
+ * #1618。書き込みに失敗しても変更自体は成功させる）。一方`live.runState`はこの2ツール自身が
+ * persistしなくても、その後に
  * 走る**別の経路**（他タスクの完了・`pump`など、`self.persist`を呼ぶ十数箇所）が
- * `live.runState.tasks`を丸ごと永続化した瞬間に一緒に書き出されてしまう。結果、
- * 永続データと定義ファイルが指すタスク集合がずれうる:
+ * `live.runState.tasks`を丸ごと永続化した瞬間に一緒に書き出されてしまう。YAMLへの
+ * 書き込みに失敗した場合、永続データと定義ファイルが指すタスク集合がずれうる:
  *
  * - `add_task`で加えたタスクは、YAMLには無いのに永続データにだけ残る
  * - `remove_task`で消したタスクは、YAMLにはあるのに永続データから消えている
