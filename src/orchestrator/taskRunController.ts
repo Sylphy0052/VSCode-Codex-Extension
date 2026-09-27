@@ -230,7 +230,7 @@ export class TaskRunController {
 
   /**
    * このウィンドウがrunの専有権を持っているか確かめ、持っていなければ取る（Issue #1628）。
-   * 計画の変更・承認・工程の起動・Orchestratorを開く操作の共通の関門にする。`lease`未設定
+   * 計画の変更・承認・工程の起動・runの再開の共通の関門にする。`lease`未設定
    * （テスト等）なら常に許可する。
    */
   async ensureLease(runId: string): Promise<ControllerResult> {
@@ -833,6 +833,10 @@ export class TaskRunController {
       if (options.parallel !== true && this.deps.store.listActive(run.workspaceRoot).length > 0) {
         return { ok: false, message: 'このフォルダには動いているrunがある。先にそのrunを中断する' };
       }
+      const leased = await this.ensureLease(runId);
+      if (!leased.ok) {
+        return leased;
+      }
       await this.updateRun(runId, (r) =>
         r.finishedAt === undefined ? setTaskRunHaltedByUser(resumeTaskRun(r), false) : r,
       );
@@ -856,6 +860,10 @@ export class TaskRunController {
       }
       if (isTaskRunActive(run)) {
         return { ok: false, message: 'runは動いている' };
+      }
+      const leased = await this.ensureLease(runId);
+      if (!leased.ok) {
+        return leased;
       }
       await this.updateRun(runId, (r) =>
         isTaskRunActive(r) ? r : setTaskRunHaltedByUser(reopenTaskRun(r), false),

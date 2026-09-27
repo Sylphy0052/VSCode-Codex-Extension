@@ -137,9 +137,23 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   const observation = createStageObservationPorts(ports);
 
+  // runごとのウィンドウ専有権（Issue #1628）。廃止したロードマップ実行の`roadmapRunLease.ts`をrunId単位へ移植
+  const lease = new TaskRunLeaseManager({
+    dir: path.join(sessionHubRoot(deps.globalStorageDir), TASK_LEASE_DIR_NAME),
+    owner: {
+      windowId: deps.windowId,
+      hostname: os.hostname(),
+      hostIdentity: computeHostIdentity(),
+      pid: process.pid,
+    },
+    onLost: (runId, holderLease) => holder.controller?.handleLeaseLost(runId, holderLease),
+    log: warn,
+  });
+
   const runner = new TaskStageRunner({
     hosts: deps.hosts,
     store,
+    canDrive: async (runId) => lease.holds(runId) || (await lease.acquire(runId)).ok,
     mergeKeys: new TaskRunMergeKeys(),
     worktreeQueue: deps.worktreeQueue,
     git: deps.git,
@@ -159,19 +173,6 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     onTaskMerged: (runId, taskId) => holder.controller?.handleTaskMerged(runId, taskId),
     onWarning: (runId, taskId, message) => warn(`${runId} ${taskId}: ${message}`),
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
-  });
-
-  // runごとのウィンドウ専有権（Issue #1628）。廃止したロードマップ実行の`roadmapRunLease.ts`をrunId単位へ移植
-  const lease = new TaskRunLeaseManager({
-    dir: path.join(sessionHubRoot(deps.globalStorageDir), TASK_LEASE_DIR_NAME),
-    owner: {
-      windowId: deps.windowId,
-      hostname: os.hostname(),
-      hostIdentity: computeHostIdentity(),
-      pid: process.pid,
-    },
-    onLost: (runId, holderLease) => holder.controller?.handleLeaseLost(runId, holderLease),
-    log: warn,
   });
 
   // 設定が無効なら判定せず、計画提案は常に承認待ちにする（ロードマップ実行と同じ判定器・閾値を使う）
