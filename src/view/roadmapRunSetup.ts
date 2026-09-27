@@ -51,6 +51,7 @@ import {
   type RoadmapRunEngine,
   type RoadmapRunMode,
 } from '../orchestrator/roadmapRunState';
+import { RoadmapRunEventStore } from '../orchestrator/roadmapRunEventLog';
 import { RoadmapRunStore } from '../orchestrator/roadmapRunStore';
 import { formatVerifyCommandForDisplay } from '../orchestrator/runnerVerifyCommands';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
@@ -217,7 +218,8 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
       notifyStalled(run, blockers, () => holder.view?.show(run.runId)),
     onDidChange: () => holder.view?.refresh(),
     mergeQueue,
-    onRunTransition: (prev, next) => holder.orchestrator?.handleRunTransition(prev, next),
+    onRunEvents: (runId, events) => holder.orchestrator?.handleRunEvents(runId, events),
+    eventLog: new RoadmapRunEventStore(deps.context.workspaceState),
     lease: leases,
     log: (message) => log.info(message),
   });
