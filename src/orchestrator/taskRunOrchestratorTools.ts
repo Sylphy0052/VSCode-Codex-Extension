@@ -51,6 +51,8 @@ const MAX_RUN_ID_LENGTH = 200;
 /** 状態の本文（タスク一覧）の上限。 */
 const MAX_RUN_STATE_LENGTH = 50_000;
 const STATE_TITLE_MAX_LENGTH = 200;
+/** `get_run_state`に載せるロードマップの記録の件数（新しい順の末尾から）。 */
+const STATE_ROADMAP_NOTICES_SHOWN = 5;
 const STATE_TEXT_MAX_LENGTH = 1000;
 
 export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
@@ -110,6 +112,12 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     name: 'get_run_state',
     description:
       'この実行の現在の状態（計画の承認状況・並列上限・各タスクの工程・判断待ちの工程と推奨値・ユーザー判断待ちの質問）を返す。状態の正本はこれで、通知の内容より優先する。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'sync_roadmap',
+    description:
+      'ロードマップIssueから始めたrunで、ロードマップIssueを今すぐ読み直す。前回から変わっていれば差分（子Issueの追加・削除・close、計画区画の変更）がイベントで届く。計画は変えない。タスクのmerge後は自動で読み直すため、人に頼まれたときなどに使う。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -266,6 +274,7 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
   'propose_plan',
   'approve_plan',
   'get_run_state',
+  'sync_roadmap',
   'refresh_kanban',
   'start_stage',
   'instruct_task',
@@ -279,6 +288,7 @@ export type TaskRunOrchestratorCall =
   | { tool: 'propose_plan'; rawArgs: unknown }
   | { tool: 'approve_plan' }
   | { tool: 'get_run_state' }
+  | { tool: 'sync_roadmap' }
   | { tool: 'refresh_kanban' }
   | {
       tool: 'start_stage';
@@ -385,6 +395,9 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
   }
   if (name === 'get_run_state') {
     return { ok: true, call: { tool: 'get_run_state' } };
+  }
+  if (name === 'sync_roadmap') {
+    return { ok: true, call: { tool: 'sync_roadmap' } };
   }
   if (name === 'refresh_kanban') {
     return { ok: true, call: { tool: 'refresh_kanban' } };
@@ -505,6 +518,9 @@ export function formatTaskRunState(
       `ロードマップ: Issue #${String(run.roadmap.issueNumber)} ${inline(run.roadmap.title, STATE_TITLE_MAX_LENGTH)}` +
         `（子Issue ${String(snapshot.children.length)}件、うち完了${String(snapshot.children.filter((c) => c.completed).length)}件。${snapshot.readAt}に読んだ）`,
     );
+    for (const notice of (run.roadmap.notices ?? []).slice(-STATE_ROADMAP_NOTICES_SHOWN)) {
+      lines.push(`  ${notice.at} ${notice.kind}: ${inline(notice.body)}`);
+    }
   }
   for (const task of listTasks(run)) {
     const stage = currentStage(task);

@@ -4,6 +4,7 @@ import type { Logger } from '../log';
 import { nodeForgeFileSystem, type CliCommandRunner } from '../orchestrator/forge';
 import { createCliIssueListPort } from '../orchestrator/roadmap';
 import { importRoadmap } from '../orchestrator/roadmapImport';
+import { hashRoadmapPlanSectionContent } from '../orchestrator/roadmapPlanHash';
 import { detectRoadmapForgeHost } from '../orchestrator/roadmapRunForge';
 import type { ControllerResult, TaskRunController } from '../orchestrator/taskRunController';
 import { TASK_RUN_TITLE_MAX_LENGTH, type TaskRunEngine } from '../orchestrator/taskRunState';
@@ -98,6 +99,8 @@ export async function startRoadmapRunCommand(
     roadmapTitle,
     children: imported.children,
     planNodes: imported.plan.kind === 'valid' ? imported.plan.nodes : undefined,
+    planSectionHash:
+      imported.plan.kind === 'valid' ? hashRoadmapPlanSectionContent(imported.plan.content) : undefined,
   });
   if (!outcome.ok) {
     deps.log.warn(`[task run] ${outcome.message}`);

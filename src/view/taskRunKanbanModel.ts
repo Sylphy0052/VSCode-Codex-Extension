@@ -29,6 +29,7 @@ import {
   type TaskPlanStatus,
   type TaskRun,
   type TaskRunEngine,
+  type TaskRunRoadmapNotice,
   type TaskStage,
 } from '../orchestrator/taskRunState';
 import { STAGE_LABELS } from '../orchestrator/taskStagePrompts';
@@ -53,6 +54,8 @@ export const TASK_RUN_KANBAN_COLUMNS = [
 export type TaskRunKanbanColumn = (typeof TASK_RUN_KANBAN_COLUMNS)[number];
 
 const TITLE_MAX_LENGTH = 200;
+/** Kanbanに出すロードマップの記録の件数。 */
+const KANBAN_ROADMAP_NOTICES_SHOWN = 3;
 const SUMMARY_MAX_LENGTH = 300;
 const FAILURE_MAX_LENGTH = 300;
 const GATE_DETAIL_MAX_LENGTH = 2000;
@@ -153,8 +156,17 @@ export interface TaskRunKanbanRun {
   /** Orchestratorの自動引き継ぎの記録。起きていなければ`undefined`（Issue #1553）。 */
   orchestratorAutoHandoffs: OrchestratorAutoHandoffRecord | undefined;
   columns: Record<TaskRunKanbanColumn, TaskRunKanbanCard[]>;
-  /** ロードマップIssueから始めたrun（Issue #1623）の元のIssue。題は無害化済み。 */
-  roadmap: { issueNumber: number; title: string } | undefined;
+  /**
+   * ロードマップIssueから始めたrun（Issue #1623）の元のIssue。題は無害化済み。`notices`は
+   * 実行中に読み直して見つけた差分と警告の新しいもの（古い順）。
+   */
+  roadmap:
+    | {
+        issueNumber: number;
+        title: string;
+        notices: { kind: TaskRunRoadmapNotice['kind']; body: string; at: string }[];
+      }
+    | undefined;
 }
 
 export interface TaskRunKanbanBoard {
@@ -417,6 +429,11 @@ export function buildTaskRunKanban(
           : {
               issueNumber: selected.roadmap.issueNumber,
               title: sanitizeInlineText(selected.roadmap.title, TITLE_MAX_LENGTH),
+              notices: (selected.roadmap.notices ?? []).slice(-KANBAN_ROADMAP_NOTICES_SHOWN).map((n) => ({
+                kind: n.kind,
+                body: sanitizeInlineText(n.body, TITLE_MAX_LENGTH),
+                at: n.at,
+              })),
             },
       orchestratorAutoHandoffs: selected.orchestratorAutoHandoffs,
       columns,

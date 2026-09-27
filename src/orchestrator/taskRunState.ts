@@ -293,6 +293,27 @@ export interface TaskRunRoadmap {
   title: string;
   /** 直近に読んだロードマップの内容。次に読み直したときの差分の基準にする。 */
   snapshot: TaskRunRoadmapSnapshot;
+  /**
+   * 読み直しと書き戻しで起きたこと（古い順、`MAX_ROADMAP_NOTICES`件まで）。増えた分を
+   * Orchestratorへイベントとして届け、Kanbanに出す。
+   */
+  notices?: readonly TaskRunRoadmapNotice[];
+}
+
+/** ロードマップの読み直し・書き戻しの記録を残す上限。古いものから捨てる。 */
+export const MAX_ROADMAP_NOTICES = 20;
+
+export interface TaskRunRoadmapNotice {
+  noticeId: string;
+  /**
+   * `childrenAdded`は子Issueの追加、`childrenRemoved`は子Issueの削除・close、`planChanged`は
+   * 計画区画の依存・並び順の変更、`warning`は読み直し・書き戻しの失敗や計画の注意点。
+   */
+  kind: 'childrenAdded' | 'childrenRemoved' | 'planChanged' | 'warning';
+  /** 拡張が組み立てた文。外部由来のテキスト（Issueのタイトル等）は含めない。 */
+  body: string;
+  /** ISO8601。 */
+  at: string;
 }
 
 export interface TaskRunRoadmapSnapshot {
@@ -300,6 +321,11 @@ export interface TaskRunRoadmapSnapshot {
   children: readonly TaskRunRoadmapChild[];
   /** 計画区画の依存（着手順の早い順）。区画が無い・読めなければ`undefined`。 */
   plan: readonly { issueNumber: number; dependsOn: readonly number[] }[] | undefined;
+  /**
+   * 計画区画の中身のハッシュ（`hashRoadmapPlanSectionContent`）。区画が無ければ`undefined`。
+   * 計画を書き戻すとき、読み直した区画がこれと違えば人が手で直したとみなして上書きしない。
+   */
+  planSectionHash?: string | undefined;
   /** ISO8601。 */
   readAt: string;
 }

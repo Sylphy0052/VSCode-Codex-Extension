@@ -118,6 +118,7 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       listInFolder: vi.fn(() => []),
       reopenRun: vi.fn(),
       startRun: vi.fn(),
+      syncRoadmap: vi.fn(),
     },
     server: {
       registerTools: vi.fn(async () => {

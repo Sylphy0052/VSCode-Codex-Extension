@@ -161,6 +161,11 @@ export interface TaskStageRunnerDeps {
   onRunChanged?: (run: TaskRun) => void;
   /** 実行を止めずに人へ知らせる事象（後片付けに失敗した等）。 */
   onWarning?: (runId: string, taskId: string, message: string) => void;
+  /**
+   * タスクのmergeが済み、後片付けを試みた後（後片付けの成否は問わない）。ロードマップへの書き戻しと
+   * 読み直しに使う（Issue #1623）。
+   */
+  onTaskMerged?: (runId: string, taskId: string) => void;
   now?: () => Date;
   newId?: () => string;
   /**
@@ -1053,6 +1058,7 @@ export class TaskStageRunner {
       if (!result.ok) {
         this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
       }
+      this.deps.onTaskMerged?.(runId, taskId);
     });
   }
 
@@ -1156,6 +1162,7 @@ export class TaskStageRunner {
     if (!result.ok) {
       this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
     }
+    this.deps.onTaskMerged?.(runId, taskId);
   }
 
   /** 帳簿から外し、MCPのトークンを失効させ、鍵（持っていれば）を放す。 */

@@ -180,6 +180,15 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'approvePlan':
         warnIfRejected(await controller.approvePlan(runId));
         return;
+      case 'syncRoadmap': {
+        const result = await controller.syncRoadmap(runId);
+        if (result.ok) {
+          void vscode.window.showInformationMessage(`オーケストレータモード: ${result.message}`);
+        } else {
+          warnIfRejected(result);
+        }
+        return;
+      }
       case 'setMaxParallel': {
         const maxParallel = message.maxParallel;
         if (typeof maxParallel !== 'number') {
@@ -671,6 +680,20 @@ const script = `
     controls.appendChild(el('span', 'status ' + status[1], status[0] + ' / セッション' + run.activeSessions));
     if (run.roadmap) {
       controls.appendChild(el('span', 'status', 'ロードマップ #' + run.roadmap.issueNumber + ' ' + run.roadmap.title));
+      if (!run.finished) {
+        controls.appendChild(button('ロードマップを読み直す', '', function () { send('syncRoadmap'); }));
+      }
+      const notices = run.roadmap.notices;
+      if (notices.length > 0) {
+        // 最新の1件を出し、直近の数件はツールチップで見せる
+        const last = notices[notices.length - 1];
+        const noticeEl = el('span', 'status' + (last.kind === 'warning' ? ' warn' : ''), 'ロードマップ: ' + last.body);
+        noticeEl.title = notices.map(function (n) {
+          const at = new Date(n.at);
+          return (isNaN(at.getTime()) ? n.at : at.toLocaleString()) + ' ' + n.body;
+        }).join(String.fromCharCode(10));
+        controls.appendChild(noticeEl);
+      }
     }
     controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {

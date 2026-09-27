@@ -13,7 +13,13 @@ import {
   resolveTaskPlan,
   type PlanTaskInput,
 } from './taskRunPlan';
-import { buildRoadmapInitialPlan } from './taskRunRoadmap';
+import { buildRoadmapInitialPlan, findIssuesOutsideRoadmap, taskIssueNumber } from './taskRunRoadmap';
+import type { TaskRunRoadmapPort } from './taskRunRoadmapForge';
+import {
+  findClosedRoadmapChildren,
+  TaskRunRoadmapFollower,
+  withRoadmapNotices,
+} from './taskRunRoadmapFollower';
 import { sanitizeInlineText } from './untrustedText';
 import { findStageQuestion } from './taskRunQuestions';
 import {
@@ -115,6 +121,8 @@ export interface TaskRunControllerDeps {
    * `agent.taskRun.planAutoApprove.enabled`が無効なら`undefined`（判定を試みずに承認待ちのまま）。
    */
   planAutoApprove(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
+  /** ロードマップIssueの読み書き（Issue #1623）。無ければ実行中の追従と書き戻しをしない。 */
+  roadmap?: TaskRunRoadmapPort;
 }
 
 export type TaskRunTransitionListener = (prev: TaskRun | undefined, next: TaskRun) => void;
@@ -142,7 +150,23 @@ export class TaskRunController {
   /** runの開始と再開を直列にする。動いているrunの確認と作成の間に別の開始が割り込まないため。 */
   private readonly startQueue = new SerialQueue();
 
-  constructor(private readonly deps: TaskRunControllerDeps) {}
+  /** ロードマップIssueから始めたrunの、ロードマップへの追従と書き戻し（Issue #1623）。 */
+  private readonly roadmapFollower: TaskRunRoadmapFollower | undefined;
+
+  constructor(private readonly deps: TaskRunControllerDeps) {
+    this.roadmapFollower =
+      deps.roadmap === undefined
+        ? undefined
+        : new TaskRunRoadmapFollower({
+            port: deps.roadmap,
+            find: (runId) => this.deps.store.find(runId),
+            updateRun: (runId, fn) => this.updateRun(runId, fn),
+            fetchIssueState: (root, n) => this.deps.observation.fetchIssueState(root, n),
+            log: (message) => this.deps.log(message),
+            now: () => this.now(),
+            newId: () => this.newId(),
+          });
+  }
 
   private now(): Date {
     return this.deps.now?.() ?? new Date();
@@ -168,6 +192,7 @@ export class TaskRunController {
   handleRunChanged(next: TaskRun): void {
     const prev = this.lastSeen.get(next.runId);
     this.lastSeen.set(next.runId, next);
+    this.roadmapFollower?.observe(prev, next);
     for (const listener of this.listeners) {
       try {
         listener(prev, next);
@@ -318,7 +343,7 @@ export class TaskRunController {
       assigned = resolved.value.assigned;
       try {
         let proposed = proposeTaskPlan(
-          resolved.value.run,
+          withOutsideRoadmapWarning(r, resolved.value.run, tasks, this.now(), () => this.newId()),
           resolved.value.drafts,
           () => this.newId(),
           this.now(),
@@ -576,12 +601,18 @@ export class TaskRunController {
     roadmapTitle: string;
     children: readonly RoadmapChild[];
     planNodes: readonly RoadmapPlanNode[] | undefined;
+    /** 計画区画の中身のハッシュ。区画が無い・読めないときは`undefined`。 */
+    planSectionHash: string | undefined;
   }): Promise<StartTaskRunOutcome & { planMessage?: ControllerResult }> {
-    const closedIssueNumbers = await this.findClosedChildren(input.workspaceRoot, input.children);
+    const closedIssueNumbers = await findClosedRoadmapChildren(
+      (n) => this.deps.observation.fetchIssueState(input.workspaceRoot, n),
+      input.children,
+    );
     const plan = buildRoadmapInitialPlan({
       roadmapIssueNumber: input.roadmapIssueNumber,
       children: input.children,
       planNodes: input.planNodes,
+      planSectionHash: input.planSectionHash,
       closedIssueNumbers,
       now: this.now(),
     });
@@ -616,16 +647,20 @@ export class TaskRunController {
     return { ...started, planMessage: await this.applyPlan(started.runId, plan.tasks) };
   }
 
-  /** `- [ ]`のままcloseされている子Issue。状態を確かめられないIssueは含めない。 */
-  private async findClosedChildren(
-    workspaceRoot: string,
-    children: readonly RoadmapChild[],
-  ): Promise<ReadonlySet<number>> {
-    const open = children.filter((c) => !c.checked).map((c) => c.issueNumber);
-    const states = await Promise.all(
-      open.map((n) => this.deps.observation.fetchIssueState(workspaceRoot, n)),
-    );
-    return new Set(open.filter((_, i) => states[i] === 'closed'));
+  /**
+   * ロードマップを読み直す（Kanbanの「ロードマップを読み直す」とOrchestratorの`sync_roadmap`。
+   * Issue #1623）。差分は`run.roadmap.notices`へ足し、Orchestratorへはイベントで届く。計画は変えない。
+   */
+  async syncRoadmap(runId: string): Promise<ControllerResult> {
+    if (this.roadmapFollower === undefined) {
+      return { ok: false, message: 'ロードマップIssueを読み書きできない' };
+    }
+    return this.roadmapFollower.sync(runId);
+  }
+
+  /** タスクのmergeと後片付けが済んだ（Runnerの`onTaskMerged`）。ロードマップの行を`[x]`にする。 */
+  handleTaskMerged(runId: string, taskId: string): void {
+    this.roadmapFollower?.handleTaskMerged(runId, taskId);
   }
 
   /** run全体の一時停止と再開（Kanbanから）。停止中は新しい工程を始めない。実行中の工程は止めない。 */
@@ -1080,4 +1115,40 @@ export class TaskRunController {
       }
     }
   }
+}
+
+/**
+ * ロードマップIssueから始めたrunで、ロードマップに無い既存のIssueが計画へ新しく入ったら警告を残す
+ * （受け付けは止めない。Issue #1623）。このrunが作ったIssue（チェックリストへ足す途中）は除く。
+ */
+function withOutsideRoadmapWarning(
+  before: TaskRun,
+  run: TaskRun,
+  tasks: readonly PlanTaskInput[],
+  now: Date,
+  newId: () => string,
+): TaskRun {
+  if (run.roadmap === undefined) {
+    return run;
+  }
+  const known = new Set(
+    listTasks(before)
+      .map((t) => taskIssueNumber(t))
+      .filter((n): n is number => n !== undefined),
+  );
+  const outside = findIssuesOutsideRoadmap(tasks, run.roadmap.snapshot).filter((n) => !known.has(n));
+  if (outside.length === 0) {
+    return run;
+  }
+  return withRoadmapNotices(
+    run,
+    [
+      {
+        kind: 'warning',
+        body: `ロードマップのチェックリストに無いIssueを計画へ入れた: ${outside.map((n) => `#${String(n)}`).join(', ')}`,
+      },
+    ],
+    now,
+    newId,
+  );
 }

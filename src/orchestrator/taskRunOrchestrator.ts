@@ -36,6 +36,7 @@ import {
   taskRunLabel,
   type OrchestratedTask,
   type TaskRun,
+  type TaskRunRoadmapNotice,
   type TaskRunEngine,
 } from './taskRunState';
 import type { ApprovalHandler, TaskSession, TaskSessionHost } from './taskSession';
@@ -76,6 +77,10 @@ export interface TaskRunOrchestratorEvent {
     | 'gateResolved'
     | 'runStalled'
     | 'runFinished'
+    | 'roadmapChildrenAdded'
+    | 'roadmapChildrenRemoved'
+    | 'roadmapPlanChanged'
+    | 'roadmapWarning'
     | 'eventsCapReached';
   body: string;
 }
@@ -115,6 +120,7 @@ export interface TaskRunOrchestratorDeps {
     | 'listInFolder'
     | 'reopenRun'
     | 'startRun'
+    | 'syncRoadmap'
   >;
   server: {
     registerTools(
@@ -589,6 +595,8 @@ export class TaskRunOrchestrator {
         return toOutcome(await controller.proposePlan(runId, call.rawArgs));
       case 'approve_plan':
         return toOutcome(await controller.approvePlan(runId));
+      case 'sync_roadmap':
+        return toOutcome(await controller.syncRoadmap(runId));
       case 'refresh_kanban': {
         if (controller.find(runId) === undefined) {
           return { text: 'runが見つかりません', isError: true };
@@ -918,10 +926,26 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
       });
     }
   }
+  events.push(...diffRoadmapNoticeEvents(prev, next));
   if (prev.finishedAt === undefined && next.finishedAt !== undefined) {
     events.push({ kind: 'runFinished', body: 'runが終了しました' });
   }
   return events;
+}
+
+const ROADMAP_NOTICE_EVENT_KINDS: Record<TaskRunRoadmapNotice['kind'], TaskRunOrchestratorEvent['kind']> = {
+  childrenAdded: 'roadmapChildrenAdded',
+  childrenRemoved: 'roadmapChildrenRemoved',
+  planChanged: 'roadmapPlanChanged',
+  warning: 'roadmapWarning',
+};
+
+/** ロードマップの記録のうち、前回に無かったもの（Issue #1623）。本文は番号と定型文だけ。 */
+function diffRoadmapNoticeEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestratorEvent[] {
+  const seen = new Set((prev.roadmap?.notices ?? []).map((n) => n.noticeId));
+  return (next.roadmap?.notices ?? [])
+    .filter((n) => !seen.has(n.noticeId))
+    .map((n) => ({ kind: ROADMAP_NOTICE_EVENT_KINDS[n.kind], body: n.body }));
 }
 
 /** 関門がユーザーの判断待ちになった・決着したイベント。 */
@@ -1009,6 +1033,11 @@ function buildRoadmapLines(roadmapIssueNumber: number): string[] {
     `- このrunはロードマップIssue #${String(roadmapIssueNumber)}の子Issueをタスクにして始めた。` +
       '子Issueのタスクは既存のIssueのタスク（existingIssueNumber）として扱う',
     '- ロードマップで完了済みの子Issueのタスクは全工程を飛ばしてある。propose_planで省いても計画に残るため、送り直さなくてよい',
+    '- 実行中に人がロードマップを直すと、子Issueの追加・削除・close、計画区画の変更がイベント（roadmapChildrenAdded など）で届く。' +
+      '計画は自動では変わらない。取り込むならpropose_planで計画を出し直す。タスクのmerge後は自動で読み直す。' +
+      '人に頼まれたときなど、すぐ読み直すにはsync_roadmapを使う',
+    '- mergeした子Issueの行の[x]、作ったIssueの行の追加、承認された計画の計画区画への書き戻しは自動で行う。' +
+      'ロードマップIssueの本文を自分で書き換えない',
   ];
 }
 

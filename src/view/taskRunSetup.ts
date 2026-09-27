@@ -26,6 +26,7 @@ import { TaskRunController, type ControllerResult } from '../orchestrator/taskRu
 import type { GateJudgeQuestion } from '../orchestrator/taskRunGates';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
+import { createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
 import {
   isTaskRunActive,
@@ -143,6 +144,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeQuestion: (engine, question) => judgeByReflex(engine, question),
     judgeGate: (engine, question) => judgeByReflex(engine, question),
     onRunChanged: (run) => holder.controller?.handleRunChanged(run),
+    onTaskMerged: (runId, taskId) => holder.controller?.handleTaskMerged(runId, taskId),
     onWarning: (runId, taskId, message) => warn(`${runId} ${taskId}: ${message}`),
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
@@ -177,6 +179,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       return { model: choice.settings.model, effort: choice.settings.effort, reasons: choice.reasons };
     },
     observation,
+    roadmap: createTaskRunRoadmapPort(ports),
     pathExists: async (target) => {
       try {
         await fsPromises.stat(target);
