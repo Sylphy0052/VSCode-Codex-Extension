@@ -127,7 +127,14 @@ export type StartIssueOutcome =
   | { ok: true }
   | {
       ok: false;
-      reason: StartIssueRejection | 'unknownRun' | 'starting' | 'worktreeFailed' | 'sessionFailed';
+      reason:
+        | StartIssueRejection
+        | 'unknownRun'
+        | 'starting'
+        | 'worktreeFailed'
+        | 'sessionFailed'
+        /** 別のウィンドウがロードマップの専有権を持っている（Controllerが返す。Issue #1555）。 */
+        | 'leaseDenied';
       message: string;
     };
 

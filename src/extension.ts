@@ -799,6 +799,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // （`disposeOrchestrator`が`live.orchestrator`をundefinedへ戻すため冪等）。
   context.subscriptions.push({ dispose: () => workflowRunner.dispose() });
 
+  // このウィンドウ（拡張ホストの起動）の識別子。セッション統括（下の`sessionHubRootDir`）と
+  // ロードマップ実行の専有権（Issue #1555）で同じ値を使うため、両方より先に作る
+  const windowId = generateWindowId();
+
   // ロードマップ実行（Issue #1465）。子Issueを依存順にセッションへ送り、Kanbanで操作する
   context.subscriptions.push(
     ...setupRoadmapRun({
@@ -830,6 +834,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
       readContextLowPercent: () => readWorkflowsConfig().contextLowPercent,
       readBaseline: readSafetyBaseline,
+      windowId,
       log,
     }),
   );
@@ -1297,9 +1302,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 届く他ウィンドウの会話を合わせて読むため、外部ターミナルの状態を推測して表示しない。
   //
   // 共有ディレクトリは`~/.codex` / `~/.claude`とは別（`globalStorageUri`配下）にし、
-  // CLI側の領域を汚さない。`windowId`はこの拡張ホストの起動ごとに生成し、プロセスidは
-  // 再利用されるため使わない。
-  const windowId = generateWindowId();
+  // CLI側の領域を汚さない。`windowId`（上で作成）はこの拡張ホストの起動ごとに生成し、
+  // プロセスidは再利用されるため使わない。
   // 前回の実行が残したツール出力の退避ファイル（issue #1325）を掃除する。退避は会話が
   // 生きている間の控えで、通常は`session.dispose()`で消える。異常終了した分だけが残る
   void purgeStaleOutputOffload(context.globalStorageUri.fsPath);

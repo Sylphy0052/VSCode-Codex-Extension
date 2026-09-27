@@ -8,6 +8,12 @@ import {
   type RoadmapPlanProposal,
 } from './roadmapPlanProposal';
 import {
+  formatRoadmapLeaseHolder,
+  formatRoadmapLeaseRejection,
+  type RoadmapRunLease,
+  type RoadmapRunLeaseManager,
+} from './roadmapRunLease';
+import {
   createRoadmapRun,
   finishRunIfDone,
   isValidIssueNumber,
@@ -44,6 +50,9 @@ import {
  * - Kanbanへ出す出来事（実行可能になった・終了した・警告）をrunごとに溜める
  *
  * - merge待ち・後片付け中のノードは、状態が変わるたびにmergeの列（`RoadmapMergeQueue`）へ渡す
+ * - runの開始・再開（再読み込み後の復元を含む）の前にウィンドウの専有権（Issue #1555、
+ *   `roadmapRunLease.ts`）を取る。取れないrunは始めず、送り出しとmergeの列へも渡さない。
+ *   runが終わったら手放す
  */
 
 /** runごとに残す出来事の上限。 */
@@ -95,6 +104,8 @@ export interface RoadmapRunControllerDeps {
   mergeQueue?: { sync(run: RoadmapRun): void };
   /** runの状態が変わった（Orchestratorへのイベント通知用。分割案8b-1）。`prev`は初めて見たrunで`undefined`。 */
   onRunTransition?: (prev: RoadmapRun | undefined, next: RoadmapRun) => void;
+  /** 同じロードマップを複数のウィンドウから同時に動かさないための専有権（Issue #1555）。無ければ取らない。 */
+  lease?: Pick<RoadmapRunLeaseManager, 'acquire' | 'holds' | 'release'>;
   log(message: string): void;
   now?: () => Date;
   newId?: () => string;
@@ -145,16 +156,32 @@ export class RoadmapRunController {
     }
     const active = this.deps.store.findActive(input.workspaceRoot, input.roadmapIssueNumber);
     if (active !== undefined) {
-      return { ok: true, runId: active.runId, reused: true };
+      return this.reuseRun(active);
     }
     const key = `${input.workspaceRoot}\n${String(input.roadmapIssueNumber)}`;
     if (this.startingRuns.has(key)) {
       return { ok: false, message: `#${String(input.roadmapIssueNumber)}の実行を準備中です` };
     }
     this.startingRuns.add(key);
+    // 計画の準備（ヘッドレスCLIで数分かかりうる）より先に専有権を取る。別のウィンドウと
+    // 同時に準備して、同じロードマップのrunを2つ作らないため
+    const runId = this.newId();
     try {
-      return await this.prepareRun(input);
+      const leased = await this.ensureLease({ ...input, runId });
+      if (!leased.ok) {
+        return leased;
+      }
+      const outcome = await this.prepareRun(input, runId);
+      if (!outcome.ok || outcome.runId !== runId) {
+        await this.releaseLease(runId);
+      }
+      if (outcome.ok && outcome.runId !== runId) {
+        const raced = this.deps.store.find(outcome.runId);
+        return raced === undefined ? outcome : this.reuseRun(raced);
+      }
+      return outcome;
     } catch (error) {
+      await this.releaseLease(runId);
       const message = error instanceof Error ? error.message : String(error);
       this.deps.log(`roadmap run: 開始に失敗: ${message}`);
       return { ok: false, message };
@@ -163,7 +190,16 @@ export class RoadmapRunController {
     }
   }
 
-  private async prepareRun(input: StartRoadmapRunInput): Promise<StartRoadmapRunOutcome> {
+  /** 同じロードマップの実行中のrunを使う。専有権が取れなければ使わない。 */
+  private async reuseRun(run: RoadmapRun): Promise<StartRoadmapRunOutcome> {
+    const leased = await this.ensureLease(run);
+    return leased.ok ? { ok: true, runId: run.runId, reused: true } : leased;
+  }
+
+  private async prepareRun(
+    input: StartRoadmapRunInput,
+    runId: string,
+  ): Promise<StartRoadmapRunOutcome> {
     const host = await this.deps.detectHost(input.workspaceRoot);
     if (host === undefined) {
       return { ok: false, message: 'originのURLからGitHub / GitLabを判定できませんでした' };
@@ -214,7 +250,6 @@ export class RoadmapRunController {
     if (raced !== undefined) {
       return { ok: true, runId: raced.runId, reused: true };
     }
-    const runId = this.newId();
     const run = createRoadmapRun({
       runId,
       roadmapIssueNumber: input.roadmapIssueNumber,
@@ -243,6 +278,67 @@ export class RoadmapRunController {
   }
 
   /* ------------------------------------------------------------------------------------------ */
+  /* ウィンドウの専有権（Issue #1555）                                                           */
+  /* ------------------------------------------------------------------------------------------ */
+
+  /**
+   * runの専有権を取る（持っていれば何もしない）。自分のrunの専有権がウィンドウの異常終了で
+   * 残っていても、失効していれば取り直せる。ファイル操作の失敗は、取れなかったものとして扱う。
+   */
+  private async ensureLease(
+    run: Pick<RoadmapRun, 'runId' | 'workspaceRoot' | 'roadmapIssueNumber'>,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const lease = this.deps.lease;
+    if (lease === undefined || lease.holds(run.runId)) {
+      return { ok: true };
+    }
+    try {
+      const outcome = await lease.acquire({
+        runId: run.runId,
+        workspaceRoot: run.workspaceRoot,
+        roadmapIssueNumber: run.roadmapIssueNumber,
+      });
+      return outcome.ok
+        ? outcome
+        : {
+            ok: false,
+            message: formatRoadmapLeaseRejection(run.roadmapIssueNumber, outcome.holder, this.now()),
+          };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.log(`[roadmap run] ${run.runId}の専有権を取れませんでした: ${message}`);
+      return {
+        ok: false,
+        message: `ロードマップ #${String(run.roadmapIssueNumber)}の専有権を取れませんでした: ${message}`,
+      };
+    }
+  }
+
+  /** このウィンドウがrunを動かしてよいか（専有権を使わない構成では常に真）。 */
+  private holdsLease(runId: string): boolean {
+    return this.deps.lease?.holds(runId) ?? true;
+  }
+
+  private async releaseLease(runId: string): Promise<void> {
+    try {
+      await this.deps.lease?.release(runId);
+    } catch (e: unknown) {
+      this.deps.log(`[roadmap run] ${runId}の専有権を解放できませんでした: ${String(e)}`);
+    }
+  }
+
+  /** 持っていたはずの専有権を別のウィンドウに取られた（heartbeatで気づいた）。 */
+  handleLeaseLost(runId: string, holder: RoadmapRunLease | undefined): void {
+    this.addEvent(
+      runId,
+      `${formatRoadmapLeaseHolder(holder, this.now())}がこのロードマップの専有権を取ったため、` +
+        'このウィンドウからの自動実行とmergeを止めました',
+      'warn',
+    );
+    this.deps.onDidChange();
+  }
+
+  /* ------------------------------------------------------------------------------------------ */
   /* 状態の変化                                                                                  */
   /* ------------------------------------------------------------------------------------------ */
 
@@ -266,9 +362,13 @@ export class RoadmapRunController {
       });
     }
     this.checkStalled(next);
-    this.deps.mergeQueue?.sync(next);
+    if (this.holdsLease(next.runId)) {
+      this.deps.mergeQueue?.sync(next);
+    }
     this.deps.onRunTransition?.(prev, next);
-    if (pickIssuesToStart(next).length > 0) {
+    if (next.finishedAt !== undefined) {
+      void this.releaseLease(next.runId);
+    } else if (pickIssuesToStart(next).length > 0) {
       this.schedulePump(next.runId);
     }
     this.deps.onDidChange();
@@ -303,6 +403,10 @@ export class RoadmapRunController {
   private schedulePump(runId: string): void {
     if (this.pumping.has(runId)) {
       this.pumpAgain.add(runId);
+      return;
+    }
+    if (!this.holdsLease(runId)) {
+      // 専有権を持たないウィンドウからは始めない（持っているウィンドウが送り出す）
       return;
     }
     const task = (async () => {
@@ -357,12 +461,30 @@ export class RoadmapRunController {
     if (!isValidMaxParallel(maxParallel)) {
       return { ok: false, message: `並列上限は1〜${MAX_ROADMAP_PARALLEL}の整数で指定してください` };
     }
+    const run = this.deps.store.find(runId);
+    if (run === undefined) {
+      return { ok: false, message: 'runが見つかりません' };
+    }
+    const leased = await this.ensureLease(run);
+    if (!leased.ok) {
+      return leased;
+    }
     const next = await this.updateRun(runId, (r) => setRunMode(r, mode, maxParallel));
     return next === undefined ? { ok: false, message: 'runが見つかりません' } : { ok: true };
   }
 
   /** run全体を止める・再開する。止めても動いているセッションは止めない（新しく始めないだけ）。 */
   async setHalted(runId: string, halted: boolean): Promise<void> {
+    const run = this.deps.store.find(runId);
+    if (!halted && run !== undefined) {
+      // 再開の前に専有権を取る（再読み込みで止めた自動実行の再開を含む）
+      const leased = await this.ensureLease(run);
+      if (!leased.ok) {
+        this.addEvent(runId, leased.message, 'warn');
+        this.deps.onDidChange();
+        return;
+      }
+    }
     await this.updateRun(runId, (r) => setRunHaltedByUser(r, halted));
   }
 
@@ -371,7 +493,11 @@ export class RoadmapRunController {
     issueNumber: number,
     overrideDependencies: boolean,
   ): Promise<StartIssueOutcome> {
-    const outcome = await this.deps.runner.startIssue(runId, issueNumber, { overrideDependencies });
+    const run = this.deps.store.find(runId);
+    const leased = run === undefined ? { ok: true as const } : await this.ensureLease(run);
+    const outcome: StartIssueOutcome = leased.ok
+      ? await this.deps.runner.startIssue(runId, issueNumber, { overrideDependencies })
+      : { ok: false, reason: 'leaseDenied', message: leased.message };
     if (!outcome.ok) {
       this.addEvent(runId, `#${String(issueNumber)}を始められませんでした: ${outcome.message}`, 'warn');
       this.deps.onDidChange();
@@ -415,6 +541,17 @@ export class RoadmapRunController {
    * （リロードのたびに黙ってセッションを始めないため）。
    */
   async restore(): Promise<void> {
+    // 走り終えていないrunの専有権を取り直す。ウィンドウが落ちて残った自分の専有権は、失効して
+    // いれば取り直せる。取れないrunは別のウィンドウが動かしているため、ここからは動かさない
+    for (const run of this.deps.store.list()) {
+      if (run.finishedAt !== undefined) {
+        continue;
+      }
+      const leased = await this.ensureLease(run);
+      if (!leased.ok) {
+        this.addEvent(run.runId, leased.message, 'warn');
+      }
+    }
     for (const run of this.deps.store.list()) {
       if (run.finishedAt !== undefined || run.mode !== 'auto' || run.haltedByUser) {
         continue;
@@ -439,7 +576,9 @@ export class RoadmapRunController {
       if (!this.lastSeen.has(run.runId)) {
         this.lastSeen.set(run.runId, run);
       }
-      this.deps.mergeQueue?.sync(run);
+      if (this.holdsLease(run.runId)) {
+        this.deps.mergeQueue?.sync(run);
+      }
     }
     this.deps.onDidChange();
   }

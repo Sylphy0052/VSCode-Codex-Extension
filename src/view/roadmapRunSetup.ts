@@ -1,4 +1,6 @@
 import { writeFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
   readAutoReplyReflexConfig,
@@ -30,6 +32,11 @@ import { describeRoadmapSourceDiff } from '../orchestrator/roadmapPlanHash';
 import { judgeRoadmapQuestion, RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
 import { RoadmapRunController } from '../orchestrator/roadmapRunController';
 import {
+  normalizeRepoIdentity,
+  ROADMAP_LEASE_DIR_NAME,
+  RoadmapRunLeaseManager,
+} from '../orchestrator/roadmapRunLease';
+import {
   detectRoadmapForgeHost,
   findRoadmapPullRequest,
   isRoadmapPullRequestMerged,
@@ -54,6 +61,7 @@ import {
   type WorktreeCreationQueue,
 } from '../orchestrator/worktree';
 import { RoadmapKanbanViewManager } from './roadmapKanbanView';
+import { sessionHubRoot } from './sessionHub';
 
 /** 1つのIssueのセッションで送る指示の上限（引き継ぎを含む）。実装・レビュー・PR作成まで回す。 */
 const ROADMAP_ISSUE_MAX_ITERATIONS = 10;
@@ -81,6 +89,8 @@ export interface RoadmapRunSetupDeps {
   readContextLowPercent: () => number;
   /** Orchestratorセッション（分割案8b-1）の権限の上限。 */
   readBaseline(): ExtensionSafetyBaseline;
+  /** このウィンドウの識別子（`sessionHub.ts`の`generateWindowId`）。専有権の持ち主の表記に使う。 */
+  windowId: string;
   log: Logger;
 }
 
@@ -171,6 +181,21 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     log: (message) => log.info(message),
   });
 
+  // ウィンドウの専有権（Issue #1555）。セッション統括の共有ディレクトリの下に置き、
+  // globalStorageを共有する全ウィンドウ（NFSで共有された別ホストを含む）から見えるようにする
+  const leases = new RoadmapRunLeaseManager({
+    dir: path.join(sessionHubRoot(deps.context.globalStorageUri.fsPath), ROADMAP_LEASE_DIR_NAME),
+    owner: { windowId: deps.windowId, hostname: hostname(), pid: process.pid },
+    // ホストによってworkspaceRootのパスが違っても同じrepoを同じ専有権にするため、originで見分ける。
+    // originが無ければパスで代える
+    resolveRepoIdentity: async (root) => {
+      const remote = await deps.git.run(['remote', 'get-url', 'origin'], root);
+      return (remote.code === 0 ? normalizeRepoIdentity(remote.stdout) : undefined) ?? path.resolve(root);
+    },
+    onLost: (runId, lost) => holder.controller?.handleLeaseLost(runId, lost),
+    log: (message) => log.warn(`[roadmap run] ${message}`),
+  });
+
   const controller = new RoadmapRunController({
     store,
     runner,
@@ -187,6 +212,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
     onDidChange: () => holder.view?.refresh(),
     mergeQueue,
     onRunTransition: (prev, next) => holder.orchestrator?.handleRunTransition(prev, next),
+    lease: leases,
     log: (message) => log.info(message),
   });
   holder.controller = controller;
@@ -211,6 +237,7 @@ export function setupRoadmapRun(deps: RoadmapRunSetupDeps): vscode.Disposable[] 
   return [
     { dispose: () => mergeQueue.dispose() },
     { dispose: () => runner.dispose() },
+    { dispose: () => leases.dispose() },
     // Orchestratorはトークンを外してからセッションを閉じるため、サーバより先に片付ける
     { dispose: () => orchestrator.dispose() },
     { dispose: () => questionServer.dispose() },
