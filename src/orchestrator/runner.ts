@@ -2359,16 +2359,6 @@ export class WorkflowRunner {
   }
 
   /**
-   * このrunのワークスペース直下（`repoRoot`）。教訓欄（`workflowView.ts`の`postLessons`、
-   * Issue #1599）が`RunNotesStore`へ渡す鍵として使う。`WorkflowRunSnapshot`は
-   * `repoRoot`を持たない（`roadmap`欄の`roadmapPath`と違い、Webviewへ絶対パスを
-   * 一切出したくないため）ので、この専用アクセサを別に用意する。
-   */
-  getRepoRoot(runId: string): string | undefined {
-    return this.runs.get(runId)?.repoRoot;
-  }
-
-  /**
    * このsessionId（Codexのthread id / Claudeのsession id）がタスク（オーケストレータ）
    * 管理下かどうかを答える（design.md §16.10の7）。`ChatViewManager` /
    * `ClaudeChatViewManager` の `isTaskManagedThread` へそのまま渡す用途。

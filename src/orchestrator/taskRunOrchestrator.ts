@@ -285,11 +285,24 @@ export class TaskRunOrchestrator {
       return;
     }
     for (const event of diffTaskRunEvents(prev, next)) {
-      this.notify(next.runId, event);
+      this.notify(next.runId, this.withLessonReminder(event));
     }
     for (const ref of newlyAwaitingDecision(prev, next)) {
       void this.notifyAwaitingDecision(next.runId, ref);
     }
+  }
+
+  /**
+   * `runFinished`イベントに、記録済みなら次のrunへ教訓を残せる旨の一文を足す（自己レビュー
+   * 指摘: medium。workflow runと違いtask-run/roadmap-runのOrchestratorは`runFinished`後も
+   * セッションが生き続けるため、intro文の「気付いた時点、またはrunFinishedを受けたときに
+   * 記録する」の後半をここで実現する）。`runNotes`が未設定（教訓欄が無効）なら何もしない。
+   */
+  private withLessonReminder(event: TaskRunOrchestratorEvent): TaskRunOrchestratorEvent {
+    if (event.kind !== 'runFinished' || this.deps.runNotes === undefined) {
+      return event;
+    }
+    return { ...event, body: `${event.body}次のrunへ残す教訓があればrecord_lessonで記録する。` };
   }
 
   /**
@@ -819,8 +832,8 @@ function buildIntroPrompt(
     ...(lessonsBlock === undefined
       ? []
       : [
-          '- record_lesson: 次のrunへ残す教訓。run終了時にはツールが閉じるため、気付いた' +
-            '時点（工程の失敗・やり直し・最後のタスクの完了前）で記録する',
+          '- record_lesson: 次のrunへ残す教訓。気付いた時点（工程の失敗・やり直し・最後の' +
+            'タスクの完了前）、またはrunFinishedを受けたときに記録する',
         ]),
     '',
     '現在の状態:',

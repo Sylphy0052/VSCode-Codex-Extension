@@ -291,8 +291,21 @@ export class RoadmapOrchestrator {
       return;
     }
     for (const event of events) {
-      this.notify(runId, event);
+      this.notify(runId, this.withLessonReminder(event));
     }
+  }
+
+  /**
+   * `runFinished`イベントに、記録済みなら次のrunへ教訓を残せる旨の一文を足す（自己レビュー
+   * 指摘: medium。workflow runと違いroadmap-runのOrchestratorは`runFinished`後もセッションが
+   * 生き続けるため、intro文の「気付いた時点、またはrunFinishedを受けたときに記録する」の
+   * 後半をここで実現する）。`runNotes`が未設定（教訓欄が無効）なら何もしない。
+   */
+  private withLessonReminder(event: RoadmapOrchestratorEvent): RoadmapOrchestratorEvent {
+    if (event.kind !== 'runFinished' || this.deps.runNotes === undefined) {
+      return event;
+    }
+    return { ...event, body: `${event.body}次のrunへ残す教訓があればrecord_lessonで記録する。` };
   }
 
   dispose(): void {
@@ -770,8 +783,8 @@ function buildIntroPrompt(
     ...(lessonsBlock === undefined
       ? []
       : [
-          '- record_lesson: 次のrunへ残す教訓。run終了時にはツールが閉じるため、気付いた' +
-            '時点（ノードの失敗・停止・最後のノードの完了前）で記録する',
+          '- record_lesson: 次のrunへ残す教訓。気付いた時点（ノードの失敗・停止・最後の' +
+            'ノードの完了前）、またはrunFinishedを受けたときに記録する',
         ]),
     '',
     `計画: ${String(run.plan.nodes.length)}ノード（${run.plan.source === 'generated' ? 'このrunで生成' : 'ロードマップ本文の計画区画'}）`,

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-import type { RunNotesFileSystemPort } from './runNotes';
+import type { ReadTextFileResult, RunNotesFileSystemPort } from './runNotes';
 
 /**
  * `RunNotesFileSystemPort`（`runNotes.ts`、Issue #1599）のNode実装。
@@ -38,11 +38,17 @@ export const nodeRunNotesFileSystem: RunNotesFileSystemPort = {
       return false;
     }
   },
-  async readTextFile(target: string): Promise<string | undefined> {
+  async readTextFile(target: string): Promise<ReadTextFileResult> {
     try {
-      return await fsPromises.readFile(target, 'utf8');
-    } catch {
-      return undefined;
+      const text = await fsPromises.readFile(target, 'utf8');
+      return { kind: 'ok', text };
+    } catch (e) {
+      // 「存在しない（ENOENT）」と「読めない（権限・I/O等）」を呼び出し側が区別できるように
+      // する（`runNotes.ts`の`ReadTextFileResult`のJSDoc参照）
+      if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return { kind: 'missing' };
+      }
+      return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
     }
   },
   async replaceTextFile(target: string, content: string): Promise<boolean> {

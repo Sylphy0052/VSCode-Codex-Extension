@@ -290,7 +290,8 @@ export function formatLessonsForIntro(lessons: readonly LessonRecord[], nonce?: 
   const omittedByLength = lines.length - kept;
   const totalOmitted = omittedByCap + omittedByLength;
   const body = lines.slice(0, kept).join('\n');
-  const withOmittedNotice = totalOmitted > 0 ? `${body}\nほか${String(totalOmitted)}件は省略` : body;
+  const withOmittedNotice =
+    totalOmitted > 0 ? `${body}\n- ほか${String(totalOmitted)}件は省略` : body;
   const wrapped = formatUntrusted(withOmittedNotice, {
     id: 'runNotes',
     field: 'lessons',
@@ -305,14 +306,25 @@ export function formatLessonsForIntro(lessons: readonly LessonRecord[], nonce?: 
   );
 }
 
+/**
+ * `readTextFile`の結果。「存在しない（ENOENT）」と「読めない（権限・I/O等）」を呼び出し側が
+ * 区別できるようにする（自己レビュー指摘: medium。以前は両方`undefined`で潰していたため、
+ * `listLessons`は権限エラーでも「記録が無い」、`deleteLesson`は「指定の教訓は見つかりません」
+ * という誤った理由を返していた）。
+ */
+export type ReadTextFileResult =
+  | { kind: 'missing' }
+  | { kind: 'ok'; text: string }
+  | { kind: 'error'; message: string };
+
 /** `RunNotesStore`が必要とする最小限のファイルシステム操作。`teamHandoff.ts`の`HandoffFileSystemPort`と同じ流儀。 */
 export interface RunNotesFileSystemPort extends SymlinkCheckPort {
   /** 親を含めてディレクトリを作る。既にあれば何もしない。作れたら（既にあった場合も）true。 */
   makeDirectory(target: string): Promise<boolean>;
   /** 1行を追記する（改行終端は呼び出し側の責務）。1回の呼び出しで1回のappendFileを行うこと。 */
   appendLine(target: string, line: string): Promise<boolean>;
-  /** UTF-8で読む。存在しなければundefined。 */
-  readTextFile(target: string): Promise<string | undefined>;
+  /** UTF-8で読む。`ReadTextFileResult`参照。 */
+  readTextFile(target: string): Promise<ReadTextFileResult>;
   /** 内容全体を置き換える。一時ファイルへ書いてからrenameする（削除・上限整理の書き直し用）。 */
   replaceTextFile(target: string, content: string): Promise<boolean>;
 }
@@ -373,6 +385,11 @@ export class RunNotesStore {
    * 教訓を1件記録する。`input`は`parseLessonArgs`済みの中身に`runId`/`runKind`を加えたもの。
    * 呼び出し回数の上限（`MAX_RECORD_LESSON_CALLS_PER_RUN`）はここでは数えない
    * （このJSDoc冒頭・定数コメント参照。呼び出し側がインメモリで数える）。
+   *
+   * 既存の記録を読めない（`readTextFile`が`{ kind: 'error' }`を返す。権限・I/O等）場合は、
+   * 件数の刈り込み判定（`MAX_LESSONS_STORED`）を飛ばして追記だけ行う。刈り込みには既存の
+   * 正確な件数が要るが、読めない以上それが分からないため。追記できたことは記録が壊れていない
+   * ことを意味しないが、読めないことをrunを止める理由にはしない。
    */
   async recordLesson(
     workspaceRoot: string,
@@ -392,9 +409,14 @@ export class RunNotesStore {
           return { ok: false, message: '教訓を書き込めませんでした。' };
         }
         const record = buildLessonRecord(input, this.now);
-        const existingText = await this.fs.readTextFile(target);
-        const existing = existingText === undefined ? [] : parseRunNotes(existingText);
-        if (existing.length >= MAX_LESSONS_STORED) {
+        const readResult = await this.fs.readTextFile(target);
+        if (readResult.kind === 'error') {
+          this.logFailure(`教訓の既存記録を読めませんでした（追記のみ行います）: ${readResult.message}`);
+        }
+        const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
+        // 読めなかった場合は既存件数が分からないため、刈り込み判定（上限整理）を飛ばして
+        // 追記だけ行う（このメソッドのJSDoc参照）
+        if (readResult.kind !== 'error' && existing.length >= MAX_LESSONS_STORED) {
           const capacityForOld = Math.max(0, MAX_LESSONS_STORED - 1);
           const kept = capacityForOld === 0 ? [] : existing.slice(-capacityForOld);
           const rewritten = await this.fs.replaceTextFile(target, toJsonlText([...kept, record]));
@@ -418,28 +440,59 @@ export class RunNotesStore {
     });
   }
 
-  /** 教訓を新しい順で一覧する。読み込み失敗・記録が無い場合は空配列。 */
+  /**
+   * 教訓を新しい順で一覧する。記録が無い場合は空配列。読み込み失敗（経路にシンボリックリンク・
+   * 権限・I/O等）も空配列を返すが、`log`（渡されていれば）へ理由を1行だけ出す。
+   */
   async listLessons(workspaceRoot: string): Promise<LessonRecord[]> {
     try {
       const target = notesPath(workspaceRoot);
-      const text = await this.fs.readTextFile(target);
-      if (text === undefined) {
+      // `recordLesson`と同じ一次防御（`findSymlinkedAncestor`）。書き込みだけでなく
+      // 読み込みも、シンボリックリンクを辿ってワークスペース外を読ませない（自己レビュー
+      // 指摘: medium）
+      const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
+      if (symlinked !== undefined) {
+        this.logFailure(`教訓一覧の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`);
         return [];
       }
-      return [...parseRunNotes(text)].reverse();
+      const readResult = await this.fs.readTextFile(target);
+      if (readResult.kind === 'missing') {
+        return [];
+      }
+      if (readResult.kind === 'error') {
+        this.logFailure(`教訓一覧を読めませんでした: ${readResult.message}`);
+        return [];
+      }
+      return [...parseRunNotes(readResult.text)].reverse();
     } catch (e) {
       this.logFailure(`教訓一覧を読めませんでした: ${e instanceof Error ? e.message : String(e)}`);
       return [];
     }
   }
 
-  /** `id`が示す教訓を1件消す。ワークフローViewからの削除操作の実体。 */
+  /**
+   * `id`が示す教訓を1件消す。ワークフローViewからの削除操作の実体。
+   *
+   * 既存の記録を読めない場合は、`{ ok: false }`の理由を「指定の教訓は見つかりませんでした」
+   * ではなく読み取り失敗にする（自己レビュー指摘: medium。両者を同じ文言にすると、実際には
+   * 存在する教訓を読めないだけなのに「無い」と誤解させる）。
+   */
   async deleteLesson(workspaceRoot: string, id: string): Promise<RunNotesWriteResult> {
     return this.queue.enqueue(async () => {
       try {
         const target = notesPath(workspaceRoot);
-        const text = await this.fs.readTextFile(target);
-        const existing = text === undefined ? [] : parseRunNotes(text);
+        // `listLessons`と同じ一次防御。削除も経路にシンボリックリンクが含まれていれば読まない
+        const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
+        if (symlinked !== undefined) {
+          this.logFailure(`教訓の削除先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+          return { ok: false, message: '教訓を削除できませんでした（経路が不正です）。' };
+        }
+        const readResult = await this.fs.readTextFile(target);
+        if (readResult.kind === 'error') {
+          this.logFailure(`教訓一覧を読めませんでした（削除できません）: ${readResult.message}`);
+          return { ok: false, message: '教訓を削除できませんでした（記録を読めませんでした）。' };
+        }
+        const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
         const next = existing.filter((record) => record.id !== id);
         if (next.length === existing.length) {
           return { ok: false, message: '指定の教訓は見つかりませんでした。' };

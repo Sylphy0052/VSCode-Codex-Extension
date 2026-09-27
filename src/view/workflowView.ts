@@ -47,6 +47,7 @@ import { workflowScript } from './workflowScript';
 import { workflowStyles } from './workflowStyles';
 import { buildTaskWorkSummary } from '../orchestrator/taskSummary';
 import type { LessonRecord, RunNotesStore } from '../orchestrator/runNotes';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 
 /**
  * ワークフローViewから、失敗の伝播・人による停止の状態が読める最小限の口
@@ -71,12 +72,22 @@ export type ProgramViewPort = WorkflowFeedProgramPort;
 
 /**
  * 教訓欄（Issue #1599）が使う口。**省略可能**で、渡さなければ欄を一切出さない
- * （`ProgramViewPort`/`RoadmapViewPort`と同じ方針）。実体は`runNotes.ts`の
- * `RunNotesStore`（`extension.ts`が拡張機能全体で共有する1インスタンスをそのまま渡す。
- * `onDidChange`はワークフローView以外——taskRun/roadmapRunの各オーケストレーター——が
- * 記録・削除した場合にも発火するため、ここでの購読だけで両方を拾える）。
+ * （`ProgramViewPort`/`RoadmapViewPort`と同じ方針）。`listLessons`/`deleteLesson`/
+ * `onDidChange`の実体は`runNotes.ts`の`RunNotesStore`（`extension.ts`が拡張機能全体で
+ * 共有する1インスタンスから束ねる。`onDidChange`はワークフローView以外——taskRun/
+ * roadmapRunの各オーケストレーター——が記録・削除した場合にも発火するため、ここでの
+ * 購読だけで両方を拾える）。
+ *
+ * `workspaceRoot`は`extension.ts`が`vscode.workspace.workspaceFolders?.[0]?.uri.fsPath`を
+ * 解決して渡す（自己レビュー指摘: medium）。**表示中のワークフローrunの`repoRoot`には
+ * 依存させない。** 依存させると、ワークフローrunが1件も動いていない（`activeRunId`が無い）
+ * ときに教訓欄が消え、タスク実行・ロードマップ実行だけを使う人が教訓を見る・消す手段を
+ * 失う（教訓はworkflow/taskRun/roadmapRunの3種で共有する1ファイルのため、runの種類を
+ * 問わず見えるべき）。
  */
-export type RunNotesViewPort = Pick<RunNotesStore, 'listLessons' | 'deleteLesson' | 'onDidChange'>;
+export interface RunNotesViewPort extends Pick<RunNotesStore, 'listLessons' | 'deleteLesson' | 'onDidChange'> {
+  readonly workspaceRoot: string;
+}
 
 /**
  * ワークフローViewのロードマップ欄（Issue #1257）が使う口。**省略可能**で、渡さなければ
@@ -127,6 +138,13 @@ interface WorkflowStateMessage {
  * 直近の結果を使い回す。人が「更新」を押したときはこの窓を無視して取り直す。
  */
 const ROADMAP_ISSUE_CACHE_MS = 60_000;
+
+/**
+ * 教訓の削除確認（Issue #1599自己レビュー指摘: high）に出すobservationの先頭の長さ。
+ * `sanitizeInlineText`で1行化・省略記号付きの短縮も行うため、確認ダイアログが長大な
+ * 複数行のテキストで埋まらないようにする。
+ */
+const LESSON_DELETE_CONFIRM_PREVIEW_LENGTH = 80;
 
 /**
  * ワークフローViewパネルの生成オプション（design.md §14.48、issue #287）。
@@ -541,9 +559,14 @@ export class WorkflowViewManager implements vscode.Disposable {
   }
 
   /**
-   * 教訓欄（Issue #1599）を送る。`runNotes`（`RunNotesViewPort`）が未注入、または
-   * 表示中のrunのワークスペース直下が分からない（`activeRunId`が無い・runが既に
-   * メモリから外れた）場合は、欄を隠す指示（`lessons: undefined`）だけを送る。
+   * 教訓欄（Issue #1599）を送る。`runNotes`（`RunNotesViewPort`）が未注入なら、欄を隠す
+   * 指示（`lessons: undefined`）だけを送る。
+   *
+   * ワークスペースルートは`runNotes.workspaceRoot`（`extension.ts`が
+   * `vscode.workspace.workspaceFolders`から解決）を使い、表示中のrun（`activeRunId`）には
+   * 依存しない（自己レビュー指摘: medium。ワークフローrunが1件も動いていないときに欄が
+   * 消えると、タスク実行・ロードマップ実行だけを使う人が教訓を見られなくなる。
+   * `RunNotesViewPort`のJSDoc参照）。
    *
    * ロードマップ欄と違い外部CLIを起動しないため、`postAll`から常に無条件で呼ぶ
    * （`refreshRoadmap`のような呼び分けは不要）。
@@ -552,13 +575,13 @@ export class WorkflowViewManager implements vscode.Disposable {
     if (this.panel === undefined) {
       return;
     }
-    const repoRoot =
-      this.activeRunId === undefined ? undefined : this.runner.getRepoRoot(this.activeRunId);
-    if (this.runNotes === undefined || repoRoot === undefined) {
+    if (this.runNotes === undefined) {
       void this.panel.webview.postMessage({ type: 'lessons', lessons: undefined });
       return;
     }
-    const lessons: readonly LessonRecord[] = await this.runNotes.listLessons(repoRoot);
+    const lessons: readonly LessonRecord[] = await this.runNotes.listLessons(
+      this.runNotes.workspaceRoot,
+    );
     if (this.panel === undefined) {
       return;
     }
@@ -681,6 +704,43 @@ export class WorkflowViewManager implements vscode.Disposable {
       await this.openIssueUrl(url);
       return;
     }
+    if (type === 'deleteLesson' && typeof m['id'] === 'string') {
+      // 教訓欄は表示中のワークフローrunに依存しない（`postLessons`・`RunNotesViewPort`の
+      // JSDoc参照）ため、`activeRunId`の有無を問わないこの位置に置く
+      if (this.runNotes === undefined) {
+        return;
+      }
+      const requestedId = m['id'];
+      const workspaceRoot = this.runNotes.workspaceRoot;
+      // Webviewは信頼境界の外側。一覧に実在するidだけを受け付ける
+      // （`selectRun`と同じ多層防御の方針。自己レビュー指摘: high）
+      const lessons = await this.runNotes.listLessons(workspaceRoot);
+      const target = lessons.find((lesson) => lesson.id === requestedId);
+      if (target === undefined) {
+        return;
+      }
+      // 削除は元に戻せないため、消す内容が分かるように確認を挟む（自己レビュー指摘: high。
+      // 「worktreeの撤去」等、他の破壊的操作と同じ流儀）
+      const preview = sanitizeInlineText(target.observation, LESSON_DELETE_CONFIRM_PREVIEW_LENGTH);
+      const choice = await vscode.window.showWarningMessage(
+        `この教訓を削除します: 「${preview}」`,
+        { modal: true },
+        '削除',
+      );
+      if (choice !== '削除') {
+        return;
+      }
+      // 削除の成否に関わらず欄の再送は`runNotes.onDidChange`購読（コンストラクタ）に任せる。
+      // ここで`postLessons`を呼び直すと、削除失敗時にも再送してしまい二重になる
+      const result = await this.runNotes.deleteLesson(workspaceRoot, requestedId);
+      if (!result.ok) {
+        // ログだけでは削除操作をした人に失敗が伝わらない（自己レビュー指摘: medium）ため、
+        // 非modalの警告でも見せる
+        this.log.warn(`[workflowView] 教訓を削除できませんでした: ${result.message}`);
+        void vscode.window.showWarningMessage(`教訓を削除できませんでした: ${result.message}`);
+      }
+      return;
+    }
 
     const runId = this.activeRunId;
     if (runId === undefined) {
@@ -689,18 +749,6 @@ export class WorkflowViewManager implements vscode.Disposable {
 
     if (type === 'stopAll') {
       this.runner.stop(runId);
-      return;
-    }
-    if (type === 'deleteLesson' && typeof m['id'] === 'string') {
-      // 削除の成否に関わらず欄の再送は`runNotes.onDidChange`購読（コンストラクタ）に任せる。
-      // ここで`postLessons`を呼び直すと、削除失敗時にも再送してしまい二重になる
-      const repoRoot = this.runner.getRepoRoot(runId);
-      if (this.runNotes !== undefined && repoRoot !== undefined) {
-        const result = await this.runNotes.deleteLesson(repoRoot, m['id']);
-        if (!result.ok) {
-          this.log.warn(`[workflowView] 教訓を削除できませんでした: ${result.message}`);
-        }
-      }
       return;
     }
     if (type === 'removeWorktrees') {

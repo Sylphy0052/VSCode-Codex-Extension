@@ -232,7 +232,7 @@ import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
-import { WorkflowViewManager, type RoadmapViewPort } from './view/workflowView';
+import { WorkflowViewManager, type RoadmapViewPort, type RunNotesViewPort } from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
 import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
@@ -909,6 +909,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   programRunner.attach();
   context.subscriptions.push({ dispose: () => programRunner.dispose() });
 
+  // 教訓欄（Issue #1599）のワークスペースルート。表示中のワークフローrunの`repoRoot`に
+  // 依存させると、taskRun/roadmapRunしか使わない利用者から欄が消える（自己レビュー指摘:
+  // medium）ため、`activeRunId`を経由しないワークスペース直下を使う。ルートが無ければ
+  // 欄自体を隠す（`postLessons`の`this.runNotes === undefined`分岐）
+  const runNotesWorkspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const runNotesViewPort: RunNotesViewPort | undefined =
+    runNotesWorkspaceRoot === undefined
+      ? undefined
+      : {
+          workspaceRoot: runNotesWorkspaceRoot,
+          listLessons: runNotes.listLessons.bind(runNotes),
+          deleteLesson: runNotes.deleteLesson.bind(runNotes),
+          onDidChange: runNotes.onDidChange.bind(runNotes),
+        };
+
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
   const workflowView = new WorkflowViewManager(
@@ -923,7 +938,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 完了根拠の列（Issue #1380）。上で作った唯一の保存先から読む
     verificationStore,
     // 教訓欄（Issue #1599）。workflow / taskRun / roadmapRunの3種で共有する唯一のインスタンス
-    runNotes,
+    runNotesViewPort,
   );
   context.subscriptions.push(workflowView);
 
