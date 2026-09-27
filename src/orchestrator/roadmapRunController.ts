@@ -29,6 +29,7 @@ import {
 import {
   selectRoadmapRunEvents,
   type RoadmapRunEventInput,
+  type RoadmapRunEventKind,
   type RoadmapRunEventsPage,
   type RoadmapRunEventStore,
 } from './roadmapRunEventLog';
@@ -395,6 +396,7 @@ export class RoadmapRunController {
       `${formatRoadmapLeaseHolder(holder, this.now())}がこのロードマップの専有権を取ったため、` +
         'このウィンドウからの自動実行とmergeを止めました',
       'warn',
+      'leaseLost',
     );
     void this.updateRun(runId, (r) => setRunHaltedByUser(r, true)).catch((e: unknown) => {
       this.deps.log(`[roadmap run] ${runId}の停止を保存できませんでした: ${String(e)}`);
@@ -671,7 +673,17 @@ export class RoadmapRunController {
     return this.deps.store.list().length > 0;
   }
 
-  private addEvent(runId: string, message: string, tone: RoadmapKanbanEvent['tone']): void {
+  /**
+   * `kind`を省くと、イベントログの種別はKanbanの表示色（`tone`）から機械的に決める
+   * （'warn' → 'warning'、それ以外 → 'notice'）。専有権の失効等、字面を揃えたい専用の種別が
+   * あるときだけ明示的に渡す（Issue #1590）。
+   */
+  private addEvent(
+    runId: string,
+    message: string,
+    tone: RoadmapKanbanEvent['tone'],
+    kind: RoadmapRunEventKind = tone === 'warn' ? 'warning' : 'notice',
+  ): void {
     const list = this.events.get(runId) ?? [];
     const event: RoadmapKanbanEvent = {
       at: this.now().toISOString(),
@@ -679,7 +691,7 @@ export class RoadmapRunController {
       tone,
     };
     this.events.set(runId, [event, ...list].slice(0, MAX_EVENTS_PER_RUN));
-    void this.appendLog(runId, [{ kind: tone === 'warn' ? 'warning' : 'notice', message }]);
+    void this.appendLog(runId, [{ kind, message }]);
   }
 
   /* ------------------------------------------------------------------------------------------ */

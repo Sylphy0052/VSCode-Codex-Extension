@@ -264,10 +264,17 @@ const WORKFLOW_EVENT_ENVELOPE: OrchestratorEventEnvelope = {
   guidance: ORCHESTRATOR_EVENT_GUIDANCE,
 };
 
-/** 1件のイベントを囲う。本文の `<` `>` は実体参照へ変換し、囲いの偽装を成立させない。 */
-function wrapEvent(event: { kind: string; body: string }, tag: string): string {
+/**
+ * 1件のイベントを囲う。本文の `<` `>` は実体参照へ変換し、囲いの偽装を成立させない。
+ *
+ * `seq`（イベントログの番号、Issue #1576）は本文の外・タグの属性として付ける。本文の中へ
+ * `イベント#N:` の形で埋め込むと、外部由来の本文（Issueタイトル等）に同じ形の文字列が
+ * あったとき番号のなりすましを許してしまう（Issue #1590）ため、構造で区別する。
+ */
+function wrapEvent(event: { kind: string; body: string; seq?: number }, tag: string): string {
   const sanitized = escapeAngleBrackets(stripControlCharsPreservingNewlines(event.body));
-  return `<${tag} kind="${event.kind}">\n${sanitized}\n</${tag}>`;
+  const seqAttr = event.seq === undefined ? '' : ` seq="${String(event.seq)}"`;
+  return `<${tag} kind="${event.kind}"${seqAttr}>\n${sanitized}\n</${tag}>`;
 }
 
 /**
@@ -281,7 +288,7 @@ function wrapEvent(event: { kind: string; body: string }, tag: string): string {
  * 戻り値が空文字なら送るものが無い（呼び出し側は送信しない）。
  */
 export function composeOrchestratorPrompt(
-  events: readonly { kind: string; body: string }[],
+  events: readonly { kind: string; body: string; seq?: number }[],
   userText: string,
   envelope: OrchestratorEventEnvelope = WORKFLOW_EVENT_ENVELOPE,
 ): string {

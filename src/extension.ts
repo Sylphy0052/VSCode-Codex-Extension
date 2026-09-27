@@ -504,7 +504,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const workflowRunnerRef: { current: WorkflowRunner | undefined } = { current: undefined };
   // ロードマップ実行（Issue #1465）のIssueセッションも同じ口で答える（Issue #1491）。
   // 汎用復元に拾わせると、入力を閉じていたタブが通常のチャットとしてworktreeで戻るため
-  const roadmapRunStore = new RoadmapRunStore(context.workspaceState);
+  const roadmapRunStore = new RoadmapRunStore(context.workspaceState, (message) => log.warn(message));
   // オーケストレータモード（Issue #1505）の工程セッションとOrchestratorセッションも同じ
   const taskRunStore = new TaskRunStore(context.workspaceState, (message) => log.warn(message));
   const isTaskManagedThread = (id: string): boolean =>

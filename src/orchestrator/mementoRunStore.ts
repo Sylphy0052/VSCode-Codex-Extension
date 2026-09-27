@@ -33,6 +33,11 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
    * 黙って消えないよう、呼び出し側でログに残す。`isFinished`を渡したときだけ呼ぶ。
    */
   onDiscardUnfinished?(runs: readonly T[]): void;
+  /**
+   * `isValid`が弾いた（骨格の合わない）要素があったとき、読み込むたびに呼ぶ（Issue #1590）。
+   * 黙って消えないよう、呼び出し側でログに残す。壊れた中身は渡さず件数だけ渡す。
+   */
+  onDiscardInvalid?(count: number): void;
 }
 
 export class MementoRunStore<T extends StoredRun> {
@@ -48,7 +53,11 @@ export class MementoRunStore<T extends StoredRun> {
     if (!Array.isArray(raw)) {
       return [];
     }
-    return raw.filter((r): r is T => this.options.isValid(r));
+    const valid = raw.filter((r): r is T => this.options.isValid(r));
+    if (valid.length < raw.length) {
+      this.options.onDiscardInvalid?.(raw.length - valid.length);
+    }
+    return valid;
   }
 
   find(runId: string): T | undefined {
