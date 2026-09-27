@@ -81,7 +81,7 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from './taskSession';
-import type { CliCommandRunner } from './forge';
+import type { CliCommandRunner, ForgeHost } from './forge';
 import { detectRoadmapForgeHost } from './roadmapRunForge';
 import { shouldAutoApproveStageElicitation, stageApprovalHandler } from './taskStageApproval';
 import { cleanupAfterMerge, cleanupRetiredTask } from './taskStageCleanup';
@@ -1066,7 +1066,7 @@ export class TaskStageRunner {
    * `cleanupRestoredTask`のように状態から`getTask`で引き直せない。
    *
    * worktreeの削除は工程セッションを止めた後にのみ行う。止めるのは`stopStage`ではなく
-   * `stopRetiredSession`にする。`stopStage`は状態側の工程も`haltStage`で止めるため、既存Issueの
+   * `stopRetiredSessionLocked`にする。`stopStage`は状態側の工程も`haltStage`で止めるため、既存Issueの
    * 付け替えで同じtaskIdのまま作り直した未着手のタスクまで「止めた」扱いにしてしまう。
    */
   async retireTask(
@@ -1074,50 +1074,70 @@ export class TaskStageRunner {
     repoRoot: string,
     task: OrchestratedTask,
   ): Promise<{ closedPullRequest: number | undefined }> {
+    const manual = '自動では再試行しないため、残ったPR・ブランチ・worktreeは手で片付けてください';
+    let host: ForgeHost | undefined;
     try {
-      await this.stopRetiredSession(runId, task.taskId);
+      host =
+        task.pullRequest === undefined
+          ? undefined
+          : await detectRoadmapForgeHost({ git: this.deps.git, cli: this.deps.cli }, repoRoot);
     } catch (e) {
       this.warn(
         runId,
         task.taskId,
-        `${task.taskId}の工程セッションを止められなかったため、後片付けを見送りました: ${errorMessage(e)}`,
+        `${task.taskId}の後片付けでホストを判定できませんでした: ${errorMessage(e)}`,
       );
-      return { closedPullRequest: undefined };
     }
-    try {
-      const host =
-        task.pullRequest === undefined
-          ? undefined
-          : await detectRoadmapForgeHost({ git: this.deps.git, cli: this.deps.cli }, repoRoot);
-      const result = await cleanupRetiredTask(this.deps, { repoRoot, runId, task, host });
-      result.warnings.forEach((w) => this.warn(runId, task.taskId, w));
-      if (!result.ok) {
-        this.warn(runId, task.taskId, `${task.taskId}の後片付けに失敗しました: ${result.message}`);
+    // セッションの停止とブランチ・worktreeの削除を1つのロックの中で行う（`settle`と同じ）。
+    // 同じtaskIdの工程の開始が、削除の途中へ割り込まないようにする
+    return this.withTaskLock(liveKey(runId, task.taskId), async () => {
+      try {
+        await this.stopRetiredSessionLocked(runId, task.taskId);
+      } catch (e) {
+        this.warn(
+          runId,
+          task.taskId,
+          `${task.taskId}の工程セッションを止められなかったため、後片付けを見送りました（${manual}）: ${errorMessage(e)}`,
+        );
+        return { closedPullRequest: undefined };
       }
-      return { closedPullRequest: result.closedPullRequest };
-    } catch (e) {
-      this.warn(runId, task.taskId, `${task.taskId}の後片付けで例外が起きました: ${errorMessage(e)}`);
-      return { closedPullRequest: undefined };
-    }
+      try {
+        const result = await cleanupRetiredTask(this.deps, { repoRoot, runId, task, host });
+        result.warnings.forEach((w) => this.warn(runId, task.taskId, w));
+        if (!result.ok) {
+          this.warn(
+            runId,
+            task.taskId,
+            `${task.taskId}の後片付けに失敗しました（${manual}）: ${result.message}`,
+          );
+        }
+        return { closedPullRequest: result.closedPullRequest };
+      } catch (e) {
+        this.warn(
+          runId,
+          task.taskId,
+          `${task.taskId}の後片付けで例外が起きました（${manual}）: ${errorMessage(e)}`,
+        );
+        return { closedPullRequest: undefined };
+      }
+    });
   }
 
   /**
-   * 計画から外れたタスクの工程セッションを止めて閉じる（Issue #1619）。状態（`run.tasks`）には
-   * 触れない。タスクは既に計画から消えたか、同じtaskIdの未着手のタスクへ作り直されているため。
-   * 完了を報告済みのセッションは報告の処理が自分で片付けるため触れない。
+   * 計画から外れたタスクの工程セッションを止めて閉じる（Issue #1619）。呼び出し側が
+   * `withTaskLock`を持っている前提。状態（`run.tasks`）には触れない。タスクは既に計画から
+   * 消えたか、同じtaskIdの未着手のタスクへ作り直されているため。完了を報告済みの
+   * セッションは報告の処理が自分で片付けるため触れない。
    */
-  private async stopRetiredSession(runId: string, taskId: string): Promise<void> {
-    const key = liveKey(runId, taskId);
-    await this.withTaskLock(key, async () => {
-      const entry = this.live.get(key);
-      if (entry === undefined || entry.closed || entry.reported) {
-        return;
-      }
-      entry.stopping = true;
-      entry.session.stopLoop();
-      await entry.session.interrupt().catch(() => undefined);
-      this.release(entry, { dispose: true });
-    });
+  private async stopRetiredSessionLocked(runId: string, taskId: string): Promise<void> {
+    const entry = this.live.get(liveKey(runId, taskId));
+    if (entry === undefined || entry.closed || entry.reported) {
+      return;
+    }
+    entry.stopping = true;
+    entry.session.stopLoop();
+    await entry.session.interrupt().catch(() => undefined);
+    this.release(entry, { dispose: true });
   }
 
   private async cleanupIfMerged(entry: LiveStageSession): Promise<void> {

@@ -361,7 +361,7 @@ export class TaskRunController {
     const retiredLine =
       retiredResults.length === 0
         ? undefined
-        : `計画から外れた着手済みタスクを片付けた: ${retiredResults.map((r) => r.taskId).join(', ')}${
+        : `計画から外れた・作り直された着手済みタスクを片付けた: ${retiredResults.map((r) => r.taskId).join(', ')}${
             closedPrNumbers.length === 0
               ? ''
               : `（閉じたPR: ${closedPrNumbers.map((n) => `#${String(n)}`).join(', ')}）`
