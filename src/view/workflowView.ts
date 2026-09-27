@@ -78,15 +78,21 @@ export type ProgramViewPort = WorkflowFeedProgramPort;
  * roadmapRunの各オーケストレーター——が記録・削除した場合にも発火するため、ここでの
  * 購読だけで両方を拾える）。
  *
- * `workspaceRoot`は`extension.ts`が`vscode.workspace.workspaceFolders?.[0]?.uri.fsPath`を
- * 解決して渡す（自己レビュー指摘: medium）。**表示中のワークフローrunの`repoRoot`には
- * 依存させない。** 依存させると、ワークフローrunが1件も動いていない（`activeRunId`が無い）
- * ときに教訓欄が消え、タスク実行・ロードマップ実行だけを使う人が教訓を見る・消す手段を
- * 失う（教訓はworkflow/taskRun/roadmapRunの3種で共有する1ファイルのため、runの種類を
- * 問わず見えるべき）。
+ * 教訓を読むルートは`getWorkspaceRoots`（`extension.ts`が`vscode.workspace.workspaceFolders`
+ * の全フォルダを呼ぶたびに解決する）で得る。**表示中のワークフローrunの`repoRoot`には
+ * 依存させない**（自己レビュー指摘: medium）。依存させると、ワークフローrunが1件も動いて
+ * いない（`activeRunId`が無い）ときに教訓欄が消え、タスク実行・ロードマップ実行だけを使う
+ * 人が教訓を見る・消す手段を失う（教訓はworkflow/taskRun/roadmapRunの3種で共有する）。
+ * 先頭フォルダだけにしないのは、マルチルートではtaskRun/roadmapRunが選ばれたフォルダへ
+ * 記録するため（自己レビュー2巡目指摘: high）。起動時に固定しないのは、フォルダを後から
+ * 開いた・足したときにも欄を出すため（同: medium。`onDidChange`はフォルダの増減でも発火する）。
  */
-export interface RunNotesViewPort extends Pick<RunNotesStore, 'listLessons' | 'deleteLesson' | 'onDidChange'> {
-  readonly workspaceRoot: string;
+export interface RunNotesViewPort extends Pick<
+  RunNotesStore,
+  'listLessons' | 'deleteLesson' | 'onDidChange'
+> {
+  /** 教訓を読むワークスペースルート群。空なら欄を隠す。 */
+  getWorkspaceRoots(): readonly string[];
 }
 
 /**
@@ -562,11 +568,9 @@ export class WorkflowViewManager implements vscode.Disposable {
    * 教訓欄（Issue #1599）を送る。`runNotes`（`RunNotesViewPort`）が未注入なら、欄を隠す
    * 指示（`lessons: undefined`）だけを送る。
    *
-   * ワークスペースルートは`runNotes.workspaceRoot`（`extension.ts`が
-   * `vscode.workspace.workspaceFolders`から解決）を使い、表示中のrun（`activeRunId`）には
-   * 依存しない（自己レビュー指摘: medium。ワークフローrunが1件も動いていないときに欄が
-   * 消えると、タスク実行・ロードマップ実行だけを使う人が教訓を見られなくなる。
-   * `RunNotesViewPort`のJSDoc参照）。
+   * ワークスペースルートは`runNotes.getWorkspaceRoots()`の全フォルダを使い、表示中のrun
+   * （`activeRunId`）には依存しない（`RunNotesViewPort`のJSDoc参照）。ルートが1つも無ければ
+   * 欄を隠す。複数あれば各フォルダの教訓をまとめて新しい順に並べる。
    *
    * ロードマップ欄と違い外部CLIを起動しないため、`postAll`から常に無条件で呼ぶ
    * （`refreshRoadmap`のような呼び分けは不要）。
@@ -575,17 +579,35 @@ export class WorkflowViewManager implements vscode.Disposable {
     if (this.panel === undefined) {
       return;
     }
-    if (this.runNotes === undefined) {
+    const roots = this.runNotes?.getWorkspaceRoots() ?? [];
+    if (this.runNotes === undefined || roots.length === 0) {
       void this.panel.webview.postMessage({ type: 'lessons', lessons: undefined });
       return;
     }
-    const lessons: readonly LessonRecord[] = await this.runNotes.listLessons(
-      this.runNotes.workspaceRoot,
+    const lessons = (await this.listLessonsInRoots(this.runNotes, roots)).map(
+      ({ lesson }) => lesson,
     );
     if (this.panel === undefined) {
       return;
     }
     void this.panel.webview.postMessage({ type: 'lessons', lessons });
+  }
+
+  /**
+   * 各ワークスペースルートの教訓を、記録したルートと組にして新しい順で返す（Issue #1599）。
+   * 削除（`deleteLesson`）はidが見つかったルートへ向ける必要があるため、ルートを落とさない。
+   */
+  private async listLessonsInRoots(
+    runNotes: RunNotesViewPort,
+    roots: readonly string[],
+  ): Promise<{ root: string; lesson: LessonRecord }[]> {
+    const perRoot = await Promise.all(
+      roots.map(async (root) =>
+        (await runNotes.listLessons(root)).map((lesson) => ({ root, lesson })),
+      ),
+    );
+    // recordedAtはISO 8601（UTC）なので文字列比較で時刻順になる
+    return perRoot.flat().sort((a, b) => b.lesson.recordedAt.localeCompare(a.lesson.recordedAt));
   }
 
   /** Issue一覧をキャッシュ越しに取る（Issue #1257）。取れなければ`undefined`。 */
@@ -711,14 +733,15 @@ export class WorkflowViewManager implements vscode.Disposable {
         return;
       }
       const requestedId = m['id'];
-      const workspaceRoot = this.runNotes.workspaceRoot;
       // Webviewは信頼境界の外側。一覧に実在するidだけを受け付ける
       // （`selectRun`と同じ多層防御の方針。自己レビュー指摘: high）
-      const lessons = await this.runNotes.listLessons(workspaceRoot);
-      const target = lessons.find((lesson) => lesson.id === requestedId);
-      if (target === undefined) {
+      const found = (
+        await this.listLessonsInRoots(this.runNotes, this.runNotes.getWorkspaceRoots())
+      ).find(({ lesson }) => lesson.id === requestedId);
+      if (found === undefined) {
         return;
       }
+      const { root: workspaceRoot, lesson: target } = found;
       // 削除は元に戻せないため、消す内容が分かるように確認を挟む（自己レビュー指摘: high。
       // 「worktreeの撤去」等、他の破壊的操作と同じ流儀）
       const preview = sanitizeInlineText(target.observation, LESSON_DELETE_CONFIRM_PREVIEW_LENGTH);

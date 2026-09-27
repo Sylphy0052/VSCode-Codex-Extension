@@ -232,7 +232,11 @@ import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
-import { WorkflowViewManager, type RoadmapViewPort, type RunNotesViewPort } from './view/workflowView';
+import {
+  WorkflowViewManager,
+  type RoadmapViewPort,
+  type RunNotesViewPort,
+} from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
 import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
@@ -910,19 +914,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push({ dispose: () => programRunner.dispose() });
 
   // 教訓欄（Issue #1599）のワークスペースルート。表示中のワークフローrunの`repoRoot`に
-  // 依存させると、taskRun/roadmapRunしか使わない利用者から欄が消える（自己レビュー指摘:
-  // medium）ため、`activeRunId`を経由しないワークスペース直下を使う。ルートが無ければ
-  // 欄自体を隠す（`postLessons`の`this.runNotes === undefined`分岐）
-  const runNotesWorkspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const runNotesViewPort: RunNotesViewPort | undefined =
-    runNotesWorkspaceRoot === undefined
-      ? undefined
-      : {
-          workspaceRoot: runNotesWorkspaceRoot,
-          listLessons: runNotes.listLessons.bind(runNotes),
-          deleteLesson: runNotes.deleteLesson.bind(runNotes),
-          onDidChange: runNotes.onDidChange.bind(runNotes),
-        };
+  // 依存させず、全ワークスペースフォルダを呼ぶたびに解決する（`RunNotesViewPort`のJSDoc
+  // 参照）。フォルダの増減でも欄を送り直すため、`onDidChange`にフォルダ変更を重ねる
+  const runNotesViewPort: RunNotesViewPort = {
+    getWorkspaceRoots: () =>
+      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+    listLessons: runNotes.listLessons.bind(runNotes),
+    deleteLesson: runNotes.deleteLesson.bind(runNotes),
+    onDidChange: (listener) => {
+      const unsubscribe = runNotes.onDidChange(listener);
+      const folderSubscription = vscode.workspace.onDidChangeWorkspaceFolders(() => listener());
+      return () => {
+        unsubscribe();
+        folderSubscription.dispose();
+      };
+    },
+  };
 
   // ワークフローView（#57）。`restoreRunsForView`がworkspaceStateのreconcileと
   // メモリ上への復元（design.md §16.11「リロード後の実行再開」）を両方行う
