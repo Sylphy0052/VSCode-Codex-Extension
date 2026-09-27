@@ -400,6 +400,9 @@ export interface RunNotesLogPort {
   warn(message: string): void;
 }
 
+/** 記録の読み込み（一覧・導入文）の待ち上限。`RunNotesStore.readAll`のJSDoc参照（Issue #1613）。 */
+const READ_TIMEOUT_MS = 5_000;
+
 function notesPath(workspaceRoot: string): string {
   return path.join(workspaceRoot, '.agents', 'run-notes.jsonl');
 }
@@ -519,31 +522,7 @@ export class RunNotesStore {
    * 権限・I/O等）も空配列を返すが、`log`（渡されていれば）へ理由を1行だけ出す。
    */
   async listLessons(workspaceRoot: string): Promise<LessonRecord[]> {
-    try {
-      const target = notesPath(workspaceRoot);
-      // `recordLesson`と同じ一次防御（`findSymlinkedAncestor`）。書き込みだけでなく
-      // 読み込みも、シンボリックリンクを辿ってワークスペース外を読ませない（自己レビュー
-      // 指摘: medium）
-      const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
-      if (symlinked !== undefined) {
-        this.logFailure(
-          `教訓一覧の読み込み先の経路にシンボリックリンクが含まれています: ${symlinked}`,
-        );
-        return [];
-      }
-      const readResult = await this.fs.readTextFile(target);
-      if (readResult.kind === 'missing') {
-        return [];
-      }
-      if (readResult.kind === 'error') {
-        this.logFailure(`教訓一覧を読めませんでした: ${readResult.message}`);
-        return [];
-      }
-      return parseRunNotes(readResult.text).filter(isLesson).reverse();
-    } catch (e) {
-      this.logFailure(`教訓一覧を読めませんでした: ${e instanceof Error ? e.message : String(e)}`);
-      return [];
-    }
+    return (await this.readAll(workspaceRoot, '教訓一覧')).filter(isLesson).reverse();
   }
 
   /**
@@ -725,10 +704,37 @@ export class RunNotesStore {
       .join('\n\n');
   }
 
-  /** 全記録を古い順で読む。読めないときは空配列を返し、ログへ1行残す。 */
+  /**
+   * 全記録を古い順で読む。読めないとき、`READ_TIMEOUT_MS`以内に読み終わらないときは空配列を
+   * 返し、ログへ1行残す。
+   *
+   * 待ち上限はNFS等でI/Oが止まった場合に、ワークフローViewの教訓欄・残件欄の表示とrun開始時の
+   * 導入文の組み立てを待たせ続けないため（Issue #1613）。止まった読み込み自体は取り消せない
+   * （`RunNotesFileSystemPort`に取消の口が無い）ので、結果を待たずに見捨てるだけにする。
+   * 書き込み系（`recordLesson`等）は待ち行列を共有するため対象にしない。
+   */
   private async readAll(workspaceRoot: string, label: string): Promise<RunNoteRecord[]> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<RunNoteRecord[]>((resolve) => {
+      timer = setTimeout(() => {
+        this.logFailure(
+          `${label}の読み込みが${READ_TIMEOUT_MS / 1000}秒以内に終わりませんでした。`,
+        );
+        resolve([]);
+      }, READ_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.readAllUntimed(workspaceRoot, label), timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async readAllUntimed(workspaceRoot: string, label: string): Promise<RunNoteRecord[]> {
     try {
       const target = notesPath(workspaceRoot);
+      // `recordLesson`と同じ一次防御（`findSymlinkedAncestor`）。書き込みだけでなく
+      // 読み込みも、シンボリックリンクを辿ってワークスペース外を読ませない
       const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
       if (symlinked !== undefined) {
         this.logFailure(
