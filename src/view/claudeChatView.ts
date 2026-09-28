@@ -482,6 +482,7 @@ function toClaudeConfig(input: TaskSessionInput, sandboxArgs: readonly string[])
         : []),
       ...sandboxArgs,
     ],
+    ...(sandboxArgs.length > 0 ? { sandboxBashGuard: true } : {}),
   };
 }
 

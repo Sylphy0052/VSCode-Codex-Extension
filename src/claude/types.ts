@@ -52,6 +52,11 @@ export interface ClaudeConfig {
    */
   agent: string;
   additionalArgs: string[];
+  /**
+   * sandbox付きで起動するか（Issue #1668）。真なら、sandboxの外へ回らない形のネットワーク
+   * コマンドを実行前に拒否するPreToolUse hookを`initialize`で登録する（`sandboxBashGuard.ts`）。
+   */
+  sandboxBashGuard?: boolean;
 }
 
 export const emptyClaudeConfig: ClaudeConfig = {

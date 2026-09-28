@@ -74,6 +74,7 @@ import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
 import type { SkillView, SkillsSnapshot } from '../provider/skills';
 import type { SlashCommand } from '../provider/slashCommands';
+import { answerSandboxBashGuard, sandboxBashGuardHooks } from './sandboxBashGuard';
 import { buildSkillsSnapshot } from './skillsList';
 import { applyStreamEvent, initialClaudeState } from './streamJson';
 import type { ClaudeConfig } from './types';
@@ -126,6 +127,8 @@ export type ClaudeSpawnPort = (
  */
 export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
+  /** sandboxの外へ回らない形のネットワークコマンドを止めるhookを登録するか（Issue #1668）。 */
+  private sandboxBashGuard = false;
   private buffer = '';
   private state: ChatState = initialClaudeState;
   private nextControlId = 1;
@@ -329,6 +332,7 @@ export class ClaudeStreamSession {
     // 訂正）。
     this.releasePendingWaiters();
     this.isForkSession = options.target.kind === 'fork';
+    this.sandboxBashGuard = options.config.sandboxBashGuard === true;
 
     const { args, warnings } = buildClaudeStreamArgs({
       target: options.target,
@@ -442,7 +446,8 @@ export class ClaudeStreamSession {
    */
   private initializeControl(): void {
     const requestId = this.claim('initialize');
-    this.write(buildControlRequest(requestId, { subtype: 'initialize', hooks: {} }));
+    const hooks = this.sandboxBashGuard ? sandboxBashGuardHooks() : {};
+    this.write(buildControlRequest(requestId, { subtype: 'initialize', hooks }));
   }
 
   /** 要求idを採番し、応答を読むときのために用途を覚える。 */
@@ -1364,6 +1369,11 @@ export class ClaudeStreamSession {
   }
 
   private handleControlRequest(request: IncomingControlRequest): void {
+    if (request.subtype === 'hook_callback') {
+      // 登録するhookはsandboxのBash判定だけ（Issue #1668）。知らないidには空（続行）を返す
+      this.write(buildControlResponse(request.requestId, answerSandboxBashGuard(request.payload)));
+      return;
+    }
     if (request.subtype !== 'can_use_tool') {
       // 未知の要求。応答しないとCLIが待つため、素直に許可も拒否もしない形で返す
       this.write(buildControlResponse(request.requestId, {}));
