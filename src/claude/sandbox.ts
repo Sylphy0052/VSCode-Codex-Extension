@@ -128,6 +128,9 @@ export function buildClaudeSandboxSettings(
  *
  * 引数のコマンド置換（`--description "$(cat <<'EOF' …)"`）も、CLIが置換を別のコマンドとして
  * 扱うため除外に一致しない（Issue #1672）。本文はファイル経由で渡させる。
+ *
+ * 出力をファイルへリダイレクトした形（`glab api … > out.json`）もsandbox内で走る（Issue #1674）。
+ * 出力をsandboxの外でファイルへ書く手段は無いので、直接読ませる。
  */
 export function buildClaudeSandboxPrompt(): string {
   const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
@@ -135,6 +138,7 @@ export function buildClaudeSandboxPrompt(): string {
     'Bashのコマンドはsandbox内で走り、ネットワークと認証情報を使えない。',
     `次のコマンドは、単独で実行したときだけsandboxの外で走る: ${commands}。`,
     'これらは1回のBash呼び出しに1つだけ書き、;、&&、||、パイプで他のコマンドと連結しない。',
+    '出力もパイプや>、>>でファイルへ受けず、そのまま直接読む。sandbox下で出力をファイルへ保存する手段は無い。',
     '前にcdも付けず、git -C <dir> pushのようにgitとサブコマンドの間へ引数も挟まない。作業ディレクトリでそのまま打つ。',
     '引数にコマンド置換（$(…)、バッククォート、"$(cat <<EOF …)"）も使わない。PR/MRやIssueの本文は先にWriteツールでファイルへ書き、gh ... --body-file <path>、glab api ... --field description=@<path>のようにファイルから渡す。',
     'これらが認証やネットワークのエラーで失敗したら、使えないと判断する前に単独で打ち直す。',

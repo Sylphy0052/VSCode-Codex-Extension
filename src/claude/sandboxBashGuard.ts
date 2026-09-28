@@ -38,30 +38,70 @@ const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', 
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/** fdの複製（`2>&1` `>&2`）と閉じる形（`>&-`）。ファイルを作らない。 */
+const FD_DUPLICATE = /^\d*>&(\d+|-)$/;
+
+export interface ShellCommand {
+  /** 語の列。出力をファイルへ書くリダイレクトとその行き先は含めない。 */
+  words: readonly string[];
+  /** 出力をファイルへ書くリダイレクト（`>` `>>` `&>` `N>` `>&file`）がある。 */
+  redirected: boolean;
+}
+
 /**
  * コマンド文字列を、連結（`;` `&&` `||` `|` `&` 改行 括弧 バッククォート）で分けたコマンドごとの
  * 語の列にする。引用符の中は区切らず、引用符そのものは外す。`2>&1`や`&>`の`&`は区切りにしない。
+ *
+ * 引用符の外の`>`で始まる出力のリダイレクトは、行き先と合わせて語から除き、`redirected`で示す。
+ * リダイレクトの付いたネットワークコマンドはsandbox内で走り、ネットワークを拒否されて失敗する
+ * （Issue #1674）。fdの複製は語に残す。`2>/dev/null`も、sandboxの外で走るかを実測していないので
+ * ファイルへの書き込みとして扱う。
  */
-export function splitShellCommands(command: string): string[][] {
-  const commands: string[][] = [];
+export function splitShellCommands(command: string): ShellCommand[] {
+  const commands: ShellCommand[] = [];
   let words: string[] = [];
   let word = '';
   let inWord = false;
   let quote: '"' | "'" | undefined;
+  /** いまの語が引用符の外の`>`から始まったリダイレクト。 */
+  let redirect = false;
+  /** 次の語が、行き先を離して書いたリダイレクト（`> out.json`）の行き先。 */
+  let skipTarget = false;
+  let redirected = false;
 
   const endWord = (): void => {
     if (inWord) {
-      words.push(word);
+      if (skipTarget) {
+        skipTarget = false;
+      } else if (redirect && !FD_DUPLICATE.test(word)) {
+        redirected = true;
+        skipTarget = /^(\d*|&)>>?&?$/.test(word);
+      } else {
+        words.push(word);
+      }
     }
     word = '';
     inWord = false;
+    redirect = false;
   };
   const endCommand = (): void => {
     endWord();
     if (words.length > 0) {
-      commands.push(words);
+      commands.push({ words, redirected });
     }
     words = [];
+    skipTarget = false;
+    redirected = false;
+  };
+  /** 引用符の外の`>`（`&>`では`&`）でリダイレクトを始める。`x>out`の`x`は別の語にする。 */
+  const startRedirect = (): void => {
+    if (!/^(\d*|&)$/.test(word)) {
+      endWord();
+    }
+    // 行き先を待つ間に次のリダイレクトが来た（`> > out`）場合、行き先は後ろのものとして扱う
+    skipTarget = false;
+    redirect = true;
+    inWord = true;
   };
 
   for (let i = 0; i < command.length; i++) {
@@ -86,7 +126,13 @@ export function splitShellCommands(command: string): string[][] {
         inWord = true;
       }
       i++;
-    } else if (c === '&' && (command[i - 1] === '>' || command[i - 1] === '<' || command[i + 1] === '>')) {
+    } else if (c === '>' && !redirect) {
+      startRedirect();
+      word += c;
+    } else if (c === '&' && command[i + 1] === '>' && !redirect) {
+      startRedirect();
+      word += c;
+    } else if (c === '&' && (command[i - 1] === '>' || command[i - 1] === '<')) {
       word += c;
       inWord = true;
     } else if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')' || c === '`') {
@@ -109,13 +155,15 @@ interface NetworkCommand {
   args: readonly string[];
   /** パターンの前に代入・ラッパー・gitのオプションが挟まっている。 */
   prefixed: boolean;
+  /** 出力をファイルへリダイレクトしている。 */
+  redirected: boolean;
 }
 
 /** 1つのコマンドが`excludedCommands`に載ったコマンドなら、その内訳を返す。 */
-function readNetworkCommand(words: readonly string[]): NetworkCommand | undefined {
+function readNetworkCommand({ words, redirected }: ShellCommand): NetworkCommand | undefined {
   let i = 0;
   let prefixed = false;
-  while (i < words.length && ASSIGNMENT.test(words[i])) {
+  while (ASSIGNMENT.test(words[i] ?? '')) {
     i++;
     prefixed = true;
   }
@@ -146,18 +194,22 @@ function readNetworkCommand(words: readonly string[]): NetworkCommand | undefine
       continue;
     }
     if (name.length === 1) {
-      return { name, args: words.slice(i + 1), prefixed };
+      return { name, args: words.slice(i + 1), prefixed, redirected };
     }
     if (words[sub] === name[1]) {
-      return { name, args: words.slice(sub + 1), prefixed };
+      return { name, args: words.slice(sub + 1), prefixed, redirected };
     }
   }
   return undefined;
 }
 
-/** 打ち直しの例に出すため、空白や記号を含む語を単引用符で囲む。リダイレクト（`2>&1`）は囲まない。 */
+/**
+ * 打ち直しの例に出すため、空白や記号を含む語を単引用符で囲む。fdの複製（`2>&1`）と入力の
+ * リダイレクトは囲まない。出力をファイルへ書くリダイレクトは語に残っていないので、`>`で始まる
+ * 残りの語（`--body "> 引用"`の本文など）は囲む。
+ */
 function quoteWord(word: string): string {
-  if (/^[\w@%+=:,./-]+$/.test(word) || /^\d*[<>]/.test(word)) {
+  if (/^[\w@%+=:,./-]+$/.test(word) || /^\d*</.test(word) || FD_DUPLICATE.test(word)) {
     return word;
   }
   return `'${word.replace(/'/g, `'\\''`)}'`;
@@ -217,19 +269,27 @@ export function sandboxBashGuardReason(command: string): string | undefined {
   }
   const found = commands
     .map(readNetworkCommand)
-    .filter((c): c is NetworkCommand => c !== undefined && (commands.length > 1 || c.prefixed));
+    .filter(
+      (c): c is NetworkCommand => c !== undefined && (commands.length > 1 || c.prefixed || c.redirected),
+    );
   if (found.length === 0) {
     return undefined;
   }
   // 該当が複数あれば全部を案内する。1つずつ案内すると、打ち直すたびに次の分で拒否される
   const names = [...new Set(found.map((c) => c.name.join(' ')))].join('・');
   const retries = found.map((c) => [...c.name, ...c.args].map(quoteWord).join(' '));
-  return [
+  const lines = [
     `このコマンドはsandbox内で走り、ネットワークが拒否されて失敗するため実行しなかった。`,
-    `${names}がsandboxの外で走るのは、1回のBash呼び出しにそれだけを単独で書き、先頭から始めたときに限る。`,
-    `cd・git -C <dir>・環境変数・timeoutなどを前に付けず、;・&&・||・パイプで他のコマンドと連結せず、次の形で1つずつ別のBash呼び出しとして打ち直す: ${retries.join(' / ')}`,
+    `${names}がsandboxの外で走るのは、1回のBash呼び出しにそれだけを単独で書き、先頭から始め、出力をファイルへリダイレクトしないときに限る。`,
+    `cd・git -C <dir>・環境変数・timeoutなどを前に付けず、;・&&・||・パイプで他のコマンドと連結せず、>・>>・&>で出力をファイルへ書かず、次の形で1つずつ別のBash呼び出しとして打ち直す: ${retries.join(' / ')}`,
     '別のディレクトリで実行する必要があれば、先にcdだけを別のBash呼び出しで実行してから打つ。',
-  ].join('\n');
+  ];
+  if (commands.length > 1 || found.some((c) => c.redirected)) {
+    lines.push(
+      '出力をjqなどで加工したりファイルへ保存したりしたかった場合は、単独で打ち、出力のJSONを直接読む。sandbox下で出力をファイルへ保存する手段は無い。',
+    );
+  }
+  return lines.join('\n');
 }
 
 /**
