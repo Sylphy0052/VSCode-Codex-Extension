@@ -1187,7 +1187,7 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
       },
       continuePrompt: { type: 'string', description: '継続時の指示（省略可）' },
       maxIterations: { type: 'number', description: '送信回数の上限（省略可）' },
-      provider: { type: 'string', description: "'codex' | 'claude'（省略可）" },
+      provider: { type: 'string', description: "'codex' | 'claude'（省略可。省略時はrunのdefaults.provider）" },
       // 失敗したタスクの置き換え（Issue #1663）。`failed`が残る間は新しいタスクが
       // 開始されないため、引き継ぎ用の追加ではここで失敗したタスクを指定させる
       supersedes: {

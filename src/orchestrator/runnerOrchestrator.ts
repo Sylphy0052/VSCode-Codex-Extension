@@ -1352,7 +1352,7 @@ function addTask(
   if (live === undefined) {
     return no('実行が見つかりません。');
   }
-  const built = buildOrchestratorTask(raw);
+  const built = buildOrchestratorTask(raw, live.def.defaultProvider);
   if ('error' in built) {
     return no(built.error);
   }

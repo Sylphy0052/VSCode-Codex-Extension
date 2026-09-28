@@ -298,6 +298,12 @@ export interface WorkflowDefinition {
   reviewFindingsResolved?: number;
   /** `defaults.maxParallel` を解決した値。タスク単位ではなくワークフロー全体に効く。 */
   maxParallel: number;
+  /**
+   * `defaults.provider` を解決した値。実行時には`defaults`ブロックが残らないため、
+   * `add_task`で`provider`を省略したタスクの既定値に使う（Issue #1662）。YAML以外から
+   * 組み立てた定義では無いことがあり、その場合は`DEFAULT_PROVIDER`へ落とす。
+   */
+  defaultProvider?: Provider;
   tasks: WorkflowTask[];
   /**
    * `defaults` ブロック自体（`provider` / `isolation` / `cleanup`）の値が未知だった場合の警告。
@@ -812,14 +818,16 @@ function resolveTask(raw: unknown, defaults: ResolvedDefaults): WorkflowTask {
  *   無視して黙って既定で作る形にはしない」）
  * - `defaults`ブロック（YAMLの`defaults:`）は実行時には残っていない
  *   （`WorkflowDefinition`は解決済みの`WorkflowTask[]`しか持たない）ため、拡張機能の
- *   既定値（`DEFAULT_PROVIDER`等）を使う。人が書いた`defaults`より安全側に倒れることは
- *   あっても緩い側には倒れない
+ *   既定値（`DEFAULT_ISOLATION`等）を使う。人が書いた`defaults`より安全側に倒れることは
+ *   あっても緩い側には倒れない。ただし`provider`だけは、省略・未知の値のときに
+ *   呼び出し側が渡すrunの既定値（`WorkflowDefinition.defaultProvider`）を使う（Issue #1662）
  *
  * ここでは`id`/`prompt`/`done`が空でも構わない（`validateWorkflow`が候補となる
  * `WorkflowDefinition`全体に対してまとめて検証する。呼び出し側の責務）。
  */
 export function buildOrchestratorTask(
   raw: Record<string, unknown>,
+  defaultProvider: Provider = DEFAULT_PROVIDER,
 ): { task: WorkflowTask } | { error: string } {
   for (const field of ['autoApprove', 'allow', 'sandbox', 'approvalMode', 'escalate'] as const) {
     if (Object.prototype.hasOwnProperty.call(raw, field)) {
@@ -841,7 +849,7 @@ export function buildOrchestratorTask(
         'ワークフロー定義からのみ指定できます）: cwd',
     };
   }
-  const provider = resolveEnum(raw['provider'], isProvider, DEFAULT_PROVIDER).value;
+  const provider = resolveEnum(raw['provider'], isProvider, defaultProvider).value;
   const isolation = resolveEnum(raw['isolation'], isIsolation, DEFAULT_ISOLATION).value;
   const type = resolveEnum(raw['type'], isCommitType, DEFAULT_COMMIT_TYPE).value;
   // 役割（design.md §16.44、Issue #693）は`add_task`から指定できる。上の禁止リスト
@@ -966,6 +974,7 @@ export function parseWorkflowYaml(source: string): WorkflowDefinition {
       ? { reviewFindingsResolved: num(root['reviewFindingsResolved'], 0) }
       : {}),
     maxParallel: defaults.maxParallel,
+    defaultProvider: defaults.provider,
     tasks: tasksRaw.map((t) => resolveTask(t, defaults)),
     defaultsWarnings,
     // 未指定と空文字は同じ「ロードマップ由来ではない」扱いにする（検証側で分岐を増やさない）
