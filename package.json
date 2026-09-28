@@ -600,6 +600,11 @@
         "category": "Agent"
       },
       {
+        "command": "agent.workflows.review",
+        "title": "ワークフローをレビュー…",
+        "category": "Agent"
+      },
+      {
         "command": "agent.workflows.team",
         "title": "チームモードでワークフローを生成…",
         "category": "Agent",

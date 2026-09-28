@@ -384,7 +384,9 @@ export const nodeWorkflowFilePort: WorkflowFilePort = {
   async writeTextFile(target: string, content: string, workspaceRoot: string): Promise<void> {
     const relative = path.relative(workspaceRoot, target);
     if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
-      throw new Error(`ワークフロー定義の書き込み先がワークスペースフォルダの外です: ${sanitizeForLog(target)}`);
+      throw new Error(
+        `ワークフロー定義の書き込み先がワークスペースフォルダの外です: ${sanitizeForLog(target)}`,
+      );
     }
 
     const symlinked = await findSymlinkedSegment(workspaceRoot, target);
@@ -747,6 +749,11 @@ export interface StartWorkflowResult {
    * して実行されることはない**（再度 `needsAllowConfirmation` が返る）。
    */
   allowDigest?: string;
+  /**
+   * `true` のとき、定義の意味レビューが済んでいない（`reviewStatus: reviewing`）。呼び出し側は
+   * レビューの継続か、利用者の確認による承認を促す（Issue #1654）。
+   */
+  needsReview?: boolean;
 }
 
 /**
@@ -2460,7 +2467,7 @@ export class WorkflowRunner {
     defPath: string,
   ): Promise<
     | { ok: true; def: WorkflowDefinition; digest: string }
-    | { ok: false; errors: readonly WorkflowIssue[] }
+    | { ok: false; errors: readonly WorkflowIssue[]; needsReview?: boolean }
   > {
     const size = await this.deps.filePort.fileSize(defPath);
     if (size === undefined) {
@@ -2499,6 +2506,7 @@ export class WorkflowRunner {
     if (def.reviewStatus === 'reviewing') {
       return {
         ok: false,
+        needsReview: true,
         errors: [
           issue(
             'ワークフローの意味レビューが完了していません。reviewStatusがreadyになってから実行してください',
@@ -3028,7 +3036,10 @@ export class WorkflowRunner {
    * 定義YAMLのファイルは書き換えない。変えた値は`maxParallelOverride`として永続化し、
    * 復元時に定義YAMLの値より優先する（`runnerRestore.ts`の`rebuildLiveRun`）。
    */
-  setMaxParallel(runId: string, maxParallel: number): { ok: true } | { ok: false; message: string } {
+  setMaxParallel(
+    runId: string,
+    maxParallel: number,
+  ): { ok: true } | { ok: false; message: string } {
     if (!isValidWorkflowMaxParallel(maxParallel)) {
       return {
         ok: false,

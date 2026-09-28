@@ -118,6 +118,7 @@ import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './orches
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
   buildWorkspaceSummary,
+  detectSecurityWarnings,
   maxAutoReviewRevisions,
   nodePlannerWorkspacePort,
   planWorkflow,
@@ -129,6 +130,7 @@ import {
   validateSlugInput,
   locateSecurityWarningLine,
   type PlanWorkflowResult,
+  type SecurityWarning,
 } from './orchestrator/planner';
 import {
   findMissingVerifyWarnings,
@@ -516,7 +518,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // worktreeで戻るため
   const taskRunStore = new TaskRunStore(context.workspaceState, (message) => log.warn(message));
   const isTaskManagedThread = (id: string): boolean =>
-    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) || taskRunStore.hasSessionRef(id);
+    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
+    taskRunStore.hasSessionRef(id);
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
@@ -1978,6 +1981,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     vscode.commands.registerCommand('agent.workflows.plan', (providerHint?: unknown) =>
       planWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
     ),
+    vscode.commands.registerCommand('agent.workflows.review', (fileArg?: unknown) =>
+      reviewWorkflowFileCommand(chat, claudeChat, workflowView, log, fileArg),
+    ),
     vscode.commands.registerCommand('agent.workflows.team', (providerHint?: unknown) =>
       planTeamWorkflowCommand(chat, claudeChat, workflowView, log, providerHint),
     ),
@@ -2277,6 +2283,25 @@ async function startWorkflowFile(
       ...(result.allowDigest === undefined ? {} : { allowConfirmedDigest: result.allowDigest }),
     });
   }
+  if (!result.ok && result.needsReview === true) {
+    // 自動レビューが上限で止まった定義は、ここで先へ進む手段を出す（Issue #1654）
+    const detail = (result.errors ?? []).map((e) => e.message).join('\n');
+    log.warn(`ワークフローを開始できません:\n${detail}`);
+    const choice = await vscode.window.showErrorMessage(
+      `ワークフローを開始できません: ${detail}`,
+      CONTINUE_REVIEW_ACTION,
+      APPROVE_AND_RUN_ACTION,
+    );
+    if (choice === CONTINUE_REVIEW_ACTION) {
+      await vscode.commands.executeCommand('agent.workflows.review', fileFsPath);
+    } else if (choice === APPROVE_AND_RUN_ACTION) {
+      const doc = await vscode.workspace.openTextDocument(fileFsPath);
+      if (await approveWorkflowReview(doc, fileFsPath, log)) {
+        await startWorkflowFile(runner, view, log, fileFsPath, workspaceRootFsPath, label);
+      }
+    }
+    return;
+  }
   if (!result.ok) {
     const detail = (result.errors ?? []).map((e) => e.message).join('\n');
     log.error(`ワークフローを開始できません:\n${detail}`);
@@ -2318,7 +2343,9 @@ async function continueNextRoadmapChunk(
   }
   const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(defPath));
   if (folder === undefined) {
-    log.warn('[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません');
+    log.warn(
+      '[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません',
+    );
     return;
   }
   const dir = readWorkflowsConfig().dir;
@@ -2352,16 +2379,11 @@ async function continueNextRoadmapChunk(
   );
 }
 
-async function runWorkflow(
-  runner: WorkflowRunner,
-  view: WorkflowViewManager,
-  log: Logger,
-): Promise<void> {
-  const folder = currentWorkspaceFolder();
-  if (folder === undefined) {
-    void vscode.window.showErrorMessage('ワークフローを実行するにはフォルダを開いてください');
-    return;
-  }
+/** ワークフロー定義フォルダ配下のYAMLを、更新日時の新しい順に並べて選ばせる。 */
+async function pickWorkflowFile(
+  folder: vscode.WorkspaceFolder,
+  placeHolder: string,
+): Promise<{ label: string; file: vscode.Uri } | undefined> {
   const dir = readWorkflowsConfig().dir;
   const pattern = new vscode.RelativePattern(folder, `${dir}/**/*.{yaml,yml}`);
   const files = await vscode.workspace.findFiles(pattern, undefined, 200);
@@ -2369,7 +2391,7 @@ async function runWorkflow(
     void vscode.window.showInformationMessage(
       `ワークフロー定義が見つかりません（${dir} 配下に .yaml / .yml を置いてください）`,
     );
-    return;
+    return undefined;
   }
   // レビューで定義が増えても最新を選べるよう、更新日時の新しい順に並べて日時を添える（Issue #1547）
   const entries = await Promise.all(
@@ -2382,15 +2404,28 @@ async function runWorkflow(
     }),
   );
   entries.sort((a, b) => b.mtime - a.mtime);
-  const picked = await vscode.window.showQuickPick(
+  return vscode.window.showQuickPick(
     entries.map(({ file, mtime }) => ({
       label: path.basename(file.fsPath),
       description: mtime > 0 ? `更新 ${formatWorkflowMtime(mtime)}` : '',
       detail: vscode.workspace.asRelativePath(file),
       file,
     })),
-    { placeHolder: '実行するワークフロー定義を選択（更新日時の新しい順）', matchOnDetail: true },
+    { placeHolder: `${placeHolder}（更新日時の新しい順）`, matchOnDetail: true },
   );
+}
+
+async function runWorkflow(
+  runner: WorkflowRunner,
+  view: WorkflowViewManager,
+  log: Logger,
+): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('ワークフローを実行するにはフォルダを開いてください');
+    return;
+  }
+  const picked = await pickWorkflowFile(folder, '実行するワークフロー定義を選択');
   if (picked === undefined) {
     return;
   }
@@ -3866,209 +3901,467 @@ async function handlePlanSuccess(
   // 保存済みYAMLを別セッションでレビューし、指摘があれば修正セッションへ戻してから
   // 再レビューする。各セッションは読み取り専用で、ファイルへの反映はこのUI層だけが行う。
   // 利用者が開いたエディタを編集した場合は、内容を上書きせず警告を残して止める。
-  void (async () => {
-    try {
-      let yaml = pendingReview.yaml;
-      let definition = pendingReview.definition;
-      let securityWarnings = result.securityWarnings;
-      let totalReviewFindings = 0;
-      const maxRevisions = maxAutoReviewRevisions(fromRoadmap);
-      for (let revision = 0; revision <= maxRevisions; revision += 1) {
-        const review = await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title:
-              revision === 0
-                ? 'ワークフローをレビューしています…'
-                : `ワークフローを再レビューしています…（${revision}/${maxRevisions}）`,
-          },
-          () =>
-            reviewWorkflowPlan({
-              goal,
-              yaml,
-              provider,
-              host,
-              cwd: workspaceRoot,
-              log,
-              fromRoadmap,
-            }),
-        );
+  void runWorkflowReviewLoop({
+    doc,
+    filePath,
+    goal,
+    workspaceRoot,
+    view,
+    log,
+    provider,
+    plannerModel,
+    host,
+    fromRoadmap,
+    yaml: pendingReview.yaml,
+    definition: pendingReview.definition,
+    securityWarnings: result.securityWarnings,
+    startRevision: 0,
+    findingsResolved: 0,
+  });
+}
 
-        if (review.error !== undefined) {
-          void warnWithLogLink(
-            log,
-            'ワークフローのレビューに失敗したため、自動修正を中止しました（詳しくはログ）',
-          );
-          return;
-        }
-        if (review.findings.length === 0) {
-          if (doc.isDirty || doc.getText() !== yaml) {
-            log.warn(
-              '[planner] 利用者によるYAML編集を検出したため、reviewStatusをreadyへ変更しませんでした',
-            );
-            void warnWithLogLink(
-              log,
-              '開いたワークフローYAMLが編集されたため、レビュー完了状態を自動反映しませんでした（詳しくはログ）',
-            );
-            return;
-          }
-          const ready = withWorkflowReviewStatus(yaml, definition, 'ready', {
-            provider,
-            model: plannerModel,
-            revision,
-            findingCount: 0,
-            findingsResolved: totalReviewFindings,
-          });
-          const readyEdit = new vscode.WorkspaceEdit();
-          readyEdit.replace(
-            doc.uri,
-            new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
-            ready.yaml,
-          );
-          if (!(await vscode.workspace.applyEdit(readyEdit)) || !(await doc.save())) {
-            void warnWithLogLink(
-              log,
-              'レビュー完了状態を保存できなかったため、ワークフローは実行待ちのままです（詳しくはログ）',
-            );
-            return;
-          }
-          yaml = ready.yaml;
-          definition = ready.definition;
-          view.previewDefinition(
-            filePath,
-            definition,
-            securityWarnings.map((warning) => ({
-              kind: 'plannerSecurity' as const,
-              taskId: warning.taskId,
-              message: warning.message,
-            })),
-          );
-          log.info(
+/** `runWorkflowReviewLoop`の入力。生成直後と、利用者が再レビューを指示したときの両方から渡す。 */
+interface WorkflowReviewLoopInput {
+  doc: vscode.TextDocument;
+  filePath: string;
+  goal: string;
+  workspaceRoot: string;
+  view: WorkflowViewManager;
+  log: Logger;
+  provider: Provider;
+  plannerModel: string;
+  host: TaskSessionHost;
+  fromRoadmap: boolean;
+  yaml: string;
+  definition: WorkflowDefinition;
+  securityWarnings: readonly SecurityWarning[];
+  /** 通算の修正回数。上限を超えて続けるときは、前回までの回数から数え続ける（Issue #1654）。 */
+  startRevision: number;
+  /** これまでに修正へ回した指摘の通算件数。 */
+  findingsResolved: number;
+}
+
+/**
+ * 保存済みワークフローYAMLのレビューと修正を回す（Issue #1654で生成直後の処理から切り出した）。
+ * 指摘0件になったときだけ`reviewStatus: ready`を書く。自動修正の上限到達とレビュー失敗では
+ * `reviewing`のまま止め、レビューを続けるか、確認済みとして実行可にするかを利用者に選ばせる。
+ */
+async function runWorkflowReviewLoop(input: WorkflowReviewLoopInput): Promise<void> {
+  const {
+    doc,
+    filePath,
+    goal,
+    workspaceRoot,
+    view,
+    log,
+    provider,
+    plannerModel,
+    host,
+    fromRoadmap,
+  } = input;
+  try {
+    let yaml = input.yaml;
+    let definition = input.definition;
+    let securityWarnings = input.securityWarnings;
+    let totalReviewFindings = input.findingsResolved;
+    const maxRevisions = maxAutoReviewRevisions(fromRoadmap);
+    const firstRevision = input.startRevision;
+    for (let revision = firstRevision; revision <= firstRevision + maxRevisions; revision += 1) {
+      const step = revision - firstRevision;
+      const review = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title:
             revision === 0
-              ? '[planner] ワークフローのレビューが完了しました（指摘なし）'
-              : `[planner] ワークフローのレビューが完了しました（${revision}回修正後に指摘なし）`,
-          );
-          if (revision > 0) {
-            void vscode.window.showInformationMessage(
-              `レビュー指摘を反映し、ワークフローの再レビューを通過しました（${revision}回修正）。`,
-            );
-          }
-          return;
-        }
-
-        const warnings = [
-          ...securityWarnings.map((w) => ({
-            kind: 'plannerSecurity' as const,
-            taskId: w.taskId,
-            message: w.message,
-          })),
-          ...review.findings.map((finding) => ({
-            kind: 'plannerReview' as const,
-            taskId: finding.taskIds[0],
-            message:
-              finding.taskIds.length > 0
-                ? `[${finding.taskIds.join(', ')}] ${finding.message}`
-                : finding.message,
-          })),
-        ];
-        totalReviewFindings += review.findings.length;
-        view.previewDefinition(filePath, definition, warnings);
-
-        if (revision === maxRevisions) {
-          log.warn(
-            `[planner] タスク分解レビューの自動修正が上限${maxRevisions}回に達しました: ${review.findings
-              .map((finding) => sanitizeForLog(finding.message))
-              .join(' / ')}`,
-          );
-          void warnWithLogLink(
+              ? 'ワークフローをレビューしています…'
+              : step === 0
+                ? 'ワークフローを再レビューしています…'
+                : `ワークフローを再レビューしています…（${step}/${maxRevisions}）`,
+        },
+        () =>
+          reviewWorkflowPlan({
+            goal,
+            yaml,
+            provider,
+            host,
+            cwd: workspaceRoot,
             log,
-            `タスク分解レビューの自動修正が上限${maxRevisions}回に達しました（指摘${review.findings.length}件）。内容を確認してください（詳しくはログ）`,
-          );
-          return;
-        }
+            fromRoadmap,
+          }),
+      );
 
-        const revised = await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: `レビュー指摘を反映しています…（${revision + 1}/${maxRevisions}）`,
-          },
-          () =>
-            reviseWorkflowPlan({
-              goal,
-              yaml,
-              findings: review.findings,
-              provider,
-              host,
-              cwd: workspaceRoot,
-              baseline: readSafetyBaseline(),
-              log,
-              fromRoadmap,
-            }),
+      // 失敗したレビューは指摘0件を意味しない。readyへ書き換えず、利用者に判断を委ねる
+      if (review.error !== undefined) {
+        log.warn(`[planner] ワークフローのレビューに失敗しました: ${sanitizeForLog(review.error)}`);
+        await offerWorkflowReviewOverride(
+          input,
+          'ワークフローのレビューに失敗したため、レビュー完了状態にしていません',
+          { revision, findingsResolved: totalReviewFindings, remainingFindings: undefined },
         );
-        if (!revised.ok) {
-          void warnWithLogLink(
-            log,
-            `レビュー指摘を反映したYAMLを適用できなかったため、自動修正を中止しました: ${sanitizeForLog(revised.error)}`,
-          );
-          return;
-        }
-        if (revised.droppedTemplateRefs.length > 0) {
-          log.warn(
-            `[planner] レビュー指摘の修正時にdependsOnに無いテンプレート変数を落としました: ${revised.droppedTemplateRefs
-              .map((reference) => `${reference.taskId}: ${reference.ref}`)
-              .join(', ')}`,
-          );
-        }
+        return;
+      }
 
-        // ファイルを開いてから利用者が編集していれば、その編集を上書きしない。修正案は
-        // エージェントではなくこのUI層が適用するため、保存前の本文比較をここで行う。
+      if (review.findings.length === 0) {
         if (doc.isDirty || doc.getText() !== yaml) {
           log.warn(
-            '[planner] 利用者によるYAML編集を検出したため、レビュー指摘の自動反映を中止しました',
+            '[planner] 利用者によるYAML編集を検出したため、reviewStatusをreadyへ変更しませんでした',
           );
           void warnWithLogLink(
             log,
-            '開いたワークフローYAMLが編集されたため、レビュー指摘の自動反映を中止しました（詳しくはログ）',
+            '開いたワークフローYAMLが編集されたため、レビュー完了状態を自動反映しませんでした（詳しくはログ）',
           );
           return;
         }
-        const revisedReviewing = withWorkflowReviewStatus(
-          revised.yaml,
-          revised.definition,
-          'reviewing',
-          {
-            provider,
-            model: plannerModel,
-            revision: revision + 1,
-            findingCount: review.findings.length,
-            findingsResolved: totalReviewFindings,
-          },
-        );
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(
+        const ready = withWorkflowReviewStatus(yaml, definition, 'ready', {
+          provider,
+          model: plannerModel,
+          revision,
+          findingCount: 0,
+          findingsResolved: totalReviewFindings,
+        });
+        const readyEdit = new vscode.WorkspaceEdit();
+        readyEdit.replace(
           doc.uri,
           new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
-          revisedReviewing.yaml,
+          ready.yaml,
         );
-        if (!(await vscode.workspace.applyEdit(edit)) || !(await doc.save())) {
+        if (!(await vscode.workspace.applyEdit(readyEdit)) || !(await doc.save())) {
           void warnWithLogLink(
             log,
-            'レビュー指摘を反映したYAMLを保存できなかったため、自動修正を中止しました（詳しくはログ）',
+            'レビュー完了状態を保存できなかったため、ワークフローは実行待ちのままです（詳しくはログ）',
           );
           return;
         }
-
-        yaml = revisedReviewing.yaml;
-        definition = revisedReviewing.definition;
-        securityWarnings = revised.securityWarnings;
+        yaml = ready.yaml;
+        definition = ready.definition;
+        view.previewDefinition(
+          filePath,
+          definition,
+          securityWarnings.map((warning) => ({
+            kind: 'plannerSecurity' as const,
+            taskId: warning.taskId,
+            message: warning.message,
+          })),
+        );
+        log.info(
+          revision === 0
+            ? '[planner] ワークフローのレビューが完了しました（指摘なし）'
+            : `[planner] ワークフローのレビューが完了しました（${revision}回修正後に指摘なし）`,
+        );
+        if (revision > 0) {
+          void vscode.window.showInformationMessage(
+            `レビュー指摘を反映し、ワークフローの再レビューを通過しました（${revision}回修正）。`,
+          );
+        }
+        return;
       }
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      log.warn(
-        `[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`,
+
+      const warnings = [
+        ...securityWarnings.map((w) => ({
+          kind: 'plannerSecurity' as const,
+          taskId: w.taskId,
+          message: w.message,
+        })),
+        ...review.findings.map((finding) => ({
+          kind: 'plannerReview' as const,
+          taskId: finding.taskIds[0],
+          message:
+            finding.taskIds.length > 0
+              ? `[${finding.taskIds.join(', ')}] ${finding.message}`
+              : finding.message,
+        })),
+      ];
+      totalReviewFindings += review.findings.length;
+      view.previewDefinition(filePath, definition, warnings);
+
+      if (step === maxRevisions) {
+        log.warn(
+          `[planner] タスク分解レビューの自動修正が上限${maxRevisions}回に達しました: ${review.findings
+            .map((finding) => sanitizeForLog(finding.message))
+            .join(' / ')}`,
+        );
+        await offerWorkflowReviewOverride(
+          input,
+          `タスク分解レビューの自動修正が上限${maxRevisions}回に達しました（指摘${review.findings.length}件）`,
+          {
+            revision,
+            findingsResolved: totalReviewFindings - review.findings.length,
+            remainingFindings: review.findings.length,
+          },
+        );
+        return;
+      }
+
+      const revised = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `レビュー指摘を反映しています…（${step + 1}/${maxRevisions}）`,
+        },
+        () =>
+          reviseWorkflowPlan({
+            goal,
+            yaml,
+            findings: review.findings,
+            provider,
+            host,
+            cwd: workspaceRoot,
+            baseline: readSafetyBaseline(),
+            log,
+            fromRoadmap,
+          }),
       );
+      if (!revised.ok) {
+        void warnWithLogLink(
+          log,
+          `レビュー指摘を反映したYAMLを適用できなかったため、自動修正を中止しました: ${sanitizeForLog(revised.error)}`,
+        );
+        return;
+      }
+      if (revised.droppedTemplateRefs.length > 0) {
+        log.warn(
+          `[planner] レビュー指摘の修正時にdependsOnに無いテンプレート変数を落としました: ${revised.droppedTemplateRefs
+            .map((reference) => `${reference.taskId}: ${reference.ref}`)
+            .join(', ')}`,
+        );
+      }
+
+      // ファイルを開いてから利用者が編集していれば、その編集を上書きしない。修正案は
+      // エージェントではなくこのUI層が適用するため、保存前の本文比較をここで行う。
+      if (doc.isDirty || doc.getText() !== yaml) {
+        log.warn(
+          '[planner] 利用者によるYAML編集を検出したため、レビュー指摘の自動反映を中止しました',
+        );
+        void warnWithLogLink(
+          log,
+          '開いたワークフローYAMLが編集されたため、レビュー指摘の自動反映を中止しました（詳しくはログ）',
+        );
+        return;
+      }
+      const revisedReviewing = withWorkflowReviewStatus(
+        revised.yaml,
+        revised.definition,
+        'reviewing',
+        {
+          provider,
+          model: plannerModel,
+          revision: revision + 1,
+          findingCount: review.findings.length,
+          findingsResolved: totalReviewFindings,
+        },
+      );
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(
+        doc.uri,
+        new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
+        revisedReviewing.yaml,
+      );
+      if (!(await vscode.workspace.applyEdit(edit)) || !(await doc.save())) {
+        void warnWithLogLink(
+          log,
+          'レビュー指摘を反映したYAMLを保存できなかったため、自動修正を中止しました（詳しくはログ）',
+        );
+        return;
+      }
+
+      yaml = revisedReviewing.yaml;
+      definition = revisedReviewing.definition;
+      securityWarnings = revised.securityWarnings;
     }
-  })();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    log.warn(
+      `[planner] タスク分解のレビュー表示中にエラーが発生しました: ${sanitizeForLog(message)}`,
+    );
+  }
+}
+
+const CONTINUE_REVIEW_ACTION = 'レビューを続ける';
+const APPROVE_REVIEW_ACTION = '確認済みとして実行可にする';
+const APPROVE_AND_RUN_ACTION = '確認済みとして実行する';
+
+/**
+ * 自動レビューが指摘0件で終わらなかったときに、次の手を利用者に選ばせる（Issue #1654）。
+ * 選ばなければ`reviewing`のまま残る。実行時にも同じ選択肢を出す（`startWorkflowFile`）。
+ */
+async function offerWorkflowReviewOverride(
+  input: WorkflowReviewLoopInput,
+  message: string,
+  state: { revision: number; findingsResolved: number; remainingFindings: number | undefined },
+): Promise<void> {
+  const choice = await vscode.window.showWarningMessage(
+    `${message}。レビューを続けるか、内容を確認のうえ実行可にしてください（詳しくはログ）`,
+    CONTINUE_REVIEW_ACTION,
+    APPROVE_REVIEW_ACTION,
+    OPEN_LOG_ACTION,
+  );
+  if (choice === OPEN_LOG_ACTION) {
+    input.log.show();
+    return;
+  }
+  if (choice === CONTINUE_REVIEW_ACTION) {
+    const current = readWorkflowDocForReview(input.doc);
+    if (current === undefined) return;
+    await runWorkflowReviewLoop({
+      ...input,
+      yaml: current.yaml,
+      definition: current.definition,
+      securityWarnings: detectSecurityWarnings(current.definition, readSafetyBaseline()),
+      startRevision: state.revision,
+      findingsResolved: state.findingsResolved,
+    });
+    return;
+  }
+  if (choice === APPROVE_REVIEW_ACTION) {
+    await approveWorkflowReview(input.doc, input.filePath, input.log, {
+      view: input.view,
+      remainingFindings: state.remainingFindings,
+    });
+  }
+}
+
+/**
+ * レビューを始め直す・承認する前に、エディタ上の現在の内容を読む。利用者が編集していれば
+ * その内容を正とする（保存前の編集は上書きしてしまうため、保存を求めて止める）。
+ */
+function readWorkflowDocForReview(
+  doc: vscode.TextDocument,
+): { yaml: string; definition: WorkflowDefinition } | undefined {
+  if (doc.isDirty) {
+    void vscode.window.showWarningMessage(
+      'ワークフローYAMLに未保存の編集があります。保存してからやり直してください',
+    );
+    return undefined;
+  }
+  const yaml = doc.getText();
+  try {
+    return { yaml, definition: parseWorkflowYaml(yaml) };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    void vscode.window.showErrorMessage(`ワークフローYAMLを解析できません: ${message}`);
+    return undefined;
+  }
+}
+
+/**
+ * 利用者の確認をもって`reviewStatus: ready`を書く（Issue #1654）。自動レビューが指摘0件で
+ * 通過したのと区別できるよう、残った指摘の件数は`reviewFindingCount`へ残す。
+ */
+async function approveWorkflowReview(
+  doc: vscode.TextDocument,
+  filePath: string,
+  log: Logger,
+  options: { view?: WorkflowViewManager; remainingFindings?: number | undefined } = {},
+): Promise<boolean> {
+  const current = readWorkflowDocForReview(doc);
+  if (current === undefined) return false;
+  const findingCount = options.remainingFindings ?? current.definition.reviewFindingCount;
+  const ready = withWorkflowReviewStatus(
+    current.yaml,
+    current.definition,
+    'ready',
+    findingCount === undefined ? {} : { findingCount },
+  );
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(
+    doc.uri,
+    new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
+    ready.yaml,
+  );
+  if (!(await vscode.workspace.applyEdit(edit)) || !(await doc.save())) {
+    void warnWithLogLink(log, 'レビュー完了状態を保存できませんでした（詳しくはログ）');
+    return false;
+  }
+  log.info(
+    `[planner] 利用者の確認でワークフローを実行可にしました（未解決の指摘${findingCount ?? 0}件）: ${filePath}`,
+  );
+  options.view?.previewDefinition(
+    filePath,
+    ready.definition,
+    detectSecurityWarnings(ready.definition, readSafetyBaseline()).map((warning) => ({
+      kind: 'plannerSecurity' as const,
+      taskId: warning.taskId,
+      message: warning.message,
+    })),
+  );
+  return true;
+}
+
+/**
+ * 保存済みのワークフローYAMLをレビューし直す（コマンド`agent.workflows.review`。Issue #1654）。
+ * 自動修正の上限に達したあとや、実行時に`reviewing`で止められたときに使う。
+ */
+async function reviewWorkflowFileCommand(
+  chat: ChatViewManager,
+  claudeChat: ClaudeChatViewManager,
+  view: WorkflowViewManager,
+  log: Logger,
+  fileArg?: unknown,
+): Promise<void> {
+  const folder = currentWorkspaceFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage('ワークフローをレビューするにはフォルダを開いてください');
+    return;
+  }
+  const workspaceRoot = folder.uri.fsPath;
+  let filePath = typeof fileArg === 'string' ? fileArg : undefined;
+  if (filePath === undefined) {
+    const active = vscode.window.activeTextEditor?.document;
+    const dirAbs = path.join(workspaceRoot, readWorkflowsConfig().dir);
+    const relative = active === undefined ? undefined : path.relative(dirAbs, active.uri.fsPath);
+    if (
+      active !== undefined &&
+      relative !== undefined &&
+      !relative.startsWith('..') &&
+      !path.isAbsolute(relative) &&
+      /\.ya?ml$/iu.test(active.uri.fsPath)
+    ) {
+      filePath = active.uri.fsPath;
+    } else {
+      filePath = (await pickWorkflowFile(folder, 'レビューするワークフロー定義を選択'))?.file
+        .fsPath;
+    }
+  }
+  if (filePath === undefined) return;
+
+  const doc = await vscode.workspace.openTextDocument(filePath);
+  await vscode.window.showTextDocument(doc, { preview: false });
+  const current = readWorkflowDocForReview(doc);
+  if (current === undefined) return;
+  const { definition } = current;
+
+  let provider = definition.plannerProvider;
+  if (provider === undefined) {
+    const picked = await vscode.window.showQuickPick(
+      [
+        { label: 'Codex', provider: 'codex' as const },
+        { label: 'Claude', provider: 'claude' as const },
+      ],
+      { placeHolder: 'レビューに使うエージェントを選択' },
+    );
+    if (picked === undefined) return;
+    provider = picked.provider;
+  }
+  const plannerModel =
+    definition.plannerModel ??
+    (provider === 'codex' ? readConfig().codex.model : readClaudeConfig().claude.model);
+
+  await runWorkflowReviewLoop({
+    doc,
+    filePath,
+    goal: definition.goal ?? definition.name,
+    workspaceRoot,
+    view,
+    log,
+    provider,
+    plannerModel,
+    host: provider === 'claude' ? claudeChat : chat,
+    fromRoadmap: definition.roadmap !== undefined,
+    yaml: current.yaml,
+    definition,
+    securityWarnings: detectSecurityWarnings(definition, readSafetyBaseline()),
+    startRevision: definition.reviewRevision ?? 0,
+    findingsResolved: definition.reviewFindingsResolved ?? 0,
+  });
 }
 
 /**
