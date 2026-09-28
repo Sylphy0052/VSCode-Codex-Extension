@@ -298,6 +298,7 @@ async function reconcileRestoredTaskStates(
       retryCount: t.retryCount,
       // このフィールドが無い古い永続データは0として扱う（issue #275より前の形式）
       manualRetryCount: t.manualRetryCount ?? 0,
+      ...(t.reloadResumes === undefined ? {} : { reloadResumes: t.reloadResumes }),
       failure,
       sessionId: t.sessionId,
       cwd: t.cwd,
@@ -540,8 +541,8 @@ export const MAX_MAX_AUTO_RESUME_ATTEMPTS = 20;
  * という新情報が無い。
  *
  * 再読み込みで途中で終わったタスクは、会話の記録（`sessionId`）があれば同じ会話を開き直す
- * （Issue #1670）。開き直すのはrunの自動再開が`MAX_RELOAD_RESUMES`回に達するまでで、
- * タスクごとの開き直しの回数はこれを超えない。
+ * （Issue #1670）。開き直すのはタスクごとに`MAX_RELOAD_RESUMES`回までで、超えたら今までどおり
+ * 新しい会話で最初から始める。
  */
 async function autoResumeIfEligible(
   self: WorkflowRunnerInternals,
@@ -594,13 +595,10 @@ async function autoResumeIfEligible(
   // （Issue #1514）。`applyAutoResume`は純粋関数なので、引き継ぐタスクを渡して引き直す
   // 実測の`await`の間に人が手動で再実行（`retryTask`）したタスクは、もう`reloadInterrupted`
   // ではない。`outcome`は実測前の状態から作った値なので、使うとその再実行を巻き戻してしまう。
-  // 実測の後の状態から必ず引き直し、実際に戻すタスクの分だけ引き継ぎを残す
-  // 同じ会話を開き直すタスク（Issue #1670）。会話はcwdに紐づくため、作業が残っていなくても
-  // 同じworktreeを使い直す。上限に達したら今までどおり新しい会話で最初から始める
-  const reloadResumes =
-    attemptsSoFar < MAX_RELOAD_RESUMES
-      ? collectReloadResumeSessions(rebuilt.runState)
-      : new Map<string, { sessionId: string; cwd: string }>();
+  // 実測の後の状態から必ず引き直し、実際に戻すタスクの分だけ引き継ぎを残す。
+  // 同じ会話を開き直すタスク（Issue #1670）は、会話がcwdに紐づくため作業が残っていなくても
+  // 同じworktreeを使い直す
+  const reloadResumes = collectReloadResumeSessions(rebuilt.runState);
   const inspected = await inspectCarriedOverWork(self, p, rebuilt, reloadResumes);
   const resumed = applyAutoResume(rebuilt.runState, rebuilt.def.tasks, new Set(inspected.keys()));
   const resumedTaskIds = new Set(resumed.kind === 'resumed' ? resumed.resumedTaskIds : []);
@@ -626,7 +624,7 @@ async function autoResumeIfEligible(
   rebuilt.reloadResumeSessions = new Map(
     [...reloadResumes].filter(([taskId]) => resumedTaskIds.has(taskId)),
   );
-  rebuilt.runState = resumed.run;
+  rebuilt.runState = countReloadResumes(resumed.run, rebuilt.reloadResumeSessions);
   rebuilt.finished = getRunOutcome(rebuilt.runState) !== 'running';
   rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResume');
   rebuilt.warnings.push({
@@ -733,7 +731,7 @@ async function inspectCarriedOverWork(
 
 /**
  * 再読み込みで途中で終わったタスクのうち、会話の記録があるものの会話と作業場所（Issue #1670）。
- * 開き直せるかは開くまで分からないため、ここでは記録の有無だけを見る。
+ * 開き直せるかは開くまで分からないため、ここでは記録の有無と開き直した回数だけを見る。
  */
 function collectReloadResumeSessions(
   run: RunState,
@@ -745,10 +743,26 @@ function collectReloadResumeSessions(
       s.failure?.kind === 'reloadInterrupted' &&
       s.sessionId !== undefined &&
       s.sessionId !== '' &&
-      s.cwd !== undefined
+      s.cwd !== undefined &&
+      (s.reloadResumes ?? 0) < MAX_RELOAD_RESUMES
     ) {
       sessions.set(taskId, { sessionId: s.sessionId, cwd: s.cwd });
     }
   }
   return sessions;
+}
+
+/** 同じ会話を開き直すタスクの回数を1つ進める（Issue #1670）。 */
+function countReloadResumes(run: RunState, sessions: ReadonlyMap<string, unknown>): RunState {
+  if (sessions.size === 0) {
+    return run;
+  }
+  const tasks = new Map(run.tasks);
+  for (const taskId of sessions.keys()) {
+    const s = tasks.get(taskId);
+    if (s !== undefined) {
+      tasks.set(taskId, { ...s, reloadResumes: (s.reloadResumes ?? 0) + 1 });
+    }
+  }
+  return { ...run, tasks };
 }

@@ -31,6 +31,8 @@ export interface PersistedTaskState {
    * （復元側が0として扱う）。
    */
   manualRetryCount: number | undefined;
+  /** 再読み込みの後に同じ会話を開き直した回数（`TaskRunState.reloadResumes`、Issue #1670）。 */
+  reloadResumes?: number;
   failure: TaskFailureReason | undefined;
   /**
    * タスクPR/MRの番号（design.md §16.11「タスクごとの...PR/MRの番号」、Issue #118）。

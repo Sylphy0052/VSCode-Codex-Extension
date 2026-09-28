@@ -216,6 +216,11 @@ export interface TaskRunState {
    * （issue #275で実測）。名前は両者の合計から決める（`retrySuffixOf`）。
    */
   readonly manualRetryCount: number;
+  /**
+   * 再読み込みで途中で終わった会話を、自動再開で開き直した回数（Issue #1670）。実行層が数え、
+   * 上限（`MAX_RELOAD_RESUMES`）に達したら新しい会話で始める。古い永続データでは無い。
+   */
+  readonly reloadResumes?: number;
   /** `state` が `failed` / `skipped` のときだけ意味を持つ。 */
   readonly failure: TaskFailureReason | undefined;
   /**

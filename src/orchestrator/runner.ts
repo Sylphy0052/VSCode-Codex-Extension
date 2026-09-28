@@ -6769,6 +6769,7 @@ export class WorkflowRunner {
             submissionCount: s.submissionCount,
             retryCount: s.retryCount,
             manualRetryCount: s.manualRetryCount,
+            ...(s.reloadResumes === undefined ? {} : { reloadResumes: s.reloadResumes }),
             failure: s.failure,
             // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
             // liveTaskが無ければ前回persistした値を引き継ぐ

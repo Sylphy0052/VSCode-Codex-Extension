@@ -347,7 +347,16 @@ export class TaskStageRunner {
    */
   private async haltAfterReload(runId: string, taskId: string, message: string): Promise<void> {
     this.warn(runId, taskId, message);
-    await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', RELOAD_HALT_REASON, this.now()));
+    // 再開待ちの一時停止を残すと、止まった工程に一時停止の理由が並んで出る
+    await this.mutate(runId, (r) =>
+      haltStage(
+        clearStagePause(r, taskId, this.now()),
+        taskId,
+        'stopped',
+        RELOAD_HALT_REASON,
+        this.now(),
+      ),
+    );
   }
 
   /** レビューが直さずに残した指摘を持って終わったなら、差し戻すかどうかの関門を開く。 */
