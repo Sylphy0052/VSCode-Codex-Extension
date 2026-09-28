@@ -24,6 +24,8 @@ export interface IntegrationGitModelOptions {
   failMerge?: boolean;
   /** `git merge --abort`を常に失敗させる（未解決の衝突は残ったまま）。 */
   failMergeAbort?: boolean;
+  /** `git update-ref`を先頭を動かさずに失敗させる（refのロック残留などに当たる）。 */
+  failUpdateRef?: boolean;
 }
 
 export const INITIAL_TIP = 'a'.repeat(40);
@@ -144,6 +146,9 @@ export class IntegrationGitModel {
       const branch = INTEGRATION_REF.exec(sub ?? '')?.[1];
       if (branch === undefined) {
         return fail(`fatal: unexpected ref ${sub ?? ''}`);
+      }
+      if (this.options.failUpdateRef === true) {
+        return fail(`fatal: Unable to create 'refs/heads/${branch}.lock': File exists.`);
       }
       if (this.tipOf(branch) !== args[3]) {
         return fail(`fatal: cannot lock ref 'refs/heads/${branch}': is at ${this.tipOf(branch)}`);

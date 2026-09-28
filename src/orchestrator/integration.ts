@@ -565,7 +565,8 @@ async function mergeTaskBranch(
   }
   if (settled.kind === 'adopt') {
     // 前回の試行の候補（人が衝突を解決してコミットしたもの、またはref更新の前に中断したもの）が
-    // 統合worktreeに残っている。作り直さずにそのまま反映する
+    // 統合worktreeに残っている。作り直さずにそのまま反映する。これは前回の試行の後始末なので、
+    // staleでも下の作り直しの回数（MAX_CANDIDATE_REBUILDS）には数えない
     const published = await publishCandidate(
       integrationWorktreeCwd,
       branch,
@@ -836,6 +837,7 @@ type PublishResult =
  * （先頭がbaseのときだけ更新するCAS）のあと、統合ブランチをcheckoutし直す。
  *
  * 先頭がbaseから動いていてCASが失敗したら`stale`を返す（呼び出し側が作り直すか止める）。
+ * 先頭がbaseのままなのに更新できなかったときは、gitの失敗として`failure`を返す。
  * 先頭が既に候補と同じ（前回の試行がref更新まで済ませて中断した）なら成功として扱う。
  */
 async function publishCandidate(
@@ -858,8 +860,17 @@ async function publishCandidate(
     ['update-ref', `refs/heads/${branch}`, candidateSha, attempt.baseSha],
     cwd,
   );
-  if (update.code !== 0 && (await resolveBranchSha(cwd, branch, git)) !== candidateSha) {
-    return { kind: 'stale' };
+  if (update.code !== 0) {
+    const tip = await resolveBranchSha(cwd, branch, git);
+    if (tip === undefined || tip === attempt.baseSha) {
+      // 先頭はbaseのまま（またはrefを読めない）なのに更新できなかった。CASの競合ではなく
+      // refのロック残留・権限・容量などのgitの失敗なので、作り直さずにgitのエラーを返す
+      await restoreIntegrationHead(cwd, branch, git);
+      return { kind: 'failure', message: gitFailureMessage('git update-ref', update) };
+    }
+    if (tip !== candidateSha) {
+      return { kind: 'stale' };
+    }
   }
   // ref更新は済んでいるため、再checkoutの失敗はマージの失敗にしない。detachしたままでも
   // 次の試行の`settleIntegrationHead`が統合ブランチをcheckoutし直す

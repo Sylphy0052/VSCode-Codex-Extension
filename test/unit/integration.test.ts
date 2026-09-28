@@ -15,6 +15,7 @@ import {
   type MergeAttempt,
   type MergeTaskOptions,
   mergeCommitMessage,
+  parseMergeAttempt,
   reconcileMergingTaskOnReload,
   resolveTaskBranchOrigin,
   uncommittedChangesCommitMessage,
@@ -1554,6 +1555,30 @@ describe('統合の1経路（Issue #1678）', () => {
     expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
   });
 
+  it('先頭がbaseのままなのにupdate-refが失敗したら、作り直さずにgitのエラーでfailureになる（片付けとしてcheckoutし直す）', async () => {
+    const model = new IntegrationGitModel({ failUpdateRef: true });
+    const git = composeGit(model);
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T9'),
+      RUN_ID,
+      'T9',
+      TASK_BRANCH,
+      git,
+      { saveAttempt: async () => {} },
+    );
+
+    expect(result.kind).toBe('failure');
+    if (result.kind === 'failure') {
+      expect(result.message).toContain('.lock');
+      expect(result.message).not.toContain('作り直しても');
+    }
+    expect(git.calls.filter((c) => c.args[0] === 'update-ref')).toHaveLength(1);
+    expect(model.tipOf(INTEGRATION_BRANCH)).toBe(INITIAL_TIP);
+    expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
+  });
+
   it('AC3: saveAttemptは、状態を変えるgitコマンド（checkout --detach・merge --no-ff・update-ref）より前に呼ばれる', async () => {
     const model = new IntegrationGitModel();
     const composed = composeGit(model);
@@ -1698,5 +1723,34 @@ describe('統合の1経路（Issue #1678）', () => {
     }
     expect(model.tipOf(INTEGRATION_BRANCH)).toBe(result.mergeCommit);
     expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
+  });
+});
+
+describe('parseMergeAttempt（永続データから読んだ試行の検証）', () => {
+  const valid = {
+    taskId: 'T9',
+    attemptId: '0f8e2c1a-1b2c-4d3e-8f90-123456789abc',
+    baseSha: 'a'.repeat(40),
+    sourceSha: 'b'.repeat(40),
+    candidateSha: 'c'.repeat(40),
+    stage: 'candidate',
+  };
+
+  it('形の合う試行はそのまま返す', () => {
+    expect(parseMergeAttempt(valid, 'T9')).toEqual(valid);
+  });
+
+  it.each([
+    ['null', null],
+    ['文字列', 'x'],
+    ['別タスクの試行', { ...valid, taskId: 'T1' }],
+    ['attemptIdが文字列でない', { ...valid, attemptId: 1 }],
+    ['attemptIdに許さない文字', { ...valid, attemptId: 'a/b' }],
+    ['baseShaが短縮SHA', { ...valid, baseSha: 'a'.repeat(7) }],
+    ['sourceShaが無い', { ...valid, sourceSha: undefined }],
+    ['candidateShaがSHAでない', { ...valid, candidateSha: 'HEAD' }],
+    ['stageが未知', { ...valid, stage: 'merging' }],
+  ])('%sならundefined', (_label, value) => {
+    expect(parseMergeAttempt(value, 'T9')).toBeUndefined();
   });
 });
