@@ -116,6 +116,12 @@ const MAX_INSTRUCTION_LENGTH = 2000;
 /** 質問への回答を、次の指示へ入れるときの上限。 */
 const MAX_ANSWER_PROMPT_LENGTH = 2000;
 
+/**
+ * 工程セッションが背景タスクの完了を待つ時間の上限（Issue #1676）。工程のループには全体の
+ * 時間上限が無いため、終わらないプロセスが背景に残ると次のターンが来ないまま止まり続ける。
+ */
+const STAGE_BACKGROUND_WAIT_LIMIT_MS = 30 * 60_000;
+
 /** worktreeで作業する工程。「実装とPR作成」でworktreeを作り、以降の工程はそれを使う。 */
 const WORKTREE_STAGES: ReadonlySet<TaskStage> = new Set(['implement', 'review', 'mergeCleanup']);
 
@@ -264,6 +270,30 @@ function errorMessage(e: unknown): string {
 
 function appendPrefix(first: string | undefined, second: string): string {
   return first === undefined ? second : `${first}\n\n${second}`;
+}
+
+/**
+ * 報告なしに終わった工程の関門へ載せる理由（Issue #1676）。
+ *
+ * `maxReached`とだけ書くと、関門を判定するReflexが「ツール呼び出しの上限」と読み違え、
+ * モデルを上げる・ツール呼び出しを制限するといった的外れな対処を勧めた。何の回数かを書き添える。
+ */
+function unreportedFinishDetail(reason: LoopStopReason, maxIterations: number): string {
+  const base = `工程セッションが報告なしに終わりました（${reason}）`;
+  if (reason === 'timedOut') {
+    // 工程のループは全体の時間上限を持たないため、`timedOut`は背景タスクを待つ上限からだけ来る
+    return (
+      `${base}。背景タスクの完了を${String(STAGE_BACKGROUND_WAIT_LIMIT_MS / 60_000)}分待っても` +
+      '背景タスクが残っていた。終わらないプロセスを背景で起動した可能性がある'
+    );
+  }
+  if (reason !== 'maxReached') {
+    return base;
+  }
+  return (
+    `${base}。拡張機能が工程セッションへ送る指示（初回の指示と「続けて」）の回数が` +
+    `上限${String(maxIterations)}回に達した。ツール呼び出しの回数ではない`
+  );
 }
 
 export class TaskStageRunner {
@@ -959,6 +989,7 @@ export class TaskStageRunner {
       initialPrompt,
       continuePrompt: `続けて。${stageScopeReminder(ref)}`,
       maxIterations: this.deps.maxIterations,
+      backgroundWaitLimitMs: STAGE_BACKGROUND_WAIT_LIMIT_MS,
       condition: `${ref.taskId}の「${STAGE_LABELS[ref.stage]}」を終え、${REPORT_STAGE_RESULT_TOOL}で報告した`,
     };
   }
@@ -1218,7 +1249,7 @@ export class TaskStageRunner {
           entry.runId,
           entry.ref.taskId,
           'needsAction',
-          `工程セッションが報告なしに終わりました（${reason}）`,
+          unreportedFinishDetail(reason, this.deps.maxIterations),
         );
         this.release(entry, { dispose: false });
       });
