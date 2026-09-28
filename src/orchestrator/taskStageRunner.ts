@@ -116,6 +116,12 @@ const MAX_INSTRUCTION_LENGTH = 2000;
 /** 質問への回答を、次の指示へ入れるときの上限。 */
 const MAX_ANSWER_PROMPT_LENGTH = 2000;
 
+/**
+ * 工程セッションが背景タスクの完了を待つ時間の上限（Issue #1676）。工程のループには全体の
+ * 時間上限が無いため、終わらないプロセスが背景に残ると次のターンが来ないまま止まり続ける。
+ */
+const STAGE_BACKGROUND_WAIT_LIMIT_MS = 30 * 60_000;
+
 /** worktreeで作業する工程。「実装とPR作成」でworktreeを作り、以降の工程はそれを使う。 */
 const WORKTREE_STAGES: ReadonlySet<TaskStage> = new Set(['implement', 'review', 'mergeCleanup']);
 
@@ -274,6 +280,13 @@ function appendPrefix(first: string | undefined, second: string): string {
  */
 function unreportedFinishDetail(reason: LoopStopReason, maxIterations: number): string {
   const base = `工程セッションが報告なしに終わりました（${reason}）`;
+  if (reason === 'timedOut') {
+    // 工程のループは全体の時間上限を持たないため、`timedOut`は背景タスクを待つ上限からだけ来る
+    return (
+      `${base}。背景タスクの完了を${String(STAGE_BACKGROUND_WAIT_LIMIT_MS / 60_000)}分待っても` +
+      '次のターンが始まらなかった。終わらないプロセスを背景で起動した可能性がある'
+    );
+  }
   if (reason !== 'maxReached') {
     return base;
   }
@@ -976,6 +989,7 @@ export class TaskStageRunner {
       initialPrompt,
       continuePrompt: `続けて。${stageScopeReminder(ref)}`,
       maxIterations: this.deps.maxIterations,
+      backgroundWaitLimitMs: STAGE_BACKGROUND_WAIT_LIMIT_MS,
       condition: `${ref.taskId}の「${STAGE_LABELS[ref.stage]}」を終え、${REPORT_STAGE_RESULT_TOOL}で報告した`,
     };
   }

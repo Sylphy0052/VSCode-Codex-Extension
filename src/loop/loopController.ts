@@ -72,6 +72,14 @@ export interface LoopPlan {
    */
   maxDurationMs?: number;
   /**
+   * 背景タスクの完了を待つ時間の上限（ミリ秒、Issue #1676）。省略すると待つ時間では止めない。
+   *
+   * ターンの完了時に背景タスクが残っていれば、ループは次の指示を送らず次のターンを待つ。
+   * dev serverのような終わらないプロセスが残ると次のターンが来ないため、待ち始めてから
+   * この時間が過ぎたら`timedOut`で止める。次のターンが始まれば数え直す。
+   */
+  backgroundWaitLimitMs?: number;
+  /**
    * ループエンジニアリングモードの設定（issue #891）。省略すると指示文を足さない。
    *
    * 有効なとき、`dispatch`が1回目は`initialInstruction`を、2回目以降は
@@ -808,8 +816,9 @@ export class LoopController {
     }
     // 背景タスクの完了待ち（Issue #1676）。停滞の履歴・評価・送信のどれにも進めない。
     // 「完了通知を待つ」と書いて終えたターンへ`続けて。`を送ると、待つだけのターンが
-    // 送信回数を食い潰す（77秒で7回を使い切った事象）
-    if (this.waitsForBackgroundTasks(plan, state)) {
+    // 送信回数を食い潰す（77秒で7回を使い切った事象）。完了を宣言したターンは待たずに
+    // 検証へ進む。待つと、次のターンでは同じ発言が`newMessage`にならず宣言が消える
+    if (!doneDeclared && this.waitsForBackgroundTasks(plan, state)) {
       return;
     }
     // 停滞判定（design.md §16.27、Issue #336）に使う履歴を、判定の対象になったターンの
@@ -1180,6 +1189,7 @@ export class LoopController {
       return false;
     }
     if (tasks.length === 0) {
+      this.clearBackgroundWait();
       return false;
     }
     // 待つ前に時間上限を見る。待ち始めてから上限を過ぎた分はタイマーが見る
@@ -1196,21 +1206,32 @@ export class LoopController {
     return true;
   }
 
-  /** 背景タスクを待つ間も時間上限を実時間で効かせる（Issue #1676）。 */
+  /**
+   * 背景タスクを待つ間も時間上限を実時間で効かせる（Issue #1676）。ループ全体の上限
+   * （`maxDurationMs`）と待つ時間の上限（`backgroundWaitLimitMs`）の早い方で止める。
+   */
   private scheduleBackgroundWaitDeadline(plan: LoopPlan): void {
     this.clearBackgroundWait();
-    const limit = plan.maxDurationMs;
-    if (limit === undefined || this.startedAt === undefined) {
+    const now = this.now();
+    const deadlines: number[] = [];
+    if (plan.maxDurationMs !== undefined && this.startedAt !== undefined) {
+      deadlines.push(this.startedAt + plan.maxDurationMs - now);
+    }
+    if (plan.backgroundWaitLimitMs !== undefined) {
+      deadlines.push(plan.backgroundWaitLimitMs);
+    }
+    if (deadlines.length === 0) {
       return;
     }
     const generation = this.runGeneration;
-    const remaining = Math.max(0, this.startedAt + limit - this.now());
+    const remaining = Math.max(0, Math.min(...deadlines));
     this.backgroundWaitTimer = setTimeout(() => {
       this.backgroundWaitTimer = undefined;
       // 待つ間に止められた・別の実行が始まった・次のターンが始まった場合は何もしない
       if (generation !== this.runGeneration || this.plan !== plan || this.sawBusy) {
         return;
       }
+      this.log('ループ: 背景タスクの完了を待つ間に時間上限へ達した。timedOutで止める');
       this.stop('timedOut');
     }, remaining);
   }
