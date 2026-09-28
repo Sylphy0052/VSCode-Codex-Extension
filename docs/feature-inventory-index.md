@@ -140,7 +140,7 @@
 | `agent.workflows.dir`                            | `".agents/workflows"`                                                                                            | `resource`            | [F25](feature-inventory.md#f25) |
 | `agent.workflows.allowAutoApprove`               | `false`                                                                                                          | `machine`             | [F30](feature-inventory.md#f30) |
 | `agent.workflows.allowClaudeBypassPermissions`   | `false`                                                                                                          | `machine`             | [F30](feature-inventory.md#f30) |
-| `agent.workflows.fullAutoApprove` | `false` | `machine` | [F30](feature-inventory.md#f30) |
+| `agent.workflows.fullAutoApprove`                | `false`                                                                                                          | `machine`             | [F30](feature-inventory.md#f30) |
 | `agent.workflows.replyTimeoutSec`                | `300`                                                                                                            | `machine-overridable` | [F31](feature-inventory.md#f31) |
 | `agent.workflows.mergeApprovalTimeoutSec`        | `3600`                                                                                                           | `machine-overridable` | [F30](feature-inventory.md#f30) |
 | `agent.workflows.taskApprovalTimeoutSec`         | `3600`                                                                                                           | `machine-overridable` | [F30](feature-inventory.md#f30) |

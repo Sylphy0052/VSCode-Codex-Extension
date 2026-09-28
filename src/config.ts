@@ -1163,7 +1163,8 @@ export interface WorkflowsConfig {
   /**
    * 実効 `autoApprove` のタスクの承認要求を、危険判定（§16.7）を通さず許可するか
    * （machineスコープ、既定 false）。PRのmergeとリモートブランチの削除は人へ回す。
-   * オーケストレータモードの工程セッションと同じ基準にそろえる（Issue #1656）。
+   * オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準にそろえる
+   * （Issue #1656）。
    */
   fullAutoApprove: boolean;
   /**
