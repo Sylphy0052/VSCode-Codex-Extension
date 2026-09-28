@@ -98,6 +98,8 @@ export function splitShellCommands(command: string): ShellCommand[] {
     if (!/^(\d*|&)$/.test(word)) {
       endWord();
     }
+    // 行き先を待つ間に次のリダイレクトが来た（`> > out`）場合、行き先は後ろのものとして扱う
+    skipTarget = false;
     redirect = true;
     inWord = true;
   };
