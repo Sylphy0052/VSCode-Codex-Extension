@@ -149,6 +149,12 @@ export type TaskFailureReason =
    */
   | { readonly kind: 'runHalted' }
   /**
+   * `failed`だったタスクを、オーケストレーターが`add_task`の`supersedes`で後継のタスクへ
+   * 置き換えた（Issue #1663）。`by`は後継のタスクid。作業は後継が引き継ぐため、
+   * `getRunOutcome`はこれを`aborted`の理由に数えない。
+   */
+  | { readonly kind: 'superseded'; readonly by: string }
+  /**
    * ウィンドウのリロードで走行中（`running` / `waitingApproval`）だったタスクを
    * 「中断」として`failed`にする（design.md §16.11）。セッションのプロセスごと消えている
    * ため、`manual` / `interrupted`（人がそのタスクの画面を直接操作した状態。セッションは
@@ -277,6 +283,71 @@ export function removeTaskState(run: RunState, taskId: string): RunState {
   const tasks = new Map(run.tasks);
   tasks.delete(taskId);
   return { ...run, tasks };
+}
+
+/**
+ * `add_task`の`supersedes`（Issue #1663）。`failed`のタスクを`skipped`（`superseded`）へ移し、
+ * 後継の`byTaskId`へ作業を引き継がせる。呼び出し側（`runnerOrchestrator.ts`）が対象を
+ * `failed`に限定し、直接の依存タスクの`dependsOn`を後継へ付け替えた後で呼ぶ前提。
+ *
+ * - 置き換えたタスクの失敗が波及した`dependencyFailed`の`skipped`は、原因からそのidを外す。
+ *   原因が空になったものは`pending`へ戻し、ほかの失敗も原因に含むものは`skipped`のまま残す
+ * - 適用後に`failed`が0件で`haltedByUser`も立っていなければ、`runHalted`の`skipped`を
+ *   `pending`へ戻す（`applyAutoResume`の再開と同じ扱い）
+ */
+export function supersedeFailedTasks(
+  run: RunState,
+  supersededIds: readonly string[],
+  byTaskId: string,
+): RunState {
+  const superseded = new Set(supersededIds);
+  const nextTasks = new Map(run.tasks);
+  for (const id of superseded) {
+    const s = nextTasks.get(id);
+    if (s === undefined || s.state !== 'failed') {
+      continue;
+    }
+    nextTasks.set(id, { ...s, state: 'skipped', failure: { kind: 'superseded', by: byTaskId } });
+  }
+  for (const [id, s] of nextTasks) {
+    if (s.state !== 'skipped' || s.failure?.kind !== 'dependencyFailed') {
+      continue;
+    }
+    const remaining = s.failure.failedTaskIds.filter((f) => !superseded.has(f));
+    if (remaining.length === s.failure.failedTaskIds.length) {
+      continue;
+    }
+    nextTasks.set(
+      id,
+      remaining.length === 0
+        ? { ...s, state: 'pending', failure: undefined }
+        : { ...s, failure: { kind: 'dependencyFailed', failedTaskIds: remaining } },
+    );
+  }
+  const next: RunState = { ...run, tasks: nextTasks };
+  if (isRunHalted(next)) {
+    return next;
+  }
+  for (const [id, s] of nextTasks) {
+    if (s.state === 'skipped' && s.failure?.kind === 'runHalted') {
+      nextTasks.set(id, { ...s, state: 'pending', failure: undefined });
+    }
+  }
+  return next;
+}
+
+/**
+ * 実行全体が停止している間に残った`pending`を`skipped`（`runHalted`）にする。失敗からの
+ * 復旧待ちが期限切れになったとき、その間に`add_task`で足された`pending`が残っていると
+ * `getRunOutcome`が`running`を返し続け、runが終わらなくなるため（Issue #1663）。
+ */
+export function skipPendingWhileHalted(run: RunState): RunState {
+  if (!isRunHalted(run)) {
+    return run;
+  }
+  const nextTasks = new Map(run.tasks);
+  skipRemainingPending(nextTasks);
+  return { ...run, tasks: nextTasks };
 }
 
 /** 1件でも `failed` が確定しているか。 */
@@ -1046,6 +1117,10 @@ export function retryTask(run: RunState, tasks: readonly WorkflowTask[], taskId:
     return run;
   }
   if (current.state !== 'failed' && current.state !== 'skipped') {
+    return run;
+  }
+  // 後継へ置き換えたタスク（Issue #1663）を戻すと、同じ作業が後継と二重に走る
+  if (current.failure?.kind === 'superseded') {
     return run;
   }
   const depsAllDone = task.dependsOn.every((dep) => run.tasks.get(dep)?.state === 'done');

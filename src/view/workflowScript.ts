@@ -57,6 +57,8 @@ export function workflowScript(): string {
     mergeBlockedWhileHalted: '依存先の統合ブロック（停止中）',
     mergeFailed: 'マージ失敗',
     runHalted: '実行停止のため未着手',
+    // Issue #1663。add_taskのsupersedesで後継のタスクへ置き換えた
+    superseded: '置き換え済み',
     reloadInterrupted: 'リロードによる中断',
     manualStop: '手動停止',
     // design.md §16.27、Issue #336。同じ応答が繰り返され進捗が無いまま停止した
@@ -164,6 +166,9 @@ export function workflowScript(): string {
       task.failure.blockedTaskIds
     ) {
       return label + '（' + task.failure.blockedTaskIds.join(', ') + '）';
+    }
+    if (task.failure.kind === 'superseded' && task.failure.by) {
+      return label + '（後継: ' + task.failure.by + '）';
     }
     return label;
   }
@@ -964,7 +969,9 @@ export function workflowScript(): string {
       });
       cell.appendChild(continueBtn);
     }
-    if (task.state === 'failed' || task.state === 'skipped') {
+    // 置き換え済み（Issue #1663）は後継が作業を引き継いでおり、runState.tsのretryTaskも拒否する
+    const isSuperseded = task.failure && task.failure.kind === 'superseded';
+    if ((task.state === 'failed' || task.state === 'skipped') && !isSuperseded) {
       const retryBtn = text('button', 'secondary', '再実行');
       retryBtn.type = 'button';
       retryBtn.addEventListener('click', (e) => {

@@ -26,7 +26,7 @@ import { issueNumberFromUrl } from './runRemaining';
 import { buildResponseSummary } from './taskSummary';
 import { formatUntrusted } from './untrustedText';
 import { isTeamRole } from './rolePresets';
-import { addTaskState, removeTaskState } from './runState';
+import { addTaskState, hasFailedTask, removeTaskState, supersedeFailedTasks } from './runState';
 import type { TaskState } from './runState';
 import type {
   FinalMergeDecision,
@@ -430,7 +430,9 @@ function runFinishedReason(
  * 二重に作らないよう、`finalizeForge`自身に冪等ガードを足した（下記参照。design.md §16.30）
  */
 function resumeIfFinishedForPlanChange(live: LiveRun): void {
-  if (live.failureRecovery !== undefined) {
+  // `failed`が残る間は`pending`が開始されない（`isRunHalted`）。ここで復旧待ちを解除すると、
+  // 期限切れでrunを終える経路まで消え、開始も終了もしないまま止まる（Issue #1663）
+  if (live.failureRecovery !== undefined && !hasFailedTask(live.runState)) {
     clearTimeout(live.failureRecovery.timer);
     live.failureRecovery = undefined;
     live.failureRecoveryExhausted = false;
@@ -1355,9 +1357,36 @@ function addTask(
     return no(built.error);
   }
   const task = built.task;
+  const supersedes = parseSupersedes(live, raw['supersedes']);
+  if ('error' in supersedes) {
+    return no(supersedes.error);
+  }
+  const supersededIds = new Set(supersedes.ids);
+  const dependsOnSuperseded = task.dependsOn.filter((dep) => supersededIds.has(dep));
+  if (dependsOnSuperseded.length > 0) {
+    return no(
+      `supersedes で置き換えるタスクには依存できません: ${dependsOnSuperseded.join(', ')}`,
+    );
+  }
+  // 置き換えるタスクへ直接依存するタスクは、依存先を後継へ付け替える。`done`のものは
+  // 以降のスケジューリングに影響しないため触らない
+  const rewired: { readonly id: string; readonly dependsOn: readonly string[] }[] = [];
+  const candidateTasks = live.def.tasks.map((t) => {
+    if (
+      !t.dependsOn.some((dep) => supersededIds.has(dep)) ||
+      live.runState.tasks.get(t.id)?.state === 'done'
+    ) {
+      return t;
+    }
+    const dependsOn = [
+      ...new Set(t.dependsOn.map((dep) => (supersededIds.has(dep) ? task.id : dep))),
+    ];
+    rewired.push({ id: t.id, dependsOn });
+    return { ...t, dependsOn };
+  });
   const candidateDef: WorkflowDefinition = {
     ...live.def,
-    tasks: [...live.def.tasks, task],
+    tasks: [...candidateTasks, task],
   };
   const validation = validateWorkflow(candidateDef);
   if (validation.errors.length > 0) {
@@ -1368,6 +1397,20 @@ function addTask(
   const verifyWarnings = findMissingVerifyWarnings([task]).map((w) => w.message);
   live.def = candidateDef;
   live.runState = addTaskState(live.runState, task.id);
+  if (supersedes.ids.length > 0) {
+    live.runState = supersedeFailedTasks(live.runState, supersedes.ids, task.id);
+  }
+  // 置き換えずに`failed`が残ると、追加したタスクは開始されない（Issue #1663）。追加は
+  // 受理し、理由と対処を返答と警告欄の両方へ出す
+  const remainingFailed = [...live.runState.tasks]
+    .filter(([, s]) => s.state === 'failed')
+    .map(([id]) => id);
+  const haltedWarning =
+    remainingFailed.length > 0
+      ? `失敗したタスク ${remainingFailed.join(', ')} が残っているため、${task.id} は開始されません。` +
+        'add_task の supersedes で置き換えるか、retry_task で再実行してください。'
+      : undefined;
+  const replyWarnings = [...verifyWarnings, ...(haltedWarning === undefined ? [] : [haltedWarning])];
   pushPlanChangeHistoryWarning(live, {
     kind: 'orchestratorTaskAdded',
     taskId: task.id,
@@ -1377,18 +1420,56 @@ function addTask(
       `prompt: ${task.prompt}\n` +
       `done: ${task.done}\n` +
       `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(', ') : '(なし)'}` +
-      verifyWarnings.map((message) => `\n警告: ${message}`).join(''),
+      (supersedes.ids.length > 0 ? `\nsupersedes: ${supersedes.ids.join(', ')}` : '') +
+      rewired.map((r) => `\n${r.id} のdependsOnを変更: ${r.dependsOn.join(', ')}`).join('') +
+      replyWarnings.map((message) => `\n警告: ${message}`).join(''),
   });
   persistTaskChangeToYaml(self, runId, live, `タスク ${task.id} の追加`, (source) =>
     appendTaskToWorkflowYaml(source, task),
   );
+  for (const r of rewired) {
+    persistTaskChangeToYaml(self, runId, live, `タスク ${r.id} の依存変更`, (source) =>
+      setTaskDependenciesInWorkflowYaml(source, r.id, r.dependsOn),
+    );
+  }
   resumeIfFinishedForPlanChange(live);
   self.notify(runId);
   self.pump(runId);
   return ok(
     `タスク ${task.id} を追加しました。` +
-      verifyWarnings.map((message) => `警告: ${message}`).join(' '),
+      (supersedes.ids.length > 0
+        ? `${supersedes.ids.join(', ')} を ${task.id} で置き換えました（skipped）。`
+        : '') +
+      replyWarnings.map((message) => `警告: ${message}`).join(' '),
   );
+}
+
+/**
+ * `add_task`の`supersedes`（Issue #1663）を読む。省略時は空。`failed`以外のタスクを
+ * 指定したら拒否する。`allow`付きのタスクも対象にする（置き換えは権限を広げる操作ではない）。
+ */
+function parseSupersedes(
+  live: LiveRun,
+  raw: unknown,
+): { readonly ids: readonly string[] } | { readonly error: string } {
+  if (raw === undefined) {
+    return { ids: [] };
+  }
+  if (!Array.isArray(raw) || raw.some((id) => typeof id !== 'string')) {
+    return { error: 'supersedes は失敗したタスクidの配列で指定してください。' };
+  }
+  const ids = [...new Set(raw as string[])];
+  const notFailed = ids
+    .map((id) => ({ id, state: live.runState.tasks.get(id)?.state }))
+    .filter((t) => t.state !== 'failed');
+  if (notFailed.length > 0) {
+    return {
+      error:
+        'supersedes に指定できるのは失敗（failed）したタスクだけです: ' +
+        notFailed.map((t) => `${t.id}（状態: ${t.state ?? '存在しない'}）`).join(', '),
+    };
+  }
+  return { ids };
 }
 
 /**
