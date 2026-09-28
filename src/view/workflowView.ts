@@ -19,7 +19,11 @@ import {
   reconcileRoadmapIssues,
   type RoadmapIssueSummary,
 } from '../orchestrator/roadmap';
-import type { WorkflowDefinition } from '../orchestrator/workflow';
+import {
+  MAX_PARALLEL_MAX,
+  MAX_PARALLEL_MIN,
+  type WorkflowDefinition,
+} from '../orchestrator/workflow';
 import { chatCsp } from './chatCsp';
 import {
   aggregateProgress,
@@ -840,6 +844,20 @@ export class WorkflowViewManager implements vscode.Disposable {
       this.runner.stop(runId);
       return;
     }
+    if (type === 'setMaxParallel') {
+      // 範囲の検証は`setMaxParallel`が行う（数値でないものだけここで落とす）
+      const maxParallel = m['maxParallel'];
+      if (typeof maxParallel !== 'number') {
+        return;
+      }
+      const result = this.runner.setMaxParallel(runId, maxParallel);
+      if (!result.ok) {
+        void vscode.window.showWarningMessage(`並列上限を変えられませんでした: ${result.message}`);
+        // 入力欄を今の値へ戻す
+        this.postAll();
+      }
+      return;
+    }
     if (type === 'removeWorktrees') {
       // 未コミットの変更があるworktreeは`removeWorktree`自身が拒否するためデータ損失は
       // 防がれるが、クリーンなworktreeとブランチは確認無しで一発で消える。セッション削除
@@ -1121,6 +1139,7 @@ ${workflowStyles()}
     <div class="actions">
       <button id="runBtn" type="button">実行</button>
       <button id="stopAllBtn" type="button" class="danger">全体の停止</button>
+      <span id="maxParallelBox" class="max-parallel" hidden><label for="maxParallelInput">並列上限</label><input id="maxParallelInput" type="number" min="${String(MAX_PARALLEL_MIN)}" max="${String(MAX_PARALLEL_MAX)}" step="1"><button id="maxParallelApplyBtn" type="button" class="secondary">適用</button></span>
       <button id="removeWorktreesBtn" type="button" class="secondary">worktreeの撤去</button>
       <button id="openDefBtn" type="button" class="secondary">定義ファイルを開く</button>
       <button id="openIntegrationPrBtn" type="button" class="secondary" disabled>統合ブランチのPR/MRを開く</button>
@@ -1355,6 +1374,7 @@ function buildPreviewSnapshot(
       ],
     },
     haltedByUser: false,
+    maxParallel: def.maxParallel,
     isDraft: true,
     // 下書きプレビューでもロードマップ欄を出す（Issue #1257）。生成直後の定義でも、
     // 元にしたロードマップの項目とIssueの状態は読めたほうがよい

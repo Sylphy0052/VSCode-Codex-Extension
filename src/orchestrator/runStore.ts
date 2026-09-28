@@ -103,6 +103,12 @@ export interface PersistedRun {
    * 一括で書き換える必要が無い。
    */
   autoResumeAttempts?: number;
+  /**
+   * ワークフロー画面で変えた並列上限（Issue #1650）。復元時は定義YAMLの`defaults.maxParallel`
+   * より優先する。画面で変えていないrunと、このフィールドが無い形式の既存データでは省略し、
+   * 復元時は定義YAMLの値を使う。定義YAMLのファイル自体は書き換えない。
+   */
+  maxParallelOverride?: number;
 }
 
 /**
