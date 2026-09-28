@@ -19,6 +19,13 @@ const RUN: WorkflowMenuEntry = {
   command: 'agent.workflows.run',
 };
 
+/** 自動レビューが上限で止まったYAMLを、続けてレビューするか承認する（Issue #1654）。 */
+const REVIEW: WorkflowMenuEntry = {
+  label: '$(checklist) ワークフローをレビュー…',
+  description: 'YAMLの定義を選んでレビューと修正を回します',
+  command: 'agent.workflows.review',
+};
+
 const VIEW: WorkflowMenuEntry = {
   label: '$(graph) ワークフローViewを開く',
   description: '定義と進行を1枚で見ます',
@@ -72,11 +79,12 @@ const STOP: WorkflowMenuEntry = {
  */
 export function buildWorkflowMenuEntries(runningCount: number): WorkflowMenuEntry[] {
   if (runningCount <= 0) {
-    return [RUN, VIEW, PLAN, TEAM, ROADMAP, CONVERT_ROADMAP];
+    return [RUN, REVIEW, VIEW, PLAN, TEAM, ROADMAP, CONVERT_ROADMAP];
   }
   return [
     { ...VIEW, description: `実行中 ${runningCount}件 — ${VIEW.description}` },
     RUN,
+    REVIEW,
     PLAN,
     TEAM,
     ROADMAP,
