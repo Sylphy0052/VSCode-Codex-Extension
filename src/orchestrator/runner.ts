@@ -43,7 +43,7 @@ import {
   type ForgeHostConfig,
   type PullRequestLayerConfig,
 } from './forge';
-import { INTEGRATION_DIR_NAME, IntegrationMergeQueue } from './integration';
+import { INTEGRATION_DIR_NAME, IntegrationMergeQueue, type MergeAttempt } from './integration';
 import {
   applyRunCompletionToFile,
   findSymlinkedSegment,
@@ -2093,6 +2093,12 @@ export interface LiveRun {
    */
   mergeResolutions: Map<string, MergeResolutionEntry>;
   /**
+   * タスクごとの統合の直近の試行（Issue #1678）。taskIdをキーにする。`mergeTask`が
+   * git操作の前に書き込み、`persist()`が`PersistedTaskState.mergeAttempt`として保存する。
+   * リロード後は`runnerRestore.ts`が永続データから戻す。
+   */
+  mergeAttempts: Map<string, MergeAttempt>;
+  /**
    * タスクの開始時に起票したIssueの番号（design.md §16.31「タスクの開始時にIssueを起票し、
    * PR本文から参照する」、roadmap W6、Issue #596）。taskIdをキーにする。`expandedPrompt`等
    * と同じく表示・追跡専用でworkspaceStateへは永続化しない（`live`が生きている間だけ、
@@ -2929,6 +2935,7 @@ export class WorkflowRunner {
       launchingTasks: new Set(),
       stopping: false,
       mergeResolutions: new Map(),
+      mergeAttempts: new Map(),
       createdTaskIssues: new Map(),
       orchestrator: undefined,
       orchestratorSeenStates: new Map(),
@@ -6757,6 +6764,7 @@ export class WorkflowRunner {
         for (const [id, s] of live.runState.tasks) {
           const liveTask = live.tasks.get(id);
           const cleanupStatus = liveTask?.cleanupStatus ?? current?.tasks[id]?.cleanupStatus;
+          const mergeAttempt = live.mergeAttempts.get(id) ?? current?.tasks[id]?.mergeAttempt;
           tasks[id] = {
             state: s.state,
             sessionId: s.sessionId,
@@ -6777,6 +6785,7 @@ export class WorkflowRunner {
               liveTask?.pullRequest?.number ?? current?.tasks[id]?.pullRequestNumber,
             pullRequestUrl: liveTask?.pullRequest?.url ?? current?.tasks[id]?.pullRequestUrl,
             ...(cleanupStatus === undefined ? {} : { cleanupStatus }),
+            ...(mergeAttempt === undefined ? {} : { mergeAttempt }),
           };
         }
         return {

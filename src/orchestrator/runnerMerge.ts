@@ -16,11 +16,13 @@ import {
   buildMergeResolutionPrompt,
   commitUncommittedChangesIfNeeded,
   findTaskIdsMergedSince,
-  isMergeResolutionComplete,
   MERGE_RESOLUTION_CONDITION,
   MERGE_RESOLUTION_MAX_ITERATIONS,
+  type CompleteResolutionResult,
   type IntegrationLease,
+  type MergeAttempt,
   type MergeResolutionTaskInfo,
+  type MergeTaskOptions,
   type MergeTaskResult,
 } from './integration';
 import { sanitizeForLog } from './sanitize';
@@ -91,7 +93,7 @@ export async function mergeTaskWithForge(
       taskId,
       taskBranch,
       self.deps.git,
-      task.type,
+      buildMergeTaskOptions(self, live, runId, taskId, task),
     );
     return { merge, pullRequest: undefined };
   }
@@ -112,6 +114,34 @@ export async function mergeTaskWithForge(
     ),
   );
   return finalizeTaskPullRequestFlow(self, live, runId, taskId, flow);
+}
+
+/**
+ * `mergeTask`へ渡す試行の保存先（Issue #1678）。試行は統合ブランチのrefを動かす前に
+ * `live.mergeAttempts`へ入れて永続化し、リロード後の判定と候補の引き取りに使う。
+ */
+function buildMergeTaskOptions(
+  self: WorkflowRunnerInternals,
+  live: LiveRun,
+  runId: string,
+  taskId: string,
+  task: WorkflowTask,
+): MergeTaskOptions {
+  return {
+    type: task.type,
+    previousAttempt: live.mergeAttempts.get(taskId),
+    saveAttempt: (attempt) => saveMergeAttempt(self, live, runId, attempt),
+  };
+}
+
+async function saveMergeAttempt(
+  self: WorkflowRunnerInternals,
+  live: LiveRun,
+  runId: string,
+  attempt: MergeAttempt,
+): Promise<void> {
+  live.mergeAttempts.set(attempt.taskId, attempt);
+  await self.persist(runId);
 }
 
 /**
@@ -191,10 +221,14 @@ function buildTaskPullRequestFlowCallbacks(
         taskId,
         taskBranch,
         self.deps.git,
-        task.type,
+        buildMergeTaskOptions(self, live, runId, taskId, task),
       );
       if (merged.kind === 'success') {
-        const push = await pushBranch(self.deps.git, integration.cwd, integration.branch);
+        const push = await self.integrationQueue.pushIntegrationBranch(
+          self.deps.git,
+          integration.cwd,
+          integration.branch,
+        );
         if (!push.ok) {
           self.deps.log.warn(
             `[workflow ${runId}/${taskId}] 統合ブランチのpushに失敗しました: ${push.message}`,
@@ -1347,11 +1381,22 @@ async function finishMergeResolution(
     return;
   }
 
-  // design.md §16.17「コンフリクト」4.「宣言だけを信じず`git status`でも確かめる」
-  const resolved =
-    reason === 'done' &&
-    (await isMergeResolutionComplete(integration.cwd, self.deps.git, { runId, taskBranch }));
-  if (resolved) {
+  // design.md §16.17「コンフリクト」4.「宣言だけを信じず`git status`でも確かめる」。
+  // 検証と統合ブランチへの反映は`mergeTask`と同じ経路（`completeResolution`）を通す
+  // （Issue #1678）。試行が無ければ候補の基準が分からないため反映しない
+  const attempt = live.mergeAttempts.get(taskId);
+  const completion =
+    reason === 'done' && attempt !== undefined
+      ? await self.integrationQueue.completeResolution(
+          lease,
+          runId,
+          taskBranch,
+          attempt,
+          self.deps.git,
+          (next) => saveMergeAttempt(self, live, runId, next),
+        )
+      : undefined;
+  if (completion?.kind === 'success') {
     live.runState = markMergeSucceeded(live.runState, live.def.tasks, taskId);
     // ラッパー（`WorkflowRunner`側のメソッド）を通す。テストが`prototype`をスパイして
     // 「interrupted/manualでは撤去しない」を確かめるため、モジュール関数を直接呼ばない
@@ -1372,10 +1417,23 @@ async function finishMergeResolution(
 
   if (reason === 'done') {
     self.deps.log.warn(
-      `[workflow ${runId}/${taskId}] 衝突解決セッションはdoneを宣言しましたが、git上は解決が統合ブランチへ入っていませんでした（未解決・未コミット・取り消しのいずれか）`,
+      `[workflow ${runId}/${taskId}] ${describeIncompleteResolution(completion)}`,
     );
   }
   await abortAndBlock(self, runId, taskId, integration, lease);
+}
+
+function describeIncompleteResolution(completion: CompleteResolutionResult | undefined): string {
+  if (completion === undefined) {
+    return '衝突解決セッションはdoneを宣言しましたが、統合の試行の記録が無いため反映しませんでした';
+  }
+  if (completion.kind === 'stale') {
+    return '衝突解決の間に統合ブランチの先頭が動いたため、解決結果を反映しませんでした（Viewの「再マージ」でやり直せます）';
+  }
+  if (completion.kind === 'failure') {
+    return `衝突解決の結果を統合ブランチへ反映できませんでした: ${completion.message}`;
+  }
+  return '衝突解決セッションはdoneを宣言しましたが、git上は解決が統合ブランチへ入っていませんでした（未解決・未コミット・取り消しのいずれか）';
 }
 
 /**
@@ -1398,7 +1456,7 @@ async function abortAndBlock(
   if (live === undefined) {
     return;
   }
-  const abort = await self.integrationQueue.abortMerge(lease, self.deps.git);
+  const abort = await self.integrationQueue.abortMerge(lease, runId, self.deps.git);
   if (!abort.ok) {
     self.deps.log.warn(
       `[workflow ${runId}/${taskId}] マージの巻き戻しに失敗しました: ${abort.message}`,

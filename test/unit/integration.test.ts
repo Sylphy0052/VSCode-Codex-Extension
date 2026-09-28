@@ -12,6 +12,8 @@ import {
   isMergeResolutionComplete,
   isValidTaskBranch,
   type IntegrationLease,
+  type MergeAttempt,
+  type MergeTaskOptions,
   mergeCommitMessage,
   reconcileMergingTaskOnReload,
   resolveTaskBranchOrigin,
@@ -23,6 +25,7 @@ import {
   type GitCommandRunner,
   type WorktreeFileSystemPort,
 } from '../../src/orchestrator/worktree';
+import { branchShaOf, INITIAL_TIP, IntegrationGitModel } from './fakeIntegrationGit';
 
 /** `runId` はUUID形式で検証されるため、テスト全体で1つの妥当なUUIDを使い回す。 */
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
@@ -33,12 +36,15 @@ const HEAD_SHA = 'deadbeef';
 /** `git` の呼び出しを記録し、プレフィックス一致で応答を差し替えられるフェイク（`worktree.test.ts` と同じ形）。 */
 class FakeGit implements GitCommandRunner {
   calls: Array<{ args: string[]; cwd: string }> = [];
-  private readonly responses: Array<{ prefix: string[]; result: GitCommandResult }> = [];
+  private readonly responses: Array<{ prefix: string[]; result: GitCommandResult; cwd?: string }> =
+    [];
 
-  private readonly sequences: Array<{ prefix: string[]; results: GitCommandResult[] }> = [];
+  private readonly sequences: Array<{ prefix: string[]; results: GitCommandResult[]; cwd?: string }> =
+    [];
 
-  respond(prefix: string[], result: GitCommandResult): void {
-    this.responses.push({ prefix, result });
+  /** `cwd`を指定すると、そのcwdの呼び出しにだけ応答する（未指定なら全cwdに応答する）。 */
+  respond(prefix: string[], result: GitCommandResult, cwd?: string): void {
+    this.responses.push(cwd === undefined ? { prefix, result } : { prefix, result, cwd });
   }
 
   /**
@@ -47,21 +53,55 @@ class FakeGit implements GitCommandRunner {
    * 未解決パスの取得が同じ`git diff --diff-filter=U`である以上、1回目と2回目で
    * 応答を変えないと実物の振る舞いを模せないため。
    */
-  respondSequence(prefix: string[], results: GitCommandResult[]): void {
-    this.sequences.push({ prefix, results });
+  respondSequence(prefix: string[], results: GitCommandResult[], cwd?: string): void {
+    this.sequences.push(cwd === undefined ? { prefix, results } : { prefix, results, cwd });
+  }
+
+  /**
+   * 登録済みの応答があれば返す（無ければ`undefined`）。`run`のほか、`composeGit`が
+   * `IntegrationGitModel`より優先する上書き層としても使う。
+   */
+  peek(args: readonly string[], cwd?: string): GitCommandResult | undefined {
+    const matchesCwd = (entryCwd?: string): boolean => entryCwd === undefined || entryCwd === cwd;
+    const sequence = this.sequences.find(
+      (r) => matchesCwd(r.cwd) && r.prefix.every((p, i) => args[i] === p),
+    );
+    if (sequence !== undefined) {
+      return sequence.results.length > 1
+        ? (sequence.results.shift() ?? { code: 0, stdout: '', stderr: '' })
+        : sequence.results[0];
+    }
+    const matched = this.responses.find(
+      (r) => matchesCwd(r.cwd) && r.prefix.every((p, i) => args[i] === p),
+    );
+    return matched?.result;
   }
 
   async run(args: readonly string[], cwd: string): Promise<GitCommandResult> {
     this.calls.push({ args: [...args], cwd });
-    const sequence = this.sequences.find((r) => r.prefix.every((p, i) => args[i] === p));
-    if (sequence !== undefined) {
-      return sequence.results.length > 1
-        ? (sequence.results.shift() ?? { code: 0, stdout: '', stderr: '' })
-        : (sequence.results[0] ?? { code: 0, stdout: '', stderr: '' });
-    }
-    const matched = this.responses.find((r) => r.prefix.every((p, i) => args[i] === p));
-    return matched?.result ?? { code: 0, stdout: '', stderr: '' };
+    return this.peek(args, cwd) ?? { code: 0, stdout: '', stderr: '' };
   }
+}
+
+/**
+ * 統合の1経路（Issue #1678）が使う実際のコマンド列
+ * （`show-ref`・`symbolic-ref`・`checkout --detach`・`merge --no-ff`・`rev-list --parents`・
+ * `update-ref`・`merge-base --is-ancestor`）を`IntegrationGitModel`で模す。モデルが扱わない
+ * コマンドや、テスト固有に強制したい応答（`MERGE_HEAD`の残存等）は`overrides`（`FakeGit`）を
+ * 先に確認し、そこに登録が無ければモデルへ委譲する。呼び出し順の検証は`calls`で行う。
+ */
+function composeGit(
+  model: IntegrationGitModel,
+  overrides: FakeGit = new FakeGit(),
+): GitCommandRunner & { calls: Array<{ args: string[]; cwd: string }> } {
+  const calls: Array<{ args: string[]; cwd: string }> = [];
+  return {
+    calls,
+    async run(args: readonly string[], cwd: string): Promise<GitCommandResult> {
+      calls.push({ args: [...args], cwd });
+      return overrides.peek(args, cwd) ?? model.handle(args, cwd) ?? { code: 0, stdout: '', stderr: '' };
+    },
+  };
 }
 
 /** 実パス解決とシンボリックリンク判定をMapで差し替えるフェイク。 */
@@ -98,6 +138,15 @@ function lease(queue: IntegrationMergeQueue, taskId: string): Promise<Integratio
   return queue.acquireLease(INTEGRATION_CWD, taskId);
 }
 const INTEGRATION_BRANCH = `wf/${RUN_ID}/integration`;
+
+/** git状態を変えないはずの経路（早期return）で`saveAttempt`が呼ばれたら検出する。 */
+function neverSaveOptions(): MergeTaskOptions {
+  return {
+    saveAttempt: async () => {
+      throw new Error('このテストでは統合の試行状態を保存しないはず');
+    },
+  };
+}
 
 describe('integrationBranchName / integrationWorktreePath', () => {
   it('統合ブランチ名はwf/<runId>/integrationになる', () => {
@@ -179,19 +228,46 @@ describe('isValidTaskBranch（wf形式・conventional形式の両方をrunId込�
 });
 
 describe('resolveTaskBranchOrigin', () => {
-  it('統合worktreeのHEADを解決する（そのタスクを開始する時点の統合ブランチのHEAD）', async () => {
+  it('統合ブランチの先頭を解決する（そのタスクを開始する時点の統合ブランチの先頭。Issue #1678）', async () => {
+    const fullSha = 'a'.repeat(40);
     const git = new FakeGit();
-    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
+    git.respond(['show-ref', '--verify', '--hash', `refs/heads/${INTEGRATION_BRANCH}`], {
+      code: 0,
+      stdout: `${fullSha}\n`,
+      stderr: '',
+    });
 
     const result = await resolveTaskBranchOrigin('/repo', RUN_ID, git);
 
-    expect(result).toBe(HEAD_SHA);
-    expect(git.calls).toEqual([{ args: ['rev-parse', 'HEAD'], cwd: INTEGRATION_CWD }]);
+    expect(result).toBe(fullSha);
+    expect(git.calls).toEqual([
+      {
+        args: ['show-ref', '--verify', '--hash', `refs/heads/${INTEGRATION_BRANCH}`],
+        cwd: INTEGRATION_CWD,
+      },
+    ]);
   });
 
-  it('git rev-parseが失敗すればundefinedを返す', async () => {
+  it('git show-refが失敗すればundefinedを返す', async () => {
     const git = new FakeGit();
-    git.respond(['rev-parse', 'HEAD'], { code: 128, stdout: '', stderr: 'fatal: bad revision' });
+    git.respond(['show-ref', '--verify', '--hash', `refs/heads/${INTEGRATION_BRANCH}`], {
+      code: 128,
+      stdout: '',
+      stderr: 'fatal: bad revision',
+    });
+
+    const result = await resolveTaskBranchOrigin('/repo', RUN_ID, git);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('省略形など40桁の16進数でない出力はundefinedを返す（HEAD_COMMIT_PATTERNと同じ防御）', async () => {
+    const git = new FakeGit();
+    git.respond(['show-ref', '--verify', '--hash', `refs/heads/${INTEGRATION_BRANCH}`], {
+      code: 0,
+      stdout: `${HEAD_SHA}\n`,
+      stderr: '',
+    });
 
     const result = await resolveTaskBranchOrigin('/repo', RUN_ID, git);
 
@@ -463,67 +539,88 @@ describe('commitUncommittedChangesIfNeeded', () => {
 describe('IntegrationMergeQueue.mergeTask', () => {
   const TASK_BRANCH = `wf/${RUN_ID}/T2`;
 
-  it('マージが成功すればsuccessとマージコミットのidを返す。メッセージは固定文言', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], { code: 0, stdout: '', stderr: '' });
+  it('マージが成功すればsuccessとマージコミットのidを返す。git mergeへはブランチ名ではなく解決済みのSHAを渡し（Issue #1678）、メッセージは固定文言。試行はgit操作の前後（prepared→candidate）で保存される', async () => {
+    const model = new IntegrationGitModel();
+    const git = composeGit(model);
+    const saved: MergeAttempt[] = [];
+    const options: MergeTaskOptions = {
+      saveAttempt: async (attempt) => {
+        saved.push(attempt);
+      },
+    };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      TASK_BRANCH,
+      git,
+      options,
+    );
 
-    expect(result).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
-    expect(git.calls.filter((c) => c.args[0] === 'merge')).toEqual([
+    const sourceSha = branchShaOf(TASK_BRANCH);
+    expect(result.kind).toBe('success');
+    if (result.kind !== 'success') return;
+    expect(result.mergeCommit).toBe(model.tipOf(INTEGRATION_BRANCH));
+    expect(model.tipOf(INTEGRATION_BRANCH)).not.toBe(INITIAL_TIP);
+    expect(git.calls.filter((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff')).toEqual([
       {
-        args: ['merge', '--no-ff', '-m', `chore(T2): merge task (run ${RUN_ID})`, TASK_BRANCH],
+        args: ['merge', '--no-ff', '-m', `chore(T2): merge task (run ${RUN_ID})`, sourceSha],
         cwd: INTEGRATION_CWD,
       },
     ]);
+    expect(saved.map((a) => a.stage)).toEqual(['prepared', 'candidate']);
   });
 
-  it('マージが未解決パスを残して失敗すればconflictを返し、未解決パスとマージ前のHEAD（巻き戻し先）を含む。git merge --abortは呼ばない', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], {
-      code: 1,
-      stdout: '',
-      stderr: 'CONFLICT (content): Merge conflict in a.ts',
-    });
-    // 1回目はマージ前の確認（未解決なし）、2回目がマージ後の未解決パス
-    git.respondSequence(
-      ['diff', '--name-only'],
-      [
-        { code: 0, stdout: '', stderr: '' },
-        { code: 0, stdout: 'a.ts\nb.ts\n', stderr: '' },
-      ],
-    );
+  it('マージが未解決パスを残して失敗すればconflictを返し、未解決パスとマージ前のHEAD（巻き戻し先）・保存済みの試行を含む。git merge --abortは呼ばない', async () => {
+    const model = new IntegrationGitModel({ shouldConflict: () => true });
+    const git = composeGit(model);
+    const saved: MergeAttempt[] = [];
+    const options: MergeTaskOptions = {
+      saveAttempt: async (attempt) => {
+        saved.push(attempt);
+      },
+    };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      TASK_BRANCH,
+      git,
+      options,
+    );
 
+    expect(saved).toHaveLength(1);
     expect(result).toEqual({
       kind: 'conflict',
-      unresolvedPaths: ['a.ts', 'b.ts'],
-      rollbackCommit: HEAD_SHA,
+      unresolvedPaths: ['CONFLICT.txt'],
+      rollbackCommit: INITIAL_TIP,
+      attempt: saved[0],
     });
     expect(git.calls.some((c) => c.args[0] === 'merge' && c.args[1] === '--abort')).toBe(false);
   });
 
   it('マージが衝突以外の理由で失敗すればfailureを返す（未解決パスが無い）', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], {
-      code: 128,
-      stdout: '',
-      stderr: 'fatal: not something we can merge',
-    });
-    git.respond(['diff', '--name-only'], { code: 0, stdout: '', stderr: '' });
+    const model = new IntegrationGitModel({ failMerge: true });
+    const git = composeGit(model);
+    const options: MergeTaskOptions = { saveAttempt: async () => {} };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(await lease(queue, 'T2'), RUN_ID, 'T2', TASK_BRANCH, git);
+    const result = await queue.mergeTask(
+      await lease(queue, 'T2'),
+      RUN_ID,
+      'T2',
+      TASK_BRANCH,
+      git,
+      options,
+    );
 
     expect(result.kind).toBe('failure');
     if (result.kind !== 'failure') return;
-    expect(result.message).toContain('not something we can merge');
+    expect(result.message).toContain('fake merge failure');
   });
 
   it('不正なrunId/taskIdはfailureを返し、gitを一切呼ばない', async () => {
@@ -531,12 +628,26 @@ describe('IntegrationMergeQueue.mergeTask', () => {
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
     const runIdLease = await lease(queue, 'T2');
-    const badRunId = await queue.mergeTask(runIdLease, 'not-a-uuid', 'T2', TASK_BRANCH, git);
+    const badRunId = await queue.mergeTask(
+      runIdLease,
+      'not-a-uuid',
+      'T2',
+      TASK_BRANCH,
+      git,
+      neverSaveOptions(),
+    );
     expect(badRunId.kind).toBe('failure');
     queue.releaseLease(runIdLease);
 
     const taskIdLease = await lease(queue, '../evil');
-    const badTaskId = await queue.mergeTask(taskIdLease, RUN_ID, '../evil', TASK_BRANCH, git);
+    const badTaskId = await queue.mergeTask(
+      taskIdLease,
+      RUN_ID,
+      '../evil',
+      TASK_BRANCH,
+      git,
+      neverSaveOptions(),
+    );
     expect(badTaskId.kind).toBe('failure');
     queue.releaseLease(taskIdLease);
 
@@ -554,6 +665,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
       'T2',
       'wf/22222222-2222-4222-8222-222222222222/T2',
       git,
+      neverSaveOptions(),
     );
     expect(otherRun.kind).toBe('failure');
     queue.releaseLease(otherRunLease);
@@ -565,6 +677,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
       'T2',
       `wf/${RUN_ID}/--upload-pack=evil`,
       git,
+      neverSaveOptions(),
     );
     expect(flagInjection.kind).toBe('failure');
     queue.releaseLease(flagLease);
@@ -582,6 +695,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
       'T2',
       'not-a-branch',
       git,
+      neverSaveOptions(),
     );
 
     expect(result.kind).toBe('failure');
@@ -591,9 +705,9 @@ describe('IntegrationMergeQueue.mergeTask', () => {
   });
 
   it('conventional形式（runIdの先頭8文字が一致する）のタスクブランチもマージできる', async () => {
-    const git = new FakeGit();
-    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], { code: 0, stdout: '', stderr: '' });
+    const model = new IntegrationGitModel();
+    const git = composeGit(model);
+    const options: MergeTaskOptions = { saveAttempt: async () => {} };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
     const conventionalBranch = `fix/42/t2-${RUN_ID.slice(0, 8)}`;
 
@@ -603,9 +717,12 @@ describe('IntegrationMergeQueue.mergeTask', () => {
       'T2',
       conventionalBranch,
       git,
+      options,
     );
 
-    expect(result).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
+    expect(result.kind).toBe('success');
+    if (result.kind !== 'success') return;
+    expect(result.mergeCommit).toBe(model.tipOf(INTEGRATION_BRANCH));
   });
 
   it('conventional形式でもrunIdの先頭8文字だけが違う（別runを装う）ブランチはfailureを返し、gitを一切呼ばない', async () => {
@@ -618,6 +735,7 @@ describe('IntegrationMergeQueue.mergeTask', () => {
       'T2',
       'fix/42/t2-99999999',
       git,
+      neverSaveOptions(),
     );
 
     expect(result.kind).toBe('failure');
@@ -626,27 +744,25 @@ describe('IntegrationMergeQueue.mergeTask', () => {
 
   it('マージ操作が直列化される（同時に完了した2タスクのgit呼び出しが重ならない）', async () => {
     const callLog: string[] = [];
+    const model = new IntegrationGitModel();
     const git: GitCommandRunner = {
-      async run(args, _cwd) {
-        callLog.push(`start:${args[0]}`);
+      async run(args, cwd) {
+        const key = args.join(' ');
+        callLog.push(`start:${key}`);
         await new Promise((resolve) => setTimeout(resolve, 0));
-        callLog.push(`end:${args[0]}`);
-        if (args[0] === 'rev-parse') {
-          return { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' };
-        }
-        if (args[0] === 'merge') {
-          return { code: 0, stdout: '', stderr: '' };
-        }
-        return { code: 0, stdout: '', stderr: '' };
+        const result = model.handle(args, cwd) ?? { code: 0, stdout: '', stderr: '' };
+        callLog.push(`end:${key}`);
+        return result;
       },
     };
+    const options: MergeTaskOptions = { saveAttempt: async () => {} };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
     const t2Lease = await lease(queue, 'T2');
-    await queue.mergeTask(t2Lease, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git);
+    await queue.mergeTask(t2Lease, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git, options);
     queue.releaseLease(t2Lease);
     const t3Lease = await lease(queue, 'T3');
-    await queue.mergeTask(t3Lease, RUN_ID, 'T3', `wf/${RUN_ID}/T3`, git);
+    await queue.mergeTask(t3Lease, RUN_ID, 'T3', `wf/${RUN_ID}/T3`, git, options);
     queue.releaseLease(t3Lease);
 
     // 直列化されていれば、あるコマンドのstart直後には必ずそのコマンドのendが来る
@@ -660,19 +776,46 @@ describe('IntegrationMergeQueue.mergeTask', () => {
 });
 
 describe('IntegrationMergeQueue.abortMerge', () => {
-  it('git merge --abortを実行する（巻き戻し）', async () => {
+  it('MERGE_HEADが残っていればgit merge --abortしてから統合ブランチへcheckoutし直す（巻き戻し）', async () => {
     const git = new FakeGit();
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+      code: 0,
+      stdout: `${HEAD_SHA}\n`,
+      stderr: '',
+    });
     git.respond(['merge', '--abort'], { code: 0, stdout: '', stderr: '' });
+    git.respond(['checkout', INTEGRATION_BRANCH], { code: 0, stdout: '', stderr: '' });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.abortMerge(await lease(queue, 'T2'), git);
+    const result = await queue.abortMerge(await lease(queue, 'T2'), RUN_ID, git);
 
     expect(result).toEqual({ ok: true });
-    expect(git.calls).toEqual([{ args: ['merge', '--abort'], cwd: INTEGRATION_CWD }]);
+    expect(git.calls).toEqual([
+      { args: ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], cwd: INTEGRATION_CWD },
+      { args: ['merge', '--abort'], cwd: INTEGRATION_CWD },
+      { args: ['checkout', INTEGRATION_BRANCH], cwd: INTEGRATION_CWD },
+    ]);
+  });
+
+  it('MERGE_HEADが無ければgit merge --abortは呼ばず、統合ブランチへcheckoutし直すだけ', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['checkout', INTEGRATION_BRANCH], { code: 0, stdout: '', stderr: '' });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.abortMerge(await lease(queue, 'T2'), RUN_ID, git);
+
+    expect(result).toEqual({ ok: true });
+    expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
   });
 
   it('git merge --abortが失敗すればgitErrorを返す', async () => {
     const git = new FakeGit();
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+      code: 0,
+      stdout: `${HEAD_SHA}\n`,
+      stderr: '',
+    });
     git.respond(['merge', '--abort'], {
       code: 1,
       stdout: '',
@@ -680,7 +823,22 @@ describe('IntegrationMergeQueue.abortMerge', () => {
     });
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.abortMerge(await lease(queue, 'T2'), git);
+    const result = await queue.abortMerge(await lease(queue, 'T2'), RUN_ID, git);
+
+    expect(result).toMatchObject({ ok: false, reason: 'gitError' });
+  });
+
+  it('git checkoutが失敗すればgitErrorを返す（MERGE_HEADが無い経路でも）', async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['checkout', INTEGRATION_BRANCH], {
+      code: 1,
+      stdout: '',
+      stderr: 'fatal: checkout failed',
+    });
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.abortMerge(await lease(queue, 'T2'), RUN_ID, git);
 
     expect(result).toMatchObject({ ok: false, reason: 'gitError' });
   });
@@ -765,14 +923,17 @@ describe('IntegrationMergeQueue.pushIntegrationBranch（design.md §16.18・Issu
 
 describe('未コミットの変更の自動コミット→マージの流れ（受入基準: 未コミットの変更があるタスクでも、マージ後の統合ブランチにその変更が含まれる）', () => {
   it('commitUncommittedChangesIfNeededで自動コミットしてから、そのコミットを含むブランチをmergeTaskでマージできる', async () => {
-    const git = new FakeGit();
-    git.respond(['status', '--porcelain'], { code: 0, stdout: ' M src/foo.ts\n', stderr: '' });
-    git.respond(['add', '-A'], { code: 0, stdout: '', stderr: '' });
-    git.respond(['commit'], { code: 0, stdout: '', stderr: '' });
-    git.respond(['rev-parse', 'HEAD'], { code: 0, stdout: `${HEAD_SHA}\n`, stderr: '' });
-    git.respond(['merge', '--no-ff'], { code: 0, stdout: '', stderr: '' });
-
     const taskCwd = path.join('/repo', '.agents', 'worktrees', RUN_ID, 'T2');
+    // status --porcelain（タスクworktree限定）だけ上書きし、それ以外はIntegrationGitModelへ委譲する
+    const overrides = new FakeGit();
+    overrides.respond(
+      ['status', '--porcelain'],
+      { code: 0, stdout: ' M src/foo.ts\n', stderr: '' },
+      taskCwd,
+    );
+    const model = new IntegrationGitModel();
+    const git = composeGit(model, overrides);
+
     const commitResult = await commitUncommittedChangesIfNeeded(taskCwd, 'T2', git);
     expect(commitResult).toEqual({ ok: true, committed: true });
 
@@ -783,12 +944,17 @@ describe('未コミットの変更の自動コミット→マージの流れ（�
       'T2',
       `wf/${RUN_ID}/T2`,
       git,
+      { saveAttempt: async () => {} },
     );
-    expect(mergeResult).toEqual({ kind: 'success', mergeCommit: HEAD_SHA });
+    expect(mergeResult.kind).toBe('success');
+    if (mergeResult.kind !== 'success') return;
+    expect(mergeResult.mergeCommit).toBe(model.tipOf(INTEGRATION_BRANCH));
 
     // 自動コミット→マージの順で行われている（マージがコミット済みの変更を取り込む前提）
     const commitCallIndex = git.calls.findIndex((c) => c.args[0] === 'commit');
-    const mergeCallIndex = git.calls.findIndex((c) => c.args[0] === 'merge');
+    const mergeCallIndex = git.calls.findIndex(
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff',
+    );
     expect(commitCallIndex).toBeGreaterThanOrEqual(0);
     expect(mergeCallIndex).toBeGreaterThan(commitCallIndex);
   });
@@ -918,7 +1084,7 @@ describe('isMergeResolutionComplete（design.md §16.17「コンフリクト」4
     expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
   });
 
-  it('MERGE_HEADの問い合わせがエラー（非0かつstderrあり）なら完了扱いにしない（Issue #1111）', async () => {
+  it('MERGE_HEADの問い合わせがエラー（終了コード1以外）なら完了扱いにしない（Issue #1111）', async () => {
     const git = resolvedGit([
       [
         ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
@@ -926,6 +1092,18 @@ describe('isMergeResolutionComplete（design.md §16.17「コンフリクト」4
       ],
     ]);
     expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(false);
+  });
+
+  it('MERGE_HEADの不在（終了コード1）はstderrに文言があっても不在として扱う（Issue #1678）', async () => {
+    // `nodeGitCommandRunner`は非0終了でstderrが空だと例外の文言を詰める。stderrの有無で
+    // 判定すると、実gitでは解決済みでも一度も完了しなかった
+    const git = resolvedGit([
+      [
+        ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+        { code: 1, stdout: '', stderr: 'Command failed: git rev-parse -q --verify MERGE_HEAD' },
+      ],
+    ]);
+    expect(await isMergeResolutionComplete(INTEGRATION_CWD, git, TARGET)).toBe(true);
   });
 
   it('未コミットの変更が残っていればfalse（Issue #1111）', async () => {
@@ -1080,7 +1258,7 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
 
     // 他タスクが「自分は占有している」と偽って作ったハンドル
     const forged: IntegrationLease = { integrationWorktreeCwd: INTEGRATION_CWD, taskId: 'T2' };
-    const result = await queue.abortMerge(forged, git);
+    const result = await queue.abortMerge(forged, RUN_ID, git);
 
     expect(result).toMatchObject({ ok: false, reason: 'leaseNotHeld' });
     expect(git.calls).toEqual([]);
@@ -1092,11 +1270,13 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
     const stale = await queue.acquireLease(INTEGRATION_CWD, 'T1');
     queue.releaseLease(stale);
 
-    expect(await queue.abortMerge(stale, git)).toMatchObject({
+    expect(await queue.abortMerge(stale, RUN_ID, git)).toMatchObject({
       ok: false,
       reason: 'leaseNotHeld',
     });
-    expect(await queue.mergeTask(stale, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git)).toMatchObject({
+    expect(
+      await queue.mergeTask(stale, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git, neverSaveOptions()),
+    ).toMatchObject({
       kind: 'failure',
     });
     expect(git.calls).toEqual([]);
@@ -1107,7 +1287,14 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
     const held = await queue.acquireLease(INTEGRATION_CWD, 'T1');
 
-    const result = await queue.mergeTask(held, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git);
+    const result = await queue.mergeTask(
+      held,
+      RUN_ID,
+      'T2',
+      `wf/${RUN_ID}/T2`,
+      git,
+      neverSaveOptions(),
+    );
 
     expect(result.kind).toBe('failure');
     expect(git.calls).toEqual([]);
@@ -1182,7 +1369,9 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
 
     // 待ち続けて固まるのではなく、失効したハンドルとして起き上がる（fail-closed）
     const woken = await waiting;
-    expect(await queue.mergeTask(woken, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git)).toMatchObject({
+    expect(
+      await queue.mergeTask(woken, RUN_ID, 'T2', `wf/${RUN_ID}/T2`, git, neverSaveOptions()),
+    ).toMatchObject({
       kind: 'failure',
     });
     expect(queue.leaseHolderTaskId(INTEGRATION_CWD)).toBeUndefined();
@@ -1208,8 +1397,15 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
     });
     const blocked = worktreeQueue.enqueue(() => blocker);
 
-    const merging = queue.mergeTask(held, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git);
-    const aborting = queue.abortMerge(held, git);
+    const merging = queue.mergeTask(
+      held,
+      RUN_ID,
+      'T1',
+      `wf/${RUN_ID}/T1`,
+      git,
+      neverSaveOptions(),
+    );
+    const aborting = queue.abortMerge(held, RUN_ID, git);
 
     // 投入時点では有効だったハンドルが、run破棄でここで失効する
     queue.releaseAllLeases();
@@ -1236,6 +1432,7 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
       'T2',
       `wf/${RUN_ID}/T2`,
       git,
+      neverSaveOptions(),
     );
 
     // `failure`ではなく`busy`。`failure`だと呼び出し側が`markMergeFailed`で`failed`を
@@ -1261,9 +1458,245 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
       'T2',
       `wf/${RUN_ID}/T2`,
       git,
+      neverSaveOptions(),
     );
 
     expect(result.kind).toBe('busy');
     expect(git.calls.some((c) => c.args[0] === 'merge')).toBe(false);
+  });
+});
+
+describe('統合の1経路（Issue #1678）', () => {
+  const TASK_BRANCH = `wf/${RUN_ID}/T9`;
+
+  it('AC2: ref更新（CAS）の直前に統合ブランチの先頭が動けば失敗し、新しい先頭で候補を作り直して成功する（最終的な先頭は競合した側とタスクブランチの両方を含む）', async () => {
+    const model = new IntegrationGitModel();
+    const composed = composeGit(model);
+    let advancedSha: string | undefined;
+    let advanced = false;
+    // ref更新の直前だけ、他タスクが同時にマージした競合を再現する（1回目のupdate-refだけ動かす）
+    const git: GitCommandRunner = {
+      async run(args, cwd) {
+        if (args[0] === 'update-ref' && !advanced) {
+          advanced = true;
+          advancedSha = model.advanceTip(INTEGRATION_BRANCH);
+        }
+        return composed.run(args, cwd);
+      },
+    };
+    const saved: MergeAttempt[] = [];
+    const options: MergeTaskOptions = {
+      saveAttempt: async (attempt) => {
+        saved.push(attempt);
+      },
+    };
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T9'),
+      RUN_ID,
+      'T9',
+      TASK_BRANCH,
+      git,
+      options,
+    );
+
+    expect(result.kind).toBe('success');
+    if (result.kind !== 'success') {
+      return;
+    }
+    const finalTip = model.tipOf(INTEGRATION_BRANCH);
+    expect(result.mergeCommit).toBe(finalTip);
+    expect(advancedSha).toBeDefined();
+    const sourceSha = branchShaOf(TASK_BRANCH);
+    const reachesAdvanced = await git.run(
+      ['merge-base', '--is-ancestor', advancedSha as string, finalTip],
+      INTEGRATION_CWD,
+    );
+    const reachesSource = await git.run(
+      ['merge-base', '--is-ancestor', sourceSha, finalTip],
+      INTEGRATION_CWD,
+    );
+    expect(reachesAdvanced.code).toBe(0);
+    expect(reachesSource.code).toBe(0);
+    // CASの失敗で1回だけ作り直している（prepared→candidateの組が2回保存される）
+    expect(saved.map((a) => a.stage)).toEqual(['prepared', 'candidate', 'prepared', 'candidate']);
+  });
+
+  it('AC2: 統合ブランチの先頭が動き続ければ、既定の上限（3回）作り直しても反映できずfailureになる（片付けとしてcheckoutし直す）', async () => {
+    const model = new IntegrationGitModel();
+    const composed = composeGit(model);
+    // ref更新のたびに先頭を動かし、CASが常に失敗する状況を再現する
+    const git: GitCommandRunner = {
+      async run(args, cwd) {
+        if (args[0] === 'update-ref') {
+          model.advanceTip(INTEGRATION_BRANCH);
+        }
+        return composed.run(args, cwd);
+      },
+    };
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T9'),
+      RUN_ID,
+      'T9',
+      TASK_BRANCH,
+      git,
+      { saveAttempt: async () => {} },
+    );
+
+    expect(result.kind).toBe('failure');
+    if (result.kind === 'failure') {
+      expect(result.message).toContain('3回作り直しても');
+    }
+    // detachしたままにせず、統合ブランチへcheckoutし直している
+    expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
+  });
+
+  it('AC3: saveAttemptは、状態を変えるgitコマンド（checkout --detach・merge --no-ff・update-ref）より前に呼ばれる', async () => {
+    const model = new IntegrationGitModel();
+    const composed = composeGit(model);
+    const order: string[] = [];
+    const git: GitCommandRunner = {
+      async run(args, cwd) {
+        order.push(`git:${args[0]}${args[1] !== undefined ? ` ${args[1]}` : ''}`);
+        return composed.run(args, cwd);
+      },
+    };
+    const options: MergeTaskOptions = {
+      saveAttempt: async (attempt) => {
+        order.push(`save:${attempt.stage}`);
+      },
+    };
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T9'),
+      RUN_ID,
+      'T9',
+      TASK_BRANCH,
+      git,
+      options,
+    );
+
+    expect(result.kind).toBe('success');
+    const preparedIndex = order.indexOf('save:prepared');
+    const candidateIndex = order.indexOf('save:candidate');
+    const checkoutDetachIndex = order.findIndex((e) => e.startsWith('git:checkout --detach'));
+    const mergeIndex = order.findIndex((e) => e.startsWith('git:merge --no-ff'));
+    const updateRefIndex = order.findIndex((e) => e.startsWith('git:update-ref'));
+    expect(preparedIndex).toBeGreaterThanOrEqual(0);
+    expect(preparedIndex).toBeLessThan(checkoutDetachIndex);
+    expect(preparedIndex).toBeLessThan(mergeIndex);
+    expect(candidateIndex).toBeGreaterThan(preparedIndex);
+    expect(candidateIndex).toBeLessThan(updateRefIndex);
+  });
+
+  it('AC4: 保存された試行があり、先頭が候補と一致するなら、件名照合をせずdoneにする', async () => {
+    const model = new IntegrationGitModel();
+    const advancedSha = model.advanceTip(INTEGRATION_BRANCH);
+    const attempt: MergeAttempt = {
+      taskId: 'T9',
+      attemptId: 'a1',
+      baseSha: INITIAL_TIP,
+      sourceSha: branchShaOf(TASK_BRANCH),
+      candidateSha: advancedSha,
+      stage: 'candidate',
+    };
+    const git = composeGit(model);
+
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T9', git, attempt);
+
+    expect(result).toBe('done');
+    expect(git.calls.some((c) => c.args[0] === 'log')).toBe(false);
+  });
+
+  it('AC4: 先頭が候補と一致しなくても、sourceが先頭から到達できるなら、件名照合をせずdoneにする', async () => {
+    const model = new IntegrationGitModel();
+    const sourceSha = branchShaOf(TASK_BRANCH);
+    // 統合ブランチへsourceを取り込んだ状態を作る（`mergeTask`は経由せずモデルへ直接反映する）
+    model.handle(['merge', '--no-ff', '-m', 'msg', sourceSha], INTEGRATION_CWD);
+    const tip = model.tipOf(INTEGRATION_BRANCH);
+    const attempt: MergeAttempt = {
+      taskId: 'T9',
+      attemptId: 'a2',
+      baseSha: INITIAL_TIP,
+      sourceSha,
+      candidateSha: 'f'.repeat(40), // 先頭とは異なる、古い試行の候補
+      stage: 'candidate',
+    };
+    const git = composeGit(model);
+
+    const result = await reconcileMergingTaskOnReload(INTEGRATION_CWD, RUN_ID, 'T9', git, attempt);
+
+    expect(result).toBe('done');
+    expect(tip).not.toBe(attempt.candidateSha);
+    expect(git.calls.some((c) => c.args[0] === 'log')).toBe(false);
+  });
+
+  it('AC5: 衝突解決の間に統合ブランチの先頭が動けばstaleを返す（作り直さず、人の「再マージ」に委ねる）', async () => {
+    const model = new IntegrationGitModel({ shouldConflict: () => true });
+    const git = composeGit(model);
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const held = await lease(queue, 'T9');
+
+    const merged = await queue.mergeTask(held, RUN_ID, 'T9', TASK_BRANCH, git, {
+      saveAttempt: async () => {},
+    });
+    expect(merged.kind).toBe('conflict');
+    if (merged.kind !== 'conflict') {
+      return;
+    }
+
+    // 人が衝突を解決してコミットした（統合worktreeはdetachのまま）
+    model.resolveConflict();
+    // その間に、別タスクのマージで統合ブランチの先頭が動いた
+    model.advanceTip(INTEGRATION_BRANCH);
+
+    const result = await queue.completeResolution(
+      held,
+      RUN_ID,
+      TASK_BRANCH,
+      merged.attempt,
+      git,
+      async () => {},
+    );
+
+    expect(result).toEqual({ kind: 'stale' });
+  });
+
+  it('AC5: 解決の間に先頭が動いていなければsuccessを返し、反映後は先頭が候補と一致しHEADは統合ブランチへ戻る', async () => {
+    const model = new IntegrationGitModel({ shouldConflict: () => true });
+    const git = composeGit(model);
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const held = await lease(queue, 'T9');
+
+    const merged = await queue.mergeTask(held, RUN_ID, 'T9', TASK_BRANCH, git, {
+      saveAttempt: async () => {},
+    });
+    expect(merged.kind).toBe('conflict');
+    if (merged.kind !== 'conflict') {
+      return;
+    }
+
+    // 人が衝突を解決してコミットした。先頭は動いていない
+    model.resolveConflict();
+
+    const result = await queue.completeResolution(
+      held,
+      RUN_ID,
+      TASK_BRANCH,
+      merged.attempt,
+      git,
+      async () => {},
+    );
+
+    expect(result.kind).toBe('success');
+    if (result.kind !== 'success') {
+      return;
+    }
+    expect(model.tipOf(INTEGRATION_BRANCH)).toBe(result.mergeCommit);
+    expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
   });
 });

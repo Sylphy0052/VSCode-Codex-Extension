@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 
 import { isPathWithinRoot } from './escalation';
@@ -51,6 +52,12 @@ export const INTEGRATION_DIR_NAME = '_integration';
  * `worktree.ts` の `HEAD_COMMIT_PATTERN` と同じ理由・同じ正規表現の複製（フラグ注入対策）。
  */
 const HEAD_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/;
+
+/** `git show-ref`が返す省略なしのSHA（SHA-1の40桁、SHA-256の64桁）。 */
+const FULL_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+/** `attemptId`（`randomUUID`の値）。永続データから読んだ値の検証に使う。 */
+const ATTEMPT_ID_PATTERN = /^[0-9a-f-]{1,64}$/;
 
 /**
  * `taskBranch` が「この `runId` の」タスクブランチの形をしているかを確かめる。
@@ -143,11 +150,10 @@ export function mergeCommitMessage(taskId: string, runId: string, type?: string)
 
 /**
  * タスクブランチの分岐元となるコミットを解決する。**そのタスクを開始する時点の
- * 統合ブランチのHEAD**（design.md §16.17「タスクブランチの分岐元」）。
+ * 統合ブランチの先頭**（design.md §16.17「タスクブランチの分岐元」）。
  *
- * 統合worktreeのHEADをそのまま使う。`resolveHeadCommit`（`worktree.ts`）を統合worktreeの
- * パスに対して呼ぶだけの薄いラッパーだが、「タスクブランチの分岐元を解決する」という
- * 呼び出し側にとっての意味を名前で表すために独立した関数にする。
+ * 統合worktreeのHEADではなく統合ブランチのrefを読む。マージの途中（衝突の解決中など）の
+ * 統合worktreeは候補へdetachしており、HEADは統合ブランチの先頭と一致しない（Issue #1678）。
  */
 export async function resolveTaskBranchOrigin(
   repoRoot: string,
@@ -155,7 +161,53 @@ export async function resolveTaskBranchOrigin(
   git: GitCommandRunner,
 ): Promise<string | undefined> {
   const cwd = integrationWorktreePath(repoRoot, runId);
-  return resolveHeadCommit(cwd, git);
+  return resolveIntegrationTip(cwd, runId, git);
+}
+
+/**
+ * 統合ブランチの先頭のSHA。統合の基準は常にこれで、統合worktreeのHEADは使わない
+ * （`resolveTaskBranchOrigin`と同じ理由。Issue #1678）。
+ */
+export async function resolveIntegrationTip(
+  integrationWorktreeCwd: string,
+  runId: string,
+  git: GitCommandRunner,
+): Promise<string | undefined> {
+  if (runIdError(runId) !== undefined) {
+    return undefined;
+  }
+  return resolveBranchSha(integrationWorktreeCwd, integrationBranchName(runId), git);
+}
+
+/**
+ * 永続データから読んだ試行の状態を検証する。形が合わない・別タスクの試行なら`undefined`
+ * （保存された試行が無い古い状態と同じ扱いになる）。
+ */
+export function parseMergeAttempt(value: unknown, taskId: string): MergeAttempt | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  const isSha = (x: unknown): x is string => typeof x === 'string' && FULL_SHA_PATTERN.test(x);
+  if (
+    v['taskId'] !== taskId ||
+    typeof v['attemptId'] !== 'string' ||
+    !ATTEMPT_ID_PATTERN.test(v['attemptId']) ||
+    !isSha(v['baseSha']) ||
+    !isSha(v['sourceSha']) ||
+    (v['stage'] !== 'prepared' && v['stage'] !== 'candidate') ||
+    (v['candidateSha'] !== undefined && !isSha(v['candidateSha']))
+  ) {
+    return undefined;
+  }
+  return {
+    taskId,
+    attemptId: v['attemptId'],
+    baseSha: v['baseSha'],
+    sourceSha: v['sourceSha'],
+    ...(v['candidateSha'] === undefined ? {} : { candidateSha: v['candidateSha'] }),
+    stage: v['stage'],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -351,17 +403,46 @@ export async function commitUncommittedChangesIfNeeded(
 // ---------------------------------------------------------------------------
 
 /**
+ * 統合の1試行の記録（Issue #1678）。統合ブランチのrefを動かす前に、何を基準に何を取り込み、
+ * どの候補を作ったかをSHAで残す。`PersistedTaskState.mergeAttempt`として永続化し、リロード後の
+ * 判定（`reconcileMergingTaskOnReload`）と、人が衝突を解決した候補の引き取り
+ * （`IntegrationMergeQueue.mergeTask`の`previousAttempt`）に使う。
+ *
+ * **保存はgit操作の前に行う**（`MergeTaskOptions.saveAttempt`）。保存の前にrefが動くと、
+ * リロード後にcommitの件名で探すしかなくなり、件名が一致しない場合に二重マージになる
+ * （#1677のR型）。
+ */
+export interface MergeAttempt {
+  taskId: string;
+  attemptId: string;
+  /** 候補を作る基準にした統合ブランチの先頭のSHA。ref更新は先頭がこの値のときだけ行う。 */
+  baseSha: string;
+  /** 取り込むタスクブランチのSHA。 */
+  sourceSha: string;
+  /** 候補（baseを第1親、sourceを取り込んだマージコミット）のSHA。候補ができる前は無い。 */
+  candidateSha?: string;
+  /** `prepared`はgit操作の前、`candidate`は候補ができてref更新の前。 */
+  stage: 'prepared' | 'candidate';
+}
+
+/**
  * マージの結果。成功・衝突・その他の失敗の3種類（design.md §16.17）。
  *
  * 衝突のときは未解決パスの一覧（`git diff --name-only --diff-filter=U`）と、巻き戻し先の
- * コミットid（マージ前の統合ブランチのHEAD）を添える。**衝突した状態のまま返し、
+ * コミットid（試行のbase。統合ブランチの先頭）を添える。**衝突した状態のまま返し、
  * ここでは `git merge --abort` しない。** 解決用セッションが自分でマージをやり直す必要が
- * 無いようにするため（design.md §16.17「コンフリクト」1.）。巻き戻しは呼び出し側が
- * `abortMerge` を明示的に呼ぶ。
+ * 無いようにするため（design.md §16.17「コンフリクト」1.）。統合worktreeはbaseへdetachした
+ * ままで、統合ブランチのrefは動いていない。解決後の反映は`completeResolution`、巻き戻しは
+ * `abortMerge`を呼び出し側が明示的に呼ぶ。
  */
 export type MergeTaskResult =
   | { kind: 'success'; mergeCommit: string }
-  | { kind: 'conflict'; unresolvedPaths: string[]; rollbackCommit: string }
+  | {
+      kind: 'conflict';
+      unresolvedPaths: string[];
+      rollbackCommit: string;
+      attempt: MergeAttempt;
+    }
   /**
    * 統合worktreeが他タスクの未解決の衝突を抱えたままで、いま自分のマージを始められない
    * （Issue #412）。`failure`と分けているのは**回復可能だから**で、呼び出し側
@@ -411,14 +492,30 @@ async function findMergeInProgress(
   return undefined;
 }
 
+/** `IntegrationMergeQueue.mergeTask`の追加の引数。 */
+export interface MergeTaskOptions {
+  /** マージコミットのConventional Commits type（`mergeCommitMessage`へ渡す。未指定・未知は`chore`）。 */
+  type?: string;
+  /** 同じタスクの前回の試行。統合worktreeに残った候補を引き取れるかの判定に使う。 */
+  previousAttempt?: MergeAttempt | undefined;
+  /**
+   * 試行の状態を保存する。git操作（detach・merge・ref更新）の前に呼び、完了を待つ。
+   * 例外を投げたらマージを始めずに`failure`を返す。
+   */
+  saveAttempt: (attempt: MergeAttempt) => Promise<void>;
+}
+
 /**
- * タスクブランチを統合worktreeへマージする。**exportしない。** 呼び出し側は必ず
- * `IntegrationMergeQueue.mergeTask` を経由すること（`worktree.ts` の作成・撤去と同じ
- * `index.lock` の競合を避けるため。design.md §16.17「マージはworktreeの作成・撤去と
+ * タスクブランチを統合ブランチへ取り込む、統合の唯一の経路（Issue #1678）。**exportしない。**
+ * 呼び出し側は必ず `IntegrationMergeQueue.mergeTask` を経由すること（`worktree.ts` の作成・
+ * 撤去と同じ `index.lock` の競合を避けるため。design.md §16.17「マージはworktreeの作成・撤去と
  * 同じ1本のキューに通して直列化する」）。
  *
- * `type` はマージコミットのConventional Commits typeを指定する省略可能な引数
- * （`mergeCommitMessage` へそのまま渡す。未指定・未知の値は`chore`）。
+ * 手順は「試行の状態を保存→統合ブランチの先頭（base）へdetach→`git merge --no-ff <source>`で
+ * 候補を作る→候補を検証→`git update-ref`で先頭がbaseのときだけ統合ブランチを候補へ進める→
+ * 統合ブランチをcheckoutし直す」。統合ブランチのrefを動かすのは最後のCASだけで、途中で
+ * 失敗・中断しても統合ブランチは元の先頭のまま残る。CASが失敗したら（先頭がbaseから動いた）
+ * 候補を捨てて新しい先頭から作り直す。
  */
 async function mergeTaskBranch(
   integrationWorktreeCwd: string,
@@ -426,7 +523,7 @@ async function mergeTaskBranch(
   taskId: string,
   taskBranch: string,
   git: GitCommandRunner,
-  type?: string,
+  options: MergeTaskOptions,
 ): Promise<MergeTaskResult> {
   const idMessage = identifierError(runId, taskId);
   if (idMessage !== undefined) {
@@ -450,44 +547,361 @@ async function mergeTaskBranch(
     return { kind: 'busy', message: inProgress };
   }
 
-  const before = await git.run(['rev-parse', 'HEAD'], integrationWorktreeCwd);
-  const rollbackCommit = before.stdout.trim();
-  if (before.code !== 0 || rollbackCommit === '') {
-    return { kind: 'failure', message: 'マージ前の統合ブランチのHEAD取得に失敗しました' };
+  const branch = integrationBranchName(runId);
+  const sourceSha = await resolveBranchSha(integrationWorktreeCwd, taskBranch, git);
+  if (sourceSha === undefined) {
+    return { kind: 'failure', message: `タスクブランチ ${taskBranch} のcommitを解決できません` };
   }
 
-  const merge = await git.run(
-    ['merge', '--no-ff', '-m', mergeCommitMessage(taskId, runId, type), taskBranch],
+  const settled = await settleIntegrationHead(
     integrationWorktreeCwd,
+    branch,
+    { runId, taskId, taskBranch, sourceSha },
+    options.previousAttempt,
+    git,
   );
-  if (merge.code === 0) {
-    const after = await git.run(['rev-parse', 'HEAD'], integrationWorktreeCwd);
-    return { kind: 'success', mergeCommit: after.code === 0 ? after.stdout.trim() : '' };
+  if (settled.kind === 'busy' || settled.kind === 'failure') {
+    return settled;
+  }
+  if (settled.kind === 'adopt') {
+    // 前回の試行の候補（人が衝突を解決してコミットしたもの、またはref更新の前に中断したもの）が
+    // 統合worktreeに残っている。作り直さずにそのまま反映する
+    const published = await publishCandidate(
+      integrationWorktreeCwd,
+      branch,
+      settled.attempt,
+      git,
+      options.saveAttempt,
+    );
+    if (published.kind !== 'stale') {
+      return published;
+    }
   }
 
-  const unresolved = await git.run(
-    ['diff', '--name-only', '--diff-filter=U'],
-    integrationWorktreeCwd,
-  );
-  const unresolvedPaths =
-    unresolved.code === 0
-      ? unresolved.stdout
-          .split(/\r?\n/u)
-          .map((line) => line.trim())
-          .filter((line) => line !== '')
-      : [];
-  if (unresolvedPaths.length > 0) {
-    return { kind: 'conflict', unresolvedPaths, rollbackCommit };
+  for (let rebuild = 0; rebuild < MAX_CANDIDATE_REBUILDS; rebuild += 1) {
+    const baseSha = await resolveBranchSha(integrationWorktreeCwd, branch, git);
+    if (baseSha === undefined) {
+      return { kind: 'failure', message: `統合ブランチ ${branch} の先頭を解決できません` };
+    }
+    if ((await isAncestor(integrationWorktreeCwd, sourceSha, baseSha, git)) === true) {
+      // 既に取り込み済み（`git merge`の「Already up to date」に当たる）。refは動かさない
+      return { kind: 'success', mergeCommit: baseSha };
+    }
+    const attempt: MergeAttempt = {
+      taskId,
+      attemptId: randomUUID(),
+      baseSha,
+      sourceSha,
+      stage: 'prepared',
+    };
+    const saveError = await trySaveAttempt(options.saveAttempt, attempt);
+    if (saveError !== undefined) {
+      return { kind: 'failure', message: saveError };
+    }
+    const built = await buildCandidate(integrationWorktreeCwd, branch, runId, attempt, git, options.type);
+    if (built.kind !== 'candidate') {
+      return built;
+    }
+    const published = await publishCandidate(
+      integrationWorktreeCwd,
+      branch,
+      built.attempt,
+      git,
+      options.saveAttempt,
+    );
+    if (published.kind !== 'stale') {
+      return published;
+    }
+    // ref更新の直前に統合ブランチの先頭がbaseから動いた。候補を捨て、新しい先頭から作り直す
   }
-
+  await restoreIntegrationHead(integrationWorktreeCwd, branch, git);
   return {
     kind: 'failure',
-    message:
-      merge.stderr.trim() !== ''
-        ? sanitizeForLog(merge.stderr)
-        : `git merge に失敗しました（終了コード ${merge.code}）`,
+    message: `統合ブランチ ${branch} の先頭が動き続けたため、${MAX_CANDIDATE_REBUILDS}回作り直しても統合候補を反映できませんでした`,
   };
 }
+
+/** ref更新（CAS）が先頭の移動で失敗したときに候補を作り直す上限。 */
+const MAX_CANDIDATE_REBUILDS = 3;
+
+/** ローカルブランチの先頭のSHA。`name`は検証済みのブランチ名（統合ブランチ・タスクブランチ）に限る。 */
+async function resolveBranchSha(
+  cwd: string,
+  name: string,
+  git: GitCommandRunner,
+): Promise<string | undefined> {
+  const result = await git.run(['show-ref', '--verify', '--hash', `refs/heads/${name}`], cwd);
+  const sha = result.stdout.trim();
+  return result.code === 0 && FULL_SHA_PATTERN.test(sha) ? sha : undefined;
+}
+
+/**
+ * `ancestor`が`descendant`から到達できるか。gitコマンド自体が失敗したら`undefined`（不明）。
+ *
+ * 「到達できない」は終了コード1、コマンドの異常（不正なSHAなど）は128で返る。stderrの有無では
+ * 判定しない。`nodeGitCommandRunner`は非0終了でstderrが空だと例外の文言を詰めるため、
+ * 「到達できない」まで不明になってしまう。
+ */
+async function isAncestor(
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+  git: GitCommandRunner,
+): Promise<boolean | undefined> {
+  const result = await git.run(['merge-base', '--is-ancestor', ancestor, descendant], cwd);
+  if (result.code === 0) {
+    return true;
+  }
+  return result.code === 1 ? false : undefined;
+}
+
+/** 試行の状態を保存する。失敗したら理由の文言を返す（git操作へ進まない）。 */
+async function trySaveAttempt(
+  save: (attempt: MergeAttempt) => Promise<void>,
+  attempt: MergeAttempt,
+): Promise<string | undefined> {
+  try {
+    await save(attempt);
+    return undefined;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return `統合の試行状態を保存できないためマージを始めません: ${sanitizeForLog(detail)}`;
+  }
+}
+
+/** gitコマンドの失敗を1行の文言にする。 */
+function gitFailureMessage(label: string, result: { code: number; stderr: string }): string {
+  return result.stderr.trim() !== ''
+    ? sanitizeForLog(result.stderr)
+    : `${label} に失敗しました（終了コード ${result.code}）`;
+}
+
+type SettledHead =
+  | { kind: 'attached' }
+  | { kind: 'adopt'; attempt: MergeAttempt }
+  | { kind: 'busy'; message: string }
+  | { kind: 'failure'; message: string };
+
+/**
+ * マージを始める前に、統合worktreeを「統合ブランチをcheckoutした状態」へ揃える。
+ *
+ * 統合worktreeがdetachしているのは、前の試行の候補が残っている（衝突を人が解決してコミット
+ * した、ref更新の前に中断した）か、ref更新の後の再checkoutの前に中断したかのどちらか。
+ * 前回の試行（`previous`）の候補がいまも反映できる（base・sourceが一致し、候補の検証を
+ * 通る）ならそれを引き取る（`adopt`）。それ以外の候補は先頭がbaseから動いて使えないため
+ * 捨てて統合ブランチをcheckoutし直す。未コミットの変更が残っていれば人の作業を消さないよう
+ * `busy`で止める。
+ */
+async function settleIntegrationHead(
+  cwd: string,
+  branch: string,
+  target: { runId: string; taskId: string; taskBranch: string; sourceSha: string },
+  previous: MergeAttempt | undefined,
+  git: GitCommandRunner,
+): Promise<SettledHead> {
+  const head = await git.run(['symbolic-ref', '-q', 'HEAD'], cwd);
+  const headRef = head.stdout.trim();
+  if (head.code === 0) {
+    return headRef === `refs/heads/${branch}`
+      ? { kind: 'attached' }
+      : {
+          kind: 'busy',
+          message: `統合worktreeが統合ブランチ以外（${sanitizeForLog(headRef)}）をcheckoutしているため、いまはマージできません。統合ブランチ ${branch} をcheckoutし直してから「再マージ」してください`,
+        };
+  }
+  if (head.code !== 1) {
+    return { kind: 'failure', message: gitFailureMessage('git symbolic-ref HEAD', head) };
+  }
+  const status = await git.run(['status', '--porcelain', '-uno'], cwd);
+  if (status.code !== 0 || status.stdout.trim() !== '') {
+    return {
+      kind: 'busy',
+      message:
+        '統合worktreeに未コミットの変更が残っているため、いまはマージできません。統合worktreeを片付けてから「再マージ」してください',
+    };
+  }
+  if (
+    previous !== undefined &&
+    previous.taskId === target.taskId &&
+    previous.sourceSha === target.sourceSha &&
+    (await resolveBranchSha(cwd, branch, git)) === previous.baseSha
+  ) {
+    const candidateSha = await verifyCandidate(cwd, target.runId, target.taskBranch, previous, git);
+    if (candidateSha !== undefined) {
+      return { kind: 'adopt', attempt: { ...previous, candidateSha, stage: 'candidate' } };
+    }
+  }
+  const checkout = await git.run(['checkout', branch], cwd);
+  return checkout.code === 0
+    ? { kind: 'attached' }
+    : { kind: 'failure', message: gitFailureMessage(`git checkout ${branch}`, checkout) };
+}
+
+type BuildCandidateResult =
+  | { kind: 'candidate'; attempt: MergeAttempt }
+  | Extract<MergeTaskResult, { kind: 'success' | 'conflict' | 'failure' }>;
+
+/**
+ * 統合ブランチの先頭（`attempt.baseSha`）へdetachし、sourceを`git merge --no-ff`して候補を作る。
+ * 統合ブランチのrefはここでは動かさない。衝突したらdetachしたまま`conflict`を返す。
+ */
+async function buildCandidate(
+  cwd: string,
+  branch: string,
+  runId: string,
+  attempt: MergeAttempt,
+  git: GitCommandRunner,
+  type: string | undefined,
+): Promise<BuildCandidateResult> {
+  const detach = await git.run(['checkout', '--detach', attempt.baseSha], cwd);
+  if (detach.code !== 0) {
+    await restoreIntegrationHead(cwd, branch, git);
+    return { kind: 'failure', message: gitFailureMessage('git checkout --detach', detach) };
+  }
+  const merge = await git.run(
+    ['merge', '--no-ff', '-m', mergeCommitMessage(attempt.taskId, runId, type), attempt.sourceSha],
+    cwd,
+  );
+  if (merge.code === 0) {
+    const head = await resolveHeadCommit(cwd, git);
+    if (head === attempt.baseSha) {
+      // 取り込むものが無かった（「Already up to date」）。候補を作らずに戻す
+      await restoreIntegrationHead(cwd, branch, git);
+      return { kind: 'success', mergeCommit: attempt.baseSha };
+    }
+    if (head === undefined || !FULL_SHA_PATTERN.test(head)) {
+      await restoreIntegrationHead(cwd, branch, git);
+      return { kind: 'failure', message: '統合候補のcommitを解決できません' };
+    }
+    return { kind: 'candidate', attempt: { ...attempt, candidateSha: head, stage: 'candidate' } };
+  }
+
+  const unresolvedPaths = await listUnresolvedPaths(cwd, git);
+  if (unresolvedPaths.length > 0) {
+    return { kind: 'conflict', unresolvedPaths, rollbackCommit: attempt.baseSha, attempt };
+  }
+  await restoreIntegrationHead(cwd, branch, git);
+  return { kind: 'failure', message: gitFailureMessage('git merge', merge) };
+}
+
+async function listUnresolvedPaths(cwd: string, git: GitCommandRunner): Promise<string[]> {
+  const unresolved = await git.run(['diff', '--name-only', '--diff-filter=U'], cwd);
+  return unresolved.code === 0
+    ? unresolved.stdout
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+    : [];
+}
+
+/**
+ * 統合worktreeのHEAD（detach中の候補）を検証し、通ればそのSHAを返す。
+ *
+ * `isMergeResolutionComplete`（未解決パスなし・`MERGE_HEAD`なし・作業ツリーがclean・
+ * タスクブランチが取り込み済み）に加え、候補の第1親が試行のbaseで、試行のsourceが候補から
+ * 到達できることを確かめる。baseの確認が無いと、先頭以外を基準にした候補（衝突解決中に
+ * 人がresetした等）を統合ブランチへ載せてしまう。
+ */
+async function verifyCandidate(
+  cwd: string,
+  runId: string,
+  taskBranch: string,
+  attempt: MergeAttempt,
+  git: GitCommandRunner,
+): Promise<string | undefined> {
+  if (!(await isMergeResolutionComplete(cwd, git, { runId, taskBranch }))) {
+    return undefined;
+  }
+  const parents = await git.run(['rev-list', '--parents', '-n', '1', 'HEAD'], cwd);
+  const [candidateSha, firstParent] = parents.stdout.trim().split(/\s+/u);
+  if (
+    parents.code !== 0 ||
+    candidateSha === undefined ||
+    !FULL_SHA_PATTERN.test(candidateSha) ||
+    firstParent !== attempt.baseSha
+  ) {
+    return undefined;
+  }
+  return (await isAncestor(cwd, attempt.sourceSha, candidateSha, git)) === true
+    ? candidateSha
+    : undefined;
+}
+
+type PublishResult =
+  | Extract<MergeTaskResult, { kind: 'success' | 'failure' }>
+  | { kind: 'stale' };
+
+/**
+ * 検証済みの候補を統合ブランチへ反映する。`git update-ref refs/heads/<branch> <candidate> <base>`
+ * （先頭がbaseのときだけ更新するCAS）のあと、統合ブランチをcheckoutし直す。
+ *
+ * 先頭がbaseから動いていてCASが失敗したら`stale`を返す（呼び出し側が作り直すか止める）。
+ * 先頭が既に候補と同じ（前回の試行がref更新まで済ませて中断した）なら成功として扱う。
+ */
+async function publishCandidate(
+  cwd: string,
+  branch: string,
+  attempt: MergeAttempt,
+  git: GitCommandRunner,
+  save: (attempt: MergeAttempt) => Promise<void>,
+): Promise<PublishResult> {
+  const candidateSha = attempt.candidateSha;
+  if (candidateSha === undefined) {
+    return { kind: 'failure', message: '統合候補が無いため統合ブランチへ反映できません' };
+  }
+  const saveError = await trySaveAttempt(save, attempt);
+  if (saveError !== undefined) {
+    await restoreIntegrationHead(cwd, branch, git);
+    return { kind: 'failure', message: saveError };
+  }
+  const update = await git.run(
+    ['update-ref', `refs/heads/${branch}`, candidateSha, attempt.baseSha],
+    cwd,
+  );
+  if (update.code !== 0 && (await resolveBranchSha(cwd, branch, git)) !== candidateSha) {
+    return { kind: 'stale' };
+  }
+  // ref更新は済んでいるため、再checkoutの失敗はマージの失敗にしない。detachしたままでも
+  // 次の試行の`settleIntegrationHead`が統合ブランチをcheckoutし直す
+  await git.run(['checkout', branch], cwd);
+  return { kind: 'success', mergeCommit: candidateSha };
+}
+
+/**
+ * 統合worktreeを「統合ブランチをcheckoutした状態」へ戻す（片付け）。進行中のマージがあれば
+ * `git merge --abort`で取り消してから統合ブランチをcheckoutする。統合ブランチのrefは
+ * 動かさないため、捨てた候補は統合ブランチに残らない。
+ */
+async function restoreIntegrationHead(
+  cwd: string,
+  branch: string,
+  git: GitCommandRunner,
+): Promise<AbortMergeResult> {
+  const mergeHead = await git.run(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], cwd);
+  if (mergeHead.code === 0) {
+    const abort = await git.run(['merge', '--abort'], cwd);
+    if (abort.code !== 0) {
+      return { ok: false, reason: 'gitError', message: gitFailureMessage('git merge --abort', abort) };
+    }
+  }
+  const checkout = await git.run(['checkout', branch], cwd);
+  if (checkout.code !== 0) {
+    return {
+      ok: false,
+      reason: 'gitError',
+      message: gitFailureMessage(`git checkout ${branch}`, checkout),
+    };
+  }
+  return { ok: true };
+}
+
+/** 衝突解決セッションが作った候補を反映した結果（`IntegrationMergeQueue.completeResolution`）。 */
+export type CompleteResolutionResult =
+  | Extract<MergeTaskResult, { kind: 'success' | 'failure' }>
+  /** 候補が検証を通らない（未解決・未コミット・baseやsourceとの関係が合わない）。 */
+  | { kind: 'incomplete' }
+  /** 解決の間に統合ブランチの先頭がbaseから動いた。候補は使えない。 */
+  | { kind: 'stale' };
 
 // ---------------------------------------------------------------------------
 // 巻き戻し
@@ -495,29 +909,6 @@ async function mergeTaskBranch(
 
 export type AbortMergeResult =
   { ok: true } | { ok: false; reason: 'gitError' | 'leaseNotHeld'; message: string };
-
-/**
- * 進行中のマージを取り消し、統合ブランチをマージ前の状態へ戻す（`git merge --abort`。
- * design.md §16.17「巻き戻し」）。**exportしない。** `IntegrationMergeQueue.abortMerge`
- * を経由すること。
- */
-async function abortMerge(
-  integrationWorktreeCwd: string,
-  git: GitCommandRunner,
-): Promise<AbortMergeResult> {
-  const result = await git.run(['merge', '--abort'], integrationWorktreeCwd);
-  if (result.code !== 0) {
-    return {
-      ok: false,
-      reason: 'gitError',
-      message:
-        result.stderr.trim() !== ''
-          ? sanitizeForLog(result.stderr)
-          : `git merge --abort に失敗しました（終了コード ${result.code}）`,
-    };
-  }
-  return { ok: true };
-}
 
 // ---------------------------------------------------------------------------
 // 統合worktreeの占有（リース）と直列化キュー
@@ -588,7 +979,7 @@ class IntegrationLeaseHandle implements IntegrationLease {
  * `index.lock` の競合が再発する（`worktree.ts` の `WorktreeCreationQueue` 自身の
  * 注意書きと同じ理由）。
  *
- * `createIntegrationWorktree` / `mergeTaskBranch` / `abortMerge` はこのファイルの外へ
+ * `createIntegrationWorktree` / `mergeTaskBranch` / `restoreIntegrationHead` はこのファイルの外へ
  * exportしていない。統合worktreeの作成・マージ・巻き戻しはこのクラスのメソッドだけが
  * 入口になる構造にすることで、「キューを経由し忘れる」事故を型のうえで起こしえない
  * 状態にする（`worktree.ts` の `WorktreeCreationQueue` と同じ方針）。
@@ -734,8 +1125,7 @@ export class IntegrationMergeQueue {
   }
 
   /**
-   * タスクブランチを統合worktreeへマージする（`mergeTaskBranch` をキュー経由で呼ぶ）。
-   * `type` は省略可能（マージコミットのConventional Commits type。未指定は`chore`）。
+   * タスクブランチを統合ブランチへ取り込む（`mergeTaskBranch` をキュー経由で呼ぶ）。
    *
    * 第1引数は`acquireLease`で取った占有ハンドル。統合worktreeのcwdはハンドルが持つ
    * （呼び出し側が別のcwdを渡せない）。ハンドルが失効していれば`failure`を返す。
@@ -746,7 +1136,7 @@ export class IntegrationMergeQueue {
     taskId: string,
     taskBranch: string,
     git: GitCommandRunner,
-    type?: string,
+    options: MergeTaskOptions,
   ): Promise<MergeTaskResult> {
     if (!this.holdsLease(lease)) {
       return Promise.resolve<MergeTaskResult>({ kind: 'failure', message: LEASE_NOT_HELD_MERGE });
@@ -765,18 +1155,67 @@ export class IntegrationMergeQueue {
       if (!this.holdsLease(lease)) {
         return Promise.resolve<MergeTaskResult>({ kind: 'failure', message: LEASE_NOT_HELD_MERGE });
       }
-      return mergeTaskBranch(cwd, runId, taskId, taskBranch, git, type);
+      return mergeTaskBranch(cwd, runId, taskId, taskBranch, git, options);
     });
   }
 
   /**
-   * 進行中のマージを取り消す（`abortMerge` をキュー経由で呼ぶ）。
+   * 衝突解決セッションが作った候補（統合worktreeのHEAD）を検証し、統合ブランチへ反映する
+   * （`mergeTask`の衝突時の続き。Issue #1678）。検証とref更新は`mergeTask`と同じ
+   * `verifyCandidate`・`publishCandidate`を通る。
+   *
+   * `stale`（解決の間に先頭が動いた）では作り直さない。解決の内容が古いbaseに対するもので、
+   * 新しい先頭に対して機械的に作り直すと衝突解決をやり直す必要があるため、呼び出し側が
+   * `blocked`へ倒して人の「再マージ」に委ねる。
+   */
+  completeResolution(
+    lease: IntegrationLease,
+    runId: string,
+    taskBranch: string,
+    attempt: MergeAttempt,
+    git: GitCommandRunner,
+    saveAttempt: (attempt: MergeAttempt) => Promise<void>,
+  ): Promise<CompleteResolutionResult> {
+    if (!this.holdsLease(lease) || lease.taskId !== attempt.taskId) {
+      return Promise.resolve<CompleteResolutionResult>({
+        kind: 'failure',
+        message: LEASE_NOT_HELD_MERGE,
+      });
+    }
+    const cwd = lease.integrationWorktreeCwd;
+    return this.worktreeQueue.enqueue(async (): Promise<CompleteResolutionResult> => {
+      if (!this.holdsLease(lease)) {
+        return { kind: 'failure', message: LEASE_NOT_HELD_MERGE };
+      }
+      const branch = integrationBranchName(runId);
+      const candidateSha = await verifyCandidate(cwd, runId, taskBranch, attempt, git);
+      if (candidateSha === undefined) {
+        return { kind: 'incomplete' };
+      }
+      return publishCandidate(
+        cwd,
+        branch,
+        { ...attempt, candidateSha, stage: 'candidate' },
+        git,
+        saveAttempt,
+      );
+    });
+  }
+
+  /**
+   * 進行中のマージ・未反映の候補を捨て、統合worktreeを統合ブランチへ戻す
+   * （`restoreIntegrationHead` をキュー経由で呼ぶ。design.md §16.17「巻き戻し」）。
+   * 統合ブランチのrefは動かさない。
    *
    * **占有ハンドルを持つタスクだけが巻き戻せる。** ハンドルを要求しないと、衝突解決中の
    * 他タスクの作業（未コミットの解決結果とインデックス）を`git merge --abort`で巻き戻して
    * しまう（Issue #412の指摘2）。
    */
-  abortMerge(lease: IntegrationLease, git: GitCommandRunner): Promise<AbortMergeResult> {
+  abortMerge(
+    lease: IntegrationLease,
+    runId: string,
+    git: GitCommandRunner,
+  ): Promise<AbortMergeResult> {
     if (!this.holdsLease(lease)) {
       return Promise.resolve<AbortMergeResult>({
         ok: false,
@@ -796,7 +1235,7 @@ export class IntegrationMergeQueue {
           message: LEASE_NOT_HELD_ABORT,
         });
       }
-      return abortMerge(cwd, git);
+      return restoreIntegrationHead(cwd, integrationBranchName(runId), git);
     });
   }
 
@@ -831,7 +1270,9 @@ export class IntegrationMergeQueue {
  * 直す」）。永続化された状態はマージが途中で切れている可能性があるため信用しない。
  *
  * - 未解決の衝突が残っていれば `blocked`
- * - 対象タスクのマージコミット（`mergeCommitMessage`の固定文言。旧形式
+ * - 保存された試行（`attempt`）があれば、統合ブランチの先頭がその候補か、先頭からsourceへ
+ *   到達できれば `done`、そうでなければ `merging`（Issue #1678。以下の件名照合は使わない）
+ * - 試行が無ければ、対象タスクのマージコミット（`mergeCommitMessage`の固定文言。旧形式
  *   `Merge task <taskId> (run <runId>)` も含む）が統合ブランチの履歴に見つかれば `done`
  * - どちらでもなければ `merging`（呼び出し側がマージをやり直す）
  *
@@ -857,6 +1298,7 @@ export async function reconcileMergingTaskOnReload(
   runId: string,
   taskId: string,
   git: GitCommandRunner,
+  attempt?: MergeAttempt,
 ): Promise<ReconcileMergingOutcome> {
   const idMessage = identifierError(runId, taskId);
   if (idMessage !== undefined) {
@@ -869,6 +1311,22 @@ export async function reconcileMergingTaskOnReload(
   );
   if (unresolved.code === 0 && unresolved.stdout.trim() !== '') {
     return 'blocked';
+  }
+
+  // 保存された試行があればSHAで判定する（Issue #1678）。先頭が候補そのもの、または先頭から
+  // sourceへ到達できれば取り込み済み。それ以外は`merging`（再開時に`mergeTask`が候補を
+  // 引き取るか、新しい先頭から作り直す）。件名の照合は試行が保存されていない古い状態だけに残す
+  if (attempt !== undefined && attempt.taskId === taskId) {
+    const tip = await resolveIntegrationTip(integrationWorktreeCwd, runId, git);
+    if (tip === undefined) {
+      return 'merging';
+    }
+    if (tip === attempt.candidateSha) {
+      return 'done';
+    }
+    return (await isAncestor(integrationWorktreeCwd, attempt.sourceSha, tip, git)) === true
+      ? 'done'
+      : 'merging';
   }
 
   const log = await git.run(['log', '--format=%s'], integrationWorktreeCwd);
@@ -919,6 +1377,7 @@ export function buildMergeResolutionPrompt(
   lines.push(
     '複数の並列タスクの成果を統合ブランチへ取り込む際にマージ衝突が発生しました。',
     '現在のディレクトリ（統合worktree）はマージが衝突した状態のままです。衝突を解決し、コミットしてください。',
+    'HEADは統合ブランチの先頭から切り離した（detached）状態です。ブランチの切り替え・作成・resetはせず、この状態のまま解決のコミットを作ってください（統合ブランチへの反映は拡張機能が行います）。',
     '',
     '# 未解決のパス',
   );
@@ -1073,8 +1532,11 @@ export async function isMergeResolutionComplete(
     ['rev-parse', '-q', '--verify', 'MERGE_HEAD'],
     integrationWorktreeCwd,
   );
-  // MERGE_HEADの解決に成功する（code 0）ということは、まだマージ進行中（未コミット）
-  if (mergeHead.code === 0 || mergeHead.stderr.trim() !== '') {
+  // MERGE_HEADの解決に成功する（code 0）ということは、まだマージ進行中（未コミット）。
+  // 不在は終了コード1で返る。それ以外（128など）はコマンド自体の異常なので「不明」として
+  // 完了扱いにしない。stderrの有無では判定しない（`nodeGitCommandRunner`は非0終了で
+  // stderrが空だと例外の文言を詰めるため、不在まで「不明」になり解決が完了しなくなる）
+  if (mergeHead.code !== 1) {
     return false;
   }
   const status = await git.run(['status', '--porcelain', '-uno'], integrationWorktreeCwd);

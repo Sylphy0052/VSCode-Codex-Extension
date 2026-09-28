@@ -1,4 +1,4 @@
-import { commitUncommittedChangesIfNeeded } from './integration';
+import { commitUncommittedChangesIfNeeded, resolveIntegrationTip } from './integration';
 import {
   isActiveTaskState,
   markWaitingOverlap,
@@ -15,7 +15,6 @@ import {
   type OverlapEntry,
 } from './taskOverlap';
 import { suggestTaskSplits } from './runnerTaskSplit';
-import { resolveHeadCommit } from './worktree';
 
 /**
  * 走行中のタスク同士の変更ファイルの交差を実測し、後から走り始めた方を待たせ、先に
@@ -294,9 +293,9 @@ async function mergeIntegrationIntoTask(
       warn(committed.message);
       return;
     }
-    const head = await resolveHeadCommit(integration.cwd, git);
+    const head = await resolveIntegrationTip(integration.cwd, runId, git);
     if (head === undefined) {
-      warn('統合ブランチのHEADを解決できません');
+      warn('統合ブランチの先頭を解決できません');
       return;
     }
     const merged = await git.run(['merge', '--no-ff', '--no-edit', head], liveTask.cwd);

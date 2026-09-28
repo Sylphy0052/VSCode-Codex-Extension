@@ -65,6 +65,7 @@ import {
 } from '../../src/orchestrator/worktree';
 import { MAX_WORKFLOW_FILE_BYTES, type Provider } from '../../src/orchestrator/workflow';
 import type { Logger } from '../../src/log';
+import { IntegrationGitModel, branchShaOf } from './fakeIntegrationGit';
 
 /**
  * `runner.ts` の結線を検証するテスト群。
@@ -413,28 +414,35 @@ function fakeGit(options?: {
 }): FakeGitHandle {
   const calls: Array<{ args: string[]; cwd: string }> = [];
   let conflictPending = options?.conflictOnce === true;
-  let unresolvedConflict = false;
   let worktreeAddCallCount = 0;
-  // 統合先へ取り込み済みのブランチ（`git merge-base --is-ancestor`の応答に使う。Issue #1111）
-  const mergedBranches = new Set<string>();
-  // 衝突して解決待ちのブランチ。解決コミットが打たれた時点で取込み済みになる
-  let mergingBranch: string | undefined;
+  // 統合worktreeでの統合経路（detach→merge→update-ref）はcommitの親子まで模す（Issue #1678）
+  const integrationGit = new IntegrationGitModel({
+    shouldConflict: () => {
+      if (!conflictPending) {
+        return false;
+      }
+      if (options?.conflictEveryMerge !== true) {
+        conflictPending = false;
+      }
+      return true;
+    },
+    ...(options?.failMerge === true ? { failMerge: true } : {}),
+    ...(options?.failMergeAbort === true ? { failMergeAbort: true } : {}),
+  });
   return {
     calls,
     resolveConflict() {
-      unresolvedConflict = false;
-      // 「解決してコミットした」＝対象ブランチが統合先へ入った状態（Issue #1111）
-      if (mergingBranch !== undefined) {
-        mergedBranches.add(mergingBranch);
-        mergingBranch = undefined;
-      }
+      integrationGit.resolveConflict();
     },
     abandonConflict() {
-      unresolvedConflict = false;
-      mergingBranch = undefined;
+      integrationGit.abandonConflict();
     },
     async run(args, cwd) {
       calls.push({ args: [...args], cwd });
+      const integrationResult = integrationGit.handle(args, cwd);
+      if (integrationResult !== undefined) {
+        return integrationResult;
+      }
       if (args[0] === 'rev-parse' && args[1] === '--is-inside-work-tree') {
         return options?.notGitRepo
           ? { code: 128, stdout: '', stderr: 'fatal: not a git repository' }
@@ -459,14 +467,6 @@ function fakeGit(options?: {
           ? { code: 1, stdout: '', stderr: 'fatal: fake push failure' }
           : { code: 0, stdout: '', stderr: '' };
       }
-      if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
-        // マージ進行中（未解決の衝突が残っている）間だけ見つかる。
-        // `-q --verify`は不在のとき何も出力しないため、stderrは空にする
-        // （`isMergeResolutionComplete`はstderrのある非0を「不明」として扱う。Issue #1111）
-        return unresolvedConflict
-          ? { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
-          : { code: 1, stdout: '', stderr: '' };
-      }
       if (args[0] === 'rev-parse' && args.includes('--verify')) {
         // ブランチはまだ存在しない（worktree作成前提）
         return { code: 1, stdout: '', stderr: 'not found' };
@@ -486,40 +486,9 @@ function fakeGit(options?: {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--no-ff') {
-        // `['merge', '--no-ff', '-m', <message>, <taskBranch>]`（`integration.ts`）
-        const branch = args[4] ?? '';
-        if (conflictPending) {
-          if (options?.conflictEveryMerge !== true) {
-            conflictPending = false;
-          }
-          unresolvedConflict = true;
-          mergingBranch = branch;
-          return { code: 1, stdout: '', stderr: 'CONFLICT (content): fake conflict' };
-        }
-        if (options?.failMerge) {
-          return { code: 1, stdout: '', stderr: 'fatal: fake merge failure' };
-        }
-        mergedBranches.add(branch);
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      if (args[0] === 'merge' && args[1] === '--abort') {
-        if (options?.failMergeAbort) {
-          // 巻き戻しに失敗＝未解決の衝突は残り続ける
-          return { code: 1, stdout: '', stderr: 'fatal: fake merge --abort failure' };
-        }
-        unresolvedConflict = false;
-        // 巻き戻したので取り込まれていない（Issue #1111）
-        mergingBranch = undefined;
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
-        return mergedBranches.has(args[2] ?? '')
-          ? { code: 0, stdout: '', stderr: '' }
-          : { code: 1, stdout: '', stderr: '' };
-      }
-      if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
-        return unresolvedConflict
-          ? { code: 0, stdout: 'CONFLICT.txt\n', stderr: '' }
+        // 統合worktree以外（タスクworktreeへの統合ブランチの取り込み。`runnerOverlap.ts`）
+        return options?.failMerge
+          ? { code: 1, stdout: '', stderr: 'fatal: fake merge failure' }
           : { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'add' && args[1] === '-A') {
@@ -1133,7 +1102,7 @@ async function startWithAllowConfirmed(
 }
 
 /** マイクロタスクを十分な回数流し、非同期の起動チェーン（worktree→boundary→openTaskSession）を進める。 */
-async function flush(times = 100): Promise<void> {
+async function flush(times = 400): Promise<void> {
   for (let i = 0; i < times; i += 1) {
     await Promise.resolve();
   }
@@ -8973,7 +8942,7 @@ tasks:
 
     expect(runner.getSnapshot(runId)?.tasks[0]?.state).toBe('done');
     const mergeCall = git.calls.find((c) => c.args[0] === 'merge' && c.args[1] === '--no-ff');
-    expect(mergeCall?.args).toContain(`wf/${runId}/T1`);
+    expect(mergeCall?.args).toContain(branchShaOf(`wf/${runId}/T1`));
   });
 
   it('永続化されたmergingタスクに未解決の衝突が残っていればblockedとして復元される', async () => {
@@ -11908,7 +11877,7 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
     const merges = mergeCalls(git);
     expect(merges).toHaveLength(2);
-    expect(merges[1]?.args).toContain(`wf/${runId}/T2`);
+    expect(merges[1]?.args).toContain(branchShaOf(`wf/${runId}/T2`));
   });
 
   /**
@@ -12337,10 +12306,10 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
 
     const t1MergeIndex = git.calls.findIndex(
-      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(`wf/${runId}/T1`),
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(branchShaOf(`wf/${runId}/T1`)),
     );
     const t2MergeIndex = git.calls.findIndex(
-      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(`wf/${runId}/T2`),
+      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(branchShaOf(`wf/${runId}/T2`)),
     );
     expect(t1MergeIndex).toBeGreaterThanOrEqual(0);
     expect(t2MergeIndex).toBeGreaterThan(t1MergeIndex);
@@ -13518,10 +13487,11 @@ tasks:
     await flush();
     expect(store.find(runId)?.tasks['T1']?.state).toBe('blocked');
 
-    // 「再マージ」でやり直す。未解決の統合worktree（MERGE_HEAD）を人が片付けた体で
-    // `resolveConflict()`を呼んでから再マージする（片付けないと`mergeTaskBranch`の
-    // busyゲートに引っかかり、新しい衝突解決セッションがそもそも開かない）
-    git.resolveConflict();
+    // 「再マージ」でやり直す。未解決の統合worktree（MERGE_HEAD）を人が`git merge --abort`で
+    // 片付けた体で`abandonConflict()`を呼んでから再マージする（片付けないと`mergeTaskBranch`の
+    // busyゲートに引っかかり、新しい衝突解決セッションがそもそも開かない。解決をコミットした
+    // 体の`resolveConflict()`だと、その候補を引き取って衝突せずに取り込む。Issue #1678）
+    git.abandonConflict();
     expect(runner.retryMerge(runId, 'T1')).toBe(true);
     await flush();
 
@@ -13606,8 +13576,8 @@ tasks:
       expect(store.find(runId)?.haltedByUser).toBe(true);
 
       // 停止中に「再マージ」を行う（Issue #517/#525で正規化された経路。`retryMerge`は
-      // `haltedByUser`を解除しない）
-      git.resolveConflict();
+      // `haltedByUser`を解除しない）。統合worktreeは人が`git merge --abort`で片付けた体にする
+      git.abandonConflict();
       expect(runner.retryMerge(runId, 'T1')).toBe(true);
       await flush();
       expect(store.find(runId)?.haltedByUser).toBe(true);

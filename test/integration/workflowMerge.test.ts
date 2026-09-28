@@ -196,6 +196,12 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
     );
     assert.equal(stateOf(snapshot, 'T2'), 'done');
 
+    // 解決の候補（detachした先頭で作ったコミット）が統合ブランチへ反映され、統合worktreeは
+    // 統合ブランチをcheckoutした状態へ戻る（Issue #1678）。
+    assert.equal(
+      git(resolution.cwd, 'symbolic-ref', 'HEAD').trim(),
+      `refs/heads/wf/${runId}/integration`,
+    );
     const log = git(resolution.cwd, 'log', '--oneline', '--format=%s');
     assert.ok(
       log.includes(mergeCommitSubject('T2', runId)),
@@ -223,9 +229,13 @@ suite('統合の衝突と自動解決（design.md §16.17）', () => {
     );
     assert.equal(stateOf(blocked, 'T2'), 'blocked');
 
-    // 統合ブランチはマージ前のコミットへ巻き戻り、未解決のパスも残らない
-    // （design.md §16.17「コンフリクト」7.）。
+    // 統合ブランチの先頭はマージ前のまま動かず、統合worktreeは統合ブランチをcheckoutした
+    // 状態へ戻り、未解決のパスも残らない（design.md §16.17「コンフリクト」7.、Issue #1678）。
     assert.equal(git(integrationCwd, 'rev-parse', 'HEAD').trim(), beforeHead);
+    assert.equal(
+      git(integrationCwd, 'symbolic-ref', 'HEAD').trim(),
+      `refs/heads/wf/${runId}/integration`,
+    );
     assert.equal(git(integrationCwd, 'diff', '--name-only', '--diff-filter=U').trim(), '');
 
     // 独立した枝（T4）は最後まで走り、T2に依存するT3だけがskippedになる。

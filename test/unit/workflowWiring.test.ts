@@ -19,6 +19,7 @@ import {
   fakeConnectionFactory,
   type FakeAppServerConnection,
 } from '../helpers/fakeAppServerConnection';
+import { IntegrationGitModel } from './fakeIntegrationGit';
 
 /**
  * `extension.ts` が実際に組み立てる配線（`WorkflowRunner` ⇄ `ChatViewManager` の
@@ -77,8 +78,14 @@ function fakeSettingsProvider(): SettingsProvider {
 }
 
 function fakeGit(): GitCommandRunner {
+  // 統合worktreeでの統合経路（detach→merge→update-ref）はcommitの親子まで模す（Issue #1678）
+  const integrationGit = new IntegrationGitModel();
   return {
-    async run(args) {
+    async run(args, cwd) {
+      const integrationResult = integrationGit.handle(args, cwd);
+      if (integrationResult !== undefined) {
+        return integrationResult;
+      }
       if (args[0] === 'rev-parse' && args[1] === '--is-inside-work-tree') {
         return { code: 0, stdout: 'true\n', stderr: '' };
       }

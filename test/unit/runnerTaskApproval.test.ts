@@ -25,6 +25,7 @@ import {
 } from '../../src/orchestrator/worktree';
 import type { Provider } from '../../src/orchestrator/workflow';
 import type { Logger } from '../../src/log';
+import { IntegrationGitModel } from './fakeIntegrationGit';
 
 /**
  * Issue #579の再現テスト（design.md §16.39）。通常タスクの`waitingApproval`に時間切れの
@@ -177,10 +178,16 @@ interface FakeGitHandle extends GitCommandRunner {
 
 function fakeGit(): FakeGitHandle {
   const calls: Array<{ args: string[]; cwd: string }> = [];
+  // 統合worktreeでの統合経路（detach→merge→update-ref）はcommitの親子まで模す（Issue #1678）
+  const integrationGit = new IntegrationGitModel();
   return {
     calls,
     async run(args, cwd) {
       calls.push({ args: [...args], cwd });
+      const integrationResult = integrationGit.handle(args, cwd);
+      if (integrationResult !== undefined) {
+        return integrationResult;
+      }
       if (args[0] === 'rev-parse' && args[1] === '--is-inside-work-tree') {
         return { code: 0, stdout: 'true\n', stderr: '' };
       }
@@ -196,9 +203,6 @@ function fakeGit(): FakeGitHandle {
       if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin') {
         return { code: 1, stdout: '', stderr: "error: No such remote 'origin'" };
       }
-      if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
-        return { code: 1, stdout: '', stderr: 'not found' };
-      }
       if (args[0] === 'rev-parse' && args.includes('--verify')) {
         return { code: 1, stdout: '', stderr: 'not found' };
       }
@@ -212,9 +216,6 @@ function fakeGit(): FakeGitHandle {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'merge' && args[1] === '--no-ff') {
-        return { code: 0, stdout: '', stderr: '' };
-      }
-      if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'add' && args[1] === '-A') {
