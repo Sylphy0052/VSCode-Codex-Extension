@@ -5372,7 +5372,12 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 
 #### マージ
 
-- タスクが `done` になった時点で、統合worktreeで `git merge --no-ff <taskBranch>` を実行する
+- タスクが `done` になった時点で、統合worktreeでタスクブランチを統合ブランチへマージする。**経路は統合ブランチの先頭を基準にした1本だけ**にする（Issue #1678）
+  1. 統合ブランチの先頭（base）とタスクブランチのcommit（source）をSHAで解決し、試行（`MergeAttempt`）としてrunへ保存する。git操作より先に保存するため、途中でリロードしても何を試みていたかが残る
+  2. `git checkout --detach <base>` してから `git merge --no-ff -m <msg> <source>` で候補を作る。統合ブランチのrefはここでは動かさない
+  3. 候補の親がbaseとsourceであることを確かめ、`git update-ref refs/heads/<統合ブランチ> <候補> <base>`（CAS）で反映し、統合ブランチをcheckoutし直す
+  4. CASが外れた（候補を作る間に先頭が動いた）ら、新しい先頭から候補を作り直す。3回外れたら `failure` にする
+  - リロード後の再判定（§16.11）は、保存した試行のSHA（先頭が候補と一致する、またはsourceが先頭の祖先）で決め、件名の照合はその補助にとどめる
 - `--no-ff` にするのは、タスク単位の境界をあとから辿れるようにするため
 - マージコミットのメッセージは固定文言（`<type>(<taskId>): merge task (run <runId>)`）。以前は `Merge task <taskId> (run <runId>)` だったが、Conventional Commitsの形ではなかったため、自動コミットのメッセージと同じくタスクの `type` を使う形へ改めた
 - **リロード直後の `merging` タスクの再判定（§16.11）や衝突解決プロンプトの相手特定は、マージコミットの件名を `--grep` の完全一致ではなく `git log --format=%s` で一覧化してJS側で照合する方式を取り、新旧どちらの形式（`<type>(<taskId>): merge task (run <runId>)` / 旧 `Merge task <taskId> (run <runId>)`）の件名にも一致させる。** これにより、runの実行中にワークフローYAMLの `type:` を書き換えてからリロードする経路や、旧バージョンの拡張機能で走らせた実行中のrunを新バージョンへ上げてからリロードする経路のどちらでも、既にマージ済みのタスクを誤って `merging`（やり直し対象）と判定し二重マージが走る事故を防ぐ
@@ -5387,12 +5392,12 @@ runごとに1本の統合ブランチを持ち、そこへ各タスクの成果�
 衝突したら、解決用のセッションを自動で立てる。無人実行を止めないため。
 
 1. `git merge` が衝突で終わったら、**衝突した状態のまま**にしておく。先に `git merge --abort` してから解決させると、解決用セッション自身がマージをやり直す必要があり、失敗する経路が増える
-2. 巻き戻し先として、マージ前の統合ブランチのコミットidを控える
+2. 統合worktreeはbaseへdetachしたまま衝突している。統合ブランチのrefはbaseのままなので、巻き戻し先を別に控える必要は無い（Issue #1678。以前はマージ前のコミットidを控えていた）
 3. 統合worktreeを `cwd` にして解決用セッションを開く。プロンプトには衝突したファイルの一覧、突き合わせる2つのタスクの `prompt` と `done`、未解決パスの一覧（`git diff --name-only --diff-filter=U`）を渡す
-4. 終了条件は「衝突を解決してコミットしてあり、未解決のパスが残っていないこと」。判定は `git status` で拡張機能側からも確かめる（宣言だけを信じない）。**確認は「未解決パスが無い」「`MERGE_HEAD` が無い」だけでは足りない**——`git merge --abort` や `git reset` でマージを取り消した状態も同じ条件を満たすため、取り消したまま `done` を宣言されると成果が統合されないまま「解決済み」として後続へ進む（Issue #1111）。`isMergeResolutionComplete` はこれに加えて、作業ツリーに未コミットの変更が無いこと（`git status --porcelain -uno`。未追跡ファイルは統合worktreeにビルド生成物が置かれうるため対象外）と、タスクブランチのcommitが統合先のHEADから到達できること（`git merge-base --is-ancestor <taskBranch> HEAD`）まで確かめる。`MERGE_HEAD` の問い合わせが非0かつstderrありで落ちた場合は「不在」ではなく「不明」として完了扱いにしない（`-q --verify` は不在のとき何も出力しないため、stderrがあるのはコマンド自体の異常）。`taskBranch` は位置引数として渡すため、`isValidTaskBranch` でこのrunのタスクブランチの形であることを先に確かめる
+4. 終了条件は「衝突を解決してコミットしてあり、未解決のパスが残っていないこと」。判定は `git status` で拡張機能側からも確かめる（宣言だけを信じない）。**確認は「未解決パスが無い」「`MERGE_HEAD` が無い」だけでは足りない**——`git merge --abort` や `git reset` でマージを取り消した状態も同じ条件を満たすため、取り消したまま `done` を宣言されると成果が統合されないまま「解決済み」として後続へ進む（Issue #1111）。`isMergeResolutionComplete` はこれに加えて、作業ツリーに未コミットの変更が無いこと（`git status --porcelain -uno`。未追跡ファイルは統合worktreeにビルド生成物が置かれうるため対象外）と、タスクブランチのcommitが統合先のHEADから到達できること（`git merge-base --is-ancestor <taskBranch> HEAD`）まで確かめる。`MERGE_HEAD` の問い合わせが終了コード1以外（128など）で落ちた場合は「不在」ではなく「不明」として完了扱いにしない（`-q --verify` は不在のとき終了コード1で返る）。stderrの有無では判定しない。`nodeGitCommandRunner` は非0終了でstderrが空だと例外の文言を詰めるため、stderrで判定すると不在まで「不明」になり、実gitでは解決が一度も完了しなかった（Issue #1678で修正）。`taskBranch` は位置引数として渡すため、`isValidTaskBranch` でこのrunのタスクブランチの形であることを先に確かめる
 5. 解決用セッションはループ制御は通常のタスクと同じ仕組みを使うが、**承認判定は通常のタスクの `escalation.ts`（タスク境界・`allow` / `escalate`）を使わず、標準の承認カード（常に人へ回す既定挙動）へ委ねる。** タスク境界（`TaskBoundary`）は本来そのタスクのworktree用に作られたもので、統合worktree（別ディレクトリ）向けに作り直すと境界判定の意味が変わってしまうため、安全側（常に人の承認を要求する）に倒す単純化である。`maxIterations` は別に持ち、既定は小さくする（5）。何度も回して直らないものは人へ回したほうが早い
-6. 解決できたらマージ完了として扱い、タスクを `done` にして次へ進む
-7. 解決できなければ、控えたコミットidへ `git merge --abort` で戻し、そのタスクを `blocked` にする。ただし**人が止めた場合（タブへの直接介入 = `manual`/`interrupted`、ワークフローViewの「全体の停止」 = `taskStopped`）は巻き戻さない**（Issue #412・#434）。人が統合worktreeで直接手を動かしている経路であり、巻き戻すと未コミットの解決結果を破棄してしまう（1.と同じ理由）。統合worktreeは衝突した状態のまま残り、占有だけが解放される。**そのタスクも`blocked`にする**（Issue #443、案A）。`merging`のまま残すと、`getRunOutcome`が`merging`を`running`扱いするためrunが終了確定せず、`retryMergeState`（`blocked`からしか動かない）の「再マージ」の対象にもならない行き止まりになるためで、`git merge --abort`は呼ばずに`markMergeBlocked`だけを呼ぶ。「巻き戻し済みの`blocked`」との違い（未コミットの解決結果が残っている）は状態には持たせず、警告欄（`mergeInterrupted`）で説明する
+6. 解決できたら、解決用セッションがコミットした候補を「マージ」の3.と同じ検証とCASで統合ブランチへ反映し、タスクを `done` にして次へ進む。解決の間に統合ブランチの先頭がbaseから動いていたら候補は使えないため、反映せず `blocked` にする（Issue #1678）
+7. 解決できなければ、`git merge --abort` で取り消して統合ブランチをcheckoutし直し、そのタスクを `blocked` にする。統合ブランチのrefは動いていないので、捨てた候補は残らない。ただし**人が止めた場合（タブへの直接介入 = `manual`/`interrupted`、ワークフローViewの「全体の停止」 = `taskStopped`）は巻き戻さない**（Issue #412・#434）。人が統合worktreeで直接手を動かしている経路であり、巻き戻すと未コミットの解決結果を破棄してしまう（1.と同じ理由）。統合worktreeは衝突した状態のまま残り、占有だけが解放される。**そのタスクも`blocked`にする**（Issue #443、案A）。`merging`のまま残すと、`getRunOutcome`が`merging`を`running`扱いするためrunが終了確定せず、`retryMergeState`（`blocked`からしか動かない）の「再マージ」の対象にもならない行き止まりになるためで、`git merge --abort`は呼ばずに`markMergeBlocked`だけを呼ぶ。「巻き戻し済みの`blocked`」との違い（未コミットの解決結果が残っている）は状態には持たせず、警告欄（`mergeInterrupted`）で説明する
 
 8. **承認待ちが長時間続いたら、自動的に7.と同じ非破壊の`blocked`へ倒す（Issue #413 PR5）。** 解決用セッションが承認カードを出したまま（5.の標準承認カード）`agent.workflows.mergeApprovalTimeoutSec`（既定3600秒＝1時間）を超えて放置されたら、`session.stopLoop()`を呼んで止める。**LLMが作業中（承認待ちで無い間）の時間は計測に含めない**——計測は承認カードが出ている間だけ、状態が変わるたびに0から数え直す（1回のカードが直っても次のカードでは新しく数え直す）。7.の「人が止めた場合」と同様に**`git merge --abort`は呼ばない**（統合worktreeは衝突した状態のまま残り、未コミットの解決結果を破棄しない）。ただし7.は「人が明示的に停止を指示した」経路（`applyLoopStopReason`が`run.haltedByUser`を立てて残りの`pending`を`runHalted`で止める）を通るのに対し、**この自動タイムアウトは対象タスク1つだけを`blocked`にし、runの残りは止めない**——1つの衝突が長引いただけで独立した他の枝まで巻き込むのは望ましくないため。`stopLoop()`が返す`LoopStopReason`は`'taskStopped'`のままで人が止めた場合と区別が付かないため、`MergeResolutionEntry.timedOutByApprovalTimeout`フラグ（タイムアウト処理が`stopLoop()`を呼ぶ直前に立てる）で内部的に見分ける。
 
