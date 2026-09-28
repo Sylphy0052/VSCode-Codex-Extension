@@ -51,6 +51,10 @@ export function stageScopeReminder(ref: StageReportRef): string {
     `報告には次の値をそのまま付ける: taskId=${ref.taskId} executionId=${ref.executionId} ` +
       `stage=${ref.stage} attemptId=${ref.attemptId}`,
     '質問・確認・方針の相談はユーザーへ直接聞かず、ask_orchestratorでOrchestratorへ送る。',
+    // 背景タスクが残っている間はループが次の指示を送らない（Issue #1676）。終わらない
+    // プロセスを背景に置くと、工程は完了通知を待ったまま時間上限まで進まなくなる
+    '背景で起動したAgent・Bashは終わるのを待ってから報告する。dev server・watch・tail -fのように' +
+      '終わりを待たない長寿命のプロセスは背景で起動しない。',
   ].join('\n');
 }
 
