@@ -98,6 +98,9 @@ function decodeLine(raw: Buffer): string {
  * readlineは改行を落とすため元のバイト位置が分からない。範囲を正確に照合できるよう、
  * バイト列のまま `\n` で区切って読む。打ち切り条件に当たる前に末尾へ達したときは
  * `undefined`（範囲が確定していない）。末尾の改行の無い行も `isComplete` には渡す。
+ *
+ * readlineと違い、単独の `\r` は行区切りとみなさない。JSONLは値の中の改行を
+ * エスケープするため、行の途中に生の `\r` は現れない前提とする。
  */
 async function readHeadDigestUntil(
   filePath: string,
@@ -132,6 +135,8 @@ async function readHeadDigestUntil(
       }
     }
     if (pending.length > 0) {
+      // readHeadUntilと同じく末尾の改行の無い行も素性の解釈には含める。書きかけの行の
+      // 可能性があるため、isCompleteがtrueを返しても範囲は確定させない
       isComplete(decodeLine(Buffer.concat(pending)));
     }
     return undefined;

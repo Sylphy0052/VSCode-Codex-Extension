@@ -565,7 +565,8 @@ export class ClaudeSessionStore {
    * 素性が揃った時点で読むのをやめる先頭読み（Issue #885）。
    *
    * `readHeadUntil` を持たないポート（テストのフェイク等）では、これまでどおり
-   * 先頭 `HEAD_LINES` 行を読んでから解釈する。どちらの経路でも結果は同じ。
+   * 先頭 `HEAD_LINES` 行を読んでから解釈する。どの経路でも結果は同じ（JSONLの行に
+   * 生の `\r` が無い前提。`readHeadDigestUntil` のJSDoc参照）。
    *
    * `readHeadDigestUntil` を持つポートでは、読んだ範囲のバイト数とハッシュも返す
    * （Issue #1466）。`head` が `undefined` のエントリは次の追記で先頭を読み直す。
