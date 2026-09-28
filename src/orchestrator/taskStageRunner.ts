@@ -284,7 +284,7 @@ function unreportedFinishDetail(reason: LoopStopReason, maxIterations: number): 
     // 工程のループは全体の時間上限を持たないため、`timedOut`は背景タスクを待つ上限からだけ来る
     return (
       `${base}。背景タスクの完了を${String(STAGE_BACKGROUND_WAIT_LIMIT_MS / 60_000)}分待っても` +
-      '次のターンが始まらなかった。終わらないプロセスを背景で起動した可能性がある'
+      '背景タスクが残っていた。終わらないプロセスを背景で起動した可能性がある'
     );
   }
   if (reason !== 'maxReached') {

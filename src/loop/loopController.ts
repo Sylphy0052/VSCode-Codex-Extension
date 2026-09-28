@@ -76,7 +76,8 @@ export interface LoopPlan {
    *
    * ターンの完了時に背景タスクが残っていれば、ループは次の指示を送らず次のターンを待つ。
    * dev serverのような終わらないプロセスが残ると次のターンが来ないため、待ち始めてから
-   * この時間が過ぎたら`timedOut`で止める。次のターンが始まれば数え直す。
+   * この時間が過ぎたら`timedOut`で止める。起点は最初に待ち始めた時刻で、背景タスクが0件に
+   * なるまで数え直さない（通知で短いターンが続いても上限が延びないように）。
    */
   backgroundWaitLimitMs?: number;
   /**
@@ -480,6 +481,8 @@ export class LoopController {
    * なければ境界が来ないため、上限の時刻に合わせてここから止める。
    */
   private backgroundWaitTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 背景タスクを待ち始めた時刻（Issue #1676）。背景タスクが0件になるまで保つ。 */
+  private backgroundWaitStartedAt: number | undefined;
   /**
    * 一時停止中にターンが完了したため、送らずに保留している次の指示（issue #909）。
    *
@@ -666,7 +669,7 @@ export class LoopController {
     this.advisorDisabled = false;
     this.runAbort = new AbortController();
     this.evaluating = false;
-    this.clearBackgroundWait();
+    this.endBackgroundWait();
     this.pendingPrompt = undefined;
     this.status = {
       running: true,
@@ -721,7 +724,7 @@ export class LoopController {
     this.runAbort?.abort();
     this.runAbort = undefined;
     this.evaluating = false;
-    this.clearBackgroundWait();
+    this.endBackgroundWait();
     this.pendingPrompt = undefined;
     this.lastMessage = undefined;
     this.status = { ...this.status, running: false, stopReason: reason };
@@ -1176,12 +1179,13 @@ export class LoopController {
    * （`streamJson.ts`の`applyBackgroundTasksChanged`）。通知を一度も受け取っていない間は
    * `NO_BACKGROUND_TERMINALS`そのものが残るため、同一性で「不明」と見分ける。実測（CLI
    * 2.1.280）では背景タスクを起動すると`result`より先に通知が届いたので、不明は
-   * 背景タスクを起動していないとみなし、従来どおり送る。Codexはターンの完了で一覧を
-   * `NO_BACKGROUND_TERMINALS`へ戻すため、常にこちらへ入る。
+   * 背景タスクを起動していないとみなし、従来どおり送る。Codexは`turn/completed`で一覧を
+   * `NO_BACKGROUND_TERMINALS`へ戻すため、ターン完了時のこの判定では常にこちらへ入る。
    */
   private waitsForBackgroundTasks(plan: LoopPlan, state: ChatState): boolean {
     const tasks = state.backgroundTerminals;
     if (tasks === NO_BACKGROUND_TERMINALS) {
+      this.endBackgroundWait();
       this.log(
         `ループ: 背景タスクの一覧を受け取らないままターンが完了した（不明）。` +
           `背景タスク無しとみなして続ける（送信${String(this.status.iteration)}回目の後）`,
@@ -1189,7 +1193,7 @@ export class LoopController {
       return false;
     }
     if (tasks.length === 0) {
-      this.clearBackgroundWait();
+      this.endBackgroundWait();
       return false;
     }
     // 待つ前に時間上限を見る。待ち始めてから上限を過ぎた分はタイマーが見る
@@ -1213,12 +1217,13 @@ export class LoopController {
   private scheduleBackgroundWaitDeadline(plan: LoopPlan): void {
     this.clearBackgroundWait();
     const now = this.now();
+    this.backgroundWaitStartedAt ??= now;
     const deadlines: number[] = [];
     if (plan.maxDurationMs !== undefined && this.startedAt !== undefined) {
       deadlines.push(this.startedAt + plan.maxDurationMs - now);
     }
     if (plan.backgroundWaitLimitMs !== undefined) {
-      deadlines.push(plan.backgroundWaitLimitMs);
+      deadlines.push(this.backgroundWaitStartedAt + plan.backgroundWaitLimitMs - now);
     }
     if (deadlines.length === 0) {
       return;
@@ -1241,6 +1246,12 @@ export class LoopController {
       clearTimeout(this.backgroundWaitTimer);
       this.backgroundWaitTimer = undefined;
     }
+  }
+
+  /** 背景タスクの待機を終える。次に待つときは待ち始めの時刻から数え直す。 */
+  private endBackgroundWait(): void {
+    this.clearBackgroundWait();
+    this.backgroundWaitStartedAt = undefined;
   }
 
   private dispatch(prompt: string, phase: LoopEngineeringPhase): void {
