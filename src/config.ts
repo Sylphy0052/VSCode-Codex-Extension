@@ -1161,6 +1161,12 @@ export interface WorkflowsConfig {
    */
   allowClaudeBypassPermissions: boolean;
   /**
+   * 実効 `autoApprove` のタスクの承認要求を、危険判定（§16.7）を通さず許可するか
+   * （machineスコープ、既定 false）。PRのmergeとリモートブランチの削除は人へ回す。
+   * オーケストレータモードの工程セッションと同じ基準にそろえる（Issue #1656）。
+   */
+  fullAutoApprove: boolean;
+  /**
    * ロードマップ（design.md §16.19）の出力先ディレクトリ。ワークスペースフォルダからの
    * 相対パス（既定 `docs/roadmap`）。`agent.workflows.dir` と同じく `machine-overridable`
    * （§16.16「成果の統合まわりの設定」）。出力先のパス自体であって実行するコマンドの選択には
@@ -1605,6 +1611,7 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: permissionFlag(c, 'workflows.allowAutoApprove'),
     allowClaudeBypassPermissions: permissionFlag(c, 'workflows.allowClaudeBypassPermissions'),
+    fullAutoApprove: permissionFlag(c, 'workflows.fullAutoApprove'),
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
     roadmapIssueLabel:
       str(c, 'workflows.roadmapIssueLabel', DEFAULT_ROADMAP_ISSUE_LABEL).trim() ||

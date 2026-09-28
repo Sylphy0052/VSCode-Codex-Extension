@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.928.18",
+  "version": "2026.928.19",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1617,6 +1617,12 @@
           "default": false,
           "scope": "machine",
           "markdownDescription": "**危険**: `claude.permissionMode` が `bypassPermissions` のとき、ワークフローのClaudeタスクもその設定のまま実行する。有効にすると Claude Code CLI がツール実行の可否を一切問い合わせなくなるため、この拡張機能の危険判定（`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作など）が**全て無効**になり、ワークフローが生成したコマンドは内容にかかわらず実行される。無効（既定）のときは、そのタスクだけ `acceptEdits` へ読み替えて危険判定を働かせる（設計書 §16.16）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
+        },
+        "agent.workflows.fullAutoApprove": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "**危険**: ワークフローのタスクのうち、実効 `autoApprove` が有効なもの（YAMLの `autoApprove: true` と `agent.workflows.allowAutoApprove` の両方）の承認要求を、危険判定を通さず許可する。`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作なども無確認で実行される。PRのmergeとリモートブランチの削除、`AskUserQuestion` だけは人へ回す。オーケストレータモードの工程セッションと同じ基準（Issue #1656）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
         },
         "agent.workflows.replyTimeoutSec": {
           "type": "number",

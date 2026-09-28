@@ -1,4 +1,9 @@
-import { isBranchOrTagDelete, normalizeCommand } from './escalation';
+import {
+  isBranchOrTagDelete,
+  normalizeCommand,
+  type EscalationRequest,
+  type EscalationResult,
+} from './escalation';
 import { MESSAGING_MCP_SERVER_NAME } from './messaging';
 import { ROADMAP_ASK_ORCHESTRATOR_TOOL } from './roadmapQuestionMcp';
 import type { TaskStage } from './taskRunState';
@@ -64,6 +69,22 @@ export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): Ap
     }
     return autoApprove ? { kind: 'auto', decision: 'accept' } : { kind: 'ask' };
   };
+}
+
+/**
+ * `agent.workflows.fullAutoApprove`（Issue #1656）が効いたワークフローのタスクの承認判定。
+ *
+ * 工程セッションのmergeCleanup以外の工程と同じ基準にそろえ、PRのmergeとリモートブランチの
+ * 削除だけを人へ回す。危険パターンと境界の判定（`classifyApprovalRequest`）は通さない。
+ */
+export function classifyFullAutoApproval(request: EscalationRequest): EscalationResult {
+  if (request.kind === 'command' && isMergeOrRemoteBranchDelete(request.command)) {
+    return {
+      decision: 'ask',
+      reasons: ['PRのmergeかリモートブランチの削除のため、fullAutoApproveでも人へ回します'],
+    };
+  }
+  return { decision: 'auto', reasons: ['fullAutoApproveが有効なため、危険判定を通さず許可しました'] };
 }
 
 /** CodexのMCP elicitationのうち、報告と質問のツールだけを許可する。 */
