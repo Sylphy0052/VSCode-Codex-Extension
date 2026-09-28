@@ -118,7 +118,7 @@ import { buildEffectiveTaskConfig, type ExtensionSafetyBaseline } from './orches
 import type { TaskSessionHost } from './orchestrator/taskSession';
 import {
   buildWorkspaceSummary,
-  MAX_AUTO_REVIEW_REVISIONS,
+  maxAutoReviewRevisions,
   nodePlannerWorkspacePort,
   planWorkflow,
   providerHintToProvider,
@@ -516,7 +516,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // worktreeで戻るため
   const taskRunStore = new TaskRunStore(context.workspaceState, (message) => log.warn(message));
   const isTaskManagedThread = (id: string): boolean =>
-    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) || taskRunStore.hasSessionRef(id);
+    (workflowRunnerRef.current?.isTaskManagedSessionId(id) ?? false) ||
+    taskRunStore.hasSessionRef(id);
 
   // 設定パネルを開かずCodex画面だけ使う場合でも選択肢が揃うよう、起動時に読む
   void settings.load();
@@ -2318,7 +2319,9 @@ async function continueNextRoadmapChunk(
   }
   const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(defPath));
   if (folder === undefined) {
-    log.warn('[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません');
+    log.warn(
+      '[roadmap] ワークフロー定義がワークスペース外にあるため、次のチャンクを自動起動できません',
+    );
     return;
   }
   const dir = readWorkflowsConfig().dir;
@@ -3272,7 +3275,7 @@ async function planWorkflowFromGoalCommand(
   );
 
   if (result.ok) {
-    await handlePlanSuccess(result, goal, workspaceRoot, view, log, provider, host);
+    await handlePlanSuccess(result, goal, workspaceRoot, view, log, provider, host, false);
     return;
   }
   await handlePlanFailure(result, log);
@@ -3594,6 +3597,7 @@ async function planWorkflowFromRoadmapFile(
       log,
       provider,
       host,
+      true,
     );
   }
 
@@ -3759,6 +3763,11 @@ async function handlePlanSuccess(
   log: Logger,
   provider: Provider,
   host: TaskSessionHost,
+  /**
+   * ロードマップIssueから生成したか（Issue #1652）。trueならレビュー観点を絞り、自動修正を
+   * 1回までにする。タスクの分け方・依存・Issue番号はロードマップで決まっているため。
+   */
+  fromRoadmap: boolean,
 ): Promise<void> {
   const dirConfig = readWorkflowsConfig().dir;
   const dirAbs = path.join(workspaceRoot, dirConfig);
@@ -3866,14 +3875,15 @@ async function handlePlanSuccess(
       let definition = pendingReview.definition;
       let securityWarnings = result.securityWarnings;
       let totalReviewFindings = 0;
-      for (let revision = 0; revision <= MAX_AUTO_REVIEW_REVISIONS; revision += 1) {
+      const maxRevisions = maxAutoReviewRevisions(fromRoadmap);
+      for (let revision = 0; revision <= maxRevisions; revision += 1) {
         const review = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title:
               revision === 0
                 ? 'ワークフローをレビューしています…'
-                : `ワークフローを再レビューしています…（${revision}/${MAX_AUTO_REVIEW_REVISIONS}）`,
+                : `ワークフローを再レビューしています…（${revision}/${maxRevisions}）`,
           },
           () =>
             reviewWorkflowPlan({
@@ -3883,6 +3893,7 @@ async function handlePlanSuccess(
               host,
               cwd: workspaceRoot,
               log,
+              fromRoadmap,
             }),
         );
 
@@ -3966,15 +3977,15 @@ async function handlePlanSuccess(
         totalReviewFindings += review.findings.length;
         view.previewDefinition(filePath, definition, warnings);
 
-        if (revision === MAX_AUTO_REVIEW_REVISIONS) {
+        if (revision === maxRevisions) {
           log.warn(
-            `[planner] タスク分解レビューの自動修正が上限${MAX_AUTO_REVIEW_REVISIONS}回に達しました: ${review.findings
+            `[planner] タスク分解レビューの自動修正が上限${maxRevisions}回に達しました: ${review.findings
               .map((finding) => sanitizeForLog(finding.message))
               .join(' / ')}`,
           );
           void warnWithLogLink(
             log,
-            `タスク分解レビューの自動修正が上限${MAX_AUTO_REVIEW_REVISIONS}回に達しました（指摘${review.findings.length}件）。内容を確認してください（詳しくはログ）`,
+            `タスク分解レビューの自動修正が上限${maxRevisions}回に達しました（指摘${review.findings.length}件）。内容を確認してください（詳しくはログ）`,
           );
           return;
         }
@@ -3982,7 +3993,7 @@ async function handlePlanSuccess(
         const revised = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `レビュー指摘を反映しています…（${revision + 1}/${MAX_AUTO_REVIEW_REVISIONS}）`,
+            title: `レビュー指摘を反映しています…（${revision + 1}/${maxRevisions}）`,
           },
           () =>
             reviseWorkflowPlan({
@@ -3994,12 +4005,13 @@ async function handlePlanSuccess(
               cwd: workspaceRoot,
               baseline: readSafetyBaseline(),
               log,
+              fromRoadmap,
             }),
         );
         if (!revised.ok) {
           void warnWithLogLink(
             log,
-            `レビュー指摘を反映したYAMLが検証を通らなかったため、自動修正を中止しました: ${sanitizeForLog(revised.error)}`,
+            `レビュー指摘を反映したYAMLを適用できなかったため、自動修正を中止しました: ${sanitizeForLog(revised.error)}`,
           );
           return;
         }

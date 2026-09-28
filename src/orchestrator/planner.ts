@@ -46,6 +46,7 @@ import {
   type Provider,
   type WorkflowDefinition,
   type WorkflowIssue,
+  type WorkflowTask,
 } from './workflow';
 
 /**
@@ -1612,6 +1613,25 @@ export const WORKFLOW_REVIEW_ASPECTS = [
 
 export type WorkflowReviewAspect = (typeof WORKFLOW_REVIEW_ASPECTS)[number];
 
+/**
+ * ロードマップから生成したワークフローで見る観点（Issue #1652）。タスクの分け方・依存・
+ * Issue番号はロードマップIssueで人が決めているため、それを問い直す5観点
+ * （`serializedParallelizable` / `missingConvergence` / `goalMismatch` /
+ * `overFragmented` / `dependencyMismatch`）は外す。ロードマップの転記漏れは
+ * `roadmapMismatches` / `correctedIssues`が別に検出している。
+ */
+export const ROADMAP_REVIEW_ASPECTS = [
+  'doneNotObservable',
+  'missingEvidence',
+  'unsupportedAssumption',
+  'missingRisk',
+] as const satisfies readonly WorkflowReviewAspect[];
+
+/** 生成元に応じたレビュー観点を返す。 */
+export function workflowReviewAspects(fromRoadmap: boolean): readonly WorkflowReviewAspect[] {
+  return fromRoadmap ? ROADMAP_REVIEW_ASPECTS : WORKFLOW_REVIEW_ASPECTS;
+}
+
 export interface WorkflowReviewFinding {
   aspect: WorkflowReviewAspect;
   /** 該当するタスクid。特定のタスクに紐づかない指摘（ゴールとの過不足等）では空。 */
@@ -1629,6 +1649,11 @@ export interface ReviewWorkflowPlanInput {
   /** レビューセッションの作業ディレクトリ。読み取り専用なのでworktreeは作らない。 */
   cwd: string;
   log: Logger;
+  /**
+   * ロードマップIssueから生成したワークフローか（Issue #1652）。trueなら観点を
+   * `ROADMAP_REVIEW_ASPECTS`に絞り、修正ではタスクのid・分け方・dependsOn・issueを変えさせない。
+   */
+  fromRoadmap?: boolean;
 }
 
 export interface ReviewWorkflowPlanResult {
@@ -1683,6 +1708,74 @@ const MAX_REVIEW_FINDING_MESSAGE_LENGTH = 500;
 export const MAX_AUTO_REVIEW_REVISIONS = 3;
 
 /**
+ * ロードマップから生成したワークフローの修正回数の上限（Issue #1652）。分解はロードマップで
+ * 確定しているため、1回直して指摘が残れば、修正を繰り返さず警告として人に委ねる。
+ */
+export const MAX_ROADMAP_AUTO_REVIEW_REVISIONS = 1;
+
+/** 生成元に応じた自動修正の上限回数を返す。 */
+export function maxAutoReviewRevisions(fromRoadmap: boolean): number {
+  return fromRoadmap ? MAX_ROADMAP_AUTO_REVIEW_REVISIONS : MAX_AUTO_REVIEW_REVISIONS;
+}
+
+/** レビュー観点ごとの指示文。プロンプトには生成元に応じた観点だけを載せる。 */
+const WORKFLOW_REVIEW_ASPECT_GUIDES: Record<WorkflowReviewAspect, string> = {
+  serializedParallelizable: '並列に進められるはずのタスクが、dependsOnで不要に直列にされていないか',
+  missingConvergence: '並列に走らせたタスクの結果を統合・レビューする合流タスクがあるか',
+  doneNotObservable:
+    '各タスクのdoneが、外から（ファイルの有無・テストの合否等で）機械的に判定できる条件に' +
+    'なっているか。「完了したと感じたら」のような主観的な表現になっていないか',
+  goalMismatch:
+    'ゴールに対してタスクが過不足なく分解されているか（ゴールの一部がどのタスクにも' +
+    '含まれていない、逆にゴールに無い作業が混ざっている等）',
+  overFragmented:
+    '設計・API・UI・テスト・文書・ファイル・roleだけを理由に、同じ成果が複数タスクへ分断されていないか',
+  unsupportedAssumption: 'evidenceで裏付けられない構成・仕様・実装を事実として断定していないか',
+  missingEvidence: '各タスクのevidenceが具体的で、outcomeとpromptの判断を支持しているか',
+  dependencyMismatch: 'dependsOnが成果の受け渡しに必要十分で、不要な直列化や依存漏れがないか',
+  missingRisk: 'assumptionsやタスクのrisksへ未確定事項が残されているか',
+};
+
+/**
+ * ロードマップ経路の修正が、ロードマップで決まったタスク構成（id・分け方・dependsOn・issue）を
+ * 変えていないかを調べ、変わった点を返す（Issue #1652）。空配列なら構成は一致している。
+ * タスクとdependsOnの並び順は問わない。
+ */
+export function findRoadmapTaskChanges(
+  before: readonly WorkflowTask[],
+  after: readonly WorkflowTask[],
+): string[] {
+  const changes: string[] = [];
+  const afterById = new Map(after.map((task) => [task.id, task]));
+  const beforeIds = new Set(before.map((task) => task.id));
+  for (const task of before) {
+    const revised = afterById.get(task.id);
+    if (revised === undefined) {
+      changes.push(`タスク ${task.id} が消えました`);
+      continue;
+    }
+    const deps = [...task.dependsOn].sort().join(',');
+    const revisedDeps = [...revised.dependsOn].sort().join(',');
+    if (deps !== revisedDeps) {
+      changes.push(
+        `タスク ${task.id} のdependsOnが [${deps}] から [${revisedDeps}] へ変わりました`,
+      );
+    }
+    if (task.issue !== revised.issue) {
+      changes.push(
+        `タスク ${task.id} のissueが ${task.issue ?? 'なし'} から ${revised.issue ?? 'なし'} へ変わりました`,
+      );
+    }
+  }
+  for (const task of after) {
+    if (!beforeIds.has(task.id)) {
+      changes.push(`タスク ${task.id} が増えました`);
+    }
+  }
+  return changes;
+}
+
+/**
  * レビューセッションへ渡すプロンプト（design.md §16.28）。
  *
  * `goal`と`yaml`はどちらも外部由来テキストとして`formatUntrusted`で囲う
@@ -1696,14 +1789,22 @@ export const MAX_AUTO_REVIEW_REVISIONS = 3;
  * §16.28「権限の与え方」）。ここでもプロンプトの指示（「書き換えない」）は補助でしかなく、
  * 実体は起動設定そのもの（design.md §16.9と同じ考え方）。
  */
-function buildWorkflowReviewPrompt(goal: string, yaml: string): string {
+function buildWorkflowReviewPrompt(goal: string, yaml: string, fromRoadmap: boolean): string {
   const nonce = randomUUID();
+  const aspects = workflowReviewAspects(fromRoadmap);
+  const exampleAspect: WorkflowReviewAspect = fromRoadmap ? 'doneNotObservable' : 'overFragmented';
   const parts = [
     'あなたはワークフロー定義（YAML）のレビュー担当です。次のゴールと、既に生成された' +
-      'ワークフロー定義（YAML）を読み、タスクへの分解と実行契約が妥当かを下記9つの観点だけで' +
+      `ワークフロー定義（YAML）を読み、タスクへの分解と実行契約が妥当かを下記${aspects.length}つの観点だけで` +
       '確認してください。',
     'あなた自身はタスクを実行せず、ファイルを書き換えることもしません（読み取りと' +
       'レビューのみ）。',
+    ...(fromRoadmap
+      ? [
+          'このワークフローはロードマップIssueから生成しました。タスクの分け方・dependsOn・' +
+            'issueはロードマップで確定済みのため、それらの変更を求める指摘はしないでください。',
+        ]
+      : []),
     '',
     `## ゴール\n${formatUntrusted(goal, {
       id: 'reviewer',
@@ -1721,26 +1822,14 @@ function buildWorkflowReviewPrompt(goal: string, yaml: string): string {
       nonce,
     })}`,
     '',
-    '## レビューの観点（この9つだけを見ること。それ以外の指摘はしないこと）',
-    '- serializedParallelizable: 並列に進められるはずのタスクが、dependsOnで不要に直列に' +
-      'されていないか',
-    '- missingConvergence: 並列に走らせたタスクの結果を統合・レビューする合流タスクが' + 'あるか',
-    '- doneNotObservable: 各タスクのdoneが、外から（ファイルの有無・テストの合否等で）' +
-      '機械的に判定できる条件になっているか。「完了したと感じたら」のような主観的な' +
-      '表現になっていないか',
-    '- goalMismatch: ゴールに対してタスクが過不足なく分解されているか（ゴールの一部が' +
-      'どのタスクにも含まれていない、逆にゴールに無い作業が混ざっている等）',
-    '- overFragmented: 設計・API・UI・テスト・文書・ファイル・roleだけを理由に、同じ成果が複数タスクへ分断されていないか',
-    '- unsupportedAssumption: evidenceで裏付けられない構成・仕様・実装を事実として断定していないか',
-    '- missingEvidence: 各タスクのevidenceが具体的で、outcomeとpromptの判断を支持しているか',
-    '- dependencyMismatch: dependsOnが成果の受け渡しに必要十分で、不要な直列化や依存漏れがないか',
-    '- missingRisk: assumptionsやタスクのrisksへ未確定事項が残されているか',
+    `## レビューの観点（この${aspects.length}つだけを見ること。それ以外の指摘はしないこと）`,
+    ...aspects.map((aspect) => `- ${aspect}: ${WORKFLOW_REVIEW_ASPECT_GUIDES[aspect]}`),
     '',
     '## 出力形式（厳守）',
     '指摘が無ければ空配列 `[]` だけを出力すること。指摘があれば、次の形のJSON配列だけを' +
       '出力すること（前置き・説明文・コードフェンスなど、JSON以外の文字は一切含めない' +
       'こと）:',
-    `[${JSON.stringify({ aspect: 'overFragmented', taskIds: ['T1'], message: '指摘の内容' })}]`,
+    `[${JSON.stringify({ aspect: exampleAspect, taskIds: ['T1'], message: '指摘の内容' })}]`,
   ];
   return parts.join('\n');
 }
@@ -1755,6 +1844,7 @@ function buildWorkflowRevisionPrompt(
   goal: string,
   yaml: string,
   findings: readonly WorkflowReviewFinding[],
+  fromRoadmap: boolean,
 ): string {
   const nonce = randomUUID();
   const findingsText = findings
@@ -1795,6 +1885,13 @@ function buildWorkflowRevisionPrompt(
     '',
     '現在のYAMLが持つゴール・依存関係・安全な既定値を不必要に削らず、レビュー指摘の解消に' +
       '必要な最小限の変更だけを行ってください。',
+    ...(fromRoadmap
+      ? [
+          'このワークフローはロードマップIssueから生成しました。タスクのid・分け方・dependsOn・' +
+            'issueはロードマップで確定済みのため変えないでください。タスクの追加・削除・統合・' +
+            '分割もしないでください。変えた修正結果は適用されません。',
+        ]
+      : []),
     OUTPUT_FORMAT_INSTRUCTION,
   ].join('\n');
 }
@@ -1818,10 +1915,11 @@ function extractJsonArrayFromResponse(response: string): string {
   return response.trim();
 }
 
-function isReviewAspect(value: unknown): value is WorkflowReviewAspect {
-  return (
-    typeof value === 'string' && (WORKFLOW_REVIEW_ASPECTS as readonly string[]).includes(value)
-  );
+function isReviewAspect(
+  value: unknown,
+  aspects: readonly WorkflowReviewAspect[],
+): value is WorkflowReviewAspect {
+  return typeof value === 'string' && (aspects as readonly string[]).includes(value);
 }
 
 /**
@@ -1834,7 +1932,11 @@ function isReviewAspect(value: unknown): value is WorkflowReviewAspect {
  * 文字列であり、`message`はそのままログ・警告欄へ表示する。`sanitizeInlineText`
  * （design.md §16.24）を通してから使う。
  */
-function parseReviewFindings(response: string, log?: Logger): WorkflowReviewFinding[] | undefined {
+function parseReviewFindings(
+  response: string,
+  aspects: readonly WorkflowReviewAspect[],
+  log?: Logger,
+): WorkflowReviewFinding[] | undefined {
   const jsonText = extractJsonArrayFromResponse(response);
   if (Buffer.byteLength(jsonText, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
     log?.warn('[planner] レビュー応答が大きすぎるため解析しませんでした');
@@ -1858,7 +1960,7 @@ function parseReviewFindings(response: string, log?: Logger): WorkflowReviewFind
       continue;
     }
     const record = item as Record<string, unknown>;
-    if (!isReviewAspect(record.aspect)) {
+    if (!isReviewAspect(record.aspect, aspects)) {
       continue;
     }
     if (typeof record.message !== 'string' || record.message.trim() === '') {
@@ -1888,7 +1990,8 @@ function parseReviewFindings(response: string, log?: Logger): WorkflowReviewFind
  * 生成したワークフロー定義（YAML）を、別の読み取り専用セッションでレビューさせる
  * （design.md §16.28、roadmap W3、Issue #337）。
  *
- * 観点は`WORKFLOW_REVIEW_ASPECTS`の9つ。結果は呼び出し側（`extension.ts`）が修正
+ * 観点は`WORKFLOW_REVIEW_ASPECTS`の9つ（ロードマップから生成した場合は`ROADMAP_REVIEW_ASPECTS`の
+ * 4つ、Issue #1652）。結果は呼び出し側（`extension.ts`）が修正
  * セッションへ渡し、指摘が残らなくなるまで再レビューする。この関数自身はYAMLを書き換えない。
  *
  * **読み取り専用であることは、プロンプトの指示ではなく起動設定で担保する。**
@@ -1909,7 +2012,8 @@ export async function reviewWorkflowPlan(
   input: ReviewWorkflowPlanInput,
 ): Promise<ReviewWorkflowPlanResult> {
   const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
-  const prompt = buildWorkflowReviewPrompt(input.goal, input.yaml);
+  const fromRoadmap = input.fromRoadmap === true;
+  const prompt = buildWorkflowReviewPrompt(input.goal, input.yaml, fromRoadmap);
   try {
     // 1ターンで閉じるため、タブを開いても中身を読む前に消える。開かずに走らせる（Issue #1440）
     const response = await runSingleTurnTask(input.host, input.provider, sessionInput, prompt, {
@@ -1918,7 +2022,7 @@ export async function reviewWorkflowPlan(
       openPanel: false,
       label: 'レビューセッション',
     });
-    const findings = parseReviewFindings(response, input.log);
+    const findings = parseReviewFindings(response, workflowReviewAspects(fromRoadmap), input.log);
     return findings === undefined
       ? { findings: [], error: 'レビュー応答をJSON配列として解釈できませんでした' }
       : { findings, error: undefined };
@@ -1942,7 +2046,8 @@ export async function reviseWorkflowPlan(
   input: ReviseWorkflowPlanInput,
 ): Promise<ReviseWorkflowPlanResult> {
   const sessionInput = buildPlannerSessionInput(input.provider, input.cwd);
-  const prompt = buildWorkflowRevisionPrompt(input.goal, input.yaml, input.findings);
+  const fromRoadmap = input.fromRoadmap === true;
+  const prompt = buildWorkflowRevisionPrompt(input.goal, input.yaml, input.findings, fromRoadmap);
   try {
     // レビューと同じ理由でタブを開かない（Issue #1440）
     const response = await runSingleTurnTask(input.host, input.provider, sessionInput, prompt, {
@@ -1960,6 +2065,20 @@ export async function reviseWorkflowPlan(
           .map((error) => error.message)
           .join(' / ')}`,
       };
+    }
+    if (fromRoadmap) {
+      // ロードマップで確定したタスク構成を変えた修正は、指示に反しているので適用しない（Issue #1652）
+      const original = tryParseAndValidate(input.yaml);
+      const changes =
+        original.ok && original.definition !== undefined
+          ? findRoadmapTaskChanges(original.definition.tasks, attempt.definition.tasks)
+          : ['修正前のYAMLを解釈できないため、タスク構成を比較できません'];
+      if (changes.length > 0) {
+        return {
+          ok: false,
+          error: `修正がロードマップのタスク構成（id・dependsOn・issue）を変えたため適用しませんでした: ${changes.join(' / ')}`,
+        };
+      }
     }
     return {
       ok: true,

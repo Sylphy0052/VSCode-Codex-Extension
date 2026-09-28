@@ -26,11 +26,17 @@ import {
   buildWorkspaceSummary,
   detectSecurityWarnings,
   extractYamlFromResponse,
+  findRoadmapTaskChanges,
   locateSecurityWarningLine,
+  MAX_AUTO_REVIEW_REVISIONS,
+  maxAutoReviewRevisions,
   planWorkflow,
   resolveUniqueFileName,
   reviewTaskPullRequest,
   reviewWorkflowPlan,
+  reviseWorkflowPlan,
+  ROADMAP_REVIEW_ASPECTS,
+  WORKFLOW_REVIEW_ASPECTS,
   sendSingleTurn,
   slugifyGoal,
   validateSlugInput,
@@ -1454,6 +1460,141 @@ describe('reviewWorkflowPlan（design.md §16.28、roadmap W3、Issue #337）', 
     expect(prompt).toContain('missingConvergence');
     expect(prompt).toContain('doneNotObservable');
     expect(prompt).toContain('goalMismatch');
+  });
+
+  it('ゴール入力からの生成では9観点すべてをレビューの指示として書く（Issue #1652）', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('下記9つの観点だけで');
+    for (const aspect of WORKFLOW_REVIEW_ASPECTS) {
+      expect(prompt).toContain(`- ${aspect}: `);
+    }
+  });
+
+  it('ロードマップからの生成では4観点だけをレビューの指示として書く（Issue #1652）', async () => {
+    const host = new FakePlannerHost(['[]']);
+    await reviewWorkflowPlan({ ...reviewBaseInput, host, fromRoadmap: true });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('下記4つの観点だけで');
+    for (const aspect of ROADMAP_REVIEW_ASPECTS) {
+      expect(prompt).toContain(`- ${aspect}: `);
+    }
+    for (const aspect of [
+      'serializedParallelizable',
+      'missingConvergence',
+      'goalMismatch',
+      'overFragmented',
+      'dependencyMismatch',
+    ]) {
+      expect(prompt).not.toContain(aspect);
+    }
+  });
+
+  it('ロードマップからの生成では、絞った観点の外の指摘を捨てる（Issue #1652）', async () => {
+    const response = JSON.stringify([
+      { aspect: 'dependencyMismatch', taskIds: ['T1'], message: '依存が足りません' },
+      { aspect: 'doneNotObservable', taskIds: ['T1'], message: 'doneが主観的です' },
+    ]);
+    const host = new FakePlannerHost([response]);
+    const result = await reviewWorkflowPlan({ ...reviewBaseInput, host, fromRoadmap: true });
+    expect(result.findings).toEqual([
+      { aspect: 'doneNotObservable', taskIds: ['T1'], message: 'doneが主観的です' },
+    ]);
+  });
+});
+
+describe('自動修正の上限（Issue #1652）', () => {
+  it('ロードマップからの生成では修正を1回までにする', () => {
+    expect(maxAutoReviewRevisions(true)).toBe(1);
+  });
+
+  it('ゴール入力からの生成では従来どおり3回まで', () => {
+    expect(maxAutoReviewRevisions(false)).toBe(MAX_AUTO_REVIEW_REVISIONS);
+    expect(MAX_AUTO_REVIEW_REVISIONS).toBe(3);
+  });
+});
+
+describe('reviseWorkflowPlan: ロードマップ経路のタスク構成の固定（Issue #1652）', () => {
+  const roadmapYaml = (overrides: { t2Deps?: string; t2Issue?: number; done?: string } = {}) =>
+    [
+      'version: 1',
+      'name: ロードマップ',
+      'tasks:',
+      '  - id: T1',
+      '    prompt: 何かする',
+      `    done: ${overrides.done ?? '終わっている'}`,
+      '    issue: 10',
+      '  - id: T2',
+      '    prompt: 次をする',
+      '    done: 終わっている',
+      `    dependsOn: [${overrides.t2Deps ?? 'T1'}]`,
+      `    issue: ${overrides.t2Issue ?? 11}`,
+    ].join('\n');
+  const reviseBaseInput = {
+    goal: 'ゴール',
+    yaml: roadmapYaml(),
+    findings: [{ aspect: 'doneNotObservable' as const, taskIds: ['T1'], message: 'doneが主観的' }],
+    provider: 'codex' as const,
+    cwd: '/repo',
+    log: fakeLogger,
+    baseline,
+  };
+
+  it('修正プロンプトに、id・dependsOn・issueを変えない指示を載せる', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ done: 'test.txtがある' })]);
+    await reviseWorkflowPlan({ ...reviseBaseInput, host, fromRoadmap: true });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('ロードマップIssueから生成しました');
+  });
+
+  it('ゴール入力からの生成では、構成を固定する指示を載せない', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ done: 'test.txtがある' })]);
+    await reviseWorkflowPlan({ ...reviseBaseInput, host });
+    const prompt = host.sessions[0]?.runLoopCalls[0]?.initialPrompt ?? '';
+    expect(prompt).not.toContain('ロードマップIssueから生成しました');
+  });
+
+  it('タスク構成を保った修正は適用する', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ done: 'test.txtがある' })]);
+    const result = await reviseWorkflowPlan({ ...reviseBaseInput, host, fromRoadmap: true });
+    expect(result.ok).toBe(true);
+  });
+
+  it('dependsOnを変えた修正は適用しない', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ t2Deps: '' })]);
+    const result = await reviseWorkflowPlan({ ...reviseBaseInput, host, fromRoadmap: true });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? '' : result.error).toContain('T2 のdependsOn');
+  });
+
+  it('issueを変えた修正は適用しない', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ t2Issue: 99 })]);
+    const result = await reviseWorkflowPlan({ ...reviseBaseInput, host, fromRoadmap: true });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? '' : result.error).toContain('T2 のissue');
+  });
+
+  it('ゴール入力からの生成では、構成が変わる修正も従来どおり適用する', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ t2Deps: '' })]);
+    const result = await reviseWorkflowPlan({ ...reviseBaseInput, host });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('findRoadmapTaskChanges（Issue #1652）', () => {
+  const task = (id: string, dependsOn: string[], issue: number | undefined) =>
+    ({ id, dependsOn, issue }) as unknown as Parameters<typeof findRoadmapTaskChanges>[0][number];
+
+  it('並び順だけの違いは変更とみなさない', () => {
+    const before = [task('T1', [], 1), task('T2', ['T1', 'T0'], 2), task('T0', [], undefined)];
+    const after = [task('T0', [], undefined), task('T2', ['T0', 'T1'], 2), task('T1', [], 1)];
+    expect(findRoadmapTaskChanges(before, after)).toEqual([]);
+  });
+
+  it('タスクの増減を検出する', () => {
+    const changes = findRoadmapTaskChanges([task('T1', [], 1)], [task('T2', [], 1)]);
+    expect(changes).toEqual(['タスク T1 が消えました', 'タスク T2 が増えました']);
   });
 });
 
