@@ -1,3 +1,4 @@
+import { MAX_RELOAD_RESUMES } from './reloadResumePrompt';
 import { escalateJudgingGatesOnReload } from './taskRunGates';
 import { cancelOpenQuestions } from './taskRunQuestions';
 import {
@@ -30,9 +31,6 @@ export const RELOAD_HALT_REASON =
 
 /** 再読み込みの後に同じ会話を開き直す工程の一時停止の理由（Issue #1670）。 */
 export const RELOAD_PAUSE_REASON = '拡張機能の再読み込みで工程セッションが終わった。同じ会話を開き直して続ける';
-
-/** 同じ実行回を再読み込みの後に開き直す上限（Issue #1670）。超えたら開き直さずに止める。 */
-export const MAX_RELOAD_RESUMES = 3;
 
 /**
  * タスクごとに観測した外部の状態。記録が無い・取得に失敗したものは`undefined`。`undefined`と
