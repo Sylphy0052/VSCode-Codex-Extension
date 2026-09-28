@@ -147,11 +147,22 @@ async function readHeadDigestUntil(
   }
 }
 
-/** 先頭 `bytes` バイトのSHA-256（Issue #1466）。ファイルがそれより短い・読めなければ `undefined`。 */
+/**
+ * 先頭 `bytes` バイトのSHA-256（Issue #1466）。ファイルがそれより短い・読めなければ `undefined`。
+ *
+ * `bytes`は索引ファイルから来た値で上限を検証していない（Issue #1648）。読む前に
+ * 実ファイルのサイズと比べ、足りなければ読まずに`undefined`を返す。壊れた・改ざんされた
+ * `bytes`で実ファイルが短いケースの無駄な読み込みを避けるだけで、`bytes`と実ファイルが
+ * 両方巨大なケースは変わらず読む（打ち切る根拠が無いため）。
+ */
 async function digestHead(filePath: string, bytes: number): Promise<string | undefined> {
   let handle: fs.FileHandle | undefined;
   try {
     handle = await fs.open(filePath, 'r');
+    const stat = await handle.stat();
+    if (stat.size < bytes) {
+      return undefined;
+    }
     const hash = createHash('sha256');
     const buffer = Buffer.allocUnsafe(Math.min(bytes, 64 * 1024));
     let offset = 0;
