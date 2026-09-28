@@ -1,5 +1,5 @@
 import type { SessionSummary } from '../codex/types';
-import type { FileSystemPort } from '../session/ports';
+import type { FileSystemPort, HeadDigest } from '../session/ports';
 import {
   isWithinAny,
   MTIME_CONCURRENCY_LIMIT,
@@ -191,19 +191,24 @@ export class ClaudeSessionStore {
       if (previous !== undefined && previous.mtimeMs === stat.mtimeMs) {
         return undefined;
       }
-      if (this.canSkipHeadRead(previous, stat)) {
-        // 索引に既にあるファイルへの通常の追記（サイズ増加・inode不変）。先頭は変わらない
-        // ため読み直さず、mtime/size/ino/updatedAtだけ更新する（Issue #1460）
+      if (
+        this.canSkipHeadRead(previous, stat) &&
+        (await this.headUnchanged(filePath, previous.head))
+      ) {
+        // 索引に既にあるファイルへの通常の追記（サイズ増加・inode不変・先頭の範囲が
+        // 同じ内容）。先頭は変わらないため読み直さず、mtime/size/ino/updatedAtだけ
+        // 更新する（Issue #1460, #1466）
         cwd = previous.session.cwd;
         this.index.set({
           filePath,
           mtimeMs: stat.mtimeMs,
           size: stat.size,
           ino: stat.ino,
+          head: previous.head,
           session: { ...previous.session, updatedAt: new Date(stat.mtimeMs).toISOString() },
         });
       } else {
-        const meta = await this.readHeadMeta(filePath);
+        const { meta, head } = await this.readHeadMeta(filePath);
         // 裏の指示だけのセッションは索引に入れない（Issue #1145）。`/usage` を打つたびに
         // 履歴が1件増えるのを防ぐ
         cwd = meta?.cwd;
@@ -215,6 +220,7 @@ export class ClaudeSessionStore {
             mtimeMs: stat.mtimeMs,
             size: stat.size,
             ino: stat.ino,
+            head,
             session: {
               id,
               provider: 'claude',
@@ -261,6 +267,10 @@ export class ClaudeSessionStore {
    * （Issue #1460）。新しいファイル・サイズ縮小（切り詰め）・inode変化（同じパスへの
    * 置き換え）・旧schema（sizeが無い）のいずれかなら false を返し、呼び出し側に
    * 先頭を読み直させる。
+   *
+   * true でも、同じinodeのまま書き直された場合（途中の行を消した後の追記でサイズが
+   * 戻った等）を区別できない。呼び出し側は続けて `headUnchanged` で先頭の範囲を
+   * 照合する（Issue #1466）。
    */
   private canSkipHeadRead(
     previous: ClaudeSessionIndexEntry | undefined,
@@ -276,6 +286,19 @@ export class ClaudeSessionStore {
       return false;
     }
     return true;
+  }
+
+  /**
+   * 素性を読み終えた先頭の範囲が、索引を作ったときと同じ内容か（Issue #1466）。
+   * 範囲を持たないエントリ（旧schema・範囲が確定しなかった）や、照合できないポート
+   * では false を返し、呼び出し側に先頭を読み直させる。
+   */
+  private async headUnchanged(filePath: string, head: HeadDigest | undefined): Promise<boolean> {
+    const digestHead = this.fs.digestHead?.bind(this.fs);
+    if (head === undefined || digestHead === undefined) {
+      return false;
+    }
+    return (await digestHead(filePath, head.bytes)) === head.sha256;
   }
 
   private listFromIndex(options: ListOptions): ListResult {
@@ -406,7 +429,7 @@ export class ClaudeSessionStore {
     if (indexed?.filePath === filePath && indexed.session.cwd !== undefined) {
       return indexed.session.cwd;
     }
-    return (await this.readHeadMeta(filePath))?.cwd;
+    return (await this.readHeadMeta(filePath)).meta?.cwd;
   }
 
   /** 初回・キャッシュ不整合時だけtranscriptを照合する。 */
@@ -543,15 +566,31 @@ export class ClaudeSessionStore {
    *
    * `readHeadUntil` を持たないポート（テストのフェイク等）では、これまでどおり
    * 先頭 `HEAD_LINES` 行を読んでから解釈する。どちらの経路でも結果は同じ。
+   *
+   * `readHeadDigestUntil` を持つポートでは、読んだ範囲のバイト数とハッシュも返す
+   * （Issue #1466）。`head` が `undefined` のエントリは次の追記で先頭を読み直す。
    */
-  private async readHeadMeta(filePath: string): Promise<TranscriptMeta | undefined> {
+  private async readHeadMeta(
+    filePath: string,
+  ): Promise<{ meta: TranscriptMeta | undefined; head: HeadDigest | undefined }> {
+    const readHeadDigestUntil = this.fs.readHeadDigestUntil?.bind(this.fs);
+    if (readHeadDigestUntil !== undefined) {
+      const reader = createTranscriptHeadReader();
+      const head = await readHeadDigestUntil(filePath, HEAD_LINES, HEAD_MAX_BYTES, (line) =>
+        reader.push(line),
+      );
+      return { meta: reader.result(), head };
+    }
     const readHeadUntil = this.fs.readHeadUntil?.bind(this.fs);
     if (readHeadUntil === undefined) {
-      return parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES));
+      return {
+        meta: parseTranscriptHead(await this.fs.readHead(filePath, HEAD_LINES)),
+        head: undefined,
+      };
     }
     const reader = createTranscriptHeadReader();
     await readHeadUntil(filePath, HEAD_LINES, HEAD_MAX_BYTES, (line) => reader.push(line));
-    return reader.result();
+    return { meta: reader.result(), head: undefined };
   }
 
   /**
@@ -565,7 +604,7 @@ export class ClaudeSessionStore {
     id: string,
     stat: { mtimeMs: number | undefined; size: number | undefined; ino: number | undefined },
   ): Promise<ClaudeSessionIndexEntry | undefined | typeof BACKGROUND_ONLY> {
-    const meta = await this.readHeadMeta(filePath);
+    const { meta, head } = await this.readHeadMeta(filePath);
     if (meta === undefined) {
       return undefined;
     }
@@ -577,6 +616,7 @@ export class ClaudeSessionStore {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       ino: stat.ino,
+      head,
       session: {
         id,
         provider: 'claude' as const,

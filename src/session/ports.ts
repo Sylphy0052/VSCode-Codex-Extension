@@ -2,6 +2,15 @@ import type { ThreadListOutcome, ThreadListPageConsumer } from '../codex/threadL
 import type { SessionMeta } from '../codex/types';
 
 /**
+ * ファイル先頭の、素性を読み終えた範囲（Issue #1466）。`bytes` は範囲のバイト数、
+ * `sha256` はその範囲の内容のSHA-256（16進）。
+ */
+export interface HeadDigest {
+  bytes: number;
+  sha256: string;
+}
+
+/**
  * ファイルアクセスの抽象。実体は node:fs だが、テストではインメモリ実装に差し替える。
  * VSCode APIには依存させない（unit testを軽く保つため）。
  */
@@ -60,6 +69,27 @@ export interface FileSystemPort {
     maxBytes: number,
     isComplete: (line: string) => boolean,
   ): Promise<string[]>;
+  /**
+   * `readHeadUntil` と同じ条件で先頭を読み、読んだ範囲のバイト数とSHA-256を返す
+   * （Issue #1466）。
+   *
+   * 範囲が確定しない（打ち切り条件に当たる前にファイル末尾へ達した・読み込みに
+   * 失敗した）ときは `undefined` を返す。末尾まで読んだ範囲は、その後の追記で
+   * 先頭の素性が揃う可能性があるため、照合の基準にしない。
+   *
+   * 任意実装。持たないポートでは `readHeadUntil` へ退避し、先頭の読み直しを省かない。
+   */
+  readHeadDigestUntil?(
+    filePath: string,
+    maxLines: number,
+    maxBytes: number,
+    isComplete: (line: string) => boolean,
+  ): Promise<HeadDigest | undefined>;
+  /**
+   * 先頭 `bytes` バイトのSHA-256を返す（Issue #1466）。ファイルが `bytes` より短い・
+   * 読めないときは `undefined`。`readHeadDigestUntil` が返した範囲の照合に使う。
+   */
+  digestHead?(filePath: string, bytes: number): Promise<string | undefined>;
   /**
    * ファイル全体をbase64で読む。会話に出す画像に使う。
    *
