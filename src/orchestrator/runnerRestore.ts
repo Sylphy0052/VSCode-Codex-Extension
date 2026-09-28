@@ -1,6 +1,8 @@
 import {
   integrationBranchName,
   integrationWorktreePath,
+  type MergeAttempt,
+  parseMergeAttempt,
   reconcileMergingTaskOnReload,
 } from './integration';
 import { resolvePseudoState } from './runnerWorkingDirectory';
@@ -274,6 +276,7 @@ async function reconcileRestoredTaskStates(
           p.runId,
           id,
           self.deps.git,
+          parseMergeAttempt(t.mergeAttempt, id),
         );
         if (outcome === 'done') {
           state = 'done';
@@ -370,6 +373,18 @@ async function resolveRestoredPseudoState(
   const failure = `疑似worktreeの統合先を復元できませんでした: ${resolved.message}`;
   self.deps.log.warn(`[workflow ${p.runId}] ${failure}`);
   return { pseudo: undefined, failure };
+}
+
+/** 永続化された統合の試行（Issue #1678）を検証して読み戻す。不正な値は捨てる。 */
+function restoreMergeAttempts(p: PersistedRun): Map<string, MergeAttempt> {
+  const attempts = new Map<string, MergeAttempt>();
+  for (const [id, t] of Object.entries(p.tasks)) {
+    const attempt = parseMergeAttempt(t.mergeAttempt, id);
+    if (attempt !== undefined) {
+      attempts.set(id, attempt);
+    }
+  }
+  return attempts;
 }
 
 async function rebuildLiveRun(
@@ -484,6 +499,7 @@ async function rebuildLiveRun(
     launchingTasks: new Set(),
     stopping: false,
     mergeResolutions: new Map(),
+    mergeAttempts: restoreMergeAttempts(p),
     createdTaskIssues: new Map(),
     // 復元した実行にはオーケストレーターセッションを作り直さない（会話は復元できない。
     // design.md §16.23「永続化と復元」）

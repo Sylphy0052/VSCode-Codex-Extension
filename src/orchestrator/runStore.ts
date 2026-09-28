@@ -1,3 +1,4 @@
+import type { MergeAttempt } from './integration';
 import type { TaskFailureReason, TaskState } from './runState';
 import type { MementoLike } from '../util/memento';
 import { SerialQueue } from './serialQueue';
@@ -45,6 +46,12 @@ export interface PersistedTaskState {
   pullRequestUrl: string | undefined;
   /** cleanupの結果。旧形式との互換性のため省略可能にする。 */
   cleanupStatus?: 'pending' | 'completed' | 'failed';
+  /**
+   * 統合の直近の試行（`integration.ts`の`MergeAttempt`、Issue #1678）。統合ブランチのrefを
+   * 動かす前に保存し、リロード後はSHAで取り込み済みかを判定する。読むときは
+   * `parseMergeAttempt`で検証する。旧形式との互換性のため省略可能にする。
+   */
+  mergeAttempt?: MergeAttempt;
 }
 
 export interface PersistedRun {
