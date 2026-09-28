@@ -2071,7 +2071,15 @@ export async function reviseWorkflowPlan(
       const original = tryParseAndValidate(input.yaml);
       const changes =
         original.ok && original.definition !== undefined
-          ? findRoadmapTaskChanges(original.definition.tasks, attempt.definition.tasks)
+          ? [
+              ...findRoadmapTaskChanges(original.definition.tasks, attempt.definition.tasks),
+              // 完了時のチェックの書き戻しはroadmap / roadmapChunkを頼りにする（design.md §16.19）
+              ...(original.definition.roadmap !== attempt.definition.roadmap ||
+              JSON.stringify(original.definition.roadmapChunk) !==
+                JSON.stringify(attempt.definition.roadmapChunk)
+                ? ['roadmap / roadmapChunkが変わりました']
+                : []),
+            ]
           : ['修正前のYAMLを解釈できないため、タスク構成を比較できません'];
       if (changes.length > 0) {
         return {

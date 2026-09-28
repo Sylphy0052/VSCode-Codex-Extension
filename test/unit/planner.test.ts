@@ -1516,9 +1516,12 @@ describe('自動修正の上限（Issue #1652）', () => {
 });
 
 describe('reviseWorkflowPlan: ロードマップ経路のタスク構成の固定（Issue #1652）', () => {
-  const roadmapYaml = (overrides: { t2Deps?: string; t2Issue?: number; done?: string } = {}) =>
+  const roadmapYaml = (
+    overrides: { t2Deps?: string; t2Issue?: number; done?: string; noRoadmap?: boolean } = {},
+  ) =>
     [
       'version: 1',
+      ...(overrides.noRoadmap === true ? [] : ['roadmap: "docs/roadmap.md"']),
       'name: ロードマップ',
       'tasks:',
       '  - id: T1',
@@ -1573,6 +1576,13 @@ describe('reviseWorkflowPlan: ロードマップ経路のタスク構成の固�
     const result = await reviseWorkflowPlan({ ...reviseBaseInput, host, fromRoadmap: true });
     expect(result.ok).toBe(false);
     expect(result.ok ? '' : result.error).toContain('T2 のissue');
+  });
+
+  it('roadmapの参照を落とした修正は適用しない', async () => {
+    const host = new FakePlannerHost([roadmapYaml({ noRoadmap: true })]);
+    const result = await reviseWorkflowPlan({ ...reviseBaseInput, host, fromRoadmap: true });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? '' : result.error).toContain('roadmap / roadmapChunkが変わりました');
   });
 
   it('ゴール入力からの生成では、構成が変わる修正も従来どおり適用する', async () => {
