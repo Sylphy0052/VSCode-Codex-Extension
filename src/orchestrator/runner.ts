@@ -100,6 +100,7 @@ import {
   resumeFromApproval,
   retryTask as retryTaskState,
   continueTask as continueTaskState,
+  skipPendingWhileHalted,
   type RunState,
   type TaskFailureReason,
   type TaskRunState,
@@ -4063,6 +4064,8 @@ export class WorkflowRunner {
       }
       current.failureRecovery = undefined;
       current.failureRecoveryExhausted = true;
+      // 復旧待ちの間に`add_task`で足された`pending`が残ると、runが終わらない（Issue #1663）
+      current.runState = skipPendingWhileHalted(current.runState);
       current.warnings.push({
         kind: 'orchestratorFailureRecoveryTimedOut',
         taskId: undefined,
@@ -4078,6 +4081,7 @@ export class WorkflowRunner {
       body: [
         `タスク ${failedTaskIds.join(', ')} が失敗しました。runは復旧計画を待っています。`,
         '10分以内に問題の原因を確認し、update_task、add_task、remove_task、update_task_dependencies、update_task_promptで計画を調整してください。同じretry_taskだけを繰り返さないでください。',
+        '失敗したタスクが残っている間は、新しいタスクを追加しても開始されません。失敗したタスクを別のタスクで引き継ぐときは、add_taskのsupersedesに失敗したタスクidを渡して置き換えてください（allow付きのタスクも置き換えられます）。',
         '計画変更は人の確認なしに適用され、ワークフロー画面へライブ反映されます。',
       ].join('\n'),
     });

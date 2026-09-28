@@ -122,7 +122,9 @@ export function getRunOutcome(run: RunState): RunOutcome {
     if (s.state === 'blocked') {
       anyBlocked = true;
     }
-    if (s.state === 'skipped') {
+    // 後継へ置き換えた（`superseded`）タスクは作業を後継が引き継ぐため、中断に数えない
+    // （Issue #1663）。後継が`done`なら`succeeded`になりうる
+    if (s.state === 'skipped' && s.failure?.kind !== 'superseded') {
       anySkipped = true;
     }
   }
