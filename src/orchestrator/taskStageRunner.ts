@@ -266,6 +266,23 @@ function appendPrefix(first: string | undefined, second: string): string {
   return first === undefined ? second : `${first}\n\n${second}`;
 }
 
+/**
+ * 報告なしに終わった工程の関門へ載せる理由（Issue #1676）。
+ *
+ * `maxReached`とだけ書くと、関門を判定するReflexが「ツール呼び出しの上限」と読み違え、
+ * モデルを上げる・ツール呼び出しを制限するといった的外れな対処を勧めた。何の回数かを書き添える。
+ */
+function unreportedFinishDetail(reason: LoopStopReason, maxIterations: number): string {
+  const base = `工程セッションが報告なしに終わりました（${reason}）`;
+  if (reason !== 'maxReached') {
+    return base;
+  }
+  return (
+    `${base}。拡張機能が工程セッションへ送る指示（初回の指示と「続けて」）の回数が` +
+    `上限${String(maxIterations)}回に達した。ツール呼び出しの回数ではない`
+  );
+}
+
 export class TaskStageRunner {
   private readonly live = new Map<string, LiveStageSession>();
   /** 開始処理の途中（mergeの鍵・worktree・セッション起動の`await`中）のタスク。二重起動を防ぐ。 */
@@ -1218,7 +1235,7 @@ export class TaskStageRunner {
           entry.runId,
           entry.ref.taskId,
           'needsAction',
-          `工程セッションが報告なしに終わりました（${reason}）`,
+          unreportedFinishDetail(reason, this.deps.maxIterations),
         );
         this.release(entry, { dispose: false });
       });
