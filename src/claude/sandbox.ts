@@ -125,6 +125,9 @@ export function buildClaudeSandboxSettings(
  * 一致はコマンドの先頭で見るため、`git -C <dir> push`も`git push *`に一致せずsandbox内で走る
  * （Issue #1666）。`git -C *`を除外へ足すとローカルのgit操作まで承認へ回るので、指示で塞ぐ。
  * 指示が守られなかった場合は、`sandboxBashGuard.ts`のPreToolUse hookが実行前に拒否する（Issue #1668）。
+ *
+ * 引数のコマンド置換（`--description "$(cat <<'EOF' …)"`）も、CLIが置換を別のコマンドとして
+ * 扱うため除外に一致しない（Issue #1672）。本文はファイル経由で渡させる。
  */
 export function buildClaudeSandboxPrompt(): string {
   const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
@@ -133,6 +136,7 @@ export function buildClaudeSandboxPrompt(): string {
     `次のコマンドは、単独で実行したときだけsandboxの外で走る: ${commands}。`,
     'これらは1回のBash呼び出しに1つだけ書き、;、&&、||、パイプで他のコマンドと連結しない。',
     '前にcdも付けず、git -C <dir> pushのようにgitとサブコマンドの間へ引数も挟まない。作業ディレクトリでそのまま打つ。',
+    '引数にコマンド置換（$(…)、バッククォート、"$(cat <<EOF …)"）も使わない。PR/MRやIssueの本文は先にWriteツールでファイルへ書き、gh ... --body-file <path>、glab api ... --field description=@<path>のようにファイルから渡す。',
     'これらが認証やネットワークのエラーで失敗したら、使えないと判断する前に単独で打ち直す。',
   ].join('\n');
 }

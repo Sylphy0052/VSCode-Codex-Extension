@@ -164,11 +164,57 @@ function quoteWord(word: string): string {
 }
 
 /**
+ * 単引用符の外にコマンド置換（`$(…)`・バッククォート）があるか。`$((`の算術展開も含むが、
+ * 誤って拒否しても打ち直しで済むので区別しない。
+ */
+export function hasCommandSubstitution(command: string): boolean {
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (singleQuoted) {
+      singleQuoted = c !== "'";
+      continue;
+    }
+    if (c === '\\') {
+      i++;
+    } else if (c === "'" && !doubleQuoted) {
+      singleQuoted = true;
+    } else if (c === '"') {
+      doubleQuoted = !doubleQuoted;
+    } else if (c === '`' || (c === '$' && command[i + 1] === '(')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * sandboxの外へ回らない形で書かれたネットワークコマンドがあれば、拒否理由を返す。
  * 無ければ`undefined`（そのまま実行させる）。
  */
 export function sandboxBashGuardReason(command: string): string | undefined {
   const commands = splitShellCommands(command);
+  // 二重引用符の中の置換は分割されず1つの語に残るため、分割とは別に見る。CLIは置換を別の
+  // コマンドとして扱い、`glab mr create --description "$(cat <<'EOF' …)"`は`glab *`に
+  // 一致せずsandbox内で走る（Issue #1672）
+  if (hasCommandSubstitution(command)) {
+    const networkNames = commands
+      .map(readNetworkCommand)
+      .filter((c): c is NetworkCommand => c !== undefined)
+      .map((c) => c.name.join(' '));
+    if (networkNames.length > 0) {
+      return [
+        `このコマンドはsandbox内で走り、ネットワークが拒否されて失敗するため実行しなかった。`,
+        `${[...new Set(networkNames)].join('・')}の引数にコマンド置換（$(…)やバッククォート。heredocを包んだ"$(cat <<EOF …)"を含む）があると、sandboxの外で走らない。`,
+        '本文や長い値は、先にWriteツールでファイルへ書き、ファイルを読むオプションで渡して単独で打ち直す。' +
+          'GitHub: gh pr create --body-file <path> / gh issue create --body-file <path>。' +
+          'GitLab: glab api projects/:id/merge_requests -X POST --raw-field source_branch=<branch> --raw-field target_branch=<branch> --raw-field title=<title> --field description=@<path>' +
+          '（Issueは projects/:id/issues へ --raw-field title=<title> --field description=@<path>。--fieldは値が@で始まるとファイルを読むので、本文以外は--raw-fieldで渡す）。',
+        '短い値なら、置換を使わず値そのものを引数に書く。',
+      ].join('\n');
+    }
+  }
   const found = commands
     .map(readNetworkCommand)
     .filter((c): c is NetworkCommand => c !== undefined && (commands.length > 1 || c.prefixed));
