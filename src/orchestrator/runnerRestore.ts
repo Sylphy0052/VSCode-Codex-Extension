@@ -15,10 +15,12 @@ import {
   type TaskRunState,
 } from './runState';
 import type { PersistedRun } from './runStore';
+import { MAX_RELOAD_RESUMES } from './reloadResumePrompt';
 import { getRunOutcome } from './scheduler';
 import { isGitWorkingTree, resolveHeadCommit, worktreePath } from './worktree';
 import {
   describeCarriedOverWork,
+  hasLeftWork,
   inspectInterruptedWorktree,
   type CarriedOverWork,
 } from './resumeCarryOver';
@@ -296,6 +298,7 @@ async function reconcileRestoredTaskStates(
       retryCount: t.retryCount,
       // このフィールドが無い古い永続データは0として扱う（issue #275より前の形式）
       manualRetryCount: t.manualRetryCount ?? 0,
+      ...(t.reloadResumes === undefined ? {} : { reloadResumes: t.reloadResumes }),
       failure,
       sessionId: t.sessionId,
       cwd: t.cwd,
@@ -457,6 +460,7 @@ async function rebuildLiveRun(
     pseudo: restoredPseudo.pseudo,
     pseudoRestoreFailure: restoredPseudo.failure,
     carriedOverWork: new Map(),
+    reloadResumeSessions: new Map(),
     // タスク間メッセージング（design.md §16.21）はこのウィンドウで新たに始める実行にだけ
     // 立てる（リロード直後の復元では作らない。再実行すればstartTask()相当の経路で
     // 改めてタスクが動き出すが、メッセージングはrunそのものに紐づく短命なサーバのため、
@@ -535,6 +539,10 @@ export const MAX_MAX_AUTO_RESUME_ATTEMPTS = 20;
  * 指摘を受け改めた）。条件2（`haltedByUser`）だけは引き続き無警告のまま——人が
  * 意図して止めたrunであり、`applyAutoResume`を呼ぶ前に確定しているため「見送った」
  * という新情報が無い。
+ *
+ * 再読み込みで途中で終わったタスクは、会話の記録（`sessionId`）があれば同じ会話を開き直す
+ * （Issue #1670）。開き直すのはタスクごとに`MAX_RELOAD_RESUMES`回までで、超えたら今までどおり
+ * 新しい会話で最初から始める。
  */
 async function autoResumeIfEligible(
   self: WorkflowRunnerInternals,
@@ -587,8 +595,11 @@ async function autoResumeIfEligible(
   // （Issue #1514）。`applyAutoResume`は純粋関数なので、引き継ぐタスクを渡して引き直す
   // 実測の`await`の間に人が手動で再実行（`retryTask`）したタスクは、もう`reloadInterrupted`
   // ではない。`outcome`は実測前の状態から作った値なので、使うとその再実行を巻き戻してしまう。
-  // 実測の後の状態から必ず引き直し、実際に戻すタスクの分だけ引き継ぎを残す
-  const inspected = await inspectCarriedOverWork(self, p, rebuilt);
+  // 実測の後の状態から必ず引き直し、実際に戻すタスクの分だけ引き継ぎを残す。
+  // 同じ会話を開き直すタスク（Issue #1670）は、会話がcwdに紐づくため作業が残っていなくても
+  // 同じworktreeを使い直す
+  const reloadResumes = collectReloadResumeSessions(rebuilt.runState);
+  const inspected = await inspectCarriedOverWork(self, p, rebuilt, reloadResumes);
   const resumed = applyAutoResume(rebuilt.runState, rebuilt.def.tasks, new Set(inspected.keys()));
   const resumedTaskIds = new Set(resumed.kind === 'resumed' ? resumed.resumedTaskIds : []);
   const carried = new Map([...inspected].filter(([taskId]) => resumedTaskIds.has(taskId)));
@@ -610,7 +621,10 @@ async function autoResumeIfEligible(
     return;
   }
   rebuilt.carriedOverWork = carried;
-  rebuilt.runState = resumed.run;
+  rebuilt.reloadResumeSessions = new Map(
+    [...reloadResumes].filter(([taskId]) => resumedTaskIds.has(taskId)),
+  );
+  rebuilt.runState = countReloadResumes(resumed.run, rebuilt.reloadResumeSessions);
   rebuilt.finished = getRunOutcome(rebuilt.runState) !== 'running';
   rebuilt.warnings = rebuilt.warnings.filter((w) => w.kind !== 'autoResume');
   rebuilt.warnings.push({
@@ -627,12 +641,14 @@ async function autoResumeIfEligible(
   }));
 
   await self.ensureMessaging(p.runId, rebuilt);
+  // 会話を開き直すためだけに使い直す、作業の残っていないworktreeは引き継ぎとして伝えない
+  const leftWork = [...carried]
+    .filter(([, work]) => hasLeftWork(work))
+    .map(([taskId, work]) => ({ taskId, work }));
   // `exactOptionalPropertyTypes`のため、答え待ちが無ければキー自体を渡さない
   void setupOrchestratorForStart(self, p.runId, rebuilt, {
     ...(p.pendingAskUser === undefined ? {} : { pendingAskUser: p.pendingAskUser }),
-    ...(carried.size === 0
-      ? {}
-      : { carriedOverWork: [...carried].map(([taskId, work]) => ({ taskId, work })) }),
+    ...(leftWork.length === 0 ? {} : { carriedOverWork: leftWork }),
   });
   self.pump(p.runId);
 }
@@ -641,12 +657,14 @@ async function autoResumeIfEligible(
  * 自動再開の対象（`reloadInterrupted`）のうち、gitのworktreeで走っていたタスクについて、
  * 中断した試行のworktreeを実測する（Issue #1514）。作業が残っていたタスクを返し、
  * 引き継ぎ・実測の失敗をそれぞれ警告へ積む。実測できなかったタスクと何も残っていない
- * タスクは返さない（今までどおり新しいworktreeで最初からやり直す）。
+ * タスクは返さない（今までどおり新しいworktreeで最初からやり直す）。ただし同じ会話を
+ * 開き直すタスク（`reloadResumes`、Issue #1670）は、何も残っていなくても返す。
  */
 async function inspectCarriedOverWork(
   self: WorkflowRunnerInternals,
   p: PersistedRun,
   rebuilt: LiveRun,
+  reloadResumes: ReadonlyMap<string, unknown>,
 ): Promise<Map<string, CarriedOverWork>> {
   const carried = new Map<string, CarriedOverWork>();
   const integration = rebuilt.integration;
@@ -683,6 +701,7 @@ async function inspectCarriedOverWork(
         branch,
         retry,
         integrationBranch: integration.branch,
+        keepEmpty: reloadResumes.has(taskId),
       });
     } catch (e) {
       inspection = {
@@ -701,9 +720,49 @@ async function inspectCarriedOverWork(
       rebuilt.warnings.push({
         kind: 'resumedWithUncommittedWork',
         taskId,
-        message: `前回の中断時点の作業が残っていたため、同じ作業場所で続きから再開します: ${describeCarriedOverWork(inspection.work)}`,
+        message: hasLeftWork(inspection.work)
+          ? `前回の中断時点の作業が残っていたため、同じ作業場所で続きから再開します: ${describeCarriedOverWork(inspection.work)}`
+          : '中断した会話を開き直すため、同じ作業場所で続きから再開します',
       });
     }
   }
   return carried;
+}
+
+/**
+ * 再読み込みで途中で終わったタスクのうち、会話の記録があるものの会話と作業場所（Issue #1670）。
+ * 開き直せるかは開くまで分からないため、ここでは記録の有無と開き直した回数だけを見る。
+ */
+function collectReloadResumeSessions(
+  run: RunState,
+): Map<string, { sessionId: string; cwd: string }> {
+  const sessions = new Map<string, { sessionId: string; cwd: string }>();
+  for (const [taskId, s] of run.tasks) {
+    if (
+      s.state === 'failed' &&
+      s.failure?.kind === 'reloadInterrupted' &&
+      s.sessionId !== undefined &&
+      s.sessionId !== '' &&
+      s.cwd !== undefined &&
+      (s.reloadResumes ?? 0) < MAX_RELOAD_RESUMES
+    ) {
+      sessions.set(taskId, { sessionId: s.sessionId, cwd: s.cwd });
+    }
+  }
+  return sessions;
+}
+
+/** 同じ会話を開き直すタスクの回数を1つ進める（Issue #1670）。 */
+function countReloadResumes(run: RunState, sessions: ReadonlyMap<string, unknown>): RunState {
+  if (sessions.size === 0) {
+    return run;
+  }
+  const tasks = new Map(run.tasks);
+  for (const taskId of sessions.keys()) {
+    const s = tasks.get(taskId);
+    if (s !== undefined) {
+      tasks.set(taskId, { ...s, reloadResumes: (s.reloadResumes ?? 0) + 1 });
+    }
+  }
+  return { ...run, tasks };
 }

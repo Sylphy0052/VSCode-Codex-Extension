@@ -118,10 +118,11 @@ export function listQueuedStages(run: TaskRun): StageRef[] {
 
 /**
  * `resume_stage`を受け付け、並列枠の空きを待っている一時停止中の工程（Issue #1629）。run全体の
- * 停止中は再開しない。
+ * 停止中は再開しない。ただし再読み込みで終わった工程（Issue #1670）は、run全体が再読み込みで
+ * 止まっていても開き直す（新しい工程は人の「再開」まで始めない）。
  */
 export function listResumingStages(run: TaskRun): StageRef[] {
-  if (!isRunAccepting(run)) {
+  if (run.planStatus !== 'approved' || run.finishedAt !== undefined) {
     return [];
   }
   return listTasks(run).flatMap((task) => {
@@ -129,6 +130,7 @@ export function listResumingStages(run: TaskRun): StageRef[] {
     return stage !== undefined &&
       task.stages[stage].status === 'running' &&
       task.pause?.phase === 'resuming' &&
+      (task.pause.reload === true || isRunAccepting(run)) &&
       task.attention === 'none'
       ? [{ taskId: task.taskId, stage }]
       : [];

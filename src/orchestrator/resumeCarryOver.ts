@@ -40,6 +40,11 @@ export interface CarryOverTarget {
   readonly branch: string;
   readonly retry: number | undefined;
   readonly integrationBranch: string;
+  /**
+   * 作業が残っていなくても`carried`を返す。同じ会話を開き直すタスク（Issue #1670）は、
+   * 会話がcwdに紐づくため同じworktreeを使い直す必要がある
+   */
+  readonly keepEmpty?: boolean;
 }
 
 /**
@@ -70,7 +75,7 @@ export async function inspectInterruptedWorktree(
   if (revList.code !== 0 || !Number.isInteger(commitCount) || commitCount < 0) {
     return { kind: 'failed', message: gitFailure('git rev-list', revList) };
   }
-  if (uncommittedCount === 0 && commitCount === 0) {
+  if (uncommittedCount === 0 && commitCount === 0 && target.keepEmpty !== true) {
     return { kind: 'nothingLeft' };
   }
   // 永続化したブランチ名は中断時点の記録にすぎない。worktree側で別のブランチへ切り替えられて
@@ -145,6 +150,14 @@ function gitFailure(label: string, result: { code: number; stderr: string }): st
 const MAX_LISTED_FILES = 30;
 /** ファイル名1件の長さ上限 */
 const MAX_FILE_NAME_LENGTH = 200;
+
+/**
+ * 未コミットの変更か統合ブランチから進んだコミットがあるか。`keepEmpty`で返した`carried`は
+ * 何も残っていないことがある（Issue #1670）。
+ */
+export function hasLeftWork(work: CarriedOverWork): boolean {
+  return work.uncommittedCount > 0 || work.commitCount > 0;
+}
 
 /** 変更の規模を1行で書く（警告・通知・プロンプトで共通）。 */
 export function describeCarriedOverWork(work: CarriedOverWork): string {

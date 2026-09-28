@@ -119,7 +119,12 @@ import {
   stopOverlapPoll,
 } from './runnerOverlap';
 import type { OverlapWait } from './taskOverlap';
-import { formatCarryOverPromptNote, type CarriedOverWork } from './resumeCarryOver';
+import {
+  formatCarryOverPromptNote,
+  hasLeftWork,
+  type CarriedOverWork,
+} from './resumeCarryOver';
+import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
 import type { SplitSuggestThresholds } from './taskSplit';
 import { notifyUnansweredInstructions } from './runnerInstruction';
 import {
@@ -1971,6 +1976,12 @@ export interface LiveRun {
    */
   carriedOverWork: Map<string, CarriedOverWork>;
   /**
+   * 自動再開で、再読み込みで途中で終わった会話を開き直すタスク（Issue #1670）。
+   * `prepareTaskLaunch`が次の開始で取り出し、作業場所が中断時と同じときだけ同じ会話を開き直す
+   * （Claudeの`-r`はcwdから会話を探すため）
+   */
+  reloadResumeSessions: Map<string, { sessionId: string; cwd: string }>;
+  /**
    * タスク間メッセージング（design.md §16.21）。`WorkflowRunnerDeps.messaging`が渡され、
    * かつMCPサーバの起動に成功したときだけ実行開始時に一度作る。
    *
@@ -2907,6 +2918,7 @@ export class WorkflowRunner {
       // （`createPseudoWorktreeForStart`）ため、ここへ理由が入ることはない
       pseudoRestoreFailure: undefined,
       carriedOverWork: new Map(),
+      reloadResumeSessions: new Map(),
       messaging: undefined,
       messagingHub: undefined,
       messagingSetupInFlight: undefined,
@@ -4355,6 +4367,11 @@ export class WorkflowRunner {
       originCommit,
       carriedOver,
     } = await resolveWorkingDirectory(this.internals, live, task, retry);
+    // 再読み込みで途中で終わった会話（Issue #1670）。作業場所が変わると会話を探せないため、
+    // 中断時と同じ作業場所のときだけ開き直す
+    const reloadResume = live.reloadResumeSessions.get(taskId);
+    live.reloadResumeSessions.delete(taskId);
+    const resumeSessionId = reloadResume?.cwd === cwd ? reloadResume.sessionId : undefined;
 
     const baseline = this.deps.readBaseline();
     // クランプはこの1関数だけを通す（design.md §16.16。#52セキュリティ監査指摘）
@@ -4426,6 +4443,7 @@ export class WorkflowRunner {
       config: effective.config,
       sandbox: effective.sandbox,
       ...(messagingUrl !== undefined ? { mcp: { url: messagingUrl } } : {}),
+      ...(resumeSessionId !== undefined ? { resume: { sessionId: resumeSessionId } } : {}),
     };
 
     const boundaryResult = await buildBoundary(this.internals, live, cwd);
@@ -4441,7 +4459,10 @@ export class WorkflowRunner {
       usedPseudoWorktree,
       pseudoSnapshot,
       originCommit,
-      carryOverNote: carriedOver === undefined ? undefined : formatCarryOverPromptNote(carriedOver),
+      carryOverNote:
+        carriedOver === undefined || !hasLeftWork(carriedOver)
+          ? undefined
+          : formatCarryOverPromptNote(carriedOver),
       effective,
       input,
       boundaryResult,
@@ -4500,7 +4521,9 @@ export class WorkflowRunner {
       changedLines: undefined,
       splitSuggested: false,
       overlapWait: undefined,
-      pendingCarryOverNote: prepared.carryOverNote,
+      // 開き直した会話は前の作業を覚えているため、引き継ぎの説明を添えない（Issue #1670）
+      pendingCarryOverNote:
+        prepared.input.resume === undefined ? prepared.carryOverNote : undefined,
       overlapResuming: false,
       overlapResumingPromise: undefined,
       overlapMergeAbortFailed: false,
@@ -4634,7 +4657,8 @@ export class WorkflowRunner {
     // 明示`cwd`のタスクは統合ブランチへマージする対象を持たないため足さない
     const condition = usedWorktree ? withCommitRequirement(task.done) : task.done;
     session.runLoop({
-      initialPrompt: task.prompt,
+      // 開き直した会話へは最初の指示を送り直さず、途中で切れたことを伝えて続けさせる（Issue #1670）
+      initialPrompt: input.resume === undefined ? task.prompt : RELOAD_RESUME_PROMPT,
       continuePrompt: task.continuePrompt,
       maxIterations: task.maxIterations,
       condition,
@@ -4666,7 +4690,7 @@ export class WorkflowRunner {
     // 起動に失敗したとき、残った作業の場所を警告で知らせるために先に控えておく
     const carriedOver = live.carriedOverWork.get(taskId);
     try {
-      const prepared = await this.prepareTaskLaunch(live, task, taskId, runId);
+      let prepared = await this.prepareTaskLaunch(live, task, taskId, runId);
 
       // dispose()後に宙に浮いていた継続の再開を止める（Issue #502）。`prepareTaskLaunch`の
       // 内部（`resolveWorkingDirectory`等）で`await`している間に`dispose()`が完走すると、
@@ -4682,7 +4706,27 @@ export class WorkflowRunner {
       }
 
       const host = this.deps.hosts[task.provider];
-      const session = await host.openTaskSession(prepared.input);
+      let session: TaskSession;
+      try {
+        session = await host.openTaskSession(prepared.input);
+      } catch (e) {
+        if (prepared.input.resume === undefined) {
+          throw e;
+        }
+        // 会話の記録が無い・別のタブで開かれている等で開き直せなければ、今までどおり新しい
+        // 会話で最初の指示から始める（Issue #1670）
+        const message = sanitizeForLog(e instanceof Error ? e.message : String(e));
+        this.deps.log.warn(
+          `[workflow ${runId}/${taskId}] 中断した会話を開き直せないため、新しい会話で始めます: ${message}`,
+        );
+        const fresh: TaskSessionInput = { ...prepared.input };
+        delete fresh.resume;
+        prepared = { ...prepared, input: fresh };
+        if (this.disposing) {
+          return;
+        }
+        session = await host.openTaskSession(prepared.input);
+      }
       session.open({ preserveFocus: true });
 
       const liveTask = this.buildLiveTask(session, prepared);
@@ -6725,6 +6769,7 @@ export class WorkflowRunner {
             submissionCount: s.submissionCount,
             retryCount: s.retryCount,
             manualRetryCount: s.manualRetryCount,
+            ...(s.reloadResumes === undefined ? {} : { reloadResumes: s.reloadResumes }),
             failure: s.failure,
             // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
             // liveTaskが無ければ前回persistした値を引き継ぐ
