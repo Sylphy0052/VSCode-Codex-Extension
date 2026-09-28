@@ -1,7 +1,13 @@
 import * as fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import * as readline from 'node:readline';
-import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from './ports';
+import { createHash } from 'node:crypto';
+import type {
+  FileSystemPort,
+  HeadDigest,
+  MemoryFileSystemPort,
+  SymlinkResolution,
+} from './ports';
 
 /** Node.jsの例外がENOENT（対象が存在しない）かどうかを見る。 */
 function isEnoent(e: unknown): boolean {
@@ -70,6 +76,103 @@ async function readHeadUntil(
   } finally {
     rl.close();
     stream.destroy();
+  }
+}
+
+/** 改行を除いた1行の文字列にする。readline（`crlfDelay: Infinity`）と同じく `\r\n` も1つの改行とみなす。 */
+function decodeLine(raw: Buffer): string {
+  let end = raw.length;
+  if (end > 0 && raw[end - 1] === 0x0a) {
+    end -= 1;
+  }
+  if (end > 0 && raw[end - 1] === 0x0d) {
+    end -= 1;
+  }
+  return raw.toString('utf8', 0, end);
+}
+
+/**
+ * `readHeadUntil` と同じ打ち切り条件で先頭を読み、読んだ範囲のバイト数とSHA-256を返す
+ * （Issue #1466）。
+ *
+ * readlineは改行を落とすため元のバイト位置が分からない。範囲を正確に照合できるよう、
+ * バイト列のまま `\n` で区切って読む。打ち切り条件に当たる前に末尾へ達したときは
+ * `undefined`（範囲が確定していない）。末尾の改行の無い行も `isComplete` には渡す。
+ *
+ * readlineと違い、単独の `\r` は行区切りとみなさない。JSONLは値の中の改行を
+ * エスケープするため、行の途中に生の `\r` は現れない前提とする。
+ */
+async function readHeadDigestUntil(
+  filePath: string,
+  maxLines: number,
+  maxBytes: number,
+  isComplete: (line: string) => boolean,
+): Promise<HeadDigest | undefined> {
+  const stream = createReadStream(filePath);
+  const hash = createHash('sha256');
+  let pending: Buffer[] = [];
+  let lines = 0;
+  let bytes = 0;
+  try {
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      let start = 0;
+      while (start < chunk.length) {
+        const newline = chunk.indexOf(0x0a, start);
+        if (newline === -1) {
+          pending.push(chunk.subarray(start));
+          break;
+        }
+        pending.push(chunk.subarray(start, newline + 1));
+        start = newline + 1;
+        const raw = Buffer.concat(pending);
+        pending = [];
+        hash.update(raw);
+        bytes += raw.length;
+        lines += 1;
+        if (isComplete(decodeLine(raw)) || lines >= maxLines || bytes >= maxBytes) {
+          return { bytes, sha256: hash.digest('hex') };
+        }
+      }
+    }
+    if (pending.length > 0) {
+      // readHeadUntilと同じく末尾の改行の無い行も素性の解釈には含める。書きかけの行の
+      // 可能性があるため、isCompleteがtrueを返しても範囲は確定させない
+      isComplete(decodeLine(Buffer.concat(pending)));
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    stream.destroy();
+  }
+}
+
+/** 先頭 `bytes` バイトのSHA-256（Issue #1466）。ファイルがそれより短い・読めなければ `undefined`。 */
+async function digestHead(filePath: string, bytes: number): Promise<string | undefined> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const hash = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(Math.min(bytes, 64 * 1024));
+    let offset = 0;
+    while (offset < bytes) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.length, bytes - offset),
+        offset,
+      );
+      if (bytesRead === 0) {
+        return undefined;
+      }
+      hash.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    return hash.digest('hex');
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -195,6 +298,8 @@ export const nodeFileSystem: FileSystemPort = {
   },
 
   readHeadUntil,
+  readHeadDigestUntil,
+  digestHead,
   forEachLine,
 };
 

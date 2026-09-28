@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { HeadDigest } from '../session/ports';
 import type { MementoLike } from '../util/memento';
 import { CLAUDE_SESSION_INDEX_KEY, type ClaudeSessionIndexEntry } from './sessionIndex';
 
@@ -52,15 +53,31 @@ function isValidEntry(value: unknown): value is ClaudeSessionIndexEntry {
 /**
  * `size`/`ino` は数値でなければ未設定扱いに落とす（Issue #1460レビュー指摘）。
  * どちらも `canSkipHeadRead` の安全側フォールバック（未設定なら先頭を読み直す）に
- * 乗るだけなので、エントリ全体を捨てずに済む。
+ * 乗るだけなので、エントリ全体を捨てずに済む。`head`（Issue #1466）も同じく、形が
+ * 合わなければ未設定扱いにする。
  */
 function sanitizeEntry(entry: ClaudeSessionIndexEntry): ClaudeSessionIndexEntry {
   const size = typeof entry.size === 'number' ? entry.size : undefined;
   const ino = typeof entry.ino === 'number' ? entry.ino : undefined;
-  if (size === entry.size && ino === entry.ino) {
+  const head = isValidHead(entry.head) ? entry.head : undefined;
+  if (size === entry.size && ino === entry.ino && head === entry.head) {
     return entry;
   }
-  return { ...entry, size, ino };
+  return { ...entry, size, ino, head };
+}
+
+function isValidHead(value: unknown): value is HeadDigest {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const head = value as Record<string, unknown>;
+  return (
+    typeof head.bytes === 'number' &&
+    Number.isSafeInteger(head.bytes) &&
+    head.bytes > 0 &&
+    typeof head.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(head.sha256)
+  );
 }
 
 /** JSONを索引エントリの配列へ解釈する。壊れている・schemaが古いときは空を返す。 */

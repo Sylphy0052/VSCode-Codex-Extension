@@ -1,4 +1,5 @@
 import type { SessionSummary } from '../codex/types';
+import type { HeadDigest } from '../session/ports';
 import type { MementoLike } from '../util/memento';
 import {
   reconcileLegacyIndex,
@@ -31,6 +32,13 @@ export interface ClaudeSessionIndexEntry {
   size: number | undefined;
   /** inode番号（Issue #1460）。同じパスのファイル置き換えを検出するために使う。 */
   ino: number | undefined;
+  /**
+   * 素性を読み終えた先頭の範囲のバイト数とSHA-256（Issue #1466）。同じinodeのまま
+   * 書き直された（途中の行が消えた後に追記でサイズが戻った等）ことを、この範囲の
+   * 照合で検出する。範囲が確定しなかったエントリ・旧schemaのエントリでは `undefined`
+   * で、先頭の読み直しを省かない。
+   */
+  head?: HeadDigest | undefined;
   session: SessionSummary;
 }
 
