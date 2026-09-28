@@ -66,6 +66,18 @@ ${completionEvidenceStyles()}
   #header .counts { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
   #header .elapsed { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
   #header .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* 実行中のrunの並列上限（Issue #1650） */
+  #header .max-parallel { display: inline-flex; align-items: center; gap: 4px; }
+  #header .max-parallel[hidden] { display: none; }
+  #header .max-parallel input {
+    width: 4em;
+    padding: 2px 4px;
+    color: var(--vscode-input-foreground);
+    background-color: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: var(--agent-radius-sm);
+    font-family: inherit;
+  }
   /* 全体進捗バー（issue 754）。完了だけを1色で塗るのではなく、完了／進行中／要対応を
      積み上げる。残り（pending）はトラックの地色のまま。
      トラックの薄さは opacity ではなく color-mix で出す。opacity は要素の集合に掛かるため、

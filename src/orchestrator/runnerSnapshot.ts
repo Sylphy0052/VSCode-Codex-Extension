@@ -108,6 +108,7 @@ export function getSnapshot(
     // ワークスペース相対パス。読み込みはView側が行う（ここはVSCode APIに触れない）
     roadmapPath: live.def.roadmap,
     haltedByUser: live.runState.haltedByUser,
+    maxParallel: live.def.maxParallel,
     failureRecovery:
       live.failureRecovery === undefined
         ? undefined

@@ -291,6 +291,12 @@ export function workflowScript(): string {
 
     el('runBtn').hidden = !isDraft;
     el('stopAllBtn').hidden = !isRunning;
+    // 並列上限（Issue #1650）は実行中のrunだけで変えられる。入力中の値は上書きしない
+    el('maxParallelBox').hidden = !isRunning;
+    const maxParallelInput = el('maxParallelInput');
+    if (document.activeElement !== maxParallelInput && typeof snapshot.maxParallel === 'number') {
+      maxParallelInput.value = String(snapshot.maxParallel);
+    }
     el('removeWorktreesBtn').hidden = !isFinished;
     el('openIntegrationPrBtn').hidden = !isFinished;
     el('cleanupIntegrationBtn').hidden = !isFinished;
@@ -2120,6 +2126,12 @@ export function workflowScript(): string {
   );
   el('runBtn').addEventListener('click', () => vscode.postMessage({ type: 'run' }));
   el('stopAllBtn').addEventListener('click', () => vscode.postMessage({ type: 'stopAll' }));
+  el('maxParallelApplyBtn').addEventListener('click', () =>
+    vscode.postMessage({
+      type: 'setMaxParallel',
+      maxParallel: Number(el('maxParallelInput').value),
+    }),
+  );
   el('removeWorktreesBtn').addEventListener('click', () =>
     vscode.postMessage({ type: 'removeWorktrees' }),
   );

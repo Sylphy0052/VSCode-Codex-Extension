@@ -112,6 +112,12 @@ export const RESERVED_ORCHESTRATOR_TASK_ID = '_orchestrator';
 
 export const MAX_PARALLEL_MIN = 1;
 export const MAX_PARALLEL_MAX = 10;
+
+/** 並列上限として受け付ける値か（`MAX_PARALLEL_MIN`〜`MAX_PARALLEL_MAX`の整数）。 */
+export function isValidWorkflowMaxParallel(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= MAX_PARALLEL_MIN && n <= MAX_PARALLEL_MAX;
+}
+
 export const MAX_TASK_COUNT = 50;
 /** 再試行のたびに新しいworktreeとCLIプロセスが増えるため、際限なく許さない。 */
 export const MAX_RETRIES = 10;
@@ -1829,11 +1835,7 @@ export function validateWorkflow(def: WorkflowDefinition): WorkflowValidationRes
     });
   }
 
-  if (
-    !Number.isInteger(def.maxParallel) ||
-    def.maxParallel < MAX_PARALLEL_MIN ||
-    def.maxParallel > MAX_PARALLEL_MAX
-  ) {
+  if (!isValidWorkflowMaxParallel(def.maxParallel)) {
     errors.push({
       taskIds: [],
       message: `maxParallel は${MAX_PARALLEL_MIN}〜${MAX_PARALLEL_MAX}の範囲で指定してください: ${def.maxParallel}`,

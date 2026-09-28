@@ -196,6 +196,9 @@ import type { VerificationStage } from '../verification/record';
 import type { VerificationStore } from '../verification/store';
 import {
   expandTemplate,
+  isValidWorkflowMaxParallel,
+  MAX_PARALLEL_MAX,
+  MAX_PARALLEL_MIN,
   MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
   validateWorkflow,
@@ -1256,6 +1259,8 @@ export interface WorkflowRunSnapshot {
   };
   /** 人の割り込み（`manual`/`interrupted`）で実行全体が停止しているか。 */
   haltedByUser: boolean;
+  /** いま効いている並列上限（画面で変えていれば変えた値。Issue #1650）。 */
+  maxParallel?: number;
   /** 失敗後、オーケストレーターが復旧計画を適用できる状態。 */
   failureRecovery?: { failedTaskIds: readonly string[]; deadline: string } | undefined;
   /**
@@ -1822,6 +1827,12 @@ export interface MergeResolutionEntry {
 export interface LiveRun {
   runId: string;
   def: WorkflowDefinition;
+  /**
+   * ワークフロー画面で変えた並列上限（Issue #1650）。変えたときは`def.maxParallel`も同じ値へ
+   * 書き換える。ここは永続化（`PersistedRun.maxParallelOverride`）の元で、画面で変えていない
+   * runでは`undefined`（復元時に定義YAMLの値を読み直す）。
+   */
+  maxParallelOverride?: number;
   defPath: string;
   repoRoot: string;
   gitRepo: boolean;
@@ -3007,6 +3018,38 @@ export class WorkflowRunner {
     }
     this.notify(runId);
     void this.persist(runId);
+  }
+
+  /**
+   * 実行中のrunの並列上限を変える（ワークフロー画面の入力欄、Issue #1650）。
+   *
+   * `live.def`を新しい値へ差し替え、永続化してから`pump`で空いた枠のタスクを始める。
+   * 下げても動いているタスクは止めない（`nextTasksToStart`が新しいタスクを始めないだけ）。
+   * 定義YAMLのファイルは書き換えない。変えた値は`maxParallelOverride`として永続化し、
+   * 復元時に定義YAMLの値より優先する（`runnerRestore.ts`の`rebuildLiveRun`）。
+   */
+  setMaxParallel(runId: string, maxParallel: number): { ok: true } | { ok: false; message: string } {
+    if (!isValidWorkflowMaxParallel(maxParallel)) {
+      return {
+        ok: false,
+        message: `並列上限は${String(MAX_PARALLEL_MIN)}〜${String(MAX_PARALLEL_MAX)}の整数で指定してください`,
+      };
+    }
+    const live = this.runs.get(runId);
+    if (live === undefined) {
+      return { ok: false, message: 'runが見つかりません' };
+    }
+    if (live.finished) {
+      return { ok: false, message: '終わったrunの並列上限は変えられません' };
+    }
+    live.maxParallelOverride = maxParallel;
+    if (live.def.maxParallel !== maxParallel) {
+      live.def = { ...live.def, maxParallel };
+      this.deps.log.info(`[workflow ${runId}] 並列上限を${String(maxParallel)}にしました`);
+    }
+    // `pump`が永続化と通知もする
+    this.pump(runId);
+    return { ok: true };
   }
 
   // ---- ワークフローViewからのタスク単位の操作（design.md §16.8） ----
@@ -6708,6 +6751,10 @@ export class WorkflowRunner {
           ...(current?.autoResumeAttempts === undefined
             ? {}
             : { autoResumeAttempts: current.autoResumeAttempts }),
+          // 画面で変えた並列上限（Issue #1650）。変えていなければキー自体を書かない
+          ...(live.maxParallelOverride === undefined
+            ? {}
+            : { maxParallelOverride: live.maxParallelOverride }),
         };
       });
     } catch (e) {

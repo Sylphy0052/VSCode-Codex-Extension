@@ -23,6 +23,7 @@ import {
   type CarriedOverWork,
 } from './resumeCarryOver';
 import {
+  isValidWorkflowMaxParallel,
   MAX_WORKFLOW_FILE_BYTES,
   parseWorkflowYaml,
   validateWorkflow,
@@ -372,10 +373,17 @@ async function rebuildLiveRun(
   self: WorkflowRunnerInternals,
   p: PersistedRun,
 ): Promise<LiveRun | undefined> {
-  const def = await loadPersistedWorkflowDefinition(self, p);
-  if (def === undefined) {
+  const loadedDef = await loadPersistedWorkflowDefinition(self, p);
+  if (loadedDef === undefined) {
     return undefined;
   }
+  // 画面で変えた並列上限（Issue #1650）は定義YAMLの値より優先する。永続データは外部から
+  // 書き換わりうるため範囲を確かめ、外れていれば捨てて定義YAMLの値を使う
+  const maxParallelOverride = isValidWorkflowMaxParallel(p.maxParallelOverride)
+    ? p.maxParallelOverride
+    : undefined;
+  const def =
+    maxParallelOverride === undefined ? loadedDef : { ...loadedDef, maxParallel: maxParallelOverride };
 
   const gitRepo = await isGitWorkingTree(p.workspaceRoot, self.deps.git);
   // 元のHEADは永続化していない（design.md §16.11は応答本文以外も最小限しか保存しない
@@ -411,6 +419,7 @@ async function rebuildLiveRun(
   return {
     runId: p.runId,
     def,
+    ...(maxParallelOverride === undefined ? {} : { maxParallelOverride }),
     defPath: p.defPath,
     repoRoot: p.workspaceRoot,
     gitRepo,
