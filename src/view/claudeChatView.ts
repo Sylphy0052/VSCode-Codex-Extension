@@ -2950,6 +2950,10 @@ export class ClaudeChatViewManager
       // 停滞判定のしきい値（design.md §16.27、Issue #336）。LoopControllerはvscodeに
       // 依存しないため、設定の読み出しはここ（view層）で行う
       readWorkflowsConfig().stallRepeatCount,
+      undefined,
+      // 背景タスクを待つ・待たないの判断（Issue #1676）。一覧を通知するのはClaude Codeだけ
+      // なので、Codex側（`chatView.ts`）には渡さない
+      (message) => this.log.info(message),
     );
 
     const entry: ClaudePanel = {

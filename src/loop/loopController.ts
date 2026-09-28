@@ -1,4 +1,4 @@
-import type { ChatItem, ChatState } from '../appserver/chatState';
+import { NO_BACKGROUND_TERMINALS, type ChatItem, type ChatState } from '../appserver/chatState';
 import {
   countRepeatedTail,
   detectStalledLoop,
@@ -466,6 +466,13 @@ export class LoopController {
    */
   private evaluating = false;
   /**
+   * 背景タスクの完了を待っている間に、時間上限で止めるためのタイマー（Issue #1676）。
+   *
+   * 時間上限は普段ターンの境界でしか見ない。背景タスクを待つ間は、CLIが次のターンを始め
+   * なければ境界が来ないため、上限の時刻に合わせてここから止める。
+   */
+  private backgroundWaitTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
    * 一時停止中にターンが完了したため、送らずに保留している次の指示（issue #909）。
    *
    * `resume()`がこれをそのまま送る。`undefined`は「まだ送るべき指示が決まっていない」
@@ -531,6 +538,8 @@ export class LoopController {
      * 割り込まないsoft deadlineであり、実時間に対する厳密な期限管理ではない。
      */
     private readonly now: () => number = () => performance.now(),
+    /** 背景タスクを待つ・待たないの判断を残すログ（Issue #1676）。 */
+    private readonly log: (message: string) => void = () => undefined,
   ) {}
 
   getStatus(): LoopStatus {
@@ -649,6 +658,7 @@ export class LoopController {
     this.advisorDisabled = false;
     this.runAbort = new AbortController();
     this.evaluating = false;
+    this.clearBackgroundWait();
     this.pendingPrompt = undefined;
     this.status = {
       running: true,
@@ -703,6 +713,7 @@ export class LoopController {
     this.runAbort?.abort();
     this.runAbort = undefined;
     this.evaluating = false;
+    this.clearBackgroundWait();
     this.pendingPrompt = undefined;
     this.lastMessage = undefined;
     this.status = { ...this.status, running: false, stopReason: reason };
@@ -725,6 +736,9 @@ export class LoopController {
       return;
     }
     if (state.busy) {
+      // 背景タスクを待っている間に次のターンが始まった（CLIが完了通知から自分で始めた
+      // ターンなど）。上限の判定はこのターンの完了時に行う
+      this.clearBackgroundWait();
       if (!this.sawBusy) {
         // このターンが始まった時点の完了世代を覚える（issue #939）
         this.resultSeqAtTurnStart = state.turnCompletionSeq;
@@ -790,6 +804,12 @@ export class LoopController {
       declaresDone(newMessage);
     if (doneDeclared && plan.doneCheck === undefined) {
       this.stop('done');
+      return;
+    }
+    // 背景タスクの完了待ち（Issue #1676）。停滞の履歴・評価・送信のどれにも進めない。
+    // 「完了通知を待つ」と書いて終えたターンへ`続けて。`を送ると、待つだけのターンが
+    // 送信回数を食い潰す（77秒で7回を使い切った事象）
+    if (this.waitsForBackgroundTasks(plan, state)) {
       return;
     }
     // 停滞判定（design.md §16.27、Issue #336）に使う履歴を、判定の対象になったターンの
@@ -1135,6 +1155,71 @@ export class LoopController {
       return false;
     }
     return this.now() - this.startedAt >= limit;
+  }
+
+  /**
+   * 完了したターンの後に、背景タスクの完了を待つか（Issue #1676）。待つなら`true`。
+   *
+   * 背景タスクが残っている間は次の指示を送らず、`iteration`も進めない。背景タスクが
+   * 終わるとCLIが完了通知から自分でターンを始めるため、そのターンの完了で改めて判定する。
+   *
+   * 一覧はClaude Codeの`background_tasks_changed`が毎回まるごと置き換える
+   * （`streamJson.ts`の`applyBackgroundTasksChanged`）。通知を一度も受け取っていない間は
+   * `NO_BACKGROUND_TERMINALS`そのものが残るため、同一性で「不明」と見分ける。実測（CLI
+   * 2.1.280）では背景タスクを起動すると`result`より先に通知が届いたので、不明は
+   * 背景タスクを起動していないとみなし、従来どおり送る。Codexはターンの完了で一覧を
+   * `NO_BACKGROUND_TERMINALS`へ戻すため、常にこちらへ入る。
+   */
+  private waitsForBackgroundTasks(plan: LoopPlan, state: ChatState): boolean {
+    const tasks = state.backgroundTerminals;
+    if (tasks === NO_BACKGROUND_TERMINALS) {
+      this.log(
+        `ループ: 背景タスクの一覧を受け取らないままターンが完了した（不明）。` +
+          `背景タスク無しとみなして続ける（送信${String(this.status.iteration)}回目の後）`,
+      );
+      return false;
+    }
+    if (tasks.length === 0) {
+      return false;
+    }
+    // 待つ前に時間上限を見る。待ち始めてから上限を過ぎた分はタイマーが見る
+    if (this.hasExceededDuration(plan)) {
+      this.stop('timedOut');
+      return true;
+    }
+    const names = tasks.map((t) => `${t.taskType ?? '?'}:${t.command}`).join(', ');
+    this.log(
+      `ループ: 背景タスク${String(tasks.length)}件の完了を待つ。次の指示は送らず、送信回数も` +
+        `数えない（送信${String(this.status.iteration)}回目の後。${names}）`,
+    );
+    this.scheduleBackgroundWaitDeadline(plan);
+    return true;
+  }
+
+  /** 背景タスクを待つ間も時間上限を実時間で効かせる（Issue #1676）。 */
+  private scheduleBackgroundWaitDeadline(plan: LoopPlan): void {
+    this.clearBackgroundWait();
+    const limit = plan.maxDurationMs;
+    if (limit === undefined || this.startedAt === undefined) {
+      return;
+    }
+    const generation = this.runGeneration;
+    const remaining = Math.max(0, this.startedAt + limit - this.now());
+    this.backgroundWaitTimer = setTimeout(() => {
+      this.backgroundWaitTimer = undefined;
+      // 待つ間に止められた・別の実行が始まった・次のターンが始まった場合は何もしない
+      if (generation !== this.runGeneration || this.plan !== plan || this.sawBusy) {
+        return;
+      }
+      this.stop('timedOut');
+    }, remaining);
+  }
+
+  private clearBackgroundWait(): void {
+    if (this.backgroundWaitTimer !== undefined) {
+      clearTimeout(this.backgroundWaitTimer);
+      this.backgroundWaitTimer = undefined;
+    }
   }
 
   private dispatch(prompt: string, phase: LoopEngineeringPhase): void {
