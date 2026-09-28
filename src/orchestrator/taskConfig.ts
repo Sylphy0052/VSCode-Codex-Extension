@@ -57,6 +57,12 @@ export interface ExtensionSafetyBaseline extends SafetyBaseline {
    * trueなら `bypassPermissions` を読み替えず、そのままタスクを実行する（危険判定は働かない）。
    */
   allowClaudeBypassPermissions: boolean;
+  /**
+   * machineスコープ設定 `agent.workflows.fullAutoApprove`（Issue #1656）。
+   * trueなら実効 `autoApprove` のタスクの承認要求を危険判定なしで許可する（mergeとリモート
+   * ブランチの削除を除く）。未指定は `false` と同じ。
+   */
+  fullAutoApprove?: boolean;
 }
 
 export interface EffectiveTaskConfig {

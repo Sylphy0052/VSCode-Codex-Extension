@@ -15,6 +15,7 @@ import {
   remainingIterations,
 } from './contextLow';
 import { classifyApprovalRequest, type EscalationPolicy, type TaskBoundary } from './escalation';
+import { classifyFullAutoApproval } from './taskStageApproval';
 import {
   buildTaskIssueBody,
   buildTaskPullRequestTitle,
@@ -5480,7 +5481,11 @@ export class WorkflowRunner {
       allow: task.allow,
       autoApprove: liveTask.autoApprove,
     };
-    const result = classifyApprovalRequest(request, liveTask.boundary, policy);
+    // 設定は承認のたびに読み直す（実行中に無効へ戻したら次の承認から危険判定へ戻す）
+    const result =
+      liveTask.autoApprove && this.deps.readBaseline().fullAutoApprove === true
+        ? classifyFullAutoApproval(request)
+        : classifyApprovalRequest(request, liveTask.boundary, policy);
     this.deps.log.info(
       `[workflow ${runId}/${taskId}] 承認判定(${approval.kind}): ${result.decision} - ${result.reasons.join(' / ')}`,
     );
