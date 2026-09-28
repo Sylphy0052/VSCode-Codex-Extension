@@ -26,6 +26,8 @@ import {
   type RoadmapQuestionVerdict,
 } from './roadmapQuestionMcp';
 import type { RunNotesStore } from './runNotes';
+import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
+import { RELOAD_HALT_REASON } from './taskRunReload';
 import { SerialQueue } from './serialQueue';
 import {
   checkStageReport,
@@ -337,6 +339,15 @@ export class TaskStageRunner {
         : openStageGate(halted, taskId, { gateId, kind: 'stageFailed', detail: failure }, this.now());
     });
     this.judgeGateLater(runId, taskId, gateId, next);
+  }
+
+  /**
+   * 再読み込みで終わった工程を開き直せなかった（Issue #1670）。再読み込みで止めた工程と同じく
+   * 人が「やり直す」まで止め、関門は開かない。開き直せなかった理由はログへ残す。
+   */
+  private async haltAfterReload(runId: string, taskId: string, message: string): Promise<void> {
+    this.warn(runId, taskId, message);
+    await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', RELOAD_HALT_REASON, this.now()));
   }
 
   /** レビューが直さずに残した指摘を持って終わったなら、差し戻すかどうかの関門を開く。 */
@@ -652,11 +663,14 @@ export class TaskStageRunner {
       return false;
     }
     const cwd = WORKTREE_STAGES.has(stage) ? task.worktreePath : run.workspaceRoot;
+    // 再読み込みで終わった工程（Issue #1670）は、開き直せなければ再読み込みで止めた工程と同じにする
+    const reload = task.pause?.reload === true;
+    const fail = (message: string): Promise<void> =>
+      reload
+        ? this.haltAfterReload(runId, taskId, message)
+        : this.haltAndOpenGate(runId, taskId, 'failed', message);
     if (attempt.sessionRef === undefined || cwd === undefined) {
-      await this.haltAndOpenGate(
-        runId,
-        taskId,
-        'failed',
+      await fail(
         `${STAGE_LABELS[stage]}を再開できませんでした: 一時停止した会話か作業ディレクトリの記録が無い`,
       );
       return false;
@@ -678,12 +692,7 @@ export class TaskStageRunner {
         attempt.sessionRef,
       );
     } catch (e) {
-      await this.haltAndOpenGate(
-        runId,
-        taskId,
-        'failed',
-        `${STAGE_LABELS[stage]}のセッションを再開できませんでした: ${errorMessage(e)}`,
-      );
+      await fail(`${STAGE_LABELS[stage]}のセッションを再開できませんでした: ${errorMessage(e)}`);
       return false;
     }
     // 開くのを待つ間に拡張機能が終了した・人が止めた・runが止まったなら続きを送らない
@@ -704,7 +713,9 @@ export class TaskStageRunner {
       entry,
       this.buildLoopPlan(
         ref,
-        `一時停止していた工程を再開した。一時停止する前の続きから進める。${stageScopeReminder(ref)}`,
+        reload
+          ? `${RELOAD_RESUME_PROMPT}${stageScopeReminder(ref)}`
+          : `一時停止していた工程を再開した。一時停止する前の続きから進める。${stageScopeReminder(ref)}`,
       ),
     );
     return true;

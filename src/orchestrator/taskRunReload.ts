@@ -7,11 +7,13 @@ import {
   haltStage,
   listTasks,
   markStagePaused,
+  markStageReloadResuming,
   resetStageForRetry,
   setTaskRunHaltedByUser,
   type OrchestratedTask,
   type TaskAttention,
   type TaskRun,
+  type TaskStage,
 } from './taskRunState';
 import type { IssueState, PullRequestState } from './taskStageObservation';
 
@@ -25,6 +27,12 @@ import type { IssueState, PullRequestState } from './taskStageObservation';
 /** 再読み込みで工程セッションが終わった工程へ残す理由。 */
 export const RELOAD_HALT_REASON =
   '拡張機能の再読み込みで工程セッションが終わりました。「やり直す」で始め直せます';
+
+/** 再読み込みの後に同じ会話を開き直す工程の一時停止の理由（Issue #1670）。 */
+export const RELOAD_PAUSE_REASON = '拡張機能の再読み込みで工程セッションが終わった。同じ会話を開き直して続ける';
+
+/** 同じ実行回を再読み込みの後に開き直す上限（Issue #1670）。超えたら開き直さずに止める。 */
+export const MAX_RELOAD_RESUMES = 3;
 
 /**
  * タスクごとに観測した外部の状態。記録が無い・取得に失敗したものは`undefined`。`undefined`と
@@ -44,6 +52,8 @@ type HaltAttention = Extract<TaskAttention, 'needsAction' | 'failed'>;
  * - PRがmerge済み: 止め方に関係なく（人が止めたタスクも）残りの工程を完了にする
  * - 人が止めていたタスク: そのまま残す
  * - PRがmergeされずに閉じられた、記録したworktreeが無い、既存のIssueが閉じられた: 工程を止めて理由を残す
+ * - 実行中だった工程で会話が残っているもの: 同じ会話を開き直す再開待ちにする（Issue #1670）。
+ *   mergeとcleanup・会話の記録が無い・開き直した回数が上限に達したものは止める
  * - 一時停止していた工程: 一時停止のまま残す（`resume_stage`で同じ会話から続ける）
  * - 実行中だった工程: 再読み込みで止まった理由を残して止める
  * - Reflexが判定中だった関門: ユーザーの判断待ちにする（判定し直さない）
@@ -84,7 +94,10 @@ export function reconcileTaskRunOnReload(
         problem.failure,
         now,
       );
-    } else if (status === 'running' && task.pause !== undefined) {
+    } else if (status === 'running' && canReopenAfterReload(task, stage)) {
+      // 会話が残っている工程は止めずに、同じ会話を開き直す再開待ちにする（Issue #1670）
+      next = markStageReloadResuming(next, task.taskId, RELOAD_PAUSE_REASON, now);
+    } else if (status === 'running' && task.pause !== undefined && task.pause.reload !== true) {
       // 一時停止した工程は会話が残っているため止めず、一時停止のまま残す（Issue #1629）。
       // ターンの終わりを待っていた・開き直す途中だった工程も、resume_stageまで開き直さない
       next = markStagePaused(next, task.taskId, now);
@@ -93,6 +106,22 @@ export function reconcileTaskRunOnReload(
     }
   }
   return finishTaskRunIfDone(escalateJudgingGatesOnReload(next, now), now);
+}
+
+/**
+ * 再読み込みで終わった工程を、同じ会話で開き直せるか（Issue #1670）。人の一時停止中の工程は
+ * 対象にしない。mergeとcleanupはmergeの鍵を持たずに開き直せないため止める（`pauseStage`と同じ）。
+ */
+function canReopenAfterReload(task: OrchestratedTask, stage: TaskStage): boolean {
+  if (stage === 'mergeCleanup' || (task.pause !== undefined && task.pause.reload !== true)) {
+    return false;
+  }
+  const attempt = task.stages[stage].attempts.find((a) => a.attemptId === task.currentAttemptId);
+  return (
+    attempt !== undefined &&
+    attempt.sessionRef !== undefined &&
+    (attempt.reloadResumes ?? 0) < MAX_RELOAD_RESUMES
+  );
 }
 
 /** merge済みでない前提で、外部の状態が工程を続けられないものか。 */

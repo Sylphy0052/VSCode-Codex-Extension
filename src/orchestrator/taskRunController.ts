@@ -38,7 +38,12 @@ import {
 } from './taskRunGates';
 import type { ReflexJudgeDeps } from './planReflexReview';
 import { reconcileTaskRunOnReload, type TaskExternalFacts } from './taskRunReload';
-import { decideStageStart, type StageRef, type StartStageRejection } from './taskRunScheduler';
+import {
+  decideStageStart,
+  listResumingStages,
+  type StageRef,
+  type StartStageRejection,
+} from './taskRunScheduler';
 import {
   approveTaskPlan,
   createTaskRun,
@@ -1020,6 +1025,7 @@ export class TaskRunController {
    * 再読み込み後の復元。工程セッションとOrchestratorは再読み込みで終わっているため、外部の状態
    * （PR・worktree・Issue）と突き合わせて工程を止め・終え（`taskRunReload.ts`）、終わっていない
    * runは人が「再開」するまで止めておく。再読み込みの間にmergeされたタスクは後片付けまで行う。
+   * 実行中だった工程のうち会話が残っているものは、同じ会話を開き直す（Issue #1670）。
    */
   async restore(): Promise<void> {
     for (const run of this.deps.store.list()) {
@@ -1028,12 +1034,14 @@ export class TaskRunController {
         continue;
       }
       let merged: string[] = [];
+      let resuming = false;
       try {
         const facts = await this.collectReloadFacts(run);
         const next = await this.deps.store.update(run.runId, (current) =>
           reconcileTaskRunOnReload(current ?? run, facts, this.now()),
         );
         this.lastSeen.set(run.runId, next);
+        resuming = listResumingStages(next).length > 0;
         merged = [...facts]
           .filter(([, fact]) => fact.pullRequestState === 'merged')
           .map(([taskId]) => taskId);
@@ -1047,6 +1055,11 @@ export class TaskRunController {
         } catch (e: unknown) {
           this.deps.log(`[task run] ${taskId}のmerge後の後片付けに失敗しました: ${String(e)}`);
         }
+      }
+      // 再読み込みで終わった工程は同じ会話を開き直す（Issue #1670）。runは止めたままなので、
+      // 新しい工程は人が「再開」するまで始まらない
+      if (resuming) {
+        this.pumpLater(run.runId);
       }
     }
   }

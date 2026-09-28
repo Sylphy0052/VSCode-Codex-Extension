@@ -2159,6 +2159,11 @@ export class ClaudeChatViewManager
     const taskConfig = toClaudeConfig(input, await this.resolveSandboxArgs(input));
     // 一時停止した工程の再開（Issue #1629）は新しい会話を作らず、同じ会話を`-r`で開き直す
     const resumeId = input.resume?.sessionId;
+    // CLIが会話を書き出す前に終わった会話（最初の指示の処理前など）は`-r`で開けないため、
+    // 開き直す側（再読み込み後の再開。Issue #1670）が新しい会話へ落とせるよう例外にする
+    if (resumeId !== undefined && (await this.store.resolveTranscriptPath(resumeId)) === undefined) {
+      throw new Error('再開する会話の記録が見つかりません');
+    }
     if (resumeId !== undefined && this.panels.has(resumeId)) {
       throw new Error('再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください');
     }

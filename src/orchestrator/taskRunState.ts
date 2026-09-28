@@ -88,6 +88,11 @@ export interface StageAttempt {
   sessionRef: string | undefined;
   /** この実行回で使った設定。自動引き継ぎの実行回は前の実行回の設定を引き継ぐ。 */
   decision: StageDecision;
+  /**
+   * ウィンドウの再読み込みの後に同じ会話を開き直した回数（Issue #1670）。上限を超えたら開き直さずに
+   * 止める。追加前に保存したrunには無い（0回として扱う）。
+   */
+  reloadResumes?: number;
 }
 
 export interface TaskStageRecord {
@@ -135,6 +140,11 @@ export interface TaskStagePause {
   requestedAt: string;
   /** ISO8601。セッションを閉じた時刻。 */
   pausedAt?: string | undefined;
+  /**
+   * ウィンドウの再読み込みで工程セッションが終わった一時停止（Issue #1670）。`resuming`のまま置き、
+   * run全体が止まっていても開き直す。人が一時停止へ戻したら外す。
+   */
+  reload?: true | undefined;
 }
 
 /** 1つのタスク。runの中でタスク1件につき1つだけ作る。 */
@@ -977,8 +987,47 @@ export function markStagePaused(run: TaskRun, taskId: string, now: Date): TaskRu
     run,
     taskId,
     ['requested', 'resuming'],
-    (task, at) => task.pause && { ...task.pause, phase: 'paused', pausedAt: at },
+    // 再読み込み由来の印は外す。以後は人の`resume_stage`とrunの再開を待つ普通の一時停止にする
+    (task, at) => task.pause && { ...task.pause, phase: 'paused', pausedAt: at, reload: undefined },
     now,
+  );
+}
+
+/**
+ * 再読み込みで工程セッションが終わった工程を、同じ会話を開き直す再開待ちにする（Issue #1670）。
+ * 実行回の開き直した回数を1つ増やす。実行中でない・人の一時停止中の工程はそのまま返す。
+ */
+export function markStageReloadResuming(
+  run: TaskRun,
+  taskId: string,
+  reason: string,
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  if (task === undefined || (task.pause !== undefined && task.pause.reload !== true)) {
+    return run;
+  }
+  const next = setStagePause(
+    run,
+    taskId,
+    [undefined, 'resuming'],
+    (_task, at) => ({ reason, phase: 'resuming', requestedAt: at, pausedAt: at, reload: true }),
+    now,
+  );
+  const paused = getTask(next, taskId);
+  const stage = paused === undefined ? undefined : currentStage(paused);
+  if (next === run || paused === undefined || stage === undefined) {
+    return next;
+  }
+  return withTask(
+    next,
+    withStage(paused, stage, {
+      attempts: paused.stages[stage].attempts.map((a) =>
+        a.attemptId === paused.currentAttemptId
+          ? { ...a, reloadResumes: (a.reloadResumes ?? 0) + 1 }
+          : a,
+      ),
+    }),
   );
 }
 
