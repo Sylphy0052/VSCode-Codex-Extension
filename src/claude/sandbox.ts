@@ -34,8 +34,11 @@ export type ClaudeSandboxMode = 'read-only' | 'workspace-write';
  * 2. どちらも承認の確認が届く（sandbox外へ回った）か、承認なしで接続に失敗して終わる
  *    （sandbox内で拒否された）ことを確かめる。承認なしで接続に成功したら、sandboxの外へ
  *    漏れているので、この一覧と`network`の設定を見直すまでその版を使わない
+ *
+ * 一致しない形（連結、`git -C <dir> push`など）で打たれたものは、実行前に
+ * `sandboxBashGuard.ts`が拒否して打ち直させる（Issue #1668）。
  */
-const EXCLUDED_COMMANDS: readonly string[] = [
+export const EXCLUDED_COMMANDS: readonly string[] = [
   'gh *',
   'glab *',
   'git push *',
@@ -121,6 +124,7 @@ export function buildClaudeSandboxSettings(
  *
  * 一致はコマンドの先頭で見るため、`git -C <dir> push`も`git push *`に一致せずsandbox内で走る
  * （Issue #1666）。`git -C *`を除外へ足すとローカルのgit操作まで承認へ回るので、指示で塞ぐ。
+ * 指示が守られなかった場合は、`sandboxBashGuard.ts`のPreToolUse hookが実行前に拒否する（Issue #1668）。
  */
 export function buildClaudeSandboxPrompt(): string {
   const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
