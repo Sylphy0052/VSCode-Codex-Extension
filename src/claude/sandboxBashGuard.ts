@@ -27,6 +27,9 @@ const NETWORK_COMMANDS: readonly (readonly string[])[] = EXCLUDED_COMMANDS.map((
   pattern.replace(/ \*$/, '').split(' '),
 );
 
+/** `NETWORK_COMMANDS`の先頭の語（`git`・`gh`など）。 */
+const NETWORK_HEADS = new Set(NETWORK_COMMANDS.map((name) => name[0]));
+
 /** 後ろのコマンドをそのまま起動するラッパー。先頭にあるとパターンの先頭一致から外れる。 */
 const WRAPPERS = new Set(['env', 'timeout', 'nice', 'nohup', 'time', 'command', 'sudo', 'stdbuf', 'exec']);
 
@@ -116,13 +119,16 @@ function readNetworkCommand(words: readonly string[]): NetworkCommand | undefine
     i++;
     prefixed = true;
   }
-  while (i < words.length && WRAPPERS.has(words[i])) {
-    i++;
-    prefixed = true;
-    // ラッパーのオプションと値（`timeout 60`の秒数、`env`の代入）を読み飛ばす
-    while (i < words.length && (/^(-|\d)/.test(words[i]) || ASSIGNMENT.test(words[i]))) {
-      i++;
+  if (i < words.length && WRAPPERS.has(words[i])) {
+    // ラッパーのオプションは値を取るもの（`timeout -s SIGKILL 60`、`sudo -u <user>`）があり、
+    // 語の形だけでは読み飛ばす数を決められない。後ろで最初に現れるネットワークコマンド名を
+    // 起動されるコマンドとみなす
+    const next = words.findIndex((word, k) => k > i && NETWORK_HEADS.has(word));
+    if (next < 0) {
+      return undefined;
     }
+    i = next;
+    prefixed = true;
   }
   const head = words[i];
   if (head === undefined) {
@@ -163,20 +169,21 @@ function quoteWord(word: string): string {
  */
 export function sandboxBashGuardReason(command: string): string | undefined {
   const commands = splitShellCommands(command);
-  for (const words of commands) {
-    const found = readNetworkCommand(words);
-    if (found === undefined || (commands.length === 1 && !found.prefixed)) {
-      continue;
-    }
-    const retry = [...found.name, ...found.args].map(quoteWord).join(' ');
-    return [
-      `このコマンドはsandbox内で走り、ネットワークが拒否されて失敗するため実行しなかった。`,
-      `${found.name.join(' ')}がsandboxの外で走るのは、1回のBash呼び出しにそれだけを単独で書き、先頭から始めたときに限る。`,
-      `cd・git -C <dir>・環境変数・timeoutなどを前に付けず、;・&&・||・パイプで他のコマンドと連結せず、次の形で打ち直す: ${retry}`,
-      '別のディレクトリで実行する必要があれば、先にcdだけを別のBash呼び出しで実行してから打つ。',
-    ].join('\n');
+  const found = commands
+    .map(readNetworkCommand)
+    .filter((c): c is NetworkCommand => c !== undefined && (commands.length > 1 || c.prefixed));
+  if (found.length === 0) {
+    return undefined;
   }
-  return undefined;
+  // 該当が複数あれば全部を案内する。1つずつ案内すると、打ち直すたびに次の分で拒否される
+  const names = [...new Set(found.map((c) => c.name.join(' ')))].join('・');
+  const retries = found.map((c) => [...c.name, ...c.args].map(quoteWord).join(' '));
+  return [
+    `このコマンドはsandbox内で走り、ネットワークが拒否されて失敗するため実行しなかった。`,
+    `${names}がsandboxの外で走るのは、1回のBash呼び出しにそれだけを単独で書き、先頭から始めたときに限る。`,
+    `cd・git -C <dir>・環境変数・timeoutなどを前に付けず、;・&&・||・パイプで他のコマンドと連結せず、次の形で1つずつ別のBash呼び出しとして打ち直す: ${retries.join(' / ')}`,
+    '別のディレクトリで実行する必要があれば、先にcdだけを別のBash呼び出しで実行してから打つ。',
+  ].join('\n');
 }
 
 /**
