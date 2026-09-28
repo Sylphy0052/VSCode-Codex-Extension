@@ -118,6 +118,9 @@ export function buildClaudeSandboxSettings(
  * 連結するとsandbox内で走る。sandbox内では利用者のRead denyがdenyReadへ反映されて認証情報を
  * 読めず、ネットワークも拒否されるため、`gh auth login`を促す未認証エラーで失敗する。
  * 認証情報をsandboxへ渡すと承認なしのコマンドから読み出せてしまうので、連結させない側で塞ぐ。
+ *
+ * 一致はコマンドの先頭で見るため、`git -C <dir> push`も`git push *`に一致せずsandbox内で走る
+ * （Issue #1666）。`git -C *`を除外へ足すとローカルのgit操作まで承認へ回るので、指示で塞ぐ。
  */
 export function buildClaudeSandboxPrompt(): string {
   const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
@@ -125,7 +128,7 @@ export function buildClaudeSandboxPrompt(): string {
     'Bashのコマンドはsandbox内で走り、ネットワークと認証情報を使えない。',
     `次のコマンドは、単独で実行したときだけsandboxの外で走る: ${commands}。`,
     'これらは1回のBash呼び出しに1つだけ書き、;、&&、||、パイプで他のコマンドと連結しない。',
-    '前にcdも付けない（git -C <dir> pushのように引数でディレクトリを渡す）。',
+    '前にcdも付けず、git -C <dir> pushのようにgitとサブコマンドの間へ引数も挟まない。作業ディレクトリでそのまま打つ。',
     'これらが認証やネットワークのエラーで失敗したら、使えないと判断する前に単独で打ち直す。',
   ].join('\n');
 }
