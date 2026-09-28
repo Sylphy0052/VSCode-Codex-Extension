@@ -22,8 +22,8 @@ import type { WorkflowTask } from './workflow';
  *   引数パスの境界チェックにも掛からない（実測で確認済み）
  * - スクリプト言語のワンライナーで同じ効果を得る: `perl -e 'unlink glob
  *   "/repo/work/tmp/*"'` はシェルメタ文字も既知のコマンド名も含まない。引数中の
- *   パスも、クォートに包まれているため `extractPathLikeArguments` の
- *   「`/` 始まり」判定に掛からない
+ *   パスが境界内を指していれば境界チェックにも掛からず、文字列の連結で組み立てた
+ *   パス（`"/re" . "po"` 等）は `extractPathLikeArguments` がパスとして拾えない
  * - 2つの承認要求にまたがる間接実行: 1つ目の要求（`fileChange`）でスクリプトを
  *   書き込み、2つ目の要求（`command`）で `bash script.sh` のように無害な形で実行する。
  *   個々の要求は単体では安全に見えるため、1要求単位の判定である以上原理的に防げない
@@ -253,14 +253,18 @@ function tokenize(command: string): string[] {
 }
 
 /**
- * 空白区切りの雑なトークン化（大文字小文字を保持する版）。
+ * パス候補を拾うためのトークン化（大文字小文字を保持する版）。
  * コマンド引数からパスらしいトークンを拾う用途では、パスの実体を変えないために
  * 大文字小文字を保ったまま扱う（`.git` セグメント判定だけは別途大文字小文字を無視する）。
+ * 空白に加えてシェルの制御演算子・リダイレクト（`;` `&` `|` `(` `)` `<` `>`）でも区切り、
+ * 各トークンの前後の引用符（`'` `"`）を外す。`cd /repo/work/R119; ls` の `R119;` を
+ * 実在しないパスとして境界外と誤判定せず、`>/outside/file` や `"/outside/b"` を
+ * 取りこぼさないため（#1658）。危険パターン判定側の `tokenize` はこの分割を使わない。
  */
-function rawTokenize(command: string): string[] {
+function splitPathTokens(command: string): string[] {
   return command
-    .trim()
-    .split(/\s+/u)
+    .split(/[\s;&|()<>]+/u)
+    .map((t) => t.replace(/^['"]+|['"]+$/gu, ''))
     .filter((t) => t !== '');
 }
 
@@ -534,7 +538,7 @@ function hasParentSegment(token: string): boolean {
  * - `.git` をパスセグメントとして含む（`cwd` 相対の書き込み先でも拾うため）
  */
 function extractPathLikeArguments(command: string): string[] {
-  return rawTokenize(command).filter(
+  return splitPathTokens(command).filter(
     (t) => looksAbsolutePath(t) || hasParentSegment(t) || hasGitSegment(t),
   );
 }
