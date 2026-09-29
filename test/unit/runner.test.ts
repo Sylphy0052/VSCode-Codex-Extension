@@ -64,6 +64,7 @@ import {
   type WorktreeFileSystemPort,
 } from '../../src/orchestrator/worktree';
 import { MAX_WORKFLOW_FILE_BYTES, type Provider } from '../../src/orchestrator/workflow';
+import { RunNotesStore } from '../../src/orchestrator/runNotes';
 import type { Logger } from '../../src/log';
 import { IntegrationGitModel, branchShaOf } from './fakeIntegrationGit';
 
@@ -1150,6 +1151,8 @@ function createHarness(
     filePort?: WorkflowFilePort;
     /** `verify.commands` の実行（Issue #1378）。 */
     verifyCommands?: WorkflowVerifyCommandDeps;
+    /** runをまたぐ教訓の保存先（Issue #1599）。無いと`record_lesson`を出さない。 */
+    runNotes?: RunNotesStore;
   },
 ): Harness {
   const codexHost = new FakeHost();
@@ -1179,6 +1182,7 @@ function createHarness(
     ...(options?.pseudoWorktree !== undefined ? { pseudoWorktree: options.pseudoWorktree } : {}),
     ...(options?.messaging !== undefined ? { messaging: options.messaging } : {}),
     ...(options?.roadmap !== undefined ? { roadmap: options.roadmap } : {}),
+    ...(options?.runNotes !== undefined ? { runNotes: options.runNotes } : {}),
     ...(options?.readMergeApprovalTimeoutSec !== undefined
       ? { readMergeApprovalTimeoutSec: options.readMergeApprovalTimeoutSec }
       : {}),
@@ -9531,7 +9535,16 @@ tasks:
       'decide_final_mergeだけが列挙から漏れていた。将来ツールを足したときに' +
       '案内文の更新漏れを機械で検出する）',
     async () => {
-      const { runner, codexHost } = createHarness(YAML_ONE);
+      // record_lesson（Issue #1599）は`runNotes`を渡したときだけ列挙する。全ツールが
+      // 出る状態で列挙漏れを確かめるため、記録の無い保存先を渡す
+      const runNotes = new RunNotesStore({
+        isSymbolicLink: async () => false,
+        makeDirectory: async () => true,
+        appendLine: async () => true,
+        readTextFile: async () => ({ kind: 'missing' }),
+        replaceTextFile: async () => true,
+      });
+      const { runner, codexHost } = createHarness(YAML_ONE, { runNotes });
       await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
       await flush();
 
@@ -11492,6 +11505,18 @@ tasks:
       const branch = persisted?.branch ?? '';
       expect(cwd.endsWith('/T1')).toBe(true);
       expect(branch).not.toBe('');
+      // 会話の記録が残っていると、同じ会話を開き直す経路（Issue #1670）に入り、引き継ぎの
+      // 説明を添えず、起動に失敗しても新しい会話でやり直す。ここでは会話を開き直せない
+      // タスクの引き継ぎを確かめるため、記録を消しておく
+      await store.update(runId, (current) => {
+        const run = current ?? (store.find(runId) as PersistedRun);
+        return {
+          ...run,
+          tasks: Object.fromEntries(
+            Object.entries(run.tasks).map(([id, t]) => [id, { ...t, sessionId: undefined }]),
+          ),
+        };
+      });
       return { store, runId, cwd, branch };
     }
 

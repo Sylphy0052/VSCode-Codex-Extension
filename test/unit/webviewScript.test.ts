@@ -1138,9 +1138,9 @@ describe('workflowScript', () => {
 
       // 範囲の切り出しに失敗すると0件になりうる。0件だと後続の検査（forループ・空集合同士の
       // Set一致）が何も検査しないまま素通りしてしまうため、件数そのものを先に主張して固定する
-      // （issue #964時点で16種）。kindを足すときはこの数字も直すことになり、
+      // （Issue #1663で`superseded`を足して17種）。kindを足すときはこの数字も直すことになり、
       // それは意図した変更として差分に出る。
-      expect(allFailureKinds).toHaveLength(16);
+      expect(allFailureKinds).toHaveLength(17);
       // 範囲を切らずに拾うと`AutoResumeOutcome`のkindが混ざる。正規表現を緩めて範囲チェックが
       // 効かなくなったときに、これらが入っていないことで検出する。`resumed`だけは現状の
       // 正規表現では拾われない形（この行の一覧に残してあるのは、書き方が揃えられたときに
