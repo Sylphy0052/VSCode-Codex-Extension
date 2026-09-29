@@ -150,33 +150,6 @@ export const nodeCliCommandRunner: CliCommandRunner = {
 };
 
 /* -------------------------------------------------------------------------------------------- */
-/* PR/MRを閉じる                                                                                */
-/* -------------------------------------------------------------------------------------------- */
-
-/**
- * PR/MRをmergeせずに閉じる（GitHub: `gh pr close`、GitLab: `glab mr close`。Issue #1619）。
- * 計画から外れた着手済みタスクの後片付けで使う。
- */
-export async function closePullRequestWithoutMerge(
-  cli: CliCommandRunner,
-  host: ForgeHost,
-  repoRoot: string,
-  number: number,
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  const command = forgeCliCommand(host);
-  const args = host === 'github' ? ['pr', 'close', String(number)] : ['mr', 'close', String(number)];
-  const result = await cli.run(command, args, repoRoot);
-  if (result.code === 0) {
-    return { ok: true };
-  }
-  const detail = result.stderr.trim() !== '' ? result.stderr.trim() : result.stdout.trim();
-  return {
-    ok: false,
-    message: `${command} ${args.join(' ')} に失敗しました（終了コード ${String(result.code)}）: ${detail}`,
-  };
-}
-
-/* -------------------------------------------------------------------------------------------- */
 /* 前提チェック                                                                                  */
 /* -------------------------------------------------------------------------------------------- */
 

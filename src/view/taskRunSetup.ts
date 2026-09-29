@@ -166,7 +166,6 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     worktreeQueue: deps.worktreeQueue,
     git: deps.git,
     fs: nodeWorktreeFileSystem,
-    cli: deps.cli,
     observation,
     resolveBaseCommit: (root) => resolveRoadmapBaseCommit(ports, root),
     sessionConfig: (engine) => deps.sessionConfig(engine),

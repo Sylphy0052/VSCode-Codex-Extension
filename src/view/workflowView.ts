@@ -12,7 +12,6 @@ import {
   createWorkflowFeed,
   type WorkflowChange,
   type WorkflowFeed,
-  type WorkflowFeedProgramPort,
 } from '../orchestrator/workflowFeed';
 import {
   parseRoadmapMarkdown,
@@ -55,29 +54,8 @@ import { remainingSourceLabel, type RemainingRecord } from '../orchestrator/runR
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 
 /**
- * ワークフローViewから、失敗の伝播・人による停止の状態が読める最小限の口
- * （design.md §16.37.3、roadmap W12-3、Issue #606の受入基準「失敗・停止の状態が
- * ワークフローViewから読める」）。`WorkflowViewManager`は`ProgramRunner`本体には
- * 依存せず、必要な操作（一覧・停止）だけをこの口として注入で受け取る
- * （`WorkflowRunner`を直接持たず`WorkflowRunner`型として受け取っているのと近い方針だが、
- * こちらは`ProgramRunner`が持つ操作のうちビューに要る分だけを切り出した専用の口にした。
- * `ProgramRunner`自体を丸ごと持たせると、ビューが実行の起動判断まで呼べてしまい、
- * 「どのrunをいつ起動するか」の判断はプログラム層に閉じるという既存の役割分担
- * （design.md §16.37.2「上位のオーケストレーターは置かない」）を崩しかねないため）。
- *
- * **省略可能。** コンストラクタでこの口を渡さない場合（既存のテスト・W12-2までの
- * `extension.ts`の配線）は、プログラムに関する表示・操作を一切行わない
- * （feedのスナップショットの`programs`が常に空になる）。既存の単発run実行の挙動には
- * 一切影響しない（受入基準「既存の単発runの挙動が変わらない」）。
- *
- * 実体は`workflowFeed.ts`の`WorkflowFeedProgramPort`（Issue #1272でfeed側へ移した。
- * Viewはこの口を直接使わず、feed越しに読む）。`extension.ts`が渡す形は変わらない。
- */
-export type ProgramViewPort = WorkflowFeedProgramPort;
-
-/**
  * 教訓欄（Issue #1599）が使う口。**省略可能**で、渡さなければ欄を一切出さない
- * （`ProgramViewPort`/`RoadmapViewPort`と同じ方針）。`listLessons`/`deleteLesson`/
+ * （`RoadmapViewPort`と同じ方針）。`listLessons`/`deleteLesson`/
  * `onDidChange`の実体は`runNotes.ts`の`RunNotesStore`（`extension.ts`が拡張機能全体で
  * 共有する1インスタンスから束ねる。`onDidChange`はワークフローView以外——taskRunの
  * オーケストレーター——が記録・削除した場合にも発火するため、ここでの
@@ -103,7 +81,7 @@ export interface RunNotesViewPort extends Pick<
 
 /**
  * ワークフローViewのロードマップ欄（Issue #1257）が使う口。**省略可能**で、渡さなければ
- * ロードマップ欄を一切出さない（`ProgramViewPort`と同じ方針）。
+ * ロードマップ欄を一切出さない（`RunNotesViewPort`と同じ方針）。
  *
  * ファイルの読み取りとCLIの実行という副作用をここへ閉じ込め、`WorkflowViewManager`側は
  * 受け取った文字列とIssue一覧を組み立てるだけにする（テストで差し替えられる）。
@@ -219,20 +197,15 @@ export class WorkflowViewManager implements vscode.Disposable {
    */
   private evidenceDoneKey: string | undefined;
   /**
-   * 単発runとプログラムの変化・状態を1本にまとめた口（Issue #1272）。Viewが購読する
-   * イベントも、読むスナップショットもこれ1つだけにする（`workflowFeed.ts`のJSDoc参照）。
+   * 単発runの変化・状態を扱う口（Issue #1272）。Viewが購読するイベントも、読む
+   * スナップショットもこれ1つだけにする（`workflowFeed.ts`のJSDoc参照）。
+   * プログラム機能はIssue #1679で削除済み。
    */
   private readonly feed: WorkflowFeed;
 
   constructor(
     private readonly runner: WorkflowRunner,
     private readonly log: Logger,
-    /**
-     * プログラムの一覧・停止・変化通知（design.md §16.37.3、roadmap W12-3、Issue #606）。
-     * 省略可能（`ProgramViewPort`のJSDoc参照）。`extension.ts`が`ProgramStore`/
-     * `ProgramRunner`から組み立てて渡す。
-     */
-    programs?: ProgramViewPort,
     /**
      * ロードマップ欄（Issue #1257）。省略可能（`RoadmapViewPort`のJSDoc参照）。
      */
@@ -247,7 +220,7 @@ export class WorkflowViewManager implements vscode.Disposable {
      */
     private readonly runNotes?: RunNotesViewPort,
   ) {
-    this.feed = createWorkflowFeed({ runner, ...(programs === undefined ? {} : { programs }) });
+    this.feed = createWorkflowFeed({ runner });
     this.unsubscribeChanged = this.feed.onChanged((change) => this.onFeedChanged(change));
     this.unsubscribeLessons = this.runNotes?.onDidChange(() => void this.postLessons());
   }
@@ -337,24 +310,18 @@ export class WorkflowViewManager implements vscode.Disposable {
   }
 
   /**
-   * feed（`workflowFeed.ts`）からの唯一の変化通知。単発runの変化もプログラムの変化も
-   * ここへ届く（Issue #1272）。
+   * feed（`workflowFeed.ts`）からの唯一の変化通知（Issue #1272）。
    *
-   * 何が変わったかで送る内容を変えない——run一覧・プログラム欄・表示中のrunは全て
+   * 何が変わったかで送る内容を変えない——run一覧・表示中のrunは全て
    * `feed.getSnapshot()`**1回の結果**から作るため、常に同じ時点の状態がそろって届く。
-   * 以前は`runner.onChanged`でrun側だけ、`programs.onChanged`でプログラム側だけを
-   * 更新しており、片方だけ新しい状態を描く余地が残っていた。
-   *
-   * 発火の順序（`ProgramRunner`が永続化を終えてから`kind: 'program'`が流れる）は
-   * feedを挟んでも変わらない（`workflowFeed.ts`のJSDoc参照）。
    */
   private onFeedChanged(change: WorkflowChange): void {
     // ロードマップ欄だけは取り直さない場合がある。ファイルの読み取りとCLIの起動
-    // （`gh`/`glab`）を伴うため、表示中のrunに関係しない変化——別runの進行や
-    // プログラム側の更新——のたびに走らせると、実行中はタスクの状態が変わるたびに
-    // プロセスが増える。統合前の`onRunnerChanged`も、表示中のrunの変化でなければ
-    // `postState`（その中の`postRoadmap`）を呼んでいなかった
-    const affectsActiveRun = change.kind !== 'run' || change.runId === this.activeRunId;
+    // （`gh`/`glab`）を伴うため、表示中のrunに関係しない変化——別runの進行——のたびに
+    // 走らせると、実行中はタスクの状態が変わるたびにプロセスが増える。統合前の
+    // `onRunnerChanged`も、表示中のrunの変化でなければ`postState`
+    // （その中の`postRoadmap`）を呼んでいなかった
+    const affectsActiveRun = change.runId === this.activeRunId;
     // 完了根拠もgitの起動を伴う。完了タスクの顔ぶれが変わらない変化では導き直さない
     // （完了後のファイル変更は、画面を開き直すか「再確認」で反映する）
     this.postAll({ refreshRoadmap: affectsActiveRun, evidenceOnlyIfDoneChanged: true });
@@ -387,7 +354,6 @@ export class WorkflowViewManager implements vscode.Disposable {
     void this.panel.webview.postMessage({
       type: 'feed',
       runs: feed.runs,
-      programs: feed.programs,
       state: snapshot === undefined ? undefined : this.buildStateMessage(snapshot),
     });
     if (options.refreshRoadmap !== false) {
@@ -733,15 +699,6 @@ export class WorkflowViewManager implements vscode.Disposable {
       await vscode.commands.executeCommand('agent.workflows.run');
       return;
     }
-    if (type === 'stopProgram' && typeof m['programId'] === 'string') {
-      // `activeRunId`の有無を問わない（プログラムのpendingなrun参照はそもそも
-      // `WorkflowRunner`側のrunIdを持たない。design.md §16.37.3、roadmap W12-3、
-      // Issue #606）。`programs`（`ProgramViewPort`）が未注入なら何もしない
-      await this.feed.haltProgram(m['programId']);
-      this.postAll();
-      return;
-    }
-
     if (type === 'refreshCompletionEvidence') {
       this.refreshCompletionEvidence();
       return;
@@ -1162,11 +1119,6 @@ ${workflowStyles()}
       </div>
       <div id="orchAskUser" class="orch-ask-user" hidden></div>
     </div>
-  </div>
-
-  <div id="programsSection" hidden>
-    <h2>プログラム</h2>
-    <div id="programs"></div>
   </div>
 
   <div id="content" hidden>

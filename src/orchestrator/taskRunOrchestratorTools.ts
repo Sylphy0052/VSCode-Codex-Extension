@@ -62,7 +62,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'propose_plan',
     description:
-      '作業の計画（タスクの分割と依存）を提案する。計画全体を毎回送る（差分ではない）。既存のタスクはget_run_stateのtaskId（T<数字>）で、新しいタスクは任意の仮キーで書く。応答で仮キーと採番したtaskIdの対応を返す。承認するまで工程は始まらず（approve_planツール、またはKanbanの承認ボタン）、承認後に計画を変えると再び承認待ちになる。',
+      '作業の計画（タスクの分割と依存）を提案する。計画全体を毎回送る（差分ではない）。既存のタスクはget_run_stateのtaskId（T<数字>）で、新しいタスクは任意の仮キーで書く。応答で仮キーと採番したtaskIdの対応を返す。承認するまで工程は始まらず（approve_planツール、またはKanbanの承認ボタン）、承認後に計画を変えると再び承認待ちになる。着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけで、タスクの追加はいつでもできる。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -108,7 +108,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'approve_plan',
     description:
-      '承認待ちの計画を承認し、工程を始める。承認待ちの計画が無ければ失敗する。',
+      '承認待ちの計画を承認し、工程を始める。呼ぶとユーザーの確認が入り、ユーザーが許可したときだけ承認される。承認待ちの計画が無ければ失敗する。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -303,14 +303,14 @@ const PAUSE_PHASE_LABELS: Record<TaskStagePausePhase, string> = {
 };
 
 /**
- * 人の承認を経ずに呼べるツール。計画の提案・承認はOrchestratorが自律で進める（Kanbanの
- * ユーザー承認ボタンを経ない）。取り消せない操作（工程の停止）とrun全体の方針
- * （並列上限）、別のrunを動かす操作（`resume_run`・`start_run`、Issue #1620）は含めない。`answer_question`と`resolve_gate`はツールの処理の中で本文を
+ * 人の承認を経ずに呼べるツール。計画の提案はOrchestratorが自律で進めるが、計画の承認
+ * （`approve_plan`）は含めない（Issue #1679。承認前の計画を人が確かめる）。取り消せない操作
+ * （工程の停止）とrun全体の方針（並列上限）、別のrunを動かす操作（`resume_run`・`start_run`、
+ * Issue #1620）も含めない。`answer_question`と`resolve_gate`はツールの処理の中で本文を
  * モーダルで確認するため、チャットの承認には回さない。
  */
 export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = new Set([
   'propose_plan',
-  'approve_plan',
   'get_run_state',
   'sync_roadmap',
   'refresh_kanban',

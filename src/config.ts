@@ -656,12 +656,12 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
 
 /**
  * オーケストレータモードの計画提案を、Reflexが妥当と判定したときに自動承認する（Issue #1554）。
- * ロードマップ計画審査（`roadmapPlanProposal.ts`）は無効化する設定が無く常に自動で書き戻すため、
- * 既定はそれに合わせて有効。無効にすると判定を試みず、常にユーザーの承認待ちにする。
+ * 既定は無効（Issue #1679）。承認前の計画を人が確認し、計画の書き換えを人の承認に通すため。
+ * 無効のときは判定を試みず、常にユーザーの承認待ちにする。
  */
 export function readTaskRunPlanAutoApproveEnabled(): boolean {
   const raw = vscode.workspace.getConfiguration('agent').get<boolean>('taskRun.planAutoApprove.enabled');
-  return typeof raw === 'boolean' ? raw : true;
+  return typeof raw === 'boolean' ? raw : false;
 }
 
 /** @see readAutoHandoffSoftThresholdPercent */

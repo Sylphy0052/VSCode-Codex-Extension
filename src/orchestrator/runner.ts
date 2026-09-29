@@ -71,7 +71,6 @@ import {
   type DispatchErrorLogPort,
   type HandoffPort,
   type HttpMcpTransportHandle,
-  type ProgramControlPort,
   type ToolUsageMetricsPort,
 } from './messaging';
 import { nodeHandoffFileSystem } from './nodeHandoffFileSystem';
@@ -1890,10 +1889,6 @@ export interface LiveRun {
    * 持つ。復元したrun（`rebuildLiveRun`）には無いので、改めて確認を取る。
    */
   verifyCommandConsent?: VerifyCommandConsent;
-  /** program配下のrun失敗後、program計画の変更が終わるまで制御MCPを維持する。 */
-  programRecoveryHold: boolean;
-  /** program配下でだけ注入される、run追加・削除・再試行・依存変更の制御口。 */
-  programControl: ProgramControlPort | undefined;
   /** 全タスク統合後の全体差分レビュー回数。 */
   integrationReviewAttempts: number;
   /** 非同期の統合差分レビュー中にMCPを先に閉じないための寿命フラグ。 */
@@ -2225,8 +2220,8 @@ interface TaskLaunchPreparation {
  * `onChanged` の最小限のpub-sub。VSCodeの `EventEmitter` には依存しない（design.mdの方針どおり）。
  * **`fire` は登録された順序どおりに、同期でリスナを呼ぶ。** リスナ本体が非同期処理を`await`する場合、
  * そのリスナより後に登録された別の購読者は、その非同期処理が完了する前の状態を読むことになる
- * （`programRunner.ts`のJSDoc・design.md §16.37.3のレビュー指摘F1、Issue #606参照。#605のF1と
- * 同じ機序が2回現れたため、この契約をここへ明記した）。
+ * （削除済み`programRunner.ts`のJSDoc・design.md §16.37.3のレビュー指摘F1、Issue #606参照。
+ * #605のF1と同じ機序が2回現れたため、この契約をここへ明記した）。
  */
 export class SimpleEmitter<T> {
   private readonly listeners: Array<(value: T) => void> = [];
@@ -2819,7 +2814,6 @@ export class WorkflowRunner {
     options?: {
       allowConfirmed?: boolean;
       allowConfirmedDigest?: string;
-      programControl?: ProgramControlPort;
     },
   ): Promise<StartWorkflowResult> {
     const parsed = await this.parseAndValidateWorkflow(defPath);
@@ -2908,8 +2902,6 @@ export class WorkflowRunner {
       finishedNotified: false,
       failureRecovery: undefined,
       failureRecoveryExhausted: false,
-      programRecoveryHold: false,
-      programControl: options?.programControl,
       integrationReviewAttempts: 0,
       integrationReviewInProgress: false,
       forgeFinalizationInProgress: false,
@@ -3370,38 +3362,6 @@ export class WorkflowRunner {
    */
   sendToOrchestrator(runId: string, text: string): boolean {
     return sendUserMessageToOrchestrator(this.internals, runId, text);
-  }
-
-  /** リロード後にprogramとの制御口を同じrunへ付け直す。 */
-  attachProgramControl(runId: string, control: ProgramControlPort): void {
-    const live = this.runs.get(runId);
-    if (live !== undefined) live.programControl = control;
-  }
-
-  /** program復旧中は終了済み子runのMCPとオーケストレーターを閉じずに維持する。 */
-  beginProgramRecovery(runId: string, message: string): boolean {
-    const live = this.runs.get(runId);
-    if (live === undefined) return false;
-    live.programRecoveryHold = true;
-    notifyOrchestrator(this.internals, runId, {
-      kind: 'failureRecovery',
-      body: [
-        message,
-        'get_program_statusで全体を確認し、retry_run、add_run、remove_run、update_run_dependenciesでprogram計画を修復してください。',
-        '後続runはskipせずpendingのままです。10分以内に計画を変更できない場合だけ最終失敗になります。',
-      ].join('\n'),
-    });
-    this.notify(runId);
-    return true;
-  }
-
-  /** program変更で再スケジュール可能になったか、復旧期限が切れたときに制御口を閉じる。 */
-  endProgramRecovery(runId: string): void {
-    const live = this.runs.get(runId);
-    if (live === undefined) return;
-    live.programRecoveryHold = false;
-    this.closeMessagingIfFinalMergeSettled(runId, getRunOutcome(live.runState));
-    this.notify(runId);
   }
 
   /**
@@ -3974,8 +3934,9 @@ export class WorkflowRunner {
           // タスク間メッセージングのMCPサーバが最終マージ確定後も閉じられないまま残る
           // （`closeMessagingIfFinalMergeSettled`の3つの呼び出し口の1つがここ。他の2つは
           // design.md §16.26「MCPサーバの寿命との整合」参照）。兄弟の形は`runnerRestore.ts`
-          // の`autoResumeIfEligible`呼び出しと`programRunner.ts`の`attach()`内（どちらも
-          // `.catch`でログを出すだけで、フォローアップの呼び出しを持たない点だけがここと違う）
+          // の`autoResumeIfEligible`呼び出しと削除済み`programRunner.ts`の`attach()`内
+          // （どちらも`.catch`でログを出すだけで、フォローアップの呼び出しを持たない点だけが
+          // ここと違う）
           void this.finalizeForge(runId)
             .catch((e: unknown) => {
               this.deps.log.error(
@@ -4165,7 +4126,6 @@ export class WorkflowRunner {
       live.failureRecovery !== undefined ||
       live.integrationReviewInProgress ||
       live.forgeFinalizationInProgress ||
-      live.programRecoveryHold ||
       live.pendingAskUser !== undefined
     ) {
       return;

@@ -2,6 +2,7 @@ import { stripControlCharsPreservingNewlines } from './sanitize';
 import {
   allocateTaskIds,
   getTask,
+  hasStarted,
   isValidTaskId,
   listTasks,
   type TaskDraft,
@@ -182,7 +183,8 @@ export interface ResolvedTaskPlan {
  *
  * - `T<n>`の形のキーは既存のタスクだけを指せる（Controllerが採番する番号を名乗らせない）
  * - 依存先は計画内のキーだけ。循環は循環するキーの組を挙げて拒否する
- * - 着手済みのタスクも計画から外せ、既存のIssue番号も変えられる（Issue #1614。自律運用のため）
+ * - 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない（Issue #1679。承認前の計画変更で
+ *   worktree・PRを持つタスクを消させない）。未着手のタスクの削除と新しいタスクの追加は通す
  * - 既存のIssue番号は計画内で重複させない
  * - ロードマップで完了済みのタスクは、提案が省いても計画に残す（`withCarriedCompletedTasks`）
  */
@@ -197,6 +199,10 @@ export function resolveTaskPlan(
   const keys = new Set(tasks.map((t) => t.id));
   if (keys.size !== tasks.length) {
     return fail('idが重複している');
+  }
+  const startedProblem = findStartedTaskChange(run, tasks);
+  if (startedProblem !== undefined) {
+    return fail(startedProblem);
   }
   for (const task of tasks) {
     if (CONTROLLER_TASK_ID.test(task.id) && getTask(run, task.id) === undefined) {
@@ -245,6 +251,30 @@ export function resolveTaskPlan(
     return fail('taskIdを採番できなかった');
   }
   return { ok: true, value: { run: allocated.run, drafts, assigned } };
+}
+
+/**
+ * 着手済みのタスクを計画から外す・既存のIssue番号を変える提案を見つけ、拒否の理由を返す
+ * （Issue #1679）。Issue番号の変更は同じ`taskId`のままタスクを作り直すため、削除と同じ扱いにする。
+ */
+function findStartedTaskChange(
+  run: TaskRun,
+  proposed: readonly PlanTaskInput[],
+): string | undefined {
+  const byKey = new Map(proposed.map((t) => [t.id, t]));
+  for (const task of listTasks(run)) {
+    if (!hasStarted(task)) {
+      continue;
+    }
+    const next = byKey.get(task.taskId);
+    if (next === undefined) {
+      return `${task.taskId}は着手済みのため計画から外せない。外せるのは未着手のタスクだけ`;
+    }
+    if (next.existingIssueNumber !== task.existingIssueNumber) {
+      return `${task.taskId}は着手済みのため既存のIssue番号を変えられない`;
+    }
+  }
+  return undefined;
 }
 
 /**

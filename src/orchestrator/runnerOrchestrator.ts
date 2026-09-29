@@ -85,11 +85,6 @@ const AUTO_APPROVED_ORCHESTRATOR_TOOLS = new Set([
   'add_task',
   'remove_task',
   'update_task_dependencies',
-  'get_program_status',
-  'add_run',
-  'remove_run',
-  'retry_run',
-  'update_run_dependencies',
   'write_handoff',
   'read_handoff',
   'list_handoffs',
@@ -267,13 +262,6 @@ function buildIntroBody(
     '- Issue本文の受入条件・実装計画がSpecの正本です。再開後も、このrun定義とIssue番号を基準に同じ順序で進行してください。',
     '- add_task / update_task_dependenciesでBlockと並列のタスクグラフを決めます。runnerが依存の完了と並列上限を満たしたタスクのセッションタブを開始し、Issueの完了時にはそのタブを閉じます。',
     '- 実行タスクから届くcleanup結果を受け取り、Issue作成・Issue更新・ロードマップ改訂が必要かを判断して計画へ反映してください。create_issue / update_issue / update_roadmap_issueは現在のリポジトリだけへ自動実行でき、許可範囲はIssue作成、本文更新、ラベル追加、Roadmap Issue本文更新に限ります。close/reopen、担当変更、削除、マージ、push、権限変更はできません。',
-    ...(live.programControl === undefined
-      ? []
-      : [
-          '- get_program_status / add_run / remove_run / retry_run / update_run_dependencies: ' +
-            '複数runを束ねるprogramの状態を読み、失敗時にrunの追加・削除・再試行・依存変更を' +
-            '行う。変更はprogram状態へ永続化され、ワークフロー画面へライブ反映されます',
-        ]),
     '- ask_user: 担当領域をまたぐ変更・設計の前提を変える変更・受入基準を下げる判断・' +
       '同じ失敗を3回繰り返した場合に限り、人へ確認する（それ以外は自分で判断する。呼べる' +
       '回数に上限あり）。add_task/remove_task/update_task_dependenciesで方針そのものが' +
@@ -705,23 +693,6 @@ export function buildOrchestratorControlPort(
   const canManageIssues =
     self.deps.forge !== undefined && self.runs.get(runId)?.forge.kind === 'active';
   return {
-    hasProgramControl: () => self.runs.get(runId)?.programControl !== undefined,
-    getProgramStatus: () =>
-      self.runs.get(runId)?.programControl?.getProgramStatus() ?? {
-        error: 'このrunはprogramに属していません。',
-      },
-    addProgramRun: (input) =>
-      self.runs.get(runId)?.programControl?.addProgramRun(input) ??
-      Promise.resolve(no('このrunはprogramに属していません。')),
-    removeProgramRun: (runRefId) =>
-      self.runs.get(runId)?.programControl?.removeProgramRun(runRefId) ??
-      Promise.resolve(no('このrunはprogramに属していません。')),
-    retryProgramRun: (runRefId) =>
-      self.runs.get(runId)?.programControl?.retryProgramRun(runRefId) ??
-      Promise.resolve(no('このrunはprogramに属していません。')),
-    updateProgramRunDependencies: (runRefId, dependsOn) =>
-      self.runs.get(runId)?.programControl?.updateProgramRunDependencies(runRefId, dependsOn) ??
-      Promise.resolve(no('このrunはprogramに属していません。')),
     getRunStatus: () => buildRunStatus(actions, runId),
     ...(canManageIssues
       ? {

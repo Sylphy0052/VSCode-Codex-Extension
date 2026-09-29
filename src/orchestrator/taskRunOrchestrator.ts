@@ -860,7 +860,7 @@ function taskRunToolName(rawParams: Record<string, unknown>): string | undefined
 /**
  * Orchestratorの承認ハンドラ（Claudeのツール承認と、Codexのコマンド等の承認）。
  *
- * 自動許可の集合に入るツールは常に許可し、入らないツール（`stop_stage`・`set_max_parallel`）は
+ * 自動許可の集合に入るツールは常に許可し、入らないツール（`approve_plan`・`stop_stage`・`set_max_parallel`など）は
  * `allowAutoApprove`でも人へ回す。それ以外の承認は、`allowAutoApprove`を人が有効にしたときだけ許可する。
  */
 export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
@@ -1040,7 +1040,8 @@ function buildIntroPrompt(
     '役割:',
     '- task-messagingのMCPツールでControllerへ命令するだけで、runの状態を直接変えない。ファイルは書かない',
     '- 状態の正本はget_run_stateとする。会話の記憶や前の世代の発言より、get_run_stateの結果を信じる',
-    '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。あなたは承認できない',
+    '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。approve_planはユーザーに会話で頼まれたときだけ使う（呼ぶとユーザーの確認が入る）',
+    '- 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけ',
     '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
     '- 承認後、Model/Effortの判断を待つ工程はstart_stageで始める。推奨値を基本にし、変えるときは理由をreasonに書く',
     '- stop_stage・set_max_parallelを使う前と、answer_questionでユーザーの判断を代わりに渡す前は、会話でユーザーに確かめる。answer_questionにはユーザーが答えた内容だけを渡す',

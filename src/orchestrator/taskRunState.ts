@@ -162,7 +162,7 @@ export interface OrchestratedTask {
   existingIssueNumber: number | undefined;
   /**
    * ロードマップで完了済みの子Issueとして置いたタスク（Issue #1623）。全工程を飛ばした状態で作り、
-   * 依存先としてだけ使う。着手していないため、計画から外れても片付け（#1619）の対象にならない。
+   * 依存先としてだけ使う。`hasStarted`は偽になるが、計画からは外せない（`withCarriedCompletedTasks`が戻す）。
    */
   completedInRoadmap?: true;
   executionId: string;
@@ -571,11 +571,8 @@ function newTask(draft: TaskDraft, executionId: string, at: string): Orchestrate
  * 内容（タイトル、要約、受入基準、依存）だけを差し替える。不正な`taskId`・Issue番号・
  * 依存先は例外にする（形式、重複、循環の検証は呼び出し側が先に済ませる前提）。
  *
- * 着手済みタスクの削除・既存Issueの付け替えも許す（Orchestratorの自律運用のため）。
- * 削除された着手済みタスクのworktree/branch/PRは、この関数では消さない。呼び出し側
- * （`TaskRunController.proposePlan`）が`findRetiredStartedTasks`で適用前後のrunを比べて
- * 検出し、後片付け（工程セッションを止める・PRを閉じる・ブランチとworktreeを消す）を
- * 引き継ぐ（Issue #1619）。
+ * 着手済みタスクの削除・既存Issueの付け替えも例外にする（Issue #1679）。理由を添えて断るのは
+ * `resolveTaskPlan`で、ここは検証を経ずに呼ばれたときの防御。
  */
 export function proposeTaskPlan(
   run: TaskRun,
@@ -599,6 +596,16 @@ export function proposeTaskPlan(
   }
   if (proposedIds.size !== drafts.length) {
     throw new Error('taskIdが重複しています');
+  }
+  const draftById = new Map(drafts.map((d) => [d.taskId, d]));
+  for (const existing of listTasks(run)) {
+    if (!hasStarted(existing)) {
+      continue;
+    }
+    const draft = draftById.get(existing.taskId);
+    if (draft === undefined || draft.existingIssueNumber !== existing.existingIssueNumber) {
+      throw new Error(`着手済みのタスクは外せず、既存のIssue番号も変えられません: ${existing.taskId}`);
+    }
   }
   const tasks: Record<string, OrchestratedTask> = {};
   for (const draft of drafts) {
@@ -635,31 +642,6 @@ export function hasStarted(task: OrchestratedTask): boolean {
     const status = task.stages[stage].status;
     return status !== 'notStarted' && status !== 'skipped';
   });
-}
-
-/**
- * `proposeTaskPlan`の適用前後のrunを比べ、片付けが要る着手済みタスクを求める（Issue #1619）。
- * 「片付けが要る」は次のいずれか: 計画から外れて消えた（後のrunに存在しない）、既存Issueの
- * 付け替えで作り直された（`newTask`によりworktree/branch/PRの記録がリセットされ、後の
- * runでは未着手扱いに戻る）。作り直される前のタスクのスナップショットを返す
- * （worktree/branch/PRの記録は作り直し後には残っていないため）。
- */
-export function findRetiredStartedTasks(
-  before: TaskRun,
-  after: TaskRun,
-): readonly OrchestratedTask[] {
-  const retired: OrchestratedTask[] = [];
-  for (const taskId of Object.keys(before.tasks)) {
-    const beforeTask = before.tasks[taskId];
-    if (beforeTask === undefined || !hasStarted(beforeTask)) {
-      continue;
-    }
-    const afterTask = after.tasks[taskId];
-    if (afterTask === undefined || !hasStarted(afterTask)) {
-      retired.push(beforeTask);
-    }
-  }
-  return retired;
 }
 
 /** 承認待ちの計画を承認する。承認待ちでなければそのまま返す。 */

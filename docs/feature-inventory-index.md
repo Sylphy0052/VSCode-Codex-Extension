@@ -48,9 +48,7 @@
 | `agent.sessionKanban`            | セッションカンバンを開く                    | [F24](feature-inventory.md#f24) |
 | `agent.forgeHub`                 | Forge Hubを開く                             | [F37](feature-inventory.md#f37) |
 | `agent.workflows.run`            | ワークフローを実行…                         | [F28](feature-inventory.md#f28) |
-| `agent.workflows.runProgram`     | プログラムを実行…                           | [F34](feature-inventory.md#f34) |
 | `agent.workflows.stop`           | ワークフローを停止…                         | [F28](feature-inventory.md#f28) |
-| `agent.workflows.stopProgram`    | プログラムを停止…                           | [F34](feature-inventory.md#f34) |
 | `agent.workflows.roadmap`        | ロードマップを生成…                         | [F27](feature-inventory.md#f27) |
 | `agent.workflows.convertRoadmap` | ファイルからロードマップを作成…             | [F27](feature-inventory.md#f27) |
 | `agent.workflows.view`           | ワークフローViewを開く                      | [F36](feature-inventory.md#f36) |
@@ -203,7 +201,7 @@
 
 ## ワークフローMCPツール
 
-出典:[messaging.ts](../src/orchestrator/messaging.ts)。宣言されたツールを抽出した。実際に呼べる範囲は接続元がタスク/オーケストレーターか、program配下か、実行状態等で異なる。`send_message`のタスク側の宛先はオーケストレーター固定。
+出典:[messaging.ts](../src/orchestrator/messaging.ts)。宣言されたツールを抽出した。実際に呼べる範囲は接続元がタスク/オーケストレーターか、実行状態等で異なる。`send_message`のタスク側の宛先はオーケストレーター固定。
 
 | ツール名                   | 宣言                                   | レビュー先                      |
 | -------------------------- | -------------------------------------- | ------------------------------- |
@@ -222,11 +220,6 @@
 | `add_task`                 | `ADD_TASK_TOOL`                        | [F31](feature-inventory.md#f31) |
 | `remove_task`              | `REMOVE_TASK_TOOL`                     | [F31](feature-inventory.md#f31) |
 | `update_task_dependencies` | `UPDATE_TASK_DEPENDENCIES_TOOL`        | [F31](feature-inventory.md#f31) |
-| `get_program_status`       | `GET_PROGRAM_STATUS_TOOL`              | [F34](feature-inventory.md#f34) |
-| `add_run`                  | `ADD_PROGRAM_RUN_TOOL`                 | [F34](feature-inventory.md#f34) |
-| `remove_run`               | `REMOVE_PROGRAM_RUN_TOOL`              | [F34](feature-inventory.md#f34) |
-| `retry_run`                | `RETRY_PROGRAM_RUN_TOOL`               | [F34](feature-inventory.md#f34) |
-| `update_run_dependencies`  | `UPDATE_PROGRAM_RUN_DEPENDENCIES_TOOL` | [F34](feature-inventory.md#f34) |
 | `write_handoff`            | `WRITE_HANDOFF_TOOL`                   | [F32](feature-inventory.md#f32) |
 | `read_handoff`             | `READ_HANDOFF_TOOL`                    | [F32](feature-inventory.md#f32) |
 | `list_handoffs`            | `LIST_HANDOFFS_TOOL`                   | [F32](feature-inventory.md#f32) |
@@ -336,11 +329,6 @@
 | [src/orchestrator/nodeHandoffFileSystem.ts](../src/orchestrator/nodeHandoffFileSystem.ts)   | [F32](feature-inventory.md#f32)                                                                                                                                     |
 | [src/orchestrator/orchestratorSession.ts](../src/orchestrator/orchestratorSession.ts)       | [F31](feature-inventory.md#f31)                                                                                                                                     |
 | [src/orchestrator/planner.ts](../src/orchestrator/planner.ts)                               | [F26](feature-inventory.md#f26)、[F32](feature-inventory.md#f32)                                                                                                    |
-| [src/orchestrator/program.ts](../src/orchestrator/program.ts)                               | [F34](feature-inventory.md#f34)                                                                                                                                     |
-| [src/orchestrator/programRunner.ts](../src/orchestrator/programRunner.ts)                   | [F34](feature-inventory.md#f34)                                                                                                                                     |
-| [src/orchestrator/programScheduler.ts](../src/orchestrator/programScheduler.ts)             | [F34](feature-inventory.md#f34)                                                                                                                                     |
-| [src/orchestrator/programState.ts](../src/orchestrator/programState.ts)                     | [F34](feature-inventory.md#f34)                                                                                                                                     |
-| [src/orchestrator/programStore.ts](../src/orchestrator/programStore.ts)                     | [F34](feature-inventory.md#f34)、[F35](feature-inventory.md#f35)                                                                                                    |
 | [src/orchestrator/pseudoWorktree.ts](../src/orchestrator/pseudoWorktree.ts)                 | [F29](feature-inventory.md#f29)                                                                                                                                     |
 | [src/orchestrator/roadmap.ts](../src/orchestrator/roadmap.ts)                               | [F27](feature-inventory.md#f27)                                                                                                                                     |
 | [src/orchestrator/rolePresets.ts](../src/orchestrator/rolePresets.ts)                       | [F32](feature-inventory.md#f32)                                                                                                                                     |

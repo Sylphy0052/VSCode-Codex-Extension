@@ -49,7 +49,6 @@ import {
   createTaskRun,
   currentStage,
   finishTaskRun,
-  findRetiredStartedTasks,
   getTask,
   isTaskDone,
   isTaskRunActive,
@@ -68,7 +67,6 @@ import {
   setTaskRunTitle,
   suspendTaskRun,
   taskRunLabel,
-  type OrchestratedTask,
   type StageDecision,
   type StageGateChoice,
   type TaskRun,
@@ -122,7 +120,6 @@ export interface TaskRunControllerDeps {
     | 'instructStage'
     | 'answerQuestion'
     | 'cleanupRestoredTask'
-    | 'retireTask'
   >;
   /** エンジンのモデル一覧と、カタログからeffortを取れないときの退避先。 */
   modelCatalog(engine: TaskRunEngine): {
@@ -417,7 +414,7 @@ export class TaskRunController {
 
   /**
    * 形式の検証を済ませた計画を受け付ける（`proposePlan`と、ロードマップIssueから作る初期計画
-   * `startRoadmapRun`が共有する。Issue #1623）。Issueの検証、Reflex審査、片付けは両者で同じ。
+   * `startRoadmapRun`が共有する。Issue #1623）。Issueの検証とReflex審査は両者で同じ。
    */
   private async applyPlan(runId: string, tasks: readonly PlanTaskInput[]): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
@@ -435,12 +432,7 @@ export class TaskRunController {
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
     let autoApproved = false;
-    // 計画から外れた・既存Issueの付け替えで作り直された着手済みタスク（作り直される前の
-    // スナップショット。Issue #1619）。updateRunが再試行される場合に備え、コールバックの
-    // 先頭で毎回リセットする
-    let retired: readonly OrchestratedTask[] = [];
     const next = await this.updateRun(runId, (r) => {
-      retired = [];
       // forgeへの問い合わせの間に別のrunが同じIssueを計画へ入れていないか、書き込みの直列の中で確かめ直す
       const conflict = this.findIssueConflict(r, tasks);
       if (conflict !== undefined) {
@@ -460,7 +452,6 @@ export class TaskRunController {
           () => this.newId(),
           this.now(),
         );
-        retired = findRetiredStartedTasks(r, proposed);
         if (review !== undefined) {
           // Reflexへ渡した内容から書き込み時までに変わっていなければ判定を適用する
           const unchanged = JSON.stringify(resolved.value.drafts) === review.reviewedDrafts;
@@ -480,7 +471,6 @@ export class TaskRunController {
         return proposed;
       } catch (e: unknown) {
         failure = e instanceof Error ? e.message : String(e);
-        retired = [];
         return r;
       }
     });
@@ -490,36 +480,10 @@ export class TaskRunController {
     if (failure !== undefined) {
       return { ok: false, message: `計画を受け付けられない: ${failure}` };
     }
-    // 片付けはベストエフォート。`retireTask`自体は失敗を`onWarning`（Kanbanの警告）へ流す
-    // だけで例外を投げない設計のため、ここでは結果を待って返答へ載せるだけでよい
-    // （失敗しても計画の受け付けは成功扱いのまま。Issue #1619）
-    const retiredResults = await Promise.all(
-      retired.map(async (task) => {
-        const { closedPullRequest } = await this.deps.runner.retireTask(
-          runId,
-          next.workspaceRoot,
-          task,
-        );
-        return { taskId: task.taskId, closedPullRequest };
-      }),
-    );
-    // 片付けより先に工程を始めると、付け替えで同じtaskIdのまま作り直したタスクが古いworktreeを
-    // 消される前に動き出しうるため、片付けを待ってから始める
     if (autoApproved) {
       this.pumpLater(runId);
     }
     const mapping = [...assigned].map(([key, taskId]) => `${key} → ${taskId}`).join(', ');
-    const closedPrNumbers = retiredResults
-      .map((r) => r.closedPullRequest)
-      .filter((n): n is number => n !== undefined);
-    const retiredLine =
-      retiredResults.length === 0
-        ? undefined
-        : `計画から外れた・作り直された着手済みタスクを片付けた: ${retiredResults.map((r) => r.taskId).join(', ')}${
-            closedPrNumbers.length === 0
-              ? ''
-              : `（閉じたPR: ${closedPrNumbers.map((n) => `#${String(n)}`).join(', ')}）`
-          }`;
     return {
       ok: true,
       message: [
@@ -527,7 +491,6 @@ export class TaskRunController {
           ? `計画を受け付け、Reflexの判定により自動承認した（${String(next.taskOrder.length)}タスク）。工程を始める。`
           : `計画を受け付けた（${String(next.taskOrder.length)}タスク）。ユーザーの承認を待っている。承認されるまで工程は始まらない。`,
         mapping === '' ? '新しいタスクは無い。' : `採番したtaskId: ${mapping}`,
-        ...(retiredLine === undefined ? [] : [retiredLine]),
       ].join('\n'),
     };
   }
