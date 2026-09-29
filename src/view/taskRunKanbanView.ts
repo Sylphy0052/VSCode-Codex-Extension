@@ -721,6 +721,7 @@ const script = `
       case 'haltedByUser': return ['一時停止中', ''];
       case 'planPending': return [a.planStatus === 'awaitingApproval' ? '計画の承認待ち' : 'Orchestratorが計画を作成中', a.planStatus === 'awaitingApproval' ? 'warn' : ''];
       case 'stalled': return ['人の対応待ち: ' + a.blockers.join(', '), 'warn'];
+      case 'reopened': return ['再開済み（タスクの追加・再実行待ち）', ''];
     }
     return ['', ''];
   }

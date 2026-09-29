@@ -545,6 +545,8 @@ function formatAssessment(run: TaskRun): string {
       return assessment.planStatus === 'drafting' ? '計画の作成中' : '計画のユーザー承認待ち';
     case 'stalled':
       return `人の対応待ちで止まっている（${assessment.blockers.join(', ')}）`;
+    case 'reopened':
+      return '再開済み（タスクの追加や再実行を待っている）';
     default:
       return assessment.kind;
   }
