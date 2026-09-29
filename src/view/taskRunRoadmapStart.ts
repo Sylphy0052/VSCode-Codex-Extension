@@ -154,10 +154,16 @@ async function pickRoadmapIssue(
   issueNumber: number | undefined,
 ): Promise<PickedRoadmap | undefined> {
   const { roadmapIssueLabel } = readWorkflowsConfig();
-  // ラベルはCLI側でも絞る。一覧の上限の外にあるロードマップIssueを取りこぼさないため（Issue #1701）
+  // 選ぶときはラベルをCLI側でも絞る。一覧の上限の外にあるロードマップIssueを取りこぼさないため
+  // （Issue #1701）。番号を渡されたときは題を引くだけなので、ラベルの無いIssueも引けるよう絞らない
   const issues = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'ロードマップIssueを取得しています…' },
-    () => createCliIssueListPort(deps.git, deps.cli, { label: roadmapIssueLabel }).listIssues(folder),
+    () =>
+      createCliIssueListPort(
+        deps.git,
+        deps.cli,
+        issueNumber === undefined ? { label: roadmapIssueLabel } : undefined,
+      ).listIssues(folder),
   );
   const wantedLabel = roadmapIssueLabel.toLowerCase();
   const roadmapIssues = (issues ?? []).filter((issue) =>
