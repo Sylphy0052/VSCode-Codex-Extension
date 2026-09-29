@@ -5898,7 +5898,7 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 
 #### 権限
 
-オーケストレーターにはファイル編集を含む全権限を与える（Issue #1697）。ワークフロー実行とロードマップ実行（§16.23のオーケストレーターモード）の両方に適用する。
+オーケストレーターにはファイル編集を含む全権限を与える（Issue #1697）。ワークフロー実行とロードマップ実行（オーケストレーターモード、`taskRunOrchestrator.ts`）の両方に適用する。
 
 - `sandbox` は `danger-full-access`、承認は Codex なら `never`、Claude Code なら `bypassPermissions` に固定する。§16.16のクランプ（`buildEffectiveTaskConfig`）は**経由しない**。拡張機能側の設定（`codex.sandbox` / 承認方針 / `agent.workflows.allowAutoApprove` / `agent.workflows.allowClaudeBypassPermissions`）でも絞られない
 - ロードマップ実行でも Claude CLI のsandbox（`cliSandbox`、Issue #1541）を付けない
