@@ -22,11 +22,19 @@ export interface ProgramStatePurgeWorkspaceState {
  */
 export async function purgeLegacyProgramState(
   workspaceState: ProgramStatePurgeWorkspaceState,
-  log: Pick<Logger, 'info'>,
+  log: Pick<Logger, 'info' | 'warn'>,
 ): Promise<void> {
   if (workspaceState.get(LEGACY_PROGRAM_WORKSPACE_STATE_KEY) === undefined) {
     return;
   }
-  await workspaceState.update(LEGACY_PROGRAM_WORKSPACE_STATE_KEY, undefined);
+  try {
+    await workspaceState.update(LEGACY_PROGRAM_WORKSPACE_STATE_KEY, undefined);
+  } catch (e: unknown) {
+    // 呼び出し元は`void`で投げっぱなしにするため、ここで捕まえないとunhandled rejectionになる
+    log.warn(
+      `プログラム機能の保存データを削除できなかった（起動は続ける。次回の起動で再び削除を試みる）: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
   log.info('プログラム機能の保存データを削除した（プログラム機能は廃止）');
 }
