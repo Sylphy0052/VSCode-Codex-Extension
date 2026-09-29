@@ -644,20 +644,9 @@
 
 <a id="f34"></a>
 
-## F34:プログラムによる複数run統括
+## F34:プログラムによる複数run統括(削除済み・Issue #1679)
 
-- [x] F34.01:複数ワークフローと依存をYAMLで束ねる。
-- [x] F34.02:依存のないrunの並列実行と後続への失敗伝播。
-- [x] F34.03:全体停止・保存・復元。
-- [x] F34.04:失敗時の制御ツールによるrun追加/削除/再試行/依存更新。
-
-レビュー結果:[静的レビュー](reviews/f34-program-runner.md)。実装修正・実機検証は未実施。
-
-主な実装:[src/orchestrator/program.ts](../src/orchestrator/program.ts)、[src/orchestrator/programRunner.ts](../src/orchestrator/programRunner.ts)、[src/orchestrator/programScheduler.ts](../src/orchestrator/programScheduler.ts)、[src/orchestrator/programState.ts](../src/orchestrator/programState.ts)、[src/orchestrator/programStore.ts](../src/orchestrator/programStore.ts)。
-
-既存テスト:[program](../test/unit/program.test.ts)、[programRunner](../test/unit/programRunner.test.ts)、[programScheduler](../test/unit/programScheduler.test.ts)、[programState](../test/unit/programState.test.ts)、[programStore](../test/unit/programStore.test.ts)。
-
-レビュー観点:タスク並列数との二段階制限、循環・未存在定義、手動停止、変更した定義の永続化。
+状態の組み合わせを減らすため機能ごと削除した。旧レビュー結果は[静的レビュー](reviews/f34-program-runner.md)に残る（変更しない）。代わりに、1ワークフロー内の並列・依存制御はタスクの`dependsOn` / `maxParallel`と`add_task` / `update_task_dependencies`ツールを使う。
 
 <a id="f35"></a>
 
@@ -670,9 +659,9 @@
 
 レビュー結果:[静的レビュー](reviews/f35-run-restore.md)。実装修正・実機検証は未実施。
 
-主な実装:[src/orchestrator/runStore.ts](../src/orchestrator/runStore.ts)、[src/orchestrator/runnerRestore.ts](../src/orchestrator/runnerRestore.ts)、[src/orchestrator/runnerSnapshot.ts](../src/orchestrator/runnerSnapshot.ts)、[src/orchestrator/programStore.ts](../src/orchestrator/programStore.ts)。
+主な実装:[src/orchestrator/runStore.ts](../src/orchestrator/runStore.ts)、[src/orchestrator/runnerRestore.ts](../src/orchestrator/runnerRestore.ts)、[src/orchestrator/runnerSnapshot.ts](../src/orchestrator/runnerSnapshot.ts)。
 
-既存テスト:[runStore](../test/unit/runStore.test.ts)、[runner](../test/unit/runner.test.ts)、[programStore](../test/unit/programStore.test.ts)。
+既存テスト:[runStore](../test/unit/runStore.test.ts)、[runner](../test/unit/runner.test.ts)。
 
 レビュー観点:途中書込、破損・旧形式、残存worktree/セッション、二重再開、明示停止の尊重。
 
@@ -680,7 +669,7 @@
 
 ## F36:ワークフロー画面・メニュー
 
-- [x] F36.01:履歴・プログラム・タスクカード・依存グラフ表示。
+- [x] F36.01:履歴・タスクカード・依存グラフ表示。
 - [x] F36.02:実行切り替えと定義/会話/PRを開く操作。
 - [x] F36.03:全体停止・タスク中断/停止/再試行/継続/マージ再試行。
 - [x] F36.04:承認回答・オーケストレーター会話・最終マージ判断。
@@ -690,7 +679,7 @@
 
 主な実装:[src/view/workflowView.ts](../src/view/workflowView.ts)、[src/view/workflowScript.ts](../src/view/workflowScript.ts)、[src/view/workflowStyles.ts](../src/view/workflowStyles.ts)、[src/view/workflowGraph.ts](../src/view/workflowGraph.ts)、[src/view/workflowMenu.ts](../src/view/workflowMenu.ts)。
 
-既存テスト:[workflowViewGraph](../test/unit/workflowViewGraph.test.ts)、[workflowViewPrograms](../test/unit/workflowViewPrograms.test.ts)、[workflowGraph](../test/unit/workflowGraph.test.ts)、[workflowMenu](../test/unit/workflowMenu.test.ts)。
+既存テスト:[workflowViewGraph](../test/unit/workflowViewGraph.test.ts)、[workflowGraph](../test/unit/workflowGraph.test.ts)、[workflowMenu](../test/unit/workflowMenu.test.ts)。
 
 レビュー観点:幅変化、状態と有効ボタンの一致、古いrunへの操作、画面再接続、重要な警告の表示。
 

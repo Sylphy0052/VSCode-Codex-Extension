@@ -565,18 +565,8 @@
         "category": "Agent"
       },
       {
-        "command": "agent.workflows.runProgram",
-        "title": "プログラムを実行…",
-        "category": "Agent"
-      },
-      {
         "command": "agent.workflows.stop",
         "title": "ワークフローを停止…",
-        "category": "Agent"
-      },
-      {
-        "command": "agent.workflows.stopProgram",
-        "title": "プログラムを停止…",
         "category": "Agent"
       },
       {
@@ -1722,9 +1712,9 @@
         },
         "agent.taskRun.planAutoApprove.enabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "window",
-          "markdownDescription": "オーケストレータモード（Issue #1505）でOrchestratorが提案した計画を、Reflexが妥当と判定したとき自動で承認する（Issue #1554）。ロードマップ実行（Issue #1465）の計画審査と同じ判定器・閾値を使い、計画そのものの整合だけを見る。判定を得られない（時間切れ・不正な応答）ときや「妥当」と言い切らないときは、これまでどおりユーザーの承認待ちにする。無効にすると判定を試みず、常に承認待ちにする。"
+          "markdownDescription": "オーケストレータモード（Issue #1505）でOrchestratorが提案した計画を、Reflexが妥当と判定したとき自動で承認する（Issue #1554）。ロードマップ実行（Issue #1465）の計画審査と同じ判定器・閾値を使い、計画そのものの整合だけを見る。判定を得られない（時間切れ・不正な応答）ときや「妥当」と言い切らないときは、これまでどおりユーザーの承認待ちにする。無効にすると判定を試みず、常に承認待ちにする。既定は無効（Issue #1679。承認前の計画を人が確認するため）。"
         },
         "agent.workflows.ciUpdateBranchMaxRetries": {
           "type": "number",
