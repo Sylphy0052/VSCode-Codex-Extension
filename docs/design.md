@@ -5645,7 +5645,7 @@ PR/MRの本文には、YAMLに書かれた `prompt` と `done` が入る。こ�
 §16.6 は、gitの作業ツリーでなければ `shared`（ワークスペース直下）へ落として並列実行し、衝突しうる旨を警告するとしていた。並列で走る以上、警告だけでは足りない。ディレクトリの複製による隔離に置き換える、というのがこの節の狙いである。複製ベースの隔離（`pseudoWorktree.ts`）は `runner.ts` からの呼び出しを含めて実装済みで、gitリポジトリでないワークスペースの `isolation: worktree` タスクに実際に使われる（Issue #105）。
 
 - 置き場はgitの場合と同じ `<workspace>/.agents/worktrees/<runId>/<taskId>`
-- タスクの開始時にワークスペースの内容を複製する。複製から外すのは `.agents/worktrees` 自身（無限に再帰する）と、重量のあるディレクトリ（設定 `agent.workflows.pseudoWorktreeExclude`、既定 `node_modules` / `.venv` / `dist` / `out`）
+- タスクの開始時にワークスペースの内容を複製する。複製から外すのは `.agents/worktrees` 自身（無限に再帰する）、拡張機能自身がrun中にワークスペースへ書く `.agents/handoff/runs`（タスク結果の受け渡し、#1271）と `.agents/run-notes.jsonl`（runの教訓、#1599）、重量のあるディレクトリ（設定 `agent.workflows.pseudoWorktreeExclude`、既定 `node_modules` / `.venv` / `dist` / `out`）。拡張機能自身が書くものを外さないと、run終了時の反映がそれを人の編集と取り違えて止まる（Issue #1687）
 - 同時に、複製元のファイル一覧とサイズ・更新時刻をスナップショットとして持つ
 - **スナップショットの走査（`listFiles` / `takeSnapshot`）が失敗したら、差分計算も統合も反映も行わずに止める（Issue #1118）。** `readdir` / `statFile` が「無い」へ畳んでよいのは `ENOENT` だけで、`EACCES` などそれ以外の失敗は例外として呼び出し側へ伝える。以前は全ての失敗を空一覧・`undefined` へ変換していたため、走査の途中で読めないディレクトリがあると欠けた一覧が成功として返り、`diffSnapshots` がその全件を `deleted` と判定した。統合マニフェストにその削除が登録されると、最終反映の削除分岐が元のワークスペースのファイルを実際に消してしまう。読めなかったことは読めなかったこととして扱い、タスク（`markMergeFailed`）やrun開始（`resolvePseudoState` の失敗）を止めて再試行できる状態にする。`ENOENT` は「タスクが本当に削除した」正常系なので、従来どおり削除として扱う
 - タスクが終わったら、スナップショットとの差分（追加・変更・削除）を計算し、統合先のディレクトリ（`<runId>/_integration`）へ適用する。これがgitの場合のマージにあたる
