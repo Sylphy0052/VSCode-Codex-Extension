@@ -3017,6 +3017,10 @@ export class ClaudeChatViewManager
     );
   }
 
+  protected override warnBackgroundTabRestoreFailed(message: string): void {
+    this.log.warn(message);
+  }
+
   /** `BaseChatViewManager.attachPanel`（基底クラス）が呼ぶ、Claude Code用のwebview HTML組み立て。 */
   protected override renderPanelHtml(entry: ClaudePanel, panel: vscode.WebviewPanel): string {
     // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。

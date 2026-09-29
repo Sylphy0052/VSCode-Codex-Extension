@@ -21,6 +21,7 @@ import {
 } from '../verification/completionEvidence';
 import type { VerificationStore } from '../verification/store';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
+import { planBackgroundOpen, trackChatPanel } from './backgroundPanelTabs';
 import {
   needsAttentionAfterHandoff,
   triggerLabel,
@@ -941,9 +942,31 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       }
       return;
     }
-    const panel = this.createWebviewPanel(entry, preserveFocus, targetViewColumn);
-    this.attachPanel(entry, panel);
+    if (!preserveFocus) {
+      this.attachPanel(entry, this.createWebviewPanel(entry, false, targetViewColumn));
+      return;
+    }
+    // 背面で開くタブが人の見ていたタブを隠さないよう、作成直後に表示し直す（Issue #1699）
+    const plan = planBackgroundOpen(targetViewColumn);
+    const previousActive = this.active;
+    const previousActiveSequence = this.activeSequence;
+    this.attachPanel(entry, this.createWebviewPanel(entry, true, plan.viewColumn));
+    if (plan.restore === undefined) {
+      return;
+    }
+    // 作成直後はグループの表示中タブになり`panel.active`が立つことがあるが、人が見ているのは
+    // 表示し直すタブの方。`attachPanel`が移した`active`を戻す
+    this.active = previousActive;
+    this.activeSequence = previousActiveSequence;
+    plan.restore().then(undefined, (e: unknown) => {
+      this.warnBackgroundTabRestoreFailed(
+        `背面で開いたタブの裏になったタブを表示し直せませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
   }
+
+  /** `showPanel`が見ていたタブを表示し直せなかったときの記録。 */
+  protected abstract warnBackgroundTabRestoreFailed(message: string): void;
 
   /**
    * 実際のパネルへ表示を結び付け、イベントを配線する。
@@ -956,6 +979,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    */
   protected attachPanel(entry: TPanel, panel: vscode.WebviewPanel): void {
     entry.panel = panel;
+    trackChatPanel(panel);
     if (panel.visible) {
       entry.lastKnownViewColumn = panel.viewColumn;
     }
