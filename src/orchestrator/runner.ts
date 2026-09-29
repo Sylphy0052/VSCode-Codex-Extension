@@ -118,11 +118,7 @@ import {
   stopOverlapPoll,
 } from './runnerOverlap';
 import type { OverlapWait } from './taskOverlap';
-import {
-  formatCarryOverPromptNote,
-  hasLeftWork,
-  type CarriedOverWork,
-} from './resumeCarryOver';
+import { formatCarryOverPromptNote, hasLeftWork, type CarriedOverWork } from './resumeCarryOver';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
 import type { SplitSuggestThresholds } from './taskSplit';
 import { notifyUnansweredInstructions } from './runnerInstruction';
@@ -144,7 +140,11 @@ import {
 } from './runnerWorkingDirectory';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
 import { WorkflowRunStore, type PersistedTaskState } from './runStore';
-import type { OrchestratorEvent, OrchestratorHealth } from './orchestratorSession';
+import {
+  ORCHESTRATOR_CONNECTION_ID,
+  type OrchestratorEvent,
+  type OrchestratorHealth,
+} from './orchestratorSession';
 import {
   answerAskUser as answerAskUserImpl,
   buildOrchestratorControlPort,
@@ -245,6 +245,15 @@ export interface WorkflowFilePort {
  */
 export const WAITING_REPLY_POLL_INTERVAL_MS = 5_000;
 export const MAX_TASK_VERIFICATION_ATTEMPTS = 3;
+
+/**
+ * ワークフローのタスクが`AskUserQuestion`を呼んだときにCLIへ返す拒否の理由（Issue #1694）。
+ * タスクには人が張り付いていないため、判断はオーケストレーターへ仰がせる。
+ */
+export const WORKFLOW_ASK_USER_QUESTION_DENY_MESSAGE =
+  'ワークフローのタスクではAskUserQuestionを使えません。判断が必要なら、send_messageで' +
+  `オーケストレーターへ質問してください（to: "${ORCHESTRATOR_CONNECTION_ID}"、expectReply: true）。` +
+  'send_messageを使えない場合は、質問と判断に必要な情報を最終報告に書いてタスクを終えてください。';
 
 /** Issue・PR・レビュー・実行指示で共有する全体契約。 */
 export function formatTaskExecutionContract(
@@ -1417,9 +1426,7 @@ export interface ActivePseudoWorktree {
  * 防げなかった。
  */
 export type LivePseudoState =
-  | { kind: 'none' }
-  | ActivePseudoWorktree
-  | { kind: 'restoreFailed'; message: string };
+  { kind: 'none' } | ActivePseudoWorktree | { kind: 'restoreFailed'; message: string };
 
 /**
  * runごとのPR/MR作成の状態（design.md §16.18）。実行開始時に一度だけ `resolveForgeState`
@@ -5503,13 +5510,17 @@ export class WorkflowRunner {
     }
 
     // AskUserQuestion（issue #685）は「実際にユーザーが選んだ回答」を代行できない。
-    // ワークフロー実行系（サブエージェント内で使えない制約はCLI側にもあるが、防御的に
-    // ここでも）は自動承認の対象から外し、常に人の判断（'ask'）へ倒す。
-    // 実際に選択肢を送れるのはwebviewの`answerAskUserQuestion`だけで、承認カード側の
-    // 「承認」操作は`decide()`（`streamSession.ts`）が種別を見て常に拒否へ倒す安全策と
-    // 二重に効く
+    // 人へ回すと無人実行が止まるため、承認カードを出さずに拒否し、質問はオーケストレーターへ
+    // 送るよう理由で伝える（Issue #1694）
     if (approval.kind === 'askUserQuestion') {
-      return { kind: 'ask' };
+      this.deps.log.info(
+        `[workflow ${runId}/${taskId}] 承認判定(askUserQuestion): 拒否 - オーケストレーターへの質問へ誘導しました`,
+      );
+      return {
+        kind: 'auto',
+        decision: 'decline',
+        message: WORKFLOW_ASK_USER_QUESTION_DENY_MESSAGE,
+      };
     }
 
     const request = await buildEscalationRequest(

@@ -581,8 +581,15 @@ const MAX_TASK_RUN_MAX_PARALLEL_PER_FOLDER = 64;
  * runごとの並列上限とは別に掛ける。壊れた値（数値でない・範囲外）は既定へ丸める。
  */
 export function readTaskRunMaxParallelPerFolder(): number {
-  const raw = vscode.workspace.getConfiguration('agent').get<number>('taskRun.maxParallelPerFolder');
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1 || raw > MAX_TASK_RUN_MAX_PARALLEL_PER_FOLDER) {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<number>('taskRun.maxParallelPerFolder');
+  if (
+    typeof raw !== 'number' ||
+    !Number.isFinite(raw) ||
+    raw < 1 ||
+    raw > MAX_TASK_RUN_MAX_PARALLEL_PER_FOLDER
+  ) {
     return DEFAULT_TASK_RUN_MAX_PARALLEL_PER_FOLDER;
   }
   return Math.floor(raw);
@@ -619,7 +626,9 @@ export const DEFAULT_TASK_RUN_RESOURCE_INTERVAL_SECONDS = 15;
 
 function readNumberInRange(key: string, min: number, max: number): number | undefined {
   const raw = vscode.workspace.getConfiguration('agent').get<number>(key);
-  return typeof raw === 'number' && Number.isFinite(raw) && raw >= min && raw <= max ? raw : undefined;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= min && raw <= max
+    ? raw
+    : undefined;
 }
 
 /** 資源を測る間隔（ミリ秒）。壊れた値（数値でない・範囲外）は既定へ丸める。 */
@@ -643,10 +652,16 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
   const cpu =
     cpuWarning !== undefined && cpuCritical !== undefined && cpuWarning <= cpuCritical
       ? { cpuWarningLoadPerCore: cpuWarning, cpuCriticalLoadPerCore: cpuCritical }
-      : { cpuWarningLoadPerCore: d.cpuWarningLoadPerCore, cpuCriticalLoadPerCore: d.cpuCriticalLoadPerCore };
+      : {
+          cpuWarningLoadPerCore: d.cpuWarningLoadPerCore,
+          cpuCriticalLoadPerCore: d.cpuCriticalLoadPerCore,
+        };
   const memory =
     memWarning !== undefined && memCritical !== undefined && memCritical <= memWarning
-      ? { memoryWarningAvailableRatio: memWarning / 100, memoryCriticalAvailableRatio: memCritical / 100 }
+      ? {
+          memoryWarningAvailableRatio: memWarning / 100,
+          memoryCriticalAvailableRatio: memCritical / 100,
+        }
       : {
           memoryWarningAvailableRatio: d.memoryWarningAvailableRatio,
           memoryCriticalAvailableRatio: d.memoryCriticalAvailableRatio,
@@ -660,7 +675,9 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
  * 無効のときは判定を試みず、常にユーザーの承認待ちにする。
  */
 export function readTaskRunPlanAutoApproveEnabled(): boolean {
-  const raw = vscode.workspace.getConfiguration('agent').get<boolean>('taskRun.planAutoApprove.enabled');
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('taskRun.planAutoApprove.enabled');
   return typeof raw === 'boolean' ? raw : false;
 }
 
@@ -1165,7 +1182,7 @@ export interface WorkflowsConfig {
   allowClaudeBypassPermissions: boolean;
   /**
    * 実効 `autoApprove` のタスクの承認要求を、危険判定（§16.7）を通さず許可するか
-   * （machineスコープ、既定 false）。PRのmergeとリモートブランチの削除は人へ回す。
+   * （machineスコープ、既定 true。Issue #1694）。PRのmergeとリモートブランチの削除は人へ回す。
    * オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準にそろえる
    * （Issue #1656）。
    */
@@ -1538,8 +1555,8 @@ export function __resetPermissionFlagWarningForTestOnly(): void {
 }
 
 /**
- * 権限を広げる側の真偽値設定を読む（Issue #1105）。`true` のときだけ有効にし、それ以外
- * （`false`・未設定・型の合わない値）は全て無効として扱う。
+ * 権限を広げる側の真偽値設定を読む（Issue #1105）。`true` のときだけ有効にし、`false`と
+ * 型の合わない値は無効として扱う。未設定は`fallback`（既定 false）を返す。
  *
  * `c.get<boolean>() ?? false` は実行時の型を確かめない。設定読取りが文字列 `"false"` の
  * ような値を返すと真として扱われ、`clampAutoApprove` の抑止や `bypassPermissions` の
@@ -1547,11 +1564,15 @@ export function __resetPermissionFlagWarningForTestOnly(): void {
  * を通した入力しか守らないため、ここで `=== true` に限定する。型の合わない値は無効化した
  * うえで通知し、設定を書いた本人が気づけるようにする。
  */
-function permissionFlag(c: vscode.WorkspaceConfiguration, key: string): boolean {
+function permissionFlag(c: vscode.WorkspaceConfiguration, key: string, fallback = false): boolean {
   const v = c.get<unknown>(key);
-  if (v === undefined || typeof v === 'boolean') {
+  if (v === undefined) {
     warnedPermissionFlagKeys.delete(key);
-    return v === true;
+    return fallback;
+  }
+  if (typeof v === 'boolean') {
+    warnedPermissionFlagKeys.delete(key);
+    return v;
   }
   if (!warnedPermissionFlagKeys.has(key)) {
     warnedPermissionFlagKeys.add(key);
@@ -1615,7 +1636,8 @@ export function readWorkflowsConfig(): WorkflowsConfig {
     dir: isSafeRelativeDir(rawDir) ? rawDir : DEFAULT_WORKFLOWS_DIR,
     allowAutoApprove: permissionFlag(c, 'workflows.allowAutoApprove'),
     allowClaudeBypassPermissions: permissionFlag(c, 'workflows.allowClaudeBypassPermissions'),
-    fullAutoApprove: permissionFlag(c, 'workflows.fullAutoApprove'),
+    // 既定は有効（Issue #1694）。package.jsonの既定値と合わせる
+    fullAutoApprove: permissionFlag(c, 'workflows.fullAutoApprove', true),
     roadmapDir: isSafeRelativeDir(rawRoadmapDir) ? rawRoadmapDir : DEFAULT_ROADMAP_DIR,
     roadmapIssueLabel:
       str(c, 'workflows.roadmapIssueLabel', DEFAULT_ROADMAP_ISSUE_LABEL).trim() ||
