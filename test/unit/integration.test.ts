@@ -1724,6 +1724,65 @@ describe('統合の1経路（Issue #1678）', () => {
     expect(model.tipOf(INTEGRATION_BRANCH)).toBe(result.mergeCommit);
     expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
   });
+
+  it('統合worktreeが統合ブランチ以外のブランチをcheckoutしていれば、busyで止まり人のcheckoutを動かさない（Issue #1683）', async () => {
+    const model = new IntegrationGitModel();
+    const overrides = new FakeGit();
+    overrides.respond(['symbolic-ref'], { code: 0, stdout: 'refs/heads/other\n', stderr: '' });
+    const git = composeGit(model, overrides);
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T9'),
+      RUN_ID,
+      'T9',
+      TASK_BRANCH,
+      git,
+      neverSaveOptions(),
+    );
+
+    expect(result.kind).toBe('busy');
+    if (result.kind === 'busy') {
+      expect(result.message).toContain('統合ブランチ以外（refs/heads/other）');
+      expect(result.message).toContain(INTEGRATION_BRANCH);
+    }
+    expect(git.calls.some((c) => c.args[0] === 'checkout')).toBe(false);
+    expect(model.tipOf(INTEGRATION_BRANCH)).toBe(INITIAL_TIP);
+  });
+
+  it('candidate段階のsaveAttemptが失敗したら、refを更新せずに統合ブランチへcheckoutし直してfailureになる（Issue #1683）', async () => {
+    const model = new IntegrationGitModel();
+    const git = composeGit(model);
+    const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
+    const options: MergeTaskOptions = {
+      saveAttempt: async (attempt) => {
+        if (attempt.stage === 'candidate') {
+          throw new Error('disk full');
+        }
+      },
+    };
+
+    const result = await queue.mergeTask(
+      await lease(queue, 'T9'),
+      RUN_ID,
+      'T9',
+      TASK_BRANCH,
+      git,
+      options,
+    );
+
+    expect(result.kind).toBe('failure');
+    if (result.kind === 'failure') {
+      expect(result.message).toContain('統合の試行状態を保存できないため');
+      expect(result.message).toContain('disk full');
+    }
+    expect(git.calls.some((c) => c.args[0] === 'update-ref')).toBe(false);
+    expect(model.tipOf(INTEGRATION_BRANCH)).toBe(INITIAL_TIP);
+    // 候補を作るためにdetachした統合worktreeを、統合ブランチへ戻している
+    expect(git.calls.some((c) => c.args[0] === 'checkout' && c.args[1] === '--detach')).toBe(true);
+    expect(git.calls.at(-1)?.args).toEqual(['checkout', INTEGRATION_BRANCH]);
+    expect(model.isDetached(INTEGRATION_CWD)).toBe(false);
+  });
 });
 
 describe('parseMergeAttempt（永続データから読んだ試行の検証）', () => {
