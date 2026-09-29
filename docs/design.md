@@ -5890,7 +5890,7 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 - `WorkflowRunner.start()` の中で、タスクを1つも起動する前に `TaskSessionHost.openTaskSession` で1つ開く。`LiveRun.orchestrator` として保持する（`LiveRun.tasks` には入れない。依存グラフのノードでもない。§16.17の衝突解決セッション（`mergeResolutions`）と同じ扱い）
 - runごとに1つ。runを跨いで共有しない。`list_tasks` と同じく、見える範囲を1つのrunに閉じるため
 - provider は `defaults.provider`。model / effort は拡張機能の既定に委ねる（タスクの `TaskSessionConfig` と同じく空文字）
-- cwd は**メインのワークスペース**。worktreeも疑似worktree（§16.20）も作らない。オーケストレーターは書かないため（次項）
+- cwd は**メインのワークスペース**。worktreeも疑似worktree（§16.20）も作らない。編集はメインのワークスペースへ直接反映される（次項、Issue #1697）
 - チャットタブは背面で開く（`open({preserveFocus: true})`）。タスクの開始時と同じ扱い（§16.8）
 - **run完了後もセッションは生かす**。「なぜ失敗したのか」を聞くのは走り終えた後が多い。`dispose` はrunがliveから外れるとき（`stop` によるrun破棄・拡張機能の終了）に行う。run完了後は後述の制御ツールだけが無効になり、会話は続けられる
 
@@ -6762,7 +6762,7 @@ roadmap W10（design.md §16.35「中断からの自動再開」、Issue #584。
 - `runnerMessaging.ts`: `onMessageAccepted`の分岐・`deliverTaskMessageToOrchestrator`・`buildTaskMessageEventBody`
 - `docs/manual-test.md` W-N: 実VSCodeでしか確かめられない受入基準（追記のみ、実施はしない）
 
-**副作用として`messagingPermissionEscalation`（前項「メッセージング経由の権限越境」・Issue #132）が実質発火しなくなる。** `checkMessagingPermissionEscalation`（`runnerSnapshot.ts`）は配送された`StoredMessage.from`を`live.def.tasks`から引き、送信元タスクの実効値と宛先タスクの実効値を比較する実装のまま変えていない。中継後は実タスクへ配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）になるため、`live.def.tasks`に見つからず`senderTask === undefined`で毎回素通りする。仮に`ORCHESTRATOR_CONNECTION_ID`を`live.def.tasks`相当の比較対象に含めたとしても、オーケストレーターの実効`sandbox`は常に`read-only`固定（`ORCHESTRATOR_SANDBOX`、§16.23）のため「宛先より緩い」は成立しない。この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は消えていない——中継を挟んでも、オーケストレーターが転送する自由記述に仕込まれた指示文は依然として宛先タスク自身の権限で実行されうる。オーケストレーターの`read-only`はオーケストレーター自身が直接何をできるかの制約であり、宛先タスクの実行権限とは無関係だからである。ただし脅威の一次防御は変わらず宛先タスク自身の権限設定（`sandbox`/`approvalMode`/`autoApprove`）であり、今回失われるのはその見える化（実行時警告）の経路だけである。この経路をオーケストレーター中継後も保つには「配送されたメッセージの元の送信元」を`StoredMessage`とは別に追跡する仕組みが要るが、オーケストレーターが内容を要約・改変しうる設計（本節冒頭）と相性が悪く、本Issueのスコープ外として見送った。実行時警告としての検出は失われるが、既存の受信内容の無害化（`<task-message>`によるデータ扱い化、前項「受信内容の扱い」）は経路を問わず変わらず効く。
+**副作用として`messagingPermissionEscalation`（前項「メッセージング経由の権限越境」・Issue #132）が実質発火しなくなる。** `checkMessagingPermissionEscalation`（`runnerSnapshot.ts`）は配送された`StoredMessage.from`を`live.def.tasks`から引き、送信元タスクの実効値と宛先タスクの実効値を比較する実装のまま変えていない。中継後は実タスクへ配送されるメッセージの`from`が常にオーケストレーター（`ORCHESTRATOR_CONNECTION_ID`）になるため、`live.def.tasks`に見つからず`senderTask === undefined`で毎回素通りする。仮に`ORCHESTRATOR_CONNECTION_ID`を`live.def.tasks`相当の比較対象に含めたとしても、当時はオーケストレーターの実効`sandbox`が常に`read-only`固定（`ORCHESTRATOR_SANDBOX`、§16.23）だったため「宛先より緩い」は成立しなかった（Issue #1697以降は`danger-full-access`固定のため、比較すれば常に「宛先より緩い」になる。検出そのものは下記のとおり削除済み）。この警告が拾っていた脅威（緩い送信元の自由記述が厳しい宛先で実行される）自体は消えていない——中継を挟んでも、オーケストレーターが転送する自由記述に仕込まれた指示文は依然として宛先タスク自身の権限で実行されうる。オーケストレーターの`read-only`はオーケストレーター自身が直接何をできるかの制約であり、宛先タスクの実行権限とは無関係だからである。ただし脅威の一次防御は変わらず宛先タスク自身の権限設定（`sandbox`/`approvalMode`/`autoApprove`）であり、今回失われるのはその見える化（実行時警告）の経路だけである。この経路をオーケストレーター中継後も保つには「配送されたメッセージの元の送信元」を`StoredMessage`とは別に追跡する仕組みが要るが、オーケストレーターが内容を要約・改変しうる設計（本節冒頭）と相性が悪く、本Issueのスコープ外として見送った。実行時警告としての検出は失われるが、既存の受信内容の無害化（`<task-message>`によるデータ扱い化、前項「受信内容の扱い」）は経路を問わず変わらず効く。
 
 **Issue #562で、この検出は復活させず削除すると決めた。** 復活させる案（配送されたメッセージの元の送信元を`StoredMessage`とは別に追跡し、そこから送信元タスクの実効値を引く）は採らない。理由は3つある。第一に、この設計では中継するオーケストレーターが内容を要約・改変しうる（本節冒頭）ため、「元の送信元」を1つに定めること自体が成り立たない——複数タスクの発言を混ぜた要約の送信元は誰か、という問いに答えがない。第二に、判定の対象が実際に届く本文と一致しなくなる。届くのはオーケストレーターが書いた文面であり、元の送信元タスクの権限はその文面の危険度を説明しない。第三に、脅威の一次防御は宛先タスク自身の権限設定（`sandbox`/`approvalMode`/`autoApprove`）と受信内容の無害化であり、失われるのは見える化の1経路だけである。**「復活させられるか」と「復活させるべきか」は別の問いで、ここでは後者に否と答えている。**
 
