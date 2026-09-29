@@ -28,6 +28,42 @@ export function trackChatPanel(panel: vscode.WebviewPanel): void {
   panel.onDidDispose(() => chatPanels.delete(panel));
 }
 
+/**
+ * 表示し直している最中のグループと、その表示し直し（列番号がキー）。
+ *
+ * 並列のタスクが続けて子タブを開くと、2つ目を開く時点ではグループの表示中タブが
+ * 1つ目の子タブに変わっていることがある。それを表示し直すと人の見ていたタブが隠れるため、
+ * 表示し直しが終わるまでは、同じグループへの後続も最初に記録したタブを表示し直す。
+ * 記録は表示し直しを始めたときに行う（子タブの作成が失敗して呼ばれなかった段取りを残さない）。
+ */
+const pendingRestores = new Map<
+  vscode.ViewColumn,
+  { readonly restore: () => Thenable<unknown>; inFlight: number }
+>();
+
+function trackPending(
+  viewColumn: vscode.ViewColumn,
+  restoreOnce: () => Thenable<unknown>,
+): () => Thenable<unknown> {
+  const restore = (): Thenable<unknown> => {
+    let pending = pendingRestores.get(viewColumn);
+    if (pending?.restore !== restore) {
+      pending = { restore, inFlight: 0 };
+      pendingRestores.set(viewColumn, pending);
+    }
+    const current = pending;
+    current.inFlight += 1;
+    // 破棄済みパネルの`reveal`など同期で投げる失敗も、拒否されたPromiseとして返す
+    return new Promise<unknown>((resolve) => resolve(restoreOnce())).finally(() => {
+      current.inFlight -= 1;
+      if (current.inFlight === 0 && pendingRestores.get(viewColumn) === current) {
+        pendingRestores.delete(viewColumn);
+      }
+    });
+  };
+  return restore;
+}
+
 /** 最大の列番号。これより右へは列番号で開けない。 */
 const MAX_VIEW_COLUMN = 9;
 
@@ -39,13 +75,20 @@ export function planBackgroundOpen(
   targetViewColumn: vscode.ViewColumn | undefined,
 ): BackgroundOpenPlan {
   const group = findTargetGroup(targetViewColumn);
-  const tab = group?.activeTab;
-  if (group === undefined || tab === undefined) {
+  if (group === undefined) {
     return { viewColumn: targetViewColumn, restore: undefined };
   }
-  const restore = restoreTab(tab, group.viewColumn);
-  if (restore !== undefined) {
-    return { viewColumn: targetViewColumn, restore };
+  const pending = pendingRestores.get(group.viewColumn);
+  if (pending !== undefined) {
+    return { viewColumn: targetViewColumn, restore: pending.restore };
+  }
+  const tab = group.activeTab;
+  if (tab === undefined) {
+    return { viewColumn: targetViewColumn, restore: undefined };
+  }
+  const restoreOnce = restoreTab(tab, group.viewColumn);
+  if (restoreOnce !== undefined) {
+    return { viewColumn: targetViewColumn, restore: trackPending(group.viewColumn, restoreOnce) };
   }
   const next = group.viewColumn + 1;
   return {
