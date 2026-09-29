@@ -621,7 +621,11 @@ export class TaskRunOrchestrator {
         return run === undefined
           ? { text: 'runが見つかりません', isError: true }
           : {
-              text: formatTaskRunState(run, controller.recommendations(runId), this.deps.resourceLines?.(runId)),
+              text: formatTaskRunState(
+                run,
+                controller.recommendations(runId),
+                this.deps.resourceLines?.(runId),
+              ),
               isError: false,
             };
       }
@@ -642,7 +646,10 @@ export class TaskRunOrchestrator {
         const result = await controller.startStage(runId, call);
         // 受け付けても資源がcriticalの間は始まらない（Issue #1629）。黙って待たせると理由が分からない
         return result.ok && this.deps.isStartHeld?.() === true
-          ? toOutcome({ ...result, message: `${result.message}\n資源がcriticalのため、状態が下がるまで開始を保留します` })
+          ? toOutcome({
+              ...result,
+              message: `${result.message}\n資源がcriticalのため、状態が下がるまで開始を保留します`,
+            })
           : toOutcome(result);
       }
       case 'stop_stage':
@@ -665,7 +672,10 @@ export class TaskRunOrchestrator {
         const run = controller.find(runId);
         return run === undefined
           ? { text: 'runが見つかりません', isError: true }
-          : { text: formatTaskRunList(controller.listInFolder(run.workspaceRoot), runId), isError: false };
+          : {
+              text: formatTaskRunList(controller.listInFolder(run.workspaceRoot), runId),
+              isError: false,
+            };
       }
       case 'resume_run':
       case 'start_run':
@@ -717,17 +727,17 @@ export class TaskRunOrchestrator {
     };
   }
 
-  private async reopenOtherRun(
-    self: TaskRun,
-    targetRunId: string,
-  ): Promise<OtherRunResult> {
+  private async reopenOtherRun(self: TaskRun, targetRunId: string): Promise<OtherRunResult> {
     if (targetRunId === self.runId) {
       return { ok: false, message: '自分のrunは再開できません' };
     }
     const target = this.deps.controller.find(targetRunId);
     // 別のフォルダのrunは存在を明かさず、見つからないものとして扱う
     if (target?.workspaceRoot !== self.workspaceRoot) {
-      return { ok: false, message: 'このフォルダにそのrunIdのrunが見つかりません。list_runsで確かめてください' };
+      return {
+        ok: false,
+        message: 'このフォルダにそのrunIdのrunが見つかりません。list_runsで確かめてください',
+      };
     }
     const result = await this.deps.controller.reopenRun(targetRunId);
     return result.ok
@@ -747,7 +757,11 @@ export class TaskRunOrchestrator {
       parallel: true,
     });
     return outcome.ok
-      ? { ok: true, runId: outcome.runId, message: `新しいrun（runId=${outcome.runId}）を作りました` }
+      ? {
+          ok: true,
+          runId: outcome.runId,
+          message: `新しいrun（runId=${outcome.runId}）を作りました`,
+        }
       : outcome;
   }
 
@@ -864,7 +878,11 @@ function taskRunToolName(rawParams: Record<string, unknown>): string | undefined
  * `allowAutoApprove`でも人へ回す。それ以外の承認は、`allowAutoApprove`を人が有効にしたときだけ許可する。
  */
 export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
-  return async (_approval, rawParams) => {
+  return async (approval, rawParams) => {
+    // Orchestratorは人と話すセッションなので、AskUserQuestionは選択UIで人へ回す（Issue #1694）
+    if (approval.kind === 'askUserQuestion') {
+      return { kind: 'ask' };
+    }
     const tool = taskRunToolName(rawParams);
     if (tool !== undefined) {
       return AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS.has(tool)
@@ -976,7 +994,10 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
   return events;
 }
 
-const ROADMAP_NOTICE_EVENT_KINDS: Record<TaskRunRoadmapNotice['kind'], TaskRunOrchestratorEvent['kind']> = {
+const ROADMAP_NOTICE_EVENT_KINDS: Record<
+  TaskRunRoadmapNotice['kind'],
+  TaskRunOrchestratorEvent['kind']
+> = {
   childrenAdded: 'roadmapChildrenAdded',
   childrenRemoved: 'roadmapChildrenRemoved',
   planChanged: 'roadmapPlanChanged',

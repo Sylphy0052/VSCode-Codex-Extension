@@ -477,7 +477,20 @@ export function isPathWithinRoot(target: string, root: string): boolean {
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
 }
 
+/**
+ * 書き込んでも内容が残らない特殊ファイル。`> /dev/null` のリダイレクト先を境界外への
+ * 書き込みとして人へ回さないよう、境界の判定から外す（Issue #1694）。
+ */
+const DISCARD_DEVICE_PATHS: ReadonlySet<string> = new Set([
+  '/dev/null',
+  '/dev/stdout',
+  '/dev/stderr',
+]);
+
 function isOutsideAllowedRoots(target: string, boundary: TaskBoundary): boolean {
+  if (DISCARD_DEVICE_PATHS.has(target)) {
+    return false;
+  }
   if (boundary.allowedRoots.length === 0) {
     return true;
   }

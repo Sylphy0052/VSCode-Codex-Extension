@@ -1428,6 +1428,15 @@ export class ClaudeStreamSession {
     }
 
     if (result.kind === 'auto') {
+      // AskUserQuestionは汎用のdecisionでは回答を運べないため、自動判定では常に拒否で返す
+      // （`decide()`と同じ理由）。ワークフローのタスクは拒否の理由で質問の送り先を伝える（Issue #1694）
+      if (approval.kind === 'askUserQuestion') {
+        this.write(
+          buildControlResponse(requestId, buildAskUserQuestionDenyResponse(result.message)),
+        );
+        this.log.info('承認(自動判定): askUserQuestion → 拒否');
+        return;
+      }
       this.write(buildControlResponse(requestId, buildCanUseToolResponse(result.decision, input)));
       this.log.info(`承認(自動判定): ${approval.kind} → ${result.decision}`);
       return;

@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.929.9",
+  "version": "2026.929.11",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1598,9 +1598,9 @@
         },
         "agent.workflows.fullAutoApprove": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "machine",
-          "markdownDescription": "**危険**: ワークフローのタスクのうち、実効 `autoApprove` が有効なもの（YAMLの `autoApprove: true` と `agent.workflows.allowAutoApprove` の両方）の承認要求を、危険判定を通さず許可する。`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作なども無確認で実行される。PRのmergeとリモートブランチの削除、`AskUserQuestion` だけは人へ回す。オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準（Issue #1656）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
+          "markdownDescription": "**危険**: ワークフローのタスクのうち、実効 `autoApprove` が有効なもの（YAMLの `autoApprove: true` と `agent.workflows.allowAutoApprove` の両方）の承認要求を、危険判定を通さず許可する。`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作なども無確認で実行される。既定で有効。無効にするには `false` を明示する。PRのmergeとリモートブランチの削除だけは人へ回す。`AskUserQuestion` は設定に関わらず人へ回さず、オーケストレーターへ質問するよう促して拒否する。オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準（Issue #1656 / #1694）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
         },
         "agent.workflows.replyTimeoutSec": {
           "type": "number",

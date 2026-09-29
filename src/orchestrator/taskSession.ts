@@ -25,8 +25,12 @@ import type { TeamRole } from './rolePresets';
  * そのため、ここでは `auto`（即決）と `ask`（従来の承認カードへ委ねる）を明示的な
  * 判別可能ユニオンにした。`ApprovalDecision` はWebviewの実際の決定にだけ使う語彙として
  * 温存し、意味の異なる2つの概念を1つの型に押し込めない。
+ *
+ * `auto`の`message`は、Claudeの`AskUserQuestion`を拒否するときにCLIへ返す理由
+ * （Issue #1694）。それ以外の要求では使わない。
  */
-export type ApprovalHandlerResult = { kind: 'auto'; decision: ApprovalDecision } | { kind: 'ask' };
+export type ApprovalHandlerResult =
+  { kind: 'auto'; decision: ApprovalDecision; message?: string } | { kind: 'ask' };
 
 /**
  * 承認要求の判定を差し込むハンドラ。`classifyApprovalRequest`（escalation.ts）の呼び出しはrunner.tsの責務。

@@ -146,9 +146,14 @@ export function buildAskUserQuestionResponse(
   };
 }
 
-/** 拒否応答。他の承認種別（`buildCanUseToolResponse`）と同じ文言に揃える。 */
-export function buildAskUserQuestionDenyResponse(): Record<string, unknown> {
-  return { behavior: 'deny', message: 'ユーザーが拒否しました' };
+/**
+ * 拒否応答。既定の文言は他の承認種別（`buildCanUseToolResponse`）と揃える。
+ * ワークフローのタスクは`message`で質問の送り先を伝える（Issue #1694）。
+ */
+export function buildAskUserQuestionDenyResponse(
+  message = 'ユーザーが拒否しました',
+): Record<string, unknown> {
+  return { behavior: 'deny', message };
 }
 
 /**
