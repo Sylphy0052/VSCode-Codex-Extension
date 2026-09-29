@@ -167,7 +167,8 @@ function readNetworkCommand({ words, redirected }: ShellCommand): NetworkCommand
     i++;
     prefixed = true;
   }
-  if (i < words.length && WRAPPERS.has(words[i])) {
+  const wrapper = words[i];
+  if (wrapper !== undefined && WRAPPERS.has(wrapper)) {
     // ラッパーのオプションは値を取るもの（`timeout -s SIGKILL 60`、`sudo -u <user>`）があり、
     // 語の形だけでは読み飛ばす数を決められない。後ろで最初に現れるネットワークコマンド名を
     // 起動されるコマンドとみなす
@@ -184,8 +185,8 @@ function readNetworkCommand({ words, redirected }: ShellCommand): NetworkCommand
   }
   let sub = i + 1;
   if (head === 'git') {
-    while (sub < words.length && words[sub].startsWith('-')) {
-      sub += GIT_OPTIONS_WITH_VALUE.has(words[sub]) ? 2 : 1;
+    for (let option = words[sub]; option?.startsWith('-'); option = words[sub]) {
+      sub += GIT_OPTIONS_WITH_VALUE.has(option) ? 2 : 1;
       prefixed = true;
     }
   }
