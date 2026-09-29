@@ -1,68 +1,77 @@
 import { describe, expect, it } from 'vitest';
-import type { PersistedProgram } from '../../src/orchestrator/programStore';
-import type { LiveRunSummary } from '../../src/orchestrator/runner';
-import { buildFeedRuns } from '../../src/orchestrator/workflowFeed';
+import {
+  createWorkflowFeed,
+  type WorkflowChange,
+  type WorkflowFeedRunnerPort,
+} from '../../src/orchestrator/workflowFeed';
+import type { LiveRunSummary, WorkflowRunSnapshot } from '../../src/orchestrator/runner';
 
 /**
- * run一覧へプログラム所属を付ける突き合わせ（`buildFeedRuns`、Issue #1272）。
+ * `createWorkflowFeed`（Issue #1272。複数runを束ねるプログラム機能はIssue #1679で削除済み）。
  *
- * この対応付けはこれまでViewが持っていた「2種類のデータの突き合わせ」にあたる部分で、
- * feedの純粋関数へ寄せた。ここが崩れると、単発runとプログラムのrunの区別が付かなくなる。
+ * Viewが読む窓口はこれ1つだけなので、通知の中継とスナップショットの組み立てが
+ * 正しいことをここで確認する。
  */
 
 function run(runId: string): LiveRunSummary {
   return { runId, name: runId, defPath: `${runId}.yaml`, outcome: 'running' };
 }
 
-function program(programId: string, runs: Record<string, string | undefined>): PersistedProgram {
+function fakeRunnerPort(opts: {
+  runs: readonly LiveRunSummary[];
+  snapshots?: Record<string, WorkflowRunSnapshot>;
+}): WorkflowFeedRunnerPort & { fire: (runId: string) => void } {
+  const listeners: Array<(runId: string) => void> = [];
   return {
-    programId,
-    defPath: `${programId}.yaml`,
-    workspaceRoot: '/repo',
-    startedAt: '2026-01-01T00:00:00.000Z',
-    finishedAt: undefined,
-    state: {
-      haltedByUser: false,
-      runs: Object.fromEntries(
-        Object.entries(runs).map(([runRefId, runId]) => [
-          runRefId,
-          { state: runId === undefined ? 'pending' : 'running', runId, skipReason: undefined },
-        ]),
-      ),
-    } as PersistedProgram['state'],
+    listLive: () => opts.runs,
+    getSnapshot: (runId) => opts.snapshots?.[runId],
+    onChanged: (listener) => {
+      listeners.push(listener);
+      return () => {
+        const i = listeners.indexOf(listener);
+        if (i !== -1) listeners.splice(i, 1);
+      };
+    },
+    fire: (runId) => listeners.forEach((l) => l(runId)),
   };
 }
 
-describe('buildFeedRuns: run一覧へプログラム所属を付ける（Issue #1272）', () => {
-  it('プログラムが起動したrunにはprogramIdとrun参照名が付く', () => {
-    const feed = buildFeedRuns([run('run-1')], [program('p1', { R1: 'run-1' })]);
-    expect(feed).toEqual([{ ...run('run-1'), programId: 'p1', programRunRefId: 'R1' }]);
+describe('createWorkflowFeed', () => {
+  it('runnerの変化通知をkind: runの1本として中継する', () => {
+    const runner = fakeRunnerPort({ runs: [run('run-1')] });
+    const feed = createWorkflowFeed({ runner });
+    const changes: WorkflowChange[] = [];
+    feed.onChanged((change) => changes.push(change));
+
+    runner.fire('run-1');
+
+    expect(changes).toEqual([{ kind: 'run', runId: 'run-1' }]);
   });
 
-  it('プログラムに属さない単発runは同じ配列に並び、programIdがundefinedになる', () => {
-    const feed = buildFeedRuns([run('run-1'), run('run-2')], [program('p1', { R1: 'run-1' })]);
-    expect(feed.map((r) => [r.runId, r.programId])).toEqual([
-      ['run-1', 'p1'],
-      ['run-2', undefined],
-    ]);
+  it('getSnapshotはrun一覧と表示中のrunを1回の呼び出しでまとめて返す', () => {
+    const snapshot = { runId: 'run-1' } as unknown as WorkflowRunSnapshot;
+    const runner = fakeRunnerPort({ runs: [run('run-1')], snapshots: { 'run-1': snapshot } });
+    const feed = createWorkflowFeed({ runner });
+
+    expect(feed.getSnapshot('run-1')).toEqual({ runs: [run('run-1')], activeRun: snapshot });
   });
 
-  it('まだ起動していないrun参照（runIdが無い）はどのrunにも結び付かない', () => {
-    const feed = buildFeedRuns([run('run-1')], [program('p1', { R1: 'run-1', R2: undefined })]);
-    expect(feed).toHaveLength(1);
-    expect(feed[0]?.programRunRefId).toBe('R1');
+  it('activeRunIdが未指定ならactiveRunはundefinedになる', () => {
+    const runner = fakeRunnerPort({ runs: [run('run-1')] });
+    const feed = createWorkflowFeed({ runner });
+
+    expect(feed.getSnapshot(undefined)).toEqual({ runs: [run('run-1')], activeRun: undefined });
   });
 
-  it('プログラム一覧が空でもrun一覧はそのまま返る（プログラム層が未配線の場合）', () => {
-    const feed = buildFeedRuns([run('run-1')], []);
-    expect(feed).toEqual([{ ...run('run-1'), programId: undefined, programRunRefId: undefined }]);
-  });
+  it('disposeで購読を解除する', () => {
+    const runner = fakeRunnerPort({ runs: [] });
+    const feed = createWorkflowFeed({ runner });
+    const changes: WorkflowChange[] = [];
+    feed.onChanged((change) => changes.push(change));
 
-  it('同じrunIdを複数のプログラムが参照していたら先に見つかった方を採る', () => {
-    const feed = buildFeedRuns(
-      [run('run-1')],
-      [program('p1', { R1: 'run-1' }), program('p2', { R9: 'run-1' })],
-    );
-    expect(feed[0]?.programId).toBe('p1');
+    feed.dispose();
+    runner.fire('run-1');
+
+    expect(changes).toEqual([]);
   });
 });

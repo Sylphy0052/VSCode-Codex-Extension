@@ -89,7 +89,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show();
@@ -119,7 +118,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show();
@@ -141,7 +139,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show();
@@ -162,7 +159,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', undefined)]),
       quietLog,
-      undefined,
       port,
     );
     view.show();
@@ -194,7 +190,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md'), snapshot('run-2', 'docs/roadmap/b.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show('run-1');
@@ -228,7 +223,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show();
@@ -254,7 +248,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show();
@@ -283,7 +276,6 @@ describe('WorkflowViewManager: ロードマップ欄（Issue #1257）', () => {
     const view = new WorkflowViewManager(
       fakeRunner([snapshot('run-1', 'docs/roadmap/a.md')]),
       quietLog,
-      undefined,
       port,
     );
     view.show();

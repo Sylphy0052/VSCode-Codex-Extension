@@ -2811,8 +2811,8 @@ export type ApplyRunCompletionOutcome =
  * を通してからキーにする（同じファイルを別の綴りで渡されても同じキューに入るようにする）。
  * `fs` へ渡すパスは加工しない（呼び出し側が意図した文字列のまま渡す）。
  *
- * **`workspaceState` 側と同じ道具立てを使う。** `WorkflowRunStore` / `ProgramStore` /
- * `ProgramRunner` は同じ `SerialQueue` で read-modify-write を守っている
+ * **`workspaceState` 側と同じ道具立てを使う。** `WorkflowRunStore` と、削除済みの
+ * `ProgramStore` / `ProgramRunner` は同じ `SerialQueue` で read-modify-write を守っていた
  * （Issue #146・#625）。ファイルへの書き戻しだけがその扱いを受けていなかった。
  *
  * **プロセス内の排他しか与えない。** 別プロセス（別のVSCodeウィンドウ、人の手による編集）
@@ -2828,7 +2828,7 @@ const roadmapWriteQueues = new Map<string, { queue: SerialQueue; pending: number
  * 待っている呼び出しが無くなった時点で `roadmapWriteQueues` から自分のエントリを
  * 取り除く。ロードマップのパスは有限とはいえ、モジュールレベルのMapは拡張機能の
  * プロセス寿命の間ずっと残るため、使い終わったものを残す理由が無い
- * （`ProgramRunner.runExclusive` が `programQueues` に対して行っている掃除と同じ考え）。
+ * （削除済み`ProgramRunner.runExclusive`が`programQueues`に対して行っていた掃除と同じ考え）。
  */
 async function runExclusiveOnRoadmapFile<T>(
   roadmapPath: string,

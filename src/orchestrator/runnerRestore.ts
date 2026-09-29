@@ -461,8 +461,6 @@ async function rebuildLiveRun(
     finishedNotified: false,
     failureRecovery: undefined,
     failureRecoveryExhausted: false,
-    programRecoveryHold: false,
-    programControl: undefined,
     integrationReviewAttempts: 0,
     integrationReviewInProgress: false,
     forgeFinalizationInProgress: false,

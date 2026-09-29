@@ -1337,43 +1337,6 @@ describe('workflowScript', () => {
     },
   );
 
-  it(
-    'PROGRAM_SKIP_REASON_LABELはProgramRunSkipReasonの全kindを網羅している' +
-      '（画面に生の識別子が出た再発防止。`src/orchestrator/programState.ts`の' +
-      '`ProgramRunSkipReason`を真として読み取る）',
-    () => {
-      const programStateSource = readFileSync(
-        path.resolve(__dirname, '../../src/orchestrator/programState.ts'),
-        'utf8',
-      );
-      const typeStart = programStateSource.indexOf('export type ProgramRunSkipReason =');
-      expect(typeStart).toBeGreaterThan(0);
-      // この型は`readonly`を使わず、さらに2つの選択肢が同じ物理行に並ぶ
-      // （`{ kind: 'failedDependency'; failedRunId: string } | { kind: 'haltedByUser' };`）。
-      // FAILURE_LABELテストと同じ`{ readonly kind: '...'` という正規表現をこの型に掛けると
-      // 0件になる（実測済み）ため`readonly`無しの形を使う。また`indexOf(';', typeStart)`は
-      // 選択肢内部のプロパティ（`failedRunId: string`の`;`）に先に当たって範囲が
-      // 短く切れてしまうため、宣言行の次の改行までを範囲にする
-      const declLineEnd = programStateSource.indexOf('\n', typeStart);
-      expect(declLineEnd).toBeGreaterThan(typeStart);
-      const typeEndOffset = programStateSource.indexOf('\n', declLineEnd + 1);
-      expect(typeEndOffset).toBeGreaterThan(declLineEnd);
-      const typeBody = programStateSource.slice(typeStart, typeEndOffset);
-      const allSkipReasons = [...typeBody.matchAll(/\{ kind: '(\w+)'/g)].map((m) => m[1]);
-      expect(allSkipReasons.length).toBeGreaterThan(0);
-      // 範囲の切り出しが効いているかの確認。`haltedByUser`は同じファイルの他の場所
-      // （stop処理でのskipReason生成やコメント）にも登場するが、範囲を切らずに拾うと
-      // 重複や無関係な一致が混ざる
-      expect(allSkipReasons.filter((k) => k === 'haltedByUser')).toHaveLength(1);
-
-      const source = workflowScript();
-      const labelMatch = source.match(/const PROGRAM_SKIP_REASON_LABEL = \{([\s\S]*?)\n {2}\};/);
-      expect(labelMatch).not.toBeNull();
-      const body = labelMatch?.[1] ?? '';
-      const labelKeys = [...body.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
-      expect(new Set(labelKeys)).toEqual(new Set(allSkipReasons));
-    },
-  );
 });
 
 describe('会話の一番下へジャンプするボタン', () => {
