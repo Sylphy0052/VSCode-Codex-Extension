@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatState } from '../../src/appserver/chatState';
 import { MAX_ORCHESTRATOR_EVENTS_PER_RUN } from '../../src/orchestrator/orchestratorSession';
-import type { ExtensionSafetyBaseline } from '../../src/orchestrator/taskConfig';
 import {
   TaskRunOrchestrator,
   type TaskRunOrchestratorDeps,
@@ -16,14 +15,6 @@ import type { TaskSession, TaskSessionHost, TaskSessionInput } from '../../src/o
  * - 自動引き継ぎに失敗したときrearmAutoHandoffを呼び、前の世代を使い続けられること
  * （taskRunOrchestratorにはhandoffPrecheckが渡されていない）
  */
-
-const LOOSE_BASELINE: ExtensionSafetyBaseline = {
-  codexSandbox: 'danger-full-access',
-  codexApprovalMode: 'never',
-  claudePermissionMode: 'bypassPermissions',
-  allowAutoApprove: true,
-  allowClaudeBypassPermissions: true,
-};
 
 function makeRun(overrides: Partial<TaskRun> = {}): TaskRun {
   return {
@@ -129,7 +120,6 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       }),
       unregister: vi.fn(),
     },
-    readBaseline: () => LOOSE_BASELINE,
     confirmAnswer: vi.fn(async () => true),
     confirmGateResolution: vi.fn(async () => true),
     showKanban: vi.fn(),
