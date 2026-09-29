@@ -970,18 +970,6 @@
           "scope": "window",
           "markdownDescription": "引き継ぎ先セッションで使うreasoning effort（Issue #1082）。空なら未指定。`agent.autoHandoff.model` と同じ優先順位で扱う。effortに対応しないモデルでは無視される。"
         },
-        "agent.autoHandoff.costPreset": {
-          "type": "string",
-          "enum": [
-            "low",
-            "balanced",
-            "full"
-          ],
-          "default": "balanced",
-          "scope": "window",
-          "deprecationMessage": "agent.autoHandoff.costPreset.codex / agent.autoHandoff.costPreset.claude に分割しました（Issue #1216）。この値は両者が未設定のときの初期値としてのみ使われます。",
-          "markdownDescription": "（非推奨）`agent.autoHandoff.costPreset.codex` / `.claude` に分割済み。両方が未設定のときの初期値としてのみ使う。"
-        },
         "agent.autoHandoff.costPreset.codex": {
           "type": "string",
           "enum": [
