@@ -1091,13 +1091,25 @@ export function finishTaskRunIfDone(run: TaskRun, now: Date): TaskRun {
   if (tasks.length === 0 || !tasks.every(isTaskDone)) {
     return run;
   }
-  const { reopenedAt } = run;
-  if (reopenedAt !== undefined && !tasks.some((task) => hasStageCompletedSince(task, reopenedAt))) {
+  if (isReopenedWithoutProgress(run)) {
     return run;
   }
   const next: TaskRun = { ...run, finishedAt: now.toISOString() };
   delete next.reopenedAt;
   return next;
+}
+
+/**
+ * 再開した（`reopenedAt`がある）runで、再開より後に終わった工程がまだ無い（Issue #1626、#1684）。
+ * 再開時はタスクの完了状態を残すため、全タスクが終わったままでも終了扱いにしない。
+ * `finishTaskRunIfDone`（終了の確定）と`assessTaskRun`（進み具合の判定）が同じ条件で見る。
+ */
+export function isReopenedWithoutProgress(run: TaskRun): boolean {
+  const { reopenedAt } = run;
+  return (
+    reopenedAt !== undefined &&
+    !listTasks(run).some((task) => hasStageCompletedSince(task, reopenedAt))
+  );
 }
 
 /** `since`（ISO8601）以後に終わった工程がある。 */

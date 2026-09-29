@@ -16,6 +16,7 @@ import {
   currentStage,
   DEPENDENCY_GATED_STAGES,
   getTask,
+  isReopenedWithoutProgress,
   isTaskDone,
   listTasks,
   type OrchestratedTask,
@@ -269,7 +270,13 @@ function isProgressingWithoutUser(run: TaskRun, task: OrchestratedTask): boolean
 export type TaskRunAssessment =
   | RunAssessment<string>
   /** 計画をOrchestratorが作成中、またはユーザーの承認待ち。 */
-  | { kind: 'planPending'; planStatus: 'drafting' | 'awaitingApproval' };
+  | { kind: 'planPending'; planStatus: 'drafting' | 'awaitingApproval' }
+  /**
+   * 終わったrunを再開した直後で、全タスクが終わったまま、再開より後に終わった工程がまだ無い
+   * （Issue #1684）。再開時はタスクの完了状態を残すため、この状態を`finished`にはしない。
+   * タスクの追加や再実行で未完了のタスクができれば、`progressing`・`stalled`で判定する。
+   */
+  | { kind: 'reopened' };
 
 /**
  * runが進んでいるか、人の対応を待って止まっているかを判定する。`stalled`になったら、
@@ -281,8 +288,13 @@ export function assessTaskRun(run: TaskRun): TaskRunAssessment {
     return { kind: 'planPending', planStatus: run.planStatus };
   }
   const tasks = listTasks(run);
+  const allDone = tasks.every(isTaskDone);
+  // 未完了のタスクがあれば通常どおり進み具合を判定する（`finishTaskRunIfDone`と同じ順序）
+  if (allDone && isReopenedWithoutProgress(run)) {
+    return { kind: 'reopened' };
+  }
   return assessRunProgress({
-    allDone: tasks.every(isTaskDone),
+    allDone,
     anyProgressingWithoutUser: tasks.some((task) => isProgressingWithoutUser(run, task)),
     haltedByUser: run.haltedByUser,
     hasRunnable: !run.haltedByUser && tasks.some((task) => isStageStartable(run, task)),

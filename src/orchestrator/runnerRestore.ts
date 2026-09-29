@@ -36,6 +36,7 @@ import {
 import {
   resolveBranchNamingAndDraft,
   retrySuffixOf,
+  type LivePseudoState,
   type LiveRun,
   type LiveRunForgeState,
   type WorkflowWarning,
@@ -349,30 +350,36 @@ async function reconcileRestoredTaskStates(
 /**
  * 疑似worktree（design.md §16.20）。リロード後の再構築はベストエフォートにする
  * （`rebuildLiveRun`自体が「定義ファイルを読めない等は復元をあきらめる」以外は失敗時も
- * 可能な限り表示を続ける方針のため。統合先の再作成に失敗した場合も`pseudo: undefined`の
- * まま復元自体は続け、ログに残す）。
+ * 可能な限り表示を続ける方針のため。統合先の再作成に失敗した場合も復元自体は続け、
+ * ログに残す）。
  *
- * **ただし失敗した事実は`failure`として持ち帰る（Issue #1114）。** `pseudo: undefined`
- * だけを返すと、作業ディレクトリの解決（`resolveSharedFallbackWorkingDirectory`）が
- * 「隔離なし（後方互換）」と区別できず、自動再開や手動の再試行が隔離なしで元の
- * ワークスペースへ書き込んでしまう。理由を`LiveRun.pseudoRestoreFailure`へ載せ、
+ * **ただし失敗した事実は`restoreFailed`として持ち帰る（Issue #1114）。** `none`を返すと、
+ * 作業ディレクトリの解決（`resolveSharedFallbackWorkingDirectory`）が「隔離なし（後方互換）」
+ * と区別できず、自動再開や手動の再試行が隔離なしで元のワークスペースへ書き込んでしまう。
  * 該当runのタスクは開始させずに`failed`へ倒す。
  *
- * なお、疑似worktreeの`baseline`はrun開始時点ではなく
- * **復元した時点**のワークスペースで取り直す（`headCommit`と同じ「復元時点を基準にする」
- * 簡略化。再実行は新しい複製でやり直す設計のため、この差異は再実行の意味を壊さない）。
+ * 疑似worktreeの`baseline`は復元時点で取り直さず、run開始時に永続化したものを読み戻す
+ * （`resolvePseudoState`、Issue #1115）。取り直すと、run開始後・リロード前に人が行った編集が
+ * 基準へ吸収され、再開後の反映がその編集を上書きしてしまう。永続化された基準が無いrun
+ * （#1115より前に始めたもの）に限り、復元時点で取り直して永続化する。
+ *
+ * 復元時点で取り直す値のうち、`rebuildLiveRun`の`headCommit`は永続化しない（Issue #1684で
+ * 判断）。復元したrunでこの値を読むのは、`forge`の`baseBranch`が無いときの統合差分レビュー
+ * （`finalizeForge`）だけで、そこでは`<base>...HEAD`の3点diffとしてmerge-baseから比べるため、
+ * 分岐元の系列上でHEADが進んでいても比較の起点は変わらない。タスクのworktreeの分岐元は
+ * この値ではなく、作成のたびに統合ブランチの先頭から取る（`resolveTaskBranchOrigin`）。
  */
 async function resolveRestoredPseudoState(
   self: WorkflowRunnerInternals,
   p: PersistedRun,
-): Promise<{ pseudo: LiveRun['pseudo']; failure: string | undefined }> {
+): Promise<LivePseudoState> {
   const resolved = await resolvePseudoState(self, p.workspaceRoot, p.runId);
   if (resolved.ok) {
-    return { pseudo: resolved.state, failure: undefined };
+    return resolved.state;
   }
-  const failure = `疑似worktreeの統合先を復元できませんでした: ${resolved.message}`;
-  self.deps.log.warn(`[workflow ${p.runId}] ${failure}`);
-  return { pseudo: undefined, failure };
+  const message = `疑似worktreeの統合先を復元できませんでした: ${resolved.message}`;
+  self.deps.log.warn(`[workflow ${p.runId}] ${message}`);
+  return { kind: 'restoreFailed', message };
 }
 
 /** 永続化された統合の試行（Issue #1678）を検証して読み戻す。不正な値は捨てる。 */
@@ -430,8 +437,8 @@ async function rebuildLiveRun(
     ? await self.resolveForgeState(p.workspaceRoot)
     : { kind: 'disabled' };
   const { branchNaming, draftPullRequest } = resolveBranchNamingAndDraft(self.deps);
-  const restoredPseudo = gitRepo
-    ? { pseudo: undefined, failure: undefined }
+  const pseudo: LivePseudoState = gitRepo
+    ? { kind: 'none' }
     : await resolveRestoredPseudoState(self, p);
 
   return {
@@ -470,8 +477,7 @@ async function rebuildLiveRun(
     forge,
     branchNaming,
     draftPullRequest,
-    pseudo: restoredPseudo.pseudo,
-    pseudoRestoreFailure: restoredPseudo.failure,
+    pseudo,
     carriedOverWork: new Map(),
     reloadResumeSessions: new Map(),
     // タスク間メッセージング（design.md §16.21）はこのウィンドウで新たに始める実行にだけ

@@ -1380,6 +1380,48 @@ export interface OrchestratorSnapshot {
 }
 
 /**
+ * 疑似worktree（design.md §16.20）の統合先。`LivePseudoState`のうち`active`の形で、
+ * `resolvePseudoState`が実行開始時と復元時に作る（gitの`integration`と対称の役割）。
+ */
+export interface ActivePseudoWorktree {
+  kind: 'active';
+  integrationDir: string;
+  queue: PseudoWorktreeIntegrationQueue;
+  /**
+   * ワークスペースの直近の既知の状態。`resolvePseudoState`が実行開始時に取って永続化した
+   * スナップショット（復元時はそれを読み戻したもの。Issue #1115）で初期化されるが、その後は
+   * 固定ではない。`reflectPseudoWorktree`がワークスペースへの反映に成功する（一部適用を
+   * 含む）たびに、反映後の実際の状態へ更新する（Issue #511）。反映を拒否した
+   * （`workspaceChanged`）場合は更新しない。書き込みが起きていないため、拒否した人の編集を
+   * 「自分が書いた状態」として取り込むと、以後その編集を検知できなくなってしまう。
+   */
+  baseline: Snapshot;
+  exclude: readonly string[];
+}
+
+/**
+ * `LiveRun.pseudo`の状態（design.md §16.20、Issue #1114、Issue #1684）。
+ *
+ * - `none`: 疑似worktreeを使わない。gitリポジトリのrunか、`WorkflowRunnerDeps.pseudoWorktree`
+ *   を渡していない（後方互換。ワークスペース直下をそのまま共有する旧挙動が正しい）
+ * - `active`: 統合先を持つ（`ActivePseudoWorktree`）
+ * - `restoreFailed`: 隔離を使っていたrunの復元（`rebuildLiveRun`）で、統合先の再作成に
+ *   失敗した。`message`はその理由。`none`と同じに扱うと、自動再開や手動の再試行が
+ *   **隔離なしで元のワークスペースへ書き込む**。`sharedFallback`の作業ディレクトリ解決は
+ *   元のrepoRootを返さず例外を投げてタスクを`failed`にする
+ *   （`resolveSharedFallbackWorkingDirectory`参照）。実行開始時は統合先の作成に失敗した
+ *   時点で実行自体を始めない（`createPseudoWorktreeForStart`）ため、この形にはならない
+ *
+ * 以前は統合先（`pseudo`）と復元失敗の理由（`pseudoRestoreFailure`）を別のフィールドに
+ * 持っており、「統合先があり、かつ復元に失敗している」という矛盾した組み合わせを型で
+ * 防げなかった。
+ */
+export type LivePseudoState =
+  | { kind: 'none' }
+  | ActivePseudoWorktree
+  | { kind: 'restoreFailed'; message: string };
+
+/**
  * runごとのPR/MR作成の状態（design.md §16.18）。実行開始時に一度だけ `resolveForgeState`
  * が決め、run中は変えない（ホストやCLIの状態が実行中に変わっても、runの結果を一貫させる）。
  */
@@ -1853,6 +1895,29 @@ export interface LiveRun {
   startedAt: string;
   runState: RunState;
   tasks: Map<string, LiveTask>;
+  /**
+   * このプロセスでrunの終了判定を確定させたか（design.md §16.5、Issue #491、Issue #1684）。
+   * `pump()`は`getRunOutcome`が`running`以外を返した時点でここを立て、以後は早期returnして
+   * 新しいタスクを開始しない。`dispose()`も片付けの間に`pump()`を止めるために立てる。
+   *
+   * **永続化しない。** 永続化するのは`runState`（`PersistedRun.tasks`・`haltedByUser`）だけで、
+   * 終了したかどうかはそこから`getRunOutcome`で導く（`PersistedRun.finishedAt`も`persist`が
+   * 同じ判定から書く）。ここを別に保存すると、`runState`と食い違った値を読み戻せてしまう。
+   * また終了ブロック（`finalizeForge`・終了通知など）を実行済みかどうかはプロセスをまたいで
+   * 引き継げないため、その判断は`finishedNotified`など実行時だけの状態が受け持つ。
+   *
+   * 再開の3経路での扱い:
+   *
+   * - Reload後の復元（`rebuildLiveRun`）: 復元した`runState`から導く
+   *   （`getRunOutcome(runState) !== 'running'`）
+   * - 自動再開（`autoResumeIfEligible`）: `reloadInterrupted`のタスクを`pending`へ戻した後の
+   *   `runState`から、復元と同じ式で導き直す
+   * - 手動の再開（`retryTask`・`continueTask`・`retryMerge`、計画変更ツールの
+   *   `resumeIfFinishedForPlanChange`）: `runState`を再開の状態へ遷移させたうえで`false`へ
+   *   戻す。遷移後は`pending`や`running`のタスクがあるため、復元と同じ式で導いても`false`に
+   *   なる。戻す前の値は、終了通知の後の再開かどうか（`notifyOrchestratorRunResumed`）の
+   *   判定に使う
+   */
   finished: boolean;
   /**
    * `notifyOrchestratorRunFinished`を送り済みかどうか（design.md §16.5・§16.43、
@@ -1928,43 +1993,10 @@ export interface LiveRun {
    */
   draftPullRequest: boolean;
   /**
-   * 疑似worktree（design.md §16.20）。`!gitRepo` かつ
-   * `WorkflowRunnerDeps.pseudoWorktree`が渡されているときだけ実行開始時に一度作る
-   * （gitの`integration`と対称の役割）。
+   * 疑似worktree（design.md §16.20）の状態。`none` / `active` / `restoreFailed`の意味は
+   * `LivePseudoState`を参照。
    */
-  pseudo:
-    | {
-        integrationDir: string;
-        queue: PseudoWorktreeIntegrationQueue;
-        /**
-         * ワークスペースの直近の既知の状態。`resolvePseudoState`が実行開始時／復元時に
-         * 一度取ったスナップショットで初期化されるが、その後は固定ではない。
-         * `reflectPseudoWorktree`がワークスペースへの反映に成功する（一部適用を含む）
-         * たびに、反映後の実際の状態へ更新する（Issue #511）。反映を拒否した
-         * （`workspaceChanged`）場合は更新しない。書き込みが起きていないため、
-         * 拒否した人の編集を「自分が書いた状態」として取り込むと、以後その編集を
-         * 検知できなくなってしまう。
-         */
-        baseline: Snapshot;
-        exclude: readonly string[];
-      }
-    | undefined;
-  /**
-   * 疑似worktree（design.md §16.20）の統合先を**復元できなかった**理由。リロード時
-   * （`rebuildLiveRun`）に`resolvePseudoState`が失敗したときだけ入る（Issue #1114）。
-   *
-   * `pseudo`が`undefined`になる理由は2つあり、この2つは区別しなければならない。
-   *
-   * - `WorkflowRunnerDeps.pseudoWorktree`を渡していない（後方互換。ワークスペース直下を
-   *   そのまま共有する旧挙動が正しい）
-   * - 隔離を使っていたrunの復元で、統合先の再作成に失敗した（隔離できない）
-   *
-   * 後者を「隔離なし」と同じに扱うと、自動再開や手動の再試行が**隔離なしで元の
-   * ワークスペースへ書き込む**。ここに理由が入っている場合、`sharedFallback`の
-   * 作業ディレクトリ解決は元のrepoRootを返さず例外を投げてタスクを`failed`にする
-   * （`resolveSharedFallbackWorkingDirectory`参照）。
-   */
-  pseudoRestoreFailure: string | undefined;
+  pseudo: LivePseudoState;
   /**
    * 自動再開で前の試行の作業を引き継ぐタスク（Issue #1514）。`resolveWorkingDirectory`が
    * 次の開始で取り出し、新しいworktreeを作らずにこの作業場所を使う
@@ -2606,10 +2638,10 @@ export class WorkflowRunner {
     runId: string,
     gitRepo: boolean,
   ): Promise<
-    { ok: true; pseudo: LiveRun['pseudo'] } | { ok: false; errors: readonly WorkflowIssue[] }
+    { ok: true; pseudo: LivePseudoState } | { ok: false; errors: readonly WorkflowIssue[] }
   > {
     if (gitRepo) {
-      return { ok: true, pseudo: undefined };
+      return { ok: true, pseudo: { kind: 'none' } };
     }
     const resolved = await resolvePseudoState(this.internals, repoRoot, runId);
     if (!resolved.ok) {
@@ -2912,9 +2944,6 @@ export class WorkflowRunner {
       branchNaming,
       draftPullRequest,
       pseudo,
-      // 実行開始時は統合先の作成に失敗した時点で実行自体を始めない
-      // （`createPseudoWorktreeForStart`）ため、ここへ理由が入ることはない
-      pseudoRestoreFailure: undefined,
       carriedOverWork: new Map(),
       reloadResumeSessions: new Map(),
       messaging: undefined,
@@ -3638,7 +3667,7 @@ export class WorkflowRunner {
     failed: string[],
   ): Promise<void> {
     const pseudoWorktreeDeps = this.deps.pseudoWorktree;
-    if (live.pseudo === undefined || pseudoWorktreeDeps === undefined) {
+    if (live.pseudo.kind !== 'active' || pseudoWorktreeDeps === undefined) {
       return;
     }
     if (state.state === 'blocked') {
@@ -3833,7 +3862,7 @@ export class WorkflowRunner {
       return { kind: 'git' };
     }
     const pseudoWorktreeDeps = this.deps.pseudoWorktree;
-    if (!live.gitRepo && live.pseudo !== undefined && pseudoWorktreeDeps !== undefined) {
+    if (!live.gitRepo && live.pseudo.kind === 'active' && pseudoWorktreeDeps !== undefined) {
       return { kind: 'pseudo', fs: pseudoWorktreeDeps.fs };
     }
     return { kind: 'none' };
@@ -3995,7 +4024,7 @@ export class WorkflowRunner {
       // 経路で正しく比較・反映できる。絞る理由自体が無くなったため、
       // `pseudoWorktreeReflectSkipped`という「反映していない」事実を伝えるためだけの
       // 暫定警告も廃止した）
-      if (live.pseudo !== undefined) {
+      if (live.pseudo.kind === 'active') {
         void reflectPseudoWorktree(this.internals, runId);
       }
       // タスク間メッセージング（design.md §16.21）のMCPサーバはrunの結果を問わず閉じる。
@@ -6285,7 +6314,7 @@ export class WorkflowRunner {
             liveTask.branch,
             liveTask.originCommit,
           );
-        } else if (liveTask.usedPseudoWorktree && live.pseudo !== undefined) {
+        } else if (liveTask.usedPseudoWorktree && live.pseudo.kind === 'active') {
           // 疑似worktree（design.md §16.20）。gitのマージに相当する統合を試みる
           void integratePseudoWorktree(this.internals, runId, taskId, live.pseudo, liveTask);
         } else {

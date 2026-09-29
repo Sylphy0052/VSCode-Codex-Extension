@@ -16,7 +16,7 @@ import {
 } from './pseudoWorktree';
 import type { CarriedOverWork } from './resumeCarryOver';
 import { markMergeBlocked, markMergeFailed, markMergeSucceeded } from './runState';
-import { issue, type LiveRun, type LiveTask } from './runner';
+import { issue, type ActivePseudoWorktree, type LiveRun, type LiveTask } from './runner';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import { sanitizeForLog } from './sanitize';
 import { buildTaskBoundary, decideWorkingDirectory } from './worktree';
@@ -159,7 +159,7 @@ async function resolveSharedFallbackWorkingDirectory(
   live.warnings.push({ kind: 'gitFallback', taskId: task.id, message: warning });
   // 疑似worktree（design.md §16.20、Issue #105）。`WorkflowRunnerDeps.pseudoWorktree`が
   // 渡されていない場合は、従来どおりワークスペース直下を共有する（後方互換）
-  if (live.pseudo !== undefined && self.deps.pseudoWorktree !== undefined) {
+  if (live.pseudo.kind === 'active' && self.deps.pseudoWorktree !== undefined) {
     // `retry`はgit側の`resolveWorktreeWorkingDirectory`と同じ値（呼び出し元の
     // `prepareTaskLaunch`が`retrySuffixOf(taskRunState)`で算出したもの）を共有する
     // （Issue #396）。以前はここへ流さず、再試行のたびに`cloneWorkspace`が前回と同じ
@@ -184,16 +184,14 @@ async function resolveSharedFallbackWorkingDirectory(
       originCommit: '',
     };
   }
-  // 復元時に統合先を作り直せなかった実行（Issue #1114）。`live.pseudo`が`undefined`でも
+  // 復元時に統合先を作り直せなかった実行（Issue #1114）。`live.pseudo`が`active`でなくても
   // ここは後方互換の「ワークスペース直下を共有する」経路へ落としてはいけない。隔離を
   // 使っていたrunの復元で隔離を用意できなかったということであり、そのまま続けると
   // 自動再開や手動の再試行が**隔離なしで元のワークスペースへ書き込む**。隔離できない
   // ことを復元失敗として扱い、例外でタスクを`failed`へ倒す（呼び出し元の`startTask`が
   // 受け止めて`applyLoopStopReason(..., 'failed')`にする）
-  if (live.pseudoRestoreFailure !== undefined) {
-    throw new Error(
-      `${live.pseudoRestoreFailure}。隔離できないため、元のワークスペースでは実行しません`,
-    );
+  if (live.pseudo.kind === 'restoreFailed') {
+    throw new Error(`${live.pseudo.message}。隔離できないため、元のワークスペースでは実行しません`);
   }
   return {
     cwd: live.repoRoot,
@@ -295,10 +293,12 @@ export async function resolvePseudoState(
   self: WorkflowRunnerInternals,
   repoRoot: string,
   runId: string,
-): Promise<{ ok: true; state: LiveRun['pseudo'] } | { ok: false; message: string }> {
+): Promise<
+  { ok: true; state: { kind: 'none' } | ActivePseudoWorktree } | { ok: false; message: string }
+> {
   const deps = self.deps.pseudoWorktree;
   if (deps === undefined) {
-    return { ok: true, state: undefined };
+    return { ok: true, state: { kind: 'none' } };
   }
   const ensured = await ensureIntegrationDir(repoRoot, runId, deps.fs);
   if (!ensured.ok) {
@@ -352,6 +352,7 @@ export async function resolvePseudoState(
   return {
     ok: true,
     state: {
+      kind: 'active',
       integrationDir: ensured.dir,
       queue,
       baseline,
@@ -375,7 +376,7 @@ export async function integratePseudoWorktree(
   self: WorkflowRunnerInternals,
   runId: string,
   taskId: string,
-  pseudo: NonNullable<LiveRun['pseudo']>,
+  pseudo: ActivePseudoWorktree,
   liveTask: LiveTask,
 ): Promise<void> {
   const live = self.runs.get(runId);
@@ -470,7 +471,7 @@ export async function reflectPseudoWorktree(
 ): Promise<void> {
   const live = self.runs.get(runId);
   const deps = self.deps.pseudoWorktree;
-  if (live === undefined || live.pseudo === undefined || deps === undefined) {
+  if (live === undefined || live.pseudo.kind !== 'active' || deps === undefined) {
     return;
   }
   const manifestRestoreError = live.pseudo.queue.getManifestRestoreError();
