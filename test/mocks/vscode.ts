@@ -542,7 +542,41 @@ export const commands = {
   },
 };
 
+/**
+ * テスト用: タブの入力の種類（Issue #1699）。`instanceof`で種類を見分ける処理が
+ * 例外を投げないよう、クラスだけを用意する。
+ */
+export class TabInputText {
+  constructor(readonly uri: FakeUri) {}
+}
+export class TabInputTextDiff {
+  constructor(
+    readonly original: FakeUri,
+    readonly modified: FakeUri,
+  ) {}
+}
+export class TabInputCustom {
+  constructor(
+    readonly uri: FakeUri,
+    readonly viewType: string,
+  ) {}
+}
+export class TabInputNotebook {
+  constructor(
+    readonly uri: FakeUri,
+    readonly notebookType: string,
+  ) {}
+}
+export class TabInputWebview {
+  constructor(readonly viewType: string) {}
+}
+
 export const window = {
+  /** テスト用: エディタグループは空の1つだけ（背面で開くタブが隠すタブは無い。Issue #1699）。 */
+  tabGroups: {
+    activeTabGroup: { viewColumn: ViewColumn.One, activeTab: undefined, tabs: [] },
+    all: [{ viewColumn: ViewColumn.One, activeTab: undefined, tabs: [] }],
+  },
   get activeTextEditor(): { document: { uri: unknown } } | undefined {
     if (state.activeTextEditorFolderPath === undefined) {
       return undefined;

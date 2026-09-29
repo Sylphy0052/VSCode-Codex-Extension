@@ -2041,6 +2041,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
   }
 
+  protected override warnBackgroundTabRestoreFailed(message: string): void {
+    this.log.warn(message);
+  }
+
   /** `BaseChatViewManager.attachPanel`（基底クラス）が呼ぶ、Codex用のwebview HTML組み立て。 */
   protected override renderPanelHtml(entry: ChatPanel, panel: vscode.WebviewPanel): string {
     // 入力欄アイコン列の表に出すボタン（設定 agent.chat.composerButtons、issue #296）。
