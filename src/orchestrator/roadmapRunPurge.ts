@@ -32,14 +32,22 @@ export interface RoadmapRunPurgeWorkspaceState {
 export async function purgeRoadmapRunSavedData(
   workspaceState: RoadmapRunPurgeWorkspaceState,
   globalStorageDir: string,
-  log: Pick<Logger, 'info'>,
+  log: Pick<Logger, 'info' | 'warn'>,
 ): Promise<void> {
   let removedAny = false;
 
   for (const key of LEGACY_ROADMAP_RUN_WORKSPACE_STATE_KEYS) {
-    if (workspaceState.get(key) !== undefined) {
+    if (workspaceState.get(key) === undefined) {
+      continue;
+    }
+    try {
       await workspaceState.update(key, undefined);
       removedAny = true;
+    } catch (e: unknown) {
+      // 呼び出し元は`void`で投げっぱなしにするため、ここで捕まえないとunhandled rejectionになる
+      log.warn(
+        `ロードマップ実行の保存データ（${key}）を削除できなかった（起動は続ける。次回の起動で再び削除を試みる）: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
