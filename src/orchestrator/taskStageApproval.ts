@@ -58,8 +58,17 @@ export function isMergeOrRemoteBranchDelete(command: string): boolean {
   );
 }
 
+/** 工程セッションが`AskUserQuestion`を呼んだときにCLIへ返す拒否の理由（Issue #1694）。 */
+export const STAGE_ASK_USER_QUESTION_DENY_MESSAGE =
+  '工程セッションではAskUserQuestionを使えません。質問・確認・方針の相談は' +
+  `${ROADMAP_ASK_ORCHESTRATOR_TOOL.name}でOrchestratorへ送ってください。`;
+
 export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): ApprovalHandler {
-  return async (_approval, rawParams) => {
+  return async (approval, rawParams) => {
+    // 工程セッションには人が張り付いていないため、質問はOrchestratorへ回させる
+    if (approval.kind === 'askUserQuestion') {
+      return { kind: 'auto', decision: 'decline', message: STAGE_ASK_USER_QUESTION_DENY_MESSAGE };
+    }
     const tool = stageToolName(rawParams);
     if (tool !== undefined && AUTO_APPROVED_STAGE_TOOLS.has(tool)) {
       return { kind: 'auto', decision: 'accept' };
@@ -84,7 +93,10 @@ export function classifyFullAutoApproval(request: EscalationRequest): Escalation
       reasons: ['PRのmergeかリモートブランチの削除のため、fullAutoApproveでも人へ回します'],
     };
   }
-  return { decision: 'auto', reasons: ['fullAutoApproveが有効なため、危険判定を通さず許可しました'] };
+  return {
+    decision: 'auto',
+    reasons: ['fullAutoApproveが有効なため、危険判定を通さず許可しました'],
+  };
 }
 
 /** CodexのMCP elicitationのうち、報告と質問のツールだけを許可する。 */
