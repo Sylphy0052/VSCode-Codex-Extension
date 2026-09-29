@@ -8,16 +8,6 @@ import {
   type OrchestratorEvent,
 } from '../../src/orchestrator/orchestratorSession';
 import { TASK_ID_PATTERN, type WorkflowDefinition } from '../../src/orchestrator/workflow';
-import type { ExtensionSafetyBaseline } from '../../src/orchestrator/taskConfig';
-
-/** 何も絞っていない拡張機能側の設定（クランプの基準）。 */
-const LOOSE_BASELINE: ExtensionSafetyBaseline = {
-  codexSandbox: 'danger-full-access',
-  codexApprovalMode: 'never',
-  claudePermissionMode: 'bypassPermissions',
-  allowAutoApprove: true,
-  allowClaudeBypassPermissions: true,
-};
 
 function definition(providers: readonly ('codex' | 'claude')[]): WorkflowDefinition {
   return {
@@ -61,35 +51,24 @@ describe('オーケストレーターセッション（design.md §16.23）', ()
   });
 
   describe('権限（design.md §16.23「権限」）', () => {
-    it('Codexでは read-only / on-request、無人実行が明示されればautoApprove有効へ落ちる', () => {
-      const effective = buildOrchestratorConfig('codex', LOOSE_BASELINE);
+    it('Codexでは danger-full-access / never で、autoApproveも有効になる（Issue #1697）', () => {
+      const effective = buildOrchestratorConfig('codex');
 
-      expect(effective.sandbox).toBe('read-only');
-      expect(effective.config.approvalMode).toBe('on-request');
+      expect(effective.sandbox).toBe('danger-full-access');
+      expect(effective.config.approvalMode).toBe('never');
       expect(effective.autoApprove).toBe(true);
+      expect(effective.warnings).toEqual([]);
       // モデルとeffortは拡張機能の既定に委ねる
       expect(effective.config.model).toBe('');
       expect(effective.config.effort).toBe('');
     });
 
-    it('Claudeでは manual（読み取りのみ）へ落ち、無人実行が明示されればautoApprove有効になる', () => {
-      const effective = buildOrchestratorConfig('claude', LOOSE_BASELINE);
+    it('Claudeでは bypassPermissions で、autoApproveも有効になる（Issue #1697）', () => {
+      const effective = buildOrchestratorConfig('claude');
 
-      expect(effective.config.approvalMode).toBe('manual');
+      expect(effective.config.approvalMode).toBe('bypassPermissions');
+      expect(effective.sandbox).toBe('');
       expect(effective.autoApprove).toBe(true);
-    });
-
-    it('拡張機能側の設定のほうが厳しければ、そちらが勝つ（クランプの不変条件）', () => {
-      const strict: ExtensionSafetyBaseline = {
-        ...LOOSE_BASELINE,
-        claudePermissionMode: 'plan',
-        allowAutoApprove: false,
-      };
-
-      const effective = buildOrchestratorConfig('claude', strict);
-
-      expect(effective.config.approvalMode).toBe('plan');
-      expect(effective.autoApprove).toBe(false);
     });
   });
 

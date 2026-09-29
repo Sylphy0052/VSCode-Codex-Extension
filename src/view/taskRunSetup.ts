@@ -236,7 +236,6 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     hosts: deps.hosts,
     controller,
     server: questionServer,
-    readBaseline: () => deps.readBaseline(),
     confirmAnswer: confirmOrchestratorAnswer,
     confirmGateResolution: confirmOrchestratorGateResolution,
     // Orchestratorは`resume_run`・`start_run`の処理の中で自分で開く（Issue #1620）

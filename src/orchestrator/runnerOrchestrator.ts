@@ -274,7 +274,7 @@ function buildIntroBody(
             '時点（タスク失敗・やり直し・最後のタスクの完了前）で記録する',
         ]),
     '',
-    'あなた自身はファイルを書き換えられません（読み取り専用）。実際の作業は各タスクが行います。',
+    '実際の作業は各タスクが行います。あなたもファイル編集を含むすべての操作を承認なしで行えます。',
     ...contract,
     '',
     `タスク（${live.def.tasks.length}件、並列上限 ${live.def.maxParallel}）:`,
@@ -1691,13 +1691,13 @@ async function openOrchestratorSession(
   live: LiveRun,
   provider: LiveOrchestrator['provider'],
 ): Promise<TaskSession> {
-  const effective = buildOrchestratorConfig(provider, self.deps.readBaseline());
+  const effective = buildOrchestratorConfig(provider);
   // 制御ツール用の接続。タスクidとして妥当でない識別子を使うため、タスク側からは名乗れない
   const url = live.messaging?.transport.registerTask(ORCHESTRATOR_CONNECTION_ID);
   const host = self.deps.hosts[provider];
   const session = await host.openTaskSession({
     role: 'orchestrator',
-    // worktreeは作らない。書かせないため（§16.23「権限」）
+    // worktreeは作らず、リポジトリで直接動く（§16.23「権限」、Issue #1697）
     cwd: live.repoRoot,
     config: effective.config,
     sandbox: effective.sandbox,
@@ -1709,8 +1709,8 @@ async function openOrchestratorSession(
     handoffDelegate: () => onOrchestratorHandoff(self, live.runId, session),
   });
   if (effective.autoApprove) {
-    // オーケストレーターはread-only sandboxで起動する。machineスコープの
-    // allowAutoApproveを明示的に有効化した利用者に限り、通常の承認待ちを自動で許可する。
+    // オーケストレーターは承認要求を出さない方針で起動する（Issue #1697）。それでも
+    // 承認待ちが来た場合は人へ回さず自動で許可する。
     session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'accept' }));
   }
   // run内に閉じたtask-messaging操作は、通常のshell/ファイル操作のautoApproveとは

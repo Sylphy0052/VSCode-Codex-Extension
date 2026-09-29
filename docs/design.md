@@ -5898,13 +5898,15 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 
 #### 権限
 
-オーケストレーターにはコードを書かせない。判断と対話と実行制御に限る。
+オーケストレーターにはファイル編集を含む全権限を与える（Issue #1697）。ワークフロー実行とロードマップ実行（§16.23のオーケストレーターモード）の両方に適用する。
 
-- `sandbox` は `read-only`、承認は Codex なら `on-request`、Claude Code なら `manual`（読み取りのみ）へ**クランプする**（`clampSandbox` / `clampCodexApprovalMode` / `clampClaudePermissionMode`。`src/util/safetyClamp.ts`）。§16.16のクランプと同じ関数を使い、独自の判定は持たない
-- YAMLからは指定できない。ワークフロー定義に対応するフィールドを設けない（§16.21と同じ立て付け）。定義ファイルの書き手がオーケストレーターの権限を緩められると、§16.16のクランプを迂回する新しい経路になる
-- `autoApprove`（§16.7）の対象外。承認要求が出た場合は通常の承認カードで人に聞く。無人実行で自動承認したい対象はタスクであって、run全体を動かせる側ではない
+- `sandbox` は `danger-full-access`、承認は Codex なら `never`、Claude Code なら `bypassPermissions` に固定する。§16.16のクランプ（`buildEffectiveTaskConfig`）は**経由しない**。拡張機能側の設定（`codex.sandbox` / 承認方針 / `agent.workflows.allowAutoApprove` / `agent.workflows.allowClaudeBypassPermissions`）でも絞られない
+- ロードマップ実行でも Claude CLI のsandbox（`cliSandbox`、Issue #1541）を付けない
+- `autoApprove` は常に有効。承認要求が来た場合も人へ回さない。MCPツールのelicitation（`decide_approval` / `decide_final_merge` 等）の扱いは従来どおり
+- YAMLからは指定できない。ワークフロー定義に対応するフィールドを設けない（§16.21と同じ立て付け）
+- worktreeは作らず、メインのworking tree（`repoRoot` / `workspaceRoot`）で動く。編集はそこへ直接反映される
 
-**書けないのに実行制御はできる**という非対称は意図したものである。ファイルを書き換える権限は個々のタスクが持ち、オーケストレーターは「どのタスクに何をさせるか」だけを動かす。両方を1つのセッションへ与えると、run全体を見渡す権限とワークスペースを書き換える権限が同じ場所に集まる。
+以前は「書けないのに実行制御はできる」という非対称を意図し、run全体を見渡す権限とワークスペースを書き換える権限を同じセッションへ集めない設計だった。Issue #1697で利用者の判断により撤回した。そのため、外部由来のテキスト（タスク出力・Issue本文等）によるプロンプトインジェクションを受けた場合の被害範囲は、読み取りだけでなく全操作に及ぶ。
 
 #### 送信の口（`TaskSession.send` の追加）
 

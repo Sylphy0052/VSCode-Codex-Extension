@@ -1,6 +1,5 @@
 import { escapeAngleBrackets, stripControlCharsPreservingNewlines } from './sanitize';
-import { buildEffectiveTaskConfig, type EffectiveTaskConfig } from './taskConfig';
-import type { ExtensionSafetyBaseline } from './taskConfig';
+import type { EffectiveTaskConfig } from './taskConfig';
 import { DEFAULT_PROVIDER, type Provider, type WorkflowDefinition } from './workflow';
 
 /**
@@ -20,24 +19,21 @@ import { DEFAULT_PROVIDER, type Provider, type WorkflowDefinition } from './work
  */
 export const ORCHESTRATOR_CONNECTION_ID = '-orchestrator-';
 
-/** オーケストレーターのサンドボックス。コードを書かせないため読み取り専用に固定する。 */
-export const ORCHESTRATOR_SANDBOX = 'read-only';
+/**
+ * オーケストレーターのサンドボックス（Codexのみ意味を持つ）。ファイル編集を含む全権限を
+ * 与えるため、制限なしに固定する（Issue #1697）。
+ */
+export const ORCHESTRATOR_SANDBOX = 'danger-full-access';
 
 /**
- * プロバイダごとの承認方針。どちらも「読み取り以外は人に聞く」に相当する値。
+ * プロバイダごとの承認方針。どちらも「一切聞かない」に相当する値（Issue #1697）。
  *
- * Codexの `on-request` は `APPROVAL_MODES` の中で `untrusted` の次に安全な値で、
- * 読み取り以外の操作で承認要求が発行される。Claudeの `manual`（CLIの表示名はManual。
- * 公式ドキュメントの `default`）は読み取りだけが無確認で走る値
- * （`CLAUDE_PERMISSION_SAFETY_ORDER` 参照）。
- *
- * `untrusted` / `plan` をあえて選ばないのは、オーケストレーターに `list_tasks` などの
- * MCPツールを使わせる必要があるため。拡張機能側の設定がこれらより厳しければ、
- * クランプ（`buildEffectiveTaskConfig`）がそちらを採る。
+ * Codexの `never` は承認要求を発行しない。Claudeの `bypassPermissions` は
+ * `can_use_tool` 自体を発行しない。
  */
 const ORCHESTRATOR_APPROVAL_MODE: Record<Provider, string> = {
-  codex: 'on-request',
-  claude: 'manual',
+  codex: 'never',
+  claude: 'bypassPermissions',
 };
 
 /**
@@ -226,27 +222,24 @@ export function pickOrchestratorProvider(def: WorkflowDefinition): Provider {
 /**
  * オーケストレーターセッションの実効設定を組み立てる（design.md §16.23「権限」）。
  *
- * タスクと同じく `buildEffectiveTaskConfig` だけを通す（design.md §16.16。クランプを
- * 経由しない経路を作らない）。YAMLからは指定できないため、ここが唯一の入口になる。
+ * **拡張機能側の設定によるクランプ（`buildEffectiveTaskConfig`）を経由しない**（Issue #1697）。
+ * オーケストレーターには編集を含む全権限を与えるため、`codexSandbox` / 承認方針 /
+ * `allowAutoApprove` / `allowClaudeBypassPermissions` のいずれにも絞られない。
+ * YAMLからは指定できないため、ここが唯一の入口になる。
  */
-export function buildOrchestratorConfig(
-  provider: Provider,
-  baseline: ExtensionSafetyBaseline,
-): EffectiveTaskConfig {
-  return buildEffectiveTaskConfig(
-    {
-      provider,
+export function buildOrchestratorConfig(provider: Provider): EffectiveTaskConfig {
+  return {
+    config: {
       model: '',
       effort: '',
       approvalMode: ORCHESTRATOR_APPROVAL_MODE[provider],
-      sandbox: ORCHESTRATOR_SANDBOX,
-      // オーケストレーター自身はYAMLからautoApproveを指定できない。machineスコープの
-      // allowAutoApproveを人が有効化した場合だけ、読み取り専用のこのセッションでも
-      // 承認待ちを作らない。既定falseは従来どおり人へ回す。
-      autoApprove: baseline.allowAutoApprove,
     },
-    baseline,
-  );
+    // sandboxはCodex固有の概念（`buildEffectiveTaskConfig`と同じくClaudeでは空文字）
+    sandbox: provider === 'codex' ? ORCHESTRATOR_SANDBOX : '',
+    // 承認方針が「一切聞かない」なので通常は承認要求が来ないが、来た場合も人へ回さない
+    autoApprove: true,
+    warnings: [],
+  };
 }
 
 /**
