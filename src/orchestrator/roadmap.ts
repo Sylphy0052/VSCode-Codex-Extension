@@ -1319,6 +1319,12 @@ export type IssueListState = 'open' | 'all';
 
 const ISSUE_LIST_LIMIT = 200;
 
+/**
+ * `glab issue list`の1ページの件数。glabの既定は30件で、openが30件を超えると新しい30件しか
+ * 取れない（Issue #1701）。GitLab APIの`per_page`の上限が100のため、200件までは2ページに分けて取る。
+ */
+const GITLAB_ISSUE_PAGE_SIZE = 100;
+
 function parseNumberTitleArray(
   stdout: string,
   numberKey: 'number' | 'iid',
@@ -1395,9 +1401,14 @@ function parseIssueUrl(stdout: string): string | undefined {
 export function createCliIssueListPort(
   git: GitCommandRunner,
   cli: CliCommandRunner,
-  options?: { state?: IssueListState },
+  /**
+   * `label`はCLI側でラベルを絞り込む（Issue #1701）。ロードマップIssueの選択のように特定ラベルだけが
+   * 欲しいときに渡す。一覧の上限（200件）の外にあるIssueも取りこぼさない。
+   */
+  options?: { state?: IssueListState; label?: string },
 ): IssueListPort {
   const state: IssueListState = options?.state ?? 'open';
+  const label = options?.label?.trim() ?? '';
   return {
     async listIssues(cwd: string): Promise<RoadmapIssueSummary[] | undefined> {
       const remote = await git.run(['remote', 'get-url', 'origin'], cwd);
@@ -1420,17 +1431,41 @@ export function createCliIssueListPort(
             String(ISSUE_LIST_LIMIT),
             // 既定はopenのみ。完了済みかどうかまで見るときだけ全件へ広げる（Issue #1257）
             ...(state === 'all' ? ['--state', 'all'] : []),
+            ...(label === '' ? [] : ['--label', label]),
           ],
           cwd,
         );
         return result.code === 0 ? parseNumberTitleArray(result.stdout, 'number') : undefined;
       }
-      const result = await cli.run(
-        'glab',
-        ['issue', 'list', '-O', 'json', ...(state === 'all' ? ['--all'] : [])],
-        cwd,
-      );
-      return result.code === 0 ? parseNumberTitleArray(result.stdout, 'iid') : undefined;
+      const issues: RoadmapIssueSummary[] = [];
+      for (let page = 1; issues.length < ISSUE_LIST_LIMIT; page += 1) {
+        const result = await cli.run(
+          'glab',
+          [
+            'issue',
+            'list',
+            '-O',
+            'json',
+            '--per-page',
+            String(GITLAB_ISSUE_PAGE_SIZE),
+            '--page',
+            String(page),
+            ...(state === 'all' ? ['--all'] : []),
+            ...(label === '' ? [] : ['--label', label]),
+          ],
+          cwd,
+        );
+        const pageIssues = result.code === 0 ? parseNumberTitleArray(result.stdout, 'iid') : undefined;
+        if (pageIssues === undefined) {
+          // 2ページ目以降の失敗は、取れた分までを返す（上限で切れたときと同じ扱い）
+          return page === 1 ? undefined : issues;
+        }
+        issues.push(...pageIssues);
+        if (pageIssues.length < GITLAB_ISSUE_PAGE_SIZE) {
+          break;
+        }
+      }
+      return issues.slice(0, ISSUE_LIST_LIMIT);
     },
     async getIssueUrl(cwd: string, issue: number): Promise<string | undefined> {
       if (!Number.isSafeInteger(issue) || issue <= 0) {

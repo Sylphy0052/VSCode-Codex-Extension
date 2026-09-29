@@ -3233,7 +3233,11 @@ async function planWorkflowFromRoadmapIssueCommand(
   provider: Provider,
 ): Promise<void> {
   const workspaceRoot = folder.uri.fsPath;
-  const issuePort = createCliIssueListPort(nodeGitCommandRunner, nodeCliCommandRunner);
+  const { roadmapDir, roadmapIssueLabel } = readWorkflowsConfig();
+  // ラベルはCLI側でも絞る。一覧の上限の外にあるロードマップIssueを取りこぼさないため（Issue #1701）
+  const issuePort = createCliIssueListPort(nodeGitCommandRunner, nodeCliCommandRunner, {
+    label: roadmapIssueLabel,
+  });
   const issues = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'ロードマップIssueを取得しています…' },
     () => issuePort.listIssues(workspaceRoot),
@@ -3244,7 +3248,6 @@ async function planWorkflowFromRoadmapIssueCommand(
     );
     return;
   }
-  const { roadmapDir, roadmapIssueLabel } = readWorkflowsConfig();
   const wantedLabel = roadmapIssueLabel.toLowerCase();
   const roadmapIssues = issues.filter((issue) =>
     (issue.labels ?? []).some((label) => label.toLowerCase() === wantedLabel),
