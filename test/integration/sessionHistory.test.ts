@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { activateExtension } from './helpers/extension';
 import { readManifest } from './helpers/manifest';
-import { flattenSessions, isGroupNode } from './helpers/sessionTree';
+import { flattenSessions, isGroupNode, showSessionsView } from './helpers/sessionTree';
 import { waitFor } from './helpers/waitFor';
 
 /**
@@ -29,8 +29,16 @@ import { waitFor } from './helpers/waitFor';
  * 作れずに起動しきっていなかっただけで、skipの有無とは無関係だった（issue #163で対策済み）。
  *
  * H-08（thread/list接続時）はそもそも実際のCodex CLIが要るため引き続き対象外。
+ *
+ * Issue #1402以降、見えていない履歴ビューは一覧を取り直さない。H-03 / H-07は取り直しを
+ * 確かめるため、手動テストと同じくビューを表示してから行う（Issue #1687）。
  */
 suite('履歴一覧（docs/manual-test.md H群）', () => {
+  suiteSetup(async () => {
+    await activateExtension();
+    await showSessionsView();
+  });
+
   test('H-00: session_index.jsonlに載っていないセッションも最初の発言から名前が付いて出る', async () => {
     const api = await activateExtension();
     const manifest = readManifest();
@@ -99,18 +107,25 @@ suite('履歴一覧（docs/manual-test.md H群）', () => {
     const api = await activateExtension();
     const manifest = readManifest();
 
+    // ビューの表示状態はIPC経由で遅れて届くことがある。届く前の切り替えは取り直しが
+    // 見えたときへ回るため、一覧は待って確かめる
+    const hasOutOfScope = (sessions: { id: string }[]): boolean =>
+      sessions.some((s) => s.id === manifest.claude.outOfScope.id);
+
     await vscode.commands.executeCommand('codex.showWorkspaceSessions');
-    const workspaceOnly = await flattenSessions(api.sessionTree);
-    assert.ok(
-      !workspaceOnly.some((s) => s.id === manifest.claude.outOfScope.id),
-      'workspaceスコープなのにワークスペース外のセッションが出ている',
-    );
+    await waitFor(
+      () => flattenSessions(api.sessionTree),
+      (sessions) => !hasOutOfScope(sessions),
+      { timeoutMs: 8000 },
+    ).catch(() => assert.fail('workspaceスコープなのにワークスペース外のセッションが出ている'));
 
     await vscode.commands.executeCommand('codex.showAllSessions');
-    const all = await flattenSessions(api.sessionTree);
-    assert.ok(
-      all.some((s) => s.id === manifest.claude.outOfScope.id),
-      '全ワークスペース表示に切り替えてもワークスペース外のセッションが出てこない',
+    await waitFor(
+      () => flattenSessions(api.sessionTree),
+      (sessions) => hasOutOfScope(sessions),
+      { timeoutMs: 8000 },
+    ).catch(() =>
+      assert.fail('全ワークスペース表示に切り替えてもワークスペース外のセッションが出てこない'),
     );
 
     // 後始末。他のテストの前提（既定はworkspaceスコープ）を崩さない

@@ -28,7 +28,7 @@ import {
  */
 
 /** `.agents` 直下のディレクトリ名。`worktree.ts` の `.agents/worktrees` と並ぶ位置。 */
-const HANDOFF_DIR_SEGMENTS = ['.agents', 'handoff', 'runs'] as const;
+export const HANDOFF_DIR_SEGMENTS = ['.agents', 'handoff', 'runs'] as const;
 
 /**
  * ファイル名のうち、taskIdに続く自由記述部分（スラッグ）の字種。

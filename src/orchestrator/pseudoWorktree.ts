@@ -9,9 +9,11 @@ import {
   identifierError,
   runIdError,
 } from './fsGuards';
+import { RUN_NOTES_RELATIVE_PATH } from './runNotes';
 import { clampWorktreeRemovalAttempts } from './runState';
 import { sanitizeForLog } from './sanitize';
 import { SerialQueue } from './serialQueue';
+import { HANDOFF_DIR_SEGMENTS } from './teamHandoff';
 import { withRetrySuffix } from './worktree';
 
 /**
@@ -835,10 +837,22 @@ export const DEFAULT_PSEUDO_WORKTREE_EXCLUDE = ['node_modules', '.venv', 'dist',
 const WORKTREES_ROOT_RELATIVE = '.agents/worktrees';
 
 /**
+ * 常に除外する相対パス（POSIX区切り）。`.agents/worktrees` に加え、拡張機能自身がrun中に
+ * ワークスペースへ書くもの（タスク結果の受け渡しファイル、runの教訓）を外す。外さないと
+ * run終了時の反映がこれを人の編集と取り違え、統合結果を反映せずに止まる（Issue #1687）。
+ */
+const ALWAYS_EXCLUDED_RELATIVE = [
+  WORKTREES_ROOT_RELATIVE,
+  HANDOFF_DIR_SEGMENTS.join('/'),
+  RUN_NOTES_RELATIVE_PATH,
+] as const;
+
+/**
  * 複製元からの相対パス（`/` 区切りに正規化済み）が除外対象かどうかを判定する純粋関数。
  *
  * 除外するのは2種類:
- * 1. `.agents/worktrees` 自身とその配下（無限再帰の防止。design.md §16.20）
+ * 1. `ALWAYS_EXCLUDED_RELATIVE` 自身とその配下（`.agents/worktrees` は無限再帰の防止。
+ *    design.md §16.20）
  * 2. `exclude` に含まれる名前のディレクトリ・ファイル（深さを問わずパスの
  *    どこかのセグメントが一致すれば対象。`node_modules` が `packages/foo/node_modules`
  *    のように深い位置にあっても効くようにするため）
@@ -846,8 +860,9 @@ const WORKTREES_ROOT_RELATIVE = '.agents/worktrees';
 export function isExcludedPath(relativePath: string, exclude: readonly string[]): boolean {
   const normalized = relativePath.split(path.sep).join('/');
   if (
-    normalized === WORKTREES_ROOT_RELATIVE ||
-    normalized.startsWith(`${WORKTREES_ROOT_RELATIVE}/`)
+    ALWAYS_EXCLUDED_RELATIVE.some(
+      (excluded) => normalized === excluded || normalized.startsWith(`${excluded}/`),
+    )
   ) {
     return true;
   }

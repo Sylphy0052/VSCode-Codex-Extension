@@ -817,6 +817,9 @@ function hasExplicitValue(
  * Codex/Claude Codeそれぞれの専用キー（`autoHandoff.costPreset.codex` / `.claude`）が
  * 未設定のときは、両者が共通で使っていた旧キー `autoHandoff.costPreset` の値を初期値として
  * 引き継ぐ。使用量の上限はCLIごとに別なので、片方だけ変えても他方へ影響させないため。
+ * 旧キーはpackage.jsonに宣言しない。文字列の葉として宣言すると、VS Codeが同じ接頭辞の
+ * `.codex` / `.claude` を無視して既定値が読めなくなるため（Issue #1687）。未宣言でも
+ * ユーザーがsettings.jsonに書いた値は読める。
  */
 export function readAutoHandoffCostPreset(agent: HandoffCostPresetAgent): CostPreset {
   const config = vscode.workspace.getConfiguration('agent');

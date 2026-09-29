@@ -320,8 +320,9 @@ suite('PR/MRの作成順序と最終マージ（design.md §16.18）', () => {
       description !== undefined,
       `本文がファイル経由で渡っていない: ${create.args.join(' ')}`,
     );
+    // 自由入力の値は `@` 始まりでファイルを読まれないよう `--raw-field` で渡す（Issue #1109）
     assert.ok(
-      create.args.includes(`--field=source_branch=wf/${run.runId}/T1`),
+      create.args.includes(`--raw-field=source_branch=wf/${run.runId}/T1`),
       'source_branchがタスクブランチでない',
     );
 

@@ -232,7 +232,9 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
     assert.equal(openTabLabels().length, 1, 'タブが二重に開いている');
   });
 
-  test('C-13: 応答中の指示はturn/steerで割り込み、turnIdが未確定の間は待ち行列に積んでターン完了後に送る', async function () {
+  // 応答中の送信は常に待ち行列へ積み、turn/steerでの割り込みは「今すぐ送る」の明示操作に
+  // 限る（PR #677）。それ以前の「turnIdが判れば自動で割り込む」仕様から書き換えた（Issue #1687）
+  test('C-13: 応答中の指示は待ち行列に積み、「今すぐ送る」でturn/steerにより割り込む。積んだ指示はターン完了後に送る', async function () {
     this.timeout(TEST_TIMEOUT_MS);
     const connection = await openChat('thread-steer');
     connection.respond('turn/start', () => ({}));
@@ -254,9 +256,14 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
     assert.equal(connection.called('turn/steer'), false);
     assert.equal(connection.callsFor('turn/start').length, 1);
 
-    // turnIdが判ったあとの指示はturn/steerで割り込む（待ち行列には積まれない）
+    // turnIdが判ったあとも、送っただけでは割り込まず待ち行列へ積む（2件目）
     connection.notify('turn/started', { threadId: 'thread-steer', turn: { id: 'turn-1' } });
     await chat.simulateCodexWebviewMessage('thread-steer', { type: 'send', text: '割り込む指示' });
+    assert.equal(connection.called('turn/steer'), false, '応答中の送信が自動で割り込んでいる');
+    assert.equal(connection.callsFor('turn/start').length, 1);
+
+    // 「今すぐ送る」（待ち行列の2件目）でturn/steerにより割り込む
+    await chat.simulateCodexWebviewMessage('thread-steer', { type: 'sendQueued', index: 1 });
     await waitFor(
       () => connection.called('turn/steer'),
       (called) => called,
@@ -269,12 +276,13 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
     });
 
     // turn/steerがapp-server側の都合（ターンの入れ替わりなど）で失敗したときは、
-    // 指示を失わず待ち行列へ積み直す（ログに「割り込めなかったため待ち行列へ積みます」）。
+    // 指示を失わず待ち行列の元の位置へ積み直す
     connection.failNext('turn/steer', 'expectedTurnId mismatch');
     await chat.simulateCodexWebviewMessage('thread-steer', {
       type: 'send',
       text: '積み直される指示',
     });
+    await chat.simulateCodexWebviewMessage('thread-steer', { type: 'sendQueued', index: 1 });
     assert.equal(connection.callsFor('turn/steer').length, 2, '失敗した割り込みが記録されていない');
 
     // ターンが終わると、待ち行列の先頭（「割り込めない指示」）から順に送られる
@@ -428,6 +436,8 @@ suite('Codex画面: プロトコルの状態遷移と配線（Issue #187）', ()
       'ephemeralスレッドをresumeで開き直している',
     );
 
+    // 応答中のタブ名には実行中の印（'* '、PR #311）が付く。一往復を終えてから見出しを確かめる
+    connection.notify('turn/completed', { threadId: 'thread-btw-side' });
     await waitFor(
       () => openTabLabels(),
       (labels) => labels.includes('脇道'),

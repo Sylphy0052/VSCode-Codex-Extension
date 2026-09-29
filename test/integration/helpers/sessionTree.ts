@@ -1,3 +1,4 @@
+import * as vscode from 'vscode';
 import type {
   SessionGroupNodeLike,
   SessionSummaryLike,
@@ -35,4 +36,13 @@ export function isGroupNode(element: SessionTreeElementLike): element is Session
   return (
     typeof element === 'object' && element !== null && 'kind' in element && element.kind === 'group'
   );
+}
+
+/**
+ * 履歴ビュー（`codex.sessions`）を表示する。Issue #1402以降、見えていないビューは
+ * `refresh` や表示範囲の切り替えで一覧を取り直さず、見えたときにまとめて取り直す。
+ * 取り直しを確かめるテストは、手動テストと同じくビューを表示してから行う。
+ */
+export async function showSessionsView(): Promise<void> {
+  await vscode.commands.executeCommand('codex.sessions.focus');
 }
