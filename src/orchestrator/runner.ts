@@ -1895,6 +1895,29 @@ export interface LiveRun {
   startedAt: string;
   runState: RunState;
   tasks: Map<string, LiveTask>;
+  /**
+   * このプロセスでrunの終了判定を確定させたか（design.md §16.5、Issue #491、Issue #1684）。
+   * `pump()`は`getRunOutcome`が`running`以外を返した時点でここを立て、以後は早期returnして
+   * 新しいタスクを開始しない。`dispose()`も片付けの間に`pump()`を止めるために立てる。
+   *
+   * **永続化しない。** 永続化するのは`runState`（`PersistedRun.tasks`・`haltedByUser`）だけで、
+   * 終了したかどうかはそこから`getRunOutcome`で導く（`PersistedRun.finishedAt`も`persist`が
+   * 同じ判定から書く）。ここを別に保存すると、`runState`と食い違った値を読み戻せてしまう。
+   * また終了ブロック（`finalizeForge`・終了通知など）を実行済みかどうかはプロセスをまたいで
+   * 引き継げないため、その判断は`finishedNotified`など実行時だけの状態が受け持つ。
+   *
+   * 再開の3経路での扱い:
+   *
+   * - Reload後の復元（`rebuildLiveRun`）: 復元した`runState`から導く
+   *   （`getRunOutcome(runState) !== 'running'`）
+   * - 自動再開（`autoResumeIfEligible`）: `reloadInterrupted`のタスクを`pending`へ戻した後の
+   *   `runState`から、復元と同じ式で導き直す
+   * - 手動の再開（`retryTask`・`continueTask`・`retryMerge`、計画変更ツールの
+   *   `resumeIfFinishedForPlanChange`）: `runState`を再開の状態へ遷移させたうえで`false`へ
+   *   戻す。遷移後は`pending`や`running`のタスクがあるため、復元と同じ式で導いても`false`に
+   *   なる。戻す前の値は、終了通知の後の再開かどうか（`notifyOrchestratorRunResumed`）の
+   *   判定に使う
+   */
   finished: boolean;
   /**
    * `notifyOrchestratorRunFinished`を送り済みかどうか（design.md §16.5・§16.43、
