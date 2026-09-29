@@ -90,10 +90,8 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from './taskSession';
-import type { CliCommandRunner, ForgeHost } from './forge';
-import { detectRoadmapForgeHost } from './roadmapRunForge';
 import { shouldAutoApproveStageElicitation, stageApprovalHandler } from './taskStageApproval';
-import { cleanupAfterMerge, cleanupRetiredTask } from './taskStageCleanup';
+import { cleanupAfterMerge } from './taskStageCleanup';
 import { observeStageCompletion, type StageObservationPorts } from './taskStageObservation';
 import {
   buildStageHandoffPrompt,
@@ -149,8 +147,6 @@ export interface TaskStageRunnerDeps {
   worktreeQueue: WorktreeCreationQueue;
   git: GitCommandRunner;
   fs: WorktreeFileSystemPort;
-  /** `gh` / `glab` の実行ポート。計画から外れた着手済みタスクのPRを閉じるときに使う（Issue #1619）。 */
-  cli: CliCommandRunner;
   observation: StageObservationPorts;
   /** タスクのブランチの分岐元のcommit。依存先のmergeを含む最新のmainを返す想定。 */
   resolveBaseCommit(repoRoot: string): Promise<string | undefined>;
@@ -1301,90 +1297,6 @@ export class TaskStageRunner {
       }
       this.deps.onTaskMerged?.(runId, taskId);
     });
-  }
-
-  /**
-   * 計画から外れた・既存Issueの付け替えで作り直された着手済みタスクの後片付け（Issue #1619）。
-   * 動いている工程セッションを止め、PRがあればmergeせず閉じ、リモートのブランチ・worktree・
-   * ローカルのブランチを消す。ベストエフォート（失敗は止めず`onWarning`経由でKanbanへ）。
-   *
-   * `task`は計画を置く前（作り直される前）のスナップショットを呼び出し側（Controller）から
-   * 受け取る。この時点で`run.tasks`には既に存在しない、または未着手へ作り直されているため、
-   * `cleanupRestoredTask`のように状態から`getTask`で引き直せない。
-   *
-   * worktreeの削除は工程セッションを止めた後にのみ行う。止めるのは`stopStage`ではなく
-   * `stopRetiredSessionLocked`にする。`stopStage`は状態側の工程も`haltStage`で止めるため、既存Issueの
-   * 付け替えで同じtaskIdのまま作り直した未着手のタスクまで「止めた」扱いにしてしまう。
-   */
-  async retireTask(
-    runId: string,
-    repoRoot: string,
-    task: OrchestratedTask,
-  ): Promise<{ closedPullRequest: number | undefined }> {
-    const manual = '自動では再試行しないため、残ったPR・ブランチ・worktreeは手で片付けてください';
-    let host: ForgeHost | undefined;
-    try {
-      host =
-        task.pullRequest === undefined
-          ? undefined
-          : await detectRoadmapForgeHost({ git: this.deps.git, cli: this.deps.cli }, repoRoot);
-    } catch (e) {
-      this.warn(
-        runId,
-        task.taskId,
-        `${task.taskId}の後片付けでホストを判定できませんでした: ${errorMessage(e)}`,
-      );
-    }
-    // セッションの停止とブランチ・worktreeの削除を1つのロックの中で行う（`settle`と同じ）。
-    // 同じtaskIdの工程の開始が、削除の途中へ割り込まないようにする
-    return this.withTaskLock(liveKey(runId, task.taskId), async () => {
-      try {
-        await this.stopRetiredSessionLocked(runId, task.taskId);
-      } catch (e) {
-        this.warn(
-          runId,
-          task.taskId,
-          `${task.taskId}の工程セッションを止められなかったため、後片付けを見送りました（${manual}）: ${errorMessage(e)}`,
-        );
-        return { closedPullRequest: undefined };
-      }
-      try {
-        const result = await cleanupRetiredTask(this.deps, { repoRoot, runId, task, host });
-        result.warnings.forEach((w) => this.warn(runId, task.taskId, w));
-        if (!result.ok) {
-          this.warn(
-            runId,
-            task.taskId,
-            `${task.taskId}の後片付けに失敗しました（${manual}）: ${result.message}`,
-          );
-        }
-        return { closedPullRequest: result.closedPullRequest };
-      } catch (e) {
-        this.warn(
-          runId,
-          task.taskId,
-          `${task.taskId}の後片付けで例外が起きました（${manual}）: ${errorMessage(e)}`,
-        );
-        return { closedPullRequest: undefined };
-      }
-    });
-  }
-
-  /**
-   * 計画から外れたタスクの工程セッションを止めて閉じる（Issue #1619）。呼び出し側が
-   * `withTaskLock`を持っている前提。状態（`run.tasks`）には触れない。タスクは既に計画から
-   * 消えたか、同じtaskIdの未着手のタスクへ作り直されているため。完了を報告済みの
-   * セッションは報告の処理が自分で片付けるため触れない。
-   */
-  private async stopRetiredSessionLocked(runId: string, taskId: string): Promise<void> {
-    const entry = this.live.get(liveKey(runId, taskId));
-    if (entry === undefined || entry.closed || entry.reported) {
-      return;
-    }
-    entry.stopping = true;
-    entry.session.stopLoop();
-    await entry.session.interrupt().catch(() => undefined);
-    this.release(entry, { dispose: true });
   }
 
   private async cleanupIfMerged(entry: LiveStageSession): Promise<void> {
