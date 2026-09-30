@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
 
@@ -109,7 +111,7 @@ export function extractCreatedReferences(
 export interface HandoffGitFacts {
   branch: string | undefined;
   head: string | undefined;
-  /** `git diff HEAD` のsha256。未commit差分が無ければ `clean`。 */
+  /** `git diff HEAD` と未追跡ファイル（パスと内容）のsha256。どちらも無ければ `clean`。 */
   diffHash: string | undefined;
 }
 
@@ -124,6 +126,31 @@ function git(cwd: string, args: string[], timeoutMs: number): Promise<string | u
   });
 }
 
+/** 追跡差分と未追跡ファイル（パスと内容）のハッシュ先頭16桁。差分が無ければ `clean`、取れなければ `undefined`。 */
+async function hashWorkingChanges(
+  cwd: string,
+  tracked: string | undefined,
+  untrackedList: string | undefined,
+): Promise<string | undefined> {
+  if (tracked === undefined || untrackedList === undefined) {
+    return undefined;
+  }
+  const paths = untrackedList.split('\0').filter((path) => path !== '');
+  if (tracked === '' && paths.length === 0) {
+    return 'clean';
+  }
+  const hash = createHash('sha256').update(tracked);
+  for (const path of paths.sort()) {
+    hash.update(`\0untracked:${path}\0`);
+    try {
+      hash.update(await readFile(join(cwd, path)));
+    } catch {
+      hash.update('unreadable');
+    }
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
 /** branch・HEAD・未commit差分のハッシュを取る。失敗は項目単位で `undefined` に倒し、投げない。 */
 export async function resolveHandoffGitFacts(
   cwd: string | undefined,
@@ -133,19 +160,15 @@ export async function resolveHandoffGitFacts(
   if (cwd === undefined) {
     return { branch: gitBranch, head: undefined, diffHash: undefined };
   }
-  const [head, diff] = await Promise.all([
+  const [head, tracked, untrackedList] = await Promise.all([
     git(cwd, ['rev-parse', 'HEAD'], timeoutMs),
     git(cwd, ['diff', 'HEAD'], timeoutMs),
+    git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'], timeoutMs),
   ]);
   return {
     branch: gitBranch,
     head: head?.trim() || undefined,
-    diffHash:
-      diff === undefined
-        ? undefined
-        : diff === ''
-          ? 'clean'
-          : createHash('sha256').update(diff).digest('hex').slice(0, 16),
+    diffHash: await hashWorkingChanges(cwd, tracked, untrackedList),
   };
 }
 
