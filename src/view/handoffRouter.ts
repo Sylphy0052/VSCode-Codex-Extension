@@ -98,20 +98,42 @@ export interface TaskAssessment {
   awaitingUserAnswerReason: string;
 }
 
-/** 引き継ぎ先の解決結果が今の設定と実質的に違うか（Issue #1090の `profileChanged`）。 */
+/**
+ * modelを変えるとき、今のcontextがこのトークン数以下ならその場で切り替え、超えるなら引き継ぐ
+ * （Issue #1752）。modelを変えるとプロンプトキャッシュが切れ、載っているcontextの全量を
+ * 再キャッシュすることになる。軽いうちはその費用が小さく、新しいタブを開くより安い。
+ * 境目は暫定の値。実測（引き継ぎのログ）で見直す。
+ */
+export const MODEL_SWITCH_IN_PLACE_MAX_CONTEXT_TOKENS = 50_000;
+
+/** model変更の扱い。`none` は変更なし。 */
+export type ProfileChangeAction = 'none' | 'switchInPlace' | 'handoff';
+
+/**
+ * 引き継ぎ先の解決結果が今の設定と実質的にmodelが違うか（Issue #1090の `profileChanged`）。
+ *
+ * effortだけの違いは含めない（Issue #1752）。Opus 5.5・Sonnet 5.5・Fable 5.1はeffortを
+ * 変えてもキャッシュが残るので、その場で変えれば済み、引き継ぐ理由にならない。
+ */
 export function isProfileChange(current: HandoffProfile, next: HandoffProfile): boolean {
-  if (current.model !== next.model) {
-    return true;
+  return current.model !== next.model;
+}
+
+/**
+ * model変更をその場で行うか引き継ぐか。contextの量が分からないときは引き継ぎへ倒す
+ * （軽いと決めつけて重いcontextのキャッシュを捨てるより、従来どおりの動作を保つ）。
+ */
+export function decideProfileChangeAction(
+  current: HandoffProfile,
+  next: HandoffProfile,
+  usedTokens: number | undefined,
+): ProfileChangeAction {
+  if (!isProfileChange(current, next)) {
+    return 'none';
   }
-  // effortは2段以上動いたときだけ「変わった」とする。1段差（high→xhigh）で引き継ぐと
-  // 区切りのたびにタブが増える割に、得られる差が小さい。
-  const from = EFFORT_LADDER.indexOf(current.effort);
-  const to = EFFORT_LADDER.indexOf(next.effort);
-  if (from === -1 || to === -1) {
-    // どちらかが未指定・ladder外なら比較材料が無い。モデルが同じなら変わっていない扱い
-    return false;
-  }
-  return Math.abs(to - from) >= 2;
+  return usedTokens !== undefined && usedTokens <= MODEL_SWITCH_IN_PLACE_MAX_CONTEXT_TOKENS
+    ? 'switchInPlace'
+    : 'handoff';
 }
 
 export function isAssessmentScore(value: unknown): value is AssessmentScore {
