@@ -73,8 +73,6 @@ import {
   GATE_CHOICE_LABELS,
   gateChoiceFromAnswer,
   type GateJudgeQuestion,
-  isReviewFailed,
-  isReviewRoundsExhausted,
   needsReviewGate,
   openStageGate,
   orchestratorGateScope,
@@ -108,7 +106,11 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from './taskSession';
-import { shouldAutoApproveStageElicitation, stageApprovalHandler } from './taskStageApproval';
+import {
+  isJudgeableMergeCommand,
+  shouldAutoApproveStageElicitation,
+  stageApprovalHandler,
+} from './taskStageApproval';
 import { cleanupAfterMerge } from './taskStageCleanup';
 import { observeStageCompletion, type StageObservationPorts } from './taskStageObservation';
 import {
@@ -125,6 +127,9 @@ import type { GitCommandRunner, WorktreeCreationQueue, WorktreeFileSystemPort } 
 
 /** 工程セッションが申告した失敗の要約を、状態の`failure`へ残すときの上限。 */
 const MAX_FAILURE_SUMMARY_LENGTH = 300;
+
+/** merge・削除の回答者判定の質問へタスク名（外部由来）を入れるときの上限。 */
+const MAX_TASK_TITLE_IN_QUESTION = 200;
 
 /** 入力を閉じたタブから送られた指示を、次の指示へ入れるときの上限。 */
 const MAX_INSTRUCTION_LENGTH = 2000;
@@ -492,7 +497,7 @@ export class TaskStageRunner {
    * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。ただし「ユーザーに判断を上げる」と
    * 判定の失敗のときは回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする
    * （レビュー未通過の関門も含む。Issue #1763・#1771）。実装への差し戻しが上限に達した関門は、
-   * Reflexに選択肢を選ばせずに回答者判定へ回す（Issue #1771）。
+   * 差し戻しを選択肢から外して判定する（Issue #1771）。
    */
   private async judgeGate(
     runId: string,
@@ -508,9 +513,7 @@ export class TaskStageRunner {
     }
     const judge = this.deps.judgeGate;
     let verdict: RoadmapQuestionVerdict;
-    if (gate.kind === 'reviewFindings' && isReviewRoundsExhausted(task)) {
-      verdict = { kind: 'human', summary: gate.reflexSummary };
-    } else if (judge === undefined) {
+    if (judge === undefined) {
       verdict = { kind: 'human', summary: undefined };
     } else {
       try {
@@ -521,7 +524,8 @@ export class TaskStageRunner {
     }
     const choice =
       verdict.kind === 'answer' ? gateChoiceFromAnswer(gate.kind, verdict.answer) : undefined;
-    let summary = verdict.summary;
+    let summary =
+      verdict.summary === undefined ? gate.reflexSummary : joinSummaries(gate.reflexSummary, verdict.summary);
     if (choice !== undefined) {
       const resolved = await this.mutate(runId, (r) =>
         resolveStageGate(
@@ -539,10 +543,7 @@ export class TaskStageRunner {
       if (resolved === undefined || findStageGate(resolved, taskId, gateId)?.status !== 'judging') {
         return;
       }
-      summary =
-        choice === 'proceed' && isReviewFailed(task)
-          ? `レビューが通過していないため、Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を採らなかった`
-          : `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
+      summary = `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
     } else {
       // レビュー未通過・差し戻しの上限に達した関門は、オーケストレーターが選べる範囲を材料に添える
       // （Issue #1771。範囲の外の決着はresolveStageGateが拒否する）
@@ -588,7 +589,14 @@ export class TaskStageRunner {
   private async judgeMergeCommand(entry: LiveStageSession, command: string): Promise<boolean> {
     const run = this.deps.store.find(entry.runId);
     const task = run === undefined ? undefined : getTask(run, entry.ref.taskId);
-    if (run === undefined || task === undefined) {
+    if (
+      run === undefined ||
+      task === undefined ||
+      !isJudgeableMergeCommand(command, {
+        branch: task.branch,
+        pullRequestNumber: task.pullRequest?.number,
+      })
+    ) {
       return false;
     }
     const answerer = await this.judgeAnswerer(
@@ -596,7 +604,7 @@ export class TaskStageRunner {
       run.engine,
       {
         source: 'stageSession',
-        question: `タスク「${task.title}」の${entry.ref.stage}工程のセッションが、PRのmergeかPRの元ブランチのリモート削除を実行しようとしている。承認なしに実行させてよいか。`,
+        question: `タスク「${sanitizeInlineText(task.title, MAX_TASK_TITLE_IN_QUESTION)}」の${entry.ref.stage}工程のセッションが、PRのmergeかPRの元ブランチのリモート削除を実行しようとしている。承認なしに実行させてよいか。`,
         command,
       },
       entry.session.reflexEnabled?.(),

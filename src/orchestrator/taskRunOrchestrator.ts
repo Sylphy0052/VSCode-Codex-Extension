@@ -735,10 +735,13 @@ export class TaskRunOrchestrator {
     ) {
       return { kind: 'ask' };
     }
+    // 並行して届いた要求が揃って上限の検査を通らないよう、判定の前に枠を取り、許可しなければ返す
+    live.stopStageJudgedApprovals += 1;
     let verdict: AnswererVerdict;
     try {
       verdict = await judge(runId, taskId, reason === '' ? undefined : reason);
     } catch (e: unknown) {
+      live.stopStageJudgedApprovals -= 1;
       this.deps.log(
         `[task run orchestrator] ${runId}: stop_stageの回答者判定に失敗したため人へ回します: ${e instanceof Error ? e.message : String(e)}`,
       );
@@ -746,9 +749,9 @@ export class TaskRunOrchestrator {
     }
     // 判定の間に世代が入れ替わっていたら、古いセッションの要求は人へ回す
     if (verdict.kind !== 'orchestrator' || this.live.get(runId) !== live) {
+      live.stopStageJudgedApprovals -= 1;
       return { kind: 'ask' };
     }
-    live.stopStageJudgedApprovals += 1;
     this.deps.log(
       `[task run orchestrator] ${runId}: 回答者判定で${taskId}のstop_stageを人に確かめずに許可しました（${sanitizeInlineText(verdict.summary, EVENT_TEXT_MAX_LENGTH)}）`,
     );

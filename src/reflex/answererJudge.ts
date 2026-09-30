@@ -70,7 +70,8 @@ export interface AnswererQuestion {
   evidence?: string | undefined;
   /**
    * 承認を求められたコマンド（PRのmergeと元ブランチのリモート削除、Issue #1771）。危険語の検査に
-   * かけない。ほかの破壊的操作を含まないことは呼び出し側（`isJudgeableMergeCommand`）が確かめる。
+   * かけない。形が許可リストに当たること（連結・置換を含まない、タスクのPR・元ブランチだけ）は
+   * 呼び出し側（`isJudgeableMergeCommand`）が確かめる。
    */
   command?: string | undefined;
 }

@@ -328,8 +328,8 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
  * タスクが関門を開いたときの状態から動いているときはそのまま返す（呼び出し側は戻り値が元の
  * runかどうかで受理を判定する）。
  * - `sendBack`: 「実装とPR作成」から やり直す（同じworktree・ブランチ・PRを使う）
- * - `proceed`: 指摘を残したまま「mergeとcleanup」へ進む。レビューが通過しなかったタスクでは
- *   Reflexの`proceed`はそのまま返す（オーケストレーターとユーザーは選べる。Issue #1771）
+ * - `proceed`: 指摘を残したまま「mergeとcleanup」へ進む。レビューが通過しなかったタスクでも
+ *   Reflex・オーケストレーター・ユーザーの誰でも選べる（Issue #1771）
  * - `sendBack`は、差し戻しが上限に達した後はユーザーの決着だけ受け付ける（Issue #1771）
  * - `retry`: 止まった工程を未着手へ戻す（`resetStageForRetry`）
  */
@@ -349,9 +349,6 @@ export function resolveStageGate(
       return undefined;
     }
     if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
-      return undefined;
-    }
-    if (resolution.by === 'reflex' && resolution.choice === 'proceed' && isReviewFailed(task)) {
       return undefined;
     }
     if (
@@ -458,7 +455,7 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
         `（上限${String(MAX_REVIEW_ROUNDS)}回）。差し戻すと同じPRへ追加の修正をしてからレビューし直す。`,
       options: [
         ...(exhausted ? [] : [GATE_OPTION_SEND_BACK]),
-        ...(failed ? [] : [GATE_OPTION_PROCEED]),
+        GATE_OPTION_PROCEED,
         GATE_OPTION_ASK_USER,
       ],
       recommended: exhausted

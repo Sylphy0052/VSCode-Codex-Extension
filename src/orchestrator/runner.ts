@@ -5579,7 +5579,10 @@ export class WorkflowRunner {
       fullAuto &&
       result.decision === 'ask' &&
       request.kind === 'command' &&
-      isJudgeableMergeCommand(request.command)
+      isJudgeableMergeCommand(request.command, {
+        branch: liveTask.branch,
+        pullRequestNumber: undefined,
+      })
     ) {
       const answerer = await this.judgeMergeCommand(task.provider, taskId, request.command);
       // 判定の間にrunやタスクが入れ替わったら、古い承認要求は人へ回すだけにする

@@ -404,7 +404,7 @@ function isDecode(command: string): boolean {
  */
 const SHELL_METACHARACTER_PATTERN = /[;|&$`()<>\r\n]/;
 
-function hasShellMetacharacters(command: string): boolean {
+export function hasShellMetacharacters(command: string): boolean {
   return SHELL_METACHARACTER_PATTERN.test(command);
 }
 
@@ -504,25 +504,6 @@ export function findIrreversibleCommands(text: string): IrreversibleCommands {
     destructive: matched.filter((p) => DESTRUCTIVE_PATTERN_IDS.has(p.id)).map((p) => p.description),
     caution: matched.filter((p) => CAUTION_PATTERN_IDS.has(p.id)).map((p) => p.description),
   };
-}
-
-/**
- * リモートのブランチの削除を除いた破壊的操作を含むか。PRのmergeと元ブランチのリモート削除を
- * 回答者判定にかける前に、同じコマンドに相乗りした破壊的操作（force push、`reset --hard`など）を
- * 除くために使う（Issue #1771）。ローカルのブランチ・タグの削除とタグの削除は含む側に数える。
- */
-export function hasDestructiveCommandBesidesRemoteBranchDelete(command: string): boolean {
-  const normalized = command.replace(/[`'"]/gu, ' ');
-  return (
-    DANGER_COMMAND_PATTERNS.some(
-      (p) =>
-        DESTRUCTIVE_PATTERN_IDS.has(p.id) &&
-        p.id !== DANGER_PATTERN_IDS.branchTagDelete &&
-        p.test(normalized),
-    ) ||
-    isLocalBranchOrTagDelete(normalized) ||
-    /\brefs\/tags\//i.test(normalized)
-  );
 }
 
 /**

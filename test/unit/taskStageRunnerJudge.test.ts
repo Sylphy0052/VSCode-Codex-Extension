@@ -152,15 +152,15 @@ describe('TaskStageRunner.judgeGate', () => {
     expect(t.run().tasks['T1']?.stages.review.status).toBe('notStarted');
   });
 
-  it('レビューが通過しなかった関門で「進める」の判定は採らず、回答者判定にかけずにユーザーへ回す（Issue #1711）', async () => {
+  it('レビューが通過しなかった関門でも「進める」の判定なら決着させる（Issue #1771）', async () => {
     const judgeGate = vi.fn<GateJudge>(async () => answer(GATE_OPTION_PROCEED));
     const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'orchestrator', summary: '決めてよい' }));
     const t = setup(reviewGateRun(false), { judgeGate, judgeAnswerer });
     await t.internals.judgeGate('run-1', 'T1', 'g1', undefined);
-    expect(judgeGate.mock.calls[0]?.[1].options).not.toContain(GATE_OPTION_PROCEED);
+    expect(judgeGate.mock.calls[0]?.[1].options).toContain(GATE_OPTION_PROCEED);
     expect(findStageGate(t.run(), 'T1', 'g1')).toMatchObject({
-      status: 'awaitingUser',
-      reflexSummary: `レビューが通過していないため、Reflexの判定（${GATE_OPTION_PROCEED}）を採らなかった`,
+      status: 'resolved',
+      resolution: { choice: 'proceed', by: 'reflex' },
     });
     expect(judgeAnswerer).not.toHaveBeenCalled();
   });
