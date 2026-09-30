@@ -35,6 +35,7 @@ import {
   findStageGate,
   GATE_CHOICE_LABELS,
   isGateChoiceAllowed,
+  isReviewFailed,
   resolveStageGate,
 } from './taskRunGates';
 import type { ReflexJudgeDeps } from './planReflexReview';
@@ -1339,6 +1340,11 @@ export class TaskRunController {
       }
       if (by === 'orchestrator' && gate.status !== 'awaitingOrchestrator') {
         rejection = 'オーケストレーターの判断待ちの関門ではない（ユーザーの判断が要る）';
+        return r;
+      }
+      const task = getTask(r, taskId);
+      if (by !== 'user' && choice === 'proceed' && task !== undefined && isReviewFailed(task)) {
+        rejection = 'レビュー未通過の関門を進めるのはユーザーだけ。escalate_to_userでユーザーへ回す';
         return r;
       }
       const resolved = resolveStageGate(r, taskId, gateId, { choice, by }, this.now());
