@@ -2319,6 +2319,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       },
       onApprovalResolved: (listener) => entry.approvalResolvedListeners.push(listener),
       interrupt: () => entry.session.interrupt(),
+      reflexEnabled: () => this.reflexEnabledFor(entry),
       pauseLoop: () => entry.loop.pause(),
       resumeLoop: () => entry.loop.resume(),
       checkMessagingToolVisible: () =>

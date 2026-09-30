@@ -178,13 +178,25 @@ export interface TaskStageRunnerDeps {
   /**
    * 工程セッションからの質問（`ask_orchestrator`）をReflexで判定する。無ければ（Reflexが無効
    * なら）すべての質問をユーザーの判断待ちにする。ユーザーの回答は`answerQuestion`で受ける。
+   *
+   * 以下の判定の`reflexEnabled`は、工程セッションのタブで効くReflexの親スイッチ
+   * （`TaskSession.reflexEnabled`。Issue #1727）。タブが無い・答えないときは`undefined`で、
+   * 呼び出し側はグローバル設定に従う。
    */
-  judgeQuestion?: (engine: TaskRunEngine, question: StageQuestion) => Promise<RoadmapQuestionVerdict>;
+  judgeQuestion?: (
+    engine: TaskRunEngine,
+    question: StageQuestion,
+    reflexEnabled: boolean | undefined,
+  ) => Promise<RoadmapQuestionVerdict>;
   /**
    * 工程の失敗とレビュー後の残った指摘で開いた関門（`taskRunGates.ts`）をReflexで判定する。
    * 無ければすべての関門をユーザーの判断待ちにする。ユーザーの判断はControllerが受ける。
    */
-  judgeGate?: (engine: TaskRunEngine, question: GateJudgeQuestion) => Promise<RoadmapQuestionVerdict>;
+  judgeGate?: (
+    engine: TaskRunEngine,
+    question: GateJudgeQuestion,
+    reflexEnabled: boolean | undefined,
+  ) => Promise<RoadmapQuestionVerdict>;
   /**
    * ユーザーへ回そうとした質問・関門を、オーケストレーターが自分で決めてよいか判定する
    * （回答者判定。Issue #1708）。無ければ（Reflexか回答者判定が無効なら）ユーザーへ回す。
@@ -194,6 +206,7 @@ export interface TaskStageRunnerDeps {
     runId: string,
     engine: TaskRunEngine,
     question: AnswererQuestion,
+    reflexEnabled: boolean | undefined,
   ) => Promise<AnswererVerdict>;
   /** 同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。無ければ掛けない。 */
   maxParallelPerFolder?: () => number;
@@ -377,13 +390,15 @@ export class TaskStageRunner {
     failure: string,
   ): Promise<void> {
     const gateId = this.newId();
+    // 状態を書き込む間に工程セッションが帳簿から外れうるので、タブのReflexを先に読む
+    const reflexEnabled = this.stageReflexEnabled(runId, taskId);
     const next = await this.mutate(runId, (r) => {
       const halted = haltStage(r, taskId, attention, failure, this.now());
       return halted === r
         ? r
         : openStageGate(halted, taskId, { gateId, kind: 'stageFailed', detail: failure }, this.now());
     });
-    this.judgeGateLater(runId, taskId, gateId, next);
+    this.judgeGateLater(runId, taskId, gateId, next, reflexEnabled);
   }
 
   /**
@@ -419,17 +434,29 @@ export class TaskStageRunner {
     );
   }
 
-  /** 判定中で開いた関門をReflexに判定させる（待たない）。 */
+  /**
+   * 工程セッションのタブで効くReflexの親スイッチ（Issue #1727）。セッションが帳簿に無い、
+   * または答えないときは`undefined`（判定側でグローバル設定に従う）。
+   */
+  private stageReflexEnabled(runId: string, taskId: string): boolean | undefined {
+    return this.live.get(liveKey(runId, taskId))?.session.reflexEnabled?.();
+  }
+
+  /**
+   * 判定中で開いた関門をReflexに判定させる（待たない）。`reflexEnabled`は関門を開いた時点の
+   * 工程セッションのタブの値。
+   */
   private judgeGateLater(
     runId: string,
     taskId: string,
     gateId: string,
     run: TaskRun | undefined,
+    reflexEnabled: boolean | undefined = this.stageReflexEnabled(runId, taskId),
   ): void {
     if (run === undefined || findStageGate(run, taskId, gateId)?.status !== 'judging') {
       return;
     }
-    void this.judgeGate(runId, taskId, gateId).catch((e: unknown) => {
+    void this.judgeGate(runId, taskId, gateId, reflexEnabled).catch((e: unknown) => {
       this.warn(runId, taskId, `${taskId}の関門の判定に失敗しました: ${errorMessage(e)}`);
     });
   }
@@ -439,7 +466,12 @@ export class TaskStageRunner {
    * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。ただし「ユーザーに判断を上げる」と
    * 判定の失敗のときは回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする。
    */
-  private async judgeGate(runId: string, taskId: string, gateId: string): Promise<void> {
+  private async judgeGate(
+    runId: string,
+    taskId: string,
+    gateId: string,
+    reflexEnabled: boolean | undefined,
+  ): Promise<void> {
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
     const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
@@ -452,7 +484,7 @@ export class TaskStageRunner {
       verdict = { kind: 'human', summary: undefined };
     } else {
       try {
-        verdict = await judge(run.engine, buildGateQuestion(task, gate));
+        verdict = await judge(run.engine, buildGateQuestion(task, gate), reflexEnabled);
       } catch (e) {
         verdict = { kind: 'human', summary: `Reflexの判定に失敗: ${errorMessage(e)}` };
       }
@@ -493,7 +525,7 @@ export class TaskStageRunner {
         evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
           .filter((line) => line !== undefined)
           .join('\n'),
-      });
+      }, reflexEnabled);
       if (answerer.kind === 'orchestrator') {
         const marked = await this.mutate(runId, (r) =>
           markGateAwaitingOrchestrator(
@@ -519,13 +551,14 @@ export class TaskStageRunner {
     runId: string,
     engine: TaskRunEngine,
     question: AnswererQuestion,
+    reflexEnabled: boolean | undefined,
   ): Promise<AnswererVerdict> {
     const judge = this.deps.judgeAnswerer;
     if (judge === undefined) {
       return { kind: 'user', summary: undefined };
     }
     try {
-      return await judge(runId, engine, question);
+      return await judge(runId, engine, question, reflexEnabled);
     } catch (e) {
       return { kind: 'user', summary: `回答者判定に失敗: ${errorMessage(e)}` };
     }
@@ -1155,7 +1188,7 @@ export class TaskStageRunner {
       }
       this.markReported(entry);
       this.recordReviewFindings(entry.runId, run.workspaceRoot, taskId, observed.output);
-      this.judgeGateLater(entry.runId, taskId, gateId, next);
+      this.judgeGateLater(entry.runId, taskId, gateId, next, entry.session.reflexEnabled?.());
       return { text: '完了を受け付けました。このターンで作業を終える。', isError: false };
     });
   }
@@ -1491,6 +1524,7 @@ export class TaskStageRunner {
     const { runId } = entry;
     const taskId = entry.ref.taskId;
     const run = this.deps.store.find(runId);
+    const reflexEnabled = entry.session.reflexEnabled?.();
     const judge = this.deps.judgeQuestion;
     let verdict: RoadmapQuestionVerdict;
     const dangers = findQuestionDangers(args);
@@ -1506,7 +1540,7 @@ export class TaskStageRunner {
       };
     } else {
       try {
-        verdict = await judge(run.engine, { ...question, recommended: undefined });
+        verdict = await judge(run.engine, { ...question, recommended: undefined }, reflexEnabled);
       } catch (e) {
         verdict = { kind: 'human', summary: `Reflexの判定に失敗: ${errorMessage(e)}` };
       }
@@ -1522,7 +1556,7 @@ export class TaskStageRunner {
           evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
             .filter((line) => line !== undefined)
             .join('\n'),
-        });
+        }, reflexEnabled);
         if (answerer.kind === 'orchestrator') {
           const marked = await this.mutate(runId, (r) =>
             markQuestionAwaitingOrchestrator(

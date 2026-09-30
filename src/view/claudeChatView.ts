@@ -3319,6 +3319,7 @@ export class ClaudeChatViewManager
         entry.session.interrupt();
         return Promise.resolve();
       },
+      reflexEnabled: () => this.reflexEnabledFor(entry),
       pauseLoop: () => entry.loop.pause(),
       resumeLoop: () => entry.loop.resume(),
       checkMessagingToolVisible: async () => {
