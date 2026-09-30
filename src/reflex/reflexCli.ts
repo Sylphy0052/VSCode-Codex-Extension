@@ -39,9 +39,9 @@ export interface ReflexCliDeps {
 }
 
 /**
- * `REFLEX_MODELS`のモデルでプロンプトを1回だけ投げる。
+ * `REFLEX_MODELS`のモデルでプロンプトを1回だけ投げる。結果をそのまま返す。
  *
- * 失敗の扱い（ログの文言、応答の解釈）は用途ごとに違うため、ここでは結果をそのまま返す。
+ * 呼出元は直接使わず、失敗ログをまとめた`runReflexJson`を通す（Issue #1728）。
  */
 export function runReflexPrompt(deps: ReflexCliDeps, prompt: string): Promise<HeadlessOutcome> {
   const run = deps.run ?? runHeadlessPromptDetailed;
@@ -56,4 +56,45 @@ export function runReflexPrompt(deps: ReflexCliDeps, prompt: string): Promise<He
     },
     prompt,
   );
+}
+
+/**
+ * JSONを返すReflex呼出の共通ランナー（Issue #1728）。
+ *
+ * プロンプトを1回投げ、応答本文を`parse`で読む。失敗（時間切れ・CLIの起動失敗や異常終了・
+ * 読めない応答・例外）はどれも`undefined`を返し、`subject`を主語にした文言で`logWarn`へ
+ * 1行出す。`signal`で打ち切ったときは呼出元が止めた結果であり不調ではないため、ログを出さない。
+ *
+ * @param subject ログの主語（例: `Reflexの判定`）。`〜が時間切れになりました`の形で使う
+ * @param parse 応答本文を読む。読めなければ`undefined`
+ */
+export async function runReflexJson<T>(
+  deps: ReflexCliDeps,
+  prompt: string,
+  subject: string,
+  parse: (text: string) => T | undefined,
+): Promise<T | undefined> {
+  try {
+    const outcome = await runReflexPrompt(deps, prompt);
+    if (!outcome.ok) {
+      if (deps.signal?.aborted !== true) {
+        // 時間切れと起動・異常終了を言い分ける（Issue #1097）。同じ文言だと、タイムアウトを
+        // 延ばすべきなのか、CLIのパスが違うのかがログから判らない
+        deps.logWarn?.(
+          outcome.reason === 'timeout'
+            ? `${subject}が時間切れになりました（${deps.timeoutMs}ms）`
+            : `${subject}を実行できませんでした（CLIの起動失敗・異常終了）`,
+        );
+      }
+      return undefined;
+    }
+    const parsed = parse(outcome.text);
+    if (parsed === undefined) {
+      deps.logWarn?.(`${subject}の応答を読めませんでした（JSONとして不正）`);
+    }
+    return parsed;
+  } catch (e) {
+    deps.logWarn?.(`${subject}で例外が出ました: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  }
 }

@@ -144,6 +144,33 @@ const num = (c: vscode.WorkspaceConfiguration, key: string, fallback: number): n
 };
 
 /**
+ * Reflex判定の閾値。0〜1の範囲外・数値でないときは既定値に戻す（Issue #1708・#1728）。
+ * 範囲の端へ寄せると、0で「常に自動で決める」設定になりうるため。
+ */
+const reflexThreshold = (
+  c: vscode.WorkspaceConfiguration,
+  key: string,
+  fallback: number,
+): number => {
+  const v = num(c, key, fallback);
+  return v >= 0 && v <= 1 ? v : fallback;
+};
+
+/**
+ * Reflex判定の各機能が有効か。Reflexモードの親スイッチ（`reflexEnabled`）がOFFなら常にfalse。
+ * 機能ごとのスイッチ（`key`）は、未設定なら`fallback`に従う。
+ */
+const reflexFeatureEnabled = (
+  reflexEnabled: boolean,
+  c: vscode.WorkspaceConfiguration,
+  key: string,
+  fallback = true,
+): boolean => {
+  const v = c.get<boolean>(key);
+  return reflexEnabled && (typeof v === 'boolean' ? v : fallback);
+};
+
+/**
  * 実行経路と権限に関わるキーは package.json 側で machine スコープに固定してある。
  * リポジトリの .vscode/settings.json から差し替えられないことが前提（設計書 §7・§8）。
  */
@@ -683,13 +710,17 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
  * オーケストレータモードの計画提案を、Reflexが妥当と判定したときに自動承認する（Issue #1554）。
  * 既定は無効（Issue #1679）。承認前の計画を人が確認し、計画の書き換えを人の承認に通すため。
  * 無効のときは判定を試みず、常にユーザーの承認待ちにする。Reflexモードの親スイッチ
- * （`readReflexEnabled`）は見ないので、呼び出し側で合わせて見る（Issue #1713）。
+ * （`readReflexEnabled`）がOFFなら常にfalse（Issue #1713）。
  */
-export function readTaskRunPlanAutoApproveEnabled(): boolean {
-  const raw = vscode.workspace
-    .getConfiguration('agent')
-    .get<boolean>('taskRun.planAutoApprove.enabled');
-  return typeof raw === 'boolean' ? raw : false;
+export function readTaskRunPlanAutoApproveEnabled(
+  reflexEnabled: boolean = readReflexEnabled(),
+): boolean {
+  return reflexFeatureEnabled(
+    reflexEnabled,
+    vscode.workspace.getConfiguration('agent'),
+    'taskRun.planAutoApprove.enabled',
+    false,
+  );
 }
 
 /** @see readAutoHandoffSoftThresholdPercent */
@@ -994,7 +1025,7 @@ export async function setReflexEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
- * 自動返信モードに挟むReflex判定（Issue #1435）の設定を読む。閾値は0〜1へ丸める。
+ * 自動返信モードに挟むReflex判定（Issue #1435）の設定を読む。閾値が0〜1の範囲外なら既定値に戻す。
  * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
  * `reflexEnabled`はタブ単位で上書きした親スイッチの値（Issue #1505）。省略時はグローバル設定。
  */
@@ -1002,10 +1033,9 @@ export function readAutoReplyReflexConfig(
   reflexEnabled: boolean = readReflexEnabled(),
 ): AutoReplyReflexSettings {
   const c = vscode.workspace.getConfiguration('agent');
-  const threshold = (key: string, fallback: number): number =>
-    Math.min(1, Math.max(0, num(c, key, fallback)));
+  const threshold = (key: string, fallback: number): number => reflexThreshold(c, key, fallback);
   return {
-    enabled: reflexEnabled && c.get<boolean>('chat.autoReply.reflex.enabled') !== false,
+    enabled: reflexFeatureEnabled(reflexEnabled, c, 'chat.autoReply.reflex.enabled'),
     completionThreshold: threshold(
       'chat.autoReply.reflex.completionThreshold',
       DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
@@ -1022,7 +1052,7 @@ export function readAutoReplyReflexConfig(
 }
 
 /**
- * 自動引き継ぎの区切り判定をReflexで行う設定（Issue #1707）を読む。閾値は0〜1へ丸める。
+ * 自動引き継ぎの区切り判定をReflexで行う設定（Issue #1707）を読む。閾値が0〜1の範囲外なら既定値に戻す。
  * `enabled`はReflexモードの親スイッチそのもの。OFFなら従来の分類器の判定を使う。
  * `reflexEnabled`はタブ単位で上書きした親スイッチの値（Issue #1505）。省略時はグローバル設定。
  */
@@ -1030,8 +1060,7 @@ export function readAutoHandoffReflexConfig(
   reflexEnabled: boolean = readReflexEnabled(),
 ): HandoffReflexSettings {
   const c = vscode.workspace.getConfiguration('agent');
-  const threshold = (key: string, fallback: number): number =>
-    Math.min(1, Math.max(0, num(c, key, fallback)));
+  const threshold = (key: string, fallback: number): number => reflexThreshold(c, key, fallback);
   return {
     enabled: reflexEnabled,
     suggestThreshold: threshold(
@@ -1050,7 +1079,7 @@ export function readAutoHandoffReflexConfig(
 }
 
 /**
- * 条件付きループの完了宣言の検証（issue #1447）の設定を読む。閾値は0〜1へ丸める。
+ * 条件付きループの完了宣言の検証（issue #1447）の設定を読む。閾値が0〜1の範囲外なら既定値に戻す。
  * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
  * `reflexEnabled`はタブ単位で上書きした親スイッチの値（Issue #1505）。省略時はグローバル設定。
  */
@@ -1059,16 +1088,17 @@ export function readLoopDoneCheckConfig(
 ): LoopDoneCheckSettings {
   const c = vscode.workspace.getConfiguration('agent');
   return {
-    enabled: reflexEnabled && c.get<boolean>('chat.loopDoneCheck.enabled') !== false,
-    threshold: Math.min(
-      1,
-      Math.max(0, num(c, 'chat.loopDoneCheck.threshold', DEFAULT_LOOP_DONE_CHECK_THRESHOLD)),
+    enabled: reflexFeatureEnabled(reflexEnabled, c, 'chat.loopDoneCheck.enabled'),
+    threshold: reflexThreshold(
+      c,
+      'chat.loopDoneCheck.threshold',
+      DEFAULT_LOOP_DONE_CHECK_THRESHOLD,
     ),
   };
 }
 
 /**
- * 依頼に合うskillの選択（issue #1451）の設定を読む。閾値は0〜1へ丸める。
+ * 依頼に合うskillの選択（issue #1451）の設定を読む。閾値が0〜1の範囲外なら既定値に戻す。
  * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
  * `reflexEnabled`はタブ単位で上書きした親スイッチの値（Issue #1505）。省略時はグローバル設定。
  */
@@ -1077,17 +1107,13 @@ export function readSkillSelectConfig(
 ): SkillSelectSettings {
   const c = vscode.workspace.getConfiguration('agent');
   return {
-    enabled: reflexEnabled && c.get<boolean>('chat.skillSelect.enabled') !== false,
-    threshold: Math.min(
-      1,
-      Math.max(0, num(c, 'chat.skillSelect.threshold', DEFAULT_SKILL_SELECT_THRESHOLD)),
-    ),
+    enabled: reflexFeatureEnabled(reflexEnabled, c, 'chat.skillSelect.enabled'),
+    threshold: reflexThreshold(c, 'chat.skillSelect.threshold', DEFAULT_SKILL_SELECT_THRESHOLD),
   };
 }
 
 /**
- * 回答者判定（Issue #1708）の設定を読む。閾値が0〜1の範囲外・数値でないときは既定値に戻す
- * （範囲の端へ寄せると、0でオーケストレーターが全部を決める設定になりうるため）。
+ * 回答者判定（Issue #1708）の設定を読む。閾値が0〜1の範囲外なら既定値に戻す。
  * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
  * `reflexEnabled`はタブ単位で上書きした親スイッチの値。省略時はグローバル設定。
  */
@@ -1095,10 +1121,9 @@ export function readAnswererJudgeConfig(
   reflexEnabled: boolean = readReflexEnabled(),
 ): AnswererJudgeSettings {
   const c = vscode.workspace.getConfiguration('agent');
-  const threshold = num(c, 'chat.answererJudge.threshold', DEFAULT_ANSWERER_JUDGE_THRESHOLD);
   return {
-    enabled: reflexEnabled && c.get<boolean>('chat.answererJudge.enabled') !== false,
-    threshold: threshold >= 0 && threshold <= 1 ? threshold : DEFAULT_ANSWERER_JUDGE_THRESHOLD,
+    enabled: reflexFeatureEnabled(reflexEnabled, c, 'chat.answererJudge.enabled'),
+    threshold: reflexThreshold(c, 'chat.answererJudge.threshold', DEFAULT_ANSWERER_JUDGE_THRESHOLD),
   };
 }
 

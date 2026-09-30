@@ -1,4 +1,10 @@
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import {
+  choiceAnswer,
+  formatReflexProbability,
+  noulAnswer,
+  type ReflexFallback,
+} from '../reflex/reflexAnswer';
 import { judge, type ReflexJudgeDeps } from '../reflex/reflexJudge';
 import type { GoalEvidence } from './goalLoop';
 
@@ -91,9 +97,11 @@ export interface LoopDoneCheckConfig {
   note?: (result: LoopDoneCheckResult, iteration: number) => void;
 }
 
-function formatProbability(p: number): string {
-  return p.toFixed(2);
-}
+/**
+ * 判定できなければ、完了宣言を信じてループを終える（`loopController.ts`が`rejected`以外で
+ * 止める）。判定器の不調でループが回り続けるのを避ける。
+ */
+export const LOOP_DONE_CHECK_FALLBACK: ReflexFallback = 'treatAsDone';
 
 /**
  * コマンドの記録を1件1行へ均す。コマンド行も出力も外部由来なので改行を潰し、偽の行を
@@ -168,16 +176,15 @@ export async function checkLoopDone(
       },
     ],
   });
-  const done = answers?.[0];
-  if (done?.kind !== 'noul') {
+  const done = noulAnswer(answers?.[0]);
+  if (done === undefined) {
     return { kind: 'unavailable' };
   }
   if (done.yes >= threshold) {
     return { kind: 'passed', probability: done.yes };
   }
   // 足りない点が読めなかったとき・「不足なし」なのに閾値を下回ったときは、一般的な文で返す
-  const gapAnswer = answers?.[1];
-  const gap = gapAnswer?.kind === 'choice' ? gapAnswer.best : undefined;
+  const gap = choiceAnswer(answers?.[1])?.best;
   return {
     kind: 'rejected',
     probability: done.yes,
@@ -214,9 +221,9 @@ export function createLoopDoneCheckConfig(
 export function describeLoopDoneCheck(result: LoopDoneCheckResult): string {
   switch (result.kind) {
     case 'passed':
-      return `Reflex判定（完了宣言の検証）: 満たした ${formatProbability(result.probability)} のためループを終了します`;
+      return `Reflex判定（完了宣言の検証）: 満たした ${formatReflexProbability(result.probability)} のためループを終了します`;
     case 'rejected':
-      return `Reflex判定（完了宣言の検証）: 満たした ${formatProbability(result.probability)}、不足 ${result.gap ?? '不明'} のためループを続けます`;
+      return `Reflex判定（完了宣言の検証）: 満たした ${formatReflexProbability(result.probability)}、不足 ${result.gap ?? '不明'} のためループを続けます`;
     case 'unavailable':
       return 'Reflex判定（完了宣言の検証）: 判定できなかったため、宣言どおりループを終了します';
   }

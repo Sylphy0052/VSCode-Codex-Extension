@@ -403,8 +403,8 @@ export class TaskRunController {
    * `planAutoApprove`が有効なら、書き込み前（forgeへの問い合わせと同様、直列書き込みの外）に
    * Reflexで計画を判定する（Issue #1554）。判定は書き込みの直列に入る前の内容に対して行うため、
    * 書き込み時に同じ内容へ解決できたときだけ承認まで進める（待っている間に他の変更が割り込んで
-   * いれば、判定済みの内容と食い違うため承認待ちへ戻す。ロードマップ計画審査
-   * `roadmapPlanProposal.ts`と同じ判定器・同じ既定閾値を使う）。
+   * いれば、判定済みの内容と食い違うため承認待ちへ戻す。判定器と既定閾値は
+   * `planReflexReview.ts`のもの）。
    */
   async proposePlan(runId: string, rawArgs: unknown): Promise<ControllerResult> {
     const parsed = parsePlanArgs(rawArgs);

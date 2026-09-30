@@ -1,5 +1,5 @@
 import type { HeadlessCliDeps, HeadlessOutcome, HeadlessProvider } from '../loop/headlessCli';
-import { runReflexPrompt } from '../reflex/reflexCli';
+import { runReflexJson } from '../reflex/reflexCli';
 import {
   TASK_TYPES,
   isAssessmentScore,
@@ -354,37 +354,17 @@ export async function classifyHandoff(
   deps: HandoffClassifierDeps,
   input: HandoffClassifierInput,
 ): Promise<TaskAssessment | undefined> {
-  try {
-    // モデルは会話しているCLIに合わせる（`REFLEX_MODELS`。Issue #1434で共通化）
-    const outcome = await runReflexPrompt(
-      {
-        provider: deps.provider,
-        executable: deps.executable,
-        timeoutMs: deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS,
-        ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
-        ...(deps.run === undefined ? {} : { run: deps.run }),
-      },
-      buildClassifierPrompt(input),
-    );
-    if (!outcome.ok) {
-      // 時間切れと起動・異常終了を言い分ける（Issue #1097）。同じ「応答しませんでした」だと
-      // タイムアウトを延ばすべきなのか、CLIのパスが違うのかがログから判らない
-      deps.logWarn?.(
-        outcome.reason === 'timeout'
-          ? `引き継ぎ先の作業の分類が時間切れになりました（${deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS}ms）`
-          : '引き継ぎ先の作業の分類を実行できませんでした（CLIの起動失敗・異常終了）',
-      );
-      return undefined;
-    }
-    const assessment = parseAssessment(outcome.text);
-    if (assessment === undefined) {
-      deps.logWarn?.('引き継ぎ先の作業の分類の応答を読めませんでした（JSONとして不正）');
-    }
-    return assessment;
-  } catch (e) {
-    deps.logWarn?.(
-      `引き継ぎ先の作業の分類で例外が出ました: ${e instanceof Error ? e.message : String(e)}`,
-    );
-    return undefined;
-  }
+  // モデルは会話しているCLIに合わせる（`REFLEX_MODELS`。Issue #1434で共通化）
+  return runReflexJson(
+    {
+      provider: deps.provider,
+      executable: deps.executable,
+      timeoutMs: deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS,
+      ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
+      ...(deps.run === undefined ? {} : { run: deps.run }),
+    },
+    buildClassifierPrompt(input),
+    '引き継ぎ先の作業の分類',
+    parseAssessment,
+  );
 }

@@ -1,6 +1,6 @@
 import type { ChatItem } from '../appserver/chatState';
 import type { HeadlessCliDeps, HeadlessOutcome, HeadlessProvider } from '../loop/headlessCli';
-import { runReflexPrompt } from '../reflex/reflexCli';
+import { runReflexJson } from '../reflex/reflexCli';
 import type { MementoLike } from '../util/memento';
 import { generationMarkOf, stripGeneration } from './handoff';
 import { CLASSIFIER_TIMEOUT_MS } from './handoffClassifier';
@@ -315,42 +315,26 @@ export async function summarizeSessionName(
   if (material === undefined) {
     return undefined;
   }
-  const timeoutMs = deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS;
-  try {
-    const outcome = await runReflexPrompt(
-      {
-        provider: deps.provider,
-        executable: deps.executable,
-        timeoutMs,
-        ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
-        ...(deps.run === undefined ? {} : { run: deps.run }),
-      },
-      buildPrompt(material),
-    );
-    if (!outcome.ok) {
-      deps.logWarn?.(
-        outcome.reason === 'timeout'
-          ? `タブ名の自動付け直しが時間切れになりました（${timeoutMs}ms）`
-          : 'タブ名の自動付け直しを実行できませんでした（CLIの起動失敗・異常終了）',
-      );
-      return undefined;
-    }
-    const result = parseAutoNameResponse(outcome.text, materialText(material));
-    if (result === undefined) {
-      deps.logWarn?.('タブ名の自動付け直しの応答を読めませんでした（JSONとして不正）');
-      return undefined;
-    }
-    const name = buildAutoSessionName(result, input.currentName);
-    if (name === undefined) {
-      deps.logWarn?.('タブ名の自動付け直しの応答に番号もslugもありませんでした');
-    }
-    return name;
-  } catch (e) {
-    deps.logWarn?.(
-      `タブ名の自動付け直しで例外が出ました: ${e instanceof Error ? e.message : String(e)}`,
-    );
+  const result = await runReflexJson(
+    {
+      provider: deps.provider,
+      executable: deps.executable,
+      timeoutMs: deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS,
+      ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
+      ...(deps.run === undefined ? {} : { run: deps.run }),
+    },
+    buildPrompt(material),
+    'タブ名の自動付け直し',
+    (text) => parseAutoNameResponse(text, materialText(material)),
+  );
+  if (result === undefined) {
     return undefined;
   }
+  const name = buildAutoSessionName(result, input.currentName);
+  if (name === undefined) {
+    deps.logWarn?.('タブ名の自動付け直しの応答に番号もslugもありませんでした');
+  }
+  return name;
 }
 
 /**

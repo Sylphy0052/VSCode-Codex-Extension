@@ -1,9 +1,8 @@
 /**
  * オーケストレータモード（Issue #1505）のタスク計画をReflexで判定する（Issue #1554）。
- * ロードマップ実行（Issue #1465、`roadmapPlanProposal.ts`）の計画審査と同じ判定器・同じ閾値
- * （`planReflexReview.ts`）を使う。ロードマップと違い、タスク計画には照らし合わせる外部の
- * Issue本文が無いため、判定は計画そのものの内部整合（タイトル・要約・受入基準・依存関係が
- * 互いに矛盾しないか）に限る。
+ * 判定器と閾値は`planReflexReview.ts`のもの（廃止したロードマップ実行の計画審査、Issue #1465から
+ * 流用した）。タスク計画には照らし合わせる外部のIssue本文が無いため、判定は計画そのものの
+ * 内部整合（タイトル・要約・受入基準・依存関係が互いに矛盾しないか）に限る。
  *
  * `summary`は改行を含みうる外部由来（Orchestrator＝LLMの出力）のテキストのため
  * `formatUntrusted`で囲う。`title`と`acceptanceCriteria`は`taskRunPlan.ts`の`readText`で

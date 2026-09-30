@@ -1,11 +1,23 @@
 import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import {
-  judge,
-  normalizeReflexLabel,
-  type ReflexAnswer,
-  type ReflexJudgeDeps,
-} from '../reflex/reflexJudge';
+  bestChoiceProbability,
+  choiceAnswer,
+  choiceProbability,
+  describeReflexChoice,
+  formatReflexProbability,
+  noulAnswer,
+  type ChoiceAnswer,
+  type ReflexFallback,
+} from '../reflex/reflexAnswer';
+import { judge, normalizeReflexLabel, type ReflexJudgeDeps } from '../reflex/reflexJudge';
+
+/** 完了の検証が判定できなければ、Reflexなしの自動返信（返信役）に任せる。 */
+export const AUTO_REPLY_COMPLETION_FALLBACK: ReflexFallback = 'withoutReflex';
+/** 危険度ゲートが判定できなければ、安全側に倒して送らない。 */
+export const AUTO_REPLY_DANGER_FALLBACK: ReflexFallback = 'stop';
+/** AskUserQuestionの回答が判定できなければ、Reflexなしの自動返信（返信役）に任せる。 */
+export const AUTO_REPLY_ASK_USER_QUESTION_FALLBACK: ReflexFallback = 'withoutReflex';
 
 /**
  * 自動返信モードに挟むReflex判定（Issue #1435）。
@@ -58,19 +70,6 @@ const ASK_TEXT_MAX_LENGTH = 400;
 /** 危険度ゲートへ文脈として渡す直前の出力の上限。送る内容を先に置くため、切れるのは文脈の側。 */
 const DANGER_CONTEXT_MAX_LENGTH = 8000;
 
-function formatProbability(p: number): string {
-  return p.toFixed(2);
-}
-
-function describeChoice(
-  labels: readonly string[],
-  probabilities: Readonly<Record<string, number>>,
-): string {
-  return labels
-    .map((label) => `${label} ${formatProbability(probabilities[label] ?? 0)}`)
-    .join(' / ');
-}
-
 export type AutoReplyCompletionVerdict =
   | { readonly kind: 'stop'; readonly reason: 'completed' | 'needsHuman'; readonly summary: string }
   | { readonly kind: 'continue'; readonly summary: string }
@@ -105,13 +104,13 @@ export async function checkAutoReplyCompletion(
       },
     ],
   });
-  const answer = answers?.[0];
-  if (answer?.kind !== 'choice') {
+  const answer = choiceAnswer(answers?.[0]);
+  if (answer === undefined) {
     return { kind: 'unavailable' };
   }
-  const summary = describeChoice(COMPLETION_OPTIONS, answer.probabilities);
-  const completed = answer.probabilities[COMPLETED] ?? 0;
-  const needsHuman = answer.probabilities[NEEDS_HUMAN] ?? 0;
+  const summary = describeReflexChoice(COMPLETION_OPTIONS, answer.probabilities);
+  const completed = choiceProbability(answer, COMPLETED);
+  const needsHuman = choiceProbability(answer, NEEDS_HUMAN);
   const [reason, p] =
     completed >= needsHuman
       ? (['completed', completed] as const)
@@ -168,11 +167,11 @@ export async function checkAutoReplyDanger(
       },
     ],
   });
-  const answer = answers?.[0];
-  if (answer?.kind !== 'noul') {
+  const answer = noulAnswer(answers?.[0]);
+  if (answer === undefined) {
     return { kind: 'unavailable' };
   }
-  const summary = `危険 ${formatProbability(answer.yes)}`;
+  const summary = `危険 ${formatReflexProbability(answer.yes)}`;
   return answer.yes >= threshold ? { kind: 'danger', summary } : { kind: 'safe', summary };
 }
 
@@ -242,9 +241,9 @@ export async function judgeAutoReplyAskUserQuestion(
   const summaries: string[] = [];
   let confident = true;
   for (const [i, question] of questions.entries()) {
-    const answer = answers[i] as Extract<ReflexAnswer, { kind: 'choice' }>;
-    const p = answer.probabilities[answer.best] ?? 0;
-    summaries.push(`質問${i + 1}: ${answer.best} ${formatProbability(p)}`);
+    const answer = answers[i] as ChoiceAnswer;
+    const p = bestChoiceProbability(answer);
+    summaries.push(`質問${i + 1}: ${answer.best} ${formatReflexProbability(p)}`);
     const index = labelsPerQuestion[i]!.indexOf(answer.best);
     const option = question.options[index];
     if (option === undefined || p < threshold) {

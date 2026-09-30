@@ -1,5 +1,14 @@
 import { findQuestionDangers } from '../orchestrator/roadmapQuestionMcp';
+import {
+  choiceAnswer,
+  choiceProbability,
+  describeReflexChoice,
+  type ReflexFallback,
+} from './reflexAnswer';
 import { judge, type ReflexJudgeDeps } from './reflexJudge';
+
+/** 判定できなければ、問いを人（ユーザー）へ回す。 */
+export const ANSWERER_JUDGE_FALLBACK: ReflexFallback = 'askHuman';
 
 /**
  * 回答者判定（Issue #1708）。オーケストレーターへ届いた問い・オーケストレーターが出そうとした
@@ -55,13 +64,6 @@ export interface AnswererQuestion {
   recommended?: string | undefined;
   /** 判断の材料。既存の選択肢判定の要約など。 */
   evidence?: string | undefined;
-}
-
-function describeProbabilities(
-  labels: readonly string[],
-  probabilities: Readonly<Record<string, number>>,
-): string {
-  return labels.map((label) => `${label} ${(probabilities[label] ?? 0).toFixed(2)}`).join(' / ');
 }
 
 /** 危険語を含むなら、Reflexを通さずユーザーへ回す判定を返す。 */
@@ -122,12 +124,12 @@ export async function judgeQuestionAnswerer(
       },
     ],
   });
-  const answer = answers?.[0];
-  if (answer?.kind !== 'choice') {
+  const answer = choiceAnswer(answers?.[0]);
+  if (answer === undefined) {
     return { kind: 'user', summary: undefined };
   }
-  const summary = describeProbabilities(QUESTION_OPTIONS, answer.probabilities);
-  return (answer.probabilities[ORCHESTRATOR] ?? 0) >= threshold
+  const summary = describeReflexChoice(QUESTION_OPTIONS, answer.probabilities);
+  return choiceProbability(answer, ORCHESTRATOR) >= threshold
     ? { kind: 'orchestrator', summary }
     : { kind: 'user', summary };
 }
@@ -166,12 +168,12 @@ export async function judgeTurnEndAnswerer(
       },
     ],
   });
-  const answer = answers?.[0];
-  if (answer?.kind !== 'choice') {
+  const answer = choiceAnswer(answers?.[0]);
+  if (answer === undefined) {
     return { kind: 'user', summary: undefined };
   }
-  const summary = describeProbabilities(TURN_END_OPTIONS, answer.probabilities);
-  if ((answer.probabilities[ORCHESTRATOR] ?? 0) >= threshold) {
+  const summary = describeReflexChoice(TURN_END_OPTIONS, answer.probabilities);
+  if (choiceProbability(answer, ORCHESTRATOR) >= threshold) {
     return { kind: 'orchestrator', summary };
   }
   return answer.best === NO_QUESTION
