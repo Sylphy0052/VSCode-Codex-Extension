@@ -418,6 +418,12 @@ interface ChatPanel extends BaseChatPanel {
    * 閉じる・無操作継続（`AutoReplyAgent`内部のアイドルタイマー）で閉じる。
    */
   autoReplyAgent: AutoReplyAgent | undefined;
+  /**
+   * 実行中の自動返信の1往復の印。無ければ`undefined`。完了検証・危険度ゲートのawait中は返信役の
+   * `isBusy()`がfalseのため、その間に届いた別のターン完了で往復が並走しないよう、これで弾く
+   * （Issue #1733）。送る直前に下ろす。
+   */
+  autoReplyTurnToken: symbol | undefined;
   /** 自動返信の往復回数。`agent.chat.autoReply.maxTurns` に達したら自動でOFFにする。 */
   autoReplyTurnCount: number;
   /** 返信役の応答履歴（`stallDetector.ts`の署名列と同じ形）。同じ応答が続いた停滞検出に使う。 */
@@ -1381,6 +1387,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.session.setAutoReply(false);
     entry.autoReplyTurnCount = 0;
     entry.autoReplyHistory = [];
+    // 判定のawaitが返らない往復の印を残すと、ONへ戻しても以後の往復を弾き続ける
+    entry.autoReplyTurnToken = undefined;
     entry.autoReplyReflexAbort.abort();
     entry.autoReplyReflexAbort = new AbortController();
     const agent = entry.autoReplyAgent;
@@ -1405,14 +1413,25 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `sendFromLoop`で次のuserメッセージとして送り、会話へ「自動返信」の印を1行残す。
    */
   private async runAutoReplyTurn(entry: ChatPanel, lastAgentMessageText: string): Promise<void> {
-    if (entry.disposed || entry.autoReplyAgent?.isBusy() === true) {
+    if (
+      entry.disposed ||
+      entry.autoReplyTurnToken !== undefined ||
+      entry.autoReplyAgent?.isBusy() === true
+    ) {
       return;
     }
+    const token = Symbol('autoReplyTurn');
+    entry.autoReplyTurnToken = token;
     // 処理中の表示（Issue #1602）は、どの経路で抜けても消す
     try {
       await this.runAutoReplyTurnSteps(entry, lastAgentMessageText);
     } finally {
-      if (!entry.disposed) {
+      // 送った後に始まった次の往復の印と処理中の表示は消さない
+      const nextTurnStarted = entry.autoReplyTurnToken !== undefined && entry.autoReplyTurnToken !== token;
+      if (entry.autoReplyTurnToken === token) {
+        entry.autoReplyTurnToken = undefined;
+      }
+      if (!entry.disposed && !nextTurnStarted) {
         entry.session.setAutoReplyActivity(undefined);
       }
     }
@@ -1484,6 +1503,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (!(await this.passesAutoReplyDangerGate(entry, message, lastAgentMessageText))) {
       return;
     }
+    // 送った後のターン完了は次の往復として受ける。完了が送信の応答より先に届いても弾かないよう、送る前に下ろす
+    entry.autoReplyTurnToken = undefined;
     entry.session.noteLocalEvent(`autoReply:${Date.now()}`, `自動返信: ${message}`);
     try {
       await this.sendFromLoop(entry, message);
@@ -2214,6 +2235,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       trace: new HandoffTrace(this.log),
       safeBoundaryProbing: false,
       autoReplyAgent: undefined,
+      autoReplyTurnToken: undefined,
       autoReplyTurnCount: 0,
       autoReplyHistory: [],
       autoReplyReflexAbort: new AbortController(),

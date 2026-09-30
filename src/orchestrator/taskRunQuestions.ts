@@ -21,6 +21,13 @@ import {
 /** 1タスクに残す質問の上限。古い回答済みの質問から捨てる。 */
 export const MAX_QUESTIONS_PER_TASK = 50;
 
+/**
+ * 1回の工程セッション（`attemptId`）から受け付ける質問の上限。質問ごとにReflexのCLIを最大2回
+ * 起動するため、質問を繰り返すセッションで起動が際限なく続かないよう止める（Issue #1733）。
+ * `MAX_QUESTIONS_PER_TASK`より小さくし、刈り込みで数え漏らさないようにする。
+ */
+export const MAX_QUESTIONS_PER_ATTEMPT = 20;
+
 function withQuestions(
   run: TaskRun,
   task: OrchestratedTask,

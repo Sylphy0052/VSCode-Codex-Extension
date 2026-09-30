@@ -437,9 +437,15 @@ export function maskForLog(value: string, homeDir?: string): string {
  */
 const INVISIBLE_CHAR_PATTERN = /[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/gu;
 
+/** C1制御文字（`U+0080`-`U+009F`。`U+0085` NELを含む）か。 */
+function isC1Control(code: number): boolean {
+  return code >= 0x80 && code <= 0x9f;
+}
+
 /**
- * C0制御文字・DEL・双方向制御文字を取り除く。改行やタブは空白に畳み、それ以外の
- * 制御文字（双方向制御含む）は跡を残さず削除する。`sanitizeForLog` の下請けだが、
+ * 制御文字と双方向制御文字を取り除く。C0/C1制御文字（改行・タブ・NEL `U+0085`を含む）・
+ * DEL・行区切り・段落区切り（`U+2028` `U+2029`）は空白に畳み、双方向制御文字・
+ * 不可視文字は跡を残さず削除する（C1と行区切りはIssue #1733）。`sanitizeForLog` の下請けだが、
  * 単独でも使う（`runner.ts` の承認要求表示、`taskSummary.ts` の応答要約。
  * レビュー指摘: medium 3 / low）。
  */
@@ -447,7 +453,8 @@ export function stripControlChars(value: string): string {
   let normalized = '';
   for (const ch of value) {
     const code = ch.codePointAt(0) ?? 0;
-    normalized += code < 0x20 || code === 0x7f ? ' ' : ch;
+    const isLineBreakLike = code === 0x2028 || code === 0x2029;
+    normalized += code < 0x20 || code === 0x7f || isC1Control(code) || isLineBreakLike ? ' ' : ch;
   }
   return normalized.replace(INVISIBLE_CHAR_PATTERN, '');
 }
@@ -469,7 +476,8 @@ export function stripControlCharsPreservingNewlines(value: string): string {
   for (const ch of value) {
     const code = ch.codePointAt(0) ?? 0;
     const isPreservedWhitespace = code === 0x0a || code === 0x0d || code === 0x09;
-    normalized += !isPreservedWhitespace && (code < 0x20 || code === 0x7f) ? ' ' : ch;
+    normalized +=
+      !isPreservedWhitespace && (code < 0x20 || code === 0x7f || isC1Control(code)) ? ' ' : ch;
   }
   return normalized.replace(INVISIBLE_CHAR_PATTERN, '');
 }

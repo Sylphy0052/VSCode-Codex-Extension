@@ -86,6 +86,7 @@ import {
   isQuestionOpen,
   markQuestionAwaitingOrchestrator,
   markQuestionAwaitingUser,
+  MAX_QUESTIONS_PER_ATTEMPT,
 } from './taskRunQuestions';
 import {
   countActiveStageSessions,
@@ -461,8 +462,22 @@ export class TaskStageRunner {
     if (run === undefined || findStageGate(run, taskId, gateId)?.status !== 'judging') {
       return;
     }
-    void this.judgeGate(runId, taskId, gateId, reflexEnabled).catch((e: unknown) => {
-      this.warn(runId, taskId, `${taskId}の関門の判定に失敗しました: ${errorMessage(e)}`);
+    void this.judgeGate(runId, taskId, gateId, reflexEnabled).catch(async (e: unknown) => {
+      const message = errorMessage(e);
+      this.warn(runId, taskId, `${taskId}の関門の判定に失敗しました: ${message}`);
+      // 状態の更新に失敗すると判定中のまま残り、誰も決着させられない。ユーザーの判断待ちへ落とす（Issue #1733）
+      // オーケストレーターの判断待ちへ移った関門は奪わない
+      await this.mutate(runId, (r) =>
+        findStageGate(r, taskId, gateId)?.status === 'judging'
+          ? escalateStageGate(r, taskId, gateId, `関門の判定に失敗: ${message}`, this.now())
+          : r,
+      ).catch((retryError: unknown) => {
+        this.warn(
+          runId,
+          taskId,
+          `${taskId}の関門をユーザーの判断待ちにできませんでした: ${errorMessage(retryError)}`,
+        );
+      });
     });
   }
 
@@ -1450,6 +1465,13 @@ export class TaskStageRunner {
     });
   }
 
+  /** いまの工程セッション（`attemptId`）から受け付けた質問の数。 */
+  private countAttemptQuestions(entry: LiveStageSession): number {
+    const run = this.deps.store.find(entry.runId);
+    const task = run === undefined ? undefined : getTask(run, entry.ref.taskId);
+    return (task?.questions ?? []).filter((q) => q.attemptId === entry.ref.attemptId).length;
+  }
+
   private hasPendingBlockingQuestion(entry: LiveStageSession): boolean {
     const run = this.deps.store.find(entry.runId);
     const task = run === undefined ? undefined : getTask(run, entry.ref.taskId);
@@ -1483,6 +1505,9 @@ export class TaskStageRunner {
       ) {
         return undefined;
       }
+      if (this.countAttemptQuestions(entry) >= MAX_QUESTIONS_PER_ATTEMPT) {
+        return 'limitReached' as const;
+      }
       const questionId = this.newId();
       const next = await this.mutate(entry.runId, (r) =>
         addStageQuestion(r, entry.ref, questionId, args, this.now()),
@@ -1500,12 +1525,33 @@ export class TaskStageRunner {
         text: 'この工程の作業は終わった、または切り替わったため質問は取り消された。質問せずにターンを終えること。',
       };
     }
-    void this.routeQuestion(entry, accepted, args).catch((e: unknown) => {
-      this.warn(
-        entry.runId,
-        entry.ref.taskId,
-        `${entry.ref.taskId}の質問の振り分けに失敗しました: ${errorMessage(e)}`,
-      );
+    if (accepted === 'limitReached') {
+      return {
+        isError: true,
+        text: `この工程で受け付ける質問の上限（${String(MAX_QUESTIONS_PER_ATTEMPT)}件）に達したため受け付けなかった。これ以上質問せず、判断できないことは報告に書くこと。`,
+      };
+    }
+    void this.routeQuestion(entry, accepted, args).catch(async (e: unknown) => {
+      const { runId } = entry;
+      const { taskId } = entry.ref;
+      const message = errorMessage(e);
+      this.warn(runId, taskId, `${taskId}の質問の振り分けに失敗しました: ${message}`);
+      // 判定中の質問にはユーザーが答えられないため、ユーザーの回答待ちへ落とす（Issue #1733）
+      await this.mutate(runId, (r) =>
+        markQuestionAwaitingUser(
+          r,
+          taskId,
+          accepted.questionId,
+          `質問の振り分けに失敗: ${message}`,
+          this.now(),
+        ),
+      ).catch((retryError: unknown) => {
+        this.warn(
+          runId,
+          taskId,
+          `${taskId}の質問をユーザーの回答待ちにできませんでした: ${errorMessage(retryError)}`,
+        );
+      });
     });
     return {
       isError: false,
