@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
  * 作成前に対象グループで表示中のタブを記録し、作成直後にフォーカスを移さず表示し直す。
  * 表示し直す手段の無いタブ（他の拡張のwebview、エディタ領域のターミナルなど）が表示中なら、
  * 子タブを隣のグループへ開いて人の見ているグループに触れない。
+ * どちらの場合も新しいグループは作らない。人が選んだ列数を子タブが増やさない（Issue #1774）。
  */
 export interface BackgroundOpenPlan {
   /** 子タブを開く列。表示し直せないタブを避けるときだけ呼び出し側の指定から変わる。 */
@@ -17,12 +18,12 @@ export interface BackgroundOpenPlan {
 }
 
 /**
- * 表示し直しに使う本拡張のチャットパネル。Codex版とClaude版の管理クラスは別々に
- * パネルを持つため、どちらのタブが見られていても引けるようモジュールで共有する。
+ * 表示し直しに使う本拡張のwebviewパネル（チャットとKanban）。Codex版とClaude版の管理クラスは
+ * 別々にパネルを持つため、どのタブが見られていても引けるようモジュールで共有する。
  */
 const chatPanels = new Set<vscode.WebviewPanel>();
 
-/** チャットパネルを表示し直しの対象に加える。パネルが破棄されたら外す。 */
+/** webviewパネルを表示し直しの対象に加える。パネルが破棄されたら外す。 */
 export function trackChatPanel(panel: vscode.WebviewPanel): void {
   chatPanels.add(panel);
   panel.onDidDispose(() => chatPanels.delete(panel));
@@ -64,16 +65,15 @@ function trackPending(
   return restore;
 }
 
-/** 最大の列番号。これより右へは列番号で開けない。 */
-const MAX_VIEW_COLUMN = 9;
-
 /**
  * 子タブを`targetViewColumn`へ背面で開くときの段取りを決める。タブを作る直前に呼ぶ。
- * 対象グループがまだ無いか空なら、隠れるタブが無いので指定どおりに開く。
+ * 指定の列のグループがまだ無ければ、既存の最も右のグループへ寄せる。
+ * 対象グループが空なら、隠れるタブが無いので指定どおりに開く。
  */
 export function planBackgroundOpen(
-  targetViewColumn: vscode.ViewColumn | undefined,
+  requestedViewColumn: vscode.ViewColumn | undefined,
 ): BackgroundOpenPlan {
+  const targetViewColumn = clampToExistingColumn(requestedViewColumn);
   const group = findTargetGroup(targetViewColumn);
   if (group === undefined) {
     return { viewColumn: targetViewColumn, restore: undefined };
@@ -90,11 +90,28 @@ export function planBackgroundOpen(
   if (restoreOnce !== undefined) {
     return { viewColumn: targetViewColumn, restore: trackPending(group.viewColumn, restoreOnce) };
   }
+  // 隣の列のグループが無ければ、隠れるタブがあっても指定の列へ開く（列を増やさない方を優先する）
   const next = group.viewColumn + 1;
-  return {
-    viewColumn: next <= MAX_VIEW_COLUMN ? next : vscode.ViewColumn.Beside,
-    restore: undefined,
-  };
+  const hasNextGroup = vscode.window.tabGroups.all.some((g) => g.viewColumn === next);
+  return { viewColumn: hasNextGroup ? next : targetViewColumn, restore: undefined };
+}
+
+/**
+ * 列番号の指定が、まだ無いグループを指していれば既存の最も右の列に置き換える。
+ * `createWebviewPanel`は無い列を指定されるとグループを新しく作るため。
+ */
+function clampToExistingColumn(
+  viewColumn: vscode.ViewColumn | undefined,
+): vscode.ViewColumn | undefined {
+  if (viewColumn === undefined || viewColumn <= 0) {
+    // `Active`（-1）と`Beside`（-2）はそのまま（`Beside`を使う呼び出し元は列を増やす意図）
+    return viewColumn;
+  }
+  const columns = vscode.window.tabGroups.all.map((g) => g.viewColumn);
+  if (columns.length === 0 || columns.includes(viewColumn)) {
+    return viewColumn;
+  }
+  return Math.max(...columns);
 }
 
 function findTargetGroup(
