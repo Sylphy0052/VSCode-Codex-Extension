@@ -199,6 +199,8 @@ describe('readContextUsage', () => {
       usedTokens: 36342,
       contextWindow: 1000000,
       remainingPercent: 96,
+      autoCompact: false,
+      modelWindow: 1000000,
     });
   });
 
