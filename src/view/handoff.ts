@@ -37,7 +37,16 @@ export type HandoffTrigger =
   | { kind: 'threshold'; remainingPercent: number }
   | { kind: 'compactBoundary' }
   | { kind: 'softThreshold'; remainingPercent: number; switchReason: string }
-  | { kind: 'assistantSuggested'; switchReason: string; suggestReason: string }
+  | {
+      kind: 'assistantSuggested';
+      switchReason: string;
+      suggestReason: string;
+      /**
+       * 引き継ぎ元の最終応答が利用者の読む回答を含むため、引き継いだ後も元タブを残すか
+       * （Issue #1707）。`agent.autoHandoff.closeOldTab` より優先する。
+       */
+      keepOldTab?: boolean;
+    }
   | { kind: 'profileChanged'; model: string; effort: string; switchReason: string }
   | { kind: 'milestone'; milestone: HandoffMilestone; command: string };
 
@@ -1064,6 +1073,13 @@ export interface AutoHandoffDecisionInput {
    */
   awaitingUserAnswer?: boolean;
   /**
+   * 最終応答が利用者の読む説明・回答・報告を含むか（Issue #1707。Reflexの判定だけが渡す）。
+   *
+   * 真で `assistantSuggested` が発火したときは、元タブを残す（`keepOldTab`）。`softThreshold`・
+   * `profileChanged` を止めるのは呼び出し側で、`safeBoundary` を偽にして渡す。
+   */
+  readingAnswer?: boolean;
+  /**
    * 直前のターンで作業の節目に当たるコマンドが成功したか（Issue #1351）。
    *
    * 残量・model/effort・分類器の結果に関係なく発火する。前段（`boundaryGatePassed`）と
@@ -1209,6 +1225,7 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
       kind: 'assistantSuggested',
       switchReason,
       suggestReason: input.handoffSuggestReason ?? '',
+      ...(input.readingAnswer === true ? { keepOldTab: true } : {}),
     };
   }
   if (input.safeBoundary === true && input.profileChanged === true) {
@@ -1335,7 +1352,13 @@ export function waitForDestinationResponse(
 
 /** 引き継ぎ後に旧タブを残したときの理由（ログの `reason=` に出る値）。 */
 export type OldTabKeptReason =
-  'noResponse' | 'turnFailed' | 'abandoned' | 'disposed' | 'oldBusy' | 'userDismissed';
+  | 'noResponse'
+  | 'turnFailed'
+  | 'abandoned'
+  | 'disposed'
+  | 'oldBusy'
+  | 'userDismissed'
+  | 'readingAnswer';
 
 /**
  * 引き継ぎ後に旧タブをどう扱うかの決定。
@@ -1356,6 +1379,11 @@ export interface OldTabDecisionInput {
   oldBusy: boolean;
   /** `agent.autoHandoff.closeOldTab` の値。 */
   closeOldTab: boolean;
+  /**
+   * 引き継ぎ元の最終応答を利用者が読むために残すか（Issue #1707。契機の `keepOldTab`）。
+   * `closeOldTab` より優先する。
+   */
+  keepForReading?: boolean;
 }
 
 /**
@@ -1374,6 +1402,9 @@ export function decideOldTabAfterHandoff(input: OldTabDecisionInput): OldTabDeci
   }
   if (input.oldDisposed) {
     return { action: 'keep', reason: 'disposed' };
+  }
+  if (input.keepForReading === true) {
+    return { action: 'keep', reason: 'readingAnswer' };
   }
   if (!input.closeOldTab) {
     return { action: 'confirm' };
@@ -1394,6 +1425,7 @@ export function oldTabKeptMessage(reason: OldTabKeptReason): string {
     disposed: '引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です',
     oldBusy: '引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します',
     userDismissed: '引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します',
+    readingAnswer: '引き継ぎ元の最終応答に利用者の読む回答が含まれるため、タブを残します',
   };
   return `${detail[reason]}（reason=${reason}）`;
 }
@@ -1402,11 +1434,12 @@ export function oldTabKeptMessage(reason: OldTabKeptReason): string {
  * 旧タブが残ったことを人へ見せるべき理由か（Issue #1165）。
  *
  * `disposed` は旧タブがもう無いので見せる相手がいない。`userDismissed` は人が自分で
- * 「残す」を選んだ結果なので、改めて知らせても新しい情報にならない。それ以外は
+ * 「残す」を選んだ結果なので、改めて知らせても新しい情報にならない。`readingAnswer` は回答を
+ * 読ませるために意図して残したもので、人は既にそのタブを見ている（Issue #1707）。それ以外は
  * 「引き継いだはずのタブが残っている」状態で、人が閉じるか再開するかを決める必要がある。
  */
 export function needsAttentionAfterHandoff(reason: OldTabKeptReason): boolean {
-  return reason !== 'disposed' && reason !== 'userDismissed';
+  return reason !== 'disposed' && reason !== 'userDismissed' && reason !== 'readingAnswer';
 }
 
 /** Attention Indexの一覧に出す、旧タブが残った理由の短い説明（Issue #1165）。 */
@@ -1418,6 +1451,7 @@ export function oldTabKeptLabel(reason: OldTabKeptReason): string {
     disposed: '引き継ぎ元が残存',
     oldBusy: '引き継ぎ元が残存・実行中のため閉じず',
     userDismissed: '引き継ぎ元が残存',
+    readingAnswer: '引き継ぎ元が残存・回答を読むため閉じず',
   };
   return label[reason];
 }

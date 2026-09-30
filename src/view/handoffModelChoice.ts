@@ -479,6 +479,11 @@ export interface SafeBoundaryProbe {
   awaitingUserAnswerReason: string;
   /** 解決したmodel/effortが今の値と実質的に違うか（`switchSafe` が真のときだけ意味を持つ）。 */
   profileChanged: boolean;
+  /**
+   * 解決したmodel/effortが今の値と実質的に違うか。`switchSafe` を問わない。区切りを
+   * Reflexで判定するとき（Issue #1707）に使う。
+   */
+  profileDiffers: boolean;
   /** 解決したmodel/effort。確認ダイアログへ出す値と同じ。 */
   profile: SessionModelSettings;
 }
@@ -517,6 +522,7 @@ export async function probeSafeBoundary(
   // 明示設定（`agent.autoHandoff.model` / `.effort`）まで含めた最終的な提案と比べる。
   // 解決結果だけで比べると、設定で固定している人のところで毎回「変わった」ことになる
   const proposal = await proposeHandoffModelSettings(current, input, deps, assessment);
+  const profileDiffers = isProfileChange(current, proposal.settings);
   return {
     assessment,
     switchSafe: assessment.switchSafe,
@@ -529,7 +535,8 @@ export async function probeSafeBoundary(
     awaitingUserAnswer: assessment.awaitingUserAnswer,
     awaitingUserAnswerReason: assessment.awaitingUserAnswerReason,
     // `profileChanged` の方は従来どおり `switchSafe` を要求する
-    profileChanged: assessment.switchSafe && isProfileChange(current, proposal.settings),
+    profileChanged: assessment.switchSafe && profileDiffers,
+    profileDiffers,
     profile: proposal.settings,
   };
 }

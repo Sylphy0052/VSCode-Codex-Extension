@@ -76,6 +76,7 @@ import {
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
   readAutoHandoffOnMilestone,
+  readAutoHandoffReflexConfig,
   readAutoHandoffClassifierTimeoutMs,
   readAutoHandoffRouterEnabled,
   readSessionAutoNameEnabled,
@@ -232,6 +233,14 @@ import {
   describeGate,
   describeProfile,
 } from './handoffTrace';
+import {
+  applyHandoffReflexThresholds,
+  describeHandoffBoundaryMaterial,
+  describeHandoffBoundaryVerdict,
+  handoffReflexReasons,
+  judgeHandoffBoundary,
+  type HandoffReflexSettings,
+} from './handoffBoundaryReflex';
 import {
   chooseHandoffModelSettings,
   pickHandoffCostPreset,
@@ -1237,9 +1246,13 @@ export class ClaudeChatViewManager
         turnFailed: state.turnFailed,
         busy: state.busy,
         // 回答待ちのまま引き継ぐのは残量の閾値・自動圧縮の契機だけ（Issue #1191）。その
-        // ときに申し送りの質問を承諾済みと読まれないよう、状態として渡す
+        // ときに申し送りの質問を承諾済みと読まれないよう、状態として渡す。引き継ぎの提案で
+        // 終わった応答の質問は引き継ぐかどうかの問いで、引き継いだ時点で答えは出ている
+        // （Issue #1707）
         awaitingUserAnswer:
-          lastAssistantMessage !== undefined && endsWithUserQuestion(lastAssistantMessage),
+          trigger.kind !== 'assistantSuggested' &&
+          lastAssistantMessage !== undefined &&
+          endsWithUserQuestion(lastAssistantMessage),
         recentUserMessages: recentUserMessages(state),
         // 引き継ぎ元の最終応答をそのまま申し送りにする（Issue #1097）。要約しない
         ...(lastAssistantMessage === undefined ? {} : { nextSteps: lastAssistantMessage }),
@@ -1348,7 +1361,11 @@ export class ClaudeChatViewManager
       giveUp.abort();
       throw e;
     }
-    void this.confirmStopAfterFirstResponse(entry, firstResponse);
+    void this.confirmStopAfterFirstResponse(
+      entry,
+      firstResponse,
+      trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
+    );
     return true;
   }
 
@@ -1363,12 +1380,14 @@ export class ClaudeChatViewManager
   private async confirmStopAfterFirstResponse(
     oldEntry: ClaudePanel,
     firstResponse: Promise<DestinationResponseOutcome>,
+    keepForReading: boolean,
   ): Promise<void> {
     const decision = decideOldTabAfterHandoff({
       outcome: await firstResponse,
       oldDisposed: oldEntry.disposed,
       oldBusy: oldEntry.session.getState().busy,
       closeOldTab: readAutoHandoffCloseOldTab(),
+      keepForReading,
     });
     if (decision.action === 'keep') {
       this.log.info(oldTabKeptMessage(decision.reason));
@@ -1977,6 +1996,8 @@ export class ClaudeChatViewManager
     }
     const loopStatus = entry.loop.getStatus();
     const assistantMessages = recentAssistantMessages(state);
+    const reflex = readAutoHandoffReflexConfig(this.reflexEnabledFor(entry));
+    const questionEnded = endsWithUserQuestion(assistantMessages.at(-1) ?? '');
     const gate = {
       busy: state.busy,
       turnFailed: state.turnFailed,
@@ -1984,7 +2005,7 @@ export class ClaudeChatViewManager
       pendingPrompts: state.prompts.length,
       // ユーザーへ質問して終わったターンは区切りではない（Issue #1191）。見るのは最終応答
       // だけで、その前の応答の質問は既に答えられている
-      awaitingUserAnswer: endsWithUserQuestion(assistantMessages.at(-1) ?? ''),
+      awaitingUserAnswer: questionEnded,
       queued: state.queued.length,
       // `running` は `pause()` 中も true のまま。返信待ちで止まっているループを「実行中」と
       // 数えると、`/loop` 運用では区切り系の契機が全部塞がる（Issue #1097）
@@ -1995,13 +2016,18 @@ export class ClaudeChatViewManager
       backgroundRunning: state.backgroundTerminals.length > 0,
     };
     if (!passesSafeBoundaryGate(gate)) {
-      entry.trace.info(`gate blocked (${describeGate(gate)})`);
-      return;
+      // Reflexで判定するときは、質問で終わったターンも後段へ回す。引き継ぐかどうかを尋ねる
+      // 質問は返答待ちとして扱わず、それ以外の質問は返答待ちとして止める（Issue #1707）
+      if (!reflex.enabled || !passesSafeBoundaryGate({ ...gate, awaitingUserAnswer: false })) {
+        entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        return;
+      }
+      entry.trace.info('質問で終わったターンのため、決定論の契機を飛ばしてReflexで判定する');
     }
     // handoffプロンプトそのものが出力されていれば、分類器を待たずに発火する（Issue #1150）。
     // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
     // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
-    if (onAssistantSuggestion && assistantMessages.some(containsHandoffPrompt)) {
+    if (!questionEnded && onAssistantSuggestion && assistantMessages.some(containsHandoffPrompt)) {
       entry.trace.info('handoffプロンプトを検知したため分類器を経由せず判定する');
       const detected = decideAutoHandoff({
         enabled: state.autoHandoff,
@@ -2031,7 +2057,9 @@ export class ClaudeChatViewManager
     // 分類器を待たずに発火する（Issue #1351）。履歴から開いた直後は過去のターンを拾わない
     // よう、このパネルでターンが1回以上終わっていることを求める
     const milestone =
-      onMilestone && state.turnCompletionSeq > 0 ? detectHandoffMilestone(state.items) : undefined;
+      onMilestone && !questionEnded && state.turnCompletionSeq > 0
+        ? detectHandoffMilestone(state.items)
+        : undefined;
     if (milestone !== undefined) {
       entry.trace.info(`作業の節目を検知したため分類器を経由せず判定する（${milestone.command}）`);
       const detected = decideAutoHandoff({
@@ -2051,6 +2079,18 @@ export class ClaudeChatViewManager
         return;
       }
       entry.trace.info('作業の節目を検知したが契機が成立しなかった');
+    }
+    if (reflex.enabled) {
+      await this.maybeAutoHandoffByReflex(entry, state, {
+        reflex,
+        assistantMessages,
+        questionEnded,
+        remainingPercent,
+        softThresholdPercent,
+        onProfileChange,
+        onAssistantSuggestion,
+      });
+      return;
     }
     if (!readAutoHandoffRouterEnabled()) {
       // 分類器が無いと `switchSafe` も分類器経由の `handoffSuggested` も得られない。残りの
@@ -2141,6 +2181,131 @@ export class ClaudeChatViewManager
       return;
     }
     this.beginAutoHandoff(entry, trigger, probe.assessment);
+  }
+
+  /**
+   * 区切り待ちの契機をReflexの判定で決める（Issue #1707）。判定の中身はCodex側の同名
+   * メソッドと同じ。
+   *
+   * model/effortの作業分類は `profileChanged` を見るときだけ分類器で取り、Reflexと並列に
+   * 走らせる。分類の結果は `preassessed` として引き継ぎへ渡す。
+   */
+  private async maybeAutoHandoffByReflex(
+    entry: ClaudePanel,
+    state: ChatState,
+    ctx: {
+      reflex: HandoffReflexSettings;
+      assistantMessages: readonly string[];
+      questionEnded: boolean;
+      remainingPercent: number | undefined;
+      softThresholdPercent: number;
+      onProfileChange: boolean;
+      onAssistantSuggestion: boolean;
+    },
+  ): Promise<void> {
+    const messages = recentUserMessages(state);
+    const userMessage = messages.at(-1);
+    const assistantMessage = ctx.assistantMessages.at(-1);
+    if (userMessage === undefined || assistantMessage === undefined) {
+      entry.trace.info('材料が無いためReflexの判定を起動しない（ユーザー指示か最終応答の記録なし）');
+      return;
+    }
+    const key = safeBoundaryProbeKey(messages, ctx.assistantMessages);
+    if (key === entry.lastSafeBoundaryKey) {
+      entry.trace.info('前回と同じ材料のためReflexの判定を起動しない');
+      return;
+    }
+    entry.lastSafeBoundaryKey = key;
+    const material = { userMessage, assistantMessage };
+    entry.trace.info(describeHandoffBoundaryMaterial(material));
+
+    const classify = ctx.onProfileChange && readAutoHandoffRouterEnabled();
+    const gitBranch = classify ? await resolveGitBranch(entry.cwd) : undefined;
+    entry.safeBoundaryProbing = true;
+    entry.trace.info(classify ? 'Reflexの判定と分類器を並列に起動する' : 'Reflexの判定を起動する');
+    const startedAt = Date.now();
+    let verdict;
+    let probe;
+    try {
+      [verdict, probe] = await Promise.all([
+        judgeHandoffBoundary(
+          {
+            provider: 'claude',
+            executable: this.claudePath(),
+            logWarn: (message) => entry.trace.warn(message),
+          },
+          material,
+        ),
+        classify
+          ? probeSafeBoundary(
+              entry.modelSettings,
+              {
+                turnFailed: state.turnFailed,
+                recentUserMessages: messages,
+                recentAssistantMessages: ctx.assistantMessages,
+                cwd: entry.cwd,
+                gitBranch,
+                turnEditedFiles: state.turnEditedFiles,
+              },
+              {
+                provider: 'claude',
+                executable: this.claudePath(),
+                models: this.settings.claudeSnapshot().models,
+                fallbackEfforts: CLAUDE_EFFORTS,
+                timeoutMs: readAutoHandoffClassifierTimeoutMs(),
+                logWarn: (message) => entry.trace.warn(message),
+              },
+            )
+          : undefined,
+      ]);
+    } finally {
+      entry.safeBoundaryProbing = false;
+    }
+    entry.trace.info(`Reflexの判定の応答まで${Date.now() - startedAt}ms`);
+    if (probe !== undefined) {
+      entry.trace.info(describeAssessment(probe.assessment));
+      entry.trace.info(describeProfile(probe));
+    }
+    if (verdict === undefined) {
+      // 失敗の理由（時間切れ / 起動失敗 / JSON不正）は `judge` がwarnで出す
+      entry.trace.info('Reflexの判定が失敗したため発火しない（理由は直前のwarnを見る）');
+      return;
+    }
+    entry.trace.info(describeHandoffBoundaryVerdict(verdict));
+    const reading = applyHandoffReflexThresholds(verdict, ctx.reflex);
+    const reasons = handoffReflexReasons(verdict);
+    // 判定を待っている間に状況が変わっていることがある（新しい指示・引き継ぎ済み）
+    const latest = entry.session.getState();
+    if (entry.disposed || entry.autoHandoffStarted || latest.busy || !latest.autoHandoff) {
+      entry.trace.info('Reflexの判定を待つ間に状況が変わったため発火しない');
+      return;
+    }
+    const trigger = decideAutoHandoff({
+      enabled: latest.autoHandoff,
+      busy: latest.busy,
+      alreadyStarted: entry.autoHandoffStarted,
+      backgroundRunning: latest.backgroundTerminals.length > 0,
+      remainingPercent: ctx.remainingPercent,
+      compacted: false,
+      thresholdPercent: readAutoHandoffThresholdPercent(),
+      softThresholdPercent: ctx.softThresholdPercent,
+      boundaryGatePassed: true,
+      safeBoundary: reading.switchSafe,
+      handoffSuggested: ctx.onAssistantSuggestion && reading.handoffSuggested,
+      handoffSuggestReason: reasons.suggestReason,
+      // 引き継ぎを提案して終わった応答の質問は、引き継ぐかどうかの問いとして扱う。それ以外の
+      // 質問で終わった応答は返答待ちとして止める
+      awaitingUserAnswer: ctx.questionEnded && !reading.handoffSuggested,
+      readingAnswer: reading.readingAnswer,
+      profileChanged: ctx.onProfileChange && probe?.profileDiffers === true,
+      ...(probe === undefined ? {} : { profile: probe.profile }),
+      switchReason: reasons.switchReason,
+    });
+    entry.trace.info(describeDecision(trigger));
+    if (trigger === undefined) {
+      return;
+    }
+    this.beginAutoHandoff(entry, trigger, probe?.assessment);
   }
 
   /** 自動引き継ぎを1回だけ開始する。契機の決め方によらず共通の後始末をここに集める。 */

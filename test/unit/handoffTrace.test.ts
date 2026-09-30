@@ -114,6 +114,7 @@ describe('ログの1行の中身（Issue #1097）', () => {
         awaitingUserAnswer: false,
         awaitingUserAnswerReason: '',
         profileChanged: true,
+        profileDiffers: true,
         profile: { model: 'gpt-6-astra', effort: 'high' },
       }),
     ).toBe('model=gpt-6-astra effort=high profileChanged=true');
