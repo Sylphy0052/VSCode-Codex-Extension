@@ -570,8 +570,7 @@ export class TaskRunOrchestrator {
         if (this.live.get(runId) !== live || live.busy || live.handingOff) {
           return false;
         }
-        live.busy = true;
-        live.session.send(text);
+        this.startTurn(live, text);
         this.deps.onDidChange();
         return true;
       },
@@ -627,15 +626,35 @@ export class TaskRunOrchestrator {
     if (live.pending.length === 0 || live.handingOff) {
       return;
     }
-    const text = composeOrchestratorPrompt(live.pending, '', TASK_RUN_EVENT_ENVELOPE);
+    const events = live.pending;
+    const text = composeOrchestratorPrompt(events, '', TASK_RUN_EVENT_ENVELOPE);
     live.pending = [];
     if (text === '') {
       return;
     }
     live.answererNudge.reset();
-    live.busy = true;
-    live.session.send(text);
+    try {
+      this.startTurn(live, text);
+    } catch (e) {
+      // 送れなかったイベントは次の機会に送り直す
+      live.pending = [...events, ...live.pending];
+      throw e;
+    }
     this.deps.onDidChange();
+  }
+
+  /**
+   * Orchestratorのターンを始める。送れなかったら`busy`を戻す。立ったままだと、次の状態変化が
+   * 届くまでイベントを送らず、ターン末の促しも止まる（Issue #1726）。
+   */
+  private startTurn(live: LiveOrchestrator, text: string): void {
+    live.busy = true;
+    try {
+      live.session.send(text);
+    } catch (e) {
+      live.busy = false;
+      throw e;
+    }
   }
 
   private async callTool(
