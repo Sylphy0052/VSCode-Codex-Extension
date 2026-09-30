@@ -2280,6 +2280,12 @@ export class ClaudeChatViewManager
             )
           : undefined,
       ]);
+    } catch (error) {
+      // 呼び出し元は `void` で受けるため、ここで止めないとunhandled rejectionになる
+      entry.trace.warn(
+        `Reflexの判定または分類器が例外で終わったため発火しない: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
     } finally {
       entry.safeBoundaryProbing = false;
     }
@@ -2290,6 +2296,8 @@ export class ClaudeChatViewManager
     }
     if (verdict === undefined) {
       // 失敗の理由（時間切れ / 起動失敗 / JSON不正）は `judge` がwarnで出す
+      // 仕様: Reflexが失敗したら発火しない。並列で取った分類器の結果（`profileDiffers`）も、
+      // `profileChanged` の契機として使わず捨てる
       entry.trace.info('Reflexの判定が失敗したため発火しない（理由は直前のwarnを見る）');
       return;
     }
