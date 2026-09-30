@@ -102,11 +102,16 @@ export function findStageGate(run: TaskRun, taskId: string, gateId: string): Sta
   return getTask(run, taskId)?.gates?.find((gate) => gate.gateId === gateId);
 }
 
-/** 上限を超えた分を、決着した古い関門から捨てる。決着していない関門は捨てない。 */
+/**
+ * 上限を超えた分を、決着した古い関門から捨てる。決着していない関門は捨てない。
+ * 自動のやり直しに数える関門は最後まで残す。先に捨てると`countAutoRetries`が減り、
+ * 上限（`MAX_AUTO_RETRIES`）に達した工程がまた自動でやり直せてしまう（Issue #1733）。
+ */
 function trimGates(gates: readonly StageGate[]): StageGate[] {
   const result = [...gates];
   while (result.length > MAX_GATES_PER_TASK) {
-    const index = result.findIndex((gate) => !isOpen(gate));
+    const uncounted = result.findIndex((gate) => !isOpen(gate) && !isAutoRetry(gate));
+    const index = uncounted >= 0 ? uncounted : result.findIndex((gate) => !isOpen(gate));
     if (index < 0) {
       break;
     }
@@ -119,16 +124,19 @@ function withTaskUpdate(run: TaskRun, next: OrchestratedTask): TaskRun {
   return { ...run, tasks: { ...run.tasks, [next.taskId]: next } };
 }
 
+/** Reflexまたはオーケストレーターの判断で工程をやり直した関門か（ユーザーの判断は数えない）。 */
+function isAutoRetry(gate: StageGate): boolean {
+  return (
+    gate.kind === 'stageFailed' &&
+    gate.resolution !== undefined &&
+    gate.resolution.by !== 'user' &&
+    gate.resolution.choice === 'retry'
+  );
+}
+
 /** その工程をReflexまたはオーケストレーターの判断でやり直した回数（ユーザーの判断は数えない）。 */
 export function countAutoRetries(task: OrchestratedTask, stage: TaskStage): number {
-  return (task.gates ?? []).filter(
-    (gate) =>
-      gate.kind === 'stageFailed' &&
-      gate.stage === stage &&
-      gate.resolution !== undefined &&
-      gate.resolution.by !== 'user' &&
-      gate.resolution.choice === 'retry',
-  ).length;
+  return (task.gates ?? []).filter((gate) => gate.stage === stage && isAutoRetry(gate)).length;
 }
 
 /** レビューの結果が関門を要するか（直さずに残した指摘がある、または通過しなかった）。 */
