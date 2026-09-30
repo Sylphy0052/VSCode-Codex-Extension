@@ -209,7 +209,8 @@ import {
   countCompactions,
   decideAutoHandoff,
   deriveHandoffBaseName,
-  extractHandoffPrompt,
+  invokedHandoffSkill,
+  parseHandoffPrompt,
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   buildHandoffSessionName,
@@ -1275,6 +1276,9 @@ export class ClaudeChatViewManager
 
     const state = entry.session.getState();
     const lastAssistantMessage = recentAssistantMessages(state, 1)[0];
+    // handoffプロンプトを本文として採るのは、同じターンでhandoff skillを呼んだ応答だけ（Issue #1748）。
+    // skillを呼ばずに書式見本を引用しただけの応答は、書式が揃っていても引き継ぎ本文にしない
+    const handoffSource = invokedHandoffSkill(state.items) ? lastAssistantMessage : undefined;
     const gitBranch = await resolveGitBranch(entry.cwd);
     // 自動承認はトグルONのとき（Issue #1350）。手動の引き継ぎボタンも対象に含める（Issue #1510）
     const autoApprove = state.autoHandoffAutoApprove;
@@ -1356,7 +1360,7 @@ export class ClaudeChatViewManager
       const handedOff = await this.delegateHandoff(
         entry.handoffDelegate,
         choice.settings,
-        chooseHandoffPrompt(pointerPath, lastAssistantMessage),
+        chooseHandoffPrompt(pointerPath, handoffSource),
         trigger,
         this.log,
       );
@@ -1421,8 +1425,12 @@ export class ClaudeChatViewManager
     // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
     // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
     const previousName = deriveHandoffBaseName(state, entry.pinnedName);
-    const handoffPrompt =
-      lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
+    const handoffBlock = handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource);
+    const handoffPrompt = handoffBlock?.body;
+    if (handoffBlock !== undefined) {
+      // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
+      entry.trace.info(`handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`);
+    }
     const handoffName = buildHandoffSessionName({
       ...(previousName === undefined ? {} : { previousName }),
       isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
@@ -1444,7 +1452,7 @@ export class ClaudeChatViewManager
     const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
     try {
       // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
-      this.dispatch(newEntry, chooseHandoffPrompt(pointerPath, lastAssistantMessage));
+      this.dispatch(newEntry, chooseHandoffPrompt(pointerPath, handoffSource));
     } catch (e) {
       giveUp.abort();
       // 新セッションは開いた後なので`started`で返す。`failed`にすると自動引き継ぎが次の
@@ -2138,7 +2146,13 @@ export class ClaudeChatViewManager
     // handoffプロンプトそのものが出力されていれば、分類器を待たずに発火する（Issue #1150）。
     // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
     // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
-    if (!questionEnded && onAssistantSuggestion && assistantMessages.some(containsHandoffPrompt)) {
+    // Claude Codeでは、同じターンでhandoff skillを呼んだことも求める（Issue #1748）
+    if (
+      !questionEnded &&
+      onAssistantSuggestion &&
+      invokedHandoffSkill(state.items) &&
+      assistantMessages.some(containsHandoffPrompt)
+    ) {
       entry.trace.info('handoffプロンプトを検知したため分類器を経由せず判定する');
       const detected = decideAutoHandoff({
         enabled: state.autoHandoff,

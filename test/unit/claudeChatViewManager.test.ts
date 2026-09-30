@@ -2794,10 +2794,22 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     '',
     `${'`'.repeat(4)}markdown`,
     '# 継続 2026-09-13 main',
+    'schema: handoff/v1',
+    'handoff_id: 20260913T120000-a1b2c3',
     '',
     '作業: 決定論検知の実装',
     '`'.repeat(4),
   ].join('\n');
+
+  /** handoff skillを呼んだ `tool_use`（Issue #1748）。これが無いターンの応答は受理しない。 */
+  const handoffSkillLine = (): string =>
+    `${JSON.stringify({
+      type: 'assistant',
+      message: {
+        id: 'msg-1748',
+        content: [{ type: 'tool_use', id: 'tool-1748', name: 'Skill', input: { skill: 'handoff' } }],
+      },
+    })}\n`;
 
   beforeEach(() => {
     __mock.reset();
@@ -2831,6 +2843,7 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
       throw new Error('セッションが記録されていません');
     }
     session.receive(initLine('session-1150'));
+    session.receive(handoffSkillLine());
     session.receive(assistantTextLine('u1', text));
     session.receive(resultLine());
     await flush();
