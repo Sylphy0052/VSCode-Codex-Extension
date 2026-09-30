@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { judgeAutoReplyAskUserQuestion } from '../chat/autoReplyReflex';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
+import { findIrreversibleCommands } from './escalation';
 import {
   failure,
   type JsonRpcRequest,
@@ -215,9 +216,64 @@ export function parseRoadmapAskArgs(
   };
 }
 
-/** Reflexを通さずに人の判断へ回す質問か（escalationが付いている、または選択肢が無い）。 */
-export function needsUserDecision(args: Pick<RoadmapAskArgs, 'options' | 'escalation'>): boolean {
-  return args.escalation.length > 0 || args.options.length === 0;
+/**
+ * 質問の自然文に現れる、取り消せない操作・影響の大きい対象の語。コマンドの形で書かれたものは
+ * `findIrreversibleCommands`が拾う。誤検知で人へ回る質問が増えるため、語は取り消せない操作と
+ * 外部へ影響が及ぶ対象に限る（Issue #1712）。
+ */
+const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp }[] = [
+  {
+    // `findIrreversibleCommands`と同じ説明にして、両方に当たっても1件にまとめる
+    description: 'リモートへの強制push',
+    pattern: /force[\s_-]*push|強制\s*(push|プッシュ)|push\s+(-f\b|--force)/u,
+  },
+  {
+    description: '履歴の書き換え',
+    pattern:
+      /履歴.{0,4}(書き換|書換|改変|改竄|改ざん)|rewrit\w*\s+(the\s+)?(git\s+)?history|history\s+rewrit|filter-(branch|repo)/u,
+  },
+  {
+    description: 'ブランチ・タグの削除',
+    pattern: /(ブランチ|タグ|branch|tag)を?\s*(削除|消す|消し|消去)|delet\w*\s+(the\s+)?(remote\s+)?(branch|tag)/u,
+  },
+  {
+    description: 'データの削除',
+    pattern: /drop\s+(table|database)|\btruncate\b|(テーブル|データベース|db|レコード|全件)を?\s*(削除|消去|消す)/u,
+  },
+  {
+    description: 'secrets',
+    pattern:
+      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password/u,
+  },
+  { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u },
+  { description: '課金', pattern: /課金|請求|billing|決済|支払|payment/u },
+  { description: 'デプロイ・公開', pattern: /デプロイ|deploy|\bpublish\b|パッケージ.{0,4}公開/u },
+];
+
+/**
+ * 質問文・理由・選択肢・材料に含まれる危険語の説明（重複なし）。質問したエージェントが
+ * `escalation`を付け忘れた・外された場合でも、取り消せない操作をReflexに答えさせないため。
+ */
+export function findQuestionDangers(
+  args: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence'>,
+): string[] {
+  const text = [args.question, args.reason, ...args.options, args.evidence ?? ''].join('\n');
+  const normalized = text.normalize('NFKC').toLowerCase();
+  const found = [
+    ...QUESTION_DANGER_PATTERNS.filter((p) => p.pattern.test(normalized)).map((p) => p.description),
+    ...findIrreversibleCommands(normalized),
+  ];
+  return [...new Set(found)];
+}
+
+/**
+ * Reflexを通さずに人の判断へ回す質問か（escalationが付いている、選択肢が無い、または
+ * 危険語を含む）。
+ */
+export function needsUserDecision(
+  args: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence' | 'escalation'>,
+): boolean {
+  return args.escalation.length > 0 || args.options.length === 0 || findQuestionDangers(args).length > 0;
 }
 
 /** Kanbanからユーザーが送る回答の上限。 */
@@ -236,6 +292,9 @@ export type RoadmapQuestionVerdict =
 /**
  * 選択肢のある質問をReflexで判定する。最上位の選択肢が閾値以上ならその選択肢で答え、
  * それ以外（確信度不足・「どれでもない」・判定の失敗）は人の判断へ回す。
+ *
+ * `recommended`はコード側で決めた推奨（関門の問い）に限る。工程セッションのエージェントが
+ * 付けた推奨を渡すと、質問した側から判定を誘導できる（Issue #1712）。
  */
 export async function judgeRoadmapQuestion(
   deps: ReflexJudgeDeps,
@@ -247,7 +306,7 @@ export async function judgeRoadmapQuestion(
     header: '',
     options: question.options.map((label) => ({
       label,
-      description: label === question.recommended ? '質問したエージェントの推奨' : '',
+      description: label === question.recommended ? 'Orchestratorの推奨' : '',
     })),
     multiSelect: false,
   };

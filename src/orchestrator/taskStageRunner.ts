@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 import type { ChatState } from '../appserver/chatState';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
 import {
+  findQuestionDangers,
   needsUserDecision,
   parseRoadmapAskArgs,
   ROADMAP_ASK_ORCHESTRATOR_TOOL,
@@ -1396,7 +1397,16 @@ export class TaskStageRunner {
         text: 'この工程の作業は終わった、または切り替わったため質問は取り消された。質問せずにターンを終えること。',
       };
     }
-    void this.routeQuestion(entry, accepted, needsUserDecision(args)).catch((e: unknown) => {
+    const dangers = findQuestionDangers(args);
+    const forceUser = needsUserDecision(args)
+      ? {
+          summary:
+            dangers.length > 0
+              ? `取り消せない操作に関わる語を含むためReflexを通さなかった（${dangers.join('、')}）`
+              : undefined,
+        }
+      : undefined;
+    void this.routeQuestion(entry, accepted, forceUser).catch((e: unknown) => {
       this.warn(
         entry.runId,
         entry.ref.taskId,
@@ -1412,24 +1422,25 @@ export class TaskStageRunner {
   }
 
   /**
-   * 質問を振り分ける。escalationが付いた質問・選択肢の無い質問・Reflexが無効なときは
-   * ユーザーの判断待ちにする。それ以外はReflexで判定し、答えられなければユーザーへ回す。
+   * 質問を振り分ける。escalationが付いた質問・選択肢の無い質問・危険語を含む質問
+   * （`forceUser`）とReflexが無効なときはユーザーの判断待ちにする。それ以外はReflexで判定し、
+   * 答えられなければユーザーへ回す。質問したエージェントの推奨はReflexへ渡さない（Issue #1712）。
    */
   private async routeQuestion(
     entry: LiveStageSession,
     question: StageQuestion,
-    forceUser: boolean,
+    forceUser: { summary: string | undefined } | undefined,
   ): Promise<void> {
     const { runId } = entry;
     const taskId = entry.ref.taskId;
     const run = this.deps.store.find(runId);
     const judge = this.deps.judgeQuestion;
     let verdict: RoadmapQuestionVerdict;
-    if (forceUser || judge === undefined || run === undefined) {
-      verdict = { kind: 'human', summary: undefined };
+    if (forceUser !== undefined || judge === undefined || run === undefined) {
+      verdict = { kind: 'human', summary: forceUser?.summary };
     } else {
       try {
-        verdict = await judge(run.engine, question);
+        verdict = await judge(run.engine, { ...question, recommended: undefined });
       } catch (e) {
         verdict = { kind: 'human', summary: `Reflexの判定に失敗: ${errorMessage(e)}` };
       }
