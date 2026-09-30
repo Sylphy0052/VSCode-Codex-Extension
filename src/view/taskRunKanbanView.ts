@@ -7,6 +7,7 @@ import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
 import { isTaskRunActive, isValidTaskId, taskRunLabel, validateTaskRunTitleInput } from '../orchestrator/taskRunState';
 import { TASK_LEASE_HEARTBEAT_MS } from '../orchestrator/taskRunLease';
+import { trackChatPanel } from './backgroundPanelTabs';
 import { chatCsp } from './chatCsp';
 import { GRAPH_SVG_SOURCE } from './graphSvgScript';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
@@ -76,6 +77,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
         vscode.ViewColumn.One,
         { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true },
       );
+      // 1列で見ているとき、同じ列へ背面で開く子タブがKanbanを隠さないよう表示し直させる（Issue #1774）
+      trackChatPanel(this.panel);
       this.panel.onDidDispose(() => {
         this.clearTimer();
         this.clearLeasePollTimer();
