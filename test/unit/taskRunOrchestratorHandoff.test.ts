@@ -104,7 +104,7 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       resumeStage: vi.fn(),
       instructTask: vi.fn(),
       setMaxParallel: vi.fn(),
-      findQuestionAwaitingUser: vi.fn(),
+      findQuestionAwaitingAnswer: vi.fn(),
       answerQuestion: vi.fn(),
       findOpenGateForUser: vi.fn(),
       resolveGate: vi.fn(),

@@ -239,7 +239,11 @@ import {
   type RunNotesViewPort,
 } from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
-import { judgeQuestionAnswerer, judgeTurnEndAnswerer } from './reflex/answererJudge';
+import {
+  ANSWERER_USER_FALLBACK,
+  judgeQuestionAnswerer,
+  judgeTurnEndAnswerer,
+} from './reflex/answererJudge';
 import { reflexJudgeDeps, type ReflexJudgeDeps } from './reflex/reflexJudge';
 import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
@@ -812,13 +816,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       const settings = readAnswererJudgeConfig();
       return settings.enabled
         ? judgeQuestionAnswerer(answererJudgeDeps(provider), question, settings.threshold)
-        : { kind: 'user', summary: undefined };
+        : ANSWERER_USER_FALLBACK;
     },
     judgeTurnEndAnswerer: async (provider, lastMessage) => {
       const settings = readAnswererJudgeConfig();
       return settings.enabled
         ? judgeTurnEndAnswerer(answererJudgeDeps(provider), lastMessage, settings.threshold)
-        : { kind: 'user', summary: undefined };
+        : ANSWERER_USER_FALLBACK;
     },
     // 自動再開（design.md §16.35、roadmap W10、Issue #584）。他のreadXxxと同じく
     // トップレベルへ配線し、`restoreRunsForView`が呼ぶたびに現在値を読み直す

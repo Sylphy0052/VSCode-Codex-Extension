@@ -66,6 +66,7 @@ import {
   type WorktreeCreationQueue,
 } from '../orchestrator/worktree';
 import {
+  ANSWERER_USER_FALLBACK,
   judgeQuestionAnswerer,
   judgeTurnEndAnswerer,
   type AnswererQuestion,
@@ -168,14 +169,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     const settings = readAnswererJudgeConfig(reflexEnabled ?? readReflexEnabled());
     return settings.enabled && orchestrator.canDecide(runId)
       ? judgeQuestionAnswerer(reflexDeps(engine), question, settings.threshold)
-      : { kind: 'user', summary: undefined };
+      : ANSWERER_USER_FALLBACK;
   };
   const judgeTurnEnd = async (runId: string, lastMessage: string): Promise<AnswererVerdict> => {
     const settings = readAnswererJudgeConfig();
     const engine = controller.find(runId)?.engine;
     return settings.enabled && engine !== undefined
       ? judgeTurnEndAnswerer(reflexDeps(engine), lastMessage, settings.threshold)
-      : { kind: 'user', summary: undefined };
+      : ANSWERER_USER_FALLBACK;
   };
 
   const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });

@@ -10844,7 +10844,7 @@ tasks:
     // 既にbusy: trueのはずで、ここでは明示的にbusyを崩さない
     expect(runner.getSnapshot(runId)?.orchestrator?.busy).toBe(true);
 
-    const outcome = control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+    const outcome = await control(state).askUser('どちらへ進める？', ['A案', 'B案']);
 
     expect(outcome.accepted).toBe(true);
     expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({
@@ -10860,8 +10860,8 @@ tasks:
     await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
     await flush();
 
-    control(state).askUser('問1', ['A', 'B']);
-    const second = control(state).askUser('問2', ['C', 'D']);
+    await control(state).askUser('問1', ['A', 'B']);
+    const second = await control(state).askUser('問2', ['C', 'D']);
 
     expect(second.accepted).toBe(false);
     expect(second.reason).toContain('既に回答待ちの質問があります');
@@ -10873,9 +10873,9 @@ tasks:
     await runner.start('/repo/.agents/workflows/ask-user.yaml', '/repo');
     await flush();
 
-    const empty = control(state).askUser('   ', ['A', 'B']);
-    const tooFew = control(state).askUser('問い', ['A']);
-    const tooMany = control(state).askUser('問い', ['A', 'B', 'C', 'D', 'E']);
+    const empty = await control(state).askUser('   ', ['A', 'B']);
+    const tooFew = await control(state).askUser('問い', ['A']);
+    const tooMany = await control(state).askUser('問い', ['A', 'B', 'C', 'D', 'E']);
 
     expect(empty.accepted).toBe(false);
     expect(empty.reason).toContain('空です');
@@ -10898,13 +10898,13 @@ tasks:
 
       const outcomes: OrchestratorControlResult[] = [];
       for (let i = 0; i < DEFAULT_MAX_ASK_USER_PER_RUN; i += 1) {
-        outcomes.push(control(state).askUser(`問${i}`, ['A', 'B']));
+        outcomes.push(await control(state).askUser(`問${i}`, ['A', 'B']));
         // 次のask_userを呼べるように、直前の質問へ都度答えておく（1回に1問だけの制約）。
         // answerAskUserはbusy中は送信を保留するため、ターンが終わったことにして配送させる
         runner.answerAskUser(runId, 0);
         orchestrator.emitState({ ...initialChatState, busy: false });
       }
-      const overLimit = control(state).askUser('もう1問', ['A', 'B']);
+      const overLimit = await control(state).askUser('もう1問', ['A', 'B']);
 
       expect(outcomes.every((o) => o.accepted)).toBe(true);
       expect(overLimit.accepted).toBe(false);
@@ -10924,13 +10924,13 @@ tasks:
     await flush();
     const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
 
-    const first = control(state).askUser('問1', ['A', 'B']);
+    const first = await control(state).askUser('問1', ['A', 'B']);
     expect(first.accepted).toBe(true);
     expect(runner.answerAskUser(runId, 0)).toBe(true);
     // answerAskUserはbusy中は送信を保留する。ターンが終わったことにして配送させる
     orchestrator.emitState({ ...initialChatState, busy: false });
 
-    const second = control(state).askUser('問2', ['C', 'D']);
+    const second = await control(state).askUser('問2', ['C', 'D']);
     expect(second.accepted).toBe(false);
     expect(second.reason).toContain('上限（1回/run）');
     expect(second.reason).toContain('decide_final_merge');
@@ -10952,7 +10952,7 @@ tasks:
       expect(runner.getSnapshot(runId)?.orchestrator?.busy).toBe(true);
 
       // ask_userもそのターンの最中に呼ばれる
-      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      await control(state).askUser('どちらへ進める？', ['A案', 'B案']);
       expect(runner.getSnapshot(runId)?.pendingAskUser).toMatchObject({ answered: false });
 
       const sentBefore = orchestrator.sentTexts.length;
@@ -10965,6 +10965,8 @@ tasks:
 
       // ターンが終わって初めて送る
       orchestrator.emitState({ ...initialChatState, busy: false });
+      // 問いを消した永続化が済むまで、スナップショットは永続化側の問いを返す
+      await flush();
 
       expect(runner.getSnapshot(runId)?.pendingAskUser).toBeUndefined();
       const last = orchestrator.sentTexts[orchestrator.sentTexts.length - 1] as string;
@@ -10980,7 +10982,7 @@ tasks:
     await flush();
     const orchestrator = codexHost.orchestratorSessions[0] as FakeTaskSession;
 
-    control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+    await control(state).askUser('どちらへ進める？', ['A案', 'B案']);
     const first = runner.answerAskUser(runId, 0);
     const sentBefore = orchestrator.sentTexts.length;
     const second = runner.answerAskUser(runId, 1);
@@ -11005,7 +11007,7 @@ tasks:
 
     expect(runner.answerAskUser(runId, 0)).toBe(false);
 
-    control(state).askUser('問い', ['A', 'B']);
+    await control(state).askUser('問い', ['A', 'B']);
     expect(runner.answerAskUser(runId, 9)).toBe(false);
     expect(runner.getSnapshot(runId)?.pendingAskUser).toBeDefined();
     expect(runner.answerAskUser('unknown-run', 0)).toBe(false);
@@ -11024,7 +11026,7 @@ tasks:
       orchestrator.emitState({ ...initialChatState, busy: true });
       orchestrator.emitState({ ...initialChatState, busy: false });
 
-      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      await control(state).askUser('どちらへ進める？', ['A案', 'B案']);
       const sentBefore = orchestrator.sentTexts.length;
 
       // 回答待ちの間にタスクが完了しても、まだオーケストレーターへは送らない
@@ -11047,7 +11049,7 @@ tasks:
     const runId = result.runId as string;
     await flush();
 
-    control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+    await control(state).askUser('どちらへ進める？', ['A案', 'B案']);
 
     expect(runner.sendToOrchestrator(runId, '横から一言')).toBe(false);
   });
@@ -11062,7 +11064,7 @@ tasks:
       const runId = result.runId as string;
       await flush();
 
-      control(state).askUser('どちらへ進める？', ['A案', 'B案']);
+      await control(state).askUser('どちらへ進める？', ['A案', 'B案']);
       await flush();
       expect(store.find(runId)?.pendingAskUser).toMatchObject({
         question: 'どちらへ進める？',
@@ -11402,7 +11404,7 @@ tasks:
     if (port === undefined) {
       throw new Error('制御ツールが配線されていません');
     }
-    port.askUser('どちらへ進める？', ['A案', 'B案']);
+    await port.askUser('どちらへ進める？', ['A案', 'B案']);
     await flush();
     expect(store.find(runId)?.pendingAskUser).toMatchObject({
       question: 'どちらへ進める？',
@@ -14761,7 +14763,7 @@ tasks:
   it('ask_userの回答待ち中に立て直しても、導入文と引き継いだイベントを新しい会話へ送る（Issue #1517）', async () => {
     const { harness, state, runId, orchestrator } = await startAndSendFromTask();
     const port = state.hub?.orchestratorControl;
-    expect(port?.askUser('どちらにしますか', ['A', 'B']).accepted).toBe(true);
+    expect((await port?.askUser('どちらにしますか', ['A', 'B']))?.accepted).toBe(true);
 
     runTurn(orchestrator, 'other');
     runTurn(orchestrator, 'other');

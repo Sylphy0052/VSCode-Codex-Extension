@@ -10,6 +10,10 @@ import type { AnswererVerdict } from '../reflex/answererJudge';
  * 促しは人の発言またはイベント1回につき1回まで。促しへの返答をまた判定して促し続けないため。
  * 送る側は、人の発言・イベントを送るたびと、外から始まったターン（会話画面からの発言）を
  * 見つけるたびに`reset`を呼ぶ。
+ *
+ * 促しはイベント送信の上限（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`、`eventsSent`）に数えない。
+ * 促しの回数は人の発言とイベントの回数を超えないので、イベント側の上限が促しの上限も兼ねる。
+ * 数えると、促しの分だけ`taskFailed`・`runFinished`などの通知が早く打ち切られる（Issue #1726）。
  */
 export class TurnEndAnswererNudge {
   private nudged = false;

@@ -69,6 +69,7 @@ import {
   setTaskRunTitle,
   suspendTaskRun,
   taskRunLabel,
+  type ExternalStageDecider,
   type StageDecision,
   type StageGateChoice,
   type TaskRun,
@@ -1272,7 +1273,7 @@ export class TaskRunController {
     taskId: string,
     questionId: string,
     answer: string,
-    by: 'orchestrator' | 'user' = 'user',
+    by: ExternalStageDecider = 'user',
   ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
@@ -1313,7 +1314,7 @@ export class TaskRunController {
     taskId: string,
     gateId: string,
     choice: StageGateChoice,
-    by: 'orchestrator' | 'user' = 'user',
+    by: ExternalStageDecider = 'user',
   ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {

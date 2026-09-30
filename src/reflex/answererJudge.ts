@@ -54,6 +54,9 @@ export type AnswererVerdict =
   /** ターン末の出力に問いが無い（`judgeTurnEndAnswerer`だけが返す）。 */
   | { readonly kind: 'noQuestion'; readonly summary: string };
 
+/** 判定が無効・失敗したときにユーザーへ回す結果（理由を添えないもの）。 */
+export const ANSWERER_USER_FALLBACK: AnswererVerdict = { kind: 'user', summary: undefined };
+
 /** 判定にかける問い。 */
 export interface AnswererQuestion {
   /** 誰が尋ねた問いか。工程セッション（`stageSession`）はオーケストレーターへ、`orchestrator`はユーザーへ尋ねている。 */
@@ -126,7 +129,7 @@ export async function judgeQuestionAnswerer(
   });
   const answer = choiceAnswer(answers?.[0]);
   if (answer === undefined) {
-    return { kind: 'user', summary: undefined };
+    return ANSWERER_USER_FALLBACK;
   }
   const summary = describeReflexChoice(QUESTION_OPTIONS, answer.probabilities);
   return choiceProbability(answer, ORCHESTRATOR) >= threshold
@@ -170,7 +173,7 @@ export async function judgeTurnEndAnswerer(
   });
   const answer = choiceAnswer(answers?.[0]);
   if (answer === undefined) {
-    return { kind: 'user', summary: undefined };
+    return ANSWERER_USER_FALLBACK;
   }
   const summary = describeReflexChoice(TURN_END_OPTIONS, answer.probabilities);
   if (choiceProbability(answer, ORCHESTRATOR) >= threshold) {
