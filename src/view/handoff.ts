@@ -50,6 +50,18 @@ export type HandoffTrigger =
   | { kind: 'profileChanged'; model: string; effort: string; switchReason: string }
   | { kind: 'milestone'; milestone: HandoffMilestone; command: string };
 
+/**
+ * 引き継ぎを1回試した結果（Issue #1746）。
+ *
+ * - `started`: 新セッションを開いた（委譲先が引き受けた場合も含む）
+ * - `declined`: 人か委譲先が「今は引き継がない」と決めた（model確認ダイアログの中止、
+ *   委譲先の見送り）。自動引き継ぎの起動済みフラグは戻さない。戻すと次のターンでまた
+ *   確認ダイアログが出る
+ * - `failed`: 引き継げなかった（transcript未解決、ポインタの書き出し失敗、新セッションを
+ *   開けなかった等）。自動引き継ぎの起動済みフラグを戻し、次のターンの後に判定し直す
+ */
+export type HandoffOutcome = 'started' | 'declined' | 'failed';
+
 /** ポインタファイルの材料。すべて拡張機能が既に持っている値だけで構成する。 */
 export interface HandoffPointerInput {
   provider: HandoffProvider;
