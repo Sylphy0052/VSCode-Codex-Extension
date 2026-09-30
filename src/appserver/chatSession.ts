@@ -24,6 +24,7 @@ import {
   normalizeItem,
   popLastQueued,
   readAutoCompactTokenLimit,
+  rebaseContextUsage,
   removeApproval,
   removePrompt,
   removeQueued,
@@ -217,7 +218,7 @@ export class ChatSession {
     // 応答に「いま効いている権限」が入っている。Plan modeを抜けるときの戻し先にする
     this.baseline = readTurnPolicy(response.result);
     this.update({ ...this.state, threadId });
-    void this.loadAutoCompactLimit(cwd);
+    void this.loadAutoCompactLimit(threadId, cwd);
     return threadId;
   }
 
@@ -247,7 +248,7 @@ export class ChatSession {
     }
     const response = await this.connection.request('thread/resume', params);
     this.applyThreadSnapshot(threadId, response.result);
-    void this.loadAutoCompactLimit(cwd);
+    void this.loadAutoCompactLimit(threadId, cwd);
   }
 
   /**
@@ -256,21 +257,31 @@ export class ChatSession {
    *
    * 通知（`thread/tokenUsage/updated`）には載らないため `config/read` で聞く。取れなければ
    * 従来どおり `modelContextWindow` を分母にするだけで会話には響かないので、失敗は記録して
-   * 見送る。次の使用量の通知から新しい分母で残量を出す。
+   * 見送る。
+   *
+   * 応答を待つ間に別のスレッドへ切り替わっていたら結果を捨てる。前のスレッド（別のcwd）の
+   * 上限を残さないよう、読めなかったときは `undefined` に戻す。上限が変わったら、次の使用量の
+   * 通知を待たずにいまの残量を新しい分母で出し直す。
    */
-  private async loadAutoCompactLimit(cwd: string | undefined): Promise<void> {
+  private async loadAutoCompactLimit(threadId: string, cwd: string | undefined): Promise<void> {
+    let autoCompactLimit: number | undefined;
     try {
       const response = await this.connection.request(
         'config/read',
         cwd === undefined ? {} : { cwd },
       );
-      const autoCompactLimit = readAutoCompactTokenLimit(response.result);
-      if (autoCompactLimit !== this.state.autoCompactLimit) {
-        this.update({ ...this.state, autoCompactLimit });
-      }
+      autoCompactLimit = readAutoCompactTokenLimit(response.result);
     } catch (error) {
       this.log.info(`auto-compactの上限を読めませんでした: ${String(error)}`);
     }
+    if (this.state.threadId !== threadId || autoCompactLimit === this.state.autoCompactLimit) {
+      return;
+    }
+    this.update({
+      ...this.state,
+      autoCompactLimit,
+      context: rebaseContextUsage(this.state.context, autoCompactLimit),
+    });
   }
 
   /**

@@ -7,6 +7,8 @@ import {
   NO_BACKGROUND_TERMINALS,
   NO_TODO_HISTORY,
   NO_TODOS,
+  modelWindowOf,
+  rebaseContextUsage,
   type BackgroundTerminalItem,
   type ChatItem,
   type ChatState,
@@ -144,7 +146,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   let todoHistory = state.todoHistory;
   let autocompactWindow = state.autocompactWindow;
   let autoCompactLimit = state.autoCompactLimit;
-  const context = contextFromAssistant(state, event, message);
+  let context = contextFromAssistant(state, event, message);
 
   for (const [position, part] of content.entries()) {
     const type = str(part['type']);
@@ -227,6 +229,9 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         }
       }
     }
+  }
+  if (autoCompactLimit !== state.autoCompactLimit) {
+    context = rebaseContextUsage(context, autoCompactLimit);
   }
 
   if (
@@ -466,7 +471,7 @@ function contextFromAssistant(
     return state.context;
   }
   return (
-    buildContextUsage(usedTokens, state.context?.contextWindow, state.autoCompactLimit) ??
+    buildContextUsage(usedTokens, modelWindowOf(state.context), state.autoCompactLimit) ??
     state.context
   );
 }

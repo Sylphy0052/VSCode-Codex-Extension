@@ -359,11 +359,13 @@ export class ClaudeStreamSession {
       //
       // `AGENT_EXTENSION_AUTO_HANDOFF` は、引き継ぎを拡張が受け持つことをhookへ知らせる
       // （Issue #1747）。`~/.claude/hooks/user-prompt-submit/context-check.py` はこれを見て、
-      // 拡張と別の基準で引き継ぎを指示しない
+      // 拡張と別の基準で引き継ぎを指示しない。自動引き継ぎが切れている会話で立てると、hookも
+      // 拡張も引き継がなくなるので、起動時点で有効なときだけ立てる。環境変数は起動時に固定
+      // されるため、会話中にトグルを切り替えても次の起動まで反映されない
       env: {
         ...process.env,
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
-        AGENT_EXTENSION_AUTO_HANDOFF: '1',
+        ...(this.state.autoHandoff ? { AGENT_EXTENSION_AUTO_HANDOFF: '1' } : {}),
       },
     });
     this.proc = proc;

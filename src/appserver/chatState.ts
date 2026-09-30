@@ -461,6 +461,11 @@ export interface ContextUsage {
    * 「auto-compactが発火するまでの残り」を表す。
    */
   autoCompact?: boolean | undefined;
+  /**
+   * モデル本来のコンテキスト上限（Issue #1747）。`contextWindow` はauto-compactの上限に
+   * 置き換わりうるため、分母を計算し直すときはこちらを渡す。
+   */
+  modelWindow?: number | undefined;
 }
 
 /**
@@ -513,7 +518,39 @@ export function buildContextUsage(
     return { usedTokens, contextWindow: undefined, remainingPercent: undefined };
   }
   const remaining = Math.max(0, Math.min(100, Math.round(((window - usedTokens) / window) * 100)));
-  return { usedTokens, contextWindow: window, remainingPercent: remaining, autoCompact };
+  return {
+    usedTokens,
+    contextWindow: window,
+    remainingPercent: remaining,
+    autoCompact,
+    modelWindow: model,
+  };
+}
+
+/**
+ * auto-compactの上限が変わったときに、いまの残量を新しい分母で出し直す（Issue #1747）。
+ * 次の使用量の通知を待つと、その間は古い分母の残量で表示と引き継ぎ判定が走るため。
+ */
+export function rebaseContextUsage(
+  context: ContextUsage | undefined,
+  autoCompactLimit: number | undefined,
+): ContextUsage | undefined {
+  if (context === undefined) {
+    return undefined;
+  }
+  return buildContextUsage(context.usedTokens, modelWindowOf(context), autoCompactLimit) ?? context;
+}
+
+/**
+ * 前回の残量からモデル本来の上限を取り出す（Issue #1747）。`contextWindow` がauto-compactの
+ * 上限に置き換わっているときは、それをモデルの上限として渡し直すと、上限が後から広がっても
+ * 分母が小さいまま戻らないので使わない。
+ */
+export function modelWindowOf(context: ContextUsage | undefined): number | undefined {
+  if (context === undefined) {
+    return undefined;
+  }
+  return context.modelWindow ?? (context.autoCompact === true ? undefined : context.contextWindow);
 }
 
 /**
