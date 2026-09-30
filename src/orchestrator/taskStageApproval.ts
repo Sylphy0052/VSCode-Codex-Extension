@@ -1,4 +1,5 @@
 import {
+  hasDestructiveCommandBesidesRemoteBranchDelete,
   isBranchOrTagDelete,
   normalizeCommand,
   type EscalationRequest,
@@ -14,7 +15,9 @@ import { REPORT_STAGE_RESULT_TOOL } from './taskStagePrompts';
  * オーケストレータモード（Issue #1505）の工程セッションの承認ハンドラ。
  *
  * 報告と質問のMCPツールは常に許可する。PRのmergeとリモートブランチの削除は取り消せないので、
- * mergeCleanupの工程でだけ許可し、ほかの工程では人へ回す。それ以外は`autoApprove`に従う。
+ * mergeCleanupの工程でだけ許可し、ほかの工程では回答者判定（`judgeMerge`）にかけて、
+ * オーケストレーターが決めてよければ許可し、それ以外は人へ回す（Issue #1771）。それ以外は
+ * `autoApprove`に従う。
  */
 
 const AUTO_APPROVED_STAGE_TOOLS: ReadonlySet<string> = new Set([
@@ -63,7 +66,25 @@ export const STAGE_ASK_USER_QUESTION_DENY_MESSAGE =
   '工程セッションではAskUserQuestionを使えません。質問・確認・方針の相談は' +
   `${ROADMAP_ASK_ORCHESTRATOR_TOOL.name}でOrchestratorへ送ってください。`;
 
-export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): ApprovalHandler {
+/**
+ * PRのmergeか元ブランチのリモート削除を、承認なしに実行させてよいかの回答者判定（Issue #1771）。
+ * オーケストレーターが決めてよければ`true`。判定が無効・失敗・時間切れなら`false`を返すこと。
+ */
+export type MergeCommandJudge = (command: string) => Promise<boolean>;
+
+/**
+ * PRのmergeと元ブランチのリモート削除のうち、回答者判定にかけてよいもの。force pushなど
+ * ほかの破壊的操作が同じコマンドに相乗りしていれば対象外にし、人へ回す（Issue #1771）。
+ */
+export function isJudgeableMergeCommand(command: string): boolean {
+  return isMergeOrRemoteBranchDelete(command) && !hasDestructiveCommandBesidesRemoteBranchDelete(command);
+}
+
+export function stageApprovalHandler(
+  stage: TaskStage,
+  autoApprove: boolean,
+  judgeMerge?: MergeCommandJudge,
+): ApprovalHandler {
   return async (approval, rawParams) => {
     // 工程セッションには人が張り付いていないため、質問はOrchestratorへ回させる
     if (approval.kind === 'askUserQuestion') {
@@ -73,8 +94,16 @@ export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): Ap
     if (tool !== undefined && AUTO_APPROVED_STAGE_TOOLS.has(tool)) {
       return { kind: 'auto', decision: 'accept' };
     }
-    if (stage !== 'mergeCleanup' && isMergeOrRemoteBranchDelete(commandOf(rawParams))) {
-      return { kind: 'ask' };
+    const command = commandOf(rawParams);
+    if (stage !== 'mergeCleanup' && isMergeOrRemoteBranchDelete(command)) {
+      // ツールの承認は同期で待つため、オーケストレーターの判断待ちを経由せず許可か人かの二択にする。
+      // `autoApprove`が無効なら、ほかのコマンドと同じく人が承認する
+      return autoApprove &&
+        judgeMerge !== undefined &&
+        isJudgeableMergeCommand(command) &&
+        (await judgeMerge(command))
+        ? { kind: 'auto', decision: 'accept' }
+        : { kind: 'ask' };
     }
     return autoApprove ? { kind: 'auto', decision: 'accept' } : { kind: 'ask' };
   };
@@ -85,6 +114,8 @@ export function stageApprovalHandler(stage: TaskStage, autoApprove: boolean): Ap
  *
  * 工程セッションのmergeCleanup以外の工程と同じ基準にそろえ、PRのmergeとリモートブランチの
  * 削除だけを人へ回す。危険パターンと境界の判定（`classifyApprovalRequest`）は通さない。
+ * 人へ回すもののうち`isJudgeableMergeCommand`に当たるものは、呼び出し側が回答者判定にかける
+ * （Issue #1771）。
  */
 export function classifyFullAutoApproval(request: EscalationRequest): EscalationResult {
   if (request.kind === 'command' && isMergeOrRemoteBranchDelete(request.command)) {

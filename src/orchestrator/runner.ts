@@ -15,7 +15,7 @@ import {
   remainingIterations,
 } from './contextLow';
 import { classifyApprovalRequest, type EscalationPolicy, type TaskBoundary } from './escalation';
-import { classifyFullAutoApproval } from './taskStageApproval';
+import { classifyFullAutoApproval, isJudgeableMergeCommand } from './taskStageApproval';
 import {
   buildTaskIssueBody,
   buildTaskPullRequestTitle,
@@ -5569,10 +5569,32 @@ export class WorkflowRunner {
       autoApprove: liveTask.autoApprove,
     };
     // 設定は承認のたびに読み直す（実行中に無効へ戻したら次の承認から危険判定へ戻す）
-    const result =
-      liveTask.autoApprove && this.deps.readBaseline().fullAutoApprove === true
-        ? classifyFullAutoApproval(request)
-        : classifyApprovalRequest(request, liveTask.boundary, policy);
+    const fullAuto = liveTask.autoApprove && this.deps.readBaseline().fullAutoApprove === true;
+    let result = fullAuto
+      ? classifyFullAutoApproval(request)
+      : classifyApprovalRequest(request, liveTask.boundary, policy);
+    // fullAutoApproveで人へ回すPRのmerge・元ブランチのリモート削除は、回答者判定がオーケストレーター
+    // なら許可する。ツールの承認は同期で待つため、許可か人かの二択にする（Issue #1771）
+    if (
+      fullAuto &&
+      result.decision === 'ask' &&
+      request.kind === 'command' &&
+      isJudgeableMergeCommand(request.command)
+    ) {
+      const answerer = await this.judgeMergeCommand(task.provider, taskId, request.command);
+      // 判定の間にrunやタスクが入れ替わったら、古い承認要求は人へ回すだけにする
+      if (this.runs.get(runId) !== live || live.tasks.get(taskId) !== liveTask) {
+        return { kind: 'ask' };
+      }
+      if (answerer?.kind === 'orchestrator') {
+        result = {
+          decision: 'auto',
+          reasons: [`回答者判定で承認なしに実行させました（${answerer.summary}）`],
+        };
+      } else if (answerer?.summary !== undefined) {
+        result = { ...result, reasons: [...result.reasons, `回答者判定: ${answerer.summary}`] };
+      }
+    }
     this.deps.log.info(
       `[workflow ${runId}/${taskId}] 承認判定(${approval.kind}): ${result.decision} - ${result.reasons.join(' / ')}`,
     );
@@ -5617,6 +5639,30 @@ export class WorkflowRunner {
     this.notify(runId);
     this.pump(runId);
     return { kind: 'ask' };
+  }
+
+  /**
+   * タスクが承認を求めたPRのmerge・元ブランチのリモート削除の回答者判定（Issue #1771）。
+   * 判定しない（depsが無い）・失敗したときは`undefined`を返し、人へ回す。
+   */
+  private async judgeMergeCommand(
+    provider: Provider,
+    taskId: string,
+    command: string,
+  ): Promise<AnswererVerdict | undefined> {
+    const judge = this.deps.judgeAskUserAnswerer;
+    if (judge === undefined) {
+      return undefined;
+    }
+    try {
+      return await judge(provider, {
+        source: 'stageSession',
+        question: `ワークフローのタスク「${taskId}」が、PRのmergeかPRの元ブランチのリモート削除を実行しようとしている。承認なしに実行させてよいか。`,
+        command,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   private onApprovalResolved(runId: string, taskId: string, decision: ApprovalDecision): void {

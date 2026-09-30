@@ -47,6 +47,7 @@ import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
 import {
+  getTask,
   isTaskRunActive,
   listTasks,
   MAX_TASK_RUN_PARALLEL,
@@ -212,6 +213,33 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     );
   };
 
+  // Orchestratorの`stop_stage`（Issue #1771）。worktreeとブランチは残るため、止めてよいかを
+  // 回答者判定にかける。Orchestratorが書いた理由は判断の材料として渡す
+  const judgeStopStage = async (
+    runId: string,
+    taskId: string,
+    reason: string | undefined,
+  ): Promise<AnswererVerdict> => {
+    const settings = readAnswererJudgeConfig();
+    const run = controller.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    if (!settings.enabled || run === undefined || task === undefined) {
+      return ANSWERER_USER_FALLBACK;
+    }
+    return judgeQuestionAnswerer(
+      reflexDeps(run.engine),
+      {
+        source: 'orchestrator',
+        question:
+          `タスク${taskId}「${sanitizeInlineText(task.title, 200)}」の工程を止めてよいか` +
+          '（worktreeとブランチは残り、後でやり直せる）',
+        reason,
+        options: ['止める', '止めない'],
+      },
+      settings.threshold,
+    );
+  };
+
   const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
 
   const observation = createStageObservationPorts(ports);
@@ -332,6 +360,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeTurnEndAnswerer: judgeTurnEnd,
     judgeAskUserQuestionAnswerer: judgeAskUserQuestion,
     judgeQuestionAnswerByOrchestrator,
+    judgeStopStageAnswerer: judgeStopStage,
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),

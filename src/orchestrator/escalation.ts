@@ -328,10 +328,14 @@ function isWorktreeReset(command: string): boolean {
  * `/i` を付け、大文字化での回避を防ぐ。
  */
 export function isBranchOrTagDelete(command: string): boolean {
+  return isLocalBranchOrTagDelete(command) || /\bgit\s+push\b[^\n]*--delete\b/i.test(command);
+}
+
+/** ローカルのブランチ・タグの削除（`git branch -d` / `git tag -d`）。 */
+function isLocalBranchOrTagDelete(command: string): boolean {
   return (
     /\bgit\s+branch\b[^\n]*\s(-[A-Za-z]*d[A-Za-z]*|--delete)\b/i.test(command) ||
-    /\bgit\s+tag\b[^\n]*\s(-d|--delete)\b/i.test(command) ||
-    /\bgit\s+push\b[^\n]*--delete\b/i.test(command)
+    /\bgit\s+tag\b[^\n]*\s(-d|--delete)\b/i.test(command)
   );
 }
 
@@ -467,26 +471,58 @@ const DANGER_COMMAND_PATTERNS: readonly DangerPattern[] = [
  * 取り消せない操作のパターン。工程セッションの質問（自然文）の検査にも使う（Issue #1712）。
  * シェルメタ文字・外部到達・デコード・`find`は、自然文や判断材料の引用に日常的に現れて
  * 誤検知が多く、操作そのものも取り消せないとは限らないため含めない。
+ *
+ * 破壊的操作（`DESTRUCTIVE_PATTERN_IDS`）に当たる質問は回答者判定を通さずユーザーが決める。
+ * デプロイ・公開は回答者判定の材料にとどめる（Issue #1771）。
  */
-const IRREVERSIBLE_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([
+const DESTRUCTIVE_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([
   DANGER_PATTERN_IDS.recursiveForceDelete,
   DANGER_PATTERN_IDS.untrackedClean,
   DANGER_PATTERN_IDS.worktreeReset,
   DANGER_PATTERN_IDS.branchTagDelete,
   DANGER_PATTERN_IDS.dbDropTruncate,
   DANGER_PATTERN_IDS.forcePush,
-  DANGER_PATTERN_IDS.deployPublish,
 ]);
+const CAUTION_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([DANGER_PATTERN_IDS.deployPublish]);
+
+/** 取り消せない操作のコマンドの説明。`destructive`は破壊的操作、`caution`はそれ以外（デプロイ・公開）。 */
+export interface IrreversibleCommands {
+  destructive: string[];
+  caution: string[];
+}
 
 /**
  * 文章に埋め込まれたコマンドのうち、取り消せない操作に当たるものの説明を返す。
  * Markdownのコード囲み（バッククォート）と引用符は空白にしてから照合する。
  */
-export function findIrreversibleCommands(text: string): string[] {
+export function findIrreversibleCommands(text: string): IrreversibleCommands {
   const normalized = text.replace(/[`'"]/gu, ' ');
-  return DANGER_COMMAND_PATTERNS.filter(
-    (p) => IRREVERSIBLE_PATTERN_IDS.has(p.id) && p.test(normalized),
-  ).map((p) => p.description);
+  const matched = DANGER_COMMAND_PATTERNS.filter(
+    (p) => (DESTRUCTIVE_PATTERN_IDS.has(p.id) || CAUTION_PATTERN_IDS.has(p.id)) && p.test(normalized),
+  );
+  return {
+    destructive: matched.filter((p) => DESTRUCTIVE_PATTERN_IDS.has(p.id)).map((p) => p.description),
+    caution: matched.filter((p) => CAUTION_PATTERN_IDS.has(p.id)).map((p) => p.description),
+  };
+}
+
+/**
+ * リモートのブランチの削除を除いた破壊的操作を含むか。PRのmergeと元ブランチのリモート削除を
+ * 回答者判定にかける前に、同じコマンドに相乗りした破壊的操作（force push、`reset --hard`など）を
+ * 除くために使う（Issue #1771）。ローカルのブランチ・タグの削除とタグの削除は含む側に数える。
+ */
+export function hasDestructiveCommandBesidesRemoteBranchDelete(command: string): boolean {
+  const normalized = command.replace(/[`'"]/gu, ' ');
+  return (
+    DANGER_COMMAND_PATTERNS.some(
+      (p) =>
+        DESTRUCTIVE_PATTERN_IDS.has(p.id) &&
+        p.id !== DANGER_PATTERN_IDS.branchTagDelete &&
+        p.test(normalized),
+    ) ||
+    isLocalBranchOrTagDelete(normalized) ||
+    /\brefs\/tags\//i.test(normalized)
+  );
 }
 
 /**

@@ -39,7 +39,7 @@ import {
   findStageGate,
   GATE_CHOICE_LABELS,
   isGateChoiceAllowed,
-  isReviewFailed,
+  isReviewRoundsExhausted,
   resolveStageGate,
 } from './taskRunGates';
 import type { ReflexJudgeDeps } from './planReflexReview';
@@ -1466,8 +1466,14 @@ export class TaskRunController {
         return r;
       }
       const task = getTask(r, taskId);
-      if (by !== 'user' && choice === 'proceed' && task !== undefined && isReviewFailed(task)) {
-        rejection = 'レビュー未通過の関門を進めるのはユーザーだけ。escalate_to_userでユーザーへ回す';
+      if (
+        by !== 'user' &&
+        choice === 'sendBack' &&
+        task !== undefined &&
+        isReviewRoundsExhausted(task)
+      ) {
+        rejection =
+          '実装への差し戻しが上限に達しているため、差し戻せるのはユーザーだけ。指摘を残したまま進めるか、escalate_to_userでユーザーへ回す';
         return r;
       }
       const resolved = resolveStageGate(r, taskId, gateId, { choice, by }, this.now());

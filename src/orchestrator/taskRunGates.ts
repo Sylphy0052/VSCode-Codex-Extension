@@ -25,10 +25,11 @@ import { sanitizeInlineText } from './untrustedText';
  * 関門は`judging`（Reflexの判定中）で開き、Reflexが決めれば決着、決められなければ
  * `awaitingUser`（ユーザーの判断待ち）にする。ただし回答者判定（Issue #1708）でオーケストレーターが
  * 決めてよいとされたら`awaitingOrchestrator`にし、オーケストレーターが決着させるか、ユーザーへ回す。
- * 差し戻しと自動のやり直しには上限を設け、上限に達したら判定せずにユーザーへ回す。
+ * 自動のやり直しには上限を設け、上限に達したら判定せずにユーザーへ回す。実装への差し戻しが上限に
+ * 達した関門は、Reflexに選択肢を選ばせずに回答者判定へ回し、差し戻しはユーザーだけが選べる（Issue #1771）。
  */
 
-/** レビュー後に実装へ差し戻す回数の上限。超えたらユーザーへ回す。 */
+/** レビュー後に実装へ差し戻す回数の上限。超えた後の差し戻しはユーザーだけが選べる（Issue #1771）。 */
 export const MAX_REVIEW_ROUNDS = 3;
 
 /** 1つの工程をReflexの判定でやり直す回数の上限。超えたらユーザーへ回す。 */
@@ -58,12 +59,23 @@ export function isGateChoiceAllowed(kind: StageGateKind, choice: StageGateChoice
 
 /**
  * レビューが通過しなかった（medium以上の指摘が残った）タスクか。この状態で指摘を残したまま
- * 進めるかはユーザーだけが決める（Issue #1711）。Reflexには選択肢として示さず、判定が
- * `proceed`でも決着させない。
+ * 進めるかは、Reflexには選ばせない（選択肢として示さず、判定が`proceed`でも決着させない）。
+ * 回答者判定でオーケストレーターが決めてよいとされたら、オーケストレーターも選べる（Issue #1771）。
  */
 export function isReviewFailed(task: OrchestratedTask): boolean {
   return task.review?.passed === false;
 }
+
+/**
+ * 実装への差し戻しが上限（`MAX_REVIEW_ROUNDS`）に達したか。達した後の差し戻しはユーザーだけが
+ * 選べる。Reflexとオーケストレーターが選べるのは、指摘を残したまま進めるかユーザーへ回すかだけ（Issue #1771）。
+ */
+export function isReviewRoundsExhausted(task: OrchestratedTask): boolean {
+  return (task.reviewRounds ?? 0) >= MAX_REVIEW_ROUNDS;
+}
+
+/** 実装への差し戻しが上限に達した関門の要約（Issue #1771）。 */
+export const REVIEW_ROUNDS_EXHAUSTED_SUMMARY = `実装への差し戻しが上限（${String(MAX_REVIEW_ROUNDS)}回）に達した`;
 
 function isOpen(gate: StageGate): boolean {
   return (
@@ -158,14 +170,12 @@ export function reviewGateDetail(review: StageReviewResult): string {
 }
 
 /**
- * 上限に達しているなら、その理由。Reflexに判定させずにユーザーへ回す。
+ * 自動のやり直しが上限に達しているなら、その理由。Reflexに判定させずにユーザーへ回す。
+ * 実装への差し戻しの上限は、ここでは扱わない（回答者判定へ回す。`isReviewRoundsExhausted`）。
  */
 function limitReached(task: OrchestratedTask, kind: StageGateKind, stage: TaskStage): string | undefined {
   if (kind === 'reviewFindings') {
-    const rounds = task.reviewRounds ?? 0;
-    return rounds >= MAX_REVIEW_ROUNDS
-      ? `実装への差し戻しが上限（${String(MAX_REVIEW_ROUNDS)}回）に達した`
-      : undefined;
+    return undefined;
   }
   return countAutoRetries(task, stage) >= MAX_AUTO_RETRIES
     ? `自動のやり直しが上限（${String(MAX_AUTO_RETRIES)}回）に達した`
@@ -173,9 +183,25 @@ function limitReached(task: OrchestratedTask, kind: StageGateKind, stage: TaskSt
 }
 
 /**
+ * 回答者判定でオーケストレーターが決めてよいとされたとき、オーケストレーターが選べる範囲の補足
+ * （Issue #1771）。判断の材料とオーケストレーターへの通知に使う。制約が無ければ`undefined`。
+ */
+export function orchestratorGateScope(task: OrchestratedTask, gate: StageGate): string | undefined {
+  if (gate.kind !== 'reviewFindings') {
+    return undefined;
+  }
+  if (isReviewRoundsExhausted(task)) {
+    return `${REVIEW_ROUNDS_EXHAUSTED_SUMMARY}ため、実装へ差し戻せるのはユーザーだけ。オーケストレーターが選べるのは、指摘を残したまま進めるかユーザーへ回すか`;
+  }
+  return isReviewFailed(task)
+    ? 'レビューが通過していない（medium以上の指摘が残った）。オーケストレーターは実装への差し戻しのほか、指摘を残したまま進めることも選べる'
+    : undefined;
+}
+
+/**
  * 関門を開く。`reviewFindings`はレビューを終えて「mergeとcleanup」が未着手のとき、
  * `stageFailed`は現在の工程が止まっているときだけ開く。決着していない関門が既にあれば
- * そのまま返す。上限に達していれば、判定中を飛ばしてユーザーの判断待ちで開く。
+ * そのまま返す。自動のやり直しが上限に達していれば、判定中を飛ばしてユーザーの判断待ちで開く。
  */
 export function openStageGate(
   run: TaskRun,
@@ -198,22 +224,21 @@ export function openStageGate(
   }
   const at = now.toISOString();
   const limit = limitReached(task, input.kind, gateStage);
+  const exhausted = input.kind === 'reviewFindings' && isReviewRoundsExhausted(task);
   const gate: StageGate = {
     gateId: input.gateId,
     kind: input.kind,
     stage: gateStage,
     status: limit === undefined ? 'judging' : 'awaitingUser',
     detail: input.detail,
-    reflexSummary: limit,
+    reflexSummary: limit ?? (exhausted ? REVIEW_ROUNDS_EXHAUSTED_SUMMARY : undefined),
     resolution: undefined,
     openedAt: at,
   };
-  const attention =
-    limit !== undefined && input.kind === 'reviewFindings' ? 'awaitingUser' : task.attention;
+  // 判断待ちで開くのは`stageFailed`だけ。その注意は止めたときの要対応・失敗のまま
   return withTaskUpdate(run, {
     ...task,
     gates: trimGates([...(task.gates ?? []), gate]),
-    attention,
     updatedAt: at,
   });
 }
@@ -304,7 +329,8 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
  * runかどうかで受理を判定する）。
  * - `sendBack`: 「実装とPR作成」から やり直す（同じworktree・ブランチ・PRを使う）
  * - `proceed`: 指摘を残したまま「mergeとcleanup」へ進む。レビューが通過しなかったタスクでは
- *   ユーザーの決着だけ受け付ける（Reflexとオーケストレーターの`proceed`はそのまま返す）
+ *   Reflexの`proceed`はそのまま返す（オーケストレーターとユーザーは選べる。Issue #1771）
+ * - `sendBack`は、差し戻しが上限に達した後はユーザーの決着だけ受け付ける（Issue #1771）
  * - `retry`: 止まった工程を未着手へ戻す（`resetStageForRetry`）
  */
 export function resolveStageGate(
@@ -325,7 +351,14 @@ export function resolveStageGate(
     if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
       return undefined;
     }
-    if (resolution.by !== 'user' && resolution.choice === 'proceed' && isReviewFailed(task)) {
+    if (resolution.by === 'reflex' && resolution.choice === 'proceed' && isReviewFailed(task)) {
+      return undefined;
+    }
+    if (
+      resolution.by !== 'user' &&
+      resolution.choice === 'sendBack' &&
+      isReviewRoundsExhausted(task)
+    ) {
       return undefined;
     }
     const resolved: StageGate = {
@@ -417,15 +450,24 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
   if (gate.kind === 'reviewFindings') {
     const rounds = task.reviewRounds ?? 0;
     const failed = isReviewFailed(task);
+    const exhausted = isReviewRoundsExhausted(task);
     return {
       question: `${task.taskId}のレビューが直さずに残した指摘がある。次にどうするか。`,
       reason:
         `レビューを終えたが指摘が残った。実装への差し戻しはこれまで${String(rounds)}回` +
         `（上限${String(MAX_REVIEW_ROUNDS)}回）。差し戻すと同じPRへ追加の修正をしてからレビューし直す。`,
-      options: failed
-        ? [GATE_OPTION_SEND_BACK, GATE_OPTION_ASK_USER]
-        : [GATE_OPTION_SEND_BACK, GATE_OPTION_PROCEED, GATE_OPTION_ASK_USER],
-      recommended: failed ? GATE_OPTION_SEND_BACK : GATE_OPTION_PROCEED,
+      options: [
+        ...(exhausted ? [] : [GATE_OPTION_SEND_BACK]),
+        ...(failed ? [] : [GATE_OPTION_PROCEED]),
+        GATE_OPTION_ASK_USER,
+      ],
+      recommended: exhausted
+        ? failed
+          ? GATE_OPTION_ASK_USER
+          : GATE_OPTION_PROCEED
+        : failed
+          ? GATE_OPTION_SEND_BACK
+          : GATE_OPTION_PROCEED,
       evidence: `レビューの結果:\n${gate.detail}`,
     };
   }
