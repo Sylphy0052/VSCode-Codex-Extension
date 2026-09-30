@@ -203,7 +203,9 @@ import { buildItemsDelta, stripHostOnlyItems, stripHostOnlyState } from './state
 import { abortAsRejection, BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
+  buildHandoffPrompt,
   chooseHandoffPrompt,
+  handoffAttemptTexts,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
@@ -224,6 +226,7 @@ import {
   oldTabKeptMessage,
   waitForDestinationResponse,
   writeHandoffPointer,
+  writeHandoffPromptFile,
   type DestinationResponseOutcome,
   type HandoffOutcome,
   type HandoffTrigger,
@@ -1324,6 +1327,7 @@ export class ClaudeChatViewManager
       `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
     );
     let pointerPath: string;
+    const createdAt = new Date();
     try {
       pointerPath = await writeHandoffPointer(this.globalStorageDir, {
         provider: 'claude',
@@ -1348,17 +1352,30 @@ export class ClaudeChatViewManager
         ...(lastAssistantMessage === undefined ? {} : { nextSteps: lastAssistantMessage }),
         turnEditedFiles: state.turnEditedFiles,
         routerReasons: choice.reasons,
-        createdAt: new Date(),
+        createdAt,
       });
     } catch (e) {
       this.reportError(e);
       return 'failed';
     }
+    // 渡す本文を、新セッションを作る前に残す（Issue #1750）。書けなければポインタを指す本文へ戻す
+    const pointerText = buildHandoffPrompt(pointerPath);
+    let firstText = chooseHandoffPrompt(pointerPath, handoffSource);
+    const savedPromptPath = await writeHandoffPromptFile(
+      this.globalStorageDir,
+      sessionId,
+      createdAt,
+      firstText,
+      (message) => this.log.warn(message),
+    );
+    if (savedPromptPath === undefined) {
+      firstText = pointerText;
+    }
     // 引き継ぎ1回につき1件の記録（Issue #1752）。失敗しても引き継ぎは止めない
     await appendHandoffLog(this.globalStorageDir, {
       provider: 'claude',
       trigger,
-      prompt: chooseHandoffPrompt(pointerPath, handoffSource),
+      prompt: firstText,
       pointerPath,
     }).catch((e: unknown) =>
       this.log.warn(
@@ -1372,7 +1389,7 @@ export class ClaudeChatViewManager
       const handedOff = await this.delegateHandoff(
         entry.handoffDelegate,
         choice.settings,
-        chooseHandoffPrompt(pointerPath, handoffSource),
+        firstText,
         trigger,
         this.log,
       );
@@ -1388,103 +1405,110 @@ export class ClaudeChatViewManager
     // 引き継ぎ元パネルと同じ列へ開く。`panel.viewColumn`は非表示のとき
     // `undefined`になるため、`lastKnownViewColumn`（最後に見えていた列）へ落ちる
     const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
-    const newSessionId = await this.openNew(
-      entry.cwd,
-      entry.taskConfig,
-      choice.settings,
-      preserveFocus,
-      targetViewColumn,
-    );
-    if (newSessionId === undefined) {
-      this.log.warn(
-        '引き継ぎ先セッションを開けなかったため引き継げませんでした（旧タブはそのまま残ります）',
-      );
-      return 'failed';
-    }
-    const newEntry = this.panels.get(newSessionId);
-    if (newEntry === undefined) {
-      this.log.warn(
-        `引き継ぎ先セッション(${newSessionId})がパネル一覧に見つからず引き継げませんでした（旧タブはそのまま残ります）`,
-      );
-      return 'failed';
-    }
-    // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
-    // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
-    newEntry.session.setAutoHandoff(state.autoHandoff);
-    // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
-    newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
-    // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
-    // 時点のグローバル設定で描かれているため、上書きした値で描き直す
-    newEntry.reflexOverride = entry.reflexOverride;
-    void newEntry.panel?.webview.postMessage({
-      type: 'reflex',
-      enabled: this.reflexEnabledFor(newEntry),
-    });
-    // 自動返信のON/OFFも持ち越す（Issue #1362）。持ち越したら引き継ぎ元では止める。
-    // 旧タブを残したとき、新旧2つのセッションが同じ作業を自動で進めるのを防ぐ。
-    // `state`は確認ダイアログの前に取った値のため、待っている間のトグル操作を拾えるよう
-    // ここで読み直す
+    // 自動返信のON/OFFは引き継ぎ先へ持ち越す（Issue #1362）。試行が失敗しても旧タブの自動返信を
+    // 止めないよう、読むのは試行の前、止めるのは送信できた後にする
     const autoReply = entry.session.getState().autoReply;
-    newEntry.session.setAutoReply(autoReply);
-    if (autoReply) {
-      this.stopAutoReply(entry, 'handedOff');
-    }
-    // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
-    // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
-    // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
-    // 引き継ぎ自体は成立するので、失敗は記録に留める。
-    //
-    // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
-    // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
-    const previousName = deriveHandoffBaseName(state, entry.pinnedName);
-    const handoffBlock =
-      handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource);
-    const handoffPrompt = handoffBlock?.body;
-    if (handoffBlock !== undefined) {
-      // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
-      entry.trace.info(
-        `handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`,
+    // 開く・送るのどちらかが失敗したら1回やり直し、それでも駄目ならポインタだけを指す本文で
+    // 1回試す（Issue #1750）。失敗した試行の新タブは閉じ、空のタブを残さない
+    for (const promptText of handoffAttemptTexts(firstText, pointerText)) {
+      const newSessionId = await this.openNew(
+        entry.cwd,
+        entry.taskConfig,
+        choice.settings,
+        preserveFocus,
+        targetViewColumn,
       );
-    }
-    const handoffName = buildHandoffSessionName({
-      ...(previousName === undefined ? {} : { previousName }),
-      isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
-      ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
-      ...(gitBranch === undefined ? {} : { gitBranch }),
-    });
-    try {
-      await this.store.rename(newSessionId, handoffName);
-      newEntry.session.setName(handoffName);
-    } catch (e) {
-      this.log.warn(
-        `引き継ぎ先の名前を設定できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-    // 送信より前に初回ターンの監視を張る（Issue #1162）。`dispatch` は今のところ同期だが、
-    // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
-    // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
-    const giveUp = new AbortController();
-    const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
-    try {
-      // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
-      this.dispatch(newEntry, chooseHandoffPrompt(pointerPath, handoffSource));
-    } catch (e) {
-      giveUp.abort();
-      // 新セッションは開いた後なので`started`で返す。`failed`にすると自動引き継ぎが次の
-      // ターンの後にもう1つ新セッションを開く（Issue #1746）
-      const message = `引き継ぎ先へ初回プロンプトを送れませんでした（新しいタブは開いたままです）: ${e instanceof Error ? e.message : String(e)}`;
-      this.log.warn(message);
-      if (notifyFailure) {
-        void vscode.window.showErrorMessage(message);
+      if (newSessionId === undefined) {
+        this.log.warn('引き継ぎ先セッションを開けませんでした');
+        continue;
       }
+      const newEntry = this.panels.get(newSessionId);
+      if (newEntry === undefined) {
+        this.log.warn(`引き継ぎ先セッション(${newSessionId})がパネル一覧に見つかりませんでした`);
+        continue;
+      }
+      // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
+      // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
+      newEntry.session.setAutoHandoff(state.autoHandoff);
+      // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
+      newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+      // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
+      // 時点のグローバル設定で描かれているため、上書きした値で描き直す
+      newEntry.reflexOverride = entry.reflexOverride;
+      void newEntry.panel?.webview.postMessage({
+        type: 'reflex',
+        enabled: this.reflexEnabledFor(newEntry),
+      });
+      // 持ち越したら引き継ぎ元では止める。旧タブを残したとき、新旧2つのセッションが同じ作業を
+      // 自動で進めるのを防ぐ。`state`は確認ダイアログの前に取った値のため、待っている間の
+      // トグル操作を拾えるよう`autoReply`は読み直した値を使う
+      newEntry.session.setAutoReply(autoReply);
+      // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
+      // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
+      // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
+      // 引き継ぎ自体は成立するので、失敗は記録に留める。
+      //
+      // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
+      // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
+      const previousName = deriveHandoffBaseName(state, entry.pinnedName);
+      const handoffBlock =
+        handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource);
+      const handoffPrompt = handoffBlock?.body;
+      if (handoffBlock !== undefined) {
+        // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
+        entry.trace.info(
+          `handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`,
+        );
+      }
+      const handoffName = buildHandoffSessionName({
+        ...(previousName === undefined ? {} : { previousName }),
+        isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
+        ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
+        ...(gitBranch === undefined ? {} : { gitBranch }),
+      });
+      try {
+        await this.store.rename(newSessionId, handoffName);
+        newEntry.session.setName(handoffName);
+      } catch (e) {
+        this.log.warn(
+          `引き継ぎ先の名前を設定できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      // 送信より前に初回ターンの監視を張る（Issue #1162）。`dispatch` は今のところ同期だが、
+      // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
+      // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
+      const giveUp = new AbortController();
+      const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
+      try {
+        // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
+        this.dispatch(newEntry, promptText);
+      } catch (e) {
+        // 標準入力への書き込みで投げるため、初回プロンプトは届いていない。届いていない
+        // 新タブは閉じて次の試行へ進む（Issue #1750）
+        giveUp.abort();
+        this.log.warn(
+          `引き継ぎ先へ初回プロンプトを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        this.teardown(newEntry);
+        continue;
+      }
+      if (autoReply) {
+        this.stopAutoReply(entry, 'handedOff');
+      }
+      void this.confirmStopAfterFirstResponse(
+        entry,
+        firstResponse,
+        trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
+      );
       return 'started';
     }
-    void this.confirmStopAfterFirstResponse(
-      entry,
-      firstResponse,
-      trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
-    );
-    return 'started';
+    // 旧タブは残す。`failed`で返すと入口が起動済みフラグを戻す（Issue #1746）
+    const message = '引き継ぎ先のセッションを開けませんでした。旧タブはそのまま残ります';
+    this.log.warn(message);
+    if (notifyFailure) {
+      void vscode.window.showErrorMessage(message);
+    }
+    return 'failed';
   }
 
   /**
