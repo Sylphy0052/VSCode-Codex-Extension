@@ -678,7 +678,8 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
 /**
  * オーケストレータモードの計画提案を、Reflexが妥当と判定したときに自動承認する（Issue #1554）。
  * 既定は無効（Issue #1679）。承認前の計画を人が確認し、計画の書き換えを人の承認に通すため。
- * 無効のときは判定を試みず、常にユーザーの承認待ちにする。
+ * 無効のときは判定を試みず、常にユーザーの承認待ちにする。Reflexモードの親スイッチ
+ * （`readReflexEnabled`）は見ないので、呼び出し側で合わせて見る（Issue #1713）。
  */
 export function readTaskRunPlanAutoApproveEnabled(): boolean {
   const raw = vscode.workspace
