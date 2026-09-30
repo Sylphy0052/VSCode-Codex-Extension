@@ -562,14 +562,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.noteUserAction(entry);
       if (doneCheck === undefined) {
         await entry.session.send(prompt, this.configFor(entry));
+        this.reportActivity(entry, prompt);
       } else {
+        // 作業記録はループの送信（`sendFromLoop`）が残す
         this.stopAutoReply(entry, 'loopStarted');
         entry.loop.start(
           buildWebGptDiscussionLoopPlan(prompt, doneCheck),
           entry.session.getState().items,
         );
       }
-      this.reportActivity(entry, prompt);
     } catch (error) {
       reportDiscussionError(error);
     } finally {
