@@ -522,7 +522,7 @@ export const INPUT_LOCKED_MESSAGE =
 
 /** 表示専用で預かったタブ（Issue #1775）の会話の末尾に足す注記。 */
 export const HELD_TASK_PANEL_NOTICE =
-  'ウィンドウを開き直したため、会話の表示だけを戻しました（CLIは起動していません）。runを再開すると、このタブで続きを開きます';
+  'ウィンドウを開き直したため、会話の表示だけを戻しました（CLIは起動していません）。続きはrunを再開すると開きます。不要なタブは閉じてかまいません';
 
 /** 入力欄を閉じたタブから送れる指示の最大文字数（Kanbanの回答欄と揃える）。 */
 const MAX_LOCKED_INSTRUCTION_LENGTH = 2000;

@@ -651,7 +651,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   claudeChat.setSummaryRollout(chat.summaryRolloutDeps());
   // オーケストレータモードのタブは、ウィンドウを開き直したら閉じずに表示専用で預かる。
   // runの再開で同じ工程・Orchestratorを開き直すときに引き取らせる（Issue #1775）
-  const holdsRestoredTaskPanel = (id: string): boolean => taskRunStore.hasSessionRef(id);
+  const holdsRestoredTaskPanel = (id: string): boolean =>
+    taskRunStore.hasUnfinishedRunSessionRef(id);
   chat.holdsRestoredTaskPanel = holdsRestoredTaskPanel;
   claudeChat.holdsRestoredTaskPanel = holdsRestoredTaskPanel;
 

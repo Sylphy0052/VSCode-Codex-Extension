@@ -307,8 +307,15 @@ export class ChatSession {
       threadId,
       restore: { state: 'loading', message: undefined },
     });
-    await this.connection.ensureStarted();
-    const response = await this.connection.request('thread/read', { threadId, includeTurns: true });
+    let response: Awaited<ReturnType<typeof this.connection.request>>;
+    try {
+      await this.connection.ensureStarted();
+      response = await this.connection.request('thread/read', { threadId, includeTurns: true });
+    } catch (e) {
+      // 表示専用のタブは`resume`を受け付けないため、再試行を促す表示（`resumeFailed`）は出さない
+      this.update({ ...this.state, restore: undefined });
+      throw e;
+    }
     const items = readInitialItems(response.result);
     this.update({
       ...this.state,

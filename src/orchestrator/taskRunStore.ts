@@ -76,17 +76,29 @@ export class TaskRunStore extends MementoRunStore<TaskRun> {
    * （全世代）かどうか。リロード後の汎用復元から、入力を閉じるべきタブを外す判定に使う。
    */
   hasSessionRef(sessionId: string): boolean {
-    if (sessionId === '') {
-      return false;
-    }
-    return this.list().some(
-      (run) =>
-        run.orchestratorSessionRefs.includes(sessionId) ||
-        Object.values(run.tasks).some((task) =>
-          Object.values(task.stages).some((stage) =>
-            stage.attempts.some((a) => a.sessionRef === sessionId),
-          ),
-        ),
+    return sessionId !== '' && this.list().some((run) => runHasSessionRef(run, sessionId));
+  }
+
+  /**
+   * 終わっていない（実行中か中断中で、再開できる）runのセッションかどうか。リロード後に
+   * 表示専用で預かるタブの判定に使う（Issue #1775）。終わったrunのタブは引き取り手が
+   * 現れないため預からない。
+   */
+  hasUnfinishedRunSessionRef(sessionId: string): boolean {
+    return (
+      sessionId !== '' &&
+      this.list().some((run) => run.finishedAt === undefined && runHasSessionRef(run, sessionId))
     );
   }
+}
+
+function runHasSessionRef(run: TaskRun, sessionId: string): boolean {
+  return (
+    run.orchestratorSessionRefs.includes(sessionId) ||
+    Object.values(run.tasks).some((task) =>
+      Object.values(task.stages).some((stage) =>
+        stage.attempts.some((a) => a.sessionRef === sessionId),
+      ),
+    )
+  );
 }

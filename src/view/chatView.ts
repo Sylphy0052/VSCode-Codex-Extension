@@ -2309,7 +2309,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       await entry.session.showReadOnly(threadId);
     } catch (e) {
       if (!entry.disposed) {
-        entry.session.resumeFailed(resumeFailureMessage(e));
+        entry.session.noteLocalEvent(
+          'held-task-panel',
+          `会話を読み込めませんでした: ${resumeFailureMessage(e)}`,
+        );
       }
       return;
     }
