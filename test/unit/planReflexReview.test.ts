@@ -34,6 +34,15 @@ describe('reviewPlanWithReflex', () => {
     await expect(review(stub)).resolves.toMatchObject({ kind: 'approved' });
   });
 
+  it('確率の合計が幅の中なら1へ割り直して閾値と比べる（Issue #1715）', async () => {
+    // 合計0.94。割り直すと妥当=0.77/0.94≒0.82で閾値を超える
+    const stub = reflexStub(reflexAnswers(probs(0.77, 0.12, 0.05)));
+    await expect(review(stub)).resolves.toEqual({
+      kind: 'approved',
+      summary: '妥当 0.82 / 誤りがある 0.13 / 判定できない 0.05',
+    });
+  });
+
   it('「妥当」が最上位でも閾値未満ならneedsUser', async () => {
     const stub = reflexStub(reflexAnswers(probs(0.6, 0.3, 0.1)));
     await expect(review(stub)).resolves.toEqual({

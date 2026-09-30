@@ -34,13 +34,18 @@ describe('checkLoopDone', () => {
     await expect(checkLoopDone(stub.deps, INPUT, THRESHOLD)).resolves.toMatchObject({ kind: 'passed' });
   });
 
-  it('閾値未満なら、足りない点に応じた固定文を添えてrejected', async () => {
-    const stub = reflexStub(reflexAnswers({ p: 0.3 }, gapProbs('検証が失敗')));
+  it.each([
+    ['検証が未実行', '終了条件を満たしたことを確かめるコマンド（テスト・ビルドなど）がまだ実行されていません。'],
+    ['検証が失敗', '実行したコマンドのうち、失敗したまま直っていないものがあります。'],
+    ['条件の一部が未達', '終了条件のうち、まだ満たしていない部分があります。'],
+    ['根拠が不明', '応答にも実行の記録にも、終了条件を満たした根拠が見当たりません。'],
+  ] as const)('閾値未満で「%s」なら、それに応じた固定文を添えてrejected', async (gap, feedback) => {
+    const stub = reflexStub(reflexAnswers({ p: 0.3 }, gapProbs(gap)));
     await expect(checkLoopDone(stub.deps, INPUT, THRESHOLD)).resolves.toEqual({
       kind: 'rejected',
       probability: 0.3,
-      gap: '検証が失敗',
-      feedback: '実行したコマンドのうち、失敗したまま直っていないものがあります。',
+      gap,
+      feedback,
     });
   });
 

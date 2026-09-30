@@ -165,6 +165,24 @@ describe('TaskStageRunner.judgeGate', () => {
     expect(judgeAnswerer).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['人へ回す判定', async (): Promise<RoadmapQuestionVerdict> => ({ kind: 'human', summary: '確信度不足' })],
+    ['「ユーザーに判断を上げる」の判定', async () => answer(GATE_OPTION_ASK_USER)],
+    [
+      '判定の失敗',
+      async (): Promise<RoadmapQuestionVerdict> => {
+        throw new Error('timeout');
+      },
+    ],
+  ])('レビューが通過しなかった関門は、%sでも回答者判定にかけずにユーザーへ回す（Issue #1711）', async (_label, verdict) => {
+    const judgeGate = vi.fn<GateJudge>(verdict);
+    const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'orchestrator', summary: '決めてよい' }));
+    const t = setup(reviewGateRun(false), { judgeGate, judgeAnswerer });
+    await t.internals.judgeGate('run-1', 'T1', 'g1', undefined);
+    expect(judgeAnswerer).not.toHaveBeenCalled();
+    expect(findStageGate(t.run(), 'T1', 'g1')?.status).toBe('awaitingUser');
+  });
+
   it('関門の種類に合わない選択肢の判定は決着させず、回答者判定にかける', async () => {
     const judgeGate = vi.fn<GateJudge>(async () => answer(GATE_OPTION_SEND_BACK));
     const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'user', summary: undefined }));
@@ -261,7 +279,10 @@ const ASK: RoadmapAskArgs = {
   escalation: [],
 };
 
-function questionRun(args: RoadmapAskArgs): { run: TaskRun; question: StageQuestion; entry: unknown } {
+function questionRun(
+  args: RoadmapAskArgs,
+  reflexEnabled: boolean | undefined,
+): { run: TaskRun; question: StageQuestion; entry: unknown } {
   const task = haltedTask('T1');
   const ref = { taskId: 'T1', executionId: task.executionId, stage: 'implement' as const, attemptId: 'a1' };
   const run = addStageQuestion(makeRun([task]), ref, 'q1', args, FIXTURE_NOW);
@@ -269,11 +290,16 @@ function questionRun(args: RoadmapAskArgs): { run: TaskRun; question: StageQuest
   if (question === undefined) {
     throw new Error('質問を足せなかった');
   }
-  return { run, question, entry: { runId: 'run-1', ref, session: { reflexEnabled: () => true } } };
+  return { run, question, entry: { runId: 'run-1', ref, session: { reflexEnabled: () => reflexEnabled } } };
 }
 
-function setupQuestion(args: RoadmapAskArgs, judges: Judges) {
-  const { run, question, entry } = questionRun(args);
+/** `reflexEnabled`は工程セッションのタブの上書き（Issue #1727）。 */
+function setupQuestion(
+  args: RoadmapAskArgs,
+  judges: Judges,
+  tab: { reflexEnabled: boolean | undefined } = { reflexEnabled: true },
+) {
+  const { run, question, entry } = questionRun(args, tab.reflexEnabled);
   const t = setup(run, judges);
   const deliverAnswer = vi.spyOn(t.internals, 'deliverAnswer').mockResolvedValue(undefined);
   return {
@@ -366,12 +392,28 @@ describe('TaskStageRunner.routeQuestion', () => {
     expect(t.question()).toMatchObject({ status: 'awaitingUser', reflexSummary: 'Reflexの判定に失敗: timeout' });
   });
 
+  it.each([false, undefined])(
+    'タブの上書き（%s）を判定の口と回答者判定へそのまま渡す（Issue #1727）',
+    async (reflexEnabled) => {
+      const judgeQuestion = vi.fn<QuestionJudge>(async () => ({ kind: 'human', summary: undefined }));
+      const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'user', summary: undefined }));
+      const t = setupQuestion(ASK, { judgeQuestion, judgeAnswerer }, { reflexEnabled });
+      await t.route();
+      expect(judgeQuestion.mock.calls[0]?.[2]).toBe(reflexEnabled);
+      expect(judgeAnswerer.mock.calls[0]?.[3]).toBe(reflexEnabled);
+    },
+  );
+
   it('既に答えの出た質問へ判定の答えが遅れて届いても上書きしない', async () => {
-    const judgeQuestion = vi.fn<QuestionJudge>(async () => answer('案B'));
+    const judgeQuestion = vi
+      .fn<QuestionJudge>()
+      .mockResolvedValueOnce(answer('案B'))
+      .mockResolvedValueOnce(answer('案A'));
     const t = setupQuestion(ASK, { judgeQuestion });
     await t.route();
     await t.route();
+    expect(judgeQuestion).toHaveBeenCalledTimes(2);
     expect(t.deliverAnswer).toHaveBeenCalledTimes(1);
-    expect(t.question()?.status).toBe('answeredByReflex');
+    expect(t.question()).toMatchObject({ status: 'answeredByReflex', answer: '案B' });
   });
 });

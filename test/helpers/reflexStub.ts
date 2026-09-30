@@ -9,19 +9,16 @@ export interface ReflexStub {
   deps: ReflexJudgeDeps;
   /** CLIへ渡したプロンプト。呼ばれた順。 */
   prompts: string[];
-  warnings: string[];
 }
 
 export function reflexStub(outcome: HeadlessOutcome | Error): ReflexStub {
   const prompts: string[] = [];
-  const warnings: string[] = [];
   return {
     prompts,
-    warnings,
     deps: {
       provider: 'claude',
       executable: 'claude',
-      logWarn: (message) => warnings.push(message),
+      logWarn: () => undefined,
       run: async (_deps, prompt) => {
         prompts.push(prompt);
         if (outcome instanceof Error) {

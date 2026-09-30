@@ -82,8 +82,10 @@ describe('buildGateQuestion', () => {
     });
     const run = withOpenGate(makeRun([task]), 'T1', 'g1', 'stageFailed');
     const opened = getTask(run, 'T1');
-    expect(opened).toBeDefined();
-    expect(buildGateQuestion(opened!, gateOf(run, 'T1', 'g1')).reason).toContain('これまで2回');
+    if (opened === undefined) {
+      throw new Error('タスクが無い');
+    }
+    expect(buildGateQuestion(opened, gateOf(run, 'T1', 'g1')).reason).toContain('これまで2回');
   });
 });
 
