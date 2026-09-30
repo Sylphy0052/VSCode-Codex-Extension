@@ -203,6 +203,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         options: target.options,
         evidence: [
           target.evidence,
+          target.escalationNote,
           target.reflexSummary === undefined ? undefined : `これまでの判定: ${target.reflexSummary}`,
           `オーケストレーターの回答案: ${answer}`,
         ]

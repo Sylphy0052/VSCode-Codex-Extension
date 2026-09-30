@@ -690,19 +690,23 @@ export class TaskRunOrchestrator {
     ) {
       return { kind: 'ask' };
     }
+    // 判定の間に同時に届いた呼び出しが上限を超えないよう、awaitの前に枠を確保する。
+    // 拒否にならなければ返す
+    live.askUserQuestionRejections += 1;
     let verdict: AnswererVerdict;
     try {
       verdict = await judge(runId, questions);
     } catch (e: unknown) {
+      live.askUserQuestionRejections -= 1;
       this.deps.log(
         `[task run orchestrator] ${runId}: AskUserQuestionの回答者判定に失敗したため人へ回します: ${e instanceof Error ? e.message : String(e)}`,
       );
       return { kind: 'ask' };
     }
     if (verdict.kind !== 'orchestrator') {
+      live.askUserQuestionRejections -= 1;
       return { kind: 'ask' };
     }
-    live.askUserQuestionRejections += 1;
     return {
       kind: 'auto',
       decision: 'decline',

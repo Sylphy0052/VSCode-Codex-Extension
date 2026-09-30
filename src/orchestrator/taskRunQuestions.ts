@@ -1,4 +1,4 @@
-import type { RoadmapAskArgs } from './roadmapQuestionMcp';
+import { describeEscalations, type RoadmapAskArgs } from './roadmapQuestionMcp';
 import {
   getTask,
   joinSummaries,
@@ -75,6 +75,7 @@ export function addStageQuestion(
     return run;
   }
   const at = now.toISOString();
+  const escalationNote = describeEscalations(args.escalation);
   const question: StageQuestion = {
     questionId,
     stage: ref.stage,
@@ -90,6 +91,7 @@ export function addStageQuestion(
     answer: undefined,
     askedAt: at,
     answeredAt: undefined,
+    ...(escalationNote === undefined ? {} : { escalationNote }),
   };
   return withQuestions(run, task, trimQuestions([...(task.questions ?? []), question]), at);
 }

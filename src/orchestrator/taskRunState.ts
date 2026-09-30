@@ -267,6 +267,8 @@ export interface StageQuestion {
    * ユーザーへ回した）。Orchestratorが答えようとしても回答者を判定し直さない（Issue #1763）。
    */
   userOnly?: true;
+  /** 質問したエージェントが付けたescalationの説明（`describeEscalations`）。回答者を判定し直す材料に使う。 */
+  escalationNote?: string;
 }
 
 /** 計画の状態: Orchestratorが作成中 / ユーザーの承認待ち / 承認済み。 */
