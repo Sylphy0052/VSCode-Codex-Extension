@@ -27,6 +27,7 @@ import { consumeNdjson } from '../util/ndjson';
 import { buildAskUserQuestionDenyResponse, buildAskUserQuestionResponse } from './askUserQuestion';
 import type { AskUserQuestionSelections } from './askUserQuestion';
 import { buildClaudeStreamArgs } from './argvBuilder';
+import { readClaudeAutoCompactWindow } from './autoCompactSettings';
 import {
   buildCanUseToolResponse,
   defaultDenyControlResponse,
@@ -332,6 +333,8 @@ export class ClaudeStreamSession {
     // 訂正）。
     this.releasePendingWaiters();
     this.isForkSession = options.target.kind === 'fork';
+    // 残量の分母（Issue #1747）。`/autocompact` の応答が届けば `streamJson.ts` が上書きする
+    this.state = { ...this.state, autoCompactLimit: readClaudeAutoCompactWindow(options.cwd) };
     this.sandboxBashGuard = options.config.sandboxBashGuard === true;
 
     const { args, warnings } = buildClaudeStreamArgs({
@@ -353,7 +356,15 @@ export class ClaudeStreamSession {
       // （SDK向け）と挙動から拡張機能のような非対話クライアント向けの明示的な入口と判断し、
       // 常に立てる。CLIの更新で消える・形が変わる可能性はあり、その場合は
       // `rewind_files` の応答が失敗として返るだけで、会話自体は影響を受けない。
-      env: { ...process.env, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1' },
+      //
+      // `AGENT_EXTENSION_AUTO_HANDOFF` は、引き継ぎを拡張が受け持つことをhookへ知らせる
+      // （Issue #1747）。`~/.claude/hooks/user-prompt-submit/context-check.py` はこれを見て、
+      // 拡張と別の基準で引き継ぎを指示しない
+      env: {
+        ...process.env,
+        CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+        AGENT_EXTENSION_AUTO_HANDOFF: '1',
+      },
     });
     this.proc = proc;
 
@@ -1460,7 +1471,7 @@ export class ClaudeStreamSession {
     }
 
     if (outgoing?.kind === 'contextUsage') {
-      const context = readContextUsage(response.payload);
+      const context = readContextUsage(response.payload, this.state.autoCompactLimit);
       if (context !== undefined) {
         this.update({ ...this.state, context });
       }
