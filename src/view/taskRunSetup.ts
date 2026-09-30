@@ -7,10 +7,8 @@ import { CLAUDE_EFFORTS } from '../claude/types';
 import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
 import {
   readAnswererJudgeConfig,
-  readAutoReplyReflexConfig,
   readClaudeConfig,
   readConfig,
-  readReflexEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
@@ -25,11 +23,7 @@ import {
   ResourceMonitor,
 } from '../orchestrator/resourceMonitor';
 import { ResourceSampler } from '../orchestrator/resourceSampler';
-import {
-  judgeRoadmapQuestion,
-  RoadmapQuestionMcpServer,
-  type RoadmapQuestionVerdict,
-} from '../orchestrator/roadmapQuestionMcp';
+import { RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
 import {
   resolveRoadmapBaseCommit,
   type RoadmapRunForgePorts,
@@ -37,7 +31,6 @@ import {
 import type { RunNotesStore } from '../orchestrator/runNotes';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import { TaskRunController, type ControllerResult } from '../orchestrator/taskRunController';
-import type { GateJudgeQuestion } from '../orchestrator/taskRunGates';
 import {
   computeHostIdentity,
   TASK_LEASE_DIR_NAME,
@@ -67,9 +60,7 @@ import {
 } from '../orchestrator/worktree';
 import {
   ANSWERER_USER_FALLBACK,
-  judgeQuestionAnswerer,
   judgeTurnEndAnswerer,
-  type AnswererQuestion,
   type AnswererVerdict,
 } from '../reflex/answererJudge';
 import { reflexJudgeDeps } from '../reflex/reflexJudge';
@@ -77,6 +68,7 @@ import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
 import { taskRunLabel } from './taskRunKanbanModel';
 import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanbanView';
+import { createStageReflexJudges } from './taskRunStageJudges';
 import { sessionHubRoot } from './sessionHub';
 import {
   startRoadmapRunCommand,
@@ -145,32 +137,10 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ? { models: deps.settings.claudeSnapshot().models, fallbackEfforts: CLAUDE_EFFORTS }
       : { models: deps.settings.snapshot().models, fallbackEfforts: FALLBACK_EFFORTS };
 
-  // 工程の質問・関門の自動回答。工程セッションのタブのReflex（`reflexEnabled`。`undefined`なら
-  // グローバル設定）と`agent.chat.autoReply.reflex.enabled`のどちらかが無効ならユーザーへ回す（Issue #1727）
-  const judgeByReflex = async (
-    engine: TaskRunEngine,
-    question: GateJudgeQuestion,
-    reflexEnabled: boolean | undefined,
-  ): Promise<RoadmapQuestionVerdict> => {
-    const settings = readAutoReplyReflexConfig(reflexEnabled ?? readReflexEnabled());
-    return settings.enabled
-      ? judgeRoadmapQuestion(reflexDeps(engine), question, settings.answerThreshold)
-      : { kind: 'human', summary: undefined };
-  };
-
-  // 回答者判定（Issue #1708）。無効、またはOrchestratorへ任せられないならすべてユーザーへ回す。
-  // 工程セッションからの問いなので、そのタブのReflexに従う（Issue #1727）
-  const judgeAnswerer = async (
-    runId: string,
-    engine: TaskRunEngine,
-    question: AnswererQuestion,
-    reflexEnabled: boolean | undefined,
-  ): Promise<AnswererVerdict> => {
-    const settings = readAnswererJudgeConfig(reflexEnabled ?? readReflexEnabled());
-    return settings.enabled && orchestrator.canDecide(runId)
-      ? judgeQuestionAnswerer(reflexDeps(engine), question, settings.threshold)
-      : ANSWERER_USER_FALLBACK;
-  };
+  const { judgeByReflex, judgeAnswerer } = createStageReflexJudges({
+    reflexDeps,
+    canDecide: (runId) => orchestrator.canDecide(runId),
+  });
   const judgeTurnEnd = async (runId: string, lastMessage: string): Promise<AnswererVerdict> => {
     const settings = readAnswererJudgeConfig();
     const engine = controller.find(runId)?.engine;
