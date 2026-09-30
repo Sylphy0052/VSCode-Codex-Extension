@@ -173,6 +173,7 @@ import {
   describeGate,
   describeProfile,
 } from './handoffTrace';
+import { appendHandoffLog } from './handoffLog';
 import {
   applyHandoffReflexThresholds,
   describeHandoffBoundaryMaterial,
@@ -1150,6 +1151,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.reportError(e);
       return 'failed';
     }
+    // 引き継ぎ1回につき1件の記録（Issue #1752）。失敗しても引き継ぎは止めない
+    await appendHandoffLog(this.globalStorageDir, {
+      provider: 'codex',
+      trigger,
+      prompt: chooseHandoffPrompt(pointerPath, lastAssistantMessage),
+      pointerPath,
+    }).catch((e: unknown) =>
+      this.log.warn(
+        `引き継ぎの記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
 
     if (entry.handoffDelegate !== undefined) {
       // 委譲先の見送りと失敗は`delegateHandoff`がfalseにまとめるため区別できない。タスク用
@@ -1228,7 +1240,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const handoffPrompt = handoffBlock?.body;
     if (handoffBlock !== undefined) {
       // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
-      entry.trace.info(`handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`);
+      entry.trace.info(
+        `handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`,
+      );
     }
     const handoffName = buildHandoffSessionName({
       ...(previousName === undefined ? {} : { previousName }),
@@ -1866,6 +1880,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           timeoutMs: readAutoHandoffClassifierTimeoutMs(),
           logWarn: (message) => entry.trace.warn(message),
         },
+        state.context?.usedTokens,
       );
     } finally {
       entry.safeBoundaryProbing = false;
@@ -1888,6 +1903,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     ) {
       entry.trace.info('分類器を待つ間に状況が変わったため発火しない');
       return;
+    }
+    if (onProfileChange && probe.switchSafe && probe.switchInPlaceModel !== undefined) {
+      await this.switchModelInPlace(entry, probe.switchInPlaceModel);
     }
     const trigger = decideAutoHandoff({
       enabled: latest.autoHandoff,
@@ -1916,6 +1934,24 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     void this.requestHandoff(entry, trigger, probe.assessment);
+  }
+
+  /**
+   * 区切りでのmodel変更を、contextが軽いためその場で行う（Issue #1752）。引き継ぎは
+   * しない。空のmodelは「既定へ戻す」なので何もしない。
+   */
+  private async switchModelInPlace(entry: ChatPanel, model: string): Promise<void> {
+    if (model === '' || model === entry.modelSettings.model) {
+      return;
+    }
+    entry.trace.info(`contextが軽いため引き継がず、modelをその場で ${model} へ切り替える`);
+    entry.modelSettings.model = model;
+    const allowed = effortsFor(this.settings.snapshot().models, model);
+    if (entry.modelSettings.effort !== '' && !allowed.includes(entry.modelSettings.effort)) {
+      entry.modelSettings.effort = '';
+    }
+    await this.persistModelSettings(entry);
+    this.postState(entry);
   }
 
   /**
@@ -1994,6 +2030,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
                 timeoutMs: readAutoHandoffClassifierTimeoutMs(),
                 logWarn: (message) => entry.trace.warn(message),
               },
+              state.context?.usedTokens,
             )
           : undefined,
       ]);
@@ -2036,6 +2073,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     ) {
       entry.trace.info('Reflexの判定を待つ間に状況が変わったため発火しない');
       return;
+    }
+    if (ctx.onProfileChange && reading.switchSafe && probe?.switchInPlaceModel !== undefined) {
+      await this.switchModelInPlace(entry, probe.switchInPlaceModel);
     }
     const trigger = decideAutoHandoff({
       enabled: latest.autoHandoff,
