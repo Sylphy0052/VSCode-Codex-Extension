@@ -180,6 +180,7 @@ export interface QuestionAwaitingAnswer {
   options: readonly string[];
   evidence: string | undefined;
   reflexSummary: string | undefined;
+  escalationNote: string | undefined;
   awaitingOrchestrator: boolean;
   /** ユーザーだけが答える質問（Issue #1763）。回答者を判定し直さない。 */
   userOnly: boolean;
@@ -713,7 +714,16 @@ export class TaskRunController {
       this.plansNeedingUser.set(runId, reviewedPlan);
       return { needsUser: { summary: verdict.summary, reviewedPlan } };
     }
-    return { decided: await this.approvePlan(runId, reviewedPlan) };
+    const approved = await this.approvePlan(runId, reviewedPlan);
+    if (!approved.ok) {
+      // 承認を拒まれた（Issueの重複等）。審査の記録を実際の状態に合わせて自動承認でなくする
+      await this.updateRun(runId, (r) =>
+        r.planStatus === 'awaitingApproval' && r.planReview?.autoApproved === true
+          ? setTaskPlanReview(r, { ...r.planReview, autoApproved: false })
+          : r,
+      );
+    }
+    return { decided: approved };
   }
 
   /**
@@ -1362,6 +1372,7 @@ export class TaskRunController {
       options: question.options,
       evidence: question.evidence,
       reflexSummary: question.reflexSummary,
+      escalationNote: question.escalationNote,
       awaitingOrchestrator: question.status === 'awaitingOrchestrator',
       userOnly: question.userOnly === true,
     };
