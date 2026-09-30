@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import * as vscode from 'vscode';
-import { buildWebGptMcpConfig, WEB_GPT_MCP_SERVER } from '../webGpt/discussion';
+import {
+  buildWebGptDiscussionLoopPlan,
+  buildWebGptDiscussionPrompt,
+  buildWebGptMcpConfig,
+  WEB_GPT_MCP_SERVER,
+} from '../webGpt/discussion';
 import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
@@ -1108,9 +1113,27 @@ export class ClaudeChatViewManager
           entry.session.ensureMcpServer(WEB_GPT_MCP_SERVER, buildWebGptMcpConfig(request.endpoint)),
       );
       assertReady();
+      // 合意・未訂正の誤りの判定にReflexを使う（Issue #1704）。無効ならエージェントの判断だけで終える
+      const doneCheck = this.buildLoopDoneCheck(entry);
+      const prompt = buildWebGptDiscussionPrompt(
+        request.topic,
+        request.urls,
+        request.maxSends,
+        true,
+        undefined,
+        doneCheck !== undefined,
+      );
       this.cancelLimitAutoResume(entry);
       this.noteUserAction(entry);
-      this.dispatch(entry, request.prompt);
+      if (doneCheck === undefined) {
+        this.dispatch(entry, prompt);
+      } else {
+        this.stopAutoReply(entry, 'loopStarted');
+        entry.loop.start(
+          buildWebGptDiscussionLoopPlan(prompt, doneCheck),
+          entry.session.getState().items,
+        );
+      }
     } catch (error) {
       reportDiscussionError(error);
     } finally {

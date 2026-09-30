@@ -1,17 +1,16 @@
 import * as vscode from 'vscode';
 import { ensureWebGptBrowser } from '../webGpt/browser';
 import {
-  buildWebGptDiscussionPrompt,
   DEFAULT_CDP_ENDPOINT,
   parseCdpEndpoint,
   parseConversationUrls,
+  WEB_GPT_DEFAULT_MAX_SENDS,
+  WEB_GPT_MAX_SENDS_LIMIT,
 } from '../webGpt/discussion';
 /** 現在の会話で使う場合も、Chromeの準備と入力は共通にする。 */
 export async function prepareWebGptDiscussion(
   useCurrentContext = false,
-): Promise<
-  { prompt: string; endpoint: string; topic: string; urls: string[]; maxSends: number } | undefined
-> {
+): Promise<{ endpoint: string; topic: string; urls: string[]; maxSends: number } | undefined> {
   if (!vscode.workspace.isTrusted) {
     throw new Error('WebGPTとの議論には信頼済みワークスペースが必要です');
   }
@@ -58,10 +57,18 @@ export async function prepareWebGptDiscussion(
         : undefined,
   });
   if (topic === undefined) return;
+  // 既定を先頭に置き、残りを1回から上限まで並べる
+  const counts = [
+    WEB_GPT_DEFAULT_MAX_SENDS,
+    ...Array.from({ length: WEB_GPT_MAX_SENDS_LIMIT }, (_, i) => i + 1).filter(
+      (count) => count !== WEB_GPT_DEFAULT_MAX_SENDS,
+    ),
+  ];
   const limit = await vscode.window.showQuickPick(
-    [2, 1, 3, 4, 5].map((count) => ({
-      label: `${count}回${count === 2 ? '（既定）' : ''}`,
-      description: count === 1 ? '初回回答を集めてまとめる' : '初回質問と追加の批評・質問を含む',
+    counts.map((count) => ({
+      label: `${count}回${count === WEB_GPT_DEFAULT_MAX_SENDS ? '（既定）' : ''}`,
+      description:
+        count === 1 ? '初回回答を集めてまとめる' : '合意するまで、初回質問と追加の批評・質問を送る',
       count,
     })),
     {
@@ -80,7 +87,6 @@ export async function prepareWebGptDiscussion(
     topic: resolvedTopic,
     urls,
     maxSends: limit.count,
-    prompt: buildWebGptDiscussionPrompt(resolvedTopic, urls, limit.count, useCurrentContext),
   };
 }
 
