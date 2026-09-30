@@ -52,8 +52,8 @@ function commandOf(rawParams: Record<string, unknown>): string {
  */
 export function isMergeOrRemoteBranchDelete(command: string): boolean {
   return (
-    /\bgh\s+pr\s+merge\b/i.test(command) ||
-    /\bglab\s+mr\s+merge\b/i.test(command) ||
+    /\bgh\s+(?:-\S+\s+(?:\S+\s+)?)*pr\s+merge\b/i.test(command) ||
+    /\bglab\s+(?:-\S+\s+(?:\S+\s+)?)*mr\s+merge\b/i.test(command) ||
     /\bgh\s+api\b[^\n]*\/merge\b/i.test(command) ||
     /\bglab\s+api\b[^\n]*\/merge\b/i.test(command) ||
     /\bgit\s+push\b[^\n]*\s\+?:[^\s]+/i.test(command) ||
