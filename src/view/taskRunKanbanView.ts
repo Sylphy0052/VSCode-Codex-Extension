@@ -559,8 +559,9 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .plan { margin-bottom: 16px; } .plan:empty { display: none; }
 .plan-box { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border: 1px solid var(--vscode-charts-yellow); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
 /* 7列を等分すると狭いパネルで1行数文字まで潰れるため、列に下限幅を持たせて横スクロールにする。空の列は細くする。
-   列の高さを画面の高さまでに抑えてカードは列の中で縦スクロールさせ、盤面の横スクロールバーを常に画面内へ置く（Issue #1764） */
-.board { display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
+   列の高さを画面の高さまでに抑えてカードは列の中で縦スクロールさせ、盤面の横スクロールバーを常に画面内へ置く（Issue #1764）。
+   横スクロールバーは列が収まる幅でも常に出し、右に列が続くかどうかで盤面の高さが変わらないようにする */
+.board { display: flex; gap: 10px; align-items: flex-start; overflow-x: scroll; padding-bottom: 8px; }
 .column { flex: 1 1 240px; min-width: 220px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; display: flex; flex-direction: column; max-height: calc(100vh - 48px); }
 .column.is-empty { flex: 0 0 104px; min-width: 104px; min-height: 0; } .column.is-empty .empty { padding: 8px 12px; }
 .column-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; font-size: 13px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
