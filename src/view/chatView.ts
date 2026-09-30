@@ -142,6 +142,7 @@ import { buildItemsDelta, stripHostOnlyState } from './stateDelta';
 import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
+  buildHandoffPrompt,
   chooseHandoffPrompt,
   containsHandoffPrompt,
   detectHandoffMilestone,
@@ -162,6 +163,7 @@ import {
   oldTabKeptMessage,
   waitForDestinationResponse,
   writeHandoffPointer,
+  writeHandoffPromptFile,
   type DestinationResponseOutcome,
   type HandoffOutcome,
   type HandoffTrigger,
@@ -1120,6 +1122,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       `引き継ぎ先のmodel/effort: ${choice.settings.model || '既定'} / ${choice.settings.effort || '既定'}（${choice.reasons.join(' / ')}）`,
     );
     let pointerPath: string;
+    const createdAt = new Date();
     try {
       pointerPath = await writeHandoffPointer(this.globalStorageDir, {
         provider: 'codex',
@@ -1144,11 +1147,24 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         ...(lastAssistantMessage === undefined ? {} : { nextSteps: lastAssistantMessage }),
         turnEditedFiles: state.turnEditedFiles,
         routerReasons: choice.reasons,
-        createdAt: new Date(),
+        createdAt,
       });
     } catch (e) {
       this.reportError(e);
       return 'failed';
+    }
+    // 渡す本文を、新セッションを作る前に残す（Issue #1750）。書けなければポインタを指す本文へ戻す
+    const pointerText = buildHandoffPrompt(pointerPath);
+    let firstText = chooseHandoffPrompt(pointerPath, lastAssistantMessage);
+    const savedPromptPath = await writeHandoffPromptFile(
+      this.globalStorageDir,
+      threadId,
+      createdAt,
+      firstText,
+      (message) => this.log.warn(message),
+    );
+    if (savedPromptPath === undefined) {
+      firstText = pointerText;
     }
 
     if (entry.handoffDelegate !== undefined) {
@@ -1157,7 +1173,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       const handedOff = await this.delegateHandoff(
         entry.handoffDelegate,
         choice.settings,
-        chooseHandoffPrompt(pointerPath, lastAssistantMessage),
+        firstText,
         trigger,
         this.log,
       );
@@ -1173,24 +1189,27 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 引き継ぎ元パネルと同じ列へ開く。`panel.viewColumn`は非表示のとき
     // `undefined`になるため、`lastKnownViewColumn`（最後に見えていた列）へ落ちる
     const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
-    const newThreadId = await this.openNew(
-      entry.cwd,
-      entry.taskConfig,
-      choice.settings,
-      preserveFocus,
-      targetViewColumn,
-    );
-    if (newThreadId === undefined) {
-      this.log.warn(
-        '引き継ぎ先セッションを開けなかったため引き継げませんでした（旧タブはそのまま残ります）',
+    // 開けなかったら1回だけやり直す（Issue #1750）。`openNew`は失敗時に作りかけのタブを片付ける
+    let newThreadId: string | undefined;
+    let newEntry: ChatPanel | undefined;
+    for (let attempt = 1; attempt <= 2 && newEntry === undefined; attempt++) {
+      newThreadId = await this.openNew(
+        entry.cwd,
+        entry.taskConfig,
+        choice.settings,
+        preserveFocus,
+        targetViewColumn,
       );
-      return 'failed';
+      newEntry = newThreadId === undefined ? undefined : this.panels.get(newThreadId);
+      if (newThreadId !== undefined && newEntry === undefined) {
+        this.log.warn(`引き継ぎ先セッション(${newThreadId})がパネル一覧に見つかりませんでした`);
+      }
     }
-    const newEntry = this.panels.get(newThreadId);
     if (newEntry === undefined) {
-      this.log.warn(
-        `引き継ぎ先セッション(${newThreadId})がパネル一覧に見つからず引き継げませんでした（旧タブはそのまま残ります）`,
-      );
+      // 旧タブは残す。`failed`で返すと入口が起動済みフラグを戻す（Issue #1746）
+      const message = '引き継ぎ先のセッションを開けませんでした。旧タブはそのまま残ります';
+      this.log.warn(message);
+      void vscode.window.showErrorMessage(message);
       return 'failed';
     }
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
@@ -1228,7 +1247,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const handoffPrompt = handoffBlock?.body;
     if (handoffBlock !== undefined) {
       // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
-      entry.trace.info(`handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`);
+      entry.trace.info(
+        `handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`,
+      );
     }
     const handoffName = buildHandoffSessionName({
       ...(previousName === undefined ? {} : { previousName }),
@@ -1242,7 +1263,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
       );
     // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
-    const text = chooseHandoffPrompt(pointerPath, lastAssistantMessage);
+    const text = firstText;
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが

@@ -502,6 +502,48 @@ export function chooseHandoffPrompt(
 }
 
 /**
+ * 新セッションへ渡す初回プロンプトの本文を、ポインタファイルと同じ場所へ書き出す（Issue #1750）。
+ *
+ * handoffプロンプトを本文として渡す場合、その本文はポインタファイルに残らない。新セッションが
+ * 開けなかったときに何を渡そうとしたのか辿れるよう、渡す前に残す。失敗したら1回だけ再試行し、
+ * それでも書けなければ`undefined`を返す（呼び出し側はポインタを指すプロンプトへ戻す）。
+ */
+export async function writeHandoffPromptFile(
+  baseDir: string,
+  sessionId: string,
+  createdAt: Date,
+  text: string,
+  logWarn: (message: string) => void,
+): Promise<string | undefined> {
+  const dir = join(baseDir, 'handoff');
+  const filePath = join(
+    dir,
+    handoffPointerFileName(sessionId, createdAt).replace(/\.md$/u, '-prompt.md'),
+  );
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeFile(filePath, text, 'utf8');
+      return filePath;
+    } catch (e) {
+      logWarn(
+        `引き継ぎの本文を書き出せませんでした（${attempt}回目）: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 引き継ぎ先を開いて初回プロンプトを渡す試行の順序（Issue #1750）。渡す本文で1回、失敗したら
+ * もう1回、それでも駄目ならポインタだけを指すプロンプトで1回。本文がポインタと同じなら最後の
+ * 1回は要らない。
+ */
+export function handoffAttemptTexts(text: string, pointerText: string): string[] {
+  return text === pointerText ? [text, text] : [text, text, pointerText];
+}
+
+/**
  * 初回プロンプトの書き出し（Issue #1228）。
  *
  * 引き継ぎ先の1件目のユーザー発言がこの手続き由来であることを見分けるための目印として
