@@ -451,7 +451,7 @@ export class TaskStageRunner {
     taskId: string,
     gateId: string,
     run: TaskRun | undefined,
-    reflexEnabled: boolean | undefined = this.stageReflexEnabled(runId, taskId),
+    reflexEnabled: boolean | undefined,
   ): void {
     if (run === undefined || findStageGate(run, taskId, gateId)?.status !== 'judging') {
       return;
