@@ -169,6 +169,13 @@ import {
   type HandoffTrigger,
 } from './handoff';
 import {
+  buildHandoffFactsSection,
+  extractCreatedReferences,
+  newHandoffId,
+  resolveHandoffGitFacts,
+  withHandoffAcceptance,
+} from './handoffAcceptance';
+import {
   HandoffTrace,
   describeAssessment,
   describeDecision,
@@ -1277,13 +1284,24 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
       );
     // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
-    const text = firstText;
+    // 受け取り側が返す受領確認（Issue #1751）のid。skillが採番した値があればそれ、無ければ拡張が採番する
+    const handoffId = handoffBlock?.handoffId ?? newHandoffId(createdAt);
+    const factsSection = buildHandoffFactsSection(
+      await resolveHandoffGitFacts(entry.cwd, gitBranch),
+      extractCreatedReferences(state.items),
+    );
+    const text = withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId);
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
     // 残ってしまうため、その場で打ち切る
     const giveUp = new AbortController();
-    const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
+    const firstResponse = waitForDestinationResponse(
+      newEntry,
+      undefined,
+      giveUp.signal,
+      handoffId,
+    );
     try {
       await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
     } catch (e) {

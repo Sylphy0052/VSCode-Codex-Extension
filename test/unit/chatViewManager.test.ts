@@ -2219,10 +2219,18 @@ describe('handoffToNewSession（issue #694）', () => {
     expect(oldPanel?.disposed).toBe(false);
 
     if (method === 'respond') {
+      // 初回プロンプトが求める受領確認の行（Issue #1751）を、送られたidで返す
+      const sent = JSON.stringify(connection.requests.find((r) => r.method === 'turn/start'));
+      const handoffId = /HANDOFF_ACCEPTED (\d{8}T\d{6}-[0-9a-f]{6})/u.exec(sent)?.[1];
+      expect(handoffId).toBeDefined();
       connection.notify('item/started', {
         threadId: 'thread-new',
         turnId: 'turn-1',
-        item: { id: 'i1', type: 'agentMessage', text: '引き継ぎファイルを読みます' },
+        item: {
+          id: 'i1',
+          type: 'agentMessage',
+          text: `引き継ぎファイルを読みます\nHANDOFF_ACCEPTED ${handoffId}`,
+        },
       });
     } else {
       connection.notify(method, { threadId: 'thread-new' });
@@ -2555,7 +2563,9 @@ describe('handoffPrecheckとrearmAutoHandoff（Issue #1580）', () => {
   }
 
   it('handoffPrecheckがfalseなら、履歴解決とhandoffDelegateへ進まず手動引き継ぎを見送る', async () => {
-    const resolveHandoffRolloutPath = vi.fn(async () => '/home/user/.codex/sessions/rollout-x.jsonl');
+    const resolveHandoffRolloutPath = vi.fn(
+      async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    );
     const store = fakeSessionStore({ resolveHandoffRolloutPath });
     const handoffDelegate = vi.fn(async () => true);
     const handoffPrecheck = vi.fn(() => false);
@@ -2572,7 +2582,9 @@ describe('handoffPrecheckとrearmAutoHandoff（Issue #1580）', () => {
   });
 
   it('handoffPrecheckがtrueなら、従来どおりhandoffDelegateまで届く', async () => {
-    const resolveHandoffRolloutPath = vi.fn(async () => '/home/user/.codex/sessions/rollout-x.jsonl');
+    const resolveHandoffRolloutPath = vi.fn(
+      async () => '/home/user/.codex/sessions/rollout-x.jsonl',
+    );
     const store = fakeSessionStore({ resolveHandoffRolloutPath });
     const handoffDelegate = vi.fn<(request: TaskHandoffRequest) => Promise<boolean>>(
       async () => true,
@@ -2617,7 +2629,10 @@ describe('handoffPrecheckとrearmAutoHandoff（Issue #1580）', () => {
         item: { id: `i-${turnId}`, type: 'agentMessage', text: '作業しました' },
       });
       connection.notify('turn/completed', { threadId: 'thread-A', turnId });
-      connection.notify('thread/status/changed', { threadId: 'thread-A', status: { type: 'idle' } });
+      connection.notify('thread/status/changed', {
+        threadId: 'thread-A',
+        status: { type: 'idle' },
+      });
       connection.notify('thread/tokenUsage/updated', {
         threadId: 'thread-A',
         turnId,
