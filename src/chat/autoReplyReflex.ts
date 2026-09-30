@@ -67,7 +67,10 @@ export const ASK_USER_QUESTION_NONE_OPTION = '選択肢に合うものが無い'
 
 const ASK_LABEL_MAX_LENGTH = 200;
 const ASK_TEXT_MAX_LENGTH = 400;
-/** 危険度ゲートへ文脈として渡す直前の出力の上限。送る内容を先に置くため、切れるのは文脈の側。 */
+/**
+ * 危険度ゲートへ文脈として渡す直前の出力の上限。判定の対象である送る内容が状態の上限
+ * （`REFLEX_STATE_LIMIT`）で削られないよう、文脈の側を先にこの長さへ縮める。
+ */
 const DANGER_CONTEXT_MAX_LENGTH = 8000;
 
 export type AutoReplyCompletionVerdict =
