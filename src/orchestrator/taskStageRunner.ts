@@ -23,7 +23,9 @@ import {
 } from '../reflex/answererJudge';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
 import {
+  describeEscalations,
   findQuestionDangers,
+  findUserOnlyEscalations,
   needsUserDecision,
   parseRoadmapAskArgs,
   ROADMAP_ASK_ORCHESTRATOR_TOOL,
@@ -127,6 +129,10 @@ const MAX_INSTRUCTION_LENGTH = 2000;
 
 /** 質問への回答を、次の指示へ入れるときの上限。 */
 const MAX_ANSWER_PROMPT_LENGTH = 2000;
+
+/** レビュー未通過の関門を回答者判定にかけるとき、オーケストレーターが選べる範囲を示す材料（Issue #1763）。 */
+const REVIEW_FAILED_ORCHESTRATOR_SCOPE =
+  'オーケストレーターが決める場合に選べるのは「実装へ差し戻す」だけ。指摘を残したまま進める判断はユーザーに残る';
 
 /**
  * 工程セッションが背景タスクの完了を待つ時間の上限（Issue #1676）。工程のループには全体の
@@ -486,7 +492,8 @@ export class TaskStageRunner {
   /**
    * 関門をReflexで判定する。Reflexが無効・判定の失敗・「ユーザーに判断を上げる」、または
    * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。ただし「ユーザーに判断を上げる」と
-   * 判定の失敗のときは回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする。
+   * 判定の失敗のときは回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする
+   * （レビュー未通過の関門も含む。オーケストレーターは差し戻しだけを選べる。Issue #1763）。
    */
   private async judgeGate(
     runId: string,
@@ -535,8 +542,9 @@ export class TaskStageRunner {
         choice === 'proceed' && isReviewFailed(task)
           ? `レビューが通過していないため、Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を採らなかった`
           : `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
-    } else if (!isReviewFailed(task)) {
-      // レビューが通過していない関門は指摘を残して進めるかの判断を含むため、ユーザーが決める（Issue #1711）
+    } else {
+      // レビューが通過していない関門でも、オーケストレーターが選べるのは実装への差し戻しだけで、
+      // 指摘を残したまま進める判断はユーザーに残る（Issue #1711。resolveStageGateが拒否する。Issue #1763）
       const question = buildGateQuestion(task, gate);
       const answerer = await this.judgeAnswerer(runId, run.engine, {
         source: 'stageSession',
@@ -544,7 +552,11 @@ export class TaskStageRunner {
         reason: question.reason,
         options: question.options,
         recommended: question.recommended,
-        evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
+        evidence: [
+          question.evidence,
+          isReviewFailed(task) ? REVIEW_FAILED_ORCHESTRATOR_SCOPE : undefined,
+          summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
+        ]
           .filter((line) => line !== undefined)
           .join('\n'),
       }, reflexEnabled);
@@ -1564,9 +1576,9 @@ export class TaskStageRunner {
   }
 
   /**
-   * 質問を振り分ける。escalationが付いた質問・危険語を含む質問はユーザーの判断待ちにする。
-   * 選択肢のある質問はReflexで判定して答え、答えられなければ（選択肢の無い質問・Reflexが無効な
-   * ときも）回答者判定（Issue #1708）にかけ、オーケストレーターが決めてよければその判断待ち、
+   * 質問を振り分ける。危険語を含む質問と、ユーザーが決めるescalationの付いた質問はユーザーの判断待ちにする。
+   * 選択肢のある質問はReflexで判定して答え、答えられなければ（選択肢の無い質問・escalationの付いた
+   * 質問・Reflexが無効なときも）回答者判定（Issue #1708・#1763）にかけ、オーケストレーターが決めてよければその判断待ち、
    * それ以外はユーザーへ回す。質問したエージェントの推奨はReflexへ渡さない（Issue #1712）。
    */
   private async routeQuestion(
@@ -1581,15 +1593,19 @@ export class TaskStageRunner {
     const judge = this.deps.judgeQuestion;
     let verdict: RoadmapQuestionVerdict;
     const dangers = findQuestionDangers(args);
-    // escalationの付いた質問と危険語を含む質問は、ユーザーが決める
-    const userOnly = args.escalation.length > 0 || dangers.length > 0;
+    const userOnlyEscalations = findUserOnlyEscalations(args.escalation);
+    // 危険語を含む質問と、取り消せない操作・受入基準に関わるescalationの付いた質問は、ユーザーが決める。
+    // それ以外のescalationの付いた質問は回答者判定にかける（Issue #1763）
+    const userOnly = dangers.length > 0 || userOnlyEscalations.length > 0;
     if (needsUserDecision(args) || judge === undefined || run === undefined) {
       verdict = {
         kind: 'human',
         summary:
           dangers.length > 0
             ? `取り消せない操作に関わる語を含むためReflexを通さなかった（${dangers.join('、')}）`
-            : undefined,
+            : userOnlyEscalations.length > 0
+              ? `ユーザーが決めるescalationが付いているためReflexを通さなかった（${userOnlyEscalations.join('、')}）`
+              : undefined,
       };
     } else {
       try {
@@ -1606,7 +1622,11 @@ export class TaskStageRunner {
           question: question.question,
           reason: question.reason,
           options: question.options,
-          evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
+          evidence: [
+            question.evidence,
+            describeEscalations(args.escalation),
+            summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
+          ]
             .filter((line) => line !== undefined)
             .join('\n'),
         }, reflexEnabled);
@@ -1631,7 +1651,7 @@ export class TaskStageRunner {
         }
       }
       await this.mutate(runId, (r) =>
-        markQuestionAwaitingUser(r, taskId, question.questionId, summary, this.now()),
+        markQuestionAwaitingUser(r, taskId, question.questionId, summary, this.now(), userOnly),
       );
       return;
     }

@@ -3,12 +3,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import * as vscode from 'vscode';
+import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 import { CLAUDE_EFFORTS } from '../claude/types';
 import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
 import {
   readAnswererJudgeConfig,
   readClaudeConfig,
   readConfig,
+  readReflexEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
@@ -30,7 +32,11 @@ import {
 } from '../orchestrator/roadmapRunForge';
 import type { RunNotesStore } from '../orchestrator/runNotes';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
-import { TaskRunController, type ControllerResult } from '../orchestrator/taskRunController';
+import {
+  TaskRunController,
+  type ControllerResult,
+  type QuestionAwaitingAnswer,
+} from '../orchestrator/taskRunController';
 import {
   computeHostIdentity,
   TASK_LEASE_DIR_NAME,
@@ -60,6 +66,7 @@ import {
 } from '../orchestrator/worktree';
 import {
   ANSWERER_USER_FALLBACK,
+  judgeQuestionAnswerer,
   judgeTurnEndAnswerer,
   type AnswererVerdict,
 } from '../reflex/answererJudge';
@@ -148,6 +155,62 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ? judgeTurnEndAnswerer(reflexDeps(engine), lastMessage, settings.threshold)
       : ANSWERER_USER_FALLBACK;
   };
+  // OrchestratorのAskUserQuestion（Issue #1763）。1回に複数の問いがあれば1問ずつ判定し、
+  // すべてオーケストレーターが決めてよいときだけ`orchestrator`とする
+  const judgeAskUserQuestion = async (
+    runId: string,
+    questions: readonly AskUserQuestionItem[],
+  ): Promise<AnswererVerdict> => {
+    const settings = readAnswererJudgeConfig();
+    const engine = controller.find(runId)?.engine;
+    if (!settings.enabled || engine === undefined || questions.length === 0) {
+      return ANSWERER_USER_FALLBACK;
+    }
+    const verdicts = await Promise.all(
+      questions.map((q) =>
+        judgeQuestionAnswerer(
+          reflexDeps(engine),
+          {
+            source: 'orchestrator',
+            question: q.question,
+            options: q.options.map((o) =>
+              o.description === '' ? o.label : `${o.label}（${o.description}）`,
+            ),
+          },
+          settings.threshold,
+        ),
+      ),
+    );
+    return verdicts.find((v) => v.kind !== 'orchestrator') ?? verdicts[0] ?? ANSWERER_USER_FALLBACK;
+  };
+  // ユーザーの判断待ちの質問にOrchestratorが答えようとしたとき（Issue #1763）。回答案を根拠へ添えて
+  // 工程セッションの質問として判定し直す。危険語を含めば判定器がユーザーを返す
+  const judgeQuestionAnswerByOrchestrator = async (
+    target: QuestionAwaitingAnswer,
+    answer: string,
+  ): Promise<AnswererVerdict> => {
+    const settings = readAnswererJudgeConfig();
+    if (!settings.enabled) {
+      return ANSWERER_USER_FALLBACK;
+    }
+    return judgeQuestionAnswerer(
+      reflexDeps(target.engine),
+      {
+        source: 'stageSession',
+        question: target.question,
+        reason: target.reason,
+        options: target.options,
+        evidence: [
+          target.evidence,
+          target.reflexSummary === undefined ? undefined : `これまでの判定: ${target.reflexSummary}`,
+          `オーケストレーターの回答案: ${answer}`,
+        ]
+          .filter((line) => line !== undefined)
+          .join('\n'),
+      },
+      settings.threshold,
+    );
+  };
 
   const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
 
@@ -204,12 +267,18 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
           threshold: DEFAULT_PLAN_APPROVE_THRESHOLD,
         }
       : undefined;
+  // Orchestratorの`approve_plan`の審査（Issue #1763）。Reflexモードが有効なら`planAutoApprove`の設定に関わらず審査する
+  const planReview = (engine: TaskRunEngine) =>
+    readReflexEnabled()
+      ? { reflex: reflexDeps(engine), threshold: DEFAULT_PLAN_APPROVE_THRESHOLD }
+      : undefined;
 
   const controller = new TaskRunController({
     store,
     runner,
     modelCatalog,
     planAutoApprove,
+    planReview,
     recommendStageSettings: async (engine, input) => {
       const current =
         engine === 'claude'
@@ -255,11 +324,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     server: questionServer,
     confirmAnswer: confirmOrchestratorAnswer,
     confirmGateResolution: confirmOrchestratorGateResolution,
+    confirmPlanApproval: confirmOrchestratorPlanApproval,
     // Orchestratorは`resume_run`・`start_run`の処理の中で自分で開く（Issue #1620）
     showKanban: (runId) => holder.view?.show(runId),
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
     judgeTurnEndAnswerer: judgeTurnEnd,
+    judgeAskUserQuestionAnswerer: judgeAskUserQuestion,
+    judgeQuestionAnswerByOrchestrator,
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),
@@ -708,6 +780,29 @@ async function confirmOrchestratorGateResolution(input: {
     '決着させる',
   );
   return choice === '決着させる';
+}
+
+/** Orchestratorが`approve_plan`で承認しようとしている計画のうち、Reflexが妥当と判定しなかったものを人に確かめる。 */
+async function confirmOrchestratorPlanApproval(input: {
+  runLabel: string;
+  taskCount: number;
+  reflexSummary: string | undefined;
+}): Promise<boolean> {
+  const detail = [
+    `${sanitizeInlineText(input.runLabel, CONFIRM_TITLE_MAX_LENGTH)}（タスク${String(input.taskCount)}件）`,
+    '',
+    input.reflexSummary === undefined
+      ? 'Reflex: 無効のため審査していません'
+      : `Reflex: ${sanitizeInlineText(input.reflexSummary, CONFIRM_TEXT_MAX_LENGTH)}`,
+    '',
+    '計画の中身はKanbanで確かめてください',
+  ].join('\n');
+  const choice = await vscode.window.showWarningMessage(
+    'Orchestratorが計画を承認しようとしています。Kanbanの計画を確かめ、承認してよければ「承認する」を押してください',
+    { modal: true, detail },
+    '承認する',
+  );
+  return choice === '承認する';
 }
 
 type ActiveRunAction = 'parallel' | 'open' | 'suspend' | 'finish';

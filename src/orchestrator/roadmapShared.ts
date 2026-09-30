@@ -36,8 +36,9 @@ export interface RoadmapPlan {
 export type RoadmapPlanOrigin = 'generated' | 'manually_modified';
 
 /**
- * Issueセッションが`ask_orchestrator`で尋ねた質問を、Reflexを通さずに人へ回す理由。
- * 1つでも付いた質問は、選択肢があってもユーザーの判断を待つ。
+ * Issueセッションが`ask_orchestrator`で尋ねた質問を、Reflexに選択肢を選ばせない理由。
+ * 1つでも付いた質問は、選択肢があっても回答者判定にかけ、オーケストレーターかユーザーの判断を待つ。
+ * `USER_ONLY_ESCALATIONS`に入るものが付いた質問は回答者判定も通さずユーザーが決める（Issue #1763）。
  */
 export const ROADMAP_QUESTION_ESCALATIONS = [
   'scopeChange',

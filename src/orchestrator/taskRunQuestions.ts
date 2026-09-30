@@ -124,16 +124,41 @@ function updateQuestion(
   return withQuestions(run, task, questions.map((q, i) => (i === index ? next : q)), at);
 }
 
-/** Reflexの判定中の質問をユーザーの判断待ちにする。 */
+/**
+ * Reflexの判定中の質問をユーザーの判断待ちにする。`userOnly`ならOrchestratorの回答で
+ * 回答者を判定し直さない質問として印を付ける。
+ */
 export function markQuestionAwaitingUser(
   run: TaskRun,
   taskId: string,
   questionId: string,
   reflexSummary: string | undefined,
   now: Date,
+  userOnly = false,
 ): TaskRun {
   return updateQuestion(run, taskId, questionId, now, (q) =>
-    q.status === 'judging' ? { ...q, status: 'awaitingUser', reflexSummary } : undefined,
+    q.status === 'judging'
+      ? { ...q, status: 'awaitingUser', reflexSummary, ...(userOnly ? { userOnly: true } : {}) }
+      : undefined,
+  );
+}
+
+/**
+ * ユーザーの判断待ちの質問をオーケストレーターの判断待ちへ移す（Issue #1763）。Orchestratorが
+ * 答えようとしたとき、回答者判定でオーケストレーターが決めてよいとされた場合に使う。
+ * ユーザーだけが答える質問は移さない。
+ */
+export function delegateQuestionToOrchestrator(
+  run: TaskRun,
+  taskId: string,
+  questionId: string,
+  summary: string,
+  now: Date,
+): TaskRun {
+  return updateQuestion(run, taskId, questionId, now, (q) =>
+    q.status === 'awaitingUser' && q.userOnly !== true
+      ? { ...q, status: 'awaitingOrchestrator', reflexSummary: joinSummaries(q.reflexSummary, summary) }
+      : undefined,
   );
 }
 
@@ -167,6 +192,7 @@ export function escalateQuestionToUser(
           ...q,
           status: 'awaitingUser',
           reflexSummary: joinSummaries(q.reflexSummary, `オーケストレーターがユーザーへ回した: ${reason}`),
+          userOnly: true,
         }
       : undefined,
   );

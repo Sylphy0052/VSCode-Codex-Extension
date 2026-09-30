@@ -262,6 +262,11 @@ export interface StageQuestion {
   /** ISO8601。 */
   askedAt: string;
   answeredAt: string | undefined;
+  /**
+   * ユーザーだけが答える質問（危険語・ユーザーが決めるescalationを含む、またはオーケストレーターが
+   * ユーザーへ回した）。Orchestratorが答えようとしても回答者を判定し直さない（Issue #1763）。
+   */
+  userOnly?: true;
 }
 
 /** 計画の状態: Orchestratorが作成中 / ユーザーの承認待ち / 承認済み。 */
