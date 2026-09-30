@@ -253,10 +253,13 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'stop_stage',
     description:
-      'タスクの工程を止める。worktreeとブランチは残り、後でstart_stageでやり直せる。人の承認を経てから実行される。',
+      'タスクの工程を止める。worktreeとブランチは残り、後でstart_stageでやり直せる。回答者判定（Reflex）で自分で決めてよいとされれば人の承認なしに、そうでなければ人の承認を経てから実行される。reasonには止める理由を書く（回答者判定の材料になる）。',
     inputSchema: {
       type: 'object',
-      properties: { taskId: TASK_ID_SCHEMA },
+      properties: {
+        taskId: TASK_ID_SCHEMA,
+        reason: { type: 'string', maxLength: MAX_PAUSE_REASON_LENGTH },
+      },
       required: ['taskId'],
       additionalProperties: false,
     },

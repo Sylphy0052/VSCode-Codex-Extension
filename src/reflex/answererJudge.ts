@@ -1,4 +1,4 @@
-import { findQuestionDangers } from '../orchestrator/roadmapQuestionMcp';
+import { describeCautionDangers, findQuestionDangers } from '../orchestrator/roadmapQuestionMcp';
 import {
   choiceAnswer,
   choiceProbability,
@@ -17,7 +17,8 @@ export const ANSWERER_JUDGE_FALLBACK: ReflexFallback = 'askHuman';
  * 対象は3経路: オーケストレータモードの工程の質問と関門、ワークフローモードの`ask_user`、
  * オーケストレーターのターン末の問いかけ。オーケストレーターへ回すのは「オーケストレーター」の
  * 確率が閾値以上のときだけで、判定の失敗・時間切れはユーザーへ回す（誤判定より安全側に倒す）。
- * 取り消せない操作に関わる語（Issue #1712の危険語）を含む問いは、Reflexを通さずユーザーへ回す。
+ * secretsと破壊的操作に関わる語（Issue #1712の危険語のうちユーザーが決めるもの）を含む問いは、
+ * Reflexを通さずユーザーへ回す。本番環境・課金・デプロイ・公開の語は判定の材料にする（Issue #1771）。
  *
  * `vscode`へは依存させず、設定の読み出しと判定の実行手段は呼び出し側から渡す。
  */
@@ -67,15 +68,21 @@ export interface AnswererQuestion {
   recommended?: string | undefined;
   /** 判断の材料。既存の選択肢判定の要約など。 */
   evidence?: string | undefined;
+  /**
+   * 承認を求められたコマンド（PRのmergeと元ブランチのリモート削除、Issue #1771）。危険語の検査に
+   * かけない。形が許可リストに当たること（連結・置換を含まない、タスクのPR・元ブランチだけ）は
+   * 呼び出し側（`isJudgeableMergeCommand`）が確かめる。
+   */
+  command?: string | undefined;
 }
 
-/** 危険語を含むなら、Reflexを通さずユーザーへ回す判定を返す。 */
+/** secrets・破壊的操作の危険語を含むなら、Reflexを通さずユーザーへ回す判定を返す。 */
 function userVerdictForDangers(dangers: readonly string[]): AnswererVerdict | undefined {
   return dangers.length === 0
     ? undefined
     : {
         kind: 'user',
-        summary: `取り消せない操作に関わる語を含むため回答者判定を通さなかった（${dangers.join('、')}）`,
+        summary: `secretsか破壊的操作に関わる語を含むため回答者判定を通さなかった（${dangers.join('、')}）`,
       };
 }
 
@@ -86,6 +93,7 @@ function buildQuestionState(question: AnswererQuestion): string {
     ...(question.reason === undefined ? [] : [`理由: ${question.reason}`]),
     ...(options.length === 0 ? [] : [`選択肢: ${options.join(' / ')}`]),
     ...(question.recommended === undefined ? [] : [`推奨: ${question.recommended}`]),
+    ...(question.command === undefined ? [] : [`コマンド: ${question.command}`]),
     ...(question.evidence === undefined ? [] : [`判断の材料: ${question.evidence}`]),
   ].join('\n');
 }
@@ -99,17 +107,17 @@ export async function judgeQuestionAnswerer(
   question: AnswererQuestion,
   threshold: number,
 ): Promise<AnswererVerdict> {
-  const dangerous = userVerdictForDangers(
-    findQuestionDangers({
-      question: question.question,
-      reason: question.reason ?? '',
-      options: question.options ?? [],
-      evidence: question.evidence,
-    }),
-  );
+  const dangers = findQuestionDangers({
+    question: question.question,
+    reason: question.reason ?? '',
+    options: question.options ?? [],
+    evidence: question.evidence,
+  });
+  const dangerous = userVerdictForDangers(dangers.userOnly);
   if (dangerous !== undefined) {
     return dangerous;
   }
+  const caution = describeCautionDangers(dangers);
   const situation =
     question.source === 'stageSession'
       ? 'オーケストレーター（複数のAIエージェントの作業を指揮するAIエージェント）へ、配下の作業セッションから問いが届いた。' +
@@ -118,7 +126,11 @@ export async function judgeQuestionAnswerer(
         'この問いを本当にユーザーへ出すか、オーケストレーターに自分で決めさせるかを決めようとしている。状態は問いの内容である。';
   const answers = await judge(deps, {
     situation,
-    state: buildQuestionState(question),
+    state: buildQuestionState(
+      caution === undefined
+        ? question
+        : { ...question, evidence: [question.evidence, caution].filter((l) => l !== undefined).join('\n') },
+    ),
     questions: [
       {
         kind: 'choice',
@@ -146,17 +158,17 @@ export async function judgeTurnEndAnswerer(
   lastMessage: string,
   threshold: number,
 ): Promise<AnswererVerdict> {
-  const dangerous = userVerdictForDangers(
-    findQuestionDangers({ question: lastMessage, reason: '', options: [], evidence: undefined }),
-  );
+  const dangers = findQuestionDangers({ question: lastMessage, reason: '', options: [], evidence: undefined });
+  const dangerous = userVerdictForDangers(dangers.userOnly);
   if (dangerous !== undefined) {
     return dangerous;
   }
+  const caution = describeCautionDangers(dangers);
   const answers = await judge(deps, {
     situation:
       'オーケストレーター（複数のAIエージェントの作業を指揮するAIエージェント）が1ターンを終えて、ユーザーの発言を待っている。' +
       '状態はその直前の出力である。出力がユーザーへ問いかけているなら、その問いをオーケストレーターに自分で決めさせるかを決めようとしている。',
-    state: lastMessage,
+    state: caution === undefined ? lastMessage : `${lastMessage}\n\n判断の材料: ${caution}`,
     questions: [
       {
         kind: 'choice',

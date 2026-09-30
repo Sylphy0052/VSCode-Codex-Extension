@@ -152,15 +152,15 @@ describe('TaskStageRunner.judgeGate', () => {
     expect(t.run().tasks['T1']?.stages.review.status).toBe('notStarted');
   });
 
-  it('レビューが通過しなかった関門で「進める」の判定は採らず、回答者判定にかけずにユーザーへ回す（Issue #1711）', async () => {
+  it('レビューが通過しなかった関門でも「進める」の判定なら決着させる（Issue #1771）', async () => {
     const judgeGate = vi.fn<GateJudge>(async () => answer(GATE_OPTION_PROCEED));
     const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'orchestrator', summary: '決めてよい' }));
     const t = setup(reviewGateRun(false), { judgeGate, judgeAnswerer });
     await t.internals.judgeGate('run-1', 'T1', 'g1', undefined);
-    expect(judgeGate.mock.calls[0]?.[1].options).not.toContain(GATE_OPTION_PROCEED);
+    expect(judgeGate.mock.calls[0]?.[1].options).toContain(GATE_OPTION_PROCEED);
     expect(findStageGate(t.run(), 'T1', 'g1')).toMatchObject({
-      status: 'awaitingUser',
-      reflexSummary: `レビューが通過していないため、Reflexの判定（${GATE_OPTION_PROCEED}）を採らなかった`,
+      status: 'resolved',
+      resolution: { choice: 'proceed', by: 'reflex' },
     });
     expect(judgeAnswerer).not.toHaveBeenCalled();
   });
@@ -174,13 +174,14 @@ describe('TaskStageRunner.judgeGate', () => {
         throw new Error('timeout');
       },
     ],
-  ])('レビューが通過しなかった関門は、%sでも回答者判定にかけずにユーザーへ回す（Issue #1711）', async (_label, verdict) => {
+  ])('レビューが通過しなかった関門は、%sなら回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする（Issue #1763・#1771）', async (_label, verdict) => {
     const judgeGate = vi.fn<GateJudge>(verdict);
     const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'orchestrator', summary: '決めてよい' }));
     const t = setup(reviewGateRun(false), { judgeGate, judgeAnswerer });
     await t.internals.judgeGate('run-1', 'T1', 'g1', undefined);
-    expect(judgeAnswerer).not.toHaveBeenCalled();
-    expect(findStageGate(t.run(), 'T1', 'g1')?.status).toBe('awaitingUser');
+    expect(judgeAnswerer).toHaveBeenCalledTimes(1);
+    expect(judgeAnswerer.mock.calls[0]?.[2].evidence).toContain('オーケストレーターは実装への差し戻しのほか、指摘を残したまま進めることも選べる');
+    expect(findStageGate(t.run(), 'T1', 'g1')?.status).toBe('awaitingOrchestrator');
   });
 
   it('関門の種類に合わない選択肢の判定は決着させず、回答者判定にかける', async () => {
@@ -322,17 +323,30 @@ describe('TaskStageRunner.routeQuestion', () => {
     expect(judgeAnswerer).not.toHaveBeenCalled();
   });
 
-  it('escalationの付いた質問はReflexにも回答者判定にもかけずにユーザーへ回す', async () => {
+  it('secrets・破壊的操作のescalationの付いた質問はReflexにも回答者判定にもかけずにユーザーへ回す', async () => {
     const judgeQuestion = vi.fn<QuestionJudge>();
     const judgeAnswerer = vi.fn<AnswererJudge>();
-    const t = setupQuestion({ ...ASK, escalation: ['specConflict'] }, { judgeQuestion, judgeAnswerer });
+    const t = setupQuestion({ ...ASK, escalation: ['secrets'] }, { judgeQuestion, judgeAnswerer });
     await t.route();
     expect(judgeQuestion).not.toHaveBeenCalled();
     expect(judgeAnswerer).not.toHaveBeenCalled();
-    expect(t.question()).toMatchObject({ status: 'awaitingUser', reflexSummary: undefined });
+    expect(t.question()).toMatchObject({
+      status: 'awaitingUser',
+      reflexSummary: 'ユーザーが決めるescalationが付いているためReflexを通さなかった（secrets）',
+    });
   });
 
-  it('危険語を含む質問はescalationが無くてもユーザーへ回し、理由を残す（Issue #1712）', async () => {
+  it('それ以外のescalationの付いた質問はReflexにかけず、回答者判定にかける', async () => {
+    const judgeQuestion = vi.fn<QuestionJudge>();
+    const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({ kind: 'orchestrator', summary: '決めてよい' }));
+    const t = setupQuestion({ ...ASK, escalation: ['specConflict'] }, { judgeQuestion, judgeAnswerer });
+    await t.route();
+    expect(judgeQuestion).not.toHaveBeenCalled();
+    expect(judgeAnswerer).toHaveBeenCalledTimes(1);
+    expect(t.question()).toMatchObject({ status: 'awaitingOrchestrator' });
+  });
+
+  it('secrets・破壊的操作の危険語を含む質問はescalationが無くてもユーザーへ回し、理由を残す（Issue #1712・#1771）', async () => {
     const judgeQuestion = vi.fn<QuestionJudge>();
     const judgeAnswerer = vi.fn<AnswererJudge>();
     const t = setupQuestion({ ...ASK, options: ['案A', 'mainへforce pushする'] }, { judgeQuestion, judgeAnswerer });
@@ -341,7 +355,7 @@ describe('TaskStageRunner.routeQuestion', () => {
     expect(judgeAnswerer).not.toHaveBeenCalled();
     expect(t.question()).toMatchObject({
       status: 'awaitingUser',
-      reflexSummary: '取り消せない操作に関わる語を含むためReflexを通さなかった（リモートへの強制push）',
+      reflexSummary: 'secretsか破壊的操作に関わる語を含むためReflexを通さなかった（リモートへの強制push）',
     });
   });
 

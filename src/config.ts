@@ -1263,7 +1263,8 @@ export interface WorkflowsConfig {
   allowClaudeBypassPermissions: boolean;
   /**
    * 実効 `autoApprove` のタスクの承認要求を、危険判定（§16.7）を通さず許可するか
-   * （machineスコープ、既定 true。Issue #1694）。PRのmergeとリモートブランチの削除は人へ回す。
+   * （machineスコープ、既定 true。Issue #1694）。PRのmergeとリモートブランチの削除は、回答者判定で
+   * オーケストレーターが決めてよいとされたときだけ許可し、それ以外は人へ回す（Issue #1771）。
    * オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準にそろえる
    * （Issue #1656）。
    */

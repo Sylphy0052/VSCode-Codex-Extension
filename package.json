@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.930.35",
+  "version": "2026.930.36",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1413,7 +1413,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。オーケストレーターへの問いを、ユーザーが答えるべきか、オーケストレーターが自分で決めてよいかをReflex判定（issue #1708）で振り分ける。対象は、オーケストレータモードの工程の質問と関門、ワークフローの `ask_user`、オーケストレーターのターン末の問いかけ。オーケストレーターへ回すのは「オーケストレーター」の確率が `#agent.chat.answererJudge.threshold#` 以上のときだけで、オーケストレーターが決められなければユーザーへ回す。判定が失敗・時間切れのときはユーザーへ回す。escalation付きの質問は判定せずユーザーへ回す。"
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。オーケストレーターへの問いを、ユーザーが答えるべきか、オーケストレーターが自分で決めてよいかをReflex判定（issue #1708）で振り分ける。対象は、オーケストレータモードの工程の質問と関門、ワークフローの `ask_user`、オーケストレーターのターン末の問いかけと `AskUserQuestion`・`stop_stage`、承認の自動許可から外していたPRのmergeとリモートブランチの削除（Issue #1771）。オーケストレーターへ回すのは「オーケストレーター」の確率が `#agent.chat.answererJudge.threshold#` 以上のときだけで、オーケストレーターが決められなければユーザーへ回す。判定が失敗・時間切れのときはユーザーへ回す。secretsか破壊的操作に関わる質問（escalationの `destructiveOperation`・`secrets` を含む）は判定せずユーザーへ回す（Issue #1771）。"
         },
         "agent.chat.answererJudge.threshold": {
           "type": "number",
@@ -1638,7 +1638,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "markdownDescription": "**危険**: ワークフローのタスクのうち、実効 `autoApprove` が有効なもの（YAMLの `autoApprove: true` と `agent.workflows.allowAutoApprove` の両方）の承認要求を、危険判定を通さず許可する。`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作なども無確認で実行される。既定で有効。無効にするには `false` を明示する。PRのmergeとリモートブランチの削除だけは人へ回す。`AskUserQuestion` は設定に関わらず人へ回さず、オーケストレーターへ質問するよう促して拒否する。オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準（Issue #1656 / #1694）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
+          "markdownDescription": "**危険**: ワークフローのタスクのうち、実効 `autoApprove` が有効なもの（YAMLの `autoApprove: true` と `agent.workflows.allowAutoApprove` の両方）の承認要求を、危険判定を通さず許可する。`rm -rf` 相当・force push・外部送信・作業ディレクトリ外への操作なども無確認で実行される。既定で有効。無効にするには `false` を明示する。PRのmergeとリモートブランチの削除は、回答者判定（`#agent.chat.answererJudge.enabled#`）でオーケストレーターが決めてよいとされたときだけ許可し、それ以外は人へ回す（Issue #1771）。`AskUserQuestion` は設定に関わらず人へ回さず、オーケストレーターへ質問するよう促して拒否する。オーケストレータモードの工程セッション（mergeCleanup以外の工程）と同じ基準（Issue #1656 / #1694）。リポジトリ側の設定から勝手に有効化されないよう machine スコープに固定している。"
         },
         "agent.workflows.replyTimeoutSec": {
           "type": "number",

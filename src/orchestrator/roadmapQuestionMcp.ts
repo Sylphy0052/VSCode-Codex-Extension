@@ -220,61 +220,87 @@ export function parseRoadmapAskArgs(
  * 質問の自然文に現れる、取り消せない操作・影響の大きい対象の語。コマンドの形で書かれたものは
  * `findIrreversibleCommands`が拾う。誤検知で人へ回る質問が増えるため、語は取り消せない操作と
  * 外部へ影響が及ぶ対象に限る（Issue #1712）。
+ *
+ * `userOnly`の語（secretsと破壊的操作）を含む質問は、回答者判定を通さずユーザーが決める。
+ * それ以外（本番環境・課金・デプロイ・公開）は回答者判定の材料にする。外部由来のテキストによる
+ * プロンプトインジェクションでReflexが誤判定しても、最も取り返しのつかない操作だけは人の目を
+ * 通るようにするため（Issue #1771）。
  */
-const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp }[] = [
+const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp; userOnly: boolean }[] = [
   {
     // `findIrreversibleCommands`と同じ説明にして、両方に当たっても1件にまとめる
     description: 'リモートへの強制push',
     pattern: /force[\s_-]*push|強制\s*(push|プッシュ)|push\s+(-f\b|--force)/u,
+    userOnly: true,
   },
   {
     description: '履歴の書き換え',
     pattern:
       /履歴.{0,4}(書き換|書換|改変|改竄|改ざん)|rewrit\w*\s+(the\s+)?(git\s+)?history|history\s+rewrit|filter-(branch|repo)/u,
+    userOnly: true,
   },
   {
     description: 'ブランチ・タグの削除',
     pattern: /(ブランチ|タグ|branch|tag)を?\s*(削除|消す|消し|消去)|delet\w*\s+(the\s+)?(remote\s+)?(branch|tag)/u,
+    userOnly: true,
   },
   {
     description: 'データの削除',
     pattern: /drop\s+(table|database)|\btruncate\b|(テーブル|データベース|db|レコード|全件)を?\s*(削除|消去|消す)/u,
+    userOnly: true,
   },
   {
     description: 'secrets',
     pattern:
       /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password/u,
+    userOnly: true,
   },
-  { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u },
-  { description: '課金', pattern: /課金|請求|billing|決済|支払|payment/u },
-  { description: 'デプロイ・公開', pattern: /デプロイ|deploy|\bpublish\b|パッケージ.{0,4}公開/u },
+  { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u, userOnly: false },
+  { description: '課金', pattern: /課金|請求|billing|決済|支払|payment/u, userOnly: false },
+  { description: 'デプロイ・公開', pattern: /デプロイ|deploy|\bpublish\b|パッケージ.{0,4}公開/u, userOnly: false },
 ];
 
-/**
- * 質問文・理由・選択肢・材料に含まれる危険語の説明（重複なし）。質問したエージェントが
- * `escalation`を付け忘れた・外された場合でも、取り消せない操作をReflexに答えさせないため。
- */
-export function findQuestionDangers(
-  args: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence'>,
-): string[] {
-  const text = [args.question, args.reason, ...args.options, args.evidence ?? ''].join('\n');
-  const normalized = text.normalize('NFKC').toLowerCase();
-  const found = [
-    ...QUESTION_DANGER_PATTERNS.filter((p) => p.pattern.test(normalized)).map((p) => p.description),
-    ...findIrreversibleCommands(normalized),
-  ];
-  return [...new Set(found)];
+/** 質問に含まれる危険語の説明。`userOnly`はユーザーが決めるもの、`caution`は回答者判定の材料にするもの。 */
+export interface QuestionDangers {
+  userOnly: string[];
+  caution: string[];
 }
 
 /**
- * 回答者判定を通さずユーザーが決めるescalation。取り消せない操作と、受入基準を下げうる
- * 判断（Issue #1711と同じ考え方）に限る。それ以外のescalationは回答者判定の材料にする（Issue #1763）。
+ * 質問文・理由・選択肢・材料に含まれる危険語の説明（それぞれ重複なし）。質問したエージェントが
+ * `escalation`を付け忘れた・外された場合でも、secretsと破壊的操作をReflexに決めさせないため。
+ */
+export function findQuestionDangers(
+  args: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence'>,
+): QuestionDangers {
+  const text = [args.question, args.reason, ...args.options, args.evidence ?? ''].join('\n');
+  const normalized = text.normalize('NFKC').toLowerCase();
+  const matched = QUESTION_DANGER_PATTERNS.filter((p) => p.pattern.test(normalized));
+  const commands = findIrreversibleCommands(normalized);
+  return {
+    userOnly: [
+      ...new Set([...matched.filter((p) => p.userOnly).map((p) => p.description), ...commands.destructive]),
+    ],
+    caution: [
+      ...new Set([...matched.filter((p) => !p.userOnly).map((p) => p.description), ...commands.caution]),
+    ],
+  };
+}
+
+/** 回答者判定の材料にする危険語の1行。無ければ`undefined`。 */
+export function describeCautionDangers(dangers: QuestionDangers): string | undefined {
+  return dangers.caution.length === 0
+    ? undefined
+    : `影響の大きい対象に関わる語を含む: ${dangers.caution.join('、')}`;
+}
+
+/**
+ * 回答者判定を通さずユーザーが決めるescalation。secretsと破壊的操作に限る。それ以外の
+ * escalation（リリース・要件変更など）は回答者判定の材料にする（Issue #1763・#1771）。
  */
 const USER_ONLY_ESCALATIONS: ReadonlySet<RoadmapQuestionEscalation> = new Set<RoadmapQuestionEscalation>([
   'destructiveOperation',
   'secrets',
-  'release',
-  'requirementChange',
 ]);
 
 /** 付いたescalationのうち、回答者判定を通さずユーザーが決めるもの。 */
@@ -295,12 +321,18 @@ export function describeEscalations(
 
 /**
  * Reflexに選択肢を選ばせない質問か（escalationが付いている、選択肢が無い、または
- * 危険語を含む）。
+ * 危険語を含む）。選ばせない質問も、ユーザーが決めるもの以外は回答者判定にかかる。
  */
 export function needsUserDecision(
   args: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence' | 'escalation'>,
 ): boolean {
-  return args.escalation.length > 0 || args.options.length === 0 || findQuestionDangers(args).length > 0;
+  const dangers = findQuestionDangers(args);
+  return (
+    args.escalation.length > 0 ||
+    args.options.length === 0 ||
+    dangers.userOnly.length > 0 ||
+    dangers.caution.length > 0
+  );
 }
 
 /** Kanbanからユーザーが送る回答の上限。 */

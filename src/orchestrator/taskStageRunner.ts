@@ -73,9 +73,9 @@ import {
   GATE_CHOICE_LABELS,
   gateChoiceFromAnswer,
   type GateJudgeQuestion,
-  isReviewFailed,
   needsReviewGate,
   openStageGate,
+  orchestratorGateScope,
   resolveStageGate,
   reviewGateDetail,
 } from './taskRunGates';
@@ -106,7 +106,11 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from './taskSession';
-import { shouldAutoApproveStageElicitation, stageApprovalHandler } from './taskStageApproval';
+import {
+  isJudgeableMergeCommand,
+  shouldAutoApproveStageElicitation,
+  stageApprovalHandler,
+} from './taskStageApproval';
 import { cleanupAfterMerge } from './taskStageCleanup';
 import { observeStageCompletion, type StageObservationPorts } from './taskStageObservation';
 import {
@@ -124,15 +128,14 @@ import type { GitCommandRunner, WorktreeCreationQueue, WorktreeFileSystemPort } 
 /** 工程セッションが申告した失敗の要約を、状態の`failure`へ残すときの上限。 */
 const MAX_FAILURE_SUMMARY_LENGTH = 300;
 
+/** merge・削除の回答者判定の質問へタスク名（外部由来）を入れるときの上限。 */
+const MAX_TASK_TITLE_IN_QUESTION = 200;
+
 /** 入力を閉じたタブから送られた指示を、次の指示へ入れるときの上限。 */
 const MAX_INSTRUCTION_LENGTH = 2000;
 
 /** 質問への回答を、次の指示へ入れるときの上限。 */
 const MAX_ANSWER_PROMPT_LENGTH = 2000;
-
-/** レビュー未通過の関門を回答者判定にかけるとき、オーケストレーターが選べる範囲を示す材料（Issue #1763）。 */
-const REVIEW_FAILED_ORCHESTRATOR_SCOPE =
-  'オーケストレーターが決める場合に選べるのは「実装へ差し戻す」だけ。指摘を残したまま進める判断はユーザーに残る';
 
 /**
  * 工程セッションが背景タスクの完了を待つ時間の上限（Issue #1676）。工程のループには全体の
@@ -493,7 +496,8 @@ export class TaskStageRunner {
    * 関門をReflexで判定する。Reflexが無効・判定の失敗・「ユーザーに判断を上げる」、または
    * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。ただし「ユーザーに判断を上げる」と
    * 判定の失敗のときは回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする
-   * （レビュー未通過の関門も含む。オーケストレーターは差し戻しだけを選べる。Issue #1763）。
+   * （レビュー未通過の関門も含む。Issue #1763・#1771）。実装への差し戻しが上限に達した関門は、
+   * 差し戻しを選択肢から外して判定する（Issue #1771）。
    */
   private async judgeGate(
     runId: string,
@@ -520,7 +524,8 @@ export class TaskStageRunner {
     }
     const choice =
       verdict.kind === 'answer' ? gateChoiceFromAnswer(gate.kind, verdict.answer) : undefined;
-    let summary = verdict.summary;
+    let summary =
+      verdict.summary === undefined ? gate.reflexSummary : joinSummaries(gate.reflexSummary, verdict.summary);
     if (choice !== undefined) {
       const resolved = await this.mutate(runId, (r) =>
         resolveStageGate(
@@ -538,13 +543,10 @@ export class TaskStageRunner {
       if (resolved === undefined || findStageGate(resolved, taskId, gateId)?.status !== 'judging') {
         return;
       }
-      summary =
-        choice === 'proceed' && isReviewFailed(task)
-          ? `レビューが通過していないため、Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を採らなかった`
-          : `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
+      summary = `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
     } else {
-      // レビューが通過していない関門でも、オーケストレーターが選べるのは実装への差し戻しだけで、
-      // 指摘を残したまま進める判断はユーザーに残る（Issue #1711。resolveStageGateが拒否する。Issue #1763）
+      // レビュー未通過・差し戻しの上限に達した関門は、オーケストレーターが選べる範囲を材料に添える
+      // （Issue #1771。範囲の外の決着はresolveStageGateが拒否する）
       const question = buildGateQuestion(task, gate);
       const answerer = await this.judgeAnswerer(runId, run.engine, {
         source: 'stageSession',
@@ -554,7 +556,7 @@ export class TaskStageRunner {
         recommended: question.recommended,
         evidence: [
           question.evidence,
-          isReviewFailed(task) ? REVIEW_FAILED_ORCHESTRATOR_SCOPE : undefined,
+          orchestratorGateScope(task, gate),
           summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
         ]
           .filter((line) => line !== undefined)
@@ -578,6 +580,45 @@ export class TaskStageRunner {
       }
     }
     await this.mutate(runId, (r) => escalateStageGate(r, taskId, gateId, summary, this.now()));
+  }
+
+  /**
+   * 工程セッションが承認を求めたPRのmerge・元ブランチのリモート削除を、承認なしに実行させてよいか
+   * 回答者判定にかける（Issue #1771）。オーケストレーターが決めてよいときだけ`true`。
+   */
+  private async judgeMergeCommand(entry: LiveStageSession, command: string): Promise<boolean> {
+    const run = this.deps.store.find(entry.runId);
+    const task = run === undefined ? undefined : getTask(run, entry.ref.taskId);
+    if (
+      run === undefined ||
+      task === undefined ||
+      !isJudgeableMergeCommand(command, {
+        branch: task.branch,
+        pullRequestNumber: task.pullRequest?.number,
+      })
+    ) {
+      return false;
+    }
+    const answerer = await this.judgeAnswerer(
+      entry.runId,
+      run.engine,
+      {
+        source: 'stageSession',
+        question: `タスク「${sanitizeInlineText(task.title, MAX_TASK_TITLE_IN_QUESTION)}」の${entry.ref.stage}工程のセッションが、PRのmergeかPRの元ブランチのリモート削除を実行しようとしている。承認なしに実行させてよいか。`,
+        command,
+      },
+      entry.session.reflexEnabled?.(),
+    );
+    if (answerer.kind !== 'orchestrator') {
+      return false;
+    }
+    // 人の目を通らずに実行されるので、後から追えるよう判定の要約を残す
+    this.warn(
+      entry.runId,
+      entry.ref.taskId,
+      `回答者判定で承認なしに実行させた（${answerer.summary}）: ${command}`,
+    );
+    return true;
   }
 
   /** 回答者判定（Issue #1708）。判定が無い・失敗したときはユーザーへ回す。 */
@@ -1074,7 +1115,11 @@ export class TaskStageRunner {
   }
 
   private attach(entry: LiveStageSession, session: TaskSession): void {
-    session.setApprovalHandler(stageApprovalHandler(entry.ref.stage, this.deps.autoApprove()));
+    session.setApprovalHandler(
+      stageApprovalHandler(entry.ref.stage, this.deps.autoApprove(), (command) =>
+        this.judgeMergeCommand(entry, command),
+      ),
+    );
     session.setMcpElicitationHandler?.(shouldAutoApproveStageElicitation);
     session.setPromptTransform((text) => {
       const prefix = entry.pendingPrefix;
@@ -1576,7 +1621,8 @@ export class TaskStageRunner {
   }
 
   /**
-   * 質問を振り分ける。危険語を含む質問と、ユーザーが決めるescalationの付いた質問はユーザーの判断待ちにする。
+   * 質問を振り分ける。secrets・破壊的操作の危険語を含む質問と、ユーザーが決めるescalationの付いた質問は
+   * ユーザーの判断待ちにする（Issue #1771）。
    * 選択肢のある質問はReflexで判定して答え、答えられなければ（選択肢の無い質問・escalationの付いた
    * 質問・Reflexが無効なときも）回答者判定（Issue #1708・#1763）にかけ、オーケストレーターが決めてよければその判断待ち、
    * それ以外はユーザーへ回す。質問したエージェントの推奨はReflexへ渡さない（Issue #1712）。
@@ -1594,15 +1640,15 @@ export class TaskStageRunner {
     let verdict: RoadmapQuestionVerdict;
     const dangers = findQuestionDangers(args);
     const userOnlyEscalations = findUserOnlyEscalations(args.escalation);
-    // 危険語を含む質問と、取り消せない操作・受入基準に関わるescalationの付いた質問は、ユーザーが決める。
-    // それ以外のescalationの付いた質問は回答者判定にかける（Issue #1763）
-    const userOnly = dangers.length > 0 || userOnlyEscalations.length > 0;
+    // secrets・破壊的操作の危険語を含む質問と、同じ種類のescalationの付いた質問は、ユーザーが決める。
+    // それ以外の危険語・escalationの付いた質問は回答者判定にかける（Issue #1763・#1771）
+    const userOnly = dangers.userOnly.length > 0 || userOnlyEscalations.length > 0;
     if (needsUserDecision(args) || judge === undefined || run === undefined) {
       verdict = {
         kind: 'human',
         summary:
-          dangers.length > 0
-            ? `取り消せない操作に関わる語を含むためReflexを通さなかった（${dangers.join('、')}）`
+          dangers.userOnly.length > 0
+            ? `secretsか破壊的操作に関わる語を含むためReflexを通さなかった（${dangers.userOnly.join('、')}）`
             : userOnlyEscalations.length > 0
               ? `ユーザーが決めるescalationが付いているためReflexを通さなかった（${userOnlyEscalations.join('、')}）`
               : undefined,

@@ -98,14 +98,14 @@ describe('judgeRoadmapQuestion', () => {
   });
 });
 
-describe('findQuestionDangers・needsUserDecision（Issue #1712）', () => {
+describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () => {
   const safe: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence' | 'escalation'> = {
     ...QUESTION,
     escalation: [],
   };
 
   it('危険語もescalationも無く選択肢があればReflexへ回す', () => {
-    expect(findQuestionDangers(safe)).toEqual([]);
+    expect(findQuestionDangers(safe)).toEqual({ userOnly: [], caution: [] });
     expect(needsUserDecision(safe)).toBe(false);
   });
 
@@ -118,20 +118,20 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712）', () => {
   });
 
   it.each([
-    ['質問文', { question: 'mainへforce pushしてよいか' }, 'リモートへの強制push'],
-    ['理由', { reason: '本番のDBを触る' }, '本番環境'],
-    ['選択肢', { options: [A, 'リモートのブランチを削除する'] }, 'ブランチ・タグの削除'],
-    ['材料', { evidence: 'APIキーを.envへ書く' }, 'secrets'],
-    ['全角の英字', { question: 'ｆｏｒｃｅ ｐｕｓｈしてよいか' }, 'リモートへの強制push'],
-  ])('%sの危険語で人へ回す', (_label, patch, expected) => {
+    ['質問文', { question: 'mainへforce pushしてよいか' }, 'userOnly', 'リモートへの強制push'],
+    ['理由', { reason: '本番のDBを触る' }, 'caution', '本番環境'],
+    ['選択肢', { options: [A, 'リモートのブランチを削除する'] }, 'userOnly', 'ブランチ・タグの削除'],
+    ['材料', { evidence: 'APIキーを.envへ書く' }, 'userOnly', 'secrets'],
+    ['全角の英字', { question: 'ｆｏｒｃｅ ｐｕｓｈしてよいか' }, 'userOnly', 'リモートへの強制push'],
+  ] as const)('%sの危険語でReflexに選ばせない', (_label, patch, side, expected) => {
     const args = { ...safe, ...patch };
-    expect(findQuestionDangers(args)).toContain(expected);
+    expect(findQuestionDangers(args)[side]).toContain(expected);
     expect(needsUserDecision(args)).toBe(true);
   });
 
   it('同じ危険が複数の欄に出ても1件にまとめる', () => {
     expect(
       findQuestionDangers({ ...safe, question: 'force pushするか', evidence: 'git push --force origin main' }),
-    ).toEqual(['リモートへの強制push']);
+    ).toEqual({ userOnly: ['リモートへの強制push'], caution: [] });
   });
 });
