@@ -152,18 +152,27 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
     expect(needsUserDecision(args)).toBe(true);
   });
 
-  it.each(['LLMのトークン量を減らす', 'token数の上限を決める', 'トークン使用量を計測する'])(
-    'secretsと無関係なtokenの質問は人へ回さない: %s',
-    (question) => {
-      expect(findQuestionDangers({ ...safe, question }).userOnly).not.toContain('secrets');
-    },
-  );
+  it.each([
+    'LLMのトークン量を減らす',
+    'token数の上限を決める',
+    'トークン使用量を計測する',
+    '入力トークンを減らす',
+    'token limitを決める',
+  ])('secretsと無関係なtokenの質問は人へ回さない: %s', (question) => {
+    expect(findQuestionDangers({ ...safe, question }).userOnly).not.toContain('secrets');
+  });
 
   it.each([
     'access tokenを保存する',
     'APIトークンを設定する',
     '認証トークンを更新する',
     'Bearer tokenを送る',
+    'tokenを教えて',
+    'トークンを貼って',
+    'personal tokenを使う',
+    'PATを発行する',
+    'bearerヘッダを付ける',
+    'CI_JOB_TOKENを渡す',
   ])('secretsを指すtokenの質問は人へ回す: %s', (question) => {
     expect(findQuestionDangers({ ...safe, question }).userOnly).toContain('secrets');
   });

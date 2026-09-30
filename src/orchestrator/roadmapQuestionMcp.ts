@@ -226,11 +226,16 @@ export function parseRoadmapAskArgs(
  * プロンプトインジェクションでReflexが誤判定しても、最も取り返しのつかない操作だけは人の目を
  * 通るようにするため（Issue #1771）。
  */
-const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp; userOnly: boolean }[] = [
+const QUESTION_DANGER_PATTERNS: readonly {
+  description: string;
+  pattern: RegExp;
+  userOnly: boolean;
+}[] = [
   {
     // `findIrreversibleCommands`と同じ説明にして、両方に当たっても1件にまとめる
     description: 'リモートへの強制push',
-    pattern: /force[\s_-]*push|強制\s*(push|プッシュ)|push\s+(-\w*f\w*\b|--force|--mirror)|push\s+\S+\s+\+\S/u,
+    pattern:
+      /force[\s_-]*push|強制\s*(push|プッシュ)|push\s+(-\w*f\w*\b|--force|--mirror)|push\s+\S+\s+\+\S/u,
     userOnly: true,
   },
   {
@@ -241,12 +246,14 @@ const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp;
   },
   {
     description: 'ブランチ・タグの削除',
-    pattern: /(ブランチ|タグ|branch|tag)を?\s*(削除|消す|消し|消去)|delet\w*\s+(the\s+)?(remote\s+)?(branch|tag)/u,
+    pattern:
+      /(ブランチ|タグ|branch|tag)を?\s*(削除|消す|消し|消去)|delet\w*\s+(the\s+)?(remote\s+)?(branch|tag)/u,
     userOnly: true,
   },
   {
     description: 'データの削除',
-    pattern: /drop\s+(table|database)|\btruncate\b|(テーブル|データベース|db|レコード|全件)を?\s*(削除|消去|消す)/u,
+    pattern:
+      /drop\s+(table|database)|\btruncate\b|(テーブル|データベース|db|レコード|全件)を?\s*(削除|消去|消す)/u,
     userOnly: true,
   },
   {
@@ -258,12 +265,16 @@ const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp;
   {
     description: 'secrets',
     pattern:
-      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password|(?:api|apiキー|auth|bearer|refresh|session|認証|認可|リフレッシュ|セッション)[\s_-]*(?:token|トークン)|(?:github|gitlab|npm|slack)[\s_-]*(?:token|トークン)|ssh[\s_-]*key|パスフレーズ|passphrase/u,
+      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password|(?<!入力|出力|input\s|output\s)(?:トークン|\btoken\b|_token\b)(?!\s*(?:量|数|使用|消費|上限|制限|コスト|予算|見積|count|usage|limit|budget|cost|window|estimate))|\bbearer\b|\bpat\b|\bjwt\b|ssh[\s_-]*key|パスフレーズ|passphrase/u,
     userOnly: true,
   },
   { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u, userOnly: false },
   { description: '課金', pattern: /課金|請求|billing|決済|支払|payment/u, userOnly: false },
-  { description: 'デプロイ・公開', pattern: /デプロイ|deploy|\bpublish\b|パッケージ.{0,4}公開/u, userOnly: false },
+  {
+    description: 'デプロイ・公開',
+    pattern: /デプロイ|deploy|\bpublish\b|パッケージ.{0,4}公開/u,
+    userOnly: false,
+  },
 ];
 
 /** 質問に含まれる危険語の説明。`userOnly`はユーザーが決めるもの、`caution`は回答者判定の材料にするもの。 */
@@ -285,10 +296,16 @@ export function findQuestionDangers(
   const commands = findIrreversibleCommands(normalized);
   return {
     userOnly: [
-      ...new Set([...matched.filter((p) => p.userOnly).map((p) => p.description), ...commands.destructive]),
+      ...new Set([
+        ...matched.filter((p) => p.userOnly).map((p) => p.description),
+        ...commands.destructive,
+      ]),
     ],
     caution: [
-      ...new Set([...matched.filter((p) => !p.userOnly).map((p) => p.description), ...commands.caution]),
+      ...new Set([
+        ...matched.filter((p) => !p.userOnly).map((p) => p.description),
+        ...commands.caution,
+      ]),
     ],
   };
 }
@@ -304,10 +321,8 @@ export function describeCautionDangers(dangers: QuestionDangers): string | undef
  * 回答者判定を通さずユーザーが決めるescalation。secretsと破壊的操作に限る。それ以外の
  * escalation（リリース・要件変更など）は回答者判定の材料にする（Issue #1763・#1771）。
  */
-const USER_ONLY_ESCALATIONS: ReadonlySet<RoadmapQuestionEscalation> = new Set<RoadmapQuestionEscalation>([
-  'destructiveOperation',
-  'secrets',
-]);
+const USER_ONLY_ESCALATIONS: ReadonlySet<RoadmapQuestionEscalation> =
+  new Set<RoadmapQuestionEscalation>(['destructiveOperation', 'secrets']);
 
 /** 付いたescalationのうち、回答者判定を通さずユーザーが決めるもの。 */
 export function findUserOnlyEscalations(
@@ -437,7 +452,10 @@ export class RoadmapQuestionMcpServer {
    * Issueセッション1つ分の接続先を登録し、CLIへ渡すURLを返す。トークンは推測できない
    * 128bitで、`unregister`した後のURLは404になる。
    */
-  register(connectionId: string, handler: RoadmapAskHandler): Promise<{ url: string; token: string }> {
+  register(
+    connectionId: string,
+    handler: RoadmapAskHandler,
+  ): Promise<{ url: string; token: string }> {
     return this.add({
       connectionId,
       tools: [ROADMAP_ASK_ORCHESTRATOR_TOOL],
