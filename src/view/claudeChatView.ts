@@ -1101,9 +1101,7 @@ export class ClaudeChatViewManager
     if (manual && this.rejectIfInputLocked(entry)) {
       return;
     }
-    const state = entry.session.getState();
-    const turnSeq = state.turnCompletionSeq;
-    if (!manual && this.autoHandoffHeld(entry, state)) {
+    if (!manual && this.autoHandoffHeld(entry, entry.session.getState())) {
       return;
     }
     const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
@@ -1119,13 +1117,15 @@ export class ClaudeChatViewManager
     this.handoffPreparing.add(entry);
     if (!manual) {
       entry.autoHandoffStarted = true;
-      entry.session.noteLocalEvent(
-        `autoHandoff:${Date.now()}`,
-        '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
-      );
     }
     let outcome: HandoffOutcome = 'failed';
     try {
+      if (!manual) {
+        entry.session.noteLocalEvent(
+          `autoHandoff:${Date.now()}`,
+          '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
+        );
+      }
       outcome = await this.startHandoff(entry, sessionId, trigger, manual, preassessed);
     } catch (e) {
       const message = `引き継ぎが例外で止まりました: ${e instanceof Error ? e.message : String(e)}`;
@@ -1138,7 +1138,11 @@ export class ClaudeChatViewManager
     }
     if (!manual && outcome === 'failed') {
       entry.autoHandoffStarted = false;
-      entry.autoHandoffFailedTurnSeq = turnSeq;
+      // 準備中に別のターンが終わっていることがあるため、試した時点ではなく今のターンを控える
+      entry.autoHandoffFailedTurnSeq = entry.session.getState().turnCompletionSeq;
+      if (entry.disposed) {
+        return;
+      }
       this.log.info('自動引き継ぎに失敗したため、次のターンが終わってから判定し直します');
     }
   }
@@ -1443,7 +1447,14 @@ export class ClaudeChatViewManager
       this.dispatch(newEntry, chooseHandoffPrompt(pointerPath, lastAssistantMessage));
     } catch (e) {
       giveUp.abort();
-      throw e;
+      // 新セッションは開いた後なので`started`で返す。`failed`にすると自動引き継ぎが次の
+      // ターンの後にもう1つ新セッションを開く（Issue #1746）
+      const message = `引き継ぎ先へ初回プロンプトを送れませんでした（新しいタブは開いたままです）: ${e instanceof Error ? e.message : String(e)}`;
+      this.log.warn(message);
+      if (notifyFailure) {
+        void vscode.window.showErrorMessage(message);
+      }
+      return 'started';
     }
     void this.confirmStopAfterFirstResponse(
       entry,
