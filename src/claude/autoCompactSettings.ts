@@ -1,6 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { MIN_AUTO_COMPACT_LIMIT } from '../appserver/chatState';
+import type { Logger } from '../log';
+
+/** settings.jsonとして読むファイルの大きさの上限。これを超えるものは読まない。 */
+const MAX_SETTINGS_BYTES = 1024 * 1024;
 
 /**
  * settingsの `autoCompactWindow` を読む（Issue #1747）。
@@ -13,7 +18,8 @@ import { join } from 'node:path';
 export function readClaudeAutoCompactWindow(
   cwd: string,
   env: NodeJS.ProcessEnv = process.env,
-  readText: (path: string) => string | undefined = readTextOrUndefined,
+  readText: (path: string) => string | undefined = (path) => readTextOrUndefined(path, log),
+  log?: Logger,
 ): number | undefined {
   const fromEnv = env['CLAUDE_CONFIG_DIR'];
   const home =
@@ -45,13 +51,24 @@ export function extractAutoCompactWindow(content: string): number | undefined {
     return undefined;
   }
   const value = (parsed as Record<string, unknown>)['autoCompactWindow'];
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+  return typeof value === 'number' && Number.isFinite(value) && value >= MIN_AUTO_COMPACT_LIMIT
+    ? value
+    : undefined;
 }
 
-function readTextOrUndefined(path: string): string | undefined {
+function readTextOrUndefined(path: string, log: Logger | undefined): string | undefined {
   try {
+    const stat = statSync(path);
+    // FIFOや巨大なファイルを同期で読むと拡張ホストが止まる
+    if (!stat.isFile() || stat.size > MAX_SETTINGS_BYTES) {
+      log?.info(`[claude] settingsを読みません（通常ファイルでないか大きすぎます）: ${path}`);
+      return undefined;
+    }
     return readFileSync(path, 'utf8');
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log?.info(`[claude] settingsを読めません: ${path}: ${String(e)}`);
+    }
     return undefined;
   }
 }
