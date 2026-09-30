@@ -9508,13 +9508,22 @@ tasks:
     ).toBe(true);
   });
 
-  it('allowAutoApproveが無効なら、オーケストレーターの承認ハンドラを設定しない', async () => {
+  it('allowAutoApproveが無効でも、オーケストレーターの承認要求を自動許可する（Issue #1697）', async () => {
+    // オーケストレーターには全権限を与え、拡張機能側の設定では絞らない（buildOrchestratorConfig）
     const { runner, codexHost } = createHarness(YAML_ONE, { allowAutoApprove: false });
     await runner.start('/repo/.agents/workflows/o.yaml', '/repo');
     await flush();
 
     const session = codexHost.orchestratorSessions[0] as FakeTaskSession;
-    expect(session.approvalHandler).toBeUndefined();
+    const result = await session.requestApproval({
+      requestId: 'orchestrator-write',
+      kind: 'command',
+      title: '',
+      detail: '',
+      itemId: undefined,
+    });
+
+    expect(result).toEqual({ kind: 'auto', decision: 'accept' });
   });
 
   it('run開始の通知を送る（役割と道具の説明つき）', async () => {
@@ -11696,7 +11705,11 @@ tasks:
 
     it('実測の途中で人が手動で再実行したら、その再実行を巻き戻さず、引き継ぎもしない', async () => {
       const { store, runId, cwd, branch } = await startAndInterrupt();
-      const leftover = leftoverGit({ head: branch, status: ' M src/a.ts\0', numstat: '3\t1\tsrc/a.ts\0' });
+      const leftover = leftoverGit({
+        head: branch,
+        status: ' M src/a.ts\0',
+        numstat: '3\t1\tsrc/a.ts\0',
+      });
       let release: () => void = () => {};
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -11733,7 +11746,11 @@ tasks:
 
     it('引き継いだタスクの起動に失敗したら、残った作業の場所を警告に残す', async () => {
       const { store, runId, cwd, branch } = await startAndInterrupt();
-      const git = leftoverGit({ head: branch, status: ' M src/a.ts\0', numstat: '3\t1\tsrc/a.ts\0' });
+      const git = leftoverGit({
+        head: branch,
+        status: ' M src/a.ts\0',
+        numstat: '3\t1\tsrc/a.ts\0',
+      });
       const { reloadedRunner, newCodexHost } = reloadWith(store, YAML, {
         readAutoResume: () => true,
         git,
@@ -11742,9 +11759,9 @@ tasks:
       await reloadedRunner.restoreRunsForView();
       // 中断で既に`failed`（reloadInterrupted）なので、状態ではなく警告の出現を待つ
       await vi.waitFor(() =>
-        expect(
-          reloadedRunner.getSnapshot(runId)?.warnings.map((w) => w.kind),
-        ).toContain('resumeInspectionFailed'),
+        expect(reloadedRunner.getSnapshot(runId)?.warnings.map((w) => w.kind)).toContain(
+          'resumeInspectionFailed',
+        ),
       );
 
       expect(store.find(runId)?.tasks['T1']?.state).toBe('failed');
@@ -11776,7 +11793,11 @@ tasks:
       const { store, runId, cwd, branch } = await startAndInterrupt(TWO_TASKS_YAML);
       const t2Cwd = store.find(runId)?.tasks['T2']?.cwd ?? '';
       expect(t2Cwd.endsWith('/T2')).toBe(true);
-      const git = leftoverGit({ head: branch, status: ' M src/a.ts\0', numstat: '3\t1\tsrc/a.ts\0' });
+      const git = leftoverGit({
+        head: branch,
+        status: ' M src/a.ts\0',
+        numstat: '3\t1\tsrc/a.ts\0',
+      });
       const fs: WorktreeFileSystemPort = {
         ...identityFs,
         pathExists: async (target) => target !== t2Cwd,
@@ -11795,9 +11816,7 @@ tasks:
       expect(store.find(runId)?.tasks['T1']?.manualRetryCount).toBe(0);
       expect(store.find(runId)?.tasks['T2']?.manualRetryCount).toBe(1);
       const warnings = reloadedRunner.getSnapshot(runId)?.warnings ?? [];
-      expect(
-        warnings.find((w) => w.kind === 'resumedWithUncommittedWork')?.taskId,
-      ).toBe('T1');
+      expect(warnings.find((w) => w.kind === 'resumedWithUncommittedWork')?.taskId).toBe('T1');
       expect(warnings.find((w) => w.kind === 'resumeInspectionFailed')?.taskId).toBe('T2');
       // 自動再開の警告は、実際にpendingへ戻したタスクを並べる
       expect(warnings.find((w) => w.kind === 'autoResume')?.message).toContain('T1, T2');
@@ -12333,10 +12352,16 @@ tasks:
     expect(store.find(runId)?.tasks['T2']?.state).toBe('done');
 
     const t1MergeIndex = git.calls.findIndex(
-      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(branchShaOf(`wf/${runId}/T1`)),
+      (c) =>
+        c.args[0] === 'merge' &&
+        c.args[1] === '--no-ff' &&
+        c.args.includes(branchShaOf(`wf/${runId}/T1`)),
     );
     const t2MergeIndex = git.calls.findIndex(
-      (c) => c.args[0] === 'merge' && c.args[1] === '--no-ff' && c.args.includes(branchShaOf(`wf/${runId}/T2`)),
+      (c) =>
+        c.args[0] === 'merge' &&
+        c.args[1] === '--no-ff' &&
+        c.args.includes(branchShaOf(`wf/${runId}/T2`)),
     );
     expect(t1MergeIndex).toBeGreaterThanOrEqual(0);
     expect(t2MergeIndex).toBeGreaterThan(t1MergeIndex);
