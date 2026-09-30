@@ -16,7 +16,8 @@ export function readClaudeAutoCompactWindow(
   readText: (path: string) => string | undefined = readTextOrUndefined,
 ): number | undefined {
   const fromEnv = env['CLAUDE_CONFIG_DIR'];
-  const home = fromEnv !== undefined && fromEnv.trim() !== '' ? fromEnv : join(homedir(), '.claude');
+  const home =
+    fromEnv !== undefined && fromEnv.trim() !== '' ? fromEnv : join(homedir(), '.claude');
   const candidates = [
     join(cwd, '.claude', 'settings.local.json'),
     join(cwd, '.claude', 'settings.json'),
