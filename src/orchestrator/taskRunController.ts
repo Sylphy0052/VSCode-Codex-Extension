@@ -30,7 +30,7 @@ import {
 } from './taskRunLease';
 import { escalateQuestionToUser, findStageQuestion } from './taskRunQuestions';
 import {
-  escalateStageGate,
+  escalateGateToUser,
   findOpenGate,
   findStageGate,
   GATE_CHOICE_LABELS,
@@ -1374,20 +1374,7 @@ export class TaskRunController {
     const next = await this.updateRun(runId, (r) =>
       'questionId' in target
         ? escalateQuestionToUser(r, taskId, target.questionId, reason, this.now())
-        : findStageGate(r, taskId, target.gateId)?.status === 'awaitingOrchestrator'
-          ? escalateStageGate(
-              r,
-              taskId,
-              target.gateId,
-              [
-                findStageGate(r, taskId, target.gateId)?.reflexSummary,
-                `オーケストレーターがユーザーへ回した: ${reason}`,
-              ]
-                .filter((line) => line !== undefined)
-                .join('\n'),
-              this.now(),
-            )
-          : r,
+        : escalateGateToUser(r, taskId, target.gateId, reason, this.now()),
     );
     const status =
       next === undefined

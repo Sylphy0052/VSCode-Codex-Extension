@@ -145,13 +145,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         )
       : { kind: 'human', summary: undefined };
 
-  // 回答者判定（Issue #1708）。無効ならすべてユーザーへ回す
+  // 回答者判定（Issue #1708）。無効、またはOrchestratorへ任せられないならすべてユーザーへ回す
   const judgeAnswerer = async (
+    runId: string,
     engine: TaskRunEngine,
     question: AnswererQuestion,
   ): Promise<AnswererVerdict> => {
     const settings = readAnswererJudgeConfig();
-    return settings.enabled
+    return settings.enabled && orchestrator.canDecide(runId)
       ? judgeQuestionAnswerer(
           { provider: engine, executable: executableFor(engine), logWarn: warn },
           question,

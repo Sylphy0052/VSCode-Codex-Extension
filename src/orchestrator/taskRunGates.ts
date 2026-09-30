@@ -4,6 +4,7 @@ import {
   currentStage,
   getTask,
   isTaskDone,
+  joinSummaries,
   resetStageForRetry,
   type OrchestratedTask,
   type StageDecider,
@@ -60,7 +61,7 @@ export function isGateChoiceAllowed(kind: StageGateKind, choice: StageGateChoice
  * 進めるかはユーザーだけが決める（Issue #1711）。Reflexには選択肢として示さず、判定が
  * `proceed`でも決着させない。
  */
-function isReviewFailed(task: OrchestratedTask): boolean {
+export function isReviewFailed(task: OrchestratedTask): boolean {
   return task.review?.passed === false;
 }
 
@@ -295,7 +296,7 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
  * runかどうかで受理を判定する）。
  * - `sendBack`: 「実装とPR作成」から やり直す（同じworktree・ブランチ・PRを使う）
  * - `proceed`: 指摘を残したまま「mergeとcleanup」へ進む。レビューが通過しなかったタスクでは
- *   ユーザーの決着だけ受け付ける（Reflexの`proceed`はそのまま返し、呼び出し側がユーザーへ回す）
+ *   ユーザーの決着だけ受け付ける（Reflexとオーケストレーターの`proceed`はそのまま返す）
  * - `retry`: 止まった工程を未着手へ戻す（`resetStageForRetry`）
  */
 export function resolveStageGate(
@@ -316,7 +317,7 @@ export function resolveStageGate(
     if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
       return undefined;
     }
-    if (resolution.by === 'reflex' && resolution.choice === 'proceed' && isReviewFailed(task)) {
+    if (resolution.by !== 'user' && resolution.choice === 'proceed' && isReviewFailed(task)) {
       return undefined;
     }
     const resolved: StageGate = {
@@ -352,6 +353,30 @@ export function resolveStageGate(
 }
 
 /**
+ * オーケストレーターの判断待ちの関門をユーザーの判断待ちへ回す（オーケストレーターが自分では
+ * 決められないとした）。`reason`はReflexの要約に添えて残す。判断待ちでなければそのまま返す。
+ */
+export function escalateGateToUser(
+  run: TaskRun,
+  taskId: string,
+  gateId: string,
+  reason: string,
+  now: Date,
+): TaskRun {
+  const gate = findStageGate(run, taskId, gateId);
+  if (gate?.status !== 'awaitingOrchestrator') {
+    return run;
+  }
+  return escalateStageGate(
+    run,
+    taskId,
+    gateId,
+    joinSummaries(gate.reflexSummary, `オーケストレーターがユーザーへ回した: ${reason}`),
+    now,
+  );
+}
+
+/**
  * 再読み込みでReflexの判定・オーケストレーターの判断が途切れた関門をユーザーの判断待ちにする
  * （判定し直さない。再読み込み後のオーケストレーターは判断を頼まれたことを知らない）。
  */
@@ -362,10 +387,13 @@ export function escalateJudgingGatesOnReload(run: TaskRun, now: Date): TaskRun {
     if (gate?.status === 'judging') {
       next = escalateStageGate(next, task.taskId, gate.gateId, '再読み込みでReflexの判定が途切れた', now);
     } else if (gate?.status === 'awaitingOrchestrator') {
-      const summary = [gate.reflexSummary, '再読み込みでオーケストレーターの判断が途切れた']
-        .filter((line) => line !== undefined)
-        .join('\n');
-      next = escalateStageGate(next, task.taskId, gate.gateId, summary, now);
+      next = escalateStageGate(
+        next,
+        task.taskId,
+        gate.gateId,
+        joinSummaries(gate.reflexSummary, '再読み込みでオーケストレーターの判断が途切れた'),
+        now,
+      );
     }
   }
   return next;

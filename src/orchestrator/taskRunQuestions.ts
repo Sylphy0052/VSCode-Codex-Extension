@@ -1,6 +1,7 @@
 import type { RoadmapAskArgs } from './roadmapQuestionMcp';
 import {
   getTask,
+  joinSummaries,
   type OrchestratedTask,
   type StageDecider,
   type StageQuestion,
@@ -158,9 +159,7 @@ export function escalateQuestionToUser(
       ? {
           ...q,
           status: 'awaitingUser',
-          reflexSummary: [q.reflexSummary, `オーケストレーターがユーザーへ回した: ${reason}`]
-            .filter((line) => line !== undefined)
-            .join('\n'),
+          reflexSummary: joinSummaries(q.reflexSummary, `オーケストレーターがユーザーへ回した: ${reason}`),
         }
       : undefined,
   );

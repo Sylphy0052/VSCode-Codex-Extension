@@ -1785,6 +1785,12 @@ export interface LiveOrchestrator {
   busy: boolean;
   /** `ask_user`の回答者判定（Issue #1708）の最中か。判定中に届いた2件目の`ask_user`は拒否する。 */
   askUserJudging?: boolean;
+  /**
+   * `ask_user`を回答者判定（Issue #1708）でオーケストレーターへ差し戻した回数。
+   * `MAX_ASK_USER_ANSWERER_REJECTIONS`に達したら判定をやめて人へ出す（差し戻しの繰り返しで
+   * runが進まなくなるのを防ぐ）。
+   */
+  askUserRejectedCount?: number;
   /** ターン末の問いかけの回答者判定と促し（Issue #1708）。最初に待機へ戻ったときに作る。 */
   answererNudge?: TurnEndAnswererNudge;
   /** まだ送っていないイベント通知。ターンが終わったらまとめて送る。 */

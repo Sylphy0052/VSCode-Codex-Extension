@@ -242,6 +242,15 @@ export class TaskRunOrchestrator {
   }
 
   /**
+   * 質問・関門の判断をOrchestratorへ任せられるか（回答者判定。Issue #1708）。セッションが無い、
+   * またはイベント通知が上限に達していると、判断待ちにしても知らせが届かず誰も決めないため任せない。
+   */
+  canDecide(runId: string): boolean {
+    const live = this.live.get(runId);
+    return live !== undefined && live.eventsSent < MAX_ORCHESTRATOR_EVENTS_PER_RUN;
+  }
+
+  /**
    * Kanbanの動作中工程カードから人が直接送った指示をOrchestratorへ知らせる（Issue #1627）。
    * 指示自体は`instruct_task`と同じ経路（`TaskRunController.instructTask`）で工程セッションへ
    * 届け終えたあとに呼ぶ想定。ここではその事実をイベントとして積むだけで、Orchestratorが人の
@@ -566,7 +575,11 @@ export class TaskRunOrchestrator {
         this.deps.onDidChange();
         return true;
       },
-    );
+    ).catch((e: unknown) => {
+      this.deps.log(
+        `[task run orchestrator] ${runId}: ターン末の回答者判定の促しを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
   }
 
   private notify(runId: string, event: TaskRunOrchestratorEvent): void {

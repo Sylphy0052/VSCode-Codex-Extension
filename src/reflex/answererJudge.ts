@@ -1,3 +1,4 @@
+import { findQuestionDangers } from '../orchestrator/roadmapQuestionMcp';
 import { judge, type ReflexJudgeDeps } from './reflexJudge';
 
 /**
@@ -7,6 +8,7 @@ import { judge, type ReflexJudgeDeps } from './reflexJudge';
  * 対象は3経路: オーケストレータモードの工程の質問と関門、ワークフローモードの`ask_user`、
  * オーケストレーターのターン末の問いかけ。オーケストレーターへ回すのは「オーケストレーター」の
  * 確率が閾値以上のときだけで、判定の失敗・時間切れはユーザーへ回す（誤判定より安全側に倒す）。
+ * 取り消せない操作に関わる語（Issue #1712の危険語）を含む問いは、Reflexを通さずユーザーへ回す。
  *
  * `vscode`へは依存させず、設定の読み出しと判定の実行手段は呼び出し側から渡す。
  */
@@ -55,11 +57,21 @@ export interface AnswererQuestion {
   evidence?: string | undefined;
 }
 
-function describe(
+function describeProbabilities(
   labels: readonly string[],
   probabilities: Readonly<Record<string, number>>,
 ): string {
   return labels.map((label) => `${label} ${(probabilities[label] ?? 0).toFixed(2)}`).join(' / ');
+}
+
+/** 危険語を含むなら、Reflexを通さずユーザーへ回す判定を返す。 */
+function userVerdictForDangers(dangers: readonly string[]): AnswererVerdict | undefined {
+  return dangers.length === 0
+    ? undefined
+    : {
+        kind: 'user',
+        summary: `取り消せない操作に関わる語を含むため回答者判定を通さなかった（${dangers.join('、')}）`,
+      };
 }
 
 function buildQuestionState(question: AnswererQuestion): string {
@@ -82,6 +94,17 @@ export async function judgeQuestionAnswerer(
   question: AnswererQuestion,
   threshold: number,
 ): Promise<AnswererVerdict> {
+  const dangerous = userVerdictForDangers(
+    findQuestionDangers({
+      question: question.question,
+      reason: question.reason ?? '',
+      options: question.options ?? [],
+      evidence: question.evidence,
+    }),
+  );
+  if (dangerous !== undefined) {
+    return dangerous;
+  }
   const situation =
     question.source === 'stageSession'
       ? 'オーケストレーター（複数のAIエージェントの作業を指揮するAIエージェント）へ、配下の作業セッションから問いが届いた。' +
@@ -103,7 +126,7 @@ export async function judgeQuestionAnswerer(
   if (answer?.kind !== 'choice') {
     return { kind: 'user', summary: undefined };
   }
-  const summary = describe(QUESTION_OPTIONS, answer.probabilities);
+  const summary = describeProbabilities(QUESTION_OPTIONS, answer.probabilities);
   return (answer.probabilities[ORCHESTRATOR] ?? 0) >= threshold
     ? { kind: 'orchestrator', summary }
     : { kind: 'user', summary };
@@ -118,6 +141,12 @@ export async function judgeTurnEndAnswerer(
   lastMessage: string,
   threshold: number,
 ): Promise<AnswererVerdict> {
+  const dangerous = userVerdictForDangers(
+    findQuestionDangers({ question: lastMessage, reason: '', options: [], evidence: undefined }),
+  );
+  if (dangerous !== undefined) {
+    return dangerous;
+  }
   const answers = await judge(deps, {
     situation:
       'オーケストレーター（複数のAIエージェントの作業を指揮するAIエージェント）が1ターンを終えて、ユーザーの発言を待っている。' +
@@ -141,7 +170,7 @@ export async function judgeTurnEndAnswerer(
   if (answer?.kind !== 'choice') {
     return { kind: 'user', summary: undefined };
   }
-  const summary = describe(TURN_END_OPTIONS, answer.probabilities);
+  const summary = describeProbabilities(TURN_END_OPTIONS, answer.probabilities);
   if ((answer.probabilities[ORCHESTRATOR] ?? 0) >= threshold) {
     return { kind: 'orchestrator', summary };
   }

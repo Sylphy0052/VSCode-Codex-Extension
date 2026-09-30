@@ -924,8 +924,14 @@ export function buildOrchestratorControlPort(
       if (rejected !== undefined) {
         return rejected;
       }
+      const orchestrator = self.runs.get(runId)?.orchestrator;
       const verdict = await judgeAskUserAnswerer(self, runId, question, choices);
+      // 判定の間にオーケストレーターが立て直された（自動再開など）ら、古いセッションの問いは出さない
+      if (orchestrator === undefined || self.runs.get(runId)?.orchestrator !== orchestrator) {
+        return no('回答者判定の間にオーケストレーターのセッションが入れ替わりました。');
+      }
       if (verdict?.kind === 'orchestrator') {
+        orchestrator.askUserRejectedCount = (orchestrator.askUserRejectedCount ?? 0) + 1;
         return no(
           'ask_userは出していません（回数にも数えていません）。回答者判定（Reflex）で、この問いは' +
             `オーケストレーターが自分で決めてよいと判定しました（${verdict.summary}）。` +
@@ -974,6 +980,12 @@ export function buildOrchestratorControlPort(
     },
   };
 }
+
+/**
+ * `ask_user`を回答者判定でオーケストレーターへ差し戻す回数の上限（Issue #1708）。
+ * 達した後の`ask_user`は判定せず人へ出す。
+ */
+const MAX_ASK_USER_ANSWERER_REJECTIONS = 3;
 
 /**
  * `ask_user`（design.md §16.33、Issue #583）を受け付ける。呼べる条件（担当領域をまたぐ・
@@ -1045,7 +1057,8 @@ function checkAskUser(
 
 /**
  * `ask_user`の回答者判定（Issue #1708）。判定しない（depsが無い）・失敗したときは`undefined`を
- * 返し、人へ出す。判定の間は`askUserJudging`を立て、2件目の`ask_user`を拒否する。
+ * 返し、人へ出す。差し戻しが`MAX_ASK_USER_ANSWERER_REJECTIONS`回に達した後も判定せず人へ出す。
+ * 判定の間は`askUserJudging`を立て、2件目の`ask_user`を拒否する。
  */
 async function judgeAskUserAnswerer(
   self: WorkflowRunnerInternals,
@@ -1055,7 +1068,11 @@ async function judgeAskUserAnswerer(
 ): Promise<AnswererVerdict | undefined> {
   const judge = self.deps.judgeAskUserAnswerer;
   const orchestrator = self.runs.get(runId)?.orchestrator;
-  if (judge === undefined || orchestrator === undefined) {
+  if (
+    judge === undefined ||
+    orchestrator === undefined ||
+    (orchestrator.askUserRejectedCount ?? 0) >= MAX_ASK_USER_ANSWERER_REJECTIONS
+  ) {
     return undefined;
   }
   orchestrator.askUserJudging = true;
@@ -2283,7 +2300,11 @@ function nudgeTurnEndAnswerer(
       self.notify(runId);
       return true;
     },
-  );
+  ).catch((e: unknown) => {
+    self.deps.log.warn(
+      `[workflow orchestrator] ${runId}: ターン末の回答者判定の促しを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  });
 }
 
 /**

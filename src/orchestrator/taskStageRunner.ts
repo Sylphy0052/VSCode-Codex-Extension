@@ -39,6 +39,7 @@ import {
   getTask,
   haltStage,
   isTaskRunActive,
+  joinSummaries,
   markStagePaused,
   MAX_PAUSE_REASON_LENGTH,
   markStageStopping,
@@ -65,6 +66,7 @@ import {
   GATE_CHOICE_LABELS,
   gateChoiceFromAnswer,
   type GateJudgeQuestion,
+  isReviewFailed,
   needsReviewGate,
   openStageGate,
   resolveStageGate,
@@ -188,7 +190,11 @@ export interface TaskStageRunnerDeps {
    * （回答者判定。Issue #1708）。無ければ（Reflexか回答者判定が無効なら）ユーザーへ回す。
    * 判定の失敗・時間切れは`{kind: 'user'}`を返す。
    */
-  judgeAnswerer?: (engine: TaskRunEngine, question: AnswererQuestion) => Promise<AnswererVerdict>;
+  judgeAnswerer?: (
+    runId: string,
+    engine: TaskRunEngine,
+    question: AnswererQuestion,
+  ) => Promise<AnswererVerdict>;
   /** 同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。無ければ掛けない。 */
   maxParallelPerFolder?: () => number;
   /**
@@ -281,10 +287,6 @@ function appendPrefix(first: string | undefined, second: string): string {
 }
 
 /** Reflexの判定の要約を行で繋ぐ。 */
-function joinSummaries(first: string | undefined, second: string): string {
-  return first === undefined ? second : `${first}\n${second}`;
-}
-
 /**
  * 報告なしに終わった工程の関門へ載せる理由（Issue #1676）。
  *
@@ -476,12 +478,13 @@ export class TaskStageRunner {
         return;
       }
       summary =
-        choice === 'proceed' && task.review?.passed === false
+        choice === 'proceed' && isReviewFailed(task)
           ? `レビューが通過していないため、Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を採らなかった`
           : `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
-    } else {
+    } else if (!isReviewFailed(task)) {
+      // レビューが通過していない関門は指摘を残して進めるかの判断を含むため、ユーザーが決める（Issue #1711）
       const question = buildGateQuestion(task, gate);
-      const answerer = await this.judgeAnswerer(run.engine, {
+      const answerer = await this.judgeAnswerer(runId, run.engine, {
         source: 'stageSession',
         question: question.question,
         reason: question.reason,
@@ -513,6 +516,7 @@ export class TaskStageRunner {
 
   /** 回答者判定（Issue #1708）。判定が無い・失敗したときはユーザーへ回す。 */
   private async judgeAnswerer(
+    runId: string,
     engine: TaskRunEngine,
     question: AnswererQuestion,
   ): Promise<AnswererVerdict> {
@@ -521,7 +525,7 @@ export class TaskStageRunner {
       return { kind: 'user', summary: undefined };
     }
     try {
-      return await judge(engine, question);
+      return await judge(runId, engine, question);
     } catch (e) {
       return { kind: 'user', summary: `回答者判定に失敗: ${errorMessage(e)}` };
     }
@@ -1510,7 +1514,7 @@ export class TaskStageRunner {
     if (verdict.kind === 'human') {
       let summary = verdict.summary;
       if (!userOnly && run !== undefined) {
-        const answerer = await this.judgeAnswerer(run.engine, {
+        const answerer = await this.judgeAnswerer(runId, run.engine, {
           source: 'stageSession',
           question: question.question,
           reason: question.reason,

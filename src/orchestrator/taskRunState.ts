@@ -1235,3 +1235,8 @@ export function recordOrchestratorAutoHandoff(run: TaskRun, generation: number, 
     },
   };
 }
+
+/** Reflex・オーケストレーターの判断の要約へ1行足す（Issue #1708）。 */
+export function joinSummaries(first: string | undefined, second: string): string {
+  return first === undefined ? second : `${first}\n${second}`;
+}

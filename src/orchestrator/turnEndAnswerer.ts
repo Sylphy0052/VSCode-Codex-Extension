@@ -38,6 +38,8 @@ export class TurnEndAnswererNudge {
     if (message.id === this.judgedMessageId) {
       return;
     }
+    // 判定の失敗・送れなかったときも同じ発言は判定し直さない。待機のまま状態が変わるたびにReflexを
+    // 呼び直さないため（促しが落ちても、問いはユーザーへ残るので安全側）
     this.judgedMessageId = message.id;
     const epoch = this.epoch;
     let verdict: AnswererVerdict;
