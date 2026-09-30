@@ -879,14 +879,20 @@ export class LoopController {
   ): Promise<void> {
     const iteration = this.status.iteration;
     // ゴール駆動でないループでは`seenEvidenceIds`は開始時点の値のまま動かないため、
-    // ここで拾うのはループを始めてから実行されたコマンドの全体になる
-    const input = {
-      condition: plan.condition,
-      recentTurns: collectRecentTurns(state.items),
-      evidence: collectCommandEvidence(state.items, this.seenEvidenceIds, iteration),
-    };
-    const result = await doneCheck
-      .check(input, this.runAbort?.signal)
+    // ここで拾うのはループを始めてから実行されたコマンドの全体になる。
+    // 入力の組み立ても判定と同じ`.catch`の内側で行う（Issue #1716）。外で例外が出ると
+    // 呼び出し元の`void`で捨てられ、ループが止まりも進みもしなくなる
+    const result = await Promise.resolve()
+      .then(() =>
+        doneCheck.check(
+          {
+            condition: plan.condition,
+            recentTurns: collectRecentTurns(state.items),
+            evidence: collectCommandEvidence(state.items, this.seenEvidenceIds, iteration),
+          },
+          this.runAbort?.signal,
+        ),
+      )
       .catch(() => ({ kind: 'unavailable' }) as const);
 
     // 待っている間にループが止められた・別の実行が始まった。結果は捨てる
