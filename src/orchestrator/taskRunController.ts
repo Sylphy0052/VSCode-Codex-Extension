@@ -208,6 +208,8 @@ export class TaskRunController {
   /** 求めている途中・求め終えた推奨値。キーは`runId`と`recommendationKey`。 */
   private readonly recommending = new Map<string, Promise<StageSettingsRecommendation | undefined>>();
   private readonly recommended = new Map<string, Map<string, StageSettingsRecommendation>>();
+  /** `approve_plan`でReflexが妥当としなかった計画（runごと。Issue #1763）。 */
+  private readonly plansNeedingUser = new Map<string, string>();
   /** runの開始と再開を直列にする。動いているrunの確認と作成の間に別の開始が割り込まないため。 */
   private readonly startQueue = new SerialQueue();
 
@@ -650,7 +652,7 @@ export class TaskRunController {
       return conflict === undefined ? approveTaskPlan(r) : r;
     });
     if (changed) {
-      return { ok: false, message: '審査の間に計画が変わりました。もう一度approve_planを呼んでください' };
+      return { ok: false, message: '審査・確認の間に計画が変わりました。もう一度approve_planを呼んでください' };
     }
     if (conflict !== undefined) {
       return { ok: false, message: `計画を承認できません: ${conflict}。Orchestratorに計画を直させてください` };
@@ -665,21 +667,33 @@ export class TaskRunController {
   /**
    * Orchestratorの`approve_plan`（Issue #1763）。承認待ちの計画をReflexで審査し、妥当なら承認する。
    * Reflexが無効・妥当と言い切れないときは承認せず`needsUser`を返す（承認するかは呼び出し側が
-   * 人に確かめる）。審査の結果は`planReview`へ記録する。
+   * 人に確かめる）。`reviewedPlan`は人に見せる計画で、承認時に変わっていないか照合する。
+   * 審査の結果は`planReview`へ記録する。Reflexが一度妥当としなかった計画は、変わるまで審査し直さない
+   * （判定の揺れで人に残した承認を通さないため）。
    */
   async approvePlanByReview(
     runId: string,
-  ): Promise<{ decided: ControllerResult } | { needsUser: string | undefined }> {
+  ): Promise<
+    | { decided: ControllerResult }
+    | { needsUser: { summary: string | undefined; reviewedPlan: string } }
+  > {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return { decided: leased };
+    }
     const run = this.deps.store.find(runId);
     if (run?.planStatus !== 'awaitingApproval') {
       return { decided: { ok: false, message: '承認待ちの計画がありません' } };
     }
-    const config = this.deps.planReview?.(run.engine);
-    if (config === undefined) {
-      return { needsUser: undefined };
-    }
     const drafts = pendingPlanDrafts(run);
     const reviewedPlan = JSON.stringify(drafts);
+    const config = this.deps.planReview?.(run.engine);
+    if (config === undefined) {
+      return { needsUser: { summary: undefined, reviewedPlan } };
+    }
+    if (this.plansNeedingUser.get(runId) === reviewedPlan) {
+      return { needsUser: { summary: run.planReview?.summary, reviewedPlan } };
+    }
     const verdict = await reviewTaskRunPlanProposal(
       config.reflex,
       drafts,
@@ -696,7 +710,8 @@ export class TaskRunController {
         : r,
     );
     if (verdict.kind !== 'approved') {
-      return { needsUser: verdict.summary };
+      this.plansNeedingUser.set(runId, reviewedPlan);
+      return { needsUser: { summary: verdict.summary, reviewedPlan } };
     }
     return { decided: await this.approvePlan(runId, reviewedPlan) };
   }
@@ -1505,6 +1520,7 @@ export class TaskRunController {
   forget(runId: string): void {
     this.lastSeen.delete(runId);
     this.recommended.delete(runId);
+    this.plansNeedingUser.delete(runId);
     for (const key of [...this.recommending.keys()]) {
       if (key.startsWith(`${runId}#`)) {
         this.recommending.delete(key);
@@ -1513,10 +1529,6 @@ export class TaskRunController {
   }
 }
 
-/**
- * ロードマップIssueから始めたrunの計画で、ロードマップに無い既存のIssueのうち新しく入ったもの。
- * このrunが作ったIssue（チェックリストへ足す途中）は除く。ロードマップから始めていなければ空。
- */
 /** 承認待ちの計画を、提案時と同じ形（`TaskDraft`）で取り出す（Issue #1763。Reflexの審査へ渡す）。 */
 function pendingPlanDrafts(run: TaskRun): TaskDraft[] {
   return listTasks(run).map((task) => ({
@@ -1541,6 +1553,10 @@ function issuesOutsideRoadmap(run: TaskRun, drafts: readonly TaskDraft[]): numbe
     .filter((n): n is number => n !== undefined && !children.has(n));
 }
 
+/**
+ * ロードマップIssueから始めたrunの計画で、ロードマップに無い既存のIssueのうち新しく入ったもの。
+ * このrunが作ったIssue（チェックリストへ足す途中）は除く。ロードマップから始めていなければ空。
+ */
 function newIssuesOutsideRoadmap(before: TaskRun, tasks: readonly PlanTaskInput[]): number[] {
   if (before.roadmap === undefined) {
     return [];

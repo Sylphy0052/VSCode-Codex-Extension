@@ -987,7 +987,7 @@ export class TaskRunOrchestrator {
     const confirmed = await this.deps.confirmPlanApproval({
       runLabel: taskRunLabel(run),
       taskCount: run.taskOrder.length,
-      reflexSummary: reviewed.needsUser,
+      reflexSummary: reviewed.needsUser.summary,
     });
     if (!confirmed) {
       return {
@@ -995,7 +995,8 @@ export class TaskRunOrchestrator {
         isError: true,
       };
     }
-    const result = await this.deps.controller.approvePlan(runId);
+    // 確認を待つ間に計画が変わっていれば、人が見ていない計画なので承認しない
+    const result = await this.deps.controller.approvePlan(runId, reviewed.needsUser.reviewedPlan);
     return { text: result.message, isError: !result.ok };
   }
 
