@@ -133,25 +133,32 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ? { models: deps.settings.claudeSnapshot().models, fallbackEfforts: CLAUDE_EFFORTS }
       : { models: deps.settings.snapshot().models, fallbackEfforts: FALLBACK_EFFORTS };
 
+  // 工程の質問・関門の自動回答。工程セッションのタブのReflex（`reflexEnabled`。`undefined`なら
+  // グローバル設定）と`agent.chat.autoReply.reflex.enabled`のどちらかが無効ならユーザーへ回す（Issue #1727）
   const judgeByReflex = async (
     engine: TaskRunEngine,
     question: GateJudgeQuestion,
-  ): Promise<RoadmapQuestionVerdict> =>
-    readReflexEnabled()
+    reflexEnabled: boolean | undefined,
+  ): Promise<RoadmapQuestionVerdict> => {
+    const settings = readAutoReplyReflexConfig(reflexEnabled ?? readReflexEnabled());
+    return settings.enabled
       ? judgeRoadmapQuestion(
           { provider: engine, executable: executableFor(engine), logWarn: warn },
           question,
-          readAutoReplyReflexConfig().answerThreshold,
+          settings.answerThreshold,
         )
       : { kind: 'human', summary: undefined };
+  };
 
-  // 回答者判定（Issue #1708）。無効、またはOrchestratorへ任せられないならすべてユーザーへ回す
+  // 回答者判定（Issue #1708）。無効、またはOrchestratorへ任せられないならすべてユーザーへ回す。
+  // 工程セッションからの問いなので、そのタブのReflexに従う（Issue #1727）
   const judgeAnswerer = async (
     runId: string,
     engine: TaskRunEngine,
     question: AnswererQuestion,
+    reflexEnabled: boolean | undefined,
   ): Promise<AnswererVerdict> => {
-    const settings = readAnswererJudgeConfig();
+    const settings = readAnswererJudgeConfig(reflexEnabled ?? readReflexEnabled());
     return settings.enabled && orchestrator.canDecide(runId)
       ? judgeQuestionAnswerer(
           { provider: engine, executable: executableFor(engine), logWarn: warn },
@@ -209,8 +216,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     isStartHeld: () => holder.monitor?.level === 'critical',
     mcpServer: questionServer,
     // Reflexモードが無効なら判定せず、すべての質問と関門をユーザーへ回す
-    judgeQuestion: (engine, question) => judgeByReflex(engine, question),
-    judgeGate: (engine, question) => judgeByReflex(engine, question),
+    judgeQuestion: judgeByReflex,
+    judgeGate: judgeByReflex,
     judgeAnswerer,
     onRunChanged: (run) => holder.controller?.handleRunChanged(run),
     onTaskMerged: (runId, taskId) => holder.controller?.handleTaskMerged(runId, taskId),

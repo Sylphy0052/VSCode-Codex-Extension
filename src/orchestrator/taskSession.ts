@@ -324,6 +324,12 @@ export interface TaskSession {
    */
   interrupt(): Promise<void>;
   /**
+   * このタブで効くReflexモードの親スイッチ。タブ単位の上書き（`TaskSessionInput.reflex`・
+   * タブのReflexボタン）があればそれを、無ければグローバル設定を返す（Issue #1727）。
+   * 省略した実装はグローバル設定に従う扱いにする。
+   */
+  reflexEnabled?(): boolean;
+  /**
    * `LoopController`を一時停止する（design.md §16.21「waitingReplyへの遷移」）。
    * `runLoop` / `interrupt` と並ぶ新しい口。既存の呼び出しはこれを一度も呼ばなければ
    * 従来どおり動く。
