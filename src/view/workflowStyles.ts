@@ -44,6 +44,7 @@ ${completionEvidenceStyles()}
   button.danger { border-color: var(--vscode-errorForeground); color: var(--vscode-errorForeground); }
   button:disabled { opacity: 0.5; cursor: default; }
   select {
+    max-width: 100%;
     padding: 2px 4px;
     color: var(--vscode-dropdown-foreground);
     background-color: var(--vscode-dropdown-background);
@@ -62,7 +63,10 @@ ${completionEvidenceStyles()}
     padding-bottom: 10px;
     border-bottom: 1px solid var(--agent-border);
   }
+  /* run名が長いとselectが選択肢の幅から縮まず、ページ全体に横スクロールが出る（Issue #1764） */
+  #header > div { min-width: 0; }
   #header .title-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  #runSelect { min-width: 0; text-overflow: ellipsis; }
   #header .counts { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
   #header .elapsed { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
   #header .actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -395,9 +399,12 @@ ${completionEvidenceStyles()}
   /* ---- タスク一覧: 盤面表示（Issue #1546、taskRunKanbanView.tsと同じ発想） ---- */
   .task-view-tools { display: flex; gap: 4px; }
   .kanban-board { display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; margin-bottom: 12px; }
+  /* 列の高さを画面の高さまでに抑えてカードは列の中で縦スクロールさせ、盤面の横スクロールバーを常に画面内へ置く（Issue #1764） */
   .kanban-column {
     flex: 1 1 220px;
     min-width: 200px;
+    max-height: calc(100vh - 48px);
+    box-sizing: border-box;
     background-color: var(--vscode-editorWidget-background);
     border: 1px solid var(--vscode-widget-border);
     border-radius: var(--agent-radius-md, 6px);
@@ -413,7 +420,7 @@ ${completionEvidenceStyles()}
     font-size: 0.9em;
     color: var(--vscode-descriptionForeground);
   }
-  .kanban-column-body { display: flex; flex-direction: column; gap: 6px; }
+  .kanban-column-body { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; }
   .kanban-card {
     cursor: pointer;
     border: 1px solid var(--vscode-widget-border);
@@ -423,6 +430,7 @@ ${completionEvidenceStyles()}
     display: flex;
     flex-direction: column;
     gap: 4px;
+    flex-shrink: 0;
   }
   .kanban-card:hover { background-color: var(--vscode-list-hoverBackground); }
   /* 表の行の強調（issue #1037）と同じ見た目を盤面のカードにも適用する */
