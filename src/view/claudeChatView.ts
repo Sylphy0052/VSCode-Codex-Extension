@@ -200,7 +200,12 @@ import {
 } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems, stripHostOnlyState } from './stateDelta';
-import { abortAsRejection, BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
+import {
+  abortAsRejection,
+  BaseChatViewManager,
+  HELD_TASK_PANEL_NOTICE,
+  type BaseChatPanel,
+} from './chatManagerBase';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
@@ -2551,7 +2556,9 @@ export class ClaudeChatViewManager
     ) {
       throw new Error('再開する会話の記録が見つかりません');
     }
-    if (resumeId !== undefined && this.panels.has(resumeId)) {
+    // ウィンドウの開き直しで表示専用に戻したタブ（Issue #1775）は、新しいタブを作らずに引き取る
+    const held = this.findHeldTaskPanel(input);
+    if (resumeId !== undefined && this.panels.has(resumeId) && this.panels.get(resumeId) !== held) {
       throw new Error(
         '再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください',
       );
@@ -2567,6 +2574,7 @@ export class ClaudeChatViewManager
     entry.autoHandoffDisabled = input.disableAutoHandoff === true;
     this.applyTaskSessionSwitches(entry, input);
     this.panels.set(sessionId, entry);
+    this.adoptHeldTaskPanel(held, entry);
     if (resumeId === undefined) {
       entry.session.start({
         cwd: input.cwd,
@@ -3167,6 +3175,28 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * オーケストレータモードのタブを表示専用で預かる（Issue #1775）。CLIは起動せず、transcriptから
+   * 会話を表示するだけにする。続きは`openTaskSession`がこのタブを引き取って開く。
+   * 引き取りと入れ違わないよう、`panels`への登録はtranscriptを読む前に済ませる。
+   */
+  private async holdTaskPanel(panel: vscode.WebviewPanel, sessionId: string): Promise<void> {
+    // CLIを起動しないためcwdは使わないが、entryの組み立てに要る
+    const cwd = currentWorkspaceFolder()?.uri.fsPath ?? '';
+    const entry = this.buildEntry(cwd, panel.title, true, undefined, panel.title);
+    this.holdRestoredTaskPanel(entry, sessionId, panel);
+    const transcript = await this.readTranscript(sessionId);
+    if (entry.disposed) {
+      return;
+    }
+    entry.session.showReadOnly(sessionId, {
+      initialItems: transcript.items,
+      initialTodos: transcript.todos,
+      initialTodoHistory: transcript.todoHistory,
+    });
+    entry.session.noteLocalEvent('held-task-panel', HELD_TASK_PANEL_NOTICE);
+  }
+
+  /**
    * リロード後にVSCodeが復元したパネルを引き取る。
    * webview側が `setState` で保持していたセッションidを使い、会話を読み直す。
    */
@@ -3178,6 +3208,10 @@ export class ClaudeChatViewManager
       return;
     }
     if (this.isTaskManagedThread(sessionId)) {
+      if (this.holdsRestoredTaskPanel(sessionId)) {
+        await this.holdTaskPanel(panel, sessionId);
+        return;
+      }
       // タスク管理下のセッション。汎用復元はここで手を引く（design.md §16.10の7）
       panel.dispose();
       return;

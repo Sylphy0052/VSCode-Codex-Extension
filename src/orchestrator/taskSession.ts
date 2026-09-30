@@ -242,6 +242,13 @@ export interface TaskSessionInput {
    * （claudeは`-r`、codexは`thread/resume`）。
    */
   resume?: { sessionId: string };
+  /**
+   * ウィンドウの開き直しで表示専用に戻したタブのうち、このセッションが引き取ってよい会話の
+   * セッションID（Issue #1775。Orchestratorの前の世代、同じ工程の過去の実行回）。当たるタブが
+   * あれば新しいタブを作らずそのタブで開く。後ろほど新しい会話として優先する。`resume`の
+   * 会話のタブは指定しなくても引き取る。
+   */
+  adoptPanelOf?: readonly string[];
 }
 
 /** `TaskSessionInput.handoffDelegate`へ渡す引き継ぎの依頼。 */

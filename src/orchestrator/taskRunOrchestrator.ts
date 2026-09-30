@@ -526,6 +526,8 @@ export class TaskRunOrchestrator {
       session = await this.deps.hosts[run.engine].openTaskSession({
         role: 'orchestrator',
         runLabel: taskRunLabel(run),
+        // ウィンドウの開き直しで表示専用に戻した前の世代のタブを引き取る（Issue #1775）
+        adoptPanelOf: run.orchestratorSessionRefs,
         // worktreeは作らず、ワークスペースで直接動く。全権限を与えるため
         // `cliSandbox`も付けない（Issue #1697）
         cwd: run.workspaceRoot,

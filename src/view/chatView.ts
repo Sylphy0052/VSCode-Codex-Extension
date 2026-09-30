@@ -139,7 +139,11 @@ import type {
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta, stripHostOnlyState } from './stateDelta';
-import { BaseChatViewManager, type BaseChatPanel } from './chatManagerBase';
+import {
+  BaseChatViewManager,
+  HELD_TASK_PANEL_NOTICE,
+  type BaseChatPanel,
+} from './chatManagerBase';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
@@ -2190,7 +2194,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     try {
       const threadId = await this.startOrResumeTaskThread(entry, input, taskConfig, threadConfig);
       this.pendingStarts.end(pendingKey);
+      // ウィンドウの開き直しで表示専用に戻したタブ（Issue #1775）は、新しいタブを作らずに
+      // 引き取る。同じキーを`panels.set`で差し替える前に探す
+      const held = this.findHeldTaskPanel(input);
       this.panels.set(threadId, entry);
+      this.adoptHeldTaskPanel(held, entry);
       await this.persistModelSettings(entry, threadId);
       return this.buildTaskSession(entry, threadId, input.mcp !== undefined);
     } catch (e) {
@@ -2215,8 +2223,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (resumeId === undefined) {
       return entry.session.start(input.cwd, config, threadConfig);
     }
-    // 同じスレッドを2つのタブで購読させない（人が履歴から開いている等）
-    if (this.panels.has(resumeId)) {
+    // 同じスレッドを2つのタブで購読させない（人が履歴から開いている等）。表示専用で預かった
+    // タブ（Issue #1775）は購読していないので、`openTaskSession`が引き取る
+    if (this.panels.has(resumeId) && this.panels.get(resumeId)?.displayOnly !== true) {
       throw new Error(
         '再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください',
       );
@@ -2283,6 +2292,36 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
+   * オーケストレータモードのタブを表示専用で預かる（Issue #1775）。スレッドは購読せず
+   * （`thread/read`）、会話を表示するだけにする。続きは`openTaskSession`がこのタブを
+   * 引き取って開く。
+   */
+  private async holdTaskPanel(panel: vscode.WebviewPanel, threadId: string): Promise<void> {
+    const entry = this.buildEntry(
+      currentWorkspaceFolder()?.uri.fsPath,
+      panel.title,
+      true,
+      undefined,
+      panel.title,
+    );
+    this.holdRestoredTaskPanel(entry, threadId, panel);
+    try {
+      await entry.session.showReadOnly(threadId);
+    } catch (e) {
+      if (!entry.disposed) {
+        entry.session.noteLocalEvent(
+          'held-task-panel',
+          `会話を読み込めませんでした: ${resumeFailureMessage(e)}`,
+        );
+      }
+      return;
+    }
+    if (!entry.disposed) {
+      entry.session.noteLocalEvent('held-task-panel', HELD_TASK_PANEL_NOTICE);
+    }
+  }
+
+  /**
    * リロード後にVSCodeが復元したパネルを引き取る。
    * webview側が `setState` で保持していた threadId を使い、会話を読み直す。
    */
@@ -2298,6 +2337,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return;
     }
     if (this.isTaskManagedThread(threadId)) {
+      if (this.holdsRestoredTaskPanel(threadId)) {
+        await this.holdTaskPanel(panel, threadId);
+        return;
+      }
       // タスク管理下のスレッド。汎用復元はここで手を引く（design.md §16.10の7）
       panel.dispose();
       return;
