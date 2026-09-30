@@ -59,6 +59,7 @@ const COMPACT_SUMMARY_LIMIT = 12000;
 const TOOL_LABEL_LIMIT = 200;
 const MAX_RUNNING_JOBS = 20;
 const MAX_EDITED_FILES = 100;
+const FILE_PATH_LIMIT = 500;
 
 /**
  * 本文へ入れる要点の節の上限（文字数）。
@@ -536,8 +537,20 @@ export function createHandoffDigestBuilder(provider: HandoffProvider): HandoffDi
   return provider === 'claude' ? createClaudeDigestBuilder() : createCodexDigestBuilder();
 }
 
+/** 読めた要点が1つも無い（拡張機能が保持している分を載せる従来形式のほうが情報が多い）。 */
+function isEmptyDigest(digest: HandoffDigest): boolean {
+  return (
+    digest.compactSummary === undefined &&
+    digest.userMessages.length === 0 &&
+    digest.failedTools.length === 0 &&
+    digest.runningJobs.length === 0 &&
+    digest.editedFiles.length === 0
+  );
+}
+
 /**
- * transcriptを1行ずつ読んで要点を返す。読めなければ `undefined`（例外は投げない）。
+ * transcriptを1行ずつ読んで要点を返す。読めない・要点が1つも無いときは `undefined`
+ * （例外は投げない）。途中で読み込みに失敗したときは、そこまでに集めた分を返す。
  *
  * 全文をメモリに載せない。transcriptは十数MBになる。
  */
@@ -548,13 +561,17 @@ export async function readHandoffDigest(
   const builder = createHandoffDigestBuilder(provider);
   const stream = createReadStream(transcriptPath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const collected = (): HandoffDigest | undefined => {
+    const digest = builder.result();
+    return digest === undefined || isEmptyDigest(digest) ? undefined : digest;
+  };
   try {
     for await (const line of rl) {
       builder.push(line);
     }
-    return builder.result();
+    return collected();
   } catch {
-    return undefined;
+    return collected();
   } finally {
     rl.close();
     stream.destroy();
@@ -567,6 +584,11 @@ const NONE = '無し';
  * 要点の節をMarkdownの行にする。
  *
  * 全体が `HANDOFF_DIGEST_LIMIT` を超えたら行の境目で切り、残りは抽出コマンドで読むよう書き添える。
+ * 切られるのは後ろの節からなので、短くて復旧に効く節（backgroundジョブ・編集したファイル）を
+ * 長くなりやすい失敗したツール呼び出しより前に置く。
+ *
+ * transcript由来の文字列は、見出しや箇条書きを偽装できないよう、複数行のものはフェンスで囲み、
+ * 1行のものは改行を畳んでから入れる。
  */
 export function renderHandoffDigest(digest: HandoffDigest): string[] {
   const lines: string[] = [];
@@ -579,7 +601,7 @@ export function renderHandoffDigest(digest: HandoffDigest): string[] {
   lines.push('### 最後の自動圧縮の要約');
   lines.push('');
   if (digest.compactSummary !== undefined) {
-    lines.push(digest.compactSummary);
+    lines.push(fenceText(digest.compactSummary));
   } else if (digest.compactSummaryUnreadable) {
     lines.push('自動圧縮は走っているが、要約は暗号化された形でしか残っておらず読めない。圧縮より前の経緯は下の発話と抽出コマンドから辿る。');
   } else {
@@ -596,26 +618,13 @@ export function renderHandoffDigest(digest: HandoffDigest): string[] {
     }
   }
   lines.push('');
-  lines.push(`### 失敗したツール呼び出し（末尾${MAX_FAILED_TOOLS}件まで）`);
-  lines.push('');
-  if (digest.failedTools.length === 0) {
-    lines.push(NONE);
-  } else {
-    for (const failure of digest.failedTools) {
-      lines.push(`- ${failure.tool}`);
-      lines.push('');
-      lines.push(fenceText(failure.error));
-      lines.push('');
-    }
-  }
-  lines.push('');
   lines.push('### 終わっていないbackgroundジョブ');
   lines.push('');
   if (digest.runningJobs.length === 0) {
     lines.push(NONE);
   } else {
     for (const job of digest.runningJobs) {
-      lines.push(`- ${job}`);
+      lines.push(`- ${clipLine(job, TOOL_LABEL_LIMIT)}`);
     }
     lines.push('');
     lines.push('開始の記録はあるが、終わった記録がtranscriptに無いもの。引き継ぎ元のセッションと一緒に止まっている場合がある。');
@@ -627,7 +636,20 @@ export function renderHandoffDigest(digest: HandoffDigest): string[] {
     lines.push(`${NONE}（シェルで書き換えたファイルは記録されない。空を「編集していない」と解釈しない）`);
   } else {
     for (const file of digest.editedFiles) {
-      lines.push(`- ${file}`);
+      lines.push(`- ${clipLine(file, FILE_PATH_LIMIT)}`);
+    }
+  }
+  lines.push('');
+  lines.push(`### 失敗したツール呼び出し（末尾${MAX_FAILED_TOOLS}件まで）`);
+  lines.push('');
+  if (digest.failedTools.length === 0) {
+    lines.push(NONE);
+  } else {
+    for (const failure of digest.failedTools) {
+      lines.push(`- ${clipLine(failure.tool, TOOL_LABEL_LIMIT)}`);
+      lines.push('');
+      lines.push(fenceText(failure.error));
+      lines.push('');
     }
   }
   lines.push('');
@@ -642,21 +664,22 @@ function fenceText(text: string): string {
 }
 
 /**
- * 行の境目で `maxChars` 以内に切る。
+ * 行の境目で `maxChars` 以内に切る（切ったときの書き添えも含めて収める）。
  *
  * `fenceText` の囲みは1要素に収まっているので、要素の境目で切ればフェンスが開いたまま残らない。
  */
 function capLines(lines: string[], maxChars: number): string[] {
+  const note = `（上限${maxChars}文字を超えたためここで切った。続きは下の抽出コマンドでtranscriptから読む）`;
+  const tail = ['', note, ''];
+  const tailChars = tail.reduce((sum, line) => sum + line.length + 1, 0);
+  if (lines.reduce((sum, line) => sum + line.length + 1, 0) <= maxChars) {
+    return lines;
+  }
   let total = 0;
   for (let i = 0; i < lines.length; i++) {
     total += (lines[i] ?? '').length + 1;
-    if (total > maxChars) {
-      return [
-        ...lines.slice(0, i),
-        '',
-        `（上限${maxChars}文字を超えたためここで切った。続きは下の抽出コマンドでtranscriptから読む）`,
-        '',
-      ];
+    if (total + tailChars > maxChars) {
+      return [...lines.slice(0, i), ...tail];
     }
   }
   return lines;
