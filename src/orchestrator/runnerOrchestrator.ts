@@ -39,6 +39,8 @@ import type {
 import { describeCarriedOverWork, type CarriedOverWork } from './resumeCarryOver';
 import type { WorkflowRunnerInternals } from './runnerInternals';
 import type { TaskSession } from './taskSession';
+import type { AnswererVerdict } from '../reflex/answererJudge';
+import { TurnEndAnswererNudge } from './turnEndAnswerer';
 import {
   appendTaskToWorkflowYaml,
   buildOrchestratorTask,
@@ -912,12 +914,30 @@ export function buildOrchestratorControlPort(
         ? ok(`最終マージの判断を ${decision} として確定しました。`)
         : no('最終マージの判断待ちが見つかりません（既に確定した可能性があります）。');
     },
-    askUser: (question, choices) => {
+    askUser: async (question, choices) => {
       const finished = runFinishedReason(self, actions, runId);
       if (finished !== undefined) {
         return no(finished);
       }
-      return beginAskUser(self, runId, question, choices);
+      // 形式・回数の検査を先に済ませ、通らない問いでReflexを呼ばない
+      const rejected = checkAskUser(self, runId, question, choices);
+      if (rejected !== undefined) {
+        return rejected;
+      }
+      const verdict = await judgeAskUserAnswerer(self, runId, question, choices);
+      if (verdict?.kind === 'orchestrator') {
+        return no(
+          'ask_userは出していません（回数にも数えていません）。回答者判定（Reflex）で、この問いは' +
+            `オーケストレーターが自分で決めてよいと判定しました（${verdict.summary}）。` +
+            '計画・Issue・コード・これまでの回答から自分で決めて進めてください。',
+        );
+      }
+      // 判定の間にrunが終わった場合に備えて確かめ直す（形式・回数は`beginAskUser`が確かめ直す）
+      const finishedAfter = runFinishedReason(self, actions, runId);
+      if (finishedAfter !== undefined) {
+        return no(finishedAfter);
+      }
+      return beginAskUser(self, runId, question, choices, verdict?.summary);
     },
     addTask: (input) => {
       const finished = planChangeFinishedReason(self, actions, runId);
@@ -966,7 +986,33 @@ function beginAskUser(
   runId: string,
   question: string,
   choices: readonly string[],
+  reflexSummary: string | undefined,
 ): OrchestratorControlResult {
+  const rejected = checkAskUser(self, runId, question, choices);
+  const live = self.runs.get(runId);
+  const orchestrator = live?.orchestrator;
+  if (rejected !== undefined || live === undefined || orchestrator === undefined) {
+    return rejected ?? no('オーケストレーターのセッションがありません。');
+  }
+  orchestrator.askUserCount += 1;
+  live.pendingAskUser = {
+    question,
+    choices: [...choices],
+    since: (self.deps.now?.() ?? new Date()).getTime(),
+    reflexSummary,
+  };
+  void self.persist(runId);
+  self.notify(runId);
+  return ok('質問をワークフローViewへ出しました。人が選ぶまで待ちます。');
+}
+
+/** `ask_user`を出せるかの検査。出せるなら`undefined`、出せないなら拒否の結果を返す。 */
+function checkAskUser(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  question: string,
+  choices: readonly string[],
+): OrchestratorControlResult | undefined {
   const live = self.runs.get(runId);
   const orchestrator = live?.orchestrator;
   if (live === undefined || orchestrator === undefined) {
@@ -974,6 +1020,9 @@ function beginAskUser(
   }
   if (live.pendingAskUser !== undefined) {
     return no('既に回答待ちの質問があります。人が答えるまで新しい質問はできません。');
+  }
+  if (orchestrator.askUserJudging === true) {
+    return no('別の質問の回答者判定が終わっていません。結果を受け取ってから質問してください。');
   }
   if (question.trim() === '') {
     return no('問いの本文が空です。');
@@ -991,15 +1040,32 @@ function beginAskUser(
         '最終マージの判断であればdecide_final_mergeのholdで止めてください。',
     );
   }
-  orchestrator.askUserCount += 1;
-  live.pendingAskUser = {
-    question,
-    choices: [...choices],
-    since: (self.deps.now?.() ?? new Date()).getTime(),
-  };
-  void self.persist(runId);
-  self.notify(runId);
-  return ok('質問をワークフローViewへ出しました。人が選ぶまで待ちます。');
+  return undefined;
+}
+
+/**
+ * `ask_user`の回答者判定（Issue #1708）。判定しない（depsが無い）・失敗したときは`undefined`を
+ * 返し、人へ出す。判定の間は`askUserJudging`を立て、2件目の`ask_user`を拒否する。
+ */
+async function judgeAskUserAnswerer(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  question: string,
+  choices: readonly string[],
+): Promise<AnswererVerdict | undefined> {
+  const judge = self.deps.judgeAskUserAnswerer;
+  const orchestrator = self.runs.get(runId)?.orchestrator;
+  if (judge === undefined || orchestrator === undefined) {
+    return undefined;
+  }
+  orchestrator.askUserJudging = true;
+  try {
+    return await judge(orchestrator.provider, { source: 'orchestrator', question, options: choices });
+  } catch {
+    return undefined;
+  } finally {
+    orchestrator.askUserJudging = false;
+  }
 }
 
 /**
@@ -1777,6 +1843,7 @@ function sendToOrchestrator(
   userTexts: readonly string[],
 ): void {
   clearUsageLimitRetryTimer(orchestrator);
+  orchestrator.answererNudge?.reset();
   orchestrator.taskCleanupEventsInFlight += countTaskCleanup(events);
   // busy中の人の発話（`sendUserMessageToOrchestrator`）は同じターンへ積まれるため足していく。
   // ターンが終わったら空にする
@@ -2146,6 +2213,10 @@ function onOrchestratorStateChanged(
     orchestrator.unreadCount += 1;
   }
   const finishedTurn = orchestrator.busy && !state.busy;
+  if (!orchestrator.busy && state.busy) {
+    // 会話画面からの発言など、`sendToOrchestrator`を通らずに始まったターン
+    orchestrator.answererNudge?.reset();
+  }
   orchestrator.busy = state.busy;
   if (!finishedTurn) {
     // 変化があった以上、固まってはいない。busyの間は判定の起点をここへずらす
@@ -2173,8 +2244,46 @@ function onOrchestratorStateChanged(
     orchestrator.taskCleanupEventsInFlight = 0;
   }
   drainOrchestrator(self, runId);
+  if (!orchestrator.busy && live.pendingAskUser === undefined) {
+    nudgeTurnEndAnswerer(self, runId, orchestrator, state);
+  }
   self.finalizeTaskCleanup(runId);
   self.notify(runId);
+}
+
+/**
+ * 待機へ戻ったオーケストレーターの直前の問いかけを回答者判定にかけ（Issue #1708）、
+ * 自分で決めてよい問いなら促しを送る。判定は非同期で、その間に次のターンが始まったら送らない。
+ */
+function nudgeTurnEndAnswerer(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  orchestrator: LiveOrchestrator,
+  state: ChatState,
+): void {
+  const judge = self.deps.judgeTurnEndAnswerer;
+  if (judge === undefined) {
+    return;
+  }
+  orchestrator.answererNudge ??= new TurnEndAnswererNudge();
+  void orchestrator.answererNudge.onIdle(
+    state.items,
+    (lastMessage) => judge(orchestrator.provider, lastMessage),
+    (text) => {
+      const live = self.runs.get(runId);
+      if (
+        live?.orchestrator !== orchestrator ||
+        orchestrator.busy ||
+        orchestrator.health !== 'alive' ||
+        live.pendingAskUser !== undefined
+      ) {
+        return false;
+      }
+      sendToOrchestrator(self, runId, orchestrator, text, [], []);
+      self.notify(runId);
+      return true;
+    },
+  );
 }
 
 /**

@@ -150,7 +150,13 @@ function buildPendingAskUserSnapshot(
   live: LiveRun,
   persisted: PersistedRun | undefined,
 ):
-  | { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean }
+  | {
+      question: string;
+      choices: readonly string[];
+      hasLiveSession: boolean;
+      answered: boolean;
+      reflexSummary?: string | undefined;
+    }
   | undefined {
   if (live.pendingAskUser !== undefined) {
     return {
@@ -161,6 +167,7 @@ function buildPendingAskUserSnapshot(
       // 終わるまで送信を保留している。`LiveAskUser.answeredChoice`のJSDoc参照）。
       // 二重回答を防ぐため、Viewはこの間ボタンを押せなくする
       answered: live.pendingAskUser.answeredChoice !== undefined,
+      reflexSummary: live.pendingAskUser.reflexSummary,
     };
   }
   if (persisted?.pendingAskUser !== undefined) {

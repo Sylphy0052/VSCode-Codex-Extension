@@ -58,7 +58,12 @@ import {
   type GitCommandRunner,
   type WorktreeCreationQueue,
 } from '../orchestrator/worktree';
-import { judgeQuestionAnswerer, type AnswererQuestion, type AnswererVerdict } from '../reflex/answererJudge';
+import {
+  judgeQuestionAnswerer,
+  judgeTurnEndAnswerer,
+  type AnswererQuestion,
+  type AnswererVerdict,
+} from '../reflex/answererJudge';
 import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
 import { taskRunLabel } from './taskRunKanbanModel';
@@ -150,6 +155,17 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ? judgeQuestionAnswerer(
           { provider: engine, executable: executableFor(engine), logWarn: warn },
           question,
+          settings.threshold,
+        )
+      : { kind: 'user', summary: undefined };
+  };
+  const judgeTurnEnd = async (runId: string, lastMessage: string): Promise<AnswererVerdict> => {
+    const settings = readAnswererJudgeConfig();
+    const engine = controller.find(runId)?.engine;
+    return settings.enabled && engine !== undefined
+      ? judgeTurnEndAnswerer(
+          { provider: engine, executable: executableFor(engine), logWarn: warn },
+          lastMessage,
           settings.threshold,
         )
       : { kind: 'user', summary: undefined };
@@ -260,6 +276,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     showKanban: (runId) => holder.view?.show(runId),
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
+    judgeTurnEndAnswerer: judgeTurnEnd,
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),

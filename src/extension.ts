@@ -37,6 +37,7 @@ import type { CodexConfig, SessionMeta, SessionSummary } from './codex/types';
 import {
   currentWorkspaceFolder,
   readActivityLogConfig,
+  readAnswererJudgeConfig,
   readClaudeConfig,
   readConfig,
   readSessionMessagingEnabled,
@@ -238,6 +239,8 @@ import {
   type RunNotesViewPort,
 } from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
+import { judgeQuestionAnswerer, judgeTurnEndAnswerer } from './reflex/answererJudge';
+import type { ReflexJudgeDeps } from './reflex/reflexJudge';
 import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
 
@@ -677,6 +680,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const runNotes = new RunNotesStore(nodeRunNotesFileSystem, {
     warn: (message) => log.warn(message),
   });
+  // ワークフローのオーケストレーターの回答者判定（Issue #1708）が使うReflexの呼び出し口
+  const answererJudgeDeps = (provider: 'codex' | 'claude'): ReflexJudgeDeps => ({
+    provider,
+    executable: provider === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath,
+    logWarn: (message) => log.warn(`[workflow] ${message}`),
+  });
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
@@ -796,6 +805,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // ask_user（design.md §16.33、Issue #583）の呼び出し上限。他のreadXxxと同じく
     // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
     readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,
+    // 回答者判定（Issue #1708）。無効ならすべてユーザーへ回す。判定のたびに設定を読み直す
+    judgeAskUserAnswerer: async (provider, question) => {
+      const settings = readAnswererJudgeConfig();
+      return settings.enabled
+        ? judgeQuestionAnswerer(answererJudgeDeps(provider), question, settings.threshold)
+        : { kind: 'user', summary: undefined };
+    },
+    judgeTurnEndAnswerer: async (provider, lastMessage) => {
+      const settings = readAnswererJudgeConfig();
+      return settings.enabled
+        ? judgeTurnEndAnswerer(answererJudgeDeps(provider), lastMessage, settings.threshold)
+        : { kind: 'user', summary: undefined };
+    },
     // 自動再開（design.md §16.35、roadmap W10、Issue #584）。他のreadXxxと同じく
     // トップレベルへ配線し、`restoreRunsForView`が呼ぶたびに現在値を読み直す
     readAutoResume: () => readWorkflowsConfig().autoResume,

@@ -43,6 +43,8 @@ import type { ApprovalHandler, TaskSession, TaskSessionHost } from './taskSessio
 import { STAGE_LABELS } from './taskStagePrompts';
 import type { StageSettingsRecommendation } from './taskStageSettings';
 import { sanitizeInlineText } from './untrustedText';
+import { TurnEndAnswererNudge } from './turnEndAnswerer';
+import type { AnswererVerdict } from '../reflex/answererJudge';
 
 /**
  * オーケストレータモード（Issue #1505）のOrchestratorセッション。
@@ -171,6 +173,11 @@ export interface TaskRunOrchestratorDeps {
   resourceLines?: (runId: string) => string[];
   /** 資源がcriticalで新しい工程の開始を保留しているか（Issue #1629）。`start_stage`の結果へ添える。 */
   isStartHeld?: () => boolean;
+  /**
+   * ターン末の問いかけの回答者判定（Issue #1708）。Orchestratorが自分で決めてよい問いかけなら
+   * `orchestrator`を返し、自分で決めるよう促す。省略時は判定しない。
+   */
+  judgeTurnEndAnswerer?: (runId: string, lastMessage: string) => Promise<AnswererVerdict>;
 }
 
 interface LiveOrchestrator {
@@ -191,6 +198,8 @@ interface LiveOrchestrator {
    * `pending`へ溜め、次の世代が立ち上がってから渡す。この世代からのツール呼び出しは拒否する。
    */
   handingOff: boolean;
+  /** ターン末の問いかけの回答者判定と促し（Issue #1708）。世代ごとに作る。 */
+  answererNudge: TurnEndAnswererNudge;
   /**
    * `record_lesson`（Issue #1599）をこのrunで受け付けた（`isError: false`を返した）回数。
    * `MAX_RECORD_LESSON_CALLS_PER_RUN`（`runNotes.ts`）との比較に使う。`eventsSent`と同じく
@@ -483,6 +492,7 @@ export class TaskRunOrchestrator {
       // 「イベントが来ない＝何も起きていない」と誤解しかねないため、世代ごとに1回知らせる（Issue #1594）
       capNoticeSent: false,
       handingOff: false,
+      answererNudge: new TurnEndAnswererNudge(),
       recordLessonCount: previous?.recordLessonCount ?? 0,
       runOperationCount: previous?.runOperationCount ?? 0,
     };
@@ -519,13 +529,44 @@ export class TaskRunOrchestrator {
     }
     const finishedTurn = live.busy && !state.busy;
     const changed = live.busy !== state.busy;
+    if (!live.busy && state.busy) {
+      // 会話画面からの発言など、`flush`を通らずに始まったターン
+      live.answererNudge.reset();
+    }
     live.busy = state.busy;
     if (finishedTurn) {
       this.flush(live);
+      if (!live.busy) {
+        this.nudgeTurnEndAnswerer(runId, live, state);
+      }
     }
     if (changed) {
       this.deps.onDidChange();
     }
+  }
+
+  /**
+   * 待機へ戻ったOrchestratorの直前の問いかけを回答者判定にかけ（Issue #1708）、自分で決めてよい
+   * 問いなら促しを送る。判定は非同期で、その間に次のターンが始まったら送らない。
+   */
+  private nudgeTurnEndAnswerer(runId: string, live: LiveOrchestrator, state: ChatState): void {
+    const judge = this.deps.judgeTurnEndAnswerer;
+    if (judge === undefined) {
+      return;
+    }
+    void live.answererNudge.onIdle(
+      state.items,
+      (lastMessage) => judge(runId, lastMessage),
+      (text) => {
+        if (this.live.get(runId) !== live || live.busy || live.handingOff) {
+          return false;
+        }
+        live.busy = true;
+        live.session.send(text);
+        this.deps.onDidChange();
+        return true;
+      },
+    );
   }
 
   private notify(runId: string, event: TaskRunOrchestratorEvent): void {
@@ -578,6 +619,7 @@ export class TaskRunOrchestrator {
     if (text === '') {
       return;
     }
+    live.answererNudge.reset();
     live.busy = true;
     live.session.send(text);
     this.deps.onDidChange();
