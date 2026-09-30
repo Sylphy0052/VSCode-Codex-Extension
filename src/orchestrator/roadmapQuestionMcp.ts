@@ -57,7 +57,7 @@ export const ROADMAP_ASK_ORCHESTRATOR_TOOL: McpToolDefinition = {
   description: [
     'Issueの実装中に判断が必要になったとき、ロードマップのOrchestratorへ質問する。',
     'AskUserQuestionの代わりにこれを使う。選択肢があればOrchestratorが自動で選ぶことがあり、',
-    'escalationに当たる質問は人の判断へ回る。',
+    'escalationに当たる質問は自動では選ばれず、Orchestratorか人の判断を待つ。',
     'blockingがtrueなら、呼んだ後はターンを終えて回答を待つ（回答は次の指示の冒頭に届く）。',
     'falseなら作業を続けてよく、回答は後の指示に添えて届く。',
   ].join(''),
@@ -85,7 +85,7 @@ export const ROADMAP_ASK_ORCHESTRATOR_TOOL: McpToolDefinition = {
         type: 'array',
         items: { type: 'string', enum: [...ROADMAP_QUESTION_ESCALATIONS] },
         description:
-          '当てはまるものを全て選ぶ。1つでもあれば人の判断へ回る: ' +
+          '当てはまるものを全て選ぶ。1つでもあればOrchestratorか人の判断を待つ: ' +
           ROADMAP_QUESTION_ESCALATIONS.map((e) => `${e}=${ESCALATION_DESCRIPTIONS[e]}`).join('、'),
       },
     },
@@ -267,7 +267,34 @@ export function findQuestionDangers(
 }
 
 /**
- * Reflexを通さずに人の判断へ回す質問か（escalationが付いている、選択肢が無い、または
+ * 回答者判定を通さずユーザーが決めるescalation。取り消せない操作と、受入基準を下げうる
+ * 判断（Issue #1711と同じ考え方）に限る。それ以外のescalationは回答者判定の材料にする（Issue #1763）。
+ */
+const USER_ONLY_ESCALATIONS: ReadonlySet<RoadmapQuestionEscalation> = new Set<RoadmapQuestionEscalation>([
+  'destructiveOperation',
+  'secrets',
+  'release',
+  'requirementChange',
+]);
+
+/** 付いたescalationのうち、回答者判定を通さずユーザーが決めるもの。 */
+export function findUserOnlyEscalations(
+  escalation: readonly RoadmapQuestionEscalation[],
+): RoadmapQuestionEscalation[] {
+  return escalation.filter((e) => USER_ONLY_ESCALATIONS.has(e));
+}
+
+/** escalationを回答者判定の材料にする1行。付いていなければ`undefined`。 */
+export function describeEscalations(
+  escalation: readonly RoadmapQuestionEscalation[],
+): string | undefined {
+  return escalation.length === 0
+    ? undefined
+    : `質問したエージェントが付けたescalation: ${escalation.map((e) => ESCALATION_DESCRIPTIONS[e]).join('、')}`;
+}
+
+/**
+ * Reflexに選択肢を選ばせない質問か（escalationが付いている、選択肢が無い、または
  * 危険語を含む）。
  */
 export function needsUserDecision(

@@ -14,7 +14,11 @@ import {
   type RunNotesStore,
 } from './runNotes';
 import { stripControlCharsPreservingNewlines } from './sanitize';
-import type { ControllerResult, TaskRunController } from './taskRunController';
+import type {
+  ControllerResult,
+  QuestionAwaitingAnswer,
+  TaskRunController,
+} from './taskRunController';
 import {
   AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS,
   formatTaskRunList,
@@ -23,7 +27,7 @@ import {
   TASK_RUN_ORCHESTRATOR_TOOLS,
   type TaskRunOrchestratorCall,
 } from './taskRunOrchestratorTools';
-import { GATE_CHOICE_LABELS, MAX_AUTO_RETRIES, MAX_REVIEW_ROUNDS } from './taskRunGates';
+import { GATE_CHOICE_LABELS, isReviewFailed, MAX_AUTO_RETRIES, MAX_REVIEW_ROUNDS } from './taskRunGates';
 import { assessTaskRun, newlyAwaitingDecision, type StageRef } from './taskRunScheduler';
 import {
   getTask,
@@ -39,12 +43,18 @@ import {
   type TaskRunRoadmapNotice,
   type TaskRunEngine,
 } from './taskRunState';
-import type { ApprovalHandler, TaskSession, TaskSessionHost } from './taskSession';
+import type {
+  ApprovalHandler,
+  ApprovalHandlerResult,
+  TaskSession,
+  TaskSessionHost,
+} from './taskSession';
 import { STAGE_LABELS } from './taskStagePrompts';
 import type { StageSettingsRecommendation } from './taskStageSettings';
 import { sanitizeInlineText } from './untrustedText';
 import { TurnEndAnswererNudge } from './turnEndAnswerer';
 import type { AnswererVerdict } from '../reflex/answererJudge';
+import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 
 /**
  * オーケストレータモード（Issue #1505）のOrchestratorセッション。
@@ -114,6 +124,7 @@ export interface TaskRunOrchestratorDeps {
     | 'recommendations'
     | 'proposePlan'
     | 'approvePlan'
+    | 'approvePlanByReview'
     | 'refreshKanban'
     | 'startStage'
     | 'stopStage'
@@ -122,6 +133,7 @@ export interface TaskRunOrchestratorDeps {
     | 'instructTask'
     | 'setMaxParallel'
     | 'findQuestionAwaitingAnswer'
+    | 'delegateQuestionToOrchestrator'
     | 'answerQuestion'
     | 'findOpenGateForUser'
     | 'resolveGate'
@@ -157,6 +169,15 @@ export interface TaskRunOrchestratorDeps {
     choiceLabel: string;
   }): Promise<boolean>;
   /**
+   * `approve_plan`で、Reflexが妥当と判定しなかった計画の承認を人に確かめる（モーダル。Issue #1763）。
+   * `reflexSummary`はReflexの判定の要約（Reflexが無効なら`undefined`）。
+   */
+  confirmPlanApproval(input: {
+    runLabel: string;
+    taskCount: number;
+    reflexSummary: string | undefined;
+  }): Promise<boolean>;
+  /**
    * `resume_run`・`start_run`で動かしたrunのKanbanを表示する（Issue #1620）。人がUIから開いたとき
    * と同じ見せ方にするため、表示は呼び出し側に任せる。そのrunのOrchestratorはこのクラスが開く。
    */
@@ -178,6 +199,22 @@ export interface TaskRunOrchestratorDeps {
    * `orchestrator`を返し、自分で決めるよう促す。省略時は判定しない。
    */
   judgeTurnEndAnswerer?: (runId: string, lastMessage: string) => Promise<AnswererVerdict>;
+  /**
+   * `AskUserQuestion`の回答者判定（Issue #1763）。Orchestratorが自分で決めてよい問いなら
+   * `orchestrator`を返し、選択UIを出さずに拒否して自分で決めさせる。省略時は判定せず人へ回す。
+   */
+  judgeAskUserQuestionAnswerer?: (
+    runId: string,
+    questions: readonly AskUserQuestionItem[],
+  ) => Promise<AnswererVerdict>;
+  /**
+   * ユーザーの判断待ちの質問へ`answer_question`で答えようとしたときの回答者判定（Issue #1763）。
+   * `orchestrator`なら確認を出さずにオーケストレーターの回答として渡す。省略時は判定せず人に確かめる。
+   */
+  judgeQuestionAnswerByOrchestrator?: (
+    target: QuestionAwaitingAnswer,
+    answer: string,
+  ) => Promise<AnswererVerdict>;
 }
 
 interface LiveOrchestrator {
@@ -211,6 +248,11 @@ interface LiveOrchestrator {
    * 同じくrun全体で数え、`MAX_RUN_OPERATIONS_PER_RUN`と比べる。
    */
   runOperationCount: number;
+  /**
+   * `AskUserQuestion`を回答者判定で拒否した回数（Issue #1763）。`MAX_ASK_USER_QUESTION_REJECTIONS`と
+   * 比べる。`recordLessonCount`と同じくrun全体で数える。
+   */
+  askUserQuestionRejections: number;
 }
 
 /**
@@ -218,6 +260,18 @@ interface LiveOrchestrator {
  * チャットの承認を経るが、承認を重ねてrunを増やし続けるのを止める。
  */
 export const MAX_RUN_OPERATIONS_PER_RUN = 3;
+
+/**
+ * 1つのrunで`AskUserQuestion`を回答者判定により拒否する回数の上限（Issue #1763）。判定が
+ * 誤ってOrchestratorへ戻し続けると人に届かなくなるため、超えたら判定せず人へ回す
+ * （ワークフローモードの`ask_user`と同じ数）。
+ */
+export const MAX_ASK_USER_QUESTION_REJECTIONS = 3;
+
+const ORCHESTRATOR_DECIDES_ASK_USER_QUESTION =
+  '回答者判定（Reflex）で、この質問はユーザーに聞かずに自分で決めてよいとされたため、選択UIは出していません。' +
+  '計画・Issue・コード・過去の回答から自分で決めて進めてください。方針の選択・承認・取り消せない操作など' +
+  '自分では決められないときは、会話でユーザーに確かめてください';
 
 /** `resume_run`・`start_run`で動かしたrun。 */
 type OtherRunResult = { ok: true; runId: string; message: string } | { ok: false; message: string };
@@ -483,7 +537,11 @@ export class TaskRunOrchestrator {
       return false;
     }
 
-    session.setApprovalHandler(approvalHandlerFor(effective.autoApprove));
+    session.setApprovalHandler(
+      approvalHandlerFor(effective.autoApprove, (questions) =>
+        this.routeAskUserQuestion(runId, questions),
+      ),
+    );
     session.setMcpElicitationHandler?.(shouldAutoApproveTaskRunElicitation);
     // 開き直し（`renew`・自動引き継ぎ）のときは前の世代を外す。古い世代からの命令は接続の時点で
     // 届かなくなる。前の世代へ送れずに溜まっていたイベントは、導入文の後で新しい世代へ渡す
@@ -504,6 +562,7 @@ export class TaskRunOrchestrator {
       answererNudge: new TurnEndAnswererNudge(),
       recordLessonCount: previous?.recordLessonCount ?? 0,
       runOperationCount: previous?.runOperationCount ?? 0,
+      askUserQuestionRejections: previous?.askUserQuestionRejections ?? 0,
     };
     if (previous !== undefined) {
       previous.pending = [];
@@ -579,6 +638,46 @@ export class TaskRunOrchestrator {
         `[task run orchestrator] ${runId}: ターン末の回答者判定の促しを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
       );
     });
+  }
+
+  /**
+   * Orchestratorの`AskUserQuestion`を回答者判定にかける（Issue #1763）。Orchestratorが決めてよい
+   * 問いなら拒否して自分で決めさせる。判定が無い・失敗した・ユーザーへ回すと判定した・拒否の上限に
+   * 達したときは、選択UIで人へ回す。危険語を含む問いは判定器がReflexを通さずユーザーへ回す。
+   */
+  private async routeAskUserQuestion(
+    runId: string,
+    questions: readonly AskUserQuestionItem[],
+  ): Promise<ApprovalHandlerResult> {
+    const judge = this.deps.judgeAskUserQuestionAnswerer;
+    const live = this.live.get(runId);
+    if (
+      judge === undefined ||
+      live === undefined ||
+      live.askUserQuestionRejections >= MAX_ASK_USER_QUESTION_REJECTIONS
+    ) {
+      return { kind: 'ask' };
+    }
+    let verdict: AnswererVerdict;
+    try {
+      verdict = await judge(runId, questions);
+    } catch (e: unknown) {
+      this.deps.log(
+        `[task run orchestrator] ${runId}: AskUserQuestionの回答者判定に失敗したため人へ回します: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return { kind: 'ask' };
+    }
+    if (verdict.kind !== 'orchestrator') {
+      return { kind: 'ask' };
+    }
+    live.askUserQuestionRejections += 1;
+    return {
+      kind: 'auto',
+      decision: 'decline',
+      message:
+        `${ORCHESTRATOR_DECIDES_ASK_USER_QUESTION}（判定: ` +
+        `${sanitizeInlineText(verdict.summary, EVENT_TEXT_MAX_LENGTH)}）`,
+    };
   }
 
   private notify(runId: string, event: TaskRunOrchestratorEvent): void {
@@ -707,7 +806,7 @@ export class TaskRunOrchestrator {
       case 'propose_plan':
         return toOutcome(await controller.proposePlan(runId, call.rawArgs));
       case 'approve_plan':
-        return toOutcome(await controller.approvePlan(runId));
+        return this.approvePlan(runId);
       case 'sync_roadmap':
         return toOutcome(await controller.syncRoadmap(runId));
       case 'refresh_kanban': {
@@ -872,6 +971,34 @@ export class TaskRunOrchestrator {
     return { text: '教訓を記録しました。', isError: false };
   }
 
+  /**
+   * `approve_plan`（Issue #1763）。Reflexが計画を妥当と判定すれば人に確かめずに承認する。
+   * Reflexが無効・妥当と言えなければ、`resolve_gate`と同じくツールの処理の中で人に確かめる。
+   */
+  private async approvePlan(runId: string): Promise<RoadmapAskOutcome> {
+    const reviewed = await this.deps.controller.approvePlanByReview(runId);
+    if ('decided' in reviewed) {
+      return { text: reviewed.decided.message, isError: !reviewed.decided.ok };
+    }
+    const run = this.deps.controller.find(runId);
+    if (run === undefined) {
+      return { text: 'runが見つかりません', isError: true };
+    }
+    const confirmed = await this.deps.confirmPlanApproval({
+      runLabel: taskRunLabel(run),
+      taskCount: run.taskOrder.length,
+      reflexSummary: reviewed.needsUser,
+    });
+    if (!confirmed) {
+      return {
+        text: 'ユーザーが計画の承認を確認しませんでした。会話でユーザーに確かめてください',
+        isError: true,
+      };
+    }
+    const result = await this.deps.controller.approvePlan(runId);
+    return { text: result.message, isError: !result.ok };
+  }
+
   private async resolveGate(
     runId: string,
     call: Extract<TaskRunOrchestratorCall, { tool: 'resolve_gate' }>,
@@ -930,8 +1057,8 @@ export class TaskRunOrchestrator {
     if (answer === '') {
       return { text: 'answerが空です', isError: true };
     }
-    if (target.awaitingOrchestrator) {
-      // 回答者判定（Issue #1708）でオーケストレーターが決めてよいとされた質問。人に確かめない
+    if (target.awaitingOrchestrator || (await this.delegateAnswer(runId, call, target, answer))) {
+      // 回答者判定（Issue #1708・#1763）でオーケストレーターが決めてよいとされた質問。人に確かめない
       const result = await this.deps.controller.answerQuestion(
         runId,
         call.taskId,
@@ -961,6 +1088,42 @@ export class TaskRunOrchestrator {
     );
     return { text: result.message, isError: !result.ok };
   }
+
+  /**
+   * ユーザーの判断待ちの質問へのOrchestratorの回答を回答者判定にかけ（Issue #1763）、オーケストレーターが
+   * 決めてよければその判断待ちへ移して`true`を返す。ユーザーだけが答える質問・判定器が無い・判定が
+   * ユーザーか失敗なら`false`（人に確かめる）。
+   */
+  private async delegateAnswer(
+    runId: string,
+    call: Extract<TaskRunOrchestratorCall, { tool: 'answer_question' }>,
+    target: QuestionAwaitingAnswer,
+    answer: string,
+  ): Promise<boolean> {
+    const judge = this.deps.judgeQuestionAnswerByOrchestrator;
+    if (judge === undefined || target.userOnly) {
+      return false;
+    }
+    let verdict: AnswererVerdict;
+    try {
+      verdict = await judge(target, answer);
+    } catch (e: unknown) {
+      this.deps.log(
+        `[task run orchestrator] ${runId}: answer_questionの回答者判定に失敗したため人に確かめます: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return false;
+    }
+    if (verdict.kind !== 'orchestrator') {
+      return false;
+    }
+    const delegated = await this.deps.controller.delegateQuestionToOrchestrator(
+      runId,
+      call.taskId,
+      call.questionId,
+      `回答者判定（answer_question）: ${verdict.summary}`,
+    );
+    return delegated.ok;
+  }
 }
 
 /** Claudeのツール承認の`tool_name`（`mcp__<server>__<tool>`）からこのサーバのツール名を取り出す。 */
@@ -975,14 +1138,21 @@ function taskRunToolName(rawParams: Record<string, unknown>): string | undefined
 /**
  * Orchestratorの承認ハンドラ（Claudeのツール承認と、Codexのコマンド等の承認）。
  *
- * 自動許可の集合に入るツールは常に許可し、入らないツール（`approve_plan`・`stop_stage`・`set_max_parallel`など）は
+ * 自動許可の集合に入るツールは常に許可し、入らないツール（`stop_stage`・`set_max_parallel`など）は
  * `allowAutoApprove`でも人へ回す。それ以外の承認は、`allowAutoApprove`を人が有効にしたときだけ許可する。
+ *
+ * `AskUserQuestion`は`routeAskUserQuestion`があれば回答者判定へ回し（Issue #1763）、無ければ
+ * 選択UIで人へ回す（Orchestratorは人と話すセッションのため。Issue #1694）。
  */
-export function approvalHandlerFor(autoApprove: boolean): ApprovalHandler {
+export function approvalHandlerFor(
+  autoApprove: boolean,
+  routeAskUserQuestion?: (questions: readonly AskUserQuestionItem[]) => Promise<ApprovalHandlerResult>,
+): ApprovalHandler {
   return async (approval, rawParams) => {
-    // Orchestratorは人と話すセッションなので、AskUserQuestionは選択UIで人へ回す（Issue #1694）
     if (approval.kind === 'askUserQuestion') {
-      return { kind: 'ask' };
+      return routeAskUserQuestion === undefined || approval.questions === undefined
+        ? { kind: 'ask' }
+        : routeAskUserQuestion(approval.questions);
     }
     const tool = taskRunToolName(rawParams);
     if (tool !== undefined) {
@@ -1064,7 +1234,12 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
     }
     for (const question of task.questions ?? []) {
       const was = before.questions?.find((q) => q.questionId === question.questionId);
-      if (question.status === 'awaitingOrchestrator' && was?.status !== 'awaitingOrchestrator') {
+      // ユーザーの判断待ちから移ったのは、Orchestrator自身がanswer_questionで答えている最中（Issue #1763）。知らせない
+      if (
+        question.status === 'awaitingOrchestrator' &&
+        was?.status !== 'awaitingOrchestrator' &&
+        was?.status !== 'awaitingUser'
+      ) {
         const options =
           question.options.length === 0
             ? ''
@@ -1143,6 +1318,10 @@ const ORCHESTRATOR_DECIDES_QUESTION =
 const ORCHESTRATOR_DECIDES_GATE =
   '自分で決め、resolve_gateで決着させてください（確認は出ません）。' +
   '自分では決められないときは、escalate_to_userでユーザーへ回してください';
+/** レビュー未通過の関門をオーケストレーターへ任せたときの補足（Issue #1711・#1763）。 */
+const ORCHESTRATOR_REVIEW_FAILED_GATE_SCOPE =
+  'レビューが通過していないため、選べるのは実装への差し戻し（sendBack）だけです。' +
+  '指摘を残したまま進めるべきなら、escalate_to_userでユーザーへ回してください。';
 
 /** 関門がオーケストレーターかユーザーの判断待ちになった・決着したイベント。 */
 function diffGateEvents(
@@ -1161,6 +1340,7 @@ function diffGateEvents(
           `${label}の${stage}の関門は、回答者判定でオーケストレーターが決めてよいとされました（gateId=` +
           `${sanitizeInlineText(gate.gateId, EVENT_TITLE_MAX_LENGTH)}）: ` +
           `${sanitizeInlineText(gate.detail, EVENT_TEXT_MAX_LENGTH)}。` +
+          (isReviewFailed(task) ? ORCHESTRATOR_REVIEW_FAILED_GATE_SCOPE : '') +
           ORCHESTRATOR_DECIDES_GATE,
       });
     }
@@ -1203,11 +1383,12 @@ function buildIntroPrompt(
     '役割:',
     '- task-messagingのMCPツールでControllerへ命令するだけで、runの状態を直接変えない。ファイルは書かない',
     '- 状態の正本はget_run_stateとする。会話の記憶や前の世代の発言より、get_run_stateの結果を信じる',
-    '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。approve_planはユーザーに会話で頼まれたときだけ使う（呼ぶとユーザーの確認が入る）',
+    '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。approve_planはユーザーに会話で頼まれたときだけ使う（Reflexが計画を審査し、妥当なら確認なしに承認される。妥当と言えなければユーザーの確認が入る）',
     '- 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけ',
     '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
     '- 承認後、Model/Effortの判断を待つ工程はstart_stageで始める。推奨値を基本にし、変えるときは理由をreasonに書く',
-    '- stop_stage・set_max_parallelを使う前と、answer_questionでユーザーの判断を代わりに渡す前は、会話でユーザーに確かめる。ユーザーの判断待ちの質問へのanswer_questionにはユーザーが答えた内容だけを渡す',
+    '- stop_stage・set_max_parallelを使う前は、会話でユーザーに確かめる。ユーザーの判断待ちの質問も、自分で決められると考えたらanswer_questionで回答案を送ってよい。' +
+      'Reflexが回答者を判定し、オーケストレーターが決めてよければ確認なしに渡り、そうでなければユーザーの確認が入る',
     '- 回答者判定（Reflex）がオーケストレーターの判断待ちとした質問と関門は、計画・Issue・コード・過去の回答から自分で決め、answer_question・resolve_gateで送る（確認は出ない）。' +
       '方針の選択、承認、取り消せない操作、担当領域をまたぐ変更、設計の前提を変える変更、受入基準を下げる判断、ユーザーしか知らない情報が要るときは、決めずにescalate_to_userでユーザーへ回す',
     '- merge・cleanupも工程セッションが行う。あなたもファイル編集を含むすべての操作を承認なしで行えるが、通常の作業は工程セッションに任せる',

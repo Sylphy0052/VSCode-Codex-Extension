@@ -109,7 +109,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'approve_plan',
     description:
-      '承認待ちの計画を承認し、工程を始める。呼ぶとユーザーの確認が入り、ユーザーが許可したときだけ承認される。承認待ちの計画が無ければ失敗する。',
+      '承認待ちの計画を承認し、工程を始める。Reflexが計画を審査し、妥当と判定すればそのまま承認される。妥当と言えなければユーザーの確認が入り、ユーザーが許可したときだけ承認される。承認待ちの計画が無ければ失敗する。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -171,7 +171,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'answer_question',
     description:
-      '工程セッションの質問へ回答する。オーケストレーターの判断待ちの質問は、計画・Issue・コード・過去の回答から自分で決めて送る（確認は出ない）。ユーザーの判断待ちの質問は、ユーザーと会話で決めた内容だけを送る。送る前に回答の本文をユーザーへ確認する。',
+      '工程セッションの質問へ回答する。オーケストレーターの判断待ちの質問は、計画・Issue・コード・過去の回答から自分で決めて送る（確認は出ない）。ユーザーの判断待ちの質問へ送ると、Reflexが回答者を判定し、オーケストレーターが決めてよければ確認なしに渡る。そうでなければ回答の本文をユーザーへ確認する。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -323,14 +323,15 @@ const PAUSE_PHASE_LABELS: Record<TaskStagePausePhase, string> = {
 };
 
 /**
- * 人の承認を経ずに呼べるツール。計画の提案はOrchestratorが自律で進めるが、計画の承認
- * （`approve_plan`）は含めない（Issue #1679。承認前の計画を人が確かめる）。取り消せない操作
- * （工程の停止）とrun全体の方針（並列上限）、別のrunを動かす操作（`resume_run`・`start_run`、
- * Issue #1620）も含めない。`answer_question`と`resolve_gate`はツールの処理の中で本文を
- * モーダルで確認するため、チャットの承認には回さない。
+ * 人の承認を経ずに呼べるツール。取り消せない操作（工程の停止）とrun全体の方針（並列上限）、
+ * 別のrunを動かす操作（`resume_run`・`start_run`、Issue #1620）は含めない。`answer_question`と
+ * `resolve_gate`はツールの処理の中で本文をモーダルで確認するため、チャットの承認には回さない。
+ * 計画の承認（`approve_plan`）も同様に、ツールの処理の中でReflexに審査させ、妥当と言えなければ
+ * モーダルで人に確かめる（Issue #1763。承認前の計画を人かReflexが確かめる。Issue #1679）。
  */
 export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = new Set([
   'propose_plan',
+  'approve_plan',
   'get_run_state',
   'sync_roadmap',
   'refresh_kanban',

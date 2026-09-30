@@ -28,7 +28,11 @@ import {
   type TaskRunLease,
   type TaskRunLeasePort,
 } from './taskRunLease';
-import { escalateQuestionToUser, findStageQuestion } from './taskRunQuestions';
+import {
+  delegateQuestionToOrchestrator,
+  escalateQuestionToUser,
+  findStageQuestion,
+} from './taskRunQuestions';
 import {
   escalateGateToUser,
   findOpenGate,
@@ -72,6 +76,7 @@ import {
   type ExternalStageDecider,
   type StageDecision,
   type StageGateChoice,
+  type TaskDraft,
   type TaskRun,
   type TaskRunEngine,
 } from './taskRunState';
@@ -152,6 +157,11 @@ export interface TaskRunControllerDeps {
    * `agent.taskRun.planAutoApprove.enabled`が無効なら`undefined`（判定を試みずに承認待ちのまま）。
    */
   planAutoApprove(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
+  /**
+   * Orchestratorの`approve_plan`で計画をReflexに審査させる（Issue #1763）。省略時とReflexモードが
+   * 無効なとき（`undefined`を返す）は審査せず人に確かめる。`planAutoApprove`の設定には左右されない。
+   */
+  planReview?(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
   /** ロードマップIssueの読み書き（Issue #1623）。無ければ実行中の追従と書き戻しをしない。 */
   roadmap?: TaskRunRoadmapPort;
   /**
@@ -161,7 +171,21 @@ export interface TaskRunControllerDeps {
   lease?: TaskRunLeasePort;
 }
 
-export type TaskRunTransitionListener = (prev: TaskRun | undefined, next: TaskRun) => void;
+/** 回答を待っている質問（Orchestratorの`answer_question`が確認の要否と回答者判定に使う）。 */
+export interface QuestionAwaitingAnswer {
+  engine: TaskRunEngine;
+  title: string;
+  question: string;
+  reason: string;
+  options: readonly string[];
+  evidence: string | undefined;
+  reflexSummary: string | undefined;
+  awaitingOrchestrator: boolean;
+  /** ユーザーだけが答える質問（Issue #1763）。回答者を判定し直さない。 */
+  userOnly: boolean;
+}
+
+export type TaskRunTransitionListener =(prev: TaskRun | undefined, next: TaskRun) => void;
 
 const REJECTION_MESSAGES: Record<StartStageRejection, string> = {
   unknownTask: 'そのタスクは計画に無い',
@@ -605,7 +629,7 @@ export class TaskRunController {
    * 計画を承認する（Kanbanのボタン、またはOrchestratorの`approve_plan`ツールから呼ぶ）。
    * 提案の後に別のrunが同じIssueを扱い始めていれば承認しない（Issue #1562）。
    */
-  async approvePlan(runId: string): Promise<ControllerResult> {
+  async approvePlan(runId: string, reviewedPlan?: string): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
       return leased;
@@ -615,10 +639,19 @@ export class TaskRunController {
       return { ok: false, message: '承認待ちの計画がありません' };
     }
     let conflict: string | undefined;
+    let changed = false;
     const next = await this.updateRun(runId, (r) => {
+      // 審査した計画から書き込み時までに変わっていれば、審査の結果を当てはめない
+      if (reviewedPlan !== undefined && JSON.stringify(pendingPlanDrafts(r)) !== reviewedPlan) {
+        changed = true;
+        return r;
+      }
       conflict = this.findIssueConflict(r);
       return conflict === undefined ? approveTaskPlan(r) : r;
     });
+    if (changed) {
+      return { ok: false, message: '審査の間に計画が変わりました。もう一度approve_planを呼んでください' };
+    }
     if (conflict !== undefined) {
       return { ok: false, message: `計画を承認できません: ${conflict}。Orchestratorに計画を直させてください` };
     }
@@ -627,6 +660,45 @@ export class TaskRunController {
     }
     this.pumpLater(runId);
     return { ok: true, message: '計画を承認した' };
+  }
+
+  /**
+   * Orchestratorの`approve_plan`（Issue #1763）。承認待ちの計画をReflexで審査し、妥当なら承認する。
+   * Reflexが無効・妥当と言い切れないときは承認せず`needsUser`を返す（承認するかは呼び出し側が
+   * 人に確かめる）。審査の結果は`planReview`へ記録する。
+   */
+  async approvePlanByReview(
+    runId: string,
+  ): Promise<{ decided: ControllerResult } | { needsUser: string | undefined }> {
+    const run = this.deps.store.find(runId);
+    if (run?.planStatus !== 'awaitingApproval') {
+      return { decided: { ok: false, message: '承認待ちの計画がありません' } };
+    }
+    const config = this.deps.planReview?.(run.engine);
+    if (config === undefined) {
+      return { needsUser: undefined };
+    }
+    const drafts = pendingPlanDrafts(run);
+    const reviewedPlan = JSON.stringify(drafts);
+    const verdict = await reviewTaskRunPlanProposal(
+      config.reflex,
+      drafts,
+      config.threshold,
+      new Set(issuesOutsideRoadmap(run, drafts)),
+    );
+    await this.updateRun(runId, (r) =>
+      r.planStatus === 'awaitingApproval' && JSON.stringify(pendingPlanDrafts(r)) === reviewedPlan
+        ? setTaskPlanReview(r, {
+            autoApproved: verdict.kind === 'approved',
+            summary: verdict.summary,
+            reviewedAt: this.now().toISOString(),
+          })
+        : r,
+    );
+    if (verdict.kind !== 'approved') {
+      return { needsUser: verdict.summary };
+    }
+    return { decided: await this.approvePlan(runId, reviewedPlan) };
   }
 
   /**
@@ -1256,21 +1328,51 @@ export class TaskRunController {
     runId: string,
     taskId: string,
     questionId: string,
-  ): { title: string; question: string; awaitingOrchestrator: boolean } | undefined {
+  ): QuestionAwaitingAnswer | undefined {
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
     const question = run === undefined ? undefined : findStageQuestion(run, taskId, questionId);
     if (
+      run === undefined ||
       task === undefined ||
       (question?.status !== 'awaitingUser' && question?.status !== 'awaitingOrchestrator')
     ) {
       return undefined;
     }
     return {
+      engine: run.engine,
       title: task.title,
       question: question.question,
+      reason: question.reason,
+      options: question.options,
+      evidence: question.evidence,
+      reflexSummary: question.reflexSummary,
       awaitingOrchestrator: question.status === 'awaitingOrchestrator',
+      userOnly: question.userOnly === true,
     };
+  }
+
+  /**
+   * ユーザーの判断待ちの質問を、回答者判定の結果（`summary`）を添えてオーケストレーターの判断待ちへ
+   * 移す（Orchestratorの`answer_question`から。Issue #1763）。ユーザーだけが答える質問は移さない。
+   */
+  async delegateQuestionToOrchestrator(
+    runId: string,
+    taskId: string,
+    questionId: string,
+    summary: string,
+  ): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
+    const next = await this.updateRun(runId, (r) =>
+      delegateQuestionToOrchestrator(r, taskId, questionId, summary, this.now()),
+    );
+    return next !== undefined &&
+      findStageQuestion(next, taskId, questionId)?.status === 'awaitingOrchestrator'
+      ? { ok: true, message: `${taskId}の質問をオーケストレーターの判断待ちにした` }
+      : { ok: false, message: 'ユーザーの判断待ちの質問ではない（既に回答済み、またはユーザーだけが答える質問）' };
   }
 
   async answerQuestion(
@@ -1415,6 +1517,30 @@ export class TaskRunController {
  * ロードマップIssueから始めたrunの計画で、ロードマップに無い既存のIssueのうち新しく入ったもの。
  * このrunが作ったIssue（チェックリストへ足す途中）は除く。ロードマップから始めていなければ空。
  */
+/** 承認待ちの計画を、提案時と同じ形（`TaskDraft`）で取り出す（Issue #1763。Reflexの審査へ渡す）。 */
+function pendingPlanDrafts(run: TaskRun): TaskDraft[] {
+  return listTasks(run).map((task) => ({
+    taskId: task.taskId,
+    title: task.title,
+    summary: task.summary,
+    acceptanceCriteria: task.acceptanceCriteria,
+    dependsOn: task.dependsOn,
+    existingIssueNumber: task.existingIssueNumber,
+    ...(task.completedInRoadmap === true ? { completedInRoadmap: true as const } : {}),
+  }));
+}
+
+/** 計画のうち、ロードマップのチェックリストに無い既存Issue（Issue #1763。承認時の審査用）。 */
+function issuesOutsideRoadmap(run: TaskRun, drafts: readonly TaskDraft[]): number[] {
+  if (run.roadmap === undefined) {
+    return [];
+  }
+  const children = new Set(run.roadmap.snapshot.children.map((c) => c.issueNumber));
+  return drafts
+    .map((d) => d.existingIssueNumber)
+    .filter((n): n is number => n !== undefined && !children.has(n));
+}
+
 function newIssuesOutsideRoadmap(before: TaskRun, tasks: readonly PlanTaskInput[]): number[] {
   if (before.roadmap === undefined) {
     return [];

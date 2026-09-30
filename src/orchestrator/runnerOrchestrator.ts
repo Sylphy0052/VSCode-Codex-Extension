@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState } from '../appserver/chatState';
 import {
+  ASK_USER_TOOL,
   MESSAGING_MCP_SERVER_NAME,
   MAX_MESSAGE_BODY_LENGTH,
   type OrchestratorControlPort,
@@ -123,6 +124,14 @@ const RESPAWN_REASON_LABELS: Record<OrchestratorRespawnReason, string> = {
  * ため、チャットの自動続行がリセット時刻の無いときに待つ時間（30分）と揃える。
  */
 const ORCHESTRATOR_USAGE_LIMIT_RETRY_MS = 30 * 60_000;
+
+/**
+ * ワークフローのオーケストレーターが`AskUserQuestion`を呼んだときにCLIへ返す拒否の理由（Issue #1763）。
+ * `ask_user`は回答者判定と回数の上限を通してからユーザーへ届くため、ユーザーへの問いはそちらへ寄せる。
+ */
+const ORCHESTRATOR_ASK_USER_QUESTION_DENY_MESSAGE =
+  `AskUserQuestionは使えません。ユーザーへの質問は${ASK_USER_TOOL.name}ツールで送ってください。` +
+  '計画・Issue・コード・過去の回答から決められることは、質問せずに自分で決めて進めてください。';
 
 /** 立て直した会話の導入文に書き添える文脈（Issue #1513）。 */
 interface OrchestratorRespawnContext {
@@ -1793,11 +1802,15 @@ async function openOrchestratorSession(
     // 委譲先が呼ばれるのは開き終えた後のため、`session`は初期化済みになっている
     handoffDelegate: () => onOrchestratorHandoff(self, live.runId, session),
   });
-  if (effective.autoApprove) {
+  session.setApprovalHandler(async (approval) => {
+    // AskUserQuestionは回答者判定を通らずに人へ届くため、判定を通すask_userへ回させる（Issue #1763）
+    if (approval.kind === 'askUserQuestion') {
+      return { kind: 'auto', decision: 'decline', message: ORCHESTRATOR_ASK_USER_QUESTION_DENY_MESSAGE };
+    }
     // オーケストレーターは承認要求を出さない方針で起動する（Issue #1697）。それでも
-    // 承認待ちが来た場合は人へ回さず自動で許可する。
-    session.setApprovalHandler(async () => ({ kind: 'auto', decision: 'accept' }));
-  }
+    // 承認待ちが来た場合は、autoApproveなら人へ回さず自動で許可する。
+    return effective.autoApprove ? { kind: 'auto', decision: 'accept' } : { kind: 'ask' };
+  });
   // run内に閉じたtask-messaging操作は、通常のshell/ファイル操作のautoApproveとは
   // 分離して常に自動許可する。ここを上の条件内に置くと、read-onlyのlist/statusまで
   // 毎回「入力を求められています」になり、無人復旧が成立しない（Issue #848）。
