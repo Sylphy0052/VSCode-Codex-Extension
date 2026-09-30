@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { prepareWebGptCli } from '../webGpt/cli';
-import { buildWebGptDiscussionPrompt } from '../webGpt/discussion';
+import { buildWebGptDiscussionLoopPlan, buildWebGptDiscussionPrompt } from '../webGpt/discussion';
 import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
 import {
   buildApprovalResponse,
@@ -548,16 +548,27 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       assertReady();
       const browserInstructions = await prepareWebGptCli(this.globalStorageDir, request.endpoint);
       assertReady();
+      // 合意・未訂正の誤りの判定にReflexを使う（Issue #1704）。無効ならエージェントの判断だけで終える
+      const doneCheck = this.buildLoopDoneCheck(entry);
       const prompt = buildWebGptDiscussionPrompt(
         request.topic,
         request.urls,
         request.maxSends,
         true,
         browserInstructions,
+        doneCheck !== undefined,
       );
       this.cancelLimitAutoResume(entry);
       this.noteUserAction(entry);
-      await entry.session.send(prompt, this.configFor(entry));
+      if (doneCheck === undefined) {
+        await entry.session.send(prompt, this.configFor(entry));
+      } else {
+        this.stopAutoReply(entry, 'loopStarted');
+        entry.loop.start(
+          buildWebGptDiscussionLoopPlan(prompt, doneCheck),
+          entry.session.getState().items,
+        );
+      }
       this.reportActivity(entry, prompt);
     } catch (error) {
       reportDiscussionError(error);
