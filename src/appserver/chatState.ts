@@ -449,10 +449,23 @@ export interface ChatUsage {
 export interface ContextUsage {
   /** いまコンテキストに載っているトークン数。 */
   usedTokens: number;
-  /** コンテキスト上限。CLIが返さないことがあるため無い場合を許す。 */
+  /**
+   * 残量の分母。auto-compactの上限が判ればそれ（Issue #1747）、判らなければモデルの
+   * コンテキスト上限。CLIが返さないことがあるため無い場合を許す。
+   */
   contextWindow: number | undefined;
   /** 残りの割合（0-100の整数）。上限が判らなければ undefined。 */
   remainingPercent: number | undefined;
+  /**
+   * `contextWindow` がauto-compactの上限か（Issue #1747）。`true` なら残量は
+   * 「auto-compactが発火するまでの残り」を表す。
+   */
+  autoCompact?: boolean | undefined;
+  /**
+   * モデル本来のコンテキスト上限（Issue #1747）。`contextWindow` はauto-compactの上限に
+   * 置き換わりうるため、分母を計算し直すときはこちらを渡す。
+   */
+  modelWindow?: number | undefined;
 }
 
 /**
@@ -480,23 +493,84 @@ export interface TurnTokens {
  *
  * 上限が無い・0以下・使用量が負といった信用できない値では割合を出さない。
  * 誤った残量を出すくらいなら何も出さないほうがよい。
+ *
+ * `autoCompactLimit`（Issue #1747）が有効ならそれとモデルの上限の小さいほうを分母にし、
+ * 残量を「auto-compactが発火するまでの残り」に揃える。表示と自動引き継ぎの閾値判定は
+ * どちらもこの値を読むので、分母を変えるのはここだけでよい。無効なら従来どおりモデルの
+ * 上限を使う。
  */
 export function buildContextUsage(
   usedTokens: number,
   contextWindow: number | undefined,
+  autoCompactLimit?: number | undefined,
 ): ContextUsage | undefined {
   if (!Number.isFinite(usedTokens) || usedTokens < 0) {
     return undefined;
   }
-  const window =
-    contextWindow !== undefined && Number.isFinite(contextWindow) && contextWindow > 0
-      ? contextWindow
-      : undefined;
+  const model = positiveOrUndefined(contextWindow);
+  const limit = positiveOrUndefined(autoCompactLimit);
+  // 分母にauto-compactの上限を使うのは、モデルの上限以下のとき（または上限が判らないとき）。
+  // `contextFromAssistant` は前回の分母を渡し直すため、同じ値が来ても `autoCompact` を保つよう
+  // 等号を含める
+  const autoCompact = limit !== undefined && (model === undefined || limit <= model);
+  const window = autoCompact ? limit : model;
   if (window === undefined) {
     return { usedTokens, contextWindow: undefined, remainingPercent: undefined };
   }
   const remaining = Math.max(0, Math.min(100, Math.round(((window - usedTokens) / window) * 100)));
-  return { usedTokens, contextWindow: window, remainingPercent: remaining };
+  return {
+    usedTokens,
+    contextWindow: window,
+    remainingPercent: remaining,
+    autoCompact,
+    modelWindow: model,
+  };
+}
+
+/**
+ * auto-compactの上限が変わったときに、いまの残量を新しい分母で出し直す（Issue #1747）。
+ * 次の使用量の通知を待つと、その間は古い分母の残量で表示と引き継ぎ判定が走るため。
+ */
+export function rebaseContextUsage(
+  context: ContextUsage | undefined,
+  autoCompactLimit: number | undefined,
+): ContextUsage | undefined {
+  if (context === undefined) {
+    return undefined;
+  }
+  return buildContextUsage(context.usedTokens, modelWindowOf(context), autoCompactLimit) ?? context;
+}
+
+/**
+ * 前回の残量からモデル本来の上限を取り出す（Issue #1747）。`contextWindow` がauto-compactの
+ * 上限に置き換わっているときは、それをモデルの上限として渡し直すと、上限が後から広がっても
+ * 分母が小さいまま戻らないので使わない。
+ */
+export function modelWindowOf(context: ContextUsage | undefined): number | undefined {
+  if (context === undefined) {
+    return undefined;
+  }
+  return context.modelWindow ?? (context.autoCompact === true ? undefined : context.contextWindow);
+}
+
+/**
+ * `config/read` の応答から、Codexのauto-compactの上限を読む（Issue #1747）。
+ *
+ * `model_auto_compact_token_limit_scope` が `body_after_prefix` のときは、上限に数えるのが
+ * コンテキストの一部だけで、`thread/tokenUsage/updated` の `last.totalTokens` とは比べられない。
+ * その場合と未設定の場合は `undefined` を返し、分母を `modelContextWindow` に戻す。
+ */
+export function readAutoCompactTokenLimit(result: unknown): number | undefined {
+  const config = rec(rec(result)?.['config']);
+  const scope = config?.['model_auto_compact_token_limit_scope'];
+  if (scope !== undefined && scope !== null && scope !== 'total') {
+    return undefined;
+  }
+  return positiveOrUndefined(numberOf(config?.['model_auto_compact_token_limit']));
+}
+
+function positiveOrUndefined(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 /**
@@ -736,6 +810,14 @@ export interface ChatState {
    * 常に `undefined`。
    */
   autocompactWindow?: AutocompactWindowView | undefined;
+  /**
+   * auto-compactが発火する上限のトークン数（Issue #1747）。残量の分母に使う。
+   *
+   * Claude Codeはsettingsの `autoCompactWindow`（`/autocompact` の応答が届けばそちら）、
+   * Codexは `config/read` の `model_auto_compact_token_limit` から入れる。判らない間は
+   * `undefined` で、残量は従来どおりモデルの上限を分母にする。
+   */
+  autoCompactLimit?: number | undefined;
   /**
    * Codexのレビュー中か（`review/start` で開始したターン）。
    *
@@ -1719,7 +1801,11 @@ export function applyEvent(
         cachedInputTokens: numberOf(last?.['cachedInputTokens']),
         outputTokens: numberOf(last?.['outputTokens']),
       };
-      const context = buildContextUsage(usedTokens, numberOf(tokenUsage['modelContextWindow']));
+      const context = buildContextUsage(
+        usedTokens,
+        numberOf(tokenUsage['modelContextWindow']),
+        state.autoCompactLimit,
+      );
       if (context === undefined) {
         // 上限が読めず残量を出せない場合でも、内訳だけは計測へ回せるので残す
         return { ...state, turnTokens };
@@ -1899,7 +1985,8 @@ export function enqueue(
   if (text.trim() === '' && attachments.length === 0) {
     return state;
   }
-  const message: QueuedMessage = skill === undefined ? { text, attachments } : { text, attachments, skill };
+  const message: QueuedMessage =
+    skill === undefined ? { text, attachments } : { text, attachments, skill };
   return { ...state, queued: [...state.queued, message] };
 }
 

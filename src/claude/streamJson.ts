@@ -7,6 +7,8 @@ import {
   NO_BACKGROUND_TERMINALS,
   NO_TODO_HISTORY,
   NO_TODOS,
+  modelWindowOf,
+  rebaseContextUsage,
   type BackgroundTerminalItem,
   type ChatItem,
   type ChatState,
@@ -143,7 +145,8 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
   let todos = state.todos;
   let todoHistory = state.todoHistory;
   let autocompactWindow = state.autocompactWindow;
-  const context = contextFromAssistant(state, event, message);
+  let autoCompactLimit = state.autoCompactLimit;
+  let context = contextFromAssistant(state, event, message);
 
   for (const [position, part] of content.entries()) {
     const type = str(part['type']);
@@ -168,6 +171,10 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         const parsed = parseAutocompactReport(text);
         if (parsed !== undefined) {
           autocompactWindow = parsed;
+          // CLIが実際に使う窓を答えているので、settingsから読んだ残量の分母より優先する
+          // （Issue #1747）。`auto` はモデルに応じた自動選定で値が判らないため、分母を
+          // モデルの上限へ戻す
+          autoCompactLimit = parsed.mode === 'fixed' ? parsed.tokens : undefined;
         }
       }
       continue;
@@ -223,12 +230,16 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
       }
     }
   }
+  if (autoCompactLimit !== state.autoCompactLimit) {
+    context = rebaseContextUsage(context, autoCompactLimit);
+  }
 
   if (
     items === state.items &&
     editedFiles === state.turnEditedFiles &&
     todos === state.todos &&
     autocompactWindow === state.autocompactWindow &&
+    autoCompactLimit === state.autoCompactLimit &&
     context === state.context &&
     state.streamingMessageId === undefined &&
     // ブロックを1つも運んでいないイベントは受け取り済みのブロック数も変えない
@@ -243,6 +254,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
     todos,
     todoHistory,
     autocompactWindow,
+    autoCompactLimit,
     context,
     // 次のイベントが同じメッセージの続きのブロックだったときに絶対番号を復元するための
     // 受け取り済みブロック数（issue #1239）。message.idが無ければ足し合わせる相手を
@@ -458,7 +470,10 @@ function contextFromAssistant(
   if (usedTokens <= 0 || usedTokens === state.context?.usedTokens) {
     return state.context;
   }
-  return buildContextUsage(usedTokens, state.context?.contextWindow) ?? state.context;
+  return (
+    buildContextUsage(usedTokens, modelWindowOf(state.context), state.autoCompactLimit) ??
+    state.context
+  );
 }
 
 /**

@@ -363,15 +363,19 @@ export function buildContextUsageRequest(requestId: string): string {
  * `get_context_usage` の応答を読む。
  *
  * 実測した中身は `{categories, totalTokens, maxTokens, percentage, ...}`。
- * 内訳（categories）は使わず、合計と上限だけを取る。
+ * 内訳（categories）は使わず、合計と上限だけを取る。`maxTokens` はモデル本来の上限なので、
+ * auto-compactの上限（Issue #1747）が判っていればそちらを分母にする。
  */
-export function readContextUsage(payload: unknown): ContextUsage | undefined {
+export function readContextUsage(
+  payload: unknown,
+  autoCompactLimit?: number | undefined,
+): ContextUsage | undefined {
   const body = rec(payload);
   const usedTokens = num(body?.['totalTokens']);
   if (usedTokens === undefined) {
     return undefined;
   }
-  return buildContextUsage(usedTokens, num(body?.['maxTokens']));
+  return buildContextUsage(usedTokens, num(body?.['maxTokens']), autoCompactLimit);
 }
 
 /**
