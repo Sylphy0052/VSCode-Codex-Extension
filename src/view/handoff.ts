@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
+import { stateHasHandoffAcceptance } from './handoffAcceptance';
 import { type HandoffDigest, readHandoffDigest, renderHandoffDigest } from './handoffDigest';
 
 /**
@@ -1443,6 +1444,12 @@ export interface HandoffTurnWatch {
 const FIRST_RESPONSE_TIMEOUT_MS = 60_000;
 
 /**
+ * 受領確認の行（`HANDOFF_ACCEPTED <id>`）を待つ上限（Issue #1751）。行は3点を出した直後に書かせる
+ * ため最初のメッセージに入るが、本文を読み込む分だけ応答の開始より遅れうる。
+ */
+const ACCEPTANCE_TIMEOUT_MS = 300_000;
+
+/**
  * 引き継ぎ先からの応答とみなさない項目の種類。
  *
  * `userMessage` / `skillContext` は送る側（人・拡張機能）が積むもの。初回プロンプトを
@@ -1469,7 +1476,8 @@ function responseItemCount(state: ChatState): number {
  * プロンプトを送れずに監視を打ち切ったとき（Issue #1162）。
  */
 export type DestinationResponseOutcome =
-  { succeeded: true } | { succeeded: false; reason: 'noResponse' | 'turnFailed' | 'abandoned' };
+  | { succeeded: true }
+  | { succeeded: false; reason: 'noResponse' | 'turnFailed' | 'abandoned' | 'notAccepted' };
 
 /**
  * 引き継ぎ先が初回プロンプトに応答を始めるのを待ち、始めたかどうかを返す。
@@ -1493,14 +1501,19 @@ export type DestinationResponseOutcome =
  */
 export function waitForDestinationResponse(
   entry: HandoffTurnWatch,
-  timeoutMs = FIRST_RESPONSE_TIMEOUT_MS,
+  timeoutMs?: number,
   giveUp?: AbortSignal,
+  expectedHandoffId?: string,
 ): Promise<DestinationResponseOutcome> {
+  const limitMs =
+    timeoutMs ??
+    (expectedHandoffId === undefined ? FIRST_RESPONSE_TIMEOUT_MS : ACCEPTANCE_TIMEOUT_MS);
   const baseline = entry.session.getState();
   const baselineItems = responseItemCount(baseline);
   const baselineSeq = baseline.turnCompletionSeq;
   return new Promise((resolve) => {
     let settled = false;
+    let responseStarted = false;
     const finish = (outcome: DestinationResponseOutcome): void => {
       if (settled) {
         return;
@@ -1516,17 +1529,35 @@ export function waitForDestinationResponse(
     };
     const onGiveUp = (): void => finish({ succeeded: false, reason: 'abandoned' });
     const listener = (state: ChatState): void => {
-      if (responseItemCount(state) > baselineItems) {
+      responseStarted = responseItemCount(state) > baselineItems;
+      if (expectedHandoffId === undefined) {
+        if (responseStarted) {
+          finish({ succeeded: true });
+          return;
+        }
+      } else if (stateHasHandoffAcceptance(state, expectedHandoffId)) {
+        // 受領確認の行が正しいidで出た（Issue #1751）
         finish({ succeeded: true });
         return;
       }
       // 応答を1件も返さないままターンが終わったなら、引き継ぎ先は使い物になっていない。
-      // 成功・失敗のどちらで終わっても同じ扱いにする（応答が無い以上、続きを託せない）
+      // 成功・失敗のどちらで終わっても同じ扱いにする（応答が無い以上、続きを託せない）。
+      // 受領確認を待つときは、応答があっても行が無い・idが違うまま終わったものを区別する
       if (state.turnCompletionSeq !== baselineSeq) {
-        finish({ succeeded: false, reason: 'turnFailed' });
+        finish({
+          succeeded: false,
+          reason: responseStarted && expectedHandoffId !== undefined ? 'notAccepted' : 'turnFailed',
+        });
       }
     };
-    const timer = setTimeout(() => finish({ succeeded: false, reason: 'noResponse' }), timeoutMs);
+    const timer = setTimeout(
+      () =>
+        finish({
+          succeeded: false,
+          reason: responseStarted && expectedHandoffId !== undefined ? 'notAccepted' : 'noResponse',
+        }),
+      limitMs,
+    );
     entry.stateListeners.push(listener);
     if (giveUp?.aborted === true) {
       onGiveUp();
@@ -1541,6 +1572,7 @@ export type OldTabKeptReason =
   | 'noResponse'
   | 'turnFailed'
   | 'abandoned'
+  | 'notAccepted'
   | 'disposed'
   | 'oldBusy'
   | 'userDismissed'
@@ -1608,6 +1640,7 @@ export function oldTabKeptMessage(reason: OldTabKeptReason): string {
     noResponse: '引き継ぎ先が既定時間内に応答を始めなかったため、旧タブを残します',
     turnFailed: '引き継ぎ先が応答を返さないままターンを終えたため、旧タブを残します',
     abandoned: '引き継ぎ先へ初回プロンプトを送れず監視を打ち切ったため、旧タブを残します',
+    notAccepted: '引き継ぎ先がHANDOFF_ACCEPTEDの行を正しいidで返さなかったため、旧タブを残します',
     disposed: '引き継ぎ元セッションは既に破棄済みのため、旧タブの後片付けは不要です',
     oldBusy: '引き継ぎ元のセッションがターン実行中のため、タブを閉じずに残します',
     userDismissed: '引き継ぎ元セッションの停止確認で継続を選ばなかったため、タブを残します',
@@ -1634,6 +1667,7 @@ export function oldTabKeptLabel(reason: OldTabKeptReason): string {
     noResponse: '引き継ぎ元が残存・引き継ぎ先が無応答',
     turnFailed: '引き継ぎ元が残存・引き継ぎ先が応答なしで終了',
     abandoned: '引き継ぎ元が残存・初回プロンプトを送れず',
+    notAccepted: '引き継ぎ元が残存・引き継ぎ先の受領確認が取れず',
     disposed: '引き継ぎ元が残存',
     oldBusy: '引き継ぎ元が残存・実行中のため閉じず',
     userDismissed: '引き継ぎ元が残存',

@@ -232,6 +232,13 @@ import {
   type HandoffTrigger,
 } from './handoff';
 import {
+  buildHandoffFactsSection,
+  extractCreatedReferences,
+  newHandoffId,
+  resolveHandoffGitFacts,
+  withHandoffAcceptance,
+} from './handoffAcceptance';
+import {
   HandoffTrace,
   describeAssessment,
   describeDecision,
@@ -1410,7 +1417,16 @@ export class ClaudeChatViewManager
     const autoReply = entry.session.getState().autoReply;
     // 開く・送るのどちらかが失敗したら1回やり直し、それでも駄目ならポインタだけを指す本文で
     // 1回試す（Issue #1750）。失敗した試行の新タブは閉じ、空のタブを残さない
-    for (const promptText of handoffAttemptTexts(firstText, pointerText)) {
+    // 受け取り側が返す受領確認（Issue #1751）のid。skillが採番した値があればそれ、無ければ拡張が採番する
+    const handoffId =
+      (handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource)?.handoffId) ??
+      newHandoffId(createdAt);
+    const factsSection = buildHandoffFactsSection(
+      await resolveHandoffGitFacts(entry.cwd, gitBranch),
+      extractCreatedReferences(state.items),
+    );
+    for (const attemptText of handoffAttemptTexts(firstText, pointerText)) {
+      const promptText = withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId);
       const newSessionId = await this.openNew(
         entry.cwd,
         entry.taskConfig,
@@ -1478,7 +1494,12 @@ export class ClaudeChatViewManager
       // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
       // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
       const giveUp = new AbortController();
-      const firstResponse = waitForDestinationResponse(newEntry, undefined, giveUp.signal);
+      const firstResponse = waitForDestinationResponse(
+        newEntry,
+        undefined,
+        giveUp.signal,
+        handoffId,
+      );
       try {
         // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
         this.dispatch(newEntry, promptText);
