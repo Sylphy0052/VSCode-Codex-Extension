@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.930.2",
+  "version": "2026.930.3",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -958,6 +958,30 @@
           "scope": "window",
           "markdownDescription": "引き継ぎ後に引き継ぎ元のタブを確認なしで閉じる（Issue #1090 / #1165）。新しいセッションが初回プロンプトへ応答を始めたときだけ閉じ、応答が無いまま終わった・60秒以内に始まらなかったときは残す。残した場合は Agent Sessions の Attention 一覧へ理由付きで出る。履歴（transcript / rollout）は残るため、必要なら履歴から開き直せる。OFFにすると従来どおり「引き継ぎ元のセッションを停止しますか？」と確認する。"
         },
+        "agent.autoHandoff.reflex.suggestThreshold": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）での自動引き継ぎの区切り判定（Issue #1707）。最終応答が新しいセッションへ移ることを提案・推奨している（移るかを尋ねる、/handoffの実行を頼む文面を含む）確率がこの値以上なら、引き継ぎを始める。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
+        },
+        "agent.autoHandoff.reflex.readingThreshold": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "Reflexモードでの自動引き継ぎの区切り判定（Issue #1707）。最終応答が利用者の読む説明・回答・報告を含む確率がこの値以上なら、残量の緩い閾値とmodel/effortの変化では引き継がない。引き継ぎの提案と同時に含むときは引き継ぐが、`#agent.autoHandoff.closeOldTab#` によらず元のタブを残す。初期値は仮置き。"
+        },
+        "agent.autoHandoff.reflex.boundaryThreshold": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "Reflexモードでの自動引き継ぎの区切り判定（Issue #1707）。作業が区切り（直前の指示が一段落し、次の作業が文面から追える）にある確率がこの値以上のときだけ、残量の緩い閾値とmodel/effortの変化で引き継ぐ。初期値は仮置き。"
+        },
         "agent.autoHandoff.model": {
           "type": "string",
           "default": "",
@@ -1369,7 +1393,7 @@
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "markdownDescription": "Reflexモード（issue #1455）を有効にするか。入力欄の「…」メニューからも切り替えられる。有効にすると、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で次の3つを判定する。自動返信モードの完了検証・質問への自動回答・危険度ゲート（`#agent.chat.autoReply.reflex.enabled#`）、条件付きループの完了宣言の検証（`#agent.chat.loopDoneCheck.enabled#`）、依頼ごとのskill選択（`#agent.chat.skillSelect.enabled#`）。一部だけ止めるには、それぞれの設定を `false` にする。判定1回に数秒〜十数秒かかり、利用枠も使う。"
+          "markdownDescription": "Reflexモード（issue #1455）を有効にするか。入力欄の「…」メニューからも切り替えられる。有効にすると、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で次の3つを判定する。自動返信モードの完了検証・質問への自動回答・危険度ゲート（`#agent.chat.autoReply.reflex.enabled#`）、条件付きループの完了宣言の検証（`#agent.chat.loopDoneCheck.enabled#`）、依頼ごとのskill選択（`#agent.chat.skillSelect.enabled#`）。一部だけ止めるには、それぞれの設定を `false` にする。あわせて、自動引き継ぎの区切り判定（`#agent.autoHandoff.reflex.suggestThreshold#` ほか）が分類器からReflexへ切り替わる。判定1回に数秒〜十数秒かかり、利用枠も使う。"
         },
         "agent.chat.loopDoneCheck.enabled": {
           "type": "boolean",
