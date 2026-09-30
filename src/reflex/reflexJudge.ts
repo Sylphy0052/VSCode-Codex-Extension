@@ -26,6 +26,14 @@ export const REFLEX_TIMEOUT_MS = 60_000;
 /** 状態として渡す本文の上限（コードポイント単位）。 */
 export const REFLEX_STATE_LIMIT = 20_000;
 
+/**
+ * 選択肢・段階の確率の合計として受け入れる幅（Issue #1715）。幅の中なら合計1へ割り直し、
+ * 外なら判定の失敗として扱う。モデルの丸め誤差は通し、全体に低い（高い）確率しか付けなかった
+ * 答えは割り直さない。
+ */
+export const REFLEX_PROBABILITY_SUM_MIN = 0.9;
+export const REFLEX_PROBABILITY_SUM_MAX = 1.1;
+
 export type ReflexQuestion =
   | { readonly kind: 'noul'; readonly question: string }
   | { readonly kind: 'choice'; readonly question: string; readonly options: readonly string[] }
@@ -255,9 +263,11 @@ export function parseReflexAnswers(
 /**
  * 選択肢ごとの確率を`labels`の並びで読み、合計1へ正規化する。
  *
- * 未知の選択肢・書かれていない選択肢・範囲外の確率があるとき、または全て0のときは`undefined`。
+ * 未知の選択肢・書かれていない選択肢・範囲外の確率があるとき、または合計が
+ * `REFLEX_PROBABILITY_SUM_MIN`〜`REFLEX_PROBABILITY_SUM_MAX`の外のときは`undefined`。
  * 書かれていない選択肢を0とみなすと、`{"x":0.2}`のような答えが正規化でxの確率1に膨らみ、
- * 閾値の判定を誤らせる。
+ * 閾値の判定を誤らせる。合計が1から大きく外れた答えも同じ理由で割り直さない
+ * （`{A:0.5, B:0.05}`を割り直すとA=0.91になり、閾値0.8を超えてしまう。Issue #1715）。
  *
  * 選択肢名は`normalizeReflexLabel`で揃えて照合する。正規化すると重なるキーが答えにあるときは、
  * どちらを採るかで結果が変わるため`undefined`。
@@ -283,7 +293,7 @@ function readDistribution(value: unknown, labels: readonly string[]): number[] |
     probs.push(p);
   }
   const sum = probs.reduce((a, b) => a + b, 0);
-  if (sum <= 0) {
+  if (sum < REFLEX_PROBABILITY_SUM_MIN || sum > REFLEX_PROBABILITY_SUM_MAX) {
     return undefined;
   }
   return probs.map((p) => p / sum);
