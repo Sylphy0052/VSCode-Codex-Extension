@@ -547,21 +547,24 @@ body { color: var(--vscode-foreground); background: var(--vscode-editor-backgrou
 main { padding: 24px; max-width: 1800px; margin: 0 auto; }
 header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
 h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 700; letter-spacing: .08em; margin: 0; } .description { color: var(--vscode-descriptionForeground); margin: 0; max-width: 720px; }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; }
+/* ロードマップ名やrun名が長いと、ヘッダがmainからはみ出してページ全体に横スクロールが出る。盤面は画面幅で列を切り取るため、右へスクロールした先が空になる（Issue #1764） */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; min-width: 0; }
+.controls select { max-width: 100%; min-width: 0; text-overflow: ellipsis; }
 .controls select, .controls input { color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; font: inherit; padding: 4px 6px; }
 .controls input[type=number] { width: 56px; }
 .btn { appearance: none; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
 .btn.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
 .btn:focus-visible, .controls select:focus-visible, .controls input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.status { border: 1px solid var(--vscode-panel-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; white-space: nowrap; } .status.warn { border-color: var(--vscode-charts-yellow); }
+.status { border: 1px solid var(--vscode-panel-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; } .status.warn { border-color: var(--vscode-charts-yellow); }
 .plan { margin-bottom: 16px; } .plan:empty { display: none; }
 .plan-box { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border: 1px solid var(--vscode-charts-yellow); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
-/* 7列を等分すると狭いパネルで1行数文字まで潰れるため、列に下限幅を持たせて横スクロールにする。空の列は細くする */
+/* 7列を等分すると狭いパネルで1行数文字まで潰れるため、列に下限幅を持たせて横スクロールにする。空の列は細くする。
+   列の高さを画面の高さまでに抑えてカードは列の中で縦スクロールさせ、盤面の横スクロールバーを常に画面内へ置く（Issue #1764） */
 .board { display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
-.column { flex: 1 1 240px; min-width: 220px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; }
+.column { flex: 1 1 240px; min-width: 220px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; display: flex; flex-direction: column; max-height: calc(100vh - 48px); }
 .column.is-empty { flex: 0 0 104px; min-width: 104px; min-height: 0; } .column.is-empty .empty { padding: 8px 12px; }
 .column-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; font-size: 13px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-.cards { display: grid; gap: 9px; padding: 8px; min-width: 0; }
+.cards { display: grid; align-content: start; grid-auto-rows: max-content; gap: 9px; padding: 8px; min-width: 0; min-height: 0; overflow-y: auto; }
 .card { min-width: 0; overflow: hidden; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 10px; }
 .card.attention { border-left: 4px solid var(--vscode-charts-yellow); } .card.running { border-left: 4px solid var(--vscode-charts-blue); }
 .card-title { display: block; font-weight: 650; overflow-wrap: anywhere; }
