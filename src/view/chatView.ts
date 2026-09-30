@@ -1209,7 +1209,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 旧タブは残す。`failed`で返すと入口が起動済みフラグを戻す（Issue #1746）
       const message = '引き継ぎ先のセッションを開けませんでした。旧タブはそのまま残ります';
       this.log.warn(message);
-      void vscode.window.showErrorMessage(message);
+      if (notifyFailure) {
+        void vscode.window.showErrorMessage(message);
+      }
       return 'failed';
     }
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
