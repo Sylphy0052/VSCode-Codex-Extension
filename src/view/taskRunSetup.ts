@@ -470,6 +470,10 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     { dispose: () => orchestrator.dispose() },
     { dispose: () => questionServer.dispose() },
     view,
+    // ウィンドウを開き直した後にKanbanのタブを復元する（Issue #1775）
+    vscode.window.registerWebviewPanelSerializer(TaskRunKanbanViewManager.viewType, {
+      deserializeWebviewPanel: async (panel, state) => view.restorePanel(panel, state),
+    }),
     vscode.commands.registerCommand('agent.taskRun.start', (engineHint?: unknown) =>
       startRunCommand(
         controller,
