@@ -195,6 +195,16 @@ describe('invokedHandoffSkill（Issue #1748）', () => {
     );
   });
 
+  it('CLIが注入したhandoffのSKILL.md本文（skillContext）があれば真', () => {
+    expect(
+      invokedHandoffSkill([
+        item('userMessage', '<command-name>/handoff</command-name>'),
+        item('skillContext', 'Base directory for this skill: /home/u/.claude/skills/handoff', 'handoff'),
+        item('agentMessage', 'x'),
+      ]),
+    ).toBe(true);
+  });
+
   it('前のターンで呼んだだけなら偽', () => {
     expect(
       invokedHandoffSkill([

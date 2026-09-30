@@ -849,11 +849,17 @@ const HANDOFF_SKILL_CALL = /^Skill:\s*(?:[\w.-]+:)?handoff\s*$/u;
 /** ユーザーが入力したhandoff skillのスラッシュコマンド（`/handoff`、`/<plugin>:handoff`）。 */
 const HANDOFF_SLASH_COMMAND = /^\/(?:[\w.-]+:)?handoff(?:\s|$)/u;
 
+/** CLIが注入したSKILL.md本文の項目（`skillContext`）が持つskill名。 */
+const HANDOFF_SKILL_CONTEXT = /^(?:[\w.-]+:)?handoff$/u;
+
 /**
  * 直前のターン（最後のユーザー指示とそれより後）でhandoff skillが呼ばれたか（Issue #1748）。
  *
  * Claude Code専用。モデルがSkillツールで呼んだ場合と、ユーザーが `/handoff` と打った場合
  * （skillの本文がユーザー発言として展開され、`tool_use` は出ない）の両方を数える。
+ * どちらの経路でもCLIはSKILL.md本文を注入し、`skillContext` の項目として積まれるため、
+ * これも呼び出しの証拠にする（stream-jsonで届く発言は制御タグ付きのまま `/handoff` で
+ * 始まらないことがある）。
  * skillを呼ばずに書式見本を引用しただけの応答を、handoffプロンプトとして受理しないために使う。
  */
 export function invokedHandoffSkill(
@@ -868,6 +874,9 @@ export function invokedHandoffSkill(
       return HANDOFF_SLASH_COMMAND.test(item.text.trim());
     }
     if (item.kind === 'mcpToolCall' && HANDOFF_SKILL_CALL.test(item.detail)) {
+      return true;
+    }
+    if (item.kind === 'skillContext' && HANDOFF_SKILL_CONTEXT.test(item.detail.trim())) {
       return true;
     }
   }
