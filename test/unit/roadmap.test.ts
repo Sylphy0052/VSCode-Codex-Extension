@@ -1444,6 +1444,118 @@ describe('createCliIssueListPort', () => {
     const port = createCliIssueListPort(fakeGit('https://github.com/org/repo.git'), cli);
     expect(await port.listIssues('/repo')).toBeUndefined();
   });
+
+  describe('glabのページ送り', () => {
+    const GITLAB_REMOTE = 'git@gitlab.example.com:org/repo.git';
+    const pageOf = (count: number, start: number): string =>
+      JSON.stringify(
+        Array.from({ length: count }, (_, i) => ({
+          iid: start + i,
+          title: `t${String(start + i)}`,
+        })),
+      );
+
+    /** ページ番号ごとの応答を返し、取りに行ったページ番号を記録する */
+    function pagedCli(responses: Record<number, { code: number; stdout: string }>): {
+      cli: CliCommandRunner;
+      pages: number[];
+    } {
+      const pages: number[] = [];
+      const cli: CliCommandRunner = {
+        run: async (_command, args) => {
+          const page = Number(args[args.indexOf('--page') + 1]);
+          pages.push(page);
+          const res = responses[page] ?? { code: 1, stdout: '' };
+          return { code: res.code, stdout: res.stdout, stderr: '' };
+        },
+      };
+      return { cli, pages };
+    }
+
+    it('1ページ目がちょうど100件なら2ページ目を取り、2ページ目が100件未満で止まる', async () => {
+      const { cli, pages } = pagedCli({
+        1: { code: 0, stdout: pageOf(100, 1) },
+        2: { code: 0, stdout: pageOf(30, 101) },
+      });
+      const issues = await createCliIssueListPort(fakeGit(GITLAB_REMOTE), cli).listIssues('/repo');
+      expect(pages).toEqual([1, 2]);
+      expect(issues).toHaveLength(130);
+    });
+
+    it('1ページ目が100件未満なら2ページ目を取らない', async () => {
+      const { cli, pages } = pagedCli({ 1: { code: 0, stdout: pageOf(99, 1) } });
+      const issues = await createCliIssueListPort(fakeGit(GITLAB_REMOTE), cli).listIssues('/repo');
+      expect(pages).toEqual([1]);
+      expect(issues).toHaveLength(99);
+    });
+
+    it('200件に達したら3ページ目を取らない', async () => {
+      const { cli, pages } = pagedCli({
+        1: { code: 0, stdout: pageOf(100, 1) },
+        2: { code: 0, stdout: pageOf(100, 101) },
+        3: { code: 0, stdout: pageOf(100, 201) },
+      });
+      const issues = await createCliIssueListPort(fakeGit(GITLAB_REMOTE), cli).listIssues('/repo');
+      expect(pages).toEqual([1, 2]);
+      expect(issues).toHaveLength(200);
+    });
+
+    it('2ページ目の失敗では1ページ目の分を返す', async () => {
+      const { cli } = pagedCli({
+        1: { code: 0, stdout: pageOf(100, 1) },
+        2: { code: 1, stdout: '' },
+      });
+      const issues = await createCliIssueListPort(fakeGit(GITLAB_REMOTE), cli).listIssues('/repo');
+      expect(issues).toHaveLength(100);
+    });
+
+    it('1ページ目の失敗ではundefinedを返す', async () => {
+      const { cli } = pagedCli({ 1: { code: 1, stdout: '' } });
+      expect(
+        await createCliIssueListPort(fakeGit(GITLAB_REMOTE), cli).listIssues('/repo'),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('labelオプション', () => {
+    function recordingCli(): {
+      cli: CliCommandRunner;
+      calls: { command: string; args: readonly string[] }[];
+    } {
+      const calls: { command: string; args: readonly string[] }[] = [];
+      const cli: CliCommandRunner = {
+        run: async (command, args) => {
+          calls.push({ command, args });
+          return { code: 0, stdout: '[]', stderr: '' };
+        },
+      };
+      return { cli, calls };
+    }
+
+    it.each([
+      ['https://github.com/org/repo.git', 'gh'],
+      ['git@gitlab.example.com:org/repo.git', 'glab'],
+    ])('%s ではlabelを渡すと%s --label が付く', async (remote, command) => {
+      const { cli, calls } = recordingCli();
+      await createCliIssueListPort(fakeGit(remote), cli, { label: 'roadmap' }).listIssues('/repo');
+      expect(calls[0]?.command).toBe(command);
+      const args = calls[0]?.args ?? [];
+      expect(args[args.indexOf('--label') + 1]).toBe('roadmap');
+    });
+
+    it.each(['https://github.com/org/repo.git', 'git@gitlab.example.com:org/repo.git'])(
+      '%s ではlabel未指定・空白のみなら --label を付けない',
+      async (remote) => {
+        const { cli, calls } = recordingCli();
+        await createCliIssueListPort(fakeGit(remote), cli).listIssues('/repo');
+        await createCliIssueListPort(fakeGit(remote), cli, { label: '  ' }).listIssues('/repo');
+        expect(calls).toHaveLength(2);
+        for (const call of calls) {
+          expect(call.args).not.toContain('--label');
+        }
+      },
+    );
+  });
 });
 
 // `slugifyGoal` はIssue #408でplanner.ts側の実装へ一本化し、roadmap.ts側の独自実装は削除した
