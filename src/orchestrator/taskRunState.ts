@@ -214,6 +214,9 @@ export type StageGateStatus = 'judging' | 'awaitingOrchestrator' | 'awaitingUser
 /** 関門の決着・質問の回答を誰が出したか。 */
 export type StageDecider = 'reflex' | 'orchestrator' | 'user';
 
+/** 工程の外から関門を決着させ、質問へ答える側（Reflexは工程の中で決めるので含まない）。 */
+export type ExternalStageDecider = Exclude<StageDecider, 'reflex'>;
+
 export interface StageGate {
   gateId: string;
   kind: StageGateKind;

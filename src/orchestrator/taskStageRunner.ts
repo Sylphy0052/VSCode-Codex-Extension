@@ -16,7 +16,11 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ChatState } from '../appserver/chatState';
-import type { AnswererQuestion, AnswererVerdict } from '../reflex/answererJudge';
+import {
+  ANSWERER_USER_FALLBACK,
+  type AnswererQuestion,
+  type AnswererVerdict,
+} from '../reflex/answererJudge';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
 import {
   findQuestionDangers,
@@ -48,6 +52,7 @@ import {
   recordTaskWorktree,
   requestStagePause,
   requestStageResume,
+  type ExternalStageDecider,
   type StageDecider,
   type StageDecision,
   type StageOutput,
@@ -555,7 +560,7 @@ export class TaskStageRunner {
   ): Promise<AnswererVerdict> {
     const judge = this.deps.judgeAnswerer;
     if (judge === undefined) {
-      return { kind: 'user', summary: undefined };
+      return ANSWERER_USER_FALLBACK;
     }
     try {
       return await judge(runId, engine, question, reflexEnabled);
@@ -1668,7 +1673,7 @@ export class TaskStageRunner {
     taskId: string,
     questionId: string,
     answer: string,
-    by: Exclude<StageDecider, 'reflex'> = 'user',
+    by: ExternalStageDecider = 'user',
   ): Promise<boolean> {
     const answered = await this.applyAnswer(runId, taskId, questionId, { by, text: answer });
     if (answered === undefined) {
