@@ -238,6 +238,7 @@ import {
   describeGate,
   describeProfile,
 } from './handoffTrace';
+import { appendHandoffLog } from './handoffLog';
 import {
   applyHandoffReflexThresholds,
   describeHandoffBoundaryMaterial,
@@ -1370,6 +1371,17 @@ export class ClaudeChatViewManager
     if (savedPromptPath === undefined) {
       firstText = pointerText;
     }
+    // 引き継ぎ1回につき1件の記録（Issue #1752）。失敗しても引き継ぎは止めない
+    await appendHandoffLog(this.globalStorageDir, {
+      provider: 'claude',
+      trigger,
+      prompt: firstText,
+      pointerPath,
+    }).catch((e: unknown) =>
+      this.log.warn(
+        `引き継ぎの記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
 
     if (entry.handoffDelegate !== undefined) {
       // 委譲先の見送りと失敗は`delegateHandoff`がfalseにまとめるため区別できない。タスク用
@@ -2288,6 +2300,7 @@ export class ClaudeChatViewManager
           timeoutMs: readAutoHandoffClassifierTimeoutMs(),
           logWarn: (message) => entry.trace.warn(message),
         },
+        state.context?.usedTokens,
       );
     } finally {
       entry.safeBoundaryProbing = false;
@@ -2310,6 +2323,9 @@ export class ClaudeChatViewManager
     ) {
       entry.trace.info('分類器を待つ間に状況が変わったため発火しない');
       return;
+    }
+    if (onProfileChange && probe.switchSafe && probe.switchInPlaceModel !== undefined) {
+      await this.switchModelInPlace(entry, probe.switchInPlaceModel);
     }
     const trigger = decideAutoHandoff({
       enabled: latest.autoHandoff,
@@ -2417,6 +2433,7 @@ export class ClaudeChatViewManager
                 timeoutMs: readAutoHandoffClassifierTimeoutMs(),
                 logWarn: (message) => entry.trace.warn(message),
               },
+              state.context?.usedTokens,
             )
           : undefined,
       ]);
@@ -2459,6 +2476,9 @@ export class ClaudeChatViewManager
     ) {
       entry.trace.info('Reflexの判定を待つ間に状況が変わったため発火しない');
       return;
+    }
+    if (ctx.onProfileChange && reading.switchSafe && probe?.switchInPlaceModel !== undefined) {
+      await this.switchModelInPlace(entry, probe.switchInPlaceModel);
     }
     const trigger = decideAutoHandoff({
       enabled: latest.autoHandoff,
@@ -3787,6 +3807,18 @@ export class ClaudeChatViewManager
       this.applyToSession(entry, 'permissionMode', claudePermissionModeForLevel(level));
     }
     this.refreshSettings(entry);
+  }
+
+  /**
+   * 区切りでのmodel変更を、contextが軽いためその場で行う（Issue #1752）。引き継ぎは
+   * しない。空のmodelは「既定へ戻す」で今の会話へ効かないため何もしない。
+   */
+  private async switchModelInPlace(entry: ClaudePanel, model: string): Promise<void> {
+    if (model === '' || model === entry.modelSettings.model) {
+      return;
+    }
+    entry.trace.info(`contextが軽いため引き継がず、modelをその場で ${model} へ切り替える`);
+    await this.applyConfig(entry, 'model', model);
   }
 
   /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */

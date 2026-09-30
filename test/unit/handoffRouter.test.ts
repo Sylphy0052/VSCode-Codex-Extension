@@ -251,10 +251,10 @@ describe('isProfileChange（Issue #1090）', () => {
     ).toBe(false);
   });
 
-  it('effortが2段動けば「変わった」', () => {
+  it('effortが2段動いても「変わっていない」（Issue #1752）', () => {
     expect(
       isProfileChange({ model: 'opus', effort: 'xhigh' }, { model: 'opus', effort: 'medium' }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('effortが未指定・ladder外なら比較材料が無いので「変わっていない」', () => {

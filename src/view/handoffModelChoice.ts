@@ -13,7 +13,7 @@ import type { SessionModelSettings } from '../sessionModelSettings';
 import { classifyHandoff, type HandoffClassifierInput } from './handoffClassifier';
 import type { SessionHandoffModelOption } from './sessionHub';
 import {
-  isProfileChange,
+  decideProfileChangeAction,
   resolveProfile,
   type CostPreset,
   type TaskAssessment,
@@ -484,6 +484,11 @@ export interface SafeBoundaryProbe {
    * Reflexで判定するとき（Issue #1707）に使う。
    */
   profileDiffers: boolean;
+  /**
+   * modelが変わる判定で、contextが軽いためその場で切り替える先のmodel（Issue #1752）。
+   * 引き継ぐ判定・変わらない判定では無い。このときの `profileChanged` / `profileDiffers` は偽。
+   */
+  switchInPlaceModel?: string;
   /** 解決したmodel/effort。確認ダイアログへ出す値と同じ。 */
   profile: SessionModelSettings;
 }
@@ -503,6 +508,7 @@ export async function probeSafeBoundary(
   current: SessionModelSettings,
   input: HandoffClassifierInput,
   deps: HandoffModelChoiceDeps,
+  usedTokens?: number,
 ): Promise<SafeBoundaryProbe | undefined> {
   if (!readAutoHandoffRouterEnabled()) {
     return undefined;
@@ -522,7 +528,8 @@ export async function probeSafeBoundary(
   // 明示設定（`agent.autoHandoff.model` / `.effort`）まで含めた最終的な提案と比べる。
   // 解決結果だけで比べると、設定で固定している人のところで毎回「変わった」ことになる
   const proposal = await proposeHandoffModelSettings(current, input, deps, assessment);
-  const profileDiffers = isProfileChange(current, proposal.settings);
+  const action = decideProfileChangeAction(current, proposal.settings, usedTokens);
+  const profileDiffers = action === 'handoff';
   return {
     assessment,
     switchSafe: assessment.switchSafe,
@@ -537,6 +544,7 @@ export async function probeSafeBoundary(
     // `profileChanged` の方は従来どおり `switchSafe` を要求する
     profileChanged: assessment.switchSafe && profileDiffers,
     profileDiffers,
+    ...(action === 'switchInPlace' ? { switchInPlaceModel: proposal.settings.model } : {}),
     profile: proposal.settings,
   };
 }
