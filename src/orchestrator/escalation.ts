@@ -514,7 +514,8 @@ const DISCARD_DEVICE_PATHS: ReadonlySet<string> = new Set([
 ]);
 
 function isOutsideAllowedRoots(target: string, boundary: TaskBoundary): boolean {
-  if (DISCARD_DEVICE_PATHS.has(target)) {
+  // `//dev/null` や `/dev/./null` のような表記ゆれも同じ特殊ファイルを指すため、正規化してから比べる（Issue #1696）。
+  if (DISCARD_DEVICE_PATHS.has(path.posix.normalize(target))) {
     return false;
   }
   if (boundary.allowedRoots.length === 0) {
