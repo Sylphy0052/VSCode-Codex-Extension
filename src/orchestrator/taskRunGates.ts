@@ -53,6 +53,15 @@ export function isGateChoiceAllowed(kind: StageGateKind, choice: StageGateChoice
   return ALLOWED_CHOICES[kind].includes(choice);
 }
 
+/**
+ * レビューが通過しなかった（medium以上の指摘が残った）タスクか。この状態で指摘を残したまま
+ * 進めるかはユーザーだけが決める（Issue #1711）。Reflexには選択肢として示さず、判定が
+ * `proceed`でも決着させない。
+ */
+function isReviewFailed(task: OrchestratedTask): boolean {
+  return task.review?.passed === false;
+}
+
 function isOpen(gate: StageGate): boolean {
   return gate.status === 'judging' || gate.status === 'awaitingUser';
 }
@@ -257,7 +266,8 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
  * タスクが関門を開いたときの状態から動いているときはそのまま返す（呼び出し側は戻り値が元の
  * runかどうかで受理を判定する）。
  * - `sendBack`: 「実装とPR作成」から やり直す（同じworktree・ブランチ・PRを使う）
- * - `proceed`: 指摘を残したまま「mergeとcleanup」へ進む
+ * - `proceed`: 指摘を残したまま「mergeとcleanup」へ進む。レビューが通過しなかったタスクでは
+ *   ユーザーの決着だけ受け付ける（Reflexの`proceed`はそのまま返し、呼び出し側がユーザーへ回す）
  * - `retry`: 止まった工程を未着手へ戻す（`resetStageForRetry`）
  */
 export function resolveStageGate(
@@ -273,6 +283,9 @@ export function resolveStageGate(
       return undefined;
     }
     if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
+      return undefined;
+    }
+    if (resolution.by === 'reflex' && resolution.choice === 'proceed' && isReviewFailed(task)) {
       return undefined;
     }
     const resolved: StageGate = {
@@ -330,13 +343,16 @@ export type GateJudgeQuestion = Pick<
 export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): GateJudgeQuestion {
   if (gate.kind === 'reviewFindings') {
     const rounds = task.reviewRounds ?? 0;
+    const failed = isReviewFailed(task);
     return {
       question: `${task.taskId}のレビューが直さずに残した指摘がある。次にどうするか。`,
       reason:
         `レビューを終えたが指摘が残った。実装への差し戻しはこれまで${String(rounds)}回` +
         `（上限${String(MAX_REVIEW_ROUNDS)}回）。差し戻すと同じPRへ追加の修正をしてからレビューし直す。`,
-      options: [GATE_OPTION_SEND_BACK, GATE_OPTION_PROCEED, GATE_OPTION_ASK_USER],
-      recommended: task.review?.passed === false ? GATE_OPTION_SEND_BACK : GATE_OPTION_PROCEED,
+      options: failed
+        ? [GATE_OPTION_SEND_BACK, GATE_OPTION_ASK_USER]
+        : [GATE_OPTION_SEND_BACK, GATE_OPTION_PROCEED, GATE_OPTION_ASK_USER],
+      recommended: failed ? GATE_OPTION_SEND_BACK : GATE_OPTION_PROCEED,
       evidence: `レビューの結果:\n${gate.detail}`,
     };
   }
