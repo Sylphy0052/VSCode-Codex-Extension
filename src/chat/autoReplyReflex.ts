@@ -1,5 +1,5 @@
 import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
-import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { sanitizeInlineText, truncateMiddleByCodePoint } from '../orchestrator/untrustedText';
 import {
   bestChoiceProbability,
   choiceAnswer,
@@ -67,7 +67,10 @@ export const ASK_USER_QUESTION_NONE_OPTION = '選択肢に合うものが無い'
 
 const ASK_LABEL_MAX_LENGTH = 200;
 const ASK_TEXT_MAX_LENGTH = 400;
-/** 危険度ゲートへ文脈として渡す直前の出力の上限。送る内容を先に置くため、切れるのは文脈の側。 */
+/**
+ * 危険度ゲートへ文脈として渡す直前の出力の上限。判定の対象である送る内容が状態の上限
+ * （`REFLEX_STATE_LIMIT`）で削られないよう、文脈の側を先にこの長さへ縮める。
+ */
 const DANGER_CONTEXT_MAX_LENGTH = 8000;
 
 export type AutoReplyCompletionVerdict =
@@ -150,9 +153,7 @@ export async function checkAutoReplyDanger(
       '',
       '### 元セッションの直前の出力',
       '',
-      context.length > DANGER_CONTEXT_MAX_LENGTH
-        ? `${context.slice(0, DANGER_CONTEXT_MAX_LENGTH)}…`
-        : context,
+      truncateDangerContext(context),
     ].join('\n'),
     questions: [
       {
@@ -173,6 +174,12 @@ export async function checkAutoReplyDanger(
   }
   const summary = `危険 ${formatReflexProbability(answer.yes)}`;
   return answer.yes >= threshold ? { kind: 'danger', summary } : { kind: 'safe', summary };
+}
+
+/** 質問や確認依頼が来やすい末尾を残し、中間を省く（Issue #1732）。 */
+function truncateDangerContext(context: string): string {
+  const middle = truncateMiddleByCodePoint(context, DANGER_CONTEXT_MAX_LENGTH);
+  return middle === undefined ? context : `${middle.head}\n…（中略）\n${middle.tail}`;
 }
 
 export type AutoReplyAskUserQuestionVerdict =
