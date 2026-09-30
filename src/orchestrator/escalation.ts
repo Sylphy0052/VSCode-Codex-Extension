@@ -464,6 +464,32 @@ const DANGER_COMMAND_PATTERNS: readonly DangerPattern[] = [
 ];
 
 /**
+ * 取り消せない操作のパターン。工程セッションの質問（自然文）の検査にも使う（Issue #1712）。
+ * シェルメタ文字・外部到達・デコード・`find`は、自然文や判断材料の引用に日常的に現れて
+ * 誤検知が多く、操作そのものも取り消せないとは限らないため含めない。
+ */
+const IRREVERSIBLE_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([
+  DANGER_PATTERN_IDS.recursiveForceDelete,
+  DANGER_PATTERN_IDS.untrackedClean,
+  DANGER_PATTERN_IDS.worktreeReset,
+  DANGER_PATTERN_IDS.branchTagDelete,
+  DANGER_PATTERN_IDS.dbDropTruncate,
+  DANGER_PATTERN_IDS.forcePush,
+  DANGER_PATTERN_IDS.deployPublish,
+]);
+
+/**
+ * 文章に埋め込まれたコマンドのうち、取り消せない操作に当たるものの説明を返す。
+ * Markdownのコード囲み（バッククォート）と引用符は空白にしてから照合する。
+ */
+export function findIrreversibleCommands(text: string): string[] {
+  const normalized = text.replace(/[`'"]/gu, ' ');
+  return DANGER_COMMAND_PATTERNS.filter(
+    (p) => IRREVERSIBLE_PATTERN_IDS.has(p.id) && p.test(normalized),
+  ).map((p) => p.description);
+}
+
+/**
  * 対象パスが境界の配下（境界そのものを含む）かどうか。
  *
  * `target.startsWith(root)` のような字面比較は `/repo` が `/repo-evil/x` に

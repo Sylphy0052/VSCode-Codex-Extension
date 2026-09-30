@@ -102,6 +102,12 @@ import {
   DEFAULT_AUTO_REPLY_REFLEX_DANGER_THRESHOLD,
   type AutoReplyReflexSettings,
 } from './chat/autoReplyReflex';
+import {
+  DEFAULT_HANDOFF_REFLEX_BOUNDARY_THRESHOLD,
+  DEFAULT_HANDOFF_REFLEX_READING_THRESHOLD,
+  DEFAULT_HANDOFF_REFLEX_SUGGEST_THRESHOLD,
+  type HandoffReflexSettings,
+} from './view/handoffBoundaryReflex';
 import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
   GoalEvaluatorProviderSetting,
@@ -676,7 +682,8 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
 /**
  * オーケストレータモードの計画提案を、Reflexが妥当と判定したときに自動承認する（Issue #1554）。
  * 既定は無効（Issue #1679）。承認前の計画を人が確認し、計画の書き換えを人の承認に通すため。
- * 無効のときは判定を試みず、常にユーザーの承認待ちにする。
+ * 無効のときは判定を試みず、常にユーザーの承認待ちにする。Reflexモードの親スイッチ
+ * （`readReflexEnabled`）は見ないので、呼び出し側で合わせて見る（Issue #1713）。
  */
 export function readTaskRunPlanAutoApproveEnabled(): boolean {
   const raw = vscode.workspace
@@ -1010,6 +1017,34 @@ export function readAutoReplyReflexConfig(
     dangerThreshold: threshold(
       'chat.autoReply.reflex.dangerThreshold',
       DEFAULT_AUTO_REPLY_REFLEX_DANGER_THRESHOLD,
+    ),
+  };
+}
+
+/**
+ * 自動引き継ぎの区切り判定をReflexで行う設定（Issue #1707）を読む。閾値は0〜1へ丸める。
+ * `enabled`はReflexモードの親スイッチそのもの。OFFなら従来の分類器の判定を使う。
+ * `reflexEnabled`はタブ単位で上書きした親スイッチの値（Issue #1505）。省略時はグローバル設定。
+ */
+export function readAutoHandoffReflexConfig(
+  reflexEnabled: boolean = readReflexEnabled(),
+): HandoffReflexSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  const threshold = (key: string, fallback: number): number =>
+    Math.min(1, Math.max(0, num(c, key, fallback)));
+  return {
+    enabled: reflexEnabled,
+    suggestThreshold: threshold(
+      'autoHandoff.reflex.suggestThreshold',
+      DEFAULT_HANDOFF_REFLEX_SUGGEST_THRESHOLD,
+    ),
+    readingThreshold: threshold(
+      'autoHandoff.reflex.readingThreshold',
+      DEFAULT_HANDOFF_REFLEX_READING_THRESHOLD,
+    ),
+    boundaryThreshold: threshold(
+      'autoHandoff.reflex.boundaryThreshold',
+      DEFAULT_HANDOFF_REFLEX_BOUNDARY_THRESHOLD,
     ),
   };
 }

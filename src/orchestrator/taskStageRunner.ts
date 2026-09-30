@@ -19,6 +19,7 @@ import type { ChatState } from '../appserver/chatState';
 import type { AnswererQuestion, AnswererVerdict } from '../reflex/answererJudge';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
 import {
+  findQuestionDangers,
   needsUserDecision,
   parseRoadmapAskArgs,
   ROADMAP_ASK_ORCHESTRATOR_TOOL,
@@ -474,7 +475,10 @@ export class TaskStageRunner {
       if (resolved === undefined || findStageGate(resolved, taskId, gateId)?.status !== 'judging') {
         return;
       }
-      summary = `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
+      summary =
+        choice === 'proceed' && task.review?.passed === false
+          ? `レビューが通過していないため、Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を採らなかった`
+          : `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
     } else {
       const question = buildGateQuestion(task, gate);
       const answerer = await this.judgeAnswerer(run.engine, {
@@ -1470,9 +1474,10 @@ export class TaskStageRunner {
   }
 
   /**
-   * 質問を振り分ける。escalationが付いた質問はユーザーの判断待ちにする。選択肢のある質問は
-   * Reflexで判定して答え、答えられなければ（選択肢の無い質問・Reflexが無効なときも）回答者判定
-   * （Issue #1708）にかけ、オーケストレーターが決めてよければその判断待ち、それ以外はユーザーへ回す。
+   * 質問を振り分ける。escalationが付いた質問・危険語を含む質問はユーザーの判断待ちにする。
+   * 選択肢のある質問はReflexで判定して答え、答えられなければ（選択肢の無い質問・Reflexが無効な
+   * ときも）回答者判定（Issue #1708）にかけ、オーケストレーターが決めてよければその判断待ち、
+   * それ以外はユーザーへ回す。質問したエージェントの推奨はReflexへ渡さない（Issue #1712）。
    */
   private async routeQuestion(
     entry: LiveStageSession,
@@ -1484,25 +1489,32 @@ export class TaskStageRunner {
     const run = this.deps.store.find(runId);
     const judge = this.deps.judgeQuestion;
     let verdict: RoadmapQuestionVerdict;
+    const dangers = findQuestionDangers(args);
+    // escalationの付いた質問と危険語を含む質問は、ユーザーが決める
+    const userOnly = args.escalation.length > 0 || dangers.length > 0;
     if (needsUserDecision(args) || judge === undefined || run === undefined) {
-      verdict = { kind: 'human', summary: undefined };
+      verdict = {
+        kind: 'human',
+        summary:
+          dangers.length > 0
+            ? `取り消せない操作に関わる語を含むためReflexを通さなかった（${dangers.join('、')}）`
+            : undefined,
+      };
     } else {
       try {
-        verdict = await judge(run.engine, question);
+        verdict = await judge(run.engine, { ...question, recommended: undefined });
       } catch (e) {
         verdict = { kind: 'human', summary: `Reflexの判定に失敗: ${errorMessage(e)}` };
       }
     }
     if (verdict.kind === 'human') {
       let summary = verdict.summary;
-      // escalationの付いた質問はユーザーが決めると工程セッションが明示している
-      if (args.escalation.length === 0 && run !== undefined) {
+      if (!userOnly && run !== undefined) {
         const answerer = await this.judgeAnswerer(run.engine, {
           source: 'stageSession',
           question: question.question,
           reason: question.reason,
           options: question.options,
-          recommended: question.recommended,
           evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
             .filter((line) => line !== undefined)
             .join('\n'),
