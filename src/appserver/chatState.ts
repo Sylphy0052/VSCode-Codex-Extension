@@ -516,6 +516,22 @@ export function buildContextUsage(
   return { usedTokens, contextWindow: window, remainingPercent: remaining, autoCompact };
 }
 
+/**
+ * `config/read` の応答から、Codexのauto-compactの上限を読む（Issue #1747）。
+ *
+ * `model_auto_compact_token_limit_scope` が `body_after_prefix` のときは、上限に数えるのが
+ * コンテキストの一部だけで、`thread/tokenUsage/updated` の `last.totalTokens` とは比べられない。
+ * その場合と未設定の場合は `undefined` を返し、分母を `modelContextWindow` に戻す。
+ */
+export function readAutoCompactTokenLimit(result: unknown): number | undefined {
+  const config = rec(rec(result)?.['config']);
+  const scope = config?.['model_auto_compact_token_limit_scope'];
+  if (scope !== undefined && scope !== null && scope !== 'total') {
+    return undefined;
+  }
+  return positiveOrUndefined(numberOf(config?.['model_auto_compact_token_limit']));
+}
+
 function positiveOrUndefined(value: number | undefined): number | undefined {
   return value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
 }
@@ -1932,7 +1948,8 @@ export function enqueue(
   if (text.trim() === '' && attachments.length === 0) {
     return state;
   }
-  const message: QueuedMessage = skill === undefined ? { text, attachments } : { text, attachments, skill };
+  const message: QueuedMessage =
+    skill === undefined ? { text, attachments } : { text, attachments, skill };
   return { ...state, queued: [...state.queued, message] };
 }
 
