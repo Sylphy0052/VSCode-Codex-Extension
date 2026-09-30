@@ -518,7 +518,12 @@ export class TaskRunController {
     if (!resolved.ok) {
       return undefined;
     }
-    const verdict = await reviewTaskRunPlanProposal(config.reflex, resolved.value.drafts, config.threshold);
+    const verdict = await reviewTaskRunPlanProposal(
+      config.reflex,
+      resolved.value.drafts,
+      config.threshold,
+      new Set(newIssuesOutsideRoadmap(current, tasks)),
+    );
     return { verdict, reviewedDrafts: JSON.stringify(resolved.value.drafts) };
   }
 
@@ -1407,6 +1412,22 @@ export class TaskRunController {
 }
 
 /**
+ * ロードマップIssueから始めたrunの計画で、ロードマップに無い既存のIssueのうち新しく入ったもの。
+ * このrunが作ったIssue（チェックリストへ足す途中）は除く。ロードマップから始めていなければ空。
+ */
+function newIssuesOutsideRoadmap(before: TaskRun, tasks: readonly PlanTaskInput[]): number[] {
+  if (before.roadmap === undefined) {
+    return [];
+  }
+  const known = new Set(
+    listTasks(before)
+      .map((t) => taskIssueNumber(t))
+      .filter((n): n is number => n !== undefined),
+  );
+  return findIssuesOutsideRoadmap(tasks, before.roadmap.snapshot).filter((n) => !known.has(n));
+}
+
+/**
  * ロードマップIssueから始めたrunで、ロードマップに無い既存のIssueが計画へ新しく入ったら警告を残す
  * （受け付けは止めない。Issue #1623）。このrunが作ったIssue（チェックリストへ足す途中）は除く。
  */
@@ -1417,15 +1438,7 @@ function withOutsideRoadmapWarning(
   now: Date,
   newId: () => string,
 ): TaskRun {
-  if (run.roadmap === undefined) {
-    return run;
-  }
-  const known = new Set(
-    listTasks(before)
-      .map((t) => taskIssueNumber(t))
-      .filter((n): n is number => n !== undefined),
-  );
-  const outside = findIssuesOutsideRoadmap(tasks, run.roadmap.snapshot).filter((n) => !known.has(n));
+  const outside = newIssuesOutsideRoadmap(before, tasks);
   if (outside.length === 0) {
     return run;
   }
