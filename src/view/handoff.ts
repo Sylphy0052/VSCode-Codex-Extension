@@ -725,6 +725,30 @@ const HANDOFF_PROMPT_FENCE = /^ {0,3}(`{4,})/;
  */
 const HANDOFF_PROMPT_HEADING = /^#[^\S\r\n]*継続/;
 
+/**
+ * handoffプロンプトの書式の版の行（Issue #1748）。
+ *
+ * `handoff` skillの出力規約で、フェンスの内側に必ず書く。見出しだけでは、skillの書式見本を
+ * 引用した応答やhandoffの説明まで拾ってしまうため、見本には出てこない値を持つ行を要求する。
+ */
+const HANDOFF_SCHEMA_LINE = /^\s*schema:\s*handoff\/v1\s*$/;
+
+/**
+ * 引き継ぎごとに振る識別子の行（Issue #1748）。
+ *
+ * skillは実行のたびに値を作る（`<YYYYMMDDTHHMMSS>-<16進6桁>`）。書式見本の `handoff_id: <id>`
+ * は山括弧を含むため一致しない。受領確認（Issue #1751）で引き継ぎ先がこの値を返す。
+ */
+const HANDOFF_ID_LINE = /^\s*handoff_id:\s*([A-Za-z0-9][A-Za-z0-9._:-]{3,63})\s*$/;
+
+/** 取り出したhandoffプロンプト（Issue #1748）。 */
+export interface HandoffPromptBlock {
+  /** フェンスの内側。 */
+  body: string;
+  /** `handoff_id:` 行の値。 */
+  handoffId: string;
+}
+
 /** 決定論検知で発火したときの根拠（`HandoffTrigger.suggestReason`）。 */
 export const HANDOFF_PROMPT_DETECTED_REASON = 'アシスタントの応答にhandoffプロンプトが含まれていた';
 
@@ -738,7 +762,15 @@ export const HANDOFF_PROMPT_DETECTED_REASON = 'アシスタントの応答にhan
  *
  * フェンスと見出しの**両方**を要求する。見出しだけを見ると、書式を話題にしているだけの
  * 応答で誤爆する。逆にフェンスだけを見ると、subagent用プロンプトなど同じく4バックティック
- * で囲む別物まで拾ってしまう。
+ * で囲む別物まで拾ってしまう。さらに同じフェンスの中に `schema: handoff/v1` と
+ * `handoff_id: <値>` の2行を要求する（Issue #1748）。skillの書式見本を引用しただけの応答は
+ * `handoff_id` が山括弧のままなので通らない。
+ *
+ * Claude Codeではこれに加えて、同じターンでhandoff skillを呼んだことを呼び出し側が
+ * `invokedHandoffSkill` で確かめる。Codexにはskillを呼んだことを示すイベントが無い（skillの
+ * 読み込みはSKILL.mdを読む普通のコマンド実行としてしか残らない。2026-09-30に実測）ため、
+ * 見出し・schema・handoff_idの書式だけで判定する。見本の値を埋めて書き写した応答や、
+ * 過去の出力の再掲は通ってしまう余地が残る。
  *
  * ストリーミング途中の断片を拾わないのは呼び出し側の責任。前段（`passesSafeBoundaryGate`）
  * が `busy` の間は通さない。
@@ -750,14 +782,32 @@ export function containsHandoffPrompt(text: string): boolean {
 /**
  * アシスタントの応答からhandoffプロンプトの本文（フェンスの内側）を取り出す（Issue #1354）。
  *
- * 判定は `containsHandoffPrompt` と同じで、見出しを含むフェンスが複数あれば最後のものを返す。
- * 閉じフェンスが無いときは末尾までを本文とする。見つからなければ `undefined`。
+ * 判定は `containsHandoffPrompt` と同じ。本文と `handoff_id` が要るときは
+ * `parseHandoffPrompt` を使う。
  */
 export function extractHandoffPrompt(text: string): string | undefined {
+  return parseHandoffPrompt(text)?.body;
+}
+
+/**
+ * アシスタントの応答からhandoffプロンプトの本文と `handoff_id` を取り出す（Issue #1748）。
+ *
+ * 見出し・`schema: handoff/v1`・`handoff_id` の3つを同じフェンスの中に持つものだけを返す。
+ * 該当するフェンスが複数あれば最後のものを返す。閉じフェンスが無いときは末尾までを本文とする。
+ * 見つからなければ `undefined`。
+ */
+export function parseHandoffPrompt(text: string): HandoffPromptBlock | undefined {
   let fenceLength = 0;
   let body: string[] = [];
   let hasHeading = false;
-  let found: string | undefined;
+  let hasSchema = false;
+  let handoffId: string | undefined;
+  let found: HandoffPromptBlock | undefined;
+  const settle = (): void => {
+    if (hasHeading && hasSchema && handoffId !== undefined) {
+      found = { body: body.join('\n').trim(), handoffId };
+    }
+  };
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\r$/, '');
     const marks = HANDOFF_PROMPT_FENCE.exec(line)?.[1];
@@ -766,27 +816,71 @@ export function extractHandoffPrompt(text: string): string | undefined {
         fenceLength = marks.length;
         body = [];
         hasHeading = false;
+        hasSchema = false;
+        handoffId = undefined;
       }
       continue;
     }
     // 閉じフェンスは開きと同じ長さ以上で、後ろに情報文字列を付けられない（Markdownの規則）。
     // 開き行はバックティックの後ろに言語名が付くため、長さと余分な文字の両方を見て弾く
     if (marks !== undefined && marks.length >= fenceLength && line.trim() === marks) {
-      if (hasHeading) {
-        found = body.join('\n').trim();
-      }
+      settle();
       fenceLength = 0;
       continue;
     }
     body.push(line);
     if (HANDOFF_PROMPT_HEADING.test(line)) {
       hasHeading = true;
+    } else if (HANDOFF_SCHEMA_LINE.test(line)) {
+      hasSchema = true;
+    } else {
+      handoffId ??= HANDOFF_ID_LINE.exec(line)?.[1];
     }
   }
-  if (fenceLength !== 0 && hasHeading) {
-    found = body.join('\n').trim();
+  if (fenceLength !== 0) {
+    settle();
   }
   return found;
+}
+
+/** handoff skillの呼び出し（`describeTool` が付ける `Skill: handoff` の形。プラグインの名前空間付きも拾う）。 */
+const HANDOFF_SKILL_CALL = /^Skill:\s*(?:[\w.-]+:)?handoff\s*$/u;
+
+/** ユーザーが入力したhandoff skillのスラッシュコマンド（`/handoff`、`/<plugin>:handoff`）。 */
+const HANDOFF_SLASH_COMMAND = /^\/(?:[\w.-]+:)?handoff(?:\s|$)/u;
+
+/** CLIが注入したSKILL.md本文の項目（`skillContext`）が持つskill名。 */
+const HANDOFF_SKILL_CONTEXT = /^(?:[\w.-]+:)?handoff$/u;
+
+/**
+ * 直前のターン（最後のユーザー指示とそれより後）でhandoff skillが呼ばれたか（Issue #1748）。
+ *
+ * Claude Code専用。モデルがSkillツールで呼んだ場合と、ユーザーが `/handoff` と打った場合
+ * （skillの本文がユーザー発言として展開され、`tool_use` は出ない）の両方を数える。
+ * どちらの経路でもCLIはSKILL.md本文を注入し、`skillContext` の項目として積まれるため、
+ * これも呼び出しの証拠にする（stream-jsonで届く発言は制御タグ付きのまま `/handoff` で
+ * 始まらないことがある）。
+ * skillを呼ばずに書式見本を引用しただけの応答を、handoffプロンプトとして受理しないために使う。
+ */
+export function invokedHandoffSkill(
+  items: ReadonlyArray<Pick<ChatItem, 'kind' | 'text' | 'detail'>>,
+): boolean {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item === undefined) {
+      continue;
+    }
+    if (item.kind === 'userMessage') {
+      return HANDOFF_SLASH_COMMAND.test(item.text.trim());
+    }
+    if (item.kind === 'mcpToolCall' && HANDOFF_SKILL_CALL.test(item.detail)) {
+      return true;
+    }
+    if (item.kind === 'skillContext' && HANDOFF_SKILL_CONTEXT.test(item.detail.trim())) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

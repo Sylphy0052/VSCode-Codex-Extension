@@ -148,7 +148,7 @@ import {
   countCompactions,
   decideAutoHandoff,
   deriveHandoffBaseName,
-  extractHandoffPrompt,
+  parseHandoffPrompt,
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   buildHandoffSessionName,
@@ -1221,8 +1221,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
     // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
     const previousName = deriveHandoffBaseName(state, entry.pinnedName);
-    const handoffPrompt =
-      lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
+    // Codexにはhandoff skillを呼んだことを示すイベントが無いため、書式だけで判定する
+    // （Issue #1748。判定条件と誤検知の余地は`containsHandoffPrompt`を参照）
+    const handoffBlock =
+      lastAssistantMessage === undefined ? undefined : parseHandoffPrompt(lastAssistantMessage);
+    const handoffPrompt = handoffBlock?.body;
+    if (handoffBlock !== undefined) {
+      // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
+      entry.trace.info(`handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`);
+    }
     const handoffName = buildHandoffSessionName({
       ...(previousName === undefined ? {} : { previousName }),
       isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
