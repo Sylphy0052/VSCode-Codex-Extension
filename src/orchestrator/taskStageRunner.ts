@@ -618,6 +618,10 @@ export class TaskStageRunner {
     if (answerer.kind !== 'orchestrator') {
       return false;
     }
+    // 判定の間に工程セッションが入れ替わったら、古い承認要求は人へ回す
+    if (entry.closed || this.live.get(liveKey(entry.runId, entry.ref.taskId)) !== entry) {
+      return false;
+    }
     // 人の目を通らずに実行されるので、後から追えるよう判定の要約を残す
     this.warn(
       entry.runId,
