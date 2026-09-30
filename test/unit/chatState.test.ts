@@ -786,6 +786,8 @@ describe('buildContextUsage', () => {
       usedTokens: 21541,
       contextWindow: 258400,
       remainingPercent: 92,
+      autoCompact: false,
+      modelWindow: 258400,
     });
   });
 
@@ -833,6 +835,8 @@ describe('applyEvent / thread/tokenUsage/updated', () => {
       usedTokens: 21541,
       contextWindow: 258400,
       remainingPercent: 92,
+      autoCompact: false,
+      modelWindow: 258400,
     });
   });
 

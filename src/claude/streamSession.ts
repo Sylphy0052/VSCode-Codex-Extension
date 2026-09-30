@@ -352,7 +352,10 @@ export class ClaudeStreamSession {
     this.releasePendingWaiters();
     this.isForkSession = options.target.kind === 'fork';
     // 残量の分母（Issue #1747）。`/autocompact` の応答が届けば `streamJson.ts` が上書きする
-    this.state = { ...this.state, autoCompactLimit: readClaudeAutoCompactWindow(options.cwd) };
+    this.state = {
+      ...this.state,
+      autoCompactLimit: readClaudeAutoCompactWindow(options.cwd, undefined, undefined, this.log),
+    };
     this.sandboxBashGuard = options.config.sandboxBashGuard === true;
 
     const { args, warnings } = buildClaudeStreamArgs({

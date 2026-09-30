@@ -507,13 +507,14 @@ export function buildContextUsage(
   if (!Number.isFinite(usedTokens) || usedTokens < 0) {
     return undefined;
   }
-  const model = positiveOrUndefined(contextWindow);
-  const limit = positiveOrUndefined(autoCompactLimit);
+  const modelWindow = positiveOrUndefined(contextWindow);
+  const compactLimit = atLeastMinCompactLimit(autoCompactLimit);
   // 分母にauto-compactの上限を使うのは、モデルの上限以下のとき（または上限が判らないとき）。
   // `contextFromAssistant` は前回の分母を渡し直すため、同じ値が来ても `autoCompact` を保つよう
   // 等号を含める
-  const autoCompact = limit !== undefined && (model === undefined || limit <= model);
-  const window = autoCompact ? limit : model;
+  const autoCompact =
+    compactLimit !== undefined && (modelWindow === undefined || compactLimit <= modelWindow);
+  const window = autoCompact ? compactLimit : modelWindow;
   if (window === undefined) {
     return { usedTokens, contextWindow: undefined, remainingPercent: undefined };
   }
@@ -523,7 +524,7 @@ export function buildContextUsage(
     contextWindow: window,
     remainingPercent: remaining,
     autoCompact,
-    modelWindow: model,
+    modelWindow,
   };
 }
 
@@ -566,7 +567,14 @@ export function readAutoCompactTokenLimit(result: unknown): number | undefined {
   if (scope !== undefined && scope !== null && scope !== 'total') {
     return undefined;
   }
-  return positiveOrUndefined(numberOf(config?.['model_auto_compact_token_limit']));
+  return atLeastMinCompactLimit(numberOf(config?.['model_auto_compact_token_limit']));
+}
+
+/** auto-compact上限の下限。これ未満だと残量が常に0%になり、引き継ぎが即発火する。 */
+export const MIN_AUTO_COMPACT_LIMIT = 10_000;
+
+function atLeastMinCompactLimit(value: number | undefined): number | undefined {
+  return value !== undefined && value >= MIN_AUTO_COMPACT_LIMIT ? value : undefined;
 }
 
 function positiveOrUndefined(value: number | undefined): number | undefined {
