@@ -306,6 +306,12 @@ function liveKey(runId: string, taskId: string): string {
   return `${runId}#${taskId}`;
 }
 
+/** 同じタスク・同じ工程の過去の実行回が使ったセッションid（古い順）。 */
+function pastStageSessionRefs(run: TaskRun, ref: StageReportRef): string[] {
+  const attempts = run.tasks[ref.taskId]?.stages[ref.stage].attempts ?? [];
+  return attempts.flatMap((a) => (a.sessionRef === undefined ? [] : [a.sessionRef]));
+}
+
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -1039,6 +1045,8 @@ export class TaskStageRunner {
     const input = {
       ...this.sessionInput(ref, cwd, config, sandbox, generation, channel),
       ...(resumeSessionId === undefined ? {} : { resume: { sessionId: resumeSessionId } }),
+      // ウィンドウの開き直しで表示専用に戻した同じ工程のタブを引き取る（Issue #1775）
+      adoptPanelOf: pastStageSessionRefs(run, ref),
     };
     let session: TaskSession;
     try {

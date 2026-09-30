@@ -296,6 +296,31 @@ export class ChatSession {
     await this.connection.request('thread/unsubscribe', { threadId });
   }
 
+  /**
+   * 会話を読むだけで購読しない（`thread/read`。Issue #1775）。VS Codeが復元したオーケストレータ
+   * モードのタブを表示専用で戻すのに使う。`thread/resume`と違いスレッドを動かさないため、
+   * 後から`openTaskSession`が同じスレッドを開き直しても二重に購読しない。
+   */
+  async showReadOnly(threadId: string): Promise<void> {
+    this.update({
+      ...this.state,
+      threadId,
+      restore: { state: 'loading', message: undefined },
+    });
+    await this.connection.ensureStarted();
+    const response = await this.connection.request('thread/read', { threadId, includeTurns: true });
+    const items = readInitialItems(response.result);
+    this.update({
+      ...this.state,
+      threadId,
+      restore: undefined,
+      name: readThreadName(response.result) ?? this.state.name,
+      items,
+      reviewing: false,
+      backgroundTerminals: [],
+    });
+  }
+
   /** VS Codeが復元したタブを、会話本文を取らない状態で保持する。 */
   deferResume(threadId: string): void {
     this.update({

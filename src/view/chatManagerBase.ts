@@ -124,6 +124,13 @@ export interface BaseChatPanel {
    */
   taskManaged: boolean;
   /**
+   * VS Codeが復元したオーケストレータモードのタブを、CLIを起動せず会話の表示だけで預かっているか
+   * （Issue #1775）。`openTaskSession`が同じ会話か後継の会話を開くと、このタブのパネルを引き取る。
+   */
+  displayOnly?: boolean;
+  /** `attachPanel`がパネルへ張ったイベントの購読。パネルを別のentryへ付け替えるときに解く。 */
+  panelSubscriptions?: vscode.Disposable[];
+  /**
    * 入力欄を閉じたタブか（Issue #1465 分割案6b、`TaskSessionInput.inputLock`）。
    * `true`ならwebviewからの操作は`LOCKED_TAB_MESSAGE_TYPES`だけを通し、外からの送信・
    * 中断（`controlSession`等）も断る。
@@ -512,6 +519,10 @@ const LOCKED_TAB_MESSAGE_TYPES: ReadonlySet<string> = new Set([
 /** 入力欄を閉じたタブへの操作を断るときの案内。 */
 export const INPUT_LOCKED_MESSAGE =
   'ロードマップ実行のIssueセッションには直接入力できません。タブの「Orchestrator経由で指示」かKanbanから指示してください';
+
+/** 表示専用で預かったタブ（Issue #1775）の会話の末尾に足す注記。 */
+export const HELD_TASK_PANEL_NOTICE =
+  'ウィンドウを開き直したため、会話の表示だけを戻しました（CLIは起動していません）。runを再開すると、このタブで続きを開きます';
 
 /** 入力欄を閉じたタブから送れる指示の最大文字数（Kanbanの回答欄と揃える）。 */
 const MAX_LOCKED_INSTRUCTION_LENGTH = 2000;
@@ -1001,10 +1012,10 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.renderPanelHtml(entry, panel);
-    panel.webview.onDidReceiveMessage((message: unknown) =>
+    const onMessage = panel.webview.onDidReceiveMessage((message: unknown) =>
       this.receiveWebviewMessage(entry, message),
     );
-    panel.onDidChangeViewState(() => {
+    const onViewState = panel.onDidChangeViewState(() => {
       if (panel.visible) {
         entry.lastKnownViewColumn = panel.viewColumn;
       }
@@ -1013,8 +1024,13 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         this.activeSequence = nextActivePanelSequence();
       }
     });
-    panel.onDidDispose(() => {
+    const onDispose = panel.onDidDispose(() => {
       entry.panel = undefined;
+      if (entry.displayOnly === true) {
+        // 預かっていた表示専用のタブ（Issue #1775）は、人が閉じたら預かりも終える
+        this.teardown(entry);
+        return;
+      }
       if (!entry.taskManaged) {
         // 人が手で開いた画面は、これまで通りタブを閉じたらセッションも終わる
         this.teardown(entry);
@@ -1024,6 +1040,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         this.active = undefined;
       }
     });
+    entry.panelSubscriptions = [onMessage, onViewState, onDispose];
     // showPanelのreveal分岐（既存タブ）はpreserveFocusを見てactiveを更新するのに、
     // 新規作成のこの分岐だけ無条件にactiveを奪っていた（レビュー指摘: critical 2）。
     // タスクは必ずpreserveFocus: trueで背面に開く（design.md §16.10の2）ため、
@@ -1033,6 +1050,66 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       this.active = entry;
       this.activeSequence = nextActivePanelSequence();
     }
+  }
+
+  /**
+   * VS Codeが復元したタブのうち、オーケストレータモードの会話として表示専用で預かるものか
+   * （Issue #1775）。`extension.ts`がrunの記録を引く判定を入れる。既定は預からない
+   * （`isTaskManagedThread`に当たるタブは今までどおり閉じる）。
+   */
+  holdsRestoredTaskPanel: (sessionId: string) => boolean = () => false;
+
+  /**
+   * 復元したタブを表示専用で預かる（Issue #1775）。CLIは起動しない。会話の読み込みは
+   * 呼び出し側が`entry.session`へ行う。タブ名はVS Codeが復元したタブ名をそのまま使う。
+   */
+  protected holdRestoredTaskPanel(entry: TPanel, sessionId: string, panel: vscode.WebviewPanel): void {
+    entry.displayOnly = true;
+    entry.inputLock = true;
+    entry.autoHandoffDisabled = true;
+    this.attachPanel(entry, panel);
+    this.panels.set(sessionId, entry);
+    this.panelsChanged.fire();
+  }
+
+  /**
+   * `openTaskSession`が引き取る表示専用のタブ（Issue #1775）。同じ会話を開き直す
+   * `resume.sessionId`を先に、次に`adoptPanelOf`の新しい方（末尾）から探す。
+   * `panels`の同じキーを新しいentryへ差し替える前に呼ぶ。
+   */
+  protected findHeldTaskPanel(input: TaskSessionInput): TPanel | undefined {
+    const candidates = [
+      ...(input.resume === undefined ? [] : [input.resume.sessionId]),
+      ...[...(input.adoptPanelOf ?? [])].reverse(),
+    ];
+    for (const id of candidates) {
+      const held = this.panels.get(id);
+      if (held?.displayOnly === true && held.panel !== undefined) {
+        return held;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 預かっていた表示専用のタブのパネルを、`openTaskSession`が開いたセッションへ付け替える
+   * （Issue #1775）。預かっていた側はパネルを閉じずに片付ける。引き取った後は`TaskSession.open`が
+   * 新しいタブを作らず、このパネルを前へ出す。
+   */
+  protected adoptHeldTaskPanel(held: TPanel | undefined, entry: TPanel): void {
+    const panel = held?.panel;
+    if (held === undefined || held === entry || held.disposed || panel === undefined) {
+      return;
+    }
+    for (const subscription of held.panelSubscriptions ?? []) {
+      subscription.dispose();
+    }
+    held.panelSubscriptions = [];
+    held.panel = undefined;
+    // 同じ会話を開き直す場合、呼び出し側が`panels`の同じキーを新しいentryへ差し替え済み。
+    // `teardown`は預かっていたentryを指すキーだけを消す
+    this.teardown(held);
+    this.attachPanel(entry, panel);
   }
 
   /**

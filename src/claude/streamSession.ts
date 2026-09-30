@@ -319,6 +319,24 @@ export class ClaudeStreamSession {
     this.update(appendEndSummary(this.state, id, display));
   }
 
+  /**
+   * プロセスを起動せず、会話を表示するだけの状態にする（Issue #1775）。VS Codeが復元した
+   * オーケストレータモードのタブを表示専用で戻すのに使う。続きは`openTaskSession`が別の
+   * インスタンスで開く。
+   */
+  showReadOnly(
+    sessionId: string,
+    initial: Pick<ClaudeStreamOptions, 'initialItems' | 'initialTodos' | 'initialTodoHistory'>,
+  ): void {
+    this.update({
+      ...initialClaudeState,
+      threadId: sessionId,
+      items: initial.initialItems ?? [],
+      todos: initial.initialTodos ?? initialClaudeState.todos,
+      todoHistory: initial.initialTodoHistory ?? initialClaudeState.todoHistory,
+    });
+  }
+
   /** プロセスを起動する。発言はこの後 `send` で流す。 */
   start(options: ClaudeStreamOptions): void {
     // 現状の`claudeChatView.ts`（`openNew`/`openTaskSession`/resume/fork/restore）は

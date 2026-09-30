@@ -649,6 +649,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   claudeChat.setSecondOpinionHost(overridableHost('codex', chat));
   // 要約セッションのrolloutもCodex側に書かれるため、後始末の口も同じくここで渡す（Issue #942）
   claudeChat.setSummaryRollout(chat.summaryRolloutDeps());
+  // オーケストレータモードのタブは、ウィンドウを開き直したら閉じずに表示専用で預かる。
+  // runの再開で同じ工程・Orchestratorを開き直すときに引き取らせる（Issue #1775）
+  const holdsRestoredTaskPanel = (id: string): boolean => taskRunStore.hasSessionRef(id);
+  chat.holdsRestoredTaskPanel = holdsRestoredTaskPanel;
+  claudeChat.holdsRestoredTaskPanel = holdsRestoredTaskPanel;
 
   // 検証結果の来歴の保存先（Issue #1377）。複数ウィンドウで共有するため`globalStorageUri`
   // 配下に置く。ループのWorkerが会話中に実行したコマンドはチャット画面から、ワークフローの
