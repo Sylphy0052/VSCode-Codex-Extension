@@ -6,7 +6,12 @@ import {
   needsUserDecision,
   type RoadmapAskArgs,
 } from '../../src/orchestrator/roadmapQuestionMcp';
-import { REFLEX_PROCESS_ERROR, REFLEX_TIMEOUT, reflexAnswers, reflexStub } from '../helpers/reflexStub';
+import {
+  REFLEX_PROCESS_ERROR,
+  REFLEX_TIMEOUT,
+  reflexAnswers,
+  reflexStub,
+} from '../helpers/reflexStub';
 
 /**
  * Issue #1717: 質問の判定（`judgeRoadmapQuestion`）の判定結果ごとの分岐と、Reflexを通さずに
@@ -17,7 +22,10 @@ const THRESHOLD = 0.8;
 const A = '案Aで進める';
 const B = '案Bで進める';
 
-const QUESTION: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'recommended' | 'evidence'> = {
+const QUESTION: Pick<
+  RoadmapAskArgs,
+  'question' | 'reason' | 'options' | 'recommended' | 'evidence'
+> = {
   question: 'どちらの案で進めるか',
   reason: '仕様が2通りに読める',
   options: [A, B],
@@ -89,7 +97,11 @@ describe('judgeRoadmapQuestion', () => {
 
   it('推奨はその選択肢の説明として渡し、理由と材料を文脈へ入れる', async () => {
     const stub = reflexStub(reflexAnswers(probs(0.9, 0.05, 0.05)));
-    await judgeRoadmapQuestion(stub.deps, { ...QUESTION, recommended: A, evidence: '設計メモ' }, THRESHOLD);
+    await judgeRoadmapQuestion(
+      stub.deps,
+      { ...QUESTION, recommended: A, evidence: '設計メモ' },
+      THRESHOLD,
+    );
     const prompt = stub.prompts[0] ?? '';
     expect(prompt).toContain(`${A}: Orchestratorの推奨`);
     expect(prompt).not.toContain(`${B}: Orchestratorの推奨`);
@@ -99,10 +111,11 @@ describe('judgeRoadmapQuestion', () => {
 });
 
 describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () => {
-  const safe: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence' | 'escalation'> = {
-    ...QUESTION,
-    escalation: [],
-  };
+  const safe: Pick<RoadmapAskArgs, 'question' | 'reason' | 'options' | 'evidence' | 'escalation'> =
+    {
+      ...QUESTION,
+      escalation: [],
+    };
 
   it('危険語もescalationも無く選択肢があればReflexへ回す', () => {
     expect(findQuestionDangers(safe)).toEqual({ userOnly: [], caution: [] });
@@ -120,18 +133,65 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
   it.each([
     ['質問文', { question: 'mainへforce pushしてよいか' }, 'userOnly', 'リモートへの強制push'],
     ['理由', { reason: '本番のDBを触る' }, 'caution', '本番環境'],
-    ['選択肢', { options: [A, 'リモートのブランチを削除する'] }, 'userOnly', 'ブランチ・タグの削除'],
+    [
+      '選択肢',
+      { options: [A, 'リモートのブランチを削除する'] },
+      'userOnly',
+      'ブランチ・タグの削除',
+    ],
     ['材料', { evidence: 'APIキーを.envへ書く' }, 'userOnly', 'secrets'],
-    ['全角の英字', { question: 'ｆｏｒｃｅ ｐｕｓｈしてよいか' }, 'userOnly', 'リモートへの強制push'],
+    [
+      '全角の英字',
+      { question: 'ｆｏｒｃｅ ｐｕｓｈしてよいか' },
+      'userOnly',
+      'リモートへの強制push',
+    ],
   ] as const)('%sの危険語でReflexに選ばせない', (_label, patch, side, expected) => {
     const args = { ...safe, ...patch };
     expect(findQuestionDangers(args)[side]).toContain(expected);
     expect(needsUserDecision(args)).toBe(true);
   });
 
+  it.each(['LLMのトークン量を減らす', 'token数の上限を決める', 'トークン使用量を計測する'])(
+    'secretsと無関係なtokenの質問は人へ回さない: %s',
+    (question) => {
+      expect(findQuestionDangers({ ...safe, question }).userOnly).not.toContain('secrets');
+    },
+  );
+
+  it.each([
+    'access tokenを保存する',
+    'APIトークンを設定する',
+    '認証トークンを更新する',
+    'Bearer tokenを送る',
+  ])('secretsを指すtokenの質問は人へ回す: %s', (question) => {
+    expect(findQuestionDangers({ ...safe, question }).userOnly).toContain('secrets');
+  });
+
+  it.each(['git push -f origin main', 'git push -fu origin main', 'git push -nf origin main'])(
+    '短縮のforce pushは人へ回す: %s',
+    (evidence) => {
+      expect(findQuestionDangers({ ...safe, evidence }).userOnly).toContain('リモートへの強制push');
+    },
+  );
+
+  it.each([
+    'git push -u origin feature/fix',
+    'git push -o -f origin main',
+    'git push origin main --follow-tags',
+  ])('forceでないpushは強制pushとして扱わない: %s', (evidence) => {
+    expect(findQuestionDangers({ ...safe, evidence }).userOnly).not.toContain(
+      'リモートへの強制push',
+    );
+  });
+
   it('同じ危険が複数の欄に出ても1件にまとめる', () => {
     expect(
-      findQuestionDangers({ ...safe, question: 'force pushするか', evidence: 'git push --force origin main' }),
+      findQuestionDangers({
+        ...safe,
+        question: 'force pushするか',
+        evidence: 'git push --force origin main',
+      }),
     ).toEqual({ userOnly: ['リモートへの強制push'], caution: [] });
   });
 });

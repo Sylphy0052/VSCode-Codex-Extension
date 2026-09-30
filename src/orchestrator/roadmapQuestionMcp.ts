@@ -258,7 +258,7 @@ const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp;
   {
     description: 'secrets',
     pattern:
-      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password|トークン|\btoken\b|ssh[\s_-]*key|パスフレーズ|passphrase/u,
+      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password|(?:api|apiキー|auth|bearer|refresh|session|認証|認可|リフレッシュ|セッション)[\s_-]*(?:token|トークン)|(?:github|gitlab|npm|slack)[\s_-]*(?:token|トークン)|ssh[\s_-]*key|パスフレーズ|passphrase/u,
     userOnly: true,
   },
   { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u, userOnly: false },

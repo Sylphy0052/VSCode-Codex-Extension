@@ -353,23 +353,31 @@ function isFindDeleteOrExec(command: string): boolean {
   );
 }
 
+/** `git push` が次の引数を値として取るオプション。 */
+const PUSH_VALUE_OPTIONS: ReadonlySet<string> = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']);
+
+/** `git push` の値を取らない短縮フラグ（`-q -v -u -n -f -d -4 -6`）だけで組んだ、`f`を含む結合フラグ。 */
+const PUSH_SHORT_FORCE_FLAGS = /^-[46dnquv]*f[46dfnquv]*$/;
+
 /** `git push` に強制フラグ（`--force` / `--force-with-lease` / 単体の `-f`）が付いているか。 */
 function isForcePush(command: string): boolean {
   const tokens = tokenize(command);
   const gitIndexes = indexesOfCommandName(tokens, 'git').filter((i) => tokens[i + 1] === 'push');
-  return gitIndexes.some((i) =>
-    tokens
-      .slice(i + 2)
-      .some(
-        (token) =>
-          token === '--force' ||
-          token === '--force-with-lease' ||
-          token.startsWith('--force-with-lease=') ||
-          token === '--mirror' ||
-          /^-[a-zA-Z]*f[a-zA-Z]*$/.test(token) ||
-          /^\+[^\s:]/.test(token),
-      ),
-  );
+  return gitIndexes.some((i) => {
+    const args = tokens.slice(i + 2);
+    return args.some((token, index) => {
+      // 値を取るオプションの値（`-o -f` など）はフラグではない
+      if (index > 0 && PUSH_VALUE_OPTIONS.has(args[index - 1])) return false;
+      return (
+        token === '--force' ||
+        token === '--force-with-lease' ||
+        token.startsWith('--force-with-lease=') ||
+        token === '--mirror' ||
+        PUSH_SHORT_FORCE_FLAGS.test(token) ||
+        /^\+[^\s:]/.test(token)
+      );
+    });
+  });
 }
 
 /**
