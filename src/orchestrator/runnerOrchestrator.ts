@@ -926,7 +926,9 @@ export function buildOrchestratorControlPort(
       }
       const orchestrator = self.runs.get(runId)?.orchestrator;
       const verdict = await judgeAskUserAnswerer(self, runId, question, choices);
-      // 判定の間にオーケストレーターが立て直された（自動再開など）ら、古いセッションの問いは出さない
+      // 判定の間にオーケストレーターが立て直された（自動再開など）ら、古いセッションの問いは出さない。
+      // 人へ出すと、新しいセッションへ引き継いだ`pendingAskUser`と食い違う。問いが要るなら新しい
+      // セッションがrunの状態から判断してもう一度ask_userを呼ぶ（Issue #1726）
       if (orchestrator === undefined || self.runs.get(runId)?.orchestrator !== orchestrator) {
         return no('回答者判定の間にオーケストレーターのセッションが入れ替わりました。');
       }
