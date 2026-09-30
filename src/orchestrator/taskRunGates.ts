@@ -6,6 +6,7 @@ import {
   isTaskDone,
   resetStageForRetry,
   type OrchestratedTask,
+  type StageDecider,
   type StageGate,
   type StageGateChoice,
   type StageGateKind,
@@ -21,8 +22,9 @@ import { sanitizeInlineText } from './untrustedText';
  * 工程が失敗・要対応で止まったとき（`stageFailed`）と、レビューが直さずに残した指摘を持って
  * 終わったとき（`reviewFindings`）に関門を開き、次の手が決まるまでそのタスクの工程を始めない。
  * 関門は`judging`（Reflexの判定中）で開き、Reflexが決めれば決着、決められなければ
- * `awaitingUser`（ユーザーの判断待ち）にする。差し戻しと自動のやり直しには上限を設け、
- * 上限に達したら判定せずにユーザーへ回す。
+ * `awaitingUser`（ユーザーの判断待ち）にする。ただし回答者判定（Issue #1708）でオーケストレーターが
+ * 決めてよいとされたら`awaitingOrchestrator`にし、オーケストレーターが決着させるか、ユーザーへ回す。
+ * 差し戻しと自動のやり直しには上限を設け、上限に達したら判定せずにユーザーへ回す。
  */
 
 /** レビュー後に実装へ差し戻す回数の上限。超えたらユーザーへ回す。 */
@@ -54,7 +56,11 @@ export function isGateChoiceAllowed(kind: StageGateKind, choice: StageGateChoice
 }
 
 function isOpen(gate: StageGate): boolean {
-  return gate.status === 'judging' || gate.status === 'awaitingUser';
+  return (
+    gate.status === 'judging' ||
+    gate.status === 'awaitingOrchestrator' ||
+    gate.status === 'awaitingUser'
+  );
 }
 
 /** 条件に合う最後の関門（`findLast`はES2022のlibに無い）。 */
@@ -103,13 +109,14 @@ function withTaskUpdate(run: TaskRun, next: OrchestratedTask): TaskRun {
   return { ...run, tasks: { ...run.tasks, [next.taskId]: next } };
 }
 
-/** その工程をReflexの判定でやり直した回数。 */
+/** その工程をReflexまたはオーケストレーターの判断でやり直した回数（ユーザーの判断は数えない）。 */
 export function countAutoRetries(task: OrchestratedTask, stage: TaskStage): number {
   return (task.gates ?? []).filter(
     (gate) =>
       gate.kind === 'stageFailed' &&
       gate.stage === stage &&
-      gate.resolution?.by === 'reflex' &&
+      gate.resolution !== undefined &&
+      gate.resolution.by !== 'user' &&
       gate.resolution.choice === 'retry',
   ).length;
 }
@@ -213,8 +220,9 @@ function replaceGate(task: OrchestratedTask, next: StageGate): readonly StageGat
 }
 
 /**
- * Reflexの判定中の関門をユーザーの判断待ちにする。`reviewFindings`はタスクの注意も
- * ユーザー判断待ちにする（`stageFailed`は止めたときの要対応・失敗のまま）。
+ * Reflexの判定中・オーケストレーターの判断待ちの関門をユーザーの判断待ちにする。
+ * `reviewFindings`はタスクの注意もユーザー判断待ちにする（`stageFailed`は止めたときの
+ * 要対応・失敗のまま）。
  */
 export function escalateStageGate(
   run: TaskRun,
@@ -224,7 +232,7 @@ export function escalateStageGate(
   now: Date,
 ): TaskRun {
   return updateGate(run, taskId, gateId, (task, gate) => {
-    if (gate.status !== 'judging') {
+    if (gate.status !== 'judging' && gate.status !== 'awaitingOrchestrator') {
       return undefined;
     }
     const at = now.toISOString();
@@ -235,6 +243,25 @@ export function escalateStageGate(
       updatedAt: at,
     };
   });
+}
+
+/** Reflexの判定中の関門をオーケストレーターの判断待ちにする（Issue #1708）。 */
+export function markGateAwaitingOrchestrator(
+  run: TaskRun,
+  taskId: string,
+  gateId: string,
+  reflexSummary: string,
+  now: Date,
+): TaskRun {
+  return updateGate(run, taskId, gateId, (task, gate) =>
+    gate.status === 'judging'
+      ? {
+          ...task,
+          gates: replaceGate(task, { ...gate, status: 'awaitingOrchestrator', reflexSummary }),
+          updatedAt: now.toISOString(),
+        }
+      : undefined,
+  );
 }
 
 /** 「実装とPR作成」と「レビュー」を未着手へ戻す（差し戻し）。 */
@@ -252,8 +279,9 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
 }
 
 /**
- * 関門を決着させる。Reflexは判定中の関門に、ユーザーは判定中・判断待ちの関門に決着を付けられる
- * （ユーザーの判断を優先し、遅れて届いたReflexの判定は捨てる）。関門の種類に合わない決着と、
+ * 関門を決着させる。Reflexは判定中の関門に、オーケストレーターは自分の判断待ちの関門に、
+ * ユーザーはどの開いた関門にも決着を付けられる（ユーザーの判断を優先し、遅れて届いたReflexや
+ * オーケストレーターの判断は捨てる）。関門の種類に合わない決着と、
  * タスクが関門を開いたときの状態から動いているときはそのまま返す（呼び出し側は戻り値が元の
  * runかどうかで受理を判定する）。
  * - `sendBack`: 「実装とPR作成」から やり直す（同じworktree・ブランチ・PRを使う）
@@ -264,12 +292,15 @@ export function resolveStageGate(
   run: TaskRun,
   taskId: string,
   gateId: string,
-  resolution: { choice: StageGateChoice; by: 'reflex' | 'user'; reflexSummary?: string },
+  resolution: { choice: StageGateChoice; by: StageDecider; reflexSummary?: string },
   now: Date,
 ): TaskRun {
   const at = now.toISOString();
   return updateGate(run, taskId, gateId, (task, gate) => {
     if (resolution.by === 'reflex' && gate.status !== 'judging') {
+      return undefined;
+    }
+    if (resolution.by === 'orchestrator' && gate.status !== 'awaitingOrchestrator') {
       return undefined;
     }
     if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
@@ -308,7 +339,8 @@ export function resolveStageGate(
 }
 
 /**
- * 再読み込みでReflexの判定が途切れた関門をユーザーの判断待ちにする（判定し直さない）。
+ * 再読み込みでReflexの判定・オーケストレーターの判断が途切れた関門をユーザーの判断待ちにする
+ * （判定し直さない。再読み込み後のオーケストレーターは判断を頼まれたことを知らない）。
  */
 export function escalateJudgingGatesOnReload(run: TaskRun, now: Date): TaskRun {
   let next = run;
@@ -316,6 +348,11 @@ export function escalateJudgingGatesOnReload(run: TaskRun, now: Date): TaskRun {
     const gate = findOpenGate(task);
     if (gate?.status === 'judging') {
       next = escalateStageGate(next, task.taskId, gate.gateId, '再読み込みでReflexの判定が途切れた', now);
+    } else if (gate?.status === 'awaitingOrchestrator') {
+      const summary = [gate.reflexSummary, '再読み込みでオーケストレーターの判断が途切れた']
+        .filter((line) => line !== undefined)
+        .join('\n');
+      next = escalateStageGate(next, task.taskId, gate.gateId, summary, now);
     }
   }
   return next;

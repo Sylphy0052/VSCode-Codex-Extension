@@ -250,11 +250,12 @@ export function decideStageStart(
 
 /**
  * 人の対応が無くても進むタスクか。工程セッションが動いていて人を待っていない、または
- * 始められる工程があり、Orchestrator・Controllerが進める。関門をReflexが判定中のタスクも
- * 進むものとして扱う。
+ * 始められる工程があり、Orchestrator・Controllerが進める。関門をReflexが判定中、または
+ * オーケストレーターの判断待ち（Issue #1708）のタスクも進むものとして扱う。
  */
 function isProgressingWithoutUser(run: TaskRun, task: OrchestratedTask): boolean {
-  if (findOpenGate(task)?.status === 'judging') {
+  const gateStatus = findOpenGate(task)?.status;
+  if (gateStatus === 'judging' || gateStatus === 'awaitingOrchestrator') {
     return true;
   }
   if (hasActiveStageSession(task)) {

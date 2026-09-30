@@ -2,6 +2,7 @@ import type { RoadmapAskArgs } from './roadmapQuestionMcp';
 import {
   getTask,
   type OrchestratedTask,
+  type StageDecider,
   type StageQuestion,
   type StageReportRef,
   type TaskRun,
@@ -11,7 +12,8 @@ import {
  * オーケストレータモード（Issue #1505）の工程セッションの質問の状態遷移（純粋関数）。
  *
  * 質問は受け付けた時点で`judging`として残し、Reflexが答えれば`answeredByReflex`、人へ回すと
- * `awaitingUser`にする。カードの「ユーザー判断待ち」は`awaitingUser`の質問の有無から導き、
+ * `awaitingUser`にする。回答者判定（Issue #1708）でオーケストレーターが決めてよいとされた質問は
+ * `awaitingOrchestrator`にし、オーケストレーターが答えるか、ユーザーへ回す。カードの「ユーザー判断待ち」は`awaitingUser`の質問の有無から導き、
  * タスクの`attention`は変えない（実行中の工程を止めた扱いにしないため）。
  */
 
@@ -30,15 +32,20 @@ function withQuestions(
   };
 }
 
-function isOpen(question: StageQuestion): boolean {
-  return question.status === 'judging' || question.status === 'awaitingUser';
+/** 未回答（判定中・オーケストレーターの判断待ち・ユーザーの判断待ち）の質問か。 */
+export function isQuestionOpen(question: StageQuestion): boolean {
+  return (
+    question.status === 'judging' ||
+    question.status === 'awaitingOrchestrator' ||
+    question.status === 'awaitingUser'
+  );
 }
 
 /** 上限を超えた分を、答えの出た古い質問から捨てる。未回答の質問は捨てない。 */
 function trimQuestions(questions: readonly StageQuestion[]): StageQuestion[] {
   const result = [...questions];
   while (result.length > MAX_QUESTIONS_PER_TASK) {
-    const index = result.findIndex((q) => !isOpen(q));
+    const index = result.findIndex((q) => !isQuestionOpen(q));
     if (index < 0) {
       break;
     }
@@ -122,25 +129,75 @@ export function markQuestionAwaitingUser(
   );
 }
 
+/** Reflexの判定中の質問をオーケストレーターの判断待ちにする（Issue #1708）。 */
+export function markQuestionAwaitingOrchestrator(
+  run: TaskRun,
+  taskId: string,
+  questionId: string,
+  reflexSummary: string,
+  now: Date,
+): TaskRun {
+  return updateQuestion(run, taskId, questionId, now, (q) =>
+    q.status === 'judging' ? { ...q, status: 'awaitingOrchestrator', reflexSummary } : undefined,
+  );
+}
+
 /**
- * 質問に回答する。Reflexは判定中の質問に、ユーザーは判断待ちの質問にだけ答えられる。
+ * オーケストレーターの判断待ちの質問をユーザーの判断待ちへ回す（オーケストレーターが自分では
+ * 決められないとした）。`reason`はReflexの要約に添えて残す。
+ */
+export function escalateQuestionToUser(
+  run: TaskRun,
+  taskId: string,
+  questionId: string,
+  reason: string,
+  now: Date,
+): TaskRun {
+  return updateQuestion(run, taskId, questionId, now, (q) =>
+    q.status === 'awaitingOrchestrator'
+      ? {
+          ...q,
+          status: 'awaitingUser',
+          reflexSummary: [q.reflexSummary, `オーケストレーターがユーザーへ回した: ${reason}`]
+            .filter((line) => line !== undefined)
+            .join('\n'),
+        }
+      : undefined,
+  );
+}
+
+const ANSWERABLE_BY: Readonly<Record<StageDecider, readonly StageQuestion['status'][]>> = {
+  reflex: ['judging'],
+  orchestrator: ['awaitingOrchestrator'],
+  // ユーザーはオーケストレーターの判断待ちの質問にも先に答えられる（Kanbanから答えたとき）
+  user: ['awaitingUser', 'awaitingOrchestrator'],
+};
+
+const ANSWERED_STATUS: Readonly<Record<StageDecider, StageQuestion['status']>> = {
+  reflex: 'answeredByReflex',
+  orchestrator: 'answeredByOrchestrator',
+  user: 'answeredByUser',
+};
+
+/**
+ * 質問に回答する。Reflexは判定中の質問に、オーケストレーターは自分の判断待ちの質問に、
+ * ユーザーはユーザーまたはオーケストレーターの判断待ちの質問にだけ答えられる。
  * 回答済みの質問はそのまま返す（呼び出し側は戻り値が元のrunかどうかで受理を判定する）。
  */
 export function answerStageQuestion(
   run: TaskRun,
   taskId: string,
   questionId: string,
-  answer: { by: 'reflex' | 'user'; text: string; reflexSummary?: string },
+  answer: { by: StageDecider; text: string; reflexSummary?: string },
   now: Date,
 ): TaskRun {
   return updateQuestion(run, taskId, questionId, now, (q) => {
-    const expected = answer.by === 'reflex' ? 'judging' : 'awaitingUser';
-    if (q.status !== expected) {
+    if (!ANSWERABLE_BY[answer.by].includes(q.status)) {
       return undefined;
     }
     return {
       ...q,
-      status: answer.by === 'reflex' ? 'answeredByReflex' : 'answeredByUser',
+      status: ANSWERED_STATUS[answer.by],
       answer: answer.text,
       reflexSummary: answer.reflexSummary ?? q.reflexSummary,
       answeredAt: now.toISOString(),
@@ -163,7 +220,7 @@ export function cancelOpenQuestions(
   const questions = task?.questions;
   const current = task?.currentAttemptId;
   const keep = current !== undefined && current !== releasedAttemptId ? current : undefined;
-  const cancellable = (q: StageQuestion): boolean => isOpen(q) && q.attemptId !== keep;
+  const cancellable = (q: StageQuestion): boolean => isQuestionOpen(q) && q.attemptId !== keep;
   if (task === undefined || questions === undefined || !questions.some(cancellable)) {
     return run;
   }
@@ -179,4 +236,9 @@ export function cancelOpenQuestions(
 /** ユーザーの判断待ちの質問。 */
 export function listQuestionsAwaitingUser(task: OrchestratedTask): StageQuestion[] {
   return (task.questions ?? []).filter((q) => q.status === 'awaitingUser');
+}
+
+/** オーケストレーターの判断待ちの質問（Issue #1708）。 */
+export function listQuestionsAwaitingOrchestrator(task: OrchestratedTask): StageQuestion[] {
+  return (task.questions ?? []).filter((q) => q.status === 'awaitingOrchestrator');
 }

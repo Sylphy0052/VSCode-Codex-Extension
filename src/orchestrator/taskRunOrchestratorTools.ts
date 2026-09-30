@@ -10,7 +10,7 @@ import {
 } from './taskRunPlan';
 import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
 import { taskIssueNumber } from './taskRunRoadmap';
-import { listQuestionsAwaitingUser } from './taskRunQuestions';
+import { listQuestionsAwaitingOrchestrator, listQuestionsAwaitingUser } from './taskRunQuestions';
 import {
   assessTaskRun,
   countActiveStageSessions,
@@ -47,6 +47,7 @@ import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 const TASK_ID_SCHEMA = { type: 'string', description: 'タスクのID（T<数字>）' };
 const MAX_QUESTION_ID_LENGTH = 200;
 const MAX_REASON_LENGTH = 500;
+const MAX_ESCALATE_REASON_LENGTH = 300;
 const MAX_SETTING_LENGTH = 100;
 const STAGE_GATE_CHOICES: readonly StageGateChoice[] = ['sendBack', 'proceed', 'retry'];
 const TASK_RUN_ENGINES: readonly TaskRunEngine[] = ['codex', 'claude'];
@@ -170,7 +171,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'answer_question',
     description:
-      '工程セッションのユーザー判断待ちの質問へ回答する。ユーザーと会話で決めた内容だけを送る。送る前に回答の本文をユーザーへ確認する。',
+      '工程セッションの質問へ回答する。オーケストレーターの判断待ちの質問は、計画・Issue・コード・過去の回答から自分で決めて送る（確認は出ない）。ユーザーの判断待ちの質問は、ユーザーと会話で決めた内容だけを送る。送る前に回答の本文をユーザーへ確認する。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -185,7 +186,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'resolve_gate',
     description:
-      'Reflexが判定できずユーザーの判断待ちになった関門（レビュー後の差し戻し、工程の失敗）を決着させる。ユーザーと会話で決めた判断だけを送る。送る前にユーザーへ確認する。',
+      'Reflexが決着させられなかった関門（レビュー後の差し戻し、工程の失敗）を決着させる。オーケストレーターの判断待ちの関門は自分で決めて送る（確認は出ない）。ユーザーの判断待ちの関門は、ユーザーと会話で決めた判断だけを送る。送る前にユーザーへ確認する。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -199,6 +200,25 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
         },
       },
       required: ['taskId', 'gateId', 'choice'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'escalate_to_user',
+    description:
+      'オーケストレーターの判断待ちの質問か関門を、自分では決められないとしてユーザーの判断待ちへ回す。方針の選択、承認、取り消せない操作、担当領域をまたぐ変更、設計の前提を変える変更、受入基準を下げる判断、ユーザーしか知らない情報が要る場合に使う。questionIdかgateIdのどちらか1つを指定する。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: TASK_ID_SCHEMA,
+        questionId: { type: 'string', description: 'get_run_stateで得た質問のID' },
+        gateId: { type: 'string', description: 'get_run_stateで得た関門のID' },
+        reason: {
+          type: 'string',
+          description: `ユーザーへ回す理由（${String(MAX_ESCALATE_REASON_LENGTH)}文字以内）。Kanbanに表示する`,
+        },
+      },
+      required: ['taskId', 'reason'],
       additionalProperties: false,
     },
   },
@@ -320,6 +340,7 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
   'resume_stage',
   'answer_question',
   'resolve_gate',
+  'escalate_to_user',
   'record_lesson',
   'list_runs',
 ]);
@@ -342,6 +363,12 @@ export type TaskRunOrchestratorCall =
   | { tool: 'instruct_task'; taskId: string; instruction: string }
   | { tool: 'answer_question'; taskId: string; questionId: string; answer: string }
   | { tool: 'resolve_gate'; taskId: string; gateId: string; choice: StageGateChoice }
+  | {
+      tool: 'escalate_to_user';
+      taskId: string;
+      target: { questionId: string } | { gateId: string };
+      reason: string;
+    }
   | { tool: 'stop_stage'; taskId: string }
   | { tool: 'pause_stage'; taskId: string; reason: string }
   | { tool: 'resume_stage'; taskId: string }
@@ -524,6 +551,29 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       }
       return { ok: true, call: { tool: 'resolve_gate', taskId, gateId, choice } };
     }
+    case 'escalate_to_user': {
+      const { questionId, gateId, reason } = a;
+      const validId = (id: unknown): id is string =>
+        typeof id === 'string' && id !== '' && id.length <= MAX_QUESTION_ID_LENGTH;
+      const target = validId(questionId)
+        ? validId(gateId)
+          ? undefined
+          : { questionId }
+        : validId(gateId)
+          ? { gateId }
+          : undefined;
+      if (target === undefined) {
+        return { ok: false, message: 'questionIdかgateIdのどちらか1つを、get_run_stateで得たIDで指定する' };
+      }
+      const text = typeof reason === 'string' ? inline(reason, MAX_ESCALATE_REASON_LENGTH) : '';
+      if (text === '') {
+        return { ok: false, message: `reasonは1〜${String(MAX_ESCALATE_REASON_LENGTH)}文字で指定する` };
+      }
+      return {
+        ok: true,
+        call: { tool: 'escalate_to_user', taskId, target, reason: text },
+      };
+    }
     default:
       return { ok: false, message: `未知のツールです: ${name}` };
   }
@@ -636,13 +686,20 @@ export function formatTaskRunState(
         );
       }
     }
-    for (const q of listQuestionsAwaitingUser(task)) {
+    const questions = [
+      ...listQuestionsAwaitingOrchestrator(task).map((q) => ({
+        q,
+        label: 'オーケストレーター判断待ちの質問（自分で決めてanswer_question、決められなければescalate_to_user）',
+      })),
+      ...listQuestionsAwaitingUser(task).map((q) => ({ q, label: 'ユーザー判断待ちの質問' })),
+    ];
+    for (const { q, label } of questions) {
       const options =
         q.options.length > 0
           ? ` / 選択肢: ${q.options.map((o) => inline(o, STATE_TITLE_MAX_LENGTH)).join(' | ')}`
           : '';
       lines.push(
-        `  ユーザー判断待ちの質問 questionId=${inline(q.questionId, MAX_QUESTION_ID_LENGTH)}: ${inline(q.question)}${options}`,
+        `  ${label} questionId=${inline(q.questionId, MAX_QUESTION_ID_LENGTH)}: ${inline(q.question)}${options}`,
         `    理由: ${inline(q.reason)}${q.recommended === undefined ? '' : ` / 推奨: ${inline(q.recommended)}`}`,
       );
     }
@@ -651,7 +708,12 @@ export function formatTaskRunState(
     }
     const gate = findOpenGate(task);
     if (gate !== undefined) {
-      const status = gate.status === 'judging' ? 'Reflexが判定中' : 'ユーザーの判断待ち';
+      const status =
+        gate.status === 'judging'
+          ? 'Reflexが判定中'
+          : gate.status === 'awaitingOrchestrator'
+            ? 'オーケストレーターの判断待ち（自分で決めてresolve_gate、決められなければescalate_to_user）'
+            : 'ユーザーの判断待ち';
       lines.push(
         `  関門 gateId=${inline(gate.gateId, MAX_QUESTION_ID_LENGTH)} 種類=${gate.kind} 工程=${gate.stage} 状態=${status}`,
         `    内容: ${inline(gate.detail)}`,

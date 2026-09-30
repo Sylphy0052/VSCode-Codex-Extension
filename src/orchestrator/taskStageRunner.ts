@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ChatState } from '../appserver/chatState';
+import type { AnswererQuestion, AnswererVerdict } from '../reflex/answererJudge';
 import type { LoopPlan, LoopStopReason } from '../loop/loopController';
 import {
   needsUserDecision,
@@ -45,6 +46,7 @@ import {
   recordTaskWorktree,
   requestStagePause,
   requestStageResume,
+  type StageDecider,
   type StageDecision,
   type StageOutput,
   type StageQuestion,
@@ -57,6 +59,7 @@ import {
 import {
   buildGateQuestion,
   escalateStageGate,
+  markGateAwaitingOrchestrator,
   findStageGate,
   GATE_CHOICE_LABELS,
   gateChoiceFromAnswer,
@@ -72,6 +75,8 @@ import {
   answerStageQuestion,
   cancelOpenQuestions,
   findStageQuestion,
+  isQuestionOpen,
+  markQuestionAwaitingOrchestrator,
   markQuestionAwaitingUser,
 } from './taskRunQuestions';
 import {
@@ -177,6 +182,12 @@ export interface TaskStageRunnerDeps {
    * 無ければすべての関門をユーザーの判断待ちにする。ユーザーの判断はControllerが受ける。
    */
   judgeGate?: (engine: TaskRunEngine, question: GateJudgeQuestion) => Promise<RoadmapQuestionVerdict>;
+  /**
+   * ユーザーへ回そうとした質問・関門を、オーケストレーターが自分で決めてよいか判定する
+   * （回答者判定。Issue #1708）。無ければ（Reflexか回答者判定が無効なら）ユーザーへ回す。
+   * 判定の失敗・時間切れは`{kind: 'user'}`を返す。
+   */
+  judgeAnswerer?: (engine: TaskRunEngine, question: AnswererQuestion) => Promise<AnswererVerdict>;
   /** 同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。無ければ掛けない。 */
   maxParallelPerFolder?: () => number;
   /**
@@ -266,6 +277,11 @@ function errorMessage(e: unknown): string {
 
 function appendPrefix(first: string | undefined, second: string): string {
   return first === undefined ? second : `${first}\n\n${second}`;
+}
+
+/** Reflexの判定の要約を行で繋ぐ。 */
+function joinSummaries(first: string | undefined, second: string): string {
+  return first === undefined ? second : `${first}\n${second}`;
 }
 
 /**
@@ -417,7 +433,8 @@ export class TaskStageRunner {
 
   /**
    * 関門をReflexで判定する。Reflexが無効・判定の失敗・「ユーザーに判断を上げる」、または
-   * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。
+   * 判定を状態へ反映できなかったときはユーザーの判断待ちにする。ただし「ユーザーに判断を上げる」と
+   * 判定の失敗のときは回答者判定にかけ、オーケストレーターが決めてよければその判断待ちにする。
    */
   private async judgeGate(runId: string, taskId: string, gateId: string): Promise<void> {
     const run = this.deps.store.find(runId);
@@ -458,8 +475,52 @@ export class TaskStageRunner {
         return;
       }
       summary = `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
+    } else {
+      const question = buildGateQuestion(task, gate);
+      const answerer = await this.judgeAnswerer(run.engine, {
+        source: 'stageSession',
+        question: question.question,
+        reason: question.reason,
+        options: question.options,
+        recommended: question.recommended,
+        evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
+          .filter((line) => line !== undefined)
+          .join('\n'),
+      });
+      if (answerer.kind === 'orchestrator') {
+        const marked = await this.mutate(runId, (r) =>
+          markGateAwaitingOrchestrator(
+            r,
+            taskId,
+            gateId,
+            joinSummaries(summary, `回答者判定: ${answerer.summary}`),
+            this.now(),
+          ),
+        );
+        if (marked !== undefined && findStageGate(marked, taskId, gateId)?.status !== 'judging') {
+          return;
+        }
+      } else if (answerer.summary !== undefined) {
+        summary = joinSummaries(summary, `回答者判定: ${answerer.summary}`);
+      }
     }
     await this.mutate(runId, (r) => escalateStageGate(r, taskId, gateId, summary, this.now()));
+  }
+
+  /** 回答者判定（Issue #1708）。判定が無い・失敗したときはユーザーへ回す。 */
+  private async judgeAnswerer(
+    engine: TaskRunEngine,
+    question: AnswererQuestion,
+  ): Promise<AnswererVerdict> {
+    const judge = this.deps.judgeAnswerer;
+    if (judge === undefined) {
+      return { kind: 'user', summary: undefined };
+    }
+    try {
+      return await judge(engine, question);
+    } catch (e) {
+      return { kind: 'user', summary: `回答者判定に失敗: ${errorMessage(e)}` };
+    }
   }
 
   /**
@@ -1350,7 +1411,7 @@ export class TaskStageRunner {
       (q) =>
         q.attemptId === entry.ref.attemptId &&
         q.blocking &&
-        (q.status === 'judging' || q.status === 'awaitingUser'),
+        isQuestionOpen(q),
     );
   }
 
@@ -1393,7 +1454,7 @@ export class TaskStageRunner {
         text: 'この工程の作業は終わった、または切り替わったため質問は取り消された。質問せずにターンを終えること。',
       };
     }
-    void this.routeQuestion(entry, accepted, needsUserDecision(args)).catch((e: unknown) => {
+    void this.routeQuestion(entry, accepted, args).catch((e: unknown) => {
       this.warn(
         entry.runId,
         entry.ref.taskId,
@@ -1409,20 +1470,21 @@ export class TaskStageRunner {
   }
 
   /**
-   * 質問を振り分ける。escalationが付いた質問・選択肢の無い質問・Reflexが無効なときは
-   * ユーザーの判断待ちにする。それ以外はReflexで判定し、答えられなければユーザーへ回す。
+   * 質問を振り分ける。escalationが付いた質問はユーザーの判断待ちにする。選択肢のある質問は
+   * Reflexで判定して答え、答えられなければ（選択肢の無い質問・Reflexが無効なときも）回答者判定
+   * （Issue #1708）にかけ、オーケストレーターが決めてよければその判断待ち、それ以外はユーザーへ回す。
    */
   private async routeQuestion(
     entry: LiveStageSession,
     question: StageQuestion,
-    forceUser: boolean,
+    args: RoadmapAskArgs,
   ): Promise<void> {
     const { runId } = entry;
     const taskId = entry.ref.taskId;
     const run = this.deps.store.find(runId);
     const judge = this.deps.judgeQuestion;
     let verdict: RoadmapQuestionVerdict;
-    if (forceUser || judge === undefined || run === undefined) {
+    if (needsUserDecision(args) || judge === undefined || run === undefined) {
       verdict = { kind: 'human', summary: undefined };
     } else {
       try {
@@ -1432,8 +1494,41 @@ export class TaskStageRunner {
       }
     }
     if (verdict.kind === 'human') {
+      let summary = verdict.summary;
+      // escalationの付いた質問はユーザーが決めると工程セッションが明示している
+      if (args.escalation.length === 0 && run !== undefined) {
+        const answerer = await this.judgeAnswerer(run.engine, {
+          source: 'stageSession',
+          question: question.question,
+          reason: question.reason,
+          options: question.options,
+          recommended: question.recommended,
+          evidence: [question.evidence, summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`]
+            .filter((line) => line !== undefined)
+            .join('\n'),
+        });
+        if (answerer.kind === 'orchestrator') {
+          const marked = await this.mutate(runId, (r) =>
+            markQuestionAwaitingOrchestrator(
+              r,
+              taskId,
+              question.questionId,
+              joinSummaries(summary, `回答者判定: ${answerer.summary}`),
+              this.now(),
+            ),
+          );
+          if (
+            marked !== undefined &&
+            findStageQuestion(marked, taskId, question.questionId)?.status !== 'judging'
+          ) {
+            return;
+          }
+        } else if (answerer.summary !== undefined) {
+          summary = joinSummaries(summary, `回答者判定: ${answerer.summary}`);
+        }
+      }
       await this.mutate(runId, (r) =>
-        markQuestionAwaitingUser(r, taskId, question.questionId, verdict.summary, this.now()),
+        markQuestionAwaitingUser(r, taskId, question.questionId, summary, this.now()),
       );
       return;
     }
@@ -1452,7 +1547,7 @@ export class TaskStageRunner {
     runId: string,
     taskId: string,
     questionId: string,
-    answer: { by: 'reflex' | 'user'; text: string; reflexSummary?: string },
+    answer: { by: StageDecider; text: string; reflexSummary?: string },
   ): Promise<StageQuestion | undefined> {
     let applied = false;
     const next = await this.mutate(runId, (r) => {
@@ -1483,7 +1578,12 @@ export class TaskStageRunner {
       ) {
         return Promise.resolve();
       }
-      const by = question.status === 'answeredByReflex' ? 'Reflexの自動回答' : 'ユーザーの回答';
+      const by =
+        question.status === 'answeredByReflex'
+          ? 'Reflexの自動回答'
+          : question.status === 'answeredByOrchestrator'
+            ? 'オーケストレーターの回答'
+            : 'ユーザーの回答';
       const text = [
         `ask_orchestratorで尋ねた質問（ID: ${question.questionId}）への${by}:`,
         formatUntrusted(question.answer, {
@@ -1508,16 +1608,19 @@ export class TaskStageRunner {
   }
 
   /**
-   * ユーザーの回答（Orchestratorの`answer_question`経由）。ユーザーの判断待ちの質問にだけ
-   * 答えられる。回答を記録できたら`true`（工程セッションが生きていれば次の指示へ入れる）。
+   * ユーザーまたはオーケストレーターの回答（Orchestratorの`answer_question`経由）。
+   * オーケストレーターは自分の判断待ちの質問に、ユーザーはユーザーかオーケストレーターの
+   * 判断待ちの質問に答えられる。回答を記録できたら`true`（工程セッションが生きていれば次の
+   * 指示へ入れる）。
    */
   async answerQuestion(
     runId: string,
     taskId: string,
     questionId: string,
     answer: string,
+    by: Exclude<StageDecider, 'reflex'> = 'user',
   ): Promise<boolean> {
-    const answered = await this.applyAnswer(runId, taskId, questionId, { by: 'user', text: answer });
+    const answered = await this.applyAnswer(runId, taskId, questionId, { by, text: answer });
     if (answered === undefined) {
       return false;
     }

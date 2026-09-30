@@ -28,8 +28,9 @@ import {
   type TaskRunLease,
   type TaskRunLeasePort,
 } from './taskRunLease';
-import { findStageQuestion } from './taskRunQuestions';
+import { escalateQuestionToUser, findStageQuestion } from './taskRunQuestions';
 import {
+  escalateStageGate,
   findOpenGate,
   findStageGate,
   GATE_CHOICE_LABELS,
@@ -1239,19 +1240,30 @@ export class TaskRunController {
     return { ok: true, message: `並列上限を${String(maxParallel)}にした` };
   }
 
-  /** ユーザー判断待ちの質問か。回答の確認（モーダル）の前に確かめる。 */
-  findQuestionAwaitingUser(
+  /**
+   * ユーザーかオーケストレーターの判断待ちの質問か。Orchestratorの`answer_question`はこれで
+   * 確認（モーダル）の要否を決める。`awaitingOrchestrator`ならオーケストレーター自身が答えてよい
+   * （Issue #1708）。
+   */
+  findQuestionAwaitingAnswer(
     runId: string,
     taskId: string,
     questionId: string,
-  ): { title: string; question: string } | undefined {
+  ): { title: string; question: string; awaitingOrchestrator: boolean } | undefined {
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
     const question = run === undefined ? undefined : findStageQuestion(run, taskId, questionId);
-    if (task === undefined || question?.status !== 'awaitingUser') {
+    if (
+      task === undefined ||
+      (question?.status !== 'awaitingUser' && question?.status !== 'awaitingOrchestrator')
+    ) {
       return undefined;
     }
-    return { title: task.title, question: question.question };
+    return {
+      title: task.title,
+      question: question.question,
+      awaitingOrchestrator: question.status === 'awaitingOrchestrator',
+    };
   }
 
   async answerQuestion(
@@ -1259,12 +1271,13 @@ export class TaskRunController {
     taskId: string,
     questionId: string,
     answer: string,
+    by: 'orchestrator' | 'user' = 'user',
   ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
       return leased;
     }
-    const ok = await this.deps.runner.answerQuestion(runId, taskId, questionId, answer);
+    const ok = await this.deps.runner.answerQuestion(runId, taskId, questionId, answer, by);
     return ok
       ? { ok: true, message: `${taskId}の質問に回答した` }
       : { ok: false, message: '回答を受け付けられなかった（既に回答済み、または取り消された可能性がある）' };
@@ -1275,25 +1288,31 @@ export class TaskRunController {
     runId: string,
     taskId: string,
     gateId: string,
-  ): { title: string; detail: string } | undefined {
+  ): { title: string; detail: string; awaitingOrchestrator: boolean } | undefined {
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
     const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
     if (task === undefined || gate === undefined || gate.status === 'resolved') {
       return undefined;
     }
-    return { title: task.title, detail: gate.detail };
+    return {
+      title: task.title,
+      detail: gate.detail,
+      awaitingOrchestrator: gate.status === 'awaitingOrchestrator',
+    };
   }
 
   /**
-   * 関門をユーザーの判断で決着させる（KanbanとOrchestratorの`resolve_gate`から）。Reflexが
-   * 判定中でもユーザーの判断を優先する。決着後はスケジューラを回す。
+   * 関門を決着させる（KanbanとOrchestratorの`resolve_gate`から）。ユーザーの判断はReflexが
+   * 判定中でも優先する。オーケストレーター（`by: 'orchestrator'`）はオーケストレーターの
+   * 判断待ちの関門だけを決着させられる（Issue #1708）。決着後はスケジューラを回す。
    */
   async resolveGate(
     runId: string,
     taskId: string,
     gateId: string,
     choice: StageGateChoice,
+    by: 'orchestrator' | 'user' = 'user',
   ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
@@ -1318,7 +1337,11 @@ export class TaskRunController {
         rejection = `この関門では「${GATE_CHOICE_LABELS[choice]}」を選べない`;
         return r;
       }
-      const resolved = resolveStageGate(r, taskId, gateId, { choice, by: 'user' }, this.now());
+      if (by === 'orchestrator' && gate.status !== 'awaitingOrchestrator') {
+        rejection = 'オーケストレーターの判断待ちの関門ではない（ユーザーの判断が要る）';
+        return r;
+      }
+      const resolved = resolveStageGate(r, taskId, gateId, { choice, by }, this.now());
       if (resolved === r) {
         rejection = 'タスクの状態が関門を開いたときから変わっている';
       }
@@ -1332,6 +1355,49 @@ export class TaskRunController {
     }
     this.pumpLater(runId);
     return { ok: true, message: `${taskId}の関門を「${GATE_CHOICE_LABELS[choice]}」で決着させた` };
+  }
+
+  /**
+   * オーケストレーターの判断待ちの質問・関門をユーザーの判断待ちへ回す（Orchestratorの
+   * `escalate_to_user`から。Issue #1708）。
+   */
+  async escalateToUser(
+    runId: string,
+    taskId: string,
+    target: { questionId: string } | { gateId: string },
+    reason: string,
+  ): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
+    const next = await this.updateRun(runId, (r) =>
+      'questionId' in target
+        ? escalateQuestionToUser(r, taskId, target.questionId, reason, this.now())
+        : findStageGate(r, taskId, target.gateId)?.status === 'awaitingOrchestrator'
+          ? escalateStageGate(
+              r,
+              taskId,
+              target.gateId,
+              [
+                findStageGate(r, taskId, target.gateId)?.reflexSummary,
+                `オーケストレーターがユーザーへ回した: ${reason}`,
+              ]
+                .filter((line) => line !== undefined)
+                .join('\n'),
+              this.now(),
+            )
+          : r,
+    );
+    const status =
+      next === undefined
+        ? undefined
+        : 'questionId' in target
+          ? findStageQuestion(next, taskId, target.questionId)?.status
+          : findStageGate(next, taskId, target.gateId)?.status;
+    return status === 'awaitingUser'
+      ? { ok: true, message: `${taskId}の判断をユーザーへ回した` }
+      : { ok: false, message: 'オーケストレーターの判断待ちではない（既に決着済み、またはユーザーの判断待ち）' };
   }
 
   /** runを忘れる（runの削除・拡張機能の終了時）。 */

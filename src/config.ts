@@ -93,6 +93,10 @@ import {
 } from './loop/loopDoneCheck';
 import { DEFAULT_SKILL_SELECT_THRESHOLD, type SkillSelectSettings } from './reflex/skillSelect';
 import {
+  DEFAULT_ANSWERER_JUDGE_THRESHOLD,
+  type AnswererJudgeSettings,
+} from './reflex/answererJudge';
+import {
   DEFAULT_AUTO_REPLY_REFLEX_ANSWER_THRESHOLD,
   DEFAULT_AUTO_REPLY_REFLEX_COMPLETION_THRESHOLD,
   DEFAULT_AUTO_REPLY_REFLEX_DANGER_THRESHOLD,
@@ -1043,6 +1047,23 @@ export function readSkillSelectConfig(
       1,
       Math.max(0, num(c, 'chat.skillSelect.threshold', DEFAULT_SKILL_SELECT_THRESHOLD)),
     ),
+  };
+}
+
+/**
+ * 回答者判定（Issue #1708）の設定を読む。閾値が0〜1の範囲外・数値でないときは既定値に戻す
+ * （範囲の端へ寄せると、0でオーケストレーターが全部を決める設定になりうるため）。
+ * `enabled`はReflexモードの親スイッチ（`readReflexEnabled`）がOFFなら常にfalse。
+ * `reflexEnabled`はタブ単位で上書きした親スイッチの値。省略時はグローバル設定。
+ */
+export function readAnswererJudgeConfig(
+  reflexEnabled: boolean = readReflexEnabled(),
+): AnswererJudgeSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  const threshold = num(c, 'chat.answererJudge.threshold', DEFAULT_ANSWERER_JUDGE_THRESHOLD);
+  return {
+    enabled: reflexEnabled && c.get<boolean>('chat.answererJudge.enabled') !== false,
+    threshold: threshold >= 0 && threshold <= 1 ? threshold : DEFAULT_ANSWERER_JUDGE_THRESHOLD,
   };
 }
 

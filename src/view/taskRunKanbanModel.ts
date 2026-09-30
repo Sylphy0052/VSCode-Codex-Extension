@@ -4,7 +4,7 @@ import {
   GATE_CHOICE_LABELS,
   MAX_REVIEW_ROUNDS,
 } from '../orchestrator/taskRunGates';
-import { listQuestionsAwaitingUser } from '../orchestrator/taskRunQuestions';
+import { listQuestionsAwaitingOrchestrator, listQuestionsAwaitingUser } from '../orchestrator/taskRunQuestions';
 import {
   assessTaskRun,
   countActiveStageSessions,
@@ -22,6 +22,7 @@ import {
   taskRunLabel,
   type OrchestratedTask,
   type OrchestratorAutoHandoffRecord,
+  type StageDecider,
   type StageGate,
   type StageGateChoice,
   type StageQuestion,
@@ -66,9 +67,14 @@ export interface TaskRunKanbanBadge {
   tone: '' | 'warn' | 'ok';
 }
 
-/** ユーザー判断待ちの質問。本文は外部由来のため、画面側では`textContent`で出す。 */
+/**
+ * ユーザー判断待ち、またはオーケストレーターの判断待ちの質問。後者もユーザーが先に答えられる。
+ * 本文は外部由来のため、画面側では`textContent`で出す。
+ */
 export interface TaskRunKanbanQuestion {
   questionId: string;
+  /** オーケストレーターの判断待ち（Issue #1708）。 */
+  awaitingOrchestrator: boolean;
   question: string;
   reason: string;
   evidence: string | undefined;
@@ -84,6 +90,8 @@ export interface TaskRunKanbanGate {
   kind: StageGate['kind'];
   stageLabel: string;
   judging: boolean;
+  /** オーケストレーターの判断待ち（Issue #1708）。ユーザーも決着させられる。 */
+  awaitingOrchestrator: boolean;
   detail: string;
   reflexSummary: string | undefined;
   /** 画面で選べる決着。失敗の関門は「やり直す」ボタン（`canRetry`）で決着させるため空。 */
@@ -249,7 +257,9 @@ function badgesFor(run: TaskRun, task: OrchestratedTask, unmet: readonly string[
     const gateBadge: TaskRunKanbanBadge =
       gate.status === 'judging'
         ? { label: 'Reflexが判定中', tone: '' }
-        : { label: '関門の判断待ち', tone: 'warn' };
+        : gate.status === 'awaitingOrchestrator'
+          ? { label: 'オーケストレーターが判断中', tone: '' }
+          : { label: '関門の判断待ち', tone: 'warn' };
     return attention === undefined || attention.label === 'ユーザー判断待ち'
       ? [gateBadge]
       : [attention, gateBadge];
@@ -267,6 +277,7 @@ function toKanbanGate(gate: StageGate): TaskRunKanbanGate {
     kind: gate.kind,
     stageLabel: STAGE_LABELS[gate.stage],
     judging: gate.status === 'judging',
+    awaitingOrchestrator: gate.status === 'awaitingOrchestrator',
     detail: gate.detail.slice(0, GATE_DETAIL_MAX_LENGTH),
     reflexSummary:
       gate.reflexSummary === undefined ? undefined : sanitizeInlineText(gate.reflexSummary, SUMMARY_MAX_LENGTH),
@@ -274,18 +285,24 @@ function toKanbanGate(gate: StageGate): TaskRunKanbanGate {
   };
 }
 
+const DECIDER_LABELS: Record<StageDecider, string> = {
+  reflex: 'Reflex',
+  orchestrator: 'オーケストレーター',
+  user: 'ユーザー',
+};
+
 function lastGateDecision(task: OrchestratedTask): string | undefined {
   const gate = findLastResolvedGate(task);
   if (gate?.resolution === undefined) {
     return undefined;
   }
-  const by = gate.resolution.by === 'reflex' ? 'Reflex' : 'ユーザー';
-  return `${STAGE_LABELS[gate.stage]}の関門: ${by}が「${GATE_CHOICE_LABELS[gate.resolution.choice]}」を選んだ`;
+  return `${STAGE_LABELS[gate.stage]}の関門: ${DECIDER_LABELS[gate.resolution.by]}が「${GATE_CHOICE_LABELS[gate.resolution.choice]}」を選んだ`;
 }
 
 function toKanbanQuestion(q: StageQuestion): TaskRunKanbanQuestion {
   return {
     questionId: q.questionId,
+    awaitingOrchestrator: q.status === 'awaitingOrchestrator',
     question: q.question,
     reason: q.reason,
     evidence: q.evidence,
@@ -327,7 +344,9 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
       isTaskRunActive(run) &&
       gate?.kind !== 'reviewFindings',
     canReveal: record !== undefined && record.attempts.length > 0,
-    questions: listQuestionsAwaitingUser(task).map(toKanbanQuestion),
+    questions: [...listQuestionsAwaitingOrchestrator(task), ...listQuestionsAwaitingUser(task)].map(
+      toKanbanQuestion,
+    ),
     gate: gate === undefined || !isTaskRunActive(run) ? undefined : toKanbanGate(gate),
     lastGateDecision: lastGateDecision(task),
     reviewRounds:
