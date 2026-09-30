@@ -3205,6 +3205,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       if (type === 'toggleReflex') {
+        // 工程セッションのタブはタブ単位の上書きだけを反転する（Issue #1714）
+        if (this.toggleReflexOverride(entry)) {
+          return;
+        }
         await setReflexEnabled(!readReflexEnabled());
         // 共通設定なので、全会話の表示は`extension.ts`の`onDidChangeConfiguration`で揃える。
         // 書き込みで実効値が変わらなかった場合（ワークスペース側の上書き）は設定変更が発火しないので、ここでも揃える
