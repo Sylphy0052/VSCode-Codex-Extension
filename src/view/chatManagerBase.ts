@@ -863,6 +863,21 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     return entry.reflexOverride ?? readReflexEnabled();
   }
 
+  /**
+   * タブ単位の上書きを持つタブ（工程セッション）のReflexボタンは、そのタブの上書きだけを
+   * 反転し、表示も描き直す（Issue #1714）。グローバル設定を反転しても上書きが優先され、
+   * ボタンの表示とタブの実際の状態が食い違うため。上書きが無いタブでは何もせず`false`を
+   * 返すので、呼び出し側でグローバル設定を反転する。
+   */
+  protected toggleReflexOverride(entry: TPanel): boolean {
+    if (entry.reflexOverride === undefined) {
+      return false;
+    }
+    entry.reflexOverride = !entry.reflexOverride;
+    void entry.panel?.webview.postMessage({ type: 'reflex', enabled: entry.reflexOverride });
+    return true;
+  }
+
   /** 入力欄を閉じたタブへの操作なら案内を出して`true`を返す。コマンド経由の入口で使う。 */
   protected rejectIfInputLocked(entry: TPanel): boolean {
     if (!entry.inputLock) {
