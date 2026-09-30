@@ -555,7 +555,7 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .btn { appearance: none; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
 .btn.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
 .btn:focus-visible, .controls select:focus-visible, .controls input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.status { border: 1px solid var(--vscode-panel-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; } .status.warn { border-color: var(--vscode-charts-yellow); }
+.status { border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 4px 10px; font-size: 12px; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; } .status.warn { border-color: var(--vscode-charts-yellow); }
 .plan { margin-bottom: 16px; } .plan:empty { display: none; }
 .plan-box { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; border: 1px solid var(--vscode-charts-yellow); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
 /* 7列を等分すると狭いパネルで1行数文字まで潰れるため、列に下限幅を持たせて横スクロールにする。空の列は細くする。
