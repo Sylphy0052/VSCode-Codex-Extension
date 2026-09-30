@@ -1839,6 +1839,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       entry.trace.info('前回と同じ材料のためReflexの判定を起動しない');
       return;
     }
+    // 判定の失敗時も鍵は戻さない（分類器の経路と同じ）。戻すとターン内のstate更新のたびに
+    // 同じ材料で判定し直し、CLIが起動できない環境ではReflexを連打する
     entry.lastSafeBoundaryKey = key;
     const material = { userMessage, assistantMessage };
     entry.trace.info(describeHandoffBoundaryMaterial(material));
@@ -1898,8 +1900,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const reading = applyHandoffReflexThresholds(verdict, ctx.reflex);
     const reasons = handoffReflexReasons(verdict);
     // 判定を待っている間に状況が変わっていることがある（新しい指示・引き継ぎ済み）
+    // 判定を待つ間に短いターンが終わっていれば `busy` は戻っているため、材料の鍵で見る
     const latest = entry.session.getState();
-    if (entry.disposed || entry.autoHandoffStarted || latest.busy || !latest.autoHandoff) {
+    if (
+      entry.disposed ||
+      entry.autoHandoffStarted ||
+      latest.busy ||
+      !latest.autoHandoff ||
+      latest.approvals.length > 0 ||
+      latest.prompts.length > 0 ||
+      latest.queued.length > 0 ||
+      safeBoundaryProbeKey(recentUserMessages(latest), recentAssistantMessages(latest)) !== key
+    ) {
       entry.trace.info('Reflexの判定を待つ間に状況が変わったため発火しない');
       return;
     }
