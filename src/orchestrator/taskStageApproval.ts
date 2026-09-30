@@ -79,7 +79,7 @@ export interface MergeCommandTarget {
   pullRequestNumber: number | undefined;
 }
 
-const GH_PR_MERGE_FLAGS = new Set(['--merge', '-m', '--rebase', '-r', '--delete-branch', '-d', '--auto']);
+const GH_PR_MERGE_FLAGS = new Set(['--merge', '-m', '--rebase', '-r', '--delete-branch', '-d']);
 const GLAB_MR_MERGE_FLAGS = new Set([
   '--rebase',
   '-r',
@@ -87,10 +87,12 @@ const GLAB_MR_MERGE_FLAGS = new Set([
   '-d',
   '--yes',
   '-y',
-  '--when-pipeline-succeeds',
-  '--auto-merge',
 ]);
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop', 'HEAD']);
+/** 許可リストの語に使える文字。展開・引用・コメントの記号を含まない。 */
+const PLAIN_TOKEN_PATTERN = /^[A-Za-z0-9._/:-]+$/;
+/** コマンドが`bash -lc '<コマンド>'`の形で届いても判定できるよう、包みを1段だけ外す。 */
+const SHELL_WRAPPER_PATTERN = /^(?:\/(?:usr\/)?bin\/)?(?:ba)?sh\s+-l?c\s+(['"])([^'"\\]*)\1$/;
 
 /** mergeの対象の指定（無指定・タスクのPR番号・タスクの元ブランチ）がタスクのものか。 */
 function isOwnMergeTarget(
@@ -128,17 +130,24 @@ function isOwnRemoteBranchDelete(args: readonly string[], branch: string): boole
 /**
  * PRのmergeと元ブランチのリモート削除のうち、回答者判定にかけてよいもの（Issue #1771）。
  * 判定はLLMなので、コマンドの形を許可リストで決め打ちし、外れるものは人へ回す。
- * - シェルのメタ文字（連結・置換・リダイレクト・改行）を含まない1コマンド
- * - `gh pr merge` / `glab mr merge`は、許可したフラグ（`--admin`・`--squash`・`-R`は含まない）と、
+ * - シェルのメタ文字（連結・置換・リダイレクト・改行）を含まない1コマンド。`bash -lc '...'`の
+ *   包みは1段だけ外して中身を見る。語は英数字と`._/:-`だけ
+ * - `gh pr merge` / `glab mr merge`は、許可したフラグ（`--admin`・`--squash`・`-R`・自動mergeの
+ *   予約は含まない）と、
  *   無指定かタスクのPR番号・元ブランチの指定だけ
  * - `git push origin --delete <b>` / `git push origin :<b>`は、`<b>`がタスクの元ブランチのとき
  *   だけ（タグと保護ブランチは対象外）
  */
 export function isJudgeableMergeCommand(command: string, target: MergeCommandTarget): boolean {
-  if (hasShellMetacharacters(command)) {
+  const trimmed = command.trim();
+  const inner = SHELL_WRAPPER_PATTERN.exec(trimmed)?.[2] ?? trimmed;
+  if (hasShellMetacharacters(inner)) {
     return false;
   }
-  const tokens = command.trim().split(/\s+/);
+  const tokens = inner.trim().split(/\s+/);
+  if (!tokens.every((t) => PLAIN_TOKEN_PATTERN.test(t))) {
+    return false;
+  }
   const [c0, c1, c2] = tokens;
   if (c0 === 'gh' && c1 === 'pr' && c2 === 'merge') {
     return isOwnMergeTarget(tokens.slice(3), GH_PR_MERGE_FLAGS, target);
