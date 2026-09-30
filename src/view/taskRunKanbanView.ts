@@ -70,34 +70,58 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       this.selectedRunId = runId;
     }
     if (this.panel === undefined) {
-      this.panel = vscode.window.createWebviewPanel(
-        TaskRunKanbanViewManager.viewType,
-        'オーケストレータモード',
-        // 左の列にKanban、右の列にOrchestratorのチャットタブを並べる
-        vscode.ViewColumn.One,
-        { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true },
+      this.attach(
+        vscode.window.createWebviewPanel(
+          TaskRunKanbanViewManager.viewType,
+          'オーケストレータモード',
+          // 左の列にKanban、右の列にOrchestratorのチャットタブを並べる
+          vscode.ViewColumn.One,
+          { enableScripts: true, retainContextWhenHidden: true, enableFindWidget: true },
+        ),
       );
-      // 1列で見ているとき、同じ列へ背面で開く子タブがKanbanを隠さないよう表示し直させる（Issue #1774）
-      trackChatPanel(this.panel);
-      this.panel.onDidDispose(() => {
-        this.clearTimer();
-        this.clearLeasePollTimer();
-        this.dirty = false;
-        this.panel = undefined;
-      });
-      this.leasePollTimer = setInterval(() => this.refresh(), TASK_LEASE_HEARTBEAT_MS);
-      this.panel.onDidChangeViewState(() => {
-        if (this.panel?.visible === true && this.dirty) {
-          this.schedulePost();
-        }
-      });
-      this.panel.webview.html = render(this.panel.webview);
-      this.panel.webview.onDidReceiveMessage((message: unknown) => this.receive(message));
-      // 初回の盤面はwebviewからの`ready`に対して送る
       return;
     }
     this.panel.reveal();
     this.schedulePost();
+  }
+
+  /**
+   * ウィンドウを開き直したときにVSCodeが復元したKanbanのタブを引き取る（Issue #1775）。
+   * 見ていたrunはwebviewの状態（`saveViewState`）から戻す。既にKanbanを開いていれば、
+   * 同じ盤面が2枚にならないよう復元した方を閉じる。
+   */
+  restorePanel(panel: vscode.WebviewPanel, state: unknown): void {
+    if (this.panel !== undefined) {
+      panel.dispose();
+      return;
+    }
+    if (this.selectedRunId === undefined && isRecord(state) && typeof state.runId === 'string') {
+      this.selectedRunId = state.runId;
+    }
+    // 復元したパネルは生成時のオプションを持たないため、webviewのオプションだけ入れ直す
+    panel.webview.options = { enableScripts: true };
+    this.attach(panel);
+  }
+
+  /** パネルへイベントを配線し、盤面のHTMLを入れる。初回の盤面はwebviewからの`ready`に対して送る。 */
+  private attach(panel: vscode.WebviewPanel): void {
+    this.panel = panel;
+    // 1列で見ているとき、同じ列へ背面で開く子タブがKanbanを隠さないよう表示し直させる（Issue #1774）
+    trackChatPanel(panel);
+    panel.onDidDispose(() => {
+      this.clearTimer();
+      this.clearLeasePollTimer();
+      this.dirty = false;
+      this.panel = undefined;
+    });
+    this.leasePollTimer = setInterval(() => this.refresh(), TASK_LEASE_HEARTBEAT_MS);
+    panel.onDidChangeViewState(() => {
+      if (this.panel?.visible === true && this.dirty) {
+        this.schedulePost();
+      }
+    });
+    panel.webview.html = render(panel.webview);
+    panel.webview.onDidReceiveMessage((message: unknown) => this.receive(message));
   }
 
   refresh(): void {
@@ -1063,6 +1087,8 @@ const script = `
       viewMode: viewMode,
       selectedTask: selectedTask ? selectedTask.taskId : undefined,
       selectedTaskRunId: selectedTask ? selectedTask.runId : undefined,
+      // ウィンドウを開き直したときに同じrunを出す（Issue #1775、restorePanel）
+      runId: current && current.run ? current.run.runId : undefined,
     });
   }
 
@@ -1240,6 +1266,7 @@ const script = `
     currentGraph = message.graph;
     leaseStatus = message.lease;
     heldElsewhere = message.heldElsewhere || [];
+    saveViewState();
     renderControls(current);
     renderProgress(current);
     renderPlan(current);
