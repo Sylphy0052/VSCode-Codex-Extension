@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
+import { type HandoffDigest, readHandoffDigest, renderHandoffDigest } from './handoffDigest';
 
 /**
  * セッションの引き継ぎ（issue #694、ポインタファイル方式はissue #1079）。
@@ -105,6 +106,13 @@ export interface HandoffPointerInput {
    * できるよう、結論だけでなく加点の内訳をそのまま残す。
    */
   routerReasons?: readonly string[];
+  /**
+   * transcriptから機械的に抜き出した会話の要点（Issue #1749）。
+   *
+   * 省略すると `writeHandoffPointer` がtranscriptから読む。読めなければ要点の節を出さず、
+   * 従来のポインタ形式（拡張機能が保持していた指示・編集ファイル＋抽出コマンド）にする。
+   */
+  digest?: HandoffDigest;
   createdAt: Date;
 }
 
@@ -231,6 +239,13 @@ const READING_RULES = [
   '上の出力だけで判らないことが出てきたときに限り、grep で語を絞ってから該当行の前後だけを読む。「念のため」で遡らない。',
 ] as const;
 
+/** 会話の要点（Issue #1749）を載せたときの読み方。抽出コマンドは要点で足りないときの補いに回す。 */
+const DIGEST_READING_RULES = [
+  READING_RULES[0],
+  'まず下の「会話の要点」を読む。自動圧縮の要約があれば、それが圧縮前の全履歴の代わりになる。',
+  '要点だけで判らないことが出てきたときに限り、下の「抽出コマンド」を打つ。それでも足りなければ grep で語を絞ってから該当行の前後だけを読む。「念のため」で遡らない。',
+] as const;
+
 /** 契機の日本語表記。 */
 /**
  * 引き継ぎの契機を人が読める1文にする。
@@ -286,11 +301,14 @@ const NEXT_STEPS_LIMIT = 4000;
 /** ポインタファイルの本文を組み立てる。モデル呼び出しは行わない。 */
 export function buildHandoffPointerMarkdown(input: HandoffPointerInput): string {
   const lines: string[] = [];
+  const digest = input.digest;
 
   lines.push('# セッション引き継ぎ');
   lines.push('');
   lines.push(
-    'これは前のセッションの続きです。会話の中身はこのファイルには入っていません。下のtranscriptに全部残っているので、必要な分だけ取り出して読んでください。',
+    digest === undefined
+      ? 'これは前のセッションの続きです。会話の中身はこのファイルには入っていません。下のtranscriptに全部残っているので、必要な分だけ取り出して読んでください。'
+      : 'これは前のセッションの続きです。会話の要点をtranscriptから機械的に抜き出して下に載せてあります。全部は下のtranscriptに残っているので、足りない分だけ取り出して読んでください。',
   );
   lines.push('');
   lines.push('## 引き継ぎ元');
@@ -345,10 +363,40 @@ export function buildHandoffPointerMarkdown(input: HandoffPointerInput): string 
   }
   lines.push('## 読み方（先に守ること）');
   lines.push('');
-  for (const rule of READING_RULES) {
+  for (const rule of digest === undefined ? READING_RULES : DIGEST_READING_RULES) {
     lines.push(`- ${rule}`);
   }
   lines.push('');
+  if (digest === undefined) {
+    pushRetainedContext(lines, input);
+  } else {
+    lines.push(...renderHandoffDigest(digest));
+  }
+  lines.push('## 抽出コマンド');
+  lines.push('');
+  lines.push('そのまま実行できる。パスは埋め込み済み。');
+  for (const entry of handoffExtractCommands(input.provider)) {
+    lines.push('');
+    lines.push(`### ${entry.title}`);
+    lines.push('');
+    lines.push('```bash');
+    lines.push(fillTranscriptPath(entry.command, input.transcriptPath));
+    lines.push('```');
+    if (entry.note !== undefined) {
+      lines.push('');
+      lines.push(entry.note);
+    }
+  }
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+/**
+ * transcriptを読めなかったときの節（Issue #1749より前の形）。拡張機能が保持していた
+ * 直近のユーザー指示と、直前のターンで編集したファイルを載せる。
+ */
+function pushRetainedContext(lines: string[], input: HandoffPointerInput): void {
   lines.push('## 直近のユーザー指示（拡張機能が保持していた分）');
   lines.push('');
   if (input.recentUserMessages.length === 0) {
@@ -378,24 +426,6 @@ export function buildHandoffPointerMarkdown(input: HandoffPointerInput): string 
     lines.push('これは直前のターンの分だけ。セッション全体の一覧は下の抽出コマンドで取る。');
   }
   lines.push('');
-  lines.push('## 抽出コマンド');
-  lines.push('');
-  lines.push('そのまま実行できる。パスは埋め込み済み。');
-  for (const entry of handoffExtractCommands(input.provider)) {
-    lines.push('');
-    lines.push(`### ${entry.title}`);
-    lines.push('');
-    lines.push('```bash');
-    lines.push(fillTranscriptPath(entry.command, input.transcriptPath));
-    lines.push('```');
-    if (entry.note !== undefined) {
-      lines.push('');
-      lines.push(entry.note);
-    }
-  }
-  lines.push('');
-
-  return lines.join('\n');
 }
 
 /** ファイル名に使えない文字を潰す。セッションIDは通常UUIDだが、値を信用しない。 */
@@ -415,15 +445,23 @@ export function handoffPointerFileName(sessionId: string, createdAt: Date): stri
  *
  * `baseDir` には `ExtensionContext.globalStorageUri` 配下を渡す。リポジトリ内には置かない
  * （push事故とworking treeの汚れを避けるため）。
+ *
+ * `input.digest` が無ければtranscriptから会話の要点を読む（Issue #1749）。読めなければ
+ * 要点なしの従来の形で書く。
  */
 export async function writeHandoffPointer(
   baseDir: string,
   input: HandoffPointerInput,
 ): Promise<string> {
+  const digest = input.digest ?? (await readHandoffDigest(input.provider, input.transcriptPath));
   const dir = join(baseDir, 'handoff');
   await mkdir(dir, { recursive: true });
   const filePath = join(dir, handoffPointerFileName(input.sessionId, input.createdAt));
-  await writeFile(filePath, buildHandoffPointerMarkdown(input), 'utf8');
+  await writeFile(
+    filePath,
+    buildHandoffPointerMarkdown(digest ? { ...input, digest } : input),
+    'utf8',
+  );
   return filePath;
 }
 
