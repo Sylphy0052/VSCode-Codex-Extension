@@ -17,9 +17,7 @@ import {
   findRoadmapPlanSection,
   formatRoadmapPlanSection,
   parseRoadmapPlanSection,
-  type RoadmapChild,
 } from '../../src/orchestrator/roadmapImport';
-import { useCurrentPlanSection } from '../../src/orchestrator/roadmapPlanProposal';
 import type { RoadmapPlanNode } from '../../src/orchestrator/roadmapShared';
 
 const bodies = (entries: [number, string][]): Map<number, string> => new Map(entries);
@@ -271,47 +269,5 @@ describe('formatRoadmapPlanSection', () => {
   it('sourceが無ければメタデータを入れない', () => {
     const lines = formatRoadmapPlanSection(NODES);
     expect(findRoadmapPlanMeta(lines)).toEqual({ kind: 'absent' });
-  });
-});
-
-describe('useCurrentPlanSection', () => {
-  const change = {
-    kind: 'sourceChanged' as const,
-    source: { added: [], removed: [], bodyChanged: [101] },
-  };
-
-  it('今の区画が検証に通ればreadyにして知らせを付ける（子のタイトルを添える）', () => {
-    const plan = {
-      nodes: NODES,
-      source: 'existingSection' as const,
-      planOrigin: 'generated' as const,
-    };
-    const children: RoadmapChild[] = [{ issueNumber: 101, title: '既存B', checked: false }];
-    const outcome = useCurrentPlanSection({
-      kind: 'planDecisionNeeded',
-      children,
-      duplicates: [],
-      change,
-      current: { kind: 'valid', plan },
-      sectionHash: 'h',
-    });
-    expect(outcome.kind).toBe('ready');
-    if (outcome.kind === 'ready') {
-      expect(outcome.plan).toBe(plan);
-      expect(outcome.notices?.[0]).toContain('本文の変更: #101（既存B）');
-    }
-  });
-
-  it('今の区画が検証に通らなければinvalidPlan', () => {
-    expect(
-      useCurrentPlanSection({
-        kind: 'planDecisionNeeded',
-        children: [],
-        duplicates: [],
-        change,
-        current: { kind: 'invalid', errors: ['子Issue#103が計画にありません'] },
-        sectionHash: 'h',
-      }),
-    ).toEqual({ kind: 'invalidPlan', errors: ['子Issue#103が計画にありません'] });
   });
 });

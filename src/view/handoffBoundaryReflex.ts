@@ -1,5 +1,14 @@
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import {
+  choiceAnswer,
+  formatReflexProbability as formatProbability,
+  noulAnswer,
+  type ReflexFallback,
+} from '../reflex/reflexAnswer';
 import { judge, type ReflexJudgeDeps } from '../reflex/reflexJudge';
+
+/** 判定できなければ何もしない（区切りの契機を発火させない）。 */
+export const HANDOFF_BOUNDARY_FALLBACK: ReflexFallback = 'none';
 
 /**
  * 自動引き継ぎの区切り判定をReflexで行う（Issue #1707）。
@@ -129,8 +138,10 @@ export async function judgeHandoffBoundary(
       },
     ],
   });
-  const [q1, q2, q3] = answers ?? [];
-  if (q1?.kind !== 'noul' || q2?.kind !== 'noul' || q3?.kind !== 'choice') {
+  const q1 = noulAnswer(answers?.[0]);
+  const q2 = noulAnswer(answers?.[1]);
+  const q3 = choiceAnswer(answers?.[2]);
+  if (q1 === undefined || q2 === undefined || q3 === undefined) {
     return undefined;
   }
   return { suggested: q1.yes, reading: q2.yes, stage: q3.probabilities };
@@ -153,10 +164,6 @@ export function applyHandoffReflexThresholds(
     switchSafe:
       !readingAnswer && (verdict.stage[STAGE_BOUNDARY] ?? 0) >= settings.boundaryThreshold,
   };
-}
-
-function formatProbability(p: number): string {
-  return p.toFixed(2);
 }
 
 /** HandoffTraceへ出す1行。閾値の調整に使う。 */

@@ -240,7 +240,7 @@ import {
 } from './view/workflowView';
 import { isPathWithinRoot } from './orchestrator/escalation';
 import { judgeQuestionAnswerer, judgeTurnEndAnswerer } from './reflex/answererJudge';
-import type { ReflexJudgeDeps } from './reflex/reflexJudge';
+import { reflexJudgeDeps, type ReflexJudgeDeps } from './reflex/reflexJudge';
 import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
 
@@ -681,11 +681,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     warn: (message) => log.warn(message),
   });
   // ワークフローのオーケストレーターの回答者判定（Issue #1708）が使うReflexの呼び出し口
-  const answererJudgeDeps = (provider: 'codex' | 'claude'): ReflexJudgeDeps => ({
-    provider,
-    executable: provider === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath,
-    logWarn: (message) => log.warn(`[workflow] ${message}`),
-  });
+  const answererJudgeDeps = (provider: 'codex' | 'claude'): ReflexJudgeDeps =>
+    reflexJudgeDeps(
+      provider,
+      provider === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath,
+      (message) => log.warn(`[workflow] ${message}`),
+      undefined,
+    );
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),

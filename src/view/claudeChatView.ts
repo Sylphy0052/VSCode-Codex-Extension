@@ -118,7 +118,7 @@ import {
   describeAskUserQuestionSelections,
   judgeAutoReplyAskUserQuestion,
 } from '../chat/autoReplyReflex';
-import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
+import { reflexJudgeDeps, type ReflexJudgeDeps } from '../reflex/reflexJudge';
 import {
   buildClaudeSkillPrompt,
   describeSkillSelect,
@@ -668,11 +668,7 @@ export class ClaudeChatViewManager
   private buildLoopDoneCheck(entry: ClaudePanel): LoopDoneCheckConfig | undefined {
     return createLoopDoneCheckConfig(
       readLoopDoneCheckConfig(this.reflexEnabledFor(entry)),
-      {
-        provider: 'claude',
-        executable: this.claudePath(),
-        logWarn: (message) => this.log.warn(message),
-      },
+      reflexJudgeDeps('claude', this.claudePath(), (message) => this.log.warn(message), undefined),
       (result, iteration) =>
         entry.session.noteLocalEvent(
           `loopDoneCheck:${Date.now()}:${iteration}`,
@@ -1701,12 +1697,12 @@ export class ClaudeChatViewManager
 
   /** 自動返信のReflex判定（Issue #1435）は、会話しているClaude Codeの軽量モデルで走らせる。 */
   private autoReplyReflexDeps(entry: ClaudePanel): ReflexJudgeDeps {
-    return {
-      provider: 'claude',
-      executable: this.claudePath(),
-      logWarn: (message) => this.log.warn(message),
-      signal: entry.autoReplyReflexAbort.signal,
-    };
+    return reflexJudgeDeps(
+      'claude',
+      this.claudePath(),
+      (message) => this.log.warn(message),
+      entry.autoReplyReflexAbort.signal,
+    );
   }
 
   /**
@@ -2207,7 +2203,9 @@ export class ClaudeChatViewManager
     const userMessage = messages.at(-1);
     const assistantMessage = ctx.assistantMessages.at(-1);
     if (userMessage === undefined || assistantMessage === undefined) {
-      entry.trace.info('材料が無いためReflexの判定を起動しない（ユーザー指示か最終応答の記録なし）');
+      entry.trace.info(
+        '材料が無いためReflexの判定を起動しない（ユーザー指示か最終応答の記録なし）',
+      );
       return;
     }
     const key = safeBoundaryProbeKey(messages, ctx.assistantMessages);
@@ -2231,11 +2229,12 @@ export class ClaudeChatViewManager
     try {
       [verdict, probe] = await Promise.all([
         judgeHandoffBoundary(
-          {
-            provider: 'claude',
-            executable: this.claudePath(),
-            logWarn: (message) => entry.trace.warn(message),
-          },
+          reflexJudgeDeps(
+            'claude',
+            this.claudePath(),
+            (message) => entry.trace.warn(message),
+            undefined,
+          ),
           material,
         ),
         classify
@@ -2361,11 +2360,16 @@ export class ClaudeChatViewManager
     const resumeId = input.resume?.sessionId;
     // CLIが会話を書き出す前に終わった会話（最初の指示の処理前など）は`-r`で開けないため、
     // 開き直す側（再読み込み後の再開。Issue #1670）が新しい会話へ落とせるよう例外にする
-    if (resumeId !== undefined && (await this.store.resolveTranscriptPath(resumeId)) === undefined) {
+    if (
+      resumeId !== undefined &&
+      (await this.store.resolveTranscriptPath(resumeId)) === undefined
+    ) {
       throw new Error('再開する会話の記録が見つかりません');
     }
     if (resumeId !== undefined && this.panels.has(resumeId)) {
-      throw new Error('再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください');
+      throw new Error(
+        '再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください',
+      );
     }
     const sessionId = resumeId ?? randomSessionId();
     // オーケストレーターセッション（design.md §16.23）・衝突解決セッション
@@ -2415,7 +2419,9 @@ export class ClaudeChatViewManager
       return [];
     }
     const withoutSandbox = (reason: string): string[] => {
-      this.log.warn(`[claude sandbox] sandbox無しで起動します（承認は従来どおり人へ回ります）: ${reason}`);
+      this.log.warn(
+        `[claude sandbox] sandbox無しで起動します（承認は従来どおり人へ回ります）: ${reason}`,
+      );
       return [];
     };
     const availability = await this.sandboxProbe.check();
@@ -3807,12 +3813,7 @@ export class ClaudeChatViewManager
         return undefined;
       }
       return selectSkill(
-        {
-          provider: 'claude',
-          executable: this.claudePath(),
-          logWarn: (message) => this.log.warn(message),
-          signal,
-        },
+        reflexJudgeDeps('claude', this.claudePath(), (message) => this.log.warn(message), signal),
         text,
         toSkillCandidates(skills, false),
         threshold,

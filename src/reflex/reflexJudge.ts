@@ -1,5 +1,6 @@
 import { formatUntrusted } from '../orchestrator/untrustedText';
-import { runReflexPrompt, type ReflexCliDeps } from './reflexCli';
+import type { HeadlessProvider } from '../loop/headlessCli';
+import { runReflexJson, type ReflexCliDeps } from './reflexCli';
 
 /**
  * Reflexの型付き判定（Issue #1434）。
@@ -70,6 +71,19 @@ export type ReflexJudgeDeps = Omit<ReflexCliDeps, 'timeoutMs'> & {
 };
 
 /**
+ * 判定の依存を組む（Issue #1728）。`signal`は省略できない引数にしてあり、中断の口が無い判定は
+ * `undefined`を明示して渡す。
+ */
+export function reflexJudgeDeps(
+  provider: HeadlessProvider,
+  executable: string,
+  logWarn: (message: string) => void,
+  signal: AbortSignal | undefined,
+): ReflexJudgeDeps {
+  return { provider, executable, logWarn, ...(signal === undefined ? {} : { signal }) };
+}
+
+/**
  * 質問をまとめて1回で判定する。戻り値は`request.questions`と同じ並び。
  *
  * @returns 呼び出し自体が失敗したときは`undefined`
@@ -83,29 +97,12 @@ export async function judge(
     deps.logWarn?.(`Reflexの判定を実行しませんでした: ${invalid}`);
     return undefined;
   }
-  const timeoutMs = deps.timeoutMs ?? REFLEX_TIMEOUT_MS;
-  try {
-    const outcome = await runReflexPrompt({ ...deps, timeoutMs }, buildReflexPrompt(request));
-    if (!outcome.ok) {
-      // 打ち切りは呼び出し側が止めた結果であり、不調ではない
-      if (deps.signal?.aborted !== true) {
-        deps.logWarn?.(
-          outcome.reason === 'timeout'
-            ? `Reflexの判定が時間切れになりました（${timeoutMs}ms）`
-            : 'Reflexの判定を実行できませんでした（CLIの起動失敗・異常終了）',
-        );
-      }
-      return undefined;
-    }
-    const answers = parseReflexAnswers(outcome.text, request.questions);
-    if (answers === undefined) {
-      deps.logWarn?.('Reflexの判定の応答を読めませんでした（JSONとして不正）');
-    }
-    return answers;
-  } catch (e) {
-    deps.logWarn?.(`Reflexの判定で例外が出ました: ${e instanceof Error ? e.message : String(e)}`);
-    return undefined;
-  }
+  return runReflexJson(
+    { ...deps, timeoutMs: deps.timeoutMs ?? REFLEX_TIMEOUT_MS },
+    buildReflexPrompt(request),
+    'Reflexの判定',
+    (text) => parseReflexAnswers(text, request.questions),
+  );
 }
 
 /** 質問の定義の誤り（呼び出し側の不備）を探す。問題が無ければ`undefined`。 */

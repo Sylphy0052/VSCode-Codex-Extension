@@ -112,7 +112,7 @@ import {
   type AutoReplyStopReason,
 } from '../chat/autoReply';
 import { checkAutoReplyCompletion, checkAutoReplyDanger } from '../chat/autoReplyReflex';
-import type { ReflexJudgeDeps } from '../reflex/reflexJudge';
+import { reflexJudgeDeps, type ReflexJudgeDeps } from '../reflex/reflexJudge';
 import {
   describeSkillSelect,
   selectSkill,
@@ -731,11 +731,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   private buildLoopDoneCheck(entry: ChatPanel): LoopDoneCheckConfig | undefined {
     return createLoopDoneCheckConfig(
       readLoopDoneCheckConfig(this.reflexEnabledFor(entry)),
-      {
-        provider: 'codex',
-        executable: readConfig().executablePath,
-        logWarn: (message) => this.log.warn(message),
-      },
+      reflexJudgeDeps(
+        'codex',
+        readConfig().executablePath,
+        (message) => this.log.warn(message),
+        undefined,
+      ),
       (result, iteration) =>
         entry.session.noteLocalEvent(
           `loopDoneCheck:${Date.now()}:${iteration}`,
@@ -1494,12 +1495,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
   /** 自動返信のReflex判定（Issue #1435）は、会話しているCodexの軽量モデルで走らせる。 */
   private autoReplyReflexDeps(entry: ChatPanel): ReflexJudgeDeps {
-    return {
-      provider: 'codex',
-      executable: readConfig().executablePath,
-      logWarn: (message) => this.log.warn(message),
-      signal: entry.autoReplyReflexAbort.signal,
-    };
+    return reflexJudgeDeps(
+      'codex',
+      readConfig().executablePath,
+      (message) => this.log.warn(message),
+      entry.autoReplyReflexAbort.signal,
+    );
   }
 
   /**
@@ -1831,7 +1832,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const userMessage = messages.at(-1);
     const assistantMessage = ctx.assistantMessages.at(-1);
     if (userMessage === undefined || assistantMessage === undefined) {
-      entry.trace.info('材料が無いためReflexの判定を起動しない（ユーザー指示か最終応答の記録なし）');
+      entry.trace.info(
+        '材料が無いためReflexの判定を起動しない（ユーザー指示か最終応答の記録なし）',
+      );
       return;
     }
     const key = safeBoundaryProbeKey(messages, ctx.assistantMessages);
@@ -1855,11 +1858,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     try {
       [verdict, probe] = await Promise.all([
         judgeHandoffBoundary(
-          {
-            provider: 'codex',
-            executable: readConfig().executablePath,
-            logWarn: (message) => entry.trace.warn(message),
-          },
+          reflexJudgeDeps(
+            'codex',
+            readConfig().executablePath,
+            (message) => entry.trace.warn(message),
+            undefined,
+          ),
           material,
         ),
         classify
@@ -2037,7 +2041,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     // 同じスレッドを2つのタブで購読させない（人が履歴から開いている等）
     if (this.panels.has(resumeId)) {
-      throw new Error('再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください');
+      throw new Error(
+        '再開する会話が別のタブで開かれています。そのタブを閉じてから再開してください',
+      );
     }
     await entry.session.resume(resumeId, input.cwd, { config, threadConfig });
     return resumeId;
@@ -4158,12 +4164,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       const candidates = toSkillCandidates(parseSkillsList(response.result).skills, true);
       return selectSkill(
-        {
-          provider: 'codex',
-          executable: readConfig().executablePath,
-          logWarn: (message) => this.log.warn(message),
+        reflexJudgeDeps(
+          'codex',
+          readConfig().executablePath,
+          (message) => this.log.warn(message),
           signal,
-        },
+        ),
         text,
         candidates,
         threshold,

@@ -1,3 +1,9 @@
+import {
+  bestChoiceProbability,
+  choiceAnswer,
+  formatReflexProbability,
+  type ReflexFallback,
+} from './reflexAnswer';
 import { normalizeReflexLabel, judge, type ReflexJudgeDeps } from './reflexJudge';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type { SkillView } from '../provider/skills';
@@ -25,6 +31,9 @@ export interface SkillSelectSettings {
 
 // 初期値は仮置き。確率はモデルの自己申告で較正されていないため、使ってから調整する
 export const DEFAULT_SKILL_SELECT_THRESHOLD = 0.6;
+
+/** 判定できなければ、skillを選ばずにReflexなしの送信へ戻す。 */
+export const SKILL_SELECT_FALLBACK: ReflexFallback = 'withoutReflex';
 
 /** 判定へ渡す候補の上限。多すぎると判定の入力が長くなり、選択肢の確率も読みにくくなる。 */
 export const SKILL_SELECT_CANDIDATE_LIMIT = 40;
@@ -139,12 +148,12 @@ export async function selectSkill(
   if (answers === undefined) {
     return { kind: 'unavailable' };
   }
-  const answer = answers[0];
-  if (answer?.kind !== 'choice') {
+  const answer = choiceAnswer(answers[0]);
+  if (answer === undefined) {
     return { kind: 'unavailable' };
   }
   const skill = candidates.find((c) => c.name === answer.best);
-  const probability = answer.probabilities[answer.best] ?? 0;
+  const probability = bestChoiceProbability(answer);
   if (skill === undefined || probability < threshold) {
     return { kind: 'none' };
   }
@@ -164,5 +173,5 @@ export function describeSkillSelect(result: SkillSelectResult): string | undefin
   if (result.kind !== 'selected') {
     return undefined;
   }
-  return `Reflex判定（skill選択）: ${result.skill.name} ${result.probability.toFixed(2)} のため読み込ませます`;
+  return `Reflex判定（skill選択）: ${result.skill.name} ${formatReflexProbability(result.probability)} のため読み込ませます`;
 }

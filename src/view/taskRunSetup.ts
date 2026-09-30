@@ -19,14 +19,21 @@ import {
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
 import { DEFAULT_PLAN_APPROVE_THRESHOLD } from '../orchestrator/planReflexReview';
-import { describeResourceChange, formatResourceLines, ResourceMonitor } from '../orchestrator/resourceMonitor';
+import {
+  describeResourceChange,
+  formatResourceLines,
+  ResourceMonitor,
+} from '../orchestrator/resourceMonitor';
 import { ResourceSampler } from '../orchestrator/resourceSampler';
 import {
   judgeRoadmapQuestion,
   RoadmapQuestionMcpServer,
   type RoadmapQuestionVerdict,
 } from '../orchestrator/roadmapQuestionMcp';
-import { resolveRoadmapBaseCommit, type RoadmapRunForgePorts } from '../orchestrator/roadmapRunForge';
+import {
+  resolveRoadmapBaseCommit,
+  type RoadmapRunForgePorts,
+} from '../orchestrator/roadmapRunForge';
 import type { RunNotesStore } from '../orchestrator/runNotes';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import { TaskRunController, type ControllerResult } from '../orchestrator/taskRunController';
@@ -64,6 +71,7 @@ import {
   type AnswererQuestion,
   type AnswererVerdict,
 } from '../reflex/answererJudge';
+import { reflexJudgeDeps } from '../reflex/reflexJudge';
 import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
 import { taskRunLabel } from './taskRunKanbanModel';
@@ -128,6 +136,9 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   const executableFor = (engine: TaskRunEngine): string =>
     engine === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath;
   const warn = (message: string): void => log.warn(`[task run] ${message}`);
+  // 工程・計画のReflex判定には中断の口が無い
+  const reflexDeps = (engine: TaskRunEngine) =>
+    reflexJudgeDeps(engine, executableFor(engine), warn, undefined);
   const modelCatalog = (engine: TaskRunEngine) =>
     engine === 'claude'
       ? { models: deps.settings.claudeSnapshot().models, fallbackEfforts: CLAUDE_EFFORTS }
@@ -142,11 +153,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   ): Promise<RoadmapQuestionVerdict> => {
     const settings = readAutoReplyReflexConfig(reflexEnabled ?? readReflexEnabled());
     return settings.enabled
-      ? judgeRoadmapQuestion(
-          { provider: engine, executable: executableFor(engine), logWarn: warn },
-          question,
-          settings.answerThreshold,
-        )
+      ? judgeRoadmapQuestion(reflexDeps(engine), question, settings.answerThreshold)
       : { kind: 'human', summary: undefined };
   };
 
@@ -160,22 +167,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   ): Promise<AnswererVerdict> => {
     const settings = readAnswererJudgeConfig(reflexEnabled ?? readReflexEnabled());
     return settings.enabled && orchestrator.canDecide(runId)
-      ? judgeQuestionAnswerer(
-          { provider: engine, executable: executableFor(engine), logWarn: warn },
-          question,
-          settings.threshold,
-        )
+      ? judgeQuestionAnswerer(reflexDeps(engine), question, settings.threshold)
       : { kind: 'user', summary: undefined };
   };
   const judgeTurnEnd = async (runId: string, lastMessage: string): Promise<AnswererVerdict> => {
     const settings = readAnswererJudgeConfig();
     const engine = controller.find(runId)?.engine;
     return settings.enabled && engine !== undefined
-      ? judgeTurnEndAnswerer(
-          { provider: engine, executable: executableFor(engine), logWarn: warn },
-          lastMessage,
-          settings.threshold,
-        )
+      ? judgeTurnEndAnswerer(reflexDeps(engine), lastMessage, settings.threshold)
       : { kind: 'user', summary: undefined };
   };
 
@@ -225,12 +224,12 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
 
-  // 設定が無効なら判定せず、計画提案は常に承認待ちにする（ロードマップ実行と同じ判定器・閾値を使う）。
+  // 設定が無効なら判定せず、計画提案は常に承認待ちにする（判定器と閾値は`planReflexReview.ts`のもの）。
   // 他のReflex判定と同じく、Reflexモードの親スイッチがOFFなら判定しない（Issue #1713）
   const planAutoApprove = (engine: TaskRunEngine) =>
-    readReflexEnabled() && readTaskRunPlanAutoApproveEnabled()
+    readTaskRunPlanAutoApproveEnabled()
       ? {
-          reflex: { provider: engine, executable: executableFor(engine), logWarn: warn },
+          reflex: reflexDeps(engine),
           threshold: DEFAULT_PLAN_APPROVE_THRESHOLD,
         }
       : undefined;
@@ -253,7 +252,11 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         fallbackEfforts,
         logWarn: warn,
       });
-      return { model: choice.settings.model, effort: choice.settings.effort, reasons: choice.reasons };
+      return {
+        model: choice.settings.model,
+        effort: choice.settings.effort,
+        reasons: choice.reasons,
+      };
     },
     observation,
     roadmap: createTaskRunRoadmapPort(ports),
@@ -329,7 +332,10 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   };
 
   // Orchestratorは新しい世代で開く（リロード後の開き直しと同じ経路。新しい世代はget_run_stateで状態を取り直す）
-  const resumeRun = async (runId: string, options?: { parallel?: boolean }): Promise<ControllerResult> => {
+  const resumeRun = async (
+    runId: string,
+    options?: { parallel?: boolean },
+  ): Promise<ControllerResult> => {
     const result = await controller.resumeRun(runId, options);
     if (result.ok) {
       showRun(view, orchestrator, runId);
@@ -400,16 +406,24 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         { finish: finishRun, suspend: suspendRun },
         log,
         parseEngine(engineHint),
-        (folder) => startRoadmapRunCommand(roadmapStartDeps(parseEngine(engineHint)), folder, undefined),
+        (folder) =>
+          startRoadmapRunCommand(roadmapStartDeps(parseEngine(engineHint)), folder, undefined),
       ),
     ),
     // ワークフローViewのロードマップ欄からはIssue番号を付けて呼ぶ（Issue #1623）
-    vscode.commands.registerCommand('agent.taskRun.startFromRoadmap', async (issueNumber?: unknown) => {
-      const folder = await pickFolder();
-      if (folder !== undefined) {
-        await startRoadmapRunCommand(roadmapStartDeps(undefined), folder, parseIssueNumber(issueNumber));
-      }
-    }),
+    vscode.commands.registerCommand(
+      'agent.taskRun.startFromRoadmap',
+      async (issueNumber?: unknown) => {
+        const folder = await pickFolder();
+        if (folder !== undefined) {
+          await startRoadmapRunCommand(
+            roadmapStartDeps(undefined),
+            folder,
+            parseIssueNumber(issueNumber),
+          );
+        }
+      },
+    ),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
     vscode.commands.registerCommand('agent.taskRun.switch', () =>
       switchRunCommand(controller, view, switchToRun),
@@ -440,7 +454,12 @@ async function switchRunCommand(
       items.push({ label: '他のフォルダ', kind: vscode.QuickPickItemKind.Separator });
       separated = true;
     }
-    items.push({ label: escapeCodicons(r.label), description: r.status, detail: r.workspaceRoot, runId: r.runId });
+    items.push({
+      label: escapeCodicons(r.label),
+      description: r.status,
+      detail: r.workspaceRoot,
+      runId: r.runId,
+    });
   }
   const chosen = await vscode.window.showQuickPick(items, {
     title: '表示するrun',
@@ -523,7 +542,9 @@ function newQuestionsAwaitingUser(prev: TaskRun | undefined, next: TaskRun): str
   }
   return listTasks(next)
     .filter((task) =>
-      (task.questions ?? []).some((q) => q.status === 'awaitingUser' && !awaiting.has(q.questionId)),
+      (task.questions ?? []).some(
+        (q) => q.status === 'awaitingUser' && !awaiting.has(q.questionId),
+      ),
     )
     .map((task) => `${task.taskId} ${sanitizeInlineText(task.title, NOTIFY_TITLE_MAX_LENGTH)}`);
 }
@@ -738,7 +759,10 @@ function activeRunActions(activeCount: number): [ActiveRunAction, string][] {
         'suspend',
         '既存のrunを中断して新しく始める（動いている工程セッションとOrchestratorを止めます。中断したrunは後で再開できます）',
       ],
-      ['finish', '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）'],
+      [
+        'finish',
+        '既存のrunを終えて新しく始める（動いている工程セッションとOrchestratorを止めます）',
+      ],
     );
   }
   return actions;
@@ -747,7 +771,9 @@ function activeRunActions(activeCount: number): [ActiveRunAction, string][] {
 async function pickFolder(): Promise<string | undefined> {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) {
-    void vscode.window.showErrorMessage('オーケストレータモード: フォルダを開いてから実行してください');
+    void vscode.window.showErrorMessage(
+      'オーケストレータモード: フォルダを開いてから実行してください',
+    );
     return undefined;
   }
   if (folders.length === 1) {
@@ -761,7 +787,10 @@ async function pick<T extends string>(
   title: string,
   options: readonly (readonly [T, string])[],
 ): Promise<T | undefined> {
-  const items = options.map(([value, label]): vscode.QuickPickItem & { value: T } => ({ label, value }));
+  const items = options.map(([value, label]): vscode.QuickPickItem & { value: T } => ({
+    label,
+    value,
+  }));
   const chosen = await vscode.window.showQuickPick(items, { title });
   return chosen?.value;
 }
