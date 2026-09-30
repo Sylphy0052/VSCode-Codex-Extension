@@ -224,6 +224,7 @@ import {
   waitForDestinationResponse,
   writeHandoffPointer,
   type DestinationResponseOutcome,
+  type HandoffOutcome,
   type HandoffTrigger,
 } from './handoff';
 import {
@@ -350,8 +351,17 @@ interface ClaudePanel extends BaseChatPanel {
    * 閾値契機と`compact_boundary`契機のどちらが先に成立しても、1セッションにつき1回しか
    * 引き継がない（Issue #1079の確認点2）。引き継ぎ処理そのものが非同期で長いため、
    * 開始した時点で立てる。
+   *
+   * 立てる・戻すのは`requestHandoff`だけ（Issue #1746）。引き継げなかったときは戻す。
    */
   autoHandoffStarted: boolean;
+  /**
+   * 自動引き継ぎに失敗したターンの`ChatState.turnCompletionSeq`（Issue #1746）。
+   *
+   * 失敗して起動済みフラグを戻した後、同じターンの材料のまま再発火し続けないための目印。
+   * `turnCompletionSeq`がこの値から進む（次のターンが終わる）まで自動引き継ぎを始めない。
+   */
+  autoHandoffFailedTurnSeq: number | undefined;
   /**
    * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら自動圧縮が
    * 走ったと判る。専用のイベントを`ChatState`へ足さずに済ませるため、項目を数える。
@@ -1043,7 +1053,7 @@ export class ClaudeChatViewManager
    * 「ボタンが効かない」ようにしか見えず、実機で起きても切り分けられない（Issue #1166）。
    *
    * ここで`this.active`を読むのはコマンドパレット経由の入口だから。会話下のボタンからは
-   * `handoffToNewSessionIn`へ押下元のentryを渡す（Issue #1297）。
+   * `requestHandoff`へ押下元のentryを渡す（Issue #1297）。
    */
   async handoffToNewSession(): Promise<void> {
     const entry = this.active;
@@ -1054,32 +1064,101 @@ export class ClaudeChatViewManager
       void vscode.window.showInformationMessage(message);
       return;
     }
-    await this.handoffToNewSessionIn(entry);
+    await this.requestHandoff(entry, { kind: 'manual' });
   }
 
+  /** 引き継ぎを準備している最中のentry。手動と自動で共用し、二重起動を止める。 */
   private readonly handoffPreparing = new Set<ClaudePanel>();
 
   /**
-   * 引き継ぎ元をentryで固定する。webviewのpostMessageと、タブのフォーカス切替が起こす
+   * 引き継ぎの入口（Issue #1746）。手動・自動の7種の契機はすべてここを通り、二重起動の判定と
+   * 自動引き継ぎの起動済みフラグ（`autoHandoffStarted`）の管理はここだけで行う。
+   *
+   * 引き継ぎ元はentryで固定する。webviewのpostMessageと、タブのフォーカス切替が起こす
    * `onDidChangeViewState`は配送順が保証されない。ボタンを押した直後に別タブへ移ると
    * viewStateが先に処理され、`this.active`が別の会話に変わってしまう（Issue #1297）。
+   *
+   * 自動引き継ぎが`failed`（例外を含む）で終わったら起動済みフラグを戻し、そのターンの
+   * `turnCompletionSeq`を控える。次のターンが終わるまでは始めないため、失敗が続いても
+   * 1ターンに2回以上は引き継ぎを始めない。`declined`（確認ダイアログの中止など）では戻さない。
+   *
+   * 呼び出し側は`void`で受けてよい。例外はここで止める。
    */
-  private async handoffToNewSessionIn(entry: ClaudePanel): Promise<void> {
-    if (this.handoffPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
-    this.handoffPreparing.add(entry);
-    try {
-      const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
-      if (sessionId === undefined) {
+  private async requestHandoff(
+    entry: ClaudePanel,
+    trigger: HandoffTrigger,
+    preassessed?: TaskAssessment,
+  ): Promise<void> {
+    const manual = trigger.kind === 'manual';
+    if (this.handoffPreparing.has(entry)) {
+      if (manual) {
+        void vscode.window.showInformationMessage(
+          '引き継ぎを準備しています。終わるまでお待ちください',
+        );
+      }
+      return;
+    }
+    if (manual && this.rejectIfInputLocked(entry)) {
+      return;
+    }
+    const state = entry.session.getState();
+    const turnSeq = state.turnCompletionSeq;
+    if (!manual && this.autoHandoffHeld(entry, state)) {
+      return;
+    }
+    const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
+    if (sessionId === undefined) {
+      if (manual) {
         const message =
           '引き継ぎ元のセッションIDを特定できなかったため引き継げませんでした（タブは開いたままです）';
         this.log.warn(message);
         void vscode.window.showErrorMessage(message);
-        return;
       }
-      await this.startHandoff(entry, sessionId, { kind: 'manual' }, true);
+      return;
+    }
+    this.handoffPreparing.add(entry);
+    if (!manual) {
+      entry.autoHandoffStarted = true;
+      entry.session.noteLocalEvent(
+        `autoHandoff:${Date.now()}`,
+        '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
+      );
+    }
+    let outcome: HandoffOutcome = 'failed';
+    try {
+      outcome = await this.startHandoff(entry, sessionId, trigger, manual, preassessed);
+    } catch (e) {
+      const message = `引き継ぎが例外で止まりました: ${e instanceof Error ? e.message : String(e)}`;
+      this.log.warn(message);
+      if (manual) {
+        void vscode.window.showErrorMessage(message);
+      }
     } finally {
       this.handoffPreparing.delete(entry);
     }
+    if (!manual && outcome === 'failed') {
+      entry.autoHandoffStarted = false;
+      entry.autoHandoffFailedTurnSeq = turnSeq;
+      this.log.info('自動引き継ぎに失敗したため、次のターンが終わってから判定し直します');
+    }
+  }
+
+  /**
+   * 自動引き継ぎをもう一度起こせるようにする（トグルのOFF→ON、タスク用セッションの
+   * `rearmAutoHandoff`）。人が求めた操作なので、失敗したターンの目印も消す。
+   */
+  private rearmAutoHandoff(entry: ClaudePanel): void {
+    entry.autoHandoffStarted = false;
+    entry.autoHandoffFailedTurnSeq = undefined;
+  }
+
+  /**
+   * 自動引き継ぎを今は始めないか。起動済みか、失敗したターンの後にまだ次のターンが
+   * 終わっていない（Issue #1746）。契機の判定（`decideAutoHandoff`の`alreadyStarted`）と
+   * `requestHandoff`で同じ条件を使う。
+   */
+  private autoHandoffHeld(entry: ClaudePanel, state: ChatState): boolean {
+    return entry.autoHandoffStarted || entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq;
   }
 
   private readonly webGptPreparing = new Set<ClaudePanel>();
@@ -1170,13 +1249,13 @@ export class ClaudeChatViewManager
     trigger: HandoffTrigger,
     notifyFailure: boolean,
     preassessed?: TaskAssessment,
-  ): Promise<boolean> {
+  ): Promise<HandoffOutcome> {
     if (this.handoffDeclinedByDelegate(entry, trigger, this.log)) {
-      return false;
+      return 'declined';
     }
     if (this.globalStorageDir === undefined) {
       this.log.warn('引き継ぎのポインタファイルの置き場所が渡されていないため引き継げません');
-      return false;
+      return 'failed';
     }
     const transcriptPath = await resolveWithRetry(() =>
       this.store.resolveTranscriptPath(sessionId),
@@ -1187,7 +1266,7 @@ export class ClaudeChatViewManager
       if (notifyFailure) {
         void vscode.window.showErrorMessage(message);
       }
-      return false;
+      return 'failed';
     }
 
     const state = entry.session.getState();
@@ -1221,7 +1300,7 @@ export class ClaudeChatViewManager
     if (choice === undefined) {
       // 確認で閉じられた。人が「今は引き継がない」と決めたのだから、エラーにも警告にもしない
       this.log.info('引き継ぎは確認ダイアログで中止されました');
-      return false;
+      return 'declined';
     }
     if (autoApprove) {
       entry.session.noteLocalEvent(
@@ -1264,17 +1343,20 @@ export class ClaudeChatViewManager
       });
     } catch (e) {
       this.reportError(e);
-      return false;
+      return 'failed';
     }
 
     if (entry.handoffDelegate !== undefined) {
-      return this.delegateHandoff(
+      // 委譲先の見送りと失敗は`delegateHandoff`がfalseにまとめるため区別できない。タスク用
+      // セッションの扱いは変えず、見送りとして起動済みフラグを戻さない（Issue #1746）
+      const handedOff = await this.delegateHandoff(
         entry.handoffDelegate,
         choice.settings,
         chooseHandoffPrompt(pointerPath, lastAssistantMessage),
         trigger,
         this.log,
       );
+      return handedOff ? 'started' : 'declined';
     }
 
     // 画面に出ていないタブからの自動引き継ぎでは、新セッションを背面に開く（Issue #1101）。
@@ -1297,14 +1379,14 @@ export class ClaudeChatViewManager
       this.log.warn(
         '引き継ぎ先セッションを開けなかったため引き継げませんでした（旧タブはそのまま残ります）',
       );
-      return false;
+      return 'failed';
     }
     const newEntry = this.panels.get(newSessionId);
     if (newEntry === undefined) {
       this.log.warn(
         `引き継ぎ先セッション(${newSessionId})がパネル一覧に見つからず引き継げませんでした（旧タブはそのまま残ります）`,
       );
-      return false;
+      return 'failed';
     }
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
     // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
@@ -1368,7 +1450,7 @@ export class ClaudeChatViewManager
       firstResponse,
       trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
     );
-    return true;
+    return 'started';
   }
 
   /**
@@ -1441,7 +1523,7 @@ export class ClaudeChatViewManager
     const trigger = decideAutoHandoff({
       enabled: state.autoHandoff,
       busy: state.busy,
-      alreadyStarted: entry.autoHandoffStarted,
+      alreadyStarted: this.autoHandoffHeld(entry, state),
       // バックグラウンド実行中は残量の閾値・自動圧縮の契機でも始めない（Issue #1315）
       backgroundRunning: state.backgroundTerminals.length > 0,
       remainingPercent: state.context?.remainingPercent,
@@ -1449,7 +1531,7 @@ export class ClaudeChatViewManager
       thresholdPercent: readAutoHandoffThresholdPercent(),
     });
     if (trigger !== undefined) {
-      this.beginAutoHandoff(entry, trigger);
+      void this.requestHandoff(entry, trigger);
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
@@ -1629,7 +1711,8 @@ export class ClaudeChatViewManager
       await this.runAutoReplyTurnSteps(entry, lastAgentMessageText);
     } finally {
       // 送った後に始まった次の往復の印と処理中の表示は消さない
-      const nextTurnStarted = entry.autoReplyTurnToken !== undefined && entry.autoReplyTurnToken !== token;
+      const nextTurnStarted =
+        entry.autoReplyTurnToken !== undefined && entry.autoReplyTurnToken !== token;
       if (entry.autoReplyTurnToken === token) {
         entry.autoReplyTurnToken = undefined;
       }
@@ -1997,7 +2080,7 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     state: ChatState,
   ): Promise<void> {
-    if (!state.autoHandoff || entry.autoHandoffStarted || entry.safeBoundaryProbing) {
+    if (!state.autoHandoff || this.autoHandoffHeld(entry, state) || entry.safeBoundaryProbing) {
       return;
     }
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
@@ -2049,7 +2132,7 @@ export class ClaudeChatViewManager
       const detected = decideAutoHandoff({
         enabled: state.autoHandoff,
         busy: state.busy,
-        alreadyStarted: entry.autoHandoffStarted,
+        alreadyStarted: this.autoHandoffHeld(entry, state),
         // 直前の`passesSafeBoundaryGate`で偽と確かめた値だが、呼び出しの形を揃えておく
         // （Issue #1315）。ここだけ渡さないと、後で前段の条件が変わったときに漏れる
         backgroundRunning: state.backgroundTerminals.length > 0,
@@ -2065,7 +2148,7 @@ export class ClaudeChatViewManager
       });
       if (detected !== undefined) {
         entry.trace.info(describeDecision(detected));
-        this.beginAutoHandoff(entry, detected);
+        void this.requestHandoff(entry, detected);
         return;
       }
       entry.trace.info('handoffプロンプトを検知したが契機が成立しなかった');
@@ -2082,7 +2165,7 @@ export class ClaudeChatViewManager
       const detected = decideAutoHandoff({
         enabled: state.autoHandoff,
         busy: state.busy,
-        alreadyStarted: entry.autoHandoffStarted,
+        alreadyStarted: this.autoHandoffHeld(entry, state),
         backgroundRunning: state.backgroundTerminals.length > 0,
         remainingPercent,
         compacted: false,
@@ -2092,7 +2175,7 @@ export class ClaudeChatViewManager
       });
       if (detected !== undefined) {
         entry.trace.info(describeDecision(detected));
-        this.beginAutoHandoff(entry, detected);
+        void this.requestHandoff(entry, detected);
         return;
       }
       entry.trace.info('作業の節目を検知したが契機が成立しなかった');
@@ -2167,14 +2250,19 @@ export class ClaudeChatViewManager
     entry.trace.info(describeProfile(probe));
     // 分類器を待っている間に状況が変わっていることがある（新しい指示・引き継ぎ済み）
     const latest = entry.session.getState();
-    if (entry.disposed || entry.autoHandoffStarted || latest.busy || !latest.autoHandoff) {
+    if (
+      entry.disposed ||
+      this.autoHandoffHeld(entry, latest) ||
+      latest.busy ||
+      !latest.autoHandoff
+    ) {
       entry.trace.info('分類器を待つ間に状況が変わったため発火しない');
       return;
     }
     const trigger = decideAutoHandoff({
       enabled: latest.autoHandoff,
       busy: latest.busy,
-      alreadyStarted: entry.autoHandoffStarted,
+      alreadyStarted: this.autoHandoffHeld(entry, latest),
       // 分類器を待つ間にバックグラウンド実行が始まっていれば止める（Issue #1315）
       backgroundRunning: latest.backgroundTerminals.length > 0,
       remainingPercent,
@@ -2197,7 +2285,7 @@ export class ClaudeChatViewManager
     if (trigger === undefined) {
       return;
     }
-    this.beginAutoHandoff(entry, trigger, probe.assessment);
+    void this.requestHandoff(entry, trigger, probe.assessment);
   }
 
   /**
@@ -2309,7 +2397,7 @@ export class ClaudeChatViewManager
     const latest = entry.session.getState();
     if (
       entry.disposed ||
-      entry.autoHandoffStarted ||
+      this.autoHandoffHeld(entry, latest) ||
       latest.busy ||
       !latest.autoHandoff ||
       latest.approvals.length > 0 ||
@@ -2323,7 +2411,7 @@ export class ClaudeChatViewManager
     const trigger = decideAutoHandoff({
       enabled: latest.autoHandoff,
       busy: latest.busy,
-      alreadyStarted: entry.autoHandoffStarted,
+      alreadyStarted: this.autoHandoffHeld(entry, latest),
       backgroundRunning: latest.backgroundTerminals.length > 0,
       remainingPercent: ctx.remainingPercent,
       compacted: false,
@@ -2345,32 +2433,7 @@ export class ClaudeChatViewManager
     if (trigger === undefined) {
       return;
     }
-    this.beginAutoHandoff(entry, trigger, probe?.assessment);
-  }
-
-  /** 自動引き継ぎを1回だけ開始する。契機の決め方によらず共通の後始末をここに集める。 */
-  private beginAutoHandoff(
-    entry: ClaudePanel,
-    trigger: HandoffTrigger,
-    preassessed?: TaskAssessment,
-  ): void {
-    const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
-    if (sessionId === undefined) {
-      return;
-    }
-    // 失敗しても戻さない。戻すとターンが終わるたびに引き継ぎを試し続けることになる
-    // （`resolveWithRetry` が既に短時間のリトライを持っている）。失敗はログに残るので、
-    // 引き継ぎたい場合はトグルを入れ直すか手動の引き継ぎを使う
-    entry.autoHandoffStarted = true;
-    entry.session.noteLocalEvent(
-      `autoHandoff:${Date.now()}`,
-      '自動引き継ぎを開始しました。新しいセッションへ引き継ぎます',
-    );
-    void this.startHandoff(entry, sessionId, trigger, false, preassessed).catch((e: unknown) =>
-      this.log.warn(
-        `自動引き継ぎが例外で止まりました: ${e instanceof Error ? e.message : String(e)}`,
-      ),
-    );
+    void this.requestHandoff(entry, trigger, probe?.assessment);
   }
 
   /**
@@ -3225,6 +3288,7 @@ export class ClaudeChatViewManager
       limitAutoResumeAwaitingResult: false,
       limitAutoResumeSuppressed: false,
       autoHandoffStarted: false,
+      autoHandoffFailedTurnSeq: undefined,
       lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
@@ -3382,9 +3446,7 @@ export class ClaudeChatViewManager
       reveal: () => this.showPanel(entry, false),
       open: (options) => this.showPanel(entry, options.preserveFocus, options.viewColumn),
       onLockedAction: (listener) => entry.lockedActionListeners.push(listener),
-      rearmAutoHandoff: () => {
-        entry.autoHandoffStarted = false;
-      },
+      rearmAutoHandoff: () => this.rearmAutoHandoff(entry),
       processInfo: () => {
         const pid = entry.session.pid;
         return pid === undefined ? undefined : { pid, shared: false };
@@ -4182,7 +4244,7 @@ export class ClaudeChatViewManager
         return;
       }
       if (type === 'handoffToNewSession') {
-        void this.handoffToNewSessionIn(entry);
+        void this.requestHandoff(entry, { kind: 'manual' });
         return;
       }
       if (type === 'secondOpinion') {
@@ -4287,7 +4349,7 @@ export class ClaudeChatViewManager
         const on = m['on'] === true;
         // 一度自動で引き継いだ後に入れ直したら、また引き継げるようにする
         if (on) {
-          entry.autoHandoffStarted = false;
+          this.rearmAutoHandoff(entry);
         }
         entry.session.setAutoHandoff(on);
         return;
