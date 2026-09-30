@@ -1,5 +1,5 @@
 import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
-import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { sanitizeInlineText, truncateMiddleByCodePoint } from '../orchestrator/untrustedText';
 import {
   bestChoiceProbability,
   choiceAnswer,
@@ -150,9 +150,7 @@ export async function checkAutoReplyDanger(
       '',
       '### 元セッションの直前の出力',
       '',
-      context.length > DANGER_CONTEXT_MAX_LENGTH
-        ? `${context.slice(0, DANGER_CONTEXT_MAX_LENGTH)}…`
-        : context,
+      truncateDangerContext(context),
     ].join('\n'),
     questions: [
       {
@@ -173,6 +171,12 @@ export async function checkAutoReplyDanger(
   }
   const summary = `危険 ${formatReflexProbability(answer.yes)}`;
   return answer.yes >= threshold ? { kind: 'danger', summary } : { kind: 'safe', summary };
+}
+
+/** 質問や確認依頼が来やすい末尾を残し、中間を省く（Issue #1732）。 */
+function truncateDangerContext(context: string): string {
+  const middle = truncateMiddleByCodePoint(context, DANGER_CONTEXT_MAX_LENGTH);
+  return middle === undefined ? context : `${middle.head}\n…（中略）\n${middle.tail}`;
 }
 
 export type AutoReplyAskUserQuestionVerdict =
