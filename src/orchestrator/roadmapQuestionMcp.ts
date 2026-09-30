@@ -230,7 +230,7 @@ const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp;
   {
     // `findIrreversibleCommands`と同じ説明にして、両方に当たっても1件にまとめる
     description: 'リモートへの強制push',
-    pattern: /force[\s_-]*push|強制\s*(push|プッシュ)|push\s+(-f\b|--force)/u,
+    pattern: /force[\s_-]*push|強制\s*(push|プッシュ)|push\s+(-\w*f\w*\b|--force|--mirror)|push\s+\S+\s+\+\S/u,
     userOnly: true,
   },
   {
@@ -250,9 +250,15 @@ const QUESTION_DANGER_PATTERNS: readonly { description: string; pattern: RegExp;
     userOnly: true,
   },
   {
+    description: '作業ツリー・ファイルの破棄',
+    pattern:
+      /git\s+reset|checkout\s+(--\s+)?\.(\s|$)|stash\s+(drop|clear)|rm\s+-\w*[rf]|worktree\s+remove|(ファイル|リポジトリ|ディレクトリ|作業ツリー)を?\s*(削除|消去|消す|破棄)|変更を?\s*(破棄|巻き戻)/u,
+    userOnly: true,
+  },
+  {
     description: 'secrets',
     pattern:
-      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password/u,
+      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|認証情報|credential|パスワード|password|トークン|\btoken\b|ssh[\s_-]*key|パスフレーズ|passphrase/u,
     userOnly: true,
   },
   { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u, userOnly: false },

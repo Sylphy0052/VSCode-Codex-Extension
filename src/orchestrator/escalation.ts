@@ -360,7 +360,15 @@ function isForcePush(command: string): boolean {
   return gitIndexes.some((i) =>
     tokens
       .slice(i + 2)
-      .some((token) => token === '--force' || token === '--force-with-lease' || token === '-f'),
+      .some(
+        (token) =>
+          token === '--force' ||
+          token === '--force-with-lease' ||
+          token.startsWith('--force-with-lease=') ||
+          token === '--mirror' ||
+          /^-[a-zA-Z]*f[a-zA-Z]*$/.test(token) ||
+          /^\+[^\s:]/.test(token),
+      ),
   );
 }
 
