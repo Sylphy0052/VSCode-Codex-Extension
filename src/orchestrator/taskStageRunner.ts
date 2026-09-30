@@ -466,8 +466,11 @@ export class TaskStageRunner {
       const message = errorMessage(e);
       this.warn(runId, taskId, `${taskId}の関門の判定に失敗しました: ${message}`);
       // 状態の更新に失敗すると判定中のまま残り、誰も決着させられない。ユーザーの判断待ちへ落とす（Issue #1733）
+      // オーケストレーターの判断待ちへ移った関門は奪わない
       await this.mutate(runId, (r) =>
-        escalateStageGate(r, taskId, gateId, `関門の判定に失敗: ${message}`, this.now()),
+        findStageGate(r, taskId, gateId)?.status === 'judging'
+          ? escalateStageGate(r, taskId, gateId, `関門の判定に失敗: ${message}`, this.now())
+          : r,
       ).catch((retryError: unknown) => {
         this.warn(
           runId,

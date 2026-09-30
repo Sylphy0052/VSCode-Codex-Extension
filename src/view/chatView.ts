@@ -1387,6 +1387,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     entry.session.setAutoReply(false);
     entry.autoReplyTurnCount = 0;
     entry.autoReplyHistory = [];
+    // 判定のawaitが返らない往復の印を残すと、ONへ戻しても以後の往復を弾き続ける
+    entry.autoReplyTurnToken = undefined;
     entry.autoReplyReflexAbort.abort();
     entry.autoReplyReflexAbort = new AbortController();
     const agent = entry.autoReplyAgent;
@@ -1424,11 +1426,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     try {
       await this.runAutoReplyTurnSteps(entry, lastAgentMessageText);
     } finally {
-      // 送った後に始まった次の往復の印は消さない
+      // 送った後に始まった次の往復の印と処理中の表示は消さない
+      const nextTurnStarted = entry.autoReplyTurnToken !== undefined && entry.autoReplyTurnToken !== token;
       if (entry.autoReplyTurnToken === token) {
         entry.autoReplyTurnToken = undefined;
       }
-      if (!entry.disposed) {
+      if (!entry.disposed && !nextTurnStarted) {
         entry.session.setAutoReplyActivity(undefined);
       }
     }
