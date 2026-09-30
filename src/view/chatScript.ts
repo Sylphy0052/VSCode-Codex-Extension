@@ -2931,7 +2931,8 @@ export function chatScript(
     return {
       text:
         'コンテキスト ' + used + '/' + formatTokens(context.contextWindow) +
-        '（残り' + context.remainingPercent + '%）',
+        // 分母がauto-compactの上限なら、残量はauto-compactまでの残り（Issue #1747）
+        (context.autoCompact ? '（自動圧縮まで残り' : '（残り') + context.remainingPercent + '%）',
       low: context.remainingPercent <= LOW_CONTEXT_PERCENT,
     };
   }
