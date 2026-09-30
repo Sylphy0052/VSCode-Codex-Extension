@@ -1383,17 +1383,20 @@ export class ClaudeChatViewManager
     if (savedPromptPath === undefined) {
       firstText = pointerText;
     }
-    // 引き継ぎ1回につき1件の記録（Issue #1752）。失敗しても引き継ぎは止めない
-    await appendHandoffLog(this.globalStorageDir, {
-      provider: 'claude',
-      trigger,
-      prompt: firstText,
-      pointerPath,
-    }).catch((e: unknown) =>
-      this.log.warn(
-        `引き継ぎの記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      ),
-    );
+    // 引き継ぎ1回につき1件の記録（Issue #1752）。新タブを開けた・委譲できた後にだけ呼び、
+    // 失敗した試行は数えない。記録できなくても引き継ぎは止めない
+    const storageDir = this.globalStorageDir;
+    const recordHandoff = (): Promise<void> =>
+      appendHandoffLog(storageDir, {
+        provider: 'claude',
+        trigger,
+        prompt: firstText,
+        pointerPath,
+      }).catch((e: unknown) =>
+        this.log.warn(
+          `引き継ぎの記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
 
     if (entry.handoffDelegate !== undefined) {
       // 委譲先の見送りと失敗は`delegateHandoff`がfalseにまとめるため区別できない。タスク用
@@ -1405,6 +1408,9 @@ export class ClaudeChatViewManager
         trigger,
         this.log,
       );
+      if (handedOff) {
+        await recordHandoff();
+      }
       return handedOff ? 'started' : 'declined';
     }
 
@@ -1518,6 +1524,7 @@ export class ClaudeChatViewManager
         this.teardown(newEntry);
         continue;
       }
+      await recordHandoff();
       if (autoReply) {
         this.stopAutoReply(entry, 'handedOff');
       }

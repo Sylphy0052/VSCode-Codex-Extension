@@ -1178,17 +1178,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (savedPromptPath === undefined) {
       firstText = pointerText;
     }
-    // 引き継ぎ1回につき1件の記録（Issue #1752）。失敗しても引き継ぎは止めない
-    await appendHandoffLog(this.globalStorageDir, {
-      provider: 'codex',
-      trigger,
-      prompt: firstText,
-      pointerPath,
-    }).catch((e: unknown) =>
-      this.log.warn(
-        `引き継ぎの記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      ),
-    );
+    // 引き継ぎ1回につき1件の記録（Issue #1752）。新タブを開けた・委譲できた後にだけ呼び、
+    // 失敗した試行は数えない。記録できなくても引き継ぎは止めない
+    const storageDir = this.globalStorageDir;
+    const recordHandoff = (): Promise<void> =>
+      appendHandoffLog(storageDir, {
+        provider: 'codex',
+        trigger,
+        prompt: firstText,
+        pointerPath,
+      }).catch((e: unknown) =>
+        this.log.warn(
+          `引き継ぎの記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
 
     if (entry.handoffDelegate !== undefined) {
       // 委譲先の見送りと失敗は`delegateHandoff`がfalseにまとめるため区別できない。タスク用
@@ -1200,6 +1203,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         trigger,
         this.log,
       );
+      if (handedOff) {
+        await recordHandoff();
+      }
       return handedOff ? 'started' : 'declined';
     }
 
@@ -1237,6 +1243,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       return 'failed';
     }
+    await recordHandoff();
     // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
     newEntry.session.setAutoHandoff(state.autoHandoff);
     // 自動承認のON/OFFも同じ理由で引き継ぎ先へ持ち越す（Issue #1350）
