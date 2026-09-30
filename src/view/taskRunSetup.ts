@@ -224,7 +224,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
   });
 
-  // 設定が無効なら判定せず、計画提案は常に承認待ちにする（ロードマップ実行と同じ判定器・閾値を使う）。
+  // 設定が無効なら判定せず、計画提案は常に承認待ちにする（判定器と閾値は`planReflexReview.ts`のもの）。
   // 他のReflex判定と同じく、Reflexモードの親スイッチがOFFなら判定しない（Issue #1713）
   const planAutoApprove = (engine: TaskRunEngine) =>
     readTaskRunPlanAutoApproveEnabled()
