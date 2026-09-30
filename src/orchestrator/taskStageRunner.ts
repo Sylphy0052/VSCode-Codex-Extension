@@ -457,7 +457,10 @@ export class TaskStageRunner {
       if (resolved === undefined || findStageGate(resolved, taskId, gateId)?.status !== 'judging') {
         return;
       }
-      summary = `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
+      summary =
+        choice === 'proceed' && task.review?.passed === false
+          ? `レビューが通過していないため、Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を採らなかった`
+          : `Reflexの判定（${GATE_CHOICE_LABELS[choice]}）を反映できなかった`;
     }
     await this.mutate(runId, (r) => escalateStageGate(r, taskId, gateId, summary, this.now()));
   }
