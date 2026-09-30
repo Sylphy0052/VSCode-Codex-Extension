@@ -204,8 +204,15 @@ export type StageGateKind = 'reviewFindings' | 'stageFailed';
 /** 関門の決着: 実装へ差し戻す / 指摘を残したまま進める / 同じ工程をやり直す。 */
 export type StageGateChoice = 'sendBack' | 'proceed' | 'retry';
 
-/** 関門の状態。`judging`はReflexの判定中、`awaitingUser`はユーザーの判断待ち。 */
-export type StageGateStatus = 'judging' | 'awaitingUser' | 'resolved';
+/**
+ * 関門の状態。`judging`はReflexの判定中、`awaitingOrchestrator`はオーケストレーターの判断待ち
+ * （回答者判定でオーケストレーターが決めてよいとされた。Issue #1708）、`awaitingUser`は
+ * ユーザーの判断待ち。
+ */
+export type StageGateStatus = 'judging' | 'awaitingOrchestrator' | 'awaitingUser' | 'resolved';
+
+/** 関門の決着・質問の回答を誰が出したか。 */
+export type StageDecider = 'reflex' | 'orchestrator' | 'user';
 
 export interface StageGate {
   gateId: string;
@@ -217,19 +224,21 @@ export interface StageGate {
   detail: string;
   /** Reflexの判定の要約（人へ回した理由を含む）。 */
   reflexSummary: string | undefined;
-  resolution: { choice: StageGateChoice; by: 'reflex' | 'user'; at: string } | undefined;
+  resolution: { choice: StageGateChoice; by: StageDecider; at: string } | undefined;
   /** ISO8601。 */
   openedAt: string;
 }
 
 /**
- * 質問の状態。`judging`はReflexの判定中、`awaitingUser`はユーザーの判断待ち。
- * 回答済み・取り消し済みは変えない。
+ * 質問の状態。`judging`はReflexの判定中、`awaitingOrchestrator`はオーケストレーターの判断待ち
+ * （Issue #1708）、`awaitingUser`はユーザーの判断待ち。回答済み・取り消し済みは変えない。
  */
 export type StageQuestionStatus =
   | 'judging'
+  | 'awaitingOrchestrator'
   | 'awaitingUser'
   | 'answeredByReflex'
+  | 'answeredByOrchestrator'
   | 'answeredByUser'
   | 'cancelled';
 
@@ -1225,4 +1234,9 @@ export function recordOrchestratorAutoHandoff(run: TaskRun, generation: number, 
       lastAt: now.toISOString(),
     },
   };
+}
+
+/** Reflex・オーケストレーターの判断の要約へ1行足す（Issue #1708）。 */
+export function joinSummaries(first: string | undefined, second: string): string {
+  return first === undefined ? second : `${first}\n${second}`;
 }

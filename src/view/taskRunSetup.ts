@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { CLAUDE_EFFORTS } from '../claude/types';
 import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
 import {
+  readAnswererJudgeConfig,
   readAutoReplyReflexConfig,
   readClaudeConfig,
   readConfig,
@@ -57,6 +58,12 @@ import {
   type GitCommandRunner,
   type WorktreeCreationQueue,
 } from '../orchestrator/worktree';
+import {
+  judgeQuestionAnswerer,
+  judgeTurnEndAnswerer,
+  type AnswererQuestion,
+  type AnswererVerdict,
+} from '../reflex/answererJudge';
 import { proposeHandoffModelSettings } from './handoffModelChoice';
 import type { SettingsProvider } from './settingsProvider';
 import { taskRunLabel } from './taskRunKanbanModel';
@@ -138,6 +145,33 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         )
       : { kind: 'human', summary: undefined };
 
+  // 回答者判定（Issue #1708）。無効、またはOrchestratorへ任せられないならすべてユーザーへ回す
+  const judgeAnswerer = async (
+    runId: string,
+    engine: TaskRunEngine,
+    question: AnswererQuestion,
+  ): Promise<AnswererVerdict> => {
+    const settings = readAnswererJudgeConfig();
+    return settings.enabled && orchestrator.canDecide(runId)
+      ? judgeQuestionAnswerer(
+          { provider: engine, executable: executableFor(engine), logWarn: warn },
+          question,
+          settings.threshold,
+        )
+      : { kind: 'user', summary: undefined };
+  };
+  const judgeTurnEnd = async (runId: string, lastMessage: string): Promise<AnswererVerdict> => {
+    const settings = readAnswererJudgeConfig();
+    const engine = controller.find(runId)?.engine;
+    return settings.enabled && engine !== undefined
+      ? judgeTurnEndAnswerer(
+          { provider: engine, executable: executableFor(engine), logWarn: warn },
+          lastMessage,
+          settings.threshold,
+        )
+      : { kind: 'user', summary: undefined };
+  };
+
   const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
 
   const observation = createStageObservationPorts(ports);
@@ -177,6 +211,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     // Reflexモードが無効なら判定せず、すべての質問と関門をユーザーへ回す
     judgeQuestion: (engine, question) => judgeByReflex(engine, question),
     judgeGate: (engine, question) => judgeByReflex(engine, question),
+    judgeAnswerer,
     onRunChanged: (run) => holder.controller?.handleRunChanged(run),
     onTaskMerged: (runId, taskId) => holder.controller?.handleTaskMerged(runId, taskId),
     onWarning: (runId, taskId, message) => warn(`${runId} ${taskId}: ${message}`),
@@ -243,6 +278,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     showKanban: (runId) => holder.view?.show(runId),
     onDidChange: () => holder.view?.refresh(),
     log: (message) => log.warn(message),
+    judgeTurnEndAnswerer: judgeTurnEnd,
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),

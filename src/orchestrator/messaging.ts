@@ -914,7 +914,10 @@ export interface OrchestratorControlPort {
    * `runnerOrchestrator.ts`参照）。1つのrunで呼べる回数には上限があり
    * （`agent.workflows.maxAskUserPerRun`、既定3）、超えたら拒否する。
    */
-  askUser(question: string, choices: readonly string[]): OrchestratorControlResult;
+  askUser(
+    question: string,
+    choices: readonly string[],
+  ): OrchestratorControlResult | Promise<OrchestratorControlResult>;
   /**
    * 最終マージ（design.md §16.26、`finalMerge: orchestrator`）をmainへ進めるか
    * （`decision: 'merge'`）、PR/MRを残して保留するか（`decision: 'hold'`）を答える。
@@ -2743,8 +2746,10 @@ export class MessagingMcpServer {
       const choices = Array.isArray(rawChoices)
         ? rawChoices.filter((c): c is string => typeof c === 'string')
         : [];
-      const result = control.askUser(str(args['question']), choices);
-      return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+      // 回答者判定（Issue #1708）を挟むため、実体は非同期に返すことがある
+      return Promise.resolve(control.askUser(str(args['question']), choices)).then((result) =>
+        success(request.id, toolTextResult(JSON.stringify(result), !result.accepted)),
+      );
     }
 
     // `add_task`は`taskId`ではなく`id`を持つ（新しいタスクの識別子そのものが引数）ため、

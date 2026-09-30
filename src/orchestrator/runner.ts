@@ -120,6 +120,8 @@ import {
 import type { OverlapWait } from './taskOverlap';
 import { formatCarryOverPromptNote, hasLeftWork, type CarriedOverWork } from './resumeCarryOver';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
+import type { AnswererQuestion, AnswererVerdict } from '../reflex/answererJudge';
+import type { TurnEndAnswererNudge } from './turnEndAnswerer';
 import type { SplitSuggestThresholds } from './taskSplit';
 import { notifyUnansweredInstructions } from './runnerInstruction';
 import {
@@ -665,6 +667,17 @@ export interface WorkflowRunnerDeps {
    * （`readFinalMergeDecisionTimeoutSec`と同じく、呼び出し側は毎回現在値を返す関数を渡すこと）。
    */
   readMaxAskUserPerRun?: () => number;
+  /**
+   * `ask_user`の回答者判定（Issue #1708）。オーケストレーターが自分で決めてよい問いなら
+   * `orchestrator`を返し、`ask_user`を回数に数えずに拒否する。省略時は判定せず人へ出す。
+   * 無効・失敗・時間切れは`user`を返すこと。
+   */
+  judgeAskUserAnswerer?: (provider: Provider, question: AnswererQuestion) => Promise<AnswererVerdict>;
+  /**
+   * ターン末の問いかけの回答者判定（Issue #1708）。オーケストレーターが自分で決めてよい問いかけ
+   * なら`orchestrator`を返し、自分で決めるよう促す。省略時は判定しない。
+   */
+  judgeTurnEndAnswerer?: (provider: Provider, lastMessage: string) => Promise<AnswererVerdict>;
   /**
    * `agent.workflows.autoResume`の現在値（design.md §16.35、roadmap W10、Issue #584）。
    * 省略時は`DEFAULT_AUTO_RESUME`（`runnerRestore.ts`、既定`true`）を使う。`false`なら
@@ -1353,7 +1366,14 @@ export interface WorkflowRunSnapshot {
    * `hasLiveSession`が`false`のときはボタンを無効にする（`workflowScript.ts`）。
    */
   pendingAskUser?:
-    | { question: string; choices: readonly string[]; hasLiveSession: boolean; answered: boolean }
+    | {
+        question: string;
+        choices: readonly string[];
+        hasLiveSession: boolean;
+        answered: boolean;
+        /** 回答者判定（Issue #1708）の要約。永続化しないため、リロード後は`undefined`。 */
+        reflexSummary?: string | undefined;
+      }
     | undefined;
 }
 
@@ -1763,6 +1783,16 @@ export interface LiveOrchestrator {
   provider: Provider;
   /** ターンが走っている最中か。走行中はイベントを溜め、割り込まない。 */
   busy: boolean;
+  /** `ask_user`の回答者判定（Issue #1708）の最中か。判定中に届いた2件目の`ask_user`は拒否する。 */
+  askUserJudging?: boolean;
+  /**
+   * `ask_user`を回答者判定（Issue #1708）でオーケストレーターへ差し戻した回数。
+   * `MAX_ASK_USER_ANSWERER_REJECTIONS`に達したら判定をやめて人へ出す（差し戻しの繰り返しで
+   * runが進まなくなるのを防ぐ）。
+   */
+  askUserRejectedCount?: number;
+  /** ターン末の問いかけの回答者判定と促し（Issue #1708）。最初に待機へ戻ったときに作る。 */
+  answererNudge?: TurnEndAnswererNudge;
   /** まだ送っていないイベント通知。ターンが終わったらまとめて送る。 */
   pending: OrchestratorEvent[];
   /** run全体で送ったイベント通知の総数（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`の判定用）。 */
@@ -2226,6 +2256,8 @@ export interface LiveAskUser {
   readonly choices: readonly string[];
   /** 回答待ちに入った時刻（ms epoch）。 */
   readonly since: number;
+  /** 回答者判定（Issue #1708）の要約。判定しなかった・失敗したときは`undefined`。 */
+  readonly reflexSummary?: string | undefined;
   /**
    * 人が選んだ答え（`answerAskUser`が設定する）。**まだオーケストレーターへは送っていない。**
    * `ask_user`のツール呼び出しはオーケストレーターのターンの最中に届くため、`answerAskUser`が

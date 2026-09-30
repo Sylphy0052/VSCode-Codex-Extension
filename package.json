@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.930.9",
+  "version": "2026.930.10",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1393,7 +1393,7 @@
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "markdownDescription": "Reflexモード（issue #1455）を有効にするか。入力欄の「…」メニューからも切り替えられる。有効にすると、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で次の3つを判定する。自動返信モードの完了検証・質問への自動回答・危険度ゲート（`#agent.chat.autoReply.reflex.enabled#`）、条件付きループの完了宣言の検証（`#agent.chat.loopDoneCheck.enabled#`）、依頼ごとのskill選択（`#agent.chat.skillSelect.enabled#`）。一部だけ止めるには、それぞれの設定を `false` にする。あわせて、自動引き継ぎの区切り判定（`#agent.autoHandoff.reflex.suggestThreshold#` ほか）が分類器からReflexへ切り替わる。判定1回に数秒〜十数秒かかり、利用枠も使う。"
+          "markdownDescription": "Reflexモード（issue #1455）を有効にするか。入力欄の「…」メニューからも切り替えられる。有効にすると、会話しているCLIの軽量モデル（Claude Codeは `sonnet`、Codexは `gpt-6-luna`）で次の4つを判定する。自動返信モードの完了検証・質問への自動回答・危険度ゲート（`#agent.chat.autoReply.reflex.enabled#`）、条件付きループの完了宣言の検証（`#agent.chat.loopDoneCheck.enabled#`）、依頼ごとのskill選択（`#agent.chat.skillSelect.enabled#`）、オーケストレーターへの問いの回答者判定（`#agent.chat.answererJudge.enabled#`）。一部だけ止めるには、それぞれの設定を `false` にする。あわせて、自動引き継ぎの区切り判定（`#agent.autoHandoff.reflex.suggestThreshold#` ほか）が分類器からReflexへ切り替わる。判定1回に数秒〜十数秒かかり、利用枠も使う。"
         },
         "agent.chat.loopDoneCheck.enabled": {
           "type": "boolean",
@@ -1408,6 +1408,20 @@
           "maximum": 1,
           "scope": "window",
           "markdownDescription": "完了宣言の検証で、「終了条件を満たした」の確率がこの値以上ならループを終了する。下回れば次の周へ進む。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
+        },
+        "agent.chat.answererJudge.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Reflexモード（`#agent.chat.reflex.enabled#`）が有効のとき、この機能だけを止めるには `false` にする。Reflexモードが無効なら、この値によらず判定しない。オーケストレーターへの問いを、ユーザーが答えるべきか、オーケストレーターが自分で決めてよいかをReflex判定（issue #1708）で振り分ける。対象は、オーケストレータモードの工程の質問と関門、ワークフローの `ask_user`、オーケストレーターのターン末の問いかけ。オーケストレーターへ回すのは「オーケストレーター」の確率が `#agent.chat.answererJudge.threshold#` 以上のときだけで、オーケストレーターが決められなければユーザーへ回す。判定が失敗・時間切れのときはユーザーへ回す。escalation付きの質問は判定せずユーザーへ回す。"
+        },
+        "agent.chat.answererJudge.threshold": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "回答者判定で、「オーケストレーター」の確率がこの値以上ならオーケストレーターに決めさせる。下回ればユーザーへ回す。範囲外や数値でない値は既定値に戻す。確率はモデルの自己申告で較正されていないため、初期値は仮置き。"
         },
         "agent.chat.skillSelect.enabled": {
           "type": "boolean",

@@ -1548,6 +1548,9 @@ export function workflowScript(): string {
     }
     box.hidden = false;
     box.appendChild(text('div', 'orch-ask-user-question', pending.question));
+    if (pending.reflexSummary) {
+      box.appendChild(text('div', 'hint', '回答者判定（Reflex）: ' + pending.reflexSummary));
+    }
     if (!pending.hasLiveSession) {
       box.appendChild(
         text('div', 'hint', 'このセッションは復元できていないため、いまは回答できません。'),

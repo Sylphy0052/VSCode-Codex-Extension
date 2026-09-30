@@ -848,7 +848,8 @@ const script = `
 
   function renderQuestion(card, q) {
     const box = el('div', 'question');
-    box.appendChild(el('div', 'question-text', (q.blocking ? '[回答待ちで停止中] ' : '') + q.question));
+    const prefix = (q.awaitingOrchestrator ? '[オーケストレーターが判断中] ' : '') + (q.blocking ? '[回答待ちで停止中] ' : '');
+    box.appendChild(el('div', 'question-text', prefix + q.question));
     box.appendChild(el('div', 'question-note', '理由: ' + q.reason));
     if (q.evidence) { box.appendChild(el('div', 'question-note', '材料: ' + q.evidence)); }
     if (q.reflexSummary) { box.appendChild(el('div', 'question-note', 'Reflex: ' + q.reflexSummary)); }
@@ -925,7 +926,8 @@ const script = `
   function renderGate(card, gate) {
     const box = el('div', 'gate');
     const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : '「' + gate.stageLabel + '」の失敗の関門';
-    box.appendChild(el('div', 'question-text', title + (gate.judging ? '（Reflexが判定中）' : '（判断待ち）')));
+    const status = gate.judging ? '（Reflexが判定中）' : gate.awaitingOrchestrator ? '（オーケストレーターが判断中）' : '（判断待ち）';
+    box.appendChild(el('div', 'question-text', title + status));
     box.appendChild(el('div', 'gate-detail', gate.detail));
     if (gate.reflexSummary) { box.appendChild(el('div', 'question-note', 'Reflex: ' + gate.reflexSummary)); }
     if (gate.choices.length > 0) {
