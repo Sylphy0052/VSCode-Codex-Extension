@@ -48,6 +48,7 @@ const TASK_ID_SCHEMA = { type: 'string', description: 'タスクのID（T<数字
 const MAX_QUESTION_ID_LENGTH = 200;
 const MAX_REASON_LENGTH = 500;
 const MAX_ESCALATE_REASON_LENGTH = 300;
+const MAX_GATE_REASON_LENGTH = 300;
 const MAX_SETTING_LENGTH = 100;
 const STAGE_GATE_CHOICES: readonly StageGateChoice[] = ['sendBack', 'proceed', 'retry'];
 const TASK_RUN_ENGINES: readonly TaskRunEngine[] = ['codex', 'claude'];
@@ -186,7 +187,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'resolve_gate',
     description:
-      'Reflexが決着させられなかった関門（レビュー後の差し戻し、工程の失敗）を決着させる。オーケストレーターの判断待ちの関門は自分で決めて送る（確認は出ない）。ユーザーの判断待ちの関門は、ユーザーと会話で決めた判断だけを送る。送る前にユーザーへ確認する。',
+      'Reflexが決着させられなかった関門（レビュー後の差し戻し、工程の失敗）を決着させる。オーケストレーターの判断待ちの関門は自分で決めて送る（確認は出ない）。ユーザーの判断待ちの関門は、Reflexがreasonを添えた判断を妥当と判定すれば確認なしで決着し、そうでなければユーザーへ確認が出る。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -197,6 +198,10 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
           enum: [...STAGE_GATE_CHOICES],
           description:
             'sendBack=実装へ差し戻す / proceed=指摘を残したまま進める（この2つはレビューの関門）/ retry=同じ工程をやり直す（失敗の関門）',
+        },
+        reason: {
+          type: 'string',
+          description: `この判断を選んだ理由（${String(MAX_GATE_REASON_LENGTH)}文字以内）。ユーザーの判断待ちの関門でReflexの審査に使う`,
         },
       },
       required: ['taskId', 'gateId', 'choice'],
@@ -366,7 +371,13 @@ export type TaskRunOrchestratorCall =
     }
   | { tool: 'instruct_task'; taskId: string; instruction: string }
   | { tool: 'answer_question'; taskId: string; questionId: string; answer: string }
-  | { tool: 'resolve_gate'; taskId: string; gateId: string; choice: StageGateChoice }
+  | {
+      tool: 'resolve_gate';
+      taskId: string;
+      gateId: string;
+      choice: StageGateChoice;
+      reason: string | undefined;
+    }
   | {
       tool: 'escalate_to_user';
       taskId: string;
@@ -546,14 +557,18 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       return { ok: true, call: { tool: 'answer_question', taskId, questionId, answer } };
     }
     case 'resolve_gate': {
-      const { gateId, choice } = a;
+      const { gateId, choice, reason } = a;
       if (typeof gateId !== 'string' || gateId === '' || gateId.length > MAX_QUESTION_ID_LENGTH) {
         return { ok: false, message: 'gateIdはget_run_stateで得た関門のIDを指定する' };
       }
       if (!isGateChoice(choice)) {
         return { ok: false, message: `choiceは${STAGE_GATE_CHOICES.join(' / ')}のいずれかを指定する` };
       }
-      return { ok: true, call: { tool: 'resolve_gate', taskId, gateId, choice } };
+      const text = typeof reason === 'string' ? inline(reason, MAX_GATE_REASON_LENGTH) : '';
+      return {
+        ok: true,
+        call: { tool: 'resolve_gate', taskId, gateId, choice, reason: text === '' ? undefined : text },
+      };
     }
     case 'escalate_to_user': {
       const { questionId, gateId, reason } = a;

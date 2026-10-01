@@ -322,7 +322,8 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
 }
 
 /**
- * 関門を決着させる。Reflexは判定中の関門に、オーケストレーターは自分の判断待ちの関門に、
+ * 関門を決着させる。Reflexは判定中の関門に、オーケストレーターは自分の判断待ちの関門
+ * （判断をReflexが妥当と判定した`reflexApproved`なら、ユーザーの判断待ちの関門にも。Issue #1787）に、
  * ユーザーはどの開いた関門にも決着を付けられる（ユーザーの判断を優先し、遅れて届いたReflexや
  * オーケストレーターの判断は捨てる）。関門の種類に合わない決着と、
  * タスクが関門を開いたときの状態から動いているときはそのまま返す（呼び出し側は戻り値が元の
@@ -337,7 +338,12 @@ export function resolveStageGate(
   run: TaskRun,
   taskId: string,
   gateId: string,
-  resolution: { choice: StageGateChoice; by: StageDecider; reflexSummary?: string },
+  resolution: {
+    choice: StageGateChoice;
+    by: StageDecider;
+    reflexSummary?: string;
+    reflexApproved?: boolean;
+  },
   now: Date,
 ): TaskRun {
   const at = now.toISOString();
@@ -345,7 +351,11 @@ export function resolveStageGate(
     if (resolution.by === 'reflex' && gate.status !== 'judging') {
       return undefined;
     }
-    if (resolution.by === 'orchestrator' && gate.status !== 'awaitingOrchestrator') {
+    if (
+      resolution.by === 'orchestrator' &&
+      gate.status !== 'awaitingOrchestrator' &&
+      !(resolution.reflexApproved === true && gate.status === 'awaitingUser')
+    ) {
       return undefined;
     }
     if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
