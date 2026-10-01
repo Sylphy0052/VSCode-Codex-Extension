@@ -82,7 +82,7 @@ import {
   type TaskRunEngine,
 } from './taskRunState';
 import { reviewTaskRunPlanProposal } from './taskRunPlanReview';
-import { reviewGateResolution } from './taskRunGateReview';
+import { reviewGateResolution, type TaskRunGateReview } from './taskRunGateReview';
 import type { TaskRunStore } from './taskRunStore';
 import type { StageObservationPorts } from './taskStageObservation';
 import type { PauseStageOutcome, TaskStageRunner } from './taskStageRunner';
@@ -104,6 +104,8 @@ import {
 
 // resume_stageの応答へ載せる失敗理由の上限。get_run_stateの「理由:」と同じ長さで切る
 const RESUME_FAILURE_MAX_LENGTH = 1000;
+// 関門へ保存するReflexの承認の要約の上限。Reflexへ渡すときの「これまでの判定の要約」と同じ長さで切る
+const GATE_APPROVAL_SUMMARY_MAX_LENGTH = 500;
 
 const PAUSE_REJECTIONS: Record<Exclude<PauseStageOutcome, { ok: true }>['reason'], string> = {
   noSession: '工程セッションが動いていない',
@@ -224,6 +226,11 @@ export class TaskRunController {
    * 判断は審査しない。
    */
   private readonly gatesNeedingUser = new Map<string, Map<string, string>>();
+  /**
+   * 審査中の関門の判断（Issue #1796）。キーは`runId`・`taskId`・`gateId`・判断。同じ判断の
+   * `resolve_gate`が並行したときに、Reflexの審査を二重に走らせず結果を共有する。
+   */
+  private readonly gateReviewsInFlight = new Map<string, Promise<TaskRunGateReview>>();
   /** runの開始と再開を直列にする。動いているrunの確認と作成の間に別の開始が割り込まないため。 */
   private readonly startQueue = new SerialQueue();
 
@@ -1482,14 +1489,23 @@ export class TaskRunController {
     ) {
       return { needsUser: { summary: undefined } };
     }
-    const verdict = await reviewGateResolution(
-      config.reflex,
-      { task, gate, choice, reason },
-      config.threshold,
-    );
+    const flightKey = JSON.stringify([runId, taskId, gateId, choice]);
+    let review = this.gateReviewsInFlight.get(flightKey);
+    if (review === undefined) {
+      review = reviewGateResolution(
+        config.reflex,
+        { task, gate, choice, reason },
+        config.threshold,
+      ).finally(() => this.gateReviewsInFlight.delete(flightKey));
+      this.gateReviewsInFlight.set(flightKey, review);
+    }
+    const verdict = await review;
     if (verdict.kind !== 'approved') {
-      const rejectedInRun = this.gatesNeedingUser.get(runId) ?? new Map<string, string>();
-      this.gatesNeedingUser.set(runId, rejectedInRun.set(key, verdict.summary));
+      // 判定を得られなかった（時間切れ・不正なJSON）ときは覚えず、次の`resolve_gate`で審査し直す
+      if (verdict.failed !== true) {
+        const rejectedInRun = this.gatesNeedingUser.get(runId) ?? new Map<string, string>();
+        this.gatesNeedingUser.set(runId, rejectedInRun.set(key, verdict.summary));
+      }
       return { needsUser: { summary: verdict.summary } };
     }
     return {
@@ -1568,7 +1584,7 @@ export class TaskRunController {
               reflexApproved: true,
               reflexSummary: joinSummaries(
                 gate.reflexSummary,
-                `Orchestratorの判断をReflexが承認: ${reflexApproval.summary}`,
+                `Orchestratorの判断をReflexが承認: ${sanitizeInlineText(reflexApproval.summary, GATE_APPROVAL_SUMMARY_MAX_LENGTH)}`,
               ),
             }
           : { choice, by },

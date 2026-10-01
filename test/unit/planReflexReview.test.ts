@@ -71,6 +71,7 @@ describe('reviewPlanWithReflex', () => {
     await expect(review(stub)).resolves.toEqual({
       kind: 'needsUser',
       summary: 'Reflexの判定を得られませんでした',
+      failed: true,
     });
   });
 

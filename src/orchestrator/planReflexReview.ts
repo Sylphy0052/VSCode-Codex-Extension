@@ -28,11 +28,12 @@ export const REVIEW_OPTIONS = [REVIEW_VALID, REVIEW_WRONG, REVIEW_UNKNOWN] as co
 
 export type PlanReflexVerdict =
   | { kind: 'approved'; summary: string }
-  | { kind: 'needsUser'; summary: string };
+  /** `failed`は判定を得られなかった（時間切れ・不正なJSON）とき。妥当でないと判定したのとは区別する。 */
+  | { kind: 'needsUser'; summary: string; failed?: true };
 
 /**
  * `situation`・`state`・`question`でReflexへ判定を1問（3択）だけ聞く。「妥当」が最上位かつ
- * `threshold`以上のときだけ`approved`。判定を得られなければ`needsUser`。
+ * `threshold`以上のときだけ`approved`。判定を得られなければ`failed`付きの`needsUser`。
  */
 export async function reviewPlanWithReflex(
   reflex: ReflexJudgeDeps,
@@ -48,7 +49,7 @@ export async function reviewPlanWithReflex(
   });
   const answer = choiceAnswer(answers?.[0]);
   if (answer === undefined) {
-    return { kind: 'needsUser', summary: 'Reflexの判定を得られませんでした' };
+    return { kind: 'needsUser', summary: 'Reflexの判定を得られませんでした', failed: true };
   }
   const summary = describeReflexChoice(REVIEW_OPTIONS, answer.probabilities);
   return answer.best === REVIEW_VALID && bestChoiceProbability(answer) >= threshold
