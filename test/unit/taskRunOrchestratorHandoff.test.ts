@@ -112,6 +112,9 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       reopenRun: vi.fn(),
       startRun: vi.fn(),
       syncRoadmap: vi.fn(),
+      approvePlanByReview: vi.fn(),
+      delegateQuestionToOrchestrator: vi.fn(),
+      escalateToUser: vi.fn(),
     },
     server: {
       registerTools: vi.fn(async () => {
@@ -122,6 +125,7 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
     },
     confirmAnswer: vi.fn(async () => true),
     confirmGateResolution: vi.fn(async () => true),
+    confirmPlanApproval: vi.fn(async () => true),
     showKanban: vi.fn(),
     onDidChange: vi.fn(),
     log: vi.fn(),

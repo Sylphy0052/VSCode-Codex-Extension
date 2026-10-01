@@ -367,7 +367,7 @@ function isForcePush(command: string): boolean {
     const args = tokens.slice(i + 2);
     return args.some((token, index) => {
       // 値を取るオプションの値（`-o -f` など）はフラグではない
-      if (index > 0 && PUSH_VALUE_OPTIONS.has(args[index - 1])) return false;
+      if (index > 0 && PUSH_VALUE_OPTIONS.has(args[index - 1] ?? '')) return false;
       return (
         token === '--force' ||
         token === '--force-with-lease' ||

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __mock } from 'vscode';
+import { __mock } from '../mocks/vscode';
 
 vi.mock('../../src/orchestrator/roadmapQuestionMcp', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/orchestrator/roadmapQuestionMcp')>()),
@@ -30,6 +30,8 @@ const GATE_QUESTION: GateJudgeQuestion = {
   question: '次の工程へ進めてよいか',
   reason: '検証が済んだ',
   options: ['進める', 'やり直す'],
+  recommended: undefined,
+  evidence: undefined,
 };
 
 const ANSWERER_QUESTION: AnswererQuestion = {
