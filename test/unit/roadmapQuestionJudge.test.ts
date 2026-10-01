@@ -167,6 +167,9 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
     'tokens削減の方針を決める',
     'tokens per requestを見直す',
     'tokens consumedを記録する',
+    // 使用量の文脈のsaved/savingsは従来どおり除外する（Issue #1795）
+    'tokens savedを記録する',
+    'token savingsを見積もる',
   ])('secretsと無関係なtokenの質問は人へ回さない: %s', (question) => {
     expect(findQuestionDangers({ ...safe, question }).userOnly).not.toContain('secrets');
   });
@@ -189,6 +192,11 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
     // OIDCのID tokenは従来どおり認証情報として扱う（回帰防止。Issue #1786）
     'ID tokenを検証する',
     'id_tokenを送る',
+    // 認証情報の保存はsavedが続いても人へ回す（Issue #1795）
+    'refresh tokens saved to fileでよいか',
+    'id_token saved in cacheでよいか',
+    'auth token savedを確認する',
+    'OAuth tokens savedでよいか',
   ])('secretsを指すtokenの質問は人へ回す: %s', (question) => {
     expect(findQuestionDangers({ ...safe, question }).userOnly).toContain('secrets');
   });
