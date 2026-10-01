@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
 
@@ -57,6 +57,32 @@ export function hasHandoffAcceptance(text: string, expectedId: string): boolean 
 export function stateHasHandoffAcceptance(state: ChatState, expectedId: string): boolean {
   return state.items.some(
     (item) => item.kind === 'agentMessage' && hasHandoffAcceptance(item.text, expectedId),
+  );
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/**
+ * 引き継ぎ先がpointerファイルを読み込んだか（Issue #1797）。
+ *
+ * 引き継ぎ先は受領行を出さずに作業を始めることがあるが、pointerを読めたのなら本文は届いている。
+ * 成功したReadツール（`fileRead`）か、コマンド（`commandExecution`）のうち、pointerのファイル名を
+ * 1語として含むものを受領とみなす。ファイル名はセッションidと時刻を含み一意なので、`~` 始まりや
+ * 相対パスで読んだ場合も拾える。`<名前>-prompt.md` や `<名前>.bak` のような別ファイルは拾わない。
+ */
+export function stateHasPointerRead(state: ChatState, pointerPath: string): boolean {
+  const name = basename(pointerPath);
+  if (name === '') {
+    return false;
+  }
+  const word = new RegExp(`(?:^|[\\s/'"=<])${escapeRegExp(name)}(?=$|[\\s'";&|)<>])`, 'u');
+  return state.items.some(
+    (item) =>
+      (item.kind === 'fileRead' || item.kind === 'commandExecution') &&
+      isSucceeded(item.status) &&
+      word.test(item.detail),
   );
 }
 

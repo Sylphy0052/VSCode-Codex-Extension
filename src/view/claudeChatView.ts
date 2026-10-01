@@ -1505,11 +1505,13 @@ export class ClaudeChatViewManager
       // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
       // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
       const giveUp = new AbortController();
+      // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）
       const firstResponse = waitForDestinationResponse(
         newEntry,
         undefined,
         giveUp.signal,
         handoffId,
+        attemptText === pointerText ? pointerPath : undefined,
       );
       try {
         // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）

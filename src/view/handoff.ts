@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
-import { stateHasHandoffAcceptance } from './handoffAcceptance';
+import { stateHasHandoffAcceptance, stateHasPointerRead } from './handoffAcceptance';
 import { type HandoffDigest, readHandoffDigest, renderHandoffDigest } from './handoffDigest';
 
 /**
@@ -1498,12 +1498,16 @@ export type DestinationResponseOutcome =
  *
  * 送信より前に張る以上、送信そのものが失敗したときに監視だけが残る。`giveUp` を渡して
  * `abort()` すれば、上限を待たずに listener を外して `abandoned` で決着させられる。
+ *
+ * `pointerPath` は初回プロンプトでpointerファイルを指したときだけ渡す。引き継ぎ先がそれを
+ * 読み込んだら、受領行が無くても受領とみなす（Issue #1797）。
  */
 export function waitForDestinationResponse(
   entry: HandoffTurnWatch,
   timeoutMs?: number,
   giveUp?: AbortSignal,
   expectedHandoffId?: string,
+  pointerPath?: string,
 ): Promise<DestinationResponseOutcome> {
   const limitMs =
     timeoutMs ??
@@ -1535,8 +1539,11 @@ export function waitForDestinationResponse(
           finish({ succeeded: true });
           return;
         }
-      } else if (stateHasHandoffAcceptance(state, expectedHandoffId)) {
-        // 受領確認の行が正しいidで出た（Issue #1751）
+      } else if (
+        stateHasHandoffAcceptance(state, expectedHandoffId) ||
+        (pointerPath !== undefined && stateHasPointerRead(state, pointerPath))
+      ) {
+        // 受領確認の行が正しいidで出た（Issue #1751）か、pointerファイルを読み込んだ（Issue #1797）
         finish({ succeeded: true });
         return;
       }

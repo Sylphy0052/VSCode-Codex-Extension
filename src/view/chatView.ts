@@ -1307,11 +1307,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
     // 残ってしまうため、その場で打ち切る
     const giveUp = new AbortController();
+    // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）
     const firstResponse = waitForDestinationResponse(
       newEntry,
       undefined,
       giveUp.signal,
       handoffId,
+      firstText === pointerText ? pointerPath : undefined,
     );
     try {
       await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
