@@ -690,7 +690,7 @@ export class TaskRunController {
    * Reflexが無効・妥当と言い切れないときは承認せず`needsUser`を返す（承認するかは呼び出し側が
    * 人に確かめる）。`reviewedPlan`は人に見せる計画で、承認時に変わっていないか照合する。
    * 審査の結果は`planReview`へ記録する。Reflexが一度妥当としなかった計画は、変わるまで審査し直さない
-   * （判定の揺れで人に残した承認を通さないため）。
+   * （判定の揺れで人に残した承認を通さないため）。判定を得られなかったときは審査し直す（Issue #1801）。
    */
   async approvePlanByReview(
     runId: string,
@@ -731,7 +731,10 @@ export class TaskRunController {
         : r,
     );
     if (verdict.kind !== 'approved') {
-      this.plansNeedingUser.set(runId, reviewedPlan);
+      // 判定を得られなかった（時間切れ・不正なJSON）ときは覚えず、次の`approve_plan`で審査し直す
+      if (verdict.failed !== true) {
+        this.plansNeedingUser.set(runId, reviewedPlan);
+      }
       return { needsUser: { summary: verdict.summary, reviewedPlan } };
     }
     const approved = await this.approvePlan(runId, reviewedPlan);
