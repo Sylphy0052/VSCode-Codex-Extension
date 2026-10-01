@@ -265,9 +265,9 @@ const QUESTION_DANGER_PATTERNS: readonly {
   {
     description: 'secrets',
     // tokenは複数形も単数形と同じに扱う。ID token（id_token）は従来どおり認証情報として拾う（Issue #1786）
-    // refresh/id/authが前に付くtokenは、後ろの除外語（savedなど）に関わらず認証情報として拾う（Issue #1795）
+    // refresh/id/auth（OAuth）が前に付くtokenは、後ろの除外語（savedなど）に関わらず認証情報として拾う（Issue #1795）
     pattern:
-      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|\b(?:refresh|id|auth)[\s_-]*tokens?\b|認証情報|credential|パスワード|password|(?<!入力|出力|input\s|output\s|max\s|cache\s|cached\s)(?:トークン|\btokens?\b|_tokens?\b)(?!\s*(?:量|数|使用|消費|上限|制限|コスト|予算|見積|count|usage|limit|budget|cost|window|estimate|削減|節約|per\b|consum|sav))|\bbearer\b|\bpat\b|\bjwt\b|ssh[\s_-]*key|パスフレーズ|passphrase/u,
+      /secret|シークレット|秘密鍵|private[\s_-]*key|api[\s_-]*key|apiキー|アクセストークン|access[\s_-]*token|\b(?:refresh|id|o?auth)[\s_-]*tokens?\b|認証情報|credential|パスワード|password|(?<!入力|出力|input\s|output\s|max\s|cache\s|cached\s)(?:トークン|\btokens?\b|_tokens?\b)(?!\s*(?:量|数|使用|消費|上限|制限|コスト|予算|見積|count|usage|limit|budget|cost|window|estimate|削減|節約|per\b|consum|sav))|\bbearer\b|\bpat\b|\bjwt\b|ssh[\s_-]*key|パスフレーズ|passphrase/u,
     userOnly: true,
   },
   { description: '本番環境', pattern: /本番|\bprod(uction)?\b/u, userOnly: false },

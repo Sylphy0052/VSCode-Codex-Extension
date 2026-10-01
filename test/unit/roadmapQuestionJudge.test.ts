@@ -196,6 +196,7 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
     'refresh tokens saved to fileでよいか',
     'id_token saved in cacheでよいか',
     'auth token savedを確認する',
+    'OAuth tokens savedでよいか',
   ])('secretsを指すtokenの質問は人へ回す: %s', (question) => {
     expect(findQuestionDangers({ ...safe, question }).userOnly).toContain('secrets');
   });
