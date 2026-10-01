@@ -113,6 +113,7 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       startRun: vi.fn(),
       syncRoadmap: vi.fn(),
       approvePlanByReview: vi.fn(),
+      resolveGateByReview: vi.fn(),
       delegateQuestionToOrchestrator: vi.fn(),
       escalateToUser: vi.fn(),
     },

@@ -56,6 +56,7 @@ import {
   currentStage,
   finishTaskRun,
   getTask,
+  joinSummaries,
   isTaskDone,
   isTaskRunActive,
   isValidMaxParallel,
@@ -81,6 +82,7 @@ import {
   type TaskRunEngine,
 } from './taskRunState';
 import { reviewTaskRunPlanProposal } from './taskRunPlanReview';
+import { reviewGateResolution } from './taskRunGateReview';
 import type { TaskRunStore } from './taskRunStore';
 import type { StageObservationPorts } from './taskStageObservation';
 import type { PauseStageOutcome, TaskStageRunner } from './taskStageRunner';
@@ -162,6 +164,11 @@ export interface TaskRunControllerDeps {
    * 無効なとき（`undefined`を返す）は審査せず人に確かめる。`planAutoApprove`の設定には左右されない。
    */
   planReview?(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
+  /**
+   * Orchestratorの`resolve_gate`で、ユーザーの判断待ちの関門の判断をReflexに審査させる（Issue #1787）。
+   * 省略時とReflexモードが無効なとき（`undefined`を返す）は審査せず人に確かめる。
+   */
+  gateReview?(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
   /** ロードマップIssueの読み書き（Issue #1623）。無ければ実行中の追従と書き戻しをしない。 */
   roadmap?: TaskRunRoadmapPort;
   /**
@@ -211,6 +218,12 @@ export class TaskRunController {
   private readonly recommended = new Map<string, Map<string, StageSettingsRecommendation>>();
   /** `approve_plan`でReflexが妥当としなかった計画（runごと。Issue #1763）。 */
   private readonly plansNeedingUser = new Map<string, string>();
+  /**
+   * `resolve_gate`でReflexが妥当としなかった関門の判断（Issue #1787）。runIdごとに、キーは`taskId`・
+   * `gateId`・判断、値はReflexの要約。理由を言い換えて審査をやり直させないよう、一度妥当としなかった
+   * 判断は審査しない。
+   */
+  private readonly gatesNeedingUser = new Map<string, Map<string, string>>();
   /** runの開始と再開を直列にする。動いているrunの確認と作成の間に別の開始が割り込まないため。 */
   private readonly startQueue = new SerialQueue();
 
@@ -1438,9 +1451,60 @@ export class TaskRunController {
   }
 
   /**
+   * Orchestratorの`resolve_gate`（Issue #1787）。ユーザーの判断待ちの関門への判断をReflexで審査し、
+   * 妥当なら決着させる。Reflexが無効・妥当と言い切れないときは決着させず`needsUser`を返す（決着させるかは
+   * 呼び出し側が人に確かめる）。Reflexが一度妥当としなかった関門は、審査し直さない。
+   */
+  async resolveGateByReview(
+    runId: string,
+    taskId: string,
+    gateId: string,
+    choice: StageGateChoice,
+    reason: string | undefined,
+  ): Promise<{ decided: ControllerResult } | { needsUser: { summary: string | undefined } }> {
+    const run = this.deps.store.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
+    if (run === undefined || task === undefined || gate?.status !== 'awaitingUser') {
+      return { needsUser: { summary: undefined } };
+    }
+    const key = JSON.stringify([taskId, gateId, choice]);
+    const rejected = this.gatesNeedingUser.get(runId)?.get(key);
+    if (rejected !== undefined) {
+      return { needsUser: { summary: rejected } };
+    }
+    const config = this.deps.gateReview?.(run.engine);
+    // 差し戻しの上限に達した関門の差し戻しはユーザーだけが選べる（Issue #1771）。審査せず人へ回す
+    if (
+      config === undefined ||
+      !isGateChoiceAllowed(gate.kind, choice) ||
+      (choice === 'sendBack' && isReviewRoundsExhausted(task))
+    ) {
+      return { needsUser: { summary: undefined } };
+    }
+    const verdict = await reviewGateResolution(
+      config.reflex,
+      { task, gate, choice, reason },
+      config.threshold,
+    );
+    if (verdict.kind !== 'approved') {
+      const rejectedInRun = this.gatesNeedingUser.get(runId) ?? new Map<string, string>();
+      this.gatesNeedingUser.set(runId, rejectedInRun.set(key, verdict.summary));
+      return { needsUser: { summary: verdict.summary } };
+    }
+    return {
+      decided: await this.resolveGate(runId, taskId, gateId, choice, 'orchestrator', {
+        summary: verdict.summary,
+      }),
+    };
+  }
+
+  /**
    * 関門を決着させる（KanbanとOrchestratorの`resolve_gate`から）。ユーザーの判断はReflexが
    * 判定中でも優先する。オーケストレーター（`by: 'orchestrator'`）はオーケストレーターの
-   * 判断待ちの関門だけを決着させられる（Issue #1708）。決着後はスケジューラを回す。
+   * 判断待ちの関門だけを決着させられる（Issue #1708）。ただし判断をReflexが妥当と判定した
+   * （`reflexApproval`がある）ときは、ユーザーの判断待ちの関門も決着させられる（Issue #1787）。
+   * 決着後はスケジューラを回す。
    */
   async resolveGate(
     runId: string,
@@ -1448,6 +1512,7 @@ export class TaskRunController {
     gateId: string,
     choice: StageGateChoice,
     by: ExternalStageDecider = 'user',
+    reflexApproval?: { summary: string },
   ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
@@ -1472,7 +1537,12 @@ export class TaskRunController {
         rejection = `この関門では「${GATE_CHOICE_LABELS[choice]}」を選べない`;
         return r;
       }
-      if (by === 'orchestrator' && gate.status !== 'awaitingOrchestrator') {
+      const reflexApproved = by === 'orchestrator' && reflexApproval !== undefined;
+      if (
+        by === 'orchestrator' &&
+        gate.status !== 'awaitingOrchestrator' &&
+        !(reflexApproved && gate.status === 'awaitingUser')
+      ) {
         rejection = 'オーケストレーターの判断待ちの関門ではない（ユーザーの判断が要る）';
         return r;
       }
@@ -1487,7 +1557,23 @@ export class TaskRunController {
           '実装への差し戻しが上限に達しているため、差し戻せるのはユーザーだけ。指摘を残したまま進めるか、escalate_to_userでユーザーへ回す';
         return r;
       }
-      const resolved = resolveStageGate(r, taskId, gateId, { choice, by }, this.now());
+      const resolved = resolveStageGate(
+        r,
+        taskId,
+        gateId,
+        reflexApproved
+          ? {
+              choice,
+              by,
+              reflexApproved: true,
+              reflexSummary: joinSummaries(
+                gate.reflexSummary,
+                `Orchestratorの判断をReflexが承認: ${reflexApproval.summary}`,
+              ),
+            }
+          : { choice, by },
+        this.now(),
+      );
       if (resolved === r) {
         rejection = 'タスクの状態が関門を開いたときから変わっている';
       }
@@ -1538,6 +1624,7 @@ export class TaskRunController {
     this.lastSeen.delete(runId);
     this.recommended.delete(runId);
     this.plansNeedingUser.delete(runId);
+    this.gatesNeedingUser.delete(runId);
     for (const key of [...this.recommending.keys()]) {
       if (key.startsWith(`${runId}#`)) {
         this.recommending.delete(key);

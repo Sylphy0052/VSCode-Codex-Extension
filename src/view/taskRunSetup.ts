@@ -308,6 +308,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     modelCatalog,
     planAutoApprove,
     planReview,
+    // 関門の判断の審査（Issue #1787）も計画の審査と同じReflexの設定で行う
+    gateReview: planReview,
     recommendStageSettings: async (engine, input) => {
       const current =
         engine === 'claude'
@@ -800,6 +802,7 @@ async function confirmOrchestratorGateResolution(input: {
   title: string;
   detail: string;
   choiceLabel: string;
+  reflexSummary: string | undefined;
 }): Promise<boolean> {
   const detail = [
     `${input.taskId} ${sanitizeInlineText(input.title, CONFIRM_TITLE_MAX_LENGTH)}`,
@@ -807,6 +810,10 @@ async function confirmOrchestratorGateResolution(input: {
     `関門: ${sanitizeInlineText(input.detail, CONFIRM_TEXT_MAX_LENGTH)}`,
     '',
     `判断: ${input.choiceLabel}`,
+    '',
+    input.reflexSummary === undefined
+      ? 'Reflex: 審査していません（無効、または人だけが選べる判断）'
+      : `Reflex: ${sanitizeInlineText(input.reflexSummary, CONFIRM_TEXT_MAX_LENGTH)}`,
   ].join('\n');
   const choice = await vscode.window.showWarningMessage(
     'Orchestratorがこの判断で関門を決着させようとしています。あなたの判断と一致していれば「決着させる」を押してください',
