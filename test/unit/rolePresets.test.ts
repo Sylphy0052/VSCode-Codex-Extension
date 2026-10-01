@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  escalationModel,
   isTeamRole,
   roleDefaults,
   roleLabel,
@@ -41,7 +40,7 @@ describe('roleLabel / roleTier', () => {
     }
   });
 
-  it('全役割の重さが light/standard/deep のいずれか（escalationは既定値に現れない）', () => {
+  it('全役割の重さが light/standard/deep のいずれか', () => {
     for (const role of TEAM_ROLES) {
       expect(['light', 'standard', 'deep']).toContain(roleTier(role));
     }
@@ -77,8 +76,8 @@ describe('roleDefaults（プロバイダごとのmodel/effort）', () => {
     }
   });
 
-  it('deep役割はcodexでgpt-6-sol、claudeでopusを返す', () => {
-    expect(roleDefaults('architect', 'codex').model).toBe('gpt-6-sol');
+  it('deep役割はcodexでgpt-6.1-sol、claudeでopusを返す', () => {
+    expect(roleDefaults('architect', 'codex').model).toBe('gpt-6.1-sol');
     expect(roleDefaults('architect', 'claude').model).toBe('opus');
     expect(roleDefaults('architect', 'codex').effort).toBe('high');
   });
@@ -89,8 +88,8 @@ describe('roleDefaults（プロバイダごとのmodel/effort）', () => {
     expect(roleDefaults('implementer', 'codex').effort).toBe('low');
   });
 
-  it('standard役割はcodexでgpt-6-sol、claudeでsonnetを返す（effortはmedium）', () => {
-    expect(roleDefaults('writer', 'codex').model).toBe('gpt-6-sol');
+  it('standard役割はcodexでgpt-6.1-sol、claudeでsonnetを返す（effortはmedium）', () => {
+    expect(roleDefaults('writer', 'codex').model).toBe('gpt-6.1-sol');
     expect(roleDefaults('writer', 'claude').model).toBe('sonnet');
     expect(roleDefaults('writer', 'codex').effort).toBe('medium');
   });
@@ -103,20 +102,5 @@ describe('roleDefaults（プロバイダごとのmodel/effort）', () => {
         expect(roleDefaults(role, provider).effort).not.toBe('ultra');
       }
     }
-  });
-});
-
-describe('escalation段はどの役割の既定値にもならない（Issue #693「詰まったときだけ使う」）', () => {
-  it('TEAM_ROLES全件で、codex/claude双方のroleDefaults().modelがescalationModel()と一致しない', () => {
-    for (const role of TEAM_ROLES) {
-      for (const provider of PROVIDERS) {
-        expect(roleDefaults(role, provider).model).not.toBe(escalationModel(provider));
-      }
-    }
-  });
-
-  it('escalationModelはcodexでgpt-6-astra、claudeでfableを返す', () => {
-    expect(escalationModel('codex')).toBe('gpt-6-astra');
-    expect(escalationModel('claude')).toBe('fable');
   });
 });

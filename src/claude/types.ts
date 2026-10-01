@@ -21,7 +21,7 @@ export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
  * 通常は `initialize` の応答（`readModelList`）から取る。ここは表示名も説明も持たない
  * 最低限の一覧であり、**選択肢を空にしないこと**だけを目的にする。
  */
-export const CLAUDE_MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku'] as const;
+export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku'] as const;
 
 export function claudeFallbackModels(): ModelInfo[] {
   return CLAUDE_MODEL_ALIASES.map((slug) => ({

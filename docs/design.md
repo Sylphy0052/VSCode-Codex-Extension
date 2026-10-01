@@ -407,7 +407,7 @@ Claude Codeだけは `claude.model` = `opus`、`claude.effort` = `medium` を拡
 - モデル一覧は `initialize` の応答の `models` から取る。Codexの `model/list` に相当する要求は control protocol に無く、これが唯一の取得手段（実測）。応答は `{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels}` で、`--model` へ渡すのは `value`。
   - 設定パネルは会話を開いていなくても選択肢を出すため、`claude --print --input-format stream-json` を単発で起動して `initialize` の応答だけを読む（`ClaudeModelProbe`）。
   - `supportsEffort` を持たないモデル（実測では haiku）では effort を選ばせず、理由を画面に出す。
-  - 取得できない場合は `fable` / `opus` / `sonnet` / `haiku` のエイリアスへ退避する。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
+  - 取得できない場合は `opus` / `sonnet` / `haiku` のエイリアスへ退避する。正式名（`claude-fable-5` など）を使う場合は `claude.model` を直接編集する。一覧に無い現在値は「(一覧外)」として選択肢に補うので、設定が失われることはない。
 - エージェント一覧は同じ `initialize` の応答の `agents` から取る（実測。CLI 2.1.227）。中身は `{name, description, model?}` の配列で、組込エージェント（`claude` `Explore` `Plan` `general-purpose` など）とユーザー定義のカスタムエージェントが混ざって返る。`--agent` へ渡すのは `name` だけで、`model` は使わない。
   - モデルと違い、意味のあるフォールバック一覧が無い（カスタムエージェントは `~/.claude/agents/` やプラグイン次第で環境ごとに違う）。取得できなければ選択肢を出さず、既定（空文字＝CLI委譲）だけが選べる状態にする（`ClaudeAgentProbe`。`ClaudeModelProbe` と同じ作り）。
   - **エージェントは起動時にのみ効く**。会話の途中で切り替える制御要求を7候補（`set_agent` / `change_agent` / `switch_agent` / `agent_change` / `set_current_agent` / `select_agent` / `use_agent`）で実測したが、いずれも `{"subtype":"error","error":"Unsupported control request subtype: <name>"}` で拒否された。`initialize` の応答の `commands` には `/agents` が含まれておりCLI内蔵の対話的なエージェント管理はあるが、拡張機能から制御できる経路ではないため使わない。
@@ -7365,7 +7365,7 @@ Anthropicが「ループエンジニアリング」として整理している�
 
 > 回答の後も相談を続ける導線と、相談の結論をメインAIへの指示として渡す導線は §14.101（Issue #929）にある。
 
-進行中の作業について、**作業を担当しているAIとは独立した別セッション**へ判断・助言・レビューを求める導線。入力欄の「…」メニューの `secondOpinion` ボタンから起動する。Codex画面・Claude Code画面のどちらから押しても、開くのは独立した**Codexのセッション**（既定は `gpt-6-sol` / effort `high`）。
+進行中の作業について、**作業を担当しているAIとは独立した別セッション**へ判断・助言・レビューを求める導線。入力欄の「…」メニューの `secondOpinion` ボタンから起動する。Codex画面・Claude Code画面のどちらから押しても、開くのは独立した**Codexのセッション**（既定は `gpt-6.1-sol` / effort `high`）。
 
 置き換えたいのは、人が手でやっている次のループである。
 
@@ -7459,7 +7459,7 @@ interface SecondOpinionInput {
 
 #### 設定
 
-- `agent.secondOpinion.candidates`: 依頼先の候補（`{name, model, effort}[]`）。既定は `gpt-6-sol` / `high` の1件。**候補が1件なら選択UIを出さずに起動する。** 壊れた値・空配列は既定へ丸める（候補ゼロで起動不能にしない）。`provider` は持たせない（Codex固定。この機能の値打ちはモデルの多様性ではなくコンテキストの分離にある）
+- `agent.secondOpinion.candidates`: 依頼先の候補（`{name, model, effort}[]`）。既定は `gpt-6.1-sol` / `high` の1件。**候補が1件なら選択UIを出さずに起動する。** 壊れた値・空配列は既定へ丸める（候補ゼロで起動不能にしない）。`provider` は持たせない（Codex固定。この機能の値打ちはモデルの多様性ではなくコンテキストの分離にある）
 - `agent.secondOpinion.headless`: 既定 `true`。`TaskSession.open()` を呼ばず、タブを作らないまま完走する。`buildEntry` が `panel: undefined` でパネルを作り、`postState` / `onSessionChange` がタブの無い状態を織り込み済みなので、開かなくても状態の更新経路は回る。`false` にすると進行が見えるタブを開く（`preserveFocus: true` なのでフォーカスは奪わない）
 - `agent.secondOpinion.timeoutMs`: 既定15分（Issue #907 で5分から延ばした。`gpt-5.6-sol` / `high` は5分を超えることがある）。10秒〜60分へ丸める。**これは1ターンの上限であり、機能全体の上限ではない**（Issue #926 I。下の「待ち時間の内訳」を参照）
 - `agent.secondOpinion.template`: 依頼文の既定値
@@ -7917,7 +7917,7 @@ Issue #926 P0 でこの位置付けを整理した。**背景要約は付随情�
 
 背景は基本コンテキストだが、無ければ成立しないわけではない。失敗・空応答・タイムアウトのいずれでも `ok: false` を返すだけで、セカンドオピニオン本体は要約なしで続行する。要約を切る（`agent.secondOpinion.summary.enabled: false`）と、要約セッションを開かず、`## ここまでの背景` の区画自体が出ない（元の会話に由来する材料が一切渡らない）。
 
-設定は `agent.secondOpinion.summary`（`enabled` / `model` / `effort`、既定は有効・`gpt-6-luna`・`low`）。モデルもeffortも本体（`gpt-6-sol` / `high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮であるためで、会話が4,000文字を超えるたびに開く経路（`SUMMARY_SKIP_THRESHOLD_CHARS`）に最上位モデルを充てる必然性がない（Issue #1001）。要約が痩せて本体の判断が狂うようなら、設定でモデルを上げられる。項目単位で検証し、`model`だけ壊れていても`enabled`の指定は生かす。
+設定は `agent.secondOpinion.summary`（`enabled` / `model` / `effort`、既定は有効・`gpt-6-luna`・`low`）。モデルもeffortも本体（`gpt-6.1-sol` / `high`）より下げてあるのは、要約に求めるのが判断ではなく事実の圧縮であるためで、会話が4,000文字を超えるたびに開く経路（`SUMMARY_SKIP_THRESHOLD_CHARS`）に最上位モデルを充てる必然性がない（Issue #1001）。要約が痩せて本体の判断が狂うようなら、設定でモデルを上げられる。項目単位で検証し、`model`だけ壊れていても`enabled`の指定は生かす。
 
 本番ログへ出すのは要約セッションの `model` / `effort` / `promptChars` と、本体側の `summary=on|off` だけ。会話の記録・要約の本文は出さない（§14.80と同じ）。
 
@@ -8882,7 +8882,7 @@ rolloutのファイル名は `rollout-<日時>-<session_id>.jsonl` で、1行目
 
 **`direct` を残したのは、この機能に求めているものが「押した時点の材料で、独立した相手に1ターンで聞く」だからである。** `askGpt` は質問文を組み立てる余分な1ターンを先に走らせるため、`timeoutMs` が2回効いて既定で最大30分待つ（§14.94）。さらに組み立ての段で親がリポジトリを読むので、押してから返るまでに触れる範囲も広い。短く聞いて短く返ってくることのほうが、この機能では効く。
 
-**利用者が変えられる範囲は増やさない。** 依頼文は `agent.secondOpinion.template` を既定値として実行のたびにInputBoxで編集でき、依頼先は `agent.secondOpinion.candidates`（既定 `gpt-6-sol` / `high`）で変えられる。どちらも既存の仕組みで足りるため、この変更で新しい設定は足していない。
+**利用者が変えられる範囲は増やさない。** 依頼文は `agent.secondOpinion.template` を既定値として実行のたびにInputBoxで編集でき、依頼先は `agent.secondOpinion.candidates`（既定 `gpt-6.1-sol` / `high`）で変えられる。どちらも既存の仕組みで足りるため、この変更で新しい設定は足していない。
 
 #### 共有部品は残す
 
@@ -9032,7 +9032,7 @@ KPI やタイムラインへ広く `aria-live` を付ける案は採らない。
 
 #### escalation段はどの役割の既定にもならない
 
-`RoleTier`には`light`/`standard`/`deep`のほかに`escalation`（Codex: `gpt-6-astra` / Claude: `fable`）があるが、`ROLE_TIERS`のいずれの役割もこの段を指さない（`rolePresets.ts:46-64`）。到達できるのは、タスクの`model`を明示指定する経路だけである。`escalationModel`関数（`rolePresets.ts:142-144`）は、その明示指定に使うモデル名をプロバイダごとに引くためのもので、いまの唯一の呼び出し元は`planner.ts`（`buildRoleDescription`）——分解セッションへ「詰まりそうなタスクに限りこのモデルを明示してよい」と伝えるプロンプト——である。「詰まったときだけ使う」という運用方針（Issue #693）を、既定値からは構造的に到達できないという形で担保している。
+`RoleTier`は`light`/`standard`/`deep`の3段で、拡張全体のモデルは2段（Codex: `gpt-6-luna` < `gpt-6.1-sol`、Claude: `sonnet` < `opus`）である。Astra・Fableは扱わない（Issue #1803。以前あった`escalation`段と`escalationModel`は削除した）。
 
 #### ファイル受け渡し
 

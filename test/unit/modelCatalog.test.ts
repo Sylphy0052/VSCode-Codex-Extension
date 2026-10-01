@@ -27,8 +27,8 @@ const catalog = JSON.stringify({
       ],
     },
     {
-      slug: 'gpt-6-sol',
-      display_name: 'GPT-6-Sol',
+      slug: 'gpt-6.1-sol',
+      display_name: 'GPT-6.1-Sol',
       default_reasoning_level: 'low',
       visibility: 'list',
       priority: 1,
@@ -42,7 +42,7 @@ const catalog = JSON.stringify({
       ],
     },
     {
-      slug: 'gpt-6-sol-wm',
+      slug: 'gpt-6.1-sol-wm',
       display_name: '内部用',
       visibility: 'hide',
       priority: 1,
@@ -53,11 +53,11 @@ const catalog = JSON.stringify({
 
 describe('parseModelCatalog', () => {
   it('priority昇順で並べる', () => {
-    expect(parseModelCatalog(catalog).map((m) => m.slug)).toEqual(['gpt-6-sol', 'gpt-6-astra']);
+    expect(parseModelCatalog(catalog).map((m) => m.slug)).toEqual(['gpt-6.1-sol', 'gpt-6-astra']);
   });
 
   it('visibilityがlistでないモデルを除く', () => {
-    expect(findModel(parseModelCatalog(catalog), 'gpt-6-sol-wm')).toBeUndefined();
+    expect(findModel(parseModelCatalog(catalog), 'gpt-6.1-sol-wm')).toBeUndefined();
   });
 
   it('表示名・説明・既定effortを取り出す', () => {
@@ -108,9 +108,9 @@ describe('parseModelCatalog', () => {
 const modelListResult = {
   data: [
     {
-      id: 'gpt-6-sol',
-      model: 'gpt-6-sol',
-      displayName: 'GPT-6-Sol',
+      id: 'gpt-6.1-sol',
+      model: 'gpt-6.1-sol',
+      displayName: 'GPT-6.1-Sol',
       description: 'Latest frontier agentic coding model.',
       hidden: false,
       isDefault: true,
@@ -147,7 +147,7 @@ const modelListResult = {
 describe('parseModelList', () => {
   it('応答の順序のままモデルを取り出す', () => {
     expect(parseModelList(modelListResult).map((m) => m.slug)).toEqual([
-      'gpt-6-sol',
+      'gpt-6.1-sol',
       'gpt-6-astra',
     ]);
   });
@@ -157,8 +157,8 @@ describe('parseModelList', () => {
   });
 
   it('表示名・説明・既定effort・effortの説明を取り出す', () => {
-    const model = findModel(parseModelList(modelListResult), 'gpt-6-sol');
-    expect(model?.displayName).toBe('GPT-6-Sol');
+    const model = findModel(parseModelList(modelListResult), 'gpt-6.1-sol');
+    expect(model?.displayName).toBe('GPT-6.1-Sol');
     expect(model?.description).toBe('Latest frontier agentic coding model.');
     expect(model?.defaultEffort).toBe('low');
     expect(model?.supportsEffort).toBe(true);

@@ -27,7 +27,7 @@ import {
 
 const CANDIDATE: SecondOpinionCandidate = {
   name: 'GPT-6 sol',
-  model: 'gpt-6-sol',
+  model: 'gpt-6.1-sol',
   effort: 'high',
 };
 
@@ -352,7 +352,7 @@ describe('approveSecondOpinionHandoff（Issue #929 Human Gate）', () => {
     const sent = port.sent[0] ?? '';
     // 出所の断り書きは送信時に必ず付く（下書きからは消せない）
     expect(sent).toContain('独立したセカンドオピニオン');
-    expect(sent).toContain('gpt-6-sol / high');
+    expect(sent).toContain('gpt-6.1-sol / high');
     expect(sent.endsWith('B案で実装すること')).toBe(true);
     // 送った後は相談を閉じる
     expect(advisor.closedReason()).toBe('instructionSent');

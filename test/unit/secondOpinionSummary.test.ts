@@ -90,7 +90,7 @@ class FakeHost implements TaskSessionHost {
   }
 }
 
-const CANDIDATE = { name: 'Sol (high)', model: 'gpt-6-sol', effort: 'high' };
+const CANDIDATE = { name: 'Sol (high)', model: 'gpt-6.1-sol', effort: 'high' };
 const CONVERSATION = '## 依頼\n\nテストを直して\n\n---\n\n## Codex\n\n直しました';
 const SNAPSHOT_CONTEXT = {
   kind: 'workspaceChanges' as const,
@@ -109,7 +109,7 @@ describe('summarizeConversation（Issue #903）', () => {
   it('要約は独立したセッションで走り、read-only・承認拒否・タブを開かない', async () => {
     const host = new FakeHost();
     const result = await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
     });
@@ -117,7 +117,7 @@ describe('summarizeConversation（Issue #903）', () => {
     expect(result).toEqual({ ok: true, summary: '要約です' });
     expect(host.openCalls).toHaveLength(1);
     expect(host.openCalls[0]?.config).toEqual({
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       approvalMode: 'never',
     });
@@ -135,7 +135,7 @@ describe('summarizeConversation（Issue #903）', () => {
       entriesDuringRun = readdirSync(input.cwd);
     };
     await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
     });
@@ -151,7 +151,7 @@ describe('summarizeConversation（Issue #903）', () => {
   it('要約セッションへは会話の記録が渡り、データであって指示ではないと明示される', async () => {
     const host = new FakeHost();
     await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
     });
@@ -168,7 +168,7 @@ describe('summarizeConversation（Issue #903）', () => {
   it('応答が空なら理由付きで失敗を返す（呼び出し側は要約なしで続行できる）', async () => {
     const host = new FakeHost('   ');
     const result = await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
     });
@@ -180,7 +180,7 @@ describe('summarizeConversation（Issue #903）', () => {
   it('会話が空なら要約セッションを開かない', async () => {
     const host = new FakeHost();
     const result = await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: '   ',
     });
@@ -344,7 +344,7 @@ describe('要約セッションのrollout後始末（Issue #942）', () => {
     let disposeCallsWhenRemoved = -1;
 
     const result = await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
       rollout: {
@@ -368,7 +368,7 @@ describe('要約セッションのrollout後始末（Issue #942）', () => {
     const host = new FakeHost();
 
     const result = await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
       rollout: {
@@ -390,7 +390,7 @@ describe('要約セッションのrollout後始末（Issue #942）', () => {
     const host = new FakeHost();
 
     const result = await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: CONVERSATION,
     });
@@ -405,7 +405,7 @@ describe('summarizeConversation は送信直前に資格情報を伏せる（Iss
     // 実在の形に見える値をソースへ直書きしない（secretスキャンに当たる）。実行時に組み立てる
     const fakeToken = `sk-live-${'q'.repeat(24)}`;
     await summarizeConversation(host, {
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       effort: 'low',
       conversation: `export OPENAI_API_KEY=${fakeToken}\n${CONVERSATION}`,
     });

@@ -763,7 +763,7 @@
 | Claudeのセッション全体fork        | `ClaudeChatViewManager.openFork`は、新しいIDを追跡できないためタブ復元と作業記録の対象外になる旨を会話へ表示する。通常の再開や途中分岐と一括して保証しない。                                 | F03/F39         |
 | Claudeの途中分岐の宣言            | `ClaudeProvider.capabilities.forkFromTurn`はfalseだが、チャットには`forkFromTurn`と`rewindConversationToTurn`の経路がある。能力フラグだけで画面の対応可否を判定しない。                      | F03             |
 | Forge Hubのcleanup完了            | `completeCleanup`はマージ済みカードを追跡から外す処理。Issue close・branch/worktree削除はこのボタン自体では行わない。                                                                        | F38             |
-| セカンドオピニオンとループAdvisor | 前者の相談先はCodex固定。後者はCodex/Claudeを選べる。相談結果の自動送信と、指示案を承認して送る経路も分けて確認する。                                                                        | F20/F22         |
+| セカンドオピニオンとループAdvisor | 前者の相談先はCodex固定。後者は既定が会話と同じCLIで、Codex/Claudeを選べる。相談結果の自動送信と、指示案を承認して送る経路も分けて確認する。                                                                        | F20/F22         |
 | 各管理画面の対象                  | 進捗は会話内の経過、カンバンは管理中会話、ワークフローはrun/task、Forge HubはIssue起点の開発カードを扱う。各画面の母集団は異なる。                                                           | F23/F24/F36/F37 |
 
 これらはコード不具合を断定した一覧ではない。レビュー時に仕様・表示・実装の整合性を確認するための記録。

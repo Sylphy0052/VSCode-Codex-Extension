@@ -21,7 +21,7 @@ import type { SecondOpinionCandidate } from '../../src/secondOpinion/candidates'
 
 const CANDIDATE: SecondOpinionCandidate = {
   name: 'GPT-6 sol',
-  model: 'gpt-6-sol',
+  model: 'gpt-6.1-sol',
   effort: 'high',
 };
 
