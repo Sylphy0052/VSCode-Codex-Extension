@@ -822,11 +822,15 @@ describe('引き継ぎ後に旧タブを閉じるかの判定（Issue #1158 / #1
     });
   });
 
-  it('旧セッションがターン実行中なら閉じない', () => {
-    expect(decideOldTabAfterHandoff(input({ oldBusy: true }))).toEqual({
+  it('利用者が旧タブで続けたターンが実行中なら閉じない', () => {
+    expect(decideOldTabAfterHandoff(input({ oldBusy: true, oldResumedByUser: true }))).toEqual({
       action: 'keep',
       reason: 'oldBusy',
     });
+  });
+
+  it('旧セッションが自分で始めたターンは止めて閉じる（Issue #1790）', () => {
+    expect(decideOldTabAfterHandoff(input({ oldBusy: true }))).toEqual({ action: 'close' });
   });
 
   it('closeOldTabが無効なら人に聞く', () => {
