@@ -219,10 +219,11 @@ export class TaskRunController {
   /** `approve_plan`でReflexが妥当としなかった計画（runごと。Issue #1763）。 */
   private readonly plansNeedingUser = new Map<string, string>();
   /**
-   * `resolve_gate`でReflexが妥当としなかった関門（Issue #1787）。キーは`runId`・`taskId`・`gateId`、
-   * 値はReflexの要約。理由を言い換えて審査をやり直させないよう、一度妥当としなかった関門は審査しない。
+   * `resolve_gate`でReflexが妥当としなかった関門の判断（Issue #1787）。runIdごとに、キーは`taskId`・
+   * `gateId`・判断、値はReflexの要約。理由を言い換えて審査をやり直させないよう、一度妥当としなかった
+   * 判断は審査しない。
    */
-  private readonly gatesNeedingUser = new Map<string, string>();
+  private readonly gatesNeedingUser = new Map<string, Map<string, string>>();
   /** runの開始と再開を直列にする。動いているrunの確認と作成の間に別の開始が割り込まないため。 */
   private readonly startQueue = new SerialQueue();
 
@@ -1467,8 +1468,8 @@ export class TaskRunController {
     if (run === undefined || task === undefined || gate?.status !== 'awaitingUser') {
       return { needsUser: { summary: undefined } };
     }
-    const key = JSON.stringify([runId, taskId, gateId]);
-    const rejected = this.gatesNeedingUser.get(key);
+    const key = JSON.stringify([taskId, gateId, choice]);
+    const rejected = this.gatesNeedingUser.get(runId)?.get(key);
     if (rejected !== undefined) {
       return { needsUser: { summary: rejected } };
     }
@@ -1487,7 +1488,8 @@ export class TaskRunController {
       config.threshold,
     );
     if (verdict.kind !== 'approved') {
-      this.gatesNeedingUser.set(key, verdict.summary);
+      const rejectedInRun = this.gatesNeedingUser.get(runId) ?? new Map<string, string>();
+      this.gatesNeedingUser.set(runId, rejectedInRun.set(key, verdict.summary));
       return { needsUser: { summary: verdict.summary } };
     }
     return {
@@ -1622,6 +1624,7 @@ export class TaskRunController {
     this.lastSeen.delete(runId);
     this.recommended.delete(runId);
     this.plansNeedingUser.delete(runId);
+    this.gatesNeedingUser.delete(runId);
     for (const key of [...this.recommending.keys()]) {
       if (key.startsWith(`${runId}#`)) {
         this.recommending.delete(key);

@@ -49,6 +49,10 @@ export async function reviewGateResolution(
   input: GateResolutionInput,
   threshold: number,
 ): Promise<TaskRunGateReview> {
+  // 切り詰めると後ろの指摘を見ないまま妥当と判定しうる。審査せず人に確かめる
+  if (input.gate.detail.length > REFLEX_GATE_DETAIL_MAX_LENGTH) {
+    return { kind: 'needsUser', summary: '関門の内容が長いため審査していません' };
+  }
   return reviewPlanWithReflex(
     reflex,
     [
