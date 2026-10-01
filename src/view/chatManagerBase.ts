@@ -190,6 +190,15 @@ export interface BaseChatPanel {
    */
   handoffKeptUserMessages?: number | undefined;
   /**
+   * 自動引き継ぎで初回プロンプトを送り終えた引き継ぎ元の印（Issue #1790）。印が無ければ`undefined`。
+   *
+   * 引き継いだ後も、引き継ぎ元はバックグラウンド処理の完了通知などで自分からターンを始める
+   * ことがあり、引き継ぎ先と同じ作業を並行して進めてしまう。印がある間は、そうしたターンを
+   * 始まった時点で止める。利用者が旧タブから送ったら（`resumedByUser`）明示的な継続とみなし、
+   * 以降は止めない。引き継ぎが失敗扱いになったときは印を外し、旧セッションを代わりに使わせる。
+   */
+  handedOff?: { resumedByUser: boolean; interrupting: boolean } | undefined;
+  /**
    * 保留中の引き継ぎ確認（Issue #1280）。確認待ちでなければ`undefined`。
    *
    * 引き継ぎ先のmodel / effortの確認は人が答えるまで進まない。`ChatState`には現れない
@@ -1745,6 +1754,35 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * `onDidChangeState`は旧セッションが idle のまま残るときに出ないため、集合の変化と
    * 同じ経路（`onDidChangePanels`）で一覧を数え直させる。
    */
+  /**
+   * 引き継ぎ済みの旧セッションが自分で始めたターンを止めるべきかを返す（Issue #1790）。
+   *
+   * 止める操作（`interrupt`）はCodexとClaude Codeで形が違うため、呼び出し側が行う。同じターンで
+   * 何度も止めにいかないよう、止めにいったことを`interrupting`に持ち、ターンが終われば戻す。
+   */
+  protected shouldStopTurnAfterHandoff(entry: TPanel, state: ChatState): boolean {
+    const hold = entry.handedOff;
+    if (hold === undefined || hold.resumedByUser) {
+      return false;
+    }
+    if (!state.busy) {
+      hold.interrupting = false;
+      return false;
+    }
+    if (hold.interrupting) {
+      return false;
+    }
+    hold.interrupting = true;
+    return true;
+  }
+
+  /** 利用者が旧タブから送ったことを記録する（Issue #1790）。以降は旧セッションを止めない。 */
+  protected noteUserSendAfterHandoff(entry: TPanel): void {
+    if (entry.handedOff !== undefined) {
+      entry.handedOff.resumedByUser = true;
+    }
+  }
+
   protected markHandoffKept(entry: TPanel, reason: OldTabKeptReason): void {
     if (!needsAttentionAfterHandoff(reason)) {
       return;

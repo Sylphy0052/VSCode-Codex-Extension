@@ -1595,6 +1595,12 @@ export interface OldTabDecisionInput {
   oldDisposed: boolean;
   /** 引き継ぎ元のセッションがターン実行中か。 */
   oldBusy: boolean;
+  /**
+   * 引き継いだ後に、利用者が旧タブから送信したか（Issue #1790）。送っていれば明示的な継続で、
+   * 実行中のターンを切らない。送っていないターンは引き継ぎ元が自分で始めたもので、引き継ぎ先と
+   * 作業が重なるため止めてよい。
+   */
+  oldResumedByUser?: boolean;
   /** `agent.autoHandoff.closeOldTab` の値。 */
   closeOldTab: boolean;
   /**
@@ -1627,8 +1633,9 @@ export function decideOldTabAfterHandoff(input: OldTabDecisionInput): OldTabDeci
   if (!input.closeOldTab) {
     return { action: 'confirm' };
   }
-  // 引き継いだ後に旧タブで新しいターンが走り出していたら閉じない（進行中の作業を切らない）
-  if (input.oldBusy) {
+  // 利用者が旧タブで続けたターンは切らない。引き継ぎ元が自分で始めたターンは引き継ぎ先と
+  // 作業が重なるため、止めて閉じる（Issue #1790）
+  if (input.oldBusy && input.oldResumedByUser === true) {
     return { action: 'keep', reason: 'oldBusy' };
   }
   return { action: 'close' };
