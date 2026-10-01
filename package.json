@@ -1002,13 +1002,13 @@
             "full"
           ],
           "enumDescriptions": [
-            "低（コスト優先）: 最上位モデル（fable / astra）とxhighを使わない",
-            "中（常用）: 最上位モデルは広さ・曖昧さ・リスク・自律性がすべて最大のときだけ",
+            "低（コスト優先）: xhighを使わない（effortはhighまで）",
+            "中（常用）: 制限なし",
             "高（最適優先）: 作業の見立てだけでmodel/effortを決める"
           ],
           "default": "balanced",
           "scope": "window",
-          "markdownDescription": "Codex画面での自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214、CLIごとに分けたのはIssue #1216）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はモデルをopus / solまで、effortをhighまでに制限する（使用量の上限が近いとき向け）。`balanced`（既定）はeffortを制限せず、最上位モデルはscope / ambiguity / risk / autonomyがすべて2のときだけ使う。`full` は制限を掛けない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。未設定のときは旧設定 `agent.autoHandoff.costPreset` の値を初期値として使う。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。"
+          "markdownDescription": "Codex画面での自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214、CLIごとに分けたのはIssue #1216）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はeffortをhighまでに制限する（使用量の上限が近いとき向け）。モデルは2段（Codexはgpt-6-luna / gpt-6.1-sol、Claudeはsonnet / opus）で、方針では変わらない。`balanced`（既定）と `full` はeffortを制限しない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。未設定のときは旧設定 `agent.autoHandoff.costPreset` の値を初期値として使う。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。"
         },
         "agent.autoHandoff.costPreset.claude": {
           "type": "string",
@@ -1018,13 +1018,13 @@
             "full"
           ],
           "enumDescriptions": [
-            "低（コスト優先）: 最上位モデル（fable / astra）とxhighを使わない",
-            "中（常用）: 最上位モデルは広さ・曖昧さ・リスク・自律性がすべて最大のときだけ",
+            "低（コスト優先）: xhighを使わない（effortはhighまで）",
+            "中（常用）: 制限なし",
             "高（最適優先）: 作業の見立てだけでmodel/effortを決める"
           ],
           "default": "balanced",
           "scope": "window",
-          "markdownDescription": "Claude Code画面での自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214、CLIごとに分けたのはIssue #1216）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はモデルをopus / solまで、effortをhighまでに制限する（使用量の上限が近いとき向け）。`balanced`（既定）はeffortを制限せず、最上位モデルはscope / ambiguity / risk / autonomyがすべて2のときだけ使う。`full` は制限を掛けない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。未設定のときは旧設定 `agent.autoHandoff.costPreset` の値を初期値として使う。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。"
+          "markdownDescription": "Claude Code画面での自動引き継ぎ先のmodel/effortにどこまでコストを掛けるか（Issue #1214、CLIごとに分けたのはIssue #1216）。`agent.autoHandoff.router` の判定結果に上限を被せるだけで、判定そのものは変えない。`low` はeffortをhighまでに制限する（使用量の上限が近いとき向け）。モデルは2段（Codexはgpt-6-luna / gpt-6.1-sol、Claudeはsonnet / opus）で、方針では変わらない。`balanced`（既定）と `full` はeffortを制限しない。`agent.autoHandoff.model` / `.effort` で明示した値はこの制限より優先する。未設定のときは旧設定 `agent.autoHandoff.costPreset` の値を初期値として使う。入力欄の「…」メニューの「引き継ぎのコスト方針」からも切り替えられる。"
         },
         "agent.autoHandoff.router": {
           "type": "boolean",
@@ -1054,7 +1054,7 @@
               },
               "model": {
                 "type": "string",
-                "description": "Codexのモデルslug（例: gpt-6-sol）"
+                "description": "Codexのモデルslug（例: gpt-6.1-sol）"
               },
               "effort": {
                 "type": "string",
@@ -1066,7 +1066,7 @@
           "default": [
             {
               "name": "Sol (high)",
-              "model": "gpt-6-sol",
+              "model": "gpt-6.1-sol",
               "effort": "high"
             }
           ],
@@ -1210,7 +1210,7 @@
           "type": "string",
           "default": "auto",
           "scope": "window",
-          "markdownDescription": "要約エージェントに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて軽量モデルへ解決する（codex は `gpt-6-sol`、claude は `haiku`）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。"
+          "markdownDescription": "要約エージェントに使うモデル。既定の `auto` は実際に動かすプロバイダに合わせて軽量モデルへ解決する（codex は `gpt-6.1-sol`、claude は `haiku`）。モデル名を書くとそれをそのまま渡すため、`provider` と食い違う名前を書かないこと。"
         },
         "agent.chat.endSummary.effort": {
           "type": "string",
@@ -1317,7 +1317,7 @@
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "markdownDescription": "ゴール駆動ループ（issue #892）の各ターンのあとに、別のAI（Advisor、issue #957）へ進め方の妥当性を確認させる。評価役（`agent.chat.goalEvaluator.*`）が「ゴールを達成したか」だけを見るのに対し、Advisorは「その進め方でよいか」を見る。両者は並列に走る。**1ターンあたりの待ち時間と費用が増える**ため既定では無効。Advisorが `blocker` を返すとループを止めて人へ渡し、それ以外の指摘は次のターンの指示へ別の区画として載せる。ゴール（目的と受入基準）を入力していないループでは動かない。**既定の相談先はCodex CLI（`provider` の既定が `codex`）であり、Claude Codeの会話でも抜粋はCodexへ渡る。** 相談先は `agent.chat.loopAdvisor.provider` で変えられる。"
+          "markdownDescription": "ゴール駆動ループ（issue #892）の各ターンのあとに、別のAI（Advisor、issue #957）へ進め方の妥当性を確認させる。評価役（`agent.chat.goalEvaluator.*`）が「ゴールを達成したか」だけを見るのに対し、Advisorは「その進め方でよいか」を見る。両者は並列に走る。**1ターンあたりの待ち時間と費用が増える**ため既定では無効。Advisorが `blocker` を返すとループを止めて人へ渡し、それ以外の指摘は次のターンの指示へ別の区画として載せる。ゴール（目的と受入基準）を入力していないループでは動かない。既定の相談先は会話と同じCLI（Codexなら `gpt-6-luna`、Claude Codeなら `sonnet`）。相談先は `agent.chat.loopAdvisor.provider` で変えられる。"
         },
         "agent.chat.loopAdvisor.provider": {
           "type": "string",
@@ -1331,9 +1331,9 @@
             "常に claude で確認する",
             "常に codex で確認する"
           ],
-          "default": "codex",
+          "default": "inherit",
           "scope": "window",
-          "markdownDescription": "Advisorをどのプロバイダで動かすか。既定は `codex` 固定で、会話しているのがどちらのCLIでも相談先は変わらない（`inherit` にすると会話と同じCLIになるが、それでは画面によって相談先が変わる）。Advisorにもツールは渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）。**会話とは別のプロバイダを指定すると、会話の抜粋（ファイル内容やコマンド出力を含む）がそちらへ渡る。** 送信前に資格情報らしき文字列は伏せるが、業務コードそのものは伏せない。"
+          "markdownDescription": "Advisorをどのプロバイダで動かすか。既定は `inherit` で、会話しているのと同じCLIで確認する。Advisorにもツールは渡さない（claude は `--tools \"\"`、codex は `--sandbox read-only`）。**会話とは別のプロバイダを指定すると、会話の抜粋（ファイル内容やコマンド出力を含む）がそちらへ渡る。** 送信前に資格情報らしき文字列は伏せるが、業務コードそのものは伏せない。"
         },
         "agent.chat.loopAdvisor.model": {
           "type": "string",
@@ -1365,7 +1365,7 @@
           "type": "string",
           "default": "auto",
           "scope": "window",
-          "markdownDescription": "自動返信の返信役に使うモデル。返信役は会話中のCLIと同じプロバイダで開き、既定の `auto` はClaude Code画面では `sonnet`、Codex画面では `gpt-6-sol` に解決する。明示したモデル名はそのまま使う。"
+          "markdownDescription": "自動返信の返信役に使うモデル。返信役は会話中のCLIと同じプロバイダで開き、既定の `auto` はClaude Code画面では `sonnet`、Codex画面では `gpt-6.1-sol` に解決する。明示したモデル名はそのまま使う。"
         },
         "agent.chat.autoReply.timeoutSeconds": {
           "type": "number",
@@ -1974,7 +1974,7 @@
           "type": "string",
           "default": "opus",
           "scope": "machine-overridable",
-          "markdownDescription": "使用するモデル。エイリアス (`opus` / `sonnet` / `fable` / `haiku`) か正式名を指定する。空なら `--model` を渡さず、Claude Code 側の設定 (`~/.claude/settings.json`) に委譲する。"
+          "markdownDescription": "使用するモデル。エイリアス (`opus` / `sonnet` / `haiku`) か正式名を指定する。空なら `--model` を渡さず、Claude Code 側の設定 (`~/.claude/settings.json`) に委譲する。"
         },
         "claude.effort": {
           "type": "string",

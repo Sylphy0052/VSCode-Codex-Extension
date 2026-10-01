@@ -78,7 +78,7 @@
 
 | 設定キー                                         | 既定値                                                                                                           | scope                 | レビュー先                      |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- | --------------------- | ------------------------------- |
-| `codex.executablePath`                           | `"codex"`                                                                                                        | `machine`             | [F01](feature-inventory.md#f01) |
+| `codex.executablePath`                           | `"inherit"`                                                                                                      | `machine`             | [F01](feature-inventory.md#f01) |
 | `codex.codexHome`                                | `""`                                                                                                             | `machine`             | [F01](feature-inventory.md#f01) |
 | `codex.additionalArgs`                           | `[]`                                                                                                             | `machine`             | [F01](feature-inventory.md#f01) |
 | `codex.sandbox`                                  | `""`                                                                                                             | `machine`             | [F10](feature-inventory.md#f10) |
@@ -101,7 +101,7 @@
 | `agent.chat.sendOn`                              | `"ctrlEnter"`                                                                                                    | `window`              | [F05](feature-inventory.md#f05) |
 | `agent.chat.composerButtons`                     | `["attach","loopToggle","compact","recap","planToggle","handoffToNewSession","secondOpinion"]`                   | `window`              | [F08](feature-inventory.md#f08) |
 | `agent.chat.limitAutoResume.enabled`             | `true`                                                                                                           | `window`              | [F11](feature-inventory.md#f11) |
-| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-6-sol","effort":"high"}]`                                                    | `window`              | [F22](feature-inventory.md#f22) |
+| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-6.1-sol","effort":"high"}]`                                                    | `window`              | [F22](feature-inventory.md#f22) |
 | `agent.secondOpinion.summary`                    | `{"enabled":true,"model":"gpt-6-luna","effort":"low"}`                                                           | `window`              | [F21](feature-inventory.md#f21) |
 | `agent.secondOpinion.headless`                   | `true`                                                                                                           | `window`              | [F22](feature-inventory.md#f22) |
 | `agent.secondOpinion.timeoutMs`                  | `900000`                                                                                                         | `window`              | [F22](feature-inventory.md#f22) |

@@ -24,14 +24,14 @@ function model(slug: string, efforts: readonly string[]): ModelInfo {
 
 const FIVE = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-/** Codex側のカタログを模した一覧（GPT-6-Luna < GPT-6-Sol < GPT-6-Astra）。 */
+/** Codex側のカタログを模した一覧（GPT-6-Luna < GPT-6.1-Sol）。 */
 function codexModels(): ModelInfo[] {
-  return [model('gpt-6-luna', FIVE), model('gpt-6-sol', FIVE), model('gpt-6-astra', FIVE)];
+  return [model('gpt-6-luna', FIVE), model('gpt-6.1-sol', FIVE)];
 }
 
-/** Claude Code側のカタログを模した一覧（Sonnet < Opus < Fable）。 */
+/** Claude Code側のカタログを模した一覧（Sonnet < Opus）。 */
 function claudeModels(): ModelInfo[] {
-  return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE), model('fable', FIVE)];
+  return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE)];
 }
 
 function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
@@ -54,17 +54,18 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
   };
 }
 
-const current = { model: 'gpt-6-sol', effort: 'high' };
+const current = { model: 'gpt-6.1-sol', effort: 'high' };
 const noFailure = { turnFailed: false };
 
 describe('段の定義', () => {
-  it('ティアは3段で、haikuを含めない', () => {
-    expect(MODEL_TIERS).toHaveLength(3);
+  it('ティアは2段で、haikuを含めない', () => {
+    expect(MODEL_TIERS).toHaveLength(2);
     const flat = MODEL_TIERS.flat();
     expect(flat).not.toContain('haiku');
     expect(flat).toContain('gpt-6-luna');
-    expect(flat).toContain('gpt-6-sol');
-    expect(flat).toContain('gpt-6-astra');
+    expect(flat).toContain('gpt-6.1-sol');
+    expect(flat).not.toContain('gpt-6-astra');
+    expect(flat).not.toContain('fable');
   });
 
   it('effortは3段でlowとmaxを含めない', () => {
@@ -94,12 +95,15 @@ describe('effortはdifficultyだけで決まる', () => {
 });
 
 describe('modelはscope+ambiguity+risk+autonomyで決まる', () => {
-  it('合計2以下は最下位、5以下は中位、6以上は最上位', () => {
+  it('合計2以下は最下位、3以上は上位（最大ティアは1）', () => {
     expect(tierFor(assess()).tier).toBe(0);
     expect(tierFor(assess({ scope: 1, ambiguity: 1 })).tier).toBe(0);
     expect(tierFor(assess({ scope: 1, ambiguity: 1, risk: 1 })).tier).toBe(1);
     expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 1 })).tier).toBe(1);
-    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2 })).tier).toBe(2);
+    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2 })).tier).toBe(1);
+    expect(
+      tierFor(assess({ scope: 2, ambiguity: 2, risk: 2, autonomy: 2 })).tier,
+    ).toBe(MODEL_TIERS.length - 1);
   });
 
   it('difficultyが高くてもmodelは上がらない（Sonnet/xhigh を表現できる）', () => {
@@ -175,7 +179,7 @@ describe('resolveProfile: Codexのカタログ', () => {
     ).toMatchObject({ model: 'gpt-6-luna', effort: 'high' });
   });
 
-  it('リポジトリ横断・曖昧・高リスク・自律 → Astra / xhigh', () => {
+  it('リポジトリ横断・曖昧・高リスク・自律 → Sol / xhigh', () => {
     expect(
       resolveProfile(
         assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 }),
@@ -183,7 +187,7 @@ describe('resolveProfile: Codexのカタログ', () => {
         codexModels(),
         current,
       ),
-    ).toMatchObject({ model: 'gpt-6-astra', effort: 'xhigh' });
+    ).toMatchObject({ model: 'gpt-6.1-sol', effort: 'xhigh' });
   });
 
   it('軽い見立てではGPT-6-Lunaを選ぶ', () => {
@@ -204,12 +208,12 @@ describe('resolveProfile: Codexのカタログ', () => {
 
 describe('resolveProfile: カタログが揃わないとき', () => {
   it('ティアに合うモデルがカタログに無ければ引き継ぎ元のモデルを据え置く', () => {
-    const onlyTop = [model('gpt-6-astra', FIVE)];
+    const onlyTop = [model('gpt-6.1-sol', FIVE)];
     expect(resolveProfile(assess(), noFailure, onlyTop, current).model).toBe(current.model);
     expect(
       resolveProfile(assess({ scope: 2, ambiguity: 2, risk: 2 }), noFailure, onlyTop, current)
         .model,
-    ).toBe('gpt-6-astra');
+    ).toBe('gpt-6.1-sol');
   });
 
   it('effort非対応のモデルにはeffortを渡さない', () => {
@@ -220,14 +224,14 @@ describe('resolveProfile: カタログが揃わないとき', () => {
   });
 
   it('カタログのeffortが一部しか無ければ、選べる中の最上位へ丸める', () => {
-    const models = [model('gpt-6-astra', ['low', 'medium'])];
+    const models = [model('gpt-6.1-sol', ['low', 'medium'])];
     expect(resolveProfile(assess({ difficulty: 2 }), noFailure, models, current).effort).toBe(
       'medium',
     );
   });
 
   it('カタログのeffortがladderに載っていない値だけなら未指定にする', () => {
-    const models = [model('gpt-6-astra', ['max'])];
+    const models = [model('gpt-6.1-sol', ['max'])];
     expect(resolveProfile(assess(), noFailure, models, current).effort).toBe('');
   });
 

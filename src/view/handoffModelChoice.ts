@@ -196,15 +196,14 @@ export async function pickHandoffCostPreset(
   const choices: PresetItem[] = [
     {
       label: '低（コスト優先）',
-      description: '最上位モデルとxhighを使わない',
-      detail: '使用量の上限が近いときに選ぶ。モデルはopus / solまで、effortはhighまで',
+      description: 'xhighを使わない',
+      detail: '使用量の上限が近いときに選ぶ。effortはhighまで（モデルの割り当ては変わらない）',
       preset: 'low',
     },
     {
       label: '中（常用）',
-      description: '最上位モデルは必要最低限',
-      detail:
-        '最上位モデル（fable / astra）は、広さ・曖昧さ・リスク・自律性がすべて最大のときだけ。effortの制限は無い',
+      description: '制限なし（常用）',
+      detail: 'モデルもeffortも作業の見立てだけで決める',
       preset: 'balanced',
     },
     {

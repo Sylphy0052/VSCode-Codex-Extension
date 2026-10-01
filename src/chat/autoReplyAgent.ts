@@ -25,7 +25,7 @@ import { buildAutoReplyRolePrompt, buildAutoReplyTurnPrompt } from './autoReply'
  *
  * 返信役は会話中のCLIと同じプロバイダで開く（Issue #1602）。当初は常にCodexで開いていたが、
  * ホストにはClaude Code画面自身を渡していたため、Claudeのセッションへ Codex向けの入力
- * （`approvalMode: never`・`gpt-6-sol`）が渡り、起動直後に失敗していた。
+ * （`approvalMode: never`・`gpt-6.1-sol`）が渡り、起動直後に失敗していた。
  */
 
 const AUTO_REPLY_LABEL = '自動返信の返信役';

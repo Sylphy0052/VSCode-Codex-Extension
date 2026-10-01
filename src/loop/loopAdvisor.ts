@@ -165,10 +165,11 @@ export const DEFAULT_ADVISOR_EVERY_N_TURNS = 1;
 /**
  * Advisorを動かすプロバイダの既定（issue #994）。
  *
- * `inherit`（会話しているのと同じCLI）にはしない。Advisorの役割は「別の目で進め方を見る」
- * ことであり、どちらの画面からループを回したかで相談先が変わると、指摘の出所が安定しない。
+ * `inherit`（会話しているのと同じCLI）にする（Issue #1803）。Claude Codeの会話の抜粋が
+ * 利用者の知らないままCodexへ渡るのを避け、モデルも会話側のCLIの軽量段（Codexは
+ * `gpt-6-luna`、Claudeは`sonnet`）へ解決する。
  */
-export const DEFAULT_ADVISOR_PROVIDER = 'codex';
+export const DEFAULT_ADVISOR_PROVIDER = 'inherit';
 
 /**
  * `model: auto` のとき、Codexで動かすAdvisorに使うモデル（issue #994）。
@@ -186,7 +187,7 @@ export const DEFAULT_ADVISOR_PROVIDER = 'codex';
  * 移った。この定数は`resolveAdvisorModel`を使う終了サマリと、自動返信（Codex画面、
  * `resolveAutoReplyModel`）の既定として残る。
  */
-export const DEFAULT_ADVISOR_CODEX_MODEL = 'gpt-6-sol';
+export const DEFAULT_ADVISOR_CODEX_MODEL = 'gpt-6.1-sol';
 
 /**
  * モデル設定の`auto`を、実際に起動するCLIに合わせて解決する（issue #994）。

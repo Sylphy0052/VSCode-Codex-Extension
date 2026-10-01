@@ -28,14 +28,14 @@ function model(slug: string, efforts: readonly string[]): ModelInfo {
   };
 }
 
-/** Claude Code側のカタログを模した一覧（Sonnet < Opus < Fable）。 */
+/** Claude Code側のカタログを模した一覧（Sonnet < Opus）。 */
 function claudeModels(): ModelInfo[] {
-  return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE), model('fable', FIVE)];
+  return [model('haiku', []), model('sonnet', FIVE), model('opus', FIVE)];
 }
 
-/** Codex側のカタログを模した一覧（GPT-6-Luna < GPT-6-Sol < GPT-6-Astra）。 */
+/** Codex側のカタログを模した一覧（GPT-6-Luna < GPT-6.1-Sol）。 */
 function codexModels(): ModelInfo[] {
-  return [model('gpt-6-luna', FIVE), model('gpt-6-sol', FIVE), model('gpt-6-astra', FIVE)];
+  return [model('gpt-6-luna', FIVE), model('gpt-6.1-sol', FIVE)];
 }
 
 function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
@@ -59,33 +59,32 @@ function assess(over: Partial<TaskAssessment> = {}): TaskAssessment {
 }
 
 const noFailure = { turnFailed: false };
-const current = { model: 'gpt-6-astra', effort: 'medium' };
+const current = { model: 'gpt-6.1-sol', effort: 'medium' };
 
 /** 最上位のティアとeffortを引き当てる見立て（scope + ambiguity + risk + autonomy = 8）。 */
 const heaviest = assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 });
 
 describe('コスト方針のプリセット（Issue #1214）', () => {
   it('省略時は full（従来どおりの割り当て）', () => {
-    expect(tierFor(heaviest).tier).toBe(2);
+    expect(tierFor(heaviest).tier).toBe(1);
     expect(effortIndexFor(heaviest).index).toBe(2);
     expect(resolveProfile(heaviest, noFailure, claudeModels(), current)).toMatchObject({
-      model: 'fable',
+      model: 'opus',
       effort: 'xhigh',
     });
   });
 
-  it('low は最上位モデル（fable / astra）とxhighを使わない', () => {
+  it('low はxhighを使わない（モデルのティアは変えない）', () => {
     expect(
       resolveProfile(heaviest, noFailure, claudeModels(), current, undefined, 'low'),
     ).toMatchObject({ model: 'opus', effort: 'high' });
     expect(
       resolveProfile(heaviest, noFailure, codexModels(), current, undefined, 'low'),
-    ).toMatchObject({ model: 'gpt-6-sol', effort: 'high' });
+    ).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' });
   });
 
   it('low は制限を掛けた理由を残す', () => {
     const resolved = resolveProfile(heaviest, noFailure, claudeModels(), current, undefined, 'low');
-    expect(resolved.reasons).toContain('コスト方針=low: モデルのティアを1へ制限');
     expect(resolved.reasons).toContain('コスト方針=low: effortをhighへ制限');
   });
 
@@ -93,21 +92,10 @@ describe('コスト方針のプリセット（Issue #1214）', () => {
     expect(effortIndexFor(assess({ difficulty: 0, taskType: 'debugging' }), 'low').index).toBe(1);
   });
 
-  it('balanced は合計8のときだけ最上位モデルを使う', () => {
-    expect(tierFor(heaviest, 'balanced').tier).toBe(2);
-    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2, autonomy: 1 }), 'balanced').tier).toBe(
-      1,
-    );
-    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2 }), 'balanced').tier).toBe(1);
-    // full なら同じ見立てでも最上位
-    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2 }), 'full').tier).toBe(2);
-  });
-
-  it('balanced は最上位へ届かなかったことを理由に残し、届いたときは何も足さない', () => {
-    expect(
-      tierFor(assess({ scope: 2, ambiguity: 2, risk: 2, autonomy: 1 }), 'balanced').notes,
-    ).toContain('コスト方針=balanced: 最上位モデルは合計8以上のときだけ');
-    expect(tierFor(heaviest, 'balanced').notes).toEqual([]);
+  it('ティアはコスト方針で変わらない（最大ティアは1）', () => {
+    expect(tierFor(heaviest).tier).toBe(1);
+    expect(tierFor(assess({ scope: 1, ambiguity: 1, risk: 1 })).tier).toBe(1);
+    expect(tierFor(assess({ scope: 1, ambiguity: 1 })).tier).toBe(0);
   });
 
   it('balanced は effort を制限しない', () => {

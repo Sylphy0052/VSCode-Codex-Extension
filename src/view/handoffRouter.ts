@@ -11,7 +11,7 @@ import { effortsFor, type ModelInfo } from '../codex/modelCatalog';
  *
  * effortとmodelは別の軸で決める。effortは「どれだけ深く考えるか」（difficulty）、modelは
  * 「どれだけ広く・曖昧で・危険で・自律的か」（scope / ambiguity / risk / autonomy）。この
- * 分離があると「モデルは上げないが深く考えさせる」（Sonnet / xhigh、GPT-6-Sol / xhigh）と
+ * 分離があると「モデルは上げないが深く考えさせる」（Sonnet / xhigh、GPT-6.1-Sol / xhigh）と
  * 「深く考える必要は無いが広い」（Opus / high、Sol / high）を区別できる。
  */
 
@@ -112,7 +112,7 @@ export type ProfileChangeAction = 'none' | 'switchInPlace' | 'handoff';
 /**
  * 引き継ぎ先の解決結果が今の設定と実質的にmodelが違うか（Issue #1090の `profileChanged`）。
  *
- * effortだけの違いは含めない（Issue #1752）。Opus 5.5・Sonnet 5.5・Fable 5.1はeffortを
+ * effortだけの違いは含めない（Issue #1752）。Opus 5.5・Sonnet 5.5はeffortを
  * 変えてもキャッシュが残るので、その場で変えれば済み、引き継ぐ理由にならない。
  */
 export function isProfileChange(current: HandoffProfile, next: HandoffProfile): boolean {
@@ -148,7 +148,8 @@ export function isTaskType(value: unknown): value is TaskType {
  * モデルのティア（低い順）。カタログ（`ModelInfo`）はティア情報を持たないため、slugの部分
  * 一致で順位付けする。
  *
- * Claude Codeは Sonnet < Opus < Fable、Codexは GPT-6-Luna < GPT-6-Sol < GPT-6-Astra。
+ * Claude Codeは Sonnet < Opus、Codexは GPT-6-Luna < GPT-6.1-Sol の2段（Issue #1803。
+ * Astra・Fableは扱わない）。
  * haikuは載せない——引き継ぎ先は「続きの作業をする側」であり、Claudeの最下位モデルまで落とさない。
  *
  * 求めたティアのモデルがカタログに無ければモデルを変えない（引き継ぎ元をそのまま使う）。
@@ -156,9 +157,11 @@ export function isTaskType(value: unknown): value is TaskType {
  */
 export const MODEL_TIERS: readonly (readonly string[])[] = [
   ['sonnet', 'gpt-6-luna'],
-  ['opus', 'gpt-6-sol'],
-  ['fable', 'gpt-6-astra'],
+  ['opus', 'gpt-6.1-sol'],
 ];
+
+/** 最大のティア（`MODEL_TIERS` の添字）。 */
+const MAX_TIER = MODEL_TIERS.length - 1;
 
 /**
  * 使うeffortを低い順に並べたもの。difficultyの0 / 1 / 2にそのまま対応する。
@@ -185,9 +188,6 @@ export function isCostPreset(value: unknown): value is CostPreset {
   return typeof value === 'string' && (COST_PRESETS as readonly string[]).includes(value);
 }
 
-/** プリセットごとのモデルのティア上限。`full` は `MODEL_TIERS` の最上位まで。 */
-const TIER_CAP: Record<CostPreset, number> = { low: 1, balanced: 2, full: 2 };
-
 /**
  * プリセットごとのeffortの段の上限（`EFFORT_LADDER`の添字）。
  *
@@ -195,15 +195,6 @@ const TIER_CAP: Record<CostPreset, number> = { low: 1, balanced: 2, full: 2 };
  * よりも失敗（同じところで詰まって再試行）が増えやすく、結果としてかえって高くつくため。
  */
 const EFFORT_CAP: Record<CostPreset, number> = { low: 1, balanced: 2, full: 2 };
-
-/**
- * 最上位のティア（fable / astra）へ上げるための合計スコアの下限。
- *
- * `full` は従来どおり6。`balanced` は8——scope / ambiguity / risk / autonomy がすべて2、
- * つまり「リポジトリ横断で、問題の定義から曖昧で、高リスクで、自律的に進める」ときだけ
- * 最上位を使う。`low` はティア上限が1のため、この値は使わない。
- */
-const TIER2_FLOOR: Record<CostPreset, number> = { low: 6, balanced: 8, full: 6 };
 
 /** 引き継ぎ先のmodel / effort。 */
 export interface HandoffProfile {
@@ -313,26 +304,14 @@ export function effortIndexFor(
 /**
  * scope / ambiguity / risk / autonomy の合計（0〜8）からティアへ。
  *
- * 2以下は最下位（局所的で明確な作業）、5以下は中位、それ以上は最上位（リポジトリ横断で
- * 曖昧、または高リスクで自律的）。最上位の下限と上限はコスト方針（`preset`）で動く
- * （Issue #1214。`balanced` は最上位を合計8のときだけ、`low` は最上位を使わない）。
- *
- * @param preset 省略時は `full`（従来どおりの割り当て）
+ * 2以下は最下位（局所的で明確な作業）、3以上は上位（Opus / Sol）。ティアは2段で、
+ * コスト方針（`preset`）はティアを動かさない（Issue #1803。方針で変わるのはeffortの上限だけ）。
+ * 結果は `MAX_TIER` で頭打ちにする。
  */
-export function tierFor(
-  assessment: TaskAssessment,
-  preset: CostPreset = 'full',
-): { tier: number; score: number; notes: string[] } {
+export function tierFor(assessment: TaskAssessment): { tier: number; score: number } {
   const score = assessment.scope + assessment.ambiguity + assessment.risk + assessment.autonomy;
-  const uncapped = score <= 2 ? 0 : score < TIER2_FLOOR[preset] ? 1 : 2;
-  const tier = Math.min(uncapped, TIER_CAP[preset]);
-  const notes: string[] =
-    tier === uncapped ? [] : [`コスト方針=${preset}: モデルのティアを${tier}へ制限`];
-  // 下限の引き上げで落ちた分（`balanced` の合計6・7）も、理由として見えるようにする
-  if (tier === uncapped && preset !== 'full' && score >= TIER2_FLOOR.full && tier < 2) {
-    notes.push(`コスト方針=${preset}: 最上位モデルは合計${TIER2_FLOOR[preset]}以上のときだけ`);
-  }
-  return { tier, score, notes };
+  const tier = Math.min(score <= 2 ? 0 : 1, MAX_TIER);
+  return { tier, score };
 }
 
 /** ティアに合うモデルを一覧から選ぶ。見つからなければ `undefined`（＝据え置き）。 */
@@ -375,7 +354,7 @@ export function effortFor(
 /**
  * 見立てをmodel / effortへ解決する。
  *
- * **静的な対応表（`スコア6 = gpt-6-astra / xhigh` のような）は持たない。** このリポジトリは
+ * **静的な対応表（`スコア6 = gpt-6.1-sol / xhigh` のような）は持たない。** このリポジトリは
  * モデル一覧もeffort一覧もCLIから動的に取っており（`modelCatalog.ts` の `effortsFor`）、
  * 静的表を持つとその仕組みを迂回して、存在しないモデル名や非対応のeffortをCLIへ渡すことに
  * なる。ここで持つのは順位（どちらが重いか）だけで、実在するかどうかはカタログに訊く。
@@ -395,13 +374,12 @@ export function resolveProfile(
   const corrected = applyCorrections(raw, context);
   const assessment = corrected.assessment;
   const effort = effortIndexFor(assessment, preset);
-  const { tier, score, notes: tierNotes } = tierFor(assessment, preset);
+  const { tier, score } = tierFor(assessment);
 
   const model = pickModel(models, tier) ?? current.model;
   const reasons = [
     `${assessment.taskType} difficulty=${assessment.difficulty} scope=${assessment.scope} ambiguity=${assessment.ambiguity} risk=${assessment.risk} autonomy=${assessment.autonomy} (model score=${score})`,
     ...corrected.notes,
-    ...tierNotes,
     ...effort.notes,
   ];
   return {

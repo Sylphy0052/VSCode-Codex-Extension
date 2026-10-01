@@ -8,7 +8,7 @@ import { SANDBOX_MODES, type ApprovalMode } from '../codex/types';
 import { LOOP_ITERATION_LIMIT } from '../loop/loopController';
 import type { Logger } from '../log';
 import { DANGER_PATTERN_IDS } from './escalation';
-import { escalationModel, roleDefaults, roleLabel, TEAM_ROLES } from './rolePresets';
+import { roleDefaults, roleLabel, TEAM_ROLES } from './rolePresets';
 import { sanitizeForLog, stripControlChars } from './sanitize';
 import type { ExtensionSafetyBaseline } from './taskConfig';
 import type { TaskSession, TaskSessionHost, TaskSessionInput } from './taskSession';
@@ -164,8 +164,6 @@ export interface SchemaDescriptionOptions {
  *
  * 役割の一覧も、役割ごとのmodel/effortも `rolePresets.ts` から引く。ここに語彙や
  * モデル名を手で書き写さない（`buildSchemaDescription` 全体の方針と同じ）。
- * `escalation` 段（Astra/Fable）はどの役割の既定にもならないので、必要なときだけ
- * `model` を明示して上げる、という運用をそのまま説明文にしている。
  */
 function buildRoleDescription(provider: Provider): string[] {
   const lines = TEAM_ROLES.map((role) => {
@@ -177,9 +175,7 @@ function buildRoleDescription(provider: Provider): string[] {
       '自動で決まる。同じ役割を複数のタスクへ付けてよい（役割はタスクidではない）。' +
       `${provider} での既定は次のとおり:`,
     ...lines,
-    `  役割を書いたタスクへ model / effort を重ねて書くと、そちらが優先される。` +
-      `難易度が高く詰まりそうなタスクに限り model: ${escalationModel(provider)} を明示してよいが、` +
-      '高額なので既定では使わないこと',
+    '  役割を書いたタスクへ model / effort を重ねて書くと、そちらが優先される',
   ];
 }
 
