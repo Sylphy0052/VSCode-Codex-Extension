@@ -1326,6 +1326,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return 'started';
     }
     this.reportActivity(newEntry, text);
+    // 以降に引き継ぎ元が自分で始めるターンを止める。既に走っていればここで止める（Issue #1790）
+    entry.handedOff = { resumedByUser: false, interrupting: false };
+    if (this.shouldStopTurnAfterHandoff(entry, entry.session.getState())) {
+      this.log.info('引き継ぎ済みのため、引き継ぎ元が自分で始めたターンを止めます');
+      void entry.session.interrupt();
+    }
     void this.confirmStopAfterFirstResponse(
       entry,
       firstResponse,
@@ -1350,10 +1356,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       outcome: await firstResponse,
       oldDisposed: oldEntry.disposed,
       oldBusy: oldEntry.session.getState().busy,
+      oldResumedByUser: oldEntry.handedOff?.resumedByUser === true,
       closeOldTab: readAutoHandoffCloseOldTab(),
       keepForReading,
     });
     if (decision.action === 'keep') {
+      // 引き継ぎ先が使えなければ旧セッションを代わりに使えるよう、止めるのをやめる
+      if (decision.reason !== 'oldBusy' && decision.reason !== 'readingAnswer') {
+        oldEntry.handedOff = undefined;
+      }
       this.log.info(oldTabKeptMessage(decision.reason));
       this.markHandoffKept(oldEntry, decision.reason);
       return;
@@ -1372,6 +1383,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
     if (choice !== stop || oldEntry.disposed) {
       const reason = oldEntry.disposed ? 'disposed' : 'userDismissed';
+      // 停止しないと選んだので、旧セッションを止めるのもやめる
+      oldEntry.handedOff = undefined;
       this.log.info(oldTabKeptMessage(reason));
       this.markHandoffKept(oldEntry, reason);
       return;
@@ -2655,6 +2668,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (entry.disposed) {
       return;
     }
+    // 引き継いだ後に引き継ぎ元が自分で始めたターンは、引き継ぎ先と作業が重なるため止める
+    // （Issue #1790）
+    if (this.shouldStopTurnAfterHandoff(entry, state)) {
+      this.log.info('引き継ぎ済みのため、引き継ぎ元が自分で始めたターンを止めます');
+      void entry.session.interrupt();
+    }
     // ターンの結果が確定した瞬間に、待たせていた指示を1件送る。
     //
     // 境目は`busy`の立ち下がりではなく`turnCompletionSeq`の変化で見る（issue #939）。
@@ -2896,6 +2915,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         if (text.trim() === '' && entry.attachments.list.length === 0) {
           return;
         }
+        this.noteUserSendAfterHandoff(entry);
         if (entry.session.getState().restore !== undefined) {
           return;
         }
