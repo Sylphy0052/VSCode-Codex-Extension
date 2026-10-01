@@ -571,7 +571,9 @@ function render(webview: vscode.Webview): string {
 
 const styles = `
 body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); margin: 0; }
-main { padding: 24px; max-width: 1800px; margin: 0 auto; }
+/* 盤面を画面の残り高さへ収め、横スクロールバーを常に画面下部に出す。列が縦に長いと盤面の下端が画面外へ押し出され、ページを縦にスクロールしないとバーが見えなかった（Issue #1788）。ヘッダ等が高く残りが足りないときは盤面の最低高さを保ってmainを縦スクロールさせる */
+main { padding: 24px; max-width: 1800px; margin: 0 auto; box-sizing: border-box; height: 100vh; display: flex; flex-direction: column; overflow-y: auto; }
+main > * { flex-shrink: 0; }
 header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; }
 h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 700; letter-spacing: .08em; margin: 0; } .description { color: var(--vscode-descriptionForeground); margin: 0; max-width: 720px; }
 /* ロードマップ名やrun名が長いと、ヘッダがmainからはみ出してページ全体に横スクロールが出る。盤面は画面幅で列を切り取るため、右へスクロールした先が空になる（Issue #1764） */
@@ -588,8 +590,8 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 /* 7列を等分すると狭いパネルで1行数文字まで潰れるため、列に下限幅を持たせて横スクロールにする。空の列は細くする。
    列の高さを画面の高さまでに抑えてカードは列の中で縦スクロールさせ、盤面の横スクロールバーを常に画面内へ置く（Issue #1764）。
    横スクロールバーは列が収まる幅でも常に出し、右に列が続くかどうかで盤面の高さが変わらないようにする */
-.board { display: flex; gap: 10px; align-items: flex-start; overflow-x: scroll; padding-bottom: 8px; }
-.column { flex: 1 1 240px; min-width: 220px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; display: flex; flex-direction: column; max-height: calc(100vh - 48px); }
+.board { display: flex; gap: 10px; align-items: flex-start; overflow-x: scroll; overflow-y: hidden; padding-bottom: 8px; flex: 1 1 auto; min-height: 240px; }
+.column { flex: 1 1 240px; min-width: 220px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 10px; min-height: 200px; overflow: hidden; display: flex; flex-direction: column; max-height: 100%; box-sizing: border-box; }
 .column.is-empty { flex: 0 0 104px; min-width: 104px; min-height: 0; } .column.is-empty .empty { padding: 8px 12px; }
 .column-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border); font-weight: 700; font-size: 13px; } .count { margin-left: auto; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 .cards { display: grid; align-content: start; grid-auto-rows: max-content; gap: 9px; padding: 8px; min-width: 0; min-height: 0; overflow-y: auto; }
