@@ -158,6 +158,15 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
     'トークン使用量を計測する',
     '入力トークンを減らす',
     'token limitを決める',
+    'input tokensを減らす',
+    'tokens usageを記録する',
+    'tokens数の上限を決める',
+    'output tokensを減らす',
+    'max tokensを決める',
+    'cache tokensを計測する',
+    'tokens削減の方針を決める',
+    'tokens per requestを見直す',
+    'tokens consumedを記録する',
   ])('secretsと無関係なtokenの質問は人へ回さない: %s', (question) => {
     expect(findQuestionDangers({ ...safe, question }).userOnly).not.toContain('secrets');
   });
@@ -173,6 +182,13 @@ describe('findQuestionDangers・needsUserDecision（Issue #1712・#1771）', () 
     'PATを発行する',
     'bearerヘッダを付ける',
     'CI_JOB_TOKENを渡す',
+    // 複数形も単数形と同じに扱う（Issue #1786）
+    'tokensを貼って',
+    'refresh tokensを保存する',
+    'GITHUB_TOKENSを渡す',
+    // OIDCのID tokenは従来どおり認証情報として扱う（回帰防止。Issue #1786）
+    'ID tokenを検証する',
+    'id_tokenを送る',
   ])('secretsを指すtokenの質問は人へ回す: %s', (question) => {
     expect(findQuestionDangers({ ...safe, question }).userOnly).toContain('secrets');
   });

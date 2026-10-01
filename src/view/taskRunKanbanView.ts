@@ -201,7 +201,7 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       return;
     }
     if (message.type === 'ready') {
-      this.post();
+      void this.post();
       return;
     }
     if (message.type === 'viewport') {
