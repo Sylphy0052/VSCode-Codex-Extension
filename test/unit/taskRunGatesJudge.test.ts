@@ -47,11 +47,15 @@ describe('buildGateQuestion', () => {
     });
   });
 
-  it('レビューが通過しなかった関門は「進める」を選択肢から外し、差し戻しを推奨にする（Issue #1711）', () => {
+  it('レビューが通過しなかった関門は差し戻しを推奨にし、「進める」も選べる（Issue #1711・#1771）', () => {
     const task = reviewedTask('T1', reviewResult(false, ['mediumの指摘']));
     const run = withOpenGate(makeRun([task]), 'T1', 'g1', 'reviewFindings');
     const question = buildGateQuestion(task, gateOf(run, 'T1', 'g1'));
-    expect(question.options).toEqual([GATE_OPTION_SEND_BACK, GATE_OPTION_ASK_USER]);
+    expect(question.options).toEqual([
+      GATE_OPTION_SEND_BACK,
+      GATE_OPTION_PROCEED,
+      GATE_OPTION_ASK_USER,
+    ]);
     expect(question.recommended).toBe(GATE_OPTION_SEND_BACK);
     expect(question.reason).toContain('これまで0回');
   });
