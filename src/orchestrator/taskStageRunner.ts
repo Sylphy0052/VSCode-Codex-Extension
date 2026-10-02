@@ -580,6 +580,7 @@ export class TaskStageRunner {
         run.engine,
         {
           source: 'stageSession',
+          route: 'gate',
           question: question.question,
           reason: question.reason,
           options: question.options,
@@ -636,6 +637,7 @@ export class TaskStageRunner {
       run.engine,
       {
         source: 'stageSession',
+        route: 'mergeCommand',
         question: `タスク「${sanitizeInlineText(task.title, MAX_TASK_TITLE_IN_QUESTION)}」の${entry.ref.stage}工程のセッションが、PRのmergeかPRの元ブランチのリモート削除を実行しようとしている。承認なしに実行させてよいか。`,
         command,
       },
@@ -1767,6 +1769,7 @@ export class TaskStageRunner {
           run.engine,
           {
             source: 'stageSession',
+            route: 'stageQuestion',
             question: question.question,
             reason: question.reason,
             options: question.options,
