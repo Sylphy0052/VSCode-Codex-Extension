@@ -1536,6 +1536,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         provider === 'claude' ? claudeChat.revealSession(sessionId) : chat.revealSession(sessionId),
     ),
     log,
+    // GitLab側の`gitlab-*` skillを呼べるかを、依頼先のCLIと作業場所で調べる（Issue #1814）
+    (provider, cwd) =>
+      provider === 'claude' ? claudeSkills.read(cwd) : appServer.listSkills([cwd]),
   );
   const onSessionKanbanRelevantChange = (): void => {
     sessionKanban.refresh();
