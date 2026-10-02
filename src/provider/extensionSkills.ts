@@ -219,7 +219,16 @@ export class UserSkillStore {
     if (await isFile(join(target, 'SKILL.md'))) {
       return { ok: false, reason: `「${name}」は既に追加されています。先に削除してください` };
     }
-    const tooLarge = await exceedsCopyLimit(sourceDir);
+    let tooLarge: string | undefined;
+    try {
+      tooLarge = await exceedsCopyLimit(sourceDir);
+    } catch (e) {
+      // 読めないサブフォルダや走査中に消えたファイル
+      return {
+        ok: false,
+        reason: `フォルダを読めませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
     if (tooLarge !== undefined) {
       return { ok: false, reason: tooLarge };
     }
@@ -233,7 +242,7 @@ export class UserSkillStore {
         recursive: true,
         errorOnExist: true,
         force: false,
-        filter: async (src) => copyable(src),
+        filter: async (src) => copyable(sourceDir, src),
       });
       // 選んだフォルダ自体やSKILL.mdがリンクだと、上の除外で中身が写らない
       if (!(await isFile(join(staging, 'SKILL.md')))) {
@@ -276,12 +285,13 @@ export class UserSkillStore {
   }
 
   private async ensureManifest(): Promise<void> {
+    // `skills/`だけ消えた状態でも`rename`先を用意する
+    await mkdir(this.skillsDir, { recursive: true });
     const manifest = pluginManifestPath(this.userRoot);
     if (await exists(manifest)) {
       return;
     }
     await mkdir(join(this.userRoot, '.claude-plugin'), { recursive: true });
-    await mkdir(this.skillsDir, { recursive: true });
     await writeFile(
       manifest,
       `${JSON.stringify(
@@ -308,8 +318,12 @@ const MAX_COPY_BYTES = 10 * 1024 * 1024;
  * 写す対象か。シンボリックリンクは写さない。リンク先がフォルダの外を指していると、
  * 選んだ覚えのないファイルまでskillの中身として読まれる。
  */
-async function copyable(path: string): Promise<boolean> {
-  return !SKIPPED_DIRS.has(basename(path)) && !(await lstat(path)).isSymbolicLink();
+async function copyable(root: string, path: string): Promise<boolean> {
+  // 選んだフォルダ自体は名前で除外しない（`node_modules`という名前のskillも写す）
+  if (path !== root && SKIPPED_DIRS.has(basename(path))) {
+    return false;
+  }
+  return !(await lstat(path)).isSymbolicLink();
 }
 
 /** `copyable`で写す分が上限を超えるなら理由を返す。 */
