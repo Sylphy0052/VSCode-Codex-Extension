@@ -149,6 +149,7 @@ import {
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
+import { configureHeadlessCliLog } from './loop/headlessCli';
 import {
   buildEffectivePresetConfig,
   buildSessionPresetQuickPickLabel,
@@ -203,6 +204,12 @@ import {
 } from './view/localReview';
 import { ClaudeChatViewManager } from './view/claudeChatView';
 import { ControlPanelViewProvider } from './view/controlPanelView';
+import {
+  configureExtensionSkillRoots,
+  notifyExtensionSkillRootsChanged,
+  resolvePluginRoots,
+  UserSkillStore,
+} from './provider/extensionSkills';
 import { initNotificationSounds } from './view/notificationSound';
 import { ConversationViewManager } from './view/conversationView';
 import { ProgressViewManager } from './view/progressView';
@@ -380,10 +387,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
   context.subscriptions.push(channel);
+  // 短命CLIの呼び出し元ごとの回数と所要時間（Issue #1807）
+  configureHeadlessCliLog((message) => log.info(message));
+  context.subscriptions.push({ dispose: () => configureHeadlessCliLog(undefined) });
 
   // 通知音の音源置き場を覚えさせる（issue #1242）。`resources/`配下のWAVを鳴らすため、
   // 拡張機能のインストール先が要る
   initNotificationSounds(context.extensionUri, log);
+
+  // 拡張機能が管理するskillを、起動するCLIへそのセッションだけ読み込ませる（Issue #1820）。
+  // ホームのskillディレクトリには書き込まない。会話・一覧取得の経路は多いため、ここで1回
+  // 配線して各経路から引かせる。ヘッドレス実行（`loop/headlessCli.ts`）には渡さない
+  const skillLayout = {
+    bundledRoot: vscode.Uri.joinPath(context.extensionUri, 'resources', 'skills-plugin').fsPath,
+    userRoot: path.join(context.globalStorageUri.fsPath, 'skills-plugin'),
+  };
+  configureExtensionSkillRoots(() =>
+    resolvePluginRoots(
+      skillLayout,
+      vscode.workspace.getConfiguration('agent').get<boolean>('bundledSkills.enabled', true),
+    ),
+  );
+  const userSkills = new UserSkillStore(skillLayout.userRoot);
 
   // 前回の異常終了で残ったレビュー材料を回収する（Issue #926 E）。十分に古いものだけを
   // 消すので、別ウィンドウで使用中のものは巻き込まない。起動を待たせる必要は無い
@@ -553,6 +578,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     settings,
     log,
     (context.extension.packageJSON as { version?: string }).version,
+    userSkills,
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
@@ -698,6 +724,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       (message) => log.warn(`[workflow] ${message}`),
       undefined,
     );
+  const logAnswererVerdict = (message: string): void => log.info(`[workflow] ${message}`);
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
@@ -818,16 +845,27 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
     readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,
     // 回答者判定（Issue #1708）。無効ならすべてユーザーへ回す。判定のたびに設定を読み直す
+    // 判定結果は出力へ1行ずつ残す（Issue #1819）
     judgeAskUserAnswerer: async (provider, question) => {
       const settings = readAnswererJudgeConfig();
       return settings.enabled
-        ? judgeQuestionAnswerer(answererJudgeDeps(provider), question, settings.threshold)
+        ? judgeQuestionAnswerer(
+            answererJudgeDeps(provider),
+            question,
+            settings.threshold,
+            logAnswererVerdict,
+          )
         : ANSWERER_USER_FALLBACK;
     },
     judgeTurnEndAnswerer: async (provider, lastMessage) => {
       const settings = readAnswererJudgeConfig();
       return settings.enabled
-        ? judgeTurnEndAnswerer(answererJudgeDeps(provider), lastMessage, settings.threshold)
+        ? judgeTurnEndAnswerer(
+            answererJudgeDeps(provider),
+            lastMessage,
+            settings.threshold,
+            logAnswererVerdict,
+          )
         : ANSWERER_USER_FALLBACK;
     },
     // 自動再開（design.md §16.35、roadmap W10、Issue #584）。他のreadXxxと同じく
@@ -1778,6 +1816,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       }
       if (e.affectsConfiguration('agent.sessionPresets')) {
         void updateSessionPresetsContext(log);
+      }
+      // 同梱skillの有効・無効（Issue #1820）。常駐しているCodexのapp-serverへ送り直し、
+      // 設定パネルの一覧も読み直す。Claude Codeは次に起動する会話から効く
+      if (e.affectsConfiguration('agent.bundledSkills.enabled')) {
+        notifyExtensionSkillRootsChanged();
+        void panel.refresh();
       }
       // 自動再開の設定はCodex・Claude Codeの全会話で共有する1つの値。設定画面から直接
       // 書き換えた場合も、開いている会話の予約と表示を揃える（Issue #1209）

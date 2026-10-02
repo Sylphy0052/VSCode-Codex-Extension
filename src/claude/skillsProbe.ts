@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { killWithEscalation } from '../process/childProcess';
 import type { Logger } from '../log';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
+import { claudePluginDirArgs } from '../provider/extensionSkills';
 import type { SkillsSnapshot } from '../provider/skills';
 import {
   buildControlRequest,
@@ -60,7 +61,17 @@ export class ClaudeSkillsProbe {
     return new Promise((resolve) => {
       const proc = spawn(
         this.claudePath(),
-        ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'],
+        // 会話と同じプラグインディレクトリを渡し、画面の一覧と会話で見えるskillを揃える
+        // （Issue #1820）
+        [
+          '--print',
+          '--input-format',
+          'stream-json',
+          '--output-format',
+          'stream-json',
+          '--verbose',
+          ...claudePluginDirArgs(),
+        ],
         { stdio: ['pipe', 'pipe', 'ignore'], ...(cwd === undefined ? {} : { cwd }) },
       );
 

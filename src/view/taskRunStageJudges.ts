@@ -18,6 +18,8 @@ export interface StageReflexJudgeDeps {
   reflexDeps: (engine: TaskRunEngine) => ReflexJudgeDeps;
   /** runのOrchestratorが回答を引き受けられるか。 */
   canDecide: (runId: string) => boolean;
+  /** 回答者判定の結果を1行ずつ出す口（Issue #1819）。 */
+  logInfo?: (message: string) => void;
 }
 
 export interface StageReflexJudges {
@@ -53,7 +55,7 @@ export function createStageReflexJudges(deps: StageReflexJudgeDeps): StageReflex
     judgeAnswerer: async (runId, engine, question, reflexEnabled) => {
       const settings = readAnswererJudgeConfig(reflexEnabled ?? readReflexEnabled());
       return settings.enabled && deps.canDecide(runId)
-        ? judgeQuestionAnswerer(deps.reflexDeps(engine), question, settings.threshold)
+        ? judgeQuestionAnswerer(deps.reflexDeps(engine), question, settings.threshold, deps.logInfo)
         : ANSWERER_USER_FALLBACK;
     },
   };

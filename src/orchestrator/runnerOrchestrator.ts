@@ -248,6 +248,14 @@ function buildIntroBody(
     `ワークフロー「${live.def.name}」の実行を開始しました。あなたはこの実行のオーケストレーターです。`,
     '人からの質問に答え、進行の要点を報告し、頼まれたら方針の変更を実行してください。',
     '',
+    // 推奨案のある確認を本文で人へ出してターンを終えないよう、判断の総則を先に置く（Issue #1819）
+    '判断の総則:',
+    '- 判断は原則として自分で行う。推奨案があり、取り消せない操作・担当領域をまたぐ変更・設計の前提を' +
+      '変える変更・受入基準を下げる判断・人しか知らない情報のどれにも当たらなければ、確認せずに実行し、' +
+      '何をなぜ選んだかを報告する',
+    '- 人へ確かめるのはask_userだけにする。本文の末尾に「Aで進めてよいですか」のような承認を求める問いを' +
+      '書いてターンを終えない',
+    '',
     'できること（MCPツール）:',
     '- list_tasks / get_run_status: 進行状況を読む',
     '- send_message: 走行中のタスクへメッセージを送る（タスクからask_orchestratorで問いが' +
@@ -1088,7 +1096,12 @@ async function judgeAskUserAnswerer(
   }
   orchestrator.askUserJudging = true;
   try {
-    return await judge(orchestrator.provider, { source: 'orchestrator', question, options: choices });
+    return await judge(orchestrator.provider, {
+      source: 'orchestrator',
+      route: 'askUser',
+      question,
+      options: choices,
+    });
   } catch {
     return undefined;
   } finally {

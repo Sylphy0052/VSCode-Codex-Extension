@@ -259,7 +259,8 @@ export class EndSummaryRunner {
   /** 新しいターンの要約を始める。前の要約が走っていれば取り消す。 */
   start(options: EndSummaryRunOptions): void {
     this.cancel('次のターンが終わったため');
-    const provider = options.settings.provider === 'inherit' ? options.host : options.settings.provider;
+    const provider =
+      options.settings.provider === 'inherit' ? options.host : options.settings.provider;
     const model = resolveEndSummaryModel(options.settings.model, provider);
     const effort = options.settings.effort.trim();
     const runner = describeRunner(provider, model, effort);
@@ -283,6 +284,7 @@ export class EndSummaryRunner {
         effort,
         timeoutMs: END_SUMMARY_TIMEOUT_MS,
         signal: abort.signal,
+        kind: 'endSummary',
         ...(options.logWarn === undefined ? {} : { logWarn: options.logWarn }),
       },
       redaction.text,
