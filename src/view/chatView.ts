@@ -65,6 +65,7 @@ import {
   readAutoHandoffOnAssistantSuggestion,
   readAutoHandoffOnMilestone,
   readAutoHandoffReflexConfig,
+  readHandoffAcceptanceThreshold,
   readAutoHandoffClassifierTimeoutMs,
   readAutoHandoffRouterEnabled,
   readSessionAutoNameEnabled,
@@ -195,6 +196,7 @@ import {
   judgeHandoffBoundary,
   type HandoffReflexSettings,
 } from './handoffBoundaryReflex';
+import { createHandoffAcceptanceJudge } from './handoffAcceptanceReflex';
 import {
   chooseHandoffModelSettings,
   pickHandoffCostPreset,
@@ -1308,12 +1310,29 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 残ってしまうため、その場で打ち切る
     const giveUp = new AbortController();
     // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）
+    const sentPointerPath = firstText === pointerText ? pointerPath : undefined;
+    const destination = newEntry;
+    // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
     const firstResponse = waitForDestinationResponse(
       newEntry,
       undefined,
       giveUp.signal,
       handoffId,
-      firstText === pointerText ? pointerPath : undefined,
+      sentPointerPath,
+      createHandoffAcceptanceJudge({
+        enabled: () => this.reflexEnabledFor(destination),
+        threshold: readHandoffAcceptanceThreshold,
+        deps: reflexJudgeDeps(
+          'codex',
+          readConfig().executablePath,
+          (message) => entry.trace.warn(message),
+          giveUp.signal,
+        ),
+        sentPrompt: text,
+        pointerPath: sentPointerPath,
+        destinationDisposed: () => destination.disposed,
+        trace: entry.trace,
+      }),
     );
     try {
       await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
