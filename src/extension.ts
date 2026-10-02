@@ -149,6 +149,7 @@ import {
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
+import { configureHeadlessCliLog } from './loop/headlessCli';
 import {
   buildEffectivePresetConfig,
   buildSessionPresetQuickPickLabel,
@@ -386,6 +387,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const channel = vscode.window.createOutputChannel('Agent Sessions');
   const log = createLogger(channel);
   context.subscriptions.push(channel);
+  // 短命CLIの呼び出し元ごとの回数と所要時間（Issue #1807）
+  configureHeadlessCliLog((message) => log.info(message));
+  context.subscriptions.push({ dispose: () => configureHeadlessCliLog(undefined) });
 
   // 通知音の音源置き場を覚えさせる（issue #1242）。`resources/`配下のWAVを鳴らすため、
   // 拡張機能のインストール先が要る

@@ -133,6 +133,12 @@ export interface TaskSessionInput {
    */
   cliSandbox?: ClaudeSandboxMode;
   /**
+   * CLIを低い優先度（`nice -n 10`）で起動する（Issue #1807）。対話中のウィンドウとCPUを同じ条件で
+   * 取り合わないため、オーケストレータモードの工程セッションだけが渡す。Claude側（`claudeChatView.ts`）
+   * だけが読む。Codex側はapp-serverを他のタブと共有していて工程専用のプロセスが無いため無視する。
+   */
+  lowPriority?: boolean;
+  /**
    * タスク間メッセージング（design.md §16.21）専用のMCPサーバへの接続先。runner.tsが
    * runごとに立てたサーバ（`messaging.ts`の`startHttpMcpTransport`）から、タスクごとに
    * 発行したURLを渡す。`undefined`なら（メッセージングが無効、またはこのタスクには
