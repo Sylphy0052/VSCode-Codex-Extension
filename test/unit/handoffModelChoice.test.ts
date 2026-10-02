@@ -82,7 +82,7 @@ describe('proposeHandoffModelSettings', () => {
   it('コスト方針=low ならxhighを選ばない（Issue #1214）', async () => {
     stubClassifier(assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 }));
     __mock.setConfig('agent', { 'autoHandoff.costPreset': 'low' });
-    const { settings, reasons } = await proposeHandoffModelSettings(current, input, deps());
+    const { settings } = await proposeHandoffModelSettings(current, input, deps());
     expect(settings).toEqual({ model: 'gpt-6.1-sol', effort: 'high' });
   });
 
