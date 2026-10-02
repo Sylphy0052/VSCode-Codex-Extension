@@ -5660,6 +5660,7 @@ export class WorkflowRunner {
     try {
       return await judge(provider, {
         source: 'stageSession',
+        route: 'mergeCommand',
         question: `ワークフローのタスク「${taskId}」が、PRのmergeかPRの元ブランチのリモート削除を実行しようとしている。承認なしに実行させてよいか。`,
         command,
       });
