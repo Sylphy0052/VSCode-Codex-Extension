@@ -1,3 +1,4 @@
+import { isExtensionSkillPath } from '../provider/extensionSkills';
 import type { SkillOrigin, SkillView } from '../provider/skills';
 
 /**
@@ -25,7 +26,14 @@ const SCOPE_TO_ORIGIN: Record<string, SkillOrigin> = {
   admin: 'admin',
 };
 
-export function parseSkillsList(raw: unknown): { skills: SkillView[]; warnings: string[] } {
+/**
+ * `extensionRoots`は拡張機能が読み込ませたプラグインディレクトリ（Issue #1820）。
+ * その配下のskillはCodexが`scope:"user"`で返すため、パスで`extension`へ振り直す。
+ */
+export function parseSkillsList(
+  raw: unknown,
+  extensionRoots: readonly string[] = [],
+): { skills: SkillView[]; warnings: string[] } {
   const data = rec(raw)?.['data'];
   if (!Array.isArray(data)) {
     return { skills: [], warnings: [] };
@@ -52,7 +60,7 @@ export function parseSkillsList(raw: unknown): { skills: SkillView[]; warnings: 
     }
 
     for (const rawSkill of arrayOf(entry['skills'])) {
-      const skill = parseSkillMetadata(rawSkill);
+      const skill = parseSkillMetadata(rawSkill, extensionRoots);
       if (skill === undefined || seenKeys.has(skill.key)) {
         continue;
       }
@@ -65,7 +73,10 @@ export function parseSkillsList(raw: unknown): { skills: SkillView[]; warnings: 
   return { skills, warnings };
 }
 
-function parseSkillMetadata(rawSkill: unknown): SkillView | undefined {
+function parseSkillMetadata(
+  rawSkill: unknown,
+  extensionRoots: readonly string[],
+): SkillView | undefined {
   const skill = rec(rawSkill);
   const name = str(skill?.['name']);
   const path = str(skill?.['path']);
@@ -77,7 +88,9 @@ function parseSkillMetadata(rawSkill: unknown): SkillView | undefined {
     key: path,
     name,
     description: str(skill['description']),
-    origin: SCOPE_TO_ORIGIN[str(skill['scope'])] ?? 'unknown',
+    origin: isExtensionSkillPath(path, extensionRoots)
+      ? 'extension'
+      : (SCOPE_TO_ORIGIN[str(skill['scope'])] ?? 'unknown'),
     originDetail: path,
     // 明示的な false だけを無効とする（`enabled`を持たない古い応答でも失わないため。
     // `src/codex/skillsList.ts`の`readSkillsList`と同じ考え方）

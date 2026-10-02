@@ -3,6 +3,11 @@ import type { Logger } from '../log';
 import type { HooksSnapshot } from '../provider/hooks';
 import { isValidMcpServerName, type McpServersSnapshot } from '../provider/mcpServers';
 import type { AccountSnapshot } from '../provider/account';
+import {
+  applyCodexSkillExtraRoots,
+  extensionPluginRoots,
+  extraRootsWarning,
+} from '../provider/extensionSkills';
 import { isValidSkillPath, type SkillsSnapshot } from '../provider/skills';
 import { isValidPluginName, type AppsSnapshot, type PluginsSnapshot } from '../provider/plugins';
 import type {
@@ -390,12 +395,21 @@ export class AppServerClient {
    * `listHooks` と同じくワークスペースフォルダを明示して渡す。
    */
   async listSkills(cwds: string[]): Promise<SkillsSnapshot> {
+    const roots = extensionPluginRoots();
     const result = await this.call<ReturnType<typeof parseSkillsList>>(async (request) => {
+      // 会話と同じく拡張機能のskillを読み込ませてから一覧を取る（Issue #1820）。
+      // 失敗しても一覧は出し、注記を添える
+      const rootsError =
+        roots.length === 0 ? undefined : await applyCodexSkillExtraRoots(request, roots);
       const response = await request('skills/list', cwds.length === 0 ? {} : { cwds });
       if (response.error !== undefined) {
         return { ok: false, error: response.error.message };
       }
-      return { ok: true, value: parseSkillsList(response.result) };
+      const parsed = parseSkillsList(response.result, roots);
+      if (rootsError !== undefined) {
+        parsed.warnings.push(extraRootsWarning(rootsError));
+      }
+      return { ok: true, value: parsed };
     });
 
     if (!result.ok) {

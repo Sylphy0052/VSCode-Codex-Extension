@@ -9,8 +9,15 @@ import type {
   ForgeIssueDraft,
   ForgeWorkItem,
 } from '../forge/hub';
+import {
+  availableSkillNames,
+  buildIssueStartPrompt,
+  buildIssueStartRequest,
+  buildWorkActionPrompt,
+} from '../forge/hubPrompts';
 import type { Logger } from '../log';
 import type { RoadmapIssueSummary } from '../orchestrator/roadmap';
+import type { SkillsSnapshot } from '../provider/skills';
 import { chatCsp } from './chatCsp';
 
 /** 会話から開始するForge操作の入口。Issue作成は常にこの画面の確認操作を経由する。 */
@@ -27,6 +34,11 @@ export class ForgeHubViewManager implements vscode.Disposable {
     private readonly cwd: () => string | undefined,
     private readonly orchestrator: ForgeOrchestrator,
     private readonly log: Logger,
+    /** 依頼先のCLIで使えるskillの一覧。GitLab側のskill呼び出しの可否に使う（Issue #1814）。 */
+    private readonly listSkills: (
+      provider: ForgeHubProvider,
+      cwd: string,
+    ) => Promise<SkillsSnapshot>,
   ) {
     orchestrator.onChanged((snapshot) => this.post({ type: 'orchestrator', snapshot }));
     orchestrator.onWorkStateChanged((sessionId, state) => {
@@ -181,10 +193,21 @@ export class ForgeHubViewManager implements vscode.Disposable {
         // Hubは複数リポジトリのカードを1つの盤面に並べるため、現在のcwdへ送ると別リポジトリの
         // 同番号Issueに対して対応を依頼してしまう。隔離worktreeで着手したカードも同じ理由で、
         // 記録した作業場所へ送る
+        const skills =
+          item.host === 'gitlab'
+            ? await this.readSkillNames(item.provider, item.cwd)
+            : new Set<string>();
         await this.orchestrator.send(
           item.provider,
           item.cwd,
-          buildWorkActionPrompt(item.host, item.status, item.issue.number, item.pullRequestNumber),
+          buildWorkActionPrompt(
+            item.host,
+            item.provider,
+            item.status,
+            item.issue.number,
+            item.pullRequestNumber,
+            skills,
+          ),
         );
       }
       return;
@@ -426,15 +449,20 @@ export class ForgeHubViewManager implements vscode.Disposable {
       // ここから先で投げても、worktreeは既にできている。消すと利用者の作業ごと消えるため
       // 残したまま、どこまで進んだかが分かる文言で返す（Issue #978）。
       try {
+        const skills =
+          snapshot.host === 'gitlab'
+            ? await this.readSkillNames(snapshot.provider, result.cwd)
+            : new Set<string>();
         const sessionId = await this.orchestrator.startWork(
           snapshot.provider,
           result.cwd,
           `issue-${String(issue.number)}`,
-          `${buildIssueStartPrompt(snapshot.host, issue.number)}\n作業ディレクトリは\`${result.cwd}\`、ブランチは\`${result.branch}\`です。worktreeとブランチはForge Hubが作成済みのため、新規作成しないでください。\n\n${
-            snapshot.host === 'gitlab'
-              ? `$gitlab-develop #${issue.number}`
-              : `GitHub Issue #${issue.number}に着手してください。`
-          }`,
+          `${buildIssueStartPrompt(snapshot.host, issue.number)}\n作業ディレクトリは\`${result.cwd}\`、ブランチは\`${result.branch}\`です。worktreeとブランチはForge Hubが作成済みのため、新規作成しないでください。\n\n${buildIssueStartRequest(
+            snapshot.host,
+            snapshot.provider,
+            issue.number,
+            skills,
+          )}`,
         );
         await this.service.recordStartedWork(snapshot, issue, result, sessionId);
       } catch (error) {
@@ -515,6 +543,29 @@ export class ForgeHubViewManager implements vscode.Disposable {
     );
   }
 
+  /**
+   * 依頼先のCLIで使えるskillの名前（Issue #1814）。
+   *
+   * 一覧を取れなくても着手・依頼は止めない。空集合を返し、skillに頼らない平文の依頼文で送る。
+   */
+  private async readSkillNames(
+    provider: ForgeHubProvider,
+    cwd: string,
+  ): Promise<ReadonlySet<string>> {
+    try {
+      const snapshot = await this.listSkills(provider, cwd);
+      if (!snapshot.ok) {
+        this.log.warn(`[forge-hub] skill一覧を取得できませんでした: ${snapshot.reason}`);
+      }
+      return availableSkillNames(snapshot);
+    } catch (error) {
+      this.log.warn(
+        `[forge-hub] skill一覧を取得できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return new Set();
+    }
+  }
+
   private postOrchestratorSnapshot(): void {
     const snapshot = this.orchestrator.getSnapshot();
     if (snapshot !== undefined) this.post({ type: 'orchestrator', snapshot });
@@ -572,38 +623,6 @@ function readIssue(value: Record<string, unknown>): RoadmapIssueSummary | undefi
     typeof value['title'] === 'string'
     ? { number: value['number'], title: value['title'] }
     : undefined;
-}
-
-function buildIssueStartPrompt(host: 'github' | 'gitlab' | undefined, number: number): string {
-  const command = host === 'gitlab' ? `glab issue view ${number}` : `gh issue view ${number}`;
-  return [
-    `Forge HubからIssue #${number}に着手します。`,
-    `最初に \`${command}\` で本文と現在の状態を確認してください。`,
-    '作業はこの隔離worktreeだけで行い、実装前に計画をIssueへ残してください。',
-    'commit/pushやMR作成、マージ、破壊的操作は、必要な確認を取ってから進めてください。',
-  ].join('\n');
-}
-
-function buildWorkActionPrompt(
-  host: 'github' | 'gitlab',
-  status: 'inProgress' | 'review' | 'ciPending' | 'ci' | 'cleanup' | 'blocked',
-  issueNumber: number,
-  pullRequestNumber: number | undefined,
-): string {
-  const reference =
-    pullRequestNumber === undefined ? `Issue #${issueNumber}` : `PR/MR #${pullRequestNumber}`;
-  if (host === 'gitlab') {
-    if (status === 'inProgress') return `$gitlab-develop #${issueNumber}`;
-    if (status === 'cleanup') return `$gitlab-cleanup ${reference}`;
-    if (status === 'blocked')
-      return `${reference}のブロック理由を調査し、必要な対応をしてください。`;
-    return `$gitlab-review ${reference}`;
-  }
-  if (status === 'inProgress') return `GitHub Issue #${issueNumber}の実装を続けてください。`;
-  if (status === 'cleanup')
-    return `${reference}はマージ済みです。対象を確認してcleanupしてください。`;
-  if (status === 'blocked') return `${reference}のブロック理由を調査し、必要な対応をしてください。`;
-  return `${reference}をレビューし、必要な対応を進めてください。`;
 }
 
 /**

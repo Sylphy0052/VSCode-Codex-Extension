@@ -400,7 +400,51 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     if (origin === 'plugin') return 'プラグイン';
     if (origin === 'system') return '同梱';
     if (origin === 'admin') return '管理者配布';
+    if (origin === 'extension') return '拡張機能';
     return '不明';
+  }
+
+  // 画面から追加した利用者skill（Issue #1820）。CLIの一覧とは別に、拡張機能が持つ
+  // ディレクトリの中身を出し、追加・削除の操作を置く。Codex・Claude Codeで同じものを共有する
+  function renderUserSkills(elId, names) {
+    const container = el(elId);
+    container.replaceChildren();
+
+    const title = document.createElement('div');
+    title.className = 'userSkills-title';
+    title.textContent = '画面から追加したskill';
+    container.appendChild(title);
+
+    const list = names || [];
+    if (list.length === 0) {
+      appendState(container, 'empty', 'まだ追加していません');
+    }
+    for (const name of list) {
+      const row = document.createElement('div');
+      row.className = 'userSkills-row';
+      const label = document.createElement('span');
+      label.className = 'skillItem-name';
+      label.textContent = 'codex-ext-user:' + name;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'userSkills-remove';
+      remove.textContent = '削除';
+      remove.addEventListener('click', () => {
+        vscode.postMessage({ type: 'removeUserSkill', name: name });
+      });
+      row.appendChild(label);
+      row.appendChild(remove);
+      container.appendChild(row);
+    }
+
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'userSkills-add';
+    add.textContent = 'フォルダからskillを追加';
+    add.addEventListener('click', () => {
+      vscode.postMessage({ type: 'addUserSkill' });
+    });
+    container.appendChild(add);
   }
 
   function renderSkill(skill) {
@@ -964,6 +1008,8 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     renderSection('codexMcp', loadingSections, () => renderMcp('codex', 'mcpListCodex', state.mcpServers));
     renderSection('codexHooks', loadingSections, () => renderHooks('hooksListCodex', state.hooks));
     renderSection('codexSkills', loadingSections, () => renderSkills('skillsListCodex', state.skills));
+    renderUserSkills('userSkillsCodex', state.userSkills);
+    renderUserSkills('userSkillsClaude', state.userSkills);
     renderSection('codexPlugins', loadingSections, () =>
       renderPlugins('pluginsListCodex', 'codex', state.plugins),
     );

@@ -1,6 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Logger } from '../log';
 import {
+  applyCodexSkillExtraRoots,
+  extensionPluginRoots,
+  onExtensionSkillRootsChanged,
+} from '../provider/extensionSkills';
+import {
   encodeErrorResponse,
   encodeNotification,
   encodeRequest,
@@ -65,6 +70,13 @@ export class AppServerConnection {
    * 立てて`reset()`で明示的に倒すほうが、将来経路が増えても壊れにくい。
    */
   private connected = false;
+  /**
+   * `initialize`の往復を終えたか。`skills/extraRoots/set`を送り直してよいのはこの後だけ
+   * （Issue #1820）。`reset()`で倒す。
+   */
+  private handshaken = false;
+  /** 拡張機能のskillディレクトリの変更の購読をやめる。`dispose()`で呼ぶ。 */
+  private readonly stopWatchingSkillRoots: () => void;
 
   constructor(
     private readonly codexPath: () => string,
@@ -87,6 +99,13 @@ export class AppServerConnection {
     private readonly maxLineBytes: number = MAX_APP_SERVER_LINE_BYTES,
   ) {
     this.frames = new FrameBuffer(maxLineBytes);
+    // 常駐プロセスなので、設定の切替や利用者skillの追加・削除を次の会話へ効かせるには
+    // 送り直す必要がある（Claude Codeは起動のたびに引数を組むので要らない）
+    this.stopWatchingSkillRoots = onExtensionSkillRootsChanged(() => {
+      if (this.handshaken) {
+        void this.sendSkillExtraRoots(extensionPluginRoots());
+      }
+    });
   }
 
   /** 起動と初期化。多重呼び出しは同じ処理を共有する。 */
@@ -202,7 +221,25 @@ export class AppServerConnection {
       throw e;
     }
     this.write(encodeNotification('initialized', {}));
+    this.handshaken = true;
     this.log.info('app-serverに接続しました');
+    // 拡張機能が管理するskillを、この接続だけ読み込ませる（Issue #1820）。最初のスレッドより
+    // 先に効かせるため待つ。何も無ければ送らない（古いCLIへ無駄に失敗させない）
+    const roots = extensionPluginRoots();
+    if (roots.length > 0) {
+      await this.sendSkillExtraRoots(roots);
+    }
+  }
+
+  /** 失敗しても会話は止めない。古いCLIにはこのメソッドが無い。 */
+  private async sendSkillExtraRoots(roots: readonly string[]): Promise<void> {
+    const error = await applyCodexSkillExtraRoots(
+      (method, params) => this.request(method, params),
+      roots,
+    );
+    if (error !== undefined) {
+      this.log.warn(`拡張機能のskillを読み込めませんでした: ${error}`);
+    }
   }
 
   private receive(chunk: Buffer): void {
@@ -339,6 +376,7 @@ export class AppServerConnection {
       return;
     }
     this.connected = false;
+    this.handshaken = false;
     this.proc = undefined;
     this.starting = undefined;
     this.frames.clear();
@@ -357,6 +395,7 @@ export class AppServerConnection {
   }
 
   dispose(): void {
+    this.stopWatchingSkillRoots();
     if (this.proc !== undefined) {
       killWithEscalation(this.proc);
     }
