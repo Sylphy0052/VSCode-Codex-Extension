@@ -996,6 +996,14 @@
           "scope": "window",
           "markdownDescription": "Reflexモードでの自動引き継ぎの区切り判定（Issue #1707）。作業が区切り（直前の指示が一段落し、次の作業が文面から追える）にある確率がこの値以上のときだけ、残量の緩い閾値とmodel/effortの変化で引き継ぐ。初期値は仮置き。"
         },
+        "agent.autoHandoff.reflex.acceptanceThreshold": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0,
+          "maximum": 1,
+          "scope": "window",
+          "markdownDescription": "Reflexモードでの引き継ぎ先の受領判定（Issue #1840）。引き継ぎ先が受領確認の行を書かず、pointerファイルも読まなかったときに、本文を把握したうえで動いている確率がこの値以上なら受領とみなし、引き継ぎ元のタブを閉じる。初期値は仮置き。"
+        },
         "agent.autoHandoff.model": {
           "type": "string",
           "default": "",

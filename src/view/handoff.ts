@@ -1501,6 +1501,10 @@ export type DestinationResponseOutcome =
  *
  * `pointerPath` は初回プロンプトでpointerファイルを指したときだけ渡す。引き継ぎ先がそれを
  * 読み込んだら、受領行が無くても受領とみなす（Issue #1797）。
+ *
+ * `judgeAcceptance` を渡すと、受領行もpointerの読み込みも無いまま `notAccepted` で決着しそうな
+ * とき（ターン終了・上限の経過）に1回だけ呼び、`true` なら受領として決着させる（Issue #1840）。
+ * 判定を待つ間に受領行が出れば、判定を待たずに受領で決着する。判定が投げたら `notAccepted`。
  */
 export function waitForDestinationResponse(
   entry: HandoffTurnWatch,
@@ -1508,6 +1512,7 @@ export function waitForDestinationResponse(
   giveUp?: AbortSignal,
   expectedHandoffId?: string,
   pointerPath?: string,
+  judgeAcceptance?: (state: ChatState) => Promise<boolean>,
 ): Promise<DestinationResponseOutcome> {
   const limitMs =
     timeoutMs ??
@@ -1518,6 +1523,7 @@ export function waitForDestinationResponse(
   return new Promise((resolve) => {
     let settled = false;
     let responseStarted = false;
+    let judging = false;
     const finish = (outcome: DestinationResponseOutcome): void => {
       if (settled) {
         return;
@@ -1532,6 +1538,23 @@ export function waitForDestinationResponse(
       resolve(outcome);
     };
     const onGiveUp = (): void => finish({ succeeded: false, reason: 'abandoned' });
+    const notAccepted: DestinationResponseOutcome = { succeeded: false, reason: 'notAccepted' };
+    // 受領行もpointerの読み込みも無いまま決着する前に、渡されていればReflexに判定させる
+    // （Issue #1840）。判定は1回だけで、待っている間のターン終了・上限の経過では決着させない
+    const settleNotAccepted = (state: ChatState): void => {
+      if (judgeAcceptance === undefined) {
+        finish(notAccepted);
+        return;
+      }
+      if (judging) {
+        return;
+      }
+      judging = true;
+      judgeAcceptance(state).then(
+        (accepted) => finish(accepted ? { succeeded: true } : notAccepted),
+        () => finish(notAccepted),
+      );
+    };
     const listener = (state: ChatState): void => {
       responseStarted = responseItemCount(state) > baselineItems;
       if (expectedHandoffId === undefined) {
@@ -1551,20 +1574,20 @@ export function waitForDestinationResponse(
       // 成功・失敗のどちらで終わっても同じ扱いにする（応答が無い以上、続きを託せない）。
       // 受領確認を待つときは、応答があっても行が無い・idが違うまま終わったものを区別する
       if (state.turnCompletionSeq !== baselineSeq) {
-        finish({
-          succeeded: false,
-          reason: responseStarted && expectedHandoffId !== undefined ? 'notAccepted' : 'turnFailed',
-        });
+        if (responseStarted && expectedHandoffId !== undefined) {
+          settleNotAccepted(state);
+        } else {
+          finish({ succeeded: false, reason: 'turnFailed' });
+        }
       }
     };
-    const timer = setTimeout(
-      () =>
-        finish({
-          succeeded: false,
-          reason: responseStarted && expectedHandoffId !== undefined ? 'notAccepted' : 'noResponse',
-        }),
-      limitMs,
-    );
+    const timer = setTimeout(() => {
+      if (responseStarted && expectedHandoffId !== undefined) {
+        settleNotAccepted(entry.session.getState());
+      } else {
+        finish({ succeeded: false, reason: 'noResponse' });
+      }
+    }, limitMs);
     entry.stateListeners.push(listener);
     if (giveUp?.aborted === true) {
       onGiveUp();
