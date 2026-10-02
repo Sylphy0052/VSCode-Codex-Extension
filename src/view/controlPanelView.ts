@@ -10,7 +10,11 @@ import {
   type UsageSnapshot,
 } from '../codex/usage';
 import type { Logger } from '../log';
-import { notifyExtensionSkillRootsChanged, type UserSkillStore } from '../provider/extensionSkills';
+import {
+  isValidSkillDirName,
+  notifyExtensionSkillRootsChanged,
+  type UserSkillStore,
+} from '../provider/extensionSkills';
 import {
   APPROVAL_LEVELS,
   APPROVAL_LEVEL_DESCRIPTIONS,
@@ -242,6 +246,15 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     if (folder === undefined) {
       return;
     }
+    // 写した中身は以後すべての会話へ読み込まれる。ホームのskillと同じ信頼で扱うため確かめる
+    const consent = await vscode.window.showWarningMessage(
+      `${folder.fsPath} をskillとして追加しますか？SKILL.mdと同じフォルダのファイルは、拡張機能から開く全ての会話でCodex・Claude Codeへ読み込まれます。信頼できるフォルダだけを追加してください。`,
+      { modal: true },
+      '追加',
+    );
+    if (consent !== '追加') {
+      return;
+    }
     const result = await this.userSkills.add(folder.fsPath);
     if (!result.ok) {
       void vscode.window.showErrorMessage(`skillを追加できませんでした: ${result.reason}`);
@@ -256,7 +269,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   /** 利用者skillを消す（Issue #1820）。取り消せないため確認してから消す。 */
   private async removeUserSkill(name: string): Promise<void> {
-    if (this.userSkills === undefined) {
+    // webviewから来た名前をダイアログへ出す前に形を確かめる
+    if (this.userSkills === undefined || !isValidSkillDirName(name)) {
       return;
     }
     const choice = await vscode.window.showWarningMessage(
@@ -758,7 +772,7 @@ ${controlPanelStyles()}
   <div class="sectionBody">
   <p class="note">skillsはモデルへ渡す指示（プロンプト）です。特にプロジェクト側で定義されたskillは、cloneしただけで効く経路になりえます。どこ由来かを確認してから使ってください。</p>
   <div class="skillsList" id="skillsListCodex"></div>
-  <p class="note">拡張機能のskill（同梱は<code>codex-ext:</code>、画面から追加したものは<code>codex-ext-user:</code>で始まる名前）は、ホームのskillディレクトリへ書き込まず会話ごとに読み込ませています。同梱skillは設定<code>agent.bundledSkills.enabled</code>で止められます。</p>
+  <p class="note">拡張機能のskill（同梱は<code>codex-ext:</code>、画面から追加したものは<code>codex-ext-user:</code>で始まる名前）は、ホームのskillディレクトリへ書き込まず会話ごとに読み込ませています。同梱skillは設定<code>agent.bundledSkills.enabled</code>で止められます。画面から追加したskillは、削除するまで拡張機能から開く全ての会話で有効です。</p>
   <div class="userSkills" id="userSkillsCodex"></div>
   </div>
   </details>
@@ -860,7 +874,7 @@ ${controlPanelStyles()}
     <button id="reloadClaudeSkills" type="button">skillsを読み直す</button>
     <p class="note">会話中にディスク上へ増減したskillを読み直します。開いている会話があれば、そちらのスラッシュコマンド候補も入れ替わります。</p>
     <div class="skillsList" id="skillsListClaude"></div>
-    <p class="note">拡張機能のskill（同梱は<code>codex-ext:</code>、画面から追加したものは<code>codex-ext-user:</code>で始まる名前）は、ホームのskillディレクトリへ書き込まず会話ごとに読み込ませています。同梱skillは設定<code>agent.bundledSkills.enabled</code>で止められます。</p>
+    <p class="note">拡張機能のskill（同梱は<code>codex-ext:</code>、画面から追加したものは<code>codex-ext-user:</code>で始まる名前）は、ホームのskillディレクトリへ書き込まず会話ごとに読み込ませています。同梱skillは設定<code>agent.bundledSkills.enabled</code>で止められます。画面から追加したskillは、削除するまで拡張機能から開く全ての会話で有効です。</p>
     <div class="userSkills" id="userSkillsClaude"></div>
     </div>
     </details>

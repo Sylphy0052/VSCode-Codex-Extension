@@ -1,6 +1,7 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { cp, lstat, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { cp, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, join } from 'node:path';
 
 /**
  * 拡張機能が管理するskillディレクトリ（Issue #1820）。
@@ -85,9 +86,12 @@ export function extensionPluginRoots(): string[] {
   return rootsProvider();
 }
 
-/** Claude Codeへ渡す引数。ディレクトリ1つにつき`--plugin-dir <dir>`を1組。 */
+/**
+ * Claude Codeへ渡す引数。ディレクトリ1つにつき`--plugin-dir <dir>`を1組。
+ * 絶対パスでないものは渡さない（`-`始まりの値をオプションと取り違えさせない）。
+ */
 export function claudePluginDirArgs(roots: readonly string[] = extensionPluginRoots()): string[] {
-  return roots.flatMap((root) => ['--plugin-dir', root]);
+  return roots.filter((root) => isAbsolute(root)).flatMap((root) => ['--plugin-dir', root]);
 }
 
 /** Codexの`skills/extraRoots/set`へ渡す値。skill本体が並ぶ`skills/`を指す。 */
@@ -97,7 +101,14 @@ export function codexSkillExtraRoots(roots: readonly string[] = extensionPluginR
 
 /** `path`（`skills/list`が返すSKILL.mdのパス）が拡張機能のプラグイン配下か。 */
 export function isExtensionSkillPath(path: string, roots: readonly string[]): boolean {
-  return codexSkillExtraRoots(roots).some((dir) => path.startsWith(`${dir}/`));
+  // Windowsでは`join`が`\`区切りを返し、CLIが返すパスと区切りが揃わないことがある
+  const target = comparablePath(path);
+  return codexSkillExtraRoots(roots).some((dir) => target.startsWith(`${comparablePath(dir)}/`));
+}
+
+function comparablePath(path: string): string {
+  const slashed = path.replace(/\\/g, '/');
+  return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
 }
 
 /**
@@ -113,7 +124,12 @@ export function onExtensionSkillRootsChanged(listener: () => void): () => void {
 /** 設定の変更や利用者skillの追加・削除の後に呼ぶ。 */
 export function notifyExtensionSkillRootsChanged(): void {
   for (const listener of changeListeners) {
-    listener();
+    // 1つが投げても残りの接続へは送り直す
+    try {
+      listener();
+    } catch {
+      // 送り直しの失敗は各listenerがログへ回す。ここでは止めない
+    }
   }
 }
 
@@ -200,28 +216,44 @@ export class UserSkillStore {
       return { ok: false, reason: `${sourceDir} にSKILL.mdがありません` };
     }
     const target = join(this.skillsDir, name);
-    if (await exists(target)) {
+    if (await isFile(join(target, 'SKILL.md'))) {
       return { ok: false, reason: `「${name}」は既に追加されています。先に削除してください` };
     }
+    const tooLarge = await exceedsCopyLimit(sourceDir);
+    if (tooLarge !== undefined) {
+      return { ok: false, reason: tooLarge };
+    }
 
+    // 写し終えるまでは`skills/`の外に置く。途中の状態を会話中のCLIに読ませず、
+    // 失敗しても既にある同名skillを巻き込まない
+    const staging = join(this.userRoot, `.staging-${randomBytes(6).toString('hex')}`);
     try {
       await this.ensureManifest();
-      // シンボリックリンクは写さない。リンク先がフォルダの外を指していると、
-      // 選んだ覚えのないファイルまでskillの中身として読まれる
-      await cp(sourceDir, target, {
+      await cp(sourceDir, staging, {
         recursive: true,
         errorOnExist: true,
         force: false,
-        filter: async (src) => !(await lstat(src)).isSymbolicLink(),
+        filter: async (src) => copyable(src),
       });
       // 選んだフォルダ自体やSKILL.mdがリンクだと、上の除外で中身が写らない
-      if (!(await isFile(join(target, 'SKILL.md')))) {
+      if (!(await isFile(join(staging, 'SKILL.md')))) {
         throw new Error('SKILL.mdを写せませんでした（シンボリックリンクは写しません）');
       }
-    } catch (e) {
-      // 途中まで写したものを残すと、壊れたskillが次の会話から読まれる
+      // SKILL.mdの無い残骸（削除の途中で失敗した等）は一覧に出ず消せないため、ここで片付ける
       await rm(target, { recursive: true, force: true });
-      return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      await rename(staging, target);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      try {
+        await rm(staging, { recursive: true, force: true });
+      } catch (cleanup) {
+        const detail = cleanup instanceof Error ? cleanup.message : String(cleanup);
+        return {
+          ok: false,
+          reason: `${reason}（一時コピー ${staging} を消せませんでした: ${detail}）`,
+        };
+      }
+      return { ok: false, reason };
     }
     return { ok: true, name };
   }
@@ -264,6 +296,45 @@ export class UserSkillStore {
       'utf8',
     );
   }
+}
+
+/** 写さないディレクトリ。skillの中身ではなく、写すと量だけが膨らむ。 */
+const SKIPPED_DIRS = new Set(['.git', 'node_modules']);
+/** 写す量の上限。誤って大きなフォルダを選んだときにglobalStorageを埋めない。 */
+const MAX_COPY_FILES = 1000;
+const MAX_COPY_BYTES = 10 * 1024 * 1024;
+
+/**
+ * 写す対象か。シンボリックリンクは写さない。リンク先がフォルダの外を指していると、
+ * 選んだ覚えのないファイルまでskillの中身として読まれる。
+ */
+async function copyable(path: string): Promise<boolean> {
+  return !SKIPPED_DIRS.has(basename(path)) && !(await lstat(path)).isSymbolicLink();
+}
+
+/** `copyable`で写す分が上限を超えるなら理由を返す。 */
+async function exceedsCopyLimit(root: string): Promise<string | undefined> {
+  let files = 0;
+  let bytes = 0;
+  const pending = [root];
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink() || SKIPPED_DIRS.has(entry.name)) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        pending.push(path);
+        continue;
+      }
+      files += 1;
+      bytes += (await lstat(path)).size;
+      if (files > MAX_COPY_FILES || bytes > MAX_COPY_BYTES) {
+        return `フォルダが大きすぎます（ファイル${MAX_COPY_FILES}個・合計${MAX_COPY_BYTES / 1024 / 1024}MBまで。.gitとnode_modulesは数えません）`;
+      }
+    }
+  }
+  return undefined;
 }
 
 async function isFile(path: string): Promise<boolean> {
