@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1002.4",
+  "version": "2026.1002.5",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -771,15 +771,15 @@
         },
         "agent.activityLog.enabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "window",
-          "markdownDescription": "この拡張機能から実行したセッションの発言と成果を日報/週報用のバッファへ記録する。発言の送信ごと・ターンの完了ごとに1行（時刻・作業ディレクトリ・本文の先頭200文字・編集ファイル名）を追記する。資格情報らしき値は伏せてから書き、会話本文の全文は書き出さない。"
+          "markdownDescription": "この拡張機能から実行したセッションの発言と成果を日報/週報用のバッファへ記録する（既定は無効）。発言の送信ごと・ターンの完了ごとに1行（時刻・作業ディレクトリ・本文の先頭200文字・編集ファイル名）を追記する。資格情報らしき値は伏せてから書き、会話本文の全文は書き出さない。"
         },
         "agent.activityLog.dir": {
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "作業記録の出力先ディレクトリ。空なら環境変数 `DAILY_BUFFER_DIR`、それも無ければ `~/workspace/dairy/.buffer` を使う。"
+          "markdownDescription": "作業記録の出力先ディレクトリ。`agent.activityLog.enabled` が `true` のときだけ使う。空なら環境変数 `DAILY_BUFFER_DIR`、それも無ければ `~/workspace/dairy/.buffer` を使う。"
         },
         "agent.chat.renderMarkdown": {
           "type": "boolean",

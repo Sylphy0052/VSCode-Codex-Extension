@@ -1160,13 +1160,13 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
 
 ## 日報・週報連携
 
-この拡張機能から実行したセッションの発言と成果を、日報の追記バッファへ書き出す。
+この拡張機能から実行したセッションの発言と成果を、日報の追記バッファへ書き出す。既定では無効で、`agent.activityLog.enabled` を `true` にしたときだけ書き出す。
 
 - 頻度: 発言の送信ごとに1行（`kind` が `prompt`）、ターンの完了ごとに1行（`kind` が `result`）
-- 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`
+- 出力先: `~/workspace/dairy/.buffer/<YYYY-MM-DD>.jsonl`（`agent.activityLog.dir` → 環境変数 `DAILY_BUFFER_DIR` → この既定の順で決める）
 - 形式: `{"ts","source","cwd","text","ref","session_id","kind"}`（`source` は `codex` / `claude-code`、`ref` は `vscode`）
 - 本文は空白を畳んで先頭200文字まで。成果の行には編集ファイル名（5件まで）を添える。資格情報らしき値（既知の形のトークン、`password:` などへの代入値）は書く前に伏せる。会話本文の全文は書き出さない
-- `agent.activityLog.enabled` を `false` にすれば一切書かない
+- `agent.activityLog.enabled` が `false`（既定）のあいだは一切書かず、出力先のディレクトリも作らない
 
 `~/.claude/scripts/daily/collect.py` がこのバッファを読み、日報・週報の作業ログに載る。拡張機能経由のClaude Codeセッションは transcript 走査とも重複しうるため、収集側で1件に畳んでいる（設計書 §15.4）。
 
