@@ -170,10 +170,11 @@ MR作成時に`--remove-source-branch`を付けていれば、マージ時に削
 ```bash
 git fetch origin --prune
 git branch -r                                    # 残っているか確認
-git merge-base --is-ancestor "origin/<branch>" "<default>" && git push origin --delete "refs/heads/<branch>"
+git merge-base --is-ancestor "origin/<branch>" "<default>"; rc=$?; echo "exit=$rc"   # 0: 含まれる、1: 含まれない、128: 判定できない (追跡参照が無いなど)
+[ "$rc" -eq 0 ] && git push origin --delete "refs/heads/<branch>"
 ```
 
-`<branch>`は上の形式確認に通ったものだけを使う。判定が通らなければ削除は実行されない。
+`<branch>`は上の形式確認に通ったものだけを使う。判定が通らなければ削除は実行されない。1なら「リモートにしか無いcommitがある」、128なら「判定できない」として、区別して報告する。
 
 ### ローカルの作業ファイル
 

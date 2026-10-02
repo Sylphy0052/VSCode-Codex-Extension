@@ -68,9 +68,9 @@ git worktree list   # <default>が他のworktreeでチェックアウトされ�
 チェックアウトされていなければ更新する。ローカルに`<default>`が無ければ、`origin/<default>`から作るだけでよい。あれば、**強制移動の前に、fast-forwardで追いつけること (ローカルの`<default>`がリモートの祖先であること) を確かめる**。`merge-base --is-ancestor`は、祖先なら0、祖先でなければ1、refが無いなどで判定できなければ128を返す。1ならローカルに未pushのcommitがあるので、`branch -f`を実行せず、状況を報告して止まる。128なら出力をそのまま報告して止まる。どちらも「未pushのcommitあり」とひとまとめにしない。
 
 ```bash
-git rev-parse --verify -q "refs/heads/<default>" || git branch "<default>" "origin/<default>"   # ローカルに無ければ作る
-git merge-base --is-ancestor "<default>" "origin/<default>"; echo "exit=$?"   # 0: 更新してよい、1: 未pushのcommitあり、128: 判定できない
-git branch -f "<default>" "origin/<default>"     # <default>をチェックアウトしていない場合。上がexit=0のときだけ
+git rev-parse --verify -q "refs/heads/<default>" >/dev/null || git branch "<default>" "origin/<default>"   # ローカルに無ければ作る (作った場合は次の2行は不要)
+git merge-base --is-ancestor "<default>" "origin/<default>"; rc=$?; echo "exit=$rc"   # 0: 更新してよい、1: 未pushのcommitあり、128: 判定できない
+[ "$rc" -eq 0 ] && git branch -f "<default>" "origin/<default>"     # <default>をチェックアウトしていない場合
 git switch "<default>" && git merge --ff-only "origin/<default>"
 ```
 
