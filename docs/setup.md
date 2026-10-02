@@ -240,7 +240,7 @@ code --install-extension vscode-codex-extension.vsix --force
 
 - GitHub CLI（`gh`）とログイン: Forge Hub、ロードマップ、タスク監視でGitHubのIssue・PRを扱う
 - GitLab CLI（`glab`）とログイン: 同じ機能でGitLabを扱う
-  - Forge HubのGitLab側は、依頼先のCLIに`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`のskillがあれば、それを呼ぶ（Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`の形）。skillは拡張機能に含まれていないため、無ければ計画の記録・MR作成・自己レビュー・後片付けの手順を平文で依頼する
+  - Forge HubのGitLab側は、`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`の3つのskillを呼ぶ。3つが揃っている出どころを、ホームやリポジトリ内のskill（Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`の形）、拡張機能に同梱したskill（`$codex-ext:gitlab-develop`・`/codex-ext:gitlab-develop`）、画面から追加したskill（`codex-ext-user:`）の順に探す。どこにも揃っていなければ（同梱skillを`agent.bundledSkills.enabled`で切った場合など）、計画の記録・MR作成・自己レビュー・後片付けの手順を平文で依頼する
 - `bwrap`（bubblewrap）と`socat`（Linux・WSLのみ。macOSは不要）: オーケストレータモードとロードマップ実行のClaude Codeセッションで、Bashの書き込み先を制限するsandboxに使う。どちらかが欠けるか、bubblewrapが起動できない環境（権限の無いコンテナなど）では、sandboxが無効のままセッションが始まり、書き込みの制限と承認の挙動が変わる
   - WSL・Linux（Debian・Ubuntu系）: `sudo apt install bubblewrap socat`
   - macOS: sandboxはOS標準の仕組みを使うため、入れるものは無い。`socat`が要る場合は`brew install socat`
