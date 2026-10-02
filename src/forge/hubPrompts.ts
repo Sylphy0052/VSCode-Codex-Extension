@@ -4,10 +4,10 @@ import type { ForgeHubProvider, ForgeWorkItem } from './hub';
 /**
  * Forge HubからAIへ送る依頼文を組み立てる（Issue #1814）。
  *
- * GitLab側は開発者本人の`gitlab-*` skill（`~/.codex/skills`・`~/.claude/skills`）があれば
- * それを呼ぶ。skillは拡張機能に同梱していないため、無い環境でskill名だけを送ると
- * エラーにならないまま計画の記録・自己レビュー・後片付けが抜け落ちる。そこで既定は
- * GitHub側と同じく平文の依頼文にし、skillが一覧にあるときだけ呼び出しへ切り替える。
+ * GitLab側は`gitlab-*` skillが3つ揃った出どころを、素の名前（ホーム・リポジトリのskill）→
+ * 同梱（`codex-ext:`）→利用者（`codex-ext-user:`）の順に選んで呼ぶ。どこにも揃わない環境で
+ * skill名だけを送ると、エラーにならないまま計画の記録・自己レビュー・後片付けが抜け落ちる。
+ * そのため揃わないときはGitHub側と同じく平文の依頼文にする。
  */
 
 /** Forge Hubが呼び分けるGitLab向けskill。 */
@@ -24,9 +24,37 @@ export function availableSkillNames(snapshot: SkillsSnapshot | undefined): Reado
   return new Set(snapshot.skills.filter((skill) => skill.enabled).map((skill) => skill.name));
 }
 
+const GITLAB_SKILLS: readonly ForgeGitLabSkill[] = [
+  'gitlab-develop',
+  'gitlab-review',
+  'gitlab-cleanup',
+];
+
+/**
+ * 呼び出し名の接頭辞。素の名前（ホーム・リポジトリのskill）が先、
+ * 次に同梱skill、利用者skillの順に選ぶ（Issue #1828）。
+ */
+const SKILL_NAME_PREFIXES = ['', 'codex-ext:', 'codex-ext-user:'] as const;
+
+/**
+ * 3つのskillが全部揃っている出どころの接頭辞を返す。無ければundefined（平文にする）。
+ *
+ * skillごとに出どころを選ぶと、素の`gitlab-develop`が素の`gitlab-review`を探して
+ * 手順が抜けるため、必ず3つの組で選ぶ。
+ */
+export function resolveGitLabSkillPrefix(skills: ReadonlySet<string>): string | undefined {
+  return SKILL_NAME_PREFIXES.find((prefix) =>
+    GITLAB_SKILLS.every((skill) => skills.has(`${prefix}${skill}`)),
+  );
+}
+
 /** skillの呼び出し文字列。Codexは`$name`、Claude Codeは`/name`と書く。 */
-export function skillInvocation(provider: ForgeHubProvider, skill: ForgeGitLabSkill): string {
-  return provider === 'claude' ? `/${skill}` : `$${skill}`;
+export function skillInvocation(
+  provider: ForgeHubProvider,
+  skill: ForgeGitLabSkill,
+  prefix = '',
+): string {
+  return provider === 'claude' ? `/${prefix}${skill}` : `$${prefix}${skill}`;
 }
 
 export function buildIssueStartPrompt(
@@ -50,8 +78,9 @@ export function buildIssueStartRequest(
   skills: ReadonlySet<string>,
 ): string {
   if (host !== 'gitlab') return `GitHub Issue #${number}に着手してください。`;
-  if (skills.has('gitlab-develop'))
-    return `${skillInvocation(provider, 'gitlab-develop')} #${number}`;
+  const prefix = resolveGitLabSkillPrefix(skills);
+  if (prefix !== undefined)
+    return `${skillInvocation(provider, 'gitlab-develop', prefix)} #${number}`;
   return [`GitLab Issue #${number}に着手してください。`, ...gitlabDevelopSteps(number)].join('\n');
 }
 
@@ -67,24 +96,25 @@ export function buildWorkActionPrompt(
     pullRequestNumber === undefined ? `Issue #${issueNumber}` : `PR/MR #${pullRequestNumber}`;
   if (status === 'blocked') return `${reference}のブロック理由を調査し、必要な対応をしてください。`;
   if (host === 'gitlab') {
+    const prefix = resolveGitLabSkillPrefix(skills);
     if (status === 'inProgress') {
-      return skills.has('gitlab-develop')
-        ? `${skillInvocation(provider, 'gitlab-develop')} #${issueNumber}`
+      return prefix !== undefined
+        ? `${skillInvocation(provider, 'gitlab-develop', prefix)} #${issueNumber}`
         : [
             `GitLab Issue #${issueNumber}の実装を続けてください。済んでいない手順から進めます。`,
             ...gitlabDevelopSteps(issueNumber),
           ].join('\n');
     }
     if (status === 'cleanup') {
-      return skills.has('gitlab-cleanup')
-        ? `${skillInvocation(provider, 'gitlab-cleanup')} ${reference}`
+      return prefix !== undefined
+        ? `${skillInvocation(provider, 'gitlab-cleanup', prefix)} ${reference}`
         : [
             `${reference}はマージ済みです。対象を確認してcleanupしてください。`,
             ...gitlabCleanupSteps(issueNumber, pullRequestNumber),
           ].join('\n');
     }
-    return skills.has('gitlab-review')
-      ? `${skillInvocation(provider, 'gitlab-review')} ${reference}`
+    return prefix !== undefined
+      ? `${skillInvocation(provider, 'gitlab-review', prefix)} ${reference}`
       : [
           `${reference}をレビューし、必要な対応を進めてください。`,
           ...gitlabReviewSteps(pullRequestNumber),

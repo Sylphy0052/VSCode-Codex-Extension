@@ -19,6 +19,12 @@ const ALL_GITLAB_SKILLS: ReadonlySet<string> = new Set([
   'gitlab-review',
   'gitlab-cleanup',
 ]);
+const BUNDLED_GITLAB_SKILLS: ReadonlySet<string> = new Set(
+  [...ALL_GITLAB_SKILLS].map((name) => `codex-ext:${name}`),
+);
+const USER_GITLAB_SKILLS: ReadonlySet<string> = new Set(
+  [...ALL_GITLAB_SKILLS].map((name) => `codex-ext-user:${name}`),
+);
 const NO_SKILLS: ReadonlySet<string> = new Set();
 
 function skill(name: string, enabled = true): SkillView {
@@ -67,6 +73,27 @@ describe('buildIssueStartRequest', () => {
     );
   });
 
+  it('素の名前が揃っていれば、同梱skillがあっても素の名前を呼ぶ', () => {
+    const all = new Set([...ALL_GITLAB_SKILLS, ...BUNDLED_GITLAB_SKILLS, ...USER_GITLAB_SKILLS]);
+    expect(buildIssueStartRequest('gitlab', 'codex', 12, all)).toBe('$gitlab-develop #12');
+  });
+
+  it('素の名前が一部だけなら、同梱skillを呼ぶ', () => {
+    const mixed = new Set(['gitlab-develop', ...BUNDLED_GITLAB_SKILLS]);
+    expect(buildIssueStartRequest('gitlab', 'codex', 12, mixed)).toBe(
+      '$codex-ext:gitlab-develop #12',
+    );
+    expect(buildIssueStartRequest('gitlab', 'claude', 12, mixed)).toBe(
+      '/codex-ext:gitlab-develop #12',
+    );
+  });
+
+  it('同梱が無く利用者skillだけなら、codex-ext-user:を呼ぶ', () => {
+    expect(buildIssueStartRequest('gitlab', 'claude', 12, USER_GITLAB_SKILLS)).toBe(
+      '/codex-ext-user:gitlab-develop #12',
+    );
+  });
+
   it('GitHubはskillの有無に関わらず従来どおり', () => {
     expect(buildIssueStartRequest('github', 'claude', 12, ALL_GITLAB_SKILLS)).toBe(
       'GitHub Issue #12に着手してください。',
@@ -95,14 +122,21 @@ describe('buildWorkActionPrompt', () => {
     }
   });
 
-  it('一部のskillだけある場合は、あるものだけ呼ぶ', () => {
+  it('3つ揃わない出どころだけなら、skillを呼ばず平文にする', () => {
     const onlyDevelop = new Set(['gitlab-develop']);
-    expect(buildWorkActionPrompt('gitlab', 'codex', 'inProgress', 12, 34, onlyDevelop)).toBe(
-      '$gitlab-develop #12',
-    );
-    expect(buildWorkActionPrompt('gitlab', 'codex', 'review', 12, 34, onlyDevelop)).not.toContain(
-      'gitlab-review',
-    );
+    for (const status of ['inProgress', 'review', 'cleanup'] as const) {
+      const text = buildWorkActionPrompt('gitlab', 'codex', status, 12, 34, onlyDevelop);
+      expect(text).not.toMatch(/[$/]gitlab-/);
+    }
+  });
+
+  it('同梱skillが揃っていれば、状態ごとにcodex-ext:を呼ぶ', () => {
+    expect(
+      buildWorkActionPrompt('gitlab', 'codex', 'review', 12, 34, BUNDLED_GITLAB_SKILLS),
+    ).toBe('$codex-ext:gitlab-review PR/MR #34');
+    expect(
+      buildWorkActionPrompt('gitlab', 'claude', 'cleanup', 12, 34, BUNDLED_GITLAB_SKILLS),
+    ).toBe('/codex-ext:gitlab-cleanup PR/MR #34');
   });
 
   it('GitHubは従来どおりの平文', () => {
