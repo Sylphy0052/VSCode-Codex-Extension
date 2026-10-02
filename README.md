@@ -83,6 +83,8 @@ Start-Process -FilePath $chrome -ArgumentList @(
 
 Marketplaceには未公開。[GitHub Releaseの最新版](https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest)からVSIXを入手してインストールする。
 
+VS CodeやCLIがまだ入っていないPCに入れる場合は、[導入手順（まっさらなPCから）](docs/setup.md)を参照する。Windows・macOS・WSLのそれぞれについて、VS Code、CLI、ログインの準備から説明している。
+
 ### 1. 前提を確認する
 
 ```bash
