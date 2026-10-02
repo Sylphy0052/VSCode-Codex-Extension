@@ -1715,6 +1715,62 @@ Codexには`reload_skills`に相当する制御要求が無く、`skills/list`�
 読み直す（`forceReload`パラメータはあるが専用ボタンを設ける動機が無い）ため、この「読み直す」
 ボタンはClaude Code専用。
 
+#### 拡張機能が管理するskill（Issue #1820）
+
+拡張機能が持つskillのディレクトリを、起動するCLIへ「そのセッションだけ」読み込ませる。
+`~/.codex/skills`・`~/.claude/skills`には書き込まない。実装は`src/provider/extensionSkills.ts`。
+
+読み込み元は2つで、どちらも同じ構成（`.claude-plugin/plugin.json`と`skills/<skill名>/SKILL.md`）。
+この1つのディレクトリをCodexとClaude Codeの両方が読める（2026-10-02実測。codex-cli 0.159.3・
+Claude Code 2.1.286）。
+
+| 種類        | 置き場所                           | プラグイン名（呼び出し名）                     | 有効・無効                                      |
+| ----------- | ---------------------------------- | ---------------------------------------------- | ----------------------------------------------- |
+| 同梱skill   | VSIX内の`resources/skills-plugin/` | `codex-ext`（`codex-ext:<skill名>`）           | 設定`agent.bundledSkills.enabled`（既定`true`） |
+| 利用者skill | `globalStorage/skills-plugin/`     | `codex-ext-user`（`codex-ext-user:<skill名>`） | 画面からの追加・削除                            |
+
+呼び出すときは、Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`と書く。
+`plugin.json`が無いディレクトリは渡さない（利用者skillを1件も追加していなければ何も渡さない）。
+
+読み込ませる経路:
+
+- Claude Code: 会話の起動引数（`buildClaudeStreamArgs`の`pluginDirs`）と、設定パネルの一覧取得
+  （`ClaudeSkillsProbe`）に`--plugin-dir <dir>`を足す。画面の一覧と会話で見えるskillを揃えるため、
+  両方に同じ引数を渡す。起動のたびに引数を組むので、設定の変更は次に起動する会話から効く
+- Codex: 常駐する`AppServerConnection`は`initialize`の直後に
+  `skills/extraRoots/set {extraRoots: ["<dir>/skills"]}`を送る。常駐プロセスなので、
+  `agent.bundledSkills.enabled`の変更や利用者skillの追加・削除のたびに送り直す。
+  設定パネルの一覧を取る単発の`AppServerClient.listSkills`も、`skills/list`の前に同じ要求を送る
+- タスク実行（オーケストレータ）の会話も同じ`ClaudeStreamSession`・`AppServerConnection`を
+  通るため、同じ経路で読み込まれる
+- ヘッドレス実行（`src/loop/headlessCli.ts`）には渡さない。`--setting-sources ''`・
+  `--ignore-user-config`で利用者の設定を読ませない脇役なので、skillも持たせない
+
+CLIの古い版で`skills/extraRoots/set`が無い場合は、会話を止めずにログへ残し、設定パネルの一覧に
+注記を出す。Claude Code側は`--plugin-dir`を持つ版（プラグイン機能のある版）を前提とし、
+版による分岐は置かない。未対応の版では起動引数のエラーとして会話・一覧取得が失敗する。
+
+出どころの表示（`SkillOrigin`の`extension`）:
+
+- Codexは拡張機能のskillも`scope:"user"`で返す。SKILL.mdのパスが上の`skills/`配下なら
+  `extension`へ振り直す
+- Claude Codeはプラグインidが`codex-ext`か`codex-ext-user`なら`extension`とする
+
+個々のskillの有効・無効は、Codexは既存の`skills/config/write`をそのまま使う。Claude Codeには
+切り替える経路が無いため、同梱skillをまとめて止める設定だけになる。
+
+利用者skillの追加は、設定パネルのskillsセクションで「フォルダからskillを追加」を押し、
+`SKILL.md`を含むフォルダを選ぶ。フォルダは`globalStorage/skills-plugin/skills/<フォルダ名>/`へ
+写して持つ（元のフォルダを参照し続けると、後から書き換わった内容が黙って効くため）。
+シンボリックリンクは写さない。同じ名前が既にあれば上書きせず断る。削除は確認ダイアログを経て
+写しだけを消す。
+
+- 追加の前に、写した中身が以後すべての会話へ読み込まれる旨を確認ダイアログで示す
+- `.git`・`node_modules`は写さない。写す分がファイル1000個か合計10MBを超えるフォルダは断る
+- 写す先はいったん`skills-plugin/.staging-<乱数>/`とし、`SKILL.md`まで写せたら`rename`で
+  `skills/<フォルダ名>/`へ移す。途中の状態を会話中のCLIに読ませず、失敗時も一時側だけを消す。
+  `SKILL.md`の無い同名の残骸（削除の途中で失敗した等）は一覧に出ず消せないため、移す前に片付ける
+
 ### 14.20 承認方法をキー操作で回す
 
 TUIは Shift+Tab で承認モードを循環させる。セレクタを開いて選ぶより速く、実際にはこちらばかり使う操作なので、チャット画面にも同じ入口を用意する（issue #13・TP-23）。

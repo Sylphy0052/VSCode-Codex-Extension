@@ -513,6 +513,28 @@ ${sharedStyles()}
     color: var(--vscode-charts-purple, var(--vscode-charts-blue));
     border: 1px solid var(--vscode-charts-purple, var(--vscode-charts-blue));
   }
+  .skillBadge-extension {
+    color: var(--vscode-charts-green);
+    border: 1px solid var(--vscode-charts-green);
+  }
+  .userSkills {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  .userSkills-title { font-weight: 600; }
+  .userSkills-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .userSkills-remove, .userSkills-add {
+    width: auto;
+    padding: 3px 10px;
+  }
+  .userSkills-add { align-self: flex-start; }
   .skillBadge-system, .skillBadge-admin, .skillBadge-unknown, .skillBadge-disabled {
     color: var(--vscode-descriptionForeground);
     border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));

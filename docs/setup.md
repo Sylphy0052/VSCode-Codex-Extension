@@ -222,6 +222,17 @@ code --install-extension vscode-codex-extension.vsix --force
   - Windowsでは`\`区切りと`/`区切りのどちらでも書ける（例: `C:\Users\<ユーザー名>\.local\bin\claude.exe`）。`claude`のように区切りもドライブ文字も含まない値はコマンド名とみなし、PATHから探す
   - パスが誤っていると「`codex.executablePath が実行できません: <パス>`」のように通知される
 
+## 拡張機能のskill
+
+拡張機能は、自分が持つskillをCodex・Claude Codeの会話へ読み込ませる。`~/.codex/skills`・`~/.claude/skills`には書き込まず、拡張機能から開いた会話にだけ効く。
+
+- 同梱skill: VSIXに入っている。呼び出し名は`codex-ext:<skill名>`（Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`）。止めたいときは設定の`agent.bundledSkills.enabled`を`false`にする
+- 自分で追加するskill: Agentsの設定パネルでskillsセクションを開き、「フォルダからskillを追加」を押して`SKILL.md`を含むフォルダを選ぶ。呼び出し名は`codex-ext-user:<フォルダ名>`になる。フォルダは拡張機能の保存領域へ写されるため、元のフォルダを書き換えても反映されない。書き換えたら一度削除して追加し直す
+  - 追加したskillは、削除するまで拡張機能から開く全ての会話で読み込まれる。信頼できるフォルダだけを追加する
+  - シンボリックリンク・`.git`・`node_modules`は写さない。写す分がファイル1000個か合計10MBを超えるフォルダは追加できない
+
+どちらも、次に開いた会話から使える。設定パネルのskill一覧では「拡張機能」と表示される。
+
 ## 必要に応じて入れるもの
 
 次のものは無くても拡張機能は動く。無い場合は、対応する機能だけが使えない。
