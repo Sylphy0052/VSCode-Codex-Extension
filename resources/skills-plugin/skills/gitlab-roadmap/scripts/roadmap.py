@@ -354,7 +354,7 @@ def mermaid(state: dict) -> str:
         ]
         lines.append("    end")
     known = {it["iid"] for it in items}
-    # roadmap外のIssueはノードが無いためエッジを引かない (format.mdのGotcha)
+    # roadmap外のIssueはノードが無いためエッジを引かない (format.mdの注意点)
     edges = [
         f"    I{d} --> I{it['iid']}"
         for it in items

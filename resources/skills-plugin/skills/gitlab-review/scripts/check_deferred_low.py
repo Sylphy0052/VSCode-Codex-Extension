@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""見送ったlow指摘の切り出し漏れ検査 (codex-ext:gitlab-review / codex-ext:gitlab-develop用)
+"""見送ったlow指摘の切り出し漏れ検査 (gitlab-review / gitlab-develop用)
 
 自己レビューnoteの「### 見送り一覧 (累積)」節 (gitlab-develop/references/mr-template.md)
 を読み、状態が `見送り (low、別Issue予定)` のまま残っている行を列挙する。
@@ -89,11 +89,13 @@ def main() -> int:
 
     try:
         if args.note == "-":
+            # ロケール依存で読むと、cp932などでは化けたまま通り「節が無い」と誤判定する
+            sys.stdin.reconfigure(encoding="utf-8")
             text = sys.stdin.read()
         else:
             with open(args.note, encoding="utf-8") as f:
                 text = f.read()
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"エラー: 入力を読めない: {e}", file=sys.stderr)
         return 2
 

@@ -20,10 +20,10 @@ roadmapごとに本文を`roadmap.py state`へ渡す。パース、状態の判�
 glab issue view <roadmapのIID>
 ```
 
-`<roadmapのIID>`は手順1の`iid`を、数字だけであることを確かめてから使う。`glab`の出力のうち本文(タイトル・ラベル等のヘッダ行を除いた説明部分)をWriteツールで`$TMPDIR/roadmap-<roadmapのIID>.md`へ書く。`glab`の応答の判定と停止は[glab-response.md](../../gitlab-develop/references/glab-response.md)に従う。`glab`とスクリプトをパイプでつながない(sandboxのネットワーク拒否や`glab`の失敗が隠れるため)。本文を書いたら、`state`を単独で呼ぶ。
+`<roadmapのIID>`は手順1の`iid`を、数字だけであることを確かめてから使う。`glab`の出力のうち本文(タイトル・ラベル等のヘッダ行を除いた説明部分)を`$TMPDIR/roadmap-<roadmapのIID>.md`へ書き出す (Claude CodeはWriteツールを使う)。`glab`の応答の判定と停止は[glab-response.md](../../gitlab-develop/references/glab-response.md)に従う。`glab`とスクリプトをパイプでつながない(sandboxのネットワーク拒否や`glab`の失敗が隠れるため)。本文を書いたら、`state`を単独で呼ぶ。
 
 ```bash
-ROADMAP_PY="<skillのベースディレクトリ>/scripts/roadmap.py"   # SKILL.mdがあるディレクトリの絶対パス
+ROADMAP_PY="<このSKILL.mdと同じディレクトリの絶対パス>/scripts/roadmap.py"
 python3 "$ROADMAP_PY" state "$TMPDIR/roadmap-<roadmapのIID>.md"
 ```
 
