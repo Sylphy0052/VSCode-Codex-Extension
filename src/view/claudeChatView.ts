@@ -82,6 +82,7 @@ import {
   readAutoHandoffOnAssistantSuggestion,
   readAutoHandoffOnMilestone,
   readAutoHandoffReflexConfig,
+  readHandoffAcceptanceReflexConfig,
   readAutoHandoffClassifierTimeoutMs,
   readAutoHandoffRouterEnabled,
   readSessionAutoNameEnabled,
@@ -125,6 +126,7 @@ import {
   judgeAutoReplyAskUserQuestion,
 } from '../chat/autoReplyReflex';
 import { reflexJudgeDeps, type ReflexJudgeDeps } from '../reflex/reflexJudge';
+import { createHandoffAcceptanceJudge } from './handoffAcceptanceReflex';
 import {
   buildClaudeSkillPrompt,
   describeSkillSelect,
@@ -1516,12 +1518,26 @@ export class ClaudeChatViewManager
       // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
       const giveUp = new AbortController();
       // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）
+      const pointerGiven = attemptText === pointerText;
+      // 受領行もpointerの読み込みも無いときは、Reflexで受領を判定する（Issue #1840）
+      const acceptanceJudge = createHandoffAcceptanceJudge({
+        settings: readHandoffAcceptanceReflexConfig(this.reflexEnabledFor(entry)),
+        deps: reflexJudgeDeps(
+          'claude',
+          this.claudePath(),
+          (message) => entry.trace.warn(message),
+          giveUp.signal,
+        ),
+        handoff: { text: attemptText, ...(pointerGiven ? { pointerPath } : {}) },
+        report: (line) => entry.trace.info(line),
+      });
       const firstResponse = waitForDestinationResponse(
         newEntry,
         undefined,
         giveUp.signal,
         handoffId,
-        attemptText === pointerText ? pointerPath : undefined,
+        pointerGiven ? pointerPath : undefined,
+        acceptanceJudge,
       );
       try {
         // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）

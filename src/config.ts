@@ -109,6 +109,10 @@ import {
   DEFAULT_HANDOFF_REFLEX_SUGGEST_THRESHOLD,
   type HandoffReflexSettings,
 } from './view/handoffBoundaryReflex';
+import {
+  DEFAULT_HANDOFF_ACCEPTANCE_REFLEX_THRESHOLD,
+  type HandoffAcceptanceReflexSettings,
+} from './view/handoffAcceptanceReflex';
 import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
   GoalEvaluatorProviderSetting,
@@ -1110,6 +1114,24 @@ export function readAutoHandoffReflexConfig(
     boundaryThreshold: threshold(
       'autoHandoff.reflex.boundaryThreshold',
       DEFAULT_HANDOFF_REFLEX_BOUNDARY_THRESHOLD,
+    ),
+  };
+}
+
+/**
+ * 引き継ぎ先の受領のReflex判定（Issue #1840）の設定を読む。閾値が0〜1の範囲外なら既定値に戻す。
+ * `enabled`はReflexモードの親スイッチ（タブ単位の上書きを含む）。省略時はグローバル設定。
+ */
+export function readHandoffAcceptanceReflexConfig(
+  reflexEnabled: boolean = readReflexEnabled(),
+): HandoffAcceptanceReflexSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    enabled: reflexEnabled,
+    acceptanceThreshold: reflexThreshold(
+      c,
+      'autoHandoff.reflex.acceptanceThreshold',
+      DEFAULT_HANDOFF_ACCEPTANCE_REFLEX_THRESHOLD,
     ),
   };
 }
