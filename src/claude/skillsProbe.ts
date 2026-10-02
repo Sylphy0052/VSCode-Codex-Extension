@@ -29,9 +29,18 @@ export class ClaudeSkillsProbe {
     private readonly timeoutMs = TIMEOUT_MS,
   ) {}
 
-  /** skillsの一覧を読む。取得できなければ理由付きで返す。 */
-  async read(): Promise<SkillsSnapshot> {
-    const response = await this.send(buildReloadSkillsRequest('reload_skills'), 'reload_skills');
+  /**
+   * skillsの一覧を読む。取得できなければ理由付きで返す。
+   *
+   * `cwd`を渡すと、そこを作業場所として起動する。プロジェクト側のskill（`<repo>/.claude/skills`）
+   * はこの場所から探される（Forge Hubが作業worktreeのskillを調べるため。Issue #1814）。
+   */
+  async read(cwd?: string): Promise<SkillsSnapshot> {
+    const response = await this.send(
+      buildReloadSkillsRequest('reload_skills'),
+      'reload_skills',
+      cwd,
+    );
     const snapshot = buildSkillsSnapshot(response);
     if (!snapshot.ok) {
       this.log.warn(`skills一覧を取得できませんでした: ${snapshot.reason}`);
@@ -43,12 +52,16 @@ export class ClaudeSkillsProbe {
    * `claude` を起動し、`initialize` に続けて1件だけ制御要求を送って応答を待つ。
    * 対応する `request_id` の応答が届くか、タイムアウトするまで待つ。
    */
-  private send(requestLine: string, requestId: string): Promise<ControlResponse | undefined> {
+  private send(
+    requestLine: string,
+    requestId: string,
+    cwd: string | undefined,
+  ): Promise<ControlResponse | undefined> {
     return new Promise((resolve) => {
       const proc = spawn(
         this.claudePath(),
         ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'],
-        { stdio: ['pipe', 'pipe', 'ignore'] },
+        { stdio: ['pipe', 'pipe', 'ignore'], ...(cwd === undefined ? {} : { cwd }) },
       );
 
       let buffer = '';
