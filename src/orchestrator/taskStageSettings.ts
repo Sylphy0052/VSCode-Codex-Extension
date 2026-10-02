@@ -85,8 +85,7 @@ export function buildStageClassifierInput(
 }
 
 export type StageSettingsCheck =
-  | { ok: true; model: string; effort: string }
-  | { ok: false; message: string };
+  { ok: true; model: string; effort: string } | { ok: false; message: string };
 
 /**
  * OrchestratorのModel/Effortを検証する。モデル一覧が取れていればその一覧と照合し、取れて

@@ -101,9 +101,9 @@ describe('modelはscope+ambiguity+risk+autonomyで決まる', () => {
     expect(tierFor(assess({ scope: 1, ambiguity: 1, risk: 1 })).tier).toBe(1);
     expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 1 })).tier).toBe(1);
     expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2 })).tier).toBe(1);
-    expect(
-      tierFor(assess({ scope: 2, ambiguity: 2, risk: 2, autonomy: 2 })).tier,
-    ).toBe(MODEL_TIERS.length - 1);
+    expect(tierFor(assess({ scope: 2, ambiguity: 2, risk: 2, autonomy: 2 })).tier).toBe(
+      MODEL_TIERS.length - 1,
+    );
   });
 
   it('difficultyが高くてもmodelは上がらない（Sonnet/xhigh を表現できる）', () => {

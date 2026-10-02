@@ -34,9 +34,7 @@ export type RoadmapReadOutcome =
   | { kind: 'failed'; message: string };
 
 export type RoadmapEditOutcome =
-  | { kind: 'written' }
-  | { kind: 'unchanged' }
-  | { kind: 'failed'; message: string };
+  { kind: 'written' } | { kind: 'unchanged' } | { kind: 'failed'; message: string };
 
 export type RoadmapPlanWriteOutcome =
   | { kind: 'written'; nodes: RoadmapPlanNode[]; sectionHash: string }

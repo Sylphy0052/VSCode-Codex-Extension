@@ -170,7 +170,9 @@ async function judgeWith(input: HandoffAcceptanceJudgeInput, state: ChatState): 
   input.trace.info(describeHandoffAcceptanceVerdict(probability, threshold));
   // 判定を待つ間に引き継ぎ先のタブが閉じられていたら、旧タブまで閉じないよう受領にしない
   if (input.destinationDisposed()) {
-    input.trace.info('Reflexの受領判定の間に引き継ぎ先のタブが閉じられたため、受領していないとみなす');
+    input.trace.info(
+      'Reflexの受領判定の間に引き継ぎ先のタブが閉じられたため、受領していないとみなす',
+    );
     return false;
   }
   return probability >= threshold;

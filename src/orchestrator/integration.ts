@@ -599,7 +599,14 @@ async function mergeTaskBranch(
     if (saveError !== undefined) {
       return { kind: 'failure', message: saveError };
     }
-    const built = await buildCandidate(integrationWorktreeCwd, branch, runId, attempt, git, options.type);
+    const built = await buildCandidate(
+      integrationWorktreeCwd,
+      branch,
+      runId,
+      attempt,
+      git,
+      options.type,
+    );
     if (built.kind !== 'candidate') {
       return built;
     }
@@ -828,9 +835,7 @@ async function verifyCandidate(
     : undefined;
 }
 
-type PublishResult =
-  | Extract<MergeTaskResult, { kind: 'success' | 'failure' }>
-  | { kind: 'stale' };
+type PublishResult = Extract<MergeTaskResult, { kind: 'success' | 'failure' }> | { kind: 'stale' };
 
 /**
  * 検証済みの候補を統合ブランチへ反映する。`git update-ref refs/heads/<branch> <candidate> <base>`
@@ -892,7 +897,11 @@ async function restoreIntegrationHead(
   if (mergeHead.code === 0) {
     const abort = await git.run(['merge', '--abort'], cwd);
     if (abort.code !== 0) {
-      return { ok: false, reason: 'gitError', message: gitFailureMessage('git merge --abort', abort) };
+      return {
+        ok: false,
+        reason: 'gitError',
+        message: gitFailureMessage('git merge --abort', abort),
+      };
     }
   }
   const checkout = await git.run(['checkout', branch], cwd);

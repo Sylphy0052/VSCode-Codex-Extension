@@ -1336,7 +1336,6 @@ describe('workflowScript', () => {
       expect(new Set(labelKeys)).toEqual(new Set(allStates));
     },
   );
-
 });
 
 describe('会話の一番下へジャンプするボタン', () => {

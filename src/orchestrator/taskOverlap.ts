@@ -56,9 +56,7 @@ export function isOverlapHoldingState(state: TaskState | undefined): boolean {
  * 追記するだけのファイルで待機が増えすぎないようにするため。Issueの確認点）。
  */
 export function isOverlapIgnored(file: string, ignore: readonly string[]): boolean {
-  return ignore.some((entry) =>
-    entry.endsWith('/') ? file.startsWith(entry) : file === entry,
-  );
+  return ignore.some((entry) => (entry.endsWith('/') ? file.startsWith(entry) : file === entry));
 }
 
 /**

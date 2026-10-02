@@ -56,23 +56,21 @@ export function buildRoadmapInitialPlan(input: RoadmapInitialPlanInput): Roadmap
           const child = byNumber.get(node.issueNumber);
           return child === undefined ? [] : [{ child, dependsOn: node.dependsOn }];
         });
-  const tasks = ordered.map(
-    ({ child, dependsOn }): PlanTaskInput => ({
-      id: roadmapTaskKey(child.issueNumber),
-      title:
-        child.title === ''
-          ? `Issue #${String(child.issueNumber)}`
-          : sanitizeInlineText(child.title, MAX_PLAN_TITLE_LENGTH),
-      summary: `ロードマップIssue #${String(input.roadmapIssueNumber)}の子Issue #${String(child.issueNumber)}。内容はIssueの本文に従う。`,
-      acceptanceCriteria: [`Issue #${String(child.issueNumber)}の受入基準を満たす`],
-      // 完了済みの子の依存は着手の判断に使わないため持たせない
-      dependsOn: completed.has(child.issueNumber)
-        ? []
-        : dependsOn.filter((n) => byNumber.has(n)).map(roadmapTaskKey),
-      existingIssueNumber: child.issueNumber,
-      ...(completed.has(child.issueNumber) ? { completedInRoadmap: true as const } : {}),
-    }),
-  );
+  const tasks = ordered.map(({ child, dependsOn }): PlanTaskInput => ({
+    id: roadmapTaskKey(child.issueNumber),
+    title:
+      child.title === ''
+        ? `Issue #${String(child.issueNumber)}`
+        : sanitizeInlineText(child.title, MAX_PLAN_TITLE_LENGTH),
+    summary: `ロードマップIssue #${String(input.roadmapIssueNumber)}の子Issue #${String(child.issueNumber)}。内容はIssueの本文に従う。`,
+    acceptanceCriteria: [`Issue #${String(child.issueNumber)}の受入基準を満たす`],
+    // 完了済みの子の依存は着手の判断に使わないため持たせない
+    dependsOn: completed.has(child.issueNumber)
+      ? []
+      : dependsOn.filter((n) => byNumber.has(n)).map(roadmapTaskKey),
+    existingIssueNumber: child.issueNumber,
+    ...(completed.has(child.issueNumber) ? { completedInRoadmap: true as const } : {}),
+  }));
   return { tasks, snapshot: buildRoadmapSnapshot(input) };
 }
 
@@ -86,7 +84,10 @@ export function buildRoadmapSnapshot(input: RoadmapSnapshotInput): TaskRunRoadma
       title: c.title,
       completed: c.checked || input.closedIssueNumbers.has(c.issueNumber),
     })),
-    plan: input.planNodes?.map((n) => ({ issueNumber: n.issueNumber, dependsOn: [...n.dependsOn] })),
+    plan: input.planNodes?.map((n) => ({
+      issueNumber: n.issueNumber,
+      dependsOn: [...n.dependsOn],
+    })),
     planSectionHash: input.planSectionHash,
     readAt: input.now.toISOString(),
   };
@@ -133,9 +134,7 @@ export function diffRoadmapSnapshots(
         '計画に入れるならpropose_planで既存Issue（existingIssueNumber）のタスクとして足してください',
     });
   }
-  const removed = before.children
-    .map((c) => c.issueNumber)
-    .filter((n) => !afterNumbers.has(n));
+  const removed = before.children.map((c) => c.issueNumber).filter((n) => !afterNumbers.has(n));
   const closed = after.children
     .filter((c) => c.completed && beforeByNumber.get(c.issueNumber)?.completed === false)
     .map((c) => c.issueNumber)
@@ -143,7 +142,9 @@ export function diffRoadmapSnapshots(
   if (removed.length > 0 || closed.length > 0) {
     const parts = [
       ...(removed.length > 0 ? [`行が消えた子Issue: ${formatIssueList(removed)}`] : []),
-      ...(closed.length > 0 ? [`完了（[x]またはclose）になった子Issue: ${formatIssueList(closed)}`] : []),
+      ...(closed.length > 0
+        ? [`完了（[x]またはclose）になった子Issue: ${formatIssueList(closed)}`]
+        : []),
     ];
     drafts.push({
       kind: 'childrenRemoved',

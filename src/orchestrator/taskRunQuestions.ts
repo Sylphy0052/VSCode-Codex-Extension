@@ -123,7 +123,12 @@ function updateQuestion(
     return run;
   }
   const at = now.toISOString();
-  return withQuestions(run, task, questions.map((q, i) => (i === index ? next : q)), at);
+  return withQuestions(
+    run,
+    task,
+    questions.map((q, i) => (i === index ? next : q)),
+    at,
+  );
 }
 
 /**
@@ -159,7 +164,11 @@ export function delegateQuestionToOrchestrator(
 ): TaskRun {
   return updateQuestion(run, taskId, questionId, now, (q) =>
     q.status === 'awaitingUser' && q.userOnly !== true
-      ? { ...q, status: 'awaitingOrchestrator', reflexSummary: joinSummaries(q.reflexSummary, summary) }
+      ? {
+          ...q,
+          status: 'awaitingOrchestrator',
+          reflexSummary: joinSummaries(q.reflexSummary, summary),
+        }
       : undefined,
   );
 }
@@ -193,7 +202,10 @@ export function escalateQuestionToUser(
       ? {
           ...q,
           status: 'awaitingUser',
-          reflexSummary: joinSummaries(q.reflexSummary, `オーケストレーターがユーザーへ回した: ${reason}`),
+          reflexSummary: joinSummaries(
+            q.reflexSummary,
+            `オーケストレーターがユーザーへ回した: ${reason}`,
+          ),
           userOnly: true,
         }
       : undefined,

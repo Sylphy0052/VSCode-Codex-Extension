@@ -140,11 +140,7 @@ import type {
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta, stripHostOnlyState } from './stateDelta';
-import {
-  BaseChatViewManager,
-  HELD_TASK_PANEL_NOTICE,
-  type BaseChatPanel,
-} from './chatManagerBase';
+import { BaseChatViewManager, HELD_TASK_PANEL_NOTICE, type BaseChatPanel } from './chatManagerBase';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,

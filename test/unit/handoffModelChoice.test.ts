@@ -317,7 +317,11 @@ describe('probeSafeBoundary（Issue #1090）', () => {
       ...input,
       recentAssistantMessages: ['#782完了。次は新しい機能の設計に取り掛かる'],
     };
-    const probe = await probeSafeBoundary({ model: 'gpt-6-luna', effort: 'medium' }, declared, deps());
+    const probe = await probeSafeBoundary(
+      { model: 'gpt-6-luna', effort: 'medium' },
+      declared,
+      deps(),
+    );
     expect(probe).toMatchObject({ switchSafe: true, profileChanged: true });
     // 宣言が分類器まで届いていること（届かなければ切り替わりを検知できない）
     expect(spy).toHaveBeenCalledWith(

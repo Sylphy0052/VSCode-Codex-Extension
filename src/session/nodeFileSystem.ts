@@ -2,12 +2,7 @@ import * as fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import * as readline from 'node:readline';
 import { createHash } from 'node:crypto';
-import type {
-  FileSystemPort,
-  HeadDigest,
-  MemoryFileSystemPort,
-  SymlinkResolution,
-} from './ports';
+import type { FileSystemPort, HeadDigest, MemoryFileSystemPort, SymlinkResolution } from './ports';
 
 /** Node.jsの例外がENOENT（対象が存在しない）かどうかを見る。 */
 function isEnoent(e: unknown): boolean {

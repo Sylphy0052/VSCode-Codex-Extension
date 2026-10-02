@@ -1551,10 +1551,12 @@ export function waitForDestinationResponse(
       }
       judging = true;
       // 同期的に投げる実装でも listener から例外を漏らさないよう、Promiseの中で呼ぶ
-      Promise.resolve(state).then(judgeAcceptance).then(
-        (accepted) => finish(accepted ? { succeeded: true } : notAccepted),
-        () => finish(notAccepted),
-      );
+      Promise.resolve(state)
+        .then(judgeAcceptance)
+        .then(
+          (accepted) => finish(accepted ? { succeeded: true } : notAccepted),
+          () => finish(notAccepted),
+        );
     };
     const listener = (state: ChatState): void => {
       responseStarted = responseItemCount(state) > baselineItems;

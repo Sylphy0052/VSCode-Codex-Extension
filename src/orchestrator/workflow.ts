@@ -115,7 +115,9 @@ export const MAX_PARALLEL_MAX = 10;
 
 /** 並列上限として受け付ける値か（`MAX_PARALLEL_MIN`〜`MAX_PARALLEL_MAX`の整数）。 */
 export function isValidWorkflowMaxParallel(n: unknown): n is number {
-  return typeof n === 'number' && Number.isInteger(n) && n >= MAX_PARALLEL_MIN && n <= MAX_PARALLEL_MAX;
+  return (
+    typeof n === 'number' && Number.isInteger(n) && n >= MAX_PARALLEL_MIN && n <= MAX_PARALLEL_MAX
+  );
 }
 
 export const MAX_TASK_COUNT = 50;

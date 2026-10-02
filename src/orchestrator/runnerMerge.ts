@@ -1416,9 +1416,7 @@ async function finishMergeResolution(
   }
 
   if (reason === 'done') {
-    self.deps.log.warn(
-      `[workflow ${runId}/${taskId}] ${describeIncompleteResolution(completion)}`,
-    );
+    self.deps.log.warn(`[workflow ${runId}/${taskId}] ${describeIncompleteResolution(completion)}`);
   }
   await abortAndBlock(self, runId, taskId, integration, lease);
 }

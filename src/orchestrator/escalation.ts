@@ -354,7 +354,13 @@ function isFindDeleteOrExec(command: string): boolean {
 }
 
 /** `git push` が次の引数を値として取るオプション。 */
-const PUSH_VALUE_OPTIONS: ReadonlySet<string> = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']);
+const PUSH_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  '-o',
+  '--push-option',
+  '--repo',
+  '--receive-pack',
+  '--exec',
+]);
 
 /** `git push` の値を取らない短縮フラグ（`-q -v -u -n -f -d -4 -6`）だけで組んだ、`f`を含む結合フラグ。 */
 const PUSH_SHORT_FORCE_FLAGS = /^-[46dnquv]*f[46dfnquv]*$/;
@@ -499,7 +505,9 @@ const DESTRUCTIVE_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([
   DANGER_PATTERN_IDS.dbDropTruncate,
   DANGER_PATTERN_IDS.forcePush,
 ]);
-const CAUTION_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([DANGER_PATTERN_IDS.deployPublish]);
+const CAUTION_PATTERN_IDS: ReadonlySet<DangerPatternId> = new Set([
+  DANGER_PATTERN_IDS.deployPublish,
+]);
 
 /** 取り消せない操作のコマンドの説明。`destructive`は破壊的操作、`caution`はそれ以外（デプロイ・公開）。 */
 export interface IrreversibleCommands {
@@ -514,7 +522,8 @@ export interface IrreversibleCommands {
 export function findIrreversibleCommands(text: string): IrreversibleCommands {
   const normalized = text.replace(/[`'"]/gu, ' ');
   const matched = DANGER_COMMAND_PATTERNS.filter(
-    (p) => (DESTRUCTIVE_PATTERN_IDS.has(p.id) || CAUTION_PATTERN_IDS.has(p.id)) && p.test(normalized),
+    (p) =>
+      (DESTRUCTIVE_PATTERN_IDS.has(p.id) || CAUTION_PATTERN_IDS.has(p.id)) && p.test(normalized),
   );
   return {
     destructive: matched.filter((p) => DESTRUCTIVE_PATTERN_IDS.has(p.id)).map((p) => p.description),

@@ -39,7 +39,9 @@ export async function reviewTaskRunPlanProposal(
   outsideRoadmapIssues: ReadonlySet<number> = new Set(),
 ): Promise<TaskRunPlanReview> {
   const hasOutside = drafts.some(
-    (draft) => draft.existingIssueNumber !== undefined && outsideRoadmapIssues.has(draft.existingIssueNumber),
+    (draft) =>
+      draft.existingIssueNumber !== undefined &&
+      outsideRoadmapIssues.has(draft.existingIssueNumber),
   );
   return reviewPlanWithReflex(
     reflex,
@@ -60,12 +62,16 @@ export async function reviewTaskRunPlanProposal(
       '「タスク計画」は、タスク同士の整合として妥当か。',
       `「${REVIEW_VALID}」は各タスクの受入基準が要約と対応し、依存関係に矛盾や重大な抜けが無い。`,
       ...(hasOutside
-        ? ['加えて、ロードマップに無いIssueのタスクは、ロードマップのタスクに必要な理由が要約から読み取れる。']
+        ? [
+            '加えて、ロードマップに無いIssueのタスクは、ロードマップのタスクに必要な理由が要約から読み取れる。',
+          ]
         : []),
       `「${REVIEW_WRONG}」は要約と受入基準が対応しない、依存関係が矛盾する、明らかに必要な受入基準が抜けているのいずれかがある。`,
       `「${REVIEW_UNKNOWN}」は記述が足りず、妥当かどうかを判断できない。`,
       ...(hasOutside
-        ? ['ロードマップに無いIssueのタスクを入れた理由が要約から読み取れないときも、この選択肢にする。']
+        ? [
+            'ロードマップに無いIssueのタスクを入れた理由が要約から読み取れないときも、この選択肢にする。',
+          ]
         : []),
     ].join(''),
     threshold,

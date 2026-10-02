@@ -2807,7 +2807,9 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
       type: 'assistant',
       message: {
         id: 'msg-1748',
-        content: [{ type: 'tool_use', id: 'tool-1748', name: 'Skill', input: { skill: 'handoff' } }],
+        content: [
+          { type: 'tool_use', id: 'tool-1748', name: 'Skill', input: { skill: 'handoff' } },
+        ],
       },
     })}\n`;
 

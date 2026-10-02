@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { CliCommandResult, CliCommandRunner, ForgeFileSystemPort } from '../../src/orchestrator/forge';
+import type {
+  CliCommandResult,
+  CliCommandRunner,
+  ForgeFileSystemPort,
+} from '../../src/orchestrator/forge';
 import {
   findRoadmapPlanSection,
   formatRoadmapPlanSection,
@@ -43,7 +47,9 @@ class FakeCli implements CliCommandRunner {
 
   /** 本文の書き込み（`gh issue edit`）が呼ばれたかどうか。 */
   hasEditCall(): boolean {
-    return this.calls.some((c) => c.command === 'gh' && c.args[0] === 'issue' && c.args[1] === 'edit');
+    return this.calls.some(
+      (c) => c.command === 'gh' && c.args[0] === 'issue' && c.args[1] === 'edit',
+    );
   }
 }
 
@@ -62,8 +68,12 @@ const nodesEdited: RoadmapPlanNode[] = [{ issueNumber: 102, dependsOn: [], wave:
 function bodyWithSection(nodes: readonly RoadmapPlanNode[]): string {
   // `writeRoadmapPlan`のvalidateRoadmapPlanが子Issueのチェックリストと計画のノードを
   // 突き合わせるため、対応する子Issueの行も入れておく
-  const checklist = nodes.map((node) => `- [ ] #${String(node.issueNumber)}: 子${String(node.issueNumber)}`);
-  return ['# ロードマップ', '', ...checklist, '', ...formatRoadmapPlanSection(nodes), ''].join('\n');
+  const checklist = nodes.map(
+    (node) => `- [ ] #${String(node.issueNumber)}: 子${String(node.issueNumber)}`,
+  );
+  return ['# ロードマップ', '', ...checklist, '', ...formatRoadmapPlanSection(nodes), ''].join(
+    '\n',
+  );
 }
 
 describe('writeRoadmapPlan', () => {
@@ -71,7 +81,8 @@ describe('writeRoadmapPlan', () => {
     const originalBody = bodyWithSection(nodesOriginal);
     const section = findRoadmapPlanSection(originalBody);
     expect(section.kind).toBe('present');
-    const approvedHash = section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
+    const approvedHash =
+      section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
 
     // 承認後、別プロセス/ウィンドウが区画を書き換えた後の本文（書く直前の読み直しで返る）
     const editedBody = bodyWithSection(nodesEdited);
@@ -89,7 +100,8 @@ describe('writeRoadmapPlan', () => {
   it('区画のハッシュが変わっていなければ書き込む', async () => {
     const originalBody = bodyWithSection(nodesOriginal);
     const section = findRoadmapPlanSection(originalBody);
-    const approvedHash = section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
+    const approvedHash =
+      section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
 
     const cli = new FakeCli([originalBody]);
     const deps: RoadmapImportDeps = { cli, fs };
@@ -114,7 +126,8 @@ describe('rewriteRoadmapPlanMeta', () => {
   it('sectionHashが今読み直した区画と食い違えば、書かずにsectionChangedを返す', async () => {
     const originalBody = bodyWithSection(nodesOriginal);
     const section = findRoadmapPlanSection(originalBody);
-    const approvedHash = section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
+    const approvedHash =
+      section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
 
     const editedBody = bodyWithSection(nodesEdited);
     const cli = new FakeCli([editedBody]);
@@ -129,7 +142,8 @@ describe('rewriteRoadmapPlanMeta', () => {
   it('sectionHashが今の区画と合えば書き込む', async () => {
     const originalBody = bodyWithSection(nodesOriginal);
     const section = findRoadmapPlanSection(originalBody);
-    const approvedHash = section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
+    const approvedHash =
+      section.kind === 'present' ? hashRoadmapPlanSectionContent(section.content) : '';
 
     const cli = new FakeCli([originalBody]);
     const deps: RoadmapImportDeps = { cli, fs };

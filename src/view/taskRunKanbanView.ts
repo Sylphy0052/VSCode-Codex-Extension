@@ -5,14 +5,23 @@ import type { Logger } from '../log';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
-import { isTaskRunActive, isValidTaskId, taskRunLabel, validateTaskRunTitleInput } from '../orchestrator/taskRunState';
+import {
+  isTaskRunActive,
+  isValidTaskId,
+  taskRunLabel,
+  validateTaskRunTitleInput,
+} from '../orchestrator/taskRunState';
 import { TASK_LEASE_HEARTBEAT_MS } from '../orchestrator/taskRunLease';
 import { trackChatPanel } from './backgroundPanelTabs';
 import { chatCsp } from './chatCsp';
 import { GRAPH_SVG_SOURCE } from './graphSvgScript';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
 import { skinBodyClass } from './skin';
-import { layoutTaskRunGraph, TASK_RUN_KANBAN_COLUMNS, type TaskRunKanbanCard } from './taskRunKanbanModel';
+import {
+  layoutTaskRunGraph,
+  TASK_RUN_KANBAN_COLUMNS,
+  type TaskRunKanbanCard,
+} from './taskRunKanbanModel';
 
 /** 盤面を送る間隔。最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
@@ -38,7 +47,10 @@ export interface TaskRunKanbanViewDeps {
    * 中断したrunを再開し、Orchestratorを新しい世代で開く（Issue #1560）。`parallel`なら同じフォルダで
    * 動いているrunと並行して再開する（Issue #1562）。
    */
-  resumeRun(runId: string, options?: { parallel?: boolean }): Promise<{ ok: boolean; message: string }>;
+  resumeRun(
+    runId: string,
+    options?: { parallel?: boolean },
+  ): Promise<{ ok: boolean; message: string }>;
   log: Logger;
 }
 
@@ -177,23 +189,39 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     this.dirty = false;
     this.lastPostAt = Date.now();
     const board = this.deps.controller.board(this.selectedRunId, currentWorkspaceFolders());
-    const orchestrator = board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
-    const graph = board.run === undefined ? undefined : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
+    const orchestrator =
+      board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
+    const graph =
+      board.run === undefined
+        ? undefined
+        : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
     // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
     const seq = ++this.postSeq;
-    const lease = board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
+    const lease =
+      board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
     // 選択していないrunも、run一覧で別のウィンドウが持っていると分かるようにする（Issue #1641）。
     // 終わったrunは専有権を取らないため読まない。読むのは未終了のrunの数だけの小さなファイルで、
     // 未終了のrunは通常数件のため、`post`のたびに読み直す
     const others = board.runs.filter((r) => !r.finished && r.runId !== board.run?.runId);
-    const statuses = await Promise.all(others.map((r) => this.deps.controller.leaseStatus(r.runId)));
-    const heldElsewhere = others.filter((_, i) => statuses[i]?.heldByOther === true).map((r) => r.runId);
+    const statuses = await Promise.all(
+      others.map((r) => this.deps.controller.leaseStatus(r.runId)),
+    );
+    const heldElsewhere = others
+      .filter((_, i) => statuses[i]?.heldByOther === true)
+      .map((r) => r.runId);
     const panel = this.panel;
     // 専有権を読む間に次の`post`が始まっていたら、古い盤面で上書きしないよう捨てる
     if (panel === undefined || seq !== this.postSeq) {
       return;
     }
-    void panel.webview.postMessage({ type: 'board', board, orchestrator, graph, lease, heldElsewhere });
+    void panel.webview.postMessage({
+      type: 'board',
+      board,
+      orchestrator,
+      graph,
+      lease,
+      heldElsewhere,
+    });
   }
 
   private receive(message: unknown): void {
@@ -227,7 +255,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       return;
     }
     void this.handle(runId, message).catch((e: unknown) => {
-      this.deps.log.warn(`オーケストレータモード: 操作に失敗しました（${message.type as string}）: ${String(e)}`);
+      this.deps.log.warn(
+        `オーケストレータモード: 操作に失敗しました（${message.type as string}）: ${String(e)}`,
+      );
       void vscode.window.showErrorMessage('オーケストレータモード: 操作に失敗しました');
     });
   }
@@ -337,7 +367,12 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   }
 
   /** 質問への回答。回答待ちでなくなっていれば（既に回答済み・取り消し済み）知らせる。 */
-  private async answerQuestion(runId: string, taskId: string, questionId: unknown, raw: unknown): Promise<void> {
+  private async answerQuestion(
+    runId: string,
+    taskId: string,
+    questionId: unknown,
+    raw: unknown,
+  ): Promise<void> {
     const answer = parseUserAnswer(raw);
     if (typeof questionId !== 'string' || answer === undefined) {
       void vscode.window.showWarningMessage(
@@ -373,7 +408,12 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
   }
 
   /** レビューの関門の決着（差し戻す・このまま進める）。失敗の関門は「やり直す」で決着させる。 */
-  private async resolveGate(runId: string, taskId: string, gateId: unknown, choice: unknown): Promise<void> {
+  private async resolveGate(
+    runId: string,
+    taskId: string,
+    gateId: unknown,
+    choice: unknown,
+  ): Promise<void> {
     if (typeof gateId !== 'string' || (choice !== 'sendBack' && choice !== 'proceed')) {
       return;
     }
@@ -493,7 +533,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     if (run === undefined || run.finishedAt !== undefined || run.suspendedAt === undefined) {
       return;
     }
-    const active = this.deps.controller.listActive(run.workspaceRoot).filter((r) => r.runId !== runId);
+    const active = this.deps.controller
+      .listActive(run.workspaceRoot)
+      .filter((r) => r.runId !== runId);
     let parallel = false;
     if (active.length > 0) {
       const alongside = '並行して再開する';
