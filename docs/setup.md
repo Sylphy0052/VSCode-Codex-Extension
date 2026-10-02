@@ -228,6 +228,7 @@ code --install-extension vscode-codex-extension.vsix --force
 
 - GitHub CLI（`gh`）とログイン: Forge Hub、ロードマップ、タスク監視でGitHubのIssue・PRを扱う
 - GitLab CLI（`glab`）とログイン: 同じ機能でGitLabを扱う
+  - Forge HubのGitLab側は、依頼先のCLIに`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`のskillがあれば、それを呼ぶ（Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`の形）。skillは拡張機能に含まれていないため、無ければ計画の記録・MR作成・自己レビュー・後片付けの手順を平文で依頼する
 - Google ChromeとNode.js（`npx`）: ChatGPTとの議論機能（WebGPT連携）。詳しくは[READMEの「WebGPTとの議論」](../README.md#webgptとの議論)
 - 音声プレイヤー: 通知音。macOSとWindowsは標準のもので鳴る。Linux・WSLでは`paplay`、`pw-play`、`aplay`、`ffplay`のいずれかが要る。無い場合は音が鳴らないだけ
 
