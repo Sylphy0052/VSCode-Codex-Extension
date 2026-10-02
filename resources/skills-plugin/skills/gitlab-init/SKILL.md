@@ -16,11 +16,12 @@ description: "GitLabでリポジトリを開発可能にする。glabの用意�
 
   ```bash
   URL=$(git remote get-url origin)
-  HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')
+  HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' -e 's#^[a-z+]+://.*##;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' -e 's#.*##')
   ```
 
+  - この式の正本はここ。同じsed式を`codex-ext:gitlab-develop`・`codex-ext:gitlab-issue`・`codex-ext:gitlab-review`のSKILL.mdと、`gitlab-review`の`scripts/review-packet.sh`にも書いている (各skillは単独で読まれるため)。式を変えるときは、この同梱skill群の中で`s#^https?://`を固定文字列で検索 (`grep -rnF 's#^https?://'`など) し、全箇所を揃える
   - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式 (`git@host:g/p.git`) はポートを落とす。SSHのポートはAPIのポートではないため
-  - httpで運用しているGitLabでは、`GITLAB_HOST`にschemeを付けても`glab`はhttpsで接続する (glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http`が要る。グローバル設定の変更なので利用者の承認を得てから行う
+  - httpで運用しているGitLabでは、`GITLAB_HOST`にホストだけを渡すと`glab`はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http`が要る。グローバル設定の変更なので利用者の承認を得てから行う
   - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`など) はこの式では扱えない。`GITLAB_HOST`の代わりに`-R <URL全体>`を使う
 
   ホストが`github.com`ならGitLabのリポジトリではない。このskillと`codex-ext:gitlab-*`の他のskillは使えないので、そう伝えて止まる。

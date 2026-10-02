@@ -89,6 +89,8 @@ def main() -> int:
 
     try:
         if args.note == "-":
+            # ロケール依存で読むと、cp932などでは化けたまま通り「節が無い」と誤判定する
+            sys.stdin.reconfigure(encoding="utf-8")
             text = sys.stdin.read()
         else:
             with open(args.note, encoding="utf-8") as f:

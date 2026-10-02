@@ -17,8 +17,8 @@ MRを1件選び、その作成者と状態に応じて次のいずれかを進�
 ## 前提
 
 - GitLabのホストは `git remote get-url origin` のURLから求める (例: `https://gitlab.example.com/group/project.git` や `git@gitlab.example.com:group/project.git` ならホストは `gitlab.example.com`)。remoteが `github.com` ならこのskillの対象外。`glab` CLIを使う。`glab` が無い、認証が済んでいないときは、`codex-ext:gitlab-init` を案内する
-  - 求め方: `HOST=$(printf '%s' "$(git remote get-url origin)" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')`。https・httpのURLはポートを残し (`gitlab.example.com:8443`)、ssh://・scp形式はポートを落とす。サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) はこの式では扱えないので、`glab` に `-R <URL全体>` を渡す
-  - 各 `glab` コマンドの前に `GITLAB_HOST=<ホスト>` を付けて渡す (Bash呼び出しごとにシェルが変わるため、`export` は次の呼び出しに残らない)。httpで運用しているGitLabでは、`GITLAB_HOST` にschemeを付けても `glab` はhttpsで接続する。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
+  - 求め方: `HOST=$(printf '%s' "$(git remote get-url origin)" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' -e 's#^[a-z+]+://.*##;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' -e 's#.*##')`。https・httpのURLはポートを残し (`gitlab.example.com:8443`)、ssh://・scp形式はポートを落とす。サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) はこの式では扱えないので、`glab` に `-R <URL全体>` を渡す
+  - 各 `glab` コマンドの前に `GITLAB_HOST=<ホスト>` を付けて渡す (Bash呼び出しごとにシェルが変わるため、`export` は次の呼び出しに残らない)。httpで運用しているGitLabでは、`GITLAB_HOST` にホストだけを渡すと `glab` はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
 - 認証確認: `GITLAB_HOST=<ホスト> glab auth status --hostname <ホスト>`
 - **先にリポジトリの規約を読む**。ルートの `CLAUDE.md`・`AGENTS.md` (あれば `CONTRIBUTING.md`) を確かめる。このskillで「既定値」と書いたもの (自己レビューの巡数、severity、自己マージの条件など) は、リポジトリ規約に別の定めがあればそちらを優先する。ただし `critical` / `high` / `medium` の指摘を残したままマージする定めは、規約にあっても利用者へ確かめてから従う
 - note・discussion・MR本文の言語は、リポジトリ規約に従う。定めが無ければ利用者との会話の言語で書く。ただし `## レビュー結果` `## 指摘対応` `## self-review` などの見出しと `reviewed-head` のマーカーは、機械で拾うため固定する

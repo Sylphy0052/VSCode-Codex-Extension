@@ -31,7 +31,7 @@ UI変更を見つけたら、明示の指示を待たずに撮る。撮影を人
 
 `npx`で実行してよいのは`playwright` (と`@playwright/mcp`) だけにする。任意のnpmパッケージを取得して実行するのは、撮影に必要な範囲を大きく超える。外部パッケージを実行する前に、パッケージ名、実行内容、ネットワーク取得の有無を利用者へ示す。
 
-`npx`には`--yes`を付けない。`playwright`が未導入のとき、`npx`は取得の可否を尋ねる。この確認を自動で承諾せず、利用者の承認を得てから導入する。
+撮影と存在確認の`npx`は、すべて`npx --no playwright ...`の形で実行する。`--no`を付けると、未導入のときは取得せずに失敗する。npx (npm 7以降) は、標準入力がTTYでないとき (エージェントのBash実行など) は`--yes`を指定したものとして扱い、確認なしで取得するため、承認をnpxの確認プロンプトに任せられない。未導入だったら、取得するパッケージ名とネットワーク取得があることを利用者へ伝えて承認を得てから、明示的に`npx --yes playwright install chromium`を実行する (手順は「Playwrightが無いとき」)。
 
 初回の実行ではPlaywright本体とブラウザのダウンロードが走る。時間がかかるのは正常。
 
@@ -145,7 +145,7 @@ grep -qxF '.playwright-mcp/' "$(git rev-parse --git-path info/exclude)" || echo 
 #### CLI経路
 
 ```bash
-npx playwright screenshot \
+npx --no playwright screenshot \
   --browser chromium \
   --viewport-size "1280,720" \
   "<URL>" "<出力パス>"
@@ -165,14 +165,14 @@ CLI経路では画面の操作ができない。`screenshot`は開いて撮る�
 [ -s "<出力パス>" ] || echo "撮れていない (ファイルが無いか空)"
 ```
 
-到達できないURLを渡した場合、`npx playwright screenshot`は終了コード1を返し、ファイルを作らない。ただしパイプに通すと終了コードが隠れる。
+到達できないURLを渡した場合、`npx --no playwright screenshot`は終了コード1を返し、ファイルを作らない。ただしパイプに通すと終了コードが隠れる。
 
 ```bash
 # 悪い例: $?はtailのものになり、常に0
-npx playwright screenshot ... | tail -2
+npx --no playwright screenshot ... | tail -2
 
 # 良い例
-LOG=$(mktemp); npx playwright screenshot ... > "$LOG" 2>&1; echo "exit=$?"; rm -f "$LOG"
+LOG=$(mktemp); npx --no playwright screenshot ... > "$LOG" 2>&1; echo "exit=$?"; rm -f "$LOG"
 ```
 
 空ファイルはアップロードを素通りする。0バイトのPNGを投げると、GitLabはエラーを返さず`markdown`を返す。取り消せないため、アップロードの前にサイズを見る。
@@ -274,9 +274,9 @@ Before/Afterは並べて貼る。どちらがどちらか分かるよう見出�
 
 ## Playwrightが無いとき
 
-MCPツールが無く、`npx playwright --version`も動かない場合は、次の順で進める。
+MCPツールが無く、`npx --no playwright --version`も動かない場合は、次の順で進める。
 
-1. `node`と`npx`があるなら、CLI経路で撮れる。ブラウザを含むPlaywright本体のダウンロードが走ることを利用者へ伝え、許可を得てから`npx playwright install chromium`を実行する。許可が出なければ3へ進む
+1. `node`と`npx`があるなら、CLI経路で撮れる。取得するパッケージ名 (`playwright`) と、Playwright本体とブラウザをネットワークからダウンロードすることを利用者へ伝え、許可を得てから、明示的に`npx --yes playwright install chromium`を実行する。承認をnpxの確認プロンプトに任せない。非TTYでは確認が出ずに取得が走るため。許可が出なければ3へ進む
 2. 操作を伴う撮影が要る場合は、MCPの導入を案内する。登録は利用者の環境設定の変更になるので、コマンドを示すだけにして実行しない。Claude Codeは`claude mcp add playwright -- npx @playwright/mcp@latest`、Codexは`codex mcp add playwright -- npx @playwright/mcp@latest`。登録後は、セッションの再起動が要ることがある
 3. `node`・`npx`も無い、または許可が出ない、UIが起動できない、そもそも画面が無い場合は縮退する。次の「撮れないとき」へ進む
 

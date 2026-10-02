@@ -17,16 +17,17 @@ Issueを1件選び、レビュー依頼を出すところまで進める。revie
 
 ```bash
 URL=$(git remote get-url origin)
-HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')
+HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' -e 's#^[a-z+]+://.*##;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' -e 's#.*##')
 GITLAB_HOST="$HOST" glab auth status
-git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'
+DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD) && DEFAULT=${DEFAULT#origin/}
+echo "DEFAULT=$DEFAULT"
 ```
 
 - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
-- httpで運用しているGitLabでは、`GITLAB_HOST` にschemeを付けても `glab` はhttpsで接続する。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
+- httpで運用しているGitLabでは、`GITLAB_HOST` にホストだけを渡すと `glab` はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
 - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す
 
-`origin/HEAD` が未設定で最後のコマンドが失敗したら、`git remote set-head origin --auto` で設定するか、利用者にデフォルトブランチ名を聞く。
+`origin/HEAD` が未設定で `DEFAULT` の代入が失敗した、または `DEFAULT` が空のときは、`git remote set-head origin --auto` で設定するよう案内して止まる (または利用者にデフォルトブランチ名を聞く)。`symbolic-ref` の出力を `sed` へパイプすると、終了コードが `sed` のものになり、未設定でも成功に見えて空になるため、代入と `origin/` の除去を分けている。`DEFAULT` はリモート由来の値なので、コマンドへ使う前に `^[A-Za-z0-9._/-]+$` に合い、`-` で始まらないことを確かめ、使う箇所はダブルクォートで囲む。
 
 - リポジトリの `CLAUDE.md`・`AGENTS.md` (あれば `CONTRIBUTING.md`) を読み、ブランチ・commit・MR・worktree・検証・マージ方式の定めに従う。このskillが書く値 (ブランチ名 `<type>/<IID>/<slug>`、Conventional Commits、MR本文の `Closes #<IID>`、severity、自己レビューの巡回上限など) は、定めが無いときの既定値である。**リポジトリ規約に別の定めがあればそちらを優先する**
 - **1 Issue 1 Branch**。Issueが無いなら先に `codex-ext:gitlab-issue` で起票する

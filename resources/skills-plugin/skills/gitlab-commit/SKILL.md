@@ -147,7 +147,7 @@ git commit -m "<type>: <subject>"
 デフォルトブランチを決め打ちしない。
 
 ```bash
-DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null) && DEFAULT=${DEFAULT#origin/}
 CURRENT=$(git branch --show-current)
 
 if [ -z "$DEFAULT" ] || [ -z "$CURRENT" ]; then

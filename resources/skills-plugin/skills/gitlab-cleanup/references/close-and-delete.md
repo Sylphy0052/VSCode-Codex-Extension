@@ -24,7 +24,7 @@ esac
 ローカルの作業ファイル (`docs/issue/issue-<IID>.md` / `docs/mr/mr-<MRのIID>.md`) とコミット履歴を読んで書く。テンプレートはnote-template.mdを使う (SKILL.mdから参照)。
 
 ```bash
-git log --oneline <default> --since="<着手日>" -- <変更したパス>
+git log --oneline "<default>" --since="<着手日>" -- <変更したパス>
 glab mr view <MRのIID>
 ```
 
@@ -144,15 +144,15 @@ roadmap本文の更新自体 (チェックリストの書き換え・Mermaid再�
 
 ```bash
 git rev-parse --abbrev-ref HEAD          # いま自分がどこにいるか
-git switch <default>
+git switch "<default>"
 ```
 
 未コミットの変更があると`git switch`が拒否することがある。その場合は**変更の中身を確認してからユーザーへ提示する**。勝手にstashや破棄をしない。
 
-`<branch>`はシェルで使う前に、`<type>/<IID>/<slug>`形式 (リポジトリ規約に別の定めがあればそれ) であることを確かめる。形式に合わないブランチ名は、そのままシェルへ渡さずユーザーへ提示して止まる。使うときは必ずダブルクォートで囲む。
+`<branch>`はシェルで使う前に、形式を確かめる。既定の形式は正規表現`^[a-z]+/[0-9]+/[a-z0-9._-]+$` (`<type>/<IID>/<slug>`)。リポジトリ規約に別の命名があればそれでもよいが、英数字と`._/-`以外の文字を含む名前は使わない。合わない名前はコマンドに埋め込まず、ユーザーへ提示して止まる。ダブルクォートで囲んでも`$(...)`やバッククォートは展開されるので、囲むだけでは足りず、文字種の確認が要る。`<default>`も同様に、リモート由来の値なので`^[A-Za-z0-9._/-]+$`に合い`-`で始まらないことを確かめ、使う箇所はダブルクォートで囲む。
 
 ```bash
-git merge-base --is-ancestor "<branch>" <default> && git branch -D "<branch>"
+git merge-base --is-ancestor "<branch>" "<default>" && git branch -D "<branch>"
 ```
 
 判定と削除を1行にまとめておく。判定が通らなければ削除は実行されない。
@@ -166,14 +166,16 @@ MR作成時に`--remove-source-branch`を付けていれば、マージ時に削
 **リモートにも同じ判定を適用する**。ローカルを消したからリモートも消してよい、とはならない。リモートにしか無いコミットが乗っている可能性がある。
 
 ```bash
-git merge-base --is-ancestor "origin/<branch>" <default> && echo "リモートも<default>に含まれる"
+git merge-base --is-ancestor "origin/<branch>" "<default>" && echo "リモートも<default>に含まれる"
 ```
 
 ```bash
 git fetch origin --prune
 git branch -r                                    # 残っているか確認
-git push origin --delete "<branch>"
+git push origin --delete "refs/heads/<branch>"
 ```
+
+`<branch>`は上の形式確認に通ったものだけを使う。
 
 `--prune`を先に打つ。リモートで既に消えているブランチの追跡参照が残っていると、判定が狂う。
 

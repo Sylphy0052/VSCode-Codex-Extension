@@ -16,12 +16,12 @@ GitLabのIssueを起票する。起票のみを担当し、起票後の本文更
 
 ```bash
 URL=$(git remote get-url origin)
-HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')
+HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' -e 's#^[a-z+]+://.*##;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' -e 's#.*##')
 GITLAB_HOST="$HOST" glab auth status
 ```
 
 - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
-- httpで運用しているGitLabでは、`GITLAB_HOST` にschemeを付けても `glab` はhttpsで接続する。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
+- httpで運用しているGitLabでは、`GITLAB_HOST` にホストだけを渡すと `glab` はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
 - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す
 
 - リポジトリの `CLAUDE.md`・`AGENTS.md` (あれば `CONTRIBUTING.md`) にIssueの書き方、ラベル、マイルストーンの定めがあれば、それを読んで従う。このskillが書く値は、定めが無いときの既定値である

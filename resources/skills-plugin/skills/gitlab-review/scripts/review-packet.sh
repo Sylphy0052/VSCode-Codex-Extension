@@ -261,15 +261,18 @@ print(d.get("description") or d.get("body") or "")' | mask_secrets
 
 # remoteのURLからホスト名だけを取り出す。
 # 対応する形: https://host/path、http://host/path、https://user:token@host/path、
-#   https://host:8443/path、ssh://git@host:port/path、git@host:path
+#   https://host:8443/path、ssh://git@host:port/path、git://host/path、git@host:path
 # URLに埋め込まれた資格情報はここで捨てる (ホスト名以外は使わない)。
-# https・httpはポートを残す (host:8443)。ssh://・scp形式はSSHのポートでありAPIのポートではないので落とす。
+# https・httpはポートを残す (host:8443)。ssh://・git://・scp形式はAPIのポートではないので落とす。
+# それ以外のscheme (file://など) とローカルパスは空を返す。
 # サブパス配置のGitLab (https://host/sub/g/p.git) は扱えない。
 remote_host() {
   printf '%s' "$1" | sed -E \
     -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' \
-    -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' \
-    -e 's#^([^/]*@)?([^/:]+):.*#\2#'
+    -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' \
+    -e 's#^[a-z+]+://.*##;t' \
+    -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' \
+    -e 's#.*##'
 }
 
 # 取得コマンドを実行し、成功したら出力を filter 経由で dest へ書く。
@@ -285,7 +288,7 @@ fetch_into() {
   body="$("$@" 2>"$errf")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     if ! grep -qiE 'no (open )?(merge request|pull request)|could not find any (merge request|pull request)' "$errf"; then
-      echo "review-packet.sh: failed to fetch $what (exit $rc): $(head -c 300 "$errf" | tr '\n' ' ')" >&2
+      echo "review-packet.sh: failed to fetch $what (exit $rc): $(head -c 300 "$errf" | mask_secrets | tr '\n' ' ')" >&2
       echo "review-packet.sh: $hint" >&2
     fi
     rm -f "$errf"
@@ -306,7 +309,7 @@ HOST="$(remote_host "$REMOTE")"
 # 「Issue番号を渡し忘れた」のか「この環境では取れない」のかを区別できない。
 if [ -z "$HOST" ]; then
   echo "review-packet.sh: no origin remote; skipping issue/mr fetch" >&2
-elif [ "$HOST" = "github.com" ]; then
+elif [ "${HOST%%:*}" = "github.com" ]; then
   if ! command -v gh >/dev/null 2>&1; then
     echo "review-packet.sh: gh not found; skipping issue/mr fetch" >&2
   else

@@ -1800,7 +1800,8 @@ GitLabのホストは`git remote`のURLから求め、規約は利用者のリ�
     が0件になること
   - 個人のツール・習慣は
     `rg -n -i 'gant|genshijin|原始人|codegraph|auto-memory|MEMORY\.md|Gotcha:|handoff|EnterWorktree|model/effort' resources/skills-plugin`
-    が0件になること
+    が0件になること。ここに挙げた語は公開されているツール名や一般的な語で、社内の情報ではないため、
+    確認の再現性を優先してこの文書に書いている
   - ホスト名は`rg -n 'gitlab\.[a-z]' resources/skills-plugin`の結果が
     `gitlab.com`・`gitlab.example.com`だけであること
   - 社名・社内のホスト名・社内の別リポジトリ名・開発者のユーザー名は、この文書に書かない。
