@@ -16,6 +16,10 @@ vi.mock('node:child_process', () => ({
 
 // `vi.mock`はホイストされるため、この静的importは差し替え後の`spawn`を使う
 import { AppServerConnection } from '../../src/appserver/connection';
+import {
+  configureExtensionSkillRoots,
+  notifyExtensionSkillRootsChanged,
+} from '../../src/provider/extensionSkills';
 /**
  * このテストでの受信バッファの1行上限（issue #795）。
  *
@@ -624,5 +628,57 @@ describe('AppServerConnection のサーバ要求への応答（Issue #1106）', 
 
     expect(wroteResponseFor(proc1.writes)).toBe(true);
     connection.dispose();
+  });
+});
+
+describe('AppServerConnection: skills/extraRoots/setの再送（issue #1825）', () => {
+  const extraRootsWrites = (writes: string[]): string[] =>
+    writes.filter((w) => w.includes('"method":"skills/extraRoots/set"'));
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    configureExtensionSkillRoots(() => ['/ext/plugin']);
+  });
+
+  afterEach(() => {
+    configureExtensionSkillRoots(() => []);
+  });
+
+  it('握手前は送らず、握手後は変更のたびに送り、reset後は送らない', async () => {
+    const proc = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(proc.proc);
+    const connection = new AppServerConnection(
+      () => 'codex',
+      fakeLogger(),
+      () => undefined,
+      async () => undefined,
+    );
+
+    const started = connection.ensureStarted();
+    // initializeの応答前（握手前）
+    notifyExtensionSkillRootsChanged();
+    expect(extraRootsWrites(proc.writes)).toHaveLength(0);
+
+    proc.emitStdout(
+      JSON.stringify({ jsonrpc: '2.0', id: initializeRequestId(proc.writes), result: {} }),
+    );
+    // 握手直後に1回送る（応答は待たずに数える）
+    await vi.waitFor(() => expect(extraRootsWrites(proc.writes)).toHaveLength(1));
+    const first = JSON.parse(extraRootsWrites(proc.writes)[0] ?? '') as {
+      id: number;
+      params: unknown;
+    };
+    expect(first.params).toEqual({ extraRoots: ['/ext/plugin/skills'] });
+    proc.emitStdout(JSON.stringify({ jsonrpc: '2.0', id: first.id, result: {} }));
+    await started;
+
+    notifyExtensionSkillRootsChanged();
+    await vi.waitFor(() => expect(extraRootsWrites(proc.writes)).toHaveLength(2));
+
+    // 接続断の後は、再接続するまで送らない
+    proc.emitExit(1);
+    notifyExtensionSkillRootsChanged();
+    await Promise.resolve();
+    expect(extraRootsWrites(proc.writes)).toHaveLength(2);
   });
 });
