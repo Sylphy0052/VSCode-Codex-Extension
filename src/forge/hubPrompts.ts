@@ -1,17 +1,47 @@
+import { BUNDLED_SKILLS_PLUGIN, USER_SKILLS_PLUGIN } from '../provider/extensionSkills';
 import type { SkillsSnapshot } from '../provider/skills';
 import type { ForgeHubProvider, ForgeWorkItem } from './hub';
 
 /**
  * Forge HubからAIへ送る依頼文を組み立てる（Issue #1814）。
  *
- * GitLab側は開発者本人の`gitlab-*` skill（`~/.codex/skills`・`~/.claude/skills`）があれば
- * それを呼ぶ。skillは拡張機能に同梱していないため、無い環境でskill名だけを送ると
- * エラーにならないまま計画の記録・自己レビュー・後片付けが抜け落ちる。そこで既定は
- * GitHub側と同じく平文の依頼文にし、skillが一覧にあるときだけ呼び出しへ切り替える。
+ * GitLab側は`gitlab-*` skillが一覧にあるときだけ呼び出しにし、無ければGitHub側と同じく
+ * 平文の依頼文にする。無い環境でskill名だけを送ると、エラーにならないまま計画の記録・
+ * 自己レビュー・後片付けが抜け落ちる。
+ *
+ * skillの出どころは、グローバル（素の名前。`~/.codex/skills`・`~/.claude/skills`や
+ * リポジトリ内のskill）、同梱（`codex-ext:`）、利用者skill（`codex-ext-user:`）の順に
+ * 探す（Issue #1828）。
  */
 
 /** Forge Hubが呼び分けるGitLab向けskill。 */
 export type ForgeGitLabSkill = 'gitlab-develop' | 'gitlab-review' | 'gitlab-cleanup';
+
+const FORGE_GITLAB_SKILLS: readonly ForgeGitLabSkill[] = [
+  'gitlab-develop',
+  'gitlab-review',
+  'gitlab-cleanup',
+];
+
+/** skill名の前に付く名前空間。グローバルは空文字列。探す順に並べる。 */
+const GITLAB_SKILL_NAMESPACES: readonly string[] = [
+  '',
+  `${BUNDLED_SKILLS_PLUGIN}:`,
+  `${USER_SKILLS_PLUGIN}:`,
+];
+
+/**
+ * Forge Hubが呼ぶ`gitlab-*` skillの名前空間を選ぶ。どこにも揃っていなければ`undefined`。
+ *
+ * 3つが揃った出どころだけを選ぶ。skillは同じ出どころの別のskillを名前で呼ぶため、
+ * skillごとに出どころが分かれると、たとえばグローバルの`gitlab-develop`が素の
+ * `gitlab-review`を探して見つけられず、途中の手順が抜ける。
+ */
+export function gitlabSkillNamespace(skills: ReadonlySet<string>): string | undefined {
+  return GITLAB_SKILL_NAMESPACES.find((namespace) =>
+    FORGE_GITLAB_SKILLS.every((skill) => skills.has(`${namespace}${skill}`)),
+  );
+}
 
 /**
  * skill一覧から、呼び出せるskillの名前を取り出す。
@@ -25,8 +55,13 @@ export function availableSkillNames(snapshot: SkillsSnapshot | undefined): Reado
 }
 
 /** skillの呼び出し文字列。Codexは`$name`、Claude Codeは`/name`と書く。 */
-export function skillInvocation(provider: ForgeHubProvider, skill: ForgeGitLabSkill): string {
-  return provider === 'claude' ? `/${skill}` : `$${skill}`;
+export function skillInvocation(
+  provider: ForgeHubProvider,
+  skill: ForgeGitLabSkill,
+  namespace = '',
+): string {
+  const name = `${namespace}${skill}`;
+  return provider === 'claude' ? `/${name}` : `$${name}`;
 }
 
 export function buildIssueStartPrompt(
@@ -50,8 +85,9 @@ export function buildIssueStartRequest(
   skills: ReadonlySet<string>,
 ): string {
   if (host !== 'gitlab') return `GitHub Issue #${number}に着手してください。`;
-  if (skills.has('gitlab-develop'))
-    return `${skillInvocation(provider, 'gitlab-develop')} #${number}`;
+  const namespace = gitlabSkillNamespace(skills);
+  if (namespace !== undefined)
+    return `${skillInvocation(provider, 'gitlab-develop', namespace)} #${number}`;
   return [`GitLab Issue #${number}に着手してください。`, ...gitlabDevelopSteps(number)].join('\n');
 }
 
@@ -67,24 +103,25 @@ export function buildWorkActionPrompt(
     pullRequestNumber === undefined ? `Issue #${issueNumber}` : `PR/MR #${pullRequestNumber}`;
   if (status === 'blocked') return `${reference}のブロック理由を調査し、必要な対応をしてください。`;
   if (host === 'gitlab') {
+    const namespace = gitlabSkillNamespace(skills);
     if (status === 'inProgress') {
-      return skills.has('gitlab-develop')
-        ? `${skillInvocation(provider, 'gitlab-develop')} #${issueNumber}`
+      return namespace !== undefined
+        ? `${skillInvocation(provider, 'gitlab-develop', namespace)} #${issueNumber}`
         : [
             `GitLab Issue #${issueNumber}の実装を続けてください。済んでいない手順から進めます。`,
             ...gitlabDevelopSteps(issueNumber),
           ].join('\n');
     }
     if (status === 'cleanup') {
-      return skills.has('gitlab-cleanup')
-        ? `${skillInvocation(provider, 'gitlab-cleanup')} ${reference}`
+      return namespace !== undefined
+        ? `${skillInvocation(provider, 'gitlab-cleanup', namespace)} ${reference}`
         : [
             `${reference}はマージ済みです。対象を確認してcleanupしてください。`,
             ...gitlabCleanupSteps(issueNumber, pullRequestNumber),
           ].join('\n');
     }
-    return skills.has('gitlab-review')
-      ? `${skillInvocation(provider, 'gitlab-review')} ${reference}`
+    return namespace !== undefined
+      ? `${skillInvocation(provider, 'gitlab-review', namespace)} ${reference}`
       : [
           `${reference}をレビューし、必要な対応を進めてください。`,
           ...gitlabReviewSteps(pullRequestNumber),

@@ -3,6 +3,7 @@
  *
  * GitLab側は`gitlab-*` skillがあるときだけ呼び出し、無ければ手順を平文で並べる。
  * skillの呼び出しはCodexなら`$name`、Claude Codeなら`/name`と書く。
+ * 出どころはグローバル・同梱・利用者skillの順に、3つ揃ったものを選ぶ（Issue #1828）。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -11,6 +12,7 @@ import {
   availableSkillNames,
   buildIssueStartRequest,
   buildWorkActionPrompt,
+  gitlabSkillNamespace,
 } from '../../src/forge/hubPrompts';
 import type { SkillView } from '../../src/provider/skills';
 
@@ -19,6 +21,12 @@ const ALL_GITLAB_SKILLS: ReadonlySet<string> = new Set([
   'gitlab-review',
   'gitlab-cleanup',
 ]);
+const BUNDLED_GITLAB_SKILLS: ReadonlySet<string> = new Set(
+  [...ALL_GITLAB_SKILLS].map((name) => `codex-ext:${name}`),
+);
+const USER_GITLAB_SKILLS: ReadonlySet<string> = new Set(
+  [...ALL_GITLAB_SKILLS].map((name) => `codex-ext-user:${name}`),
+);
 const NO_SKILLS: ReadonlySet<string> = new Set();
 
 function skill(name: string, enabled = true): SkillView {
@@ -49,7 +57,47 @@ describe('availableSkillNames', () => {
   });
 });
 
+describe('gitlabSkillNamespace（Issue #1828）', () => {
+  it('グローバルに揃っていれば、同梱skillがあってもグローバルを選ぶ', () => {
+    expect(gitlabSkillNamespace(new Set([...ALL_GITLAB_SKILLS, ...BUNDLED_GITLAB_SKILLS]))).toBe(
+      '',
+    );
+  });
+
+  it('グローバルに無ければ同梱skillを選ぶ', () => {
+    expect(gitlabSkillNamespace(new Set([...BUNDLED_GITLAB_SKILLS, ...USER_GITLAB_SKILLS]))).toBe(
+      'codex-ext:',
+    );
+  });
+
+  it('グローバルにも同梱にも無ければ利用者skillを選ぶ', () => {
+    expect(gitlabSkillNamespace(USER_GITLAB_SKILLS)).toBe('codex-ext-user:');
+  });
+
+  it('どこにも無ければundefined', () => {
+    expect(gitlabSkillNamespace(NO_SKILLS)).toBeUndefined();
+  });
+
+  it('グローバルに一部しか無ければ、次の出どころへ進む', () => {
+    expect(gitlabSkillNamespace(new Set(['gitlab-develop', ...BUNDLED_GITLAB_SKILLS]))).toBe(
+      'codex-ext:',
+    );
+    expect(gitlabSkillNamespace(new Set(['gitlab-develop', 'codex-ext:gitlab-review']))).toBe(
+      undefined,
+    );
+  });
+});
+
 describe('buildIssueStartRequest', () => {
+  it('同梱skillはプラグイン名を付けて呼ぶ', () => {
+    expect(buildIssueStartRequest('gitlab', 'codex', 12, BUNDLED_GITLAB_SKILLS)).toBe(
+      '$codex-ext:gitlab-develop #12',
+    );
+    expect(buildIssueStartRequest('gitlab', 'claude', 12, USER_GITLAB_SKILLS)).toBe(
+      '/codex-ext-user:gitlab-develop #12',
+    );
+  });
+
   it('skillが無いGitLabでは、skill名ではなく手順を平文で送る', () => {
     const text = buildIssueStartRequest('gitlab', 'codex', 12, NO_SKILLS);
     expect(text).not.toContain('gitlab-develop');
@@ -87,6 +135,15 @@ describe('buildWorkActionPrompt', () => {
     );
   });
 
+  it('同梱skillは状態ごとにプラグイン名付きで呼ぶ', () => {
+    expect(buildWorkActionPrompt('gitlab', 'codex', 'review', 12, 34, BUNDLED_GITLAB_SKILLS)).toBe(
+      '$codex-ext:gitlab-review PR/MR #34',
+    );
+    expect(
+      buildWorkActionPrompt('gitlab', 'claude', 'cleanup', 12, 34, BUNDLED_GITLAB_SKILLS),
+    ).toBe('/codex-ext:gitlab-cleanup PR/MR #34');
+  });
+
   it('skillが無いGitLabでは、どの状態でもskill名を送らない', () => {
     for (const status of ['inProgress', 'review', 'ciPending', 'ci', 'cleanup'] as const) {
       const text = buildWorkActionPrompt('gitlab', 'claude', status, 12, 34, NO_SKILLS);
@@ -95,14 +152,13 @@ describe('buildWorkActionPrompt', () => {
     }
   });
 
-  it('一部のskillだけある場合は、あるものだけ呼ぶ', () => {
+  it('一部のskillしか無い出どころは使わない', () => {
     const onlyDevelop = new Set(['gitlab-develop']);
-    expect(buildWorkActionPrompt('gitlab', 'codex', 'inProgress', 12, 34, onlyDevelop)).toBe(
-      '$gitlab-develop #12',
-    );
-    expect(buildWorkActionPrompt('gitlab', 'codex', 'review', 12, 34, onlyDevelop)).not.toContain(
-      'gitlab-review',
-    );
+    for (const status of ['inProgress', 'review', 'cleanup'] as const) {
+      expect(buildWorkActionPrompt('gitlab', 'codex', status, 12, 34, onlyDevelop)).not.toMatch(
+        /[$/]gitlab-/,
+      );
+    }
   });
 
   it('GitHubは従来どおりの平文', () => {
