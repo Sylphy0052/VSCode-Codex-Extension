@@ -153,7 +153,9 @@ git switch "<default>"
 
 ```bash
 printf '%s' "$BRANCH" | grep -Eq '^[a-z]+/[0-9]+/[a-z0-9._-]+$' || echo "ブランチ名が形式に合わない。ここで止める"
-````<default>`も同様に、リモート由来の値なので`^[A-Za-z0-9._/-]+$`に合い`-`で始まらないことを確かめ、使う箇所はダブルクォートで囲む。
+```
+
+`<default>`も同様に、リモート由来の値なので`^[A-Za-z0-9._/-]+$`に合い`-`で始まらないことを確かめ、使う箇所はダブルクォートで囲む。
 
 ```bash
 git merge-base --is-ancestor "<branch>" "<default>" && git branch -D "<branch>"
