@@ -3,12 +3,14 @@
  * 測る（Issue #1629）。OSごとの取り方の違いはここに閉じ込め、判定（`resourceMonitor.ts`）は
  * 数値だけを見る。
  *
- * - CPU: Linux・macOSは1分平均の負荷をコア数（`os.availableParallelism()`）で割る。Windowsは
- *   負荷平均が無い（常に0）ため、前回の計測からの`os.cpus()`の時間の差で使用率を出す
+ * - CPU（Issue #1807）: PSIが読めるLinuxは、拡張ホストのcgroupの`cpu.pressure`（読めなければ
+ *   `/proc/pressure/cpu`）の`some`の`total`の前回からの差で、CPUを待った時間の割合を出す。PSIが
+ *   無い環境（macOS・Windows・古いカーネル）は、前回からの`os.cpus()`の時間の差で使用率を出す。
+ *   1分平均の負荷（loadavg）はI/O待ちのプロセスも数えるため判定には使わず、診断値として持つだけ
  * - メモリ: LinuxはMemAvailable（`/proc/meminfo`）、macOSは`process.availableMemory()`、
  *   Windowsは`os.freemem()`。Linuxではcgroup（v2・v1）の制限も読み、厳しい方を採る
  * - プロセス: 1回の計測で全プロセスの一覧（pidとppid）を取り、JS側でツリーを組む。pidごとに
- *   コマンドを起動しない
+ *   コマンドを起動しない。Linuxは工程のツリーだけPSS（`smaps_rollup`）も読む
  *
  * `/proc`などから読んだ文字列は長く持たない。V8の`slice`・`split`で切り出した文字列は元の
  * 文字列を掴んだままになるため、数値へ直してから捨てる。
@@ -18,13 +20,30 @@ import { execFile } from 'node:child_process';
 import { promises as fsPromises } from 'node:fs';
 import * as os from 'node:os';
 
+/** CPUの判定に使う計測方式（Issue #1807）。 */
+export type CpuMeasureMethod = 'psi' | 'usage';
+
+/** CPUの判定に使う値。 */
+export interface CpuMeasurement {
+  method: CpuMeasureMethod;
+  /**
+   * 前回の計測からの割合（%）。`psi`はCPUを待った時間（`some`）、`usage`は全コアの使用率。
+   * 初回の計測やPSIの読み元が替わった直後は差を取れないため`undefined`。
+   */
+  percent: number | undefined;
+  /** PSIの読み元。`cgroup`は拡張ホストのcgroupの`cpu.pressure`、`system`は`/proc/pressure/cpu`。 */
+  pressureSource?: 'cgroup' | 'system';
+}
+
 /** ホスト全体（コンテナ内ならcgroupの制限も含む）の資源。測れなかった値は`undefined`。 */
 export interface HostResources {
-  /**
-   * CPUの混み具合。Linux・macOSは1分平均の負荷をコア数で割った値（1.0で全コアが埋まっている）。
-   * Windowsは前回の計測からの使用率（0〜1）。初回の計測では前回が無いため`undefined`。
-   */
-  cpuLoadPerCore: number | undefined;
+  cpu: CpuMeasurement;
+  /** 前回の計測からの全コアの使用率（%）。PSIで判定する環境でも、pauseの効果の見積もりに使う。 */
+  cpuUsagePercent: number | undefined;
+  /** 1分平均の負荷をコア数で割った値。診断用で判定には使わない。Windowsは常に0のため`undefined`。 */
+  loadPerCore: number | undefined;
+  /** 使えるコア数（`os.availableParallelism()`）。 */
+  cpuCores: number;
   /** 使えるメモリの割合（0〜1）。cgroupの制限があればホストと比べて厳しい方。 */
   memoryAvailableRatio: number | undefined;
   memoryAvailableBytes: number | undefined;
@@ -36,6 +55,12 @@ export interface HostResources {
 /** プロセスツリー（根とその子孫）の使用量の合計。 */
 export interface ProcessTreeUsage {
   rssBytes: number;
+  /**
+   * PSS（`/proc/<pid>/smaps_rollup`の`Pss`）の合計。共有ページを共有者の数で割るため、ツリーを
+   * 止めたときに空く量の見積もりに使える（Issue #1807）。Linux以外と、ツリーのどれかを読めなかった
+   * ときは`undefined`。
+   */
+  pssBytes: number | undefined;
   /** 1コアを100%とするCPU使用率。前回の計測が無く差を取れないときは`undefined`。 */
   cpuPercent: number | undefined;
   /** ツリーに含まれるプロセスの数。根が既に終わっていれば0。 */
@@ -48,6 +73,8 @@ interface ProcessRow {
   ppid: number;
   /** RSS（バイト）。一覧の時点では読んでいない（Linux）ことがある。 */
   rssBytes: number | undefined;
+  /** PSS（バイト）。Linuxで工程のツリーに含まれるプロセスだけ読む。 */
+  pssBytes?: number | undefined;
   /** 起動からの累積CPU時間（秒）。macOSは`ps`の使用率を直接使うため持たない。 */
   cpuSeconds: number | undefined;
   /** macOSの`ps`が出す使用率（%）。 */
@@ -56,10 +83,36 @@ interface ProcessRow {
 
 export interface ResourceSamplerPorts {
   platform: NodeJS.Platform;
+  /** 監視しているプロセス（拡張ホスト）のpid。PSIを読むcgroupを決めるのに使う。 */
+  pid: number;
   readFile(path: string): Promise<string>;
   readdir(path: string): Promise<string[]>;
   execFile(command: string, args: readonly string[]): Promise<string>;
   now(): number;
+  cpus(): os.CpuInfo[];
+  loadavg(): number[];
+  availableParallelism(): number;
+}
+
+/**
+ * PSIの`some`の行（`some avg10=0.12 avg60=0.34 avg300=0.56 total=123456`）。ファイルがあっても
+ * この形でなければ使わない（Issue #1807）。`total`はCPUを待った時間の累計（マイクロ秒）。
+ */
+const PRESSURE_SOME_LINE =
+  /^some avg10=\d+(?:\.\d+)? avg60=\d+(?:\.\d+)? avg300=\d+(?:\.\d+)? total=(\d+)\s*$/m;
+
+/** PSIの`some`の`total`を読む。形式が違えば`undefined`。 */
+export function parsePressureSomeTotal(text: string): number | undefined {
+  const match = PRESSURE_SOME_LINE.exec(text);
+  return match === null ? undefined : toNumber(match[1]);
+}
+
+/** `/proc/<pid>/cgroup`からcgroup v2の場所（`0::<path>`）を読む。v1だけの環境は`undefined`。 */
+export function parseCgroupV2Path(text: string): string | undefined {
+  const match = /^0::(\/\S*)\s*$/m.exec(text);
+  const path = match?.[1];
+  // カーネルが書く値だが、`..`を含む形はパスとして組まない
+  return path === undefined || path.split('/').includes('..') ? undefined : path;
 }
 
 /**
@@ -106,6 +159,7 @@ function readStatField(text: string, key: string): number | undefined {
 export function defaultResourceSamplerPorts(): ResourceSamplerPorts {
   return {
     platform: process.platform,
+    pid: process.pid,
     readFile: (path) => fsPromises.readFile(path, 'utf8'),
     readdir: (path) => fsPromises.readdir(path),
     execFile: (command, args) =>
@@ -113,7 +167,11 @@ export function defaultResourceSamplerPorts(): ResourceSamplerPorts {
         execFile(
           command,
           [...args],
-          { timeout: PROCESS_LIST_TIMEOUT_MS, maxBuffer: PROCESS_LIST_MAX_BUFFER, windowsHide: true },
+          {
+            timeout: PROCESS_LIST_TIMEOUT_MS,
+            maxBuffer: PROCESS_LIST_MAX_BUFFER,
+            windowsHide: true,
+          },
           (error, stdout) => {
             if (error !== null) {
               reject(error);
@@ -124,38 +182,62 @@ export function defaultResourceSamplerPorts(): ResourceSamplerPorts {
         );
       }),
     now: () => Date.now(),
+    cpus: () => os.cpus(),
+    loadavg: () => os.loadavg(),
+    availableParallelism: () => os.availableParallelism(),
   };
 }
 
+type HostMemory = Pick<
+  HostResources,
+  'memoryAvailableRatio' | 'memoryAvailableBytes' | 'memoryTotalBytes' | 'memoryFromCgroup'
+>;
+
 export class ResourceSampler {
-  /** Windowsのホストの使用率の差を取るための前回の`os.cpus()`の合計（ms）。 */
+  /** ホストの使用率の差を取るための前回の`os.cpus()`の合計（ms）。 */
   private previousHostCpu: { busy: number; total: number } | undefined;
+  /** PSIの差を取るための前回の`total`（マイクロ秒）と、読んだファイル・時刻。 */
+  private previousPressure: { path: string; total: number; at: number } | undefined;
   /** プロセスごとの前回の累積CPU時間（秒）と計測時刻。CPU使用率の差を取るのに使う。 */
   private previousProcessCpu: { at: number; seconds: Map<number, number> } | undefined;
 
   constructor(private readonly ports: ResourceSamplerPorts = defaultResourceSamplerPorts()) {}
 
   async sampleHost(): Promise<HostResources> {
-    const cpuLoadPerCore = this.sampleHostCpu();
+    const cpuUsagePercent = this.sampleHostCpuUsage();
+    const pressure = await this.sampleCpuPressure();
     const memory = await this.sampleHostMemory();
-    return { cpuLoadPerCore, ...memory };
+    const cpuCores = this.ports.availableParallelism();
+    const cpu: CpuMeasurement =
+      pressure === undefined
+        ? { method: 'usage', percent: cpuUsagePercent }
+        : { method: 'psi', percent: pressure.percent, pressureSource: pressure.source };
+    return {
+      cpu,
+      cpuUsagePercent,
+      loadPerCore: this.sampleLoadPerCore(cpuCores),
+      cpuCores,
+      ...memory,
+    };
   }
 
-  private sampleHostCpu(): number | undefined {
-    if (this.ports.platform !== 'win32') {
-      const load = os.loadavg()[0];
-      // cgroupのCPU上限（v2の`cpu.max`、v1の`cpu.cfs_quota_us`）は読まない（Issue #1638）。loadavgは
-      // コンテナの中でもホスト全体の値で、上限のコア数で割っても「このコンテナの負荷」にはならない。
-      // 割る側だけを合わせると逆に高く出て工程を止めすぎるため、ホスト全体の負荷として揃えて見る
-      const cores = os.availableParallelism();
-      return load === undefined || cores <= 0 ? undefined : load / cores;
+  /**
+   * 1分平均の負荷をコア数で割った値（診断用）。I/O待ち（D状態）のプロセスも数えるため判定には使わない
+   * （Issue #1807）。cgroupのCPU上限は読まない（Issue #1638）。loadavgはコンテナの中でもホスト全体の値。
+   */
+  private sampleLoadPerCore(cores: number): number | undefined {
+    if (this.ports.platform === 'win32') {
+      return undefined;
     }
-    // Windowsは前回の計測からの全コアの使用率（0〜1）で、他のOSの「1コアあたりの負荷」の近似にすぎない。
-    // 使用率は1を超えないため、閾値が1を超えるとcriticalにならない。負荷平均に当たる値（実行待ちの
-    // キュー長）はパフォーマンスカウンタにしか無く、計測ごとにPowerShellを起こす費用に見合わない
+    const load = this.ports.loadavg()[0];
+    return load === undefined || cores <= 0 ? undefined : load / cores;
+  }
+
+  /** 前回の計測からの全コアの使用率（%）。初回は`undefined`。 */
+  private sampleHostCpuUsage(): number | undefined {
     let busy = 0;
     let total = 0;
-    for (const cpu of os.cpus()) {
+    for (const cpu of this.ports.cpus()) {
       const { user, nice, sys, idle, irq } = cpu.times;
       busy += user + nice + sys + irq;
       total += user + nice + sys + idle + irq;
@@ -165,10 +247,57 @@ export class ResourceSampler {
     if (previous === undefined || total <= previous.total) {
       return undefined;
     }
-    return (busy - previous.busy) / (total - previous.total);
+    return ((busy - previous.busy) / (total - previous.total)) * 100;
   }
 
-  private async sampleHostMemory(): Promise<Omit<HostResources, 'cpuLoadPerCore'>> {
+  /**
+   * CPUのPSI（Issue #1807）。拡張ホストのcgroupの`cpu.pressure`を先に、読めなければ
+   * `/proc/pressure/cpu`を読む。使えるかはファイルの有無ではなく、読めて`some`の行の形が正しいかで
+   * 決める。どちらも使えなければ`undefined`（使用率で判定する）。
+   */
+  private async sampleCpuPressure(): Promise<
+    { source: 'cgroup' | 'system'; percent: number | undefined } | undefined
+  > {
+    if (this.ports.platform !== 'linux') {
+      return undefined;
+    }
+    for (const candidate of await this.pressureCandidates()) {
+      const text = await this.readOptional(candidate.path);
+      const total = text === undefined ? undefined : parsePressureSomeTotal(text);
+      if (total === undefined) {
+        continue;
+      }
+      const at = this.ports.now();
+      const previous = this.previousPressure;
+      this.previousPressure = { path: candidate.path, total, at };
+      // 読み元が替わった直後は、別のカウンタどうしの差になるため出さない
+      const percent =
+        previous === undefined ||
+        previous.path !== candidate.path ||
+        at <= previous.at ||
+        total < previous.total
+          ? undefined
+          : Math.min(100, ((total - previous.total) / ((at - previous.at) * 1000)) * 100);
+      return { source: candidate.source, percent };
+    }
+    this.previousPressure = undefined;
+    return undefined;
+  }
+
+  private async pressureCandidates(): Promise<
+    Array<{ path: string; source: 'cgroup' | 'system' }>
+  > {
+    const system = { path: '/proc/pressure/cpu', source: 'system' as const };
+    const cgroupText = await this.readOptional(`/proc/${String(this.ports.pid)}/cgroup`);
+    const cgroupPath = cgroupText === undefined ? undefined : parseCgroupV2Path(cgroupText);
+    if (cgroupPath === undefined) {
+      return [system];
+    }
+    const dir = cgroupPath === '/' ? '' : cgroupPath;
+    return [{ path: `/sys/fs/cgroup${dir}/cpu.pressure`, source: 'cgroup' }, system];
+  }
+
+  private async sampleHostMemory(): Promise<HostMemory> {
     const { platform } = this.ports;
     if (platform === 'linux') {
       return this.sampleLinuxMemory();
@@ -183,7 +312,7 @@ export class ResourceSampler {
     };
   }
 
-  private async sampleLinuxMemory(): Promise<Omit<HostResources, 'cpuLoadPerCore'>> {
+  private async sampleLinuxMemory(): Promise<HostMemory> {
     let hostAvailable: number | undefined;
     let hostTotal: number | undefined;
     const meminfo = await this.readOptional('/proc/meminfo');
@@ -279,6 +408,8 @@ export class ResourceSampler {
     const seconds = new Map<number, number>();
     for (const [root, pids] of trees) {
       let rssBytes = 0;
+      // PSSはLinuxだけ。メモリを持つ（RSSが0でない）プロセスのPSSを1つでも読めなければ出さない
+      let pssBytes: number | undefined = this.ports.platform === 'linux' ? 0 : undefined;
       let cpuPercent: number | undefined = 0;
       for (const pid of pids) {
         const row = rows.get(pid);
@@ -286,6 +417,14 @@ export class ResourceSampler {
           continue;
         }
         rssBytes += row.rssBytes ?? 0;
+        if (pssBytes !== undefined) {
+          pssBytes =
+            row.pssBytes !== undefined
+              ? pssBytes + row.pssBytes
+              : (row.rssBytes ?? 0) === 0
+                ? pssBytes
+                : undefined;
+        }
         if (row.cpuPercent !== undefined) {
           cpuPercent = cpuPercent === undefined ? undefined : cpuPercent + row.cpuPercent;
           continue;
@@ -308,7 +447,7 @@ export class ResourceSampler {
           cpuPercent += (Math.max(0, row.cpuSeconds - before) / elapsed) * 100;
         }
       }
-      result.set(root, { rssBytes, cpuPercent, processCount: pids.length });
+      result.set(root, { rssBytes, pssBytes, cpuPercent, processCount: pids.length });
     }
     this.previousProcessCpu = { at, seconds };
     return result;
@@ -348,16 +487,27 @@ export class ResourceSampler {
     );
   }
 
-  private async fillLinuxRss(rows: Map<number, ProcessRow>, pids: ReadonlySet<number>): Promise<void> {
+  private async fillLinuxRss(
+    rows: Map<number, ProcessRow>,
+    pids: ReadonlySet<number>,
+  ): Promise<void> {
     await Promise.all(
       [...pids].map(async (pid) => {
         const row = rows.get(pid);
-        const status = row === undefined ? undefined : await this.readOptional(`/proc/${String(pid)}/status`);
+        const status =
+          row === undefined ? undefined : await this.readOptional(`/proc/${String(pid)}/status`);
         if (row === undefined || status === undefined) {
           return;
         }
         const rssKb = readKbField(status, 'VmRSS');
-        rows.set(pid, { ...row, rssBytes: rssKb === undefined ? undefined : rssKb * 1024 });
+        // PSSはpauseで空く量の見積もりに使う（Issue #1807）。読めなければ`undefined`のまま
+        const rollup = await this.readOptional(`/proc/${String(pid)}/smaps_rollup`);
+        const pssKb = rollup === undefined ? undefined : readKbField(rollup, 'Pss');
+        rows.set(pid, {
+          ...row,
+          rssBytes: rssKb === undefined ? undefined : rssKb * 1024,
+          pssBytes: pssKb === undefined ? undefined : pssKb * 1024,
+        });
       }),
     );
   }
@@ -403,7 +553,8 @@ export class ResourceSampler {
         pid,
         ppid,
         rssBytes: rss,
-        cpuSeconds: cpuUnits === undefined ? undefined : cpuUnits / WINDOWS_CPU_TIME_UNITS_PER_SECOND,
+        cpuSeconds:
+          cpuUnits === undefined ? undefined : cpuUnits / WINDOWS_CPU_TIME_UNITS_PER_SECOND,
         cpuPercent: undefined,
       });
     }
@@ -535,7 +686,10 @@ export async function terminateDescendants(
   // その子もSIGTERMは受けており、止まらないのはSIGTERMを無視するものだけ。pidの再利用と区別するには
   // 起動時刻まで照合する必要があり、その手間に見合わないため取りこぼしを許す
   const remaining = new Set(await sampler.listDescendantPids(rootPid));
-  signal(pids.filter((pid) => remaining.has(pid)), 'SIGKILL');
+  signal(
+    pids.filter((pid) => remaining.has(pid)),
+    'SIGKILL',
+  );
 }
 
 function isPidAlive(pid: number): boolean {

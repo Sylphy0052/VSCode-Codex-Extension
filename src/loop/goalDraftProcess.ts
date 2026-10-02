@@ -88,7 +88,11 @@ export function createGoalDraftPlanner(
       deps.logInfo?.(`ゴールの下書きを頼む前に伏せました: ${note}`);
     }
     try {
-      const raw = await runHeadlessPrompt(deps, redaction.text);
+      // 利用者が下書きを待っているため、ループの脇役より先に回す（Issue #1807）
+      const raw = await runHeadlessPrompt(
+        { kind: 'goalDraft', urgent: true, ...deps },
+        redaction.text,
+      );
       if (raw === undefined) {
         deps.logWarn?.('ゴールの下書きの生成に失敗しました（応答なし）');
         return { ok: false, message: 'ゴールの下書きを作れませんでした（応答がありません）' };

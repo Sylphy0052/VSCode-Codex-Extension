@@ -1731,6 +1731,7 @@ Claude Code 2.1.286）。
 
 呼び出すときは、Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`と書く。
 `plugin.json`が無いディレクトリは渡さない（利用者skillを1件も追加していなければ何も渡さない）。
+同梱skillの中身・出どころ・更新方法は、下の「同梱skillの中身（Issue #1821）」にまとめる。
 
 読み込ませる経路:
 
@@ -1794,6 +1795,10 @@ GitLabのホストは`git remote`のURLから求め、規約は利用者のリ�
 - `resources/skills-plugin/`配下を直接編集し、通常のPRで変える。VSIXの版上げで配布される
 - Claude Code用とCodex用で中身を分けない。違いが要る箇所は本文中で書き分ける
 - 同梱範囲を広げるときは、Forge Hubから辿れるか（Forge Hubが呼ぶskillから参照されるか）で決める
+- skillやsubagentを足す・消すときは、`test/unit/bundledSkills.test.ts`の一覧も合わせて直し、
+  `npx vitest run --maxWorkers=2 test/unit/bundledSkills.test.ts`を通す。このテストは、一覧、
+  `SKILL.md`の`name`、社内のホスト名・個人のパス・メールアドレスが無いこと、`codex-ext:<名前>`の参照と
+  Markdownの相対リンクが同梱した範囲で解決することを確かめる
 - 変更後は、社内のホスト名・個人のパス・個人の規約ファイルや個人のツールへの参照が無いことを確かめる
   - 個人のパスは
     `rg -n '~/\.claude|~/\.codex|\$HOME/\.(claude|codex)|/home/[a-z]' resources/skills-plugin`

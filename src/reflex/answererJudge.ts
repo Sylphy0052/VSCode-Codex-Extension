@@ -1,4 +1,5 @@
 import { describeCautionDangers, findQuestionDangers } from '../orchestrator/roadmapQuestionMcp';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import {
   choiceAnswer,
   choiceProbability,
@@ -40,12 +41,30 @@ const NO_QUESTION = '問いなし';
 const QUESTION_OPTIONS = [USER, ORCHESTRATOR] as const;
 const TURN_END_OPTIONS = [USER, ORCHESTRATOR, NO_QUESTION] as const;
 
+// 推奨案のある「Aで進めてよいか」をユーザーへ回さないよう、方針の選択と承認は推奨案が無いときに
+// 限ってユーザーとする（Issue #1819）
 const USER_CRITERIA =
-  `「${USER}」は、方針の選択、承認、取り消せない操作、担当領域をまたぐ変更、設計の前提を変える変更、` +
-  '受入基準を下げる判断、またはユーザーしか知らない情報が要る問い。';
+  `「${USER}」は、取り消せない操作、担当領域をまたぐ変更、設計の前提を変える変更、受入基準を下げる判断、` +
+  'ユーザーしか知らない情報が要る問い、またはこれらに当たらなくても推奨案の無い方針の選択・承認。';
 const ORCHESTRATOR_CRITERIA =
   `「${ORCHESTRATOR}」は、計画・Issue・コード・過去の回答から決められる問い、または推奨案があり` +
-  `「${USER}」の条件に当たらない問い。`;
+  `「${USER}」の条件に当たらない問い。推奨案があり上の条件に当たらなければ、「Aで進めてよいか」のような` +
+  `方針の選択や承認の形をとっていても「${ORCHESTRATOR}」とする。工程の開始、関門の決着、タスクの追加の提案のように後から止めたり` +
+  'やり直したりできる操作は、取り消せない操作に当たらない。';
+
+/** 判定結果のログ（Issue #1819）に載せる問いの文字数。 */
+const LOGGED_QUESTION_MAX_LENGTH = 80;
+
+/** 回答者判定の経路（Issue #1819）。判定結果のログに出す。 */
+export type AnswererRoute =
+  | 'turnEnd'
+  | 'stageQuestion'
+  | 'gate'
+  | 'mergeCommand'
+  | 'askUserQuestion'
+  | 'stopStage'
+  | 'questionAnswer'
+  | 'askUser';
 
 export type AnswererVerdict =
   /** オーケストレーターが自分で決めてよい（確率が閾値以上）。 */
@@ -62,6 +81,8 @@ export const ANSWERER_USER_FALLBACK: AnswererVerdict = { kind: 'user', summary: 
 export interface AnswererQuestion {
   /** 誰が尋ねた問いか。工程セッション（`stageSession`）はオーケストレーターへ、`orchestrator`はユーザーへ尋ねている。 */
   source: 'stageSession' | 'orchestrator';
+  /** 判定結果のログに出す経路。 */
+  route: AnswererRoute;
   question: string;
   reason?: string | undefined;
   options?: readonly string[];
@@ -86,6 +107,20 @@ function userVerdictForDangers(dangers: readonly string[]): AnswererVerdict | un
       };
 }
 
+/**
+ * 判定結果を1行にまとめる（Issue #1819）。基準の文言・閾値の調整を実際の判定結果から行えるよう、
+ * 経路・判定・確率の要約（危険語で判定を省いたときはその旨）と問いの先頭を残す。
+ */
+export function formatAnswererVerdictLog(
+  route: AnswererRoute,
+  text: string,
+  verdict: AnswererVerdict,
+): string {
+  const summary = verdict.summary ?? '判定に失敗したためユーザーへ回した';
+  const question = sanitizeInlineText(text, LOGGED_QUESTION_MAX_LENGTH);
+  return `[回答者判定] 経路=${route} 判定=${verdict.kind} ${summary} 問い=「${question}」`;
+}
+
 function buildQuestionState(question: AnswererQuestion): string {
   const options = question.options ?? [];
   return [
@@ -100,9 +135,20 @@ function buildQuestionState(question: AnswererQuestion): string {
 
 /**
  * 問い（工程の質問・関門・`ask_user`）を誰が答えるべきか判定する。「オーケストレーター」の
- * 確率が閾値以上なら`orchestrator`、それ以外と判定の失敗は`user`。
+ * 確率が閾値以上なら`orchestrator`、それ以外と判定の失敗は`user`。判定結果は`logInfo`へ1行で出す。
  */
 export async function judgeQuestionAnswerer(
+  deps: ReflexJudgeDeps,
+  question: AnswererQuestion,
+  threshold: number,
+  logInfo?: (message: string) => void,
+): Promise<AnswererVerdict> {
+  const verdict = await judgeQuestion(deps, question, threshold);
+  logInfo?.(formatAnswererVerdictLog(question.route, question.question, verdict));
+  return verdict;
+}
+
+async function judgeQuestion(
   deps: ReflexJudgeDeps,
   question: AnswererQuestion,
   threshold: number,
@@ -152,8 +198,20 @@ export async function judgeQuestionAnswerer(
 /**
  * ターン末のオーケストレーターの出力（`lastMessage`）に、ユーザーへの問いかけがあるか、あれば
  * 誰が答えるべきかを判定する。「オーケストレーター」の確率が閾値以上のときだけ`orchestrator`。
+ * 判定結果は`logInfo`へ1行で出す。
  */
 export async function judgeTurnEndAnswerer(
+  deps: ReflexJudgeDeps,
+  lastMessage: string,
+  threshold: number,
+  logInfo?: (message: string) => void,
+): Promise<AnswererVerdict> {
+  const verdict = await judgeTurnEnd(deps, lastMessage, threshold);
+  logInfo?.(formatAnswererVerdictLog('turnEnd', lastMessage, verdict));
+  return verdict;
+}
+
+async function judgeTurnEnd(
   deps: ReflexJudgeDeps,
   lastMessage: string,
   threshold: number,

@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { normalizeIdleShutdownMinutes } from './claude/idleShutdown';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
 import { hasGitSegment } from './orchestrator/escalation';
@@ -598,6 +599,16 @@ export function readAutoHandoffAutoApprove(): boolean {
  */
 export const DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT = 20;
 
+/**
+ * 使っていないClaudeタブのCLIを終了するまでの分（`agent.claude.idleShutdownMinutes`、
+ * 既定30、0で無効。Issue #1808）。丸めは`normalizeIdleShutdownMinutes`が行う。
+ */
+export function readIdleShutdownMinutes(): number {
+  return normalizeIdleShutdownMinutes(
+    vscode.workspace.getConfiguration('agent').get<unknown>('claude.idleShutdownMinutes'),
+  );
+}
+
 /** @see DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT */
 export function readAutoHandoffThresholdPercent(): number {
   const raw = vscode.workspace
@@ -632,12 +643,16 @@ export function readTaskRunMaxParallelPerFolder(): number {
   return Math.floor(raw);
 }
 
-/** オーケストレータモードの資源の閾値（Issue #1629）。判定は`resourceMonitor.ts`。 */
+/** オーケストレータモードの資源の閾値（Issue #1629・#1807）。判定は`resourceMonitor.ts`。 */
 export interface TaskRunResourceThresholds {
-  /** 1分平均の負荷÷コア数（Windowsは使用率）がこの値以上で`warning`。 */
-  cpuWarningLoadPerCore: number;
+  /** CPUのPSI（`some`）の計測間隔あたりの待ち時間の割合（%）がこの値以上で`warning`。 */
+  cpuPressureWarningPercent: number;
   /** 同じくこの値以上で`critical`。 */
-  cpuCriticalLoadPerCore: number;
+  cpuPressureCriticalPercent: number;
+  /** PSIを読めない環境で、全コアのCPU使用率（%）がこの値以上で`warning`。 */
+  cpuUsageWarningPercent: number;
+  /** 同じくこの値以上で`critical`。 */
+  cpuUsageCriticalPercent: number;
   /** 使えるメモリの割合（0〜1）がこの値以下で`warning`。 */
   memoryWarningAvailableRatio: number;
   /** 同じくこの値以下で`critical`。 */
@@ -646,19 +661,31 @@ export interface TaskRunResourceThresholds {
 
 /**
  * 既定の閾値。根拠はpackage.jsonの各設定の説明にもある。
- * - CPU 1.0: 全コアが埋まった状態。これ以上は工程を増やすほど各工程が遅くなる
- * - CPU 1.5: コア数の1.5倍の処理が走行を待つ状態。ビルドやテストが目に見えて遅れ始める
+ * - CPUのPSI 20%・40%、CPU使用率 85%・95%: 標準値ではなく暫定値（Issue #1807）。実機の記録を見て調整する
  * - メモリ20%: 工程セッション1つが数GBを使うことがあり、次の工程で逼迫しうる残り
  * - メモリ10%: OOM killerやスワップによる大幅な遅延が起きやすくなる残り
  */
 export const DEFAULT_TASK_RUN_RESOURCE_THRESHOLDS: TaskRunResourceThresholds = {
-  cpuWarningLoadPerCore: 1,
-  cpuCriticalLoadPerCore: 1.5,
+  cpuPressureWarningPercent: 20,
+  cpuPressureCriticalPercent: 40,
+  cpuUsageWarningPercent: 85,
+  cpuUsageCriticalPercent: 95,
   memoryWarningAvailableRatio: 0.2,
   memoryCriticalAvailableRatio: 0.1,
 };
 
-/** 既定の計測間隔（秒）。1分平均の負荷の変化を1分以内に4回見られ、`/proc`を読む負担が無視できる。 */
+/**
+ * 工程セッションのCLIを低い優先度（`nice -n 10`）で起動するか（Issue #1807）。既定は有効。
+ * 無効でも、CPUがcriticalの間に始める例外の1本だけは低い優先度で起動する。
+ */
+export function readTaskRunLowPriorityEnabled(): boolean {
+  return (
+    vscode.workspace.getConfiguration('agent').get<boolean>('taskRun.lowPriority.enabled', true) !==
+    false
+  );
+}
+
+/** 既定の計測間隔（秒）。CPUのPSI・使用率の差分を1分以内に4回見られ、`/proc`を読む負担が無視できる。 */
 export const DEFAULT_TASK_RUN_RESOURCE_INTERVAL_SECONDS = 15;
 
 function readNumberInRange(key: string, min: number, max: number): number | undefined {
@@ -682,16 +709,25 @@ export function readTaskRunResourceIntervalMs(): number {
  */
 export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
   const d = DEFAULT_TASK_RUN_RESOURCE_THRESHOLDS;
-  const cpuWarning = readNumberInRange('taskRun.resource.cpuWarningLoadPerCore', 0.1, 16);
-  const cpuCritical = readNumberInRange('taskRun.resource.cpuCriticalLoadPerCore', 0.1, 16);
+  const psiWarning = readNumberInRange('taskRun.resource.cpuPressureWarningPercent', 1, 100);
+  const psiCritical = readNumberInRange('taskRun.resource.cpuPressureCriticalPercent', 1, 100);
+  const usageWarning = readNumberInRange('taskRun.resource.cpuUsageWarningPercent', 1, 100);
+  const usageCritical = readNumberInRange('taskRun.resource.cpuUsageCriticalPercent', 1, 100);
   const memWarning = readNumberInRange('taskRun.resource.memoryWarningAvailablePercent', 1, 99);
   const memCritical = readNumberInRange('taskRun.resource.memoryCriticalAvailablePercent', 1, 99);
-  const cpu =
-    cpuWarning !== undefined && cpuCritical !== undefined && cpuWarning <= cpuCritical
-      ? { cpuWarningLoadPerCore: cpuWarning, cpuCriticalLoadPerCore: cpuCritical }
+  const psi =
+    psiWarning !== undefined && psiCritical !== undefined && psiWarning <= psiCritical
+      ? { cpuPressureWarningPercent: psiWarning, cpuPressureCriticalPercent: psiCritical }
       : {
-          cpuWarningLoadPerCore: d.cpuWarningLoadPerCore,
-          cpuCriticalLoadPerCore: d.cpuCriticalLoadPerCore,
+          cpuPressureWarningPercent: d.cpuPressureWarningPercent,
+          cpuPressureCriticalPercent: d.cpuPressureCriticalPercent,
+        };
+  const usage =
+    usageWarning !== undefined && usageCritical !== undefined && usageWarning <= usageCritical
+      ? { cpuUsageWarningPercent: usageWarning, cpuUsageCriticalPercent: usageCritical }
+      : {
+          cpuUsageWarningPercent: d.cpuUsageWarningPercent,
+          cpuUsageCriticalPercent: d.cpuUsageCriticalPercent,
         };
   const memory =
     memWarning !== undefined && memCritical !== undefined && memCritical <= memWarning
@@ -703,7 +739,7 @@ export function readTaskRunResourceThresholds(): TaskRunResourceThresholds {
           memoryWarningAvailableRatio: d.memoryWarningAvailableRatio,
           memoryCriticalAvailableRatio: d.memoryCriticalAvailableRatio,
         };
-  return { ...cpu, ...memory };
+  return { ...psi, ...usage, ...memory };
 }
 
 /**

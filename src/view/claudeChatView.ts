@@ -46,7 +46,12 @@ import {
 } from '../claude/sideQuestion';
 import type { SideQuestionHistoryEntry } from '../claude/control';
 import type { ClaudeSessionStore } from '../claude/sessionStore';
-import { ClaudeStreamSession, type ClaudeSpawnPort } from '../claude/streamSession';
+import { canShutdownIdle } from '../claude/idleShutdown';
+import {
+  ClaudeStreamSession,
+  type ClaudeSpawnPort,
+  type ResumeOutcome,
+} from '../claude/streamSession';
 import { createTranscriptBuilder } from '../claude/transcript';
 import { effortsFor } from '../codex/modelCatalog';
 import {
@@ -89,6 +94,7 @@ import {
   readLoopDoneCheckConfig,
   readClaudeConfig,
   readConfig,
+  readIdleShutdownMinutes,
   readWorkflowsConfig,
   workspaceFolderPaths,
 } from '../config';
@@ -287,6 +293,7 @@ import {
   claudePermissionModeForLevel,
   isApprovalLevel,
 } from '../provider/approvalLevel';
+import { lowPrioritySpawn } from '../claude/lowPrioritySpawn';
 import type { ClaudeConfig } from '../claude/types';
 import { pinKeyFor, type PinnedSessionStore } from '../util/pinnedSessions';
 import type {
@@ -352,6 +359,8 @@ interface ClaudePanel extends BaseChatPanel {
    */
   sideQuestionHistory: SideQuestionHistoryEntry[];
   limitAutoResumeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 使っていないタブのCLIを終了する予約（Issue #1808）。 */
+  idleShutdownTimer: ReturnType<typeof setTimeout> | undefined;
   limitAutoResumeAt: number | undefined;
   limitAutoResumeAwaitingResult: boolean;
   /**
@@ -2590,7 +2599,15 @@ export class ClaudeChatViewManager
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, LABEL);
-    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
+    const entry = this.buildEntry(
+      input.cwd,
+      title,
+      true,
+      taskConfig,
+      title,
+      undefined,
+      input.lowPriority === true,
+    );
     // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
     entry.inputLock = input.inputLock === true;
     entry.autoHandoffDisabled = input.disableAutoHandoff === true;
@@ -2971,6 +2988,10 @@ export class ClaudeChatViewManager
     this.sessionMessagingRegistrations.get(entry)?.dispose();
     this.sessionMessagingRegistrations.delete(entry);
     this.cancelLimitAutoResume(entry);
+    if (entry.idleShutdownTimer !== undefined) {
+      clearTimeout(entry.idleShutdownTimer);
+      entry.idleShutdownTimer = undefined;
+    }
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
     this.handoffDrafts.delete(entry.secondOpinionKey);
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
@@ -3365,7 +3386,14 @@ export class ClaudeChatViewManager
     taskConfig: ClaudeConfig | undefined,
     pinnedName?: string,
     modelSettings: SessionModelSettings = this.initialModelSettings(taskConfig),
+    lowPriority = false,
   ): ClaudePanel {
+    // 統合テストがフェイクへ差し替えている間はその起動を変えない（niceを挟むとフェイクの外で動く）
+    const override = this.resolveSpawn();
+    const spawnPort =
+      lowPriority && override === undefined
+        ? lowPrioritySpawn((message) => this.log.warn(message))
+        : override;
     const session = new ClaudeStreamSession(
       this.claudePath,
       this.log,
@@ -3379,8 +3407,9 @@ export class ClaudeChatViewManager
         entry.approvalHandler !== undefined
           ? entry.approvalHandler(approval, rawParams)
           : Promise.resolve({ kind: 'ask' as const }),
-      // 統合テスト（Issue #186）が差し替えている間だけフェイクのプロセスになる。
-      this.resolveSpawn(),
+      // 統合テスト（Issue #186）が差し替えている間だけフェイクのプロセスになる。工程セッションは
+      // 低い優先度で起動する（Issue #1807）
+      spawnPort,
       // 自動引き継ぎの初期値（Issue #1091）。ClaudeStreamSessionはvscodeに依存しないため、
       // 設定の読み出しはここ（view層）で行う（下の`LoopController`と同じ）
       readAutoHandoffEnabled(),
@@ -3448,7 +3477,9 @@ export class ClaudeChatViewManager
       autoReplyHistory: [],
       autoReplyReflexAbort: new AbortController(),
       autoReplyAskUserQuestionInFlight: new Set(),
+      idleShutdownTimer: undefined,
     };
+    session.setResumeListener((outcome) => this.onResumeOutcome(entry, outcome));
     return entry;
   }
 
@@ -3691,6 +3722,89 @@ export class ClaudeChatViewManager
     for (const listener of [...entry.stateListeners]) {
       listener(state);
     }
+    this.scheduleIdleShutdown(entry);
+  }
+
+  /** 使っていないタブのCLIを終了してよいか（Issue #1808）。終了の直前にも呼び直す。 */
+  private idleShutdownAllowed(entry: ClaudePanel): boolean {
+    return canShutdownIdle({
+      minutes: readIdleShutdownMinutes(),
+      disposed: entry.disposed,
+      taskManaged: entry.taskManaged,
+      loopRunning: entry.loop.running,
+      handoffInProgress:
+        entry.autoHandoffStarted ||
+        this.handoffPreparing.has(entry) ||
+        entry.pendingHandoff?.active === true,
+      autoReplyInFlight: entry.autoReplyTurnToken !== undefined,
+      limitAutoResumePending: entry.limitAutoResumeTimer !== undefined,
+      sessionIdle: entry.session.idleForSuspend,
+    });
+  }
+
+  /**
+   * 使っていない状態が続いたらCLIを終了する予約を、状態が変わるたびに付け直す（Issue #1808）。
+   *
+   * 終了してよい状態の間は最初に予約した時刻を保ち、外れたら予約を消す。終了は次の送信で
+   * `--resume`して再開する（`ClaudeStreamSession.suspend`）。
+   */
+  private scheduleIdleShutdown(entry: ClaudePanel): void {
+    if (!this.idleShutdownAllowed(entry)) {
+      if (entry.idleShutdownTimer !== undefined) {
+        clearTimeout(entry.idleShutdownTimer);
+        entry.idleShutdownTimer = undefined;
+      }
+      return;
+    }
+    if (entry.idleShutdownTimer !== undefined) {
+      return;
+    }
+    entry.idleShutdownTimer = setTimeout(() => {
+      entry.idleShutdownTimer = undefined;
+      // 待っている間に状態が変わっていたら終了しない
+      if (!this.idleShutdownAllowed(entry)) {
+        return;
+      }
+      const pid = entry.session.pid;
+      void entry.session
+        .suspend({ cwd: entry.cwd, config: () => this.configFor(entry) })
+        .then((suspended) => {
+          if (suspended) {
+            this.log.info(`[idle shutdown] 使っていないタブのCLIを終了しました (pid ${pid})`);
+          }
+        })
+        .catch((e: unknown) => {
+          this.log.warn(
+            `[idle shutdown] CLIを終了できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        });
+    }, readIdleShutdownMinutes() * 60_000);
+  }
+
+  /**
+   * 休止からの再開の結果（Issue #1808）。失敗したら黙って新しい会話にせず、新しい会話として
+   * 送り直すかを選ばせる。
+   */
+  private onResumeOutcome(entry: ClaudePanel, outcome: ResumeOutcome): void {
+    if (outcome.kind !== 'failed' || entry.disposed) {
+      return;
+    }
+    const NEW_CONVERSATION = '新しい会話で送る';
+    void vscode.window
+      .showWarningMessage(
+        `Claude Code: 休止していた会話を再開できませんでした（${outcome.reason}）。新しい会話として始めますか？`,
+        NEW_CONVERSATION,
+      )
+      .then(async (choice) => {
+        if (choice !== NEW_CONVERSATION) {
+          return;
+        }
+        const sessionId = await this.openNew(entry.cwd);
+        const next = sessionId === undefined ? undefined : this.panels.get(sessionId);
+        if (next !== undefined && outcome.text !== '') {
+          this.dispatch(next, outcome.text, [...outcome.attachments]);
+        }
+      });
   }
 
   private cancelLimitAutoResume(entry: ClaudePanel): void {
@@ -3861,6 +3975,7 @@ export class ClaudeChatViewManager
     }
     entry.wasLoopRunning = status.running;
     this.postState(entry);
+    this.scheduleIdleShutdown(entry);
     if (stopped) {
       void this.postLoopEvidence(entry);
     }
