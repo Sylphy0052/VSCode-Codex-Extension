@@ -237,7 +237,7 @@ export function readClaudeConfig(): ClaudeExtensionConfig {
 export function readActivityLogConfig(): ActivityLogConfig {
   const c = vscode.workspace.getConfiguration('agent');
   return {
-    enabled: c.get<boolean>('activityLog.enabled') ?? true,
+    enabled: c.get<boolean>('activityLog.enabled') ?? false,
     dir: str(c, 'activityLog.dir'),
   };
 }
