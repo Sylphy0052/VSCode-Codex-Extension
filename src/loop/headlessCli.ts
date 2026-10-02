@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -143,11 +143,7 @@ export const CODEX_CONFIG_OVERRIDES = [
  * 露出するツール一覧を測り直し、許可していない新しい能力が増えていないか確認する**
  * 必要がある（issue #962の受入基準）。
  */
-export function buildCodexHeadlessArgs(
-  model: string,
-  outputFile: string,
-  effort = '',
-): string[] {
+export function buildCodexHeadlessArgs(model: string, outputFile: string, effort = ''): string[] {
   const modelArgs = model === 'auto' || model === '' ? [] : ['-m', model];
   const denyArgs = CODEX_DENIED_FEATURES.flatMap((feature) => ['--disable', feature]);
   const configArgs = CODEX_CONFIG_OVERRIDES.flatMap((override) => ['-c', override]);
@@ -185,6 +181,21 @@ export interface HeadlessCliDeps {
    * 説明の面でも良くない。**abortされた実行の結果は使われない前提**で、その場で回収する。
    */
   signal?: AbortSignal;
+  /**
+   * 呼び出し元の種類（例: `Reflexの判定`・`advisor`）。呼び出し元ごとの回数と所要時間をログに残す
+   * のに使う（Issue #1807）。省略時は`unknown`。
+   */
+  kind?: string;
+  /**
+   * 同じ値を持つ要求が順番待ちに溜まったら、古いものを捨てて最新だけを実行する（Issue #1807）。
+   * 捨てた要求は`superseded: true`の失敗で返す。省略時はまとめない。
+   */
+  coalesceKey?: string;
+  /**
+   * 同じ入力（CLI・モデル・effort・プロンプト）への成功した結果を、しばらく再利用してよい
+   * （Issue #1807）。応答が入力だけで決まる呼び出し（Reflexの審査など）に限って立てる。
+   */
+  cacheable?: boolean;
 }
 
 /** 呼び出しが失敗した理由。応答が得られなかったときだけ使う。 */
@@ -199,7 +210,15 @@ export type HeadlessFailureReason = 'timeout' | 'process-error';
  */
 export type HeadlessOutcome =
   | { readonly ok: true; readonly text: string }
-  | { readonly ok: false; readonly reason: HeadlessFailureReason };
+  | {
+      readonly ok: false;
+      readonly reason: HeadlessFailureReason;
+      /**
+       * 順番待ちの間に同じ`coalesceKey`の新しい要求が来て、実行せずに捨てた（Issue #1807）。
+       * 理由は`process-error`にしてある。CLIの不調ではないため、呼び出し元は警告を残さない。
+       */
+      readonly superseded?: true;
+    };
 
 /**
  * プロンプトを1回だけ投げ、応答本文を返す。**失敗しても例外を投げず`undefined`を返す。**
@@ -229,7 +248,162 @@ export async function runHeadlessPromptDetailed(
   deps: HeadlessCliDeps,
   prompt: string,
 ): Promise<HeadlessOutcome> {
-  return deps.provider === 'claude' ? runClaude(deps, prompt) : runCodex(deps, prompt);
+  const kind = deps.kind ?? 'unknown';
+  const cacheKey = deps.cacheable === true ? headlessCacheKey(deps, prompt) : undefined;
+  const cached = cacheKey === undefined ? undefined : readCache(cacheKey);
+  if (cached !== undefined) {
+    recordCall(kind, 'cache', 0, 0);
+    return cached;
+  }
+  const outcome = await enqueue(deps, prompt, kind);
+  if (cacheKey !== undefined && outcome.ok) {
+    writeCache(cacheKey, outcome);
+  }
+  return outcome;
+}
+
+/**
+ * 短命CLIを同時に1本までに絞る順番待ち（Issue #1807）。CLIは1回の起動でRSS 150〜190MB、起動時に
+ * CPUを30%前後使うため、拡張ホスト（ウィンドウ）の中で並べて起こさない。ウィンドウをまたいでは効かない。
+ */
+interface QueuedRequest {
+  deps: HeadlessCliDeps;
+  prompt: string;
+  kind: string;
+  enqueuedAt: number;
+  settle(outcome: HeadlessOutcome): void;
+}
+
+const MAX_CONCURRENT_HEADLESS = 1;
+const waiting: QueuedRequest[] = [];
+let runningCount = 0;
+
+function enqueue(deps: HeadlessCliDeps, prompt: string, kind: string): Promise<HeadlessOutcome> {
+  return new Promise((resolve) => {
+    if (deps.signal?.aborted === true) {
+      resolve({ ok: false, reason: 'process-error' });
+      return;
+    }
+    const onAbort = (): void => {
+      const index = waiting.indexOf(request);
+      if (index >= 0) {
+        waiting.splice(index, 1);
+        resolve({ ok: false, reason: 'process-error' });
+      }
+    };
+    const request: QueuedRequest = {
+      deps,
+      prompt,
+      kind,
+      enqueuedAt: Date.now(),
+      settle: (outcome) => {
+        deps.signal?.removeEventListener('abort', onAbort);
+        resolve(outcome);
+      },
+    };
+    if (deps.coalesceKey !== undefined) {
+      const index = waiting.findIndex((r) => r.deps.coalesceKey === deps.coalesceKey);
+      if (index >= 0) {
+        const [old] = waiting.splice(index, 1);
+        if (old !== undefined) {
+          recordCall(old.kind, 'coalesced', Date.now() - old.enqueuedAt, 0);
+          old.settle({ ok: false, reason: 'process-error', superseded: true });
+        }
+      }
+    }
+    deps.signal?.addEventListener('abort', onAbort, { once: true });
+    waiting.push(request);
+    drain();
+  });
+}
+
+function drain(): void {
+  while (runningCount < MAX_CONCURRENT_HEADLESS) {
+    const request = waiting.shift();
+    if (request === undefined) {
+      return;
+    }
+    runningCount += 1;
+    const startedAt = Date.now();
+    const { deps, prompt } = request;
+    const run = deps.provider === 'claude' ? runClaude(deps, prompt) : runCodex(deps, prompt);
+    void run
+      .catch((): HeadlessOutcome => ({ ok: false, reason: 'process-error' }))
+      .then((outcome) => {
+        recordCall(
+          request.kind,
+          outcome.ok ? 'ok' : outcome.reason,
+          startedAt - request.enqueuedAt,
+          Date.now() - startedAt,
+        );
+        request.settle(outcome);
+      })
+      .finally(() => {
+        runningCount -= 1;
+        drain();
+      });
+  }
+}
+
+/** 同じ入力への成功した結果を再利用する期間と件数の上限（Issue #1807）。 */
+const CACHE_TTL_MS = 5 * 60_000;
+const CACHE_MAX_ENTRIES = 64;
+const cache = new Map<string, { outcome: HeadlessOutcome; at: number }>();
+
+function headlessCacheKey(deps: HeadlessCliDeps, prompt: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([deps.provider, deps.executable, deps.model, deps.effort ?? '', prompt]))
+    .digest('hex');
+}
+
+function readCache(key: string): HeadlessOutcome | undefined {
+  const hit = cache.get(key);
+  if (hit === undefined) {
+    return undefined;
+  }
+  if (Date.now() - hit.at > CACHE_TTL_MS) {
+    cache.delete(key);
+    return undefined;
+  }
+  return hit.outcome;
+}
+
+function writeCache(key: string, outcome: HeadlessOutcome): void {
+  cache.delete(key);
+  cache.set(key, { outcome, at: Date.now() });
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    cache.delete(oldest);
+  }
+}
+
+/** 呼び出し元ごとの回数（Issue #1807）。どの呼び出し元が短命CLIを多く起こしているかをログで追う。 */
+const callCounts = new Map<string, number>();
+let headlessLog: ((message: string) => void) | undefined;
+
+/** 短命CLIの呼び出しの記録先を設定する（拡張の起動時に1回）。 */
+export function configureHeadlessCliLog(log: ((message: string) => void) | undefined): void {
+  headlessLog = log;
+}
+
+function recordCall(kind: string, result: string, waitMs: number, runMs: number): void {
+  const count = (callCounts.get(kind) ?? 0) + 1;
+  callCounts.set(kind, count);
+  headlessLog?.(
+    `[headless] ${kind}: ${result}（待ち ${String(waitMs)}ms / 実行 ${String(runMs)}ms / ` +
+      `累計 ${String(count)}回 / 順番待ち ${String(waiting.length)}件）`,
+  );
+}
+
+/** テスト用: 順番待ち・キャッシュ・回数を初期状態へ戻す。 */
+export function resetHeadlessCliStateForTest(): void {
+  waiting.length = 0;
+  runningCount = 0;
+  cache.clear();
+  callCounts.clear();
 }
 
 async function runClaude(deps: HeadlessCliDeps, prompt: string): Promise<HeadlessOutcome> {

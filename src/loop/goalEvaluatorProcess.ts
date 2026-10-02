@@ -101,7 +101,7 @@ export function createGoalEvaluator(deps: GoalEvaluatorDeps): GoalEvaluator {
     try {
       // 打ち切りの合図はターンごとに変わるため、作り置きした`deps`ではなくここで足す
       const raw = await runHeadlessPrompt(
-        { ...deps, ...(signal === undefined ? {} : { signal }) },
+        { kind: 'evaluator', ...deps, ...(signal === undefined ? {} : { signal }) },
         redaction.text,
       );
       if (raw === undefined) {

@@ -36,6 +36,10 @@ export interface ReflexCliDeps {
   signal?: AbortSignal;
   /** テストから差し替えるための口。既定は実際のヘッドレス実行。 */
   run?: (deps: HeadlessCliDeps, prompt: string) => Promise<HeadlessOutcome>;
+  /** 呼び出し元の種類（ログ用。Issue #1807）。`runReflexJson`は`subject`を入れる。 */
+  kind?: string;
+  /** 同じプロンプトへの成功した結果を再利用してよいか（Issue #1807）。 */
+  cacheable?: boolean;
 }
 
 /**
@@ -53,6 +57,8 @@ export function runReflexPrompt(deps: ReflexCliDeps, prompt: string): Promise<He
       timeoutMs: deps.timeoutMs,
       ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
       ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+      ...(deps.kind === undefined ? {} : { kind: deps.kind }),
+      ...(deps.cacheable === undefined ? {} : { cacheable: deps.cacheable }),
     },
     prompt,
   );
@@ -75,9 +81,10 @@ export async function runReflexJson<T>(
   parse: (text: string) => T | undefined,
 ): Promise<T | undefined> {
   try {
-    const outcome = await runReflexPrompt(deps, prompt);
+    // Reflexの判定は応答がプロンプトだけで決まるため、同じ文面への判定は結果を再利用する（Issue #1807）
+    const outcome = await runReflexPrompt({ kind: subject, cacheable: true, ...deps }, prompt);
     if (!outcome.ok) {
-      if (deps.signal?.aborted !== true) {
+      if (deps.signal?.aborted !== true && outcome.superseded !== true) {
         // 時間切れと起動・異常終了を言い分ける（Issue #1097）。同じ文言だと、タイムアウトを
         // 延ばすべきなのか、CLIのパスが違うのかがログから判らない
         deps.logWarn?.(

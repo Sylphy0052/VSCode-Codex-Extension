@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { describeRedaction, redactCredentials } from '../secondOpinion/redact';
 import { buildAdvisorPrompt, parseAdvice } from './advisorPrompt';
 import {
@@ -72,6 +73,8 @@ export function redactAdvisorPrompt(input: AdvisorInput): ReturnType<typeof reda
  * 一度も動けなかった周を、呼び出し側が区別できるようにする。**
  */
 export function createLoopAdvisor(deps: LoopAdvisorDeps): LoopAdvisorFn {
+  // 同じループの助言が順番待ちに溜まったら最新だけを実行する（Issue #1807）。古い周の助言は使われない
+  const coalesceKey = `advisor:${randomUUID()}`;
   return async (input: AdvisorInput, signal?: AbortSignal): Promise<LoopAdvisorResult> => {
     const redaction = redactAdvisorPrompt(input);
     const note = describeRedaction(redaction);
@@ -81,12 +84,13 @@ export function createLoopAdvisor(deps: LoopAdvisorDeps): LoopAdvisorFn {
     try {
       // 打ち切りの合図はターンごとに変わるため、作り置きした`deps`ではなくここで足す
       const outcome = await runHeadlessPromptDetailed(
-        { ...deps, ...(signal === undefined ? {} : { signal }) },
+        { kind: 'advisor', coalesceKey, ...deps, ...(signal === undefined ? {} : { signal }) },
         redaction.text,
       );
       if (!outcome.ok) {
-        if (signal?.aborted === true) {
-          // ループを止めたことによる打ち切り。CLIの不調ではないので警告として残さない
+        if (signal?.aborted === true || outcome.superseded === true) {
+          // ループを止めたことによる打ち切りと、新しい周の助言に置き換えたもの。CLIの不調ではないので
+          // 警告として残さない
           return advisorFailed(outcome.reason);
         }
         deps.logWarn?.(
