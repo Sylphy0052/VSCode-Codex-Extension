@@ -204,7 +204,12 @@ export class UserSkillStore {
   }
 
   /** `sourceDir`を写して追加する。同じ名前が既にあれば上書きせず断る。 */
-  async add(sourceDir: string): Promise<UserSkillResult> {
+  add(sourceDir: string): Promise<UserSkillResult> {
+    return serialized(this.userRoot, () => this.addNow(sourceDir));
+  }
+
+  private async addNow(sourceDir: string): Promise<UserSkillResult> {
+    await this.removeStaleStaging();
     const name = basename(sourceDir);
     if (!isValidSkillDirName(name)) {
       return {
@@ -235,7 +240,7 @@ export class UserSkillStore {
 
     // 写し終えるまでは`skills/`の外に置く。途中の状態を会話中のCLIに読ませず、
     // 失敗しても既にある同名skillを巻き込まない
-    const staging = join(this.userRoot, `.staging-${randomBytes(6).toString('hex')}`);
+    const staging = join(this.userRoot, `${STAGING_PREFIX}${randomBytes(6).toString('hex')}`);
     try {
       await this.ensureManifest();
       await cp(sourceDir, staging, {
@@ -268,7 +273,11 @@ export class UserSkillStore {
   }
 
   /** 追加したskillを消す。`userRoot`の外は消さない。 */
-  async remove(name: string): Promise<UserSkillResult> {
+  remove(name: string): Promise<UserSkillResult> {
+    return serialized(this.userRoot, () => this.removeNow(name));
+  }
+
+  private async removeNow(name: string): Promise<UserSkillResult> {
     if (!isValidSkillDirName(name)) {
       return { ok: false, reason: `不正なskill名です: ${name}` };
     }
@@ -282,6 +291,24 @@ export class UserSkillStore {
       return { ok: false, reason: e instanceof Error ? e.message : String(e) };
     }
     return { ok: true, name };
+  }
+
+  /** 拡張機能が`cp`の途中で落ちて残った一時コピーを消す。進行中の`add`のものは残す。 */
+  private async removeStaleStaging(): Promise<void> {
+    try {
+      const now = Date.now();
+      for (const entry of await readdir(this.userRoot)) {
+        if (!entry.startsWith(STAGING_PREFIX)) {
+          continue;
+        }
+        const path = join(this.userRoot, entry);
+        if (now - (await lstat(path)).mtimeMs > STALE_STAGING_MS) {
+          await rm(path, { recursive: true, force: true });
+        }
+      }
+    } catch {
+      // `userRoot`がまだ無い、または別の経路で消えた。掃除は追加の成否に関わらせない
+    }
   }
 
   private async ensureManifest(): Promise<void> {
@@ -306,6 +333,25 @@ export class UserSkillStore {
       'utf8',
     );
   }
+}
+
+const STAGING_PREFIX = '.staging-';
+/** これより古い一時コピーは、落ちた`add`の残りとみなして消す。 */
+const STALE_STAGING_MS = 60 * 60 * 1000;
+
+/** `userRoot`ごとに`add`/`remove`を1つずつ走らせる。同名の同時追加が互いの写しを消さないため。 */
+const queues = new Map<string, Promise<unknown>>();
+
+function serialized<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const run = (queues.get(key) ?? Promise.resolve()).then(task, task);
+  const tail = run.catch(() => undefined);
+  queues.set(key, tail);
+  void tail.then(() => {
+    if (queues.get(key) === tail) {
+      queues.delete(key);
+    }
+  });
+  return run;
 }
 
 /** 写さないディレクトリ。skillの中身ではなく、写すと量だけが膨らむ。 */
