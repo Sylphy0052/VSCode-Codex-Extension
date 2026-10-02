@@ -334,6 +334,11 @@ interface SessionFileCacheEntry {
   state: SharedWindowSessions | undefined;
 }
 
+/** `rebuildCacheAndFire`の比較で、`fileState`の並び順の違いを変化と見なさないための並べ替え。 */
+function compareBySignatureKey(a: [string, unknown], b: [string, unknown]): number {
+  return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+}
+
 /**
  * 全ウィンドウの共有ファイルを読み、`fs.watch`で追従する。
  *
@@ -360,6 +365,8 @@ export class SessionHubReader implements vscode.Disposable {
   private lastReloadAt = 0;
   private fullReconcileTimer: ReturnType<typeof setInterval> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
+  /** 直近に発火したときの一覧の中身（`updatedAt`を除く）。同じなら発火しない（Issue #1809）。 */
+  private lastFiredSignature: string | undefined;
 
   constructor(
     private readonly root: string,
@@ -556,6 +563,18 @@ export class SessionHubReader implements vscode.Disposable {
         (state): state is SharedWindowSessions =>
           state !== undefined && now - state.updatedAt <= STALE_MS,
       );
+    // 他ウィンドウはheartbeatのたびに`updatedAt`だけを変えて書き直す。購読側（統括ページ）は
+    // 発火のたびに盤面を組み直して送るため、ウィンドウとセッションの中身が変わったときだけ
+    // 知らせる（Issue #1809）
+    const signature = JSON.stringify(
+      this.cache
+        .map((state): [string, SharedSession[]] => [state.windowId, state.sessions])
+        .sort(compareBySignatureKey),
+    );
+    if (signature === this.lastFiredSignature) {
+      return;
+    }
+    this.lastFiredSignature = signature;
     this.fireIfAlive();
   }
 

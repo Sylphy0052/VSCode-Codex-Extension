@@ -642,7 +642,8 @@ export class ClaudeChatViewManager
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
-    this.usageProbe = new ClaudeUsageProbe(claudePath, log);
+    // 取得結果をウィンドウ間で共有し、`claude`の起動を全ウィンドウで間引く（Issue #1809）
+    this.usageProbe = new ClaudeUsageProbe(claudePath, log, globalStorageDir);
     this.sandboxProbe = new ClaudeSandboxProbe(nodeSandboxProbePorts(claudePath), log);
   }
 

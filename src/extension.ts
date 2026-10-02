@@ -1796,9 +1796,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     chat.refreshSettings();
     claudeChat.refreshModelCatalog();
   };
+  // 1回ごとに`claude`を起動してモデル一覧を聞くため、ウィンドウ数だけ起動が重なる。
+  // 一覧はCLIの更新でしか変わらないので、アイドル時の負荷を抑えて30分ごとにする（Issue #1809）
   const modelRefreshTimer = setInterval(() => {
     void refreshModelCatalog().catch(() => log.warn('モデル候補の表示を更新できませんでした'));
-  }, 5 * 60_000);
+  }, 30 * 60_000);
   context.subscriptions.push({
     dispose: () => {
       modelRefreshDisposed = true;
