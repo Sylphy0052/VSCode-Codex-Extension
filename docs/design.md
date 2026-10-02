@@ -1731,6 +1731,7 @@ Claude Code 2.1.286）。
 
 呼び出すときは、Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`と書く。
 `plugin.json`が無いディレクトリは渡さない（利用者skillを1件も追加していなければ何も渡さない）。
+同梱skillの中身・出どころ・更新方法は`docs/bundled-skills.md`にまとめる（Issue #1821）。
 
 読み込ませる経路:
 
