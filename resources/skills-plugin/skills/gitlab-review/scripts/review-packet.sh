@@ -288,7 +288,7 @@ fetch_into() {
   body="$("$@" 2>"$errf")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     if ! grep -qiE 'no (open )?(merge request|pull request)|could not find any (merge request|pull request)' "$errf"; then
-      echo "review-packet.sh: failed to fetch $what (exit $rc): $(head -c 300 "$errf" | mask_secrets | tr '\n' ' ')" >&2
+      echo "review-packet.sh: failed to fetch $what (exit $rc): $(mask_secrets < "$errf" | head -c 300 | tr '\n' ' ')" >&2
       echo "review-packet.sh: $hint" >&2
     fi
     rm -f "$errf"

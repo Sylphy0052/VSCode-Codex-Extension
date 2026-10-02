@@ -165,19 +165,15 @@ MR作成時に`--remove-source-branch`を付けていれば、マージ時に削
 
 **リモートにも同じ判定を適用する**。ローカルを消したからリモートも消してよい、とはならない。リモートにしか無いコミットが乗っている可能性がある。
 
-```bash
-git merge-base --is-ancestor "origin/<branch>" "<default>" && echo "リモートも<default>に含まれる"
-```
+`--prune`を先に打つ。リモートで既に消えているブランチの追跡参照が残っていると、判定が狂う。
 
 ```bash
 git fetch origin --prune
 git branch -r                                    # 残っているか確認
-git push origin --delete "refs/heads/<branch>"
+git merge-base --is-ancestor "origin/<branch>" "<default>" && git push origin --delete "refs/heads/<branch>"
 ```
 
-`<branch>`は上の形式確認に通ったものだけを使う。
-
-`--prune`を先に打つ。リモートで既に消えているブランチの追跡参照が残っていると、判定が狂う。
+`<branch>`は上の形式確認に通ったものだけを使う。判定が通らなければ削除は実行されない。
 
 ### ローカルの作業ファイル
 

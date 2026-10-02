@@ -23,6 +23,7 @@ description: "GitLabでリポジトリを開発可能にする。glabの用意�
   - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式 (`git@host:g/p.git`) はポートを落とす。SSHのポートはAPIのポートではないため
   - httpで運用しているGitLabでは、`GITLAB_HOST`にホストだけを渡すと`glab`はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http`が要る。グローバル設定の変更なので利用者の承認を得てから行う
   - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`など) はこの式では扱えない。`GITLAB_HOST`の代わりに`-R <URL全体>`を使う
+  - 式が扱えない形 (`file://`、ローカルパスなど) では`HOST`が空になる。空なら`glab`を呼ばず、remoteの形を確かめるよう伝えて止まる。空の`GITLAB_HOST`では`glab`が既定のホストへ向かい、別のホストの認証で成功して見えることがある。URLには認証情報が含まれることがあるので、URLをそのまま表示しない
 
   ホストが`github.com`ならGitLabのリポジトリではない。このskillと`codex-ext:gitlab-*`の他のskillは使えないので、そう伝えて止まる。
 

@@ -65,10 +65,12 @@ glab mr view <MRのIID>
 git worktree list   # <default>が他のworktreeでチェックアウトされていないか確認
 ```
 
-チェックアウトされていなければ更新する。**強制移動の前に、fast-forwardで追いつけること (ローカルの`<default>`がリモートの祖先であること) を確かめる**。通らなければ、ローカルに未pushのcommitがあるので、`branch -f`を実行せず、状況を報告して止まる。
+チェックアウトされていなければ更新する。ローカルに`<default>`が無ければ、`origin/<default>`から作るだけでよい。あれば、**強制移動の前に、fast-forwardで追いつけること (ローカルの`<default>`がリモートの祖先であること) を確かめる**。`merge-base --is-ancestor`は、祖先なら0、祖先でなければ1、refが無いなどで判定できなければ128を返す。1ならローカルに未pushのcommitがあるので、`branch -f`を実行せず、状況を報告して止まる。128なら出力をそのまま報告して止まる。どちらも「未pushのcommitあり」とひとまとめにしない。
 
 ```bash
-git merge-base --is-ancestor "<default>" "origin/<default>" && git branch -f "<default>" "origin/<default>"     # <default>をチェックアウトしていない場合。通らなければ止まる
+git rev-parse --verify -q "refs/heads/<default>" || git branch "<default>" "origin/<default>"   # ローカルに無ければ作る
+git merge-base --is-ancestor "<default>" "origin/<default>"; echo "exit=$?"   # 0: 更新してよい、1: 未pushのcommitあり、128: 判定できない
+git branch -f "<default>" "origin/<default>"     # <default>をチェックアウトしていない場合。上がexit=0のときだけ
 git switch "<default>" && git merge --ff-only "origin/<default>"
 ```
 

@@ -53,8 +53,8 @@ commit前の自動実行は行わない。**必要なタイミングで手動で
 ### 作る前に確認する
 
 ```bash
-git log --oneline <default>..HEAD
-git diff --stat <default>...HEAD
+git log --oneline "<default>"..HEAD
+git diff --stat "<default>"...HEAD
 ```
 
 - 実装計画のタスクがすべて消化されているか (残っているなら、なぜ残したかをMRに書く)

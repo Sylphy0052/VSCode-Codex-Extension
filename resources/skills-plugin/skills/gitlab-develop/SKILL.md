@@ -18,7 +18,7 @@ Issueを1件選び、レビュー依頼を出すところまで進める。revie
 ```bash
 URL=$(git remote get-url origin)
 HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' -e 's#^[a-z+]+://.*##;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' -e 's#.*##')
-GITLAB_HOST="$HOST" glab auth status
+if [ -n "$HOST" ]; then GITLAB_HOST="$HOST" glab auth status; else echo "HOST empty"; fi
 DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD) && DEFAULT=${DEFAULT#origin/}
 echo "DEFAULT=$DEFAULT"
 ```
@@ -26,6 +26,7 @@ echo "DEFAULT=$DEFAULT"
 - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
 - httpで運用しているGitLabでは、`GITLAB_HOST` にホストだけを渡すと `glab` はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
 - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す
+- 式が扱えない形 (`file://`、ローカルパスなど) では `HOST` が空になる。空なら `glab` を呼ばず、remoteの形を確かめるよう伝えて止まる (空の `GITLAB_HOST` では `glab` が既定のホストへ向かう)。URLには認証情報が含まれることがあるので、そのまま表示しない
 
 `origin/HEAD` が未設定で `DEFAULT` の代入が失敗した、または `DEFAULT` が空のときは、`git remote set-head origin --auto` で設定するよう案内して止まる (または利用者にデフォルトブランチ名を聞く)。`symbolic-ref` の出力を `sed` へパイプすると、終了コードが `sed` のものになり、未設定でも成功に見えて空になるため、代入と `origin/` の除去を分けている。`DEFAULT` はリモート由来の値なので、コマンドへ使う前に `^[A-Za-z0-9._/-]+$` に合い、`-` で始まらないことを確かめ、使う箇所はダブルクォートで囲む。
 
