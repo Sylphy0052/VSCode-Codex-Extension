@@ -1724,10 +1724,10 @@ Codexには`reload_skills`に相当する制御要求が無く、`skills/list`�
 この1つのディレクトリをCodexとClaude Codeの両方が読める（2026-10-02実測。codex-cli 0.159.3・
 Claude Code 2.1.286）。
 
-| 種類 | 置き場所 | プラグイン名（呼び出し名） | 有効・無効 |
-| --- | --- | --- | --- |
-| 同梱skill | VSIX内の`resources/skills-plugin/` | `codex-ext`（`codex-ext:<skill名>`） | 設定`agent.bundledSkills.enabled`（既定`true`） |
-| 利用者skill | `globalStorage/skills-plugin/` | `codex-ext-user`（`codex-ext-user:<skill名>`） | 画面からの追加・削除 |
+| 種類        | 置き場所                           | プラグイン名（呼び出し名）                     | 有効・無効                                      |
+| ----------- | ---------------------------------- | ---------------------------------------------- | ----------------------------------------------- |
+| 同梱skill   | VSIX内の`resources/skills-plugin/` | `codex-ext`（`codex-ext:<skill名>`）           | 設定`agent.bundledSkills.enabled`（既定`true`） |
+| 利用者skill | `globalStorage/skills-plugin/`     | `codex-ext-user`（`codex-ext-user:<skill名>`） | 画面からの追加・削除                            |
 
 呼び出すときは、Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`と書く。
 `plugin.json`が無いディレクトリは渡さない（利用者skillを1件も追加していなければ何も渡さない）。
