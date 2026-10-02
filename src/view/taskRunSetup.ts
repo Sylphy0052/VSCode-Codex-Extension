@@ -145,15 +145,18 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       ? { models: deps.settings.claudeSnapshot().models, fallbackEfforts: CLAUDE_EFFORTS }
       : { models: deps.settings.snapshot().models, fallbackEfforts: FALLBACK_EFFORTS };
 
+  // 回答者判定の結果（Issue #1819）。基準の文言・閾値を実際の判定結果から調整できるよう残す
+  const logAnswerer = (message: string): void => log.info(`[task run] ${message}`);
   const { judgeByReflex, judgeAnswerer } = createStageReflexJudges({
     reflexDeps,
     canDecide: (runId) => orchestrator.canDecide(runId),
+    logInfo: logAnswerer,
   });
   const judgeTurnEnd = async (runId: string, lastMessage: string): Promise<AnswererVerdict> => {
     const settings = readAnswererJudgeConfig();
     const engine = controller.find(runId)?.engine;
     return settings.enabled && engine !== undefined
-      ? judgeTurnEndAnswerer(reflexDeps(engine), lastMessage, settings.threshold)
+      ? judgeTurnEndAnswerer(reflexDeps(engine), lastMessage, settings.threshold, logAnswerer)
       : ANSWERER_USER_FALLBACK;
   };
   // OrchestratorのAskUserQuestion（Issue #1763）。1回に複数の問いがあれば1問ずつ判定し、
@@ -173,12 +176,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
           reflexDeps(engine),
           {
             source: 'orchestrator',
+            route: 'askUserQuestion',
             question: q.question,
             options: q.options.map((o) =>
               o.description === '' ? o.label : `${o.label}（${o.description}）`,
             ),
           },
           settings.threshold,
+          logAnswerer,
         ),
       ),
     );
@@ -198,6 +203,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       reflexDeps(target.engine),
       {
         source: 'stageSession',
+        route: 'questionAnswer',
         question: target.question,
         reason: target.reason,
         options: target.options,
@@ -211,6 +217,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
           .join('\n'),
       },
       settings.threshold,
+      logAnswerer,
     );
   };
 
@@ -231,6 +238,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       reflexDeps(run.engine),
       {
         source: 'orchestrator',
+        route: 'stopStage',
         question:
           `タスク${taskId}「${sanitizeInlineText(task.title, 200)}」の工程を止めてよいか` +
           '（worktreeとブランチは残り、後でやり直せる）',
@@ -238,6 +246,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         options: ['止める', '止めない'],
       },
       settings.threshold,
+      logAnswerer,
     );
   };
 

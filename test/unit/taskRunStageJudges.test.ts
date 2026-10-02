@@ -36,6 +36,7 @@ const GATE_QUESTION: GateJudgeQuestion = {
 
 const ANSWERER_QUESTION: AnswererQuestion = {
   source: 'stageSession',
+  route: 'stageQuestion',
   question: 'どちらの実装にするか',
 };
 
@@ -145,7 +146,12 @@ describe('judgeAnswerer（Issue #1731）', () => {
       kind: 'orchestrator',
       summary: 'Reflexの判定',
     });
-    expect(judgeQuestionAnswerer).toHaveBeenCalledWith(REFLEX_DEPS, ANSWERER_QUESTION, 0.6);
+    expect(judgeQuestionAnswerer).toHaveBeenCalledWith(
+      REFLEX_DEPS,
+      ANSWERER_QUESTION,
+      0.6,
+      undefined,
+    );
 
     vi.mocked(judgeQuestionAnswerer).mockClear();
     setAgentConfig({ 'chat.reflex.enabled': false });

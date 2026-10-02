@@ -698,6 +698,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       (message) => log.warn(`[workflow] ${message}`),
       undefined,
     );
+  const logAnswererVerdict = (message: string): void => log.info(`[workflow] ${message}`);
   const workflowRunner = new WorkflowRunner({
     hosts: {
       codex: overridableHost('codex', chat),
@@ -818,16 +819,27 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // トップレベルへ配線し、`buildOrchestratorControlPort`が呼ぶたびに現在値を読み直す
     readMaxAskUserPerRun: () => readWorkflowsConfig().maxAskUserPerRun,
     // 回答者判定（Issue #1708）。無効ならすべてユーザーへ回す。判定のたびに設定を読み直す
+    // 判定結果は出力へ1行ずつ残す（Issue #1819）
     judgeAskUserAnswerer: async (provider, question) => {
       const settings = readAnswererJudgeConfig();
       return settings.enabled
-        ? judgeQuestionAnswerer(answererJudgeDeps(provider), question, settings.threshold)
+        ? judgeQuestionAnswerer(
+            answererJudgeDeps(provider),
+            question,
+            settings.threshold,
+            logAnswererVerdict,
+          )
         : ANSWERER_USER_FALLBACK;
     },
     judgeTurnEndAnswerer: async (provider, lastMessage) => {
       const settings = readAnswererJudgeConfig();
       return settings.enabled
-        ? judgeTurnEndAnswerer(answererJudgeDeps(provider), lastMessage, settings.threshold)
+        ? judgeTurnEndAnswerer(
+            answererJudgeDeps(provider),
+            lastMessage,
+            settings.threshold,
+            logAnswererVerdict,
+          )
         : ANSWERER_USER_FALLBACK;
     },
     // 自動再開（design.md §16.35、roadmap W10、Issue #584）。他のreadXxxと同じく
