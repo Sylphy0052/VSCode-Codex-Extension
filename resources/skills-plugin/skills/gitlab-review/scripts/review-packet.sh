@@ -83,13 +83,24 @@ command -v jq >/dev/null 2>&1 || {
   exit 2
 }
 
-# baseやheadが "-" で始まってもオプションに化けないよう --end-of-options を付け、
-# コミットとして解決できる値だけを通す。
-BASE_SHA="$(git rev-parse --verify --end-of-options "$BASE^{commit}")" || {
+# baseやheadが "-" で始まるとオプションに化ける。--end-of-options は古いgit
+# (2.24未満) に無いので使わず、"-" で始まる値を先に拒否する。
+# そのうえで、コミットとして解決できる値だけを通す。
+case "$BASE" in -*)
+  echo "review-packet.sh: base must not start with '-': $BASE" >&2
+  exit 2
+  ;;
+esac
+case "$HEAD_REF" in -*)
+  echo "review-packet.sh: head must not start with '-': $HEAD_REF" >&2
+  exit 2
+  ;;
+esac
+BASE_SHA="$(git rev-parse --verify "$BASE^{commit}")" || {
   echo "review-packet.sh: cannot resolve base '$BASE'. Run 'git fetch origin' and check the name" >&2
   exit 2
 }
-HEAD_SHA="$(git rev-parse --verify --end-of-options "$HEAD_REF^{commit}")" || {
+HEAD_SHA="$(git rev-parse --verify "$HEAD_REF^{commit}")" || {
   echo "review-packet.sh: cannot resolve head '$HEAD_REF'. Run 'git fetch origin' and check the name" >&2
   exit 2
 }
@@ -104,6 +115,9 @@ chmod 700 "$PARENT"
 
 # 保持期間を過ぎたpacketを消す。実行のたびに前回までの消し忘れを回収する。
 # 対象は $PARENT 直下のディレクトリのうち drafts 以外。
+# packetは1回のレビューで作って使い捨てる前提 (再利用しない)。-mtime はディレクトリ自身の
+# 更新時刻で、packet内のファイルを書き換えても動かない。7日を超えて使い続けるpacketは
+# 消えるため、続けるなら作り直す。
 # 削除の失敗 (権限不足、併走セッションによる二重削除など) は新規packet作成を妨げない。
 RETENTION_DAYS=7
 find "$PARENT" -mindepth 1 -maxdepth 1 -type d ! -name drafts -mtime "+$RETENTION_DAYS" -exec rm -rf {} + ||
@@ -198,6 +212,8 @@ mask_secrets() {
   # 引用符なしの値は空白で終わるとみなす。地の文 (「password: 8文字以上必須」など)
   # を丸ごと伏せないため、空白を越えて行末まで伏せることはしない。
   # sedは1行ずつ処理するため、キーと値が別の行に分かれた値は対象外。
+  # 引用符なしの値は12文字以上だけを伏せる。11文字以下の短い値は伏せない
+  # (誤検知で「password: 変更する」のような地の文を欠かさないため、既知の限界)。
   mask_private_key_block | sed -E \
     -e 's/AKIA[0-9A-Z]{16}/[MASKED:aws-access-key]/g' \
     -e 's/gh[pousr]_[A-Za-z0-9]{36,}/[MASKED:github-token]/g' \
@@ -279,6 +295,9 @@ remote_host() {
 #   fetch_into <dest> <対象名> <失敗時の案内> <filter関数> <コマンド...>
 # 失敗 (終了コードが0以外) はstderrへ理由と案内を出し、packet作成は続ける。
 # MR・PRが無いだけの失敗 (glab・ghは非ゼロで終わる) は、その旨のメッセージを見て黙る。
+# 文言の実測: gh は `no pull requests found for branch "<name>"`。glab は
+# `no open merge request available for "<name>"` (ドキュメントとソースからの想定で未実測)。
+# 一致しなくても警告が1行増えるだけで、packet作成は止まらない。
 # コマンドが成功して出力が空のときも黙る (空ファイルは最後に消える)。
 fetch_into() {
   local dest="$1" what="$2" hint="$3" filter="$4"
@@ -287,7 +306,7 @@ fetch_into() {
   errf="$(mktemp "$OUT/.fetch-err-XXXXXX")"
   body="$("$@" 2>"$errf")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    if ! grep -qiE 'no (open )?(merge request|pull request)|could not find any (merge request|pull request)' "$errf"; then
+    if ! grep -qiE 'no (open )?(merge requests?|pull requests?)|could not find any (merge request|pull request)' "$errf"; then
       echo "review-packet.sh: failed to fetch $what (exit $rc): $(mask_secrets < "$errf" | head -c 300 | tr '\n' ' ')" >&2
       echo "review-packet.sh: $hint" >&2
     fi
