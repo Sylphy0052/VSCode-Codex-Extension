@@ -20,6 +20,7 @@ import {
   shellQuote,
   waitForDestinationResponse,
   decideOldTabAfterHandoff,
+  decideStopTurnAfterHandoff,
   oldTabKeptMessage,
   needsAttentionAfterHandoff,
   writeHandoffPointer,
@@ -941,5 +942,35 @@ describe('回答待ちのままの引き継ぎはポインタへ明記する（I
   it('回答待ちでなければ出さない', () => {
     const md = buildHandoffPointerMarkdown(baseInput());
     expect(md).not.toContain('ユーザーへ質問して回答を待っていた');
+  });
+});
+
+describe('decideStopTurnAfterHandoff（Issue #1793）', () => {
+  it('実行中で止められるなら止め、同じターンでは二度止めない', () => {
+    const hold = { resumedByUser: false, interrupting: false };
+    expect(decideStopTurnAfterHandoff(hold, true, true)).toBe(true);
+    expect(decideStopTurnAfterHandoff(hold, true, true)).toBe(false);
+  });
+
+  it('turn id確定前は印を立てず、確定した次の状態変化で止める', () => {
+    const hold = { resumedByUser: false, interrupting: false };
+    expect(decideStopTurnAfterHandoff(hold, true, false)).toBe(false);
+    expect(hold.interrupting).toBe(false);
+    expect(decideStopTurnAfterHandoff(hold, true, true)).toBe(true);
+  });
+
+  it('ターンが終われば印を戻し、次のターンでまた止める', () => {
+    const hold = { resumedByUser: false, interrupting: false };
+    decideStopTurnAfterHandoff(hold, true, true);
+    expect(decideStopTurnAfterHandoff(hold, false, true)).toBe(false);
+    expect(hold.interrupting).toBe(false);
+    expect(decideStopTurnAfterHandoff(hold, true, true)).toBe(true);
+  });
+
+  it('引き継ぎ前と、利用者が続けた後は止めない', () => {
+    expect(decideStopTurnAfterHandoff(undefined, true, true)).toBe(false);
+    expect(
+      decideStopTurnAfterHandoff({ resumedByUser: true, interrupting: false }, true, true),
+    ).toBe(false);
   });
 });

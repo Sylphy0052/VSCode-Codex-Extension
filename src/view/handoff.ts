@@ -1648,6 +1648,40 @@ export function decideOldTabAfterHandoff(input: OldTabDecisionInput): OldTabDeci
   return { action: 'close' };
 }
 
+/** 引き継ぎ元の止め込み状態（Issue #1790）。 */
+export interface HandoffStopHold {
+  resumedByUser: boolean;
+  /** 止める操作を実際に出した後、そのターンが終わるまで立つ。 */
+  interrupting: boolean;
+}
+
+/**
+ * 引き継ぎ済みの旧セッションが自分で始めたターンを、今止めにいくべきかを決める（Issue #1790）。
+ *
+ * `canStop`は止める操作が今すぐ効くかどうか。Codexの`turn/interrupt`はturn idを要るため、
+ * `turn/start`の応答前（turn id未確定）に呼ぶと黙って戻る。そのとき`interrupting`を立てると、
+ * turn idが確定しても二度と止めにいかず旧セッションが走り続ける（Issue #1793）。そのため
+ * `canStop`が偽なら`interrupting`を立てずに返し、turn idが確定した次の状態変化で止めにいく。
+ */
+export function decideStopTurnAfterHandoff(
+  hold: HandoffStopHold | undefined,
+  busy: boolean,
+  canStop: boolean,
+): boolean {
+  if (hold === undefined || hold.resumedByUser) {
+    return false;
+  }
+  if (!busy) {
+    hold.interrupting = false;
+    return false;
+  }
+  if (hold.interrupting || !canStop) {
+    return false;
+  }
+  hold.interrupting = true;
+  return true;
+}
+
 /** 旧タブを残した理由を、Outputへ1行で出すための説明にする。 */
 export function oldTabKeptMessage(reason: OldTabKeptReason): string {
   const detail: Record<OldTabKeptReason, string> = {

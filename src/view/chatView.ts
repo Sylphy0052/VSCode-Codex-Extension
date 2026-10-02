@@ -1330,7 +1330,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.reportActivity(newEntry, text);
     // 以降に引き継ぎ元が自分で始めるターンを止める。既に走っていればここで止める（Issue #1790）
     entry.handedOff = { resumedByUser: false, interrupting: false };
-    if (this.shouldStopTurnAfterHandoff(entry, entry.session.getState())) {
+    const handoffState = entry.session.getState();
+    if (this.shouldStopTurnAfterHandoff(entry, handoffState, handoffState.turnId !== undefined)) {
       this.log.info('引き継ぎ済みのため、引き継ぎ元が自分で始めたターンを止めます');
       void entry.session.interrupt();
     }
@@ -2672,7 +2673,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     // 引き継いだ後に引き継ぎ元が自分で始めたターンは、引き継ぎ先と作業が重なるため止める
     // （Issue #1790）
-    if (this.shouldStopTurnAfterHandoff(entry, state)) {
+    if (this.shouldStopTurnAfterHandoff(entry, state, state.turnId !== undefined)) {
       this.log.info('引き継ぎ済みのため、引き継ぎ元が自分で始めたターンを止めます');
       void entry.session.interrupt();
     }

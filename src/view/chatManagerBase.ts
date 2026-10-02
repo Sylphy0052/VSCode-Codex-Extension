@@ -23,6 +23,7 @@ import type { VerificationStore } from '../verification/store';
 import { nextActivePanelSequence, type ActiveComposerTarget } from './activePanelSequence';
 import { planBackgroundOpen, trackChatPanel } from './backgroundPanelTabs';
 import {
+  decideStopTurnAfterHandoff,
   needsAttentionAfterHandoff,
   triggerLabel,
   type HandoffTrigger,
@@ -1759,21 +1760,10 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    *
    * 止める操作（`interrupt`）はCodexとClaude Codeで形が違うため、呼び出し側が行う。同じターンで
    * 何度も止めにいかないよう、止めにいったことを`interrupting`に持ち、ターンが終われば戻す。
+   * `canStop`が偽（Codexでturn id未確定など）の間は止めにいかず、印も立てない（Issue #1793）。
    */
-  protected shouldStopTurnAfterHandoff(entry: TPanel, state: ChatState): boolean {
-    const hold = entry.handedOff;
-    if (hold === undefined || hold.resumedByUser) {
-      return false;
-    }
-    if (!state.busy) {
-      hold.interrupting = false;
-      return false;
-    }
-    if (hold.interrupting) {
-      return false;
-    }
-    hold.interrupting = true;
-    return true;
+  protected shouldStopTurnAfterHandoff(entry: TPanel, state: ChatState, canStop = true): boolean {
+    return decideStopTurnAfterHandoff(entry.handedOff, state.busy, canStop);
   }
 
   /** 利用者が旧タブから送ったことを記録する（Issue #1790）。以降は旧セッションを止めない。 */
