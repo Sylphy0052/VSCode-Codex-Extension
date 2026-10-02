@@ -287,6 +287,7 @@ import {
   claudePermissionModeForLevel,
   isApprovalLevel,
 } from '../provider/approvalLevel';
+import { lowPrioritySpawn } from '../claude/lowPrioritySpawn';
 import type { ClaudeConfig } from '../claude/types';
 import { pinKeyFor, type PinnedSessionStore } from '../util/pinnedSessions';
 import type {
@@ -2590,7 +2591,15 @@ export class ClaudeChatViewManager
     // （Issue #413 PR4）はタスクと同じ経路で開くが、タブ名だけ分けて人が見分けられるように
     // する（組み立ては`sessionTitle.ts`。Issue #533）
     const title = buildSessionPanelTitle(input, LABEL);
-    const entry = this.buildEntry(input.cwd, title, true, taskConfig, title);
+    const entry = this.buildEntry(
+      input.cwd,
+      title,
+      true,
+      taskConfig,
+      title,
+      undefined,
+      input.lowPriority === true,
+    );
     // パネルを作る（`TaskSession.open`）前に決める。HTMLの組み立てで入力欄の有無が決まる
     entry.inputLock = input.inputLock === true;
     entry.autoHandoffDisabled = input.disableAutoHandoff === true;
@@ -3365,7 +3374,14 @@ export class ClaudeChatViewManager
     taskConfig: ClaudeConfig | undefined,
     pinnedName?: string,
     modelSettings: SessionModelSettings = this.initialModelSettings(taskConfig),
+    lowPriority = false,
   ): ClaudePanel {
+    // 統合テストがフェイクへ差し替えている間はその起動を変えない（niceを挟むとフェイクの外で動く）
+    const override = this.resolveSpawn();
+    const spawnPort =
+      lowPriority && override === undefined
+        ? lowPrioritySpawn((message) => this.log.warn(message))
+        : override;
     const session = new ClaudeStreamSession(
       this.claudePath,
       this.log,
@@ -3379,8 +3395,9 @@ export class ClaudeChatViewManager
         entry.approvalHandler !== undefined
           ? entry.approvalHandler(approval, rawParams)
           : Promise.resolve({ kind: 'ask' as const }),
-      // 統合テスト（Issue #186）が差し替えている間だけフェイクのプロセスになる。
-      this.resolveSpawn(),
+      // 統合テスト（Issue #186）が差し替えている間だけフェイクのプロセスになる。工程セッションは
+      // 低い優先度で起動する（Issue #1807）
+      spawnPort,
       // 自動引き継ぎの初期値（Issue #1091）。ClaudeStreamSessionはvscodeに依存しないため、
       // 設定の読み出しはここ（view層）で行う（下の`LoopController`と同じ）
       readAutoHandoffEnabled(),

@@ -33,6 +33,7 @@ import {
   type RoadmapAskOutcome,
   type RoadmapQuestionVerdict,
 } from './roadmapQuestionMcp';
+import type { StartPolicy } from './resourceMonitor';
 import type { RunNotesStore } from './runNotes';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
 import { RELOAD_HALT_REASON } from './taskRunReload';
@@ -226,11 +227,13 @@ export interface TaskStageRunnerDeps {
   /** 同じフォルダの全runを合わせて同時に動かす工程セッションの上限（Issue #1562）。無ければ掛けない。 */
   maxParallelPerFolder?: () => number;
   /**
-   * 新しい工程セッションの開始を保留するか（資源がcritical。Issue #1629）。`true`の間は`pump`が
-   * 何も始めず、`start_stage`で受け付けた工程は空き待ちのまま残る。動いている工程は止めない。
-   * 解けたら呼び出し側が`pumpAll`を呼ぶ。無ければ保留しない。
+   * 新しい工程セッションの開始の扱い（資源の監視が決める。Issue #1629・#1807）。開始できない間、
+   * `start_stage`で受け付けた工程は空き待ちのまま残る。動いている工程は止めない。扱いが緩んだら
+   * 呼び出し側が`pumpAll`を呼ぶ。無ければ制限しない。
    */
-  isStartHeld?: () => boolean;
+  startGate?: StartGate;
+  /** 工程セッションのCLIを低い優先度で起動するか（Issue #1807）。無ければ通常の優先度。 */
+  lowPriority?: () => boolean;
   /** runの専有権（Issue #1628）。無ければ常に始める。 */
   drive?: RunDriveGate;
   /** runの状態が変わったとき（Kanbanの再描画・通知用）。 */
@@ -264,6 +267,13 @@ export interface StageProcess {
   pid: number;
   /** 他の工程と共有するプロセス（codexのapp-server）。 */
   shared: boolean;
+}
+
+/** 新しい工程セッションの開始の関門（`ResourceMonitor`が実装する。Issue #1807）。 */
+export interface StartGate {
+  policy(): StartPolicy;
+  /** 例外の1本の枠を取る。取れたらその場で使ったものとして記録される。 */
+  tryAcquireLivenessLane(): boolean;
 }
 
 /** 生きている工程セッションの帳簿。タスクごとに1つ持つ（タスクは同時に1つの工程しか動かない）。 */
@@ -349,6 +359,8 @@ export class TaskStageRunner {
   private readonly live = new Map<string, LiveStageSession>();
   /** 開始処理の途中（mergeの鍵・worktree・セッション起動の`await`中）のタスク。二重起動を防ぐ。 */
   private readonly starting = new Set<string>();
+  /** 例外の1本（Issue #1807）として始める途中のタスク。設定によらず低い優先度で起動する。 */
+  private readonly lowPriorityStarts = new Set<string>();
   /** タスクごとの操作（開始・報告・引き継ぎ・終了・停止）を直列にする。 */
   private readonly locks = new Map<string, SerialQueue>();
   private disposed = false;
@@ -417,7 +429,12 @@ export class TaskStageRunner {
       const halted = haltStage(r, taskId, attention, failure, this.now());
       return halted === r
         ? r
-        : openStageGate(halted, taskId, { gateId, kind: 'stageFailed', detail: failure }, this.now());
+        : openStageGate(
+            halted,
+            taskId,
+            { gateId, kind: 'stageFailed', detail: failure },
+            this.now(),
+          );
     });
     this.judgeGateLater(runId, taskId, gateId, next, reflexEnabled);
   }
@@ -531,7 +548,9 @@ export class TaskStageRunner {
     const choice =
       verdict.kind === 'answer' ? gateChoiceFromAnswer(gate.kind, verdict.answer) : undefined;
     let summary =
-      verdict.summary === undefined ? gate.reflexSummary : joinSummaries(gate.reflexSummary, verdict.summary);
+      verdict.summary === undefined
+        ? gate.reflexSummary
+        : joinSummaries(gate.reflexSummary, verdict.summary);
     if (choice !== undefined) {
       const resolved = await this.mutate(runId, (r) =>
         resolveStageGate(
@@ -554,20 +573,25 @@ export class TaskStageRunner {
       // レビュー未通過・差し戻しの上限に達した関門は、オーケストレーターが選べる範囲を材料に添える
       // （Issue #1771。範囲の外の決着はresolveStageGateが拒否する）
       const question = buildGateQuestion(task, gate);
-      const answerer = await this.judgeAnswerer(runId, run.engine, {
-        source: 'stageSession',
-        question: question.question,
-        reason: question.reason,
-        options: question.options,
-        recommended: question.recommended,
-        evidence: [
-          question.evidence,
-          orchestratorGateScope(task, gate),
-          summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
-        ]
-          .filter((line) => line !== undefined)
-          .join('\n'),
-      }, reflexEnabled);
+      const answerer = await this.judgeAnswerer(
+        runId,
+        run.engine,
+        {
+          source: 'stageSession',
+          question: question.question,
+          reason: question.reason,
+          options: question.options,
+          recommended: question.recommended,
+          evidence: [
+            question.evidence,
+            orchestratorGateScope(task, gate),
+            summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
+          ]
+            .filter((line) => line !== undefined)
+            .join('\n'),
+        },
+        reflexEnabled,
+      );
       if (answerer.kind === 'orchestrator') {
         const marked = await this.mutate(runId, (r) =>
           markGateAwaitingOrchestrator(
@@ -655,7 +679,12 @@ export class TaskStageRunner {
    */
   async pump(runId: string): Promise<void> {
     const current = this.deps.store.find(runId);
-    if (this.disposed || current === undefined || current.finishedAt !== undefined || current.suspendedAt !== undefined) {
+    if (
+      this.disposed ||
+      current === undefined ||
+      current.finishedAt !== undefined ||
+      current.suspendedAt !== undefined
+    ) {
       return;
     }
     // 別のウィンドウが専有権を持つrunの工程は始めない（Issue #1628）。`pumpFolder`は同じフォルダの
@@ -664,19 +693,45 @@ export class TaskStageRunner {
       return;
     }
     const run = this.deps.store.find(runId);
-    if (this.disposed || run === undefined || this.deps.isStartHeld?.() === true) {
+    if (this.disposed || run === undefined) {
+      return;
+    }
+    // 資源の監視が決めた開始の扱い（Issue #1807）。holdは何も始めない
+    const policy = this.deps.startGate?.policy() ?? 'unrestricted';
+    if (policy === 'hold') {
       return;
     }
     // 枠の数え上げから`startStage`の`starting`への予約までに`await`を挟まない。挟むと、並べて呼んだ
     // `pumpFolder`の各`pump`が同じ空き枠を数えて上限を超える
+    let free =
+      this.deps.maxParallelPerFolder === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.deps.maxParallelPerFolder() - this.countFolderSessions(run.workspaceRoot);
+    if (policy === 'limit_to_1') {
+      // このウィンドウの全runを合わせて1本まで
+      free = Math.min(free, 1 - this.countWindowSessions());
+    } else if (policy === 'liveness') {
+      // 例外の1本は、このrunで動いている工程（開始途中を含む）が0本のときだけ
+      if (countActiveStageSessions(run) + this.startingTaskIds(runId).size > 0) {
+        return;
+      }
+      free = Math.min(free, 1);
+    }
     const picked = pickStagesToStart(
       run,
       this.startingTaskIds(runId),
       this.deps.mergeKeys.isBusy(run.workspaceRoot),
-      this.deps.maxParallelPerFolder === undefined
-        ? Number.POSITIVE_INFINITY
-        : this.deps.maxParallelPerFolder() - this.countFolderSessions(run.workspaceRoot),
+      free,
     );
+    if (policy === 'liveness') {
+      const target = picked[0];
+      if (target === undefined || this.deps.startGate?.tryAcquireLivenessLane() !== true) {
+        return;
+      }
+      this.lowPriorityStarts.add(liveKey(runId, target.taskId));
+      await this.startStage(runId, target);
+      return;
+    }
     await Promise.all(picked.map((target) => this.startStage(runId, target)));
   }
 
@@ -712,7 +767,12 @@ export class TaskStageRunner {
     for (const entry of this.live.values()) {
       const info = entry.session.processInfo?.();
       if (info !== undefined) {
-        result.push({ runId: entry.runId, taskId: entry.ref.taskId, stage: entry.ref.stage, ...info });
+        result.push({
+          runId: entry.runId,
+          taskId: entry.ref.taskId,
+          stage: entry.ref.stage,
+          ...info,
+        });
       }
     }
     return result;
@@ -722,8 +782,15 @@ export class TaskStageRunner {
   private startingTaskIds(runId: string): Set<string> {
     const prefix = `${runId}#`;
     return new Set(
-      [...this.starting].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)),
+      [...this.starting]
+        .filter((key) => key.startsWith(prefix))
+        .map((key) => key.slice(prefix.length)),
     );
+  }
+
+  /** このウィンドウが動かしている工程セッションと開始処理の途中の数（全runの合計）。 */
+  private countWindowSessions(): number {
+    return new Set([...this.live.keys(), ...this.starting]).size;
   }
 
   /** 同じフォルダの全runで、動いている工程セッションと開始処理の途中（まだ動いていない）の数。 */
@@ -776,6 +843,7 @@ export class TaskStageRunner {
     } finally {
       lease?.release();
       this.starting.delete(key);
+      this.lowPriorityStarts.delete(key);
     }
   }
 
@@ -1051,6 +1119,10 @@ export class TaskStageRunner {
       ...(resumeSessionId === undefined ? {} : { resume: { sessionId: resumeSessionId } }),
       // ウィンドウの開き直しで表示専用に戻した同じ工程のタブを引き取る（Issue #1775）
       adoptPanelOf: pastStageSessionRefs(run, ref),
+      // 例外の1本（Issue #1807）は設定によらず低い優先度で起動する
+      lowPriority:
+        this.lowPriorityStarts.has(liveKey(run.runId, ref.taskId)) ||
+        this.deps.lowPriority?.() === true,
     };
     let session: TaskSession;
     try {
@@ -1269,7 +1341,11 @@ export class TaskStageRunner {
       const gateId = this.newId();
       const next = await this.mutate(entry.runId, (r) =>
         finishTaskRunIfDone(
-          this.openReviewGate(completeStage(r, binding.ref, observed.output, this.now()), taskId, gateId),
+          this.openReviewGate(
+            completeStage(r, binding.ref, observed.output, this.now()),
+            taskId,
+            gateId,
+          ),
           this.now(),
         ),
       );
@@ -1367,14 +1443,11 @@ export class TaskStageRunner {
       model: request.model === '' ? entry.input.config.model : request.model,
       effort: request.effort === '' ? entry.input.config.effort : request.effort,
     });
-    const input = this.sessionInput(
-      ref,
-      entry.input.cwd,
-      config,
-      entry.input.sandbox,
-      generation,
-      channel,
-    );
+    const input = {
+      ...this.sessionInput(ref, entry.input.cwd, config, entry.input.sandbox, generation, channel),
+      // 引き継ぎ先も同じ優先度で起動する（例外の1本として始めた工程を通常の優先度へ戻さない）
+      ...(entry.input.lowPriority === undefined ? {} : { lowPriority: entry.input.lowPriority }),
+    };
     let session: TaskSession;
     try {
       session = await this.deps.hosts[run.engine].openTaskSession(input);
@@ -1483,7 +1556,11 @@ export class TaskStageRunner {
       if (run === undefined || task === undefined || task.stages.mergeCleanup.status !== 'done') {
         return;
       }
-      const result = await cleanupAfterMerge(this.deps, { repoRoot: run.workspaceRoot, runId, task });
+      const result = await cleanupAfterMerge(this.deps, {
+        repoRoot: run.workspaceRoot,
+        runId,
+        task,
+      });
       result.warnings.forEach((w) => this.warn(runId, taskId, w));
       if (!result.ok) {
         this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
@@ -1547,10 +1624,7 @@ export class TaskStageRunner {
     const run = this.deps.store.find(entry.runId);
     const task = run === undefined ? undefined : getTask(run, entry.ref.taskId);
     return (task?.questions ?? []).some(
-      (q) =>
-        q.attemptId === entry.ref.attemptId &&
-        q.blocking &&
-        isQuestionOpen(q),
+      (q) => q.attemptId === entry.ref.attemptId && q.blocking && isQuestionOpen(q),
     );
   }
 
@@ -1675,19 +1749,24 @@ export class TaskStageRunner {
     if (verdict.kind === 'human') {
       let summary = verdict.summary;
       if (!userOnly && run !== undefined) {
-        const answerer = await this.judgeAnswerer(runId, run.engine, {
-          source: 'stageSession',
-          question: question.question,
-          reason: question.reason,
-          options: question.options,
-          evidence: [
-            question.evidence,
-            describeEscalations(args.escalation),
-            summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
-          ]
-            .filter((line) => line !== undefined)
-            .join('\n'),
-        }, reflexEnabled);
+        const answerer = await this.judgeAnswerer(
+          runId,
+          run.engine,
+          {
+            source: 'stageSession',
+            question: question.question,
+            reason: question.reason,
+            options: question.options,
+            evidence: [
+              question.evidence,
+              describeEscalations(args.escalation),
+              summary === undefined ? undefined : `Reflexの選択肢判定: ${summary}`,
+            ]
+              .filter((line) => line !== undefined)
+              .join('\n'),
+          },
+          reflexEnabled,
+        );
         if (answerer.kind === 'orchestrator') {
           const marked = await this.mutate(runId, (r) =>
             markQuestionAwaitingOrchestrator(
@@ -1869,7 +1948,9 @@ export class TaskStageRunner {
           return false;
         }
         // セッションが無い（設定を受け付けて空きを待っている）工程は状態だけ止める
-        const next = await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', reason, this.now()));
+        const next = await this.mutate(runId, (r) =>
+          haltStage(r, taskId, 'stopped', reason, this.now()),
+        );
         return next !== undefined;
       }
       if (entry.reported) {
@@ -1897,13 +1978,19 @@ export class TaskStageRunner {
    * 移した先で「やり直す」から始め直させる。止めた工程の数を返す。
    */
   async stopLiveStagesOfRun(runId: string, reason: string): Promise<number> {
-    const taskIds = [...this.live.values()].filter((e) => e.runId === runId).map((e) => e.ref.taskId);
+    const taskIds = [...this.live.values()]
+      .filter((e) => e.runId === runId)
+      .map((e) => e.ref.taskId);
     const results = await Promise.allSettled(
       taskIds.map((taskId) => this.stopStage(runId, taskId, { reason, liveOnly: true })),
     );
     results.forEach((result, i) => {
       if (result.status === 'rejected') {
-        this.warn(runId, taskIds[i] ?? '', `${taskIds[i] ?? ''}の工程を止められませんでした: ${errorMessage(result.reason)}`);
+        this.warn(
+          runId,
+          taskIds[i] ?? '',
+          `${taskIds[i] ?? ''}の工程を止められませんでした: ${errorMessage(result.reason)}`,
+        );
       }
     });
     const stopped = results.filter((r) => r.status === 'fulfilled' && r.value).length;

@@ -11,6 +11,7 @@ import {
   readClaudeConfig,
   readConfig,
   readReflexEnabled,
+  readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
@@ -23,6 +24,7 @@ import {
   describeResourceChange,
   formatResourceLines,
   ResourceMonitor,
+  type StartPolicy,
 } from '../orchestrator/resourceMonitor';
 import { ResourceSampler } from '../orchestrator/resourceSampler';
 import { RoadmapQuestionMcpServer } from '../orchestrator/roadmapQuestionMcp';
@@ -204,7 +206,9 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         evidence: [
           target.evidence,
           target.escalationNote,
-          target.reflexSummary === undefined ? undefined : `これまでの判定: ${target.reflexSummary}`,
+          target.reflexSummary === undefined
+            ? undefined
+            : `これまでの判定: ${target.reflexSummary}`,
           `オーケストレーターの回答案: ${answer}`,
         ]
           .filter((line) => line !== undefined)
@@ -275,7 +279,11 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     autoApprove: () => deps.readBaseline().allowAutoApprove,
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
-    isStartHeld: () => holder.monitor?.level === 'critical',
+    startGate: {
+      policy: () => holder.monitor?.startPolicy ?? 'unrestricted',
+      tryAcquireLivenessLane: () => holder.monitor?.tryAcquireLivenessLane() === true,
+    },
+    lowPriority: readTaskRunLowPriorityEnabled,
     mcpServer: questionServer,
     // Reflexモードが無効なら判定せず、すべての質問と関門をユーザーへ回す
     judgeQuestion: judgeByReflex,
@@ -367,11 +375,12 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),
-    isStartHeld: () => holder.monitor?.level === 'critical',
+    startPolicy: () => holder.monitor?.startPolicy ?? 'unrestricted',
   });
   holder.orchestrator = orchestrator;
 
   // 動いているrunがある間だけCPUとメモリを計り、状態が変わったらOrchestratorへ知らせる（Issue #1629）
+  let lastStartPolicy: StartPolicy = 'unrestricted';
   const monitor = new ResourceMonitor({
     sampler: new ResourceSampler(),
     hasActiveRuns: () => store.list().some((r) => isTaskRunActive(r)),
@@ -379,10 +388,21 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     thresholds: readTaskRunResourceThresholds,
     intervalMs: readTaskRunResourceIntervalMs,
     onLevelChanged: (prev, snapshot) => {
-      log.info(`[task run] 資源の状態: ${prev} -> ${snapshot.level}`);
-      orchestrator.notifyResourcePressure(describeResourceChange(prev, snapshot));
-      if (prev === 'critical') {
-        // 保留していた開始（start_stageで受け付けた工程と再開待ちの工程）を空き枠の分だけ始める
+      log.info(
+        `[task run] 資源の状態: CPU ${prev?.cpuLevel ?? 'ok'} -> ${snapshot.cpuLevel}` +
+          `（${snapshot.cpu.method}） / メモリ ${prev?.memoryLevel ?? 'ok'} -> ${snapshot.memoryLevel}` +
+          ` / 新規開始 ${snapshot.startPolicy}`,
+      );
+      // pauseの効果はrunの工程で変わるため、本文はrunごとに作る（Issue #1807）
+      orchestrator.notifyResourcePressure((runId) => describeResourceChange(prev, snapshot, runId));
+    },
+    onSampled: (snapshot) => {
+      // 保留していた開始（start_stageで受け付けた工程と再開待ちの工程）を、今の扱いで始められる分だけ
+      // 始める。扱いが変わったときに加え、例外の1本の間は60秒の間隔が空くのを計測ごとに確かめる（Issue #1807）
+      const policy = snapshot.startPolicy;
+      const changed = policy !== lastStartPolicy;
+      lastStartPolicy = policy;
+      if (policy !== 'hold' && (changed || policy === 'liveness')) {
         void runner.pumpAll().catch((e: unknown) => warn(`保留した工程の開始に失敗: ${String(e)}`));
       }
     },

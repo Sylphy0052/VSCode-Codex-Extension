@@ -1702,23 +1702,45 @@
           "minimum": 5,
           "maximum": 300,
           "scope": "machine-overridable",
-          "markdownDescription": "オーケストレータモード（Issue #1629）で、動いているrunがある間だけCPUとメモリ（工程セッションごとのプロセスツリーを含む）を測る間隔（秒）。既定の15秒は、1分平均の負荷の変化を1分以内に4回見られ、Linuxの`/proc`を読む負担が無視できる間隔として選んだ。範囲外（5未満・300超・非数値）の値は既定値（15）にフォールバックする。"
+          "markdownDescription": "オーケストレータモード（Issue #1629）で、動いているrunがある間だけCPUとメモリ（工程セッションごとのプロセスツリーを含む）を測る間隔（秒）。CPUのPSI・使用率はこの間隔の差分で出す（Issue #1807）。既定の15秒は、変化を1分以内に4回見られ、Linuxの`/proc`を読む負担が無視できる間隔として選んだ。範囲外（5未満・300超・非数値）の値は既定値（15）にフォールバックする。"
         },
-        "agent.taskRun.resource.cpuWarningLoadPerCore": {
+        "agent.taskRun.resource.cpuPressureWarningPercent": {
           "type": "number",
-          "default": 1,
-          "minimum": 0.1,
-          "maximum": 16,
+          "default": 20,
+          "minimum": 1,
+          "maximum": 100,
           "scope": "machine-overridable",
-          "markdownDescription": "CPUの混み具合がこの値以上で`warning`にする（Issue #1629）。Linux・macOSは1分平均の負荷をコア数で割った値、Windowsは使用率（0〜1）で比べる。既定の1.0は「全コアが埋まった」状態で、これ以上は工程を増やすほど各工程が遅くなる。範囲外の値は既定値にフォールバックする。"
+          "markdownDescription": "CPUのPSI（`cpu.pressure`の`some`）で、計測間隔の間にCPUを待った時間の割合（%）がこの値以上で`warning`にする（Issue #1807）。PSIを読めるLinuxだけで使う。暫定値で、実機の記録を見て調整する。範囲外の値や`critical`より大きい値は、CPUのPSIの閾値を両方とも既定値へ戻す。"
         },
-        "agent.taskRun.resource.cpuCriticalLoadPerCore": {
+        "agent.taskRun.resource.cpuPressureCriticalPercent": {
           "type": "number",
-          "default": 1.5,
-          "minimum": 0.1,
-          "maximum": 16,
+          "default": 40,
+          "minimum": 1,
+          "maximum": 100,
           "scope": "machine-overridable",
-          "markdownDescription": "CPUの混み具合がこの値以上で`critical`にし、新しい工程セッションの開始を保留する（Issue #1629。実行中の工程は止めない）。既定の1.5は、コア数の1.5倍の処理が走行を待っている状態で、ビルドやテストが目に見えて遅れ始める目安。Windowsの使用率は1を超えないため、1以下にしないとCPUでは`critical`にならない。範囲外の値や`warning`より小さい値は既定値にフォールバックする。"
+          "markdownDescription": "CPUのPSIの待ち時間の割合（%）がこの値以上で`critical`にする（Issue #1807）。CPUが`critical`の間は、メモリが`critical`でなく、runで動いている工程が0本のときだけ、低い優先度で1本を60秒に1回始める。暫定値で、実機の記録を見て調整する。"
+        },
+        "agent.taskRun.resource.cpuUsageWarningPercent": {
+          "type": "number",
+          "default": 85,
+          "minimum": 1,
+          "maximum": 100,
+          "scope": "machine-overridable",
+          "markdownDescription": "PSIを読めない環境（macOS・Windows・`/proc/pressure`の無いカーネル）で、計測間隔の間の全コアのCPU使用率（%）がこの値以上で`warning`にする（Issue #1807）。暫定値で、実機の記録を見て調整する。範囲外の値や`critical`より大きい値は、CPU使用率の閾値を両方とも既定値へ戻す。"
+        },
+        "agent.taskRun.resource.cpuUsageCriticalPercent": {
+          "type": "number",
+          "default": 95,
+          "minimum": 1,
+          "maximum": 100,
+          "scope": "machine-overridable",
+          "markdownDescription": "PSIを読めない環境で、全コアのCPU使用率（%）がこの値以上で`critical`にする（Issue #1807）。暫定値で、実機の記録を見て調整する。"
+        },
+        "agent.taskRun.lowPriority.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレータモードの工程セッションのclaude CLIを`nice -n 10`で起動し、対話中のウィンドウよりCPUを譲らせる（Issue #1807）。Windowsでは起動直後に優先度を下げる。codexの工程はapp-serverを共有しているため対象外。`nice`が無い・失敗したときは通常の優先度で起動する。無効にしても、CPUが`critical`の間に始める例外の1本だけは低い優先度で起動する。"
         },
         "agent.taskRun.resource.memoryWarningAvailablePercent": {
           "type": "number",
@@ -1726,7 +1748,7 @@
           "minimum": 1,
           "maximum": 99,
           "scope": "machine-overridable",
-          "markdownDescription": "使えるメモリの割合（%）がこの値以下で`warning`にする（Issue #1629）。LinuxはMemAvailableとcgroupの制限の厳しい方で比べる。既定の20%は、工程セッション1つ（CLIとMCPサーバ・ビルド）が数GBを使うことがあり、残りがこれを切ると次の工程で逼迫しうる目安。範囲外の値は既定値にフォールバックする。"
+          "markdownDescription": "使えるメモリの割合（%）がこの値以下で`warning`にし、新しい工程セッションを同時に1本までに絞る（Issue #1629・#1807）。LinuxはMemAvailableとcgroupの制限の厳しい方で比べる。既定の20%は、工程セッション1つ（CLIとMCPサーバ・ビルド）が数GBを使うことがあり、残りがこれを切ると次の工程で逼迫しうる目安。範囲外の値は既定値にフォールバックする。"
         },
         "agent.taskRun.resource.memoryCriticalAvailablePercent": {
           "type": "number",
