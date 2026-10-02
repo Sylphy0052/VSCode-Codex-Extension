@@ -769,6 +769,12 @@
           "scope": "window",
           "markdownDescription": "履歴一覧のグループ化。ピン留めしたセッションはどの設定でも先頭の「ピン留め」グループへ出る（`none`を除く）。"
         },
+        "agent.bundledSkills.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "拡張機能に同梱したskill（呼び出し名 `codex-ext:<skill名>`）をCodex・Claude Codeの会話へ読み込ませる。`false` にすると両方のCLIへ渡さない。`~/.codex/skills`・`~/.claude/skills` には書き込まず、その会話だけに読み込ませる。画面から追加したskill（`codex-ext-user:<skill名>`）はこの設定に関係なく読み込む。"
+        },
         "agent.activityLog.enabled": {
           "type": "boolean",
           "default": false,
