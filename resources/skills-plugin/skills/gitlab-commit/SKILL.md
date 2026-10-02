@@ -148,6 +148,7 @@ git commit -m "<type>: <subject>"
 
 ```bash
 DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null) && DEFAULT=${DEFAULT#origin/}
+case "$DEFAULT" in -* | /* | */ | *..* | *[!A-Za-z0-9._/-]*) DEFAULT="" ;; esac # 不正な値は空にして下で止める
 CURRENT=$(git branch --show-current)
 
 if [ -z "$DEFAULT" ] || [ -z "$CURRENT" ]; then

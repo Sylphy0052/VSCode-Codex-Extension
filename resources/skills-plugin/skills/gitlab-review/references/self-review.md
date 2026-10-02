@@ -190,9 +190,16 @@ git commit -m "<type>: 自己レビューの指摘に対応する"
 `review-packet.sh` が作るpacketは、リポジトリ直下の `.review-packet/<短縮SHA>-<ランダム>/` に蓄積する (git管理外)。マージ後、または見送り確定 (レビュー依頼を出さずにこのMRを終える) 後に、そのMRで作った分を削除する。パスはpacketを作ったときに標準出力へ出たものを使う。
 
 ```bash
-rm -rf "<packetのパス>"
+P="<packetのパス>"
+ROOT=$(git rev-parse --show-toplevel)
+case "$P" in
+  *..*) echo ".. を含むパスは消さない"; P="" ;;
+  "$ROOT"/.review-packet/?*/* | "$ROOT"/.review-packet/?*[!/]) ;;
+  *) echo "packet配下ではない。消さない"; P="" ;;
+esac
+[ -n "$P" ] && [ "$P" != "$ROOT/.review-packet/drafts" ] && [ -d "$P" ] && rm -rf -- "$P"
 ```
 
-消す前に、パスがリポジトリ直下の `.review-packet/` 配下 (`.review-packet/<短縮SHA>-<ランダム>`) であることを目で確かめる。空や別のディレクトリを渡すと、無関係なファイルを消す。
+空や別のディレクトリを渡すと無関係なファイルを消すため、`rm -rf` の前に上の `case` でパスがリポジトリ直下の `.review-packet/` 配下であることを機械的に確かめる。`..` を含むパスも弾く。
 
 投稿前ドラフトのディレクトリ (`.review-packet/drafts/mr-<MRのIID>`) もこのMRの分を消す。複数MRを並行で扱っている場合は、他MRのpacketとドラフトを消さないよう、該当するディレクトリだけを指定する。並行しているMRが無いなら、`.review-packet/` ごと消してよい。7日を超えたpacketは、次に `review-packet.sh` を実行したときに自動で消える。

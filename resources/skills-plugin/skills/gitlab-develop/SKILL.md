@@ -21,14 +21,18 @@ HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 
 if [ -n "$HOST" ]; then GITLAB_HOST="$HOST" glab auth status; else echo "HOST empty"; fi
 DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD) && DEFAULT=${DEFAULT#origin/}
 echo "DEFAULT=$DEFAULT"
+# 文字種と形の確認。空、先頭が-か/、末尾が/、..を含む、許可外の文字を含む値は使わない
+case "$DEFAULT" in '' | -* | /* | */ | *..* | *[!A-Za-z0-9._/-]*) echo "DEFAULTが不正。ここで止める" ;; esac
 ```
+
+上のコードブロックの補足:
 
 - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
 - httpで運用しているGitLabでは、`GITLAB_HOST` にホストだけを渡すと `glab` はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
 - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す
 - 式が扱えない形 (`file://`、ローカルパスなど) では `HOST` が空になる。空なら `glab` を呼ばず、remoteの形を確かめるよう伝えて止まる (空の `GITLAB_HOST` では `glab` が既定のホストへ向かう)。URLには認証情報が含まれることがあるので、そのまま表示しない
 
-`origin/HEAD` が未設定で `DEFAULT` の代入が失敗した、または `DEFAULT` が空のときは、`git remote set-head origin --auto` で設定するよう案内して止まる (または利用者にデフォルトブランチ名を聞く)。`symbolic-ref` の出力を `sed` へパイプすると、終了コードが `sed` のものになり、未設定でも成功に見えて空になるため、代入と `origin/` の除去を分けている。`DEFAULT` はリモート由来の値なので、コマンドへ使う前に `^[A-Za-z0-9._/-]+$` に合い、`-` で始まらないことを確かめ、使う箇所はダブルクォートで囲む。
+`origin/HEAD` が未設定で `DEFAULT` の代入が失敗した、または `DEFAULT` が空のときは、`git remote set-head origin --auto` で設定するよう案内して止まる (または利用者にデフォルトブランチ名を聞く)。`symbolic-ref` の出力を `sed` へパイプすると、終了コードが `sed` のものになり、未設定でも成功に見えて空になるため、代入と `origin/` の除去を分けている。`DEFAULT` はリモート由来の値なので、コマンドへ使う前に上のコードブロックの `case` で確かめる (`^[A-Za-z0-9._/-]+$` だけでは `..` や末尾の `/` を通すため、それらも拒否している)。`case` が不正と出したら止める。使う箇所はダブルクォートで囲む。
 
 - リポジトリの `CLAUDE.md`・`AGENTS.md` (あれば `CONTRIBUTING.md`) を読み、ブランチ・commit・MR・worktree・検証・マージ方式の定めに従う。このskillが書く値 (ブランチ名 `<type>/<IID>/<slug>`、Conventional Commits、MR本文の `Closes #<IID>`、severity、自己レビューの巡回上限など) は、定めが無いときの既定値である。**リポジトリ規約に別の定めがあればそちらを優先する**
 - **1 Issue 1 Branch**。Issueが無いなら先に `codex-ext:gitlab-issue` で起票する
@@ -160,7 +164,7 @@ glab issue view <IID>
 
 ```bash
 BRANCH=<type>/<IID>/<slug>
-printf '%s' "$BRANCH" | grep -Eq '^(feature|fix|refactor|docs|test|chore|perf|ci)/[0-9]+/[a-z0-9][a-z0-9-]{0,29}$' || echo "ブランチ名が形式に合わない。ここで止める"
+printf '%s' "$BRANCH" | grep -Eq '^(feature|fix|refactor|docs|test|chore|perf|ci)/[0-9]+/[a-z0-9][a-z0-9-]{0,29}$' || echo "ブランチ名が形式に合わない。ここで止める (次のgit switch・worktree addへ進まない)"
 ```
 
 - 種別はIssueの種別トークンに合わせる (`feature` `fix` `refactor` `docs` `test` `chore` `perf` `ci`)
@@ -170,10 +174,10 @@ printf '%s' "$BRANCH" | grep -Eq '^(feature|fix|refactor|docs|test|chore|perf|ci
 worktreeを使うかどうかはリポジトリ規約の指定に従う。指定が無ければ通常のbranchを既定にする。worktreeを使う場合は、規約が示す置き場 (例: リポジトリ直下の `.worktree/<name>/`) に作る。置き場が `.git/info/exclude` などでgit管理外になっていることを確かめる。ツールが自動で付ける既定のブランチ名 (`worktree-<name>` など) は形式に一致しないので、作成後に `git branch -m` で付け替える。
 
 ```bash
-# 通常のbranch
+# 通常のbranch ($BRANCHは上の確認で先頭が英字と確定している。switchは-c名の前に--を置けない)
 git switch -c "$BRANCH" "origin/<default>"
 # worktreeを使う場合
-git worktree add -b "$BRANCH" <置き場のパス> "origin/<default>"
+git worktree add -b "$BRANCH" -- <置き場のパス> "origin/<default>"
 ```
 
 作成後に `git branch --show-current` で確かめる。

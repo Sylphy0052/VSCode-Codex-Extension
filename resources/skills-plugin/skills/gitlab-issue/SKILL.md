@@ -20,6 +20,8 @@ HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 
 if [ -n "$HOST" ]; then GITLAB_HOST="$HOST" glab auth status; else echo "HOST empty"; fi
 ```
 
+上のコードブロックの補足:
+
 - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
 - httpで運用しているGitLabでは、`GITLAB_HOST` にホストだけを渡すと `glab` はhttpsで接続する (schemeを付けても同じ。glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
 - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す

@@ -226,6 +226,8 @@ $ glab api "projects/:id/uploads"
 ```bash
 FILE="<パス>"
 [ -s "$FILE" ] || { echo "空か存在しない。アップロードしない"; exit 1; }
+# 出力ディレクトリ (docs/screenshots/) の配下の実ファイルだけを通す。symlinkと.. を解決してから比べる
+REAL=$(realpath -- "$FILE") && case "$REAL" in "$(realpath -- docs/screenshots)"/*.png) ;; *) echo "docs/screenshots/配下のpngではない。アップロードしない"; exit 1 ;; esac
 ```
 
 ```bash
