@@ -71,6 +71,7 @@ import {
   type SideQuestionResult,
 } from './control';
 import { forkFromTurn, type ForkFromTurnResult } from './forkFromTurn';
+import { describeResumedMcp, readInitMcpServers, type InitMcpServer } from './idleShutdown';
 import { mergeDynamicMcpServer } from './mcpDynamic';
 import type { Attachment } from '../provider/attachments';
 import type { McpServerView } from '../provider/mcpServers';
@@ -107,6 +108,20 @@ export interface ClaudeStreamOptions {
    */
   initialName?: string | undefined;
 }
+
+/**
+ * 使っていないCLIの終了と再開（Issue #1808）の段階。`resumeFailed`の後はCLIが落ちたときと
+ * 同じく送信を受け付けない。
+ */
+type ProcessLifecycle = 'running' | 'stopping' | 'suspended' | 'resuming' | 'resumeFailed';
+
+/** 休止からの再開の結果（Issue #1808）。 */
+export type ResumeOutcome =
+  | { kind: 'resumed'; mcpServers: InitMcpServer[] }
+  | { kind: 'failed'; reason: string; text: string; attachments: readonly Attachment[] };
+
+/** 休止のために入力を閉じてから、シグナルで止めるまで待つ時間。 */
+const SUSPEND_GRACE_MS = 5_000;
 
 /**
  * `claude` プロセスの起動（統合テストの差し替え口。Issue #186）。
@@ -196,6 +211,22 @@ export class ClaudeStreamSession {
     string,
     (snapshot: SkillsSnapshot | undefined) => void
   >();
+  /**
+   * 使っていないCLIの終了と再開（Issue #1808）の段階。`running`以外の段階はタブの表示
+   * （`ChatState.processSuspension`）にも出す。
+   */
+  private lifecycle: ProcessLifecycle = 'running';
+  /** 休止から再開するときの起動の材料。休止した時点で決める。 */
+  private relaunchOptions:
+    { cwd: string; config: () => ClaudeConfig; planMode: boolean } | undefined;
+  /** 最後に届いた`system`/`init`の`mcp_servers`。休止の時点で`mcpBeforeSuspend`へ写す。 */
+  private lastInitMcpServers: InitMcpServer[] | undefined;
+  private mcpBeforeSuspend: InitMcpServer[] | undefined;
+  /** 再開のきっかけになった発言。再開に失敗したら新しい会話で送り直す材料として渡す。 */
+  private resumeRequest: { text: string; attachments: readonly Attachment[] } | undefined;
+  /** 再開中のCLIがstderrへ出した最後の行（失敗の理由に使う）。 */
+  private resumeStderr: string | undefined;
+  private resumeListener: ((outcome: ResumeOutcome) => void) | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -352,6 +383,8 @@ export class ClaudeStreamSession {
     // 訂正）。
     this.releasePendingWaiters();
     this.isForkSession = options.target.kind === 'fork';
+    this.lifecycle = 'running';
+    this.relaunchOptions = undefined;
     // 残量の分母（Issue #1747）。`/autocompact` の応答が届けば `streamJson.ts` が上書きする
     this.state = {
       ...this.state,
@@ -359,6 +392,35 @@ export class ClaudeStreamSession {
     };
     this.sandboxBashGuard = options.config.sandboxBashGuard === true;
 
+    this.launch(options);
+
+    const threadId =
+      options.target.kind === 'resume' ? options.target.sessionId : options.sessionId;
+    this.update({
+      ...initialClaudeState,
+      threadId,
+      items: options.initialItems ?? [],
+      todos: options.initialTodos ?? initialClaudeState.todos,
+      todoHistory: options.initialTodoHistory ?? initialClaudeState.todoHistory,
+      name: options.initialName,
+      // ここが実効値になるため、構築時と同じ初期値を入れ直す（Issue #1091）
+      autoHandoff: this.initialAutoHandoff,
+      // 自動承認（Issue #1350）も同じ理由で入れ直す
+      autoHandoffAutoApprove: this.initialAutoHandoffAutoApprove,
+      // 自動返信モード（Issue #1353）も同じ理由で入れ直す
+      autoReply: this.initialAutoReply,
+    });
+
+    this.initializeControl();
+  }
+
+  /**
+   * CLIを起動し、stdout・終了の受け口を配線する。会話の状態には触れない（`start()`と、
+   * 休止からの再開（Issue #1808）の`resumeProcess()`で共用する）。
+   */
+  private launch(
+    options: Pick<ClaudeStreamOptions, 'cwd' | 'target' | 'sessionId' | 'config'>,
+  ): void {
     const { args, warnings } = buildClaudeStreamArgs({
       target: options.target,
       sessionId: options.sessionId,
@@ -411,6 +473,15 @@ export class ClaudeStreamSession {
       }
       this.log.error(`claudeへの書き込みに失敗しました: ${e.message}`);
       this.proc = undefined;
+      // 休止のために入力を閉じた後のEPIPEは、終了したのと同じに扱う（Issue #1808）。
+      // 世代がずれてexitハンドラは素通りになるため、ここで休止を確定させる
+      if (this.lifecycle === 'stopping') {
+        this.finishSuspend();
+        return;
+      }
+      if (this.lifecycle === 'resuming') {
+        this.failResume(e.message);
+      }
       // exit/errorハンドラと同じ「ターン失敗」の経路なので、承認待ち・各種応答待ちも
       // 同じく解放する。放置するとawaitしている側が永遠に待つ（issue #355）
       this.releasePendingWaiters();
@@ -430,6 +501,10 @@ export class ClaudeStreamSession {
       const line = chunk.toString('utf8').trim();
       if (line !== '') {
         this.log.info(`[claude] ${line.slice(0, 300)}`);
+        // 再開に失敗した理由（`No conversation found ...`）はstderrにだけ出る（Issue #1808）
+        if (this.lifecycle === 'resuming') {
+          this.resumeStderr = line.slice(0, 300);
+        }
       }
     });
     proc.on('exit', (code) => {
@@ -438,6 +513,13 @@ export class ClaudeStreamSession {
       }
       this.log.info(`claudeが終了しました (code ${code ?? 'unknown'})`);
       this.proc = undefined;
+      if (this.lifecycle === 'stopping') {
+        this.finishSuspend();
+        return;
+      }
+      if (this.lifecycle === 'resuming') {
+        this.failResume(this.resumeStderr ?? `CLIが終了しました (code ${code ?? 'unknown'})`);
+      }
       // 承認待ち（waiting）・rewind_files/mcp_status/reload_skillsの応答待ちを解放する。
       // 放置するとCLIの異常終了時にawaitしている側が永遠に待つ（issue #355、dispose()と
       // 同じ解放処理を共有）
@@ -451,29 +533,189 @@ export class ClaudeStreamSession {
       }
       this.log.error(`claudeを起動できません: ${e.message}`);
       this.proc = undefined;
+      if (this.lifecycle === 'resuming') {
+        this.failResume(e.message);
+      }
       // 起動直後にCLIが異常終了した場合も、exitハンドラと同様に解放する（issue #355）
       this.releasePendingWaiters();
       this.update(this.stateAfterProcessGone());
     });
+  }
 
-    const threadId =
-      options.target.kind === 'resume' ? options.target.sessionId : options.sessionId;
-    this.update({
-      ...initialClaudeState,
-      threadId,
-      items: options.initialItems ?? [],
-      todos: options.initialTodos ?? initialClaudeState.todos,
-      todoHistory: options.initialTodoHistory ?? initialClaudeState.todoHistory,
-      name: options.initialName,
-      // ここが実効値になるため、構築時と同じ初期値を入れ直す（Issue #1091）
-      autoHandoff: this.initialAutoHandoff,
-      // 自動承認（Issue #1350）も同じ理由で入れ直す
-      autoHandoffAutoApprove: this.initialAutoHandoffAutoApprove,
-      // 自動返信モード（Issue #1353）も同じ理由で入れ直す
-      autoReply: this.initialAutoReply,
+  /**
+   * 休止・再開の受け口（Issue #1808）。再開の成否を呼び出し側（view層）へ知らせる。
+   * 失敗したときは、再開のきっかけになった発言を渡す（新しい会話として送り直すかを選ばせるため）。
+   */
+  setResumeListener(listener: (outcome: ResumeOutcome) => void): void {
+    this.resumeListener = listener;
+  }
+
+  /**
+   * 使っていないCLIを終了してよい状態か（Issue #1808）。
+   *
+   * ターン・承認・問い合わせ・待ち行列・backgroundの処理・こちらから出した要求の応答待ちの
+   * どれも残っていないこと。view層が持つ条件（ループ・引き継ぎ・工程など）は別に見る。
+   */
+  get idleForSuspend(): boolean {
+    const s = this.state;
+    return (
+      this.proc !== undefined &&
+      this.lifecycle === 'running' &&
+      s.threadId !== undefined &&
+      s.restore === undefined &&
+      !s.busy &&
+      s.approvals.length === 0 &&
+      s.prompts.length === 0 &&
+      s.queued.length === 0 &&
+      s.backgroundTerminals.length === 0 &&
+      this.waiting.size === 0 &&
+      this.rewindWaiting.size === 0 &&
+      this.rewindConversationWaiting.size === 0 &&
+      this.sideQuestionWaiting.size === 0 &&
+      this.mcpStatusWaiting.size === 0 &&
+      this.mcpConfigureWaiting.size === 0 &&
+      !this.mcpConfiguring &&
+      this.skillsWaiting.size === 0
+    );
+  }
+
+  /** 休止中（次の送信で`--resume`する）か。 */
+  get suspended(): boolean {
+    return this.lifecycle === 'suspended';
+  }
+
+  /**
+   * 使っていないCLIを終了する（Issue #1808）。session-idは残し、次の`send()`で`--resume`する。
+   *
+   * 入力を閉じてCLI自身の終了を待ち、`graceMs`で終わらなければシグナルで止める。終了を待つ
+   * 間に来た送信は待ち行列へ積み、終了を待ってから再開して送る。
+   *
+   * @param relaunch 再開に使う作業ディレクトリと起動設定。設定は再開する時点で読み直す
+   *   （休止中に変えたモデル・effortを効かせるため）
+   * @returns 終了させたか。終了してよい状態でなければ何もせず`false`
+   */
+  async suspend(
+    relaunch: { cwd: string; config: () => ClaudeConfig },
+    graceMs = SUSPEND_GRACE_MS,
+  ): Promise<boolean> {
+    const proc = this.proc;
+    if (proc === undefined || !this.idleForSuspend) {
+      return false;
+    }
+    this.lifecycle = 'stopping';
+    // Plan modeは起動引数ではなく実行中の切り替えで入るため、再開後に入れ直す
+    this.relaunchOptions = { ...relaunch, planMode: this.state.planMode };
+    this.mcpBeforeSuspend = this.lastInitMcpServers;
+    this.update({ ...this.state, processSuspension: 'stopping' });
+    const exited = new Promise<void>((resolve) => {
+      if (typeof proc.exitCode === 'number' || typeof proc.signalCode === 'string') {
+        resolve();
+        return;
+      }
+      proc.once('exit', () => resolve());
     });
+    proc.stdin.end();
+    const timer = setTimeout(() => killWithEscalation(proc), graceMs);
+    try {
+      await exited;
+    } finally {
+      clearTimeout(timer);
+    }
+    return true;
+  }
 
+  /** 休止のための終了を見届けた後の状態にする。終了を待つ間に来た送信があれば再開して送る。 */
+  private finishSuspend(): void {
+    this.lifecycle = 'suspended';
+    this.buffer = '';
+    this.releasePendingWaiters();
+    this.update({
+      ...this.state,
+      processSuspension: 'suspended',
+      busy: false,
+      // CLIの子だったbackgroundの処理はCLIと一緒に消える（`stateAfterProcessGone`と同じ理由）
+      backgroundTerminals: NO_BACKGROUND_TERMINALS,
+    });
+    this.log.info('使っていないためClaude Codeを終了しました。次の送信で再開します');
+    if (this.state.queued.length > 0) {
+      this.sendNextQueued();
+    }
+  }
+
+  /**
+   * 休止したCLIを同じsession-idで`--resume`して起動し直す（Issue #1808）。
+   *
+   * 起動は同期で`this.proc`へ入るため、続けて送信しても2本目は起動しない（2件目以降は
+   * `busy`で待ち行列へ回る）。成否は最初に届く`system`/`init`（成功）か、その前の
+   * エラーの`result`・終了（失敗）で決める。
+   */
+  private resumeProcess(text: string, attachments: readonly Attachment[]): void {
+    const relaunch = this.relaunchOptions;
+    const sessionId = this.state.threadId;
+    if (relaunch === undefined || sessionId === undefined) {
+      throw new Error('セッションが起動していません');
+    }
+    this.lifecycle = 'resuming';
+    this.resumeStderr = undefined;
+    this.resumeRequest = { text, attachments };
+    this.update({ ...this.state, processSuspension: 'resuming' });
+    this.launch({
+      cwd: relaunch.cwd,
+      target: { kind: 'resume', sessionId },
+      sessionId: undefined,
+      config: relaunch.config(),
+    });
     this.initializeControl();
+    if (relaunch.planMode) {
+      this.setPermissionMode('plan');
+    }
+  }
+
+  /** 再開後のCLIから届いたイベントで、再開の成否を決める（Issue #1808）。 */
+  private observeResume(event: Record<string, unknown>): void {
+    if (this.lifecycle !== 'resuming') {
+      return;
+    }
+    const mcp = readInitMcpServers(event);
+    if (mcp !== undefined) {
+      this.lifecycle = 'running';
+      this.resumeRequest = undefined;
+      this.update({ ...this.state, processSuspension: undefined });
+      this.noteLocalEvent(
+        `resumeMcp:${Date.now()}`,
+        describeResumedMcp(this.mcpBeforeSuspend, mcp),
+      );
+      this.resumeListener?.({ kind: 'resumed', mcpServers: mcp });
+      return;
+    }
+    if (event['type'] === 'result' && event['is_error'] === true) {
+      const errors = Array.isArray(event['errors'])
+        ? event['errors'].filter((e): e is string => typeof e === 'string')
+        : [];
+      this.failResume(errors.join(' / ') || this.resumeStderr || '不明なエラー');
+    }
+  }
+
+  private failResume(reason: string): void {
+    if (this.lifecycle !== 'resuming') {
+      return;
+    }
+    // 黙って新しい会話にしない。以後の送信は通常の「CLIが落ちた」状態と同じく受け付けない
+    this.lifecycle = 'resumeFailed';
+    const request = this.resumeRequest;
+    this.resumeRequest = undefined;
+    this.update({ ...this.state, processSuspension: 'resumeFailed' });
+    this.noteLocalEvent(
+      `resumeFailed:${Date.now()}`,
+      `会話を再開できませんでした（${reason}）。新しい会話として始めるかを選んでください`,
+    );
+    this.log.warn(`休止したClaude Codeを再開できませんでした: ${reason}`);
+    this.resumeListener?.({
+      kind: 'failed',
+      reason,
+      text: request?.text ?? '',
+      attachments: request?.attachments ?? [],
+    });
   }
 
   /**
@@ -1177,6 +1419,14 @@ export class ClaudeStreamSession {
   }
 
   send(text: string, attachments: readonly Attachment[] = []): void {
+    // 休止のための終了を待っている間（Issue #1808）は積んでおき、終了を見届けてから再開して送る
+    if (this.lifecycle === 'stopping') {
+      this.update(enqueue(this.state, text, [...attachments]));
+      return;
+    }
+    if (this.lifecycle === 'suspended') {
+      this.resumeProcess(text, attachments);
+    }
     if (this.proc === undefined) {
       throw new Error('セッションが起動していません');
     }
@@ -1186,7 +1436,7 @@ export class ClaudeStreamSession {
 
   /** 発言を送る。応答中なら待ち行列へ積む。 */
   sendOrQueue(text: string, attachments: Attachment[] = []): 'sent' | 'queued' {
-    if (this.state.busy) {
+    if (this.state.busy || this.lifecycle === 'stopping') {
       this.update(enqueue(this.state, text, attachments));
       return 'queued';
     }
@@ -1365,6 +1615,13 @@ export class ClaudeStreamSession {
           this.handleControlResponse(response);
           continue;
         }
+
+        // 終了前と再開後のMCPの接続を比べるため、最後に見た一覧を覚える（Issue #1808）
+        const initMcp = readInitMcpServers(event);
+        if (initMcp !== undefined) {
+          this.lastInitMcpServers = initMcp;
+        }
+        this.observeResume(event);
 
         const wasBusy = this.state.busy;
         const next = applyStreamEvent(this.state, event);

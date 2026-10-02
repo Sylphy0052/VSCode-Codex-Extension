@@ -682,7 +682,8 @@ ${completionEvidenceStyles()}
     white-space: nowrap;
   }
   #limitAutoResumeStatus,
-  #autoReplyActivity {
+  #autoReplyActivity,
+  #processSuspension {
     margin: 0 16px 6px;
     padding: 6px 8px;
     border-left: 3px solid var(--vscode-charts-blue, var(--vscode-focusBorder));
