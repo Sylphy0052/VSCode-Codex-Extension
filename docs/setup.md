@@ -240,6 +240,14 @@ code --install-extension vscode-codex-extension.vsix --force
 - GitHub CLI（`gh`）とログイン: Forge Hub、ロードマップ、タスク監視でGitHubのIssue・PRを扱う
 - GitLab CLI（`glab`）とログイン: 同じ機能でGitLabを扱う
   - Forge HubのGitLab側は、依頼先のCLIに`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`のskillがあれば、それを呼ぶ（Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`の形）。skillは拡張機能に含まれていないため、無ければ計画の記録・MR作成・自己レビュー・後片付けの手順を平文で依頼する
+- `bwrap`（bubblewrap）と`socat`（Linux・WSLのみ。macOSは不要）: オーケストレータモードとロードマップ実行のClaude Codeセッションで、Bashの書き込み先を制限するsandboxに使う。どちらかが欠けるか、bubblewrapが起動できない環境（権限の無いコンテナなど）では、sandboxが無効のままセッションが始まり、書き込みの制限と承認の挙動が変わる
+  - WSL・Linux（Debian・Ubuntu系）: `sudo apt install bubblewrap socat`
+  - macOS: sandboxはOS標準の仕組みを使うため、入れるものは無い。`socat`が要る場合は`brew install socat`
+- `jq`（と`tail`・`sort`）: 自動引き継ぎで新しいセッションへ渡す開始プロンプトに、前のセッションのtranscriptから指示や応答を取り出すコマンドとして埋め込まれる。拡張機能自身は実行しない。無いと、引き継ぎ先のAIが取り出せない情報（自動圧縮の要約・ユーザー指示・編集したファイル）が出る。`tail`・`sort`は通常のOSに入っている
+  - WSL・Linux（Debian・Ubuntu系）: `sudo apt install jq`
+  - macOS: `brew install jq`
+- Claude Codeの`handoff` skill: 自動引き継ぎで、Claude Codeが同じターンでこのskillを呼んだことを、handoffプロンプトの検知条件の1つにしている。skillが無くても、拡張機能自身の経路（残量の閾値などによる判定）で引き継げる。ただし、skillの呼び出しで引き継ぎを始める経路は働かない
+- GitLabの`gitlab-*` skill: 上のGitLab CLIの項に書いた`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`を指す。無い場合の挙動はそちらのとおり
 - Google ChromeとNode.js（`npx`）: ChatGPTとの議論機能（WebGPT連携）。詳しくは[READMEの「WebGPTとの議論」](../README.md#webgptとの議論)
 - 音声プレイヤー: 通知音。macOSとWindowsは標準のもので鳴る。Linux・WSLでは`paplay`、`pw-play`、`aplay`、`ffplay`のいずれかが要る。無い場合は音が鳴らないだけ
 
