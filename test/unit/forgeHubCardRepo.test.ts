@@ -17,6 +17,7 @@ import {
 import { ForgeHubViewManager } from '../../src/view/forgeHubView';
 import type { ForgeOrchestrator } from '../../src/forge/orchestrator';
 import type { Logger } from '../../src/log';
+import type { SkillsSnapshot } from '../../src/provider/skills';
 import type {
   CliAvailabilityPort,
   CliCommandResult,
@@ -87,6 +88,7 @@ const fakeLogger: Logger = {
   error: () => undefined,
   show: () => undefined,
 };
+const noSkills = async (): Promise<SkillsSnapshot> => ({ ok: true, skills: [], warnings: [] });
 
 const ISSUE = { number: 12, title: '同じ番号のIssue' };
 
@@ -197,7 +199,13 @@ describe('ForgeHubViewManager: 「対応する」の送信先（Issue #1108）',
     if (itemA === undefined) throw new Error('リポジトリAのカードがありません');
 
     const { orchestrator, sends } = fakeOrchestrator();
-    const view = new ForgeHubViewManager(service, () => '/repoB', orchestrator, fakeLogger);
+    const view = new ForgeHubViewManager(
+      service,
+      () => '/repoB',
+      orchestrator,
+      fakeLogger,
+      noSkills,
+    );
     // Hubを開いているのはリポジトリB
     await view.show('codex');
     const panel = __mock.lastCreatedPanel();
@@ -221,7 +229,13 @@ describe('ForgeHubViewManager: 「対応する」の送信先（Issue #1108）',
     if (itemA === undefined) throw new Error('リポジトリAのカードがありません');
 
     const { orchestrator } = fakeOrchestrator();
-    const view = new ForgeHubViewManager(service, () => '/repoB', orchestrator, fakeLogger);
+    const view = new ForgeHubViewManager(
+      service,
+      () => '/repoB',
+      orchestrator,
+      fakeLogger,
+      noSkills,
+    );
     await view.show('codex');
     const panel = __mock.lastCreatedPanel();
     if (panel === undefined) throw new Error('Webviewパネルが作られていません');

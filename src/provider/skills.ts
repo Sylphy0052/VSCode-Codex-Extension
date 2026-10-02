@@ -20,9 +20,12 @@
  *   skillは`system`スコープで返り、この一覧では区別できない。`skillsStatus.ts`参照）
  * - `system`: CLIに同梱されたもの（Codexの`scope:"system"`。実測）
  * - `admin`: 組織管理者が配布したもの（Codexの`scope:"admin"`。スキーマ根拠のみで実測なし）
+ * - `extension`: この拡張機能が読み込ませたもの（同梱skillと利用者skill。Issue #1820、
+ *   `provider/extensionSkills.ts`）。Codexは`scope:"user"`で返すためパスで見分ける
  * - `unknown`: 上記のどれとも判別できなかったもの
  */
-export type SkillOrigin = 'user' | 'project' | 'plugin' | 'system' | 'admin' | 'unknown';
+export type SkillOrigin =
+  'user' | 'project' | 'plugin' | 'system' | 'admin' | 'extension' | 'unknown';
 
 export interface SkillView {
   /** 一覧の識別・有効/無効切替に使うキー。Codexはファイルパス、Claude Codeは名前。 */

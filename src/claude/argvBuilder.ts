@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { isSessionId } from '../codex/argvBuilder';
 import type { LaunchTarget } from '../codex/types';
 import {
@@ -17,6 +18,11 @@ export interface ClaudeBuildInput {
   sessionId: string | undefined;
   cwd: string | undefined;
   config: ClaudeConfig;
+  /**
+   * 拡張機能が管理するskillのプラグインディレクトリ（Issue #1820）。`--plugin-dir`で
+   * そのセッションだけ読み込ませる。`provider/extensionSkills.ts`参照。
+   */
+  pluginDirs?: readonly string[];
 }
 
 export interface ClaudeBuildResult {
@@ -80,6 +86,7 @@ export function buildClaudeStreamArgs(input: ClaudeBuildInput): ClaudeBuildResul
     '--permission-prompt-tool',
     'stdio',
     ...targetArgs(input),
+    ...pluginDirArgs(input.pluginDirs ?? [], warnings),
     ...configArgs(input.config, warnings),
   ];
   return { args, warnings };
@@ -106,6 +113,22 @@ function targetArgs(input: ClaudeBuildInput): string[] {
   return input.target.kind === 'fork'
     ? ['-r', input.target.sessionId, '--fork-session']
     : ['-r', input.target.sessionId];
+}
+
+/**
+ * `--plugin-dir`の組。値は拡張機能自身が決めた絶対パスだが、`-`始まりなどフラグに化ける
+ * 形は念のため弾く。
+ */
+function pluginDirArgs(dirs: readonly string[], warnings: string[]): string[] {
+  const args: string[] = [];
+  for (const dir of dirs) {
+    if (!isAbsolute(dir)) {
+      warnings.push(`skillのプラグインディレクトリが絶対パスでないため無視します: ${dir}`);
+      continue;
+    }
+    args.push('--plugin-dir', dir);
+  }
+  return args;
 }
 
 function configArgs(config: ClaudeConfig, warnings: string[]): string[] {

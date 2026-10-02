@@ -1,4 +1,5 @@
 import type { SkillOrigin, SkillView, SkillsSnapshot } from '../provider/skills';
+import { EXTENSION_SKILL_PLUGINS } from '../provider/extensionSkills';
 import type { ControlResponse } from './control';
 
 /**
@@ -116,7 +117,9 @@ function inferOrigin(name: string, rawDescription: string): OriginInference {
     const description = rawDescription.startsWith(prefix)
       ? rawDescription.slice(prefix.length)
       : rawDescription;
-    return { origin: 'plugin', originDetail: pluginId, description };
+    // 拡張機能が`--plugin-dir`で読み込ませたもの（Issue #1820）
+    const origin = EXTENSION_SKILL_PLUGINS.includes(pluginId) ? 'extension' : 'plugin';
+    return { origin, originDetail: pluginId, description };
   }
   if (rawDescription.endsWith(USER_SUFFIX)) {
     return {
