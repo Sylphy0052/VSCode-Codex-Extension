@@ -24,7 +24,7 @@ esac
 ローカルの作業ファイル (`docs/issue/issue-<IID>.md` / `docs/mr/mr-<MRのIID>.md`) とコミット履歴を読んで書く。テンプレートはnote-template.mdを使う (SKILL.mdから参照)。
 
 ```bash
-git log --oneline main --since="<着手日>" -- <変更したパス>
+git log --oneline <default> --since="<着手日>" -- <変更したパス>
 glab mr view <MRのIID>
 ```
 
@@ -59,6 +59,8 @@ glab mr view <MRのIID>
 「だいたい終わったので閉じる」をしない。未達を残したまま閉じるなら、**どこへ持ち越したかを必ず書く**。
 
 ### 投稿してクローズする
+
+**判定結果を提示して利用者の承認を得るまで、投稿とクローズを実行しない**。投稿するnoteの本文も、承認を得るときに見せる。承認はSKILL.mdの「承認を得てから実行する」で得る。
 
 ```bash
 glab api projects/:id/issues/<IID>/notes -X POST --field "body=@/path/to/note.md"
@@ -118,6 +120,8 @@ glab issue view "<ROADMAP_IID>"
 
 ### 見つかったroadmapを更新する
 
+**更新内容を提示して利用者の承認を得るまで、roadmapへの反映 (`-X PUT`を含む) を実行しない**。承認はSKILL.mdの「承認を得てから実行する」で得る。
+
 `codex-ext:gitlab-roadmap`をUPDATEモードの機械可読な省略形で呼ぶ。ヒアリングを飛ばし、該当行のチェックとMermaid図の再生成だけを行わせる。Claude Codeは次の形で呼ぶ。Codexでは`/`を`$`に読み替える。
 
 ```text
@@ -132,21 +136,23 @@ roadmap本文の更新自体 (チェックリストの書き換え・Mermaid再�
 
 ## フェーズ4: 消す
 
-**フェーズ2の判定に通ったものだけを消す**。ここで判定をやり直さない。
+**フェーズ2の判定に通ったものだけを消す**。ここで判定をやり直さない。**判定結果を提示して利用者の承認を得るまで、ここの削除 (`git branch -D`、`git push origin --delete`、作業ファイルの`rm`) を実行しない**。承認はSKILL.mdの「承認を得てから実行する」で得たものを使い、判定結果が変わったときは取り直す。
 
 ### ローカルブランチ
 
-**消すブランチをチェックアウトしている場合は、先に`main`へ移る**。自分がいるブランチは削除できない。後片付けの対象はたいてい直前まで作業していたブランチなので、この状態がほぼ毎回発生する。
+**消すブランチをチェックアウトしている場合は、先に`<default>`へ移る**。自分がいるブランチは削除できない。後片付けの対象はたいてい直前まで作業していたブランチなので、この状態がほぼ毎回発生する。
 
 ```bash
 git rev-parse --abbrev-ref HEAD          # いま自分がどこにいるか
-git switch main
+git switch <default>
 ```
 
 未コミットの変更があると`git switch`が拒否することがある。その場合は**変更の中身を確認してからユーザーへ提示する**。勝手にstashや破棄をしない。
 
+`<branch>`はシェルで使う前に、`<type>/<IID>/<slug>`形式 (リポジトリ規約に別の定めがあればそれ) であることを確かめる。形式に合わないブランチ名は、そのままシェルへ渡さずユーザーへ提示して止まる。使うときは必ずダブルクォートで囲む。
+
 ```bash
-git merge-base --is-ancestor <branch> main && git branch -D <branch>
+git merge-base --is-ancestor "<branch>" <default> && git branch -D "<branch>"
 ```
 
 判定と削除を1行にまとめておく。判定が通らなければ削除は実行されない。
@@ -160,13 +166,13 @@ MR作成時に`--remove-source-branch`を付けていれば、マージ時に削
 **リモートにも同じ判定を適用する**。ローカルを消したからリモートも消してよい、とはならない。リモートにしか無いコミットが乗っている可能性がある。
 
 ```bash
-git merge-base --is-ancestor origin/<branch> main && echo "リモートもmainに含まれる"
+git merge-base --is-ancestor "origin/<branch>" <default> && echo "リモートも<default>に含まれる"
 ```
 
 ```bash
 git fetch origin --prune
 git branch -r                                    # 残っているか確認
-git push origin --delete <branch>
+git push origin --delete "<branch>"
 ```
 
 `--prune`を先に打つ。リモートで既に消えているブランチの追跡参照が残っていると、判定が狂う。
@@ -208,15 +214,15 @@ glab issue list --per-page 10
 
 残ったものを、**残した理由つきで**ユーザーへ提示する。
 
-### ローカルのmainを最新にする
+### ローカルの`<default>`を最新にする
 
-後片付けの最後に、手元の`main`がリモートに追いついているかを確かめる。フェーズ1の最新化はマージを確認した時点のもので、その後に他のマージが入っていると届かない。追いついていないまま次のIssueに着手すると、古い時点からブランチを切ってしまう。
+後片付けの最後に、手元の`<default>`がリモートに追いついているかを確かめる。フェーズ1の最新化はマージを確認した時点のもので、その後に他のマージが入っていると届かない。追いついていないまま次のIssueに着手すると、古い時点からブランチを切ってしまう。
 
-**worktreeを使っていたなら、撤去してメインのworking treeへ戻ってから行う**。worktree内のセッションからは`main`へ切り替えられない。
+**worktreeを使っていたなら、撤去してメインのworking treeへ戻ってから行う**。worktree内のセッションからは`<default>`へ切り替えられない。
 
 ```bash
 git fetch origin --prune
-git status -sb          # main...origin/main が behind でないことを確認する
+git status -sb          # <default>...origin/<default> が behind でないことを確認する
 git pull --ff-only
 ```
 

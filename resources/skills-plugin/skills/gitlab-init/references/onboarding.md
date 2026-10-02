@@ -22,7 +22,7 @@ ls CLAUDE.md AGENTS.md CONTRIBUTING.md
 ```
 
 - gitが入っていること
-- originのURLからGitLabのホストを読む (`https://<ホスト>/...`、`git@<ホスト>:...`、`ssh://git@<ホスト>[:<port>]/...`)。以降の`<ホスト>`はこの値。`github.com`ならGitLabのリポジトリではないので、そう伝えて止まる
+- originのURLからGitLabのホストを求める。式とポート・http・サブパス配置の扱いは[SKILL.md](../SKILL.md)の前提に書いてある。以降の`<ホスト>`はこの値。`github.com`ならGitLabのリポジトリではないので、そう伝えて止まる
 - `CLAUDE.md`・`AGENTS.md`・`CONTRIBUTING.md`のいずれかがあること。無ければ規約がどこにも書かれていない状態で、それ自体を報告する。skillは既定の規約 (ブランチ名`<type>/<IID>/<slug>`、MR本文の`Closes #<IID>`など) で動く。最小の規約ファイルを作るのは、リポジトリを作った人 (セットアップモード) の担当
 
 ## フェーズ2: `glab`を用意する
@@ -102,7 +102,7 @@ curl -s -o /dev/null -w '%{http_code}\n' --max-time 15 https://<ホスト>/
 
 ### `GITLAB_HOST`が必要なとき
 
-`glab`はリポジトリの中ではoriginのホストを使うので、多くの場合は`GITLAB_HOST`が要らない。別のホストを見に行ってしまうとき (認証済みのホストが複数ある、リポジトリの外で実行するなど) は、実行のたびに`GITLAB_HOST=<ホスト> glab ...`と付ける。
+`glab`はリポジトリの中ではoriginのホストを使うので、多くの場合は`GITLAB_HOST`が要らない。別のホストを見に行ってしまうとき (認証済みのホストが複数ある、リポジトリの外で実行するなど) は、各`glab`コマンドの前に`GITLAB_HOST=<ホスト>`を付ける (`GITLAB_HOST=<ホスト> glab ...`)。Bash呼び出しごとにシェルが変わるため、`export`は次の呼び出しへ残らない。
 
 シェルの設定ファイルへ`export GITLAB_HOST=<ホスト>`を書けば永続化できるが、他のプロジェクトにも影響するグローバル設定の変更にあたる。手順を提示し、利用者の承認を得てから実行する。黙って追記しない。
 

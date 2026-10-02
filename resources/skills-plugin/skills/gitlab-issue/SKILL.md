@@ -12,13 +12,17 @@ GitLabのIssueを起票する。起票のみを担当し、起票後の本文更
 ## 前提
 
 - `glab` CLIを使う。無い、または認証が通らないときは `codex-ext:gitlab-init` を案内して止まる
-- GitLabのホストは `git remote get-url origin` のURLから求め、`glab` へ環境変数 `GITLAB_HOST` で渡す。特定のホスト名を決め打ちしない
+- GitLabのホストは `git remote get-url origin` のURLから求め、**各 `glab` コマンドの前に `GITLAB_HOST=<ホスト>` を付けて**渡す (Bash呼び出しごとにシェルが変わるため、`export` しても次の呼び出しには残らない)。特定のホスト名を決め打ちしない
 
 ```bash
 URL=$(git remote get-url origin)
-export GITLAB_HOST=$(printf '%s' "$URL" | sed -E 's#^[a-z+]+://([^@/]+@)?##; s#^[^@/]+@##; s#[:/].*##')
-glab auth status
+HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')
+GITLAB_HOST="$HOST" glab auth status
 ```
+
+- https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
+- httpで運用しているGitLabでは、`GITLAB_HOST` にschemeを付けても `glab` はhttpsで接続する。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
+- サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す
 
 - リポジトリの `CLAUDE.md`・`AGENTS.md` (あれば `CONTRIBUTING.md`) にIssueの書き方、ラベル、マイルストーンの定めがあれば、それを読んで従う。このskillが書く値は、定めが無いときの既定値である
 - **1 Issue 1 Branch**。Issueを起票せずに実装を始めない

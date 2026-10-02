@@ -5,7 +5,7 @@
 - `codex-ext:gitlab-develop` のフェーズ5 ([SKILL.md](../../gitlab-develop/SKILL.md))。終えたらフェーズ6 ([request-review.md](../../gitlab-develop/references/request-review.md)) へ進む。本書の「レビュー依頼」はこのフェーズ6を指す
 - `gitlab-review` の自己モード ([SKILL.md](../SKILL.md))。終えたらそこで止まり、readyにはしない。レビュー依頼は `codex-ext:gitlab-develop` のフェーズ6で行う
 
-どちらから来ても、最終ゲートまで終えたらMR本文の `## レビュー記録` に `- self-review 完了 (head <SHA>)` の1行を足す (手順は最終ゲートの手順6)。`codex-ext:gitlab-develop` の現在地の判定は、この行があり、かつ記録したSHAがMRの現在のheadと一致するかでフェーズ5 (自己レビュー) とフェーズ6 (レビュー依頼) を分ける。完了後にcommitを足すとSHAがずれ、フェーズ5からやり直しになる。
+どちらから来ても、最終ゲートまで終えたらMR本文の `## レビュー記録` に `- self-review 完了 (head <SHA>)` の1行を足す (手順は最終ゲートの手順5)。`codex-ext:gitlab-develop` の現在地の判定は、この行があり、かつ記録したSHAがMRの現在のheadと一致するかでフェーズ5 (自己レビュー) とフェーズ6 (レビュー依頼) を分ける。完了後にcommitを足すとSHAがずれ、フェーズ5からやり直しになる。
 
 自己レビューは開発サイクルで最も重い工程になる。
 
@@ -192,5 +192,7 @@ git commit -m "<type>: 自己レビューの指摘に対応する"
 ```bash
 rm -rf "<packetのパス>"
 ```
+
+消す前に、パスがリポジトリ直下の `.review-packet/` 配下 (`.review-packet/<短縮SHA>-<ランダム>`) であることを目で確かめる。空や別のディレクトリを渡すと、無関係なファイルを消す。
 
 投稿前ドラフトのディレクトリ (`.review-packet/drafts/mr-<MRのIID>`) もこのMRの分を消す。複数MRを並行で扱っている場合は、他MRのpacketとドラフトを消さないよう、該当するディレクトリだけを指定する。並行しているMRが無いなら、`.review-packet/` ごと消してよい。7日を超えたpacketは、次に `review-packet.sh` を実行したときに自動で消える。

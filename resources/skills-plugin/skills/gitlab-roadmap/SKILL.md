@@ -1,16 +1,18 @@
 ---
 name: gitlab-roadmap
-description: "label=roadmapのGitLab Issueをフェーズ別チェックリストと依存関係図で維持し、次に着手すべきIssueを提示する。Use when: 「ロードマップ」「次のIssue」「roadmap更新」、/gitlab-roadmap。Do not use: 後片付け、単一Issue起票。"
+description: "label=roadmapのGitLab Issueをフェーズ別チェックリストと依存関係図で維持し、次に着手すべきIssueを提示する。Use when: 「ロードマップ」「次のIssue」「roadmap更新」、/codex-ext:gitlab-roadmap。Do not use: 後片付け、単一Issue起票。"
 ---
 
 # gitlab-roadmap
 
 `1 Issue 1 Branch`の上位レイヤ。複数Issueをフェーズ別に束ね、依存関係と進捗を1つのroadmap Issueに集約する。チェックリストと自動生成Mermaid図の両方で状態を表し、次に着手すべきIssueを判定する。
 
+呼び方は、Claude Codeは `/codex-ext:gitlab-roadmap`、Codexは `$codex-ext:gitlab-roadmap`。
+
 ## 前提
 
-- GitLabのホストは`git remote get-url origin`のURLから求める。`glab` CLIを使い、`GITLAB_HOST=<ホスト>`か`-R <ホスト>/<group>/<project>`で渡す
-- 認証確認: `glab auth status`。`glab`が無い、または認証できていないときは`codex-ext:gitlab-init`へ案内する (Claude Codeは`/codex-ext:gitlab-init`、Codexは`$codex-ext:gitlab-init`)
+- GitLabのホストは`git remote get-url origin`のURLから求める。式とポート・http・サブパス配置の扱いは[`codex-ext:gitlab-init`のSKILL.md](../gitlab-init/SKILL.md)の前提に従う。`glab` CLIを使い、**各`glab`コマンドの前に`GITLAB_HOST=<求めたホスト>`を付けて**渡す (サブパス配置のGitLabは`-R <URL全体>`)。Bash呼び出しごとにシェルが変わるため、`export`は次の呼び出しへ残らない。`references/`内の`glab`コマンドも同じ
+- 認証確認: `GITLAB_HOST=<求めたホスト> glab auth status`。`glab`が無い、または認証できていないときは`codex-ext:gitlab-init`へ案内する (Claude Codeは`/codex-ext:gitlab-init`、Codexは`$codex-ext:gitlab-init`)
 - 分類スクリプトの実行に`python3`が要る (標準ライブラリだけで動く)。無ければ利用者にインストールを求める
 - リポジトリの`CLAUDE.md`・`AGENTS.md` (あれば`CONTRIBUTING.md`) にroadmapやIssueの運用の定めがあれば、それを優先する
 - ラベル`roadmap`がプロジェクトに存在する(未作成ならCREATEモードのstep0で自動作成する)

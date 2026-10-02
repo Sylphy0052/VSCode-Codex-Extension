@@ -17,7 +17,7 @@ flowchart TD
 
 `glab`の応答の判定と停止は、すべて[glab-response.md](../../gitlab-develop/references/glab-response.md)に従う。以降の各`glab`実行でも同じ。
 
-`glab`にホストを渡す必要があるときは、SKILL.mdの前提のとおり、originのURLから求めたホストを`GITLAB_HOST=<ホスト>`で付ける。
+`glab`にホストを渡す必要があるときは、[SKILL.md](../SKILL.md)の前提のとおり、originのURLから求めたホストを各`glab`コマンドの前に`GITLAB_HOST=<ホスト>`で付ける。
 
 ## フェーズ1: 到達性・エディション・権限
 

@@ -78,10 +78,21 @@ if [ -n "$ISSUE" ] && ! printf '%s' "$ISSUE" | grep -qE '^#?[0-9]+$'; then
 fi
 ISSUE="${ISSUE#\#}"
 
-command -v jq >/dev/null 2>&1 || { echo "review-packet.sh: jq not found" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || {
+  echo "review-packet.sh: jq not found. Install jq (see codex-ext:gitlab-init for the setup steps)" >&2
+  exit 2
+}
 
-BASE_SHA="$(git rev-parse "$BASE")"
-HEAD_SHA="$(git rev-parse "$HEAD_REF")"
+# baseやheadが "-" で始まってもオプションに化けないよう --end-of-options を付け、
+# コミットとして解決できる値だけを通す。
+BASE_SHA="$(git rev-parse --verify --end-of-options "$BASE^{commit}")" || {
+  echo "review-packet.sh: cannot resolve base '$BASE'. Run 'git fetch origin' and check the name" >&2
+  exit 2
+}
+HEAD_SHA="$(git rev-parse --verify --end-of-options "$HEAD_REF^{commit}")" || {
+  echo "review-packet.sh: cannot resolve head '$HEAD_REF'. Run 'git fetch origin' and check the name" >&2
+  exit 2
+}
 
 ensure_excluded
 # symlink検査は作る前、作った後、書き込みの直前の3回行う。1回だけだと、
@@ -249,14 +260,44 @@ print(d.get("description") or d.get("body") or "")' | mask_secrets
 }
 
 # remoteのURLからホスト名だけを取り出す。
-# 対応する形: https://host/path、https://user:token@host/path、ssh://git@host:port/path、git@host:path
+# 対応する形: https://host/path、http://host/path、https://user:token@host/path、
+#   https://host:8443/path、ssh://git@host:port/path、git@host:path
 # URLに埋め込まれた資格情報はここで捨てる (ホスト名以外は使わない)。
+# https・httpはポートを残す (host:8443)。ssh://・scp形式はSSHのポートでありAPIのポートではないので落とす。
+# サブパス配置のGitLab (https://host/sub/g/p.git) は扱えない。
 remote_host() {
-  local u="$1"
-  u="${u#*://}"
-  u="${u#*@}"
-  u="${u%%[/:]*}"
-  printf '%s' "$u"
+  printf '%s' "$1" | sed -E \
+    -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' \
+    -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' \
+    -e 's#^([^/]*@)?([^/:]+):.*#\2#'
+}
+
+# 取得コマンドを実行し、成功したら出力を filter 経由で dest へ書く。
+#   fetch_into <dest> <対象名> <失敗時の案内> <filter関数> <コマンド...>
+# 失敗 (終了コードが0以外) はstderrへ理由と案内を出し、packet作成は続ける。
+# MR・PRが無いだけの失敗 (glab・ghは非ゼロで終わる) は、その旨のメッセージを見て黙る。
+# コマンドが成功して出力が空のときも黙る (空ファイルは最後に消える)。
+fetch_into() {
+  local dest="$1" what="$2" hint="$3" filter="$4"
+  shift 4
+  local errf rc=0 body
+  errf="$(mktemp "$OUT/.fetch-err-XXXXXX")"
+  body="$("$@" 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if ! grep -qiE 'no (open )?(merge request|pull request)|could not find any (merge request|pull request)' "$errf"; then
+      echo "review-packet.sh: failed to fetch $what (exit $rc): $(head -c 300 "$errf" | tr '\n' ' ')" >&2
+      echo "review-packet.sh: $hint" >&2
+    fi
+    rm -f "$errf"
+    return 0
+  fi
+  rm -f "$errf"
+  [ -n "$body" ] || return 0
+  if ! printf '%s\n' "$body" | "$filter" >"$dest"; then
+    echo "review-packet.sh: failed to process $what output; skipping it" >&2
+    rm -f "$dest"
+  fi
+  return 0
 }
 
 REMOTE="$(git remote get-url origin 2>/dev/null || true)"
@@ -269,28 +310,34 @@ elif [ "$HOST" = "github.com" ]; then
   if ! command -v gh >/dev/null 2>&1; then
     echo "review-packet.sh: gh not found; skipping issue/mr fetch" >&2
   else
+    GH_HINT="check 'gh auth status'"
+    GH_TEMPLATE='# {{.title}}
+
+{{.body}}'
     if [ -n "$ISSUE" ]; then
-      gh issue view "$ISSUE" --json title,body \
-        -t '# {{.title}}
-
-{{.body}}' 2>/dev/null | mask_secrets >"$OUT/issue.md" || true
+      fetch_into "$OUT/issue.md" "issue #$ISSUE" "$GH_HINT" mask_secrets \
+        gh issue view "$ISSUE" --json title,body -t "$GH_TEMPLATE"
     fi
-    gh pr view --json title,body \
-      -t '# {{.title}}
-
-{{.body}}' 2>/dev/null | mask_secrets >"$OUT/mr.md" || true
+    fetch_into "$OUT/mr.md" "pull request" "$GH_HINT" mask_secrets \
+      gh pr view --json title,body -t "$GH_TEMPLATE"
   fi
 else
-  # github.com以外はGitLabとみなし、glabへホストを渡す。
+  # github.com以外はGitLabとみなし、glabへホストを渡す。GitLabでないホストでも
+  # ここへ来るので、失敗時の案内でそれにも触れる。
   if ! command -v glab >/dev/null 2>&1; then
     echo "review-packet.sh: glab not found; skipping issue/mr fetch" >&2
   elif ! command -v python3 >/dev/null 2>&1; then
     echo "review-packet.sh: python3 not found; skipping issue/mr fetch" >&2
   else
+    # fetch_intoへ環境変数付きのコマンドを渡せないため関数で包む (envコマンドはPATH次第で別物になる)。
+    glab_host() { GITLAB_HOST="$HOST" glab "$@"; }
+    GLAB_HINT="check 'glab auth status --hostname $HOST'. If origin ($HOST) is not a GitLab host, this failure can be ignored"
     if [ -n "$ISSUE" ]; then
-      GITLAB_HOST="$HOST" glab issue view "$ISSUE" --output json 2>/dev/null | title_body >"$OUT/issue.md" 2>/dev/null || true
+      fetch_into "$OUT/issue.md" "issue #$ISSUE" "$GLAB_HINT" title_body \
+        glab_host issue view "$ISSUE" --output json
     fi
-    GITLAB_HOST="$HOST" glab mr view --output json 2>/dev/null | title_body >"$OUT/mr.md" 2>/dev/null || true
+    fetch_into "$OUT/mr.md" "merge request" "$GLAB_HINT" title_body \
+      glab_host mr view --output json
   fi
 fi
 

@@ -1794,10 +1794,17 @@ GitLabのホストは`git remote`のURLから求め、規約は利用者のリ�
 - `resources/skills-plugin/`配下を直接編集し、通常のPRで変える。VSIXの版上げで配布される
 - Claude Code用とCodex用で中身を分けない。違いが要る箇所は本文中で書き分ける
 - 同梱範囲を広げるときは、Forge Hubから辿れるか（Forge Hubが呼ぶskillから参照されるか）で決める
-- 変更後は、社内のホスト名・個人のパス・個人の規約ファイルへの参照が無いことを確かめる。個人のパスは
-  `rg -n '~/\.claude|~/\.codex|\$HOME/\.(claude|codex)|/home/[a-z]' resources/skills-plugin`
-  が0件になること。ホスト名は`rg -n 'gitlab\.[a-z]' resources/skills-plugin`の結果が
-  `gitlab.com`・`gitlab.example.com`だけであること
+- 変更後は、社内のホスト名・個人のパス・個人の規約ファイルや個人のツールへの参照が無いことを確かめる
+  - 個人のパスは
+    `rg -n '~/\.claude|~/\.codex|\$HOME/\.(claude|codex)|/home/[a-z]' resources/skills-plugin`
+    が0件になること
+  - 個人のツール・習慣は
+    `rg -n -i 'gant|genshijin|原始人|codegraph|auto-memory|MEMORY\.md|Gotcha:|handoff|EnterWorktree|model/effort' resources/skills-plugin`
+    が0件になること
+  - ホスト名は`rg -n 'gitlab\.[a-z]' resources/skills-plugin`の結果が
+    `gitlab.com`・`gitlab.example.com`だけであること
+  - 社名・社内のホスト名・社内の別リポジトリ名・開発者のユーザー名は、この文書に書かない。
+    編集した人が手元で上の`rg -i`のパターンへ足して0件を確かめる
 
 ### 14.20 承認方法をキー操作で回す
 

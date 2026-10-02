@@ -9,14 +9,23 @@ description: "GitLabでリポジトリを開発可能にする。glabの用意�
 
 ## 前提
 
-- GitLabのホストは決め打ちしない。`git remote get-url origin`のURLから求める。URLの形は次のいずれか。
-  - `https://<ホスト>/<group>/<project>.git`
+- GitLabのホストは決め打ちしない。`git remote get-url origin`のURLから求める。**他の`codex-ext:gitlab-*`のskillも、ホストの求め方と`glab`への渡し方はここに書く方法に揃える**。URLの形は次のいずれか。
+  - `https://<ホスト>[:<port>]/<group>/<project>.git`
   - `git@<ホスト>:<group>/<project>.git`
   - `ssh://git@<ホスト>[:<port>]/<group>/<project>.git`
 
+  ```bash
+  URL=$(git remote get-url origin)
+  HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')
+  ```
+
+  - https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式 (`git@host:g/p.git`) はポートを落とす。SSHのポートはAPIのポートではないため
+  - httpで運用しているGitLabでは、`GITLAB_HOST`にschemeを付けても`glab`はhttpsで接続する (glab 1.117で確認)。`glab config set -h <ホスト> api_protocol http`が要る。グローバル設定の変更なので利用者の承認を得てから行う
+  - サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`など) はこの式では扱えない。`GITLAB_HOST`の代わりに`-R <URL全体>`を使う
+
   ホストが`github.com`ならGitLabのリポジトリではない。このskillと`codex-ext:gitlab-*`の他のskillは使えないので、そう伝えて止まる。
 
-- GitLabの操作は`glab` CLIで行う。`glab`にホストを渡すには、`GITLAB_HOST=<ホスト>`を付けて実行するか、`-R <ホスト>/<group>/<project>`を使う。例示が必要なときは`gitlab.example.com`を使う
+- GitLabの操作は`glab` CLIで行う。ホストは**各`glab`コマンドの前に`GITLAB_HOST=<求めたホスト>`を付けて**渡す (例: `GITLAB_HOST=gitlab.example.com glab auth status`)。Bash呼び出しごとにシェルが変わるため、`export`は次の呼び出しへ残らない。例示が必要なときは`gitlab.example.com`を使う
 - 点検と適用を分ける。差分を提示して、利用者が選んだものだけ適用する。プロジェクト設定は他の人にも影響し、元に戻しにくい
 - 利用者の環境設定 (シェルの設定ファイル、`glab`のグローバル設定、エージェントのグローバル設定) は勝手に変えない。変更が要るなら手順を示して承認を得る。他のプロジェクトにも影響する
 - コマンドが失敗したら先へ進まない。取得に失敗した項目は「不明」として残す。取得失敗を「設定されていない」と読み替えない

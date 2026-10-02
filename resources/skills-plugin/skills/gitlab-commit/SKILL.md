@@ -1,6 +1,6 @@
 ---
 name: gitlab-commit
-description: "GitLabで変更を論理単位でConventional Commits短形commit・pushする。Use when: 「コミット」「commit」、gitlab-develop呼出時。Do not use: 実装、MR作成、マージ、直接push、無指示commit。"
+description: "GitLabで変更を論理単位でConventional Commits短形commit・pushする。Use when: 「コミット」「commit」、/codex-ext:gitlab-commit、codex-ext:gitlab-develop呼出時。Do not use: 実装、MR作成、マージ、直接push、無指示commit。"
 ---
 
 # gitlab-commit

@@ -93,7 +93,7 @@ def main() -> int:
         else:
             with open(args.note, encoding="utf-8") as f:
                 text = f.read()
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"エラー: 入力を読めない: {e}", file=sys.stderr)
         return 2
 

@@ -1,6 +1,6 @@
 ---
 name: gitlab-develop
-description: "GitLabでIssue着手からMR作成・自己レビュー・ready化までを1回で進め、中断時は現在地から再開する。Use when: 「Issueに着手」「実装して」「MR作って」。Do not use: 自己レビューだけのやり直し (gitlab-reviewの自己モード)、Issue起票、他人のMRレビュー、マージ後の後片付け。"
+description: "GitLabでIssue着手からMR作成・自己レビュー・ready化までを1回で進め、中断時は現在地から再開する。Use when: 「Issueに着手」「実装して」「MR作って」、/codex-ext:gitlab-develop。Do not use: 自己レビューだけのやり直し (codex-ext:gitlab-reviewの自己モード)、Issue起票、他人のMRレビュー、マージ後の後片付け。"
 ---
 
 # gitlab-develop
@@ -12,15 +12,19 @@ Issueを1件選び、レビュー依頼を出すところまで進める。revie
 ## 前提
 
 - `glab` CLIを使う (`gh` はGitHub用なのでGitLabには使わない)。`glab` が無い、または認証が通らないときは `codex-ext:gitlab-init` を案内して止まる
-- GitLabのホストは `git remote get-url origin` のURLから求め、環境変数 `GITLAB_HOST` で `glab` へ渡す。特定のホスト名を決め打ちしない
+- GitLabのホストは `git remote get-url origin` のURLから求め、**各 `glab` コマンドの前に `GITLAB_HOST=<ホスト>` を付けて**渡す (Bash呼び出しごとにシェルが変わるため、`export` しても次の呼び出しには残らない)。特定のホスト名を決め打ちしない
 - デフォルトブランチ (以下 `<default>`) も決め打ちしない。`origin/HEAD` から求める
 
 ```bash
 URL=$(git remote get-url origin)
-export GITLAB_HOST=$(printf '%s' "$URL" | sed -E 's#^[a-z+]+://([^@/]+@)?##; s#^[^@/]+@##; s#[:/].*##')
-glab auth status
+HOST=$(printf '%s' "$URL" | sed -E -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' -e 's#^ssh://([^/]*@)?([^/:]+).*#\2#;t' -e 's#^([^/]*@)?([^/:]+):.*#\2#')
+GITLAB_HOST="$HOST" glab auth status
 git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'
 ```
+
+- https・httpのURLはポートを残す (`gitlab.example.com:8443`)。ssh://・scp形式はポートを落とす (SSHのポートであり、APIのポートではないため)
+- httpで運用しているGitLabでは、`GITLAB_HOST` にschemeを付けても `glab` はhttpsで接続する。`glab config set -h <ホスト> api_protocol http` が要る (設定変更なので利用者の承認を得てから行う。詳細は `codex-ext:gitlab-init`)
+- サブパス配置のGitLab (`https://example.com/gitlab/g/p.git`) は上の式では扱えない。`glab` に `-R <URL全体>` を渡す
 
 `origin/HEAD` が未設定で最後のコマンドが失敗したら、`git remote set-head origin --auto` で設定するか、利用者にデフォルトブランチ名を聞く。
 
