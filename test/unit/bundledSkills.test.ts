@@ -36,6 +36,7 @@ describe('同梱skill', () => {
       'gitlab-cleanup',
       'gitlab-commit',
       'gitlab-develop',
+      'gitlab-init',
       'gitlab-issue',
       'gitlab-review',
       'gitlab-roadmap',
@@ -65,7 +66,6 @@ describe('同梱skill', () => {
       /~\/\.codex/,
       /\$HOME\/\.claude/,
       /\$HOME\/\.codex/,
-      /gitlab-init/,
       /gitlab-auto-cycle/,
       /gitlab-wiki-maintain/,
     ];
@@ -91,7 +91,10 @@ describe('同梱skill', () => {
     const known = new Set([...skillNames, ...agentNames]);
     const unresolved: string[] = [];
     for (const file of files) {
-      for (const m of readFileSync(file, 'utf8').matchAll(/codex-ext:([a-z0-9-]+)/g)) {
+      // `codex-ext:gitlab-*`のような総称の書き方は参照ではないので数えない
+      for (const m of readFileSync(file, 'utf8').matchAll(
+        /codex-ext:([a-z0-9-]+)(?![a-z0-9*-])/g,
+      )) {
         if (!known.has(m[1])) unresolved.push(`${path.relative(root, file)}: ${m[0]}`);
       }
     }
