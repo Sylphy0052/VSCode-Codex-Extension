@@ -177,7 +177,7 @@ claude --version
 
 続けてログインする。
 
-- Codex: `codex`を実行し、「Sign in with ChatGPT」を選んでブラウザでログインする。APIキーを使う場合は、拡張機能を入れたあとサイドバーの設定ビューからも入力できる
+- Codex: `codex`を実行し、ChatGPTアカウントでのサインインを選んでブラウザでログインする。APIキーを使う場合は、拡張機能を入れたあとサイドバーの「設定」ビューからも入力できる
 - Claude Code: `claude`を実行し、表示に従ってブラウザでログインする
 
 ログインできたら、CLIは終了してよい（Codexは`Ctrl+C`、Claude Codeは`/exit`）。
@@ -186,7 +186,13 @@ claude --version
 
 ### 1. VSIXを入手する
 
-[最新版のVSIX](https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix)をダウンロードする。URLは版が変わっても同じ。
+[最新版のVSIX](https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix)をブラウザでダウンロードする。URLは版が変わっても同じ。
+
+ターミナルで取得する場合は次を実行する。WSLでコマンドからインストールする場合は、WSLのターミナルでこちらを使い、VSIXをWSL側に置く（ブラウザで落としたファイルはWindows側に置かれる）。
+
+```bash
+curl -fL -o vscode-codex-extension.vsix https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix
+```
 
 ### 2. インストールする
 
@@ -194,16 +200,10 @@ VS Codeの拡張機能ビューを開き、右上の「...」から「Install fr
 
 WSLの場合は、WSLに接続したウィンドウでこの操作を行う。インストール先として「WSL: Ubuntu」が表示されていることを確認する。
 
-コマンドで入れる場合は、ダウンロードしたフォルダで次を実行する（WSLの場合はWSLのターミナルで、VSIXをWSL側へダウンロードしてから実行する）。
+コマンドで入れる場合は、VSIXを置いたフォルダで次を実行する。WSLの場合は、WSLのターミナルで実行する。
 
 ```bash
 code --install-extension vscode-codex-extension.vsix --force
-```
-
-WSLのターミナルからダウンロードする場合は次を使う。
-
-```bash
-curl -fL -o vscode-codex-extension.vsix https://github.com/Sylphy0052/VSCode-Codex-Extension/releases/latest/download/vscode-codex-extension.vsix
 ```
 
 ### 3. 動作を確認する
@@ -212,13 +212,15 @@ curl -fL -o vscode-codex-extension.vsix https://github.com/Sylphy0052/VSCode-Cod
 2. 左端のアクティビティバーに**Agents**のアイコンが表示されることを確認する
 3. Agentsを開き、新しい会話を始めて、短いメッセージに応答が返ってくることを確認する
 
-アイコンが出ない場合は、開いているフォルダが信頼されていない可能性がある。コマンドパレットで`Workspaces: Manage Workspace Trust`を実行し、フォルダを信頼する。
+アイコンが出ない場合は、開いているフォルダが信頼されているかを確認する。信頼されていないフォルダでは拡張機能が無効になる。コマンドパレットで`Workspaces: Manage Workspace Trust`を実行し、フォルダを信頼する。
 
 「codex コマンドが見つかりません」「claude コマンドが見つかりません」と通知が出る場合は、次を確認する。
 
 - WSLの場合、CLIをWindows側ではなくWSL側に入れたか
 - CLIを入れたあとにVS Codeを起動し直したか（起動中のVS CodeはPATHの変更を読み直さない）
-- それでも見つからない場合は、設定の`codex.executablePath`または`claude.executablePath`に実行ファイルの絶対パスを入れる。**Windowsではパスを`/`区切りで書く**（例: `C:/Users/<ユーザー名>/.local/bin/claude.exe`）。`\`区切りで書くとパスとして扱われない
+- それでも見つからない場合は、設定の`codex.executablePath`または`claude.executablePath`に実行ファイルの絶対パスを入れる。WSLでは、Windows側のユーザー設定ではなく「リモート [WSL: Ubuntu]」タブの設定に書く
+  - **Windowsではパスを`/`区切りで書く**（例: `C:/Users/<ユーザー名>/.local/bin/claude.exe`）。拡張機能は値に`/`が含まれるときだけパスとして扱う。`\`区切りの値はコマンド名とみなしてPATHから探すため、見つからない
+  - パスが誤っていると「`codex.executablePath が実行できません: <パス>`」のように通知される
 
 ## 必要に応じて入れるもの
 
@@ -226,7 +228,7 @@ curl -fL -o vscode-codex-extension.vsix https://github.com/Sylphy0052/VSCode-Cod
 
 - GitHub CLI（`gh`）とログイン: Forge Hub、ロードマップ、タスク監視でGitHubのIssue・PRを扱う
 - GitLab CLI（`glab`）とログイン: 同じ機能でGitLabを扱う
-- Google ChromeとNode.js（`npx`）: ChatGPTとの議論機能（WebGPT連携）。詳しくは[README](../README.md)の該当節
+- Google ChromeとNode.js（`npx`）: ChatGPTとの議論機能（WebGPT連携）。詳しくは[READMEの「WebGPTとの議論」](../README.md#webgptとの議論)
 - 音声プレイヤー: 通知音。macOSとWindowsは標準のもので鳴る。Linux・WSLでは`paplay`、`pw-play`、`aplay`、`ffplay`のいずれかが要る。無い場合は音が鳴らないだけ
 
 ## 更新とアンインストール
