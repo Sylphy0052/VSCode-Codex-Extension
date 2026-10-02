@@ -1771,6 +1771,34 @@ CLIの古い版で`skills/extraRoots/set`が無い場合は、会話を止めず
   `skills/<フォルダ名>/`へ移す。途中の状態を会話中のCLIに読ませず、失敗時も一時側だけを消す。
   `SKILL.md`の無い同名の残骸（削除の途中で失敗した等）は一覧に出ず消せないため、移す前に片付ける
 
+#### 同梱skillの中身（Issue #1821）
+
+Forge HubのGitLab側が使う`gitlab-*` skillと、そのレビュー段が使うsubagentを同梱する。
+
+- skill（`resources/skills-plugin/skills/`）: `gitlab-develop`・`gitlab-review`・`gitlab-cleanup`と、
+  そこから呼ばれる`gitlab-commit`・`gitlab-issue`・`gitlab-screenshot`・`gitlab-roadmap`・`gitlab-init`
+- subagent（`resources/skills-plugin/agents/`）: `review-robust`・`review-spec`・`review-style`・
+  `security-auditor`。Claude Codeはプラグインのagentとして`codex-ext:<名前>`で起動する。Codexには
+  subagentの仕組みが無いため、skillが同じファイルを読んで観点を順に確かめる
+
+出どころ: 開発者本人が使っていた個人の`gitlab-*` skill（Claude Code用とCodex用の2系統）を元に、
+2026-10-03に1本へまとめて一般化した。社内のホスト名・個人のパス・個人の規約ファイルへの参照を外し、
+GitLabのホストは`git remote`のURLから求め、規約は利用者のリポジトリの`CLAUDE.md`・`AGENTS.md`を
+読む形にした。skill同士の参照は`codex-ext:<skill名>`に揃えている。
+
+正本はこのリポジトリの`resources/skills-plugin/`とする。個人のskillから生成し直すことはしない
+（社内のホスト名や個人の規約が混ざるため）。
+
+更新方法:
+
+- `resources/skills-plugin/`配下を直接編集し、通常のPRで変える。VSIXの版上げで配布される
+- Claude Code用とCodex用で中身を分けない。違いが要る箇所は本文中で書き分ける
+- 同梱範囲を広げるときは、Forge Hubから辿れるか（Forge Hubが呼ぶskillから参照されるか）で決める
+- 変更後は、社内のホスト名・個人のパス・個人の規約ファイルへの参照が無いことを確かめる。個人のパスは
+  `rg -n '~/\.claude|~/\.codex|\$HOME/\.(claude|codex)|/home/[a-z]' resources/skills-plugin`
+  が0件になること。ホスト名は`rg -n 'gitlab\.[a-z]' resources/skills-plugin`の結果が
+  `gitlab.com`・`gitlab.example.com`だけであること
+
 ### 14.20 承認方法をキー操作で回す
 
 TUIは Shift+Tab で承認モードを循環させる。セレクタを開いて選ぶより速く、実際にはこちらばかり使う操作なので、チャット画面にも同じ入口を用意する（issue #13・TP-23）。
