@@ -256,6 +256,8 @@ export class ResourceMonitor {
    * 例外の1本を始めないため）。監視は拡張ホストごとに動くため、ウィンドウをまたいでは効かない。
    */
   private lastLivenessStartAt: number | undefined;
+  /** 直近に枠を取る前の`lastLivenessStartAt`。枠を返すときに戻す。 */
+  private livenessLaneBefore: number | undefined;
   private observedFreedBytesPerStage: number | undefined;
 
   constructor(private readonly deps: ResourceMonitorDeps) {}
@@ -297,8 +299,17 @@ export class ResourceMonitor {
     ) {
       return false;
     }
+    this.livenessLaneBefore = this.lastLivenessStartAt;
     this.lastLivenessStartAt = now;
     return true;
+  }
+
+  /**
+   * 取った例外の1本の枠を返す。枠を取った後に工程が始まらなかったとき（専有権を取れない、
+   * 既に開始途中だった等）に呼ぶ。返さないと、始まっていない1本のために60秒待つことになる。
+   */
+  releaseLivenessLane(): void {
+    this.lastLivenessStartAt = this.livenessLaneBefore;
   }
 
   /** runの状態が変わったときに呼ぶ。動いているrunの有無に合わせて計測を始める・止める。 */

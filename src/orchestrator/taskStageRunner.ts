@@ -274,6 +274,8 @@ export interface StartGate {
   policy(): StartPolicy;
   /** 例外の1本の枠を取る。取れたらその場で使ったものとして記録される。 */
   tryAcquireLivenessLane(): boolean;
+  /** 取った枠で工程が始まらなかったときに、枠を返す。 */
+  releaseLivenessLane(): void;
 }
 
 /** 生きている工程セッションの帳簿。タスクごとに1つ持つ（タスクは同時に1つの工程しか動かない）。 */
@@ -728,8 +730,9 @@ export class TaskStageRunner {
       if (target === undefined || this.deps.startGate?.tryAcquireLivenessLane() !== true) {
         return;
       }
-      this.lowPriorityStarts.add(liveKey(runId, target.taskId));
-      await this.startStage(runId, target);
+      if (!(await this.startStage(runId, target, { lowPriority: true }))) {
+        this.deps.startGate?.releaseLivenessLane();
+      }
       return;
     }
     await Promise.all(picked.map((target) => this.startStage(runId, target)));
@@ -804,12 +807,20 @@ export class TaskStageRunner {
     }, 0);
   }
 
-  private async startStage(runId: string, target: StageRef): Promise<void> {
+  /** 工程を始める。帳簿へ載せたら`true`。 */
+  private async startStage(
+    runId: string,
+    target: StageRef,
+    options: { lowPriority?: boolean } = {},
+  ): Promise<boolean> {
     const key = liveKey(runId, target.taskId);
     if (this.starting.has(key) || this.live.has(key)) {
-      return;
+      return false;
     }
     this.starting.add(key);
+    if (options.lowPriority === true) {
+      this.lowPriorityStarts.add(key);
+    }
     let lease: MergeKeyLease | undefined;
     try {
       if (target.stage === 'mergeCleanup') {
@@ -817,7 +828,7 @@ export class TaskStageRunner {
         const pending =
           run === undefined ? undefined : this.deps.mergeKeys.acquire(run.workspaceRoot, key);
         if (pending === undefined) {
-          return;
+          return false;
         }
         lease = await pending;
       }
@@ -825,7 +836,7 @@ export class TaskStageRunner {
       // 取りに行くと、同じタスクへの`stopStage`などがその間待たされる（Issue #1641）。mergeの鍵より
       // 後に置くのは、鍵の予約（`pump`が`isBusy`で見る）までに`await`を挟まないため
       if (this.deps.drive !== undefined && !(await this.deps.drive.canDrive(runId))) {
-        return;
+        return false;
       }
       const held = lease;
       const started = await this.withTaskLock(key, () => this.startStageInner(runId, target, held));
@@ -833,6 +844,7 @@ export class TaskStageRunner {
         // 鍵は帳簿へ移した。放すのは後片付け・停止・失敗のとき
         lease = undefined;
       }
+      return started;
     } catch (e) {
       await this.haltAndOpenGate(
         runId,
@@ -840,6 +852,7 @@ export class TaskStageRunner {
         'failed',
         `${STAGE_LABELS[target.stage]}を始められませんでした: ${errorMessage(e)}`,
       );
+      return false;
     } finally {
       lease?.release();
       this.starting.delete(key);

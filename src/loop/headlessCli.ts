@@ -193,9 +193,15 @@ export interface HeadlessCliDeps {
   coalesceKey?: string;
   /**
    * 同じ入力（CLI・モデル・effort・プロンプト）への成功した結果を、しばらく再利用してよい
-   * （Issue #1807）。応答が入力だけで決まる呼び出し（Reflexの審査など）に限って立てる。
+   * （Issue #1807）。応答が入力だけで決まる呼び出し（Reflexの審査など）に限って渡す。応答本文を
+   * 受け取り、再利用してよい応答（呼び出し側が読めるもの）なら`true`を返す。
    */
-  cacheable?: boolean;
+  cacheable?: (text: string) => boolean;
+  /**
+   * 順番待ちで、急がない呼び出しより先に回す（Issue #1807）。工程や利用者の操作を止めて待たせる
+   * 呼び出し（Reflexの判定など）に立てる。実行中の1本は打ち切らない。
+   */
+  urgent?: boolean;
 }
 
 /** 呼び出しが失敗した理由。応答が得られなかったときだけ使う。 */
@@ -249,14 +255,14 @@ export async function runHeadlessPromptDetailed(
   prompt: string,
 ): Promise<HeadlessOutcome> {
   const kind = deps.kind ?? 'unknown';
-  const cacheKey = deps.cacheable === true ? headlessCacheKey(deps, prompt) : undefined;
+  const cacheKey = deps.cacheable === undefined ? undefined : headlessCacheKey(deps, prompt);
   const cached = cacheKey === undefined ? undefined : readCache(cacheKey);
   if (cached !== undefined) {
     recordCall(kind, 'cache', 0, 0);
     return cached;
   }
   const outcome = await enqueue(deps, prompt, kind);
-  if (cacheKey !== undefined && outcome.ok) {
+  if (cacheKey !== undefined && outcome.ok && deps.cacheable?.(outcome.text) === true) {
     writeCache(cacheKey, outcome);
   }
   return outcome;
@@ -312,7 +318,13 @@ function enqueue(deps: HeadlessCliDeps, prompt: string, kind: string): Promise<H
       }
     }
     deps.signal?.addEventListener('abort', onAbort, { once: true });
-    waiting.push(request);
+    if (deps.urgent === true) {
+      // 急ぐ呼び出しどうしは来た順。急がない呼び出しの先頭の前へ入れる
+      const firstRelaxed = waiting.findIndex((r) => r.deps.urgent !== true);
+      waiting.splice(firstRelaxed < 0 ? waiting.length : firstRelaxed, 0, request);
+    } else {
+      waiting.push(request);
+    }
     drain();
   });
 }

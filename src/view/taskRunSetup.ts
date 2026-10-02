@@ -282,6 +282,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     startGate: {
       policy: () => holder.monitor?.startPolicy ?? 'unrestricted',
       tryAcquireLivenessLane: () => holder.monitor?.tryAcquireLivenessLane() === true,
+      releaseLivenessLane: () => holder.monitor?.releaseLivenessLane(),
     },
     lowPriority: readTaskRunLowPriorityEnabled,
     mcpServer: questionServer,

@@ -38,8 +38,10 @@ export interface ReflexCliDeps {
   run?: (deps: HeadlessCliDeps, prompt: string) => Promise<HeadlessOutcome>;
   /** 呼び出し元の種類（ログ用。Issue #1807）。`runReflexJson`は`subject`を入れる。 */
   kind?: string;
-  /** 同じプロンプトへの成功した結果を再利用してよいか（Issue #1807）。 */
-  cacheable?: boolean;
+  /** 同じプロンプトへの成功した結果のうち、再利用してよい応答か（Issue #1807）。 */
+  cacheable?: (text: string) => boolean;
+  /** 順番待ちで、急がない呼び出しより先に回すか（Issue #1807）。 */
+  urgent?: boolean;
 }
 
 /**
@@ -59,6 +61,7 @@ export function runReflexPrompt(deps: ReflexCliDeps, prompt: string): Promise<He
       ...(deps.signal === undefined ? {} : { signal: deps.signal }),
       ...(deps.kind === undefined ? {} : { kind: deps.kind }),
       ...(deps.cacheable === undefined ? {} : { cacheable: deps.cacheable }),
+      ...(deps.urgent === undefined ? {} : { urgent: deps.urgent }),
     },
     prompt,
   );
@@ -81,8 +84,18 @@ export async function runReflexJson<T>(
   parse: (text: string) => T | undefined,
 ): Promise<T | undefined> {
   try {
-    // Reflexの判定は応答がプロンプトだけで決まるため、同じ文面への判定は結果を再利用する（Issue #1807）
-    const outcome = await runReflexPrompt({ kind: subject, cacheable: true, ...deps }, prompt);
+    // Reflexの判定は応答がプロンプトだけで決まるため、同じ文面への判定は結果を再利用する。読めない
+    // 応答は再利用しない（次の呼び出しで読める応答が返る余地を残す）。工程や利用者の操作を止めて
+    // 待たせる判定なので、ループの脇役（Advisor・Evaluator）より先に回す（Issue #1807）
+    const outcome = await runReflexPrompt(
+      {
+        kind: subject,
+        cacheable: (text) => parse(text) !== undefined,
+        urgent: true,
+        ...deps,
+      },
+      prompt,
+    );
     if (!outcome.ok) {
       if (deps.signal?.aborted !== true && outcome.superseded !== true) {
         // 時間切れと起動・異常終了を言い分ける（Issue #1097）。同じ文言だと、タイムアウトを
