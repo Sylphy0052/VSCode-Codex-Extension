@@ -1533,10 +1533,11 @@ export class ClaudeChatViewManager
             'claude',
             this.claudePath(),
             (message) => entry.trace.warn(message),
-            undefined,
+            giveUp.signal,
           ),
           sentPrompt: promptText,
           pointerPath: sentPointerPath,
+          destinationDisposed: () => newEntry.disposed,
           trace: entry.trace,
         }),
       );

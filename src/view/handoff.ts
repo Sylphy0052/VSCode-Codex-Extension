@@ -1550,7 +1550,8 @@ export function waitForDestinationResponse(
         return;
       }
       judging = true;
-      judgeAcceptance(state).then(
+      // 同期的に投げる実装でも listener から例外を漏らさないよう、Promiseの中で呼ぶ
+      Promise.resolve(state).then(judgeAcceptance).then(
         (accepted) => finish(accepted ? { succeeded: true } : notAccepted),
         () => finish(notAccepted),
       );

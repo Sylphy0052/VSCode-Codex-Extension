@@ -1326,10 +1326,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           'codex',
           readConfig().executablePath,
           (message) => entry.trace.warn(message),
-          undefined,
+          giveUp.signal,
         ),
         sentPrompt: text,
         pointerPath: sentPointerPath,
+        destinationDisposed: () => destination.disposed,
         trace: entry.trace,
       }),
     );
