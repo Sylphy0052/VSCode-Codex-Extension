@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { normalizeIdleShutdownMinutes } from './claude/idleShutdown';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
 import { hasGitSegment } from './orchestrator/escalation';
@@ -597,6 +598,16 @@ export function readAutoHandoffAutoApprove(): boolean {
  * 境界）と同じ。壊れた値（数値でない・範囲外）は既定へ丸める。
  */
 export const DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT = 20;
+
+/**
+ * 使っていないClaudeタブのCLIを終了するまでの分（`agent.claude.idleShutdownMinutes`、
+ * 既定30、0で無効。Issue #1808）。丸めは`normalizeIdleShutdownMinutes`が行う。
+ */
+export function readIdleShutdownMinutes(): number {
+  return normalizeIdleShutdownMinutes(
+    vscode.workspace.getConfiguration('agent').get<unknown>('claude.idleShutdownMinutes'),
+  );
+}
 
 /** @see DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT */
 export function readAutoHandoffThresholdPercent(): number {

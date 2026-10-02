@@ -659,6 +659,9 @@ export interface ExtraUsageView {
  */
 export type TurnFailureKind = 'usageLimit' | 'other';
 
+/** 使っていないタブのCLIを終了した状態（Issue #1808）。`ChatState.processSuspension`を参照。 */
+export type ProcessSuspension = 'stopping' | 'suspended' | 'resuming' | 'resumeFailed';
+
 export interface ChatState {
   threadId: string | undefined;
   /**
@@ -801,6 +804,14 @@ export interface ChatState {
    * `undefined`へ戻す。拡張機能側だけで完結する一時的な表示で、CLIへは何も送らない。
    */
   autoReplyActivity?: string | undefined;
+  /**
+   * 使っていないタブのCLIを終了した状態（Claude Codeのみ、Issue #1808）。
+   *
+   * `stopping`は終了を待っている間、`suspended`は終了済みで次の送信で`--resume`する状態、
+   * `resuming`は起動し直して最初のターンが始まるのを待つ間、`resumeFailed`は起動し直せなかった
+   * 状態。CLIが動いている通常の状態とCodexのセッションでは`undefined`。
+   */
+  processSuspension?: ProcessSuspension | undefined;
   /**
    * Fast mode（Claude Codeの `/fast`。Issue #198）の現在値。
    *

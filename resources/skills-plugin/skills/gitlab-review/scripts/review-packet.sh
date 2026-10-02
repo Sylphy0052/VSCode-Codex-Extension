@@ -5,14 +5,66 @@
 #   review-packet.sh <base> [head] [issue-ref]
 #     base      比較元 (main, origin/main など)
 #     head      比較先 (既定: HEAD)
-#     issue-ref Issue番号またはIID (省略時はIssue本文を取らない)
+#     issue-ref IssueのIID (省略時はIssue本文を取らない)
+#   review-packet.sh --drafts <MRのIID>
+#     指摘や総評のドラフトを置くディレクトリを作り、その絶対パスを1行だけ出す。
 #
 # 出力: packetディレクトリの絶対パスを1行だけstdoutへ出す。
 # 差分本文はstdoutへ出さない。親のコンテキストへ差分を載せないための前提。
+#
+# 置き場: <リポジトリのルート>/.review-packet/ (環境変数 REVIEW_PACKET_DIR は無い。固定)。
+# 実行のたびに .git/info/exclude へ追記し、git管理外にする。リポジトリ内に置くのは、
+# 読み取り専用のsubagentが追加の許可なしに読めるようにするため。
+# packetには差分とIssue本文が入る。他ユーザーから読めないようにする。
 set -euo pipefail
-
-# packetにはIssue本文や差分が入る。他ユーザーから読めないようにする。
 umask 077
+
+DIR_NAME=".review-packet"
+EXCLUDE_LINE="/$DIR_NAME/"
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# .git/info/exclude へ除外行を足す。worktreeでも共通の .git/info/exclude を指す。
+ensure_excluded() {
+  local excl
+  excl="$(git rev-parse --git-path info/exclude)"
+  case "$excl" in
+    /*) ;;
+    *) excl="$ROOT/$excl" ;;
+  esac
+  mkdir -p "$(dirname "$excl")"
+  if ! grep -qxF "$EXCLUDE_LINE" "$excl" 2>/dev/null; then
+    printf '%s\n' "$EXCLUDE_LINE" >>"$excl"
+  fi
+}
+
+# 書き込み先の途中がsymlinkだと、意図しない場所へ書いてしまう。
+no_symlink() {
+  if [ -L "$PARENT" ]; then
+    echo "review-packet.sh: refusing to write through symlink: $PARENT" >&2
+    exit 2
+  fi
+}
+
+PARENT="$ROOT/$DIR_NAME"
+
+if [ "${1:-}" = "--drafts" ]; then
+  MR_IID="${2:?MR IID required}"
+  case "$MR_IID" in
+    '' | *[!0-9]*)
+      echo "review-packet.sh: MR IID must be digits only: $MR_IID" >&2
+      exit 2
+      ;;
+  esac
+  ensure_excluded
+  no_symlink
+  mkdir -p "$PARENT/drafts/mr-$MR_IID"
+  no_symlink
+  chmod 700 "$PARENT" "$PARENT/drafts" "$PARENT/drafts/mr-$MR_IID"
+  echo "$PARENT/drafts/mr-$MR_IID"
+  exit 0
+fi
 
 BASE="${1:?base branch required}"
 HEAD_REF="${2:-HEAD}"
@@ -26,80 +78,56 @@ if [ -n "$ISSUE" ] && ! printf '%s' "$ISSUE" | grep -qE '^#?[0-9]+$'; then
 fi
 ISSUE="${ISSUE#\#}"
 
-command -v jq >/dev/null 2>&1 || { echo "review-packet.sh: jq not found" >&2; exit 2; }
-
-ROOT="$(git rev-parse --show-toplevel)"
-BASE_SHA="$(git rev-parse "$BASE")"
-HEAD_SHA="$(git rev-parse "$HEAD_REF")"
-
-# packetはリポジトリの外へ置く。リポジトリ内だと各repoで除外設定が要り、
-# 消し忘れるとcommitへ紛れ込む。
-CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/review-packet"
-PARENT="$CACHE/$(basename "$ROOT")"
-# 途中がsymlinkだと、書き込み先が意図しない場所へ向く。
-# 作る前と作った後の両方で見る。1回だけだと、見てから mkdir するまでの間に
-# symlinkへ差し替えられたときに素通りする。
-no_symlink() {
-  local d
-  for d in "$CACHE" "$PARENT"; do
-    if [ -L "$d" ]; then
-      echo "review-packet.sh: refusing to write through symlink: $d" >&2
-      exit 2
-    fi
-  done
+command -v jq >/dev/null 2>&1 || {
+  echo "review-packet.sh: jq not found. Install jq (see codex-ext:gitlab-init for the setup steps)" >&2
+  exit 2
 }
+
+# baseやheadが "-" で始まってもオプションに化けないよう --end-of-options を付け、
+# コミットとして解決できる値だけを通す。
+BASE_SHA="$(git rev-parse --verify --end-of-options "$BASE^{commit}")" || {
+  echo "review-packet.sh: cannot resolve base '$BASE'. Run 'git fetch origin' and check the name" >&2
+  exit 2
+}
+HEAD_SHA="$(git rev-parse --verify --end-of-options "$HEAD_REF^{commit}")" || {
+  echo "review-packet.sh: cannot resolve head '$HEAD_REF'. Run 'git fetch origin' and check the name" >&2
+  exit 2
+}
+
+ensure_excluded
+# symlink検査は作る前、作った後、書き込みの直前の3回行う。1回だけだと、
+# 検査してから書くまでの間にsymlinkへ差し替えられたときに素通りする。
 no_symlink
 mkdir -p "$PARENT"
 no_symlink
-chmod 700 "$CACHE" "$PARENT"
+chmod 700 "$PARENT"
 
 # 保持期間を過ぎたpacketを消す。実行のたびに前回までの消し忘れを回収する。
-# 削除対象は $CACHE 配下に限定する。$PARENT が空、または $CACHE の外を指す
-# ときは削除せずstderrへ警告する (basenameの結果が想定外になった場合の保険)。
-# find/rmの失敗 (権限不足、併走セッションによる二重削除など) はここで打ち切らない。
-# 保持削除の失敗は新規packet作成を妨げるべきではない。
+# 対象は $PARENT 直下のディレクトリのうち drafts 以外。
+# 削除の失敗 (権限不足、併走セッションによる二重削除など) は新規packet作成を妨げない。
 RETENTION_DAYS=7
-case "$PARENT" in
-  "$CACHE"/*)
-    find "$PARENT" -mindepth 1 -maxdepth 1 -type d -mtime "+$RETENTION_DAYS" -exec rm -rf {} + ||
-      echo "review-packet.sh: retention cleanup failed (continuing)" >&2
-    ;;
-  *)
-    echo "review-packet.sh: refusing to prune outside cache: ${PARENT:-<empty>}" >&2
-    ;;
-esac
+find "$PARENT" -mindepth 1 -maxdepth 1 -type d ! -name drafts -mtime "+$RETENTION_DAYS" -exec rm -rf {} + ||
+  echo "review-packet.sh: retention cleanup failed (continuing)" >&2
 
 # mktemp の引数に使う短縮SHAは、symlink検査より前に確定させる。検査と mktemp -d の
-# 間にコマンド置換を挟むと、その fork/exec の分だけ差し替えの余地が伸びる。
+# 間にコマンド置換を挟むと、その分だけ差し替えの余地が伸びる。
 SHORT_SHA="$(git rev-parse --short "$HEAD_SHA")"
 
-# symlink検査の3回目。mkdir 直後の2回目から後に $CACHE か $PARENT を symlink へ
-# 差し替えられても気付けないため、書き込みの直前でもう一度見る。差し替えを注入して
-# 測ると、find は物理モードで起点の symlink を辿らないので保持削除は素通りするが、
-# 次の mktemp -d "$PARENT/..." は辿り、packet (diff.patch や mr.md) をリンク先へ書く。
-# 止めたいのは削除範囲の拡大ではなく、この書き込み先の乗っ取り。
-# したがって検査は保持削除の case の中ではなく、mktemp -d の直前に置く。
-# case の中だと (1) 検査から実際に危ない mktemp -d までの間に find を挟んで
-# 待ち時間が伸び、(2) $CACHE 配下に合致しない側の分岐が検査を通らずに
-# mktemp -d へ進む。この行から mktemp -d までは変数展開しか挟まない。
-# cleanup の失敗と違ってここは続行しない (書き込み先が不明な以上 fail-closed)。
+# 書き込み先が不明なまま続行しない (fail-closed)。この行から mktemp -d までは
+# 変数展開しか挟まない。
 no_symlink
 
-# 1回の実行につき1ディレクトリ。同じsha向けに作り直しても前回の内容が混ざらず、
-# 併走セッションが同じsha向けに同時実行しても互いのpacketを壊さない。
+# 1回の実行につき1ディレクトリ。同じshaで作り直しても前回の内容が混ざらず、
+# 併走セッションが同時に実行しても互いのpacketを壊さない。
 # パスをstdoutへ出すのは全ファイルを書き終えた後なので、読み手は途中状態を見ない。
-# 名前は <短縮SHA>-<ランダム>。前半で由来を追え、後半で併走実行どうしがぶつからない。
 OUT="$(mktemp -d "$PARENT/$SHORT_SHA-XXXXXX")"
 # 途中で失敗したら作りかけを消す。パスを出していない以上、呼び出し元は掃除できない。
 trap 'rm -rf "${OUT:?}"' EXIT
 
-# 文脈行数は差分規模に応じて変える。小さい差分では広く取り、
-# 大きい差分では狭める。広すぎる文脈は追い読みを減らす代わりに
-# packet自体を肥大させるため、総量が最小になる側へ倒す。
-# bc など追加コマンドには依存しない。欠けていても気付けず、
-# 「差分ゼロ」と誤認して文脈を広げてしまうため。
-# `--numstat` は "追加 削除 パス" を1ファイル1行で出す。`--shortstat` の文章と違い
-# 翻訳の対象にならないため、ロケールを問わず同じ形で読める。バイナリは "-" になる。
+# 文脈行数は差分規模に応じて変える。小さい差分では広く取り、大きい差分では狭める。
+# 広すぎる文脈は追い読みを減らす代わりにpacket自体を肥大させるため、総量が最小に
+# なる側へ倒す。`--numstat` は "追加 削除 パス" を1ファイル1行で出す。ロケールを
+# 問わず同じ形で読める。バイナリは "-" になる。
 CHANGED="$(git diff --numstat "$BASE_SHA...$HEAD_SHA" |
   awk '{if ($1 != "-") s += $1; if ($2 != "-") s += $2} END {print s + 0}')"
 if [ "$CHANGED" -lt 400 ]; then
@@ -110,36 +138,17 @@ else
   U=8
 fi
 
-# 秘密鍵ブロックはsedの範囲アドレス (/start/,/end/c\) ではなくawkで扱う。
-# 範囲アドレスはEND側にマッチする行が最後まで現れないと、そこから末尾まで
-# 丸ごと1行に畳んでしまう。実際にこのMRの説明文中の「-----BEGIN...PRIVATE
-# KEY-----」という地の文がBEGIN側の開始条件に誤ってマッチし、それ以降の
-# 本文がpacketから丸ごと消える事故が起きた。
-#
-# 途中の実装ではBEGINにマッチしても即座に畳まず、行をバッファへ貯めてENDが
-# 確定した時点でだけ畳む方式にした。しかし自己レビューで、200行以内にENDが
-# 見つからない場合にバッファをそのまま生で出す設計が別の問題を持ち込むと
-# 指摘された。実鍵が200行を超える巨大ブロックだった場合、overflow時点まで
-# 貯めた実鍵の中身とその後に続くENDが無マスクで出てしまう (secrets漏洩の
-# 経路になる)。地の文の誤検出を防ぐために作った猶予行数が、今度は本物の
-# 鍵の取りこぼしを許してしまっては本末転倒。
-#
-# 最終形: BEGINに一致したら即座に貯め込みを始め、ENDが確定した時点だけ
-# [MASKED:private-key] に畳む。200行以内にENDが確定しない場合も、EOFまで
-# 確定しない場合も、それまでの中身は一切出力せず [MASKED:possible-
-# private-key-fragment] に畳む。「本物の鍵かどうか確定できない」ときは
-# 中身を出さない側へ倒す。これで地の文の誤検出時にレビュー材料の一部が
-# 畳まれることはあるが、レビュー材料の欠落よりsecrets漏洩の方が重いため、
-# このIssueの目的 (packetの機微情報の露出を下げる) に沿う判断とした。
-#
-# 200行を超えた時点 (span > 200) で「もう鍵ブロックの一部として貯め込む
-# のはやめる」が、そこで通常出力へ戻すと、超過分がまだ実鍵の続きだった
-# 場合に201行目以降の鍵本文とEND行自体が生で出てしまう (自己レビューで
-# 指摘・実測して確認した)。skipping状態を挟み、ENDが見つかるまで出力を
-# 抑制し続ける。ただしEND無しに無限に抑制し続けると地の文の誤検出で
-# それ以降のレビュー材料が全部消える (最初の事故と同じ形) ため、
-# skipping自体にも上限 (1000行) を設け、それを超えたら諦めて通常出力へ
-# 戻る。本物の秘密鍵がこの上限を超えることは想定しない。
+# 秘密鍵ブロックはsedの範囲アドレスではなくawkで扱う。範囲アドレスはEND側に
+# マッチする行が最後まで現れないと、そこから末尾まで丸ごと畳んでしまう。
+# 方針は「本物の鍵かどうか確定できないときは中身を出さない側へ倒す」。
+#   - BEGINに一致したら即座に貯め込みを始め、ENDが確定した時点で
+#     [MASKED:private-key] に畳む。
+#   - 200行以内にENDが確定しない場合は、貯めた中身を出さず skipping 状態へ移り、
+#     ENDが見つかるまで (または1000行の上限まで) 出力を抑制する。
+#   - 解除のきっかけになった行 (END行、上限到達行) も生では出さない。
+#   - どの終端 (END検出、上限到達、EOF) でもラベルは1つだけ出す。
+#     END検出は [MASKED:private-key]、それ以外は [MASKED:possible-private-key-fragment]。
+#     ただし200行超えでskippingへ移った後にENDが見つかった場合は後者になる。
 mask_private_key_block() {
   awk '
     !in_key && !skipping && /-----BEGIN[^-]*PRIVATE KEY-----/ {
@@ -154,24 +163,11 @@ mask_private_key_block() {
         next
       }
       if (span > 200) {
-        # overflow遷移そのものではラベルを出さない。ここで出すと、
-        # 後続でEND検出/skip上限到達/EOFのいずれかが来たときに
-        # END{}やskipping側でも出るため二重出力になる (7巡目で
-        # 実際に踏んだ)。「1つの終端 (END検出/skip上限到達/EOF)
-        # につきラベル1つ」に一本化し、overflow遷移はskipping状態
-        # への切替だけを行う。
         in_key = 0; skipping = 1; skip_span = 0
         next
       }
       next
     }
-    # skip解除 (END検出、skip上限到達、EOF到達) のどれでも、
-    # 解除のきっかけになった行自体は生で出さずマスクラベルを出す。
-    # 一度目の修正 (skip_span>1000到達行にprintを足す) はサイレント
-    # 欠落こそ直したが、その行がまだ鍵本体の可能性を否定できないのに
-    # 生出力していたため、自己レビューでsecrets露出の経路として
-    # 指摘された。「解除のきっかけの行を出さない」が3つの終端に
-    # 共通する不変条件なので、どれか1つだけ非対称な形にしない。
     skipping {
       skip_span++
       if ($0 ~ /-----END[^-]*PRIVATE KEY-----/ || skip_span > 1000) {
@@ -182,9 +178,6 @@ mask_private_key_block() {
     }
     { print }
     END {
-      # in_key・skippingいずれの状態でEOFに達しても、解除の
-      # きっかけとなる行が来なかっただけで不変条件は同じなので、
-      # 同じマスクラベルを出す (サイレントな欠落にしない)。
       if (in_key || skipping) print "[MASKED:possible-private-key-fragment]"
     }
   '
@@ -192,23 +185,16 @@ mask_private_key_block() {
 
 # 鍵・トークンらしき値を伏せ字にする。既知の形 (AWS/GitHub/Slack/Stripe/SendGrid鍵、
 # URL埋め込み資格情報、秘密鍵ブロック、JWT、key=value形式) に絞り、誤検知で
-# レビュー材料が欠けるのを避ける。伏せた箇所は種別付きの [MASKED:...] にし、
-# 伏せた事実そのものを読み手に伝える。
+# レビュー材料が欠けるのを避ける。伏せた箇所は種別付きの [MASKED:...] にする。
 mask_secrets() {
   # 最後の2つの-e (key=value形式) のキャプチャグループ: \1=キー名、\4=区切り文字
   # ([:=]または=>の前後空白含む)。値だけを [MASKED:secret] に置き換えるため \1\4 を残す。
-  # \4はキー名直後の閉じ引用符 (" または ') を1つだけ許し、JSONやPythonのdict
-  # リテラル ("password": "...") も対象にする。閉じ引用符の直後に[:=]または=>が来ることを
+  # \4はキー名直後の閉じ引用符を1つだけ許し、JSONやPythonのdictリテラル
+  # ("password": "...") も対象にする。閉じ引用符の直後に[:=]または=>が来ることを
   # 求めるため、"password_hint" のようにキー名を含む別のキーは伏せない。
-  # secret_key はキー名の一部としてキー群に含む。secretは前方の選択肢に入れず
-  # secret[_-]?key と単独のsecretで表し、secret_secret のような組み合わせを
-  # キー群に含めない (Issue #158)。区切りに=>を許すのはRuby/PHPの
-  # ハッシュ記法 ('password' => '...') を伏せるため (Issue #153、MR !148の見送りlow)。
+  # 区切りに=>を許すのはRuby/PHPのハッシュ記法 ('password' => '...') のため。
   # 引用符で囲まれた値は閉じ引用符までを値とみなし、空白を含んでもマスクする。
-  # 値の中のバックスラッシュとその次の1文字 (\" や \') はエスケープとして1文字に
-  # 数え、閉じ引用符とみなさない。単引用符も同じ扱いにするのは、Python・JS・PHPの
-  # 文字列で \' を使うため。\' をエスケープとしないシェルやYAMLの単引用符では、
-  # 同じ行の次の単引用符まで伏せる範囲が広がることがあるが、伏せ過ぎる側に倒す。
+  # 値の中のバックスラッシュとその次の1文字はエスケープとして1文字に数える。
   # 引用符なしの値は空白で終わるとみなす。地の文 (「password: 8文字以上必須」など)
   # を丸ごと伏せないため、空白を越えて行末まで伏せることはしない。
   # sedは1行ずつ処理するため、キーと値が別の行に分かれた値は対象外。
@@ -226,25 +212,22 @@ mask_secrets() {
 }
 
 git diff --unified="$U" "$BASE_SHA...$HEAD_SHA" | mask_secrets >"$OUT/diff.patch"
+
 # 伏せた箇所を含むファイルを masked.txt へ出す。diff.patch ではテストのダミー値も
-# 伏せられて読めないため、実ファイルを読むべき箇所を読み手へ知らせる (Issue #159)。
-# diff.patch からは切り出せない。秘密鍵ブロックの畳み込みで行数が変わり、
-# ファイル境界の行まで消えうる。そこでファイルごとに差分を取り直して比べる。
+# 伏せられて読めないため、実ファイルを読むべき箇所を読み手へ知らせる。
+# diff.patch からは切り出せない (秘密鍵ブロックの畳み込みで行数が変わるため)。
+# そこでファイルごとに差分を取り直して比べる。
 # パスは :(literal) で渡し、* や : を含む名前がpathspecとして解釈されないようにする。
 # 1ファイルの取得失敗で set -e がpacket全体を消さないよう、失敗は拾って続ける。
 # 失敗したファイルは伏せた箇所の有無を判定できないので、載せる側へ倒す。
 # rename・copy (R/C) は元のパスもpathspecへ入れる。新しいパスだけだとrename検出が
-# 効かずファイル全体の追加として出て、変えていない行の伏せる値で載ってしまう (Issue #160)。
+# 効かず、変えていない行の伏せる値まで載ってしまう。
 # -z の --name-status は「状態、パス」、R/C だけ「状態、元のパス、新しいパス」の順に並ぶ。
-# C は diff.renames=copies の設定で出る。diff.renames=false では R も出ないが、そのときは
-# diff.patch もファイル全体の追加になるので、masked.txt と diff.patch は食い違わない。
 git diff --name-status -z "$BASE_SHA...$HEAD_SHA" | while IFS= read -r -d '' status && IFS= read -r -d '' f; do
   specs=(":(literal)$f")
   case "$status" in
     R* | C*)
-      # f を新しいパスへ置き換える。以降の判定と masked.txt への出力は新しいパスで行う。
-      # 入力が途切れて読めなければ元のパスのまま進み、set -e でpacket全体を消さない。
-      # read は失敗しても読めた分 (空文字を含む) を代入するので、別の変数で受ける。
+      # 入力が途切れて読めなければ元のパスのまま進む。
       if IFS= read -r -d '' new_f; then
         f=$new_f
         specs+=(":(literal)$f")
@@ -276,46 +259,92 @@ print("# " + (d.get("title") or ""))
 print(d.get("description") or d.get("body") or "")' | mask_secrets
 }
 
+# remoteのURLからホスト名だけを取り出す。
+# 対応する形: https://host/path、http://host/path、https://user:token@host/path、
+#   https://host:8443/path、ssh://git@host:port/path、git://host/path、git@host:path
+# URLに埋め込まれた資格情報はここで捨てる (ホスト名以外は使わない)。
+# https・httpはポートを残す (host:8443)。ssh://・git://・scp形式はAPIのポートではないので落とす。
+# それ以外のscheme (file://など) とローカルパスは空を返す。
+# サブパス配置のGitLab (https://host/sub/g/p.git) は扱えない。
+remote_host() {
+  printf '%s' "$1" | sed -E \
+    -e 's#^https?://([^/]*@)?([^/]+).*#\2#;t' \
+    -e 's#^(ssh|git|git\+ssh|ssh\+git)://([^/]*@)?([^/:]+).*#\3#;t' \
+    -e 's#^[a-z+]+://.*##;t' \
+    -e 's#^([^/]*@)?([^/:]+):.*#\2#;t' \
+    -e 's#.*##'
+}
+
+# 取得コマンドを実行し、成功したら出力を filter 経由で dest へ書く。
+#   fetch_into <dest> <対象名> <失敗時の案内> <filter関数> <コマンド...>
+# 失敗 (終了コードが0以外) はstderrへ理由と案内を出し、packet作成は続ける。
+# MR・PRが無いだけの失敗 (glab・ghは非ゼロで終わる) は、その旨のメッセージを見て黙る。
+# コマンドが成功して出力が空のときも黙る (空ファイルは最後に消える)。
+fetch_into() {
+  local dest="$1" what="$2" hint="$3" filter="$4"
+  shift 4
+  local errf rc=0 body
+  errf="$(mktemp "$OUT/.fetch-err-XXXXXX")"
+  body="$("$@" 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if ! grep -qiE 'no (open )?(merge request|pull request)|could not find any (merge request|pull request)' "$errf"; then
+      echo "review-packet.sh: failed to fetch $what (exit $rc): $(mask_secrets < "$errf" | head -c 300 | tr '\n' ' ')" >&2
+      echo "review-packet.sh: $hint" >&2
+    fi
+    rm -f "$errf"
+    return 0
+  fi
+  rm -f "$errf"
+  [ -n "$body" ] || return 0
+  if ! printf '%s\n' "$body" | "$filter" >"$dest"; then
+    echo "review-packet.sh: failed to process $what output; skipping it" >&2
+    rm -f "$dest"
+  fi
+  return 0
+}
+
 REMOTE="$(git remote get-url origin 2>/dev/null || true)"
+HOST="$(remote_host "$REMOTE")"
 # 取得できない理由は必ずstderrへ残す。黙って欠けると、呼び出し元が
 # 「Issue番号を渡し忘れた」のか「この環境では取れない」のかを区別できない。
-# remote URLからホスト名を求める (git@host:group/proj.git / https://host/group/proj.git)。
-REMOTE_HOST="$(printf '%s' "$REMOTE" | sed -E 's#^[a-z+]+://([^@/]+@)?##; s#^[^@/]+@##; s#[:/].*$##')"
-case "$REMOTE_HOST" in
-  github.com) KIND=github ;;
-  '') KIND=none ;;
-  *) KIND=gitlab ;;
-esac
-case "$KIND" in
-  gitlab)
-    export GITLAB_HOST="$REMOTE_HOST"
-    if ! command -v python3 >/dev/null 2>&1; then
-      echo "review-packet.sh: python3 not found; skipping issue/mr fetch" >&2
-    else
-      if [ -n "$ISSUE" ]; then
-        glab issue view "$ISSUE" --output json 2>/dev/null | title_body >"$OUT/issue.md" 2>/dev/null || true
-      fi
-      glab mr view --output json 2>/dev/null | title_body >"$OUT/mr.md" 2>/dev/null || true
-    fi
-    ;;
-  github)
+if [ -z "$HOST" ]; then
+  echo "review-packet.sh: no origin remote; skipping issue/mr fetch" >&2
+elif [ "${HOST%%:*}" = "github.com" ]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "review-packet.sh: gh not found; skipping issue/mr fetch" >&2
+  else
+    GH_HINT="check 'gh auth status'"
+    GH_TEMPLATE='# {{.title}}
+
+{{.body}}'
     if [ -n "$ISSUE" ]; then
-      gh issue view "$ISSUE" --json title,body \
-        -t '# {{.title}}
-
-{{.body}}' 2>/dev/null | mask_secrets >"$OUT/issue.md" || true
+      fetch_into "$OUT/issue.md" "issue #$ISSUE" "$GH_HINT" mask_secrets \
+        gh issue view "$ISSUE" --json title,body -t "$GH_TEMPLATE"
     fi
-    gh pr view --json title,body \
-      -t '# {{.title}}
+    fetch_into "$OUT/mr.md" "pull request" "$GH_HINT" mask_secrets \
+      gh pr view --json title,body -t "$GH_TEMPLATE"
+  fi
+else
+  # github.com以外はGitLabとみなし、glabへホストを渡す。GitLabでないホストでも
+  # ここへ来るので、失敗時の案内でそれにも触れる。
+  if ! command -v glab >/dev/null 2>&1; then
+    echo "review-packet.sh: glab not found; skipping issue/mr fetch" >&2
+  elif ! command -v python3 >/dev/null 2>&1; then
+    echo "review-packet.sh: python3 not found; skipping issue/mr fetch" >&2
+  else
+    # fetch_intoへ環境変数付きのコマンドを渡せないため関数で包む (envコマンドはPATH次第で別物になる)。
+    glab_host() { GITLAB_HOST="$HOST" glab "$@"; }
+    GLAB_HINT="check 'glab auth status --hostname $HOST'. If origin ($HOST) is not a GitLab host, this failure can be ignored"
+    if [ -n "$ISSUE" ]; then
+      fetch_into "$OUT/issue.md" "issue #$ISSUE" "$GLAB_HINT" title_body \
+        glab_host issue view "$ISSUE" --output json
+    fi
+    fetch_into "$OUT/mr.md" "merge request" "$GLAB_HINT" title_body \
+      glab_host mr view --output json
+  fi
+fi
 
-{{.body}}' 2>/dev/null | mask_secrets >"$OUT/mr.md" || true
-    ;;
-  *)
-    echo "review-packet.sh: unsupported remote; skipping issue/mr fetch: ${REMOTE:-none}" >&2
-    ;;
-esac
-
-# 差分が無いときは空のdiff.patchも消える。base の指定間違い (fetch忘れなど) を
+# 差分が無いときは空のdiff.patchも消える。baseの指定間違い (fetch忘れなど) を
 # 取得失敗と見分けられるよう、事実をstderrへ出す。
 if [ "$CHANGED" -eq 0 ]; then
   echo "review-packet.sh: no changes between $BASE and $HEAD_REF" >&2

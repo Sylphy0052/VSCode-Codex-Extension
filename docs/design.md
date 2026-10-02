@@ -1731,7 +1731,7 @@ Claude Code 2.1.286）。
 
 呼び出すときは、Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`と書く。
 `plugin.json`が無いディレクトリは渡さない（利用者skillを1件も追加していなければ何も渡さない）。
-同梱skillの中身・出どころ・更新方法は`docs/bundled-skills.md`にまとめる（Issue #1821）。
+同梱skillの中身・出どころ・更新方法は、下の「同梱skillの中身（Issue #1821）」にまとめる。
 
 読み込ませる経路:
 
@@ -1771,6 +1771,46 @@ CLIの古い版で`skills/extraRoots/set`が無い場合は、会話を止めず
 - 写す先はいったん`skills-plugin/.staging-<乱数>/`とし、`SKILL.md`まで写せたら`rename`で
   `skills/<フォルダ名>/`へ移す。途中の状態を会話中のCLIに読ませず、失敗時も一時側だけを消す。
   `SKILL.md`の無い同名の残骸（削除の途中で失敗した等）は一覧に出ず消せないため、移す前に片付ける
+
+#### 同梱skillの中身（Issue #1821）
+
+Forge HubのGitLab側が使う`gitlab-*` skillと、そのレビュー段が使うsubagentを同梱する。
+
+- skill（`resources/skills-plugin/skills/`）: `gitlab-develop`・`gitlab-review`・`gitlab-cleanup`と、
+  そこから呼ばれる`gitlab-commit`・`gitlab-issue`・`gitlab-screenshot`・`gitlab-roadmap`・`gitlab-init`
+- subagent（`resources/skills-plugin/agents/`）: `review-robust`・`review-spec`・`review-style`・
+  `security-auditor`。Claude Codeはプラグインのagentとして`codex-ext:<名前>`で起動する。Codexには
+  subagentの仕組みが無いため、skillが同じファイルを読んで観点を順に確かめる
+
+出どころ: 開発者本人が使っていた個人の`gitlab-*` skill（Claude Code用とCodex用の2系統）を元に、
+2026-10-03に1本へまとめて一般化した。社内のホスト名・個人のパス・個人の規約ファイルへの参照を外し、
+GitLabのホストは`git remote`のURLから求め、規約は利用者のリポジトリの`CLAUDE.md`・`AGENTS.md`を
+読む形にした。skill同士の参照は`codex-ext:<skill名>`に揃えている。
+
+正本はこのリポジトリの`resources/skills-plugin/`とする。個人のskillから生成し直すことはしない
+（社内のホスト名や個人の規約が混ざるため）。
+
+更新方法:
+
+- `resources/skills-plugin/`配下を直接編集し、通常のPRで変える。VSIXの版上げで配布される
+- Claude Code用とCodex用で中身を分けない。違いが要る箇所は本文中で書き分ける
+- 同梱範囲を広げるときは、Forge Hubから辿れるか（Forge Hubが呼ぶskillから参照されるか）で決める
+- skillやsubagentを足す・消すときは、`test/unit/bundledSkills.test.ts`の一覧も合わせて直し、
+  `npx vitest run --maxWorkers=2 test/unit/bundledSkills.test.ts`を通す。このテストは、一覧、
+  `SKILL.md`の`name`、社内のホスト名・個人のパス・メールアドレスが無いこと、`codex-ext:<名前>`の参照と
+  Markdownの相対リンクが同梱した範囲で解決することを確かめる
+- 変更後は、社内のホスト名・個人のパス・個人の規約ファイルや個人のツールへの参照が無いことを確かめる
+  - 個人のパスは
+    `rg -n '~/\.claude|~/\.codex|\$HOME/\.(claude|codex)|/home/[a-z]' resources/skills-plugin`
+    が0件になること
+  - 個人のツール・習慣は
+    `rg -n -i 'gant|genshijin|原始人|codegraph|auto-memory|MEMORY\.md|Gotcha:|handoff|EnterWorktree|model/effort' resources/skills-plugin`
+    が0件になること。ここに挙げた語は公開されているツール名や一般的な語で、社内の情報ではないため、
+    確認の再現性を優先してこの文書に書いている
+  - ホスト名は`rg -n 'gitlab\.[a-z]' resources/skills-plugin`の結果が
+    `gitlab.com`・`gitlab.example.com`だけであること
+  - 社名・社内のホスト名・社内の別リポジトリ名・開発者のユーザー名は、この文書に書かない。
+    編集した人が手元で上の`rg -i`のパターンへ足して0件を確かめる
 
 ### 14.20 承認方法をキー操作で回す
 

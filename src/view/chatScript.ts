@@ -2501,6 +2501,7 @@ export function chatScript(
     renderQueue(queuedMessages);
     renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
     renderAutoReplyActivity(state.autoReplyActivity);
+    renderProcessSuspension(state.processSuspension);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
     hasBackgroundTerminals = (state.backgroundTerminals || []).length > 0;
@@ -2708,6 +2709,24 @@ export function chatScript(
     const text = typeof activity === 'string' ? activity : '';
     node.hidden = text === '';
     node.textContent = text === '' ? '' : '自動返信: ' + text;
+  }
+
+  // 使っていないタブのCLIを終了している間の1行（Issue #1808）。Claude Codeのタブだけが送る
+  const PROCESS_SUSPENSION_LABELS = {
+    stopping: '使っていないためCLIを終了しています',
+    suspended: '休止中（次の送信で再開）',
+    resuming: 'CLIを再開しています',
+    resumeFailed: '再開に失敗しました（新しい会話として始めるかを通知から選べます）',
+  };
+  function renderProcessSuspension(suspension) {
+    const node = el('processSuspension');
+    if (!node) return;
+    const label =
+      typeof suspension === 'string' && Object.prototype.hasOwnProperty.call(PROCESS_SUSPENSION_LABELS, suspension)
+        ? PROCESS_SUSPENSION_LABELS[suspension]
+        : '';
+    node.hidden = label === '';
+    node.textContent = label;
   }
 
   function renderLimitAutoResumeStatus(status) {
