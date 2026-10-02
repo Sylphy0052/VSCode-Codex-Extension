@@ -70,6 +70,24 @@ export function executableNameCandidates(name: string, env: NodeJS.ProcessEnv): 
 }
 
 /**
+ * 設定値がコマンド名ではなくパスを指しているかを判定する（Issue #1815）。
+ *
+ * `/`を含めばどのOSでもパスとみなす。Windowsでは`\`区切り（`C:\...\codex.cmd`）と
+ * ドライブ文字始まり（`C:codex.cmd`）もパスとみなす。Linux・macOSではファイル名に`\`を
+ * 使えるため、`\`だけではパスとみなさない。Windowsかどうかは注入されたPATH区切り文字
+ * （Windowsだけ`;`）で判断し、テストでプラットフォームを固定できるようにしている。
+ */
+function isPathLike(value: string, deps: LocatorDeps): boolean {
+  if (value.includes('/')) {
+    return true;
+  }
+  if (deps.delimiter !== ';') {
+    return false;
+  }
+  return value.includes('\\') || /^[A-Za-z]:/.test(value);
+}
+
+/**
  * PATH（またはパス指定）から実行ファイルを解決する。プロバイダ共通。
  *
  * `configured` は machine スコープ設定のため、ここでの値は信頼してよい。
@@ -84,7 +102,7 @@ export function resolveExecutable(
   // 明示指定がパスを含む場合は、それだけを見る。PATHへのフォールバックはしない
   // （指定が誤っていることに気づけなくなるため）。拡張子省略（Windowsで`gh`のように
   // 拡張子なしで設定された場合）にも`executableNameCandidates`で対応する。
-  if (trimmed !== '' && trimmed.includes('/')) {
+  if (trimmed !== '' && isPathLike(trimmed, deps)) {
     for (const candidate of executableNameCandidates(trimmed, deps.env)) {
       if (deps.isExecutable(candidate)) {
         return { ok: true, path: candidate, source: 'setting' };

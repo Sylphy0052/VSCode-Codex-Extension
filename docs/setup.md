@@ -219,7 +219,7 @@ code --install-extension vscode-codex-extension.vsix --force
 - WSLの場合、CLIをWindows側ではなくWSL側に入れたか
 - CLIを入れたあとにVS Codeを起動し直したか（起動中のVS CodeはPATHの変更を読み直さない）
 - それでも見つからない場合は、設定の`codex.executablePath`または`claude.executablePath`に実行ファイルの絶対パスを入れる。WSLでは、Windows側のユーザー設定ではなく「リモート [WSL: Ubuntu]」タブの設定に書く
-  - **Windowsではパスを`/`区切りで書く**（例: `C:/Users/<ユーザー名>/.local/bin/claude.exe`）。拡張機能は値に`/`が含まれるときだけパスとして扱う。`\`区切りの値はコマンド名とみなしてPATHから探すため、見つからない
+  - Windowsでは`\`区切りと`/`区切りのどちらでも書ける（例: `C:\Users\<ユーザー名>\.local\bin\claude.exe`）。`claude`のように区切りもドライブ文字も含まない値はコマンド名とみなし、PATHから探す
   - パスが誤っていると「`codex.executablePath が実行できません: <パス>`」のように通知される
 
 ## 必要に応じて入れるもの
