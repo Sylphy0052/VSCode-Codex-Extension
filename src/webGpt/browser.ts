@@ -85,19 +85,57 @@ async function isCdpReady(endpoint: string): Promise<boolean> {
   });
 }
 
+const POWERSHELL_TIMEOUT_MS = 15000;
+const CHROME_NOT_FOUND_EXIT_CODE = 3;
+// WSL interopは断続的に `UtilAcceptVsock: accept4 failed 110` で約10秒後に終了コード1を返す。
+// 直後の再実行は通るため、この失敗に限って起動をやり直す（#1810）。
+const WSL_INTEROP_ATTEMPTS = 3;
+
+interface PowerShellFailure {
+  code?: unknown;
+  killed?: unknown;
+  stderr?: unknown;
+}
+
+function asPowerShellFailure(error: unknown): PowerShellFailure {
+  return typeof error === 'object' && error !== null ? error : {};
+}
+
+function isWslInteropFailure(failure: PowerShellFailure): boolean {
+  return typeof failure.stderr === 'string' && failure.stderr.includes('UtilAcceptVsock');
+}
+
+function describePowerShellFailure(failure: PowerShellFailure): string {
+  if (isWslInteropFailure(failure)) {
+    return `WSLからpowershell.exeを${WSL_INTEROP_ATTEMPTS}回実行しましたが、いずれもWSLのWindows連携（UtilAcceptVsock）で失敗しました。しばらく待って再実行するか、Chromeを手動で起動してください`;
+  }
+  if (failure.killed === true) {
+    return `PowerShellが${POWERSHELL_TIMEOUT_MS / 1000}秒以内に終了せず、WindowsのChromeを起動できませんでした。もう一度実行するか、Chromeを手動で起動してください`;
+  }
+  if (failure.code === CHROME_NOT_FOUND_EXIT_CODE) {
+    return 'WindowsにGoogle Chromeが見つかりません。Chromeをインストールしてください';
+  }
+  if (failure.code === 'ENOENT') {
+    return 'powershell.exeが見つかりません。WSLからWindowsのコマンドを実行できるか確認してください';
+  }
+  const detail = typeof failure.code === 'number' ? `（終了コード${failure.code}）` : '';
+  return `WindowsのChromeを起動できませんでした${detail}。PowerShellの実行環境を確認してください`;
+}
+
 async function launchChrome(port: number): Promise<void> {
   const windows =
     process.platform === 'win32' || (process.platform === 'linux' && /microsoft/i.test(release()));
   if (windows) {
-    // 動的に埋め込む値はURLで検証した数値ポートだけ。パスはWindows側で解決する。
+    // 動的に埋め込む値はURLで検証した数値ポートと定数の終了コードだけ。パスはWindows側で解決する。
     const script = `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $paths = @(
   "$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe",
   "\${env:ProgramFiles(x86)}\\Google\\Chrome\\Application\\chrome.exe",
   "$env:LOCALAPPDATA\\Google\\Chrome\\Application\\chrome.exe"
 )
 $chrome = $paths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $chrome) { throw 'Google Chrome is not installed' }
+if (-not $chrome) { exit ${CHROME_NOT_FOUND_EXIT_CODE} }
 $profile = Join-Path $env:LOCALAPPDATA 'Codex\\ChromeChatGPT'
 Start-Process -FilePath $chrome -ArgumentList @(
   '--remote-debugging-port=${port}',
@@ -106,23 +144,26 @@ Start-Process -FilePath $chrome -ArgumentList @(
   'https://chatgpt.com/'
 )
 `;
-    try {
-      await execFileAsync(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-EncodedCommand',
-          Buffer.from(script, 'utf16le').toString('base64'),
-        ],
-        { timeout: 15000, maxBuffer: 65536, windowsHide: true },
-      );
-    } catch {
-      throw new Error(
-        'WindowsのChromeを起動できませんでした。ChromeのインストールとPowerShellの実行環境を確認してください',
-      );
+    // 同じプロファイルのChromeが起動済みなら、再実行はそのChromeにタブを1つ足すだけで済む。
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await execFileAsync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-EncodedCommand',
+            Buffer.from(script, 'utf16le').toString('base64'),
+          ],
+          { timeout: POWERSHELL_TIMEOUT_MS, maxBuffer: 65536, windowsHide: true },
+        );
+        return;
+      } catch (error) {
+        const failure = asPowerShellFailure(error);
+        if (isWslInteropFailure(failure) && attempt < WSL_INTEROP_ATTEMPTS) continue;
+        throw new Error(describePowerShellFailure(failure));
+      }
     }
-    return;
   }
 
   const candidates =
