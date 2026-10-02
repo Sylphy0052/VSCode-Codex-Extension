@@ -109,6 +109,7 @@ import {
   DEFAULT_HANDOFF_REFLEX_SUGGEST_THRESHOLD,
   type HandoffReflexSettings,
 } from './view/handoffBoundaryReflex';
+import { DEFAULT_HANDOFF_ACCEPTANCE_THRESHOLD } from './view/handoffAcceptanceReflex';
 import type { GoalDraftSettings } from './loop/goalDraftProcess';
 import type {
   GoalEvaluatorProviderSetting,
@@ -1112,6 +1113,18 @@ export function readAutoHandoffReflexConfig(
       DEFAULT_HANDOFF_REFLEX_BOUNDARY_THRESHOLD,
     ),
   };
+}
+
+/**
+ * 引き継ぎ先の受領をReflexで判定するとき（Issue #1840）に、受領とみなす確率の下限を読む。
+ * 0〜1の範囲外なら既定値に戻す。
+ */
+export function readHandoffAcceptanceThreshold(): number {
+  return reflexThreshold(
+    vscode.workspace.getConfiguration('agent'),
+    'autoHandoff.reflex.acceptanceThreshold',
+    DEFAULT_HANDOFF_ACCEPTANCE_THRESHOLD,
+  );
 }
 
 /**

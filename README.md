@@ -296,7 +296,7 @@ Codexだけを使う場合も同様で、Claude Code側の導線（履歴ビュ�
 
 - Hub内のForgeオーケストレータが通常入力と状態別ボタンを同じ会話として扱う。Issue作成時は「着手前の現状」「非エンジニア向け概要」「エンジニア向け仕様・実装計画」「確認者向け確認点」に加え、利用可能なlabel・assignee・milestoneを指定できる。
 - 既存Issueを選ぶと、確認後に隔離worktreeを作り、同じForgeオーケストレータへ着手を依頼する。作業カードは再起動後も復元される。
-- GitLab側の着手・レビュー・cleanupの依頼は、依頼先のCLIに`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`のskillがあればそれを呼ぶ（Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`）。skillは拡張機能に含まれておらず、無い環境ではGitHub側と同じく手順を平文で依頼する。
+- GitLab側の着手・レビュー・cleanupの依頼は、`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`のskillを呼ぶ（Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`）。3つが揃っている出どころを、ホームやリポジトリ内のskill、拡張機能に同梱したskill（`codex-ext:gitlab-develop`など）、画面から追加したskill（`codex-ext-user:`）の順に探す。どこにも揃っていなければ、GitHub側と同じく手順を平文で依頼する。
 - 更新時にCI、レビュー本文、承認残数、マージ可否、PR/MRのopen/merged/closed状態を取得する。マージ済みは`マージ済み・cleanup待ち`列へ移る。
 - cleanupは対象を表示した確認後にだけ依頼する。マージ、Issue close、branch/worktree削除はオーケストレータが対象を確認してから実行し、自動マージ・自己マージはしない。
 
