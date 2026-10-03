@@ -388,7 +388,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // 破棄を検証するテストが先にdisposeしていても安全（部品はfakeで、commandsの破棄はdeleteだけ）
+  for (const d of disposables) {
+    d.dispose();
+  }
   disposables = [];
+  // 途中のexpectが落ちてもspyを持ち越さない
+  vi.restoreAllMocks();
 });
 
 describe('setupTaskRun: 組み立てと破棄', () => {
@@ -1459,7 +1465,6 @@ describe('コマンド: agent.taskRun.start', () => {
     expect('value' in options).toBe(false);
     expect(call(options.validateInput, 'a'.repeat(81))).toBe('80文字以内で入力してください');
     expect(call(options.validateInput, 'a')).toBeUndefined();
-    showInputBox.mockRestore();
   });
 
   it('ロードマップ側の設定の尋ね方は既定名を入力欄へ入れる', async () => {
@@ -1473,7 +1478,6 @@ describe('コマンド: agent.taskRun.start', () => {
     const settings = await call<Promise<unknown>>(deps.askSettings, '既定名');
     expect(settings).toEqual({ engine: 'codex', maxParallel: 2, title: '決めた名前' });
     expect((showInputBox.mock.calls[0]?.[0] as Loose).value).toBe('既定名');
-    showInputBox.mockRestore();
   });
 
   it('並列上限の候補は1からMAX_TASK_RUN_PARALLELまで', async () => {
@@ -1567,7 +1571,6 @@ describe('コマンド: agent.taskRun.start', () => {
       expect((showQuickPick.mock.calls[1]?.[1] as Loose).title).toBe(
         'このフォルダには動いているrunが2本あります',
       );
-      showQuickPick.mockRestore();
     });
 
     it('1本の「開く」はそのrunを開いて終わる', async () => {
@@ -1704,7 +1707,6 @@ describe('Orchestratorの確認ダイアログ', () => {
     expect(detail.endsWith(answer)).toBe(true);
     __mock.showWarningMessageAnswer = undefined;
     expect(await confirm('confirmAnswer')(input)).toBe(false);
-    warn.mockRestore();
   });
 
   it('関門: 決着させる、を押したときだけtrue。Reflexの有無を表示する', async () => {
@@ -1726,7 +1728,6 @@ describe('Orchestratorの確認ダイアログ', () => {
     expect(await confirm('confirmGateResolution')({ ...base, reflexSummary: undefined })).toBe(
       false,
     );
-    warn.mockRestore();
   });
 
   it('計画: 承認する、を押したときだけtrue。Reflexの有無を表示する', async () => {
@@ -1745,6 +1746,5 @@ describe('Orchestratorの確認ダイアログ', () => {
     );
     __mock.showWarningMessageAnswer = undefined;
     expect(await confirm('confirmPlanApproval')({ ...base, reflexSummary: undefined })).toBe(false);
-    warn.mockRestore();
   });
 });

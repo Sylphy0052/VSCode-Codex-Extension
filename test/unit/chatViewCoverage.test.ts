@@ -192,6 +192,8 @@ describe('chatView.ts の補完カバレッジ', () => {
   });
 
   afterEach(() => {
+    // 途中のexpectが落ちてもspyを持ち越さない（__mock.reset()はspyを戻さない）
+    vi.restoreAllMocks();
     vi.useRealTimers();
     for (const dir of tempDirs.splice(0)) {
       nodeFs.rmSync(dir, { recursive: true, force: true });
@@ -764,7 +766,6 @@ describe('chatView.ts の補完カバレッジ', () => {
       spy.mockReturnValue(undefined);
       await chat.post({ type: 'insertCode', code: 'const a = 1;' });
       expect(__mock.messages.infos).toContain('挿入先のエディタが開かれていません');
-      spy.mockRestore();
     });
 
     it('openCodeFile は保存前の文書としてコードを開く', async () => {
