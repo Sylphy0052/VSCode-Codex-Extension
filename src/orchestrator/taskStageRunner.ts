@@ -332,7 +332,6 @@ function appendPrefix(first: string | undefined, second: string): string {
   return first === undefined ? second : `${first}\n\n${second}`;
 }
 
-/** Reflexの判定の要約を行で繋ぐ。 */
 /**
  * 報告なしに終わった工程の関門へ載せる理由（Issue #1676）。
  *
