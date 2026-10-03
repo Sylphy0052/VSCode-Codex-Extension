@@ -211,6 +211,10 @@ mainのCIは長い間LintかFormatのステップで止まっていて、Testス
 
 テストを追加して70%へ戻すには約3360行分のテストが必要で、1つのPRでは済まない。そこで `checks` を緑に戻して以後の低下を止めることを優先し、閾値を `statements 60` / `branches 54` / `functions 58` / `lines 60` に下げた。70/68/70/70へ戻す作業は #1854 で行う。
 
+#1854では、PRごとに実測値まで閾値を段階的に引き上げる。`coverage.exclude` への追加で数値を上げることはしない。
+
+- taskRun系（`taskRunController.ts`・`taskStageRunner.ts`・`resourceSampler.ts`・`taskRunLease.ts`・`runNotes.ts`）の単体テストを追加した後の実測は statements 67.6% / branches 61.97% / functions 67.35% / lines 67.97%。閾値を `statements 67` / `branches 61` / `functions 67` / `lines 67` に上げた
+
 ### 既知の注意点
 
 - `src/view/chatScript.ts`（Webview側スクリプトをテンプレートリテラルとして埋め込むファイル）は、v8の計装の都合で実態と合わない値が出ることが既知（#455で言及）。今回の実測では、`chatShared.ts` から関数として`import`されテスト経由で実行されているにもかかわらず、per-fileのカバレッジ一覧（`npm run test:coverage`のtextレポート）自体にこのファイルが出現しなかった。実態と一致しない、またはそもそも計測結果に現れないことがあるため、このファイルの数値・有無を判断根拠にしないこと
