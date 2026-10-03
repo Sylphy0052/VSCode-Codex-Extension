@@ -192,9 +192,7 @@ describe('createClaudeDigestBuilder', () => {
       { type: 'assistant', message: { content: [{ type: 'tool_use', input: {} }] } },
     );
     const digest = b.result();
-    expect(digest).toBeDefined();
-    expect(digest?.editedFiles).toEqual([]);
-    expect(digest?.runningJobs).toEqual([]);
+    expect(digest).toMatchObject({ editedFiles: [], runningJobs: [] });
   });
 
   it('run_in_backgroundのtool_useを走行中ジョブにし、task-notificationで外す', () => {

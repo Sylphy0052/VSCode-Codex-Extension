@@ -179,4 +179,247 @@ describe('ClaudeStreamSession: 使っていないCLIの休止と再開（Issue #
       vi.useRealTimers();
     }
   });
+
+  describe('発言の無い再開と、再開の失敗・dispose後の文言（Issue #1859）', () => {
+    /** 書き込み済みのcontrol_requestから、指定した種類のrequest_idを取る。 */
+    function requestIdOf(proc: FakeChildProcess, subtype: string): string {
+      for (const w of proc.writes) {
+        const parsed = JSON.parse(w) as { request_id?: string; request?: { subtype?: string } };
+        if (parsed.request?.subtype === subtype && parsed.request_id !== undefined) {
+          return parsed.request_id;
+        }
+      }
+      throw new Error(`${subtype}のcontrol_requestが書き込まれていない`);
+    }
+
+    function respondOk(proc: FakeChildProcess, requestId: string, response: unknown): void {
+      proc.emitStdout(
+        JSON.stringify({
+          type: 'control_response',
+          response: { subtype: 'success', request_id: requestId, response },
+        }),
+      );
+    }
+
+    async function flush(): Promise<void> {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    it('休止中のcheckMcpStatusは、initializeの成功応答で再開を確定してから問い合わせる', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      expect(procs).toHaveLength(2);
+      expect(session.getState().processSuspension).toBe('resuming');
+      // systemのinitは発言を送るまで届かない。initializeの応答だけで進む
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'initialize'), {});
+      await flush();
+      expect(session.getState().processSuspension).toBeUndefined();
+      const mcpRequestId = requestIdOf(procs[1]!, 'mcp_status');
+      respondOk(procs[1]!, mcpRequestId, { mcpServers: [{ name: 'a', status: 'connected' }] });
+      await expect(status).resolves.toHaveLength(1);
+      // 発言の無い再開は成功を通知しない（MCPの比較材料が無い）
+      expect(outcomes).toHaveLength(0);
+    });
+
+    it('発言の無い再開が失敗したら、操作は再開できていない旨で失敗する', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const answer = session.askSideQuestion('これは？', []);
+      await flush();
+      procs[1]!.emitExit(1);
+      await expect(answer).resolves.toMatchObject({
+        ok: false,
+        error: { message: '休止していた会話を再開できていません' },
+      });
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]).toMatchObject({ kind: 'failed', text: '' });
+    });
+
+    /** 発言の無い再開をexitで失敗させ、`resumeFailed`にする。 */
+    async function resumeFailedSession() {
+      const ctx = createSession();
+      await suspendSession(ctx.session, ctx.procs[0]!);
+      const trigger = ctx.session.askSideQuestion('起こす', []);
+      await flush();
+      ctx.procs[1]!.emitExit(1);
+      await trigger;
+      expect(ctx.session.getState().processSuspension).toBe('resumeFailed');
+      return ctx;
+    }
+
+    it('再開に失敗した後は、MCP追加・ファイル巻き戻し・会話巻き戻し・MCP確認も再開できていない旨で失敗する', async () => {
+      const { session } = await resumeFailedSession();
+      (session as unknown as { isForkSession: boolean }).isForkSession = true;
+      await expect(session.ensureMcpServer('x', { command: 'c', args: [] })).rejects.toThrow(
+        '休止していた会話を再開できていません',
+      );
+      await expect(session.previewRewindFiles('u1')).resolves.toMatchObject({
+        ok: false,
+        error: '休止していた会話を再開できていません',
+      });
+      await expect(session.applyRewindFiles('u1')).resolves.toMatchObject({
+        ok: false,
+        error: '休止していた会話を再開できていません',
+      });
+      await expect(session.rewindConversationToTurn(['u1'], 'u1')).resolves.toMatchObject({
+        ok: false,
+        error: { message: '休止していた会話を再開できていません' },
+      });
+      await expect(session.checkMcpStatus()).resolves.toBeUndefined();
+    });
+
+    it('dispose後は、各操作も起動していない旨で失敗する', async () => {
+      const { session } = createSession();
+      session.dispose();
+      (session as unknown as { isForkSession: boolean }).isForkSession = true;
+      await expect(session.ensureMcpServer('x', { command: 'c', args: [] })).rejects.toThrow(
+        'セッションが起動していません',
+      );
+      await expect(session.previewRewindFiles('u1')).resolves.toMatchObject({
+        error: 'セッションが起動していません',
+      });
+      await expect(session.rewindConversationToTurn(['u1'], 'u1')).resolves.toMatchObject({
+        error: { message: 'セッションが起動していません' },
+      });
+    });
+
+    function respondError(proc: FakeChildProcess, requestId: string, error: string): void {
+      proc.emitStdout(
+        JSON.stringify({
+          type: 'control_response',
+          response: { subtype: 'error', request_id: requestId, error },
+        }),
+      );
+    }
+
+    it('発言の無い再開でinitializeが失敗応答でも、CLIは動いているので再開を確定する', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      // 通常の起動と同じく、承認を受けられないだけで会話は続く
+      respondError(procs[1]!, requestIdOf(procs[1]!, 'initialize'), '初期化できません');
+      await flush();
+      expect(session.getState().processSuspension).toBeUndefined();
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'mcp_status'), { mcpServers: [] });
+      await expect(status).resolves.toHaveLength(0);
+      expect(outcomes).toHaveLength(0);
+      expect(procs[1]!.kill).not.toHaveBeenCalled();
+    });
+
+    it('再開の最中に発言が来たら、initializeの成功応答では確定せずinitを待つ', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      session.send('続き');
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'initialize'), {});
+      await flush();
+      expect(session.getState().processSuspension).toBe('resuming');
+      procs[1]!.emitStdout(initEvent([]));
+      await flush();
+      expect(session.getState().processSuspension).toBeUndefined();
+      expect(outcomes).toEqual([{ kind: 'resumed', mcpServers: [] }]);
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'mcp_status'), { mcpServers: [] });
+      await expect(status).resolves.toHaveLength(0);
+    });
+
+    it('再開の最中に発言が来た後のinitialize失敗は確定せず、終了したら発言を添えて失敗を知らせる', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      void session.checkMcpStatus();
+      await flush();
+      session.send('続き');
+      respondError(procs[1]!, requestIdOf(procs[1]!, 'initialize'), '初期化できません');
+      await flush();
+      expect(session.getState().processSuspension).toBe('resuming');
+      procs[1]!.emitExit(1);
+      expect(session.getState().processSuspension).toBe('resumeFailed');
+      expect(outcomes).toEqual([expect.objectContaining({ kind: 'failed', text: '続き' })]);
+    });
+
+    it('再開の最中にdisposeしたら、待っている操作が戻り起動していない旨で失敗する', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const answer = session.askSideQuestion('これは？', []);
+      await flush();
+      expect(session.getState().processSuspension).toBe('resuming');
+      session.dispose();
+      await expect(answer).resolves.toMatchObject({
+        ok: false,
+        error: { message: 'セッションが起動していません' },
+      });
+      expect(() => session.send('続き')).toThrow('セッションが起動していません');
+      expect(outcomes).toHaveLength(0);
+    });
+
+    it('initializeの成功で確定した後にCLIが終了しても、再開の失敗にはしない', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'initialize'), {});
+      await flush();
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'mcp_status'), { mcpServers: [] });
+      await status;
+      procs[1]!.emitExit(1);
+      // 再開は済んでいる。通常の「CLIが落ちた」と同じ扱い（`resumeFailed`の表示も新しい会話の提案も出さない）
+      expect(session.getState().processSuspension).toBeUndefined();
+      expect(outcomes).toHaveLength(0);
+      expect(() => session.send('続き')).toThrow('セッションが起動していません');
+    });
+
+    it('発言の無い再開では、MCPの接続状態の比較を次に届くinitまで持ち越す', async () => {
+      const { session, procs, outcomes } = createSession();
+      session.send('最初');
+      procs[0]!.emitStdout(initEvent([{ name: 'a', status: 'connected' }]));
+      procs[0]!.emitStdout(
+        JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }),
+      );
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'initialize'), {});
+      await flush();
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'mcp_status'), { mcpServers: [] });
+      await status;
+      expect(outcomes).toHaveLength(0);
+      session.send('続き');
+      procs[1]!.emitStdout(initEvent([{ name: 'a', status: 'failed' }]));
+      expect(outcomes).toEqual([
+        { kind: 'resumed', mcpServers: [{ name: 'a', status: 'failed' }] },
+      ]);
+      // 2回目以降のinitでは報告しない
+      procs[1]!.emitStdout(initEvent([{ name: 'a', status: 'connected' }]));
+      expect(outcomes).toHaveLength(1);
+    });
+
+    it('再開に失敗した後のsendは、再開できていない旨で弾く', async () => {
+      const { session, procs } = createSession();
+      await suspendSession(session, procs[0]!);
+      session.send('続き');
+      procs[1]!.emitExit(1);
+      expect(() => session.send('もう一度')).toThrow('休止していた会話を再開できていません');
+    });
+
+    it('dispose後のsendは、再開の失敗ではなく起動していない旨で弾く', () => {
+      const { session } = createSession();
+      session.dispose();
+      expect(() => session.send('続き')).toThrow('セッションが起動していません');
+    });
+
+    it('休止中にdisposeしても、その後のsendと操作は起動していない旨で失敗する', async () => {
+      const { session, procs } = createSession();
+      await suspendSession(session, procs[0]!);
+      session.dispose();
+      expect(() => session.send('続き')).toThrow('セッションが起動していません');
+      await expect(session.askSideQuestion('これは？', [])).resolves.toMatchObject({
+        ok: false,
+        error: { message: 'セッションが起動していません' },
+      });
+      expect(procs).toHaveLength(1);
+    });
+  });
 });

@@ -1295,6 +1295,22 @@ describe('質問', () => {
     expect(question?.userOnly).toBe(true);
   });
 
+  it('元からユーザーの判断待ちの質問はユーザーへ回さず、ok:falseを返す', async () => {
+    const h = await withQuestion();
+
+    const result = await h.controller.escalateToUser(
+      RUN_ID,
+      'T1',
+      { questionId: 'q1' },
+      '決められない',
+    );
+
+    expect(result.ok).toBe(false);
+    const question = findStageQuestion(runOf(h), 'T1', 'q1');
+    expect(question?.status).toBe('awaitingUser');
+    expect(question?.userOnly).not.toBe(true);
+  });
+
   it('answerQuestionはrunnerの結果で成否を返し、回答者を渡す', async () => {
     const h = await withQuestion();
 
@@ -1489,6 +1505,20 @@ describe('関門', () => {
 
     await h.controller.resolveGateByReview(RUN_ID, 'T1', 'g1', 'proceed', undefined);
     expect(reviewGate).toHaveBeenCalledTimes(3);
+  });
+
+  it('元からユーザーの判断待ちの関門はユーザーへ回さず、ok:falseを返す', async () => {
+    const h = await setup([stageFailedRun('awaitingUser')]);
+
+    const result = await h.controller.escalateToUser(
+      RUN_ID,
+      'T1',
+      { gateId: 'g1' },
+      '決められない',
+    );
+
+    expect(result.ok).toBe(false);
+    expect(findStageGate(runOf(h), 'T1', 'g1')?.status).toBe('awaitingUser');
   });
 
   it('オーケストレーターの判断待ちの関門をユーザーへ回す。runが無ければ断る', async () => {

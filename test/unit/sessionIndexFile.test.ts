@@ -211,7 +211,9 @@ describe('sessionIndexFile', () => {
     it('親パスがファイルで作れなければ例外を投げる', async () => {
       const blocker = join(dir, 'blocker');
       await writeFile(blocker, 'x', 'utf8');
-      await expect(writeSessionIndexFile(join(blocker, 'index.json'), [])).rejects.toThrow();
+      await expect(writeSessionIndexFile(join(blocker, 'index.json'), [])).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
     });
   });
 
@@ -297,7 +299,7 @@ describe('sessionIndexFile', () => {
 
       await expect(
         reconcileLegacyIndex(join(blocker, 'index.json'), memento, false),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ code: 'EEXIST' });
       expect(update).not.toHaveBeenCalled();
     });
   });

@@ -29,6 +29,8 @@ interface Harness {
   panel: FakeWebviewPanel;
   closeTask: ReturnType<typeof vi.fn>;
   showInputBox: ReturnType<typeof vi.spyOn>;
+  /** webviewのcloseTaskメッセージの処理（入力欄の取消・controller呼出・通知）が終わるまで待つ */
+  settled: () => Promise<void>;
 }
 
 function open(
@@ -47,12 +49,17 @@ function open(
     .spyOn(vscode.window, 'showInputBox')
     .mockResolvedValue(options.inputAnswer);
   const view = new TaskRunKanbanViewManager(deps);
+  // 実装は素通しで、処理が終わったことを正の条件で待てるよう戻り値のPromiseだけ捕まえる
+  const handler = vi.spyOn(view as unknown as { closeTask: () => Promise<void> }, 'closeTask');
+  const settled = async (): Promise<void> => {
+    await Promise.all(handler.mock.results.map((r) => r.value as Promise<void>));
+  };
   view.show('run-1');
   const panel = __mock.lastCreatedPanel();
   if (panel === undefined) {
     throw new Error('パネルが作られていない');
   }
-  return { view, panel, closeTask, showInputBox };
+  return { view, panel, closeTask, showInputBox, settled };
 }
 
 /** webviewの「mergeせずに完了にする」ボタンが送るメッセージ */
@@ -112,8 +119,8 @@ describe('TaskRunKanbanViewManager: closeTask', () => {
     h = open({ inputAnswer: undefined });
     sendCloseTask(h);
     await vi.waitFor(() => expect(h?.showInputBox).toHaveBeenCalledTimes(1));
-    // 取消後の後続処理が走り切るのを待つ
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // 取消後の後続処理が走り切るのを、処理のPromiseの完了で待つ
+    await h.settled();
     expect(h.closeTask).not.toHaveBeenCalled();
     expect(__mock.messages.infos).toEqual([]);
   });
@@ -148,7 +155,7 @@ describe('TaskRunKanbanViewManager: closeTask', () => {
     h = open({ inputAnswer: '重複' });
     sendCloseTask(h);
     await vi.waitFor(() => expect(h?.closeTask).toHaveBeenCalledTimes(1));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await h.settled();
     expect(__mock.messages.infos).toEqual([]);
   });
 });
