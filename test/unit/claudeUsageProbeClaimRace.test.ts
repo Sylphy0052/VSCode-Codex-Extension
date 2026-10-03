@@ -138,13 +138,13 @@ describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
   });
 
   it('mtimeが期限の幅を超えて未来にあるロックは、時計のずれた書き手の残骸として奪う', async () => {
-    writeLock(1, -10 * 60_000);
+    writeLock(1, -45_000);
     expect(await newProbe().claim(Date.now())).toBe(true);
     expect(lockFiles()).toEqual([`${LOCK}.2`]);
   });
 
   it('mtimeの未来へのずれが期限の幅に収まるロックは、保持中として取得しない', async () => {
-    writeLock(1, -10_000);
+    writeLock(1, -35_000);
     expect(await newProbe().claim(Date.now())).toBe(false);
     expect(lockFiles()).toEqual([`${LOCK}.1`]);
   });
@@ -178,6 +178,8 @@ describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
     const windows = [0, 1].map(() => new ClaudeUsageProbe(() => claude, log, shared));
     const now = Date.now();
     await Promise.all(windows.map((probe) => probe.read(now)));
+    // 待ち合わせが成立し、両者が期限切れを見てから奪い合ったこと
+    expect(barrier.expected).toBe(0);
     expect(readFileSync(counter, 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
   });
 

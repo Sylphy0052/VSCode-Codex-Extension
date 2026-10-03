@@ -155,7 +155,8 @@ export class ClaudeUsageProbe {
           // ホームをNFSで共有するホスト間では、mtimeを付けた時計とDate.now()がずれうる。
           // 未来のmtimeを「常に新しい」と見ると、ずれた分だけ全ウィンドウが取得できなくなるので、
           // ずれも期限の幅までしか認めない。逆向きのずれで早く期限切れと見て取得が重なるのは、
-          // `claude`の起動が1回増えるだけなので許す
+          // `claude`の起動が1回増えるだけなので許す。持ち主が落ちたとき、他が取得できない時間は
+          // ずれの分だけ延び、最長で期限の2倍になる
           const age = Date.now() - (await stat(this.lockPath(latest))).mtimeMs;
           if (Math.abs(age) <= CLAIM_STALE_MS) {
             return false;
