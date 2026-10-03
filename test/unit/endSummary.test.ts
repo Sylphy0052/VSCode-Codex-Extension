@@ -379,11 +379,11 @@ describe('EndSummaryRunner', () => {
     expect(logInfo).not.toHaveBeenCalled();
 
     const second = makeRunner();
+    const secret = 'AKIAABCDEFGHIJKLMNOP';
     expect(() =>
-      second.runner.start(
-        makeOptions({ material: { ...material, response: 'AKIAABCDEFGHIJKLMNOP' } }).options,
-      ),
+      second.runner.start(makeOptions({ material: { ...material, response: secret } }).options),
     ).not.toThrow();
+    expect(second.calls[0]?.prompt).not.toContain(secret);
   });
 
   it('応答が空白だけならprocess-errorの失敗として警告と失敗の注記を残す', async () => {

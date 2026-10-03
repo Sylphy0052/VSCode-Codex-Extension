@@ -1,4 +1,3 @@
-import { homedir } from 'node:os';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { Logger } from '../../src/log';
 import {
@@ -17,6 +16,13 @@ import type { VerifyCommandResult } from '../../src/verification/commandRunner';
 // 実gitを動かさないため、変更を戻す処理は差し替える
 vi.mock('../../src/orchestrator/runnerRevert', () => ({
   withTemporaryRevert: vi.fn(),
+}));
+
+// 実行環境のHOMEに依存させないため、ホームディレクトリを固定する
+const HOME = '/home/tester';
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  homedir: () => HOME,
 }));
 
 const mockedRevert = vi.mocked(withTemporaryRevert);
@@ -485,14 +491,13 @@ describe('runVerifyStages', () => {
     });
 
     it('出力に含まれるホームディレクトリをマスクする', async () => {
-      const home = homedir();
       const text = await measure(
-        [executed('npm test', { exitCode: 1, output: `error at ${home}/proj/a.ts` })],
+        [executed('npm test', { exitCode: 1, output: `error at ${HOME}/proj/a.ts` })],
         [executed('npm test', { exitCode: 0 })],
       );
 
       expect(text).toContain('/proj/a.ts');
-      expect(text).not.toContain(home);
+      expect(text).not.toContain(HOME);
     });
   });
 });

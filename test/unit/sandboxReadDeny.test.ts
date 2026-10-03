@@ -212,6 +212,21 @@ describe('一時ディレクトリを使うテスト', () => {
 
   const noAbort = (): AbortSignal => new AbortController().signal;
 
+  /** src側の`MAX_SCANNED_DIRECTORIES`（未export）と同じ値 */
+  const MAX_SCANNED_DIRECTORIES = 200_000;
+
+  /** cwdの直下に上限+1個のディレクトリがあるように見せ、実ディレクトリを作らずに上限を超えさせる */
+  const mockOverLimitDirectories = (cwd: string): void => {
+    const entries = Array.from({ length: MAX_SCANNED_DIRECTORIES + 1 }, (_, i) => ({
+      name: `d${String(i)}`,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    }));
+    vi.spyOn(fs, 'readdir').mockImplementation(((dir: string) =>
+      Promise.resolve(dir === cwd ? entries : [])) as unknown as typeof fs.readdir);
+    vi.spyOn(fs, 'realpath').mockImplementation((target) => Promise.resolve(String(target)));
+  };
+
   afterEach(async () => {
     vi.restoreAllMocks();
     for (const dir of created.splice(0)) {
@@ -417,15 +432,7 @@ describe('一時ディレクトリを使うテスト', () => {
 
     it('辿るディレクトリが上限を超えたらlimitを返す', async () => {
       const cwd = await makeTmp();
-      const fakeDirent = (name: string) => ({
-        name,
-        isDirectory: () => true,
-        isSymbolicLink: () => false,
-      });
-      const entries = Array.from({ length: 200_001 }, (_, i) => fakeDirent(`d${String(i)}`));
-      vi.spyOn(fs, 'readdir').mockImplementation(((dir: string) =>
-        Promise.resolve(dir === cwd ? entries : [])) as unknown as typeof fs.readdir);
-      vi.spyOn(fs, 'realpath').mockImplementation((target) => Promise.resolve(String(target)));
+      mockOverLimitDirectories(cwd);
       const result = await findDeniedDirectory(cwd, [pattern('Read(secrets)', cwd)], noAbort());
       expect(result).toEqual({ kind: 'limit' });
     });
@@ -602,14 +609,7 @@ describe('一時ディレクトリを使うテスト', () => {
 
     it('ディレクトリ数が上限を超えたら、確かめきれない理由で拒否する', async () => {
       const cwd = await makeTmp();
-      const entries = Array.from({ length: 200_001 }, (_, i) => ({
-        name: `d${String(i)}`,
-        isDirectory: () => true,
-        isSymbolicLink: () => false,
-      }));
-      vi.spyOn(fs, 'readdir').mockImplementation(((dir: string) =>
-        Promise.resolve(dir === cwd ? entries : [])) as unknown as typeof fs.readdir);
-      vi.spyOn(fs, 'realpath').mockImplementation((target) => Promise.resolve(String(target)));
+      mockOverLimitDirectories(cwd);
       const proc = fakeProc();
       useProc(proc);
       const result = inspectReadOnlyCwd('claude', cwd, noAbort());
@@ -617,7 +617,7 @@ describe('一時ディレクトリを使うテスト', () => {
       const inspection = await result;
       expect(inspection.ok).toBe(false);
       if (!inspection.ok) {
-        expect(inspection.reason).toContain('200000');
+        expect(inspection.reason).toContain(String(MAX_SCANNED_DIRECTORIES));
       }
     });
 
