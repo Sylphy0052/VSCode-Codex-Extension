@@ -71,6 +71,17 @@ export interface TaskLeaseOwner {
   pid: number;
 }
 
+/** `computeHostIdentity`が読む2つの値の取得元（テストで差し替える）。 */
+export interface HostIdentitySource {
+  readBootId: () => string;
+  readPidNamespace: () => string;
+}
+
+const PROC_HOST_IDENTITY_SOURCE: HostIdentitySource = {
+  readBootId: () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8'),
+  readPidNamespace: () => readlinkSync('/proc/self/ns/pid'),
+};
+
 /**
  * ホストのboot_idと自分のPID名前空間を組み合わせた識別子。同じhostnameでもPID名前空間が
  * 違えば別プロセス（`--network=host`のdevcontainerがホストとhostnameを共有する場合等）が
@@ -78,10 +89,12 @@ export interface TaskLeaseOwner {
  * `/proc`が無い環境（macOS/Windows）や読めない環境では空文字列を返し、呼び出し側は
  * hostnameだけでの判定へフォールバックする。
  */
-export function computeHostIdentity(): string {
+export function computeHostIdentity(
+  source: HostIdentitySource = PROC_HOST_IDENTITY_SOURCE,
+): string {
   try {
-    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-    const pidNamespace = readlinkSync('/proc/self/ns/pid');
+    const bootId = source.readBootId().trim();
+    const pidNamespace = source.readPidNamespace();
     return bootId === '' || pidNamespace === '' ? '' : `${bootId}:${pidNamespace}`;
   } catch {
     return '';

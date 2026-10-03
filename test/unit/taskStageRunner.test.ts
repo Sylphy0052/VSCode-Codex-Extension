@@ -152,6 +152,9 @@ interface HarnessOptions {
 
 const OK_GIT = { code: 0, stdout: '', stderr: '' };
 
+/** `build`が作ったrunner。assertが落ちてもafterEachでdisposeする。 */
+const runners: TaskStageRunner[] = [];
+
 function build(initial: readonly TaskRun[], options: HarnessOptions = {}) {
   const runs = new Map(initial.map((r) => [r.runId, r]));
   const store = {
@@ -240,6 +243,7 @@ function build(initial: readonly TaskRun[], options: HarnessOptions = {}) {
     ...options.deps,
   } as unknown as TaskStageRunnerDeps;
   const runner = new TaskStageRunner(deps);
+  runners.push(runner);
   const run = (runId = 'run-1'): TaskRun => {
     const found = runs.get(runId);
     if (found === undefined) {
@@ -358,7 +362,6 @@ async function startedHarness(options: HarnessOptions = {}): Promise<Harness> {
   return t;
 }
 
-const runners: TaskStageRunner[] = [];
 afterEach(() => {
   runners.splice(0).forEach((r) => r.dispose());
   vi.restoreAllMocks();
@@ -366,7 +369,6 @@ afterEach(() => {
 
 async function started(options: HarnessOptions = {}): Promise<Harness> {
   const t = await startedHarness(options);
-  runners.push(t.runner);
   return t;
 }
 
@@ -588,7 +590,6 @@ describe('TaskStageRunner.pump 工程の開始', () => {
     const t = build([makeRun([queuedTask('T1', 'issuePlan'), queuedTask('T2', 'issuePlan')])], {
       deps: { maxParallelPerFolder: () => 1 },
     });
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     expect(t.openClaude).toHaveBeenCalledTimes(1);
     await reportDone(t);
@@ -624,7 +625,6 @@ describe('TaskStageRunner.pump 工程の開始', () => {
 describe('TaskStageRunner worktreeの用意', () => {
   it('「実装とPR作成」はworktreeを作って記録し、そこで書き込める設定で動かす', async () => {
     const t = build([makeRun([queuedTask('T1', 'implement', { issueNumber: 12 })])]);
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     expect(t.worktreeQueue.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -650,7 +650,6 @@ describe('TaskStageRunner worktreeの用意', () => {
 
   it('記録済みのworktreeがあれば作らずに使う', async () => {
     const t = build([makeRun([queuedTask('T1', 'implement', WORKTREE_TASK)])]);
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     expect(t.worktreeQueue.create).not.toHaveBeenCalled();
     expect(t.openClaude.mock.calls[0]?.[0].cwd).toBe('/tmp/ws/.worktrees/T1');
@@ -748,7 +747,6 @@ describe('TaskStageRunner セッションを開けないとき', () => {
         ]);
       },
     });
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     const [report, question] = (await early) ?? [];
     expect(report).toMatchObject({ isError: true });
@@ -761,7 +759,6 @@ describe('TaskStageRunner セッションを開けないとき', () => {
 describe('TaskStageRunner mergeの鍵', () => {
   it('「mergeとcleanup」はmergeの鍵を持って動かし、失敗したら鍵を放す', async () => {
     const t = build([makeRun([queuedTask('T1', 'mergeCleanup', WORKTREE_TASK)])]);
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     expect(t.openClaude).toHaveBeenCalledTimes(1);
     expect((t.deps.mergeKeys as TaskRunMergeKeys).isBusy('/tmp/ws')).toBe(true);
@@ -829,7 +826,6 @@ describe('TaskStageRunner 工程の報告', () => {
 
   it('観測が例外を投げても理由として返す', async () => {
     const t = build([makeRun([queuedTask('T1', 'issueCreate')])]);
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     t.observation.fetchIssueTitle.mockRejectedValue(new Error('forgeに届かない'));
     const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
@@ -844,7 +840,6 @@ describe('TaskStageRunner 工程の報告', () => {
 
   it('観測した事実で「Issue作成」の成果を記録する', async () => {
     const t = build([makeRun([queuedTask('T1', 'issueCreate')])]);
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
       ...refArgs(t),
@@ -906,7 +901,6 @@ describe('TaskStageRunner 工程の報告', () => {
   it('reviewの報告は残った指摘を残件へ積み、レビュー後の関門を開く', async () => {
     const runNotes = { recordRemaining: vi.fn(async () => ({ ok: true as const })) };
     const t = build([makeRun([queuedTask('T1', 'review', WORKTREE_TASK)])], { deps: { runNotes } });
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
       ...refArgs(t),
@@ -928,7 +922,6 @@ describe('TaskStageRunner 工程の報告', () => {
   it('reviewが指摘を残さなければ残件へ積まない', async () => {
     const runNotes = { recordRemaining: vi.fn(async () => ({ ok: true as const })) };
     const t = build([makeRun([queuedTask('T1', 'review', WORKTREE_TASK)])], { deps: { runNotes } });
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     await callTool(t, REPORT_STAGE_RESULT_TOOL, {
       ...refArgs(t),
@@ -954,7 +947,6 @@ function lastAttemptId(t: Harness): string {
 
 async function mergeCleanupDone(options: HarnessOptions = {}): Promise<Harness> {
   const t = build([makeRun([queuedTask('T1', 'mergeCleanup', WORKTREE_TASK)])], options);
-  runners.push(t.runner);
   await t.runner.pump('run-1');
   t.observation.fetchPullRequestState.mockResolvedValue('merged');
   t.observation.remoteBranchHead.mockResolvedValue(null);
@@ -985,7 +977,6 @@ describe('TaskStageRunner merge後の後片付け', () => {
 
   it('後片付けの失敗は警告にとどめ、鍵は放す', async () => {
     const t = build([makeRun([queuedTask('T1', 'mergeCleanup', WORKTREE_TASK)])]);
-    runners.push(t.runner);
     t.worktreeQueue.remove.mockResolvedValue({ ok: false, message: '使用中' } as never);
     await t.runner.pump('run-1');
     t.observation.fetchPullRequestState.mockResolvedValue('merged');
@@ -1005,7 +996,6 @@ describe('TaskStageRunner merge後の後片付け', () => {
 
   it('メインのworking treeを進められなければ警告する', async () => {
     const t = build([makeRun([queuedTask('T1', 'mergeCleanup', WORKTREE_TASK)])]);
-    runners.push(t.runner);
     t.git.run.mockImplementation(async (args) =>
       args[0] === 'fetch' ? { code: 1, stdout: '', stderr: 'network' } : OK_GIT,
     );
@@ -1332,7 +1322,6 @@ describe('TaskStageRunner 一時停止と再開', () => {
     });
 
     const merge = build([makeRun([queuedTask('T1', 'mergeCleanup', WORKTREE_TASK)])]);
-    runners.push(merge.runner);
     await merge.runner.pump('run-1');
     expect(await merge.runner.pauseStage('run-1', 'T1', 'x')).toEqual({
       ok: false,
@@ -1588,7 +1577,6 @@ describe('TaskStageRunner セッションの終了', () => {
     const t = build([makeRun([queuedTask('T1', 'issuePlan'), queuedTask('T2', 'issuePlan')])], {
       deps: { maxParallelPerFolder: () => 1 },
     });
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     t.session().emitFinished('failed');
     await flush();
@@ -1621,7 +1609,6 @@ describe('TaskStageRunner mergeコマンドの承認', () => {
     const t = build([makeRun([queuedTask('T1', 'implement', WORKTREE_TASK)])], {
       deps: { judgeAnswerer },
     });
-    runners.push(t.runner);
     await t.runner.pump('run-1');
     return { t, judgeAnswerer };
   }
