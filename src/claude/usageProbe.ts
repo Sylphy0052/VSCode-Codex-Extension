@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
@@ -18,6 +18,15 @@ const TIMEOUT_MS = 20_000;
  * 表示の遅れは割合だけにとどまる。
  */
 const MIN_INTERVAL_MS = 5 * 60_000;
+
+/** 取得に失敗したとき、次に読み直すまでの間隔。成功時の間隔だと回復が遅れる。 */
+const RETRY_INTERVAL_MS = 60_000;
+
+/** 取得中であることを示す排他ファイル名（`sharedDir`の直下）。 */
+const CLAIM_FILE_NAME = 'claude-usage-probe.lock';
+
+/** この時間を過ぎた排他ファイルは、保持したまま落ちたものとして奪う。 */
+const CLAIM_STALE_MS = TIMEOUT_MS * 2;
 
 /** ウィンドウ間で共有する直近の取得結果のファイル名（`sharedDir`の直下）。 */
 const SHARED_FILE_NAME = 'claude-usage-probe.json';
@@ -60,21 +69,94 @@ export class ClaudeUsageProbe {
       return undefined;
     }
     this.running = true;
+    let claimed = false;
     try {
-      const shared = await this.readShared();
-      if (shared !== undefined && shared.readAt <= now && now - shared.readAt < MIN_INTERVAL_MS) {
-        this.lastReadAt = shared.readAt;
-        return shared.usage;
+      const fresh = await this.readFreshShared(now);
+      if (fresh !== undefined) {
+        this.lastReadAt = fresh.readAt;
+        return fresh.usage;
+      }
+      // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
+      claimed = await this.claim(now);
+      if (!claimed) {
+        this.lastReadAt = now - (MIN_INTERVAL_MS - RETRY_INTERVAL_MS);
+        return undefined;
+      }
+      // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
+      const again = await this.readFreshShared(now);
+      if (again !== undefined) {
+        this.lastReadAt = again.readAt;
+        return again.usage;
       }
       this.lastReadAt = now;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
       await this.writeShared({ readAt: now, usage: undefined });
       const output = await this.run();
       const usage = output === undefined ? undefined : parseUsageReport(output);
-      await this.writeShared({ readAt: now, usage });
+      // 失敗は短い間隔で取り直せるよう、読んだ時刻を戻して記録する
+      const readAt = usage === undefined ? now - (MIN_INTERVAL_MS - RETRY_INTERVAL_MS) : now;
+      this.lastReadAt = readAt;
+      await this.writeShared({ readAt, usage });
       return usage;
     } finally {
+      if (claimed) {
+        await this.release();
+      }
       this.running = false;
+    }
+  }
+
+  /** 間隔内に他のウィンドウが読んだ結果があれば返す。 */
+  private async readFreshShared(now: number): Promise<SharedUsageRecord | undefined> {
+    const shared = await this.readShared();
+    return shared !== undefined && shared.readAt <= now && now - shared.readAt < MIN_INTERVAL_MS
+      ? shared
+      : undefined;
+  }
+
+  /**
+   * 取得権を排他的に作る。共有先が無ければ常に得られる。
+   * 他のウィンドウが保持中なら得られない。保持したまま落ちたものは期限で奪う。
+   */
+  private async claim(now: number): Promise<boolean> {
+    if (this.sharedDir === undefined) {
+      return true;
+    }
+    const lockPath = path.join(this.sharedDir, CLAIM_FILE_NAME);
+    try {
+      await mkdir(this.sharedDir, { recursive: true });
+      await writeFile(lockPath, String(now), { encoding: 'utf8', flag: 'wx' });
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+        // 共有先に書けない場合は、他のウィンドウとの調整を諦めて自分で取得する
+        this.log.warn(
+          `使用量の取得権を作れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return true;
+      }
+    }
+    try {
+      if (Date.now() - (await stat(lockPath)).mtimeMs <= CLAIM_STALE_MS) {
+        return false;
+      }
+      await unlink(lockPath);
+      await writeFile(lockPath, String(now), { encoding: 'utf8', flag: 'wx' });
+      return true;
+    } catch {
+      // 奪い合いに負けた、または消えた。今回は取得しない
+      return false;
+    }
+  }
+
+  private async release(): Promise<void> {
+    if (this.sharedDir === undefined) {
+      return;
+    }
+    try {
+      await unlink(path.join(this.sharedDir, CLAIM_FILE_NAME));
+    } catch {
+      // 既に無ければよい
     }
   }
 
