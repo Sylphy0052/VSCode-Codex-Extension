@@ -21,7 +21,7 @@ interface Fake {
 }
 
 /** `chatSessionInterrupt.test.ts` と同じ方針の最小フェイク。要求だけを記録する。 */
-function fakeSession(): Fake {
+function fakeSession(options: { rejectTurnStart?: boolean } = {}): Fake {
   const sent: Sent[] = [];
   const connection = {
     async ensureStarted() {
@@ -31,6 +31,9 @@ function fakeSession(): Fake {
       sent.push({ method, params: (params ?? {}) as Record<string, unknown> });
       if (method === 'thread/start') {
         return { result: START_RESULT };
+      }
+      if (method === 'turn/start' && options.rejectTurnStart === true) {
+        throw new Error('turn/start failed');
       }
       return { result: {} };
     },
@@ -78,6 +81,29 @@ describe('ChatSession.sendOrQueue（キューを既定にし、割込は明示�
 
     expect(fake.sent).toEqual([]);
     expect(fake.session.getState().queued.map((q) => q.text)).toEqual(['1つめ', '2つめ']);
+  });
+});
+
+describe('ChatSession.send（turn/startの失敗でbusyを戻す、issue #1873）', () => {
+  it('turn/startがrejectされたら、busyを戻して例外をそのまま投げる', async () => {
+    const fake = fakeSession({ rejectTurnStart: true });
+    await fake.session.start('/w', emptyConfig);
+
+    await expect(fake.session.send('続けて', emptyConfig)).rejects.toThrow('turn/start failed');
+
+    expect(fake.session.getState().busy).toBe(false);
+  });
+
+  it('busyが戻るので、次のsendOrQueueは待ち行列へ積まず送る', async () => {
+    const fake = fakeSession({ rejectTurnStart: true });
+    await fake.session.start('/w', emptyConfig);
+    await expect(fake.session.send('1回目', emptyConfig)).rejects.toThrow();
+    fake.sent.length = 0;
+
+    await expect(fake.session.sendOrQueue('2回目', emptyConfig)).rejects.toThrow();
+
+    expect(fake.sent.map((s) => s.method)).toEqual(['turn/start']);
+    expect(fake.session.getState().queued).toEqual([]);
   });
 });
 
