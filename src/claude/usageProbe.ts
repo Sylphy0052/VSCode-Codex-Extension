@@ -170,14 +170,16 @@ export class ClaudeUsageProbe {
         }
         throw e;
       }
+      // 作った時点で記録する。以降で例外になり取得へ進んでも、releaseで期限切れにできる
+      this.claimedGeneration = own;
       // 古いreaddirで止まっていた者は、掃除で消えた番号を作り直せてしまう。作った後に
       // 自分より大きい世代があれば、並び立たないよう自分の世代を期限切れにして退く
       const after = await this.listGenerations();
       if (after.some((generation) => generation > own)) {
+        this.claimedGeneration = undefined;
         await utimes(this.lockPath(own), 0, 0).catch(() => undefined);
         return false;
       }
-      this.claimedGeneration = own;
       // 自分より古い世代は用済み。1件ずつ消し、失敗や既に無い場合は次回に回す
       for (const generation of after.filter((g) => g < own)) {
         await unlink(this.lockPath(generation)).catch(() => undefined);
