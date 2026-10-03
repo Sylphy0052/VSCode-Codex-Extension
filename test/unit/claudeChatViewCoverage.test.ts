@@ -266,7 +266,8 @@ function sentOfType(panel: FakeWebviewPanel | undefined, type: string): SentMess
 
 async function openSession(manager: ClaudeChatViewManager): Promise<string> {
   const id = await manager.openNew('/workspace/root');
-  expect(id).toBeDefined();
+  // randomUUID()の形。undefinedや空文字を通さない
+  expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   return id as string;
 }
 

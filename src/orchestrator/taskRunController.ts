@@ -1770,18 +1770,20 @@ export class TaskRunController {
     if (!leased.ok) {
       return leased;
     }
-    const next = await this.updateRun(runId, (r) =>
-      'questionId' in target
+    // 更新後が`awaitingUser`かでは、元からユーザーの判断待ちだったものと区別できない。
+    // 更新前が`awaitingOrchestrator`だったかで成否を決める。
+    let wasAwaitingOrchestrator = false;
+    const next = await this.updateRun(runId, (r) => {
+      const before =
+        'questionId' in target
+          ? findStageQuestion(r, taskId, target.questionId)
+          : findStageGate(r, taskId, target.gateId);
+      wasAwaitingOrchestrator = before?.status === 'awaitingOrchestrator';
+      return 'questionId' in target
         ? escalateQuestionToUser(r, taskId, target.questionId, reason, this.now())
-        : escalateGateToUser(r, taskId, target.gateId, reason, this.now()),
-    );
-    const status =
-      next === undefined
-        ? undefined
-        : 'questionId' in target
-          ? findStageQuestion(next, taskId, target.questionId)?.status
-          : findStageGate(next, taskId, target.gateId)?.status;
-    return status === 'awaitingUser'
+        : escalateGateToUser(r, taskId, target.gateId, reason, this.now());
+    });
+    return next !== undefined && wasAwaitingOrchestrator
       ? { ok: true, message: `${taskId}の判断をユーザーへ回した` }
       : {
           ok: false,
