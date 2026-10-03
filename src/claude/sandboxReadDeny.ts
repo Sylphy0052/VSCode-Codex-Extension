@@ -40,6 +40,12 @@ export const MAX_STDOUT_LINE_LENGTH = 4 * 1024 * 1024;
 /** 空起動のstderrを溜める上限。 */
 export const MAX_STDERR_LENGTH = 1200;
 
+/** globの`{}`の入れ子の上限。超えたルールは解釈できないものとして扱う。 */
+export const MAX_GLOB_BRACE_DEPTH = 32;
+
+/** 解釈できなかったルールと例外の文を理由に載せるときの、それぞれの上限（文字数）。 */
+const MAX_REPORTED_LENGTH = 80;
+
 const LIST_RULES_REQUEST_ID = 'list_permission_rules';
 
 type ReadDenyRulesResult = { ok: true; rules: string[] } | { ok: false; detail: string };
@@ -122,8 +128,10 @@ function listReadDenyRules(
     });
     proc.stderr.on('data', (chunk: string) => {
       if (stderr.length < MAX_STDERR_LENGTH) {
-        // 1回のchunkが上限を超えても、溜めた結果が上限に収まるように切る
-        stderr = (stderr + chunk).slice(0, MAX_STDERR_LENGTH);
+        // 1回のchunkが上限を超えても、溜めた結果が上限に収まるように切る。`slice`は親文字列
+        // （chunkとの連結結果）を掴んだままにするので、上限分だけをコピーして持つ。切り口が
+        // サロゲートペアの途中だとその1文字はU+FFFDになるが、診断用の文なので許す
+        stderr = Buffer.from((stderr + chunk).slice(0, MAX_STDERR_LENGTH), 'utf8').toString('utf8');
       }
     });
     proc.on('error', (e) => {
@@ -212,6 +220,7 @@ export interface ReadDenyPattern {
  * 権限ルールに合わせる（`//`は絶対パス、`~/`はホーム、`./`と無印は作業ディレクトリ基準、
  * `/`を含まない無印は任意の深さ）。`/`始まりは設定ファイル基準だが、照合を広く取るため
  * 作業ディレクトリ基準で見る。末尾の`/**`はそのディレクトリ自体を覆うので外して照合する。
+ * `{}`の入れ子が深すぎるときや、正規表現にできない（`[z-a]`など）ときは例外を投げる。
  */
 export function compileReadDenyRule(
   rule: string,
@@ -251,11 +260,15 @@ export function compileReadDenyRule(
   return { rule, pattern: new RegExp(`^${prefix}/${anyDepth ? '(?:.*/)?' : ''}${body}$`) };
 }
 
-/** gitignore風のglobを正規表現の本体にする。`**`・`*`・`?`・`[...]`・`{a,b}`を扱う。 */
-function globToRegExpSource(glob: string): string {
+/**
+ * gitignore風のglobを正規表現の本体にする。`**`・`*`・`?`・`[...]`・`{a,b}`を扱う。
+ * `{}`の入れ子が`MAX_GLOB_BRACE_DEPTH`を超えたら例外にする（再帰でスタックを溢れさせない）。
+ */
+function globToRegExpSource(glob: string, depth = 0): string {
   let out = '';
   for (let i = 0; i < glob.length; i++) {
     const c = glob.charAt(i);
+    const bracketEnd = c === '[' ? findClosingBracket(glob, i) : -1;
     if (c === '*') {
       if (glob.charAt(i + 1) === '*') {
         i++;
@@ -270,20 +283,22 @@ function globToRegExpSource(glob: string): string {
       }
     } else if (c === '?') {
       out += '[^/]';
-    } else if (c === '[' && glob.indexOf(']', i + 2) !== -1) {
-      const end = glob.indexOf(']', i + 2);
-      const body = glob.slice(i + 1, end);
+    } else if (bracketEnd !== -1) {
+      const body = glob.slice(i + 1, bracketEnd);
       const negated = body.startsWith('!') || body.startsWith('^');
       out += `[${negated ? '^' : ''}${(negated ? body.slice(1) : body).replace(/[\\\]]/g, '\\$&')}]`;
-      i = end;
+      i = bracketEnd;
     } else if (c === '{' && glob.indexOf('}', i) !== -1) {
+      if (depth >= MAX_GLOB_BRACE_DEPTH) {
+        throw new Error(`{}の入れ子が${String(MAX_GLOB_BRACE_DEPTH)}段を超えています`);
+      }
       // 入れ子を数えて対応する`}`を探す。無ければ、照合を広く取るため（判定を狭めないため）、
       // 最初の`}`で閉じて`,`で分ける旧来の解釈にする。CLIの実挙動は実測していない
       const nestedEnd = findClosingBrace(glob, i);
       const end = nestedEnd !== -1 ? nestedEnd : glob.indexOf('}', i);
       const inner = glob.slice(i + 1, end);
       const alternatives = nestedEnd !== -1 ? splitTopLevelCommas(inner) : inner.split(',');
-      out += `(?:${alternatives.map(globToRegExpSource).join('|')})`;
+      out += `(?:${alternatives.map((alt) => globToRegExpSource(alt, depth + 1)).join('|')})`;
       i = end;
     } else {
       out += escapeRegExp(c);
@@ -292,12 +307,27 @@ function globToRegExpSource(glob: string): string {
   return out;
 }
 
-/** `open`位置の`{`に対応する`}`の位置を、入れ子を数えて返す。対応するものが無ければ-1。 */
+/**
+ * `open`位置の`[`を閉じる`]`の位置を返す。`[]]`のように直後の`]`は中身として扱う。無ければ-1。
+ * `{}`の対応探しでも同じ規則で`[...]`を読み飛ばし、`{a,[}]}`の`[`内の`}`で閉じないようにする。
+ */
+function findClosingBracket(glob: string, open: number): number {
+  return glob.indexOf(']', open + 2);
+}
+
+/**
+ * `open`位置の`{`に対応する`}`の位置を、入れ子を数えて返す。対応するものが無ければ-1。
+ * `\`はエスケープとして扱わない。`globToRegExpSource`が`\`を文字そのものとして照合するため、
+ * ここだけ`\}`を読み飛ばすと両者の解釈がずれる。
+ */
 function findClosingBrace(glob: string, open: number): number {
   let depth = 0;
   for (let i = open; i < glob.length; i++) {
     const c = glob.charAt(i);
-    if (c === '{') {
+    const bracketEnd = c === '[' ? findClosingBracket(glob, i) : -1;
+    if (bracketEnd !== -1) {
+      i = bracketEnd;
+    } else if (c === '{') {
       depth++;
     } else if (c === '}' && --depth === 0) {
       return i;
@@ -306,14 +336,17 @@ function findClosingBrace(glob: string, open: number): number {
   return -1;
 }
 
-/** 入れ子の`{}`の中にある`,`では分けず、最上位の`,`だけで分ける。 */
+/** 入れ子の`{}`と`[...]`の中にある`,`では分けず、最上位の`,`だけで分ける。 */
 function splitTopLevelCommas(text: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text.charAt(i);
-    if (c === '{') {
+    const bracketEnd = c === '[' ? findClosingBracket(text, i) : -1;
+    if (bracketEnd !== -1) {
+      i = bracketEnd;
+    } else if (c === '{') {
       depth++;
     } else if (c === '}') {
       depth--;
@@ -324,6 +357,10 @@ function splitTopLevelCommas(text: string): string[] {
   }
   parts.push(text.slice(start));
   return parts;
+}
+
+function clip(text: string): string {
+  return text.length > MAX_REPORTED_LENGTH ? `${text.slice(0, MAX_REPORTED_LENGTH)}…` : text;
 }
 
 function escapeRegExp(text: string): string {
@@ -432,7 +469,22 @@ export async function inspectReadOnlyCwd(
     return { ok: false, reason: `Readのdenyルールを確かめられません: ${listed.detail}` };
   }
   const home = homedir();
-  const patterns = listed.rules.flatMap((rule) => compileReadDenyRule(rule, cwd, home) ?? []);
+  const patterns: ReadDenyPattern[] = [];
+  for (const rule of listed.rules) {
+    try {
+      const compiled = compileReadDenyRule(rule, cwd, home);
+      if (compiled !== undefined) {
+        patterns.push(compiled);
+      }
+    } catch (e) {
+      // ルールはユーザー設定由来。`{}`の入れ子が深すぎる、範囲の逆転した`[z-a]`で正規表現が
+      // 作れない、などのときは照合できないので付けない側に倒す。ルールは長くなりうるので先頭だけ出す
+      return {
+        ok: false,
+        reason: `Readのdenyルール${clip(rule)}を解釈できません: ${clip(e instanceof Error ? e.message : String(e))}`,
+      };
+    }
+  }
   if (patterns.length === 0) {
     return { ok: true };
   }

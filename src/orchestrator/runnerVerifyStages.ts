@@ -20,7 +20,10 @@ import type { WorkflowTask } from './workflow';
  */
 
 /** 意味レビューへ渡す出力末尾の上限（文字数） */
-const MEASUREMENT_OUTPUT_MAX_CHARS = 1_000;
+export const MEASUREMENT_OUTPUT_MAX_CHARS = 1_000;
+
+/** 失敗メッセージに載せる、戻したファイルの件数の上限 */
+export const REVERTED_PATHS_LIMIT = 20;
 
 export interface VerifyStagesResult {
   readonly failures: string[];
@@ -95,8 +98,10 @@ export async function runVerifyStages(input: {
         [
           'テスト以外の変更を戻しても verify.commands がすべて成功しました。テストが変更を検出していません。',
           '変更を戻すと失敗するテストを追加してください。',
-          `戻したファイル: ${reverted.revertedPaths.slice(0, 20).join(', ')}${
-            reverted.revertedPaths.length > 20 ? ` ほか${reverted.revertedPaths.length - 20}件` : ''
+          `戻したファイル: ${reverted.revertedPaths.slice(0, REVERTED_PATHS_LIMIT).join(', ')}${
+            reverted.revertedPaths.length > REVERTED_PATHS_LIMIT
+              ? ` ほか${reverted.revertedPaths.length - REVERTED_PATHS_LIMIT}件`
+              : ''
           }`,
         ].join('\n'),
       );
