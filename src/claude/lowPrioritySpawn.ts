@@ -17,7 +17,7 @@ export interface LowPrioritySpawnPorts {
   setPriority(pid: number, priority: number): void;
 }
 
-const niceCache = new Map<string, string | undefined>();
+const niceCache = new Map<string, string>();
 
 function findNiceOnPath(pathValue: string | undefined): string | undefined {
   const key = pathValue ?? '';
@@ -38,7 +38,10 @@ function findNiceOnPath(pathValue: string | undefined): string | undefined {
       // 次の候補へ
     }
   }
-  niceCache.set(key, found);
+  // 見つからなかった結果は残さない。PATH値ごとに無駄なエントリが増えるため（Issue #1829）
+  if (found !== undefined) {
+    niceCache.set(key, found);
+  }
   return found;
 }
 

@@ -262,7 +262,12 @@ export async function runHeadlessPromptDetailed(
     return cached;
   }
   const outcome = await enqueue(deps, prompt, kind);
-  if (cacheKey !== undefined && outcome.ok && deps.cacheable?.(outcome.text) === true) {
+  if (
+    cacheKey !== undefined &&
+    outcome.ok &&
+    outcome.text.length <= CACHE_MAX_TEXT_LENGTH &&
+    deps.cacheable?.(outcome.text) === true
+  ) {
     writeCache(cacheKey, outcome);
   }
   return outcome;
@@ -360,6 +365,8 @@ function drain(): void {
 /** 同じ入力への成功した結果を再利用する期間と件数の上限（Issue #1807）。 */
 const CACHE_TTL_MS = 5 * 60_000;
 const CACHE_MAX_ENTRIES = 64;
+/** これを超える応答本文はキャッシュしない。対象はReflex系の短い応答だけ（Issue #1829）。 */
+const CACHE_MAX_TEXT_LENGTH = 16_384;
 const cache = new Map<string, { outcome: HeadlessOutcome; at: number }>();
 
 function headlessCacheKey(deps: HeadlessCliDeps, prompt: string): string {
