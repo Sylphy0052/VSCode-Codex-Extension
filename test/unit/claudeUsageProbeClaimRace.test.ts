@@ -1,8 +1,10 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   utimesSync,
@@ -23,6 +25,9 @@ const barrier = vi.hoisted(() => ({
   maxWaitMs: 500,
   /** 設定すると、次の`readdir`1回だけ実際の中身の代わりにこれを返す。古い一覧で止まった者の再現用。 */
   fakeListing: undefined as string[] | undefined,
+  /** 設定すると、この回数目（1始まり）の`readdir`を失敗させる。 */
+  failListingAt: undefined as number | undefined,
+  listingCalls: 0,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -30,6 +35,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return {
     ...actual,
     readdir: async (...args: Parameters<typeof actual.readdir>) => {
+      barrier.listingCalls += 1;
+      if (barrier.listingCalls === barrier.failListingAt) {
+        throw Object.assign(new Error('EIO: i/o error, scandir'), { code: 'EIO' });
+      }
       const fake = barrier.fakeListing;
       barrier.fakeListing = undefined;
       return fake ?? actual.readdir(...args);
@@ -92,9 +101,12 @@ describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
     barrier.expected = 0;
     barrier.waiting = [];
     barrier.fakeListing = undefined;
+    barrier.failListingAt = undefined;
+    barrier.listingCalls = 0;
     warnings.length = 0;
   });
   afterEach(() => {
+    vi.useRealTimers();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -119,9 +131,54 @@ describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
     expect(await crashed.claim(Date.now())).toBe(true);
     // 解放せずに落ちた。ロックは期限切れになるまで他を止める
     expect(await newProbe().claim(Date.now())).toBe(false);
-    writeLock(1, 10 * 60_000);
+    // 落ちた者が作ったファイルには触れず、時計だけ期限の先へ進める
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 10 * 60_000 });
     expect(await newProbe().claim(Date.now())).toBe(true);
     expect(lockFiles()).toEqual([`${LOCK}.2`]);
+  });
+
+  it('mtimeが期限の幅を超えて未来にあるロックは、時計のずれた書き手の残骸として奪う', async () => {
+    writeLock(1, -10 * 60_000);
+    expect(await newProbe().claim(Date.now())).toBe(true);
+    expect(lockFiles()).toEqual([`${LOCK}.2`]);
+  });
+
+  it('mtimeの未来へのずれが期限の幅に収まるロックは、保持中として取得しない', async () => {
+    writeLock(1, -10_000);
+    expect(await newProbe().claim(Date.now())).toBe(false);
+    expect(lockFiles()).toEqual([`${LOCK}.1`]);
+  });
+
+  it('作った後の一覧取得が失敗しても取得へ進み、解放で期限切れにして次へ渡す', async () => {
+    // 1回目は最新の世代を見る一覧、2回目が作った後の一覧
+    barrier.failListingAt = 2;
+    const probe = newProbe();
+    expect(await probe.claim(Date.now())).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(lockFiles()).toEqual([`${LOCK}.1`]);
+    // 解放するまでは他のウィンドウを止める
+    expect(await newProbe().claim(Date.now())).toBe(false);
+    await probe.release();
+    expect(statSync(path.join(shared, `${LOCK}.1`)).mtimeMs).toBe(0);
+    expect(await newProbe().claim(Date.now())).toBe(true);
+    expect(lockFiles()).toEqual([`${LOCK}.2`]);
+  });
+
+  it('期限切れのロックが残る中で2つのウィンドウがread()しても、claudeの起動は1回だけ', async () => {
+    const counter = path.join(dir, 'count');
+    const claude = path.join(dir, 'claude.sh');
+    writeFileSync(
+      claude,
+      `#!/bin/sh\necho x >> "${counter}"\nprintf '%s' 'Current session: 16% used · resets Aug 10, 8:09pm (Asia/Tokyo)\n'\n`,
+    );
+    chmodSync(claude, 0o755);
+    writeLock(3, 10 * 60_000);
+    // 両者が期限切れを見てから次の世代を奪い合う
+    barrier.expected = 2;
+    const windows = [0, 1].map(() => new ClaudeUsageProbe(() => claude, log, shared));
+    const now = Date.now();
+    await Promise.all(windows.map((probe) => probe.read(now)));
+    expect(readFileSync(counter, 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
   });
 
   it('新しいロックがあれば取得せず、ファイルも変えない', async () => {

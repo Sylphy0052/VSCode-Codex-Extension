@@ -39,7 +39,10 @@ const RETRY_INTERVAL_MS = 60_000;
  */
 const CLAIM_FILE_PREFIX = 'claude-usage-probe.lock';
 
-/** この時間を過ぎた排他ファイルは、保持したまま落ちたものとして次の世代で奪う。 */
+/**
+ * この時間を過ぎた排他ファイルは、保持したまま落ちたものとして次の世代で奪う。
+ * mtimeがこの時間を超えて未来にあるものも、時計のずれた書き手の残骸として奪う。
+ */
 const CLAIM_STALE_MS = TIMEOUT_MS * 2;
 
 /** ウィンドウ間で共有する直近の取得結果のファイル名（`sharedDir`の直下）。 */
@@ -149,7 +152,12 @@ export class ClaudeUsageProbe {
       const latest = Math.max(0, ...(await this.listGenerations()));
       if (latest > 0) {
         try {
-          if (Date.now() - (await stat(this.lockPath(latest))).mtimeMs <= CLAIM_STALE_MS) {
+          // ホームをNFSで共有するホスト間では、mtimeを付けた時計とDate.now()がずれうる。
+          // 未来のmtimeを「常に新しい」と見ると、ずれた分だけ全ウィンドウが取得できなくなるので、
+          // ずれも期限の幅までしか認めない。逆向きのずれで早く期限切れと見て取得が重なるのは、
+          // `claude`の起動が1回増えるだけなので許す
+          const age = Date.now() - (await stat(this.lockPath(latest))).mtimeMs;
+          if (Math.abs(age) <= CLAIM_STALE_MS) {
             return false;
           }
         } catch (e) {
