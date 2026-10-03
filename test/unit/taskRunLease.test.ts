@@ -237,9 +237,32 @@ describe('isProcessAlive / computeHostIdentity', () => {
     expect(isProcessAlive(1)).toBe(false);
   });
 
-  it('hostIdentityは空文字か「boot_id:pid名前空間」', () => {
-    const id = computeHostIdentity();
-    expect(id === '' || id.includes(':')).toBe(true);
+  describe('computeHostIdentity', () => {
+    const source = (bootId: string, pidNamespace: string) => ({
+      readBootId: () => bootId,
+      readPidNamespace: () => pidNamespace,
+    });
+
+    it('「boot_id:pid名前空間」を返す（boot_idの前後の空白は除く）', () => {
+      expect(computeHostIdentity(source('abc-123\n', 'pid:[4026531836]'))).toBe(
+        'abc-123:pid:[4026531836]',
+      );
+    });
+
+    it('boot_idまたはpid名前空間が空なら空文字', () => {
+      expect(computeHostIdentity(source('\n', 'pid:[1]'))).toBe('');
+      expect(computeHostIdentity(source('abc-123', ''))).toBe('');
+    });
+
+    it('読めない環境（例外）では空文字', () => {
+      const unreadable = {
+        readBootId: () => {
+          throw new Error('ENOENT');
+        },
+        readPidNamespace: () => 'pid:[1]',
+      };
+      expect(computeHostIdentity(unreadable)).toBe('');
+    });
   });
 });
 
