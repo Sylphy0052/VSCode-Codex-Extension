@@ -1455,7 +1455,8 @@ export function createCliIssueListPort(
           ],
           cwd,
         );
-        const pageIssues = result.code === 0 ? parseNumberTitleArray(result.stdout, 'iid') : undefined;
+        const pageIssues =
+          result.code === 0 ? parseNumberTitleArray(result.stdout, 'iid') : undefined;
         if (pageIssues === undefined) {
           // 2ページ目以降の失敗は、取れた分までを返す（上限で切れたときと同じ扱い）
           return page === 1 ? undefined : issues;

@@ -5,7 +5,12 @@ import {
   REVIEW_WRONG,
   reviewPlanWithReflex,
 } from '../../src/orchestrator/planReflexReview';
-import { REFLEX_PROCESS_ERROR, REFLEX_TIMEOUT, reflexAnswers, reflexStub } from '../helpers/reflexStub';
+import {
+  REFLEX_PROCESS_ERROR,
+  REFLEX_TIMEOUT,
+  reflexAnswers,
+  reflexStub,
+} from '../helpers/reflexStub';
 
 /** Issue #1717: 計画審査（`reviewPlanWithReflex`）の判定結果ごとの分岐。 */
 

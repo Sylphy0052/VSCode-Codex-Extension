@@ -1442,9 +1442,7 @@ function addTask(
   const supersededIds = new Set(supersedes.ids);
   const dependsOnSuperseded = task.dependsOn.filter((dep) => supersededIds.has(dep));
   if (dependsOnSuperseded.length > 0) {
-    return no(
-      `supersedes で置き換えるタスクには依存できません: ${dependsOnSuperseded.join(', ')}`,
-    );
+    return no(`supersedes で置き換えるタスクには依存できません: ${dependsOnSuperseded.join(', ')}`);
   }
   // 置き換えるタスクへ直接依存するタスクは、依存先を後継へ付け替える。`done`のものは
   // 以降のスケジューリングに影響しないため触らない
@@ -1488,7 +1486,10 @@ function addTask(
       ? `失敗したタスク ${remainingFailed.join(', ')} が残っているため、${task.id} は開始されません。` +
         'add_task の supersedes で置き換えるか、retry_task で再実行してください。'
       : undefined;
-  const replyWarnings = [...verifyWarnings, ...(haltedWarning === undefined ? [] : [haltedWarning])];
+  const replyWarnings = [
+    ...verifyWarnings,
+    ...(haltedWarning === undefined ? [] : [haltedWarning]),
+  ];
   pushPlanChangeHistoryWarning(live, {
     kind: 'orchestratorTaskAdded',
     taskId: task.id,
@@ -1754,7 +1755,9 @@ export async function setupOrchestratorForStart(
     watchOrchestratorSession(self, runId, session);
 
     const lessonsBlock =
-      self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.readIntroBlock(live.repoRoot);
+      self.deps.runNotes === undefined
+        ? undefined
+        : await self.deps.runNotes.readIntroBlock(live.repoRoot);
     notifyOrchestrator(self, runId, {
       kind: 'runStarted',
       body: buildIntroBody(live, resume, undefined, lessonsBlock),
@@ -1818,7 +1821,11 @@ async function openOrchestratorSession(
   session.setApprovalHandler(async (approval) => {
     // AskUserQuestionは回答者判定を通らずに人へ届くため、判定を通すask_userへ回させる（Issue #1763）
     if (approval.kind === 'askUserQuestion') {
-      return { kind: 'auto', decision: 'decline', message: ORCHESTRATOR_ASK_USER_QUESTION_DENY_MESSAGE };
+      return {
+        kind: 'auto',
+        decision: 'decline',
+        message: ORCHESTRATOR_ASK_USER_QUESTION_DENY_MESSAGE,
+      };
     }
     // オーケストレーターは承認要求を出さない方針で起動する（Issue #1697）。それでも
     // 承認待ちが来た場合は、autoApproveなら人へ回さず自動で許可する。
@@ -2119,7 +2126,9 @@ async function respawnOrchestrator(
   }
   orchestrator.health = 'recovering';
   const countLabel = countsTowardLimit ? `（${orchestrator.respawnCount}回目）` : '';
-  self.deps.log.warn(`[workflow ${runId}] オーケストレーターが${label}ため立て直します${countLabel}`);
+  self.deps.log.warn(
+    `[workflow ${runId}] オーケストレーターが${label}ため立て直します${countLabel}`,
+  );
   self.notify(runId);
   oldSession.dispose();
 
@@ -2171,7 +2180,9 @@ async function respawnOrchestrator(
           },
         };
   const lessonsBlock =
-    self.deps.runNotes === undefined ? undefined : await self.deps.runNotes.readIntroBlock(live.repoRoot);
+    self.deps.runNotes === undefined
+      ? undefined
+      : await self.deps.runNotes.readIntroBlock(live.repoRoot);
   // 導入文は最後に置く。送信本文が長すぎると古い側から落とすため（`composeOrchestratorPrompt`）、
   // 役割を伝える導入文を落とさないよう最も新しい位置にする
   orchestrator.pending = [
@@ -2311,28 +2322,30 @@ function nudgeTurnEndAnswerer(
     return;
   }
   orchestrator.answererNudge ??= new TurnEndAnswererNudge();
-  void orchestrator.answererNudge.onIdle(
-    state.items,
-    (lastMessage) => judge(orchestrator.provider, lastMessage),
-    (text) => {
-      const live = self.runs.get(runId);
-      if (
-        live?.orchestrator !== orchestrator ||
-        orchestrator.busy ||
-        orchestrator.health !== 'alive' ||
-        live.pendingAskUser !== undefined
-      ) {
-        return false;
-      }
-      sendToOrchestrator(self, runId, orchestrator, text, [], []);
-      self.notify(runId);
-      return true;
-    },
-  ).catch((e: unknown) => {
-    self.deps.log.warn(
-      `[workflow orchestrator] ${runId}: ターン末の回答者判定の促しを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  });
+  void orchestrator.answererNudge
+    .onIdle(
+      state.items,
+      (lastMessage) => judge(orchestrator.provider, lastMessage),
+      (text) => {
+        const live = self.runs.get(runId);
+        if (
+          live?.orchestrator !== orchestrator ||
+          orchestrator.busy ||
+          orchestrator.health !== 'alive' ||
+          live.pendingAskUser !== undefined
+        ) {
+          return false;
+        }
+        sendToOrchestrator(self, runId, orchestrator, text, [], []);
+        self.notify(runId);
+        return true;
+      },
+    )
+    .catch((e: unknown) => {
+      self.deps.log.warn(
+        `[workflow orchestrator] ${runId}: ターン末の回答者判定の促しを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
 }
 
 /**

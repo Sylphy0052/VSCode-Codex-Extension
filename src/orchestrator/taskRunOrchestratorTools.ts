@@ -77,15 +77,25 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
             properties: {
               id: {
                 type: 'string',
-                description: '既存のタスクはtaskId、新しいタスクは英数字・_・-の仮キー（T<数字>の形は使わない）',
+                description:
+                  '既存のタスクはtaskId、新しいタスクは英数字・_・-の仮キー（T<数字>の形は使わない）',
               },
-              title: { type: 'string', description: `タスク名（${String(MAX_PLAN_TITLE_LENGTH)}文字以内）` },
-              summary: { type: 'string', description: `目的（${String(MAX_PLAN_SUMMARY_LENGTH)}文字以内）` },
+              title: {
+                type: 'string',
+                description: `タスク名（${String(MAX_PLAN_TITLE_LENGTH)}文字以内）`,
+              },
+              summary: {
+                type: 'string',
+                description: `目的（${String(MAX_PLAN_SUMMARY_LENGTH)}文字以内）`,
+              },
               acceptanceCriteria: {
                 type: 'array',
                 minItems: 1,
                 maxItems: MAX_PLAN_CRITERIA,
-                items: { type: 'string', description: `${String(MAX_PLAN_CRITERION_LENGTH)}文字以内` },
+                items: {
+                  type: 'string',
+                  description: `${String(MAX_PLAN_CRITERION_LENGTH)}文字以内`,
+                },
               },
               dependsOn: {
                 type: 'array',
@@ -139,10 +149,20 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
       type: 'object',
       properties: {
         taskId: TASK_ID_SCHEMA,
-        stage: { type: 'string', enum: [...TASK_STAGES], description: '始める工程（タスクの現在の工程）' },
+        stage: {
+          type: 'string',
+          enum: [...TASK_STAGES],
+          description: '始める工程（タスクの現在の工程）',
+        },
         model: { type: 'string', description: '工程セッションのモデル' },
-        effort: { type: 'string', description: '工程セッションのeffort。CLIの既定に任せるなら空文字' },
-        reason: { type: 'string', description: `この設定を選んだ理由（${String(MAX_REASON_LENGTH)}文字以内）` },
+        effort: {
+          type: 'string',
+          description: '工程セッションのeffort。CLIの既定に任せるなら空文字',
+        },
+        reason: {
+          type: 'string',
+          description: `この設定を選んだ理由（${String(MAX_REASON_LENGTH)}文字以内）`,
+        },
         instruction: {
           type: 'string',
           description: `工程への追加の指示（任意、${String(MAX_USER_ANSWER_LENGTH)}文字以内）`,
@@ -178,7 +198,10 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
       properties: {
         taskId: TASK_ID_SCHEMA,
         questionId: { type: 'string', description: 'get_run_stateで得た質問のID' },
-        answer: { type: 'string', description: `回答（${String(MAX_USER_ANSWER_LENGTH)}文字以内）` },
+        answer: {
+          type: 'string',
+          description: `回答（${String(MAX_USER_ANSWER_LENGTH)}文字以内）`,
+        },
       },
       required: ['taskId', 'questionId', 'answer'],
       additionalProperties: false,
@@ -303,7 +326,10 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        title: { type: 'string', description: `runの名前（${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内）` },
+        title: {
+          type: 'string',
+          description: `runの名前（${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内）`,
+        },
         engine: {
           type: 'string',
           enum: TASK_RUN_ENGINES,
@@ -433,26 +459,46 @@ function parseStartStage(a: Record<string, unknown>, taskId: string): ParseResul
   if (a.instruction !== undefined && a.instruction !== '') {
     instruction = parseUserAnswer(a.instruction);
     if (instruction === undefined) {
-      return { ok: false, message: `instructionは${String(MAX_USER_ANSWER_LENGTH)}文字以内で指定する` };
+      return {
+        ok: false,
+        message: `instructionは${String(MAX_USER_ANSWER_LENGTH)}文字以内で指定する`,
+      };
     }
   }
   return {
     ok: true,
-    call: { tool: 'start_stage', taskId, stage: a.stage, model, effort, reason: reason.trim(), instruction },
+    call: {
+      tool: 'start_stage',
+      taskId,
+      stage: a.stage,
+      model,
+      effort,
+      reason: reason.trim(),
+      instruction,
+    },
   };
 }
 
 function parseStartRun(a: Record<string, unknown>): ParseResult {
   const title = readShortText(a.title, TASK_RUN_TITLE_MAX_LENGTH);
   if (title === undefined) {
-    return { ok: false, message: `titleは${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内の文字列で指定する` };
+    return {
+      ok: false,
+      message: `titleは${String(TASK_RUN_TITLE_MAX_LENGTH)}文字以内の文字列で指定する`,
+    };
   }
   const { engine, maxParallel } = a;
   if (engine !== undefined && !(TASK_RUN_ENGINES as readonly unknown[]).includes(engine)) {
     return { ok: false, message: `engineは${TASK_RUN_ENGINES.join(' / ')}のいずれかで指定する` };
   }
-  if (maxParallel !== undefined && (typeof maxParallel !== 'number' || !Number.isInteger(maxParallel))) {
-    return { ok: false, message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+  if (
+    maxParallel !== undefined &&
+    (typeof maxParallel !== 'number' || !Number.isInteger(maxParallel))
+  ) {
+    return {
+      ok: false,
+      message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する`,
+    };
   }
   return {
     ok: true,
@@ -489,7 +535,10 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
   if (name === 'set_max_parallel') {
     const n = a.maxParallel;
     if (typeof n !== 'number' || !Number.isInteger(n)) {
-      return { ok: false, message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+      return {
+        ok: false,
+        message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する`,
+      };
     }
     return { ok: true, call: { tool: 'set_max_parallel', maxParallel: n } };
   }
@@ -537,7 +586,10 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
     case 'instruct_task': {
       const instruction = parseUserAnswer(a.instruction);
       if (instruction === undefined) {
-        return { ok: false, message: `instructionは1〜${String(MAX_USER_ANSWER_LENGTH)}文字で指定する` };
+        return {
+          ok: false,
+          message: `instructionは1〜${String(MAX_USER_ANSWER_LENGTH)}文字で指定する`,
+        };
       }
       return { ok: true, call: { tool: 'instruct_task', taskId, instruction } };
     }
@@ -562,7 +614,10 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
         return { ok: false, message: 'gateIdはget_run_stateで得た関門のIDを指定する' };
       }
       if (!isGateChoice(choice)) {
-        return { ok: false, message: `choiceは${STAGE_GATE_CHOICES.join(' / ')}のいずれかを指定する` };
+        return {
+          ok: false,
+          message: `choiceは${STAGE_GATE_CHOICES.join(' / ')}のいずれかを指定する`,
+        };
       }
       const text = typeof reason === 'string' ? inline(reason, MAX_GATE_REASON_LENGTH) : '';
       if (choice === 'close' && text === '') {
@@ -570,7 +625,13 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       }
       return {
         ok: true,
-        call: { tool: 'resolve_gate', taskId, gateId, choice, reason: text === '' ? undefined : text },
+        call: {
+          tool: 'resolve_gate',
+          taskId,
+          gateId,
+          choice,
+          reason: text === '' ? undefined : text,
+        },
       };
     }
     case 'escalate_to_user': {
@@ -585,11 +646,17 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
           ? { gateId }
           : undefined;
       if (target === undefined) {
-        return { ok: false, message: 'questionIdかgateIdのどちらか1つを、get_run_stateで得たIDで指定する' };
+        return {
+          ok: false,
+          message: 'questionIdかgateIdのどちらか1つを、get_run_stateで得たIDで指定する',
+        };
       }
       const text = typeof reason === 'string' ? inline(reason, MAX_ESCALATE_REASON_LENGTH) : '';
       if (text === '') {
-        return { ok: false, message: `reasonは1〜${String(MAX_ESCALATE_REASON_LENGTH)}文字で指定する` };
+        return {
+          ok: false,
+          message: `reasonは1〜${String(MAX_ESCALATE_REASON_LENGTH)}文字で指定する`,
+        };
       }
       return {
         ok: true,
@@ -653,7 +720,9 @@ export function formatTaskRunState(
     // runがmergeを見届けた子Issueは除く（後片付けの結果次第でmergeCleanupがdoneにならないため、
     // taskRunRoadmapFollowerと同じくmergedIssueNumbersでも見る）
     const merged = new Set(run.roadmap.mergedIssueNumbers ?? []);
-    const completedChildren = new Set(snapshot.children.filter((c) => c.completed).map((c) => c.issueNumber));
+    const completedChildren = new Set(
+      snapshot.children.filter((c) => c.completed).map((c) => c.issueNumber),
+    );
     const awaitingReplan = listTasks(run)
       .filter((t) => t.completedInRoadmap !== true && t.closedWithoutMerge === undefined && t.stages.mergeCleanup.status !== 'done')
       .map(taskIssueNumber)
@@ -675,10 +744,15 @@ export function formatTaskRunState(
     lines.push(`  現在の工程: ${stage ?? '完了'} / 注意: ${task.attention} / ${stages}`);
     if (task.dependsOn.length > 0) {
       const unmet = new Set(unmetTaskDependencies(run, task));
-      lines.push(`  依存: ${task.dependsOn.map((d) => `${d}${unmet.has(d) ? '(未)' : '(済)'}`).join(' ')}`);
+      lines.push(
+        `  依存: ${task.dependsOn.map((d) => `${d}${unmet.has(d) ? '(未)' : '(済)'}`).join(' ')}`,
+      );
     }
     if (task.issueNumber !== undefined) {
-      const existing = task.existingIssueNumber === undefined ? '' : '（既存のIssue。Issue計画とIssue作成は飛ばした）';
+      const existing =
+        task.existingIssueNumber === undefined
+          ? ''
+          : '（既存のIssue。Issue計画とIssue作成は飛ばした）';
       lines.push(`  Issue: #${String(task.issueNumber)}${existing}`);
     }
     if (task.completedInRoadmap === true) {
@@ -691,15 +765,21 @@ export function formatTaskRunState(
       lines.push(`  理由: ${inline(task.failure)}`);
     }
     if (task.pause !== undefined) {
-      lines.push(`  一時停止: ${PAUSE_PHASE_LABELS[task.pause.phase]} / 理由: ${inline(task.pause.reason)}`);
+      lines.push(
+        `  一時停止: ${PAUSE_PHASE_LABELS[task.pause.phase]} / 理由: ${inline(task.pause.reason)}`,
+      );
     }
     if (stage !== undefined) {
       const record = task.stages[stage];
       const decision = record.pendingDecision ?? record.attempts.at(-1)?.decision;
       if (record.pendingDecision !== undefined) {
-        lines.push(`  空き待ち: model=${inline(decision?.model ?? '')} effort=${inline(decision?.effort ?? '')}`);
+        lines.push(
+          `  空き待ち: model=${inline(decision?.model ?? '')} effort=${inline(decision?.effort ?? '')}`,
+        );
       } else if (record.status === 'running' && decision !== undefined) {
-        lines.push(`  実行中の設定: model=${inline(decision.model)} effort=${inline(decision.effort)}`);
+        lines.push(
+          `  実行中の設定: model=${inline(decision.model)} effort=${inline(decision.effort)}`,
+        );
       }
       const recommended = recommendations.get(recommendationKey(task.taskId, stage));
       if (recommended !== undefined && awaiting.some((r) => r.taskId === task.taskId)) {
@@ -711,7 +791,8 @@ export function formatTaskRunState(
     const questions = [
       ...listQuestionsAwaitingOrchestrator(task).map((q) => ({
         q,
-        label: 'オーケストレーター判断待ちの質問（自分で決めてanswer_question、決められなければescalate_to_user）',
+        label:
+          'オーケストレーター判断待ちの質問（自分で決めてanswer_question、決められなければescalate_to_user）',
       })),
       ...listQuestionsAwaitingUser(task).map((q) => ({ q, label: 'ユーザー判断待ちの質問' })),
     ];
@@ -726,7 +807,9 @@ export function formatTaskRunState(
       );
     }
     if ((task.reviewRounds ?? 0) > 0) {
-      lines.push(`  実装への差し戻し: ${String(task.reviewRounds)}回（上限${String(MAX_REVIEW_ROUNDS)}回）`);
+      lines.push(
+        `  実装への差し戻し: ${String(task.reviewRounds)}回（上限${String(MAX_REVIEW_ROUNDS)}回）`,
+      );
     }
     if (task.closedWithoutMerge !== undefined) {
       lines.push(`  mergeせずに完了: 理由: ${inline(task.closedWithoutMerge.reason)}`);

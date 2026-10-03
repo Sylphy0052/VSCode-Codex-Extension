@@ -40,8 +40,11 @@ class FakeGit implements GitCommandRunner {
   private readonly responses: Array<{ prefix: string[]; result: GitCommandResult; cwd?: string }> =
     [];
 
-  private readonly sequences: Array<{ prefix: string[]; results: GitCommandResult[]; cwd?: string }> =
-    [];
+  private readonly sequences: Array<{
+    prefix: string[];
+    results: GitCommandResult[];
+    cwd?: string;
+  }> = [];
 
   /** `cwd`を指定すると、そのcwdの呼び出しにだけ応答する（未指定なら全cwdに応答する）。 */
   respond(prefix: string[], result: GitCommandResult, cwd?: string): void {
@@ -100,7 +103,9 @@ function composeGit(
     calls,
     async run(args: readonly string[], cwd: string): Promise<GitCommandResult> {
       calls.push({ args: [...args], cwd });
-      return overrides.peek(args, cwd) ?? model.handle(args, cwd) ?? { code: 0, stdout: '', stderr: '' };
+      return (
+        overrides.peek(args, cwd) ?? model.handle(args, cwd) ?? { code: 0, stdout: '', stderr: '' }
+      );
     },
   };
 }
@@ -1398,14 +1403,7 @@ describe('IntegrationMergeQueue: 統合worktreeの占有（Issue #412）', () =>
     });
     const blocked = worktreeQueue.enqueue(() => blocker);
 
-    const merging = queue.mergeTask(
-      held,
-      RUN_ID,
-      'T1',
-      `wf/${RUN_ID}/T1`,
-      git,
-      neverSaveOptions(),
-    );
+    const merging = queue.mergeTask(held, RUN_ID, 'T1', `wf/${RUN_ID}/T1`, git, neverSaveOptions());
     const aborting = queue.abortMerge(held, RUN_ID, git);
 
     // 投入時点では有効だったハンドルが、run破棄でここで失効する
@@ -1538,14 +1536,9 @@ describe('統合の1経路（Issue #1678）', () => {
     };
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(
-      await lease(queue, 'T9'),
-      RUN_ID,
-      'T9',
-      TASK_BRANCH,
-      git,
-      { saveAttempt: async () => {} },
-    );
+    const result = await queue.mergeTask(await lease(queue, 'T9'), RUN_ID, 'T9', TASK_BRANCH, git, {
+      saveAttempt: async () => {},
+    });
 
     expect(result.kind).toBe('failure');
     if (result.kind === 'failure') {
@@ -1560,14 +1553,9 @@ describe('統合の1経路（Issue #1678）', () => {
     const git = composeGit(model);
     const queue = new IntegrationMergeQueue(new WorktreeCreationQueue());
 
-    const result = await queue.mergeTask(
-      await lease(queue, 'T9'),
-      RUN_ID,
-      'T9',
-      TASK_BRANCH,
-      git,
-      { saveAttempt: async () => {} },
-    );
+    const result = await queue.mergeTask(await lease(queue, 'T9'), RUN_ID, 'T9', TASK_BRANCH, git, {
+      saveAttempt: async () => {},
+    });
 
     expect(result.kind).toBe('failure');
     if (result.kind === 'failure') {

@@ -23,10 +23,19 @@ import type { SplitSuggestThresholds } from '../../src/orchestrator/taskSplit';
 
 const notifyOrchestratorMock = vi.mocked(notifyOrchestrator);
 
-const THRESHOLDS: SplitSuggestThresholds = { fileCount: 2, lineCount: 1_000_000, turnCount: 1_000_000 };
+const THRESHOLDS: SplitSuggestThresholds = {
+  fileCount: 2,
+  lineCount: 1_000_000,
+  turnCount: 1_000_000,
+};
 
 function makeLogger(): Logger {
-  return { info: () => undefined, warn: () => undefined, error: () => undefined, show: () => undefined };
+  return {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    show: () => undefined,
+  };
 }
 
 function makeSelf(notify: () => void = () => undefined): WorkflowRunnerInternals {

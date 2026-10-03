@@ -9,7 +9,10 @@ import { sessionHubRoot } from '../view/sessionHub';
  * `RoadmapRunStore.ROADMAP_RUNS_KEY` / `RoadmapRunEventStore.ROADMAP_RUN_EVENTS_KEY`と
  * 同じ値。両モジュールごと削除するため、値だけここへ複製して持つ。
  */
-const LEGACY_ROADMAP_RUN_WORKSPACE_STATE_KEYS = ['codex.roadmapRuns', 'codex.roadmapRunEvents'] as const;
+const LEGACY_ROADMAP_RUN_WORKSPACE_STATE_KEYS = [
+  'codex.roadmapRuns',
+  'codex.roadmapRunEvents',
+] as const;
 
 /** ロードマップ実行の専有権ファイルの置き場（`sessionHubRoot`の下）。 */
 const LEGACY_ROADMAP_LEASE_DIR_NAME = 'roadmap-leases';

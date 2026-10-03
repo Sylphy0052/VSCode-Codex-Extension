@@ -408,7 +408,9 @@ async function rebuildLiveRun(
     ? p.maxParallelOverride
     : undefined;
   const def =
-    maxParallelOverride === undefined ? loadedDef : { ...loadedDef, maxParallel: maxParallelOverride };
+    maxParallelOverride === undefined
+      ? loadedDef
+      : { ...loadedDef, maxParallel: maxParallelOverride };
 
   const gitRepo = await isGitWorkingTree(p.workspaceRoot, self.deps.git);
   // 元のHEADは永続化していない（design.md §16.11は応答本文以外も最小限しか保存しない

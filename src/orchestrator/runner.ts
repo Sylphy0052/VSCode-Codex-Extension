@@ -672,7 +672,10 @@ export interface WorkflowRunnerDeps {
    * `orchestrator`を返し、`ask_user`を回数に数えずに拒否する。省略時は判定せず人へ出す。
    * 無効・失敗・時間切れは`user`を返すこと。
    */
-  judgeAskUserAnswerer?: (provider: Provider, question: AnswererQuestion) => Promise<AnswererVerdict>;
+  judgeAskUserAnswerer?: (
+    provider: Provider,
+    question: AnswererQuestion,
+  ) => Promise<AnswererVerdict>;
   /**
    * ターン末の問いかけの回答者判定（Issue #1708）。オーケストレーターが自分で決めてよい問いかけ
    * なら`orchestrator`を返し、自分で決めるよう促す。省略時は判定しない。

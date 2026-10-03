@@ -796,9 +796,7 @@ export const REPORT_INSTRUCTION_RESULT_TOOL: McpToolDefinition = {
  * `report_instruction_result`の引数を検証する（Issue #1502）。純粋関数。
  * 指示idが応答待ちかどうかは`TaskMessagingHub.reportInstructionResult`が見る。
  */
-export function parseInstructionResultArgs(
-  args: Record<string, unknown>,
-):
+export function parseInstructionResultArgs(args: Record<string, unknown>):
   | {
       ok: true;
       instructionId: string;
@@ -1172,7 +1170,10 @@ export const ADD_TASK_TOOL: McpToolDefinition = {
       },
       continuePrompt: { type: 'string', description: '継続時の指示（省略可）' },
       maxIterations: { type: 'number', description: '送信回数の上限（省略可）' },
-      provider: { type: 'string', description: "'codex' | 'claude'（省略可。省略時はrunのdefaults.provider）" },
+      provider: {
+        type: 'string',
+        description: "'codex' | 'claude'（省略可。省略時はrunのdefaults.provider）",
+      },
       // 失敗したタスクの置き換え（Issue #1663）。`failed`が残る間は新しいタスクが
       // 開始されないため、引き継ぎ用の追加ではここで失敗したタスクを指定させる
       supersedes: {
@@ -2351,13 +2352,7 @@ export class MessagingMcpServer {
               }
               return true;
             });
-      return [
-        ...base,
-        ...handoffTools,
-        ...listHandoffTools,
-        ...sessionTools,
-        ...controlTools,
-      ];
+      return [...base, ...handoffTools, ...listHandoffTools, ...sessionTools, ...controlTools];
     }
     return [
       ...base,

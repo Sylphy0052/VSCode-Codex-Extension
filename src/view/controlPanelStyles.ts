@@ -692,6 +692,9 @@ ${sharedStyles()}
   .skillBadge-user, .importBadge-home { border-style: solid; }
   .skillBadge-project, .importBadge-project { border-style: dashed; }
   .skillBadge-plugin { border-style: dotted; }
+  /* 拡張機能が同梱する skill。残る線種（double / groove 等）は 1px の枠では実線と見分けられないため、
+     線種ではなく記号で分ける */
+  .skillBadge-extension::before { content: '◆'; }
   .importRunButton {
     width: auto;
     margin-top: 4px;

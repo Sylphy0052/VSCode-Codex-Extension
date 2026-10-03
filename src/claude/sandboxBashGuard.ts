@@ -31,10 +31,27 @@ const NETWORK_COMMANDS: readonly (readonly string[])[] = EXCLUDED_COMMANDS.map((
 const NETWORK_HEADS = new Set(NETWORK_COMMANDS.map((name) => name[0]));
 
 /** 後ろのコマンドをそのまま起動するラッパー。先頭にあるとパターンの先頭一致から外れる。 */
-const WRAPPERS = new Set(['env', 'timeout', 'nice', 'nohup', 'time', 'command', 'sudo', 'stdbuf', 'exec']);
+const WRAPPERS = new Set([
+  'env',
+  'timeout',
+  'nice',
+  'nohup',
+  'time',
+  'command',
+  'sudo',
+  'stdbuf',
+  'exec',
+]);
 
 /** gitのグローバルオプションのうち、次の語を値に取るもの。 */
-const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path']);
+const GIT_OPTIONS_WITH_VALUE = new Set([
+  '-C',
+  '-c',
+  '--git-dir',
+  '--work-tree',
+  '--namespace',
+  '--exec-path',
+]);
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
@@ -135,7 +152,15 @@ export function splitShellCommands(command: string): ShellCommand[] {
     } else if (c === '&' && (command[i - 1] === '>' || command[i - 1] === '<')) {
       word += c;
       inWord = true;
-    } else if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')' || c === '`') {
+    } else if (
+      c === ';' ||
+      c === '&' ||
+      c === '|' ||
+      c === '\n' ||
+      c === '(' ||
+      c === ')' ||
+      c === '`'
+    ) {
       endCommand();
     } else if (c === ' ' || c === '\t') {
       endWord();
@@ -271,7 +296,8 @@ export function sandboxBashGuardReason(command: string): string | undefined {
   const found = commands
     .map(readNetworkCommand)
     .filter(
-      (c): c is NetworkCommand => c !== undefined && (commands.length > 1 || c.prefixed || c.redirected),
+      (c): c is NetworkCommand =>
+        c !== undefined && (commands.length > 1 || c.prefixed || c.redirected),
     );
   if (found.length === 0) {
     return undefined;

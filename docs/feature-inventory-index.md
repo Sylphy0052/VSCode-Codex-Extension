@@ -101,7 +101,7 @@
 | `agent.chat.sendOn`                              | `"ctrlEnter"`                                                                                                    | `window`              | [F05](feature-inventory.md#f05) |
 | `agent.chat.composerButtons`                     | `["attach","loopToggle","compact","recap","planToggle","handoffToNewSession","secondOpinion"]`                   | `window`              | [F08](feature-inventory.md#f08) |
 | `agent.chat.limitAutoResume.enabled`             | `true`                                                                                                           | `window`              | [F11](feature-inventory.md#f11) |
-| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-6.1-sol","effort":"high"}]`                                                    | `window`              | [F22](feature-inventory.md#f22) |
+| `agent.secondOpinion.candidates`                 | `[{"name":"Sol (high)","model":"gpt-6.1-sol","effort":"high"}]`                                                  | `window`              | [F22](feature-inventory.md#f22) |
 | `agent.secondOpinion.summary`                    | `{"enabled":true,"model":"gpt-6-luna","effort":"low"}`                                                           | `window`              | [F21](feature-inventory.md#f21) |
 | `agent.secondOpinion.headless`                   | `true`                                                                                                           | `window`              | [F22](feature-inventory.md#f22) |
 | `agent.secondOpinion.timeoutMs`                  | `900000`                                                                                                         | `window`              | [F22](feature-inventory.md#f22) |
@@ -203,26 +203,26 @@
 
 出典:[messaging.ts](../src/orchestrator/messaging.ts)。宣言されたツールを抽出した。実際に呼べる範囲は接続元がタスク/オーケストレーターか、実行状態等で異なる。`send_message`のタスク側の宛先はオーケストレーター固定。
 
-| ツール名                   | 宣言                                   | レビュー先                      |
-| -------------------------- | -------------------------------------- | ------------------------------- |
-| `list_tasks`               | `LIST_TASKS_TOOL`                      | [F31](feature-inventory.md#f31) |
-| `send_message`             | `SEND_MESSAGE_TOOL`                    | [F31](feature-inventory.md#f31) |
-| `ask_orchestrator`         | `ASK_ORCHESTRATOR_TOOL`                | [F31](feature-inventory.md#f31) |
-| `get_run_status`           | `GET_RUN_STATUS_TOOL`                  | [F31](feature-inventory.md#f31) |
-| `stop_task`                | `STOP_TASK_TOOL`                       | [F31](feature-inventory.md#f31) |
-| `retry_task`               | `RETRY_TASK_TOOL`                      | [F31](feature-inventory.md#f31) |
-| `continue_task`            | `CONTINUE_TASK_TOOL`                   | [F31](feature-inventory.md#f31) |
-| `decide_approval`          | `DECIDE_APPROVAL_TOOL`                 | [F30](feature-inventory.md#f30) |
-| `update_task_prompt`       | `UPDATE_TASK_PROMPT_TOOL`              | [F31](feature-inventory.md#f31) |
-| `update_task`              | `UPDATE_TASK_TOOL`                     | [F31](feature-inventory.md#f31) |
-| `ask_user`                 | `ASK_USER_TOOL`                        | [F30](feature-inventory.md#f30) |
-| `decide_final_merge`       | `DECIDE_FINAL_MERGE_TOOL`              | [F30](feature-inventory.md#f30) |
-| `add_task`                 | `ADD_TASK_TOOL`                        | [F31](feature-inventory.md#f31) |
-| `remove_task`              | `REMOVE_TASK_TOOL`                     | [F31](feature-inventory.md#f31) |
-| `update_task_dependencies` | `UPDATE_TASK_DEPENDENCIES_TOOL`        | [F31](feature-inventory.md#f31) |
-| `write_handoff`            | `WRITE_HANDOFF_TOOL`                   | [F32](feature-inventory.md#f32) |
-| `read_handoff`             | `READ_HANDOFF_TOOL`                    | [F32](feature-inventory.md#f32) |
-| `list_handoffs`            | `LIST_HANDOFFS_TOOL`                   | [F32](feature-inventory.md#f32) |
+| ツール名                   | 宣言                            | レビュー先                      |
+| -------------------------- | ------------------------------- | ------------------------------- |
+| `list_tasks`               | `LIST_TASKS_TOOL`               | [F31](feature-inventory.md#f31) |
+| `send_message`             | `SEND_MESSAGE_TOOL`             | [F31](feature-inventory.md#f31) |
+| `ask_orchestrator`         | `ASK_ORCHESTRATOR_TOOL`         | [F31](feature-inventory.md#f31) |
+| `get_run_status`           | `GET_RUN_STATUS_TOOL`           | [F31](feature-inventory.md#f31) |
+| `stop_task`                | `STOP_TASK_TOOL`                | [F31](feature-inventory.md#f31) |
+| `retry_task`               | `RETRY_TASK_TOOL`               | [F31](feature-inventory.md#f31) |
+| `continue_task`            | `CONTINUE_TASK_TOOL`            | [F31](feature-inventory.md#f31) |
+| `decide_approval`          | `DECIDE_APPROVAL_TOOL`          | [F30](feature-inventory.md#f30) |
+| `update_task_prompt`       | `UPDATE_TASK_PROMPT_TOOL`       | [F31](feature-inventory.md#f31) |
+| `update_task`              | `UPDATE_TASK_TOOL`              | [F31](feature-inventory.md#f31) |
+| `ask_user`                 | `ASK_USER_TOOL`                 | [F30](feature-inventory.md#f30) |
+| `decide_final_merge`       | `DECIDE_FINAL_MERGE_TOOL`       | [F30](feature-inventory.md#f30) |
+| `add_task`                 | `ADD_TASK_TOOL`                 | [F31](feature-inventory.md#f31) |
+| `remove_task`              | `REMOVE_TASK_TOOL`              | [F31](feature-inventory.md#f31) |
+| `update_task_dependencies` | `UPDATE_TASK_DEPENDENCIES_TOOL` | [F31](feature-inventory.md#f31) |
+| `write_handoff`            | `WRITE_HANDOFF_TOOL`            | [F32](feature-inventory.md#f32) |
+| `read_handoff`             | `READ_HANDOFF_TOOL`             | [F32](feature-inventory.md#f32) |
+| `list_handoffs`            | `LIST_HANDOFFS_TOOL`            | [F32](feature-inventory.md#f32) |
 
 ## 全ソースファイル
 

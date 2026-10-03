@@ -88,7 +88,9 @@ export async function startRoadmapRunCommand(
     );
   }
   const roadmapTitle = roadmap.title ?? `ロードマップIssue #${String(roadmap.issueNumber)}`;
-  const settings = await deps.askSettings(sanitizeInlineText(roadmapTitle, TASK_RUN_TITLE_MAX_LENGTH));
+  const settings = await deps.askSettings(
+    sanitizeInlineText(roadmapTitle, TASK_RUN_TITLE_MAX_LENGTH),
+  );
   if (settings === undefined) {
     return;
   }
@@ -100,7 +102,9 @@ export async function startRoadmapRunCommand(
     children: imported.children,
     planNodes: imported.plan.kind === 'valid' ? imported.plan.nodes : undefined,
     planSectionHash:
-      imported.plan.kind === 'valid' ? hashRoadmapPlanSectionContent(imported.plan.content) : undefined,
+      imported.plan.kind === 'valid'
+        ? hashRoadmapPlanSectionContent(imported.plan.content)
+        : undefined,
   });
   if (!outcome.ok) {
     deps.log.warn(`[task run] ${outcome.message}`);
@@ -197,12 +201,15 @@ async function pickRoadmapIssue(
   return chosen.issue ?? askRoadmapIssueNumber(undefined);
 }
 
-async function askRoadmapIssueNumber(reason: string | undefined): Promise<PickedRoadmap | undefined> {
+async function askRoadmapIssueNumber(
+  reason: string | undefined,
+): Promise<PickedRoadmap | undefined> {
   const input = await vscode.window.showInputBox({
     title: 'ロードマップIssueの番号',
     prompt: reason === undefined ? '#は付けずに番号だけ入力します' : `${reason}。番号を入力します`,
     ignoreFocusOut: true,
-    validateInput: (value) => (/^[1-9][0-9]{0,8}$/.test(value.trim()) ? undefined : '1以上の整数で入力してください'),
+    validateInput: (value) =>
+      /^[1-9][0-9]{0,8}$/.test(value.trim()) ? undefined : '1以上の整数で入力してください',
   });
   return input === undefined ? undefined : { issueNumber: Number(input.trim()), title: undefined };
 }

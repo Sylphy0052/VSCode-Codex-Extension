@@ -46,9 +46,7 @@ export function suggestTaskSplits(
     }
     const accepted = notifyOrchestrator(self, runId, {
       kind: 'taskSplitSuggested',
-      body: buildTaskSplitSuggestedEventBody(taskId, exceeded, [
-        ...(liveTask.touchedFiles ?? []),
-      ]),
+      body: buildTaskSplitSuggestedEventBody(taskId, exceeded, [...(liveTask.touchedFiles ?? [])]),
     });
     // runごとのイベント総数の上限で捨てられたら、提案済みにしない（Viewへ「提案済み」と出さない）
     if (!accepted) {

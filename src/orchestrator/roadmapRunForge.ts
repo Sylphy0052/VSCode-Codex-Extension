@@ -35,7 +35,10 @@ export async function resolveRoadmapBaseCommit(
   // `--prune`は付けない。付けると取り込みの経路によってはorigin/mainが消える
   await ports.git.run(['fetch', 'origin'], repoRoot);
   for (const ref of ['origin/HEAD', 'origin/main', 'HEAD']) {
-    const result = await ports.git.run(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], repoRoot);
+    const result = await ports.git.run(
+      ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
+      repoRoot,
+    );
     const sha = result.stdout.trim();
     if (result.code === 0 && /^[0-9a-f]{7,64}$/.test(sha)) {
       return sha;
@@ -56,7 +59,10 @@ function parseJson(text: string): unknown {
   }
 }
 
-function toPullRequest(numberValue: unknown, urlValue: unknown): { number: number; url: string } | undefined {
+function toPullRequest(
+  numberValue: unknown,
+  urlValue: unknown,
+): { number: number; url: string } | undefined {
   if (
     typeof numberValue !== 'number' ||
     !Number.isSafeInteger(numberValue) ||
@@ -70,13 +76,17 @@ function toPullRequest(numberValue: unknown, urlValue: unknown): { number: numbe
 }
 
 /** 応答の先頭要素だけを見る（`--limit 1`・新しい順）。 */
-export function parseGithubPullRequestList(stdout: string): { number: number; url: string } | undefined {
+export function parseGithubPullRequestList(
+  stdout: string,
+): { number: number; url: string } | undefined {
   const parsed = parseJson(stdout);
   const first: unknown = Array.isArray(parsed) ? parsed[0] : undefined;
   return isRecord(first) ? toPullRequest(first.number, first.url) : undefined;
 }
 
-export function parseGitlabMergeRequestList(stdout: string): { number: number; url: string } | undefined {
+export function parseGitlabMergeRequestList(
+  stdout: string,
+): { number: number; url: string } | undefined {
   const parsed = parseJson(stdout);
   const first: unknown = Array.isArray(parsed) ? parsed[0] : undefined;
   return isRecord(first) ? toPullRequest(first.iid, first.web_url) : undefined;

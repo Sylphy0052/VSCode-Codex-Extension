@@ -13,7 +13,11 @@ import {
   resolveTaskPlan,
   type PlanTaskInput,
 } from './taskRunPlan';
-import { buildRoadmapInitialPlan, findIssuesOutsideRoadmap, taskIssueNumber } from './taskRunRoadmap';
+import {
+  buildRoadmapInitialPlan,
+  findIssuesOutsideRoadmap,
+  taskIssueNumber,
+} from './taskRunRoadmap';
 import type { TaskRunRoadmapPort } from './taskRunRoadmapForge';
 import {
   findClosedRoadmapChildren,
@@ -119,8 +123,7 @@ const PAUSE_REJECTIONS: Record<Exclude<PauseStageOutcome, { ok: true }>['reason'
 export type ControllerResult = { ok: true; message: string } | { ok: false; message: string };
 
 export type StartTaskRunOutcome =
-  | { ok: true; runId: string; reused: boolean }
-  | { ok: false; message: string };
+  { ok: true; runId: string; reused: boolean } | { ok: false; message: string };
 
 export interface TaskRunControllerDeps {
   store: Pick<TaskRunStore, 'find' | 'update' | 'list' | 'listActive'>;
@@ -162,7 +165,9 @@ export interface TaskRunControllerDeps {
    * 計画の提案をReflexで判定し、自動承認する（Issue #1554）。設定
    * `agent.taskRun.planAutoApprove.enabled`が無効なら`undefined`（判定を試みずに承認待ちのまま）。
    */
-  planAutoApprove(engine: TaskRunEngine): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
+  planAutoApprove(
+    engine: TaskRunEngine,
+  ): { reflex: ReflexJudgeDeps; threshold: number } | undefined;
   /**
    * Orchestratorの`approve_plan`で計画をReflexに審査させる（Issue #1763）。省略時とReflexモードが
    * 無効なとき（`undefined`を返す）は審査せず人に確かめる。`planAutoApprove`の設定には左右されない。
@@ -197,14 +202,15 @@ export interface QuestionAwaitingAnswer {
   userOnly: boolean;
 }
 
-export type TaskRunTransitionListener =(prev: TaskRun | undefined, next: TaskRun) => void;
+export type TaskRunTransitionListener = (prev: TaskRun | undefined, next: TaskRun) => void;
 
 const REJECTION_MESSAGES: Record<StartStageRejection, string> = {
   unknownTask: 'そのタスクは計画に無い',
   planNotApproved: '計画がまだユーザーに承認されていない',
   runFinished: 'このrunは終わっている',
   taskDone: 'このタスクはすべての工程を終えている',
-  notCurrentStage: 'その工程はこのタスクの現在の工程ではない（get_run_stateで現在の工程を確かめる）',
+  notCurrentStage:
+    'その工程はこのタスクの現在の工程ではない（get_run_stateで現在の工程を確かめる）',
   alreadyRunning: 'その工程は既に実行中',
   paused: 'その工程は一時停止中（続けるならresume_stageで再開する）',
   halted: 'このタスクは停止処理中、またはユーザーの対応を待っている',
@@ -218,7 +224,10 @@ export class TaskRunController {
   private readonly lastSeen = new Map<string, TaskRun>();
   private readonly listeners = new Set<TaskRunTransitionListener>();
   /** 求めている途中・求め終えた推奨値。キーは`runId`と`recommendationKey`。 */
-  private readonly recommending = new Map<string, Promise<StageSettingsRecommendation | undefined>>();
+  private readonly recommending = new Map<
+    string,
+    Promise<StageSettingsRecommendation | undefined>
+  >();
   private readonly recommended = new Map<string, Map<string, StageSettingsRecommendation>>();
   /** `approve_plan`でReflexが妥当としなかった計画（runごと。Issue #1763）。 */
   private readonly plansNeedingUser = new Map<string, string>();
@@ -359,17 +368,23 @@ export class TaskRunController {
    * `TaskStageRunner.stopLiveStagesOfRun`）。止めた工程は移した先のウィンドウで「やり直す」から始め直す。
    */
   handleLeaseLost(runId: string, holder: TaskRunLease | undefined): void {
-    this.deps.log(`[task run] ${runId}の専有権を${formatTaskRunLeaseHolder(holder, this.now())}に取られた`);
+    this.deps.log(
+      `[task run] ${runId}の専有権を${formatTaskRunLeaseHolder(holder, this.now())}に取られた`,
+    );
     this.refreshKanban(runId);
     void this.deps.runner
       .stopLiveStagesOfRun(runId, '専有権が別のウィンドウへ移ったため止めました')
       .then((count) => {
         if (count > 0) {
-          this.deps.log(`[task run] ${runId}の専有権を失ったため、動いていた工程を${String(count)}件止めた`);
+          this.deps.log(
+            `[task run] ${runId}の専有権を失ったため、動いていた工程を${String(count)}件止めた`,
+          );
         }
       })
       .catch((e: unknown) => {
-        this.deps.log(`[task run] ${runId}の専有権を失った後、工程を止められませんでした: ${String(e)}`);
+        this.deps.log(
+          `[task run] ${runId}の専有権を失った後、工程を止められませんでした: ${String(e)}`,
+        );
       });
   }
 
@@ -418,14 +433,17 @@ export class TaskRunController {
       .recommendStageSettings(run.engine, buildStageClassifierInput(run, task, ref.stage))
       .then((value) => {
         if (value !== undefined) {
-          const perRun = this.recommended.get(runId) ?? new Map<string, StageSettingsRecommendation>();
+          const perRun =
+            this.recommended.get(runId) ?? new Map<string, StageSettingsRecommendation>();
           perRun.set(key, value);
           this.recommended.set(runId, perRun);
         }
         return value;
       })
       .catch((e: unknown) => {
-        this.deps.log(`[task run] ${ref.taskId}の${ref.stage}の推奨値を求められませんでした: ${String(e)}`);
+        this.deps.log(
+          `[task run] ${ref.taskId}の${ref.stage}の推奨値を求められませんでした: ${String(e)}`,
+        );
         // 失敗は覚えない（次に判断を待つときに求め直す）
         this.recommending.delete(cacheKey);
         return undefined;
@@ -468,7 +486,10 @@ export class TaskRunController {
    * 形式の検証を済ませた計画を受け付ける（`proposePlan`と、ロードマップIssueから作る初期計画
    * `startRoadmapRun`が共有する。Issue #1623）。Issueの検証とReflex審査は両者で同じ。
    */
-  private async applyPlan(runId: string, tasks: readonly PlanTaskInput[]): Promise<ControllerResult> {
+  private async applyPlan(
+    runId: string,
+    tasks: readonly PlanTaskInput[],
+  ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
       return leased;
@@ -555,7 +576,10 @@ export class TaskRunController {
   private async reviewPlanIfEnabled(
     current: TaskRun | undefined,
     tasks: readonly PlanTaskInput[],
-  ): Promise<{ verdict: Awaited<ReturnType<typeof reviewTaskRunPlanProposal>>; reviewedDrafts: string } | undefined> {
+  ): Promise<
+    | { verdict: Awaited<ReturnType<typeof reviewTaskRunPlanProposal>>; reviewedDrafts: string }
+    | undefined
+  > {
     if (current === undefined) {
       return undefined;
     }
@@ -632,7 +656,11 @@ export class TaskRunController {
         .filter((n): n is number => n !== undefined),
     );
     for (const other of this.deps.store.list()) {
-      if (other.runId === run.runId || other.workspaceRoot !== run.workspaceRoot || other.finishedAt !== undefined) {
+      if (
+        other.runId === run.runId ||
+        other.workspaceRoot !== run.workspaceRoot ||
+        other.finishedAt !== undefined
+      ) {
         continue;
       }
       for (const task of listTasks(other)) {
@@ -675,10 +703,16 @@ export class TaskRunController {
       return conflict === undefined ? approveTaskPlan(r) : r;
     });
     if (changed) {
-      return { ok: false, message: '審査・確認の間に計画が変わりました。もう一度approve_planを呼んでください' };
+      return {
+        ok: false,
+        message: '審査・確認の間に計画が変わりました。もう一度approve_planを呼んでください',
+      };
     }
     if (conflict !== undefined) {
-      return { ok: false, message: `計画を承認できません: ${conflict}。Orchestratorに計画を直させてください` };
+      return {
+        ok: false,
+        message: `計画を承認できません: ${conflict}。Orchestratorに計画を直させてください`,
+      };
     }
     if (next?.planStatus !== 'approved') {
       return { ok: false, message: '承認待ちの計画がありません' };
@@ -770,7 +804,10 @@ export class TaskRunController {
         return { ok: true, runId: active.runId, reused: true };
       }
       if (!isValidMaxParallel(input.maxParallel)) {
-        return { ok: false, message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+        return {
+          ok: false,
+          message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する`,
+        };
       }
       const run = createTaskRun({
         workspaceRoot: input.workspaceRoot,
@@ -831,7 +868,10 @@ export class TaskRunController {
         return { ok: true, runId: existing.runId, reused: true };
       }
       if (!isValidMaxParallel(input.maxParallel)) {
-        return { ok: false, message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+        return {
+          ok: false,
+          message: `並列上限は1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する`,
+        };
       }
       const run = createTaskRun({
         workspaceRoot: input.workspaceRoot,
@@ -1099,7 +1139,13 @@ export class TaskRunController {
         rejection = 'レビューの関門を先に決着させる（差し戻す、または指摘を残したまま進める）';
         return r;
       }
-      const resolved = resolveStageGate(r, taskId, gate.gateId, { choice: 'retry', by: 'user' }, this.now());
+      const resolved = resolveStageGate(
+        r,
+        taskId,
+        gate.gateId,
+        { choice: 'retry', by: 'user' },
+        this.now(),
+      );
       if (resolved === r) {
         rejection = '関門を決着させられなかった';
       }
@@ -1236,7 +1282,9 @@ export class TaskRunController {
             pullRequest === undefined
               ? undefined
               : orUndefined(observation.fetchPullRequestState(root, pullRequest.number)),
-            worktreePath === undefined ? undefined : orUndefined(this.deps.pathExists(worktreePath)),
+            worktreePath === undefined
+              ? undefined
+              : orUndefined(this.deps.pathExists(worktreePath)),
             // PRを作った後のIssueは見ない（reconcileTaskRunOnReloadの規則）
             issueNumber === undefined || pullRequest !== undefined
               ? undefined
@@ -1273,7 +1321,12 @@ export class TaskRunController {
       return { ok: false, message: 'runが見つからない' };
     }
     const catalog = this.deps.modelCatalog(run.engine);
-    const settings = checkStageSettings(catalog.models, catalog.fallbackEfforts, call.model, call.effort);
+    const settings = checkStageSettings(
+      catalog.models,
+      catalog.fallbackEfforts,
+      call.model,
+      call.effort,
+    );
     if (!settings.ok) {
       return settings;
     }
@@ -1407,7 +1460,11 @@ export class TaskRunController {
     };
   }
 
-  async instructTask(runId: string, taskId: string, instruction: string): Promise<ControllerResult> {
+  async instructTask(
+    runId: string,
+    taskId: string,
+    instruction: string,
+  ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
       return leased;
@@ -1420,7 +1477,10 @@ export class TaskRunController {
 
   async setMaxParallel(runId: string, maxParallel: number): Promise<ControllerResult> {
     if (!isValidMaxParallel(maxParallel)) {
-      return { ok: false, message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する` };
+      return {
+        ok: false,
+        message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する`,
+      };
     }
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
@@ -1488,7 +1548,11 @@ export class TaskRunController {
     return next !== undefined &&
       findStageQuestion(next, taskId, questionId)?.status === 'awaitingOrchestrator'
       ? { ok: true, message: `${taskId}の質問をオーケストレーターの判断待ちにした` }
-      : { ok: false, message: 'ユーザーの判断待ちの質問ではない（既に回答済み、またはユーザーだけが答える質問）' };
+      : {
+          ok: false,
+          message:
+            'ユーザーの判断待ちの質問ではない（既に回答済み、またはユーザーだけが答える質問）',
+        };
   }
 
   async answerQuestion(
@@ -1505,7 +1569,10 @@ export class TaskRunController {
     const ok = await this.deps.runner.answerQuestion(runId, taskId, questionId, answer, by);
     return ok
       ? { ok: true, message: `${taskId}の質問に回答した` }
-      : { ok: false, message: '回答を受け付けられなかった（既に回答済み、または取り消された可能性がある）' };
+      : {
+          ok: false,
+          message: '回答を受け付けられなかった（既に回答済み、または取り消された可能性がある）',
+        };
   }
 
   /** 決着待ちの関門か。決着の確認（モーダル）の前に確かめる。 */
@@ -1716,7 +1783,10 @@ export class TaskRunController {
           : findStageGate(next, taskId, target.gateId)?.status;
     return status === 'awaitingUser'
       ? { ok: true, message: `${taskId}の判断をユーザーへ回した` }
-      : { ok: false, message: 'オーケストレーターの判断待ちではない（既に決着済み、またはユーザーの判断待ち）' };
+      : {
+          ok: false,
+          message: 'オーケストレーターの判断待ちではない（既に決着済み、またはユーザーの判断待ち）',
+        };
   }
 
   /** runを忘れる（runの削除・拡張機能の終了時）。 */

@@ -159,9 +159,7 @@ describe('指示へのid付与とタスクへの注記（Issue #1502）', () => 
     const ctx = setup();
     const delivered = sendInstruction(ctx, { countUnit: '変更したファイル' });
     expect(delivered[0]?.instruction).toEqual({ countUnit: '変更したファイル' });
-    expect(composeNextPrompt('続けて', delivered)).toContain(
-      '単位「変更したファイル」を1件として',
-    );
+    expect(composeNextPrompt('続けて', delivered)).toContain('単位「変更したファイル」を1件として');
   });
 
   it('タスクからの送信・問いは指示にならず、countUnitは無視される', () => {

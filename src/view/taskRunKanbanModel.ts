@@ -4,7 +4,10 @@ import {
   GATE_CHOICE_LABELS,
   MAX_REVIEW_ROUNDS,
 } from '../orchestrator/taskRunGates';
-import { listQuestionsAwaitingOrchestrator, listQuestionsAwaitingUser } from '../orchestrator/taskRunQuestions';
+import {
+  listQuestionsAwaitingOrchestrator,
+  listQuestionsAwaitingUser,
+} from '../orchestrator/taskRunQuestions';
 import {
   assessTaskRun,
   countActiveStageSessions,
@@ -250,10 +253,16 @@ function stageBadges(
   return [{ label: 'Orchestratorの判断待ち', tone: '' }];
 }
 
-function badgesFor(run: TaskRun, task: OrchestratedTask, unmet: readonly string[]): TaskRunKanbanBadge[] {
+function badgesFor(
+  run: TaskRun,
+  task: OrchestratedTask,
+  unmet: readonly string[],
+): TaskRunKanbanBadge[] {
   if (isTaskDone(task)) {
     // ロードマップで完了済みの子Issue（Issue #1623）は工程を通していないことを示す
-    return task.completedInRoadmap === true ? [{ label: 'ロードマップで完了済み', tone: 'ok' }] : [];
+    return task.completedInRoadmap === true
+      ? [{ label: 'ロードマップで完了済み', tone: 'ok' }]
+      : [];
   }
   const gate = findOpenGate(task);
   if (gate !== undefined) {
@@ -285,7 +294,9 @@ function toKanbanGate(gate: StageGate): TaskRunKanbanGate {
     awaitingOrchestrator: gate.status === 'awaitingOrchestrator',
     detail: gate.detail.slice(0, GATE_DETAIL_MAX_LENGTH),
     reflexSummary:
-      gate.reflexSummary === undefined ? undefined : sanitizeInlineText(gate.reflexSummary, SUMMARY_MAX_LENGTH),
+      gate.reflexSummary === undefined
+        ? undefined
+        : sanitizeInlineText(gate.reflexSummary, SUMMARY_MAX_LENGTH),
     choices: choices.map((choice) => ({ choice, label: GATE_CHOICE_LABELS[choice] })),
   };
 }
@@ -333,9 +344,12 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
     dependsOn: task.dependsOn.map((taskId) => ({ taskId, satisfied: !unmet.includes(taskId) })),
     issueNumber: task.issueNumber,
     pullRequest: task.pullRequest,
-    failure: task.failure === undefined ? undefined : sanitizeInlineText(task.failure, FAILURE_MAX_LENGTH),
+    failure:
+      task.failure === undefined ? undefined : sanitizeInlineText(task.failure, FAILURE_MAX_LENGTH),
     pauseReason:
-      task.pause === undefined ? undefined : sanitizeInlineText(task.pause.reason, FAILURE_MAX_LENGTH),
+      task.pause === undefined
+        ? undefined
+        : sanitizeInlineText(task.pause.reason, FAILURE_MAX_LENGTH),
     attempts: record?.attempts.length ?? 0,
     canStop: record?.status === 'running' && !stopping,
     // 一時停止で閉じた工程にはセッションが無く、指示を届ける先が無い
@@ -381,11 +395,16 @@ function emptyColumns(): Record<TaskRunKanbanColumn, TaskRunKanbanCard[]> {
 export { taskRunLabel };
 
 /** 計画のReflex審査結果を表示用に変換する（Issue #1554）。 */
-function toKanbanPlanReview(review: TaskPlanReview | undefined): TaskRunKanbanPlanReview | undefined {
+function toKanbanPlanReview(
+  review: TaskPlanReview | undefined,
+): TaskRunKanbanPlanReview | undefined {
   if (review === undefined) {
     return undefined;
   }
-  return { autoApproved: review.autoApproved, summary: sanitizeInlineText(review.summary, SUMMARY_MAX_LENGTH) };
+  return {
+    autoApproved: review.autoApproved,
+    summary: sanitizeInlineText(review.summary, SUMMARY_MAX_LENGTH),
+  };
 }
 
 /** runの状態の表示（一覧用）。 */
@@ -409,7 +428,10 @@ export function taskRunStatusLabel(run: TaskRun): string {
  * 一覧の並び: いま開いているフォルダ（`currentFolders`）のrunを先に、他のフォルダのrunを後ろに
  * まとめ、それぞれ新しい順にする（Issue #1561）。
  */
-export function sortTaskRunsForList(runs: readonly TaskRun[], currentFolders: readonly string[]): TaskRun[] {
+export function sortTaskRunsForList(
+  runs: readonly TaskRun[],
+  currentFolders: readonly string[],
+): TaskRun[] {
   const current = new Set(currentFolders);
   return [...runs].sort((a, b) => {
     const byFolder = Number(current.has(b.workspaceRoot)) - Number(current.has(a.workspaceRoot));
@@ -459,7 +481,10 @@ export function buildTaskRunKanban(
     runs: summaries,
     run: {
       runId: selected.runId,
-      title: selected.title === undefined ? undefined : sanitizeInlineText(selected.title, TASK_RUN_TITLE_MAX_LENGTH),
+      title:
+        selected.title === undefined
+          ? undefined
+          : sanitizeInlineText(selected.title, TASK_RUN_TITLE_MAX_LENGTH),
       label: taskRunLabel(selected),
       workspaceRoot: selected.workspaceRoot,
       engine: selected.engine,
@@ -478,11 +503,13 @@ export function buildTaskRunKanban(
           : {
               issueNumber: selected.roadmap.issueNumber,
               title: sanitizeInlineText(selected.roadmap.title, TITLE_MAX_LENGTH),
-              notices: (selected.roadmap.notices ?? []).slice(-KANBAN_ROADMAP_NOTICES_SHOWN).map((n) => ({
-                kind: n.kind,
-                body: sanitizeInlineText(n.body, TITLE_MAX_LENGTH),
-                at: n.at,
-              })),
+              notices: (selected.roadmap.notices ?? [])
+                .slice(-KANBAN_ROADMAP_NOTICES_SHOWN)
+                .map((n) => ({
+                  kind: n.kind,
+                  body: sanitizeInlineText(n.body, TITLE_MAX_LENGTH),
+                  at: n.at,
+                })),
             },
       orchestratorAutoHandoffs: selected.orchestratorAutoHandoffs,
       columns,

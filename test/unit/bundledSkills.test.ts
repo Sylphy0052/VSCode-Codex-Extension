@@ -79,7 +79,7 @@ describe('同梱skill', () => {
         .forEach((line, i) => {
           for (const re of forbidden) if (re.test(line)) hits.push(`${rel}:${i + 1}: ${re}`);
           for (const m of line.matchAll(email)) {
-            if (m[0].startsWith('git@') || /(^|\.)example(\.(com|org|net))?$/.test(m[1])) continue;
+            if (m[0].startsWith('git@') || /(^|\.)example(\.(com|org|net))?$/.test(m[1]!)) continue;
             hits.push(`${rel}:${i + 1}: ${m[0]}`);
           }
         });
@@ -95,7 +95,7 @@ describe('同梱skill', () => {
       for (const m of readFileSync(file, 'utf8').matchAll(
         /codex-ext:([a-z0-9-]+)(?![a-z0-9*-])/g,
       )) {
-        if (!known.has(m[1])) unresolved.push(`${path.relative(root, file)}: ${m[0]}`);
+        if (!known.has(m[1]!)) unresolved.push(`${path.relative(root, file)}: ${m[0]}`);
       }
     }
     expect(unresolved).toEqual([]);
@@ -109,7 +109,7 @@ describe('同梱skill', () => {
         .replace(/^```[\s\S]*?^```/gm, '')
         .replace(/`[^`\n]*`/g, '');
       for (const m of text.matchAll(/\]\(([^)\s]+)\)/g)) {
-        const target = m[1].split('#')[0];
+        const target = m[1]!.split('#')[0];
         if (!target || /^[a-z]+:/i.test(target)) continue;
         const resolved = path.resolve(path.dirname(file), target);
         if (!resolved.startsWith(root + path.sep) || !existsSync(resolved)) {

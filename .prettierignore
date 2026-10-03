@@ -14,3 +14,8 @@ eval-results/
 # 当初は並行更新との衝突を避けるために docs/roadmap/ を対象外にしていた（Issue #551）。
 # 移設の経緯は Issue #1458
 docs/archive/roadmap/
+
+# VSIXに同梱するskillとsubagent。コードフェンスの中はテンプレートや記法の例で、Prettierが
+# 埋め込みMarkdown・YAMLとして整形するとインデントや入れ子のフェンスが崩れて意味が変わる
+# （Issue #1852）
+resources/skills-plugin/

@@ -1073,7 +1073,11 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 復元したタブを表示専用で預かる（Issue #1775）。CLIは起動しない。会話の読み込みは
    * 呼び出し側が`entry.session`へ行う。タブ名はVS Codeが復元したタブ名をそのまま使う。
    */
-  protected holdRestoredTaskPanel(entry: TPanel, sessionId: string, panel: vscode.WebviewPanel): void {
+  protected holdRestoredTaskPanel(
+    entry: TPanel,
+    sessionId: string,
+    panel: vscode.WebviewPanel,
+  ): void {
     entry.displayOnly = true;
     entry.inputLock = true;
     entry.autoHandoffDisabled = true;

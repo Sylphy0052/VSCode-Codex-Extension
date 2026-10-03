@@ -72,16 +72,15 @@ describe('buildTaskSplitSuggestedEventBody', () => {
   });
 
   it(`${MAX_SPLIT_SUGGEST_LISTED_FILES}件を超えるファイルは「ほかN件」と要約する`, () => {
-    const files = Array.from({ length: MAX_SPLIT_SUGGEST_LISTED_FILES + 3 }, (_, i) =>
-      `file-${String(i).padStart(2, '0')}.ts`,
+    const files = Array.from(
+      { length: MAX_SPLIT_SUGGEST_LISTED_FILES + 3 },
+      (_, i) => `file-${String(i).padStart(2, '0')}.ts`,
     );
     const body = buildTaskSplitSuggestedEventBody('T1', [], files);
     expect(body).toContain(`## 変更ファイル（${files.length}件）`);
     expect(body).toContain('- ほか3件');
     // 一覧行（- file-xx.ts）は上限件数ちょうどしか出ない
-    const listedLines = body
-      .split('\n')
-      .filter((line) => line.startsWith('- file-'));
+    const listedLines = body.split('\n').filter((line) => line.startsWith('- file-'));
     expect(listedLines).toHaveLength(MAX_SPLIT_SUGGEST_LISTED_FILES);
   });
 

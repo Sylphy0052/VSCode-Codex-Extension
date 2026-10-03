@@ -176,7 +176,11 @@ export function reviewGateDetail(review: StageReviewResult): string {
  * 自動のやり直しが上限に達しているなら、その理由。Reflexに判定させずにユーザーへ回す。
  * 実装への差し戻しの上限は、ここでは扱わない（回答者判定へ回す。`isReviewRoundsExhausted`）。
  */
-function limitReached(task: OrchestratedTask, kind: StageGateKind, stage: TaskStage): string | undefined {
+function limitReached(
+  task: OrchestratedTask,
+  kind: StageGateKind,
+  stage: TaskStage,
+): string | undefined {
   if (kind === 'reviewFindings') {
     return undefined;
   }
@@ -285,7 +289,10 @@ export function escalateStageGate(
     return {
       ...task,
       gates: replaceGate(task, { ...gate, status: 'awaitingUser', reflexSummary }),
-      attention: gate.kind === 'reviewFindings' && task.attention === 'none' ? 'awaitingUser' : task.attention,
+      attention:
+        gate.kind === 'reviewFindings' && task.attention === 'none'
+          ? 'awaitingUser'
+          : task.attention,
       updatedAt: at,
     };
   });
@@ -312,7 +319,11 @@ export function markGateAwaitingOrchestrator(
 
 /** 「実装とPR作成」と「レビュー」を未着手へ戻す（差し戻し）。 */
 function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
-  const reset = { status: 'notStarted' as const, pendingDecision: undefined, completedAt: undefined };
+  const reset = {
+    status: 'notStarted' as const,
+    pendingDecision: undefined,
+    completedAt: undefined,
+  };
   return {
     ...task,
     stages: {
@@ -402,7 +413,11 @@ export function resolveStageGate(
         return closed;
       }
       const reset = getTask(resetStageForRetry(withTaskUpdate(run, closed), taskId, now), taskId);
-      const base: OrchestratedTask = { ...(reset ?? closed), attention: 'none', failure: undefined };
+      const base: OrchestratedTask = {
+        ...(reset ?? closed),
+        attention: 'none',
+        failure: undefined,
+      };
       return resolution.choice === 'sendBack' ? sendBackToImplement(base) : base;
     }
     if (status !== 'halted') {
@@ -457,7 +472,13 @@ export function escalateJudgingGatesOnReload(run: TaskRun, now: Date): TaskRun {
   for (const task of Object.values(run.tasks)) {
     const gate = findOpenGate(task);
     if (gate?.status === 'judging') {
-      next = escalateStageGate(next, task.taskId, gate.gateId, '再読み込みでReflexの判定が途切れた', now);
+      next = escalateStageGate(
+        next,
+        task.taskId,
+        gate.gateId,
+        '再読み込みでReflexの判定が途切れた',
+        now,
+      );
     } else if (gate?.status === 'awaitingOrchestrator') {
       next = escalateStageGate(
         next,
@@ -515,7 +536,10 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
 }
 
 /** Reflexが選んだ選択肢を決着へ写す。ユーザーへ回す選択肢と未知の選択肢は`undefined`。 */
-export function gateChoiceFromAnswer(kind: StageGateKind, answer: string): StageGateChoice | undefined {
+export function gateChoiceFromAnswer(
+  kind: StageGateKind,
+  answer: string,
+): StageGateChoice | undefined {
   const choice: StageGateChoice | undefined =
     answer === GATE_OPTION_SEND_BACK
       ? 'sendBack'
