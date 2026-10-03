@@ -8,9 +8,11 @@ import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestra
 import {
   isTaskRunActive,
   isValidTaskId,
+  MAX_CLOSE_REASON_LENGTH,
   taskRunLabel,
   validateTaskRunTitleInput,
 } from '../orchestrator/taskRunState';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import { TASK_LEASE_HEARTBEAT_MS } from '../orchestrator/taskRunLease';
 import { trackChatPanel } from './backgroundPanelTabs';
 import { chatCsp } from './chatCsp';
@@ -332,6 +334,9 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       case 'retryStage':
         warnIfRejected(await controller.retryStage(runId, taskId));
         return;
+      case 'closeTask':
+        await this.closeTask(runId, taskId);
+        return;
       case 'answerQuestion':
         await this.answerQuestion(runId, taskId, message.questionId, message.answer);
         return;
@@ -403,6 +408,33 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     if (result.ok) {
       this.deps.orchestrator.notifyTaskInstructed(runId, taskId, instruction);
     } else {
+      void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
+    }
+  }
+
+  /**
+   * 工程が止まったタスクを、理由を入力させてmergeせずに完了にする（Issue #1851）。重複・取り下げの
+   * ようにPRをmergeしないと決めたタスクに使う。
+   */
+  private async closeTask(runId: string, taskId: string): Promise<void> {
+    const raw = await vscode.window.showInputBox({
+      title: `${taskId}をmergeせずに完了にする`,
+      prompt:
+        '完了にする理由（重複・取り下げなど）。依存する後続タスクは実装を始められるようになります。PRのclose・ブランチとworktreeの片付けは行いません',
+      validateInput: (value) =>
+        value.trim() === '' || value.length > MAX_CLOSE_REASON_LENGTH
+          ? `1〜${String(MAX_CLOSE_REASON_LENGTH)}文字で入力してください`
+          : undefined,
+    });
+    if (raw === undefined) {
+      return;
+    }
+    const result = await this.deps.controller.closeTask(
+      runId,
+      taskId,
+      sanitizeInlineText(raw, MAX_CLOSE_REASON_LENGTH),
+    );
+    if (!result.ok) {
       void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
     }
   }
@@ -1065,9 +1097,11 @@ const script = `
     if (card.canReveal) { actions.appendChild(button('セッションを開く', '', function () { send('revealStage', { taskId: card.taskId }); })); }
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopStage', { taskId: card.taskId }); })); }
     if (card.canRetry) { actions.appendChild(button('やり直す', 'primary', function () { send('retryStage', { taskId: card.taskId }); })); }
+    if (card.canRetry) { actions.appendChild(button('mergeせずに完了にする', '', function () { send('closeTask', { taskId: card.taskId }); })); }
     if (actions.childNodes.length > 0) { c.appendChild(actions); }
     if (card.gate) { c.appendChild(renderGate(card, card.gate)); }
     if (card.lastGateDecision) { c.appendChild(el('div', 'summary', card.lastGateDecision)); }
+    if (card.closedReason) { c.appendChild(el('div', 'summary', 'mergeせずに完了にした理由: ' + card.closedReason)); }
     if (card.canInstruct) { c.appendChild(renderInstruct(card)); }
     card.questions.forEach(function (q) { c.appendChild(renderQuestion(card, q)); });
     return c;

@@ -50,7 +50,7 @@ const MAX_REASON_LENGTH = 500;
 const MAX_ESCALATE_REASON_LENGTH = 300;
 const MAX_GATE_REASON_LENGTH = 300;
 const MAX_SETTING_LENGTH = 100;
-const STAGE_GATE_CHOICES: readonly StageGateChoice[] = ['sendBack', 'proceed', 'retry'];
+const STAGE_GATE_CHOICES: readonly StageGateChoice[] = ['sendBack', 'proceed', 'retry', 'close'];
 const TASK_RUN_ENGINES: readonly TaskRunEngine[] = ['codex', 'claude'];
 const MAX_RUN_ID_LENGTH = 200;
 /** 状態の本文（タスク一覧）の上限。 */
@@ -220,11 +220,11 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
           type: 'string',
           enum: [...STAGE_GATE_CHOICES],
           description:
-            'sendBack=実装へ差し戻す / proceed=指摘を残したまま進める（この2つはレビューの関門）/ retry=同じ工程をやり直す（失敗の関門）',
+            'sendBack=実装へ差し戻す / proceed=指摘を残したまま進める（この2つはレビューの関門）/ retry=同じ工程をやり直す / close=mergeせずに完了にする（この2つは失敗の関門）。closeは重複・取り下げのようにPRをmergeしないと決めたタスクに使い、依存する後続タスクは実装を始められる',
         },
         reason: {
           type: 'string',
-          description: `この判断を選んだ理由（${String(MAX_GATE_REASON_LENGTH)}文字以内）。ユーザーの判断待ちの関門でReflexの審査に使う`,
+          description: `この判断を選んだ理由（${String(MAX_GATE_REASON_LENGTH)}文字以内）。ユーザーの判断待ちの関門でReflexの審査に使う。closeでは必須で、完了にした理由として残る`,
         },
       },
       required: ['taskId', 'gateId', 'choice'],
@@ -620,6 +620,9 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
         };
       }
       const text = typeof reason === 'string' ? inline(reason, MAX_GATE_REASON_LENGTH) : '';
+      if (choice === 'close' && text === '') {
+        return { ok: false, message: 'choice=closeではreasonに完了にする理由を書く' };
+      }
       return {
         ok: true,
         call: {
@@ -721,7 +724,7 @@ export function formatTaskRunState(
       snapshot.children.filter((c) => c.completed).map((c) => c.issueNumber),
     );
     const awaitingReplan = listTasks(run)
-      .filter((t) => t.completedInRoadmap !== true && t.stages.mergeCleanup.status !== 'done')
+      .filter((t) => t.completedInRoadmap !== true && t.closedWithoutMerge === undefined && t.stages.mergeCleanup.status !== 'done')
       .map(taskIssueNumber)
       .filter((n): n is number => n !== undefined && completedChildren.has(n) && !merged.has(n));
     if (awaitingReplan.length > 0) {
@@ -807,6 +810,9 @@ export function formatTaskRunState(
       lines.push(
         `  実装への差し戻し: ${String(task.reviewRounds)}回（上限${String(MAX_REVIEW_ROUNDS)}回）`,
       );
+    }
+    if (task.closedWithoutMerge !== undefined) {
+      lines.push(`  mergeせずに完了: 理由: ${inline(task.closedWithoutMerge.reason)}`);
     }
     const gate = findOpenGate(task);
     if (gate !== undefined) {
