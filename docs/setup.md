@@ -243,7 +243,7 @@ code --install-extension vscode-codex-extension.vsix --force
   - Forge HubのGitLab側は、`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`の3つが揃った出どころのskillを呼ぶ。選ぶ順は、素の名前（ホームやリポジトリのskill。Codexは`$gitlab-develop`、Claude Codeは`/gitlab-develop`）、同梱skill（`codex-ext:`付き）、自分で追加したskill（`codex-ext-user:`付き）。一部しか無い出どころは使わない。どこにも3つ揃わなければ、計画の記録・MR作成・自己レビュー・後片付けの手順を平文で依頼する
 - `bwrap`（bubblewrap）と`socat`（Linux・WSLのみ。macOSは不要）: オーケストレータモードとロードマップ実行のClaude Codeセッションで、Bashの書き込み先を制限するsandboxに使う。どちらかが欠けるか、bubblewrapが起動できない環境（権限の無いコンテナなど）では、sandboxが無効のままセッションが始まり、書き込みの制限と承認の挙動が変わる
   - WSL・Linux（Debian・Ubuntu系）: `sudo apt install bubblewrap socat`
-  - macOS: sandboxはOS標準の仕組みを使うため、入れるものは無い。`socat`が要る場合は`brew install socat`
+  - macOS: sandboxはOS標準の仕組みを使うため、入れるものは無い（Claude Code公式docsは、macOSはSeatbeltを使い、`bubblewrap`と`socat`に頼るのはLinuxとWSL2だけと説明している。https://code.claude.com/docs/en/sandboxing ）。macOSの実機では未検証
 - `jq`（と`tail`・`sort`）: 自動引き継ぎで新しいセッションへ渡す開始プロンプトに、前のセッションのtranscriptから指示や応答を取り出すコマンドとして埋め込まれる。拡張機能自身は実行しない。無いと、引き継ぎ先のAIが取り出せない情報（自動圧縮の要約・ユーザー指示・編集したファイル）が出る。`tail`・`sort`は通常のOSに入っている
   - WSL・Linux（Debian・Ubuntu系）: `sudo apt install jq`
   - macOS: `brew install jq`
