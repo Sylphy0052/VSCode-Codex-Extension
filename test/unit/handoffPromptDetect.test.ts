@@ -199,7 +199,11 @@ describe('invokedHandoffSkill（Issue #1748）', () => {
     expect(
       invokedHandoffSkill([
         item('userMessage', '<command-name>/handoff</command-name>'),
-        item('skillContext', 'Base directory for this skill: /home/u/.claude/skills/handoff', 'handoff'),
+        item(
+          'skillContext',
+          'Base directory for this skill: /home/u/.claude/skills/handoff',
+          'handoff',
+        ),
         item('agentMessage', 'x'),
       ]),
     ).toBe(true);

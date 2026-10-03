@@ -175,7 +175,10 @@ async function judgeQuestion(
     state: buildQuestionState(
       caution === undefined
         ? question
-        : { ...question, evidence: [question.evidence, caution].filter((l) => l !== undefined).join('\n') },
+        : {
+            ...question,
+            evidence: [question.evidence, caution].filter((l) => l !== undefined).join('\n'),
+          },
     ),
     questions: [
       {
@@ -216,7 +219,12 @@ async function judgeTurnEnd(
   lastMessage: string,
   threshold: number,
 ): Promise<AnswererVerdict> {
-  const dangers = findQuestionDangers({ question: lastMessage, reason: '', options: [], evidence: undefined });
+  const dangers = findQuestionDangers({
+    question: lastMessage,
+    reason: '',
+    options: [],
+    evidence: undefined,
+  });
   const dangerous = userVerdictForDangers(dangers.userOnly);
   if (dangerous !== undefined) {
     return dangerous;
@@ -249,7 +257,5 @@ async function judgeTurnEnd(
   if (choiceProbability(answer, ORCHESTRATOR) >= threshold) {
     return { kind: 'orchestrator', summary };
   }
-  return answer.best === NO_QUESTION
-    ? { kind: 'noQuestion', summary }
-    : { kind: 'user', summary };
+  return answer.best === NO_QUESTION ? { kind: 'noQuestion', summary } : { kind: 'user', summary };
 }

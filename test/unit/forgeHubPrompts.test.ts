@@ -131,9 +131,9 @@ describe('buildWorkActionPrompt', () => {
   });
 
   it('同梱skillが揃っていれば、状態ごとにcodex-ext:を呼ぶ', () => {
-    expect(
-      buildWorkActionPrompt('gitlab', 'codex', 'review', 12, 34, BUNDLED_GITLAB_SKILLS),
-    ).toBe('$codex-ext:gitlab-review PR/MR #34');
+    expect(buildWorkActionPrompt('gitlab', 'codex', 'review', 12, 34, BUNDLED_GITLAB_SKILLS)).toBe(
+      '$codex-ext:gitlab-review PR/MR #34',
+    );
     expect(
       buildWorkActionPrompt('gitlab', 'claude', 'cleanup', 12, 34, BUNDLED_GITLAB_SKILLS),
     ).toBe('/codex-ext:gitlab-cleanup PR/MR #34');

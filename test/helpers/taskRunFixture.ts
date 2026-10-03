@@ -75,12 +75,18 @@ export function makeRun(tasks: readonly OrchestratedTask[]): TaskRun {
   };
 }
 
-export function reviewResult(passed: boolean, remainingFindings: readonly string[]): StageReviewResult {
+export function reviewResult(
+  passed: boolean,
+  remainingFindings: readonly string[],
+): StageReviewResult {
   return { summary: 'レビュー結果', remainingFindings, passed };
 }
 
 /** 工程の失敗で止まったタスク（`stageFailed`の関門を開ける状態）。 */
-export function haltedTask(taskId: string, overrides: Partial<OrchestratedTask> = {}): OrchestratedTask {
+export function haltedTask(
+  taskId: string,
+  overrides: Partial<OrchestratedTask> = {},
+): OrchestratedTask {
   return makeTask(taskId, 'implement', 'halted', overrides);
 }
 
@@ -109,7 +115,11 @@ export function withOpenGate(
 }
 
 /** 決着済みの`stageFailed`関門（自動のやり直しの回数を積むため）。 */
-export function resolvedRetryGate(gateId: string, stage: TaskStage, by: 'reflex' | 'orchestrator' | 'user'): StageGate {
+export function resolvedRetryGate(
+  gateId: string,
+  stage: TaskStage,
+  by: 'reflex' | 'orchestrator' | 'user',
+): StageGate {
   return {
     gateId,
     kind: 'stageFailed',

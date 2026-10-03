@@ -338,7 +338,11 @@ async function mergeIntegrationIntoTask(
  * 一定間隔の実測を始める。ターンの確定を待たずに、長いターンの途中で交差したタスクも
  * 次の周期で拾う。0以下なら周期では測らない（ターンの確定時だけになる）。
  */
-export function startOverlapPoll(self: WorkflowRunnerInternals, runId: string, live: LiveRun): void {
+export function startOverlapPoll(
+  self: WorkflowRunnerInternals,
+  runId: string,
+  live: LiveRun,
+): void {
   if (live.overlapPollTimer !== undefined || live.finished) {
     return;
   }

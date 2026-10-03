@@ -622,9 +622,7 @@ export class ClaudeSessionStore {
         id,
         provider: 'claude' as const,
         threadName: displayName(meta),
-        updatedAt: new Date(
-          (stat.mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0,
-        ).toISOString(),
+        updatedAt: new Date((stat.mtimeMs ?? Date.parse(meta.startedAt ?? '')) || 0).toISOString(),
         cwd: meta.cwd,
         archived: false,
       },

@@ -82,7 +82,7 @@ describe('proposeHandoffModelSettings', () => {
   it('コスト方針=low ならxhighを選ばない（Issue #1214）', async () => {
     stubClassifier(assess({ difficulty: 2, scope: 2, ambiguity: 2, risk: 2, autonomy: 2 }));
     __mock.setConfig('agent', { 'autoHandoff.costPreset': 'low' });
-    const { settings, reasons } = await proposeHandoffModelSettings(current, input, deps());
+    const { settings } = await proposeHandoffModelSettings(current, input, deps());
     expect(settings).toEqual({ model: 'gpt-6.1-sol', effort: 'high' });
   });
 
@@ -317,7 +317,11 @@ describe('probeSafeBoundary（Issue #1090）', () => {
       ...input,
       recentAssistantMessages: ['#782完了。次は新しい機能の設計に取り掛かる'],
     };
-    const probe = await probeSafeBoundary({ model: 'gpt-6-luna', effort: 'medium' }, declared, deps());
+    const probe = await probeSafeBoundary(
+      { model: 'gpt-6-luna', effort: 'medium' },
+      declared,
+      deps(),
+    );
     expect(probe).toMatchObject({ switchSafe: true, profileChanged: true });
     // 宣言が分類器まで届いていること（届かなければ切り替わりを検知できない）
     expect(spy).toHaveBeenCalledWith(

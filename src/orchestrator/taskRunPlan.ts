@@ -137,7 +137,10 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
     return fail(`${at}（${id}）が自分自身に依存している`);
   }
   const issue = raw.existingIssueNumber;
-  if (issue !== undefined && (typeof issue !== 'number' || !Number.isSafeInteger(issue) || issue < 1)) {
+  if (
+    issue !== undefined &&
+    (typeof issue !== 'number' || !Number.isSafeInteger(issue) || issue < 1)
+  ) {
     return fail(`${at}.existingIssueNumberは1以上の整数で指定する`);
   }
   return {
@@ -236,17 +239,15 @@ export function resolveTaskPlan(
   const allocated = allocateTaskIds(run, fresh.length);
   const assigned = new Map(fresh.map((t, i) => [t.id, allocated.taskIds[i] ?? '']));
   const toTaskId = (key: string): string => assigned.get(key) ?? key;
-  const drafts = tasks.map(
-    (t): TaskDraft => ({
-      taskId: toTaskId(t.id),
-      title: t.title,
-      summary: t.summary,
-      acceptanceCriteria: t.acceptanceCriteria,
-      dependsOn: t.dependsOn.map(toTaskId),
-      existingIssueNumber: t.existingIssueNumber,
-      ...(t.completedInRoadmap === true ? { completedInRoadmap: true } : {}),
-    }),
-  );
+  const drafts = tasks.map((t): TaskDraft => ({
+    taskId: toTaskId(t.id),
+    title: t.title,
+    summary: t.summary,
+    acceptanceCriteria: t.acceptanceCriteria,
+    dependsOn: t.dependsOn.map(toTaskId),
+    existingIssueNumber: t.existingIssueNumber,
+    ...(t.completedInRoadmap === true ? { completedInRoadmap: true } : {}),
+  }));
   if (drafts.some((d) => !isValidTaskId(d.taskId))) {
     return fail('taskIdを採番できなかった');
   }
@@ -289,16 +290,14 @@ function withCarriedCompletedTasks(
   const proposedKeys = new Set(proposed.map((t) => t.id));
   const carried = listTasks(run)
     .filter((t) => t.completedInRoadmap === true && !proposedKeys.has(t.taskId))
-    .map(
-      (t): PlanTaskInput => ({
-        id: t.taskId,
-        title: t.title,
-        summary: t.summary,
-        acceptanceCriteria: t.acceptanceCriteria,
-        dependsOn: [],
-        existingIssueNumber: t.existingIssueNumber,
-        completedInRoadmap: true,
-      }),
-    );
+    .map((t): PlanTaskInput => ({
+      id: t.taskId,
+      title: t.title,
+      summary: t.summary,
+      acceptanceCriteria: t.acceptanceCriteria,
+      dependsOn: [],
+      existingIssueNumber: t.existingIssueNumber,
+      completedInRoadmap: true,
+    }));
   return carried.length === 0 ? proposed : [...carried, ...proposed];
 }

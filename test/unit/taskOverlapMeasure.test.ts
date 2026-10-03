@@ -139,7 +139,10 @@ describe('measureWorktreeChanges', () => {
 
   it('上限ちょうどの大きさの未追跡ファイルは数え、1バイト超えたものは数えない', async () => {
     await withTmpDir(async (dir) => {
-      await fs.writeFile(path.join(dir, 'at-limit.txt'), Buffer.alloc(UNTRACKED_LINE_COUNT_MAX_BYTES, 0x0a));
+      await fs.writeFile(
+        path.join(dir, 'at-limit.txt'),
+        Buffer.alloc(UNTRACKED_LINE_COUNT_MAX_BYTES, 0x0a),
+      );
       await fs.writeFile(
         path.join(dir, 'over-limit.txt'),
         Buffer.alloc(UNTRACKED_LINE_COUNT_MAX_BYTES + 1, 0x0a),

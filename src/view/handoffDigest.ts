@@ -243,9 +243,15 @@ function claudeToolLabel(name: string, input: unknown): string {
   if (!isObject(input)) {
     return name;
   }
-  const key = ['command', 'description', 'file_path', 'notebook_path', 'pattern', 'url', 'skill'].find(
-    (k) => typeof input[k] === 'string' && input[k] !== '',
-  );
+  const key = [
+    'command',
+    'description',
+    'file_path',
+    'notebook_path',
+    'pattern',
+    'url',
+    'skill',
+  ].find((k) => typeof input[k] === 'string' && input[k] !== '');
   const detail = key === undefined ? '' : clipLine(String(input[key]), TOOL_LABEL_LIMIT);
   return detail === '' ? name : `${name}: ${detail}`;
 }
@@ -314,7 +320,8 @@ export function createClaudeDigestBuilder(): HandoffDigestBuilder {
       state = emptyState();
       toolLabels = new Map();
       const summary = textOf(content).trim();
-      state.compactSummary = summary === '' ? undefined : clipMiddle(summary, COMPACT_SUMMARY_LIMIT);
+      state.compactSummary =
+        summary === '' ? undefined : clipMiddle(summary, COMPACT_SUMMARY_LIMIT);
       return;
     }
     if (Array.isArray(content) && content.some((p) => isObject(p) && p['type'] === 'tool_result')) {
@@ -325,7 +332,11 @@ export function createClaudeDigestBuilder(): HandoffDigestBuilder {
     if (onTaskNotification(text)) {
       return;
     }
-    if (entry['isMeta'] === true || 'toolUseResult' in entry || CLAUDE_INJECTED_USER_TEXT.test(text)) {
+    if (
+      entry['isMeta'] === true ||
+      'toolUseResult' in entry ||
+      CLAUDE_INJECTED_USER_TEXT.test(text)
+    ) {
       return;
     }
     addUserMessage(state, text);
@@ -442,7 +453,8 @@ export function createCodexDigestBuilder(): HandoffDigestBuilder {
     }
     const history = payload['replacement_history'];
     state.compactSummaryUnreadable =
-      Array.isArray(history) && history.some((item) => isObject(item) && item['type'] === 'compaction');
+      Array.isArray(history) &&
+      history.some((item) => isObject(item) && item['type'] === 'compaction');
   };
 
   const onResponseItem = (payload: JsonObject): void => {
@@ -477,7 +489,9 @@ export function createCodexDigestBuilder(): HandoffDigestBuilder {
     const type = str(item['type']);
     const failed = item['status'] === 'failed';
     if (type === 'CommandExecution') {
-      const processId = str(item['process_id']) ?? (typeof item['process_id'] === 'number' ? String(item['process_id']) : undefined);
+      const processId =
+        str(item['process_id']) ??
+        (typeof item['process_id'] === 'number' ? String(item['process_id']) : undefined);
       if (processId !== undefined) {
         finishedProcesses.add(processId);
         state.runningJobs.delete(processId);
@@ -487,7 +501,8 @@ export function createCodexDigestBuilder(): HandoffDigestBuilder {
         const exitCode = item['exitCode'] ?? item['exit_code'];
         const stderr = str(item['stderr']) ?? '';
         const output = stderr.trim() === '' ? (str(item['stdout']) ?? '') : stderr;
-        const head = exitCode === null || exitCode === undefined ? '' : `exit ${String(exitCode)}\n`;
+        const head =
+          exitCode === null || exitCode === undefined ? '' : `exit ${String(exitCode)}\n`;
         addFailure(state, `exec: ${command}`, `${head}${output}`);
       }
       return;
@@ -500,7 +515,11 @@ export function createCodexDigestBuilder(): HandoffDigestBuilder {
       }
       if (failed) {
         const stderr = str(item['stderr']) ?? '';
-        addFailure(state, `apply_patch: ${paths.join(', ')}`, stderr.trim() === '' ? (str(item['stdout']) ?? '') : stderr);
+        addFailure(
+          state,
+          `apply_patch: ${paths.join(', ')}`,
+          stderr.trim() === '' ? (str(item['stdout']) ?? '') : stderr,
+        );
       }
     }
   };
@@ -603,7 +622,9 @@ export function renderHandoffDigest(digest: HandoffDigest): string[] {
   if (digest.compactSummary !== undefined) {
     lines.push(fenceText(digest.compactSummary));
   } else if (digest.compactSummaryUnreadable) {
-    lines.push('自動圧縮は走っているが、要約は暗号化された形でしか残っておらず読めない。圧縮より前の経緯は下の発話と抽出コマンドから辿る。');
+    lines.push(
+      '自動圧縮は走っているが、要約は暗号化された形でしか残っておらず読めない。圧縮より前の経緯は下の発話と抽出コマンドから辿る。',
+    );
   } else {
     lines.push(NONE);
   }
@@ -627,13 +648,17 @@ export function renderHandoffDigest(digest: HandoffDigest): string[] {
       lines.push(`- ${clipLine(job, TOOL_LABEL_LIMIT)}`);
     }
     lines.push('');
-    lines.push('開始の記録はあるが、終わった記録がtranscriptに無いもの。引き継ぎ元のセッションと一緒に止まっている場合がある。');
+    lines.push(
+      '開始の記録はあるが、終わった記録がtranscriptに無いもの。引き継ぎ元のセッションと一緒に止まっている場合がある。',
+    );
   }
   lines.push('');
   lines.push('### 編集したファイル');
   lines.push('');
   if (digest.editedFiles.length === 0) {
-    lines.push(`${NONE}（シェルで書き換えたファイルは記録されない。空を「編集していない」と解釈しない）`);
+    lines.push(
+      `${NONE}（シェルで書き換えたファイルは記録されない。空を「編集していない」と解釈しない）`,
+    );
   } else {
     for (const file of digest.editedFiles) {
       lines.push(`- ${clipLine(file, FILE_PATH_LIMIT)}`);

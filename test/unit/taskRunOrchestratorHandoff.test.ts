@@ -7,7 +7,11 @@ import {
   type TaskRunOrchestratorEvent,
 } from '../../src/orchestrator/taskRunOrchestrator';
 import { TASK_RUN_SCHEMA_VERSION, type TaskRun } from '../../src/orchestrator/taskRunState';
-import type { TaskSession, TaskSessionHost, TaskSessionInput } from '../../src/orchestrator/taskSession';
+import type {
+  TaskSession,
+  TaskSessionHost,
+  TaskSessionInput,
+} from '../../src/orchestrator/taskSession';
 
 /**
  * Issue #1580 のtaskRunOrchestrator向け単体テスト。次の2点を確かめる:
@@ -77,7 +81,13 @@ function makeFakeSession(id: string): FakeSession {
     session,
     sentTexts,
     emitState(state) {
-      listener?.({ busy: false, threadId: undefined, name: undefined, turnId: undefined, ...state } as ChatState);
+      listener?.({
+        busy: false,
+        threadId: undefined,
+        name: undefined,
+        turnId: undefined,
+        ...state,
+      } as ChatState);
     },
   };
 }
@@ -142,7 +152,10 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     const runBox = { current: makeRun() };
     const s1 = makeFakeSession('s1');
     const s2 = makeFakeSession('s2');
-    const openTaskSession = vi.fn().mockResolvedValueOnce(s1.session).mockResolvedValueOnce(s2.session);
+    const openTaskSession = vi
+      .fn()
+      .mockResolvedValueOnce(s1.session)
+      .mockResolvedValueOnce(s2.session);
     const deps = makeDeps({ openTaskSession }, runBox);
     const orch = new TaskRunOrchestrator(deps);
 
@@ -150,7 +163,10 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     // 第1世代で498件送る（上限500まで残り2件）
     const gen1Events = Array.from({ length: 498 }, (_, i) => taskFailed(`E${String(i + 1)}`));
     for (const e of gen1Events) {
-      (orch as unknown as { notify(runId: string, event: TaskRunOrchestratorEvent): void }).notify('run-1', e);
+      (orch as unknown as { notify(runId: string, event: TaskRunOrchestratorEvent): void }).notify(
+        'run-1',
+        e,
+      );
     }
 
     const input1 = openTaskSession.mock.calls[0]?.[0] as TaskSessionInput;
@@ -158,8 +174,16 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     await vi.waitFor(() => expect(openTaskSession).toHaveBeenCalledTimes(2));
 
     // 第2世代で4件届ける。合計500件目までは通り、501件目以降は上限で捨てられる
-    for (const e of [taskFailed('E499'), taskFailed('E500'), taskFailed('E501'), taskFailed('E502')]) {
-      (orch as unknown as { notify(runId: string, event: TaskRunOrchestratorEvent): void }).notify('run-1', e);
+    for (const e of [
+      taskFailed('E499'),
+      taskFailed('E500'),
+      taskFailed('E501'),
+      taskFailed('E502'),
+    ]) {
+      (orch as unknown as { notify(runId: string, event: TaskRunOrchestratorEvent): void }).notify(
+        'run-1',
+        e,
+      );
     }
     s2.emitState({ busy: false });
 
@@ -174,7 +198,10 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
   it('自動引き継ぎで次の世代を開けなかったら、前の世代でrearmAutoHandoffを呼び使い続ける', async () => {
     const runBox = { current: makeRun() };
     const s1 = makeFakeSession('s1');
-    const openTaskSession = vi.fn().mockResolvedValueOnce(s1.session).mockRejectedValueOnce(new Error('開けない'));
+    const openTaskSession = vi
+      .fn()
+      .mockResolvedValueOnce(s1.session)
+      .mockRejectedValueOnce(new Error('開けない'));
     const deps = makeDeps({ openTaskSession }, runBox);
     const orch = new TaskRunOrchestrator(deps);
 
@@ -183,7 +210,12 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     expect(orch.status('run-1')).toBe('idle');
 
     const input1 = openTaskSession.mock.calls[0]?.[0] as TaskSessionInput;
-    const accepted = await input1.handoffDelegate?.({ model: '', effort: '', prompt: '', trigger: 'auto' });
+    const accepted = await input1.handoffDelegate?.({
+      model: '',
+      effort: '',
+      prompt: '',
+      trigger: 'auto',
+    });
     expect(accepted).toBe(true);
     expect(orch.status('run-1')).toBe('handingOff');
 

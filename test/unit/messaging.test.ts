@@ -1,6 +1,6 @@
 import * as http from 'node:http';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildListTasksResult,
@@ -1902,7 +1902,7 @@ describe('オーケストレーター専用の制御ツール（design.md §16.2
     expect(calls).toEqual([]);
   });
 
-  it('ask_userが拒否されるとisErrorになる（send_messageと同じ流儀）', () => {
+  it('ask_userが拒否されるとisErrorになる（send_messageと同じ流儀）', async () => {
     const port: OrchestratorControlPort = {
       ...fakeControl().port,
       askUser: () => ({
@@ -1911,13 +1911,16 @@ describe('オーケストレーター専用の制御ツール（design.md §16.2
       }),
     };
 
-    const response = callTool(wire(port)(ORCHESTRATOR_CONNECTION_ID), 'ask_user', {
-      question: 'q',
-      choices: ['A', 'B'],
+    const conn = wire(port)(ORCHESTRATOR_CONNECTION_ID);
+    callTool(conn, 'ask_user', { question: 'q', choices: ['A', 'B'] });
+    // 回答者判定（Issue #1708）を挟むため、ask_userの応答は非同期に返る
+    const response = await vi.waitFor(() => {
+      const last = conn.sent[conn.sent.length - 1];
+      if (last === undefined || !('result' in last)) throw new Error('応答がまだ無い');
+      return last;
     });
 
-    expect(response !== undefined && 'result' in response).toBe(true);
-    if (response !== undefined && 'result' in response) {
+    if ('result' in response) {
       const result = response.result as { isError?: boolean; content: [{ text: string }] };
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('既に回答待ちの質問があります');

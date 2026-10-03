@@ -77,10 +77,14 @@ export class TaskRunRoadmapFollower {
               },
             },
       );
-      const edited = await this.deps.port.edit(run.workspaceRoot, run.roadmap.issueNumber, (body) => {
-        const update = checkIssueChecklistItems(body, [issueNumber]);
-        return update.checked.length > 0 ? update.body : undefined;
-      });
+      const edited = await this.deps.port.edit(
+        run.workspaceRoot,
+        run.roadmap.issueNumber,
+        (body) => {
+          const update = checkIssueChecklistItems(body, [issueNumber]);
+          return update.checked.length > 0 ? update.body : undefined;
+        },
+      );
       if (edited.kind === 'failed') {
         await this.warn(
           runId,
@@ -109,7 +113,9 @@ export class TaskRunRoadmapFollower {
       ) {
         const issueNumber = task.issueNumber;
         const title = task.issueDraft?.title ?? task.title;
-        this.enqueueInBackground(next.runId, () => this.appendChild(next.runId, issueNumber, title));
+        this.enqueueInBackground(next.runId, () =>
+          this.appendChild(next.runId, issueNumber, title),
+        );
       }
     }
     if (
@@ -168,11 +174,7 @@ export class TaskRunRoadmapFollower {
       }),
       ...(planErrors === undefined ? {} : { planErrors }),
     };
-    const drafts = diffRoadmapSnapshots(
-      before,
-      after,
-      ownRoadmapChanges(run),
-    );
+    const drafts = diffRoadmapSnapshots(before, after, ownRoadmapChanges(run));
     const snapshotChanged = snapshotKey(before) !== snapshotKey(after);
     if (snapshotChanged || drafts.length > 0 || warnings.length > 0) {
       await this.deps.updateRun(runId, (r) =>
@@ -257,7 +259,10 @@ export class TaskRunRoadmapFollower {
         );
         return;
       case 'failed':
-        await this.warn(runId, `承認した計画をロードマップの計画区画へ書き戻せませんでした: ${written.message}`);
+        await this.warn(
+          runId,
+          `承認した計画をロードマップの計画区画へ書き戻せませんでした: ${written.message}`,
+        );
         return;
     }
   }
@@ -326,15 +331,15 @@ function ownRoadmapChanges(run: TaskRun): {
 } {
   const tasks = Object.values(run.tasks);
   const numbered = (list: typeof tasks): Set<number> =>
-    new Set(
-      list.map((t) => taskIssueNumber(t)).filter((n): n is number => n !== undefined),
-    );
+    new Set(list.map((t) => taskIssueNumber(t)).filter((n): n is number => n !== undefined));
   return {
     taskIssueNumbers: numbered(tasks),
     mergedIssueNumbers: new Set([
       ...(run.roadmap?.mergedIssueNumbers ?? []),
       ...numbered(
-        tasks.filter((t) => t.completedInRoadmap !== true && t.stages.mergeCleanup.status === 'done'),
+        tasks.filter(
+          (t) => t.completedInRoadmap !== true && t.stages.mergeCleanup.status === 'done',
+        ),
       ),
     ]),
   };

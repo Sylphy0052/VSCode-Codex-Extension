@@ -33,9 +33,7 @@ export interface FileSystemPort {
    * 任意実装。持たないポート（テストのフェイク等）では `mtimeMs` へ退避し、
    * 常に先頭を読み直す（安全側）。
    */
-  statLite?(
-    filePath: string,
-  ): Promise<{ mtimeMs: number; size: number; ino: number } | undefined>;
+  statLite?(filePath: string): Promise<{ mtimeMs: number; size: number; ino: number } | undefined>;
   /** ディレクトリを再帰的に走査し、rollout-*.jsonl の絶対パスを返す。 */
   listRollouts(dir: string): Promise<string[]>;
   /** ディレクトリを再帰的に走査し、*.jsonl の絶対パスを返す。 */

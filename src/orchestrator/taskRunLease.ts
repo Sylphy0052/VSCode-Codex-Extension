@@ -176,7 +176,11 @@ export function isTaskRunLeaseStale(
   if (lease.hostname !== self.hostname || lease.pid <= 0) {
     return false;
   }
-  if (lease.hostIdentity !== '' && self.hostIdentity !== '' && lease.hostIdentity !== self.hostIdentity) {
+  if (
+    lease.hostIdentity !== '' &&
+    self.hostIdentity !== '' &&
+    lease.hostIdentity !== self.hostIdentity
+  ) {
     return false;
   }
   return !isPidAlive(lease.pid);
@@ -203,7 +207,9 @@ export function judgeTaskRunLease(
   if (existing.windowId === self.windowId) {
     return heartbeatAge(existing, now) < staleMs / 2 ? 'own' : 'stale';
   }
-  return isTaskRunLeaseStale(existing, self, now, isPidAlive, staleMs, observation) ? 'stale' : 'busy';
+  return isTaskRunLeaseStale(existing, self, now, isPidAlive, staleMs, observation)
+    ? 'stale'
+    : 'busy';
 }
 
 /** 専有権ファイル名。runIdを名前へそのまま出さないようハッシュにする。 */
@@ -245,7 +251,8 @@ export function formatTaskRunLeaseRejection(holder: TaskRunLease | undefined, no
   );
 }
 
-export type AcquireTaskLeaseOutcome = { ok: true } | { ok: false; holder: TaskRunLease | undefined };
+export type AcquireTaskLeaseOutcome =
+  { ok: true } | { ok: false; holder: TaskRunLease | undefined };
 
 export interface TaskRunLeaseManagerDeps {
   /** 専有権ファイルの置き場（`sessionHubRoot`の下の`TASK_LEASE_DIR_NAME`）。 */

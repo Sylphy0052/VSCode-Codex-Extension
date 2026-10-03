@@ -171,12 +171,17 @@ export async function reconcileLegacyIndex(
   memento: MementoLike,
   fileHasEntries: boolean,
 ): Promise<void> {
-  const legacyRaw = memento.get<ClaudeSessionIndexEntry[] | undefined>(CLAUDE_SESSION_INDEX_KEY, undefined);
+  const legacyRaw = memento.get<ClaudeSessionIndexEntry[] | undefined>(
+    CLAUDE_SESSION_INDEX_KEY,
+    undefined,
+  );
   if (legacyRaw === undefined) {
     return; // 旧キー自体が無い
   }
   if (!fileHasEntries) {
-    const legacy = legacyRaw.filter((entry) => entry.filePath !== '' && entry.session.provider === 'claude');
+    const legacy = legacyRaw.filter(
+      (entry) => entry.filePath !== '' && entry.session.provider === 'claude',
+    );
     await writeSessionIndexFile(filePath, legacy);
   }
   if (await verifySessionIndexFile(filePath)) {

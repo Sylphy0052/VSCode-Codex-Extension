@@ -445,7 +445,9 @@ export async function writeRoadmapPlan(
   deps: RoadmapImportDeps,
   target: RoadmapImportTarget,
   /** 計画。読み直した本文の子Issueから組み立てるなら関数で渡す（オーケストレータモード。Issue #1623）。 */
-  plan: readonly RoadmapPlanNode[] | ((children: readonly RoadmapChild[]) => readonly RoadmapPlanNode[]),
+  plan:
+    | readonly RoadmapPlanNode[]
+    | ((children: readonly RoadmapChild[]) => readonly RoadmapPlanNode[]),
   options: WriteRoadmapPlanOptions = {},
 ): Promise<WriteRoadmapPlanOutcome> {
   return runExclusiveOnRoadmapIssue(

@@ -332,8 +332,7 @@ export function progressSegments(progress: ProgressSummary): ProgressSegment[] {
   const c = progress.counts;
   // 分類はカンバンの3バケット（summarizeKanban）と揃える。同じ状態が画面の2箇所で
   // 別の枠に入っていると、どちらが正しいのか読み手には分からない
-  const active =
-    c.running + c.waitingApproval + c.waitingReply + c.waitingOverlap + c.merging;
+  const active = c.running + c.waitingApproval + c.waitingReply + c.waitingOverlap + c.merging;
   const attention = c.failed + c.blocked + c.skipped;
   const segments: ProgressSegment[] = [
     { kind: 'done', count: c.done, percent: 0 },

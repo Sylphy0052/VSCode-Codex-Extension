@@ -134,7 +134,9 @@ export async function observeStageCompletion(
 function parseIssueView(stdout: string): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(stdout);
-    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+    return typeof parsed === 'object' && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -171,7 +173,11 @@ async function viewIssue(
           ['issue', 'view', String(issueNumber), '--json', 'title,state'],
           repoRoot,
         )
-      : await ports.cli.run('glab', ['api', `projects/:id/issues/${String(issueNumber)}`], repoRoot);
+      : await ports.cli.run(
+          'glab',
+          ['api', `projects/:id/issues/${String(issueNumber)}`],
+          repoRoot,
+        );
   return result.code === 0 ? parseIssueView(result.stdout) : undefined;
 }
 

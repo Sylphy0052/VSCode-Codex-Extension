@@ -77,8 +77,7 @@ export interface ClaudeSandboxEnvironment {
 }
 
 export type ClaudeSandboxAvailability =
-  | { ok: true; environment: ClaudeSandboxEnvironment }
-  | { ok: false; reason: string };
+  { ok: true; environment: ClaudeSandboxEnvironment } | { ok: false; reason: string };
 
 /**
  * `--settings`へ渡すsandboxの設定を組み立てる。
@@ -237,12 +236,19 @@ function tryBwrap(withProc: boolean, signal: AbortSignal): Promise<SandboxComman
     'true',
   ];
   return new Promise((resolve) => {
-    const proc = execFile('bwrap', args, { timeout: BWRAP_TIMEOUT_MS }, (error, _stdout, stderr) => {
-      release();
-      resolve(
-        error === null ? { ok: true, detail: '' } : { ok: false, detail: stderr || error.message },
-      );
-    });
+    const proc = execFile(
+      'bwrap',
+      args,
+      { timeout: BWRAP_TIMEOUT_MS },
+      (error, _stdout, stderr) => {
+        release();
+        resolve(
+          error === null
+            ? { ok: true, detail: '' }
+            : { ok: false, detail: stderr || error.message },
+        );
+      },
+    );
     const release = stopOnAbort(proc, signal);
   });
 }
@@ -284,7 +290,10 @@ function tryCli(
     };
     const timer = setTimeout(() => {
       killWithEscalation(proc);
-      finish({ ok: false, detail: `${String(CLI_PREFLIGHT_TIMEOUT_MS)}ms以内に終了しませんでした` });
+      finish({
+        ok: false,
+        detail: `${String(CLI_PREFLIGHT_TIMEOUT_MS)}ms以内に終了しませんでした`,
+      });
     }, CLI_PREFLIGHT_TIMEOUT_MS);
     // 確認の途中でも拡張ホストの終了を引き留めない
     timer.unref();
@@ -375,7 +384,10 @@ export async function probeClaudeSandbox(
     return aborted;
   }
   if (!cli.ok) {
-    return { ok: false, reason: `sandbox付きでclaudeを起動できません: ${truncateReason(cli.detail)}` };
+    return {
+      ok: false,
+      reason: `sandbox付きでclaudeを起動できません: ${truncateReason(cli.detail)}`,
+    };
   }
   return { ok: true, environment };
 }
@@ -404,12 +416,10 @@ export class ClaudeSandboxProbe {
     }
     if (this.inflight === undefined) {
       this.inflight = probeClaudeSandbox(this.ports, this.abort.signal)
-        .catch(
-          (e: unknown): ClaudeSandboxAvailability => ({
-            ok: false,
-            reason: `sandboxの確認に失敗しました: ${String(e)}`,
-          }),
-        )
+        .catch((e: unknown): ClaudeSandboxAvailability => ({
+          ok: false,
+          reason: `sandboxの確認に失敗しました: ${String(e)}`,
+        }))
         .then((result) => {
           this.inflight = undefined;
           if (result.ok) {

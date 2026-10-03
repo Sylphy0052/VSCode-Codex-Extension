@@ -98,7 +98,10 @@ export class ClaudeSessionIndex {
         this.remember(entry);
       }
     } else {
-      for (const entry of legacyMemento.get<ClaudeSessionIndexEntry[]>(CLAUDE_SESSION_INDEX_KEY, [])) {
+      for (const entry of legacyMemento.get<ClaudeSessionIndexEntry[]>(
+        CLAUDE_SESSION_INDEX_KEY,
+        [],
+      )) {
         if (entry.filePath !== '' && entry.session.provider === 'claude') {
           this.remember(entry);
         }
@@ -109,7 +112,9 @@ export class ClaudeSessionIndex {
       // （Issue #1460レビュー指摘: ファイル有無だけで移行要否を決めると、検証失敗が
       // 一度でもあると旧キーが永久に残る）。起動はブロックしない。失敗しても
       // 次回起動でやり直せる（キャッシュのため）
-      void reconcileLegacyIndex(filePath, legacyMemento, fromFile.length > 0).catch(() => undefined);
+      void reconcileLegacyIndex(filePath, legacyMemento, fromFile.length > 0).catch(
+        () => undefined,
+      );
     }
   }
 
@@ -237,10 +242,7 @@ export class ClaudeSessionIndex {
       // 新しいものから順に上限まで残す。mtimeが読めなかったものは最後に回す
       const ordered = this.all().sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
       try {
-        await writeSessionIndexFile(
-          filePath,
-          ordered.slice(0, CLAUDE_SESSION_INDEX_MAX_PERSISTED),
-        );
+        await writeSessionIndexFile(filePath, ordered.slice(0, CLAUDE_SESSION_INDEX_MAX_PERSISTED));
       } catch {
         // 書けなくても次回起動時の照合で復元できる（キャッシュのため）。ここでは投げない
         this.dirty = true;

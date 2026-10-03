@@ -623,7 +623,9 @@ export function proposeTaskPlan(
     }
     const draft = draftById.get(existing.taskId);
     if (draft === undefined || draft.existingIssueNumber !== existing.existingIssueNumber) {
-      throw new Error(`着手済みのタスクは外せず、既存のIssue番号も変えられません: ${existing.taskId}`);
+      throw new Error(
+        `着手済みのタスクは外せず、既存のIssue番号も変えられません: ${existing.taskId}`,
+      );
     }
   }
   const tasks: Record<string, OrchestratedTask> = {};
@@ -1080,7 +1082,11 @@ export function completeMergedTask(run: TaskRun, taskId: string, now: Date): Tas
   for (const stage of TASK_STAGES) {
     const status = next.stages[stage].status;
     if (status !== 'done' && status !== 'skipped') {
-      next = withStage(next, stage, { status: 'done', pendingDecision: undefined, completedAt: at });
+      next = withStage(next, stage, {
+        status: 'done',
+        pendingDecision: undefined,
+        completedAt: at,
+      });
     }
   }
   return withTask(run, { ...next, attention: 'none', failure: undefined, updatedAt: at });
@@ -1204,7 +1210,10 @@ const ENGINE_LABELS: Record<TaskRunEngine, string> = { codex: 'Codex', claude: '
 
 /** runの表示名。名前が無ければ開始時刻（UTC、分まで）とエンジン。 */
 export function taskRunLabel(run: TaskRun): string {
-  return normalizeTaskRunTitle(run.title) ?? `${run.startedAt.slice(0, 16).replace('T', ' ')} ${ENGINE_LABELS[run.engine]}`;
+  return (
+    normalizeTaskRunTitle(run.title) ??
+    `${run.startedAt.slice(0, 16).replace('T', ' ')} ${ENGINE_LABELS[run.engine]}`
+  );
 }
 
 /** 表示名を付け替える。空なら名前を外す。 */
@@ -1235,7 +1244,11 @@ export function recordOrchestratorSession(run: TaskRun, sessionId: string): Task
 }
 
 /** 自動引き継ぎで世代`generation`を起こしたことを記録する（Issue #1553）。 */
-export function recordOrchestratorAutoHandoff(run: TaskRun, generation: number, now: Date): TaskRun {
+export function recordOrchestratorAutoHandoff(
+  run: TaskRun,
+  generation: number,
+  now: Date,
+): TaskRun {
   return {
     ...run,
     orchestratorAutoHandoffs: {

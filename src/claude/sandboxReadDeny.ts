@@ -64,7 +64,10 @@ function listReadDenyRules(
     '--bare',
     '--no-session-persistence',
   ];
-  const aborted: ReadDenyRulesResult = { ok: false, detail: '拡張機能の終了により確認を中止しました' };
+  const aborted: ReadDenyRulesResult = {
+    ok: false,
+    detail: '拡張機能の終了により確認を中止しました',
+  };
   if (signal.aborted) {
     return Promise.resolve(aborted);
   }
@@ -87,7 +90,10 @@ function listReadDenyRules(
       resolve(result);
     };
     const timer = setTimeout(() => {
-      finish({ ok: false, detail: `${String(LIST_RULES_TIMEOUT_MS)}ms以内に応答がありませんでした` });
+      finish({
+        ok: false,
+        detail: `${String(LIST_RULES_TIMEOUT_MS)}ms以内に応答がありませんでした`,
+      });
     }, LIST_RULES_TIMEOUT_MS);
     // 確認の途中でも拡張ホストの終了を引き留めない
     timer.unref();
@@ -165,7 +171,10 @@ function parseListRulesResponse(line: string): ReadDenyRulesResult | undefined {
     return undefined;
   }
   if (response['subtype'] !== 'success') {
-    return { ok: false, detail: `list_permission_rulesが失敗しました: ${String(response['error'])}` };
+    return {
+      ok: false,
+      detail: `list_permission_rulesが失敗しました: ${String(response['error'])}`,
+    };
   }
   const payload = response['response'];
   const state = isRecord(payload) ? payload['state'] : undefined;
