@@ -214,6 +214,7 @@ mainのCIは長い間LintかFormatのステップで止まっていて、Testス
 #1854では、PRごとに実測値まで閾値を段階的に引き上げる。`coverage.exclude` への追加で数値を上げることはしない。
 
 - taskRun系（`taskRunController.ts`・`taskStageRunner.ts`・`resourceSampler.ts`・`taskRunLease.ts`・`runNotes.ts`）の単体テストを追加した後の実測は statements 67.6% / branches 61.97% / functions 67.35% / lines 67.97%。閾値を `statements 67` / `branches 61` / `functions 67` / `lines 67` に上げた
+- chatView系（`chatView.ts`・`claudeChatView.ts`・`sessionHub.ts`・`taskRunSetup.ts`・`handoffDigest.ts`・`taskRunKanbanView.ts`）の単体テストを追加した後の実測は statements 73.71% / branches 67.63% / functions 73.26% / lines 74.17%。閾値を `statements 70` / `branches 67` / `functions 70` / `lines 70` に上げた。branchesだけ目標の68に0.37ポイント（約100分岐）足りないため、#1854は残して追加のテストで埋める
 
 ### 既知の注意点
 
