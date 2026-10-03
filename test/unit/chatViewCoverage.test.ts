@@ -1637,6 +1637,19 @@ describe('chatView.ts の補完カバレッジ', () => {
       expect(typeof status['scheduledAt']).toBe('number');
     });
 
+    it('継続指示の送信に失敗しても、1分後の再試行で継続指示を送り直す（issue #1873）', async () => {
+      const chat = await limitedChat();
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+      chat.connection.rejectFirst('turn/start', 'resume failed');
+      await tick(20);
+      expect(requestsOf(chat, 'turn/start')).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(61_000);
+      const starts = requestsOf(chat, 'turn/start');
+      expect(starts).toHaveLength(2);
+      expect(JSON.stringify(starts[1]?.params)).toContain('前回の作業を続けて');
+    });
+
     it('自動返信モードは失敗でターンが終わると止まり、理由を会話へ残す', async () => {
       const chat = await openChat();
       await chat.post({ type: 'autoReply', on: true });
