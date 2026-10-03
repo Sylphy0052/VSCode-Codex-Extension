@@ -1105,8 +1105,9 @@ export class TaskRunOrchestrator {
     if (target === undefined) {
       return { text: '決着待ちの関門が見つかりません', isError: true };
     }
-    if (target.awaitingOrchestrator) {
+    if (target.awaitingOrchestrator && call.choice !== 'close') {
       // 回答者判定（Issue #1708）でオーケストレーターが決めてよいとされた関門。人に確かめない
+      // closeは取り消せないので、決めてよいとされた関門でも下の確認へ回す
       const result = await this.deps.controller.resolveGate(
         runId,
         call.taskId,
