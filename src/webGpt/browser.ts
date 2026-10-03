@@ -122,7 +122,17 @@ function describePowerShellFailure(failure: PowerShellFailure): string {
   return `WindowsのChromeを起動できませんでした${detail}。PowerShellの実行環境を確認してください`;
 }
 
-async function launchChrome(port: number): Promise<void> {
+/** 再試行の前に使う。接続確認の失敗は「起動済みと確認できない」として扱い、従来どおり再試行させる。 */
+async function isChromeStarted(endpoint: string): Promise<boolean> {
+  try {
+    return await isCdpReady(endpoint);
+  } catch {
+    return false;
+  }
+}
+
+async function launchChrome(endpoint: string): Promise<void> {
+  const port = Number(new URL(endpoint).port);
   const windows =
     process.platform === 'win32' || (process.platform === 'linux' && /microsoft/i.test(release()));
   if (windows) {
@@ -160,7 +170,12 @@ Start-Process -FilePath $chrome -ArgumentList @(
         return;
       } catch (error) {
         const failure = asPowerShellFailure(error);
-        if (isWslInteropFailure(failure) && attempt < WSL_INTEROP_ATTEMPTS) continue;
+        if (isWslInteropFailure(failure) && attempt < WSL_INTEROP_ATTEMPTS) {
+          // interopが失敗しても、Windows側ではStart-Processが済んでいることがある。起動済みなら
+          // 再実行せず戻る（再実行すると同じプロファイルのChromeにchatgpt.comのタブが増える。#1812）
+          if (await isChromeStarted(endpoint)) return;
+          continue;
+        }
         throw new Error(describePowerShellFailure(failure));
       }
     }
@@ -215,7 +230,7 @@ Start-Process -FilePath $chrome -ArgumentList @(
 
 async function connectOrLaunch(endpoint: string): Promise<void> {
   if (await isCdpReady(endpoint)) return;
-  await launchChrome(Number(new URL(endpoint).port));
+  await launchChrome(endpoint);
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     if (await isCdpReady(endpoint)) return;
