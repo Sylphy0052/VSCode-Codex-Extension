@@ -79,7 +79,7 @@ describe('ClaudeUsageProbe', () => {
   it('保持したまま落ちた排他ファイルは期限後に奪う', async () => {
     const shared = path.join(dir, 'shared');
     const claude = fakeClaude(REPORT);
-    const lock = path.join(shared, 'claude-usage-probe.lock');
+    const lock = path.join(shared, 'claude-usage-probe.lock.1');
     const { mkdirSync, utimesSync } = await import('node:fs');
     mkdirSync(shared, { recursive: true });
     writeFileSync(lock, '1');

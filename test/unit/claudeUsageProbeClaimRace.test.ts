@@ -1,47 +1,44 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
 
 /**
- * 期限切れロックの`stat`が全員分そろうまで待たせる。全員が「期限切れ」を見てから奪い合わせるため。
- * さらに2者目以降の`unlink`は、先の者が新しいロックを作り終えるまで待たせる。
- * 「消して作り直す」が非原子的だと、後の者が先の者の新しいロックを消す順序になる。
+ * 世代付きロックの`stat`が全員分そろうまで待たせる。全員が「期限切れ」を見てから奪い合わせるため。
+ * そろわなくても止まらないよう、待つのは上限時間までにする。
  */
 const barrier = vi.hoisted(() => ({
   expected: 0,
   waiting: [] as Array<() => void>,
-  unlinks: 0,
+  maxWaitMs: 2000,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    unlink: async (...args: Parameters<typeof actual.unlink>) => {
-      if (barrier.unlinks > 0 && String(args[0]).endsWith('claude-usage-probe.lock')) {
-        for (let i = 0; i < 100; i += 1) {
-          try {
-            await actual.stat(args[0]);
-            break;
-          } catch {
-            await new Promise((resolve) => setTimeout(resolve, 10));
-          }
-        }
-      }
-      barrier.unlinks += 1;
-      return actual.unlink(...args);
-    },
     stat: async (...args: Parameters<typeof actual.stat>) => {
       const result = await actual.stat(...args);
-      if (barrier.expected > 0 && String(args[0]).endsWith('claude-usage-probe.lock')) {
+      if (barrier.expected > 0 && /claude-usage-probe\.lock\.\d+$/.test(String(args[0]))) {
         await new Promise<void>((resolve) => {
-          barrier.waiting.push(resolve);
+          const timer = setTimeout(resolve, barrier.maxWaitMs);
+          barrier.waiting.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
           if (barrier.waiting.length >= barrier.expected) {
-            const release = barrier.waiting.splice(0);
             barrier.expected = 0;
-            release.forEach((fn) => fn());
+            barrier.waiting.splice(0).forEach((fn) => fn());
           }
         });
       }
@@ -52,51 +49,108 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 import { ClaudeUsageProbe } from '../../src/claude/usageProbe';
 
+interface Claimable {
+  claim(now: number): Promise<boolean>;
+  release(): Promise<void>;
+}
+
+const warnings: string[] = [];
 const log = {
-  warn: () => undefined,
+  warn: (message: string) => warnings.push(message),
   info: () => undefined,
   error: () => undefined,
 } as unknown as Logger;
 
-interface Claimable {
-  claim(now: number): Promise<boolean>;
-}
+const LOCK = 'claude-usage-probe.lock';
 
 describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
   let dir: string;
+  let shared: string;
+
+  /** claim()はprivate。取得権の奪い合いだけを直接確かめる。 */
+  const newProbe = (sharedDir: string = shared): Claimable =>
+    new ClaudeUsageProbe(() => 'claude', log, sharedDir) as unknown as Claimable;
+  const lockFiles = (): string[] => readdirSync(shared).filter((n) => n.startsWith(`${LOCK}.`));
+  const writeLock = (generation: number, ageMs: number): void => {
+    const file = path.join(shared, `${LOCK}.${generation}`);
+    writeFileSync(file, '1');
+    const time = new Date(Date.now() - ageMs);
+    utimesSync(file, time, time);
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'usage-probe-race-'));
-  });
-  afterEach(() => {
+    shared = path.join(dir, 'shared');
+    mkdirSync(shared, { recursive: true });
     barrier.expected = 0;
     barrier.waiting = [];
-    barrier.unlinks = 0;
+    warnings.length = 0;
+  });
+  afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   });
 
   it('期限切れのロックを複数が同時に奪おうとしても、取得権を得るのは1者だけ', async () => {
     for (let round = 0; round < 5; round += 1) {
-      const shared = path.join(dir, `shared-${round}`);
-      mkdirSync(shared, { recursive: true });
-      const lock = path.join(shared, 'claude-usage-probe.lock');
-      writeFileSync(lock, '1');
-      const old = new Date(Date.now() - 10 * 60_000);
-      utimesSync(lock, old, old);
+      for (const name of lockFiles()) {
+        rmSync(path.join(shared, name));
+      }
+      writeLock(3, 10 * 60_000);
       const count = 4;
       barrier.expected = count;
-      barrier.unlinks = 0;
-      const probes = Array.from(
-        { length: count },
-        () => new ClaudeUsageProbe(() => 'claude', log, shared),
-      );
-      // claim()はprivate。取得権の奪い合いだけを直接確かめる
       const results = await Promise.all(
-        probes.map((probe) => (probe as unknown as Claimable).claim(Date.now())),
+        Array.from({ length: count }, () => newProbe().claim(Date.now())),
       );
       expect(results.filter(Boolean)).toHaveLength(1);
-      // 奪取印は直近のものを残す（遅れて同じ世代を見た者を弾くため）
-      expect(readdirSync(shared).filter((n) => n.includes('.takeover-'))).toHaveLength(1);
+      expect(lockFiles()).toEqual([`${LOCK}.4`]);
     }
+  });
+
+  it('持ち主が落ちて期限切れのまま残った世代から、次の世代を取れる', async () => {
+    const crashed = newProbe();
+    expect(await crashed.claim(Date.now())).toBe(true);
+    // 解放せずに落ちた。ロックは期限切れになるまで他を止める
+    expect(await newProbe().claim(Date.now())).toBe(false);
+    writeLock(1, 10 * 60_000);
+    expect(await newProbe().claim(Date.now())).toBe(true);
+    expect(lockFiles()).toEqual([`${LOCK}.2`]);
+  });
+
+  it('新しいロックがあれば取得せず、ファイルも変えない', async () => {
+    writeLock(5, 1_000);
+    expect(await newProbe().claim(Date.now())).toBe(false);
+    expect(lockFiles()).toEqual([`${LOCK}.5`]);
+  });
+
+  it('取得すると自分より古い世代を片付け、無関係なファイルは残す', async () => {
+    writeLock(1, 20 * 60_000);
+    writeLock(2, 15 * 60_000);
+    writeLock(5, 10 * 60_000);
+    writeFileSync(path.join(shared, `${LOCK}.x`), '');
+    writeFileSync(path.join(shared, 'claude-usage-probe.json'), '{}');
+    expect(await newProbe().claim(Date.now())).toBe(true);
+    expect(readdirSync(shared).sort()).toEqual([
+      'claude-usage-probe.json',
+      `${LOCK}.6`,
+      `${LOCK}.x`,
+    ]);
+  });
+
+  it('解放しても世代のファイルは残り、番号は戻らず次がすぐ取れる', async () => {
+    const first = newProbe();
+    expect(await first.claim(Date.now())).toBe(true);
+    await first.release();
+    expect(lockFiles()).toEqual([`${LOCK}.1`]);
+    expect(statSync(path.join(shared, `${LOCK}.1`)).mtimeMs).toBe(0);
+    expect(await newProbe().claim(Date.now())).toBe(true);
+    expect(lockFiles()).toEqual([`${LOCK}.2`]);
+  });
+
+  it('共有先に作れない場合はwarnして自分で取得する', async () => {
+    const file = path.join(dir, 'file');
+    writeFileSync(file, '');
+    expect(await newProbe(path.join(file, 'sub')).claim(Date.now())).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(existsSync(path.join(file, 'sub'))).toBe(false);
   });
 });
