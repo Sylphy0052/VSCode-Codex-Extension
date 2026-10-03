@@ -505,6 +505,8 @@ describe('EndSummaryRunner', () => {
     await vi.waitFor(() => {
       expect(logWarn).toHaveBeenCalledWith('要約エージェントで例外が出ました: aborted');
     });
+    // 失敗の注記が出ないことを確かめる前に、連鎖の残りを流し切る
+    await drainMicrotasks();
 
     expect(notes.map((n) => n.display.status)).toEqual(['inProgress', 'cancelled']);
   });

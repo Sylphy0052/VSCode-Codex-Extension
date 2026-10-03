@@ -276,9 +276,13 @@ function globToRegExpSource(glob: string): string {
       const negated = body.startsWith('!') || body.startsWith('^');
       out += `[${negated ? '^' : ''}${(negated ? body.slice(1) : body).replace(/[\\\]]/g, '\\$&')}]`;
       i = end;
-    } else if (c === '{' && findClosingBrace(glob, i) !== -1) {
-      const end = findClosingBrace(glob, i);
-      const alternatives = splitTopLevelCommas(glob.slice(i + 1, end));
+    } else if (c === '{' && glob.indexOf('}', i) !== -1) {
+      // 入れ子を数えて対応する`}`を探す。無ければ、照合を広く取るため（判定を狭めないため）、
+      // 最初の`}`で閉じて`,`で分ける旧来の解釈にする。CLIの実挙動は実測していない
+      const nestedEnd = findClosingBrace(glob, i);
+      const end = nestedEnd !== -1 ? nestedEnd : glob.indexOf('}', i);
+      const inner = glob.slice(i + 1, end);
+      const alternatives = nestedEnd !== -1 ? splitTopLevelCommas(inner) : inner.split(',');
       out += `(?:${alternatives.map(globToRegExpSource).join('|')})`;
       i = end;
     } else {

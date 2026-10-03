@@ -198,10 +198,11 @@ describe('compileReadDenyRule', () => {
       expect(matches('Read(./{a,{b,c}d}/x)', `${CWD}/c/x`)).toBe(false);
     });
 
-    it('対応する}が無い{は、入れ子の内側があっても文字そのものとして扱う', () => {
-      expect(matches('Read(./{a,{b,c})', `${CWD}/{a,b`)).toBe(true);
-      expect(matches('Read(./{a,{b,c})', `${CWD}/{a,c`)).toBe(true);
-      expect(matches('Read(./{a,{b,c})', `${CWD}/a`)).toBe(false);
+    it('入れ子の外側に対応する}が無ければ、最初の}で閉じる旧来の解釈で広く照合する', () => {
+      for (const name of ['a', '{b', 'c']) {
+        expect(matches('Read(./{a,{b,c})', `${CWD}/${name}`)).toBe(true);
+      }
+      expect(matches('Read(./{a,{b,c})', `${CWD}/b`)).toBe(false);
     });
 
     it('閉じられない{は文字そのものとして扱う', () => {
