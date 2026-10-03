@@ -227,6 +227,8 @@ export class ClaudeStreamSession {
   /** 再開中のCLIがstderrへ出した最後の行（失敗の理由に使う）。 */
   private resumeStderr: string | undefined;
   private resumeListener: ((outcome: ResumeOutcome) => void) | undefined;
+  /** 休止・再開の段階が落ち着く（`running`/`suspended`/`resumeFailed`）のを待つ呼び出し。 */
+  private lifecycleWaiters: (() => void)[] = [];
 
   constructor(
     private readonly claudePath: () => string,
@@ -637,8 +639,42 @@ export class ClaudeStreamSession {
       backgroundTerminals: NO_BACKGROUND_TERMINALS,
     });
     this.log.info('使っていないためClaude Codeを終了しました。次の送信で再開します');
+    this.wakeLifecycleWaiters();
     if (this.state.queued.length > 0) {
       this.sendNextQueued();
+    }
+  }
+
+  private wakeLifecycleWaiters(): void {
+    const waiters = this.lifecycleWaiters;
+    this.lifecycleWaiters = [];
+    for (const wake of waiters) {
+      wake();
+    }
+  }
+
+  /**
+   * 発言以外の操作（MCP状態確認・脇道の質問・巻き戻しなど）の前に、CLIが使える状態にする
+   * （Issue #1835）。休止中なら再開し、終了を待っている間・再開している間はその完了を待つ。
+   *
+   * @returns CLIが使えるか。再開に失敗した、またはCLIが落ちていれば`false`
+   */
+  private async ensureProcess(): Promise<boolean> {
+    for (;;) {
+      switch (this.lifecycle) {
+        case 'running':
+          return this.proc !== undefined;
+        case 'resumeFailed':
+          return false;
+        case 'suspended':
+          // 発言が無い再開。失敗したときの送り直し（`resumeRequest`）は空になる
+          this.resumeProcess('', []);
+          break;
+        case 'stopping':
+        case 'resuming':
+          await new Promise<void>((resolve) => this.lifecycleWaiters.push(resolve));
+          break;
+      }
     }
   }
 
@@ -681,6 +717,7 @@ export class ClaudeStreamSession {
       this.lifecycle = 'running';
       this.resumeRequest = undefined;
       this.update({ ...this.state, processSuspension: undefined });
+      this.wakeLifecycleWaiters();
       this.noteLocalEvent(
         `resumeMcp:${Date.now()}`,
         describeResumedMcp(this.mcpBeforeSuspend, mcp),
@@ -705,6 +742,7 @@ export class ClaudeStreamSession {
     const request = this.resumeRequest;
     this.resumeRequest = undefined;
     this.update({ ...this.state, processSuspension: 'resumeFailed' });
+    this.wakeLifecycleWaiters();
     this.noteLocalEvent(
       `resumeFailed:${Date.now()}`,
       `会話を再開できませんでした（${reason}）。新しい会話として始めるかを選んでください`,
@@ -1165,9 +1203,9 @@ export class ClaudeStreamSession {
    * プロセスが無い、または応答が来ない場合は`undefined`を返す（呼び出し側は
    * 「見えない」側へ倒す。`ChatViewManager.checkMcpStartupStatus`と対称の判断）。
    */
-  checkMcpStatus(): Promise<McpServerView[] | undefined> {
-    if (this.proc === undefined) {
-      return Promise.resolve(undefined);
+  async checkMcpStatus(): Promise<McpServerView[] | undefined> {
+    if (!(await this.ensureProcess())) {
+      return undefined;
     }
     const requestId = this.claim('mcpStatus');
     return new Promise((resolve) => {
@@ -1178,7 +1216,9 @@ export class ClaudeStreamSession {
 
   /** 起動中のプロセスへMCPを追加する。既存の動的サーバーと会話状態を残す。 */
   async ensureMcpServer(name: string, config: { command: string; args: string[] }): Promise<void> {
-    if (this.proc === undefined) throw new Error('Claude Codeセッションが起動していません');
+    if (!(await this.ensureProcess()) || this.proc === undefined) {
+      throw new Error('Claude Codeセッションが起動していません');
+    }
     if (this.state.busy || this.mcpConfiguring) {
       throw new Error('Claude Codeの応答またはMCP接続の完了後に、もう一度開始してください');
     }
@@ -1325,16 +1365,15 @@ export class ClaudeStreamSession {
         succeededCount: 0,
       });
     }
-    if (this.proc === undefined) {
-      return Promise.resolve({
-        ok: false,
-        prefillText: undefined,
-        error: { message: 'セッションが起動していません', origin: 'app' },
-        succeededCount: 0,
-      });
-    }
-    return forkFromTurn(userMessageUuids, targetUuid, (uuid) =>
-      this.requestRewindConversation(uuid),
+    return this.ensureProcess().then((alive): ForkFromTurnResult | Promise<ForkFromTurnResult> =>
+      alive
+        ? forkFromTurn(userMessageUuids, targetUuid, (uuid) => this.requestRewindConversation(uuid))
+        : {
+            ok: false,
+            prefillText: undefined,
+            error: { message: 'セッションが起動していません', origin: 'app' },
+            succeededCount: 0,
+          },
     );
   }
 
@@ -1385,31 +1424,36 @@ export class ClaudeStreamSession {
         error: { message: '質問が空です', origin: 'app' },
       });
     }
-    if (this.proc === undefined) {
-      return Promise.resolve({
-        ok: false,
-        response: undefined,
-        synthetic: undefined,
-        refusalFallback: undefined,
-        error: { message: 'セッションが起動していません', origin: 'app' },
+    return this.ensureProcess().then((alive): SideQuestionResult | Promise<SideQuestionResult> => {
+      if (!alive) {
+        return {
+          ok: false,
+          response: undefined,
+          synthetic: undefined,
+          refusalFallback: undefined,
+          error: { message: 'セッションが起動していません', origin: 'app' },
+        };
+      }
+      const requestId = this.claim('sideQuestion');
+      return new Promise<SideQuestionResult>((resolve) => {
+        this.sideQuestionWaiting.set(requestId, { resolve, onProgress });
+        this.write(buildSideQuestionRequest(requestId, question, history));
       });
-    }
-    const requestId = this.claim('sideQuestion');
-    return new Promise((resolve) => {
-      this.sideQuestionWaiting.set(requestId, { resolve, onProgress });
-      this.write(buildSideQuestionRequest(requestId, question, history));
     });
   }
 
-  private requestRewindFiles(userMessageId: string, dryRun: boolean): Promise<RewindFilesResult> {
-    if (this.proc === undefined) {
-      return Promise.resolve({
+  private async requestRewindFiles(
+    userMessageId: string,
+    dryRun: boolean,
+  ): Promise<RewindFilesResult> {
+    if (!(await this.ensureProcess())) {
+      return {
         ok: false,
         filesChanged: [],
         insertions: undefined,
         deletions: undefined,
         error: 'セッションが起動していません',
-      });
+      };
     }
     const requestId = this.claim('rewindFiles');
     return new Promise<RewindFilesResult>((resolve) => {
@@ -1424,8 +1468,20 @@ export class ClaudeStreamSession {
       this.update(enqueue(this.state, text, [...attachments]));
       return;
     }
+    // 再開に失敗した後は、CLIが残っていても送らない（新しい会話として送り直すかを選ばせている）
+    if (this.lifecycle === 'resumeFailed') {
+      throw new Error('休止していた会話を再開できていません');
+    }
     if (this.lifecycle === 'suspended') {
       this.resumeProcess(text, attachments);
+    } else if (
+      this.lifecycle === 'resuming' &&
+      this.resumeRequest?.text === '' &&
+      this.resumeRequest.attachments.length === 0
+    ) {
+      // 発言以外の操作が始めた再開（`ensureProcess`）の最中に来た送信。再開が失敗したとき
+      // 新しい会話で送り直せるよう、この発言を再開のきっかけとして覚える
+      this.resumeRequest = { text, attachments };
     }
     if (this.proc === undefined) {
       throw new Error('セッションが起動していません');
@@ -2019,6 +2075,9 @@ export class ClaudeStreamSession {
 
   dispose(): void {
     this.releasePendingWaiters();
+    // 休止の段階を待つ呼び出しは、`proc`が無いまま`running`でも`resumeFailed`でもなく残り得る
+    this.lifecycle = 'resumeFailed';
+    this.wakeLifecycleWaiters();
     this.proc?.stdin.end();
     if (this.proc !== undefined) {
       killWithEscalation(this.proc);
