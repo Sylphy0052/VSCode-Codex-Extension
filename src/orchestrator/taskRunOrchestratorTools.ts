@@ -724,7 +724,12 @@ export function formatTaskRunState(
       snapshot.children.filter((c) => c.completed).map((c) => c.issueNumber),
     );
     const awaitingReplan = listTasks(run)
-      .filter((t) => t.completedInRoadmap !== true && t.closedWithoutMerge === undefined && t.stages.mergeCleanup.status !== 'done')
+      .filter(
+        (t) =>
+          t.completedInRoadmap !== true &&
+          t.closedWithoutMerge === undefined &&
+          t.stages.mergeCleanup.status !== 'done',
+      )
       .map(taskIssueNumber)
       .filter((n): n is number => n !== undefined && completedChildren.has(n) && !merged.has(n));
     if (awaitingReplan.length > 0) {
