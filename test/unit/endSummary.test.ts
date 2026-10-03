@@ -82,7 +82,7 @@ describe('buildEndSummaryMaterial', () => {
   });
 
   it('コマンドは空白を1つに畳み、200文字で切って省略記号を付ける', () => {
-    const long = `${'a'.repeat(250)}`;
+    const long = 'a'.repeat(250);
     const result = buildEndSummaryMaterial(
       [user('依頼'), command('echo   hello\n  world'), command(long)],
       '応答',
@@ -281,11 +281,21 @@ function makeOptions(over: Partial<EndSummaryRunOptions> = {}): {
   return { options, notes, executableFor };
 }
 
-/** マイクロタスクを流し切って、then/catch/finallyの連鎖を終わらせる。 */
-async function flush(): Promise<void> {
-  for (let i = 0; i < 5; i++) {
-    await Promise.resolve();
-  }
+/** 要約が終わって、実行中でなくなるまで待つ。実行中の解除はthen/catch/finallyの連鎖の最後で行われる。 */
+async function untilSettled(runner: EndSummaryRunner): Promise<void> {
+  await vi.waitFor(() => {
+    expect(runner.running).toBe(false);
+  });
+}
+
+/**
+ * 何も起きないことを確かめる前に、積まれたマイクロタスクを全部流す。連鎖の段数に依存しないよう、
+ * マイクロタスクより後に回るマクロタスクを1つ挟む。
+ */
+async function drainMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 describe('EndSummaryRunner', () => {
@@ -302,7 +312,7 @@ describe('EndSummaryRunner', () => {
     expect(notes[0]?.display.detail).toBe('実行中… ・ claude ・ model: auto');
 
     calls[0]?.resolve({ ok: true, text: '  - 直した\n' });
-    await flush();
+    await untilSettled(runner);
 
     expect(notes).toHaveLength(2);
     expect(notes[1]).toEqual({
@@ -393,7 +403,7 @@ describe('EndSummaryRunner', () => {
     runner.start(options);
 
     calls[0]?.resolve({ ok: true, text: '  \n' });
-    await flush();
+    await untilSettled(runner);
 
     expect(logWarn).toHaveBeenCalledWith(
       '要約エージェントの呼び出しに失敗しました（process-error）',
@@ -404,13 +414,13 @@ describe('EndSummaryRunner', () => {
     expect(runner.running).toBe(false);
   });
 
-  it('CLIが時間切れを返したらtimeoutの失敗として残す。logWarn未指定でも注記は出る', async () => {
+  it('CLIが時間切れを返したら、logWarn未指定でもtimeoutの失敗として注記を残す', async () => {
     const { runner, calls } = makeRunner();
     const { options, notes } = makeOptions();
     runner.start(options);
 
     calls[0]?.resolve({ ok: false, reason: 'timeout' });
-    await flush();
+    await untilSettled(runner);
 
     expect(notes[1]?.display.status).toBe('failed');
     expect(notes[1]?.display.text).toBe('要約できませんでした（時間内に応答がありませんでした）');
@@ -423,32 +433,34 @@ describe('EndSummaryRunner', () => {
     runner.start(options);
 
     calls[0]?.reject(new Error('spawn失敗'));
-    await flush();
+    await untilSettled(runner);
 
     expect(logWarn).toHaveBeenCalledWith('要約エージェントで例外が出ました: spawn失敗');
     expect(notes[1]?.display.status).toBe('failed');
     expect(runner.running).toBe(false);
   });
 
-  it('Errorでない値が投げられても文字列化して警告し、logWarn未指定でも失敗の注記を出す', async () => {
-    const withWarn = makeRunner();
+  it('Errorでない値が投げられても文字列化して警告し、失敗の注記を出す', async () => {
+    const { runner, calls } = makeRunner();
     const logWarn = vi.fn();
-    const a = makeOptions({ logWarn });
-    withWarn.runner.start(a.options);
-    withWarn.calls[0]?.reject('文字列の例外');
-    await flush();
+    const { options, notes } = makeOptions({ logWarn });
+    runner.start(options);
+    calls[0]?.reject('文字列の例外');
+    await untilSettled(runner);
     expect(logWarn).toHaveBeenCalledWith('要約エージェントで例外が出ました: 文字列の例外');
-    expect(a.notes[1]?.display.status).toBe('failed');
-
-    const withoutWarn = makeRunner();
-    const b = makeOptions();
-    withoutWarn.runner.start(b.options);
-    withoutWarn.calls[0]?.reject(new Error('x'));
-    await flush();
-    expect(b.notes[1]?.display.status).toBe('failed');
+    expect(notes[1]?.display.status).toBe('failed');
   });
 
-  it('次のターンが来たら前の要約を取り消し、前の結果が後から届いても注記を上書きしない', async () => {
+  it('例外で落ちても、logWarn未指定なら警告を出さずに失敗の注記だけ出す', async () => {
+    const { runner, calls } = makeRunner();
+    const { options, notes } = makeOptions();
+    runner.start(options);
+    calls[0]?.reject(new Error('x'));
+    await untilSettled(runner);
+    expect(notes[1]?.display.status).toBe('failed');
+  });
+
+  it('次のターンが来たら、前の要約を取り消して新しい要約を始める', () => {
     const { runner, calls } = makeRunner();
     const { options, notes } = makeOptions();
     runner.start(options);
@@ -462,19 +474,24 @@ describe('EndSummaryRunner', () => {
       ['id2', 'inProgress'],
     ]);
     expect(notes[1]?.display.text).toBe('要約を取り消しました（次のターンが終わったため）');
+  });
 
-    // 取り消した側が後から成功・失敗を返しても何も出さない
+  it('取り消した側の結果が後から届いても、注記を上書きせず新しい要約の実行中状態も消さない', async () => {
+    const { runner, calls } = makeRunner();
+    const { options, notes } = makeOptions();
+    runner.start(options);
+    runner.start(options);
+
     calls[0]?.resolve({ ok: true, text: '古い要約' });
-    await flush();
+    await drainMicrotasks();
     expect(notes).toHaveLength(3);
     // 取り消した側のfinallyが新しい要約の実行中状態を消してはならない
     expect(runner.running).toBe(true);
 
     calls[1]?.resolve({ ok: true, text: '新しい要約' });
-    await flush();
+    await untilSettled(runner);
     expect(notes[3]?.id).toBe('id2');
     expect(notes[3]?.display.text).toBe('新しい要約');
-    expect(runner.running).toBe(false);
   });
 
   it('取り消した側が例外で終わったときは警告だけ残し、失敗の注記は出さない', async () => {
@@ -485,9 +502,10 @@ describe('EndSummaryRunner', () => {
     runner.cancel('手動');
 
     calls[0]?.reject(new Error('aborted'));
-    await flush();
+    await vi.waitFor(() => {
+      expect(logWarn).toHaveBeenCalledWith('要約エージェントで例外が出ました: aborted');
+    });
 
-    expect(logWarn).toHaveBeenCalledWith('要約エージェントで例外が出ました: aborted');
     expect(notes.map((n) => n.display.status)).toEqual(['inProgress', 'cancelled']);
   });
 
@@ -523,7 +541,7 @@ describe('EndSummaryRunner', () => {
     expect(runner.running).toBe(false);
     runner.cancel('後から');
     calls[0]?.resolve({ ok: true, text: '遅れて届いた' });
-    await flush();
+    await drainMicrotasks();
     expect(notes.map((n) => n.display.status)).toEqual(['inProgress']);
   });
 

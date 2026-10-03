@@ -8,7 +8,10 @@ import {
   compileReadDenyRule,
   findDeniedDirectory,
   inspectReadOnlyCwd,
+  LIST_RULES_TIMEOUT_MS,
+  MAX_SCANNED_DIRECTORIES,
   MAX_STDERR_LENGTH,
+  MAX_STDOUT_LINE_LENGTH,
   type ReadDenyPattern,
 } from '../../src/claude/sandboxReadDeny';
 
@@ -234,9 +237,6 @@ describe('一時ディレクトリを使うテスト', () => {
   };
 
   const noAbort = (): AbortSignal => new AbortController().signal;
-
-  /** src側の`MAX_SCANNED_DIRECTORIES`（未export）と同じ値 */
-  const MAX_SCANNED_DIRECTORIES = 200_000;
 
   /** cwdの直下に上限+1個のディレクトリがあるように見せ、実ディレクトリを作らずに上限を超えさせる */
   const mockOverLimitDirectories = (cwd: string): void => {
@@ -646,16 +646,26 @@ describe('一時ディレクトリを使うテスト', () => {
 
     it('ルール取得後の探索中に中止されたら、中止の理由で拒否する', async () => {
       const cwd = await makeTmp();
+      await fs.mkdir(path.join(cwd, 'a'));
       const controller = new AbortController();
       const proc = fakeProc();
       useProc(proc);
+      // 探索の最初のreaddirの中で中止し、Promiseの連鎖の段数に依存せず探索中の中止にする
+      const original = fs.readdir.bind(fs);
+      const readdir = vi.spyOn(fs, 'readdir').mockImplementation(((
+        dir: string,
+        options: unknown,
+      ) => {
+        controller.abort();
+        return original(dir, options as never);
+      }) as typeof fs.readdir);
       const result = inspectReadOnlyCwd('claude', cwd, controller.signal);
       proc.stdout.emit('data', response([deny('Read(./secrets/**)')]));
-      controller.abort();
       expect(await result).toEqual({
         ok: false,
         reason: '拡張機能の終了により確認を中止しました',
       });
+      expect(readdir).toHaveBeenCalled();
     });
 
     it('開始前に中止済みならCLIを起動せずに拒否する', async () => {
@@ -716,18 +726,18 @@ describe('一時ディレクトリを使うテスト', () => {
       expect(proc.kill).not.toHaveBeenCalled();
     });
 
-    it('30秒応答が無ければタイムアウトとして拒否する', async () => {
+    it('応答が無いまま上限時間が経つと、タイムアウトとして拒否する', async () => {
       vi.useFakeTimers();
       const cwd = await makeTmp();
       const proc = fakeProc();
       useProc(proc);
       const result = inspectReadOnlyCwd('claude', cwd, noAbort());
-      await vi.advanceTimersByTimeAsync(29_999);
+      await vi.advanceTimersByTimeAsync(LIST_RULES_TIMEOUT_MS - 1);
       proc.stdout.emit('data', 'unrelated\n');
       await vi.advanceTimersByTimeAsync(1);
       expect(await result).toEqual({
         ok: false,
-        reason: 'Readのdenyルールを確かめられません: 30000ms以内に応答がありませんでした',
+        reason: `Readのdenyルールを確かめられません: ${String(LIST_RULES_TIMEOUT_MS)}ms以内に応答がありませんでした`,
       });
       expect(proc.kill).toHaveBeenCalledTimes(1);
     });
@@ -814,12 +824,12 @@ describe('一時ディレクトリを使うテスト', () => {
       });
     });
 
-    it('1行が4MiBを超えたら、長すぎる理由で拒否する', async () => {
+    it('1行が上限を超えたら、長すぎる理由で拒否する', async () => {
       const cwd = await makeTmp();
       const proc = fakeProc();
       useProc(proc);
       const result = inspectReadOnlyCwd('claude', cwd, noAbort());
-      proc.stdout.emit('data', 'a'.repeat(4 * 1024 * 1024 + 1));
+      proc.stdout.emit('data', 'a'.repeat(MAX_STDOUT_LINE_LENGTH + 1));
       expect(await result).toEqual({
         ok: false,
         reason: 'Readのdenyルールを確かめられません: CLIの出力の1行が長すぎます',
@@ -880,18 +890,18 @@ describe('一時ディレクトリを使うテスト', () => {
       }
     });
 
-    it('stderrは上限(1200文字)を超えたら以降のchunkを溜めない', async () => {
+    it('stderrは上限を超えたら以降のchunkを溜めない', async () => {
       const cwd = await makeTmp();
       const proc = fakeProc();
       useProc(proc);
       const result = inspectReadOnlyCwd('claude', cwd, noAbort());
-      proc.stderr.emit('data', 'a'.repeat(1200));
+      proc.stderr.emit('data', 'a'.repeat(MAX_STDERR_LENGTH));
       proc.stderr.emit('data', 'LATER');
       proc.emit('close', 1);
       const inspection = await result;
       expect(inspection.ok).toBe(false);
       if (!inspection.ok) {
-        expect(inspection.reason).toContain('a'.repeat(1200));
+        expect(inspection.reason).toContain('a'.repeat(MAX_STDERR_LENGTH));
         expect(inspection.reason).not.toContain('LATER');
       }
     });

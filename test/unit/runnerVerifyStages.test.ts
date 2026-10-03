@@ -27,6 +27,11 @@ vi.mock('node:os', async (importOriginal) => ({
 
 const mockedRevert = vi.mocked(withTemporaryRevert);
 
+/** src側が失敗メッセージに載せる、戻したファイルの件数の上限と同じ値 */
+const REVERTED_PATHS_LIMIT = 20;
+/** src側が測定結果へ載せる、出力の末尾の文字数の上限と同じ値（`MEASUREMENT_OUTPUT_MAX_CHARS`） */
+const MEASUREMENT_OUTPUT_LIMIT = 1_000;
+
 type Verify = NonNullable<WorkflowTask['verify']>;
 
 function task(verify: Partial<Verify> | undefined): WorkflowTask {
@@ -199,31 +204,37 @@ describe('runVerifyStages', () => {
       expect(out.failures[0]).not.toContain('ほか');
     });
 
-    it('戻したファイルが20件ちょうどなら省略表記を付けない', async () => {
-      const paths = Array.from({ length: 20 }, (_, i) => `f${i}.ts`);
+    it('戻したファイルが上限ちょうどなら省略表記を付けない', async () => {
+      const paths = Array.from({ length: REVERTED_PATHS_LIMIT }, (_, i) => `f${i}.ts`);
       mockedRevert.mockResolvedValueOnce(ran(execResult(), { revertedPaths: paths }));
 
       const out = await run({ revertCheck: true });
 
-      expect(out.failures[0]).toContain('f19.ts');
+      expect(out.failures[0]).toContain(`f${REVERTED_PATHS_LIMIT - 1}.ts`);
       expect(out.failures[0]).not.toContain('ほか');
     });
 
-    it('戻したファイルが21件以上なら20件までに切って残数を示す', async () => {
-      const paths = Array.from({ length: 25 }, (_, i) => `f${i}.ts`);
+    it('戻したファイルが上限を超えたら上限の件数までに切って残数を示す', async () => {
+      const excess = 5;
+      const paths = Array.from({ length: REVERTED_PATHS_LIMIT + excess }, (_, i) => `f${i}.ts`);
       mockedRevert.mockResolvedValueOnce(ran(execResult(), { revertedPaths: paths }));
 
       const out = await run({ revertCheck: true });
 
-      expect(out.failures[0]).toContain('f19.ts');
-      expect(out.failures[0]).not.toContain('f20.ts');
-      expect(out.failures[0]).toContain('ほか5件');
+      expect(out.failures[0]).toContain(`f${REVERTED_PATHS_LIMIT - 1}.ts`);
+      expect(out.failures[0]).not.toContain(`f${REVERTED_PATHS_LIMIT}.ts`);
+      expect(out.failures[0]).toContain(`ほか${excess}件`);
     });
 
     it('戻すと失敗するなら正常（失敗を積まない）', async () => {
       mockedRevert.mockResolvedValueOnce(ran(execResult({ failures: ['落ちた'] })));
 
-      expect(await run({ revertCheck: true })).toEqual({ failures: [], aborted: false });
+      const out = await run({ revertCheck: true });
+
+      expect(out).toEqual({ failures: [], aborted: false });
+      expect(mockedRevert.mock.calls[0]?.[0].scope).toBe('production');
+      expect(log.warn).not.toHaveBeenCalled();
+      expect(log.error).not.toHaveBeenCalled();
     });
 
     it('戻した状態の実行が中断されたらabortedを返し失敗を積まない', async () => {
@@ -315,7 +326,7 @@ describe('runVerifyStages', () => {
       expect(call?.scope).toBe('all');
       expect(call?.signal).toBe(signal);
       expect(execute).toHaveBeenCalledWith(['npm run bench'], 'baseline');
-      expect(out.measurements).toBeDefined();
+      expect(out.measurements).toContain('### npm run bench');
     });
 
     it('revertCheckを指定しなければrevertステージは走らせない', async () => {
@@ -404,11 +415,11 @@ describe('runVerifyStages', () => {
   describe('測定結果の整形', () => {
     async function measure(
       base: ExecutedVerifyCommand[],
-      task_: ExecutedVerifyCommand[],
+      taskRun: ExecutedVerifyCommand[],
       commands = ['npm test'],
     ): Promise<string | undefined> {
       mockedRevert.mockResolvedValueOnce(ran(execResult({ executed: base })));
-      const out = await run({ baseline: commands }, { taskRun: task_ });
+      const out = await run({ baseline: commands }, { taskRun });
       return out.measurements;
     }
 
@@ -480,14 +491,19 @@ describe('runVerifyStages', () => {
       );
     });
 
-    it('出力は末尾1000文字に切る', async () => {
+    it('出力は末尾の上限の文字数だけに切る', async () => {
+      const tail = 't'.repeat(MEASUREMENT_OUTPUT_LIMIT);
       const text = await measure(
-        [executed('npm test', { exitCode: 1, output: `${'h'.repeat(3000)}${'t'.repeat(1000)}` })],
+        [
+          executed('npm test', {
+            exitCode: 1,
+            output: `${'h'.repeat(3 * MEASUREMENT_OUTPUT_LIMIT)}${tail}`,
+          }),
+        ],
         [executed('npm test', { exitCode: 0 })],
       );
 
-      expect(text).toContain('t'.repeat(1000));
-      expect(text).not.toContain('h');
+      expect(text).toBe(['### npm test', '分岐元: exit 1', tail, 'タスク後: exit 0'].join('\n'));
     });
 
     it('出力に含まれるホームディレクトリをマスクする', async () => {
