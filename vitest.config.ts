@@ -29,9 +29,11 @@ export default defineConfig({
       // branches 61.97% / functions 67.35% / lines 67.97%）の小数以下を切り捨てた値へ引き上げた。
       // chatView系のテスト追加後の実測（statements 73.71% / branches 67.63% / functions 73.26% /
       // lines 74.17%）で、statements・functions・linesは70へ戻り、branchesだけ67へ引き上げた。
+      // sandbox系・endSummary等のテスト追加後の実測（statements 75.14% / branches 69.2% /
+      // functions 74.56% / lines 75.6%）で全指標が#455の下限を超えたため、70/68/70/70へ戻した。
       thresholds: {
         statements: 70,
-        branches: 67,
+        branches: 68,
         functions: 70,
         lines: 70,
       },

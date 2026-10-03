@@ -188,7 +188,7 @@ git push origin --delete <ここに削除対象ブランチ名を人が入力す
 
 - `package.json` の `devDependencies` に `@vitest/coverage-v8` を追加した
 - `vitest.config.ts` の `test` ブロックに `coverage` を追加した（provider: `v8`、reporter: `text` と `lcov`、対象: `src/**/*.ts`）
-- `coverage.thresholds` に `statements 70` / `branches 68` / `functions 70` / `lines 70` を設定した。これを下回るとカバレッジ実行が失敗する（#1852で引き下げた。下の「下限の引き下げ」を参照）
+- `coverage.thresholds` に `statements 70` / `branches 68` / `functions 70` / `lines 70` を設定した。これを下回るとカバレッジ実行が失敗する（#1852で一度引き下げ、#1854で戻した。下の「下限の引き下げと復帰」を参照）
 - `package.json` の `scripts` に `"test:coverage": "vitest run --coverage"` を追加した。既存の `"test": "vitest run"`（カバレッジ計測なし）はそのまま残している
 - CI（`.github/workflows/ci.yml`）の `Test` ステップを `npm test` から `npm run test:coverage` に置き換えた。ジョブ名 `checks` は変更していない
 - `.gitignore` の `coverage/`（6行目）は導入前から既にあり、重複追記していない
@@ -205,7 +205,7 @@ git push origin --delete <ここに削除対象ブランチ名を人が入力す
 
 CLAUDE.mdが定める「Test coverage 80%以上」に対し、上記の実測値はいずれも届いていない。いきなり80%を閾値にすると導入と同時にCIが赤くなり、無関係な作業まで止めてしまう。そのため、**実測値をわずかに下回る値で下限を敷き、以後の低下だけを防ぐ**方針を採った。80%への引き上げは、この下限の維持を確認しながら段階的に別Issueで行う（本Issueでは未着手）。
 
-### 下限の引き下げ（#1852、2026-10-03）
+### 下限の引き下げと復帰（#1852・#1854、2026-10-03）
 
 mainのCIは長い間LintかFormatのステップで止まっていて、Testステップ（カバレッジ計測を含む）まで一度も進んでいなかった。#1852でLint・Format・Typecheckを通したところ、実測は statements 60.35% / branches 54.18% / functions 58.3% / lines 60.76% まで下がっていた。
 
@@ -215,6 +215,7 @@ mainのCIは長い間LintかFormatのステップで止まっていて、Testス
 
 - taskRun系（`taskRunController.ts`・`taskStageRunner.ts`・`resourceSampler.ts`・`taskRunLease.ts`・`runNotes.ts`）の単体テストを追加した後の実測は statements 67.6% / branches 61.97% / functions 67.35% / lines 67.97%。閾値を `statements 67` / `branches 61` / `functions 67` / `lines 67` に上げた
 - chatView系（`chatView.ts`・`claudeChatView.ts`・`sessionHub.ts`・`taskRunSetup.ts`・`handoffDigest.ts`・`taskRunKanbanView.ts`）の単体テストを追加した後の実測は statements 73.71% / branches 67.63% / functions 73.26% / lines 74.17%。閾値を `statements 70` / `branches 67` / `functions 70` / `lines 70` に上げた。branchesだけ目標の68に0.37ポイント（約100分岐）足りないため、#1854は残して追加のテストで埋める
+- テストが1本もなかった `sandboxBashGuard.ts`・`sandboxReadDeny.ts`・`endSummary.ts`・`sessionIndexFile.ts`・`runnerVerifyStages.ts` の単体テストを追加した後の実測は statements 75.14% / branches 69.2% / functions 74.56% / lines 75.6%。全指標が#455の下限を超えたため、閾値を `statements 70` / `branches 68` / `functions 70` / `lines 70` へ戻し、#1854を完了とした
 
 ### 既知の注意点
 
