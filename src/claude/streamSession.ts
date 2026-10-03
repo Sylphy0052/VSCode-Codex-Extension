@@ -1474,6 +1474,14 @@ export class ClaudeStreamSession {
     }
     if (this.lifecycle === 'suspended') {
       this.resumeProcess(text, attachments);
+    } else if (
+      this.lifecycle === 'resuming' &&
+      this.resumeRequest?.text === '' &&
+      this.resumeRequest.attachments.length === 0
+    ) {
+      // 発言以外の操作が始めた再開（`ensureProcess`）の最中に来た送信。再開が失敗したとき
+      // 新しい会話で送り直せるよう、この発言を再開のきっかけとして覚える
+      this.resumeRequest = { text, attachments };
     }
     if (this.proc === undefined) {
       throw new Error('セッションが起動していません');
