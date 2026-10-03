@@ -8,6 +8,7 @@ import {
   compileReadDenyRule,
   findDeniedDirectory,
   inspectReadOnlyCwd,
+  MAX_STDERR_LENGTH,
   type ReadDenyPattern,
 } from '../../src/claude/sandboxReadDeny';
 
@@ -73,6 +74,12 @@ describe('compileReadDenyRule', () => {
   it('//始まりは絶対パスとして扱う', () => {
     expect(matches('Read(//etc/ssl/**)', '/etc/ssl')).toBe(true);
     expect(matches('Read(//etc/ssl/**)', `${CWD}/etc/ssl`)).toBe(false);
+  });
+
+  it('//だけなら、ルートの/自身に一致する', () => {
+    expect(matches('Read(//)', '/')).toBe(true);
+    expect(matches('Read(//)', '/etc')).toBe(false);
+    expect(matches('Read(//)', CWD)).toBe(false);
   });
 
   it('~/始まりはホーム基準、~だけはホーム自身に一致する', () => {
@@ -176,6 +183,22 @@ describe('compileReadDenyRule', () => {
       expect(matches('Read(./{aa,b*}/x)', `${CWD}/aa/x`)).toBe(true);
       expect(matches('Read(./{aa,b*}/x)', `${CWD}/bcd/x`)).toBe(true);
       expect(matches('Read(./{aa,b*}/x)', `${CWD}/cc/x`)).toBe(false);
+    });
+
+    it('{}が入れ子でも、括弧の深さを数えて展開する', () => {
+      expect(matches('Read(./{a,{b,c}}/x)', `${CWD}/a/x`)).toBe(true);
+      expect(matches('Read(./{a,{b,c}}/x)', `${CWD}/b/x`)).toBe(true);
+      expect(matches('Read(./{a,{b,c}}/x)', `${CWD}/c/x`)).toBe(true);
+      expect(matches('Read(./{a,{b,c}}/x)', `${CWD}/}/x`)).toBe(false);
+      expect(matches('Read(./{a,{b,c}}/x)', `${CWD}/a,{b/x`)).toBe(false);
+      expect(matches('Read(./{a,{b,c}d}/x)', `${CWD}/cd/x`)).toBe(true);
+      expect(matches('Read(./{a,{b,c}d}/x)', `${CWD}/c/x`)).toBe(false);
+    });
+
+    it('対応する}が無い{は、入れ子の内側があっても文字そのものとして扱う', () => {
+      expect(matches('Read(./{a,{b,c})', `${CWD}/{a,b`)).toBe(true);
+      expect(matches('Read(./{a,{b,c})', `${CWD}/{a,c`)).toBe(true);
+      expect(matches('Read(./{a,{b,c})', `${CWD}/a`)).toBe(false);
     });
 
     it('閉じられない{は文字そのものとして扱う', () => {
@@ -840,6 +863,21 @@ describe('一時ディレクトリを使うテスト', () => {
         reason:
           'Readのdenyルールを確かめられません: ルールの一覧を返す前に終了しました（exit code null）: ',
       });
+    });
+
+    it('stderrは1回のchunkが上限を超えても、上限までで切って理由に入れる', async () => {
+      const cwd = await makeTmp();
+      const proc = fakeProc();
+      useProc(proc);
+      const result = inspectReadOnlyCwd('claude', cwd, noAbort());
+      proc.stderr.emit('data', `${'a'.repeat(MAX_STDERR_LENGTH)}OVER`);
+      proc.emit('close', 1);
+      const inspection = await result;
+      expect(inspection.ok).toBe(false);
+      if (!inspection.ok) {
+        expect(inspection.reason).toContain('a'.repeat(MAX_STDERR_LENGTH));
+        expect(inspection.reason).not.toContain('OVER');
+      }
     });
 
     it('stderrは上限(1200文字)を超えたら以降のchunkを溜めない', async () => {
