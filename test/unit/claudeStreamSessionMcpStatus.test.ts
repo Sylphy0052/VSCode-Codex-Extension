@@ -39,6 +39,11 @@ function createSessionWithFakeProc(): {
   return { session, written };
 }
 
+// `ensureProcess()`（Issue #1835）を待ってから書き込むため、書き込みを読む前に待つ
+async function flushPendingWrites(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function controlResponseLine(requestId: string, response: unknown): string {
   return `${JSON.stringify({
     type: 'control_response',
@@ -54,9 +59,10 @@ function controlErrorLine(requestId: string, error: string): string {
 }
 
 describe('ClaudeStreamSession.checkMcpStatus（design.md §16.21「ツールの可視性の確認」）', () => {
-  it('mcp_statusのcontrol_requestを書き込む', () => {
+  it('mcp_statusのcontrol_requestを書き込む', async () => {
     const { session, written } = createSessionWithFakeProc();
     void session.checkMcpStatus();
+    await flushPendingWrites();
 
     expect(written).toHaveLength(1);
     expect(JSON.parse(written[0]!.trim())).toEqual({
@@ -69,6 +75,7 @@ describe('ClaudeStreamSession.checkMcpStatus（design.md §16.21「ツールの�
   it('応答が届くとMCPサーバー一覧で解決する', async () => {
     const { session, written } = createSessionWithFakeProc();
     const promise = session.checkMcpStatus();
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(
@@ -93,6 +100,7 @@ describe('ClaudeStreamSession.checkMcpStatus（design.md §16.21「ツールの�
   it('応答がエラーならundefinedで解決する', async () => {
     const { session, written } = createSessionWithFakeProc();
     const promise = session.checkMcpStatus();
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(controlErrorLine(requestId, 'Unsupported control request subtype'));
@@ -123,6 +131,7 @@ describe('ClaudeStreamSession.checkMcpStatus（design.md §16.21「ツールの�
     (session as unknown as { proc: { once: () => void } }).proc.once = () => undefined;
 
     const promise = session.checkMcpStatus();
+    await flushPendingWrites();
     session.dispose();
     await expect(promise).resolves.toBeUndefined();
   });

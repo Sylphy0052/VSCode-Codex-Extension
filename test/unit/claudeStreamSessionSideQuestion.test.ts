@@ -37,6 +37,11 @@ function createSessionWithFakeProc(): {
   return { session, written };
 }
 
+// `ensureProcess()`（Issue #1835）を待ってから書き込むため、書き込みを読む前に待つ
+async function flushPendingWrites(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function controlResponseLine(requestId: string, response: unknown): string {
   return `${JSON.stringify({
     type: 'control_response',
@@ -61,9 +66,10 @@ function progressLine(requestId: string, fields: Record<string, unknown>): strin
 }
 
 describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、design.md §14.62）', () => {
-  it('askSideQuestion は side_question を書き込む（history省略時）', () => {
+  it('askSideQuestion は side_question を書き込む（history省略時）', async () => {
     const { session, written } = createSessionWithFakeProc();
     void session.askSideQuestion('今何時？', []);
+    await flushPendingWrites();
 
     expect(written).toHaveLength(1);
     expect(JSON.parse(written[0]!.trim())).toEqual({
@@ -73,11 +79,12 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
     });
   });
 
-  it('history を渡すとそのまま乗せて送る', () => {
+  it('history を渡すとそのまま乗せて送る', async () => {
     const { session, written } = createSessionWithFakeProc();
     void session.askSideQuestion('続きは？', [
       { question: '前の質問', response: '前の応答', fallbackNotice: undefined },
     ]);
+    await flushPendingWrites();
 
     expect(JSON.parse(written[0]!.trim())).toMatchObject({
       request: {
@@ -91,6 +98,7 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
   it('応答が届くと readSideQuestionResult 相当の形で解決する', async () => {
     const { session, written } = createSessionWithFakeProc();
     const promise = session.askSideQuestion('今何時？', []);
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(controlResponseLine(requestId, { response: '午後3時です', synthetic: false }));
@@ -110,6 +118,7 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
     (session as unknown as { state: { busy: boolean } }).state.busy = true;
 
     const promise = session.askSideQuestion('今何時？', []);
+    await flushPendingWrites();
     expect(written).toHaveLength(1);
 
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
@@ -117,10 +126,11 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
     await expect(promise).resolves.toMatchObject({ ok: true, response: '午後3時です' });
   });
 
-  it('control_request_progress は対応する要求の onProgress へだけ届く', () => {
+  it('control_request_progress は対応する要求の onProgress へだけ届く', async () => {
     const { session, written } = createSessionWithFakeProc();
     const progressEvents: ControlRequestProgress[] = [];
     void session.askSideQuestion('質問1', [], (p) => progressEvents.push(p));
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(progressLine(requestId, { status: 'started' }));
@@ -159,6 +169,7 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
   it('control protocol自体が失敗した場合はokがfalseになる（成功と誤判定しない）', async () => {
     const { session, written } = createSessionWithFakeProc();
     const promise = session.askSideQuestion('質問', []);
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(controlErrorLine(requestId, 'Unsupported control request subtype'));
@@ -206,6 +217,7 @@ describe('ClaudeStreamSession の脇道の質問（side_question。issue #334、
     const { session, written } = createSessionWithFakeProc();
     const first = session.askSideQuestion('質問1', []);
     const second = session.askSideQuestion('質問2', []);
+    await flushPendingWrites();
     expect(written).toHaveLength(2);
 
     const firstId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
