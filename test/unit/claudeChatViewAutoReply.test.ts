@@ -15,6 +15,16 @@ import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
 import { __mock } from '../mocks/vscode';
 
+// ターン完了のたびに`refreshUsage()`が実CLI (`claude --print /usage`) を起動しないようにする。
+// managerごとに使い捨ての`globalStorageDir`を渡すため、実物では間隔制御もロックも効かない。
+vi.mock('../../src/claude/usageProbe', () => ({
+  ClaudeUsageProbe: class {
+    read(): Promise<undefined> {
+      return Promise.resolve(undefined);
+    }
+  },
+}));
+
 /**
  * 自動返信モード（Issue #1353）のview層の配線（Issue #1360）。
  *
