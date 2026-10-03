@@ -226,6 +226,8 @@ export class ClaudeStreamSession {
   /** 最後に届いた`system`/`init`の`mcp_servers`。休止の時点で`mcpBeforeSuspend`へ写す。 */
   private lastInitMcpServers: InitMcpServer[] | undefined;
   private mcpBeforeSuspend: InitMcpServer[] | undefined;
+  /** 再開を確定したが、再開後のMCPの接続状態（`system`/`init`）をまだ見ていない（Issue #1859）。 */
+  private resumeMcpPending = false;
   /** 再開のきっかけになった発言。再開に失敗したら新しい会話で送り直す材料として渡す。 */
   private resumeRequest: { text: string; attachments: readonly Attachment[] } | undefined;
   /** 再開中のCLIがstderrへ出した最後の行（失敗の理由に使う）。 */
@@ -612,6 +614,7 @@ export class ClaudeStreamSession {
     // Plan modeは起動引数ではなく実行中の切り替えで入るため、再開後に入れ直す
     this.relaunchOptions = { ...relaunch, planMode: this.state.planMode };
     this.mcpBeforeSuspend = this.lastInitMcpServers;
+    this.resumeMcpPending = false;
     this.update({ ...this.state, processSuspension: 'stopping' });
     const exited = new Promise<void>((resolve) => {
       if (typeof proc.exitCode === 'number' || typeof proc.signalCode === 'string') {
@@ -739,31 +742,51 @@ export class ClaudeStreamSession {
 
   /**
    * 再開を成功として確定する。`mcp`は`system`/`init`から読めたときだけ渡す。
-   * 発言の無い再開（`ensureProcess`）では`init`が届かないため`undefined`のまま確定する。
+   * 発言の無い再開（`ensureProcess`）では`init`が届かないため`undefined`のまま確定し、
+   * MCPの比較は次に届く`init`で行う（`reportResumedMcp`）。
    */
   private completeResume(mcp: InitMcpServer[] | undefined): void {
     this.lifecycle = 'running';
     this.resumeRequest = undefined;
     this.update({ ...this.state, processSuspension: undefined });
     this.wakeLifecycleWaiters();
+    this.resumeMcpPending = true;
     if (mcp !== undefined) {
-      this.noteLocalEvent(
-        `resumeMcp:${Date.now()}`,
-        describeResumedMcp(this.mcpBeforeSuspend, mcp),
-      );
-      this.resumeListener?.({ kind: 'resumed', mcpServers: mcp });
+      this.reportResumedMcp(mcp);
     }
+  }
+
+  /**
+   * 再開後のMCPの接続状態を、休止前と比べてタブへ残す。再開を確定してから最初に届いた
+   * `system`/`init`で1回だけ呼ぶ。発言の無い再開は確定の時点で`init`が無いため、次の
+   * ターンの頭まで持ち越す。
+   */
+  private reportResumedMcp(mcp: InitMcpServer[]): void {
+    if (!this.resumeMcpPending) {
+      return;
+    }
+    this.resumeMcpPending = false;
+    this.noteLocalEvent(`resumeMcp:${Date.now()}`, describeResumedMcp(this.mcpBeforeSuspend, mcp));
+    this.resumeListener?.({ kind: 'resumed', mcpServers: mcp });
   }
 
   /**
    * 発言の無い再開は、`initialize`の成功応答で確定する（Issue #1859）。`system`/`init`は
    * 最初のターンの頭で出るため、発言を送らない限り届かず、待ち続けてしまう。存在しない
    * 会話の`--resume`は`initialize`の応答の前にエラーの`result`と終了で失敗する（実測）ので、
-   * 成功応答が届いたなら再開できている。
+   * 成功応答が届いたなら再開できている。確定した後にCLIが終了しても、再開の失敗ではなく
+   * 通常の「CLIが落ちた」として扱う（再開はもう済んでいるため）。
+   *
+   * 失敗応答は、待っている操作を永遠に待たせないよう再開の失敗として確定する。
    */
-  private observeInitializeResponse(): void {
-    if (this.lifecycle === 'resuming' && this.isControlOnlyResume()) {
+  private observeInitializeResponse(response: ControlResponse): void {
+    if (this.lifecycle !== 'resuming' || !this.isControlOnlyResume()) {
+      return;
+    }
+    if (response.ok) {
       this.completeResume(undefined);
+    } else {
+      this.failResume(response.error ?? 'initializeに失敗しました');
     }
   }
 
@@ -1257,11 +1280,7 @@ export class ClaudeStreamSession {
   /** 起動中のプロセスへMCPを追加する。既存の動的サーバーと会話状態を残す。 */
   async ensureMcpServer(name: string, config: { command: string; args: string[] }): Promise<void> {
     if (!(await this.ensureProcess()) || this.proc === undefined) {
-      throw new Error(
-        this.lifecycle === 'resumeFailed'
-          ? RESUME_FAILED_MESSAGE
-          : 'Claude Codeセッションが起動していません',
-      );
+      throw new Error(this.unavailableMessage());
     }
     if (this.state.busy || this.mcpConfiguring) {
       throw new Error('Claude Codeの応答またはMCP接続の完了後に、もう一度開始してください');
@@ -1716,6 +1735,7 @@ export class ClaudeStreamSession {
         const initMcp = readInitMcpServers(event);
         if (initMcp !== undefined) {
           this.lastInitMcpServers = initMcp;
+          this.reportResumedMcp(initMcp);
         }
         this.observeResume(event);
 
@@ -1933,8 +1953,8 @@ export class ClaudeStreamSession {
       this.update({ ...this.state, fastMode });
     }
 
-    if (outgoing?.kind === 'initialize' && response.ok) {
-      this.observeInitializeResponse();
+    if (outgoing?.kind === 'initialize') {
+      this.observeInitializeResponse(response);
     }
 
     if (this.handshakeDone) {
