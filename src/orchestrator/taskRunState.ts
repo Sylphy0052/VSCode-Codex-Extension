@@ -194,15 +194,35 @@ export interface OrchestratedTask {
   reviewRounds?: number;
   /** 実行中の工程の一時停止（Issue #1629）。一時停止していなければ`undefined`。 */
   pause?: TaskStagePause | undefined;
+  /**
+   * mergeせずに完了にした記録（Issue #1851）。重複・取り下げのように、PRをmergeしないと決めたタスク。
+   * 追加前に保存したrunには無い。
+   */
+  closedWithoutMerge?: TaskClosure | undefined;
   /** ISO8601。 */
   updatedAt: string;
+}
+
+/** mergeせずに完了にした理由の上限。 */
+export const MAX_CLOSE_REASON_LENGTH = 300;
+
+/** mergeせずに完了にした記録（Issue #1851）。 */
+export interface TaskClosure {
+  /** 完了にした理由。外部由来（LLMの出力・人の入力）のテキスト。表示やプロンプトへ入れるときは無害化する。 */
+  reason: string;
+  by: ExternalStageDecider;
+  /** ISO8601。 */
+  at: string;
 }
 
 /** 関門の種類: レビューで直さずに残した指摘がある / 工程が失敗・要対応で止まった。 */
 export type StageGateKind = 'reviewFindings' | 'stageFailed';
 
-/** 関門の決着: 実装へ差し戻す / 指摘を残したまま進める / 同じ工程をやり直す。 */
-export type StageGateChoice = 'sendBack' | 'proceed' | 'retry';
+/**
+ * 関門の決着: 実装へ差し戻す / 指摘を残したまま進める / 同じ工程をやり直す /
+ * mergeせずに完了にする（Issue #1851）。
+ */
+export type StageGateChoice = 'sendBack' | 'proceed' | 'retry' | 'close';
 
 /**
  * 関門の状態。`judging`はReflexの判定中、`awaitingOrchestrator`はオーケストレーターの判断待ち
@@ -1084,6 +1104,48 @@ export function completeMergedTask(run: TaskRun, taskId: string, now: Date): Tas
     }
   }
   return withTask(run, { ...next, attention: 'none', failure: undefined, updatedAt: at });
+}
+
+/**
+ * 工程が止まったタスクを、mergeせずに完了にする（Issue #1851）。重複・取り下げのように、PRを
+ * mergeしないと決めたタスクに使う。実行回（あれば）を閉じ、終わっていない工程を飛ばした扱いにする。
+ * 完了したタスクとして依存先を満たし、runの終了判定にも数える。PR・ブランチ・worktreeには触れない。
+ * 現在の工程が止まっていない・停止処理中・理由が空ならそのまま返す。
+ */
+export function closeTaskWithoutMerge(
+  run: TaskRun,
+  taskId: string,
+  closure: { reason: string; by: ExternalStageDecider },
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  const stage = task === undefined ? undefined : currentStage(task);
+  if (
+    task === undefined ||
+    stage === undefined ||
+    task.stages[stage].status !== 'halted' ||
+    task.attention === 'stopping' ||
+    closure.reason.trim() === ''
+  ) {
+    return run;
+  }
+  const at = now.toISOString();
+  let next = endCurrentAttempt(task, at);
+  for (const s of TASK_STAGES) {
+    const status = next.stages[s].status;
+    if (status !== 'done' && status !== 'skipped') {
+      // 完了時刻を残すのは、再開したrunの終了判定（`isReopenedWithoutProgress`）で進みとして数えるため
+      next = withStage(next, s, { status: 'skipped', pendingDecision: undefined, completedAt: at });
+    }
+  }
+  return withTask(run, {
+    ...next,
+    attention: 'none',
+    failure: undefined,
+    pause: undefined,
+    closedWithoutMerge: { reason: closure.reason, by: closure.by, at },
+    updatedAt: at,
+  });
 }
 
 /** 並列上限を変える。範囲外は例外にする。下げても実行中のセッションは止めない。 */

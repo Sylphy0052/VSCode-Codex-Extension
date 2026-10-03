@@ -94,7 +94,10 @@ export interface TaskRunKanbanGate {
   awaitingOrchestrator: boolean;
   detail: string;
   reflexSummary: string | undefined;
-  /** 画面で選べる決着。失敗の関門は「やり直す」ボタン（`canRetry`）で決着させるため空。 */
+  /**
+   * 画面で選べる決着。失敗の関門は「やり直す」「mergeせずに完了にする」ボタン（`canRetry`）で
+   * 決着させるため空。
+   */
   choices: { choice: StageGateChoice; label: string }[];
 }
 
@@ -121,6 +124,8 @@ export interface TaskRunKanbanCard {
   gate: TaskRunKanbanGate | undefined;
   /** 直近に決着した関門（誰が何を選んだか）。 */
   lastGateDecision: string | undefined;
+  /** mergeせずに完了にした理由（Issue #1851）。無害化して1行にした外部由来のテキスト。 */
+  closedReason: string | undefined;
   /** 実装への差し戻しの回数と上限。差し戻していなければ`undefined`。 */
   reviewRounds: string | undefined;
 }
@@ -349,6 +354,10 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
     ),
     gate: gate === undefined || !isTaskRunActive(run) ? undefined : toKanbanGate(gate),
     lastGateDecision: lastGateDecision(task),
+    closedReason:
+      task.closedWithoutMerge === undefined
+        ? undefined
+        : sanitizeInlineText(task.closedWithoutMerge.reason, FAILURE_MAX_LENGTH),
     reviewRounds:
       (task.reviewRounds ?? 0) > 0
         ? `${String(task.reviewRounds)}/${String(MAX_REVIEW_ROUNDS)}`

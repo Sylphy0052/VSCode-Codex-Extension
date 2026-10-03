@@ -52,9 +52,11 @@ import {
 } from './taskRunScheduler';
 import {
   approveTaskPlan,
+  closeTaskWithoutMerge,
   createTaskRun,
   currentStage,
   finishTaskRun,
+  finishTaskRunIfDone,
   getTask,
   joinSummaries,
   isTaskDone,
@@ -1113,6 +1115,71 @@ export class TaskRunController {
   }
 
   /**
+   * 工程が止まったタスクを、理由付きでmergeせずに完了にする（Kanbanから。Issue #1851）。重複・
+   * 取り下げのようにPRをmergeしないと決めたタスクに使う。失敗の関門が開いていれば、ユーザーの
+   * 「mergeせずに完了にする」判断として決着させる。全タスクが終わればrunも終える。
+   */
+  async closeTask(runId: string, taskId: string, reason: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
+    let rejection: string | undefined;
+    const next = await this.updateRun(runId, (r) => {
+      const task = getTask(r, taskId);
+      const stage = task === undefined ? undefined : currentStage(task);
+      if (r.finishedAt !== undefined) {
+        rejection = 'このrunは終わっている';
+        return r;
+      }
+      if (r.suspendedAt !== undefined) {
+        rejection = 'このrunは中断している。先に再開する';
+        return r;
+      }
+      if (reason.trim() === '') {
+        rejection = '理由が空';
+        return r;
+      }
+      if (task === undefined || stage === undefined || task.stages[stage].status !== 'halted') {
+        rejection = '止まっている工程が無い';
+        return r;
+      }
+      if (task.attention === 'stopping') {
+        rejection = '停止処理中';
+        return r;
+      }
+      const gate = findOpenGate(task);
+      if (gate?.kind === 'reviewFindings') {
+        rejection = 'レビューの関門を先に決着させる（差し戻す、または指摘を残したまま進める）';
+        return r;
+      }
+      const closed =
+        gate === undefined
+          ? closeTaskWithoutMerge(r, taskId, { reason, by: 'user' }, this.now())
+          : resolveStageGate(
+              r,
+              taskId,
+              gate.gateId,
+              { choice: 'close', by: 'user', closeReason: reason },
+              this.now(),
+            );
+      if (closed === r) {
+        rejection = '完了にできなかった';
+        return r;
+      }
+      return finishTaskRunIfDone(closed, this.now());
+    });
+    if (next === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    if (rejection !== undefined) {
+      return { ok: false, message: `${taskId}を完了にできない: ${rejection}` };
+    }
+    this.pumpLater(runId);
+    return { ok: true, message: `${taskId}をmergeせずに完了にした` };
+  }
+
+  /**
    * 再読み込み後の復元。工程セッションとOrchestratorは再読み込みで終わっているため、外部の状態
    * （PR・worktree・Issue）と突き合わせて工程を止め・終え（`taskRunReload.ts`）、終わっていない
    * runは人が「再開」するまで止めておく。再読み込みの間にmergeされたタスクは後片付けまで行う。
@@ -1512,9 +1579,15 @@ export class TaskRunController {
       return { needsUser: { summary: verdict.summary } };
     }
     return {
-      decided: await this.resolveGate(runId, taskId, gateId, choice, 'orchestrator', {
-        summary: verdict.summary,
-      }),
+      decided: await this.resolveGate(
+        runId,
+        taskId,
+        gateId,
+        choice,
+        'orchestrator',
+        { summary: verdict.summary },
+        reason,
+      ),
     };
   }
 
@@ -1523,7 +1596,8 @@ export class TaskRunController {
    * 判定中でも優先する。オーケストレーター（`by: 'orchestrator'`）はオーケストレーターの
    * 判断待ちの関門だけを決着させられる（Issue #1708）。ただし判断をReflexが妥当と判定した
    * （`reflexApproval`がある）ときは、ユーザーの判断待ちの関門も決着させられる（Issue #1787）。
-   * 決着後はスケジューラを回す。
+   * 「mergeせずに完了にする」（`close`）には理由（`closeReason`）が要る（Issue #1851）。
+   * 決着後はスケジューラを回し、全タスクが終わっていればrunを終える。
    */
   async resolveGate(
     runId: string,
@@ -1532,6 +1606,7 @@ export class TaskRunController {
     choice: StageGateChoice,
     by: ExternalStageDecider = 'user',
     reflexApproval?: { summary: string },
+    closeReason?: string,
   ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
@@ -1576,6 +1651,10 @@ export class TaskRunController {
           '実装への差し戻しが上限に達しているため、差し戻せるのはユーザーだけ。指摘を残したまま進めるか、escalate_to_userでユーザーへ回す';
         return r;
       }
+      if (choice === 'close' && (closeReason ?? '').trim() === '') {
+        rejection = '「mergeせずに完了にする」には理由が要る';
+        return r;
+      }
       const resolved = resolveStageGate(
         r,
         taskId,
@@ -1589,14 +1668,16 @@ export class TaskRunController {
                 gate.reflexSummary,
                 `Orchestratorの判断をReflexが承認: ${sanitizeInlineText(reflexApproval.summary, GATE_APPROVAL_SUMMARY_MAX_LENGTH)}`,
               ),
+              closeReason,
             }
-          : { choice, by },
+          : { choice, by, closeReason },
         this.now(),
       );
       if (resolved === r) {
         rejection = 'タスクの状態が関門を開いたときから変わっている';
+        return r;
       }
-      return resolved;
+      return finishTaskRunIfDone(resolved, this.now());
     });
     if (next === undefined) {
       return { ok: false, message: 'runが見つからない' };

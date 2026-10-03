@@ -1,6 +1,7 @@
 import type { RoadmapAskArgs } from './roadmapQuestionMcp';
 import { STAGE_LABELS } from './taskStagePrompts';
 import {
+  closeTaskWithoutMerge,
   currentStage,
   getTask,
   isTaskDone,
@@ -46,11 +47,13 @@ export const GATE_OPTION_SEND_BACK = '実装へ差し戻す';
 export const GATE_OPTION_PROCEED = '指摘を残したまま進める';
 export const GATE_OPTION_RETRY = '同じ工程をやり直す';
 export const GATE_OPTION_ASK_USER = 'ユーザーに判断を上げる';
+/** Reflexへは示さない（取り消せない判断なので自動では選ばせない）。Issue #1851。 */
+export const GATE_OPTION_CLOSE = 'mergeせずに完了にする';
 
 /** 関門の種類ごとに受け付ける決着。 */
 const ALLOWED_CHOICES: Record<StageGateKind, readonly StageGateChoice[]> = {
   reviewFindings: ['sendBack', 'proceed'],
-  stageFailed: ['retry'],
+  stageFailed: ['retry', 'close'],
 };
 
 export function isGateChoiceAllowed(kind: StageGateKind, choice: StageGateChoice): boolean {
@@ -333,6 +336,8 @@ function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
  *   Reflex・オーケストレーター・ユーザーの誰でも選べる（Issue #1771）
  * - `sendBack`は、差し戻しが上限に達した後はユーザーの決着だけ受け付ける（Issue #1771）
  * - `retry`: 止まった工程を未着手へ戻す（`resetStageForRetry`）
+ * - `close`: mergeせずに完了にする（`closeTaskWithoutMerge`。Issue #1851）。理由（`closeReason`）が要り、
+ *   Reflexの決着は受け付けない
  */
 export function resolveStageGate(
   run: TaskRun,
@@ -343,12 +348,19 @@ export function resolveStageGate(
     by: StageDecider;
     reflexSummary?: string;
     reflexApproved?: boolean;
+    closeReason?: string | undefined;
   },
   now: Date,
 ): TaskRun {
   const at = now.toISOString();
   return updateGate(run, taskId, gateId, (task, gate) => {
     if (resolution.by === 'reflex' && gate.status !== 'judging') {
+      return undefined;
+    }
+    if (
+      resolution.choice === 'close' &&
+      (resolution.by === 'reflex' || (resolution.closeReason ?? '').trim() === '')
+    ) {
       return undefined;
     }
     if (
@@ -395,6 +407,18 @@ export function resolveStageGate(
     }
     if (status !== 'halted') {
       return undefined;
+    }
+    if (resolution.choice === 'close' && resolution.by !== 'reflex') {
+      const reason = resolution.closeReason ?? '';
+      return getTask(
+        closeTaskWithoutMerge(
+          withTaskUpdate(run, closed),
+          taskId,
+          { reason, by: resolution.by },
+          now,
+        ),
+        taskId,
+      );
     }
     return getTask(resetStageForRetry(withTaskUpdate(run, closed), taskId, now), taskId);
   });
@@ -508,4 +532,5 @@ export const GATE_CHOICE_LABELS: Record<StageGateChoice, string> = {
   sendBack: GATE_OPTION_SEND_BACK,
   proceed: GATE_OPTION_PROCEED,
   retry: GATE_OPTION_RETRY,
+  close: GATE_OPTION_CLOSE,
 };
