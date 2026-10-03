@@ -122,8 +122,9 @@ function listReadDenyRules(
     });
     proc.stderr.on('data', (chunk: string) => {
       if (stderr.length < MAX_STDERR_LENGTH) {
-        // 1回のchunkが上限を超えても、溜めた結果が上限に収まるように切る
-        stderr = (stderr + chunk).slice(0, MAX_STDERR_LENGTH);
+        // 1回のchunkが上限を超えても、溜めた結果が上限に収まるように切る。`slice`は親文字列
+        // （chunkとの連結結果）を掴んだままにするので、上限分だけをコピーして持つ
+        stderr = Buffer.from((stderr + chunk).slice(0, MAX_STDERR_LENGTH), 'utf8').toString('utf8');
       }
     });
     proc.on('error', (e) => {
@@ -270,8 +271,8 @@ function globToRegExpSource(glob: string): string {
       }
     } else if (c === '?') {
       out += '[^/]';
-    } else if (c === '[' && glob.indexOf(']', i + 2) !== -1) {
-      const end = glob.indexOf(']', i + 2);
+    } else if (c === '[' && findClosingBracket(glob, i) !== -1) {
+      const end = findClosingBracket(glob, i);
       const body = glob.slice(i + 1, end);
       const negated = body.startsWith('!') || body.startsWith('^');
       out += `[${negated ? '^' : ''}${(negated ? body.slice(1) : body).replace(/[\\\]]/g, '\\$&')}]`;
@@ -292,12 +293,26 @@ function globToRegExpSource(glob: string): string {
   return out;
 }
 
-/** `open`位置の`{`に対応する`}`の位置を、入れ子を数えて返す。対応するものが無ければ-1。 */
+/**
+ * `open`位置の`[`を閉じる`]`の位置を返す。`[]]`のように直後の`]`は中身として扱う。無ければ-1。
+ * `{}`の対応探しでも同じ規則で`[...]`を読み飛ばし、`{a,[}]}`の`[`内の`}`で閉じないようにする。
+ */
+function findClosingBracket(glob: string, open: number): number {
+  return glob.indexOf(']', open + 2);
+}
+
+/**
+ * `open`位置の`{`に対応する`}`の位置を、入れ子を数えて返す。対応するものが無ければ-1。
+ * `\`はエスケープとして扱わない。`globToRegExpSource`が`\`を文字そのものとして照合するため、
+ * ここだけ`\}`を読み飛ばすと両者の解釈がずれる。
+ */
 function findClosingBrace(glob: string, open: number): number {
   let depth = 0;
   for (let i = open; i < glob.length; i++) {
     const c = glob.charAt(i);
-    if (c === '{') {
+    if (c === '[' && findClosingBracket(glob, i) !== -1) {
+      i = findClosingBracket(glob, i);
+    } else if (c === '{') {
       depth++;
     } else if (c === '}' && --depth === 0) {
       return i;
@@ -306,14 +321,16 @@ function findClosingBrace(glob: string, open: number): number {
   return -1;
 }
 
-/** 入れ子の`{}`の中にある`,`では分けず、最上位の`,`だけで分ける。 */
+/** 入れ子の`{}`と`[...]`の中にある`,`では分けず、最上位の`,`だけで分ける。 */
 function splitTopLevelCommas(text: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text.charAt(i);
-    if (c === '{') {
+    if (c === '[' && findClosingBracket(text, i) !== -1) {
+      i = findClosingBracket(text, i);
+    } else if (c === '{') {
       depth++;
     } else if (c === '}') {
       depth--;
@@ -432,7 +449,17 @@ export async function inspectReadOnlyCwd(
     return { ok: false, reason: `Readのdenyルールを確かめられません: ${listed.detail}` };
   }
   const home = homedir();
-  const patterns = listed.rules.flatMap((rule) => compileReadDenyRule(rule, cwd, home) ?? []);
+  let patterns: ReadDenyPattern[];
+  try {
+    patterns = listed.rules.flatMap((rule) => compileReadDenyRule(rule, cwd, home) ?? []);
+  } catch (e) {
+    // ルールはユーザー設定由来。入れ子の深い`{`の再帰でRangeErrorになる、範囲の逆転した
+    // `[z-a]`で正規表現が作れない、などのときは照合できないので付けない側に倒す
+    return {
+      ok: false,
+      reason: `Readのdenyルールを解釈できません: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
   if (patterns.length === 0) {
     return { ok: true };
   }

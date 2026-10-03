@@ -205,6 +205,21 @@ describe('compileReadDenyRule', () => {
       expect(matches('Read(./{a,{b,c})', `${CWD}/b`)).toBe(false);
     });
 
+    it('{}の対応と,の区切りは[...]の中の}と,を数えない', () => {
+      expect(matches('Read(./{a,[}]}/x)', `${CWD}/a/x`)).toBe(true);
+      expect(matches('Read(./{a,[}]}/x)', `${CWD}/}/x`)).toBe(true);
+      expect(matches('Read(./{a,[}]}/x)', `${CWD}/[/x`)).toBe(false);
+      expect(matches('Read(./{a,[,b]c}/x)', `${CWD}/,c/x`)).toBe(true);
+      expect(matches('Read(./{a,[,b]c}/x)', `${CWD}/bc/x`)).toBe(true);
+      expect(matches('Read(./{a,[,b]c}/x)', `${CWD}/[/x`)).toBe(false);
+    });
+
+    it('\\はエスケープとして扱わず、文字そのものとして照合する', () => {
+      expect(matches('Read(./{a\\,b}/x)', `${CWD}/a\\/x`)).toBe(true);
+      expect(matches('Read(./{a\\,b}/x)', `${CWD}/b/x`)).toBe(true);
+      expect(matches('Read(./{a\\,b}/x)', `${CWD}/a,b/x`)).toBe(false);
+    });
+
     it('閉じられない{は文字そのものとして扱う', () => {
       expect(matches('Read(./a{b)', `${CWD}/a{b`)).toBe(true);
       expect(matches('Read(./a{b)', `${CWD}/ab`)).toBe(false);
@@ -588,6 +603,22 @@ describe('一時ディレクトリを使うテスト', () => {
       const result = inspectReadOnlyCwd('claude', cwd, noAbort());
       proc.stdout.emit('data', response([deny('Read()')]));
       expect(await result).toEqual({ ok: true });
+    });
+
+    it.each([
+      ['入れ子が深すぎて再帰が溢れる', `Read(./${'{'.repeat(20_000)}a${'}'.repeat(20_000)})`],
+      ['文字クラスの範囲が逆転している', 'Read(./[z-a])'],
+    ])('Readルールの解釈で例外が出たら（%s）、理由を付けて拒否する', async (_, rule) => {
+      const cwd = await makeTmp();
+      const proc = fakeProc();
+      useProc(proc);
+      const result = inspectReadOnlyCwd('claude', cwd, noAbort());
+      proc.stdout.emit('data', response([deny(rule)]));
+      const inspection = await result;
+      expect(inspection.ok).toBe(false);
+      expect(inspection.ok === false && inspection.reason).toMatch(
+        /^Readのdenyルールを解釈できません: /,
+      );
     });
 
     it('deny対象のディレクトリが実在すると、理由にパスとルールを含めて拒否する', async () => {
