@@ -43,8 +43,8 @@ export const MAX_STDERR_LENGTH = 1200;
 /** globの`{}`の入れ子の上限。超えたルールは解釈できないものとして扱う。 */
 export const MAX_GLOB_BRACE_DEPTH = 32;
 
-/** 解釈できなかったルールを理由に載せるときの上限（文字数）。 */
-const MAX_REPORTED_RULE_LENGTH = 80;
+/** 解釈できなかったルールと例外の文を理由に載せるときの、それぞれの上限（文字数）。 */
+const MAX_REPORTED_LENGTH = 80;
 
 const LIST_RULES_REQUEST_ID = 'list_permission_rules';
 
@@ -268,6 +268,7 @@ function globToRegExpSource(glob: string, depth = 0): string {
   let out = '';
   for (let i = 0; i < glob.length; i++) {
     const c = glob.charAt(i);
+    const bracketEnd = c === '[' ? findClosingBracket(glob, i) : -1;
     if (c === '*') {
       if (glob.charAt(i + 1) === '*') {
         i++;
@@ -282,12 +283,11 @@ function globToRegExpSource(glob: string, depth = 0): string {
       }
     } else if (c === '?') {
       out += '[^/]';
-    } else if (c === '[' && findClosingBracket(glob, i) !== -1) {
-      const end = findClosingBracket(glob, i);
-      const body = glob.slice(i + 1, end);
+    } else if (bracketEnd !== -1) {
+      const body = glob.slice(i + 1, bracketEnd);
       const negated = body.startsWith('!') || body.startsWith('^');
       out += `[${negated ? '^' : ''}${(negated ? body.slice(1) : body).replace(/[\\\]]/g, '\\$&')}]`;
-      i = end;
+      i = bracketEnd;
     } else if (c === '{' && glob.indexOf('}', i) !== -1) {
       if (depth >= MAX_GLOB_BRACE_DEPTH) {
         throw new Error(`{}の入れ子が${String(MAX_GLOB_BRACE_DEPTH)}段を超えています`);
@@ -324,8 +324,9 @@ function findClosingBrace(glob: string, open: number): number {
   let depth = 0;
   for (let i = open; i < glob.length; i++) {
     const c = glob.charAt(i);
-    if (c === '[' && findClosingBracket(glob, i) !== -1) {
-      i = findClosingBracket(glob, i);
+    const bracketEnd = c === '[' ? findClosingBracket(glob, i) : -1;
+    if (bracketEnd !== -1) {
+      i = bracketEnd;
     } else if (c === '{') {
       depth++;
     } else if (c === '}' && --depth === 0) {
@@ -342,8 +343,9 @@ function splitTopLevelCommas(text: string): string[] {
   let start = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text.charAt(i);
-    if (c === '[' && findClosingBracket(text, i) !== -1) {
-      i = findClosingBracket(text, i);
+    const bracketEnd = c === '[' ? findClosingBracket(text, i) : -1;
+    if (bracketEnd !== -1) {
+      i = bracketEnd;
     } else if (c === '{') {
       depth++;
     } else if (c === '}') {
@@ -357,10 +359,8 @@ function splitTopLevelCommas(text: string): string[] {
   return parts;
 }
 
-function clipRule(rule: string): string {
-  return rule.length > MAX_REPORTED_RULE_LENGTH
-    ? `${rule.slice(0, MAX_REPORTED_RULE_LENGTH)}…`
-    : rule;
+function clip(text: string): string {
+  return text.length > MAX_REPORTED_LENGTH ? `${text.slice(0, MAX_REPORTED_LENGTH)}…` : text;
 }
 
 function escapeRegExp(text: string): string {
@@ -481,7 +481,7 @@ export async function inspectReadOnlyCwd(
       // 作れない、などのときは照合できないので付けない側に倒す。ルールは長くなりうるので先頭だけ出す
       return {
         ok: false,
-        reason: `Readのdenyルール${clipRule(rule)}を解釈できません: ${e instanceof Error ? e.message : String(e)}`,
+        reason: `Readのdenyルール${clip(rule)}を解釈できません: ${clip(e instanceof Error ? e.message : String(e))}`,
       };
     }
   }

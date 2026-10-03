@@ -653,6 +653,22 @@ describe('一時ディレクトリを使うテスト', () => {
       },
     );
 
+    it('長いルールの例外の文が正規表現の全文を含んでも、理由は上限までで切る', async () => {
+      const cwd = await makeTmp();
+      const proc = fakeProc();
+      useProc(proc);
+      const rule = `Read(./${'a'.repeat(1_000)}[z-a])`;
+      const result = inspectReadOnlyCwd('claude', cwd, noAbort());
+      proc.stdout.emit('data', response([deny(rule)]));
+      const inspection = await result;
+      expect(inspection.ok).toBe(false);
+      const reason = inspection.ok ? '' : inspection.reason;
+      expect(reason).toContain(`Readのdenyルール${rule.slice(0, 80)}…を解釈できません: `);
+      expect(reason.length).toBeLessThanOrEqual(
+        'Readのdenyルール…を解釈できません: …'.length + 160,
+      );
+    });
+
     it('deny対象のディレクトリが実在すると、理由にパスとルールを含めて拒否する', async () => {
       const cwd = await makeTmp();
       await fs.mkdir(path.join(cwd, 'secrets'));
