@@ -543,7 +543,15 @@ export class ChatSession {
     }
 
     this.update({ ...this.state, busy: true, turnFailed: false, turnFailureKind: undefined });
-    await this.connection.request('turn/start', params);
+    try {
+      await this.connection.request('turn/start', params);
+    } catch (e) {
+      // 送信に失敗したらターンは始まっていない。`busy`を戻さないと、画面はスピナーと停止ボタンを
+      // 出したまま固まり、使用量上限の自動再開の再試行も`busy`を見て送られずに終わる
+      // （`startReview`の失敗経路と同じ。issue #1873）
+      this.update({ ...this.state, busy: false });
+      throw e;
+    }
   }
 
   /**

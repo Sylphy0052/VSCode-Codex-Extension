@@ -192,6 +192,8 @@ describe('chatView.ts の補完カバレッジ', () => {
   });
 
   afterEach(() => {
+    // 途中のexpectが落ちてもspyを持ち越さない（__mock.reset()はspyを戻さない）
+    vi.restoreAllMocks();
     vi.useRealTimers();
     for (const dir of tempDirs.splice(0)) {
       nodeFs.rmSync(dir, { recursive: true, force: true });
@@ -480,9 +482,9 @@ describe('chatView.ts の補完カバレッジ', () => {
     it('autoReply は ON で状態へ反映し、OFF で止める', async () => {
       const chat = await openChat();
       await chat.post({ type: 'autoReply', on: true });
-      expect(stateOf(chat).autoReply).toBeTruthy();
+      expect(stateOf(chat).autoReply).toBe(true);
       await chat.post({ type: 'autoReply', on: false });
-      expect(stateOf(chat).autoReply).toBeFalsy();
+      expect(stateOf(chat).autoReply).toBe(false);
     });
 
     it.each([
@@ -764,7 +766,6 @@ describe('chatView.ts の補完カバレッジ', () => {
       spy.mockReturnValue(undefined);
       await chat.post({ type: 'insertCode', code: 'const a = 1;' });
       expect(__mock.messages.infos).toContain('挿入先のエディタが開かれていません');
-      spy.mockRestore();
     });
 
     it('openCodeFile は保存前の文書としてコードを開く', async () => {
@@ -1061,8 +1062,7 @@ describe('chatView.ts の補完カバレッジ', () => {
         },
       });
       const usage = await reading;
-      expect(usage).toBeDefined();
-      expect(JSON.stringify(usage)).toContain('42');
+      expect(usage).toMatchObject({ usedPercent: 42, windowMinutes: 300 });
     });
 
     it('readUsage は取得に失敗すると警告を残して undefined を返す', async () => {
@@ -1637,17 +1637,30 @@ describe('chatView.ts の補完カバレッジ', () => {
       expect(typeof status['scheduledAt']).toBe('number');
     });
 
+    it('継続指示の送信に失敗しても、1分後の再試行で継続指示を送り直す（issue #1873）', async () => {
+      const chat = await limitedChat();
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+      chat.connection.rejectFirst('turn/start', 'resume failed');
+      await tick(20);
+      expect(requestsOf(chat, 'turn/start')).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(61_000);
+      const starts = requestsOf(chat, 'turn/start');
+      expect(starts).toHaveLength(2);
+      expect(JSON.stringify(starts[1]?.params)).toContain('前回の作業を続けて');
+    });
+
     it('自動返信モードは失敗でターンが終わると止まり、理由を会話へ残す', async () => {
       const chat = await openChat();
       await chat.post({ type: 'autoReply', on: true });
-      expect(stateOf(chat).autoReply).toBeTruthy();
+      expect(stateOf(chat).autoReply).toBe(true);
       chat.connection.notify('turn/started', { threadId: 'thread-A', turn: { id: 'turn-1' } });
       chat.connection.notify('turn/completed', {
         threadId: 'thread-A',
         turn: { id: 'turn-1', status: 'failed', error: { message: 'boom' } },
       });
       await flushStatePosts();
-      expect(stateOf(chat).autoReply).toBeFalsy();
+      expect(stateOf(chat).autoReply).toBe(false);
       expect(JSON.stringify(stateOf(chat).items)).toContain('autoReplyStop:');
     });
 
