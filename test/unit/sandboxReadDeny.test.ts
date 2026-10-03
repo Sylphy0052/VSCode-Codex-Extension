@@ -9,6 +9,7 @@ import {
   findDeniedDirectory,
   inspectReadOnlyCwd,
   LIST_RULES_TIMEOUT_MS,
+  MAX_GLOB_BRACE_DEPTH,
   MAX_SCANNED_DIRECTORIES,
   MAX_STDERR_LENGTH,
   MAX_STDOUT_LINE_LENGTH,
@@ -35,6 +36,9 @@ const matches = (rule: string, target: string, cwd = CWD, home = HOME): boolean 
   }
   return compiled.pattern.test(target);
 };
+
+/** `{}`を`depth`段入れ子にした`Read(./{{...a...}})`。 */
+const braces = (depth: number): string => `Read(./${'{'.repeat(depth)}a${'}'.repeat(depth)})`;
 
 describe('compileReadDenyRule', () => {
   it.each(['Write(./secrets/**)', 'Bash(ls)', 'Read(', 'Read./a)', 'secrets'])(
@@ -212,6 +216,25 @@ describe('compileReadDenyRule', () => {
       expect(matches('Read(./{a,[,b]c}/x)', `${CWD}/,c/x`)).toBe(true);
       expect(matches('Read(./{a,[,b]c}/x)', `${CWD}/bc/x`)).toBe(true);
       expect(matches('Read(./{a,[,b]c}/x)', `${CWD}/[/x`)).toBe(false);
+      // 直後の]は中身、否定形の中の}も読み飛ばす
+      expect(matches('Read(./{a,[]}]}/x)', `${CWD}/}/x`)).toBe(true);
+      expect(matches('Read(./{a,[!}]}/x)', `${CWD}/b/x`)).toBe(true);
+      expect(matches('Read(./{a,[!}]}/x)', `${CWD}/}/x`)).toBe(false);
+      // 入れ子の{}の中の[,]でも分けない
+      expect(matches('Read(./{a,{b,[,]}}/x)', `${CWD}/,/x`)).toBe(true);
+      expect(matches('Read(./{a,{b,[,]}}/x)', `${CWD}/[/x`)).toBe(false);
+    });
+
+    it('{}の中の閉じられない[は文字そのものとして扱う', () => {
+      expect(matches('Read(./{a,[b}/x)', `${CWD}/[b/x`)).toBe(true);
+      expect(matches('Read(./{a,[b}/x)', `${CWD}/a/x`)).toBe(true);
+    });
+
+    it(`{}の入れ子は${MAX_GLOB_BRACE_DEPTH}段まで展開し、超えたら例外にする`, () => {
+      expect(matches(braces(MAX_GLOB_BRACE_DEPTH), `${CWD}/a`)).toBe(true);
+      expect(() => compileReadDenyRule(braces(MAX_GLOB_BRACE_DEPTH + 1), CWD, HOME)).toThrow(
+        `{}の入れ子が${MAX_GLOB_BRACE_DEPTH}段を超えています`,
+      );
     });
 
     it('\\はエスケープとして扱わず、文字そのものとして照合する', () => {
@@ -606,20 +629,29 @@ describe('一時ディレクトリを使うテスト', () => {
     });
 
     it.each([
-      ['入れ子が深すぎて再帰が溢れる', `Read(./${'{'.repeat(20_000)}a${'}'.repeat(20_000)})`],
-      ['文字クラスの範囲が逆転している', 'Read(./[z-a])'],
-    ])('Readルールの解釈で例外が出たら（%s）、理由を付けて拒否する', async (_, rule) => {
-      const cwd = await makeTmp();
-      const proc = fakeProc();
-      useProc(proc);
-      const result = inspectReadOnlyCwd('claude', cwd, noAbort());
-      proc.stdout.emit('data', response([deny(rule)]));
-      const inspection = await result;
-      expect(inspection.ok).toBe(false);
-      expect(inspection.ok === false && inspection.reason).toMatch(
-        /^Readのdenyルールを解釈できません: /,
-      );
-    });
+      [
+        '{}の入れ子が上限を超え、ルールが長い',
+        braces(MAX_GLOB_BRACE_DEPTH + 20),
+        `Readのdenyルール${braces(MAX_GLOB_BRACE_DEPTH + 20).slice(0, 80)}…を解釈できません: {}の入れ子が${MAX_GLOB_BRACE_DEPTH}段を超えています`,
+      ],
+      [
+        '文字クラスの範囲が逆転している',
+        'Read(./[z-a])',
+        'ReadのdenyルールRead(./[z-a])を解釈できません: ',
+      ],
+    ])(
+      'Readルールの解釈で例外が出たら（%s）、ルールの先頭を理由に含めて拒否する',
+      async (_, rule, expected) => {
+        const cwd = await makeTmp();
+        const proc = fakeProc();
+        useProc(proc);
+        const result = inspectReadOnlyCwd('claude', cwd, noAbort());
+        proc.stdout.emit('data', response([deny('Read(./ok)'), deny(rule)]));
+        const inspection = await result;
+        expect(inspection.ok).toBe(false);
+        expect(inspection.ok ? '' : inspection.reason).toContain(expected);
+      },
+    );
 
     it('deny対象のディレクトリが実在すると、理由にパスとルールを含めて拒否する', async () => {
       const cwd = await makeTmp();
