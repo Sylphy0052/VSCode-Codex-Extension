@@ -37,6 +37,11 @@ function createStartedSession(): {
   return { session, proc };
 }
 
+// `ensureProcess()`（Issue #1835）を待ってから書き込むため、応答待ちが積まれるまで待つ
+async function flushPendingWrites(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function canUseToolLine(requestId: string): string {
   return `${JSON.stringify({
     type: 'control_request',
@@ -50,6 +55,7 @@ describe('ClaudeStreamSession: exit/errorハンドラからの応答待ち解放
     const { session, proc } = createStartedSession();
 
     const pending = session.previewRewindFiles('msg-1');
+    await flushPendingWrites();
     proc.emit('exit', 1);
 
     await expect(pending).resolves.toEqual({
@@ -65,6 +71,7 @@ describe('ClaudeStreamSession: exit/errorハンドラからの応答待ち解放
     const { session, proc } = createStartedSession();
 
     const pending = session.checkMcpStatus();
+    await flushPendingWrites();
     proc.emit('exit', 1);
 
     await expect(pending).resolves.toBeUndefined();
@@ -96,6 +103,7 @@ describe('ClaudeStreamSession: exit/errorハンドラからの応答待ち解放
     const { session, proc } = createStartedSession();
 
     const pending = session.previewRewindFiles('msg-1');
+    await flushPendingWrites();
     proc.emit('error', new Error('spawn failed'));
 
     await expect(pending).resolves.toMatchObject({ ok: false });
@@ -125,6 +133,7 @@ describe('ClaudeStreamSession: exit/errorハンドラからの応答待ち解放
     session.start(startOptions);
 
     const pending = session.previewRewindFiles('msg-1');
+    await flushPendingWrites();
 
     session.start({ ...startOptions, sessionId: '22222222-2222-2222-2222-222222222222' });
 

@@ -85,6 +85,11 @@ function rewindRequestsWritten(written: string[]): Array<{ request_id: string; r
     .map((event) => ({ request_id: event.request_id, request: event.request }));
 }
 
+// `ensureProcess()`（Issue #1835）を待ってから書き込むため、書き込みを読む前に待つ
+async function flushPendingWrites(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function controlResponseLine(requestId: string, response: unknown): string {
   return `${JSON.stringify({
     type: 'control_response',
@@ -114,10 +119,11 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     expect(rewindRequestsWritten(written)).toEqual([]);
   });
 
-  it('forkしたセッションへは interrupt_if_running:true を付けて送る', () => {
+  it('forkしたセッションへは interrupt_if_running:true を付けて送る', async () => {
     const { session, written } = startSession('fork');
 
     void session.rewindConversationToTurn(['u1', 'u2'], 'u1');
+    await flushPendingWrites();
 
     const requests = rewindRequestsWritten(written);
     expect(requests).toHaveLength(1);
@@ -132,6 +138,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     const { session, written } = startSession('fork');
 
     void session.rewindConversationToTurn(['u1', 'u2', 'u3'], 'u1');
+    await flushPendingWrites();
 
     // 最初はu3（最新）だけを送り、u2・u1の要求はまだ書き込まれない
     expect(rewindRequestsWritten(written)).toHaveLength(1);
@@ -150,8 +157,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     );
     // forkFromTurn（forkFromTurn.ts）は応答をawaitしてから次を送るため、次の書き込みは
     // マイクロタスクを1つ挟んだ後に起きる。receive()の戻り値を待つだけでは足りない
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushPendingWrites();
 
     // 応答が届いて初めてu2の要求が書き込まれる
     expect(rewindRequestsWritten(written)).toHaveLength(2);
@@ -164,6 +170,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     const { session, written } = startSession('fork');
 
     const promise = session.rewindConversationToTurn(['u1', 'u2', 'u3'], 'u1');
+    await flushPendingWrites();
     const firstId = rewindRequestsWritten(written)[0]!.request_id;
 
     session.receive(
@@ -191,6 +198,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     const { session, written } = startSession('fork');
 
     const promise = session.rewindConversationToTurn(['u1', 'u2'], 'u1');
+    await flushPendingWrites();
     const firstId = rewindRequestsWritten(written)[0]!.request_id;
     session.receive(
       controlResponseLine(firstId, {
@@ -200,8 +208,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
         precedingAssistantUuid: 'a-1',
       }),
     );
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushPendingWrites();
 
     const secondId = rewindRequestsWritten(written)[1]!.request_id;
     session.receive(
@@ -225,6 +232,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
     const { session, written } = startSession('fork');
 
     const promise = session.rewindConversationToTurn(['u1'], 'u1');
+    await flushPendingWrites();
     const requestId = rewindRequestsWritten(written)[0]!.request_id;
 
     // control_response自体のsubtypeは"success"（=ControlResponse.ok:trueになる）が、
@@ -250,6 +258,7 @@ describe('ClaudeStreamSession の会話フォーク（rewind_conversation、issu
   it('プロセスが終了すると応答待ちが解放される（issue #355と同じ流儀）', async () => {
     const { session, written } = startSession('fork');
     const promise = session.rewindConversationToTurn(['u1', 'u2'], 'u1');
+    await flushPendingWrites();
     expect(rewindRequestsWritten(written)).toHaveLength(1);
 
     (session as unknown as { proc: unknown }).proc = undefined;

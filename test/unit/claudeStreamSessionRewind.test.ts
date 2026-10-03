@@ -40,6 +40,11 @@ function createSessionWithFakeProc(): {
   return { session, written };
 }
 
+// `ensureProcess()`（Issue #1835）を待ってから書き込むため、書き込みを読む前に待つ
+async function flushPendingWrites(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function controlResponseLine(requestId: string, response: unknown): string {
   return `${JSON.stringify({
     type: 'control_response',
@@ -55,9 +60,10 @@ function controlErrorLine(requestId: string, error: string): string {
 }
 
 describe('ClaudeStreamSession のファイル巻き戻し（rewind_files）', () => {
-  it('previewRewindFiles は user_message_id と dry_run:true を書き込む', () => {
+  it('previewRewindFiles は user_message_id と dry_run:true を書き込む', async () => {
     const { session, written } = createSessionWithFakeProc();
     void session.previewRewindFiles('msg-1');
+    await flushPendingWrites();
 
     expect(written).toHaveLength(1);
     expect(JSON.parse(written[0]!.trim())).toEqual({
@@ -67,9 +73,10 @@ describe('ClaudeStreamSession のファイル巻き戻し（rewind_files）', ()
     });
   });
 
-  it('applyRewindFiles は dry_run:false で書き込む', () => {
+  it('applyRewindFiles は dry_run:false で書き込む', async () => {
     const { session, written } = createSessionWithFakeProc();
     void session.applyRewindFiles('msg-1');
+    await flushPendingWrites();
 
     expect(JSON.parse(written[0]!.trim())).toMatchObject({
       request: { subtype: 'rewind_files', user_message_id: 'msg-1', dry_run: false },
@@ -79,6 +86,7 @@ describe('ClaudeStreamSession のファイル巻き戻し（rewind_files）', ()
   it('応答が届くとプレビューの結果で解決する', async () => {
     const { session, written } = createSessionWithFakeProc();
     const promise = session.previewRewindFiles('msg-1');
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(
@@ -102,6 +110,7 @@ describe('ClaudeStreamSession のファイル巻き戻し（rewind_files）', ()
   it('チェックポイントが無い場合はエラーとして解決する', async () => {
     const { session, written } = createSessionWithFakeProc();
     const promise = session.applyRewindFiles('msg-1');
+    await flushPendingWrites();
     const requestId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
 
     session.receive(controlErrorLine(requestId, 'No file checkpoint found for this message.'));
@@ -129,6 +138,7 @@ describe('ClaudeStreamSession のファイル巻き戻し（rewind_files）', ()
     const { session, written } = createSessionWithFakeProc();
     const first = session.previewRewindFiles('msg-1');
     const second = session.previewRewindFiles('msg-2');
+    await flushPendingWrites();
     expect(written).toHaveLength(2);
 
     const firstId = (JSON.parse(written[0]!.trim()) as { request_id: string }).request_id;
