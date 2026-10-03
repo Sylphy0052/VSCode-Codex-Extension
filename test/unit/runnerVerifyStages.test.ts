@@ -4,7 +4,11 @@ import {
   withTemporaryRevert,
   type TemporaryRevertResult,
 } from '../../src/orchestrator/runnerRevert';
-import { runVerifyStages } from '../../src/orchestrator/runnerVerifyStages';
+import {
+  MEASUREMENT_OUTPUT_MAX_CHARS,
+  REVERTED_PATHS_LIMIT,
+  runVerifyStages,
+} from '../../src/orchestrator/runnerVerifyStages';
 import type {
   ExecuteVerifyCommandsResult,
   ExecutedVerifyCommand,
@@ -26,11 +30,6 @@ vi.mock('node:os', async (importOriginal) => ({
 }));
 
 const mockedRevert = vi.mocked(withTemporaryRevert);
-
-/** src側が失敗メッセージに載せる、戻したファイルの件数の上限と同じ値 */
-const REVERTED_PATHS_LIMIT = 20;
-/** src側が測定結果へ載せる、出力の末尾の文字数の上限と同じ値（`MEASUREMENT_OUTPUT_MAX_CHARS`） */
-const MEASUREMENT_OUTPUT_LIMIT = 1_000;
 
 type Verify = NonNullable<WorkflowTask['verify']>;
 
@@ -492,12 +491,12 @@ describe('runVerifyStages', () => {
     });
 
     it('出力は末尾の上限の文字数だけに切る', async () => {
-      const tail = 't'.repeat(MEASUREMENT_OUTPUT_LIMIT);
+      const tail = 't'.repeat(MEASUREMENT_OUTPUT_MAX_CHARS);
       const text = await measure(
         [
           executed('npm test', {
             exitCode: 1,
-            output: `${'h'.repeat(3 * MEASUREMENT_OUTPUT_LIMIT)}${tail}`,
+            output: `${'h'.repeat(3 * MEASUREMENT_OUTPUT_MAX_CHARS)}${tail}`,
           }),
         ],
         [executed('npm test', { exitCode: 0 })],
