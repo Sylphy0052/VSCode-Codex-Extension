@@ -32,6 +32,16 @@ import {
 } from '../../src/view/claudeChatView';
 import { __mock, ViewColumn, window as fakeWindow, type FakeWebviewPanel } from '../mocks/vscode';
 
+// ターン完了のたびに`refreshUsage()`が実CLI (`claude --print /usage`) を起動しないようにする。
+// managerごとに使い捨ての`globalStorageDir`を渡すため、実物では間隔制御もロックも効かない。
+vi.mock('../../src/claude/usageProbe', () => ({
+  ClaudeUsageProbe: class {
+    read(): Promise<undefined> {
+      return Promise.resolve(undefined);
+    }
+  },
+}));
+
 const fakeLogger: Logger = {
   info: () => undefined,
   warn: () => undefined,
