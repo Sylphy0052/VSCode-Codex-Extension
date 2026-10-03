@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
@@ -27,6 +27,9 @@ const CLAIM_FILE_NAME = 'claude-usage-probe.lock';
 
 /** この時間を過ぎた排他ファイルは、保持したまま落ちたものとして奪う。 */
 const CLAIM_STALE_MS = TIMEOUT_MS * 2;
+
+/** 期限切れロックの奪取印のファイル名の接尾辞。続けて奪う対象の世代（mtime）を付ける。 */
+const TAKEOVER_SUFFIX = '.takeover-';
 
 /** ウィンドウ間で共有する直近の取得結果のファイル名（`sharedDir`の直下）。 */
 const SHARED_FILE_NAME = 'claude-usage-probe.json';
@@ -137,7 +140,25 @@ export class ClaudeUsageProbe {
       }
     }
     try {
-      if (Date.now() - (await stat(lockPath)).mtimeMs <= CLAIM_STALE_MS) {
+      const staleMtimeMs = (await stat(lockPath)).mtimeMs;
+      if (Date.now() - staleMtimeMs <= CLAIM_STALE_MS) {
+        return false;
+      }
+      // 「期限切れを見て、消して、作り直す」を複数が同時にやると、後から消した者が先に作り直した
+      // 者の新しいロックを消してしまい、両者が取得する。そこで期限切れロックの世代（mtime）ごとの
+      // 奪取印を`wx`で作り、作れた1者だけが消して作り直す。`wx`の排他作成はNTFS・NFSv3以降でも
+      // 原子的で、`rename`や`link`より環境差が少ない。印は残し、同じ世代を遅れて見た者を弾き続ける。
+      try {
+        await writeFile(`${lockPath}${TAKEOVER_SUFFIX}${staleMtimeMs}`, String(now), {
+          encoding: 'utf8',
+          flag: 'wx',
+        });
+      } catch {
+        // 別のウィンドウが奪取中、または奪取済み。今回は取得しない
+        return false;
+      }
+      // 印を得てから消す前に、持ち主が解放して別のウィンドウが新しく作った可能性を確かめる
+      if ((await stat(lockPath)).mtimeMs !== staleMtimeMs) {
         return false;
       }
       await unlink(lockPath);
@@ -146,6 +167,26 @@ export class ClaudeUsageProbe {
     } catch {
       // 奪い合いに負けた、または消えた。今回は取得しない
       return false;
+    }
+  }
+
+  /** 古い奪取印を片付ける。直近のものは、遅れて同じ世代を見たウィンドウを弾くため残す。 */
+  private async removeOldTakeoverMarks(): Promise<void> {
+    if (this.sharedDir === undefined) {
+      return;
+    }
+    try {
+      for (const name of await readdir(this.sharedDir)) {
+        if (!name.startsWith(`${CLAIM_FILE_NAME}${TAKEOVER_SUFFIX}`)) {
+          continue;
+        }
+        const markPath = path.join(this.sharedDir, name);
+        if (Date.now() - (await stat(markPath)).mtimeMs > CLAIM_STALE_MS) {
+          await unlink(markPath);
+        }
+      }
+    } catch {
+      // 片付けは次回に回せる
     }
   }
 
@@ -158,6 +199,7 @@ export class ClaudeUsageProbe {
     } catch {
       // 既に無ければよい
     }
+    await this.removeOldTakeoverMarks();
   }
 
   private async readShared(): Promise<SharedUsageRecord | undefined> {
