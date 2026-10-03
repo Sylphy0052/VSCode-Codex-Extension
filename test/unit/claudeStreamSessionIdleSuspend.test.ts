@@ -285,29 +285,59 @@ describe('ClaudeStreamSession: 使っていないCLIの休止と再開（Issue #
       });
     });
 
-    it('発言の無い再開でinitializeが失敗応答なら、待たせ続けず再開の失敗にする', async () => {
-      const { session, procs, outcomes } = createSession();
-      await suspendSession(session, procs[0]!);
-      const answer = session.askSideQuestion('これは？', []);
-      await flush();
-      procs[1]!.emitStdout(
+    function respondError(proc: FakeChildProcess, requestId: string, error: string): void {
+      proc.emitStdout(
         JSON.stringify({
           type: 'control_response',
-          response: {
-            subtype: 'error',
-            request_id: requestIdOf(procs[1]!, 'initialize'),
-            error: '初期化できません',
-          },
+          response: { subtype: 'error', request_id: requestId, error },
         }),
       );
-      await expect(answer).resolves.toMatchObject({
-        ok: false,
-        error: { message: '休止していた会話を再開できていません' },
-      });
+    }
+
+    it('発言の無い再開でinitializeが失敗応答でも、CLIは動いているので再開を確定する', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      // 通常の起動と同じく、承認を受けられないだけで会話は続く
+      respondError(procs[1]!, requestIdOf(procs[1]!, 'initialize'), '初期化できません');
+      await flush();
+      expect(session.getState().processSuspension).toBeUndefined();
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'mcp_status'), { mcpServers: [] });
+      await expect(status).resolves.toHaveLength(0);
+      expect(outcomes).toHaveLength(0);
+      expect(procs[1]!.kill).not.toHaveBeenCalled();
+    });
+
+    it('再開の最中に発言が来たら、initializeの成功応答では確定せずinitを待つ', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      const status = session.checkMcpStatus();
+      await flush();
+      session.send('続き');
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'initialize'), {});
+      await flush();
+      expect(session.getState().processSuspension).toBe('resuming');
+      procs[1]!.emitStdout(initEvent([]));
+      await flush();
+      expect(session.getState().processSuspension).toBeUndefined();
+      expect(outcomes).toEqual([{ kind: 'resumed', mcpServers: [] }]);
+      respondOk(procs[1]!, requestIdOf(procs[1]!, 'mcp_status'), { mcpServers: [] });
+      await expect(status).resolves.toHaveLength(0);
+    });
+
+    it('再開の最中に発言が来た後のinitialize失敗は確定せず、終了したら発言を添えて失敗を知らせる', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      void session.checkMcpStatus();
+      await flush();
+      session.send('続き');
+      respondError(procs[1]!, requestIdOf(procs[1]!, 'initialize'), '初期化できません');
+      await flush();
+      expect(session.getState().processSuspension).toBe('resuming');
+      procs[1]!.emitExit(1);
       expect(session.getState().processSuspension).toBe('resumeFailed');
-      expect(outcomes).toEqual([
-        { kind: 'failed', reason: '初期化できません', text: '', attachments: [] },
-      ]);
+      expect(outcomes).toEqual([expect.objectContaining({ kind: 'failed', text: '続き' })]);
     });
 
     it('再開の最中にdisposeしたら、待っている操作が戻り起動していない旨で失敗する', async () => {

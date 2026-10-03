@@ -393,6 +393,9 @@ export class ClaudeStreamSession {
     this.isForkSession = options.target.kind === 'fork';
     this.lifecycle = 'running';
     this.relaunchOptions = undefined;
+    // 前のプロセスで持ち越した再開後のMCP比較を、新しい会話の最初の`init`へ混ぜない
+    this.mcpBeforeSuspend = undefined;
+    this.resumeMcpPending = false;
     // 残量の分母（Issue #1747）。`/autocompact` の応答が届けば `streamJson.ts` が上書きする
     this.state = {
       ...this.state,
@@ -777,17 +780,16 @@ export class ClaudeStreamSession {
    * 成功応答が届いたなら再開できている。確定した後にCLIが終了しても、再開の失敗ではなく
    * 通常の「CLIが落ちた」として扱う（再開はもう済んでいるため）。
    *
-   * 失敗応答は、待っている操作を永遠に待たせないよう再開の失敗として確定する。
+   * 失敗応答でも同じく確定する。応答を返せた時点でCLIは会話を読み込んで動いており、
+   * 通常の起動でも`initialize`の失敗は承認を受けられないだけで会話は続く
+   * （`handleControlResponse`の`handshakeDone`の分岐）。ここで再開の失敗にすると、
+   * 動いているCLIを残したまま以後の送信をすべて断ってしまう。
    */
-  private observeInitializeResponse(response: ControlResponse): void {
+  private observeInitializeResponse(): void {
     if (this.lifecycle !== 'resuming' || !this.isControlOnlyResume()) {
       return;
     }
-    if (response.ok) {
-      this.completeResume(undefined);
-    } else {
-      this.failResume(response.error ?? 'initializeに失敗しました');
-    }
+    this.completeResume(undefined);
   }
 
   /** 発言を伴わない再開（`ensureProcess`が始めたもの）か。 */
@@ -1954,7 +1956,7 @@ export class ClaudeStreamSession {
     }
 
     if (outgoing?.kind === 'initialize') {
-      this.observeInitializeResponse(response);
+      this.observeInitializeResponse();
     }
 
     if (this.handshakeDone) {
