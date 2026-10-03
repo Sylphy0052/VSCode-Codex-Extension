@@ -146,28 +146,44 @@ export class ClaudeUsageProbe {
     }
     try {
       await mkdir(this.sharedDir, { recursive: true });
-      const generations = await this.listGenerations();
-      const latest = generations.length === 0 ? 0 : Math.max(...generations);
+      const latest = Math.max(0, ...(await this.listGenerations()));
       if (latest > 0) {
-        const mtimeMs = (await stat(this.lockPath(latest))).mtimeMs;
-        if (Date.now() - mtimeMs <= CLAIM_STALE_MS) {
-          return false;
+        try {
+          if (Date.now() - (await stat(this.lockPath(latest))).mtimeMs <= CLAIM_STALE_MS) {
+            return false;
+          }
+        } catch (e) {
+          // 見た後に、より新しい世代の取得者の掃除で消えた。今回は取得しない
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+            return false;
+          }
+          throw e;
         }
       }
       const own = latest + 1;
-      await writeFile(this.lockPath(own), String(now), { encoding: 'utf8', flag: 'wx' });
+      try {
+        await writeFile(this.lockPath(own), String(now), { encoding: 'utf8', flag: 'wx' });
+      } catch (e) {
+        // 同じ世代を別のウィンドウが先に作った。今回は取得しない
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+          return false;
+        }
+        throw e;
+      }
+      // 古いreaddirで止まっていた者は、掃除で消えた番号を作り直せてしまう。作った後に
+      // 自分より大きい世代があれば、並び立たないよう自分の世代を期限切れにして退く
+      const after = await this.listGenerations();
+      if (after.some((generation) => generation > own)) {
+        await utimes(this.lockPath(own), 0, 0).catch(() => undefined);
+        return false;
+      }
       this.claimedGeneration = own;
       // 自分より古い世代は用済み。1件ずつ消し、失敗や既に無い場合は次回に回す
-      for (const generation of generations) {
+      for (const generation of after.filter((g) => g < own)) {
         await unlink(this.lockPath(generation)).catch(() => undefined);
       }
       return true;
     } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      // 同じ世代を別のウィンドウが先に作った、または解放で消えた。今回は取得しない
-      if (code === 'EEXIST' || code === 'ENOENT') {
-        return false;
-      }
       // 共有先に書けない場合は、他のウィンドウとの調整を諦めて自分で取得する
       this.log.warn(
         `使用量の取得権を作れませんでした: ${e instanceof Error ? e.message : String(e)}`,
@@ -187,7 +203,8 @@ export class ClaudeUsageProbe {
       const suffix = name.startsWith(`${CLAIM_FILE_PREFIX}.`)
         ? name.slice(CLAIM_FILE_PREFIX.length + 1)
         : '';
-      if (/^\d+$/.test(suffix)) {
+      // 先頭ゼロや桁あふれの名前が混ざっても、世代の最大値を壊さない
+      if (/^[1-9]\d*$/.test(suffix) && Number.isSafeInteger(Number(suffix))) {
         generations.push(Number(suffix));
       }
     }

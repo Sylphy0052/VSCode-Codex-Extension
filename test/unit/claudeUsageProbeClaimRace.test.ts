@@ -20,13 +20,20 @@ import type { Logger } from '../../src/log';
 const barrier = vi.hoisted(() => ({
   expected: 0,
   waiting: [] as Array<() => void>,
-  maxWaitMs: 2000,
+  maxWaitMs: 500,
+  /** 設定すると、次の`readdir`1回だけ実際の中身の代わりにこれを返す。古い一覧で止まった者の再現用。 */
+  fakeListing: undefined as string[] | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    readdir: async (...args: Parameters<typeof actual.readdir>) => {
+      const fake = barrier.fakeListing;
+      barrier.fakeListing = undefined;
+      return fake ?? actual.readdir(...args);
+    },
     stat: async (...args: Parameters<typeof actual.stat>) => {
       const result = await actual.stat(...args);
       if (barrier.expected > 0 && /claude-usage-probe\.lock\.\d+$/.test(String(args[0]))) {
@@ -84,6 +91,7 @@ describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
     mkdirSync(shared, { recursive: true });
     barrier.expected = 0;
     barrier.waiting = [];
+    barrier.fakeListing = undefined;
     warnings.length = 0;
   });
   afterEach(() => {
@@ -152,5 +160,34 @@ describe('ClaudeUsageProbe 期限切れロックの奪取', () => {
     expect(await newProbe(path.join(file, 'sub')).claim(Date.now())).toBe(true);
     expect(warnings).toHaveLength(1);
     expect(existsSync(path.join(file, 'sub'))).toBe(false);
+  });
+
+  it('古い一覧で止まっていた者が掃除済みの小さい番号を作っても、並び立たず退く', async () => {
+    writeLock(3, 10 * 60_000);
+    writeLock(5, 1_000);
+    // 3が最新で期限切れ、と古い一覧で見たウィンドウ。4は掃除で消えた後の空き番号
+    barrier.fakeListing = [`${LOCK}.3`];
+    expect(await newProbe().claim(Date.now())).toBe(false);
+    expect(statSync(path.join(shared, `${LOCK}.4`)).mtimeMs).toBe(0);
+    expect(statSync(path.join(shared, `${LOCK}.5`)).mtimeMs).toBeGreaterThan(Date.now() - 60_000);
+    // 5は新しいロックなので、その後も取得できない
+    expect(await newProbe().claim(Date.now())).toBe(false);
+  });
+
+  it('最新の世代が掃除で消えていれば取得せず、warnもしない', async () => {
+    barrier.fakeListing = [`${LOCK}.9`];
+    expect(await newProbe().claim(Date.now())).toBe(false);
+    expect(warnings).toHaveLength(0);
+    expect(lockFiles()).toEqual([]);
+  });
+
+  it('先頭ゼロや桁あふれの名前が混ざっていても取得できる', async () => {
+    writeLock(1, 10 * 60_000);
+    const junk = [`${LOCK}.007`, `${LOCK}.99999999999999999999999`, `${LOCK}.0`];
+    for (const name of junk) {
+      writeFileSync(path.join(shared, name), '');
+    }
+    expect(await newProbe().claim(Date.now())).toBe(true);
+    expect(readdirSync(shared).sort()).toEqual([...junk, `${LOCK}.2`].sort());
   });
 });
