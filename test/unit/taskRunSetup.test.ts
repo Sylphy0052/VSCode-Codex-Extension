@@ -3,6 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CLAUDE_EFFORTS } from '../../src/claude/types';
+import { FALLBACK_EFFORTS } from '../../src/codex/modelCatalog';
 import type { Logger } from '../../src/log';
 import type { RunNotesStore } from '../../src/orchestrator/runNotes';
 import { createTaskRun, type TaskRun } from '../../src/orchestrator/taskRunState';
@@ -772,7 +774,8 @@ describe('setupTaskRun: TaskRunControllerの設定', () => {
     const catalog = opt('controller', 'modelCatalog');
     expect(call<Loose>(catalog, 'claude').models).toEqual(['claude-model']);
     expect(call<Loose>(catalog, 'codex').models).toEqual(['codex-model']);
-    expect(call<Loose>(catalog, 'codex').fallbackEfforts).toBeDefined();
+    expect(call<Loose>(catalog, 'claude').fallbackEfforts).toEqual(CLAUDE_EFFORTS);
+    expect(call<Loose>(catalog, 'codex').fallbackEfforts).toEqual(FALLBACK_EFFORTS);
   });
 
   it('計画の自動承認は設定が有効なときだけ判定器と閾値を返す', () => {
@@ -913,7 +916,6 @@ describe('setupTaskRun: Orchestratorと資源monitorの設定', () => {
     expect(call(opt('monitor', 'listStageProcesses'))).toEqual([{ pid: 1 }]);
     setup({ store: { list: () => [done, active] } as unknown as TaskRunSetupDeps['store'] });
     expect(call(opt('monitor', 'hasActiveRuns'))).toBe(true);
-    expect(opt('monitor', 'intervalMs')).toBeDefined();
     expect(call(opt('monitor', 'intervalMs'))).toBe(1234);
     expect(call(opt('monitor', 'thresholds'))).toEqual({ marker: 'thresholds' });
   });

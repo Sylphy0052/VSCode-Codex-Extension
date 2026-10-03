@@ -250,7 +250,8 @@ describe('TaskRunKanbanViewManager', () => {
       expect(html).toContain('id="board"');
       expect(html).toContain('id="graph-view"');
       const nonce = /<script nonce="([^"]+)">/.exec(html)?.[1];
-      expect(nonce).toBeDefined();
+      // randomBytes(16)のbase64は24文字。空のnonceでCSPを素通りさせていないことも兼ねる
+      expect(nonce).toMatch(/^[A-Za-z0-9+/=]{24}$/);
       // CSPのnonceとscriptのnonceが同じ値
       expect(html).toContain(`'nonce-${nonce ?? ''}'`);
     });
