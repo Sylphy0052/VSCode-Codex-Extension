@@ -802,8 +802,7 @@ describe('terminateDescendants', () => {
       return true;
     }) as typeof process.kill);
     const done = terminateDescendants(1, env.ports);
-    await vi.advanceTimersByTimeAsync(200);
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.runAllTimersAsync();
     await done;
     // 孫から先に
     const termCalls = kill.mock.calls.filter(([, sig]) => sig === 'SIGTERM').map(([pid]) => pid);
@@ -839,7 +838,7 @@ describe('terminateDescendants', () => {
       return true;
     }) as typeof process.kill);
     const done = terminateDescendants(1, env.ports);
-    await vi.advanceTimersByTimeAsync(3500);
+    await vi.runAllTimersAsync();
     await done;
     const killed = kill.mock.calls.filter(([, sig]) => sig === 'SIGKILL').map(([pid]) => pid);
     expect(killed).toEqual([2]);

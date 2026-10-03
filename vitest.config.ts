@@ -26,7 +26,7 @@ export default defineConfig({
       // #1852: CIがLintで止まっていた間に実測が下限を割った（lines 60.76% / functions 58.3% /
       // statements 60.35% / branches 54.18%）。その実測値まで下げ、以後の低下を止める。
       // 70/68/70/70へ戻す作業は#1854で行う。taskRun系のテスト追加後の実測（statements 67.6% /
-      // branches 61.97% / functions 67.35% / lines 67.97%）まで引き上げた。
+      // branches 61.97% / functions 67.35% / lines 67.97%）の小数以下を切り捨てた値へ引き上げた。
       thresholds: {
         statements: 67,
         branches: 61,

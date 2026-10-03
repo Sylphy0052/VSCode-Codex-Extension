@@ -122,9 +122,13 @@ describe('TaskRunKanbanViewManager: closeTask', () => {
     h = open({ inputAnswer: '重複\nのため\r\n取り下げ' });
     sendCloseTask(h);
     await vi.waitFor(() => expect(h?.closeTask).toHaveBeenCalledTimes(1));
-    expect(h.closeTask).toHaveBeenCalledWith('run-1', 'T3', '重複 のため  取り下げ');
+    const reason = h.closeTask.mock.calls[0]?.[2] as string;
+    // 改行の置き換え方（空白の個数）はsanitizeInlineTextの仕様で、ここでは1行になることだけを見る
+    expect(reason).not.toMatch(/[\r\n]/);
+    expect(reason.split(/\s+/)).toEqual(['重複', 'のため', '取り下げ']);
   });
 
+  // validateInputが300文字超を拒否するため通常は届かない。届いた場合も上限で切ることの確認
   it('上限を超える理由は切り詰められて渡る', async () => {
     h = open({ inputAnswer: 'a'.repeat(MAX_CLOSE_REASON_LENGTH + 50) });
     sendCloseTask(h);
