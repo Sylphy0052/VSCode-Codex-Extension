@@ -1,5 +1,14 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import * as path from 'node:path';
 import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
@@ -22,10 +31,15 @@ const MIN_INTERVAL_MS = 5 * 60_000;
 /** 取得に失敗したとき、次に読み直すまでの間隔。成功時の間隔だと回復が遅れる。 */
 const RETRY_INTERVAL_MS = 60_000;
 
-/** 取得中であることを示す排他ファイル名（`sharedDir`の直下）。 */
-const CLAIM_FILE_NAME = 'claude-usage-probe.lock';
+/**
+ * 取得中であることを示す排他ファイル名の接頭辞（`sharedDir`の直下）。
+ * 実際のファイルは`<接頭辞>.<世代番号>`で、ディレクトリ内で最大の世代が現在のロックになる。
+ * 旧版の`claude-usage-probe.lock`（世代なし）は読まない。版が混在する間に取得が重複しうるだけで、
+ * 残った旧ファイルは害がないため、互換のための処理は置かない。
+ */
+const CLAIM_FILE_PREFIX = 'claude-usage-probe.lock';
 
-/** この時間を過ぎた排他ファイルは、保持したまま落ちたものとして奪う。 */
+/** この時間を過ぎた排他ファイルは、保持したまま落ちたものとして次の世代で奪う。 */
 const CLAIM_STALE_MS = TIMEOUT_MS * 2;
 
 /** ウィンドウ間で共有する直近の取得結果のファイル名（`sharedDir`の直下）。 */
@@ -46,6 +60,8 @@ interface SharedUsageRecord {
 export class ClaudeUsageProbe {
   private lastReadAt = 0;
   private running = false;
+  /** 自分が取得中のロックの世代。取得していなければundefined。 */
+  private claimedGeneration: number | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -117,46 +133,100 @@ export class ClaudeUsageProbe {
   /**
    * 取得権を排他的に作る。共有先が無ければ常に得られる。
    * 他のウィンドウが保持中なら得られない。保持したまま落ちたものは期限で奪う。
+   *
+   * ロックは世代番号付きのファイル（`<接頭辞>.<N>`）で、最大のNが現在のロック。
+   * 期限切れなら`N+1`を`wx`で作る。同じ世代を作れるのは`wx`に成功した1者だけで、
+   * 「消して作り直す」のように途中で落ちて残る中間状態が無い。`wx`の排他作成は
+   * NTFS・NFSv3以降でも原子的で、`rename`や`link`より環境差が少ない。
+   * 解放しても世代のファイルは残して期限切れにするだけなので、番号は戻らない。
    */
   private async claim(now: number): Promise<boolean> {
     if (this.sharedDir === undefined) {
       return true;
     }
-    const lockPath = path.join(this.sharedDir, CLAIM_FILE_NAME);
     try {
       await mkdir(this.sharedDir, { recursive: true });
-      await writeFile(lockPath, String(now), { encoding: 'utf8', flag: 'wx' });
-      return true;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
-        // 共有先に書けない場合は、他のウィンドウとの調整を諦めて自分で取得する
-        this.log.warn(
-          `使用量の取得権を作れませんでした: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        return true;
+      const latest = Math.max(0, ...(await this.listGenerations()));
+      if (latest > 0) {
+        try {
+          if (Date.now() - (await stat(this.lockPath(latest))).mtimeMs <= CLAIM_STALE_MS) {
+            return false;
+          }
+        } catch (e) {
+          // 見た後に、より新しい世代の取得者の掃除で消えた。今回は取得しない
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+            return false;
+          }
+          throw e;
+        }
       }
-    }
-    try {
-      if (Date.now() - (await stat(lockPath)).mtimeMs <= CLAIM_STALE_MS) {
+      const own = latest + 1;
+      try {
+        await writeFile(this.lockPath(own), String(now), { encoding: 'utf8', flag: 'wx' });
+      } catch (e) {
+        // 同じ世代を別のウィンドウが先に作った。今回は取得しない
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+          return false;
+        }
+        throw e;
+      }
+      // 作った時点で記録する。以降で例外になり取得へ進んでも、releaseで期限切れにできる
+      this.claimedGeneration = own;
+      // 古いreaddirで止まっていた者は、掃除で消えた番号を作り直せてしまう。作った後に
+      // 自分より大きい世代があれば、並び立たないよう自分の世代を期限切れにして退く
+      const after = await this.listGenerations();
+      if (after.some((generation) => generation > own)) {
+        this.claimedGeneration = undefined;
+        await utimes(this.lockPath(own), 0, 0).catch(() => undefined);
         return false;
       }
-      await unlink(lockPath);
-      await writeFile(lockPath, String(now), { encoding: 'utf8', flag: 'wx' });
+      // 自分より古い世代は用済み。1件ずつ消し、失敗や既に無い場合は次回に回す
+      for (const generation of after.filter((g) => g < own)) {
+        await unlink(this.lockPath(generation)).catch(() => undefined);
+      }
       return true;
-    } catch {
-      // 奪い合いに負けた、または消えた。今回は取得しない
-      return false;
+    } catch (e) {
+      // 共有先に書けない場合は、他のウィンドウとの調整を諦めて自分で取得する
+      this.log.warn(
+        `使用量の取得権を作れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return true;
     }
   }
 
+  private lockPath(generation: number): string {
+    return path.join(this.sharedDir ?? '', `${CLAIM_FILE_PREFIX}.${generation}`);
+  }
+
+  /** 共有先にあるロックの世代番号を返す。 */
+  private async listGenerations(): Promise<number[]> {
+    const generations: number[] = [];
+    for (const name of await readdir(this.sharedDir ?? '')) {
+      const suffix = name.startsWith(`${CLAIM_FILE_PREFIX}.`)
+        ? name.slice(CLAIM_FILE_PREFIX.length + 1)
+        : '';
+      // 先頭ゼロや桁あふれの名前が混ざっても、世代の最大値を壊さない
+      if (/^[1-9]\d*$/.test(suffix) && Number.isSafeInteger(Number(suffix))) {
+        generations.push(Number(suffix));
+      }
+    }
+    return generations;
+  }
+
+  /**
+   * 取得権を手放す。自分の世代のファイルは消さず、期限切れの時刻へ戻す。
+   * 消すと、世代が空に戻り、期限切れを見て次の世代を作る者と番号が重なりうるため。
+   */
   private async release(): Promise<void> {
-    if (this.sharedDir === undefined) {
+    const generation = this.claimedGeneration;
+    this.claimedGeneration = undefined;
+    if (this.sharedDir === undefined || generation === undefined) {
       return;
     }
     try {
-      await unlink(path.join(this.sharedDir, CLAIM_FILE_NAME));
+      await utimes(this.lockPath(generation), 0, 0);
     } catch {
-      // 既に無ければよい
+      // 戻せなくても、期限が過ぎれば次の世代で奪われる
     }
   }
 
