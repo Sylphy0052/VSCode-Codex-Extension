@@ -29,16 +29,16 @@ import { killWithEscalation } from '../process/childProcess';
 export type ReadOnlyCwdInspection = { ok: true } | { ok: false; reason: string };
 
 /** CLIの空起動で`Read`のdenyルールを取り出す時間上限。空起動の実測1.4秒（`probeClaudeSandbox`）に余裕を持たせる。 */
-const LIST_RULES_TIMEOUT_MS = 30_000;
+export const LIST_RULES_TIMEOUT_MS = 30_000;
 
 /** 照合で辿るディレクトリの数の上限。超えたら確かめきれないとしてsandboxを付けない。 */
-const MAX_SCANNED_DIRECTORIES = 200_000;
+export const MAX_SCANNED_DIRECTORIES = 200_000;
 
 /** 空起動のstdoutで1行として溜める上限。ルールの一覧は数十KBに収まる。 */
-const MAX_STDOUT_LINE_LENGTH = 4 * 1024 * 1024;
+export const MAX_STDOUT_LINE_LENGTH = 4 * 1024 * 1024;
 
 /** 空起動のstderrを溜める上限。 */
-const MAX_STDERR_LENGTH = 1200;
+export const MAX_STDERR_LENGTH = 1200;
 
 const LIST_RULES_REQUEST_ID = 'list_permission_rules';
 
@@ -122,7 +122,8 @@ function listReadDenyRules(
     });
     proc.stderr.on('data', (chunk: string) => {
       if (stderr.length < MAX_STDERR_LENGTH) {
-        stderr += chunk;
+        // 1回のchunkが上限を超えても、溜めた結果が上限に収まるように切る
+        stderr = (stderr + chunk).slice(0, MAX_STDERR_LENGTH);
       }
     });
     proc.on('error', (e) => {
@@ -239,8 +240,12 @@ export function compileReadDenyRule(
   }
   glob = glob.replace(/(\/\*\*)+\/?$/, '').replace(/\/+$/, '');
   const prefix = escapeRegExp(base.replace(/\/+$/, ''));
-  if (glob === '' || glob === '**') {
-    return { rule, pattern: new RegExp(`^${prefix}${glob === '' ? '' : '(?:/.*)?'}$`) };
+  if (glob === '') {
+    // 基点が`/`だとprefixが空になるため、`/`自身に一致させるには`/`を補う
+    return { rule, pattern: new RegExp(`^${prefix === '' ? '/' : prefix}$`) };
+  }
+  if (glob === '**') {
+    return { rule, pattern: new RegExp(`^${prefix}(?:/.*)?$`) };
   }
   const body = globToRegExpSource(glob);
   return { rule, pattern: new RegExp(`^${prefix}/${anyDepth ? '(?:.*/)?' : ''}${body}$`) };
@@ -272,8 +277,12 @@ function globToRegExpSource(glob: string): string {
       out += `[${negated ? '^' : ''}${(negated ? body.slice(1) : body).replace(/[\\\]]/g, '\\$&')}]`;
       i = end;
     } else if (c === '{' && glob.indexOf('}', i) !== -1) {
-      const end = glob.indexOf('}', i);
-      const alternatives = glob.slice(i + 1, end).split(',');
+      // 入れ子を数えて対応する`}`を探す。無ければ、照合を広く取るため（判定を狭めないため）、
+      // 最初の`}`で閉じて`,`で分ける旧来の解釈にする。CLIの実挙動は実測していない
+      const nestedEnd = findClosingBrace(glob, i);
+      const end = nestedEnd !== -1 ? nestedEnd : glob.indexOf('}', i);
+      const inner = glob.slice(i + 1, end);
+      const alternatives = nestedEnd !== -1 ? splitTopLevelCommas(inner) : inner.split(',');
       out += `(?:${alternatives.map(globToRegExpSource).join('|')})`;
       i = end;
     } else {
@@ -281,6 +290,40 @@ function globToRegExpSource(glob: string): string {
     }
   }
   return out;
+}
+
+/** `open`位置の`{`に対応する`}`の位置を、入れ子を数えて返す。対応するものが無ければ-1。 */
+function findClosingBrace(glob: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < glob.length; i++) {
+    const c = glob.charAt(i);
+    if (c === '{') {
+      depth++;
+    } else if (c === '}' && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** 入れ子の`{}`の中にある`,`では分けず、最上位の`,`だけで分ける。 */
+function splitTopLevelCommas(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charAt(i);
+    if (c === '{') {
+      depth++;
+    } else if (c === '}') {
+      depth--;
+    } else if (c === ',' && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
 }
 
 function escapeRegExp(text: string): string {

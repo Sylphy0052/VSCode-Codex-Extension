@@ -328,15 +328,17 @@ describe('answerSandboxBashGuard', () => {
   });
 
   it('拒否対象のコマンドにはdenyの応答を返す', () => {
-    const answer = answerSandboxBashGuard(payload('cd a && git push'));
-    expect(answer).toEqual({
+    const command = 'cd a && git push';
+    // 理由文の中身はsandboxBashGuardReasonのテストで見る。ここでは理由が空でなく、応答にそのまま載ることを確かめる
+    const reason = sandboxBashGuardReason(command);
+    expect(reason).toContain('打ち直す');
+    expect(answerSandboxBashGuard(payload(command))).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason: sandboxBashGuardReason('cd a && git push'),
+        permissionDecisionReason: reason,
       },
     });
-    expect(sandboxBashGuardReason('cd a && git push')).toBeDefined();
   });
 
   it('拒否しないコマンドには空の応答を返す', () => {
