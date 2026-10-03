@@ -81,6 +81,15 @@ function fakeSettingsProvider(
   return settings as unknown as SettingsProvider;
 }
 
+/** `afterEach`で消す使い捨てディレクトリ。 */
+const tempDirs: string[] = [];
+
+function makeTempDir(): string {
+  const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-cov-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
 interface ManagerOptions {
   settings?: SettingsProvider;
   revealImportSection?: () => void | Promise<void>;
@@ -106,7 +115,7 @@ function createManager(options: ManagerOptions = {}): {
     factory,
     undefined,
     undefined,
-    nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'codex-cov-')),
+    makeTempDir(),
   );
   return { manager, connection: connection() };
 }
@@ -184,6 +193,9 @@ describe('chatView.ts の補完カバレッジ', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    for (const dir of tempDirs.splice(0)) {
+      nodeFs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe('単体の関数', () => {

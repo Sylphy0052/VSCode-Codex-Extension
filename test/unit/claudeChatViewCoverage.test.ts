@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -174,6 +174,15 @@ function fakeMemoryFileSystem(overrides?: Partial<MemoryFileSystemPort>): Memory
   };
 }
 
+/** `afterEach`で消す使い捨てディレクトリ。 */
+const tempDirs: string[] = [];
+
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
 function fakeMemento(): MemoryModeMemento {
   const store = new Map<string, unknown>();
   return {
@@ -213,7 +222,7 @@ function createManager(options?: {
     undefined,
     options?.globalStorageDir === null
       ? undefined
-      : (options?.globalStorageDir ?? mkdtempSync(join(tmpdir(), 'claude-coverage-'))),
+      : (options?.globalStorageDir ?? makeTempDir('claude-coverage-')),
   );
   if (options?.holdsRestoredTaskPanel !== undefined) {
     manager.holdsRestoredTaskPanel = options.holdsRestoredTaskPanel;
@@ -290,6 +299,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 describe('webviewメッセージの振り分け: セッションへ委ねる操作', () => {
@@ -1916,7 +1928,7 @@ describe('引き継ぎの失敗系と後始末', () => {
 
   it('ポインタを書けなければエラーとして知らせ、新しいタブを開かない', async () => {
     stubStartCapturing();
-    const blocker = join(mkdtempSync(join(tmpdir(), 'claude-handoff-blocker-')), 'file');
+    const blocker = join(makeTempDir('claude-handoff-blocker-'), 'file');
     writeFileSync(blocker, 'x');
     // ディレクトリを作るべき場所が通常ファイルのため、書き出しが失敗する
     const manager = createManager({
