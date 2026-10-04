@@ -764,6 +764,14 @@ export interface ChatState {
    */
   planMode: boolean;
   /**
+   * CLIが通知した、いま効いている承認方法（Issue #1888）。
+   *
+   * Claude Codeだけが持つ。`initialize`の応答と`system/status`通知から入れ、CLIを
+   * 休止させたら（プロセスが無く効いている値が無いため）`undefined`へ戻す。画面の承認
+   * レベルはこれを正として出し、全体の設定値は見ない。
+   */
+  permissionMode?: string | undefined;
+  /**
    * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
    *
    * 初期値はユーザー設定（`agent.autoHandoff.enabled`、既定ON）から入り、そこから先は

@@ -294,6 +294,8 @@ import {
   APPROVAL_LEVEL_CYCLE,
   claudePermissionModeForLevel,
   isApprovalLevel,
+  isUnsafeLevel,
+  levelFromClaudePermissionMode,
 } from '../provider/approvalLevel';
 import { lowPrioritySpawn } from '../claude/lowPrioritySpawn';
 import type { ClaudeConfig } from '../claude/types';
@@ -322,6 +324,12 @@ interface ClaudePanel extends BaseChatPanel {
   taskConfig: ClaudeConfig | undefined;
   /** このセッションだけに適用するモデルとeffort（issue #844）。 */
   modelSettings: SessionModelSettings;
+  /**
+   * このタブの承認方法（Issue #1888）。タブを作った時点の既定値（タスク設定があればそちら、
+   * 無ければ`claude.permissionMode`）から始め、タブでの変更はここだけを書き換える。起動と
+   * 休止からの再開の起動引数、Plan modeを抜けるときの戻し先、引き継ぎ先の起動に使う。
+   */
+  permissionMode: string;
   /**
    * セカンドオピニオン（Issue #894）の重複起動判定に使うキー。タブごとに一意
    * （`chatView.ts`の`ChatPanel.secondOpinionKey`と同じ理由）。
@@ -734,7 +742,7 @@ export class ClaudeChatViewManager
     return doneCheck === undefined ? plan : { ...plan, doneCheck };
   }
 
-  /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
+  /** Global設定のうちモデルとeffortと承認方法を、このセッションの値で上書きする。 */
   private configFor(entry: ClaudePanel): ClaudeConfig {
     const config = entry.taskConfig ?? readClaudeConfig().claude;
     // 他のセッションと話すためのMCPサーバ（Issue #1305）。タスク経路の`toClaudeConfig`と
@@ -745,6 +753,7 @@ export class ClaudeChatViewManager
       ...config,
       model: entry.modelSettings.model,
       effort: entry.modelSettings.effort,
+      permissionMode: entry.permissionMode,
       additionalArgs:
         messagingUrl === undefined
           ? config.additionalArgs
@@ -843,14 +852,19 @@ export class ClaudeChatViewManager
    */
   private buildSettingsPayload(entry: ClaudePanel): ChatSettingsPayload {
     const snapshot = this.settings.claudeSnapshot();
+    // 承認方法はこのタブのCLIが通知した値を正とする（Issue #1888）。全体の設定値を出すと、
+    // 他のタブで変えた値が、変更の届いていないこのタブにも出てしまう。通知がまだ無い間・
+    // 休止中・Plan mode中（戻し先を出す）はタブの値で代える
+    const actual = entry.session.getState().permissionMode;
+    const approvalMode = actual === undefined || actual === 'plan' ? entry.permissionMode : actual;
     return {
       models: snapshot.models,
       efforts: effortsFor(snapshot.models, entry.modelSettings.model, CLAUDE_EFFORTS),
       agents: snapshot.agents,
       model: entry.modelSettings.model,
       reasoningEffort: entry.modelSettings.effort,
-      approvalMode: snapshot.permissionMode,
-      approvalLevel: snapshot.approvalLevel,
+      approvalMode,
+      approvalLevel: levelFromClaudePermissionMode(approvalMode) ?? '',
       agent: snapshot.agent,
       defaults: {
         model: snapshot.defaults.model,
@@ -1031,6 +1045,7 @@ export class ClaudeChatViewManager
     modelSettings?: SessionModelSettings,
     preserveFocus = false,
     targetViewColumn?: vscode.ViewColumn,
+    permissionMode?: string,
   ): Promise<string | undefined> {
     const folder = currentWorkspaceFolder();
     const targetCwd = cwd ?? folder?.uri.fsPath;
@@ -1044,8 +1059,18 @@ export class ClaudeChatViewManager
     const sessionId = randomSessionId();
     // `modelSettings` を渡す経路は引き継ぎ（Issue #1082）。CLIはmodel / effortを起動時の
     // argvで受け取るため、起動後に `entry.modelSettings` を書き換えても初回プロンプトには
-    // 効かない。`buildEntry` へ渡して `configFor` が起動前に読む形にする
-    const entry = this.buildEntry(targetCwd, LABEL, false, taskConfig, undefined, modelSettings);
+    // 効かない。`buildEntry` へ渡して `configFor` が起動前に読む形にする。
+    // 承認方法（`permissionMode`、Issue #1888）も同じ理由で起動前に渡す
+    const entry = this.buildEntry(
+      targetCwd,
+      LABEL,
+      false,
+      taskConfig,
+      undefined,
+      modelSettings,
+      false,
+      permissionMode,
+    );
     this.showPanel(entry, preserveFocus, targetViewColumn);
     this.panels.set(sessionId, entry);
     // 起動引数を組む`configFor`より前に割り当てる（Issue #1305）
@@ -1456,6 +1481,8 @@ export class ClaudeChatViewManager
         choice.settings,
         preserveFocus,
         targetViewColumn,
+        // 承認方法は引き継ぎ元のタブの値を持ち越す（Issue #1888）
+        entry.permissionMode,
       );
       if (newSessionId === undefined) {
         this.log.warn('引き継ぎ先セッションを開けませんでした');
@@ -3406,6 +3433,7 @@ export class ClaudeChatViewManager
     pinnedName?: string,
     modelSettings: SessionModelSettings = this.initialModelSettings(taskConfig),
     lowPriority = false,
+    permissionMode: string = (taskConfig ?? readClaudeConfig().claude).permissionMode,
   ): ClaudePanel {
     // 統合テストがフェイクへ差し替えている間はその起動を変えない（niceを挟むとフェイクの外で動く）
     const override = this.resolveSpawn();
@@ -3470,6 +3498,7 @@ export class ClaudeChatViewManager
       lockedActionListeners: [],
       taskConfig,
       modelSettings,
+      permissionMode,
       secondOpinionKey: randomUUID(),
       lastTurnCompletionSeq: 0,
       wasLoopRunning: false,
@@ -4009,9 +4038,9 @@ export class ClaudeChatViewManager
   /**
    * 承認レベル（3段階）を適用する。
    *
-   * Claude Codeでは `permissionMode` 1項目へ展開される。書き込みは
-   * `SettingsProvider.updateApprovalLevel` が担い（「全承認」の同意もそこで取る）、
-   * 実行中のセッションへの反映は `permissionMode` を変えたときと同じ経路に乗せる。
+   * Claude Codeでは `permissionMode` 1項目へ展開される。変えるのはこのタブだけで、全体の
+   * 設定（新規タブの既定値）は設定パネルからしか変えない（Issue #1888。以前はここで全体の
+   * 設定を書き換えており、1つのタブでの変更が以降に開く全タブへ効いていた）。
    */
   private async applyApprovalLevel(entry: ClaudePanel, level: unknown): Promise<void> {
     if (!isApprovalLevel(level)) {
@@ -4019,11 +4048,49 @@ export class ClaudeChatViewManager
       return;
     }
     // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
-    const applied = await this.settings.updateApprovalLevel('claude', level);
-    if (applied) {
-      this.applyToSession(entry, 'permissionMode', claudePermissionModeForLevel(level));
+    if (!isUnsafeLevel(level) || (await this.settings.confirmClaudeFullApproval())) {
+      await this.setTabPermissionMode(entry, claudePermissionModeForLevel(level));
     }
     this.refreshSettings(entry);
+  }
+
+  /**
+   * このタブの承認方法を変える（Issue #1888）。全体の設定は書き換えない。
+   *
+   * 全承認（`bypassPermissions`）へは実行中に上げられない。全承認を許して起動していない
+   * セッションへ`set_permission_mode`を送ると、CLIは`Cannot set permission mode to
+   * bypassPermissions because the session was not launched with ...`で拒否する（実測、
+   * CLI 2.1.286）。そこで全承認へ上げるときはCLIを休止させ、次の送信で全承認の起動引数の
+   * まま`--resume`で再開させる（Issue #1808の休止と同じ経路で、会話は続く）。起動時に
+   * 「後から全承認へ上げてよい」フラグを全タブへ付ける方法は採らない。同意を取る前から、
+   * どのタブも全承認へ上がりうる状態で動くことになるため。
+   *
+   * Plan mode中は戻し先を変えるだけにする。CLIへ送るとPlan modeを抜けてしまう。
+   */
+  private async setTabPermissionMode(entry: ClaudePanel, mode: string): Promise<void> {
+    entry.permissionMode = mode;
+    const state = entry.session.getState();
+    if (state.processSuspension !== undefined) {
+      // 休止中・休止の途中。再開するときに`configFor`がこの値を読む
+      return;
+    }
+    if (mode !== 'bypassPermissions' || state.permissionMode === 'bypassPermissions') {
+      if (state.permissionMode !== 'plan') {
+        this.applyToSession(entry, 'permissionMode', mode);
+      }
+      return;
+    }
+    const suspended = await entry.session.suspend({
+      cwd: entry.cwd,
+      config: () => this.configFor(entry),
+    });
+    if (suspended) {
+      this.log.info('全承認で起動し直すため、Claude Codeを終了しました。次の送信で再開します');
+      return;
+    }
+    void vscode.window.showWarningMessage(
+      '作業中のため、全承認はまだ効いていません。応答が終わってからもう一度「全承認」を選ぶと、Claude Codeを起動し直して全承認にします。',
+    );
   }
 
   /**
@@ -4070,6 +4137,20 @@ export class ClaudeChatViewManager
       }
       await this.persistModelSettings(entry);
       this.applyToSession(entry, mapped, value);
+      this.refreshSettings(entry);
+      return;
+    }
+    if (mapped === 'permissionMode') {
+      // 承認方法もこのタブだけに効かせる（Issue #1888）。取り消された場合も表示を戻すため再送する
+      if (value !== 'bypassPermissions' || (await this.settings.confirmClaudeFullApproval())) {
+        if (value === '') {
+          // 「既定」は今の会話へ送る手段が無い。次に起動し直したときから効く
+          entry.permissionMode = value;
+          this.applyToSession(entry, mapped, value);
+        } else {
+          await this.setTabPermissionMode(entry, value);
+        }
+      }
       this.refreshSettings(entry);
       return;
     }
@@ -4635,10 +4716,9 @@ export class ClaudeChatViewManager
       }
       if (type === 'planMode') {
         this.noteUserAction(entry);
-        // 抜けるときは設定の承認方法へ戻す。タスク単位の設定があればそちらを優先する
-        // （design.md §16.10の5。無ければ従来通りグローバル設定、空なら既定=manual）
-        const fallback = (entry.taskConfig ?? readClaudeConfig().claude).permissionMode;
-        entry.session.setPlanMode(m['on'] === true, fallback);
+        // 抜けるときはこのタブの承認方法へ戻す（Issue #1888）。タブの値はタスク単位の設定か
+        // 全体の設定から始まる（design.md §16.10の5）。空なら既定=manual
+        entry.session.setPlanMode(m['on'] === true, entry.permissionMode);
         return;
       }
       if (type === 'fastMode') {

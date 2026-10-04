@@ -582,7 +582,7 @@ function applyStatus(state: ChatState, event: Record<string, unknown>): ChatStat
   if (permissionMode !== '') {
     // Plan modeの状態はこの通知を正とする。要求の成功だけを信じない
     return appendNotice(
-      { ...state, planMode: permissionMode === 'plan' },
+      { ...state, planMode: permissionMode === 'plan', permissionMode },
       'settings:' + (str(event['uuid']) || permissionMode),
       '承認方法を ' + permissionMode + ' に変えました',
     );
