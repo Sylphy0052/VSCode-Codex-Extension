@@ -1576,6 +1576,7 @@ describe('設定の変更とapprovalLevel', () => {
     await flush();
     expect(suspend).toHaveBeenCalledTimes(1);
     const relaunch = suspend.mock.calls[0]![0];
+    expect(relaunch.config().permissionMode).toBe('bypassPermissions');
     vi.spyOn(sessions[0] as ClaudeStreamSession, 'getState').mockReturnValue({
       ...(sessions[0] as ClaudeStreamSession).getState(),
       processSuspension: 'suspended',
@@ -1585,16 +1586,24 @@ describe('設定の変更とapprovalLevel', () => {
     await flush();
 
     expect(relaunch.config().permissionMode).toBe('');
+    expect(__mock.messages.infos.at(-1)).toBe(
+      '承認方法を既定へ戻しました。Claude Codeは休止中のため、次の送信で再開したときから効きます。',
+    );
   });
 
   it('CLIが落ちているときに全承認から既定へ戻すと、次の起動は既定になる（Issue #1892）', async () => {
     // startを差し替えているためプロセスは無い（`hasProcess`は`false`）
     const { calls } = stubStartCapturing();
     stubSetters();
-    const manager = createManager();
+    const confirmClaudeFullApproval = vi.fn(async () => true);
+    const manager = createManager({ settings: { confirmClaudeFullApproval } });
     const id = await openSession(manager);
     await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'full' });
     await flush();
+    // 全承認へ上がらなくても最後の比較は通ってしまうため、上げる操作が通ったことを先に確かめる
+    // （CLI停止中の全承認でタブの値が全承認になることは「CLIが落ちているときの全承認は…」が見る）
+    expect(confirmClaudeFullApproval).toHaveBeenCalledTimes(1);
+    expect(__mock.messages.warnings).toEqual([]);
 
     await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
     await flush();
@@ -1630,9 +1639,12 @@ describe('設定の変更とapprovalLevel', () => {
     vi.spyOn(ClaudeStreamSession.prototype, 'hasProcess', 'get').mockReturnValue(true);
     const manager = createManager();
     const id = await openSession(manager);
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'auto' });
+    await flush();
     await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
     await flush();
-    // 1回目は既定以外からの切り替えなので知らせる。ここでは2回目だけを見る
+    // ここまでは既定以外からの切り替えなので知らせる。見るのは次の選び直しだけ
+    expect(__mock.messages.infos).toHaveLength(1);
     __mock.messages.infos.length = 0;
 
     await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
