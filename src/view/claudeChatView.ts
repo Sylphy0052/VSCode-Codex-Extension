@@ -4118,6 +4118,11 @@ export class ClaudeChatViewManager
     });
     if (suspended) {
       this.log.info('全承認で起動し直すため、Claude Codeを終了しました。次の送信で再開します');
+      // 画面の休止表示は「使っていないため終了」の文面で、全承認で再開することは読み取れない
+      // ため、休止中に全承認を選んだときと同じく画面でも知らせる（Issue #1892）
+      void vscode.window.showInformationMessage(
+        '全承認で起動し直すため、Claude Codeを終了しました。次の送信で全承認として再開します。',
+      );
       return;
     }
     // 休止できなければ値を戻す。全承認のまま残すと、後の休止からの再開やPlan modeの戻し先で、
