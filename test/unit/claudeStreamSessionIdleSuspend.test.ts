@@ -423,3 +423,29 @@ describe('ClaudeStreamSession: 使っていないCLIの休止と再開（Issue #
     });
   });
 });
+
+describe('ClaudeStreamSession: 効いている承認方法の後始末（Issue #1888・#1890）', () => {
+  const statusEvent = (permissionMode: string): string =>
+    JSON.stringify({ type: 'system', subtype: 'status', permissionMode, uuid: 's1' });
+
+  it('CLIのプロセスが消えたら、効いている承認方法をundefinedへ戻す', () => {
+    const { session, procs } = createSession();
+    procs[0]!.emitStdout(statusEvent('acceptEdits'));
+    expect(session.getState().permissionMode).toBe('acceptEdits');
+
+    procs[0]!.emitExit(1);
+
+    expect(session.hasProcess).toBe(false);
+    expect(session.getState().permissionMode).toBeUndefined();
+  });
+
+  it('休止させたら、効いている承認方法をundefinedへ戻す', async () => {
+    const { session, procs } = createSession();
+    procs[0]!.emitStdout(statusEvent('acceptEdits'));
+    expect(session.getState().permissionMode).toBe('acceptEdits');
+
+    await suspendSession(session, procs[0]!);
+
+    expect(session.getState().permissionMode).toBeUndefined();
+  });
+});
