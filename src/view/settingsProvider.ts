@@ -916,6 +916,14 @@ export class SettingsProvider {
   }
 
   /**
+   * Claude Codeのタブ1つを「全承認」にする前の同意（Issue #1888）。設定は書き換えない。
+   * 全体の既定値を変える`updateApprovalLevel`と同じ文面で尋ねる。
+   */
+  confirmClaudeFullApproval(): Promise<boolean> {
+    return confirmFullApproval('claude');
+  }
+
+  /**
    * 承認レベル（3段階）を書き換える（`src/provider/approvalLevel.ts`）。
    *
    * Codexは `approvalMode` / `sandbox` / `approvalsReviewer` の3項目、Claude Codeは
@@ -936,14 +944,6 @@ export class SettingsProvider {
    * @returns 実際に変更したら true。確認で取り消された場合と、bypassを落とせなかった
    *   場合は false。
    */
-  /**
-   * Claude Codeのタブ1つを「全承認」にする前の同意（Issue #1888）。設定は書き換えない。
-   * 全体の既定値を変える`updateApprovalLevel`と同じ文面で尋ねる。
-   */
-  confirmClaudeFullApproval(): Promise<boolean> {
-    return confirmFullApproval('claude');
-  }
-
   async updateApprovalLevel(provider: ProviderId, level: ApprovalLevel): Promise<boolean> {
     if (isUnsafeLevel(level) && !(await confirmFullApproval(provider))) {
       return false;
