@@ -4199,8 +4199,11 @@ export class ClaudeChatViewManager
                 '承認方法を既定へ戻しました。Claude Codeは休止中のため、次の送信で再開したときから効きます。',
               );
             } else if (entry.session.hasProcess) {
+              // 全承認から戻したときは、安全側へ戻ったと読まれないよう全承認のままであることも書く
               void vscode.window.showInformationMessage(
-                '承認方法を既定へ戻しました。今動いているClaude Codeには効かず、次に起動したときから効きます。',
+                previous === 'bypassPermissions'
+                  ? '承認方法を既定へ戻しました。今動いているClaude Codeは全承認のままで、次に起動したときから既定になります。'
+                  : '承認方法を既定へ戻しました。今動いているClaude Codeには効かず、次に起動したときから効きます。',
               );
             }
           }

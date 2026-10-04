@@ -1470,6 +1470,27 @@ describe('設定の変更とapprovalLevel', () => {
     expect(calls[1]?.config.permissionMode).toBe('');
   });
 
+  it('全承認から既定へ戻すと、動いているCLIは全承認のままだと知らせる（Issue #1890）', async () => {
+    const { calls } = stubStartCapturing();
+    stubSetters();
+    // 全承認へ上げるところはCLIが落ちている扱いにし、休止させずにタブの値だけ変える
+    const manager = createManager();
+    const id = await openSession(manager);
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'full' });
+    await flush();
+    vi.spyOn(ClaudeStreamSession.prototype, 'hasProcess', 'get').mockReturnValue(true);
+
+    await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
+    await flush();
+
+    expect(__mock.messages.infos).toEqual([
+      '承認方法を既定へ戻しました。今動いているClaude Codeは全承認のままで、次に起動したときから既定になります。',
+    ]);
+    await manager.clearActive();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.config.permissionMode).toBe('');
+  });
+
   it('休止中に既定へ戻すと、次の送信の再開から効くことを知らせる（Issue #1890）', async () => {
     const { sessions } = stubStartCapturing();
     stubSetters();
