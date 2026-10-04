@@ -4092,6 +4092,12 @@ export class ClaudeChatViewManager
     const state = entry.session.getState();
     if (state.processSuspension !== undefined) {
       // 休止中・休止の途中。再開するときに`configFor`がこの値を読む
+      if (mode === 'bypassPermissions') {
+        // 全承認は起動引数でしか効かない。次の送信の再開で効くことを知らせる（Issue #1890）
+        void vscode.window.showInformationMessage(
+          'Claude Codeは休止中です。次の送信で全承認として起動し直します。',
+        );
+      }
       return;
     }
     if (mode !== 'bypassPermissions' || state.permissionMode === 'bypassPermissions') {
@@ -4179,9 +4185,13 @@ export class ClaudeChatViewManager
       }
       if (value !== 'bypassPermissions' || (await this.settings.confirmClaudeFullApproval())) {
         if (value === '') {
-          // 「既定」は今の会話へ送る手段が無い。次に起動し直したときから効く
+          // 「既定」は今の会話へ送る手段が無い。次に起動し直したときから効く。設定行の表示は
+          // CLIの通知した値のまま変わらないため、ログだけでなく画面でも知らせる（Issue #1890）
           entry.permissionMode = value;
           this.applyToSession(entry, mapped, value);
+          void vscode.window.showInformationMessage(
+            '承認方法を既定へ戻しました。今動いているClaude Codeには効かず、次に起動したときから効きます。',
+          );
         } else {
           await this.setTabPermissionMode(entry, value);
         }
