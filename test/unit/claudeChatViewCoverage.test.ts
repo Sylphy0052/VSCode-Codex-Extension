@@ -1360,6 +1360,8 @@ describe('設定の変更とapprovalLevel', () => {
       __mock.messages.warnings.some((m) => m.includes('作業中のため全承認にできませんでした')),
     ).toBe(true);
     await manager.clearActive();
+    // 開き直しが起きていないと`undefined`同士の比較で通ってしまうため、件数から確かめる
+    expect(calls).toHaveLength(2);
     expect(calls[1]?.config.permissionMode).toBe(calls[0]?.config.permissionMode);
     expect(calls[1]?.config.permissionMode).not.toBe('bypassPermissions');
   });
@@ -1417,8 +1419,16 @@ describe('設定の変更とapprovalLevel', () => {
     expect(suspend).not.toHaveBeenCalled();
     expect(setters.mode).not.toHaveBeenCalled();
     expect(
-      __mock.messages.infos.some((m) => m.includes('次の送信で全承認として起動し直します')),
-    ).toBe(true);
+      __mock.messages.infos.filter((m) => m.includes('次の送信で全承認として起動し直します')),
+    ).toHaveLength(1);
+
+    // 全承認のまま選び直しても、同じ知らせを繰り返さない
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'full' });
+    await flush();
+
+    expect(
+      __mock.messages.infos.filter((m) => m.includes('次の送信で全承認として起動し直します')),
+    ).toHaveLength(1);
   });
 
   it('休止中に全承認以外を選んでも知らせない（Issue #1890）', async () => {
@@ -1440,6 +1450,8 @@ describe('設定の変更とapprovalLevel', () => {
   it('承認方法を既定へ戻すと、今の会話へ効かないことを画面でも知らせる（Issue #1890）', async () => {
     const { calls } = stubStartCapturing();
     const setters = stubSetters();
+    // startを差し替えているためプロセスは無い。動いているものとして扱う
+    vi.spyOn(ClaudeStreamSession.prototype, 'hasProcess', 'get').mockReturnValue(true);
     const manager = createManager();
     const id = await openSession(manager);
     await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'auto' });
@@ -1455,6 +1467,50 @@ describe('設定の変更とapprovalLevel', () => {
       ),
     ).toBe(true);
     await manager.clearActive();
+    expect(calls[1]?.config.permissionMode).toBe('');
+  });
+
+  it('休止中に既定へ戻すと、次の送信の再開から効くことを知らせる（Issue #1890）', async () => {
+    const { sessions } = stubStartCapturing();
+    stubSetters();
+    const manager = createManager();
+    const id = await openSession(manager);
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'auto' });
+    await flush();
+    vi.spyOn(sessions[0] as ClaudeStreamSession, 'getState').mockReturnValue({
+      ...(sessions[0] as ClaudeStreamSession).getState(),
+      processSuspension: 'suspended',
+    });
+
+    await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
+    await flush();
+
+    expect(__mock.messages.infos).toEqual([
+      '承認方法を既定へ戻しました。Claude Codeは休止中のため、次の送信で再開したときから効きます。',
+    ]);
+  });
+
+  it('既定のタブで既定を選び直したときと、CLIが落ちているときは知らせない（Issue #1890）', async () => {
+    // startを差し替えているためプロセスは無い（`hasProcess`は`false`）
+    const { calls } = stubStartCapturing();
+    stubSetters();
+    const manager = createManager();
+    const id = await openSession(manager);
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'auto' });
+    await flush();
+
+    // CLIが落ちている。次の起動はタブの値で始まるため、知らせることが無い
+    await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
+    await flush();
+    expect(__mock.messages.infos).toEqual([]);
+
+    vi.spyOn(ClaudeStreamSession.prototype, 'hasProcess', 'get').mockReturnValue(true);
+    await manager.simulateWebviewMessage(id, { type: 'config', key: 'approvalMode', value: '' });
+    await flush();
+    expect(__mock.messages.infos).toEqual([]);
+
+    await manager.clearActive();
+    expect(calls).toHaveLength(2);
     expect(calls[1]?.config.permissionMode).toBe('');
   });
 
@@ -1475,6 +1531,7 @@ describe('設定の変更とapprovalLevel', () => {
     expect(setters.mode).not.toHaveBeenCalled();
     expect(confirmClaudeFullApproval).not.toHaveBeenCalled();
     await manager.clearActive();
+    expect(calls).toHaveLength(2);
     expect(calls[1]?.config.permissionMode).toBe(calls[0]?.config.permissionMode);
   });
 
