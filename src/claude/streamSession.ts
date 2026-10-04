@@ -590,6 +590,11 @@ export class ClaudeStreamSession {
     );
   }
 
+  /** CLIのプロセスが動いているか。落ちた・休止した後は`false`。 */
+  get hasProcess(): boolean {
+    return this.proc !== undefined;
+  }
+
   /** 休止中（次の送信で`--resume`する）か。 */
   get suspended(): boolean {
     return this.lifecycle === 'suspended';
@@ -2065,6 +2070,8 @@ export class ClaudeStreamSession {
         ? this.state.turnCompletionSeq + 1
         : this.state.turnCompletionSeq,
       backgroundTerminals: NO_BACKGROUND_TERMINALS,
+      // 次に起動するまで効いている承認方法は無い。画面はタブの値を出す（Issue #1888）
+      permissionMode: undefined,
     };
   }
 

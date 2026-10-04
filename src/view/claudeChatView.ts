@@ -3420,8 +3420,10 @@ export class ClaudeChatViewManager
     }
 
     const cwd = entry.cwd;
+    // 会話を消しても、このタブで選んだ承認方法は持ち越す（Issue #1888）
+    const permissionMode = entry.permissionMode;
     this.teardown(entry);
-    await this.openNew(cwd);
+    await this.openNew(cwd, undefined, undefined, false, undefined, permissionMode);
   }
 
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
@@ -3847,7 +3849,15 @@ export class ClaudeChatViewManager
         if (choice !== NEW_CONVERSATION) {
           return;
         }
-        const sessionId = await this.openNew(entry.cwd);
+        // 承認方法は元のタブの値を持ち越す（Issue #1888）
+        const sessionId = await this.openNew(
+          entry.cwd,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          entry.permissionMode,
+        );
         const next = sessionId === undefined ? undefined : this.panels.get(sessionId);
         if (next !== undefined && outcome.text !== '') {
           this.dispatch(next, outcome.text, [...outcome.attachments]);
@@ -4066,8 +4076,18 @@ export class ClaudeChatViewManager
    * どのタブも全承認へ上がりうる状態で動くことになるため。
    *
    * Plan mode中は戻し先を変えるだけにする。CLIへ送るとPlan modeを抜けてしまう。
+   *
+   * タスク単位の設定を持つタブは全承認へ上げない。タスク設定は安全側へ寄せてあり
+   * （`orchestrator/taskConfig.ts`）、全承認では承認要求が来ず危険判定も働かなくなるため。
    */
   private async setTabPermissionMode(entry: ClaudePanel, mode: string): Promise<void> {
+    if (mode === 'bypassPermissions' && entry.taskConfig !== undefined) {
+      void vscode.window.showWarningMessage(
+        'タスクの設定で起動したタブは全承認にできません。承認方法は変えていません。',
+      );
+      return;
+    }
+    const previous = entry.permissionMode;
     entry.permissionMode = mode;
     const state = entry.session.getState();
     if (state.processSuspension !== undefined) {
@@ -4080,6 +4100,11 @@ export class ClaudeChatViewManager
       }
       return;
     }
+    if (!entry.session.hasProcess) {
+      // CLIが落ちている。今の会話へは効かせようがなく、次に起動する会話（新しい会話・
+      // 引き継ぎ）がタブの値で起動する
+      return;
+    }
     const suspended = await entry.session.suspend({
       cwd: entry.cwd,
       config: () => this.configFor(entry),
@@ -4088,8 +4113,12 @@ export class ClaudeChatViewManager
       this.log.info('全承認で起動し直すため、Claude Codeを終了しました。次の送信で再開します');
       return;
     }
+    // 休止できなければ値を戻す。全承認のまま残すと、後の休止からの再開やPlan modeの戻し先で、
+    // 選び直していないのに全承認になる（再開の起動引数は休止の時点でなく再開時に読むため、
+    // 値は休止を頼む前に入れておく必要がある）
+    entry.permissionMode = previous;
     void vscode.window.showWarningMessage(
-      '作業中のため、全承認はまだ効いていません。応答が終わってからもう一度「全承認」を選ぶと、Claude Codeを起動し直して全承認にします。',
+      '作業中のため全承認にできませんでした。応答が終わってからもう一度「全承認」を選ぶと、Claude Codeを起動し直して全承認にします。',
     );
   }
 
@@ -4141,7 +4170,13 @@ export class ClaudeChatViewManager
       return;
     }
     if (mapped === 'permissionMode') {
-      // 承認方法もこのタブだけに効かせる（Issue #1888）。取り消された場合も表示を戻すため再送する
+      // 承認方法もこのタブだけに効かせる（Issue #1888）。取り消された場合も表示を戻すため再送する。
+      // webviewから来た値なので、CLIの受け付ける値か既定（空文字）以外は捨てる
+      const known = value === '' || (CLAUDE_PERMISSION_MODES as readonly string[]).includes(value);
+      if (!known) {
+        this.refreshSettings(entry);
+        return;
+      }
       if (value !== 'bypassPermissions' || (await this.settings.confirmClaudeFullApproval())) {
         if (value === '') {
           // 「既定」は今の会話へ送る手段が無い。次に起動し直したときから効く

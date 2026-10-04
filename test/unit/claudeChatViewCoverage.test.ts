@@ -1310,6 +1310,8 @@ describe('設定の変更とapprovalLevel', () => {
     const suspend = vi
       .spyOn(ClaudeStreamSession.prototype, 'suspend')
       .mockImplementation(async () => true);
+    // startを差し替えているためプロセスは無い。動いているものとして扱う
+    vi.spyOn(ClaudeStreamSession.prototype, 'hasProcess', 'get').mockReturnValue(true);
     const manager = createManager();
     const id = await openSession(manager);
 
