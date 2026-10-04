@@ -147,6 +147,7 @@ function fakeSettingsProvider(overrides?: Record<string, unknown>): SettingsProv
     }),
     updateClaude: async () => true,
     updateApprovalLevel: async () => true,
+    confirmClaudeFullApproval: async () => true,
     ...overrides,
   };
   return settings as unknown as SettingsProvider;
@@ -1232,11 +1233,12 @@ describe('設定の変更とapprovalLevel', () => {
     expect(logged.info.some((m) => m.includes('model を既定へ戻しました'))).toBe(true);
   });
 
-  it('approvalModeは設定の保存に成功したときだけセッションへ流す', async () => {
+  it('approvalModeはこのタブのセッションへだけ流し、全体の設定は書き換えない（Issue #1888）', async () => {
     stubStartCapturing();
     const setters = stubSetters();
     const updateClaude = vi.fn(async () => true);
-    const manager = createManager({ settings: { updateClaude } });
+    const confirmClaudeFullApproval = vi.fn(async () => false);
+    const manager = createManager({ settings: { updateClaude, confirmClaudeFullApproval } });
     const id = await openSession(manager);
 
     await manager.simulateWebviewMessage(id, {
@@ -1245,16 +1247,17 @@ describe('設定の変更とapprovalLevel', () => {
       value: 'acceptEdits',
     });
     await flush();
-    expect(updateClaude.mock.calls).toEqual([['permissionMode', 'acceptEdits']]);
+    expect(updateClaude).not.toHaveBeenCalled();
     expect(setters.mode.mock.calls).toEqual([['acceptEdits']]);
 
-    updateClaude.mockResolvedValue(false);
+    // 全承認は同意を取り消したら何も変えない
     await manager.simulateWebviewMessage(id, {
       type: 'config',
       key: 'approvalMode',
-      value: 'default',
+      value: 'bypassPermissions',
     });
     await flush();
+    expect(confirmClaudeFullApproval).toHaveBeenCalledTimes(1);
     expect(setters.mode).toHaveBeenCalledTimes(1);
   });
 
@@ -1287,32 +1290,54 @@ describe('設定の変更とapprovalLevel', () => {
     expect(setters.model).not.toHaveBeenCalled();
   });
 
-  it('approvalLevelは保存に成功したら、対応する承認方法をセッションへ流す', async () => {
+  it('approvalLevelはこのタブのセッションへだけ流し、全体の設定は書き換えない（Issue #1888）', async () => {
     stubStartCapturing();
     const setters = stubSetters();
     const updateApprovalLevel = vi.fn(async () => true);
     const manager = createManager({ settings: { updateApprovalLevel } });
     const id = await openSession(manager);
 
-    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'full' });
-    await flush();
-
-    expect(updateApprovalLevel.mock.calls).toEqual([['claude', 'full']]);
-    expect(setters.mode.mock.calls).toEqual([[claudePermissionModeForLevel('full')]]);
-  });
-
-  it('approvalLevelが取り消されたときはセッションへ流さない', async () => {
-    stubStartCapturing();
-    const setters = stubSetters();
-    const updateApprovalLevel = vi.fn(async () => false);
-    const manager = createManager({ settings: { updateApprovalLevel } });
-    const id = await openSession(manager);
-
     await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'auto' });
     await flush();
 
-    expect(updateApprovalLevel).toHaveBeenCalledTimes(1);
+    expect(updateApprovalLevel).not.toHaveBeenCalled();
+    expect(setters.mode.mock.calls).toEqual([[claudePermissionModeForLevel('auto')]]);
+  });
+
+  it('全承認は実行中に上げられないため、CLIを休止させて全承認の起動引数で再開させる', async () => {
+    stubStartCapturing();
+    const setters = stubSetters();
+    const suspend = vi
+      .spyOn(ClaudeStreamSession.prototype, 'suspend')
+      .mockImplementation(async () => true);
+    // startを差し替えているためプロセスは無い。動いているものとして扱う
+    vi.spyOn(ClaudeStreamSession.prototype, 'hasProcess', 'get').mockReturnValue(true);
+    const manager = createManager();
+    const id = await openSession(manager);
+
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'full' });
+    await flush();
+
     expect(setters.mode).not.toHaveBeenCalled();
+    expect(suspend).toHaveBeenCalledTimes(1);
+    const relaunch = suspend.mock.calls[0]![0];
+    expect(relaunch.config().permissionMode).toBe(claudePermissionModeForLevel('full'));
+  });
+
+  it('全承認の同意が取り消されたときはセッションへ流さない', async () => {
+    stubStartCapturing();
+    const setters = stubSetters();
+    const suspend = vi.spyOn(ClaudeStreamSession.prototype, 'suspend');
+    const confirmClaudeFullApproval = vi.fn(async () => false);
+    const manager = createManager({ settings: { confirmClaudeFullApproval } });
+    const id = await openSession(manager);
+
+    await manager.simulateWebviewMessage(id, { type: 'approvalLevel', level: 'full' });
+    await flush();
+
+    expect(confirmClaudeFullApproval).toHaveBeenCalledTimes(1);
+    expect(setters.mode).not.toHaveBeenCalled();
+    expect(suspend).not.toHaveBeenCalled();
   });
 
   it('不正なapprovalLevelは保存せず警告する', async () => {

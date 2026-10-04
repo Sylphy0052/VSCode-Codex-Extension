@@ -4099,9 +4099,12 @@ export function chatScript(
     }
 
     // Shift+Tab で承認レベルを回す（TUIと同じ操作。入力欄にいるときだけ効かせる）。
-    // 「全承認」は循環に入っていないため、連打で保護が外れることはない
+    // 「全承認」は循環に入っていないため、連打で保護が外れることはない。逆に全承認から
+    // 押したときは何もしない。選び直しの手間を伴う全承認を、誤操作1回で全確認へ落とさない
+    // ため（Issue #1888）。下げたいときは選択欄から選ぶ
     if (e.key === 'Tab' && e.shiftKey && APPROVAL_CYCLE.length > 0) {
       e.preventDefault();
+      if (currentApproval === 'full') return;
       const index = APPROVAL_CYCLE.indexOf(currentApproval);
       const next = index === -1 ? APPROVAL_CYCLE[0] : APPROVAL_CYCLE[(index + 1) % APPROVAL_CYCLE.length];
       currentApproval = next;
