@@ -1415,7 +1415,9 @@ export class ClaudeChatViewManager
       (message) => this.log.warn(message),
     );
     // 渡す本文を、新セッションを作る前に残す（Issue #1750）。書けなければポインタを指す本文へ戻す
-    const pointerText = buildHandoffPrompt(pointerPath);
+    const pointerHead = buildHandoffPrompt(pointerPath);
+    // replayの本文を載せずポインタだけを指す本文にも系列の在処を付け、次の世代で系列を切らない
+    const pointerText = buildHandoffPrompt(pointerPath, replay?.marker);
     let firstText = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text);
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
@@ -1482,10 +1484,11 @@ export class ClaudeChatViewManager
     );
     for (const attemptText of handoffAttemptTexts(firstText, pointerText)) {
       // ポインタだけを指す本文へ戻した試行にはreplayが無いので、確認一覧も求めない
+      const asksChecklist = attemptText !== pointerText && (replay?.userCount ?? 0) > 0;
       const promptText = withHandoffAcceptance(
         `${attemptText}\n\n${factsSection}`,
         handoffId,
-        attemptText !== pointerText && (replay?.userCount ?? 0) > 0,
+        asksChecklist,
       );
       const newSessionId = await this.openNew(
         entry.cwd,
@@ -1558,7 +1561,7 @@ export class ClaudeChatViewManager
       const giveUp = new AbortController();
       // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
       // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
-      const sentPointerPath = attemptText.startsWith(pointerText) ? pointerPath : undefined;
+      const sentPointerPath = attemptText.startsWith(pointerHead) ? pointerPath : undefined;
       // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
       const firstResponse = waitForDestinationResponse(
         newEntry,

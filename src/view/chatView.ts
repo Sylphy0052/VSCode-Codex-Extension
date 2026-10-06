@@ -1171,7 +1171,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       (message) => this.log.warn(message),
     );
     // 渡す本文を、新セッションを作る前に残す（Issue #1750）。書けなければポインタを指す本文へ戻す
-    const pointerText = buildHandoffPrompt(pointerPath);
+    const pointerHead = buildHandoffPrompt(pointerPath);
+    // replayの本文を載せずポインタだけを指す本文にも系列の在処を付け、次の世代で系列を切らない
+    const pointerText = buildHandoffPrompt(pointerPath, replay?.marker);
     let firstText = chooseHandoffPrompt(pointerPath, lastAssistantMessage, replay?.text);
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
@@ -1307,11 +1309,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       extractCreatedReferences(state.items),
     );
     // ポインタだけを指す本文へ戻したときはreplayが無いので、確認一覧も求めない
-    const text = withHandoffAcceptance(
-      `${firstText}\n\n${factsSection}`,
-      handoffId,
-      firstText !== pointerText && (replay?.userCount ?? 0) > 0,
-    );
+    const asksChecklist = firstText !== pointerText && (replay?.userCount ?? 0) > 0;
+    const text = withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId, asksChecklist);
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
@@ -1319,7 +1318,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const giveUp = new AbortController();
     // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
     // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
-    const sentPointerPath = firstText.startsWith(pointerText) ? pointerPath : undefined;
+    const sentPointerPath = firstText.startsWith(pointerHead) ? pointerPath : undefined;
     const destination = newEntry;
     // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
     const firstResponse = waitForDestinationResponse(
@@ -4025,12 +4024,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
   private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
     const toSend = entry.promptTransform?.(text) ?? text;
-    // 自動返信・ループが送った本文を残す（Issue #1896）。引き継ぐときに人の発話と見分ける
-    if (this.globalStorageDir !== undefined) {
-      recordAutoSentPrompt(this.globalStorageDir, [toSend, text]).catch((e: unknown) =>
-        this.log.warn(`自動送信の記録を追記できませんでした: ${errorMessage(e)}`),
-      );
-    }
+    this.recordAutoSent([toSend, text]);
     try {
       await entry.session.send(toSend, this.configFor(entry));
       this.reportActivity(entry, text);
@@ -4038,6 +4032,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.reportError(e);
       throw e;
     }
+  }
+
+  /**
+   * 自動返信・ループが送った本文を残す（Issue #1896）。transcript上は人の発話と同じ形になるため、
+   * 引き継ぐときに突き合わせて人の発話と見分ける。残せなくても送信は止めない。
+   */
+  private recordAutoSent(texts: readonly string[]): void {
+    if (this.globalStorageDir === undefined) {
+      return;
+    }
+    recordAutoSentPrompt(this.globalStorageDir, texts).catch((e: unknown) =>
+      this.log.warn(`自動送信の記録を追記できませんでした: ${errorMessage(e)}`),
+    );
   }
 
   /**

@@ -486,12 +486,17 @@ export function buildHandoffPrompt(pointerPath: string, replay?: string): string
  *
  * 必要な申し送りはhandoffプロンプトに揃っているので、ポインタファイルを経由させず本文だけを
  * 渡す。ポインタファイルは抽出コマンドでtranscriptを読ませる作りのため、パスを渡すと読みに行く。
+ *
+ * 系列のreplay（Issue #1896）はhandoffプロンプトの後ろへ置く。受領の判定は初回プロンプトの
+ * 先頭だけを読むため、長いreplayを前に置くと申し送りが判定材料から落ちる。
  */
 export function buildHandoffPromptFromHandoff(handoffPrompt: string, replay?: string): string {
-  if (replay === undefined) {
-    return `${HANDOFF_PROMPT_HEAD}引き継ぎ元が書いた下のhandoffプロンプトの内容だけを引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
-  }
-  return `${HANDOFF_PROMPT_HEAD}下の引き継ぎ系列のユーザー発話と、引き継ぎ元が書いたhandoffプロンプトを引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${replay}\n\n${handoffPrompt}`;
+  const what =
+    replay === undefined
+      ? '引き継ぎ元が書いた下のhandoffプロンプトの内容だけ'
+      : '引き継ぎ元が書いた下のhandoffプロンプトと、その後ろの引き継ぎ系列のユーザー発話';
+  const head = `${HANDOFF_PROMPT_HEAD}${what}を引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
+  return replay === undefined ? head : `${head}\n\n${replay}`;
 }
 
 /**
