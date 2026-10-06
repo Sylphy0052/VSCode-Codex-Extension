@@ -197,10 +197,13 @@ export async function loadAutoSentMatcher(baseDir: string): Promise<AutoSentMatc
   };
 }
 
-/** 初回プロンプトから親の系列ファイルの在処を読む。 */
+/**
+ * 初回プロンプトから親の系列ファイルの在処を読む。拡張が付けた囲いは常に本文の後ろにあり、
+ * その前のhandoffプロンプトには前の世代の囲いが書き写されていることがあるので、最後の一致を採る。
+ */
 export function parseLineageRef(text: string): LineageRef | undefined {
-  const match = REPLAY_OPEN.exec(text);
-  return match === null ? undefined : { lineageId: match[1]!, snapshot: match[2]! };
+  const match = [...text.matchAll(new RegExp(REPLAY_OPEN.source, 'gu'))].at(-1);
+  return match === undefined ? undefined : { lineageId: match[1]!, snapshot: match[2]! };
 }
 
 /** transcriptを1行ずつ取り込み、最後に発話を返す。 */
