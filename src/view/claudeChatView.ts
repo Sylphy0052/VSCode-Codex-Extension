@@ -250,6 +250,7 @@ import {
   resolveHandoffGitFacts,
   withHandoffAcceptance,
 } from './handoffAcceptance';
+import { prepareHandoffReplay, recordAutoSentPrompt } from './handoffLineage';
 import {
   HandoffTrace,
   describeAssessment,
@@ -1407,9 +1408,15 @@ export class ClaudeChatViewManager
       this.reportError(e);
       return 'failed';
     }
+    // 系列全体のユーザー発話を本文へ入れる（Issue #1896）。記録できなければreplay無しで引き継ぐ
+    const replay = await prepareHandoffReplay(
+      this.globalStorageDir,
+      { provider: 'claude', sessionId, transcriptPath, trigger, createdAt },
+      (message) => this.log.warn(message),
+    );
     // 渡す本文を、新セッションを作る前に残す（Issue #1750）。書けなければポインタを指す本文へ戻す
     const pointerText = buildHandoffPrompt(pointerPath);
-    let firstText = chooseHandoffPrompt(pointerPath, handoffSource);
+    let firstText = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text);
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
       sessionId,
@@ -1474,7 +1481,12 @@ export class ClaudeChatViewManager
       extractCreatedReferences(state.items),
     );
     for (const attemptText of handoffAttemptTexts(firstText, pointerText)) {
-      const promptText = withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId);
+      // ポインタだけを指す本文へ戻した試行にはreplayが無いので、確認一覧も求めない
+      const promptText = withHandoffAcceptance(
+        `${attemptText}\n\n${factsSection}`,
+        handoffId,
+        attemptText !== pointerText && (replay?.userCount ?? 0) > 0,
+      );
       const newSessionId = await this.openNew(
         entry.cwd,
         entry.taskConfig,
@@ -1544,8 +1556,9 @@ export class ClaudeChatViewManager
       // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
       // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
       const giveUp = new AbortController();
-      // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）
-      const sentPointerPath = attemptText === pointerText ? pointerPath : undefined;
+      // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
+      // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
+      const sentPointerPath = attemptText.startsWith(pointerText) ? pointerPath : undefined;
       // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
       const firstResponse = waitForDestinationResponse(
         newEntry,
@@ -4441,6 +4454,22 @@ export class ClaudeChatViewManager
       this.reportError(e);
       throw e;
     }
+    this.recordAutoSent([toSend, text]);
+  }
+
+  /**
+   * 自動返信・ループが送った本文を残す（Issue #1896）。transcript上は人の発話と同じ形になるため、
+   * 引き継ぐときに突き合わせて人の発話と見分ける。残せなくても送信は止めない。
+   */
+  private recordAutoSent(texts: readonly string[]): void {
+    if (this.globalStorageDir === undefined) {
+      return;
+    }
+    recordAutoSentPrompt(this.globalStorageDir, texts).catch((e: unknown) =>
+      this.log.warn(
+        `自動送信の記録を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
   }
 
   private reportError(e: unknown): void {

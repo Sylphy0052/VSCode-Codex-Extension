@@ -176,6 +176,7 @@ import {
   resolveHandoffGitFacts,
   withHandoffAcceptance,
 } from './handoffAcceptance';
+import { prepareHandoffReplay, recordAutoSentPrompt } from './handoffLineage';
 import {
   HandoffTrace,
   describeAssessment,
@@ -1163,9 +1164,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.reportError(e);
       return 'failed';
     }
+    // 系列全体のユーザー発話を本文へ入れる（Issue #1896）。記録できなければreplay無しで引き継ぐ
+    const replay = await prepareHandoffReplay(
+      this.globalStorageDir,
+      { provider: 'codex', sessionId: threadId, transcriptPath: rolloutPath, trigger, createdAt },
+      (message) => this.log.warn(message),
+    );
     // 渡す本文を、新セッションを作る前に残す（Issue #1750）。書けなければポインタを指す本文へ戻す
     const pointerText = buildHandoffPrompt(pointerPath);
-    let firstText = chooseHandoffPrompt(pointerPath, lastAssistantMessage);
+    let firstText = chooseHandoffPrompt(pointerPath, lastAssistantMessage, replay?.text);
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
       threadId,
@@ -1299,14 +1306,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       await resolveHandoffGitFacts(entry.cwd, gitBranch),
       extractCreatedReferences(state.items),
     );
-    const text = withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId);
+    // ポインタだけを指す本文へ戻したときはreplayが無いので、確認一覧も求めない
+    const text = withHandoffAcceptance(
+      `${firstText}\n\n${factsSection}`,
+      handoffId,
+      firstText !== pointerText && (replay?.userCount ?? 0) > 0,
+    );
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
     // 残ってしまうため、その場で打ち切る
     const giveUp = new AbortController();
-    // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）
-    const sentPointerPath = firstText === pointerText ? pointerPath : undefined;
+    // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
+    // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
+    const sentPointerPath = firstText.startsWith(pointerText) ? pointerPath : undefined;
     const destination = newEntry;
     // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
     const firstResponse = waitForDestinationResponse(
@@ -4012,6 +4025,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
   private async sendFromLoop(entry: ChatPanel, text: string): Promise<void> {
     const toSend = entry.promptTransform?.(text) ?? text;
+    // 自動返信・ループが送った本文を残す（Issue #1896）。引き継ぐときに人の発話と見分ける
+    if (this.globalStorageDir !== undefined) {
+      recordAutoSentPrompt(this.globalStorageDir, [toSend, text]).catch((e: unknown) =>
+        this.log.warn(`自動送信の記録を追記できませんでした: ${errorMessage(e)}`),
+      );
+    }
     try {
       await entry.session.send(toSend, this.configFor(entry));
       this.reportActivity(entry, text);

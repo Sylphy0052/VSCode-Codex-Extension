@@ -75,9 +75,9 @@ export interface HandoffDigestBuilder {
   result(): HandoffDigest | undefined;
 }
 
-type JsonObject = Record<string, unknown>;
+export type JsonObject = Record<string, unknown>;
 
-function parseLine(line: string): JsonObject | undefined {
+export function parseLine(line: string): JsonObject | undefined {
   if (line.trim() === '') {
     return undefined;
   }
@@ -89,16 +89,16 @@ function parseLine(line: string): JsonObject | undefined {
   }
 }
 
-function isObject(value: unknown): value is JsonObject {
+export function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function str(value: unknown): string | undefined {
+export function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
 /** `slice` は親文字列を掴んだままにするので、長い出力の全体がメモリに残らないようコピーする。 */
-function detach(text: string): string {
+export function detach(text: string): string {
   return Buffer.from(text, 'utf8').toString('utf8');
 }
 
@@ -128,7 +128,7 @@ function pushBounded<T>(list: T[], value: T, limit: number): void {
 }
 
 /** `text` 要素の本文をつなぐ。文字列ならそのまま返す。 */
-function textOf(content: unknown, keys: readonly string[] = ['text']): string {
+export function textOf(content: unknown, keys: readonly string[] = ['text']): string {
   if (typeof content === 'string') {
     return content;
   }
@@ -195,7 +195,7 @@ const ORCHESTRATOR_EVENT_CLOSE = /<\/(?:task-run-event|workflow-event)>/gu;
 /** Orchestratorを開いた直後に送る役割の説明（`buildIntroPrompt`）。人の発話を含まない。 */
 const ORCHESTRATOR_INTRO_HEAD = /^あなたはオーケストレータモードの実行（run: /u;
 
-function stripOrchestratorEvents(text: string): string {
+export function stripOrchestratorEvents(text: string): string {
   if (ORCHESTRATOR_INTRO_HEAD.test(text)) {
     return '';
   }
@@ -225,7 +225,7 @@ function addFailure(state: DigestState, tool: string, error: string): void {
 }
 
 /** Claude Codeが会話へ差し込む、ユーザーの発言ではない行の先頭（`handoff.ts` の抽出コマンドと同じ）。 */
-const CLAUDE_INJECTED_USER_TEXT =
+export const CLAUDE_INJECTED_USER_TEXT =
   /^<(task-notification|local-command|command-name|command-message|command-args|event|ide_|system-reminder|content>)/u;
 
 const TASK_NOTIFICATION_TOOL_USE_ID = /<tool-use-id>([^<]+)<\/tool-use-id>/u;
@@ -407,7 +407,7 @@ export function createClaudeDigestBuilder(): HandoffDigestBuilder {
 }
 
 /** Codexが会話へ差し込む、ユーザーの発言ではない行の先頭（`handoff.ts` の抽出コマンドと同じ）。 */
-const CODEX_INJECTED_USER_TEXT =
+export const CODEX_INJECTED_USER_TEXT =
   /^(<environment_context>|<user_instructions>|# AGENTS.md instructions|<INSTRUCTIONS>)/u;
 
 /** unified execが走り続けているプロセスを返すときの出力（`"session_id":44982`）。 */

@@ -25,20 +25,40 @@ export function newHandoffId(now: Date): string {
   return `${stamp}-${randomBytes(3).toString('hex')}`;
 }
 
-/** 初回プロンプトの末尾へ足す、受領確認の指示。 */
-export function buildHandoffAcceptanceInstruction(handoffId: string): string {
+/**
+ * 初回プロンプトの末尾へ足す、受領確認の指示。
+ *
+ * `withChecklist` は本文に系列全体のユーザー発話（Issue #1896）が入っているとき。3点のあとに、
+ * 今も有効な指示を読み取った結果を出させる。受領行は確認一覧より後に書かせる。
+ */
+export function buildHandoffAcceptanceInstruction(
+  handoffId: string,
+  withChecklist = false,
+): string {
+  const steps = ['「前セッションでやったこと / 未解決・未履行 / これからやること」の3点を出す'];
+  if (withChecklist) {
+    steps.push(
+      '「引き継ぎ系列のユーザー発話」から確認一覧を出す。「現在有効な指示」「撤回・置換された指示」「曖昧な指示」の3つに分け、各項目に出典のU ID（例: U3）を付ける。確認一覧はファイルに保存しない',
+    );
+  }
+  steps.push(
+    `そのあと、次の1行を単独の行で書く（前後に装飾を付けない）: ${HANDOFF_ACCEPTED_TOKEN} ${handoffId}`,
+  );
   return [
     '',
     '---',
     '受け取ったら、次の順で応答すること。',
-    '1. 「前セッションでやったこと / 未解決・未履行 / これからやること」の3点を出す',
-    `2. そのあと、次の1行を単独の行で書く（前後に装飾を付けない）: ${HANDOFF_ACCEPTED_TOKEN} ${handoffId}`,
+    ...steps.map((step, i) => `${i + 1}. ${step}`),
   ].join('\n');
 }
 
 /** 初回プロンプトへ受領確認の指示を足す。 */
-export function withHandoffAcceptance(text: string, handoffId: string): string {
-  return `${text}\n${buildHandoffAcceptanceInstruction(handoffId)}`;
+export function withHandoffAcceptance(
+  text: string,
+  handoffId: string,
+  withChecklist = false,
+): string {
+  return `${text}\n${buildHandoffAcceptanceInstruction(handoffId, withChecklist)}`;
 }
 
 const ACCEPTED_LINE = new RegExp(`^\\s*${HANDOFF_ACCEPTED_TOKEN}\\s+(\\S+)\\s*$`, 'gmu');

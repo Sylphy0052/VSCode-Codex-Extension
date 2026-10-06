@@ -472,9 +472,13 @@ export async function writeHandoffPointer(
  * transcriptのパスを直接渡していた頃（issue #694）は「transcriptを読んで要約し」という
  * 文言だったため、新セッションが冒頭で全文を読み込んでいた。読む順序と読まないものは
  * ポインタファイル側に書いてあるので、プロンプトは短く保つ。
+ *
+ * `replay`（Issue #1896）は系列全体のユーザー発話の節。ポインタファイルには最後の圧縮より後の
+ * 末尾しか載らないため、本文へ直に入れる。
  */
-export function buildHandoffPrompt(pointerPath: string): string {
-  return `${HANDOFF_PROMPT_HEAD}${pointerPath} を読んで、そこに書かれた手順で状況を把握してから作業を続けて。前セッションのtranscriptは全文読み込まないこと。`;
+export function buildHandoffPrompt(pointerPath: string, replay?: string): string {
+  const head = `${HANDOFF_PROMPT_HEAD}${pointerPath} を読んで、そこに書かれた手順で状況を把握してから作業を続けて。前セッションのtranscriptは全文読み込まないこと。`;
+  return replay === undefined ? head : `${head}\n\n${replay}`;
 }
 
 /**
@@ -483,8 +487,11 @@ export function buildHandoffPrompt(pointerPath: string): string {
  * 必要な申し送りはhandoffプロンプトに揃っているので、ポインタファイルを経由させず本文だけを
  * 渡す。ポインタファイルは抽出コマンドでtranscriptを読ませる作りのため、パスを渡すと読みに行く。
  */
-export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
-  return `${HANDOFF_PROMPT_HEAD}引き継ぎ元が書いた下のhandoffプロンプトの内容だけを引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
+export function buildHandoffPromptFromHandoff(handoffPrompt: string, replay?: string): string {
+  if (replay === undefined) {
+    return `${HANDOFF_PROMPT_HEAD}引き継ぎ元が書いた下のhandoffプロンプトの内容だけを引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
+  }
+  return `${HANDOFF_PROMPT_HEAD}下の引き継ぎ系列のユーザー発話と、引き継ぎ元が書いたhandoffプロンプトを引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${replay}\n\n${handoffPrompt}`;
 }
 
 /**
@@ -494,12 +501,13 @@ export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
 export function chooseHandoffPrompt(
   pointerPath: string,
   lastAssistantMessage: string | undefined,
+  replay?: string,
 ): string {
   const handoffPrompt =
     lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
   return handoffPrompt === undefined
-    ? buildHandoffPrompt(pointerPath)
-    : buildHandoffPromptFromHandoff(handoffPrompt);
+    ? buildHandoffPrompt(pointerPath, replay)
+    : buildHandoffPromptFromHandoff(handoffPrompt, replay);
 }
 
 /**
@@ -550,7 +558,7 @@ export function handoffAttemptTexts(text: string, pointerText: string): string[]
  * 引き継ぎ先の1件目のユーザー発言がこの手続き由来であることを見分けるための目印として
  * 切り出してある。
  */
-const HANDOFF_PROMPT_HEAD = '前セッションの続き。';
+export const HANDOFF_PROMPT_HEAD = '前セッションの続き。';
 
 /** 引き継ぎ先の名前に付ける世代の印（Issue #1145）。 */
 const CONTINUATION_SUFFIX = /^(.*?)\s*\(続き(\d+)\)$/u;
