@@ -13,7 +13,8 @@ import * as path from 'node:path';
 import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
 import type { Logger } from '../log';
-import { parseUsageReport } from './usageText';
+import { probeIntervalMs } from './accountPolicy';
+import { parseUsageReport, parseUsageSlots, type UsageSlots } from './usageText';
 
 /** 応答が返らないまま居座らせない。使用量は無くても困らない情報なので短く切る。 */
 const TIMEOUT_MS = 20_000;
@@ -63,12 +64,30 @@ interface SharedUsageRecord {
   usage: ChatUsage | undefined;
   /** `readAt`の時点での連続失敗の回数。ウィンドウをまたいで数える。 */
   failures: number;
+  /** `readAt`の時点の、5時間枠と週次のうち高い方の使用率。次の取得間隔を決める（Issue #1924）。 */
+  highestPct?: number;
 }
 
-/** 連続失敗が`failures`回のとき、`readAt`から次に取得するまでの間隔。 */
-function intervalAfter(failures: number): number {
+/**
+ * 取得したアカウントの使用率を記録する先（Issue #1924）。稼働中のアカウントだけを取りに行き、
+ * 待機中のアカウントには触れない。
+ */
+export interface UsageProbeAccounts {
+  /** 取得を始める時点で稼働中のアカウントの`<id>`。登録が無ければ`undefined`。 */
+  currentId(): Promise<string | undefined>;
+  /** 取得した枠を`id`の記録へ書く。取得中に切り替わっていたら呼び出し側が捨てる。 */
+  record(id: string, slots: UsageSlots, nowMs: number): Promise<void>;
+  /** 取得に成功した後に呼ぶ（自動切り替えの判断を行う）。 */
+  onProbed?(slots: UsageSlots, nowMs: number): Promise<void>;
+}
+
+/**
+ * 連続失敗が`failures`回のとき、`readAt`から次に取得するまでの間隔。失敗が無ければ、
+ * 使用率が高いほど短くする（Issue #1924）。
+ */
+function intervalAfter(failures: number, highestPct = 0): number {
   if (failures <= 0) {
-    return MIN_INTERVAL_MS;
+    return Math.min(MIN_INTERVAL_MS, probeIntervalMs(highestPct));
   }
   // 指数が大きくてもInfinityで頭打ちになり、minで上限に収まる
   return Math.min(RETRY_INTERVAL_MS * 2 ** (failures - 1), MIN_INTERVAL_MS);
@@ -101,7 +120,30 @@ export class ClaudeUsageProbe {
      * `ExtensionContext.globalStorageUri.fsPath`を渡す。未指定ならウィンドウ内だけで間隔を空ける。
      */
     private readonly sharedDir?: string,
+    /** 取得した枠の記録先と自動切り替えの呼び出し先（Issue #1924）。未指定なら記録しない。 */
+    private readonly accounts?: UsageProbeAccounts,
   ) {}
+
+  /** 取得した枠を稼働中だったアカウントへ記録し、自動切り替えの判断を呼ぶ。失敗しても取得は成功扱い。 */
+  private async recordSlots(
+    startedAccount: string | undefined,
+    slots: UsageSlots,
+    now: number,
+  ): Promise<void> {
+    if (this.accounts === undefined) {
+      return;
+    }
+    try {
+      if (startedAccount !== undefined) {
+        await this.accounts.record(startedAccount, slots, now);
+      }
+      await this.accounts.onProbed?.(slots, now);
+    } catch (e) {
+      this.log.warn(
+        `使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
 
   /**
    * 前回から間隔が空いていれば読む。
@@ -148,11 +190,22 @@ export class ClaudeUsageProbe {
       this.launched = true;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
       await this.writeShared({ readAt: now, usage: undefined, failures });
+      const startedAccount = await this.accounts?.currentId().catch(() => undefined);
       const output = await this.run();
       const usage = output === undefined ? undefined : parseUsageReport(output);
+      const slots = output === undefined ? undefined : parseUsageSlots(output, now);
+      const highestPct = slots === undefined ? undefined : highestOf(slots);
       const nextFailures = usage === undefined ? failures + 1 : 0;
-      this.recordResult(now, nextFailures);
-      await this.writeShared({ readAt: now, usage, failures: nextFailures });
+      this.recordResult(now, nextFailures, highestPct);
+      await this.writeShared({
+        readAt: now,
+        usage,
+        failures: nextFailures,
+        ...(highestPct === undefined ? {} : { highestPct }),
+      });
+      if (slots !== undefined) {
+        await this.recordSlots(startedAccount, slots, now);
+      }
       return usage;
     } finally {
       if (claimed) {
@@ -167,7 +220,7 @@ export class ClaudeUsageProbe {
     const shared = await this.readShared();
     return shared !== undefined &&
       shared.readAt <= now &&
-      now - shared.readAt < intervalAfter(shared.failures)
+      now - shared.readAt < intervalAfter(shared.failures, shared.highestPct)
       ? shared
       : undefined;
   }
@@ -175,7 +228,7 @@ export class ClaudeUsageProbe {
   /** 他のウィンドウが読んだ結果に合わせて、次に取得する時刻を決める。 */
   private adopt(record: SharedUsageRecord): ChatUsage | undefined {
     this.failures = record.failures;
-    this.nextReadAt = record.readAt + intervalAfter(record.failures);
+    this.nextReadAt = record.readAt + intervalAfter(record.failures, record.highestPct);
     if (record.usage !== undefined) {
       this.stopped = false;
     }
@@ -183,9 +236,9 @@ export class ClaudeUsageProbe {
   }
 
   /** 自分で取得した結果から、次に取得する時刻と停止を決める。 */
-  private recordResult(now: number, failures: number): void {
+  private recordResult(now: number, failures: number, highestPct?: number): void {
     this.failures = failures;
-    this.nextReadAt = now + intervalAfter(failures);
+    this.nextReadAt = now + intervalAfter(failures, highestPct);
     if (failures === 0) {
       this.stopped = false;
       return;
@@ -366,6 +419,11 @@ export class ClaudeUsageProbe {
   }
 }
 
+/** 5時間枠と週次のうち高い方の使用率。 */
+function highestOf(slots: UsageSlots): number {
+  return Math.max(slots.fiveHour?.pct ?? 0, slots.weekly?.pct ?? 0);
+}
+
 /** 共有ファイルを信用せずに読む。別の版の拡張機能が書いた形の違う値は捨てる。 */
 function parseSharedUsageRecord(raw: string): SharedUsageRecord | undefined {
   const parsed: unknown = JSON.parse(raw);
@@ -382,7 +440,14 @@ function parseSharedUsageRecord(raw: string): SharedUsageRecord | undefined {
     typeof v.failures === 'number' && Number.isSafeInteger(v.failures) && v.failures > 0
       ? v.failures
       : 0;
-  return { readAt: v.readAt, usage: parseSharedUsage(v.usage), failures };
+  const highestPct =
+    typeof v.highestPct === 'number' && Number.isFinite(v.highestPct) ? v.highestPct : undefined;
+  return {
+    readAt: v.readAt,
+    usage: parseSharedUsage(v.usage),
+    failures,
+    ...(highestPct === undefined ? {} : { highestPct }),
+  };
 }
 
 function parseSharedUsage(value: unknown): ChatUsage | undefined {

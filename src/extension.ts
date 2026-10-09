@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
+import { AccountAutoSwitcher } from './claude/accountAutoSwitch';
 import { ClaudeAccountStore } from './claude/accountStore';
 import { ClaudeAgentProbe } from './claude/agentProbe';
 import { ClaudeAuthActions } from './claude/authActions';
@@ -39,6 +40,7 @@ import {
   currentWorkspaceFolder,
   readActivityLogConfig,
   readAnswererJudgeConfig,
+  readClaudeAutoSwitchConfig,
   readClaudeConfig,
   readConfig,
   readSessionMessagingEnabled,
@@ -584,19 +586,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 設定パネル。Codex画面のインポートボタン（issue #227、下の`chat`構築）がパネルを
   // 表示してセクションを展開する経路（`revealSection`）を使うため、`chat`より先に
   // 構築しておく（以前はセッション一覧まわりの構築の後段でまとめて作っていた）
+  // 複数アカウントの切り替え（Issue #1921）。保存先は検証スクリプトと共通の `<claudeHome>/accounts/`
+  const claudeAccounts = {
+    store: new ClaudeAccountStore(claudeHome),
+    readIdentity: async () => {
+      const snapshot = await claudeAuth.read();
+      return snapshot.ok && snapshot.account.loggedIn ? snapshot.account.identity : undefined;
+    },
+  };
   const panel = new ControlPanelViewProvider(
     settings,
     log,
     (context.extension.packageJSON as { version?: string }).version,
     userSkills,
-    // 複数アカウントの切り替え（Issue #1921）。保存先は検証スクリプトと共通の `<claudeHome>/accounts/`
-    {
-      store: new ClaudeAccountStore(claudeHome),
-      readIdentity: async () => {
-        const snapshot = await claudeAuth.read();
-        return snapshot.ok && snapshot.account.loggedIn ? snapshot.account.identity : undefined;
-      },
-    },
+    claudeAccounts,
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
@@ -651,6 +654,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
   context.subscriptions.push(chat);
 
+  // 使用率に応じたアカウントの自動切り替え（Issue #1924）。切り替え後のCLIの入れ直しは
+  // `claudeChat`の構築後でなければ呼べないため、呼び出し時に読み直す
+  const accountAutoSwitcher = new AccountAutoSwitcher({
+    store: claudeAccounts.store,
+    readIdentity: claudeAccounts.readIdentity,
+    config: readClaudeAutoSwitchConfig,
+    notify: (message) => void vscode.window.showInformationMessage(message),
+    onSwitched: async () => {
+      await claudeChat.restartIdleSessions();
+      await panel.refresh();
+    },
+    warn: (message) => log.warn(message),
+  });
   const claudeChat = new ClaudeChatViewManager(
     claudePath,
     nodeFileSystem,
@@ -673,6 +689,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     context.globalStorageUri.fsPath,
     pinnedSessions,
     { marks: manuallyNamedSessions },
+    accountAutoSwitcher,
   );
   context.subscriptions.push(claudeChat);
 

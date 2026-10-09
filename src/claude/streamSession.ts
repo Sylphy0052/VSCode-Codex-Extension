@@ -292,6 +292,11 @@ export class ClaudeStreamSession {
      * すべてメモリに持つ（テストやディスクを使えない経路のため）。
      */
     outputOffload?: OutputOffloadPort,
+    /**
+     * CLIの設定ディレクトリ（`claude.configDir`。Issue #1924）。渡したときだけ `CLAUDE_CONFIG_DIR`
+     * へ入れる。アカウントの認証情報（`.credentials.json`）をCLIと拡張機能が同じ場所で扱うため。
+     */
+    private readonly configDir?: string,
   ) {
     this.state = {
       ...initialClaudeState,
@@ -461,6 +466,9 @@ export class ClaudeStreamSession {
       env: {
         ...process.env,
         CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1',
+        ...(this.configDir === undefined || this.configDir === ''
+          ? {}
+          : { CLAUDE_CONFIG_DIR: this.configDir }),
         ...(this.state.autoHandoff ? { AGENT_EXTENSION_AUTO_HANDOFF: '1' } : {}),
       },
     });
