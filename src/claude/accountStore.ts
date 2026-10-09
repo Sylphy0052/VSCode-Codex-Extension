@@ -346,6 +346,8 @@ export class ClaudeAccountStore {
           return this.withOauthAccountSynced(id);
         }
       }
+      // 書き戻しの後にCLIが更新していたら、上書きすると新しいrefresh tokenを失う。退避先に
+      // 書いた方は古くなるだけで、次の切り替えで新しい方が書き戻される
       if (!(await this.liveUnchanged(live))) {
         return { ok: false, reason: LIVE_CHANGED_REASON };
       }
@@ -551,12 +553,13 @@ export class ClaudeAccountStore {
       for (const other of ids) {
         await this.readRawMeta(other);
       }
-      const savedPlan = readPlan(await readFile(join(this.slot(current), CREDENTIALS)));
+      const savedCurrent = await readOptional(join(this.slot(current), CREDENTIALS));
+      const savedPlan = savedCurrent === undefined ? undefined : readPlan(savedCurrent);
       const livePlan = readPlan(live);
       if (savedPlan !== undefined && livePlan !== undefined && savedPlan !== livePlan) {
         return {
           ok: false,
-          reason: `今ログインしているアカウント（${describeIdentity(identity)}・${livePlan}）は、稼働中として記録した「${name}」（${savedPlan}）とプランが違います。切り替えると認証情報が失われるため止めました。先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください`,
+          reason: `今ログインしているアカウント（${describeIdentity(identity)}・${livePlan}）は、稼働中として記録した「${name}」（${savedPlan}）とプランが違います。切り替えると認証情報が失われるため止めました。先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください（同じアカウントでプランを変えた場合は、登録した後に「${name}」を削除してください）`,
         };
       }
       return {
@@ -1078,14 +1081,17 @@ async function withCliConfigLock<T>(path: string, task: () => Promise<T>): Promi
       }
     }
     if (Date.now() >= deadline) {
-      throw new Error('Claude Codeが設定を書き換え中のため待ちきれませんでした');
+      throw new Error(
+        'Claude Codeが設定を書き換え中のため待ちきれませんでした（Claude Codeの表示するメールアドレスは、次に切り替えるまで古いままです）',
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
   }
+  // 持つのは読み書きの数msだけなので、CLIが古いとみなす10秒には届かない（mtimeは更新しない）
   try {
     return await task();
   } finally {
-    await rm(lock, { recursive: true, force: true });
+    await rm(lock, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
