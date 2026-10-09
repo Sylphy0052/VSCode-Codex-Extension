@@ -171,6 +171,7 @@ async function judgeQuestion(
       : 'オーケストレーター（複数のAIエージェントの作業を指揮するAIエージェント）が、ユーザーへ問いを出そうとしている。' +
         'この問いを本当にユーザーへ出すか、オーケストレーターに自分で決めさせるかを決めようとしている。状態は問いの内容である。';
   const answers = await judge(deps, {
+    caller: '問いの回答者判定',
     situation,
     state: buildQuestionState(
       caution === undefined
@@ -231,6 +232,7 @@ async function judgeTurnEnd(
   }
   const caution = describeCautionDangers(dangers);
   const answers = await judge(deps, {
+    caller: 'ターン末の回答者判定',
     situation:
       'オーケストレーター（複数のAIエージェントの作業を指揮するAIエージェント）が1ターンを終えて、ユーザーの発言を待っている。' +
       '状態はその直前の出力である。出力がユーザーへ問いかけているなら、その問いをオーケストレーターに自分で決めさせるかを決めようとしている。',

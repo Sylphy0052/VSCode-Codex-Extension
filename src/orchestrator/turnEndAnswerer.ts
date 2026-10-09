@@ -2,6 +2,9 @@ import type { ChatItem } from '../appserver/chatState';
 import { lastAgentMessage } from '../loop/loopEngineering';
 import type { AnswererVerdict } from '../reflex/answererJudge';
 
+/** ターン末の回答者判定を始めるまでの待ち（Issue #1912）。 */
+export const TURN_END_JUDGE_DEBOUNCE_MS = 5_000;
+
 /**
  * ターン末の問いかけの回答者判定（Issue #1708）。オーケストレーターがターンを終えて待機へ
  * 戻ったとき、直前の出力の問いかけをオーケストレーター自身が決めてよいとReflexが判定したら、
@@ -20,6 +23,14 @@ export class TurnEndAnswererNudge {
   private judgedMessageId: string | undefined;
   /** `reset`のたびに進める。判定の間に次の発言・イベントが送られたら、古い判定では促さない。 */
   private epoch = 0;
+
+  /**
+   * @param debounceMs 待機へ戻ってから判定を始めるまでの待ち。この間に次の発言・イベントが送られたら
+   *   判定しない（Issue #1912）。判定器の起動の半数超がこの判定で、その過半は直前の判定から10秒以内
+   *   だった。イベントが続けて届くとOrchestratorは短いターンを繰り返し、判定の結果は次のターンが
+   *   始まった時点で捨てられていた
+   */
+  constructor(private readonly debounceMs: number = TURN_END_JUDGE_DEBOUNCE_MS) {}
 
   reset(): void {
     this.nudged = false;
@@ -46,6 +57,18 @@ export class TurnEndAnswererNudge {
     // 呼び直さないため（促しが落ちても、問いはユーザーへ残るので安全側）
     this.judgedMessageId = message.id;
     const epoch = this.epoch;
+    if (this.debounceMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.debounceMs));
+      // 待つ間に次の発言・イベントが送られた、または新しい出力の判定が始まった
+      if (epoch !== this.epoch || this.nudged || this.judgedMessageId !== message.id) {
+        // 判定せずに退いた発言は判定済みにしない。次のターンが新しい発言を出さずに終わったとき、
+        // 同じ発言をもう一度判定にかけられるようにする
+        if (this.judgedMessageId === message.id) {
+          this.judgedMessageId = undefined;
+        }
+        return;
+      }
+    }
     let verdict: AnswererVerdict;
     try {
       verdict = await judge(message.text);

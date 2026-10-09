@@ -63,6 +63,11 @@ export interface ReflexRequest {
   /** 判定の対象（エージェントの出力など）。外部由来として囲って渡す。 */
   readonly state: string;
   readonly questions: readonly ReflexQuestion[];
+  /**
+   * 呼び出し元の名前（例: `自動返信の要否`）。`[headless]`ログの`kind`と警告の主語に入れ、
+   * どの呼び出し元が判定を多く起こしているかをログで追えるようにする（Issue #1912）。
+   */
+  readonly caller?: string;
 }
 
 export type ReflexJudgeDeps = Omit<ReflexCliDeps, 'timeoutMs'> & {
@@ -100,7 +105,7 @@ export async function judge(
   return runReflexJson(
     { ...deps, timeoutMs: deps.timeoutMs ?? REFLEX_TIMEOUT_MS },
     buildReflexPrompt(request),
-    'Reflexの判定',
+    request.caller === undefined ? 'Reflexの判定' : `Reflexの判定（${request.caller}）`,
     (text) => parseReflexAnswers(text, request.questions),
   );
 }

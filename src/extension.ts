@@ -155,7 +155,7 @@ import {
 import { ProviderRegistry } from './provider/registry';
 import type { AgentProvider } from './provider/types';
 import { createLogger, type Logger } from './log';
-import { configureHeadlessCliLog } from './loop/headlessCli';
+import { configureHeadlessCliLog, configureHeadlessCliSharedDir } from './loop/headlessCli';
 import {
   buildEffectivePresetConfig,
   buildSessionPresetQuickPickLabel,
@@ -396,6 +396,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 短命CLIの呼び出し元ごとの回数と所要時間（Issue #1807）
   configureHeadlessCliLog((message) => log.info(message));
   context.subscriptions.push({ dispose: () => configureHeadlessCliLog(undefined) });
+  // 短命CLIの同時実行をウィンドウの間でも1本に絞る（Issue #1912）
+  configureHeadlessCliSharedDir(context.globalStorageUri.fsPath, (message) => log.warn(message));
+  context.subscriptions.push({ dispose: () => configureHeadlessCliSharedDir(undefined) });
 
   // 通知音の音源置き場を覚えさせる（issue #1242）。`resources/`配下のWAVを鳴らすため、
   // 拡張機能のインストール先が要る

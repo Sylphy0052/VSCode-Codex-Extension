@@ -76,6 +76,7 @@ export async function judgeHandoffAcceptance(
   material: HandoffAcceptanceMaterial,
 ): Promise<number | undefined> {
   const answers = await judge(deps, {
+    caller: '引き継ぎの受領確認',
     situation: [
       'AIエージェントのセッションを新しいセッションへ引き継いだ。拡張機能は、引き継ぎ先が引き継ぎの本文を',
       '受け取って読めたかを確かめてから、引き継ぎ元の画面を閉じようとしている。引き継ぎ先には受領を示す',
