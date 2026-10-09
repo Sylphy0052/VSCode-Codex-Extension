@@ -52,7 +52,8 @@ export interface GenerateImageRequest {
 
 export type GenerateImageResult =
   | { ok: true; paths: string[]; conversationUrl: string }
-  | { ok: false; error: string };
+  /** conversationUrlは送信後に失敗したとき、生成に使った会話。続きの指示で解消できるよう返す */
+  | { ok: false; error: string; conversationUrl?: string };
 
 export interface GenerateImageDeps {
   endpoint: string;
@@ -64,7 +65,14 @@ export interface GenerateImageDeps {
 
 class GenerationError extends Error {}
 /** 指示を送った後の失敗。呼び出し元が再送して重複生成しないよう、その旨を文言に含める。 */
-class SentGenerationError extends GenerationError {}
+class SentGenerationError extends GenerationError {
+  constructor(
+    message: string,
+    readonly conversationUrl: string | undefined,
+  ) {
+    super(message);
+  }
+}
 
 /** 引数を検証する。不正なら理由の文言を返す。 */
 export function parseGenerateImageArgs(
@@ -126,6 +134,9 @@ export async function generateImage(
     const sessionId = stringField(attached, 'sessionId');
     return await runInTab(browser, sessionId, request, deps);
   } catch (error) {
+    if (error instanceof SentGenerationError && error.conversationUrl !== undefined) {
+      return { ok: false, error: errorText(error), conversationUrl: error.conversationUrl };
+    }
     return { ok: false, error: errorText(error) };
   } finally {
     if (targetId !== undefined) {
@@ -174,6 +185,7 @@ async function runInTab(
     if (request.conversationUrl !== undefined && answer.conversationUrl !== request.conversationUrl) {
       throw new SentGenerationError(
         `指定した会話とは別の会話で生成されました（${answer.conversationUrl}）。再送はしていません。会話URLを確認してください`,
+        answer.conversationUrl,
       );
     }
     if (answer.images.length === 0) {
@@ -186,6 +198,7 @@ async function runInTab(
       throw new SentGenerationError(
         `ChatGPTの回答に画像がありません。生成回数の制限、拒否、質問返しの可能性があります。再送はしていません。会話: ${answer.conversationUrl}` +
           (excerpt === '' ? '' : `\n${excerpt}`),
+        answer.conversationUrl,
       );
     }
 
@@ -200,6 +213,7 @@ async function runInTab(
     throw new SentGenerationError(
       `${errorText(error)}。指示は送信済みで、再送はしていません。もう一度呼ぶ前にChatGPTの画面を確認してください` +
         (conversationUrl === undefined ? '' : `（${conversationUrl}）`),
+      conversationUrl,
     );
   }
 }
@@ -312,7 +326,7 @@ async function saveImages(dataUrls: unknown[], outputDir: string): Promise<strin
     }
     return { bytes, extension: match[1] === 'jpeg' ? 'jpg' : (match[1] ?? 'png') };
   });
-  await mkdir(outputDir, { recursive: true });
+  await mkdir(outputDir, { recursive: true, mode: 0o700 });
   const stamp = timestamp(new Date());
   const paths: string[] = [];
   for (const [index, { bytes, extension }] of images.entries()) {

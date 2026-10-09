@@ -197,6 +197,8 @@ async function handleToolCall(
   state.queue = run.catch(() => undefined);
   const result = await run;
   if (!result.ok) {
+    // 送信後の失敗（画像なし・質問返しなど）は、同じ会話で続きを頼めるようにする
+    if (result.conversationUrl !== undefined) state.conversations.add(result.conversationUrl);
     return success(request.id, toolTextResult(result.error, true));
   }
   state.conversations.add(result.conversationUrl);
