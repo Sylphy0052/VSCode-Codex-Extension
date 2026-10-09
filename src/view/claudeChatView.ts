@@ -70,6 +70,7 @@ import {
   setChatProsConsEnabled,
   readChatLimitAutoResumeEnabled,
   setChatLimitAutoResumeEnabled,
+  setClaudeAutoSwitchEnabled,
   readReflexEnabled,
   setReflexEnabled,
   readAutoHandoffEnabled,
@@ -3721,6 +3722,7 @@ export class ClaudeChatViewManager
       loopEngineeringEnabled: readChatLoopEngineeringConfig().enabled,
       loopAdvisorEnabled: readLoopAdvisorConfig().enabled,
       limitAutoResumeEnabled: readChatLimitAutoResumeEnabled(),
+      claudeAutoSwitchEnabled: readClaudeAutoSwitchConfig().enabled,
       reflexEnabled: this.reflexEnabledFor(entry),
       // effort・エージェントだけ扱いが違う。黙って効かないより、効くタイミングを書くほうがまし
       settingsNote:
@@ -4067,6 +4069,18 @@ export class ClaudeChatViewManager
         type: 'reflex',
         enabled: this.reflexEnabledFor(entry),
       });
+    }
+  }
+
+  /**
+   * アカウントの自動切り替え（`claude.accounts.autoSwitch.enabled`）のトグル表示を全会話で揃える。
+   * 設定の書き込み時は`extension.ts`の`onDidChangeConfiguration`から呼ばれる。ユーザー設定なので
+   * 全ウィンドウ・全会話で1つの値を共有する。
+   */
+  refreshAutoSwitch(): void {
+    const enabled = readClaudeAutoSwitchConfig().enabled;
+    for (const entry of this.allPanels()) {
+      void entry.panel?.webview.postMessage({ type: 'claudeAutoSwitch', enabled });
     }
   }
 
@@ -5135,6 +5149,13 @@ export class ClaudeChatViewManager
           // 届くのはClaude Code画面の会話だけで、Codex画面へは`extension.ts`の
           // `onDidChangeConfiguration`（設定の書き込みで発火する）経由で届く
           .then(() => this.refreshLimitAutoResume())
+          .catch((e: unknown) => this.reportError(e));
+        return;
+      }
+      if (type === 'toggleClaudeAutoSwitch') {
+        void setClaudeAutoSwitchEnabled(!readClaudeAutoSwitchConfig().enabled)
+          // 書き込みで実効値が変わらない場合（ワークスペース側の上書き）は設定変更が発火しないので、ここでも揃える
+          .then(() => this.refreshAutoSwitch())
           .catch((e: unknown) => this.reportError(e));
         return;
       }

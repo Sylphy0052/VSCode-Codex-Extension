@@ -1209,6 +1209,8 @@ export interface ChatShellOptions {
   loopAdvisorEnabled?: boolean;
   /** CodexまたはClaude Codeの使用量上限解除後の自動続行が有効か。 */
   limitAutoResumeEnabled?: boolean;
+  /** Claude Codeのアカウント自動切り替えが有効か。未指定（Codex画面）ならトグルを出さない。 */
+  claudeAutoSwitchEnabled?: boolean;
   /**
    * Reflexモード（`agent.chat.reflex.enabled`、issue #1455）が有効か。
    * 「…」メニューのトグルの初期状態に使う。
@@ -1670,7 +1672,12 @@ ${chatStyles()}
           <button id="loopEngineeringToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopEngineeringEnabled === true}" aria-label="ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}" title="ループが送る指示の末尾へ、機械的な検証・方針変更・撤退の申告の方針を毎回付けるか切り替えます">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">ループエンジニアリングを${options.loopEngineeringEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="loopAdvisorToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.loopAdvisorEnabled === true}" aria-label="ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}" title="ゴール駆動ループの各ターンのあとに、独立したAdvisorセッション（既定ではCodexのgpt-6.1-sol）へ進め方の妥当性を確認させるか切り替えます。目的と受入基準を入れたループでのみ動きます。毎ターンCLIの呼び出しが1本増え、Claude Codeの会話でも抜粋はCodexへ送られます。相談先を変えるにはsettings.jsonのagent.chat.loopAdvisor.provider / .modelを指定します">${COMPOSER_ICONS.secondOpinion}<span class="composerOverflowLabel">ループAdvisorを${options.loopAdvisorEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="limitAutoResumeToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.limitAutoResumeEnabled === true}" aria-label="上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}" title="使用量上限のリセット時刻から30秒後に継続指示を送ります。時刻がない場合は30分後に確認し、再開しても上限中なら1分後に再試行します。会話を閉じた場合、承認待ちの場合、手動で中断した場合は送信しません。">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">上限解除後に自動続行を${options.limitAutoResumeEnabled === true ? '無効にする' : '有効にする'}</span></button>
-          <button id="reflexToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.reflexEnabled === true}" aria-label="Reflexモードを${options.reflexEnabled === true ? '無効にする' : '有効にする'}" title="会話しているCLIの軽量モデルで、自動返信の完了検証・質問への自動回答・危険度ゲート、条件付きループの完了宣言の検証、依頼ごとのskill選択を判定します。判定1回に数秒〜十数秒かかり、利用枠も使います。Codexのskill選択は、有効にした後に開いた会話から効きます。設定として保存され、すべての会話に効きます">${COMPOSER_ICONS.reflex}<span class="composerOverflowLabel">Reflexモードを${options.reflexEnabled === true ? '無効にする' : '有効にする'}</span></button>
+          ${
+            options.claudeAutoSwitchEnabled === undefined
+              ? ''
+              : `<button id="claudeAutoSwitchToggle" type="button" class="secondary" role="menuitem" aria-pressed="${options.claudeAutoSwitchEnabled}" aria-label="アカウント自動切り替えを${options.claudeAutoSwitchEnabled ? '無効にする' : '有効にする'}" title="使用率が閾値に達したら、登録済みのClaudeアカウントを優先度順に自動で切り替えます。設定として保存され、すべてのウィンドウ・会話に効きます">${COMPOSER_ICONS.loop}<span class="composerOverflowLabel">アカウント自動切り替えを${options.claudeAutoSwitchEnabled ? '無効にする' : '有効にする'}</span></button>`
+          }
+          <button id="reflexToggle"type="button" class="secondary" role="menuitem" aria-pressed="${options.reflexEnabled === true}" aria-label="Reflexモードを${options.reflexEnabled === true ? '無効にする' : '有効にする'}" title="会話しているCLIの軽量モデルで、自動返信の完了検証・質問への自動回答・危険度ゲート、条件付きループの完了宣言の検証、依頼ごとのskill選択を判定します。判定1回に数秒〜十数秒かかり、利用枠も使います。Codexのskill選択は、有効にした後に開いた会話から効きます。設定として保存され、すべての会話に効きます">${COMPOSER_ICONS.reflex}<span class="composerOverflowLabel">Reflexモードを${options.reflexEnabled === true ? '無効にする' : '有効にする'}</span></button>
           <button id="favoriteToggle" type="button" class="secondary" role="menuitem" aria-pressed="false" aria-label="後で実施に追加" title="サイドバーの「後で実施」ビューへ追加します。タブを閉じても一覧に残り、クリックで再開できます（Issue #1366）" hidden>${COMPOSER_ICONS.favorite}<span class="composerOverflowLabel">後で実施に追加</span></button>
         </div>
       </div>

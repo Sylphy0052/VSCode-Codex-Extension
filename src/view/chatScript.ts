@@ -3693,6 +3693,23 @@ export function chatScript(
     renderLimitAutoResumeStatus({ enabled: enabled });
   }
 
+  // アカウントの自動切り替え。Claude Code画面だけにあるボタンで、ユーザー設定を共有する
+  const claudeAutoSwitchToggle = el('claudeAutoSwitchToggle');
+  if (claudeAutoSwitchToggle) {
+    claudeAutoSwitchToggle.addEventListener('click', () =>
+      vscode.postMessage({ type: 'toggleClaudeAutoSwitch' }),
+    );
+  }
+
+  function applyClaudeAutoSwitchEnabled(enabled) {
+    const button = el('claudeAutoSwitchToggle');
+    if (!button) return;
+    const action = enabled ? '無効にする' : '有効にする';
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', 'アカウント自動切り替えを' + action);
+    button.querySelector('.composerOverflowLabel').textContent = 'アカウント自動切り替えを' + action;
+  }
+
   // Reflexモード（issue #1455）の親スイッチ。共通の設定なので、表示はホストが読み直した
   // 実効値で揃える（押した会話以外のタブにも届く）
   el('reflexToggle').addEventListener('click', () =>
@@ -4199,6 +4216,9 @@ export function chatScript(
     }
     if (data.type === 'limitAutoResume' && typeof data.enabled === 'boolean') {
       applyLimitAutoResumeEnabled(data.enabled);
+    }
+    if (data.type === 'claudeAutoSwitch' && typeof data.enabled === 'boolean') {
+      applyClaudeAutoSwitchEnabled(data.enabled);
     }
     if (data.type === 'reflex' && typeof data.enabled === 'boolean') {
       applyReflexEnabled(data.enabled);
