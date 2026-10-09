@@ -99,10 +99,19 @@ export interface TranscriptUtterances {
  * `ASSISTANT_CONTEXT` の合計の上限（文字数）。
  *
  * 系列全体で各発話に直前の応答を添えた合計は、実測（transcript 355本）でp90が8,290文字、
- * 最大が37,652文字だった。p90の2倍を取り、超えたら古い順に外す。ユーザー発話には上限を
- * 設けない（古いのに今も有効な指示から落ちるため）。
+ * 最大が37,652文字だった。p90の2倍を取り、超えたら古い順に外す。ユーザー発話で外した側の応答は
+ * 数えない。
  */
 export const ASSISTANT_CONTEXT_BUDGET = 16000;
+
+/**
+ * replayに入れるユーザー発話の合計の上限（文字数）。
+ *
+ * 全件を入れると引き継ぎを重ねるほど開始プロンプトが伸び、p90で約2.7万字になっていた（#1913）。
+ * 超えたら古い発話から外し、外した件数と系列ファイルの在処を読み方に書く。古いのに今も有効な
+ * 指示は系列ファイルで確かめさせる。
+ */
+export const USER_UTTERANCE_BUDGET = 5000;
 
 /** 自動返信を送った時刻とtranscriptの時刻のずれの許容（ミリ秒）。 */
 const AUTO_SENT_WINDOW_MS = 15 * 60 * 1000;
@@ -536,29 +545,72 @@ function keptAssistantIds(records: readonly LineageRecord[], budget: number): Se
   return kept;
 }
 
+/**
+ * ユーザー発話の合計が予算に収まる新しい側の始まりの位置と、外した古い発話の件数を返す。
+ * 外した発話の直前の応答や世代の境目も、始まりより前にあれば入れない。
+ */
+function userReplayStart(
+  records: readonly LineageRecord[],
+  budget: number,
+): { start: number; omittedUsers: number } {
+  let total = 0;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i]!;
+    if (record.kind !== 'user') {
+      continue;
+    }
+    total += record.text.length;
+    if (total > budget) {
+      return {
+        start: i + 1,
+        omittedUsers: records.slice(0, i + 1).filter((r) => r.kind === 'user').length,
+      };
+    }
+  }
+  return { start: 0, omittedUsers: 0 };
+}
+
 export interface RenderReplayInput {
   ref: LineageRef;
   records: readonly LineageRecord[];
-  /** 全件の系列ファイルのパス。予算で外した応答を読みに行く先として示す。 */
+  /** 全件の系列ファイルのパス。予算で外した発話や応答を読みに行く先として示す。 */
   snapshotPath: string;
   /** 初回プロンプトに親の在処があったのに、その系列ファイルが読めなかった。 */
   parentMissing: boolean;
   budget?: number;
+  userBudget?: number;
 }
 
 /** 初回プロンプトへ入れるreplayの節。 */
 export function renderLineageReplay(input: RenderReplayInput): string {
-  const { ref, records } = input;
+  const { ref } = input;
+  const { start, omittedUsers } = userReplayStart(
+    input.records,
+    input.userBudget ?? USER_UTTERANCE_BUDGET,
+  );
+  const records = input.records.slice(start);
   const kept = keptAssistantIds(records, input.budget ?? ASSISTANT_CONTEXT_BUDGET);
   const userCount = records.filter((r) => r.kind === 'user').length;
   const lines: string[] = [];
   lines.push(`<${REPLAY_TAG} lineage="${ref.lineageId}" snapshot="${ref.snapshot}">`);
-  lines.push('## 引き継ぎ系列のユーザー発話（原文・全件）');
-  lines.push('');
-  lines.push('読み方:');
-  lines.push(
-    '- この作業の引き継ぎ系列全体でユーザーが送った発話を、会話順に原文のまま全件並べたもの。要約していない。',
-  );
+  if (omittedUsers === 0) {
+    lines.push('## 引き継ぎ系列のユーザー発話（原文・全件）');
+    lines.push('');
+    lines.push('読み方:');
+    lines.push(
+      '- この作業の引き継ぎ系列全体でユーザーが送った発話を、会話順に原文のまま全件並べたもの。要約していない。',
+    );
+  } else {
+    lines.push('## 引き継ぎ系列のユーザー発話（原文・新しい側のみ）');
+    lines.push('');
+    lines.push('読み方:');
+    lines.push(
+      '- この作業の引き継ぎ系列全体でユーザーが送った発話のうち、新しい側を会話順に原文のまま並べたもの。要約していない。',
+    );
+    lines.push(
+      `- 古い側の発話${omittedUsers}件は上限で外した（その直前の応答と世代の境目も外した）。外した発話は系列ファイル ${input.snapshotPath} にある。ここに無い古い指示が今も有効かは、そこで確かめる。`,
+    );
+  }
   lines.push('- 後の発話が前の発話を上書きする。撤回・取り消しの発話は撤回として読む。');
   lines.push(
     '- `source="auto"` は人の発話ではない（自動返信や `/loop` など、拡張機能・CLIが送ったもの）。決定を含むことはあるが、人の指示と同じ重みでは扱わない。',
@@ -569,7 +621,9 @@ export function renderLineageReplay(input: RenderReplayInput): string {
   lines.push(
     '- 「作業の区切り」の行は、PRのmergeなどの区切りで引き継いだ位置。それより前の指示が今も有効かは、確認一覧で判断する。',
   );
-  lines.push(`- 予算で省いた応答も含む全件: ${input.snapshotPath}`);
+  lines.push(
+    `- 予算で省いた${omittedUsers === 0 ? '' : '発話・'}応答も含む全件: ${input.snapshotPath}`,
+  );
   if (input.parentMissing) {
     lines.push(
       '- 前の世代の系列ファイルが読めなかったため、前の世代の発話は入っていない。前の世代の指示は下の申し送りとポインタファイルで確かめる。',
@@ -577,7 +631,11 @@ export function renderLineageReplay(input: RenderReplayInput): string {
   }
   lines.push('');
   if (userCount === 0) {
-    lines.push('（ユーザー発話は無い）');
+    lines.push(
+      omittedUsers === 0
+        ? '（ユーザー発話は無い）'
+        : '（最新の発話だけで上限を超えたため、ここには1件も入れていない。系列ファイルで読む）',
+    );
     lines.push('');
   }
   for (const record of records) {
