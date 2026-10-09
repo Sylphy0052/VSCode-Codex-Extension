@@ -87,6 +87,8 @@ export class ClaudeUsageProbe {
   private failures = 0;
   /** 連続失敗が上限に達して、自動の取得を止めているか。 */
   private stopped = false;
+  /** このウィンドウで`claude`を1回でも起動したか。 */
+  private launched = false;
   private running = false;
   /** 自分が取得中のロックの世代。取得していなければundefined。 */
   private claimedGeneration: number | undefined;
@@ -136,6 +138,14 @@ export class ClaudeUsageProbe {
         return this.adopt(again);
       }
       const failures = (await this.readShared())?.failures ?? this.failures;
+      if (failures >= MAX_CONSECUTIVE_FAILURES && this.launched) {
+        // 他のウィンドウが上限に達した。ログはそのウィンドウが出しているので、黙って止める。
+        // まだ起動していないウィンドウ（開き直した直後など）は、1回だけ試してから止まる
+        this.stopped = true;
+        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        return undefined;
+      }
+      this.launched = true;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
       await this.writeShared({ readAt: now, usage: undefined, failures });
       const output = await this.run();
@@ -366,7 +376,8 @@ function parseSharedUsageRecord(raw: string): SharedUsageRecord | undefined {
   if (typeof v.readAt !== 'number' || !Number.isFinite(v.readAt)) {
     return undefined;
   }
-  // 旧版は回数を書かない。無い・不正な値は失敗なしとして扱う
+  // 旧版は回数を書かない。無い・不正な値は失敗なしとして扱う。旧版と混在する間は、
+  // 旧版の失敗で回数が0に戻り上限に届きにくいが、間隔は旧版どおりなので許す
   const failures =
     typeof v.failures === 'number' && Number.isSafeInteger(v.failures) && v.failures > 0
       ? v.failures
