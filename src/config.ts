@@ -1725,6 +1725,17 @@ export function readSessionMessagingEnabled(): boolean {
 }
 
 /**
+ * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）を、新しく開く会話へ渡すか。
+ * ログイン済みChromeを操作するため、既定は無効。
+ */
+export function readWebGptImageGenerationEnabled(): boolean {
+  return (
+    vscode.workspace.getConfiguration('agent.webGpt').get<boolean>('imageGeneration.enabled') ===
+    true
+  );
+}
+
+/**
  * CLIへ送る本文のトークン量を出力パネルへ記録するか（Issue #1320）。
  *
  * 実行契約（`formatTaskExecutionContract`）がCLI側の会話履歴に積み上がるのかを実測する

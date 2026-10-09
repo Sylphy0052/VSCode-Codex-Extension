@@ -126,6 +126,10 @@ import type { FileSystemPort } from '../session/ports';
 import { APPROVAL_MODES, SANDBOX_MODES, type CodexConfig } from '../codex/types';
 import type { PromptSubmission } from '../appserver/prompts';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
+import {
+  IMAGE_GENERATION_MCP_SERVER_NAME,
+  IMAGE_GENERATION_TOOL_TIMEOUT_SEC,
+} from '../webGpt/imageGenerationMcp';
 import type {
   SessionMessagingHost,
   SessionMessagingRegistration,
@@ -726,15 +730,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
-   * メッセージング用MCPサーバを、このスレッドにだけ見せる`thread/start`のconfig
-   * （Issue #1305）。タスク用（`openTaskSession`）と同じ形・同じサーバ名を使う。
-   *
-   * `config.toml`には永続化されない（スレッド限定。実測はタスク経路のコメント参照）。
+   * ChatGPT（Web）で画像を生成するMCPサーバのURL（Issue #1901）。設定が無効、または
+   * サーバが未起動なら`undefined`を返す。`extension.ts`が渡す。
    */
-  private sessionMessagingThreadConfig(url: string): Record<string, unknown> {
-    return {
-      mcp_servers: { [MESSAGING_MCP_SERVER_NAME]: { url, type: 'streamable_http' } },
-    };
+  private imageGenerationMcpUrl: () => string | undefined = () => undefined;
+
+  setImageGenerationMcp(url: () => string | undefined): void {
+    this.imageGenerationMcpUrl = url;
   }
 
   /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
@@ -896,11 +898,27 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // skill選択（issue #1451）を有効にしているなら、skillの一覧をモデルへ渡さない。
     // 選んだskillは発言のたびに`turn/start`の`input`で渡す
     const hideSkills = readSkillSelectConfig(this.reflexEnabledFor(entry)).enabled;
+    // 画像生成のMCPサーバ（Issue #1901）はタスクのセッションへは渡さない
+    const imageUrl = taskConfig === undefined ? this.imageGenerationMcpUrl() : undefined;
+    const mcpServers = {
+      ...(messaging === undefined
+        ? {}
+        : { [MESSAGING_MCP_SERVER_NAME]: { url: messaging.url, type: 'streamable_http' } }),
+      ...(imageUrl === undefined
+        ? {}
+        : {
+            [IMAGE_GENERATION_MCP_SERVER_NAME]: {
+              url: imageUrl,
+              type: 'streamable_http',
+              tool_timeout_sec: IMAGE_GENERATION_TOOL_TIMEOUT_SEC,
+            },
+          }),
+    };
     const threadConfig =
-      messaging === undefined && !hideSkills
+      Object.keys(mcpServers).length === 0 && !hideSkills
         ? undefined
         : {
-            ...(messaging === undefined ? {} : this.sessionMessagingThreadConfig(messaging.url)),
+            ...(Object.keys(mcpServers).length === 0 ? {} : { mcp_servers: mcpServers }),
             ...(hideSkills ? SKILLS_DISABLED_CONFIG_OVERLAY : {}),
           };
     try {

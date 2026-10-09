@@ -151,6 +151,10 @@ import {
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox, type Attachment } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
+import {
+  IMAGE_GENERATION_MCP_SERVER_NAME,
+  IMAGE_GENERATION_TOOL_TIMEOUT_SEC,
+} from '../webGpt/imageGenerationMcp';
 import { terminateDescendants } from '../orchestrator/resourceSampler';
 import type {
   SessionMessagingHost,
@@ -691,6 +695,16 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * ChatGPT（Web）で画像を生成するMCPサーバのURL（Issue #1901）。設定が無効、または
+   * サーバが未起動なら`undefined`を返す。`extension.ts`が渡す。
+   */
+  private imageGenerationMcpUrl: () => string | undefined = () => undefined;
+
+  setImageGenerationMcp(url: () => string | undefined): void {
+    this.imageGenerationMcpUrl = url;
+  }
+
+  /**
    * この会話にメッセージング用MCPのURLを割り当て、宛先を束縛する（Issue #1305）。
    * **`session.start`より前に呼ぶ**——`configFor`が起動引数を組むときに読むため。
    *
@@ -750,21 +764,32 @@ export class ClaudeChatViewManager
     // 同じく`--mcp-config`で渡す。ここで足す値は拡張機能が完全に制御するもので、
     // 利用者設定由来の`config.additionalArgs`とは混ざらない（後ろへ足すだけ）
     const messagingUrl = this.sessionMessagingRegistrations.get(entry)?.url;
+    // 画像生成のMCPサーバ（Issue #1901）はタスクのセッションへは渡さない
+    const imageUrl = entry.taskConfig === undefined ? this.imageGenerationMcpUrl() : undefined;
+    const mcpServers = {
+      ...(messagingUrl === undefined
+        ? {}
+        : { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: messagingUrl } }),
+      ...(imageUrl === undefined
+        ? {}
+        : {
+            [IMAGE_GENERATION_MCP_SERVER_NAME]: {
+              type: 'http',
+              url: imageUrl,
+              // HTTPのMCPは応答の無いまま5分で打ち切られる（CLI 2.1.286の既定）。生成を待てるよう延ばす
+              timeout: IMAGE_GENERATION_TOOL_TIMEOUT_SEC * 1000,
+            },
+          }),
+    };
     return {
       ...config,
       model: entry.modelSettings.model,
       effort: entry.modelSettings.effort,
       permissionMode: entry.permissionMode,
       additionalArgs:
-        messagingUrl === undefined
+        Object.keys(mcpServers).length === 0
           ? config.additionalArgs
-          : [
-              ...config.additionalArgs,
-              '--mcp-config',
-              JSON.stringify({
-                mcpServers: { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: messagingUrl } },
-              }),
-            ],
+          : [...config.additionalArgs, '--mcp-config', JSON.stringify({ mcpServers })],
     };
   }
 

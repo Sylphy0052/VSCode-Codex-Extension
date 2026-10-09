@@ -41,6 +41,7 @@ import {
   readClaudeConfig,
   readConfig,
   readSessionMessagingEnabled,
+  readWebGptImageGenerationEnabled,
   readPromptMetricsEnabled,
   readToolUsageMetricsEnabled,
   readSessionPresetsConfig,
@@ -71,6 +72,11 @@ import { ForgeHubService } from './forge/hub';
 import { ForgeOrchestrator } from './forge/orchestrator';
 import { startHttpMcpTransport } from './orchestrator/messaging';
 import { startSessionMessagingHost } from './orchestrator/sessionMessagingHost';
+import { DEFAULT_CDP_ENDPOINT } from './webGpt/discussion';
+import {
+  startImageGenerationMcpHost,
+  type ImageGenerationMcpHost,
+} from './webGpt/imageGenerationMcp';
 import {
   formatSessionTarget,
   type SessionBridgePort,
@@ -1517,6 +1523,55 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         );
       });
   }
+  // ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）。設定を有効にした時点で
+  // ウィンドウにつき1つ起動し、以後に開く会話へURLを渡す。無効へ戻した後や信頼されて
+  // いないワークスペースでは、新しく開く会話へ渡さない
+  let imageGenerationHost: Promise<ImageGenerationMcpHost> | undefined;
+  let imageGenerationUrl: string | undefined;
+  const ensureImageGenerationHost = (): void => {
+    if (imageGenerationHost !== undefined || !readWebGptImageGenerationEnabled()) {
+      return;
+    }
+    imageGenerationHost = startImageGenerationMcpHost({
+      readEndpoint: () =>
+        vscode.workspace
+          .getConfiguration('agent.webGpt')
+          .get<string>('cdpEndpoint', DEFAULT_CDP_ENDPOINT),
+      outputDir: path.join(context.globalStorageUri.fsPath, 'webgpt-images'),
+      checkAvailable: () => {
+        if (!readWebGptImageGenerationEnabled()) {
+          return 'WebGPTでの画像生成は設定agent.webGpt.imageGeneration.enabledで無効になっています';
+        }
+        return vscode.workspace.isTrusted
+          ? undefined
+          : 'WebGPTでの画像生成には信頼済みワークスペースが必要です';
+      },
+      logWarn: (message) => log.warn(message),
+    });
+    imageGenerationHost
+      .then((host) => {
+        imageGenerationUrl = host.url;
+        log.info('WebGPT画像生成のMCPサーバを起動しました');
+      })
+      .catch((e: unknown) => {
+        // 次に設定を切り替えたときに起動し直せるようにする
+        imageGenerationHost = undefined;
+        log.warn(
+          `WebGPT画像生成のMCPサーバを起動できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+  };
+  const imageGenerationMcpUrl = (): string | undefined =>
+    readWebGptImageGenerationEnabled() && vscode.workspace.isTrusted
+      ? imageGenerationUrl
+      : undefined;
+  chat.setImageGenerationMcp(imageGenerationMcpUrl);
+  claudeChat.setImageGenerationMcp(imageGenerationMcpUrl);
+  // 起動の完了より先に拡張機能が止まっても閉じられるよう、起動前に登録しておく
+  context.subscriptions.push({
+    dispose: () => void imageGenerationHost?.then((host) => host.close()).catch(() => undefined),
+  });
+  ensureImageGenerationHost();
   const sessionKanban = new SessionKanbanViewManager(
     () => {
       const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
@@ -1818,6 +1873,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       }
       if (e.affectsConfiguration('agent.sessionPresets')) {
         void updateSessionPresetsContext(log);
+      }
+      if (e.affectsConfiguration('agent.webGpt.imageGeneration.enabled')) {
+        ensureImageGenerationHost();
       }
       // 同梱skillの有効・無効（Issue #1820）。常駐しているCodexのapp-serverへ送り直し、
       // 設定パネルの一覧も読み直す。Claude Codeは次に起動する会話から効く

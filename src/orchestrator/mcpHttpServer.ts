@@ -146,8 +146,12 @@ export function startHttpMcpServer(
         onRequest(handler) {
           handler(request);
         },
-        onClose() {
-          // HTTPは1リクエストごとに完結するため、明示的に閉じる操作は無い
+        onClose(handler) {
+          // HTTPは1リクエストごとに完結する。応答を返す前にクライアントが切断したときだけ
+          // 知らせる（画像生成の中断に使う。Issue #1901）
+          res.on('close', () => {
+            if (!res.writableFinished) handler();
+          });
         },
       };
       current.handle(connection);
