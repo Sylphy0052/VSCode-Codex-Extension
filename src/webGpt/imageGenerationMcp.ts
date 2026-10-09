@@ -78,10 +78,11 @@ export interface ImageGenerationMcpDeps {
   /** Claude Codeへ渡すMCP設定ファイルを置くディレクトリ。 */
   configDir: string;
   /**
-   * 呼び出しのたびに確かめる。設定が無効、または信頼済みワークスペースでなければ理由を
-   * 返す。設定を無効へ戻す前に開いた会話からも呼べないようにするため。
+   * 呼び出しのたびに確かめる。設定が無効、信頼済みワークスペースでない、または利用者が
+   * 許可しなかったときは理由を返す。設定を無効へ戻す前に開いた会話からも呼べないように
+   * するため。`prompt`は許可の確認に見せる、エージェントが渡した生成の指示。
    */
-  checkAvailable: () => string | undefined;
+  checkAvailable: (prompt: string) => Promise<string | undefined>;
   logWarn: (message: string) => void;
   /** テスト用の差し替え口。 */
   generate?: (request: GenerateImageRequest, signal: AbortSignal) => Promise<GenerateImageResult>;
@@ -217,13 +218,13 @@ async function handleToolCall(
   if (params['name'] !== GENERATE_IMAGE_TOOL.name) {
     return failure(request.id, -32602, `未知のツールです: ${String(params['name'])}`);
   }
-  const unavailable = deps.checkAvailable();
-  if (unavailable !== undefined) {
-    return success(request.id, toolTextResult(unavailable, true));
-  }
   const parsed = parseGenerateImageArgs(params['arguments']);
   if (!parsed.ok) {
     return success(request.id, toolTextResult(parsed.error, true));
+  }
+  const unavailable = await deps.checkAvailable(parsed.request.prompt);
+  if (unavailable !== undefined) {
+    return success(request.id, toolTextResult(unavailable, true));
   }
   const conversationUrl = parsed.request.conversationUrl;
   if (conversationUrl !== undefined && !state.conversations.has(conversationUrl)) {

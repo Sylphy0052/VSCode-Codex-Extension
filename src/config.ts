@@ -1724,15 +1724,18 @@ export function readSessionMessagingEnabled(): boolean {
   return vscode.workspace.getConfiguration('agent').get<boolean>('sessions.messaging') !== false;
 }
 
+/** ChatGPT（Web）での画像生成の許可方法。 */
+export type WebGptImageGenerationMode = 'ask' | 'always' | 'off';
+
 /**
- * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）を、新しく開く会話へ渡すか。
- * ログイン済みChromeを操作するため、既定は無効。
+ * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）の使い方。ログイン済みChromeを操作し
+ * 生成枠を使うため、既定は`ask`（サーバは常に会話へ渡すが、呼ばれるたびに利用者へ確かめる）。
  */
-export function readWebGptImageGenerationEnabled(): boolean {
-  return (
-    vscode.workspace.getConfiguration('agent.webGpt').get<boolean>('imageGeneration.enabled') ===
-    true
-  );
+export function readWebGptImageGenerationMode(): WebGptImageGenerationMode {
+  const value = vscode.workspace
+    .getConfiguration('agent.webGpt')
+    .get<string>('imageGeneration.mode');
+  return value === 'always' || value === 'off' ? value : 'ask';
 }
 
 /**
