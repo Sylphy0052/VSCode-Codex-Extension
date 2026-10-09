@@ -102,7 +102,7 @@ const CREDENTIALS = '.credentials.json';
 const META = 'meta.json';
 const USAGE = 'usage.json';
 const CURRENT = '.current';
-/** ウィンドウ（拡張ホスト）をまたいで書き換えを1本にするロック。mkdirで取る。 */
+/** ウィンドウ（拡張ホスト）をまたいで書き換えを1本にするロック。新規作成（wx）で取る。 */
 const LOCK = '.ext-op.lock';
 /** 持ち主が落ちて残ったロックを奪うまでの時間。書き換えは数ファイルなので十分長い。 */
 const STALE_LOCK_MS = 30_000;
@@ -318,6 +318,12 @@ export class ClaudeAccountStore {
           reason: `「${id}」には別のメールアドレス（${recorded}）が記録されています`,
         };
       }
+      for (const other of await this.registeredIds()) {
+        const meta = other === id ? undefined : await this.readMeta(other);
+        if (meta?.email === email) {
+          return { ok: false, reason: `${email}は「${meta.name ?? other}」として登録済みです` };
+        }
+      }
       await this.writeMeta(id, { email });
       return { ok: true };
     });
@@ -505,11 +511,16 @@ export class ClaudeAccountStore {
     }
   }
 
-  /** 古いロックを捨てたら `true`。 */
+  /**
+   * ロックが消えたか古いロックを捨てたら `true`（すぐ取り直す）。新しいロックがある、または
+   * 権限などで奪えないときは `false`（待って期限を見る。空回りさせない）。
+   */
   private async reclaimStaleLock(lock: string): Promise<boolean> {
-    const held = await stat(lock).catch(() => undefined);
-    if (held === undefined) {
-      return true;
+    let held: Awaited<ReturnType<typeof stat>>;
+    try {
+      held = await stat(lock);
+    } catch (e) {
+      return isNotFound(e);
     }
     if (Date.now() - held.mtimeMs <= STALE_LOCK_MS) {
       return false;
@@ -517,12 +528,14 @@ export class ClaudeAccountStore {
     const taken = `${lock}.stale-${randomBytes(4).toString('hex')}`;
     try {
       await rename(lock, taken);
-    } catch {
-      // 他の待機者が先に奪った
-      return true;
+    } catch (e) {
+      // ENOENTは他の待機者が先に奪った
+      return isNotFound(e);
     }
     const info = await stat(taken).catch(() => undefined);
     if (info !== undefined && Date.now() - info.mtimeMs <= STALE_LOCK_MS) {
+      // 同時に奪いに来た側が取り直した新しいロックだった。戻す間に第三者が取ると2者が
+      // 同時に入るが、古いロックを2者が同時に見つけた直後に限られるため受け入れる
       await link(taken, lock).catch(() => undefined);
     }
     await rm(taken, { force: true });

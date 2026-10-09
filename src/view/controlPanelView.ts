@@ -804,6 +804,13 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       if (choice !== '同じアカウント') {
         return { ok: false, error: undefined };
       }
+      // 確認を待つ間に別の端末で /login されていたら、確かめたのと違うアカウントを記録してしまう
+      if ((await this.readClaudeIdentity()) !== liveEmail) {
+        return {
+          ok: false,
+          error: '確認の間にログイン中のアカウントが変わりました。もう一度試してください',
+        };
+      }
       const adopted = await store.adoptCurrentEmail(currentId, liveEmail);
       result = adopted.ok ? await store.switchTo(id, liveEmail) : adopted;
     }
