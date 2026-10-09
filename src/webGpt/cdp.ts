@@ -50,7 +50,7 @@ export class CdpBrowser {
       typeof version === 'object' && version !== null && 'webSocketDebuggerUrl' in version
         ? version.webSocketDebuggerUrl
         : undefined;
-    if (typeof url !== 'string' || !isLoopbackWebSocket(url)) {
+    if (typeof url !== 'string' || !isLoopbackWebSocket(url, endpoint)) {
       throw new Error('CDP接続先からブラウザのWebSocket URLを読み取れません');
     }
     const socket = new WebSocket(url);
@@ -148,11 +148,19 @@ export class CdpBrowser {
   }
 }
 
-/** ブラウザが返したURLもループバックに限る。接続先の検証（`parseCdpEndpoint`）と揃える。 */
-function isLoopbackWebSocket(value: string): boolean {
+/**
+ * ブラウザが返したURLもループバックに限る。接続先の検証（`parseCdpEndpoint`）と揃える。
+ * ポートも接続先と同じに限る。同じホストの別のポートで待ち受ける別プロセスへ、
+ * 応答の書き換えで誘導されないようにするため（Issue #1903）。
+ */
+function isLoopbackWebSocket(value: string, endpoint: string): boolean {
   try {
     const url = new URL(value);
-    return url.protocol === 'ws:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+    return (
+      url.protocol === 'ws:' &&
+      ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) &&
+      url.port === new URL(endpoint).port
+    );
   } catch {
     return false;
   }

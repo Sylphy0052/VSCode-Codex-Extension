@@ -134,6 +134,12 @@ export function startHttpMcpServer(
         res.writeHead(400, { 'content-type': 'text/plain' }).end('invalid request');
         return;
       }
+      // `id`の無い通知（`notifications/initialized`など）は応答を要さない。Streamable HTTPの
+      // 仕様どおり本文なしの202を返し、MCPサーバへは渡さない（Issue #1903）
+      if (!('id' in parsed)) {
+        res.writeHead(202).end();
+        return;
+      }
       const request = parsed as JsonRpcRequest;
       // 接続の識別子は常にURLのトークンから解決した値（上のJSDoc参照）。リクエスト自体に
       // taskId/fromらしきフィールドがあっても、connection経由では一切渡していない

@@ -129,6 +129,7 @@ import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
 import {
   IMAGE_GENERATION_MCP_SERVER_NAME,
   IMAGE_GENERATION_TOOL_TIMEOUT_SEC,
+  type ImageGenerationMcpHost,
 } from '../webGpt/imageGenerationMcp';
 import type {
   SessionMessagingHost,
@@ -730,13 +731,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
-   * ChatGPT（Web）で画像を生成するMCPサーバのURL（Issue #1901）。設定が無効、または
+   * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）。設定が無効、または
    * サーバが未起動なら`undefined`を返す。`extension.ts`が渡す。
    */
-  private imageGenerationMcpUrl: () => string | undefined = () => undefined;
+  private imageGenerationMcp: () => ImageGenerationMcpHost | undefined = () => undefined;
 
-  setImageGenerationMcp(url: () => string | undefined): void {
-    this.imageGenerationMcpUrl = url;
+  setImageGenerationMcp(host: () => ImageGenerationMcpHost | undefined): void {
+    this.imageGenerationMcp = host;
   }
 
   /** Global設定のうちモデルとeffortだけを、このセッションの値で上書きする。 */
@@ -899,7 +900,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 選んだskillは発言のたびに`turn/start`の`input`で渡す
     const hideSkills = readSkillSelectConfig(this.reflexEnabledFor(entry)).enabled;
     // 画像生成のMCPサーバ（Issue #1901）はタスクのセッションへは渡さない
-    const imageUrl = taskConfig === undefined ? this.imageGenerationMcpUrl() : undefined;
+    const imageUrl = entry.taskManaged ? undefined : this.imageGenerationMcp()?.url;
     const mcpServers = {
       ...(messaging === undefined
         ? {}
