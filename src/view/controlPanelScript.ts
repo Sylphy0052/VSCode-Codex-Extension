@@ -1037,12 +1037,11 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
       badge.textContent = '稼働中';
       head.appendChild(badge);
     }
-    if (account.email) {
-      const email = document.createElement('span');
-      email.className = 'accountMeta';
-      email.textContent = account.email;
-      head.appendChild(email);
-    }
+    // 照合できるまでは、旧版が誤って記録したメールアドレスを出さない（Issue #1930）
+    const email = document.createElement('span');
+    email.className = 'accountMeta';
+    email.textContent = account.email || 'メール未確認';
+    head.appendChild(email);
     row.appendChild(head);
 
     const usage = document.createElement('div');

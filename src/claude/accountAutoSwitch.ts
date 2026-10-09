@@ -17,9 +17,7 @@ export interface AutoSwitchConfig {
 }
 
 export interface AutoSwitchPorts {
-  store: Pick<ClaudeAccountStore, 'list' | 'currentId' | 'switchTo' | 'recordEmail' | 'recordUsage'>;
-  /** 今ログインしているメールアドレス。取れなければ`undefined`。 */
-  readIdentity(): Promise<string | undefined>;
+  store: Pick<ClaudeAccountStore, 'list' | 'currentId' | 'switchTo' | 'recordUsage'>;
   config(): AutoSwitchConfig;
   /** 利用者へ知らせる（切り替えた・切り替え先が無い・切り替えに失敗した）。 */
   notify(message: string): void;
@@ -142,8 +140,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
 
   private async runSwitch(id: string, name: string, why: string): Promise<SwitchOutcome> {
     const { store } = this.ports;
-    const liveEmail = await this.ports.readIdentity();
-    const result = await store.switchTo(id, liveEmail);
+    const result = await store.switchTo(id);
     if (!result.ok) {
       // 利用者に確かめられない自動の経路では、稼働中の記録が曖昧なまま切り替えない
       const reason =
@@ -159,13 +156,14 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
       }
       return { switched: false, reason };
     }
-    const recorded = await store.recordEmail(id, await this.ports.readIdentity());
-    if (!recorded.ok) {
-      this.ports.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
+    if (result.warning !== undefined) {
+      this.ports.warn(result.warning);
     }
     this.noTargetNotified = false;
     this.lastFailure = undefined;
-    this.ports.notify(`${why}、Claude Codeのアカウントを「${name}」へ切り替えました`);
+    this.ports.notify(
+      `${why}、Claude Codeのアカウントを「${name}」へ切り替えました${result.warning === undefined ? '' : `（${result.warning}）`}`,
+    );
     await this.ports.onSwitched();
     return { switched: true, name };
   }

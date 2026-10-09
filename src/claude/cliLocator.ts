@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { resolveExecutable, type LocateResult, type LocatorDeps } from '../codex/cliLocator';
 
 /** claude実行ファイルを解決する。既定名は `claude`。 */
@@ -18,6 +19,17 @@ export function resolveClaudeHome(configured: string, deps: LocatorDeps): string
   }
 
   return `${deps.homedir()}/.claude`;
+}
+
+/**
+ * CLIの全体設定（`oauthAccount` を持つ `.claude.json`）の場所。既定の `~/.claude` なら
+ * ホーム直下の `~/.claude.json`、設定ディレクトリを変えていればその中（CLIと同じ決め方）。
+ */
+export function resolveClaudeGlobalConfig(claudeHome: string, deps: LocatorDeps): string {
+  // 末尾の `/` などで食い違わないよう正規化して比べる
+  return path.resolve(claudeHome) === path.resolve(deps.homedir(), '.claude')
+    ? path.join(deps.homedir(), '.claude.json')
+    : path.join(claudeHome, '.claude.json');
 }
 
 export interface ClaudePaths {

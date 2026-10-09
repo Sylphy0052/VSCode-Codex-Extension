@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
+  describeIdentity,
   isValidAccountId,
   REGISTER_CURRENT_ACCOUNT_LABEL,
   type ClaudeAccountStore,
@@ -107,8 +108,6 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
 /** アカウントの切り替えに要るもの（Issue #1921）。 */
 export interface ClaudeAccountDeps {
   store: ClaudeAccountStore;
-  /** 今ログインしているアカウントのメールアドレス（`claude auth status`）。取れなければ `undefined`。 */
-  readIdentity: () => Promise<string | undefined>;
 }
 
 /**
@@ -694,15 +693,13 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     const name = await vscode.window.showInputBox({
       title: '今のClaude Codeのアカウントを登録',
       prompt: '一覧に出す表示名を入力してください（日本語も使えます）',
-      value: (await this.readClaudeIdentity()) ?? '',
+      value: (await store.liveEmail()) ?? '',
       ignoreFocusOut: true,
     });
     if (name === undefined) {
       return;
     }
-    // 入力を待つ間に別のウィンドウが切り替えていても、登録する認証と組になるよう取り直す
-    const email = await this.readClaudeIdentity();
-    await this.runStoreAction(() => store.register(name, email), 'アカウントの登録');
+    await this.runStoreAction(() => store.register(name), 'アカウントの登録');
   }
 
   /**
@@ -773,55 +770,36 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     await this.runStoreAction(() => store.remove(id), '登録の削除');
   }
 
-  /** 今ログインしているメールアドレス。取れなければ `undefined`（照合できない側へ倒す）。 */
-  private async readClaudeIdentity(): Promise<string | undefined> {
-    try {
-      return await this.claudeAccounts?.readIdentity();
-    } catch (e) {
-      this.log.warn(
-        `Claude Codeのログイン状態を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      return undefined;
-    }
-  }
-
   /**
-   * 切り替える。稼働中のアカウントにメールアドレスの記録が無く照合できないときは、今の
-   * メールアドレスが稼働中のアカウントのものかを利用者に確かめ、記録してから切り替え直す。
+   * 切り替える。稼働中のアカウントに同一性の記録が無く照合できないときは、今ログインして
+   * いるアカウントが稼働中のアカウントのものかを利用者に確かめ、記録してから切り替え直す。
    */
   private async switchClaudeAccount(
     store: ClaudeAccountStore,
     id: string,
   ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
-    const liveEmail = await this.readClaudeIdentity();
-    let result = await store.switchTo(id, liveEmail);
-    if (!result.ok && result.confirmCurrent !== undefined && liveEmail !== undefined) {
-      const { id: currentId, name: currentName } = result.confirmCurrent;
+    let result = await store.switchTo(id);
+    if (!result.ok && result.confirmCurrent !== undefined) {
+      const { id: currentId, name: currentName, live, plan } = result.confirmCurrent;
+      const who = plan === undefined ? describeIdentity(live) : `${describeIdentity(live)}・${plan}`;
       const choice = await vscode.window.showWarningMessage(
-        `今ログインしている${liveEmail}は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら${liveEmail}を「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください。`,
+        `今ログインしているアカウント（${who}）は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください。`,
         { modal: true },
         '同じアカウント',
       );
       if (choice !== '同じアカウント') {
         return { ok: false, error: undefined };
       }
-      // 確認を待つ間に別の端末で /login されていたら、確かめたのと違うアカウントを記録してしまう
-      if ((await this.readClaudeIdentity()) !== liveEmail) {
-        return {
-          ok: false,
-          error: '確認の間にログイン中のアカウントが変わりました。もう一度試してください',
-        };
-      }
-      const adopted = await store.adoptCurrentEmail(currentId, liveEmail);
-      result = adopted.ok ? await store.switchTo(id, liveEmail) : adopted;
+      // 確認を待つ間に別の端末で /login されていたら記録しない（`adoptCurrent` が照合し直す）
+      const adopted = await store.adoptCurrent(currentId, live);
+      result = adopted.ok ? await store.switchTo(id) : adopted;
     }
     if (!result.ok) {
       return { ok: false, error: result.reason };
     }
-    // スクリプトで登録したアカウントにもメールアドレスを付け、次の切り替えの照合に使う
-    const recorded = await store.recordEmail(id, await this.readClaudeIdentity());
-    if (!recorded.ok) {
-      this.log.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
+    if (result.warning !== undefined) {
+      this.log.warn(result.warning);
+      void vscode.window.showWarningMessage(`アカウントは切り替えました。${result.warning}`);
     }
     return { ok: true };
   }
