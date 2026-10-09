@@ -135,9 +135,21 @@ export function startHttpMcpServer(
         return;
       }
       // `id`の無い通知（`notifications/initialized`など）は応答を要さない。Streamable HTTPの
-      // 仕様どおり本文なしの202を返し、MCPサーバへは渡さない（Issue #1903）
+      // 仕様どおり本文なしの202を返し、MCPサーバへは渡さない（Issue #1903）。
+      // `id`を付け忘れた`tools/call`などは通知ではないので、-32600で即座に断る（Issue #1905）
       if (!('id' in parsed)) {
-        res.writeHead(202).end();
+        const method = (parsed as { method: unknown }).method;
+        if (typeof method === 'string' && method.startsWith('notifications/')) {
+          res.writeHead(202).end();
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' }).end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: { code: -32600, message: '通知以外のリクエストにはidが必要です' },
+            }),
+          );
+        }
         return;
       }
       const request = parsed as JsonRpcRequest;

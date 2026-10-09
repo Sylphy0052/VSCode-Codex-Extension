@@ -1,7 +1,14 @@
 import { randomBytes } from 'node:crypto';
 
+import {
+  pruneStaleMcpConfigFiles,
+  removeMcpConfigFile,
+  writeMcpConfigFile,
+} from '../claude/mcpConfigFile';
+
 import { startHttpMcpServer, type HttpMcpServerHandle } from './mcpHttpServer';
 import {
+  MESSAGING_MCP_SERVER_NAME,
   MessagingMcpServer,
   TaskMessagingHub,
   type DispatchErrorLogPort,
@@ -32,6 +39,13 @@ export interface SessionMessagingRegistration {
   /** CLIの起動設定へ書き込むMCPサーバのURL。 */
   url: string;
   /**
+   * Claude Codeの`--mcp-config`へ渡す設定ファイルのパス。URLを引数へ直接書くとトークンが
+   * プロセスの引数一覧に載るため、権限600のファイルに書いてパスだけを渡す（Issue #1905）。
+   * Claude以外、`configDir`が無いとき、書けなかったときは`undefined`で、その場合は呼び出し側が
+   * `url`をJSONで渡す。
+   */
+  claudeConfigPath: string | undefined;
+  /**
    * このセッションのスレッドid（Codexは`threadId`、Claude Codeは`sessionId`）が確定した
    * 時点で呼ぶ。これを呼ぶまでURLは404のままで、要求を一切受け付けない。
    *
@@ -61,6 +75,8 @@ export interface SessionMessagingHostDeps {
   /** セッション宛の解決。`extension.ts`が組み立てた実体を毎回読む（値で持たない）。 */
   sessionBridge: () => SessionBridgePort | undefined;
   logPort?: DispatchErrorLogPort;
+  /** Claude Code用のMCP設定ファイルを置くディレクトリ。省略するとファイルを作らない。 */
+  configDir?: string;
 }
 
 interface SessionEntry {
@@ -85,6 +101,10 @@ export async function startSessionMessagingHost(
     return { connectionId: entry.ref, handle: (connection) => handler(connection) };
   });
 
+  const CONFIG_PREFIX = 'session-messaging-mcp';
+  const configPaths = new Set<string>();
+  if (deps.configDir !== undefined) pruneStaleMcpConfigFiles(deps.configDir, CONFIG_PREFIX);
+
   return {
     register(provider: SessionProvider): SessionMessagingRegistration {
       const token = randomBytes(16).toString('hex');
@@ -103,19 +123,41 @@ export async function startSessionMessagingHost(
       const mcpServer = new MessagingMcpServer(hub, transport, deps.logPort);
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
       entries.set(token, entry);
+      const url = server.urlForToken(token);
+      let claudeConfigPath: string | undefined;
+      if (provider === 'claude' && deps.configDir !== undefined) {
+        try {
+          claudeConfigPath = writeMcpConfigFile(deps.configDir, CONFIG_PREFIX, {
+            [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url },
+          });
+          configPaths.add(claudeConfigPath);
+        } catch (error) {
+          // 書けなければ呼び出し側がURLを直接渡す（引数には載るが、会話は他セッションと話せる）
+          deps.logPort?.error(
+            `セッション間メッセージングのMCP設定ファイルを書けませんでした: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       return {
-        url: server.urlForToken(token),
+        url,
+        claudeConfigPath,
         bind(threadId: string): void {
           entry.ref = formatSessionTarget({ windowId: deps.windowId, provider, threadId });
         },
         dispose(): void {
           entries.delete(token);
+          if (claudeConfigPath !== undefined) {
+            removeMcpConfigFile(claudeConfigPath);
+            configPaths.delete(claudeConfigPath);
+          }
         },
       };
     },
     async close(): Promise<void> {
       await server.close();
       entries.clear();
+      for (const path of configPaths) removeMcpConfigFile(path);
+      configPaths.clear();
     },
   };
 }
