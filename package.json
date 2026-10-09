@@ -630,6 +630,12 @@
           "scope": "machine",
           "markdownDescription": "WebGPTとの議論に使うChromeのCDP接続先。未起動なら専用プロファイルでChromeを起動します。ポート付きのHTTPループバックURLのみ。拡張機能が動く環境から接続できる必要があります。"
         },
+        "agent.webGpt.imageGeneration.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "新しく開くCodex・Claude Codeの会話へ、ChatGPT（Web）で画像を生成するMCPツール`generate_image`を渡します。`#agent.webGpt.cdpEndpoint#`のChromeでChatGPTにログインしておく必要があります。生成した画像は拡張機能の保存領域（globalStorageの`webgpt-images`）へ保存されます。信頼済みワークスペースでだけ使えます。変更は次に開く会話から反映されます。"
+        },
         "codex.executablePath": {
           "type": "string",
           "default": "codex",
