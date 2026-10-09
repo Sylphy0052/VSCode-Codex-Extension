@@ -25,12 +25,8 @@
 
 ## 作業後のビルドとインストール
 
-作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeとb90/b115のdev containersの3か所へ入れる。
+作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeへ入れる。b90/b115のdev containersへは入れない（2026-10-09〜）。
 
 - ビルドはメインのworking treeで `npm run build` のあと `npx vsce package --no-dependencies -o /tmp/<名前>.vsix` を実行する。`npm run package` はここでもう一度版番号を上げて `package.json` を書き換えるため使わない（版上げはPR側で済んでいる）。`<名前>` には `package.json` の版を入れる（例: `vscode-codex-extension-2026.923.3`）
 - WSL: `code --install-extension /tmp/<名前>.vsix --force`
-- b90/b115: WSLから `ssh -p 12290 kfuruhashi@localhost`（b90）、`ssh -p 12222 kfuruhashi@localhost`（b115）で入る。`ssh b90` は通らない
-  - 両ホストのホームは同じNFS。vsixは `scp -P 12290` でb90へ送り、`~/.local/share/vsix/` に置けばb115からも見える
-  - `~/.local/share/vsix/` には1つの版だけを置く。devcontainerの `postAttachCommand` がここの `*.vsix` を全部 `--force` で入れるため、古い版が残っていると並び順次第で古い版に戻る。置き換える前の版は `~/.local/share/vsix-old/` へ移す
-  - 起動中のコンテナへは各ホストで `docker ps --filter label=devcontainer.local_folder` で探し、`docker exec <コンテナ> sh -c 'cs=$(ls -t $HOME/.vscode-server/bin/*/bin/code-server | head -1); $cs --install-extension $HOME/.local/share/vsix/<名前>.vsix --force'` で入れる。コンテナ内の `remote-cli/code` はIPC前提のため使えない
-- 入れた後は、各ウィンドウで「Developer: Reload Window」を実行すると新しい版が読み込まれる
+- 入れた後は、ウィンドウで「Developer: Reload Window」を実行すると新しい版が読み込まれる
