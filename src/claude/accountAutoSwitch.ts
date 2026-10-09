@@ -31,8 +31,8 @@ export interface AutoSwitchPorts {
 export type SwitchOutcome = { switched: true; name: string } | { switched: false; reason: string };
 
 export class AccountAutoSwitcher implements UsageProbeAccounts {
-  /** 切り替えの重なりを避ける。 */
-  private switching = false;
+  /** 進行中の切り替え。切り替えの重なりを避け、上限で止まった会話はこの完了を待つ。 */
+  private inFlight: Promise<SwitchOutcome> | undefined;
   /** 切り替え先が無い旨の通知を、同じ状態で繰り返さないための印。 */
   private noTargetNotified = false;
   /** 直近の切り替え失敗の理由。同じ理由の通知を繰り返さないための印。 */
@@ -91,6 +91,11 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     if (!enabled) {
       return { switched: false, reason: '自動切り替えが無効です' };
     }
+    // 閾値や優先度による切り替えの最中なら、重ねずにその完了を待つ。切り替えが済めば
+    // 余裕のあるアカウントへ移っているので、止まった会話は続けてよい（Issue #1926）
+    if (this.inFlight !== undefined) {
+      return this.inFlight;
+    }
     const snapshot = await this.ports.store.list();
     if (!snapshot.ok) {
       return { switched: false, reason: snapshot.reason };
@@ -124,41 +129,44 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     );
   }
 
-  private async switchTo(id: string, name: string, why: string): Promise<SwitchOutcome> {
-    if (this.switching) {
-      return { switched: false, reason: '切り替え中です' };
+  private switchTo(id: string, name: string, why: string): Promise<SwitchOutcome> {
+    if (this.inFlight !== undefined) {
+      return Promise.resolve({ switched: false, reason: '切り替え中です' });
     }
-    this.switching = true;
-    try {
-      const { store } = this.ports;
-      const liveEmail = await this.ports.readIdentity();
-      const result = await store.switchTo(id, liveEmail);
-      if (!result.ok) {
-        // 利用者に確かめられない自動の経路では、稼働中の記録が曖昧なまま切り替えない
-        const reason =
-          result.confirmCurrent === undefined
-            ? result.reason
-            : `${result.reason}（アカウント一覧から手動で切り替えると、稼働中のアカウントを確認できます）`;
-        // 取得のたびに同じ失敗を知らせ続けない
-        if (this.lastFailure !== reason) {
-          this.lastFailure = reason;
-          this.ports.notify(
-            `Claude Codeのアカウントを「${name}」へ自動で切り替えられませんでした: ${reason}`,
-          );
-        }
-        return { switched: false, reason };
+    const running = this.runSwitch(id, name, why).finally(() => {
+      this.inFlight = undefined;
+    });
+    this.inFlight = running;
+    return running;
+  }
+
+  private async runSwitch(id: string, name: string, why: string): Promise<SwitchOutcome> {
+    const { store } = this.ports;
+    const liveEmail = await this.ports.readIdentity();
+    const result = await store.switchTo(id, liveEmail);
+    if (!result.ok) {
+      // 利用者に確かめられない自動の経路では、稼働中の記録が曖昧なまま切り替えない
+      const reason =
+        result.confirmCurrent === undefined
+          ? result.reason
+          : `${result.reason}（アカウント一覧から手動で切り替えると、稼働中のアカウントを確認できます）`;
+      // 取得のたびに同じ失敗を知らせ続けない
+      if (this.lastFailure !== reason) {
+        this.lastFailure = reason;
+        this.ports.notify(
+          `Claude Codeのアカウントを「${name}」へ自動で切り替えられませんでした: ${reason}`,
+        );
       }
-      const recorded = await store.recordEmail(id, await this.ports.readIdentity());
-      if (!recorded.ok) {
-        this.ports.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
-      }
-      this.noTargetNotified = false;
-      this.lastFailure = undefined;
-      this.ports.notify(`${why}、Claude Codeのアカウントを「${name}」へ切り替えました`);
-      await this.ports.onSwitched();
-      return { switched: true, name };
-    } finally {
-      this.switching = false;
+      return { switched: false, reason };
     }
+    const recorded = await store.recordEmail(id, await this.ports.readIdentity());
+    if (!recorded.ok) {
+      this.ports.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
+    }
+    this.noTargetNotified = false;
+    this.lastFailure = undefined;
+    this.ports.notify(`${why}、Claude Codeのアカウントを「${name}」へ切り替えました`);
+    await this.ports.onSwitched();
+    return { switched: true, name };
   }
 }
