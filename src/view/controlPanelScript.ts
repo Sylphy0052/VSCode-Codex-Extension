@@ -994,6 +994,132 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     });
   }
 
+  function formatClockTime(ms) {
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    return pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // 待機中のアカウントの使用率は取りに行かない（Issue #1921）。記録したリセット時刻を
+  // 過ぎた枠は、切り替えて取り直すまで実際の値が判らないため「リセット済み」とだけ出す
+  function savedLimitText(label, limit, now) {
+    if (!limit) return undefined;
+    if (typeof limit.resetsAt === 'number' && limit.resetsAt <= now) {
+      return label + ' リセット済み（記録時' + limit.pct + '%）';
+    }
+    const reset = typeof limit.resetsAt === 'number' ? ' リセット' + formatClockTime(limit.resetsAt) : '';
+    return label + limit.pct + '%' + reset;
+  }
+
+  function addSavedAccountButton(actions, text, message, disabled) {
+    const button = addAccountButton(actions, text, function () {
+      vscode.postMessage(message);
+    });
+    button.className = 'savedAccount-action';
+    button.disabled = disabled === true;
+    return button;
+  }
+
+  function renderSavedAccount(account, index, count, now) {
+    const row = document.createElement('div');
+    row.className = 'savedAccount' + (account.current ? ' savedAccount-current' : '');
+
+    const head = document.createElement('div');
+    head.className = 'accountStatus';
+    const name = document.createElement('span');
+    name.className = 'savedAccount-name';
+    name.textContent = account.name;
+    head.appendChild(name);
+    if (account.current) {
+      const badge = document.createElement('span');
+      badge.className = 'mcpBadge mcpBadge-connected';
+      badge.textContent = '稼働中';
+      head.appendChild(badge);
+    }
+    if (account.email) {
+      const email = document.createElement('span');
+      email.className = 'accountMeta';
+      email.textContent = account.email;
+      head.appendChild(email);
+    }
+    row.appendChild(head);
+
+    const usage = document.createElement('div');
+    usage.className = 'accountMeta';
+    if (account.usage) {
+      const parts = [
+        savedLimitText('5時間枠', account.usage.fiveHour, now),
+        savedLimitText('週次', account.usage.weekly, now),
+      ].filter((t) => t !== undefined);
+      usage.textContent =
+        (parts.length > 0 ? parts.join(' ・ ') : '使用率の記録なし') +
+        '（' + formatClockTime(account.usage.recordedAt) + '記録）';
+    } else {
+      usage.textContent = '使用率の記録なし';
+    }
+    row.appendChild(usage);
+
+    const actions = document.createElement('div');
+    actions.className = 'savedAccount-actions';
+    if (!account.current) {
+      addSavedAccountButton(actions, '切り替え', { type: 'switchClaudeAccount', id: account.id });
+    }
+    addSavedAccountButton(actions, '名前を変更', { type: 'renameClaudeAccount', id: account.id });
+    addSavedAccountButton(
+      actions,
+      '優先度を上げる',
+      { type: 'moveClaudeAccount', id: account.id, direction: 'up' },
+      index === 0,
+    );
+    addSavedAccountButton(
+      actions,
+      '優先度を下げる',
+      { type: 'moveClaudeAccount', id: account.id, direction: 'down' },
+      index === count - 1,
+    );
+    if (!account.current) {
+      addSavedAccountButton(actions, '登録を削除', { type: 'removeClaudeAccount', id: account.id });
+    }
+    row.appendChild(actions);
+    return row;
+  }
+
+  // 登録したアカウントの一覧（Issue #1921）。上ほど優先度が高い
+  function renderClaudeSavedAccounts(snapshot) {
+    const container = el('claudeSavedAccounts');
+    container.replaceChildren();
+    if (!snapshot) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+
+    const title = document.createElement('div');
+    title.className = 'userSkills-title';
+    title.textContent = '登録したアカウント（上ほど優先度が高い）';
+    container.appendChild(title);
+
+    if (snapshot.ok !== true) {
+      appendError(container, '登録したアカウントを読めませんでした: ' + (snapshot.reason || '不明なエラー'));
+    } else if (snapshot.accounts.length === 0) {
+      appendState(container, 'empty', 'まだ登録していません');
+    } else {
+      const now = Date.now();
+      snapshot.accounts.forEach((account, index) => {
+        container.appendChild(renderSavedAccount(account, index, snapshot.accounts.length, now));
+      });
+    }
+
+    const register = document.createElement('button');
+    register.type = 'button';
+    register.className = 'userSkills-add';
+    register.textContent = '今のアカウントを登録';
+    register.addEventListener('click', () => {
+      vscode.postMessage({ type: 'registerClaudeAccount' });
+    });
+    container.appendChild(register);
+  }
+
   function apply(state) {
     // 取得中のセクションはホストがstate.loadingSectionsで知らせてくる（issue #225
     // レビュー指摘1）。複数セクションをすばやく開いたときに、別セクションの応答で
@@ -1010,6 +1136,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     renderSection('codexSkills', loadingSections, () => renderSkills('skillsListCodex', state.skills));
     renderUserSkills('userSkillsCodex', state.userSkills);
     renderUserSkills('userSkillsClaude', state.userSkills);
+    renderClaudeSavedAccounts(state.claudeAccounts);
     renderSection('codexPlugins', loadingSections, () =>
       renderPlugins('pluginsListCodex', 'codex', state.plugins),
     );

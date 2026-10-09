@@ -1,5 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
+import {
+  isValidAccountId,
+  type ClaudeAccountStore,
+  type SavedAccountsSnapshot,
+} from '../claude/accountStore';
 import { APPROVAL_MODES, SANDBOX_MODES } from '../codex/types';
 import {
   formatResetsIn,
@@ -91,6 +96,18 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
    * 拡張機能が持つディレクトリを直接読む。削除ボタンはここに載るものにだけ出す。
    */
   userSkills: string[];
+  /**
+   * 登録したClaude Codeのアカウント（Issue #1921）。トークンは含まない。
+   * 保存先を渡されていなければ `undefined` で、一覧も登録ボタンも出さない。
+   */
+  claudeAccounts: SavedAccountsSnapshot | undefined;
+}
+
+/** アカウントの切り替えに要るもの（Issue #1921）。 */
+export interface ClaudeAccountDeps {
+  store: ClaudeAccountStore;
+  /** 今ログインしているアカウントのメールアドレス（`claude auth status`）。取れなければ `undefined`。 */
+  readIdentity: () => Promise<string | undefined>;
 }
 
 /**
@@ -112,6 +129,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     private readonly version?: string,
     /** 利用者skillの置き場（Issue #1820）。未指定なら追加・削除の操作を受け付けない。 */
     private readonly userSkills?: UserSkillStore,
+    /** Claude Codeのアカウントの保存先（Issue #1921）。未指定なら切り替えの操作を受け付けない。 */
+    private readonly claudeAccounts?: ClaudeAccountDeps,
   ) {}
 
   /** 使用量が更新されたときに外から差し込む。読み取りはUsageReaderの責務。 */
@@ -191,11 +210,20 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async post(): Promise<void> {
-    const userSkills = (await this.userSkills?.list()) ?? [];
-    await this.view?.webview.postMessage({ type: 'state', state: this.buildState(userSkills) });
+    const [userSkills, claudeAccounts] = await Promise.all([
+      this.userSkills?.list() ?? Promise.resolve([]),
+      this.claudeAccounts?.store.list(),
+    ]);
+    await this.view?.webview.postMessage({
+      type: 'state',
+      state: this.buildState(userSkills, claudeAccounts),
+    });
   }
 
-  private buildState(userSkills: string[]): PanelState {
+  private buildState(
+    userSkills: string[],
+    claudeAccounts: SavedAccountsSnapshot | undefined,
+  ): PanelState {
     const snapshot = this.settings.snapshot();
     const claude = this.settings.claudeSnapshot();
     return {
@@ -227,6 +255,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
         loadedSections: this.settings.loadedSectionIds,
       }),
       userSkills,
+      claudeAccounts,
     };
   }
 
@@ -537,6 +566,21 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (m['type'] === 'registerClaudeAccount') {
+      await this.registerClaudeAccount();
+      return;
+    }
+
+    if (
+      m['type'] === 'switchClaudeAccount' ||
+      m['type'] === 'renameClaudeAccount' ||
+      m['type'] === 'moveClaudeAccount' ||
+      m['type'] === 'removeClaudeAccount'
+    ) {
+      await this.claudeAccountAction(m);
+      return;
+    }
+
     if (m['type'] === 'loginCodexApiKey') {
       const apiKey = await vscode.window.showInputBox({
         title: 'OpenAIのAPIキーでログイン',
@@ -638,6 +682,157 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
         }),
       'pluginのインストール',
     );
+  }
+
+  /** 今の `.credentials.json` を表示名を付けて登録する（Issue #1921）。 */
+  private async registerClaudeAccount(): Promise<void> {
+    if (this.claudeAccounts === undefined) {
+      return;
+    }
+    const { store } = this.claudeAccounts;
+    const name = await vscode.window.showInputBox({
+      title: '今のClaude Codeのアカウントを登録',
+      prompt: '一覧に出す表示名を入力してください（日本語も使えます）',
+      value: (await this.readClaudeIdentity()) ?? '',
+      ignoreFocusOut: true,
+    });
+    if (name === undefined) {
+      return;
+    }
+    // 入力を待つ間に別のウィンドウが切り替えていても、登録する認証と組になるよう取り直す
+    const email = await this.readClaudeIdentity();
+    await this.runStoreAction(() => store.register(name, email), 'アカウントの登録');
+  }
+
+  /**
+   * 登録済みアカウントへの操作（Issue #1921）。webviewから来た `<id>` は形と登録済みかを
+   * 確かめてから使う（パスの組み立てに `..` などを通さない）。
+   */
+  private async claudeAccountAction(m: Record<string, unknown>): Promise<void> {
+    if (this.claudeAccounts === undefined) {
+      return;
+    }
+    const { store } = this.claudeAccounts;
+    const id = m['id'];
+    if (!isValidAccountId(id) || !(await store.isRegistered(id))) {
+      this.log.warn(`アカウントの操作要求が不正です: ${String(m['type'])}`);
+      // 別のウィンドウで削除された行などを押した場合に、一覧を今の状態へ戻す
+      await this.refresh();
+      return;
+    }
+    const name = await store.displayName(id);
+
+    if (m['type'] === 'switchClaudeAccount') {
+      const choice = await vscode.window.showWarningMessage(
+        `Claude Codeのアカウントを「${name}」へ切り替えますか？切り替えは開いている全てのVS Codeウィンドウ・全ての会話に一度に効きます。`,
+        { modal: true },
+        '切り替え',
+      );
+      if (choice !== '切り替え') {
+        return;
+      }
+      await this.runAccountAction(
+        () => this.switchClaudeAccount(store, id),
+        'アカウントの切り替え',
+      );
+      return;
+    }
+
+    if (m['type'] === 'renameClaudeAccount') {
+      const next = await vscode.window.showInputBox({
+        title: 'アカウントの表示名を変更',
+        prompt: '一覧に出す表示名を入力してください（日本語も使えます）',
+        value: name,
+        ignoreFocusOut: true,
+      });
+      if (next === undefined) {
+        return;
+      }
+      await this.runStoreAction(() => store.rename(id, next), '表示名の変更');
+      return;
+    }
+
+    if (m['type'] === 'moveClaudeAccount') {
+      const direction = m['direction'];
+      if (direction !== 'up' && direction !== 'down') {
+        return;
+      }
+      await this.runStoreAction(() => store.move(id, direction), '優先度の変更');
+      return;
+    }
+
+    const choice = await vscode.window.showWarningMessage(
+      `アカウント「${name}」の登録を削除しますか？退避した認証ファイルを消します。もう一度使うにはログインし直して登録する必要があります。`,
+      { modal: true },
+      '削除',
+    );
+    if (choice !== '削除') {
+      return;
+    }
+    await this.runStoreAction(() => store.remove(id), '登録の削除');
+  }
+
+  /** 今ログインしているメールアドレス。取れなければ `undefined`（照合できない側へ倒す）。 */
+  private async readClaudeIdentity(): Promise<string | undefined> {
+    try {
+      return await this.claudeAccounts?.readIdentity();
+    } catch (e) {
+      this.log.warn(
+        `Claude Codeのログイン状態を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * 切り替える。稼働中のアカウントにメールアドレスの記録が無く照合できないときは、今の
+   * メールアドレスが稼働中のアカウントのものかを利用者に確かめ、記録してから切り替え直す。
+   */
+  private async switchClaudeAccount(
+    store: ClaudeAccountStore,
+    id: string,
+  ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
+    const liveEmail = await this.readClaudeIdentity();
+    let result = await store.switchTo(id, liveEmail);
+    if (!result.ok && result.confirmCurrent !== undefined && liveEmail !== undefined) {
+      const { id: currentId, name: currentName } = result.confirmCurrent;
+      const choice = await vscode.window.showWarningMessage(
+        `今ログインしている${liveEmail}は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら${liveEmail}を「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「今のアカウントを登録」で登録してください。`,
+        { modal: true },
+        '同じアカウント',
+      );
+      if (choice !== '同じアカウント') {
+        return { ok: false, error: undefined };
+      }
+      // 確認を待つ間に別の端末で /login されていたら、確かめたのと違うアカウントを記録してしまう
+      if ((await this.readClaudeIdentity()) !== liveEmail) {
+        return {
+          ok: false,
+          error: '確認の間にログイン中のアカウントが変わりました。もう一度試してください',
+        };
+      }
+      const adopted = await store.adoptCurrentEmail(currentId, liveEmail);
+      result = adopted.ok ? await store.switchTo(id, liveEmail) : adopted;
+    }
+    if (!result.ok) {
+      return { ok: false, error: result.reason };
+    }
+    // スクリプトで登録したアカウントにもメールアドレスを付け、次の切り替えの照合に使う
+    const recorded = await store.recordEmail(id, await this.readClaudeIdentity());
+    if (!recorded.ok) {
+      this.log.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
+    }
+    return { ok: true };
+  }
+
+  private async runStoreAction(
+    action: () => Promise<{ ok: true } | { ok: false; reason: string }>,
+    label: string,
+  ): Promise<void> {
+    await this.runAccountAction(async () => {
+      const result = await action();
+      return result.ok ? result : { ok: false, error: result.reason };
+    }, label);
   }
 
   /**
@@ -849,6 +1044,7 @@ ${controlPanelStyles()}
     <summary class="sectionTitle">${sectionIcon('account')}アカウント</summary>
     <div class="sectionBody">
     <div class="accountBox" id="accountClaude"></div>
+    <div class="savedAccounts" id="claudeSavedAccounts" hidden></div>
     </div>
     </details>
 
