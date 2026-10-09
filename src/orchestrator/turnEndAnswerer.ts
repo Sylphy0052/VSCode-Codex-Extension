@@ -61,6 +61,11 @@ export class TurnEndAnswererNudge {
       await new Promise((resolve) => setTimeout(resolve, this.debounceMs));
       // 待つ間に次の発言・イベントが送られた、または新しい出力の判定が始まった
       if (epoch !== this.epoch || this.nudged || this.judgedMessageId !== message.id) {
+        // 判定せずに退いた発言は判定済みにしない。次のターンが新しい発言を出さずに終わったとき、
+        // 同じ発言をもう一度判定にかけられるようにする
+        if (this.judgedMessageId === message.id) {
+          this.judgedMessageId = undefined;
+        }
         return;
       }
     }

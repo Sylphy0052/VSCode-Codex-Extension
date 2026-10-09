@@ -343,8 +343,25 @@ let slotLock: HeadlessSlotLock | undefined;
 /** 実行枠を取りに行っている最中か。取りに行くのは同時に1回まで。 */
 let acquiring = false;
 /** 他のウィンドウが枠を持っていたときに、取り直すまでの間隔。 */
-const SLOT_RETRY_MS = 1_000;
+const SLOT_RETRY_MS = 250;
+/**
+ * 自分が枠を手放した後、次を取りに行くまでの間隔。手放してすぐ取り直すと、ポーリングで待つ
+ * 他のウィンドウが解放の瞬間を拾えず、待ちが残る限り同じウィンドウが枠を取り続ける。
+ * `SLOT_RETRY_MS`より長くして、待っている他のウィンドウへ順番を回す。
+ */
+const SLOT_HANDOFF_MS = 600;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleDrain(delayMs: number): void {
+  if (retryTimer !== undefined) {
+    return;
+  }
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined;
+    drain();
+  }, delayMs);
+  retryTimer.unref?.();
+}
 
 /**
  * 短命CLIの実行枠をウィンドウの間で共有する（拡張の起動時に1回）。`dir`は
@@ -375,13 +392,7 @@ function drain(): void {
       acquiring = false;
       if (slot === undefined) {
         // 他のウィンドウが実行中。時間をおいて取り直す
-        if (retryTimer === undefined) {
-          retryTimer = setTimeout(() => {
-            retryTimer = undefined;
-            drain();
-          }, SLOT_RETRY_MS);
-          retryTimer.unref?.();
-        }
+        scheduleDrain(SLOT_RETRY_MS);
         return;
       }
       if (!startNext(slot)) {
@@ -414,9 +425,13 @@ function startNext(slot: HeadlessSlot | undefined): boolean {
       request.settle(outcome);
     })
     .finally(async () => {
-      await slot?.release();
       runningCount -= 1;
-      drain();
+      if (slot === undefined) {
+        drain();
+        return;
+      }
+      await slot.release();
+      scheduleDrain(SLOT_HANDOFF_MS);
     });
   return true;
 }
