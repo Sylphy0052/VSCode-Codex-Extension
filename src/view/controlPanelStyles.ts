@@ -551,6 +551,19 @@ ${sharedStyles()}
     font-size: 0.85em;
   }
   .accountActions .note { border-top: none; padding-top: 0; margin-top: 6px; }
+  .savedAccounts { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .savedAccount {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+    border-radius: 4px;
+  }
+  .savedAccount-current { border-color: var(--vscode-charts-green); }
+  .savedAccount-name { font-weight: 600; overflow-wrap: anywhere; }
+  .savedAccount-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+  .savedAccount-action { width: auto; padding: 2px 8px; }
   .pluginsList, .appsList { display: flex; flex-direction: column; gap: 6px; }
   .pluginsWarning {
     color: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));

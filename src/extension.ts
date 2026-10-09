@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activityLogger';
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
+import { ClaudeAccountStore } from './claude/accountStore';
 import { ClaudeAgentProbe } from './claude/agentProbe';
 import { ClaudeAuthActions } from './claude/authActions';
 import { ClaudeAuthProbe } from './claude/authProbe';
@@ -588,6 +589,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
     (context.extension.packageJSON as { version?: string }).version,
     userSkills,
+    // 複数アカウントの切り替え（Issue #1921）。保存先は検証スクリプトと共通の `<claudeHome>/accounts/`
+    {
+      store: new ClaudeAccountStore(claudeHome),
+      readIdentity: async () => {
+        const snapshot = await claudeAuth.read();
+        return snapshot.ok && snapshot.account.loggedIn ? snapshot.account.identity : undefined;
+      },
+    },
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
