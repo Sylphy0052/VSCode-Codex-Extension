@@ -12,7 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import type { UsageSlot, UsageSlots } from './usageText';
 
 /**
@@ -177,19 +177,19 @@ export class ClaudeAccountStore {
       if (normalized === undefined) {
         return { ok: false, reason: INVALID_NAME_REASON };
       }
-      if (email === undefined) {
-        return {
-          ok: false,
-          reason:
-            '今ログインしているメールアドレスを取得できないため、登録済みのアカウントと重複していないか確かめられません。少し待ってから試してください',
-        };
-      }
       const live = await readOptional(this.liveCredentials);
       if (live === undefined) {
         return { ok: false, reason: 'ログインしていません。先にClaude Codeでログインしてください' };
       }
       if (!isJsonObject(live)) {
         return { ok: false, reason: '今の認証ファイルを解釈できないため登録しませんでした' };
+      }
+      if (email === undefined) {
+        return {
+          ok: false,
+          reason:
+            '今ログインしているメールアドレスを取得できないため、登録済みのアカウントと重複していないか確かめられません。少し待ってから試してください',
+        };
       }
       const ids = await this.registeredIds();
       let maxPriority = -1;
@@ -746,7 +746,9 @@ export class ClaudeAccountStore {
    * `chmod` や書き込みがリンク先へ及び、退避先の外のディレクトリを0700にしたり認証を置いたりするため。
    */
   private async rejectSymlinkDirs(dir: string): Promise<void> {
-    for (let d = dir; d !== this.claudeHome && d !== dirname(d); d = dirname(d)) {
+    // 末尾の `/` などで文字列が一致せず `<claudeHome>` より上まで遡らないよう、正規化した形で比べる
+    const root = resolvePath(this.claudeHome);
+    for (let d = resolvePath(dir); d !== root && d !== dirname(d); d = dirname(d)) {
       if ((await lstat(d)).isSymbolicLink()) {
         throw new Error(`${d}がシンボリックリンクのため書き込みませんでした`);
       }
