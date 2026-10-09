@@ -250,6 +250,13 @@ export function readClaudeAutoSwitchConfig(): { enabled: boolean; thresholdPct: 
   };
 }
 
+/** アカウントの自動切り替えのON/OFFをユーザー設定へ保存する。全ウィンドウ・全会話で共有される。 */
+export async function setClaudeAutoSwitchEnabled(enabled: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration('claude')
+    .update('accounts.autoSwitch.enabled', enabled, vscode.ConfigurationTarget.Global);
+}
+
 export function readActivityLogConfig(): ActivityLogConfig {
   const c = vscode.workspace.getConfiguration('agent');
   return {

@@ -1952,6 +1952,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         chat.refreshLimitAutoResume();
         claudeChat.refreshLimitAutoResume();
       }
+      // アカウントの自動切り替えのトグルの表示を、設定画面から直接書き換えた場合も含めて揃える
+      if (e.affectsConfiguration('claude.accounts.autoSwitch.enabled')) {
+        claudeChat.refreshAutoSwitch();
+      }
       // Reflexモード（issue #1455）の親スイッチも両画面で共有する。「…」メニューのトグルの
       // 表示を、設定画面から直接書き換えた場合も含めて揃える
       if (e.affectsConfiguration('agent.chat.reflex.enabled')) {
