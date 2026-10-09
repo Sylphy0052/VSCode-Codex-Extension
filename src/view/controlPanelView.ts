@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
   isValidAccountId,
+  REGISTER_CURRENT_ACCOUNT_LABEL,
   type ClaudeAccountStore,
   type SavedAccountsSnapshot,
 } from '../claude/accountStore';
@@ -797,7 +798,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     if (!result.ok && result.confirmCurrent !== undefined && liveEmail !== undefined) {
       const { id: currentId, name: currentName } = result.confirmCurrent;
       const choice = await vscode.window.showWarningMessage(
-        `今ログインしている${liveEmail}は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら${liveEmail}を「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「今のアカウントを登録」で登録してください。`,
+        `今ログインしている${liveEmail}は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら${liveEmail}を「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください。`,
         { modal: true },
         '同じアカウント',
       );
