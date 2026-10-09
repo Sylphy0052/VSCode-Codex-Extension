@@ -89,6 +89,7 @@ export async function checkAutoReplyCompletion(
   threshold: number,
 ): Promise<AutoReplyCompletionVerdict> {
   const answers = await judge(deps, {
+    caller: '自動返信の完了検証',
     situation: [
       'AIエージェント（元セッション）が1ターンの作業を終えた。利用者は席を外しており、自動返信の仕組みが',
       '利用者の代わりに次の発言を送るかどうかを決めようとしている。状態は元セッションの直前の出力である。',
@@ -141,6 +142,7 @@ export async function checkAutoReplyDanger(
   threshold: number,
 ): Promise<AutoReplyDangerVerdict> {
   const answers = await judge(deps, {
+    caller: '自動返信の危険検査',
     situation: [
       '利用者が席を外している間、自動返信の仕組みがAIエージェント（元セッション）へ発言や質問への回答を',
       '代わりに送ろうとしている。送る前に、それが危険な操作を招かないかを確かめたい。状態には、送ろうと',
@@ -227,6 +229,7 @@ export async function judgeAutoReplyAskUserQuestion(
     return { kind: 'delegate' };
   }
   const answers = await judge(deps, {
+    caller: '自動返信のAskUserQuestion',
     situation: [
       'AIエージェント（元セッション）が利用者へ選択式の質問をした。利用者は席を外しており、自動返信の仕組みが',
       '代わりに答えようとしている。状態には質問の一覧と、質問に至った元セッションの直前の出力が入っている。',

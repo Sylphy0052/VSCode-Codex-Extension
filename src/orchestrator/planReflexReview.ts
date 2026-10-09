@@ -43,6 +43,7 @@ export async function reviewPlanWithReflex(
   threshold: number,
 ): Promise<PlanReflexVerdict> {
   const answers = await judge(reflex, {
+    caller: 'Plan・ゲートのレビュー',
     situation,
     state,
     questions: [{ kind: 'choice', question, options: REVIEW_OPTIONS }],

@@ -150,6 +150,7 @@ export async function checkLoopDone(
 ): Promise<LoopDoneCheckResult> {
   const condition = sanitizeInlineText(input.condition.replace(/\s+/gu, ' '), CONDITION_MAX_LENGTH);
   const answers = await judge(deps, {
+    caller: 'ループの完了確認',
     situation: [
       'AIエージェントに、終了条件を満たすまで同じ作業を繰り返させている。エージェントは直前の応答で',
       '「終了条件を満たした」と宣言した。ループを止めてよいかを判断したい。',

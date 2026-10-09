@@ -100,6 +100,7 @@ export async function judgeHandoffBoundary(
   material: HandoffBoundaryMaterial,
 ): Promise<HandoffBoundaryVerdict | undefined> {
   const answers = await judge(deps, {
+    caller: '引き継ぎの区切り',
     situation: [
       'AIエージェントのセッションが1ターンを終えた。拡張機能は、このセッションを終えて新しいセッションへ',
       '作業を引き継ぐ（自動引き継ぎ）かどうかを決めようとしている。引き継ぐと利用者は新しいセッションへ',

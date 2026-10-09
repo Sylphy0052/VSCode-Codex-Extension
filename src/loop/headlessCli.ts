@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { isEffortToken } from '../codex/modelCatalog';
 import { killWithEscalation } from '../process/childProcess';
 import { canWriteStdin, guardStdinErrors } from '../process/stdinSafety';
+import { HeadlessSlotLock, type HeadlessSlot } from './headlessSlotLock';
 
 /**
  * ループの脇役（Evaluator / Advisor）をCLIのヘッドレス実行として1回だけ呼ぶ共通部。
@@ -277,7 +278,8 @@ export async function runHeadlessPromptDetailed(
 
 /**
  * 短命CLIを同時に1本までに絞る順番待ち（Issue #1807）。CLIは1回の起動でRSS 150〜190MB、起動時に
- * CPUを30%前後使うため、拡張ホスト（ウィンドウ）の中で並べて起こさない。ウィンドウをまたいでは効かない。
+ * CPUを30%前後使うため、並べて起こさない。ウィンドウ内はこの順番待ちで、ウィンドウの間は
+ * `HeadlessSlotLock`の実行枠で絞る（Issue #1912。枠は1つなので、上限も1のまま）。
  */
 interface QueuedRequest {
   deps: HeadlessCliDeps;
@@ -336,32 +338,87 @@ function enqueue(deps: HeadlessCliDeps, prompt: string, kind: string): Promise<H
   });
 }
 
+/** ウィンドウ間の実行枠。未設定（テスト・共有先なし）ならウィンドウ内の順番待ちだけで絞る。 */
+let slotLock: HeadlessSlotLock | undefined;
+/** 実行枠を取りに行っている最中か。取りに行くのは同時に1回まで。 */
+let acquiring = false;
+/** 他のウィンドウが枠を持っていたときに、取り直すまでの間隔。 */
+const SLOT_RETRY_MS = 1_000;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * 短命CLIの実行枠をウィンドウの間で共有する（拡張の起動時に1回）。`dir`は
+ * `ExtensionContext.globalStorageUri.fsPath`を渡す。`undefined`で解除する。
+ */
+export function configureHeadlessCliSharedDir(
+  dir: string | undefined,
+  logWarn?: (message: string) => void,
+): void {
+  slotLock = dir === undefined ? undefined : new HeadlessSlotLock(dir, logWarn);
+}
+
 function drain(): void {
-  while (runningCount < MAX_CONCURRENT_HEADLESS) {
-    const request = waiting.shift();
-    if (request === undefined) {
-      return;
+  if (slotLock === undefined) {
+    while (runningCount < MAX_CONCURRENT_HEADLESS && waiting.length > 0) {
+      startNext(undefined);
     }
-    runningCount += 1;
-    const startedAt = Date.now();
-    const { deps, prompt } = request;
-    const run = deps.provider === 'claude' ? runClaude(deps, prompt) : runCodex(deps, prompt);
-    void run
-      .catch((): HeadlessOutcome => ({ ok: false, reason: 'process-error' }))
-      .then((outcome) => {
-        recordCall(
-          request.kind,
-          outcome.ok ? 'ok' : outcome.reason,
-          startedAt - request.enqueuedAt,
-          Date.now() - startedAt,
-        );
-        request.settle(outcome);
-      })
-      .finally(() => {
-        runningCount -= 1;
-        drain();
-      });
+    return;
   }
+  if (acquiring || runningCount >= MAX_CONCURRENT_HEADLESS || waiting.length === 0) {
+    return;
+  }
+  acquiring = true;
+  void slotLock
+    .tryAcquire()
+    .catch(() => undefined)
+    .then((slot) => {
+      acquiring = false;
+      if (slot === undefined) {
+        // 他のウィンドウが実行中。時間をおいて取り直す
+        if (retryTimer === undefined) {
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            drain();
+          }, SLOT_RETRY_MS);
+          retryTimer.unref?.();
+        }
+        return;
+      }
+      if (!startNext(slot)) {
+        // 枠を取っている間に、待っていた要求が打ち切られた
+        void slot.release();
+      }
+      drain();
+    });
+}
+
+/** 順番待ちの先頭を起こす。待ちが空なら`false`。`slot`は実行が終わったら返す。 */
+function startNext(slot: HeadlessSlot | undefined): boolean {
+  const request = waiting.shift();
+  if (request === undefined) {
+    return false;
+  }
+  runningCount += 1;
+  const startedAt = Date.now();
+  const { deps, prompt } = request;
+  const run = deps.provider === 'claude' ? runClaude(deps, prompt) : runCodex(deps, prompt);
+  void run
+    .catch((): HeadlessOutcome => ({ ok: false, reason: 'process-error' }))
+    .then((outcome) => {
+      recordCall(
+        request.kind,
+        outcome.ok ? 'ok' : outcome.reason,
+        startedAt - request.enqueuedAt,
+        Date.now() - startedAt,
+      );
+      request.settle(outcome);
+    })
+    .finally(async () => {
+      await slot?.release();
+      runningCount -= 1;
+      drain();
+    });
+  return true;
 }
 
 /** 同じ入力への成功した結果を再利用する期間と件数の上限（Issue #1807）。 */
