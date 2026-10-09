@@ -9,6 +9,10 @@ import { parseCdpEndpoint } from './discussion';
  */
 
 const COMMAND_TIMEOUT_MS = 60_000;
+const CONNECT_TIMEOUT_MS = 10_000;
+
+/** 接続が切れた後の失敗。ページの読み込み待ちなど、再試行してよい失敗と区別する。 */
+export class CdpClosedError extends Error {}
 
 interface Pending {
   resolve: (result: Record<string, unknown>) => void;
@@ -19,11 +23,13 @@ interface Pending {
 export class CdpBrowser {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
-  private closedError: Error | undefined;
+  private closedError: CdpClosedError | undefined;
 
   private constructor(private readonly socket: WebSocket) {
     socket.addEventListener('message', (event) => this.onMessage(event.data));
-    socket.addEventListener('close', () => this.failAll(new Error('Chromeとの接続が切れました')));
+    socket.addEventListener('close', () =>
+      this.failAll(new CdpClosedError('Chromeとの接続が切れました')),
+    );
   }
 
   /** `endpoint`（`http://127.0.0.1:9222`形式）のブラウザへつなぐ。 */
@@ -32,7 +38,10 @@ export class CdpBrowser {
       throw new Error('このVS CodeのNode.jsはWebSocketに対応していません。VS Codeを更新してください');
     }
     const endpoint = parseCdpEndpoint(rawEndpoint);
-    const response = await fetch(`${endpoint}/json/version`);
+    const response = await fetch(`${endpoint}/json/version`, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+    });
     if (!response.ok) {
       throw new Error('CDP接続先が正常な応答を返しません');
     }
@@ -45,12 +54,25 @@ export class CdpBrowser {
       throw new Error('CDP接続先からブラウザのWebSocket URLを読み取れません');
     }
     const socket = new WebSocket(url);
-    await new Promise<void>((resolve, reject) => {
-      socket.addEventListener('open', () => resolve(), { once: true });
-      socket.addEventListener('error', () => reject(new Error('ChromeのCDPへ接続できません')), {
-        once: true,
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const fail = () => reject(new Error('ChromeのCDPへ接続できません'));
+        const timer = setTimeout(fail, CONNECT_TIMEOUT_MS);
+        socket.addEventListener(
+          'open',
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+        socket.addEventListener('error', fail, { once: true });
+        socket.addEventListener('close', fail, { once: true });
       });
-    });
+    } catch (error) {
+      socket.close();
+      throw error;
+    }
     return new CdpBrowser(socket);
   }
 
@@ -70,14 +92,21 @@ export class CdpBrowser {
         reject(new Error(`Chromeが応答しません（${method}）`));
       }, COMMAND_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(
-        JSON.stringify({ id, method, params, ...(sessionId === undefined ? {} : { sessionId }) }),
-      );
+      try {
+        this.socket.send(
+          JSON.stringify({ id, method, params, ...(sessionId === undefined ? {} : { sessionId }) }),
+        );
+      } catch {
+        // 閉じかけの接続では同期で投げる
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(new CdpClosedError('Chromeとの接続が切れました'));
+      }
     });
   }
 
   close(): void {
-    this.failAll(new Error('Chromeとの接続を閉じました'));
+    this.failAll(new CdpClosedError('Chromeとの接続を閉じました'));
     this.socket.close();
   }
 
@@ -109,7 +138,7 @@ export class CdpBrowser {
     );
   }
 
-  private failAll(error: Error): void {
+  private failAll(error: CdpClosedError): void {
     this.closedError ??= error;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);

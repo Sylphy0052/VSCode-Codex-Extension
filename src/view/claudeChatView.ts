@@ -151,7 +151,10 @@ import {
 import type { SlashCommand } from '../provider/slashCommands';
 import { AttachmentBox, type Attachment } from '../provider/attachments';
 import { MESSAGING_MCP_SERVER_NAME } from '../orchestrator/messaging';
-import { IMAGE_GENERATION_MCP_SERVER_NAME } from '../webGpt/imageGenerationMcp';
+import {
+  IMAGE_GENERATION_MCP_SERVER_NAME,
+  IMAGE_GENERATION_TOOL_TIMEOUT_SEC,
+} from '../webGpt/imageGenerationMcp';
 import { terminateDescendants } from '../orchestrator/resourceSampler';
 import type {
   SessionMessagingHost,
@@ -769,7 +772,14 @@ export class ClaudeChatViewManager
         : { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: messagingUrl } }),
       ...(imageUrl === undefined
         ? {}
-        : { [IMAGE_GENERATION_MCP_SERVER_NAME]: { type: 'http', url: imageUrl } }),
+        : {
+            [IMAGE_GENERATION_MCP_SERVER_NAME]: {
+              type: 'http',
+              url: imageUrl,
+              // HTTPのMCPは応答の無いまま5分で打ち切られる（CLI 2.1.286の既定）。生成を待てるよう延ばす
+              timeout: IMAGE_GENERATION_TOOL_TIMEOUT_SEC * 1000,
+            },
+          }),
     };
     return {
       ...config,

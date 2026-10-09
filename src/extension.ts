@@ -1538,16 +1538,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           .getConfiguration('agent.webGpt')
           .get<string>('cdpEndpoint', DEFAULT_CDP_ENDPOINT),
       outputDir: path.join(context.globalStorageUri.fsPath, 'webgpt-images'),
-      checkTrusted: () =>
-        vscode.workspace.isTrusted
+      checkAvailable: () => {
+        if (!readWebGptImageGenerationEnabled()) {
+          return 'WebGPTでの画像生成は設定agent.webGpt.imageGeneration.enabledで無効になっています';
+        }
+        return vscode.workspace.isTrusted
           ? undefined
-          : 'WebGPTでの画像生成には信頼済みワークスペースが必要です',
+          : 'WebGPTでの画像生成には信頼済みワークスペースが必要です';
+      },
       logWarn: (message) => log.warn(message),
     });
     imageGenerationHost
       .then((host) => {
         imageGenerationUrl = host.url;
-        context.subscriptions.push({ dispose: () => void host.close() });
         log.info('WebGPT画像生成のMCPサーバを起動しました');
       })
       .catch((e: unknown) => {
@@ -1564,6 +1567,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       : undefined;
   chat.setImageGenerationMcp(imageGenerationMcpUrl);
   claudeChat.setImageGenerationMcp(imageGenerationMcpUrl);
+  // 起動の完了より先に拡張機能が止まっても閉じられるよう、起動前に登録しておく
+  context.subscriptions.push({
+    dispose: () => void imageGenerationHost?.then((host) => host.close()).catch(() => undefined),
+  });
   ensureImageGenerationHost();
   const sessionKanban = new SessionKanbanViewManager(
     () => {

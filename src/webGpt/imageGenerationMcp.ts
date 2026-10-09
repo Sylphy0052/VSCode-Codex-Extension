@@ -56,7 +56,7 @@ const GENERATE_IMAGE_TOOL: McpToolDefinition = {
       conversationUrl: {
         type: 'string',
         description:
-          '既存の会話で生成するときの会話URL（https://chatgpt.com/c/<id>）。省略すると新しい会話を作る',
+          '前回の結果のconversationUrl（https://chatgpt.com/c/<id>）。このウィンドウでgenerate_imageが返した会話だけを指定できる。省略すると新しい会話を作る',
       },
     },
     required: ['prompt'],
@@ -68,11 +68,25 @@ export interface ImageGenerationMcpDeps {
   /** 呼び出しのたびに読む。設定の変更を次の呼び出しから反映するため。 */
   readEndpoint: () => string;
   outputDir: string;
-  /** 信頼済みワークスペースでなければ理由を返す。 */
-  checkTrusted: () => string | undefined;
+  /**
+   * 呼び出しのたびに確かめる。設定が無効、または信頼済みワークスペースでなければ理由を
+   * 返す。設定を無効へ戻す前に開いた会話からも呼べないようにするため。
+   */
+  checkAvailable: () => string | undefined;
   logWarn: (message: string) => void;
   /** テスト用の差し替え口。 */
-  generate?: (request: GenerateImageRequest) => Promise<GenerateImageResult>;
+  generate?: (request: GenerateImageRequest, signal: AbortSignal) => Promise<GenerateImageResult>;
+}
+
+interface HostState {
+  readonly deps: ImageGenerationMcpDeps;
+  /**
+   * このサーバが返した会話URL。続きの生成はここにある会話に限る。ログイン中のアカウントの
+   * 他の会話（機密を含みうる）へ、エージェントが任意に書き込めないようにするため。
+   */
+  readonly conversations: Set<string>;
+  /** 生成を1件ずつ順に流す。タブとChatGPTへの送信を並行させない。 */
+  queue: Promise<unknown>;
 }
 
 export interface ImageGenerationMcpHost {
@@ -85,11 +99,12 @@ export async function startImageGenerationMcpHost(
   deps: ImageGenerationMcpDeps,
 ): Promise<ImageGenerationMcpHost> {
   const token = randomBytes(16).toString('hex');
+  const state: HostState = { deps, conversations: new Set(), queue: Promise.resolve() };
   const server: HttpMcpServerHandle = await startHttpMcpServer((candidate) =>
     candidate === token
       ? {
           connectionId: IMAGE_GENERATION_MCP_SERVER_NAME,
-          handle: (connection) => handleConnection(deps, connection),
+          handle: (connection) => handleConnection(state, connection),
         }
       : undefined,
   );
@@ -99,11 +114,14 @@ export async function startImageGenerationMcpHost(
   };
 }
 
-function handleConnection(deps: ImageGenerationMcpDeps, connection: McpConnection): void {
+function handleConnection(state: HostState, connection: McpConnection): void {
+  // 呼び出し元が応答を待たずに切断したら（会話の中断など）、生成を止めてタブを閉じる
+  const abort = new AbortController();
+  connection.onClose(() => abort.abort());
   connection.onRequest((request) => {
-    void dispatch(deps, request)
+    void dispatch(state, request, abort.signal)
       .catch((error: unknown) => {
-        deps.logWarn(
+        state.deps.logWarn(
           `[webgpt-image] 要求の処理で例外: ${error instanceof Error ? error.message : String(error)}`,
         );
         return failure(request.id, -32603, '内部エラーが発生しました');
@@ -113,8 +131,9 @@ function handleConnection(deps: ImageGenerationMcpDeps, connection: McpConnectio
 }
 
 async function dispatch(
-  deps: ImageGenerationMcpDeps,
+  state: HostState,
   request: JsonRpcRequest,
+  signal: AbortSignal,
 ): Promise<JsonRpcResponse> {
   switch (request.method) {
     case 'initialize':
@@ -122,16 +141,18 @@ async function dispatch(
     case 'tools/list':
       return success(request.id, { tools: [GENERATE_IMAGE_TOOL] });
     case 'tools/call':
-      return handleToolCall(deps, request);
+      return handleToolCall(state, request, signal);
     default:
       return failure(request.id, -32601, `未知のメソッドです: ${request.method}`);
   }
 }
 
 async function handleToolCall(
-  deps: ImageGenerationMcpDeps,
+  state: HostState,
   request: JsonRpcRequest,
+  signal: AbortSignal,
 ): Promise<JsonRpcResponse> {
+  const { deps } = state;
   const params =
     typeof request.params === 'object' && request.params !== null
       ? (request.params as Record<string, unknown>)
@@ -139,22 +160,46 @@ async function handleToolCall(
   if (params['name'] !== GENERATE_IMAGE_TOOL.name) {
     return failure(request.id, -32602, `未知のツールです: ${String(params['name'])}`);
   }
-  const untrusted = deps.checkTrusted();
-  if (untrusted !== undefined) {
-    return success(request.id, toolTextResult(untrusted, true));
+  const unavailable = deps.checkAvailable();
+  if (unavailable !== undefined) {
+    return success(request.id, toolTextResult(unavailable, true));
   }
   const parsed = parseGenerateImageArgs(params['arguments']);
   if (!parsed.ok) {
     return success(request.id, toolTextResult(parsed.error, true));
   }
+  const conversationUrl = parsed.request.conversationUrl;
+  if (conversationUrl !== undefined && !state.conversations.has(conversationUrl)) {
+    return success(
+      request.id,
+      toolTextResult(
+        'conversationUrlには、このウィンドウでgenerate_imageが返した会話だけを指定できます。新しい会話で生成するときは省略してください',
+        true,
+      ),
+    );
+  }
   const generate =
     deps.generate ??
-    ((input: GenerateImageRequest) =>
-      generateImage(input, { endpoint: deps.readEndpoint(), outputDir: deps.outputDir }));
-  const result = await generate(parsed.request);
+    ((input: GenerateImageRequest, abortSignal: AbortSignal) =>
+      generateImage(input, {
+        endpoint: deps.readEndpoint(),
+        outputDir: deps.outputDir,
+        signal: abortSignal,
+        logWarn: deps.logWarn,
+      }));
+  const run = state.queue.then(() => {
+    // 順番を待つ間に呼び出し元が離れていたら、送信しない
+    if (signal.aborted) {
+      return { ok: false, error: '呼び出し元が中断したため生成しませんでした' } as const;
+    }
+    return generate(parsed.request, signal);
+  });
+  state.queue = run.catch(() => undefined);
+  const result = await run;
   if (!result.ok) {
     return success(request.id, toolTextResult(result.error, true));
   }
+  state.conversations.add(result.conversationUrl);
   return success(
     request.id,
     toolTextResult(
