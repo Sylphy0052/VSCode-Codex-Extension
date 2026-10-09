@@ -20,6 +20,16 @@ export function resolveClaudeHome(configured: string, deps: LocatorDeps): string
   return `${deps.homedir()}/.claude`;
 }
 
+/**
+ * CLIの全体設定（`oauthAccount` を持つ `.claude.json`）の場所。既定の `~/.claude` なら
+ * ホーム直下の `~/.claude.json`、設定ディレクトリを変えていればその中（CLIと同じ決め方）。
+ */
+export function resolveClaudeGlobalConfig(claudeHome: string, deps: LocatorDeps): string {
+  return claudeHome === `${deps.homedir()}/.claude`
+    ? `${deps.homedir()}/.claude.json`
+    : `${claudeHome}/.claude.json`;
+}
+
 export interface ClaudePaths {
   home: string;
   /**

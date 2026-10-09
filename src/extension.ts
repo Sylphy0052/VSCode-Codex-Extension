@@ -10,7 +10,8 @@ import { ClaudeAccountStore } from './claude/accountStore';
 import { ClaudeAgentProbe } from './claude/agentProbe';
 import { ClaudeAuthActions } from './claude/authActions';
 import { ClaudeAuthProbe } from './claude/authProbe';
-import { claudePaths, resolveClaudeHome } from './claude/cliLocator';
+import { claudePaths, resolveClaudeGlobalConfig, resolveClaudeHome } from './claude/cliLocator';
+import { createProfileIdentifier } from './claude/oauthProfile';
 import { ClaudeHooksProbe } from './claude/hooksProbe';
 import { ClaudeMcpProbe } from './claude/mcpProbe';
 import { ClaudeModelProbe } from './claude/modelProbe';
@@ -588,11 +589,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 構築しておく（以前はセッション一覧まわりの構築の後段でまとめて作っていた）
   // 複数アカウントの切り替え（Issue #1921）。保存先は検証スクリプトと共通の `<claudeHome>/accounts/`
   const claudeAccounts = {
-    store: new ClaudeAccountStore(claudeHome),
-    readIdentity: async () => {
-      const snapshot = await claudeAuth.read();
-      return snapshot.ok && snapshot.account.loggedIn ? snapshot.account.identity : undefined;
-    },
+    store: new ClaudeAccountStore(
+      claudeHome,
+      createProfileIdentifier((message) => log.warn(message)),
+      resolveClaudeGlobalConfig(claudeHome, nodeLocatorDeps),
+    ),
   };
   const panel = new ControlPanelViewProvider(
     settings,
@@ -658,7 +659,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // `claudeChat`の構築後でなければ呼べないため、呼び出し時に読み直す
   const accountAutoSwitcher = new AccountAutoSwitcher({
     store: claudeAccounts.store,
-    readIdentity: claudeAccounts.readIdentity,
     config: readClaudeAutoSwitchConfig,
     notify: (message) => void vscode.window.showInformationMessage(message),
     onSwitched: async () => {
