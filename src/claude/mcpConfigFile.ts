@@ -29,7 +29,13 @@ export function writeMcpConfigFile(
   // globalStorageは全ウィンドウで共有されるため、ウィンドウ（拡張ホスト）ごとに別のファイルにする。
   // 名前にpidを入れ、異常終了で残ったファイルを次の起動で見分けられるようにする
   const path = join(configDir, `${prefix}-${process.pid}-${randomBytes(8).toString('hex')}.json`);
-  writeFileSync(path, JSON.stringify({ mcpServers }), { flag: 'wx', mode: 0o600 });
+  try {
+    writeFileSync(path, JSON.stringify({ mcpServers }), { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    // 途中まで書けたファイルを残さない
+    removeMcpConfigFile(path);
+    throw error;
+  }
   return path;
 }
 

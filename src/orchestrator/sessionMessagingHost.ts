@@ -103,6 +103,7 @@ export async function startSessionMessagingHost(
 
   const CONFIG_PREFIX = 'session-messaging-mcp';
   const configPaths = new Set<string>();
+  let closed = false;
   if (deps.configDir !== undefined) pruneStaleMcpConfigFiles(deps.configDir, CONFIG_PREFIX);
 
   return {
@@ -125,7 +126,8 @@ export async function startSessionMessagingHost(
       entries.set(token, entry);
       const url = server.urlForToken(token);
       let claudeConfigPath: string | undefined;
-      if (provider === 'claude' && deps.configDir !== undefined) {
+      // close後に書くと掃除する者がいなくなる
+      if (provider === 'claude' && deps.configDir !== undefined && !closed) {
         try {
           claudeConfigPath = writeMcpConfigFile(deps.configDir, CONFIG_PREFIX, {
             [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url },
@@ -154,6 +156,7 @@ export async function startSessionMessagingHost(
       };
     },
     async close(): Promise<void> {
+      closed = true;
       await server.close();
       entries.clear();
       for (const path of configPaths) removeMcpConfigFile(path);
