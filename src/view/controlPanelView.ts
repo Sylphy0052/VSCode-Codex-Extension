@@ -689,8 +689,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     if (this.claudeAccounts === undefined) {
       return;
     }
-    const { store, readIdentity } = this.claudeAccounts;
-    const email = await readIdentity();
+    const { store } = this.claudeAccounts;
+    const email = await this.readClaudeIdentity();
     const name = await vscode.window.showInputBox({
       title: '今のClaude Codeのアカウントを登録',
       prompt: '一覧に出す表示名を入力してください（日本語も使えます）',
@@ -711,25 +711,34 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     if (this.claudeAccounts === undefined) {
       return;
     }
-    const { store, readIdentity } = this.claudeAccounts;
+    const { store } = this.claudeAccounts;
     const id = m['id'];
     if (!isValidAccountId(id) || !(await store.isRegistered(id))) {
       this.log.warn(`アカウントの操作要求が不正です: ${String(m['type'])}`);
+      // 別のウィンドウで削除された行などを押した場合に、一覧を今の状態へ戻す
+      await this.refresh();
       return;
     }
     const name = await store.displayName(id);
 
     if (m['type'] === 'switchClaudeAccount') {
       const choice = await vscode.window.showWarningMessage(
-        `Claude Codeのアカウントを「${name}」へ切り替えますか？切り替えは開いている全てのVS Codeウィンドウ・全ての会話に一度に効きます。実行中の会話は、次にCLIを起動したときから新しいアカウントになります。`,
+        `Claude Codeのアカウントを「${name}」へ切り替えますか？切り替えは開いている全てのVS Codeウィンドウ・全ての会話に一度に効きます。`,
         { modal: true },
         '切り替え',
       );
       if (choice !== '切り替え') {
         return;
       }
-      const liveEmail = await readIdentity();
-      await this.runStoreAction(() => store.switchTo(id, liveEmail), 'アカウントの切り替え');
+      const liveEmail = await this.readClaudeIdentity();
+      await this.runStoreAction(async () => {
+        const result = await store.switchTo(id, liveEmail);
+        if (result.ok) {
+          // スクリプトで登録したアカウントにもメールアドレスを付け、次の切り替えの照合に使う
+          await store.recordEmail(id, await this.readClaudeIdentity());
+        }
+        return result;
+      }, 'アカウントの切り替え');
       return;
     }
 
@@ -765,6 +774,18 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await this.runStoreAction(() => store.remove(id), '登録の削除');
+  }
+
+  /** 今ログインしているメールアドレス。取れなければ `undefined`（照合できない側へ倒す）。 */
+  private async readClaudeIdentity(): Promise<string | undefined> {
+    try {
+      return await this.claudeAccounts?.readIdentity();
+    } catch (e) {
+      this.log.warn(
+        `Claude Codeのログイン状態を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return undefined;
+    }
   }
 
   private async runStoreAction(

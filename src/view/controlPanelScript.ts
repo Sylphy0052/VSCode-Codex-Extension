@@ -1005,10 +1005,10 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
   function savedLimitText(label, limit, now) {
     if (!limit) return undefined;
     if (typeof limit.resetsAt === 'number' && limit.resetsAt <= now) {
-      return label + ' リセット済み（記録時 ' + limit.pct + '%）';
+      return label + ' リセット済み（記録時' + limit.pct + '%）';
     }
-    const reset = typeof limit.resetsAt === 'number' ? ' リセット ' + formatClockTime(limit.resetsAt) : '';
-    return label + ' ' + limit.pct + '%' + reset;
+    const reset = typeof limit.resetsAt === 'number' ? ' リセット' + formatClockTime(limit.resetsAt) : '';
+    return label + limit.pct + '%' + reset;
   }
 
   function addSavedAccountButton(actions, text, message, disabled) {
@@ -1053,7 +1053,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
       ].filter((t) => t !== undefined);
       usage.textContent =
         (parts.length > 0 ? parts.join(' ・ ') : '使用率の記録なし') +
-        '（' + formatClockTime(account.usage.recordedAt) + ' 記録）';
+        '（' + formatClockTime(account.usage.recordedAt) + '記録）';
     } else {
       usage.textContent = '使用率の記録なし';
     }

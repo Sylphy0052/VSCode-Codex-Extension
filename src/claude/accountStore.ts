@@ -1,5 +1,15 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 /**
@@ -10,9 +20,9 @@ import { dirname, join } from 'node:path';
  * 保存先の形は検証用スクリプト（`~/.claude/bin/claude-account.sh`・
  * `claude-usage-watch.mjs`）とそろえてあり、どちらから操作しても同じ状態を読み書きする。
  *
- * **トークンの中身は扱わない**。認証ファイルはバイト列のまま写すだけで、中身を解釈・
- * 返却・ログ出力しない。画面へ返すのは `<id>`・表示名・優先度・メールアドレス・
- * 使用率の記録だけ。
+ * **トークンの中身は扱わない**。認証ファイルはJSONのオブジェクトであることだけを確かめ、
+ * バイト列のまま写す。中身を返却・ログ出力しない。画面へ返すのは `<id>`・表示名・
+ * 優先度・メールアドレス・使用率の記録だけ。
  */
 
 /** `<id>` として受け付ける形。ディレクトリ名になるため、パス区切りや `..` を通さない。 */
@@ -24,6 +34,7 @@ export function isValidAccountId(id: unknown): id is string {
 
 /** 表示名の上限。サイドバーの1行に収まる程度。 */
 const MAX_NAME_LENGTH = 40;
+const INVALID_NAME_REASON = `表示名は1〜${MAX_NAME_LENGTH}文字で、改行を含めないでください`;
 
 /** 表示名を整える。空・長すぎ・制御文字入りは `undefined`。 */
 export function normalizeAccountName(name: string): string | undefined {
@@ -67,20 +78,28 @@ export type SavedAccountsSnapshot =
 export type AccountStoreResult = { ok: true } | { ok: false; reason: string };
 
 interface AccountMeta {
-  name?: string | undefined;
-  priority?: number | undefined;
-  email?: string | undefined;
-  registeredAt?: number | undefined;
+  name: string | undefined;
+  priority: number | undefined;
+  email: string | undefined;
 }
+
+/** `meta.json` の生の中身。スクリプトが足したキーを消さないよう、書き換えるキー以外は保つ。 */
+type RawMeta = Record<string, unknown>;
 
 const CREDENTIALS = '.credentials.json';
 const META = 'meta.json';
 const USAGE = 'usage.json';
 const CURRENT = '.current';
+/** ウィンドウ（拡張ホスト）をまたいで書き換えを1本にするロック。mkdirで取る。 */
+const LOCK = '.ext-op.lock';
+/** 持ち主が落ちて残ったロックを奪うまでの時間。書き換えは数ファイルなので十分長い。 */
+const STALE_LOCK_MS = 30_000;
+const LOCK_WAIT_MS = 5_000;
+const LOCK_RETRY_MS = 100;
 
 export class ClaudeAccountStore {
-  /** 書き換えは1本ずつ通す。切り替えと削除が並ぶと、書き戻し先が消えた後に書き込みうる。 */
-  private queue: Promise<unknown> = Promise.resolve();
+  /** 同じウィンドウの中の書き換えを1本ずつ通す。 */
+  private queue: Promise<AccountStoreResult> = Promise.resolve({ ok: true });
 
   constructor(private readonly claudeHome: string) {}
 
@@ -96,10 +115,14 @@ export class ClaudeAccountStore {
     return join(this.accountsDir, id);
   }
 
-  /** 登録済みのアカウントを優先度の順に返す。`accounts/` が無ければ空。 */
+  /**
+   * 登録済みのアカウントを優先度の順に返す。`accounts/` が無ければ空。
+   * スクリプトなど他の経路で緩い権限のまま作られたものは、ここで0700/0600へ締める。
+   */
   async list(): Promise<SavedAccountsSnapshot> {
     try {
       const ids = await this.registeredIds();
+      await this.tightenPermissions(ids);
       const current = await this.readCurrent();
       const accounts = await Promise.all(ids.map((id) => this.view(id, current)));
       return { ok: true, accounts: sortByPriority(accounts) };
@@ -118,43 +141,55 @@ export class ClaudeAccountStore {
     return isValidAccountId(id) && (await exists(join(this.slot(id), CREDENTIALS)));
   }
 
+  /** 表示名（`meta.json` が無ければ `<id>`）。確認ダイアログに出す。 */
+  async displayName(id: string): Promise<string> {
+    return (await this.readMeta(id)).name ?? id;
+  }
+
   /**
    * 今の `.credentials.json` を新しいアカウントとして登録し、稼働中にする。
-   * `email` が既に登録済みのアカウントと同じなら断る（同じアカウントの二重登録を防ぐ）。
+   * メールアドレスか認証ファイルの中身が登録済みのものと同じなら断る（二重登録を防ぐ）。
    */
   register(name: string, email: string | undefined): Promise<AccountStoreResult> {
     return this.serialized(async () => {
       const normalized = normalizeAccountName(name);
       if (normalized === undefined) {
-        return {
-          ok: false,
-          reason: `表示名は1〜${MAX_NAME_LENGTH}文字で、改行を含めないでください`,
-        };
+        return { ok: false, reason: INVALID_NAME_REASON };
       }
       const live = await readOptional(this.liveCredentials);
       if (live === undefined) {
         return { ok: false, reason: 'ログインしていません。先にClaude Codeでログインしてください' };
       }
+      if (!isJsonObject(live)) {
+        return { ok: false, reason: '今の認証ファイルを解釈できないため登録しませんでした' };
+      }
       const ids = await this.registeredIds();
-      const metas = await Promise.all(
-        ids.map(async (id) => ({ id, meta: await this.readMeta(id) })),
-      );
-      if (email !== undefined) {
-        const same = metas.find((m) => m.meta.email === email);
-        if (same !== undefined) {
-          return {
-            ok: false,
-            reason: `${email} は「${same.meta.name ?? same.id}」として登録済みです`,
-          };
+      let maxPriority = -1;
+      for (const id of ids) {
+        const meta = await this.readMeta(id);
+        if (email !== undefined && meta.email === email) {
+          return { ok: false, reason: `${email} は「${meta.name ?? id}」として登録済みです` };
         }
+        if ((await readOptional(join(this.slot(id), CREDENTIALS)))?.equals(live) === true) {
+          return { ok: false, reason: `今のアカウントは「${meta.name ?? id}」として登録済みです` };
+        }
+        maxPriority = Math.max(maxPriority, meta.priority ?? 0);
       }
       const id = await this.newId();
-      const priority =
-        metas.reduce((max, m) => Math.max(max, m.meta.priority ?? 0), 0) +
-        (metas.length > 0 ? 1 : 0);
       await this.writeSecret(join(this.slot(id), CREDENTIALS), live);
-      await this.writeMeta(id, { name: normalized, priority, email, registeredAt: Date.now() });
-      await this.writeSecret(join(this.accountsDir, CURRENT), Buffer.from(`${id}\n`));
+      try {
+        await this.writeMeta(id, {
+          name: normalized,
+          priority: maxPriority + 1,
+          email,
+          registeredAt: Date.now(),
+        });
+        await this.writeSecret(join(this.accountsDir, CURRENT), Buffer.from(`${id}\n`));
+      } catch (e) {
+        // 一覧に名前の無い退避先を残さない
+        await rm(this.slot(id), { recursive: true, force: true });
+        throw e;
+      }
       return { ok: true };
     });
   }
@@ -165,11 +200,11 @@ export class ClaudeAccountStore {
    * 1. 稼働中のアカウントの退避先へ、今の `.credentials.json` を書き戻す（refresh tokenが
    *    入れ替わっていても新しい方を残す）
    * 2. 切り替え先の認証ファイルを `.credentials.json` へ写す
-   * 3. `.current` を更新する
+   * 3. `.current` を更新する。失敗したら2を元に戻す
    *
    * `liveEmail` は今ログインしているアカウントのメールアドレス（`claude auth status`）。
-   * 稼働中として記録したアカウントと違う（`/login` で別アカウントに入った後など）ときは、
-   * 書き戻すと別人の認証で上書きしてしまうため切り替えない。
+   * 今の認証が稼働中として記録したアカウントのものだと確かめられないときは、書き戻すと
+   * 別のアカウントの退避先を上書きしうるため切り替えない。
    */
   switchTo(id: string, liveEmail: string | undefined): Promise<AccountStoreResult> {
     return this.serialized(async () => {
@@ -180,11 +215,22 @@ export class ClaudeAccountStore {
       if (current === id) {
         return { ok: true };
       }
+      const target = await readFile(join(this.slot(id), CREDENTIALS));
+      if (!isJsonObject(target)) {
+        return { ok: false, reason: `「${id}」の退避した認証ファイルを解釈できません` };
+      }
       const live = await readOptional(this.liveCredentials);
       if (live !== undefined) {
-        const unsaved = await this.checkLiveIsSaved(current, live, liveEmail);
-        if (unsaved !== undefined) {
-          return { ok: false, reason: unsaved };
+        if (!isJsonObject(live)) {
+          return {
+            ok: false,
+            reason:
+              '今の認証ファイルを解釈できないため、書き戻さずに止めました。少し待ってから試してください',
+          };
+        }
+        const unsafe = await this.checkLiveBelongsToCurrent(current, live, liveEmail);
+        if (unsafe !== undefined) {
+          return { ok: false, reason: unsafe };
         }
         if (current !== undefined) {
           try {
@@ -198,7 +244,6 @@ export class ClaudeAccountStore {
         }
       }
       try {
-        const target = await readFile(join(this.slot(id), CREDENTIALS));
         await this.writeSecret(this.liveCredentials, target);
       } catch (e) {
         return {
@@ -209,9 +254,11 @@ export class ClaudeAccountStore {
       try {
         await this.writeSecret(join(this.accountsDir, CURRENT), Buffer.from(`${id}\n`));
       } catch (e) {
+        // `.current` と実体がずれたままだと、次の切り替えで別のアカウントの退避先へ書き戻してしまう
+        const restored = await this.restoreLive(live);
         return {
           ok: false,
-          reason: `認証ファイルは切り替えましたが、.current の更新で止まりました: ${errorMessage(e)}`,
+          reason: `.current の更新で止まりました（${restored ? '認証ファイルは元に戻しました' : '認証ファイルを元に戻せませんでした。ログインし直してください'}）: ${errorMessage(e)}`,
         };
       }
       return { ok: true };
@@ -219,29 +266,27 @@ export class ClaudeAccountStore {
   }
 
   /**
-   * 今の `.credentials.json` が登録済みのどれかとして残っているかを確かめる。
-   * 残っていなければ、切り替えると失われるため理由を返す。
+   * 切り替えた後に、今ログインしているメールアドレスを記録する。スクリプトで登録した
+   * アカウント（`meta.json` 無し）は、ここで初めてメールアドレスが付き、以後の照合に使える。
+   * 今の認証ファイルが `id` の退避先と同じときだけ書く。
    */
-  private async checkLiveIsSaved(
-    current: string | undefined,
-    live: Buffer,
-    liveEmail: string | undefined,
-  ): Promise<string | undefined> {
-    if (current !== undefined) {
-      const meta = await this.readMeta(current);
-      if (meta.email !== undefined && liveEmail !== undefined && meta.email !== liveEmail) {
-        return `今ログインしているアカウント（${liveEmail}）は、稼働中として記録した「${meta.name ?? current}」（${meta.email}）と違います。先に「今のアカウントを登録」で登録してください`;
+  recordEmail(id: string, email: string | undefined): Promise<AccountStoreResult> {
+    return this.serialized(async () => {
+      if (email === undefined || !(await this.isRegistered(id))) {
+        return { ok: true };
       }
-      return undefined;
-    }
-    // `.current` が無い（または登録が消えた）ときは、中身が同じ退避ファイルがあれば失われない
-    for (const id of await this.registeredIds()) {
-      const saved = await readOptional(join(this.slot(id), CREDENTIALS));
-      if (saved !== undefined && saved.equals(live)) {
-        return undefined;
+      const [live, saved] = await Promise.all([
+        readOptional(this.liveCredentials),
+        readOptional(join(this.slot(id), CREDENTIALS)),
+      ]);
+      if (live === undefined || saved === undefined || !live.equals(saved)) {
+        return { ok: true };
       }
-    }
-    return '今ログインしているアカウントが登録されていないため、切り替えると認証情報が失われます。先に「今のアカウントを登録」で登録してください';
+      if ((await this.readMeta(id)).email === undefined) {
+        await this.writeMeta(id, { email });
+      }
+      return { ok: true };
+    });
   }
 
   rename(id: string, name: string): Promise<AccountStoreResult> {
@@ -251,13 +296,9 @@ export class ClaudeAccountStore {
       }
       const normalized = normalizeAccountName(name);
       if (normalized === undefined) {
-        return {
-          ok: false,
-          reason: `表示名は1〜${MAX_NAME_LENGTH}文字で、改行を含めないでください`,
-        };
+        return { ok: false, reason: INVALID_NAME_REASON };
       }
-      const meta = await this.readMeta(id);
-      await this.writeMeta(id, { ...meta, name: normalized });
+      await this.writeMeta(id, { name: normalized });
       return { ok: true };
     });
   }
@@ -265,23 +306,22 @@ export class ClaudeAccountStore {
   /** 優先度を1つ上げる（`up`）か下げる（`down`）。並びを0から振り直して `meta.json` へ残す。 */
   move(id: string, direction: 'up' | 'down'): Promise<AccountStoreResult> {
     return this.serialized(async () => {
-      if (!(await this.isRegistered(id))) {
-        return { ok: false, reason: `「${id}」は登録されていません` };
-      }
       const current = await this.readCurrent();
       const ordered = sortByPriority(
         await Promise.all((await this.registeredIds()).map((i) => this.view(i, current))),
       );
       const index = ordered.findIndex((a) => a.id === id);
+      if (index < 0) {
+        return { ok: false, reason: `「${id}」は登録されていません` };
+      }
       const swapWith = direction === 'up' ? index - 1 : index + 1;
       if (swapWith < 0 || swapWith >= ordered.length) {
         return { ok: true };
       }
       [ordered[index], ordered[swapWith]] = [ordered[swapWith]!, ordered[index]!];
       for (const [priority, account] of ordered.entries()) {
-        const meta = await this.readMeta(account.id);
-        if (meta.priority !== priority) {
-          await this.writeMeta(account.id, { ...meta, priority });
+        if (account.priority !== priority) {
+          await this.writeMeta(account.id, { priority });
         }
       }
       return { ok: true };
@@ -305,18 +345,103 @@ export class ClaudeAccountStore {
     });
   }
 
-  /** 表示名（`meta.json` が無ければ `<id>`）。確認ダイアログに出す。 */
-  async displayName(id: string): Promise<string> {
-    return (await this.readMeta(id)).name ?? id;
+  /**
+   * 今の `.credentials.json` が、稼働中として記録したアカウントのものかを確かめる。
+   * 確かめられなければ、切り替えると認証情報が失われるか別のアカウントの退避先を
+   * 上書きするため、理由を返す。
+   */
+  private async checkLiveBelongsToCurrent(
+    current: string | undefined,
+    live: Buffer,
+    liveEmail: string | undefined,
+  ): Promise<string | undefined> {
+    if (current === undefined) {
+      // `.current` が無い（または登録が消えた）ときは、中身が同じ退避ファイルがあれば失われない
+      for (const id of await this.registeredIds()) {
+        if ((await readOptional(join(this.slot(id), CREDENTIALS)))?.equals(live) === true) {
+          return undefined;
+        }
+      }
+      return '今ログインしているアカウントが登録されていないため、切り替えると認証情報が失われます。先に「今のアカウントを登録」で登録してください';
+    }
+    if ((await readOptional(join(this.slot(current), CREDENTIALS)))?.equals(live) === true) {
+      return undefined;
+    }
+    const meta = await this.readMeta(current);
+    const name = meta.name ?? current;
+    if (meta.email !== undefined && liveEmail !== undefined) {
+      return meta.email === liveEmail
+        ? undefined
+        : `今ログインしているアカウント（${liveEmail}）は、稼働中として記録した「${name}」（${meta.email}）と違います。先に「今のアカウントを登録」で登録してください`;
+    }
+    return `今ログインしているアカウントが、稼働中として記録した「${name}」と同じか確かめられません（メールアドレスを取得できないか、記録がありません）。別のアカウントの退避先を上書きしないよう切り替えを止めました。「今のアカウントを登録」で登録し直してから切り替えてください`;
   }
 
-  /** 書き換えを1本ずつ通し、途中で投げた例外は理由として返す。 */
+  private async restoreLive(previous: Buffer | undefined): Promise<boolean> {
+    try {
+      if (previous === undefined) {
+        await rm(this.liveCredentials, { force: true });
+      } else {
+        await this.writeSecret(this.liveCredentials, previous);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 書き換えを1本ずつ通し、途中で投げた例外は理由として返す。ウィンドウをまたいだ
+   * 同時操作も `accounts/.ext-op.lock` で1本にする（検証スクリプトはこのロックを見ない）。
+   */
   private serialized(task: () => Promise<AccountStoreResult>): Promise<AccountStoreResult> {
-    const guarded = (): Promise<AccountStoreResult> =>
-      task().catch((e: unknown) => ({ ok: false, reason: errorMessage(e) }));
+    const guarded = async (): Promise<AccountStoreResult> => {
+      try {
+        if (!(await this.acquireLock())) {
+          return {
+            ok: false,
+            reason: '別のウィンドウがアカウントを操作中です。少し待ってから試してください',
+          };
+        }
+      } catch (e) {
+        return { ok: false, reason: errorMessage(e) };
+      }
+      try {
+        return await task();
+      } catch (e) {
+        return { ok: false, reason: errorMessage(e) };
+      } finally {
+        await rm(join(this.accountsDir, LOCK), { recursive: true, force: true });
+      }
+    };
     const run = this.queue.then(guarded, guarded);
     this.queue = run;
     return run;
+  }
+
+  private async acquireLock(): Promise<boolean> {
+    await mkdir(this.accountsDir, { recursive: true, mode: 0o700 });
+    const lock = join(this.accountsDir, LOCK);
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        await mkdir(lock, { mode: 0o700 });
+        return true;
+      } catch (e) {
+        if ((e as { code?: unknown } | null)?.code !== 'EEXIST') {
+          throw e;
+        }
+      }
+      const held = await stat(lock).catch(() => undefined);
+      if (held !== undefined && Date.now() - held.mtimeMs > STALE_LOCK_MS) {
+        await rm(lock, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+    }
   }
 
   private async registeredIds(): Promise<string[]> {
@@ -338,6 +463,23 @@ export class ClaudeAccountStore {
     return ids;
   }
 
+  /** 緩い権限のディレクトリ・ファイルを0700/0600へ締める。シンボリックリンクは触らない。 */
+  private async tightenPermissions(ids: string[]): Promise<void> {
+    const targets: [string, number][] = [[this.accountsDir, 0o700]];
+    for (const id of ids) {
+      targets.push([this.slot(id), 0o700]);
+      for (const file of [CREDENTIALS, META, USAGE]) {
+        targets.push([join(this.slot(id), file), 0o600]);
+      }
+    }
+    for (const [path, mode] of targets) {
+      const info = await lstat(path).catch(() => undefined);
+      if (info !== undefined && !info.isSymbolicLink() && (info.mode & 0o777) !== mode) {
+        await chmod(path, mode);
+      }
+    }
+  }
+
   private async readCurrent(): Promise<string | undefined> {
     const raw = await readOptional(join(this.accountsDir, CURRENT));
     const id = raw?.toString('utf8').trim();
@@ -356,24 +498,40 @@ export class ClaudeAccountStore {
     };
   }
 
+  /** 表示用に読む。壊れた `meta.json` は無いものとして扱う。 */
   private async readMeta(id: string): Promise<AccountMeta> {
-    const parsed = await readJson(join(this.slot(id), META));
-    if (typeof parsed !== 'object' || parsed === null) {
-      return {};
-    }
-    const raw = parsed as Record<string, unknown>;
+    const raw = await this.readRawMeta(id).catch((): RawMeta => ({}));
     const name = typeof raw['name'] === 'string' ? normalizeAccountName(raw['name']) : undefined;
     return {
       name,
       priority: Number.isSafeInteger(raw['priority']) ? (raw['priority'] as number) : undefined,
       email: typeof raw['email'] === 'string' ? raw['email'] : undefined,
-      registeredAt: typeof raw['registeredAt'] === 'number' ? raw['registeredAt'] : undefined,
     };
+  }
+
+  /** `meta.json` の生の中身。無ければ空。壊れていれば投げる（書き戻しで中身を失わないため）。 */
+  private async readRawMeta(id: string): Promise<RawMeta> {
+    const buf = await readOptional(join(this.slot(id), META));
+    if (buf === undefined) {
+      return {};
+    }
+    const parsed = parseJson(buf);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`「${id}」のmeta.jsonを解釈できないため書き換えませんでした`);
+    }
+    return parsed as RawMeta;
+  }
+
+  /** `meta.json` の `changes` のキーだけを書き換え、他のキーは保つ。 */
+  private async writeMeta(id: string, changes: RawMeta): Promise<void> {
+    const next = { ...(await this.readRawMeta(id)), ...changes };
+    await this.writeSecret(join(this.slot(id), META), Buffer.from(`${JSON.stringify(next)}\n`));
   }
 
   /** `usage.json`（`{ t, limits: { '5h': {pct, resetsAt}, 'week:all models': ... } }`）を読む。 */
   private async readUsage(id: string): Promise<SavedAccountUsage | undefined> {
-    const parsed = await readJson(join(this.slot(id), USAGE));
+    const buf = await readOptional(join(this.slot(id), USAGE)).catch(() => undefined);
+    const parsed = buf === undefined ? undefined : parseJson(buf);
     if (typeof parsed !== 'object' || parsed === null) {
       return undefined;
     }
@@ -390,10 +548,6 @@ export class ClaudeAccountStore {
     };
   }
 
-  private async writeMeta(id: string, meta: AccountMeta): Promise<void> {
-    await this.writeSecret(join(this.slot(id), META), Buffer.from(`${JSON.stringify(meta)}\n`));
-  }
-
   private async newId(): Promise<string> {
     for (;;) {
       const id = `acct-${randomBytes(3).toString('hex')}`;
@@ -404,8 +558,8 @@ export class ClaudeAccountStore {
   }
 
   /**
-   * 0600で一時ファイルへ書いてからrenameする（書きかけを読ませない）。
-   * 置き場のディレクトリは0700にそろえる。
+   * 0600で一時ファイルへ書いてからrenameする（書きかけを読ませない）。一時ファイルは
+   * 既存のパスやリンクを辿らないよう新規作成に限る。置き場のディレクトリは0700にそろえる。
    */
   private async writeSecret(path: string, data: Buffer): Promise<void> {
     const dir = dirname(path);
@@ -416,7 +570,7 @@ export class ClaudeAccountStore {
     }
     const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
     try {
-      await writeFile(tmp, data, { mode: 0o600 });
+      await writeFile(tmp, data, { mode: 0o600, flag: 'wx' });
       await rename(tmp, path);
     } catch (e) {
       await rm(tmp, { force: true });
@@ -443,6 +597,20 @@ function parseLimit(value: unknown): SavedAccountLimit | undefined {
   };
 }
 
+function parseJson(buf: Buffer): unknown {
+  try {
+    return JSON.parse(buf.toString('utf8')) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 認証ファイルが書きかけや空でないことだけを見る。中身（トークン）は読まない。 */
+function isJsonObject(buf: Buffer): boolean {
+  const parsed = parseJson(buf);
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+}
+
 async function readOptional(path: string): Promise<Buffer | undefined> {
   try {
     return await readFile(path);
@@ -451,15 +619,6 @@ async function readOptional(path: string): Promise<Buffer | undefined> {
       return undefined;
     }
     throw e;
-  }
-}
-
-/** 壊れたJSONや読めないファイルは無いものとして扱う（スクリプトと同じ）。 */
-async function readJson(path: string): Promise<unknown> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as unknown;
-  } catch {
-    return undefined;
   }
 }
 
