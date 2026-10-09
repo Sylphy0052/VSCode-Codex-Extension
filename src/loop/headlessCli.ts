@@ -350,6 +350,8 @@ const SLOT_RETRY_MS = 250;
  * `SLOT_RETRY_MS`より長くして、待っている他のウィンドウへ順番を回す。
  */
 const SLOT_HANDOFF_MS = 600;
+/** この時刻までは、新しい要求が来ても枠を取りに行かない（`SLOT_HANDOFF_MS`）。 */
+let handoffUntil = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 function scheduleDrain(delayMs: number): void {
@@ -382,6 +384,12 @@ function drain(): void {
     return;
   }
   if (acquiring || runningCount >= MAX_CONCURRENT_HEADLESS || waiting.length === 0) {
+    return;
+  }
+  const handoffLeft = handoffUntil - Date.now();
+  if (handoffLeft > 0) {
+    // 手放した直後は、待っている他のウィンドウへ順番を回す
+    scheduleDrain(handoffLeft);
     return;
   }
   acquiring = true;
@@ -425,13 +433,16 @@ function startNext(slot: HeadlessSlot | undefined): boolean {
       request.settle(outcome);
     })
     .finally(async () => {
-      runningCount -= 1;
       if (slot === undefined) {
+        runningCount -= 1;
         drain();
         return;
       }
+      // 手放し終えるまでは実行中として数え、その間の要求に枠を取りに行かせない
       await slot.release();
-      scheduleDrain(SLOT_HANDOFF_MS);
+      handoffUntil = Date.now() + SLOT_HANDOFF_MS;
+      runningCount -= 1;
+      drain();
     });
   return true;
 }
