@@ -24,12 +24,21 @@ const TIMEOUT_MS = 20_000;
  * 以前はウィンドウごとに60秒だった。ターンの完了ごとに呼ばれるため、3〜4ウィンドウで
  * タスクを回すと`claude`の起動が毎分数本ずつ重なり、負荷平均を押し上げていた。消費率は
  * 分単位では動かず、到達とリセット時刻は`rate_limit_event`で即時に届くので、間隔を広げても
- * 表示の遅れは割合だけにとどまる。
+ * 表示の遅れは割合だけにとどまる。5分でも週1,000件を超えていたため15分へ延ばした（Issue #1914）。
  */
-const MIN_INTERVAL_MS = 5 * 60_000;
+const MIN_INTERVAL_MS = 15 * 60_000;
 
-/** 取得に失敗したとき、次に読み直すまでの間隔。成功時の間隔だと回復が遅れる。 */
+/**
+ * 取得に失敗したとき、次に読み直すまでの最初の間隔。成功時の間隔だと回復が遅れる。
+ * 失敗が続くと倍々に延ばし、`MIN_INTERVAL_MS`で頭打ちにする（Issue #1914）。
+ */
 const RETRY_INTERVAL_MS = 60_000;
+
+/**
+ * 連続失敗がこの回数に達したウィンドウは、自動の取得を止める（Issue #1914）。
+ * 他のウィンドウの成功が共有されるか、ウィンドウを開き直すまで再開しない。
+ */
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 /**
  * 取得中であることを示す排他ファイル名の接頭辞（`sharedDir`の直下）。
@@ -52,6 +61,17 @@ const SHARED_FILE_NAME = 'claude-usage-probe.json';
 interface SharedUsageRecord {
   readAt: number;
   usage: ChatUsage | undefined;
+  /** `readAt`の時点での連続失敗の回数。ウィンドウをまたいで数える。 */
+  failures: number;
+}
+
+/** 連続失敗が`failures`回のとき、`readAt`から次に取得するまでの間隔。 */
+function intervalAfter(failures: number): number {
+  if (failures <= 0) {
+    return MIN_INTERVAL_MS;
+  }
+  // 指数が大きくてもInfinityで頭打ちになり、minで上限に収まる
+  return Math.min(RETRY_INTERVAL_MS * 2 ** (failures - 1), MIN_INTERVAL_MS);
 }
 
 /**
@@ -61,7 +81,14 @@ interface SharedUsageRecord {
  * `rate_limit_event` は割合を持たないので、これが唯一の取得手段になる。
  */
 export class ClaudeUsageProbe {
-  private lastReadAt = 0;
+  /** この時刻までは`read`しても何もしない。 */
+  private nextReadAt = 0;
+  /** 共有先が無いときに使う、ウィンドウ内での連続失敗の回数。 */
+  private failures = 0;
+  /** 連続失敗が上限に達して、自動の取得を止めているか。 */
+  private stopped = false;
+  /** このウィンドウで`claude`を1回でも起動したか。 */
+  private launched = false;
   private running = false;
   /** 自分が取得中のロックの世代。取得していなければundefined。 */
   private claimedGeneration: number | undefined;
@@ -84,7 +111,7 @@ export class ClaudeUsageProbe {
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
   async read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    if (this.running || now - this.lastReadAt < MIN_INTERVAL_MS) {
+    if (this.running || now < this.nextReadAt) {
       return undefined;
     }
     this.running = true;
@@ -92,30 +119,40 @@ export class ClaudeUsageProbe {
     try {
       const fresh = await this.readFreshShared(now);
       if (fresh !== undefined) {
-        this.lastReadAt = fresh.readAt;
-        return fresh.usage;
+        return this.adopt(fresh);
+      }
+      if (this.stopped) {
+        // 止めている間は起動しない。他のウィンドウの成功が共有されれば、上のadoptで再開する
+        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        return undefined;
       }
       // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
       claimed = await this.claim(now);
       if (!claimed) {
-        this.lastReadAt = now - (MIN_INTERVAL_MS - RETRY_INTERVAL_MS);
+        this.nextReadAt = now + RETRY_INTERVAL_MS;
         return undefined;
       }
       // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
       const again = await this.readFreshShared(now);
       if (again !== undefined) {
-        this.lastReadAt = again.readAt;
-        return again.usage;
+        return this.adopt(again);
       }
-      this.lastReadAt = now;
+      const failures = (await this.readShared())?.failures ?? this.failures;
+      if (failures >= MAX_CONSECUTIVE_FAILURES && this.launched) {
+        // 他のウィンドウが上限に達した。ログはそのウィンドウが出しているので、黙って止める。
+        // まだ起動していないウィンドウ（開き直した直後など）は、1回だけ試してから止まる
+        this.stopped = true;
+        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        return undefined;
+      }
+      this.launched = true;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
-      await this.writeShared({ readAt: now, usage: undefined });
+      await this.writeShared({ readAt: now, usage: undefined, failures });
       const output = await this.run();
       const usage = output === undefined ? undefined : parseUsageReport(output);
-      // 失敗は短い間隔で取り直せるよう、読んだ時刻を戻して記録する
-      const readAt = usage === undefined ? now - (MIN_INTERVAL_MS - RETRY_INTERVAL_MS) : now;
-      this.lastReadAt = readAt;
-      await this.writeShared({ readAt, usage });
+      const nextFailures = usage === undefined ? failures + 1 : 0;
+      this.recordResult(now, nextFailures);
+      await this.writeShared({ readAt: now, usage, failures: nextFailures });
       return usage;
     } finally {
       if (claimed) {
@@ -128,9 +165,38 @@ export class ClaudeUsageProbe {
   /** 間隔内に他のウィンドウが読んだ結果があれば返す。 */
   private async readFreshShared(now: number): Promise<SharedUsageRecord | undefined> {
     const shared = await this.readShared();
-    return shared !== undefined && shared.readAt <= now && now - shared.readAt < MIN_INTERVAL_MS
+    return shared !== undefined &&
+      shared.readAt <= now &&
+      now - shared.readAt < intervalAfter(shared.failures)
       ? shared
       : undefined;
+  }
+
+  /** 他のウィンドウが読んだ結果に合わせて、次に取得する時刻を決める。 */
+  private adopt(record: SharedUsageRecord): ChatUsage | undefined {
+    this.failures = record.failures;
+    this.nextReadAt = record.readAt + intervalAfter(record.failures);
+    if (record.usage !== undefined) {
+      this.stopped = false;
+    }
+    return record.usage;
+  }
+
+  /** 自分で取得した結果から、次に取得する時刻と停止を決める。 */
+  private recordResult(now: number, failures: number): void {
+    this.failures = failures;
+    this.nextReadAt = now + intervalAfter(failures);
+    if (failures === 0) {
+      this.stopped = false;
+      return;
+    }
+    if (failures >= MAX_CONSECUTIVE_FAILURES && !this.stopped) {
+      this.stopped = true;
+      this.log.warn(
+        `使用量の取得が${failures}回続けて失敗したため、自動の取得を止めます。` +
+          '他のウィンドウで取得できるか、ウィンドウを開き直すと再開します。',
+      );
+    }
   }
 
   /**
@@ -310,7 +376,13 @@ function parseSharedUsageRecord(raw: string): SharedUsageRecord | undefined {
   if (typeof v.readAt !== 'number' || !Number.isFinite(v.readAt)) {
     return undefined;
   }
-  return { readAt: v.readAt, usage: parseSharedUsage(v.usage) };
+  // 旧版は回数を書かない。無い・不正な値は失敗なしとして扱う。旧版と混在する間は、
+  // 旧版の失敗で回数が0に戻り上限に届きにくいが、間隔は旧版どおりなので許す
+  const failures =
+    typeof v.failures === 'number' && Number.isSafeInteger(v.failures) && v.failures > 0
+      ? v.failures
+      : 0;
+  return { readAt: v.readAt, usage: parseSharedUsage(v.usage), failures };
 }
 
 function parseSharedUsage(value: unknown): ChatUsage | undefined {
