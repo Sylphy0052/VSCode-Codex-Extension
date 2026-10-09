@@ -1,3 +1,4 @@
+import { REGISTER_CURRENT_ACCOUNT_LABEL } from '../claude/accountStore';
 import { STATE_ICON_PATHS } from './controlPanelIcons';
 
 /**
@@ -1113,7 +1114,7 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     const register = document.createElement('button');
     register.type = 'button';
     register.className = 'userSkills-add';
-    register.textContent = '今のアカウントを登録';
+    register.textContent = ${JSON.stringify(REGISTER_CURRENT_ACCOUNT_LABEL)};
     register.addEventListener('click', () => {
       vscode.postMessage({ type: 'registerClaudeAccount' });
     });

@@ -11,7 +11,8 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import type { UsageSlot, UsageSlots } from './usageText';
 
 /**
@@ -33,6 +34,9 @@ const ACCOUNT_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
 export function isValidAccountId(id: unknown): id is string {
   return typeof id === 'string' && ACCOUNT_ID_RE.test(id) && id !== '.' && id !== '..';
 }
+
+/** webviewの登録ボタンの文言。失敗理由の案内でも同じ文言を指すため1か所で持つ。 */
+export const REGISTER_CURRENT_ACCOUNT_LABEL = '今のアカウントを登録';
 
 /** 表示名の上限。サイドバーの1行に収まる程度。 */
 const MAX_NAME_LENGTH = 40;
@@ -100,6 +104,8 @@ interface AccountMeta {
 type RawMeta = Record<string, unknown>;
 
 const CREDENTIALS = '.credentials.json';
+/** 書き戻しで上書きする前の退避ファイル。メールアドレスの一致だけで書き戻したときの取り違えに備える。 */
+const CREDENTIALS_BACKUP = '.credentials.json.bak';
 const META = 'meta.json';
 const USAGE = 'usage.json';
 const CURRENT = '.current';
@@ -162,6 +168,8 @@ export class ClaudeAccountStore {
   /**
    * 今の `.credentials.json` を新しいアカウントとして登録し、稼働中にする。
    * メールアドレスか認証ファイルの中身が登録済みのものと同じなら断る（二重登録を防ぐ）。
+   * メールアドレスを取れないときは断る。中身の一致だけでは、トークンが更新された後の同じ
+   * アカウントを見分けられないため。
    */
   register(name: string, email: string | undefined): Promise<AccountStoreResult> {
     return this.serialized(async () => {
@@ -176,11 +184,18 @@ export class ClaudeAccountStore {
       if (!isJsonObject(live)) {
         return { ok: false, reason: '今の認証ファイルを解釈できないため登録しませんでした' };
       }
+      if (email === undefined) {
+        return {
+          ok: false,
+          reason:
+            '今ログインしているメールアドレスを取得できないため、登録済みのアカウントと重複していないか確かめられません。少し待ってから試してください',
+        };
+      }
       const ids = await this.registeredIds();
       let maxPriority = -1;
       for (const id of ids) {
         const meta = await this.readMeta(id);
-        if (email !== undefined && meta.email === email) {
+        if (meta.email === email) {
           return { ok: false, reason: `${email}は「${meta.name ?? id}」として登録済みです` };
         }
         if ((await readOptional(join(this.slot(id), CREDENTIALS)))?.equals(live) === true) {
@@ -248,6 +263,7 @@ export class ClaudeAccountStore {
         }
         if (current !== undefined) {
           try {
+            await this.backupBeforeWriteBack(current, live);
             await this.writeSecret(join(this.slot(current), CREDENTIALS), live);
           } catch (e) {
             return {
@@ -435,7 +451,7 @@ export class ClaudeAccountStore {
       return {
         ok: false,
         reason:
-          '今ログインしているアカウントが登録されていないため、切り替えると認証情報が失われます。先に「今のアカウントを登録」で登録してください',
+          `今ログインしているアカウントが登録されていないため、切り替えると認証情報が失われます。先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください`,
       };
     }
     if ((await readOptional(join(this.slot(current), CREDENTIALS)))?.equals(live) === true) {
@@ -448,7 +464,7 @@ export class ClaudeAccountStore {
         ? undefined
         : {
             ok: false,
-            reason: `今ログインしているアカウント（${liveEmail}）は、稼働中として記録した「${name}」（${meta.email}）と違います。先に「今のアカウントを登録」で登録してください`,
+            reason: `今ログインしているアカウント（${liveEmail}）は、稼働中として記録した「${name}」（${meta.email}）と違います。先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください`,
           };
     }
     if (meta.email === undefined && liveEmail !== undefined) {
@@ -462,6 +478,18 @@ export class ClaudeAccountStore {
       ok: false,
       reason: `今ログインしているメールアドレスを取得できないため、稼働中として記録した「${name}」と同じか確かめられません。別のアカウントの退避先を上書きしないよう切り替えを止めました。少し待ってから試してください`,
     };
+  }
+
+  /**
+   * 書き戻しで上書きする前の退避ファイルを `.credentials.json.bak` へ残す。照合がメールアドレスの
+   * 一致だけで通った場合、同じメールアドレスで組織・プランが別の認証を取り違えて上書きしうるため。
+   * 中身が同じなら残さない。
+   */
+  private async backupBeforeWriteBack(id: string, live: Buffer): Promise<void> {
+    const saved = await readOptional(join(this.slot(id), CREDENTIALS));
+    if (saved !== undefined && !saved.equals(live)) {
+      await this.writeSecret(join(this.slot(id), CREDENTIALS_BACKUP), saved);
+    }
   }
 
   private async restoreLive(previous: Buffer | undefined): Promise<boolean> {
@@ -479,7 +507,7 @@ export class ClaudeAccountStore {
 
   /**
    * 書き換えを1本ずつ通し、途中で投げた例外は理由として返す。ウィンドウをまたいだ
-   * 同時操作も `accounts/.ext-op.lock` で1本にする（検証スクリプトはこのロックを見ない）。
+   * 同時操作も `accounts/.ext-op.lock` で1本にする（検証スクリプトの `save`・`use` も同じロックを取る）。
    */
   private serialized(task: () => Promise<AccountStoreResult>): Promise<AccountStoreResult> {
     const guarded = async (): Promise<AccountStoreResult> => {
@@ -601,7 +629,7 @@ export class ClaudeAccountStore {
     const targets: [string, number][] = [[this.accountsDir, 0o700]];
     for (const id of ids) {
       targets.push([this.slot(id), 0o700]);
-      for (const file of [CREDENTIALS, META, USAGE]) {
+      for (const file of [CREDENTIALS, CREDENTIALS_BACKUP, META, USAGE]) {
         targets.push([join(this.slot(id), file), 0o600]);
       }
     }
@@ -698,6 +726,7 @@ export class ClaudeAccountStore {
   private async writeSecret(path: string, data: Buffer): Promise<void> {
     const dir = dirname(path);
     await mkdir(dir, { recursive: true, mode: 0o700 });
+    await this.rejectSymlinkDirs(dir);
     // `<claudeHome>` 自体の権限はCLIのものなので触らない
     if (dir !== this.claudeHome) {
       await chmod(dir, 0o700);
@@ -709,6 +738,20 @@ export class ClaudeAccountStore {
     } catch (e) {
       await rm(tmp, { force: true });
       throw e;
+    }
+  }
+
+  /**
+   * `<claudeHome>` より下の置き場（`accounts/`・`accounts/<id>/`）がシンボリックリンクなら断る。
+   * `chmod` や書き込みがリンク先へ及び、退避先の外のディレクトリを0700にしたり認証を置いたりするため。
+   */
+  private async rejectSymlinkDirs(dir: string): Promise<void> {
+    // 末尾の `/` などで文字列が一致せず `<claudeHome>` より上まで遡らないよう、正規化した形で比べる
+    const root = resolvePath(this.claudeHome);
+    for (let d = resolvePath(dir); d !== root && d !== dirname(d); d = dirname(d)) {
+      if ((await lstat(d)).isSymbolicLink()) {
+        throw new Error(`${d}がシンボリックリンクのため書き込みませんでした`);
+      }
     }
   }
 }
@@ -769,6 +812,9 @@ function isNotFound(e: unknown): boolean {
   return (e as { code?: unknown } | null)?.code === 'ENOENT';
 }
 
+/** 通知に出す失敗理由。fsのエラーが含むホームディレクトリの絶対パスは `~` に縮める。 */
 function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  const message = e instanceof Error ? e.message : String(e);
+  const home = homedir();
+  return home.length > 1 ? message.split(home).join('~') : message;
 }
