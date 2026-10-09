@@ -35,6 +35,8 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
   private switching = false;
   /** 切り替え先が無い旨の通知を、同じ状態で繰り返さないための印。 */
   private noTargetNotified = false;
+  /** 直近の切り替え失敗の理由。同じ理由の通知を繰り返さないための印。 */
+  private lastFailure: string | undefined;
 
   constructor(private readonly ports: AutoSwitchPorts) {}
 
@@ -137,9 +139,13 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
           result.confirmCurrent === undefined
             ? result.reason
             : `${result.reason}（アカウント一覧から手動で切り替えると、稼働中のアカウントを確認できます）`;
-        this.ports.notify(
-          `Claude Codeのアカウントを「${name}」へ自動で切り替えられませんでした: ${reason}`,
-        );
+        // 取得のたびに同じ失敗を知らせ続けない
+        if (this.lastFailure !== reason) {
+          this.lastFailure = reason;
+          this.ports.notify(
+            `Claude Codeのアカウントを「${name}」へ自動で切り替えられませんでした: ${reason}`,
+          );
+        }
         return { switched: false, reason };
       }
       const recorded = await store.recordEmail(id, await this.ports.readIdentity());
@@ -147,6 +153,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
         this.ports.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
       }
       this.noTargetNotified = false;
+      this.lastFailure = undefined;
       this.ports.notify(`${why}、Claude Codeのアカウントを「${name}」へ切り替えました`);
       await this.ports.onSwitched();
       return { switched: true, name };
