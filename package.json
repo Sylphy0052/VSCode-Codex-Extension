@@ -2006,6 +2006,20 @@
           "scope": "machine",
           "markdownDescription": "Claude Codeの設定ディレクトリ。空なら環境変数 `CLAUDE_CONFIG_DIR`、それも無ければ `~/.claude` を使う。"
         },
+        "claude.accounts.autoSwitch.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "登録済みのClaude Codeアカウントを、使用率に応じて自動で切り替える（Issue #1924）。5時間枠と週次のうち高い方が閾値に達したら、優先度の高い順で余裕のあるアカウントへ切り替える。上限で会話が止まったときは切り替えて「続けて」を自動で送る。複数アカウントの利用がAnthropicの利用規約に沿うかは、利用者の責任で確認すること。"
+        },
+        "claude.accounts.autoSwitch.thresholdPercent": {
+          "type": "number",
+          "default": 95,
+          "minimum": 50,
+          "maximum": 100,
+          "scope": "machine",
+          "markdownDescription": "自動で切り替える使用率（%）。取得間隔の間に上限を超えないよう、100より手前に置く。"
+        },
         "claude.additionalArgs": {
           "type": "array",
           "items": {

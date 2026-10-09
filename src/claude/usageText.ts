@@ -71,6 +71,66 @@ export function parseUsageReport(text: string): ChatUsage | undefined {
   return undefined;
 }
 
+/** 枠ひとつぶんの使用率。`resetsAt` はepochミリ秒。 */
+export interface UsageSlot {
+  pct: number;
+  resetsAt: number | undefined;
+}
+
+/** `/usage` から読んだ、アカウントの自動切り替えに使う2つの枠。 */
+export interface UsageSlots {
+  fiveHour: UsageSlot | undefined;
+  /** 週次のうち全モデルの枠。モデル別の枠は切り替えの判断に使わない。 */
+  weekly: UsageSlot | undefined;
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/**
+ * `/usage` の出力から、5時間枠と週次（全モデル）の使用率とリセット時刻を読む。
+ * どちらも読めなければ `undefined`。リセット時刻の括弧内のタイムゾーンは見ず、
+ * 実行したマシンの現地時刻として解釈する。
+ *
+ * 期待する形:
+ * `Current session: 16% used · resets Aug 10, 8:09pm (Asia/Tokyo)`
+ * `Current week (all models): 23% used · resets Oct 16, 7am (Asia/Tokyo)`
+ */
+export function parseUsageSlots(text: string, nowMs: number): UsageSlots | undefined {
+  const slots: UsageSlots = { fiveHour: undefined, weekly: undefined };
+  const lines = /^Current (session|week \(([^)]+)\)):\s*(\d+)%\s*used(?:\s*·\s*resets\s*([^(\n]+?)\s*(?:\([^)]*\))?)?\s*$/gim;
+  for (const m of text.matchAll(lines)) {
+    const slot: UsageSlot = {
+      pct: Number(m[3]),
+      resetsAt: m[4] === undefined ? undefined : parseResetTime(m[4], nowMs),
+    };
+    if (m[1]?.toLowerCase() === 'session') {
+      slots.fiveHour = slot;
+    } else if (m[2]?.trim().toLowerCase() === 'all models') {
+      slots.weekly = slot;
+    }
+  }
+  return slots.fiveHour === undefined && slots.weekly === undefined ? undefined : slots;
+}
+
+/** `Aug 10, 8:09pm` / `Oct 16, 7am` を現地時刻のepochミリ秒にする。読めなければ `undefined`。 */
+function parseResetTime(text: string, nowMs: number): number | undefined {
+  const m = /^([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i.exec(text.trim());
+  if (m?.[1] === undefined || m[2] === undefined || m[3] === undefined || m[5] === undefined) {
+    return undefined;
+  }
+  const month = MONTHS.indexOf(m[1].toLowerCase());
+  if (month < 0) {
+    return undefined;
+  }
+  const hour = (Number(m[3]) % 12) + (m[5].toLowerCase() === 'pm' ? 12 : 0);
+  const at = new Date(new Date(nowMs).getFullYear(), month, Number(m[2]), hour, Number(m[4] ?? 0));
+  // 年を表記しないので、1日以上前なら来年の日付とみなす
+  if (at.getTime() < nowMs - 86_400_000) {
+    at.setFullYear(at.getFullYear() + 1);
+  }
+  return at.getTime();
+}
+
 function usageOf(usedPercent: number, limitLabel: string): ChatUsage {
   return { usedPercent, resetsAt: undefined, limitLabel, limited: undefined };
 }

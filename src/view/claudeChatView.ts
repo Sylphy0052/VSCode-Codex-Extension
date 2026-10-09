@@ -93,6 +93,7 @@ import {
   readLoopAdvisorConfig,
   setLoopAdvisorEnabled,
   readLoopDoneCheckConfig,
+  readClaudeAutoSwitchConfig,
   readClaudeConfig,
   readConfig,
   readIdleShutdownMinutes,
@@ -138,6 +139,7 @@ import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
 import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
+import type { AccountAutoSwitcher } from '../claude/accountAutoSwitch';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -383,6 +385,8 @@ interface ClaudePanel extends BaseChatPanel {
    * 操作だけ（手動送信・ループ開始・自動続行設定のOFF→ON）。
    */
   limitAutoResumeSuppressed: boolean;
+  /** 上限で止まったことに対し、アカウント切り替えを済ませた上限の識別子（Issue #1924）。同じ上限で繰り返さない。 */
+  limitSwitchKey: string | undefined;
   /**
    * 自動引き継ぎ（Issue #1079）を既に始めたか。
    *
@@ -488,7 +492,11 @@ interface ChatSettingsPayload {
 
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
-const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
+/** アカウントの使用率を見に行く周期。実際の取得間隔は`ClaudeUsageProbe`が決める（Issue #1924）。 */
+const ACCOUNT_POLL_INTERVAL_MS = 2 * 60_000;
+/** 上限でのアカウント切り替えを覚えておく時間。同じ上限で止まった別の会話が重ねて切り替えない。 */
+const LIMIT_SWITCH_MEMO_MS = 10 * 60_000;
+const LIMIT_AUTO_RESUME_INSTRUCTION ='前回の作業を続けて。現在の状態を確認してから再開して。';
 const LIMIT_AUTO_RESUME_GRACE_MS = 30_000;
 const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
 const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
@@ -570,6 +578,9 @@ export class ClaudeChatViewManager
 
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
+  private accountPollTimer: ReturnType<typeof setInterval> | undefined;
+  /** 直近に上限でアカウントを切り替えた上限の識別子と時刻。 */
+  private lastLimitSwitch: { key: string; at: number } | undefined;
   /** Claude CLIのsandboxを使えるかの確認（Issue #1541）。拡張ホストの間、結果を共有する。 */
   private readonly sandboxProbe: ClaudeSandboxProbe;
   private commands: SlashCommand[] | undefined;
@@ -651,11 +662,16 @@ export class ClaudeChatViewManager
     pinnedSessions?: PinnedSessionStore,
     /** タブ名の自動付け直し（Issue #1426）。渡さなければ自動で付け直さない。 */
     private readonly autoName?: SessionAutoNameHost,
+    /** アカウントの自動切り替え（Issue #1924）。渡さなければ使用率を記録せず、切り替えもしない。 */
+    private readonly accounts?: AccountAutoSwitcher,
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
     // 取得結果をウィンドウ間で共有し、`claude`の起動を全ウィンドウで間引く（Issue #1809）
-    this.usageProbe = new ClaudeUsageProbe(claudePath, log, globalStorageDir);
+    this.usageProbe = new ClaudeUsageProbe(claudePath, log, globalStorageDir, accounts);
+    if (accounts !== undefined) {
+      this.startAccountPolling();
+    }
     this.sandboxProbe = new ClaudeSandboxProbe(nodeSandboxProbePorts(claudePath), log);
   }
 
@@ -3094,6 +3110,92 @@ export class ClaudeChatViewManager
     this.handoffDrafts.clear();
     // 進行中のsandboxの確認が起動した子プロセスを残さない（Issue #1545）
     this.sandboxProbe.dispose();
+    if (this.accountPollTimer !== undefined) {
+      clearInterval(this.accountPollTimer);
+      this.accountPollTimer = undefined;
+    }
+  }
+
+  /**
+   * アカウントの自動切り替えが有効なとき、会話が動いていなくても使用率を見に行く（Issue #1924）。
+   * 実際に`claude`を起動する間隔は`ClaudeUsageProbe`が使用率に応じて決める。
+   */
+  private startAccountPolling(): void {
+    this.accountPollTimer = setInterval(() => {
+      if (readClaudeAutoSwitchConfig().enabled) {
+        void this.refreshUsage();
+      }
+    }, ACCOUNT_POLL_INTERVAL_MS);
+    this.accountPollTimer.unref();
+  }
+
+  /**
+   * アカウントを切り替えた後、休止できる会話のCLIを終了する。次の送信で新しい認証のまま
+   * `--resume`して起動し直す。動いているターンは壊さない。
+   */
+  async restartIdleSessions(): Promise<void> {
+    await Promise.all(
+      [...this.allPanels()].map((entry) =>
+        entry.session
+          .suspend({ cwd: entry.cwd, config: () => this.configFor(entry) })
+          .catch((e: unknown) => {
+            this.log.warn(
+              `アカウント切り替え後にCLIを終了できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            return false;
+          }),
+      ),
+    );
+  }
+
+  /**
+   * 上限で止まった会話の最終手段（Issue #1924）。アカウントを切り替え、切り替えられたときだけ
+   * 止まった会話へ「続けて」を送る。同じ上限の通知で複数の会話が止まっても、切り替えは1回に
+   * 揃え、残りの会話は切り替え済みのアカウントで続けるだけにする。
+   */
+  private maybeSwitchOnLimit(entry: ClaudePanel, state: ChatState, turnFinished: boolean): void {
+    if (
+      !turnFinished ||
+      this.accounts === undefined ||
+      entry.disposed ||
+      entry.panel === undefined ||
+      entry.limitAutoResumeSuppressed ||
+      !stoppedByUsageLimit(state)
+    ) {
+      return;
+    }
+    const limitKey = String(state.usage?.resetsAt ?? 'unknown');
+    if (entry.limitSwitchKey === limitKey) {
+      return;
+    }
+    entry.limitSwitchKey = limitKey;
+    void this.switchAndContinue(entry, limitKey);
+  }
+
+  private async switchAndContinue(entry: ClaudePanel, limitKey: string): Promise<void> {
+    const accounts = this.accounts;
+    if (accounts === undefined) {
+      return;
+    }
+    try {
+      const recent = this.lastLimitSwitch;
+      if (recent === undefined || recent.key !== limitKey || Date.now() - recent.at > LIMIT_SWITCH_MEMO_MS) {
+        const outcome = await accounts.switchOnLimit();
+        if (!outcome.switched) {
+          return;
+        }
+        this.lastLimitSwitch = { key: limitKey, at: Date.now() };
+      }
+      // 切り替えた後は、既存の「解除まで待つ」予約を畳んで、すぐ続ける
+      this.cancelLimitAutoResume(entry);
+      entry.session.noteLocalEvent(
+        `accountSwitch:${Date.now()}`,
+        'アカウントを切り替えたため自動で続行しています',
+      );
+      entry.session.send(LIMIT_AUTO_RESUME_INSTRUCTION);
+    } catch (e) {
+      this.reportError(e);
+    }
   }
 
   /**
@@ -3509,6 +3611,7 @@ export class ClaudeChatViewManager
       // 自動返信モードの初期値（Issue #1353）。同じ理由で値だけを渡す
       readAutoReplyConfig().enabled,
       this.createOutputOffload(),
+      this.claudeHome,
     );
 
     const loop = new LoopController(
@@ -3557,6 +3660,7 @@ export class ClaudeChatViewManager
       limitAutoResumeAt: undefined,
       limitAutoResumeAwaitingResult: false,
       limitAutoResumeSuppressed: false,
+      limitSwitchKey: undefined,
       autoHandoffStarted: false,
       autoHandoffFailedTurnSeq: undefined,
       lastCompactionCount: undefined,
@@ -3801,6 +3905,7 @@ export class ClaudeChatViewManager
       void this.refreshUsage();
     }
     this.scheduleLimitAutoResume(entry, state, turnFinished);
+    this.maybeSwitchOnLimit(entry, state, turnFinished);
     this.maybeAutoHandoff(entry, state);
     // 自動返信（Issue #1353）もターン完了契機。ループへ渡す前に判定する
     // （`loop/start`とautoReplyは排他のため、どちらが先でも実害は無い）

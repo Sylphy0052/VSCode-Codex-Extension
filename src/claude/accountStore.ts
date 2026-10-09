@@ -12,6 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { UsageSlot, UsageSlots } from './usageText';
 
 /**
  * Claude Codeの複数アカウントの登録・切り替え（Issue #1921）。
@@ -298,6 +299,31 @@ export class ClaudeAccountStore {
       if ((await this.readMeta(id)).email === undefined) {
         await this.writeMeta(id, { email });
       }
+      return { ok: true };
+    });
+  }
+
+  /**
+   * 稼働中のアカウントの使用率を `usage.json` へ記録する（スクリプトと同じ形）。
+   * 取得している間にアカウントが切り替わっていたら、どちらの値か判らないので捨てる
+   * （`expectedId` が今の稼働中と違うとき）。待機中のアカウントの値は取りに行かない。
+   */
+  recordUsage(expectedId: string, slots: UsageSlots, nowMs: number): Promise<AccountStoreResult> {
+    return this.serialized(async () => {
+      if ((await this.currentId()) !== expectedId) {
+        return { ok: false, reason: '取得中にアカウントが切り替わったため記録しませんでした' };
+      }
+      const limits: Record<string, UsageSlot> = {};
+      if (slots.fiveHour !== undefined) {
+        limits['5h'] = slots.fiveHour;
+      }
+      if (slots.weekly !== undefined) {
+        limits['week:all models'] = slots.weekly;
+      }
+      await this.writeSecret(
+        join(this.slot(expectedId), USAGE),
+        Buffer.from(`${JSON.stringify({ t: nowMs, limits })}\n`),
+      );
       return { ok: true };
     });
   }

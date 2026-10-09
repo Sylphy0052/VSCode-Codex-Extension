@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { DEFAULT_SWITCH_THRESHOLD_PCT } from './claude/accountPolicy';
 import { normalizeIdleShutdownMinutes } from './claude/idleShutdown';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
@@ -233,6 +234,19 @@ export function readClaudeConfig(): ClaudeExtensionConfig {
         ? additional.filter((a): a is string => typeof a === 'string')
         : [],
     },
+  };
+}
+
+/** アカウントの自動切り替えの設定（Issue #1924）。 */
+export function readClaudeAutoSwitchConfig(): { enabled: boolean; thresholdPct: number } {
+  const c = vscode.workspace.getConfiguration('claude');
+  const threshold = c.get<number>('accounts.autoSwitch.thresholdPercent');
+  return {
+    enabled: c.get<boolean>('accounts.autoSwitch.enabled') === true,
+    thresholdPct:
+      typeof threshold === 'number' && Number.isFinite(threshold)
+        ? Math.min(100, Math.max(50, threshold))
+        : DEFAULT_SWITCH_THRESHOLD_PCT,
   };
 }
 
