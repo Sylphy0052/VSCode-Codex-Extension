@@ -5,6 +5,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  link,
   rename,
   rm,
   stat,
@@ -75,7 +76,18 @@ export interface SavedAccountView {
 export type SavedAccountsSnapshot =
   { ok: true; accounts: SavedAccountView[] } | { ok: false; reason: string };
 
-export type AccountStoreResult = { ok: true } | { ok: false; reason: string };
+export type AccountStoreResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: string;
+      /**
+       * 稼働中のアカウントにメールアドレスの記録が無いため照合できなかった（スクリプトで
+       * 登録した後にトークンが更新された場合など）。利用者が同じアカウントだと確かめれば
+       * `adoptCurrentEmail` で記録して切り替え直せる。
+       */
+      confirmCurrent?: { id: string; name: string };
+    };
 
 interface AccountMeta {
   name: string | undefined;
@@ -168,7 +180,7 @@ export class ClaudeAccountStore {
       for (const id of ids) {
         const meta = await this.readMeta(id);
         if (email !== undefined && meta.email === email) {
-          return { ok: false, reason: `${email} は「${meta.name ?? id}」として登録済みです` };
+          return { ok: false, reason: `${email}は「${meta.name ?? id}」として登録済みです` };
         }
         if ((await readOptional(join(this.slot(id), CREDENTIALS)))?.equals(live) === true) {
           return { ok: false, reason: `今のアカウントは「${meta.name ?? id}」として登録済みです` };
@@ -204,7 +216,8 @@ export class ClaudeAccountStore {
    *
    * `liveEmail` は今ログインしているアカウントのメールアドレス（`claude auth status`）。
    * 今の認証が稼働中として記録したアカウントのものだと確かめられないときは、書き戻すと
-   * 別のアカウントの退避先を上書きしうるため切り替えない。
+   * 別のアカウントの退避先を上書きしうるため切り替えない（照合に使うメールアドレスの記録が
+   * 無いだけのときは `confirmCurrent` を付けて返す）。
    */
   switchTo(id: string, liveEmail: string | undefined): Promise<AccountStoreResult> {
     return this.serialized(async () => {
@@ -230,7 +243,7 @@ export class ClaudeAccountStore {
         }
         const unsafe = await this.checkLiveBelongsToCurrent(current, live, liveEmail);
         if (unsafe !== undefined) {
-          return { ok: false, reason: unsafe };
+          return unsafe;
         }
         if (current !== undefined) {
           try {
@@ -258,7 +271,7 @@ export class ClaudeAccountStore {
         const restored = await this.restoreLive(live);
         return {
           ok: false,
-          reason: `.current の更新で止まりました（${restored ? '認証ファイルは元に戻しました' : '認証ファイルを元に戻せませんでした。ログインし直してください'}）: ${errorMessage(e)}`,
+          reason: `.currentの更新で止まりました（${restored ? '認証ファイルは元に戻しました' : '認証ファイルを元に戻せませんでした。ログインし直してください'}）: ${errorMessage(e)}`,
         };
       }
       return { ok: true };
@@ -285,6 +298,27 @@ export class ClaudeAccountStore {
       if ((await this.readMeta(id)).email === undefined) {
         await this.writeMeta(id, { email });
       }
+      return { ok: true };
+    });
+  }
+
+  /**
+   * 稼働中のアカウントに、今ログインしているメールアドレスを記録する。利用者が確認ダイアログで
+   * 同じアカウントだと確かめた後にだけ呼ぶ（`switchTo` の `confirmCurrent`）。
+   */
+  adoptCurrentEmail(id: string, email: string): Promise<AccountStoreResult> {
+    return this.serialized(async () => {
+      if ((await this.currentId()) !== id) {
+        return { ok: false, reason: '稼働中のアカウントが変わりました。もう一度試してください' };
+      }
+      const recorded = (await this.readMeta(id)).email;
+      if (recorded !== undefined && recorded !== email) {
+        return {
+          ok: false,
+          reason: `「${id}」には別のメールアドレス（${recorded}）が記録されています`,
+        };
+      }
+      await this.writeMeta(id, { email });
       return { ok: true };
     });
   }
@@ -319,6 +353,10 @@ export class ClaudeAccountStore {
         return { ok: true };
       }
       [ordered[index], ordered[swapWith]] = [ordered[swapWith]!, ordered[index]!];
+      // 壊れた meta.json が途中にあると並びが半端に書き換わるため、先に全部読めるか確かめる
+      for (const account of ordered) {
+        await this.readRawMeta(account.id);
+      }
       for (const [priority, account] of ordered.entries()) {
         if (account.priority !== priority) {
           await this.writeMeta(account.id, { priority });
@@ -354,7 +392,7 @@ export class ClaudeAccountStore {
     current: string | undefined,
     live: Buffer,
     liveEmail: string | undefined,
-  ): Promise<string | undefined> {
+  ): Promise<Extract<AccountStoreResult, { ok: false }> | undefined> {
     if (current === undefined) {
       // `.current` が無い（または登録が消えた）ときは、中身が同じ退避ファイルがあれば失われない
       for (const id of await this.registeredIds()) {
@@ -362,7 +400,11 @@ export class ClaudeAccountStore {
           return undefined;
         }
       }
-      return '今ログインしているアカウントが登録されていないため、切り替えると認証情報が失われます。先に「今のアカウントを登録」で登録してください';
+      return {
+        ok: false,
+        reason:
+          '今ログインしているアカウントが登録されていないため、切り替えると認証情報が失われます。先に「今のアカウントを登録」で登録してください',
+      };
     }
     if ((await readOptional(join(this.slot(current), CREDENTIALS)))?.equals(live) === true) {
       return undefined;
@@ -372,9 +414,22 @@ export class ClaudeAccountStore {
     if (meta.email !== undefined && liveEmail !== undefined) {
       return meta.email === liveEmail
         ? undefined
-        : `今ログインしているアカウント（${liveEmail}）は、稼働中として記録した「${name}」（${meta.email}）と違います。先に「今のアカウントを登録」で登録してください`;
+        : {
+            ok: false,
+            reason: `今ログインしているアカウント（${liveEmail}）は、稼働中として記録した「${name}」（${meta.email}）と違います。先に「今のアカウントを登録」で登録してください`,
+          };
     }
-    return `今ログインしているアカウントが、稼働中として記録した「${name}」と同じか確かめられません（メールアドレスを取得できないか、記録がありません）。別のアカウントの退避先を上書きしないよう切り替えを止めました。「今のアカウントを登録」で登録し直してから切り替えてください`;
+    if (meta.email === undefined && liveEmail !== undefined) {
+      return {
+        ok: false,
+        reason: `稼働中として記録した「${name}」にメールアドレスの記録が無く、今ログインしているアカウント（${liveEmail}）と同じか確かめられません`,
+        confirmCurrent: { id: current, name },
+      };
+    }
+    return {
+      ok: false,
+      reason: `今ログインしているメールアドレスを取得できないため、稼働中として記録した「${name}」と同じか確かめられません。別のアカウントの退避先を上書きしないよう切り替えを止めました。少し待ってから試してください`,
+    };
   }
 
   private async restoreLive(previous: Buffer | undefined): Promise<boolean> {
@@ -396,22 +451,24 @@ export class ClaudeAccountStore {
    */
   private serialized(task: () => Promise<AccountStoreResult>): Promise<AccountStoreResult> {
     const guarded = async (): Promise<AccountStoreResult> => {
+      let token: string | undefined;
       try {
-        if (!(await this.acquireLock())) {
-          return {
-            ok: false,
-            reason: '別のウィンドウがアカウントを操作中です。少し待ってから試してください',
-          };
-        }
+        token = await this.acquireLock();
       } catch (e) {
         return { ok: false, reason: errorMessage(e) };
+      }
+      if (token === undefined) {
+        return {
+          ok: false,
+          reason: '別のウィンドウがアカウントを操作中です。少し待ってから試してください',
+        };
       }
       try {
         return await task();
       } catch (e) {
         return { ok: false, reason: errorMessage(e) };
       } finally {
-        await rm(join(this.accountsDir, LOCK), { recursive: true, force: true });
+        await this.releaseLock(token);
       }
     };
     const run = this.queue.then(guarded, guarded);
@@ -419,28 +476,65 @@ export class ClaudeAccountStore {
     return run;
   }
 
-  private async acquireLock(): Promise<boolean> {
+  /**
+   * ロックファイルを新規作成で取り、持ち主を示すトークンを返す。取れなければ `undefined`。
+   * 古いロックは自分専用の名前へrenameしてから捨てる。同時に奪いに来た側が先に取り直した
+   * 新しいロックを掴んだ場合は、`link`（既存を上書きしない）で元へ戻す。
+   */
+  private async acquireLock(): Promise<string | undefined> {
     await mkdir(this.accountsDir, { recursive: true, mode: 0o700 });
     const lock = join(this.accountsDir, LOCK);
+    const token = `${process.pid}-${randomBytes(8).toString('hex')}`;
     const deadline = Date.now() + LOCK_WAIT_MS;
     for (;;) {
       try {
-        await mkdir(lock, { mode: 0o700 });
-        return true;
+        await writeFile(lock, token, { mode: 0o600, flag: 'wx' });
+        return token;
       } catch (e) {
         if ((e as { code?: unknown } | null)?.code !== 'EEXIST') {
           throw e;
         }
       }
-      const held = await stat(lock).catch(() => undefined);
-      if (held !== undefined && Date.now() - held.mtimeMs > STALE_LOCK_MS) {
-        await rm(lock, { recursive: true, force: true });
+      if (await this.reclaimStaleLock(lock)) {
         continue;
       }
       if (Date.now() >= deadline) {
-        return false;
+        return undefined;
       }
       await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+    }
+  }
+
+  /** 古いロックを捨てたら `true`。 */
+  private async reclaimStaleLock(lock: string): Promise<boolean> {
+    const held = await stat(lock).catch(() => undefined);
+    if (held === undefined) {
+      return true;
+    }
+    if (Date.now() - held.mtimeMs <= STALE_LOCK_MS) {
+      return false;
+    }
+    const taken = `${lock}.stale-${randomBytes(4).toString('hex')}`;
+    try {
+      await rename(lock, taken);
+    } catch {
+      // 他の待機者が先に奪った
+      return true;
+    }
+    const info = await stat(taken).catch(() => undefined);
+    if (info !== undefined && Date.now() - info.mtimeMs <= STALE_LOCK_MS) {
+      await link(taken, lock).catch(() => undefined);
+    }
+    await rm(taken, { force: true });
+    return true;
+  }
+
+  /** 自分が取ったロックのときだけ消す（古いとみなされて奪われた後の別の持ち主のものは残す）。 */
+  private async releaseLock(token: string): Promise<void> {
+    const lock = join(this.accountsDir, LOCK);
+    const held = await readFile(lock, 'utf8').catch(() => undefined);
+    if (held === token) {
+      await rm(lock, { force: true });
     }
   }
 
@@ -472,10 +566,11 @@ export class ClaudeAccountStore {
         targets.push([join(this.slot(id), file), 0o600]);
       }
     }
+    // 表示が目的の経路なので、他人所有・途中で消えたなどで締められなくても一覧は返す
     for (const [path, mode] of targets) {
       const info = await lstat(path).catch(() => undefined);
       if (info !== undefined && !info.isSymbolicLink() && (info.mode & 0o777) !== mode) {
-        await chmod(path, mode);
+        await chmod(path, mode).catch(() => undefined);
       }
     }
   }

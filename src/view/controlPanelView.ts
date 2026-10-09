@@ -690,16 +690,17 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const { store } = this.claudeAccounts;
-    const email = await this.readClaudeIdentity();
     const name = await vscode.window.showInputBox({
       title: '今のClaude Codeのアカウントを登録',
       prompt: '一覧に出す表示名を入力してください（日本語も使えます）',
-      value: email ?? '',
+      value: (await this.readClaudeIdentity()) ?? '',
       ignoreFocusOut: true,
     });
     if (name === undefined) {
       return;
     }
+    // 入力を待つ間に別のウィンドウが切り替えていても、登録する認証と組になるよう取り直す
+    const email = await this.readClaudeIdentity();
     await this.runStoreAction(() => store.register(name, email), 'アカウントの登録');
   }
 
@@ -730,15 +731,10 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       if (choice !== '切り替え') {
         return;
       }
-      const liveEmail = await this.readClaudeIdentity();
-      await this.runStoreAction(async () => {
-        const result = await store.switchTo(id, liveEmail);
-        if (result.ok) {
-          // スクリプトで登録したアカウントにもメールアドレスを付け、次の切り替えの照合に使う
-          await store.recordEmail(id, await this.readClaudeIdentity());
-        }
-        return result;
-      }, 'アカウントの切り替え');
+      await this.runAccountAction(
+        () => this.switchClaudeAccount(store, id),
+        'アカウントの切り替え',
+      );
       return;
     }
 
@@ -786,6 +782,40 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
       );
       return undefined;
     }
+  }
+
+  /**
+   * 切り替える。稼働中のアカウントにメールアドレスの記録が無く照合できないときは、今の
+   * メールアドレスが稼働中のアカウントのものかを利用者に確かめ、記録してから切り替え直す。
+   */
+  private async switchClaudeAccount(
+    store: ClaudeAccountStore,
+    id: string,
+  ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
+    const liveEmail = await this.readClaudeIdentity();
+    let result = await store.switchTo(id, liveEmail);
+    if (!result.ok && result.confirmCurrent !== undefined && liveEmail !== undefined) {
+      const { id: currentId, name: currentName } = result.confirmCurrent;
+      const choice = await vscode.window.showWarningMessage(
+        `今ログインしている${liveEmail}は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら${liveEmail}を「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「今のアカウントを登録」で登録してください。`,
+        { modal: true },
+        '同じアカウント',
+      );
+      if (choice !== '同じアカウント') {
+        return { ok: false, error: undefined };
+      }
+      const adopted = await store.adoptCurrentEmail(currentId, liveEmail);
+      result = adopted.ok ? await store.switchTo(id, liveEmail) : adopted;
+    }
+    if (!result.ok) {
+      return { ok: false, error: result.reason };
+    }
+    // スクリプトで登録したアカウントにもメールアドレスを付け、次の切り替えの照合に使う
+    const recorded = await store.recordEmail(id, await this.readClaudeIdentity());
+    if (!recorded.ok) {
+      this.log.warn(`切り替え先のメールアドレスを記録できませんでした: ${recorded.reason}`);
+    }
+    return { ok: true };
   }
 
   private async runStoreAction(
