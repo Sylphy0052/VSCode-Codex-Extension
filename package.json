@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1009.5",
+  "version": "2026.1009.6",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -642,9 +642,9 @@
             "確認せずに生成する",
             "使わない（会話へ渡さない）"
           ],
-          "default": "ask",
+          "default": "always",
           "scope": "machine",
-          "markdownDescription": "新しく開くCodex・Claude Codeの会話へ、ChatGPT（Web）で画像を生成するMCPツール`generate_image`を渡します。`#agent.webGpt.cdpEndpoint#`のChromeでChatGPTにログインしておく必要があります。`ask`では、エージェントが生成を呼ぶたびに確認します（許可するまでChatGPTには触りません）。生成した画像は拡張機能の保存領域（globalStorageの`webgpt-images`）へ保存されます。信頼済みワークスペースでだけ使えます。変更は次に開く会話から反映されます。"
+          "markdownDescription": "新しく開くCodex・Claude Codeの会話へ、ChatGPT（Web）で画像を生成するMCPツール`generate_image`を渡します。`#agent.webGpt.cdpEndpoint#`のChromeでChatGPTにログインしておく必要があります。既定の`always`では、エージェントが呼んだ時点で確認せずに生成します（呼ばれるまでChatGPTには触りません）。`ask`にすると、呼ばれるたびに確認します。生成した画像は拡張機能の保存領域（globalStorageの`webgpt-images`）へ保存されます。信頼済みワークスペースでだけ使えます。変更は次に開く会話から反映されます。"
         },
         "codex.executablePath": {
           "type": "string",

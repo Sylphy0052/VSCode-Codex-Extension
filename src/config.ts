@@ -1728,14 +1728,14 @@ export function readSessionMessagingEnabled(): boolean {
 export type WebGptImageGenerationMode = 'ask' | 'always' | 'off';
 
 /**
- * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）の使い方。ログイン済みChromeを操作し
- * 生成枠を使うため、既定は`ask`（サーバは常に会話へ渡すが、呼ばれるたびに利用者へ確かめる）。
+ * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）の使い方。既定は`always`（会話へ渡し、
+ * 呼ばれたら確かめずに生成する）。ChatGPTに触るのは呼ばれたときだけ。`ask`は呼ばれるたびに確かめる。
  */
 export function readWebGptImageGenerationMode(): WebGptImageGenerationMode {
   const value = vscode.workspace
     .getConfiguration('agent.webGpt')
     .get<string>('imageGeneration.mode');
-  return value === 'always' || value === 'off' ? value : 'ask';
+  return value === 'ask' || value === 'off' ? value : 'always';
 }
 
 /**
