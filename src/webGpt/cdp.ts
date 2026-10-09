@@ -53,6 +53,15 @@ export class CdpBrowser {
     if (typeof url !== 'string' || !isLoopbackWebSocket(url)) {
       throw new Error('CDP接続先からブラウザのWebSocket URLを読み取れません');
     }
+    // 同じホストの別のポートで待ち受ける別プロセスへ、応答の書き換えで誘導されないよう、
+    // ポートも接続先と同じに限る（Issue #1903）
+    const socketPort = new URL(url).port;
+    const endpointPort = new URL(endpoint).port;
+    if (socketPort !== endpointPort) {
+      throw new Error(
+        `ChromeのWebSocketのポート（${socketPort}）が接続先のポート（${endpointPort}）と違います。ポートを変えて中継する構成には対応していません`,
+      );
+    }
     const socket = new WebSocket(url);
     try {
       await new Promise<void>((resolve, reject) => {

@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { startHttpMcpServer, type HttpMcpServerHandle } from '../orchestrator/mcpHttpServer';
 import {
@@ -14,6 +16,7 @@ import {
   generateImage,
   IMAGE_PROMPT_MAX_LENGTH,
   parseGenerateImageArgs,
+  pruneOldImages,
   type GenerateImageRequest,
   type GenerateImageResult,
 } from './imageGeneration';
@@ -68,6 +71,8 @@ export interface ImageGenerationMcpDeps {
   /** 呼び出しのたびに読む。設定の変更を次の呼び出しから反映するため。 */
   readEndpoint: () => string;
   outputDir: string;
+  /** Claude Codeへ渡すMCP設定ファイルを置くディレクトリ。 */
+  configDir: string;
   /**
    * 呼び出しのたびに確かめる。設定が無効、または信頼済みワークスペースでなければ理由を
    * 返す。設定を無効へ戻す前に開いた会話からも呼べないようにするため。
@@ -87,11 +92,19 @@ interface HostState {
   readonly conversations: Set<string>;
   /** 生成を1件ずつ順に流す。タブとChatGPTへの送信を並行させない。 */
   queue: Promise<unknown>;
+  /** 応答待ちの呼び出し。サーバを閉じるときに中断してタブを閉じる。 */
+  readonly inFlight: Set<AbortController>;
 }
 
 export interface ImageGenerationMcpHost {
-  /** 会話のMCP設定へ渡すURL。 */
+  /** Codexの`thread/start`のMCP設定へ渡すURL。JSON-RPCで渡すためプロセスの引数には載らない。 */
   readonly url: string;
+  /**
+   * Claude Codeの`--mcp-config`へ渡す設定ファイルのパス。URLを引数へ直接書くと、トークンが
+   * プロセスの引数一覧（`ps`）に載るため、権限600のファイルに書いてパスだけを渡す
+   * （Issue #1903）。書けなかったときは`undefined`で、Claude Codeへは渡さない。
+   */
+  readonly claudeConfigPath: string | undefined;
   close(): Promise<void>;
 }
 
@@ -99,7 +112,12 @@ export async function startImageGenerationMcpHost(
   deps: ImageGenerationMcpDeps,
 ): Promise<ImageGenerationMcpHost> {
   const token = randomBytes(16).toString('hex');
-  const state: HostState = { deps, conversations: new Set(), queue: Promise.resolve() };
+  const state: HostState = {
+    deps,
+    conversations: new Set(),
+    queue: Promise.resolve(),
+    inFlight: new Set(),
+  };
   const server: HttpMcpServerHandle = await startHttpMcpServer((candidate) =>
     candidate === token
       ? {
@@ -108,15 +126,90 @@ export async function startImageGenerationMcpHost(
         }
       : undefined,
   );
+  const url = server.urlForToken(token);
+  const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  // Claude Code用の設定ファイルを書けなくても、Codex（URLを直接渡す）では使えるよう起動は続ける
+  let claudeConfigPath: string | undefined;
+  try {
+    await pruneStaleClaudeConfigs(deps.configDir);
+    claudeConfigPath = await writeClaudeConfig(deps.configDir, url);
+  } catch (error) {
+    deps.logWarn(
+      `[webgpt-image] Claude Code用のMCP設定ファイルを書けませんでした。Claude Codeの会話では画像生成を使えません（${deps.configDir}の権限を確認してください）: ${errorText(error)}`,
+    );
+  }
+  void pruneOldImages(deps.outputDir).catch((error: unknown) => {
+    deps.logWarn(`[webgpt-image] 古い画像を消せませんでした: ${errorText(error)}`);
+  });
   return {
-    url: server.urlForToken(token),
-    close: () => server.close(),
+    url,
+    claudeConfigPath,
+    close: async () => {
+      // トークン入りのファイルは、生成の中断を待つより先に消す
+      if (claudeConfigPath !== undefined) await unlink(claudeConfigPath).catch(() => undefined);
+      // 生成中の呼び出しを中断し、タブを閉じ終えてからサーバを閉じる
+      for (const controller of state.inFlight) controller.abort();
+      await state.queue;
+      await server.close();
+    },
   };
+}
+
+/**
+ * ウィンドウごとに別のファイルにする。globalStorageは全ウィンドウで共有されるため。
+ * 名前に拡張ホストのpidを入れ、異常終了で残ったファイルを次の起動で見分けられるようにする。
+ */
+const CLAUDE_CONFIG_NAME = /^webgpt-image-mcp-(\d+)-[0-9a-f]{16}\.json$/;
+
+async function writeClaudeConfig(configDir: string, url: string): Promise<string> {
+  await mkdir(configDir, { recursive: true, mode: 0o700 });
+  const path = join(
+    configDir,
+    `webgpt-image-mcp-${process.pid}-${randomBytes(8).toString('hex')}.json`,
+  );
+  const config = {
+    mcpServers: {
+      [IMAGE_GENERATION_MCP_SERVER_NAME]: {
+        type: 'http',
+        url,
+        // HTTPのMCPは応答の無いまま5分で打ち切られる（CLI 2.1.286の既定）。生成を待てるよう延ばす
+        timeout: IMAGE_GENERATION_TOOL_TIMEOUT_SEC * 1000,
+      },
+    },
+  };
+  await writeFile(path, JSON.stringify(config), { flag: 'wx', mode: 0o600 });
+  return path;
+}
+
+/** 終了したプロセスが残した設定ファイルを消す。起動中の他のウィンドウのファイルは残す。 */
+async function pruneStaleClaudeConfigs(configDir: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(configDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pid = Number(CLAUDE_CONFIG_NAME.exec(name)?.[1]);
+    if (!Number.isInteger(pid) || pid <= 0 || isProcessAlive(pid)) continue;
+    await unlink(join(configDir, name)).catch(() => undefined);
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERMは別ユーザーのプロセスが生きている。消さない側へ倒す
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 function handleConnection(state: HostState, connection: McpConnection): void {
   // 呼び出し元が応答を待たずに切断したら（会話の中断など）、生成を止めてタブを閉じる
   const abort = new AbortController();
+  state.inFlight.add(abort);
   connection.onClose(() => abort.abort());
   connection.onRequest((request) => {
     void dispatch(state, request, abort.signal)
@@ -126,7 +219,8 @@ function handleConnection(state: HostState, connection: McpConnection): void {
         );
         return failure(request.id, -32603, '内部エラーが発生しました');
       })
-      .then((response) => connection.send(response));
+      .then((response) => connection.send(response))
+      .finally(() => state.inFlight.delete(abort));
   });
 }
 

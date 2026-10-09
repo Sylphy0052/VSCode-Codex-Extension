@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -26,8 +26,17 @@ const POLL_INTERVAL_MS = 2_000;
  * この回数続けて見たときだけ終わったとみなす。
  */
 const COMPLETE_STABLE_POLLS = 3;
+/**
+ * 画像がまだ1枚も無いまま完了と見えたときに待つ回数。ChatGPT側の描画が遅れて画像が
+ * 後から出る場合に、「画像なし」と早まって報告しないようにする（Issue #1903）。
+ */
+const COMPLETE_WITHOUT_IMAGE_POLLS = 8;
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const ANSWER_EXCERPT_LENGTH = 300;
+/** 保存した画像を残す期間。これより古いものはサーバの起動時に消す（Issue #1903）。 */
+export const IMAGE_RETENTION_MS = 30 * 24 * 60 * 60_000;
+/** このモジュールが保存するファイル名（`timestamp`と`saveImages`の形）。これ以外は消さない。 */
+const SAVED_IMAGE_NAME = /^\d{8}-\d{6}-\d{3}-\d+\.(png|jpg|webp)$/;
 
 /**
  * ChatGPTの画面構造に依存するセレクタ。画面が変わったら、ここだけを直す。
@@ -159,6 +168,8 @@ async function runInTab(
     deps.signal?.throwIfAborted();
     return evaluateInPage(browser, sessionId, expression);
   };
+  // 待機中に中断されても次のポーリングまで待たない
+  const sleep: Sleep = (ms) => delay(ms, undefined, { signal: deps.signal });
   const navigated = await browser.send(
     'Page.navigate',
     { url: request.conversationUrl ?? 'https://chatgpt.com/' },
@@ -167,7 +178,7 @@ async function runInTab(
   if (typeof navigated['errorText'] === 'string') {
     throw new GenerationError(`ChatGPTを開けませんでした: ${navigated['errorText']}`);
   }
-  await waitForComposer(evaluate, request.conversationUrl !== undefined);
+  await waitForComposer(evaluate, sleep, request.conversationUrl !== undefined);
 
   const sent = await evaluate(sendScript(request.prompt));
   if (sent === 'no-input') {
@@ -176,11 +187,11 @@ async function runInTab(
   if (sent !== 'ready') {
     throw new GenerationError(`ChatGPTの画面から応答を読み取れません。${STRUCTURE_CHANGED_HINT}`);
   }
-  await clickSend(evaluate);
+  await clickSend(evaluate, sleep);
 
   let conversationUrl = request.conversationUrl;
   try {
-    const answer = await waitForAnswer(evaluate);
+    const answer = await waitForAnswer(evaluate, sleep);
     conversationUrl = answer.conversationUrl;
     if (request.conversationUrl !== undefined && answer.conversationUrl !== request.conversationUrl) {
       throw new SentGenerationError(
@@ -202,7 +213,13 @@ async function runInTab(
       );
     }
 
+    if (!answer.images.every(isAllowedImageSource)) {
+      throw new GenerationError(`生成された画像の取得元が想定外です。${STRUCTURE_CHANGED_HINT}`);
+    }
     const dataUrls = await evaluate(fetchImagesScript(answer.images));
+    if (dataUrls === 'size') {
+      throw new GenerationError('生成された画像の大きさが想定外です');
+    }
     if (!Array.isArray(dataUrls) || dataUrls.length !== answer.images.length) {
       throw new GenerationError('生成された画像を読み出せませんでした');
     }
@@ -219,8 +236,13 @@ async function runInTab(
 }
 
 type Evaluate = (expression: string) => Promise<unknown>;
+type Sleep = (ms: number) => Promise<void>;
 
-async function waitForComposer(evaluate: Evaluate, existingConversation: boolean): Promise<void> {
+async function waitForComposer(
+  evaluate: Evaluate,
+  sleep: Sleep,
+  existingConversation: boolean,
+): Promise<void> {
   const deadline = Date.now() + PAGE_READY_LIMIT_MS;
   for (;;) {
     let status: Record<string, unknown> = {};
@@ -254,11 +276,11 @@ async function waitForComposer(evaluate: Evaluate, existingConversation: boolean
         `ChatGPTの入力欄が${PAGE_READY_LIMIT_MS / 1000}秒以内に表示されませんでした。${STRUCTURE_CHANGED_HINT}`,
       );
     }
-    await delay(500);
+    await sleep(500);
   }
 }
 
-async function clickSend(evaluate: Evaluate): Promise<void> {
+async function clickSend(evaluate: Evaluate, sleep: Sleep): Promise<void> {
   const deadline = Date.now() + SEND_ENABLED_LIMIT_MS;
   for (;;) {
     const clicked = await evaluate(clickSendScript());
@@ -269,7 +291,7 @@ async function clickSend(evaluate: Evaluate): Promise<void> {
     if (Date.now() > deadline) {
       throw new GenerationError('ChatGPTの送信ボタンが有効になりませんでした。送信していません');
     }
-    await delay(500);
+    await sleep(500);
   }
 }
 
@@ -279,23 +301,28 @@ interface Answer {
   text: string;
 }
 
-async function waitForAnswer(evaluate: Evaluate): Promise<Answer> {
+async function waitForAnswer(evaluate: Evaluate, sleep: Sleep): Promise<Answer> {
   const deadline = Date.now() + GENERATION_WAIT_LIMIT_MS;
   let stable = 0;
+  let previousImages = '';
   for (;;) {
-    await delay(POLL_INTERVAL_MS);
+    await sleep(POLL_INTERVAL_MS);
     const status = asRecord(await evaluate(answerStatusScript()));
     const path = typeof status['path'] === 'string' ? status['path'] : '';
+    const images = Array.isArray(status['images'])
+      ? status['images'].filter((src): src is string => typeof src === 'string')
+      : [];
     const done =
       /^\/c\/[a-zA-Z0-9-]{1,128}$/.test(path) &&
       typeof status['turns'] === 'number' &&
       status['turns'] > 0 &&
       status['state'] === 'complete';
-    stable = done ? stable + 1 : 0;
-    if (stable >= COMPLETE_STABLE_POLLS) {
-      const images = Array.isArray(status['images'])
-        ? status['images'].filter((src): src is string => typeof src === 'string')
-        : [];
+    // 完了の間に画像が増えたら、描画の途中とみなして数え直す
+    const imagesKey = images.join('\n');
+    stable = done && imagesKey === previousImages ? stable + 1 : done ? 1 : 0;
+    previousImages = imagesKey;
+    const required = images.length > 0 ? COMPLETE_STABLE_POLLS : COMPLETE_WITHOUT_IMAGE_POLLS;
+    if (stable >= required) {
       return {
         conversationUrl: `https://chatgpt.com${path}`,
         images,
@@ -336,6 +363,53 @@ async function saveImages(dataUrls: unknown[], outputDir: string): Promise<strin
     paths.push(path);
   }
   return paths;
+}
+
+/**
+ * 保存先から`IMAGE_RETENTION_MS`より古い画像を消す。このモジュールが付けた名前の
+ * ファイルだけを対象にする。消した件数を返す。
+ */
+export async function pruneOldImages(outputDir: string, now = Date.now()): Promise<number> {
+  let names: string[];
+  try {
+    names = await readdir(outputDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!SAVED_IMAGE_NAME.test(name)) continue;
+    const path = join(outputDir, name);
+    try {
+      const info = await lstat(path);
+      if (info.isFile() && now - info.mtimeMs > IMAGE_RETENTION_MS) {
+        await unlink(path);
+        removed += 1;
+      }
+    } catch (error) {
+      // 別のウィンドウが同時に消した
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return removed;
+}
+
+/**
+ * ページ内で取得してよい画像のURL。ChatGPTが描く`blob:`（実測）と、画像の配信元に限る。
+ * 画面の書き換えで任意のURLへリクエストさせないため（Issue #1903）。
+ */
+function isAllowedImageSource(src: string): boolean {
+  try {
+    const url = new URL(src);
+    if (url.protocol === 'blob:') return url.origin === 'https://chatgpt.com';
+    return (
+      url.protocol === 'https:' &&
+      (url.hostname === 'chatgpt.com' || url.hostname.endsWith('.oaiusercontent.com'))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function timestamp(date: Date): string {
@@ -406,7 +480,9 @@ function fetchImagesScript(sources: readonly string[]): string {
   return `(async () => {
     const out = [];
     for (const src of ${JSON.stringify(sources)}) {
-      const blob = await (await fetch(src)).blob();
+      const blob = await (await fetch(src, { redirect: 'error' })).blob();
+      // 読み出す前に大きさを確かめ、上限を超える画像をdataURLにして受け取らない
+      if (blob.size === 0 || blob.size > ${MAX_IMAGE_BYTES}) return 'size';
       out.push(await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result);
