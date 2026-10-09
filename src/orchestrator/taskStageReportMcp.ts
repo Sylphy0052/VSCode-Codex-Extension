@@ -1,7 +1,11 @@
 import type { McpToolDefinition } from './messaging';
 import { isValidIssueNumber } from './roadmapShared';
 import { TASK_STAGES, type StageOutput, type StageReportRef, type TaskStage } from './taskRunState';
-import { REPORT_STAGE_RESULT_TOOL } from './taskStagePrompts';
+import {
+  MAX_STAGE_SUMMARY_LENGTH,
+  REPORT_STAGE_RESULT_TOOL,
+  REQUIRED_STAGE_REPORT_KEYS,
+} from './taskStagePrompts';
 
 /**
  * オーケストレータモード（Issue #1505）の工程セッションが結果を報告するMCPツール
@@ -14,7 +18,9 @@ import { REPORT_STAGE_RESULT_TOOL } from './taskStagePrompts';
  */
 
 const MAX_ID_LENGTH = 200;
-const MAX_SUMMARY_LENGTH = 4000;
+const MAX_SUMMARY_LENGTH = MAX_STAGE_SUMMARY_LENGTH;
+/** 拒否メッセージの末尾に付ける。再試行で同じキーを落とさせない（Issue #1911）。 */
+const REQUIRED_KEYS_NOTE = `（必須キー: ${REQUIRED_STAGE_REPORT_KEYS.join('・')}）`;
 const MAX_ISSUE_TITLE_LENGTH = 256;
 const MAX_ISSUE_BODY_LENGTH = 60_000;
 const MAX_URL_LENGTH = 500;
@@ -57,7 +63,7 @@ export const REPORT_STAGE_RESULT_DEFINITION: McpToolDefinition = {
         description: 'review: high・mediumの指摘が残っていなければtrue',
       },
     },
-    required: ['taskId', 'executionId', 'stage', 'attemptId', 'outcome', 'summary'],
+    required: [...REQUIRED_STAGE_REPORT_KEYS],
     additionalProperties: false,
   },
 };
@@ -183,7 +189,7 @@ export function parseStageReport(raw: unknown, bound: StageReportRef): ParseResu
   ) {
     return {
       ok: false,
-      message: 'taskId・executionId・stage・attemptIdは指示文に書かれた値をそのまま付ける',
+      message: `taskId・executionId・stage・attemptIdは指示文に書かれた値をそのまま付ける${REQUIRED_KEYS_NOTE}`,
     };
   }
   const ref: StageReportRef = { taskId, executionId, stage, attemptId };
@@ -197,14 +203,17 @@ export function parseStageReport(raw: unknown, bound: StageReportRef): ParseResu
   }
   const summary = readText(a, 'summary', MAX_SUMMARY_LENGTH);
   if (summary === undefined) {
-    return { ok: false, message: `summaryは1〜${String(MAX_SUMMARY_LENGTH)}文字で指定する` };
+    return {
+      ok: false,
+      message: `summaryは1〜${String(MAX_SUMMARY_LENGTH)}文字で指定する${REQUIRED_KEYS_NOTE}`,
+    };
   }
   const outcome = a.outcome;
   if (outcome === 'failed') {
     return { ok: true, report: { ref, outcome, summary } };
   }
   if (outcome !== 'done') {
-    return { ok: false, message: 'outcomeはdoneかfailedで指定する' };
+    return { ok: false, message: `outcomeはdoneかfailedで指定する${REQUIRED_KEYS_NOTE}` };
   }
   const parsed = parseOutput(stage, a);
   if (!parsed.ok) {
