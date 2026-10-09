@@ -1510,6 +1510,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       windowId,
       sessionBridge: () => sessionBridgeHolder.current,
       logPort: { error: (message) => log.error(message) },
+      configDir: path.join(context.globalStorageUri.fsPath, 'session-messaging-mcp'),
     })
       .then((host) => {
         chat.setSessionMessaging(host);

@@ -101,7 +101,10 @@ export function parseGenerateImageArgs(
     return { ok: true, request: { prompt } };
   }
   if (typeof rawUrl !== 'string') {
-    return { ok: false, error: 'conversationUrlはhttps://chatgpt.com/c/<id>形式で指定してください' };
+    return {
+      ok: false,
+      error: 'conversationUrlはhttps://chatgpt.com/c/<id>形式で指定してください',
+    };
   }
   try {
     const [url] = parseConversationUrls(rawUrl);
@@ -182,7 +185,9 @@ async function runInTab(
 
   const sent = await evaluate(sendScript(request.prompt));
   if (sent === 'no-input') {
-    throw new GenerationError(`ChatGPTの入力欄に指示を入れられませんでした。${STRUCTURE_CHANGED_HINT}`);
+    throw new GenerationError(
+      `ChatGPTの入力欄に指示を入れられませんでした。${STRUCTURE_CHANGED_HINT}`,
+    );
   }
   if (sent !== 'ready') {
     throw new GenerationError(`ChatGPTの画面から応答を読み取れません。${STRUCTURE_CHANGED_HINT}`);
@@ -193,7 +198,10 @@ async function runInTab(
   try {
     const answer = await waitForAnswer(evaluate, sleep);
     conversationUrl = answer.conversationUrl;
-    if (request.conversationUrl !== undefined && answer.conversationUrl !== request.conversationUrl) {
+    if (
+      request.conversationUrl !== undefined &&
+      answer.conversationUrl !== request.conversationUrl
+    ) {
       throw new SentGenerationError(
         `指定した会話とは別の会話で生成されました（${answer.conversationUrl}）。再送はしていません。会話URLを確認してください`,
         answer.conversationUrl,
@@ -223,6 +231,8 @@ async function runInTab(
     if (!Array.isArray(dataUrls) || dataUrls.length !== answer.images.length) {
       throw new GenerationError('生成された画像を読み出せませんでした');
     }
+    // 長く開いたままのウィンドウでも溜まらないよう、保存のたびに古い画像を消す（Issue #1905）
+    await pruneOldImages(deps.outputDir).catch(() => 0);
     const paths = await saveImages(dataUrls, deps.outputDir);
     return { ok: true, paths, conversationUrl: answer.conversationUrl };
   } catch (error) {
@@ -251,7 +261,11 @@ async function waitForComposer(
     } catch (error) {
       // 読み込み・リダイレクトの途中は、評価先の文脈が壊れて失敗することがある。期限まで
       // 待ち直す。接続が切れた・中断したときは待っても直らないので、そのまま投げる
-      if (error instanceof CdpClosedError || !(error instanceof Error) || error.name === 'AbortError') {
+      if (
+        error instanceof CdpClosedError ||
+        !(error instanceof Error) ||
+        error.name === 'AbortError'
+      ) {
         throw error;
       }
       if (Date.now() > deadline) throw error;

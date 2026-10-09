@@ -705,14 +705,15 @@ export class ClaudeChatViewManager
    * この会話にメッセージング用MCPのURLを割り当て、宛先を束縛する（Issue #1305）。
    * **`session.start`より前に呼ぶ**——`configFor`が起動引数を組むときに読むため。
    *
-   * タスク経路（`entry.taskConfig`がある）は`runner.ts`が立てたrun用のサーバを既に
-   * `additionalArgs`へ持っているため何もしない。Claude Codeのセッションidは起動前に
+   * タスク経路（`entry.taskManaged`）は`runner.ts`が立てたrun用のサーバを既に
+   * `additionalArgs`へ持っているため何もしない。プリセットや引き継ぎで開いた会話は
+   * `taskConfig`を持つが`taskManaged`ではなく、run用のサーバを持たないので登録する。Claude Codeのセッションidは起動前に
    * 決まる（`target.kind`が`new`でも`resume`でも呼び出し側が値を持っている）ので、
    * Codexと違って発行と束縛を同時に済ませられる。分岐（`fork`）はCLIが新しいidを振り、
    * 拡張機能側がそれを知る手段が無いため、呼び出し元がここを通らない。
    */
   private registerSessionMessaging(entry: ClaudePanel, sessionId: string): void {
-    if (entry.taskConfig !== undefined) {
+    if (entry.taskManaged) {
       return;
     }
     const registration = this.sessionMessaging?.register('claude');
@@ -760,20 +761,24 @@ export class ClaudeChatViewManager
     // 他のセッションと話すためのMCPサーバ（Issue #1305）。タスク経路の`toClaudeConfig`と
     // 同じく`--mcp-config`で渡す。ここで足す値は拡張機能が完全に制御するもので、
     // 利用者設定由来の`config.additionalArgs`とは混ざらない（後ろへ足すだけ）
-    const messagingUrl = this.sessionMessagingRegistrations.get(entry)?.url;
+    const messaging = this.sessionMessagingRegistrations.get(entry);
     // 画像生成のMCPサーバ（Issue #1901）はタスクのセッションへは渡さない。URLのトークンが
     // プロセスの引数に載らないよう、設定ファイルのパスで渡す（Issue #1903）
     const imageConfigPath = entry.taskManaged
       ? undefined
       : this.imageGenerationMcp()?.claudeConfigPath;
-    // `--mcp-config`は複数の値（JSON文字列とファイルパス）を1つのフラグで受け取れる
+    // `--mcp-config`は複数の値（JSON文字列とファイルパス）を1つのフラグで受け取れる。
+    // 可変長のため、後ろに別の引数が続くとそれも設定として読まれる。`additionalArgs`の
+    // 末尾に足すこの形に頼っており、後ろへ他の引数を足さないこと（`argvBuilder.ts`も参照）。
+    // メッセージングも設定ファイルで渡す。書けなかったときだけURLを直接渡す（Issue #1905）
     const mcpConfigs = [
-      ...(messagingUrl === undefined
+      ...(messaging === undefined
         ? []
         : [
-            JSON.stringify({
-              mcpServers: { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: messagingUrl } },
-            }),
+            messaging.claudeConfigPath ??
+              JSON.stringify({
+                mcpServers: { [MESSAGING_MCP_SERVER_NAME]: { type: 'http', url: messaging.url } },
+              }),
           ]),
       ...(imageConfigPath === undefined ? [] : [imageConfigPath]),
     ];

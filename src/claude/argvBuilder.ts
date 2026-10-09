@@ -162,6 +162,8 @@ function configArgs(config: ClaudeConfig, warnings: string[]): string[] {
     }
   }
 
+  // `--mcp-config`は可変長で、後ろに並ぶ引数も設定として読む。拡張機能が足す
+  // `--mcp-config ...`は`additionalArgs`の末尾にあり、この後ろに他の引数を足さない前提
   for (const extra of config.additionalArgs) {
     if (typeof extra !== 'string' || extra === '') {
       warnings.push('claude.additionalArgs に空または非文字列の要素があるため無視します');
