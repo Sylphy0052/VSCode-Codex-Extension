@@ -21,6 +21,19 @@ export const STAGE_LABELS: Record<TaskStage, string> = {
 /** 報告に使うMCPツールの名前。 */
 export const REPORT_STAGE_RESULT_TOOL = 'report_stage_result';
 
+/** 報告の`summary`の上限文字数（`taskStageReportMcp.ts`の検証と指示文で共有する）。 */
+export const MAX_STAGE_SUMMARY_LENGTH = 4000;
+
+/** 報告に必ず付けるキー。欠けた報告は拒否する（Issue #1911）。 */
+export const REQUIRED_STAGE_REPORT_KEYS = [
+  'taskId',
+  'executionId',
+  'stage',
+  'attemptId',
+  'outcome',
+  'summary',
+] as const;
+
 const MAX_TITLE_LENGTH = 200;
 const MAX_SUMMARY_LENGTH = 4000;
 const MAX_CRITERIA_LENGTH = 4000;
@@ -50,6 +63,9 @@ export function stageScopeReminder(ref: StageReportRef): string {
       '次の工程やほかのタスクには進まない。',
     `報告には次の値をそのまま付ける: taskId=${ref.taskId} executionId=${ref.executionId} ` +
       `stage=${ref.stage} attemptId=${ref.attemptId}`,
+    // 書いていなかった頃は outcome・summary の欠落で拒否と再試行が続いた（Issue #1911）
+    `outcome（doneかfailed）とsummary（やったことの要約、またはfailedの理由。1〜${String(MAX_STAGE_SUMMARY_LENGTH)}文字）も必須。` +
+      `必須キー: ${REQUIRED_STAGE_REPORT_KEYS.join('・')}`,
     '質問・確認・方針の相談はユーザーへ直接聞かず、ask_orchestratorでOrchestratorへ送る。',
     // 背景タスクが残っている間はループが次の指示を送らない（Issue #1676）。終わらない
     // プロセスを背景に置くと、工程は完了通知を待ったまま時間上限まで進まなくなる

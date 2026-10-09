@@ -63,6 +63,8 @@ export function buildClaudeHeadlessArgs(model: string, effort = ''): string[] {
     '--model',
     resolved,
     ...effortArgs(effort, (value) => ['--effort', value]),
+    // 裏処理のtranscriptを~/.claude/projects/へ残さない（週約590MB残っていた。Issue #1911）
+    '--no-session-persistence',
   ];
 }
 

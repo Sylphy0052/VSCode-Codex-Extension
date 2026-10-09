@@ -273,7 +273,8 @@ export class ClaudeUsageProbe {
 
   private run(): Promise<string | undefined> {
     return new Promise((resolve) => {
-      const proc = spawn(this.claudePath(), ['--print', '/usage'], {
+      // transcriptを~/.claude/projects/へ残さない（Issue #1911）
+      const proc = spawn(this.claudePath(), ['--print', '--no-session-persistence', '/usage'], {
         stdio: ['ignore', 'pipe', 'ignore'],
       });
 
