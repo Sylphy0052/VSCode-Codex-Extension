@@ -1528,6 +1528,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // いないワークスペースでは、新しく開く会話へ渡さない
   let imageGenerationHost: Promise<ImageGenerationMcpHost> | undefined;
   let imageGenerationReady: ImageGenerationMcpHost | undefined;
+  let imageGenerationDisposed = false;
   const ensureImageGenerationHost = (): void => {
     if (imageGenerationHost !== undefined || !readWebGptImageGenerationEnabled()) {
       return;
@@ -1551,7 +1552,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     });
     imageGenerationHost
       .then((host) => {
-        imageGenerationReady = host;
+        // 起動の完了より先に止まった場合は、閉じたホストを会話へ渡さない
+        if (!imageGenerationDisposed) imageGenerationReady = host;
         log.info('WebGPT画像生成のMCPサーバを起動しました');
       })
       .catch((e: unknown) => {
@@ -1572,6 +1574,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push({
     dispose: () => {
       // 閉じた後に開く会話へ、消した設定ファイルのパスを渡さない
+      imageGenerationDisposed = true;
       imageGenerationReady = undefined;
       void imageGenerationHost?.then((host) => host.close()).catch(() => undefined);
     },
