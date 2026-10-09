@@ -41,7 +41,7 @@ import {
   readClaudeConfig,
   readConfig,
   readSessionMessagingEnabled,
-  readWebGptImageGenerationEnabled,
+  readWebGptImageGenerationMode,
   readPromptMetricsEnabled,
   readToolUsageMetricsEnabled,
   readSessionPresetsConfig,
@@ -1524,14 +1524,30 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         );
       });
   }
-  // ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）。設定を有効にした時点で
+  // ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）。設定がoffでなければ
   // ウィンドウにつき1つ起動し、以後に開く会話へURLを渡す。無効へ戻した後や信頼されて
   // いないワークスペースでは、新しく開く会話へ渡さない
   let imageGenerationHost: Promise<ImageGenerationMcpHost> | undefined;
   let imageGenerationReady: ImageGenerationMcpHost | undefined;
   let imageGenerationDisposed = false;
+  // `ask`で「このウィンドウ中は許可」を選んだ後は確認しない
+  let imageGenerationAllowedForWindow = false;
+  let imageGenerationConsent: Promise<boolean> | undefined;
+  const askImageGenerationConsent = async (prompt: string): Promise<boolean> => {
+    const once = '今回だけ許可';
+    const forWindow = 'このウィンドウ中は許可';
+    const shown = prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt;
+    const choice = await vscode.window.showWarningMessage(
+      `エージェントがChatGPT（Web）で画像を生成しようとしています。ログイン中のChromeを操作し、生成枠を使います。\n指示: ${shown}`,
+      { modal: true },
+      once,
+      forWindow,
+    );
+    if (choice === forWindow) imageGenerationAllowedForWindow = true;
+    return choice === once || choice === forWindow;
+  };
   const ensureImageGenerationHost = (): void => {
-    if (imageGenerationHost !== undefined || !readWebGptImageGenerationEnabled()) {
+    if (imageGenerationHost !== undefined || readWebGptImageGenerationMode() === 'off') {
       return;
     }
     imageGenerationHost = startImageGenerationMcpHost({
@@ -1541,13 +1557,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           .get<string>('cdpEndpoint', DEFAULT_CDP_ENDPOINT),
       outputDir: path.join(context.globalStorageUri.fsPath, 'webgpt-images'),
       configDir: path.join(context.globalStorageUri.fsPath, 'webgpt-image-mcp'),
-      checkAvailable: () => {
-        if (!readWebGptImageGenerationEnabled()) {
-          return 'WebGPTでの画像生成は設定agent.webGpt.imageGeneration.enabledで無効になっています';
+      checkAvailable: async (prompt) => {
+        const mode = readWebGptImageGenerationMode();
+        if (mode === 'off') {
+          return 'WebGPTでの画像生成は設定agent.webGpt.imageGeneration.modeでoffになっています';
         }
-        return vscode.workspace.isTrusted
-          ? undefined
-          : 'WebGPTでの画像生成には信頼済みワークスペースが必要です';
+        if (!vscode.workspace.isTrusted) {
+          return 'WebGPTでの画像生成には信頼済みワークスペースが必要です';
+        }
+        if (mode === 'always' || imageGenerationAllowedForWindow) {
+          return undefined;
+        }
+        // 同時に複数の呼び出しが来ても、確認は1回にまとめる
+        imageGenerationConsent ??= askImageGenerationConsent(prompt).finally(() => {
+          imageGenerationConsent = undefined;
+        });
+        return (await imageGenerationConsent) ? undefined : '利用者が画像生成を許可しませんでした';
       },
       logWarn: (message) => log.warn(message),
     });
@@ -1566,7 +1591,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       });
   };
   const imageGenerationMcp = (): ImageGenerationMcpHost | undefined =>
-    readWebGptImageGenerationEnabled() && vscode.workspace.isTrusted
+    readWebGptImageGenerationMode() !== 'off' && vscode.workspace.isTrusted
       ? imageGenerationReady
       : undefined;
   chat.setImageGenerationMcp(imageGenerationMcp);
@@ -1883,7 +1908,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       if (e.affectsConfiguration('agent.sessionPresets')) {
         void updateSessionPresetsContext(log);
       }
-      if (e.affectsConfiguration('agent.webGpt.imageGeneration.enabled')) {
+      if (e.affectsConfiguration('agent.webGpt.imageGeneration.mode')) {
         ensureImageGenerationHost();
       }
       // 同梱skillの有効・無効（Issue #1820）。常駐しているCodexのapp-serverへ送り直し、
