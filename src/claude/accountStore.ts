@@ -107,7 +107,13 @@ export type AccountStoreResult =
        * 登録した後にトークンが更新された場合など）。利用者が `live` を稼働中のアカウントだと
        * 確かめれば、`adoptCurrent` で記録して切り替え直せる。
        */
-      confirmCurrent?: { id: string; name: string; live: AccountIdentity };
+      confirmCurrent?: {
+        id: string;
+        name: string;
+        live: AccountIdentity;
+        /** 認証ファイルのプラン（`subscriptionType`・`rateLimitTier`）。退避先と同じときだけ確認に回る。 */
+        plan: string | undefined;
+      };
     };
 
 interface AccountMeta {
@@ -134,6 +140,12 @@ const LOCK = '.ext-op.lock';
 const STALE_LOCK_MS = 30_000;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_RETRY_MS = 100;
+/** 照合できなかった旧版の登録を、同じ認証ファイルのまま照合し直すまでの間隔（通信失敗に備える）。 */
+const REPAIR_RETRY_MS = 5 * 60_000;
+/** CLIが `~/.claude.json` を書くときに取るロック（proper-lockfileのディレクトリ）を待つ時間。 */
+const CONFIG_LOCK_WAIT_MS = 3_000;
+const LIVE_CHANGED_REASON =
+  '切り替えの途中でClaude Codeが認証ファイルを更新したため止めました。もう一度試してください';
 
 export class ClaudeAccountStore {
   /** 同じウィンドウの中の書き換えを1本ずつ通す。 */
@@ -142,7 +154,7 @@ export class ClaudeAccountStore {
    * 同一性の記録が無い登録を照合し直した認証ファイル（sha256）。照合できなかったものを
    * 一覧の表示のたびに呼び直さない。認証ファイルが書き戻されて変われば、もう一度試す。
    */
-  private readonly repairAttempted = new Map<string, string>();
+  private readonly repairAttempted = new Map<string, { digest: string; at: number }>();
 
   /**
    * @param identify access tokenからprofileを取る（`createProfileIdentifier`）
@@ -309,6 +321,10 @@ export class ClaudeAccountStore {
         if (!resolved.ok) {
           return resolved;
         }
+        // profileを待つ間にCLIがトークンを更新していたら、古い方を書き戻すとrefresh tokenを失う
+        if (!(await this.liveUnchanged(live))) {
+          return { ok: false, reason: LIVE_CHANGED_REASON };
+        }
         const { owner, identity } = resolved;
         try {
           await this.backupBeforeWriteBack(owner, live);
@@ -329,6 +345,9 @@ export class ClaudeAccountStore {
           await this.writeSecret(join(this.accountsDir, CURRENT), Buffer.from(`${id}\n`));
           return this.withOauthAccountSynced(id);
         }
+      }
+      if (!(await this.liveUnchanged(live))) {
+        return { ok: false, reason: LIVE_CHANGED_REASON };
       }
       try {
         await this.writeSecret(this.liveCredentials, target);
@@ -527,10 +546,23 @@ export class ClaudeAccountStore {
       };
     }
     if (meta.identity === undefined) {
+      // 利用者の確認だけで書き戻す経路なので、機械的に違うと分かるものは確認に回さない。
+      // 壊れた `meta.json` の登録が本当の持ち主かもしれないときも断る（readRawMetaが投げる）
+      for (const other of ids) {
+        await this.readRawMeta(other);
+      }
+      const savedPlan = readPlan(await readFile(join(this.slot(current), CREDENTIALS)));
+      const livePlan = readPlan(live);
+      if (savedPlan !== undefined && livePlan !== undefined && savedPlan !== livePlan) {
+        return {
+          ok: false,
+          reason: `今ログインしているアカウント（${describeIdentity(identity)}・${livePlan}）は、稼働中として記録した「${name}」（${savedPlan}）とプランが違います。切り替えると認証情報が失われるため止めました。先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください`,
+        };
+      }
       return {
         ok: false,
         reason: `稼働中として記録した「${name}」にアカウントの記録が無く、今ログインしているアカウント（${describeIdentity(identity)}）と同じか確かめられません`,
-        confirmCurrent: { id: current, name, live: identity },
+        confirmCurrent: { id: current, name, live: identity, plan: livePlan },
       };
     }
     return {
@@ -561,43 +593,47 @@ export class ClaudeAccountStore {
 
   /**
    * 同一性の記録が無い登録（旧版で登録したもの）を、退避した認証ファイルのaccess tokenで
-   * 照合し直す。期限切れなどで照合できなかった認証ファイルは、書き戻されて中身が変わるまで
-   * 呼び直さない。他の登録と同一性がぶつかるときは記録しない。書き換えのロックの外から呼ぶ。
+   * 照合し直す。照合できなかった認証ファイルは、書き戻されて中身が変わるか `REPAIR_RETRY_MS`
+   * 経つまで呼び直さない。他の登録と同一性がぶつかるときは記録しない。書き換えのロックの外から呼ぶ。
    */
   private async repairIdentities(ids: string[]): Promise<void> {
-    for (const id of ids) {
-      if ((await this.readMeta(id)).identity !== undefined) {
-        continue;
+    // 1件ごとに通信を待つと一覧の表示が件数分遅れるため、まとめて照合する
+    await Promise.all(ids.map((id) => this.repairIdentity(id)));
+  }
+
+  private async repairIdentity(id: string): Promise<void> {
+    if ((await this.readMeta(id)).identity !== undefined) {
+      return;
+    }
+    const saved = await readOptional(join(this.slot(id), CREDENTIALS)).catch(() => undefined);
+    if (saved === undefined) {
+      return;
+    }
+    const digest = createHash('sha256').update(saved).digest('hex');
+    const attempted = this.repairAttempted.get(id);
+    if (attempted?.digest === digest && Date.now() - attempted.at < REPAIR_RETRY_MS) {
+      return;
+    }
+    this.repairAttempted.set(id, { digest, at: Date.now() });
+    const identity = await this.identifyCredentials(saved);
+    if (identity === undefined) {
+      return;
+    }
+    await this.serialized(async () => {
+      // 照合している間に書き戻されていたら、古い認証ファイルの結果なので記録しない
+      const now = await readOptional(join(this.slot(id), CREDENTIALS));
+      if (now?.equals(saved) !== true || (await this.readMeta(id)).identity !== undefined) {
+        return { ok: true };
       }
-      const saved = await readOptional(join(this.slot(id), CREDENTIALS)).catch(() => undefined);
-      if (saved === undefined) {
-        continue;
-      }
-      const digest = createHash('sha256').update(saved).digest('hex');
-      if (this.repairAttempted.get(id) === digest) {
-        continue;
-      }
-      this.repairAttempted.set(id, digest);
-      const identity = await this.identifyCredentials(saved);
-      if (identity === undefined) {
-        continue;
-      }
-      await this.serialized(async () => {
-        // 照合している間に書き戻されていたら、古い認証ファイルの結果なので記録しない
-        const now = await readOptional(join(this.slot(id), CREDENTIALS));
-        if (now?.equals(saved) !== true || (await this.readMeta(id)).identity !== undefined) {
+      for (const other of await this.registeredIds()) {
+        const recorded = other === id ? undefined : (await this.readMeta(other)).identity;
+        if (recorded !== undefined && sameIdentity(recorded, identity)) {
           return { ok: true };
         }
-        for (const other of await this.registeredIds()) {
-          const recorded = other === id ? undefined : (await this.readMeta(other)).identity;
-          if (recorded !== undefined && sameIdentity(recorded, identity)) {
-            return { ok: true };
-          }
-        }
-        await this.recordIdentity(id, identity);
-        return { ok: true };
-      });
-    }
+      }
+      await this.recordIdentity(id, identity);
+      return { ok: true };
+    });
   }
 
   /**
@@ -619,53 +655,59 @@ export class ClaudeAccountStore {
    * `~/.claude.json` の `oauthAccount` を `id` のものへ差し替える（切り替えの最後）。控えが
    * あればそれを、無ければ記録した同一性から最小の形を作る。他のキーは保つ。差し替えられ
    * なくても切り替え自体は済んでいるので、`warning` を付けて `ok` で返す。
+   *
+   * CLIは `~/.claude.json` を頻繁に書き換える。CLIと同じロック（`~/.claude.json.lock`）を取り、
+   * その中で読み直して書く。CLIもロックの中で読み直してから自分の変更だけを当てるため、
+   * 互いの変更を消さない。
    */
   private async withOauthAccountSynced(id: string): Promise<AccountStoreResult> {
     const identity = (await this.readMeta(id)).identity;
     if (identity === undefined) {
       return {
         ok: true,
-        warning: `「${id}」のアカウントの記録が無いため、~/.claude.jsonのアカウント表示を差し替えませんでした`,
+        warning: `切り替え先のアカウントを確かめられていないため、~/.claude.jsonのアカウント表示を差し替えませんでした（Claude Codeの表示するメールアドレスは古いままです。一覧でメールアドレスが確かめられた後に切り替え直すと直ります）`,
       };
     }
+    const saved = await readOptional(join(this.slot(id), OAUTH_ACCOUNT)).catch(() => undefined);
+    const snapshot = saved === undefined ? undefined : asRecord(parseJson(saved));
+    const oauthAccount =
+      snapshot !== undefined && matchesIdentity(snapshot, identity)
+        ? snapshot
+        : {
+            accountUuid: identity.accountUuid,
+            emailAddress: identity.email,
+            organizationUuid: identity.organizationUuid,
+            ...(identity.organizationName === undefined
+              ? {}
+              : { organizationName: identity.organizationName }),
+          };
     try {
-      const info = await lstat(this.globalConfigPath);
-      if (info.isSymbolicLink()) {
-        return {
-          ok: true,
-          warning: '~/.claude.jsonがシンボリックリンクのため、アカウント表示を差し替えませんでした',
-        };
-      }
-      const config = asRecord(parseJson(await readFile(this.globalConfigPath)));
-      if (config === undefined) {
-        return {
-          ok: true,
-          warning: '~/.claude.jsonを解釈できないため、アカウント表示を差し替えませんでした',
-        };
-      }
-      const present = asRecord(config['oauthAccount']);
-      if (present !== undefined && matchesIdentity(present, identity)) {
+      return await withCliConfigLock(this.globalConfigPath, async () => {
+        const info = await lstat(this.globalConfigPath);
+        if (info.isSymbolicLink()) {
+          return {
+            ok: true,
+            warning: '~/.claude.jsonがシンボリックリンクのため、アカウント表示を差し替えませんでした',
+          };
+        }
+        const config = asRecord(parseJson(await readFile(this.globalConfigPath)));
+        if (config === undefined) {
+          return {
+            ok: true,
+            warning: '~/.claude.jsonを解釈できないため、アカウント表示を差し替えませんでした',
+          };
+        }
+        const present = asRecord(config['oauthAccount']);
+        if (present !== undefined && matchesIdentity(present, identity)) {
+          return { ok: true };
+        }
+        await replaceFile(
+          this.globalConfigPath,
+          Buffer.from(`${JSON.stringify({ ...config, oauthAccount }, null, 2)}\n`),
+          info.mode & 0o777,
+        );
         return { ok: true };
-      }
-      const saved = await readOptional(join(this.slot(id), OAUTH_ACCOUNT)).catch(() => undefined);
-      const snapshot = saved === undefined ? undefined : asRecord(parseJson(saved));
-      const oauthAccount =
-        snapshot !== undefined && matchesIdentity(snapshot, identity)
-          ? snapshot
-          : {
-              accountUuid: identity.accountUuid,
-              emailAddress: identity.email,
-              organizationUuid: identity.organizationUuid,
-              ...(identity.organizationName === undefined
-                ? {}
-                : { organizationName: identity.organizationName }),
-            };
-      await replaceFile(
-        this.globalConfigPath,
-        Buffer.from(`${JSON.stringify({ ...config, oauthAccount }, null, 2)}\n`),
-        info.mode & 0o777,
-      );
-      return { ok: true };
+      });
     } catch (e) {
       return {
         ok: true,
@@ -683,6 +725,12 @@ export class ClaudeAccountStore {
     if (saved !== undefined && !saved.equals(live)) {
       await this.writeSecret(join(this.slot(id), CREDENTIALS_BACKUP), saved);
     }
+  }
+
+  /** `.credentials.json` が `previous` を読んだときのままか。CLIは拡張のロックを取らずに書き換える。 */
+  private async liveUnchanged(previous: Buffer | undefined): Promise<boolean> {
+    const now = await readOptional(this.liveCredentials);
+    return previous === undefined ? now === undefined : now?.equals(previous) === true;
   }
 
   private async restoreLive(previous: Buffer | undefined): Promise<boolean> {
@@ -949,14 +997,26 @@ export class ClaudeAccountStore {
   }
 }
 
-/** `meta.json` へ書く同一性のキー。`email` はスクリプトと共有する表示用のキー。 */
+/**
+ * `meta.json` へ書く同一性のキー。`email` はスクリプトと共有する表示用のキー。組織名が
+ * 無くなったときに古い値を残さないよう、`null` で上書きする。
+ */
 function identityMeta(identity: AccountIdentity): RawMeta {
   return {
     email: identity.email,
     accountUuid: identity.accountUuid,
     organizationUuid: identity.organizationUuid,
-    organizationName: identity.organizationName,
+    organizationName: identity.organizationName ?? null,
   };
+}
+
+/** 認証ファイルのプラン（`subscriptionType`・`rateLimitTier`）。トークンは返さない。 */
+function readPlan(credentials: Buffer): string | undefined {
+  const oauth = asRecord(asRecord(parseJson(credentials))?.['claudeAiOauth']);
+  const parts = [oauth?.['subscriptionType'], oauth?.['rateLimitTier']].filter(
+    (v): v is string => typeof v === 'string' && v !== '',
+  );
+  return parts.length === 0 ? undefined : parts.join('/');
 }
 
 /** `accountUuid` と `organizationUuid` がそろっているときだけ同一性として読む。 */
@@ -998,6 +1058,35 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * CLIが全体設定を書くときに取るロック（proper-lockfileの `<path>.lock` ディレクトリ）を取って
+ * `task` を走らせる。CLIが持っていれば待ち、取れなければ投げる（古いロックも奪わない。
+ * 奪うかどうかの判断はCLIに任せる）。
+ */
+async function withCliConfigLock<T>(path: string, task: () => Promise<T>): Promise<T> {
+  const lock = `${path}.lock`;
+  const deadline = Date.now() + CONFIG_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      await mkdir(lock);
+      break;
+    } catch (e) {
+      if ((e as { code?: unknown } | null)?.code !== 'EEXIST') {
+        throw e;
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('Claude Codeが設定を書き換え中のため待ちきれませんでした');
+    }
+    await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+  }
+  try {
+    return await task();
+  } finally {
+    await rm(lock, { recursive: true, force: true });
+  }
 }
 
 /**

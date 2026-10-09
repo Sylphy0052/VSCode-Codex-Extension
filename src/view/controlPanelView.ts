@@ -780,8 +780,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
     let result = await store.switchTo(id);
     if (!result.ok && result.confirmCurrent !== undefined) {
-      const { id: currentId, name: currentName, live } = result.confirmCurrent;
-      const who = describeIdentity(live);
+      const { id: currentId, name: currentName, live, plan } = result.confirmCurrent;
+      const who = plan === undefined ? describeIdentity(live) : `${describeIdentity(live)}・${plan}`;
       const choice = await vscode.window.showWarningMessage(
         `今ログインしているアカウント（${who}）は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください。`,
         { modal: true },
@@ -799,6 +799,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     }
     if (result.warning !== undefined) {
       this.log.warn(result.warning);
+      void vscode.window.showWarningMessage(`アカウントは切り替えました。${result.warning}`);
     }
     return { ok: true };
   }

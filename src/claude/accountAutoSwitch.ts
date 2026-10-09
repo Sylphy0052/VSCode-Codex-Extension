@@ -161,7 +161,9 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     }
     this.noTargetNotified = false;
     this.lastFailure = undefined;
-    this.ports.notify(`${why}、Claude Codeのアカウントを「${name}」へ切り替えました`);
+    this.ports.notify(
+      `${why}、Claude Codeのアカウントを「${name}」へ切り替えました${result.warning === undefined ? '' : `（${result.warning}）`}`,
+    );
     await this.ports.onSwitched();
     return { switched: true, name };
   }
