@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { startHttpMcpServer, type HttpMcpServerHandle } from '../orchestrator/mcpHttpServer';
@@ -102,9 +102,9 @@ export interface ImageGenerationMcpHost {
   /**
    * Claude Codeの`--mcp-config`へ渡す設定ファイルのパス。URLを引数へ直接書くと、トークンが
    * プロセスの引数一覧（`ps`）に載るため、権限600のファイルに書いてパスだけを渡す
-   * （Issue #1903）。
+   * （Issue #1903）。書けなかったときは`undefined`で、Claude Codeへは渡さない。
    */
-  readonly claudeConfigPath: string;
+  readonly claudeConfigPath: string | undefined;
   close(): Promise<void>;
 }
 
@@ -127,34 +127,46 @@ export async function startImageGenerationMcpHost(
       : undefined,
   );
   const url = server.urlForToken(token);
-  let claudeConfigPath: string;
+  const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  // Claude Code用の設定ファイルを書けなくても、Codex（URLを直接渡す）では使えるよう起動は続ける
+  let claudeConfigPath: string | undefined;
   try {
+    await pruneStaleClaudeConfigs(deps.configDir);
     claudeConfigPath = await writeClaudeConfig(deps.configDir, url);
   } catch (error) {
-    await server.close();
-    throw error;
+    deps.logWarn(
+      `[webgpt-image] Claude Code用のMCP設定ファイルを書けませんでした。Claude Codeの会話では画像生成を使えません（${deps.configDir}の権限を確認してください）: ${errorText(error)}`,
+    );
   }
   void pruneOldImages(deps.outputDir).catch((error: unknown) => {
-    deps.logWarn(
-      `[webgpt-image] 古い画像を消せませんでした: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    deps.logWarn(`[webgpt-image] 古い画像を消せませんでした: ${errorText(error)}`);
   });
   return {
     url,
     claudeConfigPath,
     close: async () => {
+      // トークン入りのファイルは、生成の中断を待つより先に消す
+      if (claudeConfigPath !== undefined) await unlink(claudeConfigPath).catch(() => undefined);
       // 生成中の呼び出しを中断し、タブを閉じ終えてからサーバを閉じる
       for (const controller of state.inFlight) controller.abort();
       await state.queue;
-      await Promise.all([server.close(), unlink(claudeConfigPath).catch(() => undefined)]);
+      await server.close();
     },
   };
 }
 
-/** ウィンドウごとに別のファイルにする。globalStorageは全ウィンドウで共有されるため。 */
+/**
+ * ウィンドウごとに別のファイルにする。globalStorageは全ウィンドウで共有されるため。
+ * 名前に拡張ホストのpidを入れ、異常終了で残ったファイルを次の起動で見分けられるようにする。
+ */
+const CLAUDE_CONFIG_NAME = /^webgpt-image-mcp-(\d+)-[0-9a-f]{16}\.json$/;
+
 async function writeClaudeConfig(configDir: string, url: string): Promise<string> {
   await mkdir(configDir, { recursive: true, mode: 0o700 });
-  const path = join(configDir, `webgpt-image-mcp-${randomBytes(8).toString('hex')}.json`);
+  const path = join(
+    configDir,
+    `webgpt-image-mcp-${process.pid}-${randomBytes(8).toString('hex')}.json`,
+  );
   const config = {
     mcpServers: {
       [IMAGE_GENERATION_MCP_SERVER_NAME]: {
@@ -167,6 +179,31 @@ async function writeClaudeConfig(configDir: string, url: string): Promise<string
   };
   await writeFile(path, JSON.stringify(config), { flag: 'wx', mode: 0o600 });
   return path;
+}
+
+/** 終了したプロセスが残した設定ファイルを消す。起動中の他のウィンドウのファイルは残す。 */
+async function pruneStaleClaudeConfigs(configDir: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(configDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pid = Number(CLAUDE_CONFIG_NAME.exec(name)?.[1]);
+    if (!Number.isInteger(pid) || pid <= 0 || isProcessAlive(pid)) continue;
+    await unlink(join(configDir, name)).catch(() => undefined);
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERMは別ユーザーのプロセスが生きている。消さない側へ倒す
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 function handleConnection(state: HostState, connection: McpConnection): void {

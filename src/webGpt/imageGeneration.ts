@@ -1,4 +1,4 @@
-import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -381,10 +381,15 @@ export async function pruneOldImages(outputDir: string, now = Date.now()): Promi
   for (const name of names) {
     if (!SAVED_IMAGE_NAME.test(name)) continue;
     const path = join(outputDir, name);
-    const info = await stat(path);
-    if (info.isFile() && now - info.mtimeMs > IMAGE_RETENTION_MS) {
-      await unlink(path);
-      removed += 1;
+    try {
+      const info = await lstat(path);
+      if (info.isFile() && now - info.mtimeMs > IMAGE_RETENTION_MS) {
+        await unlink(path);
+        removed += 1;
+      }
+    } catch (error) {
+      // 別のウィンドウが同時に消した
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
   return removed;
@@ -475,7 +480,7 @@ function fetchImagesScript(sources: readonly string[]): string {
   return `(async () => {
     const out = [];
     for (const src of ${JSON.stringify(sources)}) {
-      const blob = await (await fetch(src)).blob();
+      const blob = await (await fetch(src, { redirect: 'error' })).blob();
       // 読み出す前に大きさを確かめ、上限を超える画像をdataURLにして受け取らない
       if (blob.size === 0 || blob.size > ${MAX_IMAGE_BYTES}) return 'size';
       out.push(await new Promise((resolve, reject) => {

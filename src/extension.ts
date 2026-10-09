@@ -1570,7 +1570,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   claudeChat.setImageGenerationMcp(imageGenerationMcp);
   // 起動の完了より先に拡張機能が止まっても閉じられるよう、起動前に登録しておく
   context.subscriptions.push({
-    dispose: () => void imageGenerationHost?.then((host) => host.close()).catch(() => undefined),
+    dispose: () => {
+      // 閉じた後に開く会話へ、消した設定ファイルのパスを渡さない
+      imageGenerationReady = undefined;
+      void imageGenerationHost?.then((host) => host.close()).catch(() => undefined);
+    },
   });
   ensureImageGenerationHost();
   const sessionKanban = new SessionKanbanViewManager(

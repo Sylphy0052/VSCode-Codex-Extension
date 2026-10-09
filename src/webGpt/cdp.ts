@@ -50,8 +50,17 @@ export class CdpBrowser {
       typeof version === 'object' && version !== null && 'webSocketDebuggerUrl' in version
         ? version.webSocketDebuggerUrl
         : undefined;
-    if (typeof url !== 'string' || !isLoopbackWebSocket(url, endpoint)) {
+    if (typeof url !== 'string' || !isLoopbackWebSocket(url)) {
       throw new Error('CDP接続先からブラウザのWebSocket URLを読み取れません');
+    }
+    // 同じホストの別のポートで待ち受ける別プロセスへ、応答の書き換えで誘導されないよう、
+    // ポートも接続先と同じに限る（Issue #1903）
+    const socketPort = new URL(url).port;
+    const endpointPort = new URL(endpoint).port;
+    if (socketPort !== endpointPort) {
+      throw new Error(
+        `ChromeのWebSocketのポート（${socketPort}）が接続先のポート（${endpointPort}）と違います。ポートを変えて中継する構成には対応していません`,
+      );
     }
     const socket = new WebSocket(url);
     try {
@@ -148,19 +157,11 @@ export class CdpBrowser {
   }
 }
 
-/**
- * ブラウザが返したURLもループバックに限る。接続先の検証（`parseCdpEndpoint`）と揃える。
- * ポートも接続先と同じに限る。同じホストの別のポートで待ち受ける別プロセスへ、
- * 応答の書き換えで誘導されないようにするため（Issue #1903）。
- */
-function isLoopbackWebSocket(value: string, endpoint: string): boolean {
+/** ブラウザが返したURLもループバックに限る。接続先の検証（`parseCdpEndpoint`）と揃える。 */
+function isLoopbackWebSocket(value: string): boolean {
   try {
     const url = new URL(value);
-    return (
-      url.protocol === 'ws:' &&
-      ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) &&
-      url.port === new URL(endpoint).port
-    );
+    return url.protocol === 'ws:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
   } catch {
     return false;
   }
