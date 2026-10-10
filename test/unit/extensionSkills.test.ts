@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { UserSkillStore, isExtensionSkillPath } from '../../src/provider/extensionSkills';
+import {
+  UserSkillStore,
+  claudePluginDirArgs,
+  isExtensionSkillPath,
+  omitDuplicatedBundledRoot,
+} from '../../src/provider/extensionSkills';
 
 let work: string;
 let userRoot: string;
@@ -118,5 +123,66 @@ describe('isExtensionSkillPath（issue #1825）', () => {
     expect(isExtensionSkillPath('C:\\ext\\plugin\\skills\\a\\SKILL.md', ['C:\\ext\\plugin'])).toBe(
       true,
     );
+  });
+});
+
+describe('omitDuplicatedBundledRoot（Claudeへ重複する同梱pluginを渡さない）', () => {
+  let bundled: string;
+  let home: string;
+
+  beforeEach(async () => {
+    bundled = join(work, 'bundled');
+    home = join(work, 'claude-home');
+    await mkdir(join(bundled, '.claude-plugin'), { recursive: true });
+    await writeFile(join(bundled, '.claude-plugin', 'plugin.json'), '{"name":"codex-ext"}');
+    await mkdir(join(bundled, 'skills', 'sk1'), { recursive: true });
+    await writeFile(join(bundled, 'skills', 'sk1', 'SKILL.md'), 'x');
+    await mkdir(join(bundled, 'agents'), { recursive: true });
+    await writeFile(join(bundled, 'agents', 'ag1.md'), 'x');
+    await mkdir(join(userRoot, '.claude-plugin'), { recursive: true });
+    await writeFile(join(userRoot, '.claude-plugin', 'plugin.json'), '{"name":"codex-ext-user"}');
+  });
+
+  async function installUser(skill: boolean, agent: boolean): Promise<void> {
+    if (skill) {
+      await mkdir(join(home, 'skills', 'sk1'), { recursive: true });
+      await writeFile(join(home, 'skills', 'sk1', 'SKILL.md'), 'x');
+    }
+    if (agent) {
+      await mkdir(join(home, 'agents'), { recursive: true });
+      await writeFile(join(home, 'agents', 'ag1.md'), 'x');
+    }
+  }
+
+  it('skillもagentも揃っていれば同梱rootだけ外し、userRootは残す', async () => {
+    await installUser(true, true);
+    expect(omitDuplicatedBundledRoot([bundled, userRoot], home)).toEqual([userRoot]);
+    expect(claudePluginDirArgs([bundled, userRoot], home)).toEqual(['--plugin-dir', userRoot]);
+  });
+
+  it('agentが欠けていれば同梱rootを残す', async () => {
+    await installUser(true, false);
+    expect(omitDuplicatedBundledRoot([bundled, userRoot], home)).toEqual([bundled, userRoot]);
+  });
+
+  it('skillが欠けていれば同梱rootを残す', async () => {
+    await installUser(false, true);
+    expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
+  });
+
+  it('skillとagent以外の構成要素があれば、揃っていても同梱rootを残す', async () => {
+    await installUser(true, true);
+    await mkdir(join(bundled, 'commands'), { recursive: true });
+    expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
+  });
+
+  it('設定ディレクトリが無ければ同梱rootを残す', () => {
+    expect(omitDuplicatedBundledRoot([bundled], join(work, 'missing'))).toEqual([bundled]);
+  });
+
+  it('比べるskillもagentも無ければ同梱rootを残す', async () => {
+    await rm(join(bundled, 'skills'), { recursive: true });
+    await rm(join(bundled, 'agents'), { recursive: true });
+    expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
   });
 });

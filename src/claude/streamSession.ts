@@ -23,7 +23,7 @@ import type { Logger } from '../log';
 import type { ApprovalHandlerResult } from '../orchestrator/taskSession';
 import { killWithEscalation, MAX_LINE_BUFFER_BYTES } from '../process/childProcess';
 import { guardStdinErrors, safeWriteStdin } from '../process/stdinSafety';
-import { extensionPluginRoots } from '../provider/extensionSkills';
+import { extensionPluginRoots, omitDuplicatedBundledRoot } from '../provider/extensionSkills';
 import { consumeNdjson } from '../util/ndjson';
 import { buildAskUserQuestionDenyResponse, buildAskUserQuestionResponse } from './askUserQuestion';
 import type { AskUserQuestionSelections } from './askUserQuestion';
@@ -442,7 +442,7 @@ export class ClaudeStreamSession {
       sessionId: options.sessionId,
       cwd: options.cwd,
       config: options.config,
-      pluginDirs: extensionPluginRoots(),
+      pluginDirs: omitDuplicatedBundledRoot(extensionPluginRoots(), this.configDir),
     });
     for (const w of warnings) {
       this.log.warn(w);
