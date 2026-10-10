@@ -51,6 +51,20 @@ describe('renderLineageReplay の縮小', () => {
     expect(text).not.toContain('omitted=');
     expect(text).not.toContain('authoritative=');
     expect(text.match(/予算超過で省いた応答\d+件/gu)).toHaveLength(1);
+    // 1500字の応答6件のうち、予算4000に収まる新しい2件だけ残る
     expect(text).toContain('予算超過で省いた応答4件は系列ファイルにある');
+    expect(text).not.toContain('<ASSISTANT_CONTEXT id="A4"');
+    expect(text).toContain('<ASSISTANT_CONTEXT id="A5"');
+  });
+
+  it('省いた応答が無ければ省略行を出さない', () => {
+    const small = renderLineageReplay({
+      ref: { lineageId: 'L1', snapshot: 'S1' },
+      records: records(),
+      snapshotPath: '/tmp/s.jsonl',
+      parentMissing: false,
+      budget: 100000,
+    });
+    expect(small).not.toMatch(/予算超過で省いた応答\d+件/u);
   });
 });

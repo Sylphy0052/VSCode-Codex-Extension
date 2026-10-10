@@ -136,6 +136,7 @@ describe('omitDuplicatedBundledRoot（Claudeへ重複する同梱pluginを渡さ
     await mkdir(join(bundled, '.claude-plugin'), { recursive: true });
     await writeFile(join(bundled, '.claude-plugin', 'plugin.json'), '{"name":"codex-ext"}');
     await mkdir(join(bundled, 'skills', 'sk1'), { recursive: true });
+    await writeFile(join(bundled, 'skills', 'sk1', 'SKILL.md'), 'x');
     await mkdir(join(bundled, 'agents'), { recursive: true });
     await writeFile(join(bundled, 'agents', 'ag1.md'), 'x');
     await mkdir(join(userRoot, '.claude-plugin'), { recursive: true });
@@ -166,6 +167,22 @@ describe('omitDuplicatedBundledRoot（Claudeへ重複する同梱pluginを渡さ
 
   it('skillが欠けていれば同梱rootを残す', async () => {
     await installUser(false, true);
+    expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
+  });
+
+  it('skillとagent以外の構成要素があれば、揃っていても同梱rootを残す', async () => {
+    await installUser(true, true);
+    await mkdir(join(bundled, 'commands'), { recursive: true });
+    expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
+  });
+
+  it('設定ディレクトリが無ければ同梱rootを残す', () => {
+    expect(omitDuplicatedBundledRoot([bundled], join(work, 'missing'))).toEqual([bundled]);
+  });
+
+  it('比べるskillもagentも無ければ同梱rootを残す', async () => {
+    await rm(join(bundled, 'skills'), { recursive: true });
+    await rm(join(bundled, 'agents'), { recursive: true });
     expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
   });
 });

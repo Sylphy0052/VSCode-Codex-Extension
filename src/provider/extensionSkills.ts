@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { cp, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
 
 /**
@@ -102,22 +102,37 @@ export function claudePluginDirArgs(
 
 /** Claude Codeの設定ディレクトリ。引数 > `CLAUDE_CONFIG_DIR` > `~/.claude`。 */
 function claudeConfigDirOf(configDir: string | undefined): string {
-  if (configDir !== undefined && configDir.trim() !== '') {
+  // 空文字だけを未指定とみなす。`streamSession`が`CLAUDE_CONFIG_DIR`を立てる条件と揃える
+  if (configDir !== undefined && configDir !== '') {
     return configDir;
   }
   const fromEnv = process.env['CLAUDE_CONFIG_DIR'];
-  return fromEnv !== undefined && fromEnv.trim() !== '' ? fromEnv : join(homedir(), '.claude');
+  return fromEnv !== undefined && fromEnv !== '' ? fromEnv : join(homedir(), '.claude');
 }
 
-function listNames(dir: string, suffix: string): string[] | undefined {
+/** `dir`直下のエントリ名。読めなければ`undefined`。 */
+function readEntryNames(dir: string): string[] | undefined {
   try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((e) => (suffix === '' ? e.isDirectory() : e.isFile() && e.name.endsWith(suffix)))
-      .map((e) => (suffix === '' ? e.name : e.name.slice(0, -suffix.length)));
+    return readdirSync(dir);
   } catch {
     return undefined;
   }
 }
+
+/** `skills/<name>/SKILL.md`を持つskill名。symlinkのディレクトリも辿る。 */
+function listSkillNames(skillsDir: string): string[] | undefined {
+  return readEntryNames(skillsDir)?.filter((n) => existsSync(join(skillsDir, n, 'SKILL.md')));
+}
+
+/** `agents/<name>.md`のagent名（拡張子を除く）。 */
+function listAgentNames(agentsDir: string): string[] | undefined {
+  return readEntryNames(agentsDir)
+    ?.filter((n) => n.endsWith('.md'))
+    .map((n) => n.slice(0, -'.md'.length));
+}
+
+/** skillとagent以外（commands・hooks・MCPなど）を外すと失うので、これだけなら外してよい。 */
+const OMITTABLE_BUNDLED_ENTRIES = new Set(['.claude-plugin', 'skills', 'agents']);
 
 function isBundledRoot(root: string): boolean {
   try {
@@ -137,23 +152,32 @@ function isBundledRoot(root: string): boolean {
  * `skills/<name>/SKILL.md`・`agents/<name>.md`に既にあるときは、同梱rootを外す。
  * 同じ説明がskill一覧に二重に載りトークンを食うため。利用者root（`codex-ext-user`）は外さない。
  * Claude起動のたびに1回判定する。Codex側（`codexSkillExtraRoots`）には影響しない。
+ *
+ * 判定は名前だけで、中身の一致は見ない。設定ディレクトリ側は利用者が同期・改変して使う版で、
+ * 同名なら利用者の版を優先する（中身まで比べると、少し違うだけで二重載りに戻る）。
+ * skillとagent以外を持つ場合と、読めない・空の場合は外さない。
  */
 export function omitDuplicatedBundledRoot(
   roots: readonly string[],
   configDir?: string,
 ): string[] {
-  const home = claudeConfigDirOf(configDir);
+  const configRoot = claudeConfigDirOf(configDir);
   return roots.filter((root) => {
     if (!isBundledRoot(root)) {
       return true;
     }
-    const skills = listNames(join(root, 'skills'), '');
-    const agents = listNames(join(root, 'agents'), '.md') ?? [];
+    const entries = readEntryNames(root) ?? [];
+    if (entries.some((n) => !OMITTABLE_BUNDLED_ENTRIES.has(n))) {
+      return true;
+    }
+    const skills = listSkillNames(join(root, 'skills'));
+    const agents = listAgentNames(join(root, 'agents')) ?? [];
+    // `every`は空配列でtrueになるため、比べる名前が無いときは重複とみなさない
     if (skills === undefined || skills.length + agents.length === 0) {
       return true;
     }
-    const skillsDup = skills.every((n) => existsSync(join(home, 'skills', n, 'SKILL.md')));
-    const agentsDup = agents.every((n) => existsSync(join(home, 'agents', `${n}.md`)));
+    const skillsDup = skills.every((n) => existsSync(join(configRoot, 'skills', n, 'SKILL.md')));
+    const agentsDup = agents.every((n) => existsSync(join(configRoot, 'agents', `${n}.md`)));
     return !(skillsDup && agentsDup);
   });
 }
