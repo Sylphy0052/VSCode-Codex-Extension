@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { cp, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 
@@ -90,8 +91,71 @@ export function extensionPluginRoots(): string[] {
  * Claude Codeへ渡す引数。ディレクトリ1つにつき`--plugin-dir <dir>`を1組。
  * 絶対パスでないものは渡さない（`-`始まりの値をオプションと取り違えさせない）。
  */
-export function claudePluginDirArgs(roots: readonly string[] = extensionPluginRoots()): string[] {
-  return roots.filter((root) => isAbsolute(root)).flatMap((root) => ['--plugin-dir', root]);
+export function claudePluginDirArgs(
+  roots: readonly string[] = extensionPluginRoots(),
+  configDir?: string,
+): string[] {
+  return omitDuplicatedBundledRoot(roots, configDir)
+    .filter((root) => isAbsolute(root))
+    .flatMap((root) => ['--plugin-dir', root]);
+}
+
+/** Claude Codeの設定ディレクトリ。引数 > `CLAUDE_CONFIG_DIR` > `~/.claude`。 */
+function claudeConfigDirOf(configDir: string | undefined): string {
+  if (configDir !== undefined && configDir.trim() !== '') {
+    return configDir;
+  }
+  const fromEnv = process.env['CLAUDE_CONFIG_DIR'];
+  return fromEnv !== undefined && fromEnv.trim() !== '' ? fromEnv : join(homedir(), '.claude');
+}
+
+function listNames(dir: string, suffix: string): string[] | undefined {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => (suffix === '' ? e.isDirectory() : e.isFile() && e.name.endsWith(suffix)))
+      .map((e) => (suffix === '' ? e.name : e.name.slice(0, -suffix.length)));
+  } catch {
+    return undefined;
+  }
+}
+
+function isBundledRoot(root: string): boolean {
+  try {
+    const manifest: unknown = JSON.parse(readFileSync(pluginManifestPath(root), 'utf8'));
+    return (
+      typeof manifest === 'object' &&
+      manifest !== null &&
+      (manifest as { name?: unknown }).name === BUNDLED_SKILLS_PLUGIN
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 同梱plugin（`codex-ext`）のskill名とagent名がすべて、Claudeの設定ディレクトリの
+ * `skills/<name>/SKILL.md`・`agents/<name>.md`に既にあるときは、同梱rootを外す。
+ * 同じ説明がskill一覧に二重に載りトークンを食うため。利用者root（`codex-ext-user`）は外さない。
+ * Claude起動のたびに1回判定する。Codex側（`codexSkillExtraRoots`）には影響しない。
+ */
+export function omitDuplicatedBundledRoot(
+  roots: readonly string[],
+  configDir?: string,
+): string[] {
+  const home = claudeConfigDirOf(configDir);
+  return roots.filter((root) => {
+    if (!isBundledRoot(root)) {
+      return true;
+    }
+    const skills = listNames(join(root, 'skills'), '');
+    const agents = listNames(join(root, 'agents'), '.md') ?? [];
+    if (skills === undefined || skills.length + agents.length === 0) {
+      return true;
+    }
+    const skillsDup = skills.every((n) => existsSync(join(home, 'skills', n, 'SKILL.md')));
+    const agentsDup = agents.every((n) => existsSync(join(home, 'agents', `${n}.md`)));
+    return !(skillsDup && agentsDup);
+  });
 }
 
 /** Codexの`skills/extraRoots/set`へ渡す値。skill本体が並ぶ`skills/`を指す。 */
