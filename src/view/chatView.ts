@@ -1073,10 +1073,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     ) {
       return false;
     }
+    // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
+    if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      return true;
+    }
     entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
     entry.session.noteLocalEvent(
       `autoHandoffOffer:${Date.now()}`,
-      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（残量に余裕があるため自動では引き継ぎません）',
+      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
     );
     this.log.info(`区切りの契機（${trigger.kind}）のため、自動引き継ぎを始めず提案で止めました`);
     return true;
@@ -1095,11 +1099,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `requestHandoff`で同じ条件を使う。
    */
   private autoHandoffHeld(entry: ChatPanel, state: ChatState): boolean {
-    return (
-      entry.autoHandoffStarted ||
-      entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq ||
-      entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq
-    );
+    return entry.autoHandoffStarted || entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq;
   }
 
   /**

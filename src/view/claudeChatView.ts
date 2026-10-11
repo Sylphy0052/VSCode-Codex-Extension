@@ -1259,7 +1259,7 @@ export class ClaudeChatViewManager
   /**
    * 区切りの契機で、新セッションを開かず提案だけで止める（Issue #1947）。止めたら`true`。
    *
-   * 提案はターンごとに1回だけ出す。同じターンでは`autoHandoffHeld`が以後の判定を止める。
+   * 提案はターンごとに1回だけ出す。
    */
   private offerHandoffInstead(entry: ClaudePanel, trigger: HandoffTrigger): boolean {
     const state = entry.session.getState();
@@ -1273,10 +1273,14 @@ export class ClaudeChatViewManager
     ) {
       return false;
     }
+    // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
+    if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      return true;
+    }
     entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
     entry.session.noteLocalEvent(
       `autoHandoffOffer:${Date.now()}`,
-      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（残量に余裕があるため自動では引き継ぎません）',
+      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
     );
     this.log.info(`区切りの契機（${trigger.kind}）のため、自動引き継ぎを始めず提案で止めました`);
     return true;
@@ -1298,11 +1302,7 @@ export class ClaudeChatViewManager
    * `requestHandoff`で同じ条件を使う。
    */
   private autoHandoffHeld(entry: ClaudePanel, state: ChatState): boolean {
-    return (
-      entry.autoHandoffStarted ||
-      entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq ||
-      entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq
-    );
+    return entry.autoHandoffStarted || entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq;
   }
 
   private readonly webGptPreparing = new Set<ClaudePanel>();
