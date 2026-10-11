@@ -19,6 +19,17 @@ import { parseUsageReport, parseUsageSlots, type UsageSlots } from './usageText'
 /** 応答が返らないまま居座らせない。使用量は無くても困らない情報なので短く切る。 */
 const TIMEOUT_MS = 20_000;
 
+/** 失敗の理由としてログへ出す、stdout・stderrそれぞれの長さの上限（Issue #1939）。 */
+const LOG_EXCERPT_CHARS = 300;
+
+/** `claude /usage`を最後まで走らせた結果。打ち切ったときや起動できなかったときは作らない。 */
+interface ProbeRun {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
 /**
  * 続けて発言しても叩き直さない間隔。全ウィンドウで共有する（Issue #1809）。
  *
@@ -191,8 +202,15 @@ export class ClaudeUsageProbe {
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
       await this.writeShared({ readAt: now, usage: undefined, failures });
       const startedAccount = await this.accounts?.currentId().catch(() => undefined);
-      const output = await this.run();
+      const result = await this.run();
+      const output = result?.stdout;
       const usage = output === undefined ? undefined : parseUsageReport(output);
+      if (result !== undefined && usage === undefined) {
+        this.log.warn(
+          `使用量を読み取れませんでした（code=${result.code}, signal=${result.signal}）。` +
+            `stdout: ${logExcerpt(result.stdout)} / stderr: ${logExcerpt(result.stderr)}`,
+        );
+      }
       const slots = output === undefined ? undefined : parseUsageSlots(output, now);
       const highestPct = slots === undefined ? undefined : highestOf(slots);
       const nextFailures = usage === undefined ? failures + 1 : 0;
@@ -390,33 +408,55 @@ export class ClaudeUsageProbe {
     }
   }
 
-  private run(): Promise<string | undefined> {
+  private run(): Promise<ProbeRun | undefined> {
     return new Promise((resolve) => {
       // transcriptを~/.claude/projects/へ残さない（Issue #1911）
       const proc = spawn(this.claudePath(), ['--print', '--no-session-persistence', '/usage'], {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       let out = '';
-      const finish = (value: string | undefined): void => {
+      let err = '';
+      const finish = (value: ProbeRun | undefined): void => {
         clearTimeout(timer);
         // SIGTERMに応答しないハングしたプロセスも回収できるよう、SIGKILLへの
         // エスカレーションを共通処理へ寄せる（issue #402、2点目のLOW対応）。
         killWithEscalation(proc);
         resolve(value);
       };
-      const timer = setTimeout(() => finish(undefined), TIMEOUT_MS);
+      const timer = setTimeout(() => {
+        this.log.warn(
+          `使用量の取得が${TIMEOUT_MS / 1000}秒で終わらないため打ち切りました。` +
+            `stderr: ${logExcerpt(err)}`,
+        );
+        finish(undefined);
+      }, TIMEOUT_MS);
 
       proc.stdout.on('data', (chunk: Buffer) => {
         out += chunk.toString();
+      });
+      // pipeが詰まって子が止まらないよう読み続けるが、ログに出す分だけ溜める
+      proc.stderr.on('data', (chunk: Buffer) => {
+        if (err.length < LOG_EXCERPT_CHARS) {
+          err += chunk.toString();
+        }
       });
       proc.on('error', (e: Error) => {
         this.log.warn(`使用量を取得できませんでした: ${e.message}`);
         finish(undefined);
       });
-      proc.on('close', () => finish(out));
+      proc.on('close', (code, signal) => finish({ stdout: out, stderr: err, code, signal }));
     });
   }
+}
+
+/** 外部プロセスの出力を、ログの1行に収まる形へ縮める。空なら空と分かるように出す。 */
+function logExcerpt(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat === '') {
+    return '（空）';
+  }
+  return flat.length > LOG_EXCERPT_CHARS ? `${flat.slice(0, LOG_EXCERPT_CHARS)}…` : flat;
 }
 
 /** 5時間枠と週次のうち高い方の使用率。 */
