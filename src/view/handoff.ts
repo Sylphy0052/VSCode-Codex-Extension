@@ -487,32 +487,42 @@ export function buildHandoffPrompt(pointerPath: string, replay?: string): string
  * 必要な申し送りはhandoffプロンプトに揃っているので、ポインタファイルを経由させず本文だけを
  * 渡す。ポインタファイルは抽出コマンドでtranscriptを読ませる作りのため、パスを渡すと読みに行く。
  *
- * 系列のreplay（Issue #1896）はhandoffプロンプトの後ろへ置く。受領の判定は初回プロンプトの
- * 先頭だけを読むため、長いreplayを前に置くと申し送りが判定材料から落ちる。
+ * 前置き文・系列のreplay（Issue #1896）・事実節・受領確認の指示は付けない（Issue #1950）。
+ * 開始プロンプトはhandoffプロンプトそのものにする。
  */
-export function buildHandoffPromptFromHandoff(handoffPrompt: string, replay?: string): string {
-  const what =
-    replay === undefined
-      ? '引き継ぎ元が書いた下のhandoffプロンプトの内容だけ'
-      : '引き継ぎ元が書いた下のhandoffプロンプトと、その後ろの引き継ぎ系列のユーザー発話';
-  const head = `${HANDOFF_PROMPT_HEAD}${what}を引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
-  return replay === undefined ? head : `${head}\n\n${replay}`;
+export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
+  return handoffPrompt;
 }
 
 /**
  * 引き継ぎ先への初回プロンプトを選ぶ（Issue #1354）。引き継ぎ元の最終応答にhandoffプロンプトが
- * あればその本文だけを渡し、無ければポインタファイルを指す。
+ * あればその本文だけを渡し、無ければポインタファイルを指す。`isBare`はhandoffプロンプトの本文
+ * だけを渡すとき`true`で、呼び出し側は事実節・受領確認の指示を付けない（Issue #1950）。
  */
 export function chooseHandoffPrompt(
   pointerPath: string,
   lastAssistantMessage: string | undefined,
   replay?: string,
-): string {
+): { text: string; isBare: boolean } {
   const handoffPrompt =
     lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
   return handoffPrompt === undefined
-    ? buildHandoffPrompt(pointerPath, replay)
-    : buildHandoffPromptFromHandoff(handoffPrompt, replay);
+    ? { text: buildHandoffPrompt(pointerPath, replay), isBare: false }
+    : { text: buildHandoffPromptFromHandoff(handoffPrompt), isBare: true };
+}
+
+/**
+ * 発話がhandoffプロンプトの本文そのものか（Issue #1950）。本文だけを渡した初回プロンプトを
+ * 引き継ぎ由来と見分けるために使う。`parseHandoffPrompt`と同じ3行（見出し・schema・handoff_id）
+ * を要求し、先頭行が見出しであることも求める。
+ */
+export function isHandoffPromptBody(text: string): boolean {
+  const lines = text.trim().split('\n').map((line) => line.replace(/\r$/, ''));
+  return (
+    HANDOFF_PROMPT_HEADING.test(lines[0] ?? '') &&
+    lines.some((line) => HANDOFF_SCHEMA_LINE.test(line)) &&
+    lines.some((line) => HANDOFF_ID_LINE.test(line))
+  );
 }
 
 /**

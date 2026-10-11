@@ -990,11 +990,11 @@
           ],
           "enumDescriptions": [
             "残量が `agent.autoHandoff.softThresholdPercent` を上回るうちは、新しいセッションを開かず引き継ぎを提案するだけで止める",
-            "従来どおり新しいセッションを開いて引き継ぐ"
+            "区切りでも新しいセッションを開いて自動で引き継ぐ"
           ],
-          "default": "offer",
+          "default": "start",
           "scope": "window",
-          "markdownDescription": "区切りの契機（`agent.autoHandoff.onAssistantSuggestion` のアシスタントの提案と `agent.autoHandoff.onMilestone` の作業の節目）で新しいセッションを開くか（Issue #1947）。`offer` では、残量が `agent.autoHandoff.softThresholdPercent` 以下のときだけ自動で引き継ぎ、それ以外はチャットに提案を1回出して止める。引き継ぐときは引き継ぎボタンを押す。残量の閾値・自動圧縮・model/effortの変化による引き継ぎはこの設定に関係なく自動で行う。"
+          "markdownDescription": "区切りの契機（`agent.autoHandoff.onAssistantSuggestion` のアシスタントの提案と `agent.autoHandoff.onMilestone` の作業の節目）で新しいセッションを開くか（Issue #1947 / #1950）。既定の `start` では区切りでも自動で引き継ぐ。`offer` では、残量が `agent.autoHandoff.softThresholdPercent` 以下のときだけ自動で引き継ぎ、それ以外はチャットに提案を1回出して止める。引き継ぐときは引き継ぎボタンを押す。残量の閾値・自動圧縮・model/effortの変化による引き継ぎはこの設定に関係なく自動で行う。"
         },
         "agent.autoHandoff.closeOldTab": {
           "type": "boolean",
