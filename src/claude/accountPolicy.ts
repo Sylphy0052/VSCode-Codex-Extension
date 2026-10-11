@@ -13,6 +13,25 @@ export const DEFAULT_SWITCH_THRESHOLD_PCT = 95;
 /** 使用率の取得間隔（分）。50%以下・75%以下・90%以下・90%超の順。 */
 const INTERVAL_MINUTES = [15, 10, 5, 2] as const;
 
+/**
+ * 待機中のアカウントを計測し直すまでの最短の間隔（Issue #1943）。計測のたびにCLIが
+ * トークンをrefreshしうるので、回数と `429` の危険を減らすため長めに取る。
+ */
+export const STANDBY_PROBE_INTERVAL_MS = 60 * 60_000;
+
+/**
+ * 待機中のアカウントの記録が古く、計測し直すべきか。記録が無いか、記録から
+ * {@link STANDBY_PROBE_INTERVAL_MS} 以上経っていれば古い。解除時刻を過ぎた枠も
+ * この間隔の中で拾い直すので、別に判定しない。
+ */
+export function isStandbyStale(account: SavedAccountView, nowMs: number): boolean {
+  if (account.current) {
+    return false;
+  }
+  const recordedAt = account.usage?.recordedAt;
+  return recordedAt === undefined || nowMs - recordedAt >= STANDBY_PROBE_INTERVAL_MS;
+}
+
 /** 稼働中のアカウントの、使用率に応じた次の取得までの間隔（ミリ秒）。 */
 export function probeIntervalMs(highestPct: number): number {
   const index = highestPct <= 50 ? 0 : highestPct <= 75 ? 1 : highestPct <= 90 ? 2 : 3;
