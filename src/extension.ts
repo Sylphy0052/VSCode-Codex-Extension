@@ -7,6 +7,7 @@ import type { RecordRequest as ActivityRequest } from './activity/activityLogger
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { AccountAutoSwitcher } from './claude/accountAutoSwitch';
 import { ClaudeAccountStore } from './claude/accountStore';
+import { StandbyUsageProbe } from './claude/standbyUsageProbe';
 import { ClaudeAgentProbe } from './claude/agentProbe';
 import { ClaudeAuthActions } from './claude/authActions';
 import { ClaudeAuthProbe } from './claude/authProbe';
@@ -43,6 +44,7 @@ import {
   readAnswererJudgeConfig,
   readClaudeAutoSwitchConfig,
   readClaudeConfig,
+  readClaudeStandbyUsageProbeEnabled,
   readConfig,
   readSessionMessagingEnabled,
   readWebGptImageGenerationMode,
@@ -655,9 +657,32 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
   context.subscriptions.push(chat);
 
+  // 待機中のアカウントの使用率の計測（Issue #1943）。前回の計測の途中で拡張が落ちると、
+  // 一時ディレクトリに認証の写しが残るので、起動時に消す
+  const standbyUsage = new StandbyUsageProbe(
+    claudeAccounts.store,
+    claudePath,
+    log,
+    readClaudeStandbyUsageProbeEnabled,
+  );
+  void claudeAccounts.store
+    .cleanupProbeDirs()
+    .catch((e: unknown) => ({
+      ok: false as const,
+      reason: e instanceof Error ? e.message : String(e),
+    }))
+    .then((result) => {
+      if (!result.ok) {
+        log.warn(`待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`);
+      } else if (result.warning !== undefined) {
+        log.warn(result.warning);
+      }
+    });
   // 使用率に応じたアカウントの自動切り替え（Issue #1924）。切り替え後のCLIの入れ直しは
   // `claudeChat`の構築後でなければ呼べないため、呼び出し時に読み直す
   const accountAutoSwitcher = new AccountAutoSwitcher({
+    probeStandby: (id, nowMs) => standbyUsage.probeAccount(id, nowMs),
+    pollStandby: (nowMs) => standbyUsage.probeOne(nowMs),
     store: claudeAccounts.store,
     config: readClaudeAutoSwitchConfig,
     notify: (message) => void vscode.window.showInformationMessage(message),

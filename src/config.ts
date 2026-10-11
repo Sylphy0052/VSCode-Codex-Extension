@@ -250,6 +250,13 @@ export function readClaudeAutoSwitchConfig(): { enabled: boolean; thresholdPct: 
   };
 }
 
+/** 待機中のアカウントの使用率を計測するか（Issue #1943）。既定は計測する。 */
+export function readClaudeStandbyUsageProbeEnabled(): boolean {
+  return (
+    vscode.workspace.getConfiguration('claude').get<boolean>('standbyUsageProbe.enabled') !== false
+  );
+}
+
 /** アカウントの自動切り替えのON/OFFをユーザー設定へ保存する。全ウィンドウ・全会話で共有される。 */
 export async function setClaudeAutoSwitchEnabled(enabled: boolean): Promise<void> {
   await vscode.workspace

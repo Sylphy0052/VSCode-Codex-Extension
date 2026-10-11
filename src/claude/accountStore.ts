@@ -3,16 +3,19 @@ import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   readdir,
   readFile,
   link,
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve as resolvePath } from 'node:path';
+import { isStandbyStale } from './accountPolicy';
 import {
   type AccountIdentity,
   type IdentifyAccount,
@@ -129,6 +132,8 @@ type RawMeta = Record<string, unknown>;
 const CREDENTIALS = '.credentials.json';
 /** 書き戻しで上書きする前の退避ファイル。メールアドレスの一致だけで書き戻したときの取り違えに備える。 */
 const CREDENTIALS_BACKUP = '.credentials.json.bak';
+/** 待機中のアカウントの計測でCLIが更新したトークンを、書き戻せなかったときに残す先（Issue #1943）。 */
+const CREDENTIALS_ROTATED = '.credentials.json.rotated';
 const META = 'meta.json';
 const USAGE = 'usage.json';
 /** `usage.json` の `limits` のキー（スクリプトと同じ）。 */
@@ -139,10 +144,23 @@ const USAGE_KEYS: Record<keyof UsageSlots, string> = {
 /** `~/.claude.json` の `oauthAccount` の控え。切り替え時に `~/.claude.json` へ戻す。 */
 const OAUTH_ACCOUNT = 'oauth-account.json';
 const CURRENT = '.current';
+/**
+ * 待機中のアカウントを計測する一時的な `CLAUDE_CONFIG_DIR`（`accounts/@probe-XXXXXX`）の接頭辞。
+ * `@` はアカウントIDに使えないので `registeredIds()` に拾われない（Issue #1943）。
+ */
+const PROBE_PREFIX = '@probe-';
+/** 一時的な `CLAUDE_CONFIG_DIR` の中でCLIが読む全体設定。 */
+const PROBE_GLOBAL_CONFIG = '.claude.json';
+const RELOGIN_HINT = 'このアカウントは再ログインが要るかもしれません';
 /** ウィンドウ（拡張ホスト）をまたいで書き換えを1本にするロック。新規作成（wx）で取る。 */
 const LOCK = '.ext-op.lock';
 /** 持ち主が落ちて残ったロックを奪うまでの時間。書き換えは数ファイルなので十分長い。 */
 const STALE_LOCK_MS = 30_000;
+/**
+ * 待機中のアカウントの計測（CLIの起動を含み20秒を超えうる）の間、ロックの時刻を更新する
+ * 間隔。古いロックとして奪われると、計測中の退避先を他のウィンドウがライブへ写しうる。
+ */
+const LOCK_HEARTBEAT_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_RETRY_MS = 100;
 /** 照合できなかった旧版の登録を、同じ認証ファイルのまま照合し直すまでの間隔（通信失敗に備える）。 */
@@ -381,26 +399,204 @@ export class ClaudeAccountStore {
   /**
    * 稼働中のアカウントの使用率を `usage.json` へ記録する（スクリプトと同じ形）。
    * 取得している間にアカウントが切り替わっていたら、どちらの値か判らないので捨てる
-   * （`expectedId` が今の稼働中と違うとき）。待機中のアカウントの値は取りに行かない。
+   * （`expectedId` が今の稼働中と違うとき）。待機中のアカウントは `probeStandby` で記録する。
    */
   recordUsage(expectedId: string, slots: UsageSlots, nowMs: number): Promise<AccountStoreResult> {
     return this.serialized(async () => {
       if ((await this.currentId()) !== expectedId) {
         return { ok: false, reason: '取得中にアカウントが切り替わったため記録しませんでした' };
       }
-      const limits: Record<string, UsageSlot> = {};
-      if (slots.fiveHour !== undefined) {
-        limits[USAGE_KEYS.fiveHour] = slots.fiveHour;
-      }
-      if (slots.weekly !== undefined) {
-        limits[USAGE_KEYS.weekly] = slots.weekly;
-      }
-      await this.writeSecret(
-        join(this.slot(expectedId), USAGE),
-        Buffer.from(`${JSON.stringify({ t: nowMs, limits })}\n`),
-      );
+      await this.writeSecret(join(this.slot(expectedId), USAGE), usageRecord(slots, nowMs));
       return { ok: true };
     });
+  }
+
+  /**
+   * 待機中のアカウントの使用率を計測し、`usage.json` へ記録する（Issue #1943）。
+   *
+   * CLIの `/usage` はライブの認証でしか動かないため、対象の認証ファイルを一時的な
+   * `CLAUDE_CONFIG_DIR`（`accounts/@probe-XXXXXX`）へ写し、`measure` にそこでCLIを走らせる。
+   * CLIがトークンをローテーションしていれば、確かめてから退避先へ書き戻す。
+   * 書き戻しが終わるまでロックを持つ。計測中に `switchTo` が同じ退避先をライブへ写すと、
+   * 計測側のrefreshで写した側のrefresh tokenが無効になるため。
+   *
+   * 稼働中・ライブと同じログイン・記録が新しいアカウントは何もせず `ok: true` を返す。
+   * 記録の新しさはロックの中で見直すので、複数のウィンドウが同じアカウントを続けて測らない。
+   */
+  probeStandby(
+    id: string,
+    measure: (configDir: string) => Promise<UsageSlots | undefined>,
+    nowMs: number,
+  ): Promise<AccountStoreResult> {
+    return this.serialized(async () => {
+      const leftover = await this.removeProbeDirs();
+      const current = await this.readCurrent();
+      if (
+        id === current ||
+        !(await this.isRegistered(id)) ||
+        !isStandbyStale(await this.view(id, current), nowMs)
+      ) {
+        return withWarning({ ok: true }, leftover);
+      }
+      const saved = await readOptional(join(this.slot(id), CREDENTIALS));
+      const savedRefresh = saved === undefined ? undefined : refreshTokenOf(saved);
+      if (saved === undefined || savedRefresh === undefined) {
+        return withWarning(
+          { ok: false, reason: `「${id}」の退避先の認証ファイルを読めないため計測しませんでした` },
+          leftover,
+        );
+      }
+      // `.current` が実体とずれていても、ライブと同じログインを測るとrefreshでライブの
+      // トークンを無効にしうる。ライブは既存のprobeが測るので、ここでは触らない。
+      // 持ち主の判定（`resolveLiveOwner`）は通信するため、refresh tokenの一致で代える
+      const live = await readOptional(this.liveCredentials).catch(() => undefined);
+      if (live !== undefined && refreshTokenOf(live) === savedRefresh) {
+        return withWarning({ ok: true }, leftover);
+      }
+      const oauthBuf = await readOptional(join(this.slot(id), OAUTH_ACCOUNT)).catch(
+        () => undefined,
+      );
+      const oauthAccount = oauthBuf === undefined ? undefined : asRecord(parseJson(oauthBuf));
+
+      await this.rejectSymlinkDirs(this.accountsDir);
+      const dir = await mkdtemp(join(this.accountsDir, PROBE_PREFIX));
+      let result: AccountStoreResult;
+      try {
+        result = await this.measureInProbeDir(id, dir, saved, oauthAccount, measure, nowMs);
+      } catch (e) {
+        result = { ok: false, reason: `「${id}」を計測できませんでした: ${errorMessage(e)}` };
+      }
+      const removeFailure = await rm(dir, { recursive: true, force: true }).then(
+        () => undefined,
+        (e: unknown) => `一時ディレクトリ${shortenHome(dir)}を消せませんでした: ${errorMessage(e)}`,
+      );
+      return withWarning(withWarning(result, leftover), removeFailure);
+    });
+  }
+
+  /**
+   * 拡張が計測の途中で落ちて残った一時ディレクトリ（`accounts/@probe-*`）を消す。中に認証が
+   * 残っているため、起動時に呼ぶ。他のウィンドウの計測中のものを消さないようロックを取る。
+   */
+  async cleanupProbeDirs(): Promise<AccountStoreResult> {
+    // アカウントを使っていない環境に、ロックのためだけの `accounts/` を作らない
+    if (!(await exists(this.accountsDir))) {
+      return { ok: true };
+    }
+    return this.serialized(async () => withWarning({ ok: true }, await this.removeProbeDirs()));
+  }
+
+  /** 一時ディレクトリへ認証を写してCLIを走らせ、書き戻しと記録までを行う。 */
+  private async measureInProbeDir(
+    id: string,
+    dir: string,
+    saved: Buffer,
+    oauthAccount: Record<string, unknown> | undefined,
+    measure: (configDir: string) => Promise<UsageSlots | undefined>,
+    nowMs: number,
+  ): Promise<AccountStoreResult> {
+    // mkdtempの既定も0700だが、umaskに頼らずそろえる
+    await chmod(dir, 0o700);
+    const probeCredentials = join(dir, CREDENTIALS);
+    await writeFile(probeCredentials, saved, { mode: 0o600, flag: 'wx' });
+    const config = oauthAccount === undefined ? {} : { oauthAccount };
+    await writeFile(join(dir, PROBE_GLOBAL_CONFIG), Buffer.from(`${JSON.stringify(config)}\n`), {
+      mode: 0o600,
+      flag: 'wx',
+    });
+    const lock = join(this.accountsDir, LOCK);
+    const heartbeat = setInterval(() => {
+      const now = new Date();
+      void utimes(lock, now, now).catch(() => undefined);
+    }, LOCK_HEARTBEAT_MS);
+    heartbeat.unref();
+    // 計測が失敗しても、途中でローテーションしたトークンは書き戻す
+    const slots = await measure(dir)
+      .catch(() => undefined)
+      .finally(() => clearInterval(heartbeat));
+    const writeBackFailure = await this.writeBackProbeCredentials(id, saved, probeCredentials);
+    if (slots === undefined) {
+      return withWarning(
+        { ok: false, reason: `「${id}」の使用率を計測できませんでした` },
+        writeBackFailure,
+      );
+    }
+    await this.writeSecret(join(this.slot(id), USAGE), usageRecord(slots, nowMs));
+    return withWarning({ ok: true }, writeBackFailure);
+  }
+
+  /**
+   * 計測中にCLIがローテーションした認証を退避先へ書き戻す。書き戻さなかったとき・
+   * 書き戻せなかったときは理由を返す（トークンやファイルの中身は含めない）。
+   */
+  private async writeBackProbeCredentials(
+    id: string,
+    saved: Buffer,
+    probeCredentials: string,
+  ): Promise<string | undefined> {
+    let rotated: Buffer | undefined;
+    try {
+      rotated = await readOptional(probeCredentials);
+    } catch (e) {
+      return `「${id}」の一時ディレクトリの認証ファイルを読めないため書き戻しませんでした（${RELOGIN_HINT}）: ${errorMessage(e)}`;
+    }
+    if (rotated?.equals(saved) === true) {
+      return undefined;
+    }
+    if (rotated === undefined || refreshTokenOf(rotated) === undefined) {
+      return `「${id}」の一時ディレクトリの認証ファイルが無いか壊れているため書き戻しませんでした（${RELOGIN_HINT}）`;
+    }
+    const target = join(this.slot(id), CREDENTIALS);
+    const stored = await readOptional(target).catch(() => undefined);
+    if (stored?.equals(saved) !== true) {
+      // ロックを取らない外部のスクリプトが書き換えた。どちらが新しいか判らないので触らない
+      return `「${id}」の退避先が計測中に書き換えられたため、更新されたトークンを書き戻しませんでした（${await this.keepRotated(id, probeCredentials)}）`;
+    }
+    try {
+      await this.backupBeforeWriteBack(id, rotated);
+      await this.writeSecret(target, rotated);
+    } catch (e) {
+      return `「${id}」の更新されたトークンを退避先へ書き戻せませんでした（${await this.keepRotated(id, probeCredentials)}）: ${errorMessage(e)}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * 書き戻せなかった更新後のトークンを、一時ディレクトリと一緒に消さずに退避先の隣へ移す。
+   * 古いトークンは無効になっているので、消すと再ログインするしかなくなる。同じファイル
+   * システム内のrenameなので、ディスクが一杯でも移せる。結果を利用者向けの一文で返す。
+   */
+  private async keepRotated(id: string, probeCredentials: string): Promise<string> {
+    const kept = join(this.slot(id), CREDENTIALS_ROTATED);
+    try {
+      // CLIが緩いモードで書き直していても、他のユーザーに読めない形で残す
+      await chmod(probeCredentials, 0o600);
+      await rename(probeCredentials, kept);
+      return `更新されたトークンを${shortenHome(kept)}に残しました。${CREDENTIALS}へ置き換えると再ログインせずに済みます`;
+    } catch {
+      return RELOGIN_HINT;
+    }
+  }
+
+  /** `accounts/@probe-*` を消す。消せなかったものがあれば理由を返す。 */
+  private async removeProbeDirs(): Promise<string | undefined> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.accountsDir);
+    } catch (e) {
+      if (isNotFound(e)) {
+        return undefined;
+      }
+      throw e;
+    }
+    const failed: string[] = [];
+    for (const name of entries.filter((n) => n.startsWith(PROBE_PREFIX))) {
+      const path = join(this.accountsDir, name);
+      await rm(path, { recursive: true, force: true }).catch(() => failed.push(shortenHome(path)));
+    }
+    return failed.length === 0
+      ? undefined
+      : `計測用の一時ディレクトリを消せませんでした: ${failed.join(', ')}`;
   }
 
   /**
@@ -1183,6 +1379,36 @@ function isJsonObject(buf: Buffer): boolean {
   return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
 }
 
+/** 認証ファイルのrefresh token。同じログインかどうかの比較にだけ使い、返却・ログ出力しない。 */
+function refreshTokenOf(credentials: Buffer): string | undefined {
+  const oauth = asRecord(asRecord(parseJson(credentials))?.['claudeAiOauth']);
+  const token = oauth?.['refreshToken'];
+  return typeof token === 'string' && token !== '' ? token : undefined;
+}
+
+/** `usage.json` の中身（スクリプトと同じ形）。 */
+function usageRecord(slots: UsageSlots, nowMs: number): Buffer {
+  const limits: Record<string, UsageSlot> = {};
+  if (slots.fiveHour !== undefined) {
+    limits[USAGE_KEYS.fiveHour] = slots.fiveHour;
+  }
+  if (slots.weekly !== undefined) {
+    limits[USAGE_KEYS.weekly] = slots.weekly;
+  }
+  return Buffer.from(`${JSON.stringify({ t: nowMs, limits })}\n`);
+}
+
+/** 結果に付随する理由を足す。失敗なら `reason` へ続け、成功なら `warning` へ続ける。 */
+function withWarning(result: AccountStoreResult, note: string | undefined): AccountStoreResult {
+  if (note === undefined) {
+    return result;
+  }
+  if (!result.ok) {
+    return { ...result, reason: `${result.reason}。${note}` };
+  }
+  return { ...result, warning: result.warning === undefined ? note : `${result.warning}。${note}` };
+}
+
 async function readOptional(path: string): Promise<Buffer | undefined> {
   try {
     return await readFile(path);
@@ -1209,7 +1435,11 @@ function isNotFound(e: unknown): boolean {
 
 /** 通知に出す失敗理由。fsのエラーが含むホームディレクトリの絶対パスは `~` に縮める。 */
 function errorMessage(e: unknown): string {
-  const message = e instanceof Error ? e.message : String(e);
+  return shortenHome(e instanceof Error ? e.message : String(e));
+}
+
+/** ホームディレクトリの絶対パスを `~` に縮める。 */
+function shortenHome(text: string): string {
   const home = homedir();
-  return home.length > 1 ? message.split(home).join('~') : message;
+  return home.length > 1 ? text.split(home).join('~') : text;
 }

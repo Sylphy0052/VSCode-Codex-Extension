@@ -3125,6 +3125,8 @@ export class ClaudeChatViewManager
     this.accountPollTimer = setInterval(() => {
       if (readClaudeAutoSwitchConfig().enabled) {
         void this.refreshUsage();
+        // 待機中のアカウントの記録も古くしない（Issue #1943）。計測の間隔は60分
+        void this.accounts?.pollStandby(Date.now());
       }
     }, ACCOUNT_POLL_INTERVAL_MS);
     this.accountPollTimer.unref();

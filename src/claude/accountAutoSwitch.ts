@@ -1,5 +1,10 @@
-import type { ClaudeAccountStore } from './accountStore';
-import { pickReturnTarget, pickSwitchTarget, reachedThreshold } from './accountPolicy';
+import type { ClaudeAccountStore, SavedAccountView } from './accountStore';
+import {
+  isStandbyStale,
+  pickReturnTarget,
+  pickSwitchTarget,
+  reachedThreshold,
+} from './accountPolicy';
 import type { UsageProbeAccounts } from './usageProbe';
 import type { UsageSlots } from './usageText';
 
@@ -27,6 +32,13 @@ export interface AutoSwitchPorts {
   /** 切り替えた後に呼ぶ。画面の更新と、動いているCLIの再起動を行う。 */
   onSwitched(): Promise<void>;
   warn(message: string): void;
+  /**
+   * 切り替え先に選んだ待機中のアカウントの記録が古いとき、その使用率を計測する（Issue #1943）。
+   * 無ければ記録のまま選ぶ。
+   */
+  probeStandby?(id: string, nowMs: number): Promise<void>;
+  /** 定期のポーリングから呼ぶ。記録が古い待機中のアカウントを1件だけ計測する（Issue #1943）。 */
+  pollStandby?(nowMs: number): Promise<void>;
 }
 
 export type SwitchOutcome = { switched: true; name: string } | { switched: false; reason: string };
@@ -60,6 +72,20 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     }
   }
 
+  /** 自動切り替えが有効なときの定期のポーリングから呼ぶ。待機中のアカウントを1件計測する。 */
+  async pollStandby(nowMs: number): Promise<void> {
+    if (!this.ports.config().enabled) {
+      return;
+    }
+    try {
+      await this.ports.pollStandby?.(nowMs);
+    } catch (e) {
+      this.ports.warn(
+        `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
   /**
    * 取得の後に呼ばれる。上限の手前なら次のアカウントへ切り替え、そうでなければ
    * 優先度の高いアカウントが戻っていないかを見て戻す。
@@ -78,8 +104,13 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
       return;
     }
     if (reachedThreshold(current, thresholdPct, nowMs)) {
+      const target = await this.pickAfterStandbyProbe(snapshot.accounts, thresholdPct, nowMs);
+      // 計測を待つ間に手動で切り替えられていれば、古い判定のまま切り替えない
+      if ((await this.ports.store.currentId()) !== current.id) {
+        return;
+      }
       await this.switchByPolicy(
-        pickSwitchTarget(snapshot.accounts, thresholdPct, nowMs),
+        target,
         `「${current.name}」の使用率が${String(thresholdPct)}%に達したため`,
       );
       return;
@@ -114,7 +145,19 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     if (!snapshot.ok) {
       return { switched: false, reason: snapshot.reason };
     }
-    const target = pickSwitchTarget(snapshot.accounts, thresholdPct, nowMs);
+    const target = await this.pickAfterStandbyProbe(snapshot.accounts, thresholdPct, nowMs);
+    // 計測を待つ間に閾値による切り替えが始まっていれば、重ねずにその完了を待つ
+    if (this.inFlight !== undefined) {
+      return this.inFlight;
+    }
+    // 計測を待つ間に別の切り替えが済んでいれば、止まったアカウントからは既に移っている。
+    // 古い一覧で選んだ先へ重ねて切り替えない
+    const stuckId = snapshot.accounts.find((a) => a.current)?.id;
+    const nowId = await this.ports.store.currentId();
+    if (nowId !== undefined && nowId !== stuckId) {
+      const name = snapshot.accounts.find((a) => a.id === nowId)?.name ?? nowId;
+      return { switched: true, name };
+    }
     if (target === undefined) {
       this.notifyNoTarget();
       return { switched: false, reason: '切り替え先がありません' };
@@ -144,6 +187,49 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     );
     if (!result.ok) {
       this.ports.warn(`上限に達したことを記録できませんでした: ${result.reason}`);
+    }
+  }
+
+  /**
+   * 切り替え先を選ぶ。選んだ先の記録が古ければ計測し、一覧を取り直して選び直す（Issue #1943）。
+   * 計測は1件ごとに20秒ほどかかりストアのロックも持つので、全件ではなく選ばれた先だけを測る。
+   * 同じアカウントは1回しか測らないので、待機中のアカウントの数で必ず終わる。
+   */
+  private async pickAfterStandbyProbe(
+    accounts: readonly SavedAccountView[],
+    thresholdPct: number,
+    nowMs: number,
+  ): Promise<SavedAccountView | undefined> {
+    const probed = new Set<string>();
+    let latest = accounts;
+    for (;;) {
+      const target = pickSwitchTarget(latest, thresholdPct, nowMs);
+      if (
+        target === undefined ||
+        this.ports.probeStandby === undefined ||
+        probed.has(target.id) ||
+        !isStandbyStale(target, nowMs)
+      ) {
+        return target;
+      }
+      probed.add(target.id);
+      await this.probeStandby(target.id, nowMs);
+      const snapshot = await this.ports.store.list();
+      if (!snapshot.ok) {
+        return target;
+      }
+      latest = snapshot.accounts;
+    }
+  }
+
+  private async probeStandby(id: string, nowMs: number): Promise<void> {
+    try {
+      await this.ports.probeStandby?.(id, nowMs);
+    } catch (e) {
+      // 計測できなくても、記録のまま切り替え先を選ぶ
+      this.ports.warn(
+        `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
