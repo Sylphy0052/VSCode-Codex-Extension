@@ -17,7 +17,10 @@ export interface AutoSwitchConfig {
 }
 
 export interface AutoSwitchPorts {
-  store: Pick<ClaudeAccountStore, 'list' | 'currentId' | 'switchTo' | 'recordUsage'>;
+  store: Pick<
+    ClaudeAccountStore,
+    'list' | 'currentId' | 'switchTo' | 'recordUsage' | 'recordLimitHit'
+  >;
   config(): AutoSwitchConfig;
   /** 利用者へ知らせる（切り替えた・切り替え先が無い・切り替えに失敗した）。 */
   notify(message: string): void;
@@ -27,6 +30,14 @@ export interface AutoSwitchPorts {
 }
 
 export type SwitchOutcome = { switched: true; name: string } | { switched: false; reason: string };
+
+/** 会話を止めた上限。チャットの `rate_limit_event` から取る。 */
+export interface LimitHit {
+  /** 枠の種別（`'5時間'` / `'週次'` / 未知ならCLIの表記のまま）。 */
+  limitLabel: string | undefined;
+  /** 解除時刻（epoch秒）。 */
+  resetsAt: number | undefined;
+}
 
 export class AccountAutoSwitcher implements UsageProbeAccounts {
   /** 進行中の切り替え。切り替えの重なりを避け、上限で止まった会話はこの完了を待つ。 */
@@ -84,7 +95,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
    * 上限で会話が止まったときの最終手段。使用率の閾値に関わらず、余裕のある次のアカウントへ
    * 切り替える。呼び出し側は、切り替えられたときだけ「続けて」を送る。
    */
-  async switchOnLimit(nowMs: number = Date.now()): Promise<SwitchOutcome> {
+  async switchOnLimit(hit: LimitHit, nowMs: number = Date.now()): Promise<SwitchOutcome> {
     const { enabled, thresholdPct } = this.ports.config();
     if (!enabled) {
       return { switched: false, reason: '自動切り替えが無効です' };
@@ -94,6 +105,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     if (this.inFlight !== undefined) {
       return this.inFlight;
     }
+    await this.recordLimitHit(hit, nowMs);
     const snapshot = await this.ports.store.list();
     if (!snapshot.ok) {
       return { switched: false, reason: snapshot.reason };
@@ -104,6 +116,31 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
       return { switched: false, reason: '切り替え先がありません' };
     }
     return this.switchTo(target.id, target.name, '上限に達したため');
+  }
+
+  /**
+   * 止まったアカウントの該当枠を、解除時刻まで使用率100%として記録する（Issue #1937）。
+   * 記録しないと、前回の取得値のリセット時刻を過ぎた枠が空いているとみなされ、上限中の
+   * まま切替先や戻り先に選ばれる。解除時刻が判らなければ、解除まで外し続けることになる
+   * ので記録しない。
+   */
+  private async recordLimitHit(hit: LimitHit, nowMs: number): Promise<void> {
+    if (hit.resetsAt === undefined) {
+      return;
+    }
+    const id = await this.ports.store.currentId();
+    if (id === undefined) {
+      return;
+    }
+    const result = await this.ports.store.recordLimitHit(
+      id,
+      slotsOf(hit.limitLabel),
+      hit.resetsAt * 1000,
+      nowMs,
+    );
+    if (!result.ok) {
+      this.ports.warn(`上限に達したことを記録できませんでした: ${result.reason}`);
+    }
   }
 
   private async switchByPolicy(
@@ -167,4 +204,15 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     await this.ports.onSwitched();
     return { switched: true, name };
   }
+}
+
+/** 上限の種別から、記録する枠を決める。種別が判らなければ両方の枠とする。 */
+function slotsOf(limitLabel: string | undefined): (keyof UsageSlots)[] {
+  if (limitLabel === '5時間') {
+    return ['fiveHour'];
+  }
+  if (limitLabel === '週次') {
+    return ['weekly'];
+  }
+  return ['fiveHour', 'weekly'];
 }

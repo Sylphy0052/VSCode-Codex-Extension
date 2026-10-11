@@ -131,6 +131,11 @@ const CREDENTIALS = '.credentials.json';
 const CREDENTIALS_BACKUP = '.credentials.json.bak';
 const META = 'meta.json';
 const USAGE = 'usage.json';
+/** `usage.json` の `limits` のキー（スクリプトと同じ）。 */
+const USAGE_KEYS: Record<keyof UsageSlots, string> = {
+  fiveHour: '5h',
+  weekly: 'week:all models',
+};
 /** `~/.claude.json` の `oauthAccount` の控え。切り替え時に `~/.claude.json` へ戻す。 */
 const OAUTH_ACCOUNT = 'oauth-account.json';
 const CURRENT = '.current';
@@ -385,15 +390,49 @@ export class ClaudeAccountStore {
       }
       const limits: Record<string, UsageSlot> = {};
       if (slots.fiveHour !== undefined) {
-        limits['5h'] = slots.fiveHour;
+        limits[USAGE_KEYS.fiveHour] = slots.fiveHour;
       }
       if (slots.weekly !== undefined) {
-        limits['week:all models'] = slots.weekly;
+        limits[USAGE_KEYS.weekly] = slots.weekly;
       }
       await this.writeSecret(
         join(this.slot(expectedId), USAGE),
         Buffer.from(`${JSON.stringify({ t: nowMs, limits })}\n`),
       );
+      return { ok: true };
+    });
+  }
+
+  /**
+   * 稼働中のアカウントが上限で止まったことを `usage.json` へ記録する（Issue #1937）。
+   * `slots` の枠だけを使用率100%・解除時刻 `resetsAt`（epochミリ秒）に置き換え、他の枠は残す。
+   * 止まったアカウントは `/usage` を取り直すまで記録が古いままになり、リセット時刻を過ぎた
+   * 枠が空いているとみなされて、上限中のまま切替先に選ばれてしまうため。
+   */
+  recordLimitHit(
+    expectedId: string,
+    slots: readonly (keyof UsageSlots)[],
+    resetsAt: number,
+    nowMs: number,
+  ): Promise<AccountStoreResult> {
+    return this.serialized(async () => {
+      if ((await this.currentId()) !== expectedId) {
+        return { ok: false, reason: '稼働中のアカウントが切り替わったため記録しませんでした' };
+      }
+      const path = join(this.slot(expectedId), USAGE);
+      const buf = await readOptional(path).catch(() => undefined);
+      const parsed = buf === undefined ? undefined : parseJson(buf);
+      const previous =
+        typeof parsed === 'object' && parsed !== null
+          ? (parsed as Record<string, unknown>)['limits']
+          : undefined;
+      const limits: Record<string, unknown> =
+        typeof previous === 'object' && previous !== null ? { ...previous } : {};
+      const hit: UsageSlot = { pct: 100, resetsAt };
+      for (const slot of slots) {
+        limits[USAGE_KEYS[slot]] = hit;
+      }
+      await this.writeSecret(path, Buffer.from(`${JSON.stringify({ t: nowMs, limits })}\n`));
       return { ok: true };
     });
   }
@@ -690,7 +729,8 @@ export class ClaudeAccountStore {
         if (info.isSymbolicLink()) {
           return {
             ok: true,
-            warning: '~/.claude.jsonがシンボリックリンクのため、アカウント表示を差し替えませんでした',
+            warning:
+              '~/.claude.jsonがシンボリックリンクのため、アカウント表示を差し替えませんでした',
           };
         }
         const config = asRecord(parseJson(await readFile(this.globalConfigPath)));
@@ -949,8 +989,8 @@ export class ClaudeAccountStore {
     const byKey = limits as Record<string, unknown>;
     return {
       recordedAt: raw['t'],
-      fiveHour: parseLimit(byKey['5h']),
-      weekly: parseLimit(byKey['week:all models']),
+      fiveHour: parseLimit(byKey[USAGE_KEYS.fiveHour]),
+      weekly: parseLimit(byKey[USAGE_KEYS.weekly]),
     };
   }
 

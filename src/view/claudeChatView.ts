@@ -140,7 +140,7 @@ import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
 import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
-import type { AccountAutoSwitcher } from '../claude/accountAutoSwitch';
+import type { AccountAutoSwitcher, LimitHit } from '../claude/accountAutoSwitch';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CommandCatalog } from '../provider/commandCatalog';
@@ -497,7 +497,7 @@ const LABEL = 'Claude Code';
 const ACCOUNT_POLL_INTERVAL_MS = 2 * 60_000;
 /** 上限でのアカウント切り替えを覚えておく時間。同じ上限で止まった別の会話が重ねて切り替えない。 */
 const LIMIT_SWITCH_MEMO_MS = 10 * 60_000;
-const LIMIT_AUTO_RESUME_INSTRUCTION ='前回の作業を続けて。現在の状態を確認してから再開して。';
+const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
 const LIMIT_AUTO_RESUME_GRACE_MS = 30_000;
 const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
 const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
@@ -3170,18 +3170,29 @@ export class ClaudeChatViewManager
       return;
     }
     entry.limitSwitchKey = limitKey;
-    void this.switchAndContinue(entry, limitKey);
+    void this.switchAndContinue(entry, limitKey, {
+      limitLabel: state.usage?.limitLabel,
+      resetsAt: state.usage?.resetsAt,
+    });
   }
 
-  private async switchAndContinue(entry: ClaudePanel, limitKey: string): Promise<void> {
+  private async switchAndContinue(
+    entry: ClaudePanel,
+    limitKey: string,
+    hit: LimitHit,
+  ): Promise<void> {
     const accounts = this.accounts;
     if (accounts === undefined) {
       return;
     }
     try {
       const recent = this.lastLimitSwitch;
-      if (recent === undefined || recent.key !== limitKey || Date.now() - recent.at > LIMIT_SWITCH_MEMO_MS) {
-        const outcome = await accounts.switchOnLimit();
+      if (
+        recent === undefined ||
+        recent.key !== limitKey ||
+        Date.now() - recent.at > LIMIT_SWITCH_MEMO_MS
+      ) {
+        const outcome = await accounts.switchOnLimit(hit);
         if (!outcome.switched) {
           return;
         }
