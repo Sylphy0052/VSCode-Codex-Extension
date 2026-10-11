@@ -1008,6 +1008,10 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     if (typeof limit.resetsAt === 'number' && limit.resetsAt <= now) {
       return label + ' リセット済み（記録時' + limit.pct + '%）';
     }
+    // 上限で止まったアカウントは、解除時刻を100%として記録している（Issue #1937）
+    if (limit.pct >= 100 && typeof limit.resetsAt === 'number') {
+      return label + ' 上限（解除' + formatClockTime(limit.resetsAt) + '）';
+    }
     const reset = typeof limit.resetsAt === 'number' ? ' リセット' + formatClockTime(limit.resetsAt) : '';
     return label + limit.pct + '%' + reset;
   }
