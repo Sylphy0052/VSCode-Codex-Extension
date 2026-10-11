@@ -150,6 +150,14 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     if (this.inFlight !== undefined) {
       return this.inFlight;
     }
+    // 計測を待つ間に別の切り替えが済んでいれば、止まったアカウントからは既に移っている。
+    // 古い一覧で選んだ先へ重ねて切り替えない
+    const stuckId = snapshot.accounts.find((a) => a.current)?.id;
+    const nowId = await this.ports.store.currentId();
+    if (nowId !== undefined && nowId !== stuckId) {
+      const name = snapshot.accounts.find((a) => a.id === nowId)?.name ?? nowId;
+      return { switched: true, name };
+    }
     if (target === undefined) {
       this.notifyNoTarget();
       return { switched: false, reason: '切り替え先がありません' };

@@ -665,13 +665,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
     readClaudeStandbyUsageProbeEnabled,
   );
-  void claudeAccounts.store.cleanupProbeDirs().then((result) => {
-    if (!result.ok) {
-      log.warn(`待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`);
-    } else if (result.warning !== undefined) {
-      log.warn(result.warning);
-    }
-  });
+  void claudeAccounts.store
+    .cleanupProbeDirs()
+    .catch((e: unknown) => ({
+      ok: false as const,
+      reason: e instanceof Error ? e.message : String(e),
+    }))
+    .then((result) => {
+      if (!result.ok) {
+        log.warn(`待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`);
+      } else if (result.warning !== undefined) {
+        log.warn(result.warning);
+      }
+    });
   // 使用率に応じたアカウントの自動切り替え（Issue #1924）。切り替え後のCLIの入れ直しは
   // `claudeChat`の構築後でなければ呼べないため、呼び出し時に読み直す
   const accountAutoSwitcher = new AccountAutoSwitcher({
