@@ -252,7 +252,9 @@ function createAccumulator(isAutoSent: AutoSentMatcher) {
         return;
       }
       if (isHandoffPromptBody(text)) {
-        // handoffプロンプトの本文だけを渡した初回プロンプト（Issue #1950）。親の在処は載らない
+        // handoffプロンプトの本文だけを渡した初回プロンプト（Issue #1950）。親の在処は載らないため
+        // 系列はここで切れ、引き継ぎ元が作ったreplayは使われない。ポインタ文へ戻る試行が
+        // replayの在処を使うので、引き継ぎ元はreplayの準備を省かない
         pending = undefined;
         return;
       }

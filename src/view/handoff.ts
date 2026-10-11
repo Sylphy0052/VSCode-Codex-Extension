@@ -514,12 +514,12 @@ export function chooseHandoffPrompt(
 /**
  * 発話がhandoffプロンプトの本文そのものか（Issue #1950）。本文だけを渡した初回プロンプトを
  * 引き継ぎ由来と見分けるために使う。`parseHandoffPrompt`と同じ3行（見出し・schema・handoff_id）
- * を要求し、先頭行が見出しであることも求める。
+ * を要求する。`parseHandoffPrompt`と同じく見出しの位置は問わない。
  */
 export function isHandoffPromptBody(text: string): boolean {
-  const lines = text.trim().split('\n').map((line) => line.replace(/\r$/, ''));
+  const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
   return (
-    HANDOFF_PROMPT_HEADING.test(lines[0] ?? '') &&
+    lines.some((line) => HANDOFF_PROMPT_HEADING.test(line)) &&
     lines.some((line) => HANDOFF_SCHEMA_LINE.test(line)) &&
     lines.some((line) => HANDOFF_ID_LINE.test(line))
   );
