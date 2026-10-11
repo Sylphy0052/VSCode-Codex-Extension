@@ -16,6 +16,9 @@ import { parseUsageSlots, type UsageSlots } from './usageText';
 /** 既存のprobeと同じ。ストアのロック（30秒で古いとみなされる）を持ったまま走るので延ばさない。 */
 const TIMEOUT_MS = 20_000;
 
+/** CLI本体が終わってから `close` を待つ上限。 */
+const CLOSE_GRACE_MS = 2_000;
+
 /**
  * 一時的な `CLAUDE_CONFIG_DIR` の認証より優先されうる環境変数。残すと別のアカウント
  * （環境変数のもの）の使用率を、待機中のアカウントの記録として書いてしまう。
@@ -58,7 +61,7 @@ export function measureUsageIn(
     };
     const timer = setTimeout(() => {
       log.warn(
-        `待機中のアカウント「${id}」の使用率の計測が${TIMEOUT_MS / 1000}秒で終わらないため打ち切りました`,
+        `待機中のアカウント「${id}」の使用率の計測が${String(TIMEOUT_MS / 1000)}秒で終わらないため打ち切りました`,
       );
       // `close` が来るまで待つ（SIGKILLへのエスカレーションで必ず終わる）
       killWithEscalation(proc);
@@ -74,14 +77,23 @@ export function measureUsageIn(
         settle(undefined);
       }
     });
-    proc.on('close', (code, signal) => {
+    const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) {
+        return;
+      }
       const slots = parseUsageSlots(out, Date.now());
       if (slots === undefined) {
         log.warn(
-          `待機中のアカウント「${id}」の使用率を読み取れませんでした（code=${code}, signal=${signal}）`,
+          `待機中のアカウント「${id}」の使用率を読み取れませんでした（code=${String(code)}, signal=${String(signal)}）`,
         );
       }
       settle(slots);
+    };
+    proc.on('close', finish);
+    // CLIが残した孫プロセスがstdoutを握っていると `close` が来ない。CLI本体が終わっていれば
+    // 認証の書き込みも済んでいるので、少し待っても来なければ読めた分で終える
+    proc.on('exit', (code, signal) => {
+      setTimeout(() => finish(code, signal), CLOSE_GRACE_MS).unref();
     });
   });
 }
@@ -131,9 +143,9 @@ export class StandbyUsageProbe {
     const run = this.queue.then(task).finally(() => {
       this.pending -= 1;
     });
-    // 失敗を次の計測へ持ち越さない
+    // 失敗を次の計測へ持ち越さない。呼び出し側には失敗をそのまま返し、警告を出させる
     this.queue = run.catch(() => undefined);
-    return this.queue;
+    return run;
   }
 
   private async probeStale(nowMs: number, limit: number): Promise<void> {
