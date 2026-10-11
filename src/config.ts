@@ -884,14 +884,14 @@ export function readAutoHandoffOnMilestone(): boolean {
 /**
  * 区切りの契機（アシスタントの提案・作業の節目）で新セッションを開くか（Issue #1947）。
  *
- * 既定は `offer`。残量が `softThresholdPercent` を上回るうちは提案だけで止める。`start` で
- * 従来どおり開く。
+ * 既定は `start`（区切りでも自動で開く、Issue #1950）。`offer` では残量が
+ * `softThresholdPercent` を上回るうちは提案だけで止める。
  */
 export function readAutoHandoffBoundaryAction(): 'offer' | 'start' {
   const raw = vscode.workspace
     .getConfiguration('agent')
     .get<string>('autoHandoff.boundaryAction');
-  return raw === 'start' ? 'start' : 'offer';
+  return raw === 'offer' ? 'offer' : 'start';
 }
 
 /**

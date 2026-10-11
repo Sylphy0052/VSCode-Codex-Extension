@@ -25,6 +25,7 @@ import {
   handoffPointerFileName,
   type HandoffProvider,
   type HandoffTrigger,
+  isHandoffPromptBody,
 } from './handoff';
 import {
   CLAUDE_INJECTED_USER_TEXT,
@@ -247,6 +248,13 @@ function createAccumulator(isAutoSent: AutoSentMatcher) {
       if (text.startsWith(HANDOFF_PROMPT_HEAD)) {
         // 引き継ぎで拡張が組み立てた初回プロンプト。発話として記録せず、親の在処だけ読む
         parent ??= parseLineageRef(text);
+        pending = undefined;
+        return;
+      }
+      if (isHandoffPromptBody(text)) {
+        // handoffプロンプトの本文だけを渡した初回プロンプト（Issue #1950）。親の在処は載らないため
+        // 系列はここで切れ、引き継ぎ元が作ったreplayは使われない。ポインタ文へ戻る試行が
+        // replayの在処を使うので、引き継ぎ元はreplayの準備を省かない
         pending = undefined;
         return;
       }

@@ -1503,7 +1503,10 @@ export class ClaudeChatViewManager
     const pointerHead = buildHandoffPrompt(pointerPath);
     // replayの本文を載せずポインタだけを指す本文にも系列の在処を付け、次の世代で系列を切らない
     const pointerText = buildHandoffPrompt(pointerPath, replay?.marker);
-    let firstText = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text);
+    const chosen = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text);
+    // handoffプロンプトの本文だけを渡す試行には、事実節・受領確認の指示を付けない（Issue #1950）
+    const bareText = chosen.isBare ? chosen.text : undefined;
+    let firstText = chosen.text;
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
       sessionId,
@@ -1570,11 +1573,10 @@ export class ClaudeChatViewManager
     for (const attemptText of handoffAttemptTexts(firstText, pointerText)) {
       // ポインタだけを指す本文へ戻した試行にはreplayが無いので、確認一覧も求めない
       const asksChecklist = attemptText !== pointerText && (replay?.userCount ?? 0) > 0;
-      const promptText = withHandoffAcceptance(
-        `${attemptText}\n\n${factsSection}`,
-        handoffId,
-        asksChecklist,
-      );
+      const isBareAttempt = attemptText === bareText;
+      const promptText = isBareAttempt
+        ? attemptText
+        : withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId, asksChecklist);
       const newSessionId = await this.openNew(
         entry.cwd,
         entry.taskConfig,
@@ -1652,7 +1654,8 @@ export class ClaudeChatViewManager
         newEntry,
         undefined,
         giveUp.signal,
-        handoffId,
+        // 受領確認を指示していない本文だけの試行では、受領行を待たない
+        isBareAttempt ? undefined : handoffId,
         sentPointerPath,
         createHandoffAcceptanceJudge({
           enabled: () => this.reflexEnabledFor(newEntry),

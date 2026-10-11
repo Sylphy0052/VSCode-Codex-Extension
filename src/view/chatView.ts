@@ -1227,7 +1227,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const pointerHead = buildHandoffPrompt(pointerPath);
     // replayの本文を載せずポインタだけを指す本文にも系列の在処を付け、次の世代で系列を切らない
     const pointerText = buildHandoffPrompt(pointerPath, replay?.marker);
-    let firstText = chooseHandoffPrompt(pointerPath, lastAssistantMessage, replay?.text);
+    const chosen = chooseHandoffPrompt(pointerPath, lastAssistantMessage, replay?.text);
+    let firstText = chosen.text;
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
       threadId,
@@ -1363,7 +1364,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
     // ポインタだけを指す本文へ戻したときはreplayが無いので、確認一覧も求めない
     const asksChecklist = firstText !== pointerText && (replay?.userCount ?? 0) > 0;
-    const text = withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId, asksChecklist);
+    // handoffプロンプトの本文だけを渡すときは、事実節・受領確認の指示を付けない（Issue #1950）。
+    // 書き出しに失敗してポインタ文へ戻したときは従来どおり付ける
+    const isBare = chosen.isBare && firstText === chosen.text;
+    const text = isBare
+      ? firstText
+      : withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId, asksChecklist);
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
@@ -1378,7 +1384,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       newEntry,
       undefined,
       giveUp.signal,
-      handoffId,
+      // 受領確認を指示していない本文だけの送信では、受領行を待たない
+      isBare ? undefined : handoffId,
       sentPointerPath,
       createHandoffAcceptanceJudge({
         enabled: () => this.reflexEnabledFor(destination),
