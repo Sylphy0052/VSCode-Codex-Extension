@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1011.4",
+  "version": "2026.1012.1",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -981,6 +981,20 @@
           "default": true,
           "scope": "window",
           "markdownDescription": "作業の節目で自動引き継ぎする（Issue #1351 / #1357）。直前のターンで次のコマンド・呼び出しが成功して終わったとき、コンテキスト残量・model/effortの変化・分類器の結果に関係なく引き継ぐ。Issue起票後は `gh issue create` / `glab issue create`、レビュー前は `gh pr create` / `glab mr create`、レビュー後は `gh pr review` / `glab mr approve` か、名前に `review` を含むsubagent・skill（`review-spec` / `gitlab-review` など）と `security-auditor` の呼び出し（Claude Codeのみ）、次のIssueへ進む前は `gh pr merge` / `glab mr merge`。回答待ち・承認待ち・`/loop` 実行中・タスク用セッション・バックグラウンド実行中は発火しない。同じターンに複数の節目があれば、工程の後ろのもの（次のIssueへ進む前 > レビュー後 > レビュー前 > Issue起票後）で1回だけ発火する。"
+        },
+        "agent.autoHandoff.boundaryAction": {
+          "type": "string",
+          "enum": [
+            "offer",
+            "start"
+          ],
+          "enumDescriptions": [
+            "残量が `agent.autoHandoff.softThresholdPercent` を上回るうちは、新しいセッションを開かず引き継ぎを提案するだけで止める",
+            "従来どおり新しいセッションを開いて引き継ぐ"
+          ],
+          "default": "offer",
+          "scope": "window",
+          "markdownDescription": "区切りの契機（`agent.autoHandoff.onAssistantSuggestion` のアシスタントの提案と `agent.autoHandoff.onMilestone` の作業の節目）で新しいセッションを開くか（Issue #1947）。`offer` では、残量が `agent.autoHandoff.softThresholdPercent` 以下のときだけ自動で引き継ぎ、それ以外はチャットに提案を1回出して止める。引き継ぐときは引き継ぎボタンを押す。残量の閾値・自動圧縮・model/effortの変化による引き継ぎはこの設定に関係なく自動で行う。"
         },
         "agent.autoHandoff.closeOldTab": {
           "type": "boolean",

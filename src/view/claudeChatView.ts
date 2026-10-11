@@ -81,6 +81,7 @@ import {
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffBoundaryAction,
   readAutoHandoffOnMilestone,
   readAutoHandoffReflexConfig,
   readHandoffAcceptanceThreshold,
@@ -226,6 +227,7 @@ import {
   detectHandoffMilestone,
   countCompactions,
   decideAutoHandoff,
+  offersInsteadOfAutoHandoff,
   deriveHandoffBaseName,
   invokedHandoffSkill,
   parseHandoffPrompt,
@@ -405,6 +407,12 @@ interface ClaudePanel extends BaseChatPanel {
    * `turnCompletionSeq`がこの値から進む（次のターンが終わる）まで自動引き継ぎを始めない。
    */
   autoHandoffFailedTurnSeq: number | undefined;
+  /**
+   * 自動引き継ぎを始めず、提案だけで止めたターンの`ChatState.turnCompletionSeq`（Issue #1947）。
+   *
+   * 同じターンの材料で状態が更新されるたびに提案を出し直さないための目印。
+   */
+  autoHandoffOfferedTurnSeq: number | undefined;
   /**
    * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら自動圧縮が
    * 走ったと判る。専用のイベントを`ChatState`へ足さずに済ませるため、項目を数える。
@@ -1202,6 +1210,9 @@ export class ClaudeChatViewManager
     if (!manual && this.autoHandoffHeld(entry, entry.session.getState())) {
       return;
     }
+    if (!manual && this.offerHandoffInstead(entry, trigger)) {
+      return;
+    }
     const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
     if (sessionId === undefined) {
       if (manual) {
@@ -1246,12 +1257,43 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * 区切りの契機で、新セッションを開かず提案だけで止める（Issue #1947）。止めたら`true`。
+   *
+   * 提案はターンごとに1回だけ出す。
+   */
+  private offerHandoffInstead(entry: ClaudePanel, trigger: HandoffTrigger): boolean {
+    const state = entry.session.getState();
+    if (
+      !offersInsteadOfAutoHandoff(
+        trigger,
+        state.context?.remainingPercent,
+        readAutoHandoffSoftThresholdPercent(),
+        readAutoHandoffBoundaryAction(),
+      )
+    ) {
+      return false;
+    }
+    // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
+    if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      return true;
+    }
+    entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
+    entry.session.noteLocalEvent(
+      `autoHandoffOffer:${Date.now()}`,
+      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
+    );
+    this.log.info(`区切りの契機（${trigger.kind}）のため、自動引き継ぎを始めず提案で止めました`);
+    return true;
+  }
+
+  /**
    * 自動引き継ぎをもう一度起こせるようにする（トグルのOFF→ON、タスク用セッションの
    * `rearmAutoHandoff`）。人が求めた操作なので、失敗したターンの目印も消す。
    */
   private rearmAutoHandoff(entry: ClaudePanel): void {
     entry.autoHandoffStarted = false;
     entry.autoHandoffFailedTurnSeq = undefined;
+    entry.autoHandoffOfferedTurnSeq = undefined;
   }
 
   /**
@@ -3677,6 +3719,7 @@ export class ClaudeChatViewManager
       limitSwitchKey: undefined,
       autoHandoffStarted: false,
       autoHandoffFailedTurnSeq: undefined,
+      autoHandoffOfferedTurnSeq: undefined,
       lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),

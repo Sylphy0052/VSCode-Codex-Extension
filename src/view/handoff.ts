@@ -1440,6 +1440,38 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
 }
 
 /**
+ * 区切りの契機で自動引き継ぎをどう扱うか（Issue #1947）。
+ *
+ * - `offer`: 残量に余裕があれば新セッションを開かず、引き継ぎを提案するだけで止める
+ * - `start`: 従来どおり新セッションを開く
+ */
+export type AutoHandoffBoundaryAction = 'offer' | 'start';
+
+/**
+ * 自動引き継ぎを始めず、提案だけで止めるか（Issue #1947）。
+ *
+ * 対象は `assistantSuggested` と `milestone` だけ。どちらも残量を見ずに発火するため、
+ * 引き継ぎ先も一段落するたびにhandoffプロンプトを出し、それを拾って引き継ぐ連鎖が
+ * 「（続き40）」まで延びた。残量が `softThresholdPercent` 以下なら引き継いだ方が良いので
+ * 従来どおり始める。残量が分からないときは引き継ぐ理由が無いので提案で止める。
+ * 残量の閾値・自動圧縮・softThreshold・profileChangedは引き継ぐ理由そのものなので対象外。
+ */
+export function offersInsteadOfAutoHandoff(
+  trigger: HandoffTrigger,
+  remainingPercent: number | undefined,
+  softThresholdPercent: number,
+  action: AutoHandoffBoundaryAction,
+): boolean {
+  if (action !== 'offer') {
+    return false;
+  }
+  if (trigger.kind !== 'assistantSuggested' && trigger.kind !== 'milestone') {
+    return false;
+  }
+  return remainingPercent === undefined || remainingPercent > softThresholdPercent;
+}
+
+/**
  * `waitForDestinationResponse` が必要とする最小の形。Codex/Claude Codeのパネルは
  * どちらも満たす。
  */

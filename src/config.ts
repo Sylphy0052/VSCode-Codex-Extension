@@ -882,6 +882,19 @@ export function readAutoHandoffOnMilestone(): boolean {
 }
 
 /**
+ * 区切りの契機（アシスタントの提案・作業の節目）で新セッションを開くか（Issue #1947）。
+ *
+ * 既定は `offer`。残量が `softThresholdPercent` を上回るうちは提案だけで止める。`start` で
+ * 従来どおり開く。
+ */
+export function readAutoHandoffBoundaryAction(): 'offer' | 'start' {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<string>('autoHandoff.boundaryAction');
+  return raw === 'start' ? 'start' : 'offer';
+}
+
+/**
  * 引き継ぎ後、旧セッションのタブを確認なしで閉じるか（Issue #1090）。
  *
  * 既定はON。新セッションの初回ターンが**成功したときだけ**閉じ、失敗・時間切れなら残す。
