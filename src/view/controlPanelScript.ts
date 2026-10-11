@@ -1002,11 +1002,12 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
   }
 
   // 待機中のアカウントの使用率は取りに行かない（Issue #1921）。記録したリセット時刻を
-  // 過ぎた枠は、切り替えて取り直すまで実際の値が判らないため「リセット済み」とだけ出す
+  // 過ぎた枠は、切り替えて取り直すまで実際の値が判らないため「不明」と出す。リセット後に
+  // 別の場所で使われていることもあり、「リセット済み」と出すと空いていると誤解させる（Issue #1941）
   function savedLimitText(label, limit, now) {
     if (!limit) return undefined;
     if (typeof limit.resetsAt === 'number' && limit.resetsAt <= now) {
-      return label + ' リセット済み（記録時' + limit.pct + '%）';
+      return label + ' 不明（' + formatClockTime(limit.resetsAt) + 'のリセット以降未計測）';
     }
     // 上限で止まったアカウントは、解除時刻を100%として記録している（Issue #1937）
     if (limit.pct >= 100 && typeof limit.resetsAt === 'number') {
