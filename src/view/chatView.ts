@@ -63,6 +63,7 @@ import {
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffBoundaryAction,
   readAutoHandoffOnMilestone,
   readAutoHandoffReflexConfig,
   readHandoffAcceptanceThreshold,
@@ -154,6 +155,7 @@ import {
   detectHandoffMilestone,
   countCompactions,
   decideAutoHandoff,
+  offersInsteadOfAutoHandoff,
   deriveHandoffBaseName,
   parseHandoffPrompt,
   endsWithUserQuestion,
@@ -410,6 +412,8 @@ interface ChatPanel extends BaseChatPanel {
   autoHandoffStarted: boolean;
   /** 自動引き継ぎに失敗したターンの`turnCompletionSeq`（`claudeChatView.ts`と同じ扱い）。 */
   autoHandoffFailedTurnSeq: number | undefined;
+  /** 引き継ぎを提案だけで止めたターンの`turnCompletionSeq`（`claudeChatView.ts`と同じ扱い）。 */
+  autoHandoffOfferedTurnSeq: number | undefined;
   /**
    * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら圧縮が走った。
    *
@@ -1010,6 +1014,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (!manual && this.autoHandoffHeld(entry, entry.session.getState())) {
       return;
     }
+    if (!manual && this.offerHandoffInstead(entry, trigger)) {
+      return;
+    }
     const threadId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
     if (threadId === undefined) {
       if (manual) {
@@ -1053,10 +1060,33 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
   }
 
+  /** 区切りの契機で提案だけで止める（`claudeChatView.ts`の同名メソッドと同じ）。 */
+  private offerHandoffInstead(entry: ChatPanel, trigger: HandoffTrigger): boolean {
+    const state = entry.session.getState();
+    if (
+      !offersInsteadOfAutoHandoff(
+        trigger,
+        state.context?.remainingPercent,
+        readAutoHandoffSoftThresholdPercent(),
+        readAutoHandoffBoundaryAction(),
+      )
+    ) {
+      return false;
+    }
+    entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
+    entry.session.noteLocalEvent(
+      `autoHandoffOffer:${Date.now()}`,
+      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（残量に余裕があるため自動では引き継ぎません）',
+    );
+    this.log.info(`区切りの契機（${trigger.kind}）のため、自動引き継ぎを始めず提案で止めました`);
+    return true;
+  }
+
   /** 自動引き継ぎをもう一度起こせるようにする（`claudeChatView.ts`の同名メソッドと同じ）。 */
   private rearmAutoHandoff(entry: ChatPanel): void {
     entry.autoHandoffStarted = false;
     entry.autoHandoffFailedTurnSeq = undefined;
+    entry.autoHandoffOfferedTurnSeq = undefined;
   }
 
   /**
@@ -1065,7 +1095,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `requestHandoff`で同じ条件を使う。
    */
   private autoHandoffHeld(entry: ChatPanel, state: ChatState): boolean {
-    return entry.autoHandoffStarted || entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq;
+    return (
+      entry.autoHandoffStarted ||
+      entry.autoHandoffFailedTurnSeq === state.turnCompletionSeq ||
+      entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq
+    );
   }
 
   /**
@@ -2498,6 +2532,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       limitAutoResumeSuppressed: false,
       autoHandoffStarted: false,
       autoHandoffFailedTurnSeq: undefined,
+      autoHandoffOfferedTurnSeq: undefined,
       lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
