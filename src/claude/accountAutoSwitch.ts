@@ -96,6 +96,11 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
    * 切り替える。呼び出し側は、切り替えられたときだけ「続けて」を送る。
    */
   async switchOnLimit(hit: LimitHit, nowMs: number = Date.now()): Promise<SwitchOutcome> {
+    // 解除時刻の表示にも使うので、自動切り替えが無効でも記録する。切り替えの最中は稼働中の
+    // IDが既に切替先へ変わっているかもしれないので記録しない
+    if (this.inFlight === undefined) {
+      await this.recordLimitHit(hit, nowMs);
+    }
     const { enabled, thresholdPct } = this.ports.config();
     if (!enabled) {
       return { switched: false, reason: '自動切り替えが無効です' };
@@ -105,7 +110,6 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     if (this.inFlight !== undefined) {
       return this.inFlight;
     }
-    await this.recordLimitHit(hit, nowMs);
     const snapshot = await this.ports.store.list();
     if (!snapshot.ok) {
       return { switched: false, reason: snapshot.reason };
