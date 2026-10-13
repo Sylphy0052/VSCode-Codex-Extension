@@ -365,8 +365,18 @@ export class TaskStageRunner {
   /** タスクごとの操作（開始・報告・引き継ぎ・終了・停止）を直列にする。 */
   private readonly locks = new Map<string, SerialQueue>();
   private disposed = false;
+  /** mergeの鍵が空いたら、そのリポジトリのrunを選び直す（Issue #1953）。 */
+  private readonly mergeKeyReleased: { dispose(): void };
 
-  constructor(private readonly deps: TaskStageRunnerDeps) {}
+  constructor(private readonly deps: TaskStageRunnerDeps) {
+    this.mergeKeyReleased = deps.mergeKeys.onReleased((laneKey) => {
+      for (const run of deps.store.listActive(laneKey)) {
+        void this.pump(run.runId).catch((e: unknown) => {
+          this.warn(run.runId, '-', `mergeの鍵が空いた後の工程の開始に失敗: ${String(e)}`);
+        });
+      }
+    });
+  }
 
   private now(): Date {
     return this.deps.now?.() ?? new Date();
@@ -2138,6 +2148,7 @@ export class TaskStageRunner {
 
   dispose(): void {
     this.disposed = true;
+    this.mergeKeyReleased.dispose();
     for (const entry of [...this.live.values()]) {
       this.release(entry, { dispose: true });
     }

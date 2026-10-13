@@ -19,12 +19,23 @@ export interface MergeKeyLease {
 export class TaskRunMergeKeys {
   /** リポジトリごとの、鍵を待っている・持っている数。 */
   private readonly holders = new Map<string, number>();
+  private readonly releasedListeners = new Set<(laneKey: string) => void>();
 
   constructor(private readonly lanes: MergeLanes = new MergeLanes()) {}
 
   /** 鍵を誰かが持っているか待っている。スケジューラはこの間、次の「mergeとcleanup」を選ばない。 */
   isBusy(laneKey: string): boolean {
     return (this.holders.get(laneKey) ?? 0) > 0;
+  }
+
+  /**
+   * `laneKey`の鍵を持っている・待っている数が0になった（`isBusy`が偽へ変わった）ときに呼ぶ。
+   * `release()`から数マイクロタスク遅れて0になるため、`release()`直後に選び直しても
+   * 次の「mergeとcleanup」はまだ選ばれない。選び直しはこの通知を受けて行う（Issue #1953）。
+   */
+  onReleased(listener: (laneKey: string) => void): { dispose(): void } {
+    this.releasedListeners.add(listener);
+    return { dispose: () => this.releasedListeners.delete(listener) };
   }
 
   /**
@@ -52,6 +63,9 @@ export class TaskRunMergeKeys {
       const count = (this.holders.get(laneKey) ?? 1) - 1;
       if (count <= 0) {
         this.holders.delete(laneKey);
+        for (const listener of [...this.releasedListeners]) {
+          listener(laneKey);
+        }
       } else {
         this.holders.set(laneKey, count);
       }
