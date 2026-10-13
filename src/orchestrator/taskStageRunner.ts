@@ -366,16 +366,24 @@ export class TaskStageRunner {
   private readonly locks = new Map<string, SerialQueue>();
   private disposed = false;
   /** mergeの鍵が空いたら、そのリポジトリのrunを選び直す（Issue #1953）。 */
-  private readonly mergeKeyReleased: { dispose(): void };
+  private readonly mergeKeyReleasedSubscription: { dispose(): void };
 
   constructor(private readonly deps: TaskStageRunnerDeps) {
-    this.mergeKeyReleased = deps.mergeKeys.onReleased((laneKey) => {
-      for (const run of deps.store.listActive(laneKey)) {
-        void this.pump(run.runId).catch((e: unknown) => {
-          this.warn(run.runId, '-', `mergeの鍵が空いた後の工程の開始に失敗: ${String(e)}`);
-        });
-      }
+    this.mergeKeyReleasedSubscription = deps.mergeKeys.onReleased((laneKey) => {
+      void this.pumpLane(laneKey);
     });
+  }
+
+  /** `laneKey`（リポジトリ）の動いているrunをすべて`pump`する。失敗は警告にする。 */
+  private async pumpLane(laneKey: string): Promise<void> {
+    const runs = this.deps.store.listActive(laneKey);
+    await Promise.all(
+      runs.map((run) =>
+        this.pump(run.runId).catch((e: unknown) => {
+          this.warn(run.runId, '-', `mergeの鍵が空いた後の工程の開始に失敗: ${String(e)}`);
+        }),
+      ),
+    );
   }
 
   private now(): Date {
@@ -2148,7 +2156,7 @@ export class TaskStageRunner {
 
   dispose(): void {
     this.disposed = true;
-    this.mergeKeyReleased.dispose();
+    this.mergeKeyReleasedSubscription.dispose();
     for (const entry of [...this.live.values()]) {
       this.release(entry, { dispose: true });
     }

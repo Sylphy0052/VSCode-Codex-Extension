@@ -19,6 +19,7 @@ export interface MergeKeyLease {
 export class TaskRunMergeKeys {
   /** リポジトリごとの、鍵を待っている・持っている数。 */
   private readonly holders = new Map<string, number>();
+  /** `onReleased`で登録された、鍵が空いたときに呼ぶ関数。 */
   private readonly releasedListeners = new Set<(laneKey: string) => void>();
 
   constructor(private readonly lanes: MergeLanes = new MergeLanes()) {}
@@ -32,6 +33,7 @@ export class TaskRunMergeKeys {
    * `laneKey`の鍵を持っている・待っている数が0になった（`isBusy`が偽へ変わった）ときに呼ぶ。
    * `release()`から数マイクロタスク遅れて0になるため、`release()`直後に選び直しても
    * 次の「mergeとcleanup」はまだ選ばれない。選び直しはこの通知を受けて行う（Issue #1953）。
+   * `listener`は例外を投げないこと（列の後始末の中で呼ぶため、投げると後に続く`listener`が呼ばれない）。
    */
   onReleased(listener: (laneKey: string) => void): { dispose(): void } {
     this.releasedListeners.add(listener);
