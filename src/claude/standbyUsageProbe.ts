@@ -134,7 +134,7 @@ export class StandbyUsageProbe {
   probeAccount(id: string, nowMs: number, force = false): Promise<void> {
     return this.enqueue(async () => {
       if (this.isEnabled() && (force || !this.attemptedRecently(id, nowMs))) {
-        await this.probe(id, nowMs);
+        await this.probe(id, nowMs, force);
       }
     });
   }
@@ -165,12 +165,13 @@ export class StandbyUsageProbe {
     }
   }
 
-  private async probe(id: string, nowMs: number): Promise<void> {
+  private async probe(id: string, nowMs: number, force = false): Promise<void> {
     this.attemptedAt.set(id, nowMs);
     const result = await this.store.probeStandby(
       id,
       (dir) => measureUsageIn(this.claudePath(), dir, id, this.log),
       Date.now(),
+      force,
     );
     if (!result.ok) {
       this.log.warn(`待機中のアカウントの使用率を記録できませんでした: ${result.reason}`);

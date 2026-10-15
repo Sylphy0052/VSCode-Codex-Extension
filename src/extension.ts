@@ -598,7 +598,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     // 手動の切り替えでも、自動の切り替えと同じく前後の両アカウントを取り直す（Issue #1955）。
     // 切り替えの操作は`accountAutoSwitcher`の構築後にしか来ない
-    onSwitched: (previousId) => accountAutoSwitcher.measureAroundSwitch(previousId),
+    onSwitched: async (previousId) => accountAutoSwitcher.measureAroundSwitch(previousId),
   };
   const panel = new ControlPanelViewProvider(
     settings,

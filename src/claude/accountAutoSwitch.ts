@@ -107,11 +107,13 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
    * 手動・自動の切り替えのどちらからも呼ぶ。自動切り替えの有効・無効には関わらない。
    */
   async measureAroundSwitch(previousId: string | undefined): Promise<void> {
+    // 注入された関数が同期で投げても、もう一方の計測と画面の反映は続ける
     const results = await Promise.allSettled([
-      this.ports.probeLive?.(),
-      previousId === undefined
-        ? undefined
-        : this.ports.probeStandby?.(previousId, Date.now(), true),
+      (async () => this.ports.probeLive?.())(),
+      (async () =>
+        previousId === undefined
+          ? undefined
+          : this.ports.probeStandby?.(previousId, Date.now(), true))(),
     ]);
     for (const result of results) {
       if (result.status === 'rejected') {
@@ -332,7 +334,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     );
     await this.ports.onSwitched();
     // 切り替えの完了（上限で止まった会話の「続けて」）を計測の20秒ほどで遅らせない
-    void this.measureAroundSwitch(previousId);
+    void this.measureAroundSwitch(previousId).catch(() => undefined);
     return { switched: true, name };
   }
 }

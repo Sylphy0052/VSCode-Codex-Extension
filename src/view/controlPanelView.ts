@@ -814,7 +814,13 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     }
     // 計測は20秒ほどかかるので待たない。終わり次第、一覧を描き直す
     if (previousId !== id) {
-      void this.claudeAccounts?.onSwitched?.(previousId);
+      void this.claudeAccounts
+        ?.onSwitched?.(previousId)
+        .catch((e: unknown) =>
+          this.log.warn(
+            `切り替え前後のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+        );
     }
     return { ok: true };
   }

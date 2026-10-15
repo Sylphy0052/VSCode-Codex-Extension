@@ -124,6 +124,8 @@ export class ClaudeUsageProbe {
   private claimedGeneration: number | undefined;
   /** 次の`read`で間隔・共有の結果・停止を無視して取得するか（Issue #1955）。 */
   private freshRequested = false;
+  /** 進行中の取得。終われば解決する（失敗しても拒否しない）。 */
+  private inFlight: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly claudePath: () => string,
@@ -162,10 +164,21 @@ export class ClaudeUsageProbe {
    * 次の`read`を、間隔・他のウィンドウの結果・連続失敗による停止に関わらず取得させる
    * （Issue #1955）。アカウントを切り替えた直後に、切り替え先の使用率を取るために使う。
    * 共有の結果は切り替え前のアカウントのものでありうるので使わない。
-   * 取得中や他のウィンドウが取得権を持っていて読めなかったときは、次の`read`へ持ち越す。
+   * 他のウィンドウが取得権を持っていて読めなかったときは、再試行の間隔を空けて次の`read`へ持ち越す。
    */
   requestFresh(): void {
     this.freshRequested = true;
+    this.nextReadAt = 0;
+  }
+
+  /**
+   * `requestFresh`してから読む。取得中なら、その取得（切り替え前のアカウントのものでありうる）
+   * が終わるのを待ってから読み直す。
+   */
+  async readFresh(now: () => number = Date.now): Promise<ChatUsage | undefined> {
+    this.requestFresh();
+    await this.inFlight;
+    return this.read(now());
   }
 
   /**
@@ -175,12 +188,21 @@ export class ClaudeUsageProbe {
    *
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
-  async read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    const forced = this.freshRequested;
-    if (this.running || (!forced && now < this.nextReadAt)) {
-      return undefined;
+  read(now: number = Date.now()): Promise<ChatUsage | undefined> {
+    if (this.running || now < this.nextReadAt) {
+      return Promise.resolve(undefined);
     }
     this.running = true;
+    const run = this.readOnce(now);
+    this.inFlight = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async readOnce(now: number): Promise<ChatUsage | undefined> {
+    const forced = this.freshRequested;
     let claimed = false;
     try {
       const fresh = forced ? undefined : await this.readFreshShared(now);
@@ -239,7 +261,8 @@ export class ClaudeUsageProbe {
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
       }
-      return usage;
+      // 取得中に切り替えられた。切り替え前のアカウントの値なので、画面へは出さない
+      return this.freshRequested ? undefined : usage;
     } finally {
       if (claimed) {
         await this.release();

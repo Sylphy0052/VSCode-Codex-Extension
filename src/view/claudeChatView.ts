@@ -3190,8 +3190,10 @@ export class ClaudeChatViewManager
    * アカウントを切り替えた直後に呼ぶ。
    */
   async refreshUsageNow(): Promise<void> {
-    this.usageProbe.requestFresh();
-    await this.refreshUsage();
+    const usage = await this.usageProbe.readFresh();
+    if (usage !== undefined) {
+      this.onUsage(usage);
+    }
   }
 
   /**
