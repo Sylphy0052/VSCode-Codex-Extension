@@ -129,12 +129,11 @@ export class StandbyUsageProbe {
   /**
    * 自動切替が切替先に選んだ待機中アカウントを測る。全件を測ると1件20秒ほどずつ切替が遅れる
    * ので、選ばれた1件だけにする。60分以内に試していれば測らない。
-   * `force`なら60分の間隔を無視する。切り替えで待機中になったアカウントを測るときに使う（Issue #1955）。
    */
-  probeAccount(id: string, nowMs: number, force = false): Promise<void> {
+  probeAccount(id: string, nowMs: number): Promise<void> {
     return this.enqueue(async () => {
-      if (this.isEnabled() && (force || !this.attemptedRecently(id, nowMs))) {
-        await this.probe(id, nowMs, force);
+      if (this.isEnabled() && !this.attemptedRecently(id, nowMs)) {
+        await this.probe(id, nowMs);
       }
     });
   }
@@ -165,13 +164,12 @@ export class StandbyUsageProbe {
     }
   }
 
-  private async probe(id: string, nowMs: number, force = false): Promise<void> {
+  private async probe(id: string, nowMs: number): Promise<void> {
     this.attemptedAt.set(id, nowMs);
     const result = await this.store.probeStandby(
       id,
       (dir) => measureUsageIn(this.claudePath(), dir, id, this.log),
       Date.now(),
-      force,
     );
     if (!result.ok) {
       this.log.warn(`待機中のアカウントの使用率を記録できませんでした: ${result.reason}`);

@@ -109,10 +109,12 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
 export interface ClaudeAccountDeps {
   store: ClaudeAccountStore;
   /**
-   * 手動で切り替えた後に呼ぶ。切り替え前後の両アカウントの使用率を取り直す（Issue #1955）。
-   * `previousId`は切り替え前に稼働中だったアカウント。
+   * 手動で切り替える直前に呼ぶ。切り替え前のアカウントの使用率を取り直す（Issue #1955）。
+   * 使用率は稼働中のアカウントでしか取れないので、切り替えはこの完了を待つ。
    */
-  onSwitched?(previousId: string | undefined): Promise<void>;
+  beforeSwitch?(): Promise<void>;
+  /** 手動で切り替えた後に呼ぶ。切り替え後のアカウントの使用率を取り直す（Issue #1955）。 */
+  onSwitched?(): Promise<void>;
 }
 
 /**
@@ -789,6 +791,14 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     id: string,
   ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
     const previousId = await store.currentId();
+    if (previousId !== id) {
+      // 取得できなくても切り替えは続ける
+      await this.claudeAccounts?.beforeSwitch?.().catch((e: unknown) =>
+        this.log.warn(
+          `切り替え前のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
+    }
     let result = await store.switchTo(id);
     if (!result.ok && result.confirmCurrent !== undefined) {
       const { id: currentId, name: currentName, live, plan } = result.confirmCurrent;
@@ -815,10 +825,10 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     // 計測は20秒ほどかかるので待たない。終わり次第、一覧を描き直す
     if (previousId !== id) {
       void this.claudeAccounts
-        ?.onSwitched?.(previousId)
+        ?.onSwitched?.()
         .catch((e: unknown) =>
           this.log.warn(
-            `切り替え前後のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+            `切り替え後のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
           ),
         );
     }
