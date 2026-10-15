@@ -193,7 +193,9 @@ export class ClaudeUsageProbe {
       return Promise.resolve(undefined);
     }
     this.running = true;
-    const run = this.readOnce(now);
+    // 取得中に切り替えられたら、他のウィンドウの結果を使った場合も含めて切り替え前の
+    // アカウントの値なので、画面へは出さない
+    const run = this.readOnce(now).then((usage) => (this.freshRequested ? undefined : usage));
     this.inFlight = run.then(
       () => undefined,
       () => undefined,
@@ -261,8 +263,7 @@ export class ClaudeUsageProbe {
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
       }
-      // 取得中に切り替えられた。切り替え前のアカウントの値なので、画面へは出さない
-      return this.freshRequested ? undefined : usage;
+      return usage;
     } finally {
       if (claimed) {
         await this.release();
