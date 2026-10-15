@@ -427,8 +427,6 @@ export class ClaudeAccountStore {
     id: string,
     measure: (configDir: string) => Promise<UsageSlots | undefined>,
     nowMs: number,
-    /** 記録が新しくても測る。切り替えで待機中になったアカウントに使う（Issue #1955）。 */
-    force = false,
   ): Promise<AccountStoreResult> {
     return this.serialized(async () => {
       const leftover = await this.removeProbeDirs();
@@ -436,7 +434,7 @@ export class ClaudeAccountStore {
       if (
         id === current ||
         !(await this.isRegistered(id)) ||
-        (!force && !isStandbyStale(await this.view(id, current), nowMs))
+        !isStandbyStale(await this.view(id, current), nowMs)
       ) {
         return withWarning({ ok: true }, leftover);
       }

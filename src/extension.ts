@@ -598,7 +598,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     // 手動の切り替えでも、自動の切り替えと同じく前後の両アカウントを取り直す（Issue #1955）。
     // 切り替えの操作は`accountAutoSwitcher`の構築後にしか来ない
-    onSwitched: async (previousId) => accountAutoSwitcher.measureAroundSwitch(previousId),
+    beforeSwitch: async () => accountAutoSwitcher.measureBeforeSwitch(),
+    onSwitched: async () => accountAutoSwitcher.measureAfterSwitch(),
   };
   const panel = new ControlPanelViewProvider(
     settings,
@@ -684,7 +685,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 使用率に応じたアカウントの自動切り替え（Issue #1924）。切り替え後のCLIの入れ直しは
   // `claudeChat`の構築後でなければ呼べないため、呼び出し時に読み直す
   const accountAutoSwitcher = new AccountAutoSwitcher({
-    probeStandby: (id, nowMs, force) => standbyUsage.probeAccount(id, nowMs, force),
+    probeStandby: (id, nowMs) => standbyUsage.probeAccount(id, nowMs),
     pollStandby: (nowMs) => standbyUsage.probeOne(nowMs),
     probeLive: (): Promise<void> => claudeChat.refreshUsageNow(),
     onUsageChanged: (): Promise<void> => panel.refreshClaudeAccounts(),
