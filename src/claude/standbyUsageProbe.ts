@@ -129,10 +129,11 @@ export class StandbyUsageProbe {
   /**
    * 自動切替が切替先に選んだ待機中アカウントを測る。全件を測ると1件20秒ほどずつ切替が遅れる
    * ので、選ばれた1件だけにする。60分以内に試していれば測らない。
+   * `force`なら60分の間隔を無視する。切り替えで待機中になったアカウントを測るときに使う（Issue #1955）。
    */
-  probeAccount(id: string, nowMs: number): Promise<void> {
+  probeAccount(id: string, nowMs: number, force = false): Promise<void> {
     return this.enqueue(async () => {
-      if (this.isEnabled() && !this.attemptedRecently(id, nowMs)) {
+      if (this.isEnabled() && (force || !this.attemptedRecently(id, nowMs))) {
         await this.probe(id, nowMs);
       }
     });

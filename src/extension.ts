@@ -215,7 +215,7 @@ import {
   type ReviewFailureReason,
 } from './view/localReview';
 import { ClaudeChatViewManager } from './view/claudeChatView';
-import { ControlPanelViewProvider } from './view/controlPanelView';
+import { type ClaudeAccountDeps, ControlPanelViewProvider } from './view/controlPanelView';
 import {
   configureExtensionSkillRoots,
   notifyExtensionSkillRootsChanged,
@@ -590,12 +590,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 表示してセクションを展開する経路（`revealSection`）を使うため、`chat`より先に
   // 構築しておく（以前はセッション一覧まわりの構築の後段でまとめて作っていた）
   // 複数アカウントの切り替え（Issue #1921）。保存先は検証スクリプトと共通の `<claudeHome>/accounts/`
-  const claudeAccounts = {
+  const claudeAccounts: ClaudeAccountDeps = {
     store: new ClaudeAccountStore(
       claudeHome,
       createProfileIdentifier((message) => log.warn(message)),
       resolveClaudeGlobalConfig(claudeHome, nodeLocatorDeps),
     ),
+    // 手動の切り替えでも、自動の切り替えと同じく前後の両アカウントを取り直す（Issue #1955）。
+    // 切り替えの操作は`accountAutoSwitcher`の構築後にしか来ない
+    onSwitched: (previousId) => accountAutoSwitcher.measureAroundSwitch(previousId),
   };
   const panel = new ControlPanelViewProvider(
     settings,
@@ -681,8 +684,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 使用率に応じたアカウントの自動切り替え（Issue #1924）。切り替え後のCLIの入れ直しは
   // `claudeChat`の構築後でなければ呼べないため、呼び出し時に読み直す
   const accountAutoSwitcher = new AccountAutoSwitcher({
-    probeStandby: (id, nowMs) => standbyUsage.probeAccount(id, nowMs),
+    probeStandby: (id, nowMs, force) => standbyUsage.probeAccount(id, nowMs, force),
     pollStandby: (nowMs) => standbyUsage.probeOne(nowMs),
+    probeLive: (): Promise<void> => claudeChat.refreshUsageNow(),
+    onUsageChanged: (): Promise<void> => panel.refreshClaudeAccounts(),
     store: claudeAccounts.store,
     config: readClaudeAutoSwitchConfig,
     notify: (message) => void vscode.window.showInformationMessage(message),

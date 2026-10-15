@@ -3163,18 +3163,35 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * アカウントの自動切り替えが有効なとき、会話が動いていなくても使用率を見に行く（Issue #1924）。
+   * 会話が動いていなくても稼働中のアカウントの使用率を見に行く（Issue #1924）。
+   * 自動切り替えが無効でもサイドバーの使用率を古くしないため、常に回す（Issue #1955）。
    * 実際に`claude`を起動する間隔は`ClaudeUsageProbe`が使用率に応じて決める。
    */
   private startAccountPolling(): void {
     this.accountPollTimer = setInterval(() => {
-      if (readClaudeAutoSwitchConfig().enabled) {
-        void this.refreshUsage();
-        // 待機中のアカウントの記録も古くしない（Issue #1943）。計測の間隔は60分
-        void this.accounts?.pollStandby(Date.now());
-      }
+      void this.pollAccounts();
     }, ACCOUNT_POLL_INTERVAL_MS);
     this.accountPollTimer.unref();
+  }
+
+  private async pollAccounts(): Promise<void> {
+    await Promise.allSettled([
+      this.refreshUsage(),
+      // 待機中のアカウントの記録も古くしない（Issue #1943）。計測の間隔は60分。
+      // 自動切り替えが無効なら`pollStandby`が何もしない
+      this.accounts?.pollStandby(Date.now()),
+    ]);
+    // 他のウィンドウが記録した分も含めて、サイドバーの一覧を描き直す
+    await this.accounts?.usageChanged();
+  }
+
+  /**
+   * 稼働中のアカウントの使用率を、間隔に関わらず取り直す（Issue #1955）。
+   * アカウントを切り替えた直後に呼ぶ。
+   */
+  async refreshUsageNow(): Promise<void> {
+    this.usageProbe.requestFresh();
+    await this.refreshUsage();
   }
 
   /**

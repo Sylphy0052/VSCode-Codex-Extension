@@ -122,6 +122,8 @@ export class ClaudeUsageProbe {
   private running = false;
   /** 自分が取得中のロックの世代。取得していなければundefined。 */
   private claimedGeneration: number | undefined;
+  /** 次の`read`で間隔・共有の結果・停止を無視して取得するか（Issue #1955）。 */
+  private freshRequested = false;
 
   constructor(
     private readonly claudePath: () => string,
@@ -157,6 +159,16 @@ export class ClaudeUsageProbe {
   }
 
   /**
+   * 次の`read`を、間隔・他のウィンドウの結果・連続失敗による停止に関わらず取得させる
+   * （Issue #1955）。アカウントを切り替えた直後に、切り替え先の使用率を取るために使う。
+   * 共有の結果は切り替え前のアカウントのものでありうるので使わない。
+   * 取得中や他のウィンドウが取得権を持っていて読めなかったときは、次の`read`へ持ち越す。
+   */
+  requestFresh(): void {
+    this.freshRequested = true;
+  }
+
+  /**
    * 前回から間隔が空いていれば読む。
    *
    * 他のウィンドウが間隔内に読んでいれば、`claude`を起動せずにその結果を返す。
@@ -164,17 +176,18 @@ export class ClaudeUsageProbe {
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
   async read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    if (this.running || now < this.nextReadAt) {
+    const forced = this.freshRequested;
+    if (this.running || (!forced && now < this.nextReadAt)) {
       return undefined;
     }
     this.running = true;
     let claimed = false;
     try {
-      const fresh = await this.readFreshShared(now);
+      const fresh = forced ? undefined : await this.readFreshShared(now);
       if (fresh !== undefined) {
         return this.adopt(fresh);
       }
-      if (this.stopped) {
+      if (this.stopped && !forced) {
         // 止めている間は起動しない。他のウィンドウの成功が共有されれば、上のadoptで再開する
         this.nextReadAt = now + RETRY_INTERVAL_MS;
         return undefined;
@@ -186,12 +199,12 @@ export class ClaudeUsageProbe {
         return undefined;
       }
       // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
-      const again = await this.readFreshShared(now);
+      const again = forced ? undefined : await this.readFreshShared(now);
       if (again !== undefined) {
         return this.adopt(again);
       }
       const failures = (await this.readShared())?.failures ?? this.failures;
-      if (failures >= MAX_CONSECUTIVE_FAILURES && this.launched) {
+      if (failures >= MAX_CONSECUTIVE_FAILURES && this.launched && !forced) {
         // 他のウィンドウが上限に達した。ログはそのウィンドウが出しているので、黙って止める。
         // まだ起動していないウィンドウ（開き直した直後など）は、1回だけ試してから止まる
         this.stopped = true;
@@ -201,6 +214,8 @@ export class ClaudeUsageProbe {
       this.launched = true;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
       await this.writeShared({ readAt: now, usage: undefined, failures });
+      // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
+      this.freshRequested = false;
       const startedAccount = await this.accounts?.currentId().catch(() => undefined);
       const result = await this.run();
       const output = result?.stdout;

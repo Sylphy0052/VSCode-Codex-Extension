@@ -36,9 +36,13 @@ export interface AutoSwitchPorts {
    * 切り替え先に選んだ待機中のアカウントの記録が古いとき、その使用率を計測する（Issue #1943）。
    * 無ければ記録のまま選ぶ。
    */
-  probeStandby?(id: string, nowMs: number): Promise<void>;
+  probeStandby?(id: string, nowMs: number, force?: boolean): Promise<void>;
   /** 定期のポーリングから呼ぶ。記録が古い待機中のアカウントを1件だけ計測する（Issue #1943）。 */
   pollStandby?(nowMs: number): Promise<void>;
+  /** 稼働中のアカウントの使用率を、間隔に関わらず取得して記録する（Issue #1955）。 */
+  probeLive?(): Promise<void>;
+  /** 記録した使用率を画面（サイドバーのアカウント一覧）へ反映する（Issue #1955）。 */
+  onUsageChanged?(): Promise<void>;
 }
 
 export type SwitchOutcome = { switched: true; name: string } | { switched: false; reason: string };
@@ -84,6 +88,40 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
         `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
+  }
+
+  /** 記録した使用率を画面へ反映する。 */
+  async usageChanged(): Promise<void> {
+    try {
+      await this.ports.onUsageChanged?.();
+    } catch (e) {
+      this.ports.warn(
+        `アカウントの使用率を表示へ反映できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
+   * アカウントを切り替えた後に呼ぶ（Issue #1955）。切り替え先（稼働中）と切り替え元
+   * （待機中になった方）の両方の使用率を、取得間隔に関わらず取り直して画面へ反映する。
+   * 手動・自動の切り替えのどちらからも呼ぶ。自動切り替えの有効・無効には関わらない。
+   */
+  async measureAroundSwitch(previousId: string | undefined): Promise<void> {
+    const results = await Promise.allSettled([
+      this.ports.probeLive?.(),
+      previousId === undefined
+        ? undefined
+        : this.ports.probeStandby?.(previousId, Date.now(), true),
+    ]);
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        const e: unknown = result.reason;
+        this.ports.warn(
+          `切り替え前後のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    await this.usageChanged();
   }
 
   /**
@@ -267,6 +305,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
 
   private async runSwitch(id: string, name: string, why: string): Promise<SwitchOutcome> {
     const { store } = this.ports;
+    const previousId = await store.currentId();
     const result = await store.switchTo(id);
     if (!result.ok) {
       // 利用者に確かめられない自動の経路では、稼働中の記録が曖昧なまま切り替えない
@@ -292,6 +331,8 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
       `${why}、Claude Codeのアカウントを「${name}」へ切り替えました${result.warning === undefined ? '' : `（${result.warning}）`}`,
     );
     await this.ports.onSwitched();
+    // 切り替えの完了（上限で止まった会話の「続けて」）を計測の20秒ほどで遅らせない
+    void this.measureAroundSwitch(previousId);
     return { switched: true, name };
   }
 }
