@@ -3,6 +3,7 @@ import { killWithEscalation } from '../process/childProcess';
 import type { Logger } from '../log';
 import { isStandbyStale, STANDBY_PROBE_INTERVAL_MS } from './accountPolicy';
 import type { ClaudeAccountStore } from './accountStore';
+import { logExcerpt } from './usageProbe';
 import { parseUsageSlots, type UsageSlots } from './usageText';
 
 /**
@@ -30,7 +31,8 @@ const AUTH_ENV_KEYS = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPI
  * cwdを一時ディレクトリにするのは、作業中のリポジトリの `.claude/` の設定やhookを読ませないため。
  * 打ち切ったときもプロセスが終わるまで待つ。終わる前に戻ると、CLIがローテーションした
  * 認証を書き終える前に、呼び出し側が書き戻しを判断してしまう。
- * stderrはトークンを含みうるので読まず、ログにも出さない。
+ * stderrはトークンを含みうるので読まず、ログにも出さない。読み取れなかったときは、原因を
+ * 調べられるようstdoutの先頭だけをログに残す（Issue #1958）。
  */
 export function measureUsageIn(
   claudePath: string,
@@ -84,7 +86,7 @@ export function measureUsageIn(
       const slots = parseUsageSlots(out, Date.now());
       if (slots === undefined) {
         log.warn(
-          `待機中のアカウント「${id}」の使用率を読み取れませんでした（code=${String(code)}, signal=${String(signal)}）`,
+          `待機中のアカウント「${id}」の使用率を読み取れませんでした（code=${String(code)}, signal=${String(signal)}）。stdout: ${logExcerpt(out)}`,
         );
       }
       settle(slots);

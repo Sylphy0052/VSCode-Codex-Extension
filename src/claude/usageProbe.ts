@@ -490,7 +490,7 @@ export class ClaudeUsageProbe {
 }
 
 /** 外部プロセスの出力を、ログの1行に収まる形へ縮める。空なら空と分かるように出す。 */
-function logExcerpt(text: string): string {
+export function logExcerpt(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   if (flat === '') {
     return '（空）';
