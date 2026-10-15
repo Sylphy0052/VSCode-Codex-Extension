@@ -790,8 +790,7 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     store: ClaudeAccountStore,
     id: string,
   ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
-    const previousId = await store.currentId();
-    if (previousId !== id) {
+    if ((await store.currentId()) !== id) {
       // 取得できなくても切り替えは続ける
       await this.claudeAccounts?.beforeSwitch?.().catch((e: unknown) =>
         this.log.warn(
@@ -799,6 +798,8 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
         ),
       );
     }
+    // 取得の後に自動切り替えが走っていることがあるので、稼働中のアカウントを取り直す
+    const previousId = await store.currentId();
     let result = await store.switchTo(id);
     if (!result.ok && result.confirmCurrent !== undefined) {
       const { id: currentId, name: currentName, live, plan } = result.confirmCurrent;
