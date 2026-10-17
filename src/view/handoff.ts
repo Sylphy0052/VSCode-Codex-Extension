@@ -1128,6 +1128,26 @@ export function detectHandoffMilestone(
 /** コマンドの先頭にある `glab`（`COMMAND_HEAD` と同じく、引数中の文言は拾わない）。 */
 const GLAB_COMMAND = new RegExp(String.raw`${COMMAND_HEAD}glab\s`, 'u');
 /**
+ * 引用符の中身を空にする。`--body "…; glab x"` の `;` の後ろをコマンドの先頭と見ないため。
+ * Codexが包む `bash -lc '…'` は外側の引用符を外して中身を残す（中身の引用符は同様に空にする）。
+ */
+function stripQuotedArguments(command: string): string {
+  return command.replace(
+    /(-l?c\s+)?("[^"]*"|'[^']*')/gu,
+    (_whole, wrapper: string | undefined, quoted: string) =>
+      wrapper === undefined ? '""' : `${wrapper}${stripQuotedArguments(quoted.slice(1, -1))}`,
+  );
+}
+/** 値を取らない `gh pr review` のオプション。これ以外のオプションの直後の語は値として読み飛ばす。 */
+const REVIEW_FLAGS_WITHOUT_VALUE = new Set([
+  '--approve',
+  '-a',
+  '--request-changes',
+  '-r',
+  '--comment',
+  '-c',
+]);
+/**
  * レビューのコマンドで、サブコマンドより後ろの部分。次のコマンドの区切りか引用符までに限る。
  * 引用符で切ることで、`--body "… --approve …"` の中身と、Codexが包む `bash -lc '…'` の
  * 閉じ引用符を見ない。
@@ -1154,9 +1174,19 @@ function approvedReviewNumberOf(command: string): string | undefined {
   if (!isApproved) {
     return undefined;
   }
+  let previous = '';
   for (const token of tokens) {
     if (token.includes('…')) {
       return undefined;
+    }
+    // `-t 30` のように数値を取るオプションの値は番号ではない
+    const isOptionValue =
+      previous.startsWith('-') &&
+      !previous.includes('=') &&
+      !REVIEW_FLAGS_WITHOUT_VALUE.has(previous);
+    previous = token;
+    if (isOptionValue) {
+      continue;
     }
     const number = TARGET_NUMBER.exec(token);
     if (number !== null) {
@@ -1200,7 +1230,7 @@ export function buildMilestonePrompt(input: MilestonePromptInput): string | unde
   // GitLabのMRは `!` で番号を書く。レビューのskill・subagentはコマンドに `glab` が出ないため、
   // 作ったMRのURLでも判定する
   const isGitLab =
-    GLAB_COMMAND.test(trigger.command) ||
+    GLAB_COMMAND.test(stripQuotedArguments(trigger.command)) ||
     createdReferences.some((reference) => reference.url.includes('/merge_requests/'));
   const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
   let next: string | undefined;
