@@ -311,6 +311,26 @@ describe('transcriptItems', () => {
     expect(items[1]?.detail).toBe('genshijin:help');
   });
 
+  it('/名前 と本文の間にattachmentが挟まっても本文をskillContextにする（issue #1971）', () => {
+    const { items } = transcriptItems([
+      userLine(
+        '<command-message>genshijin:help</command-message>\n<command-name>/genshijin:help</command-name>',
+      ),
+      JSON.stringify({
+        type: 'attachment',
+        uuid: 'at1',
+        attachment: { type: 'hook_additional_context', content: ['追加の文脈'] },
+      }),
+      userLine('リファレンスカードを表示する。\n', {
+        isMeta: true,
+        userType: undefined,
+        origin: undefined,
+      }),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['userMessage', 'skillContext']);
+    expect(items[1]?.detail).toBe('genshijin:help');
+  });
+
   it('/名前 の直後でもタグで始まる注入はskillContextにしない（issue #1968）', () => {
     const { items } = transcriptItems([
       userLine('<command-name>/model</command-name>'),

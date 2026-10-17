@@ -352,8 +352,9 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
       id: str(event['uuid']) || `user-${items.length}`,
       kind: isSkillContext ? 'skillContext' : 'userMessage',
       text,
-      // どのskillが動いたかを項目に残す（issue #889）
-      detail: isSkillContext ? skillContextName(text) || launchedSkill : '',
+      // どのskillが動いたかを項目に残す（issue #889）。本文の `Base directory` から取る名前には
+      // plugin skillの名前空間（`<plugin>:`）が付かないため、Skillツールの起動結果を優先する（issue #1971）
+      detail: isSkillContext ? launchedSkill || skillContextName(text) : '',
       status: undefined,
       turnId: undefined,
       diffs: [],
@@ -368,22 +369,41 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
 /** Skillツールの結果に返る文面（実測、issue #1968）。 */
 const SKILL_LAUNCH_PREFIX = 'Launching skill:';
 
+/** 発言・応答の項目。Skillの起動結果を遡って探すのはここまで（それより前は別の呼び出し）。 */
+const LAUNCH_SEARCH_STOP_KINDS = new Set(['userMessage', 'agentMessage', 'reasoning']);
+
 /**
- * 直前の項目がSkillツールの起動結果なら、そのskill名（issue #1968）。違えば空文字。
- * 割り込みの通知など他の合成メッセージは、直前がこの結果でない限り巻き込まない。
+ * まだ本文を受け取っていないSkillツールの起動結果のうち、最も古いもののskill名
+ * （issue #1968）。無ければ空文字。
+ *
+ * 他のツールと並列に呼ぶと、Skillの項目と本文の間に他のツールの項目が挟まる（issue #1971）。
+ * 発言・応答に当たるまで遡り、その間の起動結果と本文（`skillContext`）を数える。本文は
+ * 起動した順に1件ずつ届くため、起動のうち先頭から本文の件数分は受け取り済みとみなす。
+ * 割り込みの通知など他の合成メッセージは、受け取り待ちの起動が無い限り巻き込まない。
  */
 function launchedSkillName(items: readonly ChatItem[]): string {
-  const last = items[items.length - 1];
-  // 見出しは `describeTool` の `Skill: <名前>`。他のMCPツールの出力が同じ文面で始まっても拾わない
-  if (
-    last === undefined ||
-    last.kind !== 'mcpToolCall' ||
-    !last.detail.startsWith('Skill') ||
-    !last.text.startsWith(SKILL_LAUNCH_PREFIX)
-  ) {
-    return '';
+  /** 遡った順（新しい順）の起動結果のskill名。 */
+  const launches: string[] = [];
+  let bodies = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item === undefined || LAUNCH_SEARCH_STOP_KINDS.has(item.kind)) {
+      break;
+    }
+    if (item.kind === 'skillContext') {
+      bodies += 1;
+      continue;
+    }
+    // 見出しは `describeTool` の `Skill: <名前>`。他のMCPツールの出力が同じ文面で始まっても拾わない
+    if (
+      item.kind === 'mcpToolCall' &&
+      item.detail.startsWith('Skill') &&
+      item.text.startsWith(SKILL_LAUNCH_PREFIX)
+    ) {
+      launches.push(item.text.slice(SKILL_LAUNCH_PREFIX.length).trim());
+    }
   }
-  return last.text.slice(SKILL_LAUNCH_PREFIX.length).trim();
+  return launches[launches.length - 1 - bodies] ?? '';
 }
 
 /** `--include-partial-messages` のデルタ。同じブロックへ書き足していく。 */
