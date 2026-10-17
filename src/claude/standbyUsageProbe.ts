@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { killWithEscalation } from '../process/childProcess';
 import type { Logger } from '../log';
 import { isStandbyStale, STANDBY_PROBE_INTERVAL_MS } from './accountPolicy';
@@ -26,13 +28,56 @@ const CLOSE_GRACE_MS = 2_000;
  */
 const AUTH_ENV_KEYS = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
+/** CLIのデバッグログの置き場所（`configDir` の中。計測後に一時ディレクトリごと消える）。 */
+const DEBUG_LOG = 'cli-debug.log';
+
+/**
+ * CLIの `/usage` は使用率の取得（`/api/oauth/usage`）に失敗すると、使用率の節を省いて
+ * code=0で終わる。stdoutからは失敗の理由が分からないので、デバッグログのうち取得と
+ * トークンの更新に関わる行だけを拾う（Issue #1958）。
+ */
+const DIAGNOSTIC_LINE =
+  /fetchUtilization|Failed to load usage data|OAuth refresh|Token refresh|oauth profile/;
+
+/** ログへ残す診断行の上限。同じ失敗の繰り返しでログを埋めないよう、末尾の数行だけにする。 */
+const DIAGNOSTIC_MAX_LINES = 6;
+
+/** 診断行1行の上限。 */
+const DIAGNOSTIC_LINE_CHARS = 300;
+
+/**
+ * CLIのデバッグログから使用率の取得の失敗理由を表す行を抜き出す。CLIはトークンを
+ * 伏せて書くが、念のためトークンらしい部分も伏せる。読めなければ `undefined`。
+ */
+export async function readUsageDiagnostics(path: string): Promise<string | undefined> {
+  const text = await readFile(path, 'utf8').catch(() => undefined);
+  if (text === undefined) {
+    return undefined;
+  }
+  const lines = text
+    .split('\n')
+    .filter((line) => DIAGNOSTIC_LINE.test(line))
+    .slice(-DIAGNOSTIC_MAX_LINES)
+    .map((line) => {
+      const masked = line
+        .replace(/sk-ant-[\w-]+/g, '[REDACTED]')
+        .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+        .trim();
+      return masked.length > DIAGNOSTIC_LINE_CHARS
+        ? `${masked.slice(0, DIAGNOSTIC_LINE_CHARS)}…`
+        : masked;
+    });
+  return lines.length === 0 ? '（該当する行なし）' : lines.join(' | ');
+}
+
 /**
  * `configDir` を `CLAUDE_CONFIG_DIR` とcwdにしてCLIの `/usage` を走らせ、使用率を読む。
  * cwdを一時ディレクトリにするのは、作業中のリポジトリの `.claude/` の設定やhookを読ませないため。
  * 打ち切ったときもプロセスが終わるまで待つ。終わる前に戻ると、CLIがローテーションした
  * 認証を書き終える前に、呼び出し側が書き戻しを判断してしまう。
  * stderrはトークンを含みうるので読まず、ログにも出さない。読み取れなかったときは、原因を
- * 調べられるようstdoutの先頭だけをログに残す（Issue #1958）。
+ * 調べられるようstdoutの先頭と、CLIのデバッグログのうち使用率の取得に関わる行だけを
+ * ログに残す（Issue #1958）。
  */
 export function measureUsageIn(
   claudePath: string,
@@ -45,14 +90,20 @@ export function measureUsageIn(
     for (const key of AUTH_ENV_KEYS) {
       delete env[key];
     }
+    const debugLog = join(configDir, DEBUG_LOG);
     // transcriptを残さない（Issue #1911）
-    const proc = spawn(claudePath, ['--print', '--no-session-persistence', '/usage'], {
-      cwd: configDir,
-      env,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    const proc = spawn(
+      claudePath,
+      ['--print', '--no-session-persistence', '--debug-file', debugLog, '/usage'],
+      {
+        cwd: configDir,
+        env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    );
 
     let out = '';
+    let finished = false;
     let settled = false;
     const settle = (value: UsageSlots | undefined): void => {
       if (!settled) {
@@ -80,16 +131,23 @@ export function measureUsageIn(
       }
     });
     const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
-      if (settled) {
+      if (settled || finished) {
         return;
       }
+      finished = true;
+      clearTimeout(timer);
       const slots = parseUsageSlots(out, Date.now());
-      if (slots === undefined) {
-        log.warn(
-          `待機中のアカウント「${id}」の使用率を読み取れませんでした（code=${String(code)}, signal=${String(signal)}）。stdout: ${logExcerpt(out)}`,
-        );
+      if (slots !== undefined) {
+        settle(slots);
+        return;
       }
-      settle(slots);
+      // 呼び出し側が一時ディレクトリを消す前に読む
+      void readUsageDiagnostics(debugLog).then((diagnostics) => {
+        log.warn(
+          `待機中のアカウント「${id}」の使用率を読み取れませんでした（code=${String(code)}, signal=${String(signal)}）。stdout: ${logExcerpt(out)} / CLIのログ: ${diagnostics ?? '（読めませんでした）'}`,
+        );
+        settle(undefined);
+      });
     };
     proc.on('close', finish);
     // CLIが残した孫プロセスがstdoutを握っていると `close` が来ない。CLI本体が終わっていれば
