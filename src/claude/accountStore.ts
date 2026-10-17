@@ -149,8 +149,11 @@ const CURRENT = '.current';
  * `@` はアカウントIDに使えないので `registeredIds()` に拾われない（Issue #1943）。
  */
 const PROBE_PREFIX = '@probe-';
-/** 一時的な `CLAUDE_CONFIG_DIR` の中でCLIが読む全体設定。 */
-const PROBE_GLOBAL_CONFIG = '.claude.json';
+/**
+ * `CLAUDE_CONFIG_DIR` を立てて起動したCLIが、その中で読む全体設定。待機中の計測の一時的な
+ * ディレクトリと、拡張の会話（`<claudeHome>` を `CLAUDE_CONFIG_DIR` にして起動する）で使う。
+ */
+const CONFIG_DIR_GLOBAL_CONFIG = '.claude.json';
 const RELOGIN_HINT = 'このアカウントは再ログインが要るかもしれません';
 /** ウィンドウ（拡張ホスト）をまたいで書き換えを1本にするロック。新規作成（wx）で取る。 */
 const LOCK = '.ext-op.lock';
@@ -412,6 +415,78 @@ export class ClaudeAccountStore {
   }
 
   /**
+   * CLIが全体設定に保存した直近の使用率（`cachedUsageUtilization`）を、稼働中の `expectedId`
+   * の `usage.json` へ写す（Issue #1964）。`/usage` が429で使用率の節を省いたときの代わりに使う。
+   *
+   * `~/.claude.json` と `<claudeHome>/.claude.json` の両方を見て、`accountUuid` が `expectedId`
+   * の同一性と一致するもののうち新しい方を使う。一致しなければ別のアカウントの値なので使わない。
+   * 記録時刻は保存値の取得時刻にし、`usage.json` の記録がそれ以上に新しければ書かない。
+   *
+   * @returns 写した値の取得時刻（epochミリ秒）。写さなければ `undefined`
+   */
+  async recordCachedUsage(expectedId: string): Promise<number | undefined> {
+    let recordedAt: number | undefined;
+    const result = await this.serialized(async () => {
+      if ((await this.currentId()) !== expectedId) {
+        return { ok: false, reason: '取得中にアカウントが切り替わったため記録しませんでした' };
+      }
+      const accountUuid = await this.accountUuidOf(expectedId);
+      if (accountUuid === undefined) {
+        return { ok: true };
+      }
+      let latest: CachedUsage | undefined;
+      for (const configPath of this.globalConfigPaths()) {
+        const buf = await readOptional(configPath).catch(() => undefined);
+        const cached = buf === undefined ? undefined : parseCachedUsage(parseJson(buf));
+        if (
+          cached !== undefined &&
+          cached.accountUuid === accountUuid &&
+          (latest === undefined || cached.fetchedAtMs > latest.fetchedAtMs)
+        ) {
+          latest = cached;
+        }
+      }
+      const saved = await this.readUsage(expectedId);
+      if (latest === undefined || (saved !== undefined && saved.recordedAt >= latest.fetchedAtMs)) {
+        return { ok: true };
+      }
+      await this.writeSecret(
+        join(this.slot(expectedId), USAGE),
+        usageRecord(latest.slots, latest.fetchedAtMs),
+      );
+      recordedAt = latest.fetchedAtMs;
+      return { ok: true };
+    });
+    if (!result.ok) {
+      throw new Error(result.reason);
+    }
+    return recordedAt;
+  }
+
+  /** `id` の `accountUuid`。profileで確かめた同一性が無ければ、`oauthAccount` の控えから読む。 */
+  private async accountUuidOf(id: string): Promise<string | undefined> {
+    const identity = (await this.readMeta(id)).identity;
+    if (identity !== undefined) {
+      return identity.accountUuid;
+    }
+    const saved = await readOptional(join(this.slot(id), OAUTH_ACCOUNT)).catch(() => undefined);
+    const uuid = saved === undefined ? undefined : asRecord(parseJson(saved))?.['accountUuid'];
+    return typeof uuid === 'string' && uuid !== '' ? uuid : undefined;
+  }
+
+  /**
+   * CLIが読みうる全体設定。`CLAUDE_CONFIG_DIR` 無しで起動したCLIは `globalConfigPath`、
+   * 拡張の会話のように `<claudeHome>` を `CLAUDE_CONFIG_DIR` にして起動したCLIは
+   * `<claudeHome>/.claude.json` を読む（Issue #1964）。同じファイルなら1つにする。
+   */
+  private globalConfigPaths(): string[] {
+    const inConfigDir = join(this.claudeHome, CONFIG_DIR_GLOBAL_CONFIG);
+    return resolvePath(inConfigDir) === resolvePath(this.globalConfigPath)
+      ? [this.globalConfigPath]
+      : [this.globalConfigPath, inConfigDir];
+  }
+
+  /**
    * 待機中のアカウントの使用率を計測し、`usage.json` へ記録する（Issue #1943）。
    *
    * CLIの `/usage` はライブの認証でしか動かないため、対象の認証ファイルを一時的な
@@ -500,7 +575,7 @@ export class ClaudeAccountStore {
     const probeCredentials = join(dir, CREDENTIALS);
     await writeFile(probeCredentials, saved, { mode: 0o600, flag: 'wx' });
     const config = oauthAccount === undefined ? {} : { oauthAccount };
-    await writeFile(join(dir, PROBE_GLOBAL_CONFIG), Buffer.from(`${JSON.stringify(config)}\n`), {
+    await writeFile(join(dir, CONFIG_DIR_GLOBAL_CONFIG),Buffer.from(`${JSON.stringify(config)}\n`), {
       mode: 0o600,
       flag: 'wx',
     });
@@ -893,6 +968,7 @@ export class ClaudeAccountStore {
    * `~/.claude.json` の `oauthAccount` を `id` のものへ差し替える（切り替えの最後）。控えが
    * あればそれを、無ければ記録した同一性から最小の形を作る。他のキーは保つ。差し替えられ
    * なくても切り替え自体は済んでいるので、`warning` を付けて `ok` で返す。
+   * `<claudeHome>/.claude.json` があれば、そちらも同じように差し替える（Issue #1964）。
    *
    * CLIは `~/.claude.json` を頻繁に書き換える。CLIと同じロック（`~/.claude.json.lock`）を取り、
    * その中で読み直して書く。CLIもロックの中で読み直してから自分の変更だけを当てるため、
@@ -919,39 +995,65 @@ export class ClaudeAccountStore {
               ? {}
               : { organizationName: identity.organizationName }),
           };
+    // 拡張の会話は `<claudeHome>` を `CLAUDE_CONFIG_DIR` にして起動し、そちらの全体設定を読む。
+    // 片方だけ差し替えると、CLIが保存する使用率が古いアカウントの `accountUuid` で記録される（Issue #1964）
+    const [, ...others] = this.globalConfigPaths();
+    let result = withWarning(
+      { ok: true },
+      await this.replaceOauthAccount(
+        this.globalConfigPath,
+        '~/.claude.json',
+        oauthAccount,
+        identity,
+        false,
+      ),
+    );
+    for (const other of others) {
+      result = withWarning(
+        result,
+        await this.replaceOauthAccount(other, shortenHome(other), oauthAccount, identity, true),
+      );
+    }
+    return result;
+  }
+
+  /**
+   * `configPath` の `oauthAccount` を差し替える。差し替えられなかったときは理由を返す。
+   * `optional` なら、ファイルが無いときは何もしない（CLIが作るまで読まれないため）。
+   */
+  private async replaceOauthAccount(
+    configPath: string,
+    label: string,
+    oauthAccount: Record<string, unknown>,
+    identity: AccountIdentity,
+    optional: boolean,
+  ): Promise<string | undefined> {
+    if (optional && !(await exists(configPath))) {
+      return undefined;
+    }
     try {
-      return await withCliConfigLock(this.globalConfigPath, async () => {
-        const info = await lstat(this.globalConfigPath);
+      return await withCliConfigLock(configPath, async () => {
+        const info = await lstat(configPath);
         if (info.isSymbolicLink()) {
-          return {
-            ok: true,
-            warning:
-              '~/.claude.jsonがシンボリックリンクのため、アカウント表示を差し替えませんでした',
-          };
+          return `${label}がシンボリックリンクのため、アカウント表示を差し替えませんでした`;
         }
-        const config = asRecord(parseJson(await readFile(this.globalConfigPath)));
+        const config = asRecord(parseJson(await readFile(configPath)));
         if (config === undefined) {
-          return {
-            ok: true,
-            warning: '~/.claude.jsonを解釈できないため、アカウント表示を差し替えませんでした',
-          };
+          return `${label}を解釈できないため、アカウント表示を差し替えませんでした`;
         }
         const present = asRecord(config['oauthAccount']);
         if (present !== undefined && matchesIdentity(present, identity)) {
-          return { ok: true };
+          return undefined;
         }
         await replaceFile(
-          this.globalConfigPath,
+          configPath,
           Buffer.from(`${JSON.stringify({ ...config, oauthAccount }, null, 2)}\n`),
           info.mode & 0o777,
         );
-        return { ok: true };
+        return undefined;
       });
     } catch (e) {
-      return {
-        ok: true,
-        warning: `~/.claude.jsonのアカウント表示を差し替えられませんでした: ${errorMessage(e)}`,
-      };
+      return `${label}のアカウント表示を差し替えられませんでした: ${errorMessage(e)}`;
     }
   }
 
@@ -1396,6 +1498,51 @@ function usageRecord(slots: UsageSlots, nowMs: number): Buffer {
     limits[USAGE_KEYS.weekly] = slots.weekly;
   }
   return Buffer.from(`${JSON.stringify({ t: nowMs, limits })}\n`);
+}
+
+/** CLIが全体設定へ保存した直近の使用率（Issue #1964）。 */
+interface CachedUsage {
+  fetchedAtMs: number;
+  accountUuid: string;
+  slots: UsageSlots;
+}
+
+/**
+ * 全体設定の `cachedUsageUtilization`（`{ fetchedAtMs, accountUuid, utilization: { five_hour:
+ * { utilization, resets_at }, seven_day: ... } }`、`resets_at` はISO文字列）を読む。
+ * どちらの枠も読めなければ `undefined`。
+ */
+function parseCachedUsage(config: unknown): CachedUsage | undefined {
+  const cached = asRecord(asRecord(config)?.['cachedUsageUtilization']);
+  const fetchedAtMs = cached?.['fetchedAtMs'];
+  const accountUuid = cached?.['accountUuid'];
+  const utilization = asRecord(cached?.['utilization']);
+  if (
+    typeof fetchedAtMs !== 'number' ||
+    !Number.isFinite(fetchedAtMs) ||
+    typeof accountUuid !== 'string' ||
+    accountUuid === '' ||
+    utilization === undefined
+  ) {
+    return undefined;
+  }
+  const slots: UsageSlots = {
+    fiveHour: parseCachedSlot(utilization['five_hour']),
+    weekly: parseCachedSlot(utilization['seven_day']),
+  };
+  return slots.fiveHour === undefined && slots.weekly === undefined
+    ? undefined
+    : { fetchedAtMs, accountUuid, slots };
+}
+
+function parseCachedSlot(value: unknown): UsageSlot | undefined {
+  const raw = asRecord(value);
+  const pct = raw?.['utilization'];
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) {
+    return undefined;
+  }
+  const resetsAt = typeof raw?.['resets_at'] === 'string' ? Date.parse(raw['resets_at']) : NaN;
+  return { pct, resetsAt: Number.isNaN(resetsAt) ? undefined : resetsAt };
 }
 
 /** 結果に付随する理由を足す。失敗なら `reason` へ続け、成功なら `warning` へ続ける。 */

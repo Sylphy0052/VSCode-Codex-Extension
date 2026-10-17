@@ -24,7 +24,7 @@ export interface AutoSwitchConfig {
 export interface AutoSwitchPorts {
   store: Pick<
     ClaudeAccountStore,
-    'list' | 'currentId' | 'switchTo' | 'recordUsage' | 'recordLimitHit'
+    'list' | 'currentId' | 'switchTo' | 'recordUsage' | 'recordCachedUsage' | 'recordLimitHit'
   >;
   config(): AutoSwitchConfig;
   /** 利用者へ知らせる（切り替えた・切り替え先が無い・切り替えに失敗した）。 */
@@ -73,6 +73,17 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     const result = await this.ports.store.recordUsage(id, slots, nowMs);
     if (!result.ok) {
       this.ports.warn(`使用率を記録できませんでした: ${result.reason}`);
+    }
+  }
+
+  async recordCached(id: string): Promise<number | undefined> {
+    try {
+      return await this.ports.store.recordCachedUsage(id);
+    } catch (e) {
+      this.ports.warn(
+        `保存された使用率を記録できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return undefined;
     }
   }
 
