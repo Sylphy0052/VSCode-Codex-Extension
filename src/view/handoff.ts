@@ -1161,7 +1161,8 @@ function lastCreatedNumber(
 
 export interface MilestonePromptInput {
   trigger: HandoffTrigger;
-  cwd: string;
+  /** 作業ディレクトリ。無ければ `前提:` を書けないので最小プロンプトにしない。 */
+  cwd: string | undefined;
   /** このセッションで作ったIssue・PR/MR（`extractCreatedReferences`）。 */
   createdReferences: ReadonlyArray<CreatedReference>;
   /** 引き継ぎ先のmodel/effortが引き継ぎ元から変わるときだけ渡す。 */
@@ -1173,15 +1174,18 @@ export interface MilestonePromptInput {
  *
  * 節目の後は前の会話の文脈が無くても続けられるため、replay・事実節・受領確認の指示を付けず、
  * `前提:` と `次:` の2行だけにする。model/effortが変わるときだけ3行目に載せる。
- * 契機が節目でないとき、`次:` に要る番号が取れないときは `undefined`（従来の開始プロンプトへ戻す）。
+ * 契機が節目でないとき、cwdか `次:` に要る番号が取れないときは `undefined`（従来の開始プロンプトへ戻す）。
  */
 export function buildMilestonePrompt(input: MilestonePromptInput): string | undefined {
   const { trigger, createdReferences } = input;
-  if (trigger.kind !== 'milestone') {
+  if (trigger.kind !== 'milestone' || input.cwd === undefined || input.cwd === '') {
     return undefined;
   }
-  // GitLabのMRは `!` で番号を書く
-  const isGitLab = /(?:^|[\s;&|(]|-l?c\s+['"]?)glab\s/u.test(trigger.command);
+  // GitLabのMRは `!` で番号を書く。レビューのskill・subagentはコマンドに `glab` が出ないため、
+  // 作ったMRのURLでも判定する
+  const isGitLab =
+    /(?:^|[\s;&|(]|-l?c\s+['"]?)glab\s/u.test(trigger.command) ||
+    createdReferences.some((reference) => reference.url.includes('/merge_requests/'));
   const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
   let next: string | undefined;
   switch (trigger.milestone) {
