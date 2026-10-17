@@ -24,6 +24,7 @@ import {
   isSkillContextEntry,
   normalizeTodos,
   skillContextName,
+  slashCommandMessageText,
   TODO_WRITE_TOOL,
   toolUseResultOf,
 } from './transcript';
@@ -276,11 +277,20 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  * このイベントに付く目印はセッション履歴側と違い、`isSynthetic: true` だけで `isMeta` も
  * `sourceToolUseID` も付かない（実測、issue #934）。他の合成メッセージ
  * （`<local-command-caveat>`・cross-session-message等）と混同しないよう
- * `isSkillContextEntry` で絞り込み、通常のuserMessageと区別してfold対象
- * （`skillContext`、chatScript.tsのFOLD_KINDS）にする。
+ * `isSkillContextEntry` で絞り込み、通常のuserMessageと区別して `skillContext` にする
+ * （会話には描画しない。chatScript.tsのHIDDEN_KINDS、issue #1968）。
+ *
+ * plugin skillの本文は `Base directory for this skill:` で始まらないため、Skillツールの
+ * 結果（`Launching skill: <名前>`）の直後に来た合成メッセージも本文として扱う（issue #1968）。
+ *
+ * `/<名前>` で送った発言は、`content` が配列でなく制御タグだけの文字列で返る
+ * （CLI 2.1.296で実測、issue #1968）。履歴の読み直しと同じく `/名前 引数` に組み立て直す。
+ * 文字列の `content` は圧縮後の要約でも届くため、slash commandのときだけ受ける。
  */
 function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
-  const content = list(rec(event['message'])?.['content']);
+  const rawContent = rec(event['message'])?.['content'];
+  const slashText = typeof rawContent === 'string' ? slashCommandMessageText(rawContent) : '';
+  const content = slashText !== '' ? [{ type: 'text', text: slashText }] : list(rawContent);
   const toolResultCount = content.filter((part) => str(part['type']) === 'tool_result').length;
 
   let items = state.items;
@@ -335,14 +345,15 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
     .map((part) => str(part['text']))
     .join('');
   const images = readClaudeResultImages(content, '送った画像');
-  const isSkillContext = isSkillContextEntry(event, text);
+  const launchedSkill = event['isSynthetic'] === true ? launchedSkillName(items) : '';
+  const isSkillContext = isSkillContextEntry(event, text) || launchedSkill !== '';
   if (text !== '' || images.length > 0) {
     items = upsert(items, {
       id: str(event['uuid']) || `user-${items.length}`,
       kind: isSkillContext ? 'skillContext' : 'userMessage',
       text,
-      // 畳んだ見出しでもどのskillが動いたかは判るようにする（issue #889）
-      detail: isSkillContext ? skillContextName(text) : '',
+      // どのskillが動いたかを項目に残す（issue #889）
+      detail: isSkillContext ? skillContextName(text) || launchedSkill : '',
       status: undefined,
       turnId: undefined,
       diffs: [],
@@ -352,6 +363,27 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
   }
 
   return items === state.items ? state : { ...state, items };
+}
+
+/** Skillツールの結果に返る文面（実測、issue #1968）。 */
+const SKILL_LAUNCH_PREFIX = 'Launching skill:';
+
+/**
+ * 直前の項目がSkillツールの起動結果なら、そのskill名（issue #1968）。違えば空文字。
+ * 割り込みの通知など他の合成メッセージは、直前がこの結果でない限り巻き込まない。
+ */
+function launchedSkillName(items: readonly ChatItem[]): string {
+  const last = items[items.length - 1];
+  // 見出しは `describeTool` の `Skill: <名前>`。他のMCPツールの出力が同じ文面で始まっても拾わない
+  if (
+    last === undefined ||
+    last.kind !== 'mcpToolCall' ||
+    !last.detail.startsWith('Skill') ||
+    !last.text.startsWith(SKILL_LAUNCH_PREFIX)
+  ) {
+    return '';
+  }
+  return last.text.slice(SKILL_LAUNCH_PREFIX.length).trim();
 }
 
 /** `--include-partial-messages` のデルタ。同じブロックへ書き足していく。 */
