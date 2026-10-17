@@ -432,6 +432,8 @@ export class ClaudeAccountStore {
    * `~/.claude.json` と `<claudeHome>/.claude.json` の両方を見て、`accountUuid` が `expectedId`
    * の同一性と一致するもののうち新しい方を使う。一致しなければ別のアカウントの値なので使わない。
    * 記録時刻は保存値の取得時刻にし、`usage.json` の記録がそれ以上に新しければ書かない。
+   * 保存値に無い枠は `usage.json` の既存の記録から引き継ぐ（消さない）。記録時刻は1つなので、
+   * 引き継いだ枠は古い値のまま新しい時刻の記録に混ざる。
    *
    * @returns 写した値の取得時刻（epochミリ秒）。写さなければ `undefined`
    */
@@ -463,7 +465,13 @@ export class ClaudeAccountStore {
       }
       await this.writeSecret(
         join(this.slot(expectedId), USAGE),
-        usageRecord(latest.slots, latest.fetchedAtMs),
+        usageRecord(
+          {
+            fiveHour: latest.slots.fiveHour ?? saved?.fiveHour,
+            weekly: latest.slots.weekly ?? saved?.weekly,
+          },
+          latest.fetchedAtMs,
+        ),
       );
       recordedAt = latest.fetchedAtMs;
       return { ok: true };
