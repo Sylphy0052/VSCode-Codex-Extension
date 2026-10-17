@@ -1125,27 +1125,39 @@ export function detectHandoffMilestone(
   return undefined;
 }
 
-/** レビュー・mergeのコマンドで、サブコマンドより後ろの部分。対象の番号はここから拾う。 */
-const TARGET_SUBCOMMAND = /\b(?:pr|mr)\s+(?:merge|review|approve)\b(.*)$/u;
+/** コマンドの先頭にある `glab`（`COMMAND_HEAD` と同じく、引数中の文言は拾わない）。 */
+const GLAB_COMMAND = new RegExp(String.raw`${COMMAND_HEAD}glab\s`, 'u');
+/** レビューのコマンドで、サブコマンドより後ろの部分（次のコマンドの区切りまで）。 */
+const REVIEW_ARGUMENTS = /\b(pr\s+review|mr\s+approve)\b([^;&|]*)/u;
 /** 番号の書き方（`123` / `#123` / `!123` / PR・MRのURL）。 */
-const TARGET_NUMBER = /^(?:[#!]?(\d+)|https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)\S*)$/u;
+const TARGET_NUMBER =
+  /^(?:[#!]?(\d+)|https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)(?:[/?#]\S*)?)$/u;
 
 /**
- * `gh pr merge 123` / `glab mr approve !123` のようなコマンドから対象の番号を拾う。
- * 引用符で始まる引数（`--body "… 12 …"`）より後ろは見ない。取れなければ `undefined`。
+ * 承認したレビューのコマンド（`gh pr review 12 --approve` / `glab mr approve !12`）から対象の
+ * 番号を拾う。承認でないレビュー（`--request-changes` / `--comment`）と、番号の無いコマンドは
+ * `undefined`。引用符で始まる引数（`--body "… 12 …"`）より後ろと、200字で切られた末尾の
+ * 断片（`…` を含む）は見ない。
  */
-function targetNumberOf(command: string): string | undefined {
-  const rest = TARGET_SUBCOMMAND.exec(command)?.[1];
-  if (rest === undefined) {
+function approvedReviewNumberOf(command: string): string | undefined {
+  const match = REVIEW_ARGUMENTS.exec(command);
+  if (match === null) {
     return undefined;
   }
-  for (const token of rest.trim().split(/\s+/u)) {
-    if (/^['"]/u.test(token)) {
+  const tokens = (match[2] ?? '').trim().split(/\s+/u);
+  const isApproved =
+    match[1]?.startsWith('mr') === true ||
+    tokens.some((token) => token === '--approve' || token === '-a');
+  if (!isApproved) {
+    return undefined;
+  }
+  for (const token of tokens) {
+    if (/^['"]/u.test(token) || token.includes('…')) {
       return undefined;
     }
-    const match = TARGET_NUMBER.exec(token);
-    if (match !== null) {
-      return match[1] ?? match[2];
+    const number = TARGET_NUMBER.exec(token);
+    if (number !== null) {
+      return number[1] ?? number[2];
     }
   }
   return undefined;
@@ -1173,7 +1185,8 @@ export interface MilestonePromptInput {
  * 作業の節目での引き継ぎに渡す最小の開始プロンプト（Issue #1967）。
  *
  * 節目の後は前の会話の文脈が無くても続けられるため、replay・事実節・受領確認の指示を付けず、
- * `前提:` と `次:` の2行だけにする。model/effortが変わるときだけ3行目に載せる。
+ * `前提:` と `次:` の2行だけにする。model/effortが変わるときだけ3行目に載せる。系列の在処
+ * （`replay.marker`）も付けないため、引き継ぎの系列は節目で切れる。
  * 契機が節目でないとき、cwdか `次:` に要る番号が取れないときは `undefined`（従来の開始プロンプトへ戻す）。
  */
 export function buildMilestonePrompt(input: MilestonePromptInput): string | undefined {
@@ -1184,7 +1197,7 @@ export function buildMilestonePrompt(input: MilestonePromptInput): string | unde
   // GitLabのMRは `!` で番号を書く。レビューのskill・subagentはコマンドに `glab` が出ないため、
   // 作ったMRのURLでも判定する
   const isGitLab =
-    /(?:^|[\s;&|(]|-l?c\s+['"]?)glab\s/u.test(trigger.command) ||
+    GLAB_COMMAND.test(trigger.command) ||
     createdReferences.some((reference) => reference.url.includes('/merge_requests/'));
   const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
   let next: string | undefined;
@@ -1200,8 +1213,9 @@ export function buildMilestonePrompt(input: MilestonePromptInput): string | unde
       break;
     }
     case 'reviewed': {
-      const number =
-        targetNumberOf(trigger.command) ?? lastCreatedNumber(createdReferences, 'pr');
+      // レビューの指摘は旧セッションの会話にしか無い。指摘が残りうるレビュー（承認でないもの、
+      // subagent・skillによるもの）は従来の開始プロンプトで引き継ぐ
+      const number = approvedReviewNumberOf(trigger.command);
       next = number === undefined ? undefined : `${change(number)}をmergeしcleanup`;
       break;
     }
