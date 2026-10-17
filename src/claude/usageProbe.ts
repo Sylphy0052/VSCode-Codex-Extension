@@ -18,6 +18,8 @@ import { parseUsageReport, parseUsageSlots, type UsageSlots } from './usageText'
 
 /** 応答が返らないまま居座らせない。使用量は無くても困らない情報なので短く切る。 */
 const TIMEOUT_MS = 20_000;
+/** `readFresh`が、別の取得が先に走っていたときに待って読み直す上限回数。 */
+const READ_FRESH_ATTEMPTS = 3;
 
 /** 失敗の理由としてログへ出す、stdout・stderrそれぞれの長さの上限（Issue #1939）。 */
 const LOG_EXCERPT_CHARS = 300;
@@ -121,6 +123,8 @@ function intervalAfter(failures: number, highestPct = 0): number {
 export class ClaudeUsageProbe {
   /** この時刻までは`read`しても何もしない。 */
   private nextReadAt = 0;
+  /** 他のウィンドウが取得権を持っていて取れなかったとき、この時刻までは強制取得でも再試行しない。 */
+  private claimRetryAt = 0;
   /** 共有先が無いときに使う、ウィンドウ内での連続失敗の回数。 */
   private failures = 0;
   private running = false;
@@ -194,17 +198,24 @@ export class ClaudeUsageProbe {
    */
   requestFresh(): void {
     this.freshRequested = true;
-    this.nextReadAt = 0;
   }
 
   /**
    * `requestFresh`してから読む。取得中なら、その取得（切り替え前のアカウントのものでありうる）
-   * が終わるのを待ってから読み直す。
+   * が終わるのを待ってから読み直す。待っている間に別の取得（ポーリング）が始まって
+   * `read`が何もしなかったときは、その取得も待って読み直す（Issue #1959）。
+   * 他のウィンドウが取得権を持っているときの`undefined`は、呼び出し側が扱う。
    */
   async readFresh(now: () => number = Date.now): Promise<ChatUsage | undefined> {
     this.requestFresh();
-    await this.inFlight;
-    return this.read(now());
+    for (let attempt = 0; attempt < READ_FRESH_ATTEMPTS; attempt++) {
+      await this.inFlight;
+      const usage = await this.read(now());
+      if (usage !== undefined || !this.running) {
+        return usage;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -215,7 +226,12 @@ export class ClaudeUsageProbe {
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
   read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    if (this.running || now < this.nextReadAt) {
+    // 強制取得は通常の間隔を無視するが、取得権を取れなかった後の再試行の間隔は守る
+    if (
+      this.running ||
+      now < this.claimRetryAt ||
+      (now < this.nextReadAt && !this.freshRequested)
+    ) {
       return Promise.resolve(undefined);
     }
     this.running = true;
@@ -240,9 +256,10 @@ export class ClaudeUsageProbe {
       // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
       claimed = await this.claim(now);
       if (!claimed) {
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        this.claimRetryAt = now + RETRY_INTERVAL_MS;
         return undefined;
       }
+      this.claimRetryAt = 0;
       // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
       const again = forced ? undefined : await this.readFreshShared(now);
       if (again !== undefined) {

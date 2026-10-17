@@ -1598,7 +1598,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const askImageGenerationConsent = async (prompt: string): Promise<boolean> => {
     const once = '今回だけ許可';
     const forWindow = 'このウィンドウ中は許可';
-    const shown = prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt;
+    // 指示文は外部由来。改行で本文を偽装されないよう1行にする
+    const shown = sanitizeInlineText(prompt, 200);
     const choice = await vscode.window.showWarningMessage(
       `エージェントがChatGPT（Web）で画像を生成しようとしています。ログイン中のChromeを操作し、生成枠を使います。\n指示: ${shown}`,
       { modal: true },
