@@ -23,6 +23,10 @@ export class TurnEndAnswererNudge {
   private judgedMessageId: string | undefined;
   /** `reset`のたびに進める。判定の間に次の発言・イベントが送られたら、古い判定では促さない。 */
   private epoch = 0;
+  /** runの破棄後か。破棄後は判定しない（Issue #1918）。 */
+  private disposed = false;
+  /** 進行中のデバウンスの待ちを打ち切る関数。 */
+  private readonly pendingWaits = new Set<() => void>();
 
   /**
    * @param debounceMs 待機へ戻ってから判定を始めるまでの待ち。この間に次の発言・イベントが送られたら
@@ -38,6 +42,31 @@ export class TurnEndAnswererNudge {
   }
 
   /**
+   * runの破棄（キャンセル・完了後のteardown）で呼ぶ（Issue #1918）。デバウンスの待ちを打ち切り、
+   * 以後の判定もしない。呼ばないと、破棄後に待ちが明けて判定が1回走り、短命CLIを起動しうる。
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.epoch += 1;
+    for (const cancel of [...this.pendingWaits]) {
+      cancel();
+    }
+  }
+
+  /** `debounceMs`だけ待つ。`dispose`で打ち切られたらその時点で明ける。 */
+  private wait(): Promise<void> {
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        this.pendingWaits.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, this.debounceMs);
+      this.pendingWaits.add(done);
+    });
+  }
+
+  /**
    * 待機へ戻ったときに呼ぶ。`deliver`は促しを送れたら`true`を返す（ターンの最中や引き継ぎ中など、
    * 送れない状態なら送らずに`false`）。同じ発言は二度判定しない。
    */
@@ -47,7 +76,7 @@ export class TurnEndAnswererNudge {
     deliver: (text: string) => boolean,
   ): Promise<void> {
     const message = lastAgentMessage(items);
-    if (this.nudged || message === undefined || message.text.trim() === '') {
+    if (this.disposed || this.nudged || message === undefined || message.text.trim() === '') {
       return;
     }
     if (message.id === this.judgedMessageId) {
@@ -58,8 +87,8 @@ export class TurnEndAnswererNudge {
     this.judgedMessageId = message.id;
     const epoch = this.epoch;
     if (this.debounceMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.debounceMs));
-      // 待つ間に次の発言・イベントが送られた、または新しい出力の判定が始まった
+      await this.wait();
+      // 待つ間に次の発言・イベントが送られた、新しい出力の判定が始まった、またはrunが破棄された
       if (epoch !== this.epoch || this.nudged || this.judgedMessageId !== message.id) {
         // 判定せずに退いた発言は判定済みにしない。次のターンが新しい発言を出さずに終わったとき、
         // 同じ発言をもう一度判定にかけられるようにする

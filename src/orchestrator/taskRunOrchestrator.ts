@@ -501,6 +501,7 @@ export class TaskRunOrchestrator {
     }
     this.live.delete(runId);
     this.deps.server.unregister(live.token);
+    live.answererNudge.dispose();
     live.session.dispose();
     this.deps.onDidChange();
   }
@@ -509,6 +510,7 @@ export class TaskRunOrchestrator {
     this.disposed = true;
     for (const live of this.live.values()) {
       this.deps.server.unregister(live.token);
+      live.answererNudge.dispose();
       live.session.dispose();
     }
     this.live.clear();
