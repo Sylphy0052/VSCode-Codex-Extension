@@ -403,7 +403,9 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
           `（${snapshot.cpu.method}） / メモリ ${prev?.memoryLevel ?? 'ok'} -> ${snapshot.memoryLevel}` +
           ` / 新規開始 ${snapshot.startPolicy}`,
       );
-      // pauseの効果はrunの工程で変わるため、本文はrunごとに作る（Issue #1807）
+    },
+    // 下がった側は続いてから知らせる（Issue #1981）。pauseの効果はrunの工程で変わるため、本文はrunごとに作る（Issue #1807）
+    onNotify: (prev, snapshot) => {
       orchestrator.notifyResourcePressure((runId) => describeResourceChange(prev, snapshot, runId));
     },
     onSampled: (snapshot) => {
