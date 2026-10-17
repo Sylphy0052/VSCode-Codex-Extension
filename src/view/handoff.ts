@@ -1127,8 +1127,12 @@ export function detectHandoffMilestone(
 
 /** コマンドの先頭にある `glab`（`COMMAND_HEAD` と同じく、引数中の文言は拾わない）。 */
 const GLAB_COMMAND = new RegExp(String.raw`${COMMAND_HEAD}glab\s`, 'u');
-/** レビューのコマンドで、サブコマンドより後ろの部分（次のコマンドの区切りまで）。 */
-const REVIEW_ARGUMENTS = /\b(pr\s+review|mr\s+approve)\b([^;&|]*)/u;
+/**
+ * レビューのコマンドで、サブコマンドより後ろの部分。次のコマンドの区切りか引用符までに限る。
+ * 引用符で切ることで、`--body "… --approve …"` の中身と、Codexが包む `bash -lc '…'` の
+ * 閉じ引用符を見ない。
+ */
+const REVIEW_ARGUMENTS = /\b(pr\s+review|mr\s+approve)\b([^;&|'"]*)/u;
 /** 番号の書き方（`123` / `#123` / `!123` / PR・MRのURL）。 */
 const TARGET_NUMBER =
   /^(?:[#!]?(\d+)|https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)(?:[/?#]\S*)?)$/u;
@@ -1136,8 +1140,7 @@ const TARGET_NUMBER =
 /**
  * 承認したレビューのコマンド（`gh pr review 12 --approve` / `glab mr approve !12`）から対象の
  * 番号を拾う。承認でないレビュー（`--request-changes` / `--comment`）と、番号の無いコマンドは
- * `undefined`。引用符で始まる引数（`--body "… 12 …"`）より後ろと、200字で切られた末尾の
- * 断片（`…` を含む）は見ない。
+ * `undefined`。200字で切られた末尾の断片（`…` を含む）は見ない。
  */
 function approvedReviewNumberOf(command: string): string | undefined {
   const match = REVIEW_ARGUMENTS.exec(command);
@@ -1152,7 +1155,7 @@ function approvedReviewNumberOf(command: string): string | undefined {
     return undefined;
   }
   for (const token of tokens) {
-    if (/^['"]/u.test(token) || token.includes('…')) {
+    if (token.includes('…')) {
       return undefined;
     }
     const number = TARGET_NUMBER.exec(token);
