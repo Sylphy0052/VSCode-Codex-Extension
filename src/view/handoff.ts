@@ -1606,6 +1606,38 @@ export function offersInsteadOfAutoHandoff(
 }
 
 /**
+ * 分類器・Reflexを起動しても、結果が同じターンの提案済みで黙って捨てられると分かるか
+ * （Issue #1949）。
+ *
+ * 起動の結果として成り立つ契機のうち、`offersInsteadOfAutoHandoff` の対象外は
+ * `softThreshold`（残量が `softThresholdPercent` 以下のときだけ成立）と
+ * `profileChanged`（`onProfileChange` のときだけ成立）である。この2つが成立しえず、
+ * 同じターンで提案を出し終えていれば、`assistantSuggested` が出ても `requestHandoff` が
+ * 提案の重複として何もせず返すため、起動の費用だけが無駄になる。
+ *
+ * 提案をまだ出していないターンでは、結果次第で提案が出るので打ち切らない。
+ */
+export function probeIsRedundantAfterOffer(input: {
+  action: AutoHandoffBoundaryAction;
+  remainingPercent: number | undefined;
+  softThresholdPercent: number;
+  onProfileChange: boolean;
+  offeredTurnSeq: number | undefined;
+  turnCompletionSeq: number;
+}): boolean {
+  if (input.action !== 'offer' || input.onProfileChange) {
+    return false;
+  }
+  if (
+    input.remainingPercent !== undefined &&
+    input.remainingPercent <= input.softThresholdPercent
+  ) {
+    return false;
+  }
+  return input.offeredTurnSeq === input.turnCompletionSeq;
+}
+
+/**
  * `waitForDestinationResponse` が必要とする最小の形。Codex/Claude Codeのパネルは
  * どちらも満たす。
  */
