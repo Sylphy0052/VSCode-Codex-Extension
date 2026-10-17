@@ -12,6 +12,7 @@ import {
   findStageGate,
   type GateJudgeQuestion,
 } from '../../src/orchestrator/taskRunGates';
+import { TaskRunMergeKeys } from '../../src/orchestrator/taskRunMergeKey';
 import { addStageQuestion, findStageQuestion } from '../../src/orchestrator/taskRunQuestions';
 import type { StageQuestion, TaskRun, TaskRunEngine } from '../../src/orchestrator/taskRunState';
 import { TaskStageRunner, type TaskStageRunnerDeps } from '../../src/orchestrator/taskStageRunner';
@@ -78,6 +79,7 @@ function setup(initial: TaskRun, judges: Judges) {
   const deps = {
     store,
     now: () => FIXTURE_NOW,
+    mergeKeys: new TaskRunMergeKeys(),
     ...judges,
   } as unknown as TaskStageRunnerDeps;
   const runner = new TaskStageRunner(deps);
