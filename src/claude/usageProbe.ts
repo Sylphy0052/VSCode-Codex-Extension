@@ -156,9 +156,7 @@ export class ClaudeUsageProbe {
       }
       await this.accounts.onProbed?.(slots, now);
     } catch (e) {
-      this.log.warn(
-        `使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      this.log.warn(`使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -277,7 +275,7 @@ export class ClaudeUsageProbe {
       });
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
-      } else if (startedAccount !== undefined) {
+      } else if (usage === undefined && startedAccount !== undefined) {
         await this.recordCached(startedAccount);
       }
       return usage;

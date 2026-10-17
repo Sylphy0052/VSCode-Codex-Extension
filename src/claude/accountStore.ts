@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   link,
   rename,
   rm,
@@ -435,7 +436,7 @@ export class ClaudeAccountStore {
         return { ok: true };
       }
       let latest: CachedUsage | undefined;
-      for (const configPath of this.globalConfigPaths()) {
+      for (const configPath of await this.globalConfigPaths()) {
         const buf = await readOptional(configPath).catch(() => undefined);
         const cached = buf === undefined ? undefined : parseCachedUsage(parseJson(buf));
         if (
@@ -477,11 +478,13 @@ export class ClaudeAccountStore {
   /**
    * CLIが読みうる全体設定。`CLAUDE_CONFIG_DIR` 無しで起動したCLIは `globalConfigPath`、
    * 拡張の会話のように `<claudeHome>` を `CLAUDE_CONFIG_DIR` にして起動したCLIは
-   * `<claudeHome>/.claude.json` を読む（Issue #1964）。同じファイルなら1つにする。
+   * `<claudeHome>/.claude.json` を読む（Issue #1964）。シンボリックリンクを辿って同じファイル
+   * なら1つにする。先頭は常に `globalConfigPath`。
    */
-  private globalConfigPaths(): string[] {
+  private async globalConfigPaths(): Promise<string[]> {
     const inConfigDir = join(this.claudeHome, CONFIG_DIR_GLOBAL_CONFIG);
-    return resolvePath(inConfigDir) === resolvePath(this.globalConfigPath)
+    const real = (p: string): Promise<string> => realpath(p).catch(() => resolvePath(p));
+    return (await real(inConfigDir)) === (await real(this.globalConfigPath))
       ? [this.globalConfigPath]
       : [this.globalConfigPath, inConfigDir];
   }
@@ -575,10 +578,14 @@ export class ClaudeAccountStore {
     const probeCredentials = join(dir, CREDENTIALS);
     await writeFile(probeCredentials, saved, { mode: 0o600, flag: 'wx' });
     const config = oauthAccount === undefined ? {} : { oauthAccount };
-    await writeFile(join(dir, CONFIG_DIR_GLOBAL_CONFIG),Buffer.from(`${JSON.stringify(config)}\n`), {
-      mode: 0o600,
-      flag: 'wx',
-    });
+    await writeFile(
+      join(dir, CONFIG_DIR_GLOBAL_CONFIG),
+      Buffer.from(`${JSON.stringify(config)}\n`),
+      {
+        mode: 0o600,
+        flag: 'wx',
+      },
+    );
     const lock = join(this.accountsDir, LOCK);
     const heartbeat = setInterval(() => {
       const now = new Date();
@@ -997,7 +1004,7 @@ export class ClaudeAccountStore {
           };
     // 拡張の会話は `<claudeHome>` を `CLAUDE_CONFIG_DIR` にして起動し、そちらの全体設定を読む。
     // 片方だけ差し替えると、CLIが保存する使用率が古いアカウントの `accountUuid` で記録される（Issue #1964）
-    const [, ...others] = this.globalConfigPaths();
+    const [, ...others] = await this.globalConfigPaths();
     let result = withWarning(
       { ok: true },
       await this.replaceOauthAccount(
