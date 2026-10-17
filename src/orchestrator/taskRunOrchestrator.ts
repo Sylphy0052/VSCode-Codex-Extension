@@ -1,4 +1,4 @@
-import type { ChatState } from '../appserver/chatState';
+import type { ChatItem, ChatState } from '../appserver/chatState';
 import { MESSAGING_MCP_SERVER_NAME, type McpToolDefinition } from './messaging';
 import {
   buildOrchestratorConfig,
@@ -24,6 +24,7 @@ import {
   AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS,
   formatTaskRunList,
   formatTaskRunState,
+  formatTaskRunSummary,
   parseTaskRunOrchestratorCall,
   TASK_RUN_ORCHESTRATOR_TOOLS,
   type TaskRunOrchestratorCall,
@@ -261,6 +262,13 @@ interface LiveOrchestrator {
   handingOff: boolean;
   /** ターン末の問いかけの回答者判定と促し（Issue #1708）。世代ごとに作る。 */
   answererNudge: TurnEndAnswererNudge;
+  /**
+   * この世代で`get_run_state`がタスクごとに返した行（Issue #1980）。次の呼出しで変わったタスクだけを
+   * 返すのに使う。世代ごとに空から始め、会話の圧縮を見たら捨てる（Orchestratorが前回の結果を覚えていない）。
+   */
+  runStateShown: ReadonlyMap<string, string> | undefined;
+  /** 最後に見た会話の圧縮の項目のID。変わったら圧縮が起きたとみなす。 */
+  lastCompactionId: string | undefined;
   /**
    * `record_lesson`（Issue #1599）をこのrunで受け付けた（`isError: false`を返した）回数。
    * `MAX_RECORD_LESSON_CALLS_PER_RUN`（`runNotes.ts`）との比較に使う。`eventsSent`と同じく
@@ -601,6 +609,9 @@ export class TaskRunOrchestrator {
       capNoticeSent: false,
       handingOff: false,
       answererNudge: new TurnEndAnswererNudge(),
+      // 前の世代の記録は引き継がない。新しい世代の最初のget_run_stateは全タスクを返す（Issue #1980）
+      runStateShown: undefined,
+      lastCompactionId: undefined,
       recordLessonCount: previous?.recordLessonCount ?? 0,
       runOperationCount: previous?.runOperationCount ?? 0,
       askUserQuestionRejections: previous?.askUserQuestionRejections ?? 0,
@@ -624,7 +635,6 @@ export class TaskRunOrchestrator {
       buildIntroPrompt(
         current,
         generation,
-        this.deps.controller.recommendations(runId),
         { trigger, carriedCount: carried.length },
         lessonsBlock,
       ),
@@ -642,6 +652,12 @@ export class TaskRunOrchestrator {
     if (!live.busy && state.busy) {
       // 会話画面からの発言など、`flush`を通らずに始まったターン
       live.answererNudge.reset();
+    }
+    const compactionId = lastCompactionId(state.items);
+    if (compactionId !== live.lastCompactionId) {
+      // 圧縮の後は前回のget_run_stateの結果を覚えていないため、次の呼出しを全タスクにする（Issue #1980）
+      live.lastCompactionId = compactionId;
+      live.runStateShown = undefined;
     }
     live.busy = state.busy;
     if (finishedTurn) {
@@ -888,16 +904,21 @@ export class TaskRunOrchestrator {
     switch (call.tool) {
       case 'get_run_state': {
         const run = controller.find(runId);
-        return run === undefined
-          ? { text: 'runが見つかりません', isError: true }
-          : {
-              text: formatTaskRunState(
-                run,
-                controller.recommendations(runId),
-                this.deps.resourceLines?.(runId),
-              ),
-              isError: false,
-            };
+        if (run === undefined) {
+          return { text: 'runが見つかりません', isError: true };
+        }
+        const live = this.live.get(runId);
+        const view = formatTaskRunState(
+          run,
+          controller.recommendations(runId),
+          this.deps.resourceLines?.(runId),
+          call.request,
+          live?.runStateShown,
+        );
+        if (live !== undefined) {
+          live.runStateShown = view.shown;
+        }
+        return { text: view.text, isError: false };
       }
       case 'propose_plan':
         return toOutcome(await controller.proposePlan(runId, call.rawArgs));
@@ -1508,11 +1529,20 @@ function diffGateEvents(
   return events;
 }
 
+/** 会話の項目のうち、最後の圧縮の項目のID（Codex・Claudeとも`contextCompaction`）。 */
+function lastCompactionId(items: readonly ChatItem[]): string | undefined {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i]?.kind === 'contextCompaction') {
+      return items[i]?.id;
+    }
+  }
+  return undefined;
+}
+
 /** 開いた直後に送る、役割と現在の状態。 */
 function buildIntroPrompt(
   run: TaskRun,
   generation: number,
-  recommendations: ReadonlyMap<string, StageSettingsRecommendation>,
   handover: { trigger: GenerationTrigger; carriedCount: number },
   lessonsBlock?: string,
 ): string {
@@ -1558,8 +1588,9 @@ function buildIntroPrompt(
         ]),
     ...(run.roadmap === undefined ? [] : buildRoadmapLines(run.roadmap.issueNumber)),
     '',
-    '現在の状態:',
-    formatTaskRunState(run, recommendations),
+    // 状態の全量は載せない。最初のget_run_stateで同じ内容が返り、世代の開始時に2回入るため（Issue #1980）
+    '現在の状態（要約。各タスクの詳細は最初にget_run_stateを呼んで確かめる）:',
+    formatTaskRunSummary(run),
     '',
     buildOpeningInstruction(run),
     ...(lessonsBlock === undefined || lessonsBlock === '' ? [] : ['', lessonsBlock]),
@@ -1586,7 +1617,7 @@ function buildRoadmapLines(roadmapIssueNumber: number): string[] {
 /** 導入文の最後に置く、最初にすることの指示。 */
 function buildOpeningInstruction(run: TaskRun): string {
   if (run.planStatus !== 'drafting') {
-    return 'まず現在の状態をユーザーに短く伝え、次にできることを示してください。';
+    return 'まずget_run_stateで現在の状態を取り、ユーザーに短く伝え、次にできることを示してください。';
   }
   return run.roadmap === undefined
     ? 'まずユーザーに何をしたいかを尋ね、計画を立ててpropose_planで提案してください。'

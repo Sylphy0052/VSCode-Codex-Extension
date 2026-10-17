@@ -6,7 +6,12 @@ import {
   type TaskRunOrchestratorDeps,
   type TaskRunOrchestratorEvent,
 } from '../../src/orchestrator/taskRunOrchestrator';
-import { TASK_RUN_SCHEMA_VERSION, type TaskRun } from '../../src/orchestrator/taskRunState';
+import {
+  approveTaskPlan,
+  proposeTaskPlan,
+  TASK_RUN_SCHEMA_VERSION,
+  type TaskRun,
+} from '../../src/orchestrator/taskRunState';
 import type {
   TaskSession,
   TaskSessionHost,
@@ -86,6 +91,7 @@ function makeFakeSession(id: string): FakeSession {
         threadId: undefined,
         name: undefined,
         turnId: undefined,
+        items: [],
         ...state,
       } as ChatState);
     },
@@ -222,5 +228,75 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     await vi.waitFor(() => expect(s1.session.rearmAutoHandoff).toHaveBeenCalledTimes(1));
     expect(orch.status('run-1')).toBe('idle');
     expect(openTaskSession).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('get_run_stateの差分の記録（Issue #1980）', () => {
+  function makeRunWithTasks(): TaskRun {
+    const now = new Date('2026-10-18T00:00:00Z');
+    const draft = (taskId: string) => ({
+      taskId,
+      title: `タスク${taskId}`,
+      summary: '要約',
+      acceptanceCriteria: ['基準'],
+      dependsOn: [],
+      existingIssueNumber: undefined,
+    });
+    const base = makeRun({ planStatus: 'drafting', taskOrder: ['T1', 'T2'], nextTaskNumber: 3 });
+    return approveTaskPlan(
+      proposeTaskPlan(base, [draft('T1'), draft('T2')], (id) => `exec-${id}`, now),
+    );
+  }
+
+  it('導入文は要約の1行だけを載せ、差分の記録は世代ごと・会話の圧縮で取り直す', async () => {
+    const runBox = { current: makeRunWithTasks() };
+    const s1 = makeFakeSession('s1');
+    const s2 = makeFakeSession('s2');
+    const openTaskSession = vi
+      .fn()
+      .mockResolvedValueOnce(s1.session)
+      .mockResolvedValueOnce(s2.session);
+    const orch = new TaskRunOrchestrator(makeDeps({ openTaskSession }, runBox));
+    const getRunState = async (generation: number): Promise<string> => {
+      const outcome = await (
+        orch as unknown as {
+          callTool(
+            runId: string,
+            generation: number,
+            name: string,
+            rawArgs: unknown,
+          ): Promise<{ text: string; isError: boolean }>;
+        }
+      ).callTool('run-1', generation, 'get_run_state', {});
+      expect(outcome.isError).toBe(false);
+      return outcome.text;
+    };
+
+    await orch.open('run-1');
+    const intro = s1.sentTexts[0] ?? '';
+    expect(intro).toContain('run: run-1 / 計画: approved / タスク: 2件');
+    expect(intro).not.toContain('- T1 タスクT1');
+    expect(intro).not.toContain('現在の工程:');
+    expect(intro).toContain('まずget_run_stateで現在の状態を取り');
+
+    const gen1 = runBox.current.orchestratorGeneration;
+    expect(await getRunState(gen1)).toContain('- T1 タスクT1');
+    expect(await getRunState(gen1)).toContain('変化なし: 2件（T1, T2）');
+
+    // 会話の圧縮の後は前回の結果を覚えていないため、次の呼出しは全タスクを返す
+    s1.emitState({
+      items: [{ id: 'c1', kind: 'contextCompaction', text: '', detail: '', status: undefined }],
+    } as Partial<ChatState>);
+    expect(await getRunState(gen1)).toContain('- T1 タスクT1');
+    expect(await getRunState(gen1)).toContain('変化なし: 2件');
+
+    const input1 = openTaskSession.mock.calls[0]?.[0] as TaskSessionInput;
+    await input1.handoffDelegate?.({ model: '', effort: '', prompt: '', trigger: 'auto' });
+    await vi.waitFor(() => expect(s2.sentTexts.length).toBeGreaterThan(0));
+    const gen2 = runBox.current.orchestratorGeneration;
+    expect(gen2).toBe(gen1 + 1);
+    const firstOfGen2 = await getRunState(gen2);
+    expect(firstOfGen2).toContain('- T1 タスクT1');
+    expect(firstOfGen2).not.toContain('変化なし');
   });
 });
