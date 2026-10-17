@@ -152,11 +152,13 @@ import {
   buildHandoffPrompt,
   buildMilestonePrompt,
   chooseHandoffPrompt,
+  isBareHandoffAttempt,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
   decideAutoHandoff,
   offersInsteadOfAutoHandoff,
+  probeIsRedundantAfterOffer,
   deriveHandoffBaseName,
   parseHandoffPrompt,
   endsWithUserQuestion,
@@ -1076,9 +1078,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
     if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      entry.trace.info(`区切りの契機（${trigger.kind}）は提案済みのため何もしない`);
       return true;
     }
     entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
+    entry.trace.info(`区切りの契機（${trigger.kind}）のため引き継がず提案で止めた`);
     entry.session.noteLocalEvent(
       `autoHandoffOffer:${Date.now()}`,
       '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
@@ -1374,18 +1378,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
     // 受け取り側が返す受領確認（Issue #1751）のid。skillが採番した値があればそれ、無ければ拡張が採番する
     const handoffId = handoffBlock?.handoffId ?? newHandoffId(createdAt);
-    const factsSection = buildHandoffFactsSection(
-      await resolveHandoffGitFacts(entry.cwd, gitBranch),
-      extractCreatedReferences(state.items),
-    );
     // ポインタだけを指す本文へ戻したときはreplayが無いので、確認一覧も求めない
     const asksChecklist = firstText !== pointerText && (replay?.userCount ?? 0) > 0;
     // handoffプロンプトの本文だけを渡すときは、事実節・受領確認の指示を付けない（Issue #1950）。
-    // 書き出しに失敗してポインタ文へ戻したときは従来どおり付ける
-    const isBare = chosen.isBare && firstText === chosen.text;
+    // 書き出しに失敗してポインタ文へ戻したときは従来どおり付ける。事実節のgit呼出も本文だけの
+    // ときは省く（Issue #1952）
+    const isBare = isBareHandoffAttempt(chosen, firstText);
     const text = isBare
       ? firstText
-      : withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId, asksChecklist);
+      : withHandoffAcceptance(
+          `${firstText}\n\n${buildHandoffFactsSection(
+            await resolveHandoffGitFacts(entry.cwd, gitBranch),
+            extractCreatedReferences(state.items),
+          )}`,
+          handoffId,
+          asksChecklist,
+        );
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
@@ -1403,20 +1411,23 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 受領確認を指示していない本文だけの送信では、受領行を待たない
       isBare ? undefined : handoffId,
       sentPointerPath,
-      createHandoffAcceptanceJudge({
-        enabled: () => this.reflexEnabledFor(destination),
-        threshold: readHandoffAcceptanceThreshold,
-        deps: reflexJudgeDeps(
-          'codex',
-          readConfig().executablePath,
-          (message) => entry.trace.warn(message),
-          giveUp.signal,
-        ),
-        sentPrompt: text,
-        pointerPath: sentPointerPath,
-        destinationDisposed: () => destination.disposed,
-        trace: entry.trace,
-      }),
+      // 受領行を待たない本文だけの送信では判定も使わない
+      isBare
+        ? undefined
+        : createHandoffAcceptanceJudge({
+            enabled: () => this.reflexEnabledFor(destination),
+            threshold: readHandoffAcceptanceThreshold,
+            deps: reflexJudgeDeps(
+              'codex',
+              readConfig().executablePath,
+              (message) => entry.trace.warn(message),
+              giveUp.signal,
+            ),
+            sentPrompt: text,
+            pointerPath: sentPointerPath,
+            destinationDisposed: () => destination.disposed,
+            trace: entry.trace,
+          }),
     );
     try {
       await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
@@ -1993,6 +2004,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       entry.trace.info('作業の節目を検知したが契機が成立しなかった');
+    }
+    if (
+      probeIsRedundantAfterOffer({
+        action: readAutoHandoffBoundaryAction(),
+        remainingPercent,
+        softThresholdPercent,
+        onProfileChange,
+        offeredTurnSeq: entry.autoHandoffOfferedTurnSeq,
+        turnCompletionSeq: state.turnCompletionSeq,
+      })
+    ) {
+      entry.trace.info('このターンは引き継ぎを提案済みのため分類器・Reflexを起動しない');
+      return;
     }
     if (reflex.enabled) {
       await this.maybeAutoHandoffByReflex(entry, state, {

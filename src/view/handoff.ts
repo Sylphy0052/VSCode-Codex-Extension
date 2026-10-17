@@ -524,9 +524,23 @@ export function chooseHandoffPrompt(
 }
 
 /**
+ * 送る本文が、`chooseHandoffPrompt`の選んだ本文だけの試行か（Issue #1952）。書き出しに失敗して
+ * ポインタ文へ戻した試行は`text`と一致せず`false`になる。Codex側・Claude側で同じ判定を使う。
+ */
+export function isBareHandoffAttempt(
+  chosen: { text: string; isBare: boolean },
+  attemptText: string,
+): boolean {
+  return chosen.isBare && attemptText === chosen.text;
+}
+
+/**
  * 発話がhandoffプロンプトの本文そのものか（Issue #1950）。本文だけを渡した初回プロンプトを
  * 引き継ぎ由来と見分けるために使う。`parseHandoffPrompt`と同じ3行（見出し・schema・handoff_id）
  * を要求する。`parseHandoffPrompt`と同じく見出しの位置は問わない。
+ *
+ * 利用者が手で貼ったhandoffプロンプトも同じ形なので当たる。拡張が送ったものと本文が同じで
+ * 見分ける印が無いため、系列の記録から外れるのは仕様とする（Issue #1952）。
  */
 export function isHandoffPromptBody(text: string): boolean {
   const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
@@ -1128,6 +1142,26 @@ export function detectHandoffMilestone(
 /** コマンドの先頭にある `glab`（`COMMAND_HEAD` と同じく、引数中の文言は拾わない）。 */
 const GLAB_COMMAND = new RegExp(String.raw`${COMMAND_HEAD}glab\s`, 'u');
 /**
+ * 引用符の中身を空にする。`--body "…; glab x"` の `;` の後ろをコマンドの先頭と見ないため。
+ * Codexが包む `bash -lc '…'` は外側の引用符を外して中身を残す（中身の引用符は同様に空にする）。
+ */
+function stripQuotedArguments(command: string): string {
+  return command.replace(
+    /(-l?c\s+)?("[^"]*"|'[^']*')/gu,
+    (_whole, wrapper: string | undefined, quoted: string) =>
+      wrapper === undefined ? '""' : `${wrapper}${stripQuotedArguments(quoted.slice(1, -1))}`,
+  );
+}
+/** 値を取らない `gh pr review` のオプション。これ以外のオプションの直後の語は値として読み飛ばす。 */
+const REVIEW_FLAGS_WITHOUT_VALUE = new Set([
+  '--approve',
+  '-a',
+  '--request-changes',
+  '-r',
+  '--comment',
+  '-c',
+]);
+/**
  * レビューのコマンドで、サブコマンドより後ろの部分。次のコマンドの区切りか引用符までに限る。
  * 引用符で切ることで、`--body "… --approve …"` の中身と、Codexが包む `bash -lc '…'` の
  * 閉じ引用符を見ない。
@@ -1154,9 +1188,19 @@ function approvedReviewNumberOf(command: string): string | undefined {
   if (!isApproved) {
     return undefined;
   }
+  let previous = '';
   for (const token of tokens) {
     if (token.includes('…')) {
       return undefined;
+    }
+    // `-t 30` のように数値を取るオプションの値は番号ではない
+    const isOptionValue =
+      previous.startsWith('-') &&
+      !previous.includes('=') &&
+      !REVIEW_FLAGS_WITHOUT_VALUE.has(previous);
+    previous = token;
+    if (isOptionValue) {
+      continue;
     }
     const number = TARGET_NUMBER.exec(token);
     if (number !== null) {
@@ -1200,7 +1244,7 @@ export function buildMilestonePrompt(input: MilestonePromptInput): string | unde
   // GitLabのMRは `!` で番号を書く。レビューのskill・subagentはコマンドに `glab` が出ないため、
   // 作ったMRのURLでも判定する
   const isGitLab =
-    GLAB_COMMAND.test(trigger.command) ||
+    GLAB_COMMAND.test(stripQuotedArguments(trigger.command)) ||
     createdReferences.some((reference) => reference.url.includes('/merge_requests/'));
   const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
   let next: string | undefined;
@@ -1603,6 +1647,38 @@ export function offersInsteadOfAutoHandoff(
     return false;
   }
   return remainingPercent === undefined || remainingPercent > softThresholdPercent;
+}
+
+/**
+ * 分類器・Reflexを起動しても、結果が同じターンの提案済みで黙って捨てられると分かるか
+ * （Issue #1949）。
+ *
+ * 起動の結果として成り立つ契機のうち、`offersInsteadOfAutoHandoff` の対象外は
+ * `softThreshold`（残量が `softThresholdPercent` 以下のときだけ成立）と
+ * `profileChanged`（`onProfileChange` のときだけ成立）である。この2つが成立しえず、
+ * 同じターンで提案を出し終えていれば、`assistantSuggested` が出ても `requestHandoff` が
+ * 提案の重複として何もせず返すため、起動の費用だけが無駄になる。
+ *
+ * 提案をまだ出していないターンでは、結果次第で提案が出るので打ち切らない。
+ */
+export function probeIsRedundantAfterOffer(input: {
+  action: AutoHandoffBoundaryAction;
+  remainingPercent: number | undefined;
+  softThresholdPercent: number;
+  onProfileChange: boolean;
+  offeredTurnSeq: number | undefined;
+  turnCompletionSeq: number;
+}): boolean {
+  if (input.action !== 'offer' || input.onProfileChange) {
+    return false;
+  }
+  if (
+    input.remainingPercent !== undefined &&
+    input.remainingPercent <= input.softThresholdPercent
+  ) {
+    return false;
+  }
+  return input.offeredTurnSeq === input.turnCompletionSeq;
 }
 
 /**
