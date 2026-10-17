@@ -297,6 +297,32 @@ describe('transcriptItems', () => {
     expect(items[0]?.detail).toBe('gitlab-cleanup');
   });
 
+  it('/名前 の直後に注入されたplugin skillの本文もskillContextにする（issue #1968）', () => {
+    const meta = { isMeta: true, userType: undefined, origin: undefined };
+    const { items } = transcriptItems([
+      userLine(
+        '<command-message>genshijin:help</command-message>\n<command-name>/genshijin:help</command-name>',
+      ),
+      userLine('リファレンスカードを表示する。\n', meta),
+      userLine('別の注入', meta),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['userMessage', 'skillContext']);
+    expect(items[0]?.text).toBe('/genshijin:help');
+    expect(items[1]?.detail).toBe('genshijin:help');
+  });
+
+  it('/名前 の直後でもタグで始まる注入はskillContextにしない（issue #1968）', () => {
+    const { items } = transcriptItems([
+      userLine('<command-name>/model</command-name>'),
+      userLine('<local-command-caveat>Caveat</local-command-caveat>', {
+        isMeta: true,
+        userType: undefined,
+        origin: undefined,
+      }),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['userMessage']);
+  });
+
   it('attachmentのinvoked_skillsもskillContextにする（issue #889）', () => {
     const { items } = transcriptItems([
       JSON.stringify({
