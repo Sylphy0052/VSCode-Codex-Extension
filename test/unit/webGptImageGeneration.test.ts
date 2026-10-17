@@ -9,15 +9,18 @@ const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   evaluate: vi.fn(),
   readdirFail: false,
+  readdirCalls: 0,
 }));
 vi.mock('node:fs/promises', async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
   return {
     ...actual,
-    readdir: ((...args: Parameters<typeof actual.readdir>) =>
-      mocks.readdirFail
+    readdir: ((...args: Parameters<typeof actual.readdir>) => {
+      mocks.readdirCalls += 1;
+      return mocks.readdirFail
         ? Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }))
-        : (actual.readdir as (...a: unknown[]) => unknown)(...args)) as typeof actual.readdir,
+        : (actual.readdir as (...a: unknown[]) => unknown)(...args);
+    }) as typeof actual.readdir,
   };
 });
 
@@ -126,6 +129,7 @@ beforeEach(async () => {
   mocks.connect.mockReset().mockResolvedValue(browser);
   mocks.evaluate.mockReset();
   mocks.readdirFail = false;
+  mocks.readdirCalls = 0;
 });
 
 afterEach(async () => {
@@ -438,6 +442,8 @@ describe('generateImage', () => {
     const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.paths).toHaveLength(1);
+    // generateImageの中でpruneが走り、その失敗を握りつぶしたことを確かめる
+    expect(mocks.readdirCalls).toBeGreaterThan(0);
     await expect(pruneOldImages(outDir)).rejects.toThrow('EACCES');
   });
 });
