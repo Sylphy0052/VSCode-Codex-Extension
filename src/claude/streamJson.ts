@@ -374,7 +374,13 @@ const SKILL_LAUNCH_PREFIX = 'Launching skill:';
  */
 function launchedSkillName(items: readonly ChatItem[]): string {
   const last = items[items.length - 1];
-  if (last === undefined || last.kind !== 'mcpToolCall' || !last.text.startsWith(SKILL_LAUNCH_PREFIX)) {
+  // 見出しは `describeTool` の `Skill: <名前>`。他のMCPツールの出力が同じ文面で始まっても拾わない
+  if (
+    last === undefined ||
+    last.kind !== 'mcpToolCall' ||
+    !last.detail.startsWith('Skill') ||
+    !last.text.startsWith(SKILL_LAUNCH_PREFIX)
+  ) {
     return '';
   }
   return last.text.slice(SKILL_LAUNCH_PREFIX.length).trim();

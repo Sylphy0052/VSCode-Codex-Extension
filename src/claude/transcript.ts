@@ -336,6 +336,8 @@ function appendUserEntry(
  * `/<名前>` の直後にCLIが注入した本文か（issue #1968）。
  *
  * `<local-command-caveat>` などタグで始まる注入や、他セッションからのメッセージは巻き込まない。
+ * `.claude/commands/*.md` のカスタムコマンドが展開した本文もここで拾うが、CLIはskillと
+ * 同じ仕組みで展開しており、`/名前` の発言側で起動は判るため、本文はskillと同じく畳んで隠す。
  */
 function isSlashSkillBody(
   entry: Record<string, unknown>,
@@ -363,7 +365,8 @@ function slashCommandName(raw: string): string {
  * 手順で組み立て直す。
  */
 export function slashCommandMessageText(raw: string): string {
-  if (slashCommandName(raw) === '') {
+  // 圧縮後の要約など、本文の途中で制御タグを引用しただけの文字列は巻き込まない
+  if (!raw.trimStart().startsWith('<command-') || slashCommandName(raw) === '') {
     return '';
   }
   return cleanText(raw) || slashCommandText(raw);

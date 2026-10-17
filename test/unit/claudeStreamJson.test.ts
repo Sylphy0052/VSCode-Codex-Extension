@@ -990,6 +990,17 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('/genshijin:help 極限');
   });
 
+  it('制御タグを途中で引用しただけの文字列contentは積まない（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        message: { content: '要約: <command-name>/x</command-name> を実行した' },
+      },
+    ]);
+    expect(state.items).toEqual([]);
+  });
+
   it('目印が無いユーザーの発言は同じ文面でも畳まない（issue #934）', () => {
     const state = apply([
       {
