@@ -3,7 +3,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
-import { stateHasHandoffAcceptance, stateHasPointerRead } from './handoffAcceptance';
+import {
+  type CreatedReference,
+  stateHasHandoffAcceptance,
+  stateHasPointerRead,
+} from './handoffAcceptance';
 import { type HandoffDigest, readHandoffDigest, renderHandoffDigest } from './handoffDigest';
 
 /**
@@ -498,17 +502,25 @@ export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
  * 引き継ぎ先への初回プロンプトを選ぶ（Issue #1354）。引き継ぎ元の最終応答にhandoffプロンプトが
  * あればその本文だけを渡し、無ければポインタファイルを指す。`isBare`はhandoffプロンプトの本文
  * だけを渡すとき`true`で、呼び出し側は事実節・受領確認の指示を付けない（Issue #1950）。
+ *
+ * `milestonePrompt`（`buildMilestonePrompt`、Issue #1967）は節目の最小プロンプト。handoff
+ * プロンプトが無いときに使い、これも`isBare`で渡す。引き継ぎ元が書いたhandoffプロンプトの方が
+ * 申し送りを多く持つため、両方あればhandoffプロンプトを採る。
  */
 export function chooseHandoffPrompt(
   pointerPath: string,
   lastAssistantMessage: string | undefined,
   replay?: string,
+  milestonePrompt?: string,
 ): { text: string; isBare: boolean } {
   const handoffPrompt =
     lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
-  return handoffPrompt === undefined
+  if (handoffPrompt !== undefined) {
+    return { text: buildHandoffPromptFromHandoff(handoffPrompt), isBare: true };
+  }
+  return milestonePrompt === undefined
     ? { text: buildHandoffPrompt(pointerPath, replay), isBare: false }
-    : { text: buildHandoffPromptFromHandoff(handoffPrompt), isBare: true };
+    : { text: milestonePrompt, isBare: true };
 }
 
 /**
@@ -1111,6 +1123,118 @@ export function detectHandoffMilestone(
     }
   }
   return undefined;
+}
+
+/** コマンドの先頭にある `glab`（`COMMAND_HEAD` と同じく、引数中の文言は拾わない）。 */
+const GLAB_COMMAND = new RegExp(String.raw`${COMMAND_HEAD}glab\s`, 'u');
+/**
+ * レビューのコマンドで、サブコマンドより後ろの部分。次のコマンドの区切りか引用符までに限る。
+ * 引用符で切ることで、`--body "… --approve …"` の中身と、Codexが包む `bash -lc '…'` の
+ * 閉じ引用符を見ない。
+ */
+const REVIEW_ARGUMENTS = /\b(pr\s+review|mr\s+approve)\b([^;&|'"]*)/u;
+/** 番号の書き方（`123` / `#123` / `!123` / PR・MRのURL）。 */
+const TARGET_NUMBER =
+  /^(?:[#!]?(\d+)|https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)(?:[/?#]\S*)?)$/u;
+
+/**
+ * 承認したレビューのコマンド（`gh pr review 12 --approve` / `glab mr approve !12`）から対象の
+ * 番号を拾う。承認でないレビュー（`--request-changes` / `--comment`）と、番号の無いコマンドは
+ * `undefined`。200字で切られた末尾の断片（`…` を含む）は見ない。
+ */
+function approvedReviewNumberOf(command: string): string | undefined {
+  const match = REVIEW_ARGUMENTS.exec(command);
+  if (match === null) {
+    return undefined;
+  }
+  const tokens = (match[2] ?? '').trim().split(/\s+/u);
+  const isApproved =
+    match[1]?.startsWith('mr') === true ||
+    tokens.some((token) => token === '--approve' || token === '-a');
+  if (!isApproved) {
+    return undefined;
+  }
+  for (const token of tokens) {
+    if (token.includes('…')) {
+      return undefined;
+    }
+    const number = TARGET_NUMBER.exec(token);
+    if (number !== null) {
+      return number[1] ?? number[2];
+    }
+  }
+  return undefined;
+}
+
+/** 最後に作った参照の番号。 */
+function lastCreatedNumber(
+  references: ReadonlyArray<CreatedReference>,
+  kind: CreatedReference['kind'],
+): string | undefined {
+  return references.filter((reference) => reference.kind === kind).at(-1)?.number;
+}
+
+export interface MilestonePromptInput {
+  trigger: HandoffTrigger;
+  /** 作業ディレクトリ。無ければ `前提:` を書けないので最小プロンプトにしない。 */
+  cwd: string | undefined;
+  /** このセッションで作ったIssue・PR/MR（`extractCreatedReferences`）。 */
+  createdReferences: ReadonlyArray<CreatedReference>;
+  /** 引き継ぎ先のmodel/effortが引き継ぎ元から変わるときだけ渡す。 */
+  profileChange?: { model: string; effort: string };
+}
+
+/**
+ * 作業の節目での引き継ぎに渡す最小の開始プロンプト（Issue #1967）。
+ *
+ * 節目の後は前の会話の文脈が無くても続けられるため、replay・事実節・受領確認の指示を付けず、
+ * `前提:` と `次:` の2行だけにする。model/effortが変わるときだけ3行目に載せる。系列の在処
+ * （`replay.marker`）も付けないため、引き継ぎの系列は節目で切れる。
+ * 契機が節目でないとき、cwdか `次:` に要る番号が取れないときは `undefined`（従来の開始プロンプトへ戻す）。
+ */
+export function buildMilestonePrompt(input: MilestonePromptInput): string | undefined {
+  const { trigger, createdReferences } = input;
+  if (trigger.kind !== 'milestone' || input.cwd === undefined || input.cwd === '') {
+    return undefined;
+  }
+  // GitLabのMRは `!` で番号を書く。レビューのskill・subagentはコマンドに `glab` が出ないため、
+  // 作ったMRのURLでも判定する
+  const isGitLab =
+    GLAB_COMMAND.test(trigger.command) ||
+    createdReferences.some((reference) => reference.url.includes('/merge_requests/'));
+  const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
+  let next: string | undefined;
+  switch (trigger.milestone) {
+    case 'issueCreated': {
+      const number = lastCreatedNumber(createdReferences, 'issue');
+      next = number === undefined ? undefined : `#${number}に着手`;
+      break;
+    }
+    case 'prCreated': {
+      const number = lastCreatedNumber(createdReferences, 'pr');
+      next = number === undefined ? undefined : `${change(number)}を自己レビュー`;
+      break;
+    }
+    case 'reviewed': {
+      // レビューの指摘は旧セッションの会話にしか無い。指摘が残りうるレビュー（承認でないもの、
+      // subagent・skillによるもの）は従来の開始プロンプトで引き継ぐ
+      const number = approvedReviewNumberOf(trigger.command);
+      next = number === undefined ? undefined : `${change(number)}をmergeしcleanup`;
+      break;
+    }
+    case 'merged':
+      next = 'ロードマップから次のIssueを選ぶ';
+      break;
+  }
+  if (next === undefined) {
+    return undefined;
+  }
+  const lines = [`前提: cwd=${input.cwd}`, `次: ${next}`];
+  if (input.profileChange !== undefined) {
+    const { model, effort } = input.profileChange;
+    lines.push(`model/effort: ${model || '既定'} / ${effort || '既定'}`);
+  }
+  return lines.join('\n');
 }
 
 /**
