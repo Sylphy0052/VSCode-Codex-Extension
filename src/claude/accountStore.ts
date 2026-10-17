@@ -329,7 +329,17 @@ export class ClaudeAccountStore {
       }
       const current = await this.currentId();
       if (current === id) {
-        return { ok: true };
+        // 稼働中の持ち主を照合し直す。別の端末で /login した後や、前回の差し替えが
+        // warning で終わった後でも、同じ操作で直せるようにする。照合できないときは従来どおり何もしない
+        const liveNow = await readOptional(this.liveCredentials);
+        if (liveNow === undefined || !isJsonObject(liveNow)) {
+          return { ok: true };
+        }
+        const resolvedNow = await this.resolveLiveOwner(current, liveNow);
+        if (!resolvedNow.ok) {
+          return { ok: true };
+        }
+        // 持ち主が別のアカウントだったときは、下の通常の切り替えで直す
       }
       const target = await readFile(join(this.slot(id), CREDENTIALS));
       if (!isJsonObject(target)) {
@@ -422,6 +432,8 @@ export class ClaudeAccountStore {
    * `~/.claude.json` と `<claudeHome>/.claude.json` の両方を見て、`accountUuid` が `expectedId`
    * の同一性と一致するもののうち新しい方を使う。一致しなければ別のアカウントの値なので使わない。
    * 記録時刻は保存値の取得時刻にし、`usage.json` の記録がそれ以上に新しければ書かない。
+   * 保存値に無い枠は `usage.json` の既存の記録から引き継ぐ（消さない）。記録時刻は1つなので、
+   * 引き継いだ枠は古い値のまま新しい時刻の記録に混ざる。
    *
    * @returns 写した値の取得時刻（epochミリ秒）。写さなければ `undefined`
    */
@@ -453,7 +465,13 @@ export class ClaudeAccountStore {
       }
       await this.writeSecret(
         join(this.slot(expectedId), USAGE),
-        usageRecord(latest.slots, latest.fetchedAtMs),
+        usageRecord(
+          {
+            fiveHour: latest.slots.fiveHour ?? saved?.fiveHour,
+            weekly: latest.slots.weekly ?? saved?.weekly,
+          },
+          latest.fetchedAtMs,
+        ),
       );
       recordedAt = latest.fetchedAtMs;
       return { ok: true };
@@ -1038,11 +1056,16 @@ export class ClaudeAccountStore {
     if (optional && !(await exists(configPath))) {
       return undefined;
     }
+    const symlinkNote = `${label}がシンボリックリンクのため、アカウント表示を差し替えませんでした`;
     try {
+      // ロックを取る前に弾いて無駄なロックを避ける（ロック内でも改めて確かめる）
+      if ((await lstat(configPath)).isSymbolicLink()) {
+        return symlinkNote;
+      }
       return await withCliConfigLock(configPath, async () => {
         const info = await lstat(configPath);
         if (info.isSymbolicLink()) {
-          return `${label}がシンボリックリンクのため、アカウント表示を差し替えませんでした`;
+          return symlinkNote;
         }
         const config = asRecord(parseJson(await readFile(configPath)));
         if (config === undefined) {

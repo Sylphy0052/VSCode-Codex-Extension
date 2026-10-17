@@ -95,10 +95,14 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     try {
       await this.ports.pollStandby?.(nowMs);
     } catch (e) {
-      this.ports.warn(
-        `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      this.warnStandbyFailed(e);
     }
+  }
+
+  private warnStandbyFailed(e: unknown): void {
+    this.ports.warn(
+      `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 
   /** 記録した使用率を画面へ反映する。 */
@@ -279,9 +283,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
       await this.ports.probeStandby?.(id, nowMs);
     } catch (e) {
       // 計測できなくても、記録のまま切り替え先を選ぶ
-      this.ports.warn(
-        `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      this.warnStandbyFailed(e);
     }
   }
 

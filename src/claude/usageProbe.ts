@@ -52,6 +52,8 @@ const RETRY_INTERVAL_MS = 60_000;
  * 出力を返す。止めると、回復してもウィンドウを開き直すまで未計測のままになる（Issue #1962）。
  */
 const MAX_CONSECUTIVE_FAILURES = 5;
+/** 共有記録の`failures`は、`readAt`からこの時間以上たつと0とみなす（Issue #1920）。 */
+const STALE_FAILURES_MS = 60 * 60_000;
 
 /**
  * 取得中であることを示す排他ファイル名の接頭辞（`sharedDir`の直下）。
@@ -253,9 +255,17 @@ export class ClaudeUsageProbe {
       if (again !== undefined) {
         return this.adopt(again);
       }
-      const failures = (await this.readShared())?.failures ?? this.failures;
-      // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
-      await this.writeShared({ readAt: now, usage: undefined, failures });
+      const previous = await this.readShared();
+      // 時間が空いた記録の失敗は、今の失敗と続いているとは言えないので数えない
+      const failures =
+        previous === undefined
+          ? this.failures
+          : now - previous.readAt >= STALE_FAILURES_MS
+            ? 0
+            : previous.failures;
+      // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする。
+      // 取得中にadoptした他のウィンドウへ割合が届くよう、前回の値は残す
+      await this.writeShared({ readAt: now, usage: previous?.usage, failures });
       // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
       this.freshRequested = false;
       const startedAccount = await this.accounts?.currentId().catch(() => undefined);
