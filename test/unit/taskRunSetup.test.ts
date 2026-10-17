@@ -920,8 +920,7 @@ describe('setupTaskRun: Orchestratorと資源monitorの設定', () => {
     expect(call(opt('monitor', 'thresholds'))).toEqual({ marker: 'thresholds' });
   });
 
-  it('状態が変わったらログへ残し、Orchestratorへrunごとの本文で知らせる', () => {
-    hoisted.describeResourceChange.mockReturnValue('本文');
+  it('状態が変わったらログへ残す（Orchestratorへは知らせない）', () => {
     setup();
     const next = {
       cpuLevel: 'warning',
@@ -933,15 +932,24 @@ describe('setupTaskRun: Orchestratorと資源monitorの設定', () => {
     expect(log.infos[0]).toBe(
       '[task run] 資源の状態: CPU ok -> warning（loadavg） / メモリ ok -> ok / 新規開始 hold',
     );
-    const builder = fakes.orchestrator.notifyResourcePressure.mock.calls[0]?.[0] as (
-      id: string,
-    ) => string;
-    expect(builder('run-7')).toBe('本文');
-    expect(hoisted.describeResourceChange).toHaveBeenCalledWith(undefined, next, 'run-7');
     const prev = { cpuLevel: 'critical', memoryLevel: 'warning' };
     call(opt('monitor', 'onLevelChanged'), prev, next);
     expect(log.infos[1]).toContain('CPU critical -> warning');
     expect(log.infos[1]).toContain('メモリ warning -> ok');
+    expect(fakes.orchestrator.notifyResourcePressure).not.toHaveBeenCalled();
+  });
+
+  it('知らせる変化（onNotify）はOrchestratorへrunごとの本文で知らせる', () => {
+    hoisted.describeResourceChange.mockReturnValue('本文');
+    setup();
+    const prev = { cpuLevel: 'ok', memoryLevel: 'ok' };
+    const next = { cpuLevel: 'warning', memoryLevel: 'ok' };
+    call(opt('monitor', 'onNotify'), prev, next);
+    const builder = fakes.orchestrator.notifyResourcePressure.mock.calls[0]?.[0] as (
+      id: string,
+    ) => string;
+    expect(builder('run-7')).toBe('本文');
+    expect(hoisted.describeResourceChange).toHaveBeenCalledWith(prev, next, 'run-7');
   });
 
   it('計測のたび、保留した工程を始められる扱いのときだけ開始を促す', () => {
