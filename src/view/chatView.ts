@@ -152,6 +152,7 @@ import {
   buildHandoffPrompt,
   buildMilestonePrompt,
   chooseHandoffPrompt,
+  isBareHandoffAttempt,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
@@ -1377,18 +1378,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
     // 受け取り側が返す受領確認（Issue #1751）のid。skillが採番した値があればそれ、無ければ拡張が採番する
     const handoffId = handoffBlock?.handoffId ?? newHandoffId(createdAt);
-    const factsSection = buildHandoffFactsSection(
-      await resolveHandoffGitFacts(entry.cwd, gitBranch),
-      extractCreatedReferences(state.items),
-    );
     // ポインタだけを指す本文へ戻したときはreplayが無いので、確認一覧も求めない
     const asksChecklist = firstText !== pointerText && (replay?.userCount ?? 0) > 0;
     // handoffプロンプトの本文だけを渡すときは、事実節・受領確認の指示を付けない（Issue #1950）。
-    // 書き出しに失敗してポインタ文へ戻したときは従来どおり付ける
-    const isBare = chosen.isBare && firstText === chosen.text;
+    // 書き出しに失敗してポインタ文へ戻したときは従来どおり付ける。事実節のgit呼出も本文だけの
+    // ときは省く（Issue #1952）
+    const isBare = isBareHandoffAttempt(chosen, firstText);
     const text = isBare
       ? firstText
-      : withHandoffAcceptance(`${firstText}\n\n${factsSection}`, handoffId, asksChecklist);
+      : withHandoffAcceptance(
+          `${firstText}\n\n${buildHandoffFactsSection(
+            await resolveHandoffGitFacts(entry.cwd, gitBranch),
+            extractCreatedReferences(state.items),
+          )}`,
+          handoffId,
+          asksChecklist,
+        );
     // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
     // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
     // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
@@ -1406,20 +1411,23 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 受領確認を指示していない本文だけの送信では、受領行を待たない
       isBare ? undefined : handoffId,
       sentPointerPath,
-      createHandoffAcceptanceJudge({
-        enabled: () => this.reflexEnabledFor(destination),
-        threshold: readHandoffAcceptanceThreshold,
-        deps: reflexJudgeDeps(
-          'codex',
-          readConfig().executablePath,
-          (message) => entry.trace.warn(message),
-          giveUp.signal,
-        ),
-        sentPrompt: text,
-        pointerPath: sentPointerPath,
-        destinationDisposed: () => destination.disposed,
-        trace: entry.trace,
-      }),
+      // 受領行を待たない本文だけの送信では判定も使わない
+      isBare
+        ? undefined
+        : createHandoffAcceptanceJudge({
+            enabled: () => this.reflexEnabledFor(destination),
+            threshold: readHandoffAcceptanceThreshold,
+            deps: reflexJudgeDeps(
+              'codex',
+              readConfig().executablePath,
+              (message) => entry.trace.warn(message),
+              giveUp.signal,
+            ),
+            sentPrompt: text,
+            pointerPath: sentPointerPath,
+            destinationDisposed: () => destination.disposed,
+            trace: entry.trace,
+          }),
     );
     try {
       await newEntry.session.sendOrQueue(text, this.configFor(newEntry));

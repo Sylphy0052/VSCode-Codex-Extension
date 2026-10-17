@@ -524,9 +524,23 @@ export function chooseHandoffPrompt(
 }
 
 /**
+ * 送る本文が、`chooseHandoffPrompt`の選んだ本文だけの試行か（Issue #1952）。書き出しに失敗して
+ * ポインタ文へ戻した試行は`text`と一致せず`false`になる。Codex側・Claude側で同じ判定を使う。
+ */
+export function isBareHandoffAttempt(
+  chosen: { text: string; isBare: boolean },
+  attemptText: string,
+): boolean {
+  return chosen.isBare && attemptText === chosen.text;
+}
+
+/**
  * 発話がhandoffプロンプトの本文そのものか（Issue #1950）。本文だけを渡した初回プロンプトを
  * 引き継ぎ由来と見分けるために使う。`parseHandoffPrompt`と同じ3行（見出し・schema・handoff_id）
  * を要求する。`parseHandoffPrompt`と同じく見出しの位置は問わない。
+ *
+ * 利用者が手で貼ったhandoffプロンプトも同じ形なので当たる。拡張が送ったものと本文が同じで
+ * 見分ける印が無いため、系列の記録から外れるのは仕様とする（Issue #1952）。
  */
 export function isHandoffPromptBody(text: string): boolean {
   const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
