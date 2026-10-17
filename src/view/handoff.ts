@@ -3,7 +3,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
-import { stateHasHandoffAcceptance, stateHasPointerRead } from './handoffAcceptance';
+import {
+  type CreatedReference,
+  stateHasHandoffAcceptance,
+  stateHasPointerRead,
+} from './handoffAcceptance';
 import { type HandoffDigest, readHandoffDigest, renderHandoffDigest } from './handoffDigest';
 
 /**
@@ -498,17 +502,25 @@ export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
  * 引き継ぎ先への初回プロンプトを選ぶ（Issue #1354）。引き継ぎ元の最終応答にhandoffプロンプトが
  * あればその本文だけを渡し、無ければポインタファイルを指す。`isBare`はhandoffプロンプトの本文
  * だけを渡すとき`true`で、呼び出し側は事実節・受領確認の指示を付けない（Issue #1950）。
+ *
+ * `milestonePrompt`（`buildMilestonePrompt`、Issue #1967）は節目の最小プロンプト。handoff
+ * プロンプトが無いときに使い、これも`isBare`で渡す。引き継ぎ元が書いたhandoffプロンプトの方が
+ * 申し送りを多く持つため、両方あればhandoffプロンプトを採る。
  */
 export function chooseHandoffPrompt(
   pointerPath: string,
   lastAssistantMessage: string | undefined,
   replay?: string,
+  milestonePrompt?: string,
 ): { text: string; isBare: boolean } {
   const handoffPrompt =
     lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
-  return handoffPrompt === undefined
+  if (handoffPrompt !== undefined) {
+    return { text: buildHandoffPromptFromHandoff(handoffPrompt), isBare: true };
+  }
+  return milestonePrompt === undefined
     ? { text: buildHandoffPrompt(pointerPath, replay), isBare: false }
-    : { text: buildHandoffPromptFromHandoff(handoffPrompt), isBare: true };
+    : { text: milestonePrompt, isBare: true };
 }
 
 /**
@@ -1111,6 +1123,97 @@ export function detectHandoffMilestone(
     }
   }
   return undefined;
+}
+
+/** レビュー・mergeのコマンドで、サブコマンドより後ろの部分。対象の番号はここから拾う。 */
+const TARGET_SUBCOMMAND = /\b(?:pr|mr)\s+(?:merge|review|approve)\b(.*)$/u;
+/** 番号の書き方（`123` / `#123` / `!123` / PR・MRのURL）。 */
+const TARGET_NUMBER = /^(?:[#!]?(\d+)|https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)\S*)$/u;
+
+/**
+ * `gh pr merge 123` / `glab mr approve !123` のようなコマンドから対象の番号を拾う。
+ * 引用符で始まる引数（`--body "… 12 …"`）より後ろは見ない。取れなければ `undefined`。
+ */
+function targetNumberOf(command: string): string | undefined {
+  const rest = TARGET_SUBCOMMAND.exec(command)?.[1];
+  if (rest === undefined) {
+    return undefined;
+  }
+  for (const token of rest.trim().split(/\s+/u)) {
+    if (/^['"]/u.test(token)) {
+      return undefined;
+    }
+    const match = TARGET_NUMBER.exec(token);
+    if (match !== null) {
+      return match[1] ?? match[2];
+    }
+  }
+  return undefined;
+}
+
+/** 最後に作った参照の番号。 */
+function lastCreatedNumber(
+  references: ReadonlyArray<CreatedReference>,
+  kind: CreatedReference['kind'],
+): string | undefined {
+  return references.filter((reference) => reference.kind === kind).at(-1)?.number;
+}
+
+export interface MilestonePromptInput {
+  trigger: HandoffTrigger;
+  cwd: string;
+  /** このセッションで作ったIssue・PR/MR（`extractCreatedReferences`）。 */
+  createdReferences: ReadonlyArray<CreatedReference>;
+  /** 引き継ぎ先のmodel/effortが引き継ぎ元から変わるときだけ渡す。 */
+  profileChange?: { model: string; effort: string };
+}
+
+/**
+ * 作業の節目での引き継ぎに渡す最小の開始プロンプト（Issue #1967）。
+ *
+ * 節目の後は前の会話の文脈が無くても続けられるため、replay・事実節・受領確認の指示を付けず、
+ * `前提:` と `次:` の2行だけにする。model/effortが変わるときだけ3行目に載せる。
+ * 契機が節目でないとき、`次:` に要る番号が取れないときは `undefined`（従来の開始プロンプトへ戻す）。
+ */
+export function buildMilestonePrompt(input: MilestonePromptInput): string | undefined {
+  const { trigger, createdReferences } = input;
+  if (trigger.kind !== 'milestone') {
+    return undefined;
+  }
+  // GitLabのMRは `!` で番号を書く
+  const isGitLab = /(?:^|[\s;&|(]|-l?c\s+['"]?)glab\s/u.test(trigger.command);
+  const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
+  let next: string | undefined;
+  switch (trigger.milestone) {
+    case 'issueCreated': {
+      const number = lastCreatedNumber(createdReferences, 'issue');
+      next = number === undefined ? undefined : `#${number}に着手`;
+      break;
+    }
+    case 'prCreated': {
+      const number = lastCreatedNumber(createdReferences, 'pr');
+      next = number === undefined ? undefined : `${change(number)}を自己レビュー`;
+      break;
+    }
+    case 'reviewed': {
+      const number =
+        targetNumberOf(trigger.command) ?? lastCreatedNumber(createdReferences, 'pr');
+      next = number === undefined ? undefined : `${change(number)}をmergeしcleanup`;
+      break;
+    }
+    case 'merged':
+      next = 'ロードマップから次のIssueを選ぶ';
+      break;
+  }
+  if (next === undefined) {
+    return undefined;
+  }
+  const lines = [`前提: cwd=${input.cwd}`, `次: ${next}`];
+  if (input.profileChange !== undefined) {
+    const { model, effort } = input.profileChange;
+    lines.push(`model/effort: ${model || '既定'} / ${effort || '既定'}`);
+  }
+  return lines.join('\n');
 }
 
 /**

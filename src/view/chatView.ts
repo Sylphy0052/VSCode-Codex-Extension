@@ -150,6 +150,7 @@ import { BaseChatViewManager, HELD_TASK_PANEL_NOTICE, type BaseChatPanel } from 
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
+  buildMilestonePrompt,
   chooseHandoffPrompt,
   containsHandoffPrompt,
   detectHandoffMilestone,
@@ -1227,7 +1228,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const pointerHead = buildHandoffPrompt(pointerPath);
     // replayの本文を載せずポインタだけを指す本文にも系列の在処を付け、次の世代で系列を切らない
     const pointerText = buildHandoffPrompt(pointerPath, replay?.marker);
-    const chosen = chooseHandoffPrompt(pointerPath, lastAssistantMessage, replay?.text);
+    // 節目の契機では、次のコマンドだけを渡す（Issue #1967）
+    const milestonePrompt = buildMilestonePrompt({
+      trigger,
+      cwd: entry.cwd,
+      createdReferences: extractCreatedReferences(state.items),
+      ...(choice.settings.model === entry.modelSettings.model &&
+      choice.settings.effort === entry.modelSettings.effort
+        ? {}
+        : { profileChange: choice.settings }),
+    });
+    const chosen = chooseHandoffPrompt(
+      pointerPath,
+      lastAssistantMessage,
+      replay?.text,
+      milestonePrompt,
+    );
     let firstText = chosen.text;
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
