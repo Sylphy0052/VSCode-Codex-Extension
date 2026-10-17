@@ -28,6 +28,15 @@ const CLOSE_GRACE_MS = 2_000;
  */
 const AUTH_ENV_KEYS = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
+/**
+ * 接続先や認証方式を差し替える環境変数の接頭辞（`ANTHROPIC_BASE_URL`・`ANTHROPIC_CUSTOM_HEADERS`・
+ * `CLAUDE_CODE_USE_BEDROCK`/`CLAUDE_CODE_USE_VERTEX` など）。個別に列挙すると漏れるので接頭辞で外す。
+ */
+const AUTH_ENV_PREFIXES = ['ANTHROPIC_', 'CLAUDE_CODE_USE_', 'AWS_BEARER_TOKEN_'];
+
+/** stdoutとして溜める上限（文字数）。`/usage` の出力より十分大きく、暴走した出力でメモリを使わない。 */
+const STDOUT_MAX_CHARS = 64 * 1024;
+
 /** CLIのデバッグログの置き場所（`configDir` の中。計測後に一時ディレクトリごと消える）。 */
 const DEBUG_LOG = 'cli-debug.log';
 
@@ -87,8 +96,10 @@ export function measureUsageIn(
 ): Promise<UsageSlots | undefined> {
   return new Promise((resolve) => {
     const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
-    for (const key of AUTH_ENV_KEYS) {
-      delete env[key];
+    for (const key of Object.keys(env)) {
+      if (AUTH_ENV_KEYS.includes(key) || AUTH_ENV_PREFIXES.some((p) => key.startsWith(p))) {
+        delete env[key];
+      }
     }
     const debugLog = join(configDir, DEBUG_LOG);
     // transcriptを残さない（Issue #1911）
@@ -121,7 +132,9 @@ export function measureUsageIn(
     }, TIMEOUT_MS);
 
     proc.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
+      if (out.length < STDOUT_MAX_CHARS) {
+        out += chunk.toString();
+      }
     });
     proc.on('error', (e: Error) => {
       // 起動できなかったときは `close` が来ないことがある
