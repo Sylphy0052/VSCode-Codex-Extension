@@ -502,7 +502,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
   const claudeHooks = new ClaudeHooksProbe(claudePath, log);
-  const claudeSkills = new ClaudeSkillsProbe(claudePath, log);
+  const claudeSkills = new ClaudeSkillsProbe(claudePath, log, claudeHome);
   const claudeAuth = new ClaudeAuthProbe(claudePath, log);
   // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
   const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);

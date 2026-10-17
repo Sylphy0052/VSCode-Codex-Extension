@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   UserSkillStore,
   claudePluginDirArgs,
@@ -184,5 +184,72 @@ describe('omitDuplicatedBundledRoot（Claudeへ重複する同梱pluginを渡さ
     await rm(join(bundled, 'skills'), { recursive: true });
     await rm(join(bundled, 'agents'), { recursive: true });
     expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
+  });
+
+  it('SKILL.mdが無いskill dirは比べる名前に数えない', async () => {
+    await installUser(true, true);
+    await mkdir(join(bundled, 'skills', 'draft'), { recursive: true });
+    expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([]);
+  });
+
+  describe('設定ディレクトリの優先順（引数 > CLAUDE_CONFIG_DIR > ~/.claude）', () => {
+    let fakeHome: string;
+    let envDir: string;
+
+    beforeEach(async () => {
+      fakeHome = join(work, 'fake-home');
+      envDir = join(work, 'env-dir');
+      await mkdir(fakeHome, { recursive: true });
+      await mkdir(envDir, { recursive: true });
+      // `os.homedir()`はPOSIXでは`HOME`を先に見る
+      vi.stubEnv('HOME', fakeHome);
+      vi.stubEnv('CLAUDE_CONFIG_DIR', envDir);
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    async function installAt(dir: string): Promise<void> {
+      await mkdir(join(dir, 'skills', 'sk1'), { recursive: true });
+      await writeFile(join(dir, 'skills', 'sk1', 'SKILL.md'), 'x');
+      await mkdir(join(dir, 'agents'), { recursive: true });
+      await writeFile(join(dir, 'agents', 'ag1.md'), 'x');
+    }
+
+    it('引数があれば、CLAUDE_CONFIG_DIRに揃っていても引数側で判定する', async () => {
+      await installAt(envDir);
+      expect(omitDuplicatedBundledRoot([bundled], home)).toEqual([bundled]);
+    });
+
+    it('引数が無い・空文字ならCLAUDE_CONFIG_DIRで判定する', async () => {
+      await installAt(envDir);
+      expect(omitDuplicatedBundledRoot([bundled])).toEqual([]);
+      expect(omitDuplicatedBundledRoot([bundled], '')).toEqual([]);
+    });
+
+    it('CLAUDE_CONFIG_DIRも空なら~/.claudeで判定する', async () => {
+      vi.stubEnv('CLAUDE_CONFIG_DIR', '');
+      await installAt(join(fakeHome, '.claude'));
+      expect(omitDuplicatedBundledRoot([bundled])).toEqual([]);
+    });
+  });
+
+  it('設定ディレクトリ側のskillがリンク切れなら、同梱rootを残して理由を出す', async () => {
+    await installUser(false, true);
+    await mkdir(join(home, 'skills'), { recursive: true });
+    await symlink(join(work, 'missing-skill'), join(home, 'skills', 'sk1'));
+    const warn = vi.fn();
+    expect(omitDuplicatedBundledRoot([bundled], home, warn)).toEqual([bundled]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(join(home, 'skills', 'sk1')));
+  });
+
+  it('同梱rootのskillsを読めなければ、同梱rootを残して理由を出す', async () => {
+    await installUser(true, true);
+    await rm(join(bundled, 'skills'), { recursive: true });
+    await writeFile(join(bundled, 'skills'), 'not a directory');
+    const warn = vi.fn();
+    expect(omitDuplicatedBundledRoot([bundled], home, warn)).toEqual([bundled]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('skillsを読めない'));
   });
 });
