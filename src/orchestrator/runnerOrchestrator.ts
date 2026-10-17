@@ -2225,6 +2225,7 @@ function giveUpOrchestrator(
 ): void {
   clearUnresponsiveTimer(orchestrator);
   clearUsageLimitRetryTimer(orchestrator);
+  orchestrator.answererNudge?.dispose();
   live.orchestrator = undefined;
   self.deps.log.warn(`[workflow ${runId}] オーケストレーターを諦めました: ${detail}`);
   live.warnings.push({
@@ -2684,6 +2685,7 @@ export function disposeOrchestrator(live: LiveRun): void {
   if (live.orchestrator !== undefined) {
     clearUnresponsiveTimer(live.orchestrator);
     clearUsageLimitRetryTimer(live.orchestrator);
+    live.orchestrator.answererNudge?.dispose();
     live.orchestrator.session.dispose();
   }
   live.orchestrator = undefined;
