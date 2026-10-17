@@ -183,6 +183,8 @@ export function createTranscriptBuilder(): TranscriptBuilder {
   const toolIndex = new Map<string, number>();
   let todos: TodoItem[] = NO_TODOS;
   let todoHistory: TodoSnapshot[] = NO_TODO_HISTORY;
+  /** 直前の発言が `/<名前>` だったときのコマンド名（先頭の `/` なし）。次の注入の判定に使う。 */
+  let slashCommand = '';
 
   return {
     push(line: string): void {
@@ -193,7 +195,7 @@ export function createTranscriptBuilder(): TranscriptBuilder {
 
       const type = str(entry['type']);
       if (type === 'user') {
-        appendUserEntry(entry, items, toolIndex);
+        slashCommand = appendUserEntry(entry, items, toolIndex, slashCommand);
         return;
       }
       if (type === 'attachment') {
@@ -201,6 +203,7 @@ export function createTranscriptBuilder(): TranscriptBuilder {
         return;
       }
       if (type === 'assistant') {
+        slashCommand = '';
         const found = appendAssistantEntry(entry, items, toolIndex);
         if (found !== undefined) {
           todos = found;
@@ -257,7 +260,8 @@ function appendUserEntry(
   entry: Record<string, unknown>,
   items: ChatItem[],
   toolIndex: Map<string, number>,
-): void {
+  slashCommand: string,
+): string {
   const content = messageContent(entry);
   const toolResultCount = content.filter((part) => str(part['type']) === 'tool_result').length;
 
@@ -296,28 +300,73 @@ function appendUserEntry(
   // Skill起動時にCLIが注入するSKILL.md全文（issue #691、判定はissue #889で拡張）。
   // 他の `isMeta: true`（`<local-command-caveat>`・cross-session-message等）と混同しない
   // よう `isSkillContextEntry` で絞り込み、streamJson.tsのapplyUserと同じ判定で
-  // fold対象（`skillContext`）として積む。非表示にはしない
+  // `skillContext` として積む。会話には描画しない（chatScript.tsのHIDDEN_KINDS、issue #1968）が、
+  // handoffの検出（handoff.ts）が使うため項目は残す
+  //
+  // plugin skillの本文は `Base directory for this skill:` で始まらず、`/<名前>` から
+  // 起動すると `sourceToolUseID` も付かない（CLI 2.1.296で実測、issue #1968）。
+  // 直前の発言が `/<名前>` だったことを目印に拾い、名前もそちらから取る
   if (entry['isMeta'] === true) {
     const skillText = cleanText(messageText(entry));
     if (skillText !== '' && isSkillContextEntry(entry, skillText)) {
       items.push(
         item(entry, 'skillContext', { text: skillText, detail: skillContextName(skillText) }),
       );
+    } else if (isSlashSkillBody(entry, skillText, slashCommand)) {
+      items.push(item(entry, 'skillContext', { text: skillText, detail: slashCommand }));
     }
-    return;
+    return '';
   }
 
   if (!isHumanMessage(entry)) {
-    return;
+    return '';
   }
   const raw = messageText(entry);
   // 制御タグを落とすと空になる発言は、slash commandで始めたもの（issue #1278）。
   // 打った通りの `/名前 引数` を組み立て直して積む
   const text = cleanText(raw) || slashCommandText(raw);
   if (text === '') {
-    return;
+    return '';
   }
   items.push(item(entry, 'userMessage', { text }));
+  return slashCommandName(raw);
+}
+
+/**
+ * `/<名前>` の直後にCLIが注入した本文か（issue #1968）。
+ *
+ * `<local-command-caveat>` などタグで始まる注入や、他セッションからのメッセージは巻き込まない。
+ */
+function isSlashSkillBody(
+  entry: Record<string, unknown>,
+  text: string,
+  slashCommand: string,
+): boolean {
+  return (
+    slashCommand !== '' &&
+    text !== '' &&
+    !text.startsWith('<') &&
+    crossSessionMessageBody(entry) === undefined
+  );
+}
+
+/** `/<名前>` で始めた発言のコマンド名（先頭の `/` なし）。slash commandでなければ空文字。 */
+function slashCommandName(raw: string): string {
+  const name = commandTagBody(raw, 'command-name');
+  return name.startsWith('/') ? name.slice(1) : '';
+}
+
+/**
+ * `/<名前>` で始めた発言の表示用本文（issue #1968）。slash commandでなければ空文字。
+ *
+ * stream-jsonでも履歴と同じく制御タグだけの文字列で返るため、`transcriptItems` と同じ
+ * 手順で組み立て直す。
+ */
+export function slashCommandMessageText(raw: string): string {
+  if (slashCommandName(raw) === '') {
+    return '';
+  }
+  return cleanText(raw) || slashCommandText(raw);
 }
 
 /**

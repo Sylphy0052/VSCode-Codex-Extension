@@ -149,8 +149,8 @@ export function chatScript(
     // Claude CodeのAskUserQuestion（issue #685）。承認カード解決後、会話ログに
     // 質問と回答を1項目として残すための種類
     askUserQuestion: '質問',
-    // Skillツール実行時にCLIが注入するSKILL.md全文（issue #691）。通常のuserMessageとは
-    // 分け、他のツール出力と同じ既定折りたたみにする
+    // Skill起動時にCLIが注入するSKILL.md全文（issue #691）。会話には描画しない（HIDDEN_KINDS）が、
+    // transcriptMarkdown.tsのKIND_TITLEと語彙を揃えるため残す
     skillContext: 'Skill',
   };
 
@@ -205,8 +205,10 @@ export function chatScript(
     'collabAgentToolCall',
     'autoApprovalReview',
     'fileRead',
-    'skillContext',
   ]);
+
+  /** 会話に描画しない種類（issue #1968）。 */
+  const HIDDEN_KINDS = new Set(['skillContext']);
 
   /** 閉じたコマンド実行カードの見出しに出す、コマンド先頭の文字数。 */
   const COMMAND_PREVIEW_LENGTH = 48;
@@ -284,7 +286,6 @@ export function chatScript(
     subAgentActivity: 'tool',
     collabAgentToolCall: 'tool',
     autoApprovalReview: 'tool',
-    skillContext: 'tool',
   };
 
   /**
@@ -1445,6 +1446,9 @@ export function chatScript(
     let previousTurnId;
 
     for (const item of items) {
+      // Skill起動時にCLIが注入するSKILL.md全文は会話に出さない（issue #1968）。
+      // 起動したことはSkillツールのカードや /名前 の発言で判る。項目自体はhandoffの検出が使うため残す
+      if (HIDDEN_KINDS.has(item.kind)) continue;
       seen.add(item.id);
       let node = nodes.get(item.id);
       if (!node) {

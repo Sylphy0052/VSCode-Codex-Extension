@@ -923,6 +923,73 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.kind).toBe('userMessage');
   });
 
+  it('Skillツールの結果の直後に来たplugin skillの本文もskillContextにする（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+      },
+    ]);
+    const skill = state.items.find((i) => i.id === 'u1');
+    expect(skill?.kind).toBe('skillContext');
+    expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('Skillツールの結果の直後でもisSyntheticが無い発言はuserMessageのまま（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'x' } }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: x' }],
+        },
+      },
+      { type: 'user', uuid: 'u1', message: { content: [{ type: 'text', text: '続けて' }] } },
+    ]);
+    expect(state.items.find((i) => i.id === 'u1')?.kind).toBe('userMessage');
+  });
+
+  it('文字列で返る /名前 の発言を /名前 引数 として積む（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isReplay: true,
+        message: {
+          content:
+            '<command-message>genshijin:help</command-message>\n<command-name>/genshijin:help</command-name>\n<command-args>極限</command-args>',
+        },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('userMessage');
+    expect(state.items[0]?.text).toBe('/genshijin:help 極限');
+  });
+
   it('目印が無いユーザーの発言は同じ文面でも畳まない（issue #934）', () => {
     const state = apply([
       {
