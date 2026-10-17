@@ -974,6 +974,154 @@ describe('applyStreamEvent', () => {
     expect(state.items.find((i) => i.id === 'u1')?.kind).toBe('userMessage');
   });
 
+  it('Base directory形式の本文でもSkillツールの起動結果の名前空間付きの名前を使う（issue #1971）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: 'Base directory for this skill: /home/u/.claude/plugins/genshijin/skills/help\n\n# help\n',
+            },
+          ],
+        },
+      },
+    ]);
+    const skill = state.items.find((i) => i.id === 'u1');
+    expect(skill?.kind).toBe('skillContext');
+    expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('並列に呼んだツールの項目が挟まってもSkillの本文をskillContextにする（issue #1971）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+            { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'ls' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'a.txt' }] },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+      },
+    ]);
+    const skill = state.items.find((i) => i.id === 'u1');
+    expect(skill?.kind).toBe('skillContext');
+    expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('Skillを並列に2つ呼んだら、本文を起動した順に対応させる（issue #1971）', () => {
+    const synthetic = (uuid: string, text: string) => ({
+      type: 'user',
+      uuid,
+      isSynthetic: true,
+      message: { content: [{ type: 'text', text }] },
+    });
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'a' } },
+            { type: 'tool_use', id: 't2', name: 'Skill', input: { skill: 'b' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: a' },
+            { type: 'tool_result', tool_use_id: 't2', content: 'Launching skill: b' },
+          ],
+        },
+      },
+      synthetic('u1', 'aの本文\n'),
+      synthetic('u2', 'bの本文\n'),
+      synthetic('u3', 'No response requested.'),
+    ]);
+    const kinds = ['u1', 'u2', 'u3'].map((id) => {
+      const found = state.items.find((i) => i.id === id);
+      return [found?.kind, found?.detail];
+    });
+    expect(kinds).toEqual([
+      ['skillContext', 'a'],
+      ['skillContext', 'b'],
+      ['userMessage', ''],
+    ]);
+  });
+
+  it('本文を受け取ったSkillの起動は後の合成メッセージに使い回さない（issue #1971）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'x' } }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: x' }],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: '本文\n' }] },
+      },
+      {
+        type: 'user',
+        uuid: 'u2',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'No response requested.' }] },
+      },
+    ]);
+    expect(state.items.find((i) => i.id === 'u1')?.kind).toBe('skillContext');
+    expect(state.items.find((i) => i.id === 'u2')?.kind).toBe('userMessage');
+  });
+
   it('文字列で返る /名前 の発言を /名前 引数 として積む（issue #1968）', () => {
     const state = apply([
       {
