@@ -130,7 +130,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     name: 'get_run_state',
     description:
       'この実行の現在の状態（計画の承認状況・並列上限・各タスクの工程・判断待ちの工程と推奨値・ユーザー判断待ちの質問）を返す。状態の正本はこれで、通知の内容より優先する。' +
-      '既定は差分で、この世代で前回返したときから行が変わったタスクだけを返し、変わらなかったタスクは「変化なし: N件（T1, T3, ...）」の1行にまとめる（それらは前回の結果のまま）。見出しとロードマップ節は毎回返す。世代で最初の呼出しと会話の圧縮後の最初の呼出しは全タスクを返す。' +
+      '既定は差分で、この世代で前回返したときから行が変わったタスクと、答えを待つ質問・開いている関門があるタスクだけを返し、変わらなかったタスクは「変化なし: N件（T1, T3, ...）」の1行にまとめる（それらは前回の結果のまま）。見出しとロードマップ節は毎回返す。世代で最初の呼出しと会話の圧縮後の最初の呼出しは全タスクを返す。' +
       '全工程が終わったタスクは1行に畳む。前回の結果を覚えていないとき（圧縮の後など）はfull: trueで全タスクを取り直し、畳まれたタスクや変化なしのタスクの全項目はtaskIdsで取る。',
     inputSchema: {
       type: 'object',
@@ -830,7 +830,9 @@ export function formatTaskRunState(
     }
     const block = formatDefaultTaskBlock(run, task, recommendations, awaiting);
     shown.set(task.taskId, block);
-    if (!request.full && previous?.get(task.taskId) === block) {
+    // 答えるべき質問・開いている関門があるタスクは、行が変わらなくても毎回返す。「変化なし」に埋もれると、
+    // 前回見たまま未対応の判断待ちを見落とす
+    if (!request.full && !hasOpenDecision(task) && previous?.get(task.taskId) === block) {
       unchanged.push(task.taskId);
     } else {
       lines.push(block);
@@ -871,6 +873,15 @@ export function formatTaskRunState(
     ...(body === '' && footer.length === 0 ? ['（なし）'] : []),
   ].join('\n');
   return { text, shown };
+}
+
+/** 答えを待つ質問か、開いている関門がある（差分で省かない）。 */
+function hasOpenDecision(task: OrchestratedTask): boolean {
+  return (
+    listQuestionsAwaitingOrchestrator(task).length > 0 ||
+    listQuestionsAwaitingUser(task).length > 0 ||
+    findOpenGate(task) !== undefined
+  );
 }
 
 function runStateModeLabel(request: RunStateRequest, hasPrevious: boolean): string {

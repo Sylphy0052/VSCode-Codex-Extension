@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { openStageGate } from '../../src/orchestrator/taskRunGates';
 import {
   formatTaskRunState,
   formatTaskRunSummary,
@@ -96,6 +97,39 @@ describe('get_run_stateの差分取得（Issue #1980）', () => {
     expect(second.text).toContain('implement=running');
     expect(second.text).not.toContain('- T1 タスクT1');
     expect(second.text).not.toContain('- T3 タスクT3');
+    expect(second.text).toContain('変化なし: 2件（T1, T3）');
+  });
+
+  it('開いている関門があるタスクは、行が変わらなくても「変化なし」にせず毎回返す', () => {
+    const run = advanceT2(makeRun());
+    const t2 = run.tasks['T2'];
+    if (t2 === undefined) {
+      throw new Error('T2が無い');
+    }
+    const halted = {
+      ...run,
+      tasks: {
+        ...run.tasks,
+        T2: {
+          ...t2,
+          stages: {
+            ...t2.stages,
+            implement: { ...t2.stages.implement, status: 'halted' as const },
+          },
+        },
+      },
+    };
+    const gated = openStageGate(
+      halted,
+      'T2',
+      { gateId: 'g1', kind: 'stageFailed', detail: '失敗した' },
+      NOW,
+    );
+    const first = formatTaskRunState(gated, none);
+    expect(first.text).toContain('関門 gateId=g1');
+    const second = formatTaskRunState(gated, none, [], undefined, first.shown);
+    expect(second.text).toContain('関門 gateId=g1');
+    expect(second.text).toContain('- T2 タスクT2');
     expect(second.text).toContain('変化なし: 2件（T1, T3）');
   });
 
