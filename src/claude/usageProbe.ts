@@ -47,8 +47,9 @@ const MIN_INTERVAL_MS = 15 * 60_000;
 const RETRY_INTERVAL_MS = 60_000;
 
 /**
- * 連続失敗がこの回数に達したウィンドウは、自動の取得を止める（Issue #1914）。
- * 他のウィンドウの成功が共有されるか、ウィンドウを開き直すまで再開しない。
+ * 連続失敗がこの回数に達したら、1回だけログへ残す。取得は止めず、`intervalAfter`の
+ * 上限の間隔で取り直し続ける。CLIは使用率の取得に一時的に失敗すると、その節を黙って省いた
+ * 出力を返す。止めると、回復してもウィンドウを開き直すまで未計測のままになる（Issue #1962）。
  */
 const MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -115,14 +116,10 @@ export class ClaudeUsageProbe {
   private nextReadAt = 0;
   /** 共有先が無いときに使う、ウィンドウ内での連続失敗の回数。 */
   private failures = 0;
-  /** 連続失敗が上限に達して、自動の取得を止めているか。 */
-  private stopped = false;
-  /** このウィンドウで`claude`を1回でも起動したか。 */
-  private launched = false;
   private running = false;
   /** 自分が取得中のロックの世代。取得していなければundefined。 */
   private claimedGeneration: number | undefined;
-  /** 次の`read`で間隔・共有の結果・停止を無視して取得するか（Issue #1955）。 */
+  /** 次の`read`で間隔・共有の結果を無視して取得するか（Issue #1955）。 */
   private freshRequested = false;
   /** 進行中の取得。終われば解決する（失敗しても拒否しない）。 */
   private inFlight: Promise<void> = Promise.resolve();
@@ -161,7 +158,7 @@ export class ClaudeUsageProbe {
   }
 
   /**
-   * 次の`read`を、間隔・他のウィンドウの結果・連続失敗による停止に関わらず取得させる
+   * 次の`read`を、間隔・他のウィンドウの結果に関わらず取得させる
    * （Issue #1955）。アカウントを切り替えた直後に、切り替え先の使用率を取るために使う。
    * 共有の結果は切り替え前のアカウントのものでありうるので使わない。
    * 他のウィンドウが取得権を持っていて読めなかったときは、再試行の間隔を空けて次の`read`へ持ち越す。
@@ -211,11 +208,6 @@ export class ClaudeUsageProbe {
       if (fresh !== undefined) {
         return this.adopt(fresh);
       }
-      if (this.stopped && !forced) {
-        // 止めている間は起動しない。他のウィンドウの成功が共有されれば、上のadoptで再開する
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
-        return undefined;
-      }
       // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
       claimed = await this.claim(now);
       if (!claimed) {
@@ -228,14 +220,6 @@ export class ClaudeUsageProbe {
         return this.adopt(again);
       }
       const failures = (await this.readShared())?.failures ?? this.failures;
-      if (failures >= MAX_CONSECUTIVE_FAILURES && this.launched && !forced) {
-        // 他のウィンドウが上限に達した。ログはそのウィンドウが出しているので、黙って止める。
-        // まだ起動していないウィンドウ（開き直した直後など）は、1回だけ試してから止まる
-        this.stopped = true;
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
-        return undefined;
-      }
-      this.launched = true;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
       await this.writeShared({ readAt: now, usage: undefined, failures });
       // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
@@ -286,25 +270,17 @@ export class ClaudeUsageProbe {
   private adopt(record: SharedUsageRecord): ChatUsage | undefined {
     this.failures = record.failures;
     this.nextReadAt = record.readAt + intervalAfter(record.failures, record.highestPct);
-    if (record.usage !== undefined) {
-      this.stopped = false;
-    }
     return record.usage;
   }
 
-  /** 自分で取得した結果から、次に取得する時刻と停止を決める。 */
+  /** 自分で取得した結果から、次に取得する時刻を決める。 */
   private recordResult(now: number, failures: number, highestPct?: number): void {
     this.failures = failures;
     this.nextReadAt = now + intervalAfter(failures, highestPct);
-    if (failures === 0) {
-      this.stopped = false;
-      return;
-    }
-    if (failures >= MAX_CONSECUTIVE_FAILURES && !this.stopped) {
-      this.stopped = true;
+    if (failures === MAX_CONSECUTIVE_FAILURES) {
       this.log.warn(
-        `使用量の取得が${failures}回続けて失敗したため、自動の取得を止めます。` +
-          '他のウィンドウで取得できるか、ウィンドウを開き直すと再開します。',
+        `使用量の取得が${failures}回続けて失敗しました。` +
+          `以後${MIN_INTERVAL_MS / 60_000}分おきに取り直します。`,
       );
     }
   }
