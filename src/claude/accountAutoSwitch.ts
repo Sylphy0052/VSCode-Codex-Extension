@@ -338,6 +338,10 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
   ): Promise<SwitchOutcome> {
     const { store } = this.ports;
     if (measureBefore) {
+      // `/usage`は20秒（usageProbeのTIMEOUT_MS）で打ち切られるので、上限で止まった会話の
+      // 切り替えが遅れるのはその時間までになる。取得中に閾値の切り替えが`onProbed`から
+      // 呼ばれても「切り替え中です」で捨てられ、上限の切り替えが続く。選ばれる先は
+      // 閾値判定のものと違いうるが、結果は正しい（Issue #1959）
       await this.measureBeforeSwitch();
     }
     const result = await store.switchTo(id);
