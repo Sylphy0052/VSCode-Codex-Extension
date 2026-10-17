@@ -52,6 +52,8 @@ const RETRY_INTERVAL_MS = 60_000;
  * 出力を返す。止めると、回復してもウィンドウを開き直すまで未計測のままになる（Issue #1962）。
  */
 const MAX_CONSECUTIVE_FAILURES = 5;
+/** 共有記録の`failures`は、`readAt`からこの時間以上たつと0とみなす（Issue #1920）。 */
+const STALE_FAILURES_MS = 60 * 60_000;
 
 /**
  * 取得中であることを示す排他ファイル名の接頭辞（`sharedDir`の直下）。
@@ -119,6 +121,8 @@ function intervalAfter(failures: number, highestPct = 0): number {
 export class ClaudeUsageProbe {
   /** この時刻までは`read`しても何もしない。 */
   private nextReadAt = 0;
+  /** 他のウィンドウが取得権を持っていて取れなかったとき、この時刻までは強制取得でも再試行しない。 */
+  private claimRetryAt = 0;
   /** 共有先が無いときに使う、ウィンドウ内での連続失敗の回数。 */
   private failures = 0;
   private running = false;
@@ -192,7 +196,6 @@ export class ClaudeUsageProbe {
    */
   requestFresh(): void {
     this.freshRequested = true;
-    this.nextReadAt = 0;
   }
 
   /**
@@ -213,7 +216,12 @@ export class ClaudeUsageProbe {
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
   read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    if (this.running || now < this.nextReadAt) {
+    // 強制取得は通常の間隔を無視するが、取得権を取れなかった後の再試行の間隔は守る
+    if (
+      this.running ||
+      now < this.claimRetryAt ||
+      (now < this.nextReadAt && !this.freshRequested)
+    ) {
       return Promise.resolve(undefined);
     }
     this.running = true;
@@ -238,17 +246,26 @@ export class ClaudeUsageProbe {
       // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
       claimed = await this.claim(now);
       if (!claimed) {
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        this.claimRetryAt = now + RETRY_INTERVAL_MS;
         return undefined;
       }
+      this.claimRetryAt = 0;
       // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
       const again = forced ? undefined : await this.readFreshShared(now);
       if (again !== undefined) {
         return this.adopt(again);
       }
-      const failures = (await this.readShared())?.failures ?? this.failures;
-      // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
-      await this.writeShared({ readAt: now, usage: undefined, failures });
+      const previous = await this.readShared();
+      // 時間が空いた記録の失敗は、今の失敗と続いているとは言えないので数えない
+      const failures =
+        previous === undefined
+          ? this.failures
+          : now - previous.readAt >= STALE_FAILURES_MS
+            ? 0
+            : previous.failures;
+      // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする。
+      // 取得中にadoptした他のウィンドウへ割合が届くよう、前回の値は残す
+      await this.writeShared({ readAt: now, usage: previous?.usage, failures });
       // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
       this.freshRequested = false;
       const startedAccount = await this.accounts?.currentId().catch(() => undefined);

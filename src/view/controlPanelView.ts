@@ -218,7 +218,9 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   /** 記録したアカウントの使用率を一覧へ反映する（Issue #1955）。設定は読み直さない。 */
   async refreshClaudeAccounts(): Promise<void> {
-    await this.post();
+    // 2分ごとのポーリングから呼ばれる。設定パネル全体は組み立てず、アカウント一覧だけを送る
+    const claudeAccounts = await this.claudeAccounts?.store.list();
+    await this.view?.webview.postMessage({ type: 'claudeAccounts', claudeAccounts });
   }
 
   private async post(): Promise<void> {
