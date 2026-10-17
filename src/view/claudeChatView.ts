@@ -223,12 +223,14 @@ import {
   buildHandoffPrompt,
   buildMilestonePrompt,
   chooseHandoffPrompt,
+  isBareHandoffAttempt,
   handoffAttemptTexts,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
   decideAutoHandoff,
   offersInsteadOfAutoHandoff,
+  probeIsRedundantAfterOffer,
   deriveHandoffBaseName,
   invokedHandoffSkill,
   parseHandoffPrompt,
@@ -1280,9 +1282,11 @@ export class ClaudeChatViewManager
     }
     // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
     if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      entry.trace.info(`区切りの契機（${trigger.kind}）は提案済みのため何もしない`);
       return true;
     }
     entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
+    entry.trace.info(`区切りの契機（${trigger.kind}）のため引き継がず提案で止めた`);
     entry.session.noteLocalEvent(
       `autoHandoffOffer:${Date.now()}`,
       '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
@@ -1520,7 +1524,6 @@ export class ClaudeChatViewManager
     });
     const chosen = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text, milestonePrompt);
     // handoffプロンプトの本文だけを渡す試行には、事実節・受領確認の指示を付けない（Issue #1950）
-    const bareText = chosen.isBare ? chosen.text : undefined;
     let firstText = chosen.text;
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
@@ -1581,14 +1584,18 @@ export class ClaudeChatViewManager
     const handoffId =
       (handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource)?.handoffId) ??
       newHandoffId(createdAt);
-    const factsSection = buildHandoffFactsSection(
-      await resolveHandoffGitFacts(entry.cwd, gitBranch),
-      extractCreatedReferences(state.items),
-    );
+    // 事実節のgit呼出は、本文だけでない試行に初めて要るときまで遅らせる（Issue #1952）
+    let factsSection: string | undefined;
     for (const attemptText of handoffAttemptTexts(firstText, pointerText)) {
       // ポインタだけを指す本文へ戻した試行にはreplayが無いので、確認一覧も求めない
       const asksChecklist = attemptText !== pointerText && (replay?.userCount ?? 0) > 0;
-      const isBareAttempt = attemptText === bareText;
+      const isBareAttempt = isBareHandoffAttempt(chosen, attemptText);
+      if (!isBareAttempt) {
+        factsSection ??= buildHandoffFactsSection(
+          await resolveHandoffGitFacts(entry.cwd, gitBranch),
+          extractCreatedReferences(state.items),
+        );
+      }
       const promptText = isBareAttempt
         ? attemptText
         : withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId, asksChecklist);
@@ -1672,20 +1679,23 @@ export class ClaudeChatViewManager
         // 受領確認を指示していない本文だけの試行では、受領行を待たない
         isBareAttempt ? undefined : handoffId,
         sentPointerPath,
-        createHandoffAcceptanceJudge({
-          enabled: () => this.reflexEnabledFor(newEntry),
-          threshold: readHandoffAcceptanceThreshold,
-          deps: reflexJudgeDeps(
-            'claude',
-            this.claudePath(),
-            (message) => entry.trace.warn(message),
-            giveUp.signal,
-          ),
-          sentPrompt: promptText,
-          pointerPath: sentPointerPath,
-          destinationDisposed: () => newEntry.disposed,
-          trace: entry.trace,
-        }),
+        // 受領行を待たない本文だけの試行では判定も使わない
+        isBareAttempt
+          ? undefined
+          : createHandoffAcceptanceJudge({
+              enabled: () => this.reflexEnabledFor(newEntry),
+              threshold: readHandoffAcceptanceThreshold,
+              deps: reflexJudgeDeps(
+                'claude',
+                this.claudePath(),
+                (message) => entry.trace.warn(message),
+                giveUp.signal,
+              ),
+              sentPrompt: promptText,
+              pointerPath: sentPointerPath,
+              destinationDisposed: () => newEntry.disposed,
+              trace: entry.trace,
+            }),
       );
       try {
         // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
@@ -2465,6 +2475,19 @@ export class ClaudeChatViewManager
         return;
       }
       entry.trace.info('作業の節目を検知したが契機が成立しなかった');
+    }
+    if (
+      probeIsRedundantAfterOffer({
+        action: readAutoHandoffBoundaryAction(),
+        remainingPercent,
+        softThresholdPercent,
+        onProfileChange,
+        offeredTurnSeq: entry.autoHandoffOfferedTurnSeq,
+        turnCompletionSeq: state.turnCompletionSeq,
+      })
+    ) {
+      entry.trace.info('このターンは引き継ぎを提案済みのため分類器・Reflexを起動しない');
+      return;
     }
     if (reflex.enabled) {
       await this.maybeAutoHandoffByReflex(entry, state, {

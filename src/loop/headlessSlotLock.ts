@@ -11,6 +11,12 @@ import * as path from 'node:path';
  *
  * 実行は数十秒〜数分続くため、持ち主は実行中にmtimeを更新し続ける（ハートビート）。更新が
  * `SLOT_STALE_MS`より古いロックは、保持したまま落ちたウィンドウの残骸として奪う。
+ *
+ * 限界（Issue #1918）: ハートビートは持ち主のイベントループで動くため、拡張ホストが
+ * `SLOT_STALE_MS`を超えて止まると（同期処理の詰まり、デバッガでの停止、スリープ明けなど）更新が
+ * 途切れ、生きている持ち主の枠を他のウィンドウが奪う。奪われた側は気づかずに実行を続けるので、
+ * その実行が終わるまでは一時的に同時2本になりうる。2本で済み、実行が終われば元に戻るため、
+ * 実行を止める仕組みは持たない。
  */
 
 const SLOT_FILE_PREFIX = 'headless-cli-slot.lock';
@@ -31,6 +37,8 @@ export interface HeadlessSlot {
 
 export class HeadlessSlotLock {
   private warned = false;
+  /** `dir`を作り終えたか。作った後は取るたびの`mkdir`を省く（Issue #1918）。 */
+  private dirReady = false;
 
   constructor(
     private readonly dir: string,
@@ -40,10 +48,17 @@ export class HeadlessSlotLock {
   /**
    * 実行枠を取る。他のウィンドウが実行中なら`undefined`を返す（呼び出し側が時間をおいて取り直す）。
    * 共有先に書けないときは、ウィンドウ間の調整を諦めて枠を渡す（短命CLIを止め続けない）。
+   *
+   * 無競合でも`readdir`・`stat`・`writeFile`・`readdir`・`unlink`とfs呼び出しが数回入り、起動が
+   * 数ms遅れる（`headlessCli.ts`の`recordCall`の待ち時間にも載る）。`mkdir`だけは初回に限り、
+   * 残りは排他に要るため受け入れる。CLIの実行は数十秒〜数分かかる（Issue #1918）。
    */
   async tryAcquire(): Promise<HeadlessSlot | undefined> {
     try {
-      await mkdir(this.dir, { recursive: true });
+      if (!this.dirReady) {
+        await mkdir(this.dir, { recursive: true });
+        this.dirReady = true;
+      }
       const latest = Math.max(0, ...(await this.listGenerations()));
       if (latest > 0) {
         try {
@@ -81,6 +96,8 @@ export class HeadlessSlotLock {
       }
       return this.hold(own);
     } catch (e) {
+      // 共有先が消された場合に、次の呼び出しで作り直す
+      this.dirReady = false;
       // 書けない状態は呼び出しのたびに続くため、ログは1回だけにする
       if (!this.warned) {
         this.warned = true;
