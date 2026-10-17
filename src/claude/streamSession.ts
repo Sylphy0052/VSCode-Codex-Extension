@@ -442,7 +442,9 @@ export class ClaudeStreamSession {
       sessionId: options.sessionId,
       cwd: options.cwd,
       config: options.config,
-      pluginDirs: omitDuplicatedBundledRoot(extensionPluginRoots(), this.configDir),
+      pluginDirs: omitDuplicatedBundledRoot(extensionPluginRoots(), this.configDir, (m) =>
+        this.log.warn(m),
+      ),
     });
     for (const w of warnings) {
       this.log.warn(w);

@@ -542,6 +542,7 @@ skillはモデルへ渡す指示（プロンプト）で、hooksと同じくプ�
 - **Codex**は`skills/list`（実測。cwdごとに`{name, description, path, scope, enabled}`が返る）から一覧を作り、`scope`（`user` `repo` `system` `admin`）をそのまま出どころへ対応させる。チェックボックスで有効/無効を切り替えられ、`skills/config/write`（スキーマ根拠。この環境のskill設定を書き換えない方針のため実際の書き込みは未検証）で反映する
 - **Claude Code**は`reload_skills`（実測。専用の一覧取得要求は無く、これが唯一の経路）から一覧を作る。**有効/無効を返す・切り替える経路がどちらもプロトコルに無い**ため、常に「有効」として表示しチェックボックスは出さない。出どころは応答の`description`に付く注記（` (user)` ` (project)`、プラグインは`name`が`plugin:skill`の形になり`description`の先頭に`(plugin) `）からの**推測**であり、正式なAPIフィールドではない旨を注記する
 - 一覧を取得できない場合はその旨を出し、パネル自体は壊さない
+- **Claude Code**では、同梱skill（`codex-ext:`）を読ませないことがある。同梱pluginのskillとsubagentがすべて、Claudeの設定ディレクトリ（`claude.configDir` > `CLAUDE_CONFIG_DIR` > `~/.claude`）の`skills/<名前>/SKILL.md`・`agents/<名前>.md`に同じ名前で既にあるときで、同じ説明が一覧へ二重に載るのを避けるため。名前だけで判定し、中身が違っても設定ディレクトリ側を使う。1つでも欠けている、設定ディレクトリ側がリンク切れ、同梱pluginを読めない、同梱pluginがskillとsubagent以外（commands・hooksなど）を持つ、のいずれかなら読ませる（リンク切れと読めない場合は出力パネルへ理由を出す）。Codexでは常に読ませる
 
 ### plugins / apps
 

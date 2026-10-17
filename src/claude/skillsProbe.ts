@@ -27,6 +27,11 @@ export class ClaudeSkillsProbe {
   constructor(
     private readonly claudePath: () => string,
     private readonly log: Logger,
+    /**
+     * CLIの設定ディレクトリ。会話（`ClaudeStreamSession`）と同じ値を渡し、同じ場所の
+     * skillを読ませる。同梱pluginを省くかの判定（`claudePluginDirArgs`）も同じ場所で行う。
+     */
+    private readonly configDir?: string,
     private readonly timeoutMs = TIMEOUT_MS,
   ) {}
 
@@ -70,9 +75,15 @@ export class ClaudeSkillsProbe {
           '--output-format',
           'stream-json',
           '--verbose',
-          ...claudePluginDirArgs(),
+          ...claudePluginDirArgs(undefined, this.configDir, (m) => this.log.warn(m)),
         ],
-        { stdio: ['pipe', 'pipe', 'ignore'], ...(cwd === undefined ? {} : { cwd }) },
+        {
+          stdio: ['pipe', 'pipe', 'ignore'],
+          ...(cwd === undefined ? {} : { cwd }),
+          ...(this.configDir === undefined || this.configDir === ''
+            ? {}
+            : { env: { ...process.env, CLAUDE_CONFIG_DIR: this.configDir } }),
+        },
       );
 
       let buffer = '';
