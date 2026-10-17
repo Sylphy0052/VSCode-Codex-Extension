@@ -1180,7 +1180,10 @@ function approvedReviewNumberOf(command: string): string | undefined {
       return undefined;
     }
     // `-t 30` のように数値を取るオプションの値は番号ではない
-    const isOptionValue = previous.startsWith('-') && !REVIEW_FLAGS_WITHOUT_VALUE.has(previous);
+    const isOptionValue =
+      previous.startsWith('-') &&
+      !previous.includes('=') &&
+      !REVIEW_FLAGS_WITHOUT_VALUE.has(previous);
     previous = token;
     if (isOptionValue) {
       continue;
