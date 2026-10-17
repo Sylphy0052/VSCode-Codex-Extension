@@ -8,7 +8,18 @@ const mocks = vi.hoisted(() => ({
   ensure: vi.fn(),
   connect: vi.fn(),
   evaluate: vi.fn(),
+  readdirFail: false,
 }));
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return {
+    ...actual,
+    readdir: ((...args: Parameters<typeof actual.readdir>) =>
+      mocks.readdirFail
+        ? Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }))
+        : (actual.readdir as (...a: unknown[]) => unknown)(...args)) as typeof actual.readdir,
+  };
+});
 
 vi.mock('../../src/webGpt/browser', () => ({ ensureWebGptBrowser: mocks.ensure }));
 vi.mock('../../src/webGpt/cdp', async () => {
@@ -20,13 +31,15 @@ vi.mock('../../src/webGpt/cdp', async () => {
     evaluateInPage: mocks.evaluate,
   };
 });
+// 待ち時間を実際には待たず即時に解決する。偽の時計が有効なテストでは、その分だけ時計を進める
 vi.mock('node:timers/promises', () => ({
-  setTimeout: (_ms: number, _v: unknown, opts?: { signal?: AbortSignal }) => {
+  setTimeout: (ms: number, _v: unknown, opts?: { signal?: AbortSignal }) => {
     if (opts?.signal?.aborted) {
       const err = new Error('aborted');
       err.name = 'AbortError';
       return Promise.reject(err);
     }
+    if (vi.isFakeTimers()) vi.setSystemTime(Date.now() + ms);
     return Promise.resolve();
   },
 }));
@@ -112,9 +125,11 @@ beforeEach(async () => {
   mocks.ensure.mockReset().mockResolvedValue(undefined);
   mocks.connect.mockReset().mockResolvedValue(browser);
   mocks.evaluate.mockReset();
+  mocks.readdirFail = false;
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await rm(outDir, { recursive: true, force: true });
 });
@@ -266,18 +281,14 @@ describe('generateImage', () => {
 
   it('times out waiting for composer', async () => {
     setScript({ composer: [{ composer: false }] });
-    const t = Date.now();
-    const spy = vi.spyOn(Date, 'now');
-    spy.mockReturnValueOnce(t).mockReturnValue(t + 10 * 60_000);
+    vi.useFakeTimers({ toFake: ['Date'] });
     const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
     expect(r).toMatchObject({ error: expect.stringContaining('入力欄') });
   });
 
   it('throws page error after composer deadline', async () => {
     setScript({ composer: [new Error('ctx')] });
-    const t = Date.now();
-    const spy = vi.spyOn(Date, 'now');
-    spy.mockReturnValueOnce(t).mockReturnValue(t + 10 * 60_000);
+    vi.useFakeTimers({ toFake: ['Date'] });
     const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
     expect(r).toMatchObject({ ok: false, error: expect.stringContaining('ctx') });
   });
@@ -297,16 +308,10 @@ describe('generateImage', () => {
     expect(r).toMatchObject({ error: expect.stringContaining('見つかりません') });
 
     setScript({ click: ['disabled'] });
-    const t = Date.now();
-    const spy = vi.spyOn(Date, 'now');
-    spy.mockReturnValue(t);
-    spy
-      .mockReturnValueOnce(t)
-      .mockReturnValueOnce(t)
-      .mockReturnValue(t + 60_000);
+    vi.useFakeTimers({ toFake: ['Date'] });
     r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
     expect(r).toMatchObject({ error: expect.stringContaining('有効になりません') });
-    spy.mockRestore();
+    vi.useRealTimers();
 
     setScript({ click: ['disabled', 'clicked'], answer: [done()] });
     r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
@@ -326,19 +331,21 @@ describe('generateImage', () => {
     });
     const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
     expect(r.ok).toBe(true);
+    // 途中の変化と未完了で数え直したため、6回の状態取得をすべて使い切って完了した
+    const answerPolls = mocks.evaluate.mock.calls.filter(([, , expr]) =>
+      String(expr).includes('location.pathname'),
+    );
+    expect(answerPolls).toHaveLength(6);
   });
 
   it('times out waiting for answer, with and without path', async () => {
     for (const path of ['', '/c/abc']) {
       setScript({ answer: [{ path, turns: 0, state: 'running', images: [] }] });
-      const t = Date.now();
-      const spy = vi.spyOn(Date, 'now');
-      spy.mockReturnValue(t);
-      let n = 0;
-      spy.mockImplementation(() => (n++ < 6 ? t : t + 11 * 60_000));
+      vi.useFakeTimers({ toFake: ['Date'] });
       const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
       expect(r).toMatchObject({ error: expect.stringContaining('分以内') });
-      spy.mockRestore();
+      if (path !== '') expect((r as { error: string }).error).toContain(path);
+      vi.useRealTimers();
     }
   });
 
@@ -419,8 +426,6 @@ describe('generateImage', () => {
       error: expect.stringContaining('boom'),
     });
     // and without it
-    const r3 = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
-    expect(r3).toBeDefined();
     setScript({ answer: [new Error('boom')] });
     const r4 = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
     expect(r4.ok).toBe(false);
@@ -428,11 +433,12 @@ describe('generateImage', () => {
   });
 
   it('ignores prune failures', async () => {
-    const file = join(outDir, 'file');
-    await writeFile(file, 'x');
+    mocks.readdirFail = true;
     setScript({ answer: [done()] });
-    const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: file });
-    expect(r.ok).toBe(false);
+    const r = await generateImage({ prompt: 'p' }, { endpoint: 'e', outputDir: outDir });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.paths).toHaveLength(1);
+    await expect(pruneOldImages(outDir)).rejects.toThrow('EACCES');
   });
 });
 

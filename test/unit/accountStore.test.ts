@@ -280,11 +280,11 @@ describe('ClaudeAccountStore', () => {
     await writeFile(join(home, 'accounts', '.current'), 'legacy\n');
     const snap = await store.list();
     expect(snap.ok).toBe(true);
-    if (snap.ok) {
-      expect(snap.accounts[0]).toMatchObject({ id: 'legacy', name: 'legacy', current: true });
-    }
+    if (!snap.ok) throw new Error('list failed');
+    expect(snap.accounts[0]).toMatchObject({ id: 'legacy', name: 'legacy', current: true });
     const lock = join(home, 'accounts', '.ext-op.lock');
     await writeFile(lock, '');
+    // src/claude/accountStore.ts の STALE_LOCK_MS (30_000、非export) より十分古くする
     const old = new Date(Date.now() - 120_000);
     await utimes(lock, old, old);
     expect((await store.rename('legacy', 'L')).ok).toBe(true);
@@ -297,10 +297,10 @@ describe('ClaudeAccountStore', () => {
       calls += 1;
       return undefined;
     };
-    expect((await store.probeStandby(b, measure, Date.now())).ok).toBe(true);
-    expect((await store.probeStandby('zz', measure, Date.now())).ok).toBe(true);
+    expect(await store.probeStandby(b, measure, Date.now())).toEqual({ ok: true });
+    expect(await store.probeStandby('zz', measure, Date.now())).toEqual({ ok: true });
     await setLive('tokA');
-    expect((await store.probeStandby(a, measure, Date.now())).ok).toBe(true);
+    expect(await store.probeStandby(a, measure, Date.now())).toEqual({ ok: true });
     expect(calls).toBe(0);
   });
 
@@ -318,9 +318,9 @@ describe('ClaudeAccountStore', () => {
     expect(r.ok).toBe(true);
     expect(seen).toContain('@probe-');
     const snap = await store.list();
-    if (snap.ok) {
-      expect(snap.accounts.find((x) => x.id === a)?.usage?.fiveHour?.pct).toBe(7);
-    }
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) throw new Error('list failed');
+    expect(snap.accounts.find((x) => x.id === a)?.usage?.fiveHour?.pct).toBe(7);
   });
 
   it('probeStandby reports measure failures and empty results', async () => {
@@ -332,8 +332,15 @@ describe('ClaudeAccountStore', () => {
       },
       Date.now(),
     );
-    expect(thrown.ok).toBe(false);
-    await store.probeStandby(a, async () => undefined, Date.now());
+    expect(thrown).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('計測できませんでした'),
+    });
+    const empty = await store.probeStandby(a, async () => undefined, Date.now());
+    expect(empty).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('計測できませんでした'),
+    });
   });
 
   it('probeStandby writes back a rotated token', async () => {
