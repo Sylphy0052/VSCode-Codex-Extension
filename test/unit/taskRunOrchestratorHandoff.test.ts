@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ChatState } from '../../src/appserver/chatState';
 import { MAX_ORCHESTRATOR_EVENTS_PER_RUN } from '../../src/orchestrator/orchestratorSession';
 import {
+  formatRecommendation,
   TaskRunOrchestrator,
   type TaskRunOrchestratorDeps,
   type TaskRunOrchestratorEvent,
@@ -18,6 +19,7 @@ import type {
  * - 世代をまたいだイベント総数の上限（run全体でMAX_ORCHESTRATOR_EVENTS_PER_RUNを超えない）
  * - 自動引き継ぎに失敗したときrearmAutoHandoffを呼び、前の世代を使い続けられること
  * （taskRunOrchestratorにはhandoffPrecheckが渡されていない）
+ * あわせて、イベント通知の件数と字数を減らした形（Issue #1981）を確かめる。
  */
 
 function makeRun(overrides: Partial<TaskRun> = {}): TaskRun {
@@ -222,5 +224,67 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     await vi.waitFor(() => expect(s1.session.rearmAutoHandoff).toHaveBeenCalledTimes(1));
     expect(orch.status('run-1')).toBe('idle');
     expect(openTaskSession).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('イベント通知の件数と字数（Issue #1981）', () => {
+  function notify(orch: TaskRunOrchestrator, event: TaskRunOrchestratorEvent): void {
+    (orch as unknown as { notify(runId: string, event: TaskRunOrchestratorEvent): void }).notify(
+      'run-1',
+      event,
+    );
+  }
+
+  it('工程の開始だけではターンを起こさず、次のイベントの先頭に1行で添える', async () => {
+    const runBox = { current: makeRun() };
+    const s1 = makeFakeSession('s1');
+    const orch = new TaskRunOrchestrator(
+      makeDeps({ openTaskSession: vi.fn().mockResolvedValue(s1.session) }, runBox),
+    );
+    await orch.open('run-1');
+    s1.emitState({ busy: false });
+    expect(s1.sentTexts).toHaveLength(1);
+
+    notify(orch, { kind: 'stageStarted', body: 'T1 実装' });
+    notify(orch, { kind: 'stageStarted', body: 'T2 レビュー' });
+    expect(s1.sentTexts).toHaveLength(1);
+
+    notify(orch, taskFailed('E1'));
+    expect(s1.sentTexts).toHaveLength(2);
+    const sent = s1.sentTexts[1] ?? '';
+    expect(sent).toContain('開始した工程: T1 実装, T2 レビュー');
+    expect(sent.indexOf('開始した工程')).toBeLessThan(sent.indexOf('E1'));
+
+    // 添えた開始は次の通知へ持ち越さない
+    s1.emitState({ busy: false });
+    notify(orch, taskFailed('E2'));
+    expect(s1.sentTexts[2]).not.toContain('開始した工程');
+  });
+
+  it('導入文に質問・関門の判断の指示と通知の読み方を1回だけ書く', async () => {
+    const runBox = { current: makeRun() };
+    const s1 = makeFakeSession('s1');
+    const orch = new TaskRunOrchestrator(
+      makeDeps({ openTaskSession: vi.fn().mockResolvedValue(s1.session) }, runBox),
+    );
+    await orch.open('run-1');
+    const intro = s1.sentTexts[0] ?? '';
+    expect(intro.match(/questionAwaitingOrchestrator・gateAwaitingOrchestrator/g)).toHaveLength(1);
+    expect(intro.match(/answer_question・resolve_gateで送る（確認は出ない）/g)).toHaveLength(1);
+    expect(intro).toContain('開始した工程: T1 実装, T2 レビュー');
+    expect(intro).toContain('下がった状態が60秒続いてから届く');
+    expect(intro).toContain('推奨値の理由を先頭2件まで');
+  });
+
+  it('推奨値の理由は先頭2件までにし、残りは件数で示す', () => {
+    expect(
+      formatRecommendation({ model: 'opus', effort: 'high', reasons: ['A', 'B', 'C', 'D'] }),
+    ).toBe('推奨: model=opus effort=high（A / B / ほか2件）');
+    expect(formatRecommendation({ model: 'opus', effort: '', reasons: ['A', 'B'] })).toBe(
+      '推奨: model=opus effort=（既定）（A / B）',
+    );
+    expect(formatRecommendation({ model: 'opus', effort: 'low', reasons: [] })).toBe(
+      '推奨: model=opus effort=low',
+    );
   });
 });
