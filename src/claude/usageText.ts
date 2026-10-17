@@ -97,7 +97,8 @@ const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', '
  */
 export function parseUsageSlots(text: string, nowMs: number): UsageSlots | undefined {
   const slots: UsageSlots = { fiveHour: undefined, weekly: undefined };
-  const lines = /^Current (session|week \(([^)]+)\)):\s*(\d+)%\s*used(?:\s*·\s*resets\s*([^(\n]+?)\s*(?:\([^)]*\))?)?\s*$/gim;
+  const lines =
+    /^Current (session|week \(([^)]+)\)):\s*(\d+)%\s*used(?:\s*·\s*resets\s*([^(\n]+?)\s*(?:\([^)]*\))?)?\s*$/gim;
   for (const m of text.matchAll(lines)) {
     const slot: UsageSlot = {
       pct: Number(m[3]),

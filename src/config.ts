@@ -888,9 +888,7 @@ export function readAutoHandoffOnMilestone(): boolean {
  * `softThresholdPercent` を上回るうちは提案だけで止める。
  */
 export function readAutoHandoffBoundaryAction(): 'offer' | 'start' {
-  const raw = vscode.workspace
-    .getConfiguration('agent')
-    .get<string>('autoHandoff.boundaryAction');
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.boundaryAction');
   return raw === 'offer' ? 'offer' : 'start';
 }
 

@@ -792,18 +792,21 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
   ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
     if ((await store.currentId()) !== id) {
       // 取得できなくても切り替えは続ける
-      await this.claudeAccounts?.beforeSwitch?.().catch((e: unknown) =>
-        this.log.warn(
-          `切り替え前のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-        ),
-      );
+      await this.claudeAccounts
+        ?.beforeSwitch?.()
+        .catch((e: unknown) =>
+          this.log.warn(
+            `切り替え前のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+        );
     }
     // 取得の後に自動切り替えが走っていることがあるので、稼働中のアカウントを取り直す
     const previousId = await store.currentId();
     let result = await store.switchTo(id);
     if (!result.ok && result.confirmCurrent !== undefined) {
       const { id: currentId, name: currentName, live, plan } = result.confirmCurrent;
-      const who = plan === undefined ? describeIdentity(live) : `${describeIdentity(live)}・${plan}`;
+      const who =
+        plan === undefined ? describeIdentity(live) : `${describeIdentity(live)}・${plan}`;
       const choice = await vscode.window.showWarningMessage(
         `今ログインしているアカウント（${who}）は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください。`,
         { modal: true },
