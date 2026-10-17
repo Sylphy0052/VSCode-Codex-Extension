@@ -95,10 +95,14 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
     try {
       await this.ports.pollStandby?.(nowMs);
     } catch (e) {
-      this.ports.warn(
-        `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      this.warnStandbyFailed(e);
     }
+  }
+
+  private warnStandbyFailed(e: unknown): void {
+    this.ports.warn(
+      `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 
   /** 記録した使用率を画面へ反映する。 */
@@ -279,9 +283,7 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
       await this.ports.probeStandby?.(id, nowMs);
     } catch (e) {
       // 計測できなくても、記録のまま切り替え先を選ぶ
-      this.ports.warn(
-        `待機中のアカウントの使用率を計測できませんでした: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      this.warnStandbyFailed(e);
     }
   }
 
@@ -336,6 +338,10 @@ export class AccountAutoSwitcher implements UsageProbeAccounts {
   ): Promise<SwitchOutcome> {
     const { store } = this.ports;
     if (measureBefore) {
+      // `/usage`は20秒（usageProbeのTIMEOUT_MS）で打ち切られるので、上限で止まった会話の
+      // 切り替えが遅れるのはその時間までになる。取得中に閾値の切り替えが`onProbed`から
+      // 呼ばれても「切り替え中です」で捨てられ、上限の切り替えが続く。選ばれる先は
+      // 閾値判定のものと違いうるが、結果は正しい（Issue #1959）
       await this.measureBeforeSwitch();
     }
     const result = await store.switchTo(id);

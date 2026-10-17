@@ -169,16 +169,19 @@ export async function recordAutoSentPrompt(
   if (hashes.length === 0) {
     return;
   }
-  await mkdir(join(baseDir, 'handoff'), { recursive: true });
+  await mkdir(join(baseDir, 'handoff'), { recursive: true, mode: 0o700 });
   await appendFile(
     autoSentPath(baseDir),
     `${JSON.stringify({ at: now.toISOString(), h: hashes })}\n`,
-    'utf8',
+    { encoding: 'utf8', mode: 0o600 },
   );
 }
 
 /** 自動返信の記録を読む。読めなければ何も一致しない判定を返す。 */
-export async function loadAutoSentMatcher(baseDir: string): Promise<AutoSentMatcher> {
+export async function loadAutoSentMatcher(
+  baseDir: string,
+  now: Date = new Date(),
+): Promise<AutoSentMatcher> {
   let raw: string;
   try {
     raw = await readFile(autoSentPath(baseDir), 'utf8');
@@ -186,17 +189,40 @@ export async function loadAutoSentMatcher(baseDir: string): Promise<AutoSentMatc
     return NO_AUTO_SENT;
   }
   const sentAt = new Map<string, number[]>();
+  const keptLines: string[] = [];
+  let dropped = false;
+  const cutoff = now.getTime() - 2 * AUTO_SENT_WINDOW_MS;
   for (const line of raw.split('\n')) {
     const entry = parseLine(line);
     const at = Date.parse(str(entry?.['at']) ?? '');
     const hashes = entry?.['h'];
     if (Number.isNaN(at) || !Array.isArray(hashes)) {
+      dropped = dropped || line.trim() !== '';
       continue;
     }
+    if (at < cutoff) {
+      // 窓より古い行は判定に効かないので、次の書き戻しで落とす
+      dropped = true;
+      continue;
+    }
+    keptLines.push(line);
     for (const h of hashes) {
       if (typeof h === 'string') {
         sentAt.set(h, [...(sentAt.get(h) ?? []), at]);
       }
+    }
+  }
+  if (dropped) {
+    // 書き戻せなくても判定には影響しない。次の読み込みでもう一度試す
+    try {
+      const tmp = `${autoSentPath(baseDir)}.tmp`;
+      await writeFile(tmp, keptLines.map((l) => `${l}\n`).join(''), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      await rename(tmp, autoSentPath(baseDir));
+    } catch {
+      // 整理は任意。残った古い行は判定の窓で無視される
     }
   }
   return (text, at) => {
@@ -527,9 +553,12 @@ const TRIGGER_LABEL: Record<HandoffTrigger['kind'], string> = {
   milestone: '作業の区切り（PRのmergeなど）',
 };
 
-/** 本文が囲いのタグを偽装できないよう、タグに見える `<` を実体参照にする。 */
+/** 行頭の `---`・`#` は世代の境目や見出しに見えるので、先頭にバックスラッシュを付けて無害化する。 */
+const LINE_HEAD_MARKUP = /^(?=-{3}|#)/gmu;
+
+/** 本文が囲いのタグ・世代の境目・見出しを偽装できないよう無害化する。 */
 function neutralize(text: string): string {
-  return text.replace(REPLAY_TAG_LIKE, '&lt;$1$2');
+  return text.replace(REPLAY_TAG_LIKE, '&lt;$1$2').replace(LINE_HEAD_MARKUP, '\\');
 }
 
 /** 予算に収まる新しい側の応答のIDを返す（古い順に外す）。 */
@@ -741,10 +770,16 @@ export async function prepareHandoffReplay(
       createdAt: input.createdAt,
     });
     const snapshotPath = lineageSnapshotPath(baseDir, ref);
-    await mkdir(join(baseDir, 'handoff', 'lineage', ref.lineageId), { recursive: true });
+    await mkdir(join(baseDir, 'handoff', 'lineage', ref.lineageId), {
+      recursive: true,
+      mode: 0o700,
+    });
     // 書きかけで止まった1枚を親として読まないよう、書き終えてから名前を付ける
     const tmpPath = `${snapshotPath}.tmp`;
-    await writeFile(tmpPath, records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    await writeFile(tmpPath, records.map((r) => JSON.stringify(r)).join('\n') + '\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     await rename(tmpPath, snapshotPath);
     return {
       text: renderLineageReplay({

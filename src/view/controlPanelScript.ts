@@ -1434,6 +1434,9 @@ export function controlPanelScript(approvalLevelMetaJson: string): string {
     if (event.data && event.data.type === 'state') {
       apply(event.data.state);
     }
+    if (event.data && event.data.type === 'claudeAccounts') {
+      renderClaudeSavedAccounts(event.data.claudeAccounts);
+    }
     if (event.data && event.data.type === 'openSection') {
       openRequestedSection(event.data.id);
     }

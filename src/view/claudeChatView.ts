@@ -505,6 +505,8 @@ const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
 /** アカウントの使用率を見に行く周期。実際の取得間隔は`ClaudeUsageProbe`が決める（Issue #1924）。 */
 const ACCOUNT_POLL_INTERVAL_MS = 2 * 60_000;
+/** 切り替え直後の強制取得が失敗してから取り直すまでの待ち。取得権の再試行の間隔と揃える。 */
+const USAGE_RETRY_DELAY_MS = 60_000;
 /** 上限でのアカウント切り替えを覚えておく時間。同じ上限で止まった別の会話が重ねて切り替えない。 */
 const LIMIT_SWITCH_MEMO_MS = 10 * 60_000;
 const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
@@ -590,6 +592,8 @@ export class ClaudeChatViewManager
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
   private accountPollTimer: ReturnType<typeof setInterval> | undefined;
+  /** 切り替え直後の強制取得が失敗したときの、1回きりの再試行（Issue #1957）。 */
+  private usageRetryTimer: ReturnType<typeof setTimeout> | undefined;
   /** 直近に上限でアカウントを切り替えた上限の識別子と時刻。 */
   private lastLimitSwitch: { key: string; at: number } | undefined;
   /** Claude CLIのsandboxを使えるかの確認（Issue #1541）。拡張ホストの間、結果を共有する。 */
@@ -3187,6 +3191,10 @@ export class ClaudeChatViewManager
       clearInterval(this.accountPollTimer);
       this.accountPollTimer = undefined;
     }
+    if (this.usageRetryTimer !== undefined) {
+      clearTimeout(this.usageRetryTimer);
+      this.usageRetryTimer = undefined;
+    }
   }
 
   /**
@@ -3220,7 +3228,19 @@ export class ClaudeChatViewManager
     const usage = await this.usageProbe.readFresh();
     if (usage !== undefined) {
       this.onUsage(usage);
+      return;
     }
+    // 取れなかったら、次のポーリングを待たずに1回だけ取り直す。取得権を持つ他のウィンドウがあれば
+    // 再試行の間隔で`read`が何もしないので、`claude`の過剰な起動にはならない
+    this.usageRetryTimer ??= setTimeout(() => {
+      this.usageRetryTimer = undefined;
+      void this.usageProbe.readFresh().then((retried) => {
+        if (retried !== undefined) {
+          this.onUsage(retried);
+        }
+      });
+    }, USAGE_RETRY_DELAY_MS);
+    this.usageRetryTimer.unref();
   }
 
   /**

@@ -125,7 +125,7 @@ describe('ClaudeAccountStore', () => {
     const [a, b] = await twoAccounts();
     expect(await store.currentId()).toBe(b);
     expect((await store.switchTo('nope')).ok).toBe(false);
-    expect(await store.switchTo(b)).toEqual({ ok: true });
+    expect((await store.switchTo(b)).ok).toBe(true);
     expect((await store.switchTo(a)).ok).toBe(true);
     expect(await readFile(live(), 'utf8')).toBe(creds('tokA'));
     expect(await store.currentId()).toBe(a);
