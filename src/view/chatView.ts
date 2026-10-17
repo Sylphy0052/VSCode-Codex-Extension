@@ -158,6 +158,7 @@ import {
   countCompactions,
   decideAutoHandoff,
   offersInsteadOfAutoHandoff,
+  probeIsRedundantAfterOffer,
   deriveHandoffBaseName,
   parseHandoffPrompt,
   endsWithUserQuestion,
@@ -1077,9 +1078,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
     // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
     if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      entry.trace.info(`区切りの契機（${trigger.kind}）は提案済みのため何もしない`);
       return true;
     }
     entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
+    entry.trace.info(`区切りの契機（${trigger.kind}）のため引き継がず提案で止めた`);
     entry.session.noteLocalEvent(
       `autoHandoffOffer:${Date.now()}`,
       '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
@@ -2001,6 +2004,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         return;
       }
       entry.trace.info('作業の節目を検知したが契機が成立しなかった');
+    }
+    if (
+      probeIsRedundantAfterOffer({
+        action: readAutoHandoffBoundaryAction(),
+        remainingPercent,
+        softThresholdPercent,
+        onProfileChange,
+        offeredTurnSeq: entry.autoHandoffOfferedTurnSeq,
+        turnCompletionSeq: state.turnCompletionSeq,
+      })
+    ) {
+      entry.trace.info('このターンは引き継ぎを提案済みのため分類器・Reflexを起動しない');
+      return;
     }
     if (reflex.enabled) {
       await this.maybeAutoHandoffByReflex(entry, state, {
