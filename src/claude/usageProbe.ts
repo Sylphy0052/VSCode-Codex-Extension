@@ -121,6 +121,8 @@ function intervalAfter(failures: number, highestPct = 0): number {
 export class ClaudeUsageProbe {
   /** この時刻までは`read`しても何もしない。 */
   private nextReadAt = 0;
+  /** 他のウィンドウが取得権を持っていて取れなかったとき、この時刻までは強制取得でも再試行しない。 */
+  private claimRetryAt = 0;
   /** 共有先が無いときに使う、ウィンドウ内での連続失敗の回数。 */
   private failures = 0;
   private running = false;
@@ -194,7 +196,6 @@ export class ClaudeUsageProbe {
    */
   requestFresh(): void {
     this.freshRequested = true;
-    this.nextReadAt = 0;
   }
 
   /**
@@ -215,7 +216,12 @@ export class ClaudeUsageProbe {
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
   read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    if (this.running || now < this.nextReadAt) {
+    // 強制取得は通常の間隔を無視するが、取得権を取れなかった後の再試行の間隔は守る
+    if (
+      this.running ||
+      now < this.claimRetryAt ||
+      (now < this.nextReadAt && !this.freshRequested)
+    ) {
       return Promise.resolve(undefined);
     }
     this.running = true;
@@ -240,9 +246,10 @@ export class ClaudeUsageProbe {
       // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
       claimed = await this.claim(now);
       if (!claimed) {
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        this.claimRetryAt = now + RETRY_INTERVAL_MS;
         return undefined;
       }
+      this.claimRetryAt = 0;
       // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
       const again = forced ? undefined : await this.readFreshShared(now);
       if (again !== undefined) {
