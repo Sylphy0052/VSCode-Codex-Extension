@@ -328,8 +328,7 @@ function createClaudeUtteranceCollector(isAutoSent: AutoSentMatcher): UtteranceC
         entry['isCompactSummary'] === true ||
         entry['isMeta'] === true ||
         'toolUseResult' in entry ||
-        (Array.isArray(content) &&
-          content.some((p) => isObject(p) && p['type'] === 'tool_result'))
+        (Array.isArray(content) && content.some((p) => isObject(p) && p['type'] === 'tool_result'))
       ) {
         return;
       }

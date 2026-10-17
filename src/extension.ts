@@ -677,7 +677,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }))
     .then((result) => {
       if (!result.ok) {
-        log.warn(`待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`);
+        log.warn(
+          `待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`,
+        );
       } else if (result.warning !== undefined) {
         log.warn(result.warning);
       }

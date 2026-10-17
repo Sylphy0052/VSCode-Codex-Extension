@@ -157,10 +157,7 @@ function isBundledRoot(root: string): boolean {
  * 同名なら利用者の版を優先する（中身まで比べると、少し違うだけで二重載りに戻る）。
  * skillとagent以外を持つ場合と、読めない・空の場合は外さない。
  */
-export function omitDuplicatedBundledRoot(
-  roots: readonly string[],
-  configDir?: string,
-): string[] {
+export function omitDuplicatedBundledRoot(roots: readonly string[], configDir?: string): string[] {
   const configRoot = claudeConfigDirOf(configDir);
   return roots.filter((root) => {
     if (!isBundledRoot(root)) {
