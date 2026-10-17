@@ -89,6 +89,11 @@ export interface UsageProbeAccounts {
   currentId(): Promise<string | undefined>;
   /** 取得した枠を`id`の記録へ書く。取得中に切り替わっていたら呼び出し側が捨てる。 */
   record(id: string, slots: UsageSlots, nowMs: number): Promise<void>;
+  /**
+   * 使用率を読めなかったとき、CLIが保存した直近の値を`id`の記録へ写す（Issue #1964）。
+   * 写した値の取得時刻を返す。写さなければ`undefined`。
+   */
+  recordCached?(id: string): Promise<number | undefined>;
   /** 取得に成功した後に呼ぶ（自動切り替えの判断を行う）。 */
   onProbed?(slots: UsageSlots, nowMs: number): Promise<void>;
 }
@@ -151,8 +156,30 @@ export class ClaudeUsageProbe {
       }
       await this.accounts.onProbed?.(slots, now);
     } catch (e) {
+      this.log.warn(`使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * 使用率を読めなかったとき、CLIが保存した直近の値を稼働中だったアカウントへ記録する
+   * （Issue #1964）。CLIは`/api/oauth/usage`が429を返すと、`/usage`の使用率の節を黙って省く。
+   * 保存値は取得時刻つきで記録し、画面にはいつの値かを出す。古い値なので自動切り替えの
+   * 判断（`onProbed`）には使わない。
+   */
+  private async recordCached(startedAccount: string): Promise<void> {
+    if (this.accounts?.recordCached === undefined) {
+      return;
+    }
+    try {
+      const fetchedAt = await this.accounts.recordCached(startedAccount);
+      if (fetchedAt !== undefined) {
+        this.log.info(
+          `使用量を読めなかったため、Claude Codeが${new Date(fetchedAt).toLocaleString()}に取得した値を記録しました。`,
+        );
+      }
+    } catch (e) {
       this.log.warn(
-        `使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`,
+        `保存された使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }
@@ -236,6 +263,8 @@ export class ClaudeUsageProbe {
       }
       const slots = output === undefined ? undefined : parseUsageSlots(output, now);
       const highestPct = slots === undefined ? undefined : highestOf(slots);
+      // 保存値で代わりに記録できても、新しい値は取れていないので失敗として数え、再試行の
+      // 間隔を延ばす。CLIは429を約32分覚えて再要求しないため、短い間隔で取り直しても取れない
       const nextFailures = usage === undefined ? failures + 1 : 0;
       this.recordResult(now, nextFailures, highestPct);
       await this.writeShared({
@@ -246,6 +275,8 @@ export class ClaudeUsageProbe {
       });
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
+      } else if (usage === undefined && startedAccount !== undefined) {
+        await this.recordCached(startedAccount);
       }
       return usage;
     } finally {
