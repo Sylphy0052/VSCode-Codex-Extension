@@ -18,6 +18,8 @@ import { parseUsageReport, parseUsageSlots, type UsageSlots } from './usageText'
 
 /** 応答が返らないまま居座らせない。使用量は無くても困らない情報なので短く切る。 */
 const TIMEOUT_MS = 20_000;
+/** `readFresh`が、別の取得が先に走っていたときに待って読み直す上限回数。 */
+const READ_FRESH_ATTEMPTS = 3;
 
 /** 失敗の理由としてログへ出す、stdout・stderrそれぞれの長さの上限（Issue #1939）。 */
 const LOG_EXCERPT_CHARS = 300;
@@ -200,12 +202,20 @@ export class ClaudeUsageProbe {
 
   /**
    * `requestFresh`してから読む。取得中なら、その取得（切り替え前のアカウントのものでありうる）
-   * が終わるのを待ってから読み直す。
+   * が終わるのを待ってから読み直す。待っている間に別の取得（ポーリング）が始まって
+   * `read`が何もしなかったときは、その取得も待って読み直す（Issue #1959）。
+   * 他のウィンドウが取得権を持っているときの`undefined`は、呼び出し側が扱う。
    */
   async readFresh(now: () => number = Date.now): Promise<ChatUsage | undefined> {
     this.requestFresh();
-    await this.inFlight;
-    return this.read(now());
+    for (let attempt = 0; attempt < READ_FRESH_ATTEMPTS; attempt++) {
+      await this.inFlight;
+      const usage = await this.read(now());
+      if (usage !== undefined || !this.running) {
+        return usage;
+      }
+    }
+    return undefined;
   }
 
   /**
