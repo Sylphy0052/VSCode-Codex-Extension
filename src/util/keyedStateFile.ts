@@ -121,9 +121,13 @@ async function withFileLock<R>(lockPath: string, body: () => Promise<R>): Promis
       const handle = await open(lockPath, 'wx');
       try {
         await handle.writeFile(token, 'utf8');
-      } finally {
+      } catch (error) {
+        // 空のlockを残すと、全ウィンドウが残骸とみなすまで書けなくなる
         await handle.close();
+        await rm(lockPath, { force: true });
+        throw error;
       }
+      await handle.close();
       break;
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') {
@@ -174,8 +178,12 @@ async function removeLeftovers(filePath: string): Promise<void> {
   }
   for (const name of names.filter((n) => n.startsWith(`${base}.tmp-`))) {
     const path = join(dir, name);
-    if (Date.now() - (await stat(path)).mtimeMs > LOCK_STALE_MS) {
-      await rm(path, { force: true });
+    try {
+      if (Date.now() - (await stat(path)).mtimeMs > LOCK_STALE_MS) {
+        await rm(path, { force: true });
+      }
+    } catch {
+      // 一覧を取った後に他ウィンドウがrenameした。次のファイルへ進む
     }
   }
 }

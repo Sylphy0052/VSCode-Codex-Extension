@@ -108,4 +108,19 @@ describe('SessionModelSettingsStore（issue #844）', () => {
     expect(store.get('claude', 's0')).toEqual({ model: 'sonnet', effort: 'low' });
     expect(legacy.get('agent.sessionModelSettings.claude.s0', undefined)).toBeDefined();
   });
+
+  it('移行前でも旧キーから読み、deleteは旧キーも消す', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'model-settings-'));
+    const legacy = fakeMemento({
+      'agent.sessionModelSettings.codex.old': { model: 'gpt-a', effort: 'high' },
+    });
+    // keys()を持たないので移行は走らず、旧キーが残り続ける
+    const store = new SessionModelSettingsStore(join(dir, 'settings.json'), legacy);
+
+    expect(store.get('codex', 'old')).toEqual({ model: 'gpt-a', effort: 'high' });
+    await store.delete('codex', 'old');
+
+    expect(store.get('codex', 'old')).toBeUndefined();
+    expect(legacy.get('agent.sessionModelSettings.codex.old', undefined)).toBeUndefined();
+  });
 });

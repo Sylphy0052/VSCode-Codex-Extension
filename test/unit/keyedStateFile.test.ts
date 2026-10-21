@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   utimesSync,
   writeFileSync,
@@ -174,5 +175,41 @@ describe('KeyedStateFile（Issue #2006）', () => {
     await expect(second).rejects.toThrow();
 
     expect(file.get('a')).toBe('saved');
+  });
+
+  it('他者のトークンが書かれたlockは、自分の書込み後も消さない', async () => {
+    const path = tmpPath();
+    const file = new KeyedStateFile(path, parseString, 10);
+    await file.set('a', '1');
+    // 自分の書込みが終わった後に他者が取ったlock（新しいmtime）
+    writeFileSync(`${path}.lock`, 'other-window', 'utf8');
+
+    const pending = file.set('b', '2');
+    // 他者のlockが外れるまで待たされる。外したら書ける
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(readFileSync(`${path}.lock`, 'utf8')).toBe('other-window');
+    rmSync(`${path}.lock`);
+    await pending;
+
+    expect(new KeyedStateFile(path, parseString, 10).get('b')).toBe('2');
+  });
+
+  it('初回の書込みで、古いtmpと最新以外の退避ファイルを片付ける', async () => {
+    const path = tmpPath();
+    const oldTmp = `${path}.tmp-1-1-1`;
+    const freshTmp = `${path}.tmp-2-2-2`;
+    writeFileSync(oldTmp, 'x', 'utf8');
+    writeFileSync(freshTmp, 'x', 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(oldTmp, old, old);
+    writeFileSync(`${path}.corrupt-100`, 'x', 'utf8');
+    writeFileSync(`${path}.corrupt-200`, 'x', 'utf8');
+
+    await new KeyedStateFile(path, parseString, 10).set('a', '1');
+
+    expect(existsSync(oldTmp)).toBe(false);
+    expect(existsSync(freshTmp)).toBe(true);
+    expect(existsSync(`${path}.corrupt-100`)).toBe(false);
+    expect(existsSync(`${path}.corrupt-200`)).toBe(true);
   });
 });
