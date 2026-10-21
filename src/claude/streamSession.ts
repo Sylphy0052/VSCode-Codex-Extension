@@ -966,6 +966,18 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っていること（Issue #2004）を切り替える。
+   *
+   * `setAutoReplyActivity` と同じく拡張機能側だけで完結する状態なのでCLIへは何も送らない。
+   */
+  setAutoHandoffBackgroundWait(waiting: boolean): void {
+    if ((this.state.autoHandoffBackgroundWait ?? false) === waiting) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoffBackgroundWait: waiting });
+  }
+
+  /**
    * 会話中にeffortを変える。
    *
    * 専用の制御要求が無いため `apply_flag_settings` に載せる。**効いたことは観測できない**

@@ -813,6 +813,14 @@ export interface ChatState {
    */
   autoReplyActivity?: string | undefined;
   /**
+   * 自動引き継ぎが、バックグラウンド処理の終了だけを待っている間は`true`（Issue #2004）。
+   *
+   * バックグラウンド実行中は引き継がない（Issue #1307 / #1315）ため、区切りで終わっても
+   * 処理が終わるまで始まらない。止まっている理由が他に無いときだけ入れ、入力欄の近くへ
+   * 1行出す。拡張機能側だけで完結する一時的な表示で、CLIへは何も送らない。
+   */
+  autoHandoffBackgroundWait?: boolean | undefined;
+  /**
    * 使っていないタブのCLIを終了した状態（Claude Codeのみ、Issue #1808）。
    *
    * `stopping`は終了を待っている間、`suspended`は終了済みで次の送信で`--resume`する状態、
