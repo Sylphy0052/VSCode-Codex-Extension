@@ -839,8 +839,7 @@ export async function confirmRevertDiff(diff: FileDiff): Promise<boolean> {
  *
  * 確認モーダル（`confirmRevertDiff`）の前後2回、現在の内容を読み直して差分の想定と
  * 突き合わせる。1回目は確認を出す価値があるかどうかの事前チェック、2回目はTOCTOU対策
- * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。issue #144のメモリ追記と
- * 同じ考え方）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
+ * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。TOCTOU）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
  *
  * 内容だけでなく**場所と実体**も確認後にもう一度確かめる（Issue #1170）。応答待ちの間に
  * 親ディレクトリがワークスペース外へのsymlinkへ差し替わると、同じ絶対パス文字列が別の
@@ -925,7 +924,7 @@ export async function handleRevertDiff(
       }
     } else {
       // `add` の削除と `delete` の再作成はfdを持てない。内容（`add` は実体も）を操作の直前に
-      // もう一度確かめる（issue #144のメモリ追記と同じ考え方）
+      // もう一度確かめる（TOCTOU対策）
       if (diff.kind === 'add') {
         const identityNow = await revertPort.identify(resolved.absolutePath);
         if (
