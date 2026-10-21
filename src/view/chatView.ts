@@ -164,6 +164,7 @@ import {
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   buildHandoffSessionName,
+  isWaitingOnlyForBackground,
   passesSafeBoundaryGate,
   recentUserMessages,
   recentAssistantMessages,
@@ -1014,6 +1015,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (manual && this.rejectIfInputLocked(entry)) {
       return;
     }
+    if (manual) {
+      // 自動の契機は呼出し元がログへ出す。手動は自動承認のログだけでは自動と見分けられない
+      entry.trace.info(describeDecision(trigger));
+    }
     if (!manual && this.autoHandoffHeld(entry, entry.session.getState())) {
       return;
     }
@@ -1536,11 +1541,42 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       thresholdPercent: readAutoHandoffThresholdPercent(),
     });
     if (trigger !== undefined) {
+      entry.trace.info(describeDecision(trigger));
       void this.requestHandoff(entry, trigger);
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
   }
+
+  /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っているか（Issue #2004）を画面とログへ反映する。
+   *
+   * Claude Code側の同名メソッドと同じ。`ChatState`の更新は同期で`onSessionChange`を呼び直すため、
+   * 判定を終えてからmicrotaskで反映し、重複のログは`backgroundWaitShown`で止める。
+   */
+  private markBackgroundWait(entry: ChatPanel, waiting: boolean, gateDetail?: string): void {
+    if (this.backgroundWaitShown.has(entry) === waiting) {
+      return;
+    }
+    if (waiting) {
+      this.backgroundWaitShown.add(entry);
+    } else {
+      this.backgroundWaitShown.delete(entry);
+    }
+    entry.trace.info(
+      waiting
+        ? `gate blocked: バックグラウンド処理の終了待ち (${gateDetail ?? ''})`
+        : 'バックグラウンド処理の終了待ちが解けた',
+    );
+    queueMicrotask(() => {
+      if (!entry.disposed) {
+        entry.session.setAutoHandoffBackgroundWait(waiting);
+      }
+    });
+  }
+
+  /** 終了待ちの表示を出している会話（Issue #2004）。`markBackgroundWait`だけが書く。 */
+  private readonly backgroundWaitShown = new WeakSet<ChatPanel>();
 
   /** タブ名の自動付け直し（Issue #1426）の実行役。1セッション1本に限るためパネルごとに持つ。 */
   private readonly autoNamers = new WeakMap<ChatPanel, SerialRerun>();
@@ -1905,7 +1941,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 決める。同じ材料での再起動は `lastSafeBoundaryKey` で止める。
    */
   private async maybeAutoHandoffAtSafeBoundary(entry: ChatPanel, state: ChatState): Promise<void> {
-    if (!state.autoHandoff || this.autoHandoffHeld(entry, state) || entry.safeBoundaryProbing) {
+    if (!state.autoHandoff || this.autoHandoffHeld(entry, state)) {
+      this.markBackgroundWait(entry, false);
+      return;
+    }
+    if (entry.safeBoundaryProbing) {
       return;
     }
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
@@ -1916,6 +1956,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
     if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
       // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
+      this.markBackgroundWait(entry, false);
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
@@ -1940,11 +1981,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 引き継ぎ元が再び動くため、ここで引き継ぐと両方のセッションが同じ作業を進める
       backgroundRunning: state.backgroundTerminals.length > 0,
     };
+    // 止めている理由がバックグラウンド処理の実行中だけなら、終わるまで待っていると示す
+    // （Issue #2004）。ログは待ちに入ったときと解けたときだけ出す
+    const waitingOnBackground = isWaitingOnlyForBackground(gate, reflex.enabled);
+    this.markBackgroundWait(entry, waitingOnBackground, describeGate(gate));
     if (!passesSafeBoundaryGate(gate)) {
       // Reflexで判定するときは、質問で終わったターンも後段へ回す。引き継ぐかどうかを尋ねる
       // 質問は返答待ちとして扱わず、それ以外の質問は返答待ちとして止める（Issue #1707）
       if (!reflex.enabled || !passesSafeBoundaryGate({ ...gate, awaitingUserAnswer: false })) {
-        entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        if (!waitingOnBackground) {
+          entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        }
         return;
       }
       entry.trace.info('質問で終わったターンのため、決定論の契機を飛ばしてReflexで判定する');
