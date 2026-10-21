@@ -335,7 +335,7 @@ export class ClaudeStreamSession {
 
   /**
    * CLIとはやり取りせず、拡張機能側だけで完結した出来事を会話に1行残す
-   * （issue #6のメモリ追記など）。プロセスが生きていなくても呼べる
+   * （issue #5のシェルコマンド入力など）。プロセスが生きていなくても呼べる
    * （会話を閉じた後の操作を弾く理由が無いため）。
    */
   noteLocalEvent(id: string, text: string): void {
@@ -963,6 +963,18 @@ export class ClaudeStreamSession {
       return;
     }
     this.update({ ...this.state, autoReplyActivity: activity });
+  }
+
+  /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っていること（Issue #2004）を切り替える。
+   *
+   * `setAutoReplyActivity` と同じく拡張機能側だけで完結する状態なのでCLIへは何も送らない。
+   */
+  setAutoHandoffBackgroundWait(waiting: boolean): void {
+    if ((this.state.autoHandoffBackgroundWait ?? false) === waiting) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoffBackgroundWait: waiting });
   }
 
   /**

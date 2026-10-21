@@ -105,7 +105,7 @@ TP-01〜TP-85 は全て決着済み（実装マージ済み、または不可と
 | TP-01 | 画像の貼付・添付。現状は `input: [{ type: 'text' }]` 固定でテキストしか送れない | Codex/Claude | P1     | Z-03 | #3 済                                                                                                    |
 | TP-02 | `@` によるファイル参照の補完。現状は `/` の候補のみ                             | Codex/Claude | P2     | -    | #4 済                                                                                                    |
 | TP-03 | `!` から始まる行をシェルコマンドとして扱う（Claude TUIのbashモード相当）        | Claude       | P3     | Z-10 | #5 済（control_requestに経路が無いため統合ターミナルへ入力するのみ。自動実行はしない。design.md §14.29） |
-| TP-04 | `#` から始まる行をメモリへ追記する（Claude TUIのメモリモード相当）              | Claude       | P3     | Z-10 | #6 済（control_requestに経路が無いため拡張機能側でCLAUDE.mdへ直接追記。design.md §14.29）                |
+| TP-04 | `#` から始まる行をメモリへ追記する（Claude TUIのメモリモード相当）              | Claude       | P3     | Z-10 | #6 済 → #2007で削除（CLI本体も2.0.70で廃止。design.md §14.29）                                           |
 
 ## Phase 2: スラッシュコマンド
 

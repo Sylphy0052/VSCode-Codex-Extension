@@ -2505,6 +2505,7 @@ export function chatScript(
     renderQueue(queuedMessages);
     renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
     renderAutoReplyActivity(state.autoReplyActivity);
+    renderAutoHandoffWait(state.autoHandoffBackgroundWait);
     renderProcessSuspension(state.processSuspension);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
@@ -2713,6 +2714,14 @@ export function chatScript(
     const text = typeof activity === 'string' ? activity : '';
     node.hidden = text === '';
     node.textContent = text === '' ? '' : '自動返信: ' + text;
+  }
+
+  // 自動引き継ぎがバックグラウンド処理の終了だけを待っている間の1行（Issue #2004）。
+  // 文言はHTML側に持つ。自動引き継ぎがOFFのときはホスト側が立てない
+  function renderAutoHandoffWait(waiting) {
+    const node = el('autoHandoffWait');
+    if (!node) return;
+    node.hidden = waiting !== true;
   }
 
   // 使っていないタブのCLIを終了している間の1行（Issue #1808）。Claude Codeのタブだけが送る
@@ -3347,7 +3356,7 @@ export function chatScript(
   }
 
   /**
-   * 行頭の !/# を送信前に案内する（issue #5/#6、Claude Code画面のみ）。
+   * 行頭の ! を送信前に案内する（issue #5、Claude Code画面のみ）。
    *
    * 判定の規則はホスト側の routeInputMode（src/provider/inputModes.ts）と同じ。
    * テンプレートリテラルの中からは関数を呼べないため書き直している。両方を揃えること。
@@ -3360,8 +3369,6 @@ export function chatScript(
     if (line.indexOf('\\n') === -1) {
       if (line.slice(0, 1) === '!' && line.slice(1).trim() !== '') {
         text = 'シェルコマンドとしてターミナルへ入力します: ' + line.slice(1).trim();
-      } else if (line.slice(0, 1) === '#' && line.slice(1).trim() !== '') {
-        text = 'メモリへ追記します: ' + line.slice(1).trim();
       }
     }
     box.hidden = text === '';
