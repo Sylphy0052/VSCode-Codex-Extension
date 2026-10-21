@@ -732,7 +732,7 @@ describe('ChatViewManager', () => {
   describe('セッション単位のモデル設定（issue #844）', () => {
     it('変更を他セッションへ波及させず、同じthreadIdを開き直すと復元する', async () => {
       __mock.setConfig('codex', { model: 'global-model', reasoningEffort: 'low' });
-      const sessionSettings = new SessionModelSettingsStore(fakeMemento());
+      const sessionSettings = new SessionModelSettingsStore();
       const { manager, connection } = createManager({ sessionSettings });
 
       const firstStart = manager.openNew('/workspace/root');

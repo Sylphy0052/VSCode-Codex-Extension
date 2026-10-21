@@ -1,7 +1,35 @@
+import { join } from 'node:path';
+import { KeyedStateFile } from '../util/keyedStateFile';
 import type { MementoLike } from '../util/memento';
 
-/** `MementoLike`（実体は `context.globalState`）に保存するときのキー。 */
+/** 旧globalStateのキー（Issue #2006で廃止。移行のためだけに残す）。 */
 export const CLAUDE_SESSION_NAMES_KEY = 'claude.sessionNames';
+
+/** 保存する件数の上限。超えたら最後に使った（書いた・1日以上ぶりに読んだ）時刻の古いものから捨てる。 */
+export const CLAUDE_SESSION_NAMES_MAX_ENTRIES = 10_000;
+
+/** 1件の名前の最大文字数。これを超える値は読まず、保存時は切り詰める。 */
+const MAX_NAME_LENGTH = 1_000;
+
+const FILE_NAME = 'claude-session-names.json';
+
+/** 名前ファイルの置き場所。`context.globalStorageUri`配下（ウィンドウ間で配信されない、Issue #2006）。 */
+export function claudeSessionNamesFilePath(globalStorageDir: string): string {
+  return join(globalStorageDir, FILE_NAME);
+}
+
+function readName(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length <= MAX_NAME_LENGTH ? value : undefined;
+}
+
+/** 旧globalStateの名前。上限を超える名前も捨てずに切り詰めて読む（移行で失わないため）。 */
+function readLegacyName(all: unknown, sessionId: string): string | undefined {
+  if (typeof all !== 'object' || all === null || !Object.hasOwn(all, sessionId)) {
+    return undefined;
+  }
+  const value: unknown = (all as Record<string, unknown>)[sessionId];
+  return typeof value === 'string' ? value.slice(0, MAX_NAME_LENGTH) : undefined;
+}
 
 /**
  * 人が付け直したClaude Codeセッション名の保存先（issue #199、design.md §14.35）。
@@ -13,29 +41,65 @@ export const CLAUDE_SESSION_NAMES_KEY = 'claude.sessionNames';
  * `ClaudeSessionStore` の一覧生成・`ClaudeChatViewManager` のタブ名解決の両方が、
  * transcript由来の名前より優先してこちらを見る。
  *
- * セッションidはワークスペースをまたいでも一意なため、`workspaceState` ではなく
- * `globalState` を渡す想定（`extension.ts` 参照）。値を渡さない場合は何も永続化しない
- * no-opの `MementoLike` を既定にする（テスト等でVSCodeの `Memento` を
- * 用意しなくても壊れない）。
+ * 保存先は`globalStorageUri`配下のファイル（Issue #2006）。`globalState`は全体を1つの
+ * JSONとして全ウィンドウへ配信するため、セッション数に比例して増える名前は置かない。
+ * セッションidはワークスペースをまたいでも一意なため、ワークスペース別にはしない。
+ * `filePath`を渡さない場合はメモリ上にだけ持つ（テスト等で`globalStorageUri`を用意しなくても壊れない）。
+ * 旧globalStateの値は起動を止めずに移行し、ファイルへ書けたことを確かめてから消す。
  */
 export class ClaudeSessionNameStore {
+  private readonly file: KeyedStateFile<string>;
+  private readonly legacy: MementoLike | undefined;
+
   constructor(
-    private readonly memento: MementoLike = {
-      get: (_key, defaultValue) => defaultValue,
-      update: () => Promise.resolve(),
-    },
-  ) {}
+    filePath?: string,
+    legacy?: MementoLike,
+    /** 旧キーの移行に失敗したとき呼ぶ。旧キーは残り、次回起動でやり直す。 */
+    onMigrationError: (error: unknown) => void = () => undefined,
+  ) {
+    this.file = new KeyedStateFile(filePath, readName, CLAUDE_SESSION_NAMES_MAX_ENTRIES);
+    this.legacy = filePath === undefined ? undefined : legacy;
+    if (filePath !== undefined && legacy !== undefined) {
+      void this.migrateLegacy(legacy).catch(onMigrationError);
+    }
+  }
 
   /** 人が付けた名前を読む。付けていなければ `undefined`（呼び出し側はtranscript由来へフォールバックする）。 */
   get(sessionId: string): string | undefined {
-    const all = this.memento.get<Record<string, string>>(CLAUDE_SESSION_NAMES_KEY, {});
-    const name = all[sessionId];
+    // ファイルに無く、どのウィンドウでもまだ移行が済んでいなければ旧キーを見る
+    const name =
+      this.file.get(sessionId) ??
+      (this.file.isMigrated()
+        ? undefined
+        : readLegacyName(
+            this.legacy?.get<unknown>(CLAUDE_SESSION_NAMES_KEY, undefined),
+            sessionId,
+          ));
     return name === undefined || name.trim() === '' ? undefined : name;
   }
 
   /** 人が付けた名前を保存する。ウィンドウのリロード後も `get` で読み戻せる。 */
   async set(sessionId: string, name: string): Promise<void> {
-    const all = this.memento.get<Record<string, string>>(CLAUDE_SESSION_NAMES_KEY, {});
-    await this.memento.update(CLAUDE_SESSION_NAMES_KEY, { ...all, [sessionId]: name });
+    await this.file.set(sessionId, name.slice(0, MAX_NAME_LENGTH));
+  }
+
+  private async migrateLegacy(legacy: MementoLike): Promise<void> {
+    const readLegacy = (): unknown => legacy.get<unknown>(CLAUDE_SESSION_NAMES_KEY, undefined);
+    if (readLegacy() === undefined) {
+      return;
+    }
+    // lockを取ってから読み直す。他ウィンドウが先に移行を済ませていれば空になる
+    await this.file.importMissing(() => {
+      const all = readLegacy();
+      const items: [string, string][] = [];
+      for (const id of typeof all === 'object' && all !== null ? Object.keys(all) : []) {
+        const name = readLegacyName(all, id);
+        if (name !== undefined) {
+          items.push([id, name]);
+        }
+      }
+      return items;
+    });
+    await legacy.update(CLAUDE_SESSION_NAMES_KEY, undefined);
   }
 }

@@ -19,7 +19,7 @@ import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudePluginActions } from './claude/pluginsActions';
 import { ClaudePluginsProbe } from './claude/pluginsProbe';
 import { ClaudeProvider } from './claude/provider';
-import { ClaudeSessionNameStore } from './claude/sessionNames';
+import { ClaudeSessionNameStore, claudeSessionNamesFilePath } from './claude/sessionNames';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSessionIndex } from './claude/sessionIndex';
 import { claudeSessionIndexFilePath } from './claude/sessionIndexFile';
@@ -173,7 +173,7 @@ import { nodeCommandRunner as nodeAccountCommandRunner } from './process/command
 import { nodeFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { purgeStaleOutputOffload } from './session/nodeOutputOffload';
-import { SessionModelSettingsStore } from './sessionModelSettings';
+import { SessionModelSettingsStore, sessionModelSettingsFilePath } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
@@ -449,9 +449,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
   log.info(`CLAUDE_CONFIG_DIR=${claudeHome}`);
-  // 人が付け直したセッション名（issue #199）。globalStateはワークスペースをまたいで
-  // 有効なため、セッションidがワークスペースをまたいでも一意であることと合わせられる
-  const claudeSessionNames = new ClaudeSessionNameStore(context.globalState);
+  // 人が付け直したセッション名（issue #199）。セッションidはワークスペースをまたいでも
+  // 一意なため、ワークスペース別にしない。globalStateは全ウィンドウへ配信されるので、
+  // 保存先は`globalStorageUri`配下のファイル（Issue #2006）
+  const claudeSessionNames = new ClaudeSessionNameStore(
+    claudeSessionNamesFilePath(context.globalStorageUri.fsPath),
+    context.globalState,
+    (error) => log.warn(`セッション名の移行に失敗しました（次回起動で再試行）: ${String(error)}`),
+  );
   const claudeStore = new ClaudeSessionStore(
     nodeFileSystem,
     claudeDirs,
@@ -611,7 +616,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
   );
-  const sessionModelSettings = new SessionModelSettingsStore(context.globalState);
+  const sessionModelSettings = new SessionModelSettingsStore(
+    sessionModelSettingsFilePath(context.globalStorageUri.fsPath),
+    context.globalState,
+    (error) => log.warn(`モデル設定の移行に失敗しました（次回起動で再試行）: ${String(error)}`),
+  );
   // お気に入り（Issue #1366）。履歴ツリー・お気に入りツリー・チャット画面の3箇所から
   // 参照するため、それらより前に生成する
   const pinnedSessions = new PinnedSessionStore(context.globalState);

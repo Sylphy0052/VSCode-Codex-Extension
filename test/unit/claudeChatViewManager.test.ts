@@ -432,7 +432,7 @@ describe('ClaudeChatViewManager', () => {
     it('変更を他セッションへ波及させず、同じsessionIdを開き直すと復元する', async () => {
       __mock.setConfig('claude', { model: 'global-model', effort: 'low' });
       const { calls, sessions } = stubStartCapturing();
-      const sessionSettings = new SessionModelSettingsStore(fakeMemento());
+      const sessionSettings = new SessionModelSettingsStore();
       const { manager } = createManager({ sessionSettings });
 
       const firstId = await manager.openNew('/workspace/root');
