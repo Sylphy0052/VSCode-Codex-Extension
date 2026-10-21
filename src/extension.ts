@@ -455,6 +455,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claudeSessionNames = new ClaudeSessionNameStore(
     claudeSessionNamesFilePath(context.globalStorageUri.fsPath),
     context.globalState,
+    (error) => log.warn(`セッション名の移行に失敗しました（次回起動で再試行）: ${String(error)}`),
   );
   const claudeStore = new ClaudeSessionStore(
     nodeFileSystem,
@@ -618,6 +619,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionModelSettings = new SessionModelSettingsStore(
     sessionModelSettingsFilePath(context.globalStorageUri.fsPath),
     context.globalState,
+    (error) => log.warn(`モデル設定の移行に失敗しました（次回起動で再試行）: ${String(error)}`),
   );
   // お気に入り（Issue #1366）。履歴ツリー・お気に入りツリー・チャット画面の3箇所から
   // 参照するため、それらより前に生成する

@@ -6,7 +6,10 @@ import type { MementoLike } from '../util/memento';
 export const CLAUDE_SESSION_NAMES_KEY = 'claude.sessionNames';
 
 /** 保存する件数の上限。超えたら最後に書いた時刻の古いものから捨てる。 */
-export const CLAUDE_SESSION_NAMES_MAX_ENTRIES = 5_000;
+export const CLAUDE_SESSION_NAMES_MAX_ENTRIES = 10_000;
+
+/** 1件の名前の最大文字数。これを超える値は読まず、保存時は切り詰める。 */
+const MAX_NAME_LENGTH = 1_000;
 
 const FILE_NAME = 'claude-session-names.json';
 
@@ -16,7 +19,7 @@ export function claudeSessionNamesFilePath(globalStorageDir: string): string {
 }
 
 function readName(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+  return typeof value === 'string' && value.length <= MAX_NAME_LENGTH ? value : undefined;
 }
 
 /**
@@ -38,10 +41,15 @@ function readName(value: unknown): string | undefined {
 export class ClaudeSessionNameStore {
   private readonly file: KeyedStateFile<string>;
 
-  constructor(filePath?: string, legacy?: MementoLike) {
+  constructor(
+    filePath?: string,
+    legacy?: MementoLike,
+    /** 旧キーの移行に失敗したとき呼ぶ。旧キーは残り、次回起動でやり直す。 */
+    onMigrationError: (error: unknown) => void = () => undefined,
+  ) {
     this.file = new KeyedStateFile(filePath, readName, CLAUDE_SESSION_NAMES_MAX_ENTRIES);
     if (filePath !== undefined && legacy !== undefined) {
-      void this.migrateLegacy(legacy).catch(() => undefined);
+      void this.migrateLegacy(legacy).catch(onMigrationError);
     }
   }
 
@@ -53,25 +61,26 @@ export class ClaudeSessionNameStore {
 
   /** 人が付けた名前を保存する。ウィンドウのリロード後も `get` で読み戻せる。 */
   async set(sessionId: string, name: string): Promise<void> {
-    await this.file.set(sessionId, name);
+    await this.file.set(sessionId, name.slice(0, MAX_NAME_LENGTH));
   }
 
   private async migrateLegacy(legacy: MementoLike): Promise<void> {
-    const all = legacy.get<Record<string, unknown> | undefined>(
-      CLAUDE_SESSION_NAMES_KEY,
-      undefined,
-    );
-    if (all === undefined) {
+    const readLegacy = (): Record<string, unknown> | undefined =>
+      legacy.get<Record<string, unknown> | undefined>(CLAUDE_SESSION_NAMES_KEY, undefined);
+    if (readLegacy() === undefined) {
       return;
     }
-    const items: [string, string][] = [];
-    for (const [id, value] of Object.entries(all)) {
-      const name = readName(value);
-      if (name !== undefined) {
-        items.push([id, name]);
+    // lockを取ってから読み直す。他ウィンドウが先に移行を済ませていれば空になる
+    await this.file.importMissing(() => {
+      const items: [string, string][] = [];
+      for (const [id, value] of Object.entries(readLegacy() ?? {})) {
+        const name = readName(value);
+        if (name !== undefined) {
+          items.push([id, name]);
+        }
       }
-    }
-    await this.file.importMissing(items);
+      return items;
+    });
     await legacy.update(CLAUDE_SESSION_NAMES_KEY, undefined);
   }
 }

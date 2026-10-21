@@ -7,7 +7,7 @@ import type { MementoLike } from './util/memento';
 const LEGACY_KEY_PREFIX = 'agent.sessionModelSettings';
 
 /** 保存する件数の上限。超えたら最後に書いた時刻の古いものから捨てる。 */
-export const SESSION_MODEL_SETTINGS_MAX_ENTRIES = 5_000;
+export const SESSION_MODEL_SETTINGS_MAX_ENTRIES = 10_000;
 
 const FILE_NAME = 'session-model-settings.json';
 
@@ -51,10 +51,15 @@ export type LegacySettingsMemento = MementoLike & { keys?(): readonly string[] }
 export class SessionModelSettingsStore {
   private readonly file: KeyedStateFile<SessionModelSettings>;
 
-  constructor(filePath?: string, legacy?: LegacySettingsMemento) {
+  constructor(
+    filePath?: string,
+    legacy?: LegacySettingsMemento,
+    /** 旧キーの移行に失敗したとき呼ぶ。旧キーは残り、次回起動でやり直す。 */
+    onMigrationError: (error: unknown) => void = () => undefined,
+  ) {
     this.file = new KeyedStateFile(filePath, readSettings, SESSION_MODEL_SETTINGS_MAX_ENTRIES);
     if (filePath !== undefined && legacy !== undefined) {
-      void this.migrateLegacy(legacy).catch(() => undefined);
+      void this.migrateLegacy(legacy).catch(onMigrationError);
     }
   }
 
@@ -79,19 +84,25 @@ export class SessionModelSettingsStore {
   /** 旧キーをファイルへ移し、書けたら旧キーを消す。旧キーが残る限り起動のたびに呼ばれる。 */
   private async migrateLegacy(legacy: LegacySettingsMemento): Promise<void> {
     const prefix = `${LEGACY_KEY_PREFIX}.`;
-    const legacyKeys = (legacy.keys?.() ?? []).filter((key) => key.startsWith(prefix));
-    if (legacyKeys.length === 0) {
+    const legacyKeys = (): string[] =>
+      (legacy.keys?.() ?? []).filter((key) => key.startsWith(prefix));
+    const initialKeys = legacyKeys();
+    if (initialKeys.length === 0) {
       return;
     }
-    const items: [string, SessionModelSettings][] = [];
-    for (const key of legacyKeys) {
-      const settings = readSettings(legacy.get<unknown>(key, undefined));
-      if (settings !== undefined) {
-        items.push([key.slice(prefix.length), settings]);
+    let migratedKeys: string[] = initialKeys;
+    await this.file.importMissing(() => {
+      migratedKeys = legacyKeys();
+      const items: [string, SessionModelSettings][] = [];
+      for (const key of migratedKeys) {
+        const settings = readSettings(legacy.get<unknown>(key, undefined));
+        if (settings !== undefined) {
+          items.push([key.slice(prefix.length), settings]);
+        }
       }
-    }
-    await this.file.importMissing(items);
+      return items;
+    });
     // 並列に投げて、globalStateの書出しを1回にまとめさせる
-    await Promise.all(legacyKeys.map((key) => legacy.update(key, undefined)));
+    await Promise.all(migratedKeys.map((key) => legacy.update(key, undefined)));
   }
 }
