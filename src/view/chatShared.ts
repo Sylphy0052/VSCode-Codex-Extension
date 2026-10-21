@@ -11,7 +11,7 @@ import type { ActivityKind } from '../activity/record';
 import { currentWorkspaceFolder, workspaceFolderPaths } from '../config';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import { createNodeOutputOffload } from '../session/nodeOutputOffload';
-import type { FileSystemPort, SymlinkResolution } from '../session/ports';
+import type { FileSystemPort } from '../session/ports';
 import {
   APPROVAL_LEVELS,
   APPROVAL_LEVEL_LABELS,
@@ -23,7 +23,6 @@ import { DEFAULT_CHAT_SKIN, skinBodyClass, type ChatSkin } from './skin';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
-import { buildMemoryAppendConfirmation } from '../provider/inputModes';
 import { computeDiffContents, planDiffActions } from '../util/diffRestore';
 import {
   resolveWithinWorkspace,
@@ -217,30 +216,6 @@ export async function confirmRunShellCommand(command: string): Promise<boolean> 
     '入力する',
   );
   return choice === '入力する';
-}
-
-/**
- * 行頭が `#` の入力（issue #6、design.md §14.29）をメモリへ追記してよいか確かめる。
- *
- * ファイルへの書き込みは元に戻せないため（gitで管理されていない環境もある）、
- * 追記先と内容の両方を確認させてから書く（issue #6の受入基準）。
- *
- * `symlink` は追記先のシンボリックリンク判別結果。本文の組み立ては
- * `buildMemoryAppendConfirmation`（純粋関数）に切り出してある（issue #144。実体パスを
- * 見せずに書き込みが実行されると、実際にどのファイルが書き換わるか分からないため。
- * 実体パスが特定できない場合も警告として出す）。
- */
-export async function confirmMemoryAppend(
-  content: string,
-  path: string,
-  symlink: SymlinkResolution,
-): Promise<boolean> {
-  const choice = await vscode.window.showWarningMessage(
-    buildMemoryAppendConfirmation(content, path, symlink),
-    { modal: true },
-    '追記する',
-  );
-  return choice === '追記する';
 }
 
 /** 確認ダイアログに列挙するファイル数の上限。超えた分は件数だけ示す。 */

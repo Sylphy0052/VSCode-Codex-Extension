@@ -3347,7 +3347,7 @@ export function chatScript(
   }
 
   /**
-   * 行頭の !/# を送信前に案内する（issue #5/#6、Claude Code画面のみ）。
+   * 行頭の ! を送信前に案内する（issue #5、Claude Code画面のみ）。
    *
    * 判定の規則はホスト側の routeInputMode（src/provider/inputModes.ts）と同じ。
    * テンプレートリテラルの中からは関数を呼べないため書き直している。両方を揃えること。
@@ -3360,8 +3360,6 @@ export function chatScript(
     if (line.indexOf('\\n') === -1) {
       if (line.slice(0, 1) === '!' && line.slice(1).trim() !== '') {
         text = 'シェルコマンドとしてターミナルへ入力します: ' + line.slice(1).trim();
-      } else if (line.slice(0, 1) === '#' && line.slice(1).trim() !== '') {
-        text = 'メモリへ追記します: ' + line.slice(1).trim();
       }
     }
     box.hidden = text === '';

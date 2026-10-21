@@ -335,7 +335,7 @@ export class ClaudeStreamSession {
 
   /**
    * CLIとはやり取りせず、拡張機能側だけで完結した出来事を会話に1行残す
-   * （issue #6のメモリ追記など）。プロセスが生きていなくても呼べる
+   * （issue #5のシェルコマンド入力など）。プロセスが生きていなくても呼べる
    * （会話を閉じた後の操作を弾く理由が無いため）。
    */
   noteLocalEvent(id: string, text: string): void {
