@@ -6,7 +6,14 @@ import { join } from 'node:path';
 import { isEffortToken } from '../codex/modelCatalog';
 import { killWithEscalation } from '../process/childProcess';
 import { canWriteStdin, guardStdinErrors } from '../process/stdinSafety';
-import { HeadlessSlotLock, type HeadlessSlot } from './headlessSlotLock';
+import {
+  HeadlessSlotLock,
+  priorityRank,
+  type HeadlessPriority,
+  type HeadlessSlot,
+} from './headlessSlotLock';
+
+export type { HeadlessPriority };
 
 /**
  * ループの脇役（Evaluator / Advisor）をCLIのヘッドレス実行として1回だけ呼ぶ共通部。
@@ -201,10 +208,13 @@ export interface HeadlessCliDeps {
    */
   cacheable?: (text: string) => boolean;
   /**
-   * 順番待ちで、急がない呼び出しより先に回す（Issue #1807）。工程や利用者の操作を止めて待たせる
-   * 呼び出し（Reflexの判定など）に立てる。実行中の1本は打ち切らない。
+   * 順番待ちの優先度（Issue #1807・#2005）。省略は`background`。順番待ちはウィンドウ内でも
+   * ウィンドウの間でも、高い段から先に回す。
+   * - `human`: 人の操作を止めて待たせる呼び出し（skill選択）。実行中の`background`を打ち切って回す
+   * - `stage`: 工程を止めて待たせる呼び出し（Reflexの判定など）。実行中の1本は打ち切らない
+   * - `background`: それ以外の背景処理（分類・タブ名など）
    */
-  urgent?: boolean;
+  priority?: HeadlessPriority;
 }
 
 /** 呼び出しが失敗した理由。応答が得られなかったときだけ使う。 */
@@ -286,6 +296,8 @@ interface QueuedRequest {
   prompt: string;
   kind: string;
   enqueuedAt: number;
+  /** 人の要求に実行枠を譲って打ち切られた回数。上限を超えたら打ち切らず最後まで走らせる。 */
+  preemptions: number;
   settle(outcome: HeadlessOutcome): void;
 }
 
@@ -311,6 +323,7 @@ function enqueue(deps: HeadlessCliDeps, prompt: string, kind: string): Promise<H
       prompt,
       kind,
       enqueuedAt: Date.now(),
+      preemptions: 0,
       settle: (outcome) => {
         deps.signal?.removeEventListener('abort', onAbort);
         resolve(outcome);
@@ -327,15 +340,27 @@ function enqueue(deps: HeadlessCliDeps, prompt: string, kind: string): Promise<H
       }
     }
     deps.signal?.addEventListener('abort', onAbort, { once: true });
-    if (deps.urgent === true) {
-      // 急ぐ呼び出しどうしは来た順。急がない呼び出しの先頭の前へ入れる
-      const firstRelaxed = waiting.findIndex((r) => r.deps.urgent !== true);
-      waiting.splice(firstRelaxed < 0 ? waiting.length : firstRelaxed, 0, request);
-    } else {
-      waiting.push(request);
-    }
+    insertWaiting(request, false);
     drain();
   });
+}
+
+/**
+ * 優先度の順に順番待ちへ入れる。同じ段どうしは来た順。`front`なら同じ段の先頭へ入れる
+ * （打ち切られて戻す要求が、後から来た同じ段に追い越されないようにする）。
+ */
+function insertWaiting(request: QueuedRequest, front: boolean): void {
+  const rank = priorityRank(request.deps.priority);
+  const index = waiting.findIndex((r) => {
+    const other = priorityRank(r.deps.priority);
+    return front ? other <= rank : other < rank;
+  });
+  waiting.splice(index < 0 ? waiting.length : index, 0, request);
+}
+
+/** 順番待ちの先頭の段。待ちが無ければ`-1`。 */
+function waitingTopRank(): number {
+  return waiting.length === 0 ? -1 : priorityRank(waiting[0]?.deps.priority);
 }
 
 /** ウィンドウ間の実行枠。未設定（テスト・共有先なし）ならウィンドウ内の順番待ちだけで絞る。 */
@@ -377,6 +402,8 @@ export function configureHeadlessCliSharedDir(
 }
 
 function drain(): void {
+  // 高い段の要求を待たせていることを、他のウィンドウへ知らせる（Issue #2005）
+  void slotLock?.setWanted(waitingTopRank());
   if (slotLock === undefined) {
     while (runningCount < MAX_CONCURRENT_HEADLESS && waiting.length > 0) {
       startNext(undefined);
@@ -394,7 +421,7 @@ function drain(): void {
   }
   acquiring = true;
   void slotLock
-    .tryAcquire()
+    .tryAcquire(waiting[0]?.deps.priority)
     .catch(() => undefined)
     .then((slot) => {
       acquiring = false;
@@ -411,6 +438,27 @@ function drain(): void {
     });
 }
 
+/**
+ * 人の要求に実行枠を譲るため、実行中の背景処理を打ち切るかを確かめる間隔（Issue #2005）。
+ * 待ち印のmtimeを更新し直す間隔も兼ねる。
+ */
+const PREEMPT_POLL_MS = 500;
+/** 1つの要求を打ち切る回数の上限。人の要求が続いても、背景処理が飢えないようにする。 */
+const MAX_PREEMPTIONS = 2;
+
+/** 実行中の背景処理の`request`を譲るべきか。このウィンドウか他のウィンドウが人の要求を待たせているとき。 */
+async function shouldYield(request: QueuedRequest): Promise<boolean> {
+  const rank = priorityRank(request.deps.priority);
+  if (rank > priorityRank('background') || request.preemptions >= MAX_PREEMPTIONS) {
+    return false;
+  }
+  const human = priorityRank('human');
+  if (waiting.some((r) => priorityRank(r.deps.priority) >= human)) {
+    return true;
+  }
+  return (await slotLock?.hasHigherWaiter(priorityRank('stage'))) === true;
+}
+
 /** 順番待ちの先頭を起こす。待ちが空なら`false`。`slot`は実行が終わったら返す。 */
 function startNext(slot: HeadlessSlot | undefined): boolean {
   const request = waiting.shift();
@@ -420,16 +468,40 @@ function startNext(slot: HeadlessSlot | undefined): boolean {
   runningCount += 1;
   const startedAt = Date.now();
   const { deps, prompt } = request;
-  const run = deps.provider === 'claude' ? runClaude(deps, prompt) : runCodex(deps, prompt);
+  // 人の要求に譲るときだけ打ち切る。呼び出し元が止めた場合とは区別する
+  const yielding = new AbortController();
+  const runDeps: HeadlessCliDeps = {
+    ...deps,
+    signal:
+      deps.signal === undefined ? yielding.signal : AbortSignal.any([deps.signal, yielding.signal]),
+  };
+  const watcher = setInterval(() => {
+    void slotLock?.setWanted(waitingTopRank());
+    if (!yielding.signal.aborted) {
+      void shouldYield(request).then((yes) => {
+        if (yes) {
+          yielding.abort();
+        }
+      });
+    }
+  }, PREEMPT_POLL_MS);
+  watcher.unref?.();
+  const run = deps.provider === 'claude' ? runClaude(runDeps, prompt) : runCodex(runDeps, prompt);
   void run
     .catch((): HeadlessOutcome => ({ ok: false, reason: 'process-error' }))
     .then((outcome) => {
+      clearInterval(watcher);
+      const preempted = yielding.signal.aborted && deps.signal?.aborted !== true;
       recordCall(
         request.kind,
-        outcome.ok ? 'ok' : outcome.reason,
+        preempted ? 'preempted' : outcome.ok ? 'ok' : outcome.reason,
         startedAt - request.enqueuedAt,
         Date.now() - startedAt,
       );
+      if (preempted) {
+        requeuePreempted(request);
+        return;
+      }
       request.settle(outcome);
     })
     .finally(async () => {
@@ -440,11 +512,26 @@ function startNext(slot: HeadlessSlot | undefined): boolean {
       }
       // 手放し終えるまでは実行中として数え、その間の要求に枠を取りに行かせない
       await slot.release();
-      handoffUntil = Date.now() + SLOT_HANDOFF_MS;
+      // 人の要求が待っているなら、順番を回さず先に取らせる（Issue #2005）
+      handoffUntil = waitingTopRank() >= priorityRank('human') ? 0 : Date.now() + SLOT_HANDOFF_MS;
       runningCount -= 1;
       drain();
     });
   return true;
+}
+
+/**
+ * 打ち切られた要求を失敗にせず、順番待ちへ戻して後で取り直す（Issue #2005）。待っている間に
+ * 同じ`coalesceKey`の新しい要求が来ていれば、古いこの要求は捨てる。
+ */
+function requeuePreempted(request: QueuedRequest): void {
+  const key = request.deps.coalesceKey;
+  if (key !== undefined && waiting.some((r) => r.deps.coalesceKey === key)) {
+    request.settle({ ok: false, reason: 'process-error', superseded: true });
+    return;
+  }
+  request.preemptions += 1;
+  insertWaiting(request, true);
 }
 
 /** 同じ入力への成功した結果を再利用する期間と件数の上限（Issue #1807）。 */

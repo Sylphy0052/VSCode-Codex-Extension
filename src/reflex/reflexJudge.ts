@@ -1,5 +1,5 @@
 import { formatUntrusted } from '../orchestrator/untrustedText';
-import type { HeadlessProvider } from '../loop/headlessCli';
+import type { HeadlessPriority, HeadlessProvider } from '../loop/headlessCli';
 import { runReflexJson, type ReflexCliDeps } from './reflexCli';
 
 /**
@@ -68,6 +68,11 @@ export interface ReflexRequest {
    * どの呼び出し元が判定を多く起こしているかをログで追えるようにする（Issue #1912）。
    */
   readonly caller?: string;
+  /**
+   * 順番待ちの優先度（Issue #2005）。省略は`stage`。人の送信を止めている判定は`human`、
+   * 背景で走る判定は`background`にする。
+   */
+  readonly priority?: HeadlessPriority;
 }
 
 export type ReflexJudgeDeps = Omit<ReflexCliDeps, 'timeoutMs'> & {
@@ -103,7 +108,11 @@ export async function judge(
     return undefined;
   }
   return runReflexJson(
-    { ...deps, timeoutMs: deps.timeoutMs ?? REFLEX_TIMEOUT_MS },
+    {
+      ...deps,
+      timeoutMs: deps.timeoutMs ?? REFLEX_TIMEOUT_MS,
+      ...(request.priority === undefined ? {} : { priority: request.priority }),
+    },
     buildReflexPrompt(request),
     request.caller === undefined ? 'Reflexの判定' : `Reflexの判定（${request.caller}）`,
     (text) => parseReflexAnswers(text, request.questions),

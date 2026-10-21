@@ -132,6 +132,8 @@ export async function selectSkill(
   }
   const answers = await judge(deps, {
     caller: 'skill選択',
+    // 人の発言の送信を止めて待たせる判定のため、背景処理より先に実行枠を取る（Issue #2005）
+    priority: 'human',
     situation: [
       'AIエージェントに利用者の依頼を渡す前に、依頼に合うskill（エージェントが読み込む手順書）を選びたい。',
       '読み込ませたskillの手順にエージェントは従うため、依頼の内容に明らかに合うものだけを選ぶ。',
