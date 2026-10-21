@@ -320,6 +320,7 @@ export async function summarizeSessionName(
       provider: deps.provider,
       executable: deps.executable,
       timeoutMs: deps.timeoutMs ?? CLASSIFIER_TIMEOUT_MS,
+      priority: 'background',
       ...(deps.logWarn === undefined ? {} : { logWarn: deps.logWarn }),
       ...(deps.run === undefined ? {} : { run: deps.run }),
     },

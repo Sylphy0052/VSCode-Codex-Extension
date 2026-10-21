@@ -2,6 +2,7 @@ import {
   runHeadlessPromptDetailed,
   type HeadlessCliDeps,
   type HeadlessOutcome,
+  type HeadlessPriority,
   type HeadlessProvider,
 } from '../loop/headlessCli';
 
@@ -40,8 +41,8 @@ export interface ReflexCliDeps {
   kind?: string;
   /** 同じプロンプトへの成功した結果のうち、再利用してよい応答か（Issue #1807）。 */
   cacheable?: (text: string) => boolean;
-  /** 順番待ちで、急がない呼び出しより先に回すか（Issue #1807）。 */
-  urgent?: boolean;
+  /** 順番待ちの優先度（Issue #1807・#2005）。`runReflexJson`の既定は`stage`。 */
+  priority?: HeadlessPriority;
 }
 
 /**
@@ -61,7 +62,7 @@ export function runReflexPrompt(deps: ReflexCliDeps, prompt: string): Promise<He
       ...(deps.signal === undefined ? {} : { signal: deps.signal }),
       ...(deps.kind === undefined ? {} : { kind: deps.kind }),
       ...(deps.cacheable === undefined ? {} : { cacheable: deps.cacheable }),
-      ...(deps.urgent === undefined ? {} : { urgent: deps.urgent }),
+      ...(deps.priority === undefined ? {} : { priority: deps.priority }),
     },
     prompt,
   );
@@ -91,7 +92,7 @@ export async function runReflexJson<T>(
       {
         kind: subject,
         cacheable: (text) => parse(text) !== undefined,
-        urgent: true,
+        priority: 'stage',
         ...deps,
       },
       prompt,
