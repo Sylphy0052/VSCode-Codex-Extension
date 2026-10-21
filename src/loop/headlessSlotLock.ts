@@ -43,6 +43,13 @@ const WANT_FILE_PREFIX = 'headless-cli-want';
 /** 待ち印のmtimeを更新し直す間隔。 */
 const WANT_REFRESH_MS = 5_000;
 
+/**
+ * この時間を超えて古い他者の待ち印は、落ちたウィンドウの残骸として消す。`SLOT_STALE_MS`で
+ * 消すと、止まっていた持ち主が書き直した直後の印を消しうるため、十分に長く取る。未来のmtimeは
+ * 無視するだけで消さない（時計のずれたウィンドウの印を消し続けない）。
+ */
+const WANT_SWEEP_MS = 10 * 60_000;
+
 /** 持ち主がmtimeを更新する間隔。 */
 const SLOT_HEARTBEAT_MS = 5_000;
 
@@ -245,7 +252,7 @@ export class HeadlessSlotLock {
         const age = Date.now() - (await stat(path.join(this.dir, name))).mtimeMs;
         if (Math.abs(age) <= SLOT_STALE_MS) {
           highest = rank;
-        } else {
+        } else if (age > WANT_SWEEP_MS) {
           // 落ちたウィンドウの残骸。溜めないよう掃除する
           await unlink(path.join(this.dir, name)).catch(() => undefined);
         }
