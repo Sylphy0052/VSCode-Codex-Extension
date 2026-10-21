@@ -237,6 +237,7 @@ import {
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   buildHandoffSessionName,
+  isWaitingOnlyForBackground,
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
   recentUserMessages,
@@ -1214,6 +1215,10 @@ export class ClaudeChatViewManager
     if (manual && this.rejectIfInputLocked(entry)) {
       return;
     }
+    if (manual) {
+      // 自動の契機は呼出し元がログへ出す。手動は自動承認のログだけでは自動と見分けられない
+      entry.trace.info(describeDecision(trigger));
+    }
     if (!manual && this.autoHandoffHeld(entry, entry.session.getState())) {
       return;
     }
@@ -1807,7 +1812,11 @@ export class ClaudeChatViewManager
     );
     entry.lastCompactionCount = lastCompactionCount;
 
-    if (entry.disposed || entry.panel === undefined || entry.autoHandoffDisabled) {
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    if (entry.autoHandoffDisabled) {
+      this.markBackgroundWait(entry, undefined);
       return;
     }
     const trigger = decideAutoHandoff({
@@ -1821,11 +1830,61 @@ export class ClaudeChatViewManager
       thresholdPercent: readAutoHandoffThresholdPercent(),
     });
     if (trigger !== undefined) {
+      this.markBackgroundWait(entry, undefined);
+      entry.trace.info(describeDecision(trigger));
       void this.requestHandoff(entry, trigger);
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
   }
+
+  /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っているか（Issue #2004）を画面とログへ反映する。
+   *
+   * `gateDetail`は待ちに入るときの前段の状態（`describeGate`）で、`undefined`なら待ちを解く。
+   * 値が変わったときだけ`ChatState`を更新し、ログを1行出す。`onSessionChange`から毎回通るため、
+   * 同じ値のまま呼ばれても何もしない。
+   *
+   * `ChatState`の更新は同期で`onSessionChange`を呼び直すため、判定の途中で入れると再入する。
+   * 判定を終えてから反映するようmicrotaskへ回し、反映前の値だけを`backgroundWaitPending`に持つ。
+   * 正本は`ChatState`に置く（状態が作り直されて値が消えても、次の判定で出し直せるように）。
+   */
+  private markBackgroundWait(entry: ClaudePanel, gateDetail: string | undefined): void {
+    const waiting = gateDetail !== undefined;
+    const current =
+      this.backgroundWaitPending.get(entry) ??
+      entry.session.getState().autoHandoffBackgroundWait ??
+      false;
+    if (current === waiting) {
+      return;
+    }
+    entry.trace.info(
+      waiting
+        ? `gate blocked (バックグラウンド処理の終了待ち: ${gateDetail})`
+        : 'バックグラウンド処理の終了待ちが解けた',
+    );
+    this.backgroundWaitPending.set(entry, waiting);
+    queueMicrotask(() => {
+      // 同じtickで逆の値が後から来ていれば、そちらのmicrotaskに任せる
+      if (this.backgroundWaitPending.get(entry) !== waiting) {
+        return;
+      }
+      this.backgroundWaitPending.delete(entry);
+      if (entry.disposed) {
+        return;
+      }
+      try {
+        entry.session.setAutoHandoffBackgroundWait(waiting);
+      } catch (error) {
+        entry.trace.warn(
+          `終了待ちの表示を更新できなかった: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
+
+  /** 終了待ちの表示のうち、`ChatState`へまだ反映していない値（Issue #2004）。 */
+  private readonly backgroundWaitPending = new WeakMap<ClaudePanel, boolean>();
 
   /** タブ名の自動付け直し（Issue #1426）の実行役。1セッション1本に限るためパネルごとに持つ。 */
   private readonly autoNamers = new WeakMap<ClaudePanel, SerialRerun>();
@@ -2370,7 +2429,11 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     state: ChatState,
   ): Promise<void> {
-    if (!state.autoHandoff || this.autoHandoffHeld(entry, state) || entry.safeBoundaryProbing) {
+    if (!state.autoHandoff || this.autoHandoffHeld(entry, state)) {
+      this.markBackgroundWait(entry, undefined);
+      return;
+    }
+    if (entry.safeBoundaryProbing) {
       return;
     }
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
@@ -2381,6 +2444,7 @@ export class ClaudeChatViewManager
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
     if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
       // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
+      this.markBackgroundWait(entry, undefined);
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
@@ -2405,11 +2469,17 @@ export class ClaudeChatViewManager
       // 引き継ぎ元が再び動くため、ここで引き継ぐと両方のセッションが同じ作業を進める
       backgroundRunning: state.backgroundTerminals.length > 0,
     };
+    // 止めている理由がバックグラウンド処理の実行中だけなら、終わるまで待っていると示す
+    // （Issue #2004）。ログは待ちに入ったときと解けたときだけ出す
+    const waitingOnBackground = isWaitingOnlyForBackground(gate, reflex.enabled);
+    this.markBackgroundWait(entry, waitingOnBackground ? describeGate(gate) : undefined);
     if (!passesSafeBoundaryGate(gate)) {
       // Reflexで判定するときは、質問で終わったターンも後段へ回す。引き継ぐかどうかを尋ねる
       // 質問は返答待ちとして扱わず、それ以外の質問は返答待ちとして止める（Issue #1707）
       if (!reflex.enabled || !passesSafeBoundaryGate({ ...gate, awaitingUserAnswer: false })) {
-        entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        if (!waitingOnBackground) {
+          entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        }
         return;
       }
       entry.trace.info('質問で終わったターンのため、決定論の契機を飛ばしてReflexで判定する');

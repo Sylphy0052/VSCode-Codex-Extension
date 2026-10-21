@@ -477,6 +477,18 @@ export class ChatSession {
   }
 
   /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っていること（Issue #2004）を切り替える。
+   *
+   * `setAutoReplyActivity` と同じく拡張機能側だけで完結する状態なのでapp-serverへは何も送らない。
+   */
+  setAutoHandoffBackgroundWait(waiting: boolean): void {
+    if ((this.state.autoHandoffBackgroundWait ?? false) === waiting) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoffBackgroundWait: waiting });
+  }
+
+  /**
    * 発言を送る。モデル・effort・承認方針・サンドボックスはここで毎回渡す。
    *
    * `turn/start` の指定は「このターン以降」に効くため、会話の途中で権限を変えられる。

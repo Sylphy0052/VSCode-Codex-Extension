@@ -683,6 +683,7 @@ ${completionEvidenceStyles()}
   }
   #limitAutoResumeStatus,
   #autoReplyActivity,
+  #autoHandoffWait,
   #processSuspension {
     margin: 0 16px 6px;
     padding: 6px 8px;

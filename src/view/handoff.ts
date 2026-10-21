@@ -1522,6 +1522,28 @@ export function passesSafeBoundaryGate(input: SafeBoundaryGateInput): boolean {
 }
 
 /**
+ * 前段を止めている理由が、バックグラウンド処理の実行中だけか（Issue #2004）。
+ *
+ * 真のときは、バックグラウンド処理が終われば区切りとして通る。利用者へ「終了待ち」と示す
+ * 条件で、busy・承認待ち・質問待ち等でも止まっているときは偽。`reflexEnabled` のときは、
+ * 質問で終わったターンも後段（Reflex）へ回すため、`awaitingUserAnswer` を理由に数えない
+ * （`maybeAutoHandoffAtSafeBoundary` の前段判定と揃える）。
+ */
+export function isWaitingOnlyForBackground(
+  input: SafeBoundaryGateInput,
+  reflexEnabled: boolean,
+): boolean {
+  if (!input.backgroundRunning) {
+    return false;
+  }
+  const withoutBackground = { ...input, backgroundRunning: false };
+  return (
+    passesSafeBoundaryGate(withoutBackground) ||
+    (reflexEnabled && passesSafeBoundaryGate({ ...withoutBackground, awaitingUserAnswer: false }))
+  );
+}
+
+/**
  * 分類器を起動してよいかを絞る鍵（Issue #1090の確認点1）。
  *
  * 前回の判定から材料が変わっていなければ、同じ結論が出るだけのため呼ばない。
