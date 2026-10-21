@@ -5,7 +5,7 @@ import type { MementoLike } from '../util/memento';
 /** 旧globalStateのキー（Issue #2006で廃止。移行のためだけに残す）。 */
 export const CLAUDE_SESSION_NAMES_KEY = 'claude.sessionNames';
 
-/** 保存する件数の上限。超えたら最後に書いた時刻の古いものから捨てる。 */
+/** 保存する件数の上限。超えたら最後に使った（書いた・1日以上ぶりに読んだ）時刻の古いものから捨てる。 */
 export const CLAUDE_SESSION_NAMES_MAX_ENTRIES = 10_000;
 
 /** 1件の名前の最大文字数。これを超える値は読まず、保存時は切り詰める。 */
@@ -66,10 +66,15 @@ export class ClaudeSessionNameStore {
 
   /** 人が付けた名前を読む。付けていなければ `undefined`（呼び出し側はtranscript由来へフォールバックする）。 */
   get(sessionId: string): string | undefined {
-    // ファイルに無ければ旧キーを見る（移行が済むまでの間と、移行が拒否されたとき）
+    // ファイルに無く、どのウィンドウでもまだ移行が済んでいなければ旧キーを見る
     const name =
       this.file.get(sessionId) ??
-      readLegacyName(this.legacy?.get<unknown>(CLAUDE_SESSION_NAMES_KEY, undefined), sessionId);
+      (this.file.isMigrated()
+        ? undefined
+        : readLegacyName(
+            this.legacy?.get<unknown>(CLAUDE_SESSION_NAMES_KEY, undefined),
+            sessionId,
+          ));
     return name === undefined || name.trim() === '' ? undefined : name;
   }
 

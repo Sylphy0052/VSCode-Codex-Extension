@@ -1,6 +1,16 @@
 import { readFileSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  link,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -16,7 +26,9 @@ import { basename, dirname, join } from 'node:path';
  *   重ね、tmp経由で置き換える（他ウィンドウの変更を巻き戻さない）
  * - 読めないファイル・自分より新しい版のファイルには書かない（全件を消さないため）。
  *   壊れたJSONは`.corrupt-<時刻>`へ退避してから作り直す
- * - 件数が`maxEntries`を超えたら、最後に書いた時刻（`at`）が古いものから捨てる
+ * - 件数が`maxEntries`を超えたら、最後に使った時刻（`at`）が古いものから捨てる。`at`は書込みのほか、
+ *   最後の更新から`TOUCH_AFTER_MS`以上経った値を読んだときにも進める（書込みは
+ *   `TOUCH_FLUSH_DELAY_MS`ごとにまとめる）。使っている値を、書いていないだけで捨てないため
  */
 const SCHEMA_VERSION = 1;
 const RELOAD_CHECK_INTERVAL_MS = 1_000;
@@ -28,10 +40,14 @@ const LOCK_WAIT_MS = 15_000;
 const LOCK_RETRY_MS = 20;
 /** この時間より古いlockfileは、書込み中に落ちたウィンドウの残骸とみなして消す。 */
 const LOCK_STALE_MS = 10_000;
+/** 読んだ値の時刻を進めるのは、最後に書いてからこれ以上経ったものだけ（1件あたり1日1回まで）。 */
+const TOUCH_AFTER_MS = 24 * 60 * 60 * 1_000;
+/** 読んだ値の時刻の更新は、この間隔でまとめて書く。 */
+const TOUCH_FLUSH_DELAY_MS = 60_000;
 
 interface StoredEntry<T> {
   v: T;
-  /** 最後に書いた時刻（epoch ms）。旧globalStateから移したものは0。 */
+  /** 最後に使った時刻（epoch ms）。書込みと、1日以上ぶりの読込みで進む。旧globalStateから移したものは0。 */
   at: number;
 }
 
@@ -106,12 +122,64 @@ function trimOldest<T>(entries: Map<string, StoredEntry<T>>, maxEntries: number)
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** lockの持ち主のプロセスが既に無いか。同じマシンのウィンドウ同士なのでpidで確かめられる。 */
+function isDeadOwner(token: string): boolean {
+  const pid = Number.parseInt(token.split('-')[0] ?? '', 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return errorCode(error) === 'ESRCH';
+  }
+}
+
+/**
+ * 残骸のlockを回収する。
+ *
+ * 消す前にrenameで自分だけの名前へ退避する（renameは原子的なので、同時に回収しに来た
+ * 相手とは片方しか成功しない）。退避した中身が残骸のトークンでなければ、確かめた後に
+ * 他者が取り直した有効なlockを退避したことになるので、`link`で元へ戻す（`link`は
+ * 既にあれば失敗するので、さらに別の者が取ったlockを上書きしない）。
+ */
+async function reclaimLock(lockPath: string, staleToken: string): Promise<void> {
+  const aside = `${lockPath}.reclaim-${process.pid}-${randomUUID()}`;
+  try {
+    await rename(lockPath, aside);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') {
+      return; // 相手が先に回収した
+    }
+    throw error;
+  }
+  try {
+    if ((await readFile(aside, 'utf8')) !== staleToken) {
+      try {
+        await link(aside, lockPath);
+      } catch (error) {
+        if (errorCode(error) !== 'EEXIST') {
+          throw error;
+        }
+      }
+    }
+  } finally {
+    await rm(aside, { force: true });
+  }
+}
+
 /**
  * 他ウィンドウ（別プロセス）と排他するlockfile。`wx`で作れた側だけが書く。
  *
- * lockには所有者のトークンを書き、外すときは自分のトークンのときだけ消す（書込みが
- * `LOCK_STALE_MS`を超えて止まり、他者に回収・取り直された後で、相手のlockを消さない）。
- * 残骸の回収は、消す直前にinodeとmtimeが変わっていないことを確かめ直す。
+ * lockには所有者のトークン（pid付き）を書き、外すときは自分のトークンのときだけ消す
+ * （書込みが`LOCK_STALE_MS`を超えて止まり、他者に回収・取り直された後で、相手のlockを
+ * 消さない）。持ち主のプロセスが無いか、`LOCK_STALE_MS`より古いlockは残骸として回収する。
+ *
+ * 残る競合: 回収で退避したのが他者の有効なlockで、`link`で戻す前にさらに別の者が
+ * lockを取った場合だけ、2者が同時に書きうる。lockを持ったままウィンドウが落ち、
+ * かつ3つ以上のウィンドウが同時に回収しに来たときに限られる。OSのファイルlockを
+ * 使わない限り、これ以上は詰められない。
  */
 async function withFileLock<R>(lockPath: string, body: () => Promise<R>): Promise<R> {
   const token = `${process.pid}-${randomUUID()}`;
@@ -134,20 +202,22 @@ async function withFileLock<R>(lockPath: string, body: () => Promise<R>): Promis
         throw error;
       }
     }
+    let staleToken: string | undefined;
     try {
       const seen = await stat(lockPath);
-      if (Date.now() - seen.mtimeMs > LOCK_STALE_MS) {
-        const again = await stat(lockPath);
-        if (again.ino === seen.ino && again.mtimeMs === seen.mtimeMs) {
-          await rm(lockPath, { force: true });
-        }
-        continue;
+      const owner = await readFile(lockPath, 'utf8');
+      if (Date.now() - seen.mtimeMs > LOCK_STALE_MS || isDeadOwner(owner)) {
+        staleToken = owner;
       }
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') {
         throw error;
       }
       continue; // 確かめる間に相手が外した。すぐ取り直す
+    }
+    if (staleToken !== undefined) {
+      await reclaimLock(lockPath, staleToken);
+      continue;
     }
     if (Date.now() >= deadline) {
       throw new Error(`lockを取れなかった: ${lockPath}`);
@@ -201,6 +271,11 @@ export class KeyedStateFile<T> {
     { entry: StoredEntry<T> | null; base: StoredEntry<T> | undefined }
   >();
   private leftoversRemoved = false;
+  /** ファイルに移行済みの印があるか（スナップショット時点）。 */
+  private migrated = false;
+  /** 時刻を進めたが、まだ書いていないキー。 */
+  private readonly touched = new Set<string>();
+  private touchTimer: ReturnType<typeof setTimeout> | undefined;
   private writeChain: Promise<void> = Promise.resolve();
   private mtimeMs = -1;
   private checkedAt = 0;
@@ -215,7 +290,17 @@ export class KeyedStateFile<T> {
 
   get(key: string): T | undefined {
     this.refreshIfChanged();
-    return this.entries.get(key)?.v;
+    const entry = this.entries.get(key);
+    if (entry !== undefined) {
+      this.touch(key, entry);
+    }
+    return entry?.v;
+  }
+
+  /** 旧globalStateからの移行が（どのウィンドウでも）済んでいるか。 */
+  isMigrated(): boolean {
+    this.refreshIfChanged();
+    return this.migrated;
   }
 
   has(key: string): boolean {
@@ -243,11 +328,12 @@ export class KeyedStateFile<T> {
   }
 
   /**
-   * ファイルに無いキーだけ足す（旧globalStateからの移行用）。
+   * ファイルに無いキーだけ足し、移行済みの印を付ける（旧globalStateからの移行用）。
    *
    * ファイルに移行済みの印があれば何もしない（他ウィンドウに同期前の旧キーが残っていても、
-   * 消されたセッションを復活させない）。`collect`はlockを取ってから呼ぶ。足した結果が
-   * `maxEntries`を超えるときは書かずに拒否する（呼び出し側は旧キーを消さず、旧キーから読み続ける）。
+   * 消されたセッションを復活させない）。`collect`はlockを取ってから呼ぶ。この書込みでは
+   * 上限で切らない（移行で旧データを失わない）。上限を超えた分は、以後の書込みで
+   * 使っていないものから捨てる。
    */
   async importMissing(collect: () => Iterable<readonly [string, T]>): Promise<void> {
     await this.enqueue((disk) => {
@@ -259,13 +345,45 @@ export class KeyedStateFile<T> {
           disk.entries.set(key, { v: value, at: 0 });
         }
       }
-      if (disk.entries.size > this.maxEntries) {
-        throw new Error(
-          `移行すると上限${this.maxEntries}件を超えるため移行しない（${disk.entries.size}件）。旧保存先から読み続ける`,
-        );
-      }
       disk.migrated = true;
-    });
+    }, false);
+  }
+
+  private touch(key: string, entry: StoredEntry<T>): void {
+    const now = Date.now();
+    if (this.filePath === undefined || now - entry.at < TOUCH_AFTER_MS) {
+      return;
+    }
+    this.entries.set(key, { v: entry.v, at: now });
+    this.touched.add(key);
+    if (this.touchTimer === undefined) {
+      this.touchTimer = setTimeout(() => {
+        this.touchTimer = undefined;
+        void this.flushTouches().catch(() => undefined);
+      }, TOUCH_FLUSH_DELAY_MS);
+      // 時刻の更新待ちだけで拡張ホストの終了を止めない
+      this.touchTimer.unref?.();
+    }
+  }
+
+  /** 時刻の更新だけを書く。中身は`enqueue`が書込みのたびに載せる`applyTouches`。 */
+  private flushTouches(): Promise<void> {
+    return this.touched.size === 0 ? Promise.resolve() : this.enqueue(() => undefined);
+  }
+
+  /**
+   * まだ書いていない時刻の更新をディスクの内容へ重ねる。どの書込みでも上限で切る前に呼ぶ
+   * （読んだだけの値を、時刻を書き戻す前の別の書込みで捨てないため）。
+   */
+  private applyTouches(disk: DiskState<T>): void {
+    const now = Date.now();
+    for (const key of this.touched) {
+      const entry = disk.entries.get(key);
+      if (entry !== undefined && entry.at < now) {
+        disk.entries.set(key, { v: entry.v, at: now });
+      }
+    }
+    this.touched.clear();
   }
 
   /** 最後に保存できた値。未保存の変更が積まれていれば、その一番前の時点の値。 */
@@ -309,10 +427,12 @@ export class KeyedStateFile<T> {
         const parsed = parseFile(readFileSync(this.filePath, 'utf8'), this.parseValue);
         if (parsed.kind === 'ok') {
           this.entries = parsed.entries;
+          this.migrated = parsed.migrated;
         }
       } catch (error) {
         if (errorCode(error) === 'ENOENT') {
           this.entries = new Map();
+          this.migrated = false;
           this.mtimeMs = -1;
         }
         // 一時的な読取り失敗では、手元のスナップショットを捨てない
@@ -373,7 +493,7 @@ export class KeyedStateFile<T> {
     return { entries: parsed.entries, migrated: parsed.migrated };
   }
 
-  private enqueue(mutate: (disk: DiskState<T>) => void): Promise<void> {
+  private enqueue(mutate: (disk: DiskState<T>) => void, trim = true): Promise<void> {
     const filePath = this.filePath;
     if (filePath === undefined) {
       return Promise.resolve();
@@ -390,7 +510,10 @@ export class KeyedStateFile<T> {
           }
           const disk = await this.readDisk(filePath);
           mutate(disk);
-          trimOldest(disk.entries, this.maxEntries);
+          this.applyTouches(disk);
+          if (trim) {
+            trimOldest(disk.entries, this.maxEntries);
+          }
           const payload: PersistedFile<T> = {
             version: SCHEMA_VERSION,
             entries: Object.fromEntries(disk.entries),
@@ -408,6 +531,7 @@ export class KeyedStateFile<T> {
           // lockを持っている間に取るので、他ウィンドウの書込みとmtimeを取り違えない
           this.mtimeMs = (await stat(filePath)).mtimeMs;
           this.entries = disk.entries;
+          this.migrated = disk.migrated;
         });
         this.applyPending(this.entries);
         this.checkedAt = Date.now();

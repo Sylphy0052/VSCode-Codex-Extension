@@ -88,7 +88,7 @@ describe('SessionModelSettingsStore（issue #844）', () => {
     expect(store.get('codex', 'deleted')).toBeUndefined();
   });
 
-  it('上限を超えて移行が拒否されても、旧キーから読み続け、旧キーは残す', async () => {
+  it('上限を超えても移行は拒否せず、全件を読み戻せる', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'model-settings-'));
     const initial: Record<string, unknown> = {};
     for (let i = 0; i < 10_001; i += 1) {
@@ -96,17 +96,39 @@ describe('SessionModelSettingsStore（issue #844）', () => {
     }
     const legacy = fakeMemento(initial);
     const errors: unknown[] = [];
-    const store = new SessionModelSettingsStore(
-      join(dir, 'settings.json'),
+    const path = join(dir, 'settings.json');
+    new SessionModelSettingsStore(
+      path,
       Object.assign(legacy, { keys: () => Object.keys(initial) }),
       (error) => errors.push(error),
     );
 
     await vi.waitFor(() => {
-      expect(errors).toHaveLength(1);
+      expect(legacy.get('agent.sessionModelSettings.claude.s0', undefined)).toBeUndefined();
     });
-    expect(store.get('claude', 's0')).toEqual({ model: 'sonnet', effort: 'low' });
-    expect(legacy.get('agent.sessionModelSettings.claude.s0', undefined)).toBeDefined();
+    const reread = new SessionModelSettingsStore(path);
+    expect(reread.get('claude', 's0')).toEqual({ model: 'sonnet', effort: 'low' });
+    expect(reread.get('claude', 's10000')).toEqual({ model: 'sonnet', effort: 'low' });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('移行後は、同期前の旧キーが残る別ウィンドウでも消した値を読み戻さない', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'model-settings-'));
+    const path = join(dir, 'settings.json');
+    const key = 'agent.sessionModelSettings.codex.s1';
+    const legacyA = fakeMemento({ [key]: { model: 'gpt-a', effort: 'high' } });
+    const windowA = new SessionModelSettingsStore(
+      path,
+      Object.assign(legacyA, { keys: () => [key] }),
+    );
+    await windowA.delete('codex', 's1');
+
+    // ウィンドウBのglobalStateには、まだ旧キーの削除が届いていない
+    const legacyB = fakeMemento({ [key]: { model: 'gpt-a', effort: 'high' } });
+    const windowB = new SessionModelSettingsStore(path, legacyB);
+
+    expect(windowA.get('codex', 's1')).toBeUndefined();
+    expect(windowB.get('codex', 's1')).toBeUndefined();
   });
 
   it('移行前でも旧キーから読み、deleteは旧キーも消す', async () => {

@@ -6,7 +6,7 @@ import type { MementoLike } from './util/memento';
 /** 旧globalStateのキー接頭辞（Issue #2006で廃止。移行のためだけに残す）。 */
 const LEGACY_KEY_PREFIX = 'agent.sessionModelSettings';
 
-/** 保存する件数の上限。超えたら最後に書いた時刻の古いものから捨てる。 */
+/** 保存する件数の上限。超えたら最後に使った（書いた・1日以上ぶりに読んだ）時刻の古いものから捨てる。 */
 export const SESSION_MODEL_SETTINGS_MAX_ENTRIES = 10_000;
 
 const FILE_NAME = 'session-model-settings.json';
@@ -55,6 +55,8 @@ export type LegacySettingsMemento = MementoLike & { keys?(): readonly string[] }
 export class SessionModelSettingsStore {
   private readonly file: KeyedStateFile<SessionModelSettings>;
   private readonly legacy: LegacySettingsMemento | undefined;
+  /** 旧キーの移行。deleteはこれを待ってから行う（移行前に消すと、他ウィンドウが旧キーから読み戻せる）。 */
+  private readonly migration: Promise<void>;
 
   constructor(
     filePath?: string,
@@ -64,16 +66,20 @@ export class SessionModelSettingsStore {
   ) {
     this.file = new KeyedStateFile(filePath, readSettings, SESSION_MODEL_SETTINGS_MAX_ENTRIES);
     this.legacy = filePath === undefined ? undefined : legacy;
-    if (filePath !== undefined && legacy !== undefined) {
-      void this.migrateLegacy(legacy).catch(onMigrationError);
-    }
+    this.migration =
+      filePath !== undefined && legacy !== undefined
+        ? this.migrateLegacy(legacy).catch(onMigrationError)
+        : Promise.resolve();
   }
 
   get(provider: ProviderId, sessionId: string): SessionModelSettings | undefined {
-    // ファイルに無ければ旧キーを見る（移行が済むまでの間と、移行が拒否されたとき）
+    // ファイルに無く、どのウィンドウでもまだ移行が済んでいなければ旧キーを見る
+    // （移行済みなら、旧キーの値はファイルへ移っている。消された値を旧キーから読み戻さない）
     const stored =
       this.file.get(storageId(provider, sessionId)) ??
-      readSettings(this.legacy?.get<unknown>(legacyKey(provider, sessionId), undefined));
+      (this.file.isMigrated()
+        ? undefined
+        : readSettings(this.legacy?.get<unknown>(legacyKey(provider, sessionId), undefined)));
     return stored === undefined ? undefined : { ...stored };
   }
 
@@ -87,6 +93,7 @@ export class SessionModelSettingsStore {
 
   /** セッション本体を削除したときに、対応する保存値も破棄する。 */
   async delete(provider: ProviderId, sessionId: string): Promise<void> {
+    await this.migration;
     await this.file.delete(storageId(provider, sessionId));
     // 旧キーが残っていると、getの読み替えで消したはずの値が戻る
     if (this.legacy?.get<unknown>(legacyKey(provider, sessionId), undefined) !== undefined) {

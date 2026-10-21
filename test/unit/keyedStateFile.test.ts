@@ -126,18 +126,54 @@ describe('KeyedStateFile（Issue #2006）', () => {
     expect(new KeyedStateFile(path, parseString, 10).get('a')).toBeUndefined();
   });
 
-  it('移行で上限を超えるときは書かずに拒否する', async () => {
+  it('移行では上限で切らず、以後の書込みで使っていないものから捨てる', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(10 * 24 * 60 * 60 * 1_000);
     const path = tmpPath();
     const file = new KeyedStateFile(path, parseString, 2);
+    await file.importMissing(() => [
+      ['a', '1'],
+      ['b', '2'],
+      ['c', '3'],
+    ]);
+    expect(new KeyedStateFile(path, parseString, 2).get('a')).toBe('1');
 
-    await expect(
-      file.importMissing(() => [
-        ['a', '1'],
-        ['b', '2'],
-        ['c', '3'],
-      ]),
-    ).rejects.toThrow();
-    expect(existsSync(path)).toBe(false);
+    // bを読む（時刻が進む）。aとcは読まない
+    expect(file.get('b')).toBe('2');
+    await file.set('d', '4');
+
+    const reread = new KeyedStateFile(path, parseString, 2);
+    expect(reread.has('b')).toBe(true);
+    expect(reread.has('d')).toBe(true);
+    expect(reread.has('a')).toBe(false);
+    expect(reread.has('c')).toBe(false);
+  });
+
+  it('1日以上前に書いた値を読むと、まとめて時刻を書き戻す', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const path = tmpPath();
+    const file = new KeyedStateFile(path, parseString, 10);
+    await file.set('a', '1');
+    const day = 24 * 60 * 60 * 1_000;
+    vi.setSystemTime(1_000 + day + 1);
+
+    expect(file.get('a')).toBe('1');
+    expect(JSON.parse(readFileSync(path, 'utf8')).entries.a.at).toBe(1_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => {
+      expect(JSON.parse(readFileSync(path, 'utf8')).entries.a.at).toBeGreaterThan(1_000);
+    });
+  });
+
+  it('持ち主のプロセスが無いlockは、古くなくても回収する', async () => {
+    const path = tmpPath();
+    // 存在しないpid
+    writeFileSync(`${path}.lock`, '2147483646-dead', 'utf8');
+
+    await new KeyedStateFile(path, parseString, 10).set('a', '1');
+
+    expect(new KeyedStateFile(path, parseString, 10).get('a')).toBe('1');
   });
 
   it('落ちたウィンドウが残した古いlockは回収して書ける', async () => {
