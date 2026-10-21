@@ -316,6 +316,8 @@ function enqueue(deps: HeadlessCliDeps, prompt: string, kind: string): Promise<H
       if (index >= 0) {
         waiting.splice(index, 1);
         resolve({ ok: false, reason: 'process-error' });
+        // 待ち印を外すため。高い段の待ちが消えたら、他のウィンドウへすぐ知らせる
+        drain();
       }
     };
     const request: QueuedRequest = {
@@ -398,6 +400,8 @@ export function configureHeadlessCliSharedDir(
   dir: string | undefined,
   logWarn?: (message: string) => void,
 ): void {
+  // 作り直すと識別子が変わり、旧い待ち印が自分自身を止める。先に消しておく
+  void slotLock?.setWanted(-1);
   slotLock = dir === undefined ? undefined : new HeadlessSlotLock(dir, logWarn);
 }
 
@@ -475,14 +479,21 @@ function startNext(slot: HeadlessSlot | undefined): boolean {
     signal:
       deps.signal === undefined ? yielding.signal : AbortSignal.any([deps.signal, yielding.signal]),
   };
+  let checking = false;
   const watcher = setInterval(() => {
     void slotLock?.setWanted(waitingTopRank());
-    if (!yielding.signal.aborted) {
-      void shouldYield(request).then((yes) => {
-        if (yes) {
-          yielding.abort();
-        }
-      });
+    // fsが遅いときに確認を重ねない
+    if (!yielding.signal.aborted && !checking) {
+      checking = true;
+      void shouldYield(request)
+        .then((yes) => {
+          if (yes) {
+            yielding.abort();
+          }
+        })
+        .finally(() => {
+          checking = false;
+        });
     }
   }, PREEMPT_POLL_MS);
   watcher.unref?.();
@@ -491,7 +502,8 @@ function startNext(slot: HeadlessSlot | undefined): boolean {
     .catch((): HeadlessOutcome => ({ ok: false, reason: 'process-error' }))
     .then((outcome) => {
       clearInterval(watcher);
-      const preempted = yielding.signal.aborted && deps.signal?.aborted !== true;
+      // 打ち切る前に応答が揃っていれば、その結果を使う
+      const preempted = !outcome.ok && yielding.signal.aborted && deps.signal?.aborted !== true;
       recordCall(
         request.kind,
         preempted ? 'preempted' : outcome.ok ? 'ok' : outcome.reason,
@@ -531,6 +543,8 @@ function requeuePreempted(request: QueuedRequest): void {
     return;
   }
   request.preemptions += 1;
+  // 打ち切るまでの待ちと実行は記録済み。次の記録の「待ち」は戻した時点から数える
+  request.enqueuedAt = Date.now();
   insertWaiting(request, true);
 }
 
@@ -593,6 +607,12 @@ function recordCall(kind: string, result: string, waitMs: number, runMs: number)
 export function resetHeadlessCliStateForTest(): void {
   waiting.length = 0;
   runningCount = 0;
+  handoffUntil = 0;
+  acquiring = false;
+  if (retryTimer !== undefined) {
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+  }
   cache.clear();
   callCounts.clear();
 }

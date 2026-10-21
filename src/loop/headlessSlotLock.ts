@@ -205,8 +205,19 @@ export class HeadlessSlotLock {
           await this.ensureDir();
           await writeFile(this.wantPath(wanted), String(process.pid), 'utf8');
         }
-      } catch {
+      } catch (e) {
         this.dirReady = false;
+        // 次の呼び出しで書き直す
+        this.wantedAt = 0;
+        if (this.warned) {
+          return;
+        }
+        this.warned = true;
+        this.logWarn(
+          `短命CLIの待ち印を書けませんでした（ウィンドウ間の優先度は効きません）: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
       }
     });
     return this.wantedChain;
@@ -225,7 +236,7 @@ export class HeadlessSlotLock {
   private async foreignWantedRank(names: readonly string[]): Promise<number> {
     let highest = -1;
     for (const name of names) {
-      const match = new RegExp(`^${WANT_FILE_PREFIX}\\.(\\d)\\.(.+)$`).exec(name);
+      const match = new RegExp(`^${WANT_FILE_PREFIX}\\.([12])\\.(.+)$`).exec(name);
       const rank = Number(match?.[1]);
       if (match === null || match[2] === this.id || !Number.isInteger(rank) || rank <= highest) {
         continue;
@@ -234,6 +245,9 @@ export class HeadlessSlotLock {
         const age = Date.now() - (await stat(path.join(this.dir, name))).mtimeMs;
         if (Math.abs(age) <= SLOT_STALE_MS) {
           highest = rank;
+        } else {
+          // 落ちたウィンドウの残骸。溜めないよう掃除する
+          await unlink(path.join(this.dir, name)).catch(() => undefined);
         }
       } catch {
         // 見た後に持ち主が消した
