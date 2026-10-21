@@ -10,9 +10,8 @@ import {
   type ResumeOutcome,
 } from '../../src/claude/streamSession';
 import type { Logger } from '../../src/log';
-import type { FileSystemPort, MemoryFileSystemPort } from '../../src/session/ports';
+import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
-import type { MemoryModeMemento } from '../../src/provider/inputModes';
 import { STATE_POST_INTERVAL_MS } from '../../src/view/chatShared';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
@@ -167,14 +166,6 @@ function fakeStore(overrides?: Partial<ClaudeSessionStore>): ClaudeSessionStore 
   return store as unknown as ClaudeSessionStore;
 }
 
-function fakeMemoryFileSystem(overrides?: Partial<MemoryFileSystemPort>): MemoryFileSystemPort {
-  return {
-    readStrict: async () => undefined,
-    resolveSymlinkTarget: async () => ({ kind: 'not-symlink' }),
-    ...overrides,
-  };
-}
-
 /** `afterEach`で消す使い捨てディレクトリ。 */
 const tempDirs: string[] = [];
 
@@ -184,22 +175,9 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-function fakeMemento(): MemoryModeMemento {
-  const store = new Map<string, unknown>();
-  return {
-    get: <T>(key: string, defaultValue: T): T =>
-      store.has(key) ? (store.get(key) as T) : defaultValue,
-    update: (key: string, value: unknown): Thenable<void> => {
-      store.set(key, value);
-      return Promise.resolve();
-    },
-  };
-}
-
 function createManager(options?: {
   store?: ClaudeSessionStore;
   fileSystem?: FileSystemPort;
-  memoryFs?: MemoryFileSystemPort;
   isTaskManagedThread?: (sessionId: string) => boolean;
   settings?: Record<string, unknown>;
   holdsRestoredTaskPanel?: (sessionId: string) => boolean;
@@ -217,8 +195,6 @@ function createManager(options?: {
     () => undefined,
     () => undefined,
     options?.isTaskManagedThread ?? (() => false),
-    options?.memoryFs ?? fakeMemoryFileSystem(),
-    fakeMemento(),
     undefined,
     undefined,
     options?.globalStorageDir === null

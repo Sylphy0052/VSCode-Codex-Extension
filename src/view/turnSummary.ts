@@ -34,7 +34,7 @@ export interface TurnSummaryConfig {
  * - 指示文が空（実質的な無効化として扱う）
  * - 本文が空（画像だけを送る場合。指示文だけが本文になるのを避ける）
  *
- * 擬似コマンド（`/btw`等）と入力モード（行頭 `!` / `#`）は呼び出し側が先に振り分ける
+ * 擬似コマンド（`/btw`等）と入力モード（行頭 `!`）は呼び出し側が先に振り分ける
  * ため、ここへは来ない（`chatView.ts` / `claudeChatView.ts` の `send` ハンドラ参照）。
  */
 export function appendTurnSummaryInstruction(text: string, config: TurnSummaryConfig): string {

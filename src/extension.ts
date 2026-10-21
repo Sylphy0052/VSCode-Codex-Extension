@@ -170,7 +170,7 @@ import {
   type SessionPreset,
 } from './sessionPresets';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
-import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
+import { nodeFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { purgeStaleOutputOffload } from './session/nodeOutputOffload';
 import { SessionModelSettingsStore, sessionModelSettingsFilePath } from './sessionModelSettings';
@@ -720,9 +720,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
     isTaskManagedThread,
-    // メモリ追記（issue #6/#144）専用の読み取り口と、前回選んだ追記先の記憶先
-    nodeMemoryFileSystem,
-    context.workspaceState,
     // Claude Code画面の統合テスト（Issue #186）。セッションを作るたびに読み直すため、
     // `activate()` が終わった後からでも差し替えられる。
     () => claudeSpawnOverride.spawn,

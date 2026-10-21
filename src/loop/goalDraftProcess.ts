@@ -90,7 +90,7 @@ export function createGoalDraftPlanner(
     try {
       // 利用者が下書きを待っているため、ループの脇役より先に回す（Issue #1807）
       const raw = await runHeadlessPrompt(
-        { kind: 'goalDraft', urgent: true, ...deps },
+        { kind: 'goalDraft', priority: 'stage', ...deps },
         redaction.text,
       );
       if (raw === undefined) {

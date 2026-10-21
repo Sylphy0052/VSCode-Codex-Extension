@@ -197,7 +197,7 @@
 | `/btw`              | 両プロバイダの独立した脇道質問                                | [F07](feature-inventory.md#f07)、[F14](feature-inventory.md#f14) |
 | `/...`              | Codexのskills/プロンプト、ClaudeのCLI由来候補・フォールバック | [F07](feature-inventory.md#f07)、[F17](feature-inventory.md#f17) |
 | `@...`              | ファイル候補・参照                                            | [F06](feature-inventory.md#f06)                                  |
-| `!`、`#`            | Claudeの単一行入力。ターミナル/メモリ追記                     | [F07](feature-inventory.md#f07)                                  |
+| `!`                 | Claudeの単一行入力。ターミナル                                | [F07](feature-inventory.md#f07)                                  |
 
 ## ワークフローMCPツール
 
