@@ -1527,7 +1527,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
     entry.lastCompactionCount = lastCompactionCount;
 
-    if (entry.disposed || entry.panel === undefined || entry.autoHandoffDisabled) {
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    if (entry.autoHandoffDisabled) {
+      this.markBackgroundWait(entry, undefined);
       return;
     }
     const trigger = decideAutoHandoff({
@@ -1541,6 +1545,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       thresholdPercent: readAutoHandoffThresholdPercent(),
     });
     if (trigger !== undefined) {
+      this.markBackgroundWait(entry, undefined);
       entry.trace.info(describeDecision(trigger));
       void this.requestHandoff(entry, trigger);
       return;
@@ -1551,32 +1556,50 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /**
    * 自動引き継ぎがバックグラウンド処理の終了だけを待っているか（Issue #2004）を画面とログへ反映する。
    *
-   * Claude Code側の同名メソッドと同じ。`ChatState`の更新は同期で`onSessionChange`を呼び直すため、
-   * 判定を終えてからmicrotaskで反映し、重複のログは`backgroundWaitShown`で止める。
+   * `gateDetail`は待ちに入るときの前段の状態（`describeGate`）で、`undefined`なら待ちを解く。
+   * 値が変わったときだけ`ChatState`を更新し、ログを1行出す。`onSessionChange`から毎回通るため、
+   * 同じ値のまま呼ばれても何もしない。
+   *
+   * `ChatState`の更新は同期で`onSessionChange`を呼び直すため、判定の途中で入れると再入する。
+   * 判定を終えてから反映するようmicrotaskへ回し、反映前の値だけを`backgroundWaitPending`に持つ。
+   * 正本は`ChatState`に置く（状態が作り直されて値が消えても、次の判定で出し直せるように）。
    */
-  private markBackgroundWait(entry: ChatPanel, waiting: boolean, gateDetail?: string): void {
-    if (this.backgroundWaitShown.has(entry) === waiting) {
+  private markBackgroundWait(entry: ChatPanel, gateDetail: string | undefined): void {
+    const waiting = gateDetail !== undefined;
+    const current =
+      this.backgroundWaitPending.get(entry) ??
+      entry.session.getState().autoHandoffBackgroundWait ??
+      false;
+    if (current === waiting) {
       return;
-    }
-    if (waiting) {
-      this.backgroundWaitShown.add(entry);
-    } else {
-      this.backgroundWaitShown.delete(entry);
     }
     entry.trace.info(
       waiting
-        ? `gate blocked: バックグラウンド処理の終了待ち (${gateDetail ?? ''})`
+        ? `gate blocked (バックグラウンド処理の終了待ち: ${gateDetail})`
         : 'バックグラウンド処理の終了待ちが解けた',
     );
+    this.backgroundWaitPending.set(entry, waiting);
     queueMicrotask(() => {
-      if (!entry.disposed) {
+      // 同じtickで逆の値が後から来ていれば、そちらのmicrotaskに任せる
+      if (this.backgroundWaitPending.get(entry) !== waiting) {
+        return;
+      }
+      this.backgroundWaitPending.delete(entry);
+      if (entry.disposed) {
+        return;
+      }
+      try {
         entry.session.setAutoHandoffBackgroundWait(waiting);
+      } catch (error) {
+        entry.trace.warn(
+          `終了待ちの表示を更新できなかった: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     });
   }
 
-  /** 終了待ちの表示を出している会話（Issue #2004）。`markBackgroundWait`だけが書く。 */
-  private readonly backgroundWaitShown = new WeakSet<ChatPanel>();
+  /** 終了待ちの表示のうち、`ChatState`へまだ反映していない値（Issue #2004）。 */
+  private readonly backgroundWaitPending = new WeakMap<ChatPanel, boolean>();
 
   /** タブ名の自動付け直し（Issue #1426）の実行役。1セッション1本に限るためパネルごとに持つ。 */
   private readonly autoNamers = new WeakMap<ChatPanel, SerialRerun>();
@@ -1942,7 +1965,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   private async maybeAutoHandoffAtSafeBoundary(entry: ChatPanel, state: ChatState): Promise<void> {
     if (!state.autoHandoff || this.autoHandoffHeld(entry, state)) {
-      this.markBackgroundWait(entry, false);
+      this.markBackgroundWait(entry, undefined);
       return;
     }
     if (entry.safeBoundaryProbing) {
@@ -1956,7 +1979,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
     if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
       // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
-      this.markBackgroundWait(entry, false);
+      this.markBackgroundWait(entry, undefined);
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
@@ -1984,7 +2007,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 止めている理由がバックグラウンド処理の実行中だけなら、終わるまで待っていると示す
     // （Issue #2004）。ログは待ちに入ったときと解けたときだけ出す
     const waitingOnBackground = isWaitingOnlyForBackground(gate, reflex.enabled);
-    this.markBackgroundWait(entry, waitingOnBackground, describeGate(gate));
+    this.markBackgroundWait(entry, waitingOnBackground ? describeGate(gate) : undefined);
     if (!passesSafeBoundaryGate(gate)) {
       // Reflexで判定するときは、質問で終わったターンも後段へ回す。引き継ぐかどうかを尋ねる
       // 質問は返答待ちとして扱わず、それ以外の質問は返答待ちとして止める（Issue #1707）
