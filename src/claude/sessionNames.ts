@@ -15,8 +15,8 @@ export const CLAUDE_SESSION_NAMES_KEY = 'claude.sessionNames';
  *
  * セッションidはワークスペースをまたいでも一意なため、`workspaceState` ではなく
  * `globalState` を渡す想定（`extension.ts` 参照）。値を渡さない場合は何も永続化しない
- * no-opの `MementoLike` を既定にする（`claudeChatView.ts` の `memoryMemento` と同じ流儀。
- * テスト等でVSCodeの `Memento` を用意しなくても壊れない）。
+ * no-opの `MementoLike` を既定にする（テスト等でVSCodeの `Memento` を
+ * 用意しなくても壊れない）。
  */
 export class ClaudeSessionNameStore {
   constructor(

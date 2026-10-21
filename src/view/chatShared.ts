@@ -11,7 +11,7 @@ import type { ActivityKind } from '../activity/record';
 import { currentWorkspaceFolder, workspaceFolderPaths } from '../config';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import { createNodeOutputOffload } from '../session/nodeOutputOffload';
-import type { FileSystemPort, SymlinkResolution } from '../session/ports';
+import type { FileSystemPort } from '../session/ports';
 import {
   APPROVAL_LEVELS,
   APPROVAL_LEVEL_LABELS,
@@ -23,7 +23,6 @@ import { DEFAULT_CHAT_SKIN, skinBodyClass, type ChatSkin } from './skin';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
-import { buildMemoryAppendConfirmation } from '../provider/inputModes';
 import { computeDiffContents, planDiffActions } from '../util/diffRestore';
 import {
   resolveWithinWorkspace,
@@ -217,30 +216,6 @@ export async function confirmRunShellCommand(command: string): Promise<boolean> 
     '入力する',
   );
   return choice === '入力する';
-}
-
-/**
- * 行頭が `#` の入力（issue #6、design.md §14.29）をメモリへ追記してよいか確かめる。
- *
- * ファイルへの書き込みは元に戻せないため（gitで管理されていない環境もある）、
- * 追記先と内容の両方を確認させてから書く（issue #6の受入基準）。
- *
- * `symlink` は追記先のシンボリックリンク判別結果。本文の組み立ては
- * `buildMemoryAppendConfirmation`（純粋関数）に切り出してある（issue #144。実体パスを
- * 見せずに書き込みが実行されると、実際にどのファイルが書き換わるか分からないため。
- * 実体パスが特定できない場合も警告として出す）。
- */
-export async function confirmMemoryAppend(
-  content: string,
-  path: string,
-  symlink: SymlinkResolution,
-): Promise<boolean> {
-  const choice = await vscode.window.showWarningMessage(
-    buildMemoryAppendConfirmation(content, path, symlink),
-    { modal: true },
-    '追記する',
-  );
-  return choice === '追記する';
 }
 
 /** 確認ダイアログに列挙するファイル数の上限。超えた分は件数だけ示す。 */
@@ -864,8 +839,7 @@ export async function confirmRevertDiff(diff: FileDiff): Promise<boolean> {
  *
  * 確認モーダル（`confirmRevertDiff`）の前後2回、現在の内容を読み直して差分の想定と
  * 突き合わせる。1回目は確認を出す価値があるかどうかの事前チェック、2回目はTOCTOU対策
- * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。issue #144のメモリ追記と
- * 同じ考え方）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
+ * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。TOCTOU）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
  *
  * 内容だけでなく**場所と実体**も確認後にもう一度確かめる（Issue #1170）。応答待ちの間に
  * 親ディレクトリがワークスペース外へのsymlinkへ差し替わると、同じ絶対パス文字列が別の
@@ -950,7 +924,7 @@ export async function handleRevertDiff(
       }
     } else {
       // `add` の削除と `delete` の再作成はfdを持てない。内容（`add` は実体も）を操作の直前に
-      // もう一度確かめる（issue #144のメモリ追記と同じ考え方）
+      // もう一度確かめる（TOCTOU対策）
       if (diff.kind === 'add') {
         const identityNow = await revertPort.identify(resolved.absolutePath);
         if (

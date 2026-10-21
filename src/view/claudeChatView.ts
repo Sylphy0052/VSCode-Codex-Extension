@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { basename } from 'node:path';
 import * as vscode from 'vscode';
 import {
   buildWebGptDiscussionLoopPlan,
@@ -139,8 +138,7 @@ import {
 import { SkillSelectGate } from './skillSelectGate';
 import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
-import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
-import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
+import type { FileSystemPort } from '../session/ports';
 import type { AccountAutoSwitcher, LimitHit } from '../claude/accountAutoSwitch';
 import { ClaudeUsageProbe } from '../claude/usageProbe';
 import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
@@ -172,7 +170,6 @@ import {
   confirmClaudeImport,
   confirmCompact,
   confirmDebugCommand,
-  confirmMemoryAppend,
   confirmRewindFiles,
   confirmRunShellCommand,
   confirmStopBackgroundTask,
@@ -197,19 +194,7 @@ import {
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildSessionPanelTitle } from './sessionTitle';
-import {
-  appendMemoryLine,
-  buildProjectMemoryCandidates,
-  describeMemoryAppendResult,
-  MEMORY_LAST_SELECTED_PATH_KEY,
-  orderMemoryCandidates,
-  resolveUserMemoryFile,
-  routeInputMode,
-  symlinkResolutionEquals,
-  type InputModeCall,
-  type MemoryCandidate,
-  type MemoryModeMemento,
-} from '../provider/inputModes';
+import { routeInputMode, type InputModeCall } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems, stripHostOnlyState } from './stateDelta';
 import {
@@ -647,21 +632,6 @@ export class ClaudeChatViewManager
      */
     private readonly isTaskManagedThread: (sessionId: string) => boolean = () => false,
     /**
-     * メモリ追記（issue #6/#144）専用の読み取り口。ENOENT以外の例外は投げる・
-     * シンボリックリンクの実体パスを解決する、の2つを共有の `FileSystemPort` から
-     * 切り出したもの（`src/session/ports.ts` を参照）。既定はNode実装。
-     */
-    private readonly memoryFs: MemoryFileSystemPort = nodeMemoryFileSystem,
-    /**
-     * 直前に選んだメモリ追記先を覚えておく口（issue #144）。`vscode.Memento` と構造的に
-     * 一致するため `context.workspaceState` をそのまま渡せる（`extension.ts` 参照）。
-     * 既定は何も覚えない no-op（テスト等でワークスペースを想定しない呼び出しでも壊れない）。
-     */
-    private readonly memoryMemento: MemoryModeMemento = {
-      get: (_key, defaultValue) => defaultValue,
-      update: () => Promise.resolve(),
-    },
-    /**
      * `claude` プロセスの起こし方（統合テストの差し替え口。Issue #186）。セッションを
      * 作るたびに読み直すので、`activate()` が終わった後からでも差し替えられる。
      * `undefined` を返す間は `ClaudeStreamSession` の既定（実際に起動する）が使われる。
@@ -1076,7 +1046,7 @@ export class ClaudeChatViewManager
    * `attachPanel` が `panel.webview.onDidReceiveMessage` に登録しているのと同じ
    * `handleMessage` を直接呼ぶ入口をここへ用意する。本番のwebviewが送るメッセージは
    * 形が同じであれば区別なく処理されるため、実際に通る経路（承認の決定・発言の送信・
-   * 設定変更・巻き戻し・行頭 `!`/`#` の処理など）はここを通しても変わらない。呼び出し口は
+   * 設定変更・巻き戻し・行頭 `!` の処理など）はここを通しても変わらない。呼び出し口は
    * `ChatTestApi.simulateClaudeWebviewMessage`（`extension.ts`）で、
    * `AGENT_SESSIONS_INTEGRATION_TEST=1` のときだけ公開される。
    *
@@ -3936,7 +3906,7 @@ export class ClaudeChatViewManager
       // 会話の途中のターンから分岐（issue #333、design.md §14.61）。Codex画面の
       // 「ここから分岐」と同じボタンを、対象を発言自身のidへ切り替えて出す
       showTurnFork: true,
-      // 行頭の !/# の案内（issue #5/#6、design.md §14.29）。CodexのTUIに無い挙動
+      // 行頭の ! の案内（issue #5、design.md §14.29）。CodexのTUIに無い挙動
       showInputModeHints: true,
       // 他エージェントからの設定インポート（issue #200）。Codexは別のコントロールパネル
       // UI（issue #36）を持つため、二重導線を避けてClaude Code画面にだけ出す
@@ -4846,7 +4816,7 @@ export class ClaudeChatViewManager
         this.clearLimitAutoResumeSuppression(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         this.noteUserAction(entry);
-        // 行頭が !/# の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5/#6、
+        // 行頭が ! の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5、
         // design.md §14.29）。control_requestに相当する経路が無いため、Claudeへ発言として
         // 渡すとモデルのターンを消費して意図とずれる（design.mdの調査結果を参照）
         const inputMode = routeInputMode(text);
@@ -5584,16 +5554,12 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * 行頭が !/# の入力を、拡張機能側の機能として実行する（issue #5/#6、design.md §14.29）。
+   * 行頭が ! の入力を、拡張機能側の機能として実行する（issue #5、design.md §14.29）。
    * `routeInputMode` が「送るべきでない」と判定した時点で呼ばれるため、ここではCLIへは
    * 一切送らない。
    */
   private async runInputMode(entry: ClaudePanel, mode: InputModeCall): Promise<void> {
-    if (mode.kind === 'shell') {
-      await this.runShellInputMode(entry, mode.command);
-      return;
-    }
-    await this.runMemoryInputMode(entry, mode.content);
+    await this.runShellInputMode(entry, mode.command);
   }
 
   /**
@@ -5615,146 +5581,6 @@ export class ClaudeChatViewManager
       `shellCommand:${randomUUID()}`,
       `シェルコマンドを統合ターミナルへ入力しました（自動実行はしていません）: ${command}`,
     );
-  }
-
-  /**
-   * 内容をメモリ（CLAUDE.md）へ追記する（issue #6、issue #144で安全性を強化）。
-   *
-   * 追記先を選ばせ（各workspaceFolder + ユーザー、`resolveMemoryCandidates`）、内容・追記先
-   * （シンボリックリンクなら実体パスも、実体パスが特定できなければ警告も）を確認してから
-   * 書き込む。読み取りに`readStrict`（メモリ追記専用、ENOENT以外は投げる）を使うのは、
-   * 既存ファイルの読み込みに失敗したときに「無い」と誤認して追記のつもりで上書きするのを
-   * 防ぐため（issue #144の核心）。書き込み直前にシンボリックリンクの判定を取り直し、
-   * 確認ダイアログを見せた時点の結果と食い違っていれば書き込みを中止する（TOCTOU対策。
-   * 確認からユーザー応答までは不定長で、その間にリンク先が変わりうる）。
-   * 書き込み後は「どこに書いたか」を会話に1行残す（受入基準）。
-   */
-  private async runMemoryInputMode(entry: ClaudePanel, content: string): Promise<void> {
-    const candidates = await this.resolveMemoryCandidates(entry.cwd);
-    const choice = await vscode.window.showQuickPick(
-      candidates.map((c) => ({
-        label: c.label,
-        description: c.exists ? '既存' : '新規作成',
-        detail: c.path,
-        candidate: c,
-      })),
-      { title: `メモリへ追記: ${content}`, placeHolder: '追記先を選んでください' },
-    );
-    if (choice === undefined) {
-      return;
-    }
-    // 書き込み先はQuickPickが列挙した候補のパスに限る（パストラバーサルの入口を作らない。issue #144）
-    const targetPath = choice.candidate.path;
-    const confirmedSymlink = await this.resolveSymlinkTargetSafely(targetPath);
-
-    if (!(await confirmMemoryAppend(content, targetPath, confirmedSymlink))) {
-      return;
-    }
-
-    // TOCTOU対策: モーダル確認（ユーザー応答待ちで不定長）の間にリンク先が変わりうるため、
-    // 書き込み直前に取り直し、確認時に見せた結果と食い違えば中止する（issue #144）。
-    const symlinkAtWrite = await this.resolveSymlinkTargetSafely(targetPath);
-    if (!symlinkResolutionEquals(confirmedSymlink, symlinkAtWrite)) {
-      this.reportError(
-        new Error(
-          `追記先の状態が確認時から変わったため、書き込みを中止しました: ${targetPath}。もう一度操作しなおしてください。`,
-        ),
-      );
-      return;
-    }
-
-    let existing: string | undefined;
-    try {
-      existing = await this.memoryFs.readStrict(targetPath);
-    } catch (e) {
-      // ENOENT以外の理由で読めなかった。「無い」と誤認して既存の内容を消さないよう、
-      // ここで打ち切って書き込まない（issue #144の受入基準）
-      this.reportError(e);
-      return;
-    }
-    const next = appendMemoryLine(existing, content);
-    try {
-      await vscode.workspace.fs.writeFile(vscode.Uri.file(targetPath), Buffer.from(next, 'utf8'));
-    } catch (e) {
-      this.reportError(e);
-      return;
-    }
-    // 追記自体は既に成功しているため、記憶の失敗で処理全体は止めない。ただし黙って握り潰さず
-    // 報告する（`src/orchestrator/runStore.ts` は同型の`update`を常に`await`しており、
-    // fire-and-forgetのまま放置しない流儀に揃える。issue #144レビュー指摘）。
-    try {
-      await this.memoryMemento.update(MEMORY_LAST_SELECTED_PATH_KEY, targetPath);
-    } catch (e) {
-      this.reportError(e);
-    }
-    entry.session.noteLocalEvent(
-      `memoryAppend:${randomUUID()}`,
-      describeMemoryAppendResult(targetPath, symlinkAtWrite),
-    );
-  }
-
-  /**
-   * `this.memoryFs.resolveSymlinkTarget` を安全に呼ぶ。
-   *
-   * `MemoryFileSystemPort.resolveSymlinkTarget` はJSDoc上「例外を投げない」契約で、既定実装
-   * （`nodeMemoryFileSystem`）もそのとおりだが、`memoryFs` はテストで差し替え可能な口のため、
-   * 契約違反があっても追記処理全体を落とさず、実体パスが分からない扱いへ倒す
-   * （防御的プログラミング。issue #144レビュー指摘）。
-   */
-  private async resolveSymlinkTargetSafely(filePath: string): Promise<SymlinkResolution> {
-    try {
-      return await this.memoryFs.resolveSymlinkTarget(filePath);
-    } catch (e) {
-      this.reportError(e);
-      return { kind: 'unresolved' };
-    }
-  }
-
-  /**
-   * メモリ追記先の候補を列挙する（issue #144）。
-   *
-   * プロジェクト側は各workspaceFolderごとに1件出す（マルチルートワークスペースで
-   * どのフォルダのCLAUDE.mdか分からない問題への対処、受入基準）。加えて、この画面の
-   * 実際の作業ディレクトリ（`fallbackCwd`。タスクのworktree等でworkspaceFolderと
-   * 一致しないことがある）がworkspaceFolderに含まれていなければ、それも候補へ足す
-   * （従来どおりworktree自身のCLAUDE.mdへ追記できるようにするため）。
-   * 存在確認は共有の `FileSystemPort.readTextFile`（読めなければ無い扱いでよい。
-   * ここではラベル表示にしか使わず、書き込み判断には使わない）で行う。
-   */
-  private async resolveMemoryCandidates(fallbackCwd: string): Promise<MemoryCandidate[]> {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    const roots = folders.map((f) => ({ name: f.name, cwd: f.uri.fsPath }));
-    if (!roots.some((r) => r.cwd === fallbackCwd)) {
-      roots.push({ name: basename(fallbackCwd), cwd: fallbackCwd });
-    }
-
-    const projectInputs = await Promise.all(
-      roots.map(async (r) => {
-        const rootExists = (await this.fs.readTextFile(`${r.cwd}/CLAUDE.md`)) !== undefined;
-        const dotClaudeExists =
-          (await this.fs.readTextFile(`${r.cwd}/.claude/CLAUDE.md`)) !== undefined;
-        return {
-          name: r.name,
-          cwd: r.cwd,
-          rootClaudeMdExists: rootExists,
-          dotClaudeMdExists: dotClaudeExists,
-        };
-      }),
-    );
-    const projectCandidates = buildProjectMemoryCandidates(projectInputs);
-
-    const userPath = resolveUserMemoryFile(this.claudeHome);
-    const userCandidate: MemoryCandidate = {
-      label: 'ユーザー',
-      path: userPath,
-      exists: (await this.fs.readTextFile(userPath)) !== undefined,
-    };
-
-    const lastSelected = this.memoryMemento.get<string | undefined>(
-      MEMORY_LAST_SELECTED_PATH_KEY,
-      undefined,
-    );
-    return orderMemoryCandidates([...projectCandidates, userCandidate], lastSelected);
   }
 
   /**
