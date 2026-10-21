@@ -22,6 +22,15 @@ function readName(value: unknown): string | undefined {
   return typeof value === 'string' && value.length <= MAX_NAME_LENGTH ? value : undefined;
 }
 
+/** 旧globalStateの名前。上限を超える名前も捨てずに切り詰めて読む（移行で失わないため）。 */
+function readLegacyName(all: unknown, sessionId: string): string | undefined {
+  if (typeof all !== 'object' || all === null || !Object.hasOwn(all, sessionId)) {
+    return undefined;
+  }
+  const value: unknown = (all as Record<string, unknown>)[sessionId];
+  return typeof value === 'string' ? value.slice(0, MAX_NAME_LENGTH) : undefined;
+}
+
 /**
  * 人が付け直したClaude Codeセッション名の保存先（issue #199、design.md §14.35）。
  *
@@ -40,6 +49,7 @@ function readName(value: unknown): string | undefined {
  */
 export class ClaudeSessionNameStore {
   private readonly file: KeyedStateFile<string>;
+  private readonly legacy: MementoLike | undefined;
 
   constructor(
     filePath?: string,
@@ -48,6 +58,7 @@ export class ClaudeSessionNameStore {
     onMigrationError: (error: unknown) => void = () => undefined,
   ) {
     this.file = new KeyedStateFile(filePath, readName, CLAUDE_SESSION_NAMES_MAX_ENTRIES);
+    this.legacy = filePath === undefined ? undefined : legacy;
     if (filePath !== undefined && legacy !== undefined) {
       void this.migrateLegacy(legacy).catch(onMigrationError);
     }
@@ -55,7 +66,10 @@ export class ClaudeSessionNameStore {
 
   /** 人が付けた名前を読む。付けていなければ `undefined`（呼び出し側はtranscript由来へフォールバックする）。 */
   get(sessionId: string): string | undefined {
-    const name = this.file.get(sessionId);
+    // ファイルに無ければ旧キーを見る（移行が済むまでの間と、移行が拒否されたとき）
+    const name =
+      this.file.get(sessionId) ??
+      readLegacyName(this.legacy?.get<unknown>(CLAUDE_SESSION_NAMES_KEY, undefined), sessionId);
     return name === undefined || name.trim() === '' ? undefined : name;
   }
 
@@ -65,16 +79,16 @@ export class ClaudeSessionNameStore {
   }
 
   private async migrateLegacy(legacy: MementoLike): Promise<void> {
-    const readLegacy = (): Record<string, unknown> | undefined =>
-      legacy.get<Record<string, unknown> | undefined>(CLAUDE_SESSION_NAMES_KEY, undefined);
+    const readLegacy = (): unknown => legacy.get<unknown>(CLAUDE_SESSION_NAMES_KEY, undefined);
     if (readLegacy() === undefined) {
       return;
     }
     // lockを取ってから読み直す。他ウィンドウが先に移行を済ませていれば空になる
     await this.file.importMissing(() => {
+      const all = readLegacy();
       const items: [string, string][] = [];
-      for (const [id, value] of Object.entries(readLegacy() ?? {})) {
-        const name = readName(value);
+      for (const id of typeof all === 'object' && all !== null ? Object.keys(all) : []) {
+        const name = readLegacyName(all, id);
         if (name !== undefined) {
           items.push([id, name]);
         }

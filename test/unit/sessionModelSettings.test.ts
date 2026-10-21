@@ -87,4 +87,25 @@ describe('SessionModelSettingsStore（issue #844）', () => {
 
     expect(store.get('codex', 'deleted')).toBeUndefined();
   });
+
+  it('上限を超えて移行が拒否されても、旧キーから読み続け、旧キーは残す', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'model-settings-'));
+    const initial: Record<string, unknown> = {};
+    for (let i = 0; i < 10_001; i += 1) {
+      initial[`agent.sessionModelSettings.claude.s${i}`] = { model: 'sonnet', effort: 'low' };
+    }
+    const legacy = fakeMemento(initial);
+    const errors: unknown[] = [];
+    const store = new SessionModelSettingsStore(
+      join(dir, 'settings.json'),
+      Object.assign(legacy, { keys: () => Object.keys(initial) }),
+      (error) => errors.push(error),
+    );
+
+    await vi.waitFor(() => {
+      expect(errors).toHaveLength(1);
+    });
+    expect(store.get('claude', 's0')).toEqual({ model: 'sonnet', effort: 'low' });
+    expect(legacy.get('agent.sessionModelSettings.claude.s0', undefined)).toBeDefined();
+  });
 });

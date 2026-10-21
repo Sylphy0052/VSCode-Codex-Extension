@@ -138,4 +138,41 @@ describe('KeyedStateFile（Issue #2006）', () => {
     ).rejects.toThrow();
     expect(existsSync(path)).toBe(false);
   });
+
+  it('落ちたウィンドウが残した古いlockは回収して書ける', async () => {
+    const path = tmpPath();
+    writeFileSync(`${path}.lock`, 'dead-window', 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${path}.lock`, old, old);
+
+    await new KeyedStateFile(path, parseString, 10).set('a', '1');
+
+    expect(new KeyedStateFile(path, parseString, 10).get('a')).toBe('1');
+    expect(existsSync(`${path}.lock`)).toBe(false);
+  });
+
+  it('移行済みの印があれば、旧キーを取り込み直さない', async () => {
+    const path = tmpPath();
+    const file = new KeyedStateFile(path, parseString, 10);
+    await file.importMissing(() => [['a', '1']]);
+    await file.delete('a');
+
+    await new KeyedStateFile(path, parseString, 10).importMissing(() => [['a', 'stale']]);
+
+    expect(new KeyedStateFile(path, parseString, 10).get('a')).toBeUndefined();
+  });
+
+  it('同じキーの書込みが続けて失敗したら、最後に保存できた値へ戻す', async () => {
+    const path = tmpPath();
+    const file = new KeyedStateFile(path, parseString, 10);
+    await file.set('a', 'saved');
+    writeFileSync(path, JSON.stringify({ version: 99, entries: {} }), 'utf8');
+
+    const first = file.set('a', 'x');
+    const second = file.set('a', 'y');
+    await expect(first).rejects.toThrow();
+    await expect(second).rejects.toThrow();
+
+    expect(file.get('a')).toBe('saved');
+  });
 });

@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * `globalState`の代わりに`globalStorageUri`配下のファイルへ持つ、キー付きの小さな状態（Issue #2006）。
@@ -19,8 +20,11 @@ import { dirname } from 'node:path';
  */
 const SCHEMA_VERSION = 1;
 const RELOAD_CHECK_INTERVAL_MS = 1_000;
-/** lockを待つ上限と間隔。書込み1回は数msなので、待ち切れないのはlockが残ったときだけ。 */
-const LOCK_WAIT_MS = 3_000;
+/**
+ * lockを待つ上限と間隔。書込み1回は数msなので、待ち切れないのはlockが残ったときだけ。
+ * 上限は`LOCK_STALE_MS`より長くし、落ちたウィンドウの残骸を回収できるまで待つ。
+ */
+const LOCK_WAIT_MS = 15_000;
 const LOCK_RETRY_MS = 20;
 /** この時間より古いlockfileは、書込み中に落ちたウィンドウの残骸とみなして消す。 */
 const LOCK_STALE_MS = 10_000;
@@ -34,12 +38,19 @@ interface StoredEntry<T> {
 interface PersistedFile<T> {
   version: number;
   entries: Record<string, StoredEntry<T>>;
+  /** 旧globalStateからの移行を済ませたか。済んでいれば、他ウィンドウに残る旧キーを取り込み直さない。 */
+  migrated?: boolean;
+}
+
+/** 書込み時にディスクから読み直した内容。`mutate`はこれを書き換える。 */
+interface DiskState<T> {
+  entries: Map<string, StoredEntry<T>>;
+  migrated: boolean;
 }
 
 type ParseValue<T> = (value: unknown) => T | undefined;
 
-type ParsedFile<T> =
-  { kind: 'ok'; entries: Map<string, StoredEntry<T>> } | { kind: 'corrupt' } | { kind: 'newer' };
+type ParsedFile<T> = ({ kind: 'ok' } & DiskState<T>) | { kind: 'corrupt' } | { kind: 'newer' };
 
 function parseFile<T>(raw: string, parseValue: ParseValue<T>): ParsedFile<T> {
   let parsed: unknown;
@@ -74,7 +85,7 @@ function parseFile<T>(raw: string, parseValue: ParseValue<T>): ParsedFile<T> {
       entries.set(key, { v: value, at: typeof at === 'number' && Number.isFinite(at) ? at : 0 });
     }
   }
-  return { kind: 'ok', entries };
+  return { kind: 'ok', entries, migrated: file.migrated === true };
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -95,13 +106,24 @@ function trimOldest<T>(entries: Map<string, StoredEntry<T>>, maxEntries: number)
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** 他ウィンドウ（別プロセス）と排他するlockfile。`wx`で作れた側だけが書く。 */
+/**
+ * 他ウィンドウ（別プロセス）と排他するlockfile。`wx`で作れた側だけが書く。
+ *
+ * lockには所有者のトークンを書き、外すときは自分のトークンのときだけ消す（書込みが
+ * `LOCK_STALE_MS`を超えて止まり、他者に回収・取り直された後で、相手のlockを消さない）。
+ * 残骸の回収は、消す直前にinodeとmtimeが変わっていないことを確かめ直す。
+ */
 async function withFileLock<R>(lockPath: string, body: () => Promise<R>): Promise<R> {
+  const token = `${process.pid}-${randomUUID()}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
       const handle = await open(lockPath, 'wx');
-      await handle.close();
+      try {
+        await handle.writeFile(token, 'utf8');
+      } finally {
+        await handle.close();
+      }
       break;
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') {
@@ -109,8 +131,12 @@ async function withFileLock<R>(lockPath: string, body: () => Promise<R>): Promis
       }
     }
     try {
-      if (Date.now() - (await stat(lockPath)).mtimeMs > LOCK_STALE_MS) {
-        await rm(lockPath, { force: true });
+      const seen = await stat(lockPath);
+      if (Date.now() - seen.mtimeMs > LOCK_STALE_MS) {
+        const again = await stat(lockPath);
+        if (again.ino === seen.ino && again.mtimeMs === seen.mtimeMs) {
+          await rm(lockPath, { force: true });
+        }
         continue;
       }
     } catch (error) {
@@ -127,7 +153,30 @@ async function withFileLock<R>(lockPath: string, body: () => Promise<R>): Promis
   try {
     return await body();
   } finally {
-    await rm(lockPath, { force: true });
+    try {
+      if ((await readFile(lockPath, 'utf8')) === token) {
+        await rm(lockPath, { force: true });
+      }
+    } catch {
+      // 既に回収されていれば何もしない
+    }
+  }
+}
+
+/** 落ちたウィンドウが残したtmpと、古い退避ファイルを片付ける。最新の退避1つは調査用に残す。 */
+async function removeLeftovers(filePath: string): Promise<void> {
+  const dir = dirname(filePath);
+  const base = basename(filePath);
+  const names = await readdir(dir);
+  const corrupt = names.filter((name) => name.startsWith(`${base}.corrupt-`)).sort();
+  for (const name of corrupt.slice(0, -1)) {
+    await rm(join(dir, name), { force: true });
+  }
+  for (const name of names.filter((n) => n.startsWith(`${base}.tmp-`))) {
+    const path = join(dir, name);
+    if (Date.now() - (await stat(path)).mtimeMs > LOCK_STALE_MS) {
+      await rm(path, { force: true });
+    }
   }
 }
 
@@ -135,8 +184,15 @@ let tmpCounter = 0;
 
 export class KeyedStateFile<T> {
   private entries = new Map<string, StoredEntry<T>>();
-  /** まだファイルへ書き終えていない自分の変更。`null`は削除。再読込で巻き戻さないために重ねる。 */
-  private readonly pending = new Map<string, StoredEntry<T> | null>();
+  /**
+   * まだファイルへ書き終えていない自分の変更。`entry`が`null`なら削除。再読込で巻き戻さないために
+   * 重ねる。`base`は最後に保存できた値で、書込みに失敗したときはここへ戻す。
+   */
+  private readonly pending = new Map<
+    string,
+    { entry: StoredEntry<T> | null; base: StoredEntry<T> | undefined }
+  >();
+  private leftoversRemoved = false;
   private writeChain: Promise<void> = Promise.resolve();
   private mtimeMs = -1;
   private checkedAt = 0;
@@ -161,66 +217,71 @@ export class KeyedStateFile<T> {
 
   async set(key: string, value: T): Promise<void> {
     const stored: StoredEntry<T> = { v: value, at: Date.now() };
-    const previous = this.entries.get(key);
-    this.pending.set(key, stored);
+    const marker = { entry: stored, base: this.baseOf(key) };
+    this.pending.set(key, marker);
     this.entries.set(key, stored);
-    await this.runPending(key, stored, previous, (disk) => {
-      disk.set(key, stored);
+    await this.runPending(key, marker, (disk) => {
+      disk.entries.set(key, stored);
     });
   }
 
   async delete(key: string): Promise<void> {
-    const previous = this.entries.get(key);
-    this.pending.set(key, null);
+    const marker = { entry: null, base: this.baseOf(key) };
+    this.pending.set(key, marker);
     this.entries.delete(key);
-    await this.runPending(key, null, previous, (disk) => {
-      disk.delete(key);
+    await this.runPending(key, marker, (disk) => {
+      disk.entries.delete(key);
     });
   }
 
   /**
    * ファイルに無いキーだけ足す（旧globalStateからの移行用）。
    *
-   * `collect`はlockを取ってからもう一度呼ぶ（他ウィンドウの移行が旧キーを消した後なら、
-   * 空を返せる。消されたセッションを復活させない）。足した結果が`maxEntries`を超えるときは
-   * 書かずに拒否する（呼び出し側は旧キーを消さない）。書込みが済むまでの間も読めるよう、
-   * メモリ上には先に足しておく。
+   * ファイルに移行済みの印があれば何もしない（他ウィンドウに同期前の旧キーが残っていても、
+   * 消されたセッションを復活させない）。`collect`はlockを取ってから呼ぶ。足した結果が
+   * `maxEntries`を超えるときは書かずに拒否する（呼び出し側は旧キーを消さず、旧キーから読み続ける）。
    */
   async importMissing(collect: () => Iterable<readonly [string, T]>): Promise<void> {
-    for (const [key, value] of collect()) {
-      if (!this.entries.has(key)) {
-        this.entries.set(key, { v: value, at: 0 });
-      }
-    }
     await this.enqueue((disk) => {
+      if (disk.migrated) {
+        return;
+      }
       for (const [key, value] of collect()) {
-        if (!disk.has(key)) {
-          disk.set(key, { v: value, at: 0 });
+        if (!disk.entries.has(key)) {
+          disk.entries.set(key, { v: value, at: 0 });
         }
       }
-      if (disk.size > this.maxEntries) {
-        throw new Error(`移行すると上限${this.maxEntries}件を超える: ${disk.size}件`);
+      if (disk.entries.size > this.maxEntries) {
+        throw new Error(
+          `移行すると上限${this.maxEntries}件を超えるため移行しない（${disk.entries.size}件）。旧保存先から読み続ける`,
+        );
       }
+      disk.migrated = true;
     });
+  }
+
+  /** 最後に保存できた値。未保存の変更が積まれていれば、その一番前の時点の値。 */
+  private baseOf(key: string): StoredEntry<T> | undefined {
+    const queued = this.pending.get(key);
+    return queued === undefined ? this.entries.get(key) : queued.base;
   }
 
   private async runPending(
     key: string,
-    marker: StoredEntry<T> | null,
-    previous: StoredEntry<T> | undefined,
-    mutate: (disk: Map<string, StoredEntry<T>>) => void,
+    marker: { entry: StoredEntry<T> | null; base: StoredEntry<T> | undefined },
+    mutate: (disk: DiskState<T>) => void,
   ): Promise<void> {
     try {
       await this.enqueue(mutate);
     } catch (error) {
       // 失敗した変更を保存済みのように見せない。後から同じキーへ別の変更が
-      // 積まれていなければ、変更前の値へ戻してからディスクの内容を取り込む
+      // 積まれていなければ、最後に保存できた値へ戻してからディスクの内容を取り込む
       if (this.pending.get(key) === marker) {
         this.pending.delete(key);
-        if (previous === undefined) {
+        if (marker.base === undefined) {
           this.entries.delete(key);
         } else {
-          this.entries.set(key, previous);
+          this.entries.set(key, marker.base);
         }
       }
       this.reload();
@@ -273,7 +334,7 @@ export class KeyedStateFile<T> {
   }
 
   private applyPending(target: Map<string, StoredEntry<T>>): void {
-    for (const [key, entry] of this.pending) {
+    for (const [key, { entry }] of this.pending) {
       if (entry === null) {
         target.delete(key);
       } else {
@@ -283,13 +344,13 @@ export class KeyedStateFile<T> {
   }
 
   /** ディスクの最新を読む。無ければ空。読めない・版が新しいときは書かせないよう投げる。 */
-  private async readDisk(filePath: string): Promise<Map<string, StoredEntry<T>>> {
+  private async readDisk(filePath: string): Promise<DiskState<T>> {
     let raw: string;
     try {
       raw = await readFile(filePath, 'utf8');
     } catch (error) {
       if (errorCode(error) === 'ENOENT') {
-        return new Map();
+        return { entries: new Map(), migrated: false };
       }
       throw error;
     }
@@ -299,12 +360,12 @@ export class KeyedStateFile<T> {
     }
     if (parsed.kind === 'corrupt') {
       await rename(filePath, `${filePath}.corrupt-${Date.now()}`);
-      return new Map();
+      return { entries: new Map(), migrated: false };
     }
-    return parsed.entries;
+    return { entries: parsed.entries, migrated: parsed.migrated };
   }
 
-  private enqueue(mutate: (disk: Map<string, StoredEntry<T>>) => void): Promise<void> {
+  private enqueue(mutate: (disk: DiskState<T>) => void): Promise<void> {
     const filePath = this.filePath;
     if (filePath === undefined) {
       return Promise.resolve();
@@ -315,12 +376,17 @@ export class KeyedStateFile<T> {
       .then(async () => {
         await mkdir(dirname(filePath), { recursive: true });
         await withFileLock(`${filePath}.lock`, async () => {
+          if (!this.leftoversRemoved) {
+            this.leftoversRemoved = true;
+            await removeLeftovers(filePath).catch(() => undefined);
+          }
           const disk = await this.readDisk(filePath);
           mutate(disk);
-          trimOldest(disk, this.maxEntries);
+          trimOldest(disk.entries, this.maxEntries);
           const payload: PersistedFile<T> = {
             version: SCHEMA_VERSION,
-            entries: Object.fromEntries(disk),
+            entries: Object.fromEntries(disk.entries),
+            ...(disk.migrated ? { migrated: true } : {}),
           };
           tmpCounter += 1;
           const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}-${tmpCounter}`;
@@ -333,7 +399,7 @@ export class KeyedStateFile<T> {
           }
           // lockを持っている間に取るので、他ウィンドウの書込みとmtimeを取り違えない
           this.mtimeMs = (await stat(filePath)).mtimeMs;
-          this.entries = disk;
+          this.entries = disk.entries;
         });
         this.applyPending(this.entries);
         this.checkedAt = Date.now();

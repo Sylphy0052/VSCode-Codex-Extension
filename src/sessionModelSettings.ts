@@ -21,6 +21,10 @@ export interface SessionModelSettings {
   effort: string;
 }
 
+function legacyKey(provider: ProviderId, sessionId: string): string {
+  return `${LEGACY_KEY_PREFIX}.${provider}.${sessionId}`;
+}
+
 function storageId(provider: ProviderId, sessionId: string): string {
   return `${provider}.${sessionId}`;
 }
@@ -50,6 +54,7 @@ export type LegacySettingsMemento = MementoLike & { keys?(): readonly string[] }
  */
 export class SessionModelSettingsStore {
   private readonly file: KeyedStateFile<SessionModelSettings>;
+  private readonly legacy: LegacySettingsMemento | undefined;
 
   constructor(
     filePath?: string,
@@ -58,13 +63,17 @@ export class SessionModelSettingsStore {
     onMigrationError: (error: unknown) => void = () => undefined,
   ) {
     this.file = new KeyedStateFile(filePath, readSettings, SESSION_MODEL_SETTINGS_MAX_ENTRIES);
+    this.legacy = filePath === undefined ? undefined : legacy;
     if (filePath !== undefined && legacy !== undefined) {
       void this.migrateLegacy(legacy).catch(onMigrationError);
     }
   }
 
   get(provider: ProviderId, sessionId: string): SessionModelSettings | undefined {
-    const stored = this.file.get(storageId(provider, sessionId));
+    // ファイルに無ければ旧キーを見る（移行が済むまでの間と、移行が拒否されたとき）
+    const stored =
+      this.file.get(storageId(provider, sessionId)) ??
+      readSettings(this.legacy?.get<unknown>(legacyKey(provider, sessionId), undefined));
     return stored === undefined ? undefined : { ...stored };
   }
 
@@ -79,6 +88,10 @@ export class SessionModelSettingsStore {
   /** セッション本体を削除したときに、対応する保存値も破棄する。 */
   async delete(provider: ProviderId, sessionId: string): Promise<void> {
     await this.file.delete(storageId(provider, sessionId));
+    // 旧キーが残っていると、getの読み替えで消したはずの値が戻る
+    if (this.legacy?.get<unknown>(legacyKey(provider, sessionId), undefined) !== undefined) {
+      await this.legacy.update(legacyKey(provider, sessionId), undefined);
+    }
   }
 
   /** 旧キーをファイルへ移し、書けたら旧キーを消す。旧キーが残る限り起動のたびに呼ばれる。 */

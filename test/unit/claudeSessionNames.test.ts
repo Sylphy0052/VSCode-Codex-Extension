@@ -70,4 +70,17 @@ describe('ClaudeSessionNameStore（issue #199）', () => {
     expect(new ClaudeSessionNameStore(path).get('old')).toBe('旧名');
     expect(store.get('bad')).toBeUndefined();
   });
+
+  it('1000文字を超える旧名は捨てずに切り詰めて移す', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'claude-names-')), 'names.json');
+    const legacy = fakeMemento();
+    await legacy.update('claude.sessionNames', { long: 'あ'.repeat(1_500) });
+    const store = new ClaudeSessionNameStore(path, legacy);
+
+    await vi.waitFor(() => {
+      expect(legacy.get('claude.sessionNames', undefined)).toBeUndefined();
+    });
+    expect(new ClaudeSessionNameStore(path).get('long')).toBe('あ'.repeat(1_000));
+    expect(store.get('long')).toHaveLength(1_000);
+  });
 });
