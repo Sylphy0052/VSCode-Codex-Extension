@@ -1577,7 +1577,9 @@ ${chatStyles()}
 </head>
 <body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)} ${skinBodyClass(options.skin ?? DEFAULT_CHAT_SKIN)}${options.inputLock === true ? ' inputLocked' : ''}">
   <div id="logWrap">
-    <div id="log"></div>
+    <!-- tabindex="-1": 本文を選んだときにfocusを#logへ置く。bodyのままだとVS Codeが
+         Ctrl+Cの前に最後にfocusした入力欄へfocusを戻してしまう（Issue #2012） -->
+    <div id="log" tabindex="-1"></div>
     <div id="deferredRestore" hidden>
       <span id="deferredRestoreMessage"></span>
       <button id="loadDeferredRestore" type="button">会話を読み込む</button>

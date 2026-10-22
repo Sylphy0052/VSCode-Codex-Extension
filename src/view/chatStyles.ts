@@ -88,6 +88,8 @@ ${completionEvidenceStyles()}
     align-items: flex-start;
   }
   #log { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  /* クリックで受けるfocusは選択を保つためだけのもの。枠は出さない（Issue #2012） */
+  #log:focus { outline: none; }
   #conversationNavigation {
     position: absolute;
     right: 20px;

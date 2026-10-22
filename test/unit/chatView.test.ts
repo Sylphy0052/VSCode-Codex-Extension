@@ -801,7 +801,7 @@ describe('会話の一番下へジャンプするボタン', () => {
     expect(wrapMatch).not.toBeNull();
     const wrapHtml = wrapMatch![1];
 
-    expect(wrapHtml).toContain('<div id="log"></div>');
+    expect(wrapHtml).toContain('<div id="log" tabindex="-1"></div>');
     expect(wrapHtml).toContain('<div id="conversationNavigation">');
     for (const { id, label } of [
       { id: 'previousUserMessage', label: '前の自分の発言へ移動' },
