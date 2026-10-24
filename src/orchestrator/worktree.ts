@@ -51,6 +51,13 @@ export interface GitCommandOptions {
    * （gitのhookから拡張機能を起動した場合などに実際に起こる）。
    */
   env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * このコマンドだけのタイムアウト（ミリ秒）。省略時は {@link GIT_TIMEOUT_MS}。
+   *
+   * `git worktree add` のように作業ツリー全体をcheckoutするコマンドは、大きなrepoで
+   * 30秒を超える（実測74秒、`checkout.workers=16` でも31.7秒）ため、呼出側で延ばす。
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -83,6 +90,12 @@ function mergeGitEnv(overrides: Readonly<Record<string, string | undefined>>): N
 const GIT_TIMEOUT_MS = 30_000;
 
 /**
+ * `git worktree add` のタイムアウト。checkoutの時間はrepoの大きさと同時に作る件数で延びる
+ * （1件で74秒の実測。3件同時なら更に延びる）ため、余裕を持たせて5分にする。
+ */
+const WORKTREE_ADD_TIMEOUT_MS = 5 * 60_000;
+
+/**
  * `execFile` の既定 `maxBuffer` は1MBで、超えるとバッファ超過エラーが `gitError` として
  * 返るだけになる（実害は薄いが原因が分かりにくい）。`git status --porcelain` 等の出力が
  * 大きくなる場合に備え、明示的に広げておく（セキュリティ監査指摘・info）。
@@ -103,7 +116,7 @@ export const nodeGitCommandRunner: GitCommandRunner = {
         [...args],
         {
           cwd,
-          timeout: GIT_TIMEOUT_MS,
+          timeout: options?.timeoutMs ?? GIT_TIMEOUT_MS,
           maxBuffer: GIT_MAX_BUFFER_BYTES,
           ...(options?.env === undefined ? {} : { env: mergeGitEnv(options.env) }),
         },
@@ -671,6 +684,7 @@ async function createWorktree(
   const add = await git.run(
     ['worktree', 'add', '-b', branch, cwd, request.headCommit],
     request.repoRoot,
+    { timeoutMs: WORKTREE_ADD_TIMEOUT_MS },
   );
   if (add.code !== 0) {
     return {
