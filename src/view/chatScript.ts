@@ -2794,6 +2794,21 @@ export function chatScript(
     if (usageText !== '') bits.push(usageText);
     if (bits.length > 0) status.appendChild(document.createTextNode(bits.join(' ・ ')));
 
+    // CLIが通知した、実際に使っているmodel/effort（Issue #2016）。選択欄は設定値なので、
+    // 実測値はここに並べる。設定値と違えば警告色にする
+    const observed = settings.observed;
+    if (observed && (observed.model || observed.effort)) {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      const observedSpan = document.createElement('span');
+      if (observed.mismatch) observedSpan.className = 'warn';
+      observedSpan.textContent =
+        '実測 ' +
+        [observed.model, observed.effort].filter(Boolean).join(' / ') +
+        (observed.mismatch ? '（設定と違います）' : '');
+      observedSpan.title = 'CLIが通知した、実際に使っているmodel/effort';
+      status.appendChild(observedSpan);
+    }
+
     const context = formatContext(state.context);
     if (context) {
       if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));

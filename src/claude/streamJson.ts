@@ -113,9 +113,16 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
     return state;
   }
   const sessionId = str(event['session_id']);
+  // `model`はCLIが別名を解決した完全なID（Issue #2016）。`effort`は`--effort`を渡しても
+  // nullのため読まず、前に取れた値を残す
+  const initModel = str(event['model']);
   return {
     ...state,
     threadId: sessionId === '' ? state.threadId : sessionId,
+    observedModel:
+      initModel === ''
+        ? state.observedModel
+        : { model: initModel, effort: state.observedModel?.effort, source: 'systemInit' },
     // initはターン開始時に届く。resultで解除する
     busy: true,
     turnFailed: false,
@@ -416,8 +423,26 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 
   // 断片の通知は message.id を持たない。ここで覚えて完成メッセージと同じ項目に積む
   if (type === 'message_start') {
-    const id = str(rec(inner['message'])?.['id']);
-    return { ...state, streamingMessageId: id === '' ? undefined : id };
+    const message = rec(inner['message']);
+    const id = str(message?.['id']);
+    // `message.model`はAPIが応答したmodel（Issue #2016）。出力の前に届く。subagentの
+    // 応答と、CLIが合成したメッセージ（`<synthetic>`）は会話のmodelではないので使わない
+    const model = str(message?.['model']);
+    const isMainModel =
+      model !== '' && model !== '<synthetic>' && str(event['parent_tool_use_id']) === '';
+    return {
+      ...state,
+      streamingMessageId: id === '' ? undefined : id,
+      ...(isMainModel
+        ? {
+            observedModel: {
+              model,
+              effort: state.observedModel?.effort,
+              source: 'messageStart' as const,
+            },
+          }
+        : {}),
+    };
   }
 
   if (type === 'content_block_start') {
