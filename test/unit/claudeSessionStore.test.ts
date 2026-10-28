@@ -6,20 +6,6 @@ import { claudePaths } from '../../src/claude/cliLocator';
 import { ClaudeSessionNameStore } from '../../src/claude/sessionNames';
 import { ClaudeSessionStore } from '../../src/claude/sessionStore';
 import type { FileSystemPort } from '../../src/session/ports';
-import type { MementoLike } from '../../src/util/memento';
-
-/** `vscode.Memento` 互換のフェイク。実体はMapだけの単純な実装で足りる。 */
-function fakeMemento(): MementoLike {
-  const data = new Map<string, unknown>();
-  return {
-    get: <T>(key: string, defaultValue: T): T =>
-      data.has(key) ? (data.get(key) as T) : defaultValue,
-    update: (key: string, value: unknown): Promise<void> => {
-      data.set(key, value);
-      return Promise.resolve();
-    },
-  };
-}
 
 const HOME = '/home/u/.claude';
 const paths = claudePaths(HOME);
