@@ -150,6 +150,8 @@ export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
   /** sandboxの外へ回らない形のネットワークコマンドを止めるhookを登録するか（Issue #1668）。 */
   private sandboxBashGuard = false;
+  /** 直近の起動でargvへ載せたmodel/effort（Issue #2016）。 */
+  private launchedModel: { model: string; effort: string } | undefined;
   private buffer = '';
   private state: ChatState = initialClaudeState;
   private nextControlId = 1;
@@ -431,6 +433,14 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 直近の起動でargvの`--model` / `--effort`へ載せた値（Issue #2016）。載せなかった項目は
+   * 空文字。まだ起動していなければ`undefined`。
+   */
+  getLaunchedModel(): { model: string; effort: string } | undefined {
+    return this.launchedModel;
+  }
+
+  /**
    * CLIを起動し、stdout・終了の受け口を配線する。会話の状態には触れない（`start()`と、
    * 休止からの再開（Issue #1808）の`resumeProcess()`で共用する）。
    */
@@ -449,6 +459,8 @@ export class ClaudeStreamSession {
     for (const w of warnings) {
       this.log.warn(w);
     }
+    // 起動前の検証（Issue #2016）のため、実際にargvへ載せた値を覚えておく
+    this.launchedModel = { model: argValue(args, '--model'), effort: argValue(args, '--effort') };
 
     const proc = this.spawnProcess(this.claudePath(), args, {
       cwd: options.cwd,
@@ -2206,4 +2218,10 @@ interface Outgoing {
   subject: string;
   /** 成功したとき画面に残す一言。空なら残さない（別の通知で判るとき）。 */
   note: string;
+}
+
+/** argvの`flag`の直後の値。無ければ空文字。 */
+function argValue(args: readonly string[], flag: string): string {
+  const index = args.indexOf(flag);
+  return index >= 0 ? (args[index + 1] ?? '') : '';
 }

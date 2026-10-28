@@ -181,6 +181,16 @@ import {
   type HandoffTrigger,
 } from './handoff';
 import {
+  describeModelMismatch,
+  findLaunchMismatch,
+  findModelMismatch,
+  observedModelView,
+  settleHandoffDestination,
+  type HandoffDestination,
+  type ObservedModelView,
+} from './handoffModelVerify';
+import { readRolloutModel } from '../session/observedModelLog';
+import {
   buildHandoffFactsSection,
   extractCreatedReferences,
   newHandoffId,
@@ -792,13 +802,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return doneCheck === undefined ? plan : { ...plan, doneCheck };
   }
 
-  private settingsSnapshotFor(entry: ChatPanel): ReturnType<SettingsProvider['snapshot']> {
+  private settingsSnapshotFor(
+    entry: ChatPanel,
+  ): ReturnType<SettingsProvider['snapshot']> & { observed: ObservedModelView | undefined } {
     const snapshot = this.settings.snapshot();
     return {
       ...snapshot,
       model: entry.modelSettings.model,
       reasoningEffort: entry.modelSettings.effort,
       efforts: effortsFor(snapshot.models, entry.modelSettings.model),
+      // CLIが通知した実測値（Issue #2016）。選択欄は設定値のまま、入力欄の下に並べて出す
+      observed: observedModelView(entry.modelSettings, entry.session.getState().observedModel),
     };
   }
 
@@ -1304,22 +1318,28 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 引き継ぎ元パネルと同じ列へ開く。`panel.viewColumn`は非表示のとき
     // `undefined`になるため、`lastKnownViewColumn`（最後に見えていた列）へ落ちる
     const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
-    // 開けなかったら1回だけやり直す（Issue #1750）。`openNew`は失敗時に作りかけのタブを片付ける
-    let newThreadId: string | undefined;
-    let newEntry: ChatPanel | undefined;
-    for (let attempt = 1; attempt <= 2 && newEntry === undefined; attempt++) {
-      newThreadId = await this.openNew(
-        entry.cwd,
-        entry.taskConfig,
-        choice.settings,
-        preserveFocus,
-        targetViewColumn,
-      );
-      newEntry = newThreadId === undefined ? undefined : this.panels.get(newThreadId);
-      if (newThreadId !== undefined && newEntry === undefined) {
-        this.log.warn(`引き継ぎ先セッション(${newThreadId})がパネル一覧に見つかりませんでした`);
+    // 開けなかったら1回だけやり直す（Issue #1750）。`openNew`は失敗時に作りかけのタブを片付ける。
+    // model/effortがズレたときの作り直し（Issue #2016）でも同じ手順で開く
+    const openDestination = async (): Promise<ChatPanel | undefined> => {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const newThreadId = await this.openNew(
+          entry.cwd,
+          entry.taskConfig,
+          choice.settings,
+          preserveFocus,
+          targetViewColumn,
+        );
+        const opened = newThreadId === undefined ? undefined : this.panels.get(newThreadId);
+        if (opened !== undefined) {
+          return opened;
+        }
+        if (newThreadId !== undefined) {
+          this.log.warn(`引き継ぎ先セッション(${newThreadId})がパネル一覧に見つかりませんでした`);
+        }
       }
-    }
+      return undefined;
+    };
+    const newEntry = await openDestination();
     if (newEntry === undefined) {
       // 旧タブは残す。`failed`で返すと入口が起動済みフラグを戻す（Issue #1746）
       const message = '引き継ぎ先のセッションを開けませんでした。旧タブはそのまま残ります';
@@ -1330,24 +1350,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return 'failed';
     }
     await recordHandoff();
-    // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
-    newEntry.session.setAutoHandoff(state.autoHandoff);
-    // 自動承認のON/OFFも同じ理由で引き継ぎ先へ持ち越す（Issue #1350）
-    newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
-    // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
-    // 時点のグローバル設定で描かれているため、上書きした値で描き直す
-    newEntry.reflexOverride = entry.reflexOverride;
-    void newEntry.panel?.webview.postMessage({
-      type: 'reflex',
-      enabled: this.reflexEnabledFor(newEntry),
-    });
     // 自動返信のON/OFFも持ち越し、引き継ぎ元では止める（`claudeChatView.ts`と同じ理由。
     // Issue #1362）
     const autoReply = entry.session.getState().autoReply;
-    newEntry.session.setAutoReply(autoReply);
-    if (autoReply) {
-      this.stopAutoReply(entry, 'handedOff');
-    }
     // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
     // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
     //
@@ -1375,11 +1380,30 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
       ...(gitBranch === undefined ? {} : { gitBranch }),
     });
-    void newEntry.session
-      .setName(handoffName)
-      .catch((e: unknown) =>
-        this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
-      );
+    // 引き継ぎ先への持ち越し。作り直した引き継ぎ先（Issue #2016）へも同じだけ持ち越す
+    const carryOver = (target: ChatPanel): void => {
+      // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す（`claudeChatView.ts`と同じ理由）
+      target.session.setAutoHandoff(state.autoHandoff);
+      // 自動承認のON/OFFも同じ理由で引き継ぎ先へ持ち越す（Issue #1350）
+      target.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+      // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
+      // 時点のグローバル設定で描かれているため、上書きした値で描き直す
+      target.reflexOverride = entry.reflexOverride;
+      void target.panel?.webview.postMessage({
+        type: 'reflex',
+        enabled: this.reflexEnabledFor(target),
+      });
+      target.session.setAutoReply(autoReply);
+      void target.session
+        .setName(handoffName)
+        .catch((e: unknown) =>
+          this.log.warn(`引き継ぎ先の名前を設定できませんでした: ${errorMessage(e)}`),
+        );
+    };
+    carryOver(newEntry);
+    if (autoReply) {
+      this.stopAutoReply(entry, 'handedOff');
+    }
     // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
     // 受け取り側が返す受領確認（Issue #1751）のid。skillが採番した値があればそれ、無ければ拡張が採番する
     const handoffId = handoffBlock?.handoffId ?? newHandoffId(createdAt);
@@ -1399,45 +1423,79 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           handoffId,
           asksChecklist,
         );
-    // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
-    // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
-    // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
-    // 残ってしまうため、その場で打ち切る
-    const giveUp = new AbortController();
     // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
     // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
     const sentPointerPath = firstText.startsWith(pointerHead) ? pointerPath : undefined;
-    const destination = newEntry;
-    // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
-    const firstResponse = waitForDestinationResponse(
-      newEntry,
-      undefined,
-      giveUp.signal,
-      // 受領確認を指示していない本文だけの送信では、受領行を待たない
-      isBare ? undefined : handoffId,
-      sentPointerPath,
-      // 受領行を待たない本文だけの送信では判定も使わない
-      isBare
-        ? undefined
-        : createHandoffAcceptanceJudge({
-            enabled: () => this.reflexEnabledFor(destination),
-            threshold: readHandoffAcceptanceThreshold,
-            deps: reflexJudgeDeps(
-              'codex',
-              readConfig().executablePath,
-              (message) => entry.trace.warn(message),
-              giveUp.signal,
-            ),
-            sentPrompt: text,
-            pointerPath: sentPointerPath,
-            destinationDisposed: () => destination.disposed,
-            trace: entry.trace,
+    // 初回プロンプトを送る。作り直した引き継ぎ先（Issue #2016）へも同じ本文を送る。送信に
+    // 失敗したら投げる
+    const sendTo = async (
+      destination: ChatPanel,
+      canRebuildAgain: boolean,
+    ): Promise<HandoffDestination<ChatPanel>> => {
+      // 送信前の検証（Issue #2016）。`turn/start`へ載せる値と`thread/start`の応答のmodelが
+      // 指定と違えば、送らずに作り直させる。もう作り直さない試行では、引き継ぎを届けるために
+      // そのまま送る
+      const config = this.configFor(destination);
+      const preSendMismatch =
+        findLaunchMismatch(choice.settings, {
+          model: config.model,
+          effort: config.reasoningEffort,
+        }) ?? findModelMismatch(choice.settings, destination.session.getState().observedModel);
+      if (preSendMismatch !== undefined && canRebuildAgain) {
+        return {
+          entry: destination,
+          firstResponse: Promise.resolve<DestinationResponseOutcome>({
+            succeeded: false,
+            reason: 'abandoned',
           }),
-    );
+          abandon: () => undefined,
+          preSendMismatch,
+        };
+      }
+      // 送信より前に初回ターンの監視を張る（Issue #1162）。`sendOrQueue` は `turn/start` の
+      // 応答まで返らないことがあり、送信の後にbaselineを取ると初回ターンの完了イベントを
+      // 取り逃して必ず15分のタイムアウトへ落ちる。送信自体が失敗したときは監視だけが
+      // 残ってしまうため、その場で打ち切る
+      const giveUp = new AbortController();
+      // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
+      const firstResponse = waitForDestinationResponse(
+        destination,
+        undefined,
+        giveUp.signal,
+        // 受領確認を指示していない本文だけの送信では、受領行を待たない
+        isBare ? undefined : handoffId,
+        sentPointerPath,
+        // 受領行を待たない本文だけの送信では判定も使わない
+        isBare
+          ? undefined
+          : createHandoffAcceptanceJudge({
+              enabled: () => this.reflexEnabledFor(destination),
+              threshold: readHandoffAcceptanceThreshold,
+              deps: reflexJudgeDeps(
+                'codex',
+                readConfig().executablePath,
+                (message) => entry.trace.warn(message),
+                giveUp.signal,
+              ),
+              sentPrompt: text,
+              pointerPath: sentPointerPath,
+              destinationDisposed: () => destination.disposed,
+              trace: entry.trace,
+            }),
+      );
+      try {
+        await destination.session.sendOrQueue(text, config);
+      } catch (e) {
+        giveUp.abort();
+        throw e;
+      }
+      this.reportActivity(destination, text);
+      return { entry: destination, firstResponse, abandon: () => giveUp.abort(), preSendMismatch };
+    };
+    let launched: HandoffDestination<ChatPanel>;
     try {
-      await newEntry.session.sendOrQueue(text, this.configFor(newEntry));
+      launched = await sendTo(newEntry, true);
     } catch (e) {
-      giveUp.abort();
       // 新セッションは開いた後なので`started`で返す（`claudeChatView.ts`と同じ理由。Issue #1746）
       const message = `引き継ぎ先へ初回プロンプトを送れませんでした（新しいタブは開いたままです）: ${errorMessage(e)}`;
       this.log.warn(message);
@@ -1446,7 +1504,6 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       return 'started';
     }
-    this.reportActivity(newEntry, text);
     // 以降に引き継ぎ元が自分で始めるターンを止める。既に走っていればここで止める（Issue #1790）
     entry.handedOff = { resumedByUser: false, interrupting: false };
     const handoffState = entry.session.getState();
@@ -1454,12 +1511,76 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       this.log.info('引き継ぎ済みのため、引き継ぎ元が自分で始めたターンを止めます');
       void entry.session.interrupt();
     }
-    void this.confirmStopAfterFirstResponse(
+    // 旧セッションを止める前に、引き継ぎ先のmodel/effortを確かめる（Issue #2016）
+    void this.settleThenConfirmStop(
       entry,
-      firstResponse,
+      launched,
+      choice.settings,
+      async (canRebuildAgain) => {
+        const target = await openDestination();
+        if (target === undefined) {
+          return undefined;
+        }
+        carryOver(target);
+        try {
+          return await sendTo(target, canRebuildAgain);
+        } catch (e) {
+          this.log.warn(
+            `作り直した引き継ぎ先へ初回プロンプトを送れませんでした: ${errorMessage(e)}`,
+          );
+          return undefined;
+        }
+      },
       trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
     );
     return 'started';
+  }
+
+  /**
+   * 引き継ぎ先のmodel/effortを確かめ、ズレていれば作り直してから旧セッションの停止へ進む
+   * （Issue #2016。`claudeChatView.ts`と同じ）。作り直しで開けなかったときは、旧セッションを
+   * 止めずに残す。
+   */
+  private async settleThenConfirmStop(
+    oldEntry: ChatPanel,
+    first: HandoffDestination<ChatPanel>,
+    expected: SessionModelSettings,
+    relaunch: (canRebuildAgain: boolean) => Promise<HandoffDestination<ChatPanel> | undefined>,
+    keepForReading: boolean,
+  ): Promise<void> {
+    const settled = await settleHandoffDestination(first, {
+      expected,
+      readLogged: async (panel) => {
+        const threadId = panel.session.threadId;
+        const filePath =
+          threadId === undefined ? undefined : await this.store?.resolveRolloutPath(threadId);
+        return filePath === undefined ? undefined : readRolloutModel(filePath);
+      },
+      discard: (destination, mismatch) => {
+        const message = `引き継ぎ先(${destination.entry.session.threadId ?? '不明'})のmodel/effortが指定と違うため作り直します: ${describeModelMismatch(mismatch)}`;
+        this.log.warn(message);
+        oldEntry.trace.warn(message);
+        destination.abandon();
+        void destination.entry.session.interrupt();
+        this.teardown(destination.entry);
+      },
+      relaunch,
+      giveUp: (mismatch) => {
+        const message = `引き継ぎ先のmodel/effortが、作り直しても指定と違います: ${describeModelMismatch(mismatch)}`;
+        this.log.warn(message);
+        oldEntry.trace.warn(message);
+        void vscode.window.showWarningMessage(message);
+      },
+    });
+    if (settled === undefined) {
+      // 作り直しを開けなかった。引き継ぎ先が無いので旧セッションを使い続けられるようにする
+      oldEntry.handedOff = undefined;
+      const message = '引き継ぎ先を作り直せませんでした。旧タブはそのまま残ります';
+      this.log.warn(message);
+      void vscode.window.showErrorMessage(message);
+      return;
+    }
+    await this.confirmStopAfterFirstResponse(oldEntry, settled.firstResponse, keepForReading);
   }
 
   /**

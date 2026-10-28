@@ -662,6 +662,27 @@ export type TurnFailureKind = 'usageLimit' | 'other';
 /** 使っていないタブのCLIを終了した状態（Issue #1808）。`ChatState.processSuspension`を参照。 */
 export type ProcessSuspension = 'stopping' | 'suspended' | 'resuming' | 'resumeFailed';
 
+/**
+ * CLIが実際に使ったmodel/effortの出所（Issue #2016）。
+ *
+ * - `systemInit`: Claude Codeの`system/init`。CLIが解決したmodel（API呼出の前）
+ * - `messageStart`: Claude Codeの`message_start`。APIが応答したmodel（出力の前）
+ * - `threadStart`: Codexの`thread/start`の応答（最初の`turn/start`の前）
+ * - `rerouted`: Codexの`model/rerouted`。サーバ側の振替
+ * - `transcript` / `rollout`: CLIの会話ログ。effortはここにしか残らない
+ */
+export type ObservedModelSource =
+  'systemInit' | 'messageStart' | 'threadStart' | 'rerouted' | 'transcript' | 'rollout';
+
+/** CLIが実際に使ったmodel/effort（Issue #2016）。取れなかった項目は`undefined`。 */
+export interface ObservedModel {
+  model?: string | undefined;
+  effort?: string | undefined;
+  source: ObservedModelSource;
+  /** `model/rerouted`の振替元と理由。振替でないときは`undefined`。 */
+  rerouted?: { fromModel: string; reason: string } | undefined;
+}
+
 export interface ChatState {
   threadId: string | undefined;
   /**
@@ -771,6 +792,13 @@ export interface ChatState {
    * レベルはこれを正として出し、全体の設定値は見ない。
    */
   permissionMode?: string | undefined;
+  /**
+   * CLIが通知した、実際に使っているmodel/effort（Issue #2016）。
+   *
+   * 画面の設定値（`modelSettings`）はCLIへ渡した値で、CLIが実際に使った値とは限らない。
+   * 引き継ぎ先の検証と、入力欄の下の表示に使う。通知が無ければ`undefined`のまま。
+   */
+  observedModel?: ObservedModel | undefined;
   /**
    * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
    *
@@ -1663,6 +1691,23 @@ export function applyEvent(
         // 前のターンの成果を次のターンへ持ち越さない
         turnResultText: '',
         turnEditedFiles: [],
+      };
+    }
+
+    // サーバ側でmodelを振り替えた（Issue #2016）。effortは通知に無いので前の値を残す
+    case 'model/rerouted': {
+      const toModel = str(params['toModel']);
+      if (toModel === '') {
+        return state;
+      }
+      return {
+        ...state,
+        observedModel: {
+          model: toModel,
+          effort: state.observedModel?.effort,
+          source: 'rerouted',
+          rerouted: { fromModel: str(params['fromModel']), reason: str(params['reason']) },
+        },
       };
     }
 

@@ -217,7 +217,17 @@ export class ChatSession {
     }
     // 応答に「いま効いている権限」が入っている。Plan modeを抜けるときの戻し先にする
     this.baseline = readTurnPolicy(response.result);
-    this.update({ ...this.state, threadId });
+    // 応答の`model`は、このスレッドで実際に使うmodel（Issue #2016）。`reasoningEffort`は
+    // 載せない。effortは`thread/start`へ渡さず`turn/start`で毎ターン渡すため、応答の値は
+    // config.tomlの既定値で、実際に使う値とは限らない
+    const startedModel = readStartedModel(response.result);
+    this.update({
+      ...this.state,
+      threadId,
+      ...(startedModel === undefined
+        ? {}
+        : { observedModel: { model: startedModel, source: 'threadStart' as const } }),
+    });
     void this.loadAutoCompactLimit(threadId, cwd);
     return threadId;
   }
@@ -1033,6 +1043,15 @@ function readThreadId(result: unknown): string | undefined {
   }
   const id = (thread as Record<string, unknown>)['id'];
   return typeof id === 'string' && id !== '' ? id : undefined;
+}
+
+/** `thread/start`の応答（`ThreadStartResponse`）の`model`。無ければ`undefined`。 */
+function readStartedModel(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) {
+    return undefined;
+  }
+  const model = (result as Record<string, unknown>)['model'];
+  return typeof model === 'string' && model !== '' ? model : undefined;
 }
 
 function readThreadName(result: unknown): string | undefined {
