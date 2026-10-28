@@ -1531,8 +1531,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         if (target === undefined) {
           return undefined;
         }
-        carryOver(target);
         try {
+          carryOver(target);
           return await sendTo(target, canRebuildAgain);
         } catch (e) {
           // 初回プロンプトの届いていないタブは閉じる（作り直しは旧タブを残す扱いになるため、
