@@ -239,7 +239,8 @@ import {
   type HandoffTrigger,
 } from './handoff';
 import {
-  describeModelMismatch,
+  describeModelGiveUp,
+  describeModelRebuild,
   findLaunchMismatch,
   observedModelView,
   settleHandoffDestination,
@@ -1589,9 +1590,7 @@ export class ClaudeChatViewManager
         : withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId, asksChecklist);
       // 開いて初回プロンプトを送るまで。model/effortがズレたときの作り直し（Issue #2016）でも
       // 同じ内容をもう一度送るため、まとめておく。開けない・送れないときは`undefined`
-      const launch = async (
-        canRebuildAgain: boolean,
-      ): Promise<HandoffDestination<ClaudePanel> | undefined> => {
+      const launch = async (): Promise<HandoffDestination<ClaudePanel> | undefined> => {
         const newSessionId = await this.openNew(
           entry.cwd,
           entry.taskConfig,
@@ -1610,23 +1609,12 @@ export class ClaudeChatViewManager
           this.log.warn(`引き継ぎ先セッション(${newSessionId})がパネル一覧に見つかりませんでした`);
           return undefined;
         }
-        // 起動前の検証（Issue #2016）。argvへ載せた値が指定と違えば、送らずに作り直させる。
-        // もう作り直さない試行では、引き継ぎを届けるためにそのまま送る
-        const preSendMismatch = findLaunchMismatch(
+        // 起動前の検証（Issue #2016）。argvへ載せた値が指定と違えば拡張機能側の取り違えで、
+        // 作り直しても同じ値になる。送ったうえで通知だけする
+        const launchMismatch = findLaunchMismatch(
           choice.settings,
           newEntry.session.getLaunchedModel(),
         );
-        if (preSendMismatch !== undefined && canRebuildAgain) {
-          return {
-            entry: newEntry,
-            firstResponse: Promise.resolve<DestinationResponseOutcome>({
-              succeeded: false,
-              reason: 'abandoned',
-            }),
-            abandon: () => undefined,
-            preSendMismatch,
-          };
-        }
         // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
         // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
         newEntry.session.setAutoHandoff(state.autoHandoff);
@@ -1720,9 +1708,9 @@ export class ClaudeChatViewManager
           this.teardown(newEntry);
           return undefined;
         }
-        return { entry: newEntry, firstResponse, abandon: () => giveUp.abort(), preSendMismatch };
+        return { entry: newEntry, firstResponse, abandon: () => giveUp.abort(), launchMismatch };
       };
-      const launched = await launch(true);
+      const launched = await launch();
       if (launched === undefined) {
         continue;
       }
@@ -1763,33 +1751,51 @@ export class ClaudeChatViewManager
     oldEntry: ClaudePanel,
     first: HandoffDestination<ClaudePanel>,
     expected: SessionModelSettings,
-    relaunch: (canRebuildAgain: boolean) => Promise<HandoffDestination<ClaudePanel> | undefined>,
+    relaunch: () => Promise<HandoffDestination<ClaudePanel> | undefined>,
     keepForReading: boolean,
   ): Promise<void> {
-    const settled = await settleHandoffDestination(first, {
-      expected,
-      readLogged: async (panel) => {
-        const sessionId = panel.session.getState().threadId;
-        const filePath =
-          sessionId === undefined ? undefined : await this.store.resolveTranscriptPath(sessionId);
-        return filePath === undefined ? undefined : readTranscriptModel(filePath);
-      },
-      discard: (destination, mismatch) => {
-        const message = `引き継ぎ先(${destination.entry.session.getState().threadId ?? '不明'})のmodel/effortが指定と違うため作り直します: ${describeModelMismatch(mismatch)}`;
-        this.log.warn(message);
-        oldEntry.trace.warn(message);
-        destination.abandon();
-        destination.entry.session.interrupt();
-        this.teardown(destination.entry);
-      },
-      relaunch,
-      giveUp: (mismatch) => {
-        const message = `引き継ぎ先のmodel/effortが、作り直しても指定と違います: ${describeModelMismatch(mismatch)}`;
-        this.log.warn(message);
-        oldEntry.trace.warn(message);
-        void vscode.window.showWarningMessage(message);
-      },
-    });
+    let settled: HandoffDestination<ClaudePanel> | undefined;
+    try {
+      settled = await settleHandoffDestination(first, {
+        expected,
+        readLogged: async (panel) => {
+          const sessionId = panel.session.getState().threadId;
+          const filePath =
+            sessionId === undefined ? undefined : await this.store.resolveTranscriptPath(sessionId);
+          const observed = filePath === undefined ? undefined : await readTranscriptModel(filePath);
+          if (observed === undefined) {
+            this.log.info(
+              '引き継ぎ先のtranscriptからmodel/effortを読めなかったため、事後確認を省きます',
+            );
+          }
+          return observed;
+        },
+        discard: (destination, mismatch) => {
+          const message = describeModelRebuild(
+            destination.entry.session.getState().threadId,
+            mismatch,
+          );
+          this.log.warn(message);
+          oldEntry.trace.warn(message);
+          destination.abandon();
+          destination.entry.session.interrupt();
+          this.teardown(destination.entry);
+        },
+        relaunch: () => relaunch(),
+        giveUp: (mismatch, reason) => {
+          const message = describeModelGiveUp(mismatch, reason);
+          this.log.warn(message);
+          oldEntry.trace.warn(message);
+          void vscode.window.showWarningMessage(message);
+        },
+      });
+    } catch (e) {
+      // 作り直しの途中（開く・送る）で投げた。引き継ぎ先が無いものとして扱う
+      this.log.warn(
+        `引き継ぎ先の作り直しに失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      settled = undefined;
+    }
     if (settled === undefined) {
       // 作り直しを開けなかった。引き継ぎ先が無いので旧セッションを使い続けられるようにする
       oldEntry.handedOff = undefined;

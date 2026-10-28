@@ -21,8 +21,8 @@ export type ModelMismatchSource = ObservedModelSource | 'launch';
 export interface ModelMismatch {
   source: ModelMismatchSource;
   expected: SessionModelSettings;
-  observed: { model?: string | undefined; effort?: string | undefined };
-  rerouted?: { fromModel: string; reason: string } | undefined;
+  observed: Pick<ObservedModel, 'model' | 'effort'>;
+  rerouted?: ObservedModel['rerouted'];
 }
 
 /** 作り直しの上限。サーバ側の振替は作り直しても再び起きることがあり、無限に繰り返さない。 */
@@ -136,6 +136,26 @@ export function describeModelMismatch(mismatch: ModelMismatch): string {
   return `設定 ${expected} に対し、実際は ${observed}（${SOURCE_LABELS[mismatch.source]}）${rerouted}`;
 }
 
+/** 作り直すときにログへ残す一文。捨てるセッションのIDを含める。 */
+export function describeModelRebuild(
+  sessionId: string | undefined,
+  mismatch: ModelMismatch,
+): string {
+  return `引き継ぎ先(${sessionId ?? '不明'})のmodel/effortが指定と違うため作り直します: ${describeModelMismatch(mismatch)}`;
+}
+
+/** 作り直さずに止まるときの通知文。旧セッションは通常どおり止めることも添える。 */
+export function describeModelGiveUp(
+  mismatch: ModelMismatch,
+  reason: ModelMismatchStopReason,
+): string {
+  const lead =
+    reason === 'limit'
+      ? '引き継ぎ先のmodel/effortが、作り直しても指定と違います'
+      : '引き継ぎ先へ渡すmodel/effortが指定と違います（拡張機能側の取り違えのため作り直しません）';
+  return `${lead}: ${describeModelMismatch(mismatch)}。引き継ぎはこのまま続けます`;
+}
+
 const SOURCE_LABELS: Record<ModelMismatchSource, string> = {
   launch: '起動時の引数',
   systemInit: 'system/init',
@@ -203,9 +223,17 @@ export interface HandoffDestination<E> {
   firstResponse: Promise<DestinationResponseOutcome>;
   /** 初回応答の監視を打ち切る。捨てるときに呼ぶ。 */
   abandon(): void;
-  /** 送信前に見つけたズレ。あれば初回プロンプトは送っていない。 */
+  /**
+   * CLIへ渡す値（起動時の引数・`turn/start`の設定）の取り違え。作り直しても同じ値を渡す
+   * ことになるため、作り直さずに通知だけする。初回プロンプトは送っている。
+   */
+  launchMismatch?: ModelMismatch | undefined;
+  /** 送信前にCLIの通知で見つけたズレ。作り直す試行では初回プロンプトを送っていない。 */
   preSendMismatch?: ModelMismatch | undefined;
 }
+
+/** 作り直さずに止まった理由。`limit`は上限まで作り直した、`launch`は渡す値の取り違え。 */
+export type ModelMismatchStopReason = 'limit' | 'launch';
 
 export interface SettleHandoffDestinationDeps<E> {
   expected: SessionModelSettings;
@@ -218,14 +246,15 @@ export interface SettleHandoffDestinationDeps<E> {
    * `undefined`。
    */
   relaunch(canRebuildAgain: boolean): Promise<HandoffDestination<E> | undefined>;
-  /** 上限まで作り直してもズレたときの通知。 */
-  giveUp(mismatch: ModelMismatch): void;
+  /** ズレたまま作り直さずに止まるときの通知。 */
+  giveUp(mismatch: ModelMismatch, reason: ModelMismatchStopReason): void;
 }
 
 /**
  * ズレていれば作り直し、旧セッションを止めてよい引き継ぎ先を返す。作り直しで開けなかった
  * ときは`undefined`を返し、呼び出し側は旧セッションを残す。上限まで作り直してもズレた
- * ときは通知し、最後の引き継ぎ先を返す（旧セッションの停止は通常どおり行う）。
+ * とき・渡す値の取り違えのときは通知し、その引き継ぎ先を返す（旧セッションの停止は
+ * 通常どおり行う）。
  */
 export async function settleHandoffDestination<E extends HandoffTurnWatch>(
   first: HandoffDestination<E>,
@@ -234,6 +263,11 @@ export async function settleHandoffDestination<E extends HandoffTurnWatch>(
   let current = first;
   for (let rebuilds = 0; ; rebuilds++) {
     const destination = current;
+    // 取り違えた値を渡したなら、CLIの実測もそれに沿ってズレる。作り直しても直らない
+    if (destination.launchMismatch !== undefined) {
+      deps.giveUp(destination.launchMismatch, 'launch');
+      return destination;
+    }
     const mismatch =
       destination.preSendMismatch ??
       (await watchDestinationModel(
@@ -246,7 +280,7 @@ export async function settleHandoffDestination<E extends HandoffTurnWatch>(
       return destination;
     }
     if (rebuilds >= MAX_HANDOFF_MODEL_REBUILDS) {
-      deps.giveUp(mismatch);
+      deps.giveUp(mismatch, 'limit');
       return destination;
     }
     deps.discard(destination, mismatch);

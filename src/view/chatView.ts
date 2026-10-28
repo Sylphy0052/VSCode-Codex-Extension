@@ -181,7 +181,8 @@ import {
   type HandoffTrigger,
 } from './handoff';
 import {
-  describeModelMismatch,
+  describeModelGiveUp,
+  describeModelRebuild,
   findLaunchMismatch,
   findModelMismatch,
   observedModelView,
@@ -1432,15 +1433,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       destination: ChatPanel,
       canRebuildAgain: boolean,
     ): Promise<HandoffDestination<ChatPanel>> => {
-      // 送信前の検証（Issue #2016）。`turn/start`へ載せる値と`thread/start`の応答のmodelが
-      // 指定と違えば、送らずに作り直させる。もう作り直さない試行では、引き継ぎを届けるために
-      // そのまま送る
+      // 送信前の検証（Issue #2016）。`turn/start`へ載せる値が指定と違えば拡張機能側の
+      // 取り違えで、作り直しても同じ値になるため通知だけする。`thread/start`の応答のmodelが
+      // 違えば、送らずに作り直させる。もう作り直さない試行では、引き継ぎを届けるために送る
       const config = this.configFor(destination);
+      const launchMismatch = findLaunchMismatch(choice.settings, {
+        model: config.model,
+        effort: config.reasoningEffort,
+      });
       const preSendMismatch =
-        findLaunchMismatch(choice.settings, {
-          model: config.model,
-          effort: config.reasoningEffort,
-        }) ?? findModelMismatch(choice.settings, destination.session.getState().observedModel);
+        launchMismatch === undefined
+          ? findModelMismatch(choice.settings, destination.session.getState().observedModel)
+          : undefined;
       if (preSendMismatch !== undefined && canRebuildAgain) {
         return {
           entry: destination,
@@ -1490,7 +1494,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         throw e;
       }
       this.reportActivity(destination, text);
-      return { entry: destination, firstResponse, abandon: () => giveUp.abort(), preSendMismatch };
+      return {
+        entry: destination,
+        firstResponse,
+        abandon: () => giveUp.abort(),
+        launchMismatch,
+        preSendMismatch,
+      };
     };
     let launched: HandoffDestination<ChatPanel>;
     try {
@@ -1525,9 +1535,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         try {
           return await sendTo(target, canRebuildAgain);
         } catch (e) {
+          // 初回プロンプトの届いていないタブは閉じる（作り直しは旧タブを残す扱いになるため、
+          // 空のタブを残すと新旧どちらで続けるべきか分からなくなる）
           this.log.warn(
             `作り直した引き継ぎ先へ初回プロンプトを送れませんでした: ${errorMessage(e)}`,
           );
+          this.teardown(target);
           return undefined;
         }
       },
@@ -1548,30 +1561,43 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     relaunch: (canRebuildAgain: boolean) => Promise<HandoffDestination<ChatPanel> | undefined>,
     keepForReading: boolean,
   ): Promise<void> {
-    const settled = await settleHandoffDestination(first, {
-      expected,
-      readLogged: async (panel) => {
-        const threadId = panel.session.threadId;
-        const filePath =
-          threadId === undefined ? undefined : await this.store?.resolveRolloutPath(threadId);
-        return filePath === undefined ? undefined : readRolloutModel(filePath);
-      },
-      discard: (destination, mismatch) => {
-        const message = `引き継ぎ先(${destination.entry.session.threadId ?? '不明'})のmodel/effortが指定と違うため作り直します: ${describeModelMismatch(mismatch)}`;
-        this.log.warn(message);
-        oldEntry.trace.warn(message);
-        destination.abandon();
-        void destination.entry.session.interrupt();
-        this.teardown(destination.entry);
-      },
-      relaunch,
-      giveUp: (mismatch) => {
-        const message = `引き継ぎ先のmodel/effortが、作り直しても指定と違います: ${describeModelMismatch(mismatch)}`;
-        this.log.warn(message);
-        oldEntry.trace.warn(message);
-        void vscode.window.showWarningMessage(message);
-      },
-    });
+    let settled: HandoffDestination<ChatPanel> | undefined;
+    try {
+      settled = await settleHandoffDestination(first, {
+        expected,
+        readLogged: async (panel) => {
+          const threadId = panel.session.threadId;
+          const filePath =
+            threadId === undefined ? undefined : await this.store?.resolveRolloutPath(threadId);
+          const observed = filePath === undefined ? undefined : await readRolloutModel(filePath);
+          if (observed === undefined) {
+            this.log.info(
+              '引き継ぎ先のrolloutからmodel/effortを読めなかったため、事後確認を省きます',
+            );
+          }
+          return observed;
+        },
+        discard: (destination, mismatch) => {
+          const message = describeModelRebuild(destination.entry.session.threadId, mismatch);
+          this.log.warn(message);
+          oldEntry.trace.warn(message);
+          destination.abandon();
+          void destination.entry.session.interrupt();
+          this.teardown(destination.entry);
+        },
+        relaunch,
+        giveUp: (mismatch, reason) => {
+          const message = describeModelGiveUp(mismatch, reason);
+          this.log.warn(message);
+          oldEntry.trace.warn(message);
+          void vscode.window.showWarningMessage(message);
+        },
+      });
+    } catch (e) {
+      // 作り直しの途中（開く・持ち越す）で投げた。引き継ぎ先が無いものとして扱う
+      this.log.warn(`引き継ぎ先の作り直しに失敗しました: ${errorMessage(e)}`);
+      settled = undefined;
+    }
     if (settled === undefined) {
       // 作り直しを開けなかった。引き継ぎ先が無いので旧セッションを使い続けられるようにする
       oldEntry.handedOff = undefined;
