@@ -1623,24 +1623,25 @@ export class ClaudeStreamSession {
     return last;
   }
 
-  /** 応答を止めて、待機中の指示をすぐ送る。 */
+  /** 待機中の先頭の指示をすぐ送る。応答中なら走っているターンへ差し込む。 */
   flushQueue(): void {
     this.sendQueued(0);
   }
 
-  /** 待機中の指定した指示をすぐ送る。 */
+  /**
+   * 待機中の指定した指示をすぐ送る。
+   *
+   * 応答中でも`interrupt`は出さない（Issue #2020）。CLIは応答中に届いた発言を中断せずに
+   * 走っているターンへ取り込む（実測: CLI 2.1.296。subagentの実行中に書き込んだ発言が、
+   * ターンを止めずに同じターンの最終応答へ反映された）。中断すると走っていたsubagentまで
+   * 止まる。止めてから送りたいときは中断ボタンを使う。
+   */
   sendQueued(index: number): void {
     const { message, next } = takeQueuedAt(this.state, index);
     if (message === undefined) {
       return;
     }
-    const wasBusy = this.state.busy;
-    // interrupt()がbusy=falseを通知すると、Viewの自動送信が残りの先頭を先に取り出す。
-    // 選択した項目を先に送る間はbusyを保ったまま、待機列から先に外す。
     this.update(next);
-    if (wasBusy) {
-      this.interrupt(false);
-    }
     try {
       this.send(message.text, message.attachments);
     } catch (e) {
