@@ -2354,10 +2354,12 @@ export function chatScript(
     }
   }
 
-  function renderQueue(queued) {
+  function renderQueue(queued, held) {
     const box = el('queue');
     const list = el('queueList');
-    if (!queued || queued.length === 0) {
+    queued = queued || [];
+    held = held || [];
+    if (queued.length === 0 && held.length === 0) {
       box.hidden = true;
       list.replaceChildren();
       return;
@@ -2365,8 +2367,27 @@ export function chatScript(
 
     box.hidden = false;
     // 応答中に送った指示は既定で待ち行列に積む。今すぐ送るには「今すぐ送る」ボタンを使う
-    el('queueLabel').textContent = '順番待ちです（' + queued.length + '件）';
+    const bits = [];
+    if (queued.length > 0) bits.push('順番待ちです（' + queued.length + '件）');
+    // 今すぐ送った指示は、CLIが取り込むまで消さずに出す（Issue #2022）
+    if (held.length > 0) bits.push('取り込み待ち（' + held.length + '件）');
+    el('queueLabel').textContent = bits.join(' / ');
+    el('flushQueue').hidden = queued.length === 0;
     list.replaceChildren();
+    held.forEach((message) => {
+      const li = document.createElement('li');
+      li.className = 'held';
+      const label = document.createElement('span');
+      const count = (message.attachments || []).length;
+      const text = message.text + (count > 0 ? '（画像' + count + '枚）' : '');
+      label.textContent = text;
+      label.title = text;
+      li.appendChild(label);
+      const note = document.createElement('small');
+      note.textContent = '送信済み・ツールの実行後に届きます';
+      li.appendChild(note);
+      list.appendChild(li);
+    });
     queued.forEach((message, index) => {
       const li = document.createElement('li');
       const label = document.createElement('span');
@@ -2502,7 +2523,7 @@ export function chatScript(
     renderTodos(state.todos);
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
-    renderQueue(queuedMessages);
+    renderQueue(queuedMessages, state.held);
     renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
     renderAutoReplyActivity(state.autoReplyActivity);
     renderAutoHandoffWait(state.autoHandoffBackgroundWait);

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
@@ -158,6 +159,8 @@ export class ClaudeStreamSession {
   private readonly waiting = new Map<string, WaitingApproval>();
   /** こちらから出した要求の用途。応答は種類ごとに形が違うため、idで引く。 */
   private readonly outgoing = new Map<string, Outgoing>();
+  /** 取り込み待ちがあるため、`interrupt()`がターンの確定を中断の応答まで見送った（Issue #2022）。 */
+  private interruptDeferred = false;
   /** 承認要求が一度でも届いたか。届かない構成を利用者へ知らせるために見る。 */
   private sawApprovalRequest = false;
   private handshakeDone = false;
@@ -1568,7 +1571,7 @@ export class ClaudeStreamSession {
     });
   }
 
-  send(text: string, attachments: readonly Attachment[] = []): void {
+  send(text: string, attachments: readonly Attachment[] = [], uuid?: string): void {
     // 休止のための終了を待っている間（Issue #1808）は積んでおき、終了を見届けてから再開して送る
     if (this.lifecycle === 'stopping') {
       this.update(enqueue(this.state, text, [...attachments]));
@@ -1589,7 +1592,7 @@ export class ClaudeStreamSession {
       throw new Error('セッションが起動していません');
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
-    this.write(buildUserMessage(text, attachments));
+    this.write(buildUserMessage(text, attachments, uuid));
   }
 
   /** 発言を送る。応答中なら待ち行列へ積む。 */
@@ -1635,17 +1638,23 @@ export class ClaudeStreamSession {
    * 走っているターンへ取り込む（実測: CLI 2.1.296。subagentの実行中に書き込んだ発言が、
    * ターンを止めずに同じターンの最終応答へ反映された）。中断すると走っていたsubagentまで
    * 止まる。止めてから送りたいときは中断ボタンを使う。
+   *
+   * 応答中に送った指示は、CLIが取り込むまで`held`に残して画面に出し続ける（Issue #2022）。
+   * 取り込まれるのは実行中のツール呼び出しが終わってからで、エコーもそのとき返るため、
+   * 残さないと長いツールの実行中は指示が画面から消えて見える。
    */
   sendQueued(index: number): void {
     const { message, next } = takeQueuedAt(this.state, index);
     if (message === undefined) {
       return;
     }
-    this.update(next);
+    const uuid = this.state.busy ? randomUUID() : undefined;
+    this.update(uuid === undefined ? next : { ...next, held: [...next.held, { ...message, uuid }] });
     try {
-      this.send(message.text, message.attachments);
+      this.send(message.text, message.attachments, uuid);
     } catch (e) {
-      this.update(restoreQueued(this.state, index, message));
+      const restored = restoreQueued(this.state, index, message);
+      this.update({ ...restored, held: restored.held.filter((m) => m.uuid !== uuid) });
       throw e;
     }
   }
@@ -1659,8 +1668,14 @@ export class ClaudeStreamSession {
     if (this.proc === undefined) {
       return;
     }
-    this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
-    if (updateState) {
+    this.write(buildControlRequest(this.claim('interrupt'), { subtype: 'interrupt' }));
+    // 取り込み待ちの指示は中断しても捨てられない（Issue #2022）。CLIは`interrupt`の応答の
+    // `still_queued`にそのuuidを返し、中断の直後に次のターンとして処理する（実測: CLI 2.1.296）。
+    // 残っている間は応答中のままにする（`result`での扱いと同じ）。CLIが持っていない分は
+    // 応答を受けたときに外す（`releaseHeldAfterInterrupt`）
+    if (updateState && this.state.held.length > 0) {
+      this.interruptDeferred = true;
+    } else if (updateState) {
       // 走っていたターンがあったときだけ確定させる（issue #939）。CLIは中断後に`result`を
       // 返さないことがあるためここが確定点になるが、ターンを抱えていない状態で進めると、
       // 直前のターンの成果を作業記録へ二重に残すなど、無かった完了を1つ作ってしまう
@@ -1898,9 +1913,44 @@ export class ClaudeStreamSession {
     this.update(addApproval(this.state, approval));
   }
 
+  /**
+   * 中断の応答で、CLIがまだ持っている指示（`still_queued`）だけを取り込み待ちに残す
+   * （Issue #2022）。残っていた指示がすべて外れたら、`interrupt()`で見送ったターンの確定を
+   * ここで行う。CLIが持っていない指示を残すと、エコーが来ないまま応答中に見え続ける。
+   */
+  private releaseHeldAfterInterrupt(response: ControlResponse): void {
+    const deferred = this.interruptDeferred;
+    this.interruptDeferred = false;
+    const raw = response.payload?.['still_queued'];
+    const stillQueued = new Set(
+      Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [],
+    );
+    const held = this.state.held.filter((m) => stillQueued.has(m.uuid));
+    if (held.length > 0 || !deferred) {
+      if (held.length !== this.state.held.length) {
+        this.update({ ...this.state, held });
+      }
+      return;
+    }
+    // 中断の応答より先にエコーが届いて外れていた場合も、ここで確定させる
+    this.update({
+      ...this.state,
+      held,
+      busy: false,
+      turnCompletionSeq: this.state.busy
+        ? this.state.turnCompletionSeq + 1
+        : this.state.turnCompletionSeq,
+    });
+  }
+
   private handleControlResponse(response: ControlResponse): void {
     const outgoing = this.outgoing.get(response.requestId);
     this.outgoing.delete(response.requestId);
+
+    if (outgoing?.kind === 'interrupt') {
+      this.releaseHeldAfterInterrupt(response);
+      return;
+    }
 
     if (outgoing?.kind === 'mcpConfigure') {
       this.mcpConfigureWaiting.get(response.requestId)?.resolve(response);
@@ -2096,6 +2146,8 @@ export class ClaudeStreamSession {
       ...this.state,
       busy: false,
       turnFailed: true,
+      // CLIが消えれば取り込み待ちの指示も届かない（Issue #2022）
+      held: [],
       // 走っていたターンが「失敗として確定した」（issue #939）。`result`を受け取れない
       // まま終わった経路なので、完了の世代はここで進める。**走っていたターンがあるとき
       // だけ**進めるのは、この関数がプロセスの`exit`・`error`（起動失敗を含む）から
@@ -2203,6 +2255,7 @@ export class ClaudeStreamSession {
 /** こちらから出した制御要求の用途。 */
 type OutgoingKind =
   | 'initialize'
+  | 'interrupt'
   | 'contextUsage'
   | 'sessionCost'
   | 'settings'

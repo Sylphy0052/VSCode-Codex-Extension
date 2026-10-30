@@ -9,6 +9,7 @@ import {
   NO_TODOS,
   modelWindowOf,
   rebaseContextUsage,
+  releaseHeld,
   type BackgroundTerminalItem,
   type ChatItem,
   type ChatState,
@@ -47,6 +48,7 @@ export const initialClaudeState: ChatState = {
   streamingMessageId: undefined,
   completedBlockOffset: undefined,
   queued: [],
+  held: [],
   items: [],
   approvals: [],
   // Claude Codeにはツールからの問い合わせにあたる制御要求が無い（Codexのみ）
@@ -294,7 +296,10 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  * （CLI 2.1.296で実測、issue #1968）。履歴の読み直しと同じく `/名前 引数` に組み立て直す。
  * 文字列の `content` は圧縮後の要約でも届くため、slash commandのときだけ受ける。
  */
-function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
+function applyUser(received: ChatState, event: Record<string, unknown>): ChatState {
+  // 応答中に送った指示をCLIが取り込んだ（Issue #2022）。送ったときのuuidでエコーが返る
+  const state =
+    event['isReplay'] === true ? releaseHeld(received, str(event['uuid'])) : received;
   const rawContent = rec(event['message'])?.['content'];
   const slashText = typeof rawContent === 'string' ? slashCommandMessageText(rawContent) : '';
   const content = slashText !== '' ? [{ type: 'text', text: slashText }] : list(rawContent);
@@ -576,15 +581,18 @@ function applyResult(state: ChatState, event: Record<string, unknown>): ChatStat
           cachedInputTokens: cachedInputTokensOf(usage),
           outputTokens: num(usage['output_tokens']),
         };
+  // 取り込み待ちの指示が残っていれば、CLIはそれを次のターンとして続けて処理する
+  // （Issue #2022）。応答中のままにし、待ち行列の次の指示を先に送らせない
+  const continuing = state.held.length > 0;
   return {
     ...state,
     items: settleUnansweredCommands(state.items),
-    busy: false,
+    busy: continuing,
     turnFailed: failed,
     turnResultText: str(event['result']),
     turnTokens,
     // ターンの結果が確定した（issue #939）。Codexの `turn/completed` に対応する
-    turnCompletionSeq: state.turnCompletionSeq + 1,
+    turnCompletionSeq: continuing ? state.turnCompletionSeq : state.turnCompletionSeq + 1,
   };
 }
 

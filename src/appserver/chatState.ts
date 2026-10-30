@@ -396,6 +396,17 @@ export interface QueuedMessage {
   skill?: CodexSkillInput;
 }
 
+/**
+ * 応答中に送ったが、まだCLIが取り込んでいない指示（Issue #2022）。
+ *
+ * Claude Codeは応答中に書き込んだ発言を、実行中のツール呼び出しが終わってから走っている
+ * ターンへ取り込む。取り込んだ時点で`--replay-user-messages`のエコーが、送ったときに付けた
+ * `uuid`のまま返る（実測: CLI 2.1.296）。それまで画面から消えないよう、ここに残す。
+ */
+export interface HeldMessage extends QueuedMessage {
+  uuid: string;
+}
+
 export interface PendingApproval {
   /** JSON-RPCの要求id。応答を返すときに使う。 */
   requestId: number | string;
@@ -737,6 +748,12 @@ export interface ChatState {
    * CLIは応答中の指示を受け取れないため、捨てずにここへ積む。
    */
   queued: QueuedMessage[];
+  /**
+   * 応答中に送り、CLIの取り込みを待っている指示（Issue #2022。Claude Codeのみ）。
+   *
+   * 残っている間は走っているターンが続くため、`result`が来ても応答中のままにする。
+   */
+  held: HeldMessage[];
   items: ChatItem[];
   approvals: PendingApproval[];
   /** ユーザーへの問い合わせ（ツールの質問・MCPサーバのフォーム）。 */
@@ -960,6 +977,7 @@ export const initialChatState: ChatState = {
   streamingMessageId: undefined,
   completedBlockOffset: undefined,
   queued: [],
+  held: [],
   items: [],
   approvals: [],
   prompts: [],
@@ -2104,6 +2122,14 @@ export function restoreQueued(state: ChatState, index: number, message: QueuedMe
       ...state.queued.slice(insertionIndex),
     ],
   };
+}
+
+/** CLIが取り込んだ（エコーが返った）指示を取り込み待ちから外す（Issue #2022）。 */
+export function releaseHeld(state: ChatState, uuid: string): ChatState {
+  if (!state.held.some((m) => m.uuid === uuid)) {
+    return state;
+  }
+  return { ...state, held: state.held.filter((m) => m.uuid !== uuid) };
 }
 
 /** 末尾の指示を取り出す。空なら取り出さない。入力欄への書き戻し（Esc）に使う。 */
