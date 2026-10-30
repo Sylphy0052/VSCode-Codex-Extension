@@ -683,6 +683,9 @@ ${completionEvidenceStyles()}
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* 今すぐ送り、CLIの取り込みを待っている指示（Issue #2022） */
+  #queue li.held { color: var(--vscode-descriptionForeground); }
+  #queue li.held small { white-space: nowrap; }
   #limitAutoResumeStatus,
   #autoReplyActivity,
   #autoHandoffWait,

@@ -69,10 +69,17 @@ export interface ControlResponse {
  * stdinへ書く発言。1行で書き切る。
  *
  * 画像はbase64の `image` ブロックとして本文の前に置く（実測で受理を確認）。
+ * `uuid`を付けると、CLIは`--replay-user-messages`のエコーに同じ値を載せて返す
+ * （実測: CLI 2.1.296。Issue #2022）。
  */
-export function buildUserMessage(text: string, attachments: readonly Attachment[] = []): string {
+export function buildUserMessage(
+  text: string,
+  attachments: readonly Attachment[] = [],
+  uuid?: string,
+): string {
   return `${JSON.stringify({
     type: 'user',
+    ...(uuid === undefined ? {} : { uuid }),
     message: { role: 'user', content: buildClaudeContent(text, attachments) },
   })}\n`;
 }
