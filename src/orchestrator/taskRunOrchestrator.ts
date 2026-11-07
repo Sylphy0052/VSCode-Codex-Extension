@@ -41,7 +41,13 @@ import {
   MAX_REVIEW_ROUNDS,
   orchestratorGateScope,
 } from './taskRunGates';
-import { assessTaskRun, newlyAwaitingDecision, type StageRef } from './taskRunScheduler';
+import {
+  assessTaskRun,
+  listStagesAwaitingDecision,
+  newlyAwaitingDecision,
+  stageRefKey,
+  type StageRef,
+} from './taskRunScheduler';
 import {
   getTask,
   isTaskRunActive,
@@ -293,6 +299,13 @@ interface LiveOrchestrator {
    */
   recordLessonCount: number;
   /**
+   * 判断待ちとして知らせた工程（`stageRefKey`の形。Issue #2030）。知らせる対象は並列上限の空き枠の
+   * 分だけなので、先に知らせた工程が着手順の前の工程に押し出され、後で対象へ戻ることがある。その
+   * ときに二重に知らせないよう覚えておく。判断待ちでなくなった工程は外す（再び判断待ちになれば
+   * 改めて知らせる）。世代をまたいで引き継ぐ（引き継いだ`pending`に通知が残っているため）。
+   */
+  announcedStages: Set<string>;
+  /**
    * `resume_run`・`start_run`（Issue #1620）をこのrunで受け付けた合計回数。`recordLessonCount`と
    * 同じくrun全体で数え、`MAX_RUN_OPERATIONS_PER_RUN`と比べる。
    */
@@ -483,15 +496,28 @@ export class TaskRunOrchestrator {
   /**
    * runの状態が変わった（Controllerの`onTransition`から呼ぶ）。差分からイベントを作って届ける。
    * 判断待ちになった工程は推奨値を求めてから届ける（求められなければ推奨値なしで届ける）。
+   * 知らせるのは並列上限の空き枠の分だけで、残りは枠が空いたときに届ける（Issue #2030）。
    */
   handleRunTransition(prev: TaskRun | undefined, next: TaskRun): void {
-    if (prev === undefined || !this.live.has(next.runId)) {
+    const live = this.live.get(next.runId);
+    if (prev === undefined || live === undefined) {
       return;
     }
     for (const event of diffTaskRunEvents(prev, next)) {
       this.notify(next.runId, withLessonReminder(event, this.deps.runNotes !== undefined));
     }
+    const awaiting = new Set(listStagesAwaitingDecision(next).map(stageRefKey));
+    for (const key of [...live.announcedStages]) {
+      if (!awaiting.has(key)) {
+        live.announcedStages.delete(key);
+      }
+    }
     for (const ref of newlyAwaitingDecision(prev, next)) {
+      const key = stageRefKey(ref);
+      if (live.announcedStages.has(key)) {
+        continue;
+      }
+      live.announcedStages.add(key);
       void this.notifyAwaitingDecision(next.runId, ref);
     }
   }
@@ -639,6 +665,7 @@ export class TaskRunOrchestrator {
       runStateShown: undefined,
       lastCompactionId: undefined,
       recordLessonCount: previous?.recordLessonCount ?? 0,
+      announcedStages: new Set(previous?.announcedStages ?? []),
       runOperationCount: previous?.runOperationCount ?? 0,
       askUserQuestionRejections: previous?.askUserQuestionRejections ?? 0,
       stopStageJudgedApprovals: previous?.stopStageJudgedApprovals ?? 0,
@@ -1623,7 +1650,8 @@ function buildIntroPrompt(
     '- 計画を出し直すとき、着手済みのタスクは省いてよい（省くと現在の内容のまま残る）。内容を変えるときだけtaskId付きで送る。未着手のタスクは残すものをすべて送る（省くと計画から外れる）',
     '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
     '- 承認後、Model/Effortの判断を待つ工程はstart_stageで始める。推奨値を基本にし、変えるときは理由をreasonに書く。' +
-      `判断待ちの通知（stageAwaitingDecision）には推奨値の理由を先頭${String(MAX_EVENT_RECOMMENDATION_REASONS)}件まで書き、残りは件数だけ示す。全部はget_run_stateで読める`,
+      `判断待ちの通知（stageAwaitingDecision）には推奨値の理由を先頭${String(MAX_EVENT_RECOMMENDATION_REASONS)}件まで書き、残りは件数だけ示す。全部はget_run_stateで読める。` +
+      '判断待ちの通知は並列上限の空き枠の分だけ着手順に届き、残りは枠が空くと届く。通知を待たずに始めてもよい（推奨値はまだ無い）',
     '- set_max_parallelは呼ぶとユーザーの承認が入るため、会話で事前に確かめない。ユーザーが上限を指定したときと、資源の逼迫で下げるときに使う。stop_stageはreasonに止める理由を書いて呼ぶ。Reflexが回答者を判定し、自分で決めてよければ確認なしに止まり、そうでなければユーザーの承認が入る。ユーザーの判断待ちの質問も、自分で決められると考えたらanswer_questionで回答案を送ってよい。' +
       'Reflexが回答者を判定し、オーケストレーターが決めてよければ確認なしに渡り、そうでなければユーザーの確認が入る',
     '- 回答者判定（Reflex）がオーケストレーターの判断待ちとした質問と関門（questionAwaitingOrchestrator・gateAwaitingOrchestrator）は、計画・Issue・コード・過去の回答から自分で決め、answer_question・resolve_gateで送る（確認は出ない）。' +

@@ -14,6 +14,7 @@ import {
   assessTaskRun,
   countActiveStageSessions,
   listStagesAwaitingDecision,
+  listStagesToAnnounce,
   unmetTaskDependencies,
 } from './taskRunScheduler';
 import {
@@ -825,7 +826,7 @@ export function formatTaskRunState(
     `run: ${run.runId}`,
     `エンジン: ${run.engine} / 計画: ${run.planStatus} / 並列上限: ${String(run.maxParallel)} / 動いている工程: ${String(countActiveStageSessions(run))}`,
     `run全体の停止: ${run.haltedByUser ? 'あり' : 'なし'} / 終了: ${run.finishedAt === undefined ? 'いいえ' : 'はい'} / 全体: ${formatAssessment(run)}`,
-    `判断待ちの工程: ${awaiting.length === 0 ? 'なし' : awaiting.map((r) => `${r.taskId}:${r.stage}`).join(', ')}`,
+    `判断待ちの工程: ${awaiting.length === 0 ? 'なし' : `${awaiting.map((r) => `${r.taskId}:${r.stage}`).join(', ')}（うち並列上限の空き枠内で通知の対象: 先頭${String(listStagesToAnnounce(run).length)}件）`}`,
     ...resourceLines,
   ];
   const lines: string[] = [];
@@ -1122,7 +1123,8 @@ export function formatTaskRunSummary(run: TaskRun): string {
   return (
     `run: ${run.runId} / 計画: ${run.planStatus} / タスク: ${String(total)}件` +
     `（完了${String(counts.done)} / 実行中${String(counts.running)} / 停止中${String(counts.halted)} / 未着手${String(counts.notStarted)}）` +
-    ` / 判断待ちの工程: ${String(listStagesAwaitingDecision(run).length)}件`
+    ` / 判断待ちの工程: ${String(listStagesAwaitingDecision(run).length)}件` +
+    `（うち通知の対象${String(listStagesToAnnounce(run).length)}件）`
   );
 }
 
