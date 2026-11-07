@@ -792,6 +792,8 @@ const script = `
   let current;
   // 概要を展開したカード。盤面の再描画で畳まれないよう覚えておく
   const expandedSummaries = new Set();
+  // 完了列を展開しているか（Issue #2036）。既定は畳む。完了したタスクの数だけ列が伸び、未完了の列が埋もれるため
+  let doneExpanded = savedState.doneExpanded === true;
   let orchestratorStatus;
   // 専有権（Issue #1628）。他ウィンドウが持っているときだけ{ heldByOther: true, holderText }が届く
   let leaseStatus;
@@ -1151,11 +1153,25 @@ const script = `
       head.appendChild(el('span', 'count', String(cards.length)));
       column.appendChild(head);
       const list = el('div', 'cards');
-      if (cards.length === 0) { list.appendChild(el('div', 'empty', 'なし')); }
-      cards.forEach(function (card) { list.appendChild(renderCard(card)); });
+      if (cards.length === 0) {
+        list.appendChild(el('div', 'empty', 'なし'));
+      } else if (col[0] === 'done' && !doneExpanded) {
+        list.appendChild(button('完了' + cards.length + '件を表示する', 'done-toggle', function () { setDoneExpanded(true); }));
+      } else {
+        if (col[0] === 'done') {
+          list.appendChild(button('畳む', 'done-toggle', function () { setDoneExpanded(false); }));
+        }
+        cards.forEach(function (card) { list.appendChild(renderCard(card)); });
+      }
       column.appendChild(list);
       boardEl.appendChild(column);
     });
+  }
+
+  function setDoneExpanded(expanded) {
+    doneExpanded = expanded;
+    saveViewState();
+    if (current) { renderBoard(current); }
   }
 
   ${GRAPH_SVG_SOURCE}
@@ -1163,6 +1179,7 @@ const script = `
   function saveViewState() {
     vscode.setState({
       viewMode: viewMode,
+      doneExpanded: doneExpanded,
       selectedTask: selectedTask ? selectedTask.taskId : undefined,
       selectedTaskRunId: selectedTask ? selectedTask.runId : undefined,
       // ウィンドウを開き直したときに同じrunを出す（Issue #1775、restorePanel）
