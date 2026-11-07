@@ -178,6 +178,11 @@ export interface OrchestratedTask {
   attention: TaskAttention;
   /** `attention`が`needsAction`・`failed`のときの理由。 */
   failure: string | undefined;
+  /**
+   * 工程を止めた原因（Issue #2033）。`attention`が`stopped`のとき、再読み込みで止めたものだけ`'reload'`、
+   * 人が止めたものは`undefined`。追加前に保存したrunには無く、`isReloadHalt`が停止理由の文言で読み替える。
+   */
+  haltCause?: 'reload' | undefined;
   /** 「Issue計画」の成果。外部由来のテキスト。 */
   issueDraft: { title: string; body: string } | undefined;
   /** 「Issue作成」の成果、または既存のIssue番号。 */
@@ -876,6 +881,7 @@ export function startStageAttempt(
     currentAttemptId: attempt.attemptId,
     attention: 'none',
     failure: undefined,
+    haltCause: undefined,
     updatedAt: at,
   });
 }
@@ -947,7 +953,7 @@ export function completeStage(
           : output.stage === 'review'
             ? { ...closed, review: output.review }
             : closed;
-  return withTask(run, { ...withOutput, attention: 'none', failure: undefined, updatedAt: at });
+  return withTask(run, { ...withOutput, attention: 'none', failure: undefined, haltCause: undefined, updatedAt: at });
 }
 
 /** 「実装とPR作成」の開始時に作ったworktreeとブランチを記録する。 */
@@ -984,6 +990,7 @@ export function haltStage(
   attention: Extract<TaskAttention, 'needsAction' | 'failed' | 'stopped' | 'awaitingUser'>,
   failure: string | undefined,
   now: Date,
+  cause?: 'reload',
 ): TaskRun {
   const task = getTask(run, taskId);
   const stage = task === undefined ? undefined : currentStage(task);
@@ -998,6 +1005,7 @@ export function haltStage(
     }),
     attention,
     failure,
+    haltCause: cause,
     updatedAt: at,
   });
 }
@@ -1139,6 +1147,7 @@ export function resetStageForRetry(run: TaskRun, taskId: string, now: Date): Tas
     ...withStage(task, stage, { status: 'notStarted', pendingDecision: undefined }),
     attention: 'none',
     failure: undefined,
+    haltCause: undefined,
     updatedAt: now.toISOString(),
   });
 }
@@ -1164,7 +1173,7 @@ export function completeMergedTask(run: TaskRun, taskId: string, now: Date): Tas
       });
     }
   }
-  return withTask(run, { ...next, attention: 'none', failure: undefined, updatedAt: at });
+  return withTask(run, { ...next, attention: 'none', failure: undefined, haltCause: undefined, updatedAt: at });
 }
 
 /**
@@ -1203,6 +1212,7 @@ export function closeTaskWithoutMerge(
     ...next,
     attention: 'none',
     failure: undefined,
+    haltCause: undefined,
     pause: undefined,
     closedWithoutMerge: { reason: closure.reason, by: closure.by, at },
     updatedAt: at,

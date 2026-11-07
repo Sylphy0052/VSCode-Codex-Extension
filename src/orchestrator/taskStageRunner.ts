@@ -472,6 +472,7 @@ export class TaskStageRunner {
         'stopped',
         RELOAD_HALT_REASON,
         this.now(),
+        'reload',
       ),
     );
   }
