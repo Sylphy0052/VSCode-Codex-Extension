@@ -8,6 +8,7 @@
  * `formatUntrusted`で囲う。`title`と`acceptanceCriteria`は`taskRunPlan.ts`の`readText`で
  * 1行へ均し済みなのでそのまま使う。
  */
+import { REFLEX_STATE_LIMIT } from '../reflex/reflexJudge';
 import { formatUntrusted } from './untrustedText';
 import {
   reviewPlanWithReflex,
@@ -21,7 +22,7 @@ import type { TaskDraft } from './taskRunState';
 
 export type TaskRunPlanReview = PlanReflexVerdict;
 
-/** Reflexの状態へ入れるタスク1件の要約の上限。状態全体は`REFLEX_STATE_LIMIT`で切られる。 */
+/** Reflexの状態へ入れるタスク1件の要約の上限。状態全体が`REFLEX_STATE_LIMIT`を超えたら審査しない。 */
 const REFLEX_TASK_SUMMARY_MAX_LENGTH = 800;
 
 /**
@@ -38,6 +39,17 @@ export async function reviewTaskRunPlanProposal(
   threshold: number,
   outsideRoadmapIssues: ReadonlySet<number> = new Set(),
 ): Promise<TaskRunPlanReview> {
+  const state = buildTaskPlanReviewState(drafts, outsideRoadmapIssues);
+  const stateLength = Array.from(state).length;
+  if (stateLength > REFLEX_STATE_LIMIT) {
+    // 上限を超えた状態は`buildReflexPrompt`で中間が省かれ、一部のタスクを見ないまま判定される。
+    // 全体を見られない審査で自動承認しない（Issue #2029）。同じ計画なら何度呼んでも結果は同じなので
+    // `failed`は付けず、呼び出し側に覚えさせて再審査を省く
+    return {
+      kind: 'needsUser',
+      summary: `計画が大きく、Reflexの判定材料の上限（${String(REFLEX_STATE_LIMIT)}字）を超えるため人の承認へ回した（${String(stateLength)}字、${String(drafts.length)}件）`,
+    };
+  }
   const hasOutside = drafts.some(
     (draft) =>
       draft.existingIssueNumber !== undefined &&
@@ -57,7 +69,7 @@ export async function reviewTaskRunPlanProposal(
           ]
         : []),
     ].join(''),
-    buildTaskPlanReviewState(drafts, outsideRoadmapIssues),
+    state,
     [
       '「タスク計画」は、タスク同士の整合として妥当か。',
       `「${REVIEW_VALID}」は各タスクの受入基準が要約と対応し、依存関係に矛盾や重大な抜けが無い。`,
@@ -78,7 +90,10 @@ export async function reviewTaskRunPlanProposal(
   );
 }
 
-/** Reflexの状態。一覧を先に置き、状態の上限で切れるのは要約の側にする。 */
+/**
+ * Reflexの状態。一覧を先に置き、要約を後に並べる。`REFLEX_STATE_LIMIT`を超えた状態は
+ * Reflexへ渡さず人の承認へ回す（`reviewTaskRunPlanProposal`、Issue #2029）ため、切り詰めは起きない。
+ */
 function buildTaskPlanReviewState(
   drafts: readonly TaskDraft[],
   outsideRoadmapIssues: ReadonlySet<number>,
