@@ -18,12 +18,12 @@ import { findCycleGroups } from './workflow';
  * 拒否し、理由をOrchestratorへ返す。状態へ置くのは`proposeTaskPlan`。
  */
 
-export const MAX_PLAN_TASKS = 30;
+// タスク数には上限を置かない（以前の30件の上限は廃止した）。依存先の数も、重複を拒否し
+// 計画内のキーだけを許すため、計画のタスク数で自然に抑えられる
 export const MAX_PLAN_TITLE_LENGTH = 200;
 export const MAX_PLAN_SUMMARY_LENGTH = 2000;
 export const MAX_PLAN_CRITERIA = 20;
 export const MAX_PLAN_CRITERION_LENGTH = 500;
-const MAX_PLAN_DEPENDENCIES = MAX_PLAN_TASKS;
 
 /** 計画の中でタスクを指すキー。既存のタスクは`T<n>`、新しいタスクは任意の仮キー。 */
 const PLAN_KEY = /^[A-Za-z0-9_-]{1,32}$/;
@@ -124,7 +124,6 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
   const depsRaw = raw.dependsOn ?? [];
   if (
     !Array.isArray(depsRaw) ||
-    depsRaw.length > MAX_PLAN_DEPENDENCIES ||
     depsRaw.some((d) => typeof d !== 'string' || !PLAN_KEY.test(d))
   ) {
     return fail(`${at}.dependsOnは計画内のidの配列で指定する`);
@@ -159,8 +158,8 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
 /** `propose_plan`の引数の形式を検証する。長さ・件数の超過は切り詰めずに拒否し、書き直させる。 */
 export function parsePlanArgs(raw: unknown): Parsed<PlanTaskInput[]> {
   const tasksRaw = isRecord(raw) ? raw.tasks : undefined;
-  if (!Array.isArray(tasksRaw) || tasksRaw.length === 0 || tasksRaw.length > MAX_PLAN_TASKS) {
-    return fail(`tasksは1〜${String(MAX_PLAN_TASKS)}件の配列で指定する`);
+  if (!Array.isArray(tasksRaw) || tasksRaw.length === 0) {
+    return fail('tasksは1件以上の配列で指定する');
   }
   const tasks: PlanTaskInput[] = [];
   for (const [i, item] of tasksRaw.entries()) {

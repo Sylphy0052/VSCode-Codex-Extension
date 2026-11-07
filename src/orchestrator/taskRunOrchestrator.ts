@@ -3,7 +3,7 @@ import { MESSAGING_MCP_SERVER_NAME, type McpToolDefinition } from './messaging';
 import {
   buildOrchestratorConfig,
   composeOrchestratorPrompt,
-  MAX_ORCHESTRATOR_EVENTS_PER_RUN,
+  orchestratorEventsCap,
   type OrchestratorEventEnvelope,
 } from './orchestratorSession';
 import {
@@ -44,6 +44,7 @@ import {
   getTask,
   isTaskRunActive,
   isValidTaskId,
+  listTasks,
   MAX_PAUSE_REASON_LENGTH,
   nextOrchestratorGeneration,
   recordOrchestratorAutoHandoff,
@@ -259,7 +260,7 @@ interface LiveOrchestrator {
   startedStages: string[];
   eventsSent: number;
   /**
-   * イベント総数の上限（`MAX_ORCHESTRATOR_EVENTS_PER_RUN`）に達したことを知らせる通知を
+   * イベント総数の上限（`orchestratorEventsCap`）に達したことを知らせる通知を
    * 送り済みか（Issue #1520）。以降`notify`が無言で捨て続けるのは1度知らせれば十分なため、
    * 二重に積み増さないようここで一度きりに絞る。
    */
@@ -355,7 +356,13 @@ export class TaskRunOrchestrator {
    */
   canDecide(runId: string): boolean {
     const live = this.live.get(runId);
-    return live !== undefined && live.eventsSent < MAX_ORCHESTRATOR_EVENTS_PER_RUN;
+    return live !== undefined && live.eventsSent < this.eventsCap(runId);
+  }
+
+  /** runのイベント通知の上限。計画のタスク数に比例する（`orchestratorEventsCap`）。 */
+  private eventsCap(runId: string): number {
+    const run = this.deps.controller.find(runId);
+    return orchestratorEventsCap(run === undefined ? 0 : listTasks(run).length);
   }
 
   /**
@@ -815,7 +822,7 @@ export class TaskRunOrchestrator {
       live.startedStages.push(event.body);
       return;
     }
-    if (live.eventsSent >= MAX_ORCHESTRATOR_EVENTS_PER_RUN) {
+    if (live.eventsSent >= this.eventsCap(runId)) {
       // 上限に達すると`taskFailed`・`runFinished`を含め以降は無言で捨てていた（Issue #1520）。
       // 気付ける手がかりを1回だけ残す（ログ＋通知）。この通知自体は`eventsSent`を消費しない
       // （消費すると上限をさらに縮めてしまい、本末転倒になる）
@@ -834,13 +841,14 @@ export class TaskRunOrchestrator {
       return;
     }
     live.capNoticeSent = true;
+    const cap = this.eventsCap(runId);
     this.deps.log(
-      `[task run orchestrator] ${runId}のイベント通知が上限（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）に達したため、以降の通知は届きません`,
+      `[task run orchestrator] ${runId}のイベント通知が上限（${String(cap)}件/run）に達したため、以降の通知は届きません`,
     );
     live.pending.push({
       kind: 'eventsCapReached',
       body: [
-        `イベント通知が上限（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）に達しました。`,
+        `イベント通知が上限（${String(cap)}件/run）に達しました。`,
         'これ以降のタスクの失敗や工程の完了・run終了を含む通知はもう届きません。',
         'get_run_stateで状態を取り直して判断してください。',
       ].join('\n'),
