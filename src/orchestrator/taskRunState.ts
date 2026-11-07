@@ -162,7 +162,7 @@ export interface OrchestratedTask {
   existingIssueNumber: number | undefined;
   /**
    * ロードマップで完了済みの子Issueとして置いたタスク（Issue #1623）。全工程を飛ばした状態で作り、
-   * 依存先としてだけ使う。`hasStarted`は偽になるが、計画からは外せない（`withCarriedCompletedTasks`が戻す）。
+   * 依存先としてだけ使う。`hasStarted`は偽になるが、計画からは外せない（`withCarriedTasks`が戻す）。
    */
   completedInRoadmap?: true;
   executionId: string;
