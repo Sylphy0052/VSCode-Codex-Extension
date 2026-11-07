@@ -151,6 +151,11 @@ export interface TaskRunControllerDeps {
     engine: TaskRunEngine,
     input: HandoffClassifierInput,
   ): Promise<StageSettingsRecommendation | undefined>;
+  /**
+   * 判断待ちの工程を、Orchestratorの`start_stage`を待たずに推奨値で始めるか（Issue #2031。
+   * 設定`agent.taskRun.autoStartStages.enabled`）。省略時は始めない。
+   */
+  autoStartStages?(engine: TaskRunEngine): boolean;
   /** 計画で指定された既存のIssueがopenかを確かめる。再読み込み後の復元ではPRの状態も見る。 */
   observation: Pick<StageObservationPorts, 'fetchIssueState' | 'fetchPullRequestState'>;
   /**
@@ -218,6 +223,9 @@ const REJECTION_MESSAGES: Record<StartStageRejection, string> = {
     'このタスクには、Reflexが判定中またはユーザーの判断待ちの関門がある（ユーザーの判断はresolve_gateで渡す）',
   dependenciesUnmet: '依存先のタスクが終わっていない',
 };
+
+/** 推奨値で自動開始した工程の記録（`StageDecision.reason`）に残す理由（Issue #2031）。 */
+export const AUTO_START_REASON = '推奨値で自動開始（agent.taskRun.autoStartStages.enabled）';
 
 export class TaskRunController {
   /** 最後に購読者へ渡したrun。差分の起点にする。 */
@@ -1332,17 +1340,111 @@ export class TaskRunController {
     }
     const ref: StageRef = { taskId: call.taskId, stage: call.stage };
     const recommended = this.recommended.get(runId)?.get(recommendationKey(ref.taskId, ref.stage));
+    const recorded = await this.recordDecision(runId, ref, true, (now) => ({
+      model: settings.model,
+      effort: settings.effort,
+      reason: call.reason,
+      instruction: call.instruction,
+      recommended:
+        recommended === undefined
+          ? undefined
+          : { model: recommended.model, effort: recommended.effort },
+      decidedAt: now.toISOString(),
+    }));
+    if (!recorded.ok) {
+      return recorded;
+    }
+    return {
+      ok: true,
+      message: `${call.taskId}の${call.stage}をmodel=${settings.model} effort=${settings.effort === '' ? '（既定）' : settings.effort}で受け付けた。並列枠が空き次第始まる。`,
+    };
+  }
+
+  /**
+   * 設定`agent.taskRun.autoStartStages.enabled`が有効なrunで、判断待ちの工程を推奨値のまま
+   * 受け付ける（Issue #2031）。Orchestratorの`start_stage`と同じ記録をControllerが行う。
+   * 始めた推奨値を返し、無効・推奨値が無い・推奨値がモデル一覧に無い・受け付けられない
+   * （止まった工程のやり直しを含む）ときは`undefined`を返す（Orchestratorの判断に回す）。
+   */
+  async autoStartStage(
+    runId: string,
+    ref: StageRef,
+  ): Promise<StageSettingsRecommendation | undefined> {
+    const run = this.deps.store.find(runId);
+    if (run === undefined || this.deps.autoStartStages?.(run.engine) !== true) {
+      return undefined;
+    }
+    // やり直し（関門の決着・再読み込み後の復元・実装への差し戻しで未着手へ戻した工程）は、
+    // 前回の設定を見直す余地があるのでOrchestratorに決めさせる
+    const task = getTask(run, ref.taskId);
+    if (task === undefined || task.stages[ref.stage].attempts.length > 0) {
+      return undefined;
+    }
+    const recommendation = await this.recommend(runId, ref);
+    if (recommendation === undefined) {
+      return undefined;
+    }
+    const catalog = this.deps.modelCatalog(run.engine);
+    const settings = checkStageSettings(
+      catalog.models,
+      catalog.fallbackEfforts,
+      recommendation.model,
+      recommendation.effort,
+    );
+    if (!settings.ok) {
+      this.deps.log(
+        `[task run] ${ref.taskId}の${ref.stage}は推奨値で自動開始できませんでした: ${settings.message}`,
+      );
+      return undefined;
+    }
+    if (!(await this.ensureLease(runId)).ok) {
+      return undefined;
+    }
+    // 止まった工程のやり直しはしない（Orchestratorの判断を残す）。`decideStageStart`が断る
+    const recorded = await this.recordDecision(runId, ref, false, (now) => ({
+      model: settings.model,
+      effort: settings.effort,
+      reason: AUTO_START_REASON,
+      instruction: undefined,
+      recommended: { model: recommendation.model, effort: recommendation.effort },
+      decidedAt: now.toISOString(),
+    }));
+    if (!recorded.ok) {
+      this.deps.log(`[task run] ${recorded.message}（推奨値での自動開始）`);
+      return undefined;
+    }
+    // 検証済みの値を返す（Orchestratorへの知らせにそのまま載せる）
+    return { ...recommendation, model: settings.model, effort: settings.effort };
+  }
+
+  /** このエンジンのrunで、判断待ちの工程を推奨値で自動開始するか（Issue #2031）。 */
+  autoStartsStages(engine: TaskRunEngine): boolean {
+    return this.deps.autoStartStages?.(engine) === true;
+  }
+
+  /**
+   * 工程の設定（`StageDecision`）を記録し、並列枠の空きで始まるようにする（`start_stage`と
+   * 推奨値での自動開始で共有）。`allowRetry`なら止まっている工程をやり直しとして未着手へ戻して
+   * から判定する。判定を通らなければ状態を変えない。
+   */
+  private async recordDecision(
+    runId: string,
+    ref: StageRef,
+    allowRetry: boolean,
+    makeDecision: (now: Date) => StageDecision,
+  ): Promise<ControllerResult> {
     let rejection: string | undefined;
     const next = await this.updateRun(runId, (r) => {
       const now = this.now();
-      const task = getTask(r, call.taskId);
+      const task = getTask(r, ref.taskId);
       const retry =
+        allowRetry &&
         task !== undefined &&
-        currentStage(task) === call.stage &&
-        task.stages[call.stage].status === 'halted' &&
+        currentStage(task) === ref.stage &&
+        task.stages[ref.stage].status === 'halted' &&
         task.attention !== 'stopping';
-      const base = retry ? resetStageForRetry(r, call.taskId, now) : r;
-      const decided = decideStageStart(base, call.taskId, call.stage);
+      const base = retry ? resetStageForRetry(r, ref.taskId, now) : r;
+      const decided = decideStageStart(base, ref.taskId, ref.stage);
       if (!decided.ok) {
         rejection =
           decided.reason === 'dependenciesUnmet'
@@ -1350,18 +1452,7 @@ export class TaskRunController {
             : REJECTION_MESSAGES[decided.reason];
         return r;
       }
-      const decision: StageDecision = {
-        model: settings.model,
-        effort: settings.effort,
-        reason: call.reason,
-        instruction: call.instruction,
-        recommended:
-          recommended === undefined
-            ? undefined
-            : { model: recommended.model, effort: recommended.effort },
-        decidedAt: now.toISOString(),
-      };
-      const updated = recordStageDecision(base, call.taskId, call.stage, decision, now);
+      const updated = recordStageDecision(base, ref.taskId, ref.stage, makeDecision(now), now);
       if (updated === base) {
         rejection = '設定を記録できなかった';
         return r;
@@ -1372,14 +1463,11 @@ export class TaskRunController {
       return { ok: false, message: 'runが見つからない' };
     }
     if (rejection !== undefined) {
-      return { ok: false, message: `${call.taskId}の${call.stage}を始められない: ${rejection}` };
+      return { ok: false, message: `${ref.taskId}の${ref.stage}を始められない: ${rejection}` };
     }
     this.forgetRecommendation(runId, ref);
     this.pumpLater(runId);
-    return {
-      ok: true,
-      message: `${call.taskId}の${call.stage}をmodel=${settings.model} effort=${settings.effort === '' ? '（既定）' : settings.effort}で受け付けた。並列枠が空き次第始まる。`,
-    };
+    return { ok: true, message: '' };
   }
 
   async stopStage(runId: string, taskId: string): Promise<ControllerResult> {

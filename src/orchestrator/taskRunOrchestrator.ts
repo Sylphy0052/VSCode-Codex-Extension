@@ -101,6 +101,7 @@ export interface TaskRunOrchestratorEvent {
   kind:
     | 'planApproved'
     | 'stageAwaitingDecision'
+    | 'stageAutoStarted'
     | 'stageStarted'
     | 'stageDone'
     | 'taskNeedsAction'
@@ -144,6 +145,8 @@ export interface TaskRunOrchestratorDeps {
     | 'find'
     | 'updateRun'
     | 'recommend'
+    | 'autoStartStage'
+    | 'autoStartsStages'
     | 'recommendations'
     | 'proposePlan'
     | 'approvePlan'
@@ -271,6 +274,11 @@ interface LiveOrchestrator {
    * 次に送るイベントの先頭へ1行にまとめて添える。`eventsSent`も消費しない。
    */
   startedStages: string[];
+  /**
+   * まだ知らせていない、推奨値で自動開始した工程（「T1 実装（model=… effort=…）」の形。
+   * Issue #2031）。`startedStages`と同じく単独ではターンを起こさず、次に送るイベントへ添える。
+   */
+  autoStartedStages: string[];
   eventsSent: number;
   /**
    * イベント総数の上限（`orchestratorEventsCap`）に達したことを知らせる通知を
@@ -556,7 +564,20 @@ export class TaskRunOrchestrator {
     this.live.clear();
   }
 
+  /**
+   * 判断待ちになった工程を知らせる。設定で自動開始が有効なら、先に推奨値で受け付けさせ、
+   * 受け付けたら判断待ちの代わりに自動開始を知らせる（Issue #2031）。
+   */
   private async notifyAwaitingDecision(runId: string, ref: StageRef): Promise<void> {
+    const autoStarted = await this.deps.controller.autoStartStage(runId, ref);
+    if (autoStarted !== undefined) {
+      const effort = autoStarted.effort === '' ? '（既定）' : autoStarted.effort;
+      this.notify(runId, {
+        kind: 'stageAutoStarted',
+        body: `${ref.taskId} ${STAGE_LABELS[ref.stage]}（model=${autoStarted.model} effort=${effort}）`,
+      });
+      return;
+    }
     const recommendation = await this.deps.controller.recommend(runId, ref);
     const run = this.deps.controller.find(runId);
     const task = run === undefined ? undefined : getTask(run, ref.taskId);
@@ -654,6 +675,7 @@ export class TaskRunOrchestrator {
       busy: false,
       pending: [...carried],
       startedStages: [...(previous?.startedStages ?? [])],
+      autoStartedStages: [...(previous?.autoStartedStages ?? [])],
       // eventsSent: 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
       eventsSent: previous?.eventsSent ?? 0,
       // capNoticeSent: 上限到達の通知は前の世代のセッションにしか届いていない。新しい世代が知らないと
@@ -673,6 +695,7 @@ export class TaskRunOrchestrator {
     if (previous !== undefined) {
       previous.pending = [];
       previous.startedStages = [];
+      previous.autoStartedStages = [];
       this.deps.server.unregister(previous.token);
       previous.session.dispose();
     }
@@ -691,6 +714,7 @@ export class TaskRunOrchestrator {
         generation,
         { trigger, carriedCount: carried.length },
         lessonsBlock,
+        this.deps.controller.autoStartsStages(current.engine),
       ),
     );
     this.deps.onDidChange();
@@ -856,6 +880,11 @@ export class TaskRunOrchestrator {
       live.startedStages.push(event.body);
       return;
     }
+    if (event.kind === 'stageAutoStarted') {
+      // 推奨値での自動開始も応答を求めないため、単独ではターンを起こさない（Issue #2031）
+      live.autoStartedStages.push(event.body);
+      return;
+    }
     if (live.eventsSent >= this.eventsCap(runId)) {
       // 上限に達すると`taskFailed`・`runFinished`を含め以降は無言で捨てていた（Issue #1520）。
       // 気付ける手がかりを1回だけ残す（ログ＋通知）。この通知自体は`eventsSent`を消費しない
@@ -902,13 +931,25 @@ export class TaskRunOrchestrator {
     }
     const pending = live.pending;
     const started = live.startedStages;
-    const events: TaskRunOrchestratorEvent[] =
-      started.length === 0
-        ? pending
-        : [{ kind: 'stageStarted', body: `開始した工程: ${started.join(', ')}` }, ...pending];
+    const autoStarted = live.autoStartedStages;
+    const events: TaskRunOrchestratorEvent[] = [
+      ...(autoStarted.length === 0
+        ? []
+        : [
+            {
+              kind: 'stageAutoStarted' as const,
+              body: `推奨値で自動開始した工程: ${autoStarted.join(', ')}。変えるならstop_stageで止めてからstart_stageでやり直す`,
+            },
+          ]),
+      ...(started.length === 0
+        ? []
+        : [{ kind: 'stageStarted' as const, body: `開始した工程: ${started.join(', ')}` }]),
+      ...pending,
+    ];
     const text = composeOrchestratorPrompt(events, '', TASK_RUN_EVENT_ENVELOPE);
     live.pending = [];
     live.startedStages = [];
+    live.autoStartedStages = [];
     if (text === '') {
       return;
     }
@@ -919,6 +960,7 @@ export class TaskRunOrchestrator {
       // 送れなかったイベントは次の機会に送り直す
       live.pending = [...pending, ...live.pending];
       live.startedStages = [...started, ...live.startedStages];
+      live.autoStartedStages = [...autoStarted, ...live.autoStartedStages];
       throw e;
     }
     this.deps.onDidChange();
@@ -1631,6 +1673,7 @@ function buildIntroPrompt(
   generation: number,
   handover: { trigger: GenerationTrigger; carriedCount: number },
   lessonsBlock?: string,
+  autoStartStages = false,
 ): string {
   return [
     `あなたはオーケストレータモードの実行（run: ${run.runId}）を指揮するOrchestratorです（第${String(generation)}世代）。`,
@@ -1651,7 +1694,10 @@ function buildIntroPrompt(
     '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
     '- 承認後、Model/Effortの判断を待つ工程はstart_stageで始める。推奨値を基本にし、変えるときは理由をreasonに書く。' +
       `判断待ちの通知（stageAwaitingDecision）には推奨値の理由を先頭${String(MAX_EVENT_RECOMMENDATION_REASONS)}件まで書き、残りは件数だけ示す。全部はget_run_stateで読める。` +
-      '判断待ちの通知は並列上限の空き枠の分だけ着手順に届き、残りは枠が空くと届く。通知を待たずに始めてもよい（推奨値はまだ無い）',
+      '判断待ちの通知は並列上限の空き枠の分だけ着手順に届き、残りは枠が空くと届く。通知を待たずに始めてもよい（推奨値はまだ無い）' +
+      (autoStartStages
+        ? '。このrunでは推奨値での自動開始が有効で、推奨値を得られた工程はControllerが推奨値のまま始め、stageAutoStartedで知らせる（応答は要らない）。判断待ちの通知は、推奨値を得られなかった工程と、やり直しの工程（前に実行したことがある工程）にだけ届く。自動開始した工程の設定を変えるならstop_stageで止めてからstart_stageでやり直す'
+        : ''),
     '- set_max_parallelは呼ぶとユーザーの承認が入るため、会話で事前に確かめない。ユーザーが上限を指定したときと、資源の逼迫で下げるときに使う。stop_stageはreasonに止める理由を書いて呼ぶ。Reflexが回答者を判定し、自分で決めてよければ確認なしに止まり、そうでなければユーザーの承認が入る。ユーザーの判断待ちの質問も、自分で決められると考えたらanswer_questionで回答案を送ってよい。' +
       'Reflexが回答者を判定し、オーケストレーターが決めてよければ確認なしに渡り、そうでなければユーザーの確認が入る',
     '- 回答者判定（Reflex）がオーケストレーターの判断待ちとした質問と関門（questionAwaitingOrchestrator・gateAwaitingOrchestrator）は、計画・Issue・コード・過去の回答から自分で決め、answer_question・resolve_gateで送る（確認は出ない）。' +
