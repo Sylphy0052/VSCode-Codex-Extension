@@ -175,7 +175,7 @@ describe('get_run_stateの差分取得（Issue #1980）', () => {
   it('導入文向けの要約はタスク数と状態別の件数を1行で返す', () => {
     const summary = formatTaskRunSummary(advanceT2(makeRun()));
     expect(summary).toBe(
-      'run: run-1 / 計画: approved / タスク: 3件（完了1 / 実行中1 / 停止中0 / 未着手1） / 判断待ちの工程: 1件',
+      'run: run-1 / 計画: approved / タスク: 3件（完了1 / 実行中1 / 停止中0 / 未着手1） / 判断待ちの工程: 1件（うち通知の対象1件）',
     );
     expect(summary).not.toContain('\n');
   });

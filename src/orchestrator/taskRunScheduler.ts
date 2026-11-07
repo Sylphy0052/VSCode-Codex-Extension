@@ -335,9 +335,7 @@ export function assessTaskRun(run: TaskRun): TaskRunAssessment {
  */
 function assessWhileAwaitingApproval(run: TaskRun): TaskRunAssessment {
   const pending: TaskRunAssessment = { kind: 'planPending', planStatus: 'awaitingApproval' };
-  const tasks = listTasks(run).filter(
-    (task) => !isTaskDone(task) && isTaskPlanApproved(run, task),
-  );
+  const tasks = listTasks(run).filter((task) => !isTaskDone(task) && isTaskPlanApproved(run, task));
   if (tasks.length === 0) {
     return pending;
   }

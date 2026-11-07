@@ -1649,7 +1649,9 @@ export class ClaudeStreamSession {
       return;
     }
     const uuid = this.state.busy ? randomUUID() : undefined;
-    this.update(uuid === undefined ? next : { ...next, held: [...next.held, { ...message, uuid }] });
+    this.update(
+      uuid === undefined ? next : { ...next, held: [...next.held, { ...message, uuid }] },
+    );
     try {
       this.send(message.text, message.attachments, uuid);
     } catch (e) {

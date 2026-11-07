@@ -47,10 +47,7 @@ import {
 } from '../orchestrator/taskRunLease';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
-import {
-  createIssueReader,
-  createTaskRunRoadmapPort,
-} from '../orchestrator/taskRunRoadmapForge';
+import { createIssueReader, createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
 import {
   getTask,

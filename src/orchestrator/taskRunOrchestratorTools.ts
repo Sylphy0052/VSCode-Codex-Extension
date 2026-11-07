@@ -1029,8 +1029,14 @@ function formatTaskLines(
   if (task.completedInRoadmap === true) {
     lines.push('  ロードマップで完了済み（全工程を飛ばした。提案で省いても計画に残る）');
   }
-  if (run.planStatus === 'awaitingApproval' && stage !== undefined && !isTaskPlanApproved(run, task)) {
-    lines.push('  計画の承認待ち（新しいタスク、または内容を変えたタスク。承認まで新しい工程を始めない）');
+  if (
+    run.planStatus === 'awaitingApproval' &&
+    stage !== undefined &&
+    !isTaskPlanApproved(run, task)
+  ) {
+    lines.push(
+      '  計画の承認待ち（新しいタスク、または内容を変えたタスク。承認まで新しい工程を始めない）',
+    );
   }
   if (task.pullRequest !== undefined) {
     lines.push(`  PR: #${String(task.pullRequest.number)} ${inline(task.pullRequest.url)}`);
