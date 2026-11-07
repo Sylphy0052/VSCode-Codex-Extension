@@ -959,7 +959,13 @@ export function completeStage(
           : output.stage === 'review'
             ? { ...closed, review: output.review }
             : closed;
-  return withTask(run, { ...withOutput, attention: 'none', failure: undefined, haltCause: undefined, updatedAt: at });
+  return withTask(run, {
+    ...withOutput,
+    attention: 'none',
+    failure: undefined,
+    haltCause: undefined,
+    updatedAt: at,
+  });
 }
 
 /** 「実装とPR作成」の開始時に作ったworktreeとブランチを記録する。 */
@@ -1179,7 +1185,13 @@ export function completeMergedTask(run: TaskRun, taskId: string, now: Date): Tas
       });
     }
   }
-  return withTask(run, { ...next, attention: 'none', failure: undefined, haltCause: undefined, updatedAt: at });
+  return withTask(run, {
+    ...next,
+    attention: 'none',
+    failure: undefined,
+    haltCause: undefined,
+    updatedAt: at,
+  });
 }
 
 /**
