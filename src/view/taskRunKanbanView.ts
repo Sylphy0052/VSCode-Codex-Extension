@@ -942,7 +942,7 @@ const script = `
     }
     const box = el('div', 'plan-box');
     if (run.planStatus === 'awaitingApproval') {
-      box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列を確かめて承認してください。変更したいときはOrchestratorのチャットで伝えます。'));
+      box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列と「計画の承認待ち」の印が付いたタスクを確かめて承認してください。承認を待つのは新しいタスクと内容を変えたタスクだけで、前回承認したままのタスクは進み続けます。変更したいときはOrchestratorのチャットで伝えます。'));
       if (run.planReview) {
         box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
       }
