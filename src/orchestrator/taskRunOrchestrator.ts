@@ -56,6 +56,7 @@ import {
   MAX_PAUSE_REASON_LENGTH,
   nextOrchestratorGeneration,
   recordOrchestratorAutoHandoff,
+  recordOrchestratorEventsSent,
   recordOrchestratorSession,
   TASK_STAGES,
   taskRunLabel,
@@ -496,7 +497,7 @@ export class TaskRunOrchestrator {
       `[task run orchestrator] ${runId}のOrchestratorを次の世代へ引き継げませんでした。前の世代で続けます`,
     );
     if (!live.busy) {
-      this.flush(live);
+      this.flush(runId, live);
     }
     this.deps.onDidChange();
   }
@@ -676,8 +677,9 @@ export class TaskRunOrchestrator {
       pending: [...carried],
       startedStages: [...(previous?.startedStages ?? [])],
       autoStartedStages: [...(previous?.autoStartedStages ?? [])],
-      // eventsSent: 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる
-      eventsSent: previous?.eventsSent ?? 0,
+      // eventsSent: 上限はrun全体で数える（Issue #1580）。世代ごとに0へ戻すと、引き継ぐたびに上限が延びる。
+      // 前の世代が無い（拡張の再読み込み・closeの後に開いた）ときは保存した数から始める（Issue #2034）
+      eventsSent: previous?.eventsSent ?? run.orchestratorEventsSent ?? 0,
       // capNoticeSent: 上限到達の通知は前の世代のセッションにしか届いていない。新しい世代が知らないと
       // 「イベントが来ない＝何も起きていない」と誤解しかねないため、世代ごとに1回知らせる（Issue #1594）
       capNoticeSent: false,
@@ -739,7 +741,7 @@ export class TaskRunOrchestrator {
     }
     live.busy = state.busy;
     if (finishedTurn) {
-      this.flush(live);
+      this.flush(runId, live);
       if (!live.busy) {
         this.nudgeTurnEndAnswerer(runId, live, state);
       }
@@ -895,7 +897,7 @@ export class TaskRunOrchestrator {
     live.eventsSent += 1;
     live.pending.push(event);
     if (!live.busy) {
-      this.flush(live);
+      this.flush(runId, live);
     }
   }
 
@@ -917,7 +919,7 @@ export class TaskRunOrchestrator {
       ].join('\n'),
     });
     if (!live.busy) {
-      this.flush(live);
+      this.flush(runId, live);
     }
   }
 
@@ -925,7 +927,7 @@ export class TaskRunOrchestrator {
    * 溜まったイベントを送る。ターンの最中と、次の世代への引き継ぎの途中には送らない。
    * まだ知らせていない工程の開始は、先頭に1行で添える（Issue #1981）。
    */
-  private flush(live: LiveOrchestrator): void {
+  private flush(runId: string, live: LiveOrchestrator): void {
     if (live.pending.length === 0 || live.handingOff) {
       return;
     }
@@ -963,7 +965,24 @@ export class TaskRunOrchestrator {
       live.autoStartedStages = [...autoStarted, ...live.autoStartedStages];
       throw e;
     }
+    this.persistEventsSent(runId, live.eventsSent);
     this.deps.onDidChange();
+  }
+
+  /**
+   * 送ったイベント通知の数をrun状態へ保存する（Issue #2034）。保存は1イベントごとでなく送信の区切り
+   * （ターンを始めた後）にまとめる。保存はworkspaceStateの書き込み1回で、1イベントごとでは上限の件数分
+   * 書くことになるため。区切りの前に再読み込みしたときに数えそびれるのは、まだ送っていないイベントの分だけ。
+   * `flush`は同期関数のため保存を待たない。失敗してもイベントの送信は止めず、ログに残す
+   */
+  private persistEventsSent(runId: string, count: number): void {
+    this.deps.controller
+      .updateRun(runId, (r) => recordOrchestratorEventsSent(r, count))
+      .catch((e: unknown) => {
+        this.deps.log(
+          `[task run orchestrator] ${runId}のイベント通知数を保存できませんでした: ${String(e)}`,
+        );
+      });
   }
 
   /**

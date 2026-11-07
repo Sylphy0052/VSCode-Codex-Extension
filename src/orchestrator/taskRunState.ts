@@ -357,6 +357,12 @@ export interface TaskRun {
   /** 開いたOrchestratorセッションのsessionId（全世代）。リロード後の汎用復元から外す判定に使う。 */
   orchestratorSessionRefs: readonly string[];
   /**
+   * Orchestratorへ送ったイベント通知の数（全世代の合計。Issue #2034）。上限（`orchestratorEventsCap`）は
+   * run全体で数えるため、拡張の再読み込みを挟んでも数え直さないよう保存する。
+   * 追加前に保存したrunには無い（0として扱う）。
+   */
+  orchestratorEventsSent?: number | undefined;
+  /**
    * 直近の計画提案に対するReflex判定（Issue #1554）。判定を試みていなければ`undefined`。
    * 追加前に保存したrunには無い（`undefined`として扱う）。
    */
@@ -1368,6 +1374,17 @@ export function recordOrchestratorSession(run: TaskRun, sessionId: string): Task
     return run;
   }
   return { ...run, orchestratorSessionRefs: [...run.orchestratorSessionRefs, sessionId] };
+}
+
+/**
+ * Orchestratorへ送ったイベント通知の数を保存する（Issue #2034）。保存値以下なら同じ`run`を返し、
+ * 書き込みを起こさない（数は増えるだけで、遅れて届いた古い数で戻さない）。
+ */
+export function recordOrchestratorEventsSent(run: TaskRun, count: number): TaskRun {
+  if (count <= (run.orchestratorEventsSent ?? 0)) {
+    return run;
+  }
+  return { ...run, orchestratorEventsSent: count };
 }
 
 /** 自動引き継ぎで世代`generation`を起こしたことを記録する（Issue #1553）。 */
