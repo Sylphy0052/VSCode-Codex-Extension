@@ -102,6 +102,24 @@ export function listStagesAwaitingDecision(run: TaskRun): StageRef[] {
     });
 }
 
+/**
+ * 判断待ちの工程のうち、Orchestratorへ知らせるもの（Issue #2030）。並列上限の空き枠の分だけを
+ * 着手順に返す。空き枠は、並列上限から動いているセッション・設定を受け付けて待っている工程・
+ * 再開待ちの工程を引いた数。N件の判断待ちを一斉に知らせると、推奨値の算出（分類器）もN件並列で
+ * 走るため。
+ *
+ * - 設定を受け付けた「mergeとcleanup」はmergeの鍵で別に待つので、枠から引かない（鍵待ちで
+ *   他の工程の通知を遅らせない）
+ * - 同じフォルダの全runを合わせた上限（`folderSlots`、Issue #1562）は使わない。Runnerが持つ値で
+ *   ここからは見えないため。フォルダ上限で詰まっても、件数は並列上限までに収まる
+ */
+export function listStagesToAnnounce(run: TaskRun): StageRef[] {
+  const queued = listQueuedStages(run).filter((ref) => ref.stage !== 'mergeCleanup').length;
+  const slots =
+    run.maxParallel - countActiveStageSessions(run) - queued - listResumingStages(run).length;
+  return listStagesAwaitingDecision(run).slice(0, Math.max(0, slots));
+}
+
 /** 設定を受け付け、並列枠（とmergeの鍵）の空きを待っている工程。着手順に返す。 */
 export function listQueuedStages(run: TaskRun): StageRef[] {
   if (!isRunAccepting(run)) {
@@ -306,17 +324,18 @@ export function assessTaskRun(run: TaskRun): TaskRunAssessment {
   });
 }
 
-function stageRefKey(ref: StageRef): string {
+export function stageRefKey(ref: StageRef): string {
   return `${ref.taskId}:${ref.stage}`;
 }
 
 /**
- * 状態の更新で新たにOrchestratorの判断を待つようになった工程。Controllerはこれを
- * Orchestratorへイベントとして送る。
+ * 状態の更新で新たにOrchestratorへ知らせる対象（`listStagesToAnnounce`）に入った工程。
+ * Controllerはこれを Orchestratorへイベントとして送る。工程が終わって枠が空くと次の工程が対象に
+ * 入るので、後続もこの差分で知らせる。
  */
 export function newlyAwaitingDecision(before: TaskRun, after: TaskRun): StageRef[] {
-  const beforeKeys = listStagesAwaitingDecision(before).map(stageRefKey);
-  const afterRefs = listStagesAwaitingDecision(after);
+  const beforeKeys = listStagesToAnnounce(before).map(stageRefKey);
+  const afterRefs = listStagesToAnnounce(after);
   const appeared = new Set(newlyAppeared(beforeKeys, afterRefs.map(stageRefKey)));
   return afterRefs.filter((ref) => appeared.has(stageRefKey(ref)));
 }
