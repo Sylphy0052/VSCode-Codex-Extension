@@ -165,6 +165,12 @@ export interface OrchestratedTask {
    * 依存先としてだけ使う。`hasStarted`は偽になるが、計画からは外せない（`withCarriedTasks`が戻す）。
    */
   completedInRoadmap?: true;
+  /**
+   * 承認した計画に今の内容で入っている（Issue #2028）。計画を出し直して承認待ちに戻っても、
+   * これが付いたタスクは工程を進める。新しいタスクと内容を変えたタスクには付かない。
+   * 追加前に保存したrunには無いが、直前のrunが`approved`なら`proposeTaskPlan`が承認済みとみなす。
+   */
+  planApproved?: true;
   executionId: string;
   stages: Record<TaskStage, TaskStageRecord>;
   /** 報告を受け付ける実行回。実行中のセッションが無ければ`undefined`（どの報告も受け付けない）。 */
@@ -651,20 +657,13 @@ export function proposeTaskPlan(
   const tasks: Record<string, OrchestratedTask> = {};
   for (const draft of drafts) {
     const existing = getTask(run, draft.taskId);
-    // 未着手のタスクで既存Issueが変わったら、Issue工程を飛ばすかどうかから作り直す
+    // 未着手のタスクで既存Issueが変わったら、Issue工程を飛ばすかどうかから作り直す（未承認になる）
     tasks[draft.taskId] =
       existing === undefined
         ? newTask(draft, newExecutionId(draft.taskId), at)
         : existing.existingIssueNumber !== draft.existingIssueNumber
           ? newTask(draft, existing.executionId, at)
-          : {
-              ...existing,
-              title: draft.title,
-              summary: draft.summary,
-              acceptanceCriteria: draft.acceptanceCriteria,
-              dependsOn: draft.dependsOn,
-              updatedAt: at,
-            };
+          : withDraftContent(run, existing, draft, at);
   }
   const next: TaskRun = {
     ...run,
@@ -677,6 +676,53 @@ export function proposeTaskPlan(
   return next;
 }
 
+/**
+ * 既存のタスクの内容を計画の案で差し替える。承認済み（直前のrunが`approved`、または
+ * `planApproved`）で内容が変わらなければ承認済みのまま残し、変われば外す（Issue #2028）。
+ */
+function withDraftContent(
+  run: TaskRun,
+  existing: OrchestratedTask,
+  draft: TaskDraft,
+  at: string,
+): OrchestratedTask {
+  const wasApproved = run.planStatus === 'approved' || existing.planApproved === true;
+  const unchanged =
+    existing.title === draft.title &&
+    existing.summary === draft.summary &&
+    sameStrings(existing.acceptanceCriteria, draft.acceptanceCriteria) &&
+    sameStrings(existing.dependsOn, draft.dependsOn);
+  const updated: OrchestratedTask = {
+    ...existing,
+    title: draft.title,
+    summary: draft.summary,
+    acceptanceCriteria: draft.acceptanceCriteria,
+    dependsOn: draft.dependsOn,
+    updatedAt: at,
+  };
+  if (wasApproved && unchanged) {
+    updated.planApproved = true;
+  } else {
+    delete updated.planApproved;
+  }
+  return updated;
+}
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+/**
+ * タスクを計画の承認済みとして扱えるか（Issue #2028）。runが`approved`なら全タスク、
+ * 承認待ちなら`planApproved`の付いたタスクだけ。計画作成中（`drafting`）は無い。
+ */
+export function isTaskPlanApproved(run: TaskRun, task: OrchestratedTask): boolean {
+  return (
+    run.planStatus === 'approved' ||
+    (run.planStatus === 'awaitingApproval' && task.planApproved === true)
+  );
+}
+
 /** 工程を1つでも始めた（飛ばした工程は数えない）。 */
 export function hasStarted(task: OrchestratedTask): boolean {
   return TASK_STAGES.some((stage) => {
@@ -685,9 +731,18 @@ export function hasStarted(task: OrchestratedTask): boolean {
   });
 }
 
-/** 承認待ちの計画を承認する。承認待ちでなければそのまま返す。 */
+/** 承認待ちの計画を承認し、全タスクを承認済みにする（Issue #2028）。承認待ちでなければそのまま返す。 */
 export function approveTaskPlan(run: TaskRun): TaskRun {
-  return run.planStatus === 'awaitingApproval' ? { ...run, planStatus: 'approved' } : run;
+  if (run.planStatus !== 'awaitingApproval') {
+    return run;
+  }
+  const tasks: Record<string, OrchestratedTask> = { ...run.tasks };
+  for (const task of listTasks(run)) {
+    if (task.planApproved !== true) {
+      tasks[task.taskId] = { ...task, planApproved: true };
+    }
+  }
+  return { ...run, planStatus: 'approved', tasks };
 }
 
 /** 直近の計画提案に対するReflex判定を記録する（Issue #1554）。判定を試みていなければ`undefined`。 */

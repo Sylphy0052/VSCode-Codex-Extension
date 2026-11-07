@@ -20,6 +20,7 @@ import {
 import {
   currentStage,
   isTaskDone,
+  isTaskPlanApproved,
   isValidTaskId,
   listTasks,
   MAX_PAUSE_REASON_LENGTH,
@@ -65,7 +66,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'propose_plan',
     description:
-      '作業の計画（タスクの分割と依存）を提案する。未着手のタスクは計画に残すものを毎回すべて送る（省いた未着手のタスクは計画から外れる）。着手済みのタスクとロードマップで完了済みのタスクは省いてよく、省くと現在の内容のまま残る。内容を変えるときだけtaskId付きで送る。既存のタスクはget_run_stateのtaskId（T<数字>）で、新しいタスクは任意の仮キーで書く。応答で仮キーと採番したtaskIdの対応を返す。承認するまで工程は始まらず（approve_planツール、またはKanbanの承認ボタン）、承認後に計画を変えると再び承認待ちになる。着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけで、タスクの追加はいつでもできる。新しいタスクのdependsOnには、省いたタスクのtaskIdも書ける。',
+      '作業の計画（タスクの分割と依存）を提案する。未着手のタスクは計画に残すものを毎回すべて送る（省いた未着手のタスクは計画から外れる）。着手済みのタスクとロードマップで完了済みのタスクは省いてよく、省くと現在の内容のまま残る。内容を変えるときだけtaskId付きで送る。既存のタスクはget_run_stateのtaskId（T<数字>）で、新しいタスクは任意の仮キーで書く。応答で仮キーと採番したtaskIdの対応を返す。承認するまで工程は始まらない（approve_planツール、またはKanbanの承認ボタン）。承認後に計画を変えると再び承認待ちになるが、承認を待つのは新しいタスクと内容（title・summary・acceptanceCriteria・dependsOn・existingIssueNumber）を変えたタスクだけで、他のタスクは工程を進め続ける。着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけで、タスクの追加はいつでもできる。新しいタスクのdependsOnには、省いたタスクのtaskIdも書ける。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1027,6 +1028,9 @@ function formatTaskLines(
   }
   if (task.completedInRoadmap === true) {
     lines.push('  ロードマップで完了済み（全工程を飛ばした。提案で省いても計画に残る）');
+  }
+  if (run.planStatus === 'awaitingApproval' && stage !== undefined && !isTaskPlanApproved(run, task)) {
+    lines.push('  計画の承認待ち（新しいタスク、または内容を変えたタスク。承認まで新しい工程を始めない）');
   }
   if (task.pullRequest !== undefined) {
     lines.push(`  PR: #${String(task.pullRequest.number)} ${inline(task.pullRequest.url)}`);

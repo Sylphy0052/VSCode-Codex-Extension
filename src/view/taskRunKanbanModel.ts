@@ -19,6 +19,7 @@ import {
   DEPENDENCY_GATED_STAGES,
   hasStarted,
   isTaskDone,
+  isTaskPlanApproved,
   isTaskRunActive,
   listTasks,
   TASK_RUN_TITLE_MAX_LENGTH,
@@ -199,7 +200,8 @@ function columnFor(run: TaskRun, task: OrchestratedTask): TaskRunKanbanColumn {
   if (isTaskDone(task)) {
     return 'done';
   }
-  if (run.planStatus !== 'approved' && !hasStarted(task)) {
+  // 計画の出し直しでは、承認を待つのは新しいタスクと内容を変えたタスクだけ（Issue #2028）
+  if (!isTaskPlanApproved(run, task) && !hasStarted(task)) {
     return 'planApproval';
   }
   return currentStage(task) ?? 'done';
@@ -241,8 +243,12 @@ function stageBadges(
       ? [{ label: '実行中', tone: 'ok' }]
       : [{ label: PAUSE_BADGE_LABELS[task.pause.phase], tone: 'warn' }];
   }
-  if (record.status !== 'notStarted' || run.planStatus !== 'approved') {
+  if (record.status !== 'notStarted') {
     return [];
+  }
+  // 着手済みで内容を変えたタスクは工程の列に残るので、承認まで次の工程を始めないことを示す（Issue #2028）
+  if (!isTaskPlanApproved(run, task)) {
+    return run.planStatus === 'awaitingApproval' ? [{ label: '計画の承認待ち', tone: 'warn' }] : [];
   }
   if (DEPENDENCY_GATED_STAGES.includes(stage) && unmet.length > 0) {
     return [{ label: '依存待ち', tone: '' }];
