@@ -788,6 +788,18 @@ export function readTaskRunPlanAutoApproveEnabled(
   );
 }
 
+/**
+ * オーケストレータモードで、判断待ちになった工程をOrchestratorの`start_stage`を待たずに
+ * 推奨値のModel/Effortで始めるか（Issue #2031）。既定は無効。推奨値を得られない工程と、
+ * やり直しの工程（前に実行したことがある工程）は従来どおりOrchestratorが決める。
+ */
+export function readTaskRunAutoStartStagesEnabled(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('taskRun.autoStartStages.enabled');
+  return typeof raw === 'boolean' ? raw : false;
+}
+
 /** @see readAutoHandoffSoftThresholdPercent */
 export const DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT = 40;
 

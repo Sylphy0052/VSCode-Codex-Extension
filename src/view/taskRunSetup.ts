@@ -13,6 +13,7 @@ import {
   readReflexEnabled,
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
+  readTaskRunAutoStartStagesEnabled,
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
   readTaskRunResourceThresholds,
@@ -329,6 +330,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     modelCatalog,
     planAutoApprove,
     planReview,
+    // 判断待ちの工程を推奨値で自動開始する（Issue #2031）。設定はエンジンに依らない
+    autoStartStages: () => readTaskRunAutoStartStagesEnabled(),
     // 関門の判断の審査（Issue #1787）も計画の審査と同じReflexの設定で行う
     gateReview: planReview,
     recommendStageSettings: async (engine, input) => {
