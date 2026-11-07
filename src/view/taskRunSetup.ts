@@ -46,7 +46,10 @@ import {
 } from '../orchestrator/taskRunLease';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
-import { createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
+import {
+  createIssueReader,
+  createTaskRunRoadmapPort,
+} from '../orchestrator/taskRunRoadmapForge';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
 import {
   getTask,
@@ -383,6 +386,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeQuestionAnswerByOrchestrator,
     judgeStopStageAnswerer: judgeStopStage,
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
+    readIssue: createIssueReader(ports),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),
     startPolicy: () => holder.monitor?.startPolicy ?? 'unrestricted',

@@ -963,6 +963,55 @@ export async function fetchIssueBody(
   }
 }
 
+export interface FetchedIssue {
+  title: string;
+  /** forgeの表記のまま（GitHubは`OPEN`/`CLOSED`、GitLabは`opened`/`closed`）。 */
+  state: string;
+  body: string;
+}
+
+/**
+ * Issueの題・状態・本文を1件取得する（Issue #2037）。取得できなければ `undefined`。
+ * 経路は`fetchIssueBody`と同じで、GitHubは `gh issue view --json`、GitLabは `glab api` を読む。
+ */
+export async function fetchIssue(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  issue: number,
+): Promise<FetchedIssue | undefined> {
+  if (!Number.isSafeInteger(issue) || issue <= 0) {
+    return undefined;
+  }
+  const result =
+    host === 'github'
+      ? await cli.run('gh', ['issue', 'view', String(issue), '--json', 'title,state,body'], cwd)
+      : await cli.run('glab', ['api', `projects/:id/issues/${String(issue)}`], cwd);
+  if (result.code !== 0) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  const { title, state } = record;
+  const body = record[host === 'github' ? 'body' : 'description'];
+  if (typeof title !== 'string' || typeof state !== 'string') {
+    return undefined;
+  }
+  // GitLabは説明が空のIssueで`description: null`を返す。取得の失敗と分けて空の本文として扱う
+  if (body === null) {
+    return { title, state, body: '' };
+  }
+  return typeof body === 'string' ? { title, state, body } : undefined;
+}
+
 export interface UpdateIssueRequest {
   host: ForgeHost;
   cwd: string;

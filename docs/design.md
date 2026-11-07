@@ -6026,6 +6026,8 @@ runごとに、タスクとは別のセッションを1つだけ立てる。人�
 | `remove_task`              | `taskId`                                  | 後述（新設、§16.29、roadmap W4、Issue #338）         |
 | `update_task_dependencies` | `taskId` / `dependsOn`                    | 後述（新設、§16.29、roadmap W4、Issue #338）         |
 
+オーケストレータモード（Issue #1505）のOrchestratorは、同じMCPサーバの別の接続で`taskRunOrchestratorTools.ts`の`TASK_RUN_ORCHESTRATOR_TOOLS`を使う。そのうち`get_issue`（引数`issueNumber`、Issue #2037）は、runのリポジトリ（originのforge）のIssueを番号で読み、題・状態を`sanitizeInlineText`で1行にし、本文を`formatUntrusted`で囲って返す。Orchestratorは全権限で動き（#1697）、BashのIssue閲覧を機械的に止める手段が無いため、Issue本文を読む正規の経路をこのツールにし、導入文でもBashではなくこのツールを使うよう指示する。コメント・PRの本文と差分は返さない。工程セッションの接続には出さない。
+
 - 制御ツールは**既存のrunnerのメソッドをそのまま呼ぶ**。Viewのボタンが通るのと同じ経路にし、モデル用の別経路を作らない。状態遷移の正しさを1か所（`runState.ts`）に保つため
 - `stop_task` の対象は「走行中のタスク」に限らない。**衝突解決セッション（`live.mergeResolutions`。§16.17「コンフリクト」5.）も対象**（issue #514）。`merging` のタスク自身のループは既に終わっているが、統合worktreeで開く衝突解決セッションはまだ生きており、そちらへ `stopLoop()` を届ける。`WorkflowRunner.stopTask` は戻り値（`boolean`）を「送り先を見つけて `stopLoop()` を呼べたか」の根拠にし、見つからなければ `false` を返す。制御ツール側（`buildOrchestratorControlPort` の `stopTask`）はこれを見て `no(...)` を返し、届いていないのに「止めました」という成功を返さない。人はワークフローViewを見て「止まっていない」ことに気づけるが、オーケストレーターは応答（`accepted`）しか見ないため、一度嘘の成功を返すとその経路を二度と再試行しない
 - `no(...)` は「見つからない」と「届いたが既に終わっていた」を同じ文言で返してはならない（issue #514 medium指摘）。`live.tasks` のエントリは `onTaskFinished` 後も消えないため、`merging` のタスクのように「送り先はあったが、ループは既に終わっていた」場合にも `stopLoop()` は `false` を返す。これを「見つかりません」と伝えるとオーケストレーターが誤診する（実際には届いていたのに、届いていないと思って的外れな再試行をする）。`WorkflowRunner.hasStoppableSession` で送り先の有無だけを別に判定し、文言を「見つかりません」／「既に停止しています」に分ける
@@ -6145,6 +6147,7 @@ export function sanitizeInlineText(text: string, maxLength: number): string;
 - `workflow.ts` のテンプレート展開（§16.4）。`{{T1.files}}` は以前、「拡張機能が組み立てた構造化データ」という前提のもとで `result` / `summary` と異なり無防備のまま展開していた。だが実体を追うと、`files` は `runner.ts` の `state.turnEditedFiles`、つまり `streamJson.ts` が CLI の `tool_use` 引数から取り出した文字列であり、モデル自身が生成した値である。ファイルシステム上の実在検証も通っていない。この前提が誤りだったため、`files` も `formatUntrusted` で囲うようにし、`referencedResultFields`（上流・下流の権限差分を警告する仕組み。§16.4案2）の対象にも加えた。`cwd` / `branch` は引き続き拡張機能自身が組み立てた値なので対象外のまま
 - `roadmap.ts` の `formatRoadmapMaterial`（ロードマップ項目の本文 `item.text` を `formatUntrusted` で囲う）、`buildRoadmapPlanGoal`（ロードマップのタイトル・フェーズ名を `sanitizeInlineText` で1行に均す）、`buildRoadmapPrompt`（`goal` を `formatUntrusted` で囲い、Issueタイトルとワークスペースの一覧の各要素を `sanitizeInlineText` で均す）
 - `planner.ts` の `buildPlannerPrompt`（ゴール文を `formatUntrusted` で囲う）と `sanitizeEntryName`（旧来の独自実装を `sanitizeInlineText` への委譲に置き換えた）
+- `taskRunOrchestratorTools.ts` の `formatIssueForOrchestrator`（オーケストレータモードの`get_issue`。Issueの題・状態を `sanitizeInlineText` で1行にし、本文を `formatUntrusted` で囲う。Issue #2037、§16.23）
 
 `buildRoadmapPlanGoal` が組み立てたゴール文は、そのまま `buildPlannerPrompt` の `goal` として渡り、そちらで改めて `formatUntrusted` により囲われる。`buildRoadmapPlanGoal` の側で `formatUntrusted` の囲いまで付けると二重囲いになるため、そちらでは `sanitizeInlineText` による1行化だけにとどめてある。囲いを二重に掛けても安全性が下がるわけではないが、プロンプトの見た目が余計に複雑になるだけで実益が無いという判断である。
 
