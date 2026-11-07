@@ -5,7 +5,6 @@ import {
   MAX_PLAN_CRITERIA,
   MAX_PLAN_CRITERION_LENGTH,
   MAX_PLAN_SUMMARY_LENGTH,
-  MAX_PLAN_TASKS,
   MAX_PLAN_TITLE_LENGTH,
 } from './taskRunPlan';
 import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
@@ -60,8 +59,6 @@ const STATE_TITLE_MAX_LENGTH = 200;
 /** `get_run_state`に載せるロードマップの記録の件数（新しい順の末尾から）。 */
 const STATE_ROADMAP_NOTICES_SHOWN = 5;
 const STATE_TEXT_MAX_LENGTH = 1000;
-/** `get_run_state`の`taskIds`で一度に指定できる件数。 */
-const MAX_RUN_STATE_TASK_IDS = MAX_PLAN_TASKS;
 
 export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
@@ -74,7 +71,6 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
         tasks: {
           type: 'array',
           minItems: 1,
-          maxItems: MAX_PLAN_TASKS,
           items: {
             type: 'object',
             properties: {
@@ -143,7 +139,6 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
           type: 'array',
           items: TASK_ID_SCHEMA,
           minItems: 1,
-          maxItems: MAX_RUN_STATE_TASK_IDS,
           description:
             '指定したタスクだけを全項目で返す（差分の判定に関係なく、完了済みでも省かない）',
         },
@@ -512,12 +507,11 @@ function parseGetRunState(a: Record<string, unknown>): ParseResult {
   if (
     !Array.isArray(taskIds) ||
     taskIds.length === 0 ||
-    taskIds.length > MAX_RUN_STATE_TASK_IDS ||
     !taskIds.every((id): id is string => typeof id === 'string' && isValidTaskId(id))
   ) {
     return {
       ok: false,
-      message: `taskIdsはget_run_stateで得たT<数字>を1〜${String(MAX_RUN_STATE_TASK_IDS)}件の配列で指定する`,
+      message: 'taskIdsはget_run_stateで得たT<数字>を1件以上の配列で指定する',
     };
   }
   return {
@@ -820,27 +814,53 @@ export function formatTaskRunState(
   const tasks = listTasks(run);
   const shown = new Map(previous ?? []);
   const unchanged: string[] = [];
+  // タスク数に上限が無いため、本文が`MAX_RUN_STATE_LENGTH`を超えうる。`formatUntrusted`の切り詰めに
+  // 任せると、切られたタスクまで`shown`に載り、次の呼出しで「変化なし」に入って見えないままになる。
+  // 収まらないタスクはここで本文から外し、`shown`も更新しない（次の呼出しで改めて返す）
+  const omitted: string[] = [];
+  let used = lines.reduce((n, line) => n + line.length + 1, 0);
+  const fits = (block: readonly string[]): boolean => {
+    const size = block.reduce((n, line) => n + line.length + 1, 0);
+    if (used + size > MAX_RUN_STATE_LENGTH) {
+      return false;
+    }
+    used += size;
+    return true;
+  };
   for (const task of tasks) {
     if (requested !== undefined) {
       if (requested.has(task.taskId)) {
-        lines.push(...formatTaskLines(run, task, recommendations, awaiting));
-        shown.set(task.taskId, formatDefaultTaskBlock(run, task, recommendations, awaiting));
+        const taskLines = formatTaskLines(run, task, recommendations, awaiting);
+        if (fits(taskLines)) {
+          lines.push(...taskLines);
+          shown.set(task.taskId, formatDefaultTaskBlock(run, task, recommendations, awaiting));
+        } else {
+          omitted.push(task.taskId);
+        }
       }
       continue;
     }
     const block = formatDefaultTaskBlock(run, task, recommendations, awaiting);
-    shown.set(task.taskId, block);
     // 答えるべき質問・開いている関門があるタスクは、行が変わらなくても毎回返す。「変化なし」に埋もれると、
     // 前回見たまま未対応の判断待ちを見落とす
     if (!request.full && !hasOpenDecision(task) && previous?.get(task.taskId) === block) {
       unchanged.push(task.taskId);
-    } else {
+    } else if (fits([block])) {
       lines.push(block);
+      shown.set(task.taskId, block);
+    } else {
+      omitted.push(task.taskId);
     }
   }
   const footer: string[] = [];
   if (unchanged.length > 0) {
     footer.push(`変化なし: ${String(unchanged.length)}件（${unchanged.join(', ')}）`);
+  }
+  if (omitted.length > 0) {
+    footer.push(
+      `本文の上限（${String(MAX_RUN_STATE_LENGTH)}文字）で省いたタスク: ${String(omitted.length)}件（${omitted.join(', ')}）。` +
+        'taskIdsで分けて取るか、次のget_run_stateで返す',
+    );
   }
   const currentIds = new Set(tasks.map((t) => t.taskId));
   if (requested !== undefined) {
