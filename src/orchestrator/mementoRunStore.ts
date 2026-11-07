@@ -10,6 +10,11 @@ import { SerialQueue } from './serialQueue';
  * ようにする。保存する件数は開始時刻の新しい順に上限まで残す（`isFinished`を渡せば走り終えた
  * runから先に捨てる）。読み込み時は`isValid`で
  * 骨格を確かめ、版の合わない（将来の形式や壊れた）要素を読み飛ばす。
+ *
+ * 検証済みの一覧はメモリに持ち、2回目以降の`list`・`find`は読み直しも検証もしない（Issue #2032）。
+ * このキーを書くのはこのストアだけで、書き込みはすべて`update`・`clearAll`を通るため、
+ * 書き込みに成功したときにキャッシュを差し替えれば保存内容と食い違わない。
+ * 返す配列と要素はキャッシュと共有する。呼び出し側は変更しない（`TaskRun`は不変として扱う）。
  */
 
 export interface StoredRun {
@@ -35,8 +40,8 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
    */
   onDiscardUnfinished?(runs: readonly T[]): void;
   /**
-   * `isValid`が弾いた（骨格の合わない）要素があったとき、その件数が前回と変わったときだけ呼ぶ
-   * （Issue #1590。`list`は`find`・`update`のたびに読むため、毎回呼ぶとログが埋まる）。
+   * `isValid`が弾いた（骨格の合わない）要素があったとき、その件数を渡す。検証は初回の読み込みで
+   * 1回だけ行うため、呼ぶのも1回だけ（Issue #1590・#2032）。
    * 黙って消えないよう、呼び出し側でログに残す。壊れた中身は渡さず件数だけ渡す。
    */
   onDiscardInvalid?(count: number): void;
@@ -44,7 +49,8 @@ export interface MementoRunStoreOptions<T extends StoredRun> {
 
 export class MementoRunStore<T extends StoredRun> {
   private readonly queue = new SerialQueue();
-  private lastDiscarded = 0;
+  /** 検証済みの一覧。初回の`list`で読み込み、書き込みに成功するたびに差し替える。 */
+  private cache: readonly T[] | undefined;
 
   constructor(
     private readonly memento: MementoLike,
@@ -52,19 +58,10 @@ export class MementoRunStore<T extends StoredRun> {
   ) {}
 
   list(): readonly T[] {
-    const raw = this.memento.get<unknown>(this.options.key, []);
-    if (!Array.isArray(raw)) {
-      return [];
+    if (this.cache === undefined) {
+      this.cache = this.load();
     }
-    const valid = raw.filter((r): r is T => this.options.isValid(r));
-    const discarded = raw.length - valid.length;
-    if (discarded !== this.lastDiscarded) {
-      this.lastDiscarded = discarded;
-      if (discarded > 0) {
-        this.options.onDiscardInvalid?.(discarded);
-      }
-    }
-    return valid;
+    return this.cache;
   }
 
   find(runId: string): T | undefined {
@@ -85,7 +82,10 @@ export class MementoRunStore<T extends StoredRun> {
         return next;
       }
       const merged = index === -1 ? [next, ...all] : all.map((r, i) => (i === index ? next : r));
-      await this.memento.update(this.options.key, this.trim(merged));
+      const trimmed = this.trim(merged);
+      await this.memento.update(this.options.key, trimmed);
+      // 書き込みに失敗したら（上で例外になり）キャッシュは前の内容のまま残る
+      this.cache = trimmed;
       return next;
     });
   }
@@ -93,7 +93,21 @@ export class MementoRunStore<T extends StoredRun> {
   clearAll(): Promise<void> {
     return this.queue.enqueue(async () => {
       await this.memento.update(this.options.key, []);
+      this.cache = [];
     });
+  }
+
+  private load(): readonly T[] {
+    const raw = this.memento.get<unknown>(this.options.key, []);
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    const valid = raw.filter((r): r is T => this.options.isValid(r));
+    const discarded = raw.length - valid.length;
+    if (discarded > 0) {
+      this.options.onDiscardInvalid?.(discarded);
+    }
+    return valid;
   }
 
   private trim(runs: readonly T[]): T[] {
