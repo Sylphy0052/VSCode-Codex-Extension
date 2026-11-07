@@ -1620,6 +1620,7 @@ function buildIntroPrompt(
     '- 状態の正本はget_run_stateとする。会話の記憶や前の世代の発言より、get_run_stateの結果を信じる',
     '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。approve_planはユーザーに会話で頼まれたときだけ使う（Reflexが計画を審査し、妥当なら確認なしに承認される。妥当と言えなければユーザーの確認が入る）',
     '- 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけ',
+    '- 計画を出し直すとき、着手済みのタスクは省いてよい（省くと現在の内容のまま残る）。内容を変えるときだけtaskId付きで送る。未着手のタスクは残すものをすべて送る（省くと計画から外れる）',
     '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
     '- 承認後、Model/Effortの判断を待つ工程はstart_stageで始める。推奨値を基本にし、変えるときは理由をreasonに書く。' +
       `判断待ちの通知（stageAwaitingDecision）には推奨値の理由を先頭${String(MAX_EVENT_RECOMMENDATION_REASONS)}件まで書き、残りは件数だけ示す。全部はget_run_stateで読める`,

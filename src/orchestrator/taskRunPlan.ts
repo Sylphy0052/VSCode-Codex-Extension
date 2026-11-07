@@ -185,10 +185,12 @@ export interface ResolvedTaskPlan {
  *
  * - `T<n>`の形のキーは既存のタスクだけを指せる（Controllerが採番する番号を名乗らせない）
  * - 依存先は計画内のキーだけ。循環は循環するキーの組を挙げて拒否する
- * - 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない（Issue #1679。承認前の計画変更で
- *   worktree・PRを持つタスクを消させない）。未着手のタスクの削除と新しいタスクの追加は通す
+ * - 着手済みのタスクとロードマップで完了済みのタスクは、提案が省いても現在の内容のまま計画に残す
+ *   （`withCarriedTasks`。Issue #1623・#2027）。承認前の計画変更でworktree・PRを持つタスクを
+ *   消させない（Issue #1679）。内容を変えるときだけ`taskId`付きで送らせる
+ * - 着手済みのタスクの既存のIssue番号は変えられない（Issue #1679）
+ * - 未着手のタスクは、省くと計画から外れる。新しいタスクの追加は通す
  * - 既存のIssue番号は計画内で重複させない
- * - ロードマップで完了済みのタスクは、提案が省いても計画に残す（`withCarriedCompletedTasks`）
  */
 export function resolveTaskPlan(
   run: TaskRun,
@@ -197,7 +199,7 @@ export function resolveTaskPlan(
   if (run.finishedAt !== undefined) {
     return fail('このrunは終わっている');
   }
-  const tasks = withCarriedCompletedTasks(run, proposed);
+  const tasks = withCarriedTasks(run, proposed);
   const keys = new Set(tasks.map((t) => t.id));
   if (keys.size !== tasks.length) {
     return fail('idが重複している');
@@ -254,8 +256,9 @@ export function resolveTaskPlan(
 }
 
 /**
- * 着手済みのタスクを計画から外す・既存のIssue番号を変える提案を見つけ、拒否の理由を返す
- * （Issue #1679）。Issue番号の変更は同じ`taskId`のままタスクを作り直すため、削除と同じ扱いにする。
+ * 着手済みのタスクの既存のIssue番号を変える提案を見つけ、拒否の理由を返す（Issue #1679）。
+ * Issue番号の変更は同じ`taskId`のままタスクを作り直すため、削除と同じ扱いにする。省いた着手済みの
+ * タスクは`withCarriedTasks`が戻すので、ここで外される場合は扱わない。
  */
 function findStartedTaskChange(
   run: TaskRun,
@@ -267,10 +270,7 @@ function findStartedTaskChange(
       continue;
     }
     const next = byKey.get(task.taskId);
-    if (next === undefined) {
-      return `${task.taskId}は着手済みのため計画から外せない。外せるのは未着手のタスクだけ`;
-    }
-    if (next.existingIssueNumber !== task.existingIssueNumber) {
+    if (next !== undefined && next.existingIssueNumber !== task.existingIssueNumber) {
       return `${task.taskId}は着手済みのため既存のIssue番号を変えられない`;
     }
   }
@@ -278,25 +278,63 @@ function findStartedTaskChange(
 }
 
 /**
- * ロードマップで完了済みの子Issueのタスク（Issue #1623）のうち、提案が省いたものを計画の先頭へ
- * 戻す。Orchestratorに毎回送り直させず、`dependsOn`から`taskId`で指せるようにするため。
- * 完了済みのタスクは計画から外せない。依存は持たせない（完了済みのため着手の判断に使わない）。
+ * 提案が省いた、計画から外せないタスクを現在の内容のまま戻す。Orchestratorに毎回送り直させず、
+ * 新しいタスクの`dependsOn`から`taskId`で指せるようにするため。対象は次の2つ。
+ *
+ * - ロードマップで完了済みの子Issueのタスク（Issue #1623）。依存は持たせない（完了済みのため
+ *   着手の判断に使わない）
+ * - 着手済みのタスク（Issue #2027）。依存は現在の値を保ち、今回の提案で外れたタスクへの依存だけ
+ *   落とす（外したのはOrchestratorの判断で、送り直しを求めるより着手を止めないほうを採る）
+ *
+ * 戻す位置は現在の`taskOrder`での位置に合わせる。`taskOrder`は着手順に効くため、出し直しで
+ * 着手済みタスクの次工程の順番を変えない。
  */
-function withCarriedCompletedTasks(
+function withCarriedTasks(
   run: TaskRun,
   proposed: readonly PlanTaskInput[],
 ): readonly PlanTaskInput[] {
   const proposedKeys = new Set(proposed.map((t) => t.id));
-  const carried = listTasks(run)
-    .filter((t) => t.completedInRoadmap === true && !proposedKeys.has(t.taskId))
-    .map((t): PlanTaskInput => ({
+  const carriedTasks = listTasks(run).filter(
+    (t) => (t.completedInRoadmap === true || hasStarted(t)) && !proposedKeys.has(t.taskId),
+  );
+  if (carriedTasks.length === 0) {
+    return proposed;
+  }
+  const keys = new Set([...proposedKeys, ...carriedTasks.map((t) => t.taskId)]);
+  const carried = carriedTasks.map((t): PlanTaskInput => {
+    const isCompleted = t.completedInRoadmap === true;
+    return {
       id: t.taskId,
       title: t.title,
       summary: t.summary,
       acceptanceCriteria: t.acceptanceCriteria,
-      dependsOn: [],
+      dependsOn: isCompleted ? [] : t.dependsOn.filter((dep) => keys.has(dep)),
       existingIssueNumber: t.existingIssueNumber,
-      completedInRoadmap: true,
-    }));
-  return carried.length === 0 ? proposed : [...carried, ...proposed];
+      ...(isCompleted ? { completedInRoadmap: true } : {}),
+    };
+  });
+  return mergeByCurrentOrder(run, proposed, carried);
+}
+
+/**
+ * 戻すタスクを、現在の`taskOrder`で自分より後ろにある最初の既存タスクの直前へ差し込む。
+ * 後ろに既存タスクが無ければ末尾へ置く。提案内の並びは変えない。
+ */
+function mergeByCurrentOrder(
+  run: TaskRun,
+  proposed: readonly PlanTaskInput[],
+  carried: readonly PlanTaskInput[],
+): PlanTaskInput[] {
+  const position = new Map(run.taskOrder.map((taskId, i) => [taskId, i]));
+  const result = [...proposed];
+  for (const task of carried) {
+    const own = position.get(task.id) ?? Number.POSITIVE_INFINITY;
+    const at = result.findIndex((t) => (position.get(t.id) ?? -1) > own);
+    if (at === -1) {
+      result.push(task);
+    } else {
+      result.splice(at, 0, task);
+    }
+  }
+  return result;
 }
