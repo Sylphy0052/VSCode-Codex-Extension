@@ -122,10 +122,7 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
     acceptanceCriteria.push(criterion.value);
   }
   const depsRaw = raw.dependsOn ?? [];
-  if (
-    !Array.isArray(depsRaw) ||
-    depsRaw.some((d) => typeof d !== 'string' || !PLAN_KEY.test(d))
-  ) {
+  if (!Array.isArray(depsRaw) || depsRaw.some((d) => typeof d !== 'string' || !PLAN_KEY.test(d))) {
     return fail(`${at}.dependsOnは計画内のidの配列で指定する`);
   }
   const dependsOn = depsRaw as string[];

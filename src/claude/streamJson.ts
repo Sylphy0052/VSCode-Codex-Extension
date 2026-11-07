@@ -298,8 +298,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  */
 function applyUser(received: ChatState, event: Record<string, unknown>): ChatState {
   // 応答中に送った指示をCLIが取り込んだ（Issue #2022）。送ったときのuuidでエコーが返る
-  const state =
-    event['isReplay'] === true ? releaseHeld(received, str(event['uuid'])) : received;
+  const state = event['isReplay'] === true ? releaseHeld(received, str(event['uuid'])) : received;
   const rawContent = rec(event['message'])?.['content'];
   const slashText = typeof rawContent === 'string' ? slashCommandMessageText(rawContent) : '';
   const content = slashText !== '' ? [{ type: 'text', text: slashText }] : list(rawContent);
