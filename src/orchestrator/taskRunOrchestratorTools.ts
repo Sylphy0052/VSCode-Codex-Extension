@@ -57,6 +57,11 @@ const TASK_RUN_ENGINES: readonly TaskRunEngine[] = ['codex', 'claude'];
 const MAX_RUN_ID_LENGTH = 200;
 /** 状態の本文（タスク一覧）の上限。 */
 const MAX_RUN_STATE_LENGTH = 50_000;
+/**
+ * `get_run_state`のフッタ（「変化なし」「省いたタスク」）に並べるidの件数。件数自体は全数を出す。
+ * フッタは`formatUntrusted`の上限の外にあり、タスクが数百件になると差分の呼出しごとにid列が膨らむため
+ */
+const RUN_STATE_FOOTER_IDS_SHOWN = 10;
 const STATE_TITLE_MAX_LENGTH = 200;
 /** `get_run_state`に載せるロードマップの記録の件数（新しい順の末尾から）。 */
 const STATE_ROADMAP_NOTICES_SHOWN = 5;
@@ -128,7 +133,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     name: 'get_run_state',
     description:
       'この実行の現在の状態（計画の承認状況・並列上限・各タスクの工程・判断待ちの工程と推奨値・ユーザー判断待ちの質問）を返す。状態の正本はこれで、通知の内容より優先する。' +
-      '既定は差分で、この世代で前回返したときから行が変わったタスクと、答えを待つ質問・開いている関門があるタスクだけを返し、変わらなかったタスクは「変化なし: N件（T1, T3, ...）」の1行にまとめる（それらは前回の結果のまま）。見出しとロードマップ節は毎回返す。世代で最初の呼出しと会話の圧縮後の最初の呼出しは全タスクを返す。' +
+      '既定は差分で、この世代で前回返したときから行が変わったタスクと、答えを待つ質問・開いている関門があるタスクだけを返し、変わらなかったタスクは「変化なし: N件（T1, T3, ...）」の1行にまとめる（それらは前回の結果のまま。idは先頭10件だけ並べ、残りは「ほかN件」）。本文の上限に収まらないときは、答えを待つ質問・開いている関門・判断待ちの工程があるタスクを先に入れ、入らなかったタスクは「省いたタスク」の行に出す（同じくidは先頭10件まで）。見出しとロードマップ節は毎回返す。世代で最初の呼出しと会話の圧縮後の最初の呼出しは全タスクを返す。' +
       '全工程が終わったタスクは1行に畳む。前回の結果を覚えていないとき（圧縮の後など）はfull: trueで全タスクを取り直し、畳まれたタスクや変化なしのタスクの全項目はtaskIdsで取る。',
     inputSchema: {
       type: 'object',
@@ -881,38 +886,61 @@ export function formatTaskRunState(
     used += size;
     return true;
   };
-  for (const task of tasks) {
-    if (requested !== undefined) {
-      if (requested.has(task.taskId)) {
-        const taskLines = formatTaskLines(run, task, recommendations, awaiting);
-        if (fits(taskLines)) {
-          lines.push(...taskLines);
-          shown.set(task.taskId, formatDefaultTaskBlock(run, task, recommendations, awaiting));
-        } else {
-          omitted.push(task.taskId);
+  if (requested !== undefined) {
+    for (const task of tasks) {
+      if (!requested.has(task.taskId)) {
+        continue;
+      }
+      const taskLines = formatTaskLines(run, task, recommendations, awaiting);
+      if (fits(taskLines)) {
+        lines.push(...taskLines);
+        shown.set(task.taskId, formatDefaultTaskBlock(run, task, recommendations, awaiting));
+      } else {
+        omitted.push(task.taskId);
+      }
+    }
+  } else {
+    const candidates: { task: OrchestratedTask; block: string }[] = [];
+    for (const task of tasks) {
+      const block = formatDefaultTaskBlock(run, task, recommendations, awaiting);
+      // 答えるべき質問・開いている関門があるタスクは、行が変わらなくても毎回返す。「変化なし」に埋もれると、
+      // 前回見たまま未対応の判断待ちを見落とす
+      if (!request.full && !hasOpenDecision(task) && previous?.get(task.taskId) === block) {
+        unchanged.push(task.taskId);
+      } else {
+        candidates.push({ task, block });
+      }
+    }
+    // 本文の予算は判断待ちのタスクへ先に割り当てる（Issue #2035）。計画順に詰めると、計画の後ろにある
+    // 判断待ちが省かれ、Orchestratorの判断が1回の呼出し分遅れる。判断待ち同士・残り同士は計画順で詰める
+    const awaitingTaskIds = new Set(awaiting.map((r) => r.taskId));
+    const needsDecision = (task: OrchestratedTask): boolean =>
+      hasOpenDecision(task) || awaitingTaskIds.has(task.taskId);
+    const included = new Set<string>();
+    for (const prioritized of [true, false]) {
+      for (const { task, block } of candidates) {
+        if (needsDecision(task) === prioritized && fits([block])) {
+          included.add(task.taskId);
         }
       }
-      continue;
     }
-    const block = formatDefaultTaskBlock(run, task, recommendations, awaiting);
-    // 答えるべき質問・開いている関門があるタスクは、行が変わらなくても毎回返す。「変化なし」に埋もれると、
-    // 前回見たまま未対応の判断待ちを見落とす
-    if (!request.full && !hasOpenDecision(task) && previous?.get(task.taskId) === block) {
-      unchanged.push(task.taskId);
-    } else if (fits([block])) {
-      lines.push(block);
-      shown.set(task.taskId, block);
-    } else {
-      omitted.push(task.taskId);
+    // 本文に並べる順は計画順のまま保つ
+    for (const { task, block } of candidates) {
+      if (included.has(task.taskId)) {
+        lines.push(block);
+        shown.set(task.taskId, block);
+      } else {
+        omitted.push(task.taskId);
+      }
     }
   }
   const footer: string[] = [];
   if (unchanged.length > 0) {
-    footer.push(`変化なし: ${String(unchanged.length)}件（${unchanged.join(', ')}）`);
+    footer.push(`変化なし: ${String(unchanged.length)}件（${formatFooterIds(unchanged)}）`);
   }
   if (omitted.length > 0) {
     footer.push(
-      `本文の上限（${String(MAX_RUN_STATE_LENGTH)}文字）で省いたタスク: ${String(omitted.length)}件（${omitted.join(', ')}）。` +
+      `本文の上限（${String(MAX_RUN_STATE_LENGTH)}文字）で省いたタスク: ${String(omitted.length)}件（${formatFooterIds(omitted)}）。` +
         'taskIdsで分けて取るか、次のget_run_stateで返す',
     );
   }
@@ -947,6 +975,15 @@ export function formatTaskRunState(
     ...(body === '' && footer.length === 0 ? ['（なし）'] : []),
   ].join('\n');
   return { text, shown };
+}
+
+/** フッタのid列。先頭`RUN_STATE_FOOTER_IDS_SHOWN`件だけを並べ、残りは件数にする。 */
+function formatFooterIds(ids: readonly string[]): string {
+  if (ids.length <= RUN_STATE_FOOTER_IDS_SHOWN) {
+    return ids.join(', ');
+  }
+  const rest = ids.length - RUN_STATE_FOOTER_IDS_SHOWN;
+  return `${ids.slice(0, RUN_STATE_FOOTER_IDS_SHOWN).join(', ')}, ほか${String(rest)}件`;
 }
 
 /** 答えを待つ質問か、開いている関門がある（差分で省かない）。 */
