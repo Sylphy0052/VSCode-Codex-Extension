@@ -91,7 +91,7 @@ export async function prepareWebGptDiscussion(
   const rawUrls = await vscode.window.showInputBox(
     {
       title: `WebGPTと議論：会話URL${titleSuffix}`,
-      value: initial?.urls?.join(' '),
+      ...(initial?.urls !== undefined ? { value: initial.urls.join(' ') } : {}),
       prompt:
         '開いたChromeで必要ならログインし、URLは空欄で新規会話を作成、既存会話は1〜3件を空白かカンマで区切って入力',
       placeHolder: '空欄で新規会話、またはhttps://chatgpt.com/c/…',
@@ -114,7 +114,7 @@ export async function prepareWebGptDiscussion(
     (await vscode.window.showInputBox(
       {
         title: `WebGPTと議論：議題${titleSuffix}`,
-        value: initial?.topic,
+        ...(initial?.topic !== undefined ? { value: initial.topic } : {}),
         prompt: useCurrentContext
           ? '空欄なら現在の会話から議題を選びます。議題に必要な論点を要約してChatGPTへ送ります'
           : 'この議題と議論中の回答・批評を対象のChatGPT会話（URL空欄なら新規）へ送信します',

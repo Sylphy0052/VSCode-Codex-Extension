@@ -2180,7 +2180,8 @@ describe('WebGPTとの議論（現在の会話から開始）', () => {
 
     await manager.simulateWebviewMessage(id, { type: 'webGptDiscussion' });
 
-    await vi.waitFor(() => expect(prepareWebGptDiscussion).toHaveBeenCalledWith(true));
+    // 第2引数は質問ファイルのボタン用の固定議題（Issue #2057）。このボタン経路では渡さない
+    await vi.waitFor(() => expect(prepareWebGptDiscussion).toHaveBeenCalledWith(true, undefined));
     expect(sessions).toHaveLength(1);
     expect(ensure).not.toHaveBeenCalled();
     expect(sendOrQueue).not.toHaveBeenCalled();

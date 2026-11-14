@@ -70,18 +70,35 @@ export async function readAskQuestionTopic(
         return { ok: false, message: `シンボリックリンクは対象外です: ${target}` };
       }
     }
-    const stat = await fs.lstat(absolutePath);
-    if (!stat.isFile()) {
-      return { ok: false, message: `通常のファイルではありません: ${absolutePath}` };
+    // 判定と読み込みの間にシンボリックリンクへ差し替えられても辿らないよう、`O_NOFOLLOW`で開き、
+    // 同じファイル記述子で種別・大きさを確かめて読む（lstatの後にreadFileする形だと競合する）
+    const handle = await fs.open(absolutePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) {
+        return { ok: false, message: `通常のファイルではありません: ${absolutePath}` };
+      }
+      if (stat.size > ASK_QUESTION_MAX_BYTES) {
+        return {
+          ok: false,
+          message: '質問ファイルが大きすぎます。短くしてから、もう一度押してください',
+        };
+      }
+      // 開いた後に親ディレクトリが差し替えられていないか、実体のパスで確かめる
+      const expected = path.join(
+        await fs.realpath(root),
+        'docs',
+        'chatgpt',
+        path.basename(absolutePath),
+      );
+      if ((await fs.realpath(absolutePath)) !== expected) {
+        return { ok: false, message: `作業フォルダの外を指しています: ${absolutePath}` };
+      }
+      const checked = checkAskQuestionTopic(await handle.readFile('utf8'));
+      return checked.ok ? { ok: true, topic: checked.topic, absolutePath } : checked;
+    } finally {
+      await handle.close();
     }
-    if (stat.size > ASK_QUESTION_MAX_BYTES) {
-      return {
-        ok: false,
-        message: '質問ファイルが大きすぎます。短くしてから、もう一度押してください',
-      };
-    }
-    const checked = checkAskQuestionTopic(await fs.readFile(absolutePath, 'utf8'));
-    return checked.ok ? { ok: true, topic: checked.topic, absolutePath } : checked;
   } catch (error) {
     return {
       ok: false,
