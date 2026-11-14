@@ -6,7 +6,12 @@ import {
   buildWebGptMcpConfig,
   WEB_GPT_MCP_SERVER,
 } from '../webGpt/discussion';
-import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
+import { prepareAskQuestionDiscussion } from './askQuestionDiscussion';
+import {
+  prepareWebGptDiscussion,
+  reportDiscussionError,
+  type PrepareWebGptDiscussionOptions,
+} from './webGptDiscussionCommand';
 import {
   chatPanelToolRequestHost,
   WebGptToolRequests,
@@ -1345,10 +1350,12 @@ export class ClaudeChatViewManager
   /**
    * @param prepared エージェントの依頼（Issue #2051）で利用者が確認済みの入力。渡したときは
    *   入力欄を開き直さない
+   * @param prepareOptions 入力欄へ渡す設定。質問ファイルの本文を議題にするとき（Issue #2057）に使う
    */
   private async discussWithWebGptIn(
     entry: ClaudePanel,
     prepared?: PreparedWebGptDiscussion,
+    prepareOptions?: PrepareWebGptDiscussionOptions,
   ): Promise<void> {
     if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
     if (prepared === undefined && this.webGptToolRequests.has(entry)) {
@@ -1373,7 +1380,7 @@ export class ClaudeChatViewManager
     };
     try {
       assertReady();
-      const request = prepared ?? (await prepareWebGptDiscussion(true));
+      const request = prepared ?? (await prepareWebGptDiscussion(true, prepareOptions));
       if (request === undefined) return;
       assertReady();
       await vscode.window.withProgress(
@@ -5272,6 +5279,15 @@ export class ClaudeChatViewManager
       }
       if (type === 'webGptDiscussion') {
         void this.discussWithWebGptIn(entry);
+        return;
+      }
+      if (type === 'askChatGptDiscuss') {
+        // 質問ファイル作成の下のボタン（Issue #2057）。クリックまでは何も送らない
+        void prepareAskQuestionDiscussion(entry.session.getState().items, m['itemId'], [
+          ...new Set([...(entry.cwd === undefined ? [] : [entry.cwd]), ...workspaceFolderPaths()]),
+        ]).then((options) => {
+          if (options !== undefined) void this.discussWithWebGptIn(entry, undefined, options);
+        });
         return;
       }
       if (type === 'secondOpinionContinue') {

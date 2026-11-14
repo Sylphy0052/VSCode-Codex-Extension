@@ -3,7 +3,12 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { prepareWebGptCli } from '../webGpt/cli';
 import { buildWebGptDiscussionLoopPlan, buildWebGptDiscussionPrompt } from '../webGpt/discussion';
-import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
+import { prepareAskQuestionDiscussion } from './askQuestionDiscussion';
+import {
+  prepareWebGptDiscussion,
+  reportDiscussionError,
+  type PrepareWebGptDiscussionOptions,
+} from './webGptDiscussionCommand';
 import {
   chatPanelToolRequestHost,
   SESSION_MESSAGING_TOOL_TIMEOUT_SEC,
@@ -603,10 +608,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /**
    * @param prepared エージェントの依頼（Issue #2051）で利用者が確認済みの入力。渡したときは
    *   入力欄を開き直さない
+   * @param prepareOptions 入力欄へ渡す設定。質問ファイルの本文を議題にするとき（Issue #2057）に使う
    */
   private async discussWithWebGptIn(
     entry: ChatPanel,
     prepared?: PreparedWebGptDiscussion,
+    prepareOptions?: PrepareWebGptDiscussionOptions,
   ): Promise<void> {
     if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
     if (prepared === undefined && this.webGptToolRequests.has(entry)) {
@@ -635,7 +642,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (this.globalStorageDir === undefined) {
         throw new Error('WebGPT接続設定の保存先を取得できませんでした');
       }
-      const request = prepared ?? (await prepareWebGptDiscussion(true));
+      const request = prepared ?? (await prepareWebGptDiscussion(true, prepareOptions));
       if (request === undefined) return;
       assertReady();
       const browserInstructions = await prepareWebGptCli(this.globalStorageDir, request.endpoint);
@@ -3692,6 +3699,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       }
       if (type === 'webGptDiscussion') {
         void this.discussWithWebGptIn(entry);
+        return;
+      }
+      if (type === 'askChatGptDiscuss') {
+        // 質問ファイル作成の下のボタン（Issue #2057）。クリックまでは何も送らない
+        void prepareAskQuestionDiscussion(entry.session.getState().items, m['itemId'], [
+          ...new Set([...(entry.cwd === undefined ? [] : [entry.cwd]), ...workspaceFolderPaths()]),
+        ]).then((options) => {
+          if (options !== undefined) void this.discussWithWebGptIn(entry, undefined, options);
+        });
         return;
       }
       if (type === 'secondOpinionContinue') {
