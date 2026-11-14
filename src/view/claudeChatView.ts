@@ -12,6 +12,8 @@ import {
   WebGptToolRequests,
   type PreparedWebGptDiscussion,
 } from './webGptDiscussionFromTool';
+import { applySessionProfileTool, type SessionProfile } from './sessionProfileTool';
+import type { SessionProfileToolArgs, SessionProfileToolResult } from '../orchestrator/messaging';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
@@ -740,6 +742,8 @@ export class ClaudeChatViewManager
     const registration = this.sessionMessaging?.register('claude', {
       // チャットの発話からWebGPTとの議論を始めるツール（Issue #2051）
       webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args),
+      // エージェントが自分のmodel/effortを変えるツール（Issue #2053）
+      sessionProfile: (args) => this.setSessionProfileFromTool(entry, args),
     });
     if (registration === undefined) {
       return;
@@ -818,17 +822,20 @@ export class ClaudeChatViewManager
     };
   }
 
-  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<void> {
+  /** 保存に失敗したときだけ`false`を返す（保存先が無く保存しなかった場合は`true`）。 */
+  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<boolean> {
     const id = sessionId ?? entry.session.threadId;
     if (id === undefined || this.sessionSettings === undefined) {
-      return;
+      return true;
     }
     try {
       await this.sessionSettings.set('claude', id, entry.modelSettings);
+      return true;
     } catch (e) {
       this.log.warn(
         `セッションのモデル設定を保存できませんでした: ${e instanceof Error ? e.message : e}`,
       );
+      return false;
     }
   }
 
@@ -4609,6 +4616,55 @@ export class ClaudeChatViewManager
     await this.applyConfig(entry, 'model', model);
   }
 
+  /**
+   * model/effortを書き換え、永続化・実セッション・表示をそろえる。UIからの変更
+   * （`applyConfig`）とエージェントのツール呼び出し（Issue #2053）の共通経路。
+   * `send`に挙げたキーだけを実セッションへ送る。
+   */
+  private async updateModelSettings(
+    entry: ClaudePanel,
+    next: SessionProfile,
+    send: readonly ('model' | 'effort')[],
+  ): Promise<boolean> {
+    entry.modelSettings.model = next.model;
+    entry.modelSettings.effort = next.effort;
+    const saved = await this.persistModelSettings(entry);
+    for (const key of send) {
+      this.applyToSession(entry, key, key === 'model' ? next.model : next.effort);
+    }
+    this.refreshSettings(entry);
+    return saved;
+  }
+
+  /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */
+  private setSessionProfileFromTool(
+    entry: ClaudePanel,
+    args: SessionProfileToolArgs,
+  ): Promise<SessionProfileToolResult> {
+    return applySessionProfileTool(
+      {
+        current: () => ({ model: entry.modelSettings.model, effort: entry.modelSettings.effort }),
+        models: () => this.settings.claudeSnapshot().models,
+        fallbackEfforts: CLAUDE_EFFORTS,
+        apply: ({ next, modelChanged, effortChanged }) =>
+          this.updateModelSettings(entry, next, [
+            ...(modelChanged ? (['model'] as const) : []),
+            // 既定（空文字）へ戻した分は実セッションへ送れない（`applyToSession`）
+            ...(effortChanged && next.effort !== '' ? (['effort'] as const) : []),
+          ]),
+        note: (text) => entry.session.noteLocalEvent(`sessionProfile:${Date.now()}`, text),
+        log: (text) => entry.trace.info(text),
+        effortUnverified: true,
+        effortResetDeferred: true,
+        // ターン中に`set_model`を送ると、ターンを壊さず同じターンの次のAPI呼び出しから
+        // 新しいmodelで動く（Issue #2053で実測）。休止中なら`configFor`が`modelSettings`の
+        // 値で次に起動する
+        effectiveFrom: 'このツールの結果を受けた後の応答から効きます（同じターンの続きを含む）',
+      },
+      args,
+    );
+  }
+
   /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */
   private async applyConfig(entry: ClaudePanel, key: unknown, value: unknown): Promise<void> {
     if (typeof value !== 'string') {
@@ -4629,19 +4685,18 @@ export class ClaudeChatViewManager
       return;
     }
     if (mapped === 'model' || mapped === 'effort') {
+      let { model, effort } = entry.modelSettings;
       if (mapped === 'model') {
-        entry.modelSettings.model = value;
+        model = value;
         const snapshot = this.settings.claudeSnapshot();
         const allowed = effortsFor(snapshot.models, value, CLAUDE_EFFORTS);
-        if (entry.modelSettings.effort !== '' && !allowed.includes(entry.modelSettings.effort)) {
-          entry.modelSettings.effort = '';
+        if (effort !== '' && !allowed.includes(effort)) {
+          effort = '';
         }
       } else {
-        entry.modelSettings.effort = value;
+        effort = value;
       }
-      await this.persistModelSettings(entry);
-      this.applyToSession(entry, mapped, value);
-      this.refreshSettings(entry);
+      await this.updateModelSettings(entry, { model, effort }, [mapped]);
       return;
     }
     if (mapped === 'permissionMode') {

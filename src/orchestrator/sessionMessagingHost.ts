@@ -14,6 +14,7 @@ import {
   type DispatchErrorLogPort,
   type McpConnection,
   type McpTransportPort,
+  type SessionProfilePort,
   type WebGptDiscussionPort,
 } from './messaging';
 import { formatSessionTarget, type SessionBridgePort, type SessionProvider } from './sessionBridge';
@@ -79,6 +80,8 @@ export interface SessionMessagingHost {
 export interface SessionMessagingRegisterOptions {
   /** この会話でWebGPTとの議論を始める口（Issue #2051）。会話に束縛した関数を渡す。 */
   webGptDiscussion?: WebGptDiscussionPort | undefined;
+  /** この会話のmodel/effortを変える口（Issue #2053）。会話に束縛した関数を渡す。 */
+  sessionProfile?: SessionProfilePort | undefined;
 }
 
 export interface SessionMessagingHostDeps {
@@ -136,6 +139,7 @@ export async function startSessionMessagingHost(
         sessionBridge: deps.sessionBridge,
         sessionOnly: true,
         webGptDiscussion: options?.webGptDiscussion,
+        sessionProfile: options?.sessionProfile,
       });
       const mcpServer = new MessagingMcpServer(hub, transport, deps.logPort);
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
