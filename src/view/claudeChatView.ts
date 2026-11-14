@@ -60,6 +60,7 @@ import {
 } from '../claude/streamSession';
 import { createTranscriptBuilder } from '../claude/transcript';
 import { effortsFor } from '../codex/modelCatalog';
+import { extractProfileRecommendation } from '../claude/profileRecommendation';
 import {
   currentWorkspaceFolder,
   readChatComposerButtonsConfig,
@@ -4665,6 +4666,42 @@ export class ClaudeChatViewManager
     );
   }
 
+  /**
+   * 応答の「推奨: model=... / effort=...」行のボタンを押したとき、model/effortをその値へ
+   * 切り替える（Issue #2056）。押されたときだけ呼ばれる。
+   *
+   * webviewから届くのは項目のidだけで、値は会話の状態にある本文から読み直す（画面から
+   * 届いた値を信用しない）。modelは`set_model`、effortは`/effort <level>`で送る。
+   * `apply_flag_settings`は効いたことを確かめられないため使わない（`setEffortBySlashCommand`）。
+   */
+  private async applyProfileRecommendation(entry: ClaudePanel, itemId: unknown): Promise<void> {
+    if (typeof itemId !== 'string') {
+      return;
+    }
+    const state = entry.session.getState();
+    const item = state.items.find((i) => i.id === itemId && i.kind === 'agentMessage');
+    const rec = item === undefined ? undefined : extractProfileRecommendation(item.text);
+    if (rec === undefined) {
+      return;
+    }
+    if (state.busy) {
+      void vscode.window.showWarningMessage(
+        '応答の途中のため切り替えませんでした。応答が終わってからもう一度押してください。',
+      );
+      return;
+    }
+    const allowed = effortsFor(this.settings.claudeSnapshot().models, rec.model, CLAUDE_EFFORTS);
+    if (!allowed.includes(rec.effort)) {
+      void vscode.window.showWarningMessage(
+        `${rec.model} では effort=${rec.effort} を選べないため切り替えませんでした。`,
+      );
+      return;
+    }
+    entry.trace.info(`推奨行のボタンで model=${rec.model} / effort=${rec.effort} へ切り替える`);
+    await this.updateModelSettings(entry, { model: rec.model, effort: rec.effort }, ['model']);
+    entry.session.setEffortBySlashCommand(rec.effort);
+  }
+
   /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */
   private async applyConfig(entry: ClaudePanel, key: unknown, value: unknown): Promise<void> {
     if (typeof value !== 'string') {
@@ -5463,6 +5500,10 @@ export class ClaudeChatViewManager
       }
       if (type === 'approvalLevel') {
         void this.applyApprovalLevel(entry, m['level']);
+        return;
+      }
+      if (type === 'applyProfileRecommendation') {
+        void this.applyProfileRecommendation(entry, m['itemId']);
         return;
       }
       if (type === 'config') {

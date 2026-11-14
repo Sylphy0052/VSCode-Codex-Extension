@@ -1011,6 +1011,22 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 会話中にeffortを変え、CLI自身の応答で変わったことを確かめられる経路（Issue #2056）。
+   *
+   * TUIと同じ `/effort <level>` をユーザー発言として送る。`setEffort`（`apply_flag_settings`）と
+   * 違い、CLIが `Set effort level to <level> (this session only)` を返す（CLI 2.1.325で
+   * 実測。モデル呼び出しを経由しない `<synthetic>` 応答で、`num_turns` は0）。応答は会話に残る。
+   * 呼び出し側は、ターン中でないこと・値が既知の集合にあることを確かめてから呼ぶ。
+   */
+  setEffortBySlashCommand(effort: string): void {
+    if (this.proc === undefined || effort === '') {
+      return;
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage(`/effort ${effort}`));
+  }
+
+  /**
    * 会話の名前を変える（issue #199）。
    *
    * 表示用の名前は拡張機能側（`ClaudeSessionStore`）を正とする設計のため（理由は

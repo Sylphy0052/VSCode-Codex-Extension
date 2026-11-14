@@ -16,6 +16,7 @@ import {
 } from '../appserver/chatState';
 import { readClaudeResultImages } from '../provider/imageRefs';
 import { parseAutocompactReport } from './autocompactText';
+import { extractProfileRecommendation } from './profileRecommendation';
 import {
   applyFileChangeResult,
   claudeSearchResults,
@@ -171,6 +172,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         turnId: undefined,
         diffs: [],
         searchResults: [],
+        profileRecommendation: extractProfileRecommendation(text),
       });
       // `/autocompact` はモデル呼び出しを経由しない `<synthetic>` 応答として、固定書式の
       // テキストで窓サイズを返す（issue #201、design.md §14.37。`autocompactText.ts` 参照）。
