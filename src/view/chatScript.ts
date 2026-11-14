@@ -531,9 +531,14 @@ export function chatScript(
     recommendButton.addEventListener('click', () => {
       if (!node.recommendTarget) return;
       recommendButton.disabled = true;
-      node.recommendApplied = node.recommendKey;
+      const label = recommendButton.textContent;
       vscode.postMessage({ type: 'applyProfileRecommendation', itemId: node.recommendTarget });
       recommendButton.textContent = '切り替えを依頼しました';
+      // 応答の途中で断られた場合に押し直せるよう、少し後に戻す（切り替えは何度送っても同じ結果）
+      setTimeout(() => {
+        recommendButton.disabled = false;
+        recommendButton.textContent = label;
+      }, 3000);
     });
     recommend.appendChild(recommendButton);
     wrap.appendChild(recommend);
@@ -641,7 +646,6 @@ export function chatScript(
       recommendButton,
       recommendTarget: undefined,
       recommendKey: '',
-      recommendApplied: '',
       fork,
       forkTarget: undefined,
       rewind,
@@ -1426,13 +1430,11 @@ export function chatScript(
     node.rewind.hidden = !(SHOW_REWIND && item.kind === 'userMessage');
 
     // 推奨行のボタン（Issue #2056）。確定した応答（profileRecommendationを持つ項目）にだけ出す。
-    // 同じ値で一度押したあとは、状態の更新で押せる状態へ戻さない
     const rec = item.kind === 'agentMessage' ? item.profileRecommendation : undefined;
     if (rec) {
       const key = rec.model + '/' + rec.effort;
       if (node.recommendKey !== key) {
         node.recommendKey = key;
-        node.recommendApplied = '';
         node.recommendButton.disabled = false;
         node.recommendButton.textContent = 'model=' + rec.model + ' / effort=' + rec.effort + ' に切り替える';
       }
