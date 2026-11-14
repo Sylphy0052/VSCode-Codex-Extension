@@ -10,6 +10,8 @@ import {
   WebGptToolRequests,
   type PreparedWebGptDiscussion,
 } from './webGptDiscussionFromTool';
+import { applySessionProfileTool, type SessionProfile } from './sessionProfileTool';
+import type { SessionProfileToolArgs, SessionProfileToolResult } from '../orchestrator/messaging';
 import {
   buildApprovalResponse,
   defaultDenyResponse,
@@ -793,7 +795,41 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       'codex',
       entry.taskManaged
         ? undefined
-        : { webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args) },
+        : {
+            webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args),
+            // エージェントが自分のmodel/effortを変えるツール（Issue #2053）
+            sessionProfile: (args) => this.setSessionProfileFromTool(entry, args),
+          },
+    );
+  }
+
+  /**
+   * model/effortを書き換え、永続化と表示をそろえる。UIからの変更とエージェントのツール
+   * 呼び出し（Issue #2053）の共通経路。実セッションへは次の`turn/start`で載る
+   * （`appserver/chatSession.ts`）。
+   */
+  private async updateModelSettings(entry: ChatPanel, next: SessionProfile): Promise<void> {
+    entry.modelSettings.model = next.model;
+    entry.modelSettings.effort = next.effort;
+    await this.persistModelSettings(entry);
+    this.postState(entry);
+  }
+
+  /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */
+  private setSessionProfileFromTool(
+    entry: ChatPanel,
+    args: SessionProfileToolArgs,
+  ): Promise<SessionProfileToolResult> {
+    return applySessionProfileTool(
+      {
+        current: () => ({ model: entry.modelSettings.model, effort: entry.modelSettings.effort }),
+        models: () => this.settings.snapshot().models,
+        apply: ({ next }) => this.updateModelSettings(entry, next),
+        note: (text) => entry.session.noteLocalEvent(`sessionProfile:${Date.now()}`, text),
+        log: (text) => entry.trace.info(text),
+        effectiveFrom: '次の発言（turn/start）から効きます。今のターンは今の設定のまま続きます',
+      },
+      args,
     );
   }
 
@@ -3851,20 +3887,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         const value = m['value'];
         if (isEditableKey(key) && typeof value === 'string') {
           if (key === 'model' || key === 'reasoningEffort') {
+            let { model, effort } = entry.modelSettings;
             if (key === 'model') {
-              entry.modelSettings.model = value;
+              model = value;
               const allowed = effortsFor(this.settings.snapshot().models, value);
-              if (
-                entry.modelSettings.effort !== '' &&
-                !allowed.includes(entry.modelSettings.effort)
-              ) {
-                entry.modelSettings.effort = '';
+              if (effort !== '' && !allowed.includes(effort)) {
+                effort = '';
               }
             } else {
-              entry.modelSettings.effort = value;
+              effort = value;
             }
-            await this.persistModelSettings(entry);
-            this.postState(entry);
+            await this.updateModelSettings(entry, { model, effort });
             return;
           }
           // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する

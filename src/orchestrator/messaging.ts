@@ -1546,6 +1546,91 @@ export function parseWebGptDiscussionToolArgs(
 }
 
 /**
+ * 呼び出し元の会話のmodel/effortを変えるツール（Issue #2053）。1セッション用のhubで、
+ * `sessionProfile`が渡されているときだけ見せる（タスク実行の会話には渡さない）。
+ *
+ * 対象は接続に束縛した会話だけで、引数では選ばせない。値の検証と反映は受け取る側
+ * （拡張機能のビュー）が、UIで変えたときと同じ経路で行う。
+ */
+export const SET_SESSION_PROFILE_TOOL: McpToolDefinition = {
+  name: 'set_session_profile',
+  description:
+    'この会話のmodelとeffortを変える。作業内容に対して今のmodel/effortが合わないと判断したときに呼ぶ。' +
+    'いつから効くかは結果に書かれる（Claude Codeは同じターンの続きから、Codexは次の発言から）。' +
+    'modelを変えるとprompt cacheが作り直しになるため、' +
+    '途中の補正が必要なときだけ使う。使える値はモデル一覧で検証され、不正な値は使える値の一覧付きで' +
+    '拒否される。既定へ戻す（空文字）ことはできない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      model: {
+        type: 'string',
+        description: '変更後のmodel（モデル一覧のslug）。省略すると今のmodelのまま。',
+      },
+      effort: {
+        type: 'string',
+        description:
+          '変更後のeffort。省略すると今のeffortのまま（変更後のmodelで使えなければ既定へ戻る）。',
+      },
+      reason: {
+        type: 'string',
+        description: '変える理由（1行）。会話と作業ログに残る。',
+      },
+    },
+    required: ['reason'],
+    additionalProperties: false,
+  },
+};
+
+/** `set_session_profile`の引数。型と必須だけを確かめた値で、値の検証は受け取る側が行う。 */
+export interface SessionProfileToolArgs {
+  model: string | undefined;
+  effort: string | undefined;
+  reason: string;
+}
+
+/** `set_session_profile`の結果。 */
+export interface SessionProfileToolResult {
+  applied: boolean;
+  message: string;
+}
+
+/** 呼び出し元の会話のmodel/effortを変える口。会話ごとに束縛した関数を渡す。 */
+export type SessionProfilePort = (
+  args: SessionProfileToolArgs,
+) => Promise<SessionProfileToolResult>;
+
+/**
+ * `set_session_profile`の引数を型と必須だけ確かめて取り出す。型が違う・空文字・両方省略なら
+ * 理由を返す。値がモデル一覧にあるかは受け取る側で確かめる。
+ */
+export function parseSessionProfileToolArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: SessionProfileToolArgs } | { ok: false; reason: string } {
+  const { model, effort, reason } = args;
+  if (model !== undefined && typeof model !== 'string') {
+    return { ok: false, reason: 'modelは文字列で指定してください' };
+  }
+  if (effort !== undefined && typeof effort !== 'string') {
+    return { ok: false, reason: 'effortは文字列で指定してください' };
+  }
+  if (typeof reason !== 'string' || reason.trim() === '') {
+    return { ok: false, reason: 'reason（変える理由）を指定してください' };
+  }
+  if (model === undefined && effort === undefined) {
+    return { ok: false, reason: 'modelとeffortの少なくとも一方を指定してください' };
+  }
+  // 空文字（既定へ戻す）は実セッションに効かない（`claudeChatView.ts`の`applyToSession`）ため拒否する
+  if (model === '' || effort === '') {
+    return {
+      ok: false,
+      reason: '既定へ戻す（空文字）ことはできません。使う値を明示してください',
+    };
+  }
+  return { ok: true, value: { model, effort, reason } };
+}
+
+/**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
  */
@@ -1701,6 +1786,11 @@ export interface TaskMessagingHubDeps {
    */
   webGptDiscussion?: WebGptDiscussionPort | undefined;
   /**
+   * 呼び出し元の会話のmodel/effortを変える口（Issue #2053）。`sessionOnly`のhubでだけ読み、
+   * 渡されているときだけ`set_session_profile`を見せる。タスク実行の会話には渡さない。
+   */
+  sessionProfile?: SessionProfilePort | undefined;
+  /**
    * オーケストレーターが今メッセージを受け取れるか（Issue #1513）。タスクから
    * オーケストレーターへの送信を受け付けたときにだけ呼ぶ。`recovering`・`unavailable`なら
    * 結果の`reason`へその旨を足し、`unavailable`では`expectReply`を落として積む
@@ -1820,6 +1910,11 @@ export class TaskMessagingHub {
   /** WebGPTとの議論を始める口（Issue #2051）。1セッション用のhubでだけ返す。 */
   get webGptDiscussion(): WebGptDiscussionPort | undefined {
     return this.deps.sessionOnly === true ? this.deps.webGptDiscussion : undefined;
+  }
+
+  /** 呼び出し元の会話のmodel/effortを変える口（Issue #2053）。1セッション用のhubでだけ返す。 */
+  get sessionProfile(): SessionProfilePort | undefined {
+    return this.deps.sessionOnly === true ? this.deps.sessionProfile : undefined;
   }
 
   /**
@@ -2407,11 +2502,14 @@ export class MessagingMcpServer {
     // 宛先解決ができないため、何も見せない
     if (this.hub.sessionOnly) {
       // WebGPTとの議論（Issue #2051）は宛先解決を使わないため、`sessionBridge`とは独立に足す
-      const webGptTools =
-        this.hub.webGptDiscussion === undefined ? [] : [START_WEBGPT_DISCUSSION_TOOL];
+      // model/effortの変更（Issue #2053）も同じ理由で独立に足す
+      const ownTools = [
+        ...(this.hub.webGptDiscussion === undefined ? [] : [START_WEBGPT_DISCUSSION_TOOL]),
+        ...(this.hub.sessionProfile === undefined ? [] : [SET_SESSION_PROFILE_TOOL]),
+      ];
       return this.hub.sessionBridge === undefined
-        ? webGptTools
-        : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS, ...webGptTools];
+        ? ownTools
+        : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS, ...ownTools];
     }
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
     const handoffTools = this.hub.handoff === undefined ? [] : HANDOFF_TOOLS;
@@ -2508,6 +2606,9 @@ export class MessagingMcpServer {
     // （`visibleTools`で見せていないものを、呼び出し時にも同じ条件で弾く多層防御の流儀）
     if (name === START_WEBGPT_DISCUSSION_TOOL.name) {
       return this.handleWebGptDiscussionCall(request, args);
+    }
+    if (name === SET_SESSION_PROFILE_TOOL.name) {
+      return this.handleSessionProfileCall(request, args);
     }
 
     if (this.hub.sessionOnly && name !== 'send_message' && !SESSION_TOOL_NAMES.has(name)) {
@@ -2699,6 +2800,35 @@ export class MessagingMcpServer {
       }
     }
     return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+  }
+
+  /**
+   * `set_session_profile`（Issue #2053）の呼び出し。口が無いhub（run用・タスク実行の会話）
+   * では「未知のツール」で拒否する（`visibleTools`と同じ条件の多層防御）。
+   */
+  private async handleSessionProfileCall(
+    request: JsonRpcRequest,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const port = this.hub.sessionProfile;
+    if (port === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${SET_SESSION_PROFILE_TOOL.name}`);
+    }
+    const parsed = parseSessionProfileToolArgs(args);
+    let result: SessionProfileToolResult;
+    if (!parsed.ok) {
+      result = { applied: false, message: parsed.reason };
+    } else {
+      try {
+        result = await port(parsed.value);
+      } catch (error) {
+        result = {
+          applied: false,
+          message: `model/effortを変えられませんでした: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.applied));
   }
 
   /**
