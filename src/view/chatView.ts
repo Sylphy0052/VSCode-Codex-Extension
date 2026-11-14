@@ -808,11 +808,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 呼び出し（Issue #2053）の共通経路。実セッションへは次の`turn/start`で載る
    * （`appserver/chatSession.ts`）。
    */
-  private async updateModelSettings(entry: ChatPanel, next: SessionProfile): Promise<void> {
+  private async updateModelSettings(entry: ChatPanel, next: SessionProfile): Promise<boolean> {
     entry.modelSettings.model = next.model;
     entry.modelSettings.effort = next.effort;
-    await this.persistModelSettings(entry);
+    const saved = await this.persistModelSettings(entry);
     this.postState(entry);
+    return saved;
   }
 
   /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */
@@ -929,21 +930,24 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     };
   }
 
-  private async persistModelSettings(entry: ChatPanel, threadId?: string): Promise<void> {
+  /** 保存に失敗したときだけ`false`を返す（保存しない会話・保存先が無い場合は`true`）。 */
+  private async persistModelSettings(entry: ChatPanel, threadId?: string): Promise<boolean> {
     const id = threadId ?? entry.session.threadId;
     if (
       (threadId === undefined && !entry.persistModelSettings) ||
       id === undefined ||
       this.sessionSettings === undefined
     ) {
-      return;
+      return true;
     }
     try {
       await this.sessionSettings.set('codex', id, entry.modelSettings);
+      return true;
     } catch (e) {
       this.log.warn(
         `セッションのモデル設定を保存できませんでした: ${e instanceof Error ? e.message : e}`,
       );
+      return false;
     }
   }
 

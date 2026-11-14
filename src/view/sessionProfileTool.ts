@@ -79,8 +79,13 @@ export interface SessionProfileHost {
   models(): ModelInfo[];
   /** effortsForのfallback（Claudeは`CLAUDE_EFFORTS`）。 */
   fallbackEfforts?: readonly string[];
-  /** 変わった値だけを反映する（永続化・実セッション・表示まで）。 */
-  apply(resolved: ResolvedSessionProfile): Promise<void>;
+  /** 変わった値だけを反映する（永続化・実セッション・表示まで）。保存に失敗したら`false`。 */
+  apply(resolved: ResolvedSessionProfile): Promise<boolean>;
+  /**
+   * effortを既定へ戻した分が、今の実セッションへは送られないか（Claude。空文字は送れない。
+   * `applyToSession`）。
+   */
+  effortResetDeferred?: boolean;
   /** 会話に1行残す。 */
   note(text: string): void;
   /** 作業ログへ残す。 */
@@ -113,7 +118,17 @@ export async function applySessionProfileTool(
       message: `既に model=${show(next.model)} / effort=${show(next.effort)} のため、何も変えていません`,
     };
   }
-  await host.apply(resolved.value);
+  let saved: boolean;
+  try {
+    saved = await host.apply(resolved.value);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    host.log(`set_session_profile: 反映の途中で失敗した: ${detail}`);
+    return {
+      applied: false,
+      message: `反映の途中で失敗しました。一部だけ反映されている可能性があります: ${detail}`,
+    };
+  }
 
   const changes: string[] = [];
   if (modelChanged) changes.push(`model ${show(current.model)} → ${show(next.model)}`);
@@ -126,8 +141,14 @@ export async function applySessionProfileTool(
   const notes = [`${summary} に変えました。${host.effectiveFrom}`];
   if (effortReset) {
     notes.push(
-      `effort ${current.effort} は model ${show(next.model)} で使えないため既定へ戻しました`,
+      `effort ${current.effort} は model ${show(next.model)} で使えないため既定へ戻しました` +
+        (host.effortResetDeferred === true
+          ? '（既定への戻しは今のプロセスへは送れず、次の起動から効きます）'
+          : ''),
     );
+  }
+  if (!saved) {
+    notes.push('ただし設定を保存できなかったため、ウィンドウの再読み込み後は元の値に戻ります');
   }
   if (effortChanged && !effortReset && host.effortUnverified === true) {
     notes.push('effortは変更の要求を送りましたが、効いたかどうかは確かめられません');

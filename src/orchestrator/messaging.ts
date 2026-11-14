@@ -2360,6 +2360,13 @@ export const DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL = 100;
  * （design.md §16.21「ツールの引数でタスクidを名乗らせない」）。
  */
 export class MessagingMcpServer {
+  /**
+   * `set_session_profile`（Issue #2053）の呼び出しを1本ずつ流す鎖。同じ会話から続けて
+   * 呼ばれたとき、保存と実セッションへの送信の順が入れ替わらないようにする
+   * （1セッション用のhubはセッションごとにこのサーバを1つ持つ）。
+   */
+  private sessionProfileChain: Promise<unknown> = Promise.resolve();
+
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
@@ -2820,7 +2827,9 @@ export class MessagingMcpServer {
       result = { applied: false, message: parsed.reason };
     } else {
       try {
-        result = await port(parsed.value);
+        const call = this.sessionProfileChain.then(() => port(parsed.value));
+        this.sessionProfileChain = call.catch(() => undefined);
+        result = await call;
       } catch (error) {
         result = {
           applied: false,

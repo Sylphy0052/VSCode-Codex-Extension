@@ -822,17 +822,20 @@ export class ClaudeChatViewManager
     };
   }
 
-  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<void> {
+  /** 保存に失敗したときだけ`false`を返す（保存先が無く保存しなかった場合は`true`）。 */
+  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<boolean> {
     const id = sessionId ?? entry.session.threadId;
     if (id === undefined || this.sessionSettings === undefined) {
-      return;
+      return true;
     }
     try {
       await this.sessionSettings.set('claude', id, entry.modelSettings);
+      return true;
     } catch (e) {
       this.log.warn(
         `セッションのモデル設定を保存できませんでした: ${e instanceof Error ? e.message : e}`,
       );
+      return false;
     }
   }
 
@@ -4622,14 +4625,15 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     next: SessionProfile,
     send: readonly ('model' | 'effort')[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     entry.modelSettings.model = next.model;
     entry.modelSettings.effort = next.effort;
-    await this.persistModelSettings(entry);
+    const saved = await this.persistModelSettings(entry);
     for (const key of send) {
       this.applyToSession(entry, key, key === 'model' ? next.model : next.effort);
     }
     this.refreshSettings(entry);
+    return saved;
   }
 
   /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */
@@ -4651,8 +4655,10 @@ export class ClaudeChatViewManager
         note: (text) => entry.session.noteLocalEvent(`sessionProfile:${Date.now()}`, text),
         log: (text) => entry.trace.info(text),
         effortUnverified: true,
+        effortResetDeferred: true,
         // ターン中に`set_model`を送ると、ターンを壊さず同じターンの次のAPI呼び出しから
-        // 新しいmodelで動く（Issue #2053で実測）。休止中なら永続化した値で次に起動する
+        // 新しいmodelで動く（Issue #2053で実測）。休止中なら`configFor`が`modelSettings`の
+        // 値で次に起動する
         effectiveFrom: 'このツールの結果を受けた後の応答から効きます（同じターンの続きを含む）',
       },
       args,
