@@ -122,6 +122,11 @@ export interface ChatItem {
    */
   searchResults?: WebSearchResult[] | undefined;
   /**
+   * 応答に「推奨: model=... / effort=...」の行があったときの値（Issue #2056）。Claude Codeの
+   * 確定した`agentMessage`だけが持つ。ストリーム中の途中の本文には付けない。
+   */
+  profileRecommendation?: { model: string; effort: string } | undefined;
+  /**
    * 思考の全文（reasoningのみ）。
    *
    * `text` は要約として使う。CodexのReasoningThreadItemは要約(`summary`)と全文(`content`)を

@@ -521,6 +521,28 @@ export function chatScript(
     }
     wrap.appendChild(body);
 
+    // 応答の「推奨: model=... / effort=...」行から出す切り替えボタン（Issue #2056）。
+    // 押したときだけ拡張機能側へ要求を送る。応答が出ただけでは何も変えない
+    const recommend = document.createElement('div');
+    recommend.className = 'recommend';
+    recommend.hidden = true;
+    const recommendButton = document.createElement('button');
+    recommendButton.className = 'secondary';
+    recommendButton.addEventListener('click', () => {
+      if (!node.recommendTarget) return;
+      recommendButton.disabled = true;
+      const label = recommendButton.textContent;
+      vscode.postMessage({ type: 'applyProfileRecommendation', itemId: node.recommendTarget });
+      recommendButton.textContent = '切り替えを依頼しました';
+      // 応答の途中で断られた場合に押し直せるよう、少し後に戻す（切り替えは何度送っても同じ結果）
+      setTimeout(() => {
+        recommendButton.disabled = false;
+        recommendButton.textContent = label;
+      }, 3000);
+    });
+    recommend.appendChild(recommendButton);
+    wrap.appendChild(recommend);
+
     // 指示の書き直し（issue #1073）。本文と同じ場所に出し、編集中は本文を隠す。
     // userMessage以外では常に隠れたまま
     const editBox = document.createElement('div');
@@ -628,6 +650,10 @@ export function chatScript(
       editTarget: undefined,
       editFromStart: false,
       editing: false,
+      recommend,
+      recommendButton,
+      recommendTarget: undefined,
+      recommendKey: '',
       fork,
       forkTarget: undefined,
       rewind,
@@ -1446,6 +1472,23 @@ export function chatScript(
     // どの発言でも常に持っている値なので、直前の発言の有無を待つ必要が無い
     node.rewindTarget = item.kind === 'userMessage' ? item.id : undefined;
     node.rewind.hidden = !(SHOW_REWIND && item.kind === 'userMessage');
+
+    // 推奨行のボタン（Issue #2056）。確定した応答（profileRecommendationを持つ項目）にだけ出す。
+    const rec = item.kind === 'agentMessage' ? item.profileRecommendation : undefined;
+    if (rec) {
+      const key = rec.model + '/' + rec.effort;
+      if (node.recommendKey !== key) {
+        node.recommendKey = key;
+        node.recommendButton.disabled = false;
+        node.recommendButton.textContent = 'model=' + rec.model + ' / effort=' + rec.effort + ' に切り替える';
+      }
+      node.recommendTarget = item.id;
+      node.recommend.hidden = false;
+    } else {
+      node.recommendTarget = undefined;
+      node.recommendKey = '';
+      node.recommend.hidden = true;
+    }
 
     // 停止は実行中のセカンドオピニオンにだけ出す（Issue #940）。項目のidがそのまま
     // 実行の識別子になる。終わった実行の項目に押せるボタンを残さない

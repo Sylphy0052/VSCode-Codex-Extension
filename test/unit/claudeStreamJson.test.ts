@@ -41,6 +41,23 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('直します');
   });
 
+  it('確定した応答の推奨行を項目へ載せる。推奨行が無ければ載せない（Issue #2056）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'text', text: '推奨: model=opus / effort=xhigh (設計判断)' },
+            { type: 'text', text: '普通の文' },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.profileRecommendation).toEqual({ model: 'opus', effort: 'xhigh' });
+    expect(state.items[1]?.profileRecommendation).toBeUndefined();
+  });
+
   it('1メッセージ内の複数テキストを別々の項目にする', () => {
     const state = apply([
       {
