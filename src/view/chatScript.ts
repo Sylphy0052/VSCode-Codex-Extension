@@ -592,6 +592,12 @@ export function chatScript(
     diffs.hidden = true;
     wrap.appendChild(diffs);
 
+    // ask-chatgptの質問ファイルを作ったときだけ出す、ChatGPTで議論するボタン（Issue #2057）
+    const askBox = document.createElement('div');
+    askBox.className = 'ask-chatgpt';
+    askBox.hidden = true;
+    wrap.appendChild(askBox);
+
     const node = {
       wrap,
       label,
@@ -605,6 +611,8 @@ export function chatScript(
       imageKey: '',
       diffs,
       diffKey: '',
+      askBox,
+      askKey: '',
       copy,
       openOutput,
       // 退避したツール出力を開く対象（issue #1325）。退避していない項目では undefined
@@ -1136,6 +1144,41 @@ export function chatScript(
   }
 
   /**
+   * 作業フォルダ直下のdocs/chatgpt/ask-<slug>.mdか（Issue #2057）。ボタンを出すかの
+   * 簡易判定で、パスの確認・本文の読み込み・字数の判定はホスト側が行う。
+   */
+  function isAskQuestionPath(p) {
+    if (!p || containsParentSegment(p)) return false;
+    const pattern = /^docs[/]chatgpt[/]ask-[A-Za-z0-9][A-Za-z0-9-]*\\.md$/;
+    return workspaceRoots.some((root) => {
+      const norm = root.replace(/[\\/]+$/, '');
+      return p.indexOf(norm + '/') === 0 && pattern.test(p.slice(norm.length + 1));
+    });
+  }
+
+  /** 質問ファイルをWriteで作った項目の下に、議論を始めるボタンを出す。押すまで送らない。 */
+  function renderAskChatGptButton(node, item) {
+    const created = item.kind === 'fileChange'
+      ? (item.diffs || []).find((d) => d.kind === 'add' && isAskQuestionPath(d.path))
+      : undefined;
+    const key = created ? item.id : '';
+    if (node.askKey === key) return;
+    node.askKey = key;
+    node.askBox.replaceChildren();
+    node.askBox.hidden = !created;
+    if (!created) return;
+    const button = document.createElement('button');
+    button.className = 'secondary';
+    button.type = 'button';
+    button.textContent = 'この質問をChatGPTで議論する';
+    button.title = '質問ファイルの本文を議題にします。会話URLと送信上限を確認するまで送信しません';
+    button.addEventListener('click', () =>
+      vscode.postMessage({ type: 'askChatGptDiscuss', itemId: item.id }),
+    );
+    node.askBox.appendChild(button);
+  }
+
+  /**
    * 差分の見出し行に足す操作ボタン（issue #291）。「エディタで開く」「差分を開く」
    * 「この変更を戻す」を、種類とパスから出し分ける。実際の復元可否（ハンクの解析等）は
    * ここでは見ない（Webview側は文字列のパース器を持たないため）。ホスト側が
@@ -1380,6 +1423,7 @@ export function chatScript(
       // 適用済みの実変更なので操作ボタンを出す（issue #291）
       renderDiffs(node.diffs, diffs, item.id, true);
     }
+    renderAskChatGptButton(node, item);
 
     // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
     node.forkTarget = forkTarget;

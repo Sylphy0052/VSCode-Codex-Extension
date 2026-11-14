@@ -909,6 +909,7 @@ ${completionEvidenceStyles()}
   }
   #loopEvidence { padding: 0 16px 6px; font-size: 0.85em; }
   .diffs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .ask-chatgpt { margin-top: 6px; }
   .diff {
     border: 1px solid var(--agent-border);
     border-radius: var(--agent-radius-md);

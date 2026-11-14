@@ -30,6 +30,11 @@ export interface PrepareWebGptDiscussionOptions {
   token?: vscode.CancellationToken | undefined;
   /** 入力欄の見出しへ添える依頼元（会話のタイトル）。 */
   requester?: string | undefined;
+  /**
+   * 質問ファイルの本文など、確定済みの議題（Issue #2057）。渡すと議題の入力欄を出さず、
+   * 本文をそのまま使う。送信は会話URLと送信上限の確認のあとで、確認前には送らない。
+   */
+  fixedTopic?: string | undefined;
 }
 
 /**
@@ -65,7 +70,7 @@ export async function prepareWebGptDiscussion(
   useCurrentContext = false,
   options: PrepareWebGptDiscussionOptions = {},
 ): Promise<{ endpoint: string; topic: string; urls: string[]; maxSends: number } | undefined> {
-  const { initial, token, requester } = options;
+  const { initial, token, requester, fixedTopic } = options;
   const titleSuffix = requester === undefined ? '' : `（${requester}からの依頼）`;
   if (!vscode.workspace.isTrusted) {
     throw new Error('WebGPTとの議論には信頼済みワークスペースが必要です');
@@ -104,23 +109,26 @@ export async function prepareWebGptDiscussion(
   );
   if (rawUrls === undefined) return;
   const urls = parseConversationUrls(rawUrls);
-  const topic = await vscode.window.showInputBox(
-    {
-      title: `WebGPTと議論：議題${titleSuffix}`,
-      value: initial?.topic,
-      prompt: useCurrentContext
-        ? '空欄なら現在の会話から議題を選びます。議題に必要な論点を要約してChatGPTへ送ります'
-        : 'この議題と議論中の回答・批評を対象のChatGPT会話（URL空欄なら新規）へ送信します',
-      ignoreFocusOut: true,
-      validateInput: (value) =>
-        (!useCurrentContext && value.trim().length === 0) || value.length > WEB_GPT_TOPIC_MAX_LENGTH
-          ? useCurrentContext
-            ? `議題は${WEB_GPT_TOPIC_MAX_LENGTH}文字以内で入力してください`
-            : `議題は1〜${WEB_GPT_TOPIC_MAX_LENGTH}文字で入力してください`
-          : undefined,
-    },
-    token,
-  );
+  const topic =
+    fixedTopic ??
+    (await vscode.window.showInputBox(
+      {
+        title: `WebGPTと議論：議題${titleSuffix}`,
+        value: initial?.topic,
+        prompt: useCurrentContext
+          ? '空欄なら現在の会話から議題を選びます。議題に必要な論点を要約してChatGPTへ送ります'
+          : 'この議題と議論中の回答・批評を対象のChatGPT会話（URL空欄なら新規）へ送信します',
+        ignoreFocusOut: true,
+        validateInput: (value) =>
+          (!useCurrentContext && value.trim().length === 0) ||
+          value.length > WEB_GPT_TOPIC_MAX_LENGTH
+            ? useCurrentContext
+              ? `議題は${WEB_GPT_TOPIC_MAX_LENGTH}文字以内で入力してください`
+              : `議題は1〜${WEB_GPT_TOPIC_MAX_LENGTH}文字で入力してください`
+            : undefined,
+      },
+      token,
+    ));
   if (topic === undefined) return;
   // 初期値（無ければ既定）を先頭に置き、残りを1回から上限まで並べる
   const first = initial?.maxSends ?? WEB_GPT_DEFAULT_MAX_SENDS;
