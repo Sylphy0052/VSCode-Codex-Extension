@@ -235,11 +235,16 @@ export class ChatSession {
   /**
    * 既存のスレッドを読み込む。`settings`を渡すと`thread/start`と同じ設定（権限・モデル・
    * スレッド限定のconfig）を`thread/resume`へ載せる（一時停止した工程の再開。Issue #1629）。
+   * `config`を省くとスレッド限定のconfigだけを載せ、権限・モデルはスレッドの保存値のままにする
+   * （履歴から開いた会話へ会話ごとのMCPを渡す。Issue #2051）。
    */
   async resume(
     threadId: string,
     cwd: string | undefined,
-    settings?: { config: CodexConfig; threadConfig?: Record<string, unknown> | undefined },
+    settings?: {
+      config?: CodexConfig | undefined;
+      threadConfig?: Record<string, unknown> | undefined;
+    },
   ): Promise<void> {
     this.update({
       ...this.state,
@@ -251,7 +256,11 @@ export class ChatSession {
       threadId,
       ...(settings === undefined
         ? {}
-        : threadSettingsParams(settings.config, settings.threadConfig)),
+        : settings.config === undefined
+          ? settings.threadConfig === undefined
+            ? {}
+            : { config: settings.threadConfig }
+          : threadSettingsParams(settings.config, settings.threadConfig)),
     };
     if (cwd !== undefined) {
       params['cwd'] = cwd;
