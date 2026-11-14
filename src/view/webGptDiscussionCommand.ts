@@ -10,6 +10,12 @@ import {
 /** 議題の文字数上限。入力欄とエージェントからの依頼（Issue #2051）で共通にする。 */
 const WEB_GPT_TOPIC_MAX_LENGTH = 12000;
 
+/**
+ * エージェントが渡す議題の文字数上限（Issue #2051）。入力欄の前のモーダルで全文を読める
+ * 長さに抑える。利用者が入力欄で書き足す分は`WEB_GPT_TOPIC_MAX_LENGTH`まで受け付ける。
+ */
+const WEB_GPT_TOOL_TOPIC_MAX_LENGTH = 2000;
+
 /** エージェントが`start_webgpt_discussion`で渡した入力欄の初期値（Issue #2051）。 */
 export interface WebGptDiscussionInitialValues {
   topic?: string | undefined;
@@ -33,8 +39,8 @@ export interface PrepareWebGptDiscussionOptions {
 export function validateWebGptDiscussionInitial(
   initial: WebGptDiscussionInitialValues,
 ): string | undefined {
-  if (initial.topic !== undefined && initial.topic.length > WEB_GPT_TOPIC_MAX_LENGTH) {
-    return `議題は${WEB_GPT_TOPIC_MAX_LENGTH}文字以内で指定してください`;
+  if (initial.topic !== undefined && initial.topic.length > WEB_GPT_TOOL_TOPIC_MAX_LENGTH) {
+    return `議題は${WEB_GPT_TOOL_TOPIC_MAX_LENGTH}文字以内で指定してください`;
   }
   if (initial.urls !== undefined) {
     try {

@@ -1477,7 +1477,7 @@ export const START_WEBGPT_DISCUSSION_TOOL: McpToolDefinition = {
     properties: {
       topic: {
         type: 'string',
-        description: '議題（12000文字以内）。省略すると現在の会話から論点を選ぶ。',
+        description: '議題（2000文字以内）。省略すると現在の会話から論点を選ぶ。',
       },
       urls: {
         type: 'array',

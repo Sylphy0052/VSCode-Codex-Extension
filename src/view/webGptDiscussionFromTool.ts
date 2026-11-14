@@ -139,7 +139,11 @@ export class WebGptToolRequests<TPanel> {
     try {
       // 入力欄は1行で長い議題の全体が見えないため、先に依頼の全文をモーダルで見せる。
       // Chromeの起動・接続もこの同意の後にする
-      const proceed = await askToProceed(this.host.title(entry), args);
+      // モーダルはAPIから閉じられないため、会話を閉じた・時間切れなら待たずに打ち切る
+      const proceed = await raceCancellation(
+        askToProceed(this.host.title(entry), args),
+        source.token,
+      );
       if (proceed && !source.token.isCancellationRequested) {
         const value = await this.prepare(true, {
           initial: args,
@@ -279,6 +283,30 @@ async function askToProceed(requester: string, args: WebGptDiscussionToolArgs): 
     proceed,
   );
   return choice === proceed;
+}
+
+/** `promise`と打ち切りを競わせ、打ち切られたら`false`を返す。 */
+function raceCancellation(
+  promise: Promise<boolean>,
+  token: vscode.CancellationToken,
+): Promise<boolean> {
+  if (token.isCancellationRequested) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const listener = token.onCancellationRequested(() => {
+      listener.dispose();
+      resolve(false);
+    });
+    promise.then(
+      (value) => {
+        listener.dispose();
+        resolve(value);
+      },
+      () => {
+        listener.dispose();
+        resolve(false);
+      },
+    );
+  });
 }
 
 function reject(reason: string): WebGptDiscussionToolResult {
