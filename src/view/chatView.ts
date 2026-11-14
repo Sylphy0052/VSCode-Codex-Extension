@@ -5,6 +5,12 @@ import { prepareWebGptCli } from '../webGpt/cli';
 import { buildWebGptDiscussionLoopPlan, buildWebGptDiscussionPrompt } from '../webGpt/discussion';
 import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
 import {
+  chatPanelToolRequestHost,
+  SESSION_MESSAGING_TOOL_TIMEOUT_SEC,
+  WebGptToolRequests,
+  type PreparedWebGptDiscussion,
+} from './webGptDiscussionFromTool';
+import {
   buildApprovalResponse,
   defaultDenyResponse,
   describeApproval,
@@ -146,7 +152,12 @@ import type {
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildSessionPanelTitle } from './sessionTitle';
 import { buildItemsDelta, stripHostOnlyState } from './stateDelta';
-import { BaseChatViewManager, HELD_TASK_PANEL_NOTICE, type BaseChatPanel } from './chatManagerBase';
+import {
+  BaseChatViewManager,
+  HELD_TASK_PANEL_NOTICE,
+  INPUT_LOCKED_MESSAGE,
+  type BaseChatPanel,
+} from './chatManagerBase';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
@@ -568,6 +579,16 @@ const REVIEW_TARGET_INPUT: Record<
 export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements TaskSessionHost {
   private readonly webGptPreparing = new Set<ChatPanel>();
 
+  /** エージェントのツール呼び出しから受けた議論の依頼（Issue #2051）。 */
+  private readonly webGptToolRequests = new WebGptToolRequests<ChatPanel>(
+    chatPanelToolRequestHost<ChatPanel>({
+      isListed: (entry) => [...this.panels.values()].includes(entry),
+      preparing: this.webGptPreparing,
+      inputLockedMessage: INPUT_LOCKED_MESSAGE,
+      start: (entry, request) => this.discussWithWebGptIn(entry, request),
+    }),
+  );
+
   async discussWithWebGpt(): Promise<void> {
     const entry = this.active;
     if (entry === undefined) {
@@ -577,8 +598,21 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     await this.discussWithWebGptIn(entry);
   }
 
-  private async discussWithWebGptIn(entry: ChatPanel): Promise<void> {
+  /**
+   * @param prepared エージェントの依頼（Issue #2051）で利用者が確認済みの入力。渡したときは
+   *   入力欄を開き直さない
+   */
+  private async discussWithWebGptIn(
+    entry: ChatPanel,
+    prepared?: PreparedWebGptDiscussion,
+  ): Promise<void> {
     if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
+    if (prepared === undefined && this.webGptToolRequests.has(entry)) {
+      void vscode.window.showInformationMessage(
+        'この会話ではエージェントの依頼によるWebGPTとの議論が確認中か開始待ちです',
+      );
+      return;
+    }
     this.webGptPreparing.add(entry);
     const assertReady = () => {
       const state = entry.session.getState();
@@ -599,7 +633,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       if (this.globalStorageDir === undefined) {
         throw new Error('WebGPT接続設定の保存先を取得できませんでした');
       }
-      const request = await prepareWebGptDiscussion(true);
+      const request = prepared ?? (await prepareWebGptDiscussion(true));
       if (request === undefined) return;
       assertReady();
       const browserInstructions = await prepareWebGptCli(this.globalStorageDir, request.endpoint);
@@ -747,6 +781,39 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /** 通常の会話へ見せるメッセージング用MCPサーバを配線する（Issue #1305）。 */
   setSessionMessaging(host: SessionMessagingHost | undefined): void {
     this.sessionMessaging = host;
+  }
+
+  /**
+   * この会話にメッセージング用MCPのURLを発行する（Issue #1305）。宛先はスレッドidが判ってから
+   * 呼び出し側が`bind`する。タスク実行の会話（`taskManaged`）には、WebGPTとの議論を始める
+   * ツール（Issue #2051）を見せない。
+   */
+  private registerSessionMessaging(entry: ChatPanel): SessionMessagingRegistration | undefined {
+    return this.sessionMessaging?.register(
+      'codex',
+      entry.taskManaged
+        ? undefined
+        : { webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args) },
+    );
+  }
+
+  /**
+   * 履歴から開いた会話（`thread/resume`）にもメッセージング用MCPを渡す（Issue #2051）。
+   * スレッドidは既に判っているため、発行と同時に宛先を束縛する。既に割り当て済みなら
+   * それを使う（再読込の`resume`で二重に発行しない）。
+   */
+  private resumeThreadConfig(
+    entry: ChatPanel,
+    threadId: string,
+  ): { threadConfig: Record<string, unknown> } | undefined {
+    let messaging = this.sessionMessagingRegistrations.get(entry);
+    if (messaging === undefined) {
+      messaging = this.registerSessionMessaging(entry);
+      if (messaging === undefined) return undefined;
+      messaging.bind(threadId);
+      this.sessionMessagingRegistrations.set(entry, messaging);
+    }
+    return { threadConfig: { mcp_servers: messagingMcpServers(messaging.url) } };
   }
 
   /**
@@ -918,16 +985,14 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 他のセッションと話すためのMCPサーバ（Issue #1305）。スレッドidは`thread/start`の
     // 応答でしか判らないため、先にURLだけ発行し、idが確定してから宛先を束縛する。
     // 束縛するまでこのURLは404のままで、誰も名乗れない
-    const messaging = this.sessionMessaging?.register('codex');
+    const messaging = this.registerSessionMessaging(entry);
     // skill選択（issue #1451）を有効にしているなら、skillの一覧をモデルへ渡さない。
     // 選んだskillは発言のたびに`turn/start`の`input`で渡す
     const hideSkills = readSkillSelectConfig(this.reflexEnabledFor(entry)).enabled;
     // 画像生成のMCPサーバ（Issue #1901）はタスクのセッションへは渡さない
     const imageUrl = entry.taskManaged ? undefined : this.imageGenerationMcp()?.url;
     const mcpServers = {
-      ...(messaging === undefined
-        ? {}
-        : { [MESSAGING_MCP_SERVER_NAME]: { url: messaging.url, type: 'streamable_http' } }),
+      ...(messaging === undefined ? {} : messagingMcpServers(messaging.url)),
       ...(imageUrl === undefined
         ? {}
         : {
@@ -2650,7 +2715,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     this.showPanel(entry, false);
     this.panels.set(threadId, entry);
     try {
-      await entry.session.resume(threadId, cwd);
+      await entry.session.resume(threadId, cwd, this.resumeThreadConfig(entry, threadId));
     } catch (e) {
       const message = resumeFailureMessage(e);
       entry.session.resumeFailed(message);
@@ -3329,7 +3394,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
           return;
         }
         try {
-          await entry.session.resume(threadId, entry.cwd);
+          await entry.session.resume(
+            threadId,
+            entry.cwd,
+            entry.taskManaged ? undefined : this.resumeThreadConfig(entry, threadId),
+          );
         } catch (e) {
           const message = resumeFailureMessage(e);
           entry.session.resumeFailed(message);
@@ -5060,4 +5129,18 @@ function readSubmission(raw: unknown): PromptSubmission | undefined {
   }
   // 項目名はMCPサーバが決める。`values[id] = ...` だと `__proto__` で回答が消える
   return { action, values: Object.fromEntries(values) };
+}
+
+/**
+ * 会話ごとのメッセージング用MCPを`mcp_servers`へ載せる形（Issue #1305）。WebGPTとの議論の
+ * ツール（Issue #2051）は利用者の確認を待つため、ツールの時間切れを既定より長くする。
+ */
+function messagingMcpServers(url: string): Record<string, unknown> {
+  return {
+    [MESSAGING_MCP_SERVER_NAME]: {
+      url,
+      type: 'streamable_http',
+      tool_timeout_sec: SESSION_MESSAGING_TOOL_TIMEOUT_SEC,
+    },
+  };
 }

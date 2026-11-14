@@ -14,6 +14,7 @@ import {
   type DispatchErrorLogPort,
   type McpConnection,
   type McpTransportPort,
+  type WebGptDiscussionPort,
 } from './messaging';
 import { formatSessionTarget, type SessionBridgePort, type SessionProvider } from './sessionBridge';
 
@@ -64,9 +65,20 @@ export interface SessionMessagingHost {
    * Codexは`thread/start`の応答でしかスレッドidが判らないため、起動前にここでURLを取り、
    * 起動後に`bind`する。Claude Codeは起動前にセッションidが決まるため、発行直後に
    * `bind`できる。
+   *
+   * `options.webGptDiscussion`を渡すと、その会話へ`start_webgpt_discussion`を見せる
+   * （Issue #2051）。タスク実行の会話では渡さない。
    */
-  register(provider: SessionProvider): SessionMessagingRegistration;
+  register(
+    provider: SessionProvider,
+    options?: SessionMessagingRegisterOptions,
+  ): SessionMessagingRegistration;
   close(): Promise<void>;
+}
+
+export interface SessionMessagingRegisterOptions {
+  /** この会話でWebGPTとの議論を始める口（Issue #2051）。会話に束縛した関数を渡す。 */
+  webGptDiscussion?: WebGptDiscussionPort | undefined;
 }
 
 export interface SessionMessagingHostDeps {
@@ -107,7 +119,10 @@ export async function startSessionMessagingHost(
   if (deps.configDir !== undefined) pruneStaleMcpConfigFiles(deps.configDir, CONFIG_PREFIX);
 
   return {
-    register(provider: SessionProvider): SessionMessagingRegistration {
+    register(
+      provider: SessionProvider,
+      options?: SessionMessagingRegisterOptions,
+    ): SessionMessagingRegistration {
       const token = randomBytes(16).toString('hex');
       const entry: SessionEntry = { provider, ref: undefined, handler: undefined };
       const transport: McpTransportPort = {
@@ -120,6 +135,7 @@ export async function startSessionMessagingHost(
         listRunTasks: () => [],
         sessionBridge: deps.sessionBridge,
         sessionOnly: true,
+        webGptDiscussion: options?.webGptDiscussion,
       });
       const mcpServer = new MessagingMcpServer(hub, transport, deps.logPort);
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる

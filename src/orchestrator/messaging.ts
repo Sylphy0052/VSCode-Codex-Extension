@@ -1458,6 +1458,94 @@ export const SESSION_TOOLS: readonly McpToolDefinition[] = [
 const SESSION_TOOL_NAMES = new Set(SESSION_TOOLS.map((tool) => tool.name));
 
 /**
+ * この会話からWebGPT（ChatGPT）との議論を始めるツール（Issue #2051）。1セッション用のhubで、
+ * `webGptDiscussion`が渡されているときだけ見せる（タスク実行の会話には渡さない）。
+ *
+ * 呼ばれると拡張機能が利用者に入力欄で確認を取り、確定したときだけ受け付ける。議論は
+ * 呼び出し元のターンが終わり、送信待ちが無くなってから始まる。
+ */
+export const START_WEBGPT_DISCUSSION_TOOL: McpToolDefinition = {
+  name: 'start_webgpt_discussion',
+  description:
+    'この会話でWebGPT（ブラウザのChatGPT）との議論を始める。利用者が「WebGPTと議論して」と' +
+    '頼んだとき、または設計判断が割れて外部の意見が欲しいときに呼ぶ。呼ぶと利用者に議題・' +
+    '会話URL・送信上限の確認を求め、確定するまでこのツールは戻らない。結果が`accepted: true`なら' +
+    '**このターンをすぐ終えること**（ターンの終了後に拡張機能が議論の手順を送る）。' +
+    '`accepted: false`なら`reason`を利用者へ伝え、議論は始まっていない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      topic: {
+        type: 'string',
+        description: '議題（12000文字以内）。省略すると現在の会話から論点を選ぶ。',
+      },
+      urls: {
+        type: 'array',
+        items: { type: 'string' },
+        maxItems: 3,
+        description:
+          '続きを議論する既存のChatGPT会話のURL（`https://chatgpt.com/c/<id>`、0〜3件）。省略すると新規会話。',
+      },
+      maxSends: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10,
+        description: '各会話への送信上限（1〜10）。省略すると既定値。',
+      },
+    },
+    additionalProperties: false,
+  },
+};
+
+/** `start_webgpt_discussion`の引数。型だけ確かめた値で、中身の検証は受け取る側が行う。 */
+export interface WebGptDiscussionToolArgs {
+  topic: string | undefined;
+  urls: string[] | undefined;
+  maxSends: number | undefined;
+}
+
+/** `start_webgpt_discussion`の結果。 */
+export interface WebGptDiscussionToolResult {
+  accepted: boolean;
+  reason: string;
+}
+
+/** 呼び出し元の会話で議論の確認と予約を行う口。会話ごとに束縛した関数を渡す。 */
+export type WebGptDiscussionPort = (
+  args: WebGptDiscussionToolArgs,
+) => Promise<WebGptDiscussionToolResult>;
+
+/**
+ * `start_webgpt_discussion`の引数を型だけ確かめて取り出す。型が違えば理由を返す。
+ * URLの形式・範囲・文字数は、入力欄と同じ検証を受け取る側（拡張機能のビュー）で行う。
+ */
+export function parseWebGptDiscussionToolArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: WebGptDiscussionToolArgs } | { ok: false; reason: string } {
+  const { topic, urls, maxSends } = args;
+  if (topic !== undefined && typeof topic !== 'string') {
+    return { ok: false, reason: 'topicは文字列で指定してください' };
+  }
+  if (
+    urls !== undefined &&
+    (!Array.isArray(urls) || !urls.every((url): url is string => typeof url === 'string'))
+  ) {
+    return { ok: false, reason: 'urlsは文字列の配列で指定してください' };
+  }
+  if (maxSends !== undefined && (typeof maxSends !== 'number' || !Number.isInteger(maxSends))) {
+    return { ok: false, reason: 'maxSendsは整数で指定してください' };
+  }
+  return {
+    ok: true,
+    value: {
+      topic,
+      urls: urls === undefined ? undefined : [...(urls as string[])],
+      maxSends,
+    },
+  };
+}
+
+/**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
  */
@@ -1608,6 +1696,11 @@ export interface TaskMessagingHubDeps {
    */
   sessionOnly?: boolean;
   /**
+   * WebGPTとの議論を呼び出し元の会話で始める口（Issue #2051）。`sessionOnly`のhubでだけ読み、
+   * 渡されているときだけ`start_webgpt_discussion`を見せる。タスク実行の会話には渡さない。
+   */
+  webGptDiscussion?: WebGptDiscussionPort | undefined;
+  /**
    * オーケストレーターが今メッセージを受け取れるか（Issue #1513）。タスクから
    * オーケストレーターへの送信を受け付けたときにだけ呼ぶ。`recovering`・`unavailable`なら
    * 結果の`reason`へその旨を足し、`unavailable`では`expectReply`を落として積む
@@ -1728,6 +1821,11 @@ export class TaskMessagingHub {
    * 1つのチャットセッションのためのhubか（Issue #1305、`TaskMessagingHubDeps.sessionOnly`）。
    * 見せる道具を絞る判断にだけ使う。
    */
+  /** WebGPTとの議論を始める口（Issue #2051）。1セッション用のhubでだけ返す。 */
+  get webGptDiscussion(): WebGptDiscussionPort | undefined {
+    return this.deps.sessionOnly === true ? this.deps.webGptDiscussion : undefined;
+  }
+
   get sessionOnly(): boolean {
     return this.deps.sessionOnly === true;
   }
@@ -2308,7 +2406,12 @@ export class MessagingMcpServer {
     // だけが通る）とセッション宛の道具に絞る。`sessionBridge`が未設定ならそもそも
     // 宛先解決ができないため、何も見せない
     if (this.hub.sessionOnly) {
-      return this.hub.sessionBridge === undefined ? [] : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS];
+      // WebGPTとの議論（Issue #2051）は宛先解決を使わないため、`sessionBridge`とは独立に足す
+      const webGptTools =
+        this.hub.webGptDiscussion === undefined ? [] : [START_WEBGPT_DISCUSSION_TOOL];
+      return this.hub.sessionBridge === undefined
+        ? webGptTools
+        : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS, ...webGptTools];
     }
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
     const handoffTools = this.hub.handoff === undefined ? [] : HANDOFF_TOOLS;
@@ -2403,6 +2506,10 @@ export class MessagingMcpServer {
 
     // 1セッション用のhub（Issue #1305）では、run内の道具を名前を推測して呼ばれても通さない
     // （`visibleTools`で見せていないものを、呼び出し時にも同じ条件で弾く多層防御の流儀）
+    if (name === START_WEBGPT_DISCUSSION_TOOL.name) {
+      return this.handleWebGptDiscussionCall(request, args);
+    }
+
     if (this.hub.sessionOnly && name !== 'send_message' && !SESSION_TOOL_NAMES.has(name)) {
       return failure(request.id, -32602, `未知のツールです: ${name}`);
     }
@@ -2562,6 +2669,36 @@ export class MessagingMcpServer {
       request.id,
       toolTextResult(JSON.stringify({ ...result, reason, crossWindow: true }), !result.accepted),
     );
+  }
+
+  /**
+   * `start_webgpt_discussion`（Issue #2051）の呼び出し。口が無いhub（run用・タスク実行の会話）
+   * では「未知のツール」で拒否する（`visibleTools`と同じ条件の多層防御）。利用者の確認を
+   * 待つため、結果が返るまで時間がかかる。
+   */
+  private async handleWebGptDiscussionCall(
+    request: JsonRpcRequest,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const port = this.hub.webGptDiscussion;
+    if (port === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${START_WEBGPT_DISCUSSION_TOOL.name}`);
+    }
+    const parsed = parseWebGptDiscussionToolArgs(args);
+    let result: WebGptDiscussionToolResult;
+    if (!parsed.ok) {
+      result = { accepted: false, reason: parsed.reason };
+    } else {
+      try {
+        result = await port(parsed.value);
+      } catch (error) {
+        result = {
+          accepted: false,
+          reason: `議論を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
   }
 
   /**

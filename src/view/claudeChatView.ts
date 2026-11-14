@@ -7,6 +7,11 @@ import {
   WEB_GPT_MCP_SERVER,
 } from '../webGpt/discussion';
 import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
+import {
+  chatPanelToolRequestHost,
+  WebGptToolRequests,
+  type PreparedWebGptDiscussion,
+} from './webGptDiscussionFromTool';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
@@ -201,6 +206,7 @@ import {
   abortAsRejection,
   BaseChatViewManager,
   HELD_TASK_PANEL_NOTICE,
+  INPUT_LOCKED_MESSAGE,
   type BaseChatPanel,
 } from './chatManagerBase';
 import {
@@ -731,7 +737,10 @@ export class ClaudeChatViewManager
     if (entry.taskManaged) {
       return;
     }
-    const registration = this.sessionMessaging?.register('claude');
+    const registration = this.sessionMessaging?.register('claude', {
+      // チャットの発話からWebGPTとの議論を始めるツール（Issue #2051）
+      webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args),
+    });
     if (registration === undefined) {
       return;
     }
@@ -1305,6 +1314,16 @@ export class ClaudeChatViewManager
 
   private readonly webGptPreparing = new Set<ClaudePanel>();
 
+  /** エージェントのツール呼び出しから受けた議論の依頼（Issue #2051）。 */
+  private readonly webGptToolRequests = new WebGptToolRequests<ClaudePanel>(
+    chatPanelToolRequestHost<ClaudePanel>({
+      isListed: (entry) => [...this.panels.values()].includes(entry),
+      preparing: this.webGptPreparing,
+      inputLockedMessage: INPUT_LOCKED_MESSAGE,
+      start: (entry, request) => this.discussWithWebGptIn(entry, request),
+    }),
+  );
+
   /** 三点メニューからはentryを固定し、入力中に別タブへ移っても送り先を変えない。 */
   async discussWithWebGpt(): Promise<void> {
     const entry = this.active;
@@ -1315,8 +1334,21 @@ export class ClaudeChatViewManager
     await this.discussWithWebGptIn(entry);
   }
 
-  private async discussWithWebGptIn(entry: ClaudePanel): Promise<void> {
+  /**
+   * @param prepared エージェントの依頼（Issue #2051）で利用者が確認済みの入力。渡したときは
+   *   入力欄を開き直さない
+   */
+  private async discussWithWebGptIn(
+    entry: ClaudePanel,
+    prepared?: PreparedWebGptDiscussion,
+  ): Promise<void> {
     if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
+    if (prepared === undefined && this.webGptToolRequests.has(entry)) {
+      void vscode.window.showInformationMessage(
+        'この会話ではエージェントの依頼によるWebGPTとの議論が確認中か開始待ちです',
+      );
+      return;
+    }
     this.webGptPreparing.add(entry);
     const assertReady = () => {
       const state = entry.session.getState();
@@ -1333,7 +1365,7 @@ export class ClaudeChatViewManager
     };
     try {
       assertReady();
-      const request = await prepareWebGptDiscussion(true);
+      const request = prepared ?? (await prepareWebGptDiscussion(true));
       if (request === undefined) return;
       assertReady();
       await vscode.window.withProgress(
