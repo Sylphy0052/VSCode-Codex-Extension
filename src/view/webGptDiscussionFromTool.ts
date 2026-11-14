@@ -7,6 +7,7 @@ import type {
 
 import {
   prepareWebGptDiscussion,
+  reportDiscussionError,
   validateWebGptDiscussionInitial,
   type PrepareWebGptDiscussionOptions,
 } from './webGptDiscussionCommand';
@@ -61,8 +62,11 @@ export interface WebGptToolRequestHost<TPanel> {
 }
 
 export class WebGptToolRequests<TPanel> {
-  /** 確認中または予約中の会話。1会話につき1件だけ受け付ける。 */
-  private readonly inFlight = new Set<TPanel>();
+  /**
+   * 確認中または予約中の会話と、それを打ち切る関数。1会話につき1件だけ受け付ける。
+   * 確認中は入力欄を閉じ、予約中は予約を破棄する。
+   */
+  private readonly inFlight = new Map<TPanel, () => void>();
 
   constructor(
     private readonly host: WebGptToolRequestHost<TPanel>,
@@ -76,6 +80,11 @@ export class WebGptToolRequests<TPanel> {
   /** この会話で予約中・確認中の依頼があるか。 */
   has(entry: TPanel): boolean {
     return this.inFlight.has(entry);
+  }
+
+  /** 会話を閉じたときに呼ぶ。確認中なら入力欄を閉じ、予約中なら破棄する。 */
+  cancel(entry: TPanel): void {
+    this.inFlight.get(entry)?.();
   }
 
   async request(
@@ -93,7 +102,7 @@ export class WebGptToolRequests<TPanel> {
     if (invalid !== undefined) {
       return reject(invalid);
     }
-    this.inFlight.add(entry);
+    this.inFlight.set(entry, () => undefined);
     let accepted = false;
     try {
       const prepared = await this.confirm(entry, args);
@@ -121,22 +130,33 @@ export class WebGptToolRequests<TPanel> {
     args: WebGptDiscussionToolArgs,
   ): Promise<{ ok: true; value: PreparedWebGptDiscussion } | { ok: false; reason: string }> {
     const source = new vscode.CancellationTokenSource();
-    const timer = setTimeout(() => source.cancel(), this.confirmTimeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      source.cancel();
+    }, this.confirmTimeoutMs);
+    this.inFlight.set(entry, () => source.cancel());
     try {
-      const value = await this.prepare(true, {
-        initial: args,
-        token: source.token,
-        requester: this.host.title(entry),
-      });
-      if (value !== undefined) {
-        return { ok: true, value };
+      // 入力欄は1行で長い議題の全体が見えないため、先に依頼の全文をモーダルで見せる。
+      // Chromeの起動・接続もこの同意の後にする
+      const proceed = await askToProceed(this.host.title(entry), args);
+      if (proceed && !source.token.isCancellationRequested) {
+        const value = await this.prepare(true, {
+          initial: args,
+          token: source.token,
+          requester: this.host.title(entry),
+        });
+        if (value !== undefined && !source.token.isCancellationRequested) {
+          return { ok: true, value };
+        }
       }
-      return {
-        ok: false,
-        reason: source.token.isCancellationRequested
-          ? `利用者の確認が${Math.round(this.confirmTimeoutMs / 60000)}分以内に済まなかったため、開始しませんでした`
-          : '利用者が確認をキャンセルしたため、開始しませんでした',
-      };
+      let reason = '利用者が確認をキャンセルしたため、開始しませんでした';
+      if (timedOut) {
+        reason = `利用者の確認が${Math.round(this.confirmTimeoutMs / 60000)}分以内に済まなかったため、開始しませんでした`;
+      } else if (source.token.isCancellationRequested) {
+        reason = '確認の間に会話が閉じられたため、開始しませんでした';
+      }
+      return { ok: false, reason };
     } finally {
       clearTimeout(timer);
       source.dispose();
@@ -161,8 +181,14 @@ export class WebGptToolRequests<TPanel> {
       }
       if (!this.host.isIdle(entry)) return;
       finish();
-      void this.host.start(entry, request);
+      // 受付から開始まで間が空くため、外部へ送る前提（信頼済みワークスペース）を確かめ直す
+      if (!vscode.workspace.isTrusted) {
+        reportDiscussionError(new Error('WebGPTとの議論には信頼済みワークスペースが必要です'));
+        return;
+      }
+      this.host.start(entry, request).catch(reportDiscussionError);
     };
+    this.inFlight.set(entry, finish);
     // 状態の通知の中で自動返信やループが次の送信を始めることがあるため、1ティック待って
     // その結果を見てから判定する
     unsubscribe = this.host.onStateChanged(entry, () => {
@@ -227,6 +253,32 @@ export function chatPanelToolRequestHost<TPanel extends ToolRequestPanel>(deps: 
     },
     start: deps.start,
   };
+}
+
+/**
+ * エージェントからの依頼の全文をモーダルで見せ、続けるか尋ねる。入力欄（1行）では長い議題の
+ * 後半が見えず、プロンプトインジェクションで紛れ込んだ内容を見落とすため。
+ */
+async function askToProceed(requester: string, args: WebGptDiscussionToolArgs): Promise<boolean> {
+  const topic =
+    args.topic === undefined || args.topic.trim() === ''
+      ? '（指定なし: 現在の会話から論点を選ぶ）'
+      : args.topic;
+  const urls =
+    args.urls === undefined || args.urls.length === 0 ? '（新規会話）' : args.urls.join('\n');
+  const maxSends = args.maxSends === undefined ? '（既定）' : `${args.maxSends}回`;
+  const proceed = 'Chromeへ接続して入力欄で確認する';
+  const choice = await vscode.window.showWarningMessage(
+    `エージェント（${requester}）がWebGPT（ChatGPT）との議論の開始を求めています`,
+    {
+      modal: true,
+      detail:
+        '議論ではこの議題と議論中の回答・批評をChatGPTへ送ります。続けると入力欄で内容を確認・修正できます。\n\n' +
+        `議題:\n${topic}\n\n会話URL:\n${urls}\n\n送信上限: ${maxSends}`,
+    },
+    proceed,
+  );
+  return choice === proceed;
 }
 
 function reject(reason: string): WebGptDiscussionToolResult {

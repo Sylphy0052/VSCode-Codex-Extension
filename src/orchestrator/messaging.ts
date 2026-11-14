@@ -1817,15 +1817,15 @@ export class TaskMessagingHub {
     return this.deps.sessionBridge?.();
   }
 
-  /**
-   * 1つのチャットセッションのためのhubか（Issue #1305、`TaskMessagingHubDeps.sessionOnly`）。
-   * 見せる道具を絞る判断にだけ使う。
-   */
   /** WebGPTとの議論を始める口（Issue #2051）。1セッション用のhubでだけ返す。 */
   get webGptDiscussion(): WebGptDiscussionPort | undefined {
     return this.deps.sessionOnly === true ? this.deps.webGptDiscussion : undefined;
   }
 
+  /**
+   * 1つのチャットセッションのためのhubか（Issue #1305、`TaskMessagingHubDeps.sessionOnly`）。
+   * 見せる道具を絞る判断にだけ使う。
+   */
   get sessionOnly(): boolean {
     return this.deps.sessionOnly === true;
   }

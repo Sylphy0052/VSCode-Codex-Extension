@@ -3343,6 +3343,8 @@ export class ClaudeChatViewManager
     // タブを閉じたら、この会話に割り当てたメッセージング用MCPのURLを失効させる（Issue #1305）
     this.sessionMessagingRegistrations.get(entry)?.dispose();
     this.sessionMessagingRegistrations.delete(entry);
+    // 確認中・開始待ちのWebGPTとの議論（Issue #2051）を破棄する
+    this.webGptToolRequests.cancel(entry);
     this.cancelLimitAutoResume(entry);
     if (entry.idleShutdownTimer !== undefined) {
       clearTimeout(entry.idleShutdownTimer);

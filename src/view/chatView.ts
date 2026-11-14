@@ -817,6 +817,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   }
 
   /**
+   * 再開に失敗した会話のメッセージング用MCPを失効させる（Issue #2051）。読み込めていない
+   * スレッドのURLを残さない。再試行（`resume`）では`resumeThreadConfig`が発行し直す。
+   */
+  private releaseSessionMessaging(entry: ChatPanel): void {
+    this.sessionMessagingRegistrations.get(entry)?.dispose();
+    this.sessionMessagingRegistrations.delete(entry);
+  }
+
+  /**
    * ChatGPT（Web）で画像を生成するMCPサーバ（Issue #1901）。設定が無効、または
    * サーバが未起動なら`undefined`を返す。`extension.ts`が渡す。
    */
@@ -2717,6 +2726,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     try {
       await entry.session.resume(threadId, cwd, this.resumeThreadConfig(entry, threadId));
     } catch (e) {
+      this.releaseSessionMessaging(entry);
       const message = resumeFailureMessage(e);
       entry.session.resumeFailed(message);
       this.reportError(e, message);
@@ -3065,6 +3075,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // タブを閉じたら、この会話に割り当てたメッセージング用MCPのURLを失効させる（Issue #1305）
     this.sessionMessagingRegistrations.get(entry)?.dispose();
     this.sessionMessagingRegistrations.delete(entry);
+    // 確認中・開始待ちのWebGPTとの議論（Issue #2051）を破棄する
+    this.webGptToolRequests.cancel(entry);
     this.cancelLimitAutoResume(entry);
     this.pendingStarts.remove(entry);
     // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、
@@ -3400,6 +3412,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
             entry.taskManaged ? undefined : this.resumeThreadConfig(entry, threadId),
           );
         } catch (e) {
+          if (!entry.taskManaged) this.releaseSessionMessaging(entry);
           const message = resumeFailureMessage(e);
           entry.session.resumeFailed(message);
           this.reportError(e, message);
