@@ -21,14 +21,24 @@ export async function prepareAskQuestionDiscussion(
     void vscode.window.showWarningMessage('質問ファイルの作成が見つかりませんでした');
     return undefined;
   }
-  const read = await readAskQuestionTopic(roots, diff.path);
-  if (!read.ok) {
-    void vscode.window.showWarningMessage(`ChatGPTでの議論を始められません: ${read.message}`);
+  try {
+    const read = await readAskQuestionTopic(roots, diff.path);
+    if (!read.ok) {
+      void vscode.window.showWarningMessage(`ChatGPTでの議論を始められません: ${read.message}`);
+      return undefined;
+    }
+    // プレビューが開けなくても議論は続けられる。失敗は未処理のrejectにしない
+    void Promise.resolve(
+      vscode.window.showTextDocument(vscode.Uri.file(read.absolutePath), {
+        preview: true,
+        preserveFocus: true,
+      }),
+    ).then(undefined, () => undefined);
+    return { fixedTopic: read.topic };
+  } catch (error) {
+    // 呼び出し側は`.then`だけでrejectを受けないため、ここで理由を出して止める
+    const reason = error instanceof Error ? error.message : String(error);
+    void vscode.window.showWarningMessage(`ChatGPTでの議論を始められません: ${reason}`);
     return undefined;
   }
-  void vscode.window.showTextDocument(vscode.Uri.file(read.absolutePath), {
-    preview: true,
-    preserveFocus: true,
-  });
-  return { fixedTopic: read.topic };
 }

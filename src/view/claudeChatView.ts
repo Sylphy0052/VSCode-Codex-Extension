@@ -4689,6 +4689,9 @@ export class ClaudeChatViewManager
     const item = state.items.find((i) => i.id === itemId && i.kind === 'agentMessage');
     const rec = item === undefined ? undefined : extractProfileRecommendation(item.text);
     if (rec === undefined) {
+      void vscode.window.showWarningMessage(
+        '推奨の行が会話に見つからないため切り替えませんでした。',
+      );
       return;
     }
     if (state.busy) {

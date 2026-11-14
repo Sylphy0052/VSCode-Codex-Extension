@@ -625,8 +625,9 @@ export const window = {
    * テスト用: 実際にエディタへ表示はせず、渡された文書のパスを
    * `__mock.openedTextDocumentPaths` へ記録するだけ（issue #205）。
    */
-  showTextDocument: (doc: { uri: FakeUri }, _options?: unknown): Promise<void> => {
-    state.openedTextDocumentPaths.push(doc.uri.fsPath);
+  showTextDocument: (doc: { uri: FakeUri } | FakeUri, _options?: unknown): Promise<void> => {
+    // 実APIは文書とUriのどちらも受ける
+    state.openedTextDocumentPaths.push(('uri' in doc ? doc.uri : doc).fsPath);
     return Promise.resolve(undefined);
   },
   showQuickPick: (items: readonly unknown[], _options?: unknown): Promise<unknown> =>
