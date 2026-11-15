@@ -36,7 +36,7 @@ export async function requestPlanSecondOpinion(
 ): Promise<PlanSecondOpinionResult> {
   const state = buildTaskPlanReviewState(drafts, outsideRoadmapIssues);
   if (Array.from(state).length > REFLEX_STATE_LIMIT) {
-    return unknown(
+    return unknownResult(
       `計画が大きく、セカンドオピニオンの材料の上限（${String(REFLEX_STATE_LIMIT)}字）を超えるため判定できない`,
     );
   }
@@ -47,12 +47,14 @@ export async function requestPlanSecondOpinion(
     parseSecondOpinion,
   );
   if (parsed === undefined) {
-    return unknown('セカンドオピニオンの判定を得られなかった（時間切れ・実行失敗・不正な出力）');
+    return unknownResult(
+      'セカンドオピニオンの判定を得られなかった（時間切れ・実行失敗・不正な出力）',
+    );
   }
   return parsed;
 }
 
-function unknown(summary: string): PlanSecondOpinionResult {
+function unknownResult(summary: string): PlanSecondOpinionResult {
   return { verdict: 'unknown', findings: [], summary };
 }
 
