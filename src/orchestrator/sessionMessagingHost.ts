@@ -98,8 +98,9 @@ export interface SessionMessagingHostDeps {
   sessionBridge: () => SessionBridgePort | undefined;
   logPort?: DispatchErrorLogPort;
   /**
-   * ツールの実利用率の記録（Issue #1324 受入基準1）。有効なら会話ごとにカウンタを持ち、
-   * 会話の`dispose`で1行出す。ワークフローのrun側（`runner.ts`）と設定キーは同じ。
+   * ツールの実利用率の記録（Issue #1324 受入基準1）。会話ごとにカウンタを持ち、有効な間の
+   * 呼び出しだけを数えて、会話の`dispose`時点でも有効なら1行出す。`enabled`は毎回読む
+   * （会話の途中で設定を切り替えても効く）。ワークフローのrun側（`runner.ts`）と設定キーは同じ。
    */
   toolUsageMetrics?: { enabled: () => boolean; log: (line: string) => void };
   /** Claude Code用のMCP設定ファイルを置くディレクトリ。省略するとファイルを作らない。 */
@@ -154,15 +155,21 @@ export async function startSessionMessagingHost(
         sessionProfile: options?.sessionProfile,
         startRoadmapOrchestrator: options?.startRoadmapOrchestrator,
       });
-      const toolUsage =
-        deps.toolUsageMetrics?.enabled() === true ? new ToolUsageCounter() : undefined;
+      // 有効かどうかは呼び出しのたびと会話の終了時に読む。通常の会話はrunより長く開いたままに
+      // なりやすく、登録時に1回だけ決めると、設定を切り替えても既存の会話へ反映されない
+      const metrics = deps.toolUsageMetrics;
+      const toolUsage = metrics === undefined ? undefined : new ToolUsageCounter();
       const mcpServer = new MessagingMcpServer(
         hub,
         transport,
         deps.logPort,
-        toolUsage === undefined
+        metrics === undefined || toolUsage === undefined
           ? undefined
-          : { record: (taskId, toolName) => toolUsage.record(taskId, toolName) },
+          : {
+              record: (taskId, toolName) => {
+                if (metrics.enabled()) toolUsage.record(taskId, toolName);
+              },
+            },
       );
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
       entries.set(token, entry);
@@ -189,10 +196,11 @@ export async function startSessionMessagingHost(
           entry.ref = formatSessionTarget({ windowId: deps.windowId, provider, threadId });
         },
         dispose(): void {
-          if (toolUsage !== undefined) {
-            // 呼ばれなかった会話は行を出さない（接続ごとの集計が空）
+          // 終了時点で無効なら、途中まで数えた分も出さない。呼ばれなかった会話は行を出さない
+          // （接続ごとの集計が空）
+          if (metrics !== undefined && toolUsage !== undefined && metrics.enabled()) {
             for (const counts of toolUsage.snapshot()) {
-              deps.toolUsageMetrics?.log(formatToolUsageMetricsLine(`chat-${provider}`, counts));
+              metrics.log(formatToolUsageMetricsLine(`chat-${provider}`, counts));
             }
           }
           entries.delete(token);
