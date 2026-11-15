@@ -565,7 +565,13 @@ export class TaskStageRunner {
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
     const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
-    if (run === undefined || task === undefined || gate?.status !== 'judging') {
+    // 最適化の関門は人だけが決着できる（Issue #2106）。`judging`で開かないが、念のためReflexに渡さない
+    if (
+      run === undefined ||
+      task === undefined ||
+      gate?.status !== 'judging' ||
+      gate.kind === 'optimization'
+    ) {
       return;
     }
     const judge = this.deps.judgeGate;

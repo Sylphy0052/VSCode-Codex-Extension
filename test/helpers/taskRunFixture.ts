@@ -104,7 +104,7 @@ export function withOpenGate(
   run: TaskRun,
   taskId: string,
   gateId: string,
-  kind: StageGate['kind'],
+  kind: Exclude<StageGate['kind'], 'optimization'>,
   detail = '詳細',
 ): TaskRun {
   const next = openStageGate(run, taskId, { gateId, kind, detail }, FIXTURE_NOW);

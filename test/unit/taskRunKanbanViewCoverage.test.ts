@@ -84,6 +84,8 @@ function kanbanRun(runId: string, cards: TaskRunKanbanCard[] = []): TaskRunKanba
     engine: 'codex',
     maxParallel: 2,
     planStatus: 'approved',
+    optimizationApprovals: [],
+    planHumanOnly: false,
     planReview: undefined,
     haltedByUser: false,
     finished: false,
@@ -564,7 +566,9 @@ describe('TaskRunKanbanViewManager', () => {
     it('approvePlan: controllerへ渡し、拒否されたら警告する', async () => {
       h = open();
       send(h, { type: 'approvePlan', runId: 'run-1' });
-      await vi.waitFor(() => expect(h?.controller.approvePlan).toHaveBeenCalledWith('run-1'));
+      await vi.waitFor(() =>
+        expect(h?.controller.approvePlan).toHaveBeenCalledWith('run-1', undefined, 'human'),
+      );
       await settle();
       expect(__mock.messages.warnings).toEqual([]);
       h.controller.approvePlan?.mockResolvedValue(NG);

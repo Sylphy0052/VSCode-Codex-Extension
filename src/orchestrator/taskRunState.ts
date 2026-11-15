@@ -15,6 +15,8 @@
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
 
+import type { OptimizeSummary } from './optimizeLedger';
+import { sameOptimization, type OptimizationSpec } from './optimizeSpec';
 import type { TaskMetricsTally } from './runMetrics';
 import { stripControlChars } from './sanitize';
 import { sanitizeInlineText } from './untrustedText';
@@ -172,6 +174,18 @@ export interface OrchestratedTask {
    * 追加前に保存したrunには無いが、直前のrunが`approved`なら`proposeTaskPlan`が承認済みとみなす。
    */
   planApproved?: true;
+  /**
+   * 最適化の仕様（Issue #2106）。持つタスクを含む計画は、人がKanbanで承認したときだけ承認済みになる。
+   * 外部由来（LLMの出力）のテキストを含む。コマンドは承認済みの値だけを実行する。
+   */
+  optimization?: OptimizationSpec;
+  /**
+   * 一度でも`optimization`を持ったタスク（Issue #2106）。仕様を外して出し直しても、通常のタスクとして
+   * Reflexの自動承認で進めさせないため、外した後も残す。
+   */
+  hadOptimization?: true;
+  /** 最適化の台帳の要約（試行の数・基準値・最良値・最良のcommit）。台帳の本体はglobalStorageのファイル。 */
+  optimizeSummary?: OptimizeSummary;
   executionId: string;
   stages: Record<TaskStage, TaskStageRecord>;
   /** 報告を受け付ける実行回。実行中のセッションが無ければ`undefined`（どの報告も受け付けない）。 */
@@ -230,7 +244,14 @@ export interface TaskClosure {
 }
 
 /** 関門の種類: レビューで直さずに残した指摘がある / 工程が失敗・要対応で止まった。 */
-export type StageGateKind = 'reviewFindings' | 'stageFailed';
+export type StageGateKind = 'reviewFindings' | 'stageFailed' | 'optimization';
+
+/**
+ * 最適化の関門（Issue #2106）を立てた理由。`baselineFailed`（基準値の計測失敗）では`proceed`は測り直しを
+ * 意味し、`sendBack`は選べない。
+ */
+export type OptimizeGateReason =
+  'baselineFailed' | 'treeMismatch' | 'worsenedAfterReview' | 'preMergeFailed';
 
 /**
  * 関門の決着: 実装へ差し戻す / 指摘を残したまま進める / 同じ工程をやり直す /
@@ -262,6 +283,8 @@ export interface StageGate {
   /** Reflexの判定の要約（人へ回した理由を含む）。 */
   reflexSummary: string | undefined;
   resolution: { choice: StageGateChoice; by: StageDecider; at: string } | undefined;
+  /** `optimization`の関門だけ。立てた理由（Issue #2106）。 */
+  optimizeReason?: OptimizeGateReason;
   /** ISO8601。 */
   openedAt: string;
 }
@@ -616,6 +639,8 @@ export interface TaskDraft {
   existingIssueNumber: number | undefined;
   /** ロードマップで完了済みの子Issue（Issue #1623）。全工程を飛ばした状態で作る。 */
   completedInRoadmap?: true;
+  /** 最適化の仕様（Issue #2106）。`parseOptimizationSpec`を通した値だけを入れる。 */
+  optimization?: OptimizationSpec;
 }
 
 /**
@@ -644,6 +669,7 @@ function newTask(draft: TaskDraft, executionId: string, at: string): Orchestrate
   const workStage = completed ? 'skipped' : 'notStarted';
   return {
     ...draft,
+    ...(draft.optimization === undefined ? {} : { hadOptimization: true as const }),
     executionId,
     stages: {
       issuePlan: emptyStage(issueStage),
@@ -716,7 +742,7 @@ export function proposeTaskPlan(
       existing === undefined
         ? newTask(draft, newExecutionId(draft.taskId), at)
         : existing.existingIssueNumber !== draft.existingIssueNumber
-          ? newTask(draft, existing.executionId, at)
+          ? withHadOptimization(newTask(draft, existing.executionId, at), existing)
           : withDraftContent(run, existing, draft, at);
   }
   const next: TaskRun = {
@@ -745,7 +771,9 @@ function withDraftContent(
     existing.title === draft.title &&
     existing.summary === draft.summary &&
     sameStrings(existing.acceptanceCriteria, draft.acceptanceCriteria) &&
-    sameStrings(existing.dependsOn, draft.dependsOn);
+    sameStrings(existing.dependsOn, draft.dependsOn) &&
+    // 最適化の仕様は全項目を比べる。変更も削除も再承認を要する（Issue #2106）
+    sameOptimization(existing.optimization, draft.optimization);
   const updated: OrchestratedTask = {
     ...existing,
     title: draft.title,
@@ -754,12 +782,28 @@ function withDraftContent(
     dependsOn: draft.dependsOn,
     updatedAt: at,
   };
+  if (draft.optimization === undefined) {
+    delete updated.optimization;
+    if (existing.optimization !== undefined) {
+      updated.hadOptimization = true;
+    }
+  } else {
+    updated.optimization = draft.optimization;
+    updated.hadOptimization = true;
+  }
   if (wasApproved && unchanged) {
     updated.planApproved = true;
   } else {
     delete updated.planApproved;
   }
   return updated;
+}
+
+/** 作り直したタスクへ、元のタスクが一度でも最適化の仕様を持った記録を引き継ぐ（Issue #2106）。 */
+function withHadOptimization(task: OrchestratedTask, existing: OrchestratedTask): OrchestratedTask {
+  return existing.hadOptimization === true || existing.optimization !== undefined
+    ? { ...task, hadOptimization: true }
+    : task;
 }
 
 function sameStrings(a: readonly string[], b: readonly string[]): boolean {
@@ -785,9 +829,31 @@ export function hasStarted(task: OrchestratedTask): boolean {
   });
 }
 
-/** 承認待ちの計画を承認し、全タスクを承認済みにする（Issue #2028）。承認待ちでなければそのまま返す。 */
-export function approveTaskPlan(run: TaskRun): TaskRun {
+/** 計画を承認する主体（Issue #2106）。`human`はKanbanのwebviewからのメッセージの処理だけが渡す。 */
+export type PlanApprover = 'human' | 'orchestrator';
+
+/**
+ * 最適化の仕様を持つ（または一度でも持った）タスクか。指標や準備のコマンドは拡張がsandboxの外で
+ * 実行するので、人だけが承認できる（Issue #2106）。
+ */
+export function isHumanApprovalTask(task: OrchestratedTask): boolean {
+  return task.optimization !== undefined || task.hadOptimization === true;
+}
+
+/** 計画に、人だけが承認できるタスクが含まれるか。含まれるとき`approve_plan`とReflexの自動承認は効かない。 */
+export function planRequiresHumanApproval(run: TaskRun): boolean {
+  return listTasks(run).some(isHumanApprovalTask);
+}
+
+/**
+ * 承認待ちの計画を承認し、全タスクを承認済みにする（Issue #2028）。承認待ちでなければそのまま返す。
+ * 人だけが承認できるタスクを含む計画は、承認者が`human`でなければそのまま返す（Issue #2106）。
+ */
+export function approveTaskPlan(run: TaskRun, approver: PlanApprover = 'orchestrator'): TaskRun {
   if (run.planStatus !== 'awaitingApproval') {
+    return run;
+  }
+  if (approver !== 'human' && planRequiresHumanApproval(run)) {
     return run;
   }
   const tasks: Record<string, OrchestratedTask> = { ...run.tasks };

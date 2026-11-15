@@ -37,6 +37,7 @@ import {
 import type { IssueReader } from './taskRunRoadmapForge';
 import {
   GATE_CHOICE_LABELS,
+  HUMAN_ONLY_GATE_MESSAGE,
   MAX_AUTO_RETRIES,
   MAX_REVIEW_ROUNDS,
   orchestratorGateScope,
@@ -1324,6 +1325,9 @@ export class TaskRunOrchestrator {
     const target = this.deps.controller.findOpenGateForUser(runId, call.taskId, call.gateId);
     if (target === undefined) {
       return { text: '決着待ちの関門が見つかりません', isError: true };
+    }
+    if (target.humanOnly) {
+      return { text: HUMAN_ONLY_GATE_MESSAGE, isError: true };
     }
     if (target.awaitingOrchestrator && call.choice !== 'close') {
       // 回答者判定（Issue #1708）でオーケストレーターが決めてよいとされた関門。人に確かめない

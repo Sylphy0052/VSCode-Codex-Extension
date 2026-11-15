@@ -30,6 +30,7 @@ const REFLEX_GATE_TITLE_MAX_LENGTH = 200;
 const GATE_KIND_LABELS: Record<StageGateKind, string> = {
   reviewFindings: 'レビューで直さずに残した指摘がある',
   stageFailed: '工程が失敗・要対応で止まった',
+  optimization: '最適化の計測で人の判断が要る（Reflexは判定しない）',
 };
 
 export interface GateResolutionInput {
