@@ -876,7 +876,8 @@
               "handoffToNewSession",
               "autoHandoffToggle",
               "handoffPresetPicker",
-              "secondOpinion"
+              "secondOpinion",
+              "reconsider"
             ],
             "enumDescriptions": [
               "画像を添付する",
@@ -899,7 +900,8 @@
               "この会話を新しいセッションへ引き継ぐ",
               "自動引き継ぎ（コンテキスト逼迫時に自動で新セッションへ引き継ぐ）を切り替える",
               "自動引き継ぎ先のmodel/effortのコスト方針（低・中・高）を選ぶ",
-              "独立したCodexセッションへ意見を求める（セカンドオピニオン）"
+              "独立したCodexセッションへ意見を求める（セカンドオピニオン）",
+              "場面の台帳で再考する（別文脈のadvisorが場面を列挙し、未確認の場面を実測させる）"
             ]
           },
           "default": [

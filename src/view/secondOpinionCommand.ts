@@ -31,6 +31,15 @@ import {
 } from '../secondOpinion/advisorSession';
 import { parseHandoffDraft, type HandoffDraft } from '../secondOpinion/handoff';
 import {
+  buildLedgerInstruction,
+  buildLedgerRequest,
+  formatLedger,
+  isLedgerFilled,
+  parseLedger,
+  unsettledScenes,
+  type LedgerStore,
+} from '../secondOpinion/ledger';
+import {
   cancelledFollowUpDisplay,
   cancelledHandoffDisplay,
   cancelledMaterialUpdateDisplay,
@@ -103,6 +112,11 @@ export interface SecondOpinionPanelPort extends SecondOpinionParentPort {
    * 組み立てたものを読むだけ（親のターンを1つも使わない。受入基準3）。
    */
   conversationTranscript(): string;
+  /**
+   * 会話の記録から抜いた実行記録（コマンド・終了状態・出力の末尾。Issue #2065）。
+   * 場面の台帳で再考するときだけ使う。省略した呼び出し側は実行記録なしとして扱う。
+   */
+  executionRecords?(): string;
   /**
    * 要約セッションのrolloutを消すための口（Issue #942）。
    *
@@ -390,6 +404,12 @@ export async function startSecondOpinion(
    * 渡さない呼び出しは Issue #894 時点の挙動（1ターンで閉じる）になる。
    */
   advisorStore?: AdvisorSessionStore,
+  /**
+   * 渡すと「場面の台帳で再考する」になる（Issue #2065）。依頼先・思考の深さ・資料・依頼文を
+   * 選ばせず（先頭の候補・その候補のeffort・作業ツリーの変更・台帳の依頼文）、実行記録を足して
+   * 走らせ、返った台帳を保存して作業中のAIへ差し込む。
+   */
+  reconsider?: { ledgers: LedgerStore },
 ): Promise<void> {
   if (registry.isRunning(port.parentSessionId)) {
     void vscode.window.showInformationMessage(
@@ -410,32 +430,45 @@ export async function startSecondOpinion(
     log.warn(`[secondOpinion] ${warning}`);
   }
 
-  const picked = await pickCandidate(config.candidates);
+  const previousLedger = reconsider?.ledgers.get(port.parentSessionId);
+  const picked =
+    reconsider === undefined ? await pickCandidate(config.candidates) : config.candidates[0];
   if (picked === undefined) {
     return;
   }
-  const effort = await pickEffort(picked, listEfforts);
+  const effort = reconsider === undefined ? await pickEffort(picked, listEfforts) : picked.effort;
   if (effort === undefined) {
     return;
   }
   // 今回だけの上書き。設定の候補（`candidates.ts`）は変えない（Issue #944）
   const candidate: SecondOpinionCandidate = { ...picked, effort };
-  const artifactKind = await pickArtifactKind(config.summary.enabled);
+  const artifactKind =
+    reconsider === undefined ? await pickArtifactKind(config.summary.enabled) : 'workspaceChanges';
   if (artifactKind === undefined) {
     return;
   }
-  const request = await vscode.window.showInputBox({
-    title: 'セカンドオピニオンへの依頼',
-    // 要約を添える設定では「会話の内容は渡らない」は事実と食い違う。何が渡るかを正しく出す。
-    // 用途はレビューに限らないため、聞けることの幅も文面に出す（Issue #926 P0）
-    prompt: config.summary.enabled
-      ? 'レビュー・設計判断・案の比較・次の一手など、聞きたいことを書いてください（この会話そのものは渡らず、別セッションが作った背景要約だけが渡ります）'
-      : 'レビュー・設計判断・案の比較・次の一手など、聞きたいことを書いてください（この会話の内容は渡りません）',
-    value: config.template,
-  });
+  // 画面へ出す依頼の文。台帳で再考するときは、長い依頼文ではなく操作の名前を出す
+  const reconsiderLabel =
+    previousLedger === undefined ? '場面の台帳で再考する' : '場面の台帳で再考する（2回目以降）';
+  const request =
+    reconsider !== undefined
+      ? buildLedgerRequest(
+          previousLedger,
+          previousLedger !== undefined && isLedgerFilled(previousLedger),
+        )
+      : await vscode.window.showInputBox({
+          title: 'セカンドオピニオンへの依頼',
+          // 要約を添える設定では「会話の内容は渡らない」は事実と食い違う。何が渡るかを正しく出す。
+          // 用途はレビューに限らないため、聞けることの幅も文面に出す（Issue #926 P0）
+          prompt: config.summary.enabled
+            ? 'レビュー・設計判断・案の比較・次の一手など、聞きたいことを書いてください（この会話そのものは渡らず、別セッションが作った背景要約だけが渡ります）'
+            : 'レビュー・設計判断・案の比較・次の一手など、聞きたいことを書いてください（この会話の内容は渡りません）',
+          value: config.template,
+        });
   if (request === undefined || request.trim() === '') {
     return;
   }
+  const displayRequest = reconsider === undefined ? request : reconsiderLabel;
   const captured = await captureArtifact(artifactKind, cwd, port, git);
   if (captured === undefined) {
     return;
@@ -484,7 +517,7 @@ export async function startSecondOpinion(
         failedSecondOpinionDisplay(
           candidate,
           artifactKind,
-          request,
+          displayRequest,
           'レビュー材料を書き出せませんでした',
         ),
       );
@@ -494,17 +527,17 @@ export async function startSecondOpinion(
     // ここまでの選択・入力・スナップショットは待たせずに済ませてあり、待たせるのは
     // この後に開く2つのセッション（会話の要約と本体）だけである
     if (!port.isParentIdle()) {
-      port.note(id, queuedSecondOpinionDisplay(candidate, artifactKind, request));
+      port.note(id, queuedSecondOpinionDisplay(candidate, artifactKind, displayRequest));
       log.info('[secondOpinion] 親セッションのターンが終わるまで待機します');
     }
     const waited = await waitForParentIdle(port, controller.signal);
     if (waited === 'cancelled') {
       // 待機中に止められた場合。セッションは1つも開いていない
       log.info('[secondOpinion] 待機中に利用者の操作で停止しました（セッションは開いていません）');
-      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, displayRequest));
       return;
     }
-    port.note(id, pendingSecondOpinionDisplay(candidate, artifactKind, request));
+    port.note(id, pendingSecondOpinionDisplay(candidate, artifactKind, displayRequest));
     // 要約は本体より先に作る（本体のプロンプトへ載せるため）。失敗しても本体は続ける
     const summary = await buildConversationSummary(port, host, config, log, controller.signal);
     if (summary.failure !== undefined) {
@@ -515,12 +548,13 @@ export async function startSecondOpinion(
     // 本体を続ける理由になるため、利用者停止をその経路へ流してはならない
     if (summary.cancelledByUser || controller.signal.aborted) {
       log.info('[secondOpinion] 利用者の操作で停止しました（本体は開始していません）');
-      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, request));
+      port.note(id, cancelledSecondOpinionDisplay(candidate, artifactKind, displayRequest));
       return;
     }
     // 相談を続ける設定なら、回答の後もセッションを残す（Issue #929）。残ったセッションは
     // この後 `handOverAdvisorSession` が引き取り、引き取れなければそこで閉じる
-    const keepSession = config.advisor.enabled && advisorStore !== undefined;
+    const keepSession =
+      reconsider === undefined && config.advisor.enabled && advisorStore !== undefined;
     const result = await runSecondOpinion(
       host,
       {
@@ -533,6 +567,8 @@ export async function startSecondOpinion(
         timeoutMs: config.timeoutMs,
         conversationSummary: summary.text,
         conversationBackgroundKind: summary.kind,
+        // 台帳で再考するときだけ、要約とは別に実行記録を渡す（Issue #2065）
+        executionRecords: reconsider === undefined ? undefined : port.executionRecords?.(),
         signal: controller.signal,
         keepSession,
         // 写しを実体化できたときだけ渡す。渡すと固定指示が「外を読むな」から
@@ -553,29 +589,35 @@ export async function startSecondOpinion(
         : summary.failure === undefined
           ? 'off'
           : 'failed';
-    port.note(id, resultDisplay(candidate, artifactKind, request, result, summaryStatus));
+    port.note(id, resultDisplay(candidate, artifactKind, displayRequest, result, summaryStatus));
     if (!result.ok && result.cancelledByUser !== true) {
       log.warn(`[secondOpinion] 失敗しました: ${result.reason}`);
     }
     // 回答が返ったら、その全文をそのまま作業中のAIへ渡す（Issue #1003）。表示より後に
     // 置くのは、送信で失敗しても回答が会話に残るようにするため
-    if (config.autoSend) {
+    if (reconsider !== undefined) {
+      // 台帳で再考したときは、台帳を保存して作業中のAIへ差し込む。台帳が次の再考へ状態を
+      // 運ぶので、advisorのセッションは残さない（`handOverAdvisorSession` も通さない）
+      await applyLedgerResult(port, reconsider.ledgers, id, result, log);
+    } else if (config.autoSend) {
       await autoSendResult(port, candidate, result, log);
     }
-    bundleHandedOver = handOverAdvisorSession(
-      port,
-      advisorStore,
-      config,
-      candidate,
-      result,
-      id,
-      log,
-      bundle,
-      // 相談の途中で材料を最新へ更新する手段（Issue #975）。作業ツリーの変更を資料に
-      // 選んだときだけ渡す（それ以外の資料には、更新すべき材料が無い）
-      materialWriterFor(cwd, git, captured, config.diffPresentation !== undefined, log),
-      created.afterTreeDir,
-    );
+    bundleHandedOver =
+      reconsider === undefined &&
+      handOverAdvisorSession(
+        port,
+        advisorStore,
+        config,
+        candidate,
+        result,
+        id,
+        log,
+        bundle,
+        // 相談の途中で材料を最新へ更新する手段（Issue #975）。作業ツリーの変更を資料に
+        // 選んだときだけ渡す（それ以外の資料には、更新すべき材料が無い）
+        materialWriterFor(cwd, git, captured, config.diffPresentation !== undefined, log),
+        created.afterTreeDir,
+      );
   } finally {
     registry.end(port.parentSessionId, id);
     // 相談が続かないなら材料は用済み。`AdvisorSession` が引き取った場合は、その `close()` が消す
@@ -1140,6 +1182,66 @@ export async function autoSendResult(
     log.warn(`[secondOpinion] 回答を自動送信できませんでした: ${errorMessage(e)}`);
     void vscode.window.showWarningMessage(
       `セカンドオピニオンの回答を作業中のAIへ送れませんでした: ${errorMessage(e)}`,
+    );
+  }
+}
+
+/**
+ * advisorが返した台帳を保存し、会話へ表示して、未決着の場面があれば作業中のAIへ差し込む
+ * （Issue #2065 手1・手2）。
+ *
+ * 台帳が埋まっていれば「場面の台帳は埋まりました」と表示するだけで、作業中のAIへは何も
+ * 送らない（再考を終わらせるため）。台帳を読み取れなかったときは、回答だけを会話に残して
+ * 保存も送信もしない（前回の台帳を壊さない）。
+ */
+export async function applyLedgerResult(
+  port: SecondOpinionPanelPort,
+  ledgers: LedgerStore,
+  itemId: string,
+  result: SecondOpinionResult,
+  log: Logger,
+): Promise<void> {
+  if (!result.ok) {
+    return;
+  }
+  const ledger = parseLedger(result.response);
+  if (ledger === undefined) {
+    log.warn('[secondOpinion] 回答から場面の台帳を読み取れませんでした');
+    port.note(`${itemId}:ledger`, {
+      status: 'failed',
+      text: 'advisorの回答から場面の台帳を読み取れませんでした。前回の台帳は変えていません。もう一度再考してください。',
+      detail: '場面の台帳',
+    });
+    return;
+  }
+  ledgers.set(port.parentSessionId, ledger);
+  const filled = isLedgerFilled(ledger);
+  const unsettled = unsettledScenes(ledger);
+  port.note(`${itemId}:ledger`, {
+    status: 'completed',
+    text: `${
+      filled
+        ? '場面の台帳は埋まりました。本来の場面はすべて実測済みか、理由つきの不採用です'
+        : `場面の台帳: 未決着の本来の場面が${String(unsettled.length)}件あります`
+    }\n\n${formatLedger(ledger)}`,
+    detail: filled ? '場面の台帳 ・ 埋まった' : '場面の台帳',
+  });
+  if (filled) {
+    return;
+  }
+  if (port.sendApprovedInstruction === undefined) {
+    log.info('[secondOpinion] この画面からは送れないため台帳を差し込みません');
+    return;
+  }
+  try {
+    const outcome = await port.sendApprovedInstruction(
+      buildLedgerInstruction(ledger, result.response),
+    );
+    log.info(`[secondOpinion] 台帳を作業中のAIへ差し込みました（${outcome}）`);
+  } catch (e) {
+    log.warn(`[secondOpinion] 台帳を差し込めませんでした: ${errorMessage(e)}`);
+    void vscode.window.showWarningMessage(
+      `場面の台帳を作業中のAIへ差し込めませんでした: ${errorMessage(e)}`,
     );
   }
 }

@@ -8,7 +8,7 @@ import {
 } from '../../src/view/composerButtons';
 
 describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準の並び）', () => {
-  it('23個の操作を正準の並びで持つ', () => {
+  it('24個の操作を正準の並びで持つ', () => {
     expect(COMPOSER_BUTTON_IDS).toEqual([
       'attach',
       'loopToggle',
@@ -33,6 +33,7 @@ describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準�
       'autoReplyToggle',
       'handoffPresetPicker',
       'secondOpinion',
+      'reconsider',
     ]);
   });
 });
@@ -130,14 +131,15 @@ describe('overflowComposerButtons（「…」メニューへ畳むボタンの�
       'autoHandoffAutoApproveToggle',
       'autoReplyToggle',
       'handoffPresetPicker',
+      'reconsider',
     ]);
   });
 
-  it('空配列（表に何も出さない設定）を渡すと23個すべてが返る', () => {
+  it('空配列（表に何も出さない設定）を渡すと24個すべてが返る', () => {
     expect(overflowComposerButtons([])).toEqual(COMPOSER_BUTTON_IDS);
   });
 
-  it('23個すべてを渡すと空配列が返る（どこにも重複しない）', () => {
+  it('24個すべてを渡すと空配列が返る（どこにも重複しない）', () => {
     expect(overflowComposerButtons(COMPOSER_BUTTON_IDS)).toEqual([]);
   });
 
