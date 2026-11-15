@@ -18,7 +18,13 @@ import {
   type PreparedWebGptDiscussion,
 } from './webGptDiscussionFromTool';
 import { applySessionProfileTool, type SessionProfile } from './sessionProfileTool';
-import type { SessionProfileToolArgs, SessionProfileToolResult } from '../orchestrator/messaging';
+import type {
+  SessionProfileToolArgs,
+  SessionProfileToolResult,
+  StartRoadmapOrchestratorToolArgs,
+  StartRoadmapOrchestratorToolResult,
+} from '../orchestrator/messaging';
+import { startRoadmapOrchestratorFromTool } from './startRoadmapOrchestratorTool';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
@@ -751,6 +757,8 @@ export class ClaudeChatViewManager
       webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args),
       // エージェントが自分のmodel/effortを変えるツール（Issue #2053）
       sessionProfile: (args) => this.setSessionProfileFromTool(entry, args),
+      // ロードマップのオーケストレータモードを起動するツール（Issue #2070）
+      startRoadmapOrchestrator: (args) => this.startRoadmapOrchestratorFromTool(entry, args),
     });
     if (registration === undefined) {
       return;
@@ -4656,6 +4664,22 @@ export class ClaudeChatViewManager
     }
     this.refreshSettings(entry);
     return saved;
+  }
+
+  /** エージェントが`start_roadmap_orchestrator`でロードマップのrunを起動する（Issue #2070）。 */
+  private startRoadmapOrchestratorFromTool(
+    entry: ClaudePanel,
+    args: StartRoadmapOrchestratorToolArgs,
+  ): Promise<StartRoadmapOrchestratorToolResult> {
+    return startRoadmapOrchestratorFromTool(
+      {
+        engine: 'claude',
+        folder: () => entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath,
+        note: (text) => entry.session.noteLocalEvent(`startRoadmap:${Date.now()}`, text),
+        log: (text) => entry.trace.info(text),
+      },
+      args,
+    );
   }
 
   /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */

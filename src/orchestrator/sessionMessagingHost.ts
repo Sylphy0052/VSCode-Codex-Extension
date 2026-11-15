@@ -15,6 +15,7 @@ import {
   type McpConnection,
   type McpTransportPort,
   type SessionProfilePort,
+  type StartRoadmapOrchestratorPort,
   type WebGptDiscussionPort,
 } from './messaging';
 import { formatSessionTarget, type SessionBridgePort, type SessionProvider } from './sessionBridge';
@@ -82,6 +83,11 @@ export interface SessionMessagingRegisterOptions {
   webGptDiscussion?: WebGptDiscussionPort | undefined;
   /** この会話のmodel/effortを変える口（Issue #2053）。会話に束縛した関数を渡す。 */
   sessionProfile?: SessionProfilePort | undefined;
+  /**
+   * この会話でロードマップのオーケストレータモードを起動する口（Issue #2070）。会話に束縛した
+   * 関数を渡す。Orchestratorと工程セッションでは渡さない。
+   */
+  startRoadmapOrchestrator?: StartRoadmapOrchestratorPort | undefined;
 }
 
 export interface SessionMessagingHostDeps {
@@ -140,6 +146,7 @@ export async function startSessionMessagingHost(
         sessionOnly: true,
         webGptDiscussion: options?.webGptDiscussion,
         sessionProfile: options?.sessionProfile,
+        startRoadmapOrchestrator: options?.startRoadmapOrchestrator,
       });
       const mcpServer = new MessagingMcpServer(hub, transport, deps.logPort);
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる

@@ -83,6 +83,7 @@ import { createStageReflexJudges } from './taskRunStageJudges';
 import { sessionHubRoot } from './sessionHub';
 import {
   startRoadmapRunCommand,
+  startRoadmapRunFromChat,
   type RoadmapRunStartDeps,
   type RunSettings,
 } from './taskRunRoadmapStart';
@@ -539,6 +540,22 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         }
       },
     ),
+    // チャットのモデルが`start_roadmap_orchestrator`で起動する（Issue #2070）。QuickPickは出さない。
+    // 引数は呼び出し元チャットのフォルダとengine。値は信用せず型を確かめる
+    vscode.commands.registerCommand('agent.taskRun.startRoadmapFromChat', (raw?: unknown) => {
+      const input = raw as
+        { folder?: unknown; engine?: unknown; issueNumber?: unknown } | undefined;
+      const engine = parseEngine(input?.engine);
+      if (typeof input?.folder !== 'string' || input.folder === '' || engine === undefined) {
+        return { accepted: false, reason: 'フォルダとengineを指定してください' };
+      }
+      return startRoadmapRunFromChat(roadmapStartDeps(engine), {
+        folder: input.folder,
+        engine,
+        issueNumber: parseIssueNumber(input.issueNumber),
+        maxParallel: Math.min(readTaskRunMaxParallelPerFolder(), MAX_TASK_RUN_PARALLEL),
+      });
+    }),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
     vscode.commands.registerCommand('agent.taskRun.switch', () =>
       switchRunCommand(controller, view, switchToRun),
