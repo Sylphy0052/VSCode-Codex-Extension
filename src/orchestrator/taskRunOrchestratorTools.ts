@@ -1,4 +1,5 @@
 import type { McpToolDefinition } from './messaging';
+import { parseOptimizeRequest, type OptimizeRequest } from './optimizeRequest';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from './roadmapQuestionMcp';
 import { RECORD_LESSON_TOOL, parseLessonArgs, type LessonInput } from './runNotes';
 import {
@@ -473,6 +474,25 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
           maximum: MAX_TASK_RUN_PARALLEL,
           description: '新しいrunの並列上限。省くとこの実行と同じ',
         },
+        optimization: {
+          type: 'object',
+          description:
+            '最適化の依頼。新しいrunのOrchestratorが、指標などの案を読むだけで確かめ、propose_planのoptimizationに載せて人の承認を待つ。ここに書いたコマンドは案で、承認前には実行されない',
+          properties: {
+            objective: { type: 'string', description: '何を良くしたいか' },
+            metric: { type: 'string', description: '指標の案（何をどう測るか）' },
+            correctness: { type: 'string', description: '正しさの確認の案' },
+            setup: { type: 'string', description: '準備のコマンドの案' },
+            allowedPaths: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '変更してよいパスの案',
+            },
+            budget: { type: 'string', description: '予算の案（試行回数・時間）' },
+          },
+          required: ['objective'],
+          additionalProperties: false,
+        },
       },
       required: ['title'],
       additionalProperties: false,
@@ -615,6 +635,7 @@ export type TaskRunOrchestratorCall =
       title: string;
       engine: TaskRunEngine | undefined;
       maxParallel: number | undefined;
+      optimization: OptimizeRequest | undefined;
     };
 
 type ParseResult = { ok: true; call: TaskRunOrchestratorCall } | { ok: false; message: string };
@@ -720,6 +741,14 @@ function parseStartRun(a: Record<string, unknown>): ParseResult {
       message: `maxParallelは1〜${String(MAX_TASK_RUN_PARALLEL)}の整数で指定する`,
     };
   }
+  let optimization: OptimizeRequest | undefined;
+  if (a.optimization !== undefined) {
+    const parsed = parseOptimizeRequest(a.optimization);
+    if (!parsed.ok) {
+      return { ok: false, message: parsed.message };
+    }
+    optimization = parsed.value;
+  }
   return {
     ok: true,
     call: {
@@ -727,6 +756,7 @@ function parseStartRun(a: Record<string, unknown>): ParseResult {
       title,
       engine: engine as TaskRunEngine | undefined,
       maxParallel: maxParallel as number | undefined,
+      optimization,
     },
   };
 }

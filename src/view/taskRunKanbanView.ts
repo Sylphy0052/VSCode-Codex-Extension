@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
+import type { OptimizeTrialRecord } from '../orchestrator/optimizeLedger';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
@@ -53,6 +54,8 @@ export interface TaskRunKanbanViewDeps {
     runId: string,
     options?: { parallel?: boolean },
   ): Promise<{ ok: boolean; message: string }>;
+  /** 最適化のタスクの台帳の記録を読む（Issue #2109）。無ければ試行の一覧は出さない。 */
+  readOptimizeTrials?(runId: string, taskId: string): Promise<OptimizeTrialRecord[]>;
   log: Logger;
 }
 
@@ -190,15 +193,22 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     this.dirty = false;
     this.lastPostAt = Date.now();
-    const board = this.deps.controller.board(this.selectedRunId, currentWorkspaceFolders());
+    const folders = currentWorkspaceFolders();
+    const plainBoard = this.deps.controller.board(this.selectedRunId, folders);
+    // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
+    const seq = ++this.postSeq;
+    // 最適化のタスクがあるときだけ台帳を読み、試行の採否と指標の推移を盤面へ足す（Issue #2109）
+    const trials = await this.readOptimizeTrials(plainBoard.run?.runId);
+    const board =
+      trials.size === 0
+        ? plainBoard
+        : this.deps.controller.board(plainBoard.run?.runId, folders, trials);
     const orchestrator =
       board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
     const graph =
       board.run === undefined
         ? undefined
         : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
-    // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
-    const seq = ++this.postSeq;
     const lease =
       board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
     // 選択していないrunも、run一覧で別のウィンドウが持っていると分かるようにする（Issue #1641）。
@@ -224,6 +234,36 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       lease,
       heldElsewhere,
     });
+  }
+
+  /**
+   * runの最適化のタスク（`optimizeLoop`か`optimizeSummary`を持つ）の台帳を読む。読めなかった
+   * タスクは状態だけで表示する（台帳の読み取りの失敗で盤面を止めない）。
+   */
+  private async readOptimizeTrials(
+    runId: string | undefined,
+  ): Promise<Map<string, OptimizeTrialRecord[]>> {
+    const result = new Map<string, OptimizeTrialRecord[]>();
+    const read = this.deps.readOptimizeTrials;
+    const run = runId === undefined ? undefined : this.deps.controller.find(runId);
+    if (read === undefined || run === undefined) {
+      return result;
+    }
+    const targets = Object.values(run.tasks).filter(
+      (t) => t.optimizeLoop !== undefined || t.optimizeSummary !== undefined,
+    );
+    await Promise.all(
+      targets.map(async (task) => {
+        try {
+          result.set(task.taskId, await read(run.runId, task.taskId));
+        } catch (e: unknown) {
+          this.deps.log.warn(
+            `最適化の台帳を読めない（${run.runId}/${task.taskId}）: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }),
+    );
+    return result;
   }
 
   private receive(message: unknown): void {
@@ -695,6 +735,18 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .badge { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 11px; padding: 1px 7px; } .badge.warn { border-color: var(--vscode-charts-yellow); color: var(--vscode-charts-yellow); } .badge.ok { border-color: var(--vscode-charts-blue); color: var(--vscode-charts-blue); }
 .dep.unmet { text-decoration: underline dotted; color: var(--vscode-charts-yellow); }
 .failure { color: var(--vscode-errorForeground); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.optimize { margin-top: 8px; border-top: 1px dashed var(--vscode-panel-border); padding-top: 6px; font-size: 12px; }
+.optimize-summary { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.optimize-trend { width: 100%; max-width: 240px; height: 44px; display: block; margin-top: 4px; }
+.optimize-trend polyline { fill: none; stroke: var(--vscode-descriptionForeground); stroke-width: 1; }
+.optimize-trend circle.adopted { fill: var(--vscode-charts-green); }
+.optimize-trend circle.rejected { fill: var(--vscode-charts-yellow); }
+.optimize-trend circle.invalid { fill: var(--vscode-errorForeground); }
+.optimize-trend circle.baseline { fill: var(--vscode-charts-blue); }
+.optimize-rows { margin: 4px 0 0; padding: 0; list-style: none; max-height: 200px; overflow-y: auto; }
+.optimize-rows li { margin-top: 2px; overflow-wrap: anywhere; }
+.optimize-rows .adopted { color: var(--vscode-charts-green); }
+.optimize-rows .invalid { color: var(--vscode-errorForeground); }
 .paused { color: var(--vscode-editorWarning-foreground); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .link { appearance: none; background: none; border: 0; padding: 0; color: var(--vscode-textLink-foreground); font: inherit; font-size: 12px; cursor: pointer; }
@@ -1107,6 +1159,41 @@ const script = `
     return box;
   }
 
+  // 最適化のタスクの基準値・最良値・試行ごとの採否・指標の推移（Issue #2109）。試行の仮説と理由は
+  // 外部由来のテキストなので、textContentだけで出す
+  function renderOptimize(opt) {
+    const box = el('div', 'optimize');
+    const summary = el('div', 'optimize-summary');
+    summary.appendChild(el('span', undefined, '基準値: ' + (opt.baseline === undefined || opt.baseline === null ? '未計測' : opt.baseline)));
+    summary.appendChild(el('span', undefined, '最良値: ' + (opt.best === undefined || opt.best === null ? 'なし' : opt.best)));
+    summary.appendChild(el('span', undefined, '試行: ' + opt.trials + '回'));
+    box.appendChild(summary);
+    if (opt.trend.length > 1) {
+      const svg = svgEl('svg', { class: 'optimize-trend', viewBox: '-4 -4 208 48', role: 'img', 'aria-label': '指標の推移' });
+      svg.appendChild(svgEl('polyline', { points: opt.trend.map(function (p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ') }));
+      opt.trend.forEach(function (p) {
+        const dot = svgEl('circle', { class: p.kind, cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: 2.5 });
+        const tip = svgEl('title');
+        tip.textContent = p.label + ': ' + p.value;
+        dot.appendChild(tip);
+        svg.appendChild(dot);
+      });
+      box.appendChild(svg);
+    }
+    if (opt.omitted > 0) { box.appendChild(el('div', 'summary', '古い試行' + opt.omitted + '件は省略')); }
+    if (opt.rows.length > 0) {
+      const list = el('ul', 'optimize-rows');
+      opt.rows.forEach(function (r) {
+        const item = el('li', r.outcome);
+        const metric = r.metric === undefined || r.metric === null ? '測れず' : r.metric;
+        item.textContent = '#' + r.trial + ' ' + r.outcomeLabel + ' (' + metric + ')' + (r.reason ? ' ' + r.reason : '') + (r.hypothesis ? ' / 仮説: ' + r.hypothesis : '');
+        list.appendChild(item);
+      });
+      box.appendChild(list);
+    }
+    return box;
+  }
+
   function renderCard(card) {
     const warn = card.badges.some(function (b) { return b.tone === 'warn'; });
     const running = card.badges.some(function (b) { return b.tone === 'ok'; });
@@ -1151,6 +1238,7 @@ const script = `
     if (meta.childNodes.length > 0) { c.appendChild(meta); }
     if (card.failure) { c.appendChild(el('div', 'failure', card.failure)); }
     if (card.pauseReason) { c.appendChild(el('div', 'paused', '一時停止の理由: ' + card.pauseReason)); }
+    if (card.optimize) { c.appendChild(renderOptimize(card.optimize)); }
     const actions = el('div', 'actions');
     if (card.canReveal) { actions.appendChild(button('セッションを開く', '', function () { send('revealStage', { taskId: card.taskId }); })); }
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopStage', { taskId: card.taskId }); })); }
