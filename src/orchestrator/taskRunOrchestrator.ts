@@ -505,6 +505,22 @@ export class TaskRunOrchestrator {
   }
 
   /**
+   * runの完了時、mergeまで終えた、またはmergeせずcloseしたタスク由来の残件を`done`にする
+   * （Issue #2079）。記録の失敗はrunに影響させない（`RunNotesStore`がログへ残す）。
+   */
+  private closeRemainingOfCompletedTasks(run: TaskRun): void {
+    const { runNotes } = this.deps;
+    if (runNotes === undefined) return;
+    const completed = Object.values(run.tasks)
+      .filter(
+        (task) =>
+          task.stages.mergeCleanup.status === 'done' || task.closedWithoutMerge !== undefined,
+      )
+      .map((task) => task.taskId);
+    void runNotes.markRemainingDoneForTasks(run.workspaceRoot, run.runId, completed);
+  }
+
+  /**
    * runの状態が変わった（Controllerの`onTransition`から呼ぶ）。差分からイベントを作って届ける。
    * 判断待ちになった工程は推奨値を求めてから届ける（求められなければ推奨値なしで届ける）。
    * 知らせるのは並列上限の空き枠の分だけで、残りは枠が空いたときに届ける（Issue #2030）。
@@ -516,6 +532,9 @@ export class TaskRunOrchestrator {
     }
     for (const event of diffTaskRunEvents(prev, next)) {
       this.notify(next.runId, withLessonReminder(event, this.deps.runNotes !== undefined));
+    }
+    if (prev.finishedAt === undefined && next.finishedAt !== undefined) {
+      this.closeRemainingOfCompletedTasks(next);
     }
     const awaiting = new Set(listStagesAwaitingDecision(next).map(stageRefKey));
     for (const key of [...live.announcedStages]) {
