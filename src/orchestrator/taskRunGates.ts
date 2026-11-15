@@ -1,5 +1,5 @@
 import type { RoadmapAskArgs } from './roadmapQuestionMcp';
-import { STAGE_LABELS } from './taskStagePrompts';
+import { normalizeFailureCause, previousStageFailures, STAGE_LABELS } from './taskStagePrompts';
 import {
   closeTaskWithoutMerge,
   currentStage,
@@ -188,6 +188,27 @@ function limitReached(
     ? `自動のやり直しが上限（${String(MAX_AUTO_RETRIES)}回）に達した`
     : undefined;
 }
+
+/**
+ * 同じ工程の直前の失敗（今の関門を除く）と原因が同じか。同じなら自動のやり直しを選ばせず、
+ * オーケストレーターの判断（方式を変える指示、計画の出し直し）へ回す。
+ */
+export function isRepeatedFailure(task: OrchestratedTask, gate: StageGate): boolean {
+  if (gate.kind !== 'stageFailed') {
+    return false;
+  }
+  const prior = (task.gates ?? []).filter(
+    (g) => g.kind === 'stageFailed' && g.stage === gate.stage && g.gateId !== gate.gateId,
+  );
+  const last = prior.at(-1);
+  return (
+    last !== undefined && normalizeFailureCause(last.detail) === normalizeFailureCause(gate.detail)
+  );
+}
+
+/** 同じ原因の失敗でReflexの判定を飛ばすときの要約。 */
+export const REPEATED_FAILURE_SUMMARY =
+  '前回と同じ原因で失敗した。自動のやり直しにせず、方式を変える指示か計画の出し直しを判断する';
 
 /**
  * 回答者判定でオーケストレーターが決めてよいとされたとき、オーケストレーターが選べる範囲の補足
@@ -524,6 +545,7 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
     };
   }
   const retries = countAutoRetries(task, gate.stage);
+  const past = previousStageFailures(task, gate.stage, gate.gateId);
   return {
     question: `${task.taskId}の「${STAGE_LABELS[gate.stage]}」が止まった。次にどうするか。`,
     reason:
@@ -531,7 +553,12 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
       `（上限${String(MAX_AUTO_RETRIES)}回）。一時的な失敗ならやり直し、同じ原因で繰り返しそうならユーザーに上げる。`,
     options: [GATE_OPTION_RETRY, GATE_OPTION_ASK_USER],
     recommended: undefined,
-    evidence: `止まった理由: ${gate.detail}`,
+    evidence: [
+      `止まった理由: ${gate.detail}`,
+      ...(past.length > 0
+        ? [`この工程の過去の失敗:\n${past.map((f) => `- ${f}`).join('\n')}`]
+        : []),
+    ].join('\n'),
   };
 }
 
