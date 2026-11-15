@@ -8,6 +8,7 @@ import {
   OptimizeLedgerStore,
   summarizeTrials,
   type OptimizeSummary,
+  type OptimizeTrialRecord,
 } from './optimizeLedger';
 import {
   consumeMergeAllowance,
@@ -397,6 +398,11 @@ export class OptimizeLoopHost {
       '--',
       '.',
     ]);
+  }
+
+  /** Kanbanに出す、タスクの台帳の記録（Issue #2109）。読み取りだけで状態は変えない。 */
+  readTrials(runId: string, taskId: string): Promise<OptimizeTrialRecord[]> {
+    return this.ledger.read(optimizeLoopId(runId, taskId), taskId);
   }
 
   /** PRを書くセッションへ渡す台帳の要約。LLMが書いた欄を含むので外部由来として囲む。 */

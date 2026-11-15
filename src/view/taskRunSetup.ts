@@ -609,6 +609,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     controller,
     orchestrator,
     revealStage: (runId, taskId) => runner.revealStageSession(runId, taskId),
+    readOptimizeTrials: (runId, taskId) => optimizeLoop.readTrials(runId, taskId),
     finishRun,
     suspendRun,
     resumeRun,

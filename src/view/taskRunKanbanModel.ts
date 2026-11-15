@@ -1,3 +1,4 @@
+import type { OptimizeTrialRecord } from '../orchestrator/optimizeLedger';
 import { describeOptimization } from '../orchestrator/optimizeSpec';
 import {
   findLastResolvedGate,
@@ -43,6 +44,7 @@ import {
 } from '../orchestrator/taskRunState';
 import { STAGE_LABELS } from '../orchestrator/taskStagePrompts';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { buildOptimizeView, type TaskRunKanbanOptimize } from './taskRunKanbanOptimize';
 import { layoutGraph, type GraphLayout } from './workflowGraph';
 
 /**
@@ -137,6 +139,11 @@ export interface TaskRunKanbanCard {
   closedReason: string | undefined;
   /** 実装への差し戻しの回数と上限。差し戻していなければ`undefined`。 */
   reviewRounds: string | undefined;
+  /**
+   * 最適化の基準値・最良値・試行ごとの採否・指標の推移（Issue #2109）。最適化の状態も台帳も無い
+   * タスクは`undefined`で、カードの表示は変わらない。
+   */
+  optimize: TaskRunKanbanOptimize | undefined;
 }
 
 export interface TaskRunKanbanRunSummary {
@@ -381,7 +388,11 @@ function toKanbanQuestion(q: StageQuestion): TaskRunKanbanQuestion {
   };
 }
 
-function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
+function buildCard(
+  run: TaskRun,
+  task: OrchestratedTask,
+  trials: readonly OptimizeTrialRecord[] | undefined,
+): TaskRunKanbanCard {
   const unmet = unmetTaskDependencies(run, task);
   const stage = currentStage(task);
   const record = stage === undefined ? undefined : task.stages[stage];
@@ -428,6 +439,7 @@ function buildCard(run: TaskRun, task: OrchestratedTask): TaskRunKanbanCard {
       (task.reviewRounds ?? 0) > 0
         ? `${String(task.reviewRounds)}/${String(MAX_REVIEW_ROUNDS)}`
         : undefined,
+    optimize: buildOptimizeView(task, trials),
   };
 }
 
@@ -518,6 +530,8 @@ export function buildTaskRunKanban(
   runs: readonly TaskRun[],
   selectedRunId: string | undefined,
   currentFolders: readonly string[],
+  /** 選んだrunの最適化のタスクごとの台帳の記録（Issue #2109）。キーはtaskId。 */
+  optimizeTrials?: ReadonlyMap<string, readonly OptimizeTrialRecord[]>,
 ): TaskRunKanbanBoard {
   const sorted = sortTaskRunsForList(runs, currentFolders);
   const current = new Set(currentFolders);
@@ -544,7 +558,7 @@ export function buildTaskRunKanban(
   }
   const columns = emptyColumns();
   for (const task of listTasks(selected)) {
-    const card = buildCard(selected, task);
+    const card = buildCard(selected, task, optimizeTrials?.get(task.taskId));
     columns[card.column].push(card);
   }
   return {

@@ -61,6 +61,7 @@ function card(taskId: string, overrides: Partial<TaskRunKanbanCard> = {}): TaskR
     lastGateDecision: undefined,
     closedReason: undefined,
     reviewRounds: undefined,
+    optimize: undefined,
     ...overrides,
   };
 }
