@@ -18,6 +18,7 @@ import {
   type StartRoadmapOrchestratorPort,
   type WebGptDiscussionPort,
 } from './messaging';
+import { formatToolUsageMetricsLine, ToolUsageCounter } from './toolUsageMetrics';
 import { formatSessionTarget, type SessionBridgePort, type SessionProvider } from './sessionBridge';
 
 /**
@@ -96,6 +97,11 @@ export interface SessionMessagingHostDeps {
   /** セッション宛の解決。`extension.ts`が組み立てた実体を毎回読む（値で持たない）。 */
   sessionBridge: () => SessionBridgePort | undefined;
   logPort?: DispatchErrorLogPort;
+  /**
+   * ツールの実利用率の記録（Issue #1324 受入基準1）。有効なら会話ごとにカウンタを持ち、
+   * 会話の`dispose`で1行出す。ワークフローのrun側（`runner.ts`）と設定キーは同じ。
+   */
+  toolUsageMetrics?: { enabled: () => boolean; log: (line: string) => void };
   /** Claude Code用のMCP設定ファイルを置くディレクトリ。省略するとファイルを作らない。 */
   configDir?: string;
 }
@@ -148,7 +154,16 @@ export async function startSessionMessagingHost(
         sessionProfile: options?.sessionProfile,
         startRoadmapOrchestrator: options?.startRoadmapOrchestrator,
       });
-      const mcpServer = new MessagingMcpServer(hub, transport, deps.logPort);
+      const toolUsage =
+        deps.toolUsageMetrics?.enabled() === true ? new ToolUsageCounter() : undefined;
+      const mcpServer = new MessagingMcpServer(
+        hub,
+        transport,
+        deps.logPort,
+        toolUsage === undefined
+          ? undefined
+          : { record: (taskId, toolName) => toolUsage.record(taskId, toolName) },
+      );
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
       entries.set(token, entry);
       const url = server.urlForToken(token);
@@ -174,6 +189,12 @@ export async function startSessionMessagingHost(
           entry.ref = formatSessionTarget({ windowId: deps.windowId, provider, threadId });
         },
         dispose(): void {
+          if (toolUsage !== undefined) {
+            // 呼ばれなかった会話は行を出さない（接続ごとの集計が空）
+            for (const counts of toolUsage.snapshot()) {
+              deps.toolUsageMetrics?.log(formatToolUsageMetricsLine(`chat-${provider}`, counts));
+            }
+          }
           entries.delete(token);
           if (claudeConfigPath !== undefined) {
             removeMcpConfigFile(claudeConfigPath);

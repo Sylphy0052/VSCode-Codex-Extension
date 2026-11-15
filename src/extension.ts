@@ -1578,6 +1578,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       windowId,
       sessionBridge: () => sessionBridgeHolder.current,
       logPort: { error: (message) => log.error(message) },
+      toolUsageMetrics: { enabled: readToolUsageMetricsEnabled, log: (line) => log.info(line) },
       configDir: path.join(context.globalStorageUri.fsPath, 'session-messaging-mcp'),
     })
       .then((host) => {
