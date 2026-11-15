@@ -22,6 +22,7 @@ import {
   renderPromotedLesson,
   type RepoVisibility,
 } from './lessonPromotion';
+import { fileToPluginRoadmap, type PluginRoadmapDeps } from './pluginRoadmap';
 import type { RunMetrics } from './runMetrics';
 import type { LessonRecord, RunNotesStore } from './runNotes';
 import {
@@ -537,6 +538,8 @@ export interface RunRetrospectiveDeps {
   metricsDir: string;
   runNotes: Pick<RunNotesStore, 'listLessons' | 'listRemaining'> | undefined;
   forge: RetrospectiveForge;
+  /** plugin向けの改善の起票先。無ければ起票しない。 */
+  plugin?: PluginRoadmapDeps;
   /** この拡張自身のリポジトリ（`owner/name`）。分からなければ振り返らない。 */
   ownRepo: string | undefined;
   budgetConfig(): SelfImproveBudgetConfig;
@@ -557,6 +560,7 @@ export type RetrospectiveEvent =
   | 'noProposal'
   | 'startAllowed'
   | 'startDenied'
+  | 'pluginRoadmap'
   | 'error';
 
 /** 自己改善の起票・評価・着手。runの終了時と`start_self_improve_run`から呼ぶ。 */
@@ -706,6 +710,7 @@ export class RunRetrospective {
           return;
         }
         await this.propose(run, state, own.repo, usage, config);
+        await this.proposeToPlugin(run);
       } finally {
         await writeState(this.stateFile(), state);
       }
@@ -964,6 +969,29 @@ export class RunRetrospective {
       'filed',
       `${kind === 'improvement' ? '改善' : '調査'}Issue #${String(created.issueNumber)}を起票した（${spec.key}、指標: ${spec.metric}）`,
     );
+  }
+
+  /**
+   * plugin向けの改善を、pluginのロードマップへ起票する（Issue #2089）。skill本文の改善だけを
+   * 起票し、それ以外は調査Issueへの提案に留める。同期の状態もrunの記録へ残す。失敗は止めない。
+   */
+  private async proposeToPlugin(run: TaskRun): Promise<void> {
+    const plugin = this.deps.plugin;
+    if (plugin === undefined) {
+      return;
+    }
+    try {
+      const result = await fileToPluginRoadmap(plugin);
+      for (const note of result.notes) {
+        await this.record(run.runId, 'pluginRoadmap', note);
+      }
+    } catch (e) {
+      await this.record(
+        run.runId,
+        'error',
+        `pluginのロードマップへ起票できない: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /** 判断の記録。出力パネルと`retrospective-log.jsonl`へ残す。 */
