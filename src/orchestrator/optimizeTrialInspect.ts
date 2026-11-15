@@ -120,7 +120,7 @@ export async function discardMetricOutput(
   }
   const abs = path.resolve(candidateDir, metricFile);
   const rel = path.relative(candidateDir, abs);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+  if (rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     return;
   }
   const realRoot = await realpath(candidateDir);

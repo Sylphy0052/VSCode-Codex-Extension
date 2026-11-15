@@ -779,11 +779,15 @@ async function measureMetric(
     }
     return outcome;
   };
+  const runs = args.runs ?? spec.measurementRuns;
+  // 計測全体の上限は回数に比例させる。測り直しで回数を増やしたときに、元の回数の分の上限で
+  // 打ち切られて、正しい改善が「計測できなかった」で不採用にならないようにする
+  const totalScale = Math.max(1, runs / spec.measurementRuns);
   const result = await measureAlternating({
     measure,
-    runs: args.runs ?? spec.measurementRuns,
+    runs,
     perRunTimeoutMs: timeouts.perRunMs ?? DEFAULT_TRIAL_PER_RUN_TIMEOUT_MS,
-    totalTimeoutMs: timeouts.totalMs ?? DEFAULT_TRIAL_TOTAL_TIMEOUT_MS,
+    totalTimeoutMs: (timeouts.totalMs ?? DEFAULT_TRIAL_TOTAL_TIMEOUT_MS) * totalScale,
     loadThreshold: LOAD_DISCARD_THRESHOLD,
     maxLoadRetries: MAX_LOAD_RETRIES,
   });
