@@ -16,6 +16,7 @@
  */
 
 import type { OptimizeSummary } from './optimizeLedger';
+import type { OptimizeRequest } from './optimizeRequest';
 import type { OptimizeLoopState } from './optimizeLoop';
 import { sameOptimization, type OptimizationSpec } from './optimizeSpec';
 import type { TaskMetricsTally } from './runMetrics';
@@ -441,6 +442,12 @@ export interface TaskRun {
    * 拠り所にする。項目の無い保存データは目的なしと読む。
    */
   goal?: TaskRunGoal;
+  /**
+   * `start_run`で渡された最適化の依頼（Issue #2109）。指標・正しさの確認・パス・予算の案を含む外部由来の
+   * テキストで、承認済みの仕様ではない（仕様は`propose_plan`の`optimization`を人が承認して初めて決まる）。
+   * 項目の無い保存データは依頼なしと読む。
+   */
+  optimizeRequest?: OptimizeRequest;
 }
 
 /** runの目的と完了条件（Issue #2088）。 */
@@ -560,6 +567,8 @@ export interface CreateTaskRunInput {
   roadmap?: TaskRunRoadmap;
   /** 目的と完了条件（Issue #2088）。 */
   goal?: TaskRunGoal;
+  /** 最適化の依頼（Issue #2109）。 */
+  optimizeRequest?: OptimizeRequest;
   now: Date;
 }
 
@@ -587,6 +596,7 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
     orchestratorSessionRefs: [],
     ...(input.roadmap === undefined ? {} : { roadmap: input.roadmap }),
     ...(input.goal === undefined ? {} : { goal: input.goal }),
+    ...(input.optimizeRequest === undefined ? {} : { optimizeRequest: input.optimizeRequest }),
   };
 }
 

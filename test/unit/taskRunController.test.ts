@@ -237,6 +237,20 @@ describe('startRun', () => {
     expect(seen[1]?.runId).toBe('id-1');
   });
 
+  it('最適化の依頼を新しいrunの状態に保存する（Issue #2109）', async () => {
+    const h = await setup();
+    await h.controller.startRun({
+      workspaceRoot: ROOT,
+      engine: 'codex',
+      maxParallel: 2,
+      optimizeRequest: { objective: '起動を速くする', metric: 'bench' },
+    });
+    expect(runOf(h, 'id-1').optimizeRequest).toEqual({
+      objective: '起動を速くする',
+      metric: 'bench',
+    });
+  });
+
   it('同じフォルダに動いているrunがあれば再利用する。parallelなら新しく作る', async () => {
     const h = await setup([makeRun([])]);
 

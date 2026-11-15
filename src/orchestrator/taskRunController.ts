@@ -5,6 +5,8 @@ import type { HandoffClassifierInput } from '../view/handoffClassifier';
 import { buildTaskRunKanban, type TaskRunKanbanBoard } from '../view/taskRunKanbanModel';
 import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
+import type { OptimizeTrialRecord } from './optimizeLedger';
+import type { OptimizeRequest } from './optimizeRequest';
 import type { RoadmapChild } from './roadmapImport';
 import type { RoadmapPlanNode } from './roadmapShared';
 import {
@@ -980,6 +982,8 @@ export class TaskRunController {
     title?: string;
     /** 動いているrunを再利用せず、並行して新しく始める（Issue #1562）。 */
     parallel?: boolean;
+    /** 最適化の依頼（Issue #2109）。既存のrunを返すときは使わない。 */
+    optimizeRequest?: OptimizeRequest;
   }): Promise<StartTaskRunOutcome> {
     return this.startQueue.enqueue(async (): Promise<StartTaskRunOutcome> => {
       const active = this.deps.store.listActive(input.workspaceRoot)[0];
@@ -997,6 +1001,7 @@ export class TaskRunController {
         engine: input.engine,
         maxParallel: input.maxParallel,
         ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.optimizeRequest === undefined ? {} : { optimizeRequest: input.optimizeRequest }),
         runId: this.newId(),
         now: this.now(),
       });
@@ -1488,8 +1493,17 @@ export class TaskRunController {
    * Kanbanの盤面。`selectedRunId`が無ければ、いま開いているフォルダ（`currentFolders`）の動いているrun、
    * 無ければそのフォルダの最も新しいrunを選ぶ。
    */
-  board(selectedRunId: string | undefined, currentFolders: readonly string[]): TaskRunKanbanBoard {
-    return buildTaskRunKanban(this.deps.store.list(), selectedRunId, currentFolders);
+  board(
+    selectedRunId: string | undefined,
+    currentFolders: readonly string[],
+    optimizeTrials?: ReadonlyMap<string, readonly OptimizeTrialRecord[]>,
+  ): TaskRunKanbanBoard {
+    return buildTaskRunKanban(
+      this.deps.store.list(),
+      selectedRunId,
+      currentFolders,
+      optimizeTrials,
+    );
   }
 
   /**
