@@ -276,6 +276,53 @@ describe('RunRetrospective', () => {
     expect(createdAt(0).labels).toEqual(['research']);
   });
 
+  it('plugin向けの教訓はpluginのロードマップへ起票し、同期の状態を記録に残す', async () => {
+    const created: string[] = [];
+    let roadmap = '## READY\n- [ ] #1 a\n\n## DONE\n';
+    const r = new RunRetrospective({
+      stateDir: stateDir(),
+      metricsDir: metricsDir(),
+      runNotes: {
+        listLessons: async () => [
+          { ...lesson('r1'), instruction: 'skills/foo/SKILL.mdの手順を直す' },
+        ],
+        listRemaining: async () => [] as RemainingRecord[],
+      },
+      forge,
+      plugin: () => ({
+        repo: 'me/plugin',
+        forge: {
+          repoVisibility: async () => 'public',
+          readRoadmap: async () => ({ issueNumber: 10, body: roadmap }),
+          readResearch: async () => ({ issueNumber: 11, body: '## 提案\n' }),
+          findIssueByKey: async () => undefined,
+          createIssue: async (_r, issue) => {
+            created.push(issue.title);
+            return { ok: true, issueNumber: 50 };
+          },
+          createResearchIssue: async () => ({ ok: true, issueNumber: 11 }),
+          updateIssueBody: async (_r, _n, body) => {
+            roadmap = body;
+            return true;
+          },
+          readHeadCommit: async () => 'abc',
+        },
+        installedCommit: async () => 'def',
+      }),
+      ownRepo: 'Owner/Repo',
+      budgetConfig: () => ({ maxPerWeek: 3, weeklyUsageThresholdPct: 80 }),
+      weeklyUsagePct: async () => usage,
+      now: () => now,
+      log: (m) => logs.push(m),
+    });
+    await r.onRunFinished(await finishedRun('r1'));
+    expect(created).toHaveLength(1);
+    expect(roadmap).toContain('#50');
+    const log = await fs.readFile(path.join(stateDir(), 'retrospective-log.jsonl'), 'utf8');
+    expect(log).toContain('"event":"pluginRoadmap"');
+    expect(log).toContain('不一致');
+  });
+
   it('週次使用率が閾値以上なら振り返りを止め、記録に残す', async () => {
     usage = 85;
     await retro().onRunFinished(await finishedRun('r1'));
