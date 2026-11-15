@@ -1676,6 +1676,21 @@
           "scope": "machine",
           "markdownDescription": "ワークフローのタスク間メッセージングで、MCPツールが実際に何回呼ばれたかを出力パネルへ記録する。run終了時に接続（タスク、およびオーケストレーター）ごとへ1行で、呼び出し回数の合計、呼ばれたツールの種類数、ツール名ごとの回数を出す。\n\n30個近いツールのうち実際に使われているのはどれかを実測し、常時公開するツールを絞るための材料にする計測（Issue #1324）。有効にしてもツールの見え方や呼び出しの結果は変わらない。常用は想定していない。"
         },
+        "agent.orchestrator.selfImprove.maxPerWeek": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "scope": "machine",
+          "markdownDescription": "自律改善（この拡張自身を直すIssue）を起票する件数の、直近7日あたりの上限（K）。評価中（merge済みで判定が出ていない）の改善があるあいだは、新しい自己改善に着手しない（同時1件）。"
+        },
+        "agent.orchestrator.selfImprove.weeklyUsageThresholdPct": {
+          "type": "number",
+          "default": 80,
+          "minimum": 1,
+          "maximum": 100,
+          "scope": "machine",
+          "markdownDescription": "週次使用率（%）がこの値以上になったら、振り返りと自己改善の起票・着手を止め、その旨を記録に残す。"
+        },
         "agent.workflows.dir": {
           "type": "string",
           "default": ".agents/workflows",
