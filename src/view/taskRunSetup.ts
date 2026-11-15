@@ -11,6 +11,7 @@ import {
   readClaudeConfig,
   readConfig,
   readReflexEnabled,
+  readSelfImproveBudgetRaw,
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunAutoStartStagesEnabled,
@@ -35,6 +36,9 @@ import {
   type RoadmapRunForgePorts,
 } from '../orchestrator/roadmapRunForge';
 import type { RunNotesStore } from '../orchestrator/runNotes';
+import { parseGithubRepo, RunRetrospective } from '../orchestrator/runRetrospective';
+import { createGithubRetrospectiveForge } from '../orchestrator/runRetrospectiveForge';
+import { normalizeConfig } from '../orchestrator/selfImproveBudget';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import {
   TaskRunController,
@@ -47,7 +51,11 @@ import {
   TaskRunLeaseManager,
 } from '../orchestrator/taskRunLease';
 import { createRunMetricsRecorder, RUN_METRICS_DIR_NAME } from '../orchestrator/runMetricsStore';
-import { MAX_AUTO_RETRIES, MAX_GATES_PER_TASK, MAX_REVIEW_ROUNDS } from '../orchestrator/taskRunGates';
+import {
+  MAX_AUTO_RETRIES,
+  MAX_GATES_PER_TASK,
+  MAX_REVIEW_ROUNDS,
+} from '../orchestrator/taskRunGates';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { createIssueReader, createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
@@ -127,7 +135,17 @@ export interface TaskRunSetupDeps {
    * 1インスタンスを渡す。
    */
   runNotes?: RunNotesStore;
+  /**
+   * エンジンの週次使用率（%）。自律改善の予算（Issue #2084）の判断に使う。省略時・分からないときは
+   * `undefined`で、使用率では止めない。
+   */
+  weeklyUsagePct?: (engine: TaskRunEngine) => Promise<number | undefined>;
+  /** `package.json`の`repository.url`。自己改善（Issue #2086）はこのrepoのrunでだけ行う。 */
+  extensionRepositoryUrl?: string | undefined;
 }
+
+/** 振り返り（Issue #2086）の状態・予算・記録の置き場。`<globalStorage>`の下。 */
+const SELF_IMPROVE_DIR_NAME = 'self-improve';
 
 /**
  * オーケストレータモード（Issue #1505）の組み立てとコマンド登録。`extension.ts`はここを
@@ -292,8 +310,20 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     },
     log: warn,
   });
+  // 指標を記録した後に振り返る（Issue #2086）。予算（Issue #2084）は振り返りの中で判断し、記録に残す
+  const retrospective = new RunRetrospective({
+    stateDir: path.join(deps.globalStorageDir, SELF_IMPROVE_DIR_NAME),
+    metricsDir: path.join(deps.globalStorageDir, RUN_METRICS_DIR_NAME),
+    runNotes: deps.runNotes,
+    forge: createGithubRetrospectiveForge(ports),
+    ownRepo: parseGithubRepo(deps.extensionRepositoryUrl),
+    budgetConfig: () => normalizeConfig(readSelfImproveBudgetRaw()),
+    weeklyUsagePct: async (engine) => deps.weeklyUsagePct?.(engine),
+    now: () => Date.now(),
+    log: (message) => log.info(message),
+  });
   store.onRunFinished = (run) => {
-    void recordRunMetrics(run);
+    void recordRunMetrics(run).then(() => retrospective.onRunFinished(run));
   };
 
   const runner = new TaskStageRunner({
@@ -311,7 +341,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     resolveBaseCommit: (root) => resolveRoadmapBaseCommit(ports, root),
     sessionConfig: (engine) => deps.sessionConfig(engine),
     autoApprove: () => deps.readBaseline().allowAutoApprove,
-    checkSelfImproveMerge: (root, prNumber) => checkSelfImproveMerge(ports, root, prNumber),
+    checkSelfImproveMerge: (root, prNumber, options) =>
+      checkSelfImproveMerge(ports, root, prNumber, options),
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
     startGate: {
@@ -414,6 +445,48 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeStopStageAnswerer: judgeStopStage,
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     readIssue: createIssueReader(ports),
+    startSelfImproveRun: (self, issueNumber) =>
+      retrospective.startSelfImprove({
+        workspaceRoot: self.workspaceRoot,
+        engine: self.engine,
+        issueNumber,
+        runsInFolder: () => controller.listInFolder(self.workspaceRoot),
+        start: async (title) => {
+          const started = await controller.startRun({
+            workspaceRoot: self.workspaceRoot,
+            engine: self.engine,
+            maxParallel: 1,
+            title,
+            parallel: true,
+          });
+          if (!started.ok) {
+            return started;
+          }
+          const n = String(issueNumber);
+          const plan = await controller.proposePlan(started.runId, {
+            tasks: [
+              {
+                id: 'T1',
+                title,
+                summary: `自己改善Issue #${n}の本文（改善の内容・事前登録）に従って実装する。`,
+                acceptanceCriteria: [
+                  `Issue #${n}の改善の内容だけを入れ、保護パスに触れない`,
+                  `PRにself-improveラベルを付け、本文に「Closes #${n}」を入れる`,
+                ],
+                dependsOn: [],
+                existingIssueNumber: issueNumber,
+              },
+            ],
+          });
+          return {
+            ok: true as const,
+            runId: started.runId,
+            message: plan.ok
+              ? `自己改善#${n}のrun（runId=${started.runId}）を作り、計画を提案しました`
+              : `自己改善#${n}のrun（runId=${started.runId}）を作りました。計画は受け付けられませんでした: ${plan.message}`,
+          };
+        },
+      }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),
     startPolicy: () => holder.monitor?.startPolicy ?? 'unrestricted',

@@ -6,6 +6,7 @@ import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activity
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { AccountAutoSwitcher } from './claude/accountAutoSwitch';
+import { effectivePct } from './claude/accountPolicy';
 import { ClaudeAccountStore } from './claude/accountStore';
 import { StandbyUsageProbe } from './claude/standbyUsageProbe';
 import { ClaudeAgentProbe } from './claude/agentProbe';
@@ -1000,6 +1001,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       settings,
       log,
       runNotes,
+      extensionRepositoryUrl: (context.extension.packageJSON as { repository?: { url?: string } })
+        .repository?.url,
+      // 自律改善の予算（Issue #2084）。Claudeは稼働中のアカウントの週次の記録から見積もる。
+      // Codexの週次は取る口がここに無いため分からない扱い（止めない）
+      weeklyUsagePct: async (engine) => {
+        if (engine !== 'claude') {
+          return undefined;
+        }
+        const snapshot = await claudeAccounts.store.list();
+        const weekly = snapshot.ok
+          ? snapshot.accounts.find((a) => a.current)?.usage?.weekly
+          : undefined;
+        return weekly === undefined ? undefined : effectivePct(weekly, Date.now());
+      },
     }),
   );
 

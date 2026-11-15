@@ -10,11 +10,14 @@ import {
  * PRのmerge前に、自己改善PRが保護パスに触れていないか確かめる（Issue #2082）。
  * ラベルと変更ファイルは`gh`で取り、保護パスの一覧はPRの変更で空にされないよう`origin/main`のものを読む。
  * 拒否しなくてよければ`undefined`、拒否する理由か確かめられなかった理由を返す（GitHub以外のforgeは対象外）。
+ * `selfImproveRun`（自己改善のrunのPR。Issue #2086）なら、ラベルが無いこと自体を拒否する
+ * （ラベルの付け忘れで保護パスの検査とCIの検査を素通りさせない）。
  */
 export async function checkSelfImproveMerge(
   ports: RoadmapRunForgePorts,
   repoRoot: string,
   pullRequestNumber: number,
+  options: { selfImproveRun?: boolean } = {},
 ): Promise<string | undefined> {
   if ((await detectRoadmapForgeHost(ports, repoRoot)) !== 'github') {
     return undefined;
@@ -30,7 +33,9 @@ export async function checkSelfImproveMerge(
   }
   // ラベルが無ければファイルと一覧は要らない（人の依頼の通常の実装は従来どおり）
   if (!labels.includes(SELF_IMPROVE_LABEL)) {
-    return undefined;
+    return options.selfImproveRun === true
+      ? `自己改善のrunのPR #${n}に${SELF_IMPROVE_LABEL}ラベルが無いためmergeできない。ラベルを付けてから再度mergeする`
+      : undefined;
   }
   const filesResult = await ports.cli.run(
     'gh',

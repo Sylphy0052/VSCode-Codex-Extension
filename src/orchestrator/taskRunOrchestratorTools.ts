@@ -395,6 +395,19 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'start_self_improve_run',
+    description:
+      '振り返りが起票した自己改善Issue（self-improveラベル）1件を、新しいrunで着手する。自己改善のrunは同時に1本だけで、評価中の改善がある・週次使用率が閾値以上・ラベルが無いときは拒否される。人の承認を経てから実行される。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        issueNumber: { type: 'integer', minimum: 1, description: '自己改善IssueのIssue番号' },
+      },
+      required: ['issueNumber'],
+      additionalProperties: false,
+    },
+  },
   RECORD_LESSON_TOOL,
 ];
 
@@ -500,6 +513,7 @@ export type TaskRunOrchestratorCall =
   | { tool: 'list_runs' }
   | { tool: 'get_issue'; issueNumber: number }
   | { tool: 'resume_run'; runId: string }
+  | { tool: 'start_self_improve_run'; issueNumber: number }
   | {
       tool: 'start_run';
       title: string;
@@ -665,6 +679,13 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
       return { ok: false, message: 'issueNumberは正の整数で指定する' };
     }
     return { ok: true, call: { tool: 'get_issue', issueNumber: n } };
+  }
+  if (name === 'start_self_improve_run') {
+    const n = a.issueNumber;
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) {
+      return { ok: false, message: 'issueNumberは正の整数で指定する' };
+    }
+    return { ok: true, call: { tool: 'start_self_improve_run', issueNumber: n } };
   }
   if (name === 'resume_run') {
     const runId = a.runId;

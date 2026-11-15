@@ -18,6 +18,11 @@ src/orchestrator/taskRunStore.ts
 # 指標の計算（#2081で追加するファイルもここへ足す）
 src/orchestrator/promptMetrics.ts
 src/orchestrator/toolUsageMetrics.ts
+# 自律改善の予算・教訓の昇格の信頼境界・振り返りの評価とrevert（#2084・#2085・#2086）
+src/orchestrator/selfImproveBudget.ts
+src/orchestrator/lessonPromotion.ts
+src/orchestrator/runRetrospective.ts
+src/orchestrator/runRetrospectiveForge.ts
 # 保護パスの一覧と、それを検査するコード・CI設定
 .github/self-improve-protected-paths
 .github/workflows/

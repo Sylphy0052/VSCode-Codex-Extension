@@ -1828,6 +1828,21 @@ export function readPromptMetricsEnabled(): boolean {
 }
 
 /**
+ * 自律改善の予算（Issue #2084）。値の検証は`selfImproveBudget.ts`の`normalizeConfig`が行うため、
+ * ここでは型を問わず生の値を返す。
+ */
+export function readSelfImproveBudgetRaw(): {
+  maxPerWeek: unknown;
+  weeklyUsageThresholdPct: unknown;
+} {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    maxPerWeek: c.get<unknown>('orchestrator.selfImprove.maxPerWeek'),
+    weeklyUsageThresholdPct: c.get<unknown>('orchestrator.selfImprove.weeklyUsageThresholdPct'),
+  };
+}
+
+/**
  * メッセージング用MCPツールの実利用率を出力パネルへ記録するか（Issue #1324）。
  *
  * 30個近いツールのうち実際に呼ばれているのはどれかを実測し、接続種別・フェーズごとの
