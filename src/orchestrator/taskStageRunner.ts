@@ -1245,6 +1245,7 @@ export class TaskStageRunner {
       inputLock: true,
       forceAutoHandoff: true,
       autoHandoffAutoApprove: true,
+      suppressSkillRetro: true,
       reflex: true,
       handoffDelegate: (request) => this.onHandoff(channel.binding, request),
     };

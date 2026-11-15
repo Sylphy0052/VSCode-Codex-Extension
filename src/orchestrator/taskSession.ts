@@ -223,6 +223,11 @@ export interface TaskSessionInput {
    */
   autoHandoffAutoApprove?: boolean;
   /**
+   * 環境変数`SKILL_RETRO_DISABLE=1`を渡し、pluginのStop hook（skill使用後に振り返りを促して停止を
+   * 止める）が工程を邪魔しないようにする。工程セッションだけが`true`を渡す（Issue #2087）。
+   */
+  suppressSkillRetro?: boolean;
+  /**
    * Reflexモード（`agent.chat.reflex.enabled`）の親スイッチを、このセッションだけ上書きする
    * （Issue #1505 仕様6）。省略時はグローバル設定に従う。個別の機能のON/OFF
    * （`agent.chat.loopDoneCheck.enabled`など）と閾値はグローバル設定のまま使う。
