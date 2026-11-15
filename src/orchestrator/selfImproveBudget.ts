@@ -65,12 +65,18 @@ export function evaluatingEntries(ledger: SelfImproveLedger): SelfImproveEntry[]
   return ledger.entries.filter((e) => e.mergedAt !== undefined && e.evaluatedAt === undefined);
 }
 
-/** 週次使用率が閾値以上か。使用率が不明（undefined）なら止めない。 */
+/** 週次使用率が分からないときの止める理由（fail-closed）。 */
+export const USAGE_UNKNOWN_REASON = '週次使用率が分からないため、自己改善の起票と着手を止める';
+
+/** 週次使用率が閾値以上か。使用率が不明（undefined）なら、利用枠を使い切らないよう止める。 */
 export function decideUsage(
   weeklyUsagePct: number | undefined,
   config: SelfImproveBudgetConfig,
 ): BudgetDecision {
-  if (weeklyUsagePct !== undefined && weeklyUsagePct >= config.weeklyUsageThresholdPct) {
+  if (weeklyUsagePct === undefined) {
+    return { allowed: false, reason: USAGE_UNKNOWN_REASON };
+  }
+  if (weeklyUsagePct >= config.weeklyUsageThresholdPct) {
     return {
       allowed: false,
       reason: `週次使用率${weeklyUsagePct}%が閾値${config.weeklyUsageThresholdPct}%以上のため、振り返りと自己改善を止める`,
@@ -266,6 +272,43 @@ export async function withFileLock<T>(
   }
 }
 
+/**
+ * 古いロックを外す。外す処理を `<lock>.reclaim` の排他で直列化し、その中で古さを見直してから消す。
+ * 見直さないと、先に外した側が取り直した新しいロックを、遅れて来た側が古いと誤認して消してしまう。
+ * 外す権利を取れなかった（他が外している最中）ときは false を返し、呼び出し側が取り直しに戻る。
+ */
+async function reclaimStale(lock: string, staleMs: number): Promise<boolean> {
+  const guard = `${lock}.reclaim`;
+  try {
+    await fs.writeFile(guard, String(process.pid), { flag: 'wx' });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw err;
+    }
+    // 外す側が落ちて残った番人は、ロックと同じ古さの基準で片付ける。
+    try {
+      const gst = await fs.stat(guard);
+      if (Date.now() - gst.mtimeMs > staleMs) {
+        await fs.rm(guard, { force: true });
+      }
+    } catch {
+      // 消えていれば、次の周回で取り直す
+    }
+    return false;
+  }
+  try {
+    const st = await fs.stat(lock);
+    if (Date.now() - st.mtimeMs > staleMs) {
+      await fs.rm(lock, { force: true });
+    }
+  } catch {
+    // 既に無ければ、取り直すだけでよい
+  } finally {
+    await fs.rm(guard, { force: true });
+  }
+  return true;
+}
+
 async function acquire(lock: string, staleMs: number): Promise<void> {
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
@@ -279,8 +322,7 @@ async function acquire(lock: string, staleMs: number): Promise<void> {
     }
     try {
       const st = await fs.stat(lock);
-      if (Date.now() - st.mtimeMs > staleMs) {
-        await fs.rm(lock, { force: true });
+      if (Date.now() - st.mtimeMs > staleMs && (await reclaimStale(lock, staleMs))) {
         continue;
       }
     } catch {

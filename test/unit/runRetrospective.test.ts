@@ -17,6 +17,7 @@ import {
   type MergeState,
   type RetrospectiveForge,
 } from '../../src/orchestrator/runRetrospective';
+import { withFileLock } from '../../src/orchestrator/selfImproveBudget';
 import { createTaskRun, type TaskRun } from '../../src/orchestrator/taskRunState';
 
 const LESSON_ID = '11111111-2222-4333-8444-555555555555';
@@ -332,6 +333,42 @@ describe('RunRetrospective', () => {
     expect(log).toContain('週次使用率85%');
   });
 
+  it('週次使用率が分からないときは起票せず、理由を記録に残す', async () => {
+    usage = undefined;
+    await retro().onRunFinished(await finishedRun('r1'));
+    expect(forge.created).toHaveLength(0);
+    const log = await fs.readFile(path.join(stateDir(), 'retrospective-log.jsonl'), 'utf8');
+    expect(log).toContain('"event":"stopped"');
+    expect(log).toContain('週次使用率が分からない');
+  });
+
+  it('古いロックを同時に外そうとしても、同時に入るのは1プロセスだけ', async () => {
+    // 起動を数msずらさないと、全員が同時に古さを見て修正前でも通る。修正前は最大3同時になる。
+    let maxInside = 0;
+    for (let round = 0; round < 20; round++) {
+      const lock = path.join(dir, `race${round}.lock`);
+      await fs.writeFile(lock, '1');
+      const old = new Date(Date.now() - 60_000);
+      await fs.utimes(lock, old, old);
+      let inside = 0;
+      const run = async (i: number) => {
+        await new Promise((r) => setTimeout(r, i % 3));
+        await withFileLock(
+          lock,
+          async () => {
+            inside += 1;
+            maxInside = Math.max(maxInside, inside);
+            await new Promise((r) => setTimeout(r, 15));
+            inside -= 1;
+          },
+          { staleMs: 30_000 },
+        );
+      };
+      await Promise.all(Array.from({ length: 8 }, (_, i) => run(i)));
+    }
+    expect(maxInside).toBe(1);
+  }, 60_000);
+
   it('自己改善のrunの終了時は改善案を出さない', async () => {
     await writeMetrics(metrics('r1', now - DAY, '1.0.0', 1));
     lessons = [lesson('r1')];
@@ -426,6 +463,10 @@ describe('RunRetrospective', () => {
     const busy = await retro().startSelfImprove(input);
     expect(busy.ok).toBe(false);
     expect(busy.message).toContain('週次使用率90%');
+    usage = undefined;
+    const unknown = await retro().startSelfImprove(input);
+    expect(unknown.ok).toBe(false);
+    expect(unknown.message).toContain('週次使用率が分からない');
     usage = 10;
     const serial = await retro().startSelfImprove({
       ...input,
