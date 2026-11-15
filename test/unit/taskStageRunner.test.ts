@@ -25,7 +25,7 @@ import type {
 } from '../../src/orchestrator/taskSession';
 import { REPORT_STAGE_RESULT_TOOL } from '../../src/orchestrator/taskStagePrompts';
 import { TaskStageRunner, type TaskStageRunnerDeps } from '../../src/orchestrator/taskStageRunner';
-import { FIXTURE_NOW, makeRun, makeTask } from '../helpers/taskRunFixture';
+import { FIXTURE_NOW, makeRun, makeTask, resolvedRetryGate } from '../helpers/taskRunFixture';
 
 /**
  * `TaskStageRunner`の工程の実行・状態遷移・エラー処理（Issue #1854）。依存（`TaskStageRunnerDeps`）は
@@ -402,6 +402,18 @@ describe('TaskStageRunner.pump 工程の開始', () => {
     expect(plan).toMatchObject({ maxIterations: MAX_ITERATIONS, backgroundWaitLimitMs: 1_800_000 });
     expect(plan?.continuePrompt.startsWith('続けて。')).toBe(true);
     expect(t.onRunChanged).toHaveBeenCalled();
+  });
+
+  it('同じ工程の過去の失敗があれば、開始時のプロンプトへ前回までの失敗として載せる', async () => {
+    const prior = {
+      ...resolvedRetryGate('old1', 'issuePlan', 'reflex'),
+      detail: '型エラーで落ちた',
+    };
+    const t = build([makeRun([queuedTask('T1', 'issuePlan', { gates: [prior] })])]);
+    await t.runner.pump('run-1');
+    const prompt = t.session().plans[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('前回までの失敗');
+    expect(prompt).toContain('型エラーで落ちた');
   });
 
   it('同じタスクの工程を二重に始めない', async () => {

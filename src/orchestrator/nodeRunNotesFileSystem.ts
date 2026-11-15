@@ -4,6 +4,12 @@ import * as path from 'node:path';
 
 import type { ReadTextFileResult, RunNotesFileSystemPort } from './runNotes';
 
+/** ロックを待つ上限。超えたら排他なしで続ける（記録の失敗でrunを止めない）。 */
+const LOCK_WAIT_MS = 5_000;
+/** この時間より古いロックは、持ち主が落ちて残ったものとみなして取り除く。 */
+const LOCK_STALE_MS = 30_000;
+const LOCK_RETRY_MS = 50;
+
 /**
  * `RunNotesFileSystemPort`（`runNotes.ts`、Issue #1599）のNode実装。
  *
@@ -49,6 +55,41 @@ export const nodeRunNotesFileSystem: RunNotesFileSystemPort = {
         return { kind: 'missing' };
       }
       return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+    }
+  },
+  async withLock<T>(target: string, fn: () => Promise<T>): Promise<T | undefined> {
+    const lockDir = `${target}.lock`;
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    let acquired = false;
+    while (!acquired) {
+      try {
+        // mkdirは存在すれば失敗するので、プロセス間で原子的な排他になる
+        await fsPromises.mkdir(lockDir);
+        acquired = true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+          return undefined;
+        }
+        try {
+          const stat = await fsPromises.stat(lockDir);
+          if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+            // 持ち主が落ちて残ったロック。取り除いて取り直す
+            await fsPromises.rmdir(lockDir);
+            continue;
+          }
+        } catch {
+          continue;
+        }
+        if (Date.now() >= deadline) {
+          return undefined;
+        }
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+      }
+    }
+    try {
+      return await fn();
+    } finally {
+      await fsPromises.rmdir(lockDir).catch(() => undefined);
     }
   },
   async replaceTextFile(target: string, content: string): Promise<boolean> {

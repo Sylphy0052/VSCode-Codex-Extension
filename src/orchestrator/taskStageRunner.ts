@@ -36,6 +36,7 @@ import {
 import type { StartPolicy } from './resourceMonitor';
 import type { RunNotesStore } from './runNotes';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
+import { recordMaxReached } from './runMetrics';
 import { RELOAD_HALT_REASON } from './taskRunReload';
 import { SerialQueue } from './serialQueue';
 import {
@@ -68,6 +69,8 @@ import {
 } from './taskRunState';
 import {
   buildGateQuestion,
+  isRepeatedFailure,
+  REPEATED_FAILURE_SUMMARY,
   escalateStageGate,
   markGateAwaitingOrchestrator,
   findStageGate,
@@ -445,6 +448,7 @@ export class TaskStageRunner {
     taskId: string,
     attention: 'needsAction' | 'failed',
     failure: string,
+    countMaxReached = false,
   ): Promise<void> {
     const gateId = this.newId();
     // 状態を書き込む間に工程セッションが帳簿から外れうるので、タブのReflexを先に読む
@@ -454,7 +458,7 @@ export class TaskStageRunner {
       return halted === r
         ? r
         : openStageGate(
-            halted,
+            countMaxReached ? recordMaxReached(halted, taskId) : halted,
             taskId,
             { gateId, kind: 'stageFailed', detail: failure },
             this.now(),
@@ -563,6 +567,9 @@ export class TaskStageRunner {
     let verdict: RoadmapQuestionVerdict;
     if (judge === undefined) {
       verdict = { kind: 'human', summary: undefined };
+    } else if (isRepeatedFailure(task, gate)) {
+      // 同じ原因の2回目はReflexに自動やり直しを選ばせず、回答者判定（Orchestrator・ユーザー）へ回す
+      verdict = { kind: 'human', summary: REPEATED_FAILURE_SUMMARY };
     } else {
       try {
         verdict = await judge(run.engine, buildGateQuestion(task, gate), reflexEnabled);
@@ -1566,6 +1573,7 @@ export class TaskStageRunner {
           entry.ref.taskId,
           'needsAction',
           unreportedFinishDetail(reason, this.deps.maxIterations),
+          reason === 'maxReached',
         );
         this.release(entry, { dispose: false });
       });

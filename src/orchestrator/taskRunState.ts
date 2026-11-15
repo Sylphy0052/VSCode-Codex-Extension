@@ -15,6 +15,7 @@
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
 
+import type { TaskMetricsTally } from './runMetrics';
 import { stripControlChars } from './sanitize';
 import { sanitizeInlineText } from './untrustedText';
 
@@ -203,6 +204,8 @@ export interface OrchestratedTask {
   gates?: readonly StageGate[];
   /** レビュー後に実装へ差し戻した回数。追加前に保存したrunには無い（0回として扱う）。 */
   reviewRounds?: number;
+  /** runごとの指標（Issue #2081）のうち、刈られて後から数えられなくなる件数。 */
+  metricsTally?: TaskMetricsTally;
   /** 実行中の工程の一時停止（Issue #1629）。一時停止していなければ`undefined`。 */
   pause?: TaskStagePause | undefined;
   /**
