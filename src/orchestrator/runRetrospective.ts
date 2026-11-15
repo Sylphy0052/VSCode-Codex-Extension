@@ -34,6 +34,7 @@ import {
   decideRetrospective,
   decideStart,
   decideUsage,
+  USAGE_UNKNOWN_REASON,
   SelfImproveBudgetStore,
   withFileLock,
   type SelfImproveBudgetConfig,
@@ -687,13 +688,11 @@ export class RunRetrospective {
     }
     const config = this.deps.budgetConfig();
     const usage = await this.deps.weeklyUsagePct(run.engine);
+    // 使用率が不明なときは、振り返り（評価と教訓の記録）は続け、自己改善の起票だけ止める。
     const usageDecision = decideUsage(usage, config);
-    if (!usageDecision.allowed) {
+    if (!usageDecision.allowed && usage !== undefined) {
       await this.record(run.runId, 'stopped', usageDecision.reason);
       return;
-    }
-    if (usage === undefined) {
-      await this.record(run.runId, 'skipped', '週次使用率が分からないため、止めずに続ける');
     }
     const isSelfImproveRun = await this.isSelfImproveRun(run);
     if (isSelfImproveRun === undefined) {
@@ -708,12 +707,20 @@ export class RunRetrospective {
       const state = await readState(this.stateFile());
       try {
         await this.evaluatePending(run, state);
-        const decision = decideRetrospective(usage, config, isSelfImproveRun);
-        if (!decision.allowed) {
-          await this.record(run.runId, 'stopped', decision.reason);
-          return;
+        if (usage === undefined) {
+          await this.record(
+            run.runId,
+            'stopped',
+            USAGE_UNKNOWN_REASON,
+          );
+        } else {
+          const decision = decideRetrospective(usage, config, isSelfImproveRun);
+          if (!decision.allowed) {
+            await this.record(run.runId, 'stopped', decision.reason);
+            return;
+          }
+          await this.propose(run, state, own.repo, usage, config);
         }
-        await this.propose(run, state, own.repo, usage, config);
         await this.proposeToPlugin(run);
       } finally {
         await writeState(this.stateFile(), state);

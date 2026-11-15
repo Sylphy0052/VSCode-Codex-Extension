@@ -17,6 +17,7 @@ import {
   type MergeState,
   type RetrospectiveForge,
 } from '../../src/orchestrator/runRetrospective';
+import { withFileLock } from '../../src/orchestrator/selfImproveBudget';
 import { createTaskRun, type TaskRun } from '../../src/orchestrator/taskRunState';
 
 const LESSON_ID = '11111111-2222-4333-8444-555555555555';
@@ -330,6 +331,37 @@ describe('RunRetrospective', () => {
     const log = await fs.readFile(path.join(stateDir(), 'retrospective-log.jsonl'), 'utf8');
     expect(log).toContain('"event":"stopped"');
     expect(log).toContain('週次使用率85%');
+  });
+
+  it('週次使用率が分からないときは起票せず、理由を記録に残す', async () => {
+    usage = undefined;
+    await retro().onRunFinished(await finishedRun('r1'));
+    expect(forge.created).toHaveLength(0);
+    const log = await fs.readFile(path.join(stateDir(), 'retrospective-log.jsonl'), 'utf8');
+    expect(log).toContain('"event":"stopped"');
+    expect(log).toContain('週次使用率が分からない');
+  });
+
+  it('古いロックを同時に外そうとしても、同時に入るのは1プロセスだけ', async () => {
+    const lock = path.join(dir, 'race.lock');
+    await fs.writeFile(lock, '1');
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lock, old, old);
+    let inside = 0;
+    let maxInside = 0;
+    const run = () =>
+      withFileLock(
+        lock,
+        async () => {
+          inside += 1;
+          maxInside = Math.max(maxInside, inside);
+          await new Promise((r) => setTimeout(r, 20));
+          inside -= 1;
+        },
+        { staleMs: 30_000 },
+      );
+    await Promise.all(Array.from({ length: 8 }, run));
+    expect(maxInside).toBe(1);
   });
 
   it('自己改善のrunの終了時は改善案を出さない', async () => {
