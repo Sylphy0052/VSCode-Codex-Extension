@@ -7,6 +7,10 @@
 - ロードマップの正本はGitHubの `roadmap` ラベルのIssue（2026-09-26時点で #1457 の1本）とする。着手順・優先度・進捗はそこだけに書き、ロードマップIssueを増やさずこの1本へ足す
 - `docs/archive/` は凍結記録。参照せず、書き換えない（旧 `docs/roadmap/` はここへ移した。Issue #1458）
 
+## チャットでの作業の流れ
+
+- Issueを起票してロードマップ#1457を整理したら、実装以降は task-messaging MCPの `start_roadmap_orchestrator` でオーケストレータモードに任せる（会話の中で実装しない）。子Issueが1件でも呼ぶ。調査・質問への回答・ロードマップに載せない小さな修正では呼ばない
+
 ## PR運用
 
 - 各PRの最後に `node scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の版上げを `chore: バージョンを<版>にする` として同じPRへcommitする。配布したvsixの版とmainのcommitを1対1にするため
