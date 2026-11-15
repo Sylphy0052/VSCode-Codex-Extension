@@ -936,8 +936,14 @@ const script = `
       // 自動承認（Issue #1554）のときだけ、判定理由を短く残す
       if (run.planReview && run.planReview.autoApproved) {
         const box = el('div', 'plan-box');
-        box.appendChild(el('span', undefined, 'Reflexが計画を妥当と判定し、自動で承認しました。'));
-        box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+        if (run.planReview.orchestrator) {
+          // approve_planの3段（Issue #2073）。承認した主体はOrchestrator
+          box.appendChild(el('span', undefined, 'Orchestratorが、自己確認・セカンドオピニオン・Reflexの3段を通した計画を承認しました。'));
+          appendPlanReviewStages(box, run.planReview);
+        } else {
+          box.appendChild(el('span', undefined, 'Reflexが計画を妥当と判定し、自動で承認しました。'));
+          box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+        }
         planEl.appendChild(box);
       }
       return;
@@ -945,7 +951,10 @@ const script = `
     const box = el('div', 'plan-box');
     if (run.planStatus === 'awaitingApproval') {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列と「計画の承認待ち」の印が付いたタスクを確かめて承認してください。承認を待つのは新しいタスクと内容を変えたタスクだけで、前回承認したままのタスクは進み続けます。変更したいときはOrchestratorのチャットで伝えます。'));
-      if (run.planReview) {
+      if (run.planReview && run.planReview.orchestrator) {
+        box.appendChild(el('div', 'question-note', 'Orchestratorの承認審査は通らなかった（承認していません）。'));
+        appendPlanReviewStages(box, run.planReview);
+      } else if (run.planReview) {
         box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
       }
       box.appendChild(button('計画を承認', 'primary', function () { send('approvePlan'); }));
@@ -953,6 +962,23 @@ const script = `
       box.appendChild(el('span', undefined, 'Orchestratorが計画を作成中です。やりたいことはOrchestratorのチャットで伝えます。'));
     }
     planEl.appendChild(box);
+  }
+
+  // approve_planの3段（自己確認・セカンドオピニオン・Reflex）の結果を1段1行で出す（Issue #2073）
+  function appendPlanReviewStages(box, review) {
+    const o = review.orchestrator;
+    box.appendChild(el('div', 'question-note', '自己確認: ' + (o.selfCheck || '（なし）')));
+    const labels = { valid: '妥当', wrong: '誤りがある', unknown: '判定不能' };
+    if (o.secondOpinion) {
+      let text = 'セカンドオピニオン: ' + labels[o.secondOpinion.verdict];
+      if (o.secondOpinion.findings.length > 0) {
+        text += '（指摘: ' + o.secondOpinion.findings.join(' / ') + '）';
+      }
+      box.appendChild(el('div', 'question-note', text));
+    } else {
+      box.appendChild(el('div', 'question-note', 'セカンドオピニオン: 未実施'));
+    }
+    box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + review.summary));
   }
 
   function renderQuestion(card, q) {

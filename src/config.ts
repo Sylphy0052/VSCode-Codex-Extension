@@ -789,6 +789,16 @@ export function readTaskRunPlanAutoApproveEnabled(
 }
 
 /**
+ * オーケストレータモードで、計画を承認する主体（Issue #2073）。`human`（既定）は人がKanbanで承認し、
+ * `orchestrator`は`approve_plan`が自己確認・セカンドオピニオン・Reflexの3段を通した計画を
+ * Orchestratorが承認する。未知の値は`human`にフォールバックする（人の承認を省く方向へ倒さない）。
+ */
+export function readTaskRunPlanApprovalMode(): 'human' | 'orchestrator' {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('taskRun.planApproval.mode');
+  return raw === 'orchestrator' ? 'orchestrator' : 'human';
+}
+
+/**
  * オーケストレータモードで、判断待ちになった工程をOrchestratorの`start_stage`を待たずに
  * 推奨値のModel/Effortで始めるか（Issue #2031）。既定は無効。推奨値を得られない工程と、
  * やり直しの工程（前に実行したことがある工程）は従来どおりOrchestratorが決める。

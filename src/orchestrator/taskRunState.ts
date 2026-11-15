@@ -313,10 +313,34 @@ export type TaskPlanStatus = 'drafting' | 'awaitingApproval' | 'approved';
 export interface TaskPlanReview {
   /** Reflexが「妥当」を閾値以上で答え、承認まで進めた。 */
   autoApproved: boolean;
-  /** Reflexの判定の要約（人へ回した理由を含む）。 */
+  /** Reflexの判定の要約（人へ回した理由を含む）。Reflexまで進まなかったときはその旨。 */
   summary: string;
   /** ISO8601。 */
   reviewedAt: string;
+  /**
+   * 承認した（承認を試みた）主体（Issue #2073）。`agent.taskRun.planApproval.mode=orchestrator`の
+   * `approve_plan`が3段を通した記録にだけ付く。無いときは従来どおりReflexの自動承認の記録。
+   */
+  approver?: 'orchestrator';
+  /** Orchestratorの自己確認（確認した項目と結論）。`approver`があるときだけ。 */
+  selfCheck?: string;
+  /** セカンドオピニオンの結果。`approver`があり、そこまで進んだときだけ。 */
+  secondOpinion?: TaskPlanSecondOpinion;
+}
+
+/**
+ * 計画を承認する主体（設定`agent.taskRun.planApproval.mode`。Issue #2073）。`human`は人がKanbanで
+ * 承認する（既定）。`orchestrator`は`approve_plan`が3段（自己確認・セカンドオピニオン・Reflex）を
+ * 通した計画をOrchestratorが承認する。
+ */
+export type PlanApprovalMode = 'human' | 'orchestrator';
+
+/** 計画のセカンドオピニオン（独立した別のheadless CLIによるレビュー）の結果。 */
+export interface TaskPlanSecondOpinion {
+  /** `valid`=妥当 / `wrong`=誤りがある / `unknown`=判定不能（時間切れ・不正な出力等）。 */
+  verdict: 'valid' | 'wrong' | 'unknown';
+  /** 指摘の短い一覧。`valid`のとき空のこともある。 */
+  findings: readonly string[];
 }
 
 export const TASK_RUN_SCHEMA_VERSION = 1;

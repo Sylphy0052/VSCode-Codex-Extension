@@ -94,7 +94,7 @@ export async function reviewTaskRunPlanProposal(
  * Reflexの状態。一覧を先に置き、要約を後に並べる。`REFLEX_STATE_LIMIT`を超えた状態は
  * Reflexへ渡さず人の承認へ回す（`reviewTaskRunPlanProposal`、Issue #2029）ため、切り詰めは起きない。
  */
-function buildTaskPlanReviewState(
+export function buildTaskPlanReviewState(
   drafts: readonly TaskDraft[],
   outsideRoadmapIssues: ReadonlySet<number>,
 ): string {

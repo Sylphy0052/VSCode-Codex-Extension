@@ -61,6 +61,7 @@ import {
   TASK_STAGES,
   taskRunLabel,
   type OrchestratedTask,
+  type PlanApprovalMode,
   type StageDecider,
   type TaskRun,
   type TaskRunRoadmapNotice,
@@ -152,6 +153,7 @@ export interface TaskRunOrchestratorDeps {
     | 'proposePlan'
     | 'approvePlan'
     | 'approvePlanByReview'
+    | 'planApprovalMode'
     | 'resolveGateByReview'
     | 'refreshKanban'
     | 'startStage'
@@ -717,6 +719,7 @@ export class TaskRunOrchestrator {
         { trigger, carriedCount: carried.length },
         lessonsBlock,
         this.deps.controller.autoStartsStages(current.engine),
+        this.deps.controller.planApprovalMode(),
       ),
     );
     this.deps.onDidChange();
@@ -1054,7 +1057,7 @@ export class TaskRunOrchestrator {
       case 'propose_plan':
         return toOutcome(await controller.proposePlan(runId, call.rawArgs));
       case 'approve_plan':
-        return this.approvePlan(runId);
+        return this.approvePlan(runId, call.selfCheck);
       case 'sync_roadmap':
         return toOutcome(await controller.syncRoadmap(runId));
       case 'refresh_kanban': {
@@ -1240,9 +1243,14 @@ export class TaskRunOrchestrator {
   /**
    * `approve_plan`（Issue #1763）。Reflexが計画を妥当と判定すれば人に確かめずに承認する。
    * Reflexが無効・妥当と言えなければ、`resolve_gate`と同じくツールの処理の中で人に確かめる。
+   * `agent.taskRun.planApproval.mode=orchestrator`では3段（自己確認・セカンドオピニオン・Reflex）を
+   * Controllerが通し、人には確かめずに結果をそのまま返す（Issue #2073）。
    */
-  private async approvePlan(runId: string): Promise<RoadmapAskOutcome> {
-    const reviewed = await this.deps.controller.approvePlanByReview(runId);
+  private async approvePlan(
+    runId: string,
+    selfCheck: string | undefined,
+  ): Promise<RoadmapAskOutcome> {
+    const reviewed = await this.deps.controller.approvePlanByReview(runId, selfCheck);
     if ('decided' in reviewed) {
       return { text: reviewed.decided.message, isError: !reviewed.decided.ok };
     }
@@ -1693,6 +1701,7 @@ function buildIntroPrompt(
   handover: { trigger: GenerationTrigger; carriedCount: number },
   lessonsBlock?: string,
   autoStartStages = false,
+  planApprovalMode: PlanApprovalMode = 'human',
 ): string {
   return [
     `あなたはオーケストレータモードの実行（run: ${run.runId}）を指揮するOrchestratorです（第${String(generation)}世代）。`,
@@ -1707,7 +1716,9 @@ function buildIntroPrompt(
     '役割:',
     '- task-messagingのMCPツールでControllerへ命令するだけで、runの状態を直接変えない。ファイルは書かない',
     '- 状態の正本はget_run_stateとする。会話の記憶や前の世代の発言より、get_run_stateの結果を信じる',
-    '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。approve_planはユーザーに会話で頼まれたときだけ使う（Reflexが計画を審査し、妥当なら確認なしに承認される。妥当と言えなければユーザーの確認が入る）',
+    planApprovalMode === 'orchestrator'
+      ? '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。提案した後は、計画の承認をあなた自身が行う（このrunは設定agent.taskRun.planApproval.mode=orchestrator）。承認前に計画を自分で点検し（タスクの分割・依存・受入基準・範囲外の作業が無いか）、確認した項目と結論をselfCheckに具体的に書いてapprove_planを呼ぶ。拡張機能が、計画の本文だけを別のCLIに渡すセカンドオピニオンとReflexの審査を必ず通す（飛ばせない。selfCheckと会話はセカンドオピニオンへ渡らない）。3段とも妥当のときだけ承認される。承認されなければ、返った指摘を読んでpropose_planで計画を直し、selfCheckを書き直してもう一度approve_planを呼ぶ。セカンドオピニオンが誤りがあるとした計画は、直さない限り審査し直されない。Reflexが無効などで承認できないときは、ユーザーがKanbanで承認するのを待つ。承認後にタスクを足したり変えたりすると、そのタスクは再び3段を通すまで承認待ちになる'
+      : '- ユーザーの依頼をタスクに分け、依存を付けてpropose_planで提案する。計画の承認はユーザーがKanbanで行う。approve_planはユーザーに会話で頼まれたときだけ使う（Reflexが計画を審査し、妥当なら確認なしに承認される。妥当と言えなければユーザーの確認が入る）',
     '- 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない。外せるのは未着手のタスクだけ',
     '- 計画を出し直すとき、着手済みのタスクは省いてよい（省くと現在の内容のまま残る）。内容を変えるときだけtaskId付きで送る。未着手のタスクは残すものをすべて送る（省くと計画から外れる）',
     '- ユーザーが既存のIssueを指定したタスクはexistingIssueNumberに番号を入れる。Issue計画とIssue作成を飛ばして実装から始まる。Issueはopenでなければ計画を受け付けない',
