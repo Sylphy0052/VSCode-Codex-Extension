@@ -2641,6 +2641,11 @@ export class ClaudeChatViewManager
       }
       entry.trace.info('handoffプロンプトを検知したが契機が成立しなかった');
     }
+    // 残る契機がhandoffプロンプトの検知だけなら、分類器を起動しても使い道が無い（Issue #2066）
+    if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
+      entry.trace.info('handoffプロンプト以外の区切り待ちの契機が全部OFFのため分類器を起動しない');
+      return;
+    }
     // 作業の節目（Issue起票・PR/MR作成・マージ）のコマンドが成功して終わったターンは、
     // 分類器を待たずに発火する（Issue #1351）。履歴から開いた直後は過去のターンを拾わない
     // よう、このパネルでターンが1回以上終わっていることを求める
