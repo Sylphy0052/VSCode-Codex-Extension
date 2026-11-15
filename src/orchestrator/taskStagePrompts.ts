@@ -100,6 +100,8 @@ export function stageScopeReminder(ref: StageReportRef): string {
   ].join('\n');
 }
 
+// 教訓をこのファイルの定型文へ昇格するときは、`lessonPromotion.ts`の`renderPromotedLesson`
+// の戻り値（出典がrepo成果物の教訓だけ、固定テンプレート）以外の文を入れない（Issue #2085）。
 function untrusted(
   text: string,
   taskId: string,

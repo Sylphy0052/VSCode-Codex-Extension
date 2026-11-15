@@ -55,6 +55,18 @@ export const RUN_NOTES_RELATIVE_PATH = '.agents/run-notes.jsonl';
 /** どの種類のrunが記録したか。導入文の表示にそのまま使う。 */
 export type RunKind = 'workflow' | 'taskRun' | 'roadmapRun';
 
+/**
+ * 教訓の出典の種類（Issue #2085）。昇格できるのは`repoArtifact`だけ。
+ * - repoArtifact: このrepo内の成果物（コード、テスト結果、CIのログ、拡張が計算した指標）
+ * - otherRepo: 他repoの作業から得た（GitHubへ出さない）
+ * - external: Issue・PRの本文、ツール出力、工程の出力など外部由来。省略時もこれ（安全側）
+ */
+export type LessonSource = 'repoArtifact' | 'otherRepo' | 'external';
+
+export function isLessonSource(value: unknown): value is LessonSource {
+  return value === 'repoArtifact' || value === 'otherRepo' || value === 'external';
+}
+
 /** 1件の教訓。JSON Linesの1行がこの形。 */
 export interface LessonRecord {
   v: 1;
@@ -68,6 +80,8 @@ export interface LessonRecord {
   observation: string;
   evidence: readonly string[];
   instruction: string;
+  /** 出典の種類。古い記録には無い。無いものは`external`として扱う。 */
+  source?: LessonSource;
 }
 
 /**
@@ -132,6 +146,8 @@ export interface LessonInput {
   observation: string;
   evidence: readonly string[];
   instruction: string;
+  /** 出典の種類。MCPの引数からは受けず、呼び出し側（拡張）が決める。省略は`external`。 */
+  source?: LessonSource;
 }
 
 type ParseLessonResult = { ok: true; value: LessonInput } | { ok: false; message: string };
@@ -219,6 +235,7 @@ function buildLessonRecord(
       .slice(0, MAX_LESSON_EVIDENCE_ITEMS)
       .map((item) => sanitizeLessonText(item, MAX_LESSON_EVIDENCE_LENGTH)),
     instruction: sanitizeLessonText(input.instruction, MAX_LESSON_FIELD_LENGTH),
+    source: input.source ?? 'external',
   };
 }
 
@@ -241,7 +258,8 @@ function isLessonRecord(value: unknown): value is LessonRecord {
     typeof v.observation === 'string' &&
     typeof v.instruction === 'string' &&
     Array.isArray(v.evidence) &&
-    v.evidence.every((e) => typeof e === 'string')
+    v.evidence.every((e) => typeof e === 'string') &&
+    (v.source === undefined || isLessonSource(v.source))
   );
 }
 
