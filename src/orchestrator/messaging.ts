@@ -924,6 +924,14 @@ export interface OrchestratorControlPort {
    */
   decideFinalMerge(decision: string, reason: string): OrchestratorControlResult;
   /**
+   * このrunで`decide_final_merge`が意味を持つか（Issue #1324）。`false`なら`tools/list`から
+   * 外し、呼ばれても「未知のツール」で拒否する。判断待ちが立つのは`finalMerge: orchestrator`の
+   * runだけで（`confirm`は人がViewで判断し、`auto` / `pr-only`は判断待ち自体が無い）、
+   * `finalMerge`はrun開始時に一度だけ決まるため、接続中に`true`へ変わることは無い。
+   * 省略時は従来どおり見せる。
+   */
+  canDecideFinalMerge?(): boolean;
+  /**
    * 実行中の定義へ新しいタスクを加える（design.md §16.29、roadmap W4、Issue #338）。
    * 適用先は実行中の定義（`live.def`）で、YAMLファイルへもベストエフォートで追記する
    * （Issue #1614）。追加するタスクにも既存の検証（id形式・循環依存・上限件数・プロンプト長）をそのまま通す。
@@ -2649,6 +2657,12 @@ export class MessagingMcpServer {
               if (tool.name === RECORD_LESSON_TOOL.name && control.recordLesson === undefined) {
                 return false;
               }
+              if (
+                tool.name === DECIDE_FINAL_MERGE_TOOL.name &&
+                control.canDecideFinalMerge?.() === false
+              ) {
+                return false;
+              }
               return true;
             });
       return [...base, ...handoffTools, ...listHandoffTools, ...sessionTools, ...controlTools];
@@ -3134,6 +3148,10 @@ export class MessagingMcpServer {
     // `decide_final_merge`はrun全体で1つの判断（統合PR/MRという1つの対象）にしか使えず、
     // 他の制御ツールと違って`taskId`を取らない。`target`（`taskId`）を読む前に分岐する
     if (name === DECIDE_FINAL_MERGE_TOOL.name) {
+      // `visibleTools`で外したrun（`finalMerge: orchestrator`以外）では同じ条件で拒否する
+      if (control.canDecideFinalMerge?.() === false) {
+        return failure(request.id, -32602, `未知のツールです: ${name}`);
+      }
       const result = control.decideFinalMerge(str(args['decision']), str(args['reason']));
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }

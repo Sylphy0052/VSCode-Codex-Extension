@@ -86,13 +86,22 @@ const control = {
   updateRoadmapIssue: async () => accepted,
 } as unknown as OrchestratorControlPort;
 
-function listTools(taskId: string): { names: string[]; chars: number } {
+/** `finalMerge: orchestrator`以外のrunの配線（`decide_final_merge`を外す。Issue #1324）。 */
+const controlWithoutFinalMerge = {
+  ...control,
+  canDecideFinalMerge: () => false,
+} as OrchestratorControlPort;
+
+function listTools(
+  taskId: string,
+  orchestratorControl: OrchestratorControlPort = control,
+): { names: string[]; chars: number } {
   const transport = new BenchTransport();
   const hub = new TaskMessagingHub({
     listRunTasks: () => [],
     handoff,
     sessionBridge: () => sessionBridge,
-    orchestratorControl: control,
+    orchestratorControl,
   });
   new MessagingMcpServer(hub, transport);
   const connection = new BenchConnection(taskId);
@@ -106,11 +115,16 @@ function listTools(taskId: string): { names: string[]; chars: number } {
   return { names: result.tools.map((t) => t.name), chars: JSON.stringify(result).length };
 }
 
-for (const [label, taskId] of [
-  ['タスク接続', 'T1'],
-  ['オーケストレーター接続', ORCHESTRATOR_CONNECTION_ID],
+for (const [label, taskId, orchestratorControl] of [
+  ['タスク接続', 'T1', control],
+  ['オーケストレーター接続（finalMerge: orchestrator）', ORCHESTRATOR_CONNECTION_ID, control],
+  [
+    'オーケストレーター接続（finalMerge: それ以外）',
+    ORCHESTRATOR_CONNECTION_ID,
+    controlWithoutFinalMerge,
+  ],
 ] as const) {
-  const { names, chars } = listTools(taskId);
+  const { names, chars } = listTools(taskId, orchestratorControl);
   console.log(`${label}: ${names.length}ツール / ${chars}字`);
   console.log(`  ${names.join(', ')}`);
 }
