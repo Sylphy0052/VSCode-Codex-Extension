@@ -549,8 +549,17 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       if (typeof input?.folder !== 'string' || input.folder === '' || engine === undefined) {
         return { accepted: false, reason: 'フォルダとengineを指定してください' };
       }
+      // 公開コマンドなので、開いているワークスペースフォルダの配下だけを受ける
+      const folder = path.resolve(input.folder);
+      const inWorkspace = (vscode.workspace.workspaceFolders ?? []).some((f) => {
+        const rel = path.relative(f.uri.fsPath, folder);
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+      });
+      if (!inWorkspace) {
+        return { accepted: false, reason: '開いているワークスペースフォルダの外は指定できません' };
+      }
       return startRoadmapRunFromChat(roadmapStartDeps(engine), {
-        folder: input.folder,
+        folder,
         engine,
         issueNumber: parseIssueNumber(input.issueNumber),
         maxParallel: Math.min(readTaskRunMaxParallelPerFolder(), MAX_TASK_RUN_PARALLEL),

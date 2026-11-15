@@ -231,7 +231,7 @@ async function reloadExistingRun(
   if (!synced.ok) {
     deps.log.warn(`[task run] ${synced.message}`);
     return {
-      accepted: true,
+      accepted: false,
       runId,
       reused: true,
       reason:

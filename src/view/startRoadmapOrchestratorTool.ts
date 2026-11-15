@@ -31,14 +31,25 @@ export async function startRoadmapOrchestratorFromTool(
   if (folder === undefined) {
     return { accepted: false, reason: 'このチャットのフォルダが決まっていないため起動できません' };
   }
-  const result = await vscode.commands.executeCommand<StartRoadmapOrchestratorToolResult>(
-    'agent.taskRun.startRoadmapFromChat',
-    {
-      folder,
-      engine: host.engine,
-      ...(args.roadmapIssueNumber === undefined ? {} : { issueNumber: args.roadmapIssueNumber }),
-    },
-  );
+  let result: StartRoadmapOrchestratorToolResult | undefined;
+  try {
+    result = await vscode.commands.executeCommand<StartRoadmapOrchestratorToolResult>(
+      'agent.taskRun.startRoadmapFromChat',
+      {
+        folder,
+        engine: host.engine,
+        ...(args.roadmapIssueNumber === undefined ? {} : { issueNumber: args.roadmapIssueNumber }),
+      },
+    );
+  } catch (error) {
+    const message = sanitizeInlineText(
+      error instanceof Error ? error.message : String(error),
+      REASON_MAX_LENGTH,
+    );
+    host.note(`オーケストレータモード: 起動に失敗しました（${message}）`);
+    host.log(`start_roadmap_orchestrator: 失敗 ${message}`);
+    return { accepted: false, reason: `オーケストレータモードを起動できませんでした: ${message}` };
+  }
   if (result === undefined) {
     return { accepted: false, reason: 'オーケストレータモードが利用できません' };
   }

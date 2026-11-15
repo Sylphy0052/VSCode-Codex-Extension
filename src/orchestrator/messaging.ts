@@ -2960,7 +2960,7 @@ export class MessagingMcpServer {
       } catch (error) {
         result = {
           accepted: false,
-          reason: `オーケストレータモードを起動できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+          reason: `オーケストレータモードを起動できませんでした: ${sanitizeInlineText(error instanceof Error ? error.message : String(error), 200)}`,
         };
       }
     }
