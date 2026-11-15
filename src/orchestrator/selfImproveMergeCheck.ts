@@ -34,7 +34,14 @@ export async function checkSelfImproveMerge(
   }
   const filesResult = await ports.cli.run(
     'gh',
-    ['api', '--paginate', `repos/{owner}/{repo}/pulls/${n}/files`, '--jq', '.[].filename'],
+    [
+      'api',
+      '--paginate',
+      `repos/{owner}/{repo}/pulls/${n}/files`,
+      '--jq',
+      // renameで保護パスの外へ移すと`filename`は移動先だけになるので、移動元も見る（CIは`--no-renames`で同じ）
+      '.[] | .filename, (.previous_filename // empty)',
+    ],
     repoRoot,
   );
   const listResult = await ports.git.run(
