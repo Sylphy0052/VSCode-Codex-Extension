@@ -2939,6 +2939,7 @@ describe('自動引き継ぎ: 区切り待ちの契機（Reflex・分類器）',
       config: {
         'autoHandoff.onProfileChange': false,
         'autoHandoff.onAssistantSuggestion': false,
+        'autoHandoff.onHandoffPrompt': false,
         'autoHandoff.onMilestone': false,
       },
     });

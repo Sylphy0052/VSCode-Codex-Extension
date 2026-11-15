@@ -974,7 +974,13 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "安全な区切りで、アシスタント自身が引き継ぎを提案したときに自動引き継ぎする（Issue #1097 / #1150）。コンテキスト残量もmodel/effortの変化も問わない。提案の判定は2経路ある。（1）「別セッションで続きを」「新しいチャットへ引き継ぐ」のような地の文での提案は `agent.autoHandoff.router` の分類器が判定する（正規表現では言い回しのぶれを拾えないため）。（2）handoffプロンプトそのものが出力されたときは、書式が固定されているので拡張機能側が決定論的に検知する。こちらは `agent.autoHandoff.router` が無効・時間切れ・失敗でも発火する。`/loop` 実行中とタスク用セッションではどちらの経路でも発火しない。"
+          "markdownDescription": "安全な区切りで、アシスタント自身が地の文で引き継ぎを提案したときに自動引き継ぎする（Issue #1097）。コンテキスト残量もmodel/effortの変化も問わない。「別セッションで続きを」「新しいチャットへ引き継ぐ」のような提案は `agent.autoHandoff.router` の分類器（またはReflex）が判定する（正規表現では言い回しのぶれを拾えないため）。handoffプロンプトそのものの出力は `agent.autoHandoff.onHandoffPrompt` で制御する（Issue #2066）。`/loop` 実行中とタスク用セッションでは発火しない。"
+        },
+        "agent.autoHandoff.onHandoffPrompt": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "安全な区切りで、handoffプロンプト（`handoff` skillの出力）が出力されたときに自動引き継ぎする（Issue #1150 / #2066）。書式が固定されているので拡張機能側が決定論的に検知し、`agent.autoHandoff.router` が無効・時間切れ・失敗でも発火する。Claude Codeでは同じターンで `handoff` skillを呼んだことも求める。`agent.autoHandoff.onAssistantSuggestion` とは独立に効く。`/loop` 実行中とタスク用セッションでは発火しない。"
         },
         "agent.autoHandoff.onMilestone": {
           "type": "boolean",

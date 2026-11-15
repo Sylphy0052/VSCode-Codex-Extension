@@ -2506,14 +2506,26 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     expect(threadStarts(connection)).toBe(1);
   });
 
-  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+  it('onHandoffPrompt=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onHandoffPrompt': false,
+    });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+
+  // 地の文の提案だけを止めても、handoffプロンプトの検知は止まらない（Issue #2066）
+  it('onAssistantSuggestion=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
     __mock.setConfig('agent', {
       'autoHandoff.router': false,
       'autoHandoff.onAssistantSuggestion': false,
     });
     const connection = await finishTurnWith(HANDOFF_PROMPT);
-    await tick(20);
-    expect(threadStarts(connection)).toBe(1);
+    await vi.waitFor(() => {
+      expect(threadStarts(connection)).toBe(2);
+    });
   });
 
   it('自動引き継ぎ自体がOFFなら発火しない', async () => {

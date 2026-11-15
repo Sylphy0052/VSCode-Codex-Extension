@@ -93,6 +93,7 @@ import {
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffOnHandoffPrompt,
   readAutoHandoffBoundaryAction,
   readAutoHandoffOnMilestone,
   readAutoHandoffReflexConfig,
@@ -2552,10 +2553,17 @@ export class ClaudeChatViewManager
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
     const onProfileChange = readAutoHandoffOnProfileChange();
     const onAssistantSuggestion = readAutoHandoffOnAssistantSuggestion();
+    const onHandoffPrompt = readAutoHandoffOnHandoffPrompt();
     const onMilestone = readAutoHandoffOnMilestone();
     const remainingPercent = state.context?.remainingPercent;
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
-    if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
+    if (
+      !withinSoft &&
+      !onProfileChange &&
+      !onAssistantSuggestion &&
+      !onHandoffPrompt &&
+      !onMilestone
+    ) {
       // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
       this.markBackgroundWait(entry, undefined);
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
@@ -2601,9 +2609,10 @@ export class ClaudeChatViewManager
     // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
     // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
     // Claude Codeでは、同じターンでhandoff skillを呼んだことも求める（Issue #1748）
+    // 地の文の提案（`onAssistantSuggestion`）とは独立の設定で制御する（Issue #2066）
     if (
       !questionEnded &&
-      onAssistantSuggestion &&
+      onHandoffPrompt &&
       invokedHandoffSkill(state.items) &&
       assistantMessages.some(containsHandoffPrompt)
     ) {
