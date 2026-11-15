@@ -1,3 +1,4 @@
+import { applyOptimizeGateResolution } from './optimizeLoop';
 import type { RoadmapAskArgs } from './roadmapQuestionMcp';
 import { tallyPrunedGates } from './runMetrics';
 import { normalizeFailureCause, previousStageFailures, STAGE_LABELS } from './taskStagePrompts';
@@ -5,6 +6,7 @@ import {
   closeTaskWithoutMerge,
   currentStage,
   getTask,
+  haltStage,
   isTaskDone,
   joinSummaries,
   resetStageForRetry,
@@ -406,6 +408,88 @@ export function markGateAwaitingOrchestrator(
 }
 
 /** 「実装とPR作成」と「レビュー」を未着手へ戻す（差し戻し）。 */
+/**
+ * 最適化の関門を、工程を止めてから開く（Issue #2111）。工程のセッションが動いている（`running`）
+ * ときは止めずに関門だけ開く（merge直前の計測の失敗。mergeは承認経路が拒み続ける）。
+ */
+export function openOptimizeGateHalting(
+  run: TaskRun,
+  taskId: string,
+  input: { gateId: string; reason: OptimizeGateReason; detail: string },
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  const stage = task === undefined ? undefined : currentStage(task);
+  if (task === undefined || stage === undefined || task.optimization === undefined) {
+    return run;
+  }
+  const halted =
+    task.stages[stage].status === 'running'
+      ? run
+      : haltStage(run, taskId, 'awaitingUser', input.detail, now);
+  return openOptimizeGate(halted, taskId, input, now);
+}
+
+/**
+ * 最適化の関門の決着（Issue #2111）。ループの状態を`applyOptimizeGateResolution`で進め、
+ * 止めた工程を未着手へ戻す。`sendBack`は「実装とPR作成」から（作業ツリーを最良の木へ戻して）
+ * やり直す。`close`は止まった工程だけを、mergeせずに完了にする。
+ */
+function resolveOptimizeGate(
+  run: TaskRun,
+  closed: OrchestratedTask,
+  gate: StageGate,
+  resolution: { choice: StageGateChoice; closeReason?: string | undefined },
+  status: OrchestratedTask['stages'][TaskStage]['status'],
+  now: Date,
+): OrchestratedTask | undefined {
+  const applied =
+    closed.optimizeLoop === undefined || gate.optimizeReason === undefined
+      ? undefined
+      : applyOptimizeGateResolution(closed.optimizeLoop, gate.optimizeReason, resolution.choice);
+  const base: OrchestratedTask = {
+    ...closed,
+    ...(applied === undefined ? {} : { optimizeLoop: applied.state }),
+  };
+  if (resolution.choice === 'close') {
+    return status === 'halted'
+      ? getTask(
+          closeTaskWithoutMerge(
+            withTaskUpdate(run, base),
+            closed.taskId,
+            { reason: resolution.closeReason ?? '', by: 'user' },
+            now,
+          ),
+          closed.taskId,
+        )
+      : undefined;
+  }
+  if (status !== 'halted') {
+    return { ...base, attention: base.attention === 'awaitingUser' ? 'none' : base.attention };
+  }
+  if (resolution.choice === 'sendBack') {
+    const reset = {
+      status: 'notStarted' as const,
+      pendingDecision: undefined,
+      completedAt: undefined,
+    };
+    return {
+      ...base,
+      stages: {
+        ...base.stages,
+        implement: { ...base.stages.implement, ...reset },
+        review: { ...base.stages.review, ...reset },
+        mergeCleanup: { ...base.stages.mergeCleanup, ...reset },
+      },
+      attention: 'none',
+      failure: undefined,
+      haltCause: undefined,
+      updatedAt: now.toISOString(),
+    };
+  }
+  return getTask(resetStageForRetry(withTaskUpdate(run, base), closed.taskId, now), closed.taskId);
+}
+
 function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
   const reset = {
     status: 'notStarted' as const,
@@ -495,24 +579,7 @@ export function resolveStageGate(
     }
     const status = task.stages[stage].status;
     if (gate.kind === 'optimization') {
-      // 決着の結果（測り直し・木を戻す・mergeを1回許す）は最適化のループ（#2111）が関門の決着から読んで行う
-      if (resolution.choice === 'close') {
-        return status === 'halted'
-          ? getTask(
-              closeTaskWithoutMerge(
-                withTaskUpdate(run, closed),
-                taskId,
-                { reason: resolution.closeReason ?? '', by: 'user' },
-                now,
-              ),
-              taskId,
-            )
-          : undefined;
-      }
-      return {
-        ...closed,
-        attention: task.attention === 'awaitingUser' ? 'none' : task.attention,
-      };
+      return resolveOptimizeGate(run, closed, gate, resolution, status, now);
     }
     if (gate.kind === 'reviewFindings') {
       // 関門を開いた後に再読み込みで「mergeとcleanup」が止まった（PRが閉じられた等）場合も決着させる

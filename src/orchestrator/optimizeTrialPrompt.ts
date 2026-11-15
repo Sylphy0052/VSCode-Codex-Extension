@@ -40,7 +40,16 @@ export interface TrialPromptInput {
   bestMetric?: number;
   /** テストから固定する。 */
   nonce?: string;
+  /** 伸び止まりで「別の方式で組み直す」指示を出す（Issue #2111）。拡張が決める値。 */
+  rebuild?: boolean;
 }
+
+/** 伸び止まりのときに1回だけ出す、組み直しの指示（Issue #2111）。 */
+export const REBUILD_DIRECTIVE = [
+  '## 組み直しの指示（拡張機能から）',
+  '最良が続けて更新されていない。これまでの方式の延長ではなく、別の方式で組み直す仮説を立てる。',
+  '台帳に載っている方式と同じ方式は選ばない。',
+].join('\n');
 
 /** 試行のセッションに守らせる決まり。仮説の段・変更の段で共通。 */
 export function trialRules(allowedPaths: readonly string[]): string {
@@ -144,6 +153,7 @@ export function buildHypothesisPrompt(input: TrialPromptInput): string {
     '',
     trialRules(input.spec.allowedPaths),
     '',
+    ...(input.rebuild === true ? [REBUILD_DIRECTIVE, ''] : []),
     '## 求めること',
     'コードを読み、次の1試行で試す仮説を1つだけ立てる。変更も1つだけにする。',
     '次のJSONだけを返す。前後に説明を付けない。',
