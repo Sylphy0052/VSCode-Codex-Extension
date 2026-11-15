@@ -43,6 +43,11 @@ export interface RunVerifyCommandOptions {
   readonly killGraceMs?: number;
   readonly platform?: NodeJS.Platform;
   readonly now?: () => Date;
+  /**
+   * 子プロセスを起こした直後に呼ぶ（Issue #2110）。pidは`detached`ならプロセスグループIDでもある。
+   * 落ちた拡張が残した孤児を後から止めるため、呼び出し側がPIDの記録を残すのに使う。
+   */
+  readonly onSpawn?: (pid: number) => void;
 }
 
 /** 末尾だけを残すバッファ。上限を超えた分は古い側から捨てる */
@@ -132,6 +137,14 @@ export function runVerifyCommand(options: RunVerifyCommandOptions): Promise<Veri
       detached: platform !== 'win32',
       windowsHide: true,
     });
+
+    if (child.pid !== undefined) {
+      try {
+        options.onSpawn?.(child.pid);
+      } catch {
+        // 記録の失敗でコマンドの実行は止めない
+      }
+    }
 
     let timedOut = false;
     let aborted = false;
