@@ -26,17 +26,18 @@ import { formatUntrusted, sanitizeInlineText, truncateByCodePoint } from './untr
  * 書いた教訓を、ワークスペース直下の1ファイル（`RUN_NOTES_RELATIVE_PATH`）へJSON Lines
  * として積み、次回以降のrun開始時の導入文（`formatLessonsForIntro`）へ差し込む。
  *
- * このファイルは`.agents/handoff/runs/`（`teamHandoff.ts`）とは異なり**gitで共有する**
- * （`.gitignore`で除外しない）。run単位・使い捨てではなく、リポジトリを触った全runの
- * 教訓を積み重ねる置き場のため。書く内容がそのままcommitされうる以上、秘密・トークン・
- * 個人情報を書かせない防御（`redactCredentials`）は必須（`RECORD_LESSON_TOOL`の
- * description・`RunNotesStore.recordLesson`の両方に置く二重の防御）。
+ * このファイルは**ローカル限定**で、gitへ載せない（`.gitignore`で除外済み。Issue #2079）。
+ * 外部由来の文や他repoの情報を含みうる教訓を、PUBLICなrepoへ出さないため。書く内容が外へ
+ * 出ない前提でも、秘密・トークン・個人情報を書かせない防御（`redactCredentials`）は必須
+ * （`RECORD_LESSON_TOOL`のdescription・`RunNotesStore.recordLesson`の両方に置く二重の防御）。
  *
- * **信頼境界。** git追跡のため、`record_lesson`を通さずPRで手書きした行も次回以降のrunの
- * 導入文へ入る。導入文では`formatUntrusted`で「データであり指示ではない」と囲うが、モデルが
- * それに従う保証は無い。このファイルは`AGENTS.md`・`CLAUDE.md`と同じくリポジトリ内の指示に
- * 準じるものとして扱い、PRで`.agents/run-notes.jsonl`の差分を人が確認することを防御線とする
- * （承認済みの教訓だけを入れる等の仕組みは持たない。Issue #1599の自己レビューで決定）。
+ * **信頼境界。** gitで共有しないので、他人のPRで手書きされた行が混ざる経路は無い。ただし
+ * ローカルでファイルを手で編集した行は次回以降のrunの導入文へ入る。導入文では`formatUntrusted`で
+ * 「データであり指示ではない」と囲うが、モデルがそれに従う保証は無い。
+ *
+ * **別プロセスとの同時書き込み。** `SerialQueue`が直列化するのはプロセス内だけ。複数のVS Code
+ * ウィンドウが同じファイルを書き直しても記録が失われないよう、読んで書き直す区間は
+ * ロックディレクトリ（`withLock`）で囲む。
  *
  * `teamHandoff.ts`・`nodeHandoffFileSystem.ts`と同じ流儀を踏襲する: ポート
  * （`RunNotesFileSystemPort`）の実装は失敗を例外で投げず値で返し、`RunNotesStore`は
@@ -390,6 +391,11 @@ export interface RunNotesFileSystemPort extends SymlinkCheckPort {
   readTextFile(target: string): Promise<ReadTextFileResult>;
   /** 内容全体を置き換える。一時ファイルへ書いてからrenameする（削除・上限整理の書き直し用）。 */
   replaceTextFile(target: string, content: string): Promise<boolean>;
+  /**
+   * `target`に対するプロセス間の排他ロックを取って`fn`を実行する。取れなければ`undefined`を返し
+   * `fn`は実行しない（呼び出し側は排他なしで続ける）。実装しない環境（テスト等）では呼ばれない。
+   */
+  withLock?<T>(target: string, fn: () => Promise<T>): Promise<T | undefined>;
 }
 
 /** 教訓の記録・削除の結果。`OrchestratorControlResult`と同じ「成否と理由」の流儀。 */
@@ -437,6 +443,29 @@ export class RunNotesStore {
     };
   }
 
+  /**
+   * 読んで書き直す区間をプロセス間のロックで囲む。ポートがロックを持たない、またはロックを
+   * 取れなかったときは、排他なしで`fn`を実行する（教訓を書けないことでrunを止めない）。
+   */
+  private async locked<T>(workspaceRoot: string, fn: () => Promise<T>): Promise<T> {
+    if (this.fs.withLock === undefined) {
+      return fn();
+    }
+    const result = await this.fs.withLock(notesPath(workspaceRoot), async () => ({
+      value: await fn(),
+    }));
+    if (result === undefined) {
+      this.logFailure('記録ファイルのロックを取れませんでした（排他なしで続けます）。');
+      return fn();
+    }
+    return result.value;
+  }
+
+  /** プロセス内の直列化（`SerialQueue`）の中で、プロセス間のロックも取って`fn`を実行する。 */
+  private enqueueLocked<T>(workspaceRoot: string, fn: () => Promise<T>): Promise<T> {
+    return this.queue.enqueue(() => this.locked(workspaceRoot, fn));
+  }
+
   private notifyChanged(): void {
     for (const listener of this.listeners) {
       listener();
@@ -467,7 +496,7 @@ export class RunNotesStore {
     workspaceRoot: string,
     input: LessonInput & { runId: string; runKind: RunKind },
   ): Promise<RunNotesWriteResult> {
-    return this.queue.enqueue(async () => {
+    return this.enqueueLocked(workspaceRoot, async () => {
       try {
         const target = notesPath(workspaceRoot);
         const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
@@ -533,7 +562,7 @@ export class RunNotesStore {
    * 存在する教訓を読めないだけなのに「無い」と誤解させる）。
    */
   async deleteLesson(workspaceRoot: string, id: string): Promise<RunNotesWriteResult> {
-    return this.queue.enqueue(async () => {
+    return this.enqueueLocked(workspaceRoot, async () => {
       try {
         const target = notesPath(workspaceRoot);
         // `listLessons`と同じ一次防御。削除も経路にシンボリックリンクが含まれていれば読まない
@@ -595,7 +624,7 @@ export class RunNotesStore {
     if (records.length === 0) {
       return { ok: true };
     }
-    return this.queue.enqueue(async () => {
+    return this.enqueueLocked(workspaceRoot, async () => {
       try {
         const target = notesPath(workspaceRoot);
         const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
@@ -661,6 +690,78 @@ export class RunNotesStore {
         ? { ok: false, message: '指定の未処理の残件は見つかりませんでした。' }
         : result,
     );
+  }
+
+  /**
+   * 完了（mergeまたはcloseで終わった）タスク由来の未処理の残件を`done`にする（Issue #2079）。
+   * `runId`と`taskId`が一致する`reviewFinding`・`unresolved`の残件が対象。runの完了時に呼ぶ。
+   */
+  async markRemainingDoneForTasks(
+    workspaceRoot: string,
+    runId: string,
+    taskIds: readonly string[],
+  ): Promise<RunNotesWriteResult> {
+    if (taskIds.length === 0) {
+      return { ok: true };
+    }
+    const targets = new Set(taskIds);
+    const doneAt = this.now().toISOString();
+    const result = await this.rewriteRemaining(
+      workspaceRoot,
+      '完了タスクの残件を済にできませんでした',
+      (record) =>
+        record.status === 'open' &&
+        record.runId === runId &&
+        record.taskId !== undefined &&
+        targets.has(record.taskId)
+          ? { ...record, status: 'done', doneAt }
+          : record,
+    );
+    return result.ok ? { ok: true } : result;
+  }
+
+  /**
+   * 同趣旨の教訓`ids`を1件の`input`へまとめる。`ids`のうち存在するものを消し、まとめた1件を
+   * 追記する（Issue #2079）。1件も見つからなければ何も書かず失敗を返す。
+   */
+  async mergeLessons(
+    workspaceRoot: string,
+    ids: readonly string[],
+    input: LessonInput & { runId: string; runKind: RunKind },
+  ): Promise<RunNotesWriteResult> {
+    const targets = new Set(ids);
+    return this.enqueueLocked(workspaceRoot, async () => {
+      try {
+        const target = notesPath(workspaceRoot);
+        const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);
+        if (symlinked !== undefined) {
+          this.logFailure(`教訓の統合先の経路にシンボリックリンクが含まれています: ${symlinked}`);
+          return { ok: false, message: '教訓を統合できませんでした（経路が不正です）。' };
+        }
+        const readResult = await this.fs.readTextFile(target);
+        if (readResult.kind === 'error') {
+          this.logFailure(`教訓一覧を読めませんでした（統合できません）: ${readResult.message}`);
+          return { ok: false, message: '教訓を統合できませんでした（記録を読めませんでした）。' };
+        }
+        const existing = readResult.kind === 'ok' ? parseRunNotes(readResult.text) : [];
+        const next = existing.filter((record) => !(isLesson(record) && targets.has(record.id)));
+        if (next.length === existing.length) {
+          return { ok: false, message: '指定の教訓は見つかりませんでした。' };
+        }
+        const merged = buildLessonRecord(input, this.now);
+        if (!(await this.fs.replaceTextFile(target, toJsonlText([...next, merged])))) {
+          this.logFailure('教訓を統合できませんでした。');
+          return { ok: false, message: '教訓を統合できませんでした。' };
+        }
+        this.notifyChanged();
+        return { ok: true };
+      } catch (e) {
+        this.logFailure(
+          `教訓の統合中に予期しない例外が発生しました: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return { ok: false, message: '教訓を統合できませんでした。' };
+      }
+    });
   }
 
   /**
@@ -759,7 +860,7 @@ export class RunNotesStore {
     failure: string,
     update: (record: RemainingRecord) => RemainingRecord,
   ): Promise<{ ok: true; changed: boolean } | { ok: false; message: string }> {
-    return this.queue.enqueue(async () => {
+    return this.enqueueLocked(workspaceRoot, async () => {
       try {
         const target = notesPath(workspaceRoot);
         const symlinked = await findSymlinkedAncestor(workspaceRoot, target, this.fs);

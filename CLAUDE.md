@@ -21,6 +21,7 @@
   - ブランチ保護は承認数0で自己merge可能な設定になっている（詳細: `docs/repository-hygiene.md`）
   - CI未完了で `gh pr merge` が `mergeStateStatus: BLOCKED` を返す場合は `--admin` を付けてstatus check待ちを迂回する
   - squash mergeはこのリポジトリで禁止されている（2026-08-24〜）。`--merge` か `--rebase` を使う
+- 例外: `self-improvement`ラベルのPR（この拡張自身を直すPR）は、`--admin`を使わず `checks` と `external-cli` が成功するまでmergeしない。配布は全runが終わってから行い、自動Reloadはしない。配布前に直前のvsixを`/tmp`以外へ保管する。戻し方は `docs/self-improvement-revert.md`
 - merge後のcleanupは必須
   - リモートの元ブランチ削除、ローカルブランチ削除、worktree撤去まで行う
   - `gh pr merge --delete-branch` は、対象ブランチがworktreeへcheckout済みだと `Cannot delete branch ... checked out at ...` で失敗し、リモートブランチが残ったままになることがある。失敗時は `git ls-remote --heads origin <branch>` で残存を確認し、`git push origin --delete <branch>` 等で手動削除する
@@ -32,5 +33,6 @@
 作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeへ入れる。b90/b115のdev containersへは入れない（2026-10-09〜）。
 
 - ビルドはメインのworking treeで `npm run build` のあと `npx vsce package --no-dependencies -o /tmp/<名前>.vsix` を実行する。`npm run package` はここでもう一度版番号を上げて `package.json` を書き換えるため使わない（版上げはPR側で済んでいる）。`<名前>` には `package.json` の版を入れる（例: `vscode-codex-extension-2026.923.3`）
+- `self-improvement`ラベルのPRを入れるときは、インストール前に直前の版のvsixを `~/.local/share/vscode-codex-extension/vsix-backup/` へ保管する（手順は `docs/self-improvement-revert.md`）
 - WSL: `code --install-extension /tmp/<名前>.vsix --force`
 - 入れた後は、ウィンドウで「Developer: Reload Window」を実行すると新しい版が読み込まれる
