@@ -114,6 +114,50 @@ export function buildClaudeSandboxSettings(
 }
 
 /**
+ * 最適化の試行（Issue #2107）のセッション用のsandbox設定。書き込みは作業ディレクトリ
+ * （候補のworktree）の中だけに許し、sandboxの外で走るコマンドもネットワークも作らない。
+ *
+ * 工程用の{@link buildClaudeSandboxSettings}との違いは、`excludedCommands`が空であること。
+ * 工程用は`gh`・`git push`などをsandboxの外（承認フロー）で走らせるが、試行のセッションには
+ * 承認ハンドラが無く、外で走るコマンドがそのまま実行されてしまう。
+ */
+export function buildClaudeTrialSandboxSettings(
+  environment: ClaudeSandboxEnvironment,
+  denyWritePaths: readonly string[] = [],
+): Record<string, unknown> {
+  return {
+    sandbox: {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      failIfUnavailable: true,
+      excludedCommands: [],
+      network: { strictAllowlist: true, allowedDomains: [] },
+      // 作業ディレクトリがgit worktreeだと、CLIはそのgit共通ディレクトリ（共有の`.git`のrefs・
+      // objects）を書き込み許可へ自動で足す（2.1.325。設定で外す手段は無い）。候補の外
+      // （共有の`.git`・基準と最良のworktree）は`denyWrite`で明示的に塞ぐ。共有の`.git`は
+      // `runTrialStage`が必ず渡す。`denyWrite`が既定の書き込み許可より優先されることは、
+      // 工程用の設定（作業ディレクトリ自体を`denyWrite`する`read-only`）で実測済み
+      ...(denyWritePaths.length > 0 ? { filesystem: { denyWrite: [...denyWritePaths] } } : {}),
+      ...(environment.weakerNested ? { enableWeakerNestedSandbox: true } : {}),
+    },
+  };
+}
+
+/**
+ * 試行のセッションで拒否するツール。`git`・`gh`・`glab`はsandboxだけに頼らず、ツールの側でも
+ * 塞ぐ（`git commit`・`git push`・`git config`・`git remote`・ブランチの操作はすべて`git`）。
+ * ネットワークを要するツールも落とす。
+ */
+export const CLAUDE_TRIAL_DISALLOWED_TOOLS: readonly string[] = [
+  'Bash(git *)',
+  'Bash(gh *)',
+  'Bash(glab *)',
+  'WebFetch',
+  'WebSearch',
+];
+
+/**
  * sandbox付きのセッションへ`--append-system-prompt`で伝える指示（Issue #1610）。
  *
  * `excludedCommands`は単独のコマンドにしか一致せず、`gh issue view 1 2>&1; echo ---`のように
