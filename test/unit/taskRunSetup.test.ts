@@ -400,12 +400,13 @@ afterEach(() => {
 });
 
 describe('setupTaskRun: 組み立てと破棄', () => {
-  it('4つのコマンドとKanbanのシリアライザを登録する', () => {
+  it('5つのコマンドとKanbanのシリアライザを登録する', () => {
     setup();
     expect([...hoisted.commands.keys()].sort()).toEqual([
       'agent.taskRun.kanban',
       'agent.taskRun.start',
       'agent.taskRun.startFromRoadmap',
+      'agent.taskRun.startRoadmapFromChat',
       'agent.taskRun.switch',
     ]);
     expect(hoisted.serializers.map((s) => s.viewType)).toEqual(['agent.taskRunKanban.test']);

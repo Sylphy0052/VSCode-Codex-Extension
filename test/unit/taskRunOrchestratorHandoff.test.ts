@@ -115,6 +115,7 @@ function makeDeps(host: TaskSessionHost, runBox: { current: TaskRun }): TaskRunO
       // 推奨値での自動開始（Issue #2031）は既定の無効のまま
       autoStartStage: vi.fn(async () => undefined),
       autoStartsStages: vi.fn(() => false),
+      planApprovalMode: vi.fn(() => 'human' as const),
       recommendations: vi.fn(() => new Map()),
       proposePlan: vi.fn(),
       approvePlan: vi.fn(),
