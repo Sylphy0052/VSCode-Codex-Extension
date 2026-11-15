@@ -17,6 +17,12 @@ coverage/
 # （.agents/handoff/ 直下の手書きの申し送りは追跡対象のままにするため、runs/ だけを除く）
 .agents/handoff/runs/
 
+# オーケストレータの教訓・残件（ローカル限定）。外部由来の文や他repoの情報を含みうるのでgitへ載せない。
+# 書き込み中の一時ファイルと排他用のロックも含める
+.agents/run-notes.jsonl
+.agents/run-notes.jsonl.lock
+.agents/.run-notes-*.tmp
+
 # ChatGPT向け質問ファイルのドラフト（ローカルのみ、リモート未push）
 docs/chatgpt/
 
