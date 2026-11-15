@@ -23,6 +23,8 @@ export const SECOND_OPINION_FINDING_MAX_LENGTH = 300;
 export interface PlanSecondOpinionResult extends TaskPlanSecondOpinion {
   /** 人が読む1行の要約（Orchestratorへ返す理由と記録に使う）。 */
   summary: string;
+  /** `false`のとき、同じ計画で呼び直しても判定できない（計画が大きすぎる）。計画を直させる。 */
+  retryable?: false;
 }
 
 /**
@@ -36,9 +38,12 @@ export async function requestPlanSecondOpinion(
 ): Promise<PlanSecondOpinionResult> {
   const state = buildTaskPlanReviewState(drafts, outsideRoadmapIssues);
   if (Array.from(state).length > REFLEX_STATE_LIMIT) {
-    return unknownResult(
-      `計画が大きく、セカンドオピニオンの材料の上限（${String(REFLEX_STATE_LIMIT)}字）を超えるため判定できない`,
-    );
+    return {
+      ...unknownResult(
+        `計画が大きく、セカンドオピニオンの材料の上限（${String(REFLEX_STATE_LIMIT)}字）を超えるため判定できない`,
+      ),
+      retryable: false,
+    };
   }
   const parsed = await runReflexJson(
     { ...reflex, timeoutMs: reflex.timeoutMs ?? SECOND_OPINION_TIMEOUT_MS },
