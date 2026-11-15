@@ -17,6 +17,7 @@ import {
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunOptimizeLimits,
+  readTaskRunOptimizeRefuter,
   readTaskRunAutoStartStagesEnabled,
   readTaskRunPlanApprovalMode,
   readTaskRunPlanAutoApproveEnabled,
@@ -48,6 +49,8 @@ import {
 import { createGithubRetrospectiveForge } from '../orchestrator/runRetrospectiveForge';
 import { normalizeConfig } from '../orchestrator/selfImproveBudget';
 import { OptimizeLoopHost } from '../orchestrator/optimizeLoopHost';
+import { createRefuter, REFUTER_TIMEOUT_MS } from '../orchestrator/optimizeRefute';
+import { runHeadlessPromptDetailed } from '../loop/headlessCli';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import {
   TaskRunController,
@@ -369,6 +372,29 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         throw new Error(`試行のセッションのsandboxを使えない: ${probed.reason}`);
       }
       return { ...base, claudeSandbox: probed.environment };
+    },
+    // 反証役（Issue #2108）。会話もツールも持たない新規のheadless CLIで判定させる
+    refuter: (trialEngine) => {
+      const settings = readTaskRunOptimizeRefuter();
+      return createRefuter({
+        trialEngine,
+        setting: settings.engine,
+        run: (engine, prompt, signal) =>
+          runHeadlessPromptDetailed(
+            {
+              provider: engine,
+              executable: executableFor(engine),
+              model: settings.model !== '' ? settings.model : engine === 'claude' ? 'sonnet' : '',
+              timeoutMs: REFUTER_TIMEOUT_MS,
+              logWarn: warn,
+              kind: '最適化の反証役',
+              // 長く走るので、工程を止めて待たせるReflexの判定を順番待ちで追い越させる
+              priority: 'background',
+              ...(signal === undefined ? {} : { signal }),
+            },
+            prompt,
+          ),
+      });
     },
     limits: () => readTaskRunOptimizeLimits(),
     usageThresholdPct: () => normalizeConfig(readSelfImproveBudgetRaw()).weeklyUsageThresholdPct,

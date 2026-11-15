@@ -8,6 +8,7 @@ import {
   summarizeTrials,
   type OptimizeLedgerStore,
   type OptimizeLlmText,
+  type OptimizeRefutation,
   type OptimizeSecondaryResult,
   type OptimizeTrialRecord,
 } from './optimizeLedger';
@@ -21,10 +22,13 @@ import {
   type RunOutcome,
 } from './optimizeMeasure';
 import { writeProcessRecord, removeProcessRecord } from './optimizeProcessRecord';
+import type { RefuteEvidence, RefuteOutcome, RefuteSide, Refuter } from './optimizeRefute';
 import type { OptimizationSpec } from './optimizeSpec';
 import {
   captureTrialState,
   describeViolations,
+  discardMetricOutput,
+  ensureWorktreeConfigFile,
   inspectTrial,
   listChangedFiles,
   type TrialState,
@@ -125,6 +129,11 @@ export interface OptimizeTrialInput {
   deps?: OptimizeTrialDeps;
   /** 伸び止まりで「別の方式で組み直す」指示を出す（Issue #2111）。 */
   rebuild?: boolean;
+  /**
+   * 採用候補を突かせる反証役（Issue #2108）。会話を持たない別のheadless CLI。無ければ反証せずに
+   * 計測の採否のまま返す。
+   */
+  refute?: Refuter;
 }
 
 export interface OptimizeTrialResult {
@@ -316,6 +325,8 @@ async function runOptimizeTrialBody(
     ...(input.taskBranchRef === undefined ? {} : { taskBranchRef: input.taskBranchRef }),
     git,
   };
+  // Claudeのsandboxが試行中に空の`config.worktree`を作っても、状態が変わらないよう先に作る
+  await ensureWorktreeConfigFile(candidateDir, git);
   const before = await captureTrialState(stateInput);
   const protectedPatterns = await readProtectedPatterns(candidateDir, input.bestCommit, git);
   // Claudeのsandboxで、基準・最良のworktreeへの書き込みを明示的に塞ぐ（共有の`.git`は
@@ -336,6 +347,8 @@ async function runOptimizeTrialBody(
     stage: TrialStageResult,
     allowedPaths: readonly string[],
   ): Promise<{ state: TrialState; violations: TrialViolation[] }> => {
+    // 試行のセッションが確かめに走らせた計測の出力は、モデルが変えたファイルに数えない
+    await discardMetricOutput(candidateDir, spec.metricFile, input.bestCommit, git);
     const state = await captureTrialState(stateInput);
     const violations = inspectTrial({
       before,
@@ -487,14 +500,37 @@ async function runOptimizeTrialBody(
     );
   }
 
-  const measured = await measureCandidate({ input, commit, runVerify, git, runSetup, commandMs });
-  return finish({ llm, ...measured, commit }, { halt: false, violations: [], continuation });
+  const measureArgs = { input, commit, runVerify, git, runSetup, commandMs };
+  const measured = await measureCandidate(measureArgs);
+  // 採用候補は、最良を更新する前に会話を持たない反証役に突かせる（Issue #2108）
+  const judged: RefutedPart =
+    measured.decision.outcome === 'adopted' &&
+    input.refute !== undefined &&
+    input.signal?.aborted !== true
+      ? await refuteAdopted(measureArgs, measured, llm, input.refute)
+      : measured;
+  return finish(
+    {
+      llm,
+      correctness: judged.correctness,
+      metric: judged.metric,
+      secondary: judged.secondary,
+      load: judged.load,
+      decision: judged.decision,
+      ...(judged.refutation === undefined ? {} : { refutation: judged.refutation }),
+      commit,
+    },
+    { halt: false, violations: [], continuation },
+  );
 }
 
 type MeasuredPart = Pick<
   OptimizeTrialRecord,
   'correctness' | 'metric' | 'secondary' | 'decision' | 'load'
->;
+> & {
+  /** 反証役へ渡す、最良の木の計測値と有意判定のp値。指標を測れたときだけある。 */
+  stats?: { best: RefuteSide; pValue: number };
+};
 
 interface MeasureCandidateInput {
   input: OptimizeTrialInput;
@@ -503,6 +539,106 @@ interface MeasureCandidateInput {
   git: GitRunner;
   runSetup: (dir: string) => Promise<void>;
   commandMs: number;
+  /** 各木を測る回数。省けば仕様の`measurementRuns`。 */
+  runs?: number;
+  /** 測り直し。準備と正しさの確認は済んでいるので、指標の計測だけをやり直す。 */
+  remeasure?: { correctness: { passed: boolean; detail: string } };
+}
+
+type RefutedPart = MeasuredPart & { refutation?: OptimizeRefutation };
+
+/** 採用候補を反証役に突かせ、結果で採否を決め直す（Issue #2108）。 */
+async function refuteAdopted(
+  args: MeasureCandidateInput,
+  measured: MeasuredPart,
+  llm: OptimizeLlmText,
+  refute: Refuter,
+): Promise<RefutedPart> {
+  const { input, commit, git } = args;
+  const { spec } = input;
+  const evidenceOf = async (part: MeasuredPart): Promise<RefuteEvidence> => ({
+    trial: input.trial,
+    llm,
+    diff: await git(input.dirs.candidate, ['diff', input.bestCommit, commit]).catch(
+      (e: unknown) => `（差分を取れませんでした: ${e instanceof Error ? e.message : String(e)}）`,
+    ),
+    direction: spec.direction,
+    minImprovement: spec.minImprovement,
+    significanceLevel: spec.significanceLevel,
+    ...(input.baselineMetric === undefined ? {} : { baseline: input.baselineMetric }),
+    best: part.stats?.best ?? { samples: 0, median: Number.NaN, spread: Number.NaN },
+    candidate: {
+      samples: part.metric.samples,
+      median: part.metric.median,
+      spread: part.metric.spread,
+    },
+    pValue: part.stats?.pValue ?? Number.NaN,
+    significant: part.metric.significant === true,
+    secondary: part.secondary,
+    correctness: part.correctness,
+  });
+  const signal = input.signal === undefined ? {} : { signal: input.signal };
+  const first = await refute(await evidenceOf(measured), { allowRemeasure: true, ...signal });
+  if (first.verdict !== 'remeasure') {
+    return withRefutation(measured, first);
+  }
+  // 測り直しは計測の回数を2倍にして交互計測をやり直すだけ。試行のセッションは起動し直さない（1回だけ）
+  const fromRuns = spec.measurementRuns;
+  const toRuns = fromRuns * 2;
+  const remeasured = await measureCandidate({
+    ...args,
+    runs: toRuns,
+    remeasure: { correctness: measured.correctness },
+  });
+  const note = { remeasured: { fromRuns, toRuns } };
+  if (remeasured.decision.outcome !== 'adopted') {
+    return {
+      ...remeasured,
+      decision: {
+        outcome: 'rejected',
+        reason: `反証役の求めで計測を${fromRuns}回から${toRuns}回に増やして測り直し、採用の条件を満たさなかった: ${remeasured.decision.reason}`,
+      },
+      refutation: {
+        verdict: 'refuted',
+        detail: `測り直しを求めた: ${first.reason}`,
+        engine: first.engine,
+        ...(first.fallback === undefined ? {} : { fallback: first.fallback }),
+        ...note,
+      },
+    };
+  }
+  const second = await refute(await evidenceOf(remeasured), { allowRemeasure: false, ...signal });
+  return withRefutation(remeasured, second, note);
+}
+
+/** 反証の結果を採否へ反映する。採るのは「反証できなかった」ときだけ。 */
+function withRefutation(
+  measured: MeasuredPart,
+  outcome: RefuteOutcome,
+  extra: Pick<OptimizeRefutation, 'remeasured'> = {},
+): RefutedPart {
+  const refutation: OptimizeRefutation = {
+    verdict:
+      outcome.verdict === 'holds'
+        ? 'holds'
+        : outcome.verdict === 'refuted'
+          ? 'refuted'
+          : 'inconclusive',
+    detail: outcome.reason,
+    engine: outcome.engine,
+    ...(outcome.fallback === undefined ? {} : { fallback: outcome.fallback }),
+    ...extra,
+  };
+  if (refutation.verdict === 'holds') {
+    return { ...measured, refutation };
+  }
+  const reason =
+    refutation.verdict === 'refuted'
+      ? `反証役が反証した: ${outcome.reason}`
+      : outcome.verdict === 'remeasure'
+        ? '反証役が測り直しの後も判定を決めなかったため採用しない'
+        : `反証役が判定できなかったため採用しない: ${outcome.reason}`;
+  return { ...measured, decision: { outcome: 'rejected', reason }, refutation };
 }
 
 /** 候補の準備 → 正しさの確認（落ちたら1回だけやり直す）→ 指標と副指標を最良の木と交互に測る → 採否。 */
@@ -521,17 +657,20 @@ async function measureCandidate(args: MeasureCandidateInput): Promise<MeasuredPa
   });
 
   const run = async (): Promise<MeasuredPart> => {
-    try {
-      await prepareMeasureWorktree({
-        repoDir: input.repoDir,
-        worktreeDir: input.dirs.candidate,
-        commit,
-        allowedPaths: spec.allowedPaths,
-        runSetup: args.runSetup,
-        git: args.git,
-      });
-    } catch (e) {
-      return fail(`候補の準備に失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+    // 測り直しでは候補の木は準備済みで、正しさの確認も通っている。指標の計測だけをやり直す
+    if (args.remeasure === undefined) {
+      try {
+        await prepareMeasureWorktree({
+          repoDir: input.repoDir,
+          worktreeDir: input.dirs.candidate,
+          commit,
+          allowedPaths: spec.allowedPaths,
+          runSetup: args.runSetup,
+          git: args.git,
+        });
+      } catch (e) {
+        return fail(`候補の準備に失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
 
     const spawned = new Set<number>();
@@ -543,6 +682,9 @@ async function measureCandidate(args: MeasureCandidateInput): Promise<MeasuredPa
       );
     };
     try {
+      if (args.remeasure !== undefined) {
+        return await measureMetric(args, args.remeasure.correctness, track);
+      }
       let correctness = { passed: false, detail: '' };
       for (
         let attempt = 1;
@@ -637,11 +779,15 @@ async function measureMetric(
     }
     return outcome;
   };
+  const runs = args.runs ?? spec.measurementRuns;
+  // 計測全体の上限は回数に比例させる。測り直しで回数を増やしたときに、元の回数の分の上限で
+  // 打ち切られて、正しい改善が「計測できなかった」で不採用にならないようにする
+  const totalScale = Math.max(1, runs / spec.measurementRuns);
   const result = await measureAlternating({
     measure,
-    runs: spec.measurementRuns,
+    runs,
     perRunTimeoutMs: timeouts.perRunMs ?? DEFAULT_TRIAL_PER_RUN_TIMEOUT_MS,
-    totalTimeoutMs: timeouts.totalMs ?? DEFAULT_TRIAL_TOTAL_TIMEOUT_MS,
+    totalTimeoutMs: (timeouts.totalMs ?? DEFAULT_TRIAL_TOTAL_TIMEOUT_MS) * totalScale,
     loadThreshold: LOAD_DISCARD_THRESHOLD,
     maxLoadRetries: MAX_LOAD_RETRIES,
   });
@@ -691,6 +837,14 @@ async function measureMetric(
     ...metricBase,
     significant: decision.pValue <= spec.significanceLevel,
   };
+  const stats = {
+    best: {
+      samples: result.aValues.length,
+      median: median(result.aValues),
+      spread: stddev(result.aValues),
+    },
+    pValue: decision.pValue,
+  };
   if (!decision.adopted) {
     return {
       correctness,
@@ -698,6 +852,7 @@ async function measureMetric(
       secondary,
       load,
       decision: { outcome: 'rejected', reason: decision.reason },
+      stats,
     };
   }
   if (outOfTolerance.length > 0) {
@@ -710,6 +865,7 @@ async function measureMetric(
         outcome: 'rejected',
         reason: `副指標が許容幅を超えて悪化しました: ${outOfTolerance.join(', ')}`,
       },
+      stats,
     };
   }
   return {
@@ -718,5 +874,6 @@ async function measureMetric(
     secondary,
     load,
     decision: { outcome: 'adopted', reason: decision.reason },
+    stats,
   };
 }

@@ -13,6 +13,8 @@ export default tseslint.config(
       // test/integration（tsconfig.integration.json）のコンパイル出力。ソースは
       // test/integration/**/*.ts 側で検査する
       'out/**',
+      // 最適化ハーネスのテストが対象に使う小さなCommonJSのリポジトリ。検査の対象ではない
+      'test/unit/fixtures/optimize-repo/**',
     ],
   },
   js.configs.recommended,

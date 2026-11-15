@@ -205,6 +205,38 @@ describe('runOptimizeTrial', () => {
     expect(fake.calls[1]?.prompt).toContain('ループが遅い');
   });
 
+  describe('モデルが変えていないものは、検査で数えない（Issue #2108の実機確認）', () => {
+    it('Claudeのsandboxが空のconfig.worktreeを作っても、共有の.gitの変更にならない', async () => {
+      const fake = fakeSession({
+        onChange: async (input) => {
+          await setValue('5')(input);
+          // Claude CLIのsandboxは、無いgitの管理ファイルへ書き込めないファイルを重ねるため、
+          // 空のファイルを作って残す
+          const gitDir = git(input.cwd, 'rev-parse', '--absolute-git-dir');
+          await writeFile(join(gitDir, 'config.worktree'), '', { flag: 'a' });
+        },
+      });
+      const result = await run(fake);
+      expect(result.violations).toEqual([]);
+      expect(result.outcome).toBe('adopted');
+      expect(result.halt).toBe(false);
+    });
+
+    it('変更の段が計測のコマンドを走らせて出力ファイルを残しても、モデルの変更だけで判定する', async () => {
+      const fake = fakeSession({
+        onChange: async (input) => {
+          await setValue('5')(input);
+          execFileSync('sh', ['-c', METRIC_COMMAND], { cwd: input.cwd });
+        },
+      });
+      const result = await run(fake);
+      expect(result.violations).toEqual([]);
+      expect(result.outcome).toBe('adopted');
+      expect(() => git(repo, 'cat-file', '-e', `${result.commit}:m.json`)).toThrow();
+      expect(git(repo, 'show', `${result.commit}:src/value.txt`)).toBe('5');
+    });
+  });
+
   describe('不採用になる試行', () => {
     it('変更してよいパスの外を変えた', async () => {
       const fake = fakeSession({
@@ -281,6 +313,20 @@ describe('runOptimizeTrial', () => {
       const result = await run(fake);
       expect(result.outcome).toBe('rejected');
       expect(result.violations.map((v) => v.kind)).toContain('gitConfigChanged');
+    });
+
+    it('worktreeごとの設定（config.worktree）に設定を書いた', async () => {
+      const fake = fakeSession({
+        onChange: async (input) => {
+          await setValue('5')(input);
+          const gitDir = git(input.cwd, 'rev-parse', '--absolute-git-dir');
+          await writeFile(join(gitDir, 'config.worktree'), '[core]\n\thooksPath = /tmp/x\n');
+        },
+      });
+      const result = await run(fake);
+      expect(result.outcome).toBe('rejected');
+      expect(result.halt).toBe(true);
+      expect(result.record.decision.reason).toContain('worktree/config.worktree');
     });
 
     it('基準のworktreeを変えた', async () => {

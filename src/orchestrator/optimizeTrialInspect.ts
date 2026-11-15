@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, readlink, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { normalizeKeepPaths, runGit, type GitRunner } from './optimizeWorktrees';
@@ -72,6 +72,78 @@ export async function listChangedFiles(
     tree,
   ]);
   return out.split('\0').filter((f) => f !== '');
+}
+
+/**
+ * 候補のworktreeの管理領域に`config.worktree`が無ければ、空のファイルを作る。試行の状態を取る前に呼ぶ。
+ *
+ * Claude CLI（2.1.325で確認）のsandboxは、gitの管理ファイル（`config.worktree`・`config.lock`など）
+ * への書き込みを塞ぐため、そのパスへ書き込めないファイルを重ねる。ファイルが無いと重ねる先として
+ * 空のファイルを作り、終わった後も残す（Bashを使う変更の段の後にだけ現れ、このリポジトリの
+ * worktreeの管理領域にも0バイトの`config.worktree`が残っている。Issue #2108の実機確認）。
+ * 先に作っておけば重ねても内容は変わらない。gitは空の設定ファイルを、無いのと同じに読む。
+ */
+export async function ensureWorktreeConfigFile(
+  candidateDir: string,
+  git: GitRunner = runGit,
+): Promise<void> {
+  const gitDir = path.resolve(
+    candidateDir,
+    (await git(candidateDir, ['rev-parse', '--absolute-git-dir'])).trim(),
+  );
+  try {
+    await writeFile(path.join(gitDir, 'config.worktree'), '', { flag: 'wx' });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw e;
+    }
+  }
+}
+
+/**
+ * 計測の出力ファイル（`metricFile`）を、試行前の最良のcommitの状態へ戻す（無かったなら消す）。
+ * 検査の前に呼ぶ。
+ *
+ * 試行のセッションが確かめのために計測のコマンドを走らせると、出力ファイルが作業ツリーに残り、
+ * モデルが変えたファイルとして数えられる（Issue #2108の実機確認で、Codexの試行が`m.json`で
+ * 不採用になった）。計測の値は拡張が計測用のworktreeで取り直すので、候補の木には残さない。
+ * 出力ファイルの親がworktreeの外を指す（シンボリックリンク経由）ときは触らず、検査に任せる。
+ */
+export async function discardMetricOutput(
+  candidateDir: string,
+  metricFile: string | undefined,
+  bestCommit: string,
+  git: GitRunner = runGit,
+): Promise<void> {
+  if (metricFile === undefined) {
+    return;
+  }
+  const abs = path.resolve(candidateDir, metricFile);
+  const rel = path.relative(candidateDir, abs);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return;
+  }
+  const realRoot = await realpath(candidateDir);
+  const realParent = await realpath(path.dirname(abs)).catch(() => undefined);
+  if (
+    realParent === undefined ||
+    (realParent !== realRoot && !realParent.startsWith(`${realRoot}${path.sep}`))
+  ) {
+    return;
+  }
+  const gitPath = rel.split(path.sep).join('/');
+  let tracked = true;
+  try {
+    await git(candidateDir, ['cat-file', '-e', `${bestCommit}:${gitPath}`]);
+  } catch {
+    tracked = false;
+  }
+  if (tracked) {
+    await git(candidateDir, ['checkout', bestCommit, '--', `:(literal)${gitPath}`]);
+    return;
+  }
+  // ディレクトリなどファイルでないものは消さず、検査に任せる
+  await rm(abs, { force: true }).catch(() => undefined);
 }
 
 async function hashFileOrAbsent(file: string): Promise<string> {

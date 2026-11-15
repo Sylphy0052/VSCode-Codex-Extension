@@ -705,6 +705,35 @@ export function readTaskRunOptimizeLimits(): { maxTrials: number; maxMinutes: nu
   };
 }
 
+/** 最適化の反証役（Issue #2108）のエンジンの設定値。`optimizeRefute.ts`の`RefuterEngineSetting`と同じ。 */
+export type TaskRunOptimizeRefuterEngine = 'opposite' | 'same' | 'claude' | 'codex';
+
+const REFUTER_ENGINES: readonly TaskRunOptimizeRefuterEngine[] = [
+  'opposite',
+  'same',
+  'claude',
+  'codex',
+];
+
+/**
+ * 最適化の反証役（Issue #2108）の設定。エンジンの既定は`opposite`（試行と別のエンジン）。
+ * モデルは空ならエンジンごとの既定（Claudeは`sonnet`、CodexはCLIの既定）。
+ */
+export function readTaskRunOptimizeRefuter(): {
+  engine: TaskRunOptimizeRefuterEngine;
+  model: string;
+} {
+  const c = vscode.workspace.getConfiguration('agent');
+  const engine = c.get<unknown>('taskRun.optimize.refuterEngine');
+  const model = c.get<unknown>('taskRun.optimize.refuterModel');
+  return {
+    engine: REFUTER_ENGINES.includes(engine as TaskRunOptimizeRefuterEngine)
+      ? (engine as TaskRunOptimizeRefuterEngine)
+      : 'opposite',
+    model: typeof model === 'string' && /^[A-Za-z0-9._:-]{0,100}$/.test(model) ? model : '',
+  };
+}
+
 /** オーケストレータモードの資源の閾値（Issue #1629・#1807）。判定は`resourceMonitor.ts`。 */
 export interface TaskRunResourceThresholds {
   /** CPUのPSI（`some`）の計測間隔あたりの待ち時間の割合（%）がこの値以上で`warning`。 */
