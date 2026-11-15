@@ -123,6 +123,8 @@ export interface OptimizeTrialInput {
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   deps?: OptimizeTrialDeps;
+  /** 伸び止まりで「別の方式で組み直す」指示を出す（Issue #2111）。 */
+  rebuild?: boolean;
 }
 
 export interface OptimizeTrialResult {
@@ -303,6 +305,7 @@ async function runOptimizeTrialBody(
     ledger: ledgerBefore,
     ...(input.baselineMetric === undefined ? {} : { baselineMetric: input.baselineMetric }),
     ...(summary.best === undefined ? {} : { bestMetric: summary.best }),
+    ...(input.rebuild === true ? { rebuild: true } : {}),
   };
 
   const stateInput = {

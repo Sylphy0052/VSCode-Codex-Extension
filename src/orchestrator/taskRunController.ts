@@ -147,7 +147,8 @@ export interface TaskRunControllerDeps {
     | 'instructStage'
     | 'answerQuestion'
     | 'cleanupRestoredTask'
-  >;
+  > &
+    Partial<Pick<TaskStageRunner, 'cleanupOptimizeTask'>>;
   /** エンジンのモデル一覧と、カタログからeffortを取れないときの退避先。 */
   modelCatalog(engine: TaskRunEngine): {
     models: readonly ModelInfo[];
@@ -496,6 +497,13 @@ export class TaskRunController {
   private pumpLater(runId: string): void {
     void this.deps.runner.pump(runId).catch((e: unknown) => {
       this.deps.log(`[task run] ${runId}の工程を始められませんでした: ${String(e)}`);
+    });
+  }
+
+  /** mergeせずに完了にした最適化のタスクの、refと計測用のworktreeを消す（Issue #2111 仕様9）。 */
+  private cleanupOptimizeLater(runId: string, taskId: string): void {
+    void this.deps.runner.cleanupOptimizeTask?.(runId, taskId).catch((e: unknown) => {
+      this.deps.log(`[task run] ${taskId}の最適化の後片付けに失敗しました: ${String(e)}`);
     });
   }
 
@@ -1400,6 +1408,7 @@ export class TaskRunController {
     if (rejection !== undefined) {
       return { ok: false, message: `${taskId}を完了にできない: ${rejection}` };
     }
+    this.cleanupOptimizeLater(runId, taskId);
     this.pumpLater(runId);
     return { ok: true, message: `${taskId}をmergeせずに完了にした` };
   }
@@ -2023,6 +2032,9 @@ export class TaskRunController {
     }
     if (rejection !== undefined) {
       return { ok: false, message: `${taskId}の関門を決着させられない: ${rejection}` };
+    }
+    if (choice === 'close') {
+      this.cleanupOptimizeLater(runId, taskId);
     }
     this.pumpLater(runId);
     return { ok: true, message: `${taskId}の関門を「${GATE_CHOICE_LABELS[choice]}」で決着させた` };

@@ -9,6 +9,7 @@ import {
   recordMaxReached,
   type RunMetricsKeys,
 } from '../../src/orchestrator/runMetrics';
+import { initialLoopState } from '../../src/orchestrator/optimizeLoop';
 import { collectRunMetricsKeys, writeRunMetrics } from '../../src/orchestrator/runMetricsStore';
 import { MAX_GATES_PER_TASK, openStageGate } from '../../src/orchestrator/taskRunGates';
 import { reconcileTaskRunOnReload } from '../../src/orchestrator/taskRunReload';
@@ -74,13 +75,17 @@ describe('computeRunMetrics', () => {
       reviewRounds: 2,
       gates: [resolvedGate('g1', 'reflex'), resolvedGate('g2', 'user')],
     });
-    const t2 = haltedTask('T2', { gates: [resolvedGate('g3', 'orchestrator')] });
+    const t2 = haltedTask('T2', {
+      gates: [resolvedGate('g3', 'orchestrator')],
+      optimizeLoop: { ...initialLoopState(), trials: 4 },
+    });
     const run = recordMaxReached({ ...makeRun([t1, t2]), finishedAt: LATER.toISOString() }, 'T1');
     const metrics = computeRunMetrics(run, KEYS);
     expect(metrics).toMatchObject({
       childIssues: 2,
       sendBacks: 2,
       maxReached: 1,
+      optimizeTrials: 4,
       gatesResolved: { reflex: 1, orchestrator: 1, user: 1 },
       msPerChildIssue: 1800000,
     });

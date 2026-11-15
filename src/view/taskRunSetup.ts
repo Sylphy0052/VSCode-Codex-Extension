@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
+import { ClaudeSandboxProbe, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CLAUDE_EFFORTS } from '../claude/types';
 import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
 import {
@@ -15,6 +16,7 @@ import {
   readSelfImproveBudgetRaw,
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
+  readTaskRunOptimizeLimits,
   readTaskRunAutoStartStagesEnabled,
   readTaskRunPlanApprovalMode,
   readTaskRunPlanAutoApproveEnabled,
@@ -45,6 +47,7 @@ import {
 } from '../orchestrator/pluginRoadmapForge';
 import { createGithubRetrospectiveForge } from '../orchestrator/runRetrospectiveForge';
 import { normalizeConfig } from '../orchestrator/selfImproveBudget';
+import { OptimizeLoopHost } from '../orchestrator/optimizeLoopHost';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import {
   TaskRunController,
@@ -343,8 +346,39 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     void recordRunMetrics(run).then(() => retrospective.onRunFinished(run));
   };
 
+  // 最適化のループ（Issue #2111）。試行のセッションはClaudeならsandboxを確かめてから起動する
+  const trialSandboxProbe = new ClaudeSandboxProbe(
+    nodeSandboxProbePorts(() => executableFor('claude')),
+    log,
+  );
+  const optimizeLoop = new OptimizeLoopHost({
+    storageDir: deps.globalStorageDir,
+    cli: deps.cli,
+    trialEngine: async (engine, settings) => {
+      const base = {
+        engine,
+        executable: executableFor(engine),
+        model: settings.model,
+        ...(settings.effort === undefined ? {} : { effort: settings.effort }),
+      };
+      if (engine !== 'claude') {
+        return base;
+      }
+      const probed = await trialSandboxProbe.check();
+      if (!probed.ok) {
+        throw new Error(`試行のセッションのsandboxを使えない: ${probed.reason}`);
+      }
+      return { ...base, claudeSandbox: probed.environment };
+    },
+    limits: () => readTaskRunOptimizeLimits(),
+    usageThresholdPct: () => normalizeConfig(readSelfImproveBudgetRaw()).weeklyUsageThresholdPct,
+    weeklyUsagePct: async (engine) => deps.weeklyUsagePct?.(engine),
+    log: warn,
+  });
+
   const runner = new TaskStageRunner({
     hosts: deps.hosts,
+    optimizeLoop,
     store,
     drive: {
       canDrive: async (runId) => lease.holds(runId) || (await lease.acquire(runId)).ok,

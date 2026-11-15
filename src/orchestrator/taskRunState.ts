@@ -16,6 +16,7 @@
  */
 
 import type { OptimizeSummary } from './optimizeLedger';
+import type { OptimizeLoopState } from './optimizeLoop';
 import { sameOptimization, type OptimizationSpec } from './optimizeSpec';
 import type { TaskMetricsTally } from './runMetrics';
 import { stripControlChars } from './sanitize';
@@ -186,6 +187,8 @@ export interface OrchestratedTask {
   hadOptimization?: true;
   /** 最適化の台帳の要約（試行の数・基準値・最良値・最良のcommit）。台帳の本体はglobalStorageのファイル。 */
   optimizeSummary?: OptimizeSummary;
+  /** 最適化のループの状態（Issue #2111）。試行の回数・経過時間・最良の候補・伸び止まりなど。 */
+  optimizeLoop?: OptimizeLoopState;
   executionId: string;
   stages: Record<TaskStage, TaskStageRecord>;
   /** 報告を受け付ける実行回。実行中のセッションが無ければ`undefined`（どの報告も受け付けない）。 */
@@ -612,6 +615,19 @@ export function currentStage(task: OrchestratedTask): TaskStage | undefined {
 /** mergeとcleanupまで終わった。依存先として満たされている。 */
 export function isTaskDone(task: OrchestratedTask): boolean {
   return currentStage(task) === undefined;
+}
+
+/** 最適化のループの状態（Issue #2111）を保存する。タスクが無ければそのまま返す。 */
+export function recordOptimizeLoop(
+  run: TaskRun,
+  taskId: string,
+  state: OptimizeLoopState,
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  return task === undefined
+    ? run
+    : withTask(run, { ...task, optimizeLoop: state, updatedAt: now.toISOString() });
 }
 
 function withTask(run: TaskRun, next: OrchestratedTask): TaskRun {

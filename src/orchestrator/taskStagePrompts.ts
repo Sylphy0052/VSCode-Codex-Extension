@@ -76,6 +76,11 @@ export interface StagePromptInput {
   instruction: string | undefined;
   /** 工程セッションの作業ディレクトリ。 */
   cwd: string;
+  /**
+   * 拡張機能が足す追記（最適化の台帳の要約。Issue #2111）。外部由来の部分は呼び出し側が
+   * `formatUntrusted`で囲んでおく。
+   */
+  extra?: string;
 }
 
 /**
@@ -326,6 +331,9 @@ export function buildStagePrompt(input: StagePromptInput, nonce: string = random
         'Orchestratorが書いた追加の指示であり、この工程の担当範囲を超える作業は含まない',
       ),
     );
+  }
+  if (input.extra !== undefined && input.extra.trim() !== '') {
+    lines.push('', input.extra.trim());
   }
   const failures = previousStageFailures(task, ref.stage);
   if (failures.length > 0) {

@@ -1692,3 +1692,194 @@ describe('TaskStageRunner.dispose', () => {
     expect(t.runner.listStageProcesses()).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 最適化のループ（Issue #2111）
+// ---------------------------------------------------------------------------
+
+describe('TaskStageRunner 最適化タスクのimplement (Issue #2111)', () => {
+  const OPT_SPEC = {
+    metricSource: 'wallTime',
+    metricCommand: 'bench',
+    direction: 'minimize',
+    minImprovement: { kind: 'absolute', value: 1 },
+    significanceLevel: 0.05,
+    correctnessCommand: 'test',
+    allowedPaths: ['src'],
+    budget: { maxTrials: 3, maxMinutes: 10 },
+    measurementRuns: 5,
+  } as unknown as NonNullable<OrchestratedTask['optimization']>;
+
+  it('deps.optimizeLoop無しなら、ループを通さずにセッションを始めず、止めて関門を開く', async () => {
+    const t = build([
+      makeRun([queuedTask('T1', 'implement', { optimization: OPT_SPEC, ...WORKTREE_TASK })]),
+    ]);
+    await t.runner.pump('run-1');
+    await flush();
+    expect(t.openClaude).not.toHaveBeenCalled();
+    expect(t.sessions).toHaveLength(0);
+    expect(t.task().gates?.[0]).toMatchObject({ kind: 'stageFailed', status: 'awaitingUser' });
+    expect(t.task().gates?.[0]?.detail).toContain('最適化のループを使えない');
+  });
+
+  it('基準値を測れなければ、試行もPRのセッションも始めずbaselineFailedの関門(人だけが決着)を開く', async () => {
+    const runLoop = vi.fn(async (_args: { task: OrchestratedTask }) => ({
+      kind: 'baselineFailed' as const,
+      detail: '基準値の準備に失敗した: npm ci',
+      state: {
+        phase: 'baseline' as const,
+        trials: 0,
+        elapsedMs: 0,
+        plateau: 0,
+        rebuilt: false,
+        inconclusiveStreak: 0,
+      },
+    }));
+    const optimizeLoop = {
+      runLoop,
+      restoreWorkTree: vi.fn(),
+      ledgerSummaryForPrompt: vi.fn(),
+      checkPullRequestTree: vi.fn(),
+      remeasureAfterReview: vi.fn(),
+      checkMerge: vi.fn(),
+      cleanup: vi.fn(),
+    };
+    const t = build(
+      [makeRun([queuedTask('T1', 'implement', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    await flush();
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(t.openClaude).not.toHaveBeenCalled();
+    expect(t.task().gates?.[0]).toMatchObject({
+      kind: 'optimization',
+      optimizeReason: 'baselineFailed',
+      status: 'awaitingUser',
+    });
+    expect(t.task().stages.implement.status).toBe('halted');
+  });
+
+  function optimizeHost(over: Record<string, unknown> = {}) {
+    return {
+      runLoop: vi.fn(),
+      restoreWorkTree: vi.fn(),
+      ledgerSummaryForPrompt: vi.fn(),
+      checkPullRequestTree: vi.fn(),
+      remeasureAfterReview: vi.fn(),
+      checkMerge: vi.fn(),
+      cleanup: vi.fn(),
+      ...over,
+    };
+  }
+
+  it('review後に測り直して有意に悪化していれば、worsenedAfterReviewの関門(人だけが決着)を開く', async () => {
+    const optimizeLoop = optimizeHost({
+      remeasureAfterReview: vi.fn(async () => ({
+        worsened: true,
+        detail: '最良より有意に悪化した',
+        measuredTree: 'tree1',
+      })),
+    });
+    const t = build(
+      [makeRun([queuedTask('T1', 'review', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
+      ...refArgs(t),
+      outcome: 'done',
+      summary: 'レビューした',
+      reviewSummary: '問題なし',
+      reviewPassed: true,
+      remainingFindings: [],
+    });
+    expect(outcome).toMatchObject({ isError: false });
+    await flush();
+    expect(optimizeLoop.remeasureAfterReview).toHaveBeenCalledTimes(1);
+    expect(t.task().gates?.find((g) => g.kind === 'optimization')).toMatchObject({
+      optimizeReason: 'worsenedAfterReview',
+      status: 'awaitingUser',
+    });
+  });
+
+  it.each([
+    [{ match: false, detail: 'PRのHEADの木が最良の候補の木と一致しない' }, 'treeMismatch'],
+    [{ match: true, detail: '一致した' }, undefined],
+  ] as const)(
+    'implement(PRを書くセッション)の完了で、PRのHEADの木を最良と照合する: %o',
+    async (checked, reason) => {
+      const optimizeLoop = optimizeHost({
+        checkPullRequestTree: vi.fn(async () => checked),
+        ledgerSummaryForPrompt: vi.fn(async () => '台帳の要約'),
+        restoreWorkTree: vi.fn(async () => undefined),
+      });
+      const t = build(
+        [
+          makeRun([
+            queuedTask('T1', 'implement', {
+              optimization: OPT_SPEC,
+              optimizeLoop: {
+                phase: 'pr',
+                trials: 3,
+                elapsedMs: 0,
+                plateau: 0,
+                rebuilt: false,
+                inconclusiveStreak: 0,
+                baseline: { metric: 100, commit: 'a'.repeat(40) },
+                best: { metric: 80, commit: 'b'.repeat(40), ref: 'r', trial: 2 },
+              },
+              ...WORKTREE_TASK,
+            }),
+          ]),
+        ],
+        { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+      );
+      t.observation.findPullRequest.mockResolvedValue({
+        number: 5,
+        url: 'https://example.com/pull/5',
+      } as never);
+      await t.runner.pump('run-1');
+      await flush();
+      expect(t.openClaude).toHaveBeenCalledTimes(1);
+      const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
+        ...refArgs(t),
+        outcome: 'done',
+        summary: 'PRを作った',
+        pullRequestNumber: 5,
+        pullRequestUrl: 'https://example.com/pull/5',
+      });
+      expect(outcome).toMatchObject({ isError: false });
+      await flush();
+      expect(optimizeLoop.checkPullRequestTree).toHaveBeenCalledTimes(1);
+      const gate = t.task().gates?.find((g) => g.kind === 'optimization');
+      if (reason === undefined) {
+        expect(gate).toBeUndefined();
+      } else {
+        expect(gate).toMatchObject({ optimizeReason: reason, status: 'awaitingUser' });
+      }
+    },
+  );
+
+  it('review後に測り直して悪化していなければ関門を開かない', async () => {
+    const optimizeLoop = optimizeHost({
+      remeasureAfterReview: vi.fn(async () => ({ worsened: false, detail: '同等' })),
+    });
+    const t = build(
+      [makeRun([queuedTask('T1', 'review', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    await callTool(t, REPORT_STAGE_RESULT_TOOL, {
+      ...refArgs(t),
+      outcome: 'done',
+      summary: 'レビューした',
+      reviewSummary: '問題なし',
+      reviewPassed: true,
+      remainingFindings: [],
+    });
+    await flush();
+    expect(optimizeLoop.remeasureAfterReview).toHaveBeenCalledTimes(1);
+    expect(t.task().gates).toBeUndefined();
+  });
+});

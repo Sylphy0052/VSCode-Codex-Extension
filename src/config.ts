@@ -672,6 +672,39 @@ export function readTaskRunMaxParallelPerFolder(): number {
   return Math.floor(raw);
 }
 
+/** @see readTaskRunOptimizeLimits */
+export const DEFAULT_TASK_RUN_OPTIMIZE_MAX_TRIALS = 50;
+/** @see readTaskRunOptimizeLimits */
+export const DEFAULT_TASK_RUN_OPTIMIZE_MAX_MINUTES = 24 * 60;
+const MAX_TASK_RUN_OPTIMIZE_MAX_TRIALS = 1000;
+const MAX_TASK_RUN_OPTIMIZE_MAX_MINUTES = 7 * 24 * 60;
+
+function positiveIntOr(raw: unknown, max: number, fallback: number): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= max
+    ? Math.floor(raw)
+    : fallback;
+}
+
+/**
+ * 最適化のループ（Issue #2111）の上限の上限。計画の最適化の仕様の予算はこれを超えられない。
+ * 壊れた値（数値でない・範囲外）は既定へ丸める。
+ */
+export function readTaskRunOptimizeLimits(): { maxTrials: number; maxMinutes: number } {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    maxTrials: positiveIntOr(
+      c.get<unknown>('taskRun.optimize.maxTrials'),
+      MAX_TASK_RUN_OPTIMIZE_MAX_TRIALS,
+      DEFAULT_TASK_RUN_OPTIMIZE_MAX_TRIALS,
+    ),
+    maxMinutes: positiveIntOr(
+      c.get<unknown>('taskRun.optimize.maxMinutes'),
+      MAX_TASK_RUN_OPTIMIZE_MAX_MINUTES,
+      DEFAULT_TASK_RUN_OPTIMIZE_MAX_MINUTES,
+    ),
+  };
+}
+
 /** オーケストレータモードの資源の閾値（Issue #1629・#1807）。判定は`resourceMonitor.ts`。 */
 export interface TaskRunResourceThresholds {
   /** CPUのPSI（`some`）の計測間隔あたりの待ち時間の割合（%）がこの値以上で`warning`。 */
