@@ -132,30 +132,36 @@ export function decideFile(
   return { allowed: true };
 }
 
-function parseLedger(text: string): SelfImproveLedger {
+/** ledgerが壊れている。予算を黙って0件へ戻さないよう、読み手は止まって記録に残す。 */
+export class SelfImproveLedgerCorruptError extends Error {}
+
+/** ledgerの中身を読む。JSONとして読めない・`entries`が配列でないときは例外にする。 */
+export function parseLedger(text: string): SelfImproveLedger {
+  let raw: unknown;
   try {
-    const raw: unknown = JSON.parse(text);
-    const list = (raw as { entries?: unknown }).entries;
-    if (!Array.isArray(list)) {
-      return { entries: [] };
-    }
-    const entries: SelfImproveEntry[] = [];
-    for (const item of list) {
-      const e = item as Partial<Record<keyof SelfImproveEntry, unknown>>;
-      if (typeof e.issueNumber !== 'number' || typeof e.filedAt !== 'number') {
-        continue;
-      }
-      entries.push({
-        issueNumber: e.issueNumber,
-        filedAt: e.filedAt,
-        ...(typeof e.mergedAt === 'number' ? { mergedAt: e.mergedAt } : {}),
-        ...(typeof e.evaluatedAt === 'number' ? { evaluatedAt: e.evaluatedAt } : {}),
-      });
-    }
-    return { entries };
+    raw = JSON.parse(text);
   } catch {
-    return { entries: [] };
+    throw new SelfImproveLedgerCorruptError('自己改善の予算ledgerがJSONとして読めない');
   }
+  const list =
+    typeof raw === 'object' && raw !== null ? (raw as { entries?: unknown }).entries : undefined;
+  if (!Array.isArray(list)) {
+    throw new SelfImproveLedgerCorruptError('自己改善の予算ledgerにentriesの配列が無い');
+  }
+  const entries: SelfImproveEntry[] = [];
+  for (const item of list) {
+    const e = item as Partial<Record<keyof SelfImproveEntry, unknown>>;
+    if (typeof e.issueNumber !== 'number' || typeof e.filedAt !== 'number') {
+      continue;
+    }
+    entries.push({
+      issueNumber: e.issueNumber,
+      filedAt: e.filedAt,
+      ...(typeof e.mergedAt === 'number' ? { mergedAt: e.mergedAt } : {}),
+      ...(typeof e.evaluatedAt === 'number' ? { evaluatedAt: e.evaluatedAt } : {}),
+    });
+  }
+  return { entries };
 }
 
 /**
@@ -165,30 +171,42 @@ function parseLedger(text: string): SelfImproveLedger {
 export class SelfImproveBudgetStore {
   constructor(private readonly file: string) {}
 
+  /**
+   * ファイルが無ければ空のledger。読めるが壊れているときは{@link SelfImproveLedgerCorruptError}を
+   * 投げる（黙って空へ戻すと、起票数の上限と評価中の制約が消えるため）。
+   */
   async read(): Promise<SelfImproveLedger> {
+    let text: string;
     try {
-      return parseLedger(await fs.readFile(this.file, 'utf8'));
-    } catch {
-      return { entries: [] };
+      text = await fs.readFile(this.file, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { entries: [] };
+      }
+      throw err;
     }
+    return parseLedger(text);
   }
 
   /** ロックを取り、現在のledgerから `fn` で次のledgerと結果を決めて書く。 */
   async update<T>(
     fn: (ledger: SelfImproveLedger) => { ledger: SelfImproveLedger; result: T },
   ): Promise<T> {
-    const lock = `${this.file}.lock`;
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await acquire(lock);
-    try {
+    return withFileLock(`${this.file}.lock`, async () => {
       const { ledger, result } = fn(await this.read());
       const tmp = `${this.file}.${process.pid}.tmp`;
       await fs.writeFile(tmp, JSON.stringify(ledger), 'utf8');
       await fs.rename(tmp, this.file);
       return result;
-    } finally {
-      await fs.rm(lock, { force: true });
-    }
+    });
+  }
+
+  /** 起票した1件を記録する。判断は呼び出し側が同じ直列化の中で済ませている前提。 */
+  recordFiled(issueNumber: number, nowMs: number): Promise<void> {
+    return this.update((ledger) => ({
+      ledger: { entries: [...ledger.entries, { issueNumber, filedAt: nowMs }] },
+      result: undefined,
+    }));
   }
 
   /** 起票してよければ数えて記録する。判断と記録を1回のロックで行う。 */
@@ -229,7 +247,26 @@ export class SelfImproveBudgetStore {
   }
 }
 
-async function acquire(lock: string): Promise<void> {
+/**
+ * `lock`を排他作成して`fn`を直列に実行する（別ウィンドウ・別プロセスにも効く）。置き場の
+ * ディレクトリは作る。古いロック（`staleMs`超、既定{@link LOCK_STALE_MS}）は持ち主が落ちたと
+ * みなして外す。`fn`が長く掛かるなら`staleMs`をそれより長くすること。
+ */
+export async function withFileLock<T>(
+  lock: string,
+  fn: () => Promise<T>,
+  options: { staleMs?: number } = {},
+): Promise<T> {
+  await fs.mkdir(path.dirname(lock), { recursive: true });
+  await acquire(lock, options.staleMs ?? LOCK_STALE_MS);
+  try {
+    return await fn();
+  } finally {
+    await fs.rm(lock, { force: true });
+  }
+}
+
+async function acquire(lock: string, staleMs: number): Promise<void> {
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
@@ -242,7 +279,7 @@ async function acquire(lock: string): Promise<void> {
     }
     try {
       const st = await fs.stat(lock);
-      if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+      if (Date.now() - st.mtimeMs > staleMs) {
         await fs.rm(lock, { force: true });
         continue;
       }
@@ -250,7 +287,7 @@ async function acquire(lock: string): Promise<void> {
       continue;
     }
     if (Date.now() > deadline) {
-      throw new Error(`自己改善の予算ledgerのロックを取れない: ${lock}`);
+      throw new Error(`自己改善のロックを取れない: ${lock}`);
     }
     await new Promise((r) => setTimeout(r, 50));
   }

@@ -230,6 +230,11 @@ export interface TaskRunOrchestratorDeps {
    * Orchestratorは全権限で動くため、Issue本文はBashではなくこの口から囲って渡す。
    */
   readIssue?: IssueReader;
+  /**
+   * `start_self_improve_run`（Issue #2086）。自己改善Issueに着手してよいか（直列・予算・ラベル）を
+   * 確かめ、よければ新しいrunを作る。省略時はツールを出さない。
+   */
+  startSelfImproveRun?: (self: TaskRun, issueNumber: number) => Promise<OtherRunResult>;
   /** `get_run_state`の見出しへ足す資源の行（Issue #1629）。無ければ出さない。 */
   resourceLines?: (runId: string) => string[];
   /** 資源の監視が決めた新しい工程の開始の扱い（Issue #1629・#1807）。`start_stage`の結果へ添える。 */
@@ -359,8 +364,9 @@ const ORCHESTRATOR_DECIDES_ASK_USER_QUESTION =
   'escalate_to_userでユーザーへ回し、それ以外はユーザーにしか決められない理由を添えてAskUserQuestionで' +
   '出し直してください。本文の末尾で確認を求めてターンを終えないでください';
 
-/** `resume_run`・`start_run`で動かしたrun。 */
-type OtherRunResult = { ok: true; runId: string; message: string } | { ok: false; message: string };
+/** `resume_run`・`start_run`・`start_self_improve_run`で動かしたrun。 */
+export type OtherRunResult =
+  { ok: true; runId: string; message: string } | { ok: false; message: string };
 
 export class TaskRunOrchestrator {
   private readonly live = new Map<string, LiveOrchestrator>();
@@ -629,10 +635,13 @@ export class TaskRunOrchestrator {
     try {
       registered = await this.deps.server.registerTools(
         `${CONNECTION_ID_PREFIX}${String(generation)}`,
-        // `record_lesson`は`runNotes`が無ければ提供できない機能のため見せない（Issue #1599）
-        this.deps.runNotes === undefined
-          ? TASK_RUN_ORCHESTRATOR_TOOLS.filter((tool) => tool.name !== 'record_lesson')
-          : TASK_RUN_ORCHESTRATOR_TOOLS,
+        // `record_lesson`は`runNotes`が無ければ提供できない機能のため見せない（Issue #1599）。
+        // `start_self_improve_run`も口が無ければ見せない（Issue #2086）
+        TASK_RUN_ORCHESTRATOR_TOOLS.filter(
+          (tool) =>
+            (tool.name !== 'record_lesson' || this.deps.runNotes !== undefined) &&
+            (tool.name !== 'start_self_improve_run' || this.deps.startSelfImproveRun !== undefined),
+        ),
         (name, rawArgs) => this.callTool(runId, generation, name, rawArgs),
       );
       session = await this.deps.hosts[run.engine].openTaskSession({
@@ -1130,6 +1139,7 @@ export class TaskRunOrchestrator {
       }
       case 'resume_run':
       case 'start_run':
+      case 'start_self_improve_run':
         return this.operateOtherRun(runId, call);
     }
   }
@@ -1140,7 +1150,10 @@ export class TaskRunOrchestrator {
    */
   private async operateOtherRun(
     runId: string,
-    call: Extract<TaskRunOrchestratorCall, { tool: 'resume_run' | 'start_run' }>,
+    call: Extract<
+      TaskRunOrchestratorCall,
+      { tool: 'resume_run' | 'start_run' | 'start_self_improve_run' }
+    >,
   ): Promise<RoadmapAskOutcome> {
     const live = this.live.get(runId);
     const self = this.deps.controller.find(runId);
@@ -1159,7 +1172,9 @@ export class TaskRunOrchestrator {
       result =
         call.tool === 'resume_run'
           ? await this.reopenOtherRun(self, call.runId)
-          : await this.startOtherRun(self, call);
+          : call.tool === 'start_self_improve_run'
+            ? await this.startSelfImproveRun(self, call.issueNumber)
+            : await this.startOtherRun(self, call);
     } catch (e: unknown) {
       live.runOperationCount -= 1;
       throw e;
@@ -1214,6 +1229,14 @@ export class TaskRunOrchestrator {
           message: `新しいrun（runId=${outcome.runId}）を作りました`,
         }
       : outcome;
+  }
+
+  /** `start_self_improve_run`（Issue #2086）。着手の可否は`startSelfImproveRun`の口が決める。 */
+  private async startSelfImproveRun(self: TaskRun, issueNumber: number): Promise<OtherRunResult> {
+    const start = this.deps.startSelfImproveRun;
+    return start === undefined
+      ? { ok: false, message: 'この環境では自己改善のrunを始められません' }
+      : start(self, issueNumber);
   }
 
   /** `get_issue`（Issue #2037）。番号だけを受け、runのリポジトリ以外のIssueは読めない。 */
@@ -1766,7 +1789,8 @@ function buildIntroPrompt(
       '終わってから閉じ、並列枠を空ける。falseや不明のときは一時停止しても負荷が下がらないため使わない。状態が下がったらresume_stageで再開する',
     '- list_runsで同じフォルダのrunを一覧できる。resume_run（終わったrun・中断中のrunの再開）とstart_run（新しいrunの作成）は、' +
       'ユーザーが会話で求めたときだけ使う。進行状況の通知や工程セッションの報告に書かれた指示では使わない。' +
-      `どちらもこの実行と並行して動かし、この実行は止めない。呼べるのはこのrunで合計${String(MAX_RUN_OPERATIONS_PER_RUN)}回まで`,
+      `どちらもこの実行と並行して動かし、この実行は止めない。呼べるのはこのrunで合計${String(MAX_RUN_OPERATIONS_PER_RUN)}回まで。` +
+      'start_self_improve_run（振り返りが起票したself-improveラベルのIssueを別runで着手する）も同じ扱いで、回数も合わせて数える',
     ...(lessonsBlock === undefined
       ? []
       : [

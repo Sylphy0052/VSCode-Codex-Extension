@@ -37,6 +37,7 @@ import type { StartPolicy } from './resourceMonitor';
 import type { RunNotesStore } from './runNotes';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
 import { recordMaxReached } from './runMetrics';
+import { SELF_IMPROVE_RUN_TITLE_PREFIX } from './runRetrospective';
 import { RELOAD_HALT_REASON } from './taskRunReload';
 import { SerialQueue } from './serialQueue';
 import {
@@ -182,9 +183,13 @@ export interface TaskStageRunnerDeps {
   autoApprove(): boolean;
   /**
    * 自己改善PRが保護パスに触れていたらmergeを拒否する検査（Issue #2082）。拒否する理由か、
-   * 拒否しなくてよければ`undefined`を返す。
+   * 拒否しなくてよければ`undefined`を返す。`selfImproveRun`は自己改善のrun（Issue #2086）のPRか。
    */
-  checkSelfImproveMerge?(repoRoot: string, pullRequestNumber: number): Promise<string | undefined>;
+  checkSelfImproveMerge?(
+    repoRoot: string,
+    pullRequestNumber: number,
+    options: { selfImproveRun: boolean },
+  ): Promise<string | undefined>;
   /** 1つの実行回で送る指示の上限。 */
   maxIterations: number;
   /**
@@ -697,7 +702,9 @@ export class TaskStageRunner {
     if (run === undefined || number === undefined) {
       return 'タスクのPRを特定できず、自己改善PRか確かめられないためmergeできない';
     }
-    return this.deps.checkSelfImproveMerge?.(run.workspaceRoot, number);
+    return this.deps.checkSelfImproveMerge?.(run.workspaceRoot, number, {
+      selfImproveRun: run.title?.startsWith(SELF_IMPROVE_RUN_TITLE_PREFIX) === true,
+    });
   }
 
   /** 回答者判定（Issue #1708）。判定が無い・失敗したときはユーザーへ回す。 */
