@@ -410,6 +410,19 @@ export interface TaskRun {
    * 項目の無い保存データは再開していないと読む。
    */
   reopenedAt?: string;
+  /**
+   * runの目的と完了条件（Issue #2088）。mergeのたびにOrchestratorが残りのタスクを目的に照らして見直す
+   * 拠り所にする。項目の無い保存データは目的なしと読む。
+   */
+  goal?: TaskRunGoal;
+}
+
+/** runの目的と完了条件（Issue #2088）。 */
+export interface TaskRunGoal {
+  /** 目的。 */
+  objective: string;
+  /** 完了条件（観測できる結果）。満たしたら残りのタスクがあっても終了を提案する。 */
+  completionCriteria: string;
 }
 
 /** runが対象にするロードマップIssue（Issue #1623）。 */
@@ -519,6 +532,8 @@ export interface CreateTaskRunInput {
   title?: string;
   /** ロードマップIssueから始めるときの対象（Issue #1623）。 */
   roadmap?: TaskRunRoadmap;
+  /** 目的と完了条件（Issue #2088）。 */
+  goal?: TaskRunGoal;
   now: Date;
 }
 
@@ -545,6 +560,7 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
     orchestratorGeneration: 0,
     orchestratorSessionRefs: [],
     ...(input.roadmap === undefined ? {} : { roadmap: input.roadmap }),
+    ...(input.goal === undefined ? {} : { goal: input.goal }),
   };
 }
 
