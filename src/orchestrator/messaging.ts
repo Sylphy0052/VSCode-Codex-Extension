@@ -1557,8 +1557,9 @@ export const SET_SESSION_PROFILE_TOOL: McpToolDefinition = {
   description:
     'この会話のmodelとeffortを変える。作業内容に対して今のmodel/effortが合わないと判断したときに呼ぶ。' +
     'いつから効くかは結果に書かれる（Claude Codeは同じターンの続きから、Codexは次の発言から）。' +
-    'modelを変えるとprompt cacheが作り直しになるため、' +
-    '途中の補正が必要なときだけ使う。使える値はモデル一覧で検証され、不正な値は使える値の一覧付きで' +
+    '会話の冒頭は履歴が無くcache損失が小さいので、作業に合う値へ切り替えてよい。' +
+    '途中でmodelを変えるとprompt cacheが作り直しになるため、その費用に見合うときだけ使う。' +
+    '使える値はモデル一覧で検証され、不正な値は使える値の一覧付きで' +
     '拒否される。既定へ戻す（空文字）ことはできない。',
   inputSchema: {
     type: 'object',
