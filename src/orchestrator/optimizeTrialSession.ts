@@ -52,9 +52,19 @@ export const CLAUDE_CHANGE_TOOLS = 'Read,Glob,Grep,Edit,Write,Bash';
 /**
  * Codexで落とす能力。工程の脇役用（`CODEX_DENIED_FEATURES`）のうち、試行は作業ディレクトリの
  * コードを読み書きするためシェルだけ残す。外部アプリ・ブラウザ・プラグインは落としたまま。
+ *
+ * `code_mode_host`も残す。codex-cli 0.166ではシェルの呼び出しがcode mode hostを経由し、
+ * これを落とすと「code-mode host is disabled」でコマンドが1つも実行されない（probeで実測）。
+ * 書き込みの範囲は`--sandbox workspace-write`が塞ぐので、残しても隔離は緩まない。
  */
+const CODEX_TRIAL_KEPT_FEATURES: ReadonlySet<string> = new Set([
+  'shell_tool',
+  'unified_exec',
+  'code_mode_host',
+]);
+
 export const CODEX_TRIAL_DENIED_FEATURES: readonly string[] = CODEX_DENIED_FEATURES.filter(
-  (feature) => feature !== 'shell_tool' && feature !== 'unified_exec',
+  (feature) => !CODEX_TRIAL_KEPT_FEATURES.has(feature),
 );
 
 const EFFORT_TOKEN = /^[A-Za-z0-9_-]{1,32}$/;

@@ -97,6 +97,9 @@ describe('buildCodexTrialArgs', () => {
     expect(args).toContain('browser_use');
     expect(args).toContain('apps');
     expect(args).not.toContain('shell_tool');
+    expect(args).not.toContain('unified_exec');
+    // シェルはcode mode host経由で動くので、落とすとコマンドが1つも実行されない
+    expect(args).not.toContain('code_mode_host');
   });
 });
 
