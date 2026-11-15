@@ -192,11 +192,16 @@ export async function fileToPluginRoadmap(deps: PluginRoadmapDeps): Promise<Plug
       notes.push(`${c.key}: 既存のIssueを確かめられないため起票しない`);
       continue;
     }
+    const title = mask(c.title);
     if (existing !== undefined) {
-      notes.push(`${c.key}: #${String(existing)}で起票済み`);
+      // 前回、起票は済んだがロードマップ本文の更新に失敗した場合に備え、skill本文の改善なら載せ直す
+      notes.push(
+        classifyPluginFiles(c.files) === 'skill'
+          ? await ensureOnRoadmap(deps, c.key, existing, title)
+          : `${c.key}: #${String(existing)}で起票済み`,
+      );
       continue;
     }
-    const title = mask(c.title);
     const body = `${mask(c.body)}\n\n${keyMarker(c.key)}\n`;
     if (classifyPluginFiles(c.files) === 'skill') {
       notes.push(await fileSkillImprovement(deps, c.key, title, body));
@@ -205,6 +210,26 @@ export async function fileToPluginRoadmap(deps: PluginRoadmapDeps): Promise<Plug
     }
   }
   return { notes };
+}
+
+async function ensureOnRoadmap(
+  deps: PluginRoadmapDeps,
+  key: string,
+  issueNumber: number,
+  title: string,
+): Promise<string> {
+  const { repo, forge } = deps;
+  const roadmap = await forge.readRoadmap(repo);
+  if (roadmap === undefined || roadmap === 'error') {
+    return `${key}: #${String(issueNumber)}で起票済み。ロードマップを読めず載っているか確かめられない`;
+  }
+  const next = appendToRoadmapReady(roadmap.body, issueNumber, title);
+  if (!next.added) {
+    return `${key}: #${String(issueNumber)}で起票済み`;
+  }
+  return (await forge.updateIssueBody(repo, roadmap.issueNumber, next.body))
+    ? `${key}: #${String(issueNumber)}が未掲載だったため、ロードマップ#${String(roadmap.issueNumber)}へ載せ直した`
+    : `${key}: #${String(issueNumber)}をロードマップ#${String(roadmap.issueNumber)}へ載せ直せなかった`;
 }
 
 async function fileSkillImprovement(
