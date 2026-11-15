@@ -90,22 +90,21 @@ export function maskForGithub(text: string, options: IssueMaskOptions): string {
     (_m: string, owner: string, name: string) =>
       `${owner}/${name}`.toLowerCase() === own ? `${owner}/${name}` : MASK_REPO,
   );
-  // メールは先に伏せる（URLのuserinfoと混ざらないように）
-  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, MASK_EMAIL);
   // GitHub URLのrepoは、宛先repo以外を伏せる。ホストは残す（公開情報のため）
   out = out.replace(
-    /https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+)/gi,
+    /https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]*[\w-])/gi,
     (match: string, owner: string, name: string) =>
       `${owner}/${name}`.toLowerCase() === own ? match : `https://github.com/${MASK_REPO}`,
   );
-  // それ以外のURLはホストを伏せる（パスは残す）
+  // それ以外のURLはホストを伏せる（パスは残す）。スキームは問わず、userinfo・ポート・IPv6も
+  // authority全体として伏せる
   out = out.replace(
-    /(https?:\/\/)([^\s/:?#<>"')]+)(:\d+)?/gi,
-    (match: string, scheme: string, host: string) =>
-      host.toLowerCase().replace(/^www\./, '') === 'github.com' || host === MASK_REPO
-        ? match
-        : `${scheme}${MASK_URL_HOST}`,
+    /([a-z][a-z0-9+.-]*:\/\/)((?:<[A-Z]+>|[^\s/?#<>"')])*)/gi,
+    (match: string, scheme: string, authority: string) =>
+      /^(?:www\.)?github\.com(?::\d+)?$/i.test(authority) ? match : `${scheme}${MASK_URL_HOST}`,
   );
+  // メールはURLのauthorityを伏せた後に伏せる（userinfoの`@`をURLごと先に処理するため）
+  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, MASK_EMAIL);
   return out;
 }
 

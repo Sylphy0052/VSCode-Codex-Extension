@@ -60,7 +60,10 @@ describe('起票', () => {
     const body = buildLessonIssueBody(
       lesson('repoArtifact', {
         observation: 'a@example.com が https://internal.example.co.jp/x/y で失敗',
-        evidence: ['https://github.com/secret-org/private-repo/pull/1', 'git@github.com:org/other.git'],
+        evidence: [
+          'https://github.com/secret-org/private-repo/pull/1',
+          'git@github.com:org/other.git',
+        ],
         instruction: `https://github.com/${OWN}/issues/1 を参照`,
       }),
       'public',
@@ -77,5 +80,21 @@ describe('起票', () => {
 
   it('maskForGithubはホスト付きポートも伏せる', () => {
     expect(maskForGithub('http://10.0.0.1:8080/a', { ownRepo: OWN })).not.toContain('10.0.0.1');
+  });
+
+  it('userinfo付き・http以外のスキーム・IPv6のホストも伏せる', () => {
+    const out = maskForGithub(
+      'https://user:pw@h.corp/x git://host.corp/y ssh://git@git.corp.example/t/r.git https://[::1]:80/a',
+      { ownRepo: OWN },
+    );
+    for (const leaked of ['h.corp', 'host.corp', 'corp.example', '::1', 'user']) {
+      expect(out).not.toContain(leaked);
+    }
+  });
+
+  it('文末のピリオドが付いた自repoのURLは伏せない', () => {
+    expect(maskForGithub(`see https://github.com/${OWN}.`, { ownRepo: OWN })).toBe(
+      `see https://github.com/${OWN}.`,
+    );
   });
 });
