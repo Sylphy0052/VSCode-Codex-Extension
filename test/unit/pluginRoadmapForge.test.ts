@@ -150,7 +150,7 @@ describe('createGithubPluginRoadmapForge', () => {
       ok: true,
       issueNumber: 7,
     });
-    expect(s.calls[0].slice(0, 2)).toEqual(['label', 'create']);
+    expect(s.calls[0]?.slice(0, 2)).toEqual(['label', 'create']);
     expect(s.calls[1]).toContain('--label=research');
   });
 

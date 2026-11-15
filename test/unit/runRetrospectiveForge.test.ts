@@ -87,7 +87,7 @@ describe('createGithubRetrospectiveForge', () => {
     const issue = { title: 't', body: 'b', labels: ['self-improve', 'research'] };
     const s = setup(() => ok('https://github.com/o/r/issues/12\n'));
     expect(await s.forge.createIssue('/r', issue)).toEqual({ ok: true, issueNumber: 12 });
-    expect(s.calls[0].join(' ')).toContain('self-improve,research');
+    expect(s.calls[0]?.join(' ')).toContain('self-improve,research');
     const failed = await setup(() => ng('denied')).forge.createIssue('/r', issue);
     expect(failed.ok).toBe(false);
     expect(await setup(() => ok('no url')).forge.createIssue('/r', issue)).toEqual({
@@ -135,7 +135,7 @@ describe('readMergeState', () => {
         return issue;
       }
       if (args[0] === 'pr') {
-        return prs[args[2]] ?? ng();
+        return prs[args[2] ?? ''] ?? ng();
       }
       return pkg;
     });
