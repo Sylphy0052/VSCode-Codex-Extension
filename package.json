@@ -1824,6 +1824,20 @@
           "scope": "window",
           "markdownDescription": "オーケストレータモード（Issue #1505）でOrchestratorが提案した計画を、Reflexが妥当と判定したとき自動で承認する（Issue #1554）。ロードマップ実行（Issue #1465）の計画審査と同じ判定器・閾値を使い、計画そのものの整合だけを見る。判定を得られない（時間切れ・不正な応答）ときや「妥当」と言い切らないときは、これまでどおりユーザーの承認待ちにする。無効にすると判定を試みず、常に承認待ちにする。Reflexモード（`agent.chat.reflex.enabled`）がOFFのときも同様に判定しない（Issue #1713）。既定は無効（Issue #1679。承認前の計画を人が確認するため）。"
         },
+        "agent.taskRun.planApproval.mode": {
+          "type": "string",
+          "enum": [
+            "human",
+            "orchestrator"
+          ],
+          "enumDescriptions": [
+            "人がKanbanで計画を承認する（既定）。Orchestratorの`approve_plan`はユーザーに頼まれたときだけ使い、Reflexが妥当と言えなければ人に確かめる。",
+            "Orchestratorが計画を承認する。`approve_plan`にselfCheck（自己確認）を必須とし、計画の本文だけを別のCLIへ渡すセカンドオピニオンとReflexを必ず通す。3段とも妥当のときだけ承認し、そうでなければ人へ回さず指摘をOrchestratorへ返す。人は計画を見ないまま工程が進むため、判断の根拠はKanbanの計画承認欄に残る。"
+          ],
+          "default": "human",
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード（Issue #1505）で計画を承認する主体（Issue #2073）。`orchestrator`にするとReflexモード（`agent.chat.reflex.enabled`）が必要で、OFFのときは承認せずKanbanでの人の承認を待つ。`orchestrator`では`agent.taskRun.planAutoApprove.enabled`の自動承認は使わず、承認はすべて`approve_plan`の3段を通す。既定は`human`。"
+        },
         "agent.taskRun.autoStartStages.enabled": {
           "type": "boolean",
           "default": false,

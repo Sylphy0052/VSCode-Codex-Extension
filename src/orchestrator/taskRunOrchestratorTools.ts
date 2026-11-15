@@ -126,8 +126,20 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'approve_plan',
     description:
-      '承認待ちの計画を承認し、工程を始める。Reflexが計画を審査し、妥当と判定すればそのまま承認される。妥当と言えなければユーザーの確認が入り、ユーザーが許可したときだけ承認される。承認待ちの計画が無ければ失敗する。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      '承認待ちの計画を承認し、工程を始める。承認待ちの計画が無ければ失敗する。' +
+      '設定agent.taskRun.planApproval.modeがhuman（既定）のとき: Reflexが計画を審査し、妥当と判定すればそのまま承認される。妥当と言えなければユーザーの確認が入り、ユーザーが許可したときだけ承認される。selfCheckは使わない。' +
+      'orchestratorのとき: selfCheck（必須）の存在確認 → セカンドオピニオン（計画の本文だけを別のCLIへ渡す独立レビュー。selfCheckと会話は渡らない）→ Reflexの順に審査し、3段とも妥当のときだけ承認される。1つでも妥当と言えなければ承認されず、理由と指摘が返る（ユーザーの確認は出ない）。指摘を直してpropose_planで出し直し、selfCheckを書き直して再度呼ぶ。セカンドオピニオンが「誤りがある」とした計画は、直さない限り審査し直さない。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selfCheck: {
+          type: 'string',
+          description:
+            'orchestratorモードで必須。承認前に計画を自分で点検した結果（確認した項目と結論。タスクの分割・依存・受入基準・範囲を具体的に書く）。空や短すぎる値は拒否される。humanモードでは使わない',
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'get_run_state',
@@ -429,6 +441,8 @@ const PAUSE_PHASE_LABELS: Record<TaskStagePausePhase, string> = {
  * `resolve_gate`はツールの処理の中で本文をモーダルで確認するため、チャットの承認には回さない。
  * 計画の承認（`approve_plan`）も同様に、ツールの処理の中でReflexに審査させ、妥当と言えなければ
  * モーダルで人に確かめる（Issue #1763。承認前の計画を人かReflexが確かめる。Issue #1679）。
+ * `agent.taskRun.planApproval.mode=orchestrator`では、モーダルを出さず自己確認・セカンドオピニオン・
+ * Reflexの3段を通ったときだけ承認する（Issue #2073）。
  */
 export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = new Set([
   'propose_plan',
@@ -450,7 +464,7 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
 
 export type TaskRunOrchestratorCall =
   | { tool: 'propose_plan'; rawArgs: unknown }
-  | { tool: 'approve_plan' }
+  | { tool: 'approve_plan'; selfCheck: string | undefined }
   | { tool: 'get_run_state'; request: RunStateRequest }
   | { tool: 'sync_roadmap' }
   | { tool: 'refresh_kanban' }
@@ -617,7 +631,11 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
     return { ok: true, call: { tool: 'propose_plan', rawArgs: raw } };
   }
   if (name === 'approve_plan') {
-    return { ok: true, call: { tool: 'approve_plan' } };
+    // selfCheckの要否はmode（設定）で決まるため、ここでは型だけ確かめる。不足の拒否はControllerが行う
+    if (a.selfCheck !== undefined && typeof a.selfCheck !== 'string') {
+      return { ok: false, message: 'selfCheckは文字列で指定する' };
+    }
+    return { ok: true, call: { tool: 'approve_plan', selfCheck: a.selfCheck } };
   }
   if (name === 'get_run_state') {
     return parseGetRunState(a);

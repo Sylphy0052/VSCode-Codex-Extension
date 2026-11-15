@@ -63,6 +63,8 @@ const TITLE_MAX_LENGTH = 200;
 /** Kanbanに出すロードマップの記録の件数。 */
 const KANBAN_ROADMAP_NOTICES_SHOWN = 3;
 const SUMMARY_MAX_LENGTH = 300;
+/** Kanbanに出すOrchestratorの自己確認の上限（Issue #2073）。保存側の上限（1500字）より短く畳む。 */
+const PLAN_SELF_CHECK_MAX_LENGTH = 600;
 const FAILURE_MAX_LENGTH = 300;
 const GATE_DETAIL_MAX_LENGTH = 2000;
 
@@ -154,6 +156,14 @@ export interface TaskRunKanbanRunSummary {
 export interface TaskRunKanbanPlanReview {
   autoApproved: boolean;
   summary: string;
+  /**
+   * `approve_plan`（mode=orchestrator）が3段を通した記録のときだけ付く（Issue #2073）。承認した主体と、
+   * 自己確認・セカンドオピニオンの結果。無いときはReflexだけの審査（従来の表示）。
+   */
+  orchestrator?: {
+    selfCheck: string;
+    secondOpinion: { verdict: 'valid' | 'wrong' | 'unknown'; findings: string[] } | undefined;
+  };
 }
 
 export interface TaskRunKanbanRun {
@@ -407,9 +417,27 @@ function toKanbanPlanReview(
   if (review === undefined) {
     return undefined;
   }
-  return {
+  const base = {
     autoApproved: review.autoApproved,
     summary: sanitizeInlineText(review.summary, SUMMARY_MAX_LENGTH),
+  };
+  if (review.approver !== 'orchestrator') {
+    return base;
+  }
+  return {
+    ...base,
+    orchestrator: {
+      selfCheck: sanitizeInlineText(review.selfCheck ?? '', PLAN_SELF_CHECK_MAX_LENGTH),
+      secondOpinion:
+        review.secondOpinion === undefined
+          ? undefined
+          : {
+              verdict: review.secondOpinion.verdict,
+              findings: review.secondOpinion.findings.map((f) =>
+                sanitizeInlineText(f, SUMMARY_MAX_LENGTH),
+              ),
+            },
+    },
   };
 }
 
