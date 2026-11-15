@@ -16,7 +16,13 @@ import {
   type PreparedWebGptDiscussion,
 } from './webGptDiscussionFromTool';
 import { applySessionProfileTool, type SessionProfile } from './sessionProfileTool';
-import type { SessionProfileToolArgs, SessionProfileToolResult } from '../orchestrator/messaging';
+import type {
+  SessionProfileToolArgs,
+  SessionProfileToolResult,
+  StartRoadmapOrchestratorToolArgs,
+  StartRoadmapOrchestratorToolResult,
+} from '../orchestrator/messaging';
+import { startRoadmapOrchestratorFromTool } from './startRoadmapOrchestratorTool';
 import {
   buildApprovalResponse,
   defaultDenyResponse,
@@ -807,6 +813,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
             webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args),
             // エージェントが自分のmodel/effortを変えるツール（Issue #2053）
             sessionProfile: (args) => this.setSessionProfileFromTool(entry, args),
+            // ロードマップのオーケストレータモードを起動するツール（Issue #2070）
+            startRoadmapOrchestrator: (args) => this.startRoadmapOrchestratorFromTool(entry, args),
           },
     );
   }
@@ -822,6 +830,22 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const saved = await this.persistModelSettings(entry);
     this.postState(entry);
     return saved;
+  }
+
+  /** エージェントが`start_roadmap_orchestrator`でロードマップのrunを起動する（Issue #2070）。 */
+  private startRoadmapOrchestratorFromTool(
+    entry: ChatPanel,
+    args: StartRoadmapOrchestratorToolArgs,
+  ): Promise<StartRoadmapOrchestratorToolResult> {
+    return startRoadmapOrchestratorFromTool(
+      {
+        engine: 'codex',
+        folder: () => entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath,
+        note: (text) => entry.session.noteLocalEvent(`startRoadmap:${Date.now()}`, text),
+        log: (text) => entry.trace.info(text),
+      },
+      args,
+    );
   }
 
   /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */

@@ -1546,6 +1546,83 @@ export function parseWebGptDiscussionToolArgs(
 }
 
 /**
+ * 通常チャットのモデルがロードマップのオーケストレータモードを起動するツール（Issue #2070）。
+ * 1セッション用のhubで、`startRoadmapOrchestrator`が渡されているときだけ見せる。Orchestratorと
+ * 工程セッション（タスク実行の会話）には渡さない（run内から別のrunを立てる再帰を防ぐため）。
+ *
+ * 起動前の確認は出さない。人の関門はKanbanの計画承認（runは`awaitingApproval`で始まる）。
+ */
+export const START_ROADMAP_ORCHESTRATOR_TOOL: McpToolDefinition = {
+  name: 'start_roadmap_orchestrator',
+  description:
+    'ロードマップIssueのオーケストレータモード（実装以降を自動で進めるrun）を起動する。' +
+    'Issueを起票してロードマップへ載せ終え、実装へ進む段になったときに呼ぶ（子Issueが1件でも呼ぶ）。' +
+    'ロードマップの子Issueを進める依頼を受けたときも呼ぶ。会話の中で実装しない。' +
+    '調査だけ、質問への回答、ロードマップに載せない小さな修正では呼ばない。' +
+    '同じロードマップIssueのrunが既にあれば新しく作らず、ロードマップを読み直させる' +
+    '（中断中なら再開してから読み直させる）。起動したrunの計画は承認待ちで始まり、' +
+    '利用者がKanbanで承認すると工程が進む。結果が`accepted: true`なら**このターンをすぐ終えること**。' +
+    '`accepted: false`なら`reason`を利用者へ伝え、runは始まっていない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      roadmapIssueNumber: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'ロードマップIssueの番号。省略するとroadmapラベルのopenなIssueが1本のときそれを使う。',
+      },
+      reason: {
+        type: 'string',
+        description: '起動する理由（1行）。会話と作業ログに残る。',
+      },
+    },
+    required: ['reason'],
+    additionalProperties: false,
+  },
+};
+
+/** `start_roadmap_orchestrator`の引数。型と必須だけを確かめた値。 */
+export interface StartRoadmapOrchestratorToolArgs {
+  roadmapIssueNumber: number | undefined;
+  reason: string;
+}
+
+/** `start_roadmap_orchestrator`の結果。 */
+export interface StartRoadmapOrchestratorToolResult {
+  accepted: boolean;
+  reason: string;
+  /** 起動した・読み直したrunのID。 */
+  runId?: string | undefined;
+  /** 既存runを読み直しただけなら`true`。 */
+  reused?: boolean | undefined;
+}
+
+/** 呼び出し元の会話でロードマップのrunを起動する口。会話ごとに束縛した関数を渡す。 */
+export type StartRoadmapOrchestratorPort = (
+  args: StartRoadmapOrchestratorToolArgs,
+) => Promise<StartRoadmapOrchestratorToolResult>;
+
+/** `start_roadmap_orchestrator`の引数を型と必須だけ確かめて取り出す。 */
+export function parseStartRoadmapOrchestratorToolArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: StartRoadmapOrchestratorToolArgs } | { ok: false; reason: string } {
+  const { roadmapIssueNumber, reason } = args;
+  if (
+    roadmapIssueNumber !== undefined &&
+    (typeof roadmapIssueNumber !== 'number' ||
+      !Number.isInteger(roadmapIssueNumber) ||
+      roadmapIssueNumber < 1)
+  ) {
+    return { ok: false, reason: 'roadmapIssueNumberは1以上の整数で指定してください' };
+  }
+  if (typeof reason !== 'string' || reason.trim() === '') {
+    return { ok: false, reason: 'reasonに起動する理由を1行で指定してください' };
+  }
+  return { ok: true, value: { roadmapIssueNumber, reason } };
+}
+
+/**
  * 呼び出し元の会話のmodel/effortを変えるツール（Issue #2053）。1セッション用のhubで、
  * `sessionProfile`が渡されているときだけ見せる（タスク実行の会話には渡さない）。
  *
@@ -1792,6 +1869,12 @@ export interface TaskMessagingHubDeps {
    */
   sessionProfile?: SessionProfilePort | undefined;
   /**
+   * ロードマップのオーケストレータモードを呼び出し元の会話で起動する口（Issue #2070）。
+   * `sessionOnly`のhubでだけ読み、渡されているときだけ`start_roadmap_orchestrator`を見せる。
+   * Orchestratorと工程セッションには渡さない。
+   */
+  startRoadmapOrchestrator?: StartRoadmapOrchestratorPort | undefined;
+  /**
    * オーケストレーターが今メッセージを受け取れるか（Issue #1513）。タスクから
    * オーケストレーターへの送信を受け付けたときにだけ呼ぶ。`recovering`・`unavailable`なら
    * 結果の`reason`へその旨を足し、`unavailable`では`expectReply`を落として積む
@@ -1916,6 +1999,10 @@ export class TaskMessagingHub {
   /** 呼び出し元の会話のmodel/effortを変える口（Issue #2053）。1セッション用のhubでだけ返す。 */
   get sessionProfile(): SessionProfilePort | undefined {
     return this.deps.sessionOnly === true ? this.deps.sessionProfile : undefined;
+  }
+
+  get startRoadmapOrchestrator(): StartRoadmapOrchestratorPort | undefined {
+    return this.deps.sessionOnly === true ? this.deps.startRoadmapOrchestrator : undefined;
   }
 
   /**
@@ -2514,6 +2601,9 @@ export class MessagingMcpServer {
       const ownTools = [
         ...(this.hub.webGptDiscussion === undefined ? [] : [START_WEBGPT_DISCUSSION_TOOL]),
         ...(this.hub.sessionProfile === undefined ? [] : [SET_SESSION_PROFILE_TOOL]),
+        ...(this.hub.startRoadmapOrchestrator === undefined
+          ? []
+          : [START_ROADMAP_ORCHESTRATOR_TOOL]),
       ];
       return this.hub.sessionBridge === undefined
         ? ownTools
@@ -2617,6 +2707,9 @@ export class MessagingMcpServer {
     }
     if (name === SET_SESSION_PROFILE_TOOL.name) {
       return this.handleSessionProfileCall(request, args);
+    }
+    if (name === START_ROADMAP_ORCHESTRATOR_TOOL.name) {
+      return this.handleStartRoadmapOrchestratorCall(request, args);
     }
 
     if (this.hub.sessionOnly && name !== 'send_message' && !SESSION_TOOL_NAMES.has(name)) {
@@ -2839,6 +2932,39 @@ export class MessagingMcpServer {
       }
     }
     return success(request.id, toolTextResult(JSON.stringify(result), !result.applied));
+  }
+
+  /**
+   * `start_roadmap_orchestrator`（Issue #2070）の呼び出し。口が無いhub（run用・タスク実行の会話）
+   * では「未知のツール」で拒否する（`visibleTools`と同じ条件の多層防御）。
+   */
+  private async handleStartRoadmapOrchestratorCall(
+    request: JsonRpcRequest,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const port = this.hub.startRoadmapOrchestrator;
+    if (port === undefined) {
+      return failure(
+        request.id,
+        -32602,
+        `未知のツールです: ${START_ROADMAP_ORCHESTRATOR_TOOL.name}`,
+      );
+    }
+    const parsed = parseStartRoadmapOrchestratorToolArgs(args);
+    let result: StartRoadmapOrchestratorToolResult;
+    if (!parsed.ok) {
+      result = { accepted: false, reason: parsed.reason };
+    } else {
+      try {
+        result = await port(parsed.value);
+      } catch (error) {
+        result = {
+          accepted: false,
+          reason: `オーケストレータモードを起動できませんでした: ${sanitizeInlineText(error instanceof Error ? error.message : String(error), 200)}`,
+        };
+      }
+    }
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
   }
 
   /**
