@@ -45,6 +45,13 @@ function isStoredTaskRun(r: unknown): r is TaskRun {
 }
 
 export class TaskRunStore extends MementoRunStore<TaskRun> {
+  /**
+   * runが終わった（`finishedAt`が新しく立った）ときに呼ぶ（Issue #2081）。終了の経路（reload・controller・
+   * stage runner・人の操作）はどれも`update`を通るので、ここで1回だけ受ける。再開して終わり直したrunは
+   * `finishedAt`が変わるので、もう一度呼ぶ。
+   */
+  onRunFinished: ((run: TaskRun) => void) | undefined;
+
   constructor(memento: MementoLike, log?: (message: string) => void) {
     super(memento, {
       key: TASK_RUNS_KEY,
@@ -74,6 +81,12 @@ export class TaskRunStore extends MementoRunStore<TaskRun> {
   /** 同じワークスペースのrun（終わったものを含む）。フォルダ全体の同時セッション数を数えるのに使う。 */
   listInFolder(workspaceRoot: string): TaskRun[] {
     return this.list().filter((r) => r.workspaceRoot === workspaceRoot);
+  }
+
+  protected override afterUpdate(prev: TaskRun | undefined, next: TaskRun): void {
+    if (next.finishedAt !== undefined && prev?.finishedAt !== next.finishedAt) {
+      this.onRunFinished?.(next);
+    }
   }
 
   /**

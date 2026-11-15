@@ -86,9 +86,17 @@ export class MementoRunStore<T extends StoredRun> {
       await this.memento.update(this.options.key, trimmed);
       // 書き込みに失敗したら（上で例外になり）キャッシュは前の内容のまま残る
       this.cache = trimmed;
+      try {
+        this.afterUpdate(current, next);
+      } catch {
+        // 通知の失敗で状態の更新を失敗させない
+      }
       return next;
     });
   }
+
+  /** 書き込みに成功した更新のあとで呼ぶ。`prev`は更新前（新規なら`undefined`）。派生クラスが差し替える。 */
+  protected afterUpdate(_prev: T | undefined, _next: T): void {}
 
   clearAll(): Promise<void> {
     return this.queue.enqueue(async () => {

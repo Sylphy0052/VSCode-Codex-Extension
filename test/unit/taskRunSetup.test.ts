@@ -274,6 +274,7 @@ function makeDeps(overrides: Partial<TaskRunSetupDeps> = {}): TaskRunSetupDeps {
     store: { list: () => [] } as unknown as TaskRunSetupDeps['store'],
     windowId: 'window-1',
     globalStorageDir: '/tmp/global-storage',
+    extensionVersion: '0.0.0-test',
     hosts: {} as TaskRunSetupDeps['hosts'],
     worktreeQueue: worktreeQueue as unknown as TaskRunSetupDeps['worktreeQueue'],
     git: git as unknown as TaskRunSetupDeps['git'],
