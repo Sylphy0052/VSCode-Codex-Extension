@@ -20,6 +20,7 @@ import {
   FIXTURE_NOW,
   haltedTask,
   makeRun,
+  resolvedRetryGate,
   reviewResult,
   reviewedTask,
   withOpenGate,
@@ -247,6 +248,43 @@ describe('TaskStageRunner.judgeGate', () => {
     expect(findStageGate(t.run(), 'T1', 'g1')).toMatchObject({
       status: 'awaitingOrchestrator',
       reflexSummary: '上げる 0.70\n回答者判定: 決めてよい 0.90',
+    });
+  });
+
+  describe('同じ原因の2回目の失敗', () => {
+    function repeatedRun(priorDetail: string): TaskRun {
+      const prior = { ...resolvedRetryGate('old1', 'implement', 'reflex'), detail: priorDetail };
+      return withOpenGate(
+        makeRun([haltedTask('T1', { gates: [prior] })]),
+        'T1',
+        'g1',
+        'stageFailed',
+        'テストが落ちた',
+      );
+    }
+
+    it('Reflexにやり直しを選ばせず、回答者判定へ回してオーケストレーターの判断待ちにする', async () => {
+      const judgeGate = vi.fn<GateJudge>(async () => answer(GATE_OPTION_RETRY));
+      const judgeAnswerer = vi.fn<AnswererJudge>(async () => ({
+        kind: 'orchestrator',
+        summary: '決めてよい',
+      }));
+      const t = setup(repeatedRun('テストが落ちた'), { judgeGate, judgeAnswerer });
+      await t.internals.judgeGate('run-1', 'T1', 'g1', undefined);
+      expect(judgeGate).not.toHaveBeenCalled();
+      expect(judgeAnswerer).toHaveBeenCalledTimes(1);
+      expect(findStageGate(t.run(), 'T1', 'g1')).toMatchObject({ status: 'awaitingOrchestrator' });
+    });
+
+    it('前回と原因が違えば従来どおりReflexがやり直しを選べる', async () => {
+      const judgeGate = vi.fn<GateJudge>(async () => answer(GATE_OPTION_RETRY));
+      const t = setup(repeatedRun('別の原因'), { judgeGate });
+      await t.internals.judgeGate('run-1', 'T1', 'g1', undefined);
+      expect(judgeGate).toHaveBeenCalledTimes(1);
+      expect(findStageGate(t.run(), 'T1', 'g1')).toMatchObject({
+        status: 'resolved',
+        resolution: { choice: 'retry', by: 'reflex' },
+      });
     });
   });
 
