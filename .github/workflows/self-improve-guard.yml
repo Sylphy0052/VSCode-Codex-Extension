@@ -1,0 +1,29 @@
+# 自己改善PR（ラベル self-improve）が保護パスに触れたら失敗させる（Issue #2082）。
+# 保護パスの一覧はPR側ではなくベースブランチのものを使う（PRで一覧を空にして回避されないため）。
+# pull_request_targetは使わない（ci.ymlの前提を参照）。ラベルはイベントのペイロードから読む。
+name: Self-improve guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: self-improve-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check protected paths
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/check-self-improve-protected.mjs "$BASE_SHA" "$HEAD_SHA"

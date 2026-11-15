@@ -1,0 +1,26 @@
+# 自律改善（ラベル self-improve のPR）が触れてはならないパス（Issue #2082）。
+# 1行1パターン。`*`は`/`を除く任意の文字列、`**`は`/`を含む任意の文字列、末尾`/`は以下すべて。
+# 検査: src/orchestrator/selfImproveGuard.ts（merge判定）と scripts/check-self-improve-protected.mjs（CI）。
+# このファイルの変更も拒否される。変更が必要なら調査Issueのチェックリストへ提案として残す。
+
+# 関門・上限値・差し戻しの規則
+src/orchestrator/taskRunGates.ts
+src/orchestrator/taskRunGateReview.ts
+# 承認判定（AskUserQuestionの拒否、merge・ブランチ削除の扱い）
+src/orchestrator/taskStageApproval.ts
+# 総則・closeの人確認
+src/orchestrator/taskRunOrchestrator.ts
+# セカンドオピニオン
+src/orchestrator/planSecondOpinion.ts
+# 保存済みrunの互換（TASK_RUN_SCHEMA_VERSION）
+src/orchestrator/taskRunState.ts
+src/orchestrator/taskRunStore.ts
+# 指標の計算（#2081で追加するファイルもここへ足す）
+src/orchestrator/promptMetrics.ts
+src/orchestrator/toolUsageMetrics.ts
+# 保護パスの一覧と、それを検査するコード・CI設定
+.github/self-improve-protected-paths
+.github/workflows/
+src/orchestrator/selfImproveGuard.ts
+src/orchestrator/selfImproveMergeCheck.ts
+scripts/check-self-improve-protected.mjs

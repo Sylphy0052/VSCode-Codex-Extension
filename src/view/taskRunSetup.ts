@@ -63,6 +63,7 @@ import {
 } from '../orchestrator/taskRunState';
 import type { TaskRunStore } from '../orchestrator/taskRunStore';
 import type { TaskSessionConfig, TaskSessionHost } from '../orchestrator/taskSession';
+import { checkSelfImproveMerge } from '../orchestrator/selfImproveMergeCheck';
 import { createStageObservationPorts } from '../orchestrator/taskStageObservation';
 import { TaskStageRunner } from '../orchestrator/taskStageRunner';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
@@ -310,6 +311,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     resolveBaseCommit: (root) => resolveRoadmapBaseCommit(ports, root),
     sessionConfig: (engine) => deps.sessionConfig(engine),
     autoApprove: () => deps.readBaseline().allowAutoApprove,
+    checkSelfImproveMerge: (root, prNumber) => checkSelfImproveMerge(ports, root, prNumber),
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
     startGate: {

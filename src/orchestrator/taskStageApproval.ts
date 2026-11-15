@@ -162,10 +162,26 @@ export function isJudgeableMergeCommand(command: string, target: MergeCommandTar
   return false;
 }
 
+/**
+ * PRのmergeを拒否する理由を返す（Issue #2082）。自己改善PRが保護パスに触れていれば理由、
+ * 拒否しなくてよければ`undefined`。確かめられないときは理由を返す（fail closed）。
+ */
+export type SelfImproveMergeGuard = (command: string) => Promise<string | undefined>;
+
+/** PRのmerge（ブランチ削除を除く）に当たるコマンド。 */
+function isPullRequestMerge(command: string): boolean {
+  return (
+    /\bgh\s+(?:-\S+\s+(?:\S+\s+)?)*pr\s+merge\b/i.test(command) ||
+    /\bglab\s+(?:-\S+\s+(?:\S+\s+)?)*mr\s+merge\b/i.test(command) ||
+    /\b(?:gh|glab)\s+api\b[^\n]*\/merge\b/i.test(command)
+  );
+}
+
 export function stageApprovalHandler(
   stage: TaskStage,
   autoApprove: boolean,
   judgeMerge?: MergeCommandJudge,
+  guardMerge?: SelfImproveMergeGuard,
 ): ApprovalHandler {
   return async (approval, rawParams) => {
     // 工程セッションには人が張り付いていないため、質問はOrchestratorへ回させる
@@ -177,6 +193,15 @@ export function stageApprovalHandler(
       return { kind: 'auto', decision: 'accept' };
     }
     const command = commandOf(rawParams);
+    // 自己改善PRの保護パス検査は、工程と`autoApprove`に関わらず、mergeの承認の前に行う
+    if (guardMerge !== undefined && isPullRequestMerge(command)) {
+      const denial = await guardMerge(command).catch(
+        () => '自己改善PRの保護パス検査に失敗したためmergeできない',
+      );
+      if (denial !== undefined) {
+        return { kind: 'auto', decision: 'decline', message: denial };
+      }
+    }
     if (stage !== 'mergeCleanup' && isMergeOrRemoteBranchDelete(command)) {
       // ツールの承認は同期で待つため、オーケストレーターの判断待ちを経由せず許可か人かの二択にする。
       // `autoApprove`が無効なら、ほかのコマンドと同じく人が承認する
