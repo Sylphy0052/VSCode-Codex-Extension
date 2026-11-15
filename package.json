@@ -1683,6 +1683,18 @@
           "scope": "machine",
           "markdownDescription": "自律改善（この拡張自身を直すIssue）を起票する件数の、直近7日あたりの上限（K）。評価中（merge済みで判定が出ていない）の改善があるあいだは、新しい自己改善に着手しない（同時1件）。"
         },
+        "agent.orchestrator.selfImprove.pluginRepo": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "個人plugin（`~/.claude`へ同期されるrepo）の`owner/name`。空なら、plugin向けの改善を起票しない。設定すると、振り返りで見つかったskill本文の改善を、そのrepoのロードマップIssue（`roadmap`ラベルの1本）の子として自律で起票する。hook・設定・規約・スクリプトの改善は調査Issue（`research`ラベル）へ提案として残すだけで、起票しない（Issue #2089）。"
+        },
+        "agent.orchestrator.selfImprove.pluginSyncedCommitFile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "`~/.claude`へ同期済みのpluginのcommit（SHA）を書いたファイルのパス。runの記録へ、pluginの最新commitとの一致を残すために読む。空なら同期の状態は「確かめられない」と記録する。"
+        },
         "agent.orchestrator.selfImprove.weeklyUsageThresholdPct": {
           "type": "number",
           "default": 80,

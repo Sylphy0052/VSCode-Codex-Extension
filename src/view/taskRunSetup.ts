@@ -11,6 +11,7 @@ import {
   readClaudeConfig,
   readConfig,
   readReflexEnabled,
+  readPluginRoadmapSettings,
   readSelfImproveBudgetRaw,
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
@@ -37,6 +38,11 @@ import {
 } from '../orchestrator/roadmapRunForge';
 import type { RunNotesStore } from '../orchestrator/runNotes';
 import { parseGithubRepo, RunRetrospective } from '../orchestrator/runRetrospective';
+import {
+  createGithubPluginRoadmapForge,
+  isPluginRepoName,
+  readSyncedCommit,
+} from '../orchestrator/pluginRoadmapForge';
 import { createGithubRetrospectiveForge } from '../orchestrator/runRetrospectiveForge';
 import { normalizeConfig } from '../orchestrator/selfImproveBudget';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
@@ -317,6 +323,17 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     runNotes: deps.runNotes,
     forge: createGithubRetrospectiveForge(ports),
     ownRepo: parseGithubRepo(deps.extensionRepositoryUrl),
+    plugin: () => {
+      const settings = readPluginRoadmapSettings();
+      if (!isPluginRepoName(settings.repo)) {
+        return undefined;
+      }
+      return {
+        repo: settings.repo,
+        forge: createGithubPluginRoadmapForge(ports, os.homedir()),
+        installedCommit: () => readSyncedCommit(settings.syncedCommitFile),
+      };
+    },
     budgetConfig: () => normalizeConfig(readSelfImproveBudgetRaw()),
     weeklyUsagePct: async (engine) => deps.weeklyUsagePct?.(engine),
     now: () => Date.now(),

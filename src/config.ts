@@ -1843,6 +1843,22 @@ export function readSelfImproveBudgetRaw(): {
 }
 
 /**
+ * plugin向けの改善の起票先（Issue #2089）。`repo`が空なら起票しない。`syncedCommitFile`は
+ * `~/.claude`へ同期済みのpluginのcommitを書いたファイル（空なら同期の状態は「確かめられない」）。
+ */
+export function readPluginRoadmapSettings(): { repo: string; syncedCommitFile: string } {
+  const c = vscode.workspace.getConfiguration('agent');
+  const str = (key: string): string => {
+    const v = c.get<unknown>(key);
+    return typeof v === 'string' ? v.trim() : '';
+  };
+  return {
+    repo: str('orchestrator.selfImprove.pluginRepo'),
+    syncedCommitFile: str('orchestrator.selfImprove.pluginSyncedCommitFile'),
+  };
+}
+
+/**
  * メッセージング用MCPツールの実利用率を出力パネルへ記録するか（Issue #1324）。
  *
  * 30個近いツールのうち実際に呼ばれているのはどれかを実測し、接続種別・フェーズごとの

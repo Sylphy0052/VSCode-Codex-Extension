@@ -12,7 +12,7 @@
  */
 
 import { decideIssueFiling, maskForGithub, type RepoVisibility } from './lessonPromotion';
-import type { LessonSource } from './runNotes';
+import type { LessonRecord, LessonSource } from './runNotes';
 
 /** skill本文のパス（`skills/<名前>/`の下のMarkdown）。repo直下でも`claude-home/`の下でもよい。 */
 const SKILL_BODY_PATTERN = /^(?:[^/]+\/)?skills\/[^/]+\/.+\.md$/;
@@ -279,4 +279,37 @@ async function fileResearchProposal(
     return `${key}: 調査Issue#${String(research.issueNumber)}の本文を更新できない`;
   }
   return `${key}: skill本文以外のため、調査Issue#${String(research.issueNumber)}へ提案として残した`;
+}
+
+/** 教訓の文中に現れる、plugin内のファイルらしいパス。 */
+const PLUGIN_PATH_TOKEN =
+  /(?:claude-home\/)?(?:skills|hooks|rules|scripts|bin|docs)\/[\w.-]+(?:\/[\w.-]+)*|(?:claude-home\/)?(?:settings\.json|CLAUDE\.md)/g;
+
+/**
+ * このrunの教訓から、plugin向けの改善の候補を作る。文中にpluginのファイルらしいパスが無い教訓は
+ * このrepo向けなので候補にしない。出典は教訓の記録のまま（無ければ`external`）。
+ */
+export function candidatesFromLessons(
+  lessons: readonly LessonRecord[],
+  runId: string,
+): PluginImprovementCandidate[] {
+  const out: PluginImprovementCandidate[] = [];
+  for (const lesson of lessons) {
+    if (lesson.runId !== runId) {
+      continue;
+    }
+    const text = [lesson.observation, lesson.instruction, ...lesson.evidence].join('\n');
+    const files = [...new Set(text.match(PLUGIN_PATH_TOKEN) ?? [])];
+    if (files.length === 0) {
+      continue;
+    }
+    out.push({
+      key: `plugin-lesson-${lesson.id.slice(0, 8)}`,
+      title: `plugin: ${lesson.instruction.replace(/\s+/g, ' ').trim().slice(0, 60)}`,
+      body: `観察: ${lesson.observation}\n\n改善: ${lesson.instruction}\n\n対象: ${files.join(', ')}`,
+      files,
+      source: lesson.source ?? 'external',
+    });
+  }
+  return out;
 }

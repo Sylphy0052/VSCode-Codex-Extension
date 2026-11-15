@@ -22,7 +22,11 @@ import {
   renderPromotedLesson,
   type RepoVisibility,
 } from './lessonPromotion';
-import { fileToPluginRoadmap, type PluginRoadmapDeps } from './pluginRoadmap';
+import {
+  candidatesFromLessons,
+  fileToPluginRoadmap,
+  type PluginRoadmapDeps,
+} from './pluginRoadmap';
 import type { RunMetrics } from './runMetrics';
 import type { LessonRecord, RunNotesStore } from './runNotes';
 import {
@@ -539,7 +543,7 @@ export interface RunRetrospectiveDeps {
   runNotes: Pick<RunNotesStore, 'listLessons' | 'listRemaining'> | undefined;
   forge: RetrospectiveForge;
   /** plugin向けの改善の起票先。無ければ起票しない。 */
-  plugin?: PluginRoadmapDeps;
+  plugin?(): Omit<PluginRoadmapDeps, 'candidates'> | undefined;
   /** この拡張自身のリポジトリ（`owner/name`）。分からなければ振り返らない。 */
   ownRepo: string | undefined;
   budgetConfig(): SelfImproveBudgetConfig;
@@ -976,12 +980,19 @@ export class RunRetrospective {
    * 起票し、それ以外は調査Issueへの提案に留める。同期の状態もrunの記録へ残す。失敗は止めない。
    */
   private async proposeToPlugin(run: TaskRun): Promise<void> {
-    const plugin = this.deps.plugin;
+    const plugin = this.deps.plugin?.();
     if (plugin === undefined) {
       return;
     }
     try {
-      const result = await fileToPluginRoadmap(plugin);
+      const lessons =
+        this.deps.runNotes === undefined
+          ? []
+          : await this.deps.runNotes.listLessons(run.workspaceRoot);
+      const result = await fileToPluginRoadmap({
+        ...plugin,
+        candidates: async () => candidatesFromLessons(lessons, run.runId),
+      });
       for (const note of result.notes) {
         await this.record(run.runId, 'pluginRoadmap', note);
       }
