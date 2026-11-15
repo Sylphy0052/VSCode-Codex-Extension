@@ -499,12 +499,98 @@ export function implementSessionBlockReason(
 export const PRE_MERGE_MEASURING_MESSAGE =
   'mergeしない: 計測中。終わったらもう一度merge命令を出す（--match-head-commit <計測したcommit> を付ける）';
 
-/** `gh pr merge`の命令から`--match-head-commit`の値を取る。無ければ`undefined`。 */
+/**
+ * 1つのコマンドとして読めないmerge命令（連結・パイプ・リダイレクト・置換・改行）。`a || gh pr merge`
+ * のように、検査した`--match-head-commit`付きの命令の後ろに別の命令を続けさせないため。
+ */
+const PRE_MERGE_SHELL_META = /[;&|<>`\r\n]|\$\(/;
+
+export const PRE_MERGE_SINGLE_COMMAND_MESSAGE =
+  'mergeしない: merge命令は1つのコマンドで出す（;・&&・||・|・リダイレクト・置換・改行を含めない）';
+
+/** `bash -lc '<中身>'`の包み（Codexの命令の形）。 */
+const SHELL_PROGRAM = /^(?:\/(?:usr\/)?bin\/)?(?:ba)?sh$/;
+
+/** 引用符を解いて語に分ける。引用符が閉じていなければ`undefined`。 */
+function splitShellWords(command: string): string[] | undefined {
+  const words: string[] = [];
+  let current = '';
+  let inWord = false;
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i] as string;
+    if (quote === "'") {
+      if (ch === "'") {
+        quote = undefined;
+      } else {
+        current += ch;
+      }
+    } else if (quote === '"') {
+      if (ch === '"') {
+        quote = undefined;
+      } else if (ch === '\\' && i + 1 < command.length) {
+        i += 1;
+        current += command[i] as string;
+      } else {
+        current += ch;
+      }
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      inWord = true;
+    } else if (ch === '\\' && i + 1 < command.length) {
+      i += 1;
+      current += command[i] as string;
+      inWord = true;
+    } else if (/\s/.test(ch)) {
+      if (inWord) {
+        words.push(current);
+        current = '';
+        inWord = false;
+      }
+    } else {
+      current += ch;
+      inWord = true;
+    }
+  }
+  if (quote !== undefined) {
+    return undefined;
+  }
+  if (inWord) {
+    words.push(current);
+  }
+  return words;
+}
+
+/**
+ * `gh pr merge`の命令から`--match-head-commit`の値を取る。無い・2つ以上ある・引数の値の中にしか
+ * 無いときは`undefined`。`bash -lc '...'`の包みは1段だけ外して見る。
+ */
 export function parseMatchHeadCommit(command: string): string | undefined {
-  const match = /(?:^|\s)--match-head-commit(?:=|\s+)["']?([0-9a-fA-F]{7,64})["']?(?=\s|$)/.exec(
-    command,
-  );
-  return match?.[1]?.toLowerCase();
+  let words = splitShellWords(command);
+  if (
+    words !== undefined &&
+    words.length === 3 &&
+    SHELL_PROGRAM.test(words[0] as string) &&
+    /^-l?c$/.test(words[1] as string)
+  ) {
+    words = splitShellWords(words[2] as string);
+  }
+  if (words === undefined) {
+    return undefined;
+  }
+  const values: string[] = [];
+  words.forEach((word, i) => {
+    if (word === '--match-head-commit') {
+      values.push(words[i + 1] ?? '');
+    } else if (word.startsWith('--match-head-commit=')) {
+      values.push(word.slice('--match-head-commit='.length));
+    }
+  });
+  const [value] = values;
+  if (values.length !== 1 || value === undefined || !/^[0-9a-fA-F]{7,64}$/.test(value)) {
+    return undefined;
+  }
+  return value.toLowerCase();
 }
 
 export type PreMergeDecision =
@@ -528,6 +614,9 @@ export function decidePreMerge(input: {
   }
   if (pm.status === 'measuring') {
     return { kind: 'reject', reason: PRE_MERGE_MEASURING_MESSAGE, startMeasure: false };
+  }
+  if (PRE_MERGE_SHELL_META.test(input.command)) {
+    return { kind: 'reject', reason: PRE_MERGE_SINGLE_COMMAND_MESSAGE, startMeasure: false };
   }
   if (parseMatchHeadCommit(input.command) !== head) {
     return {

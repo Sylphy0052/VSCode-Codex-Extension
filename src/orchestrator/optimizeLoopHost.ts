@@ -527,13 +527,24 @@ export class OptimizeLoopHost {
       return undefined;
     }
     const key = `${run.runId}/${task.taskId}`;
-    if (decision.startMeasure && !this.measuring.has(key)) {
+    // 保存された「計測中」をこのホストが走らせていなければ、Reloadや保存の失敗で計測が途切れている。
+    // 始め直さないと、同じHEADのmerge命令を「計測中」で拒否し続ける
+    const orphaned =
+      state.preMerge?.status === 'measuring' &&
+      state.preMerge.commit.toLowerCase() === head &&
+      !this.measuring.has(key);
+    if ((decision.startMeasure || orphaned) && !this.measuring.has(key)) {
       this.measuring.add(key);
       const measuring: OptimizeLoopState = {
         ...state,
         preMerge: { commit: head, status: 'measuring', detail: '計測中' },
       };
-      await args.saveState(measuring);
+      try {
+        await args.saveState(measuring);
+      } catch (e) {
+        this.measuring.delete(key);
+        throw e;
+      }
       void this.measurePreMerge({ run, task, spec, head, base, state: measuring, args })
         .catch((e: unknown) =>
           this.deps.log(`[optimize] merge直前の計測に失敗: ${errorMessage(e)}`),

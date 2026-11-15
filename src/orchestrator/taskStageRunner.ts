@@ -765,8 +765,11 @@ export class TaskStageRunner {
     const { taskId } = entry.ref;
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
-    if (host === undefined || run === undefined || task?.optimization === undefined) {
+    if (run === undefined || task?.optimization === undefined) {
       return undefined;
+    }
+    if (host === undefined) {
+      return 'mergeしない: 最適化のループが使えず、merge直前の計測ができない';
     }
     const open = findOpenGate(task);
     if (open?.kind === 'optimization') {

@@ -173,7 +173,9 @@ function isPullRequestMerge(command: string): boolean {
   return (
     /\bgh\s+(?:-\S+\s+(?:\S+\s+)?)*pr\s+merge\b/i.test(command) ||
     /\bglab\s+(?:-\S+\s+(?:\S+\s+)?)*mr\s+merge\b/i.test(command) ||
-    /\b(?:gh|glab)\s+api\b[^\n]*\/merge\b/i.test(command)
+    /\b(?:gh|glab)\s+api\b[^\n]*\/merge\b/i.test(command) ||
+    // GraphQLのmerge（Issue #2111 最適化のmerge直前の計測を迂回させない）
+    /\bgh\s+api\b[\s\S]*\b(?:mergePullRequest|enablePullRequestAutoMerge)\b/i.test(command)
   );
 }
 

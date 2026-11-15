@@ -25,6 +25,7 @@ import { OptimizeLoopHost } from '../../src/orchestrator/optimizeLoopHost';
 import type { OptimizationSpec } from '../../src/orchestrator/optimizeSpec';
 import type { OptimizeTrialResult } from '../../src/orchestrator/optimizeTrial';
 import { openOptimizeGateHalting } from '../../src/orchestrator/taskRunGates';
+import { stageApprovalHandler } from '../../src/orchestrator/taskStageApproval';
 import { FIXTURE_NOW, makeRun, makeTask } from '../helpers/taskRunFixture';
 
 /** 最適化ハーネスのループ制御（Issue #2111）の受入基準。 */
@@ -559,6 +560,38 @@ describe('decidePreMerge (受入6)', () => {
       consumeAllowance: false,
     });
   });
+  it('引数の値の中・重複した--match-head-commitは数えない。bash -lcの包みは外して見る', () => {
+    expect(
+      parseMatchHeadCommit(`gh pr merge 5 --subject "x --match-head-commit ${SHA_A}"`),
+    ).toBeUndefined();
+    expect(
+      parseMatchHeadCommit(
+        `gh pr merge 5 --match-head-commit ${SHA_A} --match-head-commit ${SHA_B}`,
+      ),
+    ).toBeUndefined();
+    expect(parseMatchHeadCommit(`gh pr merge 5 --match-head-commit "${SHA_A}`)).toBeUndefined();
+    expect(
+      parseMatchHeadCommit(`/bin/bash -lc 'gh pr merge 5 --merge --match-head-commit ${SHA_A}'`),
+    ).toBe(SHA_A);
+    expect(parseMatchHeadCommit(`bash -lc gh pr merge 5 --match-head-commit ${SHA_A}`)).toBe(SHA_A);
+  });
+  it('連結・パイプ・置換を含む命令は、--match-head-commitが合っていてもpassedでも拒否', () => {
+    const passed = trialsState({ preMerge: { commit: SHA_A, status: 'passed', detail: '' } });
+    for (const command of [
+      `${cmd(SHA_A)} || gh pr merge 5 --admin --merge`,
+      `${cmd(SHA_A)}; gh pr merge 6`,
+      `${cmd(SHA_A)} && echo ok`,
+      `${cmd(SHA_A)} | cat`,
+      `${cmd(SHA_A)}\ngh pr merge 6`,
+      `gh pr merge $(echo 5) --match-head-commit ${SHA_A}`,
+      `bash -lc '${cmd(SHA_A)} || gh pr merge 5 --admin'`,
+    ]) {
+      expect(decidePreMerge({ state: passed, command, headOid: SHA_A })).toMatchObject({
+        kind: 'reject',
+        startMeasure: false,
+      });
+    }
+  });
 });
 
 describe('OptimizeLoopHost.checkMerge (受入6)', () => {
@@ -609,6 +642,98 @@ describe('OptimizeLoopHost.checkMerge (受入6)', () => {
       }),
     );
     expect(calls.some((c) => c.startsWith('git fetch'))).toBe(true);
+  });
+
+  function stuckHost(calls: string[]) {
+    const cli = {
+      run: vi.fn(async (command: string, args: readonly string[]) => {
+        calls.push(`${command} ${args.join(' ')}`);
+        if (command === 'gh') {
+          return { code: 0, stdout: JSON.stringify({ headRefOid: SHA_A, baseRefName: 'main' }) };
+        }
+        return NEVER_DONE;
+      }),
+    };
+    return new OptimizeLoopHost({
+      storageDir: '/nonexistent/storage',
+      cli: cli as never,
+      git: vi.fn(async () => '') as never,
+      trialEngine: vi.fn() as never,
+      limits: () => LIMITS,
+      usageThresholdPct: () => undefined,
+      weeklyUsagePct: async () => undefined,
+      log: vi.fn(),
+    });
+  }
+
+  it('保存された「計測中」をこのホストが走らせていなければ(Reload後)、計測を始め直す。2回目は重ねない', async () => {
+    const calls: string[] = [];
+    const host = stuckHost(calls);
+    const task = makeTask('T1', 'mergeCleanup', 'running', {
+      optimization: SPEC,
+      optimizeLoop: trialsState({
+        preMerge: { commit: SHA_A, status: 'measuring', detail: '計測中' },
+      }),
+    });
+    const args = {
+      run: makeRun([task]),
+      task,
+      pullRequestNumber: 5,
+      command: `gh pr merge 5 --merge --match-head-commit ${SHA_A}`,
+      saveState: vi.fn(async () => undefined),
+      openGate: vi.fn(async () => undefined),
+    };
+    expect(await host.checkMerge(args)).toContain('計測中');
+    expect(calls.filter((c) => c.startsWith('git fetch'))).toHaveLength(1);
+    expect(await host.checkMerge(args)).toContain('計測中');
+    expect(calls.filter((c) => c.startsWith('git fetch'))).toHaveLength(1);
+  });
+
+  it('「計測中」の保存に失敗したら、次のmerge命令で計測を始め直せる', async () => {
+    const calls: string[] = [];
+    const host = stuckHost(calls);
+    const task = makeTask('T1', 'mergeCleanup', 'running', {
+      optimization: SPEC,
+      optimizeLoop: trialsState(),
+    });
+    const saveState = vi
+      .fn<(s: OptimizeLoopState) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('disk full'))
+      .mockResolvedValue(undefined);
+    const args = {
+      run: makeRun([task]),
+      task,
+      pullRequestNumber: 5,
+      command: `gh pr merge 5 --merge --match-head-commit ${SHA_A}`,
+      saveState,
+      openGate: vi.fn(async () => undefined),
+    };
+    await expect(host.checkMerge(args)).rejects.toThrow('disk full');
+    expect(calls.some((c) => c.startsWith('git fetch'))).toBe(false);
+    expect(await host.checkMerge(args)).toContain('計測中');
+    expect(calls.some((c) => c.startsWith('git fetch'))).toBe(true);
+  });
+});
+
+describe('stageApprovalHandler のmerge検査の対象 (受入6)', () => {
+  it('gh pr merge(--admin付き)・REST・GraphQLのmergeは検査にかけ、拒否を返す', async () => {
+    const guard = vi.fn(async () => '計測中');
+    const handler = stageApprovalHandler('mergeCleanup', true, undefined, guard);
+    for (const command of [
+      `gh pr merge 5 --admin --merge`,
+      `gh api -X PUT repos/o/r/pulls/5/merge`,
+      `gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }'`,
+      `gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: "x"}) { clientMutationId } }'`,
+    ]) {
+      expect(
+        await handler({ kind: 'commandExecution' } as never, { input: { command } }),
+      ).toMatchObject({ kind: 'auto', decision: 'decline', message: '計測中' });
+    }
+    expect(guard).toHaveBeenCalledTimes(4);
+    expect(
+      await handler({ kind: 'commandExecution' } as never, { input: { command: 'gh pr view 5' } }),
+    ).toEqual({ kind: 'auto', decision: 'accept' });
+    expect(guard).toHaveBeenCalledTimes(4);
   });
 });
 
