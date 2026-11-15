@@ -293,7 +293,8 @@ export type OptimizeLoopRunnerPort = Pick<
   | 'remeasureAfterReview'
   | 'checkMerge'
   | 'cleanup'
->;
+> &
+  Partial<Pick<OptimizeLoopHost, 'postLedgerComment'>>;
 
 /** 動いている最適化のループ。タスクごとに1つ。 */
 interface LiveOptimizeLoop {
@@ -1778,6 +1779,14 @@ export class TaskStageRunner {
     }
     try {
       const checked = await host.checkPullRequestTree(completed, task, number);
+      if (checked.match && task.pullRequest !== undefined) {
+        // 台帳は拡張がPRへ投稿する（Issue #2108）。失敗しても完了の報告は止めない
+        void host
+          .postLedgerComment?.(completed, task, task.pullRequest)
+          .catch((e: unknown) =>
+            this.warn(run.runId, ref.taskId, `台帳をPRへ投稿できなかった: ${errorMessage(e)}`),
+          );
+      }
       return checked.match ? undefined : checked.detail;
     } catch (e) {
       return `PRのHEADの木を最良の候補と照合できなかった: ${errorMessage(e)}`;

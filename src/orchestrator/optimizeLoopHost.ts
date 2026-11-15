@@ -2,7 +2,18 @@ import { rm } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { HeadlessSlotLock } from '../loop/headlessSlotLock';
 import { runVerifyCommand } from '../verification/commandRunner';
+import {
+  detectForgeHost,
+  fetchPullRequestCommentBodies,
+  nodeForgeFileSystem,
+  postPullRequestComment,
+  type CliCommandRunner,
+  type ForgeFileSystemPort,
+  type ForgeHost,
+} from './forge';
 import { compareTrees, judgeAfterReview, judgePreMerge } from './optimizeCompare';
+import { buildLedgerComment, ledgerCommentMarker } from './optimizeLedgerComment';
+import type { Refuter } from './optimizeRefute';
 import {
   OPTIMIZE_LEDGER_DIR_NAME,
   OptimizeLedgerStore,
@@ -16,6 +27,7 @@ import {
   prepareLoopResume,
   runOptimizeLoop,
   sameTree,
+  STOP_REASON_LABELS,
   type BaselineResult,
   type OptimizeLoopLimits,
   type OptimizeLoopOutcome,
@@ -86,6 +98,12 @@ export interface OptimizeLoopHostDeps {
   processPorts?: ProcessRecordPorts;
   runVerify?: typeof runVerifyCommand;
   runTrial?: typeof runOptimizeTrial;
+  /**
+   * 採用候補を突かせる反証役（Issue #2108）を、試行のセッションのエンジンから作る。無ければ反証しない。
+   */
+  refuter?: (trialEngine: TaskRunEngine) => Refuter;
+  /** 台帳をPRへ投稿するときの一時ファイル。既定は`nodeForgeFileSystem`。 */
+  forgeFs?: ForgeFileSystemPort;
   now?: () => Date;
   log(message: string): void;
 }
@@ -109,6 +127,11 @@ export interface MergeCheckArgs {
   command: string;
   saveState(state: OptimizeLoopState): Promise<void>;
   openGate(reason: OptimizeGateReason, detail: string): Promise<void>;
+}
+
+/** PRのURLからforgeを決める。GitLabのMRの形でなければGitHubとする（ほかの操作も`gh`を使う）。 */
+export function pullRequestForgeHost(url: string): ForgeHost {
+  return url.includes('/-/merge_requests/') ? 'gitlab' : (detectForgeHost(url) ?? 'github');
 }
 
 /** refと台帳に使うID。runの中の最適化のタスクごとに分ける。 */
@@ -239,6 +262,7 @@ export class OptimizeLoopHost {
       model: args.model,
       effort: args.effort,
     });
+    const refute = this.deps.refuter?.(engine.engine);
     const summary = async (s: OptimizeLoopState): Promise<OptimizeSummary> =>
       summarizeTrials(
         await this.ledger.read(loopId, task.taskId),
@@ -275,6 +299,7 @@ export class OptimizeLoopHost {
             ...(this.deps.lock === undefined ? {} : { lock: this.deps.lock }),
             signal: trialArgs.signal,
             rebuild: trialArgs.rebuild,
+            ...(refute === undefined ? {} : { refute }),
           });
         },
         promoteBest: async (commit) => {
@@ -421,6 +446,59 @@ export class OptimizeLoopHost {
     ]
       .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
       .join('\n');
+  }
+
+  /**
+   * 台帳をPRのコメントとして投稿する（Issue #2108 仕様5）。本文は拡張が台帳から組み立て、LLMには
+   * 書かせない。同じ台帳（試行の回数と最良のcommitが同じ）のコメントが既にあれば投稿しない。
+   */
+  async postLedgerComment(
+    run: TaskRun,
+    task: OrchestratedTask,
+    pullRequest: { number: number; url: string },
+  ): Promise<{ posted: boolean; detail: string }> {
+    if (task.optimization === undefined) {
+      return { posted: false, detail: '最適化のタスクではない' };
+    }
+    const loopId = optimizeLoopId(run.runId, task.taskId);
+    const records = await this.ledger.read(loopId, task.taskId);
+    const loop = task.optimizeLoop;
+    const body = buildLedgerComment({
+      loopId,
+      records,
+      ...(loop?.baseline === undefined ? {} : { baseline: loop.baseline.metric }),
+      ...(loop?.best === undefined
+        ? {}
+        : { best: { metric: loop.best.metric, trial: loop.best.trial, commit: loop.best.commit } }),
+      ...(loop?.stopReason === undefined
+        ? {}
+        : { stopReason: STOP_REASON_LABELS[loop.stopReason] }),
+    });
+    const host = pullRequestForgeHost(pullRequest.url);
+    const cli = this.forgeCli();
+    const request = { host, cwd: run.workspaceRoot, number: pullRequest.number };
+    const marker = ledgerCommentMarker(loopId, records.length, loop?.best?.commit ?? '-');
+    const existing = await fetchPullRequestCommentBodies(cli, request);
+    if (existing?.some((b) => b.includes(marker)) === true) {
+      return { posted: false, detail: '同じ台帳のコメントが既にある' };
+    }
+    const result = await postPullRequestComment(
+      { cli, fs: this.deps.forgeFs ?? nodeForgeFileSystem },
+      { ...request, body },
+    );
+    if (!result.ok) {
+      throw new Error(`台帳をPR #${pullRequest.number}へ投稿できませんでした: ${result.message}`);
+    }
+    return { posted: true, detail: `台帳をPR #${pullRequest.number}へ投稿した` };
+  }
+
+  private forgeCli(): CliCommandRunner {
+    return {
+      run: async (command, args, cwd) => {
+        const r = await this.deps.cli.run(command, args, cwd);
+        return { code: r.code, stdout: r.stdout, stderr: r.stderr ?? '' };
+      },
+    };
   }
 
   private async headOid(

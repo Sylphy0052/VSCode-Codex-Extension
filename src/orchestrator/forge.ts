@@ -1128,6 +1128,82 @@ export async function postIssueComment(
   }
 }
 
+/**
+ * PR/MRへコメントを1件投稿する（Issue #2108。最適化の台帳）。本文は一時ファイル経由で渡す。
+ * GitHubは`gh pr comment --body-file`、GitLabは`glab api .../merge_requests/<n>/notes`。
+ */
+export async function postPullRequestComment(
+  deps: CreatePullRequestDeps,
+  request: { host: ForgeHost; cwd: string; number: number; body: string },
+): Promise<ForgeStepOutcome> {
+  if (!Number.isSafeInteger(request.number) || request.number <= 0 || request.body.trim() === '') {
+    return { ok: false, message: 'PR番号または本文が不正です' };
+  }
+  const bodyFilePath = await deps.fs.writeTempFile(request.body);
+  try {
+    const args =
+      request.host === 'github'
+        ? ['pr', 'comment', String(request.number), `--body-file=${bodyFilePath}`]
+        : [
+            'api',
+            `projects/:id/merge_requests/${String(request.number)}/notes`,
+            `--field=body=@${bodyFilePath}`,
+          ];
+    const command = forgeCliCommand(request.host);
+    const result = await deps.cli.run(command, args, request.cwd);
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        message:
+          result.stderr.trim() !== ''
+            ? sanitizeForLog(result.stderr)
+            : `${command} でPRへのコメントに失敗しました（終了コード ${result.code}）`,
+      };
+    }
+    return { ok: true };
+  } finally {
+    await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
+/**
+ * PR/MRのコメントの本文を読む（Issue #2108。同じ台帳を2回投稿しないため）。読めなければ`undefined`。
+ */
+export async function fetchPullRequestCommentBodies(
+  cli: CliCommandRunner,
+  request: { host: ForgeHost; cwd: string; number: number },
+): Promise<string[] | undefined> {
+  if (!Number.isSafeInteger(request.number) || request.number <= 0) {
+    return undefined;
+  }
+  const result =
+    request.host === 'github'
+      ? await cli.run('gh', ['pr', 'view', String(request.number), '--json=comments'], request.cwd)
+      : await cli.run(
+          'glab',
+          ['api', `projects/:id/merge_requests/${String(request.number)}/notes?per_page=100`],
+          request.cwd,
+        );
+  if (result.code !== 0) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(result.stdout);
+    const list =
+      request.host === 'github'
+        ? (parsed as { comments?: unknown } | null)?.comments
+        : (parsed as unknown);
+    if (!Array.isArray(list)) {
+      return undefined;
+    }
+    return list
+      .map((entry: unknown) => (entry as { body?: unknown } | null)?.body)
+      .filter((body): body is string => typeof body === 'string');
+  } catch {
+    return undefined;
+  }
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* PR/MRの番号の取り出し                                                                         */
 /* -------------------------------------------------------------------------------------------- */
