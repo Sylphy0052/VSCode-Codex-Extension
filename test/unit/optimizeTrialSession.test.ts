@@ -8,6 +8,7 @@ import {
   parseClaudeTrialOutput,
   runTrialProcess,
   runTrialStage,
+  trialEnvironment,
 } from '../../src/orchestrator/optimizeTrialSession';
 
 function settingsOf(args: string[]): Record<string, unknown> {
@@ -271,5 +272,25 @@ describe('runTrialStage', () => {
         recordDir: join(dir, 'records'),
       }),
     ).rejects.toThrow('sandbox');
+  });
+});
+
+describe('trialEnvironment', () => {
+  it('秘密らしい環境変数を外し、CLIの認証と普通の変数は残す', () => {
+    const kept = trialEnvironment({
+      PATH: '/bin',
+      GH_TOKEN: 'x',
+      GITLAB_TOKEN: 'x',
+      DB_PASSWORD: 'x',
+      CLAUDE_CODE_OAUTH_TOKEN: 'keep',
+      ANTHROPIC_API_KEY: 'keep',
+      CODEX_HOME: '/h',
+    });
+    expect(Object.keys(kept).sort()).toEqual([
+      'ANTHROPIC_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CODEX_HOME',
+      'PATH',
+    ]);
   });
 });

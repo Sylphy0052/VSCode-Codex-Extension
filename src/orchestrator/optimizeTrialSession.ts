@@ -169,6 +169,27 @@ export function defaultTrialProcessGroupPorts(): TrialProcessGroupPorts {
   };
 }
 
+/** 認証に要る接頭辞。名前に`TOKEN`などを含んでも渡す。 */
+const AUTH_ENV_PREFIXES = ['CLAUDE_', 'ANTHROPIC_', 'CODEX_', 'OPENAI_'];
+
+const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/iu;
+
+/**
+ * 試行のプロセスへ渡す環境変数。拡張の環境にある`GH_TOKEN`・`GITLAB_TOKEN`などを渡すと、
+ * 変更の段が書き出して許可パスのファイルへ残せてしまうため、秘密らしい名前のものを外す。
+ * CLI自身の認証（`CLAUDE_`・`ANTHROPIC_`・`CODEX_`・`OPENAI_`の接頭辞）は残す。
+ */
+export function trialEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const kept: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(base)) {
+    const isAuth = AUTH_ENV_PREFIXES.some((prefix) => name.startsWith(prefix));
+    if (isAuth || !SECRET_ENV_NAME.test(name)) {
+      kept[name] = value;
+    }
+  }
+  return kept;
+}
+
 /** 標準出力を溜める上限。 */
 const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
 
@@ -232,7 +253,8 @@ export async function runTrialProcess(input: RunTrialProcessInput): Promise<Tria
       cwd: input.cwd,
       detached: true,
       stdio: ['pipe', 'pipe', 'ignore'],
-      ...(input.env === undefined ? {} : { env: input.env }),
+      // 指定が無ければ、秘密らしい環境変数を外した拡張の環境を渡す
+      env: input['env'] ?? trialEnvironment(process['env']),
     });
   } catch (e) {
     return failedStart(e);
@@ -273,6 +295,27 @@ export async function runTrialProcess(input: RunTrialProcessInput): Promise<Tria
   child.stdin?.on('error', () => undefined);
   child.stdin?.end(input.stdin);
 
+  // 中断は記録の書き込みを待つ間も取りこぼさないよう、先に登録する
+  let killTimer: NodeJS.Timeout | undefined;
+  const stop = (): void => {
+    ports.killGroup(pid, 'SIGTERM');
+    killTimer ??= setTimeout(() => ports.killGroup(pid, 'SIGKILL'), TERM_GRACE_MS);
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stop();
+  }, input.timeoutMs);
+  const onAbort = (): void => {
+    aborted = true;
+    stop();
+  };
+  input.signal?.addEventListener('abort', onAbort, { once: true });
+  // 起動の途中で中断されていた場合（上の確認は起動前なので、型の絞り込みを避けて関数で読む）
+  const isAborted = (): boolean => input.signal?.aborted === true;
+  if (isAborted()) {
+    onAbort();
+  }
+
   let recorded = false;
   try {
     await writeProcessRecord(
@@ -285,22 +328,10 @@ export async function runTrialProcess(input: RunTrialProcessInput): Promise<Tria
     // 記録できなくても試行は続ける。終了後のグループ確認は同じように行う
   }
 
-  const stop = (): void => {
-    ports.killGroup(pid, 'SIGTERM');
-    setTimeout(() => ports.killGroup(pid, 'SIGKILL'), TERM_GRACE_MS).unref();
-  };
-  const timer = setTimeout(() => {
-    timedOut = true;
-    stop();
-  }, input.timeoutMs);
-  const onAbort = (): void => {
-    aborted = true;
-    stop();
-  };
-  input.signal?.addEventListener('abort', onAbort, { once: true });
-
   const result = await exited;
   clearTimeout(timer);
+  // 終了後にPIDが使い回されても、遅れたSIGKILLが無関係のグループへ届かないようにする
+  clearTimeout(killTimer);
   input.signal?.removeEventListener('abort', onAbort);
 
   // 先頭が終わっても、孫がグループに残りうる。理由を問わずグループごと止める

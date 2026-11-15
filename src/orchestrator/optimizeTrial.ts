@@ -126,6 +126,8 @@ export interface OptimizeTrialInput {
 }
 
 export interface OptimizeTrialResult {
+  /** 中断された。台帳には書いていない。 */
+  aborted: boolean;
   outcome: OptimizeTrialRecord['decision']['outcome'];
   record: OptimizeTrialRecord;
   /** 試行後の木を固定したcommit。固定できなければ無い。 */
@@ -177,6 +179,44 @@ function loadSnapshot(): { loadAverage1m: number; freeMemoryMb: number } {
 
 /** 1試行を行い、台帳に1行足す。 */
 export async function runOptimizeTrial(input: OptimizeTrialInput): Promise<OptimizeTrialResult> {
+  const progress = { sessionStarted: false };
+  try {
+    return await runOptimizeTrialBody(input, progress);
+  } catch (e) {
+    // 例外でも台帳に1行残し、同じ試行番号の再試行が続かないようにする。
+    // セッションを起動した後なら共有の状態を確かめられていないので、ループは止める
+    const aborted = input.signal?.aborted === true;
+    const record: OptimizeTrialRecord = {
+      trial: input.trial,
+      at: (input.deps?.now ?? (() => new Date()))().toISOString(),
+      llm: EMPTY_LLM,
+      correctness: { passed: false, detail: '試行が例外で終わったため実行していません' },
+      metric: { samples: 0, median: Number.NaN, spread: Number.NaN },
+      secondary: [],
+      load: loadSnapshot(),
+      decision: {
+        outcome: 'invalid',
+        reason: `試行中に例外が起きました: ${e instanceof Error ? e.message : String(e)}`,
+      },
+    };
+    if (!aborted) {
+      await input.ledger.append(input.runId, input.taskId, record);
+    }
+    return {
+      aborted,
+      outcome: 'invalid',
+      record,
+      adoptionCandidate: false,
+      halt: progress.sessionStarted,
+      violations: [],
+    };
+  }
+}
+
+async function runOptimizeTrialBody(
+  input: OptimizeTrialInput,
+  progress: { sessionStarted: boolean },
+): Promise<OptimizeTrialResult> {
   const git = input.deps?.git ?? runGit;
   const runStage = input.deps?.runStage ?? runTrialStage;
   const runVerify = input.deps?.runVerify ?? runVerifyCommand;
@@ -198,8 +238,13 @@ export async function runOptimizeTrial(input: OptimizeTrialInput): Promise<Optim
       at: now().toISOString(),
       load: partial.load ?? loadSnapshot(),
     };
-    await input.ledger.append(input.runId, input.taskId, record);
+    // 中断された試行は、評価していない仮説を失敗として残さないよう台帳へ書かない
+    const aborted = input.signal?.aborted === true;
+    if (!aborted) {
+      await input.ledger.append(input.runId, input.taskId, record);
+    }
     return {
+      aborted,
       outcome: record.decision.outcome,
       record,
       ...(record.commit === undefined ? {} : { commit: record.commit }),
@@ -304,6 +349,7 @@ export async function runOptimizeTrial(input: OptimizeTrialInput): Promise<Optim
     violations.some((v) => v.shared);
 
   // 1段目: 仮説。読み取り専用で起動し、終わったら作業ツリーが試行前と同じかを確かめる
+  progress.sessionStarted = true;
   const stage1 = await runStage({
     ...stageBase,
     stage: 'hypothesis',
@@ -479,13 +525,20 @@ async function measureCandidate(args: MeasureCandidateInput): Promise<MeasuredPa
     }
 
     const spawned = new Set<number>();
+    const writes: Promise<void>[] = [];
     const track = (pid: number, label: string): void => {
       spawned.add(pid);
-      void writeProcessRecord(input.processRecordDir, { pid, label }).catch(() => undefined);
+      writes.push(
+        writeProcessRecord(input.processRecordDir, { pid, label }).catch(() => undefined),
+      );
     };
     try {
       let correctness = { passed: false, detail: '' };
-      for (let attempt = 1; attempt <= 2 && !correctness.passed; attempt += 1) {
+      for (
+        let attempt = 1;
+        attempt <= 2 && !correctness.passed && input.signal?.aborted !== true;
+        attempt += 1
+      ) {
         const result = await runVerify({
           command: spec.correctnessCommand,
           cwd: input.dirs.candidate,
@@ -506,6 +559,8 @@ async function measureCandidate(args: MeasureCandidateInput): Promise<MeasuredPa
       }
       return await measureMetric(args, correctness, track);
     } finally {
+      // 書き込みが終わる前に消すと、消した後に記録が残る
+      await Promise.allSettled(writes);
       for (const pid of spawned) {
         await removeProcessRecord(input.processRecordDir, pid).catch(() => undefined);
       }
@@ -558,7 +613,10 @@ async function measureMetric(
   });
   const measure = async (tree: MeasureTree, signal: AbortSignal): Promise<RunOutcome> => {
     const outcome = await base(tree, signal);
-    if (outcome.ok && secondaries.length > 0 && spec.metricFile !== undefined) {
+    // 負荷で捨てて測り直す回の値は、主指標と同じく使わない
+    const discarded =
+      outcome.ok && outcome.load !== undefined && outcome.load > LOAD_DISCARD_THRESHOLD;
+    if (outcome.ok && !discarded && secondaries.length > 0 && spec.metricFile !== undefined) {
       const got = await readSecondaryValues(
         path.resolve(cwdFor(tree), spec.metricFile),
         secondaries.map((s) => s.name),

@@ -415,6 +415,47 @@ describe('runOptimizeTrial', () => {
     expect(result.halt).toBe(true);
   });
 
+  it('試行中に例外が起きても、台帳に無効の1行を残す（セッション起動後はループを止める）', async () => {
+    const fake = fakeSession({ onChange: setValue('5') });
+    const result = await run(fake, {
+      deps: {
+        runStage: async (input) => {
+          if (input.stage === 'change') {
+            throw new Error('起動に失敗');
+          }
+          return fake.runStage(input);
+        },
+      },
+    });
+    expect(result.outcome).toBe('invalid');
+    expect(result.halt).toBe(true);
+    const rows = await new OptimizeLedgerStore(storage).read(RUN_ID, TASK_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.decision.reason).toContain('起動に失敗');
+  });
+
+  it('準備の前に例外が起きたときは、ループを止めずに無効の1行を残す', async () => {
+    const fake = fakeSession({});
+    const result = await run(fake, {}, { setupCommand: 'exit 1' });
+    expect(result.outcome).toBe('invalid');
+    expect(result.halt).toBe(false);
+    expect(fake.calls).toHaveLength(0);
+    expect(await new OptimizeLedgerStore(storage).read(RUN_ID, TASK_ID)).toHaveLength(1);
+  });
+
+  it('中断された試行は台帳に書かない', async () => {
+    const controller = new AbortController();
+    const fake = fakeSession({
+      onChange: async (input) => {
+        await setValue('5')(input);
+        controller.abort();
+      },
+    });
+    const result = await run(fake, { signal: controller.signal });
+    expect(result.aborted).toBe(true);
+    expect(await new OptimizeLedgerStore(storage).read(RUN_ID, TASK_ID)).toHaveLength(0);
+  });
+
   it('2回目の試行は、前回の台帳を指示に入れ、最良のcommitから始める', async () => {
     const first = fakeSession({ onChange: setValue('5') });
     const r1 = await run(first);

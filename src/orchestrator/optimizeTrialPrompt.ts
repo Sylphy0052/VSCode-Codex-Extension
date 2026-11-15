@@ -119,7 +119,7 @@ function lastTrialLine(ledger: readonly OptimizeTrialRecord[]): string {
   const last = ledger[ledger.length - 1];
   return last === undefined
     ? '- 直前の試行: なし'
-    : `- 直前の試行: #${last.trial}は${last.decision.outcome}（${last.decision.reason.slice(0, 200).replace(/\s+/gu, ' ')}）`;
+    : `- 直前の試行: #${last.trial}は${last.decision.outcome}（理由は台帳の要約を参照）`;
 }
 
 /** 1段目: 仮説・予測・方式をJSONで返させる。変更はさせない。 */
