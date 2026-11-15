@@ -708,11 +708,7 @@ export class RunRetrospective {
       try {
         await this.evaluatePending(run, state);
         if (usage === undefined) {
-          await this.record(
-            run.runId,
-            'stopped',
-            USAGE_UNKNOWN_REASON,
-          );
+          await this.record(run.runId, 'stopped', USAGE_UNKNOWN_REASON);
         } else {
           const decision = decideRetrospective(usage, config, isSelfImproveRun);
           if (!decision.allowed) {
