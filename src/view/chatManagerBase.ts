@@ -62,6 +62,8 @@ export interface ChatSessionLike {
   decide(requestId: number | string, decision: ApprovalDecision): void;
   setAutoHandoff(on: boolean): void;
   setAutoHandoffAutoApprove(on: boolean): void;
+  /** 工程セッションでpluginのStop hook（skill-retro）を止める。Claudeだけが持つ。 */
+  setSuppressSkillRetro?(on: boolean): void;
 }
 
 /**
@@ -817,6 +819,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     if (input.autoHandoffAutoApprove === true) {
       entry.session.setAutoHandoffAutoApprove(true);
+    }
+    if (input.suppressSkillRetro === true) {
+      entry.session.setSuppressSkillRetro?.(true);
     }
     entry.reflexOverride = input.reflex;
     entry.handoffDelegate = input.handoffDelegate;
