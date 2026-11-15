@@ -27,6 +27,8 @@ import type { OptimizationSpec } from './optimizeSpec';
 import {
   captureTrialState,
   describeViolations,
+  discardMetricOutput,
+  ensureWorktreeConfigFile,
   inspectTrial,
   listChangedFiles,
   type TrialState,
@@ -323,6 +325,8 @@ async function runOptimizeTrialBody(
     ...(input.taskBranchRef === undefined ? {} : { taskBranchRef: input.taskBranchRef }),
     git,
   };
+  // Claudeのsandboxが試行中に空の`config.worktree`を作っても、状態が変わらないよう先に作る
+  await ensureWorktreeConfigFile(candidateDir, git);
   const before = await captureTrialState(stateInput);
   const protectedPatterns = await readProtectedPatterns(candidateDir, input.bestCommit, git);
   // Claudeのsandboxで、基準・最良のworktreeへの書き込みを明示的に塞ぐ（共有の`.git`は
@@ -343,6 +347,8 @@ async function runOptimizeTrialBody(
     stage: TrialStageResult,
     allowedPaths: readonly string[],
   ): Promise<{ state: TrialState; violations: TrialViolation[] }> => {
+    // 試行のセッションが確かめに走らせた計測の出力は、モデルが変えたファイルに数えない
+    await discardMetricOutput(candidateDir, spec.metricFile, input.bestCommit, git);
     const state = await captureTrialState(stateInput);
     const violations = inspectTrial({
       before,

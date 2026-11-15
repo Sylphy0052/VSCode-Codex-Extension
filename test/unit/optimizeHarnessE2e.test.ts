@@ -161,6 +161,11 @@ describe('最適化ハーネスの通し', () => {
     }
     if (hypothesisCalls === 1) {
       await writeFile(join(input.cwd, 'src', 'fib.js'), FIB_MEMO);
+      // 実機の確認で起きたことを再現する: モデルが確かめに計測のコマンドを走らせてm.jsonを残し、
+      // Claude CLIのsandboxが空のconfig.worktreeを作る。どちらも採否に響いてはならない
+      execFileSync('node', ['bench/bench.js'], { cwd: input.cwd });
+      const gitDir = git(input.cwd, 'rev-parse', '--absolute-git-dir');
+      await writeFile(join(gitDir, 'config.worktree'), '', { flag: 'a' });
     } else if (hypothesisCalls === 2) {
       await writeFile(join(input.cwd, 'bench', 'bench.js'), FAKE_BENCH);
     } else {

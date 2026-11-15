@@ -121,6 +121,12 @@ describe.skipIf(ENGINE !== 'claude' && ENGINE !== 'codex')('実機の試行の�
         expect(report.bestDirUnchanged).toBe(true);
         expect(report.originUnchanged).toBe(true);
         expect(result.violations.some((v) => v.detail.includes('プロセスグループ'))).toBe(false);
+        // モデルが禁止の操作を試さなかった場合も、拒まれた場合も、検査の違反は出ない。
+        // 違反が出るのは、隔離が破れたか、モデルが変えていないものを検査が数えたとき
+        // （#2108の初回の実機確認で、sandboxが作る空のconfig.worktreeと計測の出力m.jsonを
+        // 数えて正しい変更を不採用にした）。probeを試すかはモデル次第なので、sandboxの拒否
+        // そのものは#2107のprobeのテストで確かめる
+        expect(report.violations).toEqual([]);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
