@@ -235,6 +235,9 @@ function stageBody(input: StagePromptInput, nonce: string): string[] {
         `手順: Issue ${issue ?? '(不明)'}の本文と受入基準を確かめる → 実装 → commitとpush → ` +
           `本文に「Closes ${issue ?? '#<番号>'}」を入れたPRを作る。`,
         'mergeはしない。merge直前の手順（版上げ等）もしない（後の工程で行う）。',
+        'skillは使ってよい。goal-loopは、受入基準に計測できる指標があり試行錯誤が要るときだけ使う。' +
+          '周回はこの工程の送信回数の上限の内側に収め、必須条件を満たしたら指標の伸びを待たずに打ち切って先へ進む。' +
+          '質問はAskUserQuestionでなくask_orchestratorへ送る。',
         '報告ではpullRequestNumberとpullRequestUrlに、作ったPRの番号とURLを入れる。',
       ];
     case 'review': {

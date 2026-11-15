@@ -443,6 +443,14 @@ export class ClaudeStreamSession {
     return this.launchedModel;
   }
 
+  /** 工程セッションでpluginのStop hook（skill-retro）を止める環境変数を渡すか（Issue #2087）。 */
+  private suppressSkillRetro = false;
+
+  /** `SKILL_RETRO_DISABLE=1`を次回起動から渡す。起動前に呼ぶ。 */
+  setSuppressSkillRetro(on: boolean): void {
+    this.suppressSkillRetro = on;
+  }
+
   /**
    * CLIを起動し、stdout・終了の受け口を配線する。会話の状態には触れない（`start()`と、
    * 休止からの再開（Issue #1808）の`resumeProcess()`で共用する）。
@@ -487,6 +495,8 @@ export class ClaudeStreamSession {
           ? {}
           : { CLAUDE_CONFIG_DIR: this.configDir }),
         ...(this.state.autoHandoff ? { AGENT_EXTENSION_AUTO_HANDOFF: '1' } : {}),
+        // 工程セッションでpluginのStop hookが停止を止めないようにする（Issue #2087）
+        ...(this.suppressSkillRetro ? { SKILL_RETRO_DISABLE: '1' } : {}),
       },
     });
     this.proc = proc;
