@@ -110,6 +110,7 @@ export interface TaskRunOrchestratorEvent {
     | 'taskFailed'
     | 'taskStopped'
     | 'taskClosed'
+    | 'taskMerged'
     | 'taskInstructed'
     | 'questionAwaitingOrchestrator'
     | 'questionAwaitingUser'
@@ -1550,6 +1551,39 @@ export function formatRecommendation(
   return `推奨: model=${recommendation.model} effort=${effort}${reasons === '' ? '' : `（${reasons}）`}`;
 }
 
+/** 停滞を疑うmerge数。目的を持つrunで、これだけmergeするごとに方式の見直しを促す。 */
+const STAGNATION_MERGE_INTERVAL = 3;
+
+/**
+ * mergeのたびにOrchestratorへ送る見直しの促し（Issue #2088）。目的と完了条件があれば添え、
+ * 完了条件を満たしていれば終了の提案、停滞していれば方式の見直しを求める。
+ */
+function mergeReviewBody(run: TaskRun, label: string): string {
+  const lines = [`${label}がmergeされました。`];
+  const { goal } = run;
+  if (goal === undefined) {
+    lines.push(
+      '残りのタスクがこのrunの目的に対して最善か見直し、変えるなら propose_plan を出し直してください。',
+    );
+    return lines.join('\n');
+  }
+  lines.push(
+    `目的: ${sanitizeInlineText(goal.objective, EVENT_TEXT_MAX_LENGTH)}`,
+    `完了条件: ${sanitizeInlineText(goal.completionCriteria, EVENT_TEXT_MAX_LENGTH)}`,
+    '完了条件を満たしたか確かめ、満たしていれば残りのタスクがあっても終了を提案してください。',
+    '満たしていなければ、残りのタスクが目的に対して最善か見直し、変えるなら propose_plan を出し直してください。',
+  );
+  const merged = Object.values(run.tasks).filter(
+    (t) => t.stages.mergeCleanup.status === 'done' && t.closedWithoutMerge === undefined,
+  ).length;
+  if (merged > 0 && merged % STAGNATION_MERGE_INTERVAL === 0) {
+    lines.push(
+      `直近${String(STAGNATION_MERGE_INTERVAL)}件のmergeで完了条件に近づいていないなら、停滞です。方式そのものを見直してください。`,
+    );
+  }
+  return lines.join('\n');
+}
+
 /**
  * 前後のrunの差分から、Orchestratorへ届けるイベントを作る。判断待ちになった工程は
  * 推奨値を求めてから届けるため、ここでは作らない（`handleRunTransition`）。
@@ -1597,6 +1631,13 @@ export function diffTaskRunEvents(prev: TaskRun, next: TaskRun): TaskRunOrchestr
         kind: 'taskClosed',
         body: `${label}をmergeせずに完了にしました（理由: ${sanitizeInlineText(task.closedWithoutMerge.reason, EVENT_TEXT_MAX_LENGTH)}）`,
       });
+    }
+    if (
+      before.stages.mergeCleanup.status !== 'done' &&
+      task.stages.mergeCleanup.status === 'done' &&
+      task.closedWithoutMerge === undefined
+    ) {
+      events.push({ kind: 'taskMerged', body: mergeReviewBody(next, label) });
     }
     for (const question of task.questions ?? []) {
       const was = before.questions?.find((q) => q.questionId === question.questionId);

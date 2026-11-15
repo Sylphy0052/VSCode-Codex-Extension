@@ -1038,6 +1038,10 @@ export class TaskRunController {
           title: sanitizeInlineText(input.roadmapTitle, MAX_PLAN_TITLE_LENGTH),
           snapshot: plan.snapshot,
         },
+        goal: {
+          objective: sanitizeInlineText(input.roadmapTitle, MAX_PLAN_TITLE_LENGTH),
+          completionCriteria: `ロードマップIssue #${String(input.roadmapIssueNumber)}の目的を満たす観測できる結果が揃う`,
+        },
         runId: this.newId(),
         now: this.now(),
       });
