@@ -1,3 +1,4 @@
+import { parseOptimizationSpec, type OptimizationSpec } from './optimizeSpec';
 import { stripControlCharsPreservingNewlines } from './sanitize';
 import {
   allocateTaskIds,
@@ -42,6 +43,8 @@ export interface PlanTaskInput {
    * ロードマップから作る初期計画だけが付ける（`propose_plan`の引数からは読まない）。
    */
   completedInRoadmap?: true;
+  /** 最適化の仕様（Issue #2106）。検証済み。承認は人だけが行う。 */
+  optimization?: OptimizationSpec;
 }
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string };
@@ -139,6 +142,14 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
   ) {
     return fail(`${at}.existingIssueNumberは1以上の整数で指定する`);
   }
+  let optimization: OptimizationSpec | undefined;
+  if (raw.optimization !== undefined) {
+    const spec = parseOptimizationSpec(raw.optimization, `${at}.optimization`);
+    if (!spec.ok) {
+      return spec;
+    }
+    optimization = spec.value;
+  }
   return {
     ok: true,
     value: {
@@ -148,6 +159,7 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
       acceptanceCriteria,
       dependsOn,
       existingIssueNumber: issue,
+      ...(optimization === undefined ? {} : { optimization }),
     },
   };
 }
@@ -245,6 +257,7 @@ export function resolveTaskPlan(
     dependsOn: t.dependsOn.map(toTaskId),
     existingIssueNumber: t.existingIssueNumber,
     ...(t.completedInRoadmap === true ? { completedInRoadmap: true } : {}),
+    ...(t.optimization === undefined ? {} : { optimization: t.optimization }),
   }));
   if (drafts.some((d) => !isValidTaskId(d.taskId))) {
     return fail('taskIdを採番できなかった');
@@ -308,6 +321,7 @@ function withCarriedTasks(
       dependsOn: isCompleted ? [] : t.dependsOn.filter((dep) => keys.has(dep)),
       existingIssueNumber: t.existingIssueNumber,
       ...(isCompleted ? { completedInRoadmap: true } : {}),
+      ...(t.optimization === undefined ? {} : { optimization: t.optimization }),
     };
   });
   return mergeByCurrentOrder(run, proposed, carried);

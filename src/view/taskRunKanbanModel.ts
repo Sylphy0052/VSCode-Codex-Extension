@@ -1,7 +1,9 @@
+import { describeOptimization } from '../orchestrator/optimizeSpec';
 import {
   findLastResolvedGate,
   findOpenGate,
   GATE_CHOICE_LABELS,
+  isGateChoiceAllowed,
   MAX_REVIEW_ROUNDS,
 } from '../orchestrator/taskRunGates';
 import {
@@ -22,6 +24,7 @@ import {
   isTaskPlanApproved,
   isTaskRunActive,
   listTasks,
+  planRequiresHumanApproval,
   TASK_RUN_TITLE_MAX_LENGTH,
   taskRunLabel,
   type OrchestratedTask,
@@ -175,6 +178,18 @@ export interface TaskRunKanbanRun {
   engine: TaskRunEngine;
   maxParallel: number;
   planStatus: TaskPlanStatus;
+  /**
+   * 承認待ちの計画にある最適化の仕様の全項目（Issue #2106）。コマンドは承認済みの前の、計画に載った
+   * 値の全文。人だけが承認できるため、承認画面でこれを見てから承認する。外部由来のテキストを含むので
+   * 画面側では`textContent`で出す。
+   */
+  optimizationApprovals: {
+    taskId: string;
+    title: string;
+    items: { label: string; value: string }[];
+  }[];
+  /** 計画に人だけが承認できるタスクがある（Reflexの自動承認・`approve_plan`では承認されない）。 */
+  planHumanOnly: boolean;
   /** 計画をReflexが審査したか、その結果（未審査なら`undefined`。Issue #1554）。 */
   planReview: TaskRunKanbanPlanReview | undefined;
   haltedByUser: boolean;
@@ -300,8 +315,23 @@ function badgesFor(
   return attention === undefined ? badges : [attention, ...badges];
 }
 
+/** 最適化の関門の選択肢の表示名（Issue #2106）。基準値の計測失敗では`proceed`が測り直し。 */
+function optimizeChoiceLabel(choice: StageGateChoice, gate: StageGate): string {
+  if (choice === 'proceed') {
+    return gate.optimizeReason === 'baselineFailed' ? '基準値を測り直す' : '承知で進める';
+  }
+  return choice === 'sendBack' ? '最良の候補の木へ戻す' : GATE_CHOICE_LABELS[choice];
+}
+
 function toKanbanGate(gate: StageGate): TaskRunKanbanGate {
-  const choices: StageGateChoice[] = gate.kind === 'reviewFindings' ? ['sendBack', 'proceed'] : [];
+  const choices: StageGateChoice[] =
+    gate.kind === 'reviewFindings'
+      ? ['sendBack', 'proceed']
+      : gate.kind === 'optimization'
+        ? (['proceed', 'sendBack', 'close'] as const).filter((c) =>
+            isGateChoiceAllowed('optimization', c, gate.optimizeReason),
+          )
+        : [];
   return {
     gateId: gate.gateId,
     kind: gate.kind,
@@ -313,7 +343,13 @@ function toKanbanGate(gate: StageGate): TaskRunKanbanGate {
       gate.reflexSummary === undefined
         ? undefined
         : sanitizeInlineText(gate.reflexSummary, SUMMARY_MAX_LENGTH),
-    choices: choices.map((choice) => ({ choice, label: GATE_CHOICE_LABELS[choice] })),
+    choices: choices.map((choice) => ({
+      choice,
+      label:
+        gate.kind === 'optimization'
+          ? optimizeChoiceLabel(choice, gate)
+          : GATE_CHOICE_LABELS[choice],
+    })),
   };
 }
 
@@ -524,6 +560,18 @@ export function buildTaskRunKanban(
       engine: selected.engine,
       maxParallel: selected.maxParallel,
       planStatus: selected.planStatus,
+      optimizationApprovals: listTasks(selected).flatMap((task) =>
+        task.optimization === undefined
+          ? []
+          : [
+              {
+                taskId: task.taskId,
+                title: sanitizeInlineText(task.title, TITLE_MAX_LENGTH),
+                items: describeOptimization(task.optimization),
+              },
+            ],
+      ),
+      planHumanOnly: planRequiresHumanApproval(selected),
       planReview: toKanbanPlanReview(selected.planReview),
       haltedByUser: selected.haltedByUser,
       finished: selected.finishedAt !== undefined,

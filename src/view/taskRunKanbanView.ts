@@ -268,7 +268,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     const controller = this.deps.controller;
     switch (message.type) {
       case 'approvePlan':
-        warnIfRejected(await controller.approvePlan(runId));
+        // 承認者`human`を渡してよいのはこのメッセージの処理だけ（Issue #2106）
+        warnIfRejected(await controller.approvePlan(runId, undefined, 'human'));
         return;
       case 'syncRoadmap': {
         const result = await controller.syncRoadmap(runId);
@@ -439,17 +440,32 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
   }
 
-  /** レビューの関門の決着（差し戻す・このまま進める）。失敗の関門は「やり直す」で決着させる。 */
+  /** レビュー・最適化の関門の決着。失敗の関門は「やり直す」で決着させる。 */
   private async resolveGate(
     runId: string,
     taskId: string,
     gateId: unknown,
     choice: unknown,
   ): Promise<void> {
-    if (typeof gateId !== 'string' || (choice !== 'sendBack' && choice !== 'proceed')) {
+    if (
+      typeof gateId !== 'string' ||
+      (choice !== 'sendBack' && choice !== 'proceed' && choice !== 'close')
+    ) {
       return;
     }
-    const result = await this.deps.controller.resolveGate(runId, taskId, gateId, choice);
+    // `close`は最適化の関門（Issue #2106）だけがここから選べる。理由が要るので人の操作として記録する
+    const result =
+      choice === 'close'
+        ? await this.deps.controller.resolveGate(
+            runId,
+            taskId,
+            gateId,
+            choice,
+            'user',
+            undefined,
+            '最適化の関門でユーザーがmergeせずに完了にした',
+          )
+        : await this.deps.controller.resolveGate(runId, taskId, gateId, choice);
     if (!result.ok) {
       void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
     }
@@ -957,6 +973,20 @@ const script = `
       } else if (run.planReview) {
         box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
       }
+      if (run.planHumanOnly) {
+        box.appendChild(el('div', 'question-note', 'この計画には最適化の仕様を持つタスクがあります。指標・準備・正しさのコマンドは拡張機能がsandboxの外で実行するため、人がここで承認したときだけ承認済みになります（Orchestratorの承認とReflexの自動承認は効きません）。下のコマンドの全文を確かめてから承認してください。'));
+      }
+      (run.optimizationApprovals || []).forEach(function (entry) {
+        const spec = el('div', 'optimization-spec');
+        spec.appendChild(el('div', 'question-text', entry.taskId + ' ' + entry.title + ' の最適化の仕様'));
+        entry.items.forEach(function (item) {
+          const row = el('div', 'gate-detail');
+          row.appendChild(el('strong', undefined, item.label + ': '));
+          row.appendChild(el('code', undefined, item.value));
+          spec.appendChild(row);
+        });
+        box.appendChild(spec);
+      });
       box.appendChild(button('計画を承認', 'primary', function () { send('approvePlan'); }));
     } else {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を作成中です。やりたいことはOrchestratorのチャットで伝えます。'));
@@ -1060,7 +1090,7 @@ const script = `
 
   function renderGate(card, gate) {
     const box = el('div', 'gate');
-    const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : '「' + gate.stageLabel + '」の失敗の関門';
+    const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : gate.kind === 'optimization' ? '最適化の関門（人だけが決着できます）' : '「' + gate.stageLabel + '」の失敗の関門';
     const status = gate.judging ? '（Reflexが判定中）' : gate.awaitingOrchestrator ? '（オーケストレーターが判断中）' : '（判断待ち）';
     box.appendChild(el('div', 'question-text', title + status));
     box.appendChild(el('div', 'gate-detail', gate.detail));

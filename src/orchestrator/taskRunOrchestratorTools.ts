@@ -67,6 +67,101 @@ const STATE_TITLE_MAX_LENGTH = 200;
 const STATE_ROADMAP_NOTICES_SHOWN = 5;
 const STATE_TEXT_MAX_LENGTH = 1000;
 
+/**
+ * `propose_plan`のタスクの`optimization`（Issue #2106）。最適化の仕様を持つ計画は、人がKanbanで承認した
+ * ときだけ承認済みになる（`approve_plan`では承認できない）。指標・準備・正しさのコマンドは拡張機能が
+ * sandboxの外で実行する。
+ */
+const OPTIMIZATION_INPUT_SCHEMA = {
+  type: 'object',
+  description:
+    '最適化の仕様（任意）。持つタスクを含む計画は、人がKanbanで承認したときだけ承認済みになる。内容を変えても外しても再承認が要る',
+  properties: {
+    setupCommand: {
+      type: 'string',
+      description: '準備のコマンド（依存を決まった形で入れ直す。例: npm ci）',
+    },
+    metricSource: {
+      type: 'string',
+      enum: ['wallTime', 'file'],
+      description:
+        'wallTime（既定）: metricCommandの実行時間を測る。file: 変更禁止の計測スクリプトがmetricFileへ書くJSON（{"value": 数値, "<副指標名>": 数値}）から取る',
+    },
+    metricCommand: { type: 'string', description: '指標を測るコマンド（1行）' },
+    metricFile: {
+      type: 'string',
+      description: 'metricSourceがfileのときの、リポジトリからの相対パス',
+    },
+    direction: { type: 'string', enum: ['minimize', 'maximize'] },
+    minImprovement: {
+      type: 'object',
+      description: '改善と見なす最小の差',
+      properties: {
+        kind: { type: 'string', enum: ['absolute', 'percent'] },
+        value: { type: 'number', minimum: 0 },
+      },
+      required: ['kind', 'value'],
+      additionalProperties: false,
+    },
+    significanceLevel: { type: 'number', description: '有意水準（0より大きく0.5以下）' },
+    secondaryMetrics: {
+      type: 'array',
+      description: '悪化を許さない副指標（metricSourceがfileのときだけ）',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          direction: { type: 'string', enum: ['minimize', 'maximize'] },
+          tolerance: {
+            type: 'object',
+            properties: {
+              kind: { type: 'string', enum: ['absolute', 'percent'] },
+              value: { type: 'number', minimum: 0 },
+            },
+            required: ['kind', 'value'],
+            additionalProperties: false,
+          },
+        },
+        required: ['name', 'direction', 'tolerance'],
+        additionalProperties: false,
+      },
+    },
+    correctnessCommand: {
+      type: 'string',
+      description: '正しさの確認コマンド（終了コード0を正しいとする）',
+    },
+    allowedPaths: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string' },
+      description:
+        '変更してよいパスを列挙する（必須）。ここに無いパスはすべて変更禁止（ベンチマーク・fixture・テスト・設定・計測スクリプトを含む）',
+    },
+    budget: {
+      type: 'object',
+      properties: {
+        maxTrials: { type: 'integer', minimum: 1 },
+        maxMinutes: { type: 'integer', minimum: 1 },
+      },
+      required: ['maxTrials', 'maxMinutes'],
+      additionalProperties: false,
+    },
+    target: { type: 'number', description: '目標値（任意）' },
+    measurementRuns: { type: 'integer', minimum: 5, description: '1つの案を測る回数N（5以上）' },
+  },
+  required: [
+    'metricCommand',
+    'direction',
+    'minImprovement',
+    'significanceLevel',
+    'correctnessCommand',
+    'allowedPaths',
+    'budget',
+    'measurementRuns',
+  ],
+  additionalProperties: false,
+} as const;
+
 export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'propose_plan',
@@ -113,6 +208,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
                 minimum: 1,
                 description: '既存のIssueを使う場合の番号。指定するとIssue計画とIssue作成を飛ばす',
               },
+              optimization: OPTIMIZATION_INPUT_SCHEMA,
             },
             required: ['id', 'title', 'summary', 'acceptanceCriteria'],
             additionalProperties: false,

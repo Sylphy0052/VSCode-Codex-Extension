@@ -6,7 +6,12 @@ import {
   type TaskRunControllerDeps,
 } from '../../src/orchestrator/taskRunController';
 import type { TaskRunLease } from '../../src/orchestrator/taskRunLease';
-import { findStageGate } from '../../src/orchestrator/taskRunGates';
+import type { OptimizationSpec } from '../../src/orchestrator/optimizeSpec';
+import {
+  findStageGate,
+  openOptimizeGate,
+  resolveStageGate,
+} from '../../src/orchestrator/taskRunGates';
 import { reviewGateResolution } from '../../src/orchestrator/taskRunGateReview';
 import { reviewTaskRunPlanProposal } from '../../src/orchestrator/taskRunPlanReview';
 import {
@@ -19,8 +24,10 @@ import {
   MAX_TASK_RUN_PARALLEL,
   createTaskRun,
   getTask,
+  type OptimizeGateReason,
   type OrchestratedTask,
   type StageGate,
+  type StageGateChoice,
   type TaskRun,
 } from '../../src/orchestrator/taskRunState';
 import type { PauseStageOutcome, TaskStageRunner } from '../../src/orchestrator/taskStageRunner';
@@ -1350,6 +1357,7 @@ describe('関門', () => {
       title: 'T1のタイトル',
       detail: '詳細',
       awaitingOrchestrator: true,
+      humanOnly: false,
     });
     expect(h.controller.findOpenGateForUser(RUN_ID, 'T1', 'g9')).toBeUndefined();
     expect(h.controller.findOpenGateForUser('missing', 'T1', 'g1')).toBeUndefined();
@@ -1610,5 +1618,190 @@ describe('ロードマップ', () => {
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain('取得できない');
+  });
+});
+
+describe('最適化の仕様と人だけの承認・関門（Issue #2106）', () => {
+  const SPEC = {
+    setupCommand: 'npm ci',
+    metricSource: 'file',
+    metricCommand: 'node bench/run.js',
+    metricFile: 'bench/out.json',
+    direction: 'minimize',
+    minImprovement: { kind: 'percent', value: 2 },
+    significanceLevel: 0.05,
+    correctnessCommand: 'npm test',
+    allowedPaths: ['src/hot'],
+    budget: { maxTrials: 20, maxMinutes: 120 },
+    measurementRuns: 7,
+  };
+  const withSpec = (optimization: unknown): { tasks: object[] } => ({
+    tasks: [{ ...planArgs('a').tasks[0], optimization }],
+  });
+  const reflexOn = { planAutoApprove: () => ({ reflex: REFLEX, threshold: 0.8 }) };
+
+  it('propose_planがoptimizationを受け取り、型に合わない値を理由付きで拒否する', async () => {
+    const h = await setup([drafting()]);
+
+    expect((await h.controller.proposePlan(RUN_ID, withSpec(SPEC))).ok).toBe(true);
+    expect(getTask(runOf(h), 'T1')?.optimization).toMatchObject({
+      metricCommand: 'node bench/run.js',
+      allowedPaths: ['src/hot'],
+    });
+    const bad = [
+      [{ ...SPEC, metricSource: 'regex' }, 'metricSource'],
+      [{ ...SPEC, allowedPaths: [] }, 'allowedPaths'],
+      [{ ...SPEC, allowedPaths: ['../x'] }, '..'],
+      [{ ...SPEC, allowedPaths: ['.'] }, 'リポジトリ全体'],
+      [{ ...SPEC, measurementRuns: 2 }, 'measurementRuns'],
+      [{ ...SPEC, metricCommand: 'a\nb' }, '1行'],
+      [{ ...SPEC, extra: 1 }, '未知のキー'],
+      [{ ...SPEC, metricFile: undefined }, 'metricFile'],
+      [{ ...SPEC, secondaryMetrics: 'x' }, 'secondaryMetrics'],
+    ] as const;
+    for (const [spec, word] of bad) {
+      const result = await h.controller.proposePlan(RUN_ID, withSpec(spec));
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(word);
+    }
+  });
+
+  it('Reflexが妥当としても自動承認せず、approve_planでも承認されない。人の承認だけが通る', async () => {
+    reviewPlan.mockResolvedValue({ kind: 'approved', summary: '妥当' });
+    for (const mode of ['human', 'orchestrator'] as const) {
+      const h = await setup([drafting()], {
+        ...reflexOn,
+        planApprovalMode: () => mode,
+        planReview: () => ({ reflex: REFLEX, threshold: 0.8 }),
+      });
+      const proposed = await h.controller.proposePlan(RUN_ID, withSpec(SPEC));
+      expect(proposed.message).not.toContain('自動承認した');
+      expect(runOf(h).planStatus).toBe('awaitingApproval');
+
+      const byTool = await h.controller.approvePlanByReview(RUN_ID, 'x'.repeat(40));
+      expect(byTool).toMatchObject({ decided: { ok: false } });
+      const direct = await h.controller.approvePlan(RUN_ID);
+      expect(direct.ok).toBe(false);
+      expect(direct.message).toContain('最適化の仕様');
+      expect(runOf(h).planStatus).toBe('awaitingApproval');
+
+      const human = await h.controller.approvePlan(RUN_ID, undefined, 'human');
+      expect(human.ok).toBe(true);
+      expect(runOf(h).planStatus).toBe('approved');
+    }
+  });
+
+  it('optimizationの無い計画は従来どおりapprove_planで承認される', async () => {
+    const h = await setup([drafting()]);
+    await h.controller.proposePlan(RUN_ID, planArgs('a'));
+
+    expect((await h.controller.approvePlan(RUN_ID)).ok).toBe(true);
+  });
+
+  it('optimizationを変えても外しても承認が外れ、外した後も人の承認が要る', async () => {
+    const h = await setup([drafting()]);
+    await h.controller.proposePlan(RUN_ID, withSpec(SPEC));
+    await h.controller.approvePlan(RUN_ID, undefined, 'human');
+    // 同じ内容の出し直しは承認済みのまま
+    await h.controller.proposePlan(RUN_ID, { tasks: [{ ...withSpec(SPEC).tasks[0], id: 'T1' }] });
+    expect(getTask(runOf(h), 'T1')?.planApproved).toBe(true);
+
+    await h.controller.proposePlan(RUN_ID, {
+      tasks: [{ ...withSpec({ ...SPEC, measurementRuns: 9 }).tasks[0], id: 'T1' }],
+    });
+    expect(getTask(runOf(h), 'T1')?.planApproved).toBeUndefined();
+    expect(runOf(h).planStatus).toBe('awaitingApproval');
+    await h.controller.approvePlan(RUN_ID, undefined, 'human');
+
+    await h.controller.proposePlan(RUN_ID, { tasks: [{ ...planArgs('a').tasks[0], id: 'T1' }] });
+    const removed = getTask(runOf(h), 'T1');
+    expect(removed?.planApproved).toBeUndefined();
+    expect(removed?.optimization).toBeUndefined();
+    expect(removed?.hadOptimization).toBe(true);
+    expect((await h.controller.approvePlan(RUN_ID)).ok).toBe(false);
+    expect((await h.controller.approvePlan(RUN_ID, undefined, 'human')).ok).toBe(true);
+  });
+
+  describe('最適化の関門', () => {
+    const optRun = (): TaskRun =>
+      makeRun([haltedTask('T1', { optimization: SPEC as unknown as OptimizationSpec })]);
+    const opened = (reason: OptimizeGateReason = 'preMergeFailed'): TaskRun =>
+      openOptimizeGate(optRun(), 'T1', { gateId: 'g1', reason, detail: '悪化' }, FIXTURE_NOW);
+
+    it('awaitingUserで開き、仕様の無いタスクには開かない', () => {
+      const gate = findStageGate(opened(), 'T1', 'g1');
+      expect(gate).toMatchObject({ kind: 'optimization', status: 'awaitingUser' });
+      const plain = makeRun([haltedTask('T1')]);
+      expect(
+        openOptimizeGate(
+          plain,
+          'T1',
+          { gateId: 'g1', reason: 'baselineFailed', detail: '' },
+          FIXTURE_NOW,
+        ),
+      ).toBe(plain);
+    });
+
+    it('Reflexとオーケストレーターは決着させられず、人はproceed・sendBack・closeだけ選べる', () => {
+      const run = opened();
+      const by = (choice: StageGateChoice, who: 'reflex' | 'orchestrator' | 'user', extra = {}) =>
+        resolveStageGate(run, 'T1', 'g1', { choice, by: who, ...extra }, FIXTURE_NOW);
+      expect(by('proceed', 'reflex')).toBe(run);
+      expect(by('proceed', 'orchestrator')).toBe(run);
+      expect(by('proceed', 'orchestrator', { reflexApproved: true })).toBe(run);
+      expect(by('retry', 'user')).toBe(run);
+      expect(by('close', 'user')).toBe(run);
+      expect(findStageGate(by('proceed', 'user'), 'T1', 'g1')?.resolution).toMatchObject({
+        choice: 'proceed',
+        by: 'user',
+      });
+      expect(findStageGate(by('sendBack', 'user'), 'T1', 'g1')?.status).toBe('resolved');
+      const closed = by('close', 'user', { closeReason: '不要' });
+      expect(getTask(closed, 'T1')?.closedWithoutMerge).toMatchObject({ by: 'user' });
+    });
+
+    it('基準値の計測失敗ではsendBackを選べない', () => {
+      const run = opened('baselineFailed');
+      expect(
+        resolveStageGate(run, 'T1', 'g1', { choice: 'sendBack', by: 'user' }, FIXTURE_NOW),
+      ).toBe(run);
+      const proceeded = resolveStageGate(
+        run,
+        'T1',
+        'g1',
+        { choice: 'proceed', by: 'user' },
+        FIXTURE_NOW,
+      );
+      expect(findStageGate(proceeded, 'T1', 'g1')?.status).toBe('resolved');
+    });
+
+    it('resolve_gateの経路（by: orchestrator）は理由付きで失敗する。Kanbanからのuserは通る', async () => {
+      const h = await setup([opened()]);
+
+      expect(h.controller.findOpenGateForUser(RUN_ID, 'T1', 'g1')?.humanOnly).toBe(true);
+      const byOrchestrator = await h.controller.resolveGate(
+        RUN_ID,
+        'T1',
+        'g1',
+        'proceed',
+        'orchestrator',
+        { summary: 'ok' },
+      );
+      expect(byOrchestrator.ok).toBe(false);
+      expect(byOrchestrator.message).toContain('人だけ');
+      expect(findStageGate(runOf(h), 'T1', 'g1')?.status).toBe('awaitingUser');
+      const review = await h.controller.resolveGateByReview(
+        RUN_ID,
+        'T1',
+        'g1',
+        'proceed',
+        undefined,
+      );
+      expect(review).toEqual({ needsUser: { summary: undefined } });
+      expect(reviewGate).not.toHaveBeenCalled();
+
+      const byUser = await h.controller.resolveGate(RUN_ID, 'T1', 'g1', 'proceed');
+      expect(byUser.ok).toBe(true);
+    });
   });
 });

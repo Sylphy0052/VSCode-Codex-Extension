@@ -42,6 +42,7 @@ import {
   findOpenGate,
   findStageGate,
   GATE_CHOICE_LABELS,
+  HUMAN_ONLY_GATE_MESSAGE,
   isGateChoiceAllowed,
   isReviewRoundsExhausted,
   resolveStageGate,
@@ -56,6 +57,8 @@ import {
 } from './taskRunScheduler';
 import {
   approveTaskPlan,
+  planRequiresHumanApproval,
+  type PlanApprover,
   closeTaskWithoutMerge,
   createTaskRun,
   currentStage,
@@ -113,6 +116,10 @@ import {
 
 // resume_stageの応答へ載せる失敗理由の上限。get_run_stateの「理由:」と同じ長さで切る
 const RESUME_FAILURE_MAX_LENGTH = 1000;
+
+/** 最適化の仕様を持つ計画を`approve_plan`・Reflexの自動承認で承認させないときの理由（Issue #2106）。 */
+export const HUMAN_ONLY_PLAN_MESSAGE =
+  '承認しない: この計画には最適化の仕様（optimization）を持つタスクがある。指標や準備のコマンドは拡張機能がsandboxの外で実行するため、人がKanbanで承認したときだけ承認済みになる。ユーザーがKanbanで承認するのを待つ（本文で確かめない）';
 // 関門へ保存するReflexの承認の要約の上限。Reflexへ渡すときの「これまでの判定の要約」と同じ長さで切る
 const GATE_APPROVAL_SUMMARY_MAX_LENGTH = 500;
 
@@ -556,13 +563,16 @@ export class TaskRunController {
         if (review !== undefined) {
           // Reflexへ渡した内容から書き込み時までに変わっていなければ判定を適用する
           const unchanged = JSON.stringify(resolved.value.drafts) === review.reviewedDrafts;
+          // 最適化の仕様を持つ計画は、Reflexが妥当と判定しても自動承認しない（Issue #2106）
+          const approve =
+            unchanged && review.verdict.kind === 'approved' && !planRequiresHumanApproval(proposed);
           proposed = setTaskPlanReview(proposed, {
-            autoApproved: unchanged && review.verdict.kind === 'approved',
+            autoApproved: approve,
             summary: review.verdict.summary,
             reviewedAt: this.now().toISOString(),
           });
-          if (unchanged && review.verdict.kind === 'approved') {
-            proposed = approveTaskPlan(proposed);
+          if (approve) {
+            proposed = approveTaskPlan(proposed, 'orchestrator');
             autoApproved = true;
           }
         } else {
@@ -715,7 +725,11 @@ export class TaskRunController {
    * 計画を承認する（Kanbanのボタン、またはOrchestratorの`approve_plan`ツールから呼ぶ）。
    * 提案の後に別のrunが同じIssueを扱い始めていれば承認しない（Issue #1562）。
    */
-  async approvePlan(runId: string, reviewedPlan?: string): Promise<ControllerResult> {
+  async approvePlan(
+    runId: string,
+    reviewedPlan?: string,
+    approver: PlanApprover = 'orchestrator',
+  ): Promise<ControllerResult> {
     const leased = await this.ensureLease(runId);
     if (!leased.ok) {
       return leased;
@@ -723,6 +737,9 @@ export class TaskRunController {
     const run = this.deps.store.find(runId);
     if (run?.planStatus !== 'awaitingApproval') {
       return { ok: false, message: '承認待ちの計画がありません' };
+    }
+    if (approver !== 'human' && planRequiresHumanApproval(run)) {
+      return { ok: false, message: HUMAN_ONLY_PLAN_MESSAGE };
     }
     let conflict: string | undefined;
     let changed = false;
@@ -733,7 +750,7 @@ export class TaskRunController {
         return r;
       }
       conflict = this.findIssueConflict(r);
-      return conflict === undefined ? approveTaskPlan(r) : r;
+      return conflict === undefined ? approveTaskPlan(r, approver) : r;
     });
     if (changed) {
       return {
@@ -775,6 +792,9 @@ export class TaskRunController {
     const run = this.deps.store.find(runId);
     if (run?.planStatus !== 'awaitingApproval') {
       return { decided: { ok: false, message: '承認待ちの計画がありません' } };
+    }
+    if (planRequiresHumanApproval(run)) {
+      return { decided: { ok: false, message: HUMAN_ONLY_PLAN_MESSAGE } };
     }
     const drafts = pendingPlanDrafts(run);
     const reviewedPlan = JSON.stringify(drafts);
@@ -1824,7 +1844,9 @@ export class TaskRunController {
     runId: string,
     taskId: string,
     gateId: string,
-  ): { title: string; detail: string; awaitingOrchestrator: boolean } | undefined {
+  ):
+    | { title: string; detail: string; awaitingOrchestrator: boolean; humanOnly: boolean }
+    | undefined {
     const run = this.deps.store.find(runId);
     const task = run === undefined ? undefined : getTask(run, taskId);
     const gate = run === undefined ? undefined : findStageGate(run, taskId, gateId);
@@ -1835,6 +1857,7 @@ export class TaskRunController {
       title: task.title,
       detail: gate.detail,
       awaitingOrchestrator: gate.status === 'awaitingOrchestrator',
+      humanOnly: gate.kind === 'optimization',
     };
   }
 
@@ -1865,6 +1888,7 @@ export class TaskRunController {
     // 差し戻しの上限に達した関門の差し戻しはユーザーだけが選べる（Issue #1771）。審査せず人へ回す
     if (
       config === undefined ||
+      gate.kind === 'optimization' ||
       !isGateChoiceAllowed(gate.kind, choice) ||
       (choice === 'sendBack' && isReviewRoundsExhausted(task))
     ) {
@@ -1938,7 +1962,11 @@ export class TaskRunController {
         rejection = '決着待ちの関門ではない（既に決着済み、または存在しない）';
         return r;
       }
-      if (!isGateChoiceAllowed(gate.kind, choice)) {
+      if (gate.kind === 'optimization' && by !== 'user') {
+        rejection = HUMAN_ONLY_GATE_MESSAGE;
+        return r;
+      }
+      if (!isGateChoiceAllowed(gate.kind, choice, gate.optimizeReason)) {
         rejection = `この関門では「${GATE_CHOICE_LABELS[choice]}」を選べない`;
         return r;
       }
@@ -2060,6 +2088,7 @@ function pendingPlanDrafts(run: TaskRun): TaskDraft[] {
     dependsOn: task.dependsOn,
     existingIssueNumber: task.existingIssueNumber,
     ...(task.completedInRoadmap === true ? { completedInRoadmap: true as const } : {}),
+    ...(task.optimization === undefined ? {} : { optimization: task.optimization }),
   }));
 }
 
