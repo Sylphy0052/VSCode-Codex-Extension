@@ -617,6 +617,19 @@ export function isTaskDone(task: OrchestratedTask): boolean {
   return currentStage(task) === undefined;
 }
 
+/** 最適化のループの状態（Issue #2111）を保存する。タスクが無ければそのまま返す。 */
+export function recordOptimizeLoop(
+  run: TaskRun,
+  taskId: string,
+  state: OptimizeLoopState,
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  return task === undefined
+    ? run
+    : withTask(run, { ...task, optimizeLoop: state, updatedAt: now.toISOString() });
+}
+
 function withTask(run: TaskRun, next: OrchestratedTask): TaskRun {
   if (!isValidTaskId(next.taskId)) {
     throw new Error(`不正なtaskId: ${next.taskId}`);

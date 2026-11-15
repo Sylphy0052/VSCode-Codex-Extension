@@ -33,6 +33,13 @@ import {
   type RoadmapAskOutcome,
   type RoadmapQuestionVerdict,
 } from './roadmapQuestionMcp';
+import {
+  implementSessionBlockReason,
+  type OptimizeLoopOutcome,
+  type OptimizeLoopState,
+  STOP_REASON_LABELS,
+} from './optimizeLoop';
+import type { OptimizeLoopHost } from './optimizeLoopHost';
 import type { StartPolicy } from './resourceMonitor';
 import type { RunNotesStore } from './runNotes';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
@@ -44,6 +51,7 @@ import {
   checkStageReport,
   clearStagePause,
   completeStage,
+  currentStage,
   finishTaskRunIfDone,
   getTask,
   haltStage,
@@ -54,6 +62,7 @@ import {
   markStageStopping,
   type OrchestratedTask,
   recordAttemptSession,
+  recordOptimizeLoop,
   recordTaskWorktree,
   requestStagePause,
   requestStageResume,
@@ -74,11 +83,13 @@ import {
   REPEATED_FAILURE_SUMMARY,
   escalateStageGate,
   markGateAwaitingOrchestrator,
+  findOpenGate,
   findStageGate,
   GATE_CHOICE_LABELS,
   gateChoiceFromAnswer,
   type GateJudgeQuestion,
   needsReviewGate,
+  openOptimizeGateHalting,
   openStageGate,
   orchestratorGateScope,
   resolveStageGate,
@@ -190,6 +201,11 @@ export interface TaskStageRunnerDeps {
     pullRequestNumber: number,
     options: { selfImproveRun: boolean },
   ): Promise<string | undefined>;
+  /**
+   * 最適化のループ（Issue #2111）。最適化の仕様を持つタスクのimplementはこのループに置き換える。
+   * 無ければ、最適化のタスクのimplementは始めずに止める（ループを通さずにセッションを始めない）。
+   */
+  optimizeLoop?: OptimizeLoopRunnerPort;
   /** 1つの実行回で送る指示の上限。 */
   maxIterations: number;
   /**
@@ -265,6 +281,29 @@ export interface TaskStageRunnerDeps {
    * 未設定なら積まない。
    */
   runNotes?: Pick<RunNotesStore, 'recordRemaining'>;
+}
+
+/** 工程の実行が使う最適化のループの口（実体は`OptimizeLoopHost`）。 */
+export type OptimizeLoopRunnerPort = Pick<
+  OptimizeLoopHost,
+  | 'runLoop'
+  | 'restoreWorkTree'
+  | 'ledgerSummaryForPrompt'
+  | 'checkPullRequestTree'
+  | 'remeasureAfterReview'
+  | 'checkMerge'
+  | 'cleanup'
+>;
+
+/** 動いている最適化のループ。タスクごとに1つ。 */
+interface LiveOptimizeLoop {
+  runId: string;
+  ref: StageReportRef;
+  controller: AbortController;
+  /** `pause_stage`を受け付けた。次の試行の前で止まる。 */
+  pauseRequested: boolean;
+  /** 人の停止（`stop_stage`・runの停止）の理由。 */
+  stopReason: string | undefined;
 }
 
 /** `pauseStage`の結果。受け付けなかったときは理由を返す。 */
@@ -371,6 +410,8 @@ function unreportedFinishDetail(reason: LoopStopReason, maxIterations: number): 
 
 export class TaskStageRunner {
   private readonly live = new Map<string, LiveStageSession>();
+  /** 動いている最適化のループ（Issue #2111）。工程セッションの帳簿（`live`）とは別に持つ。 */
+  private readonly optimizeLoops = new Map<string, LiveOptimizeLoop>();
   /** 開始処理の途中（mergeの鍵・worktree・セッション起動の`await`中）のタスク。二重起動を防ぐ。 */
   private readonly starting = new Set<string>();
   /** 例外の1本（Issue #1807）として始める途中のタスク。設定によらず低い優先度で起動する。 */
@@ -700,6 +741,66 @@ export class TaskStageRunner {
     return true;
   }
 
+  /** merge命令の検査。自己改善の保護パス（Issue #2082）と、最適化のmerge直前の計測（Issue #2111）。 */
+  private async guardMerge(entry: LiveStageSession, command: string): Promise<string | undefined> {
+    if (this.deps.checkSelfImproveMerge !== undefined) {
+      const denial = await this.guardSelfImproveMerge(entry);
+      if (denial !== undefined) {
+        return denial;
+      }
+    }
+    return this.guardOptimizeMerge(entry, command);
+  }
+
+  /**
+   * 最適化のタスクのmerge直前の計測（Issue #2111 仕様8）。計測が要れば背景で始めてすぐ拒否する
+   * （承認の応答を計測の間ずっと待たせない）。失敗したら最適化の関門を立てる。
+   */
+  private async guardOptimizeMerge(
+    entry: LiveStageSession,
+    command: string,
+  ): Promise<string | undefined> {
+    const host = this.deps.optimizeLoop;
+    const { runId } = entry;
+    const { taskId } = entry.ref;
+    const run = this.deps.store.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    if (host === undefined || run === undefined || task?.optimization === undefined) {
+      return undefined;
+    }
+    const open = findOpenGate(task);
+    if (open?.kind === 'optimization') {
+      return 'mergeしない: 最適化の関門が決着していない。人の判断を待つ';
+    }
+    const number = task.pullRequest?.number;
+    if (number === undefined) {
+      return 'タスクのPRを特定できず、merge直前の計測ができないためmergeできない';
+    }
+    try {
+      return await host.checkMerge({
+        run,
+        task,
+        pullRequestNumber: number,
+        command,
+        saveState: async (state) => {
+          await this.saveOptimizeLoop(runId, taskId, state);
+        },
+        openGate: async (reason, detail) => {
+          await this.mutate(runId, (r) =>
+            openOptimizeGateHalting(
+              r,
+              taskId,
+              { gateId: this.newId(), reason, detail },
+              this.now(),
+            ),
+          );
+        },
+      });
+    } catch (e) {
+      return `merge直前の計測を始められなかったためmergeできない: ${errorMessage(e)}`;
+    }
+  }
+
   /** タスクのPRのmerge前の自己改善保護パス検査（Issue #2082）。PRが未確定なら確かめられないので拒否する。 */
   private async guardSelfImproveMerge(entry: LiveStageSession): Promise<string | undefined> {
     const run = this.deps.store.find(entry.runId);
@@ -849,7 +950,7 @@ export class TaskStageRunner {
 
   /** このウィンドウが動かしている工程セッションと開始処理の途中の数（全runの合計）。 */
   private countWindowSessions(): number {
-    return new Set([...this.live.keys(), ...this.starting]).size;
+    return new Set([...this.live.keys(), ...this.optimizeLoops.keys(), ...this.starting]).size;
   }
 
   /** 同じフォルダの全runで、動いている工程セッションと開始処理の途中（まだ動いていない）の数。 */
@@ -870,7 +971,7 @@ export class TaskStageRunner {
     options: { lowPriority?: boolean } = {},
   ): Promise<boolean> {
     const key = liveKey(runId, target.taskId);
-    if (this.starting.has(key) || this.live.has(key)) {
+    if (this.starting.has(key) || this.live.has(key) || this.optimizeLoops.has(key)) {
       return false;
     }
     this.starting.add(key);
@@ -955,6 +1056,21 @@ export class TaskStageRunner {
       run = worktree.run;
       cwd = worktree.worktreePath;
     }
+    // 最適化のタスクのimplementは、ループを通してだけ始める（Issue #2111 仕様1）
+    const queuedTask = getTask(run, taskId);
+    const loopBlock =
+      stage === 'implement' && queuedTask !== undefined
+        ? implementSessionBlockReason(queuedTask)
+        : undefined;
+    if (loopBlock !== undefined && this.deps.optimizeLoop === undefined) {
+      await this.haltAndOpenGate(
+        runId,
+        taskId,
+        'failed',
+        `最適化のループを使えないため始めない: ${loopBlock}`,
+      );
+      return false;
+    }
 
     const attemptId = this.newId();
     const hasAttempts = (getTask(run, taskId)?.stages[stage].attempts.length ?? 0) > 0;
@@ -977,8 +1093,28 @@ export class TaskStageRunner {
       return false;
     }
     const ref: StageReportRef = { taskId, executionId: task.executionId, stage, attemptId };
+    if (loopBlock !== undefined) {
+      this.startOptimizeLoop(runId, ref, cwd, decision);
+      return true;
+    }
+    return this.openAndRunStage(started, task, ref, cwd, decision, lease);
+  }
+
+  /** 始めた実行回のセッションを開き、最初の指示を送る。帳簿へ載せたら`true`。 */
+  private async openAndRunStage(
+    started: TaskRun,
+    task: OrchestratedTask,
+    ref: StageReportRef,
+    cwd: string,
+    decision: StageDecision,
+    lease: MergeKeyLease | undefined,
+  ): Promise<boolean> {
+    const { runId } = started;
+    const { taskId, stage } = ref;
     let entry: LiveStageSession;
+    let extra: string | undefined;
     try {
+      extra = await this.prepareOptimizePrSession(started, task, cwd, ref);
       entry = await this.openStageSession(started, ref, cwd, decision, lease);
     } catch (e) {
       await this.haltAndOpenGate(
@@ -1003,10 +1139,182 @@ export class TaskStageRunner {
       entry,
       this.buildLoopPlan(
         ref,
-        buildStagePrompt({ task, ref, instruction: decision.instruction, cwd }, this.newId()),
+        buildStagePrompt(
+          {
+            task,
+            ref,
+            instruction: decision.instruction,
+            cwd,
+            ...(extra === undefined ? {} : { extra }),
+          },
+          this.newId(),
+        ),
       ),
     );
     return true;
+  }
+
+  // ---- 最適化のループ（Issue #2111） ----
+
+  /**
+   * 最適化のループが止まった後のimplement（PRを書くセッション）の準備。作業ツリーを最良の候補の木に
+   * 戻す（ループが止まった直後・関門の`sendBack`の後）。セッションへ渡す台帳の要約を返す。最適化の
+   * タスクでなければ何もしない。
+   */
+  private async prepareOptimizePrSession(
+    run: TaskRun,
+    task: OrchestratedTask,
+    cwd: string,
+    ref: StageReportRef,
+  ): Promise<string | undefined> {
+    const host = this.deps.optimizeLoop;
+    const loop = task.optimizeLoop;
+    if (ref.stage !== 'implement' || task.optimization === undefined || host === undefined) {
+      return undefined;
+    }
+    const best = loop?.best?.commit ?? loop?.baseline?.commit;
+    if (loop?.rewritePending === true && best !== undefined) {
+      await host.restoreWorkTree(cwd, best);
+      await this.saveOptimizeLoop(run.runId, task.taskId, { ...loop, rewritePending: false });
+    }
+    return host.ledgerSummaryForPrompt(run, task);
+  }
+
+  private async saveOptimizeLoop(
+    runId: string,
+    taskId: string,
+    state: OptimizeLoopState,
+  ): Promise<TaskRun | undefined> {
+    return this.mutate(runId, (r) => recordOptimizeLoop(r, taskId, state, this.now()));
+  }
+
+  /** ループを背景で回す。ループは工程の実行回（`running`）として並列の枠を1つ使う。 */
+  private startOptimizeLoop(
+    runId: string,
+    ref: StageReportRef,
+    cwd: string,
+    decision: StageDecision,
+  ): void {
+    const key = liveKey(runId, ref.taskId);
+    const handle: LiveOptimizeLoop = {
+      runId,
+      ref,
+      controller: new AbortController(),
+      pauseRequested: false,
+      stopReason: undefined,
+    };
+    this.optimizeLoops.set(key, handle);
+    void this.driveOptimizeLoop(runId, handle, cwd, decision)
+      .catch(async (e: unknown) => {
+        await this.withTaskLock(key, () =>
+          this.haltAndOpenGate(
+            runId,
+            ref.taskId,
+            'failed',
+            `最適化のループが失敗しました: ${errorMessage(e)}`,
+          ),
+        );
+      })
+      .finally(() => {
+        this.optimizeLoops.delete(key);
+        void this.pumpFolder(runId);
+      });
+  }
+
+  private async driveOptimizeLoop(
+    runId: string,
+    handle: LiveOptimizeLoop,
+    cwd: string,
+    decision: StageDecision,
+  ): Promise<void> {
+    const host = this.deps.optimizeLoop;
+    const run = this.deps.store.find(runId);
+    const task = run === undefined ? undefined : getTask(run, handle.ref.taskId);
+    if (host === undefined || run === undefined || task === undefined) {
+      return;
+    }
+    const outcome = await host.runLoop({
+      run,
+      task,
+      worktreePath: cwd,
+      model: decision.model,
+      effort: decision.effort,
+      signal: handle.controller.signal,
+      isPauseRequested: () => handle.pauseRequested,
+      saveState: async (state) => {
+        await this.saveOptimizeLoop(runId, handle.ref.taskId, state);
+      },
+    });
+    await this.withTaskLock(liveKey(runId, handle.ref.taskId), () =>
+      this.afterOptimizeLoop(runId, handle, cwd, decision, outcome),
+    );
+  }
+
+  /** ループが返った後。止め方ごとに工程を止めるか、PRを書くセッションを始める。 */
+  private async afterOptimizeLoop(
+    runId: string,
+    handle: LiveOptimizeLoop,
+    cwd: string,
+    decision: StageDecision,
+    outcome: OptimizeLoopOutcome,
+  ): Promise<void> {
+    const { taskId } = handle.ref;
+    await this.saveOptimizeLoop(runId, taskId, outcome.state);
+    const current = this.deps.store.find(runId);
+    const task = current === undefined ? undefined : getTask(current, taskId);
+    // 待つ間に人が止めた・runが止まった・実行回が替わったなら、状態だけ残して終える
+    if (
+      current === undefined ||
+      task === undefined ||
+      task.currentAttemptId !== handle.ref.attemptId ||
+      task.stages.implement.status !== 'running'
+    ) {
+      return;
+    }
+    if (handle.stopReason !== undefined) {
+      await this.mutate(runId, (r) =>
+        haltStage(r, taskId, 'stopped', handle.stopReason, this.now()),
+      );
+      return;
+    }
+    if (outcome.kind === 'paused') {
+      await this.mutate(runId, (r) =>
+        haltStage(
+          r,
+          taskId,
+          'stopped',
+          '最適化のループを次の試行の前で一時停止した。「やり直す」で続きから再開する',
+          this.now(),
+        ),
+      );
+      return;
+    }
+    if (outcome.kind === 'baselineFailed') {
+      // 試行を始めずに、人だけが決着できる最適化の関門を立てる（Issue #2111 仕様2）
+      const gateId = this.newId();
+      await this.mutate(runId, (r) =>
+        openOptimizeGateHalting(
+          haltStage(r, taskId, 'awaitingUser', outcome.detail, this.now()),
+          taskId,
+          { gateId, reason: 'baselineFailed', detail: outcome.detail },
+          this.now(),
+        ),
+      );
+      return;
+    }
+    this.warn(
+      runId,
+      taskId,
+      `最適化のループが止まった（${STOP_REASON_LABELS[outcome.reason]}）。最良の候補からPRを作る`,
+    );
+    await this.openAndRunStage(
+      current,
+      { ...task, optimizeLoop: outcome.state },
+      handle.ref,
+      cwd,
+      decision,
+      undefined,
+    );
   }
 
   /**
@@ -1274,9 +1582,9 @@ export class TaskStageRunner {
         entry.ref.stage,
         this.deps.autoApprove(),
         (command) => this.judgeMergeCommand(entry, command),
-        this.deps.checkSelfImproveMerge === undefined
+        this.deps.checkSelfImproveMerge === undefined && this.deps.optimizeLoop === undefined
           ? undefined
-          : () => this.guardSelfImproveMerge(entry),
+          : (command) => this.guardMerge(entry, command),
       ),
     );
     session.setMcpElicitationHandler?.(shouldAutoApproveStageElicitation);
@@ -1413,17 +1721,22 @@ export class TaskStageRunner {
           isError: true,
         };
       }
+      const treeMismatch = await this.checkOptimizePullRequest(run, binding.ref, observed.output);
       const gateId = this.newId();
-      const next = await this.mutate(entry.runId, (r) =>
-        finishTaskRunIfDone(
-          this.openReviewGate(
-            completeStage(r, binding.ref, observed.output, this.now()),
-            taskId,
-            gateId,
-          ),
-          this.now(),
-        ),
-      );
+      const next = await this.mutate(entry.runId, (r) => {
+        const completed = completeStage(r, binding.ref, observed.output, this.now());
+        // PRのHEADの木が最良の候補と違えば、人だけが決着できる最適化の関門にする（Issue #2111 仕様6）
+        const gated =
+          treeMismatch === undefined
+            ? this.openReviewGate(completed, taskId, gateId)
+            : openOptimizeGateHalting(
+                completed,
+                taskId,
+                { gateId, reason: 'treeMismatch', detail: treeMismatch },
+                this.now(),
+              );
+        return finishTaskRunIfDone(gated, this.now());
+      });
       const done = next === undefined ? undefined : getTask(next, taskId);
       if (done?.stages[binding.ref.stage].status !== 'done') {
         return { text: '完了を記録できませんでした。改めて報告する。', isError: true };
@@ -1431,8 +1744,82 @@ export class TaskStageRunner {
       this.markReported(entry);
       this.recordReviewFindings(entry.runId, run.workspaceRoot, taskId, observed.output);
       this.judgeGateLater(entry.runId, taskId, gateId, next, entry.session.reflexEnabled?.());
+      if (binding.ref.stage === 'review') {
+        this.remeasureAfterReviewLater(entry.runId, taskId);
+      }
       return { text: '完了を受け付けました。このターンで作業を終える。', isError: false };
     });
+  }
+
+  /**
+   * 最適化のタスクのimplementの完了で、PRのHEADの木が最良の候補の木と一致するか確かめる
+   * （Issue #2111 仕様6）。一致しない・確かめられないときは理由を返す。
+   */
+  private async checkOptimizePullRequest(
+    run: TaskRun,
+    ref: StageReportRef,
+    output: StageOutput,
+  ): Promise<string | undefined> {
+    const host = this.deps.optimizeLoop;
+    if (host === undefined || ref.stage !== 'implement') {
+      return undefined;
+    }
+    const completed = completeStage(run, ref, output, this.now());
+    const task = getTask(completed, ref.taskId);
+    if (task?.optimization === undefined) {
+      return undefined;
+    }
+    const number = task.pullRequest?.number;
+    if (number === undefined) {
+      return 'PRを特定できず、PRのHEADの木を最良の候補と照合できない';
+    }
+    try {
+      const checked = await host.checkPullRequestTree(completed, task, number);
+      return checked.match ? undefined : checked.detail;
+    } catch (e) {
+      return `PRのHEADの木を最良の候補と照合できなかった: ${errorMessage(e)}`;
+    }
+  }
+
+  /**
+   * review工程の修正・差し戻しでコードが変わったら、最良の木と交互に測り直す（Issue #2111 仕様7）。
+   * 有意に悪化した・正しさが落ちたら最適化の関門を立てる。試行ループは回し直さない。
+   */
+  private remeasureAfterReviewLater(runId: string, taskId: string): void {
+    const host = this.deps.optimizeLoop;
+    const run = this.deps.store.find(runId);
+    const task = run === undefined ? undefined : getTask(run, taskId);
+    if (host === undefined || run === undefined || task?.optimization === undefined) {
+      return;
+    }
+    void host
+      .remeasureAfterReview(run, task)
+      .then(async (result) => {
+        const latest = this.deps.store.find(runId);
+        const loop = latest === undefined ? undefined : getTask(latest, taskId)?.optimizeLoop;
+        await this.mutate(runId, (r) => {
+          const saved =
+            loop === undefined || result.measuredTree === undefined
+              ? r
+              : recordOptimizeLoop(
+                  r,
+                  taskId,
+                  { ...loop, measuredTree: result.measuredTree },
+                  this.now(),
+                );
+          return result.worsened
+            ? openOptimizeGateHalting(
+                saved,
+                taskId,
+                { gateId: this.newId(), reason: 'worsenedAfterReview', detail: result.detail },
+                this.now(),
+              )
+            : saved;
+        });
+      })
+      .catch((e: unknown) => {
+        this.warn(runId, taskId, `review後の測り直しに失敗しました: ${errorMessage(e)}`);
+      });
   }
 
   /** review工程が直さずに残した指摘を残件へ積む。記録の成否は工程の完了に影響させない。 */
@@ -1641,6 +2028,7 @@ export class TaskStageRunner {
       if (!result.ok) {
         this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
       }
+      await this.cleanupOptimize(run, task);
       this.deps.onTaskMerged?.(runId, taskId);
     });
   }
@@ -1661,7 +2049,37 @@ export class TaskStageRunner {
     if (!result.ok) {
       this.warn(runId, taskId, `${taskId}のmerge後の後片付けに失敗しました: ${result.message}`);
     }
+    await this.cleanupOptimize(run, task);
     this.deps.onTaskMerged?.(runId, taskId);
+  }
+
+  /**
+   * mergeせずに完了にしたタスクの最適化の後片付け（Issue #2111 仕様9）。終わっていない・最適化で
+   * ないタスクでは何もしない。
+   */
+  async cleanupOptimizeTask(runId: string, taskId: string): Promise<void> {
+    await this.withTaskLock(liveKey(runId, taskId), async () => {
+      const run = this.deps.store.find(runId);
+      const task = run === undefined ? undefined : getTask(run, taskId);
+      if (run !== undefined && task !== undefined && currentStage(task) === undefined) {
+        await this.cleanupOptimize(run, task);
+      }
+    });
+  }
+
+  /** `refs/optimize/<runId>-<taskId>/`と計測用のworktreeを消す。失敗は警告に留める。 */
+  private async cleanupOptimize(run: TaskRun, task: OrchestratedTask): Promise<void> {
+    const host = this.deps.optimizeLoop;
+    if (host === undefined || task.optimization === undefined) {
+      return;
+    }
+    await host.cleanup(run.runId, task.taskId, run.workspaceRoot).catch((e: unknown) => {
+      this.warn(
+        run.runId,
+        task.taskId,
+        `${task.taskId}の最適化の後片付けに失敗しました: ${errorMessage(e)}`,
+      );
+    });
   }
 
   /** 帳簿から外し、MCPのトークンを失効させ、鍵（持っていれば）を放す。 */
@@ -2019,6 +2437,14 @@ export class TaskStageRunner {
     const key = liveKey(runId, taskId);
     const reason = options.reason ?? '人が止めました';
     const stopped = await this.withTaskLock(key, async () => {
+      // 最適化のループは試行と計測のプロセスごと止める（Issue #2111 仕様1）
+      const loop = this.optimizeLoops.get(key);
+      if (loop !== undefined) {
+        loop.stopReason = reason;
+        loop.controller.abort();
+        await this.mutate(runId, (r) => haltStage(r, taskId, 'stopped', reason, this.now()));
+        return true;
+      }
       const entry = this.live.get(key);
       if (entry === undefined || entry.closed) {
         if (options.liveOnly === true) {
@@ -2055,7 +2481,7 @@ export class TaskStageRunner {
    * 移した先で「やり直す」から始め直させる。止めた工程の数を返す。
    */
   async stopLiveStagesOfRun(runId: string, reason: string): Promise<number> {
-    const taskIds = [...this.live.values()]
+    const taskIds = [...this.live.values(), ...this.optimizeLoops.values()]
       .filter((e) => e.runId === runId)
       .map((e) => e.ref.taskId);
     const results = await Promise.allSettled(
@@ -2090,6 +2516,16 @@ export class TaskStageRunner {
       const task = run === undefined ? undefined : getTask(run, taskId);
       if (task?.pause !== undefined) {
         return { ok: false, reason: 'alreadyPaused' };
+      }
+      // 最適化のループは次の試行の前で止める（Issue #2111 仕様1）。止まったら工程を止め、
+      // 「やり直す」でループの状態から続ける
+      const loop = this.optimizeLoops.get(key);
+      if (loop !== undefined) {
+        if (loop.pauseRequested) {
+          return { ok: false, reason: 'alreadyPaused' };
+        }
+        loop.pauseRequested = true;
+        return { ok: true, waitingForTurn: true };
       }
       const entry = this.live.get(key);
       if (entry === undefined || entry.closed) {
@@ -2205,6 +2641,10 @@ export class TaskStageRunner {
       this.release(entry, { dispose: true });
     }
     this.live.clear();
+    // 試行と計測のプロセスも止める。止め切れずに残ったものは、再開時にプロセスの記録から止める
+    for (const loop of this.optimizeLoops.values()) {
+      loop.controller.abort();
+    }
     this.locks.clear();
   }
 }

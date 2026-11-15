@@ -407,7 +407,6 @@ export function markGateAwaitingOrchestrator(
   );
 }
 
-/** 「実装とPR作成」と「レビュー」を未着手へ戻す（差し戻し）。 */
 /**
  * 最適化の関門を、工程を止めてから開く（Issue #2111）。工程のセッションが動いている（`running`）
  * ときは止めずに関門だけ開く（merge直前の計測の失敗。mergeは承認経路が拒み続ける）。
@@ -490,6 +489,7 @@ function resolveOptimizeGate(
   return getTask(resetStageForRetry(withTaskUpdate(run, base), closed.taskId, now), closed.taskId);
 }
 
+/** 「実装とPR作成」と「レビュー」を未着手へ戻す（差し戻し）。 */
 function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
   const reset = {
     status: 'notStarted' as const,

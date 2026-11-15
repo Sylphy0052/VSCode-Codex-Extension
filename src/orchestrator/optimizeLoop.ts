@@ -315,13 +315,20 @@ export async function runOptimizeLoop(input: OptimizeLoopInput): Promise<Optimiz
     return { kind: 'stopped', reason, state };
   };
 
+  // 基準値が無いまま止められたら、PRを書く段へは進めない（最良も基準も無い）。やり直しで測り直す
+  const stopBeforeBaseline = async (): Promise<OptimizeLoopOutcome> => {
+    state = { ...state, phase: 'baseline', stopReason: 'userStopped' };
+    await save();
+    return { kind: 'stopped', reason: 'userStopped', state };
+  };
+
   if (state.baseline === undefined) {
     if (input.signal.aborted) {
-      return stop('userStopped');
+      return stopBeforeBaseline();
     }
     const baseline = await ports.measureBaseline(input.signal);
     if (input.signal.aborted) {
-      return stop('userStopped');
+      return stopBeforeBaseline();
     }
     if (!baseline.ok) {
       state = { ...state, phase: 'baseline' };
@@ -581,11 +588,17 @@ export function applyOptimizeGateResolution(
     }
     case 'treeMismatch':
       return choice === 'sendBack'
-        ? { state: { ...state, phase: 'pr', rewritePending: true }, action: 'restoreBestAndRewrite' }
+        ? {
+            state: { ...state, phase: 'pr', rewritePending: true },
+            action: 'restoreBestAndRewrite',
+          }
         : { state, action: 'continue' };
     case 'worsenedAfterReview':
       return choice === 'sendBack'
-        ? { state: { ...state, phase: 'pr', rewritePending: true }, action: 'restoreBestAndRewrite' }
+        ? {
+            state: { ...state, phase: 'pr', rewritePending: true },
+            action: 'restoreBestAndRewrite',
+          }
         : { state, action: 'continue' };
     case 'preMergeFailed':
       return state.preMerge === undefined

@@ -55,6 +55,11 @@ export interface RunMetrics {
   autoRetries: number;
   maxReached: number;
   questions: number;
+  /**
+   * 最適化のループ（Issue #2111）が回した試行の回数の合計（中断を含む）。試行のセッションは
+   * 通常の工程セッションとは別に数える。
+   */
+  optimizeTrials: number;
   /** 決着した関門の件数（決着者別）。刈られた分を含む。 */
   gatesResolved: Record<StageDecider, number>;
   /** 子Issueあたりの所要時間（ミリ秒）。子Issueが0件なら`undefined`。 */
@@ -133,9 +138,11 @@ export function computeRunMetrics(run: TaskRun, keys: RunMetricsKeys): RunMetric
   let autoRetries = 0;
   let maxReached = 0;
   let questions = 0;
+  let optimizeTrials = 0;
   for (const task of tasks) {
     const tally = task.metricsTally;
     sendBacks += task.reviewRounds ?? 0;
+    optimizeTrials += task.optimizeLoop?.trials ?? 0;
     maxReached += tally?.maxReached ?? 0;
     questions += Math.max(tally?.questionsAsked ?? 0, task.questions?.length ?? 0);
     autoRetries += tally?.prunedAutoRetries ?? 0;
@@ -162,6 +169,7 @@ export function computeRunMetrics(run: TaskRun, keys: RunMetricsKeys): RunMetric
     autoRetries,
     maxReached,
     questions,
+    optimizeTrials,
     gatesResolved,
     msPerChildIssue:
       tasks.length === 0 || !Number.isFinite(elapsed)

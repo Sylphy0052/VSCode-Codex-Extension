@@ -41,6 +41,7 @@ function metrics(
     autoRetries: 0,
     maxReached: 0,
     questions: 0,
+    optimizeTrials: 0,
     gatesResolved: { reflex: 0, orchestrator: 0, user: 0 },
     msPerChildIssue: 60_000,
     keys: {
