@@ -21,6 +21,7 @@
   - ブランチ保護は承認数0で自己merge可能な設定になっている（詳細: `docs/repository-hygiene.md`）
   - CI未完了で `gh pr merge` が `mergeStateStatus: BLOCKED` を返す場合は `--admin` を付けてstatus check待ちを迂回する
   - squash mergeはこのリポジトリで禁止されている（2026-08-24〜）。`--merge` か `--rebase` を使う
+- 例外: `self-improvement`ラベルのPR（この拡張自身を直すPR）は、`--admin`を使わず `checks` と `external-cli` が成功するまでmergeしない。配布は全runが終わってから行い、自動Reloadはしない。配布前に直前のvsixを`/tmp`以外へ保管する。戻し方は `docs/self-improvement-revert.md`
 - merge後のcleanupは必須
   - リモートの元ブランチ削除、ローカルブランチ削除、worktree撤去まで行う
   - `gh pr merge --delete-branch` は、対象ブランチがworktreeへcheckout済みだと `Cannot delete branch ... checked out at ...` で失敗し、リモートブランチが残ったままになることがある。失敗時は `git ls-remote --heads origin <branch>` で残存を確認し、`git push origin --delete <branch>` 等で手動削除する

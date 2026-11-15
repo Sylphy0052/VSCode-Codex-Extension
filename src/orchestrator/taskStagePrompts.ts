@@ -257,6 +257,10 @@ function stageBody(input: StagePromptInput, nonce: string): string[] {
         `作業ディレクトリはこのタスク専用のworktree（ブランチ ${task.branch ?? '(不明)'}）。mergeの鍵はこのセッションが持っている。`,
         `手順: git fetch origin → 最新のorigin/mainを取り込む → リポジトリの規約（CLAUDE.md／AGENTS.md）にある` +
           `merge直前の手順（版上げ等）を行いcommitしてpush → PR ${pr ?? '(不明)'}をsquash以外の方法でmerge → リモートブランチを消す。`,
+        `merge前に \`gh pr view ${pr ?? '<PR番号>'} --json labels\` でラベルを確かめる。\`self-improvement\`ラベルのPR（この拡張自身を直すPR）は\`--admin\`を使わず、` +
+          '`checks`と`external-cli`が成功するまでmergeしない。未完了なら待ち、失敗ならmergeせずfailedで報告する。',
+        '自己改善のPRをmergeしても、vsixのビルド・インストール・Reloadはこの工程でしない（全runが終わってから人が行い、自動Reloadはしない）。' +
+          '配布前の保管と戻し方は docs/self-improvement-revert.md に従う。',
         'worktreeとローカルブランチは消さない。メインのworking treeも触らない（このセッションが終わったあとにControllerが片付ける）。',
       ];
   }
