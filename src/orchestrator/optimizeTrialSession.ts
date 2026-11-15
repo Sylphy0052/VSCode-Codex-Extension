@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 import {
   buildClaudeTrialSandboxSettings,
   CLAUDE_TRIAL_DISALLOWED_TOOLS,
@@ -35,7 +36,10 @@ export interface TrialEngineConfig {
   effort?: string;
   /** Claudeのsandbox。`ClaudeSandboxProbe`で使えると確かめた環境を渡す。 */
   claudeSandbox?: ClaudeSandboxEnvironment;
-  /** Claudeの変更の段で、sandboxの書き込みを明示的に塞ぐパス（共有の`.git`、基準・最良のworktree）。 */
+  /**
+   * Claudeの変更の段で、sandboxの書き込みを明示的に塞ぐパス（基準・最良のworktree）。
+   * 候補のgit共通ディレクトリは`runTrialStage`が作業ディレクトリから求めて必ず足すので、ここには要らない。
+   */
   claudeDenyWrite?: readonly string[];
 }
 
@@ -115,6 +119,12 @@ export interface CodexTrialArgsInput {
  * Codexの起動引数。仮説の段は`--sandbox read-only`、変更の段は`--sandbox workspace-write`
  * （ネットワークは`sandbox_workspace_write.network_access=false`で明示して無効にする）。
  * `exec resume`は使わず、毎回`--ephemeral`の新しいセッションにする。
+ *
+ * `workspace-write`の書き込み先は、既定で作業ディレクトリに加えて`/tmp`と`$TMPDIR`も含む
+ * （codex 0.166の`codex debug prompt-input`で「The writable roots are `/tmp`, `$TMPDIR`, `<cwd>`」と出る）。
+ * `/tmp`には他のworktreeや他のプロセスの一時ファイルが置かれうるので`exclude_slash_tmp`で外し、
+ * `$TMPDIR`は`runTrialStage`が試行専用の空ディレクトリへ差し替える。承認を求める経路も
+ * `approval_policy="never"`で塞ぎ、sandboxの外で走るコマンドを作らない。
  */
 export function buildCodexTrialArgs(input: CodexTrialArgsInput): string[] {
   const effort =
@@ -135,6 +145,10 @@ export function buildCodexTrialArgs(input: CodexTrialArgsInput): string[] {
     'shell_environment_policy.inherit=core',
     '-c',
     'sandbox_workspace_write.network_access=false',
+    '-c',
+    'sandbox_workspace_write.exclude_slash_tmp=true',
+    '-c',
+    'approval_policy="never"',
     ...modelArgs(input.model, '-m'),
     ...effort,
     '-o',
@@ -392,6 +406,24 @@ export interface RunTrialStageInput {
   groupPorts?: TrialProcessGroupPorts;
   recordPorts?: ProcessRecordPorts;
   spawnFn?: typeof spawn;
+  /** 作業ディレクトリのgit共通ディレクトリ（絶対パス）を返す。テストから差し替える。 */
+  resolveGitCommonDir?: (cwd: string) => Promise<string>;
+}
+
+const execFileAsync = promisify(execFile);
+
+/** `git rev-parse --git-common-dir`で、作業ディレクトリのgit共通ディレクトリを絶対パスで取る。 */
+export async function resolveGitCommonDir(cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { cwd, encoding: 'utf8' },
+  );
+  const dir = stdout.trim();
+  if (dir === '' || !path.isAbsolute(dir)) {
+    throw new Error(`git共通ディレクトリを絶対パスで取れませんでした: ${JSON.stringify(dir)}`);
+  }
+  return dir;
 }
 
 export interface TrialStageResult {
@@ -440,21 +472,38 @@ export async function runTrialStage(input: RunTrialStageInput): Promise<TrialSta
   let outputDir: string | undefined;
   let args: string[];
   let outputFile: string | undefined;
+  let env = input['env'];
   if (cfg.engine === 'claude') {
     if (cfg.claudeSandbox === undefined) {
       throw new Error('Claudeの試行にはsandboxの確認結果が要ります');
     }
+    // Claude CLI（2.1.325で確認）は、作業ディレクトリがgit worktreeだと、そのgit共通ディレクトリ
+    // （refs・objects・他のworktreeの管理領域を含む共有の`.git`）をsandboxの書き込み許可へ自動で足す。
+    // 設定で外す手段は無いため、変更の段は必ず共有の`.git`を書き込み禁止にする。呼び出し側の
+    // 渡し忘れで隔離が漏れないよう、作業ディレクトリからここで求める
+    const denyWrite =
+      input.stage === 'change'
+        ? [
+            await (input.resolveGitCommonDir ?? resolveGitCommonDir)(input.cwd),
+            ...(cfg.claudeDenyWrite ?? []),
+          ]
+        : [];
     args = buildClaudeTrialArgs({
       stage: input.stage,
       model: cfg.model,
       ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
       sandbox: cfg.claudeSandbox,
-      ...(cfg.claudeDenyWrite === undefined ? {} : { denyWrite: cfg.claudeDenyWrite }),
+      ...(denyWrite.length === 0 ? {} : { denyWrite }),
       ...(input.resumeSessionId === undefined ? {} : { resumeSessionId: input.resumeSessionId }),
     });
   } else {
     outputDir = await mkdtemp(path.join(os.tmpdir(), 'optimize-trial-'));
     outputFile = path.join(outputDir, 'last-message.txt');
+    // Codexのsandboxは`$TMPDIR`を書き込み可にする。共有の一時ディレクトリではなく、
+    // この段だけの空ディレクトリを渡す（`-o`の出力ファイルとは別の場所にする）
+    const privateTmp = path.join(outputDir, 'tmp');
+    await mkdir(privateTmp);
+    env = { ...(input['env'] ?? trialEnvironment(process['env'])), TMPDIR: privateTmp };
     args = buildCodexTrialArgs({
       stage: input.stage,
       model: cfg.model,
@@ -472,7 +521,7 @@ export async function runTrialStage(input: RunTrialStageInput): Promise<TrialSta
       recordDir: input.recordDir,
       label: `optimize-trial:${cfg.engine}:${input.stage}`,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(input.env === undefined ? {} : { env: input.env }),
+      ...(env === undefined ? {} : { env }),
       ...(input.groupPorts === undefined ? {} : { groupPorts: input.groupPorts }),
       ...(input.recordPorts === undefined ? {} : { recordPorts: input.recordPorts }),
       ...(input.spawnFn === undefined ? {} : { spawnFn: input.spawnFn }),

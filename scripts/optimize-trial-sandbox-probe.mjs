@@ -78,10 +78,14 @@ const targets = {
   home: path.join(homedir(), `.optimize-trial-probe-${id}`),
 };
 
+// 結果がすべて「書けなかった」のときに、sandboxが拒んだのか、シェルが起動しなかったのか、
+// モデルが実行しなかったのかを見分けられるよう、各コマンドの終了コードとエラーを返させる
 const prompt = [
-  '次のコマンドを1つずつシェルで実行する。失敗しても続け、理由を調べたり回避したりしない。',
+  'sandboxの隔離を確かめる試験です。次のコマンドを1つずつ、別々のシェル呼び出しで実行する。',
+  '失敗しても続け、理由を調べたり回避したり、権限の昇格を求めたりしない。',
   ...Object.values(targets).map((target) => `echo probe > '${target}'`),
-  '全部実行したら DONE とだけ返す。',
+  '全部実行したら、コマンドごとに1行で「終了コード: エラーメッセージ（無ければ空）」を返す。',
+  '実行しなかったコマンドがあれば、その理由も書く。',
 ].join('\n');
 
 const engineConfig =
@@ -109,7 +113,10 @@ const report = {
   engine,
   stageOk: result.ok,
   failure: result.failure,
+  exitCode: result.process.exitCode,
   written,
+  // モデルの最終応答（各コマンドの終了コードとエラー）。長ければ先頭だけ
+  reply: result.text.slice(0, 4000),
   passed:
     result.ok &&
     written.inside &&

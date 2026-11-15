@@ -461,11 +461,10 @@ describe('runOptimizeTrial', () => {
     expect(result.record.metric.samples).toBe(0);
   });
 
-  it('Claudeの起動には共有の.gitと基準・最良のworktreeを書き込み禁止として渡す', async () => {
+  it('Claudeの起動には基準・最良のworktreeを書き込み禁止として渡す（共有の.gitはrunTrialStageが塞ぐ）', async () => {
     const fake = fakeSession({ onChange: setValue('5') });
     await run(fake);
     const deny = fake.calls[1]?.engine.claudeDenyWrite ?? [];
-    expect(deny).toContain(join(repo, '.git'));
     expect(deny).toContain(dirs.baseline);
     expect(deny).toContain(dirs.best);
     expect(deny).not.toContain(dirs.candidate);

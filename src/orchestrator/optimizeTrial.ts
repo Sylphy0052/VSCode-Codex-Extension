@@ -315,14 +315,11 @@ async function runOptimizeTrialBody(
   };
   const before = await captureTrialState(stateInput);
   const protectedPatterns = await readProtectedPatterns(candidateDir, input.bestCommit, git);
-  // Claudeのsandboxで、共有の`.git`と基準・最良のworktreeへの書き込みを明示的に塞ぐ
-  const commonDir = path.resolve(
-    candidateDir,
-    (await git(candidateDir, ['rev-parse', '--git-common-dir'])).trim(),
-  );
+  // Claudeのsandboxで、基準・最良のworktreeへの書き込みを明示的に塞ぐ（共有の`.git`は
+  // `runTrialStage`が作業ディレクトリから求めて必ず塞ぐ）
   const engine: TrialEngineConfig =
     input.engine.engine === 'claude'
-      ? { ...input.engine, claudeDenyWrite: [commonDir, input.dirs.baseline, input.dirs.best] }
+      ? { ...input.engine, claudeDenyWrite: [input.dirs.baseline, input.dirs.best] }
       : input.engine;
   const stageBase = {
     cwd: candidateDir,

@@ -1,4 +1,14 @@
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -6,6 +16,7 @@ import {
   buildClaudeTrialArgs,
   buildCodexTrialArgs,
   parseClaudeTrialOutput,
+  resolveGitCommonDir,
   runTrialProcess,
   runTrialStage,
   trialEnvironment,
@@ -80,6 +91,8 @@ describe('buildCodexTrialArgs', () => {
   it('ネットワークを無効にし、シェル以外の外部到達の能力を落とす', () => {
     const args = buildCodexTrialArgs({ ...base, stage: 'change' });
     expect(args).toContain('sandbox_workspace_write.network_access=false');
+    expect(args).toContain('sandbox_workspace_write.exclude_slash_tmp=true');
+    expect(args).toContain('approval_policy="never"');
     expect(args).toContain('tools.web_search=false');
     expect(args).toContain('browser_use');
     expect(args).toContain('apps');
@@ -232,10 +245,114 @@ describe('runTrialStage', () => {
       resumeSessionId: 'sess-1',
       timeoutMs: 10_000,
       recordDir: join(dir, 'records'),
+      resolveGitCommonDir: async () => '/repo/.git',
     });
     expect(result).toMatchObject({ ok: true, text: 'done', sessionId: 'sess-9' });
     const argv = JSON.parse(await readFile(argvFile, 'utf8')) as string[];
     expect(argv[argv.indexOf('--resume') + 1]).toBe('sess-1');
+  });
+
+  it('Claude: 変更の段は、呼び出し側が渡さなくても共有の.gitを書き込み禁止にする', async () => {
+    const argvFile = join(dir, 'argv.json');
+    const executable = await fakeCli(`
+      require('fs').writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+      console.log(JSON.stringify({ result: 'done', session_id: 's' }));
+    `);
+    await runTrialStage({
+      stage: 'change',
+      prompt: 'p',
+      cwd: dir,
+      engine: {
+        engine: 'claude',
+        executable,
+        model: 'auto',
+        claudeSandbox: { weakerNested: false },
+        claudeDenyWrite: ['/trees/best'],
+      },
+      timeoutMs: 10_000,
+      recordDir: join(dir, 'records'),
+      resolveGitCommonDir: async (cwd) => (cwd === dir ? '/repo/.git' : 'wrong'),
+    });
+    const argv = JSON.parse(await readFile(argvFile, 'utf8')) as string[];
+    const sandbox = settingsOf(argv)['sandbox'] as Record<string, unknown>;
+    expect(sandbox['filesystem']).toEqual({ denyWrite: ['/repo/.git', '/trees/best'] });
+  });
+
+  it('Claude: 共有の.gitを求められなければ起動しない', async () => {
+    const executable = await fakeCli('process.exit(0);');
+    await expect(
+      runTrialStage({
+        stage: 'change',
+        prompt: 'p',
+        cwd: dir,
+        engine: {
+          engine: 'claude',
+          executable,
+          model: 'auto',
+          claudeSandbox: { weakerNested: false },
+        },
+        timeoutMs: 10_000,
+        recordDir: join(dir, 'records'),
+        resolveGitCommonDir: async () => {
+          throw new Error('not a git repository');
+        },
+      }),
+    ).rejects.toThrow('not a git repository');
+  });
+
+  it('Codex: 変更の段は/tmpを外し、TMPDIRを段ごとの空ディレクトリにする', async () => {
+    const seenFile = join(dir, 'seen.json');
+    const executable = await fakeCli(`
+      const args = process.argv.slice(2);
+      const fs = require('fs');
+      const tmp = process['env'].TMPDIR;
+      fs.writeFileSync(${JSON.stringify(seenFile)}, JSON.stringify({ args, tmp, entries: fs.readdirSync(tmp) }));
+      fs.writeFileSync(args[args.indexOf('-o') + 1], 'ok');
+    `);
+    const result = await runTrialStage({
+      stage: 'change',
+      prompt: 'p',
+      cwd: dir,
+      engine: { engine: 'codex', executable, model: 'auto' },
+      timeoutMs: 10_000,
+      recordDir: join(dir, 'records'),
+    });
+    expect(result.ok).toBe(true);
+    const seen = JSON.parse(await readFile(seenFile, 'utf8')) as {
+      args: string[];
+      tmp: string;
+      entries: string[];
+    };
+    expect(seen.args).toContain('sandbox_workspace_write.exclude_slash_tmp=true');
+    expect(seen.args).toContain('approval_policy="never"');
+    expect(seen.entries).toEqual([]);
+    const output = seen.args[seen.args.indexOf('-o') + 1] ?? '';
+    expect(seen.tmp.startsWith(join(output, '..'))).toBe(true);
+    expect(seen.tmp).not.toBe(tmpdir());
+    // 段が終わったら一時ディレクトリごと消す
+    await expect(readdir(seen.tmp)).rejects.toThrow();
+  });
+
+  it('resolveGitCommonDir: worktreeから共有の.gitを絶対パスで返す', async () => {
+    const repo = join(dir, 'repo');
+    const tree = join(dir, 'tree');
+    const env = {
+      ...process['env'],
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 't@localhost',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 't@localhost',
+    };
+    const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, env });
+    await mkdir(repo);
+    git(repo, 'init', '-q', '-b', 'main');
+    await writeFile(join(repo, 'a.txt'), 'a');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'init');
+    git(repo, 'worktree', 'add', '-q', '--detach', tree, 'HEAD');
+    expect(await realpath(await resolveGitCommonDir(tree))).toBe(
+      await realpath(join(repo, '.git')),
+    );
   });
 
   it('Codex: -oのファイルから最終メッセージを読む', async () => {
