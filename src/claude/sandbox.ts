@@ -123,6 +123,7 @@ export function buildClaudeSandboxSettings(
  */
 export function buildClaudeTrialSandboxSettings(
   environment: ClaudeSandboxEnvironment,
+  denyWritePaths: readonly string[] = [],
 ): Record<string, unknown> {
   return {
     sandbox: {
@@ -132,6 +133,10 @@ export function buildClaudeTrialSandboxSettings(
       failIfUnavailable: true,
       excludedCommands: [],
       network: { strictAllowlist: true, allowedDomains: [] },
+      // git worktreeの作業ディレクトリでは、共有の`.git`（refs・objects）への書き込みが
+      // 既定で許されうる。候補の外（共有の`.git`・基準と最良のworktree）を明示的に塞ぐ。
+      // `denyWrite`が既定の書き込み許可より優先されることは、工程用の設定で実測済み
+      ...(denyWritePaths.length > 0 ? { filesystem: { denyWrite: [...denyWritePaths] } } : {}),
       ...(environment.weakerNested ? { enableWeakerNestedSandbox: true } : {}),
     },
   };

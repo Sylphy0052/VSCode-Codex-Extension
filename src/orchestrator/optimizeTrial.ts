@@ -315,9 +315,18 @@ async function runOptimizeTrialBody(
   };
   const before = await captureTrialState(stateInput);
   const protectedPatterns = await readProtectedPatterns(candidateDir, input.bestCommit, git);
+  // Claudeのsandboxで、共有の`.git`と基準・最良のworktreeへの書き込みを明示的に塞ぐ
+  const commonDir = path.resolve(
+    candidateDir,
+    (await git(candidateDir, ['rev-parse', '--git-common-dir'])).trim(),
+  );
+  const engine: TrialEngineConfig =
+    input.engine.engine === 'claude'
+      ? { ...input.engine, claudeDenyWrite: [commonDir, input.dirs.baseline, input.dirs.best] }
+      : input.engine;
   const stageBase = {
     cwd: candidateDir,
-    engine: input.engine,
+    engine,
     timeoutMs: timeouts.stageMs ?? DEFAULT_TRIAL_STAGE_TIMEOUT_MS,
     recordDir: input.processRecordDir,
     ...(input.signal === undefined ? {} : { signal: input.signal }),
@@ -448,7 +457,8 @@ async function runOptimizeTrialBody(
       { halt: halts(check2.violations), violations: check2.violations, continuation },
     );
   }
-  if (!stage2.ok && !stage2.process.timedOut) {
+  // 時間切れで止めた変更の段は、途中の木のまま計測へ進めず無効にする（不採用側へ倒す）
+  if (!stage2.ok) {
     return finish(
       {
         llm,

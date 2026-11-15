@@ -35,6 +35,8 @@ export interface TrialEngineConfig {
   effort?: string;
   /** Claudeのsandbox。`ClaudeSandboxProbe`で使えると確かめた環境を渡す。 */
   claudeSandbox?: ClaudeSandboxEnvironment;
+  /** Claudeの変更の段で、sandboxの書き込みを明示的に塞ぐパス（共有の`.git`、基準・最良のworktree）。 */
+  claudeDenyWrite?: readonly string[];
 }
 
 /** 仮説の段で使うClaudeのツール。書き込み系（Edit・Write・Bash）を含めない。 */
@@ -62,6 +64,8 @@ export interface ClaudeTrialArgsInput {
   model: string;
   effort?: string;
   sandbox: ClaudeSandboxEnvironment;
+  /** sandboxの書き込みを明示的に塞ぐパス（変更の段のみ）。 */
+  denyWrite?: readonly string[];
   /** 仮説の段の会話を続けるときのセッションID（変更の段のみ）。 */
   resumeSessionId?: string;
 }
@@ -94,7 +98,7 @@ export function buildClaudeTrialArgs(input: ClaudeTrialArgsInput): string[] {
     '--permission-mode',
     'acceptEdits',
     '--settings',
-    JSON.stringify(buildClaudeTrialSandboxSettings(input.sandbox)),
+    JSON.stringify(buildClaudeTrialSandboxSettings(input.sandbox, input.denyWrite)),
     '--disallowedTools',
     CLAUDE_TRIAL_DISALLOWED_TOOLS.join(','),
   ];
@@ -445,6 +449,7 @@ export async function runTrialStage(input: RunTrialStageInput): Promise<TrialSta
       model: cfg.model,
       ...(cfg.effort === undefined ? {} : { effort: cfg.effort }),
       sandbox: cfg.claudeSandbox,
+      ...(cfg.claudeDenyWrite === undefined ? {} : { denyWrite: cfg.claudeDenyWrite }),
       ...(input.resumeSessionId === undefined ? {} : { resumeSessionId: input.resumeSessionId }),
     });
   } else {

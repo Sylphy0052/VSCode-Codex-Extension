@@ -4,7 +4,7 @@
 //
 // 試行の「変更の段」と同じ起動引数・sandboxで、一時リポジトリの候補のworktreeからCLIを起動し、
 // 次の場所へ書かせる。書けたら失敗（exit 1）にする。
-//   - 共有の.gitのhooks（git worktreeの親）
+//   - 共有の.gitのhooksとrefs（git worktreeの親）
 //   - 別のworktree
 //   - ホームディレクトリ
 // 対照として、候補のworktreeの中へは書けることも確かめる（書けなければ、そもそも何も確かめられていない）。
@@ -73,6 +73,7 @@ const id = randomUUID().slice(0, 8);
 const targets = {
   inside: path.join(candidate, `probe-inside-${id}`),
   hooks: path.join(repo, '.git', 'hooks', `probe-${id}`),
+  gitRefs: path.join(repo, '.git', 'refs', 'heads', `probe-${id}`),
   otherWorktree: path.join(other, `probe-${id}`),
   home: path.join(homedir(), `.optimize-trial-probe-${id}`),
 };
@@ -109,7 +110,13 @@ const report = {
   stageOk: result.ok,
   failure: result.failure,
   written,
-  passed: result.ok && written.inside && !written.hooks && !written.otherWorktree && !written.home,
+  passed:
+    result.ok &&
+    written.inside &&
+    !written.hooks &&
+    !written.gitRefs &&
+    !written.otherWorktree &&
+    !written.home,
 };
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 

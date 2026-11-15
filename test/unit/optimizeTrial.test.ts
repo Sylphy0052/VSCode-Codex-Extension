@@ -415,6 +415,62 @@ describe('runOptimizeTrial', () => {
     expect(result.halt).toBe(true);
   });
 
+  it('正しさの確認が時間切れになったら、不採用で計測しない', async () => {
+    const fake = fakeSession({ onChange: setValue('5') });
+    const result = await run(
+      fake,
+      { timeouts: { commandMs: 300 } },
+      { correctnessCommand: 'sleep 30' },
+    );
+    expect(result.outcome).toBe('rejected');
+    expect(result.adoptionCandidate).toBe(false);
+    expect(result.record.correctness.passed).toBe(false);
+    expect(result.record.metric.samples).toBe(0);
+  });
+
+  it('計測のコマンドが時間切れになったら、不採用になる', async () => {
+    const fake = fakeSession({ onChange: setValue('5') });
+    const result = await run(
+      fake,
+      { timeouts: { perRunMs: 300 } },
+      { metricCommand: 'sleep 30', metricSource: 'wallTime' },
+    );
+    expect(result.outcome).toBe('rejected');
+    expect(result.adoptionCandidate).toBe(false);
+  });
+
+  it('変更の段が時間切れで止まったら、途中の木を計測せず無効になる', async () => {
+    const fake = fakeSession({ onChange: setValue('5') });
+    const result = await run(fake, {
+      deps: {
+        runStage: async (input) => {
+          const r = await fake.runStage(input);
+          return input.stage === 'change'
+            ? {
+                ...r,
+                ok: false,
+                failure: '時間の上限を超えて止めました',
+                process: proc({ timedOut: true }),
+              }
+            : r;
+        },
+      },
+    });
+    expect(result.outcome).toBe('invalid');
+    expect(result.adoptionCandidate).toBe(false);
+    expect(result.record.metric.samples).toBe(0);
+  });
+
+  it('Claudeの起動には共有の.gitと基準・最良のworktreeを書き込み禁止として渡す', async () => {
+    const fake = fakeSession({ onChange: setValue('5') });
+    await run(fake);
+    const deny = fake.calls[1]?.engine.claudeDenyWrite ?? [];
+    expect(deny).toContain(join(repo, '.git'));
+    expect(deny).toContain(dirs.baseline);
+    expect(deny).toContain(dirs.best);
+    expect(deny).not.toContain(dirs.candidate);
+  });
+
   it('試行中に例外が起きても、台帳に無効の1行を残す（セッション起動後はループを止める）', async () => {
     const fake = fakeSession({ onChange: setValue('5') });
     const result = await run(fake, {

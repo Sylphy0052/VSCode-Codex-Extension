@@ -37,6 +37,14 @@ describe('buildClaudeTrialArgs', () => {
     expect(sandbox['network']).toEqual({ strictAllowlist: true, allowedDomains: [] });
   });
 
+  it('denyWriteを渡したときだけ、sandboxの書き込み禁止に入る', () => {
+    const none = settingsOf(buildClaudeTrialArgs({ ...base, stage: 'change' }));
+    expect((none['sandbox'] as Record<string, unknown>)['filesystem']).toBeUndefined();
+    const args = buildClaudeTrialArgs({ ...base, stage: 'change', denyWrite: ['/repo/.git'] });
+    const sandbox = settingsOf(args)['sandbox'] as Record<string, unknown>;
+    expect(sandbox['filesystem']).toEqual({ denyWrite: ['/repo/.git'] });
+  });
+
   it('git・gh・glabのBashを拒否し、--disallowedToolsは最後に置く', () => {
     const args = buildClaudeTrialArgs({ ...base, stage: 'change' });
     const flag = args.indexOf('--disallowedTools');
