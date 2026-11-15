@@ -114,6 +114,43 @@ export function buildClaudeSandboxSettings(
 }
 
 /**
+ * 最適化の試行（Issue #2107）のセッション用のsandbox設定。書き込みは作業ディレクトリ
+ * （候補のworktree）の中だけに許し、sandboxの外で走るコマンドもネットワークも作らない。
+ *
+ * 工程用の{@link buildClaudeSandboxSettings}との違いは、`excludedCommands`が空であること。
+ * 工程用は`gh`・`git push`などをsandboxの外（承認フロー）で走らせるが、試行のセッションには
+ * 承認ハンドラが無く、外で走るコマンドがそのまま実行されてしまう。
+ */
+export function buildClaudeTrialSandboxSettings(
+  environment: ClaudeSandboxEnvironment,
+): Record<string, unknown> {
+  return {
+    sandbox: {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      failIfUnavailable: true,
+      excludedCommands: [],
+      network: { strictAllowlist: true, allowedDomains: [] },
+      ...(environment.weakerNested ? { enableWeakerNestedSandbox: true } : {}),
+    },
+  };
+}
+
+/**
+ * 試行のセッションで拒否するツール。`git`・`gh`・`glab`はsandboxだけに頼らず、ツールの側でも
+ * 塞ぐ（`git commit`・`git push`・`git config`・`git remote`・ブランチの操作はすべて`git`）。
+ * ネットワークを要するツールも落とす。
+ */
+export const CLAUDE_TRIAL_DISALLOWED_TOOLS: readonly string[] = [
+  'Bash(git *)',
+  'Bash(gh *)',
+  'Bash(glab *)',
+  'WebFetch',
+  'WebSearch',
+];
+
+/**
  * sandbox付きのセッションへ`--append-system-prompt`で伝える指示（Issue #1610）。
  *
  * `excludedCommands`は単独のコマンドにしか一致せず、`gh issue view 1 2>&1; echo ---`のように
