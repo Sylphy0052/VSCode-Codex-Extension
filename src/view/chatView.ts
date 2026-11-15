@@ -4112,13 +4112,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return createNodeSummaryRolloutDeps(codexPaths(this.codexHome).sessions, this.fs, this.log);
   }
 
-  /**
-   * セカンドオピニオン（Issue #894）を起動する。
-   *
-   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
-   * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
-   * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
-   */
+  /** 場面の台帳で再考する（Issue #2065）。台帳が埋まっていなければ、作業中のAIへ差し込む。 */
   private async startReconsiderationFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
       this.secondOpinionPortFor(entry),
@@ -4132,6 +4126,13 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     );
   }
 
+  /**
+   * セカンドオピニオン（Issue #894）を起動する。
+   *
+   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
+   * セッションを開き、起動時点の成果物と依頼文だけを見て評価させ、その結果をこの会話へ
+   * 表示するだけに留める（親セッションへ発言として送り返すことはしない）。
+   */
   private async startSecondOpinionFor(entry: ChatPanel): Promise<void> {
     await startSecondOpinion(
       this.secondOpinionPortFor(entry),
@@ -4163,8 +4164,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 親セッションへは何も送らない
       conversationTranscript: () =>
         buildTranscriptMarkdown(entry.session.getState().items, 'Codex'),
-      executionRecords: () =>
-        buildExecutionRecordMarkdown(entry.session.getState().items, 'Codex'),
+      executionRecords: () => buildExecutionRecordMarkdown(entry.session.getState().items, 'Codex'),
       note: (id, display) => entry.session.noteSecondOpinion(id, display),
       setRunning: (running) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });

@@ -3346,13 +3346,7 @@ export class ClaudeChatViewManager
     this.summaryRollout = deps;
   }
 
-  /**
-   * セカンドオピニオン（Issue #894）を起動する。
-   *
-   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
-   * セッションが起動時点の成果物と依頼文だけを見て評価し、その結果をこの会話へ表示する
-   * （この会話へ発言として送り返すことはしない）。
-   */
+  /** 場面の台帳で再考する（Issue #2065）。台帳が埋まっていなければ、作業中のAIへ差し込む。 */
   private async startReconsiderationFor(entry: ClaudePanel): Promise<void> {
     const host = this.secondOpinionHost;
     if (host === undefined) {
@@ -3371,6 +3365,13 @@ export class ClaudeChatViewManager
     );
   }
 
+  /**
+   * セカンドオピニオン（Issue #894）を起動する。
+   *
+   * 脇道の質問（`startSideQuestion`）と違い、この会話は一切渡さない。独立したCodex
+   * セッションが起動時点の成果物と依頼文だけを見て評価し、その結果をこの会話へ表示する
+   * （この会話へ発言として送り返すことはしない）。
+   */
   private async startSecondOpinionFor(entry: ClaudePanel): Promise<void> {
     const host = this.secondOpinionHost;
     if (host === undefined) {

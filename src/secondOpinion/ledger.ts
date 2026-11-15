@@ -6,7 +6,7 @@
  * 本来の場面がすべて実測済みになれば、再考は終わる。
  *
  * このファイルは `vscode` に依存しない純粋な部分だけを持つ（書式・解析・埋まったかの判定・
- * advisorへの依頼文）。起動と保存は `view/reconsiderCommand.ts` が担う。
+ * advisorへの依頼文）。起動と保存は `view/secondOpinionCommand.ts` が担う。
  */
 
 export const SCENE_KINDS = ['本来の場面', '自明に通る場面'] as const;
