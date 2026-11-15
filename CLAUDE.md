@@ -33,5 +33,6 @@
 作業を終えるたびに（PRのmergeとcleanupの後）、最新の `main` から拡張機能をビルドし、WSLのVS Codeへ入れる。b90/b115のdev containersへは入れない（2026-10-09〜）。
 
 - ビルドはメインのworking treeで `npm run build` のあと `npx vsce package --no-dependencies -o /tmp/<名前>.vsix` を実行する。`npm run package` はここでもう一度版番号を上げて `package.json` を書き換えるため使わない（版上げはPR側で済んでいる）。`<名前>` には `package.json` の版を入れる（例: `vscode-codex-extension-2026.923.3`）
+- `self-improvement`ラベルのPRを入れるときは、インストール前に直前の版のvsixを `~/.local/share/vscode-codex-extension/vsix-backup/` へ保管する（手順は `docs/self-improvement-revert.md`）
 - WSL: `code --install-extension /tmp/<名前>.vsix --force`
 - 入れた後は、ウィンドウで「Developer: Reload Window」を実行すると新しい版が読み込まれる
