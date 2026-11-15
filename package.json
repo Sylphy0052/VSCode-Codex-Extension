@@ -1799,6 +1799,30 @@
           "scope": "machine-overridable",
           "markdownDescription": "オーケストレータモードの最適化のループ（Issue #2111）で、1つのタスクがループを回す時間（分）の上限の上限。計画の最適化の仕様（`budget.maxMinutes`）はこの値を超えられない。Reload・中断をまたいで合計する。範囲外（1未満・10080超・非数値）の値は既定値（1440）にフォールバックする。"
         },
+        "agent.taskRun.optimize.refuterEngine": {
+          "type": "string",
+          "enum": [
+            "opposite",
+            "same",
+            "claude",
+            "codex"
+          ],
+          "enumDescriptions": [
+            "試行のセッションと別のエンジン（Claudeの試行ならCodex、その逆）",
+            "試行のセッションと同じエンジンの新規セッション",
+            "常にClaude",
+            "常にCodex"
+          ],
+          "default": "opposite",
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレータモードの最適化のループ（Issue #2108）で、採用候補を突かせる反証役のエンジン。反証役は試行の会話もツールも持たない新規のheadless CLIで起動する。選んだエンジンのCLIを起動できなければ、試行と同じエンジンの新規セッションで判定し、そうしたことを台帳に残す。"
+        },
+        "agent.taskRun.optimize.refuterModel": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "最適化の反証役（Issue #2108）のモデル。空ならエンジンごとの既定（Claudeは`sonnet`、CodexはCLIの既定）。反証役のエンジンが試行と同じになったとき（`same`や起動失敗の切り替え）もこの値を使う。"
+        },
         "agent.taskRun.resource.intervalSeconds": {
           "type": "number",
           "default": 15,

@@ -61,9 +61,19 @@ export interface OptimizeLoad {
 
 export type OptimizeDecisionOutcome = 'adopted' | 'rejected' | 'invalid';
 
+/**
+ * 反証役（Issue #2108）の結果。`detail`は反証役（LLM）が書いた理由、または拡張が書いた
+ * 判定できなかった理由。
+ */
 export interface OptimizeRefutation {
   verdict: 'holds' | 'refuted' | 'inconclusive';
   detail: string;
+  /** 判定させたエンジン。 */
+  engine?: 'claude' | 'codex';
+  /** 選んだエンジンを起動できず、試行と同じエンジンの新規セッションへ切り替えた理由。 */
+  fallback?: string;
+  /** 反証役が測り直しを求め、計測の回数を増やして測り直した。 */
+  remeasured?: { fromRuns: number; toRuns: number };
 }
 
 export interface OptimizeTrialRecord {
@@ -126,6 +136,9 @@ export function normalizeTrialRecord(record: OptimizeTrialRecord): OptimizeTrial
           refutation: {
             ...record.refutation,
             detail: clip(record.refutation.detail, NOTE_MAX_LENGTH),
+            ...(record.refutation.fallback === undefined
+              ? {}
+              : { fallback: clip(record.refutation.fallback, NOTE_MAX_LENGTH) }),
           },
         }),
   };
