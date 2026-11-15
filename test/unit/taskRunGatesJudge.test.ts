@@ -8,8 +8,10 @@ import {
   escalateJudgingGatesOnReload,
   findStageGate,
   gateChoiceFromAnswer,
+  isRepeatedFailure,
   markGateAwaitingOrchestrator,
 } from '../../src/orchestrator/taskRunGates';
+import { buildStagePrompt } from '../../src/orchestrator/taskStagePrompts';
 import { getTask, type StageGate, type TaskRun } from '../../src/orchestrator/taskRunState';
 import {
   FIXTURE_NOW,
@@ -90,6 +92,57 @@ describe('buildGateQuestion', () => {
       throw new Error('タスクが無い');
     }
     expect(buildGateQuestion(opened, gateOf(run, 'T1', 'g1')).reason).toContain('これまで2回');
+  });
+
+  it('同じ工程の過去の失敗内容をevidenceへ足す', () => {
+    const task = haltedTask('T1', {
+      gates: [{ ...resolvedRetryGate('old1', 'implement', 'reflex'), detail: '型エラーで落ちた' }],
+    });
+    const run = withOpenGate(makeRun([task]), 'T1', 'g1', 'stageFailed', 'テストが落ちた');
+    const opened = getTask(run, 'T1');
+    if (opened === undefined) {
+      throw new Error('タスクが無い');
+    }
+    const { evidence } = buildGateQuestion(opened, gateOf(run, 'T1', 'g1'));
+    expect(evidence).toContain('止まった理由: テストが落ちた');
+    expect(evidence).toContain('この工程の過去の失敗:\n- 型エラーで落ちた');
+  });
+});
+
+describe('buildStagePrompt の前回までの失敗', () => {
+  const ref = { taskId: 'T1', executionId: 'e1', stage: 'implement', attemptId: 'a1' } as const;
+
+  it('同じ工程の過去の失敗を載せ、失敗が無ければ節を出さない', () => {
+    const failed = haltedTask('T1', {
+      gates: [{ ...resolvedRetryGate('old1', 'implement', 'reflex'), detail: '型エラーで落ちた' }],
+    });
+    const withFailure = buildStagePrompt(
+      { task: failed, ref, instruction: undefined, cwd: '/w' },
+      'nonce',
+    );
+    expect(withFailure).toContain('前回までの失敗');
+    expect(withFailure).toContain('型エラーで落ちた');
+    const clean = buildStagePrompt(
+      { task: haltedTask('T1'), ref, instruction: undefined, cwd: '/w' },
+      'nonce',
+    );
+    expect(clean).not.toContain('前回までの失敗');
+  });
+});
+
+describe('isRepeatedFailure', () => {
+  it('直前の失敗と原因が同じなら真（数字・空白の違いは無視）、違えば偽', () => {
+    const base = { ...resolvedRetryGate('old1', 'implement', 'reflex'), detail: 'timeout 30 s' };
+    const task = haltedTask('T1', { gates: [base] });
+    const same = withOpenGate(makeRun([task]), 'T1', 'g1', 'stageFailed', 'Timeout  45 s');
+    const sameTask = getTask(same, 'T1');
+    const other = withOpenGate(makeRun([task]), 'T1', 'g2', 'stageFailed', '別の原因');
+    const otherTask = getTask(other, 'T1');
+    if (sameTask === undefined || otherTask === undefined) {
+      throw new Error('タスクが無い');
+    }
+    expect(isRepeatedFailure(sameTask, gateOf(same, 'T1', 'g1'))).toBe(true);
+    expect(isRepeatedFailure(otherTask, gateOf(other, 'T1', 'g2'))).toBe(false);
   });
 });
 

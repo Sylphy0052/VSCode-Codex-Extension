@@ -68,6 +68,8 @@ import {
 } from './taskRunState';
 import {
   buildGateQuestion,
+  isRepeatedFailure,
+  REPEATED_FAILURE_SUMMARY,
   escalateStageGate,
   markGateAwaitingOrchestrator,
   findStageGate,
@@ -558,6 +560,9 @@ export class TaskStageRunner {
     let verdict: RoadmapQuestionVerdict;
     if (judge === undefined) {
       verdict = { kind: 'human', summary: undefined };
+    } else if (isRepeatedFailure(task, gate)) {
+      // 同じ原因の2回目はReflexに自動やり直しを選ばせず、回答者判定（Orchestrator・ユーザー）へ回す
+      verdict = { kind: 'human', summary: REPEATED_FAILURE_SUMMARY };
     } else {
       try {
         verdict = await judge(run.engine, buildGateQuestion(task, gate), reflexEnabled);
