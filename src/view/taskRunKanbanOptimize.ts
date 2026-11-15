@@ -68,7 +68,11 @@ function oneLine(value: unknown, max: number): string {
 }
 
 /** 台帳の1行は手で直せるファイルなので、形を信用せずに読む。 */
-function toRow(record: OptimizeTrialRecord): TaskRunKanbanOptimizeRow | undefined {
+function toRow(record: OptimizeTrialRecord | null): TaskRunKanbanOptimizeRow | undefined {
+  // `null`の行（JSONとしては正しい）もあり得る。読めない行は飛ばし、盤面全体を止めない
+  if (typeof record !== 'object' || record === null) {
+    return undefined;
+  }
   const trial = finiteOrUndefined(record.trial);
   if (trial === undefined) {
     return undefined;
