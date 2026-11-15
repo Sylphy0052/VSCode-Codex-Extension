@@ -30,6 +30,7 @@ export const COMPOSER_BUTTON_IDS = [
   'autoReplyToggle',
   'handoffPresetPicker',
   'secondOpinion',
+  'reconsider',
 ] as const;
 
 export type ComposerButtonId = (typeof COMPOSER_BUTTON_IDS)[number];

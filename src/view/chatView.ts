@@ -38,7 +38,10 @@ import {
   type ChatState,
 } from '../appserver/chatState';
 import { FileRewindJournal, type FileRewindPlan } from '../appserver/fileRewind';
-import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
+import {
+  buildExecutionRecordMarkdown,
+  buildTranscriptMarkdown,
+} from '../appserver/transcriptMarkdown';
 import { ChatSession } from '../appserver/chatSession';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
@@ -293,6 +296,7 @@ import {
   type SecondOpinionPanelPort,
 } from './secondOpinionCommand';
 import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
+import { LedgerStore } from '../secondOpinion/ledger';
 import type { HandoffDraft } from '../secondOpinion/handoff';
 import { PendingStartRegistry } from './pendingStarts';
 import { readPersistedThreadId } from './panelState';
@@ -701,6 +705,9 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
    */
   private readonly advisorStore = new AdvisorSessionStore();
+
+  /** 場面の台帳（Issue #2065）。会話ごとに、同じ会話の再考の間だけ引き継ぐ。 */
+  private readonly ledgerStore = new LedgerStore();
   /**
    * 承認待ちの下書き（Issue #929 Handoff）。会話ごとに最新の1件だけを持つ。
    *
@@ -3167,6 +3174,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 相談相手を残さない（Issue #929）。会話が消えた後もセッションが生き残ると、
     // 誰にも見えないままCodexのプロセスとロールアウトだけが増える
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
+    this.ledgerStore.delete(entry.secondOpinionKey);
     this.handoffDrafts.delete(entry.secondOpinionKey);
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
     entry.autoReplyAgent?.close('tabClosed');
@@ -3735,6 +3743,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await this.startSecondOpinionFor(entry);
         return;
       }
+      if (type === 'reconsider') {
+        await this.startReconsiderationFor(entry);
+        return;
+      }
       if (type === 'webGptDiscussion') {
         void this.discussWithWebGptIn(entry);
         return;
@@ -4124,6 +4136,20 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     return createNodeSummaryRolloutDeps(codexPaths(this.codexHome).sessions, this.fs, this.log);
   }
 
+  /** 場面の台帳で再考する（Issue #2065）。台帳が埋まっていなければ、作業中のAIへ差し込む。 */
+  private async startReconsiderationFor(entry: ChatPanel): Promise<void> {
+    await startSecondOpinion(
+      this.secondOpinionPortFor(entry),
+      this,
+      this.secondOpinionRegistry,
+      this.log,
+      undefined,
+      (model) => effortsFor(this.settings.snapshot().models, model),
+      this.advisorStore,
+      { ledgers: this.ledgerStore },
+    );
+  }
+
   /**
    * セカンドオピニオン（Issue #894）を起動する。
    *
@@ -4162,6 +4188,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       // 親セッションへは何も送らない
       conversationTranscript: () =>
         buildTranscriptMarkdown(entry.session.getState().items, 'Codex'),
+      executionRecords: () => buildExecutionRecordMarkdown(entry.session.getState().items, 'Codex'),
       note: (id, display) => entry.session.noteSecondOpinion(id, display),
       setRunning: (running) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });

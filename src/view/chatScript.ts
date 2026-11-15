@@ -3741,6 +3741,7 @@ export function chatScript(
   el('secondOpinion').addEventListener('click', () =>
     vscode.postMessage({ type: 'secondOpinion' }),
   );
+  el('reconsider').addEventListener('click', () => vscode.postMessage({ type: 'reconsider' }));
   el('webGptDiscussion').addEventListener('click', () =>
     vscode.postMessage({ type: 'webGptDiscussion' }),
   );
@@ -4400,6 +4401,10 @@ export function chatScript(
       const secondOpinionButton = el('secondOpinion');
       secondOpinionButton.disabled = data.running;
       secondOpinionButton.setAttribute('aria-disabled', String(data.running));
+      // 再考も同じ実行枠（SecondOpinionRegistry）を使うので、同じ間は押せなくする
+      const reconsiderButton = el('reconsider');
+      reconsiderButton.disabled = data.running;
+      reconsiderButton.setAttribute('aria-disabled', String(data.running));
     }
     if (data.type === 'secondOpinionHandoff') {
       // 承認待ちの下書きの有無が変わった（Issue #929）

@@ -34,7 +34,10 @@ import {
   type ChatState,
   type ChatUsage,
 } from '../appserver/chatState';
-import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
+import {
+  buildExecutionRecordMarkdown,
+  buildTranscriptMarkdown,
+} from '../appserver/transcriptMarkdown';
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
@@ -51,6 +54,7 @@ import {
   type SecondOpinionPanelPort,
 } from './secondOpinionCommand';
 import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
+import { LedgerStore } from '../secondOpinion/ledger';
 import type { HandoffDraft } from '../secondOpinion/handoff';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
@@ -628,6 +632,10 @@ export class ClaudeChatViewManager
    * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
    */
   private readonly advisorStore = new AdvisorSessionStore();
+
+  /** 場面の台帳（Issue #2065）。会話ごとに、同じ会話の再考の間だけ引き継ぐ。 */
+  private readonly ledgerStore = new LedgerStore();
+
   /**
    * 承認待ちの下書き（Issue #929 Handoff）。会話ごとに最新の1件だけを持つ。
    *
@@ -3346,6 +3354,25 @@ export class ClaudeChatViewManager
     this.summaryRollout = deps;
   }
 
+  /** 場面の台帳で再考する（Issue #2065）。台帳が埋まっていなければ、作業中のAIへ差し込む。 */
+  private async startReconsiderationFor(entry: ClaudePanel): Promise<void> {
+    const host = this.secondOpinionHost;
+    if (host === undefined) {
+      void vscode.window.showErrorMessage('再考の依頼先（Codex）を利用できません');
+      return;
+    }
+    await startSecondOpinion(
+      this.secondOpinionPortFor(entry),
+      host,
+      this.secondOpinionRegistry,
+      this.log,
+      undefined,
+      undefined,
+      this.advisorStore,
+      { ledgers: this.ledgerStore },
+    );
+  }
+
   /**
    * セカンドオピニオン（Issue #894）を起動する。
    *
@@ -3388,6 +3415,7 @@ export class ClaudeChatViewManager
       entry.idleShutdownTimer = undefined;
     }
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
+    this.ledgerStore.delete(entry.secondOpinionKey);
     this.handoffDrafts.delete(entry.secondOpinionKey);
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
     entry.autoReplyAgent?.close('tabClosed');
@@ -3553,6 +3581,8 @@ export class ClaudeChatViewManager
       // 親セッションへは何も送らない
       conversationTranscript: () =>
         buildTranscriptMarkdown(entry.session.getState().items, 'Claude Code'),
+      executionRecords: () =>
+        buildExecutionRecordMarkdown(entry.session.getState().items, 'Claude Code'),
       note: (id, display) => entry.session.noteSecondOpinion(id, display),
       setRunning: (running) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
@@ -5316,6 +5346,10 @@ export class ClaudeChatViewManager
       }
       if (type === 'secondOpinion') {
         void this.startSecondOpinionFor(entry);
+        return;
+      }
+      if (type === 'reconsider') {
+        void this.startReconsiderationFor(entry);
         return;
       }
       if (type === 'webGptDiscussion') {

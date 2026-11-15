@@ -193,6 +193,50 @@ export function buildTranscriptMarkdown(items: readonly ChatItem[], agentLabel: 
   return capTranscript(sections.join('\n\n---\n\n'));
 }
 
+/** 実行記録に載せるコマンド数の上限（新しい方から数える）。 */
+export const EXECUTION_RECORD_MAX_COMMANDS = 40;
+/** 実行記録で1コマンドの出力から残す末尾の文字数。 */
+export const EXECUTION_RECORD_TAIL_CHARS = 1_200;
+/** 実行記録全体の上限。超えたら古いコマンドから落とす。 */
+export const EXECUTION_RECORD_MAX_CHARS = 30_000;
+
+/**
+ * 会話の記録から、コマンド項目だけを抜いた「実行記録」を作る（Issue #2065）。
+ *
+ * 場面の台帳で「実測済み」を判定する材料になる。要約（`secondOpinion/summary.ts`）は圧縮の段で
+ * コマンドの出力を落としうるため、判定の材料を要約に頼らない。見出し（コマンド・終了状態）は
+ * `buildTranscriptMarkdown` と同じ組み立てで、本文は出力の末尾だけを残す（失敗の理由や最終行の
+ * 結果は末尾に出るため）。コマンドが無ければ空文字列を返す。
+ */
+export function buildExecutionRecordMarkdown(
+  items: readonly ChatItem[],
+  agentLabel: string,
+): string {
+  const commands = items
+    .filter((item) => item.kind === 'commandExecution')
+    .slice(-EXECUTION_RECORD_MAX_COMMANDS);
+  const sections = commands.map((item) => {
+    const body = bodyOf(item);
+    const tail =
+      body.length > EXECUTION_RECORD_TAIL_CHARS
+        ? `（先頭${String(body.length - EXECUTION_RECORD_TAIL_CHARS)}文字は省略）\n${body.slice(body.length - EXECUTION_RECORD_TAIL_CHARS)}`
+        : body;
+    return tail === '' ? headingOf(item, agentLabel) : `${headingOf(item, agentLabel)}\n\n${tail}`;
+  });
+  // 新しい方を優先して残す
+  const kept: string[] = [];
+  let total = 0;
+  for (let i = sections.length - 1; i >= 0; i -= 1) {
+    const section = sections[i] ?? '';
+    if (total + section.length > EXECUTION_RECORD_MAX_CHARS && kept.length > 0) {
+      break;
+    }
+    kept.unshift(section);
+    total += section.length;
+  }
+  return kept.join('\n\n---\n\n');
+}
+
 /** 保存ダイアログの既定ファイル名。秒まで含めて同日の複数回エクスポートでも上書きになりにくくする。 */
 export function defaultTranscriptFileName(now: Date): string {
   const pad = (n: number): string => String(n).padStart(2, '0');

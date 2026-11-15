@@ -1258,6 +1258,9 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h11"/><path d="M4.5 12.5V9.5M8 12.5V6.5M11.5 12.5V3.5"/></svg>',
   secondOpinion:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 4.2a1 1 0 0 1 1-1h6.4a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H5.4L3 11V8.8h-.2a1 1 0 0 1-1-1z"/><path d="M12.2 6.2h1a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H13V14l-2.4-2.2H8.2"/></svg>',
+  // 場面の台帳で再考する（Issue #2065）。チェックリストの印で「空欄を埋める」を表す
+  reconsider:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.5l1.2 1.2 2-2.2"/><path d="M8 4.5h5.5"/><path d="M2.5 10.5l1.2 1.2 2-2.2"/><path d="M8 10.5h5.5"/></svg>',
   // Reflexモード（issue #1455）。軽量モデルの素早い判定を稲妻で表す
   reflex:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 1.5L3.8 9h4l-1 5.5L12.2 7h-4z"/></svg>',
@@ -1498,6 +1501,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.secondOpinion,
+      };
+    case 'reconsider':
+      return {
+        ariaLabel: '場面の台帳で再考する',
+        title:
+          '作業中のAIとは別の文脈のadvisorが、変更が働く場面を列挙し、実行記録から各場面が実測で確かめられたかを判定します。未確認の場面は作業中のAIへ差し込み、実測させます。2回目以降は前回の台帳を引き継ぎ、全場面が埋まれば「場面の台帳は埋まりました」と表示します',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.reconsider,
       };
   }
 }

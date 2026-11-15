@@ -131,6 +131,13 @@ export interface SecondOpinionInput {
    * 逆に記録を要約と偽ることにもなる。
    */
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
+  /**
+   * 会話の記録から抜いた実行記録（コマンド・終了状態・出力の末尾。Issue #2065）。
+   *
+   * 場面の台帳で「実測済み」を判定する材料。要約は圧縮の段で出力を落としうるため、
+   * 判定を要約に頼らず、要約とは別の区画として渡す。省略または空なら区画を出さない。
+   */
+  executionRecords?: string | undefined;
   /** 今回評価してほしい追加資料。 */
   artifact: SecondOpinionArtifact;
   /**
@@ -638,6 +645,18 @@ function summarySection(summary: string, kind: ConversationBackgroundKind): stri
 }
 
 /**
+ * 実行記録の区画（Issue #2065）。作業したエージェントが実際に走らせたコマンドと、その終了状態・
+ * 出力の末尾。エージェント自身の言い分ではなく、会話の記録から機械的に抜いたもの。
+ */
+function executionRecordSection(records: string | undefined): string | undefined {
+  const body = records?.trim() ?? '';
+  if (body === '') {
+    return undefined;
+  }
+  return `## 実行記録（作業したエージェントが走らせたコマンド。会話の記録から機械的に抜いたもの）\n\n${fence(body, '')}`;
+}
+
+/**
  * 送信するプロンプト全文を組み立てる。
  *
  * 並びは「固定指示 → 依頼 → ここまでの背景 → 追加資料」。依頼文・背景・追加資料を明確に
@@ -664,6 +683,7 @@ export function buildSecondOpinionPrompt(input: SecondOpinionInput): string {
     ),
     position === 'front' ? request : undefined,
     summary === '' ? undefined : summarySection(summary, backgroundKind),
+    executionRecordSection(input.executionRecords),
     artifactSection(input.artifact, tier, input.diffPresentation),
     position === 'end' ? request : undefined,
     input.restateRequestAtEnd === true ? restatedRequestSection(input) : undefined,
