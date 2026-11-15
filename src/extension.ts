@@ -970,6 +970,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       store: taskRunStore,
       windowId,
       globalStorageDir: context.globalStorageUri.fsPath,
+      extensionVersion:
+        (context.extension.packageJSON as { version?: string }).version ?? 'unknown',
       hosts: {
         codex: overridableHost('codex', chat),
         claude: overridableHost('claude', claudeChat),

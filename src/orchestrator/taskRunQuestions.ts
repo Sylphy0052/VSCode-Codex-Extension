@@ -1,4 +1,5 @@
 import { describeEscalations, type RoadmapAskArgs } from './roadmapQuestionMcp';
+import { tallyQuestionAsked } from './runMetrics';
 import {
   getTask,
   joinSummaries,
@@ -93,7 +94,13 @@ export function addStageQuestion(
     answeredAt: undefined,
     ...(escalationNote === undefined ? {} : { escalationNote }),
   };
-  return withQuestions(run, task, trimQuestions([...(task.questions ?? []), question]), at);
+  const asked = tallyQuestionAsked(task, task.questions ?? []);
+  const next = withQuestions(run, task, trimQuestions([...(task.questions ?? []), question]), at);
+  // 質問が刈られても受け付けた総数は減らさない（Issue #2081）
+  const updated = next.tasks[ref.taskId];
+  return updated === undefined
+    ? next
+    : { ...next, tasks: { ...next.tasks, [ref.taskId]: { ...updated, metricsTally: asked } } };
 }
 
 export function findStageQuestion(

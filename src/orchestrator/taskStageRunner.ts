@@ -36,6 +36,7 @@ import {
 import type { StartPolicy } from './resourceMonitor';
 import type { RunNotesStore } from './runNotes';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
+import { recordMaxReached } from './runMetrics';
 import { RELOAD_HALT_REASON } from './taskRunReload';
 import { SerialQueue } from './serialQueue';
 import {
@@ -440,6 +441,7 @@ export class TaskStageRunner {
     taskId: string,
     attention: 'needsAction' | 'failed',
     failure: string,
+    countMaxReached = false,
   ): Promise<void> {
     const gateId = this.newId();
     // 状態を書き込む間に工程セッションが帳簿から外れうるので、タブのReflexを先に読む
@@ -449,7 +451,7 @@ export class TaskStageRunner {
       return halted === r
         ? r
         : openStageGate(
-            halted,
+            countMaxReached ? recordMaxReached(halted, taskId) : halted,
             taskId,
             { gateId, kind: 'stageFailed', detail: failure },
             this.now(),
@@ -1545,6 +1547,7 @@ export class TaskStageRunner {
           entry.ref.taskId,
           'needsAction',
           unreportedFinishDetail(reason, this.deps.maxIterations),
+          reason === 'maxReached',
         );
         this.release(entry, { dispose: false });
       });
