@@ -19,7 +19,7 @@ const evidence = (over: Partial<RefuteEvidence> = {}): RefuteEvidence => ({
   },
   diff: 'diff --git a/src/a.ts b/src/a.ts\n-const x = [];\n+const x = cached;',
   direction: 'minimize',
-  minImprovement: { kind: 'relative', value: 5 },
+  minImprovement: { kind: 'percent', value: 5 },
   significanceLevel: 0.05,
   baseline: 100,
   best: { samples: 5, median: 100, spread: 2 },
