@@ -713,6 +713,13 @@ export function buildOrchestratorControlPort(
     self.deps.forge !== undefined && self.runs.get(runId)?.forge.kind === 'active';
   return {
     getRunStatus: () => buildRunStatus(actions, runId),
+    // 判断待ちが立つのは`finalMerge: orchestrator`のrunだけ（`decideFinalMerge`の
+    // `pending.mode !== 'orchestrator'`の拒否、`runner.ts`の`mayAwaitFinalMergeDecision`と
+    // 同じ条件）。それ以外のrunでは`tools/list`から外す（Issue #1324）
+    canDecideFinalMerge: () => {
+      const forge = self.runs.get(runId)?.forge;
+      return forge?.kind === 'active' && forge.finalMerge === 'orchestrator';
+    },
     ...(canManageIssues
       ? {
           createIssue: ({
