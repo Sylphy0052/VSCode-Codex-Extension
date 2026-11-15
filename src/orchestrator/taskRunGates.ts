@@ -1,4 +1,5 @@
 import type { RoadmapAskArgs } from './roadmapQuestionMcp';
+import { tallyPrunedGates } from './runMetrics';
 import { normalizeFailureCause, previousStageFailures, STAGE_LABELS } from './taskStagePrompts';
 import {
   closeTaskWithoutMerge,
@@ -122,17 +123,18 @@ export function findStageGate(run: TaskRun, taskId: string, gateId: string): Sta
  * 自動のやり直しに数える関門は最後まで残す。先に捨てると`countAutoRetries`が減り、
  * 上限（`MAX_AUTO_RETRIES`）に達した工程がまた自動でやり直せてしまう（Issue #1733）。
  */
-function trimGates(gates: readonly StageGate[]): StageGate[] {
+function trimGates(gates: readonly StageGate[]): { kept: StageGate[]; pruned: StageGate[] } {
   const result = [...gates];
+  const pruned: StageGate[] = [];
   while (result.length > MAX_GATES_PER_TASK) {
     const uncounted = result.findIndex((gate) => !isOpen(gate) && !isAutoRetry(gate));
     const index = uncounted >= 0 ? uncounted : result.findIndex((gate) => !isOpen(gate));
     if (index < 0) {
       break;
     }
-    result.splice(index, 1);
+    pruned.push(...result.splice(index, 1));
   }
-  return result;
+  return { kept: result, pruned };
 }
 
 function withTaskUpdate(run: TaskRun, next: OrchestratedTask): TaskRun {
@@ -264,9 +266,12 @@ export function openStageGate(
     openedAt: at,
   };
   // 判断待ちで開くのは`stageFailed`だけ。その注意は止めたときの要対応・失敗のまま
+  // 刈る前に決着者別の件数を指標へ足す（Issue #2081）。刈った後では数え落とす
+  const { kept, pruned } = trimGates([...(task.gates ?? []), gate]);
   return withTaskUpdate(run, {
     ...task,
-    gates: trimGates([...(task.gates ?? []), gate]),
+    gates: kept,
+    ...(pruned.length === 0 ? {} : { metricsTally: tallyPrunedGates(task, pruned) }),
     updatedAt: at,
   });
 }

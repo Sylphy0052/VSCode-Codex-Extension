@@ -46,6 +46,8 @@ import {
   TASK_LEASE_DIR_NAME,
   TaskRunLeaseManager,
 } from '../orchestrator/taskRunLease';
+import { createRunMetricsRecorder, RUN_METRICS_DIR_NAME } from '../orchestrator/runMetricsStore';
+import { MAX_AUTO_RETRIES, MAX_GATES_PER_TASK, MAX_REVIEW_ROUNDS } from '../orchestrator/taskRunGates';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { createIssueReader, createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
@@ -61,6 +63,7 @@ import {
 } from '../orchestrator/taskRunState';
 import type { TaskRunStore } from '../orchestrator/taskRunStore';
 import type { TaskSessionConfig, TaskSessionHost } from '../orchestrator/taskSession';
+import { checkSelfImproveMerge } from '../orchestrator/selfImproveMergeCheck';
 import { createStageObservationPorts } from '../orchestrator/taskStageObservation';
 import { TaskStageRunner } from '../orchestrator/taskStageRunner';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
@@ -106,6 +109,8 @@ export interface TaskRunSetupDeps {
   windowId: string;
   /** 専有権ファイルの置き場を決める（`sessionHubRoot`の下）。`context.globalStorageUri.fsPath`。 */
   globalStorageDir: string;
+  /** 実行中の拡張機能の版。runごとの指標の群分けの鍵にする（Issue #2081）。 */
+  extensionVersion: string;
   hosts: Record<TaskRunEngine, TaskSessionHost>;
   worktreeQueue: WorktreeCreationQueue;
   git: GitCommandRunner;
@@ -274,6 +279,23 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     log: warn,
   });
 
+  // runの終了時に指標を記録する（Issue #2081）。終了の経路はどれもstoreの更新を通る
+  const recordRunMetrics = createRunMetricsRecorder({
+    dir: path.join(deps.globalStorageDir, RUN_METRICS_DIR_NAME),
+    extensionVersion: deps.extensionVersion,
+    claudeHome: path.join(os.homedir(), '.claude'),
+    limits: {
+      stageMaxIterations: TASK_STAGE_MAX_ITERATIONS,
+      maxReviewRounds: MAX_REVIEW_ROUNDS,
+      maxAutoRetries: MAX_AUTO_RETRIES,
+      maxGatesPerTask: MAX_GATES_PER_TASK,
+    },
+    log: warn,
+  });
+  store.onRunFinished = (run) => {
+    void recordRunMetrics(run);
+  };
+
   const runner = new TaskStageRunner({
     hosts: deps.hosts,
     store,
@@ -289,6 +311,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     resolveBaseCommit: (root) => resolveRoadmapBaseCommit(ports, root),
     sessionConfig: (engine) => deps.sessionConfig(engine),
     autoApprove: () => deps.readBaseline().allowAutoApprove,
+    checkSelfImproveMerge: (root, prNumber) => checkSelfImproveMerge(ports, root, prNumber),
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
     startGate: {

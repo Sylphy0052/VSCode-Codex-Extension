@@ -36,6 +36,7 @@ import {
 import type { StartPolicy } from './resourceMonitor';
 import type { RunNotesStore } from './runNotes';
 import { RELOAD_RESUME_PROMPT } from './reloadResumePrompt';
+import { recordMaxReached } from './runMetrics';
 import { RELOAD_HALT_REASON } from './taskRunReload';
 import { SerialQueue } from './serialQueue';
 import {
@@ -179,6 +180,11 @@ export interface TaskStageRunnerDeps {
   sessionConfig(engine: TaskRunEngine): { config: TaskSessionConfig; sandbox: string };
   /** 工程セッションのツール実行を自動で許可するか。mergeとリモートブランチの削除は別に扱う。 */
   autoApprove(): boolean;
+  /**
+   * 自己改善PRが保護パスに触れていたらmergeを拒否する検査（Issue #2082）。拒否する理由か、
+   * 拒否しなくてよければ`undefined`を返す。
+   */
+  checkSelfImproveMerge?(repoRoot: string, pullRequestNumber: number): Promise<string | undefined>;
   /** 1つの実行回で送る指示の上限。 */
   maxIterations: number;
   /**
@@ -442,6 +448,7 @@ export class TaskStageRunner {
     taskId: string,
     attention: 'needsAction' | 'failed',
     failure: string,
+    countMaxReached = false,
   ): Promise<void> {
     const gateId = this.newId();
     // 状態を書き込む間に工程セッションが帳簿から外れうるので、タブのReflexを先に読む
@@ -451,7 +458,7 @@ export class TaskStageRunner {
       return halted === r
         ? r
         : openStageGate(
-            halted,
+            countMaxReached ? recordMaxReached(halted, taskId) : halted,
             taskId,
             { gateId, kind: 'stageFailed', detail: failure },
             this.now(),
@@ -680,6 +687,17 @@ export class TaskStageRunner {
       `回答者判定で承認なしに実行させた（${answerer.summary}）: ${command}`,
     );
     return true;
+  }
+
+  /** タスクのPRのmerge前の自己改善保護パス検査（Issue #2082）。PRが未確定なら確かめられないので拒否する。 */
+  private async guardSelfImproveMerge(entry: LiveStageSession): Promise<string | undefined> {
+    const run = this.deps.store.find(entry.runId);
+    const task = run === undefined ? undefined : getTask(run, entry.ref.taskId);
+    const number = task?.pullRequest?.number;
+    if (run === undefined || number === undefined) {
+      return 'タスクのPRを特定できず、自己改善PRか確かめられないためmergeできない';
+    }
+    return this.deps.checkSelfImproveMerge?.(run.workspaceRoot, number);
   }
 
   /** 回答者判定（Issue #1708）。判定が無い・失敗したときはユーザーへ回す。 */
@@ -1238,8 +1256,13 @@ export class TaskStageRunner {
 
   private attach(entry: LiveStageSession, session: TaskSession): void {
     session.setApprovalHandler(
-      stageApprovalHandler(entry.ref.stage, this.deps.autoApprove(), (command) =>
-        this.judgeMergeCommand(entry, command),
+      stageApprovalHandler(
+        entry.ref.stage,
+        this.deps.autoApprove(),
+        (command) => this.judgeMergeCommand(entry, command),
+        this.deps.checkSelfImproveMerge === undefined
+          ? undefined
+          : () => this.guardSelfImproveMerge(entry),
       ),
     );
     session.setMcpElicitationHandler?.(shouldAutoApproveStageElicitation);
@@ -1550,6 +1573,7 @@ export class TaskStageRunner {
           entry.ref.taskId,
           'needsAction',
           unreportedFinishDetail(reason, this.deps.maxIterations),
+          reason === 'maxReached',
         );
         this.release(entry, { dispose: false });
       });
