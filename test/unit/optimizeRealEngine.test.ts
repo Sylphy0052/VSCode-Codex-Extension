@@ -63,7 +63,6 @@ describe.skipIf(ENGINE !== 'claude' && ENGINE !== 'codex')('実機の試行の�
           commits: { baseline: head, best: head, candidate: head },
           allowedPaths: ['src'],
         });
-        const bestBefore = (await readdir(dirs.best)).sort();
         let config: TrialEngineConfig = { engine, executable: EXECUTABLE, model: 'auto' };
         if (engine === 'claude') {
           const probed = await new ClaudeSandboxProbe(
@@ -112,8 +111,9 @@ describe.skipIf(ENGINE !== 'claude' && ENGINE !== 'codex')('実機の試行の�
           halt: result.halt,
           violations: result.violations.map((v) => v.kind),
           changeSummary: result.record.llm.changeSummary,
-          bestDirUnchanged:
-            JSON.stringify((await readdir(dirs.best)).sort()) === JSON.stringify(bestBefore),
+          // モデルへ書かせたprobe.txtがbestに無いことだけを見る。bench.jsが計測でm.jsonなどを
+          // cwdへ書くので、一覧の全体比較はしない
+          bestDirUnchanged: !(await readdir(dirs.best)).includes('probe.txt'),
           originUnchanged: git(origin, 'for-each-ref') === originBefore,
         };
         // Issueへ貼る結果
