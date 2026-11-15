@@ -1692,3 +1692,71 @@ describe('TaskStageRunner.dispose', () => {
     expect(t.runner.listStageProcesses()).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 最適化のループ（Issue #2111）
+// ---------------------------------------------------------------------------
+
+describe('TaskStageRunner 最適化タスクのimplement (Issue #2111)', () => {
+  const OPT_SPEC = {
+    metricSource: 'wallTime',
+    metricCommand: 'bench',
+    direction: 'minimize',
+    minImprovement: { kind: 'absolute', value: 1 },
+    significanceLevel: 0.05,
+    correctnessCommand: 'test',
+    allowedPaths: ['src'],
+    budget: { maxTrials: 3, maxMinutes: 10 },
+    measurementRuns: 5,
+  } as unknown as NonNullable<OrchestratedTask['optimization']>;
+
+  it('deps.optimizeLoop無しなら、ループを通さずにセッションを始めず、止めて関門を開く', async () => {
+    const t = build([
+      makeRun([queuedTask('T1', 'implement', { optimization: OPT_SPEC, ...WORKTREE_TASK })]),
+    ]);
+    await t.runner.pump('run-1');
+    await flush();
+    expect(t.openClaude).not.toHaveBeenCalled();
+    expect(t.sessions).toHaveLength(0);
+    expect(t.task().gates?.[0]).toMatchObject({ kind: 'stageFailed', status: 'awaitingUser' });
+    expect(t.task().gates?.[0]?.detail).toContain('最適化のループを使えない');
+  });
+
+  it('基準値を測れなければ、試行もPRのセッションも始めずbaselineFailedの関門(人だけが決着)を開く', async () => {
+    const runLoop = vi.fn(async (_args: { task: OrchestratedTask }) => ({
+      kind: 'baselineFailed' as const,
+      detail: '基準値の準備に失敗した: npm ci',
+      state: {
+        phase: 'baseline' as const,
+        trials: 0,
+        elapsedMs: 0,
+        plateau: 0,
+        rebuilt: false,
+        inconclusiveStreak: 0,
+      },
+    }));
+    const optimizeLoop = {
+      runLoop,
+      restoreWorkTree: vi.fn(),
+      ledgerSummaryForPrompt: vi.fn(),
+      checkPullRequestTree: vi.fn(),
+      remeasureAfterReview: vi.fn(),
+      checkMerge: vi.fn(),
+      cleanup: vi.fn(),
+    };
+    const t = build(
+      [makeRun([queuedTask('T1', 'implement', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    await flush();
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(t.openClaude).not.toHaveBeenCalled();
+    expect(t.task().gates?.[0]).toMatchObject({
+      kind: 'optimization',
+      optimizeReason: 'baselineFailed',
+      status: 'awaitingUser',
+    });
+    expect(t.task().stages.implement.status).toBe('halted');
+  });
+});

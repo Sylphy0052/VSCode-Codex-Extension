@@ -445,7 +445,7 @@ export async function prepareLoopResume(
   ports: ResumePorts,
 ): Promise<ResumeReport> {
   const processes = await ports.killRecordedProcesses();
-  let next: OptimizeLoopState = { ...state };
+  const next: OptimizeLoopState = { ...state };
   const ledger = await ports.readLedger();
   let interruptedTrial: number | undefined;
   if (state.inFlightTrial !== undefined) {
@@ -554,8 +554,9 @@ export function consumeMergeAllowance(state: OptimizeLoopState): OptimizeLoopSta
   if (state.preMerge === undefined) {
     return state;
   }
-  const { allowedOnce: _used, ...rest } = state.preMerge;
-  return { ...state, preMerge: rest };
+  const preMerge: OptimizePreMerge = { ...state.preMerge };
+  delete preMerge.allowedOnce;
+  return { ...state, preMerge };
 }
 
 // ---- 関門の決着（Issue #2111 仕様2・6・7・8） ----
@@ -583,8 +584,9 @@ export function applyOptimizeGateResolution(
   }
   switch (reason) {
     case 'baselineFailed': {
-      const { baseline: _b, ...rest } = state;
-      return { state: { ...rest, phase: 'baseline' }, action: 'remeasureBaseline' };
+      const next: OptimizeLoopState = { ...state, phase: 'baseline' };
+      delete next.baseline;
+      return { state: next, action: 'remeasureBaseline' };
     }
     case 'treeMismatch':
       return choice === 'sendBack'
