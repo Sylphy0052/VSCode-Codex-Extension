@@ -4232,6 +4232,8 @@ export class ClaudeChatViewManager
     // 起きないが、境目の意味を両画面で揃える
     const turnFinished = entry.lastTurnCompletionSeq !== state.turnCompletionSeq;
     entry.lastTurnCompletionSeq = state.turnCompletionSeq;
+    // 会話の区切りの追跡（Issue #2123）。次の指示を送る前に、終わったターンを確定させる
+    this.trackConversation(entry, state);
     if (turnFinished && state.queued.length > 0) {
       entry.session.sendNextQueued();
     }

@@ -52,8 +52,11 @@ import { formatUntrusted, sanitizeInlineText, truncateByCodePoint } from './untr
 /** `.agents`直下のファイル名。値そのものは表示・文書化のためにも公開する。 */
 export const RUN_NOTES_RELATIVE_PATH = '.agents/run-notes.jsonl';
 
-/** どの種類のrunが記録したか。導入文の表示にそのまま使う。 */
-export type RunKind = 'workflow' | 'taskRun' | 'roadmapRun';
+/**
+ * どの種類のrunが記録したか。導入文の表示にそのまま使う。`chat`は通常チャットの会話の区切りから
+ * 拡張が機械的に作った教訓（Issue #2123、`retrospectiveMetrics/chat.ts`）。
+ */
+export type RunKind = 'workflow' | 'taskRun' | 'roadmapRun' | 'chat';
 
 /**
  * 教訓の出典の種類（Issue #2085）。昇格できるのは`repoArtifact`だけ。
@@ -240,7 +243,7 @@ function buildLessonRecord(
 }
 
 function isRunKind(value: unknown): value is RunKind {
-  return value === 'workflow' || value === 'taskRun' || value === 'roadmapRun';
+  return value === 'workflow' || value === 'taskRun' || value === 'roadmapRun' || value === 'chat';
 }
 
 function isLessonRecord(value: unknown): value is LessonRecord {

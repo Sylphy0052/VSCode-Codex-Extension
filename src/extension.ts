@@ -1002,6 +1002,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       settings,
       log,
       runNotes,
+      chatConversationHosts: [chat, claudeChat],
       extensionRepositoryUrl: (context.extension.packageJSON as { repository?: { url?: string } })
         .repository?.url,
       // 自律改善の予算（Issue #2084）。Claudeは稼働中のアカウントの週次の記録から見積もる。

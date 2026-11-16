@@ -47,6 +47,13 @@ import {
   type RunSummary,
 } from './runSummary';
 import { findProtectedTouches, SELF_IMPROVE_LABEL } from './selfImproveGuard';
+import {
+  CHAT_METRIC_LABELS,
+  CHAT_MIN_ABS_DELTA,
+  CHAT_RETROSPECTIVE_METRICS,
+  isChatRetrospectiveMetric,
+  type ChatRetrospectiveMetric,
+} from './retrospectiveMetrics/chat';
 import type { TaskRunEngine } from './taskRunState';
 
 /** 評価に使う指標。どれも小さいほど良い。 */
@@ -62,7 +69,12 @@ export const RETROSPECTIVE_METRICS = [
   'reloadResumes',
   'msPerNode',
 ] as const;
-export type RetrospectiveMetric = (typeof RETROSPECTIVE_METRICS)[number];
+export type RetrospectiveMetric = (typeof RETROSPECTIVE_METRICS)[number] | ChatRetrospectiveMetric;
+
+/** run種別ごとの評価に使う指標（`METRICS_BY_KIND`）。chatは会話の指標（Issue #2123）。 */
+export function retrospectiveMetricsFor(kind: RunKind): readonly RetrospectiveMetric[] {
+  return METRICS_BY_KIND[kind];
+}
 
 /**
  * run種別ごとに比べる指標。先頭は、悪くなった指標が無いときに狙う指標。
@@ -71,7 +83,7 @@ export type RetrospectiveMetric = (typeof RETROSPECTIVE_METRICS)[number];
 const METRICS_BY_KIND: Readonly<Record<RunKind, readonly RetrospectiveMetric[]>> = {
   task: ['sendBacks', 'autoRetries', 'maxReached', 'questions', 'msPerChildIssue'],
   workflow: ['nodeRetries', 'failedNodes', 'reloadResumes', 'msPerNode'],
-  chat: [],
+  chat: CHAT_RETROSPECTIVE_METRICS,
 };
 
 /** 最小run数の既定値。これに満たないうちは判定を保留する。 */
@@ -89,6 +101,7 @@ const MIN_ABS_DELTA: Record<RetrospectiveMetric, number> = {
   nodeRetries: 0.2,
   reloadResumes: 0.2,
   msPerNode: 5 * 60_000,
+  ...CHAT_MIN_ABS_DELTA,
 };
 
 /**
@@ -195,6 +208,9 @@ export function compareVersions(a: string, b: string): number | undefined {
  * 0件のrunと、その指標を持たない種別のrunは`undefined`（比べない）。
  */
 export function metricValue(m: RunMetrics, metric: RetrospectiveMetric): number | undefined {
+  if (isChatRetrospectiveMetric(metric)) {
+    return m.chat?.[metric];
+  }
   switch (metric) {
     case 'msPerChildIssue':
       return m.msPerChildIssue;
@@ -234,7 +250,7 @@ function mean(values: readonly number[]): number | undefined {
 
 /**
  * 今回のrunが過去の平均から最も悪くなった指標。比べるのは`kind`の指標だけ。悪くなったものが
- * 無ければ、その種別の先頭の指標（taskは差し戻し、workflowは再試行）。
+ * 無ければ、その種別の先頭の指標（taskは差し戻し、workflowは再試行、chatは`CHAT_RETROSPECTIVE_METRICS`の先頭）。
  */
 export function selectTargetMetric(
   current: RunMetrics,
@@ -417,6 +433,7 @@ const METRIC_LABELS: Record<RetrospectiveMetric, string> = {
   nodeRetries: 'ノードの再試行（ノードあたり）',
   reloadResumes: '再読み込み後の会話の開き直し（ノードあたり）',
   msPerNode: 'ノードあたりの所要時間（ミリ秒）',
+  ...CHAT_METRIC_LABELS,
 };
 
 /** run種別ごとの、昇格先の定型文が渡る先（改善Issueの本文の「どこへ加えるか」）。 */

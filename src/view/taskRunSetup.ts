@@ -65,6 +65,7 @@ import {
   TaskRunLeaseManager,
 } from '../orchestrator/taskRunLease';
 import { createRunMetricsRecorder, RUN_METRICS_DIR_NAME } from '../orchestrator/runMetricsStore';
+import { setupChatRetrospective, type ChatConversationHost } from './chatRetrospectiveSetup';
 import { createWorkflowRunMetricsRecorder } from '../orchestrator/retrospectiveMetrics/workflowRunMetrics';
 import type { WorkflowRunStore } from '../orchestrator/runStore';
 import {
@@ -158,6 +159,8 @@ export interface TaskRunSetupDeps {
   weeklyUsagePct?: (engine: TaskRunEngine) => Promise<number | undefined>;
   /** `package.json`の`repository.url`。自己改善（Issue #2086）はこのrepoのrunでだけ行う。 */
   extensionRepositoryUrl?: string | undefined;
+  /** 通常チャットの会話を区切って振り返る画面（Issue #2123）。省略時は追わない。 */
+  chatConversationHosts?: readonly ChatConversationHost[];
   /**
    * ワークフロー（YAML）のrun（Issue #2122）。渡すと、runの終了時に`kind: 'workflow'`の指標を
    * 記録し、task runと同じ振り返りに掛ける。
@@ -364,6 +367,15 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   store.onRunFinished = (run) => {
     void recordRunMetrics(run).then(() => retrospective.onRunFinished(taskRunSummary(run)));
   };
+  // 通常チャットの会話の区切りも同じ振り返りへ渡す（Issue #2123）
+  const chatRetrospective = setupChatRetrospective({
+    hosts: deps.chatConversationHosts ?? [],
+    retrospective,
+    runNotes: deps.runNotes,
+    globalStorageDir: deps.globalStorageDir,
+    extensionVersion: deps.extensionVersion,
+    log: warn,
+  });
   // ワークフローのrunも終了時に指標を記録して振り返る（Issue #2122）。振り返るのは指標を初めて
   // 書いたときだけ（再実行で終わり直したrunを二重に振り返らない）
   const workflowRuns = deps.workflowRuns;
@@ -714,6 +726,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   return [
     transitions,
+    chatRetrospective,
     { dispose: () => monitor.dispose() },
     { dispose: () => lease.dispose() },
     { dispose: () => runner.dispose() },

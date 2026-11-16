@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
+import { toTrackedChatState, type ChatConversationTracker } from '../chat/chatConversationTracker';
 import { readChatEndSummaryConfig, readNotificationsConfig, readReflexEnabled } from '../config';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { Logger } from '../log';
@@ -1556,6 +1557,29 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
+   * 通常チャットの会話を区切って振り返りへ渡す口（Issue #2123）。渡されていなければ追わない。
+   * Codex・Claudeの両画面で同じ追跡器を共有する（鍵はタブのエントリ）。
+   */
+  private conversationTracker: ChatConversationTracker | undefined;
+
+  setConversationTracker(tracker: ChatConversationTracker): void {
+    this.conversationTracker = tracker;
+  }
+
+  /**
+   * 状態が変わるたびに呼ぶ（`onSessionChange`）。ターンの開始・終了から会話の区切りを追う。
+   * 渡すのは件数・真偽値・区分・コストだけで、会話本文と編集したファイルのパスは渡さない。
+   */
+  protected trackConversation(entry: TPanel, state: ChatState): void {
+    this.conversationTracker?.observe(entry, {
+      engine: this.favoriteProvider,
+      cwd: entry.cwd,
+      taskManaged: entry.taskManaged,
+      state: toTrackedChatState(state),
+    });
+  }
+
+  /**
    * ループ終了表示の完了根拠（Issue #1380）を読む口。渡されていなければ表示しない。
    */
   private completionEvidenceStore: Pick<VerificationStore, 'list'> | undefined;
@@ -1696,6 +1720,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       entry.postTimer = undefined;
     }
     entry.loop.stop('manual');
+    // 会話の区切り（Issue #2123）。無入力で既に区切った分は追跡器が二重に渡さない
+    this.conversationTracker?.end(entry);
     // 引き継ぎの確認待ちのままタブを閉じた分を中止する（Issue #1280）。放っておくと
     // 誰も答えない確認を`chooseHandoffModelSettings`が待ち続ける
     entry.pendingHandoff?.cancelForTeardown();
