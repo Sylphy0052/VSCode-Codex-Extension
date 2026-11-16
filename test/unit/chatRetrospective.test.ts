@@ -591,9 +591,11 @@ describe('振り返りのchat指標', () => {
 
   it('改善案の指標はchatの指標から選ぶ', () => {
     const history = [chatMetrics('h1', 0, '1.0.0', 0.1), chatMetrics('h2', 0, '1.0.0', 0.1)];
-    expect(selectTargetMetric(chatMetrics('c', 0, '1.0.0', 0.9), history)).toBe('failedTurnRate');
+    expect(selectTargetMetric(chatMetrics('c', 0, '1.0.0', 0.9), history, 'chat')).toBe(
+      'failedTurnRate',
+    );
     // 悪くなった指標が無ければchatの最初の指標
-    expect(selectTargetMetric(history[0]!, history)).toBe('failedTurnRate');
+    expect(selectTargetMetric(history[0]!, history, 'chat')).toBe('failedTurnRate');
   });
 
   it('評価はchatのrunだけを母集団にする', () => {

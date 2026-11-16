@@ -63,13 +63,28 @@ export const RETROSPECTIVE_METRICS = [
   'maxReached',
   'questions',
   'msPerChildIssue',
+  // ワークフローのrun（Issue #2122）。件数はノードあたり
+  'failedNodes',
+  'nodeRetries',
+  'reloadResumes',
+  'msPerNode',
 ] as const;
 export type RetrospectiveMetric = (typeof RETROSPECTIVE_METRICS)[number] | ChatRetrospectiveMetric;
 
-/** run種別ごとの評価に使う指標。chatは会話の指標（Issue #2123）、それ以外はtaskの指標。 */
+/** run種別ごとの評価に使う指標（`METRICS_BY_KIND`）。chatは会話の指標（Issue #2123）。 */
 export function retrospectiveMetricsFor(kind: RunKind): readonly RetrospectiveMetric[] {
-  return kind === 'chat' ? CHAT_RETROSPECTIVE_METRICS : RETROSPECTIVE_METRICS;
+  return METRICS_BY_KIND[kind];
 }
+
+/**
+ * run種別ごとに比べる指標。先頭は、悪くなった指標が無いときに狙う指標。
+ * 種別の違う指標は値が出ない（`metricValue`が`undefined`）ので比べない。
+ */
+const METRICS_BY_KIND: Readonly<Record<RunKind, readonly RetrospectiveMetric[]>> = {
+  task: ['sendBacks', 'autoRetries', 'maxReached', 'questions', 'msPerChildIssue'],
+  workflow: ['nodeRetries', 'failedNodes', 'reloadResumes', 'msPerNode'],
+  chat: CHAT_RETROSPECTIVE_METRICS,
+};
 
 /** 最小run数の既定値。これに満たないうちは判定を保留する。 */
 export const DEFAULT_MIN_RUNS = 5;
@@ -82,6 +97,10 @@ const MIN_ABS_DELTA: Record<RetrospectiveMetric, number> = {
   maxReached: 0.2,
   questions: 0.2,
   msPerChildIssue: 10 * 60_000,
+  failedNodes: 0.2,
+  nodeRetries: 0.2,
+  reloadResumes: 0.2,
+  msPerNode: 5 * 60_000,
   ...CHAT_MIN_ABS_DELTA,
 };
 
@@ -184,28 +203,62 @@ export function compareVersions(a: string, b: string): number | undefined {
   return 0;
 }
 
-/** 指標の値。件数は子Issueあたりに均す（runの大きさで比べないため）。 */
+/**
+ * 指標の値。件数は子Issue・ノードあたりに均す（runの大きさで比べないため）。子Issue・ノードが
+ * 0件のrunと、その指標を持たない種別のrunは`undefined`（比べない）。
+ */
 export function metricValue(m: RunMetrics, metric: RetrospectiveMetric): number | undefined {
   if (isChatRetrospectiveMetric(metric)) {
     return m.chat?.[metric];
   }
-  if (metric === 'msPerChildIssue') {
-    return m.msPerChildIssue;
+  switch (metric) {
+    case 'msPerChildIssue':
+      return m.msPerChildIssue;
+    case 'failedNodes':
+    case 'nodeRetries':
+    case 'reloadResumes':
+    case 'msPerNode':
+      return workflowMetricValue(m, metric);
+    default:
+      return m.childIssues > 0 ? m[metric] / m.childIssues : undefined;
   }
-  return m.childIssues > 0 ? m[metric] / m.childIssues : undefined;
+}
+
+function workflowMetricValue(
+  m: RunMetrics,
+  metric: 'failedNodes' | 'nodeRetries' | 'reloadResumes' | 'msPerNode',
+): number | undefined {
+  const w = m.workflow;
+  if (w === undefined || w.nodes <= 0) {
+    return undefined;
+  }
+  switch (metric) {
+    case 'failedNodes':
+      return w.failedNodes / w.nodes;
+    case 'nodeRetries':
+      return w.retries / w.nodes;
+    case 'reloadResumes':
+      return w.reloadResumes / w.nodes;
+    case 'msPerNode':
+      return w.msPerNode;
+  }
 }
 
 function mean(values: readonly number[]): number | undefined {
   return values.length === 0 ? undefined : values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-/** 今回のrunが過去の平均から最も悪くなった指標。悪くなったものが無ければ差し戻し。 */
+/**
+ * 今回のrunが過去の平均から最も悪くなった指標。比べるのは`kind`の指標だけ。悪くなったものが
+ * 無ければ、その種別の先頭の指標（taskは差し戻し、workflowは再試行、chatは`CHAT_RETROSPECTIVE_METRICS`の先頭）。
+ */
 export function selectTargetMetric(
   current: RunMetrics,
   history: readonly RunMetrics[],
+  kind: RunKind = 'task',
 ): RetrospectiveMetric {
+  const metrics = METRICS_BY_KIND[kind];
   let best: { metric: RetrospectiveMetric; excess: number } | undefined;
-  const metrics = retrospectiveMetricsFor(normalizeRunKind(current.kind) ?? 'task');
   for (const metric of metrics) {
     const value = metricValue(current, metric);
     const base = mean(
@@ -251,6 +304,8 @@ export interface Proposal {
   lesson: LessonRecord;
   promoted: string;
   spec: ImprovementSpec;
+  /** 改善案を出したrunの種別。本文の「どこへ加えるか」の文言を決める。省略時はtask。 */
+  runKind?: RunKind;
 }
 
 /**
@@ -265,7 +320,8 @@ export function buildProposal(input: {
   /** 改善案を出したrunの種別。昇格先を決める。省略時はtask。 */
   kind?: RunKind;
 }): Proposal | undefined {
-  const targetFile = promotionTargetFile(input.kind ?? 'task');
+  const kind = input.kind ?? 'task';
+  const targetFile = promotionTargetFile(kind);
   for (const lesson of input.lessons) {
     if (lesson.runId !== input.runId || !isPromotable(lesson)) {
       continue;
@@ -274,12 +330,13 @@ export function buildProposal(input: {
     if (promoted === undefined) {
       continue;
     }
-    const metric = selectTargetMetric(input.current, input.history);
+    const metric = selectTargetMetric(input.current, input.history, kind);
     const target = `promoteLesson:${targetFile}`;
     const evidence = [lesson.id];
     return {
       lesson,
       promoted,
+      runKind: kind,
       spec: {
         v: 1,
         key: improvementKey(target, metric, evidence),
@@ -372,7 +429,18 @@ const METRIC_LABELS: Record<RetrospectiveMetric, string> = {
   maxReached: '送信回数の使い切り（子Issueあたり）',
   questions: '質問（子Issueあたり）',
   msPerChildIssue: '子Issueあたりの所要時間（ミリ秒）',
+  failedNodes: '失敗したノード（ノードあたり）',
+  nodeRetries: 'ノードの再試行（ノードあたり）',
+  reloadResumes: '再読み込み後の会話の開き直し（ノードあたり）',
+  msPerNode: 'ノードあたりの所要時間（ミリ秒）',
   ...CHAT_METRIC_LABELS,
+};
+
+/** run種別ごとの、昇格先の定型文が渡る先（改善Issueの本文の「どこへ加えるか」）。 */
+const PROMOTION_DESTINATION_LABELS: Readonly<Record<RunKind, string>> = {
+  task: '工程プロンプト',
+  workflow: 'ワークフローのノードへ渡す定型文',
+  chat: '通常チャットで拡張が付ける定型文',
 };
 
 function specSection(spec: ImprovementSpec): string[] {
@@ -382,7 +450,7 @@ function specSection(spec: ImprovementSpec): string[] {
     '',
     `- 狙う指標: ${METRIC_LABELS[spec.metric]}。期待する変化: 減る`,
     `- 判定の閾値: 改善後の平均が改善前の平均より${String(spec.thresholdPct)}%以上、かつ${String(spec.minAbsDelta)}以上増えたら悪化としてrevertする`,
-    `- 最小run数: ${String(spec.minRuns)}（改善を含む版で、工程プロンプトと上限値のハッシュが揃ったrunがこの数に満たないうちは判定を保留する）`,
+    `- 最小run数: ${String(spec.minRuns)}（改善を含む版で、群分けの鍵（プロンプトと上限値のハッシュなど）が揃ったrunがこの数に満たないうちは判定を保留する）`,
     '',
     '```json',
     JSON.stringify(spec),
@@ -411,7 +479,7 @@ export function renderProposalBody(input: {
   }
   const change = [
     '## 改善の内容',
-    `\`${proposal.spec.files.join('`・`')}\`の工程プロンプトへ次の定型文を加える。文は言い換えず、このまま入れる。`,
+    `\`${proposal.spec.files.join('`・`')}\`の${PROMOTION_DESTINATION_LABELS[proposal.runKind ?? 'task']}へ次の定型文を加える。文は言い換えず、このまま入れる。`,
     '',
     `> ${proposal.promoted}`,
   ];

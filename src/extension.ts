@@ -154,6 +154,7 @@ import {
   type WorkflowDefinition,
 } from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
+import { workflowRunLimits } from './orchestrator/retrospectiveMetrics/workflowRunMetrics';
 import {
   formatResolutionFailureMessage,
   resolveSpawnPath,
@@ -1015,6 +1016,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           ? snapshot.accounts.find((a) => a.current)?.usage?.weekly
           : undefined;
         return weekly === undefined ? undefined : effectivePct(weekly, Date.now());
+      },
+      // ワークフローのrunの振り返り（Issue #2122）
+      workflowRuns: {
+        store: workflowStore,
+        providers: (runId) =>
+          workflowRunner.getSnapshot(runId)?.tasks.map((task) => task.provider) ?? [],
+        limits: () => workflowRunLimits(readWorkflowsConfig().maxAutoResumeAttempts),
       },
     }),
   );

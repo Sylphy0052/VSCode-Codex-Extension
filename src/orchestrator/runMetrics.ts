@@ -46,7 +46,7 @@ export interface RunMetricsKeys {
 export interface RunMetrics {
   schemaVersion: 1;
   /**
-   * run種別（Issue #2120）。評価は同じ種別のrunだけで行う。今計算するのはtask runだけ。
+   * run種別（Issue #2120）。評価は同じ種別のrunだけで行う。今計算するのはtask runとワークフローのrun（Issue #2122）。
    * #2120より前の記録には無く、読むときは`task`として扱う（`runSummary.ts`の`normalizeRunKind`）。
    */
   kind: RunKind;
@@ -71,6 +71,11 @@ export interface RunMetrics {
   /** 子Issueあたりの所要時間（ミリ秒）。子Issueが0件なら`undefined`。 */
   msPerChildIssue: number | undefined;
   /**
+   * ワークフローのrunの件数（Issue #2122）。`kind: 'workflow'`の記録だけが持つ。ワークフローの
+   * 記録は子Issueを持たないので、上のtask用の件数は0（`msPerChildIssue`は`undefined`）にする。
+   */
+  workflow?: WorkflowRunTally;
+  /**
    * 通常チャットの会話の指標（Issue #2123）。`kind: 'chat'`の記録だけが持つ。計算は
    * `retrospectiveMetrics/chat.ts`。chatの記録ではtask向けの件数は0、所要時間は`undefined`。
    */
@@ -92,6 +97,20 @@ export interface ChatMetricValues {
   costPerTurn: number | undefined;
   /** ターンあたりの所要時間（ミリ秒）。 */
   msPerTurn: number;
+}
+
+/** ワークフローのrunの件数（Issue #2122）。計算は`retrospectiveMetrics/workflowRunMetrics.ts`。 */
+export interface WorkflowRunTally {
+  /** ノードの数。 */
+  nodes: number;
+  /** `failed`で終わったノードの数。 */
+  failedNodes: number;
+  /** 再試行の回数の合計（自動の`retryCount`＋手動・自動再開の`manualRetryCount`）。 */
+  retries: number;
+  /** 再読み込みの後に同じ会話を開き直した回数の合計。 */
+  reloadResumes: number;
+  /** 開始・終了時刻の揃ったノードあたりの所要時間（ミリ秒）。揃ったノードが無ければ`undefined`。 */
+  msPerNode: number | undefined;
 }
 
 const DECIDERS: readonly StageDecider[] = ['reflex', 'orchestrator', 'user'];
