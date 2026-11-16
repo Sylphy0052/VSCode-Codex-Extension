@@ -6,6 +6,7 @@
  *
  * - タブを閉じたとき（`end`。`teardown`から呼ぶ）
  * - 最後のターン終了から一定時間（`idleMs`）次のターンが始まらないとき
+ * - 拡張の終了・Reload（`dispose`。途中の会話を捨てないため。Issue #2128）
  *
  * 区切った区切りは管理表から外してから`onSegment`へ渡すため、両方の契機が重なっても同じ区切りを
  * 二度渡さない。区切った後に会話が続いたら、次のターンから新しい区切りを始める。
@@ -48,7 +49,7 @@ export interface ChatConversationObservation {
   state: TrackedChatState;
 }
 
-export type SegmentEndReason = 'teardown' | 'idle';
+export type SegmentEndReason = 'teardown' | 'idle' | 'dispose';
 
 export interface ChatConversationTrackerDeps {
   /** 最後のターン終了から区切るまでの時間（ミリ秒）。0以下なら無入力では区切らない。 */
@@ -140,12 +141,17 @@ export class ChatConversationTracker {
     this.conversations.delete(key);
   }
 
-  /** 全会話の区切りを止める（区切りは渡さない）。拡張の終了時に呼ぶ。 */
+  /**
+   * 全会話の途中の区切りを渡し、タイマーを止める。拡張の終了・Reload時に呼ぶ（Issue #2128）。
+   * 選別は受け取る側が行う。管理表を空にしてから渡すため、後から同じ会話の`end`や無入力の
+   * タイマーが来ても二重に渡さない。
+   */
   dispose(): void {
-    for (const conv of this.conversations.values()) {
-      this.cancelTimer(conv);
-    }
+    const conversations = [...this.conversations.values()];
     this.conversations.clear();
+    for (const conv of conversations) {
+      this.close(conv, 'dispose');
+    }
   }
 
   private finishTurn(key: object, conv: Conversation, obs: ChatConversationObservation): void {

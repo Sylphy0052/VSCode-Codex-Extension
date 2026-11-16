@@ -10,7 +10,10 @@ import {
   type ChatConversationObservation,
   type SegmentEndReason,
 } from '../../src/chat/chatConversationTracker';
-import { createChatSegmentRecorder } from '../../src/chat/chatRetrospective';
+import {
+  createChatSegmentRecorder,
+  type ChatSegmentOutcome,
+} from '../../src/chat/chatRetrospective';
 import {
   buildChatLessons,
   chatRunSummary,
@@ -30,6 +33,7 @@ import {
   readAllRunMetrics,
   retrospectiveMetricsFor,
   selectTargetMetric,
+  type RunRetrospective,
 } from '../../src/orchestrator/runRetrospective';
 import type { RunKind, RunSummary } from '../../src/orchestrator/runSummary';
 
@@ -370,15 +374,54 @@ describe('ChatConversationTracker', () => {
     c.turn(1_000, { edited: true });
     clock.advance(24 * 60 * 60_000);
     expect(emitted).toHaveLength(0);
-    tracker.dispose();
-    tracker.end(c.key);
-    expect(emitted).toHaveLength(0);
 
     const other = makeTracker();
     const c2 = new Conversation(other.tracker, other.clock);
     c2.turn(1_000, { edited: true });
     other.tracker.dispose();
     expect(other.clock.pending).toBe(0);
+  });
+
+  it('disposeで途中の会話を区切って渡し、その後のteardown・無入力では二重に渡さない', () => {
+    const { tracker, clock, emitted } = makeTracker();
+    const a = new Conversation(tracker, clock, {});
+    const b = new Conversation(tracker, clock, {});
+    const idle = new Conversation(tracker, clock, {});
+    a.turn(1_000, { edited: true, cost: 0.3 });
+    a.turn(2_000, { cost: 0.5 });
+    b.turn(1_000);
+    // ターンの無い会話は区切りにしない
+    idle.observe({ busy: false });
+    tracker.dispose();
+    expect(emitted.map((e) => [e.reason, e.segment.turns.length])).toEqual([
+      ['dispose', 2],
+      ['dispose', 1],
+    ]);
+    expect(emitted[0]?.segment.costEndUsd).toBe(0.5);
+    expect(clock.pending).toBe(0);
+    tracker.end(a.key);
+    tracker.end(b.key);
+    clock.advance(60 * 60_000);
+    tracker.dispose();
+    expect(emitted).toHaveLength(2);
+  });
+
+  it('teardownで区切った会話はdisposeで二重に渡さない', () => {
+    const { tracker, clock, emitted } = makeTracker();
+    const c = new Conversation(tracker, clock);
+    c.turn(1_000, { edited: true });
+    tracker.end(c.key);
+    tracker.dispose();
+    expect(emitted.map((e) => e.reason)).toEqual(['teardown']);
+  });
+
+  it('無入力で区切った後にターンが無ければdisposeで渡さない', () => {
+    const { tracker, clock, emitted } = makeTracker();
+    const c = new Conversation(tracker, clock);
+    c.turn(1_000, { edited: true });
+    clock.advance(31 * 60_000);
+    tracker.dispose();
+    expect(emitted.map((e) => e.reason)).toEqual(['idle']);
   });
 
   it('タスク管理下の会話は区切りに印を付ける（選別で落とす）', () => {
@@ -400,12 +443,16 @@ describe('createChatSegmentRecorder', () => {
   }[];
   let retrospected: RunSummary[];
   let sources: RunKind[];
+  let ownRepoRoots: string[];
+  let ownRepo: Awaited<ReturnType<RunRetrospective['resolveOwnRepo']>>;
 
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-retro-'));
     lessons = [];
     retrospected = [];
     sources = ['task', 'chat'];
+    ownRepoRoots = [];
+    ownRepo = { ok: true, repo: { nameWithOwner: 'owner/self', visibility: 'public' } };
   });
   afterEach(async () => {
     await fs.rm(dir, { recursive: true, force: true });
@@ -429,6 +476,10 @@ describe('createChatSegmentRecorder', () => {
           retrospected.push(run);
           return Promise.resolve();
         },
+        resolveOwnRepo: async (root) => {
+          ownRepoRoots.push(root);
+          return Promise.resolve(ownRepo);
+        },
       },
       log: () => undefined,
     });
@@ -451,6 +502,87 @@ describe('createChatSegmentRecorder', () => {
       ['/ws', 'chat-1', 'chat'],
     ]);
     expect(retrospected.map((r) => [r.kind, r.runId])).toEqual([['chat', 'chat-1']]);
+    expect(ownRepoRoots).toEqual(['/ws']);
+  });
+
+  it('この拡張自身のrepo以外の会話は指標も教訓も書かず、理由付きでskippedを返す', async () => {
+    ownRepo = { ok: false, reason: 'この拡張自身のリポジトリでない' };
+    const outcome = await recorder()(segment(), 120_000);
+    expect(outcome).toEqual({ kind: 'skipped', reason: 'この拡張自身のリポジトリでない' });
+    expect(ownRepoRoots).toEqual(['/ws']);
+    expect(await savedMetrics()).toHaveLength(0);
+    await expect(fs.readdir(path.join(dir, 'run-metrics'))).rejects.toThrow();
+    expect(lessons).toHaveLength(0);
+    expect(retrospected).toHaveLength(0);
+  });
+
+  it('自repoか確かめられない（判定が例外・振り返りが無い）ときは何も書かない', async () => {
+    const logs: string[] = [];
+    const base = {
+      metricsDir: path.join(dir, 'run-metrics'),
+      extensionVersion: 'v',
+      claudeHome: path.join(dir, 'none'),
+      sources: (): RunKind[] => ['chat'],
+      settings: () => ({ minTurns: 1, idleMinutes: 30 }),
+      runNotes: {
+        recordLesson: async (
+          workspaceRoot: string,
+          input: LessonInput & { runId: string; runKind: NotesRunKind },
+        ) => {
+          lessons.push({ workspaceRoot, input });
+          return Promise.resolve({ ok: true as const });
+        },
+      },
+      log: (m: string) => logs.push(m),
+    };
+    const throwing = createChatSegmentRecorder({
+      ...base,
+      retrospective: {
+        onRunFinished: async () => Promise.resolve(),
+        resolveOwnRepo: async () => Promise.reject(new Error('gh failed')),
+      },
+    });
+    expect(await throwing(segment(), 1)).toEqual({ kind: 'skipped', reason: 'gh failed' });
+    expect(logs).toHaveLength(1);
+    const none = createChatSegmentRecorder({ ...base, retrospective: undefined });
+    expect((await none(segment(), 1)).kind).toBe('skipped');
+    expect(await savedMetrics()).toHaveLength(0);
+    expect(lessons).toHaveLength(0);
+  });
+
+  it('disposeで渡した途中の会話は、選別条件を満たすものだけ1件記録する', async () => {
+    const clock = new FakeClock();
+    const record = recorder();
+    const done: Promise<ChatSegmentOutcome>[] = [];
+    let n = 0;
+    const t = new ChatConversationTracker({
+      idleMs: () => 30 * 60_000,
+      onSegment: (seg, finishedAt) => done.push(record(seg, finishedAt)),
+      now: () => clock.now,
+      newRunId: () => `chat-d${String(++n)}`,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+    });
+    const eligible = new Conversation(t, clock);
+    eligible.turn(1_000, { edited: true, failed: true });
+    eligible.turn(1_000);
+    eligible.turn(1_000);
+    // 編集が無い会話は選別で落ちる
+    const ineligible = new Conversation(t, clock);
+    ineligible.turn(1_000);
+    ineligible.turn(1_000);
+    ineligible.turn(1_000);
+    t.dispose();
+    // dispose後に同じ会話のteardown・無入力の区切りが来ても2件目はできない
+    t.end(eligible.key);
+    t.end(ineligible.key);
+    clock.advance(60 * 60_000);
+    const outcomes = await Promise.all(done);
+    expect(outcomes.map((o) => o.kind)).toEqual(['recorded', 'skipped']);
+    const saved = await savedMetrics();
+    expect(saved.map((m) => m.runId)).toEqual(['chat-d1']);
+    expect(lessons).toHaveLength(1);
+    expect(retrospected.map((r) => r.runId)).toEqual(['chat-d1']);
   });
 
   it('同じ区切りを二度渡しても指標・教訓・振り返りは1回だけ', async () => {
@@ -498,7 +630,10 @@ describe('createChatSegmentRecorder', () => {
       sources: () => ['chat'],
       settings: () => ({ minTurns: 1, idleMinutes: 30 }),
       runNotes: undefined,
-      retrospective: undefined,
+      retrospective: {
+        onRunFinished: async () => Promise.resolve(),
+        resolveOwnRepo: async () => Promise.resolve(ownRepo),
+      },
       log: (m) => logs.push(m),
     });
     const outcome = await record(segment(), 1);
