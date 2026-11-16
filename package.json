@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1116.9",
+  "version": "2026.1116.10",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1694,6 +1694,23 @@
           "default": "",
           "scope": "machine",
           "markdownDescription": "`~/.claude`へ同期済みのpluginのcommit（SHA）を書いたファイルのパス。runの記録へ、pluginの最新commitとの一致を残すために読む。空なら同期の状態は「確かめられない」と記録する。"
+        },
+        "agent.orchestrator.selfImprove.sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "task",
+              "workflow",
+              "chat"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [
+            "task"
+          ],
+          "scope": "machine",
+          "markdownDescription": "自律改善の振り返りの対象にするrunの種別。`task`はtask run、`workflow`はワークフローのrun、`chat`は通常チャットの会話。含まれない種別のrunは振り返らず、その旨を記録に残す。評価は同じ種別のrunだけで比べる（Issue #2120）。`workflow`・`chat`の終了の検知と指標は後続のIssueで入るため、今は選んでも振り返られない。"
         },
         "agent.orchestrator.selfImprove.weeklyUsageThresholdPct": {
           "type": "number",

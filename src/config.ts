@@ -1905,6 +1905,16 @@ export function readSelfImproveBudgetRaw(): {
 }
 
 /**
+ * 自律改善の振り返りの対象にするrun種別（Issue #2120）。値の検証は`runSummary.ts`の
+ * `normalizeRetrospectiveSources`が行うため、ここでは型を問わず生の値を返す。
+ */
+export function readSelfImproveSourcesRaw(): unknown {
+  return vscode.workspace
+    .getConfiguration('agent')
+    .get<unknown>('orchestrator.selfImprove.sources');
+}
+
+/**
  * plugin向けの改善の起票先（Issue #2089）。`repo`が空なら起票しない。`syncedCommitFile`は
  * `~/.claude`へ同期済みのpluginのcommitを書いたファイル（空なら同期の状態は「確かめられない」）。
  */

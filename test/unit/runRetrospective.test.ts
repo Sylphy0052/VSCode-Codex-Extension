@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,18 +7,35 @@ import type { LessonRecord } from '../../src/orchestrator/runNotes';
 import type { RemainingRecord } from '../../src/orchestrator/runRemaining';
 import {
   buildProposal,
+  combineWeeklyUsage,
   compareVersions,
   evaluateImprovement,
   findBlockingTombstone,
   improvementKey,
+  readAllRunMetrics,
   RunRetrospective,
   SELF_IMPROVE_RUN_TITLE_PREFIX,
   type ImprovementSpec,
   type MergeState,
   type RetrospectiveForge,
+  type RunRetrospectiveDeps,
 } from '../../src/orchestrator/runRetrospective';
+import {
+  normalizeRetrospectiveSources,
+  normalizeRunKind,
+  taskRunSummary,
+  type RunSummary,
+  type TaskRunSummary,
+} from '../../src/orchestrator/runSummary';
 import { withFileLock } from '../../src/orchestrator/selfImproveBudget';
-import { createTaskRun, type TaskRun } from '../../src/orchestrator/taskRunState';
+import {
+  findProtectedTouches,
+  parseProtectedPaths,
+  SELF_IMPROVE_LABEL,
+  selfImproveMergeDenial,
+} from '../../src/orchestrator/selfImproveGuard';
+import { createTaskRun } from '../../src/orchestrator/taskRunState';
+import { makeRun, makeTask } from '../helpers/taskRunFixture';
 
 const LESSON_ID = '11111111-2222-4333-8444-555555555555';
 const DAY = 24 * 60 * 60_000;
@@ -33,6 +50,7 @@ function metrics(
 ): RunMetrics {
   return {
     schemaVersion: 1,
+    kind: 'task',
     runId,
     startedAt: new Date(startMs).toISOString(),
     finishedAt: new Date(startMs + 60_000).toISOString(),
@@ -159,6 +177,105 @@ describe('純関数', () => {
     ).toBe('kept');
   });
 
+  it('種別の違うrunは評価の母集団に混ぜない（Issue #2120）', () => {
+    const after = [1, 2, 3, 4].map((i) => metrics(`a${i}`, mergedAt + i * DAY, '1.0.1', 1));
+    const workflow = [5, 6].map((i) => ({
+      ...metrics(`w${i}`, mergedAt + i * DAY, '1.0.1', 9),
+      kind: 'workflow' as const,
+    }));
+    const workflowBefore = { ...metrics('wb', T0, '1.0.0', 0), kind: 'workflow' as const };
+    // taskの改善の評価には、workflowのrunを改善後の5本目として数えない
+    expect(
+      evaluateImprovement({ spec, mergedAt, version: '1.0.1' }, [
+        ...before,
+        ...after,
+        ...workflow,
+        workflowBefore,
+      ]),
+    ).toEqual({ kind: 'hold', have: 4, need: 5 });
+    // runKindがtaskの記録も、runKindの無い記録と同じに評価する
+    expect(
+      evaluateImprovement({ spec, mergedAt, version: '1.0.1', runKind: 'task' }, [
+        ...before,
+        ...after,
+        ...workflow,
+      ]),
+    ).toEqual({ kind: 'hold', have: 4, need: 5 });
+    // workflowの改善はworkflowのrunだけで評価する（taskの改善前のrunは比べる相手にしない）
+    expect(
+      evaluateImprovement(
+        { spec: { ...spec, minRuns: 2 }, mergedAt, version: '1.0.1', runKind: 'workflow' },
+        [...before, ...after, ...workflow, workflowBefore],
+      ),
+    ).toEqual({ kind: 'worsened', before: 0, after: 9 });
+  });
+
+  it('使ったengineのうち1つでも週次使用率が閾値以上なら、その値で止める', () => {
+    const config = { maxPerWeek: 3, weeklyUsageThresholdPct: 80 };
+    expect(combineWeeklyUsage([10, 85], config)).toBe(85);
+    expect(combineWeeklyUsage([undefined, 90], config)).toBe(90);
+    expect(combineWeeklyUsage([10, 30], config)).toBe(30);
+    expect(combineWeeklyUsage([10, undefined], config)).toBeUndefined();
+    expect(combineWeeklyUsage([], config)).toBeUndefined();
+  });
+
+  it('振り返る種別の設定と保存された種別を読む', () => {
+    expect(normalizeRetrospectiveSources(undefined)).toEqual(['task']);
+    expect(normalizeRetrospectiveSources('task')).toEqual(['task']);
+    expect(normalizeRetrospectiveSources(['chat', 'x', 'chat', 1, 'workflow'])).toEqual([
+      'chat',
+      'workflow',
+    ]);
+    expect(normalizeRetrospectiveSources([])).toEqual([]);
+    expect(normalizeRunKind(undefined)).toBe('task');
+    expect(normalizeRunKind('chat')).toBe('chat');
+    expect(normalizeRunKind('other')).toBeUndefined();
+  });
+
+  it('task runから振り返りの入力を作る', () => {
+    const base = createTaskRun({
+      workspaceRoot: '/repo',
+      engine: 'codex',
+      maxParallel: 1,
+      runId: 'r',
+      now: new Date(T0),
+      title: 't',
+    });
+    const withTasks = makeRun([
+      makeTask('T1', 'implement', 'running', { issueNumber: 5 }),
+      makeTask('T2', 'implement', 'running', { existingIssueNumber: 7 }),
+      makeTask('T3', 'implement', 'running', { issueNumber: 5 }),
+    ]);
+    expect(taskRunSummary(base)).toEqual({
+      kind: 'task',
+      runId: 'r',
+      workspaceRoot: '/repo',
+      engines: ['codex'],
+      startedAt: new Date(T0).toISOString(),
+      finishedAt: undefined,
+      title: 't',
+      issueNumbers: [],
+    });
+    expect(taskRunSummary(withTasks).issueNumbers).toEqual([5, 7]);
+  });
+
+  it('指標の計算・保存・振り返りの入力のファイルは保護パスに入り、自己改善のPRが変えると拒否される', () => {
+    const patterns = parseProtectedPaths(
+      readFileSync(
+        path.join(__dirname, '..', '..', '.github', 'self-improve-protected-paths'),
+        'utf8',
+      ),
+    );
+    const files = [
+      'src/orchestrator/runMetrics.ts',
+      'src/orchestrator/runMetricsStore.ts',
+      'src/orchestrator/runSummary.ts',
+      'src/orchestrator/retrospectiveMetrics/workflowMetrics.ts',
+    ];
+    expect(findProtectedTouches(files, patterns)).toEqual(files);
+    expect(selfImproveMergeDenial([SELF_IMPROVE_LABEL], files, patterns)).toBeDefined();
+  });
+
   it('墓標と同じ対象・指標で新しい根拠が無ければ拒否する', () => {
     const tomb = {
       target: 't',
@@ -206,7 +323,7 @@ describe('RunRetrospective', () => {
   const metricsDir = () => path.join(dir, 'run-metrics');
   const stateDir = () => path.join(dir, 'self-improve');
 
-  function retro(): RunRetrospective {
+  function retro(over: Partial<RunRetrospectiveDeps> = {}): RunRetrospective {
     return new RunRetrospective({
       stateDir: stateDir(),
       metricsDir: metricsDir(),
@@ -220,6 +337,7 @@ describe('RunRetrospective', () => {
       weeklyUsagePct: async () => usage,
       now: () => now,
       log: (m) => logs.push(m),
+      ...over,
     });
   }
 
@@ -228,18 +346,20 @@ describe('RunRetrospective', () => {
     await fs.writeFile(path.join(metricsDir(), `${m.runId}.json`), JSON.stringify(m));
   }
 
-  function run(runId: string, title?: string): TaskRun {
-    return createTaskRun({
-      workspaceRoot: '/repo',
-      engine: 'claude',
-      maxParallel: 1,
-      runId,
-      now: new Date(now),
-      ...(title === undefined ? {} : { title }),
-    });
+  function run(runId: string, title?: string): TaskRunSummary {
+    return taskRunSummary(
+      createTaskRun({
+        workspaceRoot: '/repo',
+        engine: 'claude',
+        maxParallel: 1,
+        runId,
+        now: new Date(now),
+        ...(title === undefined ? {} : { title }),
+      }),
+    );
   }
 
-  async function finishedRun(runId: string): Promise<TaskRun> {
+  async function finishedRun(runId: string): Promise<TaskRunSummary> {
     await writeMetrics(metrics(runId, now - DAY, '1.0.0', 1));
     lessons = [lesson(runId)];
     return run(runId);
@@ -477,5 +597,79 @@ describe('RunRetrospective', () => {
     const ok = await retro().startSelfImprove(input);
     expect(ok.ok).toBe(true);
     expect(started).toBe(1);
+  });
+
+  it('kindの無い既存の指標ファイルはtaskとして読み、振り返りに使う', async () => {
+    const legacy: Partial<RunMetrics> = metrics('r1', now - DAY, '1.0.0', 1);
+    delete legacy.kind;
+    await fs.mkdir(metricsDir(), { recursive: true });
+    await fs.writeFile(path.join(metricsDir(), 'r1.json'), JSON.stringify(legacy));
+    await writeMetrics({ ...metrics('w1', now - DAY, '1.0.0', 1), kind: 'workflow' });
+    await fs.writeFile(
+      path.join(metricsDir(), 'x1.json'),
+      JSON.stringify({ ...legacy, runId: 'x1', kind: 'other' }),
+    );
+    const tasks = await readAllRunMetrics(metricsDir());
+    expect(tasks.map((m) => [m.runId, m.kind])).toEqual([['r1', 'task']]);
+    const workflows = await readAllRunMetrics(metricsDir(), 'workflow');
+    expect(workflows.map((m) => m.runId)).toEqual(['w1']);
+    lessons = [lesson('r1')];
+    await retro().onRunFinished(run('r1'));
+    expect(forge.created).toHaveLength(1);
+    const state = JSON.parse(
+      await fs.readFile(path.join(stateDir(), 'retrospective.json'), 'utf8'),
+    );
+    expect(state.improvements[0].runKind).toBe('task');
+  });
+
+  it('sourcesに無い種別のrunは振り返らず、理由を記録に残す', async () => {
+    const workflow: RunSummary = {
+      kind: 'workflow',
+      runId: 'w1',
+      workspaceRoot: '/repo',
+      engines: ['claude'],
+      startedAt: new Date(now - DAY).toISOString(),
+      finishedAt: new Date(now).toISOString(),
+    };
+    await retro().onRunFinished(workflow);
+    await retro({ sources: () => [] }).onRunFinished(await finishedRun('r1'));
+    expect(forge.created).toHaveLength(0);
+    const log = await fs.readFile(path.join(stateDir(), 'retrospective-log.jsonl'), 'utf8');
+    expect(log).toContain('"event":"skipped"');
+    expect(log).toContain('run種別workflowは設定agent.orchestrator.selfImprove.sourcesに無い');
+    expect(log).toContain('run種別taskは設定agent.orchestrator.selfImprove.sourcesに無い');
+  });
+
+  it('workflowのrunは自己改善のrunとみなさず、同じ種別の指標だけを見る', async () => {
+    let asked = 0;
+    forge.listSelfImproveIssueNumbers = async () => {
+      asked++;
+      return [];
+    };
+    // taskの指標はあるが、workflowの指標は無い
+    await writeMetrics(metrics('w1', now - DAY, '1.0.0', 1));
+    lessons = [lesson('w1')];
+    await retro({ sources: () => ['workflow'] }).onRunFinished({
+      kind: 'workflow',
+      runId: 'w1',
+      workspaceRoot: '/repo',
+      engines: ['claude'],
+      startedAt: new Date(now - DAY).toISOString(),
+      finishedAt: new Date(now).toISOString(),
+    });
+    expect(asked).toBe(0);
+    expect(forge.created).toHaveLength(0);
+    expect(logs.join('\n')).toContain('このrunの指標が記録されていない');
+  });
+
+  it('使ったengineのうち1つでも週次使用率が閾値以上なら振り返りを止める', async () => {
+    const r = { ...(await finishedRun('r1')), engines: ['claude', 'codex'] as const };
+    await retro({
+      weeklyUsagePct: async (engine) => (engine === 'codex' ? 95 : 10),
+    }).onRunFinished(r);
+    expect(forge.created).toHaveLength(0);
+    const log = await fs.readFile(path.join(stateDir(), 'retrospective-log.jsonl'), 'utf8');
+    expect(log).toContain('"event":"stopped"');
+    expect(log).toContain('週次使用率95%');
   });
 });

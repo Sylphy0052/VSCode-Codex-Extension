@@ -39,8 +39,15 @@ import {
   withFileLock,
   type SelfImproveBudgetConfig,
 } from './selfImproveBudget';
+import {
+  DEFAULT_RETROSPECTIVE_SOURCES,
+  metricsGroupKey,
+  normalizeRunKind,
+  type RunKind,
+  type RunSummary,
+} from './runSummary';
 import { findProtectedTouches, SELF_IMPROVE_LABEL } from './selfImproveGuard';
-import { listTasks, type TaskRun, type TaskRunEngine } from './taskRunState';
+import type { TaskRunEngine } from './taskRunState';
 
 /** 評価に使う指標。どれも小さいほど良い。 */
 export const RETROSPECTIVE_METRICS = [
@@ -102,6 +109,8 @@ export type ImprovementVerdict = 'kept' | 'reverted' | 'abandoned' | 'noBaseline
 export interface ImprovementRecord {
   issueNumber: number;
   kind: 'improvement' | 'research';
+  /** 改善案を出したrunの種別。評価はこの種別の指標だけで行う。#2120より前の記録には無く、`task`とみなす。 */
+  runKind?: RunKind;
   spec: ImprovementSpec;
   filedAt: number;
   mergedAt?: number;
@@ -277,17 +286,20 @@ export type Evaluation =
  * 改善を評価する。改善後のrunは「改善を含む版で、merge後に始まり、最初の1本とプロンプト・上限値の
  * ハッシュが一致する」ものの先頭から最小run数だけ使う（後から足されるrunで判定を揺らさない）。
  * 改善前はmerge前に終わった、改善を含まない版のrunの直近の最小run数。
+ * どちらも改善案を出したrunと同じ種別のrunだけを使う（種別の違うrunを母集団に混ぜない）。
  */
 export function evaluateImprovement(
-  record: Pick<ImprovementRecord, 'spec' | 'mergedAt' | 'version'>,
+  record: Pick<ImprovementRecord, 'spec' | 'mergedAt' | 'version' | 'runKind'>,
   runs: readonly RunMetrics[],
 ): Evaluation {
   const { spec, mergedAt, version } = record;
+  const kind = record.runKind ?? 'task';
   const need = spec.minRuns;
   if (mergedAt === undefined || version === undefined) {
     return { kind: 'hold', have: 0, need };
   }
   const valued = runs
+    .filter((m) => normalizeRunKind(m.kind) === kind)
     .map((m) => ({ m, v: metricValue(m, spec.metric) }))
     .filter((x): x is { m: RunMetrics; v: number } => x.v !== undefined)
     .sort((a, b) => Date.parse(a.m.finishedAt) - Date.parse(b.m.finishedAt));
@@ -297,13 +309,9 @@ export function evaluateImprovement(
       Date.parse(m.startedAt) >= mergedAt,
   );
   const anchor = candidates[0]?.m.keys;
+  const anchorGroup = anchor === undefined ? undefined : metricsGroupKey(kind, anchor);
   const after = candidates
-    .filter(
-      ({ m }) =>
-        anchor !== undefined &&
-        m.keys.promptHash === anchor.promptHash &&
-        m.keys.limitsHash === anchor.limitsHash,
-    )
+    .filter(({ m }) => anchorGroup !== undefined && metricsGroupKey(kind, m.keys) === anchorGroup)
     .slice(0, need);
   if (after.length < need) {
     return { kind: 'hold', have: after.length, need };
@@ -479,8 +487,14 @@ function isRunMetrics(value: unknown): value is RunMetrics {
   );
 }
 
-/** runごとの指標（`<globalStorage>/run-metrics/*.json`）をすべて読む。読めないものは飛ばす。 */
-export async function readAllRunMetrics(dir: string): Promise<RunMetrics[]> {
+/**
+ * runごとの指標（`<globalStorage>/run-metrics/*.json`）のうち、種別が`kind`のものをすべて読む。
+ * `kind`の無い記録（#2120より前）は`task`として読む。読めないもの・知らない種別のものは飛ばす。
+ */
+export async function readAllRunMetrics(
+  dir: string,
+  kind: RunKind = 'task',
+): Promise<RunMetrics[]> {
   let names: string[];
   try {
     names = await fs.readdir(dir);
@@ -491,14 +505,30 @@ export async function readAllRunMetrics(dir: string): Promise<RunMetrics[]> {
   for (const name of names.filter((n) => n.endsWith('.json'))) {
     try {
       const parsed: unknown = JSON.parse(await fs.readFile(path.join(dir, name), 'utf8'));
-      if (isRunMetrics(parsed)) {
-        out.push(parsed);
+      if (isRunMetrics(parsed) && normalizeRunKind(parsed.kind) === kind) {
+        out.push({ ...parsed, kind });
       }
     } catch {
       // 書きかけ・壊れた記録は使わない
     }
   }
   return out;
+}
+
+/**
+ * runで使ったengineごとの週次使用率を1つにまとめる。1つでも閾値以上なら、その最大値（止める）。
+ * そうでなく不明が混ざれば`undefined`（起票だけ止める）。どれも分かれば最大値。
+ */
+export function combineWeeklyUsage(
+  values: readonly (number | undefined)[],
+  config: SelfImproveBudgetConfig,
+): number | undefined {
+  const known = values.filter((v): v is number => v !== undefined);
+  const max = known.length === 0 ? undefined : Math.max(...known);
+  if (max !== undefined && !decideUsage(max, config).allowed) {
+    return max;
+  }
+  return known.length === values.length ? max : undefined;
 }
 
 // ---------------------------------------------------------------- 入出力の口
@@ -548,6 +578,11 @@ export interface RunRetrospectiveDeps {
   /** この拡張自身のリポジトリ（`owner/name`）。分からなければ振り返らない。 */
   ownRepo: string | undefined;
   budgetConfig(): SelfImproveBudgetConfig;
+  /**
+   * 振り返る種別（設定`agent.orchestrator.selfImprove.sources`）。無ければ
+   * {@link DEFAULT_RETROSPECTIVE_SOURCES}。含まれない種別のrunは振り返らない。
+   */
+  sources?(): readonly RunKind[];
   /** 週次使用率（%）。分からなければ`undefined`（止めない）。 */
   weeklyUsagePct(engine: TaskRunEngine): Promise<number | undefined>;
   now(): number;
@@ -577,7 +612,7 @@ export class RunRetrospective {
   }
 
   /** runの終了時の振り返り。失敗はrunの進行に影響させず、記録に残す。 */
-  async onRunFinished(run: TaskRun): Promise<void> {
+  async onRunFinished(run: RunSummary): Promise<void> {
     try {
       await this.retrospect(run);
     } catch (e) {
@@ -593,7 +628,11 @@ export class RunRetrospective {
     workspaceRoot: string;
     engine: TaskRunEngine;
     issueNumber: number;
-    runsInFolder: () => readonly TaskRun[];
+    runsInFolder: () => readonly {
+      runId: string;
+      finishedAt: string | undefined;
+      title?: string | undefined;
+    }[];
     start: (title: string) => Promise<T>;
   }): Promise<T | { ok: false; message: string }> {
     const { workspaceRoot: root, issueNumber } = input;
@@ -680,14 +719,27 @@ export class RunRetrospective {
     return { ok: true, repo };
   }
 
-  private async retrospect(run: TaskRun): Promise<void> {
+  private async retrospect(run: RunSummary): Promise<void> {
+    const sources = this.deps.sources?.() ?? DEFAULT_RETROSPECTIVE_SOURCES;
+    if (!sources.includes(run.kind)) {
+      await this.record(
+        run.runId,
+        'skipped',
+        `run種別${run.kind}は設定agent.orchestrator.selfImprove.sourcesに無いため振り返らない`,
+      );
+      return;
+    }
     const own = await this.resolveOwnRepo(run.workspaceRoot);
     if (!own.ok) {
       await this.record(run.runId, 'skipped', `${own.reason}ため振り返らない`);
       return;
     }
     const config = this.deps.budgetConfig();
-    const usage = await this.deps.weeklyUsagePct(run.engine);
+    // ワークフローはノードごとにengineが違うため、使ったengineのどれかが閾値を超えていれば止める
+    const usage = combineWeeklyUsage(
+      await Promise.all(run.engines.map((e) => this.deps.weeklyUsagePct(e))),
+      config,
+    );
     // 使用率が不明なときは、振り返り（評価と教訓の記録）は続け、自己改善の起票だけ止める。
     const usageDecision = decideUsage(usage, config);
     if (!usageDecision.allowed && usage !== undefined) {
@@ -724,7 +776,14 @@ export class RunRetrospective {
     });
   }
 
-  private async isSelfImproveRun(run: TaskRun): Promise<boolean | undefined> {
+  /**
+   * 自己改善のrunか。種別ごとに判定する。taskはrunの名前の頭か、子Issueに`self-improve`ラベルの
+   * Issueがあるか。workflow・chatは自己改善のrunにならない（`start_self_improve_run`はtask runを始める）。
+   */
+  private async isSelfImproveRun(run: RunSummary): Promise<boolean | undefined> {
+    if (run.kind !== 'task') {
+      return false;
+    }
     if (run.title?.startsWith(SELF_IMPROVE_RUN_TITLE_PREFIX) === true) {
       return true;
     }
@@ -732,11 +791,7 @@ export class RunRetrospective {
     if (labeled === undefined) {
       return undefined;
     }
-    return listTasks(run).some(
-      (t) =>
-        (t.issueNumber !== undefined && labeled.includes(t.issueNumber)) ||
-        (t.existingIssueNumber !== undefined && labeled.includes(t.existingIssueNumber)),
-    );
+    return run.issueNumbers.some((n) => labeled.includes(n));
   }
 
   /** 起票済みでmerge前の改善が、mergeされたか・merge無しで閉じられたかを確かめて状態へ移す。 */
@@ -761,17 +816,20 @@ export class RunRetrospective {
     }
   }
 
-  private async evaluatePending(run: TaskRun, state: RetrospectiveState): Promise<void> {
+  private async evaluatePending(run: RunSummary, state: RetrospectiveState): Promise<void> {
     const root = run.workspaceRoot;
     await this.refreshMergeStates(root, state);
     const pending = state.improvements.filter(
       (r) => r.kind === 'improvement' && r.verdict === undefined && r.mergedAt !== undefined,
     );
-    if (pending.length === 0) {
-      return;
-    }
-    const runs = await readAllRunMetrics(this.deps.metricsDir);
+    const runsByKind = new Map<RunKind, RunMetrics[]>();
     for (const rec of pending) {
+      const kind = rec.runKind ?? 'task';
+      let runs = runsByKind.get(kind);
+      if (runs === undefined) {
+        runs = await readAllRunMetrics(this.deps.metricsDir, kind);
+        runsByKind.set(kind, runs);
+      }
       const ev = evaluateImprovement(rec, runs);
       const n = `#${String(rec.issueNumber)}`;
       if (ev.kind === 'hold') {
@@ -854,7 +912,7 @@ export class RunRetrospective {
   }
 
   private async propose(
-    run: TaskRun,
+    run: RunSummary,
     state: RetrospectiveState,
     repo: { nameWithOwner: string; visibility: RepoVisibility },
     usage: number | undefined,
@@ -862,7 +920,8 @@ export class RunRetrospective {
   ): Promise<void> {
     const root = run.workspaceRoot;
     const { forge, runNotes } = this.deps;
-    const all = await readAllRunMetrics(this.deps.metricsDir);
+    // 比べるのは同じ種別のrunだけ
+    const all = await readAllRunMetrics(this.deps.metricsDir, run.kind);
     const current = all.find((m) => m.runId === run.runId);
     if (current === undefined) {
       await this.record(
@@ -970,7 +1029,13 @@ export class RunRetrospective {
     }
     const now = this.deps.now();
     await this.budget.recordFiled(created.issueNumber, now);
-    state.improvements.push({ issueNumber: created.issueNumber, kind, spec, filedAt: now });
+    state.improvements.push({
+      issueNumber: created.issueNumber,
+      kind,
+      runKind: run.kind,
+      spec,
+      filedAt: now,
+    });
     await this.record(
       run.runId,
       'filed',
@@ -982,7 +1047,7 @@ export class RunRetrospective {
    * plugin向けの改善を、pluginのロードマップへ起票する（Issue #2089）。skill本文の改善だけを
    * 起票し、それ以外は調査Issueへの提案に留める。同期の状態もrunの記録へ残す。失敗は止めない。
    */
-  private async proposeToPlugin(run: TaskRun): Promise<void> {
+  private async proposeToPlugin(run: RunSummary): Promise<void> {
     const plugin = this.deps.plugin?.();
     if (plugin === undefined) {
       return;
