@@ -222,7 +222,8 @@ describe('最適化ハーネスの通し', () => {
       usageThresholdPct: () => undefined,
       weeklyUsagePct: async () => undefined,
       log: () => undefined,
-      runTrial: (input) => runOptimizeTrial({ ...input, deps: { runStage, readPressure: async () => 0 } }),
+      runTrial: (input) =>
+        runOptimizeTrial({ ...input, deps: { runStage, readPressure: async () => 0 } }),
       refuter: () =>
         createRefuter({
           trialEngine: 'claude',
