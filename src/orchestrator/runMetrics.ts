@@ -5,6 +5,7 @@ import type {
   StageQuestion,
   TaskRun,
 } from './taskRunState';
+import type { RunKind } from './runSummary';
 
 /**
  * runごとの指標（Issue #2081）。runの終了時に拡張が計算して記録する。LLMには書かせない。
@@ -44,6 +45,11 @@ export interface RunMetricsKeys {
 
 export interface RunMetrics {
   schemaVersion: 1;
+  /**
+   * run種別（Issue #2120）。評価は同じ種別のrunだけで行う。今計算するのはtask runだけ。
+   * #2120より前の記録には無く、読むときは`task`として扱う（`runSummary.ts`の`normalizeRunKind`）。
+   */
+  kind: RunKind;
   runId: string;
   startedAt: string;
   finishedAt: string;
@@ -161,6 +167,7 @@ export function computeRunMetrics(run: TaskRun, keys: RunMetricsKeys): RunMetric
   const elapsed = Date.parse(run.finishedAt) - Date.parse(run.startedAt);
   return {
     schemaVersion: 1,
+    kind: 'task',
     runId: run.runId,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,

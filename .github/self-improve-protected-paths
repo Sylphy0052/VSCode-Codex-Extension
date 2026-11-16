@@ -18,6 +18,12 @@ src/orchestrator/taskRunStore.ts
 # 指標の計算（#2081で追加するファイルもここへ足す）
 src/orchestrator/promptMetrics.ts
 src/orchestrator/toolUsageMetrics.ts
+# runごとの指標の計算と保存、振り返りの入力（run種別・群分けの鍵）（#2081・#2120）
+src/orchestrator/runMetrics.ts
+src/orchestrator/runMetricsStore.ts
+src/orchestrator/runSummary.ts
+# ワークフロー・通常チャットの指標の計算を置く場所（#2120の後続で足す）
+src/orchestrator/retrospectiveMetrics/
 # 自律改善の予算・教訓の昇格の信頼境界・振り返りの評価とrevert（#2084・#2085・#2086）
 src/orchestrator/selfImproveBudget.ts
 src/orchestrator/lessonPromotion.ts

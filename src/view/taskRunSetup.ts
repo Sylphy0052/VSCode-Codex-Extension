@@ -14,6 +14,7 @@ import {
   readReflexEnabled,
   readPluginRoadmapSettings,
   readSelfImproveBudgetRaw,
+  readSelfImproveSourcesRaw,
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
   readTaskRunOptimizeLimits,
@@ -41,6 +42,7 @@ import {
 } from '../orchestrator/roadmapRunForge';
 import type { RunNotesStore } from '../orchestrator/runNotes';
 import { parseGithubRepo, RunRetrospective } from '../orchestrator/runRetrospective';
+import { normalizeRetrospectiveSources, taskRunSummary } from '../orchestrator/runSummary';
 import {
   createGithubPluginRoadmapForge,
   isPluginRepoName,
@@ -341,12 +343,13 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       };
     },
     budgetConfig: () => normalizeConfig(readSelfImproveBudgetRaw()),
+    sources: () => normalizeRetrospectiveSources(readSelfImproveSourcesRaw()),
     weeklyUsagePct: async (engine) => deps.weeklyUsagePct?.(engine),
     now: () => Date.now(),
     log: (message) => log.info(message),
   });
   store.onRunFinished = (run) => {
-    void recordRunMetrics(run).then(() => retrospective.onRunFinished(run));
+    void recordRunMetrics(run).then(() => retrospective.onRunFinished(taskRunSummary(run)));
   };
 
   // 最適化のループ（Issue #2111）。試行のセッションはClaudeならsandboxを確かめてから起動する
