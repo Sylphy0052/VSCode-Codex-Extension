@@ -72,8 +72,22 @@ const MIN_ABS_DELTA: Record<RetrospectiveMetric, number> = {
   msPerChildIssue: 10 * 60_000,
 };
 
-/** 昇格した教訓の定型文を入れる先（`taskStagePrompts.ts`のコメントが入れてよい文を定めている）。 */
-export const PROMOTION_TARGET_FILE = 'src/orchestrator/taskStagePrompts.ts';
+/**
+ * run種別ごとの、昇格した教訓の定型文を入れる先（Issue #2121）。どのファイルも冒頭のコメントが
+ * 入れてよい文を定めている。どれも保護パスに入れない（昇格先なので）。
+ */
+export const PROMOTION_TARGET_FILES: Readonly<Record<RunKind, string>> = {
+  task: 'src/orchestrator/taskStagePrompts.ts',
+  workflow: 'src/orchestrator/workflowPrompts.ts',
+  chat: 'src/chat/chatPrompts.ts',
+};
+/** taskの昇格先。`PROMOTION_TARGET_FILES.task`と同じ。 */
+export const PROMOTION_TARGET_FILE = PROMOTION_TARGET_FILES.task;
+
+/** run種別の昇格先を引く。 */
+export function promotionTargetFile(kind: RunKind): string {
+  return PROMOTION_TARGET_FILES[kind];
+}
 /** 自己改善のrunの名前の頭。直列の判定と、振り返りで改善案を出さない判定に使う。 */
 export const SELF_IMPROVE_RUN_TITLE_PREFIX = '自己改善 #';
 /** 調査Issueのラベル。保護パスに触れる案を提案として回す先。 */
@@ -231,7 +245,10 @@ export function buildProposal(input: {
   lessons: readonly LessonRecord[];
   current: RunMetrics;
   history: readonly RunMetrics[];
+  /** 改善案を出したrunの種別。昇格先を決める。省略時はtask。 */
+  kind?: RunKind;
 }): Proposal | undefined {
+  const targetFile = promotionTargetFile(input.kind ?? 'task');
   for (const lesson of input.lessons) {
     if (lesson.runId !== input.runId || !isPromotable(lesson)) {
       continue;
@@ -241,7 +258,7 @@ export function buildProposal(input: {
       continue;
     }
     const metric = selectTargetMetric(input.current, input.history);
-    const target = `promoteLesson:${PROMOTION_TARGET_FILE}`;
+    const target = `promoteLesson:${targetFile}`;
     const evidence = [lesson.id];
     return {
       lesson,
@@ -250,7 +267,7 @@ export function buildProposal(input: {
         v: 1,
         key: improvementKey(target, metric, evidence),
         target,
-        files: [PROMOTION_TARGET_FILE],
+        files: [targetFile],
         metric,
         expected: 'decrease',
         thresholdPct: DEFAULT_THRESHOLD_PCT,
@@ -376,7 +393,7 @@ export function renderProposalBody(input: {
   }
   const change = [
     '## 改善の内容',
-    `\`${PROMOTION_TARGET_FILE}\`の工程プロンプトへ次の定型文を加える。文は言い換えず、このまま入れる。`,
+    `\`${proposal.spec.files.join('`・`')}\`の工程プロンプトへ次の定型文を加える。文は言い換えず、このまま入れる。`,
     '',
     `> ${proposal.promoted}`,
   ];
@@ -937,6 +954,7 @@ export class RunRetrospective {
       lessons,
       current,
       history: all.filter((m) => m.runId !== run.runId),
+      kind: run.kind,
     });
     if (proposal === undefined) {
       await this.record(
