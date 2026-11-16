@@ -801,8 +801,9 @@ export class RunRetrospective {
   /**
    * runのワークスペースがこの拡張自身のリポジトリか。自己改善はこの拡張を直すものなので、
    * 他のリポジトリのrunからは起票も評価もしない（他repoへこの拡張の改善を起票しないため）。
+   * 通常チャットの指標・教訓の記録（`chatRetrospective.ts`）も、書く前に同じ判定を使う。
    */
-  private async resolveOwnRepo(
+  async resolveOwnRepo(
     root: string,
   ): Promise<
     | { ok: true; repo: { nameWithOwner: string; visibility: RepoVisibility } }

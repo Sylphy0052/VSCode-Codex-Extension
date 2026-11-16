@@ -18,7 +18,7 @@ export interface ChatConversationHost {
 
 export interface ChatRetrospectiveSetupDeps {
   hosts: readonly ChatConversationHost[];
-  retrospective: Pick<RunRetrospective, 'onRunFinished'>;
+  retrospective: Pick<RunRetrospective, 'onRunFinished' | 'resolveOwnRepo'>;
   runNotes: RunNotesStore | undefined;
   globalStorageDir: string;
   extensionVersion: string;
@@ -27,7 +27,8 @@ export interface ChatRetrospectiveSetupDeps {
 
 /**
  * 通常チャットの会話を区切って振り返る（Issue #2123）。Codex・Claudeの画面で1つの追跡器を共有し、
- * 区切りを指標・教訓・振り返りへ渡す。返したDisposableはタイマーを止める。
+ * 区切りを指標・教訓・振り返りへ渡す。返したDisposableは途中の会話を区切って渡し、タイマーを止める
+ * （書き込みは待たないので、終了処理の時間内に書けなかった分は捨てる。Issue #2128）。
  */
 export function setupChatRetrospective(deps: ChatRetrospectiveSetupDeps): vscode.Disposable {
   const settings = (): ReturnType<typeof normalizeChatRetrospectiveSettings> =>
