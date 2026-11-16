@@ -177,7 +177,7 @@ describe('createWorkflowRunMetricsRecorder（Issue #2122）', () => {
       log: (m) => logs.push(m),
     });
 
-  it('初めて書いたときだけ振り返りの入力を返し、同じrunの指標は1件だけ残る', async () => {
+  it('新しい終わりを書いたときだけ振り返りの入力を返し、同じrunの指標は1件だけ残る', async () => {
     const r = run({ tasks: { T1: node('done') } });
     const summary = await recorder()(r);
     expect(summary).toEqual({
@@ -190,8 +190,9 @@ describe('createWorkflowRunMetricsRecorder（Issue #2122）', () => {
     });
     // Reload後に同じ終わりをもう一度通知されても、別の記録器（別のウィンドウ）でも振り返らない
     expect(await recorder()(r)).toBeUndefined();
-    // 再実行で終わり直したrunは指標を置き換えるが、振り返らない
+    // 再開して終わり直したrunは指標を置き換え、新しい終わりとして振り返り直す（Issue #2129）
     const again = { ...r, finishedAt: '2026-11-16T02:00:00.000Z' };
+    expect((await recorder()(again))?.finishedAt).toBe(again.finishedAt);
     expect(await recorder()(again)).toBeUndefined();
     const all = await readAllRunMetrics(path.join(dir, 'run-metrics'), 'workflow');
     expect(all).toHaveLength(1);
@@ -200,6 +201,81 @@ describe('createWorkflowRunMetricsRecorder（Issue #2122）', () => {
     expect(all[0]?.keys.promptHash).toBe(hashWorkflowPrompts());
     // taskの指標としては読まない
     expect(await readAllRunMetrics(path.join(dir, 'run-metrics'), 'task')).toHaveLength(0);
+    expect(logs).toEqual([]);
+  });
+
+  it('blocked→再開→succeededのrunは2回振り返り、2回目は最終結果の指標を使う（Issue #2129）', async () => {
+    const memento = fakeMemento();
+    const store = new WorkflowRunStore(memento);
+    const record = recorder();
+    const pending: Promise<unknown>[] = [];
+    const retrospected: { finishedAt: string | undefined; failedNodes: number | undefined }[] = [];
+    const metricsDir = path.join(dir, 'run-metrics');
+    const wire = (s: WorkflowRunStore, rec: ReturnType<typeof recorder>): void => {
+      s.onRunFinished = (r) => {
+        pending.push(
+          rec(r).then(async (summary) => {
+            if (summary === undefined) {
+              return;
+            }
+            // 振り返りは記録済みの指標を読む（runRetrospective.tsのproposeImprovement）
+            const all = await readAllRunMetrics(metricsDir, 'workflow');
+            const current = all.find((m) => m.runId === summary.runId);
+            retrospected.push({
+              finishedAt: summary.finishedAt,
+              failedNodes: current?.workflow?.failedNodes,
+            });
+          }),
+        );
+      };
+    };
+    wire(store, record);
+    const drain = async (): Promise<void> => {
+      await Promise.all(pending.splice(0));
+    };
+
+    // 走行中 → blockedで止まる（T1が失敗）
+    await store.update('wf-1', () =>
+      run({ finishedAt: undefined, tasks: { T1: node('running') } }),
+    );
+    const blocked = run({ tasks: { T1: node('failed') } });
+    await store.update('wf-1', () => blocked);
+    // 同じfinishedAtのまま更新が繰り返されても振り返りは1回だけ
+    await store.update('wf-1', (cur) => ({ ...blocked, finishedAt: cur?.finishedAt }));
+    await store.update('wf-1', (cur) => ({ ...blocked, finishedAt: cur?.finishedAt }));
+    await drain();
+    expect(retrospected).toEqual([{ finishedAt: blocked.finishedAt, failedNodes: 1 }]);
+
+    // 再開 → succeeded
+    await store.update('wf-1', () =>
+      run({ finishedAt: undefined, tasks: { T1: node('running', { manualRetryCount: 1 }) } }),
+    );
+    const succeeded = run({
+      finishedAt: '2026-11-16T02:00:00.000Z',
+      tasks: { T1: node('done', { manualRetryCount: 1 }) },
+    });
+    await store.update('wf-1', () => succeeded);
+    await store.update('wf-1', (cur) => ({ ...succeeded, finishedAt: cur?.finishedAt }));
+    await drain();
+    expect(retrospected).toEqual([
+      { finishedAt: blocked.finishedAt, failedNodes: 1 },
+      { finishedAt: succeeded.finishedAt, failedNodes: 0 },
+    ]);
+
+    // Reload後（別のstore・記録器）に同じ終わりを通知されても振り返りは重ならない
+    const reloaded = new WorkflowRunStore(memento);
+    wire(reloaded, recorder());
+    await reloaded.reconcileAfterReload();
+    await reloaded.update('wf-1', (cur) => ({ ...succeeded, finishedAt: cur?.finishedAt }));
+    await drain();
+    expect(await recorder()(succeeded)).toBeUndefined();
+    expect(retrospected).toHaveLength(2);
+
+    // 評価の母集団では同じrunIdの指標は1件だけで、最新の終わりの値
+    const all = await readAllRunMetrics(metricsDir, 'workflow');
+    expect(all).toHaveLength(1);
+    expect(all[0]?.finishedAt).toBe(succeeded.finishedAt);
+    expect(all[0]?.workflow?.retries).toBe(1);
     expect(logs).toEqual([]);
   });
 
