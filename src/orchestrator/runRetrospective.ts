@@ -47,6 +47,13 @@ import {
   type RunSummary,
 } from './runSummary';
 import { findProtectedTouches, SELF_IMPROVE_LABEL } from './selfImproveGuard';
+import {
+  CHAT_METRIC_LABELS,
+  CHAT_MIN_ABS_DELTA,
+  CHAT_RETROSPECTIVE_METRICS,
+  isChatRetrospectiveMetric,
+  type ChatRetrospectiveMetric,
+} from './retrospectiveMetrics/chat';
 import type { TaskRunEngine } from './taskRunState';
 
 /** 評価に使う指標。どれも小さいほど良い。 */
@@ -57,7 +64,12 @@ export const RETROSPECTIVE_METRICS = [
   'questions',
   'msPerChildIssue',
 ] as const;
-export type RetrospectiveMetric = (typeof RETROSPECTIVE_METRICS)[number];
+export type RetrospectiveMetric = (typeof RETROSPECTIVE_METRICS)[number] | ChatRetrospectiveMetric;
+
+/** run種別ごとの評価に使う指標。chatは会話の指標（Issue #2123）、それ以外はtaskの指標。 */
+export function retrospectiveMetricsFor(kind: RunKind): readonly RetrospectiveMetric[] {
+  return kind === 'chat' ? CHAT_RETROSPECTIVE_METRICS : RETROSPECTIVE_METRICS;
+}
 
 /** 最小run数の既定値。これに満たないうちは判定を保留する。 */
 export const DEFAULT_MIN_RUNS = 5;
@@ -70,6 +82,7 @@ const MIN_ABS_DELTA: Record<RetrospectiveMetric, number> = {
   maxReached: 0.2,
   questions: 0.2,
   msPerChildIssue: 10 * 60_000,
+  ...CHAT_MIN_ABS_DELTA,
 };
 
 /**
@@ -173,6 +186,9 @@ export function compareVersions(a: string, b: string): number | undefined {
 
 /** 指標の値。件数は子Issueあたりに均す（runの大きさで比べないため）。 */
 export function metricValue(m: RunMetrics, metric: RetrospectiveMetric): number | undefined {
+  if (isChatRetrospectiveMetric(metric)) {
+    return m.chat?.[metric];
+  }
   if (metric === 'msPerChildIssue') {
     return m.msPerChildIssue;
   }
@@ -189,7 +205,8 @@ export function selectTargetMetric(
   history: readonly RunMetrics[],
 ): RetrospectiveMetric {
   let best: { metric: RetrospectiveMetric; excess: number } | undefined;
-  for (const metric of RETROSPECTIVE_METRICS) {
+  const metrics = retrospectiveMetricsFor(normalizeRunKind(current.kind) ?? 'task');
+  for (const metric of metrics) {
     const value = metricValue(current, metric);
     const base = mean(
       history.flatMap((m) => {
@@ -205,7 +222,7 @@ export function selectTargetMetric(
       best = { metric, excess };
     }
   }
-  return best?.metric ?? 'sendBacks';
+  return best?.metric ?? metrics[0] ?? 'sendBacks';
 }
 
 export function improvementKey(
@@ -355,6 +372,7 @@ const METRIC_LABELS: Record<RetrospectiveMetric, string> = {
   maxReached: '送信回数の使い切り（子Issueあたり）',
   questions: '質問（子Issueあたり）',
   msPerChildIssue: '子Issueあたりの所要時間（ミリ秒）',
+  ...CHAT_METRIC_LABELS,
 };
 
 function specSection(spec: ImprovementSpec): string[] {

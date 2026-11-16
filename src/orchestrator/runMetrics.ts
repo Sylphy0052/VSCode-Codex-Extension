@@ -70,7 +70,28 @@ export interface RunMetrics {
   gatesResolved: Record<StageDecider, number>;
   /** 子Issueあたりの所要時間（ミリ秒）。子Issueが0件なら`undefined`。 */
   msPerChildIssue: number | undefined;
+  /**
+   * 通常チャットの会話の指標（Issue #2123）。`kind: 'chat'`の記録だけが持つ。計算は
+   * `retrospectiveMetrics/chat.ts`。chatの記録ではtask向けの件数は0、所要時間は`undefined`。
+   */
+  chat?: ChatMetricValues;
   keys: RunMetricsKeys;
+}
+
+/** 通常チャットの会話1区切りの指標（Issue #2123）。会話本文やファイルパスは持たない。 */
+export interface ChatMetricValues {
+  turns: number;
+  failedTurns: number;
+  /** 編集のあったターンの数。 */
+  editTurns: number;
+  /** 失敗ターンの率（0〜1）。 */
+  failedTurnRate: number;
+  /** 編集のあったターン1回あたりのターン数。 */
+  turnsPerEdit: number;
+  /** ターンあたりのコスト（USD）。コストが分からない（Codexなど）ときは`undefined`。 */
+  costPerTurn: number | undefined;
+  /** ターンあたりの所要時間（ミリ秒）。 */
+  msPerTurn: number;
 }
 
 const DECIDERS: readonly StageDecider[] = ['reflex', 'orchestrator', 'user'];

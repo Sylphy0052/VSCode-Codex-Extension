@@ -1890,6 +1890,18 @@ export function readPromptMetricsEnabled(): boolean {
 }
 
 /**
+ * 通常チャットの会話の区切りと選別（Issue #2123）。値の検証は`retrospectiveMetrics/chat.ts`の
+ * `normalizeChatRetrospectiveSettings`が行うため、ここでは型を問わず生の値を返す。
+ */
+export function readChatRetrospectiveSettingsRaw(): { minTurns: unknown; idleMinutes: unknown } {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    minTurns: c.get<unknown>('orchestrator.selfImprove.chatMinTurns'),
+    idleMinutes: c.get<unknown>('orchestrator.selfImprove.chatIdleMinutes'),
+  };
+}
+
+/**
  * 自律改善の予算（Issue #2084）。値の検証は`selfImproveBudget.ts`の`normalizeConfig`が行うため、
  * ここでは型を問わず生の値を返す。
  */

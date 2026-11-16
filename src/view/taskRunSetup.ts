@@ -65,6 +65,7 @@ import {
   TaskRunLeaseManager,
 } from '../orchestrator/taskRunLease';
 import { createRunMetricsRecorder, RUN_METRICS_DIR_NAME } from '../orchestrator/runMetricsStore';
+import { setupChatRetrospective, type ChatConversationHost } from './chatRetrospectiveSetup';
 import {
   MAX_AUTO_RETRIES,
   MAX_GATES_PER_TASK,
@@ -156,6 +157,8 @@ export interface TaskRunSetupDeps {
   weeklyUsagePct?: (engine: TaskRunEngine) => Promise<number | undefined>;
   /** `package.json`の`repository.url`。自己改善（Issue #2086）はこのrepoのrunでだけ行う。 */
   extensionRepositoryUrl?: string | undefined;
+  /** 通常チャットの会話を区切って振り返る画面（Issue #2123）。省略時は追わない。 */
+  chatConversationHosts?: readonly ChatConversationHost[];
 }
 
 /** 振り返り（Issue #2086）の状態・予算・記録の置き場。`<globalStorage>`の下。 */
@@ -351,6 +354,15 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   store.onRunFinished = (run) => {
     void recordRunMetrics(run).then(() => retrospective.onRunFinished(taskRunSummary(run)));
   };
+  // 通常チャットの会話の区切りも同じ振り返りへ渡す（Issue #2123）
+  const chatRetrospective = setupChatRetrospective({
+    hosts: deps.chatConversationHosts ?? [],
+    retrospective,
+    runNotes: deps.runNotes,
+    globalStorageDir: deps.globalStorageDir,
+    extensionVersion: deps.extensionVersion,
+    log: warn,
+  });
 
   // 最適化のループ（Issue #2111）。試行のセッションはClaudeならsandboxを確かめてから起動する
   const trialSandboxProbe = new ClaudeSandboxProbe(
@@ -683,6 +695,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   return [
     transitions,
+    chatRetrospective,
     { dispose: () => monitor.dispose() },
     { dispose: () => lease.dispose() },
     { dispose: () => runner.dispose() },

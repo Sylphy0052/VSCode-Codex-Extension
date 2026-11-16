@@ -1676,6 +1676,20 @@
           "scope": "machine",
           "markdownDescription": "ワークフローのタスク間メッセージングで、MCPツールが実際に何回呼ばれたかを出力パネルへ記録する。run終了時に接続（タスク、およびオーケストレーター）ごとへ1行で、呼び出し回数の合計、呼ばれたツールの種類数、ツール名ごとの回数を出す。\n\n30個近いツールのうち実際に使われているのはどれかを実測し、常時公開するツールを絞るための材料にする計測（Issue #1324）。有効にしてもツールの見え方や呼び出しの結果は変わらない。常用は想定していない。"
         },
+        "agent.orchestrator.selfImprove.chatIdleMinutes": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "scope": "machine",
+          "markdownDescription": "通常チャットの会話を区切るまでの無入力の時間（分）。最後のターンが終わってからこの時間、次のターンが始まらなければ、そこまでを1つの会話として振り返る。タブを閉じたときも区切る。`0`なら無入力では区切らない。`agent.orchestrator.selfImprove.sources`に`chat`があるときだけ使う（Issue #2123）。"
+        },
+        "agent.orchestrator.selfImprove.chatMinTurns": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "scope": "machine",
+          "markdownDescription": "通常チャットの会話を振り返る対象にするターン数の下限。編集のあったターンが1回以上あり、ターン数がこの値以上の会話だけ、指標と教訓を記録して振り返る。タスク（オーケストレータ）管理下の会話は対象にしない（Issue #2123）。"
+        },
         "agent.orchestrator.selfImprove.maxPerWeek": {
           "type": "integer",
           "default": 3,

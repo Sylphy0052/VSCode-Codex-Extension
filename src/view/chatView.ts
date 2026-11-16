@@ -3201,6 +3201,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     // 「前のターンが確定した→次を送ってよい」が正しい順序でもある。
     const turnFinished = entry.lastTurnCompletionSeq !== state.turnCompletionSeq;
     entry.lastTurnCompletionSeq = state.turnCompletionSeq;
+    // 会話の区切りの追跡（Issue #2123）。次の指示を送る前に、終わったターンを確定させる
+    this.trackConversation(entry, state);
     if (turnFinished && state.queued.length > 0) {
       void entry.session.sendNextQueued(this.configFor(entry));
     }
