@@ -2,8 +2,16 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+import { appendChatPromotedGuidance, CHAT_PROMOTED_GUIDANCE } from '../chat/chatPrompts';
 import { computeRunMetrics, type RunMetrics, type RunMetricsKeys } from './runMetrics';
+import type { RunKind } from './runSummary';
 import { buildStagePrompt } from './taskStagePrompts';
+import {
+  formatIssueDevelopmentSteps,
+  formatTaskExecutionContractReference,
+  formatWorkflowPromotedGuidance,
+  WORKFLOW_PROMOTED_GUIDANCE,
+} from './workflowPrompts';
 import {
   TASK_STAGES,
   type OrchestratedTask,
@@ -116,6 +124,42 @@ export function hashStagePrompts(): string {
   return sha256(parts.join('\n---\n'));
 }
 
+/**
+ * ワークフローのノードへ渡す定型文（`workflowPrompts.ts`）のハッシュ（Issue #2121）。固定の入力で
+ * 組むので、ジョブのYAMLには依らず定型文が変わったときだけ変わる。`guidance`はテスト用。
+ */
+export function hashWorkflowPrompts(
+  guidance: readonly string[] = WORKFLOW_PROMOTED_GUIDANCE,
+): string {
+  return sha256(
+    [
+      ...formatIssueDevelopmentSteps(1),
+      ...formatWorkflowPromotedGuidance(guidance),
+      formatTaskExecutionContractReference('T0', 'digest'),
+    ].join('\n'),
+  );
+}
+
+/**
+ * 通常チャットで拡張が付ける定型文（`src/chat/chatPrompts.ts`）のハッシュ（Issue #2121）。固定の
+ * 発言で組むので、定型文が変わったときだけ変わる。`guidance`はテスト用。
+ */
+export function hashChatPrompts(guidance: readonly string[] = CHAT_PROMOTED_GUIDANCE): string {
+  return sha256(appendChatPromotedGuidance('text', guidance));
+}
+
+/** run種別ごとの、群分けの鍵になるプロンプトのハッシュ。 */
+export function hashPromptsForKind(kind: RunKind): string {
+  switch (kind) {
+    case 'task':
+      return hashStagePrompts();
+    case 'workflow':
+      return hashWorkflowPrompts();
+    case 'chat':
+      return hashChatPrompts();
+  }
+}
+
 async function collectFiles(root: string, budget: { left: number }): Promise<string[]> {
   let entries;
   try {
@@ -197,13 +241,15 @@ export interface RunMetricsKeySources {
   /** 工程の上限値（送信回数・差し戻し・自動やり直し・関門の保持数など）。 */
   limits: Readonly<Record<string, number>>;
   claudeHome: string;
+  /** プロンプトのハッシュを取るrun種別。省略時はtask。 */
+  kind?: RunKind;
 }
 
 export async function collectRunMetricsKeys(src: RunMetricsKeySources): Promise<RunMetricsKeys> {
   const limits = Object.entries(src.limits).sort(([a], [b]) => a.localeCompare(b));
   return {
     extensionVersion: src.extensionVersion,
-    promptHash: hashStagePrompts(),
+    promptHash: hashPromptsForKind(src.kind ?? 'task'),
     limitsHash: sha256(JSON.stringify(limits)),
     pluginHash: await hashPluginFiles(src.claudeHome),
     pluginCommits: await readPluginCommits(src.claudeHome),

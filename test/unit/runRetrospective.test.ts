@@ -134,6 +134,18 @@ describe('純関数', () => {
     ).toBeUndefined();
     const p = buildProposal({ runId: 'r', lessons: [lesson('r')], current, history: [] });
     expect(p?.spec).toMatchObject({ metric: 'sendBacks', minRuns: 5, thresholdPct: 20 });
+    expect(p?.spec.files).toEqual(['src/orchestrator/taskStagePrompts.ts']);
+  });
+
+  it('改善案の昇格先はrun種別で決まる（Issue #2121）', () => {
+    const current = metrics('r', T0, '1.0.0', 1);
+    const at = (kind: 'workflow' | 'chat') =>
+      buildProposal({ runId: 'r', lessons: [lesson('r')], current, history: [], kind })?.spec;
+    expect(at('workflow')).toMatchObject({
+      target: 'promoteLesson:src/orchestrator/workflowPrompts.ts',
+      files: ['src/orchestrator/workflowPrompts.ts'],
+    });
+    expect(at('chat')?.files).toEqual(['src/chat/chatPrompts.ts']);
   });
 
   const spec: ImprovementSpec = {
