@@ -238,6 +238,8 @@ export class WorkflowRunStore {
 
   /**
    * runの`finishedAt`が埋まった（`running`から終わった）更新の後に呼ぶ（Issue #2122）。
+   * 再開して終わり直したrunは、新しい`finishedAt`でもう一度呼ぶ（振り返り直すかは記録器が
+   * `finishedAt`で決める。Issue #2129）。
    * 指標の記録と振り返りに使う。リロード直後の`reconcileAfterReload`では呼ばない
    * （中断で埋まった`finishedAt`はrunの終わりではないため）。
    */

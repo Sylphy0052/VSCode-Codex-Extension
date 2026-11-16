@@ -1,9 +1,6 @@
-import * as fs from 'node:fs/promises';
-
 import type { RunMetrics, RunMetricsKeys, WorkflowRunTally } from '../runMetrics';
 import {
   collectRunMetricsKeys,
-  runMetricsFile,
   writeRunMetrics,
   type RunMetricsKeySources,
 } from '../runMetricsStore';
@@ -128,9 +125,10 @@ export interface WorkflowRunMetricsRecorderDeps extends Omit<
 
 /**
  * ワークフローのrunが終わったときに呼ぶ記録器。指標を書き、振り返るべきなら振り返りの入力を返す。
- * 振り返るのはそのrunの指標を初めて書いたときだけ（再実行で終わり直したrun・リロードをまたいで
- * 同じ終わりを再び通知されたrunは振り返らない）。指標のファイルはrunIdごとに1つで、終わり直した
- * runは置き換える。失敗してもrunの進行は止めず、ログへ残して`undefined`を返す。
+ * 振り返りの単位はrunIdと終わった時点（`finishedAt`）の組（Issue #2129）。再開して終わり直した
+ * runは新しい終わりとして振り返り直し、リロードをまたいで同じ終わりを再び通知されたrunは振り返らない。
+ * 指標のファイルはrunIdごとに1つで、終わり直したrunは最新の終わりの値で置き換える（評価の母集団で
+ * 同じrunを二重に数えない）。失敗してもrunの進行は止めず、ログへ残して`undefined`を返す。
  * 同じrunIdの記録は直列にする。
  */
 export function createWorkflowRunMetricsRecorder(
@@ -150,9 +148,9 @@ export function createWorkflowRunMetricsRecorder(
         if (metrics === undefined) {
           return undefined;
         }
-        const existed = await fileExists(runMetricsFile(deps.dir, run.runId));
-        const result = await writeRunMetrics(deps.dir, metrics);
-        if (existed || result !== 'written') {
+        // 同じ終わり（同じfinishedAt）が既に書かれていれば`skipped`になり、振り返らない
+        // （Reloadをまたいだ再通知・別ウィンドウ）。終わり直したrunは置き換えて振り返り直す
+        if ((await writeRunMetrics(deps.dir, metrics)) !== 'written') {
           return undefined;
         }
         return workflowRunSummary(run, deps.providers(run.runId));
@@ -166,13 +164,4 @@ export function createWorkflowRunMetricsRecorder(
     chains.set(run.runId, task);
     return task;
   };
-}
-
-async function fileExists(file: string): Promise<boolean> {
-  try {
-    await fs.access(file);
-    return true;
-  } catch {
-    return false;
-  }
 }

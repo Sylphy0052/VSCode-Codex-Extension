@@ -376,8 +376,9 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     extensionVersion: deps.extensionVersion,
     log: warn,
   });
-  // ワークフローのrunも終了時に指標を記録して振り返る（Issue #2122）。振り返るのは指標を初めて
-  // 書いたときだけ（再実行で終わり直したrunを二重に振り返らない）
+  // ワークフローのrunも終了時に指標を記録して振り返る（Issue #2122）。振り返るのは新しい終わり
+  // （finishedAt）の指標を書いたときだけ。再開して終わり直したrunは振り返り直し、同じ終わりの
+  // 再通知では振り返らない（Issue #2129）
   const workflowRuns = deps.workflowRuns;
   if (workflowRuns !== undefined) {
     const recordWorkflowRunMetrics = createWorkflowRunMetricsRecorder({
