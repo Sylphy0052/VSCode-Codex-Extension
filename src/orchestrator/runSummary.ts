@@ -94,12 +94,15 @@ export function normalizeRetrospectiveSources(raw: unknown): readonly RunKind[] 
 
 /**
  * 評価で比べてよいrunの群を表す鍵。種別を含めるので、種別の違うrunは同じ群にならない。
- * taskは工程プロンプトと上限値のハッシュで分ける（C・Dで種別ごとの鍵を足すときはここを分岐する）。
- * 版とmerge時刻による絞り込みは評価の側で行う。
+ * taskは工程プロンプトと上限値のハッシュで分ける。workflowはさらにpluginのハッシュでも分ける
+ * （Issue #2122。ジョブごとのYAMLは鍵に入れない）。版とmerge時刻による絞り込みは評価の側で行う。
  */
 export function metricsGroupKey(
   kind: RunKind,
-  keys: Pick<RunMetricsKeys, 'promptHash' | 'limitsHash'>,
+  keys: Pick<RunMetricsKeys, 'promptHash' | 'limitsHash' | 'pluginHash'>,
 ): string {
+  if (kind === 'workflow') {
+    return JSON.stringify([kind, keys.promptHash, keys.limitsHash, keys.pluginHash ?? null]);
+  }
   return JSON.stringify([kind, keys.promptHash, keys.limitsHash]);
 }

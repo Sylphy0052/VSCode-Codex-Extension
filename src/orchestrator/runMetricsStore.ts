@@ -42,6 +42,11 @@ function safeFileName(runId: string): string {
   return runId.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
+/** runの指標を書くファイル。 */
+export function runMetricsFile(dir: string, runId: string): string {
+  return path.join(dir, `${safeFileName(runId)}.json`);
+}
+
 /**
  * 記録する。同じrunIdで`finishedAt`が同じ記録が既にあれば書かない（1回だけ）。再開して終わり直した
  * runは`finishedAt`が変わるので、同じファイルを置き換える（二重に記録しない）。
@@ -51,7 +56,7 @@ export async function writeRunMetrics(
   dir: string,
   metrics: RunMetrics,
 ): Promise<'written' | 'skipped'> {
-  const file = path.join(dir, `${safeFileName(metrics.runId)}.json`);
+  const file = runMetricsFile(dir, metrics.runId);
   await fs.mkdir(dir, { recursive: true });
   try {
     const existing = JSON.parse(await fs.readFile(file, 'utf8')) as { finishedAt?: unknown };

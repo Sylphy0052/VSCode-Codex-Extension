@@ -65,6 +65,8 @@ import {
   TaskRunLeaseManager,
 } from '../orchestrator/taskRunLease';
 import { createRunMetricsRecorder, RUN_METRICS_DIR_NAME } from '../orchestrator/runMetricsStore';
+import { createWorkflowRunMetricsRecorder } from '../orchestrator/retrospectiveMetrics/workflowRunMetrics';
+import type { WorkflowRunStore } from '../orchestrator/runStore';
 import {
   MAX_AUTO_RETRIES,
   MAX_GATES_PER_TASK,
@@ -156,6 +158,17 @@ export interface TaskRunSetupDeps {
   weeklyUsagePct?: (engine: TaskRunEngine) => Promise<number | undefined>;
   /** `package.json`の`repository.url`。自己改善（Issue #2086）はこのrepoのrunでだけ行う。 */
   extensionRepositoryUrl?: string | undefined;
+  /**
+   * ワークフロー（YAML）のrun（Issue #2122）。渡すと、runの終了時に`kind: 'workflow'`の指標を
+   * 記録し、task runと同じ振り返りに掛ける。
+   */
+  workflowRuns?: {
+    store: Pick<WorkflowRunStore, 'onRunFinished'>;
+    /** runのノードのprovider。週次使用率の判断に使う。 */
+    providers(runId: string): readonly TaskRunEngine[];
+    /** ワークフローの上限値（群分けの鍵）。ジョブごとのYAMLの値は入れない。 */
+    limits(): Readonly<Record<string, number>>;
+  };
 }
 
 /** 振り返り（Issue #2086）の状態・予算・記録の置き場。`<globalStorage>`の下。 */
@@ -351,6 +364,24 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
   store.onRunFinished = (run) => {
     void recordRunMetrics(run).then(() => retrospective.onRunFinished(taskRunSummary(run)));
   };
+  // ワークフローのrunも終了時に指標を記録して振り返る（Issue #2122）。振り返るのは指標を初めて
+  // 書いたときだけ（再実行で終わり直したrunを二重に振り返らない）
+  const workflowRuns = deps.workflowRuns;
+  if (workflowRuns !== undefined) {
+    const recordWorkflowRunMetrics = createWorkflowRunMetricsRecorder({
+      dir: path.join(deps.globalStorageDir, RUN_METRICS_DIR_NAME),
+      extensionVersion: deps.extensionVersion,
+      claudeHome: path.join(os.homedir(), '.claude'),
+      limits: () => workflowRuns.limits(),
+      providers: (runId) => workflowRuns.providers(runId),
+      log: warn,
+    });
+    workflowRuns.store.onRunFinished = (run) => {
+      void recordWorkflowRunMetrics(run).then((summary) =>
+        summary === undefined ? undefined : retrospective.onRunFinished(summary),
+      );
+    };
+  }
 
   // 最適化のループ（Issue #2111）。試行のセッションはClaudeならsandboxを確かめてから起動する
   const trialSandboxProbe = new ClaudeSandboxProbe(

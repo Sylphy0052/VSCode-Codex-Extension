@@ -12,8 +12,11 @@ import {
   evaluateImprovement,
   findBlockingTombstone,
   improvementKey,
+  metricValue,
   readAllRunMetrics,
+  renderProposalBody,
   RunRetrospective,
+  selectTargetMetric,
   SELF_IMPROVE_RUN_TITLE_PREFIX,
   type ImprovementSpec,
   type MergeState,
@@ -67,6 +70,36 @@ function metrics(
       promptHash,
       limitsHash: 'l1',
       pluginHash: undefined,
+      pluginCommits: {},
+    },
+  };
+}
+
+/** ワークフローのrunの指標（Issue #2122）。 */
+function workflowMetrics(
+  runId: string,
+  startMs: number,
+  version: string,
+  tally: { nodes: number; retries?: number; failedNodes?: number; msPerNode?: number },
+  pluginHash: string | undefined = 'g1',
+): RunMetrics {
+  return {
+    ...metrics(runId, startMs, version, 0),
+    kind: 'workflow',
+    childIssues: 0,
+    msPerChildIssue: undefined,
+    workflow: {
+      nodes: tally.nodes,
+      failedNodes: tally.failedNodes ?? 0,
+      retries: tally.retries ?? 0,
+      reloadResumes: 0,
+      msPerNode: tally.msPerNode,
+    },
+    keys: {
+      extensionVersion: version,
+      promptHash: 'wp1',
+      limitsHash: 'wl1',
+      pluginHash,
       pluginCommits: {},
     },
   };
@@ -146,6 +179,102 @@ describe('純関数', () => {
       files: ['src/orchestrator/workflowPrompts.ts'],
     });
     expect(at('chat')?.files).toEqual(['src/chat/chatPrompts.ts']);
+  });
+
+  it('ワークフローの指標はノードあたりに均し、ノード0件のrunは比べない（Issue #2122）', () => {
+    const empty = workflowMetrics('w0', T0, '1.0.0', { nodes: 0, retries: 3 });
+    expect(metricValue(empty, 'nodeRetries')).toBeUndefined();
+    expect(metricValue(empty, 'msPerNode')).toBeUndefined();
+    const m = workflowMetrics('w1', T0, '1.0.0', {
+      nodes: 4,
+      retries: 2,
+      failedNodes: 1,
+      msPerNode: 1000,
+    });
+    expect(metricValue(m, 'nodeRetries')).toBe(0.5);
+    expect(metricValue(m, 'failedNodes')).toBe(0.25);
+    expect(metricValue(m, 'msPerNode')).toBe(1000);
+    // task用の指標はワークフローの記録では値が出ない
+    expect(metricValue(m, 'sendBacks')).toBeUndefined();
+    // taskの記録ではワークフロー用の指標は値が出ない
+    expect(metricValue(metrics('t', T0, '1.0.0', 1), 'nodeRetries')).toBeUndefined();
+  });
+
+  it('ワークフローのrunはワークフロー用の指標から狙う指標を選ぶ（Issue #2122）', () => {
+    const history = [1, 2].map((i) =>
+      workflowMetrics(`h${i}`, T0 + i * DAY, '1.0.0', { nodes: 4, failedNodes: 0 }),
+    );
+    const worse = workflowMetrics('w', T0 + 3 * DAY, '1.0.0', { nodes: 4, failedNodes: 2 });
+    expect(selectTargetMetric(worse, history, 'workflow')).toBe('failedNodes');
+    // 悪くなった指標が無ければ再試行を狙う。ノード0件の履歴とは比べない
+    const empty = workflowMetrics('e', T0, '1.0.0', { nodes: 0, failedNodes: 0 });
+    expect(selectTargetMetric(empty, history, 'workflow')).toBe('nodeRetries');
+    expect(selectTargetMetric(worse, [empty], 'workflow')).toBe('nodeRetries');
+  });
+
+  it('改善Issueの本文は昇格先の種別に合った文言にする（Issue #2122）', () => {
+    const proposal = buildProposal({
+      runId: 'w',
+      lessons: [lesson('w')],
+      current: workflowMetrics('w', T0, '1.0.0', { nodes: 2 }),
+      history: [],
+      kind: 'workflow',
+    });
+    expect(proposal).toBeDefined();
+    if (proposal === undefined) {
+      return;
+    }
+    const body = renderProposalBody({
+      proposal,
+      kind: 'improvement',
+      protectedTouches: [],
+      runId: 'w',
+      openRemaining: 0,
+      visibility: 'public',
+      ownRepo: 'Owner/Repo',
+    });
+    expect(body).toContain(
+      '`src/orchestrator/workflowPrompts.ts`のワークフローのノードへ渡す定型文へ次の定型文を加える',
+    );
+    expect(body).not.toContain('工程プロンプトへ');
+  });
+
+  it('ワークフローの改善は、ワークフローのrunだけを同じ群（pluginのハッシュを含む）で評価する（Issue #2122）', () => {
+    const wfSpec: ImprovementSpec = {
+      v: 1,
+      key: 'si-w',
+      target: 't',
+      files: [],
+      metric: 'nodeRetries',
+      expected: 'decrease',
+      thresholdPct: 20,
+      minAbsDelta: 0.2,
+      minRuns: 3,
+      evidence: [LESSON_ID],
+    };
+    const merged = T0 + 10 * DAY;
+    const wfBefore = [1, 2, 3].map((i) =>
+      workflowMetrics(`b${i}`, T0 + i * DAY, '1.0.0', { nodes: 2, retries: 0 }),
+    );
+    const wfAfter = [1, 2].map((i) =>
+      workflowMetrics(`a${i}`, merged + i * DAY, '1.0.1', { nodes: 2, retries: 2 }),
+    );
+    // pluginのハッシュが違うrunと、taskのrunは改善後の3本目として数えない
+    const otherPlugin = workflowMetrics('p', merged + 3 * DAY, '1.0.1', { nodes: 2 }, 'g2');
+    const task = metrics('t', merged + 4 * DAY, '1.0.1', 0);
+    const record = {
+      spec: wfSpec,
+      mergedAt: merged,
+      version: '1.0.1',
+      runKind: 'workflow' as const,
+    };
+    expect(evaluateImprovement(record, [...wfBefore, ...wfAfter, otherPlugin, task])).toEqual({
+      kind: 'hold',
+      have: 2,
+      need: 3,
+    });
+    const third = workflowMetrics('a3', merged + 5 * DAY, '1.0.1', { nodes: 2, retries: 2 });
+    expect(evaluateImprovement(record, [...wfBefore, ...wfAfter, third]).kind).toBe('worsened');
   });
 
   const spec: ImprovementSpec = {
@@ -672,6 +801,30 @@ describe('RunRetrospective', () => {
     expect(asked).toBe(0);
     expect(forge.created).toHaveLength(0);
     expect(logs.join('\n')).toContain('このrunの指標が記録されていない');
+  });
+
+  it('workflowのrunの改善Issueはワークフロー用定型文ファイルへの昇格になる（Issue #2122）', async () => {
+    await writeMetrics(workflowMetrics('w1', now - DAY, '1.0.0', { nodes: 3, retries: 1 }));
+    lessons = [lesson('w1')];
+    await retro({ sources: () => ['task', 'workflow'] }).onRunFinished({
+      kind: 'workflow',
+      runId: 'w1',
+      workspaceRoot: '/repo',
+      engines: ['claude', 'codex'],
+      startedAt: new Date(now - DAY).toISOString(),
+      finishedAt: new Date(now).toISOString(),
+    });
+    expect(forge.created).toHaveLength(1);
+    const issue = createdAt(0);
+    expect(issue.labels).toEqual(['self-improve']);
+    expect(issue.body).toContain(
+      '`src/orchestrator/workflowPrompts.ts`のワークフローのノードへ渡す定型文へ',
+    );
+    expect(issue.body).toContain('"metric":"nodeRetries"');
+    const state = JSON.parse(
+      await fs.readFile(path.join(stateDir(), 'retrospective.json'), 'utf8'),
+    );
+    expect(state.improvements[0].runKind).toBe('workflow');
   });
 
   it('使ったengineのうち1つでも週次使用率が閾値以上なら振り返りを止める', async () => {

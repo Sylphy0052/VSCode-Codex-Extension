@@ -1710,7 +1710,7 @@
             "task"
           ],
           "scope": "machine",
-          "markdownDescription": "自律改善の振り返りの対象にするrunの種別。`task`はtask run、`workflow`はワークフローのrun、`chat`は通常チャットの会話。含まれない種別のrunは振り返らず、その旨を記録に残す。評価は同じ種別のrunだけで比べる（Issue #2120）。`workflow`・`chat`の終了の検知と指標は後続のIssueで入るため、今は選んでも振り返られない。"
+          "markdownDescription": "自律改善の振り返りの対象にするrunの種別。`task`はtask run、`workflow`はワークフローのrun、`chat`は通常チャットの会話。含まれない種別のrunは振り返らず、その旨を記録に残す。評価は同じ種別のrunだけで比べる（Issue #2120）。`workflow`はrunの終了時に指標を記録し、1つのrunにつき1回だけ振り返る（Issue #2122）。`chat`の終了の検知と指標は後続のIssueで入るため、今は選んでも振り返られない。"
         },
         "agent.orchestrator.selfImprove.weeklyUsageThresholdPct": {
           "type": "number",

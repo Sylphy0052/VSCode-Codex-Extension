@@ -141,7 +141,7 @@ import {
   validateExplicitCwds,
 } from './runnerWorkingDirectory';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
-import { WorkflowRunStore, type PersistedTaskState } from './runStore';
+import { persistedTaskTimes, WorkflowRunStore, type PersistedTaskState } from './runStore';
 import {
   ORCHESTRATOR_CONNECTION_ID,
   type OrchestratorEvent,
@@ -6833,6 +6833,12 @@ export class WorkflowRunner {
           const liveTask = live.tasks.get(id);
           const cleanupStatus = liveTask?.cleanupStatus ?? current?.tasks[id]?.cleanupStatus;
           const mergeAttempt = live.mergeAttempts.get(id) ?? current?.tasks[id]?.mergeAttempt;
+          const times = persistedTaskTimes(
+            s.state,
+            liveTask?.startedAt,
+            current?.tasks[id],
+            this.deps.now?.() ?? new Date(),
+          );
           tasks[id] = {
             state: s.state,
             sessionId: s.sessionId,
@@ -6846,6 +6852,7 @@ export class WorkflowRunner {
             retryCount: s.retryCount,
             manualRetryCount: s.manualRetryCount,
             ...(s.reloadResumes === undefined ? {} : { reloadResumes: s.reloadResumes }),
+            ...times,
             failure: s.failure,
             // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
             // liveTaskが無ければ前回persistした値を引き継ぐ
