@@ -5,10 +5,12 @@
  * 1. 設定`agent.orchestrator.selfImprove.sources`に`chat`が無ければ何もしない（指標も教訓も残さない）
  * 2. 選別条件（タスク管理下でない・編集のあったターンが1回以上・ターン数が下限以上）を満たさない
  *    区切りは保存しない
- * 3. `kind: 'chat'`の指標を`<globalStorage>/run-metrics`へ1件保存する（群分けの鍵はチャット用の
+ * 3. 会話の作業フォルダがこの拡張自身のGitHubリポジトリでなければ何も書かない
+ *    （判定は`RunRetrospective.resolveOwnRepo`を使い回す。Issue #2128）
+ * 4. `kind: 'chat'`の指標を`<globalStorage>/run-metrics`へ1件保存する（群分けの鍵はチャット用の
  *    プロンプトのハッシュとpluginのハッシュ）
- * 4. 失敗ターンから機械的に作った教訓をrun-notesへ`runKind: 'chat'`で記録する
- * 5. 振り返り（`RunRetrospective.onRunFinished`）を呼ぶ
+ * 5. 失敗ターンから機械的に作った教訓をrun-notesへ`runKind: 'chat'`で記録する
+ * 6. 振り返り（`RunRetrospective.onRunFinished`）を呼ぶ
  *
  * 失敗しても会話は止めず、ログへ残す。`vscode`に依存しない。
  */
@@ -35,7 +37,11 @@ export interface ChatSegmentRecorderDeps {
   /** 選別のターン数の下限と、区切りの無入力の分数（群分けの鍵の上限値に含める）。 */
   settings(): { minTurns: number; idleMinutes: number };
   runNotes: Pick<RunNotesStore, 'recordLesson'> | undefined;
-  retrospective: Pick<RunRetrospective, 'onRunFinished'> | undefined;
+  /**
+   * 振り返り。`resolveOwnRepo`で会話の作業フォルダがこの拡張自身のリポジトリかを確かめてから
+   * 書く。無ければ自repoか確かめられないので何も書かない。
+   */
+  retrospective: Pick<RunRetrospective, 'onRunFinished' | 'resolveOwnRepo'> | undefined;
   log(message: string): void;
 }
 
@@ -59,7 +65,16 @@ export function createChatSegmentRecorder(
     if (summary === undefined) {
       return { kind: 'skipped', reason: '作業ディレクトリが分からない' };
     }
+    const retrospective = deps.retrospective;
+    if (retrospective === undefined) {
+      return { kind: 'skipped', reason: '振り返りが無く、自repoの会話か確かめられない' };
+    }
     try {
+      // 他repoの会話の指標・教訓は残さない（評価の母集団にも他repoのrun-notesにも入れない）
+      const own = await retrospective.resolveOwnRepo(summary.workspaceRoot);
+      if (!own.ok) {
+        return { kind: 'skipped', reason: own.reason };
+      }
       const keys = await collectRunMetricsKeys({
         extensionVersion: deps.extensionVersion,
         claudeHome: deps.claudeHome,
@@ -85,7 +100,7 @@ export function createChatSegmentRecorder(
         }
       }
       if (written) {
-        await deps.retrospective?.onRunFinished(summary);
+        await retrospective.onRunFinished(summary);
       }
       return { kind: 'recorded', written, lessons };
     } catch (e) {
