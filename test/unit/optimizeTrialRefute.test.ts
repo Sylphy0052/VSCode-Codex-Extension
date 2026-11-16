@@ -148,7 +148,7 @@ describe('runOptimizeTrialの反証', () => {
         claudeSandbox: { weakerNested: false },
       },
       processRecordDir: join(storage, 'processes'),
-      deps: { runStage: session.runStage },
+      deps: { runStage: session.runStage, readPressure: async () => 0 },
       ...(refute === undefined ? {} : { refute }),
     });
 

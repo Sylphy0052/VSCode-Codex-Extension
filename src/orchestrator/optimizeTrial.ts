@@ -97,6 +97,8 @@ export interface OptimizeTrialDeps {
   runStage?: typeof runTrialStage;
   runVerify?: typeof runVerifyCommand;
   now?: () => Date;
+  /** CPU圧力の累計（マイクロ秒）の読み取り。計測の負荷判定に使う。テストで実機の負荷から切り離す。 */
+  readPressure?: () => Promise<number | undefined>;
 }
 
 export interface OptimizeTrialInput {
@@ -500,7 +502,15 @@ async function runOptimizeTrialBody(
     );
   }
 
-  const measureArgs = { input, commit, runVerify, git, runSetup, commandMs };
+  const measureArgs = {
+    input,
+    commit,
+    runVerify,
+    git,
+    runSetup,
+    commandMs,
+    ...(input.deps?.readPressure === undefined ? {} : { readPressure: input.deps.readPressure }),
+  };
   const measured = await measureCandidate(measureArgs);
   // 採用候補は、最良を更新する前に会話を持たない反証役に突かせる（Issue #2108）
   const judged: RefutedPart =
@@ -539,6 +549,7 @@ interface MeasureCandidateInput {
   git: GitRunner;
   runSetup: (dir: string) => Promise<void>;
   commandMs: number;
+  readPressure?: () => Promise<number | undefined>;
   /** 各木を測る回数。省けば仕様の`measurementRuns`。 */
   runs?: number;
   /** 測り直し。準備と正しさの確認は済んでいるので、指標の計測だけをやり直す。 */
@@ -760,6 +771,7 @@ async function measureMetric(
     metricSource: spec.metricSource,
     command: spec.metricCommand,
     ...(spec.metricFile === undefined ? {} : { metricFile: spec.metricFile }),
+    ...(args.readPressure === undefined ? {} : { readPressure: args.readPressure }),
     cwdFor,
     onSpawn: (pid, tree) => track(pid, `optimize-trial:metric:${tree}`),
   });

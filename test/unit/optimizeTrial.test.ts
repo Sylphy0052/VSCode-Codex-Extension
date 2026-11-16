@@ -155,7 +155,7 @@ describe('runOptimizeTrial', () => {
         claudeSandbox: { weakerNested: false },
       },
       processRecordDir: join(storage, 'processes'),
-      deps: { runStage: fake.runStage },
+      deps: { runStage: fake.runStage, readPressure: async () => 0 },
       ...over,
     });
 
