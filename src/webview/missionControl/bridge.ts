@@ -107,6 +107,11 @@ export interface Bridge {
   runStart(): Promise<ReplyResult>;
   issueList(folder: string): Promise<ReplyResult>;
   issueStart(request: McIssueStartRequest): Promise<ReplyResult>;
+  /**
+   * 許可リストの拡張コマンドを実行させる（Issue #2161）。送るのはidだけ。`target`は
+   * 選択中のセッションのproviderを渡すコマンドにだけ付ける。
+   */
+  runCommand(command: string, target?: McTarget): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -307,6 +312,12 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
         roadmapIssueNumbers: request.roadmapIssueNumbers,
         issueNumbers: request.issueNumbers,
       }),
+    runCommand: (command, to) =>
+      call(
+        to === undefined
+          ? { type: 'runCommand', command }
+          : { type: 'runCommand', command, ...targetOnly(to) },
+      ),
     watch(target) {
       api.postMessage({
         type: 'watch',
