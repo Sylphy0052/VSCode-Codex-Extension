@@ -44,6 +44,8 @@ import type {
   SessionHandoffDetail,
   SessionQueuedMessage,
   SessionRecentTurn,
+  SessionSettingChange,
+  SessionSettingsDetail,
   SessionSideQuestion,
   SharedApprovalDecision,
   SharedHandoffDecision,
@@ -353,7 +355,14 @@ export type SessionControlAction =
    * キューが進んだり同じ本文の指示が並んだりして別の指示を消すため、項目のidで照合する。
    * 位置は補助で、idの項目が動いていてもidで見つけ直す。
    */
-  | { kind: 'cancelQueued'; index: number; queuedId: string };
+  | { kind: 'cancelQueued'; index: number; queuedId: string }
+  /** 今のmodel・effort・承認レベル・plan/fast modeを取り寄せる（Issue #2159）。 */
+  | { kind: 'sessionSettings' }
+  /**
+   * 設定を1つ変える（Issue #2159）。全承認の同意ダイアログを待つため非同期で、
+   * `controlSessionAsync`が扱う。
+   */
+  | { kind: 'changeSetting'; change: SessionSettingChange };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -378,6 +387,8 @@ export interface SessionControlResult {
   commands?: SlashCommand[] | undefined;
   /** `kind === 'queuedMessages'`のときだけ入る（Issue #2158）。 */
   queued?: SessionQueuedMessage[] | undefined;
+  /** `kind === 'sessionSettings'` / `'changeSetting'`のときだけ入る（Issue #2159）。 */
+  settings?: SessionSettingsDetail | undefined;
 }
 
 /**
@@ -418,6 +429,38 @@ export function abortAsRejection(signal: AbortSignal): Promise<never> {
     }
     signal.addEventListener('abort', fail, { once: true });
   });
+}
+
+/**
+ * 設定の変更を、今の設定と候補に照らして断る（Issue #2159）。通せるなら`undefined`。
+ *
+ * model・effortは画面（別ウィンドウのこともある）から届いた値なので、候補に無いものは捨てる。
+ * effortは変更後のmodelで選べる値か既定（空文字）だけを通す。
+ */
+export function rejectSettingChange(
+  current: SessionSettingsDetail,
+  change: SessionSettingChange,
+): string | undefined {
+  switch (change.setting) {
+    case 'model':
+      return change.value === current.model || current.models.some((m) => m.slug === change.value)
+        ? undefined
+        : `${change.value} はこのセッションで選べるmodelにありません`;
+    case 'effort': {
+      const efforts = current.models.find((m) => m.slug === current.model)?.efforts ?? [];
+      return change.value === '' || efforts.includes(change.value)
+        ? undefined
+        : `今のmodelでは effort=${change.value} を選べません`;
+    }
+    case 'approvalLevel':
+      return current.approvalScope === 'task'
+        ? 'タスクの設定で起動したセッションの承認レベルは変えられません（Codex全体の設定を変えても効きません）'
+        : undefined;
+    case 'planMode':
+      return undefined;
+    case 'fastMode':
+      return current.fastMode === undefined ? 'このセッションではfast modeを使えません' : undefined;
+  }
 }
 
 /** 送信キューの1件を運ぶ形にする（Issue #2158）。本文は上限で切り詰め、画像は枚数だけ。 */
@@ -771,6 +814,8 @@ const LOCKED_TAB_HUB_ACTIONS: ReadonlySet<SessionControlAction['kind']> = new Se
   'approvalDecision',
   'answerQuestion',
   'answerPrompt',
+  // 見るだけ。変更（`changeSetting`）は断り、応答の`editable`でも変えられないと伝える（Issue #2159）
+  'sessionSettings',
 ] as const);
 
 /** 入力欄を閉じたタブへの操作を断るときの案内。 */
@@ -1669,18 +1714,27 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       case 'commandCandidates':
         // 候補の取り寄せは非同期（ファイルの走査・CLIへの問い合わせ）。`controlSessionAsync`が扱う
         return { ok: false, error: 'この操作は候補の取り寄せ口から呼んでください' };
+      case 'sessionSettings':
+        return { ok: true, settings: this.sessionSettingsOf(entry) };
+      case 'changeSetting':
+        // 全承認の同意ダイアログを待つため非同期。`controlSessionAsync`が扱う
+        return { ok: false, error: 'この操作は設定変更の口から呼んでください' };
     }
   }
 
   /**
-   * `controlSession`の非同期版（Issue #2158）。候補の取り寄せ（`fileCandidates` /
-   * `commandCandidates`）だけをここで扱い、ほかは`controlSession`へ回す。
+   * `controlSession`の非同期版（Issue #2158、#2159）。候補の取り寄せ（`fileCandidates` /
+   * `commandCandidates`）と設定の変更（`changeSetting`）をここで扱い、ほかは`controlSession`へ回す。
    */
   async controlSessionAsync(
     threadId: string,
     action: SessionControlAction,
   ): Promise<SessionControlResult> {
-    if (action.kind !== 'fileCandidates' && action.kind !== 'commandCandidates') {
+    if (
+      action.kind !== 'fileCandidates' &&
+      action.kind !== 'commandCandidates' &&
+      action.kind !== 'changeSetting'
+    ) {
       return this.controlSession(threadId, action);
     }
     const entry = this.panels.get(threadId);
@@ -1689,6 +1743,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     if (entry.inputLock) {
       return { ok: false, error: INPUT_LOCKED_MESSAGE };
+    }
+    if (action.kind === 'changeSetting') {
+      return this.changeSettingFromHub(entry, action.change);
     }
     try {
       if (action.kind === 'fileCandidates') {
@@ -1699,6 +1756,45 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       return { ok: false, error: `候補を取り寄せられませんでした: ${String(e)}` };
     }
   }
+
+  /**
+   * Mission Controlからの設定変更（Issue #2159）。model・effortは今の候補にある値だけを通し、
+   * 適用はタブの設定行と同じ経路（各サブクラスの`applySessionSetting`）へ回す。
+   * 応答には変更後の設定を載せる（取り消し・作業中で変わらなかったことも画面が読み取れる）。
+   */
+  private async changeSettingFromHub(
+    entry: TPanel,
+    change: SessionSettingChange,
+  ): Promise<SessionControlResult> {
+    const before = this.sessionSettingsOf(entry);
+    const rejected = rejectSettingChange(before, change);
+    if (rejected !== undefined) {
+      return { ok: false, error: rejected, settings: before };
+    }
+    try {
+      const error = await this.applySessionSetting(entry, change);
+      const settings = this.sessionSettingsOf(entry);
+      return error === undefined ? { ok: true, settings } : { ok: false, error, settings };
+    } catch (e: unknown) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        settings: this.sessionSettingsOf(entry),
+      };
+    }
+  }
+
+  /** 今のmodel・effort・承認レベル・plan/fast mode（Issue #2159）。 */
+  protected abstract sessionSettingsOf(entry: TPanel): SessionSettingsDetail;
+
+  /**
+   * 設定を1つ変える（Issue #2159）。値の形と候補は呼び出し側が確かめ済み。
+   * 変えられなかったときは理由の文を返す。
+   */
+  protected abstract applySessionSetting(
+    entry: TPanel,
+    change: SessionSettingChange,
+  ): Promise<string | undefined>;
 
   /** `@`の候補（チャットタブの入力欄と同じ絞り込み。Issue #2158）。 */
   protected abstract listFileCandidates(entry: TPanel, query: string): Promise<string[]>;

@@ -57,6 +57,7 @@ const READ_ONLY_CONTROL_KINDS: ReadonlySet<string> = new Set([
   'fileCandidates',
   'commandCandidates',
   'queuedMessages',
+  'sessionSettings',
 ]);
 
 /** 新規セッションの起動（Issue #2137の1）。vscodeに依る部分は`extension.ts`が組む。 */
@@ -686,6 +687,7 @@ export class MissionControlViewManager implements vscode.Disposable {
       files: result.files,
       commands: result.commands,
       queued: result.queued,
+      settings: result.settings,
     });
   }
 }

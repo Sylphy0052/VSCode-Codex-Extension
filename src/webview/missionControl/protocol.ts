@@ -430,6 +430,8 @@ export type McHostMessage =
       commands?: McSlashCommand[] | undefined;
       /** `queuedMessages`の応答（Issue #2158）。 */
       queued?: McQueuedMessage[] | undefined;
+      /** `sessionSettings`・`changeSetting`の応答（Issue #2159）。 */
+      settings?: McSessionSettings | undefined;
     }
   | {
       /** `launchOptions`・`pickFolder`・`launch`への応答（Issue #2137）。 */
@@ -510,7 +512,38 @@ export type McControlAction =
   | { action: 'fileCandidates'; query: string }
   | { action: 'commandCandidates' }
   | { action: 'queuedMessages' }
-  | { action: 'cancelQueued'; index: number; queuedId: string };
+  | { action: 'cancelQueued'; index: number; queuedId: string }
+  // Issue #2159: 実行中セッションの設定
+  | { action: 'sessionSettings' }
+  | McSettingChangeAction;
+
+/** 設定の変更1件（Issue #2159）。形は`sessionHub.ts`の`parseSessionSettingChange`が確かめる。 */
+export type McSettingChangeAction =
+  | { action: 'changeSetting'; setting: 'model' | 'effort'; value: string }
+  | { action: 'changeSetting'; setting: 'approvalLevel'; value: McApprovalLevel }
+  | { action: 'changeSetting'; setting: 'planMode' | 'fastMode'; value: boolean };
+
+export type McApprovalLevel = 'ask' | 'auto' | 'full';
+
+/**
+ * 実行中セッションの今の設定（Issue #2159）。`sessionHub.ts`の`SessionSettingsDetail`と同じ形。
+ *
+ * `approvalScope`は承認レベルの変更が効く範囲: `session`はこのセッションだけ（Claude）、
+ * `global`はCodex全体の設定（タスク設定を持たない全Codexセッション）、`task`は変えられない。
+ */
+export interface McSessionSettings {
+  model: string;
+  effort: string;
+  /** 先頭は既定（`slug: ''`）。 */
+  models: Array<{ slug: string; label: string; efforts: string[] }>;
+  /** 空文字はどのレベルにも当たらない（カスタム）。 */
+  approvalLevel: string;
+  approvalScope: 'session' | 'global' | 'task';
+  planMode: boolean;
+  /** 無ければこのセッションで使えない。 */
+  fastMode?: boolean | undefined;
+  editable: boolean;
+}
 
 /** 送る画像1件（Issue #2158）。`dataUrl`はpng / jpeg / gif / webpのbase64。 */
 export interface McAttachment {

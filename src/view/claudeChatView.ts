@@ -230,6 +230,8 @@ import {
   INPUT_LOCKED_MESSAGE,
   type BaseChatPanel,
 } from './chatManagerBase';
+import type { SessionSettingChange, SessionSettingsDetail } from './sessionHub';
+import { buildSettingModelOptions } from './sessionSettingsDetail';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
@@ -940,6 +942,60 @@ export class ClaudeChatViewManager
     query: string,
   ): Promise<string[]> {
     return (await fileMentionCandidates(this.mentions, entry.cwd, query)) ?? [];
+  }
+
+  /**
+   * Mission Controlの設定欄（Issue #2159）。承認レベルはこのタブだけの値（Issue #1888）。
+   * fast modeはCLIが`initialize`で状態を返したときだけ出す（`state.fastMode`が無ければ使えない）。
+   */
+  protected override sessionSettingsOf(entry: ClaudePanel): SessionSettingsDetail {
+    const state = entry.session.getState();
+    return {
+      model: entry.modelSettings.model,
+      effort: entry.modelSettings.effort,
+      models: buildSettingModelOptions(
+        this.settings.claudeSnapshot().models,
+        entry.modelSettings.model,
+        CLAUDE_EFFORTS,
+      ),
+      approvalLevel: this.buildSettingsPayload(entry).approvalLevel,
+      approvalScope: 'session',
+      planMode: state.planMode,
+      fastMode: state.fastMode,
+      editable: !entry.inputLock,
+    };
+  }
+
+  /**
+   * タブの設定行（`config` / `approvalLevel` / `planMode` / `fastMode`の分岐）と同じ経路で
+   * 変える（Issue #2159）。
+   */
+  protected override async applySessionSetting(
+    entry: ClaudePanel,
+    change: SessionSettingChange,
+  ): Promise<string | undefined> {
+    switch (change.setting) {
+      case 'model':
+        await this.applyConfig(entry, 'model', change.value);
+        return undefined;
+      case 'effort':
+        await this.applyConfig(entry, 'reasoningEffort', change.value);
+        return undefined;
+      case 'approvalLevel':
+        await this.applyApprovalLevel(entry, change.value);
+        // タブの値は同意の取り消し・作業中で全承認へ上げられなかったときに元へ戻る
+        return entry.permissionMode === claudePermissionModeForLevel(change.value)
+          ? undefined
+          : '承認レベルは変わりませんでした（取り消された、またはタスクの設定・作業中で変えられません）';
+      case 'planMode':
+        this.noteUserAction(entry);
+        entry.session.setPlanMode(change.value, entry.permissionMode);
+        return undefined;
+      case 'fastMode':
+        this.noteUserAction(entry);
+        entry.session.setFastMode(change.value);
+        return undefined;
+    }
   }
 
   /**

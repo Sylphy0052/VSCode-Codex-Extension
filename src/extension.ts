@@ -324,6 +324,8 @@ const LONG_REPLY_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
   'sendWithAttachments',
   'fileCandidates',
   'commandCandidates',
+  // 全承認へ上げるときは宛先のウィンドウで同意のダイアログを待つ（Issue #2159）
+  'changeSetting',
 ]);
 
 /**
@@ -1644,9 +1646,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             ((action.kind === 'answerQuestion' || action.kind === 'answerPrompt') &&
               !approvalDisclosure.consume(target, action.pendingRequestId))
           ? { ok: false, error: '承認の内容を表示してから操作してください' }
-          : // 候補の取り寄せだけ待つ。回答は待ちを挟まず、二重送信の判定（answeredPending）から
-            // 記録までを同期で済ませる
-            action.kind === 'fileCandidates' || action.kind === 'commandCandidates'
+          : // 候補の取り寄せと設定の変更（Issue #2159）だけ待つ。回答は待ちを挟まず、二重送信の
+            // 判定（answeredPending）から記録までを同期で済ませる
+            action.kind === 'fileCandidates' ||
+              action.kind === 'commandCandidates' ||
+              action.kind === 'changeSetting'
             ? await (provider === 'claude' ? claudeChat : chat).controlSessionAsync(
                 threadId,
                 action,
@@ -1823,6 +1827,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         query: action.kind === 'fileCandidates' ? action.query : undefined,
         index: action.kind === 'cancelQueued' ? action.index : undefined,
         queuedId: action.kind === 'cancelQueued' ? action.queuedId : undefined,
+        setting: action.kind === 'changeSetting' ? action.change.setting : undefined,
+        settingValue: action.kind === 'changeSetting' ? action.change.value : undefined,
         pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
         sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
         approvalRequestId:
@@ -1857,6 +1863,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       files: reply.payload?.files,
       commands: reply.payload?.commands,
       queued: reply.payload?.queued,
+      settings: reply.payload?.settings,
     };
   };
   // エージェント向けの口（design.md §16.21「宛先解決の統合」、Issue #1274）。

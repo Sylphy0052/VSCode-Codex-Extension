@@ -73,6 +73,7 @@ import {
 } from './keys';
 import { Composer, type ComposerKeysRef } from './composer';
 import { CommandPalette, type McPaletteEntry } from './palette';
+import { SessionSettingsPanel } from './sessionSettings';
 import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
 import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
@@ -131,6 +132,10 @@ const SESSION_ONLY_COMMANDS: ReadonlySet<McKeyCommand['kind']> = new Set([
   // 指示欄の添付・送信キュー（Issue #2158）
   'attach',
   'queue',
+  // 実行中セッションの設定（Issue #2159）
+  'settings',
+  'planMode',
+  'fastMode',
 ]);
 
 const PROVIDER_FILTERS: ReadonlyArray<[McProviderFilter, string]> = [
@@ -862,6 +867,33 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         }
         return;
       }
+      case 'settings':
+      case 'planMode':
+      case 'fastMode': {
+        // 設定欄（Issue #2159）。plan / fastはボタンを押し、settingsは最初の選択欄へ移る
+        const selector =
+          command.kind === 'settings'
+            ? '[data-settings-first]'
+            : command.kind === 'planMode'
+              ? '[data-settings-plan]'
+              : '[data-settings-fast]';
+        const element = detailRef.current?.querySelector<HTMLElement>(selector);
+        if (element === null || element === undefined || element.hasAttribute('disabled')) {
+          setToast(
+            command.kind === 'fastMode'
+              ? 'Fast modeを使えるClaudeのセッションを選んでください'
+              : '設定を変えられるセッションを選んでください',
+          );
+          return;
+        }
+        setPaneFocus('detail');
+        if (command.kind === 'settings') {
+          element.focus();
+        } else {
+          element.click();
+        }
+        return;
+      }
       case 'help':
         setHelpOpen((open) => !open);
         return;
@@ -928,6 +960,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         return;
       }
       if (onRuns && SESSION_ONLY_COMMANDS.has(command.kind)) {
+        return;
+      }
+      // providerに無い操作は出さない（Issue #2159）。Fast modeはCodexと、CLIが状態を返さない
+      // Claudeのセッションでは設定欄にボタンが無いので、パレットにも出さない
+      if (
+        command.kind === 'fastMode' &&
+        (detailRef.current?.querySelector('[data-settings-fast]') ?? null) === null
+      ) {
         return;
       }
       entries.push({
@@ -2043,6 +2083,7 @@ function SessionDetail(props: {
         </div>
       )}
       <ReviewList session={session} bridge={props.bridge} onToast={props.onToast} />
+      <SessionSettingsPanel session={session} bridge={props.bridge} onToast={props.onToast} />
       {props.conversation}
       <Composer
         session={session}

@@ -5,6 +5,7 @@ import {
   isSharedApprovalDecision,
   isSharedHandoffDecision,
   isWindowIdShape,
+  parseSessionSettingChange,
   type SessionHubReplyPayload,
   type SessionHubRequest,
 } from './sessionHub';
@@ -157,6 +158,13 @@ export function parseAction(message: Record<string, unknown>): SessionControlAct
         message.queuedId !== ''
         ? { kind: 'cancelQueued', index: message.index as number, queuedId: message.queuedId }
         : undefined;
+    // Issue #2159: 実行中セッションの設定。値が候補にあるかは受信側（`controlSessionAsync`）が確かめる
+    case 'sessionSettings':
+      return { kind: 'sessionSettings' };
+    case 'changeSetting': {
+      const change = parseSessionSettingChange(message.setting, message.value);
+      return change === undefined ? undefined : { kind: 'changeSetting', change };
+    }
     default:
       return undefined;
   }
@@ -190,6 +198,9 @@ export function toReplyPayload(result: SessionControlResult): SessionHubReplyPay
   if (result.queued !== undefined) {
     return { queued: result.queued };
   }
+  if (result.settings !== undefined) {
+    return { settings: result.settings };
+  }
   return undefined;
 }
 
@@ -222,6 +233,8 @@ export function toSessionControlAction(
     | 'query'
     | 'index'
     | 'queuedId'
+    | 'setting'
+    | 'settingValue'
   >,
 ): SessionControlAction | undefined {
   const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
@@ -302,6 +315,15 @@ export function toSessionControlAction(
         action: 'cancelQueued',
         index: request.index,
         queuedId: request.queuedId,
+      });
+    // Issue #2159: 実行中セッションの設定
+    case 'sessionSettings':
+      return { kind: 'sessionSettings' };
+    case 'changeSetting':
+      return parseAction({
+        action: 'changeSetting',
+        setting: request.setting,
+        value: request.settingValue,
       });
     default:
       return undefined;
