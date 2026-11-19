@@ -53,6 +53,8 @@ import {
   activateAccessKey,
   refreshAccessKeys,
   scopeActions,
+  scopeInputs,
+  tabStaysInPane,
   submitAround,
   trapTab,
 } from './accessKeys';
@@ -775,6 +777,19 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         },
       });
     }
+    for (const [i, input] of scopeInputs(document).entries()) {
+      entries.push({
+        id: `input:${String(i)}`,
+        label: `入力欄へ: ${input.label}`,
+        keyLabel: input.element.dataset['akey'],
+        contextual: true,
+        run: () => {
+          if (input.element.isConnected) {
+            input.element.focus();
+          }
+        },
+      });
+    }
     const paneLabels: Record<McPane, string> = {
       rail: 'repo一覧へ移る',
       list: onRuns ? 'run一覧へ移る' : '一覧へ移る',
@@ -887,6 +902,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       if (event.defaultPrevented) {
         return;
       }
+      // IMEで変換している途中のキーは、送信を含むどのコマンドにも使わない
+      if (event.isComposing || event.keyCode === 229) {
+        return;
+      }
       const editable = isEditable(event.target);
       const input = {
         key: event.key,
@@ -952,6 +971,15 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       if (plainLetter && freeOnThisTab && state.tab === 'sessions') {
         if (activateAccessKey(document, event.key.toLowerCase())) {
           event.preventDefault();
+          return;
+        }
+      }
+      // 詳細ペインの中のTabは、端に着くまで標準の移動で順に辿る（アクセスキーが尽きた操作にも届く）
+      if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const pane = (event.target as HTMLElement | null)?.closest?.<HTMLElement>(
+          '[data-pane="detail"]',
+        );
+        if (pane !== null && pane !== undefined && tabStaysInPane(pane, event.shiftKey)) {
           return;
         }
       }

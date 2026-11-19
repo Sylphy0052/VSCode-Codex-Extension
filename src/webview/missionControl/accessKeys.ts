@@ -52,9 +52,53 @@ function badgeHost(element: HTMLElement): HTMLElement | null {
     element instanceof HTMLSelectElement ||
     element instanceof HTMLTextAreaElement
   ) {
-    return element.closest('label');
+    // labelで囲まれていない入力欄（脇道の質問のtextareaなど）は、直上の親に表示する
+    return element.closest('label') ?? element.parentElement;
   }
   return element;
+}
+
+/** 詳細ペインの入力欄（パレットの「入力欄へフォーカス」用）。 */
+export function scopeInputs(root: ParentNode): Array<{ label: string; element: HTMLElement }> {
+  const scope = accessKeyScope(root);
+  if (scope === null || scope.getAttribute('role') === 'dialog') {
+    return [];
+  }
+  const inputs: Array<{ label: string; element: HTMLElement }> = [];
+  for (const element of scope.querySelectorAll<HTMLElement>(
+    'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select',
+  )) {
+    if (!isUsable(element)) {
+      continue;
+    }
+    const label = (
+      element.getAttribute('aria-label') ??
+      element.getAttribute('placeholder') ??
+      element.getAttribute('title') ??
+      element.closest('label')?.textContent ??
+      ''
+    )
+      .replace(/\s+/gu, ' ')
+      .trim();
+    inputs.push({ label: label === '' ? '入力欄' : label, element });
+  }
+  return inputs;
+}
+
+/**
+ * 詳細ペインの中のTabを標準の移動に任せるか。ペインの中の押せる要素の端でなければtrue。
+ * 端（または枠自身）ではfalseを返し、呼び出し側がペイン移動にする。
+ */
+export function tabStaysInPane(pane: HTMLElement, backward: boolean): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || active === pane || !pane.contains(active)) {
+    return false;
+  }
+  const focusables = [...pane.querySelectorAll<HTMLElement>(ACTIONABLE)].filter(
+    (element) => (element as HTMLButtonElement).disabled !== true && element.tabIndex >= 0,
+  );
+  const edge = backward ? focusables[0] : focusables[focusables.length - 1];
+  return edge !== undefined && active !== edge;
 }
 
 /** アクセスキーを割り当て直す。範囲の外に残った前回の割り当ては消す。 */

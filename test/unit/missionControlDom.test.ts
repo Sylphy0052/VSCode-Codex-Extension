@@ -480,4 +480,36 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       expect(window.document.activeElement).toBe(textarea);
     });
   });
+
+  it('IMEで変換している途中のCtrl+Enterでは、全体のキー処理から送信しない（Issue #2152）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    const input = window.document.querySelector('textarea.composer-input') as HTMLTextAreaElement;
+    input.value = '変換中';
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    const button = window.document.querySelector(
+      'form.composer button[type="submit"]',
+    ) as HTMLButtonElement;
+    const press = (init: KeyboardEventInit & { keyCode?: number }): void => {
+      button.dispatchEvent(
+        new window.KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        }),
+      );
+    };
+    press({ isComposing: true });
+    press({ keyCode: 229 });
+    await tick();
+    expect(posted.filter((m) => m.action === 'send')).toHaveLength(0);
+    press({});
+    await tick();
+    expect(posted.filter((m) => m.action === 'send')).toHaveLength(1);
+  });
 });
