@@ -19,7 +19,17 @@ import {
 } from './extras';
 import { KindIcon, ProviderIcon } from './icons';
 import {
+  HistoryDialog,
+  LaunchSettingsFields,
+  LifecycleButtons,
+  MarkBar,
+  normalizeLaunchSettings,
+} from './lifecycle';
+import {
   ACTIVITY_LABELS,
+  LIFECYCLE_LABELS,
+  pruneMarks,
+  summarizeLifecycle,
   countSessionsInRepo,
   EMPTY_FILTER,
   countByActivity,
@@ -43,7 +53,10 @@ import type {
   McActivity,
   McApprovalDetail,
   McControlAction,
+  McLaunchChoices,
   McLaunchRepo,
+  McLaunchSettings,
+  McLifecycleOp,
   McPendingItem,
   McProvider,
   McRepo,
@@ -172,6 +185,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   /** 最初のスナップショットを受けるまでは先頭を自動で選ぶ。 */
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
+  const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     const off = bridge.onSnapshot((next) => {
@@ -237,6 +253,16 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       setSelected(next);
     }
   }, [snapshot, rowIds, selected]);
+
+  // 複数選択は、一覧に見えているセッションだけに保つ（絞り込みで隠れたものへ操作が届かない）
+  useEffect(() => {
+    setMarks((prev) =>
+      pruneMarks(
+        prev,
+        sessions.map((s) => s.key),
+      ),
+    );
+  }, [sessions]);
 
   const selectedPending = pending.find((item) => pendingRowId(item) === selected);
   const selectedResume = resumable.find((item) => resumeRowId(item) === selected);
@@ -378,9 +404,86 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     return undefined;
   };
 
+  // Issue #2149の1: 操作の対象は、複数選択があればそれ、無ければ選択中の行のセッション
+  // （Inboxの項目なら、その会話）。task runの質問は会話ではないので対象にしない
+  const focusedSession: McSession | undefined =
+    selectedSession ??
+    (selectedPending !== undefined && selectedPending.kind !== 'taskRunQuestion'
+      ? sessionOf(selectedPending)
+      : undefined);
+  const lifecycleTargets = (): McSession[] =>
+    marks.size > 0
+      ? sessions.filter((s) => marks.has(s.key))
+      : focusedSession === undefined
+        ? []
+        : [focusedSession];
+  const runLifecycle = (
+    op: McLifecycleOp,
+    targets: readonly McSession[] = lifecycleTargets(),
+  ): void => {
+    if (targets.length === 0) {
+      setToast(`${LIFECYCLE_LABELS[op]}セッションを選んでください（j / kで移動、xで複数選択）`);
+      return;
+    }
+    // 確認（deleteと実行中の終了）は拡張ホストがモーダルで出す
+    void bridge.lifecycle(op, targets).then((result) => {
+      if (!result.ok) {
+        setToast(result.error ?? `${LIFECYCLE_LABELS[op]}できませんでした`);
+        return;
+      }
+      setToast(summarizeLifecycle(op, result.outcomes ?? []));
+      // 成功した分だけ複数選択から外す（失敗した分は選んだまま残して再試行できるようにする）
+      const done = new Set(
+        (result.outcomes ?? []).filter((o) => o.ok).map((o) => targetKey(o.target)),
+      );
+      setMarks((prev) => {
+        const next = new Set(
+          [...prev].filter((key) => {
+            const s = sessions.find((x) => x.key === key);
+            return s === undefined || !done.has(targetKey(s));
+          }),
+        );
+        return next.size === prev.size ? prev : next;
+      });
+    });
+  };
+  const toggleMark = (session: McSession | undefined): void => {
+    if (session === undefined) {
+      setToast('複数選択できるのはセッションの行です');
+      return;
+    }
+    setMarks((prev) => {
+      const next = new Set(prev);
+      if (next.has(session.key)) {
+        next.delete(session.key);
+      } else {
+        next.add(session.key);
+      }
+      return next;
+    });
+  };
+
   // キーボード操作（Issue #2136の5）。最新の状態をrefで読む
-  const latest = useRef({ rowIds, selected, helpOpen, launchOpen });
-  latest.current = { rowIds, selected, helpOpen, launchOpen };
+  const latest = useRef({
+    rowIds,
+    selected,
+    helpOpen,
+    launchOpen,
+    historyOpen,
+    marks,
+    runLifecycle,
+    toggleFocused: () => toggleMark(focusedSession),
+  });
+  latest.current = {
+    rowIds,
+    selected,
+    helpOpen,
+    launchOpen,
+    historyOpen,
+    marks,
+    runLifecycle,
+    toggleFocused: () => toggleMark(focusedSession),
+  };
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       const editable = isEditable(event.target);
@@ -400,11 +503,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       if (state.helpOpen && command.kind !== 'help' && command.kind !== 'escape') {
         return;
       }
-      // 新規起動の画面を出している間は、一覧・回答のキーを効かせない（Escで閉じるだけ）
-      if (state.launchOpen) {
+      // 新規起動・履歴の画面を出している間は、一覧・回答のキーを効かせない（Escで閉じるだけ。
+      // 履歴の↑ / ↓・Enterは`HistoryDialog`が受け持つ）
+      if (state.launchOpen || state.historyOpen) {
         if (command.kind === 'escape' && !editable) {
           event.preventDefault();
           setLaunchOpen(false);
+          setHistoryOpen(false);
         } else if (command.kind === 'escape' && event.target instanceof HTMLElement) {
           event.target.blur();
         }
@@ -446,7 +551,18 @@ export function App(props: { bridge: Bridge }): JSX.Element {
             setHelpOpen(false);
           } else if (editable && event.target instanceof HTMLElement) {
             event.target.blur();
+          } else if (state.marks.size > 0) {
+            setMarks(new Set());
           }
+          return;
+        case 'toggleMark':
+          state.toggleFocused();
+          return;
+        case 'lifecycle':
+          state.runLifecycle(command.op);
+          return;
+        case 'history':
+          setHistoryOpen(true);
           return;
         case 'choose':
           formKeys.current?.choose(command.index);
@@ -524,6 +640,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           <button
             type="button"
             class="btn"
+            onClick={() => setHistoryOpen(true)}
+            title="履歴から再開（h）"
+          >
+            履歴
+          </button>
+          <button
+            type="button"
+            class="btn"
             title="ウィンドウをReloadする"
             onClick={() =>
               void bridge.reloadWindow().then((result) => {
@@ -576,6 +700,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         />
         <section class="section" aria-label="セッション一覧">
           <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
+          <MarkBar count={marks.size} onOp={runLifecycle} onClear={() => setMarks(new Set())} />
           {groups.length === 0 ? (
             <p class="empty">セッションはありません。</p>
           ) : (
@@ -593,6 +718,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                       now={now}
                       stallMs={snapshot.stallMs}
                       selected={selected === sessionRowId(session)}
+                      marked={marks.has(session.key)}
                       onSelect={() => setSelected(sessionRowId(session))}
                     />
                   ))}
@@ -640,6 +766,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
             onSelectPending={(item) => setSelected(pendingRowId(item))}
             onReloadTurns={() => loadTurns(selectedSession)}
             onSessionAction={sessionAction}
+            marked={marks.has(selectedSession.key)}
+            // 詳細のボタンは、複数選択があってもこのセッションだけに効かせる
+            onLifecycle={(op) => runLifecycle(op, [selectedSession])}
+            onToggleMark={() => toggleMark(selectedSession)}
           />
         ) : selectedResume !== undefined ? (
           <ResumeDetail
@@ -661,6 +791,16 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           onClose={() => setLaunchOpen(false)}
           onLaunched={(message) => {
             setLaunchOpen(false);
+            setToast(message);
+          }}
+        />
+      ) : null}
+      {historyOpen ? (
+        <HistoryDialog
+          bridge={bridge}
+          onClose={() => setHistoryOpen(false)}
+          onOpened={(message) => {
+            setHistoryOpen(false);
             setToast(message);
           }}
         />
@@ -813,18 +953,30 @@ function SessionRow(props: {
   now: number;
   stallMs: number;
   selected: boolean;
+  /** 複数選択（`x`）に入っているか。 */
+  marked: boolean;
   onSelect: () => void;
 }): JSX.Element {
   const { session } = props;
+  const classes = ['row', props.selected ? 'selected' : '', props.marked ? 'marked' : '']
+    .filter((c) => c !== '')
+    .join(' ');
   return (
     <div
-      class={props.selected ? 'row selected' : 'row'}
+      class={classes}
       data-row={sessionRowId(session)}
       role="option"
       aria-selected={props.selected}
+      aria-checked={props.marked}
       onClick={props.onSelect}
     >
-      <ProviderIcon provider={session.provider} />
+      {props.marked ? (
+        <span class="mark" aria-label="選択中">
+          ✓
+        </span>
+      ) : (
+        <ProviderIcon provider={session.provider} />
+      )}
       <span class="row-title">{session.title}</span>
       <span class="row-meta">
         <ActivityPill session={session} now={props.now} stallMs={props.stallMs} />{' '}
@@ -1038,6 +1190,9 @@ function SessionDetail(props: {
   onReloadTurns: () => void;
   onSessionAction: (session: McSession, action: McControlAction, done: string) => void;
   onSend: (text: string) => Promise<string | undefined>;
+  marked: boolean;
+  onLifecycle: (op: McLifecycleOp) => void;
+  onToggleMark: () => void;
 }): JSX.Element {
   const { session } = props;
   return (
@@ -1062,6 +1217,12 @@ function SessionDetail(props: {
             );
           })
         }
+      />
+      <LifecycleButtons
+        provider={session.provider}
+        marked={props.marked}
+        onOp={props.onLifecycle}
+        onToggleMark={props.onToggleMark}
       />
       {props.pending.length === 0 ? null : (
         <div>
@@ -1179,6 +1340,11 @@ function LaunchDialog(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const firstRef = useRef<HTMLSelectElement | null>(null);
+  // Issue #2149の2: model・effort・承認方針・プリセット。空は「設定のまま」
+  const [choices, setChoices] = useState<McLaunchChoices | undefined>(undefined);
+  const [settings, setSettings] = useState<McLaunchSettings>({});
+  /** 前回の選択を当てたrepo。repoを選び直したときだけ当て直す。 */
+  const appliedRepo = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     void bridge.launchOptions().then((result) => {
@@ -1188,6 +1354,7 @@ function LaunchDialog(props: {
       }
       const list = result.repos ?? [];
       setRepos({ status: 'ok', value: list });
+      setChoices(result.choices);
       setPath((current) => current ?? list[0]?.path);
     });
   }, [bridge]);
@@ -1199,6 +1366,26 @@ function LaunchDialog(props: {
   const chosen = list.find((repo) => repo.path === path);
   const running = chosen === undefined ? 0 : countSessionsInRepo(props.sessions, chosen.key);
   const worktree = worktreeChoice ?? running > 0;
+
+  // repoを選んだら、そのrepoで前回選んだ値を既定にする
+  const chosenKey = chosen?.key;
+  useEffect(() => {
+    if (choices === undefined || chosenKey === undefined || appliedRepo.current === chosenKey) {
+      return;
+    }
+    appliedRepo.current = chosenKey;
+    const remembered = choices.defaults[chosenKey];
+    if (remembered === undefined) {
+      return;
+    }
+    setProvider(remembered.provider);
+    setSettings(normalizeLaunchSettings(remembered.provider, remembered, choices));
+  }, [choices, chosenKey]);
+
+  const changeProvider = (next: McProvider): void => {
+    setProvider(next);
+    setSettings((prev) => normalizeLaunchSettings(next, prev, choices));
+  };
 
   const pick = (): void => {
     setError(undefined);
@@ -1226,7 +1413,8 @@ function LaunchDialog(props: {
     }
     setBusy(true);
     setError(undefined);
-    void bridge.launch({ cwd: chosen.path, provider, prompt, worktree }).then((result) => {
+    const request = { cwd: chosen.path, provider, prompt, worktree, ...settings };
+    void bridge.launch(request).then((result) => {
       setBusy(false);
       if (!result.ok) {
         setError(result.error ?? '起動できませんでした');
@@ -1290,7 +1478,7 @@ function LaunchDialog(props: {
             type="button"
             aria-pressed={provider === 'codex'}
             disabled={busy}
-            onClick={() => setProvider('codex')}
+            onClick={() => changeProvider('codex')}
           >
             Codex
           </button>
@@ -1298,11 +1486,19 @@ function LaunchDialog(props: {
             type="button"
             aria-pressed={provider === 'claude'}
             disabled={busy}
-            onClick={() => setProvider('claude')}
+            onClick={() => changeProvider('claude')}
           >
             Claude
           </button>
         </div>
+        <LaunchSettingsFields
+          choices={choices}
+          provider={provider}
+          value={settings}
+          disabled={busy}
+          onChange={setSettings}
+          onProvider={setProvider}
+        />
         <label>
           最初の指示（空なら会話を開くだけ）
           <textarea
@@ -1335,7 +1531,11 @@ function LaunchDialog(props: {
             {worktree ? '' : ' worktreeをOFFのまま起動しようとしています。'}
           </p>
         ) : null}
-        <p class="notice">modelは各CLIの既定で起動します（会話のタブで変えられます）。</p>
+        <p class="notice">
+          {choices === undefined
+            ? 'model・effort・承認方針は拡張機能の設定のまま起動します（会話のタブで変えられます）。'
+            : '承認方針は拡張機能の設定より緩くできません。選んだ値はrepoごとに覚え、次回の既定にします。'}
+        </p>
         {error === undefined ? null : (
           <p class="error" role="alert">
             {error}
