@@ -80,13 +80,32 @@ describe('parseRunningTurns（Issue #2138）', () => {
 });
 
 describe('RunningTurnJournal', () => {
-  it('takePrevious: 前回の分を返し、保存領域を空にする', () => {
+  it('takePrevious: 前回の分を返し、再開かforgetするまで保存領域に残す', () => {
     const { journal, update } = setup([
       { provider: 'codex', threadId: 'a', title: 'T', since: 1 },
+      { provider: 'codex', threadId: 'b', title: 'T', since: 1 },
       { bad: true },
     ]);
-    expect(journal.takePrevious()).toHaveLength(1);
-    expect(update).toHaveBeenCalledWith([]);
+    expect(journal.takePrevious()).toHaveLength(2);
+    // 読み出しただけでは書き直さない（続けてReloadしても再開待ちが残る）
+    expect(update).not.toHaveBeenCalled();
+    // 今回の実行中の分は、持ち越した分に書き足す
+    journal.observe([session()]);
+    expect(update.mock.calls.at(-1)?.[0].map((e) => e.threadId)).toEqual(['a', 'b', 't1']);
+    journal.forget({ provider: 'codex', threadId: 'a' });
+    expect(update.mock.calls.at(-1)?.[0].map((e) => e.threadId)).toEqual(['b', 't1']);
+  });
+
+  it('takePrevious: 持ち越した会話が実行中へ戻ったら再開待ちから外す', () => {
+    const { journal, update } = setup([
+      { provider: 'codex', threadId: 't1', title: 'タイトル', since: 1 },
+      { provider: 'codex', threadId: 'b', title: 'T', since: 1 },
+    ]);
+    journal.takePrevious();
+    journal.observe([session({ activity: 'idle' })]);
+    expect(update).not.toHaveBeenCalled();
+    journal.observe([session()]);
+    expect(update.mock.calls.at(-1)?.[0].map((e) => e.threadId)).toEqual(['b', 't1']);
   });
 
   it('実行中の会話を書く。idle以外（承認待ち等）も実行中扱い', () => {

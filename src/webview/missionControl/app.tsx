@@ -852,6 +852,8 @@ function SessionRow(props: {
 function SessionActions(props: {
   session: McSession;
   onSessionAction: (session: McSession, action: McControlAction, done: string) => void;
+  /** セッションidをコピーする（旧統括ページの「idをコピー」。Issue #1305、#2138）。 */
+  onCopyRef?: (() => void) | undefined;
 }): JSX.Element {
   const { session, onSessionAction } = props;
   const busy = session.activity !== 'idle';
@@ -892,6 +894,16 @@ function SessionActions(props: {
           </button>
         )
       ) : null}
+      {props.onCopyRef === undefined ? null : (
+        <button
+          type="button"
+          class="btn"
+          title="send_message / ask_sessionの宛先に使うセッションidをコピーする"
+          onClick={props.onCopyRef}
+        >
+          idをコピー
+        </button>
+      )}
     </div>
   );
 }
@@ -1038,7 +1050,19 @@ function SessionDetail(props: {
         {formatElapsed(props.now - session.activitySince)} · {session.cwdLabel} ·{' '}
         {session.isCurrentWindow ? 'このウィンドウ' : '別ウィンドウ'}
       </p>
-      <SessionActions session={session} onSessionAction={props.onSessionAction} />
+      <SessionActions
+        session={session}
+        onSessionAction={props.onSessionAction}
+        onCopyRef={() =>
+          void props.bridge.copyRef(session).then((result) => {
+            props.onToast(
+              result.ok
+                ? 'セッションidをコピーしました'
+                : (result.error ?? 'コピーできませんでした'),
+            );
+          })
+        }
+      />
       {props.pending.length === 0 ? null : (
         <div>
           <h3>要対応</h3>

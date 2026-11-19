@@ -3,7 +3,7 @@ import type { Logger } from '../../src/log';
 import { readMissionControlStallMs } from '../../src/view/missionControlLauncher';
 import { MissionControlViewManager } from '../../src/view/missionControlView';
 import type { McSnapshot } from '../../src/webview/missionControl/protocol';
-import { __mock, Uri, type FakeWebviewPanel } from '../mocks/vscode';
+import { __mock, env, Uri, type FakeWebviewPanel } from '../mocks/vscode';
 
 const log: Logger = {
   info: () => undefined,
@@ -43,6 +43,31 @@ function open(read: () => McSnapshot, control = vi.fn()) {
 }
 
 describe('MissionControlViewManager（Issue #2136）', () => {
+  it('copyRef: 確かめた宛先からセッションidを組み立ててコピーし、形の合わない宛先は断る（Issue #2138）', async () => {
+    const { panel } = open(() => snapshot(0));
+    env.clipboard.written.length = 0;
+    panel.webview.simulateMessage({
+      type: 'copyRef',
+      seq: 3,
+      windowId: 'w2',
+      provider: 'claude',
+      threadId: 't9',
+    });
+    await vi.waitFor(() =>
+      expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 3, ok: true }),
+    );
+    expect(env.clipboard.written).toEqual(['session:claude:w2:t9']);
+    panel.webview.simulateMessage({
+      type: 'copyRef',
+      seq: 4,
+      windowId: 'w2',
+      provider: 'x',
+      threadId: 't9',
+    });
+    expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 4, ok: false });
+    expect(env.clipboard.written).toHaveLength(1);
+  });
+
   it('タブ名に件数を出し、CSPはdefault-src noneとnonce付きの1ファイルだけ', () => {
     const { panel } = open(() => snapshot(2));
     expect(panel.viewType).toBe('agent.missionControl');

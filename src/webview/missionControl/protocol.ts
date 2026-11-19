@@ -305,4 +305,6 @@ export type McWebviewMessage =
   /** 再開待ちを一覧から外す。 */
   | ({ type: 'resumeDismiss'; seq: number } & McTarget)
   /** ウィンドウのReload。実行中のターンがあれば拡張ホストが件数を出して確かめる。 */
-  | { type: 'reloadWindow'; seq: number };
+  | { type: 'reloadWindow'; seq: number }
+  /** セッションidをクリップボードへコピーする（旧統括ページの「idをコピー」）。 */
+  | ({ type: 'copyRef'; seq: number } & McTarget);

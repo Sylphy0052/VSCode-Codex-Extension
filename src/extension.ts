@@ -1891,6 +1891,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     git: nodeGitCommandRunner,
     windowId,
     resumable: missionControlResumable,
+    forgetResumable: (entry) => runningTurnJournal.forget(entry),
     openThread: (provider, threadId, title, cwd) =>
       (provider === 'codex' ? chat : claudeChat).openThread(threadId, title, cwd),
     runningTurnCount: () =>

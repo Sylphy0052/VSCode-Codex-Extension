@@ -61,6 +61,8 @@ export interface Bridge {
   resumeDismiss(target: McTarget): Promise<ReplyResult>;
   /** ウィンドウのReloadを頼む。確認は拡張ホストが出す。 */
   reloadWindow(): Promise<ReplyResult>;
+  /** セッションid（`send_message`の宛先）をクリップボードへコピーさせる。 */
+  copyRef(target: McTarget): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -201,6 +203,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     resume: (to) => call({ type: 'resume', ...targetOnly(to) }),
     resumeDismiss: (to) => call({ type: 'resumeDismiss', ...targetOnly(to) }),
     reloadWindow: () => call({ type: 'reloadWindow' }),
+    copyRef: (to) => call({ type: 'copyRef', ...targetOnly(to) }),
     watch(target) {
       api.postMessage({
         type: 'watch',

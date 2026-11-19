@@ -65,11 +65,13 @@ function setup(over: Partial<McHostDeps> = {}) {
   const openThread = vi.fn(async () => undefined);
   const showMissionControl = vi.fn();
   const resumable = new Map<string, RunningTurnEntry>();
+  const forgetResumable = vi.fn();
   const deps: McHostDeps = {
     review: { diffSource, acknowledge } as never,
     git: { run: gitRun } as never,
     windowId: 'win1',
     resumable,
+    forgetResumable,
     openThread,
     runningTurnCount: () => 0,
     showMissionControl,
@@ -77,7 +79,17 @@ function setup(over: Partial<McHostDeps> = {}) {
     ...over,
   };
   const host = createMissionControlHost(deps);
-  return { host, deps, diffSource, acknowledge, gitRun, openThread, showMissionControl, resumable };
+  return {
+    host,
+    deps,
+    diffSource,
+    acknowledge,
+    gitRun,
+    openThread,
+    showMissionControl,
+    resumable,
+    forgetResumable,
+  };
 }
 
 beforeEach(() => {
@@ -193,12 +205,22 @@ describe('reviewAck', () => {
 
 describe('resume / resumeDismiss', () => {
   it('再開待ちで自分のウィンドウなら会話を開き、一覧から外す', async () => {
-    const { host, resumable, openThread, deps } = setup();
+    const { host, resumable, openThread, deps, forgetResumable } = setup();
     resumable.set('codex:th1', entry());
     expect(await host.port.resume(target)).toBeUndefined();
     expect(openThread).toHaveBeenCalledWith('codex', 'th1', 'T', '/w/app');
     expect(resumable.has('codex:th1')).toBe(false);
+    expect(forgetResumable).toHaveBeenCalledWith(entry());
     expect(deps.log.info).toHaveBeenCalled();
+  });
+
+  it('開き終わる前に重ねて押されても二重に開かない', async () => {
+    const { host, resumable, openThread } = setup();
+    resumable.set('codex:th1', entry());
+    const first = host.port.resume(target);
+    expect(await host.port.resume(target)).toBe('この会話は再開待ちではありません');
+    expect(await first).toBeUndefined();
+    expect(openThread).toHaveBeenCalledTimes(1);
   });
 
   it('再開待ちに無ければエラー文で開かない', async () => {
@@ -218,19 +240,30 @@ describe('resume / resumeDismiss', () => {
   });
 
   it('開くのに失敗したら一覧に残す', async () => {
-    const { host, resumable, openThread } = setup();
+    const { host, resumable, openThread, forgetResumable } = setup();
     resumable.set('codex:th1', entry());
     openThread.mockRejectedValueOnce(new Error('boom'));
     await expect(host.port.resume(target)).rejects.toThrow('boom');
     expect(resumable.has('codex:th1')).toBe(true);
+    expect(forgetResumable).not.toHaveBeenCalled();
   });
 
   it('resumeDismiss: 外せたらundefined、無ければエラー文', () => {
-    const { host, resumable } = setup();
+    const { host, resumable, forgetResumable } = setup();
     resumable.set('codex:th1', entry());
     expect(host.port.resumeDismiss(target)).toBeUndefined();
     expect(resumable.size).toBe(0);
+    expect(forgetResumable).toHaveBeenCalledWith(entry());
     expect(host.port.resumeDismiss(target)).toBe('この会話は再開待ちではありません');
+  });
+
+  it('resumeDismiss: 他のウィンドウ宛は外さない', () => {
+    const { host, resumable } = setup();
+    resumable.set('codex:th1', entry());
+    expect(host.port.resumeDismiss({ ...target, windowId: 'other' })).toBe(
+      'この会話は再開待ちではありません',
+    );
+    expect(resumable.has('codex:th1')).toBe(true);
   });
 });
 

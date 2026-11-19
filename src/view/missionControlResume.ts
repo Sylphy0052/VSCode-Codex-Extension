@@ -89,6 +89,8 @@ export function parseRunningTurns(raw: unknown): RunningTurnEntry[] {
 /** 実行中のターンを持つ会話を保存領域へ書き続ける。 */
 export class RunningTurnJournal {
   private readonly running = new Map<string, RunningTurnEntry>();
+  /** 前回の起動から持ち越した、まだ再開していない分（`takePrevious`）。 */
+  private readonly carried = new Map<string, RunningTurnEntry>();
   private readonly removals = new Map<string, unknown>();
   private lastWritten = '[]';
 
@@ -99,13 +101,27 @@ export class RunningTurnJournal {
   ) {}
 
   /**
-   * 前回の起動で書いた分を読み出し、保存領域を空にする。起動直後に1回だけ呼ぶ。
-   * 今回の実行中の分は`observe`が書き直す。
+   * 前回の起動で書いた分を読み出す。起動直後に1回だけ呼ぶ。
+   *
+   * 読み出した分は「再開待ち」として、再開か外す（`forget`）か、その会話が実行中へ戻るまで
+   * 保存領域に残す。読み出した時点で消すと、再開しないまま続けてReloadしたときに消えてしまう。
+   * 今回の実行中の分は`observe`が書き足す。
    */
   takePrevious(): RunningTurnEntry[] {
     const previous = parseRunningTurns(this.store.get());
-    void this.store.update([]);
+    this.carried.clear();
+    for (const entry of previous) {
+      this.carried.set(entryKey(entry), entry);
+    }
+    this.lastWritten = this.serialize();
     return previous;
+  }
+
+  /** 再開待ちを再開した・外したときに呼ぶ。保存領域からも消す。 */
+  forget(entry: { provider: McProvider; threadId: string }): void {
+    if (this.carried.delete(entryKey(entry))) {
+      this.write();
+    }
   }
 
   /** このウィンドウの会話の状態が変わるたびに呼ぶ。 */
@@ -120,6 +136,10 @@ export class RunningTurnJournal {
         continue;
       }
       this.cancelRemoval(key);
+      // 実行中へ戻った会話は再開待ちではない
+      if (this.carried.delete(key)) {
+        changed = true;
+      }
       const existing = this.running.get(key);
       if (
         existing === undefined ||
@@ -177,13 +197,24 @@ export class RunningTurnJournal {
     }
   }
 
+  /** 書き込む値。まだ再開していない前回の分と、今回の実行中の分。 */
+  private entries(): RunningTurnEntry[] {
+    const carried = [...this.carried.entries()]
+      .filter(([key]) => !this.running.has(key))
+      .map(([, entry]) => entry);
+    return [...carried, ...this.running.values()].slice(0, MAX_ENTRIES);
+  }
+
+  private serialize(): string {
+    return JSON.stringify(this.entries().map((v) => [v.provider, v.threadId, v.title, v.cwd]));
+  }
+
   private write(): void {
-    const value = [...this.running.values()].slice(0, MAX_ENTRIES);
-    const serialized = JSON.stringify(value.map((v) => [v.provider, v.threadId, v.title, v.cwd]));
+    const serialized = this.serialize();
     if (serialized === this.lastWritten) {
       return;
     }
     this.lastWritten = serialized;
-    void this.store.update(value);
+    void this.store.update(this.entries());
   }
 }

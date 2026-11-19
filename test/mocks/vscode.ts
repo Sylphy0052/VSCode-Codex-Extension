@@ -538,6 +538,14 @@ export const env = {
     state.openedExternalUris.push(uri.fsPath);
     return true;
   },
+  /** クリップボード（Issue #2138）。書かれた文字列を`written`へ記録するだけ。 */
+  clipboard: {
+    written: [] as string[],
+    writeText: (text: string): Promise<void> => {
+      env.clipboard.written.push(text);
+      return Promise.resolve();
+    },
+  },
 };
 
 export const commands = {

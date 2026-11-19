@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { Logger } from '../log';
+import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import type {
   McLaunchRepo,
   McLaunchRequest,
@@ -233,6 +234,9 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'reloadWindow':
         this.handleHost(m);
         return;
+      case 'copyRef':
+        this.handleCopyRef(m);
+        return;
       default:
         return;
     }
@@ -380,7 +384,33 @@ export class MissionControlViewManager implements vscode.Disposable {
           `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
         );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+        // 失敗で戻した項目（再開待ちなど）を画面へ反映する
+        this.refresh();
       });
+  }
+
+  /**
+   * セッションid（`send_message` / `ask_session`の宛先）をクリップボードへ書く。旧統括ページの
+   * 「idをコピー」（Issue #1305）をMCへ移した（Issue #2138）。webviewは信頼境界の外側なので、
+   * 届いた文字列をそのまま書かず、`parseTarget`で確かめた宛先から組み立て直す。
+   */
+  private handleCopyRef(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const target = parseTarget(message);
+    if (target === undefined) {
+      this.postReply(seq, { ok: false, error: '宛先が正しくありません' });
+      return;
+    }
+    void Promise.resolve(vscode.env.clipboard.writeText(formatSessionTarget(target))).then(
+      () => this.postReply(seq, { ok: true }),
+      (e: unknown) => {
+        this.log.warn(`Mission Control: セッションidをコピーできませんでした: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: 'コピーできませんでした' });
+      },
+    );
   }
 
   private postReply(seq: number, reply: Record<string, unknown>): void {

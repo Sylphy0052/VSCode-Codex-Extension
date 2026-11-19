@@ -33,7 +33,9 @@ function fakeGit(responses: Record<string, GitCommandResult>): {
 }
 
 const TOP = '/repo';
-const baseResponses = (overrides: Record<string, GitCommandResult> = {}) => ({
+const baseResponses = (
+  overrides: Record<string, GitCommandResult> = {},
+): Record<string, GitCommandResult> => ({
   'rev-parse --show-toplevel': ok(`${TOP}\n`),
   'rev-parse --verify --quiet origin/main^{commit}': ok('abc\n'),
   'merge-base HEAD origin/main': ok('mb111\n'),

@@ -25,6 +25,8 @@ export interface McHostDeps {
   windowId: string;
   /** Reloadで切れた会話（`provider:threadId` → 中身）。再開・外すとここから消す。 */
   resumable: Map<string, RunningTurnEntry>;
+  /** 再開した・外した再開待ちを、次の起動へ持ち越さないようにする（`RunningTurnJournal.forget`）。 */
+  forgetResumable(entry: RunningTurnEntry): void;
   openThread(
     provider: McProvider,
     threadId: string,
@@ -72,7 +74,7 @@ function parseBaseQuery(uri: vscode.Uri): BaseQuery {
 }
 
 export function createMissionControlHost(deps: McHostDeps): {
-  port: McHostPort;
+  port: McHostPort & Required<Pick<McHostPort, 'observe'>>;
   disposables: vscode.Disposable[];
 } {
   const notifier = new McNotifier({
@@ -110,7 +112,7 @@ export function createMissionControlHost(deps: McHostDeps): {
     },
   };
 
-  const port: McHostPort = {
+  const port: McHostPort & Required<Pick<McHostPort, 'observe'>> = {
     async openDiff(target, file) {
       const key = formatSessionTarget(target);
       const source = deps.review.diffSource(key, file);
@@ -137,19 +139,31 @@ export function createMissionControlHost(deps: McHostDeps): {
         : 'このセッションはレビュー待ちではありません';
     },
     async resume(target) {
-      const entry = deps.resumable.get(resumeKey(target));
+      const key = resumeKey(target);
+      const entry = deps.resumable.get(key);
       if (entry === undefined || target.windowId !== deps.windowId) {
         return 'この会話は再開待ちではありません';
       }
-      await deps.openThread(entry.provider, entry.threadId, entry.title, entry.cwd);
-      deps.resumable.delete(resumeKey(target));
+      // 開き終わるまでの間に重ねて押されても二重に開かないよう、先に一覧から外す
+      deps.resumable.delete(key);
+      try {
+        await deps.openThread(entry.provider, entry.threadId, entry.title, entry.cwd);
+      } catch (error) {
+        deps.resumable.set(key, entry);
+        throw error;
+      }
+      deps.forgetResumable(entry);
       deps.log.info(`Mission Control: Reloadで切れた会話を開き直した（${entry.provider}）`);
       return undefined;
     },
     resumeDismiss(target) {
-      return deps.resumable.delete(resumeKey(target))
-        ? undefined
-        : 'この会話は再開待ちではありません';
+      const entry = deps.resumable.get(resumeKey(target));
+      if (entry === undefined || target.windowId !== deps.windowId) {
+        return 'この会話は再開待ちではありません';
+      }
+      deps.resumable.delete(resumeKey(target));
+      deps.forgetResumable(entry);
+      return undefined;
     },
     async reloadWindow() {
       const running = deps.runningTurnCount();
