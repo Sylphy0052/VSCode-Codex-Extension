@@ -1,7 +1,7 @@
 import { buildSync } from 'esbuild';
 import { JSDOM } from 'jsdom';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { McPendingItem, McSnapshot } from '../../src/webview/missionControl/protocol';
 
 /**
@@ -43,7 +43,16 @@ function boot() {
   return { window, posted, deliver, key };
 }
 
-const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 60));
+/**
+ * 描画とeffectを60ms分進める。PreactのeffectはrequestAnimationFrame（無ければ35msのsetTimeout）の
+ * 後に走り、スナップショット→選択のeffect→取り寄せのeffectのように2段続く所がある。実時間で60ms
+ * 待つと、CIの負荷でNodeのtimerが遅れたとき2段目が間に合わず落ちていた（Issue #2145）。JSDOMの
+ * timerとanimation frameはNodeのglobalのsetTimeout/setIntervalで動くので、偽のtimerで進めれば
+ * 実時間の遅れに左右されない。
+ */
+const tick = async (): Promise<void> => {
+  await vi.advanceTimersByTimeAsync(60);
+};
 
 function item(overrides: Partial<McPendingItem>): McPendingItem {
   return {
@@ -75,6 +84,15 @@ function snapshot(pending: McPendingItem[]): McSnapshot {
 }
 
 describe('Mission Controlのwebview（Issue #2136）', () => {
+  // JSDOMは`boot()`の中で作るので、その前に偽のtimerへ替える。戻すときに前のテストの
+  // window（TICK_MSの間隔timerなど）の予定も捨てられる
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('ツール承認をキーボードだけで承認でき、外部由来の文字列はテキストとして出す', async () => {
     const { window, posted, deliver, key } = boot();
     await tick();
