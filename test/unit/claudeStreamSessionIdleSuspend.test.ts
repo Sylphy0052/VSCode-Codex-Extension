@@ -180,6 +180,52 @@ describe('ClaudeStreamSession: 使っていないCLIの休止と再開（Issue #
     }
   });
 
+  describe('引き継ぎで前の世代を止める（Issue #2146）', () => {
+    it('応答中でも止められ、強制終了せずに終われば forced は false', async () => {
+      const { session, procs } = createSession();
+      session.send('作業して');
+      expect(session.idleForSuspend).toBe(false);
+      const done = session.halt(relaunch, 60_000);
+      expect(procs[0]!.kill).not.toHaveBeenCalled();
+      procs[0]!.emitExit(0);
+      await expect(done).resolves.toEqual({ forced: false });
+      expect(session.pid).toBeUndefined();
+      expect(session.suspended).toBe(true);
+    });
+
+    it('入力を閉じても終わらなければシグナルで止め、forced を true で返す', async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, procs } = createSession();
+        session.send('作業して');
+        const done = session.halt(relaunch, 5_000);
+        vi.advanceTimersByTime(5_000);
+        expect(procs[0]!.kill).toHaveBeenCalled();
+        procs[0]!.emitExit(null, 'SIGTERM');
+        await expect(done).resolves.toEqual({ forced: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('待たせていた指示は、止めた直後には送らず2本目のCLIを起こさない', async () => {
+      const { session, procs } = createSession();
+      session.send('作業して');
+      expect(session.sendOrQueue('待たせた指示')).toBe('queued');
+      const done = session.halt(relaunch, 60_000);
+      procs[0]!.emitExit(0);
+      await done;
+      expect(procs).toHaveLength(1);
+      expect(session.getState().queued).toHaveLength(1);
+    });
+
+    it('プロセスが無ければ何もせず undefined を返す', async () => {
+      const { session, procs } = createSession();
+      await suspendSession(session, procs[0]!);
+      await expect(session.halt(relaunch)).resolves.toBeUndefined();
+    });
+  });
+
   describe('発言の無い再開と、再開の失敗・dispose後の文言（Issue #1859）', () => {
     /** 書き込み済みのcontrol_requestから、指定した種類のrequest_idを取る。 */
     function requestIdOf(proc: FakeChildProcess, subtype: string): string {

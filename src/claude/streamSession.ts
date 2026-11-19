@@ -149,6 +149,8 @@ export type ClaudeSpawnPort = (
  */
 export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
+  /** `halt`で止めた直後は、待ち行列の指示を送ってCLIを起こさない（Issue #2146）。 */
+  private holdQueueAfterStop = false;
   /** sandboxの外へ回らない形のネットワークコマンドを止めるhookを登録するか（Issue #1668）。 */
   private sandboxBashGuard = false;
   /** 設定で足したsandboxの除外パターン。hookの判定へ渡す（Issue #2133）。 */
@@ -656,6 +658,34 @@ export class ClaudeStreamSession {
     if (proc === undefined || !this.idleForSuspend) {
       return false;
     }
+    await this.stopProcessKeepingSession(proc, relaunch, graceMs);
+    return true;
+  }
+
+  /**
+   * ターンの途中でもCLIを終了する（引き継ぎで前の世代を止める。Issue #2146）。`suspend`と違い
+   * 使っていない状態を求めない。session-idとタブは残し、次の送信で`--resume`する。
+   *
+   * @returns プロセスが無ければ`undefined`。あれば、`graceMs`の間に終わらずシグナルで止めたか
+   */
+  async halt(
+    relaunch: { cwd: string; config: () => ClaudeConfig },
+    graceMs = SUSPEND_GRACE_MS,
+  ): Promise<{ forced: boolean } | undefined> {
+    const proc = this.proc;
+    if (proc === undefined || this.lifecycle !== 'running') {
+      return undefined;
+    }
+    // 待たせていた指示を終了の直後に送ると、止めたCLIをすぐ起こしてしまう
+    this.holdQueueAfterStop = true;
+    return this.stopProcessKeepingSession(proc, relaunch, graceMs);
+  }
+
+  private async stopProcessKeepingSession(
+    proc: ChildProcessWithoutNullStreams,
+    relaunch: { cwd: string; config: () => ClaudeConfig },
+    graceMs: number,
+  ): Promise<{ forced: boolean }> {
     this.lifecycle = 'stopping';
     // Plan modeは起動引数ではなく実行中の切り替えで入るため、再開後に入れ直す
     this.relaunchOptions = { ...relaunch, planMode: this.state.planMode };
@@ -670,13 +700,17 @@ export class ClaudeStreamSession {
       proc.once('exit', () => resolve());
     });
     proc.stdin.end();
-    const timer = setTimeout(() => killWithEscalation(proc), graceMs);
+    let forced = false;
+    const timer = setTimeout(() => {
+      forced = true;
+      killWithEscalation(proc);
+    }, graceMs);
     try {
       await exited;
     } finally {
       clearTimeout(timer);
     }
-    return true;
+    return { forced };
   }
 
   /** 休止のための終了を見届けた後の状態にする。終了を待つ間に来た送信があれば再開して送る。 */
@@ -695,7 +729,9 @@ export class ClaudeStreamSession {
     });
     this.log.info('使っていないためClaude Codeを終了しました。次の送信で再開します');
     this.wakeLifecycleWaiters();
-    if (this.state.queued.length > 0) {
+    const hold = this.holdQueueAfterStop;
+    this.holdQueueAfterStop = false;
+    if (!hold && this.state.queued.length > 0) {
       this.sendNextQueued();
     }
   }

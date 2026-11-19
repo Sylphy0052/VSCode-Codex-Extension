@@ -80,6 +80,8 @@ class FakeSession {
   reflex: boolean | undefined;
   process: { pid: number; shared: boolean } | undefined;
   releaseForPause: (() => Promise<{ memoryFreed: boolean }>) | undefined;
+  haltProcess:
+    ((options: { graceMs: number }) => Promise<{ forced: boolean } | undefined>) | undefined;
 
   runLoop = vi.fn((plan: LoopPlan) => {
     this.plans.push(plan);
@@ -1491,6 +1493,69 @@ describe('TaskStageRunner 引き継ぎ', () => {
 
     // 新しいセッションで完了できる
     expect(await reportDone(t)).toMatchObject({ isError: false });
+  });
+
+  describe('前の世代のプロセスを止める', () => {
+    const haltOn =
+      (halt: FakeSession['haltProcess']) =>
+      (s: FakeSession, index: number): void => {
+        if (index === 0) {
+          s.haltProcess = halt;
+        }
+      };
+
+    it('新しい世代が最初の指示を受け取る前に、前の世代のプロセスを止める', async () => {
+      const halt = vi.fn(async () => ({ forced: false }));
+      const t = await started({ sessionSetup: haltOn(halt) });
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(halt).toHaveBeenCalledTimes(1);
+      expect(halt).toHaveBeenCalledWith({ graceMs: 5_000 });
+      const haltOrder = halt.mock.invocationCallOrder[0] ?? 0;
+      const runLoopOrder = t.session(1).runLoop.mock.invocationCallOrder[0] ?? 0;
+      expect(haltOrder).toBeLessThan(runLoopOrder);
+      // 正常に終わったら強制終了の記録は残さない
+      expect(t.warnings).toEqual([]);
+      expect(t.session(0).note).toHaveBeenCalledTimes(1);
+    });
+
+    it('終わらず強制終了したら警告と旧タブの記録へ残す', async () => {
+      const t = await started({ sessionSetup: haltOn(async () => ({ forced: true })) });
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(t.warnings.some((w) => w.includes('強制終了'))).toBe(true);
+      expect(t.session(0).note).toHaveBeenCalledTimes(2);
+      expect(t.session(1).runLoop).toHaveBeenCalledTimes(1);
+    });
+
+    it('止められなくても警告して引き継ぎは続ける', async () => {
+      const t = await started({
+        sessionSetup: haltOn(async () => {
+          throw new Error('止められない');
+        }),
+      });
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(t.warnings.some((w) => w.includes('止められませんでした'))).toBe(true);
+      expect(t.session(1).runLoop).toHaveBeenCalledTimes(1);
+    });
+
+    it('止める処理が返らなくても上限で打ち切って引き継ぎを続ける', async () => {
+      vi.useFakeTimers();
+      try {
+        const t = await started({ sessionSetup: haltOn(() => new Promise(() => undefined)) });
+        const handedOff = delegateOf(t)(HANDOFF);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(await handedOff).toBe(true);
+        expect(t.warnings.some((w) => w.includes('待ちきれませんでした'))).toBe(true);
+        expect(t.session(1).runLoop).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('止める口が無い（codex）なら何もせず引き継ぐ', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(t.warnings).toEqual([]);
+    });
   });
 
   it('引き継ぎ先のModel・Effortが空なら元のセッションの設定を使う', async () => {

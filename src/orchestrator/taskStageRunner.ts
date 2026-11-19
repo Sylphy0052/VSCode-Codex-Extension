@@ -142,6 +142,10 @@ import type { McpToolDefinition } from './messaging';
 import type { GitCommandRunner, WorktreeCreationQueue, WorktreeFileSystemPort } from './worktree';
 
 /** 工程セッションが申告した失敗の要約を、状態の`failure`へ残すときの上限。 */
+/** 引き継ぎで前の世代のCLIが自分で終わるのを待つ時間。過ぎたらシグナルで止める（Issue #2146）。 */
+const HANDOFF_HALT_GRACE_MS = 5_000;
+/** 子孫の終了待ち（3秒）、猶予、SIGKILLまでの待ち（3秒）を足した上限。過ぎたら待たずに先へ進む。 */
+const HANDOFF_HALT_TIMEOUT_MS = 15_000;
 const MAX_FAILURE_SUMMARY_LENGTH = 300;
 
 /** merge・削除の回答者判定の質問へタスク名（外部由来）を入れるときの上限。 */
@@ -1961,8 +1965,56 @@ export class TaskStageRunner {
     channel.binding.entry = entry;
     channel.binding.session = session;
     this.attach(entry, session);
+    // 引き継ぎ文書は旧世代が書き終えた後でここへ届く。新世代が最初の指示を受け取る前に、
+    // 同じ作業場所を触る旧世代のプロセスを止める（Issue #2146）
+    await this.haltPreviousGeneration(entry, previous, generation - 1);
     this.runLoop(entry, this.buildLoopPlan(ref, buildStageHandoffPrompt(ref, request.prompt)));
     return true;
+  }
+
+  /**
+   * 引き継いだ前の世代の進行中のターンを中断し、CLIの終了を待つ。タブは残す。止められない・
+   * 終わらないときも引き継ぎは止めず、強制終了や失敗を警告とタブの記録へ残す。
+   */
+  private async haltPreviousGeneration(
+    entry: LiveStageSession,
+    previous: TaskSession,
+    previousGeneration: number,
+  ): Promise<void> {
+    if (previous.haltProcess === undefined) {
+      return;
+    }
+    const taskId = entry.ref.taskId;
+    const label = `${taskId}の${String(previousGeneration)}代目のセッション`;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), HANDOFF_HALT_TIMEOUT_MS);
+    });
+    try {
+      const result = await Promise.race([
+        previous.haltProcess({ graceMs: HANDOFF_HALT_GRACE_MS }),
+        timedOut,
+      ]);
+      if (result === 'timeout') {
+        this.warn(
+          entry.runId,
+          taskId,
+          `${label}の終了を待ちきれませんでした（引き継ぎは続けます）`,
+        );
+      } else if (result?.forced === true) {
+        const text = `${label}が時間内に終わらなかったため、強制終了しました`;
+        this.warn(entry.runId, taskId, text);
+        previous.note(`task:handoff-forced:${entry.ref.attemptId}`, text);
+      }
+    } catch (e) {
+      this.warn(
+        entry.runId,
+        taskId,
+        `${label}を止められませんでした（引き継ぎは続けます）: ${errorMessage(e)}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async onFinished(

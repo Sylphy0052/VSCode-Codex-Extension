@@ -444,6 +444,13 @@ export interface TaskSession {
    * （`memoryFreed: false`）。呼んだ後のセッションは`dispose`済みとして扱う。
    */
   releaseForPause?(): Promise<{ memoryFreed: boolean }>;
+  /**
+   * 引き継ぎで前の世代を止める（Issue #2146）。進行中のターンを中断し、CLIとその子孫の終了を
+   * 待つ。タブと会話は残す（表示の問題として分け、プロセスは止める）。`graceMs`の間に終わらず
+   * シグナルで止めたら`forced`を`true`で返す。止めるプロセスが無ければ`undefined`。
+   * claudeだけが実装する（codexのapp-serverは全スレッドで共有しており、止められない）。
+   */
+  haltProcess?(options: { graceMs: number }): Promise<{ forced: boolean } | undefined>;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /**

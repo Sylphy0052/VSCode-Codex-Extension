@@ -4238,6 +4238,21 @@ export class ClaudeChatViewManager
         this.teardown(entry);
         return { memoryFreed: true };
       },
+      // 引き継ぎで前の世代を止める（Issue #2146）。進行中のターンを中断し、子孫（Bashなど）を
+      // 終わらせてからCLIを止める。タブは残し、次の送信で`--resume`できる
+      haltProcess: async ({ graceMs }) => {
+        const pid = entry.session.pid;
+        if (pid === undefined) {
+          return undefined;
+        }
+        entry.session.interrupt();
+        await terminateDescendants(pid).catch((e: unknown) => {
+          this.log.warn(
+            `[task handoff] 子プロセスを止められませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        });
+        return entry.session.halt({ cwd: entry.cwd, config: () => this.configFor(entry) }, graceMs);
+      },
       dispose: () => this.teardown(entry),
     };
   }
