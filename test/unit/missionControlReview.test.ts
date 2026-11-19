@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { GitCommandResult, GitCommandRunner } from '../../src/orchestrator/worktree';
 import {
@@ -32,7 +35,8 @@ function fakeGit(responses: Record<string, GitCommandResult>): {
   };
 }
 
-const TOP = '/repo';
+// diffSourceはrealpathで確かめるので、実在するディレクトリを使う
+const TOP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mc-review-')));
 const baseResponses = (
   overrides: Record<string, GitCommandResult> = {},
 ): Record<string, GitCommandResult> => ({
@@ -337,6 +341,36 @@ describe('ReviewTracker', () => {
     expect(tracker.observe([idle('b')]).has('b')).toBe(true);
   });
 
+  it('onChangeが例外を投げても列が止まらず、次のセッションを確かめる', async () => {
+    const onChange = vi.fn(() => {
+      throw new Error('view gone');
+    });
+    const { git } = fakeGit(baseResponses());
+    const tracker = new ReviewTracker(git, onChange, () => 0);
+    tracker.observe([idle('a'), idle('b')]);
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(2));
+    expect(tracker.observe([idle('a'), idle('b')]).size).toBe(2);
+  });
+
+  it('gitが後から失敗しても、直前の結果を消さず持ち越す', async () => {
+    let broken = false;
+    const base = fakeGit(baseResponses()).git;
+    const git: GitCommandRunner = {
+      run: (args, cwd, options) => (broken ? Promise.resolve(ng) : base.run(args, cwd, options)),
+    };
+    let now = 1_000_000;
+    const onChange = vi.fn();
+    const tracker = new ReviewTracker(git, onChange, () => now);
+    tracker.observe([idle()]);
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+    broken = true;
+    now += REVIEW_RECHECK_MS + 1;
+    tracker.observe([idle()]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(tracker.observe([idle()]).has('s1')).toBe(true);
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
   it('acknowledgeで消え、変更が増えると再び出る', async () => {
     let numstat = '1\t2\ta.ts\0';
     const { git } = fakeGit({});
@@ -444,6 +478,22 @@ describe('ReviewTracker', () => {
       const { tracker } = setup();
       tracker.observe([idle()]);
       expect(tracker.diffSource('s1', 'a.ts')).toBeUndefined();
+    });
+
+    it('symlinkでtoplevelの外へ出るファイルは拒否する', async () => {
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-outside-'));
+      fs.writeFileSync(path.join(outside, 'secret.txt'), 'x');
+      fs.symlinkSync(outside, path.join(TOP, 'link'));
+      fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(TOP, 'file-link'));
+      fs.writeFileSync(path.join(TOP, 'inside.ts'), 'x');
+      const tracker = await loaded(
+        '1\t1\tlink/secret.txt\0' + '1\t1\tfile-link\0' + '1\t1\tinside.ts\0' + '1\t1\tgone.ts\0',
+      );
+      expect(tracker.diffSource('s1', 'link/secret.txt')).toBeUndefined();
+      expect(tracker.diffSource('s1', 'file-link')).toBeUndefined();
+      expect(tracker.diffSource('s1', 'inside.ts')).toBeDefined();
+      // 消したファイル（実体なし）は、親がtoplevel内なら開ける
+      expect(tracker.diffSource('s1', 'gone.ts')).toBeDefined();
     });
 
     it('toplevel内の`..`始まりのファイル名は拒否しない', async () => {

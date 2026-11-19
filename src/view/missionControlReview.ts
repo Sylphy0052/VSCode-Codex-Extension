@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { GitCommandRunner } from '../orchestrator/worktree';
 import type { McActivity, McReview, McReviewFile } from '../webview/missionControl/protocol';
@@ -231,6 +232,10 @@ export class ReviewTracker {
     if (relative === '' || escapes || path.isAbsolute(relative)) {
       return undefined;
     }
+    // symlinkでtoplevelの外へ出るファイルは開かない（実体のパスで確かめる）
+    if (!staysInside(changes.toplevel, absolute)) {
+      return undefined;
+    }
     return { toplevel: changes.toplevel, base: changes.base, file: found };
   }
 
@@ -271,21 +276,65 @@ export class ReviewTracker {
         if (entry === undefined || this.disposed) {
           continue;
         }
-        const changes = await readWorkingChanges(this.git, entry.cwd).catch(() => undefined);
+        // gitが一時的に失敗したときは、直前の結果を消さず次の確認まで持ち越す
+        let changes: WorkingChanges | undefined;
+        let failed = false;
+        try {
+          changes = await readWorkingChanges(this.git, entry.cwd);
+        } catch {
+          failed = true;
+        }
         // 確かめている間に外された・cwdが変わったセッションの結果は捨てる
         if (this.disposed || this.entries.get(key) !== entry) {
           continue;
         }
-        const before = entry.fingerprint;
         entry.checkedAt = this.now();
+        // 読めなかった（例外、またはgitの非0終了）ときも、前の結果があれば残す
+        if (failed || (changes === undefined && entry.changes !== undefined)) {
+          continue;
+        }
+        const before = entry.fingerprint;
         entry.changes = changes;
         entry.fingerprint = changes === undefined ? undefined : reviewFingerprint(changes);
         if (before !== entry.fingerprint) {
-          this.onChange();
+          try {
+            this.onChange();
+          } catch {
+            // 画面側の例外で列を止めない
+          }
         }
       }
     } finally {
       this.running = false;
     }
+  }
+}
+
+/** `target`の実体が`root`の実体の配下にあるか。消えたファイルは、残っている親の実体で見る。 */
+function staysInside(root: string, target: string): boolean {
+  try {
+    const realRoot = fs.realpathSync(root);
+    let probe = target;
+    for (;;) {
+      try {
+        const real = fs.realpathSync(probe);
+        const relative = path.relative(realRoot, real);
+        return (
+          relative === '' ||
+          !(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return false;
+        }
+        const parent = path.dirname(probe);
+        if (parent === probe) {
+          return false;
+        }
+        probe = parent;
+      }
+    }
+  } catch {
+    return false;
   }
 }

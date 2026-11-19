@@ -244,6 +244,7 @@ import {
   readMissionControlStallMs,
 } from './view/missionControlLauncher';
 import { MISSION_CONTROL_OPEN_COMMAND, MissionControlViewManager } from './view/missionControlView';
+import { withSafeGitConfig } from './view/missionControlGit';
 import { ReviewTracker } from './view/missionControlReview';
 import {
   RUNNING_TURNS_KEY,
@@ -1870,7 +1871,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const missionControlRepoResolver = createRepoResolver();
   const missionControlActivitySince = new ActivitySince();
   // レビュー待ち（Issue #2138の1）。gitは裏で1件ずつ走らせ、結果が変わったら画面を更新する
-  const missionControlReview = new ReviewTracker(nodeGitCommandRunner, () =>
+  const missionControlReview = new ReviewTracker(withSafeGitConfig(nodeGitCommandRunner), () =>
     missionControl.refresh(),
   );
   // Reloadで切れた会話（Issue #2138の3）。前回の起動で実行中だった分を読み出して「再開待ち」にする
@@ -1888,7 +1889,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   ];
   const missionControlHost = createMissionControlHost({
     review: missionControlReview,
-    git: nodeGitCommandRunner,
+    git: withSafeGitConfig(nodeGitCommandRunner),
     windowId,
     resumable: missionControlResumable,
     forgetResumable: (entry) => runningTurnJournal.forget(entry),

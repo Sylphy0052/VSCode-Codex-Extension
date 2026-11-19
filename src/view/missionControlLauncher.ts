@@ -6,6 +6,7 @@ import {
   nodeWorktreeFileSystem,
   WorktreeCreationQueue,
 } from '../orchestrator/worktree';
+import { withSafeGitConfig } from './missionControlGit';
 import type { McProvider } from '../webview/missionControl/protocol';
 import {
   buildLaunchRepos,
@@ -92,7 +93,7 @@ export function createMissionControlLauncher(deps: MissionControlLauncherDeps): 
     },
     async launch(request) {
       const result = await launchMissionControlSession(request, {
-        git: nodeGitCommandRunner,
+        git: withSafeGitConfig(nodeGitCommandRunner),
         worktreeFs: nodeWorktreeFileSystem,
         worktrees,
         isDirectory,
