@@ -46,7 +46,11 @@ export type McKeyCommand =
   | { kind: 'turnOlder' }
   // Issue #2158: 指示欄（Composer）の添付・送信キュー
   | { kind: 'attach' }
-  | { kind: 'queue' };
+  | { kind: 'queue' }
+  // 実行中セッションの設定（Issue #2159）
+  | { kind: 'settings' }
+  | { kind: 'planMode' }
+  | { kind: 'fastMode' };
 
 export interface McKeyInput {
   key: string;
@@ -275,6 +279,26 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     label: '送信キューを開く / 閉じる（↑ / ↓で移動、Deleteで取り消す）',
     contextual: true,
     command: { kind: 'queue' },
+  },
+  // 実行中セッションの設定もShift付きにする（Issue #2159。アクセスキーの英字を減らさない）
+  {
+    keys: ['Shift+m'],
+    label:
+      '設定欄へ移る（model・effort・承認レベルを↑ / ↓で選び、Ctrl+Enterで変更する。次のターンから効く）',
+    contextual: true,
+    command: { kind: 'settings' },
+  },
+  {
+    keys: ['Shift+l'],
+    label: 'Plan modeに入る / 抜ける（次のターンから効く）',
+    contextual: true,
+    command: { kind: 'planMode' },
+  },
+  {
+    keys: ['Shift+t'],
+    label: 'Fast modeを切り替える（Claudeだけ）',
+    contextual: true,
+    command: { kind: 'fastMode' },
   },
   {
     keys: [':'],
