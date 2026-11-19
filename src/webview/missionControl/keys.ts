@@ -50,7 +50,12 @@ export type McKeyCommand =
   // 実行中セッションの設定（Issue #2159）
   | { kind: 'settings' }
   | { kind: 'planMode' }
-  | { kind: 'fastMode' };
+  | { kind: 'fastMode' }
+  // 選んだセッションへのrename・fork・pin・clear・引き継ぎ・巻き戻し（Issue #2160）
+  | { kind: 'sessionOp'; op: McSessionOp };
+
+/** 選んだセッションへの操作（Issue #2160）。`pin`はピン留めの付け外しを切り替える。 */
+export type McSessionOp = 'rename' | 'fork' | 'pin' | 'clear' | 'handoff' | 'rewind';
 
 export interface McKeyInput {
   key: string;
@@ -299,6 +304,43 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     label: 'Fast modeを切り替える（Claudeだけ）',
     contextual: true,
     command: { kind: 'fastMode' },
+  },
+  // 選んだセッションへの操作もShift付きにする（Issue #2160。アクセスキーの英字を減らさない）
+  {
+    keys: ['Shift+r'],
+    label: '選んだセッションの名前を変える',
+    contextual: true,
+    command: { kind: 'sessionOp', op: 'rename' },
+  },
+  {
+    keys: ['Shift+b'],
+    label: '選んだセッションを分岐する（会話全体を複製した新しいセッションを開く）',
+    contextual: true,
+    command: { kind: 'sessionOp', op: 'fork' },
+  },
+  {
+    keys: ['Shift+i'],
+    label: '選んだセッションをピン留めする / 外す',
+    contextual: true,
+    command: { kind: 'sessionOp', op: 'pin' },
+  },
+  {
+    keys: ['Shift+c'],
+    label: '選んだセッションの会話をクリアする（確認を出す）',
+    contextual: true,
+    command: { kind: 'sessionOp', op: 'clear' },
+  },
+  {
+    keys: ['Shift+h'],
+    label: '選んだセッションを新しいセッションへ引き継ぐ',
+    contextual: true,
+    command: { kind: 'sessionOp', op: 'handoff' },
+  },
+  {
+    keys: ['Shift+z'],
+    label: '選んだセッションを発言の時点まで巻き戻す（Claudeだけ。確認を出す）',
+    contextual: true,
+    command: { kind: 'sessionOp', op: 'rewind' },
   },
   {
     keys: [':'],
