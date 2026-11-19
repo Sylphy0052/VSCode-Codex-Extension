@@ -120,6 +120,7 @@ import {
   readLoopDoneCheckConfig,
   readClaudeAutoSwitchConfig,
   readClaudeConfig,
+  readClaudeSandboxExtraExcludedCommands,
   readConfig,
   readIdleShutdownMinutes,
   readWorkflowsConfig,
@@ -578,7 +579,11 @@ function openShellCommandTerminal(cwd: string, command: string): void {
  * ユーザー設定・YAMLの経路とは無関係（§16.16の信頼境界を壊さない。`TaskSessionConfig`
  * 自体に`additionalArgs`が無いことがそれを裏付ける）。
  */
-function toClaudeConfig(input: TaskSessionInput, sandboxArgs: readonly string[]): ClaudeConfig {
+function toClaudeConfig(
+  input: TaskSessionInput,
+  sandboxArgs: readonly string[],
+  extraExcludedCommands: readonly string[] = [],
+): ClaudeConfig {
   return {
     model: input.config.model,
     effort: input.config.effort,
@@ -595,7 +600,9 @@ function toClaudeConfig(input: TaskSessionInput, sandboxArgs: readonly string[])
         : []),
       ...sandboxArgs,
     ],
-    ...(sandboxArgs.length > 0 ? { sandboxBashGuard: true } : {}),
+    ...(sandboxArgs.length > 0
+      ? { sandboxBashGuard: true, sandboxExtraExcludedCommands: [...extraExcludedCommands] }
+      : {}),
   };
 }
 
@@ -2977,7 +2984,18 @@ export class ClaudeChatViewManager
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     // sandboxの起動引数は`taskConfig.additionalArgs`へ入れる。同じパネルでCLIを起動し直す
     // （モデル変更・中断後の再開）ときも`configFor`がこれを読むため、sandboxが外れない
-    const taskConfig = toClaudeConfig(input, await this.resolveSandboxArgs(input));
+    // 設定で足した除外パターン（Issue #2133）は、sandboxの設定・指示文・hookの判定へ同じ値を渡す
+    const { commands: extraExcludedCommands, unsafe } = readClaudeSandboxExtraExcludedCommands();
+    if (input.cliSandbox !== undefined && unsafe.length > 0) {
+      this.log.warn(
+        `agent.claude.sandbox.extraExcludedCommandsのうち ${unsafe.join(' / ')} は、どんなコマンドでもsandboxの外へ出せてしまうため使わない（Issue #2133）`,
+      );
+    }
+    const taskConfig = toClaudeConfig(
+      input,
+      await this.resolveSandboxArgs(input, extraExcludedCommands),
+      extraExcludedCommands,
+    );
     // 一時停止した工程の再開（Issue #1629）は新しい会話を作らず、同じ会話を`-r`で開き直す
     const resumeId = input.resume?.sessionId;
     // CLIが会話を書き出す前に終わった会話（最初の指示の処理前など）は`-r`で開けないため、
@@ -3047,7 +3065,10 @@ export class ClaudeChatViewManager
    * 同じ判断を済ませる（`probeClaudeSandbox`）。作業ディレクトリの中身のせいでsandbox内の
    * Bashが全て失敗する場合も、sandbox無しで起動する（`ClaudeSandboxProbe.checkCwd`、Issue #1630）。
    */
-  private async resolveSandboxArgs(input: TaskSessionInput): Promise<string[]> {
+  private async resolveSandboxArgs(
+    input: TaskSessionInput,
+    extraExcludedCommands: readonly string[],
+  ): Promise<string[]> {
     if (input.cliSandbox === undefined) {
       return [];
     }
@@ -3065,7 +3086,12 @@ export class ClaudeChatViewManager
     if (!inspection.ok) {
       return withoutSandbox(inspection.reason);
     }
-    return claudeSandboxArgs(input.cliSandbox, input.cwd, availability.environment);
+    return claudeSandboxArgs(
+      input.cliSandbox,
+      input.cwd,
+      availability.environment,
+      extraExcludedCommands,
+    );
   }
 
   /** 既存のセッションを開く。過去のやり取りはtranscriptから復元する。 */

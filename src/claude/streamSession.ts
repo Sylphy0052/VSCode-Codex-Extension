@@ -151,6 +151,8 @@ export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
   /** sandboxの外へ回らない形のネットワークコマンドを止めるhookを登録するか（Issue #1668）。 */
   private sandboxBashGuard = false;
+  /** 設定で足したsandboxの除外パターン。hookの判定へ渡す（Issue #2133）。 */
+  private sandboxExtraExcludedCommands: readonly string[] = [];
   /** 直近の起動でargvへ載せたmodel/effort（Issue #2016）。 */
   private launchedModel: { model: string; effort: string } | undefined;
   private buffer = '';
@@ -412,6 +414,7 @@ export class ClaudeStreamSession {
       autoCompactLimit: readClaudeAutoCompactWindow(options.cwd, undefined, undefined, this.log),
     };
     this.sandboxBashGuard = options.config.sandboxBashGuard === true;
+    this.sandboxExtraExcludedCommands = options.config.sandboxExtraExcludedCommands ?? [];
 
     this.launch(options);
 
@@ -1867,7 +1870,12 @@ export class ClaudeStreamSession {
   private handleControlRequest(request: IncomingControlRequest): void {
     if (request.subtype === 'hook_callback') {
       // 登録するhookはsandboxのBash判定だけ（Issue #1668）。知らないidには空（続行）を返す
-      this.write(buildControlResponse(request.requestId, answerSandboxBashGuard(request.payload)));
+      this.write(
+        buildControlResponse(
+          request.requestId,
+          answerSandboxBashGuard(request.payload, this.sandboxExtraExcludedCommands),
+        ),
+      );
       return;
     }
     if (request.subtype !== 'can_use_tool') {
