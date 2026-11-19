@@ -636,6 +636,18 @@ describe('SessionHubRequestWatcher', () => {
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining('sendの要求を受け付けました'));
   });
 
+  it('名前の変更と巻き戻しの要求は名前と発言のidを渡す（Issue #2160）', async () => {
+    const handler = vi.fn((): SessionHubRequestOutcome => ({ ok: true }));
+    const rename = await putRequest(target, { kind: 'rename', name: '新しい名前' });
+    const rewind = await putRequest(target, { kind: 'rewind', messageId: 'u-1' });
+    makeWatcher(handler).start();
+    await until(() => exists(replyPath(rewind.requestId)));
+    await until(() => exists(replyPath(rename.requestId)));
+    const reqs = handler.mock.calls.map((c) => (c as unknown as [SessionHubRequest])[0]);
+    expect(reqs.find((r) => r.kind === 'rename')).toMatchObject({ name: '新しい名前' });
+    expect(reqs.find((r) => r.kind === 'rewind')).toMatchObject({ messageId: 'u-1' });
+  });
+
   it('start後に置かれた要求もfs.watchで拾い、同期ハンドラの結果も返せる', async () => {
     const handler = vi.fn((): SessionHubRequestOutcome => ({ ok: false, error: 'nope' }));
     makeWatcher(handler).start();
@@ -931,6 +943,42 @@ describe('SessionHubRequestPort', () => {
     expect(sq?.question).toHaveLength(2000);
     expect(sq?.answer).toHaveLength(8000);
     expect(sq?.error).toHaveLength(2000);
+  });
+
+  it('巻き戻しで戻るファイルを応答から読む（Issue #2160）', async () => {
+    respondWith(target, (requestId) =>
+      JSON.stringify({ requestId, ok: true, payload: { rewindFiles: [] } }),
+    );
+    const empty = await makePort().request(target, {
+      kind: 'rewindPreview',
+      provider: 'claude',
+      threadId: 't',
+      messageId: 'u-1',
+    });
+    expect(empty.payload).toEqual({ rewindFiles: [] });
+  });
+
+  it('直近のやり取りは人の発言のidだけを形を確かめて読む（Issue #2160）', async () => {
+    respondWith(target, (requestId) =>
+      JSON.stringify({
+        requestId,
+        ok: true,
+        payload: {
+          capturedAt: 1,
+          turns: [
+            { role: 'user', text: 'a', truncated: false, id: 'u-1' },
+            { role: 'agent', text: 'b', truncated: false, id: 'x' },
+            { role: 'user', text: 'c', truncated: false, id: 'bad\nid' },
+          ],
+        },
+      }),
+    );
+    const turns = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'claude',
+      threadId: 't',
+    });
+    expect(turns.payload?.turns?.map((t) => t.id)).toEqual(['u-1', undefined, undefined]);
   });
 
   it('脇道の質問の応答は不正なstatusならpayloadごと捨てる', async () => {

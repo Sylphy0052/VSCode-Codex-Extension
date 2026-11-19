@@ -4786,9 +4786,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    */
   private async forkFrom(
     entry: ChatPanel,
-    turnId: string,
+    /** `undefined`は会話全体の分岐（Mission Controlの分岐。Issue #2160）。 */
+    turnId: string | undefined,
     title = '分岐',
-    progressTitle = 'この指示から分岐しています…',
+    progressTitle = turnId === undefined ? '会話を分岐しています…' : 'この指示から分岐しています…',
   ): Promise<string | undefined> {
     const threadId = entry.session.threadId;
     if (threadId === undefined) {
@@ -4797,7 +4798,11 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
 
     const response = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: progressTitle },
-      () => this.connection.request('thread/fork', { threadId, beforeTurnId: turnId }),
+      () =>
+        this.connection.request(
+          'thread/fork',
+          turnId === undefined ? { threadId } : { threadId, beforeTurnId: turnId },
+        ),
     );
 
     const newThreadId = readForkedThreadId(response.result);
@@ -4907,13 +4912,18 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
 
     try {
-      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
-      // 付け直しが保存の直前に印を見るため、保存より先に付ける
-      await this.autoName?.marks.add(pinKeyFor({ provider: 'codex', id: entry.session.threadId }));
-      await entry.session.setName(name.trim());
+      await this.applyName(entry, entry.session.threadId, name.trim());
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /** 名前を保存する。コマンドとMission Controlの名前の変更（Issue #2160）が通る。 */
+  private async applyName(entry: ChatPanel, threadId: string, name: string): Promise<void> {
+    // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
+    // 付け直しが保存の直前に印を見るため、保存より先に付ける
+    await this.autoName?.marks.add(pinKeyFor({ provider: 'codex', id: threadId }));
+    await entry.session.setName(name);
   }
 
   /**
@@ -4959,6 +4969,51 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const cwd = entry.cwd;
     this.teardown(entry);
     await this.openNew(cwd);
+  }
+
+  /**
+   * Mission Controlからのクリア（Issue #2160）。確認は要求元が出し済みなので、ここでは
+   * ダイアログを出さず、断る理由を返す（別ウィンドウから操作した人にも見えるように）。
+   */
+  protected override async clearFromHub(entry: ChatPanel): Promise<string | undefined> {
+    if (entry.taskManaged) {
+      return 'タスクが動かしている画面はクリアできません';
+    }
+    const cwd = entry.cwd;
+    this.teardown(entry);
+    await this.openNew(cwd);
+    return undefined;
+  }
+
+  /** Mission Controlからの名前の変更（Issue #2160）。 */
+  protected override async renameEntry(
+    entry: ChatPanel,
+    name: string,
+  ): Promise<string | undefined> {
+    if (entry.session.threadId === undefined) {
+      return 'まだ始まっていない会話には名前を付けられません';
+    }
+    await this.applyName(entry, entry.session.threadId, name);
+    return undefined;
+  }
+
+  /** Mission Controlからの分岐（Issue #2160）。ターンを指定しない分岐は会話の末尾から分岐する。 */
+  protected override async forkEntry(entry: ChatPanel): Promise<string | undefined> {
+    if (entry.session.threadId === undefined) {
+      return 'まだ始まっていない会話は分岐できません';
+    }
+    const name = entry.session.getState().name ?? entry.session.threadId.slice(0, 8);
+    const forked = await this.forkFrom(entry, undefined, `${name} (fork)`);
+    return forked === undefined ? '分岐できませんでした' : undefined;
+  }
+
+  /** Mission Controlからの引き継ぎ（Issue #2160）。押下元のentryを固定して渡す。 */
+  protected override startHandoffFromHub(entry: ChatPanel): string | undefined {
+    if (this.handoffPreparing.has(entry)) {
+      return '引き継ぎを準備しています。終わるまでお待ちください';
+    }
+    void this.requestHandoff(entry, { kind: 'manual' });
+    return undefined;
   }
 
   /**

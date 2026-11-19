@@ -362,7 +362,30 @@ export type SessionControlAction =
    * 設定を1つ変える（Issue #2159）。全承認の同意ダイアログを待つため非同期で、
    * `controlSessionAsync`が扱う。
    */
-  | { kind: 'changeSetting'; change: SessionSettingChange };
+  | { kind: 'changeSetting'; change: SessionSettingChange }
+  // Issue #2160: 選んだセッションへのrename・fork・pin・clear・引き継ぎ・巻き戻し。
+  // 確認（clear・巻き戻し）はMission Controlが出してから送る。受信側はダイアログを出さない
+  /** 名前を変える。`name`は`parseSessionName`で確かめた値。 */
+  | { kind: 'rename'; name: string }
+  /** 会話全体を分岐して新しいタブで開く（宛先のウィンドウに開く）。 */
+  | { kind: 'fork' }
+  /**
+   * 履歴のピン留め / 解除。印は全ウィンドウ共通の`globalState`にあり会話に属さないため、
+   * `extension.ts`が要求元のウィンドウで済ませる。ここへ届いたら断る。
+   */
+  | { kind: 'pin' }
+  | { kind: 'unpin' }
+  /** 会話を捨てて同じフォルダで新しい会話を始める（`/clear`相当）。 */
+  | { kind: 'clear' }
+  /** 新しいセッションへの引き継ぎを始める（コマンドの「引き継ぎ」と同じ手動の契機）。 */
+  | { kind: 'handoff' }
+  /**
+   * 巻き戻しで戻るファイルを確かめる（Claudeだけ）。`messageId`は人の発言の固定のid
+   * （`SessionRecentTurn.id`）。位置や本文では、選ぶまでに会話が進むと別の発言を指すため。
+   */
+  | { kind: 'rewindPreview'; messageId: string }
+  /** ファイルを指定した発言の直前まで戻す（Claudeだけ。会話の履歴には触れない）。 */
+  | { kind: 'rewind'; messageId: string };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -389,7 +412,19 @@ export interface SessionControlResult {
   queued?: SessionQueuedMessage[] | undefined;
   /** `kind === 'sessionSettings'` / `'changeSetting'`のときだけ入る（Issue #2159）。 */
   settings?: SessionSettingsDetail | undefined;
+  /** `kind === 'rewindPreview'`のときだけ入る、戻すと変わるファイル（Issue #2160）。 */
+  rewindFiles?: string[] | undefined;
 }
+
+/** Mission Controlからの操作のうち、待ちを伴うため`controlSessionAsync`が扱うもの（Issue #2160）。 */
+const ASYNC_SESSION_OPS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'rename',
+  'fork',
+  'clear',
+  'handoff',
+  'rewindPreview',
+  'rewind',
+]);
 
 /**
  * 投げた脇道の質問1件の状態（Issue #1261）。
@@ -645,6 +680,8 @@ function toRecentTurn(item: ChatItem): SessionRecentTurn | undefined {
     return {
       role: item.kind === 'userMessage' ? 'user' : 'agent',
       ...capText(text, MAX_RECENT_TURN_CHARS),
+      // 巻き戻しの起点の指定に使う（Issue #2160）。会話の画面の巻き戻しボタンと同じ値
+      ...(item.kind === 'userMessage' && item.id !== '' ? { id: item.id } : {}),
     };
   }
   if (item.kind === 'fileChange') {
@@ -1719,6 +1756,18 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       case 'changeSetting':
         // 全承認の同意ダイアログを待つため非同期。`controlSessionAsync`が扱う
         return { ok: false, error: 'この操作は設定変更の口から呼んでください' };
+      case 'pin':
+      case 'unpin':
+        // 履歴の印は会話に属さない。`extension.ts`が要求元のウィンドウで済ませる
+        return { ok: false, error: 'ピン留めは会話への操作として扱えません' };
+      case 'rename':
+      case 'fork':
+      case 'clear':
+      case 'handoff':
+      case 'rewindPreview':
+      case 'rewind':
+        // 保存・分岐・CLIへの問い合わせを待つため非同期。`controlSessionAsync`が扱う
+        return { ok: false, error: 'この操作はセッション操作の口から呼んでください' };
     }
   }
 
@@ -1733,7 +1782,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     if (
       action.kind !== 'fileCandidates' &&
       action.kind !== 'commandCandidates' &&
-      action.kind !== 'changeSetting'
+      action.kind !== 'changeSetting' &&
+      !ASYNC_SESSION_OPS.has(action.kind)
     ) {
       return this.controlSession(threadId, action);
     }
@@ -1746,6 +1796,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     if (action.kind === 'changeSetting') {
       return this.changeSettingFromHub(entry, action.change);
+    }
+    if (ASYNC_SESSION_OPS.has(action.kind)) {
+      try {
+        return await this.sessionOpFromHub(entry, action);
+      } catch (e: unknown) {
+        return {
+          ok: false,
+          error: `操作に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
     }
     try {
       if (action.kind === 'fileCandidates') {
@@ -1782,6 +1842,125 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         settings: this.sessionSettingsOf(entry),
       };
     }
+  }
+
+  /**
+   * Mission Controlで選んだセッションへのrename・fork・clear・引き継ぎ・巻き戻し（Issue #2160）。
+   *
+   * 確認（clear・巻き戻し）は要求元のMission Controlが出し済み。受信側のウィンドウにダイアログを
+   * 出すと、別ウィンドウから操作した人には見えないまま止まるため、ここでは出さずに結果を返す。
+   */
+  private async sessionOpFromHub(
+    entry: TPanel,
+    action: SessionControlAction,
+  ): Promise<SessionControlResult> {
+    const done = (error: string | undefined): SessionControlResult =>
+      error === undefined ? { ok: true } : { ok: false, error };
+    switch (action.kind) {
+      case 'rename':
+        return done(await this.renameEntry(entry, action.name));
+      case 'fork':
+        return done(await this.forkEntry(entry));
+      case 'clear':
+        return done(await this.clearFromHub(entry));
+      case 'handoff':
+        return done(this.startHandoffFromHub(entry));
+      case 'rewindPreview':
+      case 'rewind': {
+        // 起点は人の発言の固定のidで指す。今の会話に無いidは、取り寄せた後に会話が
+        // 作り直された（clear等）か別の会話のidなので、近い発言へ倒さずに断る
+        const found = entry.session
+          .getState()
+          .items.some((item) => item.kind === 'userMessage' && item.id === action.messageId);
+        if (!found) {
+          return {
+            ok: false,
+            error: 'この発言は会話に見つかりませんでした（会話が変わった可能性があります）',
+          };
+        }
+        if (action.kind === 'rewindPreview') {
+          const preview = await this.previewRewind(entry, action.messageId);
+          if ('error' in preview) {
+            this.rewindPreviews.delete(entry);
+            return { ok: false, error: preview.error };
+          }
+          this.rewindPreviews.set(entry, { messageId: action.messageId, files: preview.files });
+          return { ok: true, rewindFiles: preview.files };
+        }
+        return done(await this.rewindFromHub(entry, action.messageId));
+      }
+      default:
+        return { ok: false, error: 'この操作は扱えません' };
+    }
+  }
+
+  /**
+   * Mission Controlで確かめた巻き戻しの内容（Issue #2160）。entryごとに最後の1件だけ持つ。
+   * 確かめてから押すまでに会話が進むと戻るファイルが増えるため、押したときに見せた一覧と
+   * 突き合わせる。
+   */
+  private readonly rewindPreviews = new WeakMap<
+    TPanel,
+    { messageId: string; files: readonly string[] }
+  >();
+
+  /**
+   * Mission Controlからの巻き戻しの適用（Issue #2160）。確かめた発言・ファイルと今の状態が
+   * 食い違うときは戻さずに断る（人が見ていないファイルまで戻さないように）。
+   */
+  private async rewindFromHub(entry: TPanel, messageId: string): Promise<string | undefined> {
+    const confirmed = this.rewindPreviews.get(entry);
+    if (confirmed?.messageId !== messageId) {
+      return '戻るファイルを確かめてから巻き戻してください';
+    }
+    if (entry.session.getState().busy) {
+      return '実行中の会話は戻せません。中断してから戻してください';
+    }
+    const current = await this.previewRewind(entry, messageId);
+    if ('error' in current) {
+      this.rewindPreviews.delete(entry);
+      return current.error;
+    }
+    const before = [...confirmed.files].sort();
+    const after = [...current.files].sort();
+    if (before.length !== after.length || before.some((file, i) => file !== after[i])) {
+      this.rewindPreviews.set(entry, { messageId, files: current.files });
+      return '確かめた後に戻るファイルが変わりました。確かめ直してください';
+    }
+    if (current.files.length === 0) {
+      return '戻すファイルの変更はありません';
+    }
+    // 確かめた後に会話が動き出していないか、問い合わせを待った後にもう一度見る
+    if (entry.session.getState().busy) {
+      return '実行中の会話は戻せません。中断してから戻してください';
+    }
+    this.rewindPreviews.delete(entry);
+    return this.applyRewind(entry, messageId);
+  }
+
+  /** 名前を変える（Issue #2160）。値は確かめ済み。変えられなかったときは理由の文を返す。 */
+  protected abstract renameEntry(entry: TPanel, name: string): Promise<string | undefined>;
+
+  /** 会話全体を分岐して新しいタブで開く（Issue #2160）。 */
+  protected abstract forkEntry(entry: TPanel): Promise<string | undefined>;
+
+  /** 確認なしでクリアする（Issue #2160。確認は要求元が出し済み）。 */
+  protected abstract clearFromHub(entry: TPanel): Promise<string | undefined>;
+
+  /** 手動の引き継ぎを始める（Issue #2160）。完了は待たない。始められなければ理由の文を返す。 */
+  protected abstract startHandoffFromHub(entry: TPanel): string | undefined;
+
+  /** 巻き戻しで戻るファイル（Issue #2160）。既定は扱えない（Claudeだけが上書きする）。 */
+  protected previewRewind(
+    _entry: TPanel,
+    _messageId: string,
+  ): Promise<{ files: string[] } | { error: string }> {
+    return Promise.resolve({ error: '巻き戻しはClaudeのセッションだけで使えます' });
+  }
+
+  /** ファイルを発言の直前まで戻す（Issue #2160）。既定は扱えない（Claudeだけが上書きする）。 */
+  protected applyRewind(_entry: TPanel, _messageId: string): Promise<string | undefined> {
+    return Promise.resolve('巻き戻しはClaudeのセッションだけで使えます');
   }
 
   /** 今のmodel・effort・承認レベル・plan/fast mode（Issue #2159）。 */

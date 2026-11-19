@@ -765,7 +765,19 @@ export type SessionHubRequestKind =
   | 'cancelQueued'
   /** Mission Controlから実行中セッションの設定を見る・変える（Issue #2159）。 */
   | 'sessionSettings'
-  | 'changeSetting';
+  | 'changeSetting'
+  /**
+   * Mission Controlで選んだセッションへの操作（Issue #2160）。`pin` / `unpin`は履歴の印で
+   * 会話に属さないため要求元のウィンドウで済ませるが、版の違う相手から届いても扱えるよう列挙する。
+   */
+  | 'rename'
+  | 'fork'
+  | 'pin'
+  | 'unpin'
+  | 'clear'
+  | 'handoff'
+  | 'rewindPreview'
+  | 'rewind';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -920,6 +932,41 @@ export interface SessionRecentTurn {
   truncated: boolean;
   /** `tool` / `diff`の見出し（コマンド行・ツール名・変更したファイル）。 */
   title?: string | undefined;
+  /**
+   * 人の発言（`role === 'user'`）の固定のid（Issue #2160）。巻き戻しの起点の指定に使う。
+   * 表示テキストや位置では、取り寄せてから選ぶまでに会話が進むと別の発言を指すため。
+   */
+  id?: string | undefined;
+}
+
+/** 発言のidの長さの上限。ClaudeのメッセージidはUUIDで、これより十分短い（Issue #2160）。 */
+export const MAX_TURN_ID_CHARS = 256;
+
+/** セッション名の長さの上限（Issue #2160）。タブ・履歴に出して読める長さ。 */
+export const MAX_SESSION_NAME_CHARS = 200;
+
+/**
+ * 名前の変更で届いた名前を、信用せずに読み解く（Issue #2160）。前後の空白を落とし、空・改行入り・
+ * 上限超えは`undefined`にする。webviewと別ウィンドウの要求ファイルのどちらから届いた値もここを通す。
+ */
+export function parseSessionName(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const name = value.trim();
+  return name === '' || name.length > MAX_SESSION_NAME_CHARS || /[\r\n]/u.test(name)
+    ? undefined
+    : name;
+}
+
+/** 巻き戻しの起点の発言のidを形だけ確かめる（Issue #2160）。会話との突き合わせは受信側が行う。 */
+export function parseTurnId(value: unknown): string | undefined {
+  return typeof value === 'string' &&
+    value !== '' &&
+    value.length <= MAX_TURN_ID_CHARS &&
+    !/[\r\n]/u.test(value)
+    ? value
+    : undefined;
 }
 
 /**
@@ -1062,6 +1109,8 @@ export interface SessionHubReplyPayload {
   queued?: SessionQueuedMessage[] | undefined;
   /** `kind === 'sessionSettings'` / `'changeSetting'`の応答（Issue #2159）。 */
   settings?: SessionSettingsDetail | undefined;
+  /** `kind === 'rewindPreview'`の応答（Issue #2160）。戻すと変わるファイル。 */
+  rewindFiles?: string[] | undefined;
 }
 
 /** スラッシュコマンドの候補1件（`SlashCommand`と同じ形。Issue #2158）。 */
@@ -1147,6 +1196,10 @@ export interface SessionHubRequest {
   settingValue?: string | boolean | undefined;
   /** `kind === 'cancelQueued'`のときの項目id。 */
   queuedId?: string | undefined;
+  /** `kind === 'rename'`のときの新しい名前（Issue #2160）。受信側が検証する。 */
+  name?: string | undefined;
+  /** `kind === 'rewindPreview'` / `'rewind'`のときの戻す起点の発言のid（Issue #2160）。 */
+  messageId?: string | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -1248,6 +1301,8 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     query: typeof v.query === 'string' ? v.query : undefined,
     index: typeof v.index === 'number' ? v.index : undefined,
     queuedId: typeof v.queuedId === 'string' ? v.queuedId : undefined,
+    name: typeof v.name === 'string' ? v.name : undefined,
+    messageId: typeof v.messageId === 'string' ? v.messageId : undefined,
     setting: typeof v.setting === 'string' ? v.setting : undefined,
     settingValue:
       typeof v.settingValue === 'string' || typeof v.settingValue === 'boolean'
@@ -1414,6 +1469,10 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
   }
   if (Array.isArray(v.queued)) {
     return { queued: parseQueuedMessages(v.queued) };
+  }
+  // Issue #2160: 巻き戻しで戻るファイル。形は補完の候補と同じ（相対・絶対のパスの配列）
+  if (Array.isArray(v.rewindFiles)) {
+    return { rewindFiles: parseCandidateFiles(v.rewindFiles) };
   }
   // Issue #2159: 実行中セッションの設定
   if (v.settings !== undefined) {
@@ -1595,6 +1654,8 @@ function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
       // こちらで切った分も「続きがある」ものとして扱う
       truncated: capped || v.truncated === true,
       title: typeof v.title === 'string' ? cap(v.title, MAX_REPLY_TITLE_CHARS) : undefined,
+      // 巻き戻しの起点に使う発言のid（Issue #2160）。受信側が会話と突き合わせるので形だけ見る
+      id: v.role === 'user' ? parseTurnId(v.id) : undefined,
     });
   }
   return turns;
@@ -1801,6 +1862,8 @@ export class SessionHubRequestPort {
       queuedId?: string | undefined;
       setting?: string | undefined;
       settingValue?: string | boolean | undefined;
+      name?: string | undefined;
+      messageId?: string | undefined;
     },
     /** 応答を待つ上限（ms）。既定は`REPLY_TIMEOUT_MS`。`LONG_REPLY_TIMEOUT_MS`を超えない。 */
     timeoutMs: number = REPLY_TIMEOUT_MS,

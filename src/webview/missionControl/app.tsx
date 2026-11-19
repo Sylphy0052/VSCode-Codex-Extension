@@ -70,10 +70,12 @@ import {
   keyLabelFor,
   resolveKey,
   type McKeyCommand,
+  type McSessionOp,
 } from './keys';
 import { Composer, type ComposerKeysRef } from './composer';
 import { CommandPalette, type McPaletteEntry } from './palette';
 import { SessionSettingsPanel } from './sessionSettings';
+import { SessionOpDialog, type McSessionOpDialog } from './sessionOps';
 import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
 import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
@@ -136,6 +138,8 @@ const SESSION_ONLY_COMMANDS: ReadonlySet<McKeyCommand['kind']> = new Set([
   'settings',
   'planMode',
   'fastMode',
+  // 選んだセッションへの操作（Issue #2160）
+  'sessionOp',
 ]);
 
 const PROVIDER_FILTERS: ReadonlyArray<[McProviderFilter, string]> = [
@@ -286,6 +290,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // 名前変更・クリア・巻き戻しのダイアログ（Issue #2160）。対象は開いた時点のセッションに固定する
+  const [opDialog, setOpDialog] = useState<
+    { op: McSessionOpDialog; session: McSession } | undefined
+  >(undefined);
   const [tab, setTab] = useState<'sessions' | 'runs'>(initial.tab);
   const [selectedRun, setSelectedRun] = useState<string | undefined>(undefined);
   const [issuesOpen, setIssuesOpen] = useState(false);
@@ -656,6 +664,43 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       });
     });
   };
+  // Issue #2160: 選んだ1つのセッションへの操作。複数選択には効かせない（clear・巻き戻しを
+  // まとめて行わないように）。名前変更・クリア・巻き戻しはダイアログで入力・確認してから送る
+  const runSessionOp = (op: McSessionOp): void => {
+    const session = focusedSession;
+    if (session === undefined) {
+      setToast('操作するセッションを選んでください（j / kで移動）');
+      return;
+    }
+    switch (op) {
+      case 'rename':
+      case 'clear':
+        setOpDialog({ op, session });
+        return;
+      case 'rewind':
+        if (session.provider !== 'claude') {
+          setToast('巻き戻せるのはClaudeのセッションだけです');
+          return;
+        }
+        setOpDialog({ op, session });
+        return;
+      case 'fork':
+        sessionAction(session, { action: 'fork' }, `「${session.title}」を分岐しました`);
+        return;
+      case 'pin':
+        sessionAction(
+          session,
+          { action: session.pinned === true ? 'unpin' : 'pin' },
+          session.pinned === true
+            ? `「${session.title}」のピン留めを外しました`
+            : `「${session.title}」をピン留めしました`,
+        );
+        return;
+      case 'handoff':
+        sessionAction(session, { action: 'handoff' }, `「${session.title}」の引き継ぎを始めました`);
+        return;
+    }
+  };
   const toggleMark = (session: McSession | undefined): void => {
     if (session === undefined) {
       setToast('複数選択できるのはセッションの行です');
@@ -924,6 +969,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       case 'history':
         setHistoryOpen(true);
         return;
+      case 'sessionOp':
+        runSessionOp(command.op);
+        return;
       case 'choose':
         formKeys.current?.choose(command.index);
         return;
@@ -967,6 +1015,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       if (
         command.kind === 'fastMode' &&
         (detailRef.current?.querySelector('[data-settings-fast]') ?? null) === null
+      ) {
+        return;
+      }
+      // 巻き戻しはClaudeにしか無い（Issue #2160）
+      if (
+        command.kind === 'sessionOp' &&
+        command.op === 'rewind' &&
+        focusedSession?.provider !== 'claude'
       ) {
         return;
       }
@@ -1109,6 +1165,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     launchOpen,
     historyOpen,
     issuesOpen,
+    opDialogOpen: opDialog !== undefined,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1119,6 +1176,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     launchOpen,
     historyOpen,
     issuesOpen,
+    opDialogOpen: opDialog !== undefined,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1146,7 +1204,11 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       const resolved = resolveKey(input);
       const state = latest.current;
       const dialogOpen =
-        state.launchOpen || state.historyOpen || state.issuesOpen || state.paletteOpen;
+        state.launchOpen ||
+        state.historyOpen ||
+        state.issuesOpen ||
+        state.opDialogOpen ||
+        state.paletteOpen;
       const plainLetter =
         /^[a-z]$/iu.test(event.key) &&
         !event.shiftKey &&
@@ -1165,6 +1227,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setLaunchOpen(false);
           setHistoryOpen(false);
           setIssuesOpen(false);
+          setOpDialog(undefined);
           setPalette(undefined);
         } else if (resolved?.command.kind === 'escape' && event.target instanceof HTMLElement) {
           if (state.paletteOpen) {
@@ -1604,6 +1667,18 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           onClose={() => setHistoryOpen(false)}
           onOpened={(message) => {
             setHistoryOpen(false);
+            setToast(message);
+          }}
+        />
+      ) : null}
+      {opDialog !== undefined ? (
+        <SessionOpDialog
+          bridge={bridge}
+          session={opDialog.session}
+          op={opDialog.op}
+          onClose={() => setOpDialog(undefined)}
+          onDone={(message) => {
+            setOpDialog(undefined);
             setToast(message);
           }}
         />

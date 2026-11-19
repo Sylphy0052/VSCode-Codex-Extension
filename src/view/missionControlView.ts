@@ -58,6 +58,8 @@ const READ_ONLY_CONTROL_KINDS: ReadonlySet<string> = new Set([
   'commandCandidates',
   'queuedMessages',
   'sessionSettings',
+  // 巻き戻しで戻るファイルを確かめるだけ（Issue #2160）
+  'rewindPreview',
 ]);
 
 /** 新規セッションの起動（Issue #2137の1）。vscodeに依る部分は`extension.ts`が組む。 */
@@ -688,6 +690,7 @@ export class MissionControlViewManager implements vscode.Disposable {
       commands: result.commands,
       queued: result.queued,
       settings: result.settings,
+      rewindFiles: result.rewindFiles,
     });
   }
 }

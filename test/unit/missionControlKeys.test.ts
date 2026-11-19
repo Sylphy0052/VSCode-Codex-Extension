@@ -171,6 +171,23 @@ describe('mapKey（既存の割り当てを壊さない）', () => {
     expect(mapKey({ ...base, key: 'h' })).toEqual({ kind: 'history' });
   });
 
+  it('選んだセッションへの操作はShift付きの英字、小文字の割り当ては変えない（Issue #2160）', () => {
+    const cases: Array<[string, string]> = [
+      ['R', 'rename'],
+      ['B', 'fork'],
+      ['I', 'pin'],
+      ['C', 'clear'],
+      ['H', 'handoff'],
+      ['Z', 'rewind'],
+    ];
+    for (const [key, op] of cases) {
+      expect(mapKey({ ...base, key, shiftKey: true })).toEqual({ kind: 'sessionOp', op });
+    }
+    expect(mapKey({ ...base, key: 'h' })).toEqual({ kind: 'history' });
+    expect(mapKey({ ...base, key: 'c' })).not.toEqual({ kind: 'sessionOp', op: 'clear' });
+    expect(mapKey({ ...base, key: 'z' })).not.toEqual({ kind: 'sessionOp', op: 'rewind' });
+  });
+
   it('Tab / Shift+Tab / ← / →はペインの移動', () => {
     expect(mapKey({ ...base, key: 'Tab' })).toEqual({ kind: 'pane', delta: 1 });
     expect(mapKey({ ...base, key: 'Tab', shiftKey: true })).toEqual({ kind: 'pane', delta: -1 });

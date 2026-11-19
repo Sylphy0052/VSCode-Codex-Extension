@@ -339,6 +339,57 @@ describe('toSessionControlAction: session-hubの要求の検証（Issue #2158）
   });
 });
 
+describe('選んだセッションへの操作（Issue #2160）', () => {
+  it('parseAction: 6操作を受け付け、名前は前後の空白を落とす', () => {
+    expect(parseAction({ action: 'rename', name: '  新しい名前 ' })).toEqual({
+      kind: 'rename',
+      name: '新しい名前',
+    });
+    for (const action of ['fork', 'pin', 'unpin', 'clear', 'handoff'] as const) {
+      expect(parseAction({ action })).toEqual({ kind: action });
+    }
+    expect(parseAction({ action: 'rewindPreview', messageId: 'm-1' })).toEqual({
+      kind: 'rewindPreview',
+      messageId: 'm-1',
+    });
+    expect(parseAction({ action: 'rewind', messageId: 'm-1' })).toEqual({
+      kind: 'rewind',
+      messageId: 'm-1',
+    });
+  });
+
+  it('parseAction: 空・長すぎる・改行入りの名前と、idの無い巻き戻しは断る', () => {
+    expect(parseAction({ action: 'rename', name: '   ' })).toBeUndefined();
+    expect(parseAction({ action: 'rename', name: 'a'.repeat(201) })).toBeUndefined();
+    expect(parseAction({ action: 'rename', name: 'a\nb' })).toBeUndefined();
+    expect(parseAction({ action: 'rename' })).toBeUndefined();
+    expect(parseAction({ action: 'rewind' })).toBeUndefined();
+    expect(parseAction({ action: 'rewind', messageId: '' })).toBeUndefined();
+    expect(parseAction({ action: 'rewindPreview', messageId: 'a\nb' })).toBeUndefined();
+    expect(parseAction({ action: 'rewind', messageId: 3 })).toBeUndefined();
+  });
+
+  it('toSessionControlAction: session-hubの要求も同じ規則で確かめる', () => {
+    expect(toSessionControlAction({ kind: 'rename', name: 'n' })).toEqual({
+      kind: 'rename',
+      name: 'n',
+    });
+    expect(toSessionControlAction({ kind: 'clear' })).toEqual({ kind: 'clear' });
+    expect(toSessionControlAction({ kind: 'handoff' })).toEqual({ kind: 'handoff' });
+    expect(toSessionControlAction({ kind: 'rewind', messageId: 'm' })).toEqual({
+      kind: 'rewind',
+      messageId: 'm',
+    });
+    expect(toSessionControlAction({ kind: 'rename' })).toBeUndefined();
+    expect(toSessionControlAction({ kind: 'rewindPreview' })).toBeUndefined();
+  });
+
+  it('toReplyPayload: 巻き戻しで戻るファイルを応答へ載せる', () => {
+    expect(toReplyPayload({ ok: true, rewindFiles: ['a.ts'] })).toEqual({ rewindFiles: ['a.ts'] });
+    expect(toReplyPayload({ ok: true, rewindFiles: [] })).toEqual({ rewindFiles: [] });
+  });
+});
+
 describe('toReplyPayload（Issue #2158）', () => {
   it('候補・送信キューを応答へ載せる', () => {
     expect(toReplyPayload({ ok: true, files: ['a.ts'] })).toEqual({ files: ['a.ts'] });
