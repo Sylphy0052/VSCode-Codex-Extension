@@ -46,6 +46,9 @@ describe('mergeTurnPage', () => {
     const apart = mergeTurnPage(log, { turns: turns(40, 46), start: 40, total: 46 });
     expect(apart.start).toBe(40);
     expect(apart.turns).toHaveLength(6);
+    // 遅れて届いた古い範囲（読み込み済みより前で離れている）は捨て、末尾を残す
+    const late = mergeTurnPage(apart, { turns: turns(0, 30), start: 0, total: 40 });
+    expect(late).toBe(apart);
     const legacy = mergeTurnPage(log, { turns: turns(0, 3) });
     expect(legacy.start).toBeUndefined();
     expect(hasOlderTurns(legacy)).toBe(false);

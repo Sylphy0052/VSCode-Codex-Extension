@@ -247,6 +247,11 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [helpOpen, setHelpOpen] = useState(false);
   const [approvals, setApprovals] = useState<Record<string, Loadable<McApprovalDetail[]>>>({});
   const [turns, setTurns] = useState<Record<string, TurnLogState>>({});
+  /**
+   * 会話を取り直した回数（宛先ごと）。古いやり取りの読み足しは始めた時の値を覚えておき、
+   * その間に取り直していたら応答を捨てて続きも取らない（Issue #2157）。
+   */
+  const turnsGeneration = useRef(new Map<string, number>());
   /** 回答を送った項目。共有ファイルから消えるまで、Inboxで送信済みとして薄く出す。 */
   const [sent, setSent] = useState<ReadonlySet<string>>(new Set());
   /**
@@ -390,6 +395,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   };
   const loadTurns = (target: McTarget): void => {
     const key = targetKey(target);
+    turnsGeneration.current.set(key, (turnsGeneration.current.get(key) ?? 0) + 1);
     setTurns((prev) => ({ ...prev, [key]: { status: 'loading' } }));
     void bridge.request(target, { action: 'recentTurns', limit: TURN_PAGE_SIZE }).then((result) => {
       setTurns((prev) => ({
@@ -426,10 +432,15 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       });
     };
     setOlder((log) => ({ ...log, olderLoading: true, olderError: undefined }));
+    const generation = turnsGeneration.current.get(key);
     const fetchBefore = (before: number): void => {
       void bridge
         .request(target, { action: 'recentTurns', limit: TURN_PAGE_SIZE, before })
         .then((result) => {
+          // 読み足しの間に取り直した（再読込・選び直し）なら、古い位置の応答を新しいログへ混ぜない
+          if (turnsGeneration.current.get(key) !== generation) {
+            return;
+          }
           if (!result.ok) {
             setOlder((log) => ({
               ...log,

@@ -58,6 +58,8 @@ export function logFromPage(page: TurnPage): TurnLog {
  * - 末尾まで届いた（ライブtail）なら、それより後ろの古い内容は捨てる
  * - 範囲が離れている・どちらかの範囲が分からないときは、届いた範囲だけにする
  *   （ずれた位置で継ぎ足して会話の順序を壊さない）
+ * - ただし、読み込み済みより前で離れた範囲（遅れて届いた古いやり取り）は捨てて今のログを残す。
+ *   その間に末尾が取り直されて先へ進んでいる。届いた古い範囲だけにすると末尾が消える
  */
 export function mergeTurnPage(prev: TurnLog | undefined, page: TurnPage): TurnLog {
   if (prev === undefined || prev.start === undefined || !hasRange(page)) {
@@ -65,7 +67,10 @@ export function mergeTurnPage(prev: TurnLog | undefined, page: TurnPage): TurnLo
   }
   const pageEnd = page.start + page.turns.length;
   const prevEnd = prev.start + prev.turns.length;
-  if (page.start > prevEnd || pageEnd < prev.start) {
+  if (pageEnd < prev.start) {
+    return prev;
+  }
+  if (page.start > prevEnd) {
     return { ...logFromPage(page), olderLoading: prev.olderLoading };
   }
   const isTail = pageEnd === page.total;
