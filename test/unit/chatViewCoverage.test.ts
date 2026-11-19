@@ -1179,6 +1179,88 @@ describe('chatView.ts の補完カバレッジ', () => {
     });
   });
 
+  describe('統括ページからの問い合わせへの回答（Issue #2135）', () => {
+    const ask = (chat: OpenedChat, id: number, isSecret = false): Promise<unknown> =>
+      chat.connection.serverRequest(id, 'item/tool/requestUserInput', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        turnId: 'turn-1',
+        questions: [
+          {
+            id: 'q1',
+            header: '色',
+            question: '好きな色は？',
+            isOther: true,
+            isSecret,
+            options: [{ label: '赤', description: '' }],
+          },
+        ],
+      });
+    const answer = (chat: OpenedChat, id: string, value: string) =>
+      chat.manager.controlSession(chat.threadId, {
+        kind: 'answerPrompt',
+        pendingRequestId: id,
+        submission: { action: 'submit', values: { q1: [value] } },
+      });
+
+    it('問い合わせだけでも承認待ちになり、中身に入力欄が載る', async () => {
+      const chat = await openChat();
+      void ask(chat, 21);
+      await tick();
+      expect(chat.manager.managedSessions()[0]?.activity).toBe('approvalPending');
+      const detail = chat.manager.controlSession(chat.threadId, { kind: 'approvalDetail' });
+      expect(detail.approvals?.[0]).toMatchObject({
+        requestId: '21',
+        kind: 'codexPrompt',
+        decidable: false,
+        answer: 'text',
+        fields: [{ id: 'q1', options: [{ value: '赤', label: '赤' }], allowOther: true }],
+      });
+    });
+
+    it('統括から答えると応答が返り、同じ項目への2回目は既に回答済みになる', async () => {
+      const chat = await openChat();
+      const responded = ask(chat, 22);
+      await tick();
+      expect(answer(chat, '22', '赤')).toEqual({ ok: true });
+      await expect(responded).resolves.toEqual({ answers: { q1: { answers: ['赤'] } } });
+      expect(answer(chat, '22', '青')).toEqual({ ok: false, error: 'この項目は既に回答済みです' });
+    });
+
+    it('タブで答えた後・別経路で解決された後は、統括からの回答を既に回答済みで断る', async () => {
+      const chat = await openChat();
+      const responded = ask(chat, 23);
+      void ask(chat, 24);
+      await tick();
+      await chat.post({
+        type: 'prompt',
+        requestId: 23,
+        submission: { action: 'submit', values: { q1: ['赤'] } },
+      });
+      await expect(responded).resolves.toEqual({ answers: { q1: { answers: ['赤'] } } });
+      chat.connection.notify('serverRequest/resolved', { threadId: 'thread-A', requestId: 24 });
+      await tick();
+      expect(answer(chat, '23', '青')).toEqual({ ok: false, error: 'この項目は既に回答済みです' });
+      expect(answer(chat, '24', '青')).toEqual({ ok: false, error: 'この項目は既に回答済みです' });
+      expect(stateOf(chat).prompts).toHaveLength(0);
+    });
+
+    it('伏せ字の欄は統括から値を送らせず、断るだけを通す', async () => {
+      const chat = await openChat();
+      void ask(chat, 25, true);
+      await tick();
+      expect(answer(chat, '25', 'pw').ok).toBe(false);
+      expect(stateOf(chat).prompts).toHaveLength(1);
+      const decline = chat.manager.controlSession(chat.threadId, {
+        kind: 'answerPrompt',
+        pendingRequestId: '25',
+        submission: { action: 'decline', values: {} },
+      });
+      expect(decline).toEqual({ ok: true });
+      expect(stateOf(chat).prompts).toHaveLength(0);
+    });
+  });
+
   describe('統括ページからの脇道の質問', () => {
     const FORK_RESULT = {
       thread: { id: 'th-side-2', name: null, turns: [] },

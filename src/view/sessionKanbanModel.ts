@@ -1,5 +1,6 @@
 import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import { isWithinAnyRoot, normalizeWorkspacePath } from '../util/paths';
+import type { PendingItem } from './pendingItem';
 import type { SessionActivityState } from './sessionActivity';
 
 /**
@@ -54,6 +55,8 @@ export interface SessionKanbanCard extends Omit<ManagedSessionInput, 'cwd'> {
 export interface SessionKanbanBoard {
   cards: Record<SessionKanbanColumn, SessionKanbanCard[]>;
   total: number;
+  /** 全ウィンドウのtask runの質問（Issue #2135）。会話に属さないため盤面の外に並べる。 */
+  taskRunPending?: PendingItem[] | undefined;
 }
 
 export function buildSessionKanban(

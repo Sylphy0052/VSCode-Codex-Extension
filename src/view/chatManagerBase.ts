@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { ChatState, PendingApproval } from '../appserver/chatState';
+import type { PendingPrompt, PromptSubmission } from '../appserver/prompts';
+import type { AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { toTrackedChatState, type ChatConversationTracker } from '../chat/chatConversationTracker';
 import { readChatEndSummaryConfig, readNotificationsConfig, readReflexEnabled } from '../config';
 import type { HeadlessProvider } from '../loop/headlessCli';
@@ -34,6 +36,7 @@ import { PendingHandoffChoice } from './handoffPending';
 import type { SkillSelectGate } from './skillSelectGate';
 import { buildEndSummaryMaterial, EndSummaryRunner, type EndSummaryDisplay } from './endSummary';
 import { playNotificationSound } from './notificationSound';
+import { ALREADY_ANSWERED_MESSAGE, validateAskUserQuestionAnswers } from './pendingItem';
 import type {
   SessionApprovalDetail,
   SessionHandoffDetail,
@@ -65,6 +68,10 @@ export interface ChatSessionLike {
   setAutoHandoffAutoApprove(on: boolean): void;
   /** 工程セッションでpluginのStop hook（skill-retro）を止める。Claudeだけが持つ。 */
   setSuppressSkillRetro?(on: boolean): void;
+  /** AskUserQuestionへの回答（Issue #2135で統括ページからも使う）。Claudeだけが持つ。 */
+  answerAskUserQuestion?(requestId: number | string, selections: AskUserQuestionSelections): void;
+  /** `requestUserInput`/elicitationへの回答（Issue #2135で統括ページからも使う）。Codexだけが持つ。 */
+  answerPrompt?(requestId: number | string, submission: PromptSubmission): void;
 }
 
 /**
@@ -289,7 +296,19 @@ export type SessionControlAction =
       decision: SharedHandoffDecision;
       model?: string | undefined;
       effort?: string | undefined;
-    };
+    }
+  /**
+   * AskUserQuestionへの回答（Issue #2135）。`answers`は質問文→選んだラベル。
+   * 受け取った側が質問と突き合わせて確かめる。
+   */
+  | { kind: 'answerQuestion'; pendingRequestId: string; answers: Record<string, string[]> }
+  /** Codexの`requestUserInput`/elicitationへの回答（Issue #2135）。 */
+  | { kind: 'answerPrompt'; pendingRequestId: string; submission: PromptSubmission }
+  /**
+   * task runの質問への回答（Issue #2135）。会話への操作ではなく、`extension.ts`の
+   * `controlSessionAnywhere`が宛先ウィンドウのtask runへ回す。ここへ届いたら断る。
+   */
+  | { kind: 'answerTaskRunQuestion'; pendingId: string; text: string };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -365,17 +384,69 @@ function toSideQuestionView(run: SideQuestionRun): SessionSideQuestion {
  * （`describeFileChanges`がカンマ区切りで作る）から引けるため、両方を見る。
  */
 function describePendingApprovals(
-  state: Pick<ChatState, 'approvals' | 'items'>,
+  state: Pick<ChatState, 'approvals' | 'items' | 'prompts'>,
 ): SessionApprovalDetail[] {
-  return state.approvals.map((approval) => ({
+  const approvals = state.approvals.map((approval): SessionApprovalDetail => ({
     requestId: String(approval.requestId),
     kind: approval.kind,
     title: approval.title,
     detail: approval.detail,
     paths: readApprovalPaths(state, approval),
-    // 選択式の問い合わせは4値（accept/acceptForSession/decline/cancel）では答えられない
+    // 選択式の問い合わせは4値（accept/acceptForSession/decline/cancel）では答えられない。
+    // `decidable`は承認・拒否のボタンを出してよいかの意味のまま残す（古い版の統括ページが
+    // `true`を見て「承認」を出すと、答えの無い拒否が送られるため）。回答は`answer`で示す
     decidable: approval.kind !== 'askUserQuestion',
+    answer: approval.kind === 'askUserQuestion' ? 'choices' : 'decision',
+    questions:
+      approval.kind === 'askUserQuestion'
+        ? (approval.questions ?? []).map((q) => ({
+            question: q.question,
+            header: q.header,
+            options: q.options.map((o) => ({ label: o.label, description: o.description })),
+            multiSelect: q.multiSelect,
+          }))
+        : undefined,
   }));
+  // Codexの問い合わせ（Issue #2135）。伏せ字の値は共有ディレクトリを通さない
+  const prompts = state.prompts.map((prompt): SessionApprovalDetail => ({
+    requestId: String(prompt.requestId),
+    kind: 'codexPrompt',
+    title: prompt.title,
+    detail: [prompt.source === '' ? '' : `出どころ: ${prompt.source}`, prompt.message]
+      .concat(prompt.url === undefined ? [] : [`URL: ${prompt.url}`])
+      .filter((line) => line !== '')
+      .join('\n'),
+    paths: [],
+    decidable: false,
+    answer: 'text',
+    fields: prompt.fields.map((f) => ({
+      id: f.id,
+      label: f.label,
+      description: f.description,
+      options: f.options.map((o) => ({ value: o.value, label: o.label })),
+      multiple: f.multiple,
+      allowOther: f.allowOther,
+      required: f.required,
+    })),
+    answerBlockedReason: promptAnswerBlockedReason(prompt),
+  }));
+  return [...approvals, ...prompts];
+}
+
+/**
+ * 統括ページから答えさせない問い合わせの理由（Issue #2135）。答えてよければ`undefined`。
+ *
+ * 伏せ字の欄の値を要求ファイル（共有ディレクトリ）へ書かせない。真偽値・数値の欄は
+ * 統括ページに入力部品が無いため、タブ側で答えさせる。
+ */
+function promptAnswerBlockedReason(prompt: PendingPrompt): string | undefined {
+  if (prompt.fields.some((f) => f.secret)) {
+    return '伏せ字の入力欄があるため、会話のタブ側で答えてください';
+  }
+  if (prompt.fields.some((f) => f.input !== 'text')) {
+    return '数値・真偽値の入力欄があるため、会話のタブ側で答えてください';
+  }
+  return undefined;
 }
 
 function readApprovalPaths(state: Pick<ChatState, 'items'>, approval: PendingApproval): string[] {
@@ -528,6 +599,18 @@ const LOCKED_TAB_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   'prompt',
   'answerAskUserQuestion',
 ]);
+
+/**
+ * 入力欄を閉じたタブ（Issue #1465 分割案6b）でも、統括ページから通す操作（Issue #2135）。
+ * 開くことと、承認・質問への応答（とその中身の取り寄せ）だけ。
+ */
+const LOCKED_TAB_HUB_ACTIONS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'open',
+  'approvalDetail',
+  'approvalDecision',
+  'answerQuestion',
+  'answerPrompt',
+] as const);
 
 /** 入力欄を閉じたタブへの操作を断るときの案内。 */
 export const INPUT_LOCKED_MESSAGE =
@@ -1257,7 +1340,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       return { ok: false, error: 'この会話は既に閉じられています' };
     }
     // 入力欄を閉じたタブ（Issue #1465 分割案6b）は、統括ページからも開くことしか許さない
-    if (entry.inputLock && action.kind !== 'open') {
+    // ただし承認・質問への応答は、タブ側（`LOCKED_TAB_MESSAGE_TYPES`）と同じく通す。捨てると
+    // ロードマップ実行のセッションが止まったままになる（Issue #2135）
+    if (entry.inputLock && !LOCKED_TAB_HUB_ACTIONS.has(action.kind)) {
       return { ok: false, error: INPUT_LOCKED_MESSAGE };
     }
     switch (action.kind) {
@@ -1322,12 +1407,19 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         if (approval === undefined) {
           return { ok: false, error: 'この承認要求は既に解決されています' };
         }
-        if (approval.kind === 'askUserQuestion') {
-          return { ok: false, error: 'この問い合わせは会話のタブ側で答えてください' };
+        // AskUserQuestionは拒否だけを通す（承認では選んだ答えを運べない）。答えは`answerQuestion`で送る
+        if (approval.kind === 'askUserQuestion' && action.decision !== 'decline') {
+          return { ok: false, error: '選択肢を選んで回答してください' };
         }
         this.resolveApproval(entry, approval.requestId, action.decision);
         return { ok: true };
       }
+      case 'answerQuestion':
+        return this.answerQuestionFromHub(entry, action.pendingRequestId, action.answers);
+      case 'answerPrompt':
+        return this.answerPromptFromHub(entry, action.pendingRequestId, action.submission);
+      case 'answerTaskRunQuestion':
+        return { ok: false, error: 'task runの質問は会話への操作として扱えません' };
       case 'handoffDetail': {
         const handoff = entry.pendingHandoff?.detail();
         return handoff === undefined
@@ -1346,6 +1438,75 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         return pending.decide(action.handoffRequestId, action.decision, settings);
       }
     }
+  }
+
+  /**
+   * 統括ページからのAskUserQuestionへの回答（Issue #2135）。チャットタブの選択UIと同じ
+   * `answerAskUserQuestion`を呼ぶ。
+   *
+   * 既にタブ側・他のウィンドウで答えられていれば、セッションの承認一覧から消えている。
+   * そのときは送らずに「既に回答済み」を返す（二重に送らない）。
+   */
+  private answerQuestionFromHub(
+    entry: TPanel,
+    pendingRequestId: string,
+    answers: Record<string, string[]>,
+  ): SessionControlResult {
+    const approval = entry.session
+      .getState()
+      .approvals.find(
+        (a) => a.kind === 'askUserQuestion' && String(a.requestId) === pendingRequestId,
+      );
+    if (approval === undefined) {
+      return { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    }
+    const answer = entry.session.answerAskUserQuestion;
+    if (answer === undefined) {
+      return { ok: false, error: 'この会話は質問への回答を受け付けません' };
+    }
+    const selections = validateAskUserQuestionAnswers(approval.questions ?? [], answers);
+    if (typeof selections === 'string') {
+      return { ok: false, error: selections };
+    }
+    answer.call(entry.session, approval.requestId, selections);
+    return { ok: true };
+  }
+
+  /**
+   * 統括ページからのCodexの問い合わせへの回答（Issue #2135）。チャットタブのフォームと同じ
+   * `answerPrompt`を呼ぶ。制約に反する回答はセッション側が差し戻し、問い合わせを残す。
+   */
+  private answerPromptFromHub(
+    entry: TPanel,
+    pendingRequestId: string,
+    submission: PromptSubmission,
+  ): SessionControlResult {
+    const findPrompt = (): PendingPrompt | undefined =>
+      entry.session.getState().prompts.find((p) => String(p.requestId) === pendingRequestId);
+    const prompt = findPrompt();
+    if (prompt === undefined) {
+      return { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    }
+    const answer = entry.session.answerPrompt;
+    if (answer === undefined) {
+      return { ok: false, error: 'この会話は問い合わせへの回答を受け付けません' };
+    }
+    // 断る・取り消すは値を運ばないため、欄の種類によらず通す
+    const blocked = submission.action === 'submit' ? promptAnswerBlockedReason(prompt) : undefined;
+    if (blocked !== undefined) {
+      return { ok: false, error: blocked };
+    }
+    answer.call(entry.session, prompt.requestId, submission);
+    // 差し戻されたら問い合わせは残り、欄ごとの理由が付く
+    const after = findPrompt();
+    if (after !== undefined) {
+      const reasons = Object.values(after.errors);
+      return {
+        ok: false,
+        error: reasons.length > 0 ? reasons.join(' / ') : '回答を受け付けられませんでした',
+      };
+    }
+    return { ok: true };
   }
 
   /**

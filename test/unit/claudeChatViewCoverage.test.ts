@@ -419,6 +419,125 @@ describe('webviewメッセージの振り分け: セッションへ委ねる操�
     expect(answer.mock.calls[0]).toEqual(['req-1', selections]);
   });
 
+  describe('統括ページからのAskUserQuestionへの回答（Issue #2135）', () => {
+    const askLine = (requestId: string): string =>
+      `${JSON.stringify({
+        type: 'control_request',
+        request_id: requestId,
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'AskUserQuestion',
+          input: {
+            questions: [
+              {
+                question: 'どちらにしますか',
+                header: '選択',
+                options: [
+                  { label: 'A', description: '' },
+                  { label: 'B', description: '' },
+                ],
+                multiSelect: false,
+              },
+            ],
+          },
+        },
+      })}\n`;
+
+    /** 実プロセスの代わりに書き込みを控えるstdinを差し込み、AskUserQuestionを1件待たせる。 */
+    async function openAsking(): Promise<{
+      manager: ClaudeChatViewManager;
+      id: string;
+      session: ClaudeStreamSession;
+      written: string[];
+    }> {
+      const { sessions } = stubStartCapturing();
+      const manager = createManager();
+      const id = await openSession(manager);
+      const session = sessions[0] as ClaudeStreamSession;
+      const written: string[] = [];
+      (session as unknown as { proc: unknown }).proc = {
+        killed: false,
+        stdin: { write: (line: string) => written.push(line), destroyed: false, writable: true },
+      };
+      session.receive(askLine('r1'));
+      await Promise.resolve();
+      return { manager, id, session, written };
+    }
+
+    const answerFromHub = (manager: ClaudeChatViewManager, id: string, label: string) =>
+      manager.controlSession(id, {
+        kind: 'answerQuestion',
+        pendingRequestId: 'r1',
+        answers: { どちらにしますか: [label] },
+      });
+
+    it('中身に質問が載り、統括から答えると応答を1回だけ書き、2回目は既に回答済み', async () => {
+      const { manager, id, session, written } = await openAsking();
+      const detail = manager.controlSession(id, { kind: 'approvalDetail' });
+      expect(detail.approvals?.[0]).toMatchObject({
+        requestId: 'r1',
+        decidable: false,
+        answer: 'choices',
+        questions: [{ question: 'どちらにしますか', multiSelect: false }],
+      });
+      expect(answerFromHub(manager, id, 'A')).toEqual({ ok: true });
+      expect(answerFromHub(manager, id, 'B')).toEqual({
+        ok: false,
+        error: 'この項目は既に回答済みです',
+      });
+      expect(written).toHaveLength(1);
+      expect(written[0]).toContain('"answers":{"どちらにしますか":"A"}');
+      expect(session.getState().approvals).toHaveLength(0);
+    });
+
+    it('タブで答えた後の統括からの回答は既に回答済みになり、タブの応答だけが書かれる', async () => {
+      const { manager, id, written } = await openAsking();
+      await manager.simulateWebviewMessage(id, {
+        type: 'answerAskUserQuestion',
+        requestId: 'r1',
+        answers: { どちらにしますか: ['A'] },
+      });
+      expect(answerFromHub(manager, id, 'B')).toEqual({
+        ok: false,
+        error: 'この項目は既に回答済みです',
+      });
+      expect(written).toHaveLength(1);
+    });
+
+    it('質問と合わない回答・承認は送らずに項目を残し、拒否だけは通す', async () => {
+      const { manager, id, session, written } = await openAsking();
+      for (const answers of [
+        {},
+        { どちらにしますか: ['A', 'B'] },
+        { どちらにしますか: ['A'], 余計: ['x'] },
+      ]) {
+        const r = manager.controlSession(id, {
+          kind: 'answerQuestion',
+          pendingRequestId: 'r1',
+          answers,
+        });
+        expect(r.ok).toBe(false);
+      }
+      expect(
+        manager.controlSession(id, {
+          kind: 'approvalDecision',
+          approvalRequestId: 'r1',
+          decision: 'accept',
+        }).ok,
+      ).toBe(false);
+      expect(written).toHaveLength(0);
+      expect(session.getState().approvals).toHaveLength(1);
+      expect(
+        manager.controlSession(id, {
+          kind: 'approvalDecision',
+          approvalRequestId: 'r1',
+          decision: 'decline',
+        }),
+      ).toEqual({ ok: true });
+      expect(written[0]).toContain('"behavior":"deny"');
+    });
+  });
+
   it('approveは不正なdecision・requestIdを無視する', async () => {
     const { sessions } = stubStartCapturing();
     const manager = createManager();

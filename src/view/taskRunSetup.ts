@@ -110,6 +110,7 @@ import { taskRunLabel } from './taskRunKanbanModel';
 import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanbanView';
 import { createStageReflexJudges } from './taskRunStageJudges';
 import { sessionHubRoot } from './sessionHub';
+import { listTaskRunPendingItems, type TaskRunPendingPort } from './taskRunPending';
 import {
   startRoadmapRunCommand,
   startRoadmapRunFromChat,
@@ -159,6 +160,11 @@ export interface TaskRunSetupDeps {
   weeklyUsagePct?: (engine: TaskRunEngine) => Promise<number | undefined>;
   /** `package.json`の`repository.url`。自己改善（Issue #2086）はこのrepoのrunでだけ行う。 */
   extensionRepositoryUrl?: string | undefined;
+  /**
+   * task runの質問をsession-hubへ公開する口の置き場（Issue #2135）。渡すと実体を入れる。
+   * `extension.ts`はsession-hubを組み立てる時点でこの箱から読む。
+   */
+  pendingPort?: { current?: TaskRunPendingPort | undefined };
   /** 通常チャットの会話を区切って振り返る画面（Issue #2123）。省略時は追わない。 */
   chatConversationHosts?: readonly ChatConversationHost[];
   /**
@@ -551,6 +557,15 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     log: (message) => log.info(message),
   });
   holder.controller = controller;
+  if (deps.pendingPort !== undefined) {
+    deps.pendingPort.current = {
+      list: (windowId) =>
+        listTaskRunPendingItems(store.list(), (runId) => lease.holds(runId), windowId),
+      answer: (runId, taskId, questionId, answer) =>
+        controller.answerQuestion(runId, taskId, questionId, answer),
+      onDidChange: (listener) => controller.onTransition(() => listener()),
+    };
+  }
 
   const orchestrator = new TaskRunOrchestrator({
     hosts: deps.hosts,

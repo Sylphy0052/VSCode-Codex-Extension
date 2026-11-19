@@ -5,6 +5,12 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
+import {
+  parseAskUserQuestionAnswers,
+  parsePendingItems,
+  type PendingAnswerMode,
+  type PendingItem,
+} from './pendingItem';
 import type { SessionActivityState } from './sessionActivity';
 
 /**
@@ -43,12 +49,21 @@ export interface SharedSession {
    * 読み手は「無ければ走っていない」として扱う。
    */
   loop?: SharedLoopState | undefined;
+  /**
+   * この会話で人の回答を待っている項目（Issue #2135）。要約だけを載せ、全文は
+   * `approvalDetail`で取り寄せる。古い版のウィンドウが書いたファイルには無い。
+   */
+  pending?: PendingItem[] | undefined;
 }
 
 interface SharedSessionFile {
   windowId: string;
   updatedAt: number;
   sessions: SharedSession[];
+  /**
+   * 会話に属さない待ち項目（task runの質問。Issue #2135）。古い版のファイルには無い。
+   */
+  pending?: PendingItem[] | undefined;
 }
 
 /** 読み込み側が扱う、他ウィンドウ1つ分のスナップショット。 */
@@ -56,6 +71,8 @@ export interface SharedWindowSessions {
   windowId: string;
   updatedAt: number;
   sessions: SharedSession[];
+  /** 会話に属さない待ち項目（Issue #2135）。無ければ空配列。 */
+  pending?: PendingItem[] | undefined;
 }
 
 /** heartbeatの間隔。状態変化時はこれを待たず、下の間引きの範囲で書く。 */
@@ -147,9 +164,20 @@ function isSharedSession(value: unknown): value is SharedSession {
   );
 }
 
-/** 形の合わない`loop`を落として取り込む（1項目の不整合でセッションごと消さない）。 */
-function normalizeSharedSession(session: SharedSession): SharedSession {
-  return isSharedLoopState(session.loop) ? session : { ...session, loop: undefined };
+/**
+ * 形の合わない`loop`を落として取り込む（1項目の不整合でセッションごと消さない）。
+ *
+ * `pending`は要素ごとに確かめる（Issue #2135）。宛先（`session.windowId`）は中身を信じず、
+ * ファイル名から取った`windowId`で上書きする（要求ファイルの置き場所になるため）。
+ */
+function normalizeSharedSession(session: SharedSession, windowId: string): SharedSession {
+  const pending = withOwnerWindow(parsePendingItems(session.pending), windowId);
+  const loop = isSharedLoopState(session.loop) ? session.loop : undefined;
+  return { ...session, loop, pending };
+}
+
+function withOwnerWindow(items: readonly PendingItem[], windowId: string): PendingItem[] {
+  return items.map((item) => ({ ...item, session: { ...item.session, windowId } }));
 }
 
 /**
@@ -163,7 +191,7 @@ function normalizeSharedSession(session: SharedSession): SharedSession {
  * 形の合わない`sessions`の要素だけを落とし、ファイル全体は捨てない
  * （1件の不整合で、そのウィンドウのセッションが丸ごと消えないようにする）。
  */
-function parseSharedSessionFile(raw: string): SharedSessionFile | undefined {
+function parseSharedSessionFile(raw: string, windowId: string): SharedSessionFile | undefined {
   const parsed: unknown = JSON.parse(raw);
   if (typeof parsed !== 'object' || parsed === null) {
     return undefined;
@@ -178,7 +206,10 @@ function parseSharedSessionFile(raw: string): SharedSessionFile | undefined {
   return {
     windowId: v.windowId,
     updatedAt: v.updatedAt,
-    sessions: v.sessions.filter(isSharedSession).map(normalizeSharedSession),
+    sessions: v.sessions
+      .filter(isSharedSession)
+      .map((session) => normalizeSharedSession(session, windowId)),
+    pending: withOwnerWindow(parsePendingItems(v.pending), windowId),
   };
 }
 
@@ -228,6 +259,8 @@ export class SessionHubWriter {
     private readonly windowId: string,
     private readonly getSessions: () => readonly SharedSession[],
     private readonly log: Logger,
+    /** 会話に属さない待ち項目（task runの質問。Issue #2135）。省略時は書かない。 */
+    private readonly getWindowPending: () => readonly PendingItem[] = () => [],
   ) {
     this.filePath = path.join(sessionsDir(this.root), `${this.windowId}.json`);
   }
@@ -285,6 +318,7 @@ export class SessionHubWriter {
         windowId: this.windowId,
         updatedAt: Date.now(),
         sessions: [...this.getSessions()],
+        pending: [...this.getWindowPending()],
       };
       try {
         await mkdir(sessionsDir(this.root), { recursive: true });
@@ -534,7 +568,7 @@ export class SessionHubReader implements vscode.Disposable {
     }
     try {
       const raw = await readFile(filePath, 'utf8');
-      const parsed = parseSharedSessionFile(raw);
+      const parsed = parseSharedSessionFile(raw, windowId);
       const now = Date.now();
       if (parsed === undefined || now - parsed.updatedAt > STALE_MS) {
         this.fileState.delete(windowId);
@@ -568,7 +602,7 @@ export class SessionHubReader implements vscode.Disposable {
     // 知らせる（Issue #1809）
     const signature = JSON.stringify(
       this.cache
-        .map((state): [string, SharedSession[]] => [state.windowId, state.sessions])
+        .map((state): [string, unknown] => [state.windowId, [state.sessions, state.pending]])
         .sort(compareBySignatureKey),
     );
     if (signature === this.lastFiredSignature) {
@@ -661,7 +695,10 @@ export type SessionHubRequestKind =
   | 'sideQuestion'
   | 'sideQuestionResult'
   | 'handoffDetail'
-  | 'handoffDecision';
+  | 'handoffDecision'
+  | 'answerQuestion'
+  | 'answerPrompt'
+  | 'answerTaskRunQuestion';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -692,6 +729,39 @@ export interface SessionApprovalDetail {
    * 答えられない。統括ページからは中身だけ出し、ボタンは出さない。
    */
   decidable: boolean;
+  /**
+   * 回答の形（Issue #2135）。`decision`は承認・拒否、`choices`はAskUserQuestionの選択肢、
+   * `text`はCodexの問い合わせのフォーム。古い版のウィンドウからの応答には無い。
+   */
+  answer?: PendingAnswerMode | undefined;
+  /** `kind === 'askUserQuestion'`のときの質問一覧（Issue #2135）。 */
+  questions?: SharedAskUserQuestion[] | undefined;
+  /** `kind === 'codexPrompt'`のときの入力欄（Issue #2135）。 */
+  fields?: SharedPromptField[] | undefined;
+  /**
+   * 統括ページからは答えられない理由（Issue #2135）。伏せ字の入力欄を持つ問い合わせは、
+   * 値を共有ディレクトリへ書かせないためタブ側で答えさせる。
+   */
+  answerBlockedReason?: string | undefined;
+}
+
+/** AskUserQuestionの質問1件（`AskUserQuestionItem`と同じ形。Issue #2135）。 */
+export interface SharedAskUserQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** Codexの問い合わせの入力欄1つ（`PromptField`の表示に要る分だけ。Issue #2135）。 */
+export interface SharedPromptField {
+  id: string;
+  label: string;
+  description: string;
+  options: Array<{ value: string; label: string }>;
+  multiple: boolean;
+  allowOther: boolean;
+  required: boolean;
 }
 
 /**
@@ -859,6 +929,17 @@ export interface SessionHubRequest {
   handoffModel?: string | undefined;
   /** `handoffDecision === 'repick'`のときに指定するeffort。空文字はCLIの既定。 */
   handoffEffort?: string | undefined;
+  /**
+   * `kind === 'answerQuestion'` / `'answerPrompt'`のときの、対象の要求id（Issue #2135）。
+   * `answerTaskRunQuestion`では使わず、`pendingId`で引く。
+   */
+  pendingRequestId?: string | undefined;
+  /** `kind === 'answerTaskRunQuestion'`のときの`PendingItem.id`（Issue #2135）。 */
+  pendingId?: string | undefined;
+  /** `kind === 'answerQuestion'`のときの回答（質問文→選んだラベル）。受信側が質問と突き合わせる。 */
+  answers?: Record<string, string[]> | undefined;
+  /** `kind === 'answerPrompt'`のときの回答。受信側が形と制約を確かめる。 */
+  submission?: unknown;
 }
 
 /** 要求に対する応答。 */
@@ -939,6 +1020,10 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     handoffDecision: typeof v.handoffDecision === 'string' ? v.handoffDecision : undefined,
     handoffModel: typeof v.handoffModel === 'string' ? v.handoffModel : undefined,
     handoffEffort: typeof v.handoffEffort === 'string' ? v.handoffEffort : undefined,
+    pendingRequestId: typeof v.pendingRequestId === 'string' ? v.pendingRequestId : undefined,
+    pendingId: typeof v.pendingId === 'string' ? v.pendingId : undefined,
+    answers: parseAskUserQuestionAnswers(v.answers),
+    submission: v.submission,
   };
 }
 
@@ -1028,9 +1113,95 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
         : [],
       // 読めない版から届いた場合は押せない側へ倒す。誤って承認させない
       decidable: v.decidable === true,
+      // 回答の形（Issue #2135）は付いているときだけ載せる。無ければ承認・拒否として扱う
+      ...(v.answer === 'choices' || v.answer === 'text' ? { answer: v.answer } : {}),
+      ...optionalField('questions', parseSharedQuestions(v.questions)),
+      ...optionalField('fields', parseSharedPromptFields(v.fields)),
+      ...optionalField(
+        'answerBlockedReason',
+        typeof v.answerBlockedReason === 'string' ? v.answerBlockedReason : undefined,
+      ),
     });
   }
   return { approvals };
+}
+
+/** 値があるときだけその項目を持つオブジェクトにする（無い項目を`undefined`で生やさない）。 */
+function optionalField<K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> {
+  return value === undefined ? {} : ({ [key]: value } as Partial<Record<K, V>>);
+}
+
+const MAX_REPLY_QUESTIONS = 10;
+const MAX_REPLY_OPTIONS = 20;
+const MAX_REPLY_FIELDS = 20;
+const MAX_REPLY_LABEL_CHARS = 500;
+
+function readText(value: unknown): string {
+  return typeof value === 'string' ? value.slice(0, MAX_REPLY_LABEL_CHARS) : '';
+}
+
+/** AskUserQuestionの質問一覧を、信用せずに読み解く（Issue #2135）。 */
+function parseSharedQuestions(value: unknown): SharedAskUserQuestion[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const questions: SharedAskUserQuestion[] = [];
+  for (const entry of value.slice(0, MAX_REPLY_QUESTIONS)) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const q = entry as Record<string, unknown>;
+    // 質問文は回答のキーになる。切り詰めると送り返したときに一致しないため、長すぎる質問は落とす
+    if (typeof q.question !== 'string' || q.question.length > MAX_REPLY_TEXT_CHARS) {
+      continue;
+    }
+    questions.push({
+      question: q.question,
+      header: readText(q.header),
+      options: Array.isArray(q.options)
+        ? q.options
+            .slice(0, MAX_REPLY_OPTIONS)
+            .filter((o): o is Record<string, unknown> => typeof o === 'object' && o !== null)
+            .filter((o) => typeof o.label === 'string' && o.label.length <= MAX_REPLY_LABEL_CHARS)
+            .map((o) => ({ label: o.label as string, description: readText(o.description) }))
+        : [],
+      multiSelect: q.multiSelect === true,
+    });
+  }
+  return questions;
+}
+
+/** Codexの問い合わせの入力欄を、信用せずに読み解く（Issue #2135）。 */
+function parseSharedPromptFields(value: unknown): SharedPromptField[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const fields: SharedPromptField[] = [];
+  for (const entry of value.slice(0, MAX_REPLY_FIELDS)) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const f = entry as Record<string, unknown>;
+    if (typeof f.id !== 'string' || f.id.length > MAX_REPLY_LABEL_CHARS) {
+      continue;
+    }
+    fields.push({
+      id: f.id,
+      label: readText(f.label),
+      description: readText(f.description),
+      options: Array.isArray(f.options)
+        ? f.options
+            .slice(0, MAX_REPLY_OPTIONS)
+            .filter((o): o is Record<string, unknown> => typeof o === 'object' && o !== null)
+            .filter((o) => typeof o.value === 'string' && o.value.length <= MAX_REPLY_LABEL_CHARS)
+            .map((o) => ({ value: o.value as string, label: readText(o.label) }))
+        : [],
+      multiple: f.multiple === true,
+      allowOther: f.allowOther === true,
+      required: f.required === true,
+    });
+  }
+  return fields;
 }
 
 /**
@@ -1235,6 +1406,10 @@ export class SessionHubRequestPort {
       handoffDecision?: string | undefined;
       handoffModel?: string | undefined;
       handoffEffort?: string | undefined;
+      pendingRequestId?: string | undefined;
+      pendingId?: string | undefined;
+      answers?: Record<string, string[]> | undefined;
+      submission?: unknown;
     },
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
