@@ -606,7 +606,9 @@ export class MissionControlViewManager implements vscode.Disposable {
     void run()
       .then((error) => {
         if (error !== undefined) {
-          this.log.warn(`Mission Control: 設定の操作を拒みました（${String(message.type)}）: ${error}`);
+          this.log.warn(
+            `Mission Control: 設定の操作を拒みました（${String(message.type)}）: ${error}`,
+          );
         }
         this.postReply(seq, error === undefined ? { ok: true } : { ok: false, error });
         this.refresh();
