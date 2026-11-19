@@ -57,14 +57,31 @@ export const MC_PREF_KEYS: readonly McPrefKey[] = [...PREF_SPECS.keys()] as McPr
 /** `agent`節の設定を読む関数（`getConfiguration('agent').get`）。 */
 export type McPrefReader = (key: McPrefKey) => unknown;
 
-/** 今の値。型・範囲の合わない値は`package.json`の既定へ丸める（画面に壊れた値を出さない）。 */
+/**
+ * 今の値。型・範囲の合わない値は`package.json`の既定へ丸める（画面に壊れた値を出さない）。
+ * 数値は、実際に効いている値を出すため、設定を使う側（`readMissionControlStallMs`）と同じ規則で
+ * 読む。範囲内なら整数でない値（2.5など）もそのまま出す（MCから書く値だけを整数に限る）。
+ */
 export function readMcPrefs(read: McPrefReader): McPrefs {
   const prefs: Record<string, boolean | number> = {};
   for (const [key, spec] of PREF_SPECS) {
     const raw = read(key as McPrefKey);
-    prefs[key] = isValidValue(spec, raw) ? raw : spec.fallback;
+    prefs[key] = isEffectiveValue(spec, raw) ? raw : spec.fallback;
   }
   return prefs as McPrefs;
+}
+
+/** 設定を使う側が受け付ける値か（数値は範囲内の有限値。整数でなくてよい）。 */
+function isEffectiveValue(
+  spec: BooleanPrefSpec | NumberPrefSpec,
+  value: unknown,
+): value is boolean | number {
+  if (spec.kind === 'boolean') {
+    return typeof value === 'boolean';
+  }
+  return (
+    typeof value === 'number' && Number.isFinite(value) && value >= spec.min && value <= spec.max
+  );
 }
 
 export interface McPrefChange {
