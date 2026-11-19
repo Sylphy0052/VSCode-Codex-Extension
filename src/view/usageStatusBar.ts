@@ -17,6 +17,13 @@ import {
 } from '../codex/usage';
 import { formatAbsoluteTime } from './relativeTime';
 
+/** `UsageStatusBar.current()`の戻り値。 */
+export interface UsageState {
+  codex: UsageSnapshot | undefined;
+  claude: readonly ClaudeLimitEntry[];
+  claudeReceivedAt: number | undefined;
+}
+
 /** 残り時間の表記を進めるための再描画の間隔（issue #1224。分未満は表示に出ない）。 */
 const TICK_MS = 60_000;
 
@@ -37,7 +44,12 @@ export class UsageStatusBar implements vscode.Disposable {
   private claudeLimits: ClaudeLimitEntry[] = [];
   /** Codexの直近のスナップショット。残り時間の表記を進めるために持つ（issue #1224）。 */
   private snapshot: UsageSnapshot | undefined;
+  /** Claude Codeの値を最後に受け取った時刻（ms）。Mission Controlに「いつの値か」を出すため。 */
+  private claudeReceivedAt: number | undefined;
   private readonly ticker: ReturnType<typeof setInterval>;
+  private readonly changed = new vscode.EventEmitter<void>();
+  /** 値が届いたら発火する（Mission Controlが同じ取得元を読むため。Issue #2162）。 */
+  readonly onDidChange = this.changed.event;
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -76,8 +88,24 @@ export class UsageStatusBar implements vscode.Disposable {
   updateClaude(usage: ChatUsage | undefined): void {
     if (usage !== undefined) {
       this.claudeLimits = mergeClaudeUsage(this.claudeLimits, usage);
+      this.claudeReceivedAt = Date.now();
     }
     this.renderClaude();
+    if (usage !== undefined) {
+      this.changed.fire();
+    }
+  }
+
+  /**
+   * 保持している値（Issue #2162）。Mission Controlはこれを読み、`/api/oauth/usage`などを
+   * 別に取りに行かない。取得できていなければ`codex`は`undefined`、`claude`は空。
+   */
+  current(): UsageState {
+    return {
+      codex: this.snapshot,
+      claude: this.claudeLimits,
+      claudeReceivedAt: this.claudeReceivedAt,
+    };
   }
 
   private renderClaude(): void {
@@ -111,6 +139,7 @@ export class UsageStatusBar implements vscode.Disposable {
   update(snapshot: UsageSnapshot | undefined): void {
     this.snapshot = snapshot;
     this.renderCodex();
+    this.changed.fire();
   }
 
   private renderCodex(): void {
@@ -141,6 +170,7 @@ export class UsageStatusBar implements vscode.Disposable {
 
   dispose(): void {
     clearInterval(this.ticker);
+    this.changed.dispose();
     this.item.dispose();
     this.claudeItem.dispose();
   }

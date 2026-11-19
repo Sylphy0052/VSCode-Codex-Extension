@@ -8,6 +8,7 @@ import type {
   McRunOp,
   McRunState,
   McRunTask,
+  McRunTaskOp,
   McRunsSnapshot,
 } from '../webview/missionControl/protocol';
 import {
@@ -32,6 +33,11 @@ export interface McRunsPort {
   onDidChange(listener: () => void): { dispose(): void };
   /** 失敗・取りやめなら理由の文、成功なら`undefined`。 */
   runOp(op: McRunOp, runId: string): Promise<string | undefined>;
+  /**
+   * runのタスク1件への操作（Issue #2162）。Kanbanの「やり直す」「停止」と同じ
+   * `TaskRunController.retryStage` / `stopStage`を呼ぶ。失敗・取りやめなら理由の文。
+   */
+  taskOp?(op: McRunTaskOp, runId: string, taskId: string): Promise<string | undefined>;
   setMaxParallel(runId: string, maxParallel: number): Promise<string | undefined>;
   /** 新しいrunを始める（`agent.taskRun.start`と同じQuickPickを出す）。 */
   start(): Promise<string | undefined>;
@@ -104,6 +110,8 @@ function toTasks(run: TaskRunKanbanRun): McRunTask[] {
       done: column === 'done',
       issueNumber: card.issueNumber,
       pullRequestNumber: card.pullRequest?.number,
+      canStop: card.canStop,
+      canRetry: card.canRetry,
     })),
   );
 }
@@ -175,6 +183,27 @@ export function parseRunOp(
     return 'runが正しくありません';
   }
   return { op: op as McRunOp, runId };
+}
+
+const TASK_OPS: readonly McRunTaskOp[] = ['retry', 'stop'];
+/** `TASK_ID_PATTERN`（`workflow.ts`）と同じ字種。 */
+const TASK_ID_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,49}$/u;
+
+/** `runTaskOp`の検証（Issue #2162）。合わなければ理由の文。 */
+export function parseRunTaskOp(
+  message: Record<string, unknown>,
+): { op: McRunTaskOp; runId: string; taskId: string } | string {
+  const { op, runId, taskId } = message;
+  if (typeof op !== 'string' || !(TASK_OPS as readonly string[]).includes(op)) {
+    return '操作が正しくありません';
+  }
+  if (!isRunIdShape(runId)) {
+    return 'runが正しくありません';
+  }
+  if (typeof taskId !== 'string' || !TASK_ID_SHAPE.test(taskId)) {
+    return 'タスクが正しくありません';
+  }
+  return { op: op as McRunTaskOp, runId, taskId };
 }
 
 /** `runParallel`の検証。範囲（1〜上限）は`TaskRunController.setMaxParallel`も確かめる。 */

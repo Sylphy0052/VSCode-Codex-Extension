@@ -304,6 +304,8 @@ import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
+import { buildMcUsage } from './view/missionControlUsage';
+import { createMcSettingsPort } from './view/missionControlSettings';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import {
   WorkflowViewManager,
@@ -2041,6 +2043,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
   /** Mission Controlへ最後に渡した履歴（Issue #2149の3）。開き直す要求の突き合わせに使う。 */
   let missionControlHistory: SessionSummary[] = [];
+  // 利用枠はステータスバーとMission Control（Issue #2162）が同じ値を読む。MCのタブはReload後に
+  // 早く復元されうるので、MCより先に作っておく
+  const usageBar = new UsageStatusBar();
+  context.subscriptions.push(usageBar);
   const missionControl: MissionControlViewManager = new MissionControlViewManager(
     () => {
       const sessions = [
@@ -2075,9 +2081,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           pinnedSessions.isPinned(pinKeyFor({ provider, id: threadId })),
       });
       const runsPort = missionControlRunsHolder.current;
+      const withUsage = { ...snapshot, usage: buildMcUsage(usageBar.current(), snapshot.now) };
       return runsPort === undefined
-        ? snapshot
-        : { ...snapshot, runs: runsPort.snapshot(workspaceFolderPaths()) };
+        ? withUsage
+        : { ...withUsage, runs: runsPort.snapshot(workspaceFolderPaths()) };
     },
     controlSessionAnywhere,
     context.extensionUri,
@@ -2228,6 +2235,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
     },
     () => missionControlRunsHolder.current,
+    createMcSettingsPort(context.globalState),
+  );
+  // 利用枠と、MCから変えられる設定（Issue #2162）が変わったら画面へ反映する。設定はMCの外
+  // （設定エディタ・別ウィンドウ）で変わることもある
+  context.subscriptions.push(
+    usageBar.onDidChange(() => missionControl.refresh()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration('agent.missionControl') ||
+        event.affectsConfiguration('agent.notifications')
+      ) {
+        missionControl.refresh();
+      }
+    }),
   );
   // runの変化（Issue #2150）はセッションの状態変化とは別に届くため、ここでRunsタブへ反映する
   const missionControlRunsSubscription = missionControlRunsHolder.current?.onDidChange(() =>
@@ -2453,8 +2474,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   };
 
   const usageReader = new UsageReader(nodeFileSystem, paths);
-  const usageBar = new UsageStatusBar();
-  context.subscriptions.push(usageBar);
 
   const readUsage = async (): Promise<void> => {
     // app-serverに聞ければ現在値が返る。繋がっていないときだけロールアウトを読む

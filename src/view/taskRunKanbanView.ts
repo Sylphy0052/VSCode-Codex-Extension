@@ -414,6 +414,42 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
   }
 
+  /**
+   * Mission Controlからタスクの工程を止める（Issue #2162）。Kanbanの「停止」と同じ条件
+   * （`canStop`）と確認を通す。失敗・取りやめなら理由の文を返す。
+   */
+  async stopTaskStage(runId: string, taskId: string): Promise<string | undefined> {
+    const card = this.findCard(runId, taskId);
+    if (card === undefined || !card.canStop) {
+      return '止められる工程ではありません';
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `${taskId}の工程を停止しますか？ worktreeとブランチは残り、後で「やり直す」で始め直せます。`,
+      { modal: true },
+      '停止する',
+    );
+    if (choice !== '停止する') {
+      return CANCELLED;
+    }
+    const result = await this.deps.controller.stopStage(runId, taskId);
+    this.schedulePost();
+    return result.ok ? undefined : result.message;
+  }
+
+  /**
+   * Mission Controlからタスクの工程をやり直す（Issue #2162）。Kanbanの「やり直す」と同じ
+   * `retryStage`を、ボタンを出す条件（`canRetry`）のときだけ呼ぶ。
+   */
+  async retryTaskStage(runId: string, taskId: string): Promise<string | undefined> {
+    const card = this.findCard(runId, taskId);
+    if (card === undefined || !card.canRetry) {
+      return 'やり直せる工程ではありません';
+    }
+    const result = await this.deps.controller.retryStage(runId, taskId);
+    this.schedulePost();
+    return result.ok ? undefined : result.message;
+  }
+
   /** 質問への回答。回答待ちでなくなっていれば（既に回答済み・取り消し済み）知らせる。 */
   private async answerQuestion(
     runId: string,
