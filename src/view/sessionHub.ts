@@ -985,9 +985,10 @@ export interface SessionHubRequestOutcome {
 const REPLY_TIMEOUT_MS = 5_000;
 /**
  * CLIを起動する操作（archive・delete。Issue #2149）の応答を待つ上限。`REQUEST_TTL_MS`より
- * 短くし、受信側の掃除で要求・応答が消される前に打ち切る。
+ * 短くし、受信側の掃除で要求・応答が消される前に打ち切る。受信側はターンの中断（上限5秒）と
+ * CLI（`execFile`の上限30秒）を順に待つため、その合計より長くする。
  */
-export const LONG_REPLY_TIMEOUT_MS = 30_000;
+export const LONG_REPLY_TIMEOUT_MS = 45_000;
 /** 応答ファイルの確認間隔。 */
 const REPLY_POLL_MS = 150;
 /**

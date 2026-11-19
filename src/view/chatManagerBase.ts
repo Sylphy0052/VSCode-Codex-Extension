@@ -1317,23 +1317,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
-   * セッション統括ページ（`sessionKanbanView.ts`）からの操作（Issue #1258）。
+   * Mission Controlから会話を閉じる（Issue #2149の1）。実行中のターンを止めてから、タブを
+   * 閉じたときと同じ`teardown`を通す。確認は呼び出し側（Mission Control）が済ませている。
    *
-   * 自ウィンドウのカードからも、別ウィンドウから要求ファイルで届いた分
-   * （`extension.ts`の`SessionHubRequestWatcher`）からも、同じここを通す。
-   *
-   * 中断と送信は`dispatchMessage`（webviewの操作と同じ入口）へ流す。ループへの割り込み
-   * 扱い・上限による自動再開の抑止・擬似コマンドの扱いは各サブクラスの`send` /
-   * `interrupt`の分岐が持っているため、ここで作り直すと画面からの操作と挙動がずれる。
-   */
-  /**
-   * Mission Controlから会話を閉じる（Issue #2149の1）。タブを閉じたときと同じ`teardown`で、
-   * 実行中ならプロセスも止める。確認は呼び出し側（Mission Control）が済ませている。
+   * `teardown`だけではCodexのターンは止まらない（app-serverは共有で、会話を閉じても
+   * `turn/interrupt`を送らない）。止める処理は`stopTurnBeforeClose`がproviderごとに持つ。
    *
    * タスクの会話（オーケストレータ・ワークフローが管理）と入力欄を閉じたタブは閉じさせない。
    * 管理側が会話の続きを待っているため、外から止めると工程が宙に浮く。
    */
-  closeSession(threadId: string): SessionControlResult {
+  async closeSession(threadId: string): Promise<SessionControlResult> {
     const entry = this.panels.get(threadId);
     if (entry === undefined || entry.disposed) {
       return { ok: false, error: 'この会話は既に閉じられています' };
@@ -1344,8 +1337,17 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         error: 'タスクの会話は閉じられません（管理しているタスク側で止めてください）',
       };
     }
+    await this.stopTurnBeforeClose(entry);
     this.teardown(entry);
     return { ok: true };
+  }
+
+  /**
+   * `closeSession`が`teardown`の前に呼ぶ、実行中のターンを止める処理。既定は何もしない
+   * （Claude Codeは`teardown`の`session.dispose()`がCLIのプロセスを止める）。
+   */
+  protected async stopTurnBeforeClose(_entry: TPanel): Promise<void> {
+    // 既定は何もしない
   }
 
   /** 会話がこのウィンドウで開いているか。 */
@@ -1354,6 +1356,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     return entry !== undefined && !entry.disposed;
   }
 
+  /**
+   * セッション統括ページ（`sessionKanbanView.ts`）からの操作（Issue #1258）。
+   *
+   * 自ウィンドウのカードからも、別ウィンドウから要求ファイルで届いた分
+   * （`extension.ts`の`SessionHubRequestWatcher`）からも、同じここを通す。
+   *
+   * 中断と送信は`dispatchMessage`（webviewの操作と同じ入口）へ流す。ループへの割り込み
+   * 扱い・上限による自動再開の抑止・擬似コマンドの扱いは各サブクラスの`send` /
+   * `interrupt`の分岐が持っているため、ここで作り直すと画面からの操作と挙動がずれる。
+   */
   controlSession(threadId: string, action: SessionControlAction): SessionControlResult {
     // 結果の取得だけは会話の有無より先に見る（Issue #1261）。回答が返る前にタブが
     // 閉じても、投げた側は結果を読めるようにする（預かっているのはこの管理クラス）

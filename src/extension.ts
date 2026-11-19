@@ -255,6 +255,7 @@ import { createMissionControlHost, isRunningTurn, resumeKey } from './view/missi
 import {
   isLifecycleOp,
   LIFECYCLE_UNSUPPORTED_MESSAGE,
+  mergeArchivedSessions,
   runLifecycle,
   supportsArchive,
   toHistoryItems,
@@ -1565,12 +1566,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     const manager = provider === 'claude' ? claudeChat : chat;
     let result: SessionControlResult;
     if (op === 'close') {
-      result = manager.closeSession(threadId);
+      result = await manager.closeSession(threadId);
     } else if (!supportsArchive(provider)) {
       result = { ok: false, error: LIFECYCLE_UNSUPPORTED_MESSAGE };
     } else {
       const closed = manager.hasOpenSession(threadId)
-        ? manager.closeSession(threadId)
+        ? await manager.closeSession(threadId)
         : { ok: true };
       if (!closed.ok) {
         result = closed;
@@ -2127,14 +2128,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         });
       },
       history: async () => {
-        const sessions = await providers.listSessions(
-          {
-            scope: 'all',
-            workspaceFolders: workspaceFolderPaths(),
-            maxEntries: readConfig().historyMaxEntries,
-          },
-          log,
-        );
+        const options = {
+          scope: 'all' as const,
+          workspaceFolders: workspaceFolderPaths(),
+          maxEntries: readConfig().historyMaxEntries,
+        };
+        // `thread/list`由来の一覧はarchive済みを含まないため、ファイルから拾って重ねる
+        const [listed, archived] = await Promise.all([
+          providers.listSessions(options, log),
+          store.listArchived(options).catch((e: unknown) => {
+            log.warn(`Mission Control: archive済みのセッションを読めませんでした: ${String(e)}`);
+            return [];
+          }),
+        ]);
+        const sessions = mergeArchivedSessions(listed, archived);
         missionControlHistory = sessions;
         return toHistoryItems(sessions, missionControlRepoResolver);
       },
@@ -2145,6 +2152,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         );
         if (session === undefined) {
           return '履歴にこのセッションが見つかりません。履歴を開き直してください';
+        }
+        // archive済みのCodexのセッションは、app-serverが再開を断る（「unarchiveしてから」と
+        // 返す。実測）。再開の操作なので、先にarchiveを解除する
+        if (session.provider === 'codex' && session.archived) {
+          try {
+            const run = await actions.run('unarchive', session.id);
+            if (run.code !== 0) {
+              return `archiveを解除できませんでした: ${run.stderr.trim()}`;
+            }
+          } catch (e: unknown) {
+            return `archiveを解除できませんでした: ${String(e)}`;
+          }
+          log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
+          missionControlHistory = missionControlHistory.map((s) =>
+            s === session ? { ...s, archived: false } : s,
+          );
         }
         openSession(chat, claudeChat, log, session);
         return undefined;

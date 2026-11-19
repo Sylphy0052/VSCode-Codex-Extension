@@ -326,6 +326,8 @@ import {
 const VIEW_TYPE = 'codex.chat';
 const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
 const LIMIT_AUTO_RESUME_GRACE_MS = 30_000;
+/** Mission Controlから閉じる前の`turn/interrupt`の応答を待つ上限（Issue #2149の1）。 */
+const CLOSE_INTERRUPT_TIMEOUT_MS = 5_000;
 const LIMIT_AUTO_RESUME_RETRY_MS = 60_000;
 const LIMIT_AUTO_RESUME_FALLBACK_MS = 30 * 60_000;
 
@@ -3167,6 +3169,28 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
    * `BaseChatViewManager.teardown`（基底クラス）の拡張フック。`pendingStarts`
    * （`thread/start`応答待ち登録。Claude Codeには対応する概念が無い）からも取り除く。
    */
+  /**
+   * Mission Controlから閉じる前に、実行中のターンを止める（Issue #2149の1）。app-serverは
+   * 他の会話と共有しているため`teardown`ではターンが止まらず、閉じた後も裏でファイルを
+   * 書き換え続ける。応答を待つのは上限まで（`turn/interrupt`は応答が返らないことがある）。
+   */
+  protected override async stopTurnBeforeClose(entry: ChatPanel): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), CLOSE_INTERRUPT_TIMEOUT_MS);
+    });
+    try {
+      const result = await Promise.race([entry.session.interrupt().then(() => 'done'), timeout]);
+      if (result === 'timeout') {
+        this.log.warn('Mission Control: 閉じる前のターンの中断が応答しませんでした');
+      }
+    } catch (e: unknown) {
+      this.log.warn(`Mission Control: 閉じる前にターンを中断できませんでした: ${String(e)}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   protected override onTeardown(entry: ChatPanel): void {
     // タブを閉じたら、この会話に割り当てたメッセージング用MCPのURLを失効させる（Issue #1305）
     this.sessionMessagingRegistrations.get(entry)?.dispose();

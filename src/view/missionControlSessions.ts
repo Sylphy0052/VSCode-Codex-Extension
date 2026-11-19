@@ -1,4 +1,5 @@
 import type { SessionSummary } from '../codex/types';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type {
   McHistoryItem,
   McLifecycleOp,
@@ -21,6 +22,8 @@ import { parseTarget } from './sessionControlMessage';
 export const MAX_LIFECYCLE_TARGETS = 100;
 /** 確認の文に名前を並べる件数。残りは件数だけ出す。 */
 const CONFIRM_LIST_MAX = 5;
+/** 確認の文に出すタイトル1件の長さの上限（文字数）。 */
+const CONFIRM_TITLE_MAX_CHARS = 80;
 
 const LIFECYCLE_OPS: readonly McLifecycleOp[] = ['close', 'archive', 'delete'];
 
@@ -98,7 +101,10 @@ export function lifecycleConfirmation(
   sessions: readonly LifecycleSessionInfo[],
 ): LifecycleConfirmation | undefined {
   const names = (list: readonly LifecycleSessionInfo[]): string => {
-    const shown = list.slice(0, CONFIRM_LIST_MAX).map((s) => `・${s.title}`);
+    // タイトルは外部由来。改行を残すと、確認文の中に偽の行（件数・対象）を書き足せる
+    const shown = list
+      .slice(0, CONFIRM_LIST_MAX)
+      .map((s) => `・${sanitizeInlineText(s.title, CONFIRM_TITLE_MAX_CHARS)}`);
     const rest = list.length - shown.length;
     return [...shown, ...(rest > 0 ? [`ほか${String(rest)}件`] : [])].join('\n');
   };
@@ -195,6 +201,18 @@ export function summarizeOutcomes(
 
 /** 履歴に出す件数の上限。 */
 export const MAX_HISTORY_ITEMS = 500;
+
+/**
+ * 一覧（`thread/list`由来。archive済みを含まない）へ、archive済みのセッションを重ねる。
+ * 同じセッションが両方にあれば一覧の方を残す。
+ */
+export function mergeArchivedSessions(
+  listed: readonly SessionSummary[],
+  archived: readonly SessionSummary[],
+): SessionSummary[] {
+  const seen = new Set(listed.map((s) => `${s.provider}|${s.id}`));
+  return [...listed, ...archived.filter((s) => !seen.has(`${s.provider}|${s.id}`))];
+}
 
 /** 履歴（`SessionSummary`）を画面の形へ変える。新しい順に並べる。 */
 export function toHistoryItems(
