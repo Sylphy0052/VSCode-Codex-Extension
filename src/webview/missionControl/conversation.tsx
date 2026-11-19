@@ -125,7 +125,8 @@ export function Conversation(props: {
       setCurrent(0);
     }
   }, [matches.length]);
-  // 今の一致を見える位置へ出す
+  // 今の一致を見える位置へ出す。検索語が変わると、選択位置（0件目）と一致したやり取りが同じでも
+  // 一致の文字位置は変わるので、検索語でも出し直す
   useEffect(() => {
     if (current === undefined) {
       return;
@@ -133,7 +134,7 @@ export function Conversation(props: {
     logRef.current
       ?.querySelector<HTMLElement>(`[data-match="${current}"]`)
       ?.scrollIntoView({ block: 'center' });
-  }, [current, currentMatch?.turn]);
+  }, [current, currentMatch?.turn, query]);
 
   // 古いやり取りを先頭へ足したときは見ていた位置を保ち、下端にいたなら新しいやり取りへ付いていく
   useLayoutEffect(() => {
