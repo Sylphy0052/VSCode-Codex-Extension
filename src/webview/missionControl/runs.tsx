@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Bridge } from './bridge';
+import { keyLabelFor } from './keys';
 import type {
   McIssueListing,
   McProvider,
@@ -82,7 +83,19 @@ export function RunsPane(props: {
         </button>
       </div>
       <section class="section" aria-label="run一覧">
-        {runs.runs.length === 0 ? <p class="empty">runはありません。</p> : null}
+        {runs.runs.length === 0 ? (
+          <div class="empty empty-guide">
+            <p>runはありません。次のキーで始められます。</p>
+            <ul>
+              <li>
+                <kbd>{keyLabelFor('newSession')}</kbd>新しいrunを始める
+              </li>
+              <li>
+                <kbd>{keyLabelFor('issues')}</kbd>roadmap・Issueから起動する
+              </li>
+            </ul>
+          </div>
+        ) : null}
         {STATE_ORDER.map(([state, label]) => {
           const group = runs.runs.filter((r) => r.state === state);
           if (group.length === 0) {
@@ -115,6 +128,7 @@ export function RunsPane(props: {
                   <span class="row-sub">
                     {r.repoLabel} · {r.assessment}
                   </span>
+                  <RunProgress run={r} />
                 </div>
               ))}
             </div>
@@ -132,6 +146,7 @@ export function RunsPane(props: {
               {String(run.maxParallel)}（実行中{String(run.activeSessions)}）· 完了{' '}
               {String(run.taskDone)}/{String(run.taskTotal)}
             </p>
+            <RunProgress run={run} />
             <div class="actions">
               <button
                 type="button"
@@ -227,6 +242,38 @@ export function RunsPane(props: {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * runの工程バー（Issue #2151の2）。タスクごとに1区切りで、完了・要対応・進行中を色と模様で
+ * 分ける（要対応は斜線、完了は塗り、進行中は枠だけ）。終えたrunはタスクの一覧を持たないので、
+ * 完了数の割合の帯だけを出す。
+ */
+export function RunProgress(props: { run: McRun }): JSX.Element | null {
+  const { run } = props;
+  if (run.taskTotal === 0) {
+    return null;
+  }
+  const label = `タスク ${String(run.taskDone)} / ${String(run.taskTotal)} 完了`;
+  if (run.tasks.length === 0) {
+    const percent = Math.min(100, Math.round((run.taskDone / run.taskTotal) * 100));
+    return (
+      <span class="run-progress" role="img" aria-label={label} title={label}>
+        <span class="run-seg done" style={{ flex: `0 0 ${String(percent)}%` }} />
+      </span>
+    );
+  }
+  return (
+    <span class="run-progress" role="img" aria-label={label} title={label}>
+      {run.tasks.map((t) => (
+        <span
+          key={t.taskId}
+          class={`run-seg ${t.done ? 'done' : t.warn ? 'warn' : 'active'}`}
+          title={`${t.taskId} ${t.stage}`}
+        />
+      ))}
+    </span>
   );
 }
 

@@ -342,6 +342,51 @@ export function stalledSince(
     : Math.max(session.lastOutputAt, session.activitySince);
 }
 
+/**
+ * カードの見た目を決める状態（Issue #2151）。`activity`に、停滞（実行中で出力が止まった）を
+ * 足したもの。色と形（アイコン・枠の線種）の両方をこれで選ぶ。
+ */
+export type McCardStatus = McActivity | 'stalled';
+
+export function cardStatus(
+  session: Pick<McSession, 'activity' | 'lastOutputAt' | 'activitySince'>,
+  now: number,
+  stallMs: number,
+): McCardStatus {
+  return isStalled(session, now, stallMs) ? 'stalled' : session.activity;
+}
+
+/** 人の対応が要るか（入力待ち・引き継ぎ確認・待ち項目あり）。カードに印を付ける。 */
+export function needsAttention(session: Pick<McSession, 'activity' | 'pendingCount'>): boolean {
+  return (
+    session.activity === 'approvalPending' ||
+    session.activity === 'handoffPending' ||
+    session.pendingCount > 0
+  );
+}
+
+/** トークン数を短く出す（`1,234`・`12.3k`・`1.2M`）。 */
+export function formatTokens(tokens: number): string {
+  if (tokens < 10_000) {
+    return Math.round(tokens).toLocaleString('en-US');
+  }
+  if (tokens < 1_000_000) {
+    return `${(tokens / 1000).toFixed(1)}k`;
+  }
+  return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
+
+/** 推定費用（USD）を出す。1セント未満は`<$0.01`にする（0円に見せない）。 */
+export function formatCost(usd: number): string {
+  if (usd > 0 && usd < 0.01) {
+    return '<$0.01';
+  }
+  return `$${usd.toFixed(2)}`;
+}
+
+/** 一覧の密度（Issue #2151の3）。 */
+export type McDensity = 'comfortable' | 'compact';
+
 /** 同じrepoで開いているセッションの数（新規起動でworktreeを既定ONにするかの判断）。 */
 export function countSessionsInRepo(sessions: readonly McSession[], repoKey: string): number {
   return sessions.filter((session) => session.repoKey === repoKey).length;

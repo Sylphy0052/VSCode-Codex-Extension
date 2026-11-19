@@ -66,6 +66,12 @@ export interface McSession {
   lastOutput?: string | undefined;
   /** 出力が最後に変わった時刻（ms）。停滞の判定に使う。古い版のウィンドウでは無い。 */
   lastOutputAt?: number | undefined;
+  /** CLIが通知したmodel（Issue #2151）。外部由来のテキストなので文字列として描くだけにする。 */
+  model?: string | undefined;
+  /** セッション累計のトークン数（Codexだけ）。 */
+  tokens?: number | undefined;
+  /** セッションの推定費用（USD。Claude Codeだけ）。 */
+  costUsd?: number | undefined;
   /**
    * レビュー待ち（Issue #2138の1）。ターンが終わって作業ツリーに変更が残っていて、まだ
    * 「確認済み」にしていないときだけ載る。

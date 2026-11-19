@@ -309,6 +309,9 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       pendingCount: items.length,
       lastOutput: session.lastOutput,
       lastOutputAt: session.lastOutputAt,
+      model: session.model,
+      tokens: session.tokens,
+      costUsd: session.costUsd,
       review: input.reviews?.get(key),
     });
     for (const item of items) {

@@ -17,7 +17,7 @@ import {
   ReviewSection,
   SideQuestionForm,
 } from './extras';
-import { KindIcon, ProviderIcon } from './icons';
+import { KindIcon, ProviderIcon, StatusIcon } from './icons';
 import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import {
   HistoryDialog,
@@ -39,13 +39,18 @@ import {
   filterSessions,
   formatElapsed,
   groupSessionsByRepo,
-  isStalled,
+  cardStatus,
+  formatCost,
+  formatTokens,
+  needsAttention,
   stalledSince,
   KEY_HELP,
   moveSelection,
   needsApprovalDetail,
   PENDING_KIND_LABELS,
   reconcileSelection,
+  type McCardStatus,
+  type McDensity,
   type McFilter,
   type McProviderFilter,
 } from './logic';
@@ -58,7 +63,7 @@ import {
   submitAround,
   trapTab,
 } from './accessKeys';
-import { KEY_BINDINGS, bindingDisplay, resolveKey, type McKeyCommand } from './keys';
+import { KEY_BINDINGS, bindingDisplay, keyLabelFor, resolveKey, type McKeyCommand } from './keys';
 import { CommandPalette, type McPaletteEntry } from './palette';
 import type {
   McActivity,
@@ -87,6 +92,8 @@ interface PersistedState {
   tab: 'sessions' | 'runs';
   /** ボタン上にアクセスキーを出すか（Issue #2152の3。`.`で切り替える）。 */
   showAccessKeys: boolean;
+  /** 一覧の密度（Issue #2151の3。`Shift+V`で切り替える）。 */
+  density: McDensity;
 }
 
 /** フォーカスを置けるペイン（Issue #2152の2）。Runsタブは`list`がrunの画面。 */
@@ -104,6 +111,8 @@ const SESSION_ONLY_COMMANDS: ReadonlySet<McKeyCommand['kind']> = new Set([
   'reply',
   'toggleMark',
   'lifecycle',
+  // 一覧 / カードはセッションの一覧だけの表示（Runsタブには効かない）
+  'view',
 ]);
 
 const PROVIDER_FILTERS: ReadonlyArray<[McProviderFilter, string]> = [
@@ -142,6 +151,7 @@ function readPersisted(raw: unknown): PersistedState {
     viewMode: 'list',
     tab: 'sessions',
     showAccessKeys: true,
+    density: 'comfortable',
   };
   if (typeof raw !== 'object' || raw === null) {
     return fallback;
@@ -164,6 +174,7 @@ function readPersisted(raw: unknown): PersistedState {
     viewMode: v.viewMode === 'grid' ? 'grid' : 'list',
     tab: v.tab === 'runs' ? 'runs' : 'sessions',
     showAccessKeys: v.showAccessKeys !== false,
+    density: v.density === 'compact' ? 'compact' : 'comfortable',
   };
 }
 
@@ -254,6 +265,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [paneFocus, setPaneFocus] = useState<McPane>('list');
   const [palette, setPalette] = useState<readonly McPaletteEntry[] | undefined>(undefined);
   const [showAccessKeys, setShowAccessKeys] = useState(initial.showAccessKeys);
+  const [density, setDensity] = useState<McDensity>(initial.density);
 
   useEffect(() => {
     const off = bridge.onSnapshot((next) => {
@@ -277,8 +289,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       viewMode,
       tab,
       showAccessKeys,
+      density,
     } satisfies PersistedState);
-  }, [bridge, filter, selected, viewMode, tab, showAccessKeys]);
+  }, [bridge, filter, selected, viewMode, tab, showAccessKeys, density]);
 
   useEffect(() => {
     if (toast === '') {
@@ -642,6 +655,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       case 'accessKeys':
         setShowAccessKeys((on) => !on);
         return;
+      case 'view':
+        setViewMode((mode) => (mode === 'grid' ? 'list' : 'grid'));
+        return;
+      case 'density':
+        setDensity((d) => (d === 'compact' ? 'comfortable' : 'compact'));
+        return;
       case 'submit':
         submitAround(ctx.target);
         return;
@@ -846,18 +865,6 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         label: `このウィンドウのみ: ${filter.currentWindowOnly ? 'オフにする' : 'オンにする'}`,
         contextual: false,
         run: setFilterLater({ currentWindowOnly: !filter.currentWindowOnly }),
-      },
-      {
-        id: 'view:list',
-        label: 'セッションを一覧で表示',
-        contextual: false,
-        run: () => setViewMode('list'),
-      },
-      {
-        id: 'view:grid',
-        label: 'セッションをカードで表示',
-        contextual: false,
-        run: () => setViewMode('grid'),
       },
       {
         id: 'markClear',
@@ -1073,7 +1080,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   formKeys.current = null;
 
   return (
-    <div class={showAccessKeys ? 'mc akeys' : 'mc'} data-tab={tab} data-pane-focus={effectivePane}>
+    <div
+      class={['mc', showAccessKeys ? 'akeys' : '', density === 'compact' ? 'compact' : '']
+        .filter((c) => c !== '')
+        .join(' ')}
+      data-tab={tab}
+      data-pane-focus={effectivePane}
+      data-density={density}
+    >
       <Rail
         focused={effectivePane === 'rail'}
         repos={repos}
@@ -1114,7 +1128,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 value={filter.query}
                 onInput={(e) => setFilter({ ...filter, query: e.currentTarget.value })}
               />
-              <div class="seg" role="group" aria-label="セッション一覧の表示">
+              <div
+                class="seg"
+                role="group"
+                aria-label="セッション一覧の表示（v）"
+                title="一覧 / カードを切り替える（v）"
+                data-key-label="v"
+              >
                 <button
                   type="button"
                   aria-pressed={viewMode === 'list'}
@@ -1128,6 +1148,28 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                   onClick={() => setViewMode('grid')}
                 >
                   カード
+                </button>
+              </div>
+              <div
+                class="seg"
+                role="group"
+                aria-label="表示の密度（Shift+V）"
+                title="表示の密度を切り替える（Shift+V）"
+                data-key-label="Shift+V"
+              >
+                <button
+                  type="button"
+                  aria-pressed={density === 'comfortable'}
+                  onClick={() => setDensity('comfortable')}
+                >
+                  標準
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={density === 'compact'}
+                  onClick={() => setDensity('compact')}
+                >
+                  詰める
                 </button>
               </div>
               <button
@@ -1176,7 +1218,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               </button>
             </div>
             <section class="section" aria-label="Inbox">
-              <h2 class="pane-title">Inbox（{String(pending.length + resumable.length)}）</h2>
+              <h2 class="pane-title">
+                Inbox（{String(pending.length + resumable.length)}）
+                {pending.length > 0 ? (
+                  <span class="badge attention" title="回答を待っている項目の数">
+                    {String(pending.length)}
+                  </span>
+                ) : null}
+              </h2>
               {pending.length === 0 && resumable.length === 0 ? (
                 <p class="empty">回答待ちの項目はありません。</p>
               ) : (
@@ -1214,7 +1263,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
               <MarkBar count={marks.size} onOp={runLifecycle} onClear={() => setMarks(new Set())} />
               {groups.length === 0 ? (
-                <p class="empty">セッションはありません。</p>
+                <EmptyGuide filtered={(snapshot.sessions ?? []).length > 0} />
               ) : (
                 groups.map((group) => (
                   <div key={group.repo.key}>
@@ -1473,15 +1522,68 @@ function PendingRow(props: {
 /** 状態のピル。実行中で出力が止まっていれば「停滞」にする（Issue #2137の5）。 */
 function ActivityPill(props: { session: McSession; now: number; stallMs: number }): JSX.Element {
   const { session, now, stallMs } = props;
+  const status = cardStatus(session, now, stallMs);
   const since = stalledSince(session);
-  if (isStalled(session, now, stallMs) && since !== undefined) {
+  const label = status === 'stalled' ? '停滞' : ACTIVITY_LABELS[session.activity];
+  // 状態が変わると作り直して、ピルの出現のアニメーションで変化（完了など）を知らせる
+  return (
+    <span
+      key={status}
+      class={`pill ${status}`}
+      title={status === 'stalled' ? '実行中ですが、出力が止まっています' : undefined}
+    >
+      <StatusIcon status={status} label={label} decorative />
+      {status === 'stalled' && since !== undefined
+        ? `${label} ${formatElapsed(now - since)}`
+        : label}
+    </span>
+  );
+}
+
+/** カードの補足（model・トークン・費用）。取れたものだけを並べる。 */
+function sessionFacts(session: McSession): string[] {
+  const facts: string[] = [];
+  if (session.model !== undefined && session.model !== '') {
+    facts.push(session.model);
+  }
+  if (session.tokens !== undefined) {
+    facts.push(`${formatTokens(session.tokens)} tokens`);
+  }
+  if (session.costUsd !== undefined) {
+    facts.push(formatCost(session.costUsd));
+  }
+  return facts;
+}
+
+/** セッションが1件も無い・絞り込みで0件のときの案内（Issue #2151の3）。最初の操作をキー付きで示す。 */
+function EmptyGuide(props: { filtered: boolean }): JSX.Element {
+  if (props.filtered) {
     return (
-      <span class="pill stalled" title="実行中ですが、出力が止まっています">
-        停滞 {formatElapsed(now - since)}
-      </span>
+      <p class="empty">
+        条件に合うセッションはありません。検索（<kbd>{keyLabelFor('search')}</kbd>
+        ）と左の絞り込みを見直してください。
+      </p>
     );
   }
-  return <span class={`pill ${session.activity}`}>{ACTIVITY_LABELS[session.activity]}</span>;
+  const steps: ReadonlyArray<[McKeyCommand['kind'], string]> = [
+    ['newSession', '新しいセッションを始める'],
+    ['history', '履歴から会話を再開する'],
+    ['issues', 'roadmap・Issueから起動する'],
+    ['help', 'キー操作の一覧を見る'],
+  ];
+  return (
+    <div class="empty empty-guide">
+      <p>セッションはありません。次のキーで始められます。</p>
+      <ul>
+        {steps.map(([kind, text]) => (
+          <li key={kind}>
+            <kbd>{keyLabelFor(kind)}</kbd>
+            {text}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function SessionRow(props: {
@@ -1494,13 +1596,24 @@ function SessionRow(props: {
   onSelect: () => void;
 }): JSX.Element {
   const { session } = props;
-  const classes = ['row', props.selected ? 'selected' : '', props.marked ? 'marked' : '']
+  const status: McCardStatus = cardStatus(session, props.now, props.stallMs);
+  const attention = needsAttention(session);
+  const facts = sessionFacts(session);
+  const classes = [
+    'row',
+    'session-row',
+    `status-${status}`,
+    attention ? 'attention' : '',
+    props.selected ? 'selected' : '',
+    props.marked ? 'marked' : '',
+  ]
     .filter((c) => c !== '')
     .join(' ');
   return (
     <div
       class={classes}
       data-row={sessionRowId(session)}
+      data-status={status}
       role="option"
       aria-selected={props.selected}
       aria-checked={props.marked}
@@ -1518,6 +1631,7 @@ function SessionRow(props: {
         <ActivityPill session={session} now={props.now} stallMs={props.stallMs} />{' '}
         {formatElapsed(props.now - session.activitySince)}
       </span>
+      {facts.length === 0 ? null : <span class="row-facts">{facts.join(' · ')}</span>}
       {session.lastOutput === undefined ? null : (
         <span class="row-out" title={session.lastOutput}>
           {session.lastOutput}
@@ -1531,7 +1645,11 @@ function SessionRow(props: {
             ? ' · ループ停止中'
             : ' · ループ中'
           : ''}
-        {session.pendingCount > 0 ? ` · 要対応 ${String(session.pendingCount)}` : ''}
+        {session.pendingCount > 0 ? (
+          <span class="badge attention" title="このセッションで回答を待っている項目の数">
+            ! 要対応 {String(session.pendingCount)}
+          </span>
+        ) : null}
       </span>
     </div>
   );

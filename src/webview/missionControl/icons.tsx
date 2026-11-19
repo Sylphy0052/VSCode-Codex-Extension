@@ -1,4 +1,5 @@
 import type { JSX } from 'preact';
+import type { McCardStatus } from './logic';
 import type { McPendingKind, McProvider } from './protocol';
 
 /** インラインSVGのアイコン（Issue #2136の7）。色は`currentColor`でテーマに従う。 */
@@ -42,6 +43,56 @@ const KIND_PATHS: Record<McPendingKind, JSX.Element[]> = {
 
 export function KindIcon(props: { kind: McPendingKind; label: string }): JSX.Element {
   return <Svg label={props.label}>{KIND_PATHS[props.kind]}</Svg>;
+}
+
+/**
+ * 状態ごとに形の違うアイコン（Issue #2151）。色だけに頼らず形でも見分けられるようにする。
+ * 実行中は回る弧（スピナー。`prefers-reduced-motion`では止まり、弧の形だけが残る）。
+ */
+const STATUS_PATHS: Record<McCardStatus, JSX.Element[]> = {
+  // 回る弧（実行中）
+  running: [
+    <circle key="a" cx="8" cy="8" r="5.5" class="status-track" />,
+    <path key="b" d="M8 2.5a5.5 5.5 0 0 1 5.5 5.5" />,
+  ],
+  // 弧と中心の点（バックグラウンドで実行中）
+  backgroundRunning: [
+    <path key="a" d="M8 2.5a5.5 5.5 0 0 1 5.5 5.5" />,
+    <circle key="b" cx="8" cy="8" r="1.4" class="status-fill" />,
+  ],
+  // 三角の感嘆符（停滞）
+  stalled: [<path key="a" d="M8 2 14.5 13.5h-13z" />, <path key="b" d="M8 6.5v3.2M8 11.6v.1" />],
+  // 円の感嘆符（入力待ち）
+  approvalPending: [
+    <circle key="a" cx="8" cy="8" r="6" />,
+    <path key="b" d="M8 4.8v3.8M8 11v.1" />,
+  ],
+  // 矢印（引き継ぎ確認）
+  handoffPending: [<path key="a" d="M2.5 8h10M9.5 4.5 13 8l-3.5 3.5" />],
+  // 中抜きの丸（待機）
+  idle: [<circle key="a" cx="8" cy="8" r="4" />],
+};
+
+/** `decorative`は隣に同じ文言があるとき（ピルの中など）。読み上げを重ねないよう隠す。 */
+export function StatusIcon(props: {
+  status: McCardStatus;
+  label: string;
+  decorative?: boolean;
+}): JSX.Element {
+  const className = `icon status-icon status-${props.status}`;
+  if (props.decorative === true) {
+    return (
+      <svg class={className} viewBox="0 0 16 16" aria-hidden="true">
+        {STATUS_PATHS[props.status]}
+      </svg>
+    );
+  }
+  return (
+    <svg class={className} viewBox="0 0 16 16" role="img" aria-label={props.label}>
+      <title>{props.label}</title>
+      {STATUS_PATHS[props.status]}
+    </svg>
+  );
 }
 
 export function ProviderIcon(props: { provider: McProvider }): JSX.Element {
