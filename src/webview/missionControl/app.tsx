@@ -962,6 +962,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       if (onRuns && SESSION_ONLY_COMMANDS.has(command.kind)) {
         return;
       }
+      // providerに無い操作は出さない（Issue #2159）。Fast modeはCodexと、CLIが状態を返さない
+      // Claudeのセッションでは設定欄にボタンが無いので、パレットにも出さない
+      if (
+        command.kind === 'fastMode' &&
+        (detailRef.current?.querySelector('[data-settings-fast]') ?? null) === null
+      ) {
+        return;
+      }
       entries.push({
         id: `key:${String(index)}`,
         label: onRuns && binding.runsLabel !== undefined ? binding.runsLabel : binding.label,
