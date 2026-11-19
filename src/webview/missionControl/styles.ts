@@ -11,7 +11,11 @@ html, body { height: 100%; }
 body { margin: 0; padding: 0; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size, 13px); }
 button, input, textarea, select { font: inherit; }
 :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.mc { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr) minmax(260px, 38%); height: 100vh; }
+.mc { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr) minmax(260px, 38%); grid-template-rows: auto minmax(0, 1fr); height: 100vh; }
+.mc-header { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 3px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+.mc-header-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 0; color: inherit; background: none; border: 0; cursor: pointer; text-align: left; }
+.mc-header-filter { margin-left: auto; }
+.mc-header-item.limited, .help-box li.limited { color: var(--vscode-errorForeground); }
 .pane { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--vscode-panel-border); }
 .pane:last-child { border-right: 0; }
 .pane-title { margin: 0; padding: 8px 10px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--vscode-descriptionForeground); }
@@ -129,6 +133,9 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .runs-pane { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
 .run-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 3px 0; border-bottom: 1px solid var(--vscode-panel-border); }
 .run-task.done { opacity: .55; }
+.run-task { cursor: pointer; border-left: 2px solid transparent; padding-left: 4px; }
+.run-task.selected { background: var(--vscode-list-inactiveSelectionBackground); border-left-color: var(--vscode-focusBorder); }
+.run-task-actions { grid-column: 1 / -1; display: flex; gap: 6px; }
 .run-task .pill { margin-right: 4px; }
 .issue-box { width: min(640px, 94vw); }
 .history-box { width: min(720px, 94vw); display: grid; gap: 8px; }

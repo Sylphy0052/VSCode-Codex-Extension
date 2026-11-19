@@ -1,4 +1,4 @@
-import type { McLifecycleOp, McRunOp } from './protocol';
+import type { McLifecycleOp, McRunOp, McRunTaskOp } from './protocol';
 
 /**
  * Mission Controlのキー割り当て（Issue #2136の5・#2152）。
@@ -52,7 +52,15 @@ export type McKeyCommand =
   | { kind: 'planMode' }
   | { kind: 'fastMode' }
   // 選んだセッションへのrename・fork・pin・clear・引き継ぎ・巻き戻し（Issue #2160）
-  | { kind: 'sessionOp'; op: McSessionOp };
+  | { kind: 'sessionOp'; op: McSessionOp }
+  // 費用・利用枠・MCの設定・絞り込みの保存・runのタスク単位の操作（Issue #2162）
+  | { kind: 'usage' }
+  | { kind: 'prefs' }
+  | { kind: 'saveFilter' }
+  | { kind: 'savedFilter'; delta: 1 | -1 }
+  | { kind: 'deleteFilter' }
+  | { kind: 'task'; delta: 1 | -1 }
+  | { kind: 'taskOp'; op: McRunTaskOp };
 
 /** 選んだセッションへの操作（Issue #2160）。`pin`はピン留めの付け外しを切り替える。 */
 export type McSessionOp = 'rename' | 'fork' | 'pin' | 'clear' | 'handoff' | 'rewind';
@@ -341,6 +349,63 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     label: '選んだセッションを発言の時点まで巻き戻す（Claudeだけ。確認を出す）',
     contextual: true,
     command: { kind: 'sessionOp', op: 'rewind' },
+  },
+  // Issue #2162: 費用・利用枠・設定・絞り込みの保存。英字はShift付きにする（アクセスキーを減らさない）
+  {
+    keys: ['Shift+u'],
+    label: '費用と利用枠の詳細を開く / 閉じる',
+    command: { kind: 'usage' },
+  },
+  {
+    keys: [','],
+    label: 'Mission Controlの設定（停滞の閾値・通知）を開く',
+    command: { kind: 'prefs' },
+  },
+  {
+    keys: ['Shift+w'],
+    label: '今の絞り込みに名前を付けて保存する（同じ名前は上書き）',
+    command: { kind: 'saveFilter' },
+  },
+  {
+    keys: [']'],
+    label: '保存した絞り込みの次へ切り替える',
+    command: { kind: 'savedFilter', delta: 1 },
+  },
+  {
+    keys: ['['],
+    label: '保存した絞り込みの前へ切り替える',
+    command: { kind: 'savedFilter', delta: -1 },
+  },
+  {
+    keys: ['Shift+x'],
+    label: '今の保存した絞り込みを削除する',
+    command: { kind: 'deleteFilter' },
+  },
+  {
+    keys: ['Shift+j'],
+    label: 'runの次のタスクを選ぶ',
+    scope: 'runs',
+    command: { kind: 'task', delta: 1 },
+  },
+  {
+    keys: ['Shift+k'],
+    label: 'runの前のタスクを選ぶ',
+    scope: 'runs',
+    command: { kind: 'task', delta: -1 },
+  },
+  {
+    keys: ['Shift+g'],
+    label: '選んだタスクの工程をやり直す（Kanbanの「やり直す」と同じ）',
+    scope: 'runs',
+    contextual: true,
+    command: { kind: 'taskOp', op: 'retry' },
+  },
+  {
+    keys: ['Shift+y'],
+    label: '選んだタスクの工程を停止する（確認あり）',
+    scope: 'runs',
+    contextual: true,
+    command: { kind: 'taskOp', op: 'stop' },
   },
   {
     keys: [':'],

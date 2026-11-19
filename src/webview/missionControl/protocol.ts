@@ -142,6 +142,70 @@ export interface McSnapshot {
   resumable?: McResumeItem[] | undefined;
   /** オーケストレータモードのrun（Issue #2150）。task runが使えないときは無い。 */
   runs?: McRunsSnapshot | undefined;
+  /** 利用枠（Issue #2162）。ステータスバーと同じ取得元。古い版の拡張ホストでは無い。 */
+  usage?: McUsage | undefined;
+  /** MCから変えられる設定の今の値（Issue #2162）。古い版の拡張ホストでは無い。 */
+  prefs?: McPrefs | undefined;
+  /** 名前を付けて保存した絞り込み（Issue #2162）。古い版の拡張ホストでは無い。 */
+  savedFilters?: McSavedFilter[] | undefined;
+}
+
+/** 利用枠の窓1つ（Issue #2162）。 */
+export interface McUsageWindow {
+  /** 窓の表示名（週次・5時間など）。外部由来なので拡張ホストで1行にしてある。 */
+  label: string;
+  /** 使用率（%）。分からなければ無い。 */
+  usedPercent?: number | undefined;
+  /** リセット時刻（ms）。分からなければ無い。 */
+  resetsAt?: number | undefined;
+  /** 上限に達しているか。 */
+  limited: boolean;
+  /** リセット時刻を過ぎていて、使用率がもう今の値ではない。 */
+  stale: boolean;
+}
+
+/** 取得元1つ（Codex・Claude Code）の利用枠。 */
+export interface McUsageSource {
+  windows: McUsageWindow[];
+  /** 値を受け取った時刻（ms）。分からなければ無い。 */
+  capturedAt?: number | undefined;
+  /** プラン名（Codexだけ）。 */
+  plan?: string | undefined;
+}
+
+/** 利用枠。取得できていない取得元は無い（画面には「取得できない」と出す）。 */
+export interface McUsage {
+  codex?: McUsageSource | undefined;
+  claude?: McUsageSource | undefined;
+}
+
+/** MCから変えられる設定（Issue #2162）。キーは`agent.`を除いた設定名。 */
+export type McBooleanPrefKey =
+  | 'notifications.approvalPending'
+  | 'notifications.turnComplete'
+  | 'notifications.sound.enabled'
+  | 'notifications.sound.turnComplete'
+  | 'notifications.sound.approvalPending'
+  | 'notifications.sound.handoff'
+  | 'notifications.sound.onlyWhenHidden';
+export type McNumberPrefKey = 'missionControl.stallMinutes';
+export type McPrefKey = McBooleanPrefKey | McNumberPrefKey;
+
+export type McPrefs = Record<McBooleanPrefKey, boolean> & Record<McNumberPrefKey, number>;
+
+/** 絞り込みの中身（webviewの`McFilter`と同じ形）。 */
+export interface McFilterSpec {
+  repoKey?: string | undefined;
+  provider: 'all' | McProvider;
+  currentWindowOnly: boolean;
+  query: string;
+  activity?: McActivity | undefined;
+}
+
+/** 名前を付けて保存した絞り込み。`name`は拡張ホストで1行にし、長さを切ってある。 */
+export interface McSavedFilter {
+  name: string;
+  filter: McFilterSpec;
 }
 
 /**
@@ -163,6 +227,10 @@ export interface McRunTask {
   done: boolean;
   issueNumber?: number | undefined;
   pullRequestNumber?: number | undefined;
+  /** 工程を止められるか（Kanbanの「停止」と同じ条件。Issue #2162）。 */
+  canStop?: boolean | undefined;
+  /** 工程をやり直せるか（Kanbanの「やり直す」と同じ条件）。 */
+  canRetry?: boolean | undefined;
 }
 
 /** run一覧の1行。 */
@@ -206,6 +274,12 @@ export interface McRunsSnapshot {
 
 /** runへの操作（Issue #2150）。`finish`・`suspend`は拡張ホストが確認を出す。 */
 export type McRunOp = 'switch' | 'pause' | 'unpause' | 'suspend' | 'resume' | 'finish';
+
+/**
+ * runのタスク1件への操作（Issue #2162）。Kanbanの「やり直す」（`retryStage`）と
+ * 「停止」（`stopStage`）と同じ。`stop`は拡張ホストが確認を出す。
+ */
+export type McRunTaskOp = 'retry' | 'stop';
 
 /** roadmap・Issueの一覧の1件。 */
 export interface McIssueItem {
@@ -627,4 +701,15 @@ export type McWebviewMessage =
    * コマンドidだけで、引数は拡張ホストが決める。宛先は、選択中のセッションのproviderを渡す
    * コマンドにだけ付ける。
    */
-  | ({ type: 'runCommand'; seq: number; command: string } & Partial<McTarget>);
+  | ({ type: 'runCommand'; seq: number; command: string } & Partial<McTarget>)
+  /** runのタスク1件への操作（Issue #2162）。 */
+  | { type: 'runTaskOp'; seq: number; op: McRunTaskOp; runId: string; taskId: string }
+  /**
+   * MCの設定を1つ変える（Issue #2162）。`key`は許可リストと完全一致するものだけ、値の型と
+   * 範囲は拡張ホストが確かめる。
+   */
+  | { type: 'setPref'; seq: number; key: McPrefKey; value: boolean | number }
+  /** 絞り込みに名前を付けて保存する。同じ名前があれば上書きする。 */
+  | { type: 'saveFilter'; seq: number; name: string; filter: McFilterSpec }
+  /** 保存した絞り込みを消す。 */
+  | { type: 'deleteFilter'; seq: number; name: string };

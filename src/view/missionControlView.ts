@@ -20,10 +20,13 @@ import {
   parseIssueStart,
   parseRunOp,
   parseRunParallel,
+  parseRunTaskOp,
   pickFolder as pickRunFolder,
   type McRunsPort,
 } from './missionControlRuns';
 import { parseRunCommand } from './missionControlCommands';
+import { applyDeleteFilter, applySaveFilter, parseSetPref } from './missionControlPrefs';
+import type { McSettingsPort } from './missionControlSettings';
 import { parseLifecycleRequest, type McLifecycleRunResult } from './missionControlSessions';
 import { MAX_TASK_RUN_PARALLEL } from '../orchestrator/taskRunState';
 import { pickAttachmentFiles } from './missionControlAttachments';
@@ -132,6 +135,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     private readonly sessionPort?: McSessionPort,
     /** オーケストレータモードのrun（Issue #2150）。task runの組み立ての後に入るため関数で受ける。 */
     private readonly runsPort?: () => McRunsPort | undefined,
+    /** MCの設定の変更と絞り込みの保存（Issue #2162）。 */
+    private readonly settingsPort?: McSettingsPort,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -252,7 +257,7 @@ export class MissionControlViewManager implements vscode.Disposable {
       return;
     }
     this.lastPostAt = Date.now();
-    const snapshot = this.read();
+    const snapshot = this.withSettings(this.read());
     this.latestSnapshot = snapshot;
     // タブ名の件数は非表示の間も合わせる（タブ自体は見えている）
     panel.title = missionControlTitle(snapshot.pending.length);
@@ -315,7 +320,13 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'runStart':
       case 'issueList':
       case 'issueStart':
+      case 'runTaskOp':
         this.handleRuns(m);
+        return;
+      case 'setPref':
+      case 'saveFilter':
+      case 'deleteFilter':
+        this.handleSettings(m);
         return;
       default:
         return;
@@ -508,6 +519,16 @@ export class MissionControlViewManager implements vscode.Disposable {
         }
         case 'runStart':
           return done(await port.start());
+        case 'runTaskOp': {
+          const request = parseRunTaskOp(message);
+          if (typeof request === 'string') {
+            return { ok: false, error: request };
+          }
+          if (port.taskOp === undefined) {
+            return { ok: false, error: 'タスクの操作はこの画面では使えません' };
+          }
+          return done(await port.taskOp(request.op, request.runId, request.taskId));
+        }
         case 'issueList': {
           const folder = pickRunFolder(message.folder, folders);
           if (folder === undefined) {
@@ -538,6 +559,61 @@ export class MissionControlViewManager implements vscode.Disposable {
       .catch((e: unknown) => {
         this.log.warn(
           `Mission Control: runの操作に失敗しました（${String(message.type)}）: ${String(e)}`,
+        );
+        this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  /** 設定の今の値と保存した絞り込みをスナップショットへ載せる（Issue #2162）。 */
+  private withSettings(snapshot: McSnapshot): McSnapshot {
+    const port = this.settingsPort;
+    if (port === undefined) {
+      return snapshot;
+    }
+    return { ...snapshot, prefs: port.prefs(), savedFilters: port.savedFilters() };
+  }
+
+  /**
+   * 設定の変更と絞り込みの保存・削除（Issue #2162）。設定は`parseSetPref`で許可リストと
+   * 値の型・範囲を、絞り込みは`applySaveFilter`等で名前と中身を確かめてから書く。
+   */
+  private handleSettings(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const port = this.settingsPort;
+    if (port === undefined) {
+      this.postReply(seq, { ok: false, error: 'この画面では使えません' });
+      return;
+    }
+    const run = async (): Promise<string | undefined> => {
+      if (message.type === 'setPref') {
+        const change = parseSetPref(message);
+        return typeof change === 'string' ? change : port.setPref(change);
+      }
+      const current = port.savedFilters();
+      const next =
+        message.type === 'saveFilter'
+          ? applySaveFilter(current, message)
+          : applyDeleteFilter(current, message);
+      if (typeof next === 'string') {
+        return next;
+      }
+      await port.writeSavedFilters(next);
+      return undefined;
+    };
+    void run()
+      .then((error) => {
+        if (error !== undefined) {
+          this.log.warn(`Mission Control: 設定の操作を拒みました（${String(message.type)}）: ${error}`);
+        }
+        this.postReply(seq, error === undefined ? { ok: true } : { ok: false, error });
+        this.refresh();
+      })
+      .catch((e: unknown) => {
+        this.log.warn(
+          `Mission Control: 設定の操作に失敗しました（${String(message.type)}）: ${String(e)}`,
         );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
       });

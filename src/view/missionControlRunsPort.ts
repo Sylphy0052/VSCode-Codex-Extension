@@ -19,6 +19,7 @@ import type {
   McIssueStartRequest,
   McRoadmapOrder,
   McRunOp,
+  McRunTaskOp,
 } from '../webview/missionControl/protocol';
 import { buildMcRuns, type McRunsPort } from './missionControlRuns';
 import type { TaskRunKanbanRun } from './taskRunKanbanModel';
@@ -73,6 +74,17 @@ export function createMcRunsPort(deps: McRunsPortDeps): McRunsPort {
       default:
         return '操作が正しくありません';
     }
+  };
+
+  const taskOp = async (
+    op: McRunTaskOp,
+    runId: string,
+    taskId: string,
+  ): Promise<string | undefined> => {
+    if (controller.find(runId) === undefined) {
+      return 'runが見つかりません';
+    }
+    return op === 'stop' ? view.stopTaskStage(runId, taskId) : view.retryTaskStage(runId, taskId);
   };
 
   const listIssues = async (folder: string): Promise<McIssueListing | string> => {
@@ -207,6 +219,7 @@ export function createMcRunsPort(deps: McRunsPortDeps): McRunsPort {
     },
     onDidChange: (listener) => controller.onTransition(() => listener()),
     runOp,
+    taskOp,
     setMaxParallel: async (runId, maxParallel) =>
       failure(await controller.setMaxParallel(runId, maxParallel)),
     start: async () => {

@@ -19,6 +19,15 @@ import {
 } from './extras';
 import { KindIcon, ProviderIcon, StatusIcon } from './icons';
 import { IssueStartDialog, orderRuns, RunsPane } from './runs';
+import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPanels';
+import {
+  activeSavedFilter,
+  cycleSavedFilter,
+  findSelectedTask,
+  fromFilterSpec,
+  taskOpBlockReason,
+  toFilterSpec,
+} from './globalLogic';
 import {
   HistoryDialog,
   LaunchSettingsFields,
@@ -92,6 +101,7 @@ import type {
   McProvider,
   McRepo,
   McRunOp,
+  McRunTaskOp,
   McResumeItem,
   McSession,
   McSnapshot,
@@ -297,7 +307,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   >(undefined);
   const [tab, setTab] = useState<'sessions' | 'runs'>(initial.tab);
   const [selectedRun, setSelectedRun] = useState<string | undefined>(undefined);
+  const [selectedTask, setSelectedTask] = useState<string | undefined>(undefined);
   const [issuesOpen, setIssuesOpen] = useState(false);
+  // 費用・利用枠の詳細、MCの設定、絞り込みの保存（Issue #2162）
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [saveFilterOpen, setSaveFilterOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
   const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
   // Issue #2152: フォーカスのあるペイン・コマンドパレット・アクセスキーの表示
@@ -749,6 +764,63 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const runStart = (): void => {
     void bridge.runStart().then(reportRunResult);
   };
+  // runのタスク単位の操作（Issue #2162）。選んだタスクが今のrunに無ければ選んでいない扱いにし、
+  // runが変わったら選択を解く（別のrunの同じidのタスクへ操作が飛ばないように）
+  const runTasks = effectiveRun?.tasks ?? [];
+  const effectiveTask = findSelectedTask(runTasks, selectedTask);
+  const effectiveRunId = effectiveRun?.runId;
+  useEffect(() => {
+    setSelectedTask(undefined);
+  }, [effectiveRunId]);
+  const moveTask = (delta: 1 | -1): void => {
+    const next = moveSelection(
+      runTasks.map((t) => t.taskId),
+      effectiveTask?.taskId,
+      delta,
+    );
+    setSelectedTask(next);
+    if (next !== undefined) {
+      document
+        .querySelector(`[data-task="${CSS.escape(next)}"]`)
+        ?.scrollIntoView({ block: 'nearest' });
+    }
+  };
+  const runTaskOp = (op: McRunTaskOp, taskId: string | undefined = effectiveTask?.taskId): void => {
+    const blocked =
+      effectiveRun === undefined ? 'runを選んでください' : taskOpBlockReason(runTasks, taskId, op);
+    if (effectiveRun === undefined || taskId === undefined || blocked !== undefined) {
+      setToast(blocked ?? 'タスクを選んでください（Shift+J / Shift+K）');
+      return;
+    }
+    setSelectedTask(taskId);
+    // 確認（やり直し・停止とも）は拡張ホストのモーダルで出す。ホストもidが今のrunにあるかを確かめる
+    void bridge.runTaskOp(op, effectiveRun.runId, taskId).then(reportRunResult);
+  };
+  // 保存した絞り込み（Issue #2162）
+  const savedFilters = snapshot?.savedFilters ?? [];
+  const switchSavedFilter = (delta: 1 | -1): void => {
+    const next = cycleSavedFilter(savedFilters, filter, delta);
+    if (next === undefined) {
+      setToast('保存した絞り込みはありません（Shift+Wで保存）');
+      return;
+    }
+    setFilter(fromFilterSpec(next.filter));
+    setToast(`絞り込み「${next.name}」`);
+  };
+  const deleteSavedFilter = (): void => {
+    const active = activeSavedFilter(savedFilters, filter);
+    if (active === undefined) {
+      setToast('削除する保存した絞り込みを ] / [ で選んでください');
+      return;
+    }
+    void bridge.deleteFilter(active.name).then((result) => {
+      setToast(
+        result.ok
+          ? `絞り込み「${active.name}」を削除しました`
+          : (result.error ?? '削除に失敗しました'),
+      );
+    });
+  };
   const reloadWindow = (): void => {
     void bridge.reloadWindow().then((result) => {
       if (!result.ok) {
@@ -783,6 +855,36 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     },
   ): void => {
     const onRuns = tab === 'runs';
+    // 費用・利用枠・設定・絞り込みの保存はどのタブでも効く（Issue #2162）
+    switch (command.kind) {
+      case 'usage':
+        setUsageOpen((open) => !open);
+        return;
+      case 'prefs':
+        setPrefsOpen(true);
+        return;
+      case 'saveFilter':
+        setSaveFilterOpen(true);
+        return;
+      case 'savedFilter':
+        switchSavedFilter(command.delta);
+        return;
+      case 'deleteFilter':
+        deleteSavedFilter();
+        return;
+      case 'task':
+      case 'taskOp':
+        if (!onRuns) {
+          setToast('Runsタブで使います');
+        } else if (command.kind === 'task') {
+          moveTask(command.delta);
+        } else {
+          runTaskOp(command.op);
+        }
+        return;
+      default:
+        break;
+    }
     if (command.kind === 'runOp' || command.kind === 'parallel') {
       if (!onRuns) {
         setToast('Runsタブで使います');
@@ -949,6 +1051,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       case 'escape':
         if (helpOpen) {
           setHelpOpen(false);
+        } else if (usageOpen) {
+          setUsageOpen(false);
         } else if (ctx.editable && ctx.target instanceof HTMLElement) {
           // 入力欄から出たら、そのペインにフォーカスを残す（フォーカス位置を見失わないように）
           const pane = ctx.target.closest<HTMLElement>('[data-pane]');
@@ -1137,6 +1241,15 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         run: setFilterLater({ provider }),
       });
     }
+    // 保存した絞り込み（Issue #2162）。名前はホストで1行・40字までに揃えてある
+    for (const saved of savedFilters) {
+      entries.push({
+        id: `savedFilter:${saved.name}`,
+        label: `保存した絞り込み: ${saved.name}`,
+        contextual: false,
+        run: () => setFilter(fromFilterSpec(saved.filter)),
+      });
+    }
     entries.push(
       {
         id: 'currentWindowOnly',
@@ -1181,10 +1294,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   // キーボード操作（Issue #2136の5）。最新の状態をrefで読む
   const latest = useRef({
     helpOpen,
+    usageOpen,
     launchOpen,
     historyOpen,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
+    globalDialogOpen: prefsOpen || saveFilterOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1192,10 +1307,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   });
   latest.current = {
     helpOpen,
+    usageOpen,
     launchOpen,
     historyOpen,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
+    globalDialogOpen: prefsOpen || saveFilterOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1227,6 +1344,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         state.historyOpen ||
         state.issuesOpen ||
         state.opDialogOpen ||
+        state.globalDialogOpen ||
         state.paletteOpen;
       const plainLetter =
         /^[a-z]$/iu.test(event.key) &&
@@ -1247,6 +1365,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setHistoryOpen(false);
           setIssuesOpen(false);
           setOpDialog(undefined);
+          setPrefsOpen(false);
+          setSaveFilterOpen(false);
           setPalette(undefined);
         } else if (resolved?.command.kind === 'escape' && event.target instanceof HTMLElement) {
           if (state.paletteOpen) {
@@ -1270,6 +1390,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       if (
         state.helpOpen &&
         resolved?.command.kind !== 'help' &&
+        resolved?.command.kind !== 'escape'
+      ) {
+        return;
+      }
+      // 利用枠の詳細もヘルプと同じく、開閉とEscだけを効かせる（Issue #2162）
+      if (
+        state.usageOpen &&
+        resolved?.command.kind !== 'usage' &&
         resolved?.command.kind !== 'escape'
       ) {
         return;
@@ -1391,6 +1519,16 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       data-pane-focus={effectivePane}
       data-density={density}
     >
+      <McHeader
+        sessions={snapshot.sessions}
+        usage={snapshot.usage}
+        now={now}
+        savedFilters={savedFilters}
+        filter={filter}
+        onUsage={() => setUsageOpen((open) => !open)}
+        onPrefs={() => setPrefsOpen(true)}
+        onSaveFilter={() => setSaveFilterOpen(true)}
+      />
       <Rail
         focused={effectivePane === 'rail'}
         repos={repos}
@@ -1407,6 +1545,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           onParallel={runParallel}
           onStart={runStart}
           onIssues={() => setIssuesOpen(true)}
+          selectedTask={effectiveTask?.taskId}
+          onSelectTask={setSelectedTask}
+          onTaskOp={runTaskOp}
           tabButtons={tabButtons}
           focused={effectivePane === 'list'}
         />
@@ -1655,6 +1796,35 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         </>
       ) : null}
       {helpOpen ? <HelpOverlay onClose={() => setHelpOpen(false)} /> : null}
+      {usageOpen ? (
+        <UsageDialog
+          sessions={snapshot.sessions}
+          usage={snapshot.usage}
+          now={now}
+          onClose={() => setUsageOpen(false)}
+        />
+      ) : null}
+      {prefsOpen ? (
+        <PrefsDialog
+          bridge={bridge}
+          prefs={snapshot.prefs}
+          onClose={() => setPrefsOpen(false)}
+          onDone={(message) => setToast(message)}
+        />
+      ) : null}
+      {saveFilterOpen ? (
+        <SaveFilterDialog
+          bridge={bridge}
+          filter={filter}
+          savedFilters={savedFilters}
+          toSpec={toFilterSpec}
+          onClose={() => setSaveFilterOpen(false)}
+          onDone={(message) => {
+            setSaveFilterOpen(false);
+            setToast(message);
+          }}
+        />
+      ) : null}
       {palette !== undefined ? (
         <CommandPalette entries={palette} onClose={() => setPalette(undefined)} />
       ) : null}

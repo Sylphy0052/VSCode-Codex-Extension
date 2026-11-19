@@ -9,6 +9,7 @@ import type {
   McRunOp,
   McRunsSnapshot,
   McRunState,
+  McRunTaskOp,
 } from './protocol';
 
 /** 表示順。 */
@@ -32,6 +33,10 @@ export function RunsPane(props: {
   onParallel: (delta: 1 | -1) => void;
   onStart: () => void;
   onIssues: () => void;
+  /** 選んでいるタスク（Issue #2162）。 */
+  selectedTask: string | undefined;
+  onSelectTask: (taskId: string) => void;
+  onTaskOp: (op: McRunTaskOp, taskId: string) => void;
   tabButtons: JSX.Element;
   /** キーボードのフォーカスがこのペインにあるか（Issue #2152の2）。 */
   focused: boolean;
@@ -222,7 +227,19 @@ export function RunsPane(props: {
             <h3>タスク（{String(run.tasks.length)}）</h3>
             {run.tasks.length === 0 ? <p class="empty">タスクはありません。</p> : null}
             {run.tasks.map((t) => (
-              <div key={t.taskId} class={t.done ? 'run-task done' : 'run-task'}>
+              <div
+                key={t.taskId}
+                class={[
+                  'run-task',
+                  t.done ? 'done' : '',
+                  t.taskId === props.selectedTask ? 'selected' : '',
+                ]
+                  .filter((c) => c !== '')
+                  .join(' ')}
+                data-task={t.taskId}
+                aria-selected={t.taskId === props.selectedTask}
+                onClick={() => props.onSelectTask(t.taskId)}
+              >
                 <span class="row-title">
                   {t.taskId} {t.title}
                 </span>
@@ -236,6 +253,38 @@ export function RunsPane(props: {
                   {t.issueNumber !== undefined ? ` #${String(t.issueNumber)}` : ''}
                   {t.pullRequestNumber !== undefined ? ` PR#${String(t.pullRequestNumber)}` : ''}
                 </span>
+                {t.taskId === props.selectedTask && (t.canRetry === true || t.canStop === true) ? (
+                  <span class="run-task-actions">
+                    {t.canRetry === true ? (
+                      <button
+                        type="button"
+                        class="btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onTaskOp('retry', t.taskId);
+                        }}
+                        title="工程をやり直す（Shift+G）"
+                        data-key-label="Shift+G"
+                      >
+                        やり直す
+                      </button>
+                    ) : null}
+                    {t.canStop === true ? (
+                      <button
+                        type="button"
+                        class="btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onTaskOp('stop', t.taskId);
+                        }}
+                        title="工程を停止する（Shift+Y）"
+                        data-key-label="Shift+Y"
+                      >
+                        停止
+                      </button>
+                    ) : null}
+                  </span>
+                ) : null}
               </div>
             ))}
           </>

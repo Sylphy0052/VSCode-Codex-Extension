@@ -17,6 +17,13 @@ import {
 } from '../codex/usage';
 import { formatAbsoluteTime } from './relativeTime';
 
+/** `UsageStatusBar.current()`の戻り値。 */
+export interface UsageState {
+  codex: UsageSnapshot | undefined;
+  claude: readonly ClaudeLimitEntry[];
+  claudeReceivedAt: number | undefined;
+}
+
 /** 残り時間の表記を進めるための再描画の間隔（issue #1224。分未満は表示に出ない）。 */
 const TICK_MS = 60_000;
 
@@ -37,7 +44,15 @@ export class UsageStatusBar implements vscode.Disposable {
   private claudeLimits: ClaudeLimitEntry[] = [];
   /** Codexの直近のスナップショット。残り時間の表記を進めるために持つ（issue #1224）。 */
   private snapshot: UsageSnapshot | undefined;
+  /**
+   * Claude Codeの値を枠ごとに最後に受け取った時刻（ms）。Mission Controlに「いつの値か」を出すため。
+   * 通知は1枠ずつ届くので、1つの時刻で全枠を新しく見せない。
+   */
+  private readonly claudeReceivedAt = new Map<string | undefined, number>();
   private readonly ticker: ReturnType<typeof setInterval>;
+  private readonly changed = new vscode.EventEmitter<void>();
+  /** 値が届いたら発火する（Mission Controlが同じ取得元を読むため。Issue #2162）。 */
+  readonly onDidChange = this.changed.event;
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -76,8 +91,42 @@ export class UsageStatusBar implements vscode.Disposable {
   updateClaude(usage: ChatUsage | undefined): void {
     if (usage !== undefined) {
       this.claudeLimits = mergeClaudeUsage(this.claudeLimits, usage);
+      if (
+        usage.usedPercent !== undefined ||
+        usage.resetsAt !== undefined ||
+        usage.limited !== undefined
+      ) {
+        this.claudeReceivedAt.set(usage.limitLabel, Date.now());
+      }
     }
     this.renderClaude();
+    if (usage !== undefined) {
+      this.changed.fire();
+    }
+  }
+
+  /**
+   * 保持している値（Issue #2162）。Mission Controlはこれを読み、`/api/oauth/usage`などを
+   * 別に取りに行かない。取得できていなければ`codex`は`undefined`、`claude`は空。
+   */
+  current(): UsageState {
+    return {
+      codex: this.snapshot,
+      claude: this.claudeLimits,
+      claudeReceivedAt: this.oldestClaudeReceivedAt(),
+    };
+  }
+
+  /** 持っている枠のうち最も古い受け取り時刻。新しい枠の時刻で古い枠を新しく見せない。 */
+  private oldestClaudeReceivedAt(): number | undefined {
+    let oldest: number | undefined;
+    for (const entry of this.claudeLimits) {
+      const at = this.claudeReceivedAt.get(entry.label);
+      if (at !== undefined && (oldest === undefined || at < oldest)) {
+        oldest = at;
+      }
+    }
+    return oldest;
   }
 
   private renderClaude(): void {
@@ -111,6 +160,7 @@ export class UsageStatusBar implements vscode.Disposable {
   update(snapshot: UsageSnapshot | undefined): void {
     this.snapshot = snapshot;
     this.renderCodex();
+    this.changed.fire();
   }
 
   private renderCodex(): void {
@@ -141,6 +191,7 @@ export class UsageStatusBar implements vscode.Disposable {
 
   dispose(): void {
     clearInterval(this.ticker);
+    this.changed.dispose();
     this.item.dispose();
     this.claudeItem.dispose();
   }

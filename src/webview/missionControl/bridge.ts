@@ -13,8 +13,11 @@ import type {
   McLifecycleOp,
   McLifecycleOutcome,
   McProvider,
+  McFilterSpec,
+  McPrefKey,
   McQueuedMessage,
   McRunOp,
+  McRunTaskOp,
   McSessionSettings,
   McSideQuestion,
   McSlashCommand,
@@ -112,6 +115,13 @@ export interface Bridge {
    * 選択中のセッションのproviderを渡すコマンドにだけ付ける。
    */
   runCommand(command: string, target?: McTarget): Promise<ReplyResult>;
+  /** runのタスク1件への操作（Issue #2162）。 */
+  runTaskOp(op: McRunTaskOp, runId: string, taskId: string): Promise<ReplyResult>;
+  /** MCの設定を1つ変える（Issue #2162）。 */
+  setPref(key: McPrefKey, value: boolean | number): Promise<ReplyResult>;
+  /** 絞り込みに名前を付けて保存する（Issue #2162）。 */
+  saveFilter(name: string, filter: McFilterSpec): Promise<ReplyResult>;
+  deleteFilter(name: string): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -318,6 +328,10 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           ? { type: 'runCommand', command }
           : { type: 'runCommand', command, ...targetOnly(to) },
       ),
+    runTaskOp: (op, runId, taskId) => call({ type: 'runTaskOp', op, runId, taskId }),
+    setPref: (key, value) => call({ type: 'setPref', key, value }),
+    saveFilter: (name, filter) => call({ type: 'saveFilter', name, filter }),
+    deleteFilter: (name) => call({ type: 'deleteFilter', name }),
     watch(target) {
       api.postMessage({
         type: 'watch',
