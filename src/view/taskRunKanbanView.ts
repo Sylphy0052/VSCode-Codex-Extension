@@ -28,6 +28,8 @@ import {
 
 /** 盤面を送る間隔。最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
+/** 確認で取りやめたときに`finishRun`・`suspendRun`・`resumeRun`が返す文。 */
+const CANCELLED = '取りやめました';
 
 /** Kanbanから使うOrchestratorの口。 */
 export interface TaskRunKanbanOrchestratorPort {
@@ -538,7 +540,11 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     this.schedulePost();
   }
 
-  private async finishRun(runId: string): Promise<void> {
+  /**
+   * 確かめてからrunを終える。Mission Control（Issue #2150）からも呼ぶ。終えたら`undefined`、
+   * 取りやめ・失敗なら理由の文を返す（失敗は警告も出す）。
+   */
+  async finishRun(runId: string): Promise<string | undefined> {
     const choice = await vscode.window.showWarningMessage(
       'このrunを終えますか？',
       {
@@ -549,16 +555,19 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       'runを終える',
     );
     if (choice !== 'runを終える') {
-      return;
+      return CANCELLED;
     }
-    warnIfRejected(await this.deps.finishRun(runId));
+    const result = await this.deps.finishRun(runId);
+    warnIfRejected(result);
     this.schedulePost();
+    return result.ok ? undefined : result.message;
   }
 
-  private async suspendRun(runId: string): Promise<void> {
+  /** 確かめてからrunを中断する。戻り値は`finishRun`と同じ。 */
+  async suspendRun(runId: string): Promise<string | undefined> {
     const run = this.deps.controller.find(runId);
     if (run === undefined || !isTaskRunActive(run)) {
-      return;
+      return '動いているrunではありません';
     }
     const choice = await vscode.window.showWarningMessage(
       'このrunを中断しますか？',
@@ -570,10 +579,12 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       'runを中断する',
     );
     if (choice !== 'runを中断する') {
-      return;
+      return CANCELLED;
     }
-    warnIfRejected(await this.deps.suspendRun(runId));
+    const result = await this.deps.suspendRun(runId);
+    warnIfRejected(result);
     this.schedulePost();
+    return result.ok ? undefined : result.message;
   }
 
   /**
@@ -616,10 +627,10 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
    * 中断したrunを再開する。同じフォルダに動いているrunがあれば、並行して再開するか、（1本だけなら）
    * そちらを中断して入れ替えるかを確かめる（Issue #1562）。runの切り替えコマンド（Issue #1561）からも呼ぶ。
    */
-  async resumeRun(runId: string): Promise<void> {
+  async resumeRun(runId: string): Promise<string | undefined> {
     const run = this.deps.controller.find(runId);
     if (run === undefined || run.finishedAt !== undefined || run.suspendedAt === undefined) {
-      return;
+      return '中断中のrunではありません';
     }
     const active = this.deps.controller
       .listActive(run.workspaceRoot)
@@ -648,15 +659,17 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
         const suspended = await this.deps.suspendRun(active[0]!.runId);
         if (!suspended.ok) {
           warnIfRejected(suspended);
-          return;
+          return suspended.message;
         }
       } else {
-        return;
+        return CANCELLED;
       }
     }
-    warnIfRejected(await this.deps.resumeRun(runId, { parallel }));
+    const result = await this.deps.resumeRun(runId, { parallel });
+    warnIfRejected(result);
     this.selectedRunId = runId;
     this.schedulePost();
+    return result.ok ? undefined : result.message;
   }
 
   /** PRのURLは外部由来。httpsのURLであることを確かめてから開く。 */

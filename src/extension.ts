@@ -263,6 +263,7 @@ import {
 import type { McLifecycleOp } from './webview/missionControl/protocol';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
+import type { McRunsPort } from './view/missionControlRuns';
 import {
   ALREADY_ANSWERED_MESSAGE,
   AnsweredPendingIds,
@@ -1008,6 +1009,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const windowId = generateWindowId();
   // task runの質問をsession-hubへ公開する口（Issue #2135）。実体は`setupTaskRun`が入れる
   const taskRunPendingHolder: { current?: TaskRunPendingPort | undefined } = {};
+  // Mission ControlのRunsタブ（Issue #2150）の口。実体は`setupTaskRun`が入れる
+  const missionControlRunsHolder: { current?: McRunsPort | undefined } = {};
 
   // オーケストレータモード（Issue #1505）
   context.subscriptions.push(
@@ -1015,6 +1018,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       store: taskRunStore,
       windowId,
       pendingPort: taskRunPendingHolder,
+      missionControlRuns: missionControlRunsHolder,
       globalStorageDir: context.globalStorageUri.fsPath,
       extensionVersion:
         (context.extension.packageJSON as { version?: string }).version ?? 'unknown',
@@ -2004,7 +2008,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
           ),
       ];
-      return buildMissionControlSnapshot({
+      const snapshot = buildMissionControlSnapshot({
         sessions,
         reviews: missionControlReview.observe(
           sessions.map((session) => ({
@@ -2024,6 +2028,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         now: Date.now(),
         stallMs: readMissionControlStallMs(),
       });
+      const runsPort = missionControlRunsHolder.current;
+      return runsPort === undefined
+        ? snapshot
+        : { ...snapshot, runs: runsPort.snapshot(workspaceFolderPaths()) };
     },
     controlSessionAnywhere,
     context.extensionUri,
@@ -2173,7 +2181,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return undefined;
       },
     },
+    () => missionControlRunsHolder.current,
   );
+  // runの変化（Issue #2150）はセッションの状態変化とは別に届くため、ここでRunsタブへ反映する
+  const missionControlRunsSubscription = missionControlRunsHolder.current?.onDidChange(() =>
+    missionControl.refresh(),
+  );
+  if (missionControlRunsSubscription !== undefined) {
+    context.subscriptions.push(missionControlRunsSubscription);
+  }
   const forgeHub = new ForgeHubViewManager(
     new ForgeHubService({
       git: nodeGitCommandRunner,

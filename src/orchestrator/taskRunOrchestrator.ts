@@ -114,6 +114,7 @@ export interface TaskRunOrchestratorEvent {
     | 'taskClosed'
     | 'taskMerged'
     | 'taskInstructed'
+    | 'issuesSelected'
     | 'questionAwaitingOrchestrator'
     | 'questionAwaitingUser'
     | 'gateAwaitingOrchestrator'
@@ -418,6 +419,20 @@ export class TaskRunOrchestrator {
     this.notify(runId, {
       kind: 'taskInstructed',
       body: `人がKanbanから${label}へ直接指示を送りました:\n${sanitizeInlineText(instruction, EVENT_TEXT_MAX_LENGTH)}`,
+    });
+  }
+
+  /**
+   * Mission Controlで人が選んだIssueからrunを始めたことをOrchestratorへ知らせる（Issue #2150）。
+   * Orchestratorを開いた後に呼ぶ（開いていなければイベントは捨てられる）。番号は検証済みの整数だけ。
+   */
+  notifyIssuesSelected(runId: string, issueNumbers: readonly number[]): void {
+    const list = issueNumbers.map((n) => `#${String(n)}`).join(', ');
+    this.notify(runId, {
+      kind: 'issuesSelected',
+      body:
+        `人がMission ControlでIssue ${list}を選び、このrunを始めました。` +
+        'これらのIssueを読み、実装する計画を提案してください。',
     });
   }
 
