@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
+import { isApprovalLevel, type ApprovalLevel } from '../provider/approvalLevel';
 import { parseAttachmentInputs, type AttachmentInput } from '../provider/attachments';
 import {
   parseAskUserQuestionAnswers,
@@ -761,7 +762,10 @@ export type SessionHubRequestKind =
   | 'fileCandidates'
   | 'commandCandidates'
   | 'queuedMessages'
-  | 'cancelQueued';
+  | 'cancelQueued'
+  /** Mission Controlから実行中セッションの設定を見る・変える（Issue #2159）。 */
+  | 'sessionSettings'
+  | 'changeSetting';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -937,6 +941,79 @@ export interface SessionQueuedMessage {
 export const MAX_QUEUED_TEXT_CHARS = 2000;
 
 /**
+ * 承認レベルの変更が効く範囲（Issue #2159）。
+ *
+ * - `session` — このセッションだけ（Claude。`applyApprovalLevel`がタブの値を変える）
+ * - `global` — Codex全体の設定（`settings.updateApprovalLevel('codex', ...)`がユーザー設定を
+ *   書き換え、タスク設定を持たない全Codexセッションの次のターンへ効く）
+ * - `task` — タスクの設定で起動したCodexセッション。全体の設定を変えても効かないため変えられない
+ */
+export type SessionApprovalScope = 'session' | 'global' | 'task';
+
+/** 実行中セッションの今の設定（Issue #2159）。`sessionSettings` / `changeSetting`の応答に載る。 */
+export interface SessionSettingsDetail {
+  /** 空文字はCLIの既定。 */
+  model: string;
+  /** 空文字はCLIの既定。 */
+  effort: string;
+  /** 選べるmodel。先頭は既定（`slug: ''`）。各要素の`efforts`がそのmodelで選べるeffort。 */
+  models: SessionHandoffModelOption[];
+  /** `ask` / `auto` / `full`。どれにも当たらなければ空文字（カスタム）。 */
+  approvalLevel: string;
+  approvalScope: SessionApprovalScope;
+  planMode: boolean;
+  /** fast modeの今の値。`undefined`はこのセッションで使えない（Codex・CLIが未対応）。 */
+  fastMode?: boolean | undefined;
+  /** 変更を受け付けるか。入力欄を閉じたタブは見るだけ。 */
+  editable: boolean;
+}
+
+/** 変えられる設定の種別（Issue #2159）。 */
+export const SESSION_SETTING_KINDS = [
+  'model',
+  'effort',
+  'approvalLevel',
+  'planMode',
+  'fastMode',
+] as const;
+export type SessionSettingKind = (typeof SESSION_SETTING_KINDS)[number];
+
+/** 設定の変更1件（Issue #2159）。 */
+export type SessionSettingChange =
+  | { setting: 'model'; value: string }
+  | { setting: 'effort'; value: string }
+  | { setting: 'approvalLevel'; value: ApprovalLevel }
+  | { setting: 'planMode'; value: boolean }
+  | { setting: 'fastMode'; value: boolean };
+
+/** model・effortの値の長さの上限。CLIのmodel名はこれより十分短い。 */
+const MAX_SETTING_VALUE_CHARS = 200;
+
+/**
+ * 設定の変更を、信用せずに読み解く（Issue #2159）。webviewと別ウィンドウの要求ファイルの
+ * どちらから届いた値も、ここを通してから使う。値が候補にあるかは受信側が確かめる。
+ */
+export function parseSessionSettingChange(
+  setting: unknown,
+  value: unknown,
+): SessionSettingChange | undefined {
+  switch (setting) {
+    case 'model':
+    case 'effort':
+      return typeof value === 'string' && value.length <= MAX_SETTING_VALUE_CHARS
+        ? { setting, value }
+        : undefined;
+    case 'approvalLevel':
+      return isApprovalLevel(value) ? { setting, value } : undefined;
+    case 'planMode':
+    case 'fastMode':
+      return typeof value === 'boolean' ? { setting, value } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
  * 脇道の質問（btw）1件の進み具合（Issue #1261）。
  *
  * 回答は本流の会話に残さないため、この値が統括ページへ運ぶ唯一の経路になる。
@@ -983,6 +1060,8 @@ export interface SessionHubReplyPayload {
   commands?: SessionSlashCommand[] | undefined;
   /** `kind === 'queuedMessages'`の応答（Issue #2158）。 */
   queued?: SessionQueuedMessage[] | undefined;
+  /** `kind === 'sessionSettings'` / `'changeSetting'`の応答（Issue #2159）。 */
+  settings?: SessionSettingsDetail | undefined;
 }
 
 /** スラッシュコマンドの候補1件（`SlashCommand`と同じ形。Issue #2158）。 */
@@ -1062,6 +1141,10 @@ export interface SessionHubRequest {
   query?: string | undefined;
   /** `kind === 'cancelQueued'`のときの位置（Issue #2158）。照合には使わず補助。 */
   index?: number | undefined;
+  /** `kind === 'changeSetting'`のときの設定の種別（Issue #2159）。受信側が検証する。 */
+  setting?: string | undefined;
+  /** `kind === 'changeSetting'`のときの値。model・effort・承認レベルは文字列、plan/fastは真偽値。 */
+  settingValue?: string | boolean | undefined;
   /** `kind === 'cancelQueued'`のときの項目id。 */
   queuedId?: string | undefined;
 }
@@ -1165,6 +1248,11 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     query: typeof v.query === 'string' ? v.query : undefined,
     index: typeof v.index === 'number' ? v.index : undefined,
     queuedId: typeof v.queuedId === 'string' ? v.queuedId : undefined,
+    setting: typeof v.setting === 'string' ? v.setting : undefined,
+    settingValue:
+      typeof v.settingValue === 'string' || typeof v.settingValue === 'boolean'
+        ? v.settingValue
+        : undefined,
   };
 }
 
@@ -1326,6 +1414,11 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
   }
   if (Array.isArray(v.queued)) {
     return { queued: parseQueuedMessages(v.queued) };
+  }
+  // Issue #2159: 実行中セッションの設定
+  if (v.settings !== undefined) {
+    const settings = parseSessionSettingsDetail(v.settings);
+    return settings === undefined ? undefined : { settings };
   }
   const raw = v.approvals;
   if (!Array.isArray(raw)) {
@@ -1571,6 +1664,33 @@ function parseHandoffDetail(value: unknown): SessionHandoffDetail | undefined {
   };
 }
 
+/**
+ * 実行中セッションの設定を、信用せずに読み解く（Issue #2159）。
+ *
+ * 範囲の分からない値は変更できない側へ倒す: 承認の範囲が読めなければ`task`（変えられない）、
+ * `editable`は`true`のときだけ変更を受け付ける。
+ */
+export function parseSessionSettingsDetail(value: unknown): SessionSettingsDetail | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.model !== 'string' || typeof v.effort !== 'string') {
+    return undefined;
+  }
+  const scope = v.approvalScope;
+  return {
+    model: v.model.slice(0, MAX_SETTING_VALUE_CHARS),
+    effort: v.effort.slice(0, MAX_SETTING_VALUE_CHARS),
+    models: Array.isArray(v.models) ? parseHandoffModelOptions(v.models) : [],
+    approvalLevel: isApprovalLevel(v.approvalLevel) ? v.approvalLevel : '',
+    approvalScope: scope === 'session' || scope === 'global' ? scope : 'task',
+    planMode: v.planMode === true,
+    fastMode: typeof v.fastMode === 'boolean' ? v.fastMode : undefined,
+    editable: v.editable === true,
+  };
+}
+
 function parseHandoffModelOptions(raw: readonly unknown[]): SessionHandoffModelOption[] {
   const options: SessionHandoffModelOption[] = [];
   for (const entry of raw) {
@@ -1679,6 +1799,8 @@ export class SessionHubRequestPort {
       query?: string | undefined;
       index?: number | undefined;
       queuedId?: string | undefined;
+      setting?: string | undefined;
+      settingValue?: string | boolean | undefined;
     },
     /** 応答を待つ上限（ms）。既定は`REPLY_TIMEOUT_MS`。`LONG_REPLY_TIMEOUT_MS`を超えない。 */
     timeoutMs: number = REPLY_TIMEOUT_MS,

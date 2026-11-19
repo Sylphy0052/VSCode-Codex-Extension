@@ -175,6 +175,8 @@ import {
   INPUT_LOCKED_MESSAGE,
   type BaseChatPanel,
 } from './chatManagerBase';
+import type { SessionSettingChange, SessionSettingsDetail } from './sessionHub';
+import { buildSettingModelOptions } from './sessionSettingsDetail';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
@@ -263,7 +265,11 @@ import {
   type SummaryRolloutDeps,
 } from '../secondOpinion/summaryRollout';
 import { SessionModelSettingsStore, type SessionModelSettings } from '../sessionModelSettings';
-import { APPROVAL_LEVEL_CYCLE, isApprovalLevel } from '../provider/approvalLevel';
+import {
+  APPROVAL_LEVEL_CYCLE,
+  isApprovalLevel,
+  levelFromCodexSettings,
+} from '../provider/approvalLevel';
 import { AttachmentBox, type CodexSkillInput } from '../provider/attachments';
 import { CommandCatalog } from '../provider/commandCatalog';
 import { FileMentionCatalog } from '../provider/fileMentions';
@@ -4977,6 +4983,65 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
   /** `@`の候補（Issue #2158）。 */
   protected override async listFileCandidates(entry: ChatPanel, query: string): Promise<string[]> {
     return (await fileMentionCandidates(this.mentions, entry.cwd, query)) ?? [];
+  }
+
+  /**
+   * Mission Controlの設定欄（Issue #2159）。承認レベルはCodex全体の設定で、`configFor`が
+   * ターンごとに`readConfig().codex`を読むため、タスク設定を持たない全Codexセッションに効く。
+   * タスク設定を持つセッションは`entry.taskConfig`を読み、全体の設定を変えても効かない。
+   * Codexにfast modeは無い。
+   */
+  protected override sessionSettingsOf(entry: ChatPanel): SessionSettingsDetail {
+    const snapshot = this.settings.snapshot();
+    const task = entry.taskConfig;
+    return {
+      model: entry.modelSettings.model,
+      effort: entry.modelSettings.effort,
+      models: buildSettingModelOptions(snapshot.models, entry.modelSettings.model),
+      approvalLevel:
+        task === undefined ? snapshot.approvalLevel : (levelFromCodexSettings(task) ?? ''),
+      approvalScope: task === undefined ? 'global' : 'task',
+      planMode: entry.session.getState().planMode,
+      fastMode: undefined,
+      editable: !entry.inputLock,
+    };
+  }
+
+  /** タブの設定行（`config` / `approvalLevel` / `planMode`の分岐）と同じ経路で変える（Issue #2159）。 */
+  protected override async applySessionSetting(
+    entry: ChatPanel,
+    change: SessionSettingChange,
+  ): Promise<string | undefined> {
+    switch (change.setting) {
+      case 'model':
+      case 'effort': {
+        let { model, effort } = entry.modelSettings;
+        if (change.setting === 'model') {
+          model = change.value;
+          const allowed = effortsFor(this.settings.snapshot().models, model);
+          if (effort !== '' && !allowed.includes(effort)) {
+            effort = '';
+          }
+        } else {
+          effort = change.value;
+        }
+        // 次のターンの`configFor`がこの値を載せる
+        await this.updateModelSettings(entry, { model, effort });
+        return undefined;
+      }
+      case 'approvalLevel': {
+        // 取り消された場合も表示を現在値へ戻すため、結果によらず再送する
+        const applied = await this.settings.updateApprovalLevel('codex', change.value);
+        this.refreshSettings();
+        return applied ? undefined : '承認レベルは変わりませんでした（取り消されました）';
+      }
+      case 'planMode':
+        this.noteUserAction(entry);
+        entry.session.setPlanMode(change.value);
+        return undefined;
+      case 'fastMode':
+        return 'Codexにはfast modeがありません';
+    }
   }
 
   /**

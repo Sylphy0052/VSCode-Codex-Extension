@@ -15,6 +15,7 @@ import type {
   McProvider,
   McQueuedMessage,
   McRunOp,
+  McSessionSettings,
   McSideQuestion,
   McSlashCommand,
   McSnapshot,
@@ -42,6 +43,7 @@ export interface ControlResult {
   files?: string[] | undefined;
   commands?: McSlashCommand[] | undefined;
   queued?: McQueuedMessage[] | undefined;
+  settings?: McSessionSettings | undefined;
 }
 
 /** `launchOptions`・`pickFolder`・`launch`の応答（Issue #2137）。 */
@@ -129,6 +131,8 @@ const LONG_ACTIONS: ReadonlySet<McControlAction['action']> = new Set([
   'sendWithAttachments',
   'fileCandidates',
   'commandCandidates',
+  // 全承認の同意ダイアログを人が閉じるまで返らない（Issue #2159）
+  'changeSetting',
 ]);
 
 function timeoutFor(action: McControlAction): number {
@@ -228,6 +232,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           files: message.files,
           commands: message.commands,
           queued: message.queued,
+          settings: message.settings,
         });
       }
     }
