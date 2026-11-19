@@ -141,11 +141,12 @@ import { formatUntrusted, sanitizeInlineText } from './untrustedText';
 import type { McpToolDefinition } from './messaging';
 import type { GitCommandRunner, WorktreeCreationQueue, WorktreeFileSystemPort } from './worktree';
 
-/** 工程セッションが申告した失敗の要約を、状態の`failure`へ残すときの上限。 */
 /** 引き継ぎで前の世代のCLIが自分で終わるのを待つ時間。過ぎたらシグナルで止める（Issue #2146）。 */
 const HANDOFF_HALT_GRACE_MS = 5_000;
 /** 子孫の終了待ち（3秒）、猶予、SIGKILLまでの待ち（3秒）を足した上限。過ぎたら待たずに先へ進む。 */
 const HANDOFF_HALT_TIMEOUT_MS = 15_000;
+
+/** 工程セッションが申告した失敗の要約を、状態の`failure`へ残すときの上限。 */
 const MAX_FAILURE_SUMMARY_LENGTH = 300;
 
 /** merge・削除の回答者判定の質問へタスク名（外部由来）を入れるときの上限。 */

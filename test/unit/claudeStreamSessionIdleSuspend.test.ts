@@ -224,6 +224,46 @@ describe('ClaudeStreamSession: 使っていないCLIの休止と再開（Issue #
       await suspendSession(session, procs[0]!);
       await expect(session.halt(relaunch)).resolves.toBeUndefined();
     });
+
+    it('再開中（resuming）に生きている再開後のプロセスも止め、発言は失敗として返す', async () => {
+      const { session, procs, outcomes } = createSession();
+      await suspendSession(session, procs[0]!);
+      session.send('続き');
+      expect(session.getState().processSuspension).toBe('resuming');
+      const done = session.halt(relaunch, 60_000);
+      expect(session.getState().processSuspension).toBe('resumeFailed');
+      expect(outcomes[0]).toMatchObject({ kind: 'failed', text: '続き' });
+      procs[1]!.emitExit(0);
+      await expect(done).resolves.toEqual({ forced: false });
+      expect(procs).toHaveLength(2);
+    });
+
+    it('再開中に終わらなければシグナルで止め forced を true にする', async () => {
+      vi.useFakeTimers();
+      try {
+        const { session, procs } = createSession();
+        await suspendSession(session, procs[0]!);
+        session.send('続き');
+        const done = session.halt(relaunch, 5_000);
+        vi.advanceTimersByTime(5_000);
+        expect(procs[1]!.kill).toHaveBeenCalled();
+        procs[1]!.emitExit(null, 'SIGTERM');
+        await expect(done).resolves.toEqual({ forced: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('停止中（stopping）に呼ばれても終了を待ち、終われば返る', async () => {
+      const { session, procs } = createSession();
+      const suspending = session.suspend(relaunch, 60_000);
+      const done = session.halt(relaunch, 60_000);
+      procs[0]!.emitExit(0);
+      await suspending;
+      await expect(done).resolves.toEqual({ forced: false });
+      // 引き継ぎで止めたので、再開のCLIは起動しない
+      expect(procs).toHaveLength(1);
+    });
   });
 
   describe('発言の無い再開と、再開の失敗・dispose後の文言（Issue #1859）', () => {

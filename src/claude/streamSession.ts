@@ -673,12 +673,20 @@ export class ClaudeStreamSession {
     graceMs = SUSPEND_GRACE_MS,
   ): Promise<{ forced: boolean } | undefined> {
     const proc = this.proc;
-    if (proc === undefined || this.lifecycle !== 'running') {
+    if (proc === undefined) {
       return undefined;
     }
     // 待たせていた指示を終了の直後に送ると、止めたCLIをすぐ起こしてしまう
     this.holdQueueAfterStop = true;
-    return this.stopProcessKeepingSession(proc, relaunch, graceMs);
+    if (this.lifecycle === 'running') {
+      return this.stopProcessKeepingSession(proc, relaunch, graceMs);
+    }
+    // running以外でもプロセスが生きていれば止める。再開中は発言を失わないよう失敗として
+    // 呼び出し側へ返し、停止中・その他は既に進んでいる終了の完了を待つ（必要なら強制終了）
+    if (this.lifecycle === 'resuming') {
+      this.failResume('引き継ぎのため停止しました');
+    }
+    return this.stopProcess(proc, graceMs);
   }
 
   private async stopProcessKeepingSession(
@@ -692,6 +700,14 @@ export class ClaudeStreamSession {
     this.mcpBeforeSuspend = this.lastInitMcpServers;
     this.resumeMcpPending = false;
     this.update({ ...this.state, processSuspension: 'stopping' });
+    return this.stopProcess(proc, graceMs);
+  }
+
+  /** stdinを閉じ、`graceMs`で終わらなければシグナルで止めて、終了を待つ。 */
+  private async stopProcess(
+    proc: ChildProcessWithoutNullStreams,
+    graceMs: number,
+  ): Promise<{ forced: boolean }> {
     const exited = new Promise<void>((resolve) => {
       if (typeof proc.exitCode === 'number' || typeof proc.signalCode === 'string') {
         resolve();
