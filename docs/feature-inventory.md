@@ -479,7 +479,7 @@
 - [x] F24.02:承認待ち・実行中・待機の3列分類。
 - [x] F24.03:カードから会話を開き状態変化を反映。
 
-旧統括ページ（`sessionKanbanView.ts`）はIssue #2138で廃止し、Mission Controlへ統合した。`agent.sessionKanban`はMission Controlを開く別名として残る。5つの状態での絞り込み、レビュー待ち、再開待ち、引き継ぎ確認・脇道の質問もMission Controlで扱う。
+旧統括ページ（`sessionKanbanView.ts`）はIssue #2138で廃止し、Mission Controlへ統合した。`agent.sessionKanban`はMission Controlを開く別名として残る。5つの状態での絞り込み、レビュー待ち、再開待ち、引き継ぎ確認・脇道の質問もMission Controlで扱う。全操作はキーボードだけで行える（Issue #2152）。キーの割り当ては`src/webview/missionControl/keys.ts`の表1つから判定・ヘルプ（`?`）・コマンドパレット（`:`）を作り、詳細ペインとダイアログのボタンには空いている英字をアクセスキーとして振る。拡張側のkeybindingは開く`Ctrl+K J`・閉じる`Ctrl+K Q`。
 
 レビュー結果:[静的レビュー](reviews/f24-session-kanban.md)（廃止前の旧統括ページが対象）。
 

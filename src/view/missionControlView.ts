@@ -28,6 +28,8 @@ import { MAX_TASK_RUN_PARALLEL } from '../orchestrator/taskRunState';
 import { parseAction, parseTarget, type SessionControl } from './sessionControlMessage';
 
 export const MISSION_CONTROL_OPEN_COMMAND = 'agent.missionControl.open';
+/** Mission Controlのタブを閉じる（Issue #2152の5。開いていなければ何もしない）。 */
+export const MISSION_CONTROL_CLOSE_COMMAND = 'agent.missionControl.close';
 
 /** webviewのbundle（`npm run build`が`src/webview/missionControl/main.tsx`から作る）。 */
 const SCRIPT_PATH = ['dist', 'missionControl.js'] as const;
@@ -138,6 +140,10 @@ export class MissionControlViewManager implements vscode.Disposable {
     );
     this.attach(panel);
     this.log.info('Mission Controlを開いた');
+  }
+
+  close(): void {
+    this.panel?.dispose();
   }
 
   /** Reload後に、VS Codeが残しておいたタブを引き取る（`registerWebviewPanelSerializer`）。 */

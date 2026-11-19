@@ -106,4 +106,18 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .history-box { width: min(720px, 94vw); display: grid; gap: 8px; }
 .history-filter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto; gap: 6px; }
 .history-list { max-height: 50vh; overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
+/* フォーカスのあるペインを枠で示す。枠はペインの状態で描き、ペイン自身の標準の枠は消す */
+.pane:focus { outline: none; }
+.pane.pane-focused { box-shadow: inset 0 0 0 2px var(--vscode-focusBorder); }
+.pane:focus-visible.pane-focused { box-shadow: inset 0 0 0 3px var(--vscode-focusBorder); }
+button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
+/* アクセスキーの表示（\`.\`で切り替え）。入力欄は::afterを描けないので囲みのlabelに出す */
+.akeys [data-akey-badge]::after, .akeys [data-key-label]:not(:has(kbd)):not(input)::after { margin-left: 6px; padding: 0 4px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; opacity: .8; }
+.akeys [data-akey-badge]::after { content: attr(data-akey-badge); }
+.akeys [data-key-label]:not(:has(kbd)):not(input)::after { content: attr(data-key-label); }
+.palette-box { width: min(620px, 94vw); display: grid; gap: 6px; }
+.palette-list { list-style: none; margin: 0; padding: 0; max-height: 55vh; overflow: auto; }
+.palette-item { display: flex; justify-content: space-between; gap: 12px; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
+.palette-item.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.palette-item kbd { font-family: var(--vscode-editor-font-family, monospace); opacity: .8; }
 `;

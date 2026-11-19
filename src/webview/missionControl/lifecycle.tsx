@@ -198,10 +198,22 @@ export function MarkBar(props: {
   return (
     <div class="mark-bar" role="group" aria-label="選択したセッションの操作">
       <span>{String(props.count)}件を選択中</span>
-      <button type="button" class="btn" onClick={() => props.onOp('close')} title="閉じる（c）">
+      <button
+        type="button"
+        class="btn"
+        onClick={() => props.onOp('close')}
+        title="閉じる（c）"
+        data-key-label="c"
+      >
         閉じる
       </button>
-      <button type="button" class="btn" onClick={() => props.onOp('archive')} title="archive（e）">
+      <button
+        type="button"
+        class="btn"
+        onClick={() => props.onOp('archive')}
+        title="archive（e）"
+        data-key-label="e"
+      >
         archive
       </button>
       <button
@@ -209,10 +221,17 @@ export function MarkBar(props: {
         class="btn"
         onClick={() => props.onOp('delete')}
         title="削除（Shift+D）"
+        data-key-label="Shift+D"
       >
         削除
       </button>
-      <button type="button" class="btn" onClick={props.onClear} title="選択を外す（Esc）">
+      <button
+        type="button"
+        class="btn"
+        onClick={props.onClear}
+        title="選択を外す（Esc）"
+        data-key-label="Esc"
+      >
         選択を外す
       </button>
     </div>
@@ -230,10 +249,22 @@ export function LifecycleButtons(props: {
   const reason = archivable ? undefined : 'Claude Codeのセッションはarchive・削除できません';
   return (
     <div class="actions">
-      <button type="button" class="btn" onClick={props.onToggleMark} title="複数選択（x）">
+      <button
+        type="button"
+        class="btn"
+        onClick={props.onToggleMark}
+        title="複数選択（x）"
+        data-key-label="x"
+      >
         {props.marked ? '選択を外す' : '選択に加える'}
       </button>
-      <button type="button" class="btn" onClick={() => props.onOp('close')} title="閉じる（c）">
+      <button
+        type="button"
+        class="btn"
+        onClick={() => props.onOp('close')}
+        title="閉じる（c）"
+        data-key-label="c"
+      >
         {LIFECYCLE_LABELS.close}
       </button>
       <button
@@ -242,6 +273,7 @@ export function LifecycleButtons(props: {
         disabled={!archivable}
         onClick={() => props.onOp('archive')}
         title={reason ?? 'archive（e）。履歴から開き直せます'}
+        data-key-label="e"
       >
         {LIFECYCLE_LABELS.archive}
       </button>
@@ -251,6 +283,7 @@ export function LifecycleButtons(props: {
         disabled={!archivable}
         onClick={() => props.onOp('delete')}
         title={reason ?? '削除（Shift+D）。元に戻せません'}
+        data-key-label="Shift+D"
       >
         {LIFECYCLE_LABELS.delete}
       </button>
