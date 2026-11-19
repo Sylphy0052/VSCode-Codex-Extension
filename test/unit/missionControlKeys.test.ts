@@ -164,7 +164,9 @@ describe('mapKey（既存の割り当てを壊さない）', () => {
       op: 'finish',
     });
     expect(mapKey({ ...base, key: 'F' })).toBeUndefined();
-    expect(mapKey({ ...base, key: 'J', shiftKey: true })).toBeUndefined();
+    // Shift+JはIssue #2162でrunのタスク選択に割り当てた。CapsLockの大文字Gはやり直しにしない
+    expect(mapKey({ ...base, key: 'J', shiftKey: true })).toEqual({ kind: 'task', delta: 1 });
+    expect(mapKey({ ...base, key: 'G' })).toBeUndefined();
   });
 
   it('hは履歴のまま', () => {
