@@ -32,11 +32,19 @@ export function RunsPane(props: {
   onStart: () => void;
   onIssues: () => void;
   tabButtons: JSX.Element;
+  /** キーボードのフォーカスがこのペインにあるか（Issue #2152の2）。 */
+  focused: boolean;
 }): JSX.Element {
   const { runs, selectedRun } = props;
   if (runs === undefined) {
     return (
-      <div class="pane runs-pane" style={{ gridColumn: '2 / 4' }}>
+      <div
+        class={props.focused ? 'pane runs-pane pane-focused' : 'pane runs-pane'}
+        style={{ gridColumn: '2 / 4' }}
+        data-pane="list"
+        tabIndex={-1}
+        aria-label="Runs"
+      >
         <p class="empty">オーケストレータモードは使えません。</p>
       </div>
     );
@@ -45,10 +53,22 @@ export function RunsPane(props: {
   const halted = run?.halted === true;
   const disabled = run === undefined;
   return (
-    <div class="pane runs-pane" style={{ gridColumn: '2 / 4' }}>
+    <div
+      class={props.focused ? 'pane runs-pane pane-focused' : 'pane runs-pane'}
+      style={{ gridColumn: '2 / 4' }}
+      data-pane="list"
+      tabIndex={-1}
+      aria-label="Runs"
+    >
       <div class="toolbar">
         {props.tabButtons}
-        <button type="button" class="btn primary" onClick={props.onStart} title="新しいrun（n）">
+        <button
+          type="button"
+          class="btn primary"
+          onClick={props.onStart}
+          title="新しいrun（n）"
+          data-key-label="n"
+        >
           ＋ 新しいrun
         </button>
         <button
@@ -56,6 +76,7 @@ export function RunsPane(props: {
           class="btn"
           onClick={props.onIssues}
           title="roadmap・Issueから起動（i）"
+          data-key-label="i"
         >
           roadmap / Issueから起動
         </button>
@@ -118,6 +139,7 @@ export function RunsPane(props: {
                 disabled={disabled}
                 onClick={() => props.onOp('switch')}
                 title="切替（o / Enter）"
+                data-key-label="o"
               >
                 切替
               </button>
@@ -127,6 +149,7 @@ export function RunsPane(props: {
                 disabled={disabled}
                 onClick={() => props.onOp(halted ? 'unpause' : 'pause')}
                 title="一時停止 / 解除（p）"
+                data-key-label="p"
               >
                 {halted ? '一時停止を解く' : '一時停止'}
               </button>
@@ -136,6 +159,7 @@ export function RunsPane(props: {
                 disabled={disabled}
                 onClick={() => props.onOp('suspend')}
                 title="中断（z）"
+                data-key-label="z"
               >
                 中断
               </button>
@@ -145,6 +169,7 @@ export function RunsPane(props: {
                 disabled={disabled}
                 onClick={() => props.onOp('resume')}
                 title="再開（u）"
+                data-key-label="u"
               >
                 再開
               </button>
@@ -154,6 +179,7 @@ export function RunsPane(props: {
                 disabled={disabled}
                 onClick={() => props.onOp('finish')}
                 title="終える（Shift+F）"
+                data-key-label="Shift+F"
               >
                 終える
               </button>
@@ -163,6 +189,7 @@ export function RunsPane(props: {
                 disabled={disabled || run.maxParallel <= 1}
                 onClick={() => props.onParallel(-1)}
                 title="並列上限を下げる（-）"
+                data-key-label="-"
               >
                 並列 −
               </button>
@@ -172,6 +199,7 @@ export function RunsPane(props: {
                 disabled={disabled || run.maxParallel >= runs.maxParallelLimit}
                 onClick={() => props.onParallel(1)}
                 title="並列上限を上げる（+）"
+                data-key-label="+"
               >
                 並列 ＋
               </button>
@@ -365,6 +393,10 @@ export function IssueStartDialog(props: {
         return;
       }
       case 'Enter':
+        // ボタンの上のEnterは、そのボタン（閉じるなど）を押す標準の操作に任せる
+        if (e.target instanceof HTMLButtonElement) {
+          return;
+        }
         e.preventDefault();
         start();
         return;
@@ -384,7 +416,13 @@ export function IssueStartDialog(props: {
 
   return (
     <div class="help" role="dialog" aria-label="roadmap・Issueから起動">
-      <div class="help-box history-box issue-box" ref={boxRef} tabIndex={-1} onKeyDown={onKeyDown}>
+      <div
+        class="help-box history-box issue-box"
+        ref={boxRef}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        data-reserved-keys="jkxfg"
+      >
         <h2>roadmap・Issueから起動</h2>
         <p class="notice">
           フォルダ: {folders[folderIndex]?.label ?? '（なし）'}（f） / CLI: {engine}（g） / j k 移動

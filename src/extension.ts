@@ -243,7 +243,11 @@ import {
   createMissionControlLauncher,
   readMissionControlStallMs,
 } from './view/missionControlLauncher';
-import { MISSION_CONTROL_OPEN_COMMAND, MissionControlViewManager } from './view/missionControlView';
+import {
+  MISSION_CONTROL_CLOSE_COMMAND,
+  MISSION_CONTROL_OPEN_COMMAND,
+  MissionControlViewManager,
+} from './view/missionControlView';
 import { withSafeGitConfig } from './view/missionControlGit';
 import { ReviewTracker } from './view/missionControlReview';
 import {
@@ -2240,6 +2244,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }),
     missionControl,
     vscode.commands.registerCommand(MISSION_CONTROL_OPEN_COMMAND, () => missionControl.show()),
+    vscode.commands.registerCommand(MISSION_CONTROL_CLOSE_COMMAND, () => missionControl.close()),
     // Reload後にタブを復元する（Issue #2136）
     vscode.window.registerWebviewPanelSerializer(MissionControlViewManager.viewType, {
       deserializeWebviewPanel: (panel: vscode.WebviewPanel) => {

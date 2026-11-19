@@ -102,10 +102,17 @@ export function ToolApprovalForm(props: FormProps & { approval: McApprovalDetail
             class="btn primary"
             disabled={busy}
             onClick={() => decide('accept')}
+            data-key-label="a"
           >
             <kbd>a</kbd>承認
           </button>
-          <button type="button" class="btn" disabled={busy} onClick={() => decide('decline')}>
+          <button
+            type="button"
+            class="btn"
+            disabled={busy}
+            onClick={() => decide('decline')}
+            data-key-label="d"
+          >
             <kbd>d</kbd>拒否
           </button>
         </div>
@@ -136,6 +143,7 @@ function ChoiceList(props: ChoiceListProps): JSX.Element {
           class="choice"
           aria-pressed={props.draft.selected.includes(option.value)}
           onClick={() => props.onChoose(option.value)}
+          data-key-label={props.numbered && index < 9 ? String(index + 1) : undefined}
         >
           <span>
             {props.numbered && index < 9 ? <kbd>{String(index + 1)}</kbd> : null}
@@ -206,7 +214,7 @@ export function QuestionForm(props: FormProps & { approval: McApprovalDetail }):
     reply: () => otherRefs.current[active]?.focus(),
   };
   return (
-    <div class="answer">
+    <div class="answer" data-submit-scope>
       {questions.map((q, qIndex) => {
         const draft = drafts.get(qIndex) ?? EMPTY_DRAFT;
         return (
@@ -252,7 +260,13 @@ export function QuestionForm(props: FormProps & { approval: McApprovalDetail }):
         );
       })}
       <div class="actions">
-        <button type="button" class="btn primary" disabled={busy} onClick={submitAnswers}>
+        <button
+          type="button"
+          class="btn primary"
+          disabled={busy}
+          onClick={submitAnswers}
+          data-key-label="a"
+        >
           <kbd>a</kbd>回答を送る
         </button>
       </div>
@@ -311,7 +325,7 @@ export function PromptForm(props: FormProps & { approval: McApprovalDetail }): J
     reply: () => otherRefs.current[active]?.focus(),
   };
   return (
-    <div class="answer">
+    <div class="answer" data-submit-scope>
       {props.approval.detail === '' ? null : <pre class="pre">{props.approval.detail}</pre>}
       {blocked !== undefined ? (
         <p class="notice">{blocked}</p>
@@ -366,10 +380,22 @@ export function PromptForm(props: FormProps & { approval: McApprovalDetail }): J
             );
           })}
           <div class="actions">
-            <button type="button" class="btn primary" disabled={busy} onClick={submitValues}>
+            <button
+              type="button"
+              class="btn primary"
+              disabled={busy}
+              onClick={submitValues}
+              data-key-label="a"
+            >
               <kbd>a</kbd>回答を送る
             </button>
-            <button type="button" class="btn" disabled={busy} onClick={declinePrompt}>
+            <button
+              type="button"
+              class="btn"
+              disabled={busy}
+              onClick={declinePrompt}
+              data-key-label="d"
+            >
               <kbd>d</kbd>断る
             </button>
           </div>
@@ -404,7 +430,7 @@ export function TaskRunForm(props: FormProps): JSX.Element {
     reply: () => textRef.current?.focus(),
   };
   return (
-    <div class="answer">
+    <div class="answer" data-submit-scope>
       <p class="turn-text">{props.item.summary}</p>
       {options.length === 0 ? null : (
         <ChoiceList
@@ -431,7 +457,13 @@ export function TaskRunForm(props: FormProps): JSX.Element {
         }}
       />
       <div class="actions">
-        <button type="button" class="btn primary" disabled={busy} onClick={submitText}>
+        <button
+          type="button"
+          class="btn primary"
+          disabled={busy}
+          onClick={submitText}
+          data-key-label="a"
+        >
           <kbd>a</kbd>回答を送る
         </button>
       </div>

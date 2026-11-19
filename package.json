@@ -550,6 +550,11 @@
         "icon": "$(dashboard)"
       },
       {
+        "command": "agent.missionControl.close",
+        "title": "Mission Controlを閉じる",
+        "category": "Agent"
+      },
+      {
         "command": "agent.taskRun.start",
         "title": "オーケストレータモードを開始",
         "category": "Agent"
@@ -2275,6 +2280,18 @@
         "key": "ctrl+k a",
         "mac": "cmd+k a",
         "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "agent.missionControl.open",
+        "key": "ctrl+k j",
+        "mac": "cmd+k j",
+        "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "agent.missionControl.close",
+        "key": "ctrl+k q",
+        "mac": "cmd+k q",
+        "when": "activeWebviewPanelId == 'agent.missionControl'"
       }
     ]
   },

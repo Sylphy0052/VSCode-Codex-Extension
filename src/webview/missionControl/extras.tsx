@@ -96,7 +96,7 @@ export function HandoffForm(props: {
   };
 
   return (
-    <div class="handoff-form">
+    <div class="handoff-form" data-submit-scope>
       <p>
         {detail.model} / {detail.effort}（{detail.trigger}）
       </p>
@@ -118,6 +118,7 @@ export function HandoffForm(props: {
           class="btn primary"
           disabled={busy}
           onClick={() => void send('proceed')}
+          data-submit
         >
           続行
         </button>
@@ -241,7 +242,7 @@ export function SideQuestionForm(props: { session: McSession; bridge: Bridge }):
   };
 
   return (
-    <div class="side-question">
+    <div class="side-question" data-submit-scope>
       <h3>脇道の質問（本流の会話に残さない）</h3>
       <div class="composer">
         <textarea
@@ -255,6 +256,7 @@ export function SideQuestionForm(props: { session: McSession; bridge: Bridge }):
           class="btn"
           disabled={busy || text.trim() === ''}
           onClick={() => void send()}
+          data-submit
         >
           聞く
         </button>

@@ -42,7 +42,6 @@ import {
   isStalled,
   stalledSince,
   KEY_HELP,
-  mapKey,
   moveSelection,
   needsApprovalDetail,
   PENDING_KIND_LABELS,
@@ -50,6 +49,15 @@ import {
   type McFilter,
   type McProviderFilter,
 } from './logic';
+import {
+  activateAccessKey,
+  refreshAccessKeys,
+  scopeActions,
+  submitAround,
+  trapTab,
+} from './accessKeys';
+import { KEY_BINDINGS, bindingDisplay, resolveKey, type McKeyCommand } from './keys';
+import { CommandPalette, type McPaletteEntry } from './palette';
 import type {
   McActivity,
   McApprovalDetail,
@@ -75,11 +83,32 @@ interface PersistedState {
   selected: string | undefined;
   viewMode: 'list' | 'grid';
   tab: 'sessions' | 'runs';
+  /** ボタン上にアクセスキーを出すか（Issue #2152の3。`.`で切り替える）。 */
+  showAccessKeys: boolean;
 }
+
+/** フォーカスを置けるペイン（Issue #2152の2）。Runsタブは`list`がrunの画面。 */
+type McPane = 'rail' | 'list' | 'detail';
 
 const RECENT_TURNS = 6;
 /** 経過時間の表示を描き直す間隔。 */
 const TICK_MS = 5_000;
+
+/** セッションの項目にだけ効く操作。Runsタブでは何もしない（パレットにも出さない）。 */
+const SESSION_ONLY_COMMANDS: ReadonlySet<McKeyCommand['kind']> = new Set([
+  'approve',
+  'decline',
+  'choose',
+  'reply',
+  'toggleMark',
+  'lifecycle',
+]);
+
+const PROVIDER_FILTERS: ReadonlyArray<[McProviderFilter, string]> = [
+  ['all', 'すべて'],
+  ['codex', 'Codex'],
+  ['claude', 'Claude'],
+];
 
 type Loadable<T> =
   { status: 'loading' } | { status: 'ok'; value: T } | { status: 'error'; error: string };
@@ -110,6 +139,7 @@ function readPersisted(raw: unknown): PersistedState {
     selected: undefined,
     viewMode: 'list',
     tab: 'sessions',
+    showAccessKeys: true,
   };
   if (typeof raw !== 'object' || raw === null) {
     return fallback;
@@ -131,6 +161,7 @@ function readPersisted(raw: unknown): PersistedState {
     selected: typeof v.selected === 'string' ? v.selected : undefined,
     viewMode: v.viewMode === 'grid' ? 'grid' : 'list',
     tab: v.tab === 'runs' ? 'runs' : 'sessions',
+    showAccessKeys: v.showAccessKeys !== false,
   };
 }
 
@@ -200,6 +231,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [issuesOpen, setIssuesOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
   const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
+  // Issue #2152: フォーカスのあるペイン・コマンドパレット・アクセスキーの表示
+  const [paneFocus, setPaneFocus] = useState<McPane>('list');
+  const [palette, setPalette] = useState<readonly McPaletteEntry[] | undefined>(undefined);
+  const [showAccessKeys, setShowAccessKeys] = useState(initial.showAccessKeys);
 
   useEffect(() => {
     const off = bridge.onSnapshot((next) => {
@@ -217,8 +252,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   }, []);
 
   useEffect(() => {
-    bridge.setState({ filter, selected, viewMode, tab } satisfies PersistedState);
-  }, [bridge, filter, selected, viewMode, tab]);
+    bridge.setState({
+      filter,
+      selected,
+      viewMode,
+      tab,
+      showAccessKeys,
+    } satisfies PersistedState);
+  }, [bridge, filter, selected, viewMode, tab, showAccessKeys]);
 
   useEffect(() => {
     if (toast === '') {
@@ -506,195 +547,455 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const runStart = (): void => {
     void bridge.runStart().then(reportRunResult);
   };
+  const reloadWindow = (): void => {
+    void bridge.reloadWindow().then((result) => {
+      if (!result.ok) {
+        setToast(result.error ?? 'Reloadを取りやめました');
+      }
+    });
+  };
+
+  // フォーカスを置けるペイン（Issue #2152の2）。Runsタブは詳細がrunの画面に含まれる
+  const panes: readonly McPane[] = tab === 'runs' ? ['rail', 'list'] : ['rail', 'list', 'detail'];
+  const effectivePane: McPane = panes.includes(paneFocus) ? paneFocus : 'list';
+  const focusPane = (pane: McPane): void => {
+    setPaneFocus(pane);
+    document.querySelector<HTMLElement>(`[data-pane="${pane}"]`)?.focus({ preventScroll: true });
+  };
+  /** repo一覧の`j` / `k`。「すべて」→各repoの順に選ぶ。 */
+  const moveRepo = (delta: 1 | -1): void => {
+    const ids = ['', ...repos.map((repo) => repo.key)];
+    const next = moveSelection(ids, filter.repoKey ?? '', delta);
+    setFilter((f) => ({
+      ...f,
+      repoKey: next === '' || next === undefined ? undefined : next,
+    }));
+  };
+
+  /** キー・パレットから来た操作を実行する（Issue #2136の5・#2152）。 */
+  const dispatch = (
+    command: McKeyCommand,
+    ctx: { editable: boolean; target: EventTarget | null } = {
+      editable: false,
+      target: null,
+    },
+  ): void => {
+    const onRuns = tab === 'runs';
+    if (command.kind === 'runOp' || command.kind === 'parallel') {
+      if (!onRuns) {
+        setToast('Runsタブで使います');
+      } else if (command.kind === 'runOp') {
+        runAction(command.op);
+      } else {
+        runParallel(command.delta);
+      }
+      return;
+    }
+    if (onRuns && SESSION_ONLY_COMMANDS.has(command.kind)) {
+      return;
+    }
+    if (effectivePane === 'rail' && (command.kind === 'next' || command.kind === 'prev')) {
+      moveRepo(command.kind === 'next' ? 1 : -1);
+      return;
+    }
+    if (effectivePane === 'rail' && command.kind === 'detail') {
+      focusPane('list');
+      return;
+    }
+    if (onRuns && command.kind === 'detail') {
+      runAction('switch');
+      return;
+    }
+    if (onRuns && command.kind === 'newSession') {
+      runStart();
+      return;
+    }
+    switch (command.kind) {
+      case 'pane': {
+        const index = panes.indexOf(effectivePane);
+        focusPane(panes[(index + command.delta + panes.length) % panes.length] ?? 'list');
+        return;
+      }
+      case 'palette':
+        // パレットは一番上のダイアログになり、詳細の操作を拾えなくなるので開く前に集める
+        setPalette(buildPalette());
+        return;
+      case 'accessKeys':
+        setShowAccessKeys((on) => !on);
+        return;
+      case 'submit':
+        submitAround(ctx.target);
+        return;
+      case 'tab':
+        setTab((t) => (t === 'runs' ? 'sessions' : 'runs'));
+        return;
+      case 'issues':
+        setIssuesOpen(true);
+        return;
+      case 'next':
+      case 'prev': {
+        if (onRuns) {
+          const nextRun = moveSelection(
+            runIds,
+            effectiveRun?.runId,
+            command.kind === 'next' ? 1 : -1,
+          );
+          setSelectedRun(nextRun);
+          if (nextRun !== undefined) {
+            document
+              .querySelector(`[data-row="${CSS.escape(`run:${nextRun}`)}"]`)
+              ?.scrollIntoView({ block: 'nearest' });
+          }
+          return;
+        }
+        const next = moveSelection(rowIds, selected, command.kind === 'next' ? 1 : -1);
+        setSelected(next);
+        if (next !== undefined) {
+          document
+            .querySelector(`[data-row="${CSS.escape(next)}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+        }
+        return;
+      }
+      case 'detail': {
+        const first = detailRef.current?.querySelector<HTMLElement>(
+          'button:not(:disabled), input, textarea',
+        );
+        setPaneFocus('detail');
+        (first ?? detailRef.current)?.focus();
+        return;
+      }
+      case 'search':
+        searchRef.current?.focus();
+        return;
+      case 'help':
+        setHelpOpen((open) => !open);
+        return;
+      case 'newSession':
+        setLaunchOpen(true);
+        return;
+      case 'escape':
+        if (helpOpen) {
+          setHelpOpen(false);
+        } else if (ctx.editable && ctx.target instanceof HTMLElement) {
+          // 入力欄から出たら、そのペインにフォーカスを残す（フォーカス位置を見失わないように）
+          const pane = ctx.target.closest<HTMLElement>('[data-pane]');
+          if (pane === null) {
+            ctx.target.blur();
+          } else {
+            pane.focus({ preventScroll: true });
+          }
+        } else if (marks.size > 0) {
+          setMarks(new Set());
+        }
+        return;
+      case 'toggleMark':
+        toggleMark(focusedSession);
+        return;
+      case 'lifecycle':
+        runLifecycle(command.op);
+        return;
+      case 'history':
+        setHistoryOpen(true);
+        return;
+      case 'choose':
+        formKeys.current?.choose(command.index);
+        return;
+      case 'approve':
+        formKeys.current?.approve();
+        return;
+      case 'decline':
+        formKeys.current?.decline();
+        return;
+      case 'reply':
+        if (formKeys.current !== null) {
+          formKeys.current.reply();
+        } else {
+          // セッションの詳細では、指示のcomposerへ移る
+          setPaneFocus('detail');
+          detailRef.current?.querySelector<HTMLElement>('textarea.composer-input')?.focus();
+        }
+        return;
+    }
+  };
+
+  /** コマンドパレットの項目（Issue #2152の1）。キーの表・ペイン・絞り込み・詳細のボタン。 */
+  const buildPalette = (): McPaletteEntry[] => {
+    const onRuns = tab === 'runs';
+    const hasItem = onRuns ? effectiveRun !== undefined : selected !== undefined;
+    const entries: McPaletteEntry[] = [];
+    KEY_BINDINGS.forEach((binding, index) => {
+      if (binding.hideInPalette === true || typeof binding.command === 'function') {
+        return;
+      }
+      const command = binding.command;
+      // 今のタブで効かない操作は出さない（タブの切り替えは出すので、そこから届く）
+      if (binding.scope === 'runs' && !onRuns) {
+        return;
+      }
+      if (onRuns && SESSION_ONLY_COMMANDS.has(command.kind)) {
+        return;
+      }
+      entries.push({
+        id: `key:${String(index)}`,
+        label: onRuns && binding.runsLabel !== undefined ? binding.runsLabel : binding.label,
+        keyLabel: bindingDisplay(binding),
+        contextual: binding.contextual === true && hasItem,
+        run: () => latest.current.dispatch(command),
+      });
+    });
+    // 詳細ペインのボタン（diffを開く・中断など）。選んでいる項目に効くので上に出す
+    for (const [i, action] of scopeActions(document).entries()) {
+      entries.push({
+        id: `detail:${String(i)}`,
+        label: `詳細: ${action.label}`,
+        keyLabel: action.element.dataset['akey'],
+        contextual: true,
+        run: () => {
+          if (action.element.isConnected) {
+            action.element.click();
+          }
+        },
+      });
+    }
+    const paneLabels: Record<McPane, string> = {
+      rail: 'repo一覧へ移る',
+      list: onRuns ? 'run一覧へ移る' : '一覧へ移る',
+      detail: '詳細へ移る',
+    };
+    for (const pane of panes) {
+      entries.push({
+        id: `pane:${pane}`,
+        label: paneLabels[pane],
+        contextual: false,
+        run: () => latest.current.focusPane(pane),
+      });
+    }
+    const setFilterLater = (next: Partial<McFilter>) => () => setFilter((f) => ({ ...f, ...next }));
+    entries.push({
+      id: 'repo:all',
+      label: 'repoで絞り込む: すべて',
+      contextual: false,
+      run: setFilterLater({ repoKey: undefined }),
+    });
+    for (const repo of repos) {
+      entries.push({
+        id: `repo:${repo.key}`,
+        label: `repoで絞り込む: ${repo.label}`,
+        contextual: false,
+        run: setFilterLater({ repoKey: repo.key }),
+      });
+    }
+    entries.push({
+      id: 'activity:all',
+      label: '状態で絞り込む: すべて',
+      contextual: false,
+      run: setFilterLater({ activity: undefined }),
+    });
+    for (const activity of Object.keys(ACTIVITY_LABELS) as McActivity[]) {
+      entries.push({
+        id: `activity:${activity}`,
+        label: `状態で絞り込む: ${ACTIVITY_LABELS[activity]}`,
+        contextual: false,
+        run: setFilterLater({ activity }),
+      });
+    }
+    for (const [provider, label] of PROVIDER_FILTERS) {
+      entries.push({
+        id: `provider:${provider}`,
+        label: `CLIで絞り込む: ${label}`,
+        contextual: false,
+        run: setFilterLater({ provider }),
+      });
+    }
+    entries.push(
+      {
+        id: 'currentWindowOnly',
+        label: `このウィンドウのみ: ${filter.currentWindowOnly ? 'オフにする' : 'オンにする'}`,
+        contextual: false,
+        run: setFilterLater({ currentWindowOnly: !filter.currentWindowOnly }),
+      },
+      {
+        id: 'view:list',
+        label: 'セッションを一覧で表示',
+        contextual: false,
+        run: () => setViewMode('list'),
+      },
+      {
+        id: 'view:grid',
+        label: 'セッションをカードで表示',
+        contextual: false,
+        run: () => setViewMode('grid'),
+      },
+      {
+        id: 'markClear',
+        label: '複数選択を外す',
+        contextual: false,
+        run: () => setMarks(new Set()),
+      },
+      {
+        id: 'reload',
+        label: 'ウィンドウをReloadする',
+        contextual: false,
+        run: reloadWindow,
+      },
+    );
+    return entries;
+  };
 
   // キーボード操作（Issue #2136の5）。最新の状態をrefで読む
   const latest = useRef({
-    rowIds,
-    selected,
     helpOpen,
     launchOpen,
     historyOpen,
     issuesOpen,
+    paletteOpen: palette !== undefined,
     tab,
-    runIds,
-    effectiveRunId: effectiveRun?.runId,
-    runAction,
-    runParallel,
-    runStart,
-    marks,
-    runLifecycle,
-    toggleFocused: () => toggleMark(focusedSession),
+    dispatch,
+    focusPane,
   });
   latest.current = {
-    rowIds,
-    selected,
     helpOpen,
     launchOpen,
     historyOpen,
     issuesOpen,
+    paletteOpen: palette !== undefined,
     tab,
-    runIds,
-    effectiveRunId: effectiveRun?.runId,
-    runAction,
-    runParallel,
-    runStart,
-    marks,
-    runLifecycle,
-    toggleFocused: () => toggleMark(focusedSession),
+    dispatch,
+    focusPane,
   };
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
+      // ダイアログ・入力欄が自分で受け持ったキー（履歴の↑ / ↓、composerのCtrl+Enterなど）
+      if (event.defaultPrevented) {
+        return;
+      }
       const editable = isEditable(event.target);
-      const command = mapKey({
+      const input = {
         key: event.key,
         ctrlKey: event.ctrlKey,
         metaKey: event.metaKey,
         altKey: event.altKey,
         shiftKey: event.shiftKey,
         inEditable: editable || event.isComposing,
-      });
-      // ボタン・リンクの上のEnterは、そのボタンを押す標準の操作に任せる。奪うとTabで移って
-      // Enterで押す操作ができない
-      if (command === undefined || (command.kind === 'detail' && isActivatable(event.target))) {
-        return;
-      }
+      };
+      const resolved = resolveKey(input);
       const state = latest.current;
-      if (state.helpOpen && command.kind !== 'help' && command.kind !== 'escape') {
-        return;
-      }
-      // 新規起動・履歴の画面を出している間は、一覧・回答のキーを効かせない（Escで閉じるだけ。
-      // 履歴の↑ / ↓・Enterは`HistoryDialog`が受け持つ）
-      if (state.launchOpen || state.historyOpen || state.issuesOpen) {
-        if (command.kind === 'escape' && !editable) {
+      const dialogOpen =
+        state.launchOpen || state.historyOpen || state.issuesOpen || state.paletteOpen;
+      const plainLetter =
+        /^[a-z]$/iu.test(event.key) &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !editable &&
+        !event.isComposing;
+      // 新規起動・履歴・パレットの画面を出している間は、一覧・回答のキーを効かせない（Escで閉じる
+      // だけ。履歴の↑ / ↓・Enterは`HistoryDialog`が受け持つ）。Tabは画面の中で回し、
+      // Ctrl+Enterで送信し、英字はボタンのアクセスキーにする（Issue #2152の3・4）
+      if (dialogOpen) {
+        const dialog = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].pop();
+        if (resolved?.command.kind === 'escape' && !editable) {
           event.preventDefault();
           setLaunchOpen(false);
           setHistoryOpen(false);
           setIssuesOpen(false);
-        } else if (command.kind === 'escape' && event.target instanceof HTMLElement) {
-          event.target.blur();
-        }
-        return;
-      }
-      event.preventDefault();
-      const onRuns = state.tab === 'runs';
-      if (command.kind === 'runOp' || command.kind === 'parallel') {
-        if (!onRuns) {
-          setToast('Runsタブで使います');
-        } else if (command.kind === 'runOp') {
-          state.runAction(command.op);
-        } else {
-          state.runParallel(command.delta);
+          setPalette(undefined);
+        } else if (resolved?.command.kind === 'escape' && event.target instanceof HTMLElement) {
+          if (state.paletteOpen) {
+            setPalette(undefined);
+          } else {
+            event.target.blur();
+          }
+        } else if (resolved?.command.kind === 'submit') {
+          if (submitAround(event.target)) {
+            event.preventDefault();
+          }
+        } else if (event.key === 'Tab' && dialog !== undefined) {
+          if (trapTab(dialog, event.shiftKey)) {
+            event.preventDefault();
+          }
+        } else if (plainLetter && activateAccessKey(document, event.key.toLowerCase())) {
+          event.preventDefault();
         }
         return;
       }
       if (
-        onRuns &&
-        (command.kind === 'approve' ||
-          command.kind === 'decline' ||
-          command.kind === 'choose' ||
-          command.kind === 'reply' ||
-          command.kind === 'toggleMark' ||
-          command.kind === 'lifecycle')
+        state.helpOpen &&
+        resolved?.command.kind !== 'help' &&
+        resolved?.command.kind !== 'escape'
       ) {
         return;
       }
-      if (onRuns && command.kind === 'detail') {
-        state.runAction('switch');
-        return;
-      }
-      if (onRuns && command.kind === 'newSession') {
-        state.runStart();
-        return;
-      }
-      switch (command.kind) {
-        case 'tab':
-          setTab((t) => (t === 'runs' ? 'sessions' : 'runs'));
-          return;
-        case 'issues':
-          setIssuesOpen(true);
-          return;
-        case 'next':
-        case 'prev': {
-          if (onRuns) {
-            const nextRun = moveSelection(
-              state.runIds,
-              state.effectiveRunId,
-              command.kind === 'next' ? 1 : -1,
-            );
-            setSelectedRun(nextRun);
-            if (nextRun !== undefined) {
-              document
-                .querySelector(`[data-row="${CSS.escape(`run:${nextRun}`)}"]`)
-                ?.scrollIntoView({ block: 'nearest' });
-            }
-            return;
-          }
-          const next = moveSelection(
-            state.rowIds,
-            state.selected,
-            command.kind === 'next' ? 1 : -1,
-          );
-          setSelected(next);
-          if (next !== undefined) {
-            document
-              .querySelector(`[data-row="${CSS.escape(next)}"]`)
-              ?.scrollIntoView({ block: 'nearest' });
-          }
+      // セッションのタブで、全体のキーに当たらない英字（Runsタブだけのキーを含む）は詳細ペインの
+      // アクセスキーにする
+      const freeOnThisTab =
+        resolved === undefined || (resolved.binding.scope === 'runs' && state.tab !== 'runs');
+      if (plainLetter && freeOnThisTab && state.tab === 'sessions') {
+        if (activateAccessKey(document, event.key.toLowerCase())) {
+          event.preventDefault();
           return;
         }
-        case 'detail':
-          detailRef.current
-            ?.querySelector<HTMLElement>('button:not(:disabled), input, textarea')
-            ?.focus();
-          return;
-        case 'search':
-          searchRef.current?.focus();
-          return;
-        case 'help':
-          setHelpOpen((open) => !open);
-          return;
-        case 'newSession':
-          setLaunchOpen(true);
-          return;
-        case 'escape':
-          if (state.helpOpen) {
-            setHelpOpen(false);
-          } else if (editable && event.target instanceof HTMLElement) {
-            event.target.blur();
-          } else if (state.marks.size > 0) {
-            setMarks(new Set());
-          }
-          return;
-        case 'toggleMark':
-          state.toggleFocused();
-          return;
-        case 'lifecycle':
-          state.runLifecycle(command.op);
-          return;
-        case 'history':
-          setHistoryOpen(true);
-          return;
-        case 'choose':
-          formKeys.current?.choose(command.index);
-          return;
-        case 'approve':
-          formKeys.current?.approve();
-          return;
-        case 'decline':
-          formKeys.current?.decline();
-          return;
-        case 'reply':
-          if (formKeys.current !== null) {
-            formKeys.current.reply();
-          } else {
-            // セッションの詳細では、指示のcomposerへ移る
-            detailRef.current?.querySelector<HTMLElement>('textarea.composer-input')?.focus();
-          }
-          return;
       }
+      // ボタン・リンクの上のEnterは、そのボタンを押す標準の操作に任せる。奪うとTabで移って
+      // Enterで押す操作ができない
+      if (
+        resolved === undefined ||
+        (resolved.command.kind === 'detail' && isActivatable(event.target))
+      ) {
+        return;
+      }
+      event.preventDefault();
+      state.dispatch(resolved.command, { editable, target: event.target });
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
+  // ペインのフォーカスを、クリック・Tabで移ったフォーカスにも合わせる（Issue #2152の2）
+  useEffect(() => {
+    const follow = (event: Event): void => {
+      const pane =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>('[data-pane]')?.dataset['pane']
+          : undefined;
+      if (pane === 'rail' || pane === 'list' || pane === 'detail') {
+        setPaneFocus(pane);
+      }
+    };
+    document.addEventListener('focusin', follow);
+    document.addEventListener('pointerdown', follow);
+    return () => {
+      document.removeEventListener('focusin', follow);
+      document.removeEventListener('pointerdown', follow);
+    };
+  }, []);
+
+  // 詳細ペイン・ダイアログのボタンへアクセスキーを振り直す（Issue #2152の3）。ボタンは子の
+  // 部品の状態でも増減するので、DOMの変化を見て次のフレームでまとめて振る
+  useEffect(() => {
+    const root = document.getElementById('root') ?? document.body;
+    let queued = false;
+    const schedule = (): void => {
+      if (queued) {
+        return;
+      }
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        refreshAccessKeys(document);
+      });
+    };
+    const observer = new MutationObserver(schedule);
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'open', 'data-tab'],
+    });
+    schedule();
+    return () => observer.disconnect();
   }, []);
 
   if (snapshot === undefined) {
@@ -707,6 +1008,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         type="button"
         aria-pressed={tab === 'sessions'}
         title="セッション（t）"
+        data-key-label="t"
         onClick={() => setTab('sessions')}
       >
         セッション
@@ -715,6 +1017,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         type="button"
         aria-pressed={tab === 'runs'}
         title="Runs（t）"
+        data-key-label="t"
         onClick={() => setTab('runs')}
       >
         Runs（{String(runsSnap?.runs.length ?? 0)}）
@@ -725,8 +1028,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   formKeys.current = null;
 
   return (
-    <div class="mc">
+    <div class={showAccessKeys ? 'mc akeys' : 'mc'} data-tab={tab} data-pane-focus={effectivePane}>
       <Rail
+        focused={effectivePane === 'rail'}
         repos={repos}
         snapshot={snapshot}
         filter={filter}
@@ -742,11 +1046,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           onStart={runStart}
           onIssues={() => setIssuesOpen(true)}
           tabButtons={tabButtons}
+          focused={effectivePane === 'list'}
         />
       ) : null}
       {tab === 'sessions' ? (
         <>
-          <div class="pane center">
+          <div
+            class={effectivePane === 'list' ? 'pane center pane-focused' : 'pane center'}
+            data-pane="list"
+            tabIndex={-1}
+            aria-label="一覧"
+          >
             <div class="toolbar">
               {tabButtons}
               <input
@@ -754,6 +1064,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 class="search"
                 type="search"
                 placeholder="検索（/）"
+                data-key-label="/"
                 aria-label="タイトル・要約・repo名で検索"
                 value={filter.query}
                 onInput={(e) => setFilter({ ...filter, query: e.currentTarget.value })}
@@ -779,6 +1090,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 class="btn primary"
                 onClick={() => setLaunchOpen(true)}
                 title="新規セッション（n）"
+                data-key-label="n"
               >
                 ＋ 新規
               </button>
@@ -787,6 +1099,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 class="btn"
                 onClick={() => setHistoryOpen(true)}
                 title="履歴から再開（h）"
+                data-key-label="h"
               >
                 履歴
               </button>
@@ -794,18 +1107,27 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 type="button"
                 class="btn"
                 title="ウィンドウをReloadする"
-                onClick={() =>
-                  void bridge.reloadWindow().then((result) => {
-                    if (!result.ok) {
-                      setToast(result.error ?? 'Reloadを取りやめました');
-                    }
-                  })
-                }
+                onClick={reloadWindow}
               >
                 Reload
               </button>
-              <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
+              <button
+                type="button"
+                class="btn"
+                onClick={() => setHelpOpen(true)}
+                title="キー操作（?）"
+                data-key-label="?"
+              >
                 ?
+              </button>
+              <button
+                type="button"
+                class="btn"
+                onClick={() => dispatch({ kind: 'palette' })}
+                title="コマンドパレット（:）"
+                data-key-label=":"
+              >
+                操作
               </button>
             </div>
             <section class="section" aria-label="Inbox">
@@ -873,7 +1195,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               )}
             </section>
           </div>
-          <div class="pane" ref={detailRef} aria-label="詳細">
+          <div
+            class={effectivePane === 'detail' ? 'pane pane-focused' : 'pane'}
+            ref={detailRef}
+            data-pane="detail"
+            tabIndex={-1}
+            aria-label="詳細"
+          >
             {selectedPending !== undefined ? (
               <PendingDetail
                 key={selectedPending.id}
@@ -931,6 +1259,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         </>
       ) : null}
       {helpOpen ? <HelpOverlay onClose={() => setHelpOpen(false)} /> : null}
+      {palette !== undefined ? (
+        <CommandPalette entries={palette} onClose={() => setPalette(undefined)} />
+      ) : null}
       {launchOpen ? (
         <LaunchDialog
           bridge={bridge}
@@ -971,20 +1302,22 @@ export function App(props: { bridge: Bridge }): JSX.Element {
 }
 
 function Rail(props: {
+  focused: boolean;
   repos: readonly McRepo[];
   snapshot: McSnapshot;
   filter: McFilter;
   onFilter: (filter: McFilter) => void;
 }): JSX.Element {
   const { filter, onFilter } = props;
-  const providers: Array<[McProviderFilter, string]> = [
-    ['all', 'すべて'],
-    ['codex', 'Codex'],
-    ['claude', 'Claude'],
-  ];
+  const providers = PROVIDER_FILTERS;
   const activityCounts = countByActivity(props.snapshot.sessions, props.repos, filter);
   return (
-    <nav class="pane" aria-label="repo">
+    <nav
+      class={props.focused ? 'pane pane-focused' : 'pane'}
+      aria-label="repo"
+      data-pane="rail"
+      tabIndex={-1}
+    >
       <h2 class="pane-title">Repo</h2>
       <button
         type="button"
@@ -1717,10 +2050,13 @@ function HelpOverlay(props: { onClose: () => void }): JSX.Element {
     <div class="help" role="dialog" aria-label="キー操作" onClick={props.onClose}>
       <div class="help-box">
         <h2>キー操作</h2>
+        <p class="notice">
+          詳細ペインとダイアログのボタンは、ボタン上の英字1つで押せます（.で表示を切り替え）。
+        </p>
         <table>
           <tbody>
             {KEY_HELP.map(([key, label]) => (
-              <tr key={key}>
+              <tr key={`${key} ${label}`}>
                 <td>
                   <kbd>{key}</kbd>
                 </td>

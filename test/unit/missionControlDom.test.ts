@@ -1,7 +1,8 @@
 import { buildSync } from 'esbuild';
-import { JSDOM } from 'jsdom';
+import { JSDOM, type DOMWindow } from 'jsdom';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { KEY_HELP } from '../../src/webview/missionControl/keys';
 import type { McPendingItem, McSnapshot } from '../../src/webview/missionControl/protocol';
 
 /**
@@ -318,6 +319,135 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       cwd: '/w/app',
       provider: 'codex',
       worktree: true,
+    });
+  });
+
+  describe('キーボードだけで操作する（Issue #2152）', () => {
+    const press = (window: DOMWindow, k: string, init: Partial<KeyboardEventInit> = {}): void => {
+      const target = window.document.activeElement ?? window.document.body;
+      target.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, ...init }));
+    };
+    const focusedPane = (window: DOMWindow): string | undefined =>
+      window.document.querySelector<HTMLElement>('.pane-focused')?.dataset['pane'];
+
+    it('Tab / Shift+Tabでペインを移り、フォーカスのあるペインに枠が付く。repo一覧はj / kで選ぶ', async () => {
+      const { window, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+      await tick();
+      expect(focusedPane(window)).toBe('list');
+      press(window, 'Tab');
+      await tick();
+      expect(focusedPane(window)).toBe('detail');
+      expect(window.document.activeElement?.getAttribute('data-pane')).toBe('detail');
+      press(window, 'Tab', { shiftKey: true });
+      await tick();
+      press(window, 'ArrowLeft');
+      await tick();
+      expect(focusedPane(window)).toBe('rail');
+      press(window, 'j');
+      await tick();
+      expect(window.document.querySelector('.rail-item.active')?.textContent).toContain('app');
+      press(window, 'k');
+      await tick();
+      expect(window.document.querySelector('.rail-item.active')?.textContent).toContain('すべて');
+    });
+
+    it(':のパレットで操作を名前で絞り込み、Enterで実行する', async () => {
+      const { window, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+      await tick();
+      press(window, ':');
+      await tick();
+      const input = window.document.querySelector(
+        '[aria-label="コマンドパレット"] input',
+      ) as HTMLInputElement;
+      expect(window.document.activeElement).toBe(input);
+      // 選んでいるセッションに効く操作（閉じるなど）が上に出る
+      const first = window.document.querySelector('.palette-item')?.textContent ?? '';
+      expect(first).not.toContain('検索');
+      input.value = '履歴';
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      press(window, 'Enter');
+      await tick();
+      expect(window.document.querySelector('[aria-label="コマンドパレット"]')).toBeNull();
+      expect(window.document.querySelector('[role="dialog"][aria-label="履歴"]')).not.toBeNull();
+    });
+
+    it('詳細ペインのボタンにアクセスキーを振り、その英字で押せる。全体のキーの英字は振らない', async () => {
+      const { window, posted, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+      await tick();
+      const detail = window.document.querySelector('[data-pane="detail"]') as HTMLElement;
+      const keyed = [...detail.querySelectorAll<HTMLElement>('[data-akey]')];
+      expect(keyed.length).toBeGreaterThan(0);
+      for (const element of keyed) {
+        expect('jkadrnxceht').not.toContain(element.dataset['akey']);
+      }
+      // 全体のキーと同じ意味のボタンには振らず、そのキーを表示する
+      const close = [...detail.querySelectorAll<HTMLElement>('button')].find(
+        (b) => b.getAttribute('data-key-label') === 'c',
+      );
+      expect(close?.hasAttribute('data-akey')).toBe(false);
+      const button = keyed.find((element) => element instanceof window.HTMLButtonElement);
+      expect(button).toBeDefined();
+      let clicked = false;
+      button?.addEventListener('click', () => {
+        clicked = true;
+      });
+      press(window, button?.dataset['akey'] ?? '');
+      await tick();
+      expect(clicked).toBe(true);
+      // .でキーの表示を切り替える
+      expect(window.document.querySelector('.mc')?.classList.contains('akeys')).toBe(true);
+      press(window, '.');
+      await tick();
+      expect(window.document.querySelector('.mc')?.classList.contains('akeys')).toBe(false);
+      expect(posted.length).toBeGreaterThan(0);
+    });
+
+    it('?のヘルプはキーの表の全行を出す', async () => {
+      const { window, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      press(window, '?');
+      await tick();
+      const rows = window.document.querySelectorAll('[aria-label="キー操作"] tr');
+      expect(rows.length).toBe(KEY_HELP.length);
+    });
+
+    it('新規起動のダイアログはTabが外へ抜けず、Ctrl+Enterで起動する', async () => {
+      const { window, posted, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      press(window, 'n');
+      await tick();
+      const options = posted.find((m) => m.type === 'launchOptions');
+      deliver({
+        type: 'reply',
+        seq: options?.seq,
+        ok: true,
+        repos: [{ path: '/w/app', key: '/w/app', label: 'app', source: 'session' }],
+      });
+      await tick();
+      const dialog = window.document.querySelector('[role="dialog"]') as HTMLElement;
+      const focusables = [
+        ...dialog.querySelectorAll<HTMLElement>('button, select, textarea, input'),
+      ];
+      const last = focusables.filter((e) => !(e as HTMLButtonElement).disabled).at(-1);
+      last?.focus();
+      press(window, 'Tab');
+      expect(dialog.contains(window.document.activeElement)).toBe(true);
+      const textarea = dialog.querySelector('textarea') as HTMLTextAreaElement;
+      textarea.focus();
+      press(window, 'Enter', { ctrlKey: true });
+      await tick();
+      expect(posted.find((m) => m.type === 'launch')).toMatchObject({ cwd: '/w/app' });
     });
   });
 });
