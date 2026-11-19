@@ -4,9 +4,7 @@
 
 ## mergeの条件
 
-- `--admin`でstatus check待ちを迂回しない。`checks`と`external-cli`が成功してからmergeする
-- CI未完了・失敗の間はmergeしない（`gh pr checks <PR番号>`で確認）
-- 通常PRの「CI完了を待たず自己merge」はこのラベルのPRには適用しない
+- CIのworkflowは2026-11-20から無効にしてある。CIの成功は待たず、手元で `npm run format:check`・`npm run typecheck`・`npm run lint`・変更に関わるテストが通ったらmergeする（`--admin`で迂回してよい）
 
 ## 配布の条件
 
@@ -59,4 +57,4 @@ git push origin revert/<PR番号>
 gh pr create --title "revert: <PR番号>を戻す" --body "Reverts #<PR番号>"
 ```
 
-このPRも`self-improvement`ラベルを付け、`checks`と`external-cli`の成功を待ってからmergeする。squash mergeは使わない。
+このPRも`self-improvement`ラベルを付け、上の「mergeの条件」に従ってmergeする。squash mergeは使わない。

@@ -16,12 +16,12 @@
 - 各PRの最後に `node scripts/bump-version.mjs` を実行し、`package.json` と `package-lock.json` の版上げを `chore: バージョンを<版>にする` として同じPRへcommitする。配布したvsixの版とmainのcommitを1対1にするため
   - merge直前に `git fetch origin` し、`origin/main` の版が版上げ前の版から変わっていたら、mainを取り込んでから `bump-version.mjs` を実行し直す。並行する2つのPRが同じ版へ上げた場合、変更が同一なのでgitは衝突として止めず、同じ版番号の中身違いが2回配布されてしまう
 - PR作成後は自己レビュー必須。指摘があれば自分で修正してから次へ進む
-- CI (`checks` / `external-cli`) の確認、他者レビューは不要。自己マージしてよい
-- 自己レビュー・修正が済んでいれば、CI (`checks` / `external-cli`) の完了を待たずに自己mergeしてよい
+- CIのworkflow（`CI`、`checks` / `external-cli`）は2026-11-20から無効にしてある。CIの結果は確かめず、完了も待たない。CIを有効に戻すかどうかも尋ねない。他者レビューも不要で、自己マージしてよい
+- 自己レビュー・修正が済み、手元で `npm run format:check`・`npm run typecheck`・`npm run lint`・変更に関わるテストが通ったら、自己mergeしてよい（CIの代わり）
   - ブランチ保護は承認数0で自己merge可能な設定になっている（詳細: `docs/repository-hygiene.md`）
-  - CI未完了で `gh pr merge` が `mergeStateStatus: BLOCKED` を返す場合は `--admin` を付けてstatus check待ちを迂回する
+  - `gh pr merge` が `mergeStateStatus: BLOCKED` を返す場合は `--admin` を付けてstatus check待ちを迂回する
   - squash mergeはこのリポジトリで禁止されている（2026-08-24〜）。`--merge` か `--rebase` を使う
-- 例外: `self-improvement`ラベルのPR（この拡張自身を直すPR）は、`--admin`を使わず `checks` と `external-cli` が成功するまでmergeしない。配布は全runが終わってから行い、自動Reloadはしない。配布前に直前のvsixを`/tmp`以外へ保管する。戻し方は `docs/self-improvement-revert.md`
+- `self-improvement`ラベルのPR（この拡張自身を直すPR）も、CIの成功を待たずにmergeしてよい。ただし配布は全runが終わってから行い、自動Reloadはしない。配布前に直前のvsixを`/tmp`以外へ保管する。戻し方は `docs/self-improvement-revert.md`
 - merge後のcleanupは必須
   - リモートの元ブランチ削除、ローカルブランチ削除、worktree撤去まで行う
   - `gh pr merge --delete-branch` は、対象ブランチがworktreeへcheckout済みだと `Cannot delete branch ... checked out at ...` で失敗し、リモートブランチが残ったままになることがある。失敗時は `git ls-remote --heads origin <branch>` で残存を確認し、`git push origin --delete <branch>` 等で手動削除する
