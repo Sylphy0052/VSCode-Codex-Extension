@@ -550,6 +550,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         ctrlKey: event.ctrlKey,
         metaKey: event.metaKey,
         altKey: event.altKey,
+        shiftKey: event.shiftKey,
         inEditable: editable || event.isComposing,
       });
       // ボタン・リンクの上のEnterは、そのボタンを押す標準の操作に任せる。奪うとTabで移って
@@ -744,190 +745,190 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         />
       ) : null}
       {tab === 'sessions' ? (
-      <>
-      <div class="pane center">
-        <div class="toolbar">
-          {tabButtons}
-          <input
-            ref={searchRef}
-            class="search"
-            type="search"
-            placeholder="検索（/）"
-            aria-label="タイトル・要約・repo名で検索"
-            value={filter.query}
-            onInput={(e) => setFilter({ ...filter, query: e.currentTarget.value })}
-          />
-          <div class="seg" role="group" aria-label="セッション一覧の表示">
-            <button
-              type="button"
-              aria-pressed={viewMode === 'list'}
-              onClick={() => setViewMode('list')}
-            >
-              一覧
-            </button>
-            <button
-              type="button"
-              aria-pressed={viewMode === 'grid'}
-              onClick={() => setViewMode('grid')}
-            >
-              カード
-            </button>
-          </div>
-          <button
-            type="button"
-            class="btn primary"
-            onClick={() => setLaunchOpen(true)}
-            title="新規セッション（n）"
-          >
-            ＋ 新規
-          </button>
-          <button
-            type="button"
-            class="btn"
-            onClick={() => setHistoryOpen(true)}
-            title="履歴から再開（h）"
-          >
-            履歴
-          </button>
-          <button
-            type="button"
-            class="btn"
-            title="ウィンドウをReloadする"
-            onClick={() =>
-              void bridge.reloadWindow().then((result) => {
-                if (!result.ok) {
-                  setToast(result.error ?? 'Reloadを取りやめました');
-                }
-              })
-            }
-          >
-            Reload
-          </button>
-          <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
-            ?
-          </button>
-        </div>
-        <section class="section" aria-label="Inbox">
-          <h2 class="pane-title">Inbox（{String(pending.length + resumable.length)}）</h2>
-          {pending.length === 0 && resumable.length === 0 ? (
-            <p class="empty">回答待ちの項目はありません。</p>
-          ) : (
-            pending.map((item) => (
-              <PendingRow
-                key={item.id}
-                item={item}
-                repos={repos}
-                session={sessionOf(item)}
-                now={now}
-                selected={selected === pendingRowId(item)}
-                sent={sent.has(item.id)}
-                onSelect={() => setSelected(pendingRowId(item))}
+        <>
+          <div class="pane center">
+            <div class="toolbar">
+              {tabButtons}
+              <input
+                ref={searchRef}
+                class="search"
+                type="search"
+                placeholder="検索（/）"
+                aria-label="タイトル・要約・repo名で検索"
+                value={filter.query}
+                onInput={(e) => setFilter({ ...filter, query: e.currentTarget.value })}
               />
-            ))
-          )}
-          {resumable.map((item) => (
-            <ResumeRow
-              key={item.id}
-              item={item}
-              repos={repos}
-              now={now}
-              selected={selected === resumeRowId(item)}
-              onSelect={() => setSelected(resumeRowId(item))}
-            />
-          ))}
-        </section>
-        <ReviewSection
-          sessions={reviewSessions}
-          selected={selected}
-          rowId={sessionRowId}
-          onSelect={setSelected}
-        />
-        <section class="section" aria-label="セッション一覧">
-          <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
-          <MarkBar count={marks.size} onOp={runLifecycle} onClear={() => setMarks(new Set())} />
-          {groups.length === 0 ? (
-            <p class="empty">セッションはありません。</p>
-          ) : (
-            groups.map((group) => (
-              <div key={group.repo.key}>
-                <h3 class="group-title" title={group.repo.full}>
-                  {group.repo.label}
-                  <span class="count">{String(group.sessions.length)}</span>
-                </h3>
-                <div class={viewMode === 'grid' ? 'grid' : undefined}>
-                  {group.sessions.map((session) => (
-                    <SessionRow
-                      key={session.key}
-                      session={session}
-                      now={now}
-                      stallMs={snapshot.stallMs}
-                      selected={selected === sessionRowId(session)}
-                      marked={marks.has(session.key)}
-                      onSelect={() => setSelected(sessionRowId(session))}
-                    />
-                  ))}
-                </div>
+              <div class="seg" role="group" aria-label="セッション一覧の表示">
+                <button
+                  type="button"
+                  aria-pressed={viewMode === 'list'}
+                  onClick={() => setViewMode('list')}
+                >
+                  一覧
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={viewMode === 'grid'}
+                  onClick={() => setViewMode('grid')}
+                >
+                  カード
+                </button>
               </div>
-            ))
-          )}
-        </section>
-      </div>
-      <div class="pane" ref={detailRef} aria-label="詳細">
-        {selectedPending !== undefined ? (
-          <PendingDetail
-            key={selectedPending.id}
-            item={selectedPending}
-            bridge={bridge}
-            repos={repos}
-            session={sessionOf(selectedPending)}
-            now={now}
-            sent={sent.has(selectedPending.id)}
-            answerError={answerErrors.get(selectedPending.id)}
-            approvals={approvals[targetKey(selectedPending)]}
-            turns={turns[targetKey(selectedPending)]}
-            formKeys={formKeys}
-            submit={submitFor(selectedPending)}
-            onReload={() => loadApprovals(selectedPending)}
-            onReloadTurns={() => loadTurns(selectedPending)}
-            onSessionAction={sessionAction}
-          />
-        ) : selectedSession !== undefined ? (
-          <SessionDetail
-            key={selectedSession.key}
-            session={selectedSession}
-            bridge={bridge}
-            onToast={setToast}
-            now={now}
-            stallMs={snapshot.stallMs}
-            onSend={(text) => sendTo(selectedSession, text)}
-            pending={(snapshot.pending ?? []).filter(
-              (p) =>
-                p.windowId === selectedSession.windowId &&
-                p.threadId === selectedSession.threadId &&
-                p.provider === selectedSession.provider,
+              <button
+                type="button"
+                class="btn primary"
+                onClick={() => setLaunchOpen(true)}
+                title="新規セッション（n）"
+              >
+                ＋ 新規
+              </button>
+              <button
+                type="button"
+                class="btn"
+                onClick={() => setHistoryOpen(true)}
+                title="履歴から再開（h）"
+              >
+                履歴
+              </button>
+              <button
+                type="button"
+                class="btn"
+                title="ウィンドウをReloadする"
+                onClick={() =>
+                  void bridge.reloadWindow().then((result) => {
+                    if (!result.ok) {
+                      setToast(result.error ?? 'Reloadを取りやめました');
+                    }
+                  })
+                }
+              >
+                Reload
+              </button>
+              <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
+                ?
+              </button>
+            </div>
+            <section class="section" aria-label="Inbox">
+              <h2 class="pane-title">Inbox（{String(pending.length + resumable.length)}）</h2>
+              {pending.length === 0 && resumable.length === 0 ? (
+                <p class="empty">回答待ちの項目はありません。</p>
+              ) : (
+                pending.map((item) => (
+                  <PendingRow
+                    key={item.id}
+                    item={item}
+                    repos={repos}
+                    session={sessionOf(item)}
+                    now={now}
+                    selected={selected === pendingRowId(item)}
+                    sent={sent.has(item.id)}
+                    onSelect={() => setSelected(pendingRowId(item))}
+                  />
+                ))
+              )}
+              {resumable.map((item) => (
+                <ResumeRow
+                  key={item.id}
+                  item={item}
+                  repos={repos}
+                  now={now}
+                  selected={selected === resumeRowId(item)}
+                  onSelect={() => setSelected(resumeRowId(item))}
+                />
+              ))}
+            </section>
+            <ReviewSection
+              sessions={reviewSessions}
+              selected={selected}
+              rowId={sessionRowId}
+              onSelect={setSelected}
+            />
+            <section class="section" aria-label="セッション一覧">
+              <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
+              <MarkBar count={marks.size} onOp={runLifecycle} onClear={() => setMarks(new Set())} />
+              {groups.length === 0 ? (
+                <p class="empty">セッションはありません。</p>
+              ) : (
+                groups.map((group) => (
+                  <div key={group.repo.key}>
+                    <h3 class="group-title" title={group.repo.full}>
+                      {group.repo.label}
+                      <span class="count">{String(group.sessions.length)}</span>
+                    </h3>
+                    <div class={viewMode === 'grid' ? 'grid' : undefined}>
+                      {group.sessions.map((session) => (
+                        <SessionRow
+                          key={session.key}
+                          session={session}
+                          now={now}
+                          stallMs={snapshot.stallMs}
+                          selected={selected === sessionRowId(session)}
+                          marked={marks.has(session.key)}
+                          onSelect={() => setSelected(sessionRowId(session))}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </section>
+          </div>
+          <div class="pane" ref={detailRef} aria-label="詳細">
+            {selectedPending !== undefined ? (
+              <PendingDetail
+                key={selectedPending.id}
+                item={selectedPending}
+                bridge={bridge}
+                repos={repos}
+                session={sessionOf(selectedPending)}
+                now={now}
+                sent={sent.has(selectedPending.id)}
+                answerError={answerErrors.get(selectedPending.id)}
+                approvals={approvals[targetKey(selectedPending)]}
+                turns={turns[targetKey(selectedPending)]}
+                formKeys={formKeys}
+                submit={submitFor(selectedPending)}
+                onReload={() => loadApprovals(selectedPending)}
+                onReloadTurns={() => loadTurns(selectedPending)}
+                onSessionAction={sessionAction}
+              />
+            ) : selectedSession !== undefined ? (
+              <SessionDetail
+                key={selectedSession.key}
+                session={selectedSession}
+                bridge={bridge}
+                onToast={setToast}
+                now={now}
+                stallMs={snapshot.stallMs}
+                onSend={(text) => sendTo(selectedSession, text)}
+                pending={(snapshot.pending ?? []).filter(
+                  (p) =>
+                    p.windowId === selectedSession.windowId &&
+                    p.threadId === selectedSession.threadId &&
+                    p.provider === selectedSession.provider,
+                )}
+                turns={turns[targetKey(selectedSession)]}
+                onSelectPending={(item) => setSelected(pendingRowId(item))}
+                onReloadTurns={() => loadTurns(selectedSession)}
+                onSessionAction={sessionAction}
+                marked={marks.has(selectedSession.key)}
+                // 詳細のボタンは、複数選択があってもこのセッションだけに効かせる
+                onLifecycle={(op) => runLifecycle(op, [selectedSession])}
+                onToggleMark={() => toggleMark(selectedSession)}
+              />
+            ) : selectedResume !== undefined ? (
+              <ResumeDetail
+                key={selectedResume.id}
+                item={selectedResume}
+                now={now}
+                bridge={bridge}
+                onToast={setToast}
+              />
+            ) : (
+              <p class="empty">項目を選ぶと詳細が出ます（j / kで移動）。</p>
             )}
-            turns={turns[targetKey(selectedSession)]}
-            onSelectPending={(item) => setSelected(pendingRowId(item))}
-            onReloadTurns={() => loadTurns(selectedSession)}
-            onSessionAction={sessionAction}
-            marked={marks.has(selectedSession.key)}
-            // 詳細のボタンは、複数選択があってもこのセッションだけに効かせる
-            onLifecycle={(op) => runLifecycle(op, [selectedSession])}
-            onToggleMark={() => toggleMark(selectedSession)}
-          />
-        ) : selectedResume !== undefined ? (
-          <ResumeDetail
-            key={selectedResume.id}
-            item={selectedResume}
-            now={now}
-            bridge={bridge}
-            onToast={setToast}
-          />
-        ) : (
-          <p class="empty">項目を選ぶと詳細が出ます（j / kで移動）。</p>
-        )}
-      </div>
-      </>
+          </div>
+        </>
       ) : null}
       {helpOpen ? <HelpOverlay onClose={() => setHelpOpen(false)} /> : null}
       {launchOpen ? (
