@@ -8,7 +8,7 @@ import {
   type FormKeysRef,
   type Submit,
 } from './answerForms';
-import type { Bridge, ControlResult } from './bridge';
+import type { Bridge, ReplyResult, ControlResult } from './bridge';
 import {
   HandoffForm,
   ResumeDetail,
@@ -18,6 +18,7 @@ import {
   SideQuestionForm,
 } from './extras';
 import { KindIcon, ProviderIcon } from './icons';
+import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import {
   HistoryDialog,
   LaunchSettingsFields,
@@ -60,6 +61,7 @@ import type {
   McPendingItem,
   McProvider,
   McRepo,
+  McRunOp,
   McResumeItem,
   McSession,
   McSnapshot,
@@ -72,6 +74,7 @@ interface PersistedState {
   filter: McFilter;
   selected: string | undefined;
   viewMode: 'list' | 'grid';
+  tab: 'sessions' | 'runs';
 }
 
 const RECENT_TURNS = 6;
@@ -102,7 +105,12 @@ function resumeRowId(item: McResumeItem): string {
 }
 
 function readPersisted(raw: unknown): PersistedState {
-  const fallback: PersistedState = { filter: EMPTY_FILTER, selected: undefined, viewMode: 'list' };
+  const fallback: PersistedState = {
+    filter: EMPTY_FILTER,
+    selected: undefined,
+    viewMode: 'list',
+    tab: 'sessions',
+  };
   if (typeof raw !== 'object' || raw === null) {
     return fallback;
   }
@@ -122,6 +130,7 @@ function readPersisted(raw: unknown): PersistedState {
         : EMPTY_FILTER,
     selected: typeof v.selected === 'string' ? v.selected : undefined,
     viewMode: v.viewMode === 'grid' ? 'grid' : 'list',
+    tab: v.tab === 'runs' ? 'runs' : 'sessions',
   };
 }
 
@@ -186,6 +195,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [tab, setTab] = useState<'sessions' | 'runs'>(initial.tab);
+  const [selectedRun, setSelectedRun] = useState<string | undefined>(undefined);
+  const [issuesOpen, setIssuesOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
   const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
 
@@ -205,8 +217,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   }, []);
 
   useEffect(() => {
-    bridge.setState({ filter, selected, viewMode } satisfies PersistedState);
-  }, [bridge, filter, selected, viewMode]);
+    bridge.setState({ filter, selected, viewMode, tab } satisfies PersistedState);
+  }, [bridge, filter, selected, viewMode, tab]);
 
   useEffect(() => {
     if (toast === '') {
@@ -463,6 +475,38 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     });
   };
 
+  // Runsタブ（Issue #2150）
+  const runsSnap = snapshot?.runs;
+  const orderedRuns = useMemo(() => orderRuns(runsSnap?.runs ?? []), [runsSnap]);
+  const runIds = orderedRuns.map((r) => r.runId);
+  const effectiveRun = orderedRuns.find((r) => r.runId === selectedRun) ?? orderedRuns[0];
+  const runAction = (op: McRunOp): void => {
+    if (effectiveRun === undefined) {
+      setToast('runを選んでください');
+      return;
+    }
+    const sent: McRunOp = op === 'pause' && effectiveRun.halted ? 'unpause' : op;
+    void bridge.runOp(sent, effectiveRun.runId).then(reportRunResult);
+  };
+  const reportRunResult = (result: ReplyResult): void => {
+    if (!result.ok) {
+      setToast(result.error ?? '操作に失敗しました');
+    } else if (result.message !== undefined && result.message !== '') {
+      setToast(result.message);
+    }
+  };
+  const runParallel = (delta: 1 | -1): void => {
+    if (effectiveRun === undefined || runsSnap === undefined) {
+      setToast('runを選んでください');
+      return;
+    }
+    const next = Math.min(Math.max(effectiveRun.maxParallel + delta, 1), runsSnap.maxParallelLimit);
+    void bridge.runParallel(effectiveRun.runId, next).then(reportRunResult);
+  };
+  const runStart = (): void => {
+    void bridge.runStart().then(reportRunResult);
+  };
+
   // キーボード操作（Issue #2136の5）。最新の状態をrefで読む
   const latest = useRef({
     rowIds,
@@ -470,6 +514,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     helpOpen,
     launchOpen,
     historyOpen,
+    issuesOpen,
+    tab,
+    runIds,
+    effectiveRunId: effectiveRun?.runId,
+    runAction,
+    runParallel,
+    runStart,
     marks,
     runLifecycle,
     toggleFocused: () => toggleMark(focusedSession),
@@ -480,6 +531,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     helpOpen,
     launchOpen,
     historyOpen,
+    issuesOpen,
+    tab,
+    runIds,
+    effectiveRunId: effectiveRun?.runId,
+    runAction,
+    runParallel,
+    runStart,
     marks,
     runLifecycle,
     toggleFocused: () => toggleMark(focusedSession),
@@ -505,20 +563,71 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       }
       // 新規起動・履歴の画面を出している間は、一覧・回答のキーを効かせない（Escで閉じるだけ。
       // 履歴の↑ / ↓・Enterは`HistoryDialog`が受け持つ）
-      if (state.launchOpen || state.historyOpen) {
+      if (state.launchOpen || state.historyOpen || state.issuesOpen) {
         if (command.kind === 'escape' && !editable) {
           event.preventDefault();
           setLaunchOpen(false);
           setHistoryOpen(false);
+          setIssuesOpen(false);
         } else if (command.kind === 'escape' && event.target instanceof HTMLElement) {
           event.target.blur();
         }
         return;
       }
       event.preventDefault();
+      const onRuns = state.tab === 'runs';
+      if (command.kind === 'runOp' || command.kind === 'parallel') {
+        if (!onRuns) {
+          setToast('Runsタブで使います');
+        } else if (command.kind === 'runOp') {
+          state.runAction(command.op);
+        } else {
+          state.runParallel(command.delta);
+        }
+        return;
+      }
+      if (
+        onRuns &&
+        (command.kind === 'approve' ||
+          command.kind === 'decline' ||
+          command.kind === 'choose' ||
+          command.kind === 'reply' ||
+          command.kind === 'toggleMark' ||
+          command.kind === 'lifecycle')
+      ) {
+        return;
+      }
+      if (onRuns && command.kind === 'detail') {
+        state.runAction('switch');
+        return;
+      }
+      if (onRuns && command.kind === 'newSession') {
+        state.runStart();
+        return;
+      }
       switch (command.kind) {
+        case 'tab':
+          setTab((t) => (t === 'runs' ? 'sessions' : 'runs'));
+          return;
+        case 'issues':
+          setIssuesOpen(true);
+          return;
         case 'next':
         case 'prev': {
+          if (onRuns) {
+            const nextRun = moveSelection(
+              state.runIds,
+              state.effectiveRunId,
+              command.kind === 'next' ? 1 : -1,
+            );
+            setSelectedRun(nextRun);
+            if (nextRun !== undefined) {
+              document
+                .querySelector(`[data-row="${CSS.escape(`run:${nextRun}`)}"]`)
+                ?.scrollIntoView({ block: 'nearest' });
+            }
+            return;
+          }
           const next = moveSelection(
             state.rowIds,
             state.selected,
@@ -591,6 +700,26 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     return <p class="empty">読み込み中…</p>;
   }
   const now = Date.now() + clockOffset;
+  const tabButtons = (
+    <div class="seg" role="group" aria-label="タブ">
+      <button
+        type="button"
+        aria-pressed={tab === 'sessions'}
+        title="セッション（t）"
+        onClick={() => setTab('sessions')}
+      >
+        セッション
+      </button>
+      <button
+        type="button"
+        aria-pressed={tab === 'runs'}
+        title="Runs（t）"
+        onClick={() => setTab('runs')}
+      >
+        Runs（{String(runsSnap?.runs.length ?? 0)}）
+      </button>
+    </div>
+  );
   // 回答欄が描かれないときは、前の項目の回答欄へキーが届かないよう外す
   formKeys.current = null;
 
@@ -602,8 +731,23 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         filter={filter}
         onFilter={(next) => setFilter(next)}
       />
+      {tab === 'runs' ? (
+        <RunsPane
+          runs={runsSnap}
+          selectedRun={effectiveRun?.runId}
+          onSelect={setSelectedRun}
+          onOp={runAction}
+          onParallel={runParallel}
+          onStart={runStart}
+          onIssues={() => setIssuesOpen(true)}
+          tabButtons={tabButtons}
+        />
+      ) : null}
+      {tab === 'sessions' ? (
+      <>
       <div class="pane center">
         <div class="toolbar">
+          {tabButtons}
           <input
             ref={searchRef}
             class="search"
@@ -783,6 +927,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           <p class="empty">項目を選ぶと詳細が出ます（j / kで移動）。</p>
         )}
       </div>
+      </>
+      ) : null}
       {helpOpen ? <HelpOverlay onClose={() => setHelpOpen(false)} /> : null}
       {launchOpen ? (
         <LaunchDialog
@@ -791,6 +937,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           onClose={() => setLaunchOpen(false)}
           onLaunched={(message) => {
             setLaunchOpen(false);
+            setToast(message);
+          }}
+        />
+      ) : null}
+      {issuesOpen ? (
+        <IssueStartDialog
+          bridge={bridge}
+          folders={runsSnap?.folders ?? []}
+          onClose={() => setIssuesOpen(false)}
+          onDone={(message) => {
+            setIssuesOpen(false);
             setToast(message);
           }}
         />
