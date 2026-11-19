@@ -252,6 +252,15 @@ import {
   type RunningTurnSession,
 } from './view/missionControlResume';
 import { createMissionControlHost, isRunningTurn, resumeKey } from './view/missionControlHost';
+import {
+  isLifecycleOp,
+  LIFECYCLE_UNSUPPORTED_MESSAGE,
+  mergeArchivedSessions,
+  runLifecycle,
+  supportsArchive,
+  toHistoryItems,
+} from './view/missionControlSessions';
+import type { McLifecycleOp } from './webview/missionControl/protocol';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
 import {
@@ -273,6 +282,7 @@ import {
   SessionHubWriter,
   isSharedApprovalDecision,
   isSharedHandoffDecision,
+  LONG_REPLY_TIMEOUT_MS,
   type SessionHubReplyPayload,
   type SessionHubRequest,
   type SharedSession,
@@ -1537,6 +1547,58 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 中身を渡した相手と要求を覚えておき、取り寄せていない要求への決定を受信側でも弾く
   // （Issue #1259）。画面側だけの約束にすると、統括ページを経由しない経路で素通りする
   const approvalDisclosure = new ApprovalDisclosureLog();
+  // archive・delete（Codex CLIのサブコマンド）。セッション一覧の右クリックとMission Control
+  // （Issue #2149）が同じものを使う。別ウィンドウからの要求を受ける前に作っておく
+  const actions = new SessionActions(nodeCommandRunner, codexPath);
+  /**
+   * 会話を閉じる・archive・deleteする（Issue #2149の1）。自ウィンドウのMission Controlからも、
+   * 別ウィンドウから要求ファイルで届いた分からも、ここを通す。確認は要求元が済ませている。
+   *
+   * archive・deleteはCodexだけ（Claude Codeにはarchiveの仕組みが無い）。開いている会話は
+   * 先に閉じる。プロセスが動いたままだとロールアウトへ書き続けるため。
+   */
+  const lifecycleSession = async (
+    provider: 'codex' | 'claude',
+    threadId: string,
+    op: McLifecycleOp,
+    from: string,
+  ): Promise<SessionControlResult> => {
+    const manager = provider === 'claude' ? claudeChat : chat;
+    let result: SessionControlResult;
+    if (op === 'close') {
+      result = await manager.closeSession(threadId);
+    } else if (!supportsArchive(provider)) {
+      result = { ok: false, error: LIFECYCLE_UNSUPPORTED_MESSAGE };
+    } else {
+      const closed = manager.hasOpenSession(threadId)
+        ? await manager.closeSession(threadId)
+        : { ok: true };
+      if (!closed.ok) {
+        result = closed;
+      } else {
+        try {
+          const run = await actions.run(op, threadId);
+          if (run.code === 0) {
+            if (op === 'delete') {
+              await sessionModelSettings.delete('codex', threadId);
+            }
+            result = { ok: true };
+          } else {
+            result = { ok: false, error: `${op}に失敗しました: ${run.stderr.trim()}` };
+          }
+        } catch (e: unknown) {
+          // `buildActionArgs`がidの形を確かめて投げる
+          result = { ok: false, error: `${op}に失敗しました: ${String(e)}` };
+        }
+      }
+    }
+    // 閉じる・archive・deleteは成否によらず1行残す。どのウィンドウから止めたかを後から追う
+    log.info(
+      `セッション統括: ${op}を受け付けました（要求元 ${from}、${provider}/${threadId}、` +
+        `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
+    );
+    return result;
+  };
   // 回答済みの待ち項目（Issue #2135）。同じ項目に2箇所から答えても二重に送らない
   const answeredPending = new AnsweredPendingIds();
   const controlSession = (
@@ -1654,6 +1716,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         );
         return { ok: answered.ok, error: answered.error };
       }
+      if (isLifecycleOp(request.kind)) {
+        const done = await lifecycleSession(
+          request.provider,
+          request.threadId,
+          request.kind,
+          request.from,
+        );
+        return { ok: done.ok, error: done.error };
+      }
       const action = toSessionControlAction(request);
       if (action === undefined) {
         // 版が違うウィンドウから知らない操作が届いた。黙って捨てると相手が待つ
@@ -1672,6 +1743,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
   );
   sessionHubRequestWatcher.start();
+  /** 閉じる・archive・deleteを宛先のウィンドウで行う（Issue #2149の1）。 */
+  const lifecycleSessionAnywhere = async (
+    target: SessionControlTarget,
+    op: McLifecycleOp,
+  ): Promise<SessionControlResult> => {
+    if (target.windowId === windowId) {
+      return lifecycleSession(target.provider, target.threadId, op, windowId);
+    }
+    const reply = await sessionHubRequestPort.request(
+      target.windowId,
+      { kind: op, provider: target.provider, threadId: target.threadId },
+      // archive・deleteは相手のウィンドウでCLIを起動するため、既定の5秒では足りない
+      LONG_REPLY_TIMEOUT_MS,
+    );
+    return { ok: reply.ok, error: reply.error };
+  };
   /**
    * 宛先のウィンドウを問わず、セッション1件へ操作を1つ届ける（Issue #1258、#1274）。
    *
@@ -1905,6 +1992,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     { dispose: () => missionControlReview.dispose() },
     { dispose: () => runningTurnJournal.dispose() },
   );
+  /** Mission Controlへ最後に渡した履歴（Issue #2149の3）。開き直す要求の突き合わせに使う。 */
+  let missionControlHistory: SessionSummary[] = [];
   const missionControl: MissionControlViewManager = new MissionControlViewManager(
     () => {
       const sessions = [
@@ -1952,13 +2041,138 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         (await store.list({ scope: 'all', workspaceFolders: [], maxEntries: 200 })).sessions.map(
           (session) => session.cwd,
         ),
-      open: (provider, cwd, prompt) => {
-        const manager = provider === 'codex' ? chat : claudeChat;
-        return prompt.trim() === '' ? manager.openNew(cwd) : manager.openNewWithPrompt(cwd, prompt);
+      open: (provider, cwd, prompt, launchSettings) => {
+        // 起動オプション（Issue #2149の2）は`agent.openPresetChat`と同じく`taskConfig`で渡す
+        if (provider === 'codex') {
+          const config: CodexConfig | undefined =
+            launchSettings === undefined
+              ? undefined
+              : {
+                  ...readConfig().codex,
+                  model: launchSettings.model,
+                  reasoningEffort: launchSettings.effort,
+                  approvalMode: launchSettings.approvalMode,
+                  sandbox: launchSettings.sandbox || readConfig().codex.sandbox,
+                };
+          return prompt.trim() === ''
+            ? chat.openNew(cwd, config)
+            : chat.openNewWithPrompt(cwd, prompt, undefined, config);
+        }
+        const config: ClaudeConfig | undefined =
+          launchSettings === undefined
+            ? undefined
+            : {
+                ...readClaudeConfig().claude,
+                model: launchSettings.model,
+                effort: launchSettings.effort,
+                permissionMode: launchSettings.approvalMode,
+              };
+        return prompt.trim() === ''
+          ? claudeChat.openNew(cwd, config)
+          : claudeChat.openNewWithPrompt(cwd, prompt, config);
+      },
+      catalog: async () => {
+        const codexConfig = readConfig().codex;
+        const claudeConfig = readClaudeConfig().claude;
+        const { presets } = readSessionPresetsConfig();
+        return {
+          models: {
+            codex: await settings.modelCandidates('codex'),
+            claude: await settings.modelCandidates('claude'),
+          },
+          presets,
+          baseline: readSafetyBaseline(),
+          current: {
+            codex: {
+              model: codexConfig.model,
+              effort: codexConfig.reasoningEffort,
+              approval: codexConfig.approvalMode,
+            },
+            claude: {
+              model: claudeConfig.model,
+              effort: claudeConfig.effort,
+              approval: claudeConfig.permissionMode,
+            },
+          },
+        };
       },
       log,
     }),
     missionControlHost.port,
+    {
+      lifecycle: (op, targets) => {
+        const snapshot = missionControl.lastSnapshot();
+        return runLifecycle(op, targets, {
+          describe: (target) => {
+            const session = snapshot?.sessions.find(
+              (s) =>
+                s.windowId === target.windowId &&
+                s.provider === target.provider &&
+                s.threadId === target.threadId,
+            );
+            return session === undefined
+              ? undefined
+              : {
+                  title: session.title,
+                  provider: session.provider,
+                  running: session.activity !== 'idle',
+                };
+          },
+          confirm: async (confirmation) =>
+            (await vscode.window.showWarningMessage(
+              confirmation.message,
+              { modal: true },
+              confirmation.button,
+            )) === confirmation.button,
+          dispatch: (target, lifecycleOp) => lifecycleSessionAnywhere(target, lifecycleOp),
+        });
+      },
+      history: async () => {
+        const options = {
+          scope: 'all' as const,
+          workspaceFolders: workspaceFolderPaths(),
+          maxEntries: readConfig().historyMaxEntries,
+        };
+        // `thread/list`由来の一覧はarchive済みを含まないため、ファイルから拾って重ねる
+        const [listed, archived] = await Promise.all([
+          providers.listSessions(options, log),
+          store.listArchived(options).catch((e: unknown) => {
+            log.warn(`Mission Control: archive済みのセッションを読めませんでした: ${String(e)}`);
+            return [];
+          }),
+        ]);
+        const sessions = mergeArchivedSessions(listed, archived);
+        missionControlHistory = sessions;
+        return toHistoryItems(sessions, missionControlRepoResolver);
+      },
+      historyOpen: async (provider, threadId) => {
+        // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
+        const session = missionControlHistory.find(
+          (s) => s.provider === provider && s.id === threadId,
+        );
+        if (session === undefined) {
+          return '履歴にこのセッションが見つかりません。履歴を開き直してください';
+        }
+        // archive済みのCodexのセッションは、app-serverが再開を断る（「unarchiveしてから」と
+        // 返す。実測）。再開の操作なので、先にarchiveを解除する
+        if (session.provider === 'codex' && session.archived) {
+          try {
+            const run = await actions.run('unarchive', session.id);
+            if (run.code !== 0) {
+              return `archiveを解除できませんでした: ${run.stderr.trim()}`;
+            }
+          } catch (e: unknown) {
+            return `archiveを解除できませんでした: ${String(e)}`;
+          }
+          log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
+          missionControlHistory = missionControlHistory.map((s) =>
+            s === session ? { ...s, archived: false } : s,
+          );
+        }
+        openSession(chat, claudeChat, log, session);
+        return undefined;
+      },
+    },
   );
   const forgeHub = new ForgeHubViewManager(
     new ForgeHubService({
@@ -2034,8 +2248,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   if (taskRunPendingSubscription !== undefined) {
     context.subscriptions.push(taskRunPendingSubscription);
   }
-
-  const actions = new SessionActions(nodeCommandRunner, codexPath);
 
   // ピン留め＝お気に入り（issue #293、Issue #1366）。セッションidはワークスペースを
   // またいでも一意なため、`ClaudeSessionNameStore`と同じくglobalStateへ持たせる

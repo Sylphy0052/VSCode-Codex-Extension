@@ -1,5 +1,8 @@
 import type {
   McActivity,
+  McHistoryItem,
+  McLifecycleOp,
+  McLifecycleOutcome,
   McPendingItem,
   McPendingKind,
   McPromptField,
@@ -287,7 +290,11 @@ export type McKeyCommand =
   | { kind: 'search' }
   | { kind: 'help' }
   | { kind: 'newSession' }
-  | { kind: 'escape' };
+  | { kind: 'escape' }
+  // Issue #2149: 複数選択・閉じる・archive・delete・履歴
+  | { kind: 'toggleMark' }
+  | { kind: 'lifecycle'; op: McLifecycleOp }
+  | { kind: 'history' };
 
 export interface McKeyInput {
   key: string;
@@ -326,6 +333,17 @@ export function mapKey(input: McKeyInput): McKeyCommand | undefined {
       return { kind: 'help' };
     case 'n':
       return { kind: 'newSession' };
+    case 'x':
+      return { kind: 'toggleMark' };
+    case 'c':
+      return { kind: 'lifecycle', op: 'close' };
+    case 'e':
+      return { kind: 'lifecycle', op: 'archive' };
+    // 取り消せない削除は、拒否の`d`と取り違えないようShift付きにする
+    case 'D':
+      return { kind: 'lifecycle', op: 'delete' };
+    case 'h':
+      return { kind: 'history' };
     default:
       break;
   }
@@ -409,7 +427,120 @@ export const KEY_HELP: ReadonlyArray<[string, string]> = [
   ['d', '拒否'],
   ['r', '返信欄へ移る'],
   ['n', '新規セッション'],
+  ['x', 'セッションの複数選択を切り替える'],
+  ['c', 'セッションを閉じる（実行中なら確認）'],
+  ['e', 'セッションをarchive（実行中なら確認）'],
+  ['Shift+D', 'セッションを削除（必ず確認）'],
+  ['h', '履歴を開く（↑ / ↓で移動、Enterで再開）'],
   ['/', '検索'],
   ['?', 'この一覧'],
-  ['Esc', '閉じる / 入力欄から出る'],
+  ['Esc', '閉じる / 複数選択を外す / 入力欄から出る'],
 ];
+
+/** 履歴の絞り込み（Issue #2149の3）。日付は`YYYY-MM-DD`（`<input type="date">`の値）。 */
+export interface McHistoryFilter {
+  query: string;
+  /** `McHistoryItem.repoKey`。空ならすべて。 */
+  repoKey: string;
+  from: string;
+  to: string;
+}
+
+export const EMPTY_HISTORY_FILTER: McHistoryFilter = { query: '', repoKey: '', from: '', to: '' };
+
+/** `YYYY-MM-DD`をその日の0時（ローカル時刻、ms）にする。読めなければ`undefined`。 */
+function parseDay(value: string): number | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (match === null) {
+    return undefined;
+  }
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * タイトル・repo・日付で絞り、新しい順に並べる。日付で絞るときは、更新時刻の分からない
+ * （`updatedAt`が0の）項目を外す。
+ */
+export function filterHistory(
+  items: readonly McHistoryItem[],
+  filter: McHistoryFilter,
+): McHistoryItem[] {
+  const query = filter.query.trim().toLowerCase();
+  const from = parseDay(filter.from);
+  const toStart = parseDay(filter.to);
+  const to = toStart === undefined ? undefined : toStart + DAY_MS;
+  return items
+    .filter((item) => {
+      if (filter.repoKey !== '' && item.repoKey !== filter.repoKey) {
+        return false;
+      }
+      if (
+        query !== '' &&
+        !item.title.toLowerCase().includes(query) &&
+        !item.repoLabel.toLowerCase().includes(query)
+      ) {
+        return false;
+      }
+      if ((from !== undefined || to !== undefined) && item.updatedAt <= 0) {
+        return false;
+      }
+      if (from !== undefined && item.updatedAt < from) {
+        return false;
+      }
+      return to === undefined || item.updatedAt < to;
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** 履歴に出てくるrepo（絞り込みの候補）。ラベル順。 */
+export function historyRepos(
+  items: readonly McHistoryItem[],
+): Array<{ key: string; label: string }> {
+  const seen = new Map<string, string>();
+  for (const item of items) {
+    if (!seen.has(item.repoKey)) {
+      seen.set(item.repoKey, item.repoLabel);
+    }
+  }
+  return [...seen]
+    .map(([key, label]) => ({ key, label }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** ライフサイクル操作の表示名。 */
+export const LIFECYCLE_LABELS: Record<McLifecycleOp, string> = {
+  close: '閉じる',
+  archive: 'archive',
+  delete: '削除',
+};
+
+/** ライフサイクル操作の結果をトースト用の1文にする。 */
+export function summarizeLifecycle(
+  op: McLifecycleOp,
+  outcomes: readonly McLifecycleOutcome[],
+): string {
+  const ok = outcomes.filter((o) => o.ok).length;
+  const failed = outcomes.filter((o) => !o.ok);
+  const label = LIFECYCLE_LABELS[op];
+  if (failed.length === 0) {
+    return `${String(ok)}件を${label}しました`;
+  }
+  const reason = failed[0]?.error ?? '理由不明';
+  return ok === 0
+    ? `${label}できませんでした: ${reason}`
+    : `${String(ok)}件を${label}し、${String(failed.length)}件は失敗しました: ${reason}`;
+}
+
+/**
+ * 複数選択（`x`）の印を、今の一覧に残っているものだけにする。変わらなければ同じSetを返す。
+ */
+export function pruneMarks(
+  marks: ReadonlySet<string>,
+  sessionKeys: readonly string[],
+): ReadonlySet<string> {
+  const alive = new Set(sessionKeys);
+  const next = [...marks].filter((key) => alive.has(key));
+  return next.length === marks.size ? marks : new Set(next);
+}

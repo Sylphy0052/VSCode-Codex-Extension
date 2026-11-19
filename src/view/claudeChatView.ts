@@ -1175,9 +1175,16 @@ export class ClaudeChatViewManager
     return sessionId;
   }
 
-  /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
-  async openNewWithPrompt(cwd: string, prompt: string): Promise<string | undefined> {
-    const sessionId = await this.openNew(cwd);
+  /**
+   * 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。
+   * `config`はMission Controlの起動オプション（Issue #2149の2）。`openNew`へそのまま渡す。
+   */
+  async openNewWithPrompt(
+    cwd: string,
+    prompt: string,
+    config?: ClaudeConfig,
+  ): Promise<string | undefined> {
+    const sessionId = await this.openNew(cwd, config);
     if (sessionId === undefined) return undefined;
     const entry = this.panels.get(sessionId);
     if (entry === undefined) return undefined;

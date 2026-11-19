@@ -3,8 +3,12 @@ import * as vscode from 'vscode';
 import type { Logger } from '../log';
 import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import type {
+  McHistoryItem,
+  McLaunchChoices,
   McLaunchRepo,
   McLaunchRequest,
+  McLifecycleOp,
+  McProvider,
   McSnapshot,
   McTarget,
 } from '../webview/missionControl/protocol';
@@ -12,6 +16,7 @@ import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
 import { parseLaunchRequest, type McLaunchResult } from './missionControlLaunch';
 import { missionControlTitle } from './missionControlModel';
+import { parseLifecycleRequest, type McLifecycleRunResult } from './missionControlSessions';
 import { parseAction, parseTarget, type SessionControl } from './sessionControlMessage';
 
 export const MISSION_CONTROL_OPEN_COMMAND = 'agent.missionControl.open';
@@ -33,6 +38,8 @@ export const LIVE_TURNS = 6;
 /** 新規セッションの起動（Issue #2137の1）。vscodeに依る部分は`extension.ts`が組む。 */
 export interface McLaunchPort {
   options(): Promise<McLaunchRepo[]>;
+  /** model・effort・承認方針・プリセットの候補と、repoごとの前回の選択（Issue #2149の2）。 */
+  choices?(): Promise<McLaunchChoices>;
   /** フォルダ選択のダイアログを出す。選ばれなければ`undefined`。 */
   pickFolder(): Promise<McLaunchRepo | undefined>;
   launch(request: McLaunchRequest): Promise<McLaunchResult>;
@@ -50,6 +57,19 @@ export interface McHostPort {
   reloadWindow(): Promise<string | undefined>;
   /** スナップショットを作るたびに呼ぶ（通知のまとめ）。`foreground`はMCが前面にあるか。 */
   observe?(snapshot: McSnapshot, foreground: boolean): void;
+}
+
+/**
+ * セッションを閉じる・archive・deleteと履歴（Issue #2149の1・3）。vscodeに依る部分は
+ * `extension.ts`が組む。
+ */
+export interface McSessionPort {
+  /** 確認を出してから、宛先のウィンドウで実行する。確認で取りやめたら`cancelled`。 */
+  lifecycle(op: McLifecycleOp, targets: readonly McTarget[]): Promise<McLifecycleRunResult>;
+  /** archive済みを含む過去のセッション（新しい順）。 */
+  history(): Promise<McHistoryItem[]>;
+  /** 履歴の1件をこのウィンドウで開き直す。失敗したら理由の文を返す。 */
+  historyOpen(provider: McProvider, threadId: string): Promise<string | undefined>;
 }
 
 /**
@@ -72,6 +92,7 @@ export class MissionControlViewManager implements vscode.Disposable {
   private watched: McTarget | undefined;
   private liveTimer: ReturnType<typeof setInterval> | undefined;
   private liveInFlight = false;
+  private latestSnapshot: McSnapshot | undefined;
 
   constructor(
     private readonly read: () => McSnapshot,
@@ -80,6 +101,7 @@ export class MissionControlViewManager implements vscode.Disposable {
     private readonly log: Logger,
     private readonly launcher?: McLaunchPort,
     private readonly host?: McHostPort,
+    private readonly sessionPort?: McSessionPort,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -119,6 +141,11 @@ export class MissionControlViewManager implements vscode.Disposable {
     panel.webview.options = this.webviewOptions();
     this.attach(panel);
     this.log.info('Mission Controlを復元した');
+  }
+
+  /** 最後に作ったスナップショット（ライフサイクル操作の確認文・実行中の判定に使う）。 */
+  lastSnapshot(): McSnapshot | undefined {
+    return this.latestSnapshot;
   }
 
   refresh(): void {
@@ -192,6 +219,7 @@ export class MissionControlViewManager implements vscode.Disposable {
     }
     this.lastPostAt = Date.now();
     const snapshot = this.read();
+    this.latestSnapshot = snapshot;
     // タブ名の件数は非表示の間も合わせる（タブ自体は見えている）
     panel.title = missionControlTitle(snapshot.pending.length);
     this.windowId = snapshot.windowId;
@@ -236,6 +264,11 @@ export class MissionControlViewManager implements vscode.Disposable {
         return;
       case 'copyRef':
         this.handleCopyRef(m);
+        return;
+      case 'lifecycle':
+      case 'history':
+      case 'historyOpen':
+        this.handleSessions(m);
         return;
       default:
         return;
@@ -316,7 +349,12 @@ export class MissionControlViewManager implements vscode.Disposable {
     }
     const run = async (): Promise<Record<string, unknown>> => {
       if (message.type === 'launchOptions') {
-        return { ok: true, repos: await launcher.options() };
+        // 候補（model一覧はCLIへ問い合わせる）が取れなくても、起動先の候補は返す
+        const choices = await launcher.choices?.().catch((e: unknown) => {
+          this.log.warn(`Mission Control: 起動オプションの候補を読めませんでした: ${String(e)}`);
+          return undefined;
+        });
+        return { ok: true, repos: await launcher.options(), choices };
       }
       if (message.type === 'pickFolder') {
         const repo = await launcher.pickFolder();
@@ -338,6 +376,52 @@ export class MissionControlViewManager implements vscode.Disposable {
       .then((reply) => this.postReply(seq, reply))
       .catch((e: unknown) => {
         this.log.warn(`Mission Control: 起動にかかわる操作に失敗しました: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  /** 閉じる・archive・delete・履歴の要求（Issue #2149）。応答は`reply`で返す。 */
+  private handleSessions(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const port = this.sessionPort;
+    if (port === undefined) {
+      this.postReply(seq, { ok: false, error: 'この操作はこの画面では使えません' });
+      return;
+    }
+    const run = async (): Promise<Record<string, unknown>> => {
+      if (message.type === 'history') {
+        return { ok: true, history: await port.history() };
+      }
+      if (message.type === 'historyOpen') {
+        const { provider, threadId } = message;
+        if ((provider !== 'codex' && provider !== 'claude') || typeof threadId !== 'string') {
+          return { ok: false, error: '開くセッションが正しくありません' };
+        }
+        const error = await port.historyOpen(provider, threadId);
+        return error === undefined ? { ok: true } : { ok: false, error };
+      }
+      const request = parseLifecycleRequest(message);
+      if (typeof request === 'string') {
+        return { ok: false, error: request };
+      }
+      const result = await port.lifecycle(request.op, request.targets);
+      if (result.cancelled) {
+        return { ok: false, error: '取りやめました' };
+      }
+      return { ok: true, outcomes: result.outcomes };
+    };
+    void run()
+      .then((reply) => {
+        this.postReply(seq, reply);
+        this.refresh();
+      })
+      .catch((e: unknown) => {
+        this.log.warn(
+          `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
+        );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
       });
   }

@@ -256,20 +256,35 @@ export class SessionStore {
   }
 
   /**
+   * archive済みのセッションだけを並べる（Mission Controlの履歴。Issue #2149の3）。
+   *
+   * `thread/list`は`archived`を指定しないとarchive済みを返さない（app-serverのスキーマ
+   * `ThreadListParams.archived`）。`list`は指定しないため、archive済みはここでファイルから拾う。
+   */
+  async listArchived(options: ListOptions): Promise<SessionSummary[]> {
+    return (await this.listFromFiles(options, true)).sessions;
+  }
+
+  /**
    * ファイルから一覧を組み立てる（`thread/list` が使えないとき、または未接続のとき）。
    *
    * ロールアウトの実在を骨格にする。`session_index.jsonl` はCodexが要約名を確定させて
    * から書かれるため、それだけを見ると始めたばかりのセッションが一覧に出てこない。
    * indexは要約名と更新時刻の供給元として重ねる（Claude Code側と同じ組み立て方）。
+   *
+   * `archivedOnly`ならarchive済みのロールアウトだけを並べる（`listArchived`）。
    */
-  private async listFromFiles(options: ListOptions): Promise<ListResult> {
+  private async listFromFiles(options: ListOptions, archivedOnly = false): Promise<ListResult> {
     const content = await this.fs.readTextFile(this.paths.sessionIndex);
     const { entries, skipped } =
       content === undefined ? { entries: [], skipped: 0 } : parseSessionIndex(content);
     const indexed = new Map(entries.map((e) => [e.id, e]));
 
     const locations = await this.locateRollouts();
-    const ordered = await this.orderByRecency([...locations.entries()], indexed);
+    const located = [...locations.entries()].filter(
+      ([, location]) => !archivedOnly || location.archived,
+    );
+    const ordered = await this.orderByRecency(located, indexed);
 
     const sessions: SessionSummary[] = [];
     let unresolved = 0;

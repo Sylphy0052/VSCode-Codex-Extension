@@ -67,7 +67,7 @@ describe('launchMissionControlSession（Issue #2137）', () => {
       d,
     );
     expect(result).toEqual({ ok: true, cwd: '/w/app', threadId: 'thread-1' });
-    expect(d.open).toHaveBeenCalledWith('claude', '/w/app', 'go');
+    expect(d.open).toHaveBeenCalledWith('claude', '/w/app', 'go', undefined);
   });
 
   it('worktreeがONなら本体の.claude/worktrees/配下に作り、そこで起動する', async () => {
@@ -92,7 +92,7 @@ describe('launchMissionControlSession（Issue #2137）', () => {
       expect.anything(),
       expect.anything(),
     );
-    expect(d.open).toHaveBeenCalledWith('codex', '/w/app/.claude/worktrees/mc-1', '');
+    expect(d.open).toHaveBeenCalledWith('codex', '/w/app/.claude/worktrees/mc-1', '', undefined);
   });
 });
 

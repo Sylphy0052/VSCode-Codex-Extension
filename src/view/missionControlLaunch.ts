@@ -8,6 +8,7 @@ import {
   type WorktreeFileSystemPort,
 } from '../orchestrator/worktree';
 import type { McLaunchRepo, McLaunchRequest, McProvider } from '../webview/missionControl/protocol';
+import { parseLaunchSettings, type EffectiveLaunchSettings } from './missionControlLaunchOptions';
 import type { McRepoResolver } from './missionControlModel';
 
 /**
@@ -48,7 +49,11 @@ export function parseLaunchRequest(message: Record<string, unknown>): McLaunchRe
   if (typeof worktree !== 'boolean') {
     return 'worktreeの指定が不正です';
   }
-  return { cwd: path.resolve(cwd), provider, prompt, worktree };
+  const settings = parseLaunchSettings(message);
+  if (typeof settings === 'string') {
+    return settings;
+  }
+  return { ...settings, cwd: path.resolve(cwd), provider, prompt, worktree };
 }
 
 export interface McLaunchDeps {
@@ -59,8 +64,16 @@ export interface McLaunchDeps {
   isDirectory(target: string): Promise<boolean>;
   /** `<git-common-dir>/info/exclude`へ1行足す（`.claude/worktrees/`がignoreされていないとき）。 */
   appendExclude(excludeFile: string, line: string): Promise<void>;
-  /** 会話を開き、`prompt`が空でなければ最初の指示として送る。開いた会話のidを返す。 */
-  open(provider: McProvider, cwd: string, prompt: string): Promise<string | undefined>;
+  /**
+   * 会話を開き、`prompt`が空でなければ最初の指示として送る。開いた会話のidを返す。
+   * `settings`があればmodel・effort・承認方針をその値で起動する（Issue #2149の2）。
+   */
+  open(
+    provider: McProvider,
+    cwd: string,
+    prompt: string,
+    settings?: EffectiveLaunchSettings,
+  ): Promise<string | undefined>;
 }
 
 export type McLaunchResult =
@@ -69,6 +82,7 @@ export type McLaunchResult =
 export async function launchMissionControlSession(
   request: McLaunchRequest,
   deps: McLaunchDeps,
+  settings?: EffectiveLaunchSettings,
 ): Promise<McLaunchResult> {
   if (!(await deps.isDirectory(request.cwd))) {
     return { ok: false, error: '作業ディレクトリが見つかりません' };
@@ -81,7 +95,7 @@ export async function launchMissionControlSession(
     }
     cwd = created.cwd;
   }
-  const threadId = await deps.open(request.provider, cwd, request.prompt);
+  const threadId = await deps.open(request.provider, cwd, request.prompt, settings);
   if (threadId === undefined) {
     return { ok: false, error: '会話を開けませんでした' };
   }

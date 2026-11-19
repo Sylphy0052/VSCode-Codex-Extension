@@ -717,7 +717,11 @@ export type SessionHubRequestKind =
   | 'handoffDecision'
   | 'answerQuestion'
   | 'answerPrompt'
-  | 'answerTaskRunQuestion';
+  | 'answerTaskRunQuestion'
+  /** Mission Controlから会話を閉じる・archive・delete（Issue #2149の1）。 */
+  | 'close'
+  | 'archive'
+  | 'delete';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -979,6 +983,12 @@ export interface SessionHubRequestOutcome {
 
 /** 応答を待つ上限。これを過ぎたら要求ファイルを取り下げる。 */
 const REPLY_TIMEOUT_MS = 5_000;
+/**
+ * CLIを起動する操作（archive・delete。Issue #2149）の応答を待つ上限。`REQUEST_TTL_MS`より
+ * 短くし、受信側の掃除で要求・応答が消される前に打ち切る。受信側はターンの中断（上限5秒）と
+ * CLI（`execFile`の上限30秒）を順に待つため、その合計より長くする。
+ */
+export const LONG_REPLY_TIMEOUT_MS = 45_000;
 /** 応答ファイルの確認間隔。 */
 const REPLY_POLL_MS = 150;
 /**
@@ -1430,6 +1440,8 @@ export class SessionHubRequestPort {
       answers?: Record<string, string[]> | undefined;
       submission?: unknown;
     },
+    /** 応答を待つ上限（ms）。既定は`REPLY_TIMEOUT_MS`。`LONG_REPLY_TIMEOUT_MS`を超えない。 */
+    timeoutMs: number = REPLY_TIMEOUT_MS,
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
     if (!isSafeId(targetWindowId)) {
@@ -1452,7 +1464,10 @@ export class SessionHubRequestPort {
       this.log.warn(`セッション統括: 要求の送信に失敗しました（${input.kind}）: ${String(e)}`);
       return { requestId, ok: false, error: '要求を送れませんでした' };
     }
-    const reply = await this.waitForReply(requestId);
+    const reply = await this.waitForReply(
+      requestId,
+      Math.min(Math.max(timeoutMs, 0), LONG_REPLY_TIMEOUT_MS),
+    );
     if (reply !== undefined) {
       return reply;
     }
@@ -1477,9 +1492,12 @@ export class SessionHubRequestPort {
    * 取りこぼしの余地があり（`SessionHubReader`が`filename`無しのイベントを想定して
    * いるのと同じ事情）、5秒という上限の中では読み直しの方が単純で確実。
    */
-  private async waitForReply(requestId: string): Promise<SessionHubReply | undefined> {
+  private async waitForReply(
+    requestId: string,
+    timeoutMs: number,
+  ): Promise<SessionHubReply | undefined> {
     const replyPath = path.join(repliesDir(this.root), `${requestId}.json`);
-    const deadline = Date.now() + REPLY_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
         const raw = await readFile(replyPath, 'utf8');

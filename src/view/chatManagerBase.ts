@@ -1317,6 +1317,46 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
+   * Mission Controlから会話を閉じる（Issue #2149の1）。実行中のターンを止めてから、タブを
+   * 閉じたときと同じ`teardown`を通す。確認は呼び出し側（Mission Control）が済ませている。
+   *
+   * `teardown`だけではCodexのターンは止まらない（app-serverは共有で、会話を閉じても
+   * `turn/interrupt`を送らない）。止める処理は`stopTurnBeforeClose`がproviderごとに持つ。
+   *
+   * タスクの会話（オーケストレータ・ワークフローが管理）と入力欄を閉じたタブは閉じさせない。
+   * 管理側が会話の続きを待っているため、外から止めると工程が宙に浮く。
+   */
+  async closeSession(threadId: string): Promise<SessionControlResult> {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    if (entry.taskManaged || entry.inputLock) {
+      return {
+        ok: false,
+        error: 'タスクの会話は閉じられません（管理しているタスク側で止めてください）',
+      };
+    }
+    await this.stopTurnBeforeClose(entry);
+    this.teardown(entry);
+    return { ok: true };
+  }
+
+  /**
+   * `closeSession`が`teardown`の前に呼ぶ、実行中のターンを止める処理。既定は何もしない
+   * （Claude Codeは`teardown`の`session.dispose()`がCLIのプロセスを止める）。
+   */
+  protected async stopTurnBeforeClose(_entry: TPanel): Promise<void> {
+    // 既定は何もしない
+  }
+
+  /** 会話がこのウィンドウで開いているか。 */
+  hasOpenSession(threadId: string): boolean {
+    const entry = this.panels.get(threadId);
+    return entry !== undefined && !entry.disposed;
+  }
+
+  /**
    * セッション統括ページ（`sessionKanbanView.ts`）からの操作（Issue #1258）。
    *
    * 自ウィンドウのカードからも、別ウィンドウから要求ファイルで届いた分

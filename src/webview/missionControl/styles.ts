@@ -93,4 +93,12 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .launch-box { width: min(560px, 92vw); display: grid; gap: 8px; }
 .launch-box label { display: grid; gap: 2px; }
 .launch-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.launch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; }
+.launch-grid label { display: grid; gap: 2px; }
+.row.marked { box-shadow: inset 3px 0 var(--vscode-charts-blue, var(--vscode-focusBorder)); }
+.mark { color: var(--vscode-charts-blue, var(--vscode-focusBorder)); font-weight: 700; text-align: center; }
+.mark-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 10px; margin-bottom: 4px; background: var(--vscode-editorWidget-background, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 4px; }
+.history-box { width: min(720px, 94vw); display: grid; gap: 8px; }
+.history-filter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto; gap: 6px; }
+.history-list { max-height: 50vh; overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
 `;
