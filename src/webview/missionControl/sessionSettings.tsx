@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { Bridge, ControlResult } from './bridge';
 import type {
@@ -52,13 +52,36 @@ export function SessionSettingsPanel(props: {
   const [effort, setEffort] = useState('');
   const [approval, setApproval] = useState('');
   const [reload, setReload] = useState(0);
+  // 読み直しで選択欄を上書きするかの判断に使う、直前に受け取った設定とそのセッション
+  const adopted = useRef<{ key: string; settings: McSessionSettings } | undefined>(undefined);
 
+  /**
+   * 受け取った設定を出す。同じセッションの読み直しでは、人が選び替えて未送信の欄は残し、
+   * 選び替えていない欄だけ新しい値へ合わせる。
+   */
   const adopt = (next: McSessionSettings): void => {
+    const previous = adopted.current?.key === session.key ? adopted.current.settings : undefined;
+    adopted.current = { key: session.key, settings: next };
     setSettings(next);
-    setModel(next.model);
-    setEffort(next.effort);
-    setApproval(next.approvalLevel);
+    if (previous === undefined) {
+      setModel(next.model);
+      setEffort(next.effort);
+      setApproval(next.approvalLevel);
+      return;
+    }
+    setModel((current) => (current === previous.model ? next.model : current));
+    setEffort((current) => (current === previous.effort ? next.effort : current));
+    setApproval((current) => (current === previous.approvalLevel ? next.approvalLevel : current));
   };
+
+  // 別のセッションへ移ったら、前のセッションの設定を出したまま操作させない
+  useEffect(() => {
+    if (adopted.current !== undefined && adopted.current.key !== session.key) {
+      adopted.current = undefined;
+      setSettings(undefined);
+      setError(undefined);
+    }
+  }, [session.key]);
 
   useEffect(() => {
     let stopped = false;
@@ -69,7 +92,7 @@ export function SessionSettingsPanel(props: {
       if (result.ok && result.settings !== undefined) {
         adopt(result.settings);
         setError(undefined);
-      } else {
+      } else if (adopted.current?.key !== session.key) {
         setSettings(undefined);
         setError(result.error ?? '設定を取り寄せられませんでした');
       }
@@ -77,8 +100,10 @@ export function SessionSettingsPanel(props: {
     return () => {
       stopped = true;
     };
-    // セッションが変わったとき・変更の後に読み直す
-  }, [bridge, session.key, reload]);
+    // セッションが変わったとき・変更の後・セッションの動き（ターンの開始と終わり、modelの表示）が
+    // 変わったときに読み直す。Claudeの承認レベルやplan / fast modeはCLIの通知で確定し、
+    // タブ側で変えた値もここへは届かないため、取り寄せ直さないと古い値を出し続ける
+  }, [bridge, session.key, reload, session.activity, session.activitySince, session.model]);
 
   if (settings === undefined) {
     return (
@@ -118,16 +143,22 @@ export function SessionSettingsPanel(props: {
     }
     setBusy(true);
     setError(undefined);
+    // Claudeの承認レベルは、CLIが新しい値を通知するまで応答に前の値が載る。少し待って読み直す
+    const refetchLater = (): void => {
+      setTimeout(() => setReload((n) => n + 1), REFETCH_AFTER_MS);
+    };
     for (const change of changes) {
       const result = await send(change);
       if (!result.ok) {
         setError(result.error ?? '設定を変えられませんでした');
         setBusy(false);
+        refetchLater();
         return;
       }
     }
     setBusy(false);
     props.onToast('設定を変えました。次のターンから効きます');
+    refetchLater();
   };
 
   const toggle = async (setting: 'planMode' | 'fastMode', value: boolean): Promise<void> => {
