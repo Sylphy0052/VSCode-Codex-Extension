@@ -282,6 +282,42 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     expect(doc.activeElement?.tagName).toBe('BUTTON');
   });
 
+  it('送信したあとに遅れて届いた@の候補で、空になった指示欄へ候補を出さない（Issue #2158のレビュー）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    const doc = window.document;
+    const input = doc.querySelector('textarea.composer-input') as HTMLTextAreaElement;
+    input.focus();
+    input.value = '見て @sr';
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    // 候補の取り寄せ（150ms待ち）が走る前に送る
+    input.dispatchEvent(
+      new window.KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await tick();
+    const send = posted.find((m) => m.action === 'send');
+    deliver({ type: 'controlResult', seq: send?.seq, ok: true });
+    await tick();
+    // 保留していた取り寄せが走っても応答しても、送った後の指示欄に候補を出さない
+    await vi.advanceTimersByTimeAsync(300);
+    const files = posted.filter((m) => m.action === 'fileCandidates').at(-1);
+    if (files !== undefined) {
+      deliver({ type: 'controlResult', seq: files.seq, ok: true, files: ['src/a.ts'] });
+    }
+    await tick();
+    expect(input.value).toBe('');
+    expect(doc.querySelector('.composer-candidates')).toBeNull();
+  });
+
   it('composerは送信中に二重送信させず、失敗したら入力を残して理由を出す（Issue #2137）', async () => {
     const { window, posted, deliver } = boot();
     await tick();

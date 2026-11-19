@@ -296,6 +296,12 @@ export function Composer(props: {
     setSending(true);
     setError(undefined);
     setCompletion(undefined);
+    // 送った下書きへの候補の取り寄せが保留なら止める（送信後の空の指示欄に古い候補を出さない）
+    querySeq.current += 1;
+    if (debounce.current !== undefined) {
+      clearTimeout(debounce.current);
+      debounce.current = undefined;
+    }
     void props.onSend(text, attachments).then((failure) => {
       setSending(false);
       if (failure === undefined) {
