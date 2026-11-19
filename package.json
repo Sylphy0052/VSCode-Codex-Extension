@@ -987,6 +987,14 @@
           "scope": "window",
           "markdownDescription": "引き継ぎ先の作業を分類するヘッドレス実行（`agent.autoHandoff.router`）の待ち時間（ミリ秒。Issue #1097）。時間切れになると分類が得られず、安全な区切りを待つ契機（`softThreshold` / `onProfileChange` / `onAssistantSuggestion`）は発火しない。範囲外の値と数値でない値は既定の120000へ丸める。"
         },
+        "agent.missionControl.stallMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 1440,
+          "scope": "window",
+          "markdownDescription": "Mission Controlで、実行中なのに出力がこの分数動かないセッションを「停滞」と表示する（Issue #2137）。範囲外の値と数値でない値は既定の5へ丸める。"
+        },
         "agent.sessionAutoName.enabled": {
           "type": "boolean",
           "default": true,

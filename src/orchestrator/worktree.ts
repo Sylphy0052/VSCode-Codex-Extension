@@ -575,6 +575,29 @@ export interface CreateWorktreeRequest {
    * 省略時は`branchName`自身の既定どおり `wf/<runId>/<taskId>` になる（後方互換）。
    */
   branchNaming?: BranchNamingOptions;
+  /**
+   * 作成先。省略時は`'agents'`（`.agents/worktrees/<runId>/<taskId>`）。`'claude'`は
+   * Mission Controlの手動セッション用（Issue #2137）で、`.claude/worktrees/<taskId>`に作る。
+   */
+  location?: WorktreeLocation;
+}
+
+/** worktreeの置き場所の種類（`CreateWorktreeRequest.location`）。 */
+export type WorktreeLocation = 'agents' | 'claude';
+
+/** 手動セッション用のworktreeを置くディレクトリ（Issue #2137）。 */
+export function claudeWorktreesRootDir(repoRoot: string): string {
+  return path.join(repoRoot, '.claude', 'worktrees');
+}
+
+function worktreePathFor(request: CreateWorktreeRequest): string {
+  if (request.location === 'claude') {
+    return path.join(
+      claudeWorktreesRootDir(request.repoRoot),
+      withRetrySuffix(request.taskId, request.retry),
+    );
+  }
+  return worktreePath(request.repoRoot, request.runId, request.taskId, request.retry);
 }
 
 export type CreateWorktreeResult =
@@ -660,7 +683,7 @@ async function createWorktree(
       message: `不正なブランチ名（branchName()の生成形に一致しません）: ${branch}`,
     };
   }
-  const cwd = worktreePath(request.repoRoot, request.runId, request.taskId, request.retry);
+  const cwd = worktreePathFor(request);
 
   // 一次防御: `git worktree add` を呼ぶ前に、作成先までの経路にシンボリックリンクが
   // 含まれていないかを確かめる（レビュー指摘: critical 4）

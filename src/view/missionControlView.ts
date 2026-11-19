@@ -1,9 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { Logger } from '../log';
-import type { McSnapshot } from '../webview/missionControl/protocol';
+import type {
+  McLaunchRepo,
+  McLaunchRequest,
+  McSnapshot,
+  McTarget,
+} from '../webview/missionControl/protocol';
 import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
+import { parseLaunchRequest, type McLaunchResult } from './missionControlLaunch';
 import { missionControlTitle } from './missionControlModel';
 import { parseAction, parseTarget, type SessionKanbanControl } from './sessionKanbanView';
 
@@ -17,6 +23,19 @@ const SCRIPT_PATH = ['dist', 'missionControl.js'] as const;
  * 最初の1件はすぐ送り、以降は間隔ごとにまとめ、最後の1回は必ず送る。
  */
 const POST_INTERVAL_MS = 250;
+
+/** ライブtailで他ウィンドウのセッションの直近のやり取りを取り直す間隔（Issue #2137の3）。 */
+export const LIVE_POLL_MS = 2_000;
+/** ライブtailで送る直近のやり取りの件数。 */
+export const LIVE_TURNS = 6;
+
+/** 新規セッションの起動（Issue #2137の1）。vscodeに依る部分は`extension.ts`が組む。 */
+export interface McLaunchPort {
+  options(): Promise<McLaunchRepo[]>;
+  /** フォルダ選択のダイアログを出す。選ばれなければ`undefined`。 */
+  pickFolder(): Promise<McLaunchRepo | undefined>;
+  launch(request: McLaunchRequest): Promise<McLaunchResult>;
+}
 
 /**
  * Mission Control（Issue #2136）のエディタタブ。
@@ -32,12 +51,19 @@ export class MissionControlViewManager implements vscode.Disposable {
   private dirty = false;
   private postTimer: ReturnType<typeof setTimeout> | undefined;
   private lastPostAt = 0;
+  /** 最後に送ったスナップショットのウィンドウid（自ウィンドウか他ウィンドウかの判定に使う）。 */
+  private windowId: string | undefined;
+  /** ライブtailの対象（詳細で選択中のセッション）。 */
+  private watched: McTarget | undefined;
+  private liveTimer: ReturnType<typeof setInterval> | undefined;
+  private liveInFlight = false;
 
   constructor(
     private readonly read: () => McSnapshot,
     private readonly control: SessionKanbanControl,
     private readonly extensionUri: vscode.Uri,
     private readonly log: Logger,
+    private readonly launcher?: McLaunchPort,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -88,6 +114,7 @@ export class MissionControlViewManager implements vscode.Disposable {
 
   dispose(): void {
     this.clearTimer();
+    this.stopLive();
     this.panel?.dispose();
   }
 
@@ -100,17 +127,21 @@ export class MissionControlViewManager implements vscode.Disposable {
     this.panelDisposables.push(
       panel.onDidDispose(() => {
         this.clearTimer();
+        this.stopLive();
+        this.watched = undefined;
         this.dirty = false;
         this.panel = undefined;
         for (const d of this.panelDisposables.splice(0)) {
           d.dispose();
         }
       }),
-      // 非表示の間の更新は溜めておき、表に戻った時点で送り直す
+      // 非表示の間の更新は溜めておき、表に戻った時点で送り直す。ライブtailの取り直しも
+      // 非表示の間は止め、表に戻ったら再開する
       panel.onDidChangeViewState(() => {
         if (this.panel?.visible === true && this.dirty) {
           this.schedulePost();
         }
+        this.restartLive();
       }),
       panel.webview.onDidReceiveMessage((message: unknown) => this.receive(message)),
     );
@@ -147,11 +178,16 @@ export class MissionControlViewManager implements vscode.Disposable {
     const snapshot = this.read();
     // タブ名の件数は非表示の間も合わせる（タブ自体は見えている）
     panel.title = missionControlTitle(snapshot.pending.length);
+    this.windowId = snapshot.windowId;
     this.dirty = !panel.visible;
     if (this.dirty) {
       return;
     }
     void panel.webview.postMessage({ type: 'snapshot', snapshot });
+    // 自ウィンドウのセッションは状態の変化（このpostの契機）ごとにやり取りを送り直す
+    if (this.watched !== undefined && this.watched.windowId === this.windowId) {
+      this.pushLive();
+    }
   }
 
   private receive(message: unknown): void {
@@ -159,13 +195,128 @@ export class MissionControlViewManager implements vscode.Disposable {
       return;
     }
     const m = message as Record<string, unknown>;
-    if (m.type === 'ready') {
-      this.post();
+    switch (m.type) {
+      case 'ready':
+        this.post();
+        return;
+      case 'control':
+        this.handleControl(m);
+        return;
+      case 'watch':
+        this.setWatch(m.target);
+        return;
+      case 'launchOptions':
+      case 'pickFolder':
+      case 'launch':
+        this.handleLaunch(m);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
+   * ライブtailの対象を差し替える（Issue #2137の3）。自ウィンドウのセッションは状態の変化で
+   * 送り、他ウィンドウのセッションは選択中の間だけ`recentTurns`を間隔を空けて取り直す。
+   */
+  private setWatch(raw: unknown): void {
+    const target =
+      typeof raw === 'object' && raw !== null
+        ? parseTarget(raw as Record<string, unknown>)
+        : undefined;
+    this.watched = target;
+    this.restartLive();
+  }
+
+  private restartLive(): void {
+    this.stopLive();
+    const target = this.watched;
+    if (target === undefined || this.panel?.visible !== true) {
       return;
     }
-    if (m.type === 'control') {
-      this.handleControl(m);
+    this.pushLive();
+    if (target.windowId !== this.windowId) {
+      this.liveTimer = setInterval(() => this.pushLive(), LIVE_POLL_MS);
     }
+  }
+
+  private stopLive(): void {
+    if (this.liveTimer !== undefined) {
+      clearInterval(this.liveTimer);
+      this.liveTimer = undefined;
+    }
+  }
+
+  /** 直近のやり取りを1回取り、webviewへ送る。前の取り寄せが返るまでは重ねない。 */
+  private pushLive(): void {
+    const target = this.watched;
+    if (target === undefined || this.liveInFlight || this.panel?.visible !== true) {
+      return;
+    }
+    this.liveInFlight = true;
+    void this.control(target, { kind: 'recentTurns', limit: LIVE_TURNS })
+      .then((result) => {
+        // 取り寄せの間に選択が変わっていたら捨てる（前の会話のやり取りを出さない）
+        if (this.watched !== target) {
+          return;
+        }
+        void this.panel?.webview.postMessage({
+          type: 'liveTurns',
+          target,
+          ok: result.ok,
+          error: result.error,
+          turns: result.turns,
+        });
+      })
+      .catch((e: unknown) => {
+        this.log.warn(`Mission Control: やり取りを取り寄せられませんでした: ${String(e)}`);
+      })
+      .finally(() => {
+        this.liveInFlight = false;
+      });
+  }
+
+  /** 新規セッションの起動にかかわる要求（Issue #2137の1）。応答は`reply`で返す。 */
+  private handleLaunch(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const launcher = this.launcher;
+    if (launcher === undefined) {
+      this.postReply(seq, { ok: false, error: '新規起動はこの画面では使えません' });
+      return;
+    }
+    const run = async (): Promise<Record<string, unknown>> => {
+      if (message.type === 'launchOptions') {
+        return { ok: true, repos: await launcher.options() };
+      }
+      if (message.type === 'pickFolder') {
+        const repo = await launcher.pickFolder();
+        return { ok: true, repo };
+      }
+      const request = parseLaunchRequest(message);
+      if (typeof request === 'string') {
+        return { ok: false, error: request };
+      }
+      const result = await launcher.launch(request);
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      this.log.info(`Mission Control: ${request.provider}の会話を起動した（${result.cwd}）`);
+      this.refresh();
+      return { ok: true, cwd: result.cwd };
+    };
+    void run()
+      .then((reply) => this.postReply(seq, reply))
+      .catch((e: unknown) => {
+        this.log.warn(`Mission Control: 起動にかかわる操作に失敗しました: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  private postReply(seq: number, reply: Record<string, unknown>): void {
+    void this.panel?.webview.postMessage({ ...reply, type: 'reply', seq });
   }
 
   /**

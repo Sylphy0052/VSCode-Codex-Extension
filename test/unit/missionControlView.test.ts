@@ -17,6 +17,7 @@ function snapshot(pendingCount: number): McSnapshot {
     windowId: 'w1',
     repos: [],
     sessions: [],
+    stallMs: 300_000,
     pending: Array.from({ length: pendingCount }, (_, i) => ({
       id: `p${String(i)}`,
       kind: 'toolApproval' as const,
