@@ -178,6 +178,9 @@ describe('mapKey（既存の割り当てを壊さない）', () => {
     expect(mapKey({ ...base, key: 'ArrowLeft' })).toEqual({ kind: 'pane', delta: -1 });
     // 入力欄の中のTabは標準の移動に任せる
     expect(mapKey({ ...base, key: 'Tab', inEditable: true })).toBeUndefined();
+    // 入力欄（フィルタ・ダイアログ）の中の← / →はカーソル移動に任せる
+    expect(mapKey({ ...base, key: 'ArrowLeft', inEditable: true })).toBeUndefined();
+    expect(mapKey({ ...base, key: 'ArrowRight', inEditable: true })).toBeUndefined();
   });
 
   it('記号はShiftの有無を問わない（配列でShiftの要否が違うため）', () => {
