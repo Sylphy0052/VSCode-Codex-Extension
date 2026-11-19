@@ -10,6 +10,8 @@ import {
   validateAskUserQuestionAnswers,
 } from '../../src/view/pendingItem';
 import { deriveSessionActivityState } from '../../src/view/sessionActivity';
+import { createTaskRun, type TaskRun } from '../../src/orchestrator/taskRunState';
+import { listTaskRunPendingItems } from '../../src/view/taskRunPending';
 
 const askApproval: PendingApproval = {
   requestId: 'r1',
@@ -133,5 +135,49 @@ describe('PendingItem（Issue #2135）', () => {
     answered.add('b');
     answered.add('c');
     expect([answered.has('a'), answered.has('b'), answered.has('c')]).toEqual([false, true, true]);
+  });
+
+  it('task runの質問は専有権を持つrunのユーザー判断待ちだけを、要約に切って載せる', () => {
+    const runOf = (status: string): TaskRun =>
+      ({
+        ...createTaskRun({
+          runId: 'run-1',
+          workspaceRoot: '/repo',
+          engine: 'claude',
+          maxParallel: 1,
+          title: 'r',
+          now: new Date('2026-11-01T00:00:00Z'),
+        }),
+        taskOrder: ['T1'],
+        tasks: {
+          T1: {
+            taskId: 'T1',
+            title: 'タスク1',
+            stages: {},
+            questions: [
+              {
+                questionId: 'q1',
+                status,
+                question: `進めてよいか?\n${'x'.repeat(2000)}`,
+                options: ['はい', 'いいえ'],
+                askedAt: '2026-11-01T00:00:01Z',
+              },
+            ],
+          },
+        },
+      }) as unknown as TaskRun;
+    const items = listTaskRunPendingItems([runOf('awaitingUser')], () => true, 'w');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: 'taskRun:run-1:T1:q1',
+      kind: 'taskRunQuestion',
+      session: { windowId: 'w', threadId: 'run-1', provider: 'claude' },
+      payload: { runId: 'run-1', taskId: 'T1', questionId: 'q1', options: ['はい', 'いいえ'] },
+    });
+    // 全文は載せない（改行を畳み、上限で切る）
+    expect(items[0]?.payload.summary.length).toBeLessThanOrEqual(501);
+    expect(items[0]?.payload.summary).not.toContain('\n');
+    expect(listTaskRunPendingItems([runOf('answered')], () => true, 'w')).toEqual([]);
+    expect(listTaskRunPendingItems([runOf('awaitingUser')], () => false, 'w')).toEqual([]);
   });
 });
