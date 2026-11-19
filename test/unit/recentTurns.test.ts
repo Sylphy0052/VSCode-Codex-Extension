@@ -25,17 +25,17 @@ const conversation = [
 describe('readRecentTurns', () => {
   it('発言・応答・ツール呼び出しを古い順で返し、思考は含めない', () => {
     expect(readRecentTurns({ items: conversation }, 10)).toEqual([
-      { role: 'user', text: '1件目の質問', truncated: false },
+      { id: 'userMessage-1件目の質問', role: 'user', text: '1件目の質問', truncated: false },
       { role: 'agent', text: '1件目の応答', truncated: false },
       { role: 'tool', text: 'ls -la', truncated: false, title: '$ ' },
-      { role: 'user', text: '2件目の質問', truncated: false },
+      { id: 'userMessage-2件目の質問', role: 'user', text: '2件目の質問', truncated: false },
       { role: 'agent', text: '2件目の応答', truncated: false },
     ]);
   });
 
   it('指定した件数だけ新しい方から取る', () => {
     expect(readRecentTurns({ items: conversation }, 2)).toEqual([
-      { role: 'user', text: '2件目の質問', truncated: false },
+      { id: 'userMessage-2件目の質問', role: 'user', text: '2件目の質問', truncated: false },
       { role: 'agent', text: '2件目の応答', truncated: false },
     ]);
   });
@@ -43,8 +43,16 @@ describe('readRecentTurns', () => {
   it('本文が空白だけの項目は飛ばす', () => {
     const items = [item('agentMessage', '   '), item('userMessage', '本文あり')];
     expect(readRecentTurns({ items }, 5)).toEqual([
-      { role: 'user', text: '本文あり', truncated: false },
+      { id: 'userMessage-本文あり', role: 'user', text: '本文あり', truncated: false },
     ]);
+  });
+
+  it('発言には元の項目のidを付け、本文が同じでも区別する（巻き戻しの対象に使う。Issue #2160）', () => {
+    const items = [item('userMessage', '同じ', 'uuid-a'), item('userMessage', '同じ', 'uuid-b')];
+    expect(readRecentTurns({ items }, 5).map((t) => t.id)).toEqual(['uuid-a', 'uuid-b']);
+    expect(
+      readRecentTurns({ items: [item('userMessage', 'id無し', '')] }, 5)[0],
+    ).not.toHaveProperty('id');
   });
 
   it('長い本文は切り詰めて印を立てる', () => {
