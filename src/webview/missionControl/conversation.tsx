@@ -168,7 +168,7 @@ export function Conversation(props: {
   const step = (delta: 1 | -1): void => {
     setCurrent((at) => stepMatch(at, matches.length, delta));
   };
-  props.keysRef.current = {
+  const keys: ConversationKeys = {
     search: () => {
       searchRef.current?.focus();
       searchRef.current?.select();
@@ -184,9 +184,15 @@ export function Conversation(props: {
       }
     },
   };
+  props.keysRef.current = keys;
+  const ownKeys = useRef(keys);
+  ownKeys.current = keys;
   useEffect(
     () => () => {
-      props.keysRef.current = null;
+      // 宛先が替わって作り直したときは、新しい方が先に描画して埋めている。それを消さない
+      if (props.keysRef.current === ownKeys.current) {
+        props.keysRef.current = null;
+      }
     },
     [],
   );
