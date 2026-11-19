@@ -188,19 +188,34 @@ export function parseRunOp(
 const TASK_OPS: readonly McRunTaskOp[] = ['retry', 'stop'];
 /** `TASK_ID_PATTERN`（`workflow.ts`）と同じ字種。 */
 const TASK_ID_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,49}$/u;
+/** 字種は合うが、オブジェクトのキーに使うとprototypeに触れる名前。タスクのidとして受けない。 */
+const RESERVED_OBJECT_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
 
 /** `runTaskOp`の検証（Issue #2162）。合わなければ理由の文。 */
 export function parseRunTaskOp(
   message: Record<string, unknown>,
 ): { op: McRunTaskOp; runId: string; taskId: string } | string {
-  const { op, runId, taskId } = message;
+  // 継承したプロパティ（`Object.create`で作った値・汚染されたprototype）は読まない
+  const own = (key: string): unknown =>
+    Object.prototype.hasOwnProperty.call(message, key) ? message[key] : undefined;
+  const op = own('op');
+  const runId = own('runId');
+  const taskId = own('taskId');
   if (typeof op !== 'string' || !(TASK_OPS as readonly string[]).includes(op)) {
     return '操作が正しくありません';
   }
   if (!isRunIdShape(runId)) {
     return 'runが正しくありません';
   }
-  if (typeof taskId !== 'string' || !TASK_ID_SHAPE.test(taskId)) {
+  if (
+    typeof taskId !== 'string' ||
+    !TASK_ID_SHAPE.test(taskId) ||
+    RESERVED_OBJECT_KEYS.has(taskId)
+  ) {
     return 'タスクが正しくありません';
   }
   return { op: op as McRunTaskOp, runId, taskId };
