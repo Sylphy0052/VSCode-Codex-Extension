@@ -23,6 +23,7 @@ import {
   pickFolder as pickRunFolder,
   type McRunsPort,
 } from './missionControlRuns';
+import { parseRunCommand } from './missionControlCommands';
 import { parseLifecycleRequest, type McLifecycleRunResult } from './missionControlSessions';
 import { MAX_TASK_RUN_PARALLEL } from '../orchestrator/taskRunState';
 import { pickAttachmentFiles } from './missionControlAttachments';
@@ -300,6 +301,9 @@ export class MissionControlViewManager implements vscode.Disposable {
         return;
       case 'pickAttachments':
         this.handlePickAttachments(m);
+        return;
+      case 'runCommand':
+        this.handleRunCommand(m);
         return;
       case 'lifecycle':
       case 'history':
@@ -640,6 +644,39 @@ export class MissionControlViewManager implements vscode.Disposable {
       (e: unknown) => {
         this.log.warn(`Mission Control: 添付を選べませんでした: ${String(e)}`);
         this.postReply(seq, { ok: false, error: '添付を選べませんでした' });
+      },
+    );
+  }
+
+  /**
+   * 許可リストの拡張コマンドを実行する（Issue #2161）。webviewからはidだけを受け、
+   * `parseRunCommand`で許可リストとの完全一致と形を確かめる。引数はここで決め、宛先は
+   * 最後に送ったスナップショットに載っているセッションだけを認める。
+   */
+  private handleRunCommand(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const sessions = this.latestSnapshot?.sessions ?? [];
+    const request = parseRunCommand(message, (target) =>
+      sessions.some(
+        (s) =>
+          s.windowId === target.windowId &&
+          s.provider === target.provider &&
+          s.threadId === target.threadId,
+      ),
+    );
+    if (typeof request === 'string') {
+      this.log.warn(`Mission Control: コマンドの実行を拒みました: ${request}`);
+      this.postReply(seq, { ok: false, error: request });
+      return;
+    }
+    void Promise.resolve(vscode.commands.executeCommand(request.id, ...request.args)).then(
+      () => this.postReply(seq, { ok: true }),
+      (e: unknown) => {
+        this.log.warn(`Mission Control: コマンドに失敗しました（${request.id}）: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: 'コマンドに失敗しました' });
       },
     );
   }
