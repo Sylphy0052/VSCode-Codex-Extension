@@ -1896,6 +1896,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     claudeChat.onDidChangePanels(onSessionKanbanRelevantChange),
     sessionHubReader.onDidChange(() => sessionKanban.refresh()),
   );
+  // task runの質問が出た・答えられた（Issue #2135）。会話の状態変化とは別に届くため、ここで
+  // 統括ページと共有ファイルへ反映する。runの変化は頻繁なので、待ち項目のidが変わったときだけ
+  let lastTaskRunPendingIds = '';
+  const taskRunPendingSubscription = taskRunPendingHolder.current?.onDidChange(() => {
+    const ids = currentWindowPending()
+      .map((item) => item.id)
+      .join('\n');
+    if (ids === lastTaskRunPendingIds) {
+      return;
+    }
+    lastTaskRunPendingIds = ids;
+    onSessionKanbanRelevantChange();
+  });
+  if (taskRunPendingSubscription !== undefined) {
+    context.subscriptions.push(taskRunPendingSubscription);
+  }
 
   const actions = new SessionActions(nodeCommandRunner, codexPath);
 
