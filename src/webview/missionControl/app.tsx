@@ -165,12 +165,29 @@ function readPersisted(raw: unknown): PersistedState {
   };
 }
 
+/**
+ * 文字を打ち込まない`<input>`の種類。チェックボックスなどは英字を受け取らないので入力欄として
+ * 扱わない。扱うと、アクセスキーで押した後にフォーカスが残り、次の英字が効かなくなる（Issue #2152）。
+ * `radio`と`range`は矢印キーで値を変えるので、入力欄のまま扱う（←/→をペイン移動に取らない）。
+ */
+const NON_TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
+  'checkbox',
+  'button',
+  'submit',
+  'reset',
+  'image',
+  'file',
+  'color',
+]);
+
 function isEditable(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
   }
+  if (target instanceof HTMLInputElement) {
+    return !NON_TEXT_INPUT_TYPES.has(target.type);
+  }
   return (
-    target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement ||
     target.isContentEditable

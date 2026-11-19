@@ -449,5 +449,35 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       await tick();
       expect(posted.find((m) => m.type === 'launch')).toMatchObject({ cwd: '/w/app' });
     });
+
+    it('チェックボックスをアクセスキーで押した後も、次のアクセスキーが効く', async () => {
+      const { window, posted, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      press(window, 'n');
+      await tick();
+      const options = posted.find((m) => m.type === 'launchOptions');
+      deliver({
+        type: 'reply',
+        seq: options?.seq,
+        ok: true,
+        repos: [{ path: '/w/app', key: '/w/app', label: 'app', source: 'session' }],
+      });
+      await tick();
+      const dialog = window.document.querySelector('[role="dialog"]') as HTMLElement;
+      // 開いた直後はrepoの選択欄にフォーカスがあり、英字は選択欄の文字入力になる。Escで出る
+      press(window, 'Escape');
+      await tick();
+      const checkbox = dialog.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      const before = checkbox.checked;
+      press(window, checkbox.dataset['akey'] ?? '');
+      await tick();
+      expect(checkbox.checked).toBe(!before);
+      const textarea = dialog.querySelector('textarea') as HTMLTextAreaElement;
+      press(window, textarea.dataset['akey'] ?? '');
+      await tick();
+      expect(window.document.activeElement).toBe(textarea);
+    });
   });
 });
