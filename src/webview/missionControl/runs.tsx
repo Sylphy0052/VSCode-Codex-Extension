@@ -296,16 +296,23 @@ export function IssueStartDialog(props: {
       setMessage('Issueを選んでください');
       return;
     }
-    const roadmap = targets.find(isRoadmap);
-    const numbers = [...new Set(targets.map((e) => e.number))].slice(0, ISSUES_MAX);
+    // roadmapは1本ずつ起動し、それ以外のIssueはまとめて1本の自由指示のrunへ渡す（拡張ホストが行う）
+    const roadmapNumbers = [...new Set(targets.filter(isRoadmap).map((e) => e.number))];
+    const issueNumbers = [
+      ...new Set(targets.filter((e) => !isRoadmap(e)).map((e) => e.number)),
+    ].filter((n) => !roadmapNumbers.includes(n));
+    if (roadmapNumbers.length + issueNumbers.length > ISSUES_MAX) {
+      setMessage(`選べるのは${String(ISSUES_MAX)}件までです`);
+      return;
+    }
     setBusy(true);
     setMessage(undefined);
     void bridge
       .issueStart({
         folder,
         engine,
-        ...(roadmap !== undefined ? { roadmapIssueNumber: roadmap.number } : {}),
-        issueNumbers: roadmap !== undefined ? [] : numbers,
+        roadmapIssueNumbers: roadmapNumbers,
+        issueNumbers,
       })
       .then((result) => {
         setBusy(false);

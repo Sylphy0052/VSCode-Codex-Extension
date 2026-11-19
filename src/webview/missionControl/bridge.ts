@@ -250,7 +250,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
         type: 'issueStart',
         folder: request.folder,
         engine: request.engine,
-        roadmapIssueNumber: request.roadmapIssueNumber,
+        roadmapIssueNumbers: request.roadmapIssueNumbers,
         issueNumbers: request.issueNumbers,
       }),
     watch(target) {

@@ -31,7 +31,7 @@ const MESSAGE_MAX_LENGTH = 300;
 export interface McRunsPortDeps {
   controller: TaskRunController;
   view: TaskRunKanbanViewManager;
-  orchestrator: Pick<TaskRunOrchestrator, 'open' | 'notifyIssuesSelected'>;
+  orchestrator: Pick<TaskRunOrchestrator, 'open'>;
   git: GitCommandRunner;
   cli: CliCommandRunner;
   log: Logger;
@@ -109,30 +109,40 @@ export function createMcRunsPort(deps: McRunsPortDeps): McRunsPort {
     };
   };
 
-  const startFromIssues = async (
+  // `start_roadmap_orchestrator`（`agent.taskRun.startRoadmapFromChat`）と同じ関数で起動する
+  const startRoadmap = async (
     request: McIssueStartRequest,
+    issueNumber: number,
+    maxParallel: number,
   ): Promise<{ ok: boolean; message: string }> => {
-    const maxParallel = Math.min(deps.defaultMaxParallel(), MAX_TASK_RUN_PARALLEL);
-    if (request.roadmapIssueNumber !== undefined) {
-      // `start_roadmap_orchestrator`（`agent.taskRun.startRoadmapFromChat`）と同じ関数で起動する
-      const result = await startRoadmapRunFromChat(deps.roadmapStartDeps(request.engine), {
-        folder: request.folder,
-        engine: request.engine,
-        issueNumber: request.roadmapIssueNumber,
-        maxParallel,
-      });
-      const roadmap = `roadmap #${String(request.roadmapIssueNumber)}`;
-      if (!result.accepted) {
-        return { ok: false, message: sanitizeInlineText(result.reason, MESSAGE_MAX_LENGTH) };
-      }
+    const roadmap = `roadmap #${String(issueNumber)}`;
+    const result = await startRoadmapRunFromChat(deps.roadmapStartDeps(request.engine), {
+      folder: request.folder,
+      engine: request.engine,
+      issueNumber,
+      maxParallel,
+    });
+    if (!result.accepted) {
       return {
-        ok: true,
-        message:
-          result.reused === true
-            ? `${roadmap}の既存のrunを開きました`
-            : `${roadmap}でrunを始めました（計画の承認待ち）`,
+        ok: false,
+        message: `${roadmap}: ${sanitizeInlineText(result.reason, MESSAGE_MAX_LENGTH)}`,
       };
     }
+    return {
+      ok: true,
+      message:
+        result.reused === true
+          ? `${roadmap}の既存のrunを開きました`
+          : `${roadmap}でrunを始めました（計画の承認待ち）`,
+    };
+  };
+
+  // `agent.taskRun.start`の自由な指示から始めるrunと同じ関数（`startRun`→Kanban→Orchestrator）で
+  // 起動し、選んだIssue番号を最初の指示文として渡す
+  const startFreeRun = async (
+    request: McIssueStartRequest,
+    maxParallel: number,
+  ): Promise<{ ok: boolean; message: string }> => {
     const list = request.issueNumbers.map((n) => `#${String(n)}`).join(', ');
     const outcome = await controller.startRun({
       workspaceRoot: request.folder,
@@ -147,15 +157,37 @@ export function createMcRunsPort(deps: McRunsPortDeps): McRunsPort {
       return { ok: false, message: outcome.message };
     }
     view.show(outcome.runId);
-    const opened = await deps.orchestrator.open(outcome.runId);
+    const opened = await deps.orchestrator.open(
+      outcome.runId,
+      false,
+      `Issue ${list}を実装してください（Mission ControlでIssueを選んで始めたrun）。` +
+        '各Issueをget_issueで読み、既存のIssueのタスク（existingIssueNumber）にした計画をpropose_planで提案してください。',
+    );
     if (!opened) {
       return {
         ok: false,
-        message: 'runは始めましたが、Orchestratorを開けませんでした。Kanbanから開き直してください',
+        message: `Issue ${list}でrunは始めましたが、Orchestratorを開けませんでした。Kanbanから開き直してください`,
       };
     }
-    deps.orchestrator.notifyIssuesSelected(outcome.runId, request.issueNumbers);
     return { ok: true, message: `Issue ${list}でrunを始めました` };
+  };
+
+  const startFromIssues = async (
+    request: McIssueStartRequest,
+  ): Promise<{ ok: boolean; message: string }> => {
+    const maxParallel = Math.min(deps.defaultMaxParallel(), MAX_TASK_RUN_PARALLEL);
+    const results: { ok: boolean; message: string }[] = [];
+    // roadmapは1本ずつ起動する（前の起動が終わってから次へ進む）
+    for (const issueNumber of request.roadmapIssueNumbers) {
+      results.push(await startRoadmap(request, issueNumber, maxParallel));
+    }
+    if (request.issueNumbers.length > 0) {
+      results.push(await startFreeRun(request, maxParallel));
+    }
+    return {
+      ok: results.every((r) => r.ok),
+      message: results.map((r) => r.message).join(' / '),
+    };
   };
 
   return {

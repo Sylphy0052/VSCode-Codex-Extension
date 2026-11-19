@@ -114,7 +114,6 @@ export interface TaskRunOrchestratorEvent {
     | 'taskClosed'
     | 'taskMerged'
     | 'taskInstructed'
-    | 'issuesSelected'
     | 'questionAwaitingOrchestrator'
     | 'questionAwaitingUser'
     | 'gateAwaitingOrchestrator'
@@ -423,40 +422,33 @@ export class TaskRunOrchestrator {
   }
 
   /**
-   * Mission Controlで人が選んだIssueからrunを始めたことをOrchestratorへ知らせる（Issue #2150）。
-   * Orchestratorを開いた後に呼ぶ（開いていなければイベントは捨てられる）。番号は検証済みの整数だけ。
-   */
-  notifyIssuesSelected(runId: string, issueNumbers: readonly number[]): void {
-    const list = issueNumbers.map((n) => `#${String(n)}`).join(', ');
-    this.notify(runId, {
-      kind: 'issuesSelected',
-      body:
-        `人がMission ControlでIssue ${list}を選び、このrunを始めました。` +
-        'これらのIssueを読み、実装する計画を提案してください。',
-    });
-  }
-
-  /**
    * Orchestratorのタブを開く。生きているセッションがあれば前へ出すだけにし、無ければ次の世代を
    * 起こす。`renew`なら生きているセッションを閉じて次の世代を起こす（人が手で開き直すとき用。
    * コンテキストが尽きかけたときは自動引き継ぎ`onHandoff`が同じ手順で起こす。Issue #1553）。
    * 失敗してもrunは止めない（ログへ残し、`false`を返す）。
+   *
+   * `firstRequest`は自由指示のrunでユーザーが最初に出す指示の代わりに、導入文の最後へ入れる文
+   * （Mission ControlでIssueを選んで始めたとき。Issue #2150）。新しい世代を起こすときだけ使う。
    */
-  open(runId: string, renew = false): Promise<boolean> {
+  open(runId: string, renew = false, firstRequest?: string): Promise<boolean> {
     const existing = this.live.get(runId);
     if (existing !== undefined && !renew) {
       existing.session.reveal();
       return Promise.resolve(true);
     }
-    return this.startNewGeneration(runId, 'manual');
+    return this.startNewGeneration(runId, 'manual', firstRequest);
   }
 
-  private startNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
+  private startNewGeneration(
+    runId: string,
+    trigger: GenerationTrigger,
+    firstRequest?: string,
+  ): Promise<boolean> {
     const inFlight = this.opening.get(runId);
     if (inFlight !== undefined) {
       return inFlight;
     }
-    const task = this.openNewGeneration(runId, trigger).finally(() => {
+    const task = this.openNewGeneration(runId, trigger, firstRequest).finally(() => {
       this.opening.delete(runId);
     });
     this.opening.set(runId, task);
@@ -636,7 +628,11 @@ export class TaskRunOrchestrator {
     });
   }
 
-  private async openNewGeneration(runId: string, trigger: GenerationTrigger): Promise<boolean> {
+  private async openNewGeneration(
+    runId: string,
+    trigger: GenerationTrigger,
+    firstRequest?: string,
+  ): Promise<boolean> {
     // 引き継ぎを待つ間にrunが中断・完了していたら、次の世代は起こさない（中断・完了の側が`close`する）
     const before = this.deps.controller.find(runId);
     if (trigger === 'autoHandoff' && (before === undefined || !isTaskRunActive(before))) {
@@ -766,6 +762,7 @@ export class TaskRunOrchestrator {
         lessonsBlock,
         this.deps.controller.autoStartsStages(current.engine),
         this.deps.controller.planApprovalMode(),
+        firstRequest,
       ),
     );
     this.deps.onDidChange();
@@ -1806,6 +1803,7 @@ export function buildIntroPrompt(
   lessonsBlock?: string,
   autoStartStages = false,
   planApprovalMode: PlanApprovalMode = 'human',
+  firstRequest?: string,
 ): string {
   return [
     `あなたはオーケストレータモードの実行（run: ${run.runId}）を指揮するOrchestratorです（第${String(generation)}世代）。`,
@@ -1867,7 +1865,7 @@ export function buildIntroPrompt(
     '現在の状態（要約。各タスクの詳細は最初にget_run_stateを呼んで確かめる）:',
     formatTaskRunSummary(run),
     '',
-    buildOpeningInstruction(run),
+    buildOpeningInstruction(run, firstRequest),
     ...(lessonsBlock === undefined || lessonsBlock === '' ? [] : ['', lessonsBlock]),
   ].join('\n');
 }
@@ -1909,8 +1907,14 @@ function buildOptimizeRequestLines(run: TaskRun): string[] {
   ];
 }
 
-/** 導入文の最後に置く、最初にすることの指示。 */
-function buildOpeningInstruction(run: TaskRun): string {
+/**
+ * 導入文の最後に置く、最初にすることの指示。`firstRequest`はユーザーの最初の指示の代わりに渡された
+ * 文（Mission ControlでIssueを選んで始めた自由指示のrun。Issue #2150）で、計画前のrunにだけ使う。
+ */
+function buildOpeningInstruction(run: TaskRun, firstRequest?: string): string {
+  if (run.planStatus === 'drafting' && firstRequest !== undefined && firstRequest !== '') {
+    return `ユーザーの最初の指示: ${firstRequest}`;
+  }
   if (run.planStatus !== 'drafting') {
     return 'まずget_run_stateで現在の状態を取り、ユーザーに短く伝え、次にできることを示してください。';
   }

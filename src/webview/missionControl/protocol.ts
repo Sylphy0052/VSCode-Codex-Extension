@@ -222,13 +222,13 @@ export interface McIssueListing {
 }
 
 /**
- * roadmap・Issueからの起動。`roadmapIssueNumber`ならそのroadmapで（`start_roadmap_orchestrator`と
- * 同じ経路）、`issueNumbers`なら新しいrunを始めて選んだIssueをOrchestratorへ渡す。
+ * roadmap・Issueからの起動。`roadmapIssueNumbers`は1本ずつそのroadmapで起動し（`start_roadmap_orchestrator`
+ * と同じ経路）、`issueNumbers`は自由な指示から始めるrunを1本始めて、選んだIssue番号を最初の指示文で渡す。
  */
 export interface McIssueStartRequest {
   folder: string;
   engine: McProvider;
-  roadmapIssueNumber?: number | undefined;
+  roadmapIssueNumbers: number[];
   issueNumbers: number[];
 }
 

@@ -214,23 +214,21 @@ export function parseIssueStart(
   if (folder === undefined) {
     return '開いているワークスペースフォルダを選んでください';
   }
-  const { engine, roadmapIssueNumber, issueNumbers } = message;
+  const { engine, roadmapIssueNumbers, issueNumbers } = message;
   if (engine !== 'codex' && engine !== 'claude') {
     return 'CLIが正しくありません';
   }
-  if (roadmapIssueNumber !== undefined) {
-    if (!isIssueNumber(roadmapIssueNumber)) {
-      return 'roadmapのIssue番号が正しくありません';
-    }
-    return { folder, engine, roadmapIssueNumber, issueNumbers: [] };
-  }
-  if (
-    !Array.isArray(issueNumbers) ||
-    issueNumbers.length === 0 ||
-    issueNumbers.length > MAX_ISSUES_PER_START ||
-    !issueNumbers.every(isIssueNumber)
-  ) {
+  const isNumberList = (value: unknown): value is number[] =>
+    Array.isArray(value) && value.length <= MAX_ISSUES_PER_START && value.every(isIssueNumber);
+  if (!isNumberList(roadmapIssueNumbers) || !isNumberList(issueNumbers)) {
     return `Issueを1〜${String(MAX_ISSUES_PER_START)}件選んでください`;
   }
-  return { folder, engine, issueNumbers: [...new Set(issueNumbers)] };
+  const roadmaps = [...new Set(roadmapIssueNumbers)];
+  // 同じ番号がroadmapと通常のIssueの両方に来たら、roadmapとして扱う
+  const issues = [...new Set(issueNumbers)].filter((n) => !roadmaps.includes(n));
+  const total = roadmaps.length + issues.length;
+  if (total === 0 || total > MAX_ISSUES_PER_START) {
+    return `Issueを1〜${String(MAX_ISSUES_PER_START)}件選んでください`;
+  }
+  return { folder, engine, roadmapIssueNumbers: roadmaps, issueNumbers: issues };
 }
