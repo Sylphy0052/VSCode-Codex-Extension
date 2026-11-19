@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
 import {
+  buildClaudeSandboxPrompt,
   buildClaudeSandboxSettings,
+  claudeSandboxArgs,
+  EXCLUDED_COMMANDS,
+  isUnsafeExtraExcludedCommand,
+  normalizeExtraExcludedCommands,
   ClaudeSandboxProbe,
   nodeSandboxProbePorts,
   type ClaudeSandboxProbePorts,
@@ -47,7 +52,75 @@ describe('buildClaudeSandboxSettings: excludedCommands（Issue #1545）', () => 
       'npm ci *',
       'pip install *',
       'docker *',
+      'ssh *',
+      'scp *',
+      'rsync *',
     ]);
+  });
+});
+
+const CS_PY = 'python3 /home/u/.claude/skills/compute-server/scripts/cs.py *';
+
+describe('extraExcludedCommands（Issue #2133）', () => {
+  it('設定で足したパターンを固定の一覧の後ろへ合流させる', () => {
+    const settings = buildClaudeSandboxSettings(
+      'workspace-write',
+      '/work',
+      { weakerNested: false },
+      [CS_PY],
+    );
+    const list = (settings['sandbox'] as Record<string, unknown>)['excludedCommands'];
+    expect(list).toEqual([...EXCLUDED_COMMANDS, CS_PY]);
+  });
+
+  it('既定（空）なら固定の一覧のままで、指示文に絶対パスの案内を足さない', () => {
+    expect(excludedCommands()).toEqual([...EXCLUDED_COMMANDS]);
+    expect(buildClaudeSandboxPrompt()).toBe(buildClaudeSandboxPrompt([]));
+    expect(buildClaudeSandboxPrompt()).not.toContain('絶対パス');
+  });
+
+  it('指示文の一覧にも載せ、絶対パスのまま単独で打つよう伝える', () => {
+    const prompt = buildClaudeSandboxPrompt([CS_PY]);
+    expect(prompt).toContain(
+      'ssh / scp / rsync / python3 /home/u/.claude/skills/compute-server/scripts/cs.py。',
+    );
+    expect(prompt).toContain(
+      '一覧のうち python3 /home/u/.claude/skills/compute-server/scripts/cs.py は、書かれたとおりの絶対パスのまま',
+    );
+  });
+
+  it('claudeSandboxArgsは設定と指示文の両方へ同じ値を渡す', () => {
+    const args = claudeSandboxArgs('workspace-write', '/work', { weakerNested: false }, [CS_PY]);
+    const settings = JSON.parse(args[1] ?? '{}') as { sandbox: { excludedCommands: string[] } };
+    expect(settings.sandbox.excludedCommands).toContain(CS_PY);
+    expect(args[3]).toContain('cs.py');
+  });
+
+  it('壊れた要素・空・改行入り・固定の一覧との重複・重複は捨てる', () => {
+    expect(
+      normalizeExtraExcludedCommands([42, '', '  ', 'a\nb', 'gh *', ` ${CS_PY} `, CS_PY, null]),
+    ).toEqual([CS_PY]);
+    expect(normalizeExtraExcludedCommands('ssh *')).toEqual([]);
+    expect(normalizeExtraExcludedCommands(undefined)).toEqual([]);
+  });
+
+  it('どんなコマンドでも外へ出せる危険なパターン（ワイルドカード・シェル・ラッパー）は捨てる', () => {
+    const unsafe = ['*', ' * ', '* foo', 'bash *', 'sh -c *', 'env *', 'sudo *', 'xargs *', '$X *'];
+    for (const pattern of unsafe) {
+      expect(isUnsafeExtraExcludedCommand(pattern)).toBe(true);
+    }
+    expect(isUnsafeExtraExcludedCommand(CS_PY)).toBe(false);
+    expect(normalizeExtraExcludedCommands([...unsafe, CS_PY])).toEqual([CS_PY]);
+    const settings = buildClaudeSandboxSettings(
+      'workspace-write',
+      '/work',
+      { weakerNested: false },
+      ['*', 'bash *'],
+    );
+    expect((settings['sandbox'] as Record<string, unknown>)['excludedCommands']).toEqual([
+      ...EXCLUDED_COMMANDS,
+    ]);
+    expect(buildClaudeSandboxPrompt(['*', 'bash *'])).toBe(buildClaudeSandboxPrompt());
   });
 });
 

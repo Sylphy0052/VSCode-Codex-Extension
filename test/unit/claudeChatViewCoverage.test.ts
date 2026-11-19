@@ -859,6 +859,50 @@ describe('openTaskSessionの再開とsandbox', () => {
     expect(args).toContain('--append-system-prompt');
     expect(args[1]).toContain('enableWeakerNestedSandbox');
   });
+
+  it('設定で足した除外パターンをsandboxの設定・指示文・hookの判定へ渡し、危険なものは捨てて警告する（Issue #2133）', async () => {
+    const csPy = 'python3 /home/u/.claude/skills/compute-server/scripts/cs.py *';
+    __mock.setConfig('agent', {
+      claude: { sandbox: { extraExcludedCommands: [csPy, 'bash *', '*'] } },
+    });
+    const { calls } = stubStartCapturing();
+    vi.spyOn(ClaudeSandboxProbe.prototype, 'check').mockResolvedValue({
+      ok: true,
+      environment: { weakerNested: false },
+    });
+    vi.spyOn(ClaudeSandboxProbe.prototype, 'checkCwd').mockResolvedValue({ ok: true });
+    const manager = createManager();
+
+    await manager.openTaskSession({ ...TASK_INPUT, cliSandbox: 'workspace-write' });
+
+    const config = calls[0]?.config;
+    const args = config?.additionalArgs ?? [];
+    const settings = JSON.parse(args[1] ?? '{}') as { sandbox: { excludedCommands: string[] } };
+    expect(settings.sandbox.excludedCommands.at(-1)).toBe(csPy);
+    expect(settings.sandbox.excludedCommands).not.toContain('bash *');
+    expect(settings.sandbox.excludedCommands).not.toContain('*');
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toContain(
+      'python3 /home/u/.claude/skills/compute-server/scripts/cs.py',
+    );
+    expect(config?.sandboxBashGuard).toBe(true);
+    expect(config?.sandboxExtraExcludedCommands).toEqual([csPy]);
+    expect(
+      logged.warn.some((m) => m.includes('bash *') && m.includes('extraExcludedCommands')),
+    ).toBe(true);
+  });
+
+  it('sandboxが付かないときは除外パターンをhookへ渡さない（Issue #2133）', async () => {
+    __mock.setConfig('agent', {
+      claude: { sandbox: { extraExcludedCommands: ['python3 /x/cs.py *'] } },
+    });
+    const { calls } = stubStartCapturing();
+    const manager = createManager();
+
+    await manager.openTaskSession({ ...TASK_INPUT });
+
+    expect(calls[0]?.config.sandboxBashGuard).toBeUndefined();
+    expect(calls[0]?.config.sandboxExtraExcludedCommands).toBeUndefined();
+  });
 });
 
 describe('パネルの復元・名前変更・クリア', () => {
