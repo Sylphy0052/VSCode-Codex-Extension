@@ -12,7 +12,9 @@ import {
 import type { PendingItem } from '../../src/view/pendingItem';
 
 /** `.git`の置き場所だけを持つ偽のファイルシステム。 */
-function fakeFs(entries: Record<string, 'dir' | string>): Parameters<typeof createRepoResolver>[0] {
+function fakeFs(
+  entries: Record<string, 'dir' | string>,
+): NonNullable<Parameters<typeof createRepoResolver>[0]> {
   return {
     gitEntry: (dir) => {
       const entry = entries[`${dir}/.git`];
