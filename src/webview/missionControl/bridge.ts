@@ -31,6 +31,9 @@ export interface ControlResult {
   error?: string | undefined;
   approvals?: McApprovalDetail[] | undefined;
   turns?: McTurn[] | undefined;
+  /** `turns`の先頭が会話の何件目か（0始まり）と会話全体の件数（Issue #2157）。古い版は返さない。 */
+  turnStart?: number | undefined;
+  turnTotal?: number | undefined;
   handoff?: McHandoffDetail | undefined;
   sideQuestion?: McSideQuestion | undefined;
 }
@@ -55,6 +58,8 @@ export interface LiveTurns {
   ok: boolean;
   error?: string | undefined;
   turns?: McTurn[] | undefined;
+  turnStart?: number | undefined;
+  turnTotal?: number | undefined;
 }
 
 export interface Bridge {
@@ -174,6 +179,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           ok: message.ok,
           error: message.error,
           turns: message.turns,
+          turnStart: message.turnStart,
+          turnTotal: message.turnTotal,
         });
       }
       return;
@@ -187,6 +194,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           error: message.error,
           approvals: message.approvals,
           turns: message.turns,
+          turnStart: message.turnStart,
+          turnTotal: message.turnTotal,
           handoff: message.handoff,
           sideQuestion: message.sideQuestion,
         });

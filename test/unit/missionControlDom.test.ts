@@ -512,4 +512,269 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     await tick();
     expect(posted.filter((m) => m.action === 'send')).toHaveLength(1);
   });
+
+  it('詳細の会話を先頭まで遡り、会話内を検索して一致へ移り、ツール / diffをキーで開閉する（Issue #2157）', async () => {
+    const { window, posted, deliver } = boot();
+    // JSDOMにはscrollIntoViewが無い
+    window.HTMLElement.prototype.scrollIntoView = () => undefined;
+    const shiftKey = (k: string): void => {
+      window.document.dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: k, shiftKey: true, bubbles: true }),
+      );
+    };
+    const page = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) =>
+        from + i === 100
+          ? { role: 'tool', text: '出力に needle', title: '$ npm test', truncated: false }
+          : {
+              role: 'user',
+              text: `発言${from + i}${from + i === 5 ? ' needle' : ''}`,
+              truncated: false,
+            },
+      );
+    const answer = (before: number | undefined, from: number) => {
+      const request = posted.filter((m) => m.action === 'recentTurns').at(-1);
+      expect(request?.before).toBe(before);
+      deliver({
+        type: 'controlResult',
+        seq: request?.seq,
+        ok: true,
+        turns: page(from, before ?? 130),
+        turnStart: from,
+        turnTotal: 130,
+      });
+    };
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    answer(undefined, 80);
+    await tick();
+    const doc = window.document;
+    expect(doc.querySelectorAll('.turn-log .turn')).toHaveLength(50);
+    expect(doc.body.textContent).toContain('あと80件');
+    // ツール呼び出しは閉じて出し、Shift+Eで開く・もう一度で閉じる
+    expect(doc.querySelector('.turn.tool .turn-output')).toBeNull();
+    shiftKey('E');
+    await tick();
+    expect(doc.querySelector('.turn.tool .turn-output')?.textContent).toContain('出力に needle');
+    shiftKey('E');
+    await tick();
+    expect(doc.querySelector('.turn.tool .turn-output')).toBeNull();
+    // Shift+Oで古いやり取りを読み足す
+    shiftKey('O');
+    await tick();
+    answer(80, 30);
+    await tick();
+    expect(doc.querySelectorAll('.turn-log .turn')).toHaveLength(100);
+    // Shift+Sで検索欄へ移り、語を入れると先頭まで読み込んでから探す
+    shiftKey('S');
+    await tick();
+    const search = doc.querySelector('.turn-search-input') as HTMLInputElement;
+    expect(doc.activeElement).toBe(search);
+    search.value = 'needle';
+    search.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    answer(30, 0);
+    await tick();
+    expect(doc.querySelectorAll('.turn-log .turn')).toHaveLength(130);
+    expect(doc.body.textContent).toContain('会話の先頭');
+    expect(doc.querySelector('.turn-search-count')?.textContent).toBe('1 / 2件');
+    expect(doc.querySelector('.turn-match.current')?.closest('.turn')?.textContent).toContain(
+      '発言5',
+    );
+    // 入力欄から出て、Shift+Nで次の一致へ。閉じていたツールの出力は開いて見せる
+    search.blur();
+    shiftKey('N');
+    await tick();
+    expect(doc.querySelector('.turn-search-count')?.textContent).toBe('2 / 2件');
+    expect(doc.querySelector('.turn-match.current')?.closest('.turn-output')).not.toBeNull();
+    shiftKey('P');
+    await tick();
+    expect(doc.querySelector('.turn-search-count')?.textContent).toBe('1 / 2件');
+  });
+
+  describe('詳細の会話（Issue #2157）', () => {
+    const userPage = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => ({
+        role: 'user',
+        text: `発言${from + i}`,
+        truncated: false,
+      }));
+    const setup = async () => {
+      const env = boot();
+      const scrolled: string[] = [];
+      env.window.HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+        scrolled.push(this.textContent ?? '');
+      };
+      const shiftKey = (k: string): void => {
+        env.window.document.dispatchEvent(
+          new env.window.KeyboardEvent('keydown', { key: k, shiftKey: true, bubbles: true }),
+        );
+      };
+      const lastRequest = () => env.posted.filter((m) => m.action === 'recentTurns').at(-1);
+      const reply = (seq: unknown, turns: unknown[], start: number, total: number) => {
+        env.deliver({
+          type: 'controlResult',
+          seq,
+          ok: true,
+          turns,
+          turnStart: start,
+          turnTotal: total,
+        });
+      };
+      await tick();
+      env.deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+      await tick();
+      return { ...env, scrolled, shiftKey, lastRequest, reply };
+    };
+
+    it('検索語を変えると同じやり取りの別位置へスクロールし直す', async () => {
+      const { window, scrolled, lastRequest, reply } = await setup();
+      const long = `aaa${'x'.repeat(5000)}bbb`;
+      reply(lastRequest()?.seq, [{ role: 'agent', text: long, truncated: false }], 0, 1);
+      await tick();
+      const search = window.document.querySelector('.turn-search-input') as HTMLInputElement;
+      search.value = 'aaa';
+      search.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      search.value = 'bbb';
+      search.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      expect(scrolled).toEqual(['aaa', 'bbb']);
+    });
+
+    it('読み足し中に再読込して末尾が先へ進んでも、遅れて届いた古い応答で末尾を消さない', async () => {
+      const { window, posted, shiftKey, lastRequest, reply } = await setup();
+      reply(lastRequest()?.seq, userPage(80, 130), 80, 130);
+      await tick();
+      shiftKey('O');
+      await tick();
+      const olderSeq = lastRequest()?.seq;
+      expect(lastRequest()?.before).toBe(80);
+      (
+        Array.from(window.document.querySelectorAll('button')).find(
+          (b) => b.textContent === '再読込',
+        ) as HTMLButtonElement
+      ).click();
+      await tick();
+      const reloadSeq = lastRequest()?.seq;
+      expect(reloadSeq).not.toBe(olderSeq);
+      reply(reloadSeq, userPage(90, 140), 90, 140);
+      await tick();
+      reply(olderSeq, userPage(30, 80), 30, 130);
+      await tick();
+      const texts = Array.from(window.document.querySelectorAll('.turn-log .turn')).map(
+        (e) => e.textContent,
+      );
+      // 遅れて届いた古い範囲で、取り直した末尾（発言139）を消さない
+      expect(texts).toHaveLength(50);
+      expect(texts.at(-1)).toContain('発言139');
+      // 取り直した後の古い応答では続きを取らない
+      expect(posted.filter((m) => m.action === 'recentTurns').at(-1)?.seq).toBe(reloadSeq);
+    });
+
+    it('上端までスクロールすると古いやり取りを要求し、Shift+Oを繰り返して先頭まで届く', async () => {
+      const { window, shiftKey, lastRequest, reply } = await setup();
+      reply(lastRequest()?.seq, userPage(80, 130), 80, 130);
+      await tick();
+      const log = window.document.querySelector('.turn-log') as HTMLElement;
+      log.scrollTop = 0;
+      log.dispatchEvent(new window.Event('scroll'));
+      await tick();
+      expect(lastRequest()?.before).toBe(80);
+      reply(lastRequest()?.seq, userPage(30, 80), 30, 130);
+      await tick();
+      shiftKey('O');
+      await tick();
+      expect(lastRequest()?.before).toBe(30);
+      reply(lastRequest()?.seq, userPage(0, 30), 0, 130);
+      await tick();
+      const turns = window.document.querySelectorAll('.turn-log .turn');
+      expect(turns).toHaveLength(130);
+      expect(turns[0]?.textContent).toContain('発言0');
+      expect(window.document.body.textContent).toContain('会話の先頭');
+    });
+
+    it('入力欄のEnter / Shift+Enterで移動、一致なし表示、パレットとヘルプに載る', async () => {
+      const { window, key, lastRequest, reply } = await setup();
+      reply(
+        lastRequest()?.seq,
+        [
+          { role: 'user', text: 'foo one', truncated: false },
+          { role: 'agent', text: 'foo two foo three', truncated: false },
+        ],
+        0,
+        2,
+      );
+      await tick();
+      const doc = window.document;
+      const search = doc.querySelector('.turn-search-input') as HTMLInputElement;
+      search.value = 'foo';
+      search.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      const count = () => doc.querySelector('.turn-search-count')?.textContent;
+      expect(count()).toBe('1 / 3件');
+      search.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await tick();
+      expect(count()).toBe('2 / 3件');
+      search.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await tick();
+      search.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await tick();
+      expect(count()).toBe('1 / 3件');
+      search.dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }),
+      );
+      await tick();
+      expect(count()).toBe('3 / 3件');
+      search.value = 'zzz';
+      search.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      expect(count()).toBe('一致なし');
+      search.blur();
+      key(':');
+      await tick();
+      const palette = doc.body.textContent ?? '';
+      for (const label of [
+        '会話内を検索',
+        '会話内の次の一致へ',
+        '会話内の前の一致へ',
+        'まとめて開く',
+        '古いやり取りを読み足す',
+      ]) {
+        expect(palette).toContain(label);
+      }
+      const help = JSON.stringify(KEY_HELP);
+      for (const k of ['Shift+s', 'Shift+n', 'Shift+p', 'Shift+e', 'Shift+o']) {
+        expect(help.toLowerCase()).toContain(k.toLowerCase());
+      }
+    });
+
+    it('クリックで1件ずつ開閉、Shift+Eでまとめて開閉（diffも）', async () => {
+      const { window, shiftKey, lastRequest, reply } = await setup();
+      reply(
+        lastRequest()?.seq,
+        [
+          { role: 'tool', text: 'out1', title: '$ ls', truncated: false },
+          { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+        ],
+        0,
+        2,
+      );
+      await tick();
+      const doc = window.document;
+      const outputs = () => doc.querySelectorAll('.turn-output').length;
+      expect(outputs()).toBe(0);
+      (doc.querySelector('.turn.diff .turn-fold') as HTMLButtonElement).click();
+      await tick();
+      expect(doc.querySelector('.turn.diff .turn-output')?.textContent).toContain('+a');
+      expect(outputs()).toBe(1);
+      shiftKey('E');
+      await tick();
+      expect(outputs()).toBe(2);
+      shiftKey('E');
+      await tick();
+      expect(outputs()).toBe(0);
+    });
+  });
 });

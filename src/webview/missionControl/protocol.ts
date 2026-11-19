@@ -399,9 +399,12 @@ export interface McSideQuestion {
 }
 
 export interface McTurn {
-  role: 'user' | 'agent';
+  /** `tool`はツール呼び出し、`diff`はファイル変更（Issue #2157。詳細ペインで折りたたんで出す）。 */
+  role: 'user' | 'agent' | 'tool' | 'diff';
   text: string;
   truncated: boolean;
+  /** `tool` / `diff`の見出し（コマンド行・ツール名・変更したファイル）。 */
+  title?: string | undefined;
 }
 
 /** 拡張ホスト → webview。 */
@@ -414,6 +417,9 @@ export type McHostMessage =
       error?: string | undefined;
       approvals?: McApprovalDetail[] | undefined;
       turns?: McTurn[] | undefined;
+      /** `turns`の先頭が会話の何件目か（0始まり）と会話全体の件数（Issue #2157）。古い版は返さない。 */
+      turnStart?: number | undefined;
+      turnTotal?: number | undefined;
       /** `handoffDetail`の応答。保留が無ければ無い。 */
       handoff?: McHandoffDetail | undefined;
       /** `sideQuestion`・`sideQuestionResult`の応答。 */
@@ -447,6 +453,8 @@ export type McHostMessage =
       ok: boolean;
       error?: string | undefined;
       turns?: McTurn[] | undefined;
+      turnStart?: number | undefined;
+      turnTotal?: number | undefined;
     };
 
 /** 操作の宛先。 */
@@ -466,7 +474,8 @@ export type McControlAction =
   | { action: 'pauseLoop' }
   | { action: 'resumeLoop' }
   | { action: 'approvalDetail' }
-  | { action: 'recentTurns'; limit: number }
+  /** `before`を付けると、その件数目より前を取る（Issue #2157。古いやり取りを遡る）。 */
+  | { action: 'recentTurns'; limit: number; before?: number | undefined }
   | { action: 'send'; text: string }
   | { action: 'approvalDecision'; approvalRequestId: string; decision: 'accept' | 'decline' }
   | { action: 'answerQuestion'; pendingRequestId: string; answers: Record<string, string[]> }

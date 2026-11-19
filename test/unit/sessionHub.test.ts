@@ -14,7 +14,10 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatItem } from '../../src/appserver/chatState';
 import type { Logger } from '../../src/log';
+import { readTurnPage } from '../../src/view/chatManagerBase';
+import { parseAction } from '../../src/view/sessionControlMessage';
 import {
   generateWindowId,
   isSharedApprovalDecision,
@@ -953,11 +956,11 @@ describe('SessionHubRequestPort', () => {
       'str',
       { role: 'system', text: 'x' },
       { role: 'user', text: 5 },
-      { role: 'user', text: 'u'.repeat(2500) },
+      { role: 'user', text: 'u'.repeat(10_500) },
       { role: 'agent', text: 'short', truncated: true },
       { role: 'agent', text: 'plain' },
     ];
-    for (let i = 0; i < 50; i += 1) {
+    for (let i = 0; i < 70; i += 1) {
       entries.push({ role: 'user', text: `n${i}` });
     }
     respondWith(target, (requestId) =>
@@ -970,11 +973,59 @@ describe('SessionHubRequestPort', () => {
       limit: 10,
     });
     const turns = reply.payload?.turns ?? [];
-    expect(turns).toHaveLength(40);
-    expect(turns[0]).toEqual({ role: 'user', text: 'u'.repeat(2000), truncated: true });
+    expect(turns).toHaveLength(60);
+    expect(turns[0]).toEqual({ role: 'user', text: 'u'.repeat(10_000), truncated: true });
     expect(turns[1]).toEqual({ role: 'agent', text: 'short', truncated: true });
     expect(turns[2]).toEqual({ role: 'agent', text: 'plain', truncated: false });
     expect(reply.payload?.capturedAt).toBe(123);
+  });
+
+  it('ツール呼び出し・diffと範囲を読む（Issue #2157）', async () => {
+    const turns = [
+      { role: 'user', text: 'q' },
+      { role: 'tool', text: 'out', title: '$ ls', truncated: false },
+      { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+    ];
+    respondWith(target, (requestId) =>
+      JSON.stringify({ requestId, ok: true, payload: { turns, turnStart: 7, turnTotal: 10 } }),
+    );
+    const reply = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'codex',
+      threadId: 't',
+      limit: 3,
+      before: 10,
+    });
+    expect(reply.payload?.turns?.map((t) => [t.role, t.title])).toEqual([
+      ['user', undefined],
+      ['tool', '$ ls'],
+      ['diff', 'update a.ts'],
+    ]);
+    expect([reply.payload?.turnStart, reply.payload?.turnTotal]).toEqual([7, 10]);
+  });
+
+  it('要素を落とした応答では範囲を捨てる（Issue #2157）', async () => {
+    const turns = [
+      { role: 'user', text: 'q' },
+      { role: 'tool', text: 'out', title: '$ ls', truncated: false },
+      { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+    ];
+    respondWith(target, (requestId) =>
+      JSON.stringify({
+        requestId,
+        ok: true,
+        payload: { turns: [...turns, { role: 'system', text: 'x' }], turnStart: 6, turnTotal: 10 },
+      }),
+    );
+    const broken = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'codex',
+      threadId: 't',
+      limit: 4,
+    });
+    expect(broken.payload?.turns).toHaveLength(3);
+    expect(broken.payload?.turnStart).toBeUndefined();
+    expect(broken.payload?.turnTotal).toBeUndefined();
   });
 
   it('turnsのcapturedAtが数値でなければ省く', async () => {
@@ -1138,5 +1189,86 @@ describe('SessionHubRequestPort', () => {
     });
     expect(reply).toMatchObject({ ok: false, error: 'denied' });
     expect(reply.payload).toBeUndefined();
+  });
+});
+
+describe('会話を範囲指定で遡る（Issue #2157）', () => {
+  it('他ウィンドウの会話も、session-hub越しにbeforeを辿って先頭まで届く（ツール・diff・長文混じり）', async () => {
+    expect(parseAction({ action: 'recentTurns', limit: 50, before: 80 })).toEqual({
+      kind: 'recentTurns',
+      limit: 50,
+      before: 80,
+    });
+    const items: ChatItem[] = [];
+    for (let i = 0; i < 160; i += 1) {
+      const base = { id: `i${i}`, detail: 'ls', status: undefined, turnId: undefined, diffs: [] };
+      if (i % 5 === 0) {
+        items.push({ ...base, kind: 'reasoning', text: '考え中' } as ChatItem);
+      } else if (i % 7 === 0) {
+        items.push({
+          ...base,
+          kind: 'fileChange',
+          text: '',
+          diffs: [{ path: `a${i}.ts`, kind: 'update', movePath: undefined, diff: `+${i}` }],
+        } as ChatItem);
+      } else if (i % 11 === 0) {
+        items.push({ ...base, kind: 'commandExecution', text: `out${i}` } as ChatItem);
+      } else {
+        // 長文（8,000字超）を混ぜて1回分の本文の上限（120,000字）に掛ける
+        const text = i % 3 === 0 ? `m${i} ${'x'.repeat(9_000)}` : `m${i}`;
+        items.push({
+          ...base,
+          kind: i % 2 === 0 ? 'userMessage' : 'agentMessage',
+          text,
+        } as ChatItem);
+      }
+    }
+    const target = randomUUID();
+    track(
+      new SessionHubRequestWatcher(
+        root,
+        target,
+        (req) => {
+          const page = readTurnPage({ items }, req.limit ?? 1, req.before);
+          return {
+            ok: true,
+            payload: { turns: page.turns, turnStart: page.start, turnTotal: page.total },
+          };
+        },
+        makeLog(),
+      ),
+    ).start();
+    const port = new SessionHubRequestPort(root, randomUUID(), makeLog());
+    const pages: Array<[number | undefined, number]> = [];
+    let before: number | undefined;
+    const all: string[] = [];
+    let total: number | undefined;
+    for (let n = 0; n < 20; n += 1) {
+      const reply = await port.request(target, {
+        kind: 'recentTurns',
+        provider: 'codex',
+        threadId: 't',
+        limit: 50,
+        before,
+      });
+      expect(reply.ok).toBe(true);
+      const start = reply.payload?.turnStart;
+      total = reply.payload?.turnTotal;
+      const got = reply.payload?.turns ?? [];
+      pages.push([start, got.length]);
+      all.unshift(...got.map((t) => `${t.role}:${(t.title ?? t.text).slice(0, 8)}`));
+      expect(start).toBeDefined();
+      if (start === 0) {
+        break;
+      }
+      before = start;
+    }
+    const expected = readTurnPage({ items }, 1).total;
+    expect(total).toBe(expected);
+    expect(expected).toBeGreaterThan(100);
+    expect(all).toHaveLength(expected);
+    expect(all[0]).toMatch(/^agent:m1/);
+    // 長文で件数が減ったページがある
+    expect(pages.some(([, len]) => len < 50)).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
-import type { ChatState, PendingApproval } from '../appserver/chatState';
+import type { ChatItem, ChatState, PendingApproval } from '../appserver/chatState';
 import type { PendingPrompt, PromptSubmission } from '../appserver/prompts';
 import type { AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { toTrackedChatState, type ChatConversationTracker } from '../chat/chatConversationTracker';
@@ -225,11 +225,30 @@ export interface BaseChatPanel {
  *
  * 要求側が件数を指定するが、共有ディレクトリへ書くのは別プロセスなので、受信側で丸める。
  * 大きな値をそのまま通すと、会話全体を1回の応答へ載せることになる。
+ *
+ * Issue #2157で、Mission Controlが範囲指定（`before`）で会話の先頭まで遡れるようにした。
+ * 1回の上限は残し、遡るときは要求側が何回かに分けて取る。
  */
-const MAX_RECENT_TURNS = 20;
+const MAX_RECENT_TURNS = 50;
 
-/** 1件の本文の上限。カードは流れを掴むためのもので、全文はタブ側で読む。 */
-const MAX_RECENT_TURN_CHARS = 600;
+/**
+ * 1件の本文の上限（Issue #2157で600字から引き上げた）。Mission Controlの詳細ペインで
+ * 会話を読むため、発言はほぼ全文を載せる。それでも上限を外さないのは、応答ファイルが
+ * 共有ディレクトリを経由するため。
+ */
+const MAX_RECENT_TURN_CHARS = 8_000;
+
+/** ツール呼び出しの出力・diffの上限（Issue #2157）。折りたたんで出す補足なので短めにとる。 */
+const MAX_RECENT_TOOL_CHARS = 2_000;
+
+/** `tool` / `diff`の見出しの上限（Issue #2157）。 */
+const MAX_RECENT_TITLE_CHARS = 500;
+
+/**
+ * 1回の応答に載せる本文の合計の上限（Issue #2157）。長い発言が続く範囲では件数を減らして
+ * 返す（要求側は返ってきた`turnStart`から続きを取る）。1件目は上限を超えても必ず載せる。
+ */
+const MAX_RECENT_PAGE_CHARS = 120_000;
 
 /**
  * 脇道の質問の回答を返すときの上限（Issue #1261）。
@@ -276,8 +295,11 @@ export type SessionControlAction =
   | { kind: 'approvalDetail' }
   /** 取り寄せた中身に対する承認・拒否（Issue #1259）。 */
   | { kind: 'approvalDecision'; approvalRequestId: string; decision: SharedApprovalDecision }
-  /** 会話の直近のやり取りを取り寄せる（Issue #1260）。カードを展開している間だけ送る。 */
-  | { kind: 'recentTurns'; limit: number }
+  /**
+   * 会話の直近のやり取りを取り寄せる（Issue #1260）。カードを展開している間だけ送る。
+   * `before`を付けると、その件数目より前を取る（Issue #2157。古いやり取りを遡る）。
+   */
+  | { kind: 'recentTurns'; limit: number; before?: number | undefined }
   /** 脇道の質問を投げる（Issue #1261）。回答を待たず、受け付けたことだけを返す。 */
   | { kind: 'sideQuestion'; text: string }
   /** 投げた脇道の質問の進み具合を取りに行く（Issue #1261）。 */
@@ -320,6 +342,9 @@ export interface SessionControlResult {
   turns?: SessionRecentTurn[] | undefined;
   /** `turns`を作った時刻（Issue #1260）。 */
   capturedAt?: number | undefined;
+  /** `turns`の先頭が会話の何件目か（0始まり）と、会話全体の件数（Issue #2157）。 */
+  turnStart?: number | undefined;
+  turnTotal?: number | undefined;
   /** `kind === 'sideQuestion'` / `'sideQuestionResult'`のときだけ入る（Issue #1261）。 */
   sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`のときだけ入る、保留中の引き継ぎ確認（Issue #1280）。 */
@@ -482,33 +507,125 @@ export function readRecentTurns(
   state: Pick<ChatState, 'items'>,
   limit: number,
 ): SessionRecentTurn[] {
+  return readTurnPage(state, limit).turns;
+}
+
+/** `readTurnPage`の結果（Issue #2157）。 */
+export interface TurnPage {
+  turns: SessionRecentTurn[];
+  /** `turns[0]`が会話の何件目か（0始まり）。 */
+  start: number;
+  /** 会話全体の件数。 */
+  total: number;
+}
+
+/** ツール呼び出しとして載せる項目の種類と、見出しの前置き（Issue #2157）。 */
+const TOOL_TURN_PREFIX: Readonly<Record<string, string>> = {
+  commandExecution: '$ ',
+  mcpToolCall: 'ツール: ',
+  fileRead: '読み取り: ',
+  webSearch: '検索: ',
+};
+
+function capText(text: string, max: number): { text: string; truncated: boolean } {
+  // 切り詰めは末尾ではなく先頭を残す。発言の書き出しの方が何の話か判りやすい
+  return text.length > max
+    ? { text: text.slice(0, max), truncated: true }
+    : { text, truncated: false };
+}
+
+/**
+ * やり取りとして載せる項目か（Issue #2157）。位置（`turnStart`）はこれが真の項目だけで数える。
+ * 長い会話で毎回全件をたどるため、本文の複製を作らずに判定する。
+ */
+function isTurnItem(item: ChatItem): boolean {
+  if (item.kind === 'userMessage' || item.kind === 'agentMessage') {
+    return /\S/u.test(item.text);
+  }
+  if (item.kind === 'fileChange') {
+    return item.diffs.length > 0;
+  }
+  return TOOL_TURN_PREFIX[item.kind] !== undefined;
+}
+
+/** 会話の項目1件を、やり取り1件へ変える（Issue #2157）。載せない項目は`undefined`。 */
+function toRecentTurn(item: ChatItem): SessionRecentTurn | undefined {
+  if (!isTurnItem(item)) {
+    return undefined;
+  }
+  if (item.kind === 'userMessage' || item.kind === 'agentMessage') {
+    const text = item.text.trim();
+    return {
+      role: item.kind === 'userMessage' ? 'user' : 'agent',
+      ...capText(text, MAX_RECENT_TURN_CHARS),
+    };
+  }
+  if (item.kind === 'fileChange') {
+    const title = item.diffs
+      .map(
+        (diff) =>
+          `${diff.kind} ${diff.movePath === undefined ? diff.path : `${diff.path} → ${diff.movePath}`}`,
+      )
+      .join(', ');
+    const body = item.diffs.map((diff) => diff.diff).join('\n');
+    return {
+      role: 'diff',
+      ...capText(body, MAX_RECENT_TOOL_CHARS),
+      title: capText(title, MAX_RECENT_TITLE_CHARS).text,
+    };
+  }
+  const prefix = TOOL_TURN_PREFIX[item.kind] ?? '';
+  const output = capText(item.text, MAX_RECENT_TOOL_CHARS);
+  return {
+    role: 'tool',
+    text: output.text,
+    // 退避した出力（issue #1325）は`text`が末尾のプレビューだけなので、続きがあるものとして扱う
+    truncated: output.truncated || item.truncated === true || item.outputOffloaded === true,
+    title: capText(`${prefix}${item.detail}`, MAX_RECENT_TITLE_CHARS).text,
+  };
+}
+
+/**
+ * 会話のやり取りを範囲指定で取る（Issue #2157）。
+ *
+ * `before`（0始まり・含まない）より前の`limit`件を返す。`before`を省くと末尾から取る。
+ * 件数は`MAX_RECENT_TURNS`、本文の合計は`MAX_RECENT_PAGE_CHARS`で頭打ちにする。
+ * 要求側は返ってきた`start`を次の`before`にして先頭まで遡る。
+ */
+export function readTurnPage(
+  state: Pick<ChatState, 'items'>,
+  limit: number,
+  before?: number,
+): TurnPage {
   // NaN・Infinityは丸めを素通りして件数の比較を常に偽にする（1件も返らない）。
   // 呼び出し側が形だけ確かめて渡すため、ここで使える値へ倒しておく
   const count = Number.isFinite(limit)
     ? Math.min(Math.max(Math.trunc(limit), 1), MAX_RECENT_TURNS)
     : 1;
+  // 位置を数えるため、載せる項目は全件たどる（変換は範囲に入った分だけ）
+  const eligible = state.items.filter(isTurnItem);
+  const total = eligible.length;
+  const end =
+    before !== undefined && Number.isFinite(before)
+      ? Math.min(Math.max(Math.trunc(before), 0), total)
+      : total;
   const turns: SessionRecentTurn[] = [];
-  // 末尾から必要な分だけ遡る。長い会話で全件を走査しない
-  for (let i = state.items.length - 1; i >= 0 && turns.length < count; i -= 1) {
-    const item = state.items[i];
-    if (item === undefined) {
-      continue;
+  let chars = 0;
+  let start = end;
+  while (start > 0 && turns.length < count) {
+    const turn = toRecentTurn(eligible[start - 1] as ChatItem);
+    if (turn === undefined) {
+      break;
     }
-    const role =
-      item.kind === 'userMessage' ? 'user' : item.kind === 'agentMessage' ? 'agent' : undefined;
-    if (role === undefined || item.text.trim() === '') {
-      continue;
+    const size = turn.text.length + (turn.title?.length ?? 0);
+    if (turns.length > 0 && chars + size > MAX_RECENT_PAGE_CHARS) {
+      break;
     }
-    const text = item.text.trim();
-    const truncated = text.length > MAX_RECENT_TURN_CHARS;
-    turns.push({
-      role,
-      // 切り詰めは末尾ではなく先頭を残す。発言の書き出しの方が何の話か判りやすい
-      text: truncated ? text.slice(0, MAX_RECENT_TURN_CHARS) : text,
-      truncated,
-    });
+    chars += size;
+    turns.push(turn);
+    start -= 1;
   }
-  return turns.reverse();
+  return { turns: turns.reverse(), start, total };
 }
 
 /**
@@ -1431,12 +1548,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       }
       case 'approvalDetail':
         return { ok: true, approvals: describePendingApprovals(entry.session.getState()) };
-      case 'recentTurns':
+      case 'recentTurns': {
+        const page = readTurnPage(entry.session.getState(), action.limit, action.before);
         return {
           ok: true,
-          turns: readRecentTurns(entry.session.getState(), action.limit),
+          turns: page.turns,
           capturedAt: Date.now(),
+          turnStart: page.start,
+          turnTotal: page.total,
         };
+      }
       case 'approvalDecision': {
         const state = entry.session.getState();
         // 取り寄せてから押すまでの間に、タブ側やTUIで解決されていることがある。
