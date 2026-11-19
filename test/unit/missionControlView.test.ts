@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../../src/log';
+import { readMissionControlStallMs } from '../../src/view/missionControlLauncher';
 import { MissionControlViewManager } from '../../src/view/missionControlView';
 import type { McSnapshot } from '../../src/webview/missionControl/protocol';
 import { __mock, Uri, type FakeWebviewPanel } from '../mocks/vscode';
@@ -17,6 +18,7 @@ function snapshot(pendingCount: number): McSnapshot {
     windowId: 'w1',
     repos: [],
     sessions: [],
+    stallMs: 300_000,
     pending: Array.from({ length: pendingCount }, (_, i) => ({
       id: `p${String(i)}`,
       kind: 'toolApproval' as const,
@@ -100,6 +102,139 @@ describe('MissionControlViewManager（Issue #2136）', () => {
       { windowId: 'w2', provider: 'claude', threadId: 't' },
       { kind: 'approvalDecision', approvalRequestId: '1', decision: 'accept' },
     );
+  });
+
+  describe('ライブtail（Issue #2137の3）', () => {
+    const okTurns = () => Promise.resolve({ ok: true, turns: [] });
+    const liveCount = (panel: FakeWebviewPanel) =>
+      panel.webview.sent.filter((m) => (m as { type?: string }).type === 'liveTurns').length;
+
+    it('他ウィンドウのセッションは選択中・表示中だけ取り直し、隠す・外す・閉じると止まる', async () => {
+      vi.useFakeTimers();
+      try {
+        const control = vi.fn(okTurns);
+        const { view, panel } = open(() => snapshot(0), control);
+        panel.webview.simulateMessage({ type: 'ready' });
+        panel.webview.simulateMessage({
+          type: 'watch',
+          target: { windowId: 'w2', provider: 'codex', threadId: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(control).toHaveBeenCalledTimes(1);
+        expect(control).toHaveBeenLastCalledWith(
+          { windowId: 'w2', provider: 'codex', threadId: 't' },
+          { kind: 'recentTurns', limit: 6 },
+        );
+        await vi.advanceTimersByTimeAsync(4_000);
+        expect(control).toHaveBeenCalledTimes(3);
+        expect(liveCount(panel)).toBe(3);
+
+        // 背面へ回ると止まり、表へ戻ると再開する
+        panel.simulateVisibilityChange(false);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(control).toHaveBeenCalledTimes(3);
+        panel.simulateVisibilityChange(true);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(control).toHaveBeenCalledTimes(5);
+
+        // 選択を外すと止まる
+        panel.webview.simulateMessage({ type: 'watch', target: undefined });
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(control).toHaveBeenCalledTimes(5);
+
+        // 閉じると止まり、タイマーも残らない
+        panel.webview.simulateMessage({
+          type: 'watch',
+          target: { windowId: 'w2', provider: 'codex', threadId: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        const before = control.mock.calls.length;
+        view.dispose();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(control).toHaveBeenCalledTimes(before);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('自ウィンドウのセッションは間隔で取り直さず、状態の変化ごとに送る', async () => {
+      vi.useFakeTimers();
+      try {
+        const control = vi.fn(okTurns);
+        const { view, panel } = open(() => snapshot(0), control);
+        panel.webview.simulateMessage({ type: 'ready' });
+        panel.webview.simulateMessage({
+          type: 'watch',
+          target: { windowId: 'w1', provider: 'codex', threadId: 't' },
+        });
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(control).toHaveBeenCalledTimes(1);
+        view.refresh();
+        await vi.advanceTimersByTimeAsync(300);
+        expect(control).toHaveBeenCalledTimes(2);
+        view.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('webviewからの起動の要求は形を確かめ、不正ならlauncherへ渡さずに理由を返す', async () => {
+    const launch = vi.fn();
+    const launcher = { options: vi.fn(), pickFolder: vi.fn(), launch };
+    const view = new MissionControlViewManager(
+      () => snapshot(0),
+      vi.fn(),
+      Uri.file('/ext') as never,
+      log,
+      launcher,
+    );
+    view.show();
+    const panel = __mock.lastCreatedPanel() as FakeWebviewPanel;
+    for (const [seq, bad] of [
+      [1, { cwd: 'relative/dir', provider: 'codex', prompt: '', worktree: false }],
+      [2, { cwd: '/a\nb', provider: 'codex', prompt: '', worktree: false }],
+      [3, { cwd: '/repo', provider: 'gpt', prompt: '', worktree: false }],
+      [4, { cwd: '/repo', provider: 'codex', prompt: 1, worktree: false }],
+      [5, { cwd: '/repo', provider: 'codex', prompt: '', worktree: 'yes' }],
+    ] as const) {
+      panel.webview.simulateMessage({ type: 'launch', seq, ...bad });
+    }
+    await vi.waitFor(() =>
+      expect(
+        panel.webview.sent.filter((m) => (m as { type?: string }).type === 'reply'),
+      ).toHaveLength(5),
+    );
+    expect(launch).not.toHaveBeenCalled();
+    for (const m of panel.webview.sent.filter((x) => (x as { type?: string }).type === 'reply')) {
+      expect(m).toMatchObject({ ok: false });
+    }
+    view.dispose();
+  });
+
+  it('停滞の設定は既定5分で、範囲外・数値でない値は既定へ丸める（Issue #2137の5）', () => {
+    const cases: Array<[unknown, number]> = [
+      [undefined, 300_000],
+      [10, 600_000],
+      [1, 60_000],
+      [1440, 86_400_000],
+      [0, 300_000],
+      [1441, 300_000],
+      ['10', 300_000],
+      [Number.NaN, 300_000],
+    ];
+    try {
+      for (const [value, expected] of cases) {
+        __mock.setConfig(
+          'agent',
+          value === undefined ? {} : { missionControl: { stallMinutes: value } },
+        );
+        expect(readMissionControlStallMs()).toBe(expected);
+      }
+    } finally {
+      __mock.setConfig('agent', {});
+    }
   });
 
   it('Reload後の復元でパネルを引き取り、2枚目は持たない', () => {

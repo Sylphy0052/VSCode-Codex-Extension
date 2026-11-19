@@ -236,7 +236,14 @@ import {
   ActivitySince,
   buildMissionControlSnapshot,
   createRepoResolver,
+  lastOutputLine,
+  LastOutputTracker,
+  outputFingerprint,
 } from './view/missionControlModel';
+import {
+  createMissionControlLauncher,
+  readMissionControlStallMs,
+} from './view/missionControlLauncher';
 import { MISSION_CONTROL_OPEN_COMMAND, MissionControlViewManager } from './view/missionControlView';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
@@ -1457,6 +1464,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // `ManagedChatSession`へ項目が増えるたびに、意図しない値が共有ファイルへ流れ出す
   // 待ち項目（Issue #2135）を最初に見た時刻。状態側に発生時刻が無いため、ここで覚える
   const pendingFirstSeen = new PendingFirstSeen();
+  // 出力が最後に動いた時刻（Issue #2137の5、停滞の判定）。状態が変わるたびにここが呼ばれる
+  const lastOutputTracker = new LastOutputTracker();
   const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] => {
     const manager = provider === 'codex' ? chat : claudeChat;
     return manager.managedSessions().map((session) => {
@@ -1468,6 +1477,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         activity: session.activity,
         loop: session.loop,
         provider,
+        lastOutput: state === undefined ? undefined : lastOutputLine(state.items),
+        lastOutputAt:
+          state === undefined
+            ? undefined
+            : lastOutputTracker.observe(
+                `${provider}:${session.threadId}`,
+                outputFingerprint(state.items),
+              ),
         pending:
           state === undefined
             ? []
@@ -1487,6 +1504,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   };
   const currentWindowSessions = (): SharedSession[] => {
     const sessions = [...toSharedSessions('codex'), ...toSharedSessions('claude')];
+    lastOutputTracker.retain(
+      new Set(sessions.map((session) => `${session.provider}:${session.threadId}`)),
+    );
     pendingFirstSeen.retain(
       new Set(sessions.flatMap((session) => (session.pending ?? []).map((item) => item.id))),
     );
@@ -1885,10 +1905,30 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         resolveRepo: missionControlRepoResolver,
         activitySince: missionControlActivitySince,
         now: Date.now(),
+        stallMs: readMissionControlStallMs(),
       }),
     controlSessionAnywhere,
     context.extensionUri,
     log,
+    createMissionControlLauncher({
+      resolveRepo: missionControlRepoResolver,
+      globalState: context.globalState,
+      sessionCwds: () => [
+        ...currentWindowSessions().map((session) => session.cwd),
+        ...sessionHubReader
+          .getOthers()
+          .flatMap((window) => window.sessions.map((session) => session.cwd)),
+      ],
+      historyCwds: async () =>
+        (await store.list({ scope: 'all', workspaceFolders: [], maxEntries: 200 })).sessions.map(
+          (session) => session.cwd,
+        ),
+      open: (provider, cwd, prompt) => {
+        const manager = provider === 'codex' ? chat : claudeChat;
+        return prompt.trim() === '' ? manager.openNew(cwd) : manager.openNewWithPrompt(cwd, prompt);
+      },
+      log,
+    }),
   );
   const forgeHub = new ForgeHubViewManager(
     new ForgeHubService({

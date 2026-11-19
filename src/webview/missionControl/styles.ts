@@ -85,4 +85,12 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .help-box kbd { font-family: var(--vscode-editor-font-family, monospace); }
 .toast { position: fixed; right: 12px; bottom: 12px; padding: 6px 10px; border-radius: 4px; color: var(--vscode-notifications-foreground, var(--vscode-foreground)); background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); border: 1px solid var(--vscode-notifications-border, var(--vscode-panel-border)); }
 .toast:empty { display: none; }
+.pill.stalled { --pill: var(--vscode-charts-red); }
+.row-out { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-descriptionForeground); }
+.grid .row-out { grid-column: 1 / 3; }
+.composer { display: grid; gap: 4px; margin-top: 8px; }
+.warn { color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow)); }
+.launch-box { width: min(560px, 92vw); display: grid; gap: 8px; }
+.launch-box label { display: grid; gap: 2px; }
+.launch-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 `;

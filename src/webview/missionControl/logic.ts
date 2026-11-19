@@ -245,6 +245,7 @@ export type McKeyCommand =
   | { kind: 'reply' }
   | { kind: 'search' }
   | { kind: 'help' }
+  | { kind: 'newSession' }
   | { kind: 'escape' };
 
 export interface McKeyInput {
@@ -282,6 +283,8 @@ export function mapKey(input: McKeyInput): McKeyCommand | undefined {
       return { kind: 'search' };
     case '?':
       return { kind: 'help' };
+    case 'n':
+      return { kind: 'newSession' };
     default:
       break;
   }
@@ -308,6 +311,45 @@ export function moveSelection(
   return ids[next];
 }
 
+/**
+ * スナップショットが変わったときの選択の扱い。
+ *
+ * 選択中の行が一覧に残っていればそのまま。消えた（回答済み・絞り込み）ら選択を外す。同じ位置の
+ * 別の行へ移すと、遅れて押した`a` / `d` / 数字が別の項目への回答になる（段階2のレビュー）。
+ * `autoSelect`（最初の表示。Reload前の選択が残っていないときを含む）の間だけ先頭を選ぶ。
+ */
+export function reconcileSelection(
+  ids: readonly string[],
+  current: string | undefined,
+  autoSelect: boolean,
+): string | undefined {
+  if (current !== undefined && ids.includes(current)) {
+    return current;
+  }
+  return autoSelect ? ids[0] : undefined;
+}
+
+/**
+ * 停滞（Issue #2137の5）。実行中なのに、出力が`stallMs`以上動いていないセッション。
+ * 出力の時刻を持たない（古い版のウィンドウの）セッションは判定しない。
+ */
+export function isStalled(
+  session: Pick<McSession, 'activity' | 'lastOutputAt'>,
+  now: number,
+  stallMs: number,
+): boolean {
+  return (
+    session.activity === 'running' &&
+    session.lastOutputAt !== undefined &&
+    now - session.lastOutputAt >= stallMs
+  );
+}
+
+/** 同じrepoで開いているセッションの数（新規起動でworktreeを既定ONにするかの判断）。 */
+export function countSessionsInRepo(sessions: readonly McSession[], repoKey: string): number {
+  return sessions.filter((session) => session.repoKey === repoKey).length;
+}
+
 /** 画面に出すキーの一覧（`?`）。 */
 export const KEY_HELP: ReadonlyArray<[string, string]> = [
   ['j / k', '次 / 前の項目'],
@@ -316,6 +358,7 @@ export const KEY_HELP: ReadonlyArray<[string, string]> = [
   ['a', '承認 / 回答を送る'],
   ['d', '拒否'],
   ['r', '返信欄へ移る'],
+  ['n', '新規セッション'],
   ['/', '検索'],
   ['?', 'この一覧'],
   ['Esc', '閉じる / 入力欄から出る'],

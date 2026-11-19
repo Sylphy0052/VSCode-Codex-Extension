@@ -12,23 +12,28 @@ import type { Bridge, ControlResult } from './bridge';
 import { KindIcon, ProviderIcon } from './icons';
 import {
   ACTIVITY_LABELS,
+  countSessionsInRepo,
   EMPTY_FILTER,
   filterPending,
   filterSessions,
   formatElapsed,
   groupSessionsByRepo,
+  isStalled,
   KEY_HELP,
   mapKey,
   moveSelection,
   needsApprovalDetail,
   PENDING_KIND_LABELS,
+  reconcileSelection,
   type McFilter,
   type McProviderFilter,
 } from './logic';
 import type {
   McApprovalDetail,
   McControlAction,
+  McLaunchRepo,
   McPendingItem,
+  McProvider,
   McRepo,
   McSession,
   McSnapshot,
@@ -142,7 +147,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const detailRef = useRef<HTMLDivElement | null>(null);
   const formKeys: FormKeysRef = useRef(null);
-  const lastIndex = useRef(0);
+  /** 最初のスナップショットを受けるまでは先頭を自動で選ぶ。 */
+  const autoSelect = useRef(true);
+  const [launchOpen, setLaunchOpen] = useState(false);
 
   useEffect(() => {
     const off = bridge.onSnapshot((next) => {
@@ -186,17 +193,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     [pending, groups],
   );
 
-  // 選択中の行が消えた（回答済み・絞り込み）ら、同じ位置の行へ移す。未選択なら先頭を選ぶ
+  // 選択中の行が消えた（回答済み・絞り込み）ら選択を外す。同じ位置の別の行へ移すと、遅れて
+  // 押した回答キーが別の項目へ届く。先頭を選ぶのは最初のスナップショットのときだけ
   useEffect(() => {
     if (snapshot === undefined) {
       return;
     }
-    const index = selected === undefined ? -1 : rowIds.indexOf(selected);
-    if (index >= 0) {
-      lastIndex.current = index;
-      return;
-    }
-    const next = rowIds[Math.min(lastIndex.current, rowIds.length - 1)];
+    const next = reconcileSelection(rowIds, selected, autoSelect.current);
+    autoSelect.current = false;
     if (next !== selected) {
       setSelected(next);
     }
@@ -262,6 +266,33 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     // 選択が変わったときだけ取り寄せ直す
   }, [selectedPendingId, detailKey]);
 
+  // ライブtail（Issue #2137の3）。詳細で選んでいるセッションを拡張ホストへ伝え、届いた
+  // やり取りで差し替える。取り直しの間隔・止めどきは拡張ホストが持つ
+  useEffect(() => {
+    bridge.watch(detailTarget);
+  }, [detailKey]);
+  useEffect(() => {
+    const off = bridge.onLiveTurns((live) => {
+      const key = targetKey(live.target);
+      setTurns((prev) => {
+        if (live.ok) {
+          return { ...prev, [key]: { status: 'ok', value: live.turns ?? [] } };
+        }
+        // 一時的な失敗では、取れていたやり取りを消さない
+        return prev[key]?.status === 'ok'
+          ? prev
+          : {
+              ...prev,
+              [key]: { status: 'error', error: live.error ?? 'やり取りを取り寄せられませんでした' },
+            };
+      });
+    });
+    return () => {
+      off();
+      bridge.watch(undefined);
+    };
+  }, [bridge]);
+
   const submitFor =
     (item: McPendingItem): Submit =>
     async (action: McControlAction) => {
@@ -304,9 +335,19 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     });
   };
 
+  /** composerからの指示（Issue #2137の4）。失敗の理由は呼び出し側（composer）で出す。 */
+  const sendTo = async (session: McSession, text: string): Promise<string | undefined> => {
+    const result = await bridge.request(session, { action: 'send', text });
+    if (!result.ok) {
+      return result.error ?? '指示を送れませんでした';
+    }
+    setToast('指示を送りました');
+    return undefined;
+  };
+
   // キーボード操作（Issue #2136の5）。最新の状態をrefで読む
-  const latest = useRef({ rowIds, selected, helpOpen });
-  latest.current = { rowIds, selected, helpOpen };
+  const latest = useRef({ rowIds, selected, helpOpen, launchOpen });
+  latest.current = { rowIds, selected, helpOpen, launchOpen };
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       const editable = isEditable(event.target);
@@ -324,6 +365,16 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       }
       const state = latest.current;
       if (state.helpOpen && command.kind !== 'help' && command.kind !== 'escape') {
+        return;
+      }
+      // 新規起動の画面を出している間は、一覧・回答のキーを効かせない（Escで閉じるだけ）
+      if (state.launchOpen) {
+        if (command.kind === 'escape' && !editable) {
+          event.preventDefault();
+          setLaunchOpen(false);
+        } else if (command.kind === 'escape' && event.target instanceof HTMLElement) {
+          event.target.blur();
+        }
         return;
       }
       event.preventDefault();
@@ -354,6 +405,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         case 'help':
           setHelpOpen((open) => !open);
           return;
+        case 'newSession':
+          setLaunchOpen(true);
+          return;
         case 'escape':
           if (state.helpOpen) {
             setHelpOpen(false);
@@ -371,7 +425,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           formKeys.current?.decline();
           return;
         case 'reply':
-          formKeys.current?.reply();
+          if (formKeys.current !== null) {
+            formKeys.current.reply();
+          } else {
+            // セッションの詳細では、指示のcomposerへ移る
+            detailRef.current?.querySelector<HTMLElement>('textarea.composer-input')?.focus();
+          }
           return;
       }
     };
@@ -421,6 +480,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               カード
             </button>
           </div>
+          <button
+            type="button"
+            class="btn primary"
+            onClick={() => setLaunchOpen(true)}
+            title="新規セッション（n）"
+          >
+            ＋ 新規
+          </button>
           <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
             ?
           </button>
@@ -461,6 +528,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                       key={session.key}
                       session={session}
                       now={now}
+                      stallMs={snapshot.stallMs}
                       selected={selected === sessionRowId(session)}
                       onSelect={() => setSelected(sessionRowId(session))}
                     />
@@ -491,8 +559,11 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           />
         ) : selectedSession !== undefined ? (
           <SessionDetail
+            key={selectedSession.key}
             session={selectedSession}
             now={now}
+            stallMs={snapshot.stallMs}
+            onSend={(text) => sendTo(selectedSession, text)}
             pending={(snapshot.pending ?? []).filter(
               (p) =>
                 p.windowId === selectedSession.windowId &&
@@ -509,6 +580,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         )}
       </div>
       {helpOpen ? <HelpOverlay onClose={() => setHelpOpen(false)} /> : null}
+      {launchOpen ? (
+        <LaunchDialog
+          bridge={bridge}
+          sessions={snapshot.sessions}
+          onClose={() => setLaunchOpen(false)}
+          onLaunched={(message) => {
+            setLaunchOpen(false);
+            setToast(message);
+          }}
+        />
+      ) : null}
       <div class="toast" role="status" aria-live="polite">
         {toast}
       </div>
@@ -618,9 +700,23 @@ function PendingRow(props: {
   );
 }
 
+/** 状態のピル。実行中で出力が止まっていれば「停滞」にする（Issue #2137の5）。 */
+function ActivityPill(props: { session: McSession; now: number; stallMs: number }): JSX.Element {
+  const { session, now, stallMs } = props;
+  if (isStalled(session, now, stallMs) && session.lastOutputAt !== undefined) {
+    return (
+      <span class="pill stalled" title="実行中ですが、出力が止まっています">
+        停滞 {formatElapsed(now - session.lastOutputAt)}
+      </span>
+    );
+  }
+  return <span class={`pill ${session.activity}`}>{ACTIVITY_LABELS[session.activity]}</span>;
+}
+
 function SessionRow(props: {
   session: McSession;
   now: number;
+  stallMs: number;
   selected: boolean;
   onSelect: () => void;
 }): JSX.Element {
@@ -636,9 +732,14 @@ function SessionRow(props: {
       <ProviderIcon provider={session.provider} />
       <span class="row-title">{session.title}</span>
       <span class="row-meta">
-        <span class={`pill ${session.activity}`}>{ACTIVITY_LABELS[session.activity]}</span>{' '}
+        <ActivityPill session={session} now={props.now} stallMs={props.stallMs} />{' '}
         {formatElapsed(props.now - session.activitySince)}
       </span>
+      {session.lastOutput === undefined ? null : (
+        <span class="row-out" title={session.lastOutput}>
+          {session.lastOutput}
+        </span>
+      )}
       <span class="row-sub" title={session.cwdFull}>
         {session.cwdLabel}
         {session.isCurrentWindow ? ' · このウィンドウ' : ' · 別ウィンドウ'}
@@ -818,11 +919,13 @@ function PendingDetail(props: {
 function SessionDetail(props: {
   session: McSession;
   now: number;
+  stallMs: number;
   pending: readonly McPendingItem[];
   turns: Loadable<McTurn[]> | undefined;
   onSelectPending: (item: McPendingItem) => void;
   onReloadTurns: () => void;
   onSessionAction: (session: McSession, action: McControlAction, done: string) => void;
+  onSend: (text: string) => Promise<string | undefined>;
 }): JSX.Element {
   const { session } = props;
   return (
@@ -831,7 +934,7 @@ function SessionDetail(props: {
         <ProviderIcon provider={session.provider} /> {session.title}
       </h2>
       <p class="notice" title={session.cwdFull}>
-        <span class={`pill ${session.activity}`}>{ACTIVITY_LABELS[session.activity]}</span>{' '}
+        <ActivityPill session={session} now={props.now} stallMs={props.stallMs} />{' '}
         {formatElapsed(props.now - session.activitySince)} · {session.cwdLabel} ·{' '}
         {session.isCurrentWindow ? 'このウィンドウ' : '別ウィンドウ'}
       </p>
@@ -856,6 +959,271 @@ function SessionDetail(props: {
         </div>
       )}
       <Turns turns={props.turns} onReload={props.onReloadTurns} />
+      <Composer onSend={props.onSend} />
+    </div>
+  );
+}
+
+/**
+ * 指示の入力欄（Issue #2137の4）。送信中は二重に送らせず、失敗の理由は入力を残したまま出す。
+ * Ctrl+Enter（macOSはCmd+Enter）でも送る。
+ */
+function Composer(props: { onSend: (text: string) => Promise<string | undefined> }): JSX.Element {
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const submit = (): void => {
+    if (sending || text.trim() === '') {
+      return;
+    }
+    setSending(true);
+    setError(undefined);
+    void props.onSend(text).then((failure) => {
+      setSending(false);
+      if (failure === undefined) {
+        setText('');
+      } else {
+        setError(failure);
+      }
+    });
+  };
+  return (
+    <form
+      class="composer"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <h3>指示を送る</h3>
+      <textarea
+        class="text-input composer-input"
+        rows={3}
+        aria-label="会話へ送る指示"
+        placeholder="会話へ送る指示（Ctrl+Enterで送信）"
+        value={text}
+        disabled={sending}
+        onInput={(e) => setText(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+      />
+      <div class="actions">
+        <button type="submit" class="btn primary" disabled={sending || text.trim() === ''}>
+          {sending ? '送信中…' : '送信'}
+        </button>
+      </div>
+      {error === undefined ? null : (
+        <p class="error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+/** 起動先の候補の出どころ（選択肢の見出し）。 */
+const LAUNCH_SOURCE_LABELS: Record<McLaunchRepo['source'], string> = {
+  picked: '選んだフォルダ',
+  recent: '最近使った',
+  session: '開いているセッション',
+  history: '履歴',
+};
+
+/**
+ * 新規セッションの起動（Issue #2137の1・2）。repoを選び、Codex / Claudeと最初の指示を決める。
+ * 同じrepoで既にセッションが開いていれば、worktreeを既定でONにして警告を出す。
+ */
+function LaunchDialog(props: {
+  bridge: Bridge;
+  sessions: readonly McSession[];
+  onClose: () => void;
+  onLaunched: (message: string) => void;
+}): JSX.Element {
+  const { bridge } = props;
+  const [repos, setRepos] = useState<Loadable<McLaunchRepo[]>>({ status: 'loading' });
+  const [path, setPath] = useState<string | undefined>(undefined);
+  const [provider, setProvider] = useState<McProvider>('codex');
+  const [prompt, setPrompt] = useState('');
+  /** 利用者が手で切り替えたworktreeの指定。`undefined`の間はrepoに応じた既定を使う。 */
+  const [worktreeChoice, setWorktreeChoice] = useState<boolean | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const firstRef = useRef<HTMLSelectElement | null>(null);
+
+  useEffect(() => {
+    void bridge.launchOptions().then((result) => {
+      if (!result.ok) {
+        setRepos({ status: 'error', error: result.error ?? '候補を取り寄せられませんでした' });
+        return;
+      }
+      const list = result.repos ?? [];
+      setRepos({ status: 'ok', value: list });
+      setPath((current) => current ?? list[0]?.path);
+    });
+  }, [bridge]);
+  useEffect(() => {
+    firstRef.current?.focus();
+  }, [repos.status]);
+
+  const list = repos.status === 'ok' ? repos.value : [];
+  const chosen = list.find((repo) => repo.path === path);
+  const running = chosen === undefined ? 0 : countSessionsInRepo(props.sessions, chosen.key);
+  const worktree = worktreeChoice ?? running > 0;
+
+  const pick = (): void => {
+    setError(undefined);
+    void bridge.pickFolder().then((result) => {
+      if (!result.ok) {
+        setError(result.error ?? 'フォルダを選べませんでした');
+        return;
+      }
+      const repo = result.repo;
+      if (repo === undefined) {
+        return;
+      }
+      setRepos((prev) =>
+        prev.status === 'ok'
+          ? { status: 'ok', value: [repo, ...prev.value.filter((r) => r.path !== repo.path)] }
+          : { status: 'ok', value: [repo] },
+      );
+      setPath(repo.path);
+      setWorktreeChoice(undefined);
+    });
+  };
+  const launch = (): void => {
+    if (busy || chosen === undefined) {
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    void bridge.launch({ cwd: chosen.path, provider, prompt, worktree }).then((result) => {
+      setBusy(false);
+      if (!result.ok) {
+        setError(result.error ?? '起動できませんでした');
+        return;
+      }
+      const name = provider === 'codex' ? 'Codex' : 'Claude';
+      props.onLaunched(
+        worktree
+          ? `${name}をworktreeで起動しました（${result.cwd ?? ''}）`
+          : `${name}を起動しました`,
+      );
+    });
+  };
+  const groups = (['picked', 'recent', 'session', 'history'] as const)
+    .map((source) => ({ source, repos: list.filter((repo) => repo.source === source) }))
+    .filter((group) => group.repos.length > 0);
+
+  return (
+    <div class="help" role="dialog" aria-label="新規セッション">
+      <form
+        class="help-box launch-box"
+        onSubmit={(e) => {
+          e.preventDefault();
+          launch();
+        }}
+      >
+        <h2>新規セッション</h2>
+        <label>
+          Repo
+          <span class="launch-row">
+            <select
+              ref={firstRef}
+              class="text-input"
+              aria-label="起動するrepo"
+              value={path ?? ''}
+              disabled={busy}
+              onChange={(e) => {
+                setPath(e.currentTarget.value);
+                setWorktreeChoice(undefined);
+              }}
+            >
+              {groups.map((group) => (
+                <optgroup key={group.source} label={LAUNCH_SOURCE_LABELS[group.source]}>
+                  {group.repos.map((repo) => (
+                    <option key={repo.path} value={repo.path} title={repo.path}>
+                      {repo.label}（{repo.path}）
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <button type="button" class="btn" disabled={busy} onClick={pick}>
+              フォルダを選ぶ…
+            </button>
+          </span>
+        </label>
+        {repos.status === 'loading' ? <p class="notice">候補を取り寄せ中…</p> : null}
+        {repos.status === 'error' ? <p class="error">{repos.error}</p> : null}
+        <div class="seg" role="group" aria-label="起動するCLI">
+          <button
+            type="button"
+            aria-pressed={provider === 'codex'}
+            disabled={busy}
+            onClick={() => setProvider('codex')}
+          >
+            Codex
+          </button>
+          <button
+            type="button"
+            aria-pressed={provider === 'claude'}
+            disabled={busy}
+            onClick={() => setProvider('claude')}
+          >
+            Claude
+          </button>
+        </div>
+        <label>
+          最初の指示（空なら会話を開くだけ）
+          <textarea
+            class="text-input"
+            rows={4}
+            value={prompt}
+            disabled={busy}
+            onInput={(e) => setPrompt(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+                e.preventDefault();
+                launch();
+              }
+            }}
+          />
+        </label>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={worktree}
+            disabled={busy}
+            onChange={(e) => setWorktreeChoice(e.currentTarget.checked)}
+          />
+          別のworktreeで動かす（.claude/worktrees/ 配下に作る）
+        </label>
+        {running > 0 ? (
+          <p class="warn" role="alert">
+            このrepoでは既に{String(running)}
+            件のセッションが開いています。同じ作業ツリーを2つのセッションが編集すると、変更が衝突します。
+            {worktree ? '' : ' worktreeをOFFのまま起動しようとしています。'}
+          </p>
+        ) : null}
+        <p class="notice">modelは各CLIの既定で起動します（会話のタブで変えられます）。</p>
+        {error === undefined ? null : (
+          <p class="error" role="alert">
+            {error}
+          </p>
+        )}
+        <div class="actions">
+          <button type="submit" class="btn primary" disabled={busy || chosen === undefined}>
+            {busy ? '起動中…' : '起動'}
+          </button>
+          <button type="button" class="btn" disabled={busy} onClick={props.onClose}>
+            閉じる
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

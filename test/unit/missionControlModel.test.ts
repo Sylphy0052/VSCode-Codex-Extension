@@ -3,13 +3,18 @@ import {
   ActivitySince,
   buildMissionControlSnapshot,
   createRepoResolver,
+  lastOutputLine,
+  LastOutputTracker,
   missionControlTitle,
+  outputFingerprint,
   type McSessionInput,
 } from '../../src/view/missionControlModel';
 import type { PendingItem } from '../../src/view/pendingItem';
 
 /** `.git`の置き場所だけを持つ偽のファイルシステム。 */
-function fakeFs(entries: Record<string, 'dir' | string>): Parameters<typeof createRepoResolver>[0] {
+function fakeFs(
+  entries: Record<string, 'dir' | string>,
+): NonNullable<Parameters<typeof createRepoResolver>[0]> {
   return {
     gitEntry: (dir) => {
       const entry = entries[`${dir}/.git`];
@@ -119,6 +124,7 @@ describe('buildMissionControlSnapshot（Issue #2136）', () => {
       resolveRepo: resolveByCwd,
       activitySince: new ActivitySince(() => 50),
       now: 1_000,
+      stallMs: 300_000,
     });
     expect(snapshot.pending.map((p) => p.id)).toEqual(['p-old', 'taskRun:r:T1:q', 'p-new']);
     expect(snapshot.repos.map((r) => [r.label, r.sessionCount, r.pendingCount])).toEqual([
@@ -145,6 +151,7 @@ describe('buildMissionControlSnapshot（Issue #2136）', () => {
       resolveRepo: resolveByCwd,
       activitySince: new ActivitySince(),
       now: 0,
+      stallMs: 300_000,
     });
     expect(snapshot.pending).toHaveLength(1);
   });
@@ -161,6 +168,78 @@ describe('ActivitySince', () => {
     since.retain(new Set());
     now = 30;
     expect(since.stamp('s', 'idle')).toBe(30);
+  });
+});
+
+describe('createRepoResolverのキャッシュ（段階2のレビュー）', () => {
+  it('覚える件数に上限があり、最も長く使っていないcwdから捨てる', () => {
+    let lookups = 0;
+    const fs = fakeFs({ '/w/app/.git': 'dir' });
+    const counting: typeof fs = {
+      gitEntry: (dir) => {
+        lookups += 1;
+        return fs.gitEntry(dir);
+      },
+      readText: fs.readText,
+    };
+    const resolve = createRepoResolver(counting, 2);
+    resolve('/w/app/a');
+    resolve('/w/app/b');
+    resolve('/w/app/a'); // aを最近使った側へ
+    resolve('/w/app/c'); // bが捨てられる
+    const before = lookups;
+    resolve('/w/app/a');
+    resolve('/w/app/c');
+    expect(lookups).toBe(before);
+    resolve('/w/app/b');
+    expect(lookups).toBeGreaterThan(before);
+  });
+});
+
+describe('最終出力と停滞の材料（Issue #2137）', () => {
+  it('利用者の発言を除いた最後の出力の、末尾の空でない行を取る', () => {
+    expect(
+      lastOutputLine([
+        { kind: 'agentMessage', text: '1行目\n2行目\n\n' },
+        { kind: 'userMessage', text: '次へ' },
+      ]),
+    ).toBe('2行目');
+    expect(lastOutputLine([{ kind: 'userMessage', text: 'x' }])).toBeUndefined();
+    expect(lastOutputLine([])).toBeUndefined();
+  });
+
+  it('制御文字を除き、長い行は切り詰める', () => {
+    expect(lastOutputLine([{ kind: 'command', text: '\u001b[31mred\u0007' }])).toBe('[31mred');
+    const line = lastOutputLine([{ kind: 'agentMessage', text: 'a'.repeat(500) }]);
+    expect(line?.length).toBe(200);
+    expect(line?.endsWith('…')).toBe(true);
+  });
+
+  it('指紋が変わったときだけ時刻を更新し、消えた会話は忘れる', () => {
+    let now = 100;
+    const tracker = new LastOutputTracker(() => now);
+    const items = [{ kind: 'agentMessage', text: 'abc', status: 'inProgress' }];
+    expect(tracker.observe('k', outputFingerprint(items))).toBe(100);
+    now = 200;
+    expect(tracker.observe('k', outputFingerprint(items))).toBe(100);
+    expect(tracker.observe('k', outputFingerprint([{ ...items[0]!, text: 'abcd' }]))).toBe(200);
+    tracker.retain(new Set());
+    now = 300;
+    expect(tracker.observe('k', outputFingerprint(items))).toBe(300);
+  });
+
+  it('スナップショットへ最終出力・時刻・停滞の閾値を載せる', () => {
+    const snapshot = buildMissionControlSnapshot({
+      sessions: [session({ lastOutput: 'build ok', lastOutputAt: 50 })],
+      windowPending: [],
+      currentWindowId: 'w-self',
+      resolveRepo: resolveByCwd,
+      activitySince: new ActivitySince(() => 0),
+      now: 0,
+      stallMs: 60_000,
+    });
+    expect(snapshot.stallMs).toBe(60_000);
+    expect(snapshot.sessions[0]).toMatchObject({ lastOutput: 'build ok', lastOutputAt: 50 });
   });
 });
 

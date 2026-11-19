@@ -20,6 +20,7 @@ CONTRIBUTING.md
 eslint.config.mjs
 tsconfig.json
 tsconfig.integration.json
+tsconfig.webview.json
 vitest.config.ts
 src/**
 test/**

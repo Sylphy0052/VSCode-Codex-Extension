@@ -3,13 +3,16 @@ import {
   buildPromptValues,
   buildQuestionAnswers,
   chooseOption,
+  countSessionsInRepo,
   EMPTY_DRAFT,
   EMPTY_FILTER,
   filterPending,
   filterSessions,
   formatElapsed,
+  isStalled,
   mapKey,
   moveSelection,
+  reconcileSelection,
   setOther,
 } from '../../src/webview/missionControl/logic';
 import type { McPendingItem, McRepo, McSession } from '../../src/webview/missionControl/protocol';
@@ -178,6 +181,7 @@ describe('キー操作', () => {
     expect(mapKey({ ...base, key: 'r' })).toEqual({ kind: 'reply' });
     expect(mapKey({ ...base, key: '/' })).toEqual({ kind: 'search' });
     expect(mapKey({ ...base, key: '?' })).toEqual({ kind: 'help' });
+    expect(mapKey({ ...base, key: 'n' })).toEqual({ kind: 'newSession' });
   });
 
   it('入力欄の中と修飾キー付きは文字入力として通し、Escapeだけ拾う', () => {
@@ -194,6 +198,57 @@ describe('キー操作', () => {
     expect(moveSelection(ids, 'a', -1)).toBe('a');
     expect(moveSelection(ids, 'gone', 1)).toBe('a');
     expect(moveSelection([], 'a', 1)).toBeUndefined();
+  });
+});
+
+describe('選択の扱い（段階2のレビュー）', () => {
+  it('選択中の項目が消えたら、同じ位置の別の項目へ移さずに外す', () => {
+    expect(reconcileSelection(['p:a', 'p:b'], 'p:a', false)).toBe('p:a');
+    expect(reconcileSelection(['p:b', 'p:c'], 'p:a', false)).toBeUndefined();
+    expect(reconcileSelection(['p:b'], undefined, false)).toBeUndefined();
+  });
+
+  it('最初の表示の間だけ先頭を選ぶ（Reload前の選択が消えていても）', () => {
+    expect(reconcileSelection(['p:b', 'p:c'], undefined, true)).toBe('p:b');
+    expect(reconcileSelection(['p:b', 'p:c'], 'p:gone', true)).toBe('p:b');
+    expect(reconcileSelection([], undefined, true)).toBeUndefined();
+  });
+});
+
+describe('停滞とworktreeの既定（Issue #2137）', () => {
+  it('実行中で出力が閾値以上動いていなければ停滞', () => {
+    expect(isStalled({ activity: 'running', lastOutputAt: 0 }, 300_000, 300_000)).toBe(true);
+    expect(isStalled({ activity: 'running', lastOutputAt: 1 }, 300_000, 300_000)).toBe(false);
+    expect(isStalled({ activity: 'idle', lastOutputAt: 0 }, 900_000, 300_000)).toBe(false);
+    expect(isStalled({ activity: 'approvalPending', lastOutputAt: 0 }, 900_000, 300_000)).toBe(
+      false,
+    );
+    expect(isStalled({ activity: 'running', lastOutputAt: undefined }, 900_000, 300_000)).toBe(
+      false,
+    );
+  });
+
+  it('同じrepoで開いているセッションを数える', () => {
+    const base = {
+      windowId: 'w1',
+      threadId: 't',
+      provider: 'codex' as const,
+      isCurrentWindow: true,
+    };
+    const row = (key: string, repoKey: string): McSession => ({
+      ...base,
+      key,
+      repoKey,
+      title: key,
+      activity: 'idle',
+      activitySince: 0,
+      cwdLabel: '',
+      cwdFull: '',
+      pendingCount: 0,
+    });
+    const list = [row('a', '/w/app'), row('b', '/w/app'), row('c', '/w/other')];
+    expect(countSessionsInRepo(list, '/w/app')).toBe(2);
+    expect(countSessionsInRepo(list, '/w/none')).toBe(0);
   });
 });
 

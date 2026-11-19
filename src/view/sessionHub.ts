@@ -54,7 +54,17 @@ export interface SharedSession {
    * `approvalDetail`で取り寄せる。古い版のウィンドウが書いたファイルには無い。
    */
   pending?: PendingItem[] | undefined;
+  /**
+   * 最後の出力の1行（Issue #2137）。Mission Controlの一覧に出す。外部由来のテキストなので
+   * 読み手は文字列として表示するだけにする。古い版のウィンドウが書いたファイルには無い。
+   */
+  lastOutput?: string | undefined;
+  /** 出力が最後に変わったのを書き手が見た時刻（ms）。停滞の判定に使う。 */
+  lastOutputAt?: number | undefined;
 }
+
+/** `lastOutput`の上限（文字数）。共有ファイルと画面へ長い行を流さない。 */
+export const MAX_SHARED_LAST_OUTPUT_CHARS = 200;
 
 interface SharedSessionFile {
   windowId: string;
@@ -173,7 +183,16 @@ function isSharedSession(value: unknown): value is SharedSession {
 function normalizeSharedSession(session: SharedSession, windowId: string): SharedSession {
   const pending = withOwnerWindow(parsePendingItems(session.pending), windowId);
   const loop = isSharedLoopState(session.loop) ? session.loop : undefined;
-  return { ...session, loop, pending };
+  // 最終出力（Issue #2137）は形と長さを確かめ、合わなければ無かったものとして落とす
+  const lastOutput =
+    typeof session.lastOutput === 'string'
+      ? session.lastOutput.replace(/[\r\n]+/gu, ' ').slice(0, MAX_SHARED_LAST_OUTPUT_CHARS)
+      : undefined;
+  const lastOutputAt =
+    typeof session.lastOutputAt === 'number' && Number.isFinite(session.lastOutputAt)
+      ? session.lastOutputAt
+      : undefined;
+  return { ...session, loop, pending, lastOutput, lastOutputAt };
 }
 
 function withOwnerWindow(items: readonly PendingItem[], windowId: string): PendingItem[] {

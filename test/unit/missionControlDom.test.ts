@@ -69,6 +69,7 @@ function snapshot(pending: McPendingItem[]): McSnapshot {
     windowId: 'w1',
     repos: [{ key: '/w/app', label: 'app', full: '/w/app', sessionCount: 0, pendingCount: 1 }],
     sessions: [],
+    stallMs: 300_000,
     pending,
   };
 }
@@ -132,6 +133,173 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     expect(posted.find((m) => m.action === 'answerTaskRunQuestion')).toMatchObject({
       pendingId: 'taskRun:r:T1:q',
       text: '案B',
+    });
+  });
+  it('選択中の項目が消えたら選択を外し、遅れて押したaを別の項目へ送らない（段階2のレビュー）', async () => {
+    const { posted, deliver, key } = boot();
+    await tick();
+    const q = (id: string) =>
+      item({ id, kind: 'taskRunQuestion', answer: 'text', options: ['案A'] });
+    deliver({ type: 'snapshot', snapshot: snapshot([q('taskRun:r:T1:q'), q('taskRun:r:T2:q')]) });
+    await tick();
+    // 先頭が選ばれている。回答済みで消えた後のスナップショットを受ける
+    deliver({ type: 'snapshot', snapshot: snapshot([q('taskRun:r:T2:q')]) });
+    await tick();
+    key('1');
+    await tick();
+    key('a');
+    await tick();
+    expect(posted.find((m) => m.action === 'answerTaskRunQuestion')).toBeUndefined();
+  });
+
+  it('セッションを選ぶとライブtailを頼み、composerから指示を送る（Issue #2137）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    const base = snapshot([]);
+    deliver({
+      type: 'snapshot',
+      snapshot: {
+        ...base,
+        // 出力から10分経っている（停滞の既定は5分）
+        now: 600_000,
+        sessions: [
+          {
+            key: 's1',
+            windowId: 'w2',
+            threadId: 't9',
+            provider: 'claude',
+            isCurrentWindow: false,
+            repoKey: '/w/app',
+            title: '会話',
+            activity: 'running',
+            activitySince: 0,
+            cwdLabel: 'app',
+            cwdFull: '/w/app',
+            pendingCount: 0,
+            lastOutput: '<b>build</b>',
+            lastOutputAt: 0,
+          },
+        ],
+      },
+    });
+    await tick();
+    expect(posted.filter((m) => m.type === 'watch').at(-1)).toMatchObject({
+      target: { windowId: 'w2', provider: 'claude', threadId: 't9' },
+    });
+    // 外部由来の最終出力はテキストとして出し、出力が止まっていれば停滞になる
+    expect(window.document.querySelector('b')).toBeNull();
+    expect(window.document.body.textContent).toContain('<b>build</b>');
+    expect(window.document.querySelector('.pill.stalled')).not.toBeNull();
+    deliver({
+      type: 'liveTurns',
+      target: { windowId: 'w2', provider: 'claude', threadId: 't9' },
+      ok: true,
+      turns: [{ role: 'agent', text: 'ライブの出力', truncated: false }],
+    });
+    await tick();
+    expect(window.document.body.textContent).toContain('ライブの出力');
+    const input = window.document.querySelector('textarea.composer-input') as HTMLTextAreaElement;
+    input.value = '続けて';
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    (window.document.querySelector('form.composer') as HTMLFormElement).requestSubmit();
+    await tick();
+    expect(posted.find((m) => m.action === 'send')).toMatchObject({
+      windowId: 'w2',
+      threadId: 't9',
+      text: '続けて',
+    });
+  });
+
+  const runningSession = {
+    key: 's1',
+    windowId: 'w1',
+    threadId: 't1',
+    provider: 'codex' as const,
+    isCurrentWindow: true,
+    repoKey: '/w/app',
+    title: '会話',
+    activity: 'running' as const,
+    activitySince: 0,
+    cwdLabel: 'app',
+    cwdFull: '/w/app',
+    pendingCount: 0,
+  };
+
+  it('composerは送信中に二重送信させず、失敗したら入力を残して理由を出す（Issue #2137）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    const input = window.document.querySelector('textarea.composer-input') as HTMLTextAreaElement;
+    input.value = '続けて';
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    const form = window.document.querySelector('form.composer') as HTMLFormElement;
+    form.requestSubmit();
+    await tick();
+    const button = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(button.textContent).toBe('送信中…');
+    expect(button.disabled).toBe(true);
+    form.requestSubmit();
+    await tick();
+    const sends = posted.filter((m) => m.action === 'send');
+    expect(sends).toHaveLength(1);
+    deliver({
+      type: 'controlResult',
+      seq: sends[0]?.seq,
+      ok: false,
+      error: '会話が見つかりません',
+    });
+    await tick();
+    expect(form.querySelector('[role="alert"]')?.textContent).toBe('会話が見つかりません');
+    expect(
+      (window.document.querySelector('textarea.composer-input') as HTMLTextAreaElement).value,
+    ).toBe('続けて');
+    expect(button.textContent).toBe('送信');
+  });
+
+  it('同じrepoでセッションが開いていれば、新規起動のworktreeを既定ONにして警告を出す（Issue #2137）', async () => {
+    const { window, posted, deliver, key } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    key('n');
+    await tick();
+    const options = posted.find((m) => m.type === 'launchOptions');
+    expect(options).toBeDefined();
+    deliver({
+      type: 'reply',
+      seq: options?.seq,
+      ok: true,
+      repos: [
+        { path: '/w/app', key: '/w/app', label: 'app', source: 'session' },
+        { path: '/w/other', key: '/w/other', label: 'other', source: 'history' },
+      ],
+    });
+    await tick();
+    const dialog = window.document.querySelector('[role="dialog"]') as HTMLElement;
+    const check = dialog.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(check.checked).toBe(true);
+    expect(dialog.querySelector('.warn')?.textContent).toContain('既に1');
+    // 別のrepoへ替えると既定はOFFに戻り、警告も消える
+    const select = dialog.querySelector('select') as HTMLSelectElement;
+    select.value = '/w/other';
+    select.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await tick();
+    expect((dialog.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect(dialog.querySelector('.warn')).toBeNull();
+    select.value = '/w/app';
+    select.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await tick();
+    (dialog.querySelector('form') as HTMLFormElement).requestSubmit();
+    await tick();
+    expect(posted.find((m) => m.type === 'launch')).toMatchObject({
+      cwd: '/w/app',
+      provider: 'codex',
+      worktree: true,
     });
   });
 });

@@ -62,6 +62,10 @@ export interface McSession {
   cwdFull: string;
   loop?: { running: boolean; paused: boolean } | undefined;
   pendingCount: number;
+  /** 最後の出力の1行（Issue #2137）。外部由来のテキストなので文字列として描くだけにする。 */
+  lastOutput?: string | undefined;
+  /** 出力が最後に変わった時刻（ms）。停滞の判定に使う。古い版のウィンドウでは無い。 */
+  lastOutputAt?: number | undefined;
 }
 
 /** 左のrepoレールの1行。 */
@@ -82,6 +86,28 @@ export interface McSnapshot {
   sessions: McSession[];
   /** 待ちの長い順（`createdAt`の古い順）。 */
   pending: McPendingItem[];
+  /** 実行中のまま出力がこの時間（ms）動かなければ「停滞」とする（Issue #2137の5）。 */
+  stallMs: number;
+}
+
+/** 新規セッションの起動先の候補（Issue #2137の1）。 */
+export interface McLaunchRepo {
+  /** 起動に使う絶対パス（gitのtoplevel、または選んだフォルダ）。 */
+  path: string;
+  /** `McRepo.key`と同じ形。同じrepoで動いているセッションを数えるのに使う。 */
+  key: string;
+  label: string;
+  source: 'session' | 'recent' | 'history' | 'picked';
+}
+
+/** 新規セッションの起動の要求。 */
+export interface McLaunchRequest {
+  cwd: string;
+  provider: McProvider;
+  /** 最初の指示。空なら会話を開くだけにする。 */
+  prompt: string;
+  /** 別のworktree（`<repo>/.claude/worktrees/`配下）で動かすか。 */
+  worktree: boolean;
 }
 
 /** AskUserQuestionの質問1件（`SharedAskUserQuestion`と同じ形）。 */
@@ -133,6 +159,25 @@ export type McHostMessage =
       error?: string | undefined;
       approvals?: McApprovalDetail[] | undefined;
       turns?: McTurn[] | undefined;
+    }
+  | {
+      /** `launchOptions`・`pickFolder`・`launch`への応答（Issue #2137）。 */
+      type: 'reply';
+      seq: number;
+      ok: boolean;
+      error?: string | undefined;
+      repos?: McLaunchRepo[] | undefined;
+      repo?: McLaunchRepo | undefined;
+      /** 起動した作業ディレクトリ。worktreeで起動したときはそのパス。 */
+      cwd?: string | undefined;
+    }
+  | {
+      /** 詳細で選択中のセッションの直近のやり取り（ライブtail。Issue #2137の3）。 */
+      type: 'liveTurns';
+      target: McTarget;
+      ok: boolean;
+      error?: string | undefined;
+      turns?: McTurn[] | undefined;
     };
 
 /** 操作の宛先。 */
@@ -153,6 +198,7 @@ export type McControlAction =
   | { action: 'resumeLoop' }
   | { action: 'approvalDetail' }
   | { action: 'recentTurns'; limit: number }
+  | { action: 'send'; text: string }
   | { action: 'approvalDecision'; approvalRequestId: string; decision: 'accept' | 'decline' }
   | { action: 'answerQuestion'; pendingRequestId: string; answers: Record<string, string[]> }
   | {
@@ -163,4 +209,10 @@ export type McControlAction =
   | { action: 'answerTaskRunQuestion'; pendingId: string; text: string };
 
 export type McWebviewMessage =
-  { type: 'ready' } | ({ type: 'control'; seq: number } & McTarget & McControlAction);
+  | { type: 'ready' }
+  | ({ type: 'control'; seq: number } & McTarget & McControlAction)
+  | { type: 'launchOptions'; seq: number }
+  | { type: 'pickFolder'; seq: number }
+  | ({ type: 'launch'; seq: number } & McLaunchRequest)
+  /** ライブtailの対象。`target`が無ければ止める。 */
+  | { type: 'watch'; target?: McTarget | undefined };

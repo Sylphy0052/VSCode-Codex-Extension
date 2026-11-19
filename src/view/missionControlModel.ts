@@ -31,6 +31,9 @@ export type McRepoResolver = (cwd: string | undefined) => McRepoInfo;
 
 const UNKNOWN_REPO: McRepoInfo = { key: '(unknown)', label: '(不明)', full: '(不明)' };
 
+/** `createRepoResolver`が覚えるcwdの件数の上限。 */
+export const REPO_CACHE_MAX_ENTRIES = 256;
+
 interface RepoFs {
   /** `.git`がディレクトリなら`'dir'`、ファイルなら`'file'`、無ければ`undefined`。 */
   gitEntry(dir: string): 'dir' | 'file' | undefined;
@@ -63,9 +66,13 @@ const nodeRepoFs: RepoFs = {
  * 同じrepoのセッションがworktreeの数だけ別のrepoに分かれる。
  *
  * gitを起動せず`.git`を辿るだけにする（スナップショットは状態が変わるたびに作り直すため）。
- * 結果は`cwd`ごとに覚える。
+ * 結果は`cwd`ごとに覚える。覚える件数には上限（`maxEntries`）を設け、超えたら最も長く
+ * 使っていないものから捨てる（撤去済みのworktreeのcwdが溜まり続けないようにする）。
  */
-export function createRepoResolver(fs: RepoFs = nodeRepoFs): McRepoResolver {
+export function createRepoResolver(
+  fs: RepoFs = nodeRepoFs,
+  maxEntries: number = REPO_CACHE_MAX_ENTRIES,
+): McRepoResolver {
   const cache = new Map<string, McRepoInfo>();
   return (cwd) => {
     if (cwd === undefined || cwd === '') {
@@ -73,12 +80,22 @@ export function createRepoResolver(fs: RepoFs = nodeRepoFs): McRepoResolver {
     }
     const cached = cache.get(cwd);
     if (cached !== undefined) {
+      // Mapは挿入順を保つ。入れ直して「最近使った」側へ寄せる
+      cache.delete(cwd);
+      cache.set(cwd, cached);
       return cached;
     }
     const root = findRepoRoot(fs, cwd) ?? cwd;
     const full = normalizeWorkspacePath(root);
     const info: McRepoInfo = { key: full, label: path.basename(full) || full, full };
     cache.set(cwd, info);
+    while (cache.size > Math.max(1, maxEntries)) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      cache.delete(oldest);
+    }
     return info;
   };
 }
@@ -145,6 +162,84 @@ export class ActivitySince {
   }
 }
 
+/** 最終出力を読むのに使う会話の項目（`ChatItem`のうち使う分だけ）。 */
+export interface OutputItem {
+  kind: string;
+  text: string;
+  status?: string | undefined;
+}
+
+/** `lastOutputLine`が返す1行の上限（`MAX_SHARED_LAST_OUTPUT_CHARS`と同じ値）。 */
+const LAST_OUTPUT_CHARS = 200;
+
+/**
+ * 会話の最後の出力から1行を取る（Issue #2137の3）。利用者の発言は出力に数えない。
+ * 末尾の空でない行を、制御文字を除いて上限まで切り詰めて返す。
+ */
+export function lastOutputLine(items: readonly OutputItem[]): string | undefined {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item === undefined || item.kind === 'userMessage') {
+      continue;
+    }
+    const text = item.text.trimEnd();
+    if (text.trim() === '') {
+      continue;
+    }
+    const lastBreak = text.lastIndexOf('\n');
+    const line = text
+      .slice(lastBreak + 1)
+      // eslint-disable-next-line no-control-regex -- 端末の制御文字を一覧へ出さない
+      .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+      .trim();
+    if (line === '') {
+      continue;
+    }
+    return line.length > LAST_OUTPUT_CHARS ? `${line.slice(0, LAST_OUTPUT_CHARS - 1)}…` : line;
+  }
+  return undefined;
+}
+
+/**
+ * 出力が動いたかを比べるための指紋。項目の数と、末尾の項目の種類・状態・本文の長さで作る。
+ * 本文そのものは持たない（長い本文を覚え続けないため）。
+ */
+export function outputFingerprint(items: readonly OutputItem[]): string {
+  const last = items[items.length - 1];
+  if (last === undefined) {
+    return '0';
+  }
+  return `${String(items.length)}|${last.kind}|${last.status ?? ''}|${String(last.text.length)}`;
+}
+
+/**
+ * 会話ごとに、出力が最後に変わった時刻を覚える（停滞の判定。Issue #2137の5）。
+ * 状態が変わるたびに呼ばれる前提で、指紋が前回と違えばその時刻を記録する。
+ */
+export class LastOutputTracker {
+  private readonly seen = new Map<string, { fingerprint: string; at: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  observe(key: string, fingerprint: string): number {
+    const entry = this.seen.get(key);
+    if (entry !== undefined && entry.fingerprint === fingerprint) {
+      return entry.at;
+    }
+    const at = this.now();
+    this.seen.set(key, { fingerprint, at });
+    return at;
+  }
+
+  retain(keys: ReadonlySet<string>): void {
+    for (const key of [...this.seen.keys()]) {
+      if (!keys.has(key)) {
+        this.seen.delete(key);
+      }
+    }
+  }
+}
+
 export interface McSnapshotInput {
   sessions: readonly McSessionInput[];
   /** 会話に属さない待ち項目（task runの質問）。全ウィンドウ分。 */
@@ -153,6 +248,8 @@ export interface McSnapshotInput {
   resolveRepo: McRepoResolver;
   activitySince: ActivitySince;
   now: number;
+  /** 停滞とみなすまでの時間（ms）。設定`agent.missionControl.stallMinutes`から作る。 */
+  stallMs: number;
 }
 
 export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot {
@@ -203,6 +300,8 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       cwdFull: session.cwd === undefined ? '(不明)' : normalizeWorkspacePath(session.cwd),
       loop: session.loop,
       pendingCount: items.length,
+      lastOutput: session.lastOutput,
+      lastOutputAt: session.lastOutputAt,
     });
     for (const item of items) {
       addPending(item);
@@ -222,6 +321,7 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
     repos: repoList,
     sessions,
     pending,
+    stallMs: input.stallMs,
   };
 }
 
