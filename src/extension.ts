@@ -236,6 +236,12 @@ import {
   type SessionControlTarget,
 } from './view/sessionControlMessage';
 import {
+  fromRemoteReply,
+  remoteReplyTimeoutMs,
+  routeSessionControl,
+  toRemoteControlInput,
+} from './view/sessionControlRouting';
+import {
   ActivitySince,
   buildMissionControlSnapshot,
   createRepoResolver,
@@ -315,24 +321,6 @@ import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
-
-/**
- * 別ウィンドウ宛てで応答を長く待つ操作（Issue #2158）。画像を載せた要求は書き込み・読み込みに、
- * 候補の取り寄せはファイルの走査・CLIへの問い合わせに、既定の5秒を超えうる。
- */
-const LONG_REPLY_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
-  'sendWithAttachments',
-  'fileCandidates',
-  'commandCandidates',
-  // 全承認へ上げるときは宛先のウィンドウで同意のダイアログを待つ（Issue #2159）
-  'changeSetting',
-  // 名前の保存・分岐・タブの作り直し・CLIへの巻き戻しの問い合わせ（Issue #2160）
-  'rename',
-  'fork',
-  'clear',
-  'rewindPreview',
-  'rewind',
-]);
 
 /** Mission Controlから選んだセッションを変える操作（Issue #2160）。受け付けたら1行残す。 */
 const SESSION_OP_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
@@ -1858,76 +1846,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     target: SessionControlTarget,
     action: SessionControlAction,
   ): Promise<SessionControlResult> => {
-    // task runの質問は会話に属さないため、会話への操作（`controlSession`）を通さない（Issue #2135）
-    if (action.kind === 'answerTaskRunQuestion' && target.windowId === windowId) {
+    // 振り分けと要求の組み立ては`sessionControlRouting.ts`に置き、unitテストで確かめる
+    const route = routeSessionControl(target, action, windowId);
+    if (route === 'taskRunQuestion' && action.kind === 'answerTaskRunQuestion') {
       return answerTaskRunPending(action.pendingId, action.text, windowId);
     }
-    // ピン留めは全ウィンドウ共通の印（Issue #2160）。宛先へ回さずこのウィンドウで済ませると、
-    // Mission Controlの表示（このウィンドウの`globalState`から読む）にもすぐ効く
-    if (target.windowId === windowId || action.kind === 'pin' || action.kind === 'unpin') {
+    if (route === 'local') {
       return controlSession(target.provider, target.threadId, action, windowId);
     }
     const reply = await sessionHubRequestPort.request(
       target.windowId,
-      {
-        kind: action.kind,
-        provider: target.provider,
-        threadId: target.threadId,
-        text:
-          action.kind === 'send' ||
-          action.kind === 'sideQuestion' ||
-          action.kind === 'answerTaskRunQuestion' ||
-          action.kind === 'sendWithAttachments'
-            ? action.text
-            : undefined,
-        attachments: action.kind === 'sendWithAttachments' ? action.attachments : undefined,
-        query: action.kind === 'fileCandidates' ? action.query : undefined,
-        index: action.kind === 'cancelQueued' ? action.index : undefined,
-        queuedId: action.kind === 'cancelQueued' ? action.queuedId : undefined,
-        setting: action.kind === 'changeSetting' ? action.change.setting : undefined,
-        settingValue: action.kind === 'changeSetting' ? action.change.value : undefined,
-        name: action.kind === 'rename' ? action.name : undefined,
-        messageId:
-          action.kind === 'rewindPreview' || action.kind === 'rewind'
-            ? action.messageId
-            : undefined,
-        pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
-        sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
-        approvalRequestId:
-          action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
-        decision: action.kind === 'approvalDecision' ? action.decision : undefined,
-        limit: action.kind === 'recentTurns' ? action.limit : undefined,
-        before: action.kind === 'recentTurns' ? action.before : undefined,
-        handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
-        handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
-        handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
-        handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
-        pendingRequestId:
-          action.kind === 'answerQuestion' || action.kind === 'answerPrompt'
-            ? action.pendingRequestId
-            : undefined,
-        answers: action.kind === 'answerQuestion' ? action.answers : undefined,
-        submission: action.kind === 'answerPrompt' ? action.submission : undefined,
-      },
-      // 画像を載せた要求の書き込み・読み込みと、ファイルの走査・CLIへの問い合わせは5秒を超えうる
-      LONG_REPLY_KINDS.has(action.kind) ? LONG_REPLY_TIMEOUT_MS : undefined,
+      toRemoteControlInput(target, action),
+      remoteReplyTimeoutMs(action.kind),
     );
-    return {
-      ok: reply.ok,
-      error: reply.error,
-      approvals: reply.payload?.approvals,
-      turns: reply.payload?.turns,
-      capturedAt: reply.payload?.capturedAt,
-      turnStart: reply.payload?.turnStart,
-      turnTotal: reply.payload?.turnTotal,
-      handoff: reply.payload?.handoff,
-      sideQuestion: reply.payload?.sideQuestion,
-      files: reply.payload?.files,
-      commands: reply.payload?.commands,
-      queued: reply.payload?.queued,
-      settings: reply.payload?.settings,
-      rewindFiles: reply.payload?.rewindFiles,
-    };
+    return fromRemoteReply(reply);
   };
   // エージェント向けの口（design.md §16.21「宛先解決の統合」、Issue #1274）。
   // `WorkflowRunner`はこれより前に作られるため、`messaging.sessionBridge`は毎回
