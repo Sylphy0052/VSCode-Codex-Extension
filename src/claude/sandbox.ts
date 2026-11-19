@@ -60,8 +60,46 @@ export const EXCLUDED_COMMANDS: readonly string[] = [
 ];
 
 /**
+ * 設定で足すパターンの先頭に置けない語。シェル・`eval`・ラッパーは後ろに任意のコマンドを取り、
+ * `bash *`や`env *`を載せるとどんなコマンドでもsandboxの外へ出せてしまう（Issue #2133）。
+ */
+const UNSAFE_EXTRA_HEADS: ReadonlySet<string> = new Set([
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'ksh',
+  'fish',
+  'eval',
+  'source',
+  '.',
+  'xargs',
+  'env',
+  'timeout',
+  'nice',
+  'nohup',
+  'time',
+  'command',
+  'builtin',
+  'sudo',
+  'su',
+  'stdbuf',
+  'exec',
+]);
+
+/**
+ * 設定で足すパターンとして危険か。先頭の語がワイルドカード・変数（`*`だけのパターンは全コマンドに
+ * 一致してsandboxを実質無効にする）か、任意のコマンドを起動できるシェル・ラッパーなら危険とする。
+ */
+export function isUnsafeExtraExcludedCommand(pattern: string): boolean {
+  const head = pattern.trim().split(/\s+/)[0] ?? '';
+  return head === '' || /[*?$`]/.test(head) || UNSAFE_EXTRA_HEADS.has(head);
+}
+
+/**
  * 利用者が設定（`agent.claude.sandbox.extraExcludedCommands`）で足した除外パターンを整える
- * （Issue #2133）。文字列でないもの・空・改行を含むもの・固定の一覧と重複するものは捨てる。
+ * （Issue #2133）。文字列でないもの・空・改行を含むもの・固定の一覧と重複するもの・
+ * sandboxを実質無効にする危険なもの（{@link isUnsafeExtraExcludedCommand}）は捨てる。
  */
 export function normalizeExtraExcludedCommands(raw: unknown): string[] {
   if (!Array.isArray(raw)) {
@@ -76,6 +114,7 @@ export function normalizeExtraExcludedCommands(raw: unknown): string[] {
     if (
       pattern === '' ||
       /[\r\n]/.test(pattern) ||
+      isUnsafeExtraExcludedCommand(pattern) ||
       EXCLUDED_COMMANDS.includes(pattern) ||
       result.includes(pattern)
     ) {

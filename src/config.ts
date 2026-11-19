@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_SWITCH_THRESHOLD_PCT } from './claude/accountPolicy';
 import { normalizeIdleShutdownMinutes } from './claude/idleShutdown';
-import { normalizeExtraExcludedCommands } from './claude/sandbox';
+import { isUnsafeExtraExcludedCommand, normalizeExtraExcludedCommands } from './claude/sandbox';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
 import { hasGitSegment } from './orchestrator/escalation';
@@ -642,12 +642,24 @@ export function readIdleShutdownMinutes(): number {
 /**
  * sandbox付きの工程セッションで、sandboxの外（承認フロー）へ回すコマンドを足す
  * （`agent.claude.sandbox.extraExcludedCommands`、既定`[]`。Issue #2133）。
- * 壊れた要素（文字列でない・空・改行入り）と固定の一覧との重複は捨てる。
+ * 壊れた要素（文字列でない・空・改行入り）・固定の一覧との重複・sandboxを実質無効にする
+ * 危険なパターン（`*`・`bash *`など）は捨てる。危険なパターンは`unsafe`に入れて返し、
+ * 呼び出し側が警告に残す。
  */
-export function readClaudeSandboxExtraExcludedCommands(): string[] {
-  return normalizeExtraExcludedCommands(
-    vscode.workspace.getConfiguration('agent').get<unknown>('claude.sandbox.extraExcludedCommands'),
-  );
+export function readClaudeSandboxExtraExcludedCommands(): {
+  commands: string[];
+  unsafe: string[];
+} {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<unknown>('claude.sandbox.extraExcludedCommands');
+  const unsafe = Array.isArray(raw)
+    ? raw.filter(
+        (item): item is string =>
+          typeof item === 'string' && item.trim() !== '' && isUnsafeExtraExcludedCommand(item),
+      )
+    : [];
+  return { commands: normalizeExtraExcludedCommands(raw), unsafe };
 }
 
 /** @see DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT */

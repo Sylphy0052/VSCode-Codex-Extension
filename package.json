@@ -942,8 +942,8 @@
             "type": "string"
           },
           "default": [],
-          "scope": "window",
-          "markdownDescription": "オーケストレータモード・ロードマップ実行のsandbox付きClaude Codeセッションで、sandboxの外（通常の承認フロー）で走らせるコマンドを足す（Issue #2133）。`gh *`・`git push *`・`ssh *`・`scp *`・`rsync *`などの固定の一覧に加わり、子セッションへの指示文と、連結などで外へ回らない形を実行前に止める判定にも同じ値が使われる。一致はコマンドの先頭から見るので、スクリプトは絶対パスで書く（例: `python3 /home/<user>/.claude/skills/compute-server/scripts/cs.py *`）。`~/`・連結・リダイレクト・`$(…)`を含む形では一致しない。ここに載せても自動で通るわけではなく、承認の判定（`agent.workflows.allowAutoApprove`）を通る。"
+          "scope": "machine",
+          "markdownDescription": "オーケストレータモード・ロードマップ実行のsandbox付きClaude Codeセッションで、sandboxの外（通常の承認フロー）で走らせるコマンドを足す（Issue #2133）。リポジトリ側の設定からsandboxを緩められないよう machine スコープに固定している。先頭がワイルドカード（`*`）・シェル（`bash`・`sh`など）・ラッパー（`env`・`sudo`・`xargs`など）のパターンは、どんなコマンドでも外へ出せてしまうため無視して警告に残す。`gh *`・`git push *`・`ssh *`・`scp *`・`rsync *`などの固定の一覧に加わり、子セッションへの指示文と、連結などで外へ回らない形を実行前に止める判定にも同じ値が使われる。一致はコマンドの先頭から見るので、スクリプトは絶対パスで書く（例: `python3 /home/<user>/.claude/skills/compute-server/scripts/cs.py *`）。`~/`・連結・リダイレクト・`$(…)`を含む形では一致しない。ここに載せても自動で通るわけではなく、承認の判定（`agent.workflows.allowAutoApprove`）を通る。"
         },
         "agent.autoHandoff.thresholdPercent": {
           "type": "number",

@@ -5,6 +5,7 @@ import {
   buildClaudeSandboxSettings,
   claudeSandboxArgs,
   EXCLUDED_COMMANDS,
+  isUnsafeExtraExcludedCommand,
   normalizeExtraExcludedCommands,
   ClaudeSandboxProbe,
   nodeSandboxProbePorts,
@@ -101,6 +102,25 @@ describe('extraExcludedCommands（Issue #2133）', () => {
     ).toEqual([CS_PY]);
     expect(normalizeExtraExcludedCommands('ssh *')).toEqual([]);
     expect(normalizeExtraExcludedCommands(undefined)).toEqual([]);
+  });
+
+  it('どんなコマンドでも外へ出せる危険なパターン（ワイルドカード・シェル・ラッパー）は捨てる', () => {
+    const unsafe = ['*', ' * ', '* foo', 'bash *', 'sh -c *', 'env *', 'sudo *', 'xargs *', '$X *'];
+    for (const pattern of unsafe) {
+      expect(isUnsafeExtraExcludedCommand(pattern)).toBe(true);
+    }
+    expect(isUnsafeExtraExcludedCommand(CS_PY)).toBe(false);
+    expect(normalizeExtraExcludedCommands([...unsafe, CS_PY])).toEqual([CS_PY]);
+    const settings = buildClaudeSandboxSettings(
+      'workspace-write',
+      '/work',
+      { weakerNested: false },
+      ['*', 'bash *'],
+    );
+    expect((settings['sandbox'] as Record<string, unknown>)['excludedCommands']).toEqual([
+      ...EXCLUDED_COMMANDS,
+    ]);
+    expect(buildClaudeSandboxPrompt(['*', 'bash *'])).toBe(buildClaudeSandboxPrompt());
   });
 });
 

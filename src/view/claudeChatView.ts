@@ -2985,7 +2985,12 @@ export class ClaudeChatViewManager
     // sandboxの起動引数は`taskConfig.additionalArgs`へ入れる。同じパネルでCLIを起動し直す
     // （モデル変更・中断後の再開）ときも`configFor`がこれを読むため、sandboxが外れない
     // 設定で足した除外パターン（Issue #2133）は、sandboxの設定・指示文・hookの判定へ同じ値を渡す
-    const extraExcludedCommands = readClaudeSandboxExtraExcludedCommands();
+    const { commands: extraExcludedCommands, unsafe } = readClaudeSandboxExtraExcludedCommands();
+    if (input.cliSandbox !== undefined && unsafe.length > 0) {
+      this.log.warn(
+        `agent.claude.sandbox.extraExcludedCommandsのうち ${unsafe.join(' / ')} は、どんなコマンドでもsandboxの外へ出せてしまうため使わない（Issue #2133）`,
+      );
+    }
     const taskConfig = toClaudeConfig(
       input,
       await this.resolveSandboxArgs(input, extraExcludedCommands),
