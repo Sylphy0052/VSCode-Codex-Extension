@@ -395,6 +395,8 @@ export const NO_BACKGROUND_TERMINALS: BackgroundTerminalItem[] = [];
 
 /** 待ち行列の1件。応答中に送られた指示を、添えた画像ごと保つ。 */
 export interface QueuedMessage {
+  /** 取り消しの照合に使う安定したid（作成時に振る。位置や本文では見分けられないため）。 */
+  id?: string;
   text: string;
   attachments: Attachment[];
   /** 送るときに読み込ませるskill（issue #1451）。 */
@@ -2074,6 +2076,9 @@ export function routeSend(state: ChatState): SendRoute {
   return state.turnId === undefined ? 'queue' : 'steer';
 }
 
+/** 待ち行列の項目へ振るidの連番。 */
+let queuedSeq = 0;
+
 /**
  * 応答中の指示を待ち行列の末尾へ積む。
  *
@@ -2088,8 +2093,10 @@ export function enqueue(
   if (text.trim() === '' && attachments.length === 0) {
     return state;
   }
+  queuedSeq += 1;
+  const id = `q${String(queuedSeq)}-${Date.now().toString(36)}`;
   const message: QueuedMessage =
-    skill === undefined ? { text, attachments } : { text, attachments, skill };
+    skill === undefined ? { id, text, attachments } : { id, text, attachments, skill };
   return { ...state, queued: [...state.queued, message] };
 }
 

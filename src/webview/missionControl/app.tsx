@@ -63,13 +63,22 @@ import {
   submitAround,
   trapTab,
 } from './accessKeys';
-import { KEY_BINDINGS, bindingDisplay, keyLabelFor, resolveKey, type McKeyCommand } from './keys';
+import {
+  COMPOSER_KEY_HELP,
+  KEY_BINDINGS,
+  bindingDisplay,
+  keyLabelFor,
+  resolveKey,
+  type McKeyCommand,
+} from './keys';
+import { Composer, type ComposerKeysRef } from './composer';
 import { CommandPalette, type McPaletteEntry } from './palette';
 import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
 import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
   McActivity,
   McApprovalDetail,
+  McAttachment,
   McControlAction,
   McLaunchChoices,
   McLaunchRepo,
@@ -119,6 +128,9 @@ const SESSION_ONLY_COMMANDS: ReadonlySet<McKeyCommand['kind']> = new Set([
   'turnMatchPrev',
   'turnFolds',
   'turnOlder',
+  // 指示欄の添付・送信キュー（Issue #2158）
+  'attach',
+  'queue',
 ]);
 
 const PROVIDER_FILTERS: ReadonlyArray<[McProviderFilter, string]> = [
@@ -264,6 +276,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const detailRef = useRef<HTMLDivElement | null>(null);
   const formKeys: FormKeysRef = useRef(null);
   const conversationKeys: ConversationKeysRef = useRef(null);
+  const composerKeys: ComposerKeysRef = useRef(null);
   /** 最初のスナップショットを受けるまでは先頭を自動で選ぶ。 */
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
@@ -572,12 +585,26 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   };
 
   /** composerからの指示（Issue #2137の4）。失敗の理由は呼び出し側（composer）で出す。 */
-  const sendTo = async (session: McSession, text: string): Promise<string | undefined> => {
-    const result = await bridge.request(session, { action: 'send', text });
+  const sendTo = async (
+    session: McSession,
+    text: string,
+    attachments: readonly McAttachment[],
+  ): Promise<string | undefined> => {
+    // 画像があるときは別の種別で送る（古い版のウィンドウが画像を落として送らないように。Issue #2158）
+    const result = await bridge.request(
+      session,
+      attachments.length === 0
+        ? { action: 'send', text }
+        : { action: 'sendWithAttachments', text, attachments: [...attachments] },
+    );
     if (!result.ok) {
       return result.error ?? '指示を送れませんでした';
     }
-    setToast('指示を送りました');
+    setToast(
+      attachments.length === 0
+        ? '指示を送りました'
+        : `画像${String(attachments.length)}枚を添えて指示を送りました`,
+    );
     return undefined;
   };
 
@@ -820,6 +847,21 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         }
         return;
       }
+      case 'attach':
+      case 'queue': {
+        const keys = composerKeys.current;
+        if (keys === null) {
+          setToast('指示欄のあるセッションを選んでください');
+          return;
+        }
+        setPaneFocus('detail');
+        if (command.kind === 'attach') {
+          keys.attach();
+        } else {
+          keys.toggleQueue();
+        }
+        return;
+      }
       case 'help':
         setHelpOpen((open) => !open);
         return;
@@ -896,6 +938,31 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         run: () => latest.current.dispatch(command),
       });
     });
+    // 指示欄の補完（Issue #2158）。入力欄の中のキーなので、表の外からパレットへ足す
+    if (!onRuns && composerKeys.current !== null) {
+      entries.push(
+        {
+          id: 'composer:file',
+          label: '指示欄: ファイルを補完する（@を入れて候補を出す）',
+          keyLabel: '@',
+          contextual: true,
+          run: () => {
+            setPaneFocus('detail');
+            composerKeys.current?.complete('@');
+          },
+        },
+        {
+          id: 'composer:command',
+          label: '指示欄: スラッシュコマンドを補完する（行頭に/を入れて候補を出す）',
+          keyLabel: '/（行頭）',
+          contextual: true,
+          run: () => {
+            setPaneFocus('detail');
+            composerKeys.current?.complete('/');
+          },
+        },
+      );
+    }
     // 詳細ペインのボタン（diffを開く・中断など）。選んでいる項目に効くので上に出す
     for (const [i, action] of scopeActions(document).entries()) {
       entries.push({
@@ -1435,7 +1502,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 onToast={setToast}
                 now={now}
                 stallMs={snapshot.stallMs}
-                onSend={(text) => sendTo(selectedSession, text)}
+                onSend={(text, attachments) => sendTo(selectedSession, text, attachments)}
+                composerKeys={composerKeys}
                 pending={(snapshot.pending ?? []).filter(
                   (p) =>
                     p.windowId === selectedSession.windowId &&
@@ -1919,7 +1987,8 @@ function SessionDetail(props: {
   conversation: JSX.Element;
   onSelectPending: (item: McPendingItem) => void;
   onSessionAction: (session: McSession, action: McControlAction, done: string) => void;
-  onSend: (text: string) => Promise<string | undefined>;
+  onSend: (text: string, attachments: readonly McAttachment[]) => Promise<string | undefined>;
+  composerKeys: ComposerKeysRef;
   marked: boolean;
   onLifecycle: (op: McLifecycleOp) => void;
   onToggleMark: () => void;
@@ -1975,70 +2044,15 @@ function SessionDetail(props: {
       )}
       <ReviewList session={session} bridge={props.bridge} onToast={props.onToast} />
       {props.conversation}
-      <Composer onSend={props.onSend} />
+      <Composer
+        session={session}
+        bridge={props.bridge}
+        keysRef={props.composerKeys}
+        onSend={props.onSend}
+        onToast={props.onToast}
+      />
       <SideQuestionForm session={session} bridge={props.bridge} />
     </div>
-  );
-}
-
-/**
- * 指示の入力欄（Issue #2137の4）。送信中は二重に送らせず、失敗の理由は入力を残したまま出す。
- * Ctrl+Enter（macOSはCmd+Enter）でも送る。
- */
-function Composer(props: { onSend: (text: string) => Promise<string | undefined> }): JSX.Element {
-  const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | undefined>(undefined);
-  const submit = (): void => {
-    if (sending || text.trim() === '') {
-      return;
-    }
-    setSending(true);
-    setError(undefined);
-    void props.onSend(text).then((failure) => {
-      setSending(false);
-      if (failure === undefined) {
-        setText('');
-      } else {
-        setError(failure);
-      }
-    });
-  };
-  return (
-    <form
-      class="composer"
-      onSubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
-    >
-      <h3>指示を送る</h3>
-      <textarea
-        class="text-input composer-input"
-        rows={3}
-        aria-label="会話へ送る指示"
-        placeholder="会話へ送る指示（Ctrl+Enterで送信）"
-        value={text}
-        disabled={sending}
-        onInput={(e) => setText(e.currentTarget.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <div class="actions">
-        <button type="submit" class="btn primary" disabled={sending || text.trim() === ''}>
-          {sending ? '送信中…' : '送信'}
-        </button>
-      </div>
-      {error === undefined ? null : (
-        <p class="error" role="alert">
-          {error}
-        </p>
-      )}
-    </form>
   );
 }
 
@@ -2295,6 +2309,19 @@ function HelpOverlay(props: { onClose: () => void }): JSX.Element {
         <table>
           <tbody>
             {KEY_HELP.map(([key, label]) => (
+              <tr key={`${key} ${label}`}>
+                <td>
+                  <kbd>{key}</kbd>
+                </td>
+                <td>{label}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <h3>指示欄の中</h3>
+        <table aria-label="指示欄の中のキー">
+          <tbody>
+            {COMPOSER_KEY_HELP.map(([key, label]) => (
               <tr key={`${key} ${label}`}>
                 <td>
                   <kbd>{key}</kbd>

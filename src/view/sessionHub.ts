@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
+import { parseAttachmentInputs, type AttachmentInput } from '../provider/attachments';
 import {
   parseAskUserQuestionAnswers,
   parsePendingItems,
@@ -754,7 +755,13 @@ export type SessionHubRequestKind =
   /** Mission Controlから会話を閉じる・archive・delete（Issue #2149の1）。 */
   | 'close'
   | 'archive'
-  | 'delete';
+  | 'delete'
+  /** Mission ControlのComposer: 添付・補完・送信キュー（Issue #2158）。 */
+  | 'sendWithAttachments'
+  | 'fileCandidates'
+  | 'commandCandidates'
+  | 'queuedMessages'
+  | 'cancelQueued';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -912,6 +919,24 @@ export interface SessionRecentTurn {
 }
 
 /**
+ * 送信キューの1件（Issue #2158）。応答中に送って待たせている指示。
+ *
+ * 取り消しの`cancelQueued`は、この`id`を添えて送り、受け取った側がidで突き合わせる。
+ */
+export interface SessionQueuedMessage {
+  /** 項目の安定したid。 */
+  id: string;
+  /** 本文。長いものは`MAX_QUEUED_TEXT_CHARS`で切り詰める（`truncated`が立つ）。 */
+  text: string;
+  truncated: boolean;
+  /** 添えた画像の枚数。中身は運ばない。 */
+  attachments: number;
+}
+
+/** 送信キューの1件の本文を運ぶ上限。画面で見分けられれば足りる。 */
+export const MAX_QUEUED_TEXT_CHARS = 2000;
+
+/**
  * 脇道の質問（btw）1件の進み具合（Issue #1261）。
  *
  * 回答は本流の会話に残さないため、この値が統括ページへ運ぶ唯一の経路になる。
@@ -952,6 +977,19 @@ export interface SessionHubReplyPayload {
   sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`の応答（Issue #1280）。保留が無ければ`undefined`。 */
   handoff?: SessionHandoffDetail | undefined;
+  /** `kind === 'fileCandidates'`の応答（Issue #2158）。作業ディレクトリからの相対パス。 */
+  files?: string[] | undefined;
+  /** `kind === 'commandCandidates'`の応答（Issue #2158）。 */
+  commands?: SessionSlashCommand[] | undefined;
+  /** `kind === 'queuedMessages'`の応答（Issue #2158）。 */
+  queued?: SessionQueuedMessage[] | undefined;
+}
+
+/** スラッシュコマンドの候補1件（`SlashCommand`と同じ形。Issue #2158）。 */
+export interface SessionSlashCommand {
+  name: string;
+  description: string;
+  argumentHint: string;
 }
 
 /** 1件の要求。`kind`ごとの追加項目はここへ並べる。 */
@@ -1012,6 +1050,20 @@ export interface SessionHubRequest {
   answers?: Record<string, string[]> | undefined;
   /** `kind === 'answerPrompt'`のときの回答。受信側が形と制約を確かめる。 */
   submission?: unknown;
+  /**
+   * `kind === 'sendWithAttachments'`のときの画像（データURL。Issue #2158）。
+   *
+   * パスで渡さず中身を載せる。パスを書けば受信側にそのファイルを読ませられてしまうため。
+   * 大きさは`parseAttachmentInputs`の上限（base64で約14MB）に収まり、要求ファイル全体は
+   * `MAX_REQUEST_FILE_BYTES`で頭打ちにする。
+   */
+  attachments?: AttachmentInput[] | undefined;
+  /** `kind === 'fileCandidates'`のときの絞り込みの文字列（Issue #2158）。 */
+  query?: string | undefined;
+  /** `kind === 'cancelQueued'`のときの位置（Issue #2158）。照合には使わず補助。 */
+  index?: number | undefined;
+  /** `kind === 'cancelQueued'`のときの項目id。 */
+  queuedId?: string | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -1029,6 +1081,12 @@ export interface SessionHubRequestOutcome {
   error?: string | undefined;
   payload?: SessionHubReplyPayload | undefined;
 }
+
+/**
+ * 要求ファイル1つの大きさの上限（Issue #2158）。画像の添付（データURLで合計約14MB。
+ * `MAX_TOTAL_DATA_URL_CHARS`）が収まり、それ以上は読まない。
+ */
+export const MAX_REQUEST_FILE_BYTES = 16 * 1024 * 1024;
 
 /** 応答を待つ上限。これを過ぎたら要求ファイルを取り下げる。 */
 const REPLY_TIMEOUT_MS = 5_000;
@@ -1103,6 +1161,10 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     pendingId: typeof v.pendingId === 'string' ? v.pendingId : undefined,
     answers: parseAskUserQuestionAnswers(v.answers),
     submission: v.submission,
+    attachments: parseAttachmentInputs(v.attachments),
+    query: typeof v.query === 'string' ? v.query : undefined,
+    index: typeof v.index === 'number' ? v.index : undefined,
+    queuedId: typeof v.queuedId === 'string' ? v.queuedId : undefined,
   };
 }
 
@@ -1152,6 +1214,81 @@ const MAX_REPLY_TITLE_CHARS = 1_000;
 const MAX_REPLY_ANSWER_CHARS = 8_000;
 
 /**
+ * Composerの候補・送信キューとして読み取る上限（Issue #2158）。書き手の上限（ファイル候補50件・
+ * キューの本文`MAX_QUEUED_TEXT_CHARS`）より少しだけ緩くする。
+ */
+const MAX_REPLY_FILES = 60;
+const MAX_REPLY_PATH_CHARS = 1_000;
+const MAX_REPLY_COMMANDS = 500;
+const MAX_REPLY_COMMAND_NAME_CHARS = 200;
+const MAX_REPLY_COMMAND_TEXT_CHARS = 1_000;
+const MAX_REPLY_QUEUED = 100;
+
+function parseCandidateFiles(raw: readonly unknown[]): string[] {
+  return raw
+    .filter(
+      (f): f is string => typeof f === 'string' && f !== '' && f.length <= MAX_REPLY_PATH_CHARS,
+    )
+    .slice(0, MAX_REPLY_FILES);
+}
+
+function parseSlashCommands(raw: readonly unknown[]): SessionSlashCommand[] {
+  const commands: SessionSlashCommand[] = [];
+  for (const entry of raw) {
+    if (commands.length >= MAX_REPLY_COMMANDS) {
+      break;
+    }
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const v = entry as Record<string, unknown>;
+    if (
+      typeof v.name !== 'string' ||
+      v.name === '' ||
+      v.name.length > MAX_REPLY_COMMAND_NAME_CHARS
+    ) {
+      continue;
+    }
+    commands.push({
+      name: v.name,
+      description:
+        typeof v.description === 'string'
+          ? v.description.slice(0, MAX_REPLY_COMMAND_TEXT_CHARS)
+          : '',
+      argumentHint:
+        typeof v.argumentHint === 'string'
+          ? v.argumentHint.slice(0, MAX_REPLY_COMMAND_TEXT_CHARS)
+          : '',
+    });
+  }
+  return commands;
+}
+
+function parseQueuedMessages(raw: readonly unknown[]): SessionQueuedMessage[] {
+  const queued: SessionQueuedMessage[] = [];
+  for (const entry of raw) {
+    if (queued.length >= MAX_REPLY_QUEUED) {
+      break;
+    }
+    // 位置で取り消すため、読めない要素も落とさず空の1件として数える（位置がずれないように）
+    const v = typeof entry === 'object' && entry !== null ? (entry as Record<string, unknown>) : {};
+    const text = typeof v.text === 'string' ? v.text : '';
+    queued.push({
+      id: typeof v.id === 'string' ? v.id : '',
+      text: text.slice(0, MAX_QUEUED_TEXT_CHARS),
+      truncated: v.truncated === true || text.length > MAX_QUEUED_TEXT_CHARS,
+      attachments:
+        typeof v.attachments === 'number' &&
+        Number.isSafeInteger(v.attachments) &&
+        v.attachments >= 0
+          ? v.attachments
+          : 0,
+    });
+  }
+  return queued;
+}
+
+/**
  * 応答の`payload`を、信用せずに読み解く（Issue #1259）。
  *
  * 中身は別プロセス（版が違うこともある）が書いた文字列で、そのまま画面へ流す。
@@ -1179,6 +1316,16 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
   if (v.handoff !== undefined) {
     const handoff = parseHandoffDetail(v.handoff);
     return handoff === undefined ? undefined : { handoff };
+  }
+  // Issue #2158: Composerの候補・送信キュー
+  if (Array.isArray(v.files)) {
+    return { files: parseCandidateFiles(v.files) };
+  }
+  if (Array.isArray(v.commands)) {
+    return { commands: parseSlashCommands(v.commands) };
+  }
+  if (Array.isArray(v.queued)) {
+    return { queued: parseQueuedMessages(v.queued) };
   }
   const raw = v.approvals;
   if (!Array.isArray(raw)) {
@@ -1528,6 +1675,10 @@ export class SessionHubRequestPort {
       pendingId?: string | undefined;
       answers?: Record<string, string[]> | undefined;
       submission?: unknown;
+      attachments?: AttachmentInput[] | undefined;
+      query?: string | undefined;
+      index?: number | undefined;
+      queuedId?: string | undefined;
     },
     /** 応答を待つ上限（ms）。既定は`REPLY_TIMEOUT_MS`。`LONG_REPLY_TIMEOUT_MS`を超えない。 */
     timeoutMs: number = REPLY_TIMEOUT_MS,
@@ -1545,10 +1696,15 @@ export class SessionHubRequestPort {
       issuedAt: Date.now(),
     };
     const filePath = path.join(requestsDirFor(this.root, targetWindowId), `${requestId}.json`);
+    const body = JSON.stringify(request);
+    // 受け取る側は上限を超える要求ファイルを読まずに捨てる。書く前に断り、相手を待たない
+    if (Buffer.byteLength(body, 'utf8') > MAX_REQUEST_FILE_BYTES) {
+      return { requestId, ok: false, error: '送る内容が大きすぎます（画像を減らしてください）' };
+    }
     try {
       await mkdir(requestsDirFor(this.root, targetWindowId), { recursive: true });
       await mkdir(repliesDir(this.root), { recursive: true });
-      await writeAtomic(filePath, JSON.stringify(request));
+      await writeAtomic(filePath, body);
     } catch (e) {
       this.log.warn(`セッション統括: 要求の送信に失敗しました（${input.kind}）: ${String(e)}`);
       return { requestId, ok: false, error: '要求を送れませんでした' };
@@ -1673,6 +1829,18 @@ export class SessionHubRequestWatcher implements vscode.Disposable {
 
   private async handle(filePath: string): Promise<void> {
     if (this.disposed) {
+      return;
+    }
+    // 画像を載せる要求（Issue #2158）があるため大きさを先に見る。上限を超えるものは読まずに捨てる
+    // （共有ディレクトリへ書ける誰かが巨大なファイルを置いても、拡張ホストのメモリを食わせない）
+    try {
+      const info = await stat(filePath);
+      if (info.size > MAX_REQUEST_FILE_BYTES) {
+        await unlink(filePath);
+        this.log.warn(`セッション統括: 大きすぎる要求を捨てました（${info.size} bytes）`);
+        return;
+      }
+    } catch {
       return;
     }
     let raw: string;

@@ -2,7 +2,7 @@ import { buildSync } from 'esbuild';
 import { JSDOM, type DOMWindow } from 'jsdom';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { KEY_HELP } from '../../src/webview/missionControl/keys';
+import { COMPOSER_KEY_HELP, KEY_HELP } from '../../src/webview/missionControl/keys';
 import type { McPendingItem, McSnapshot } from '../../src/webview/missionControl/protocol';
 
 /**
@@ -245,6 +245,84 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     pendingCount: 0,
   };
 
+  it('送信キューは一覧の外から↓で先頭へ入り、先頭が送られて繰り上がってもフォーカスが残る（Issue #2158のレビュー）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    const doc = window.document;
+    const keydown = (target: EventTarget, init: KeyboardEventInit): void => {
+      target.dispatchEvent(
+        new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+      );
+    };
+    const answer = (queued: string[]): void => {
+      const request = posted.filter((m) => m.action === 'queuedMessages').at(-1);
+      deliver({
+        type: 'controlResult',
+        seq: request?.seq,
+        ok: true,
+        queued: queued.map((text) => ({
+          id: `id-${text}`,
+          text,
+          truncated: false,
+          attachments: 0,
+        })),
+      });
+    };
+    keydown(doc.body, { key: 'Q', shiftKey: true });
+    await tick();
+    answer(['一', '二', '三']);
+    await tick();
+    // 開いた直後は一覧のコンテナにフォーカスがある。↓は2件目ではなく先頭へ入る
+    keydown(doc.querySelector('.composer-queue') as HTMLElement, { key: 'ArrowDown' });
+    await tick();
+    expect(doc.activeElement?.textContent).toContain('一');
+    // 先頭が送られて繰り上がる（2秒ごとの読み直し）。フォーカスはbodyへ落ちない
+    keydown(doc.activeElement as HTMLElement, { key: 'ArrowDown' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    answer(['二', '三']);
+    await tick();
+    expect(doc.activeElement?.textContent).toContain('二');
+    expect(doc.activeElement?.tagName).toBe('BUTTON');
+  });
+
+  it('送信したあとに遅れて届いた@の候補で、空になった指示欄へ候補を出さない（Issue #2158のレビュー）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    const doc = window.document;
+    const input = doc.querySelector('textarea.composer-input') as HTMLTextAreaElement;
+    input.focus();
+    input.value = '見て @sr';
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    // 候補の取り寄せ（150ms待ち）が走る前に送る
+    input.dispatchEvent(
+      new window.KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await tick();
+    const send = posted.find((m) => m.action === 'send');
+    deliver({ type: 'controlResult', seq: send?.seq, ok: true });
+    await tick();
+    // 保留していた取り寄せが走っても応答しても、送った後の指示欄に候補を出さない
+    await vi.advanceTimersByTimeAsync(300);
+    const files = posted.filter((m) => m.action === 'fileCandidates').at(-1);
+    if (files !== undefined) {
+      deliver({ type: 'controlResult', seq: files.seq, ok: true, files: ['src/a.ts'] });
+    }
+    await tick();
+    expect(input.value).toBe('');
+    expect(doc.querySelector('.composer-candidates')).toBeNull();
+  });
+
   it('composerは送信中に二重送信させず、失敗したら入力を残して理由を出す（Issue #2137）', async () => {
     const { window, posted, deliver } = boot();
     await tick();
@@ -417,7 +495,8 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       press(window, '?');
       await tick();
       const rows = window.document.querySelectorAll('[aria-label="キー操作"] tr');
-      expect(rows.length).toBe(KEY_HELP.length);
+      // キーの表と、指示欄の中のキー（Issue #2158）の表
+      expect(rows.length).toBe(KEY_HELP.length + COMPOSER_KEY_HELP.length);
     });
 
     it('新規起動のダイアログはTabが外へ抜けず、Ctrl+Enterで起動する', async () => {

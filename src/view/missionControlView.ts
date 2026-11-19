@@ -25,6 +25,7 @@ import {
 } from './missionControlRuns';
 import { parseLifecycleRequest, type McLifecycleRunResult } from './missionControlSessions';
 import { MAX_TASK_RUN_PARALLEL } from '../orchestrator/taskRunState';
+import { pickAttachmentFiles } from './missionControlAttachments';
 import { parseAction, parseTarget, type SessionControl } from './sessionControlMessage';
 
 export const MISSION_CONTROL_OPEN_COMMAND = 'agent.missionControl.open';
@@ -50,6 +51,13 @@ export const LIVE_POLL_MS = 2_000;
  * ようになった分だけ多めにとる。
  */
 export const LIVE_TURNS = 20;
+
+/** 状態を変えない取り寄せの操作（Issue #2158）。結果を返した後に一覧を組み直さない。 */
+const READ_ONLY_CONTROL_KINDS: ReadonlySet<string> = new Set([
+  'fileCandidates',
+  'commandCandidates',
+  'queuedMessages',
+]);
 
 /** 新規セッションの起動（Issue #2137の1）。vscodeに依る部分は`extension.ts`が組む。 */
 export interface McLaunchPort {
@@ -286,6 +294,9 @@ export class MissionControlViewManager implements vscode.Disposable {
         return;
       case 'copyRef':
         this.handleCopyRef(m);
+        return;
+      case 'pickAttachments':
+        this.handlePickAttachments(m);
         return;
       case 'lifecycle':
       case 'history':
@@ -596,6 +607,40 @@ export class MissionControlViewManager implements vscode.Disposable {
     );
   }
 
+  /**
+   * Composerの添付（Issue #2158）。ダイアログはこのウィンドウに出す。会話が別ウィンドウでも
+   * 同じマシンのファイルなので、画像は中身を、ほかはパスをwebviewへ返す。
+   */
+  private handlePickAttachments(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    // 既定の場所は会話の作業ディレクトリ。webview由来の値なので、ダイアログの初期位置にだけ使う
+    const cwd =
+      typeof message.cwd === 'string' && message.cwd !== '' && message.cwd.length <= 4096
+        ? message.cwd
+        : undefined;
+    void pickAttachmentFiles(cwd).then(
+      (picked) =>
+        this.postReply(
+          seq,
+          picked === undefined
+            ? { ok: true, attachments: [], paths: [] }
+            : {
+                ok: true,
+                attachments: picked.attachments,
+                paths: picked.paths,
+                message: picked.skipped.length === 0 ? undefined : picked.skipped.join('\n'),
+              },
+        ),
+      (e: unknown) => {
+        this.log.warn(`Mission Control: 添付を選べませんでした: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: '添付を選べませんでした' });
+      },
+    );
+  }
+
   private postReply(seq: number, reply: Record<string, unknown>): void {
     void this.panel?.webview.postMessage({ ...reply, type: 'reply', seq });
   }
@@ -614,7 +659,10 @@ export class MissionControlViewManager implements vscode.Disposable {
     void this.control(target, action)
       .then((result) => {
         this.postResult(seq, result);
-        this.refresh();
+        // 候補・キューの取り寄せは入力のたびに来る。一覧は変わらないので組み直さない
+        if (!READ_ONLY_CONTROL_KINDS.has(action.kind)) {
+          this.refresh();
+        }
       })
       .catch((e: unknown) => {
         this.log.warn(`Mission Control: 操作に失敗しました（${action.kind}）: ${String(e)}`);
@@ -635,6 +683,9 @@ export class MissionControlViewManager implements vscode.Disposable {
       turnTotal: result.turnTotal,
       handoff: result.handoff,
       sideQuestion: result.sideQuestion,
+      files: result.files,
+      commands: result.commands,
+      queued: result.queued,
     });
   }
 }
@@ -649,6 +700,8 @@ export function renderMissionControlHtml(webview: vscode.Webview, scriptUri: vsc
     "default-src 'none'",
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
+    // 指示欄に添えた画像のサムネイル（Issue #2158）。webviewが自分で作ったデータURLだけ
+    'img-src data:',
   ].join('; ');
   const src = webview.asWebviewUri(scriptUri).toString();
   return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Mission Control</title><style>${MISSION_CONTROL_STYLES}</style></head><body><div id="root"></div><script nonce="${nonce}" src="${escapeAttribute(src)}"></script></body></html>`;

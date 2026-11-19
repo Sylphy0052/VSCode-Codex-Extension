@@ -312,6 +312,7 @@ import {
   noteDropRejected,
   openChatFileLink,
   openCodeInNewFile,
+  fileMentionCandidates,
   postFileMentions,
   postImageData,
   renderShell,
@@ -4963,8 +4964,19 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    const commands = await this.listSlashCommands();
+    void entry.panel.webview.postMessage({ type: 'commands', commands });
+  }
+
+  /** `/`の候補。タブの入力欄とMission Controlの補完（Issue #2158）が同じ一覧を使う。 */
+  protected override async listSlashCommands(): Promise<SlashCommand[]> {
     this.commands ??= await this.loadCommands();
-    void entry.panel.webview.postMessage({ type: 'commands', commands: this.commands });
+    return this.commands;
+  }
+
+  /** `@`の候補（Issue #2158）。 */
+  protected override async listFileCandidates(entry: ChatPanel, query: string): Promise<string[]> {
+    return (await fileMentionCandidates(this.mentions, entry.cwd, query)) ?? [];
   }
 
   /**

@@ -230,7 +230,11 @@ import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
-import type { SessionControlTarget } from './view/sessionControlMessage';
+import {
+  toReplyPayload,
+  toSessionControlAction,
+  type SessionControlTarget,
+} from './view/sessionControlMessage';
 import {
   ActivitySince,
   buildMissionControlSnapshot,
@@ -273,7 +277,6 @@ import {
   AnsweredPendingIds,
   buildChatPendingItems,
   chatPendingId,
-  parsePromptSubmission,
   PendingFirstSeen,
   type PendingItem,
 } from './view/pendingItem';
@@ -285,11 +288,7 @@ import {
   SessionHubRequestPort,
   SessionHubRequestWatcher,
   SessionHubWriter,
-  isSharedApprovalDecision,
-  isSharedHandoffDecision,
   LONG_REPLY_TIMEOUT_MS,
-  type SessionHubReplyPayload,
-  type SessionHubRequest,
   type SharedSession,
 } from './view/sessionHub';
 import { ForgeHubViewManager } from './view/forgeHubView';
@@ -316,6 +315,16 @@ import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
+
+/**
+ * 別ウィンドウ宛てで応答を長く待つ操作（Issue #2158）。画像を載せた要求は書き込み・読み込みに、
+ * 候補の取り寄せはファイルの走査・CLIへの問い合わせに、既定の5秒を超えうる。
+ */
+const LONG_REPLY_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'sendWithAttachments',
+  'fileCandidates',
+  'commandCandidates',
+]);
 
 /**
  * `test/integration/**` だけが使う内部参照。エンドユーザー向けの公開APIではない
@@ -1613,13 +1622,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   };
   // 回答済みの待ち項目（Issue #2135）。同じ項目に2箇所から答えても二重に送らない
   const answeredPending = new AnsweredPendingIds();
-  const controlSession = (
+  const controlSession = async (
     provider: 'codex' | 'claude',
     threadId: string,
     action: SessionControlAction,
     /** 要求元のwindowId。自ウィンドウのカードからの操作なら自分自身のid */
     from: string,
-  ): SessionControlResult => {
+  ): Promise<SessionControlResult> => {
     const target = { from, provider, threadId };
     const pendingId =
       action.kind === 'answerQuestion'
@@ -1635,7 +1644,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             ((action.kind === 'answerQuestion' || action.kind === 'answerPrompt') &&
               !approvalDisclosure.consume(target, action.pendingRequestId))
           ? { ok: false, error: '承認の内容を表示してから操作してください' }
-          : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+          : // 候補の取り寄せだけ待つ。回答は待ちを挟まず、二重送信の判定（answeredPending）から
+            // 記録までを同期で済ませる
+            action.kind === 'fileCandidates' || action.kind === 'commandCandidates'
+            ? await (provider === 'claude' ? claudeChat : chat).controlSessionAsync(
+                threadId,
+                action,
+              )
+            : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
     if (pendingId !== undefined && result.ok) {
       answeredPending.add(pendingId);
     }
@@ -1742,7 +1758,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         // 版が違うウィンドウから知らない操作が届いた。黙って捨てると相手が待つ
         return { ok: false, error: `この版のウィンドウは${request.kind}を扱えません` };
       }
-      const result = controlSession(request.provider, request.threadId, action, request.from);
+      const result = await controlSession(request.provider, request.threadId, action, request.from);
       if (!result.ok) {
         log.info(`セッション統括: 要求を実行できませんでした（${result.error ?? '理由は不明'}）`);
       }
@@ -1790,33 +1806,44 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     if (target.windowId === windowId) {
       return controlSession(target.provider, target.threadId, action, windowId);
     }
-    const reply = await sessionHubRequestPort.request(target.windowId, {
-      kind: action.kind,
-      provider: target.provider,
-      threadId: target.threadId,
-      text:
-        action.kind === 'send' ||
-        action.kind === 'sideQuestion' ||
-        action.kind === 'answerTaskRunQuestion'
-          ? action.text
-          : undefined,
-      pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
-      sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
-      approvalRequestId: action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
-      decision: action.kind === 'approvalDecision' ? action.decision : undefined,
-      limit: action.kind === 'recentTurns' ? action.limit : undefined,
-      before: action.kind === 'recentTurns' ? action.before : undefined,
-      handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
-      handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
-      handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
-      handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
-      pendingRequestId:
-        action.kind === 'answerQuestion' || action.kind === 'answerPrompt'
-          ? action.pendingRequestId
-          : undefined,
-      answers: action.kind === 'answerQuestion' ? action.answers : undefined,
-      submission: action.kind === 'answerPrompt' ? action.submission : undefined,
-    });
+    const reply = await sessionHubRequestPort.request(
+      target.windowId,
+      {
+        kind: action.kind,
+        provider: target.provider,
+        threadId: target.threadId,
+        text:
+          action.kind === 'send' ||
+          action.kind === 'sideQuestion' ||
+          action.kind === 'answerTaskRunQuestion' ||
+          action.kind === 'sendWithAttachments'
+            ? action.text
+            : undefined,
+        attachments: action.kind === 'sendWithAttachments' ? action.attachments : undefined,
+        query: action.kind === 'fileCandidates' ? action.query : undefined,
+        index: action.kind === 'cancelQueued' ? action.index : undefined,
+        queuedId: action.kind === 'cancelQueued' ? action.queuedId : undefined,
+        pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
+        sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
+        approvalRequestId:
+          action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
+        decision: action.kind === 'approvalDecision' ? action.decision : undefined,
+        limit: action.kind === 'recentTurns' ? action.limit : undefined,
+        before: action.kind === 'recentTurns' ? action.before : undefined,
+        handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
+        handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
+        handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
+        handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
+        pendingRequestId:
+          action.kind === 'answerQuestion' || action.kind === 'answerPrompt'
+            ? action.pendingRequestId
+            : undefined,
+        answers: action.kind === 'answerQuestion' ? action.answers : undefined,
+        submission: action.kind === 'answerPrompt' ? action.submission : undefined,
+      },
+      // 画像を載せた要求の書き込み・読み込みと、ファイルの走査・CLIへの問い合わせは5秒を超えうる
+      LONG_REPLY_KINDS.has(action.kind) ? LONG_REPLY_TIMEOUT_MS : undefined,
+    );
     return {
       ok: reply.ok,
       error: reply.error,
@@ -1827,6 +1854,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       turnTotal: reply.payload?.turnTotal,
       handoff: reply.payload?.handoff,
       sideQuestion: reply.payload?.sideQuestion,
+      files: reply.payload?.files,
+      commands: reply.payload?.commands,
+      queued: reply.payload?.queued,
     };
   };
   // エージェント向けの口（design.md §16.21「宛先解決の統合」、Issue #1274）。
@@ -5387,119 +5417,4 @@ function toSessionSummary(
     activity: session.activity,
     sameWindow: ownerWindowId === selfWindowId,
   };
-}
-
-function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | undefined {
-  if (result.approvals !== undefined) {
-    return { approvals: result.approvals };
-  }
-  if (result.turns !== undefined) {
-    return {
-      turns: result.turns,
-      capturedAt: result.capturedAt,
-      turnStart: result.turnStart,
-      turnTotal: result.turnTotal,
-    };
-  }
-  if (result.handoff !== undefined) {
-    return { handoff: result.handoff };
-  }
-  if (result.sideQuestion !== undefined) {
-    return { sideQuestion: result.sideQuestion };
-  }
-  return undefined;
-}
-
-/**
- * 要求ファイルの`kind`を、チャット画面への操作へ変える（Issue #1258、#1259）。
- *
- * `kind`を`string`として扱うのは、共有ディレクトリへ書き込むのが版の違う別プロセス
- * だから（`SessionHubRequestWatcher`は未知の`kind`もそのまま渡す）。知らない操作は
- * `undefined`を返し、呼び出し側が「扱えない」と応答して、送った側をタイムアウトまで
- * 待たせない。`decision`も同じ理由で、ここでホワイトリスト検証してから通す。
- */
-function toSessionControlAction(
-  request: Pick<
-    SessionHubRequest,
-    | 'kind'
-    | 'text'
-    | 'approvalRequestId'
-    | 'decision'
-    | 'limit'
-    | 'before'
-    | 'sideQuestionId'
-    | 'handoffRequestId'
-    | 'handoffDecision'
-    | 'handoffModel'
-    | 'handoffEffort'
-    | 'pendingRequestId'
-    | 'answers'
-    | 'submission'
-  >,
-): SessionControlAction | undefined {
-  const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
-  switch (request.kind as string) {
-    case 'open':
-      return { kind: 'open' };
-    case 'interrupt':
-      return { kind: 'interrupt' };
-    case 'pauseLoop':
-      return { kind: 'pauseLoop' };
-    case 'resumeLoop':
-      return { kind: 'resumeLoop' };
-    case 'send':
-      return text === undefined ? undefined : { kind: 'send', text };
-    case 'approvalDetail':
-      return { kind: 'approvalDetail' };
-    case 'recentTurns':
-      // 件数は受信側（`controlSession`）が範囲へ丸める。ここでは形だけ確かめる
-      return {
-        kind: 'recentTurns',
-        limit: typeof limit === 'number' ? limit : 1,
-        before: typeof request.before === 'number' ? request.before : undefined,
-      };
-    case 'sideQuestion':
-      // 質問文の空・長さは受信側（`controlSession`）が確かめる
-      return text === undefined ? undefined : { kind: 'sideQuestion', text };
-    case 'sideQuestionResult':
-      return sideQuestionId === undefined
-        ? undefined
-        : { kind: 'sideQuestionResult', sideQuestionId };
-    case 'approvalDecision':
-      return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
-        ? undefined
-        : { kind: 'approvalDecision', approvalRequestId, decision };
-    case 'handoffDetail':
-      return { kind: 'handoffDetail' };
-    case 'handoffDecision':
-      // model / effortは受信側（`PendingHandoffChoice`）が候補と突き合わせて弾く。
-      // ここは`decision`だけをホワイトリストで確かめる
-      return request.handoffRequestId === undefined ||
-        !isSharedHandoffDecision(request.handoffDecision)
-        ? undefined
-        : {
-            kind: 'handoffDecision',
-            handoffRequestId: request.handoffRequestId,
-            decision: request.handoffDecision,
-            model: request.handoffModel,
-            effort: request.handoffEffort,
-          };
-    case 'answerQuestion':
-      // 質問との突き合わせは受信側（`controlSession`）が行う。ここは形だけ確かめる
-      return request.pendingRequestId === undefined || request.answers === undefined
-        ? undefined
-        : {
-            kind: 'answerQuestion',
-            pendingRequestId: request.pendingRequestId,
-            answers: request.answers,
-          };
-    case 'answerPrompt': {
-      const submission = parsePromptSubmission(request.submission);
-      return request.pendingRequestId === undefined || submission === undefined
-        ? undefined
-        : { kind: 'answerPrompt', pendingRequestId: request.pendingRequestId, submission };
-    }
-    default:
-      return undefined;
-  }
 }

@@ -1001,13 +1001,28 @@ export async function postFileMentions(
   if (typeof query !== 'string') {
     return;
   }
+  const files = await fileMentionCandidates(mentions, cwd, query);
+  if (files === undefined) {
+    return;
+  }
+  void panel.webview.postMessage({ type: 'files', query, files });
+}
+
+/**
+ * `@` のファイル候補を絞り込んで返す（Issue #2158。Mission Controlの補完もこれを使う）。
+ * 探すフォルダが決まらなければ`undefined`。
+ */
+export async function fileMentionCandidates(
+  mentions: FileMentionCatalog,
+  cwd: string | undefined,
+  query: string,
+): Promise<string[] | undefined> {
   // 復元されたCodex画面はcwdを持たない。そのときはこのウィンドウのフォルダを充てる
   const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
   if (folder === undefined) {
-    return;
+    return undefined;
   }
-  const files = filterFiles(await mentions.list(folder), query, MENTION_LIMIT);
-  void panel.webview.postMessage({ type: 'files', query, files });
+  return filterFiles(await mentions.list(folder), query, MENTION_LIMIT);
 }
 
 export interface ChatShellOptions {

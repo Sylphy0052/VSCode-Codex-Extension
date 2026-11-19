@@ -318,6 +318,38 @@ describe('chatView.ts の補完カバレッジ', () => {
       expect(stateOf(chat).queued).toHaveLength(0);
     });
 
+    it('取り消しはidで照合し、同じ本文の2件が並んでも選んだ側だけを消す（Issue #2158）', async () => {
+      const chat = await openChat();
+      await sendText(chat, '最初の指示');
+      chat.connection.notify('turn/started', { threadId: 'thread-A', turn: { id: 'turn-1' } });
+      await chat.post({ type: 'send', text: '同じ本文' });
+      await chat.post({ type: 'send', text: '同じ本文' });
+      const view = chat.manager.controlSession(chat.threadId, { kind: 'queuedMessages' });
+      const ids = (view.queued ?? []).map((q) => q.id);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).not.toBe(ids[1]);
+      const keep = stateOf(chat).queued[0];
+
+      // 位置のヒントが古くて0を指していても、2件目のidを消す
+      const ok = chat.manager.controlSession(chat.threadId, {
+        kind: 'cancelQueued',
+        index: 0,
+        queuedId: ids[1]!,
+      });
+      expect(ok).toEqual({ ok: true });
+      expect(stateOf(chat).queued).toHaveLength(1);
+      expect(stateOf(chat).queued[0]).toBe(keep);
+
+      // 見つからないidは、同じ位置に別の指示がいても消さずに断る
+      const gone = chat.manager.controlSession(chat.threadId, {
+        kind: 'cancelQueued',
+        index: 0,
+        queuedId: ids[1]!,
+      });
+      expect(gone).toEqual({ ok: false, error: 'この指示は既に送られたか、取り消されています' });
+      expect(stateOf(chat).queued).toHaveLength(1);
+    });
+
     it('sendQueued と flushQueue は進行中のターンへ turn/steer で割り込む', async () => {
       const chat = await openChat();
       await sendText(chat, '最初の指示');
