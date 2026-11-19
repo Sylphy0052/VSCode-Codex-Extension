@@ -936,6 +936,15 @@
           "scope": "window",
           "markdownDescription": "Claude Codeのタブを使わないままこの分数が過ぎたら、そのタブのCLIを終了してメモリを空ける（Issue #1808）。タブには「休止中（次の送信で再開）」と出し、次に送ったときに同じ会話を `--resume` で再開する。応答中・承認待ち・質問待ち・ループ実行中・自動引き継ぎ中・バックグラウンドタスクがあるとき、ワークフローやオーケストレータモードの工程のタブでは終了しない。`0` で無効。Codexのタブには効かない。"
         },
+        "agent.claude.sandbox.extraExcludedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード・ロードマップ実行のsandbox付きClaude Codeセッションで、sandboxの外（通常の承認フロー）で走らせるコマンドを足す（Issue #2133）。`gh *`・`git push *`・`ssh *`・`scp *`・`rsync *`などの固定の一覧に加わり、子セッションへの指示文と、連結などで外へ回らない形を実行前に止める判定にも同じ値が使われる。一致はコマンドの先頭から見るので、スクリプトは絶対パスで書く（例: `python3 /home/<user>/.claude/skills/compute-server/scripts/cs.py *`）。`~/`・連結・リダイレクト・`$(…)`を含む形では一致しない。ここに載せても自動で通るわけではなく、承認の判定（`agent.workflows.allowAutoApprove`）を通る。"
+        },
         "agent.autoHandoff.thresholdPercent": {
           "type": "number",
           "default": 20,

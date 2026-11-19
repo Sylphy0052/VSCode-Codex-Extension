@@ -53,7 +53,43 @@ export const EXCLUDED_COMMANDS: readonly string[] = [
   'pip install *',
   // sandboxと両立しない（公式ドキュメントのトラブルシューティング）
   'docker *',
+  // 計算機サーバ（Issue #2133）。`~/.ssh`の鍵をsandboxへ渡さず、承認フローを通して外で走らせる
+  'ssh *',
+  'scp *',
+  'rsync *',
 ];
+
+/**
+ * 利用者が設定（`agent.claude.sandbox.extraExcludedCommands`）で足した除外パターンを整える
+ * （Issue #2133）。文字列でないもの・空・改行を含むもの・固定の一覧と重複するものは捨てる。
+ */
+export function normalizeExtraExcludedCommands(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const result: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const pattern = item.trim();
+    if (
+      pattern === '' ||
+      /[\r\n]/.test(pattern) ||
+      EXCLUDED_COMMANDS.includes(pattern) ||
+      result.includes(pattern)
+    ) {
+      continue;
+    }
+    result.push(pattern);
+  }
+  return result;
+}
+
+/** 固定の{@link EXCLUDED_COMMANDS}に、設定で足したパターンを後ろへ合流させる。 */
+export function sandboxExcludedCommands(extra: readonly string[] = []): string[] {
+  return [...EXCLUDED_COMMANDS, ...normalizeExtraExcludedCommands(extra)];
+}
 
 /** bubblewrapの試し起動の時間上限。名前空間を作れないときは即座に失敗するので短くてよい。 */
 const BWRAP_TIMEOUT_MS = 10_000;
@@ -90,6 +126,7 @@ export function buildClaudeSandboxSettings(
   mode: ClaudeSandboxMode,
   cwd: string,
   environment: ClaudeSandboxEnvironment,
+  extraExcludedCommands: readonly string[] = [],
 ): Record<string, unknown> {
   return {
     sandbox: {
@@ -97,7 +134,7 @@ export function buildClaudeSandboxSettings(
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
       failIfUnavailable: true,
-      excludedCommands: [...EXCLUDED_COMMANDS],
+      excludedCommands: sandboxExcludedCommands(extraExcludedCommands),
       // 既定では許可されていない接続先へ繋ぐたびに承認（`SandboxNetworkAccess`）が届く。
       // これは接続先のホストしか持たず、コマンドの中身（`gh pr merge`など）を見る承認判定を
       // 素通りさせるため、sandbox内の接続は全て拒否し、ネットワークを要するコマンドは
@@ -174,9 +211,15 @@ export const CLAUDE_TRIAL_DISALLOWED_TOOLS: readonly string[] = [
  *
  * 出力をファイルへリダイレクトした形（`glab api … > out.json`）もsandbox内で走る（Issue #1674）。
  * 出力をsandboxの外でファイルへ書く手段は無いので、直接読ませる。
+ *
+ * 設定で足したパターン（`python3 /home/<user>/.../cs.py *`など。Issue #2133）も同じく先頭一致で、
+ * `~/`は展開されず一致しないため、設定と同じ絶対パスで打たせる。足したものがあるときだけ伝える。
  */
-export function buildClaudeSandboxPrompt(): string {
-  const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
+export function buildClaudeSandboxPrompt(extraExcludedCommands: readonly string[] = []): string {
+  const extra = normalizeExtraExcludedCommands(extraExcludedCommands);
+  const commands = sandboxExcludedCommands(extra)
+    .map((pattern) => pattern.replace(/ \*$/, ''))
+    .join(' / ');
   return [
     'Bashのコマンドはsandbox内で走り、ネットワークと認証情報を使えない。',
     `次のコマンドは、単独で実行したときだけsandboxの外で走る: ${commands}。`,
@@ -185,6 +228,11 @@ export function buildClaudeSandboxPrompt(): string {
     '前にcdも付けず、git -C <dir> pushのようにgitとサブコマンドの間へ引数も挟まない。作業ディレクトリでそのまま打つ。',
     '引数にコマンド置換（$(…)、バッククォート、"$(cat <<EOF …)"）も使わない。PR/MRやIssueの本文は先にWriteツールでファイルへ書き、gh ... --body-file <path>、glab api ... --field description=@<path>のようにファイルから渡す。',
     'これらが認証やネットワークのエラーで失敗したら、使えないと判断する前に単独で打ち直す。',
+    ...(extra.length > 0
+      ? [
+          `一覧のうち ${extra.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ')} は、書かれたとおりの絶対パスのまま先頭から単独で打つ。~/や相対パスに書き換えず、連結・リダイレクト・$(…)も付けない。`,
+        ]
+      : []),
   ].join('\n');
 }
 
@@ -198,12 +246,13 @@ export function claudeSandboxArgs(
   mode: ClaudeSandboxMode,
   cwd: string,
   environment: ClaudeSandboxEnvironment,
+  extraExcludedCommands: readonly string[] = [],
 ): string[] {
   return [
     '--settings',
-    JSON.stringify(buildClaudeSandboxSettings(mode, cwd, environment)),
+    JSON.stringify(buildClaudeSandboxSettings(mode, cwd, environment, extraExcludedCommands)),
     '--append-system-prompt',
-    buildClaudeSandboxPrompt(),
+    buildClaudeSandboxPrompt(extraExcludedCommands),
   ];
 }
 

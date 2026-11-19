@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_SWITCH_THRESHOLD_PCT } from './claude/accountPolicy';
 import { normalizeIdleShutdownMinutes } from './claude/idleShutdown';
+import { normalizeExtraExcludedCommands } from './claude/sandbox';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
 import { hasGitSegment } from './orchestrator/escalation';
@@ -635,6 +636,17 @@ export const DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT = 20;
 export function readIdleShutdownMinutes(): number {
   return normalizeIdleShutdownMinutes(
     vscode.workspace.getConfiguration('agent').get<unknown>('claude.idleShutdownMinutes'),
+  );
+}
+
+/**
+ * sandbox付きの工程セッションで、sandboxの外（承認フロー）へ回すコマンドを足す
+ * （`agent.claude.sandbox.extraExcludedCommands`、既定`[]`。Issue #2133）。
+ * 壊れた要素（文字列でない・空・改行入り）と固定の一覧との重複は捨てる。
+ */
+export function readClaudeSandboxExtraExcludedCommands(): string[] {
+  return normalizeExtraExcludedCommands(
+    vscode.workspace.getConfiguration('agent').get<unknown>('claude.sandbox.extraExcludedCommands'),
   );
 }
 
