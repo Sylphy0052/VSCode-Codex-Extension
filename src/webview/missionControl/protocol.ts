@@ -144,14 +144,99 @@ export interface McLaunchRepo {
   source: 'session' | 'recent' | 'history' | 'picked';
 }
 
+/**
+ * 起動時に選べる設定（Issue #2149の2）。空文字・未指定は「拡張機能の設定のまま」を表す。
+ * 承認方針は拡張機能の設定より緩められない（拡張ホストがクランプする）。
+ */
+export interface McLaunchSettings {
+  model?: string | undefined;
+  effort?: string | undefined;
+  /** Codexは`approvalMode`、Claudeは`permissionMode`の値。 */
+  approval?: string | undefined;
+  /** `agent.sessionPresets`の`name`。プリセットの値を土台にし、上の3つで上書きする。 */
+  preset?: string | undefined;
+}
+
 /** 新規セッションの起動の要求。 */
-export interface McLaunchRequest {
+export interface McLaunchRequest extends McLaunchSettings {
   cwd: string;
   provider: McProvider;
   /** 最初の指示。空なら会話を開くだけにする。 */
   prompt: string;
   /** 別のworktree（`<repo>/.claude/worktrees/`配下）で動かすか。 */
   worktree: boolean;
+}
+
+/** 開始ダイアログのmodelの候補1件。 */
+export interface McLaunchModel {
+  slug: string;
+  label: string;
+  /** このmodelで選べるeffort。空ならeffortを選べないmodel。 */
+  efforts: string[];
+}
+
+/** 開始ダイアログの承認方針の候補1件。 */
+export interface McLaunchApproval {
+  value: string;
+  label: string;
+}
+
+/** providerごとの候補。 */
+export interface McLaunchProviderChoices {
+  models: McLaunchModel[];
+  /** modelを選ばないときのeffortの候補。 */
+  efforts: string[];
+  /** 拡張機能の設定と同じか、それより厳しいものだけ。 */
+  approvals: McLaunchApproval[];
+  /** 拡張機能の設定の値（「設定のまま」の表示に使う）。 */
+  current: { model: string; effort: string; approval: string };
+}
+
+/** プリセット1件（`agent.sessionPresets`）。 */
+export interface McLaunchPreset {
+  name: string;
+  provider: McProvider;
+  model: string;
+  effort: string;
+  approval: string;
+}
+
+/** repoごとに覚えた前回の選択。 */
+export interface McLaunchDefaults extends McLaunchSettings {
+  provider: McProvider;
+}
+
+export interface McLaunchChoices {
+  providers: Record<McProvider, McLaunchProviderChoices>;
+  presets: McLaunchPreset[];
+  /** `McLaunchRepo.key` → 前回の選択。 */
+  defaults: Record<string, McLaunchDefaults>;
+}
+
+/**
+ * セッションのライフサイクル操作（Issue #2149の1）。`archive`は取り消せる（履歴から
+ * archive解除できる）。`delete`は取り消せないので拡張ホストが確認を出す。
+ */
+export type McLifecycleOp = 'close' | 'archive' | 'delete';
+
+/** ライフサイクル操作の1件ごとの結果。 */
+export interface McLifecycleOutcome {
+  target: McTarget;
+  ok: boolean;
+  error?: string | undefined;
+}
+
+/** 履歴の1件（Issue #2149の3）。archive済みを含む。 */
+export interface McHistoryItem {
+  provider: McProvider;
+  threadId: string;
+  title: string;
+  repoKey: string;
+  repoLabel: string;
+  cwdFull: string;
+  /** 最後に更新された時刻（ms）。不明なら0。 */
+  updatedAt: number;
+  archived: boolean;
 }
 
 /** AskUserQuestionの質問1件（`SharedAskUserQuestion`と同じ形）。 */
@@ -240,6 +325,12 @@ export type McHostMessage =
       repo?: McLaunchRepo | undefined;
       /** 起動した作業ディレクトリ。worktreeで起動したときはそのパス。 */
       cwd?: string | undefined;
+      /** `launchOptions`の応答: model・effort・承認方針・プリセットの候補（Issue #2149の2）。 */
+      choices?: McLaunchChoices | undefined;
+      /** `lifecycle`の応答: 1件ごとの結果（Issue #2149の1）。確認で取りやめたら無い。 */
+      outcomes?: McLifecycleOutcome[] | undefined;
+      /** `history`の応答（Issue #2149の3）。 */
+      history?: McHistoryItem[] | undefined;
     }
   | {
       /** 詳細で選択中のセッションの直近のやり取り（ライブtail。Issue #2137の3）。 */
@@ -294,6 +385,12 @@ export type McWebviewMessage =
   | { type: 'launchOptions'; seq: number }
   | { type: 'pickFolder'; seq: number }
   | ({ type: 'launch'; seq: number } & McLaunchRequest)
+  /** 閉じる・archive・delete（Issue #2149の1）。複数選択はまとめて1件で送る。 */
+  | { type: 'lifecycle'; seq: number; op: McLifecycleOp; targets: McTarget[] }
+  /** 履歴の一覧を取り寄せる（Issue #2149の3）。絞り込みはwebviewで行う。 */
+  | { type: 'history'; seq: number }
+  /** 履歴の1件をこのウィンドウで開き直す。 */
+  | { type: 'historyOpen'; seq: number; provider: McProvider; threadId: string }
   /** ライブtailの対象。`target`が無ければ止める。 */
   | { type: 'watch'; target?: McTarget | undefined }
   /** レビュー待ちの1ファイルをdiffエディタで開く（Issue #2138の1）。 */

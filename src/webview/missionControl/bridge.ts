@@ -2,9 +2,14 @@ import type {
   McApprovalDetail,
   McControlAction,
   McHandoffDetail,
+  McHistoryItem,
   McHostMessage,
+  McLaunchChoices,
   McLaunchRepo,
   McLaunchRequest,
+  McLifecycleOp,
+  McLifecycleOutcome,
+  McProvider,
   McSideQuestion,
   McSnapshot,
   McTarget,
@@ -34,6 +39,9 @@ export interface ReplyResult {
   repos?: McLaunchRepo[] | undefined;
   repo?: McLaunchRepo | undefined;
   cwd?: string | undefined;
+  choices?: McLaunchChoices | undefined;
+  outcomes?: McLifecycleOutcome[] | undefined;
+  history?: McHistoryItem[] | undefined;
 }
 
 /** ライブtailで届いた直近のやり取り。 */
@@ -51,6 +59,12 @@ export interface Bridge {
   /** フォルダ選択のダイアログを出させる。 */
   pickFolder(): Promise<ReplyResult>;
   launch(request: McLaunchRequest): Promise<ReplyResult>;
+  /** 閉じる・archive・delete（Issue #2149の1）。確認は拡張ホストが出す。 */
+  lifecycle(op: McLifecycleOp, targets: readonly McTarget[]): Promise<ReplyResult>;
+  /** 履歴（archive済みを含む）を取り寄せる。 */
+  history(): Promise<ReplyResult>;
+  /** 履歴の1件を開き直す。 */
+  historyOpen(provider: McProvider, threadId: string): Promise<ReplyResult>;
   /** レビュー待ちの1ファイルをdiffエディタで開かせる（Issue #2138の1）。 */
   openDiff(target: McTarget, path: string): Promise<ReplyResult>;
   /** レビュー待ちを「確認済み」にする。 */
@@ -133,6 +147,9 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           repos: message.repos,
           repo: message.repo,
           cwd: message.cwd,
+          choices: message.choices,
+          outcomes: message.outcomes,
+          history: message.history,
         });
       }
       return;
@@ -197,7 +214,14 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
         provider: request.provider,
         prompt: request.prompt,
         worktree: request.worktree,
+        model: request.model,
+        effort: request.effort,
+        approval: request.approval,
+        preset: request.preset,
       }),
+    lifecycle: (op, targets) => call({ type: 'lifecycle', op, targets: targets.map(targetOnly) }),
+    history: () => call({ type: 'history' }),
+    historyOpen: (provider, threadId) => call({ type: 'historyOpen', provider, threadId }),
     openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
     reviewAck: (to) => call({ type: 'reviewAck', ...targetOnly(to) }),
     resume: (to) => call({ type: 'resume', ...targetOnly(to) }),

@@ -1326,6 +1326,34 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * 扱い・上限による自動再開の抑止・擬似コマンドの扱いは各サブクラスの`send` /
    * `interrupt`の分岐が持っているため、ここで作り直すと画面からの操作と挙動がずれる。
    */
+  /**
+   * Mission Controlから会話を閉じる（Issue #2149の1）。タブを閉じたときと同じ`teardown`で、
+   * 実行中ならプロセスも止める。確認は呼び出し側（Mission Control）が済ませている。
+   *
+   * タスクの会話（オーケストレータ・ワークフローが管理）と入力欄を閉じたタブは閉じさせない。
+   * 管理側が会話の続きを待っているため、外から止めると工程が宙に浮く。
+   */
+  closeSession(threadId: string): SessionControlResult {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    if (entry.taskManaged || entry.inputLock) {
+      return {
+        ok: false,
+        error: 'タスクの会話は閉じられません（管理しているタスク側で止めてください）',
+      };
+    }
+    this.teardown(entry);
+    return { ok: true };
+  }
+
+  /** 会話がこのウィンドウで開いているか。 */
+  hasOpenSession(threadId: string): boolean {
+    const entry = this.panels.get(threadId);
+    return entry !== undefined && !entry.disposed;
+  }
+
   controlSession(threadId: string, action: SessionControlAction): SessionControlResult {
     // 結果の取得だけは会話の有無より先に見る（Issue #1261）。回答が返る前にタブが
     // 閉じても、投げた側は結果を読めるようにする（預かっているのはこの管理クラス）

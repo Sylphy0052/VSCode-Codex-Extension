@@ -1117,13 +1117,17 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     }
   }
 
-  /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
+  /**
+   * 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。
+   * `config`はMission Controlの起動オプション（Issue #2149の2）。`openNew`へそのまま渡す。
+   */
   async openNewWithPrompt(
     cwd: string,
     prompt: string,
     beforeSend?: () => void,
+    config?: CodexConfig,
   ): Promise<string | undefined> {
-    const threadId = await this.openNew(cwd);
+    const threadId = await this.openNew(cwd, config);
     if (threadId === undefined) return undefined;
     const entry = this.panels.get(threadId);
     if (entry === undefined) return undefined;
