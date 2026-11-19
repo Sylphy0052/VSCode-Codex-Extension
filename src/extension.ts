@@ -1816,13 +1816,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           action.kind === 'send' ||
           action.kind === 'sideQuestion' ||
           action.kind === 'answerTaskRunQuestion' ||
-          action.kind === 'sendWithAttachments' ||
-          action.kind === 'cancelQueued'
+          action.kind === 'sendWithAttachments'
             ? action.text
             : undefined,
         attachments: action.kind === 'sendWithAttachments' ? action.attachments : undefined,
         query: action.kind === 'fileCandidates' ? action.query : undefined,
         index: action.kind === 'cancelQueued' ? action.index : undefined,
+        queuedId: action.kind === 'cancelQueued' ? action.queuedId : undefined,
         pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
         sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
         approvalRequestId:

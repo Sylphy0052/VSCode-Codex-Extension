@@ -510,7 +510,7 @@ export type McControlAction =
   | { action: 'fileCandidates'; query: string }
   | { action: 'commandCandidates' }
   | { action: 'queuedMessages' }
-  | { action: 'cancelQueued'; index: number; text: string };
+  | { action: 'cancelQueued'; index: number; queuedId: string };
 
 /** 送る画像1件（Issue #2158）。`dataUrl`はpng / jpeg / gif / webpのbase64。 */
 export interface McAttachment {
@@ -527,6 +527,8 @@ export interface McSlashCommand {
 
 /** 送信キューの1件（Issue #2158）。 */
 export interface McQueuedMessage {
+  /** 項目の安定したid。取り消しの照合に使う。 */
+  id: string;
   text: string;
   truncated: boolean;
   /** 添えた画像の枚数。 */

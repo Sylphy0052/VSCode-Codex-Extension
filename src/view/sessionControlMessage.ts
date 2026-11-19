@@ -153,8 +153,9 @@ export function parseAction(message: Record<string, unknown>): SessionControlAct
     case 'cancelQueued':
       return Number.isSafeInteger(message.index) &&
         (message.index as number) >= 0 &&
-        typeof message.text === 'string'
-        ? { kind: 'cancelQueued', index: message.index as number, text: message.text }
+        typeof message.queuedId === 'string' &&
+        message.queuedId !== ''
+        ? { kind: 'cancelQueued', index: message.index as number, queuedId: message.queuedId }
         : undefined;
     default:
       return undefined;
@@ -220,6 +221,7 @@ export function toSessionControlAction(
     | 'attachments'
     | 'query'
     | 'index'
+    | 'queuedId'
   >,
 ): SessionControlAction | undefined {
   const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
@@ -296,7 +298,11 @@ export function toSessionControlAction(
     case 'queuedMessages':
       return { kind: 'queuedMessages' };
     case 'cancelQueued':
-      return parseAction({ action: 'cancelQueued', index: request.index, text });
+      return parseAction({
+        action: 'cancelQueued',
+        index: request.index,
+        queuedId: request.queuedId,
+      });
     default:
       return undefined;
   }

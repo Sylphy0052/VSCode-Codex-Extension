@@ -256,7 +256,7 @@ export function Composer(props: {
 
   const cancelQueued = (index: number, item: McQueuedMessage): void => {
     void bridge
-      .request(session, { action: 'cancelQueued', index, text: item.text })
+      .request(session, { action: 'cancelQueued', index, queuedId: item.id })
       .then((result) => {
         props.onToast(
           result.ok ? '送信キューから取り消しました' : (result.error ?? '取り消せませんでした'),
@@ -538,9 +538,7 @@ export function Composer(props: {
           >
             {queue.map((item, i) => (
               // 位置を含めない（先頭が送られて繰り上がっても同じ項目のDOMを残し、フォーカスを保つ）
-              <li
-                key={`${item.text}#${String(queue.slice(0, i).filter((q) => q.text === item.text).length)}`}
-              >
+              <li key={item.id === '' ? `#${String(i)}` : item.id}>
                 <button
                   type="button"
                   class="choice"

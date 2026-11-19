@@ -282,16 +282,18 @@ describe('parseAction: 添付・補完・送信キュー（Issue #2158）', () =
     expect(parseAction({ action: 'queuedMessages' })).toEqual({ kind: 'queuedMessages' });
   });
 
-  it('cancelQueuedは0以上の整数の位置と本文を要る', () => {
-    expect(parseAction({ action: 'cancelQueued', index: 0, text: 'a' })).toEqual({
+  it('cancelQueuedは0以上の整数の位置と項目idを要る', () => {
+    expect(parseAction({ action: 'cancelQueued', index: 0, queuedId: 'a' })).toEqual({
       kind: 'cancelQueued',
       index: 0,
-      text: 'a',
+      queuedId: 'a',
     });
-    expect(parseAction({ action: 'cancelQueued', index: -1, text: 'a' })).toBeUndefined();
-    expect(parseAction({ action: 'cancelQueued', index: 1.5, text: 'a' })).toBeUndefined();
-    expect(parseAction({ action: 'cancelQueued', index: '0', text: 'a' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: -1, queuedId: 'a' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: 1.5, queuedId: 'a' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: '0', queuedId: 'a' })).toBeUndefined();
     expect(parseAction({ action: 'cancelQueued', index: 0 })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: 0, queuedId: '' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: 0, text: 'a' })).toBeUndefined();
   });
 });
 
@@ -309,10 +311,10 @@ describe('toSessionControlAction: session-hubの要求の検証（Issue #2158）
       kind: 'commandCandidates',
     });
     expect(toSessionControlAction({ kind: 'queuedMessages' })).toEqual({ kind: 'queuedMessages' });
-    expect(toSessionControlAction({ kind: 'cancelQueued', index: 2, text: 'b' })).toEqual({
+    expect(toSessionControlAction({ kind: 'cancelQueued', index: 2, queuedId: 'b' })).toEqual({
       kind: 'cancelQueued',
       index: 2,
-      text: 'b',
+      queuedId: 'b',
     });
   });
 
@@ -325,8 +327,10 @@ describe('toSessionControlAction: session-hubの要求の検証（Issue #2158）
       }),
     ).toBeUndefined();
     expect(toSessionControlAction({ kind: 'fileCandidates' })).toBeUndefined();
-    expect(toSessionControlAction({ kind: 'cancelQueued', text: 'b' })).toBeUndefined();
-    expect(toSessionControlAction({ kind: 'cancelQueued', index: -1, text: 'b' })).toBeUndefined();
+    expect(toSessionControlAction({ kind: 'cancelQueued', queuedId: 'b' })).toBeUndefined();
+    expect(
+      toSessionControlAction({ kind: 'cancelQueued', index: -1, queuedId: 'b' }),
+    ).toBeUndefined();
   });
 
   it('未知の種別は断る', () => {
@@ -340,7 +344,7 @@ describe('toReplyPayload（Issue #2158）', () => {
     expect(toReplyPayload({ ok: true, files: ['a.ts'] })).toEqual({ files: ['a.ts'] });
     const commands = [{ name: 'init', description: 'd', argumentHint: '' }];
     expect(toReplyPayload({ ok: true, commands })).toEqual({ commands });
-    const queued = [{ text: 'q', truncated: false, attachments: 1 }];
+    const queued = [{ id: 'q1', text: 'q', truncated: false, attachments: 1 }];
     expect(toReplyPayload({ ok: true, queued })).toEqual({ queued });
     expect(toReplyPayload({ ok: true })).toBeUndefined();
   });

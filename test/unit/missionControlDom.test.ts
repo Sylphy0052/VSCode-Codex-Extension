@@ -262,7 +262,12 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
         type: 'controlResult',
         seq: request?.seq,
         ok: true,
-        queued: queued.map((text) => ({ text, truncated: false, attachments: 0 })),
+        queued: queued.map((text) => ({
+          id: `id-${text}`,
+          text,
+          truncated: false,
+          attachments: 0,
+        })),
       });
     };
     keydown(doc.body, { key: 'Q', shiftKey: true });

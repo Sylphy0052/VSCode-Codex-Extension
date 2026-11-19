@@ -921,10 +921,11 @@ export interface SessionRecentTurn {
 /**
  * 送信キューの1件（Issue #2158）。応答中に送って待たせている指示。
  *
- * 取り消しの`cancelQueued`は、この`text`（切り詰めた後の値）を添えて送り、受け取った側が
- * 同じ位置の指示と突き合わせる。
+ * 取り消しの`cancelQueued`は、この`id`を添えて送り、受け取った側がidで突き合わせる。
  */
 export interface SessionQueuedMessage {
+  /** 項目の安定したid。 */
+  id: string;
   /** 本文。長いものは`MAX_QUEUED_TEXT_CHARS`で切り詰める（`truncated`が立つ）。 */
   text: string;
   truncated: boolean;
@@ -1059,8 +1060,10 @@ export interface SessionHubRequest {
   attachments?: AttachmentInput[] | undefined;
   /** `kind === 'fileCandidates'`のときの絞り込みの文字列（Issue #2158）。 */
   query?: string | undefined;
-  /** `kind === 'cancelQueued'`のときの位置（Issue #2158）。本文は`text`に載せる。 */
+  /** `kind === 'cancelQueued'`のときの位置（Issue #2158）。照合には使わず補助。 */
   index?: number | undefined;
+  /** `kind === 'cancelQueued'`のときの項目id。 */
+  queuedId?: string | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -1161,6 +1164,7 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     attachments: parseAttachmentInputs(v.attachments),
     query: typeof v.query === 'string' ? v.query : undefined,
     index: typeof v.index === 'number' ? v.index : undefined,
+    queuedId: typeof v.queuedId === 'string' ? v.queuedId : undefined,
   };
 }
 
@@ -1270,6 +1274,7 @@ function parseQueuedMessages(raw: readonly unknown[]): SessionQueuedMessage[] {
     const v = typeof entry === 'object' && entry !== null ? (entry as Record<string, unknown>) : {};
     const text = typeof v.text === 'string' ? v.text : '';
     queued.push({
+      id: typeof v.id === 'string' ? v.id : '',
       text: text.slice(0, MAX_QUEUED_TEXT_CHARS),
       truncated: v.truncated === true || text.length > MAX_QUEUED_TEXT_CHARS,
       attachments:
@@ -1673,6 +1678,7 @@ export class SessionHubRequestPort {
       attachments?: AttachmentInput[] | undefined;
       query?: string | undefined;
       index?: number | undefined;
+      queuedId?: string | undefined;
     },
     /** 応答を待つ上限（ms）。既定は`REPLY_TIMEOUT_MS`。`LONG_REPLY_TIMEOUT_MS`を超えない。 */
     timeoutMs: number = REPLY_TIMEOUT_MS,

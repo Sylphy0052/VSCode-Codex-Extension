@@ -349,10 +349,11 @@ export type SessionControlAction =
   /** 送信キュー（応答中に送って待たせている指示）を取り寄せる（Issue #2158）。 */
   | { kind: 'queuedMessages' }
   /**
-   * 送信キューの1件を取り消す（Issue #2158）。位置だけだと、取り寄せてから押すまでに
-   * キューが進んで別の指示を消すため、本文も添えて一致を確かめる。
+   * 送信キューの1件を取り消す（Issue #2158）。位置や本文では、取り寄せてから押すまでに
+   * キューが進んだり同じ本文の指示が並んだりして別の指示を消すため、項目のidで照合する。
+   * 位置は補助で、idの項目が動いていてもidで見つけ直す。
    */
-  | { kind: 'cancelQueued'; index: number; text: string };
+  | { kind: 'cancelQueued'; index: number; queuedId: string };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -420,9 +421,14 @@ export function abortAsRejection(signal: AbortSignal): Promise<never> {
 }
 
 /** 送信キューの1件を運ぶ形にする（Issue #2158）。本文は上限で切り詰め、画像は枚数だけ。 */
-function toQueuedView(text: string, attachments: readonly unknown[]): SessionQueuedMessage {
+function toQueuedView(
+  id: string,
+  text: string,
+  attachments: readonly unknown[],
+): SessionQueuedMessage {
   const truncated = text.length > MAX_QUEUED_TEXT_CHARS;
   return {
+    id,
     text: truncated ? text.slice(0, MAX_QUEUED_TEXT_CHARS) : text,
     truncated,
     attachments: attachments.length,
@@ -1641,15 +1647,22 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       case 'queuedMessages':
         return {
           ok: true,
-          queued: entry.session.getState().queued.map((q) => toQueuedView(q.text, q.attachments)),
+          queued: entry.session
+            .getState()
+            .queued.map((q) => toQueuedView(q.id ?? '', q.text, q.attachments)),
         };
       case 'cancelQueued': {
-        // 取り寄せてから押すまでにキューが進んでいたら、同じ位置に別の指示がいる。消さずに断る
-        const queued = entry.session.getState().queued[action.index];
-        if (queued === undefined || toQueuedView(queued.text, []).text !== action.text) {
+        // 取り寄せてから押すまでにキューが進んでいても、idで同じ項目を探す。見つからなければ断る
+        const list = entry.session.getState().queued;
+        const hinted = list[action.index];
+        const at =
+          hinted !== undefined && hinted.id === action.queuedId
+            ? action.index
+            : list.findIndex((q) => q.id === action.queuedId);
+        if (action.queuedId === '' || at < 0) {
           return { ok: false, error: 'この指示は既に送られたか、取り消されています' };
         }
-        this.dispatchMessage(entry, { type: 'cancelQueued', index: action.index });
+        this.dispatchMessage(entry, { type: 'cancelQueued', index: at });
         return { ok: true };
       }
       case 'fileCandidates':
