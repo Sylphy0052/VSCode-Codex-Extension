@@ -424,6 +424,12 @@ export type McHostMessage =
       handoff?: McHandoffDetail | undefined;
       /** `sideQuestion`・`sideQuestionResult`の応答。 */
       sideQuestion?: McSideQuestion | undefined;
+      /** `fileCandidates`の応答（Issue #2158）。会話の作業ディレクトリからの相対パス。 */
+      files?: string[] | undefined;
+      /** `commandCandidates`の応答（Issue #2158）。 */
+      commands?: McSlashCommand[] | undefined;
+      /** `queuedMessages`の応答（Issue #2158）。 */
+      queued?: McQueuedMessage[] | undefined;
     }
   | {
       /** `launchOptions`・`pickFolder`・`launch`への応答（Issue #2137）。 */
@@ -445,6 +451,10 @@ export type McHostMessage =
       issues?: McIssueListing | undefined;
       /** run・roadmapの操作の結果の説明（Issue #2150）。 */
       message?: string | undefined;
+      /** `pickAttachments`の応答: 画像（Issue #2158）。 */
+      attachments?: McAttachment[] | undefined;
+      /** `pickAttachments`の応答: 画像以外のファイルの絶対パス。本文へ`@パス`で差し込む。 */
+      paths?: string[] | undefined;
     }
   | {
       /** 詳細で選択中のセッションの直近のやり取り（ライブtail。Issue #2137の3）。 */
@@ -494,7 +504,34 @@ export type McControlAction =
       effort?: string | undefined;
     }
   | { action: 'sideQuestion'; text: string }
-  | { action: 'sideQuestionResult'; sideQuestionId: string };
+  | { action: 'sideQuestionResult'; sideQuestionId: string }
+  // Issue #2158: Composerの添付・補完・送信キュー
+  | { action: 'sendWithAttachments'; text: string; attachments: McAttachment[] }
+  | { action: 'fileCandidates'; query: string }
+  | { action: 'commandCandidates' }
+  | { action: 'queuedMessages' }
+  | { action: 'cancelQueued'; index: number; text: string };
+
+/** 送る画像1件（Issue #2158）。`dataUrl`はpng / jpeg / gif / webpのbase64。 */
+export interface McAttachment {
+  name: string;
+  dataUrl: string;
+}
+
+/** スラッシュコマンドの候補1件（Issue #2158）。 */
+export interface McSlashCommand {
+  name: string;
+  description: string;
+  argumentHint: string;
+}
+
+/** 送信キューの1件（Issue #2158）。 */
+export interface McQueuedMessage {
+  text: string;
+  truncated: boolean;
+  /** 添えた画像の枚数。 */
+  attachments: number;
+}
 
 export type McWebviewMessage =
   | { type: 'ready' }
@@ -531,4 +568,6 @@ export type McWebviewMessage =
   /** ウィンドウのReload。実行中のターンがあれば拡張ホストが件数を出して確かめる。 */
   | { type: 'reloadWindow'; seq: number }
   /** セッションidをクリップボードへコピーする（旧統括ページの「idをコピー」）。 */
-  | ({ type: 'copyRef'; seq: number } & McTarget);
+  | ({ type: 'copyRef'; seq: number } & McTarget)
+  /** 添付するファイルを選ぶ（Issue #2158）。`cwd`はダイアログの初期位置にだけ使う。 */
+  | { type: 'pickAttachments'; seq: number; cwd?: string | undefined };

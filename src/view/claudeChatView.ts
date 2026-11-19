@@ -207,6 +207,7 @@ import {
   noteDropRejected,
   openChatFileLink,
   openCodeInNewFile,
+  fileMentionCandidates,
   postFileMentions,
   postImageData,
   renderShell,
@@ -918,16 +919,27 @@ export class ClaudeChatViewManager
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    const commands = await this.listSlashCommands(entry);
+    void entry.panel.webview.postMessage({ type: 'commands', commands });
+  }
+
+  /** `/`の候補。タブの入力欄とMission Controlの補完（Issue #2158）が同じ一覧を使う。 */
+  protected override async listSlashCommands(entry: ClaudePanel): Promise<SlashCommand[]> {
     const fromCli = entry.session.commands;
     const commands =
       fromCli.length > 0
         ? fromCli
         : (this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths()));
     // `/btw`（脇道の質問、issue #334）はCLIの一覧に無いため、拡張機能側で先頭へ足す
-    void entry.panel.webview.postMessage({
-      type: 'commands',
-      commands: withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands),
-    });
+    return withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands);
+  }
+
+  /** `@`の候補（Issue #2158）。 */
+  protected override async listFileCandidates(
+    entry: ClaudePanel,
+    query: string,
+  ): Promise<string[]> {
+    return (await fileMentionCandidates(this.mentions, entry.cwd, query)) ?? [];
   }
 
   /**

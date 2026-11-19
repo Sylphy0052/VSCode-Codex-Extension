@@ -1,5 +1,6 @@
 import type {
   McApprovalDetail,
+  McAttachment,
   McControlAction,
   McHandoffDetail,
   McHistoryItem,
@@ -12,8 +13,10 @@ import type {
   McLifecycleOp,
   McLifecycleOutcome,
   McProvider,
+  McQueuedMessage,
   McRunOp,
   McSideQuestion,
+  McSlashCommand,
   McSnapshot,
   McTarget,
   McTurn,
@@ -36,6 +39,9 @@ export interface ControlResult {
   turnTotal?: number | undefined;
   handoff?: McHandoffDetail | undefined;
   sideQuestion?: McSideQuestion | undefined;
+  files?: string[] | undefined;
+  commands?: McSlashCommand[] | undefined;
+  queued?: McQueuedMessage[] | undefined;
 }
 
 /** `launchOptions`・`pickFolder`・`launch`の応答（Issue #2137）。 */
@@ -50,6 +56,8 @@ export interface ReplyResult {
   history?: McHistoryItem[] | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
+  attachments?: McAttachment[] | undefined;
+  paths?: string[] | undefined;
 }
 
 /** ライブtailで届いた直近のやり取り。 */
@@ -87,6 +95,8 @@ export interface Bridge {
   reloadWindow(): Promise<ReplyResult>;
   /** セッションid（`send_message`の宛先）をクリップボードへコピーさせる。 */
   copyRef(target: McTarget): Promise<ReplyResult>;
+  /** 添付するファイルを選ばせる（Issue #2158）。`cwd`はダイアログの初期位置。 */
+  pickAttachments(cwd: string | undefined): Promise<ReplyResult>;
   /** runへの操作（Issue #2150）。 */
   runOp(op: McRunOp, runId: string): Promise<ReplyResult>;
   runParallel(runId: string, maxParallel: number): Promise<ReplyResult>;
@@ -110,6 +120,21 @@ export interface MessageTarget {
 
 /** 応答が来ない操作を打ち切るまでの時間。拡張ホスト側は別ウィンドウ宛てを5秒で打ち切る。 */
 const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * 拡張ホストが別ウィンドウ宛てを長く待つ操作（画像付きの送信・候補の取り寄せ。Issue #2158）の打ち切り。
+ * 拡張ホスト側の上限（45秒）より長くとり、ホストの失敗の理由を先に受け取る。
+ */
+const LONG_REQUEST_TIMEOUT_MS = 60_000;
+const LONG_ACTIONS: ReadonlySet<McControlAction['action']> = new Set([
+  'sendWithAttachments',
+  'fileCandidates',
+  'commandCandidates',
+]);
+
+function timeoutFor(action: McControlAction): number {
+  return LONG_ACTIONS.has(action.action) ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+}
+
 /**
  * `launchOptions`・`pickFolder`・`launch`の打ち切り。フォルダ選択のダイアログは人が閉じるまで
  * 返らず、worktreeの作成も時間がかかるため、操作より長く待つ。
@@ -168,6 +193,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           history: message.history,
           issues: message.issues,
           message: message.message,
+          attachments: message.attachments,
+          paths: message.paths,
         });
       }
       return;
@@ -198,6 +225,9 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           turnTotal: message.turnTotal,
           handoff: message.handoff,
           sideQuestion: message.sideQuestion,
+          files: message.files,
+          commands: message.commands,
+          queued: message.queued,
         });
       }
     }
@@ -211,7 +241,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           if (waiting.delete(id)) {
             resolve({ ok: false, error: '拡張機能から応答がありませんでした' });
           }
-        }, REQUEST_TIMEOUT_MS);
+        }, timeoutFor(action));
         waiting.set(id, (result) => {
           clearTimeout(timer);
           resolve(result);
@@ -250,6 +280,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     resumeDismiss: (to) => call({ type: 'resumeDismiss', ...targetOnly(to) }),
     reloadWindow: () => call({ type: 'reloadWindow' }),
     copyRef: (to) => call({ type: 'copyRef', ...targetOnly(to) }),
+    pickAttachments: (cwd) => call({ type: 'pickAttachments', cwd }),
     runOp: (op, runId) => call({ type: 'runOp', op, runId }),
     runParallel: (runId, maxParallel) => call({ type: 'runParallel', runId, maxParallel }),
     runStart: () => call({ type: 'runStart' }),

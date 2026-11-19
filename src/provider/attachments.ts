@@ -166,6 +166,62 @@ export function formatSize(bytes: number): string {
   return `${bytes}B`;
 }
 
+/**
+ * 画面の外（Mission Control・別ウィンドウの要求ファイル）から届く添付1件（Issue #2158）。
+ * 中身の判定（形式・大きさ）は受け取った会話の`AttachmentBox.add`が持つ。
+ */
+export interface AttachmentInput {
+  name: string;
+  dataUrl: string;
+}
+
+/** 添付の表示名の長さの上限。ファイル名として十分な長さ。 */
+const MAX_ATTACHMENT_NAME_CHARS = 255;
+/** データURLの接頭辞（`data:image/webp;base64,`）に見込む長さ。 */
+const DATA_URL_PREFIX_ALLOWANCE = 64;
+/** 1枚のデータURLの長さの上限。base64は元の4/3倍になる。 */
+export const MAX_ATTACHMENT_DATA_URL_CHARS =
+  Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + DATA_URL_PREFIX_ALLOWANCE;
+/** 1回の送信に載るデータURLの合計の長さの上限。 */
+export const MAX_TOTAL_DATA_URL_CHARS =
+  Math.ceil((MAX_TOTAL_BYTES * 4) / 3) + DATA_URL_PREFIX_ALLOWANCE * MAX_ATTACHMENTS;
+
+/**
+ * 外から届いた添付の並びを形と長さだけで確かめる（Issue #2158）。
+ *
+ * 信頼境界の外（webview・共有ディレクトリの要求ファイル）から来る値なので、`AttachmentBox`へ
+ * 渡す前に、枚数と長さの上限で弾く。上限は`AttachmentBox`と同じ値から作る（ここを通っても
+ * 形式違いなどで`AttachmentBox`が断ることはある）。合わなければ`undefined`。
+ */
+export function parseAttachmentInputs(value: unknown): AttachmentInput[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ATTACHMENTS) {
+    return undefined;
+  }
+  const inputs: AttachmentInput[] = [];
+  let total = 0;
+  for (const item of value as unknown[]) {
+    if (typeof item !== 'object' || item === null) {
+      return undefined;
+    }
+    const { name, dataUrl } = item as Record<string, unknown>;
+    if (
+      typeof name !== 'string' ||
+      name.length > MAX_ATTACHMENT_NAME_CHARS ||
+      typeof dataUrl !== 'string' ||
+      !dataUrl.startsWith('data:') ||
+      dataUrl.length > MAX_ATTACHMENT_DATA_URL_CHARS
+    ) {
+      return undefined;
+    }
+    total += dataUrl.length;
+    if (total > MAX_TOTAL_DATA_URL_CHARS) {
+      return undefined;
+    }
+    inputs.push({ name, dataUrl });
+  }
+  return inputs;
+}
+
 /** 画面へ渡す1件。base64はサムネイルの表示に要るのでデータURLで載せる。 */
 export interface AttachmentView {
   id: string;

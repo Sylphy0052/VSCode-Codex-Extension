@@ -37,14 +37,18 @@ import type { SkillSelectGate } from './skillSelectGate';
 import { buildEndSummaryMaterial, EndSummaryRunner, type EndSummaryDisplay } from './endSummary';
 import { playNotificationSound } from './notificationSound';
 import { ALREADY_ANSWERED_MESSAGE, validateAskUserQuestionAnswers } from './pendingItem';
+import type { AttachmentBox, AttachmentInput } from '../provider/attachments';
+import type { SlashCommand } from '../provider/slashCommands';
 import type {
   SessionApprovalDetail,
   SessionHandoffDetail,
+  SessionQueuedMessage,
   SessionRecentTurn,
   SessionSideQuestion,
   SharedApprovalDecision,
   SharedHandoffDecision,
 } from './sessionHub';
+import { MAX_QUEUED_TEXT_CHARS } from './sessionHub';
 import {
   decoratePanelTitle,
   deriveSessionActivityState,
@@ -100,6 +104,8 @@ export interface BaseChatPanel {
   /** セッションを開始した作業ディレクトリ。カンバンのワークスペース絞り込みに使う。 */
   cwd: string | undefined;
   session: ChatSessionLike;
+  /** 送信前の添付。Mission Controlから画像を添えて送るときも、ここへ入れてから送る（Issue #2158）。 */
+  attachments: AttachmentBox;
   /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
   /**
@@ -330,7 +336,23 @@ export type SessionControlAction =
    * task runの質問への回答（Issue #2135）。会話への操作ではなく、`extension.ts`の
    * `controlSessionAnywhere`が宛先ウィンドウのtask runへ回す。ここへ届いたら断る。
    */
-  | { kind: 'answerTaskRunQuestion'; pendingId: string; text: string };
+  | { kind: 'answerTaskRunQuestion'; pendingId: string; text: string }
+  /**
+   * 画像を添えて送る（Issue #2158）。`send`へ添付を足さず別の種別にするのは、古い版の
+   * ウィンドウが知らないフィールドを落として画像なしで送らないようにするため。
+   */
+  | { kind: 'sendWithAttachments'; text: string; attachments: AttachmentInput[] }
+  /** `@`の補完に使う、会話の作業ディレクトリのファイル候補（Issue #2158）。 */
+  | { kind: 'fileCandidates'; query: string }
+  /** `/`の補完に使う、その会話で使えるスラッシュコマンド（Issue #2158）。 */
+  | { kind: 'commandCandidates' }
+  /** 送信キュー（応答中に送って待たせている指示）を取り寄せる（Issue #2158）。 */
+  | { kind: 'queuedMessages' }
+  /**
+   * 送信キューの1件を取り消す（Issue #2158）。位置だけだと、取り寄せてから押すまでに
+   * キューが進んで別の指示を消すため、本文も添えて一致を確かめる。
+   */
+  | { kind: 'cancelQueued'; index: number; text: string };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -349,6 +371,12 @@ export interface SessionControlResult {
   sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`のときだけ入る、保留中の引き継ぎ確認（Issue #1280）。 */
   handoff?: SessionHandoffDetail | undefined;
+  /** `kind === 'fileCandidates'`のときだけ入る、作業ディレクトリからの相対パス（Issue #2158）。 */
+  files?: string[] | undefined;
+  /** `kind === 'commandCandidates'`のときだけ入る（Issue #2158）。 */
+  commands?: SlashCommand[] | undefined;
+  /** `kind === 'queuedMessages'`のときだけ入る（Issue #2158）。 */
+  queued?: SessionQueuedMessage[] | undefined;
 }
 
 /**
@@ -389,6 +417,16 @@ export function abortAsRejection(signal: AbortSignal): Promise<never> {
     }
     signal.addEventListener('abort', fail, { once: true });
   });
+}
+
+/** 送信キューの1件を運ぶ形にする（Issue #2158）。本文は上限で切り詰め、画像は枚数だけ。 */
+function toQueuedView(text: string, attachments: readonly unknown[]): SessionQueuedMessage {
+  const truncated = text.length > MAX_QUEUED_TEXT_CHARS;
+  return {
+    text: truncated ? text.slice(0, MAX_QUEUED_TEXT_CHARS) : text,
+    truncated,
+    attachments: attachments.length,
+  };
 }
 
 function toSideQuestionView(run: SideQuestionRun): SessionSideQuestion {
@@ -1598,7 +1636,105 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
             : { model: action.model, effort: action.effort ?? '' };
         return pending.decide(action.handoffRequestId, action.decision, settings);
       }
+      case 'sendWithAttachments':
+        return this.sendWithAttachmentsFromHub(entry, action.text, action.attachments);
+      case 'queuedMessages':
+        return {
+          ok: true,
+          queued: entry.session.getState().queued.map((q) => toQueuedView(q.text, q.attachments)),
+        };
+      case 'cancelQueued': {
+        // 取り寄せてから押すまでにキューが進んでいたら、同じ位置に別の指示がいる。消さずに断る
+        const queued = entry.session.getState().queued[action.index];
+        if (queued === undefined || toQueuedView(queued.text, []).text !== action.text) {
+          return { ok: false, error: 'この指示は既に送られたか、取り消されています' };
+        }
+        this.dispatchMessage(entry, { type: 'cancelQueued', index: action.index });
+        return { ok: true };
+      }
+      case 'fileCandidates':
+      case 'commandCandidates':
+        // 候補の取り寄せは非同期（ファイルの走査・CLIへの問い合わせ）。`controlSessionAsync`が扱う
+        return { ok: false, error: 'この操作は候補の取り寄せ口から呼んでください' };
     }
+  }
+
+  /**
+   * `controlSession`の非同期版（Issue #2158）。候補の取り寄せ（`fileCandidates` /
+   * `commandCandidates`）だけをここで扱い、ほかは`controlSession`へ回す。
+   */
+  async controlSessionAsync(
+    threadId: string,
+    action: SessionControlAction,
+  ): Promise<SessionControlResult> {
+    if (action.kind !== 'fileCandidates' && action.kind !== 'commandCandidates') {
+      return this.controlSession(threadId, action);
+    }
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    if (entry.inputLock) {
+      return { ok: false, error: INPUT_LOCKED_MESSAGE };
+    }
+    try {
+      if (action.kind === 'fileCandidates') {
+        return { ok: true, files: await this.listFileCandidates(entry, action.query) };
+      }
+      return { ok: true, commands: await this.listSlashCommands(entry) };
+    } catch (e: unknown) {
+      return { ok: false, error: `候補を取り寄せられませんでした: ${String(e)}` };
+    }
+  }
+
+  /** `@`の候補（チャットタブの入力欄と同じ絞り込み。Issue #2158）。 */
+  protected abstract listFileCandidates(entry: TPanel, query: string): Promise<string[]>;
+
+  /** `/`の候補（チャットタブの入力欄と同じ一覧。Issue #2158）。 */
+  protected abstract listSlashCommands(entry: TPanel): Promise<SlashCommand[]>;
+
+  /**
+   * Mission Controlから画像を添えて送る（Issue #2158）。
+   *
+   * タブの入力欄と同じく、添付箱（`entry.attachments`）へ入れてから`send`を流す（空のときだけ）。1枚でも
+   * 受け付けられなければ、入れた分を戻して何も送らない。擬似コマンドなど添付を使わない送信で
+   * 箱に残った分も戻す（残すと、次にタブから送った発言へ黙って付いてしまう）。
+   */
+  private sendWithAttachmentsFromHub(
+    entry: TPanel,
+    text: string,
+    inputs: readonly AttachmentInput[],
+  ): SessionControlResult {
+    // タブで付けて未送信の画像があると、送信で一緒に取り出され、枚数・合計の上限も合算される。
+    // 利用者の意図しない画像を送らないよう、混ぜずに断る
+    if (entry.attachments.list.length > 0) {
+      return {
+        ok: false,
+        error: 'この会話のタブに未送信の画像があります（タブで送るか外してから送ってください）',
+      };
+    }
+    const added: string[] = [];
+    const rollback = (): void => {
+      for (const id of added) {
+        entry.attachments.remove(id);
+      }
+    };
+    for (const input of inputs) {
+      const result = entry.attachments.add(input.name, input.dataUrl);
+      if ('reason' in result) {
+        rollback();
+        return { ok: false, error: `${input.name}: ${result.reason}` };
+      }
+      added.push(result.attachment.id);
+    }
+    // 送る処理は添付箱から同期に取り出す（`take`より前に待ちが無い）。ここで残っていれば使われていない
+    this.dispatchMessage(entry, { type: 'send', text });
+    const left = new Set(entry.attachments.list.map((a) => a.id));
+    if (added.some((id) => left.has(id))) {
+      rollback();
+      return { ok: false, error: 'この指示には画像を添えられません（画像を外して送ってください）' };
+    }
+    return { ok: true };
   }
 
   /**
