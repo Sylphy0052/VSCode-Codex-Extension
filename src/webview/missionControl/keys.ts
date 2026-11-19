@@ -43,7 +43,10 @@ export type McKeyCommand =
   | { kind: 'turnMatch' }
   | { kind: 'turnMatchPrev' }
   | { kind: 'turnFolds' }
-  | { kind: 'turnOlder' };
+  | { kind: 'turnOlder' }
+  // Issue #2158: 指示欄（Composer）の添付・送信キュー
+  | { kind: 'attach' }
+  | { kind: 'queue' };
 
 export interface McKeyInput {
   key: string;
@@ -260,6 +263,19 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     contextual: true,
     command: { kind: 'turnOlder' },
   },
+  // 指示欄の操作もShift付きにする（Issue #2158。アクセスキーの英字を減らさない）
+  {
+    keys: ['Shift+a'],
+    label: '指示に添付するファイルを選ぶ（画像は画像として、ほかは@パスとして）',
+    contextual: true,
+    command: { kind: 'attach' },
+  },
+  {
+    keys: ['Shift+q'],
+    label: '送信キューを開く / 閉じる（↑ / ↓で移動、Deleteで取り消す）',
+    contextual: true,
+    command: { kind: 'queue' },
+  },
   {
     keys: [':'],
     label: 'コマンドパレット（操作を名前で選ぶ）',
@@ -407,6 +423,21 @@ export const KEY_HELP: ReadonlyArray<readonly [string, string]> = KEY_BINDINGS.f
     return rows;
   },
 );
+
+/**
+ * 指示欄（Composer）の中で効くキー（Issue #2158）。入力欄の中のキーは`resolveKey`が文字入力として
+ * 通すため、指示欄が自分で受け持つ。表に入れず、ヘルプに別の表として出す。
+ */
+export const COMPOSER_KEY_HELP: ReadonlyArray<readonly [string, string]> = [
+  ['Ctrl+V', '指示欄: 画像を貼り付けて添付する'],
+  ['@', '指示欄: ファイルの候補を出す（続けて打つと絞り込む）'],
+  ['/（行頭）', '指示欄: スラッシュコマンドの候補を出す'],
+  ['↑ / ↓', '指示欄の候補: 選ぶ'],
+  ['Enter / Tab', '指示欄の候補: 入れる'],
+  ['Esc', '指示欄の候補: 閉じる'],
+  ['Ctrl+Enter', '指示欄: 送る（応答中なら送信キューへ入る）'],
+  ['↑ / ↓・Delete', '送信キュー: 選ぶ・取り消す'],
+];
 
 /**
  * タブで効いている英字（Shift無し）。詳細ペインのアクセスキーはこれ以外から選ぶ。

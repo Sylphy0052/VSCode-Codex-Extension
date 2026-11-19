@@ -700,6 +700,8 @@ export function renderMissionControlHtml(webview: vscode.Webview, scriptUri: vsc
     "default-src 'none'",
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
+    // 指示欄に添えた画像のサムネイル（Issue #2158）。webviewが自分で作ったデータURLだけ
+    'img-src data:',
   ].join('; ');
   const src = webview.asWebviewUri(scriptUri).toString();
   return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Mission Control</title><style>${MISSION_CONTROL_STYLES}</style></head><body><div id="root"></div><script nonce="${nonce}" src="${escapeAttribute(src)}"></script></body></html>`;

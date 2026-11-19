@@ -2,7 +2,7 @@ import { buildSync } from 'esbuild';
 import { JSDOM, type DOMWindow } from 'jsdom';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { KEY_HELP } from '../../src/webview/missionControl/keys';
+import { COMPOSER_KEY_HELP, KEY_HELP } from '../../src/webview/missionControl/keys';
 import type { McPendingItem, McSnapshot } from '../../src/webview/missionControl/protocol';
 
 /**
@@ -417,7 +417,8 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       press(window, '?');
       await tick();
       const rows = window.document.querySelectorAll('[aria-label="キー操作"] tr');
-      expect(rows.length).toBe(KEY_HELP.length);
+      // キーの表と、指示欄の中のキー（Issue #2158）の表
+      expect(rows.length).toBe(KEY_HELP.length + COMPOSER_KEY_HELP.length);
     });
 
     it('新規起動のダイアログはTabが外へ抜けず、Ctrl+Enterで起動する', async () => {

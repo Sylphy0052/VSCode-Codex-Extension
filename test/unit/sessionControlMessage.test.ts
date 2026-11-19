@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { parseAction, parseTarget } from '../../src/view/sessionControlMessage';
+import { MAX_ATTACHMENT_DATA_URL_CHARS, MAX_ATTACHMENTS } from '../../src/provider/attachments';
+import {
+  MAX_CANDIDATE_QUERY_CHARS,
+  parseAction,
+  parseTarget,
+  toReplyPayload,
+  toSessionControlAction,
+} from '../../src/view/sessionControlMessage';
 
 describe('parseTarget', () => {
   it('3つの値が揃っていれば対象を返す', () => {
@@ -211,5 +218,130 @@ describe('parseAction', () => {
     expect(
       parseAction({ action: 'answerTaskRunQuestion', pendingId: 1, text: 'a' }),
     ).toBeUndefined();
+  });
+});
+
+// Issue #2158: Composerの添付・補完・送信キュー
+const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+
+describe('parseAction: 添付・補完・送信キュー（Issue #2158）', () => {
+  it('sendWithAttachmentsは本文と1枚以上の画像を要る', () => {
+    expect(
+      parseAction({
+        action: 'sendWithAttachments',
+        text: 'see',
+        attachments: [{ name: 'a.png', dataUrl: PNG }],
+      }),
+    ).toEqual({
+      kind: 'sendWithAttachments',
+      text: 'see',
+      attachments: [{ name: 'a.png', dataUrl: PNG }],
+    });
+    expect(
+      parseAction({ action: 'sendWithAttachments', text: 'x', attachments: [] }),
+    ).toBeUndefined();
+    expect(parseAction({ action: 'sendWithAttachments', text: 'x' })).toBeUndefined();
+    expect(
+      parseAction({ action: 'sendWithAttachments', attachments: [{ name: 'a', dataUrl: PNG }] }),
+    ).toBeUndefined();
+  });
+
+  it('画像の形・長さ・枚数が合わなければ断る', () => {
+    const one = (item: unknown) =>
+      parseAction({ action: 'sendWithAttachments', text: '', attachments: [item] });
+    expect(one({ name: 'a', dataUrl: 'file:///etc/passwd' })).toBeUndefined();
+    expect(one({ name: 1, dataUrl: PNG })).toBeUndefined();
+    expect(one({ name: 'x'.repeat(256), dataUrl: PNG })).toBeUndefined();
+    expect(
+      one({ name: 'a', dataUrl: `data:${'x'.repeat(MAX_ATTACHMENT_DATA_URL_CHARS)}` }),
+    ).toBeUndefined();
+    expect(one(null)).toBeUndefined();
+    const many = Array.from({ length: MAX_ATTACHMENTS + 1 }, () => ({ name: 'a', dataUrl: PNG }));
+    expect(
+      parseAction({ action: 'sendWithAttachments', text: '', attachments: many }),
+    ).toBeUndefined();
+  });
+
+  it('fileCandidatesは絞り込みの文字列を上限まで受ける', () => {
+    expect(parseAction({ action: 'fileCandidates', query: 'src/' })).toEqual({
+      kind: 'fileCandidates',
+      query: 'src/',
+    });
+    expect(parseAction({ action: 'fileCandidates', query: '' })).toEqual({
+      kind: 'fileCandidates',
+      query: '',
+    });
+    expect(
+      parseAction({ action: 'fileCandidates', query: 'x'.repeat(MAX_CANDIDATE_QUERY_CHARS + 1) }),
+    ).toBeUndefined();
+    expect(parseAction({ action: 'fileCandidates' })).toBeUndefined();
+  });
+
+  it('commandCandidates・queuedMessagesは引数が無い', () => {
+    expect(parseAction({ action: 'commandCandidates' })).toEqual({ kind: 'commandCandidates' });
+    expect(parseAction({ action: 'queuedMessages' })).toEqual({ kind: 'queuedMessages' });
+  });
+
+  it('cancelQueuedは0以上の整数の位置と本文を要る', () => {
+    expect(parseAction({ action: 'cancelQueued', index: 0, text: 'a' })).toEqual({
+      kind: 'cancelQueued',
+      index: 0,
+      text: 'a',
+    });
+    expect(parseAction({ action: 'cancelQueued', index: -1, text: 'a' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: 1.5, text: 'a' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: '0', text: 'a' })).toBeUndefined();
+    expect(parseAction({ action: 'cancelQueued', index: 0 })).toBeUndefined();
+  });
+});
+
+describe('toSessionControlAction: session-hubの要求の検証（Issue #2158）', () => {
+  it('追加した種別は検証を通る', () => {
+    const attachments = [{ name: 'a.png', dataUrl: PNG }];
+    expect(toSessionControlAction({ kind: 'sendWithAttachments', text: 't', attachments })).toEqual(
+      { kind: 'sendWithAttachments', text: 't', attachments },
+    );
+    expect(toSessionControlAction({ kind: 'fileCandidates', query: 'a' })).toEqual({
+      kind: 'fileCandidates',
+      query: 'a',
+    });
+    expect(toSessionControlAction({ kind: 'commandCandidates' })).toEqual({
+      kind: 'commandCandidates',
+    });
+    expect(toSessionControlAction({ kind: 'queuedMessages' })).toEqual({ kind: 'queuedMessages' });
+    expect(toSessionControlAction({ kind: 'cancelQueued', index: 2, text: 'b' })).toEqual({
+      kind: 'cancelQueued',
+      index: 2,
+      text: 'b',
+    });
+  });
+
+  it('必要な項目が欠けた要求は断る', () => {
+    expect(toSessionControlAction({ kind: 'sendWithAttachments', text: 't' })).toBeUndefined();
+    expect(
+      toSessionControlAction({
+        kind: 'sendWithAttachments',
+        attachments: [{ name: 'a', dataUrl: PNG }],
+      }),
+    ).toBeUndefined();
+    expect(toSessionControlAction({ kind: 'fileCandidates' })).toBeUndefined();
+    expect(toSessionControlAction({ kind: 'cancelQueued', text: 'b' })).toBeUndefined();
+    expect(toSessionControlAction({ kind: 'cancelQueued', index: -1, text: 'b' })).toBeUndefined();
+  });
+
+  it('未知の種別は断る', () => {
+    expect(toSessionControlAction({ kind: 'deleteEverything' as never })).toBeUndefined();
+    expect(toSessionControlAction({ kind: 'attachments' as never })).toBeUndefined();
+  });
+});
+
+describe('toReplyPayload（Issue #2158）', () => {
+  it('候補・送信キューを応答へ載せる', () => {
+    expect(toReplyPayload({ ok: true, files: ['a.ts'] })).toEqual({ files: ['a.ts'] });
+    const commands = [{ name: 'init', description: 'd', argumentHint: '' }];
+    expect(toReplyPayload({ ok: true, commands })).toEqual({ commands });
+    const queued = [{ text: 'q', truncated: false, attachments: 1 }];
+    expect(toReplyPayload({ ok: true, queued })).toEqual({ queued });
+    expect(toReplyPayload({ ok: true })).toBeUndefined();
   });
 });

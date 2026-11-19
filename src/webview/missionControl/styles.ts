@@ -106,6 +106,17 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .row-out { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-descriptionForeground); }
 .grid .row-out { grid-column: 1 / 3; }
 .composer { display: grid; gap: 4px; margin-top: 8px; }
+/* 指示欄の添付・候補・送信キュー（Issue 2158） */
+.composer-field { position: relative; }
+.composer-attachments { display: flex; flex-wrap: wrap; gap: 4px; }
+.composer-attachment { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; font-size: 11px; }
+.composer-attachment img { width: 24px; height: 24px; object-fit: cover; }
+.composer-candidates { list-style: none; margin: 2px 0 0; padding: 2px; max-height: 30vh; overflow: auto; border: 1px solid var(--vscode-focusBorder); border-radius: 3px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); }
+.composer-candidate { display: flex; justify-content: space-between; gap: 12px; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+.composer-candidate.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.composer-candidate .desc { opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: inherit; }
+.composer-queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.composer-queue button { width: 100%; text-align: left; white-space: pre-wrap; word-break: break-word; }
 .warn { color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow)); }
 .launch-box { width: min(560px, 92vw); display: grid; gap: 8px; }
 .launch-box label { display: grid; gap: 2px; }
