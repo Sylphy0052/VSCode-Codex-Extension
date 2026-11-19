@@ -26,8 +26,9 @@ button, input, textarea, select { font: inherit; }
 .seg button { flex: 1 1 0; padding: 2px 4px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 3px; cursor: pointer; }
 .seg button[aria-pressed="true"] { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-background); }
 .check { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--vscode-descriptionForeground); }
-.center { display: grid; grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
-.toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+.center { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+.toolbar .seg button { white-space: nowrap; }
 .search { flex: 1 1 auto; min-width: 0; padding: 3px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; }
 .btn { padding: 3px 10px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-button-border, var(--vscode-panel-border)); border-radius: 3px; cursor: pointer; white-space: nowrap; }
 .btn:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
@@ -151,10 +152,13 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 .grid .session-row.status-idle { border-color: var(--vscode-panel-border); }
 .grid .session-row.status-stalled { border-style: dashed; }
 .grid .session-row .row-out { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.grid .session-row.selected { border-color: var(--vscode-focusBorder); }
+/* 上のカードの背景より後ろに置き、ホバーと選択の背景を一覧表示と同じく出す */
+.grid .session-row:hover { background: var(--vscode-list-hoverBackground); }
+.grid .session-row.selected { background: var(--vscode-list-inactiveSelectionBackground); border-color: var(--vscode-focusBorder); }
 /* 工程バー（run） */
 .run-progress { grid-column: 2 / 4; display: flex; gap: 2px; height: 6px; min-width: 0; margin-top: 2px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, var(--vscode-descriptionForeground) 15%, transparent); }
-.detail .run-progress { height: 8px; }
+/* 詳細は1列のgrid。行の列指定（2 / 4）を持ち込むと暗黙の列が増えて詳細全体が崩れる */
+.detail .run-progress { grid-column: 1 / -1; height: 8px; }
 .run-seg { flex: 1 1 0; min-width: 2px; }
 .run-seg.done { background: var(--vscode-charts-green, var(--vscode-charts-blue)); }
 .run-seg.active { box-shadow: inset 0 0 0 1px var(--vscode-charts-blue); }
