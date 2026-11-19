@@ -34,7 +34,10 @@ export type McKeyCommand =
   | { kind: 'pane'; delta: 1 | -1 }
   | { kind: 'palette' }
   | { kind: 'accessKeys' }
-  | { kind: 'submit' };
+  | { kind: 'submit' }
+  // Issue #2151: 一覧 / カードの切り替え・密度の切り替え
+  | { kind: 'view' }
+  | { kind: 'density' };
 
 export interface McKeyInput {
   key: string;
@@ -212,6 +215,13 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     label: 'roadmap・Issueから起動（j / kで移動、xで選択、Enterで起動、fでフォルダ、gでCLI）',
     command: { kind: 'issues' },
   },
+  { keys: ['v'], label: 'セッションの一覧 / カードを切り替える', command: { kind: 'view' } },
+  {
+    // 一覧 / カードの`v`と対にする（Shift付きなので詳細ペインのアクセスキーを減らさない）
+    keys: ['Shift+v'],
+    label: '表示の密度（標準 / コンパクト）を切り替える',
+    command: { kind: 'density' },
+  },
   { keys: ['/'], label: '検索', command: { kind: 'search' } },
   {
     keys: [':'],
@@ -289,6 +299,17 @@ function displaySpec(spec: string): string {
 /** ヘルプ・パレットに出すキーの表記。 */
 export function bindingDisplay(binding: McKeyBinding): string {
   return binding.display ?? binding.keys.map(displaySpec).join(' / ');
+}
+
+/**
+ * 操作に割り当てたキーの表記（空の状態の案内などに出す）。表から引くので、割り当てを変えても
+ * 案内がずれない。割り当てが無ければ`undefined`。
+ */
+export function keyLabelFor(kind: McKeyCommand['kind']): string | undefined {
+  const binding = KEY_BINDINGS.find(
+    (b) => typeof b.command !== 'function' && b.command.kind === kind,
+  );
+  return binding === undefined ? undefined : bindingDisplay(binding);
 }
 
 export interface McResolvedKey {

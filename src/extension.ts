@@ -1510,6 +1510,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
                 `${provider}:${session.threadId}`,
                 outputFingerprint(state.items),
               ),
+        // カード表示（Issue #2151）。取れないものは載せない（0や-を出さない）
+        model: state?.observedModel?.model,
+        tokens: state?.sessionTokens,
+        costUsd: state?.sessionCost?.totalCostUsd,
         pending:
           state === undefined
             ? []

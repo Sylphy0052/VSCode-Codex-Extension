@@ -26,8 +26,9 @@ button, input, textarea, select { font: inherit; }
 .seg button { flex: 1 1 0; padding: 2px 4px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-panel-border); border-radius: 3px; cursor: pointer; }
 .seg button[aria-pressed="true"] { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-background); }
 .check { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--vscode-descriptionForeground); }
-.center { display: grid; grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
-.toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+.center { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+.toolbar .seg button { white-space: nowrap; }
 .search { flex: 1 1 auto; min-width: 0; padding: 3px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; }
 .btn { padding: 3px 10px; color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); background: var(--vscode-button-secondaryBackground, transparent); border: 1px solid var(--vscode-button-border, var(--vscode-panel-border)); border-radius: 3px; cursor: pointer; white-space: nowrap; }
 .btn:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
@@ -120,4 +121,69 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 .palette-item { display: flex; justify-content: space-between; gap: 12px; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
 .palette-item.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .palette-item kbd { font-family: var(--vscode-editor-font-family, monospace); opacity: .8; }
+/*
+ * 段階8（Issue 2151）: カード表示・進み具合・密度。
+ * 状態は色（--status）と形（アイコン・帯の模様）の両方で示す。色だけに頼らない:
+ * 実行中=回る弧、停滞=三角＋帯が破線、入力待ち=円の感嘆符、要対応=「!」付きのバッジと太い帯。
+ */
+.session-row { --status: transparent; position: relative; transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease; animation: mc-enter .18s ease-out; }
+.session-row::before { content: ""; position: absolute; top: 3px; bottom: 3px; left: 0; width: 3px; border-radius: 2px; background: var(--status); }
+.session-row.status-running { --status: var(--vscode-charts-blue); }
+.session-row.status-backgroundRunning { --status: var(--vscode-charts-orange); }
+.session-row.status-approvalPending { --status: var(--vscode-charts-yellow); }
+.session-row.status-handoffPending { --status: var(--vscode-charts-purple); }
+.session-row.status-stalled { --status: var(--vscode-charts-red); }
+.session-row.status-stalled::before { background: repeating-linear-gradient(180deg, var(--status) 0 4px, transparent 4px 7px); }
+.session-row.attention::before { width: 5px; }
+.row-facts { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.grid .row-facts { grid-column: 1 / 3; }
+.row-sub .badge { margin-left: 6px; }
+.badge.attention { display: inline-block; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-charts-yellow) 28%, transparent); border: 1px solid var(--vscode-charts-yellow); line-height: 15px; }
+.pane-title .badge { margin-left: 6px; letter-spacing: 0; }
+.pill { display: inline-flex; align-items: center; gap: 3px; }
+.pill .status-icon { width: 11px; height: 11px; stroke-width: 2; }
+.status-icon .status-track { opacity: .3; }
+.status-icon .status-fill { fill: currentColor; stroke: none; }
+.status-icon.status-running, .status-icon.status-backgroundRunning { animation: mc-spin 1.1s linear infinite; transform-origin: 50% 50%; }
+.session-row .pill { animation: mc-pop .25s ease-out; }
+.row:not(.session-row) { transition: background-color .15s ease, border-color .15s ease; }
+/* カード（グリッド）。帯は左端、カードの枠は状態の色を薄く混ぜる */
+.grid .session-row { gap: 4px 8px; padding: 8px 10px 8px 12px; background: var(--vscode-editorWidget-background, transparent); border-color: color-mix(in srgb, var(--status) 45%, var(--vscode-panel-border)); }
+.grid .session-row.status-idle { border-color: var(--vscode-panel-border); }
+.grid .session-row.status-stalled { border-style: dashed; }
+.grid .session-row .row-out { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* 上のカードの背景より後ろに置き、ホバーと選択の背景を一覧表示と同じく出す */
+.grid .session-row:hover { background: var(--vscode-list-hoverBackground); }
+.grid .session-row.selected { background: var(--vscode-list-inactiveSelectionBackground); border-color: var(--vscode-focusBorder); }
+/* 工程バー（run） */
+.run-progress { grid-column: 2 / 4; display: flex; gap: 2px; height: 6px; min-width: 0; margin-top: 2px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, var(--vscode-descriptionForeground) 15%, transparent); }
+/* 詳細は1列のgrid。行の列指定（2 / 4）を持ち込むと暗黙の列が増えて詳細全体が崩れる */
+.detail .run-progress { grid-column: 1 / -1; height: 8px; }
+.run-seg { flex: 1 1 0; min-width: 2px; }
+.run-seg.done { background: var(--vscode-charts-green, var(--vscode-charts-blue)); }
+.run-seg.active { box-shadow: inset 0 0 0 1px var(--vscode-charts-blue); }
+.run-seg.warn { background: repeating-linear-gradient(135deg, var(--vscode-charts-yellow) 0 3px, transparent 3px 6px); box-shadow: inset 0 0 0 1px var(--vscode-charts-yellow); }
+/* 空の状態の案内 */
+.empty-guide p { margin: 0 0 6px; }
+.empty-guide ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.empty-guide li { display: flex; align-items: center; gap: 8px; }
+.empty kbd { min-width: 20px; padding: 0 5px; text-align: center; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; background: var(--vscode-textCodeBlock-background, transparent); }
+/* 密度: コンパクトでは余白を詰め、最後の発言と補足の行を隠す */
+.mc.compact .row { padding-top: 2px; padding-bottom: 2px; }
+.mc.compact .session-row .row-out, .mc.compact .session-row .row-facts { display: none; }
+.mc.compact .grid { gap: 4px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.mc.compact .grid .session-row { padding: 4px 8px 4px 10px; }
+.mc.compact .pane-title { padding-top: 4px; padding-bottom: 4px; }
+.mc.compact .group-title { padding-top: 2px; padding-bottom: 2px; }
+/* ハイコントラストでは塗りを消して枠と模様で示す */
+body.vscode-high-contrast .badge.attention, body.vscode-high-contrast-light .badge.attention { background: transparent; border-color: var(--vscode-contrastBorder, var(--vscode-charts-yellow)); }
+body.vscode-high-contrast .grid .session-row, body.vscode-high-contrast-light .grid .session-row { background: transparent; border-color: var(--vscode-contrastBorder, var(--vscode-panel-border)); }
+body.vscode-high-contrast .run-progress, body.vscode-high-contrast-light .run-progress { background: transparent; outline: 1px solid var(--vscode-contrastBorder, var(--vscode-panel-border)); }
+@keyframes mc-spin { to { transform: rotate(360deg); } }
+@keyframes mc-enter { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@keyframes mc-pop { from { opacity: .4; transform: scale(.92); } to { opacity: 1; transform: none; } }
+/* 動きを減らす設定では、アニメーションと遷移をすべて止める（スピナーは弧の形だけが残る） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
 `;

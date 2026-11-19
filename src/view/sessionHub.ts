@@ -61,10 +61,27 @@ export interface SharedSession {
   lastOutput?: string | undefined;
   /** 出力が最後に変わったのを書き手が見た時刻（ms）。停滞の判定に使う。 */
   lastOutputAt?: number | undefined;
+  /**
+   * CLIが通知した、実際に使っているmodel（Issue #2151のカード表示）。通知が無ければ無い。
+   * 外部由来のテキストなので、読み手は1行へ畳んで文字列として表示するだけにする。
+   */
+  model?: string | undefined;
+  /** セッション累計のトークン数（Codexだけ。Claude Codeは費用を出す）。 */
+  tokens?: number | undefined;
+  /** セッションの推定費用（USD。Claude Codeだけ）。 */
+  costUsd?: number | undefined;
 }
 
 /** `lastOutput`の上限（文字数）。共有ファイルと画面へ長い行を流さない。 */
 export const MAX_SHARED_LAST_OUTPUT_CHARS = 200;
+
+/** `model`の上限（文字数）。 */
+export const MAX_SHARED_MODEL_CHARS = 80;
+
+/** 0以上の有限の数だけを通す（共有ファイルの中身は別ウィンドウ由来で信用しない）。 */
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
 
 interface SharedSessionFile {
   windowId: string;
@@ -197,7 +214,18 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
     typeof session.lastOutputAt === 'number' && Number.isFinite(session.lastOutputAt)
       ? session.lastOutputAt
       : undefined;
-  return { ...session, loop, pending, lastOutput, lastOutputAt };
+  // カードの補足（Issue #2151）も同じく、形の合わないものは無かったものとして落とす
+  const model =
+    typeof session.model === 'string' && session.model.trim() !== ''
+      ? session.model
+          // eslint-disable-next-line no-control-regex -- 改行・制御文字で一覧の行を崩さない
+          .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+          .trim()
+          .slice(0, MAX_SHARED_MODEL_CHARS)
+      : undefined;
+  const tokens = nonNegativeNumber(session.tokens);
+  const costUsd = nonNegativeNumber(session.costUsd);
+  return { ...session, loop, pending, lastOutput, lastOutputAt, model, tokens, costUsd };
 }
 
 function withOwnerWindow(items: readonly PendingItem[], windowId: string): PendingItem[] {
