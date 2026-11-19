@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { approvalStatusBarText, type ApprovalPendingSession } from './approvalPending';
+import { MISSION_CONTROL_OPEN_COMMAND } from './missionControlView';
 
 /** ステータスバーから承認待ちの画面へ戻るコマンド（`package.json`にも同じidがある）。 */
 export const SHOW_APPROVAL_PENDING_COMMAND = 'codex.showApprovalPending';
@@ -61,8 +62,17 @@ function buildTooltip(pending: readonly ApprovalPendingSession[]): vscode.Markdo
   for (const session of pending) {
     lines.push(`- ${escapeMarkdown(session.title)}`);
   }
-  lines.push('', '_押すと該当の会話を開きます_');
-  return new vscode.MarkdownString(lines.join('\n'));
+  lines.push(
+    '',
+    '_押すと該当の会話を開きます_',
+    '',
+    `[Mission Controlで開く](command:${MISSION_CONTROL_OPEN_COMMAND})`,
+  );
+  const tooltip = new vscode.MarkdownString(lines.join('\n'));
+  // コマンドのリンクはMission Controlを開くものだけを通す（Issue #2136）。タイトルは
+  // エスケープ済みで、ほかのコマンドのリンクは解釈されない
+  tooltip.isTrusted = { enabledCommands: [MISSION_CONTROL_OPEN_COMMAND] };
+  return tooltip;
 }
 
 /** Markdownの記号を打ち消す。tooltipへ差し込むのはCLI由来の文字列のため。 */

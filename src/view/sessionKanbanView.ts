@@ -237,7 +237,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function parseTarget(message: Record<string, unknown>): SessionKanbanTarget | undefined {
+export function parseTarget(message: Record<string, unknown>): SessionKanbanTarget | undefined {
   if (
     typeof message.windowId !== 'string' ||
     typeof message.threadId !== 'string' ||
@@ -252,7 +252,7 @@ function parseTarget(message: Record<string, unknown>): SessionKanbanTarget | un
   };
 }
 
-function parseAction(message: Record<string, unknown>): SessionControlAction | undefined {
+export function parseAction(message: Record<string, unknown>): SessionControlAction | undefined {
   switch (message.action) {
     case 'open':
       return { kind: 'open' };

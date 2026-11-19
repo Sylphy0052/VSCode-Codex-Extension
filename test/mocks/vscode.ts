@@ -505,6 +505,10 @@ export const workspace = {
  */
 export const Uri = {
   file: (fsPath: string): FakeUri => ({ fsPath }),
+  /** 本物と同じく区切りを`/`で足すだけ（Issue #2136）。 */
+  joinPath: (base: FakeUri, ...segments: string[]): FakeUri => ({
+    fsPath: [base.fsPath, ...segments].join('/'),
+  }),
   /** 本物と同じく文字列をそのまま保持するだけ（`strict`の検証はしない）。 */
   parse: (value: string): FakeUri => ({ fsPath: value }),
   from: ({ scheme, path }: { scheme: string; path?: string }): FakeSchemeUri => ({
