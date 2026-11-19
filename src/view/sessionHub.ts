@@ -143,6 +143,11 @@ function isSafeId(value: string): boolean {
   return ID_PATTERN.test(value);
 }
 
+/** ウィンドウid（`generateWindowId`が作るUUID）の形か。画面から届いた宛先の検証に使う。 */
+export function isWindowIdShape(value: unknown): value is string {
+  return typeof value === 'string' && isSafeId(value);
+}
+
 const ACTIVITY_STATES: readonly SessionActivityState[] = [
   'idle',
   'running',

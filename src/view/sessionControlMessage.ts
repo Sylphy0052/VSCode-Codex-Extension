@@ -1,6 +1,6 @@
 import type { SessionControlAction, SessionControlResult } from './chatManagerBase';
 import { parseAskUserQuestionAnswers, parsePromptSubmission } from './pendingItem';
-import { isSharedApprovalDecision, isSharedHandoffDecision } from './sessionHub';
+import { isSharedApprovalDecision, isSharedHandoffDecision, isWindowIdShape } from './sessionHub';
 
 /**
  * 画面（Mission Control）から届くセッション操作のメッセージを確かめる。
@@ -28,10 +28,20 @@ export type SessionControl = (
   action: SessionControlAction,
 ) => Promise<SessionControlResult>;
 
+/** 会話のidの長さの上限。CodexのthreadId・ClaudeのセッションidはUUIDで、これより十分短い。 */
+const MAX_THREAD_ID_LENGTH = 256;
+
+/**
+ * 宛先を確かめる。一覧（スナップショット）と照合する前に形で弾く: windowIdはUUID、threadIdは
+ * 空でなく上限より短い1行（Issue #2150。#2149のレビューの指摘）。
+ */
 export function parseTarget(message: Record<string, unknown>): SessionControlTarget | undefined {
   if (
-    typeof message.windowId !== 'string' ||
+    !isWindowIdShape(message.windowId) ||
     typeof message.threadId !== 'string' ||
+    message.threadId === '' ||
+    message.threadId.length > MAX_THREAD_ID_LENGTH ||
+    /[\r\n]/u.test(message.threadId) ||
     (message.provider !== 'codex' && message.provider !== 'claude')
   ) {
     return undefined;
