@@ -196,7 +196,12 @@ export function readSavedFilters(raw: unknown): McSavedFilter[] {
     const entry = item as Record<string, unknown>;
     const name = normalizeFilterName(entry.name);
     const filter = normalizeFilterSpec(entry.filter);
-    if (name === undefined || filter === undefined || seen.has(name)) {
+    if (
+      name === undefined ||
+      filter === undefined ||
+      seen.has(name) ||
+      out.some((f) => sameFilterSpec(f.filter, filter))
+    ) {
       continue;
     }
     seen.add(name);
@@ -226,6 +231,12 @@ export function applySaveFilter(
   if (filter === undefined) {
     return '絞り込みの中身が正しくありません';
   }
+  // 中身が同じものを別の名前で持つと、`[` / `]`と削除が今の絞り込みを中身で見分けるので、
+  // 後の名前へ切り替えられず、削除も先の名前に当たる。同じ中身は1つだけにする
+  const twin = current.find((f) => f.name !== name && sameFilterSpec(f.filter, filter));
+  if (twin !== undefined) {
+    return `同じ絞り込みが「${twin.name}」で保存されています`;
+  }
   const index = current.findIndex((f) => f.name === name);
   if (index >= 0) {
     return current.map((f, i) => (i === index ? { name, filter } : f));
@@ -234,6 +245,16 @@ export function applySaveFilter(
     return `保存できる絞り込みは${String(MAX_SAVED_FILTERS)}件までです`;
   }
   return [...current, { name, filter }];
+}
+
+function sameFilterSpec(a: McFilterSpec, b: McFilterSpec): boolean {
+  return (
+    a.provider === b.provider &&
+    a.currentWindowOnly === b.currentWindowOnly &&
+    a.query === b.query &&
+    a.repoKey === b.repoKey &&
+    a.activity === b.activity
+  );
 }
 
 /** `deleteFilter`を当てた後の一覧。だめなら理由の文。 */

@@ -58,7 +58,7 @@ export function formatCostTotal(total: McCostTotal): string {
  */
 export function formatUsageWindow(window: McUsageWindow, now: number): string {
   const label = oneLine(window.label, 40);
-  if (window.stale) {
+  if (isWindowStale(window, now)) {
     return window.limited ? `${label} 解除待ち` : `${label} --（リセット済み）`;
   }
   const bits = [label];
@@ -79,10 +79,19 @@ export function formatUsageSummary(source: McUsageSource | undefined, now: numbe
   if (source === undefined || source.windows.length === 0) {
     return '取得できない';
   }
-  const live = source.windows.filter((w) => !w.stale);
+  const live = source.windows.filter((w) => !isWindowStale(w, now));
   const pool = live.length > 0 ? live : source.windows;
   const worst = pool.reduce((a, b) => (rank(b) > rank(a) ? b : a));
   return formatUsageWindow(worst, now);
+}
+
+/**
+ * リセット時刻を過ぎた窓か。拡張ホストが付けた`stale`はスナップショットを作った時点の判定で、
+ * 利用枠の取得もMCの再描画も無いまま時刻を過ぎることがある（利用枠はセッションが動いたときにしか
+ * 取り直さない）。画面の時計でも確かめ、古い使用率を今の値に見せない。
+ */
+export function isWindowStale(window: McUsageWindow, now: number): boolean {
+  return window.stale || (window.resetsAt !== undefined && window.resetsAt <= now);
 }
 
 function rank(window: McUsageWindow): number {
